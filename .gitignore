@@ -21,7 +21,7 @@ tmp/
 
 .vscode
 
-# Binaries fro programs and plugins
+# Binaries from programs and plugins
 *.exe
 *.exe~
 *.dll
