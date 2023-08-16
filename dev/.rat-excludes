@@ -1,0 +1,5 @@
+.gitignore
+.rat-excludes
+LICENSE
+NOTICE
+go.sum
