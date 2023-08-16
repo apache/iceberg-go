@@ -40,7 +40,7 @@ var UnpartitionedPartitionSpec = &PartitionSpec{id: 0}
 // PartitionField represents how one partition value is derived from the
 // source column by transformation.
 type PartitionField struct {
-	// SourceID is the source column ID of the table's schema
+	// SourceID is the source column id of the table's schema
 	SourceID int `json:"source-id"`
 	// FieldID is the partition field id across all the table partition specs
 	FieldID int `json:"field-id"`
