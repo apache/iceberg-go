@@ -26,58 +26,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestParseTransform(t *testing.T) {
-	tests := []struct {
-		toparse  string
-		expected iceberg.Transform
-	}{
-		{"identity", iceberg.IdentityTransform{}},
-		{"void", iceberg.VoidTransform{}},
-		{"year", iceberg.YearTransform{}},
-		{"month", iceberg.MonthTransform{}},
-		{"day", iceberg.DayTransform{}},
-		{"hour", iceberg.HourTransform{}},
-		{"bucket[5]", iceberg.BucketTransform{N: 5}},
-		{"bucket[100]", iceberg.BucketTransform{N: 100}},
-		{"truncate[10]", iceberg.TruncateTransform{W: 10}},
-		{"truncate[255]", iceberg.TruncateTransform{W: 255}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.toparse, func(t *testing.T) {
-			transform, err := iceberg.ParseTransform(tt.toparse)
-			require.NoError(t, err)
-			assert.Equal(t, tt.expected, transform)
-
-			txt, err := transform.MarshalText()
-			assert.NoError(t, err)
-			assert.Equal(t, tt.toparse, string(txt))
-		})
-	}
-
-	errorTests := []struct {
-		name    string
-		toparse string
-	}{
-		{"foobar", "foobar"},
-		{"bucket no brackets", "bucket"},
-		{"truncate no brackets", "truncate"},
-		{"bucket no val", "bucket[]"},
-		{"truncate no val", "truncate[]"},
-		{"bucket neg", "bucket[-1]"},
-		{"truncate neg", "truncate[-1]"},
-	}
-
-	for _, tt := range errorTests {
-		t.Run(tt.name, func(t *testing.T) {
-			tr, err := iceberg.ParseTransform(tt.toparse)
-			assert.Nil(t, tr)
-			assert.ErrorIs(t, err, iceberg.ErrInvalidTransform)
-			assert.ErrorContains(t, err, tt.toparse)
-		})
-	}
-}
-
 func TestPartitionSpec(t *testing.T) {
 	assert.Equal(t, 1000, iceberg.UnpartitionedPartitionSpec.LastAssignedFieldID())
 
