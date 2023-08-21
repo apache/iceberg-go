@@ -45,23 +45,81 @@ const (
 	S3ProxyURI        = "s3.proxy-uri"
 )
 
+// IO is an interface to a hierarchical file system.
+//
+// The IO interface is the minimum implementation required for a file
+// system to utilize an iceberg table. A file system may implement
+// additional interfaces, such as ReadFileIO, to provide additional or
+// optimized functionality.
 type IO interface {
+	// Open opens the named file.
+	//
+	// When Open returns an error, it should be of type *PathError
+	// with the Op field set to "open", the Path field set to name,
+	// and the Err field describing the problem.
+	//
+	// Open should reject attempts to open names that do not satisfy
+	// fs.ValidPath(name), returning a *PathError with Err set to
+	// ErrInvalid or ErrNotExist.
 	Open(name string) (File, error)
+
+	// Remove removes the named file or (empty) directory.
+	//
+	// If there is an error, it will be of type *PathError.
 	Remove(name string) error
 }
 
+// ReadFileIO is the interface implemented by a file system that
+// provides an optimized implementation of ReadFile.
 type ReadFileIO interface {
 	IO
 
+	// ReadFile reads the named file and returns its contents.
+	// A successful call returns a nil error, not io.EOF.
+	// (Because ReadFile reads the whole file, the expected EOF
+	// from the final Read is not treated as an error to be reported.)
+	//
+	// The caller is permitted to modify the returned byte slice.
+	// This method should return a copy of the underlying data.
 	ReadFile(name string) ([]byte, error)
 }
 
+// A File provides access to a single file. The File interface is the
+// minimum implementation required for Iceberg to interact with a file.
+// Directory files should also implement
 type File interface {
 	fs.File
 	io.ReadSeekCloser
 	io.ReaderAt
 }
 
+// A ReadDirFile is a directory file whose entries can be read with the
+// ReadDir method. Every directory file should implement this interface.
+// (It is permissible for any file to implement this interface, but
+// if so ReadDir should return an error for non-directories.)
+type ReadDirFile interface {
+	File
+
+	// ReadDir read the contents of the directory and returns a slice
+	// of up to n DirEntry values in directory order. Subsequent calls
+	// on the same file will yield further DirEntry values.
+	//
+	// If n > 0, ReadDir returns at most n DirEntry structures. In this
+	// case, if ReadDir returns an empty slice, it will return a non-nil
+	// error explaining why.
+	//
+	// At the end of a directory, the error is io.EOF. (ReadDir must return
+	// io.EOF itself, not an error wrapping io.EOF.)
+	//
+	// If n <= 0, ReadDir returns all the DirEntry values from the directory
+	// in a single slice. In this case, if ReadDir succeeds (reads all the way
+	// to the end of the directory), it returns the slice and a nil error.
+	// If it encounters an error before the end of the directory, ReadDir
+	// returns the DirEntry list read until that point and a non-nil error.
+	ReadDir(n int) ([]fs.DirEntry, error)
+}
+
+// FS wraps an io/fs.FS as an IO interface.
 func FS(fsys fs.FS) IO {
 	if _, ok := fsys.(fs.ReadFileFS); ok {
 		return readFileFS{ioFS{fsys, nil}}
@@ -69,6 +127,9 @@ func FS(fsys fs.FS) IO {
 	return ioFS{fsys, nil}
 }
 
+// FSPreProcName wraps an io/fs.FS like FS, only if fn is non-nil then
+// it is called to preprocess any filenames before they are passed to
+// the underlying fsys.
 func FSPreProcName(fsys fs.FS, fn func(string) string) IO {
 	if _, ok := fsys.(fs.ReadFileFS); ok {
 		return readFileFS{ioFS{fsys, fn}}
@@ -233,33 +294,34 @@ func inferFileIOFromSchema(path string, props map[string]string) (IO, error) {
 
 		s3fs := s3iofs.New(parsed.Host, awscfg)
 		return FSPreProcName(s3fs, preprocess), nil
-	case "file":
+	case "file", "":
 		return LocalFS{}, nil
 	default:
-		return nil, nil
+		return nil, fmt.Errorf("IO for file '%s' not implemented", path)
 	}
 }
 
+// LoadFS takes a map of properties and an optional URI location
+// and attempts to infer an IO object from it.
+//
+// A schema of "file://" or an empty string will result in a LocalFS
+// implementation. Otherwise this will return an error if the schema
+// does not yet have an implementation here.
+//
+// Currently only LocalFS and S3 are implemented.
 func LoadFS(props map[string]string, location string) (IO, error) {
-	if location != "" {
-		iofs, err := inferFileIOFromSchema(location, props)
-		if err != nil {
-			return nil, err
-		}
-		if iofs != nil {
-			return iofs, nil
-		}
+	if location == "" {
+		location = props["warehouse"]
 	}
 
-	if warehouse, ok := props["warehouse"]; ok {
-		iofs, err := inferFileIOFromSchema(warehouse, props)
-		if err != nil {
-			return nil, err
-		}
-		if iofs != nil {
-			return iofs, nil
-		}
+	iofs, err := inferFileIOFromSchema(location, props)
+	if err != nil {
+		return nil, err
 	}
 
-	return LocalFS{}, nil
+	if iofs == nil {
+		iofs = LocalFS{}
+	}
+
+	return iofs, nil
 }

@@ -19,6 +19,8 @@ package io
 
 import "os"
 
+// LocalFS is an implementation of IO that implements interaction with
+// the local file system.
 type LocalFS struct{}
 
 func (LocalFS) Open(name string) (File, error) {

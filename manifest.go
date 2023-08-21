@@ -26,6 +26,9 @@ import (
 	"github.com/hamba/avro/v2/ocf"
 )
 
+// ManifestContent indicates the type of data inside of the files
+// described by a manifest. This will indicate whether the data files
+// contain active data or deleted rows.
 type ManifestContent int32
 
 const (
@@ -247,29 +250,70 @@ func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]M
 	return results, dec.Error()
 }
 
+// ManifestFile is the interface which covers both V1 and V2 manifest files.
 type ManifestFile interface {
+	// Version returns the version number of this manifest file.
+	// It should be 1 or 2.
 	Version() int
+	// FilePath is the location URI of this manifest file.
 	FilePath() string
+	// Length is the length in bytes of the manifest file.
 	Length() int64
+	// PartitionID is the ID of the partition spec used to write
+	// this manifest. It must be listed in the table metadata
+	// partition-specs.
 	PartitionID() int32
+	// ManifestContent is the type of files tracked by this manifest,
+	// either data or delete files. All v1 manifests track data files.
 	ManifestContent() ManifestContent
+	// SnapshotID is the ID of the snapshot where this manifest file
+	// was added.
 	SnapshotID() int64
+	// AddedDataFiles returns the number of entries in the manifest that
+	// have the status of EntryStatusADDED.
 	AddedDataFiles() int32
+	// ExistingDataFiles returns the number of entries in the manifest
+	// which have the status of EntryStatusEXISTING.
 	ExistingDataFiles() int32
+	// DeletedDataFiles returns the number of entries in the manifest
+	// which have the status of EntryStatusDELETED.
 	DeletedDataFiles() int32
+	// AddedRows returns the number of rows in all files of the manifest
+	// that have status EntryStatusADDED.
 	AddedRows() int64
+	// ExistingRows returns the number of rows in all files of the manifest
+	// which have status EntryStatusEXISTING.
 	ExistingRows() int64
+	// DeletedRows returns the number of rows in all files of the manifest
+	// which have status EntryStatusDELETED.
 	DeletedRows() int64
+	// SequenceNum returns the sequence number when this manifest was
+	// added to the table. Will be 0 for v1 manifest lists.
 	SequenceNum() int64
+	// MinSequenceNum is the minimum data sequence number of all live data
+	// or delete files in the manifest. Will be 0 for v1 manifest lists.
 	MinSequenceNum() int64
+	// Metadata returns implementation-specific key metadata for encryption
+	// if it exists in the manifest list.
 	Metadata() []byte
+	// PartitionList returns a list of field summaries for each partition
+	// field in the spec. Each field in the list corresponds to a field in
+	// the manifest file's partition spec.
 	PartitionList() []fieldSummary
 
+	// HasAddedFiles returns true if AddedDataFiles > 0 or if it was null.
 	HasAddedFiles() bool
+	// HasExistingFiles returns true if ExistingDataFiles > 0 or if it was null.
 	HasExistingFiles() bool
+	// FetchEntries reads the manifest list file to fetch the list of
+	// manifest entries using the provided file system IO interface.
+	// If discardDeleted is true, entries for files containing deleted rows
+	// will be skipped.
 	FetchEntries(fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error)
 }
 
+// ReadManifestList reads in an avro manifest list file and returns a slice
+// of manifest files or an error if one is encountered.
 func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
 	dec, err := ocf.NewDecoder(in)
 	if err != nil {
@@ -295,6 +339,8 @@ func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
 	return out, dec.Error()
 }
 
+// ManifestEntryStatus defines constants for the entry status of
+// existing, added or deleted.
 type ManifestEntryStatus int8
 
 const (
@@ -303,6 +349,9 @@ const (
 	EntryStatusDELETED  ManifestEntryStatus = 2
 )
 
+// ManifestEntryContent defines constants for the type of file contents
+// in the file entries. Data, Position based deletes and equality based
+// deletes.
 type ManifestEntryContent int8
 
 const (
@@ -311,6 +360,7 @@ const (
 	EntryContentEqDeletes  ManifestEntryContent = 2
 )
 
+// FileFormat defines constants for the format of data files.
 type FileFormat string
 
 const (
@@ -515,31 +565,85 @@ func (m *manifestEntryV2) FileSequenceNum() *int64 {
 
 func (m *manifestEntryV2) DataFile() DataFile { return &m.Data }
 
+// DataFile is the interface for reading the information about a
+// given data file indicated by an entry in a manifest list.
 type DataFile interface {
+	// ContentType is the type of the content stored by the data file,
+	// either Data, Equality deletes, or Position deletes. All v1 files
+	// are Data files.
 	ContentType() ManifestEntryContent
+	// FilePath is the full URI for the file, complete with FS scheme.
 	FilePath() string
+	// FileFormat is the format of the data file, AVRO, Orc, or Parquet.
 	FileFormat() FileFormat
+	// Partition returns a mapping of field name to partition value for
+	// each of the partition spec's fields.
 	Partition() map[string]any
+	// Count returns the number of records in this file.
 	Count() int64
+	// FileSizeBytes is the total file size in bytes.
 	FileSizeBytes() int64
+	// ColumnSizes is a mapping from column id to the total size on disk
+	// of all regions that store the column. Does not include bytes
+	// necessary to read other columns, like footers. Map will be nil for
+	// row-oriented formats (avro).
 	ColumnSizes() map[int]int64
+	// ValueCounts is a mapping from column id to the number of values
+	// in the column, including null and NaN values.
 	ValueCounts() map[int]int64
+	// NullValueCounts is a mapping from column id to the number of
+	// null values in the column.
 	NullValueCounts() map[int]int64
+	// NaNValueCounts is a mapping from column id to the number of NaN
+	// values in the column.
 	NaNValueCounts() map[int]int64
+	// DistictValueCounts is a mapping from column id to the number of
+	// distinct values in the column. Distinct counts must be derived
+	// using values in the file by counting or using sketches, but not
+	// using methods like merging existing distinct counts.
 	DistinctValueCounts() map[int]int64
+	// LowerBoundValues is a mapping from column id to the lower bounded
+	// value of the column, serialized as binary. Each value in the column
+	// must be less than or requal to all non-null, non-NaN values in the
+	// column for the file.
 	LowerBoundValues() map[int][]byte
+	// UpperBoundValues is a mapping from column id to the upper bounded
+	// value of the column, serialized as binary. Each value in the column
+	// must be greater than or equal to all non-null, non-NaN values in
+	// the column for the file.
 	UpperBoundValues() map[int][]byte
+	// MetadataKey is implementation-specific key metadata for encryption.
 	MetadataKey() []byte
+	// Splits are the split offsets for the data file. For example,
+	// all row group offsets in a Parquet file. Must be sorted ascending.
 	Splits() []int64
+	// EqualityFieldIDs are used to determine row equality in equality
+	// delete files. It is required when the content type is
+	// EntryContentEqDeletes.
 	EqualityFieldIDs() []int
+	// SortOrderID returns the id representing the sort order for this
+	// file, or nil if there is no sort order.
 	SortOrderID() *int
 }
 
+// ManifestEntry is an interface for both v1 and v2 manifest entries.
 type ManifestEntry interface {
+	// Status returns the type of the file tracked by this entry.
+	// Deletes are informational only and not used in scans.
 	Status() ManifestEntryStatus
+	// SnapshotID is the id where the file was added, or deleted,
+	// if null it is inherited from the manifest list.
 	SnapshotID() int64
+	// SequenceNum returns the data sequence number of the file.
+	// If it was null and the status is EntryStatusADDED then it
+	// is inherited from the manifest list.
 	SequenceNum() int64
+	// FileSequenceNum returns the file sequence number indicating
+	// when the file was added. If it was null and the status is
+	// EntryStatusADDED then it is inherited from the manifest list.
 	FileSequenceNum() *int64
+	// DataFile provides the information about the data file indicated
+	// by this manifest entry.
 	DataFile() DataFile
 
 	inheritSeqNum(manifest ManifestFile)
