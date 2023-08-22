@@ -19,6 +19,7 @@ package iceberg
 
 import (
 	"runtime/debug"
+	"strings"
 
 	"golang.org/x/exp/constraints"
 )
@@ -29,9 +30,9 @@ func init() {
 	version = "(unknown version)"
 	if info, ok := debug.ReadBuildInfo(); ok {
 		for _, dep := range info.Deps {
-			switch {
-			case dep.Path == "github.com/apache/iceberg/go/iceberg":
+			if strings.HasPrefix(dep.Path, "github.com/apache/iceberg-go") {
 				version = dep.Version
+				break
 			}
 		}
 	}
