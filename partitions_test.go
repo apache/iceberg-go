@@ -27,9 +27,9 @@ import (
 )
 
 func TestPartitionSpec(t *testing.T) {
-	assert.Equal(t, 1000, iceberg.UnpartitionedPartitionSpec.LastAssignedFieldID())
+	assert.Equal(t, 999, iceberg.UnpartitionedSpec.LastAssignedFieldID())
 
-	bucket := iceberg.BucketTransform{N: 4}
+	bucket := iceberg.BucketTransform{NumBuckets: 4}
 	idField1 := iceberg.PartitionField{
 		SourceID: 3, FieldID: 1001, Name: "id", Transform: bucket}
 	spec1 := iceberg.NewPartitionSpec(idField1)
@@ -59,19 +59,28 @@ func TestPartitionSpec(t *testing.T) {
 	assert.Equal(t, 1002, spec3.LastAssignedFieldID())
 }
 
+func TestUnpartitionedWithVoidField(t *testing.T) {
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceID: 3, FieldID: 1001, Name: "void", Transform: iceberg.VoidTransform{},
+	})
+
+	assert.True(t, spec.IsUnpartitioned())
+}
+
 func TestSerializeUnpartitionedSpec(t *testing.T) {
-	data, err := json.Marshal(iceberg.UnpartitionedPartitionSpec)
+	data, err := json.Marshal(iceberg.UnpartitionedSpec)
 	require.NoError(t, err)
 
 	assert.JSONEq(t, `{"spec-id": 0, "fields": []}`, string(data))
+	assert.True(t, iceberg.UnpartitionedSpec.IsUnpartitioned())
 }
 
 func TestSerializePartitionSpec(t *testing.T) {
 	spec := iceberg.NewPartitionSpecID(3,
 		iceberg.PartitionField{SourceID: 1, FieldID: 1000,
-			Transform: iceberg.TruncateTransform{W: 19}, Name: "str_truncate"},
+			Transform: iceberg.TruncateTransform{Width: 19}, Name: "str_truncate"},
 		iceberg.PartitionField{SourceID: 2, FieldID: 1001,
-			Transform: iceberg.BucketTransform{N: 25}, Name: "int_bucket"},
+			Transform: iceberg.BucketTransform{NumBuckets: 25}, Name: "int_bucket"},
 	)
 
 	data, err := json.Marshal(spec)
@@ -104,9 +113,9 @@ func TestSerializePartitionSpec(t *testing.T) {
 func TestPartitionType(t *testing.T) {
 	spec := iceberg.NewPartitionSpecID(3,
 		iceberg.PartitionField{SourceID: 1, FieldID: 1000,
-			Transform: iceberg.TruncateTransform{W: 19}, Name: "str_truncate"},
+			Transform: iceberg.TruncateTransform{Width: 19}, Name: "str_truncate"},
 		iceberg.PartitionField{SourceID: 2, FieldID: 1001,
-			Transform: iceberg.BucketTransform{N: 25}, Name: "int_bucket"},
+			Transform: iceberg.BucketTransform{NumBuckets: 25}, Name: "int_bucket"},
 		iceberg.PartitionField{SourceID: 3, FieldID: 1002,
 			Transform: iceberg.IdentityTransform{}, Name: "bool_identity"},
 		iceberg.PartitionField{SourceID: 1, FieldID: 1003,

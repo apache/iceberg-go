@@ -30,10 +30,10 @@ const (
 	InitialPartitionSpecID = 0
 )
 
-// UnpartitionedPartitionSpec is the default unpartitioned spec which can
+// UnpartitionedSpec is the default unpartitioned spec which can
 // be used for comparisons or to just provide a convenience for referencing
 // the same unpartitioned spec object.
-var UnpartitionedPartitionSpec = &PartitionSpec{id: 0}
+var UnpartitionedSpec = &PartitionSpec{id: 0}
 
 // PartitionField represents how one partition value is derived from the
 // source column by transformation.
@@ -153,7 +153,21 @@ func (ps *PartitionSpec) initialize() {
 func (ps *PartitionSpec) ID() int                    { return ps.id }
 func (ps *PartitionSpec) NumFields() int             { return len(ps.fields) }
 func (ps *PartitionSpec) Field(i int) PartitionField { return ps.fields[i] }
-func (ps *PartitionSpec) IsUnpartitioned() bool      { return len(ps.fields) == 0 }
+
+func (ps *PartitionSpec) IsUnpartitioned() bool {
+	if len(ps.fields) == 0 {
+		return true
+	}
+
+	for _, f := range ps.fields {
+		if _, ok := f.Transform.(VoidTransform); !ok {
+			return false
+		}
+	}
+
+	return true
+}
+
 func (ps *PartitionSpec) FieldsBySourceID(fieldID int) []PartitionField {
 	return slices.Clone(ps.sourceIdToFields[fieldID])
 }
@@ -176,7 +190,7 @@ func (ps PartitionSpec) String() string {
 
 func (ps *PartitionSpec) LastAssignedFieldID() int {
 	if len(ps.fields) == 0 {
-		return partitionDataIDStart
+		return partitionDataIDStart - 1
 	}
 
 	id := ps.fields[0].FieldID

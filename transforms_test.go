@@ -43,14 +43,14 @@ func TestParseTransform(t *testing.T) {
 		{"DaY", iceberg.DayTransform{}},
 		{"hour", iceberg.HourTransform{}},
 		{"hOuR", iceberg.HourTransform{}},
-		{"bucket[5]", iceberg.BucketTransform{N: 5}},
-		{"bucket[100]", iceberg.BucketTransform{N: 100}},
-		{"BUCKET[5]", iceberg.BucketTransform{N: 5}},
-		{"bUCKeT[100]", iceberg.BucketTransform{N: 100}},
-		{"truncate[10]", iceberg.TruncateTransform{W: 10}},
-		{"truncate[255]", iceberg.TruncateTransform{W: 255}},
-		{"TRUNCATE[10]", iceberg.TruncateTransform{W: 10}},
-		{"tRuNCATe[255]", iceberg.TruncateTransform{W: 255}},
+		{"bucket[5]", iceberg.BucketTransform{NumBuckets: 5}},
+		{"bucket[100]", iceberg.BucketTransform{NumBuckets: 100}},
+		{"BUCKET[5]", iceberg.BucketTransform{NumBuckets: 5}},
+		{"bUCKeT[100]", iceberg.BucketTransform{NumBuckets: 100}},
+		{"truncate[10]", iceberg.TruncateTransform{Width: 10}},
+		{"truncate[255]", iceberg.TruncateTransform{Width: 255}},
+		{"TRUNCATE[10]", iceberg.TruncateTransform{Width: 10}},
+		{"tRuNCATe[255]", iceberg.TruncateTransform{Width: 255}},
 	}
 
 	for _, tt := range tests {

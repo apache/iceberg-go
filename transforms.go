@@ -37,7 +37,7 @@ func ParseTransform(s string) (Transform, error) {
 		}
 
 		n, _ := strconv.Atoi(matches[1])
-		return BucketTransform{N: n}, nil
+		return BucketTransform{NumBuckets: n}, nil
 	case strings.HasPrefix(s, "truncate"):
 		matches := regexFromBrackets.FindStringSubmatch(s)
 		if len(matches) != 2 {
@@ -45,7 +45,7 @@ func ParseTransform(s string) (Transform, error) {
 		}
 
 		n, _ := strconv.Atoi(matches[1])
-		return TruncateTransform{W: n}, nil
+		return TruncateTransform{Width: n}, nil
 	default:
 		switch s {
 		case "identity":
@@ -104,27 +104,27 @@ func (VoidTransform) ResultType(t Type) Type { return t }
 // a 32-bit hash of the source value to produce a positive value by mod
 // the bucket number.
 type BucketTransform struct {
-	N int
+	NumBuckets int
 }
 
 func (t BucketTransform) MarshalText() ([]byte, error) {
 	return []byte(t.String()), nil
 }
 
-func (t BucketTransform) String() string { return fmt.Sprintf("bucket[%d]", t.N) }
+func (t BucketTransform) String() string { return fmt.Sprintf("bucket[%d]", t.NumBuckets) }
 
 func (BucketTransform) ResultType(Type) Type { return PrimitiveTypes.Int32 }
 
 // TruncateTransform is a transformation for truncating a value to a specified width.
 type TruncateTransform struct {
-	W int
+	Width int
 }
 
 func (t TruncateTransform) MarshalText() ([]byte, error) {
 	return []byte(t.String()), nil
 }
 
-func (t TruncateTransform) String() string { return fmt.Sprintf("truncate[%d]", t.W) }
+func (t TruncateTransform) String() string { return fmt.Sprintf("truncate[%d]", t.Width) }
 
 func (TruncateTransform) ResultType(t Type) Type { return t }
 
