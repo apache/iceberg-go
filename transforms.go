@@ -67,7 +67,7 @@ func ParseTransform(s string) (Transform, error) {
 }
 
 // Transform is an interface for the various Transformation types
-// in partition specs. Currently they do not yet provide actual
+// in partition specs. Currently, they do not yet provide actual
 // transformation functions or implementation. That will come later as
 // data reading gets implemented.
 type Transform interface {
