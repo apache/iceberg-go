@@ -37,7 +37,7 @@ import (
 )
 
 const (
-	S3Region      = "s3.region"
+	S3Region          = "s3.region"
 	S3SessionToken    = "s3.session-token"
 	S3SecretAccessKey = "s3.secret-access-key"
 	S3AccessKeyID     = "s3.access-key-id"
@@ -254,7 +254,7 @@ func inferFileIOFromSchema(path string, props map[string]string) (IO, error) {
 			})))
 		}
 
-		if defaultRegion, ok := props[S3RegionName]; ok {
+		if defaultRegion, ok := props[S3Region]; ok {
 			opts = append(opts, config.WithDefaultRegion(defaultRegion))
 		}
 
