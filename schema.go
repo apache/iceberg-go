@@ -214,7 +214,7 @@ func (s *Schema) FindFieldByNameCaseInsensitive(name string) (NestedField, bool)
 	return s.FindFieldByID(id)
 }
 
-// FindFieldByID is like [*Schema.FindColumnByName], but returns the whole
+// FindFieldByID is like [*Schema.FindColumnName], but returns the whole
 // field rather than just the field name.
 func (s *Schema) FindFieldByID(id int) (NestedField, bool) {
 	idx, _ := s.lazyIDToField()

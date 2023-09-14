@@ -24,4 +24,5 @@ var (
 	ErrNotImplemented    = errors.New("not implemented")
 	ErrInvalidArgument   = errors.New("invalid argument")
 	ErrInvalidSchema     = errors.New("invalid schema")
+	ErrInvalidTransform  = errors.New("invalid transform syntax")
 )
