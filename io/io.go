@@ -37,11 +37,11 @@ import (
 )
 
 const (
-	S3RegionName      = "s3.region-name"
+	S3Region      = "s3.region"
 	S3SessionToken    = "s3.session-token"
 	S3SecretAccessKey = "s3.secret-access-key"
 	S3AccessKeyID     = "s3.access-key-id"
-	S3EndpointURL     = "s3.region"
+	S3EndpointURL     = "s3.endpoint"
 	S3ProxyURI        = "s3.proxy-uri"
 )
 
