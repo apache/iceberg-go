@@ -65,6 +65,14 @@ func TestUnpartitionedWithVoidField(t *testing.T) {
 	})
 
 	assert.True(t, spec.IsUnpartitioned())
+
+	spec2 := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceID: 3, FieldID: 1001, Name: "void", Transform: iceberg.VoidTransform{},
+	}, iceberg.PartitionField{
+		SourceID: 3, FieldID: 1002, Name: "bucket", Transform: iceberg.BucketTransform{NumBuckets: 2},
+	})
+
+	assert.False(t, spec2.IsUnpartitioned())
 }
 
 func TestSerializeUnpartitionedSpec(t *testing.T) {
