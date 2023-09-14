@@ -37,3 +37,10 @@ lib/
 
 # Output of the go coverage tool
 *.out
+
+# intellij files
+.idea/
+.idea_modules/
+*.ipr
+*.iws
+*.iml
