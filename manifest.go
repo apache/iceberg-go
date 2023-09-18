@@ -36,39 +36,105 @@ const (
 	ManifestContentDeletes ManifestContent = 1
 )
 
-type fieldSummary struct {
+type FieldSummary struct {
 	ContainsNull bool    `avro:"contains_null"`
 	ContainsNaN  *bool   `avro:"contains_nan"`
 	LowerBound   *[]byte `avro:"lower_bound"`
 	UpperBound   *[]byte `avro:"upper_bound"`
 }
 
+// ManifestV1Builder is a helper for building a V1 manifest file
+// struct which will conform to the ManifestFile interface.
+type ManifestV1Builder struct {
+	m *manifestFileV1
+}
+
+// NewManifestV1Builder is passed all of the required fields and then allows
+// all of the optional fields to be set by calling the corresponding methods
+// before calling [ManifestV1Builder.Build] to construct the object.
+func NewManifestV1Builder(path string, length int64, partitionSpecID int32, addedSnapshotID int64) *ManifestV1Builder {
+	return &ManifestV1Builder{
+		m: &manifestFileV1{
+			Path:            path,
+			Len:             length,
+			SpecID:          partitionSpecID,
+			AddedSnapshotID: addedSnapshotID,
+		},
+	}
+}
+
+func (b *ManifestV1Builder) AddedFiles(cnt int32) *ManifestV1Builder {
+	b.m.AddedFilesCount = &cnt
+	return b
+}
+
+func (b *ManifestV1Builder) ExistingFiles(cnt int32) *ManifestV1Builder {
+	b.m.ExistingFilesCount = &cnt
+	return b
+}
+
+func (b *ManifestV1Builder) DeletedFiles(cnt int32) *ManifestV1Builder {
+	b.m.DeletedFilesCount = &cnt
+	return b
+}
+
+func (b *ManifestV1Builder) AddedRows(cnt int64) *ManifestV1Builder {
+	b.m.AddedRowsCount = &cnt
+	return b
+}
+
+func (b *ManifestV1Builder) ExistingRows(cnt int64) *ManifestV1Builder {
+	b.m.ExistingRowsCount = &cnt
+	return b
+}
+
+func (b *ManifestV1Builder) DeletedRows(cnt int64) *ManifestV1Builder {
+	b.m.DeletedRowsCount = &cnt
+	return b
+}
+
+func (b *ManifestV1Builder) Partitions(p []FieldSummary) *ManifestV1Builder {
+	b.m.PartitionList = &p
+	return b
+}
+
+func (b *ManifestV1Builder) KeyMetadata(km []byte) *ManifestV1Builder {
+	b.m.Key = km
+	return b
+}
+
+// Build returns the constructed manifest file, after calling Build this
+// builder should not be used further as we avoid copying by just returning
+// a pointer to the constructed manifest file. Further calls to the modifier
+// methods after calling build would modify the constructed ManifestFile.
+func (b *ManifestV1Builder) Build() ManifestFile {
+	return b.m
+}
+
 type manifestFileV1 struct {
 	Path               string          `avro:"manifest_path"`
 	Len                int64           `avro:"manifest_length"`
-	PartitionSpecID    int32           `avro:"partition_spec_id"`
-	Content            ManifestContent `avro:"content"`
-	AddedSnapshotID    *int64          `avro:"added_snapshot_id"`
+	SpecID             int32           `avro:"partition_spec_id"`
+	AddedSnapshotID    int64           `avro:"added_snapshot_id"`
 	AddedFilesCount    *int32          `avro:"added_data_files_count"`
 	ExistingFilesCount *int32          `avro:"existing_data_files_count"`
 	DeletedFilesCount  *int32          `avro:"deleted_data_files_count"`
 	AddedRowsCount     *int64          `avro:"added_rows_count"`
 	ExistingRowsCount  *int64          `avro:"existing_rows_count"`
 	DeletedRowsCount   *int64          `avro:"deleted_rows_count"`
-	Partitions         *[]fieldSummary `avro:"partitions"`
-	KeyMetadata        []byte          `avro:"key_metadata"`
+	PartitionList      *[]FieldSummary `avro:"partitions"`
+	Key                []byte          `avro:"key_metadata"`
 }
 
-func (*manifestFileV1) Version() int                       { return 1 }
-func (m *manifestFileV1) FilePath() string                 { return m.Path }
-func (m *manifestFileV1) Length() int64                    { return m.Len }
-func (m *manifestFileV1) PartitionID() int32               { return m.PartitionSpecID }
-func (m *manifestFileV1) ManifestContent() ManifestContent { return m.Content }
+func (*manifestFileV1) Version() int             { return 1 }
+func (m *manifestFileV1) FilePath() string       { return m.Path }
+func (m *manifestFileV1) Length() int64          { return m.Len }
+func (m *manifestFileV1) PartitionSpecID() int32 { return m.SpecID }
+func (m *manifestFileV1) ManifestContent() ManifestContent {
+	return ManifestContentData
+}
 func (m *manifestFileV1) SnapshotID() int64 {
-	if m.AddedSnapshotID == nil {
-		return 0
-	}
-	return *m.AddedSnapshotID
+	return m.AddedSnapshotID
 }
 
 func (m *manifestFileV1) AddedDataFiles() int32 {
@@ -123,22 +189,97 @@ func (m *manifestFileV1) HasExistingFiles() bool {
 
 func (m *manifestFileV1) SequenceNum() int64    { return 0 }
 func (m *manifestFileV1) MinSequenceNum() int64 { return 0 }
-func (m *manifestFileV1) Metadata() []byte      { return m.KeyMetadata }
-func (m *manifestFileV1) PartitionList() []fieldSummary {
-	if m.Partitions == nil {
+func (m *manifestFileV1) KeyMetadata() []byte   { return m.Key }
+func (m *manifestFileV1) Partitions() []FieldSummary {
+	if m.PartitionList == nil {
 		return nil
 	}
-	return *m.Partitions
+	return *m.PartitionList
 }
 
 func (m *manifestFileV1) FetchEntries(fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error) {
 	return fetchManifestEntries(m, fs, discardDeleted)
 }
 
+// ManifestV2Builder is a helper for building a V2 manifest file
+// struct which will conform to the ManifestFile interface.
+type ManifestV2Builder struct {
+	m *manifestFileV2
+}
+
+// NewManifestV2Builder is constructed with the primary fields, with the remaining
+// fields set to their zero value unless modified by calling the corresponding
+// methods of the builder. Then calling [ManifestV2Builder.Build] to retrieve the
+// constructed ManifestFile.
+func NewManifestV2Builder(path string, length int64, partitionSpecID int32, content ManifestContent, addedSnapshotID int64) *ManifestV2Builder {
+	return &ManifestV2Builder{
+		m: &manifestFileV2{
+			Path:            path,
+			Len:             length,
+			SpecID:          partitionSpecID,
+			Content:         content,
+			AddedSnapshotID: addedSnapshotID,
+		},
+	}
+}
+
+func (b *ManifestV2Builder) SequenceNum(num, minSeqNum int64) *ManifestV2Builder {
+	b.m.SeqNumber, b.m.MinSeqNumber = num, minSeqNum
+	return b
+}
+
+func (b *ManifestV2Builder) AddedFiles(cnt int32) *ManifestV2Builder {
+	b.m.AddedFilesCount = cnt
+	return b
+}
+
+func (b *ManifestV2Builder) ExistingFiles(cnt int32) *ManifestV2Builder {
+	b.m.ExistingFilesCount = cnt
+	return b
+}
+
+func (b *ManifestV2Builder) DeletedFiles(cnt int32) *ManifestV2Builder {
+	b.m.DeletedFilesCount = cnt
+	return b
+}
+
+func (b *ManifestV2Builder) AddedRows(cnt int64) *ManifestV2Builder {
+	b.m.AddedRowsCount = cnt
+	return b
+}
+
+func (b *ManifestV2Builder) ExistingRows(cnt int64) *ManifestV2Builder {
+	b.m.ExistingRowsCount = cnt
+	return b
+}
+
+func (b *ManifestV2Builder) DeletedRows(cnt int64) *ManifestV2Builder {
+	b.m.DeletedRowsCount = cnt
+	return b
+}
+
+func (b *ManifestV2Builder) Partitions(p []FieldSummary) *ManifestV2Builder {
+	b.m.PartitionList = &p
+	return b
+}
+
+func (b *ManifestV2Builder) KeyMetadata(km []byte) *ManifestV2Builder {
+	b.m.Key = km
+	return b
+}
+
+// Build returns the constructed manifest file, after calling Build this
+// builder should not be used further as we avoid copying by just returning
+// a pointer to the constructed manifest file. Further calls to the modifier
+// methods after calling build would modify the constructed ManifestFile.
+func (b *ManifestV2Builder) Build() ManifestFile {
+	return b.m
+}
+
 type manifestFileV2 struct {
 	Path               string          `avro:"manifest_path"`
 	Len                int64           `avro:"manifest_length"`
-	PartitionSpecID    int32           `avro:"partition_spec_id"`
+	SpecID             int32           `avro:"partition_spec_id"`
 	Content            ManifestContent `avro:"content"`
 	SeqNumber          int64           `avro:"sequence_number"`
 	MinSeqNumber       int64           `avro:"min_sequence_number"`
@@ -149,15 +290,15 @@ type manifestFileV2 struct {
 	AddedRowsCount     int64           `avro:"added_rows_count"`
 	ExistingRowsCount  int64           `avro:"existing_rows_count"`
 	DeletedRowsCount   int64           `avro:"deleted_rows_count"`
-	Partitions         *[]fieldSummary `avro:"partitions"`
-	KeyMetadata        []byte          `avro:"key_metadata"`
+	PartitionList      *[]FieldSummary `avro:"partitions"`
+	Key                []byte          `avro:"key_metadata"`
 }
 
 func (*manifestFileV2) Version() int { return 2 }
 
 func (m *manifestFileV2) FilePath() string                 { return m.Path }
 func (m *manifestFileV2) Length() int64                    { return m.Len }
-func (m *manifestFileV2) PartitionID() int32               { return m.PartitionSpecID }
+func (m *manifestFileV2) PartitionSpecID() int32           { return m.SpecID }
 func (m *manifestFileV2) ManifestContent() ManifestContent { return m.Content }
 func (m *manifestFileV2) SnapshotID() int64 {
 	return m.AddedSnapshotID
@@ -189,13 +330,13 @@ func (m *manifestFileV2) DeletedRows() int64 {
 
 func (m *manifestFileV2) SequenceNum() int64    { return m.SeqNumber }
 func (m *manifestFileV2) MinSequenceNum() int64 { return m.MinSeqNumber }
-func (m *manifestFileV2) Metadata() []byte      { return m.KeyMetadata }
+func (m *manifestFileV2) KeyMetadata() []byte   { return m.Key }
 
-func (m *manifestFileV2) PartitionList() []fieldSummary {
-	if m.Partitions == nil {
+func (m *manifestFileV2) Partitions() []FieldSummary {
+	if m.PartitionList == nil {
 		return nil
 	}
-	return *m.Partitions
+	return *m.PartitionList
 }
 
 func (m *manifestFileV2) HasAddedFiles() bool {
@@ -259,10 +400,10 @@ type ManifestFile interface {
 	FilePath() string
 	// Length is the length in bytes of the manifest file.
 	Length() int64
-	// PartitionID is the ID of the partition spec used to write
+	// PartitionSpecID is the ID of the partition spec used to write
 	// this manifest. It must be listed in the table metadata
 	// partition-specs.
-	PartitionID() int32
+	PartitionSpecID() int32
 	// ManifestContent is the type of files tracked by this manifest,
 	// either data or delete files. All v1 manifests track data files.
 	ManifestContent() ManifestContent
@@ -293,13 +434,13 @@ type ManifestFile interface {
 	// MinSequenceNum is the minimum data sequence number of all live data
 	// or delete files in the manifest. Will be 0 for v1 manifest lists.
 	MinSequenceNum() int64
-	// Metadata returns implementation-specific key metadata for encryption
+	// KeyMetadata returns implementation-specific key metadata for encryption
 	// if it exists in the manifest list.
-	Metadata() []byte
-	// PartitionList returns a list of field summaries for each partition
+	KeyMetadata() []byte
+	// Partitions returns a list of field summaries for each partition
 	// field in the spec. Each field in the list corresponds to a field in
 	// the manifest file's partition spec.
-	PartitionList() []fieldSummary
+	Partitions() []FieldSummary
 
 	// HasAddedFiles returns true if AddedDataFiles > 0 or if it was null.
 	HasAddedFiles() bool
@@ -401,8 +542,8 @@ type dataFile struct {
 	DistinctCounts   *[]colMap[int, int64]  `avro:"distinct_counts"`
 	LowerBounds      *[]colMap[int, []byte] `avro:"lower_bounds"`
 	UpperBounds      *[]colMap[int, []byte] `avro:"upper_bounds"`
-	KeyMetadata      *[]byte                `avro:"key_metadata"`
-	SplitOffsets     *[]int64               `avro:"split_offsets"`
+	Key              *[]byte                `avro:"key_metadata"`
+	Splits           *[]int64               `avro:"split_offsets"`
 	EqualityIDs      *[]int                 `avro:"equality_ids"`
 	SortOrder        *int                   `avro:"sort_order_id"`
 
@@ -471,18 +612,18 @@ func (d *dataFile) UpperBoundValues() map[int][]byte {
 	return d.upperBoundMap
 }
 
-func (d *dataFile) MetadataKey() []byte {
-	if d.KeyMetadata == nil {
+func (d *dataFile) KeyMetadata() []byte {
+	if d.Key == nil {
 		return nil
 	}
-	return *d.KeyMetadata
+	return *d.Key
 }
 
-func (d *dataFile) Splits() []int64 {
-	if d.SplitOffsets == nil {
+func (d *dataFile) SplitOffsets() []int64 {
+	if d.Splits == nil {
 		return nil
 	}
-	return *d.SplitOffsets
+	return *d.Splits
 }
 
 func (d *dataFile) EqualityFieldIDs() []int {
@@ -612,11 +753,11 @@ type DataFile interface {
 	// must be greater than or equal to all non-null, non-NaN values in
 	// the column for the file.
 	UpperBoundValues() map[int][]byte
-	// MetadataKey is implementation-specific key metadata for encryption.
-	MetadataKey() []byte
-	// Splits are the split offsets for the data file. For example,
+	// KeyMetadata is implementation-specific key metadata for encryption.
+	KeyMetadata() []byte
+	// SplitOffsets are the split offsets for the data file. For example,
 	// all row group offsets in a Parquet file. Must be sorted ascending.
-	Splits() []int64
+	SplitOffsets() []int64
 	// EqualityFieldIDs are used to determine row equality in equality
 	// delete files. It is required when the content type is
 	// EntryContentEqDeletes.

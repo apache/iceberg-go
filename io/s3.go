@@ -65,13 +65,13 @@ func createS3FileIO(parsed *url.URL, props map[string]string) (IO, error) {
 		})))
 	}
 
-	if defaultRegion, ok := props[S3Region]; ok {
-		opts = append(opts, config.WithDefaultRegion(defaultRegion))
+	if region, ok := props[S3Region]; ok {
+		opts = append(opts, config.WithRegion(region))
 	}
 
-	accessKey, secretKey := props[S3AccessKeyID], props[S3SecretAccessKey]
+	accessKey, secretAccessKey := props[S3AccessKeyID], props[S3SecretAccessKey]
 	token := props[S3SessionToken]
-	if accessKey != "" || secretKey != "" || token != "" {
+	if accessKey != "" || secretAccessKey != "" || token != "" {
 		opts = append(opts, config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
 			props[S3AccessKeyID], props[S3SecretAccessKey], props[S3SessionToken])))
 	}

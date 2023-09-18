@@ -30,49 +30,38 @@ import (
 var (
 	falseBool                   = false
 	snapshotID            int64 = 9182715666859759686
-	fileCount             int32 = 3
-	zero                  int32 = 0
-	zero64                int64 = 0
 	addedRows             int64 = 237993
-	manifestFileRecordsV1       = []manifestFileV1{{
-		Path:               "/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro",
-		Len:                7989,
-		PartitionSpecID:    0,
-		AddedSnapshotID:    &snapshotID,
-		AddedFilesCount:    &fileCount,
-		ExistingFilesCount: &zero,
-		DeletedFilesCount:  &zero,
-		AddedRowsCount:     &addedRows,
-		ExistingRowsCount:  &zero64,
-		DeletedRowsCount:   &zero64,
-		Partitions: &[]fieldSummary{{
-			ContainsNull: true, ContainsNaN: &falseBool,
-			LowerBound: &[]byte{0x01, 0x00, 0x00, 0x00},
-			UpperBound: &[]byte{0x02, 0x00, 0x00, 0x00},
-		}},
-	}}
+	manifestFileRecordsV1       = []ManifestFile{
+		NewManifestV1Builder("/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro",
+			7989, 0, snapshotID).
+			AddedFiles(3).
+			ExistingFiles(0).
+			DeletedFiles(0).
+			AddedRows(addedRows).
+			ExistingRows(0).
+			DeletedRows(0).
+			Partitions([]FieldSummary{{
+				ContainsNull: true, ContainsNaN: &falseBool,
+				LowerBound: &[]byte{0x01, 0x00, 0x00, 0x00},
+				UpperBound: &[]byte{0x02, 0x00, 0x00, 0x00},
+			}}).Build()}
 
-	manifestFileRecordsV2 = []manifestFileV2{{
-		Path:               "/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro",
-		Len:                7989,
-		PartitionSpecID:    0,
-		Content:            ManifestContentDeletes,
-		SeqNumber:          3,
-		MinSeqNumber:       3,
-		AddedSnapshotID:    snapshotID,
-		AddedFilesCount:    3,
-		ExistingFilesCount: 0,
-		DeletedFilesCount:  0,
-		AddedRowsCount:     addedRows,
-		ExistingRowsCount:  0,
-		DeletedRowsCount:   0,
-		Partitions: &[]fieldSummary{{
-			ContainsNull: true,
-			ContainsNaN:  &falseBool,
-			LowerBound:   &[]byte{0x01, 0x00, 0x00, 0x00},
-			UpperBound:   &[]byte{0x02, 0x00, 0x00, 0x00},
-		}},
-	}}
+	manifestFileRecordsV2 = []ManifestFile{
+		NewManifestV2Builder("/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro",
+			7989, 0, ManifestContentDeletes, snapshotID).
+			SequenceNum(3, 3).
+			AddedFiles(3).
+			ExistingFiles(0).
+			DeletedFiles(0).
+			AddedRows(addedRows).
+			ExistingRows(0).
+			DeletedRows(0).
+			Partitions([]FieldSummary{{
+				ContainsNull: true,
+				ContainsNaN:  &falseBool,
+				LowerBound:   &[]byte{0x01, 0x00, 0x00, 0x00},
+				UpperBound:   &[]byte{0x02, 0x00, 0x00, 0x00},
+			}}).Build()}
 
 	entrySnapshotID        int64 = 8744736658442914487
 	intZero                      = 0
@@ -192,8 +181,8 @@ var (
 					{Key: 18, Value: []byte{0, 0, 0, 0, 0, 0x18, 'b', '@'}},
 					{Key: 19, Value: []byte{0, 0, 0, 0, 0, 0, 0x04, '@'}},
 				},
-				SplitOffsets: &[]int64{4},
-				SortOrder:    &intZero,
+				Splits:    &[]int64{4},
+				SortOrder: &intZero,
 			},
 		},
 		{
@@ -321,8 +310,8 @@ var (
 					{Key: 18, Value: []byte{0xc3, 0xf5, '(', '\\', 0x8f, ':', 0x8c, '@'}},
 					{Key: 19, Value: []byte{0, 0, 0, 0, 0, 0, 0x04, '@'}},
 				},
-				SplitOffsets: &[]int64{4},
-				SortOrder:    &intZero,
+				Splits:    &[]int64{4},
+				SortOrder: &intZero,
 			},
 		},
 	}
@@ -344,7 +333,7 @@ var (
 				NaNCounts:        manifestEntryV1Records[0].Data.NaNCounts,
 				LowerBounds:      manifestEntryV1Records[0].Data.LowerBounds,
 				UpperBounds:      manifestEntryV1Records[0].Data.UpperBounds,
-				SplitOffsets:     manifestEntryV1Records[0].Data.SplitOffsets,
+				Splits:           manifestEntryV1Records[0].Data.Splits,
 				SortOrder:        manifestEntryV1Records[0].Data.SortOrder,
 			},
 		},
@@ -364,7 +353,7 @@ var (
 				NaNCounts:        manifestEntryV1Records[1].Data.NaNCounts,
 				LowerBounds:      manifestEntryV1Records[1].Data.LowerBounds,
 				UpperBounds:      manifestEntryV1Records[1].Data.UpperBounds,
-				SplitOffsets:     manifestEntryV1Records[1].Data.SplitOffsets,
+				Splits:           manifestEntryV1Records[1].Data.Splits,
 				SortOrder:        manifestEntryV1Records[1].Data.SortOrder,
 			},
 		},
@@ -436,7 +425,7 @@ func (m *ManifestTestSuite) SetupSuite() {
 func (m *ManifestTestSuite) TestManifestEntriesV1() {
 	var mockfs internal.MockFS
 	manifest := manifestFileV1{
-		Path: manifestFileRecordsV1[0].Path,
+		Path: manifestFileRecordsV1[0].FilePath(),
 	}
 
 	mockfs.Test(m.T())
@@ -446,7 +435,7 @@ func (m *ManifestTestSuite) TestManifestEntriesV1() {
 	entries, err := manifest.FetchEntries(&mockfs, false)
 	m.Require().NoError(err)
 	m.Len(entries, 2)
-	m.Zero(manifest.PartitionID())
+	m.Zero(manifest.PartitionSpecID())
 	m.Zero(manifest.SnapshotID())
 	m.Zero(manifest.AddedDataFiles())
 	m.Zero(manifest.ExistingDataFiles())
@@ -567,8 +556,8 @@ func (m *ManifestTestSuite) TestManifestEntriesV1() {
 		19: {0, 0, 0, 0, 0, 0, 0x04, '@'},
 	}, datafile.UpperBoundValues())
 
-	m.Nil(datafile.MetadataKey())
-	m.Equal([]int64{4}, datafile.Splits())
+	m.Nil(datafile.KeyMetadata())
+	m.Equal([]int64{4}, datafile.SplitOffsets())
 	m.Nil(datafile.EqualityFieldIDs())
 	m.Zero(*datafile.SortOrderID())
 }
@@ -592,11 +581,11 @@ func (m *ManifestTestSuite) TestReadManifestListV1() {
 	m.Equal(addedRows, list[0].AddedRows())
 	m.Zero(list[0].ExistingRows())
 	m.Zero(list[0].DeletedRows())
-	m.Nil(list[0].Metadata())
-	m.Zero(list[0].PartitionID())
+	m.Nil(list[0].KeyMetadata())
+	m.Zero(list[0].PartitionSpecID())
 	m.Equal(snapshotID, list[0].SnapshotID())
 
-	part := list[0].PartitionList()[0]
+	part := list[0].Partitions()[0]
 	m.True(part.ContainsNull)
 	m.False(*part.ContainsNaN)
 	m.Equal([]byte{0x01, 0x00, 0x00, 0x00}, *part.LowerBound)
@@ -623,10 +612,10 @@ func (m *ManifestTestSuite) TestReadManifestListV2() {
 	m.Equal(addedRows, list[0].AddedRows())
 	m.Zero(list[0].ExistingRows())
 	m.Zero(list[0].DeletedRows())
-	m.Nil(list[0].Metadata())
-	m.Zero(list[0].PartitionID())
+	m.Nil(list[0].KeyMetadata())
+	m.Zero(list[0].PartitionSpecID())
 
-	part := list[0].PartitionList()[0]
+	part := list[0].Partitions()[0]
 	m.True(part.ContainsNull)
 	m.False(*part.ContainsNaN)
 	m.Equal([]byte{0x01, 0x00, 0x00, 0x00}, *part.LowerBound)
@@ -636,7 +625,7 @@ func (m *ManifestTestSuite) TestReadManifestListV2() {
 func (m *ManifestTestSuite) TestManifestEntriesV2() {
 	var mockfs internal.MockFS
 	manifest := manifestFileV2{
-		Path: manifestFileRecordsV2[0].Path,
+		Path: manifestFileRecordsV2[0].FilePath(),
 	}
 
 	mockfs.Test(m.T())
@@ -646,7 +635,7 @@ func (m *ManifestTestSuite) TestManifestEntriesV2() {
 	entries, err := manifest.FetchEntries(&mockfs, false)
 	m.Require().NoError(err)
 	m.Len(entries, 2)
-	m.Zero(manifest.PartitionID())
+	m.Zero(manifest.PartitionSpecID())
 	m.Zero(manifest.SnapshotID())
 	m.Zero(manifest.AddedDataFiles())
 	m.Zero(manifest.ExistingDataFiles())
@@ -767,8 +756,8 @@ func (m *ManifestTestSuite) TestManifestEntriesV2() {
 		19: {0, 0, 0, 0, 0, 0, 0x04, '@'},
 	}, datafile.UpperBoundValues())
 
-	m.Nil(datafile.MetadataKey())
-	m.Equal([]int64{4}, datafile.Splits())
+	m.Nil(datafile.KeyMetadata())
+	m.Equal([]int64{4}, datafile.SplitOffsets())
 	m.Nil(datafile.EqualityFieldIDs())
 	m.Zero(*datafile.SortOrderID())
 }
