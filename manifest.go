@@ -52,15 +52,19 @@ type ManifestV1Builder struct {
 // NewManifestV1Builder is passed all of the required fields and then allows
 // all of the optional fields to be set by calling the corresponding methods
 // before calling [ManifestV1Builder.Build] to construct the object.
-func NewManifestV1Builder(path string, length int64, partitionSpecID int32, addedSnapshotID int64) *ManifestV1Builder {
+func NewManifestV1Builder(path string, length int64, partitionSpecID int32) *ManifestV1Builder {
 	return &ManifestV1Builder{
 		m: &manifestFileV1{
-			Path:            path,
-			Len:             length,
-			SpecID:          partitionSpecID,
-			AddedSnapshotID: addedSnapshotID,
+			Path:   path,
+			Len:    length,
+			SpecID: partitionSpecID,
 		},
 	}
+}
+
+func (b *ManifestV1Builder) AddedSnapshotID(id int64) *ManifestV1Builder {
+	b.m.AddedSnapshotID = &id
+	return b
 }
 
 func (b *ManifestV1Builder) AddedFiles(cnt int32) *ManifestV1Builder {
@@ -115,7 +119,7 @@ type manifestFileV1 struct {
 	Path               string          `avro:"manifest_path"`
 	Len                int64           `avro:"manifest_length"`
 	SpecID             int32           `avro:"partition_spec_id"`
-	AddedSnapshotID    int64           `avro:"added_snapshot_id"`
+	AddedSnapshotID    *int64          `avro:"added_snapshot_id"`
 	AddedFilesCount    *int32          `avro:"added_data_files_count"`
 	ExistingFilesCount *int32          `avro:"existing_data_files_count"`
 	DeletedFilesCount  *int32          `avro:"deleted_data_files_count"`
@@ -134,7 +138,10 @@ func (m *manifestFileV1) ManifestContent() ManifestContent {
 	return ManifestContentData
 }
 func (m *manifestFileV1) SnapshotID() int64 {
-	return m.AddedSnapshotID
+	if m.AddedSnapshotID == nil {
+		return 0
+	}
+	return *m.AddedSnapshotID
 }
 
 func (m *manifestFileV1) AddedDataFiles() int32 {

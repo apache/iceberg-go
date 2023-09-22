@@ -33,7 +33,8 @@ var (
 	addedRows             int64 = 237993
 	manifestFileRecordsV1       = []ManifestFile{
 		NewManifestV1Builder("/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro",
-			7989, 0, snapshotID).
+			7989, 0).
+			AddedSnapshotID(snapshotID).
 			AddedFiles(3).
 			ExistingFiles(0).
 			DeletedFiles(0).
@@ -70,6 +71,11 @@ var (
 			EntryStatus: EntryStatusADDED,
 			Snapshot:    entrySnapshotID,
 			Data: dataFile{
+				// bad value for Content but this field doesn't exist in V1
+				// so it shouldn't get written and shouldn't be read back out
+				// so the roundtrip test asserts that we get the default value
+				// back out.
+				Content:          EntryContentEqDeletes,
 				Path:             "/home/iceberg/warehouse/nyc/taxis_partitioned/data/VendorID=null/00000-633-d8a4223e-dc97-45a1-86e1-adaba6e8abd7-00001.parquet",
 				Format:           ParquetFile,
 				PartitionData:    map[string]any{"VendorID": int(1), "tpep_pickup_datetime": time.Unix(1925, 0)},

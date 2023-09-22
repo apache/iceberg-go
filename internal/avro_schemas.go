@@ -40,7 +40,7 @@ func init() {
 			{"name": "partition_spec_id", "type": "int", "doc": "Spec ID used to write", "field-id": 502},
 			{
 				"name": "added_snapshot_id",
-				"type": "long",
+				"type": ["null", "long"],
 				"doc": "Snapshot ID that added the manifest",
 				"field-id": 503
 			},
