@@ -24,7 +24,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.18.35
 	github.com/aws/aws-sdk-go-v2/credentials v1.13.34
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.38.4
-	github.com/hamba/avro/v2 v2.14.1
+	github.com/hamba/avro/v2 v2.16.0
 	github.com/stretchr/testify v1.8.4
 	github.com/wolfeidau/s3iofs v1.2.0
 	golang.org/x/exp v0.0.0-20230811145659-89c5cff77bcb
