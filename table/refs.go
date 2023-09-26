@@ -24,6 +24,7 @@ import (
 
 const MainBranch = "main"
 
+// RefType will be either a BranchRef or a TagRef
 type RefType string
 
 const (
@@ -35,6 +36,7 @@ var (
 	ErrInvalidRefType = errors.New("invalid snapshot ref type, should be 'branch' or 'tag'")
 )
 
+// SnapshotRef represents the reference information for a specific snapshot
 type SnapshotRef struct {
 	SnapshotID         int64   `json:"snapshot-id"`
 	SnapshotRefType    RefType `json:"type"`

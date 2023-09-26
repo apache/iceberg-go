@@ -42,6 +42,8 @@ var (
 	ErrMissingOperation = errors.New("missing operation key")
 )
 
+// ValidOperation ensures that a given string is one of the valid operation
+// types: append,replace,overwrite,delete
 func ValidOperation(s string) (Operation, error) {
 	switch s {
 	case "append", "replace", "overwrite", "delete":
@@ -52,6 +54,9 @@ func ValidOperation(s string) (Operation, error) {
 
 const operationKey = "operation"
 
+// Summary stores the summary information for a snapshot indicating
+// the operation that created the snapshot, and various properties
+// which might exist in the summary.
 type Summary struct {
 	Operation  Operation
 	Properties map[string]string

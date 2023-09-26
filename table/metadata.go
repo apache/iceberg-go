@@ -28,24 +28,65 @@ import (
 	"github.com/google/uuid"
 )
 
+// Metadata for an iceberg table as specified in the Iceberg spec
+//
+// https://iceberg.apache.org/spec/#iceberg-table-spec
 type Metadata interface {
+	// Version indicates the version of this metadata, 1 for V1, 2 for V2, etc.
 	Version() int
+	// TableUUID returns a UUID that identifies the table, generated when the
+	// table is created. Implementations must throw an exception if a table's
+	// UUID does not match the expected UUID after refreshing metadata.
 	TableUUID() uuid.UUID
+	// Loc is the table's base location. This is used by writers to determine
+	// where to store data files, manifest files, and table metadata files.
 	Loc() string
+	// LastUpdated is the timestamp in milliseconds from the unix epoch when
+	// the table was last updated. Each table metadata file should update this
+	// field just before writing.
 	LastUpdated() int
+	// LastColumn returns the highest assigned column ID for the table.
+	// This is used to ensure fields are always assigned an unused ID when
+	// evolving schemas.
 	LastColumn() int
+	// Schemas returns the list of schemas, stored as objects with their
+	// schema-id.
 	Schemas() []*iceberg.Schema
+	// CurrentSchema returns the table's current schema.
 	CurrentSchema() *iceberg.Schema
+	// PartitionSpecs returns the list of all partition specs in the table.
 	PartitionSpecs() []iceberg.PartitionSpec
+	// PartitionSpec returns the current partition spec that the table is using.
 	PartitionSpec() iceberg.PartitionSpec
+	// DefaultPartitionSpec is the ID of the current spec that writers should
+	// use by default.
 	DefaultPartitionSpec() int
+	// LastPartitionSpecID is the highest assigned partition field ID across
+	// all partition specs for the table. This is used to ensure partition
+	// fields are always assigned an unused ID when evolving specs.
 	LastPartitionSpecID() *int
+	// Snapshots returns the list of valid snapshots. Valid snapshots are
+	// snapshots for which all data files exist in the file system. A data
+	// file must not be deleted from the file system until the last snapshot
+	// in which it was listed is garbage collected.
 	Snapshots() []Snapshot
+	// SnapshotByID find and return a specific snapshot by its ID. Returns
+	// nil if the ID is not found in the list of snapshots.
 	SnapshotByID(int64) *Snapshot
+	// SnapshotByName searches the list of snapshots for a snapshot with a given
+	// ref name. Returns nil if there's no ref with this name for a snapshot.
 	SnapshotByName(name string) *Snapshot
+	// CurrentSnapshot returns the table's current snapshot.
 	CurrentSnapshot() *Snapshot
+	// SortOrder returns the table's current sort order, ie: the one with the
+	// ID that matches the default-sort-order-id.
 	SortOrder() SortOrder
+	// SortOrders returns the list of sort orders in the table.
 	SortOrders() []SortOrder
+	// Properties is a string to string map of table properties. This is used
+	// to control settings that affect reading and writing and is not intended
+	// to be used for arbitrary metadata. For example, commit.retry.num-retries
+	// is used to control the number of commit retries.
 	Properties() iceberg.Properties
 }
 
@@ -54,6 +95,8 @@ var (
 	ErrInvalidMetadata              = errors.New("invalid metadata")
 )
 
+// ParseMetadata parses json metadata provided by the passed in reader,
+// returning an error if one is encountered.
 func ParseMetadata(r io.Reader) (Metadata, error) {
 	data, err := io.ReadAll(r)
 	if err != nil {
@@ -63,10 +106,13 @@ func ParseMetadata(r io.Reader) (Metadata, error) {
 	return ParseMetadataBytes(data)
 }
 
+// ParseMetadataString is like [ParseMetadata], but for a string rather than
+// an io.Reader.
 func ParseMetadataString(s string) (Metadata, error) {
 	return ParseMetadataBytes([]byte(s))
 }
 
+// ParseMetadataBytes is like [ParseMetadataString] but for a byte slice.
 func ParseMetadataBytes(b []byte) (Metadata, error) {
 	ver := struct {
 		FormatVersion int `json:"format-version"`
@@ -180,6 +226,10 @@ func (c *commonMetadata) Properties() iceberg.Properties {
 	return c.Props
 }
 
+// preValidate updates values in the metadata struct with defaults based on
+// combinations of struct members. Such as initializing slices as empty slices
+// if they were null in the metadata, or normalizing inconsistencies between
+// metadata versions.
 func (c *commonMetadata) preValidate() {
 	if c.CurrentSnapshotID != nil && *c.CurrentSnapshotID == -1 {
 		// treat -1 as the same as nil, clean this up in pre-validation

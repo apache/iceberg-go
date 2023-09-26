@@ -45,11 +45,18 @@ var (
 	ErrInvalidNullOrder     = errors.New("invalid null order, must be 'nulls-first' or 'nulls-last'")
 )
 
+// SortField describes a field used in a sort order definition.
 type SortField struct {
-	SourceID  int               `json:"source-id"`
+	// SourceID is the source column id from the table's schema
+	SourceID int `json:"source-id"`
+	// Transform is the tranformation used to produce values to be
+	// sorted on from the source column.
 	Transform iceberg.Transform `json:"transform"`
-	Direction SortDirection     `json:"direction"`
-	NullOrder NullOrder         `json:"null-order"`
+	// Direction is an enum indicating ascending or descending direction.
+	Direction SortDirection `json:"direction"`
+	// NullOrder describes the order of null values when sorting
+	// should be only either nulls-first or nulls-last enum values.
+	NullOrder NullOrder `json:"null-order"`
 }
 
 func (s *SortField) String() string {
@@ -114,8 +121,14 @@ const (
 	UnsortedSortOrderID = 0
 )
 
+// A default Sort Order indicating no sort order at all
 var UnsortedSortOrder = SortOrder{OrderID: UnsortedSortOrderID, Fields: []SortField{}}
 
+// SortOrder describes how the data is sorted within the table.
+//
+// Data can be sorted within partitions by columns to gain performance. The
+// order of the sort fields within the list defines the order in which the
+// sort is applied to the data.
 type SortOrder struct {
 	OrderID int         `json:"order-id"`
 	Fields  []SortField `json:"fields"`
