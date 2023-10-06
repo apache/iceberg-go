@@ -38,13 +38,13 @@ type Metadata interface {
 	// table is created. Implementations must throw an exception if a table's
 	// UUID does not match the expected UUID after refreshing metadata.
 	TableUUID() uuid.UUID
-	// Loc is the table's base location. This is used by writers to determine
+	// Location is the table's base location. This is used by writers to determine
 	// where to store data files, manifest files, and table metadata files.
-	Loc() string
-	// LastUpdated is the timestamp in milliseconds from the unix epoch when
+	Location() string
+	// LastUpdatedMillis is the timestamp in milliseconds from the unix epoch when
 	// the table was last updated. Each table metadata file should update this
 	// field just before writing.
-	LastUpdated() int
+	LastUpdatedMillis() int64
 	// LastColumn returns the highest assigned column ID for the table.
 	// This is used to ensure fields are always assigned an unused ID when
 	// evolving schemas.
@@ -138,8 +138,8 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 type commonMetadata struct {
 	FormatVersion      int                     `json:"format-version"`
 	UUID               uuid.UUID               `json:"table-uuid"`
-	Location           string                  `json:"location"`
-	LastUpdatedMS      int                     `json:"last-updated-ms"`
+	Loc                string                  `json:"location"`
+	LastUpdatedMS      int64                   `json:"last-updated-ms"`
 	LastColumnID       int                     `json:"last-column-id"`
 	SchemaList         []*iceberg.Schema       `json:"schemas"`
 	CurrentSchemaID    int                     `json:"current-schema-id"`
@@ -157,8 +157,8 @@ type commonMetadata struct {
 }
 
 func (c *commonMetadata) TableUUID() uuid.UUID       { return c.UUID }
-func (c *commonMetadata) Loc() string                { return c.Location }
-func (c *commonMetadata) LastUpdated() int           { return c.LastUpdatedMS }
+func (c *commonMetadata) Location() string           { return c.Loc }
+func (c *commonMetadata) LastUpdatedMillis() int64   { return c.LastUpdatedMS }
 func (c *commonMetadata) LastColumn() int            { return c.LastColumnID }
 func (c *commonMetadata) Schemas() []*iceberg.Schema { return c.SchemaList }
 func (c *commonMetadata) CurrentSchema() *iceberg.Schema {

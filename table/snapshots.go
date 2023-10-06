@@ -117,8 +117,8 @@ func (s *Summary) MarshalJSON() ([]byte, error) {
 type Snapshot struct {
 	SnapshotID       int64    `json:"snapshot-id"`
 	ParentSnapshotID *int64   `json:"parent-snapshot-id,omitempty"`
-	SequenceNumber   int      `json:"sequence-number"`
-	TimestampMs      int      `json:"timestamp-ms"`
+	SequenceNumber   int64    `json:"sequence-number"`
+	TimestampMs      int64    `json:"timestamp-ms"`
 	ManifestList     string   `json:"manifest-list,omitempty"`
 	Summary          *Summary `json:"summary,omitempty"`
 	SchemaID         *int     `json:"schema-id,omitempty"`
@@ -177,10 +177,10 @@ func (s Snapshot) Manifests(fio io.IO) ([]iceberg.ManifestFile, error) {
 
 type MetadataLogEntry struct {
 	MetadataFile string `json:"metadata-file"`
-	TimestampMs  int    `json:"timestamp-ms"`
+	TimestampMs  int64  `json:"timestamp-ms"`
 }
 
 type SnapshotLogEntry struct {
 	SnapshotID  int64 `json:"snapshot-id"`
-	TimestampMs int   `json:"timestamp-ms"`
+	TimestampMs int64 `json:"timestamp-ms"`
 }

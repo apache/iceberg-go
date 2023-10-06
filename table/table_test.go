@@ -49,7 +49,7 @@ func (t *TableTestSuite) SetupSuite() {
 	t.Require().NotNil(tbl)
 
 	t.Equal([]string{"foo"}, tbl.Identifier())
-	t.Equal("s3://bucket/test/location/uuid.metadata.json", tbl.MetadataLoc())
+	t.Equal("s3://bucket/test/location/uuid.metadata.json", tbl.MetadataLocation())
 	t.Equal(&mockfs, tbl.FS())
 
 	t.tbl = tbl

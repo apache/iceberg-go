@@ -40,16 +40,16 @@ func (t Table) Equals(other Table) bool {
 		reflect.DeepEqual(t.metadata, other.metadata)
 }
 
-func (t Table) Identifier() Identifier { return t.identifier }
-func (t Table) Metadata() Metadata     { return t.metadata }
-func (t Table) MetadataLoc() string    { return t.metadataLocation }
-func (t Table) FS() io.IO              { return t.fs }
+func (t Table) Identifier() Identifier   { return t.identifier }
+func (t Table) Metadata() Metadata       { return t.metadata }
+func (t Table) MetadataLocation() string { return t.metadataLocation }
+func (t Table) FS() io.IO                { return t.fs }
 
 func (t Table) Schema() *iceberg.Schema              { return t.metadata.CurrentSchema() }
 func (t Table) Spec() iceberg.PartitionSpec          { return t.metadata.PartitionSpec() }
 func (t Table) SortOrder() SortOrder                 { return t.metadata.SortOrder() }
 func (t Table) Properties() iceberg.Properties       { return t.metadata.Properties() }
-func (t Table) Location() string                     { return t.metadata.Loc() }
+func (t Table) Location() string                     { return t.metadata.Location() }
 func (t Table) CurrentSnapshot() *Snapshot           { return t.metadata.CurrentSnapshot() }
 func (t Table) SnapshotByID(id int64) *Snapshot      { return t.metadata.SnapshotByID(id) }
 func (t Table) SnapshotByName(name string) *Snapshot { return t.metadata.SnapshotByName(name) }
