@@ -35,3 +35,38 @@ func TestInvalidSnapshotRefType(t *testing.T) {
 	err := json.Unmarshal([]byte(ref), &snapRef)
 	assert.ErrorIs(t, err, table.ErrInvalidRefType)
 }
+
+func TestSnapshotBranchRef(t *testing.T) {
+	ref := `{
+		"snapshot-id": 3051729675574597004,
+		"type": "branch"
+	}`
+
+	var snapRef table.SnapshotRef
+	err := json.Unmarshal([]byte(ref), &snapRef)
+	assert.NoError(t, err)
+
+	assert.Equal(t, table.BranchRef, snapRef.SnapshotRefType)
+	assert.Equal(t, int64(3051729675574597004), snapRef.SnapshotID)
+	assert.Nil(t, snapRef.MinSnapshotsToKeep)
+	assert.Nil(t, snapRef.MaxRefAgeMs)
+	assert.Nil(t, snapRef.MaxSnapshotAgeMs)
+}
+
+func TestSnapshotTagRef(t *testing.T) {
+	ref := `{
+		"snapshot-id": 3051729675574597004,
+		"type": "tag",
+		"min-snapshots-to-keep": 10
+	}`
+
+	var snapRef table.SnapshotRef
+	err := json.Unmarshal([]byte(ref), &snapRef)
+	assert.NoError(t, err)
+
+	assert.Equal(t, table.TagRef, snapRef.SnapshotRefType)
+	assert.Equal(t, int64(3051729675574597004), snapRef.SnapshotID)
+	assert.Equal(t, 10, *snapRef.MinSnapshotsToKeep)
+	assert.Nil(t, snapRef.MaxRefAgeMs)
+	assert.Nil(t, snapRef.MaxSnapshotAgeMs)
+}

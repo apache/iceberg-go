@@ -401,7 +401,7 @@ func TestV2RefCreation(t *testing.T) {
 	var meta table.MetadataV2
 	require.NoError(t, json.Unmarshal([]byte(ExampleTableMetadataV2), &meta))
 
-	maxRefAge := 10000000
+	maxRefAge := int64(10000000)
 	assert.Equal(t, map[string]table.SnapshotRef{
 		"main": {
 			SnapshotID:      3055729675574597004,

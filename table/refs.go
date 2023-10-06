@@ -41,8 +41,8 @@ type SnapshotRef struct {
 	SnapshotID         int64   `json:"snapshot-id"`
 	SnapshotRefType    RefType `json:"type"`
 	MinSnapshotsToKeep *int    `json:"min-snapshots-to-keep,omitempty"`
-	MaxSnapshotAgeMs   *int    `json:"max-snapshot-age-ms,omitempty"`
-	MaxRefAgeMs        *int    `json:"max-ref-age-ms,omitempty"`
+	MaxSnapshotAgeMs   *int64  `json:"max-snapshot-age-ms,omitempty"`
+	MaxRefAgeMs        *int64  `json:"max-ref-age-ms,omitempty"`
 }
 
 func (s *SnapshotRef) UnmarshalJSON(b []byte) error {

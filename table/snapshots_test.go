@@ -103,3 +103,13 @@ func TestInvalidOperation(t *testing.T) {
 	assert.ErrorIs(t, err, table.ErrInvalidOperation)
 	assert.ErrorContains(t, err, "found 'foobar'")
 }
+
+func TestSnapshotString(t *testing.T) {
+	snapshot := testSnapshot()
+	assert.Equal(t, `append: id=25, parent_id=19, schema_id=3, sequence_number=200, timestamp_ms=1602638573590, manifest_list=s3:/a/b/c.avro`,
+		snapshot.String())
+
+	snapshot = testSnapshotWithProperties()
+	assert.Equal(t, `append, {"foo":"bar"}: id=25, parent_id=19, schema_id=3, sequence_number=200, timestamp_ms=1602638573590, manifest_list=s3:/a/b/c.avro`,
+		snapshot.String())
+}

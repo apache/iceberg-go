@@ -62,6 +62,15 @@ type Summary struct {
 	Properties map[string]string
 }
 
+func (s *Summary) String() string {
+	out := string(s.Operation)
+	if s.Properties != nil {
+		data, _ := json.Marshal(s.Properties)
+		out += ", " + string(data)
+	}
+	return out
+}
+
 func (s *Summary) Equals(other *Summary) bool {
 	if s == other {
 		return true
@@ -130,7 +139,7 @@ func (s Snapshot) String() string {
 	)
 
 	if s.Summary != nil {
-		op = string(s.Summary.Operation) + ": "
+		op = s.Summary.String() + ": "
 	}
 	if s.ParentSnapshotID != nil {
 		parent = ", parent_id=" + strconv.FormatInt(*s.ParentSnapshotID, 10)
@@ -138,7 +147,8 @@ func (s Snapshot) String() string {
 	if s.SchemaID != nil {
 		schema = ", schema_id=" + strconv.Itoa(*s.SchemaID)
 	}
-	return fmt.Sprintf("%sid=%d%s%s", op, s.SnapshotID, parent, schema)
+	return fmt.Sprintf("%sid=%d%s%s, sequence_number=%d, timestamp_ms=%d, manifest_list=%s",
+		op, s.SnapshotID, parent, schema, s.SequenceNumber, s.TimestampMs, s.ManifestList)
 }
 
 func (s Snapshot) Equals(other Snapshot) bool {
