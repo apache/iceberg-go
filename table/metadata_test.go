@@ -122,7 +122,7 @@ func TestMetadataV1Parsing(t *testing.T) {
 	assert.Equal(t, uuid.MustParse("d20125c8-7284-442c-9aea-15fee620737c"), meta.TableUUID())
 	assert.Equal(t, "s3://bucket/test/location", meta.Location())
 	assert.Equal(t, int64(1602638573874), meta.LastUpdatedMillis())
-	assert.Equal(t, 3, meta.LastColumn())
+	assert.Equal(t, 3, meta.LastColumnID())
 
 	expected := iceberg.NewSchema(
 		0,
@@ -169,7 +169,7 @@ func TestMetadataV2Parsing(t *testing.T) {
 	assert.Equal(t, "s3://bucket/test/location", data.Location())
 	assert.Equal(t, 34, data.LastSequenceNumber)
 	assert.Equal(t, int64(1602638573590), data.LastUpdatedMS)
-	assert.Equal(t, 3, data.LastColumnID)
+	assert.Equal(t, 3, data.LastColumnId)
 	assert.Equal(t, 0, data.SchemaList[0].ID)
 	assert.Equal(t, 1, data.CurrentSchemaID)
 	assert.Equal(t, 0, data.Specs[0].ID())

@@ -45,10 +45,10 @@ type Metadata interface {
 	// the table was last updated. Each table metadata file should update this
 	// field just before writing.
 	LastUpdatedMillis() int64
-	// LastColumn returns the highest assigned column ID for the table.
+	// LastColumnID returns the highest assigned column ID for the table.
 	// This is used to ensure fields are always assigned an unused ID when
 	// evolving schemas.
-	LastColumn() int
+	LastColumnID() int
 	// Schemas returns the list of schemas, stored as objects with their
 	// schema-id.
 	Schemas() []*iceberg.Schema
@@ -140,7 +140,7 @@ type commonMetadata struct {
 	UUID               uuid.UUID               `json:"table-uuid"`
 	Loc                string                  `json:"location"`
 	LastUpdatedMS      int64                   `json:"last-updated-ms"`
-	LastColumnID       int                     `json:"last-column-id"`
+	LastColumnId       int                     `json:"last-column-id"`
 	SchemaList         []*iceberg.Schema       `json:"schemas"`
 	CurrentSchemaID    int                     `json:"current-schema-id"`
 	Specs              []iceberg.PartitionSpec `json:"partition-specs"`
@@ -159,7 +159,7 @@ type commonMetadata struct {
 func (c *commonMetadata) TableUUID() uuid.UUID       { return c.UUID }
 func (c *commonMetadata) Location() string           { return c.Loc }
 func (c *commonMetadata) LastUpdatedMillis() int64   { return c.LastUpdatedMS }
-func (c *commonMetadata) LastColumn() int            { return c.LastColumnID }
+func (c *commonMetadata) LastColumnID() int          { return c.LastColumnId }
 func (c *commonMetadata) Schemas() []*iceberg.Schema { return c.SchemaList }
 func (c *commonMetadata) CurrentSchema() *iceberg.Schema {
 	for _, s := range c.SchemaList {
@@ -314,7 +314,7 @@ func (c *commonMetadata) validate() error {
 	case c.LastUpdatedMS == 0:
 		// last-updated-ms is required
 		return fmt.Errorf("%w: missing last-updated-ms", ErrInvalidMetadata)
-	case c.LastColumnID == 0:
+	case c.LastColumnId == 0:
 		// last-column-id is required
 		return fmt.Errorf("%w: missing last-column-id", ErrInvalidMetadata)
 	}

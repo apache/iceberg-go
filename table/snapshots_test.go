@@ -26,7 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func testSnapshot() table.Snapshot {
+func Snapshot() table.Snapshot {
 	parentID := int64(19)
 	manifest, schemaid := "s3:/a/b/c.avro", 3
 	return table.Snapshot{
@@ -42,7 +42,7 @@ func testSnapshot() table.Snapshot {
 	}
 }
 
-func testSnapshotWithProperties() table.Snapshot {
+func SnapshotWithProperties() table.Snapshot {
 	parentID := int64(19)
 	manifest, schemaid := "s3:/a/b/c.avro", 3
 	return table.Snapshot{
@@ -60,7 +60,7 @@ func testSnapshotWithProperties() table.Snapshot {
 }
 
 func TestSerializeSnapshot(t *testing.T) {
-	snapshot := testSnapshot()
+	snapshot := Snapshot()
 	data, err := json.Marshal(snapshot)
 	require.NoError(t, err)
 
@@ -76,7 +76,7 @@ func TestSerializeSnapshot(t *testing.T) {
 }
 
 func TestSerializeSnapshotWithProps(t *testing.T) {
-	snapshot := testSnapshotWithProperties()
+	snapshot := SnapshotWithProperties()
 	data, err := json.Marshal(snapshot)
 	require.NoError(t, err)
 
@@ -105,11 +105,11 @@ func TestInvalidOperation(t *testing.T) {
 }
 
 func TestSnapshotString(t *testing.T) {
-	snapshot := testSnapshot()
+	snapshot := Snapshot()
 	assert.Equal(t, `append: id=25, parent_id=19, schema_id=3, sequence_number=200, timestamp_ms=1602638573590, manifest_list=s3:/a/b/c.avro`,
 		snapshot.String())
 
-	snapshot = testSnapshotWithProperties()
+	snapshot = SnapshotWithProperties()
 	assert.Equal(t, `append, {"foo":"bar"}: id=25, parent_id=19, schema_id=3, sequence_number=200, timestamp_ms=1602638573590, manifest_list=s3:/a/b/c.avro`,
 		snapshot.String())
 }
