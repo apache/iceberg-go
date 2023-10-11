@@ -28,6 +28,18 @@ github:
   features:
     issues: true
 
+  enabled_merge_buttons:
+    squash: true
+    merge: false
+    rebase: false
+
+  protected_branches:
+    main:
+      required_pull_request_reviews:
+        required_approving_review_count: 1
+
+      required_linear_history: true
+
 notifications:
   commits:      commits@iceberg.apache.org
   issues:       issues@iceberg.apache.org
