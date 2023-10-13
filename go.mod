@@ -24,10 +24,11 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.18.44
 	github.com/aws/aws-sdk-go-v2/credentials v1.13.42
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.40.1
+	github.com/google/uuid v1.3.1
 	github.com/hamba/avro/v2 v2.16.0
 	github.com/stretchr/testify v1.8.4
 	github.com/wolfeidau/s3iofs v1.3.0
-	golang.org/x/exp v0.0.0-20230811145659-89c5cff77bcb
+	golang.org/x/exp v0.0.0-20231006140011-7918f672742d
 )
 
 require (
