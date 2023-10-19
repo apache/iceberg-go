@@ -33,8 +33,7 @@ var (
 	addedRows             int64 = 237993
 	manifestFileRecordsV1       = []ManifestFile{
 		NewManifestV1Builder("/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro",
-			7989, 0).
-			AddedSnapshotID(snapshotID).
+			7989, 0, snapshotID).
 			AddedFiles(3).
 			ExistingFiles(0).
 			DeletedFiles(0).
