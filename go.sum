@@ -68,8 +68,8 @@ github.com/stretchr/testify v1.7.1/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/
 github.com/stretchr/testify v1.8.0/go.mod h1:yNjHg4UonilssWZ8iaSj1OCr/vHnekPRkoO+kdMU+MU=
 github.com/stretchr/testify v1.8.4 h1:CcVxjf3Q8PM0mHUKJCdn+eZZtm5yQwehR5yeSVQQcUk=
 github.com/stretchr/testify v1.8.4/go.mod h1:sz/lmYIOXD/1dqDmKjjqLyZ2RngseejIcXlSw2iwfAo=
-github.com/wolfeidau/s3iofs v1.3.0 h1:O6lf4HCZVuHMjCdMYrpQIfKzLDYbO5BtNrH5RdQGv4c=
-github.com/wolfeidau/s3iofs v1.3.0/go.mod h1:oWH749wXNok7pJ+5MK7mi5uyS7GqQzeGApEGwUSaIjc=
+github.com/wolfeidau/s3iofs v1.3.1 h1:efurU2xWxtFZMmlNetCxcwlYVP9dyuT/Ae+tAT11KaY=
+github.com/wolfeidau/s3iofs v1.3.1/go.mod h1:pAy2+KHCwa6kqh1VldNbE5SrzAwD4gY2emk03/mRav8=
 golang.org/x/exp v0.0.0-20231006140011-7918f672742d h1:jtJma62tbqLibJ5sFQz8bKtEM8rJBtfilJ2qTU199MI=
 golang.org/x/exp v0.0.0-20231006140011-7918f672742d/go.mod h1:ldy0pHrwJyGW56pPQzzkH36rKxoZW1tw7ZJpeKx+hdo=
 golang.org/x/net v0.17.0 h1:pVaXccu2ozPjCXewfr1S7xza/zcXTity9cCdXQYSjIM=
