@@ -21,6 +21,51 @@
 
 `iceberg` is a Golang implementation of the [Iceberg table spec](https://iceberg.apache.org/spec/).
 
+## Feature Support / Roadmap
+
+### FileSystem Support
+
+| Filesystem Type      | Supported |
+| :------------------: | :-------: |
+| S3                   |    X      |
+| Google Cloud Storage |           |
+| Azure Blob Storage   |           |
+| Local Filesystem     |    X      |
+
+### Metadata
+
+| Operation                | Supported |
+| :----------------------- | :-------: |
+| Get Schema               |     X     |
+| Get Snapshots            |     X     |
+| Get Sort Orders          |     X     |
+| Get Partition Specs      |     X     |
+| Get Manifests            |     X     |
+| Create New Manifests     |     X     |
+| Plan Scan                |           |
+| Plan Scan for Snapshot   |           |
+
+### Catalog Support
+
+| Operation                | REST | Hive | DynamoDB | Glue |
+| :----------------------- | :--: | :--: | :------: | :--: |
+| Create Table             |      |      |          |      |
+| Update Current Snapshot  |      |      |          |      |
+| Create New Snapshot      |      |      |          |      |
+| Rename Table             |      |      |          |      |
+| Drop Table               |      |      |          |      |
+| Alter Table              |      |      |          |      |
+| Set Table Properties     |      |      |          |      |
+| Create Namespace         |      |      |          |      |
+| Drop Namespace           |      |      |          |      |
+| Set Namespace Properties |      |      |          |      |
+
+### Read/Write Data Support
+
+* No intrinsic support for reading/writing data yet
+  * Data can be manually read currently by retrieving data files via Manifests.
+  * Plan to add [Apache Arrow](https://pkg.go.dev/github.com/apache/arrow/go/v14@v14.0.0) support eventually.
+
 # Get in Touch
 
 - [Iceberg community](https://iceberg.apache.org/community/)
