@@ -44,3 +44,5 @@ lib/
 *.ipr
 *.iws
 *.iml
+
+.envrc*

@@ -104,6 +104,8 @@ func (c *GlueCatalog) LoadTable(ctx context.Context, catalogTable CatalogTable) 
 		return nil, err
 	}
 
+	fmt.Println("catalogTable.Location", catalogTable.Location)
+
 	// TODO: consider providing a way to directly access the S3 iofs to enable testing of the catalog.
 	iofs, err := io.LoadFS(map[string]string{}, catalogTable.Location)
 	if err != nil {

@@ -109,7 +109,9 @@ func TestGlueListTableIntegration(t *testing.T) {
 	if os.Getenv("TEST_DATABASE_NAME") == "" {
 		t.Skip()
 	}
-
+	if os.Getenv("TEST_TABLE_NAME") == "" {
+		t.Skip()
+	}
 	assert := require.New(t)
 
 	awscfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
@@ -120,4 +122,31 @@ func TestGlueListTableIntegration(t *testing.T) {
 	tables, err := catalog.ListTables(context.TODO(), GlueDatabaseIdentifier(os.Getenv("TEST_DATABASE_NAME")))
 	assert.NoError(err)
 	assert.Equal([]string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")}, tables[1].Identifier)
+}
+
+func TestGlueLoadTableIntegration(t *testing.T) {
+	if os.Getenv("TEST_DATABASE_NAME") == "" {
+		t.Skip()
+	}
+	if os.Getenv("TEST_TABLE_NAME") == "" {
+		t.Skip()
+	}
+	if os.Getenv("TEST_TABLE_LOCATION") == "" {
+		t.Skip()
+	}
+
+	assert := require.New(t)
+
+	awscfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
+	assert.NoError(err)
+
+	catalog := NewGlueCatalog(awscfg)
+
+	table, err := catalog.LoadTable(context.TODO(), CatalogTable{
+		Identifier:  []string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")},
+		Location:    os.Getenv("TEST_TABLE_LOCATION"),
+		CatalogType: Glue,
+	})
+	assert.NoError(err)
+	assert.Equal([]string{os.Getenv("TEST_TABLE_NAME")}, table.Identifier())
 }
