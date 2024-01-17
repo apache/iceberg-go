@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/glue"
@@ -32,37 +31,38 @@ func NewGlueCatalog(awscfg aws.Config) *GlueCatalog {
 }
 
 // GetTable loads a table from the Glue Catalog using the given database and table name.
-func (c *GlueCatalog) GetTable(ctx context.Context, identifier table.Identifier) (*table.Table, error) {
+func (c *GlueCatalog) GetTable(ctx context.Context, identifier table.Identifier) (CatalogTable, error) {
 	database, tableName, err := identifierToGlueTable(identifier)
 	if err != nil {
-		return nil, err
+		return CatalogTable{}, err
 	}
 
-	params := &glue.GetTableInput{DatabaseName: aws.String(database), Name: aws.String(tableName)}
-
-	tblRes, err := c.glueSvc.GetTable(ctx, params)
+	tblRes, err := c.glueSvc.GetTable(ctx,
+		&glue.GetTableInput{
+			DatabaseName: aws.String(database),
+			Name:         aws.String(tableName),
+		},
+	)
 	if err != nil {
 		if errors.Is(err, &types.EntityNotFoundException{}) {
-			return nil, ErrNoSuchTable
+			return CatalogTable{}, ErrNoSuchTable
 		}
-		return nil, fmt.Errorf("failed to get table %s.%s: %w", database, tableName, err)
+		return CatalogTable{}, fmt.Errorf("failed to get table %s.%s: %w", database, tableName, err)
 	}
 
-	iofs, err := io.LoadFS(map[string]string{}, tblRes.Table.Parameters["metadata_location"])
-	if err != nil {
-		return nil, fmt.Errorf("failed to load table %s.%s: %w", database, tableName, err)
+	if tblRes.Table.Parameters["table_type"] != "ICEBERG" {
+		return CatalogTable{}, errors.New("table is not an iceberg table")
 	}
 
-	icebergTable, err := table.NewFromLocation([]string{tableName}, tblRes.Table.Parameters["metadata_location"], iofs)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create table from location %s.%s: %w", database, tableName, err)
-	}
-
-	return icebergTable, nil
+	return CatalogTable{
+		Identifier:  identifier,
+		Location:    tblRes.Table.Parameters["metadata_location"],
+		CatalogType: Glue,
+	}, nil
 }
 
 // ListTables returns a list of iceberg tables in the given Glue database.
-func (c *GlueCatalog) ListTables(ctx context.Context, identifier table.Identifier) ([]*table.Table, error) {
+func (c *GlueCatalog) ListTables(ctx context.Context, identifier table.Identifier) ([]CatalogTable, error) {
 	database, err := identifierToGlueDatabase(identifier)
 	if err != nil {
 		return nil, err
@@ -75,7 +75,7 @@ func (c *GlueCatalog) ListTables(ctx context.Context, identifier table.Identifie
 		return nil, fmt.Errorf("failed to list tables in namespace %s: %w", database, err)
 	}
 
-	var icebergTables []*table.Table
+	var icebergTables []CatalogTable
 
 	for _, tbl := range tblsRes.TableList {
 		// skip non iceberg tables
@@ -84,17 +84,13 @@ func (c *GlueCatalog) ListTables(ctx context.Context, identifier table.Identifie
 			continue
 		}
 
-		iofs, err := io.LoadFS(map[string]string{}, tbl.Parameters["metadata_location"])
-		if err != nil {
-			return nil, fmt.Errorf("failed to load table %s.%s: %w", database, aws.ToString(tbl.Name), err)
-		}
-
-		icebergTable, err := table.NewFromLocation([]string{*tbl.Name}, tbl.Parameters["metadata_location"], iofs)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create table from location %s.%s: %w", database, aws.ToString(tbl.Name), err)
-		}
-
-		icebergTables = append(icebergTables, icebergTable)
+		icebergTables = append(icebergTables,
+			CatalogTable{
+				Identifier:  GlueTableIdentifier(database, aws.ToString(tbl.Name)),
+				Location:    tbl.Parameters["metadata_location"],
+				CatalogType: Glue,
+			},
+		)
 	}
 
 	return icebergTables, nil
