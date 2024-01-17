@@ -26,6 +26,7 @@ var (
 type Catalog interface {
 	GetTable(ctx context.Context, identifier table.Identifier) (CatalogTable, error)
 	ListTables(ctx context.Context, identifier table.Identifier) ([]CatalogTable, error)
+	LoadTable(ctx context.Context, table CatalogTable) (*table.Table, error)
 	CatalogType() CatalogType
 }
 

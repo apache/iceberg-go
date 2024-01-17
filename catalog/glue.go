@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/glue"
@@ -94,6 +95,27 @@ func (c *GlueCatalog) ListTables(ctx context.Context, identifier table.Identifie
 	}
 
 	return icebergTables, nil
+}
+
+// LoadTable loads a table from the catalog table details.
+func (c *GlueCatalog) LoadTable(ctx context.Context, catalogTable CatalogTable) (*table.Table, error) {
+	database, tableName, err := identifierToGlueTable(catalogTable.Identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	// TODO: consider providing a way to directly access the S3 iofs to enable testing of the catalog.
+	iofs, err := io.LoadFS(map[string]string{}, catalogTable.Location)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load table %s.%s: %w", database, tableName, err)
+	}
+
+	icebergTable, err := table.NewFromLocation([]string{tableName}, catalogTable.Location, iofs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create table from location %s.%s: %w", database, tableName, err)
+	}
+
+	return icebergTable, nil
 }
 
 func (c *GlueCatalog) CatalogType() CatalogType {
