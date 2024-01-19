@@ -41,15 +41,11 @@ var (
 
 // Catalog for iceberg table operations like create, drop, load, list and others.
 type Catalog interface {
-	GetTable(ctx context.Context, identifier table.Identifier) (CatalogTable, error)
-	ListTables(ctx context.Context, identifier table.Identifier) ([]CatalogTable, error)
-	LoadTable(ctx context.Context, table CatalogTable) (*table.Table, error)
+	// ListTables returns a list of table identifiers in the catalog, with the returned
+	// identifiers containing the information required to load the table via that catalog.
+	ListTables(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error)
+	// LoadTable loads a table from the catalog and returns a Table with the metadata.
+	LoadTable(ctx context.Context, identifier table.Identifier) (*table.Table, error)
+	// CatalogType returns the type of the catalog.
 	CatalogType() CatalogType
-}
-
-// CatalogTable is the details of a table in a catalog.
-type CatalogTable struct {
-	Identifier  table.Identifier // this identifier may vary depending on the catalog implementation
-	Location    string           // URL to the table location
-	CatalogType CatalogType
 }
