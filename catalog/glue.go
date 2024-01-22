@@ -33,13 +33,13 @@ var (
 	_ Catalog = (*GlueCatalog)(nil)
 )
 
-type GlueAPI interface {
+type glueAPI interface {
 	GetTable(ctx context.Context, params *glue.GetTableInput, optFns ...func(*glue.Options)) (*glue.GetTableOutput, error)
 	GetTables(ctx context.Context, params *glue.GetTablesInput, optFns ...func(*glue.Options)) (*glue.GetTablesOutput, error)
 }
 
 type GlueCatalog struct {
-	glueSvc GlueAPI
+	glueSvc glueAPI
 }
 
 func NewGlueCatalog(awscfg aws.Config) *GlueCatalog {
