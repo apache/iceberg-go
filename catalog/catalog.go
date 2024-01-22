@@ -22,6 +22,7 @@ import (
 	"errors"
 
 	"github.com/apache/iceberg-go/table"
+	"github.com/aws/aws-sdk-go-v2/aws"
 )
 
 type CatalogType string
@@ -38,6 +39,19 @@ var (
 	// ErrNoSuchTable is returned when a table does not exist in the catalog.
 	ErrNoSuchTable = errors.New("table does not exist")
 )
+
+// WithAwsConfig sets the AWS configuration for the catalog.
+func WithAwsConfig(cfg aws.Config) CatalogOption {
+	return func(o *CatalogOptions) {
+		o.awsConfig = cfg
+	}
+}
+
+type CatalogOption func(*CatalogOptions)
+
+type CatalogOptions struct {
+	awsConfig aws.Config
+}
 
 // Catalog for iceberg table operations like create, drop, load, list and others.
 type Catalog interface {

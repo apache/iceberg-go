@@ -110,7 +110,7 @@ func TestGlueListTableIntegration(t *testing.T) {
 	awscfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
 
-	catalog := NewGlueCatalog(awscfg)
+	catalog := NewGlueCatalog(WithAwsConfig(awscfg))
 
 	tables, err := catalog.ListTables(context.TODO(), GlueDatabaseIdentifier(os.Getenv("TEST_DATABASE_NAME")))
 	assert.NoError(err)
@@ -133,7 +133,7 @@ func TestGlueLoadTableIntegration(t *testing.T) {
 	awscfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
 
-	catalog := NewGlueCatalog(awscfg)
+	catalog := NewGlueCatalog(WithAwsConfig(awscfg))
 
 	table, err := catalog.LoadTable(context.TODO(), []string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")})
 	assert.NoError(err)

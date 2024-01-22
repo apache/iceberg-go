@@ -42,9 +42,15 @@ type GlueCatalog struct {
 	glueSvc glueAPI
 }
 
-func NewGlueCatalog(awscfg aws.Config) *GlueCatalog {
+func NewGlueCatalog(opts ...CatalogOption) *GlueCatalog {
+	options := &CatalogOptions{}
+
+	for _, o := range opts {
+		o(options)
+	}
+
 	return &GlueCatalog{
-		glueSvc: glue.NewFromConfig(awscfg),
+		glueSvc: glue.NewFromConfig(options.awsConfig),
 	}
 }
 
