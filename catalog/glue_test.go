@@ -86,8 +86,14 @@ func TestGlueListTables(t *testing.T) {
 					"metadata_location": "s3://test-bucket/test_table/metadata/abc123-123.metadata.json",
 				},
 			},
+			{
+				Name: aws.String("other_table"),
+				Parameters: map[string]string{
+					"metadata_location": "s3://test-bucket/other_table/",
+				},
+			},
 		},
-	}, nil)
+	}, nil).Once()
 
 	glueCatalog := &GlueCatalog{
 		glueSvc: mockGlueSvc,
@@ -95,6 +101,7 @@ func TestGlueListTables(t *testing.T) {
 
 	tables, err := glueCatalog.ListTables(context.TODO(), GlueDatabaseIdentifier("test_database"))
 	assert.NoError(err)
+	assert.Len(tables, 1)
 	assert.Equal([]string{"test_database", "test_table"}, tables[0])
 }
 

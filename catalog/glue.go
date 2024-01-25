@@ -29,6 +29,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/glue/types"
 )
 
+const glueTableTypeIceberg = "ICEBERG"
+
 var (
 	_ Catalog = (*GlueCatalog)(nil)
 )
@@ -42,8 +44,8 @@ type GlueCatalog struct {
 	glueSvc glueAPI
 }
 
-func NewGlueCatalog(opts ...CatalogOption) *GlueCatalog {
-	options := &CatalogOptions{}
+func NewGlueCatalog(opts ...Option) *GlueCatalog {
+	options := &Options{}
 
 	for _, o := range opts {
 		o(options)
@@ -65,23 +67,22 @@ func (c *GlueCatalog) ListTables(ctx context.Context, namespace table.Identifier
 
 	params := &glue.GetTablesInput{DatabaseName: aws.String(database)}
 
-	tblsRes, err := c.glueSvc.GetTables(ctx, params)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list tables in namespace %s: %w", database, err)
-	}
-
 	var icebergTables []table.Identifier
 
-	for _, tbl := range tblsRes.TableList {
-		// skip non iceberg tables
-		// TODO: consider what this would look like for non ICEBERG tables as you can convert them to ICEBERG tables via the Glue catalog API.
-		if tbl.Parameters["table_type"] != "ICEBERG" {
-			continue
+	for {
+		tblsRes, err := c.glueSvc.GetTables(ctx, params)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list tables in namespace %s: %w", database, err)
 		}
 
 		icebergTables = append(icebergTables,
-			GlueTableIdentifier(database, aws.ToString(tbl.Name)),
-		)
+			filterTableListByType(database, tblsRes.TableList, glueTableTypeIceberg)...)
+
+		if tblsRes.NextToken == nil {
+			break
+		}
+
+		params.NextToken = tblsRes.NextToken
 	}
 
 	return icebergTables, nil
@@ -162,11 +163,24 @@ func identifierToGlueDatabase(identifier table.Identifier) (string, error) {
 }
 
 // GlueTableIdentifier returns a glue table identifier for an iceberg table in the format [database, table].
-func GlueTableIdentifier(database string, table string) table.Identifier {
-	return []string{database, table}
+func GlueTableIdentifier(database string, tableName string) table.Identifier {
+	return []string{database, tableName}
 }
 
 // GlueDatabaseIdentifier returns a database identifier for a Glue database in the format [database].
 func GlueDatabaseIdentifier(database string) table.Identifier {
 	return []string{database}
+}
+
+func filterTableListByType(database string, tableList []types.Table, tableType string) []table.Identifier {
+	var filtered []table.Identifier
+
+	for _, tbl := range tableList {
+		if tbl.Parameters["table_type"] != tableType {
+			continue
+		}
+		filtered = append(filtered, GlueTableIdentifier(database, aws.ToString(tbl.Name)))
+	}
+
+	return filtered
 }
