@@ -90,10 +90,14 @@ func (c *GlueCatalog) ListTables(ctx context.Context, namespace table.Identifier
 // LoadTable loads a table from the catalog table details.
 //
 // The identifier should contain the Glue database name, then glue table name.
-func (c *GlueCatalog) LoadTable(ctx context.Context, identifier table.Identifier) (*table.Table, error) {
+func (c *GlueCatalog) LoadTable(ctx context.Context, identifier table.Identifier, props map[string]string) (*table.Table, error) {
 	database, tableName, err := identifierToGlueTable(identifier)
 	if err != nil {
 		return nil, err
+	}
+
+	if props == nil {
+		props = map[string]string{}
 	}
 
 	location, err := c.getTable(ctx, database, tableName)
@@ -102,7 +106,7 @@ func (c *GlueCatalog) LoadTable(ctx context.Context, identifier table.Identifier
 	}
 
 	// TODO: consider providing a way to directly access the S3 iofs to enable testing of the catalog.
-	iofs, err := io.LoadFS(map[string]string{}, location)
+	iofs, err := io.LoadFS(props, location)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load table %s.%s: %w", database, tableName, err)
 	}

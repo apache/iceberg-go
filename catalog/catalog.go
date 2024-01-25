@@ -59,7 +59,7 @@ type Catalog interface {
 	// identifiers containing the information required to load the table via that catalog.
 	ListTables(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error)
 	// LoadTable loads a table from the catalog and returns a Table with the metadata.
-	LoadTable(ctx context.Context, identifier table.Identifier) (*table.Table, error)
+	LoadTable(ctx context.Context, identifier table.Identifier, props map[string]string) (*table.Table, error)
 	// CatalogType returns the type of the catalog.
 	CatalogType() CatalogType
 }
