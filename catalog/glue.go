@@ -134,7 +134,7 @@ func (c *GlueCatalog) getTable(ctx context.Context, database, tableName string) 
 	)
 	if err != nil {
 		if errors.Is(err, &types.EntityNotFoundException{}) {
-			return "", ErrNoSuchTable
+			return "", fmt.Errorf("failed to get table %s.%s: %w", database, tableName, ErrNoSuchTable)
 		}
 		return "", fmt.Errorf("failed to get table %s.%s: %w", database, tableName, err)
 	}
