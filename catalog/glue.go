@@ -45,14 +45,14 @@ type GlueCatalog struct {
 }
 
 func NewGlueCatalog(opts ...Option) *GlueCatalog {
-	options := &Options{}
+	glueOps := &options{}
 
 	for _, o := range opts {
-		o(options)
+		o(glueOps)
 	}
 
 	return &GlueCatalog{
-		glueSvc: glue.NewFromConfig(options.awsConfig),
+		glueSvc: glue.NewFromConfig(glueOps.awsConfig),
 	}
 }
 

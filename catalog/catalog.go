@@ -42,14 +42,14 @@ var (
 
 // WithAwsConfig sets the AWS configuration for the catalog.
 func WithAwsConfig(cfg aws.Config) Option {
-	return func(o *Options) {
+	return func(o *options) {
 		o.awsConfig = cfg
 	}
 }
 
-type Option func(*Options)
+type Option func(*options)
 
-type Options struct {
+type options struct {
 	awsConfig aws.Config
 }
 
