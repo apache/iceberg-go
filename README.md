@@ -49,6 +49,8 @@
 
 | Operation                | REST | Hive | DynamoDB | Glue |
 | :----------------------- | :--: | :--: | :------: | :--: |
+| Load Table               |      |      |          |  X   |
+| List Tables              |      |      |          |  X   |
 | Create Table             |      |      |          |      |
 | Update Current Snapshot  |      |      |          |      |
 | Create New Snapshot      |      |      |          |      |
@@ -63,8 +65,8 @@
 ### Read/Write Data Support
 
 * No intrinsic support for reading/writing data yet
-  * Data can be manually read currently by retrieving data files via Manifests.
-  * Plan to add [Apache Arrow](https://pkg.go.dev/github.com/apache/arrow/go/v14@v14.0.0) support eventually.
+* Data can be manually read currently by retrieving data files via Manifests.
+* Plan to add [Apache Arrow](https://pkg.go.dev/github.com/apache/arrow/go/v14@v14.0.0) support eventually.
 
 # Get in Touch
 
