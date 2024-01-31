@@ -26,7 +26,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/glue v1.73.1
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.48.0
 	github.com/google/uuid v1.3.1
-	github.com/hamba/avro/v2 v2.16.0
+	github.com/hamba/avro/v2 v2.19.0
 	github.com/stretchr/testify v1.8.4
 	github.com/wolfeidau/s3iofs v1.5.0
 	golang.org/x/exp v0.0.0-20231006140011-7918f672742d
@@ -50,6 +50,7 @@ require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
+	github.com/klauspost/compress v1.17.4 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
