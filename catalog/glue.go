@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -91,7 +92,7 @@ func (c *GlueCatalog) ListTables(ctx context.Context, namespace table.Identifier
 // LoadTable loads a table from the catalog table details.
 //
 // The identifier should contain the Glue database name, then glue table name.
-func (c *GlueCatalog) LoadTable(ctx context.Context, identifier table.Identifier, props map[string]string) (*table.Table, error) {
+func (c *GlueCatalog) LoadTable(ctx context.Context, identifier table.Identifier, props iceberg.Properties) (*table.Table, error) {
 	database, tableName, err := identifierToGlueTable(identifier)
 	if err != nil {
 		return nil, err
@@ -122,6 +123,35 @@ func (c *GlueCatalog) LoadTable(ctx context.Context, identifier table.Identifier
 
 func (c *GlueCatalog) CatalogType() CatalogType {
 	return Glue
+}
+
+func (c *GlueCatalog) DropTable(ctx context.Context, identifier table.Identifier) error {
+	return fmt.Errorf("%w: [Glue Catalog] drop table", iceberg.ErrNotImplemented)
+}
+
+func (c *GlueCatalog) RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error) {
+	return nil, fmt.Errorf("%w: [Glue Catalog] rename table", iceberg.ErrNotImplemented)
+}
+
+func (c *GlueCatalog) CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error {
+	return fmt.Errorf("%w: [Glue Catalog] create namespace", iceberg.ErrNotImplemented)
+}
+
+func (c *GlueCatalog) DropNamespace(ctx context.Context, namespace table.Identifier) error {
+	return fmt.Errorf("%w: [Glue Catalog] drop namespace", iceberg.ErrNotImplemented)
+}
+
+func (c *GlueCatalog) LoadNamespaceProperties(ctx context.Context, namespace table.Identifier) (iceberg.Properties, error) {
+	return nil, fmt.Errorf("%w: [Glue Catalog] load namespace properties", iceberg.ErrNotImplemented)
+}
+
+func (c *GlueCatalog) UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier,
+	removals []string, updates iceberg.Properties) (PropertiesUpdateSummary, error) {
+	return PropertiesUpdateSummary{}, fmt.Errorf("%w: [Glue Catalog] update namespace properties", iceberg.ErrNotImplemented)
+}
+
+func (c *GlueCatalog) ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error) {
+	return nil, fmt.Errorf("%w: [Glue Catalog] list namespaces", iceberg.ErrNotImplemented)
 }
 
 // GetTable loads a table from the Glue Catalog using the given database and table name.
