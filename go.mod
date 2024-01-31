@@ -25,7 +25,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.16.14
 	github.com/aws/aws-sdk-go-v2/service/glue v1.73.1
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.48.0
-	github.com/google/uuid v1.3.1
+	github.com/google/uuid v1.6.0
 	github.com/hamba/avro/v2 v2.16.0
 	github.com/stretchr/testify v1.8.4
 	github.com/wolfeidau/s3iofs v1.5.0
