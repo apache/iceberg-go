@@ -39,6 +39,10 @@ func (m *MockFS) Remove(name string) error {
 	return m.Called(name).Error(0)
 }
 
+func (m *MockFS) WriteFile(name string, data []byte, perm fs.FileMode) error {
+	return m.Called(name, data, perm).Error(0)
+}
+
 type MockFSReadFile struct {
 	MockFS
 }

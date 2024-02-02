@@ -22,6 +22,8 @@ import (
 	"os"
 	"testing"
 
+	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/glue"
@@ -42,6 +44,11 @@ func (m *mockGlueClient) GetTable(ctx context.Context, params *glue.GetTableInpu
 func (m *mockGlueClient) GetTables(ctx context.Context, params *glue.GetTablesInput, optFns ...func(*glue.Options)) (*glue.GetTablesOutput, error) {
 	args := m.Called(ctx, params, optFns)
 	return args.Get(0).(*glue.GetTablesOutput), args.Error(1)
+}
+
+func (m *mockGlueClient) CreateTable(ctx context.Context, params *glue.CreateTableInput, optFns ...func(*glue.Options)) (*glue.CreateTableOutput, error) {
+	args := m.Called(ctx, params, optFns)
+	return args.Get(0).(*glue.CreateTableOutput), args.Error(1)
 }
 
 func TestGlueGetTable(t *testing.T) {
@@ -145,4 +152,45 @@ func TestGlueLoadTableIntegration(t *testing.T) {
 	table, err := catalog.LoadTable(context.TODO(), []string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")}, nil)
 	assert.NoError(err)
 	assert.Equal([]string{os.Getenv("TEST_TABLE_NAME")}, table.Identifier())
+}
+
+func TestGlueCreateTableIntegration(t *testing.T) {
+	if os.Getenv("TEST_DATABASE_NAME") == "" {
+		t.Skip()
+	}
+	if os.Getenv("TEST_CREATE_TABLE_NAME") == "" {
+		t.Skip()
+	}
+	if os.Getenv("TEST_CREATE_TABLE_LOCATION") == "" {
+		t.Skip()
+	}
+
+	assert := require.New(t)
+
+	location := os.Getenv("TEST_CREATE_TABLE_LOCATION")
+
+	schema := iceberg.NewSchemaWithIdentifiers(1, []int{},
+		iceberg.NestedField{
+			ID: 1, Name: "vendor_id", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{
+			ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{
+			ID: 3, Name: "datetime", Type: iceberg.PrimitiveTypes.TimestampTz})
+	partSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceID: 3, FieldID: 1000, Name: "datetime", Transform: iceberg.DayTransform{}})
+
+	props := map[string]string{
+		"write.target-file-size-bytes": "536870912",
+		"write.format.default":         "parquet",
+	}
+
+	awscfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
+	assert.NoError(err)
+
+	catalog := NewGlueCatalog(WithAwsConfig(awscfg))
+
+	table, err := catalog.CreateTable(context.TODO(),
+		[]string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_CREATE_TABLE_NAME")}, schema, partSpec, table.UnsortedSortOrder, location, props)
+	assert.NoError(err)
+	assert.Equal([]string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_CREATE_TABLE_NAME")}, table.Identifier())
 }
