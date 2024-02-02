@@ -21,11 +21,14 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net/url"
+	"strings"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/google/uuid"
 )
 
 type CatalogType string
@@ -49,6 +52,14 @@ var (
 func WithAwsConfig(cfg aws.Config) Option[GlueCatalog] {
 	return func(o *options) {
 		o.awsConfig = cfg
+	}
+}
+
+// WithDefaultLocation sets the default location for the catalog, this is used
+// when a location is not provided in the create table operation.
+func WithDefaultLocation(location string) Option[GlueCatalog] {
+	return func(o *options) {
+		o.defaultLocation = location
 	}
 }
 
@@ -117,7 +128,8 @@ func WithPrefix(prefix string) Option[RestCatalog] {
 type Option[T GlueCatalog | RestCatalog] func(*options)
 
 type options struct {
-	awsConfig aws.Config
+	awsConfig       aws.Config
+	defaultLocation string
 
 	tlsConfig         *tls.Config
 	credential        string
@@ -184,4 +196,34 @@ func TableNameFromIdent(ident table.Identifier) string {
 
 func NamespaceFromIdent(ident table.Identifier) table.Identifier {
 	return ident[:len(ident)-1]
+}
+
+func getMetadataPath(locationPath string, newVersion int) (string, error) {
+	if newVersion < 0 {
+		return "", fmt.Errorf("invalid table version: %d must be a non-negative integer", newVersion)
+	}
+
+	metaDataPath, err := url.JoinPath(strings.TrimLeft(locationPath, "/"), "metadata", fmt.Sprintf("%05d-%s.metadata.json", newVersion, uuid.New().String()))
+	if err != nil {
+		return "", fmt.Errorf("failed to build metadata path: %w", err)
+	}
+
+	return metaDataPath, nil
+}
+
+func getLocationForTable(location, defaultLocation, database, tableName string) (*url.URL, error) {
+	if location != "" {
+		return url.Parse(location)
+	}
+
+	if defaultLocation == "" {
+		return nil, fmt.Errorf("no default path is set, please specify a location when creating a table")
+	}
+
+	u, err := url.Parse(defaultLocation)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse location URL: %w", err)
+	}
+
+	return u.JoinPath(fmt.Sprintf("%s.db", database), tableName), nil
 }

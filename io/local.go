@@ -30,3 +30,7 @@ func (LocalFS) Open(name string) (File, error) {
 func (LocalFS) Remove(name string) error {
 	return os.Remove(name)
 }
+
+func (LocalFS) WriteFile(name string, data []byte, perm os.FileMode) error {
+	return os.WriteFile(name, data, perm)
+}

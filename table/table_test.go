@@ -19,6 +19,8 @@ package table_test
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -127,4 +129,30 @@ func (t *TableTestSuite) TestSnapshotByName() {
 	}
 
 	t.True(testSnapshot.Equals(*t.tbl.SnapshotByName("test")))
+}
+
+func (t *TableTestSuite) TestNewTable() {
+
+	identifier := table.Identifier{"records"}
+
+	schema := iceberg.NewSchemaWithIdentifiers(1, []int{1},
+		iceberg.NestedField{
+			ID: 1, Name: "vendor_id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{
+			ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{
+			ID: 3, Name: "datetime", Type: iceberg.PrimitiveTypes.TimestampTz})
+
+	partSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceID: 3, FieldID: 1000, Name: "datetime", Transform: iceberg.DayTransform{}})
+
+	location := "s3://bucket/test/location"
+
+	tbl, err := table.NewTable(identifier, schema, partSpec, table.UnsortedSortOrder, location, nil)
+	t.Require().NoError(err)
+	t.Require().Equal(identifier, tbl.Identifier())
+
+	data, err := json.Marshal(tbl.Metadata())
+	t.Require().NoError(err)
+	fmt.Println(string(data))
 }

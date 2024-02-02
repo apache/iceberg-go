@@ -22,6 +22,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
+	"github.com/google/uuid"
 	"golang.org/x/exp/slices"
 )
 
@@ -94,4 +95,30 @@ func NewFromLocation(ident Identifier, metalocation string, fsys io.IO) (*Table,
 		}
 	}
 	return New(ident, meta, metalocation, fsys), nil
+}
+
+func NewTable(ident Identifier, schema *iceberg.Schema, partitionSpec iceberg.PartitionSpec, sortOrder SortOrder, location string, properties iceberg.Properties) (*Table, error) {
+	if properties == nil {
+		properties = make(iceberg.Properties)
+	}
+
+	tableUUID := uuid.New()
+
+	// TODO: we need to "freshen" the sequences in the schema, partition spec, and sort order
+
+	metadata, err := NewMetadataV2(schema, partitionSpec, sortOrder, location, tableUUID, properties)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Table{
+		identifier:       ident,
+		metadata:         metadata,
+		metadataLocation: location,
+		fs:               nil,
+	}, nil
+}
+
+func intToPtr(i int) *int {
+	return &i
 }

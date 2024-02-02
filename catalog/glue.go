@@ -19,6 +19,7 @@ package catalog
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -39,10 +40,12 @@ var (
 type glueAPI interface {
 	GetTable(ctx context.Context, params *glue.GetTableInput, optFns ...func(*glue.Options)) (*glue.GetTableOutput, error)
 	GetTables(ctx context.Context, params *glue.GetTablesInput, optFns ...func(*glue.Options)) (*glue.GetTablesOutput, error)
+	CreateTable(ctx context.Context, params *glue.CreateTableInput, optFns ...func(*glue.Options)) (*glue.CreateTableOutput, error)
 }
 
 type GlueCatalog struct {
-	glueSvc glueAPI
+	glueSvc         glueAPI
+	defaultLocation string
 }
 
 func NewGlueCatalog(opts ...Option[GlueCatalog]) *GlueCatalog {
@@ -53,7 +56,8 @@ func NewGlueCatalog(opts ...Option[GlueCatalog]) *GlueCatalog {
 	}
 
 	return &GlueCatalog{
-		glueSvc: glue.NewFromConfig(glueOps.awsConfig),
+		glueSvc:         glue.NewFromConfig(glueOps.awsConfig),
+		defaultLocation: glueOps.defaultLocation,
 	}
 }
 
@@ -121,6 +125,55 @@ func (c *GlueCatalog) LoadTable(ctx context.Context, identifier table.Identifier
 	return icebergTable, nil
 }
 
+func (c *GlueCatalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, partitionSpec iceberg.PartitionSpec, sortOrder table.SortOrder, location string, props map[string]string) (*table.Table, error) {
+	database, tableName, err := identifierToGlueTable(identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	locationURL, err := getLocationForTable(location, c.defaultLocation, database, tableName)
+	if err != nil {
+		return nil, err
+	}
+
+	// append metadata path to location path/to/database.db/tablename/metadata/00000-UUID.metadata.json
+	metadataPath, err := getMetadataPath(locationURL.Path, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	tbl, err := table.NewTable(identifier, schema, partitionSpec, sortOrder, locationURL.String(), props)
+	if err != nil {
+		return nil, err
+	}
+
+	err = c.writeMetaData(locationURL.String(), metadataPath, tbl.Metadata())
+	if err != nil {
+		return nil, err
+	}
+
+	params := &glue.CreateTableInput{
+		DatabaseName: aws.String(database),
+
+		TableInput: &types.TableInput{
+			Name:      aws.String(tableName),
+			TableType: aws.String("EXTERNAL_TABLE"),
+			Parameters: map[string]string{
+				"table_type":        glueTableTypeIceberg,
+				"metadata_location": fmt.Sprintf("%s://%s/%s", locationURL.Scheme, locationURL.Host, metadataPath),
+			},
+			StorageDescriptor: &types.StorageDescriptor{Location: aws.String(locationURL.String())},
+		},
+	}
+
+	_, err = c.glueSvc.CreateTable(ctx, params)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create table %s.%s: %w", database, tableName, err)
+	}
+
+	return tbl, nil
+}
+
 func (c *GlueCatalog) CatalogType() CatalogType {
 	return Glue
 }
@@ -174,6 +227,25 @@ func (c *GlueCatalog) getTable(ctx context.Context, database, tableName string) 
 	}
 
 	return tblRes.Table.Parameters["metadata_location"], nil
+}
+
+func (c *GlueCatalog) writeMetaData(location, metadataPath string, metadata table.Metadata) error {
+	iofs, err := io.LoadFS(map[string]string{}, location)
+	if err != nil {
+		return fmt.Errorf("failed to load fs: %w", err)
+	}
+
+	data, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("failed to marshal table metadata: %w", err)
+	}
+
+	err = iofs.WriteFile(metadataPath, data, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write metadata file: %w", err)
+	}
+
+	return nil
 }
 
 func identifierToGlueTable(identifier table.Identifier) (string, string, error) {

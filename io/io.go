@@ -48,6 +48,9 @@ type IO interface {
 	//
 	// If there is an error, it will be of type *PathError.
 	Remove(name string) error
+
+	// Create creates or truncates the named file.
+	WriteFile(name string, data []byte, perm fs.FileMode) error
 }
 
 // ReadFileIO is the interface implemented by a file system that
@@ -166,12 +169,23 @@ func (f ioFS) Remove(name string) error {
 	return r.Remove(name)
 }
 
+func (f ioFS) WriteFile(name string, data []byte, perm fs.FileMode) error {
+	r, ok := f.fsys.(interface {
+		WriteFile(name string, data []byte, perm fs.FileMode) error
+	})
+	if !ok {
+		return errMissingWriteFile
+	}
+	return r.WriteFile(name, data, perm)
+}
+
 var (
-	errMissingReadDir  = errors.New("fs.File directory missing ReadDir method")
-	errMissingSeek     = errors.New("fs.File missing Seek method")
-	errMissingReadAt   = errors.New("fs.File missing ReadAt")
-	errMissingRemove   = errors.New("fs.FS missing Remove method")
-	errMissingReadFile = errors.New("fs.FS missing ReadFile method")
+	errMissingReadDir   = errors.New("fs.File directory missing ReadDir method")
+	errMissingSeek      = errors.New("fs.File missing Seek method")
+	errMissingReadAt    = errors.New("fs.File missing ReadAt")
+	errMissingRemove    = errors.New("fs.FS missing Remove method")
+	errMissingWriteFile = errors.New("fs.FS missing WriteFile method")
+	errMissingReadFile  = errors.New("fs.FS missing ReadFile method")
 )
 
 type ioFile struct {

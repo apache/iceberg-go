@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/apache/iceberg-go"
 
@@ -398,4 +399,33 @@ func (m *MetadataV2) UnmarshalJSON(b []byte) error {
 
 	m.preValidate()
 	return m.validate()
+}
+
+func NewMetadataV2(schema *iceberg.Schema, partitionSpec iceberg.PartitionSpec, sortOrder SortOrder, location string, tableUUID uuid.UUID, properties iceberg.Properties) (*MetadataV2, error) {
+	metadata := &MetadataV2{
+		commonMetadata: commonMetadata{
+			FormatVersion:      2,
+			UUID:               tableUUID,
+			Loc:                location,
+			Specs:              []iceberg.PartitionSpec{partitionSpec},
+			DefaultSpecID:      partitionSpec.ID(),
+			SortOrderList:      []SortOrder{sortOrder},
+			DefaultSortOrderID: sortOrder.OrderID,
+			SchemaList:         []*iceberg.Schema{schema},
+			CurrentSchemaID:    schema.ID,
+			Props:              properties,
+			LastColumnId:       schema.HighestFieldID(),
+			LastPartitionID:    intToPtr(partitionSpec.LastAssignedFieldID()),
+			LastUpdatedMS:      time.Now().UnixMilli(),
+		},
+	}
+
+	metadata.preValidate()
+
+	err := metadata.validate()
+	if err != nil {
+		return nil, fmt.Errorf("invalid metadata: %w", err)
+	}
+
+	return metadata, nil
 }
