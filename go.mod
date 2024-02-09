@@ -25,8 +25,10 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.16.14
 	github.com/aws/aws-sdk-go-v2/service/glue v1.73.1
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.48.0
+	github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815
 	github.com/google/uuid v1.3.1
 	github.com/hamba/avro/v2 v2.16.0
+	github.com/pterm/pterm v0.12.78
 	github.com/stretchr/testify v1.8.4
 	github.com/wolfeidau/s3iofs v1.5.0
 	golang.org/x/exp v0.0.0-20231006140011-7918f672742d
@@ -61,7 +63,6 @@ require (
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/pterm/pterm v0.12.78 // indirect
 	github.com/rivo/uniseg v0.4.4 // indirect
 	github.com/stretchr/objx v0.5.0 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
