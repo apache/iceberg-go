@@ -336,7 +336,7 @@ func (r *RestCatalogSuite) TestListNamespaceWithParent200() {
 
 		json.NewEncoder(w).Encode(map[string]any{
 			"namespaces": []table.Identifier{
-				{"tax"},
+				{"accounting", "tax"},
 			},
 		})
 	})
