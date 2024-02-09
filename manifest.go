@@ -23,6 +23,7 @@ import (
 
 	iceio "github.com/apache/iceberg-go/io"
 
+	"github.com/hamba/avro/v2"
 	"github.com/hamba/avro/v2/ocf"
 )
 
@@ -109,6 +110,16 @@ func (b *ManifestV1Builder) KeyMetadata(km []byte) *ManifestV1Builder {
 // methods after calling build would modify the constructed ManifestFile.
 func (b *ManifestV1Builder) Build() ManifestFile {
 	return b.m
+}
+
+type fallbackManifestFileV1 struct {
+	manifestFileV1
+	AddedSnapshotID *int64 `avro:"added_snapshot_id"`
+}
+
+func (f *fallbackManifestFileV1) toManifest() *manifestFileV1 {
+	f.manifestFileV1.AddedSnapshotID = *f.AddedSnapshotID
+	return &f.manifestFileV1
 }
 
 type manifestFileV1 struct {
@@ -364,22 +375,44 @@ func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]M
 	}
 
 	metadata := dec.Metadata()
-	isVer1 := true
+	isVer1, isFallback := true, false
 	if string(metadata["format-version"]) == "2" {
 		isVer1 = false
+	} else {
+		sc, err := avro.ParseBytes(dec.Metadata()["avro.schema"])
+		if err != nil {
+			return nil, err
+		}
+
+		for _, f := range sc.(*avro.RecordSchema).Fields() {
+			if f.Name() == "snapshot_id" {
+				if f.Type().Type() == avro.Union {
+					isFallback = true
+				}
+				break
+			}
+		}
 	}
 
 	results := make([]ManifestEntry, 0)
 	for dec.HasNext() {
 		var tmp ManifestEntry
 		if isVer1 {
-			tmp = &manifestEntryV1{}
+			if isFallback {
+				tmp = &fallbackManifestEntryV1{}
+			} else {
+				tmp = &manifestEntryV1{}
+			}
 		} else {
 			tmp = &manifestEntryV2{}
 		}
 
 		if err := dec.Decode(tmp); err != nil {
 			return nil, err
+		}
+
+		if isFallback {
+			tmp = tmp.(*fallbackManifestEntryV1).toEntry()
 		}
 
 		if !discardDeleted || tmp.Status() != EntryStatusDELETED {
@@ -461,19 +494,42 @@ func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
 		return nil, err
 	}
 
-	out := make([]ManifestFile, 0)
+	sc, err := avro.ParseBytes(dec.Metadata()["avro.schema"])
+	if err != nil {
+		return nil, err
+	}
 
+	var fallbackAddedSnapshot bool
+	for _, f := range sc.(*avro.RecordSchema).Fields() {
+		if f.Name() == "added_snapshot_id" {
+			if f.Type().Type() == avro.Union {
+				fallbackAddedSnapshot = true
+			}
+			break
+		}
+	}
+
+	out := make([]ManifestFile, 0)
 	for dec.HasNext() {
 		var file ManifestFile
 		if string(dec.Metadata()["format-version"]) == "2" {
 			file = &manifestFileV2{}
 		} else {
-			file = &manifestFileV1{}
+			if fallbackAddedSnapshot {
+				file = &fallbackManifestFileV1{}
+			} else {
+				file = &manifestFileV1{}
+			}
 		}
 
 		if err := dec.Decode(file); err != nil {
 			return nil, err
 		}
+
+		if fallbackAddedSnapshot {
+			file = file.(*fallbackManifestFileV1).toManifest()
+		}
+
 		out = append(out, file)
 	}
 
@@ -641,6 +697,16 @@ type manifestEntryV1 struct {
 	SeqNum      *int64
 	FileSeqNum  *int64
 	Data        dataFile `avro:"data_file"`
+}
+
+type fallbackManifestEntryV1 struct {
+	manifestEntryV1
+	Snapshot *int64 `avro:"snapshot_id"`
+}
+
+func (f *fallbackManifestEntryV1) toEntry() *manifestEntryV1 {
+	f.manifestEntryV1.Snapshot = *f.Snapshot
+	return &f.manifestEntryV1
 }
 
 func (m *manifestEntryV1) inheritSeqNum(manifest ManifestFile) {}

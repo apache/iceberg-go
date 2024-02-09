@@ -22,6 +22,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -30,6 +31,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -815,4 +817,19 @@ func (r *RestTLSCatalogSuite) TestSSLCerts() {
 func TestRestCatalog(t *testing.T) {
 	suite.Run(t, new(RestCatalogSuite))
 	suite.Run(t, new(RestTLSCatalogSuite))
+}
+
+func TestRestIntegration(t *testing.T) {
+	cat, err := catalog.NewRestCatalog("rest", "http://localhost:8181")
+	require.NoError(t, err)
+
+	require.NotNil(t, cat)
+
+	tbls, err := cat.ListTables(context.Background(), catalog.ToRestIdentifier("demo", "nyc"))
+	require.NoError(t, err)
+
+	tbl, err := cat.LoadTable(context.Background(), tbls[0], nil)
+	require.NoError(t, err)
+
+	fmt.Println(tbl.Metadata())
 }

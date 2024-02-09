@@ -671,11 +671,7 @@ func (r *RestCatalog) ListNamespaces(ctx context.Context, parent table.Identifie
 		return nil, err
 	}
 
-	out := make([]table.Identifier, len(rsp.Namespaces))
-	for i, ns := range rsp.Namespaces {
-		out[i] = append(parent, ns...)
-	}
-	return out, nil
+	return rsp.Namespaces, nil
 }
 
 func (r *RestCatalog) LoadNamespaceProperties(ctx context.Context, namespace table.Identifier) (iceberg.Properties, error) {
