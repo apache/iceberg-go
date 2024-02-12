@@ -114,10 +114,15 @@ func main() {
 		log.Fatal("unimplemented output type")
 	}
 
+	opts := []catalog.Option{}
+	if len(cfg.Cred) > 0 {
+		opts = append(opts, catalog.WithCredential(cfg.Cred))
+	}
+
 	var cat catalog.Catalog
 	switch catalog.CatalogType(cfg.Catalog) {
 	case catalog.REST:
-		if cat, err = catalog.NewRestCatalog("rest", cfg.URI); err != nil {
+		if cat, err = catalog.NewRestCatalog("rest", cfg.URI, opts...); err != nil {
 			log.Fatal(err)
 		}
 	default:
