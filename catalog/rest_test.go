@@ -697,8 +697,7 @@ func (r *RestCatalogSuite) TestLoadTable200() {
 						"metadata-file": "s3://warehouse/database/table/metadata/00000-88484a1c-00e5-4a07-a787-c0e7aeffa805.gz.metadata.json"
 					}
 				]
-			},
-			"config": {"client.factory": "io.tabular.iceberg.catalog.TabularAwsClientFactory", "region": "us-west-2"}
+			}
 		}`))
 	})
 
