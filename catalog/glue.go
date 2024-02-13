@@ -45,7 +45,7 @@ type GlueCatalog struct {
 	glueSvc glueAPI
 }
 
-func NewGlueCatalog(opts ...Option) *GlueCatalog {
+func NewGlueCatalog(opts ...Option[GlueCatalog]) *GlueCatalog {
 	glueOps := &options{}
 
 	for _, o := range opts {

@@ -367,7 +367,7 @@ type RestCatalog struct {
 	props iceberg.Properties
 }
 
-func NewRestCatalog(name, uri string, opts ...Option) (*RestCatalog, error) {
+func NewRestCatalog(name, uri string, opts ...Option[RestCatalog]) (*RestCatalog, error) {
 	ops := &options{}
 	for _, o := range opts {
 		o(ops)

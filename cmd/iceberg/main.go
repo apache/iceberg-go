@@ -116,18 +116,18 @@ func main() {
 		log.Fatal("unimplemented output type")
 	}
 
-	opts := []catalog.Option{}
-	if len(cfg.Cred) > 0 {
-		opts = append(opts, catalog.WithCredential(cfg.Cred))
-	}
-
-	if len(cfg.Warehouse) > 0 {
-		opts = append(opts, catalog.WithWarehouseLocation(cfg.Warehouse))
-	}
-
 	var cat catalog.Catalog
 	switch catalog.CatalogType(cfg.Catalog) {
 	case catalog.REST:
+		opts := []catalog.Option[catalog.RestCatalog]{}
+		if len(cfg.Cred) > 0 {
+			opts = append(opts, catalog.WithCredential(cfg.Cred))
+		}
+
+		if len(cfg.Warehouse) > 0 {
+			opts = append(opts, catalog.WithWarehouseLocation(cfg.Warehouse))
+		}
+
 		if cat, err = catalog.NewRestCatalog("rest", cfg.URI, opts...); err != nil {
 			log.Fatal(err)
 		}

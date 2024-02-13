@@ -46,50 +46,50 @@ var (
 )
 
 // WithAwsConfig sets the AWS configuration for the catalog.
-func WithAwsConfig(cfg aws.Config) Option {
+func WithAwsConfig(cfg aws.Config) Option[GlueCatalog] {
 	return func(o *options) {
 		o.awsConfig = cfg
 	}
 }
 
-func WithCredential(cred string) Option {
+func WithCredential(cred string) Option[RestCatalog] {
 	return func(o *options) {
 		o.credential = cred
 	}
 }
 
-func WithOAuthToken(token string) Option {
+func WithOAuthToken(token string) Option[RestCatalog] {
 	return func(o *options) {
 		o.oauthToken = token
 	}
 }
 
-func WithTLSConfig(config *tls.Config) Option {
+func WithTLSConfig(config *tls.Config) Option[RestCatalog] {
 	return func(o *options) {
 		o.tlsConfig = config
 	}
 }
 
-func WithWarehouseLocation(loc string) Option {
+func WithWarehouseLocation(loc string) Option[RestCatalog] {
 	return func(o *options) {
 		o.warehouseLocation = loc
 	}
 }
 
-func WithMetadataLocation(loc string) Option {
+func WithMetadataLocation(loc string) Option[RestCatalog] {
 	return func(o *options) {
 		o.metadataLocation = loc
 	}
 }
 
-func WithSigV4() Option {
+func WithSigV4() Option[RestCatalog] {
 	return func(o *options) {
 		o.enableSigv4 = true
 		o.sigv4Service = "execute-api"
 	}
 }
 
-func WithSigV4RegionSvc(region, service string) Option {
+func WithSigV4RegionSvc(region, service string) Option[RestCatalog] {
 	return func(o *options) {
 		o.enableSigv4 = true
 		o.sigv4Region = region
@@ -102,19 +102,19 @@ func WithSigV4RegionSvc(region, service string) Option {
 	}
 }
 
-func WithAuthURI(uri *url.URL) Option {
+func WithAuthURI(uri *url.URL) Option[RestCatalog] {
 	return func(o *options) {
 		o.authUri = uri
 	}
 }
 
-func WithPrefix(prefix string) Option {
+func WithPrefix(prefix string) Option[RestCatalog] {
 	return func(o *options) {
 		o.prefix = prefix
 	}
 }
 
-type Option func(*options)
+type Option[T GlueCatalog | RestCatalog] func(*options)
 
 type options struct {
 	awsConfig aws.Config
