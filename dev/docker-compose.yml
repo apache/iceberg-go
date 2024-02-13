@@ -19,8 +19,7 @@ version: "3"
 services:
   spark-iceberg:
     image: tabulario/spark-iceberg
-    container_name: spark-iceberg
-    build: .
+    container_name: spark-iceberg    
     networks:
       iceberg_net:
     depends_on:

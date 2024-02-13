@@ -57,7 +57,8 @@ Options:
   --catalog TEXT     specify the catalog type [default: rest]
   --uri TEXT         specify the catalog URI
   --output TYPE      output type (json/text) [default: text]
-  --credential TEXT  specify credentials for the catalog`
+  --credential TEXT  specify credentials for the catalog
+  --warehouse TEXT   specify the warehouse to use`
 
 func main() {
 	args, err := docopt.ParseArgs(usage, os.Args[1:], iceberg.Version())
@@ -93,11 +94,12 @@ func main() {
 		PropName string `docopt:"PROPNAME"`
 		Value    string `docopt:"VALUE"`
 
-		Catalog string `docopt:"--catalog"`
-		URI     string `docopt:"--uri"`
-		Output  string `docopt:"--output"`
-		History bool   `docopt:"--history"`
-		Cred    string `docopt:"--credential"`
+		Catalog   string `docopt:"--catalog"`
+		URI       string `docopt:"--uri"`
+		Output    string `docopt:"--output"`
+		History   bool   `docopt:"--history"`
+		Cred      string `docopt:"--credential"`
+		Warehouse string `docopt:"--warehouse"`
 	}{}
 
 	if err := args.Bind(&cfg); err != nil {
@@ -117,6 +119,10 @@ func main() {
 	opts := []catalog.Option{}
 	if len(cfg.Cred) > 0 {
 		opts = append(opts, catalog.WithCredential(cfg.Cred))
+	}
+
+	if len(cfg.Warehouse) > 0 {
+		opts = append(opts, catalog.WithWarehouseLocation(cfg.Warehouse))
 	}
 
 	var cat catalog.Catalog
