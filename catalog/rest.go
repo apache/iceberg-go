@@ -470,7 +470,7 @@ func (r *RestCatalog) createSession(opts *options) (*http.Client, error) {
 
 	session.defaultHeaders.Set("X-Client-Version", icebergRestSpecVersion)
 	session.defaultHeaders.Set("Content-Type", "application/json")
-	session.defaultHeaders.Set("User-Agent", "PyIceberg/0.5.1")
+	session.defaultHeaders.Set("User-Agent", "GoIceberg/"+iceberg.Version())
 
 	if opts.enableSigv4 {
 		cfg, err := config.LoadDefaultConfig(context.Background())
