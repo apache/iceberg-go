@@ -68,7 +68,7 @@ func TestAuthHeader(t *testing.T) {
 	assert.Equal(t, http.Header{
 		"Authorization":    {"Bearer some_jwt_token"},
 		"Content-Type":     {"application/json"},
-		"User-Agent":       {"PyIceberg/0.5.1"},
+		"User-Agent":       {"GoIceberg/(unknown version)"},
 		"X-Client-Version": {icebergRestSpecVersion},
 	}, cat.cl.Transport.(*sessionTransport).defaultHeaders)
 }
@@ -115,7 +115,7 @@ func TestAuthUriHeader(t *testing.T) {
 	assert.Equal(t, http.Header{
 		"Authorization":    {"Bearer some_jwt_token"},
 		"Content-Type":     {"application/json"},
-		"User-Agent":       {"PyIceberg/0.5.1"},
+		"User-Agent":       {"GoIceberg/(unknown version)"},
 		"X-Client-Version": {icebergRestSpecVersion},
 	}, cat.cl.Transport.(*sessionTransport).defaultHeaders)
 }

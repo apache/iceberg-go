@@ -41,7 +41,7 @@ const (
 var (
 	TestHeaders = http.Header{
 		"X-Client-Version": {"0.14.1"},
-		"User-Agent":       {"PyIceberg/0.5.1"},
+		"User-Agent":       {"GoIceberg/(unknown version)"},
 		"Authorization":    {"Bearer " + TestToken},
 	}
 	OAuthTestHeaders = http.Header{
