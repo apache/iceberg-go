@@ -30,6 +30,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go/auth/bearer"
 	"github.com/wolfeidau/s3iofs"
 )
 
@@ -65,7 +66,14 @@ func createS3FileIO(parsed *url.URL, props map[string]string) (IO, error) {
 		})))
 	}
 
+	if tok, ok := props["token"]; ok {
+		opts = append(opts, config.WithBearerAuthTokenProvider(
+			&bearer.StaticTokenProvider{Token: bearer.Token{Value: tok}}))
+	}
+
 	if region, ok := props[S3Region]; ok {
+		opts = append(opts, config.WithRegion(region))
+	} else if region, ok := props["client.region"]; ok {
 		opts = append(opts, config.WithRegion(region))
 	}
 

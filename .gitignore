@@ -46,3 +46,7 @@ lib/
 *.iml
 
 .envrc*
+
+# local catalog environment via docker
+dev/notebooks
+dev/warehouse
