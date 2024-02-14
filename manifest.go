@@ -18,13 +18,13 @@
 package iceberg
 
 import (
+	"context"
 	"io"
 	"sync"
 
-	iceio "github.com/apache/iceberg-go/io"
-
 	"github.com/hamba/avro/v2"
 	"github.com/hamba/avro/v2/ocf"
+	"github.com/thanos-io/objstore"
 )
 
 // ManifestContent indicates the type of data inside of the files
@@ -208,7 +208,7 @@ func (m *manifestFileV1) Partitions() []FieldSummary {
 	return *m.PartitionList
 }
 
-func (m *manifestFileV1) FetchEntries(fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error) {
+func (m *manifestFileV1) FetchEntries(fs objstore.Bucket, discardDeleted bool) ([]ManifestEntry, error) {
 	return fetchManifestEntries(m, fs, discardDeleted)
 }
 
@@ -358,12 +358,12 @@ func (m *manifestFileV2) HasExistingFiles() bool {
 	return m.ExistingFilesCount > 0
 }
 
-func (m *manifestFileV2) FetchEntries(fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error) {
+func (m *manifestFileV2) FetchEntries(fs objstore.Bucket, discardDeleted bool) ([]ManifestEntry, error) {
 	return fetchManifestEntries(m, fs, discardDeleted)
 }
 
-func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error) {
-	f, err := fs.Open(m.FilePath())
+func fetchManifestEntries(m ManifestFile, fs objstore.Bucket, discardDeleted bool) ([]ManifestEntry, error) {
+	f, err := fs.Get(context.Background(), m.FilePath())
 	if err != nil {
 		return nil, err
 	}
@@ -483,7 +483,7 @@ type ManifestFile interface {
 	// manifest entries using the provided file system IO interface.
 	// If discardDeleted is true, entries for files containing deleted rows
 	// will be skipped.
-	FetchEntries(fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error)
+	FetchEntries(fs objstore.Bucket, discardDeleted bool) ([]ManifestEntry, error)
 }
 
 // ReadManifestList reads in an avro manifest list file and returns a slice

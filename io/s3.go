@@ -18,20 +18,12 @@
 package io
 
 import (
-	"context"
-	"fmt"
-	"net/http"
 	"net/url"
 	"os"
-	"strings"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/smithy-go/auth/bearer"
-	"github.com/wolfeidau/s3iofs"
+	"github.com/go-kit/log"
+	"github.com/thanos-io/objstore"
+	s3 "github.com/thanos-io/objstore/providers/s3"
 )
 
 // Constants for S3 configuration options
@@ -44,73 +36,31 @@ const (
 	S3ProxyURI        = "s3.proxy-uri"
 )
 
-func createS3FileIO(parsed *url.URL, props map[string]string) (IO, error) {
-	opts := []func(*config.LoadOptions) error{}
+func createS3FileIO(parsed *url.URL, props map[string]string) (objstore.Bucket, error) {
+	config, err := s3ConfigFromProps(parsed, props)
+	if err != nil {
+		return nil, err
+	}
+
+	return s3.NewBucketWithConfig(log.NewNopLogger(), config, "iceberg")
+}
+
+func s3ConfigFromProps(parsed *url.URL, props map[string]string) (s3.Config, error) {
 	endpoint, ok := props[S3EndpointURL]
 	if !ok {
 		endpoint = os.Getenv("AWS_S3_ENDPOINT")
 	}
 
-	if endpoint != "" {
-		opts = append(opts, config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
-			if service != s3.ServiceID {
-				// fallback to default resolution for the service
-				return aws.Endpoint{}, &aws.EndpointNotFoundError{}
-			}
-
-			return aws.Endpoint{
-				URL:               endpoint,
-				SigningRegion:     region,
-				HostnameImmutable: true,
-			}, nil
-		})))
+	if endpoint == "" {
+		endpoint = "s3.us-east-1.amazonaws.com"
 	}
 
-	if tok, ok := props["token"]; ok {
-		opts = append(opts, config.WithBearerAuthTokenProvider(
-			&bearer.StaticTokenProvider{Token: bearer.Token{Value: tok}}))
-	}
-
-	if region, ok := props[S3Region]; ok {
-		opts = append(opts, config.WithRegion(region))
-	} else if region, ok := props["client.region"]; ok {
-		opts = append(opts, config.WithRegion(region))
-	}
-
-	accessKey, secretAccessKey := props[S3AccessKeyID], props[S3SecretAccessKey]
-	token := props[S3SessionToken]
-	if accessKey != "" || secretAccessKey != "" || token != "" {
-		opts = append(opts, config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-			props[S3AccessKeyID], props[S3SecretAccessKey], props[S3SessionToken])))
-	}
-
-	if proxy, ok := props[S3ProxyURI]; ok {
-		proxyURL, err := url.Parse(proxy)
-		if err != nil {
-			return nil, fmt.Errorf("invalid s3 proxy url '%s'", proxy)
-		}
-
-		opts = append(opts, config.WithHTTPClient(awshttp.NewBuildableClient().WithTransportOptions(
-			func(t *http.Transport) {
-				t.Proxy = http.ProxyURL(proxyURL)
-			},
-		)))
-	}
-
-	awscfg, err := config.LoadDefaultConfig(context.Background(), opts...)
-	if err != nil {
-		return nil, err
-	}
-
-	preprocess := func(n string) string {
-		_, after, found := strings.Cut(n, "://")
-		if found {
-			n = after
-		}
-
-		return strings.TrimPrefix(n, parsed.Host)
-	}
-
-	s3fs := s3iofs.New(parsed.Host, awscfg)
-	return FSPreProcName(s3fs, preprocess), nil
+	return s3.Config{
+		Bucket:       parsed.Host,
+		Endpoint:     endpoint,
+		Region:       props[S3Region],
+		AccessKey:    props[S3AccessKeyID],
+		SecretKey:    props[S3SecretAccessKey],
+		SessionToken: props[S3SessionToken],
+	}, nil
 }
