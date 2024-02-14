@@ -168,10 +168,10 @@ type Catalog interface {
 }
 
 const (
-	keyToken             = "token"
+	keyOauthToken        = "token"
 	keyWarehouseLocation = "warehouse"
 	keyMetadataLocation  = "metadata_location"
-	keyCredential        = "credential"
+	keyOauthCredential   = "credential"
 )
 
 func TableNameFromIdent(ident table.Identifier) string {

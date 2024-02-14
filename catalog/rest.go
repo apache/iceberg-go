@@ -306,7 +306,7 @@ func fromProps(props iceberg.Properties) *options {
 	o := &options{}
 	for k, v := range props {
 		switch k {
-		case keyToken:
+		case keyOauthToken:
 			o.oauthToken = v
 		case keyWarehouseLocation:
 			o.warehouseLocation = v
@@ -324,7 +324,7 @@ func fromProps(props iceberg.Properties) *options {
 				continue
 			}
 			o.authUri = u
-		case keyCredential:
+		case keyOauthCredential:
 			o.credential = v
 		case keyPrefix:
 			o.prefix = v
@@ -342,8 +342,8 @@ func toProps(o *options) iceberg.Properties {
 		}
 	}
 
-	setIf(keyCredential, o.credential)
-	setIf(keyToken, o.oauthToken)
+	setIf(keyOauthCredential, o.credential)
+	setIf(keyOauthToken, o.oauthToken)
 	setIf(keyWarehouseLocation, o.warehouseLocation)
 	setIf(keyMetadataLocation, o.metadataLocation)
 	if o.enableSigv4 {
