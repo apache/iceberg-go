@@ -19,12 +19,14 @@ package iceberg
 
 import (
 	"bytes"
+	"context"
 	"testing"
 	"time"
 
 	"github.com/apache/iceberg-go/internal"
 	"github.com/hamba/avro/v2/ocf"
 	"github.com/stretchr/testify/suite"
+	"github.com/thanos-io/objstore"
 )
 
 var (
@@ -428,16 +430,13 @@ func (m *ManifestTestSuite) SetupSuite() {
 }
 
 func (m *ManifestTestSuite) TestManifestEntriesV1() {
-	var mockfs internal.MockFS
+	bucket := objstore.NewInMemBucket()
 	manifest := manifestFileV1{
 		Path: manifestFileRecordsV1[0].FilePath(),
 	}
+	m.Require().NoError(bucket.Upload(context.Background(), manifest.FilePath(), bytes.NewReader(m.v1ManifestEntries.Bytes())))
 
-	mockfs.Test(m.T())
-	mockfs.On("Open", manifest.FilePath()).Return(&internal.MockFile{
-		Contents: bytes.NewReader(m.v1ManifestEntries.Bytes())}, nil)
-	defer mockfs.AssertExpectations(m.T())
-	entries, err := manifest.FetchEntries(&mockfs, false)
+	entries, err := manifest.FetchEntries(bucket, false)
 	m.Require().NoError(err)
 	m.Len(entries, 2)
 	m.Zero(manifest.PartitionSpecID())
@@ -628,16 +627,13 @@ func (m *ManifestTestSuite) TestReadManifestListV2() {
 }
 
 func (m *ManifestTestSuite) TestManifestEntriesV2() {
-	var mockfs internal.MockFS
+	bucket := objstore.NewInMemBucket()
 	manifest := manifestFileV2{
 		Path: manifestFileRecordsV2[0].FilePath(),
 	}
+	m.Require().NoError(bucket.Upload(context.Background(), manifest.FilePath(), bytes.NewReader(m.v2ManifestEntries.Bytes())))
 
-	mockfs.Test(m.T())
-	mockfs.On("Open", manifest.FilePath()).Return(&internal.MockFile{
-		Contents: bytes.NewReader(m.v2ManifestEntries.Bytes())}, nil)
-	defer mockfs.AssertExpectations(m.T())
-	entries, err := manifest.FetchEntries(&mockfs, false)
+	entries, err := manifest.FetchEntries(bucket, false)
 	m.Require().NoError(err)
 	m.Len(entries, 2)
 	m.Zero(manifest.PartitionSpecID())
