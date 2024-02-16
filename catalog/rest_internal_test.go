@@ -66,10 +66,11 @@ func TestAuthHeader(t *testing.T) {
 
 	require.IsType(t, (*sessionTransport)(nil), cat.cl.Transport)
 	assert.Equal(t, http.Header{
-		"Authorization":    {"Bearer some_jwt_token"},
-		"Content-Type":     {"application/json"},
-		"User-Agent":       {"GoIceberg/(unknown version)"},
-		"X-Client-Version": {icebergRestSpecVersion},
+		"Authorization":               {"Bearer some_jwt_token"},
+		"Content-Type":                {"application/json"},
+		"User-Agent":                  {"GoIceberg/(unknown version)"},
+		"X-Client-Version":            {icebergRestSpecVersion},
+		"X-Iceberg-Access-Delegation": {"vended-credentials"},
 	}, cat.cl.Transport.(*sessionTransport).defaultHeaders)
 }
 
@@ -113,9 +114,10 @@ func TestAuthUriHeader(t *testing.T) {
 
 	require.IsType(t, (*sessionTransport)(nil), cat.cl.Transport)
 	assert.Equal(t, http.Header{
-		"Authorization":    {"Bearer some_jwt_token"},
-		"Content-Type":     {"application/json"},
-		"User-Agent":       {"GoIceberg/(unknown version)"},
-		"X-Client-Version": {icebergRestSpecVersion},
+		"Authorization":               {"Bearer some_jwt_token"},
+		"Content-Type":                {"application/json"},
+		"User-Agent":                  {"GoIceberg/(unknown version)"},
+		"X-Client-Version":            {icebergRestSpecVersion},
+		"X-Iceberg-Access-Delegation": {"vended-credentials"},
 	}, cat.cl.Transport.(*sessionTransport).defaultHeaders)
 }
