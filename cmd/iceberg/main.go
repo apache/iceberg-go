@@ -34,16 +34,21 @@ import (
 const usage = `iceberg.
 
 Usage:
-  iceberg list [options] [PARENT]
-  iceberg describe [options] [namespace | table] IDENTIFIER
-  iceberg (schema | spec | uuid | location) [options] TABLE_ID
-  iceberg drop [options] (namespace | table) IDENTIFIER
-  iceberg files [options] TABLE_ID [--history]
-  iceberg rename [options] <from> <to>
-  iceberg properties [options] get (namespace | table) IDENTIFIER [PROPNAME]
-  iceberg properties [options] set (namespace | table) IDENTIFIER PROPNAME VALUE
-  iceberg properties [options] remove (namespace | table) IDENTIFIER PROPNAME
-  iceberg -h | --help | --version
+  iceberg [command] [options] [arguments]
+  iceberg -h | --help
+  iceberg --version
+
+Commands:
+  describe    Describe a namespace or a table.
+  list        List tables or namespaces.
+  schema      Get the schema of the table.
+  spec        Return the partition spec of the table.
+  uuid        Return the UUID of the table.
+  location    Return the location of the table.
+  drop        Operations to drop a namespace or table.
+  files       List all the files of the table.
+  rename      Rename a table.
+  properties  Properties on tables/namespaces.
 
 Arguments:
   PARENT         Catalog parent namespace
@@ -53,12 +58,22 @@ Arguments:
   VALUE          value to set
 
 Options:
-  -h --help          show this helpe messages and exit
   --catalog TEXT     specify the catalog type [default: rest]
   --uri TEXT         specify the catalog URI
   --output TYPE      output type (json/text) [default: text]
   --credential TEXT  specify credentials for the catalog
-  --warehouse TEXT   specify the warehouse to use`
+  --warehouse TEXT   specify the warehouse to use
+
+Example Usages
+  iceberg list [options] [PARENT]
+  iceberg describe [options] [namespace | table] IDENTIFIER
+  iceberg (schema | spec | uuid | location) [options] TABLE_ID
+  iceberg drop [options] (namespace | table) IDENTIFIER
+  iceberg files [options] TABLE_ID [--history]
+  iceberg rename [options] <from> <to>
+  iceberg properties [options] get (namespace | table) IDENTIFIER [PROPNAME]
+  iceberg properties [options] set (namespace | table) IDENTIFIER PROPNAME VALUE
+  iceberg properties [options] remove (namespace | table) IDENTIFIER PROPNAME`
 
 func main() {
 	args, err := docopt.ParseArgs(usage, os.Args[1:], iceberg.Version())
