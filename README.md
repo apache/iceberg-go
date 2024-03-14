@@ -21,6 +21,19 @@
 
 `iceberg` is a Golang implementation of the [Iceberg table spec](https://iceberg.apache.org/spec/).
 
+## Build From Source
+
+### Prerequisites
+
+* Go 1.21 or later
+
+### Build
+
+```shell
+$ git clone https://github.com/apache/iceberg-go.git
+$ cd iceberg-go/cmd/iceberg && go build .
+```
+
 ## Feature Support / Roadmap
 
 ### FileSystem Support
