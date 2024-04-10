@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/table"
+	"github.com/polarsignals/iceberg-go"
+	"github.com/polarsignals/iceberg-go/table"
 	"github.com/thanos-io/objstore"
 )
 

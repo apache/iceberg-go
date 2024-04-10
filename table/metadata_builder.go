@@ -1,7 +1,7 @@
 package table
 
 import (
-	"github.com/apache/iceberg-go"
+	"github.com/polarsignals/iceberg-go"
 	"github.com/google/uuid"
 )
 

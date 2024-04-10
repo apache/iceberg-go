@@ -30,7 +30,7 @@ func init() {
 	version = "(unknown version)"
 	if info, ok := debug.ReadBuildInfo(); ok {
 		for _, dep := range info.Deps {
-			if strings.HasPrefix(dep.Path, "github.com/apache/iceberg-go") {
+			if strings.HasPrefix(dep.Path, "github.com/polarsignals/iceberg-go") {
 				version = dep.Version
 				break
 			}

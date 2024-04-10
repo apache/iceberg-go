@@ -23,7 +23,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/apache/iceberg-go"
+	"github.com/polarsignals/iceberg-go"
 )
 
 type SortDirection string

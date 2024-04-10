@@ -23,8 +23,8 @@ import (
 	"errors"
 	"net/url"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/table"
+	"github.com/polarsignals/iceberg-go"
+	"github.com/polarsignals/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
 )
 

@@ -22,8 +22,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/table"
+	"github.com/polarsignals/iceberg-go"
+	"github.com/polarsignals/iceberg-go/table"
 	"github.com/stretchr/testify/suite"
 	"github.com/thanos-io/objstore"
 )

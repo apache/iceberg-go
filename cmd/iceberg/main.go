@@ -25,9 +25,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/catalog"
-	"github.com/apache/iceberg-go/table"
+	"github.com/polarsignals/iceberg-go"
+	"github.com/polarsignals/iceberg-go/catalog"
+	"github.com/polarsignals/iceberg-go/table"
 	"github.com/docopt/docopt-go"
 )
 

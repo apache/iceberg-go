@@ -24,7 +24,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/apache/iceberg-go"
+	"github.com/polarsignals/iceberg-go"
 	"github.com/thanos-io/objstore"
 	"golang.org/x/exp/maps"
 )

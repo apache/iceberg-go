@@ -21,7 +21,7 @@ import (
 	"context"
 	"reflect"
 
-	"github.com/apache/iceberg-go"
+	"github.com/polarsignals/iceberg-go"
 	"github.com/thanos-io/objstore"
 	"golang.org/x/exp/slices"
 )
