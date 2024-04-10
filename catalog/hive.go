@@ -12,6 +12,10 @@ import (
 	"github.com/thanos-io/objstore"
 )
 
+var (
+	ErrorTableNotFound = fmt.Errorf("table not found")
+)
+
 const (
 	hiveTableMetadataDir = "metadata"
 	hiveVersionHintFile  = "version-hint.text"
@@ -136,6 +140,9 @@ func getTableMetadata(ctx context.Context, bucket objstore.Bucket, ns, tbl strin
 func getTableVersion(ctx context.Context, bucket objstore.Bucket, ns, tbl string) (int, error) {
 	r, err := bucket.Get(ctx, filepath.Join(ns, tbl, hiveTableMetadataDir, hiveVersionHintFile))
 	if err != nil {
+		if bucket.IsObjNotFoundErr(err) { // Table does not exist.
+			return -1, ErrorTableNotFound
+		}
 		return -1, fmt.Errorf("failed to get version hint file: %w", err)
 	}
 	defer r.Close()
