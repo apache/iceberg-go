@@ -18,13 +18,13 @@
 package iceberg
 
 import (
+	"context"
 	"io"
 	"sync"
 
-	iceio "github.com/apache/iceberg-go/io"
-
 	"github.com/hamba/avro/v2"
 	"github.com/hamba/avro/v2/ocf"
+	"github.com/thanos-io/objstore"
 )
 
 // ManifestContent indicates the type of data inside of the files
@@ -208,8 +208,8 @@ func (m *manifestFileV1) Partitions() []FieldSummary {
 	return *m.PartitionList
 }
 
-func (m *manifestFileV1) FetchEntries(fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error) {
-	return fetchManifestEntries(m, fs, discardDeleted)
+func (m *manifestFileV1) FetchEntries(bucket objstore.Bucket, discardDeleted bool) ([]ManifestEntry, error) {
+	return fetchManifestEntries(m, bucket, discardDeleted)
 }
 
 // ManifestV2Builder is a helper for building a V2 manifest file
@@ -358,12 +358,12 @@ func (m *manifestFileV2) HasExistingFiles() bool {
 	return m.ExistingFilesCount > 0
 }
 
-func (m *manifestFileV2) FetchEntries(fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error) {
-	return fetchManifestEntries(m, fs, discardDeleted)
+func (m *manifestFileV2) FetchEntries(bucket objstore.Bucket, discardDeleted bool) ([]ManifestEntry, error) {
+	return fetchManifestEntries(m, bucket, discardDeleted)
 }
 
-func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error) {
-	f, err := fs.Open(m.FilePath())
+func fetchManifestEntries(m ManifestFile, bucket objstore.Bucket, discardDeleted bool) ([]ManifestEntry, error) {
+	f, err := bucket.Get(context.TODO(), m.FilePath())
 	if err != nil {
 		return nil, err
 	}
@@ -399,12 +399,20 @@ func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]M
 		var tmp ManifestEntry
 		if isVer1 {
 			if isFallback {
-				tmp = &fallbackManifestEntryV1{}
+				tmp = &fallbackManifestEntryV1{
+					manifestEntryV1: manifestEntryV1{
+						Data: &dataFile{},
+					},
+				}
 			} else {
-				tmp = &manifestEntryV1{}
+				tmp = &manifestEntryV1{
+					Data: &dataFile{},
+				}
 			}
 		} else {
-			tmp = &manifestEntryV2{}
+			tmp = &manifestEntryV2{
+				Data: &dataFile{},
+			}
 		}
 
 		if err := dec.Decode(tmp); err != nil {
@@ -483,7 +491,7 @@ type ManifestFile interface {
 	// manifest entries using the provided file system IO interface.
 	// If discardDeleted is true, entries for files containing deleted rows
 	// will be skipped.
-	FetchEntries(fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error)
+	FetchEntries(bucket objstore.Bucket, discardDeleted bool) ([]ManifestEntry, error)
 }
 
 // ReadManifestList reads in an avro manifest list file and returns a slice
@@ -569,6 +577,19 @@ const (
 type colMap[K, V any] struct {
 	Key   K `avro:"key"`
 	Value V `avro:"value"`
+}
+
+// TODO(thor) revisit this I had copilot write it
+func avroColMapFromMap[K comparable, V any](m map[K]V) *[]colMap[K, V] {
+	if m == nil {
+		return nil
+	}
+
+	out := make([]colMap[K, V], 0, len(m))
+	for k, v := range m {
+		out = append(out, colMap[K, V]{Key: k, Value: v})
+	}
+	return &out
 }
 
 func avroColMapToMap[K comparable, V any](c *[]colMap[K, V]) map[K]V {
@@ -696,7 +717,7 @@ type manifestEntryV1 struct {
 	Snapshot    int64               `avro:"snapshot_id"`
 	SeqNum      *int64
 	FileSeqNum  *int64
-	Data        dataFile `avro:"data_file"`
+	Data        DataFile `avro:"data_file"`
 }
 
 type fallbackManifestEntryV1 struct {
@@ -725,14 +746,14 @@ func (m *manifestEntryV1) FileSequenceNum() *int64 {
 	return m.FileSeqNum
 }
 
-func (m *manifestEntryV1) DataFile() DataFile { return &m.Data }
+func (m *manifestEntryV1) DataFile() DataFile { return m.Data }
 
 type manifestEntryV2 struct {
 	EntryStatus ManifestEntryStatus `avro:"status"`
 	Snapshot    *int64              `avro:"snapshot_id"`
 	SeqNum      *int64              `avro:"sequence_number"`
 	FileSeqNum  *int64              `avro:"file_sequence_number"`
-	Data        dataFile            `avro:"data_file"`
+	Data        DataFile            `avro:"data_file"`
 }
 
 func (m *manifestEntryV2) inheritSeqNum(manifest ManifestFile) {
@@ -770,7 +791,7 @@ func (m *manifestEntryV2) FileSequenceNum() *int64 {
 	return m.FileSeqNum
 }
 
-func (m *manifestEntryV2) DataFile() DataFile { return &m.Data }
+func (m *manifestEntryV2) DataFile() DataFile { return m.Data }
 
 // DataFile is the interface for reading the information about a
 // given data file indicated by an entry in a manifest list.

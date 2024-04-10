@@ -18,10 +18,11 @@
 package table
 
 import (
+	"context"
 	"reflect"
 
 	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/io"
+	"github.com/thanos-io/objstore"
 	"golang.org/x/exp/slices"
 )
 
@@ -31,7 +32,7 @@ type Table struct {
 	identifier       Identifier
 	metadata         Metadata
 	metadataLocation string
-	fs               io.IO
+	bucket           objstore.Bucket
 }
 
 func (t Table) Equals(other Table) bool {
@@ -43,7 +44,7 @@ func (t Table) Equals(other Table) bool {
 func (t Table) Identifier() Identifier   { return t.identifier }
 func (t Table) Metadata() Metadata       { return t.metadata }
 func (t Table) MetadataLocation() string { return t.metadataLocation }
-func (t Table) FS() io.IO                { return t.fs }
+func (t Table) Bucket() objstore.Bucket  { return t.bucket }
 
 func (t Table) Schema() *iceberg.Schema              { return t.metadata.CurrentSchema() }
 func (t Table) Spec() iceberg.PartitionSpec          { return t.metadata.PartitionSpec() }
@@ -61,37 +62,27 @@ func (t Table) Schemas() map[int]*iceberg.Schema {
 	return m
 }
 
-func New(ident Identifier, meta Metadata, location string, fs io.IO) *Table {
+func New(ident Identifier, meta Metadata, location string, bucket objstore.Bucket) *Table {
 	return &Table{
 		identifier:       ident,
 		metadata:         meta,
 		metadataLocation: location,
-		fs:               fs,
+		bucket:           bucket,
 	}
 }
 
-func NewFromLocation(ident Identifier, metalocation string, fsys io.IO) (*Table, error) {
+func NewFromLocation(ident Identifier, metalocation string, bucket objstore.Bucket) (*Table, error) {
 	var meta Metadata
 
-	if rf, ok := fsys.(io.ReadFileIO); ok {
-		data, err := rf.ReadFile(metalocation)
-		if err != nil {
-			return nil, err
-		}
-
-		if meta, err = ParseMetadataBytes(data); err != nil {
-			return nil, err
-		}
-	} else {
-		f, err := fsys.Open(metalocation)
-		if err != nil {
-			return nil, err
-		}
-		defer f.Close()
-
-		if meta, err = ParseMetadata(f); err != nil {
-			return nil, err
-		}
+	r, err := bucket.Get(context.Background(), metalocation)
+	if err != nil {
+		return nil, err
 	}
-	return New(ident, meta, metalocation, fsys), nil
+	defer r.Close()
+
+	if meta, err = ParseMetadata(r); err != nil {
+		return nil, err
+	}
+
+	return New(ident, meta, metalocation, bucket), nil
 }

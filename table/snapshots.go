@@ -18,13 +18,14 @@
 package table
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
 
 	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/io"
+	"github.com/thanos-io/objstore"
 	"golang.org/x/exp/maps"
 )
 
@@ -172,9 +173,9 @@ func (s Snapshot) Equals(other Snapshot) bool {
 		s.Summary.Equals(other.Summary)
 }
 
-func (s Snapshot) Manifests(fio io.IO) ([]iceberg.ManifestFile, error) {
+func (s Snapshot) Manifests(bucket objstore.Bucket) ([]iceberg.ManifestFile, error) {
 	if s.ManifestList != "" {
-		f, err := fio.Open(s.ManifestList)
+		f, err := bucket.Get(context.TODO(), s.ManifestList)
 		if err != nil {
 			return nil, fmt.Errorf("could not open manifest file: %w", err)
 		}

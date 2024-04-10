@@ -23,11 +23,12 @@ import (
 	"fmt"
 
 	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/glue"
 	"github.com/aws/aws-sdk-go-v2/service/glue/types"
+	"github.com/go-kit/log"
+	"github.com/thanos-io/objstore/client"
 )
 
 const glueTableTypeIceberg = "ICEBERG"
@@ -107,13 +108,12 @@ func (c *GlueCatalog) LoadTable(ctx context.Context, identifier table.Identifier
 		return nil, err
 	}
 
-	// TODO: consider providing a way to directly access the S3 iofs to enable testing of the catalog.
-	iofs, err := io.LoadFS(props, location)
+	bucket, err := client.NewBucket(log.NewNopLogger(), []byte(props["bucket_conf"]), "glue")
 	if err != nil {
-		return nil, fmt.Errorf("failed to load table %s.%s: %w", database, tableName, err)
+		return nil, fmt.Errorf("failed to create bucket: %w", err)
 	}
 
-	icebergTable, err := table.NewFromLocation([]string{tableName}, location, iofs)
+	icebergTable, err := table.NewFromLocation([]string{tableName}, location, bucket)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create table from location %s.%s: %w", database, tableName, err)
 	}

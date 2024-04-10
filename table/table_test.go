@@ -19,12 +19,13 @@ package table_test
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/suite"
+	"github.com/thanos-io/objstore"
 )
 
 type TableTestSuite struct {
@@ -38,31 +39,24 @@ func TestTable(t *testing.T) {
 }
 
 func (t *TableTestSuite) SetupSuite() {
-	var mockfs internal.MockFS
-	mockfs.Test(t.T())
-	mockfs.On("Open", "s3://bucket/test/location/uuid.metadata.json").
-		Return(&internal.MockFile{Contents: bytes.NewReader([]byte(ExampleTableMetadataV2))}, nil)
-	defer mockfs.AssertExpectations(t.T())
+	bucket := objstore.NewInMemBucket()
+	bucket.Upload(context.Background(), "s3://bucket/test/location/uuid.metadata.json", bytes.NewReader([]byte(ExampleTableMetadataV2)))
 
-	tbl, err := table.NewFromLocation([]string{"foo"}, "s3://bucket/test/location/uuid.metadata.json", &mockfs)
+	tbl, err := table.NewFromLocation([]string{"foo"}, "s3://bucket/test/location/uuid.metadata.json", bucket)
 	t.Require().NoError(err)
 	t.Require().NotNil(tbl)
 
 	t.Equal([]string{"foo"}, tbl.Identifier())
 	t.Equal("s3://bucket/test/location/uuid.metadata.json", tbl.MetadataLocation())
-	t.Equal(&mockfs, tbl.FS())
 
 	t.tbl = tbl
 }
 
 func (t *TableTestSuite) TestNewTableFromReadFile() {
-	var mockfsReadFile internal.MockFSReadFile
-	mockfsReadFile.Test(t.T())
-	mockfsReadFile.On("ReadFile", "s3://bucket/test/location/uuid.metadata.json").
-		Return([]byte(ExampleTableMetadataV2), nil)
-	defer mockfsReadFile.AssertExpectations(t.T())
+	bucket := objstore.NewInMemBucket()
+	bucket.Upload(context.Background(), "s3://bucket/test/location/uuid.metadata.json", bytes.NewReader([]byte(ExampleTableMetadataV2)))
 
-	tbl2, err := table.NewFromLocation([]string{"foo"}, "s3://bucket/test/location/uuid.metadata.json", &mockfsReadFile)
+	tbl2, err := table.NewFromLocation([]string{"foo"}, "s3://bucket/test/location/uuid.metadata.json", bucket)
 	t.Require().NoError(err)
 	t.Require().NotNil(tbl2)
 

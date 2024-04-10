@@ -129,7 +129,7 @@ func (t text) Files(tbl *table.Table, history bool) {
 				snap.SnapshotID, *snap.SchemaID, manifest),
 		})
 
-		manifestList, err := snap.Manifests(tbl.FS())
+		manifestList, err := snap.Manifests(tbl.Bucket())
 		if err != nil {
 			t.Error(err)
 			os.Exit(1)
@@ -139,7 +139,7 @@ func (t text) Files(tbl *table.Table, history bool) {
 			snapshotTree = append(snapshotTree, pterm.LeveledListItem{
 				Level: 1, Text: "Manifest: " + m.FilePath(),
 			})
-			datafiles, err := m.FetchEntries(tbl.FS(), false)
+			datafiles, err := m.FetchEntries(tbl.Bucket(), false)
 			if err != nil {
 				t.Error(err)
 				os.Exit(1)

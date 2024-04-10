@@ -204,7 +204,7 @@ func TestSerializeMetadataV1(t *testing.T) {
 	data, err := json.Marshal(&meta)
 	require.NoError(t, err)
 
-	assert.JSONEq(t, `{"location": "s3://bucket/test/location", "table-uuid": "d20125c8-7284-442c-9aea-15fee620737c", "last-updated-ms": 1602638573874, "last-column-id": 3, "schemas": [{"type": "struct", "fields": [{"id": 1, "name": "x", "type": "long", "required": true}, {"id": 2, "name": "y", "type": "long", "required": true, "doc": "comment"}, {"id": 3, "name": "z", "type": "long", "required": true}], "schema-id": 0, "identifier-field-ids": []}], "current-schema-id": 0, "partition-specs": [{"spec-id": 0, "fields": [{"source-id": 1, "field-id": 1000, "transform": "identity", "name": "x"}]}], "default-spec-id": 0, "last-partition-id": 1000, "properties": {}, "snapshots": [{"snapshot-id": 1925, "sequence-number": 0, "timestamp-ms": 1602638573822}], "snapshot-log": [], "metadata-log": [], "sort-orders": [{"order-id": 0, "fields": []}], "default-sort-order-id": 0, "refs": {}, "format-version": 1, "schema": {"type": "struct", "fields": [{"id": 1, "name": "x", "type": "long", "required": true}, {"id": 2, "name": "y", "type": "long", "required": true, "doc": "comment"}, {"id": 3, "name": "z", "type": "long", "required": true}], "schema-id": 0, "identifier-field-ids": []}, "partition-spec": [{"name": "x", "transform": "identity", "source-id": 1, "field-id": 1000}]}`,
+	assert.JSONEq(t, `{"location": "s3://bucket/test/location", "table-uuid": "d20125c8-7284-442c-9aea-15fee620737c", "last-updated-ms": 1602638573874, "last-column-id": 3, "schemas": [{"type": "struct", "fields": [{"id": 1, "name": "x", "type": "long", "required": true}, {"id": 2, "name": "y", "type": "long", "required": true, "doc": "comment"}, {"id": 3, "name": "z", "type": "long", "required": true}], "schema-id": 0, "identifier-field-ids": []}], "current-schema-id": 0, "partition-specs": [{"spec-id": 0, "fields": [{"source-id": 1, "field-id": 1000, "transform": "identity", "name": "x"}]}], "default-spec-id": 0, "last-partition-id": 1000, "snapshots": [{"snapshot-id": 1925, "sequence-number": 0, "timestamp-ms": 1602638573822}], "sort-orders": [{"order-id": 0, "fields": []}], "format-version": 1, "schema": {"type": "struct", "fields": [{"id": 1, "name": "x", "type": "long", "required": true}, {"id": 2, "name": "y", "type": "long", "required": true, "doc": "comment"}, {"id": 3, "name": "z", "type": "long", "required": true}], "schema-id": 0, "identifier-field-ids": []}, "partition-spec": [{"name": "x", "transform": "identity", "source-id": 1, "field-id": 1000}]}`,
 		string(data))
 }
 
@@ -488,4 +488,59 @@ func TestV1WriteMetadataToV2(t *testing.T) {
 	assert.Equal(t, []any{map[string]any{"order-id": float64(0), "fields": []any{}}}, rawData["sort-orders"])
 	assert.NotContains(t, rawData, "schema")
 	assert.NotContains(t, rawData, "partition-spec")
+}
+
+func TestV1_MetadataBuilder(t *testing.T) {
+	const exampleV1Metadata = `{
+	"format-version": 1,
+	"table-uuid": "d20125c8-7284-442c-9aea-15fee620737c",
+	"location": "s3://bucket/test/location",
+	"last-updated-ms": 1602638573874,
+	"last-column-id": 3,
+	"schema": {
+		"type": "struct",
+		"fields": [
+			{"id": 1, "name": "x", "required": true, "type": "long"},
+			{"id": 2, "name": "y", "required": true, "type": "long", "doc": "comment"},
+			{"id": 3, "name": "z", "required": true, "type": "long"}
+		]
+	},
+    "partition-specs": [{"spec-id": 0, "fields": [{"name": "x", "transform": "identity", "source-id": 1, "field-id": 1000}]}],
+	"current-snapshot-id": -1,
+	"snapshots": [{"snapshot-id": 1925, "timestamp-ms": 1602638573822}]
+}`
+	meta, err := table.ParseMetadataBytes([]byte(exampleV1Metadata))
+	require.NoError(t, err)
+	require.NotNil(t, meta)
+
+	schema := iceberg.NewSchema(
+		0,
+		iceberg.NestedField{ID: 1, Name: "x", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "y", Type: iceberg.PrimitiveTypes.Int64, Required: true, Doc: "comment"},
+		iceberg.NestedField{ID: 3, Name: "z", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+
+	md := table.NewMetadataV1Builder(
+		"s3://bucket/test/location",
+		schema,
+		1602638573874,
+		3,
+	).
+		WithTableUUID(uuid.MustParse("d20125c8-7284-442c-9aea-15fee620737c")).
+		WithPartitionSpecs([]iceberg.PartitionSpec{
+			iceberg.NewPartitionSpec(iceberg.PartitionField{
+				SourceID: 1, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "x",
+			})}).
+		WithCurrentSnapshotID(-1).
+		WithSnapshots([]table.Snapshot{
+			{SnapshotID: 1925, TimestampMs: 1602638573822},
+		}).Build()
+
+	b, err := json.Marshal(md)
+	require.NoError(t, err)
+
+	var built table.MetadataV1
+	json.Unmarshal(b, &built)
+
+	require.Equal(t, meta, &built)
 }

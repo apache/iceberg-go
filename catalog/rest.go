@@ -33,11 +33,12 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
-	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/go-kit/log"
+	"github.com/thanos-io/objstore/client"
 )
 
 var (
@@ -618,11 +619,11 @@ func (r *RestCatalog) LoadTable(ctx context.Context, identifier table.Identifier
 		tblProps[k] = v
 	}
 
-	iofs, err := iceio.LoadFS(tblProps, ret.MetadataLoc)
+	bucket, err := client.NewBucket(log.NewNopLogger(), []byte(tblProps["bucket_conf"]), "rest")
 	if err != nil {
 		return nil, err
 	}
-	return table.New(id, ret.Metadata, ret.MetadataLoc, iofs), nil
+	return table.New(id, ret.Metadata, ret.MetadataLoc, bucket), nil
 }
 
 func (r *RestCatalog) DropTable(ctx context.Context, identifier table.Identifier) error {

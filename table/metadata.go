@@ -141,19 +141,19 @@ type commonMetadata struct {
 	Loc                string                  `json:"location"`
 	LastUpdatedMS      int64                   `json:"last-updated-ms"`
 	LastColumnId       int                     `json:"last-column-id"`
-	SchemaList         []*iceberg.Schema       `json:"schemas"`
+	SchemaList         []*iceberg.Schema       `json:"schemas,omitempty"`
 	CurrentSchemaID    int                     `json:"current-schema-id"`
 	Specs              []iceberg.PartitionSpec `json:"partition-specs"`
 	DefaultSpecID      int                     `json:"default-spec-id"`
 	LastPartitionID    *int                    `json:"last-partition-id,omitempty"`
-	Props              iceberg.Properties      `json:"properties"`
+	Props              iceberg.Properties      `json:"properties,omitempty"`
 	SnapshotList       []Snapshot              `json:"snapshots,omitempty"`
 	CurrentSnapshotID  *int64                  `json:"current-snapshot-id,omitempty"`
-	SnapshotLog        []SnapshotLogEntry      `json:"snapshot-log"`
-	MetadataLog        []MetadataLogEntry      `json:"metadata-log"`
-	SortOrderList      []SortOrder             `json:"sort-orders"`
-	DefaultSortOrderID int                     `json:"default-sort-order-id"`
-	Refs               map[string]SnapshotRef  `json:"refs"`
+	SnapshotLog        []SnapshotLogEntry      `json:"snapshot-log,omitempty"`
+	MetadataLog        []MetadataLogEntry      `json:"metadata-log,omitempty"`
+	SortOrderList      []SortOrder             `json:"sort-orders,omitempty"`
+	DefaultSortOrderID int                     `json:"default-sort-order-id,omitempty"`
+	Refs               map[string]SnapshotRef  `json:"refs,omitempty"`
 }
 
 func (c *commonMetadata) TableUUID() uuid.UUID       { return c.UUID }
@@ -325,15 +325,14 @@ func (c *commonMetadata) validate() error {
 func (c *commonMetadata) Version() int { return c.FormatVersion }
 
 type MetadataV1 struct {
-	Schema    iceberg.Schema           `json:"schema"`
-	Partition []iceberg.PartitionField `json:"partition-spec"`
-
 	commonMetadata
+	Schema    *iceberg.Schema          `json:"schema"`
+	Partition []iceberg.PartitionField `json:"partition-spec"`
 }
 
 func (m *MetadataV1) preValidate() {
 	if len(m.SchemaList) == 0 {
-		m.SchemaList = []*iceberg.Schema{&m.Schema}
+		m.SchemaList = []*iceberg.Schema{m.Schema}
 	}
 
 	if len(m.Specs) == 0 {

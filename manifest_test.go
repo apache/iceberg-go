@@ -19,12 +19,13 @@ package iceberg
 
 import (
 	"bytes"
+	"context"
 	"testing"
 	"time"
 
-	"github.com/apache/iceberg-go/internal"
 	"github.com/hamba/avro/v2/ocf"
 	"github.com/stretchr/testify/suite"
+	"github.com/thanos-io/objstore"
 )
 
 var (
@@ -69,7 +70,7 @@ var (
 		{
 			EntryStatus: EntryStatusADDED,
 			Snapshot:    entrySnapshotID,
-			Data: dataFile{
+			Data: &dataFile{
 				// bad value for Content but this field doesn't exist in V1
 				// so it shouldn't get written and shouldn't be read back out
 				// so the roundtrip test asserts that we get the default value
@@ -193,7 +194,7 @@ var (
 		{
 			EntryStatus: EntryStatusADDED,
 			Snapshot:    8744736658442914487,
-			Data: dataFile{
+			Data: &dataFile{
 				Path:             "/home/iceberg/warehouse/nyc/taxis_partitioned/data/VendorID=1/00000-633-d8a4223e-dc97-45a1-86e1-adaba6e8abd7-00002.parquet",
 				Format:           ParquetFile,
 				PartitionData:    map[string]any{"VendorID": int(1), "tpep_pickup_datetime": time.Unix(1925, 0)},
@@ -325,41 +326,41 @@ var (
 		{
 			EntryStatus: EntryStatusADDED,
 			Snapshot:    &entrySnapshotID,
-			Data: dataFile{
-				Path:             manifestEntryV1Records[0].Data.Path,
-				Format:           manifestEntryV1Records[0].Data.Format,
-				PartitionData:    manifestEntryV1Records[0].Data.PartitionData,
-				RecordCount:      manifestEntryV1Records[0].Data.RecordCount,
-				FileSize:         manifestEntryV1Records[0].Data.FileSize,
-				BlockSizeInBytes: manifestEntryV1Records[0].Data.BlockSizeInBytes,
-				ColSizes:         manifestEntryV1Records[0].Data.ColSizes,
-				ValCounts:        manifestEntryV1Records[0].Data.ValCounts,
-				NullCounts:       manifestEntryV1Records[0].Data.NullCounts,
-				NaNCounts:        manifestEntryV1Records[0].Data.NaNCounts,
-				LowerBounds:      manifestEntryV1Records[0].Data.LowerBounds,
-				UpperBounds:      manifestEntryV1Records[0].Data.UpperBounds,
-				Splits:           manifestEntryV1Records[0].Data.Splits,
-				SortOrder:        manifestEntryV1Records[0].Data.SortOrder,
+			Data: &dataFile{
+				Path:             manifestEntryV1Records[0].Data.FilePath(),
+				Format:           manifestEntryV1Records[0].Data.FileFormat(),
+				PartitionData:    manifestEntryV1Records[0].Data.Partition(),
+				RecordCount:      manifestEntryV1Records[0].Data.Count(),
+				FileSize:         manifestEntryV1Records[0].Data.FileSizeBytes(),
+				BlockSizeInBytes: manifestEntryV1Records[0].Data.FileSizeBytes(),
+				ColSizes:         manifestEntryV1Records[0].Data.(*dataFile).ColSizes,
+				ValCounts:        manifestEntryV1Records[0].Data.(*dataFile).ValCounts,
+				NullCounts:       manifestEntryV1Records[0].Data.(*dataFile).NullCounts,
+				NaNCounts:        manifestEntryV1Records[0].Data.(*dataFile).NaNCounts,
+				LowerBounds:      manifestEntryV1Records[0].Data.(*dataFile).LowerBounds,
+				UpperBounds:      manifestEntryV1Records[0].Data.(*dataFile).UpperBounds,
+				Splits:           manifestEntryV1Records[0].Data.(*dataFile).Splits,
+				SortOrder:        manifestEntryV1Records[0].Data.(*dataFile).SortOrder,
 			},
 		},
 		{
 			EntryStatus: EntryStatusADDED,
 			Snapshot:    &entrySnapshotID,
-			Data: dataFile{
-				Path:             manifestEntryV1Records[1].Data.Path,
-				Format:           manifestEntryV1Records[1].Data.Format,
-				PartitionData:    manifestEntryV1Records[1].Data.PartitionData,
-				RecordCount:      manifestEntryV1Records[1].Data.RecordCount,
-				FileSize:         manifestEntryV1Records[1].Data.FileSize,
-				BlockSizeInBytes: manifestEntryV1Records[1].Data.BlockSizeInBytes,
-				ColSizes:         manifestEntryV1Records[1].Data.ColSizes,
-				ValCounts:        manifestEntryV1Records[1].Data.ValCounts,
-				NullCounts:       manifestEntryV1Records[1].Data.NullCounts,
-				NaNCounts:        manifestEntryV1Records[1].Data.NaNCounts,
-				LowerBounds:      manifestEntryV1Records[1].Data.LowerBounds,
-				UpperBounds:      manifestEntryV1Records[1].Data.UpperBounds,
-				Splits:           manifestEntryV1Records[1].Data.Splits,
-				SortOrder:        manifestEntryV1Records[1].Data.SortOrder,
+			Data: &dataFile{
+				Path:             manifestEntryV1Records[1].Data.FilePath(),
+				Format:           manifestEntryV1Records[1].Data.FileFormat(),
+				PartitionData:    manifestEntryV1Records[1].Data.Partition(),
+				RecordCount:      manifestEntryV1Records[1].Data.Count(),
+				FileSize:         manifestEntryV1Records[1].Data.FileSizeBytes(),
+				BlockSizeInBytes: manifestEntryV1Records[1].Data.FileSizeBytes(),
+				ColSizes:         manifestEntryV1Records[1].Data.(*dataFile).ColSizes,
+				ValCounts:        manifestEntryV1Records[1].Data.(*dataFile).ValCounts,
+				NullCounts:       manifestEntryV1Records[1].Data.(*dataFile).NullCounts,
+				NaNCounts:        manifestEntryV1Records[1].Data.(*dataFile).NaNCounts,
+				LowerBounds:      manifestEntryV1Records[1].Data.(*dataFile).LowerBounds,
+				UpperBounds:      manifestEntryV1Records[1].Data.(*dataFile).UpperBounds,
+				Splits:           manifestEntryV1Records[1].Data.(*dataFile).Splits,
+				SortOrder:        manifestEntryV1Records[1].Data.(*dataFile).SortOrder,
 			},
 		},
 	}
@@ -376,7 +377,7 @@ type ManifestTestSuite struct {
 }
 
 func (m *ManifestTestSuite) writeManifestList() {
-	enc, err := ocf.NewEncoder(internal.AvroSchemaCache.Get(internal.ManifestListV1Key).String(),
+	enc, err := ocf.NewEncoder(AvroManifestListV1Schema,
 		&m.v1ManifestList, ocf.WithMetadata(map[string][]byte{
 			"avro.codec": []byte("deflate"),
 		}),
@@ -386,7 +387,7 @@ func (m *ManifestTestSuite) writeManifestList() {
 	m.Require().NoError(enc.Encode(manifestFileRecordsV1[0]))
 	enc.Close()
 
-	enc, err = ocf.NewEncoder(internal.AvroSchemaCache.Get(internal.ManifestListV2Key).String(),
+	enc, err = ocf.NewEncoder(AvroManifestListV2Schema,
 		&m.v2ManifestList, ocf.WithMetadata(map[string][]byte{
 			"format-version": []byte("2"),
 			"avro.codec":     []byte("deflate"),
@@ -398,18 +399,13 @@ func (m *ManifestTestSuite) writeManifestList() {
 }
 
 func (m *ManifestTestSuite) writeManifestEntries() {
-	enc, err := ocf.NewEncoder(internal.AvroSchemaCache.Get(internal.ManifestEntryV1Key).String(), &m.v1ManifestEntries,
-		ocf.WithMetadata(map[string][]byte{
-			"format-version": []byte("1"),
-		}), ocf.WithCodec(ocf.Deflate))
-	m.Require().NoError(err)
-
+	entries := make([]ManifestEntry, 0, len(manifestEntryV1Records))
 	for _, ent := range manifestEntryV1Records {
-		m.Require().NoError(enc.Encode(ent))
+		entries = append(entries, ent)
 	}
-	m.Require().NoError(enc.Close())
+	m.Require().NoError(WriteManifestV1(&m.v1ManifestEntries, entries))
 
-	enc, err = ocf.NewEncoder(internal.AvroSchemaCache.Get(internal.ManifestEntryV2Key).String(),
+	enc, err := ocf.NewEncoder(AvroManifestEntryV2Schema,
 		&m.v2ManifestEntries, ocf.WithMetadata(map[string][]byte{
 			"format-version": []byte("2"),
 			"avro.codec":     []byte("deflate"),
@@ -428,16 +424,13 @@ func (m *ManifestTestSuite) SetupSuite() {
 }
 
 func (m *ManifestTestSuite) TestManifestEntriesV1() {
-	var mockfs internal.MockFS
+	bucket := objstore.NewInMemBucket()
 	manifest := manifestFileV1{
 		Path: manifestFileRecordsV1[0].FilePath(),
 	}
+	bucket.Upload(context.Background(), manifest.FilePath(), bytes.NewReader(m.v1ManifestEntries.Bytes()))
 
-	mockfs.Test(m.T())
-	mockfs.On("Open", manifest.FilePath()).Return(&internal.MockFile{
-		Contents: bytes.NewReader(m.v1ManifestEntries.Bytes())}, nil)
-	defer mockfs.AssertExpectations(m.T())
-	entries, err := manifest.FetchEntries(&mockfs, false)
+	entries, err := manifest.FetchEntries(bucket, false)
 	m.Require().NoError(err)
 	m.Len(entries, 2)
 	m.Zero(manifest.PartitionSpecID())
@@ -628,16 +621,13 @@ func (m *ManifestTestSuite) TestReadManifestListV2() {
 }
 
 func (m *ManifestTestSuite) TestManifestEntriesV2() {
-	var mockfs internal.MockFS
+	bucket := objstore.NewInMemBucket()
 	manifest := manifestFileV2{
 		Path: manifestFileRecordsV2[0].FilePath(),
 	}
+	bucket.Upload(context.Background(), manifest.FilePath(), bytes.NewReader(m.v2ManifestEntries.Bytes()))
 
-	mockfs.Test(m.T())
-	mockfs.On("Open", manifest.FilePath()).Return(&internal.MockFile{
-		Contents: bytes.NewReader(m.v2ManifestEntries.Bytes())}, nil)
-	defer mockfs.AssertExpectations(m.T())
-	entries, err := manifest.FetchEntries(&mockfs, false)
+	entries, err := manifest.FetchEntries(bucket, false)
 	m.Require().NoError(err)
 	m.Len(entries, 2)
 	m.Zero(manifest.PartitionSpecID())
