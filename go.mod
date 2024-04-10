@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-module github.com/apache/iceberg-go
+module github.com/polarsignals/iceberg-go
 
 go 1.21
 
