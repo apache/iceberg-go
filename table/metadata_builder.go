@@ -1,8 +1,8 @@
 package table
 
 import (
-	"github.com/polarsignals/iceberg-go"
 	"github.com/google/uuid"
+	"github.com/polarsignals/iceberg-go"
 )
 
 type MetadataV1Builder struct {
@@ -18,13 +18,14 @@ func NewMetadataV1Builder(
 ) *MetadataV1Builder {
 	return &MetadataV1Builder{
 		MetadataV1: &MetadataV1{
-			Schema:    schema,
 			Partition: nil, // Deprecated: use partition-specs and default-spec-id instead. See: https://iceberg.apache.org/spec/#table-metadata
 			commonMetadata: commonMetadata{
-				FormatVersion: 1,
-				Loc:           location,
-				LastUpdatedMS: lastUpdatesMs,
-				LastColumnId:  lastColumnId,
+				FormatVersion:   1,
+				Loc:             location,
+				LastUpdatedMS:   lastUpdatesMs,
+				LastColumnId:    lastColumnId,
+				SchemaList:      []*iceberg.Schema{schema},
+				CurrentSchemaID: schema.ID,
 			},
 		},
 	}
@@ -38,7 +39,7 @@ func (b *MetadataV1Builder) WithTableUUID(id uuid.UUID) *MetadataV1Builder {
 
 // WithSchemas sets the optional schemas field of the metadata.
 func (b *MetadataV1Builder) WithSchemas(schemas []*iceberg.Schema) *MetadataV1Builder {
-	b.SchemaList = schemas
+	b.SchemaList = append(b.SchemaList, schemas...)
 	return b
 }
 
