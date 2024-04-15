@@ -25,7 +25,7 @@ func DataFileFromParquet(path string, size int64, r io.ReaderAt) (DataFile, erro
 	bldr := NewDataFileV1Builder(
 		path,
 		ParquetFile,
-		nil, // TODO partition spec
+		map[string]any{}, // TODO allow partition configuration
 		f.NumRows(),
 		size,
 	)
