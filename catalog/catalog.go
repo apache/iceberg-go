@@ -23,9 +23,9 @@ import (
 	"errors"
 	"net/url"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/polarsignals/iceberg-go"
 	"github.com/polarsignals/iceberg-go/table"
-	"github.com/aws/aws-sdk-go-v2/aws"
 )
 
 type CatalogType string
@@ -36,6 +36,7 @@ const (
 	Glue     CatalogType = "glue"
 	DynamoDB CatalogType = "dynamodb"
 	SQL      CatalogType = "sql"
+	Hadoop   CatalogType = "hadoop"
 )
 
 var (

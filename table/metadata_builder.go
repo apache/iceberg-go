@@ -18,7 +18,7 @@ func NewMetadataV1Builder(
 ) *MetadataV1Builder {
 	return &MetadataV1Builder{
 		MetadataV1: &MetadataV1{
-			Partition: nil, // Deprecated: use partition-specs and default-spec-id instead. See: https://iceberg.apache.org/spec/#table-metadata
+			Partition: []iceberg.PartitionField{}, // Deprecated: use partition-specs and default-spec-id instead. See: https://iceberg.apache.org/spec/#table-metadata
 			commonMetadata: commonMetadata{
 				FormatVersion:   1,
 				Loc:             location,
@@ -26,6 +26,7 @@ func NewMetadataV1Builder(
 				LastColumnId:    lastColumnId,
 				SchemaList:      []*iceberg.Schema{schema},
 				CurrentSchemaID: schema.ID,
+				Specs:           []iceberg.PartitionSpec{iceberg.NewPartitionSpec()},
 			},
 		},
 	}
