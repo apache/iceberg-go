@@ -391,7 +391,6 @@ const (
                             "doc": "File format name: avro, orc, or parquet",
                             "field-id": 101
                         },
-                        {{- if . }}
                         {
                             "name": "partition",
                             "type": {
@@ -411,7 +410,6 @@ const (
                             },
                             "field-id": 102
                         },
-                        {{- end }}
                         {"name": "record_count", "type": "long", "doc": "Number of records in the file", "field-id": 103},
                         {"name": "file_size_in_bytes", "type": "long", "doc": "Total file size in bytes", "field-id": 104},
                         {"name": "block_size_in_bytes", "type": "long", "field-id": 105},
