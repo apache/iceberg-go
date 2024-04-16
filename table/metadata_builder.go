@@ -28,6 +28,7 @@ func NewMetadataV1Builder(
 				SchemaList:      []*iceberg.Schema{schema},
 				CurrentSchemaID: schema.ID,
 				Specs:           []iceberg.PartitionSpec{iceberg.NewPartitionSpec()},
+				Props:           iceberg.Properties{},
 			},
 		},
 	}

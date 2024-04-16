@@ -146,7 +146,7 @@ type commonMetadata struct {
 	Specs              []iceberg.PartitionSpec `json:"partition-specs"`
 	DefaultSpecID      int                     `json:"default-spec-id"`
 	LastPartitionID    *int                    `json:"last-partition-id,omitempty"`
-	Props              iceberg.Properties      `json:"properties,omitempty"`
+	Props              iceberg.Properties      `json:"properties"`
 	SnapshotList       []Snapshot              `json:"snapshots,omitempty"`
 	CurrentSnapshotID  *int64                  `json:"current-snapshot-id,omitempty"`
 	SnapshotLog        []SnapshotLogEntry      `json:"snapshot-log,omitempty"`
