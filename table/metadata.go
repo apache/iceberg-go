@@ -237,6 +237,10 @@ func (c *commonMetadata) preValidate() {
 		c.CurrentSnapshotID = nil
 	}
 
+	if c.Refs == nil {
+		c.Refs = make(map[string]SnapshotRef)
+	}
+
 	if c.CurrentSnapshotID != nil {
 		if _, ok := c.Refs[MainBranch]; !ok {
 			c.Refs[MainBranch] = SnapshotRef{
@@ -248,10 +252,6 @@ func (c *commonMetadata) preValidate() {
 
 	if c.MetadataLog == nil {
 		c.MetadataLog = []MetadataLogEntry{}
-	}
-
-	if c.Refs == nil {
-		c.Refs = make(map[string]SnapshotRef)
 	}
 
 	if c.SnapshotLog == nil {
