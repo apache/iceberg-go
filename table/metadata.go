@@ -331,6 +331,10 @@ type MetadataV1 struct {
 }
 
 func (m *MetadataV1) preValidate() {
+	if len(m.Partition) == 0 {
+		m.Partition = []iceberg.PartitionField{}
+	}
+
 	if len(m.SchemaList) == 0 {
 		m.SchemaList = []*iceberg.Schema{m.Schema}
 	}
