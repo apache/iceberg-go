@@ -257,6 +257,10 @@ func (c *commonMetadata) preValidate() {
 	if c.SnapshotLog == nil {
 		c.SnapshotLog = []SnapshotLogEntry{}
 	}
+
+	if c.Props == nil {
+		c.Props = iceberg.Properties{}
+	}
 }
 
 func (c *commonMetadata) checkSchemas() error {
