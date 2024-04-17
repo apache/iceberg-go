@@ -69,7 +69,7 @@ func maxColValue(col int, r *parquet.File) []byte {
 		}
 
 		for j := 0; j < index.NumPages(); j++ {
-			v := index.MaxValue(i)
+			v := index.MaxValue(j)
 			if maxval.IsNull() {
 				maxval = v
 				foundPage = j
@@ -103,7 +103,7 @@ func minColValue(col int, r *parquet.File) []byte {
 		}
 
 		for j := 0; j < index.NumPages(); j++ {
-			v := index.MinValue(i)
+			v := index.MinValue(j)
 			if minval.IsNull() {
 				minval = v
 				foundPage = j
