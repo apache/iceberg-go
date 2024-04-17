@@ -19,11 +19,8 @@ package catalog
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
-	"net/url"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/polarsignals/iceberg-go"
 	"github.com/polarsignals/iceberg-go/table"
 )
@@ -46,92 +43,6 @@ var (
 	ErrNamespaceAlreadyExists = errors.New("namespace already exists")
 )
 
-// WithAwsConfig sets the AWS configuration for the catalog.
-func WithAwsConfig(cfg aws.Config) Option[GlueCatalog] {
-	return func(o *options) {
-		o.awsConfig = cfg
-	}
-}
-
-func WithCredential(cred string) Option[RestCatalog] {
-	return func(o *options) {
-		o.credential = cred
-	}
-}
-
-func WithOAuthToken(token string) Option[RestCatalog] {
-	return func(o *options) {
-		o.oauthToken = token
-	}
-}
-
-func WithTLSConfig(config *tls.Config) Option[RestCatalog] {
-	return func(o *options) {
-		o.tlsConfig = config
-	}
-}
-
-func WithWarehouseLocation(loc string) Option[RestCatalog] {
-	return func(o *options) {
-		o.warehouseLocation = loc
-	}
-}
-
-func WithMetadataLocation(loc string) Option[RestCatalog] {
-	return func(o *options) {
-		o.metadataLocation = loc
-	}
-}
-
-func WithSigV4() Option[RestCatalog] {
-	return func(o *options) {
-		o.enableSigv4 = true
-		o.sigv4Service = "execute-api"
-	}
-}
-
-func WithSigV4RegionSvc(region, service string) Option[RestCatalog] {
-	return func(o *options) {
-		o.enableSigv4 = true
-		o.sigv4Region = region
-
-		if service == "" {
-			o.sigv4Service = "execute-api"
-		} else {
-			o.sigv4Service = service
-		}
-	}
-}
-
-func WithAuthURI(uri *url.URL) Option[RestCatalog] {
-	return func(o *options) {
-		o.authUri = uri
-	}
-}
-
-func WithPrefix(prefix string) Option[RestCatalog] {
-	return func(o *options) {
-		o.prefix = prefix
-	}
-}
-
-type Option[T GlueCatalog | RestCatalog] func(*options)
-
-type options struct {
-	awsConfig aws.Config
-
-	tlsConfig         *tls.Config
-	credential        string
-	oauthToken        string
-	warehouseLocation string
-	metadataLocation  string
-	enableSigv4       bool
-	sigv4Region       string
-	sigv4Service      string
-	prefix            string
-	authUri           *url.URL
-}
-
 type PropertiesUpdateSummary struct {
 	Removed []string `json:"removed"`
 	Updated []string `json:"updated"`
@@ -147,12 +58,12 @@ type Catalog interface {
 	// identifiers containing the information required to load the table via that catalog.
 	ListTables(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error)
 	// LoadTable loads a table from the catalog and returns a Table with the metadata.
-	LoadTable(ctx context.Context, identifier table.Identifier, props iceberg.Properties) (*table.Table, error)
+	LoadTable(ctx context.Context, identifier table.Identifier, props iceberg.Properties) (table.Table, error)
 	// DropTable tells the catalog to drop the table entirely
 	DropTable(ctx context.Context, identifier table.Identifier) error
 	// RenameTable tells the catalog to rename a given table by the identifiers
 	// provided, and then loads and returns the destination table
-	RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error)
+	RenameTable(ctx context.Context, from, to table.Identifier) (table.Table, error)
 	// ListNamespaces returns the list of available namespaces, optionally filtering by a
 	// parent namespace
 	ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error)
@@ -166,6 +77,9 @@ type Catalog interface {
 	// UpdateNamespaceProperties allows removing, adding, and/or updating properties of a namespace
 	UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier,
 		removals []string, updates iceberg.Properties) (PropertiesUpdateSummary, error)
+
+	// CreateTable tells the catalog to create a new table with the given schema and properties
+	CreateTable(ctx context.Context, location string, schema *iceberg.Schema, props iceberg.Properties) (table.Table, error)
 }
 
 const (

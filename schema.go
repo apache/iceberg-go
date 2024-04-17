@@ -279,6 +279,49 @@ func (s *Schema) Equals(other *Schema) bool {
 	})
 }
 
+// Merge combines two schemas into a single schema. It returns a schema with an ID that is one greater thatn the ID of the first schema.
+// If the two schemas have the same fields, the first schema is returned.
+func (s *Schema) Merge(other *Schema) (*Schema, error) {
+	if s.Equals(other) {
+		return s, nil
+	}
+
+	if other == nil {
+		return s, nil
+	}
+
+	if s == other {
+		return s, nil
+	}
+
+	final := s.fields
+	for _, field := range other.fields {
+		if _, ok := s.FindFieldByName(field.Name); !ok {
+			final = append(final, field)
+		}
+	}
+
+	// Sort the fields by name
+	slices.SortFunc(final, func(a, b NestedField) int {
+		switch {
+		case a.Name < b.Name:
+			return -1
+		case a.Name > b.Name:
+			return 1
+		default:
+			return 0
+		}
+	})
+
+	// Fixup field ID's
+	for i, f := range final {
+		f.ID = i
+	}
+
+	// TODO: Fixup identifier field IDs
+	return NewSchemaWithIdentifiers(s.ID+1, []int{}, final...), nil
+}
+
 // HighestFieldID returns the value of the numerically highest field ID
 // in this schema.
 func (s *Schema) HighestFieldID() int {

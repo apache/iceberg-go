@@ -31,7 +31,7 @@ import (
 type TableTestSuite struct {
 	suite.Suite
 
-	tbl *table.Table
+	tbl table.Table
 }
 
 func TestTable(t *testing.T) {
@@ -60,7 +60,7 @@ func (t *TableTestSuite) TestNewTableFromReadFile() {
 	t.Require().NoError(err)
 	t.Require().NotNil(tbl2)
 
-	t.True(t.tbl.Equals(*tbl2))
+	t.True(t.tbl.Equals(tbl2))
 }
 
 func (t *TableTestSuite) TestSchema() {

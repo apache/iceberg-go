@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/polarsignals/iceberg-go"
 	"github.com/polarsignals/iceberg-go/table"
 	"github.com/thanos-io/objstore"
@@ -19,6 +22,8 @@ var (
 const (
 	hdfsTableMetadataDir = "metadata"
 	hdfsVersionHintFile  = "version-hint.text"
+
+	namespaceSeparator = "\x1F"
 )
 
 func hdfsMetadataFileName(version int) string {
@@ -62,7 +67,7 @@ func (h *hdfs) DropTable(ctx context.Context, identifier table.Identifier) error
 	return h.bucket.Delete(ctx, filepath.Join(ns, tbl))
 }
 
-func (h *hdfs) RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error) {
+func (h *hdfs) RenameTable(ctx context.Context, from, to table.Identifier) (table.Table, error) {
 	return nil, fmt.Errorf("hdfs catalog does not support renaming tables")
 }
 
@@ -90,7 +95,7 @@ func (h *hdfs) UpdateNamespaceProperties(ctx context.Context, namespace table.Id
 	return PropertiesUpdateSummary{}, fmt.Errorf("hdfs catalog does not support updating namespace properties")
 }
 
-func (h *hdfs) LoadTable(ctx context.Context, identifier table.Identifier, _ iceberg.Properties) (*table.Table, error) {
+func (h *hdfs) LoadTable(ctx context.Context, identifier table.Identifier, _ iceberg.Properties) (table.Table, error) {
 	ns, tbl, err := splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
@@ -105,7 +110,22 @@ func (h *hdfs) LoadTable(ctx context.Context, identifier table.Identifier, _ ice
 	return t, nil
 }
 
-func (h *hdfs) loadLatestTable(ctx context.Context, identifier table.Identifier, ns, tbl string) (*table.Table, error) {
+func (h *hdfs) CreateTable(ctx context.Context, location string, schema *iceberg.Schema, props iceberg.Properties) (table.Table, error) {
+	// TODO: upload the metadata file to the bucket?
+	metadata := table.NewMetadataV1Builder(
+		location,
+		schema,
+		time.Now().UnixMilli(),
+		schema.NumFields(),
+	).
+		WithTableUUID(uuid.New()).
+		WithCurrentSchemaID(schema.ID).
+		Build()
+
+	return table.NewHDFSTable(0, table.Identifier{location}, metadata, filepath.Join(location, hdfsTableMetadataDir, hdfsMetadataFileName(0)), h.bucket), nil
+}
+
+func (h *hdfs) loadLatestTable(ctx context.Context, identifier table.Identifier, ns, tbl string) (table.Table, error) {
 	v, err := getTableVersion(ctx, h.bucket, ns, tbl)
 	if err != nil {
 		return nil, err
@@ -116,7 +136,7 @@ func (h *hdfs) loadLatestTable(ctx context.Context, identifier table.Identifier,
 		return nil, err
 	}
 
-	return table.New(identifier, md, filepath.Join(ns, tbl, hdfsTableMetadataDir, hdfsMetadataFileName(md.Version())), h.bucket), nil
+	return table.NewHDFSTable(v, identifier, md, filepath.Join(ns, tbl, hdfsTableMetadataDir, hdfsMetadataFileName(v)), h.bucket), nil
 }
 
 // getTableMetadata returns the metadata of the table at the specified version.
@@ -157,4 +177,13 @@ func getTableVersion(ctx context.Context, bucket objstore.Bucket, ns, tbl string
 	}
 
 	return v, nil
+}
+
+func splitIdentForPath(ident table.Identifier) (string, string, error) {
+	if len(ident) < 1 {
+		return "", "", fmt.Errorf("%w: missing namespace or invalid identifier %v",
+			ErrNoSuchTable, strings.Join(ident, "."))
+	}
+
+	return strings.Join(NamespaceFromIdent(ident), namespaceSeparator), TableNameFromIdent(ident), nil
 }

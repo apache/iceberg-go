@@ -7,19 +7,19 @@ import (
 	"github.com/parquet-go/parquet-go"
 )
 
-func ManifestEntryV1FromParquet(path string, size int64, r io.ReaderAt) (ManifestEntry, error) {
-	df, err := DataFileFromParquet(path, size, r)
+func ManifestEntryV1FromParquet(path string, size int64, r io.ReaderAt) (ManifestEntry, *Schema, error) {
+	df, schema, err := DataFileFromParquet(path, size, r)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return NewManifestEntryV1(EntryStatusADDED, size, df), nil
+	return NewManifestEntryV1(EntryStatusADDED, size, df), schema, nil
 }
 
-func DataFileFromParquet(path string, size int64, r io.ReaderAt) (DataFile, error) {
+func DataFileFromParquet(path string, size int64, r io.ReaderAt) (DataFile, *Schema, error) {
 	f, err := parquet.OpenFile(r, size)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	bldr := NewDataFileV1Builder(
@@ -29,8 +29,6 @@ func DataFileFromParquet(path string, size int64, r io.ReaderAt) (DataFile, erro
 		f.NumRows(),
 		size,
 	)
-
-	f.ColumnIndexes()
 
 	// Create the upper and lower bounds for each column.
 	numColumns := len(f.Metadata().RowGroups[0].Columns)
@@ -43,7 +41,9 @@ func DataFileFromParquet(path string, size int64, r io.ReaderAt) (DataFile, erro
 	bldr.WithLowerBounds(lower)
 	bldr.WithUpperBounds(upper)
 	bldr.WithColumnSizes(colSizes(f))
-	return bldr.Build(), nil
+
+	// Create the schema.
+	return bldr.Build(), parquetSchemaToIcebergSchema(-1, f.Schema()), nil
 }
 
 func colSizes(f *parquet.File) map[int]int64 {
@@ -141,5 +141,37 @@ func compare(v1, v2 parquet.Value) int {
 		return parquet.BooleanType.Compare(v1, v2)
 	default:
 		panic(fmt.Sprintf("unsupported value comparison: %v", v1.Kind()))
+	}
+}
+
+func parquetSchemaToIcebergSchema(id int, schema *parquet.Schema) *Schema {
+	fields := make([]NestedField, 0, len(schema.Fields()))
+	for i, f := range schema.Fields() {
+		fields = append(fields, NestedField{
+			Type:     parquetTypeToIcebergType(f.Type()),
+			ID:       i,
+			Name:     f.Name(),
+			Required: f.Required(),
+		})
+	}
+	return NewSchema(id, fields...)
+}
+
+func parquetTypeToIcebergType(t parquet.Type) Type {
+	switch t.Kind() {
+	case parquet.Boolean:
+		return BooleanType{}
+	case parquet.Int32:
+		return Int32Type{}
+	case parquet.Int64:
+		return Int64Type{}
+	case parquet.Float:
+		return Float32Type{}
+	case parquet.Double:
+		return Float64Type{}
+	case parquet.ByteArray:
+		return BinaryType{}
+	default:
+		panic(fmt.Sprintf("unsupported parquet type: %v", t.Kind()))
 	}
 }
