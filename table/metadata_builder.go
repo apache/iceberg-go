@@ -25,7 +25,6 @@ func NewMetadataV1Builder(
 				Loc:             location,
 				LastUpdatedMS:   lastUpdatesMs,
 				LastColumnId:    lastColumnId,
-				SchemaList:      []*iceberg.Schema{schema},
 				CurrentSchemaID: schema.ID,
 				Specs:           []iceberg.PartitionSpec{iceberg.NewPartitionSpec()},
 				Props:           iceberg.Properties{},

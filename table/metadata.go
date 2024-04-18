@@ -367,6 +367,14 @@ func (m *MetadataV1) preValidate() {
 	m.commonMetadata.preValidate()
 }
 
+func (c *MetadataV1) CurrentSchema() *iceberg.Schema {
+	if c.Schema != nil {
+		return c.Schema
+	}
+
+	return c.commonMetadata.CurrentSchema()
+}
+
 func (m *MetadataV1) UnmarshalJSON(b []byte) error {
 	type Alias MetadataV1
 	aux := (*Alias)(m)
