@@ -34,8 +34,8 @@ type hdfs struct {
 	bucket objstore.Bucket
 }
 
-func NewHDFS(bucket objstore.Bucket) Catalog {
-	return &hdfs{bucket: bucket}
+func NewHDFS(uri string, bucket objstore.Bucket) Catalog {
+	return &hdfs{bucket: NewIcebucket(uri, bucket)}
 }
 
 func (h *hdfs) CatalogType() CatalogType {
