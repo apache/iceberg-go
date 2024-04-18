@@ -3,32 +3,22 @@ package catalog
 import (
 	"bytes"
 	"context"
-	"os"
+	"io"
 	"path/filepath"
 	"testing"
 
 	"github.com/parquet-go/parquet-go"
 	"github.com/polarsignals/iceberg-go"
 	"github.com/stretchr/testify/require"
-	"github.com/thanos-io/objstore/providers/filesystem"
+	"github.com/thanos-io/objstore"
 )
 
 func Test_HDFS(t *testing.T) {
-	warehouse := filepath.Join("testdata", t.Name()) // TODO: ideally we can get this working in-memory
-	require.NoError(t, os.MkdirAll(warehouse, 0o755))
-	t.Cleanup(func() {
-		require.NoError(t, os.RemoveAll("testdata"))
-	})
+	bucket := objstore.NewInMemBucket()
 
-	bucket, err := filesystem.NewBucket(warehouse)
-	require.NoError(t, err)
+	catalog := NewHDFS("/", bucket)
 
-	wh, err := filepath.Abs(warehouse)
-	require.NoError(t, err)
-
-	catalog := NewHDFS(wh, bucket)
-
-	tablePath := filepath.Join(wh, "db", "test_table")
+	tablePath := filepath.Join("db", "test_table")
 
 	ctx := context.Background()
 	tbl, err := catalog.CreateTable(ctx, tablePath, iceberg.NewSchema(0), iceberg.Properties{})
@@ -58,12 +48,22 @@ func Test_HDFS(t *testing.T) {
 	snapshot := table.CurrentSnapshot()
 	require.NotNil(t, snapshot)
 
-	manifests, err := snapshot.Manifests(NewIcebucket(wh, bucket))
+	manifests, err := snapshot.Manifests(bucket)
 	require.NoError(t, err)
 
 	require.Len(t, manifests, 1)
-	entries, err := manifests[0].FetchEntries(NewIcebucket(wh, bucket), false)
+	entries, err := manifests[0].FetchEntries(bucket, false)
 	require.NoError(t, err)
 
 	require.Len(t, entries, 1)
+
+	rc, err := bucket.Get(ctx, entries[0].DataFile().FilePath())
+	require.NoError(t, err)
+	t.Cleanup(func() { rc.Close() })
+
+	buf, err := io.ReadAll(rc)
+	require.NoError(t, err)
+
+	_, err = parquet.OpenFile(bytes.NewReader(buf), int64(len(buf)))
+	require.NoError(t, err)
 }
