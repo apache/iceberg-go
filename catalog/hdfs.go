@@ -110,7 +110,14 @@ func (h *hdfs) LoadTable(ctx context.Context, identifier table.Identifier, _ ice
 	return t, nil
 }
 
-func (h *hdfs) CreateTable(ctx context.Context, location string, schema *iceberg.Schema, props iceberg.Properties) (table.Table, error) {
+func (h *hdfs) CreateTable(ctx context.Context, location string, schema *iceberg.Schema, _ iceberg.Properties, options ...TableOption) (table.Table, error) {
+	opts := &tableOptions{
+		partitionSpec: iceberg.NewPartitionSpec(),
+	}
+	for _, option := range options {
+		option(opts)
+	}
+
 	// TODO: upload the metadata file to the bucket?
 	metadata := table.NewMetadataV1Builder(
 		location,
@@ -120,6 +127,8 @@ func (h *hdfs) CreateTable(ctx context.Context, location string, schema *iceberg
 	).
 		WithTableUUID(uuid.New()).
 		WithCurrentSchemaID(schema.ID).
+		WithPartitionSpecs([]iceberg.PartitionSpec{opts.partitionSpec}).
+		WithDefaultSpecID(opts.partitionSpec.ID()).
 		Build()
 
 	return table.NewHDFSTable(0, table.Identifier{location}, metadata, filepath.Join(location, hdfsTableMetadataDir, hdfsMetadataFileName(0)), h.bucket), nil

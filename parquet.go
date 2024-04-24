@@ -25,7 +25,7 @@ func DataFileFromParquet(path string, size int64, r io.ReaderAt) (DataFile, *Sch
 	bldr := NewDataFileV1Builder(
 		path,
 		ParquetFile,
-		map[string]any{}, // TODO allow partition configuration
+		map[string]any{}, // TODO: At present Parquet writes are assumed to be unpartitioned.
 		f.NumRows(),
 		size,
 	)

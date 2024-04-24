@@ -44,6 +44,7 @@ func (t *hdfsTable) SnapshotWriter(options ...WriterOption) (SnapshotWriter, err
 		bucket:     t.bucket,
 		version:    t.version,
 		table:      t,
+		schema:     t.metadata.CurrentSchema(),
 	}
 
 	for _, options := range options {
@@ -72,7 +73,8 @@ func (s *hdfsSnapshotWriter) dataDir() string {
 	return filepath.Join(s.table.Location(), dataDirName)
 }
 
-// it might be worth setting this as an option.
+// Append a new new Parquet data file to the table. Append does not write into partitions but instead just adds the data file directly to the table.
+// If the table is partitioned, the upper and lower bounds of the entries data file as well as the manifest will still be populated from the Parquet file.
 func (s *hdfsSnapshotWriter) Append(ctx context.Context, r io.Reader) error {
 	b := &bytes.Buffer{}
 	rdr := io.TeeReader(r, b) // Read file into memory while uploading
@@ -94,18 +96,19 @@ func (s *hdfsSnapshotWriter) Append(ctx context.Context, r io.Reader) error {
 		if s.schema != nil && !s.schema.Equals(schema) {
 			return fmt.Errorf("schema mismatch: %v != %v", s.schema, schema)
 		}
-	}
-
-	// Merge the schema with the table schema
-	if s.schema == nil {
-		s.schema, err = s.table.Metadata().CurrentSchema().Merge(schema)
-		if err != nil {
-			return err
-		}
 	} else {
-		s.schema, err = s.schema.Merge(schema)
-		if err != nil {
-			return err
+
+		// Merge the schema with the table schema
+		if s.schema == nil {
+			s.schema, err = s.table.Metadata().CurrentSchema().Merge(schema)
+			if err != nil {
+				return err
+			}
+		} else {
+			s.schema, err = s.schema.Merge(schema)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -158,10 +161,16 @@ func (s *hdfsSnapshotWriter) Close(ctx context.Context) error {
 	}
 
 	// Create manifest list
-	newmanifest := iceberg.NewManifestV1Builder(path, attr.Size, 0, s.snapshotID).
+	bldr := iceberg.NewManifestV1Builder(path, attr.Size, 0, s.snapshotID).
 		AddedFiles(int32(len(s.entries))).
-		ExistingFiles(int32(len(manifest) - len(s.entries))).
-		Build()
+		ExistingFiles(int32(len(manifest) - len(s.entries)))
+
+	// Add partition information if the table is partitioned
+	if spec := s.table.Metadata().PartitionSpec(); !spec.IsUnpartitioned() {
+		bldr.Partitions(summarizeFields(spec, s.entries))
+	}
+
+	newmanifest := bldr.Build()
 	var manifestList []iceberg.ManifestFile
 	if appendMode { // Replace the last manifest if we are in append mode
 		manifestList = append(previousManifests[:len(previousManifests)-1], newmanifest)
@@ -214,6 +223,7 @@ func (s *hdfsSnapshotWriter) Close(ctx context.Context) error {
 }
 
 func (s *hdfsSnapshotWriter) addSnapshot(ctx context.Context, t Table, snapshot Snapshot, schema *iceberg.Schema) (Metadata, error) {
+	// TODO: it would probably be better to clone the metadata and then apply the changes
 	metadata := t.Metadata()
 
 	if !t.Metadata().CurrentSchema().Equals(schema) {
@@ -234,6 +244,8 @@ func (s *hdfsSnapshotWriter) addSnapshot(ctx context.Context, t Table, snapshot 
 		}
 	}
 
+	spec := metadata.PartitionSpec()
+
 	return NewMetadataV1Builder(
 		metadata.Location(),
 		schema,
@@ -244,6 +256,8 @@ func (s *hdfsSnapshotWriter) addSnapshot(ctx context.Context, t Table, snapshot 
 		WithCurrentSchemaID(schema.ID).
 		WithCurrentSnapshotID(snapshot.SnapshotID).
 		WithSnapshots(append(snapshots, snapshot)).
+		WithPartitionSpecs([]iceberg.PartitionSpec{spec}).
+		WithDefaultSpecID((&spec).ID()).
 		Build(), nil
 }
 
@@ -262,4 +276,36 @@ func (s *hdfsSnapshotWriter) uploadManifest(ctx context.Context, path string, wr
 	})
 
 	return errg.Wait()
+}
+
+// summarizeFields returns the field summaries for the given partition spec and manifest entries.
+func summarizeFields(spec iceberg.PartitionSpec, entries []iceberg.ManifestEntry) []iceberg.FieldSummary {
+	fieldSummaries := []iceberg.FieldSummary{}
+
+	for i := 0; i < spec.NumFields(); i++ {
+		field := spec.Field(i)
+
+		// Find the entry with the lower/upper bounds for the field
+		u, l := []byte{}, []byte{}
+		for _, entry := range entries {
+			upper := entry.DataFile().UpperBoundValues()[field.SourceID]
+			lower := entry.DataFile().LowerBoundValues()[field.SourceID]
+
+			// TODO: this may not be a correct way to compare the values
+			if len(u) == 0 || bytes.Compare(upper, u) > 0 {
+				u = upper
+			}
+
+			if len(l) == 0 || bytes.Compare(lower, l) < 0 {
+				l = lower
+			}
+		}
+
+		fieldSummaries = append(fieldSummaries, iceberg.FieldSummary{
+			LowerBound: &l,
+			UpperBound: &u,
+		})
+	}
+
+	return fieldSummaries
 }

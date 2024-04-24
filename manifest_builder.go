@@ -123,9 +123,9 @@ func WriteManifestV1(w io.Writer, entries []ManifestEntry) error {
 		w,
 		ocf.WithMetadata(map[string][]byte{
 			"format-version": []byte("1"),
-			"schema":         []byte("todo"), // TODO
-			"partition-spec": []byte("todo"), // TODO
-			"avro.codec":     []byte("deflate"),
+			//"schema":         []byte("todo"), // TODO
+			//"partition-spec": []byte("todo"), // TODO
+			"avro.codec": []byte("deflate"),
 		}),
 		ocf.WithCodec(ocf.Deflate),
 	)
@@ -147,10 +147,16 @@ func WriteManifestV1(w io.Writer, entries []ManifestEntry) error {
 // The entries must all share the same partition spec.
 func AvroSchemaFromEntriesV1(entries []ManifestEntry) string {
 	partitions := entries[0].DataFile().Partition() // Pull the first entries partition spec since they are expected to be the same for all entries.
+	partitionFieldID := 1000                        // According to the spec partition field IDs start at 1000. https://iceberg.apache.org/spec/#partition-evolution
 	b := &bytes.Buffer{}
 	if err := template.Must(
 		template.New("EntryV1Schema").
 			Funcs(template.FuncMap{
+				"PartitionFieldID": func(_ any) int {
+					prev := partitionFieldID
+					partitionFieldID++
+					return prev
+				},
 				"Type": func(i any) string {
 					switch t := i.(type) {
 					case string:

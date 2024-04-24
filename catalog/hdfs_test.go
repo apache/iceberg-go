@@ -9,6 +9,7 @@ import (
 
 	"github.com/parquet-go/parquet-go"
 	"github.com/polarsignals/iceberg-go"
+	"github.com/polarsignals/iceberg-go/table"
 	"github.com/stretchr/testify/require"
 	"github.com/thanos-io/objstore"
 )
@@ -24,7 +25,9 @@ func Test_HDFS(t *testing.T) {
 	tbl, err := catalog.CreateTable(ctx, tablePath, iceberg.NewSchema(0), iceberg.Properties{})
 	require.NoError(t, err)
 
-	writer, err := tbl.SnapshotWriter()
+	writer, err := tbl.SnapshotWriter(
+		table.WithMergeSchema(),
+	)
 	require.NoError(t, err)
 
 	type RowType struct{ FirstName, LastName string }

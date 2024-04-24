@@ -41,7 +41,7 @@ type PartitionField struct {
 	// SourceID is the source column id of the table's schema
 	SourceID int `json:"source-id"`
 	// FieldID is the partition field id across all the table partition specs
-	FieldID int `json:"field-id"`
+	FieldID int `json:"field-id,omitempty"`
 	// Name is the name of the partition field itself
 	Name string `json:"name"`
 	// Transform is the transform used to produce the partition value

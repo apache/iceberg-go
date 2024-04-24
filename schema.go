@@ -290,35 +290,16 @@ func (s *Schema) Merge(other *Schema) (*Schema, error) {
 		return s, nil
 	}
 
-	if s == other {
-		return s, nil
-	}
-
 	final := s.fields
+	nextID := len(s.fields)
 	for _, field := range other.fields {
 		if _, ok := s.FindFieldByName(field.Name); !ok {
+			field.ID = nextID
 			final = append(final, field)
+			nextID++
 		}
 	}
 
-	// Sort the fields by name
-	slices.SortFunc(final, func(a, b NestedField) int {
-		switch {
-		case a.Name < b.Name:
-			return -1
-		case a.Name > b.Name:
-			return 1
-		default:
-			return 0
-		}
-	})
-
-	// Fixup field ID's
-	for i, f := range final {
-		f.ID = i
-	}
-
-	// TODO: Fixup identifier field IDs
 	return NewSchemaWithIdentifiers(s.ID+1, []int{}, final...), nil
 }
 

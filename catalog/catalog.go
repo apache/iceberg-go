@@ -79,7 +79,19 @@ type Catalog interface {
 		removals []string, updates iceberg.Properties) (PropertiesUpdateSummary, error)
 
 	// CreateTable tells the catalog to create a new table with the given schema and properties
-	CreateTable(ctx context.Context, location string, schema *iceberg.Schema, props iceberg.Properties) (table.Table, error)
+	CreateTable(ctx context.Context, location string, schema *iceberg.Schema, props iceberg.Properties, options ...TableOption) (table.Table, error)
+}
+
+type TableOption func(*tableOptions)
+
+type tableOptions struct {
+	partitionSpec iceberg.PartitionSpec
+}
+
+func WithPartitionSpec(spec iceberg.PartitionSpec) TableOption {
+	return func(opts *tableOptions) {
+		opts.partitionSpec = spec
+	}
 }
 
 const (

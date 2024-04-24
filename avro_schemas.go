@@ -372,6 +372,7 @@ const (
 
 	// EntryV1SchemaTmpl is a Go text/template template for the Avro schema of a v1 manifest entry.
 	// It expects a map[string]any as the partitions as as the templated object. It calls a custom Type function to determine the Avro type for each partition value.
+	// It also calls a PartitionFieldID function to determine the field-id for each partition value.
 	AvroEntryV1SchemaTmpl = `{
         "type": "record",
         "name": "manifest_entry",
@@ -397,14 +398,14 @@ const (
                                 "type": "record",
                                 "name": "r102",
                                 "fields": [
-									{{ $first := true }}
-                                    {{- range $key, $value := . }}
-									{{ if $first }}
-										{{ $first = false }}
-									{{ else }}
-										,
-									{{ end }}
-                                    {"name": "{{ $key }}", "type": {{ Type $value }}}
+                                    {{- $first := true -}}
+                                    {{- range $key, $value := . -}}
+                                    {{- if $first -}}
+                                       {{ $first = false }}
+                                    {{- else -}}
+                                        ,
+                                    {{- end }}
+                                    {"field-id": {{ PartitionFieldID $key }}, "name": "{{ $key }}", "type": {{ Type $value }}}
                                     {{- end }}
                                 ]
                             },
