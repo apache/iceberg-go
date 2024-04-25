@@ -6,6 +6,7 @@ import (
 	"io"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/parquet-go/parquet-go"
 	"github.com/polarsignals/iceberg-go"
@@ -44,11 +45,11 @@ func Test_HDFS(t *testing.T) {
 	require.NoError(t, writer.Close(ctx))
 
 	// Read the data back
-	table, err := catalog.LoadTable(ctx, []string{tablePath}, iceberg.Properties{})
+	tbl, err = catalog.LoadTable(ctx, []string{tablePath}, iceberg.Properties{})
 	require.NoError(t, err)
 
-	require.Equal(t, table.Location(), tablePath)
-	snapshot := table.CurrentSnapshot()
+	require.Equal(t, tbl.Location(), tablePath)
+	snapshot := tbl.CurrentSnapshot()
 	require.NotNil(t, snapshot)
 
 	manifests, err := snapshot.Manifests(bucket)
@@ -69,4 +70,91 @@ func Test_HDFS(t *testing.T) {
 
 	_, err = parquet.OpenFile(bytes.NewReader(buf), int64(len(buf)))
 	require.NoError(t, err)
+
+	t.Run("AppendManifestWithExpiration", func(t *testing.T) {
+		w, err := tbl.SnapshotWriter(
+			table.WithMergeSchema(),
+			table.WithExpireSnapshotsOlderThan(time.Nanosecond),
+			table.WithManifestSizeBytes(1024*1024),
+		)
+		require.NoError(t, err)
+
+		b := &bytes.Buffer{}
+		err = parquet.Write(b, []RowType{
+			{FirstName: "Charlie"},
+			{FirstName: "David"},
+		})
+		require.NoError(t, err)
+		require.NoError(t, w.Append(ctx, b))
+		require.NoError(t, w.Close(ctx))
+
+		tbl, err = catalog.LoadTable(ctx, []string{tablePath}, iceberg.Properties{})
+		require.NoError(t, err)
+
+		// Expect where to only be one snapshot (the one we just added)
+		require.Len(t, tbl.Metadata().Snapshots(), 1)
+
+		// Expect there to be only one manifest file (it was appended to)
+		mfst, err := tbl.CurrentSnapshot().Manifests(bucket)
+		require.NoError(t, err)
+		require.Len(t, mfst, 1)
+	})
+
+	t.Run("FastAppendWithoutExpiration", func(t *testing.T) {
+		w, err := tbl.SnapshotWriter(
+			table.WithMergeSchema(),
+			table.WithManifestSizeBytes(1024*1024),
+			table.WithFastAppend(),
+		)
+		require.NoError(t, err)
+
+		b := &bytes.Buffer{}
+		err = parquet.Write(b, []RowType{
+			{FirstName: "Batman"},
+			{FirstName: "Robin"},
+		})
+		require.NoError(t, err)
+		require.NoError(t, w.Append(ctx, b))
+		require.NoError(t, w.Close(ctx))
+
+		tbl, err = catalog.LoadTable(ctx, []string{tablePath}, iceberg.Properties{})
+		require.NoError(t, err)
+
+		require.Len(t, tbl.Metadata().Snapshots(), 2)
+		mfst, err := tbl.CurrentSnapshot().Manifests(bucket)
+		require.NoError(t, err)
+		require.Len(t, mfst, 2)
+	})
+
+	t.Run("MergeSchema", func(t *testing.T) {
+		w, err := tbl.SnapshotWriter(
+			table.WithMergeSchema(),
+			table.WithManifestSizeBytes(1024*1024),
+			table.WithFastAppend(),
+		)
+		require.NoError(t, err)
+
+		b := &bytes.Buffer{}
+		type NewRowType struct{ FirstName, MiddleName, LastName string }
+		err = parquet.Write(b, []NewRowType{
+			{
+				FirstName:  "Thomas",
+				MiddleName: "Woodrow",
+				LastName:   "Wilson",
+			},
+		})
+		require.NoError(t, err)
+		require.NoError(t, w.Append(ctx, b))
+		require.NoError(t, w.Close(ctx))
+
+		tbl, err = catalog.LoadTable(ctx, []string{tablePath}, iceberg.Properties{})
+		require.NoError(t, err)
+
+		require.Len(t, tbl.Metadata().Snapshots(), 3)
+		mfst, err := tbl.CurrentSnapshot().Manifests(bucket)
+		require.NoError(t, err)
+		require.Len(t, mfst, 3)
+
+		require.Len(t, tbl.Metadata().CurrentSchema().Fields(), 3)
+	})
 }
