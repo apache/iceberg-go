@@ -157,4 +157,51 @@ func Test_HDFS(t *testing.T) {
 
 		require.Len(t, tbl.Metadata().CurrentSchema().Fields(), 3)
 	})
+
+	t.Run("RemoveStaleMetadata", func(t *testing.T) {
+		w, err := tbl.SnapshotWriter(
+			table.WithMetadataPreviousVersionsMax(1),
+			table.WithMetadataDeleteAfterCommit(),
+		)
+		require.NoError(t, err)
+
+		b := &bytes.Buffer{}
+		err = parquet.Write(b, []RowType{
+			{FirstName: "Steve"},
+		})
+		require.NoError(t, err)
+		require.NoError(t, w.Append(ctx, b))
+		require.NoError(t, w.Close(ctx))
+
+		tbl, err = catalog.LoadTable(ctx, []string{tablePath}, iceberg.Properties{})
+		require.NoError(t, err)
+
+		// Expect the metadata log to have been created.
+		require.Len(t, tbl.Metadata().GetMetadataLog(), 1)
+		file := tbl.Metadata().GetMetadataLog()[0].MetadataFile
+		_, err = bucket.Attributes(ctx, file)
+		require.NoError(t, err)
+
+		w, err = tbl.SnapshotWriter(
+			table.WithMetadataPreviousVersionsMax(1),
+			table.WithMetadataDeleteAfterCommit(),
+		)
+		require.NoError(t, err)
+
+		b = &bytes.Buffer{}
+		err = parquet.Write(b, []RowType{
+			{FirstName: "Erwin"},
+		})
+		require.NoError(t, err)
+		require.NoError(t, w.Append(ctx, b))
+		require.NoError(t, w.Close(ctx))
+
+		tbl, err = catalog.LoadTable(ctx, []string{tablePath}, iceberg.Properties{})
+		require.NoError(t, err)
+
+		require.Len(t, tbl.Metadata().GetMetadataLog(), 1)
+		// Validate that the file was deleted
+		_, err = bucket.Attributes(ctx, file)
+		require.True(t, bucket.IsObjNotFoundErr(err))
+	})
 }

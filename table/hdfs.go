@@ -209,7 +209,7 @@ func (s *hdfsSnapshotWriter) Close(ctx context.Context) error {
 			Operation: OpAppend,
 		},
 	}
-	md, err := s.addSnapshot(ctx, s.table, snapshot, s.schema)
+	md, staleMetadataFiles, err := s.addSnapshot(ctx, s.table, snapshot, s.schema)
 	if err != nil {
 		return err
 	}
@@ -232,11 +232,21 @@ func (s *hdfsSnapshotWriter) Close(ctx context.Context) error {
 		return err
 	}
 
+	// Delete stale metadata files
+	if s.options.metadataDeleteAfterCommit {
+		for _, file := range staleMetadataFiles {
+			if err := s.bucket.Delete(ctx, file); err != nil {
+				return fmt.Errorf("failed to delete stale metadata file %s: %w", file, err)
+			}
+		}
+	}
+
 	return nil
 }
 
-func (s *hdfsSnapshotWriter) addSnapshot(ctx context.Context, t Table, snapshot Snapshot, schema *iceberg.Schema) (Metadata, error) {
+func (s *hdfsSnapshotWriter) addSnapshot(ctx context.Context, t Table, snapshot Snapshot, schema *iceberg.Schema) (Metadata, []string, error) {
 	metadata := CloneMetadataV1(t.Metadata())
+	ts := time.Now().UnixMilli()
 
 	if !t.Metadata().CurrentSchema().Equals(schema) {
 		// need to only update the schema ID if it has changed
@@ -256,14 +266,33 @@ func (s *hdfsSnapshotWriter) addSnapshot(ctx context.Context, t Table, snapshot 
 		}
 	}
 
+	log := metadata.GetMetadataLog()
+	staleMetadataFiles := []string{}
+	if s.options.metadataPreviousVersionsMax > 0 {
+		log = append(log, MetadataLogEntry{
+			MetadataFile: s.table.MetadataLocation(),
+			TimestampMs:  ts,
+		})
+
+		// Truncate up to the maximum number of previous versions
+		if len(log) > s.options.metadataPreviousVersionsMax {
+			staleCount := len(log) - s.options.metadataPreviousVersionsMax
+			for i := 0; i < staleCount; i++ {
+				staleMetadataFiles = append(staleMetadataFiles, log[i].MetadataFile)
+			}
+			log = log[len(log)-s.options.metadataPreviousVersionsMax:]
+		}
+	}
+
 	return metadata.
 		WithSchema(schema).
 		WithSchemas(nil). // Only retain a single schema
-		WithLastUpdatedMs(time.Now().UnixMilli()).
+		WithLastUpdatedMs(ts).
 		WithCurrentSnapshotID(snapshot.SnapshotID).
 		WithSnapshots(append(snapshots, snapshot)).
 		WithPartitionSpecs([]iceberg.PartitionSpec{s.spec}). // Only retain a single partition spec
-		Build(), nil
+		WithMetadataLog(log).
+		Build(), staleMetadataFiles, nil
 }
 
 // uploadManifest uploads a manifest to the iceberg table. It's a wrapper around the bucket upload which requires a io.Reader and the manifest write functions which requires a io.Writer.

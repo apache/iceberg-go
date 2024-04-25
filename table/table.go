@@ -141,10 +141,24 @@ type SnapshotWriter interface {
 type WriterOption func(*writerOptions)
 
 type writerOptions struct {
-	fastAppendMode           bool
-	manifestSizeBytes        int
-	mergeSchema              bool
-	expireSnapshotsOlderThan time.Duration
+	fastAppendMode              bool
+	manifestSizeBytes           int
+	mergeSchema                 bool
+	expireSnapshotsOlderThan    time.Duration
+	metadataDeleteAfterCommit   bool
+	metadataPreviousVersionsMax int
+}
+
+func WithMetadataDeleteAfterCommit() WriterOption {
+	return func(o *writerOptions) {
+		o.metadataDeleteAfterCommit = true
+	}
+}
+
+func WithMetadataPreviousVersionsMax(n int) WriterOption {
+	return func(o *writerOptions) {
+		o.metadataPreviousVersionsMax = n
+	}
 }
 
 func WithExpireSnapshotsOlderThan(d time.Duration) WriterOption {
