@@ -62,9 +62,10 @@ type hdfsSnapshotWriter struct {
 	table      Table
 	options    writerOptions
 
-	schema  *iceberg.Schema
-	spec    iceberg.PartitionSpec
-	entries []iceberg.ManifestEntry
+	schemaChanged bool
+	schema        *iceberg.Schema
+	spec          iceberg.PartitionSpec
+	entries       []iceberg.ManifestEntry
 }
 
 func (s *hdfsSnapshotWriter) metadataDir() string {
@@ -94,34 +95,33 @@ func (s *hdfsSnapshotWriter) Append(ctx context.Context, r io.Reader) error {
 	}
 
 	// If merge schema is disabled; ensure that the schema isn't changing.
-	if !s.options.mergeSchema {
-		if s.schema != nil && !s.schema.Equals(schema) {
-			return fmt.Errorf("schema mismatch: %v != %v", s.schema, schema)
+	if s.schema != nil && !s.schema.Equals(schema) {
+		if !s.options.mergeSchema {
+			return fmt.Errorf("unexpected schema mismatch: %v != %v", s.schema, schema)
 		}
+
+		s.schemaChanged = true
 	}
 
 	s.schema = schema
 
 	// Update the partition spec if the schema has changed so that the spec ID's match the new field IDs
-	if s.schema.ID != s.table.Metadata().CurrentSchema().ID {
-		spec := s.table.Metadata().PartitionSpec()
-		if !spec.IsUnpartitioned() {
-			updatedFields := make([]iceberg.PartitionField, 0, spec.NumFields())
-			for i := 0; i < spec.NumFields(); i++ {
-				field := spec.Field(i)
-				schemaField, ok := s.schema.FindFieldByName(field.Name)
-				if !ok {
-					return fmt.Errorf("partition field %s not found in schema", field.Name)
-				}
-
-				updatedFields = append(updatedFields, iceberg.PartitionField{
-					SourceID:  schemaField.ID,
-					Name:      field.Name,
-					Transform: field.Transform,
-				})
+	if spec := s.table.Metadata().PartitionSpec(); s.schemaChanged && !spec.IsUnpartitioned() {
+		updatedFields := make([]iceberg.PartitionField, 0, spec.NumFields())
+		for i := 0; i < spec.NumFields(); i++ {
+			field := spec.Field(i)
+			schemaField, ok := s.schema.FindFieldByName(field.Name)
+			if !ok {
+				return fmt.Errorf("partition field %s not found in schema", field.Name)
 			}
-			s.spec = iceberg.NewPartitionSpec(updatedFields...)
+
+			updatedFields = append(updatedFields, iceberg.PartitionField{
+				SourceID:  schemaField.ID,
+				Name:      field.Name,
+				Transform: field.Transform,
+			})
 		}
+		s.spec = iceberg.NewPartitionSpec(updatedFields...)
 	}
 
 	s.entries = append(s.entries, entry)
@@ -144,10 +144,10 @@ func (s *hdfsSnapshotWriter) Close(ctx context.Context) error {
 		}
 	}
 
-	// If not in fast append mode; check if we can append to the previous manifest file.
-	// TODO(thor): we also can't append a manifest if the schem has changed.
 	appendMode := false
-	if len(previousManifests) != 0 && !s.options.fastAppendMode && s.options.manifestSizeBytes > 0 {
+	// If the schema hasn't changed we can append to the previous manifest file if it's not too large and we aren't in fast append mode.
+	// Otherweise we always create a new manifest file.
+	if !s.schemaChanged && len(previousManifests) != 0 && !s.options.fastAppendMode && s.options.manifestSizeBytes > 0 {
 		// Check the size of the previous manifest file
 		latest := previousManifests[len(previousManifests)-1]
 		if latest.Length() < int64(s.options.manifestSizeBytes) { // Append to the latest manifest
@@ -180,7 +180,7 @@ func (s *hdfsSnapshotWriter) Close(ctx context.Context) error {
 
 	// Add partition information if the table is partitioned
 	if !s.spec.IsUnpartitioned() {
-		bldr.Partitions(summarizeFields(s.spec, s.entries))
+		bldr.Partitions(summarizeFields(s.spec, manifest))
 	}
 
 	newmanifest := bldr.Build()
@@ -304,7 +304,6 @@ func summarizeFields(spec iceberg.PartitionSpec, entries []iceberg.ManifestEntry
 			upper := entry.DataFile().UpperBoundValues()[field.SourceID]
 			lower := entry.DataFile().LowerBoundValues()[field.SourceID]
 
-			// TODO: this may not be a correct way to compare the values
 			if len(u) == 0 || bytes.Compare(upper, u) > 0 {
 				u = upper
 			}
