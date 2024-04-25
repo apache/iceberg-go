@@ -52,6 +52,8 @@ type Metadata interface {
 	// Schemas returns the list of schemas, stored as objects with their
 	// schema-id.
 	Schemas() []*iceberg.Schema
+	// SchemaID returns the ID of the current schema.
+	SchemaID() int
 	// CurrentSchema returns the table's current schema.
 	CurrentSchema() *iceberg.Schema
 	// PartitionSpecs returns the list of all partition specs in the table.
@@ -73,6 +75,8 @@ type Metadata interface {
 	// SnapshotByID find and return a specific snapshot by its ID. Returns
 	// nil if the ID is not found in the list of snapshots.
 	SnapshotByID(int64) *Snapshot
+	// SnapshotID returns the ID of the current snapshot.
+	SnapshotID() *int64
 	// SnapshotByName searches the list of snapshots for a snapshot with a given
 	// ref name. Returns nil if there's no ref with this name for a snapshot.
 	SnapshotByName(name string) *Snapshot
@@ -88,6 +92,15 @@ type Metadata interface {
 	// to be used for arbitrary metadata. For example, commit.retry.num-retries
 	// is used to control the number of commit retries.
 	Properties() iceberg.Properties
+
+	// GetSnapshotLog is a list of snapshot log entries. This is used to track
+	GetSnapshotLog() []SnapshotLogEntry
+	// GetMetadataLog is a list of metadata log entries. This is used to track
+	GetMetadataLog() []MetadataLogEntry
+	// SortOrderID returns the ID of the current sort order.
+	SortOrderID() int
+	// SnapshotRefs is a map of snapshot ref names to snapshot refs. This is used to
+	SnapshotRefs() map[string]SnapshotRef
 }
 
 var (
@@ -156,11 +169,17 @@ type commonMetadata struct {
 	Refs               map[string]SnapshotRef  `json:"refs,omitempty"`
 }
 
-func (c *commonMetadata) TableUUID() uuid.UUID       { return c.UUID }
-func (c *commonMetadata) Location() string           { return c.Loc }
-func (c *commonMetadata) LastUpdatedMillis() int64   { return c.LastUpdatedMS }
-func (c *commonMetadata) LastColumnID() int          { return c.LastColumnId }
-func (c *commonMetadata) Schemas() []*iceberg.Schema { return c.SchemaList }
+func (c *commonMetadata) GetSnapshotLog() []SnapshotLogEntry   { return c.SnapshotLog }
+func (c *commonMetadata) GetMetadataLog() []MetadataLogEntry   { return c.MetadataLog }
+func (c *commonMetadata) SnapshotRefs() map[string]SnapshotRef { return c.Refs }
+func (c *commonMetadata) SortOrderID() int                     { return c.DefaultSortOrderID }
+func (c *commonMetadata) SnapshotID() *int64                   { return c.CurrentSnapshotID }
+func (c *commonMetadata) SchemaID() int                        { return c.CurrentSchemaID }
+func (c *commonMetadata) TableUUID() uuid.UUID                 { return c.UUID }
+func (c *commonMetadata) Location() string                     { return c.Loc }
+func (c *commonMetadata) LastUpdatedMillis() int64             { return c.LastUpdatedMS }
+func (c *commonMetadata) LastColumnID() int                    { return c.LastColumnId }
+func (c *commonMetadata) Schemas() []*iceberg.Schema           { return c.SchemaList }
 func (c *commonMetadata) CurrentSchema() *iceberg.Schema {
 	for _, s := range c.SchemaList {
 		if s.ID == c.CurrentSchemaID {

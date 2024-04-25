@@ -236,8 +236,7 @@ func (s *hdfsSnapshotWriter) Close(ctx context.Context) error {
 }
 
 func (s *hdfsSnapshotWriter) addSnapshot(ctx context.Context, t Table, snapshot Snapshot, schema *iceberg.Schema) (Metadata, error) {
-	// TODO: it would probably be better to clone the metadata and then apply the changes
-	metadata := t.Metadata()
+	metadata := CloneMetadataV1(t.Metadata())
 
 	if !t.Metadata().CurrentSchema().Equals(schema) {
 		// need to only update the schema ID if it has changed
@@ -257,20 +256,13 @@ func (s *hdfsSnapshotWriter) addSnapshot(ctx context.Context, t Table, snapshot 
 		}
 	}
 
-	spec := metadata.PartitionSpec()
-
-	return NewMetadataV1Builder(
-		metadata.Location(),
-		schema,
-		time.Now().UnixMilli(),
-		schema.NumFields(),
-	).
-		WithTableUUID(metadata.TableUUID()).
-		WithCurrentSchemaID(schema.ID).
+	return metadata.
+		WithSchema(schema).
+		WithSchemas(nil). // Only retain a single schema
+		WithLastUpdatedMs(time.Now().UnixMilli()).
 		WithCurrentSnapshotID(snapshot.SnapshotID).
 		WithSnapshots(append(snapshots, snapshot)).
-		WithPartitionSpecs([]iceberg.PartitionSpec{s.spec}).
-		WithDefaultSpecID((&spec).ID()).
+		WithPartitionSpecs([]iceberg.PartitionSpec{s.spec}). // Only retain a single partition spec
 		Build(), nil
 }
 

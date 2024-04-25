@@ -33,6 +33,58 @@ func NewMetadataV1Builder(
 	}
 }
 
+func CloneMetadataV1(m Metadata) *MetadataV1Builder {
+	b := &MetadataV1Builder{
+		MetadataV1: &MetadataV1{
+			Schema:    m.CurrentSchema(),
+			Partition: []iceberg.PartitionField{}, // Deprecated: use partition-specs and default-spec-id instead. See: https://iceberg.apache.org/spec/#table-metadata
+			commonMetadata: commonMetadata{
+				FormatVersion:      m.Version(),
+				UUID:               m.TableUUID(),
+				Loc:                m.Location(),
+				Specs:              m.PartitionSpecs(),
+				DefaultSpecID:      m.DefaultPartitionSpec(),
+				Props:              m.Properties(),
+				SchemaList:         m.Schemas(),
+				CurrentSchemaID:    m.SchemaID(),
+				LastPartitionID:    m.LastPartitionSpecID(),
+				SnapshotList:       m.Snapshots(),
+				CurrentSnapshotID:  m.SnapshotID(),
+				SnapshotLog:        m.GetSnapshotLog(),
+				MetadataLog:        m.GetMetadataLog(),
+				SortOrderList:      m.SortOrders(),
+				DefaultSortOrderID: m.SortOrderID(),
+				Refs:               m.SnapshotRefs(),
+			},
+		},
+	}
+	return b
+
+}
+
+func (b *MetadataV1Builder) WithLastUpdatedMs(lastUpdatedMs int64) *MetadataV1Builder {
+	b.LastUpdatedMS = lastUpdatedMs
+	return b
+}
+
+func (b *MetadataV1Builder) WithFormatVersion(version int) *MetadataV1Builder {
+	b.FormatVersion = version
+	return b
+}
+
+func (b *MetadataV1Builder) WithLocation(location string) *MetadataV1Builder {
+	b.Loc = location
+	return b
+}
+
+func (b *MetadataV1Builder) WithSchema(schema *iceberg.Schema) *MetadataV1Builder {
+	b.Schema = schema
+	b.CurrentSchemaID = schema.ID
+	b.LastColumnId = schema.NumFields()
+	b.SchemaList = append(b.SchemaList, schema)
+	return b
+}
+
 // WithTableUUID sets the optional table-uuid field of the metadata.
 func (b *MetadataV1Builder) WithTableUUID(id uuid.UUID) *MetadataV1Builder {
 	b.UUID = id
