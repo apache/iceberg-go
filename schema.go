@@ -20,6 +20,7 @@ package iceberg
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync/atomic"
 
@@ -291,13 +292,19 @@ func (s *Schema) Merge(other *Schema) (*Schema, error) {
 	}
 
 	final := s.fields
-	nextID := len(s.fields)
 	for _, field := range other.fields {
 		if _, ok := s.FindFieldByName(field.Name); !ok {
-			field.ID = nextID
 			final = append(final, field)
-			nextID++
 		}
+	}
+
+	// Sort the schema by name
+	sort.Slice(final, func(i, j int) bool {
+		return final[i].Name < final[j].Name
+	})
+
+	for i := range final {
+		final[i].ID = i
 	}
 
 	return NewSchemaWithIdentifiers(s.ID+1, []int{}, final...), nil

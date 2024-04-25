@@ -403,7 +403,7 @@ func (m *ManifestTestSuite) writeManifestEntries() {
 	for _, ent := range manifestEntryV1Records {
 		entries = append(entries, ent)
 	}
-	m.Require().NoError(WriteManifestV1(&m.v1ManifestEntries, entries))
+	m.Require().NoError(WriteManifestV1(&m.v1ManifestEntries, NewSchema(0), entries))
 
 	enc, err := ocf.NewEncoder(AvroManifestEntryV2Schema,
 		&m.v2ManifestEntries, ocf.WithMetadata(map[string][]byte{

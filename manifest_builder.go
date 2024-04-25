@@ -2,6 +2,7 @@ package iceberg
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"text/template"
@@ -117,13 +118,18 @@ func WriteManifestListV1(w io.Writer, files []ManifestFile) error {
 	return nil
 }
 
-func WriteManifestV1(w io.Writer, entries []ManifestEntry) error {
+func WriteManifestV1(w io.Writer, schema *Schema, entries []ManifestEntry) error {
+	b, err := json.Marshal(schema)
+	if err != nil {
+		return fmt.Errorf("failed to marshal schema: %w", err)
+	}
+
 	enc, err := ocf.NewEncoder(
 		AvroSchemaFromEntriesV1(entries),
 		w,
 		ocf.WithMetadata(map[string][]byte{
 			"format-version": []byte("1"),
-			//"schema":         []byte("todo"), // TODO
+			"schema":         b,
 			//"partition-spec": []byte("todo"), // TODO
 			"avro.codec": []byte("deflate"),
 		}),
