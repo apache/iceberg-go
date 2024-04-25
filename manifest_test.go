@@ -20,6 +20,7 @@ package iceberg
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -405,9 +406,13 @@ func (m *ManifestTestSuite) writeManifestEntries() {
 	}
 	m.Require().NoError(WriteManifestV1(&m.v1ManifestEntries, NewSchema(0), entries))
 
+	b, err := json.Marshal(NewSchema(0))
+	m.Require().NoError(err)
+
 	enc, err := ocf.NewEncoder(AvroManifestEntryV2Schema,
 		&m.v2ManifestEntries, ocf.WithMetadata(map[string][]byte{
 			"format-version": []byte("2"),
+			"schema":         b,
 			"avro.codec":     []byte("deflate"),
 		}), ocf.WithCodec(ocf.Deflate))
 	m.Require().NoError(err)
@@ -430,7 +435,7 @@ func (m *ManifestTestSuite) TestManifestEntriesV1() {
 	}
 	bucket.Upload(context.Background(), manifest.FilePath(), bytes.NewReader(m.v1ManifestEntries.Bytes()))
 
-	entries, err := manifest.FetchEntries(bucket, false)
+	entries, _, err := manifest.FetchEntries(bucket, false)
 	m.Require().NoError(err)
 	m.Len(entries, 2)
 	m.Zero(manifest.PartitionSpecID())
@@ -627,7 +632,7 @@ func (m *ManifestTestSuite) TestManifestEntriesV2() {
 	}
 	bucket.Upload(context.Background(), manifest.FilePath(), bytes.NewReader(m.v2ManifestEntries.Bytes()))
 
-	entries, err := manifest.FetchEntries(bucket, false)
+	entries, _, err := manifest.FetchEntries(bucket, false)
 	m.Require().NoError(err)
 	m.Len(entries, 2)
 	m.Zero(manifest.PartitionSpecID())

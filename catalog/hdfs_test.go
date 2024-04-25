@@ -55,7 +55,7 @@ func Test_HDFS(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, manifests, 1)
-	entries, err := manifests[0].FetchEntries(bucket, false)
+	entries, _, err := manifests[0].FetchEntries(bucket, false)
 	require.NoError(t, err)
 
 	require.Len(t, entries, 1)

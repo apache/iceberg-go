@@ -19,6 +19,8 @@ package iceberg
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"sync"
 
@@ -208,7 +210,7 @@ func (m *manifestFileV1) Partitions() []FieldSummary {
 	return *m.PartitionList
 }
 
-func (m *manifestFileV1) FetchEntries(bucket objstore.Bucket, discardDeleted bool) ([]ManifestEntry, error) {
+func (m *manifestFileV1) FetchEntries(bucket objstore.Bucket, discardDeleted bool) ([]ManifestEntry, *Schema, error) {
 	return fetchManifestEntries(m, bucket, discardDeleted)
 }
 
@@ -358,30 +360,36 @@ func (m *manifestFileV2) HasExistingFiles() bool {
 	return m.ExistingFilesCount > 0
 }
 
-func (m *manifestFileV2) FetchEntries(bucket objstore.Bucket, discardDeleted bool) ([]ManifestEntry, error) {
+func (m *manifestFileV2) FetchEntries(bucket objstore.Bucket, discardDeleted bool) ([]ManifestEntry, *Schema, error) {
 	return fetchManifestEntries(m, bucket, discardDeleted)
 }
 
-func fetchManifestEntries(m ManifestFile, bucket objstore.Bucket, discardDeleted bool) ([]ManifestEntry, error) {
+func fetchManifestEntries(m ManifestFile, bucket objstore.Bucket, discardDeleted bool) ([]ManifestEntry, *Schema, error) {
 	f, err := bucket.Get(context.TODO(), m.FilePath())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer f.Close()
 
 	dec, err := ocf.NewDecoder(f)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
+	// Extract the table shcmema from the metadata
+	schema := &Schema{}
 	metadata := dec.Metadata()
+	if err := json.Unmarshal(metadata["schema"], schema); err != nil {
+		return nil, nil, fmt.Errorf("failed to unmarshal schema: %w", err)
+	}
+
 	isVer1, isFallback := true, false
 	if string(metadata["format-version"]) == "2" {
 		isVer1 = false
 	} else {
 		sc, err := avro.ParseBytes(dec.Metadata()["avro.schema"])
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		for _, f := range sc.(*avro.RecordSchema).Fields() {
@@ -416,7 +424,7 @@ func fetchManifestEntries(m ManifestFile, bucket objstore.Bucket, discardDeleted
 		}
 
 		if err := dec.Decode(tmp); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		if isFallback {
@@ -429,7 +437,7 @@ func fetchManifestEntries(m ManifestFile, bucket objstore.Bucket, discardDeleted
 		}
 	}
 
-	return results, dec.Error()
+	return results, schema, dec.Error()
 }
 
 // ManifestFile is the interface which covers both V1 and V2 manifest files.
@@ -488,10 +496,11 @@ type ManifestFile interface {
 	// HasExistingFiles returns true if ExistingDataFiles > 0 or if it was null.
 	HasExistingFiles() bool
 	// FetchEntries reads the manifest list file to fetch the list of
-	// manifest entries using the provided file system IO interface.
+	// manifest entries using the provided bucket. It will return the schema of the table
+	// when the manifest was written.
 	// If discardDeleted is true, entries for files containing deleted rows
 	// will be skipped.
-	FetchEntries(bucket objstore.Bucket, discardDeleted bool) ([]ManifestEntry, error)
+	FetchEntries(bucket objstore.Bucket, discardDeleted bool) ([]ManifestEntry, *Schema, error)
 }
 
 // ReadManifestList reads in an avro manifest list file and returns a slice

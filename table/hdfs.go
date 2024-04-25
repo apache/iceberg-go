@@ -151,7 +151,7 @@ func (s *hdfsSnapshotWriter) Close(ctx context.Context) error {
 		// Check the size of the previous manifest file
 		latest := previousManifests[len(previousManifests)-1]
 		if latest.Length() < int64(s.options.manifestSizeBytes) { // Append to the latest manifest
-			previous, err := latest.FetchEntries(s.bucket, false)
+			previous, _, err := latest.FetchEntries(s.bucket, false)
 			if err != nil {
 				return err
 			}
