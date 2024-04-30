@@ -20,6 +20,7 @@ module github.com/polarsignals/iceberg-go
 go 1.21
 
 require (
+	github.com/go-kit/log v0.2.1
 	github.com/google/uuid v1.6.0
 	github.com/hamba/avro/v2 v2.16.0
 	github.com/oklog/ulid v1.3.1
@@ -36,7 +37,6 @@ require (
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/efficientgo/core v1.0.0-rc.0.0.20221201130417-ba593f67d2a4 // indirect
-	github.com/go-kit/log v0.2.1 // indirect
 	github.com/go-logfmt/logfmt v0.5.1 // indirect
 	github.com/golang/protobuf v1.5.3 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
@@ -60,6 +60,5 @@ require (
 	github.com/segmentio/encoding v0.3.6 // indirect
 	golang.org/x/sys v0.17.0 // indirect
 	google.golang.org/protobuf v1.31.0 // indirect
-	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

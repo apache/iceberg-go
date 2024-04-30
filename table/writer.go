@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/go-kit/log/level"
 	"github.com/polarsignals/iceberg-go"
 	"github.com/thanos-io/objstore"
 	"golang.org/x/sync/errgroup"
@@ -170,7 +171,7 @@ func (s *snapshotWriter) Close(ctx context.Context) error {
 			Operation: OpAppend,
 		},
 	}
-	md, staleMetadataFiles, staleSnapshotFiles, err := s.addSnapshot(ctx, s.table, snapshot, s.schema)
+	md, staleMetadataFiles, staleSnapshots, err := s.addSnapshot(ctx, s.table, snapshot, s.schema)
 	if err != nil {
 		return err
 	}
@@ -191,26 +192,75 @@ func (s *snapshotWriter) Close(ctx context.Context) error {
 		return err
 	}
 
+	// Cleanup stale snapshot files and metadata files (if configured)
+	s.cleanup(ctx, staleMetadataFiles, staleSnapshots, md)
+	return nil
+}
+
+func (s *snapshotWriter) cleanup(ctx context.Context, metadataFiles []string, staleSnapshots []Snapshot, md Metadata) {
 	// Delete stale metadata files
 	if s.options.metadataDeleteAfterCommit {
-		for _, file := range staleMetadataFiles {
+		for _, file := range metadataFiles {
 			if err := s.bucket.Delete(ctx, file); err != nil {
-				return fmt.Errorf("failed to delete stale metadata file %s: %w", file, err)
+				level.Error(s.options.logger).Log("msg", "failed to delete old file", "file", file, "err", err)
 			}
 		}
 	}
 
-	// Delete stale snapshot files
-	for _, file := range staleSnapshotFiles {
-		if err := s.bucket.Delete(ctx, file); err != nil {
-			return fmt.Errorf("failed to delete old snapshot file %s: %w", file, err)
+	if len(staleSnapshots) == 0 {
+		return
+	}
+
+	// Cleanup snapshots; First find if any manifests are no longer reachable by the expired snapshots and remove those.
+	// Then remove the snapshot files.
+
+	// Find all the reachable manifest files from snapshots
+	currentManifests := map[string]struct{}{}
+	for _, snapshot := range md.Snapshots() {
+		manifests, err := snapshot.Manifests(s.bucket)
+		if err != nil {
+			level.Error(s.options.logger).Log("msg", "failed to fetch manifests", "snapshot", snapshot.SnapshotID, "file", snapshot.ManifestList, "err", err)
+			continue
+		}
+
+		for _, manifest := range manifests {
+			currentManifests[manifest.FilePath()] = struct{}{}
 		}
 	}
 
-	return nil
+	oldManifests := map[string]struct{}{}
+	for _, snapshot := range staleSnapshots {
+		manifests, err := snapshot.Manifests(s.bucket)
+		if err != nil {
+			level.Error(s.options.logger).Log("msg", "failed to fetch manifests", "snapshot", snapshot.SnapshotID, "file", snapshot.ManifestList, "err", err)
+			continue
+		}
+
+		for _, manifest := range manifests {
+			oldManifests[manifest.FilePath()] = struct{}{}
+		}
+	}
+
+	// Remove stale manifest files
+	for manifest := range oldManifests {
+		if _, ok := currentManifests[manifest]; ok {
+			continue
+		}
+
+		if err := s.bucket.Delete(ctx, manifest); err != nil {
+			level.Error(s.options.logger).Log("msg", "failed to delete stale manifest", "file", manifest, "err", err)
+		}
+	}
+
+	// Delete stale snapshot files
+	for _, snapshot := range staleSnapshots {
+		if err := s.bucket.Delete(ctx, snapshot.ManifestList); err != nil {
+			level.Error(s.options.logger).Log("msg", "failed to delete stale snapshot", "snapshot", snapshot.SnapshotID, "file", snapshot.ManifestList, "err", err)
+		}
+	}
 }
 
-func (s *snapshotWriter) addSnapshot(ctx context.Context, t Table, snapshot Snapshot, schema *iceberg.Schema) (Metadata, []string, []string, error) {
+func (s *snapshotWriter) addSnapshot(ctx context.Context, t Table, snapshot Snapshot, schema *iceberg.Schema) (Metadata, []string, []Snapshot, error) {
 	metadata := CloneMetadataV1(t.Metadata())
 	ts := time.Now().UnixMilli()
 
@@ -223,14 +273,14 @@ func (s *snapshotWriter) addSnapshot(ctx context.Context, t Table, snapshot Snap
 
 	// Expire old snapshots if requested
 	snapshots := metadata.Snapshots()
-	staleSnapshotFiles := []string{}
+	staleSnapshots := []Snapshot{}
 	if s.options.expireSnapshotsOlderThan != 0 {
 		snapshots = []Snapshot{}
 		for _, snapshot := range metadata.Snapshots() {
 			if time.Since(time.UnixMilli(snapshot.TimestampMs)) <= s.options.expireSnapshotsOlderThan {
 				snapshots = append(snapshots, snapshot)
 			} else {
-				staleSnapshotFiles = append(staleSnapshotFiles, snapshot.ManifestList)
+				staleSnapshots = append(staleSnapshots, snapshot)
 			}
 		}
 	}
@@ -261,7 +311,7 @@ func (s *snapshotWriter) addSnapshot(ctx context.Context, t Table, snapshot Snap
 		WithSnapshots(append(snapshots, snapshot)).
 		WithPartitionSpecs([]iceberg.PartitionSpec{s.spec}). // Only retain a single partition spec
 		WithMetadataLog(log).
-		Build(), staleMetadataFiles, staleSnapshotFiles, nil
+		Build(), staleMetadataFiles, staleSnapshots, nil
 }
 
 // uploadManifest uploads a manifest to the iceberg table. It's a wrapper around the bucket upload which requires a io.Reader and the manifest write functions which requires a io.Writer.

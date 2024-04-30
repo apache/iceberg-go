@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/go-kit/log"
 	"github.com/oklog/ulid"
 	"github.com/parquet-go/parquet-go"
 	"github.com/polarsignals/iceberg-go"
@@ -147,6 +148,14 @@ type writerOptions struct {
 	expireSnapshotsOlderThan    time.Duration
 	metadataDeleteAfterCommit   bool
 	metadataPreviousVersionsMax int
+
+	logger log.Logger
+}
+
+func WithLogger(logger log.Logger) WriterOption {
+	return func(o *writerOptions) {
+		o.logger = logger
+	}
 }
 
 func WithMetadataDeleteAfterCommit() WriterOption {
