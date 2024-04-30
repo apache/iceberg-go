@@ -81,7 +81,7 @@ func (b *MetadataV1Builder) WithSchema(schema *iceberg.Schema) *MetadataV1Builde
 	b.Schema = schema
 	b.CurrentSchemaID = schema.ID
 	b.LastColumnId = schema.NumFields()
-	b.SchemaList = append(b.SchemaList, schema)
+	b.SchemaList = []*iceberg.Schema{schema}
 	return b
 }
 
@@ -93,7 +93,7 @@ func (b *MetadataV1Builder) WithTableUUID(id uuid.UUID) *MetadataV1Builder {
 
 // WithSchemas sets the optional schemas field of the metadata.
 func (b *MetadataV1Builder) WithSchemas(schemas []*iceberg.Schema) *MetadataV1Builder {
-	b.SchemaList = append(b.SchemaList, schemas...)
+	b.SchemaList = schemas
 	return b
 }
 
