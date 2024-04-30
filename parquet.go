@@ -94,6 +94,10 @@ func maxColValue(col int, r *parquet.File) []byte {
 
 // https://iceberg.apache.org/spec/#appendix-d-single-value-serialization
 func binarySingleValueSerialize(v parquet.Value) []byte {
+	if v.IsNull() {
+		return nil
+	}
+
 	switch v.Kind() {
 	case parquet.ByteArray:
 		return v.Bytes()
