@@ -79,6 +79,10 @@ func Test_HDFS(t *testing.T) {
 		)
 		require.NoError(t, err)
 
+		prev := tbl.CurrentSnapshot().ManifestList
+		_, err = bucket.Attributes(ctx, prev)
+		require.NoError(t, err)
+
 		b := &bytes.Buffer{}
 		err = parquet.Write(b, []RowType{
 			{FirstName: "Charlie"},
@@ -98,6 +102,11 @@ func Test_HDFS(t *testing.T) {
 		mfst, err := tbl.CurrentSnapshot().Manifests(bucket)
 		require.NoError(t, err)
 		require.Len(t, mfst, 1)
+
+		// Expect the manifest file to have been deleted
+		_, err = bucket.Attributes(ctx, prev)
+		require.Error(t, err)
+		require.True(t, bucket.IsObjNotFoundErr(err))
 	})
 
 	t.Run("FastAppendWithoutExpiration", func(t *testing.T) {

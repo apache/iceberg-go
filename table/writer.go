@@ -170,7 +170,7 @@ func (s *snapshotWriter) Close(ctx context.Context) error {
 			Operation: OpAppend,
 		},
 	}
-	md, staleMetadataFiles, err := s.addSnapshot(ctx, s.table, snapshot, s.schema)
+	md, staleMetadataFiles, staleSnapshotFiles, err := s.addSnapshot(ctx, s.table, snapshot, s.schema)
 	if err != nil {
 		return err
 	}
@@ -200,10 +200,17 @@ func (s *snapshotWriter) Close(ctx context.Context) error {
 		}
 	}
 
+	// Delete stale snapshot files
+	for _, file := range staleSnapshotFiles {
+		if err := s.bucket.Delete(ctx, file); err != nil {
+			return fmt.Errorf("failed to delete old snapshot file %s: %w", file, err)
+		}
+	}
+
 	return nil
 }
 
-func (s *snapshotWriter) addSnapshot(ctx context.Context, t Table, snapshot Snapshot, schema *iceberg.Schema) (Metadata, []string, error) {
+func (s *snapshotWriter) addSnapshot(ctx context.Context, t Table, snapshot Snapshot, schema *iceberg.Schema) (Metadata, []string, []string, error) {
 	metadata := CloneMetadataV1(t.Metadata())
 	ts := time.Now().UnixMilli()
 
@@ -216,11 +223,14 @@ func (s *snapshotWriter) addSnapshot(ctx context.Context, t Table, snapshot Snap
 
 	// Expire old snapshots if requested
 	snapshots := metadata.Snapshots()
+	staleSnapshotFiles := []string{}
 	if s.options.expireSnapshotsOlderThan != 0 {
 		snapshots = []Snapshot{}
 		for _, snapshot := range metadata.Snapshots() {
 			if time.Since(time.UnixMilli(snapshot.TimestampMs)) <= s.options.expireSnapshotsOlderThan {
 				snapshots = append(snapshots, snapshot)
+			} else {
+				staleSnapshotFiles = append(staleSnapshotFiles, snapshot.ManifestList)
 			}
 		}
 	}
@@ -251,7 +261,7 @@ func (s *snapshotWriter) addSnapshot(ctx context.Context, t Table, snapshot Snap
 		WithSnapshots(append(snapshots, snapshot)).
 		WithPartitionSpecs([]iceberg.PartitionSpec{s.spec}). // Only retain a single partition spec
 		WithMetadataLog(log).
-		Build(), staleMetadataFiles, nil
+		Build(), staleMetadataFiles, staleSnapshotFiles, nil
 }
 
 // uploadManifest uploads a manifest to the iceberg table. It's a wrapper around the bucket upload which requires a io.Reader and the manifest write functions which requires a io.Writer.
