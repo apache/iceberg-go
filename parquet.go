@@ -101,11 +101,11 @@ func binarySingleValueSerialize(v parquet.Value) []byte {
 		return v.Bytes()
 	case parquet.Double:
 		b := make([]byte, 8)
-		binary.LittleEndian.PutUint32(b, uint32(v.Double()))
+		binary.LittleEndian.PutUint64(b, uint64(v.Double()))
 		return b
 	case parquet.Int64:
 		b := make([]byte, 8)
-		binary.LittleEndian.PutUint32(b, uint32(v.Int64()))
+		binary.LittleEndian.PutUint64(b, uint64(v.Int64()))
 		return b
 	case parquet.Int32:
 		b := make([]byte, 4)
