@@ -132,6 +132,13 @@ func (b *MetadataV1Builder) WithProperties(properties iceberg.Properties) *Metad
 func (b *MetadataV1Builder) WithCurrentSnapshotID(currentSnapshotID int64) *MetadataV1Builder {
 	id := currentSnapshotID // copy the value to prevent modification after build
 	b.CurrentSnapshotID = &id
+	if b.Refs == nil {
+		b.Refs = make(map[string]SnapshotRef)
+	}
+	b.Refs["main"] = SnapshotRef{
+		SnapshotID:      currentSnapshotID,
+		SnapshotRefType: BranchRef,
+	}
 	return b
 }
 
