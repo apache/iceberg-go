@@ -3,6 +3,7 @@ package table
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -140,7 +141,7 @@ func (s *snapshotWriter) Close(ctx context.Context) error {
 
 	// Add partition information if the table is partitioned
 	if !s.spec.IsUnpartitioned() {
-		bldr.Partitions(summarizeFields(s.spec, manifest))
+		bldr.Partitions(summarizeFields(s.spec, s.schema, manifest))
 	}
 
 	newmanifest := bldr.Build()
@@ -271,11 +272,12 @@ func (s *snapshotWriter) uploadManifest(ctx context.Context, path string, write 
 }
 
 // summarizeFields returns the field summaries for the given partition spec and manifest entries.
-func summarizeFields(spec iceberg.PartitionSpec, entries []iceberg.ManifestEntry) []iceberg.FieldSummary {
+func summarizeFields(spec iceberg.PartitionSpec, schema *iceberg.Schema, entries []iceberg.ManifestEntry) []iceberg.FieldSummary {
 	fieldSummaries := []iceberg.FieldSummary{}
 
 	for i := 0; i < spec.NumFields(); i++ {
 		field := spec.Field(i)
+		typ := schema.Field(field.SourceID).Type
 
 		// Find the entry with the lower/upper bounds for the field
 		u, l := []byte{}, []byte{}
@@ -283,11 +285,11 @@ func summarizeFields(spec iceberg.PartitionSpec, entries []iceberg.ManifestEntry
 			upper := entry.DataFile().UpperBoundValues()[field.SourceID]
 			lower := entry.DataFile().LowerBoundValues()[field.SourceID]
 
-			if len(u) == 0 || bytes.Compare(upper, u) > 0 {
+			if len(u) == 0 || compare(u, upper, typ) < 0 {
 				u = upper
 			}
 
-			if len(l) == 0 || bytes.Compare(lower, l) < 0 {
+			if len(l) == 0 || compare(lower, l, typ) < 0 {
 				l = lower
 			}
 		}
@@ -299,4 +301,61 @@ func summarizeFields(spec iceberg.PartitionSpec, entries []iceberg.ManifestEntry
 	}
 
 	return fieldSummaries
+}
+
+func compare(a, b []byte, typ iceberg.Type) int {
+	switch typ.Type() {
+	case "boolean":
+		return bytes.Compare(a, b)
+	case "int":
+		a := int32(binary.LittleEndian.Uint32(a))
+		b := int32(binary.LittleEndian.Uint32(b))
+		switch {
+		case a < b:
+			return -1
+		case a > b:
+			return 1
+		default:
+			return 0
+		}
+	case "float":
+		a := float32(binary.LittleEndian.Uint32(a))
+		b := float32(binary.LittleEndian.Uint32(b))
+		switch {
+		case a < b:
+			return -1
+		case a > b:
+			return 1
+		default:
+			return 0
+		}
+	case "long":
+		a := int64(binary.LittleEndian.Uint64(a))
+		b := int64(binary.LittleEndian.Uint64(b))
+		switch {
+		case a < b:
+			return -1
+		case a > b:
+			return 1
+		default:
+			return 0
+		}
+	case "double":
+		a := float64(binary.LittleEndian.Uint64(a))
+		b := float64(binary.LittleEndian.Uint64(b))
+		switch {
+		case a < b:
+			return -1
+		case a > b:
+			return 1
+		default:
+			return 0
+		}
+	case "string":
+		return bytes.Compare(a, b)
+	case "binary":
+		return bytes.Compare(a, b)
+	default:
+		panic(fmt.Sprintf("unsupported type %v", typ))
+	}
 }
