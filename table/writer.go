@@ -123,14 +123,9 @@ func (s *snapshotWriter) Close(ctx context.Context) error {
 	}
 
 	// Write the manifest file
-	if err := s.uploadManifest(ctx, path, func(ctx context.Context, w io.Writer) error {
+	n, err := s.uploadManifest(ctx, path, func(ctx context.Context, w io.Writer) error {
 		return iceberg.WriteManifestV1(w, s.schema, manifest)
-	}); err != nil {
-		return err
-	}
-
-	// Fetch the size of the manifest file
-	attr, err := s.bucket.Attributes(ctx, path)
+	})
 	if err != nil {
 		return err
 	}
@@ -141,7 +136,7 @@ func (s *snapshotWriter) Close(ctx context.Context) error {
 	}
 
 	// Create manifest list
-	bldr := iceberg.NewManifestV1Builder(path, attr.Size, 0, s.snapshotID).
+	bldr := iceberg.NewManifestV1Builder(path, int64(n), 0, s.snapshotID).
 		AddedRows(rows).
 		AddedFiles(int32(len(s.entries))).
 		ExistingFiles(int32(len(manifest) - len(s.entries)))
@@ -162,7 +157,7 @@ func (s *snapshotWriter) Close(ctx context.Context) error {
 	// Upload the manifest list
 	manifestListFile := fmt.Sprintf("snap-%v-%s%s", s.snapshotID, generateULID(), manifestFileExt)
 	manifestListPath := filepath.Join(s.metadataDir(), manifestListFile)
-	if err := s.uploadManifest(ctx, manifestListPath, func(ctx context.Context, w io.Writer) error {
+	if _, err := s.uploadManifest(ctx, manifestListPath, func(ctx context.Context, w io.Writer) error {
 		return iceberg.WriteManifestListV1(w, manifestList)
 	}); err != nil {
 		return err
@@ -321,20 +316,36 @@ func (s *snapshotWriter) addSnapshot(ctx context.Context, t Table, snapshot Snap
 }
 
 // uploadManifest uploads a manifest to the iceberg table. It's a wrapper around the bucket upload which requires a io.Reader and the manifest write functions which requires a io.Writer.
-func (s *snapshotWriter) uploadManifest(ctx context.Context, path string, write func(ctx context.Context, w io.Writer) error) error {
+func (s *snapshotWriter) uploadManifest(ctx context.Context, path string, write func(ctx context.Context, w io.Writer) error) (int, error) {
 	r, w := io.Pipe()
+	accountW := &accountingWriter{w: w}
 
 	errg, ctx := errgroup.WithContext(ctx)
 	errg.Go(func() error {
-		defer w.Close()
-		return write(ctx, w)
+		defer accountW.Close()
+		return write(ctx, accountW)
 	})
 
 	errg.Go(func() error {
 		return s.bucket.Upload(ctx, path, r)
 	})
 
-	return errg.Wait()
+	return accountW.n, errg.Wait()
+}
+
+type accountingWriter struct {
+	w io.WriteCloser
+	n int
+}
+
+func (a *accountingWriter) Write(p []byte) (int, error) {
+	n, err := a.w.Write(p)
+	a.n += n
+	return n, err
+}
+
+func (a *accountingWriter) Close() error {
+	return a.w.Close()
 }
 
 // summarizeFields returns the field summaries for the given partition spec and manifest entries.
