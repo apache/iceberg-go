@@ -135,8 +135,14 @@ func (s *snapshotWriter) Close(ctx context.Context) error {
 		return err
 	}
 
+	rows := int64(0)
+	for _, entry := range s.entries {
+		rows += entry.DataFile().Count()
+	}
+
 	// Create manifest list
 	bldr := iceberg.NewManifestV1Builder(path, attr.Size, 0, s.snapshotID).
+		AddedRows(rows).
 		AddedFiles(int32(len(s.entries))).
 		ExistingFiles(int32(len(manifest) - len(s.entries)))
 

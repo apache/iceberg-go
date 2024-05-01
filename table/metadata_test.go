@@ -507,7 +507,8 @@ func TestV1_MetadataBuilder(t *testing.T) {
 	},
     "partition-specs": [{"spec-id": 0, "fields": [{"name": "x", "transform": "identity", "source-id": 1, "field-id": 1000}]}],
 	"current-snapshot-id": -1,
-	"snapshots": [{"snapshot-id": 1925, "timestamp-ms": 1602638573822}]
+	"snapshots": [{"snapshot-id": 1925, "timestamp-ms": 1602638573822}],
+    "refs": {"main": {"snapshot-id": -1, "type": "branch"}}
 }`
 	meta, err := table.ParseMetadataBytes([]byte(exampleV1Metadata))
 	require.NoError(t, err)
