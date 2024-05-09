@@ -28,7 +28,7 @@ require (
 	github.com/aws/smithy-go v1.19.0
 	github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815
 	github.com/google/uuid v1.6.0
-	github.com/hamba/avro/v2 v2.16.0
+	github.com/hamba/avro/v2 v2.21.1
 	github.com/pterm/pterm v0.12.78
 	github.com/stretchr/testify v1.8.4
 	github.com/wolfeidau/s3iofs v1.5.0
@@ -57,6 +57,7 @@ require (
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/gookit/color v1.5.4 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
+	github.com/klauspost/compress v1.17.8 // indirect
 	github.com/lithammer/fuzzysearch v1.1.8 // indirect
 	github.com/mattn/go-runewidth v0.0.15 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
