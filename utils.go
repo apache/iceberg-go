@@ -18,10 +18,9 @@
 package iceberg
 
 import (
+	"cmp"
 	"runtime/debug"
 	"strings"
-
-	"golang.org/x/exp/constraints"
 )
 
 var version string
@@ -40,7 +39,7 @@ func init() {
 
 func Version() string { return version }
 
-func max[T constraints.Ordered](vals ...T) T {
+func max[T cmp.Ordered](vals ...T) T {
 	if len(vals) == 0 {
 		panic("can't call max with no arguments")
 	}
