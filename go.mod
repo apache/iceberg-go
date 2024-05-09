@@ -25,8 +25,9 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.16.16
 	github.com/aws/aws-sdk-go-v2/service/glue v1.73.1
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.48.0
+	github.com/aws/smithy-go v1.19.0
 	github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815
-	github.com/google/uuid v1.3.1
+	github.com/google/uuid v1.6.0
 	github.com/hamba/avro/v2 v2.16.0
 	github.com/pterm/pterm v0.12.78
 	github.com/stretchr/testify v1.8.4
@@ -51,7 +52,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sso v1.18.7 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.21.7 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.26.7 // indirect
-	github.com/aws/smithy-go v1.19.0 // indirect
 	github.com/containerd/console v1.0.3 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
