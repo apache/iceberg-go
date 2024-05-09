@@ -31,7 +31,7 @@ require (
 	github.com/hamba/avro/v2 v2.16.0
 	github.com/pterm/pterm v0.12.78
 	github.com/stretchr/testify v1.8.4
-	github.com/wolfeidau/s3iofs v1.5.0
+	github.com/wolfeidau/s3iofs v1.5.2
 	golang.org/x/exp v0.0.0-20231006140011-7918f672742d
 )
 
