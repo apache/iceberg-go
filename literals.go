@@ -467,8 +467,7 @@ func (t TimestampLiteral) To(typ Type) (Literal, error) {
 	case TimestampTzType:
 		return t, nil
 	case DateType:
-		tm := time.UnixMicro(int64(t)).UTC()
-		return DateLiteral(tm.Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds())), nil
+		return DateLiteral(Timestamp(t).ToDate()), nil
 	}
 	return nil, fmt.Errorf("%w: TimestampLiteral to %s", ErrBadCast, typ)
 }
@@ -538,19 +537,23 @@ func (s StringLiteral) To(typ Type) (Literal, error) {
 
 		return TimeLiteral(val), nil
 	case TimestampType:
-		val, err := arrow.TimestampFromString(string(s), arrow.Microsecond)
+		// requires RFC3339 with no time zone
+		tm, err := time.Parse("2006-01-02T15:04:05", string(s))
 		if err != nil {
-			return nil, fmt.Errorf("%w: casting '%s' to %s - %s",
-				ErrBadCast, s, typ, err.Error())
+			return nil, fmt.Errorf("%w: invalid Timestamp format for casting from string '%s': %s",
+				ErrBadCast, s, err.Error())
 		}
-		return TimestampLiteral(val), nil
+
+		return TimestampLiteral(Timestamp(tm.UTC().UnixMicro())), nil
 	case TimestampTzType:
-		val, err := arrow.TimestampFromString(string(s), arrow.Microsecond)
+		// requires RFC3339 format WITH time zone
+		tm, err := time.Parse(time.RFC3339, string(s))
 		if err != nil {
-			return nil, fmt.Errorf("%w: casting '%s' to %s - %s",
-				ErrBadCast, s, typ, err.Error())
+			return nil, fmt.Errorf("%w: invalid TimestampTz format for casting from string '%s': %s",
+				ErrBadCast, s, err.Error())
 		}
-		return TimestampLiteral(val), nil
+
+		return TimestampLiteral(Timestamp(tm.UTC().UnixMicro())), nil
 	case UUIDType:
 		val, err := uuid.Parse(string(s))
 		if err != nil {

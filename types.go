@@ -23,6 +23,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/apache/arrow/go/v16/arrow/decimal128"
 	"golang.org/x/exp/slices"
@@ -534,6 +535,11 @@ func (TimeType) Type() string   { return "time" }
 func (TimeType) String() string { return "time" }
 
 type Timestamp int64
+
+func (t Timestamp) ToDate() Date {
+	tm := time.UnixMicro(int64(t)).UTC()
+	return Date(tm.Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
+}
 
 // TimestampType represents a number of microseconds since the unix epoch
 // without regard for timezone.

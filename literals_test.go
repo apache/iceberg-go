@@ -358,12 +358,8 @@ func TestStringLiteralConversion(t *testing.T) {
 			iceberg.NewLiteral(iceberg.Date(arrow.Date32FromTime(tm)))},
 		{iceberg.StringLiteral("14:21:01.919"),
 			iceberg.NewLiteral(iceberg.Time(51661919000))},
-		{iceberg.StringLiteral("2017-08-18T14:21:01.919234+00:00"),
-			iceberg.NewLiteral(iceberg.Timestamp(1503066061919234))},
 		{iceberg.StringLiteral("2017-08-18T14:21:01.919234"),
 			iceberg.NewLiteral(iceberg.Timestamp(1503066061919234))},
-		{iceberg.StringLiteral("2017-08-18T14:21:01.919234-07:00"),
-			iceberg.NewLiteral(iceberg.Timestamp(1503091261919234))},
 		{iceberg.StringLiteral(expected.String()), iceberg.NewLiteral(expected)},
 		{iceberg.StringLiteral("34.560"),
 			iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(34560), Scale: 3})},
@@ -383,6 +379,24 @@ func TestStringLiteralConversion(t *testing.T) {
 			assert.Truef(t, tt.to.Equals(got), "expected: %s, got: %s", tt.to, got)
 		})
 	}
+
+	lit := iceberg.StringLiteral("2017-08-18T14:21:01.919234-07:00")
+	casted, err := lit.To(iceberg.PrimitiveTypes.TimestampTz)
+	require.NoError(t, err)
+	expectedTimestamp := iceberg.NewLiteral(iceberg.Timestamp(1503091261919234))
+	assert.Truef(t, casted.Equals(expectedTimestamp), "expected: %s, got: %s",
+		expectedTimestamp, casted)
+
+	_, err = lit.To(iceberg.PrimitiveTypes.Timestamp)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, iceberg.ErrBadCast)
+	assert.ErrorContains(t, err, `parsing time "2017-08-18T14:21:01.919234-07:00": extra text: "-07:00"`)
+	assert.ErrorContains(t, err, "invalid Timestamp format for casting from string")
+
+	_, err = iceberg.StringLiteral("2017-08-18T14:21:01.919234").To(iceberg.PrimitiveTypes.TimestampTz)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, iceberg.ErrBadCast)
+	assert.ErrorContains(t, err, `cannot parse "" as "Z07:00"`)
 }
 
 func TestLiteralIdentityConversions(t *testing.T) {
