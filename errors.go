@@ -25,4 +25,7 @@ var (
 	ErrInvalidArgument   = errors.New("invalid argument")
 	ErrInvalidSchema     = errors.New("invalid schema")
 	ErrInvalidTransform  = errors.New("invalid transform syntax")
+	ErrType              = errors.New("type error")
+	ErrBadCast           = errors.New("could not cast value")
+	ErrBadLiteral        = errors.New("invalid literal value")
 )
