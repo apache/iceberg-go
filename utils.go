@@ -19,6 +19,9 @@ package iceberg
 
 import (
 	"cmp"
+	"fmt"
+	"hash/maphash"
+	"maps"
 	"runtime/debug"
 	"strings"
 )
@@ -52,3 +55,127 @@ func max[T cmp.Ordered](vals ...T) T {
 	}
 	return out
 }
+
+// Optional represents a typed value that could be null
+type Optional[T any] struct {
+	Val   T
+	Valid bool
+}
+
+// represents a single row in a record
+type structLike interface {
+	// Size returns the number of columns in this row
+	Size() int
+	// Get returns the value in the requested column,
+	// will panic if pos is out of bounds.
+	Get(pos int) any
+	// Set changes the value in the column indicated,
+	// will panic if pos is out of bounds.
+	Set(pos int, val any)
+}
+
+type accessor struct {
+	pos   int
+	inner *accessor
+}
+
+func (a *accessor) String() string {
+	return fmt.Sprintf("Accessor(position=%d, inner=%s)", a.pos, a.inner)
+}
+
+func (a *accessor) Get(s structLike) any {
+	val, inner := s.Get(a.pos), a
+	for inner.inner != nil {
+		inner = inner.inner
+		val = val.(structLike).Get(inner.pos)
+	}
+	return val
+}
+
+type Set[E any] interface {
+	Add(...E)
+	Contains(E) bool
+	Members() []E
+	Equals(Set[E]) bool
+	Len() int
+}
+
+var lzseed = maphash.MakeSeed()
+
+type literalSet map[any]struct{ orig Literal }
+
+func newLiteralSet(vals ...Literal) Set[Literal] {
+	s := literalSet{}
+	for _, v := range vals {
+		s.addliteral(v)
+	}
+	return s
+}
+
+func (l literalSet) addliteral(v Literal) {
+	switch v := v.(type) {
+	case FixedLiteral:
+		l[maphash.Bytes(lzseed, []byte(v))] = struct{ orig Literal }{v}
+	case BinaryLiteral:
+		l[maphash.Bytes(lzseed, []byte(v))] = struct{ orig Literal }{v}
+	default:
+		l[v] = struct{ orig Literal }{}
+	}
+}
+
+func (l literalSet) Add(lits ...Literal) {
+	for _, v := range lits {
+		l.addliteral(v)
+	}
+}
+
+func (l literalSet) Contains(lit Literal) bool {
+	switch lit := lit.(type) {
+	case BinaryLiteral:
+		v, ok := l[maphash.Bytes(lzseed, []byte(lit))]
+		if !ok {
+			return false
+		}
+		return lit.Equals(v.orig)
+	case FixedLiteral:
+		v, ok := l[maphash.Bytes(lzseed, []byte(lit))]
+		if !ok {
+			return false
+		}
+		return lit.Equals(v.orig)
+	default:
+		_, ok := l[lit]
+		return ok
+	}
+}
+
+func (l literalSet) Members() []Literal {
+	result := make([]Literal, 0, len(l))
+	for k, v := range l {
+		if k, ok := k.(Literal); ok {
+			result = append(result, k)
+		} else {
+			result = append(result, v.orig)
+		}
+	}
+	return result
+}
+
+func (l literalSet) Equals(other Set[Literal]) bool {
+	rhs, ok := other.(literalSet)
+	if !ok {
+		return false
+	}
+	return maps.EqualFunc(l, rhs, func(v1, v2 struct{ orig Literal }) bool {
+		switch {
+		case v1.orig == nil:
+			return v2.orig == nil
+		case v2.orig == nil:
+			return v1.orig == nil
+		default:
+			return v1.orig.Equals(v2.orig)
+		}
+	})
+}
+
+func (l literalSet) Len() int { return len(l) }
