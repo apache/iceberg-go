@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"golang.org/x/exp/maps"
@@ -45,6 +46,8 @@ type Schema struct {
 	nameToID      atomic.Pointer[map[string]int]
 	nameToIDLower atomic.Pointer[map[string]int]
 	idToAccessor  atomic.Pointer[map[int]accessor]
+
+	lazyIDToParent func() (map[int]int, error)
 }
 
 // NewSchema constructs a new schema with the provided ID
@@ -57,7 +60,11 @@ func NewSchema(id int, fields ...NestedField) *Schema {
 // and fields, along with a slice of field IDs to be listed as identifier
 // fields.
 func NewSchemaWithIdentifiers(id int, identifierIDs []int, fields ...NestedField) *Schema {
-	return &Schema{ID: id, fields: fields, IdentifierFieldIDs: identifierIDs}
+	s := &Schema{ID: id, fields: fields, IdentifierFieldIDs: identifierIDs}
+	s.lazyIDToParent = sync.OnceValues(func() (map[int]int, error) {
+		return IndexParents(s)
+	})
+	return s
 }
 
 func (s *Schema) String() string {
@@ -344,6 +351,27 @@ func (s *Schema) Select(caseSensitive bool, names ...string) (*Schema, error) {
 	}
 
 	return PruneColumns(s, ids, true)
+}
+
+func (s *Schema) FieldHasOptionalParent(id int) bool {
+	idToParent, _ := s.lazyIDToParent()
+	idToField, _ := s.lazyIDToField()
+
+	f, ok := idToField[id]
+	if !ok {
+		return false
+	}
+
+	for {
+		parent, ok := idToParent[f.ID]
+		if !ok {
+			return false
+		}
+
+		if f = idToField[parent]; !f.Required {
+			return true
+		}
+	}
 }
 
 // SchemaVisitor is an interface that can be implemented to allow for
@@ -884,6 +912,66 @@ func (findLastFieldID) Map(_ MapType, keyResult, valueResult int) int {
 }
 
 func (findLastFieldID) Primitive(PrimitiveType) int { return 0 }
+
+// IndexParents generates an index of field IDs to their parent field
+// IDs. Root fields are not indexed
+func IndexParents(schema *Schema) (map[int]int, error) {
+	indexer := &indexParents{
+		idToParent: make(map[int]int),
+		idStack:    make([]int, 0),
+	}
+	return Visit(schema, indexer)
+}
+
+type indexParents struct {
+	idToParent map[int]int
+	idStack    []int
+}
+
+func (i *indexParents) BeforeField(field NestedField) {
+	i.idStack = append(i.idStack, field.ID)
+}
+
+func (i *indexParents) AfterField(field NestedField) {
+	i.idStack = i.idStack[:len(i.idStack)-1]
+}
+
+func (i *indexParents) Schema(schema *Schema, _ map[int]int) map[int]int {
+	return i.idToParent
+}
+
+func (i *indexParents) Struct(st StructType, _ []map[int]int) map[int]int {
+	var parent int
+	stackLen := len(i.idStack)
+	if stackLen > 0 {
+		parent = i.idStack[stackLen-1]
+		for _, f := range st.FieldList {
+			i.idToParent[f.ID] = parent
+		}
+	}
+
+	return i.idToParent
+}
+
+func (i *indexParents) Field(NestedField, map[int]int) map[int]int {
+	return i.idToParent
+}
+
+func (i *indexParents) List(list ListType, _ map[int]int) map[int]int {
+	i.idToParent[list.ElementID] = i.idStack[len(i.idStack)-1]
+	return i.idToParent
+}
+
+func (i *indexParents) Map(mapType MapType, _, _ map[int]int) map[int]int {
+	parent := i.idStack[len(i.idStack)-1]
+	i.idToParent[mapType.KeyID] = parent
+	i.idToParent[mapType.ValueID] = parent
+	return i.idToParent
+}
+
+func (i *indexParents) Primitive(PrimitiveType) map[int]int {
+	return i.idToParent
+}
 
 type buildPosAccessors struct{}
 

@@ -85,7 +85,7 @@ func (a *accessor) String() string {
 
 func (a *accessor) Get(s structLike) any {
 	val, inner := s.Get(a.pos), a
-	for inner.inner != nil {
+	for val != nil && inner.inner != nil {
 		inner = inner.inner
 		val = val.(structLike).Get(inner.pos)
 	}

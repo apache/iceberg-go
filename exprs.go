@@ -19,6 +19,7 @@ package iceberg
 
 import (
 	"fmt"
+	"reflect"
 
 	"github.com/google/uuid"
 )
@@ -332,7 +333,7 @@ type BoundTerm interface {
 	Ref() BoundReference
 	Type() Type
 
-	evalToLiteral(structLike) Literal
+	evalToLiteral(structLike) Optional[Literal]
 	evalIsNull(structLike) bool
 }
 
@@ -471,17 +472,32 @@ func (b *boundRef[T]) eval(st structLike) Optional[T] {
 		return Optional[T]{}
 	case T:
 		return Optional[T]{Valid: true, Val: v}
+	default:
+		var z T
+		typ, val := reflect.TypeOf(z), reflect.ValueOf(v)
+		if !val.CanConvert(typ) {
+			panic(fmt.Errorf("%w: cannot convert value '%+v' to expected type %s",
+				ErrInvalidSchema, val.Interface(), typ.String()))
+		}
+
+		return Optional[T]{
+			Valid: true,
+			Val:   val.Convert(typ).Interface().(T),
+		}
 	}
-	panic("unexpected type returned for bound ref")
 }
 
-func (b *boundRef[T]) evalToLiteral(st structLike) Literal {
+func (b *boundRef[T]) evalToLiteral(st structLike) Optional[Literal] {
 	v := b.eval(st)
+	if !v.Valid {
+		return Optional[Literal]{}
+	}
+
 	lit := NewLiteral[T](v.Val)
 	if !lit.Type().Equals(b.field.Type) {
 		lit, _ = lit.To(b.field.Type)
 	}
-	return lit
+	return Optional[Literal]{Val: lit, Valid: true}
 }
 
 func (b *boundRef[T]) evalIsNull(st structLike) bool {
@@ -538,11 +554,11 @@ func (up *unboundUnaryPredicate) Bind(schema *Schema, caseSensitive bool) (Boole
 	// fast case optimizations
 	switch up.op {
 	case OpIsNull:
-		if bound.Ref().Field().Required {
+		if bound.Ref().Field().Required && !schema.FieldHasOptionalParent(bound.Ref().Field().ID) {
 			return AlwaysFalse{}, nil
 		}
 	case OpNotNull:
-		if bound.Ref().Field().Required {
+		if bound.Ref().Field().Required && !schema.FieldHasOptionalParent(bound.Ref().Field().ID) {
 			return AlwaysTrue{}, nil
 		}
 	case OpIsNan:
