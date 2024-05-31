@@ -211,7 +211,7 @@ func getMetadataPath(locationPath string, newVersion int) (string, error) {
 	return metaDataPath, nil
 }
 
-func getLocationForTable(location, defaultLocation, database, tableName string) (*url.URL, error) {
+func GetLocationForTable(location, defaultLocation, database, tableName string) (*url.URL, error) {
 	if location != "" {
 		return url.Parse(location)
 	}

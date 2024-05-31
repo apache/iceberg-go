@@ -142,7 +142,7 @@ func (c *GlueCatalog) CreateTable(ctx context.Context, identifier table.Identifi
 		return nil, err
 	}
 
-	tbl, err := table.NewTable(identifier, schema, partitionSpec, sortOrder, locationURL.String(), props)
+	tbl, err := table.NewTableBuilder(identifier, schema, location).WithPartitionSpec(partitionSpec).WithSortOrder(sortOrder).WithProperties(props).Build()
 	if err != nil {
 		return nil, err
 	}

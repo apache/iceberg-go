@@ -147,8 +147,11 @@ func (t *TableTestSuite) TestNewTable() {
 		SourceID: 3, FieldID: 1000, Name: "datetime", Transform: iceberg.DayTransform{}})
 
 	location := "s3://bucket/test/location"
+	tbl, err := table.NewTableBuilder(identifier, schema, location).
+		WithPartitionSpec(partSpec).
+		WithSortOrder(table.UnsortedSortOrder).
+		Build()
 
-	tbl, err := table.NewTable(identifier, schema, partSpec, table.UnsortedSortOrder, location, nil)
 	t.Require().NoError(err)
 	t.Require().Equal(identifier, tbl.Identifier())
 

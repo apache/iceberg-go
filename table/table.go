@@ -97,24 +97,59 @@ func NewFromLocation(ident Identifier, metalocation string, fsys io.IO) (*Table,
 	return New(ident, meta, metalocation, fsys), nil
 }
 
-func NewTable(ident Identifier, schema *iceberg.Schema, partitionSpec iceberg.PartitionSpec, sortOrder SortOrder, location string, properties iceberg.Properties) (*Table, error) {
-	if properties == nil {
-		properties = make(iceberg.Properties)
-	}
+type TableBuilder struct {
+	ident         Identifier
+	schema        *iceberg.Schema
+	partitionSpec iceberg.PartitionSpec
+	sortOrder     SortOrder
+	location      string
+	properties    iceberg.Properties
+}
 
+// NewTableBuilder creates a new TableBuilder for building a Table.
+//
+// The ident, schema and location parameters are required to create a Table, others
+// can be specified with the corresponding builder methods.
+func NewTableBuilder(ident Identifier, schema *iceberg.Schema, location string) *TableBuilder {
+	return &TableBuilder{
+		ident:      ident,
+		schema:     schema,
+		location:   location,
+		properties: make(iceberg.Properties),
+	}
+}
+
+// WithPartitionSpec sets the partition spec for the table. The partition spec defines how data is partitioned in the table.
+func (b *TableBuilder) WithPartitionSpec(spec iceberg.PartitionSpec) *TableBuilder {
+	b.partitionSpec = spec
+	return b
+}
+
+// WithSortOrder sets the sort order for the table. The sort order defines how data is sorted in the table.
+func (b *TableBuilder) WithSortOrder(sortOrder SortOrder) *TableBuilder {
+	b.sortOrder = sortOrder
+	return b
+}
+
+func (b *TableBuilder) WithProperties(properties iceberg.Properties) *TableBuilder {
+	b.properties = properties
+	return b
+}
+
+func (b *TableBuilder) Build() (*Table, error) {
 	tableUUID := uuid.New()
 
 	// TODO: we need to "freshen" the sequences in the schema, partition spec, and sort order
 
-	metadata, err := NewMetadataV2(schema, partitionSpec, sortOrder, location, tableUUID, properties)
+	metadata, err := NewMetadataV2(b.schema, b.partitionSpec, b.sortOrder, b.location, tableUUID, b.properties)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Table{
-		identifier:       ident,
+		identifier:       b.ident,
 		metadata:         metadata,
-		metadataLocation: location,
+		metadataLocation: b.location,
 		fs:               nil,
 	}, nil
 }
