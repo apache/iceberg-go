@@ -19,8 +19,6 @@ package table_test
 
 import (
 	"bytes"
-	"encoding/json"
-	"fmt"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -147,15 +145,17 @@ func (t *TableTestSuite) TestNewTable() {
 		SourceID: 3, FieldID: 1000, Name: "datetime", Transform: iceberg.DayTransform{}})
 
 	location := "s3://bucket/test/location"
-	tbl, err := table.NewTableBuilder(identifier, schema, location).
+	metadataLocation := "metadata/00001-00000-00000-00000-00000.metadata.json"
+	tbl, err := table.NewTableBuilder(identifier, schema, location, metadataLocation).
 		WithPartitionSpec(partSpec).
 		WithSortOrder(table.UnsortedSortOrder).
 		Build()
 
 	t.Require().NoError(err)
 	t.Require().Equal(identifier, tbl.Identifier())
-
-	data, err := json.Marshal(tbl.Metadata())
-	t.Require().NoError(err)
-	fmt.Println(string(data))
+	t.Require().Equal(schema, tbl.Schema())
+	t.Require().Equal(partSpec, tbl.Spec())
+	t.Require().Equal(table.UnsortedSortOrder, tbl.SortOrder())
+	t.Require().Equal(location, tbl.Location())
+	t.Require().Equal(metadataLocation, tbl.MetadataLocation())
 }

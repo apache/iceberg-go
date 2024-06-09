@@ -19,9 +19,10 @@ package catalog
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
@@ -44,8 +45,7 @@ type glueAPI interface {
 }
 
 type GlueCatalog struct {
-	glueSvc         glueAPI
-	defaultLocation string
+	glueSvc glueAPI
 }
 
 func NewGlueCatalog(opts ...Option[GlueCatalog]) *GlueCatalog {
@@ -56,8 +56,7 @@ func NewGlueCatalog(opts ...Option[GlueCatalog]) *GlueCatalog {
 	}
 
 	return &GlueCatalog{
-		glueSvc:         glue.NewFromConfig(glueOps.awsConfig),
-		defaultLocation: glueOps.defaultLocation,
+		glueSvc: glue.NewFromConfig(glueOps.awsConfig),
 	}
 }
 
@@ -125,33 +124,49 @@ func (c *GlueCatalog) LoadTable(ctx context.Context, identifier table.Identifier
 	return icebergTable, nil
 }
 
+// CreateTable creates a new table in the catalog.
+//
+// The identifier should contain the Glue database name, then glue table name.
+// The location should be the S3 prefix for the table, which will have the database name, table name, and metadata file appended to it.
 func (c *GlueCatalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, partitionSpec iceberg.PartitionSpec, sortOrder table.SortOrder, location string, props map[string]string) (*table.Table, error) {
 	database, tableName, err := identifierToGlueTable(identifier)
 	if err != nil {
 		return nil, err
 	}
 
-	locationURL, err := getLocationForTable(location, c.defaultLocation, database, tableName)
+	// s3://bucket/prefix/database.db/tablename
+	locationURL, err := url.Parse(location)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse location URL %s: %w", location, err)
+	}
+
+	// 00000-UUID.metadata.json
+	newManifest, err := table.GenerateMetadataFileName(0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate metadata file name: %w", err)
+	}
+
+	// s3://bucket/prefix/database.db/tablename/manifest/00000-UUID.metadata.json
+	metadataURL := locationURL.JoinPath("metadata", newManifest)
+
+	// prefix/database.db/tablename/manifest/00000-UUID.metadata.json
+	metadataLocation := strings.TrimPrefix(metadataURL.Path, "/")
+
+	tbl, err := table.NewTableBuilder(identifier, schema, location, metadataLocation).
+		WithPartitionSpec(partitionSpec).
+		WithSortOrder(sortOrder).
+		WithProperties(props).
+		Build()
 	if err != nil {
 		return nil, err
 	}
 
-	// append metadata path to location path/to/database.db/tablename/metadata/00000-UUID.metadata.json
-	metadataPath, err := getMetadataPath(locationURL.Path, 0)
+	err = writeTableMetaData(tbl.FS(), tbl.MetadataLocation(), tbl.Metadata())
 	if err != nil {
 		return nil, err
 	}
 
-	tbl, err := table.NewTableBuilder(identifier, schema, location).WithPartitionSpec(partitionSpec).WithSortOrder(sortOrder).WithProperties(props).Build()
-	if err != nil {
-		return nil, err
-	}
-
-	err = c.writeMetaData(locationURL.String(), metadataPath, tbl.Metadata())
-	if err != nil {
-		return nil, err
-	}
-
+	// TODO: need to convert the schema to a glue schema and provide that to create table.
 	params := &glue.CreateTableInput{
 		DatabaseName: aws.String(database),
 
@@ -160,7 +175,7 @@ func (c *GlueCatalog) CreateTable(ctx context.Context, identifier table.Identifi
 			TableType: aws.String("EXTERNAL_TABLE"),
 			Parameters: map[string]string{
 				"table_type":        glueTableTypeIceberg,
-				"metadata_location": fmt.Sprintf("%s://%s/%s", locationURL.Scheme, locationURL.Host, metadataPath),
+				"metadata_location": metadataURL.String(),
 			},
 			StorageDescriptor: &types.StorageDescriptor{Location: aws.String(locationURL.String())},
 		},
@@ -227,25 +242,6 @@ func (c *GlueCatalog) getTable(ctx context.Context, database, tableName string) 
 	}
 
 	return tblRes.Table.Parameters["metadata_location"], nil
-}
-
-func (c *GlueCatalog) writeMetaData(location, metadataPath string, metadata table.Metadata) error {
-	iofs, err := io.LoadFS(map[string]string{}, location)
-	if err != nil {
-		return fmt.Errorf("failed to load fs: %w", err)
-	}
-
-	data, err := json.Marshal(metadata)
-	if err != nil {
-		return fmt.Errorf("failed to marshal table metadata: %w", err)
-	}
-
-	err = iofs.WriteFile(metadataPath, data, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to write metadata file: %w", err)
-	}
-
-	return nil
 }
 
 func identifierToGlueTable(identifier table.Identifier) (string, string, error) {

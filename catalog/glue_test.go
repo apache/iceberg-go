@@ -138,9 +138,6 @@ func TestGlueLoadTableIntegration(t *testing.T) {
 	if os.Getenv("TEST_TABLE_NAME") == "" {
 		t.Skip()
 	}
-	if os.Getenv("TEST_TABLE_LOCATION") == "" {
-		t.Skip()
-	}
 
 	assert := require.New(t)
 

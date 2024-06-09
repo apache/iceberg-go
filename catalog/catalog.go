@@ -20,15 +20,15 @@ package catalog
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
-	"strings"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/google/uuid"
 )
 
 type CatalogType string
@@ -198,32 +198,16 @@ func NamespaceFromIdent(ident table.Identifier) table.Identifier {
 	return ident[:len(ident)-1]
 }
 
-func getMetadataPath(locationPath string, newVersion int) (string, error) {
-	if newVersion < 0 {
-		return "", fmt.Errorf("invalid table version: %d must be a non-negative integer", newVersion)
-	}
-
-	metaDataPath, err := url.JoinPath(strings.TrimLeft(locationPath, "/"), "metadata", fmt.Sprintf("%05d-%s.metadata.json", newVersion, uuid.New().String()))
+func writeTableMetaData(iofs io.IO, metadataPath string, metadata table.Metadata) error {
+	data, err := json.Marshal(metadata)
 	if err != nil {
-		return "", fmt.Errorf("failed to build metadata path: %w", err)
+		return fmt.Errorf("failed to marshal table metadata: %w", err)
 	}
 
-	return metaDataPath, nil
-}
-
-func GetLocationForTable(location, defaultLocation, database, tableName string) (*url.URL, error) {
-	if location != "" {
-		return url.Parse(location)
-	}
-
-	if defaultLocation == "" {
-		return nil, fmt.Errorf("no default path is set, please specify a location when creating a table")
-	}
-
-	u, err := url.Parse(defaultLocation)
+	err = iofs.WriteFile(metadataPath, data, 0644)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse location URL: %w", err)
+		return fmt.Errorf("failed to write metadata file: %w", err)
 	}
 
-	return u.JoinPath(fmt.Sprintf("%s.db", database), tableName), nil
+	return nil
 }

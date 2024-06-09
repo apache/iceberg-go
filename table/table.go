@@ -18,6 +18,7 @@
 package table
 
 import (
+	"fmt"
 	"reflect"
 
 	"github.com/apache/iceberg-go"
@@ -98,24 +99,26 @@ func NewFromLocation(ident Identifier, metalocation string, fsys io.IO) (*Table,
 }
 
 type TableBuilder struct {
-	ident         Identifier
-	schema        *iceberg.Schema
-	partitionSpec iceberg.PartitionSpec
-	sortOrder     SortOrder
-	location      string
-	properties    iceberg.Properties
+	ident            Identifier
+	schema           *iceberg.Schema
+	partitionSpec    iceberg.PartitionSpec
+	sortOrder        SortOrder
+	location         string
+	metadataLocation string // this path is relative to the location
+	properties       iceberg.Properties
 }
 
 // NewTableBuilder creates a new TableBuilder for building a Table.
 //
 // The ident, schema and location parameters are required to create a Table, others
 // can be specified with the corresponding builder methods.
-func NewTableBuilder(ident Identifier, schema *iceberg.Schema, location string) *TableBuilder {
+func NewTableBuilder(ident Identifier, schema *iceberg.Schema, location, metadataLocation string) *TableBuilder {
 	return &TableBuilder{
-		ident:      ident,
-		schema:     schema,
-		location:   location,
-		properties: make(iceberg.Properties),
+		ident:            ident,
+		schema:           schema,
+		location:         location,
+		metadataLocation: metadataLocation,
+		properties:       make(iceberg.Properties),
 	}
 }
 
@@ -146,12 +149,31 @@ func (b *TableBuilder) Build() (*Table, error) {
 		return nil, err
 	}
 
+	// location = s3://<bucket>/<prefix>
+	fs, err := io.LoadFS(map[string]string{}, b.location)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load fs: %w", err)
+	}
+
 	return &Table{
 		identifier:       b.ident,
 		metadata:         metadata,
-		metadataLocation: b.location,
-		fs:               nil,
+		metadataLocation: b.metadataLocation,
+		fs:               fs,
 	}, nil
+}
+
+// GenerateMetadataFileName generates a filename for a table metadata file based on the provided table version.
+// The filename is in the format "<V>-<random-uuid>.metadata.json", where the V is a 5-digit zero-padded non-negative integer
+// and the UUID is a randomly generated UUID string.
+//
+// If the provided version is negative, an error is returned.
+func GenerateMetadataFileName(newVersion int) (string, error) {
+	if newVersion < 0 {
+		return "", fmt.Errorf("invalid table version: %d must be a non-negative integer", newVersion)
+	}
+
+	return fmt.Sprintf("%05d-%s.metadata.json", newVersion, uuid.New().String()), nil
 }
 
 func intToPtr(i int) *int {
