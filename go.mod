@@ -30,7 +30,7 @@ require (
 	github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815
 	github.com/google/uuid v1.6.0
 	github.com/hamba/avro/v2 v2.22.1
-	github.com/pterm/pterm v0.12.78
+	github.com/pterm/pterm v0.12.79
 	github.com/stretchr/testify v1.9.0
 	github.com/wolfeidau/s3iofs v1.5.2
 	golang.org/x/exp v0.0.0-20240222234643-814bf88cf225
