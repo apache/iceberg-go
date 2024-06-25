@@ -44,6 +44,7 @@ type Schema struct {
 	idToField     atomic.Pointer[map[int]NestedField]
 	nameToID      atomic.Pointer[map[string]int]
 	nameToIDLower atomic.Pointer[map[string]int]
+	idToAccessor  atomic.Pointer[map[int]accessor]
 }
 
 // NewSchema constructs a new schema with the provided ID
@@ -133,6 +134,21 @@ func (s *Schema) lazyNameToIDLower() (map[string]int, error) {
 
 	s.nameToIDLower.Store(&out)
 	return out, nil
+}
+
+func (s *Schema) lazyIdToAccessor() (map[int]accessor, error) {
+	index := s.idToAccessor.Load()
+	if index != nil {
+		return *index, nil
+	}
+
+	idx, err := buildAccessors(s)
+	if err != nil {
+		return nil, err
+	}
+
+	s.idToAccessor.Store(&idx)
+	return idx, nil
 }
 
 func (s *Schema) Type() string { return "struct" }
@@ -253,6 +269,16 @@ func (s *Schema) FindTypeByNameCaseInsensitive(name string) (Type, bool) {
 	}
 
 	return f.Type, true
+}
+
+func (s *Schema) accessorForField(id int) (accessor, bool) {
+	idx, err := s.lazyIdToAccessor()
+	if err != nil {
+		return accessor{}, false
+	}
+
+	acc, ok := idx[id]
+	return acc, ok
 }
 
 // Equals compares the fields and identifierIDs, but does not compare
@@ -858,3 +884,44 @@ func (findLastFieldID) Map(_ MapType, keyResult, valueResult int) int {
 }
 
 func (findLastFieldID) Primitive(PrimitiveType) int { return 0 }
+
+type buildPosAccessors struct{}
+
+func (buildPosAccessors) Schema(_ *Schema, structResult map[int]accessor) map[int]accessor {
+	return structResult
+}
+
+func (buildPosAccessors) Struct(st StructType, fieldResults []map[int]accessor) map[int]accessor {
+	result := map[int]accessor{}
+	for pos, f := range st.FieldList {
+		if innerMap := fieldResults[pos]; len(innerMap) != 0 {
+			for inner, acc := range innerMap {
+				acc := acc
+				result[inner] = accessor{pos: pos, inner: &acc}
+			}
+		} else {
+			result[f.ID] = accessor{pos: pos}
+		}
+	}
+	return result
+}
+
+func (buildPosAccessors) Field(_ NestedField, fieldResult map[int]accessor) map[int]accessor {
+	return fieldResult
+}
+
+func (buildPosAccessors) List(ListType, map[int]accessor) map[int]accessor {
+	return map[int]accessor{}
+}
+
+func (buildPosAccessors) Map(_ MapType, _, _ map[int]accessor) map[int]accessor {
+	return map[int]accessor{}
+}
+
+func (buildPosAccessors) Primitive(PrimitiveType) map[int]accessor {
+	return map[int]accessor{}
+}
+
+func buildAccessors(schema *Schema) (map[int]accessor, error) {
+	return Visit(schema, buildPosAccessors{})
+}
