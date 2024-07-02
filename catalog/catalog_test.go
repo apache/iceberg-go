@@ -15,22 +15,4 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package io
-
-import "os"
-
-// LocalFS is an implementation of IO that implements interaction with
-// the local file system.
-type LocalFS struct{}
-
-func (LocalFS) Open(name string) (File, error) {
-	return os.Open(name)
-}
-
-func (LocalFS) Remove(name string) error {
-	return os.Remove(name)
-}
-
-func (LocalFS) WriteFile(name string, data []byte, perm os.FileMode) error {
-	return os.WriteFile(name, data, perm)
-}
+package catalog

@@ -21,6 +21,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
@@ -39,6 +41,7 @@ var (
 type glueAPI interface {
 	GetTable(ctx context.Context, params *glue.GetTableInput, optFns ...func(*glue.Options)) (*glue.GetTableOutput, error)
 	GetTables(ctx context.Context, params *glue.GetTablesInput, optFns ...func(*glue.Options)) (*glue.GetTablesOutput, error)
+	CreateTable(ctx context.Context, params *glue.CreateTableInput, optFns ...func(*glue.Options)) (*glue.CreateTableOutput, error)
 }
 
 type GlueCatalog struct {
@@ -119,6 +122,71 @@ func (c *GlueCatalog) LoadTable(ctx context.Context, identifier table.Identifier
 	}
 
 	return icebergTable, nil
+}
+
+// CreateTable creates a new table in the catalog.
+//
+// The identifier should contain the Glue database name, then glue table name.
+// The location should be the S3 prefix for the table, which will have the database name, table name, and metadata file appended to it.
+func (c *GlueCatalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, partitionSpec iceberg.PartitionSpec, sortOrder table.SortOrder, location string, props map[string]string) (*table.Table, error) {
+	database, tableName, err := identifierToGlueTable(identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	// s3://bucket/prefix/database.db/tablename
+	locationURL, err := url.Parse(location)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse location URL %s: %w", location, err)
+	}
+
+	// 00000-UUID.metadata.json
+	newManifest, err := table.GenerateMetadataFileName(0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate metadata file name: %w", err)
+	}
+
+	// s3://bucket/prefix/database.db/tablename/manifest/00000-UUID.metadata.json
+	metadataURL := locationURL.JoinPath("metadata", newManifest)
+
+	// prefix/database.db/tablename/manifest/00000-UUID.metadata.json
+	metadataLocation := strings.TrimPrefix(metadataURL.Path, "/")
+
+	tbl, err := table.NewTableBuilder(identifier, schema, location, metadataLocation).
+		WithPartitionSpec(partitionSpec).
+		WithSortOrder(sortOrder).
+		WithProperties(props).
+		Build()
+	if err != nil {
+		return nil, err
+	}
+
+	err = writeTableMetaData(tbl.FS(), tbl.MetadataLocation(), tbl.Metadata())
+	if err != nil {
+		return nil, err
+	}
+
+	// TODO: need to convert the schema to a glue schema and provide that to create table.
+	params := &glue.CreateTableInput{
+		DatabaseName: aws.String(database),
+
+		TableInput: &types.TableInput{
+			Name:      aws.String(tableName),
+			TableType: aws.String("EXTERNAL_TABLE"),
+			Parameters: map[string]string{
+				"table_type":        glueTableTypeIceberg,
+				"metadata_location": metadataURL.String(),
+			},
+			StorageDescriptor: &types.StorageDescriptor{Location: aws.String(locationURL.String())},
+		},
+	}
+
+	_, err = c.glueSvc.CreateTable(ctx, params)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create table %s.%s: %w", database, tableName, err)
+	}
+
+	return tbl, nil
 }
 
 func (c *GlueCatalog) CatalogType() CatalogType {

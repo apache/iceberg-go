@@ -128,3 +128,34 @@ func (t *TableTestSuite) TestSnapshotByName() {
 
 	t.True(testSnapshot.Equals(*t.tbl.SnapshotByName("test")))
 }
+
+func (t *TableTestSuite) TestNewTable() {
+
+	identifier := table.Identifier{"records"}
+
+	schema := iceberg.NewSchemaWithIdentifiers(1, []int{1},
+		iceberg.NestedField{
+			ID: 1, Name: "vendor_id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{
+			ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{
+			ID: 3, Name: "datetime", Type: iceberg.PrimitiveTypes.TimestampTz})
+
+	partSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceID: 3, FieldID: 1000, Name: "datetime", Transform: iceberg.DayTransform{}})
+
+	location := "s3://bucket/test/location"
+	metadataLocation := "metadata/00001-00000-00000-00000-00000.metadata.json"
+	tbl, err := table.NewTableBuilder(identifier, schema, location, metadataLocation).
+		WithPartitionSpec(partSpec).
+		WithSortOrder(table.UnsortedSortOrder).
+		Build()
+
+	t.Require().NoError(err)
+	t.Require().Equal(identifier, tbl.Identifier())
+	t.Require().Equal(schema, tbl.Schema())
+	t.Require().Equal(partSpec, tbl.Spec())
+	t.Require().Equal(table.UnsortedSortOrder, tbl.SortOrder())
+	t.Require().Equal(location, tbl.Location())
+	t.Require().Equal(metadataLocation, tbl.MetadataLocation())
+}

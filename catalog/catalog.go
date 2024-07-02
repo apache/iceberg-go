@@ -20,10 +20,13 @@ package catalog
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
 )
@@ -49,6 +52,14 @@ var (
 func WithAwsConfig(cfg aws.Config) Option[GlueCatalog] {
 	return func(o *options) {
 		o.awsConfig = cfg
+	}
+}
+
+// WithDefaultLocation sets the default location for the catalog, this is used
+// when a location is not provided in the create table operation.
+func WithDefaultLocation(location string) Option[GlueCatalog] {
+	return func(o *options) {
+		o.defaultLocation = location
 	}
 }
 
@@ -117,7 +128,8 @@ func WithPrefix(prefix string) Option[RestCatalog] {
 type Option[T GlueCatalog | RestCatalog] func(*options)
 
 type options struct {
-	awsConfig aws.Config
+	awsConfig       aws.Config
+	defaultLocation string
 
 	tlsConfig         *tls.Config
 	credential        string
@@ -184,4 +196,18 @@ func TableNameFromIdent(ident table.Identifier) string {
 
 func NamespaceFromIdent(ident table.Identifier) table.Identifier {
 	return ident[:len(ident)-1]
+}
+
+func writeTableMetaData(iofs io.IO, metadataPath string, metadata table.Metadata) error {
+	data, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("failed to marshal table metadata: %w", err)
+	}
+
+	err = iofs.WriteFile(metadataPath, data, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write metadata file: %w", err)
+	}
+
+	return nil
 }
