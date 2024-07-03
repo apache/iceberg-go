@@ -410,6 +410,7 @@ type BoundReference interface {
 	BoundTerm
 
 	Field() NestedField
+	Pos() int
 }
 
 type boundRef[T LiteralType] struct {
@@ -446,6 +447,8 @@ func createBoundRef(field NestedField, acc accessor) BoundReference {
 	}
 	panic("unhandled bound reference type: " + field.Type.String())
 }
+
+func (b *boundRef[T]) Pos() int { return b.acc.pos }
 
 func (*boundRef[T]) isTerm() {}
 
@@ -702,7 +705,7 @@ func (ul *unboundLiteralPredicate) Bind(schema *Schema, caseSensitive bool) (Boo
 	}
 
 	if (ul.op == OpStartsWith || ul.op == OpNotStartsWith) &&
-		!bound.Type().Equals(PrimitiveTypes.String) {
+		!(bound.Type().Equals(PrimitiveTypes.String) || bound.Type().Equals(PrimitiveTypes.Binary)) {
 		return nil, fmt.Errorf("%w: StartsWith and NotStartsWith must bind to String type, not %s",
 			ErrType, bound.Type())
 	}

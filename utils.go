@@ -98,6 +98,7 @@ type Set[E any] interface {
 	Members() []E
 	Equals(Set[E]) bool
 	Len() int
+	All(func(E) bool) bool
 }
 
 var lzseed = maphash.MakeSeed()
@@ -179,3 +180,19 @@ func (l literalSet) Equals(other Set[Literal]) bool {
 }
 
 func (l literalSet) Len() int { return len(l) }
+
+func (l literalSet) All(fn func(Literal) bool) bool {
+	for k, v := range l {
+		var e Literal
+		if k, ok := k.(Literal); ok {
+			e = k
+		} else {
+			e = v.orig
+		}
+
+		if !fn(e) {
+			return false
+		}
+	}
+	return true
+}

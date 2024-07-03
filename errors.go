@@ -20,12 +20,13 @@ package iceberg
 import "errors"
 
 var (
-	ErrInvalidTypeString = errors.New("invalid type")
-	ErrNotImplemented    = errors.New("not implemented")
-	ErrInvalidArgument   = errors.New("invalid argument")
-	ErrInvalidSchema     = errors.New("invalid schema")
-	ErrInvalidTransform  = errors.New("invalid transform syntax")
-	ErrType              = errors.New("type error")
-	ErrBadCast           = errors.New("could not cast value")
-	ErrBadLiteral        = errors.New("invalid literal value")
+	ErrInvalidTypeString       = errors.New("invalid type")
+	ErrNotImplemented          = errors.New("not implemented")
+	ErrInvalidArgument         = errors.New("invalid argument")
+	ErrInvalidSchema           = errors.New("invalid schema")
+	ErrInvalidTransform        = errors.New("invalid transform syntax")
+	ErrType                    = errors.New("type error")
+	ErrBadCast                 = errors.New("could not cast value")
+	ErrBadLiteral              = errors.New("invalid literal value")
+	ErrInvalidBinSerialization = errors.New("invalid binary serialization")
 )
