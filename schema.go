@@ -178,6 +178,12 @@ func (s *Schema) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
+	if s.lazyIDToParent == nil {
+		s.lazyIDToParent = sync.OnceValues(func() (map[int]int, error) {
+			return IndexParents(s)
+		})
+	}
+
 	s.fields = aux.Fields
 	if s.IdentifierFieldIDs == nil {
 		s.IdentifierFieldIDs = []int{}

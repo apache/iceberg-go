@@ -18,8 +18,6 @@
 package table
 
 import (
-	"reflect"
-
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
 	"golang.org/x/exp/slices"
@@ -37,7 +35,7 @@ type Table struct {
 func (t Table) Equals(other Table) bool {
 	return slices.Equal(t.identifier, other.identifier) &&
 		t.metadataLocation == other.metadataLocation &&
-		reflect.DeepEqual(t.metadata, other.metadata)
+		t.metadata.Equals(other.metadata)
 }
 
 func (t Table) Identifier() Identifier   { return t.identifier }

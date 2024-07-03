@@ -22,6 +22,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 
 	"github.com/apache/iceberg-go"
 
@@ -88,6 +90,8 @@ type Metadata interface {
 	// to be used for arbitrary metadata. For example, commit.retry.num-retries
 	// is used to control the number of commit retries.
 	Properties() iceberg.Properties
+
+	Equals(Metadata) bool
 }
 
 var (
@@ -134,6 +138,12 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 	return ret, json.Unmarshal(b, ret)
 }
 
+func sliceEqualHelper[T interface{ Equals(T) bool }](s1, s2 []T) bool {
+	return slices.EqualFunc(s1, s2, func(t1, t2 T) bool {
+		return t1.Equals(t2)
+	})
+}
+
 // https://iceberg.apache.org/spec/#iceberg-table-spec
 type commonMetadata struct {
 	FormatVersion      int                     `json:"format-version"`
@@ -154,6 +164,42 @@ type commonMetadata struct {
 	SortOrderList      []SortOrder             `json:"sort-orders"`
 	DefaultSortOrderID int                     `json:"default-sort-order-id"`
 	Refs               map[string]SnapshotRef  `json:"refs"`
+}
+
+func (c *commonMetadata) Equals(other *commonMetadata) bool {
+	switch {
+	case c.LastPartitionID == nil && other.LastPartitionID != nil:
+		fallthrough
+	case c.LastPartitionID != nil && other.LastPartitionID == nil:
+		fallthrough
+	case c.CurrentSnapshotID == nil && other.CurrentSnapshotID != nil:
+		fallthrough
+	case c.CurrentSnapshotID != nil && other.CurrentSnapshotID == nil:
+		return false
+	}
+
+	switch {
+	case !sliceEqualHelper(c.SchemaList, other.SchemaList):
+		fallthrough
+	case !sliceEqualHelper(c.SnapshotList, other.SnapshotList):
+		fallthrough
+	case !sliceEqualHelper(c.Specs, other.Specs):
+		fallthrough
+	case !maps.Equal(c.Props, other.Props):
+		fallthrough
+	case !maps.EqualFunc(c.Refs, other.Refs, func(sr1, sr2 SnapshotRef) bool { return sr1.Equals(sr2) }):
+		return false
+	}
+
+	return c.FormatVersion == other.FormatVersion && c.UUID == other.UUID &&
+		((c.LastPartitionID == other.LastPartitionID) || (*c.LastPartitionID == *other.LastPartitionID)) &&
+		((c.CurrentSnapshotID == other.CurrentSnapshotID) || (*c.CurrentSnapshotID == *other.CurrentSnapshotID)) &&
+		c.Loc == other.Loc && c.LastUpdatedMS == other.LastUpdatedMS &&
+		c.LastColumnId == other.LastColumnId && c.CurrentSchemaID == other.CurrentSchemaID &&
+		c.DefaultSpecID == other.DefaultSpecID && c.DefaultSortOrderID == other.DefaultSortOrderID &&
+		slices.Equal(c.SnapshotLog, other.SnapshotLog) && slices.Equal(c.MetadataLog, other.MetadataLog) &&
+		sliceEqualHelper(c.SortOrderList, other.SortOrderList)
+
 }
 
 func (c *commonMetadata) TableUUID() uuid.UUID       { return c.UUID }
@@ -331,6 +377,16 @@ type MetadataV1 struct {
 	commonMetadata
 }
 
+func (m *MetadataV1) Equals(other Metadata) bool {
+	rhs, ok := other.(*MetadataV1)
+	if !ok {
+		return false
+	}
+
+	return m.Schema.Equals(&rhs.Schema) && slices.Equal(m.Partition, rhs.Partition) &&
+		m.commonMetadata.Equals(&rhs.commonMetadata)
+}
+
 func (m *MetadataV1) preValidate() {
 	if len(m.SchemaList) == 0 {
 		m.SchemaList = []*iceberg.Schema{&m.Schema}
@@ -386,6 +442,16 @@ type MetadataV2 struct {
 	LastSequenceNumber int `json:"last-sequence-number"`
 
 	commonMetadata
+}
+
+func (m *MetadataV2) Equals(other Metadata) bool {
+	rhs, ok := other.(*MetadataV2)
+	if !ok {
+		return false
+	}
+
+	return m.LastSequenceNumber == rhs.LastSequenceNumber &&
+		m.commonMetadata.Equals(&rhs.commonMetadata)
 }
 
 func (m *MetadataV2) UnmarshalJSON(b []byte) error {

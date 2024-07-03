@@ -19,6 +19,7 @@ package table_test
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -131,7 +132,9 @@ func TestMetadataV1Parsing(t *testing.T) {
 		iceberg.NestedField{ID: 3, Name: "z", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 	)
 
-	assert.Equal(t, []*iceberg.Schema{expected}, meta.Schemas())
+	assert.True(t, slices.EqualFunc([]*iceberg.Schema{expected}, meta.Schemas(), func(s1, s2 *iceberg.Schema) bool {
+		return s1.Equals(s2)
+	}))
 	assert.Zero(t, data.SchemaList[0].ID)
 	assert.True(t, meta.CurrentSchema().Equals(expected))
 	assert.Equal(t, []iceberg.PartitionSpec{

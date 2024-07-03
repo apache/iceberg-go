@@ -113,7 +113,7 @@ func (ps *PartitionSpec) CompatibleWith(other *PartitionSpec) bool {
 
 // Equals returns true iff the field lists are the same AND the spec id
 // is the same between this partition spec and the provided one.
-func (ps *PartitionSpec) Equals(other PartitionSpec) bool {
+func (ps PartitionSpec) Equals(other PartitionSpec) bool {
 	return ps.id == other.id && slices.Equal(ps.fields, other.fields)
 }
 
