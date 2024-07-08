@@ -214,7 +214,12 @@ func inferFileIOFromSchema(path string, props map[string]string) (IO, error) {
 
 	switch parsed.Scheme {
 	case "s3", "s3a", "s3n":
+		if props["s3.use-cdk"] == "true" {
+			return CreateBlobFileIO(parsed, props)
+		}
 		return createS3FileIO(parsed, props)
+	case "mem":
+		return CreateBlobFileIO(parsed, props)
 	case "file", "":
 		return LocalFS{}, nil
 	default:
@@ -229,7 +234,7 @@ func inferFileIOFromSchema(path string, props map[string]string) (IO, error) {
 // implementation. Otherwise this will return an error if the schema
 // does not yet have an implementation here.
 //
-// Currently only LocalFS and S3 are implemented.
+// Currently local, S3, GCS, and In-Memory FSs are implemented.
 func LoadFS(props map[string]string, location string) (IO, error) {
 	if location == "" {
 		location = props["warehouse"]

@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -42,9 +43,23 @@ const (
 	S3AccessKeyID     = "s3.access-key-id"
 	S3EndpointURL     = "s3.endpoint"
 	S3ProxyURI        = "s3.proxy-uri"
+	S3ConnectTimeout  = "s3.connect-timeout"
+	S3SignerUri       = "s3.signer.uri"
 )
 
-func createS3FileIO(parsed *url.URL, props map[string]string) (IO, error) {
+var unsupportedS3Props = []string{
+	S3ConnectTimeout,
+	S3SignerUri,
+}
+
+func ParseAWSConfig(props map[string]string) (*aws.Config, error) {
+	// If any unsupported properties are set, return an error.
+	for k := range props {
+		if slices.Contains(unsupportedS3Props, k) {
+			return nil, fmt.Errorf("unsupported S3 property %q", k)
+		}
+	}
+
 	opts := []func(*config.LoadOptions) error{}
 	endpoint, ok := props[S3EndpointURL]
 	if !ok {
@@ -97,7 +112,18 @@ func createS3FileIO(parsed *url.URL, props map[string]string) (IO, error) {
 		)))
 	}
 
-	awscfg, err := config.LoadDefaultConfig(context.Background(), opts...)
+	awscfg := new(aws.Config)
+	var err error
+	*awscfg, err = config.LoadDefaultConfig(context.Background(), opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	return awscfg, nil
+}
+
+func createS3FileIO(parsed *url.URL, props map[string]string) (IO, error) {
+	awscfg, err := ParseAWSConfig(props)
 	if err != nil {
 		return nil, err
 	}
@@ -111,6 +137,6 @@ func createS3FileIO(parsed *url.URL, props map[string]string) (IO, error) {
 		return strings.TrimPrefix(n, parsed.Host)
 	}
 
-	s3fs := s3iofs.New(parsed.Host, awscfg)
+	s3fs := s3iofs.New(parsed.Host, *awscfg)
 	return FSPreProcName(s3fs, preprocess), nil
 }
