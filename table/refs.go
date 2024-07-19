@@ -20,6 +20,7 @@ package table
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 )
 
 const MainBranch = "main"
@@ -43,6 +44,10 @@ type SnapshotRef struct {
 	MinSnapshotsToKeep *int    `json:"min-snapshots-to-keep,omitempty"`
 	MaxSnapshotAgeMs   *int64  `json:"max-snapshot-age-ms,omitempty"`
 	MaxRefAgeMs        *int64  `json:"max-ref-age-ms,omitempty"`
+}
+
+func (s *SnapshotRef) Equals(rhs SnapshotRef) bool {
+	return reflect.DeepEqual(s, &rhs)
 }
 
 func (s *SnapshotRef) UnmarshalJSON(b []byte) error {

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/apache/iceberg-go"
@@ -132,6 +133,11 @@ var UnsortedSortOrder = SortOrder{OrderID: UnsortedSortOrderID, Fields: []SortFi
 type SortOrder struct {
 	OrderID int         `json:"order-id"`
 	Fields  []SortField `json:"fields"`
+}
+
+func (s SortOrder) Equals(rhs SortOrder) bool {
+	return s.OrderID == rhs.OrderID &&
+		slices.Equal(s.Fields, rhs.Fields)
 }
 
 func (s SortOrder) String() string {
