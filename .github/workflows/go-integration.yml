@@ -15,15 +15,15 @@
 # specific language governing permissions and limitations
 # under the License.
 
-name: Go
+name: "Go Integration"
 
 on:
   push:
     branches:
       - 'main'
     tags:
-      - 'v**'          
-  pull_request:    
+      - 'v**'
+  pull_request:
 
 concurrency:
   group: ${{ github.repository }}-${{ github.head_ref || github.sha }}-${{ github.workflow }}
@@ -33,25 +33,36 @@ permissions:
   contents: read
 
 jobs:
-  lint-and-test:
-    name: ${{ matrix.os }} go${{ matrix.go }}
+  integration-test:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        go: [ '1.21', '1.22' ]
-        os: [ 'ubuntu-latest', 'windows-latest', 'macos-latest' ]
     steps:
-    - uses: actions/checkout@v3
-    - name: Install Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: ${{ matrix.go }}
-        cache: true
-        cache-dependency-path: go.sum
-    - name: Install staticcheck
-      run: go install honnef.co/go/tools/cmd/staticcheck@latest
-    - name: Lint
-      run: staticcheck ./...
-    - name: Run tests
-      run: go test -v ./...
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Install Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: 1.22
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Start docker
+        run: |
+          docker compose -f dev/docker-compose.yml up -d
+          sleep 10
+      - name: Provision Tables
+        run: |
+          docker compose -f dev/docker-compose.yml exec -T spark-iceberg ipython ./provision.py
+
+      - name: Get minio container IP
+        run: |
+          echo "AWS_S3_ENDPOINT=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' minio)" >> $GITHUB_ENV
+
+      - name: Run integration tests
+        env:
+          AWS_S3_ENDPOINT: "${{ env.AWS_S3_ENDPOINT }}"
+        run: go test -tags integration -v -run="^TestScanner" ./table
+
+      - name: Show debug logs
+        if: ${{ failure() }}
+        run: docker compose -f dev/docker-compose.yml logs
