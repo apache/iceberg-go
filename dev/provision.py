@@ -59,7 +59,7 @@ for catalog_name, catalog in catalogs.items():
         NestedField(field_id=2, name="fixed_col", field_type=FixedType(25), required=False),
     )
 
-    catalog.create_table(identifier="default.test_uuid_and_fixed_unpartitioned", schema=schema)
+    catalog.create_table(identifier=f"{catalog_name}.default.test_uuid_and_fixed_unpartitioned", schema=schema)
 
     spark.sql(
         f"""
