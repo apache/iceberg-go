@@ -35,6 +35,7 @@ func TestScanner(t *testing.T) {
 	require.NoError(t, err)
 
 	props := iceberg.Properties{
+		io.S3Region:      "us-east-1",
 		io.S3AccessKeyID: "admin", io.S3SecretAccessKey: "password"}
 
 	tests := []struct {
@@ -82,6 +83,7 @@ func TestScannerWithDeletes(t *testing.T) {
 	require.NoError(t, err)
 
 	props := iceberg.Properties{
+		io.S3Region:      "us-east-1",
 		io.S3AccessKeyID: "admin", io.S3SecretAccessKey: "password"}
 
 	ident := catalog.ToRestIdentifier("default", "test_positional_mor_deletes")

@@ -64,9 +64,13 @@ func createS3FileIO(parsed *url.URL, props map[string]string) (IO, error) {
 	}
 
 	if region, ok := props[S3Region]; ok {
-		opts = append(opts, func(o *s3.Options) { o.Region = region })
+		opts = append(opts, func(o *s3.Options) {
+			o.Region = region
+		})
 	} else if region, ok := props["client.region"]; ok {
-		opts = append(opts, func(o *s3.Options) { o.Region = region })
+		opts = append(opts, func(o *s3.Options) {
+			o.Region = region
+		})
 	}
 
 	accessKey, secretAccessKey := props[S3AccessKeyID], props[S3SecretAccessKey]
