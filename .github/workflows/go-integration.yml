@@ -62,6 +62,7 @@ jobs:
       - name: Run integration tests
         env:
           AWS_S3_ENDPOINT: "${{ env.AWS_S3_ENDPOINT }}"
+          AWS_REGION: "us-east-1"
         run: |
           go run ./cmd/iceberg --uri http://localhost:8181 describe default.test_uuid_and_fixed_unpartitioned
           go run ./cmd/iceberg --uri http://localhost:8181 files default.test_uuid_and_fixed_unpartitioned
