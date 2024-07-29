@@ -53,6 +53,7 @@ jobs:
       - name: Provision Tables
         run: |
           docker compose -f dev/docker-compose.yml exec -T spark-iceberg ipython ./provision.py
+          sleep 10
 
       - name: Get minio container IP
         run: |
