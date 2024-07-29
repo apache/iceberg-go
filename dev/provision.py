@@ -35,22 +35,22 @@ catalogs = {
             "s3.secret-access-key": "password",
         },
     ),
-    'hive': load_catalog(
-        "hive",
-        **{
-            "type": "hive",
-            "uri": "http://hive:9083",
-            "s3.endpoint": "http://minio:9000",
-            "s3.access-key-id": "admin",
-            "s3.secret-access-key": "password",
-        },
-    ),
+    # 'hive': load_catalog(
+    #     "hive",
+    #     **{
+    #         "type": "hive",
+    #         "uri": "http://hive:9083",
+    #         "s3.endpoint": "http://minio:9000",
+    #         "s3.access-key-id": "admin",
+    #         "s3.secret-access-key": "password",
+    #     },
+    # ),
 }
 
 for catalog_name, catalog in catalogs.items():
     spark.sql(
         f"""
-      CREATE DATABASE IF NOT EXISTS {catalog_name}.default;
+      CREATE DATABASE IF NOT EXISTS default;
     """
     )
 
@@ -59,11 +59,11 @@ for catalog_name, catalog in catalogs.items():
         NestedField(field_id=2, name="fixed_col", field_type=FixedType(25), required=False),
     )
 
-    catalog.create_table(identifier=f"{catalog_name}.default.test_uuid_and_fixed_unpartitioned", schema=schema)
+    catalog.create_table(identifier=f"default.test_uuid_and_fixed_unpartitioned", schema=schema)
 
     spark.sql(
         f"""
-        INSERT INTO {catalog_name}.default.test_uuid_and_fixed_unpartitioned VALUES
+        INSERT INTO default.test_uuid_and_fixed_unpartitioned VALUES
         ('102cb62f-e6f8-4eb0-9973-d9b012ff0967', CAST('1234567890123456789012345' AS BINARY)),
         ('ec33e4b2-a834-4cc3-8c4a-a1d3bfc2f226', CAST('1231231231231231231231231' AS BINARY)),
         ('639cccce-c9d2-494a-a78c-278ab234f024', CAST('12345678901234567ass12345' AS BINARY)),
@@ -74,7 +74,7 @@ for catalog_name, catalog in catalogs.items():
 
     spark.sql(
         f"""
-      CREATE OR REPLACE TABLE {catalog_name}.default.test_null_nan
+      CREATE OR REPLACE TABLE default.test_null_nan
       USING iceberg
       AS SELECT
         1            AS idx,
@@ -84,28 +84,28 @@ for catalog_name, catalog in catalogs.items():
         null         AS col_numeric
     UNION ALL SELECT
         3            AS idx,
-        1            AS col_numeric
+        1            AS col_numeric;
     """
     )
 
     spark.sql(
         f"""
-      CREATE OR REPLACE TABLE {catalog_name}.default.test_null_nan_rewritten
+      CREATE OR REPLACE TABLE default.test_null_nan_rewritten
       USING iceberg
-      AS SELECT * FROM default.test_null_nan
+      AS SELECT * FROM default.test_null_nan;
     """
     )
 
     spark.sql(
         f"""
-    CREATE OR REPLACE TABLE {catalog_name}.default.test_limit as
+    CREATE OR REPLACE TABLE default.test_limit as
       SELECT * LATERAL VIEW explode(ARRAY(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)) AS idx;
     """
     )
 
     spark.sql(
         f"""
-    CREATE OR REPLACE TABLE {catalog_name}.default.test_positional_mor_deletes (
+    CREATE OR REPLACE TABLE default.test_positional_mor_deletes (
         dt     date,
         number integer,
         letter string
@@ -122,11 +122,11 @@ for catalog_name, catalog in catalogs.items():
 
     # Partitioning is not really needed, but there is a bug:
     # https://github.com/apache/iceberg/pull/7685
-    spark.sql(f"ALTER TABLE {catalog_name}.default.test_positional_mor_deletes ADD PARTITION FIELD years(dt) AS dt_years")
+    spark.sql(f"ALTER TABLE default.test_positional_mor_deletes ADD PARTITION FIELD years(dt) AS dt_years")
 
     spark.sql(
         f"""
-    INSERT INTO {catalog_name}.default.test_positional_mor_deletes
+    INSERT INTO default.test_positional_mor_deletes
     VALUES
         (CAST('2023-03-01' AS date), 1, 'a'),
         (CAST('2023-03-02' AS date), 2, 'b'),
@@ -143,17 +143,17 @@ for catalog_name, catalog in catalogs.items():
     """
     )
 
-    spark.sql(f"ALTER TABLE {catalog_name}.default.test_positional_mor_deletes CREATE TAG tag_12")
+    spark.sql(f"ALTER TABLE default.test_positional_mor_deletes CREATE TAG tag_12")
 
-    spark.sql(f"ALTER TABLE {catalog_name}.default.test_positional_mor_deletes CREATE BRANCH without_5")
+    spark.sql(f"ALTER TABLE default.test_positional_mor_deletes CREATE BRANCH without_5")
 
-    spark.sql(f"DELETE FROM {catalog_name}.default.test_positional_mor_deletes.branch_without_5 WHERE number = 5")
+    spark.sql(f"DELETE FROM default.test_positional_mor_deletes.branch_without_5 WHERE number = 5")
 
-    spark.sql(f"DELETE FROM {catalog_name}.default.test_positional_mor_deletes WHERE number = 9")
+    spark.sql(f"DELETE FROM default.test_positional_mor_deletes WHERE number = 9")
 
     spark.sql(
         f"""
-      CREATE OR REPLACE TABLE {catalog_name}.default.test_positional_mor_double_deletes (
+      CREATE OR REPLACE TABLE default.test_positional_mor_double_deletes (
         dt     date,
         number integer,
         letter string
@@ -170,11 +170,11 @@ for catalog_name, catalog in catalogs.items():
 
     # Partitioning is not really needed, but there is a bug:
     # https://github.com/apache/iceberg/pull/7685
-    spark.sql(f"ALTER TABLE {catalog_name}.default.test_positional_mor_double_deletes ADD PARTITION FIELD years(dt) AS dt_years")
+    spark.sql(f"ALTER TABLE default.test_positional_mor_double_deletes ADD PARTITION FIELD years(dt) AS dt_years")
 
     spark.sql(
         f"""
-    INSERT INTO {catalog_name}.default.test_positional_mor_double_deletes
+    INSERT INTO default.test_positional_mor_double_deletes
     VALUES
         (CAST('2023-03-01' AS date), 1, 'a'),
         (CAST('2023-03-02' AS date), 2, 'b'),
@@ -191,9 +191,9 @@ for catalog_name, catalog in catalogs.items():
     """
     )
 
-    spark.sql(f"DELETE FROM {catalog_name}.default.test_positional_mor_double_deletes WHERE number = 9")
+    spark.sql(f"DELETE FROM default.test_positional_mor_double_deletes WHERE number = 9")
 
-    spark.sql(f"DELETE FROM {catalog_name}.default.test_positional_mor_double_deletes WHERE letter == 'f'")
+    spark.sql(f"DELETE FROM default.test_positional_mor_double_deletes WHERE letter == 'f'")
 
     all_types_dataframe = (
         spark.range(0, 5, 1, 5)
@@ -214,7 +214,7 @@ for catalog_name, catalog in catalogs.items():
         .withColumn("structCol", expr("STRUCT(mapCol, arrayCol)"))
     )
 
-    all_types_dataframe.writeTo(f"{catalog_name}.default.test_all_types").tableProperty("format-version", "2").partitionedBy(
+    all_types_dataframe.writeTo(f"default.test_all_types").tableProperty("format-version", "2").partitionedBy(
         "intCol"
     ).createOrReplace()
 
@@ -229,7 +229,7 @@ for catalog_name, catalog in catalogs.items():
     ]:
         spark.sql(
             f"""
-          CREATE OR REPLACE TABLE {catalog_name}.default.{table_name} (
+          CREATE OR REPLACE TABLE default.{table_name} (
             dt     date,
             ts     timestamp,
             number integer,
@@ -239,11 +239,11 @@ for catalog_name, catalog in catalogs.items():
         """
         )
 
-        spark.sql(f"ALTER TABLE {catalog_name}.default.{table_name} ADD PARTITION FIELD {partition}")
+        spark.sql(f"ALTER TABLE default.{table_name} ADD PARTITION FIELD {partition}")
 
         spark.sql(
             f"""
-        INSERT INTO {catalog_name}.default.{table_name}
+        INSERT INTO default.{table_name}
         VALUES
             (CAST('2022-03-01' AS date), CAST('2022-03-01 01:22:00' AS timestamp), 1, 'a'),
             (CAST('2022-03-02' AS date), CAST('2022-03-02 02:22:00' AS timestamp), 2, 'b'),
@@ -262,11 +262,11 @@ for catalog_name, catalog in catalogs.items():
 
     # There is an issue with CREATE OR REPLACE
     # https://github.com/apache/iceberg/issues/8756
-    spark.sql(f"DROP TABLE IF EXISTS {catalog_name}.default.test_table_version")
+    spark.sql(f"DROP TABLE IF EXISTS default.test_table_version")
 
     spark.sql(
         f"""
-    CREATE TABLE {catalog_name}.default.test_table_version (
+    CREATE TABLE default.test_table_version (
         dt     date,
         number integer,
         letter string
@@ -280,7 +280,7 @@ for catalog_name, catalog in catalogs.items():
 
     spark.sql(
         f"""
-    CREATE TABLE {catalog_name}.default.test_table_sanitized_character (
+    CREATE TABLE default.test_table_sanitized_character (
         `letter/abc` string
     )
     USING iceberg
@@ -292,7 +292,7 @@ for catalog_name, catalog in catalogs.items():
 
     spark.sql(
         f"""
-    INSERT INTO {catalog_name}.default.test_table_sanitized_character
+    INSERT INTO default.test_table_sanitized_character
     VALUES
         ('123')
     """
@@ -300,7 +300,7 @@ for catalog_name, catalog in catalogs.items():
 
     spark.sql(
         f"""
-    INSERT INTO {catalog_name}.default.test_table_sanitized_character
+    INSERT INTO default.test_table_sanitized_character
     VALUES
         ('123')
     """
@@ -308,22 +308,22 @@ for catalog_name, catalog in catalogs.items():
 
     spark.sql(
         f"""
-    CREATE TABLE {catalog_name}.default.test_table_add_column (
+    CREATE TABLE default.test_table_add_column (
         a string
     )
     USING iceberg
     """
     )
 
-    spark.sql(f"INSERT INTO {catalog_name}.default.test_table_add_column VALUES ('1')")
+    spark.sql(f"INSERT INTO default.test_table_add_column VALUES ('1')")
 
-    spark.sql(f"ALTER TABLE {catalog_name}.default.test_table_add_column ADD COLUMN b string")
+    spark.sql(f"ALTER TABLE default.test_table_add_column ADD COLUMN b string")
 
-    spark.sql(f"INSERT INTO {catalog_name}.default.test_table_add_column VALUES ('2', '2')")
+    spark.sql(f"INSERT INTO default.test_table_add_column VALUES ('2', '2')")
 
     spark.sql(
         f"""
-    CREATE TABLE {catalog_name}.default.test_table_empty_list_and_map (
+    CREATE TABLE default.test_table_empty_list_and_map (
         col_list             array<int>,
         col_map              map<int, int>,
         col_list_with_struct array<struct<test:int>>
@@ -337,7 +337,7 @@ for catalog_name, catalog in catalogs.items():
 
     spark.sql(
         f"""
-    INSERT INTO {catalog_name}.default.test_table_empty_list_and_map
+    INSERT INTO default.test_table_empty_list_and_map
     VALUES (null, null, null),
            (array(), map(), array(struct(1)))
     """
@@ -345,7 +345,7 @@ for catalog_name, catalog in catalogs.items():
 
     spark.sql(
         f"""
-        CREATE OR REPLACE TABLE {catalog_name}.default.test_table_snapshot_operations (
+        CREATE OR REPLACE TABLE default.test_table_snapshot_operations (
             number integer
         )
         USING iceberg
@@ -357,35 +357,35 @@ for catalog_name, catalog in catalogs.items():
 
     spark.sql(
         f"""
-        INSERT INTO {catalog_name}.default.test_table_snapshot_operations
+        INSERT INTO default.test_table_snapshot_operations
         VALUES (1)
         """
     )
 
     spark.sql(
         f"""
-        INSERT INTO {catalog_name}.default.test_table_snapshot_operations
+        INSERT INTO default.test_table_snapshot_operations
         VALUES (2)
         """
     )
 
     spark.sql(
         f"""
-        DELETE FROM {catalog_name}.default.test_table_snapshot_operations
+        DELETE FROM default.test_table_snapshot_operations
         WHERE number = 2
         """
     )
 
     spark.sql(
         f"""
-        INSERT INTO {catalog_name}.default.test_table_snapshot_operations
+        INSERT INTO default.test_table_snapshot_operations
         VALUES (3)
         """
     )
 
     spark.sql(
         f"""
-        INSERT INTO {catalog_name}.default.test_table_snapshot_operations
+        INSERT INTO default.test_table_snapshot_operations
         VALUES (4)
         """
     )

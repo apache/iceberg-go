@@ -56,7 +56,7 @@ jobs:
 
       - name: Get minio container IP
         run: |
-          echo "AWS_S3_ENDPOINT=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' minio)" >> $GITHUB_ENV
+          echo "AWS_S3_ENDPOINT=http://$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' minio):9000" >> $GITHUB_ENV
 
       - name: Run integration tests
         env:
