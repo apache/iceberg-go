@@ -63,11 +63,7 @@ jobs:
         env:
           AWS_S3_ENDPOINT: "${{ env.AWS_S3_ENDPOINT }}"
           AWS_REGION: "us-east-1"
-          AWS_ACCESS_KEY_ID: "admin"
-          AWS_SECRET_ACCESS_KEY: "password"
-        run: |
-          go run ./cmd/iceberg --uri http://localhost:8181 describe default.test_uuid_and_fixed_unpartitioned
-          go run ./cmd/iceberg --uri http://localhost:8181 files default.test_uuid_and_fixed_unpartitioned
+        run: |          
           go test -tags integration -v -run="^TestScanner" ./table
 
       - name: Show debug logs
