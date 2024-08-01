@@ -18,11 +18,13 @@ version: "3"
 
 services:
   spark-iceberg:
-    image: tabulario/spark-iceberg
+    image: pyiceberg-spark
     container_name: spark-iceberg    
+    build: .
     networks:
       iceberg_net:
     depends_on:
+      - hive
       - rest
       - minio
     volumes:
@@ -85,5 +87,17 @@ services:
       /usr/bin/mc policy set public minio/warehouse;
       tail -f /dev/null
       "
+  hive:
+    build: hive/
+    container_name: hive
+    hostname: hive
+    networks:
+      iceberg_net:
+    ports:
+      - 9083:9083
+    environment:
+      SERVICE_NAME: "metastore"
+      SERVICE_OPTS: "-Dmetastore.warehouse.dir=s3a://warehouse/hive/"
+
 networks:
   iceberg_net:

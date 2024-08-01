@@ -59,6 +59,23 @@ func (t Table) Schemas() map[int]*iceberg.Schema {
 	return m
 }
 
+func (t Table) Scan(rowFilter iceberg.BooleanExpression, snapshotID int64, caseSensitive bool, fields ...string) *Scan {
+	s := &Scan{
+		metadata:       t.metadata,
+		io:             t.fs,
+		rowFilter:      rowFilter,
+		selectedFields: fields,
+		caseSensitive:  caseSensitive,
+	}
+
+	if snapshotID != 0 {
+		s.snapshotID = &snapshotID
+	}
+
+	s.partitionFilters = newKeyDefaultMapWrapErr(s.buildPartitionProjection)
+	return s
+}
+
 func New(ident Identifier, meta Metadata, location string, fs io.IO) *Table {
 	return &Table{
 		identifier:       ident,

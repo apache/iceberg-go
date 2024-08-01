@@ -980,8 +980,50 @@ func (bsp *boundSetPredicate[T]) String() string {
 	return fmt.Sprintf("Bound%s(term=%s, {%v})", bsp.op, bsp.term, bsp.lits.Members())
 }
 func (bsp *boundSetPredicate[T]) AsUnbound(r Reference, lits []Literal) UnboundPredicate {
-	return &unboundSetPredicate{op: bsp.op, term: r, lits: newLiteralSet(lits...)}
+	litSet := newLiteralSet(lits...)
+	if litSet.Len() == 1 {
+		switch bsp.op {
+		case OpIn:
+			return LiteralPredicate(OpEQ, r, lits[0])
+		case OpNotIn:
+			return LiteralPredicate(OpNEQ, r, lits[0])
+		}
+	}
+
+	return &unboundSetPredicate{op: bsp.op, term: r, lits: litSet}
 }
+
 func (bsp *boundSetPredicate[T]) Literals() Set[Literal] {
 	return bsp.lits
+}
+
+type BoundTransform struct {
+	transform Transform
+	term      BoundTerm
+}
+
+func (*BoundTransform) isTerm() {}
+func (b *BoundTransform) String() string {
+	return fmt.Sprintf("BoundTransform(transform=%s, term=%s)",
+		b.transform, b.term)
+}
+
+func (b *BoundTransform) Ref() BoundReference { return b.term.Ref() }
+func (b *BoundTransform) Type() Type          { return b.transform.ResultType(b.term.Type()) }
+
+func (b *BoundTransform) Equals(other BoundTerm) bool {
+	rhs, ok := other.(*BoundTransform)
+	if !ok {
+		return false
+	}
+
+	return b.transform.Equals(rhs.transform) && b.term.Equals(rhs.term)
+}
+
+func (b *BoundTransform) evalToLiteral(st structLike) Optional[Literal] {
+	return b.transform.Apply(b.term.evalToLiteral(st))
+}
+
+func (b *BoundTransform) evalIsNull(st structLike) bool {
+	return !b.evalToLiteral(st).Valid
 }

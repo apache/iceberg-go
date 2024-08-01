@@ -20,6 +20,7 @@ package iceberg
 import (
 	"io"
 	"sync"
+	"time"
 
 	iceio "github.com/apache/iceberg-go/io"
 
@@ -557,6 +558,19 @@ const (
 	EntryContentEqDeletes  ManifestEntryContent = 2
 )
 
+func (m ManifestEntryContent) String() string {
+	switch m {
+	case EntryContentData:
+		return "Data"
+	case EntryContentPosDeletes:
+		return "Positional_Deletes"
+	case EntryContentEqDeletes:
+		return "Equality_Deletes"
+	default:
+		return "UNKNOWN"
+	}
+}
+
 // FileFormat defines constants for the format of data files.
 type FileFormat string
 
@@ -579,6 +593,51 @@ func avroColMapToMap[K comparable, V any](c *[]colMap[K, V]) map[K]V {
 	out := make(map[K]V)
 	for _, data := range *c {
 		out[data.Key] = data.Value
+	}
+	return out
+}
+
+func avroPartitionData(input map[string]any) map[string]any {
+	// hamba/avro2 will unmarshal a map[string]any such that
+	// each entry will actually be a map[string]interface{} with the key
+	// being the avro type.
+	//
+	// This means that partition data that looks like:
+	//
+	//  [{"field-id": 1000, "name": "ts", "type": {"type": "int", "logicalType": "date"}}]
+	//
+	// Becomes:
+	//
+	//  map[string]any{"ts": map[string]any{"int.date": time.Time{}}}
+	//
+	// so we need to simplify our map and make partition data handling easier
+	out := map[string]any{}
+	for k, v := range input {
+		switch v := v.(type) {
+		case map[string]any:
+			for typname, val := range v {
+				switch typname {
+				case "int.date":
+					out[k] = Date(val.(time.Time).Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
+				case "int.time-millis":
+					out[k] = Time(val.(time.Duration).Microseconds())
+				case "long.time-micros":
+					out[k] = Time(val.(time.Duration).Microseconds())
+				case "long.timestamp-millis":
+					out[k] = Timestamp(val.(time.Time).UTC().UnixMicro())
+				case "long.timestamp-micros":
+					out[k] = Timestamp(val.(time.Time).UTC().UnixMicro())
+				case "bytes.decimal":
+					// not implemented yet
+				case "fixed.decimal":
+					// not implemented yet
+				default:
+					out[k] = val
+				}
+			}
+		default:
+			out[k] = v
+		}
 	}
 	return out
 }
@@ -623,15 +682,19 @@ func (d *dataFile) initializeMapData() {
 		d.distinctCntMap = avroColMapToMap(d.DistinctCounts)
 		d.lowerBoundMap = avroColMapToMap(d.LowerBounds)
 		d.upperBoundMap = avroColMapToMap(d.UpperBounds)
+		d.PartitionData = avroPartitionData(d.PartitionData)
 	})
 }
 
 func (d *dataFile) ContentType() ManifestEntryContent { return d.Content }
 func (d *dataFile) FilePath() string                  { return d.Path }
 func (d *dataFile) FileFormat() FileFormat            { return d.Format }
-func (d *dataFile) Partition() map[string]any         { return d.PartitionData }
-func (d *dataFile) Count() int64                      { return d.RecordCount }
-func (d *dataFile) FileSizeBytes() int64              { return d.FileSize }
+func (d *dataFile) Partition() map[string]any {
+	d.initializeMapData()
+	return d.PartitionData
+}
+func (d *dataFile) Count() int64         { return d.RecordCount }
+func (d *dataFile) FileSizeBytes() int64 { return d.FileSize }
 
 func (d *dataFile) ColumnSizes() map[int]int64 {
 	d.initializeMapData()
