@@ -158,8 +158,6 @@ for catalog_name, catalog in catalogs.items():
     """
     )
 
-    # Partitioning is not really needed, but there is a bug:
-    # https://github.com/apache/iceberg/pull/7685
     spark.sql(f"ALTER TABLE default.test_positional_mor_double_deletes ADD PARTITION FIELD years(dt) AS dt_years")
 
     spark.sql(
