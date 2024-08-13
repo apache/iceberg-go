@@ -35,16 +35,6 @@ catalogs = {
             "s3.secret-access-key": "password",
         },
     ),
-    # 'hive': load_catalog(
-    #     "hive",
-    #     **{
-    #         "type": "hive",
-    #         "uri": "http://hive:9083",
-    #         "s3.endpoint": "http://minio:9000",
-    #         "s3.access-key-id": "admin",
-    #         "s3.secret-access-key": "password",
-    #     },
-    # ),
 }
 
 for catalog_name, catalog in catalogs.items():
