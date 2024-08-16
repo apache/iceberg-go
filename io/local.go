@@ -17,14 +17,17 @@
 
 package io
 
-import "os"
+import (
+	"os"
+	"strings"
+)
 
 // LocalFS is an implementation of IO that implements interaction with
 // the local file system.
 type LocalFS struct{}
 
 func (LocalFS) Open(name string) (File, error) {
-	return os.Open(name)
+	return os.Open(strings.TrimPrefix(name, "file://"))
 }
 
 func (LocalFS) Remove(name string) error {
