@@ -385,6 +385,10 @@ func getFieldIDMap(sc avro.Schema) map[string]int {
 	return result
 }
 
+type hasFieldToIDMap interface {
+	setFieldNameToIDMap(map[string]int)
+}
+
 func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error) {
 	f, err := fs.Open(m.FilePath())
 	if err != nil {
@@ -441,7 +445,9 @@ func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]M
 
 		if !discardDeleted || tmp.Status() != EntryStatusDELETED {
 			tmp.inheritSeqNum(m)
-			tmp.DataFile().setFieldNameToIDMap(fieldNameToID)
+			if fieldToIDMap, ok := tmp.DataFile().(hasFieldToIDMap); ok {
+				fieldToIDMap.setFieldNameToIDMap(fieldNameToID)
+			}
 			results = append(results, tmp)
 		}
 	}
@@ -720,9 +726,13 @@ func (d *dataFile) setFieldNameToIDMap(m map[string]int) { d.fieldNameToID = m }
 func (d *dataFile) ContentType() ManifestEntryContent { return d.Content }
 func (d *dataFile) FilePath() string                  { return d.Path }
 func (d *dataFile) FileFormat() FileFormat            { return d.Format }
-func (d *dataFile) Partition() map[string]any         { return d.PartitionData }
-func (d *dataFile) Count() int64                      { return d.RecordCount }
-func (d *dataFile) FileSizeBytes() int64              { return d.FileSize }
+func (d *dataFile) Partition() map[string]any {
+	d.initializeMapData()
+	return d.PartitionData
+}
+
+func (d *dataFile) Count() int64         { return d.RecordCount }
+func (d *dataFile) FileSizeBytes() int64 { return d.FileSize }
 
 func (d *dataFile) ColumnSizes() map[int]int64 {
 	d.initializeMapData()
