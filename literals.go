@@ -71,6 +71,12 @@ type TypedLiteral[T LiteralType] interface {
 	Comparator() Comparator[T]
 }
 
+type NumericLiteral interface {
+	Literal
+	Increment() Literal
+	Decrement() Literal
+}
+
 // NewLiteral provides a literal based on the type of T
 func NewLiteral[T LiteralType](val T) Literal {
 	switch v := any(val).(type) {
@@ -416,6 +422,22 @@ func (i Int32Literal) Equals(other Literal) bool {
 	return literalEq(i, other)
 }
 
+func (i Int32Literal) Increment() Literal {
+	if i == math.MaxInt32 {
+		return Int32AboveMaxLiteral()
+	}
+
+	return Int32Literal(i + 1)
+}
+
+func (i Int32Literal) Decrement() Literal {
+	if i == math.MinInt32 {
+		return Int32BelowMinLiteral()
+	}
+
+	return Int32Literal(i - 1)
+}
+
 func (i Int32Literal) MarshalBinary() (data []byte, err error) {
 	// stored as 4 bytes in little endian order
 	data = make([]byte, 4)
@@ -480,6 +502,22 @@ func (i Int64Literal) To(t Type) (Literal, error) {
 
 func (i Int64Literal) Equals(other Literal) bool {
 	return literalEq(i, other)
+}
+
+func (i Int64Literal) Increment() Literal {
+	if i == math.MaxInt64 {
+		return Int64AboveMaxLiteral()
+	}
+
+	return Int64Literal(i + 1)
+}
+
+func (i Int64Literal) Decrement() Literal {
+	if i == math.MinInt64 {
+		return Int64BelowMinLiteral()
+	}
+
+	return Int64Literal(i - 1)
 }
 
 func (i Int64Literal) MarshalBinary() (data []byte, err error) {
@@ -598,7 +636,7 @@ func (DateLiteral) Comparator() Comparator[Date] { return cmp.Compare[Date] }
 func (d DateLiteral) Type() Type                 { return PrimitiveTypes.Date }
 func (d DateLiteral) Value() Date                { return Date(d) }
 func (d DateLiteral) String() string {
-	t := time.Unix(0, 0).UTC().AddDate(0, 0, int(d))
+	t := Date(d).ToTime()
 	return t.Format("2006-01-02")
 }
 func (d DateLiteral) To(t Type) (Literal, error) {
@@ -611,6 +649,9 @@ func (d DateLiteral) To(t Type) (Literal, error) {
 func (d DateLiteral) Equals(other Literal) bool {
 	return literalEq(d, other)
 }
+
+func (d DateLiteral) Increment() Literal { return DateLiteral(d + 1) }
+func (d DateLiteral) Decrement() Literal { return DateLiteral(d - 1) }
 
 func (d DateLiteral) MarshalBinary() (data []byte, err error) {
 	// stored as 4 byte little endian
@@ -673,7 +714,7 @@ func (TimestampLiteral) Comparator() Comparator[Timestamp] { return cmp.Compare[
 func (t TimestampLiteral) Type() Type                      { return PrimitiveTypes.Timestamp }
 func (t TimestampLiteral) Value() Timestamp                { return Timestamp(t) }
 func (t TimestampLiteral) String() string {
-	tm := time.UnixMicro(int64(t)).UTC()
+	tm := Timestamp(t).ToTime()
 	return tm.Format("2006-01-02 15:04:05.000000")
 }
 func (t TimestampLiteral) To(typ Type) (Literal, error) {
@@ -690,6 +731,9 @@ func (t TimestampLiteral) To(typ Type) (Literal, error) {
 func (t TimestampLiteral) Equals(other Literal) bool {
 	return literalEq(t, other)
 }
+
+func (t TimestampLiteral) Increment() Literal { return TimestampLiteral(t + 1) }
+func (t TimestampLiteral) Decrement() Literal { return TimestampLiteral(t - 1) }
 
 func (t TimestampLiteral) MarshalBinary() (data []byte, err error) {
 	// stored as 8 byte little endian
@@ -1071,6 +1115,16 @@ func (d DecimalLiteral) Equals(other Literal) bool {
 		return false
 	}
 	return d.Val == rescaled
+}
+
+func (d DecimalLiteral) Increment() Literal {
+	d.Val = d.Val.Add(decimal128.FromU64(1))
+	return d
+}
+
+func (d DecimalLiteral) Decrement() Literal {
+	d.Val = d.Val.Sub(decimal128.FromU64(1))
+	return d
 }
 
 func (d DecimalLiteral) MarshalBinary() (data []byte, err error) {

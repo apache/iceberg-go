@@ -506,6 +506,10 @@ func (Float64Type) String() string { return "double" }
 
 type Date int32
 
+func (d Date) ToTime() time.Time {
+	return epochTM.AddDate(0, 0, int(d))
+}
+
 // DateType represents a calendar date without a timezone or time,
 // represented as a 32-bit integer denoting the number of days since
 // the unix epoch.
@@ -535,6 +539,10 @@ func (TimeType) Type() string   { return "time" }
 func (TimeType) String() string { return "time" }
 
 type Timestamp int64
+
+func (t Timestamp) ToTime() time.Time {
+	return time.UnixMicro(int64(t)).UTC()
+}
 
 func (t Timestamp) ToDate() Date {
 	tm := time.UnixMicro(int64(t)).UTC()

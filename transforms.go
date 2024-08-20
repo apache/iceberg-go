@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ParseTransform takes the string representation of a transform as
@@ -127,6 +128,8 @@ func (t TruncateTransform) MarshalText() ([]byte, error) {
 func (t TruncateTransform) String() string { return fmt.Sprintf("truncate[%d]", t.Width) }
 
 func (TruncateTransform) ResultType(t Type) Type { return t }
+
+var epochTM = time.Unix(0, 0).UTC()
 
 // YearTransform transforms a datetime value into a year value.
 type YearTransform struct{}
