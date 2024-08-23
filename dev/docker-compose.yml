@@ -18,11 +18,12 @@ version: "3"
 
 services:
   spark-iceberg:
-    image: tabulario/spark-iceberg
+    image: pyiceberg-spark
     container_name: spark-iceberg    
+    build: .
     networks:
       iceberg_net:
-    depends_on:
+    depends_on:      
       - rest
       - minio
     volumes:
@@ -85,5 +86,6 @@ services:
       /usr/bin/mc policy set public minio/warehouse;
       tail -f /dev/null
       "
+
 networks:
   iceberg_net:

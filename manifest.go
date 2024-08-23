@@ -932,8 +932,6 @@ type DataFile interface {
 	// SortOrderID returns the id representing the sort order for this
 	// file, or nil if there is no sort order.
 	SortOrderID() *int
-
-	setFieldNameToIDMap(map[string]int)
 }
 
 // ManifestEntry is an interface for both v1 and v2 manifest entries.
