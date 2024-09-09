@@ -185,7 +185,7 @@ func main() {
 				os.Exit(1)
 			}
 		case cfg.Table:
-			err := cat.DropTable(context.Background(), catalog.ToRestIdentifier(cfg.Ident))
+			err := cat.DropTable(context.Background(), catalog.ToRestIdentifier(cfg.Ident), false)
 			if err != nil {
 				output.Error(err)
 				os.Exit(1)
@@ -241,7 +241,7 @@ func describe(output Output, cat catalog.Catalog, id string, entityType string) 
 	}
 
 	if (entityType == "any" || entityType == "tbl") && len(ident) > 1 {
-		tbl, err := cat.LoadTable(ctx, ident, nil)
+		tbl, err := cat.LoadTable(ctx, ident)
 		if err != nil {
 			if !errors.Is(err, catalog.ErrNoSuchTable) || entityType != "any" {
 				output.Error(err)
@@ -261,7 +261,7 @@ func describe(output Output, cat catalog.Catalog, id string, entityType string) 
 }
 
 func loadTable(output Output, cat catalog.Catalog, id string) *table.Table {
-	tbl, err := cat.LoadTable(context.Background(), catalog.ToRestIdentifier(id), nil)
+	tbl, err := cat.LoadTable(context.Background(), catalog.ToRestIdentifier(id))
 	if err != nil {
 		output.Error(err)
 		os.Exit(1)
