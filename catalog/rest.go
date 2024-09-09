@@ -84,6 +84,86 @@ func (e errorResponse) Error() string {
 	return e.Type + ": " + e.Message
 }
 
+type Identifier struct {
+	Namespace []string `json:"namespace"`
+	Name      string   `json:"name"`
+}
+
+type commitTableResponse struct {
+	MetadataLoc string          `json:"metadata-location"`
+	RawMetadata json.RawMessage `json:"metadata"`
+	Metadata    table.Metadata  `json:"-"`
+}
+
+func (t *commitTableResponse) UnmarshalJSON(b []byte) (err error) {
+	type Alias commitTableResponse
+	if err = json.Unmarshal(b, (*Alias)(t)); err != nil {
+		return err
+	}
+
+	t.Metadata, err = table.ParseMetadataBytes(t.RawMetadata)
+	return
+}
+
+type loadTableResponse struct {
+	MetadataLoc string             `json:"metadata-location"`
+	RawMetadata json.RawMessage    `json:"metadata"`
+	Config      iceberg.Properties `json:"config"`
+	Metadata    table.Metadata     `json:"-"`
+}
+
+func (t *loadTableResponse) UnmarshalJSON(b []byte) (err error) {
+	type Alias loadTableResponse
+	if err = json.Unmarshal(b, (*Alias)(t)); err != nil {
+		return err
+	}
+
+	t.Metadata, err = table.ParseMetadataBytes(t.RawMetadata)
+	return
+}
+
+type createTableOption func(*createTableRequest)
+
+func WithTableLocation(loc string) createTableOption {
+	return func(req *createTableRequest) {
+		req.Location = strings.TrimRight(loc, "/")
+	}
+}
+
+func WithTablePartitionSpec(spec iceberg.PartitionSpec) createTableOption {
+	return func(req *createTableRequest) {
+		req.PartitionSpec = spec
+	}
+}
+
+func WithTableWriteOrder(order table.SortOrder) createTableOption {
+	return func(req *createTableRequest) {
+		req.WriteOrder = order
+	}
+}
+
+func WithTableStagingCreate() createTableOption {
+	return func(req *createTableRequest) {
+		req.StageCreate = true
+	}
+}
+
+func WithTableProperties(props iceberg.Properties) createTableOption {
+	return func(req *createTableRequest) {
+		req.Props = props
+	}
+}
+
+type createTableRequest struct {
+	Name          string                `json:"name"`
+	Location      string                `json:"location"`
+	Schema        *iceberg.Schema       `json:"schema"`
+	PartitionSpec iceberg.PartitionSpec `json:"partition-spec"`
+	WriteOrder    table.SortOrder       `json:"write-order"`
+	StageCreate   bool                  `json:"stage-create"`
+	Props         iceberg.Properties    `json:"properties"`
+}
+
 type oauthTokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	TokenType    string `json:"token_type"`
@@ -537,6 +617,25 @@ func checkValidNamespace(ident table.Identifier) error {
 	return nil
 }
 
+func (r *RestCatalog) tableFromResponse(identifier []string, metadata table.Metadata, loc string, config iceberg.Properties) (*table.Table, error) {
+	id := identifier
+	if r.name != "" {
+		id = append([]string{r.name}, identifier...)
+	}
+
+	tblProps := maps.Clone(r.props)
+	maps.Copy(tblProps, metadata.Properties())
+	for k, v := range config {
+		tblProps[k] = v
+	}
+
+	iofs, err := iceio.LoadFS(tblProps, loc)
+	if err != nil {
+		return nil, err
+	}
+	return table.New(id, metadata, loc, iofs), nil
+}
+
 func (r *RestCatalog) ListTables(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error) {
 	if err := checkValidNamespace(namespace); err != nil {
 		return nil, err
@@ -546,12 +645,8 @@ func (r *RestCatalog) ListTables(ctx context.Context, namespace table.Identifier
 	path := []string{"namespaces", ns, "tables"}
 
 	type resp struct {
-		Identifiers []struct {
-			Namespace []string `json:"namespace"`
-			Name      string   `json:"name"`
-		} `json:"identifiers"`
+		Identifiers []Identifier `json:"identifiers"`
 	}
-
 	rsp, err := doGet[resp](ctx, r.baseURI, path, r.cl, map[int]error{http.StatusNotFound: ErrNoSuchNamespace})
 	if err != nil {
 		return nil, err
@@ -573,64 +668,129 @@ func splitIdentForPath(ident table.Identifier) (string, string, error) {
 	return strings.Join(NamespaceFromIdent(ident), namespaceSeparator), TableNameFromIdent(ident), nil
 }
 
-type tblResponse struct {
-	MetadataLoc string             `json:"metadata-location"`
-	RawMetadata json.RawMessage    `json:"metadata"`
-	Config      iceberg.Properties `json:"config"`
-	Metadata    table.Metadata     `json:"-"`
-}
-
-func (t *tblResponse) UnmarshalJSON(b []byte) (err error) {
-	type Alias tblResponse
-	if err = json.Unmarshal(b, (*Alias)(t)); err != nil {
-		return err
-	}
-
-	t.Metadata, err = table.ParseMetadataBytes(t.RawMetadata)
-	return
-}
-
-func (r *RestCatalog) LoadTable(ctx context.Context, identifier table.Identifier, props iceberg.Properties) (*table.Table, error) {
+func (r *RestCatalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...createTableOption) (*table.Table, error) {
 	ns, tbl, err := splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
 
-	if props == nil {
-		props = iceberg.Properties{}
+	payload := createTableRequest{
+		Name:   tbl,
+		Schema: schema,
+	}
+	for _, o := range opts {
+		o(&payload)
 	}
 
-	ret, err := doGet[tblResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables", tbl},
+	ret, err := doPost[createTableRequest, loadTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables"}, payload,
+		r.cl, map[int]error{http.StatusNotFound: ErrNoSuchNamespace, http.StatusConflict: ErrTableAlreadyExists})
+	if err != nil {
+		return nil, err
+	}
+
+	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, ret.Config)
+}
+
+func (r *RestCatalog) RegisterTable(ctx context.Context, identifier table.Identifier, metadataLoc string) (*table.Table, error) {
+	ns, tbl, err := splitIdentForPath(identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	type payload struct {
+		Name        string `json:"name"`
+		MetadataLoc string `json:"metadata-location"`
+	}
+
+	ret, err := doPost[payload, loadTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables", tbl},
+		payload{Name: tbl, MetadataLoc: metadataLoc}, r.cl, map[int]error{http.StatusNotFound: ErrNoSuchNamespace, http.StatusConflict: ErrTableAlreadyExists})
+	if err != nil {
+		return nil, err
+	}
+
+	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, ret.Config)
+}
+
+func (r *RestCatalog) LoadTable(ctx context.Context, identifier table.Identifier) (*table.Table, error) {
+	ns, tbl, err := splitIdentForPath(identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	ret, err := doGet[loadTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables", tbl},
 		r.cl, map[int]error{http.StatusNotFound: ErrNoSuchTable})
 	if err != nil {
 		return nil, err
 	}
 
-	id := identifier
-	if r.name != "" {
-		id = append([]string{r.name}, identifier...)
-	}
+	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, ret.Config)
+}
 
-	tblProps := maps.Clone(r.props)
-	maps.Copy(tblProps, props)
-	maps.Copy(tblProps, ret.Metadata.Properties())
-	for k, v := range ret.Config {
-		tblProps[k] = v
-	}
-
-	iofs, err := iceio.LoadFS(tblProps, ret.MetadataLoc)
+func (r *RestCatalog) UpdateTable(ctx context.Context, identifier table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
+	ns, tbl, err := splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
-	return table.New(id, ret.Metadata, ret.MetadataLoc, iofs), nil
+
+	ident := Identifier{
+		Namespace: NamespaceFromIdent(identifier),
+		Name:      tbl,
+	}
+	type payload struct {
+		Identifier   Identifier          `json:"identifier"`
+		Requirements []table.Requirement `json:"requirements"`
+		Updates      []table.Update      `json:"updates"`
+	}
+	ret, err := doPost[payload, commitTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables", tbl},
+		payload{Identifier: ident, Requirements: requirements, Updates: updates}, r.cl,
+		map[int]error{http.StatusNotFound: ErrNoSuchTable, http.StatusConflict: ErrCommitFailed})
+	if err != nil {
+		return nil, err
+	}
+
+	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, nil)
 }
 
-func (r *RestCatalog) DropTable(ctx context.Context, identifier table.Identifier) error {
-	return fmt.Errorf("%w: [Rest Catalog] drop table", iceberg.ErrNotImplemented)
+func (r *RestCatalog) DropTable(ctx context.Context, identifier table.Identifier, purge bool) error {
+	ns, tbl, err := splitIdentForPath(identifier)
+	if err != nil {
+		return err
+	}
+
+	uri := r.baseURI.JoinPath("namespaces", ns, "tables", tbl)
+	if purge {
+		v := url.Values{}
+		v.Set("purgeRequested", "true")
+		uri.RawQuery = v.Encode()
+	}
+
+	_, err = doDelete[struct{}](ctx, uri, []string{}, r.cl,
+		map[int]error{http.StatusNotFound: ErrNoSuchTable})
+
+	return err
 }
 
 func (r *RestCatalog) RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error) {
-	return nil, fmt.Errorf("%w: [Rest Catalog] rename table", iceberg.ErrNotImplemented)
+	type payload struct {
+		From Identifier `json:"from"`
+		To   Identifier `json:"to"`
+	}
+	f := Identifier{
+		Namespace: NamespaceFromIdent(from),
+		Name:      TableNameFromIdent(from),
+	}
+	t := Identifier{
+		Namespace: NamespaceFromIdent(to),
+		Name:      TableNameFromIdent(to),
+	}
+
+	_, err := doPost[payload, any](ctx, r.baseURI, []string{"tables", "rename"}, payload{From: f, To: t}, r.cl,
+		map[int]error{http.StatusNotFound: ErrNoSuchTable})
+	if err != nil {
+		return nil, err
+	}
+
+	return r.LoadTable(ctx, to)
 }
 
 func (r *RestCatalog) CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error {
@@ -709,4 +869,21 @@ func (r *RestCatalog) UpdateNamespaceProperties(ctx context.Context, namespace t
 	ns := strings.Join(namespace, namespaceSeparator)
 	return doPost[payload, PropertiesUpdateSummary](ctx, r.baseURI, []string{"namespaces", ns, "properties"},
 		payload{Remove: removals, Updates: updates}, r.cl, map[int]error{http.StatusNotFound: ErrNoSuchNamespace})
+}
+
+func (r *RestCatalog) CheckNamespaceExists(ctx context.Context, namespace table.Identifier) (bool, error) {
+	if err := checkValidNamespace(namespace); err != nil {
+		return false, err
+	}
+
+	_, err := doGet[struct{}](ctx, r.baseURI, []string{"namespaces", strings.Join(namespace, namespaceSeparator)},
+		r.cl, map[int]error{http.StatusNotFound: ErrNoSuchNamespace})
+	if err != nil {
+		if errors.Is(err, ErrNoSuchNamespace) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	return true, nil
 }

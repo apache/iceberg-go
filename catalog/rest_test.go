@@ -704,7 +704,7 @@ func (r *RestCatalogSuite) TestLoadTable200() {
 	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	tbl, err := cat.LoadTable(context.Background(), catalog.ToRestIdentifier("fokko", "table"), nil)
+	tbl, err := cat.LoadTable(context.Background(), catalog.ToRestIdentifier("fokko", "table"))
 	r.Require().NoError(err)
 
 	r.Equal(catalog.ToRestIdentifier("rest", "fokko", "table"), tbl.Identifier())

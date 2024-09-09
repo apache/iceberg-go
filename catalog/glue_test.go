@@ -142,7 +142,7 @@ func TestGlueLoadTableIntegration(t *testing.T) {
 
 	catalog := NewGlueCatalog(WithAwsConfig(awscfg))
 
-	table, err := catalog.LoadTable(context.TODO(), []string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")}, nil)
+	table, err := catalog.LoadTable(context.TODO(), []string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")})
 	assert.NoError(err)
 	assert.Equal([]string{os.Getenv("TEST_TABLE_NAME")}, table.Identifier())
 }
