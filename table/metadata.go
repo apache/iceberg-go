@@ -689,6 +689,14 @@ func (c *commonMetadata) Refs() map[string]SnapshotRef      { return maps.Clone(
 func (c *commonMetadata) SnapshotLogs() []SnapshotLogEntry  { return slices.Clone(c.SnapshotLog) }
 func (c *commonMetadata) PreviousFiles() []MetadataLogEntry { return slices.Clone(c.MetadataLog) }
 func (c *commonMetadata) Equals(other *commonMetadata) bool {
+	if c == nil || other == nil {
+		return c == other
+	}
+
+	if c == other {
+		return true
+	}
+
 	switch {
 	case c.LastPartitionID == nil && other.LastPartitionID != nil:
 		fallthrough
@@ -909,12 +917,20 @@ func (m *metadataV1) Equals(other Metadata) bool {
 		return false
 	}
 
+	if m == rhs {
+		return true
+	}
+
+	if m == nil || rhs == nil {
+		return false
+	}
+
 	return m.Schema.Equals(rhs.Schema) && slices.Equal(m.Partition, rhs.Partition) &&
 		m.commonMetadata.Equals(&rhs.commonMetadata)
 }
 
 func (m *metadataV1) preValidate() {
-	if len(m.SchemaList) == 0 {
+	if len(m.SchemaList) == 0 && m.Schema != nil {
 		m.SchemaList = []*iceberg.Schema{m.Schema}
 	}
 
@@ -973,6 +989,14 @@ type metadataV2 struct {
 func (m *metadataV2) Equals(other Metadata) bool {
 	rhs, ok := other.(*metadataV2)
 	if !ok {
+		return false
+	}
+
+	if m == rhs {
+		return true
+	}
+
+	if m == nil || rhs == nil {
 		return false
 	}
 
