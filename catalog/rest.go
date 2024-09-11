@@ -124,31 +124,31 @@ func (t *loadTableResponse) UnmarshalJSON(b []byte) (err error) {
 
 type createTableOption func(*createTableRequest)
 
-func WithTableLocation(loc string) createTableOption {
+func WithLocation(loc string) createTableOption {
 	return func(req *createTableRequest) {
 		req.Location = strings.TrimRight(loc, "/")
 	}
 }
 
-func WithTablePartitionSpec(spec iceberg.PartitionSpec) createTableOption {
+func WithPartitionSpec(spec iceberg.PartitionSpec) createTableOption {
 	return func(req *createTableRequest) {
 		req.PartitionSpec = spec
 	}
 }
 
-func WithTableWriteOrder(order table.SortOrder) createTableOption {
+func WithWriteOrder(order table.SortOrder) createTableOption {
 	return func(req *createTableRequest) {
 		req.WriteOrder = order
 	}
 }
 
-func WithTableStagingCreate() createTableOption {
+func WithStageCreate() createTableOption {
 	return func(req *createTableRequest) {
 		req.StageCreate = true
 	}
 }
 
-func WithTableProperties(props iceberg.Properties) createTableOption {
+func WithProperties(props iceberg.Properties) createTableOption {
 	return func(req *createTableRequest) {
 		req.Props = props
 	}
