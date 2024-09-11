@@ -23,14 +23,21 @@ import (
 	"github.com/google/uuid"
 )
 
+// A Requirement is a validation rule that must be satisfied before attempting to
+// make and commit changes to a table. Requirements are used to ensure that the
+// table is in a valid state before making changes.
 type Requirement interface {
+	// Validate checks that the current table metadata satisfies the requirement.
 	Validate(Metadata) error
 }
 
+// baseRequirement is a common struct that all requirements embed. It is used to
+// identify the type of the requirement.
 type baseRequirement struct {
 	Type string `json:"type"`
 }
 
+// AssertCreate validates that the table does not already exist.
 type AssertCreate struct {
 	baseRequirement
 }
@@ -49,6 +56,7 @@ func (a *AssertCreate) Validate(meta Metadata) error {
 	return nil
 }
 
+// AssertTableUuid validates that the table UUID matches the requirement's `UUID`.
 type AssertTableUuid struct {
 	baseRequirement
 	UUID uuid.UUID `json:"uuid"`
@@ -73,6 +81,9 @@ func (a *AssertTableUuid) Validate(meta Metadata) error {
 	return nil
 }
 
+// AssertRefSnapshotID validates that the table branch or tag identified by the
+// requirement's `Ref` must reference the requirement's `SnapshotID`.
+// if `SnapshotID` is `nil`, the ref must not already exist.
 type AssertRefSnapshotID struct {
 	baseRequirement
 	Ref        string `json:"ref"`
@@ -108,6 +119,7 @@ func (a *AssertRefSnapshotID) Validate(meta Metadata) error {
 	return nil
 }
 
+// AssertTableType validates that the table's last assigned column ID matches the requirement's `LastAssignedFieldID`.
 type AssertLastAssignedFieldId struct {
 	baseRequirement
 	LastAssignedFieldID int `json:"last-assigned-field-id"`
@@ -132,6 +144,7 @@ func (a *AssertLastAssignedFieldId) Validate(meta Metadata) error {
 	return nil
 }
 
+// AssertCurrentSchemaId validates that the table's current schema ID matches the requirement's `CurrentSchemaID`.
 type AssertCurrentSchemaId struct {
 	baseRequirement
 	CurrentSchemaID int `json:"current-schema-id"`
@@ -156,6 +169,7 @@ func (a *AssertCurrentSchemaId) Validate(meta Metadata) error {
 	return nil
 }
 
+// AssertLastAssignedPartitionId validates that the table's last assigned partition ID matches the requirement's `LastAssignedPartitionID`.
 type AssertLastAssignedPartitionId struct {
 	baseRequirement
 	LastAssignedPartitionID int `json:"last-assigned-partition-id"`
@@ -180,6 +194,7 @@ func (a *AssertLastAssignedPartitionId) Validate(meta Metadata) error {
 	return nil
 }
 
+// AssertDefaultSpecId validates that the table's default partition spec ID matches the requirement's `DefaultSpecID`.
 type AssertDefaultSpecId struct {
 	baseRequirement
 	DefaultSpecID int `json:"default-spec-id"`
@@ -204,6 +219,7 @@ func (a *AssertDefaultSpecId) Validate(meta Metadata) error {
 	return nil
 }
 
+// AssertDefaultSortOrderId validates that the table's default sort order ID matches the requirement's `DefaultSortOrderID`.
 type AssertDefaultSortOrderId struct {
 	baseRequirement
 	DefaultSortOrderID int `json:"default-sort-order-id"`

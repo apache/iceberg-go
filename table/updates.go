@@ -135,7 +135,7 @@ type AddPartitionSpecUpdate struct {
 
 // NewAddPartitionSpecUpdate creates a new AddPartitionSpecUpdate with the given partition spec.
 // If the initial flag is set to true, the spec is considered the initial spec of the table,
-// and all other previously added specs in the metadata builder are remoed.
+// and all other previously added specs in the metadata builder are removed.
 func NewAddPartitionSpecUpdate(spec *iceberg.PartitionSpec, initial bool) *AddPartitionSpecUpdate {
 	return &AddPartitionSpecUpdate{
 		baseUpdate: baseUpdate{ActionName: "add-spec"},
