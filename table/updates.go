@@ -58,18 +58,20 @@ type AddSchemaUpdate struct {
 	baseUpdate
 	Schema       *iceberg.Schema `json:"schema"`
 	LastColumnID int             `json:"last-column-id"`
+	initial      bool
 }
 
-func NewAddSchemaUpdate(schema *iceberg.Schema, lastColumnID int) *AddSchemaUpdate {
+func NewAddSchemaUpdate(schema *iceberg.Schema, lastColumnID int, initial bool) *AddSchemaUpdate {
 	return &AddSchemaUpdate{
 		baseUpdate:   baseUpdate{ActionName: "add-schema"},
 		Schema:       schema,
 		LastColumnID: lastColumnID,
+		initial:      initial,
 	}
 }
 
 func (u *AddSchemaUpdate) Apply(builder *MetadataBuilder) error {
-	_, err := builder.AddSchema(u.Schema, u.LastColumnID)
+	_, err := builder.AddSchema(u.Schema, u.LastColumnID, u.initial)
 	return err
 }
 
@@ -92,20 +94,20 @@ func (u *SetCurrentSchemaUpdate) Apply(builder *MetadataBuilder) error {
 
 type AddPartitionSpecUpdate struct {
 	baseUpdate
-	Spec          *iceberg.PartitionSpec `json:"spec"`
-	initialChange bool
+	Spec    *iceberg.PartitionSpec `json:"spec"`
+	initial bool
 }
 
 func NewAddPartitionSpecUpdate(spec *iceberg.PartitionSpec, initial bool) *AddPartitionSpecUpdate {
 	return &AddPartitionSpecUpdate{
-		baseUpdate:    baseUpdate{ActionName: "add-spec"},
-		Spec:          spec,
-		initialChange: initial,
+		baseUpdate: baseUpdate{ActionName: "add-spec"},
+		Spec:       spec,
+		initial:    initial,
 	}
 }
 
 func (u *AddPartitionSpecUpdate) Apply(builder *MetadataBuilder) error {
-	_, err := builder.AddPartitionSpec(u.Spec, u.initialChange)
+	_, err := builder.AddPartitionSpec(u.Spec, u.initial)
 	return err
 }
 
@@ -129,17 +131,19 @@ func (u *SetDefaultSpecUpdate) Apply(builder *MetadataBuilder) error {
 type AddSortOrderUpdate struct {
 	baseUpdate
 	SortOrder *SortOrder `json:"sort-order"`
+	initial   bool
 }
 
-func NewAddSortOrderUpdate(sortOrder *SortOrder) *AddSortOrderUpdate {
+func NewAddSortOrderUpdate(sortOrder *SortOrder, initial bool) *AddSortOrderUpdate {
 	return &AddSortOrderUpdate{
 		baseUpdate: baseUpdate{ActionName: "add-sort-order"},
 		SortOrder:  sortOrder,
+		initial:    initial,
 	}
 }
 
 func (u *AddSortOrderUpdate) Apply(builder *MetadataBuilder) error {
-	_, err := builder.AddSortOrder(u.SortOrder)
+	_, err := builder.AddSortOrder(u.SortOrder, u.initial)
 	return err
 }
 

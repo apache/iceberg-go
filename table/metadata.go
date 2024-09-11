@@ -179,15 +179,21 @@ func MetadataBuilderFromBase(metadata Metadata) (*MetadataBuilder, error) {
 	return b, nil
 }
 
-func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema, newLastColumnID int) (*MetadataBuilder, error) {
+func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema, newLastColumnID int, initial bool) (*MetadataBuilder, error) {
 	if newLastColumnID < b.lastColumnId {
-		return nil, fmt.Errorf("invalid last column id %d, must be >= %d",
-			newLastColumnID, b.lastColumnId)
+		return nil, fmt.Errorf("%w: newLastColumnID %d, must be >= %d", iceberg.ErrInvalidArgument, newLastColumnID, b.lastColumnId)
 	}
 
-	b.updates = append(b.updates, NewAddSchemaUpdate(schema, newLastColumnID))
+	var schemas []*iceberg.Schema
+	if initial {
+		schemas = []*iceberg.Schema{schema}
+	} else {
+		schemas = append(b.schemaList, schema)
+	}
+
 	b.lastColumnId = newLastColumnID
-	b.schemaList = append(b.schemaList, schema)
+	b.schemaList = schemas
+	b.updates = append(b.updates, NewAddSchemaUpdate(schema, newLastColumnID, initial))
 
 	return b, nil
 }
@@ -211,10 +217,17 @@ func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial 
 	if b.lastPartitionID != nil {
 		prev = *b.lastPartitionID
 	}
-
 	lastPartitionID := max(maxFieldID, prev)
+
+	var specs []iceberg.PartitionSpec
+	if initial {
+		specs = []iceberg.PartitionSpec{*spec}
+	} else {
+		specs = append(b.specs, *spec)
+	}
+
+	b.specs = specs
 	b.lastPartitionID = &lastPartitionID
-	b.specs = append(b.specs, *spec)
 	b.updates = append(b.updates, NewAddPartitionSpecUpdate(spec, initial))
 
 	return b, nil
@@ -248,9 +261,17 @@ func (b *MetadataBuilder) AddSnapshot(snapshot *Snapshot) (*MetadataBuilder, err
 	return b, nil
 }
 
-func (b *MetadataBuilder) AddSortOrder(sortOrder *SortOrder) (*MetadataBuilder, error) {
-	b.updates = append(b.updates, NewAddSortOrderUpdate(sortOrder))
-	b.sortOrderList = append(b.sortOrderList, *sortOrder)
+func (b *MetadataBuilder) AddSortOrder(sortOrder *SortOrder, initial bool) (*MetadataBuilder, error) {
+	var sortOrders []SortOrder
+	if initial {
+		sortOrders = []SortOrder{*sortOrder}
+	} else {
+		sortOrders = append(b.sortOrderList, *sortOrder)
+	}
+
+	b.sortOrderList = sortOrders
+	b.updates = append(b.updates, NewAddSortOrderUpdate(sortOrder, initial))
+
 	return b, nil
 }
 
