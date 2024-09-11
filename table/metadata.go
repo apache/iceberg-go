@@ -410,7 +410,7 @@ func WithMaxRefAgeMs(maxRefAgeMs int64) setSnapshotRefOption {
 		if maxRefAgeMs <= 0 {
 			return fmt.Errorf("%w: maxRefAgeMs %d, must be > 0", iceberg.ErrInvalidArgument, maxRefAgeMs)
 		}
-		ref.MaxRefAgeMs = &maxRefAgeMs
+		ref.MaxRefAgeMs = maxRefAgeMs
 		return nil
 	}
 }
@@ -420,7 +420,7 @@ func WithMaxSnapshotAgeMs(maxSnapshotAgeMs int64) setSnapshotRefOption {
 		if maxSnapshotAgeMs <= 0 {
 			return fmt.Errorf("%w: maxSnapshotAgeMs %d, must be > 0", iceberg.ErrInvalidArgument, maxSnapshotAgeMs)
 		}
-		ref.MaxSnapshotAgeMs = &maxSnapshotAgeMs
+		ref.MaxSnapshotAgeMs = maxSnapshotAgeMs
 		return nil
 	}
 }
@@ -430,7 +430,7 @@ func WithMinSnapshotsToKeep(minSnapshotsToKeep int) setSnapshotRefOption {
 		if minSnapshotsToKeep <= 0 {
 			return fmt.Errorf("%w: minSnapshotsToKeep %d, must be > 0", iceberg.ErrInvalidArgument, minSnapshotsToKeep)
 		}
-		ref.MinSnapshotsToKeep = &minSnapshotsToKeep
+		ref.MinSnapshotsToKeep = minSnapshotsToKeep
 		return nil
 	}
 }
@@ -453,14 +453,14 @@ func (b *MetadataBuilder) SetSnapshotRef(
 
 	var maxRefAgeMs, maxSnapshotAgeMs int64
 	var minSnapshotsToKeep int
-	if ref.MaxRefAgeMs != nil {
-		maxRefAgeMs = *ref.MaxRefAgeMs
+	if ref.MaxRefAgeMs > 0 {
+		maxRefAgeMs = ref.MaxRefAgeMs
 	}
-	if ref.MaxSnapshotAgeMs != nil {
-		maxSnapshotAgeMs = *ref.MaxSnapshotAgeMs
+	if ref.MaxSnapshotAgeMs > 0 {
+		maxSnapshotAgeMs = ref.MaxSnapshotAgeMs
 	}
-	if ref.MinSnapshotsToKeep != nil {
-		minSnapshotsToKeep = *ref.MinSnapshotsToKeep
+	if ref.MinSnapshotsToKeep > 0 {
+		minSnapshotsToKeep = ref.MinSnapshotsToKeep
 	}
 
 	if existingRef, ok := b.refs[name]; ok && existingRef.Equals(ref) {
@@ -685,9 +685,9 @@ type commonMetadata struct {
 }
 
 func (c *commonMetadata) Ref() SnapshotRef                  { return c.SnapshotRefs[MainBranch] }
-func (c *commonMetadata) Refs() map[string]SnapshotRef      { return c.SnapshotRefs }
-func (c *commonMetadata) SnapshotLogs() []SnapshotLogEntry  { return c.SnapshotLog }
-func (c *commonMetadata) PreviousFiles() []MetadataLogEntry { return c.MetadataLog }
+func (c *commonMetadata) Refs() map[string]SnapshotRef      { return maps.Clone(c.SnapshotRefs) }
+func (c *commonMetadata) SnapshotLogs() []SnapshotLogEntry  { return slices.Clone(c.SnapshotLog) }
+func (c *commonMetadata) PreviousFiles() []MetadataLogEntry { return slices.Clone(c.MetadataLog) }
 func (c *commonMetadata) Equals(other *commonMetadata) bool {
 	switch {
 	case c.LastPartitionID == nil && other.LastPartitionID != nil:

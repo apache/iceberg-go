@@ -66,7 +66,7 @@ func TestSnapshotTagRef(t *testing.T) {
 
 	assert.Equal(t, table.TagRef, snapRef.SnapshotRefType)
 	assert.Equal(t, int64(3051729675574597004), snapRef.SnapshotID)
-	assert.Equal(t, 10, *snapRef.MinSnapshotsToKeep)
+	assert.Equal(t, 10, snapRef.MinSnapshotsToKeep)
 	assert.Nil(t, snapRef.MaxRefAgeMs)
 	assert.Nil(t, snapRef.MaxSnapshotAgeMs)
 }

@@ -412,7 +412,7 @@ func TestV2RefCreation(t *testing.T) {
 		"test": {
 			SnapshotID:      3051729675574597004,
 			SnapshotRefType: TagRef,
-			MaxRefAgeMs:     &maxRefAge,
+			MaxRefAgeMs:     maxRefAge,
 		},
 	}, meta.SnapshotRefs)
 }
