@@ -290,8 +290,12 @@ func (b *MetadataBuilder) RemoveProperties(keys []string) (*MetadataBuilder, err
 
 func (b *MetadataBuilder) SetCurrentSchemaID(currentSchemaID int) (*MetadataBuilder, error) {
 	if currentSchemaID == -1 {
-		currentSchemaID = b.MaxSchemaID()
-		if !b.isAddedSchemaID(currentSchemaID) {
+		currentSchemaID = maxBy(b.schemaList, func(s *iceberg.Schema) int {
+			return s.ID
+		})
+		if !containsBy(b.updates, func(u Update) bool {
+			return u.Action() == "add-schema" && u.(*AddSchemaUpdate).Schema.ID == currentSchemaID
+		}) {
 			return nil, errors.New("can't set current schema to last added schema, no schema has been added")
 		}
 	}
@@ -312,8 +316,12 @@ func (b *MetadataBuilder) SetCurrentSchemaID(currentSchemaID int) (*MetadataBuil
 
 func (b *MetadataBuilder) SetDefaultSortOrderID(defaultSortOrderID int) (*MetadataBuilder, error) {
 	if defaultSortOrderID == -1 {
-		defaultSortOrderID = b.MaxSortOrderID()
-		if !b.isAddedSortOrder(defaultSortOrderID) {
+		defaultSortOrderID = maxBy(b.sortOrderList, func(s SortOrder) int {
+			return s.OrderID
+		})
+		if !containsBy(b.updates, func(u Update) bool {
+			return u.Action() == "add-sort-order" && u.(*AddSortOrderUpdate).SortOrder.OrderID == defaultSortOrderID
+		}) {
 			return nil, fmt.Errorf("can't set default sort order to last added with no added sort orders")
 		}
 	}
@@ -333,8 +341,12 @@ func (b *MetadataBuilder) SetDefaultSortOrderID(defaultSortOrderID int) (*Metada
 
 func (b *MetadataBuilder) SetDefaultSpecID(defaultSpecID int) (*MetadataBuilder, error) {
 	if defaultSpecID == -1 {
-		defaultSpecID = b.MaxSpecID()
-		if !b.isAddedSpecID(defaultSpecID) {
+		defaultSpecID = maxBy(b.specs, func(s iceberg.PartitionSpec) int {
+			return s.ID()
+		})
+		if !containsBy(b.updates, func(u Update) bool {
+			return u.Action() == "add-partition-spec" && u.(*AddPartitionSpecUpdate).Spec.ID() == defaultSpecID
+		}) {
 			return nil, fmt.Errorf("can't set default spec to last added with no added partition specs")
 		}
 	}
@@ -470,7 +482,9 @@ func (b *MetadataBuilder) SetSnapshotRef(
 		b.lastUpdatedMS = time.Now().Local().UnixMilli()
 	}
 
-	if b.isAddedSnapshot(snapshotID) {
+	if containsBy(b.updates, func(u Update) bool {
+		return u.Action() == "add-snapshot" && u.(*AddSnapshotUpdate).Snapshot.SnapshotID == snapshotID
+	}) {
 		b.lastUpdatedMS = snapshot.TimestampMs
 	}
 
@@ -518,7 +532,7 @@ func (b *MetadataBuilder) GetSchemaByID(id int) (*iceberg.Schema, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("schema with id %d not found", id)
+	return nil, fmt.Errorf("%w: schema with id %d not found", iceberg.ErrInvalidArgument, id)
 }
 
 func (b *MetadataBuilder) GetSpecByID(id int) (*iceberg.PartitionSpec, error) {
@@ -541,39 +555,6 @@ func (b *MetadataBuilder) GetSortOrderByID(id int) (*SortOrder, error) {
 	return nil, fmt.Errorf("sort order with id %d not found", id)
 }
 
-func (b *MetadataBuilder) MaxSchemaID() int {
-	max := 0
-	for _, s := range b.schemaList {
-		if s.ID > max {
-			max = s.ID
-		}
-	}
-
-	return max
-}
-
-func (b *MetadataBuilder) MaxSpecID() int {
-	max := 0
-	for _, s := range b.specs {
-		if s.ID() > max {
-			max = s.ID()
-		}
-	}
-
-	return max
-}
-
-func (b *MetadataBuilder) MaxSortOrderID() int {
-	max := 0
-	for _, s := range b.sortOrderList {
-		if s.OrderID > max {
-			max = s.OrderID
-		}
-	}
-
-	return max
-}
-
 func (b *MetadataBuilder) SnapshotByID(id int64) (*Snapshot, error) {
 	for _, s := range b.snapshotList {
 		if s.SnapshotID == id {
@@ -582,51 +563,6 @@ func (b *MetadataBuilder) SnapshotByID(id int64) (*Snapshot, error) {
 	}
 
 	return nil, fmt.Errorf("snapshot with id %d not found", id)
-}
-
-func (b *MetadataBuilder) isAddedSchemaID(id int) bool {
-	for _, u := range b.updates {
-		if u.Action() == "add-schema" &&
-			u.(*AddSchemaUpdate).Schema.ID == id {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (b *MetadataBuilder) isAddedSnapshot(id int64) bool {
-	for _, u := range b.updates {
-		if u.Action() == "add-snapshot" &&
-			u.(*AddSnapshotUpdate).Snapshot.SnapshotID == id {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (b *MetadataBuilder) isAddedSpecID(id int) bool {
-	for _, u := range b.updates {
-		if u.Action() == "add-partition-spec" &&
-			u.(*AddPartitionSpecUpdate).Spec.ID() == id {
-			return true
-		}
-
-	}
-
-	return false
-}
-
-func (b *MetadataBuilder) isAddedSortOrder(id int) bool {
-	for _, u := range b.updates {
-		if u.Action() == "add-sort-order" &&
-			u.(*AddSortOrderUpdate).SortOrder.OrderID == id {
-			return true
-		}
-	}
-
-	return false
 }
 
 func (b *MetadataBuilder) Build() (Metadata, error) {
@@ -654,6 +590,26 @@ func (b *MetadataBuilder) Build() (Metadata, error) {
 	default:
 		panic("unreachable: invalid format version")
 	}
+}
+
+// containsBy returns true if found(e) is true for any e in elems.
+func containsBy[S []E, E any](elems S, found func(e E) bool) bool {
+	for _, e := range elems {
+		if found(e) {
+			return true
+		}
+	}
+	return false
+}
+
+// maxBy returns the maximum value of extract(e) for all e in elems.
+// If elems is empty, returns 0.
+func maxBy[S []E, E any](elems S, extract func(e E) int) int {
+	m := 0
+	for _, e := range elems {
+		m = max(m, extract(e))
+	}
+	return m
 }
 
 var (
