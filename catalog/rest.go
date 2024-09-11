@@ -623,16 +623,11 @@ func (r *RestCatalog) tableFromResponse(identifier []string, metadata table.Meta
 		id = append([]string{r.name}, identifier...)
 	}
 
-	tblProps := maps.Clone(r.props)
-	maps.Copy(tblProps, metadata.Properties())
-	for k, v := range config {
-		tblProps[k] = v
-	}
-
-	iofs, err := iceio.LoadFS(tblProps, loc)
+	iofs, err := iceio.LoadFS(config, loc)
 	if err != nil {
 		return nil, err
 	}
+
 	return table.New(id, metadata, loc, iofs), nil
 }
 
@@ -688,7 +683,13 @@ func (r *RestCatalog) CreateTable(ctx context.Context, identifier table.Identifi
 		return nil, err
 	}
 
-	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, ret.Config)
+	config := maps.Clone(r.props)
+	maps.Copy(config, ret.Metadata.Properties())
+	for k, v := range ret.Config {
+		config[k] = v
+	}
+
+	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, config)
 }
 
 func (r *RestCatalog) RegisterTable(ctx context.Context, identifier table.Identifier, metadataLoc string) (*table.Table, error) {
@@ -708,10 +709,16 @@ func (r *RestCatalog) RegisterTable(ctx context.Context, identifier table.Identi
 		return nil, err
 	}
 
-	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, ret.Config)
+	config := maps.Clone(r.props)
+	maps.Copy(config, ret.Metadata.Properties())
+	for k, v := range ret.Config {
+		config[k] = v
+	}
+
+	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, config)
 }
 
-func (r *RestCatalog) LoadTable(ctx context.Context, identifier table.Identifier) (*table.Table, error) {
+func (r *RestCatalog) LoadTable(ctx context.Context, identifier table.Identifier, props iceberg.Properties) (*table.Table, error) {
 	ns, tbl, err := splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
@@ -723,7 +730,14 @@ func (r *RestCatalog) LoadTable(ctx context.Context, identifier table.Identifier
 		return nil, err
 	}
 
-	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, ret.Config)
+	config := maps.Clone(r.props)
+	maps.Copy(config, props)
+	maps.Copy(config, ret.Metadata.Properties())
+	for k, v := range ret.Config {
+		config[k] = v
+	}
+
+	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, config)
 }
 
 func (r *RestCatalog) UpdateTable(ctx context.Context, identifier table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
@@ -748,7 +762,10 @@ func (r *RestCatalog) UpdateTable(ctx context.Context, identifier table.Identifi
 		return nil, err
 	}
 
-	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, nil)
+	config := maps.Clone(r.props)
+	maps.Copy(config, ret.Metadata.Properties())
+
+	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, config)
 }
 
 func (r *RestCatalog) DropTable(ctx context.Context, identifier table.Identifier, purge bool) error {
@@ -790,7 +807,7 @@ func (r *RestCatalog) RenameTable(ctx context.Context, from, to table.Identifier
 		return nil, err
 	}
 
-	return r.LoadTable(ctx, to)
+	return r.LoadTable(ctx, to, nil)
 }
 
 func (r *RestCatalog) CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error {
