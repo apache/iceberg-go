@@ -221,6 +221,10 @@ func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial 
 }
 
 func (b *MetadataBuilder) AddSnapshot(snapshot *Snapshot) (*MetadataBuilder, error) {
+	if snapshot == nil {
+		return nil, nil
+	}
+
 	if len(b.schemaList) == 0 {
 		return nil, errors.New("can't add snapshot with no added schemas")
 	} else if len(b.specs) == 0 {
