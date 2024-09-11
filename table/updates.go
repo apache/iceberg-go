@@ -24,24 +24,31 @@ import (
 	"github.com/google/uuid"
 )
 
+// Update represents a change to a table's metadata.
 type Update interface {
+	// Action returns the name of the action that the update represents.
 	Action() string
+	// Apply applies the update to the given metadata builder.
 	Apply(*MetadataBuilder) error
 }
 
+// baseUpdate contains the common fields for all updates. It is used to identify the type
+// of the update.
 type baseUpdate struct {
-	ActionName string `json:"action"`
+	ActionName string `json:"Action"`
 }
 
 func (u *baseUpdate) Action() string {
 	return u.ActionName
 }
 
+// AssignUUIDUpdate assigns a UUID to the table metadata.
 type AssignUUIDUpdate struct {
 	baseUpdate
 	UUID uuid.UUID `json:"uuid"`
 }
 
+// NewAssignUUIDUpdate creates a new AssignUUIDUpdate with the given UUID.
 func NewAssignUUIDUpdate(uuid uuid.UUID) *AssignUUIDUpdate {
 	return &AssignUUIDUpdate{
 		baseUpdate: baseUpdate{ActionName: "assign-uuid"},
@@ -49,16 +56,19 @@ func NewAssignUUIDUpdate(uuid uuid.UUID) *AssignUUIDUpdate {
 	}
 }
 
+// Apply updates the UUID on the given metadata builder.
 func (u *AssignUUIDUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.SetUUID(u.UUID)
 	return err
 }
 
+// UpgradeFormatVersionUpdate upgrades the format version of the table metadata.
 type UpgradeFormatVersionUpdate struct {
 	baseUpdate
 	FormatVersion int `json:"format-version"`
 }
 
+// NewUpgradeFormatVersionUpdate creates a new UpgradeFormatVersionUpdate with the given format version.
 func NewUpgradeFormatVersionUpdate(formatVersion int) *UpgradeFormatVersionUpdate {
 	return &UpgradeFormatVersionUpdate{
 		baseUpdate:    baseUpdate{ActionName: "upgrade-format-version"},
@@ -66,11 +76,13 @@ func NewUpgradeFormatVersionUpdate(formatVersion int) *UpgradeFormatVersionUpdat
 	}
 }
 
+// Apply upgrades the format version on the given metadata builder.
 func (u *UpgradeFormatVersionUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.SetFormatVersion(u.FormatVersion)
 	return err
 }
 
+// AddSchemaUpdate adds a schema to the table metadata.
 type AddSchemaUpdate struct {
 	baseUpdate
 	Schema       *iceberg.Schema `json:"schema"`
@@ -78,6 +90,9 @@ type AddSchemaUpdate struct {
 	initial      bool
 }
 
+// NewAddSchemaUpdate creates a new AddSchemaUpdate with the given schema and last column ID.
+// If the initial flag is set to true, the schema is considered the initial schema of the table,
+// and all previously added schemas in the metadata builder are removed.
 func NewAddSchemaUpdate(schema *iceberg.Schema, lastColumnID int, initial bool) *AddSchemaUpdate {
 	return &AddSchemaUpdate{
 		baseUpdate:   baseUpdate{ActionName: "add-schema"},
@@ -92,11 +107,13 @@ func (u *AddSchemaUpdate) Apply(builder *MetadataBuilder) error {
 	return err
 }
 
+// SetCurrentSchemaUpdate sets the current schema of the table metadata.
 type SetCurrentSchemaUpdate struct {
 	baseUpdate
 	SchemaID int `json:"schema-id"`
 }
 
+// NewSetCurrentSchemaUpdate creates a new SetCurrentSchemaUpdate with the given schema ID.
 func NewSetCurrentSchemaUpdate(id int) *SetCurrentSchemaUpdate {
 	return &SetCurrentSchemaUpdate{
 		baseUpdate: baseUpdate{ActionName: "set-current-schema"},
@@ -109,12 +126,16 @@ func (u *SetCurrentSchemaUpdate) Apply(builder *MetadataBuilder) error {
 	return err
 }
 
+// AddPartitionSpecUpdate adds a partition spec to the table metadata.
 type AddPartitionSpecUpdate struct {
 	baseUpdate
 	Spec    *iceberg.PartitionSpec `json:"spec"`
 	initial bool
 }
 
+// NewAddPartitionSpecUpdate creates a new AddPartitionSpecUpdate with the given partition spec.
+// If the initial flag is set to true, the spec is considered the initial spec of the table,
+// and all other previously added specs in the metadata builder are remoed.
 func NewAddPartitionSpecUpdate(spec *iceberg.PartitionSpec, initial bool) *AddPartitionSpecUpdate {
 	return &AddPartitionSpecUpdate{
 		baseUpdate: baseUpdate{ActionName: "add-spec"},
@@ -128,11 +149,13 @@ func (u *AddPartitionSpecUpdate) Apply(builder *MetadataBuilder) error {
 	return err
 }
 
+// SetDefaultSpecUpdate sets the default partition spec of the table metadata.
 type SetDefaultSpecUpdate struct {
 	baseUpdate
 	SpecID int `json:"spec-id"`
 }
 
+// NewSetDefaultSpecUpdate creates a new SetDefaultSpecUpdate with the given spec ID.
 func NewSetDefaultSpecUpdate(id int) *SetDefaultSpecUpdate {
 	return &SetDefaultSpecUpdate{
 		baseUpdate: baseUpdate{ActionName: "set-default-spec"},
@@ -145,12 +168,16 @@ func (u *SetDefaultSpecUpdate) Apply(builder *MetadataBuilder) error {
 	return err
 }
 
+// AddSortOrderUpdate adds a sort order to the table metadata.
 type AddSortOrderUpdate struct {
 	baseUpdate
 	SortOrder *SortOrder `json:"sort-order"`
 	initial   bool
 }
 
+// NewAddSortOrderUpdate creates a new AddSortOrderUpdate with the given sort order.
+// If the initial flag is set to true, the sort order is considered the initial sort order of the table,
+// and all previously added sort orders in the metadata builder are removed.
 func NewAddSortOrderUpdate(sortOrder *SortOrder, initial bool) *AddSortOrderUpdate {
 	return &AddSortOrderUpdate{
 		baseUpdate: baseUpdate{ActionName: "add-sort-order"},
@@ -164,11 +191,13 @@ func (u *AddSortOrderUpdate) Apply(builder *MetadataBuilder) error {
 	return err
 }
 
+// SetDefaultSortOrderUpdate sets the default sort order of the table metadata.
 type SetDefaultSortOrderUpdate struct {
 	baseUpdate
 	SortOrderID int `json:"sort-order-id"`
 }
 
+// NewSetDefaultSortOrderUpdate creates a new SetDefaultSortOrderUpdate with the given sort order ID.
 func NewSetDefaultSortOrderUpdate(id int) *SetDefaultSortOrderUpdate {
 	return &SetDefaultSortOrderUpdate{
 		baseUpdate:  baseUpdate{ActionName: "set-default-sort-order"},
@@ -181,11 +210,13 @@ func (u *SetDefaultSortOrderUpdate) Apply(builder *MetadataBuilder) error {
 	return err
 }
 
+// AddSnapshotUpdate adds a snapshot to the table metadata.
 type AddSnapshotUpdate struct {
 	baseUpdate
 	Snapshot *Snapshot `json:"snapshot"`
 }
 
+// NewAddSnapshotUpdate creates a new AddSnapshotUpdate with the given snapshot.
 func NewAddSnapshotUpdate(snapshot *Snapshot) *AddSnapshotUpdate {
 	return &AddSnapshotUpdate{
 		baseUpdate: baseUpdate{ActionName: "add-snapshot"},
@@ -198,6 +229,7 @@ func (u *AddSnapshotUpdate) Apply(builder *MetadataBuilder) error {
 	return err
 }
 
+// SetCurrentSnapshotUpdate sets the current snapshot of the table metadata.
 type SetSnapshotRefUpdate struct {
 	baseUpdate
 	RefName            string  `json:"ref-name"`
@@ -208,6 +240,8 @@ type SetSnapshotRefUpdate struct {
 	MinSnapshotsToKeep int     `json:"min-snapshots-to-keep,omitempty"`
 }
 
+// NewSetSnapshotRefUpdate creates a new SetSnapshotRefUpdate with the given snapshot reference information.
+// MaxRefAgeMs, MaxSnapshotAgeMs, and MinSnapshotsToKeep are optional, and any non-positive values are ignored.
 func NewSetSnapshotRefUpdate(
 	name string,
 	snapshotID int64,
@@ -228,13 +262,13 @@ func NewSetSnapshotRefUpdate(
 
 func (u *SetSnapshotRefUpdate) Apply(builder *MetadataBuilder) error {
 	opts := []setSnapshotRefOption{}
-	if u.MaxRefAgeMs != 0 {
+	if u.MaxRefAgeMs >= 0 {
 		opts = append(opts, WithMaxRefAgeMs(u.MaxRefAgeMs))
 	}
-	if u.MaxSnapshotAgeMs != 0 {
+	if u.MaxSnapshotAgeMs >= 0 {
 		opts = append(opts, WithMaxSnapshotAgeMs(u.MaxSnapshotAgeMs))
 	}
-	if u.MinSnapshotsToKeep != 0 {
+	if u.MinSnapshotsToKeep >= 0 {
 		opts = append(opts, WithMinSnapshotsToKeep(u.MinSnapshotsToKeep))
 	}
 
@@ -247,11 +281,13 @@ func (u *SetSnapshotRefUpdate) Apply(builder *MetadataBuilder) error {
 	return err
 }
 
+// SetLocationUpdate sets the location of the table metadata.
 type SetLocationUpdate struct {
 	baseUpdate
 	Location string `json:"location"`
 }
 
+// NewSetLocationUpdate creates a new SetLocationUpdate with the given location.
 func NewSetLocationUpdate(loc string) *SetLocationUpdate {
 	return &SetLocationUpdate{
 		baseUpdate: baseUpdate{ActionName: "set-location"},
@@ -264,11 +300,13 @@ func (u *SetLocationUpdate) Apply(builder *MetadataBuilder) error {
 	return err
 }
 
+// SetPropertyUpdate sets a number of properties in the table metadata.
 type SetPropertiesUpdate struct {
 	baseUpdate
 	Updates iceberg.Properties `json:"updates"`
 }
 
+// NewSetPropertiesUpdate creates a new SetPropertiesUpdate with the given properties.
 func NewSetPropertiesUpdate(updates iceberg.Properties) *SetPropertiesUpdate {
 	return &SetPropertiesUpdate{
 		baseUpdate: baseUpdate{ActionName: "set-properties"},
@@ -281,11 +319,15 @@ func (u *SetPropertiesUpdate) Apply(builder *MetadataBuilder) error {
 	return err
 }
 
+// RemovePropertiesUpdate removes a number of properties from the table metadata.
+// The properties are identified by their names, and if a property with the given name does not exist,
+// it is ignored.
 type RemovePropertiesUpdate struct {
 	baseUpdate
 	Removals []string `json:"removals"`
 }
 
+// NewRemovePropertiesUpdate creates a new RemovePropertiesUpdate with the given property names.
 func NewRemovePropertiesUpdate(removals []string) *RemovePropertiesUpdate {
 	return &RemovePropertiesUpdate{
 		baseUpdate: baseUpdate{ActionName: "remove-properties"},
@@ -298,11 +340,13 @@ func (u *RemovePropertiesUpdate) Apply(builder *MetadataBuilder) error {
 	return err
 }
 
+// RemoveSnapshotsUpdate removes a number of snapshots from the table metadata.
 type RemoveSnapshotsUpdate struct {
 	baseUpdate
 	SnapshotIDs []int64 `json:"snapshot-ids"`
 }
 
+// NewRemoveSnapshotsUpdate creates a new RemoveSnapshotsUpdate with the given snapshot IDs.
 func NewRemoveSnapshotsUpdate(ids []int64) *RemoveSnapshotsUpdate {
 	return &RemoveSnapshotsUpdate{
 		baseUpdate:  baseUpdate{ActionName: "remove-snapshots"},
@@ -314,11 +358,13 @@ func (u *RemoveSnapshotsUpdate) Apply(builder *MetadataBuilder) error {
 	return fmt.Errorf("%w: remove-snapshots", iceberg.ErrNotImplemented)
 }
 
+// RemoveSnapshotRefUpdate removes a snapshot reference from the table metadata.
 type RemoveSnapshotRefUpdate struct {
 	baseUpdate
 	RefName string `json:"ref-name"`
 }
 
+// NewRemoveSnapshotRefUpdate creates a new RemoveSnapshotRefUpdate with the given reference name.
 func NewRemoveSnapshotRefUpdate(ref string) *RemoveSnapshotRefUpdate {
 	return &RemoveSnapshotRefUpdate{
 		baseUpdate: baseUpdate{ActionName: "remove-snapshot-ref"},
