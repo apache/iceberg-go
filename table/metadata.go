@@ -391,19 +391,64 @@ func (b *MetadataBuilder) SetProperties(props iceberg.Properties) (*MetadataBuil
 	return b, nil
 }
 
+type setSnapshotRefOption func(*SnapshotRef) error
+
+func WithMaxRefAgeMs(maxRefAgeMs int64) setSnapshotRefOption {
+	return func(ref *SnapshotRef) error {
+		if maxRefAgeMs <= 0 {
+			return fmt.Errorf("%w: maxRefAgeMs %d, must be > 0", iceberg.ErrInvalidArgument, maxRefAgeMs)
+		}
+		ref.MaxRefAgeMs = &maxRefAgeMs
+		return nil
+	}
+}
+
+func WithMaxSnapshotAgeMs(maxSnapshotAgeMs int64) setSnapshotRefOption {
+	return func(ref *SnapshotRef) error {
+		if maxSnapshotAgeMs <= 0 {
+			return fmt.Errorf("%w: maxSnapshotAgeMs %d, must be > 0", iceberg.ErrInvalidArgument, maxSnapshotAgeMs)
+		}
+		ref.MaxSnapshotAgeMs = &maxSnapshotAgeMs
+		return nil
+	}
+}
+
+func WithMinSnapshotsToKeep(minSnapshotsToKeep int) setSnapshotRefOption {
+	return func(ref *SnapshotRef) error {
+		if minSnapshotsToKeep <= 0 {
+			return fmt.Errorf("%w: minSnapshotsToKeep %d, must be > 0", iceberg.ErrInvalidArgument, minSnapshotsToKeep)
+		}
+		ref.MinSnapshotsToKeep = &minSnapshotsToKeep
+		return nil
+	}
+}
+
 func (b *MetadataBuilder) SetSnapshotRef(
 	name string,
 	snapshotID int64,
 	refType RefType,
-	maxRefAgeMs, maxSnapshotAgeMs *int64,
-	minSnapshotsToKeep *int,
+	options ...setSnapshotRefOption,
 ) (*MetadataBuilder, error) {
 	ref := SnapshotRef{
-		SnapshotID:         snapshotID,
-		SnapshotRefType:    refType,
-		MinSnapshotsToKeep: minSnapshotsToKeep,
-		MaxRefAgeMs:        maxRefAgeMs,
-		MaxSnapshotAgeMs:   maxSnapshotAgeMs,
+		SnapshotID:      snapshotID,
+		SnapshotRefType: refType,
+	}
+	for _, opt := range options {
+		if err := opt(&ref); err != nil {
+			return nil, fmt.Errorf("invalid snapshot ref option: %w", err)
+		}
+	}
+
+	var maxRefAgeMs, maxSnapshotAgeMs int64
+	var minSnapshotsToKeep int
+	if ref.MaxRefAgeMs != nil {
+		maxRefAgeMs = *ref.MaxRefAgeMs
+	}
+	if ref.MaxSnapshotAgeMs != nil {
+		maxSnapshotAgeMs = *ref.MaxSnapshotAgeMs
+	}
+	if ref.MinSnapshotsToKeep != nil {
+		minSnapshotsToKeep = *ref.MinSnapshotsToKeep
 	}
 
 	if existingRef, ok := b.refs[name]; ok && existingRef.Equals(ref) {
@@ -415,8 +460,8 @@ func (b *MetadataBuilder) SetSnapshotRef(
 		return nil, fmt.Errorf("can't set snapshot ref %s to unknown snapshot %d: %w", name, snapshotID, err)
 	}
 
-	b.updates = append(b.updates, NewSetSnapshotRefUpdate(name, snapshotID, refType, maxRefAgeMs, maxSnapshotAgeMs, minSnapshotsToKeep))
 	if refType == MainBranch {
+		b.updates = append(b.updates, NewSetSnapshotRefUpdate(name, snapshotID, refType, maxRefAgeMs, maxSnapshotAgeMs, minSnapshotsToKeep))
 		b.currentSnapshotID = &snapshotID
 		b.snapshotLog = append(b.snapshotLog, SnapshotLogEntry{
 			SnapshotID:  snapshotID,
@@ -429,13 +474,7 @@ func (b *MetadataBuilder) SetSnapshotRef(
 		b.lastUpdatedMS = snapshot.TimestampMs
 	}
 
-	b.refs[name] = SnapshotRef{
-		SnapshotID:         snapshotID,
-		SnapshotRefType:    refType,
-		MinSnapshotsToKeep: minSnapshotsToKeep,
-		MaxRefAgeMs:        maxRefAgeMs,
-		MaxSnapshotAgeMs:   maxSnapshotAgeMs,
-	}
+	b.refs[name] = ref
 	return b, nil
 }
 

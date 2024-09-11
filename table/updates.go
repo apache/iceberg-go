@@ -186,17 +186,17 @@ type SetSnapshotRefUpdate struct {
 	RefName            string  `json:"ref-name"`
 	RefType            RefType `json:"type"`
 	SnapshotID         int64   `json:"snapshot-id"`
-	MaxRefAgeMs        *int64  `json:"max-ref-age-ms,omitempty"`
-	MaxSnapshotAgeMs   *int64  `json:"max-snapshot-age-ms,omitempty"`
-	MinSnapshotsToKeep *int    `json:"min-snapshots-to-keep,omitempty"`
+	MaxRefAgeMs        int64   `json:"max-ref-age-ms,omitempty"`
+	MaxSnapshotAgeMs   int64   `json:"max-snapshot-age-ms,omitempty"`
+	MinSnapshotsToKeep int     `json:"min-snapshots-to-keep,omitempty"`
 }
 
 func NewSetSnapshotRefUpdate(
 	name string,
 	snapshotID int64,
 	refType RefType,
-	maxRefAgeMs, maxSnapshotAgeMs *int64,
-	minSnapshotsToKeep *int,
+	maxRefAgeMs, maxSnapshotAgeMs int64,
+	minSnapshotsToKeep int,
 ) *SetSnapshotRefUpdate {
 	return &SetSnapshotRefUpdate{
 		baseUpdate:         baseUpdate{ActionName: "set-snapshot-ref"},
@@ -210,13 +210,22 @@ func NewSetSnapshotRefUpdate(
 }
 
 func (u *SetSnapshotRefUpdate) Apply(builder *MetadataBuilder) error {
+	opts := []setSnapshotRefOption{}
+	if u.MaxRefAgeMs != 0 {
+		opts = append(opts, WithMaxRefAgeMs(u.MaxRefAgeMs))
+	}
+	if u.MaxSnapshotAgeMs != 0 {
+		opts = append(opts, WithMaxSnapshotAgeMs(u.MaxSnapshotAgeMs))
+	}
+	if u.MinSnapshotsToKeep != 0 {
+		opts = append(opts, WithMinSnapshotsToKeep(u.MinSnapshotsToKeep))
+	}
+
 	_, err := builder.SetSnapshotRef(
 		u.RefName,
 		u.SnapshotID,
 		u.RefType,
-		u.MaxRefAgeMs,
-		u.MaxSnapshotAgeMs,
-		u.MinSnapshotsToKeep,
+		opts...,
 	)
 	return err
 }
