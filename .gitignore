@@ -50,3 +50,9 @@ lib/
 # local catalog environment via docker
 dev/notebooks
 dev/warehouse
+
+/apache-iceberg-go-*.tar.gz
+/apache-iceberg-go-*.tar.gz.asc
+/dev/release/apache-rat-*.jar
+/dev/release/filtered_rat.txt
+/dev/release/rat.xml
