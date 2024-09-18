@@ -21,12 +21,70 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/MarvinJWendt/testza"
 	"github.com/apache/iceberg-go/table"
 	"github.com/pterm/pterm"
+	"github.com/stretchr/testify/assert"
 )
 
-const ExampleTableMetadataV1 = `{
+var testArgs = []struct {
+	meta     string
+	expected string
+}{
+	{`{
+    "format-version": 2,
+    "table-uuid": "9c12d441-03fe-4693-9a96-a0705ddf69c1",
+    "location": "s3://bucket/test/location",
+    "last-sequence-number": 0,
+    "last-updated-ms": 1602638573590,
+    "last-column-id": 3,
+    "current-schema-id": 0,
+    "schemas": [
+        {"type": "struct", "schema-id": 0, "fields": [{"id": 1, "name": "x", "required": true, "type": "long"}]},
+        {
+            "type": "struct",
+            "fields": [
+                {"id": 1, "name": "x", "required": true, "type": "long"}
+            ]
+        }
+    ],
+    "default-spec-id": 0,
+    "partition-specs": [{"spec-id": 0, "fields": []}],
+    "last-partition-id": 1000,
+    "default-sort-order-id": 0,
+    "sort-orders": [
+        {
+            "order-id": 0,
+            "fields": [ ]
+        }
+    ],
+    "properties": {"read.split.target.size": "134217728"},
+    "current-snapshot-id": -1,
+    "snapshots": [ ],
+    "snapshot-log": [ ],
+    "metadata-log": [ ],
+    "refs": { }
+}`, 
+`Table format version | 2
+Metadata location    | 
+Table UUID           | 9c12d441-03fe-4693-9a96-a0705ddf69c1
+Last updated         | 1602638573590
+Sort Order           | 0: []
+Partition Spec       | []
+
+Current Schema, id=0
+└──1: x: required long
+
+Current Snapshot | 
+
+Snapshots
+
+Properties
+key                    | value
+----------------------------------
+read.split.target.size | 134217728
+
+`},
+	{`{
     "format-version": 2,
     "table-uuid": "9c12d441-03fe-4693-9a96-a0705ddf69c1",
     "location": "s3://bucket/test/location",
@@ -87,17 +145,8 @@ const ExampleTableMetadataV1 = `{
     ],
     "metadata-log": [{"metadata-file": "s3://bucket/.../v1.json", "timestamp-ms": 1515100}],
     "refs": {"test": {"snapshot-id": 3051729675574597004, "type": "tag", "max-ref-age-ms": 10000000}}
-}`
-
-func TestDescribeTable(t *testing.T) {
-	var buf bytes.Buffer
-	meta, _ := table.ParseMetadataBytes([]byte(ExampleTableMetadataV1))
-	table := table.New([]string{"t"}, meta, "", nil)
-
-	pterm.SetDefaultOutput(&buf)
-	pterm.DisableColor()
-	text{}.DescribeTable(table)
-	var expected = `Table format version | 2
+}`, 
+`Table format version | 2
 Metadata location    | 
 Table UUID           | 9c12d441-03fe-4693-9a96-a0705ddf69c1
 Last updated         | 1602638573590
@@ -125,7 +174,22 @@ key                    | value
 ----------------------------------
 read.split.target.size | 134217728
 
-`
+`},
+}
 
-	testza.AssertEqual(t, expected, buf.String())
+
+func TestDescribeTable(t *testing.T) {
+	var buf bytes.Buffer
+	pterm.SetDefaultOutput(&buf)
+	pterm.DisableColor()
+
+	for _, tt := range testArgs {
+		meta, _ := table.ParseMetadataBytes([]byte(tt.meta))
+		table := table.New([]string{"t"}, meta, "", nil)
+		buf.Reset()
+
+		text{}.DescribeTable(table)
+
+		assert.Equal(t, tt.expected, buf.String())
+	}
 }
