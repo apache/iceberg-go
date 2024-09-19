@@ -23,12 +23,14 @@ SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_TOP_DIR="$(cd "${SOURCE_DIR}/../../" && pwd)"
 
 if [ "$#" -ne 1 ]; then
-  echo "Usage: $0 <rc>"
-  echo " e.g.: $0 1"
+  echo "Usage: $0 <version> <rc>"
+  echo " e.g.: $0 1.0.0 1"
   exit 1
 fi
 
-rc=$1
+# TODO: possibly use go-semantic-release to auto generate the version?
+version=$1
+rc=$2
 
 : "${RELEASE_DEFAULT:=1}"
 : "${RELEASE_PULL:=${RELEASE_DEFAULT}}"

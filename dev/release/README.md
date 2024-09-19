@@ -30,7 +30,7 @@ Run `dev/release/release_rc.sh` on a working copy of
 
 ```console
 $ git clone git@github.com:apache/iceberg-go.git
-$ dev/release/release_rc.sh ${RC}
+$ dev/release/release_rc.sh ${VERSION} ${RC}
 (Send a vote email to dev@iceberg.apache.org.
  You can use a draft shown by release_rc.sh for the email.)
 ```
@@ -38,11 +38,10 @@ $ dev/release/release_rc.sh ${RC}
 Here is an example to release RC1:
 
 ```console
-$ GH_TOKEN=${YOUR_GITHUB_TOKEN} dev/release/release_rc.sh 1
+$ GH_TOKEN=${YOUR_GITHUB_TOKEN} dev/release/release_rc.sh 1.0.0 1
 ```
 
-The argument of `release_rc.sh` is the RC number. If RC1 has a problem, we'll 
-increment the RC number such as RC2, RC3 and so on.
+The arguments of `release_rc.sh` are the version and the RC number. If RC1 has a problem, we'll increment the RC number such as RC2, RC3 and so on.
 
 Requirements to run `release_rc.sh`:
 
