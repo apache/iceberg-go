@@ -1,8 +1,0 @@
-.gitignore
-.rat-excludes
-LICENSE
-NOTICE
-go.sum
-build
-rat-results.txt
-operation_string.go

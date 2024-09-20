@@ -65,7 +65,7 @@ mkdir -p "$FWDIR"/lib
 }
 
 mkdir -p build
-$java_cmd -jar "$rat_jar" -E "$FWDIR"/dev/.rat-excludes -d "$FWDIR" > build/rat-results.txt
+$java_cmd -jar "$rat_jar" -E "$FWDIR"/dev/release/rat_exclude_files.txt -d "$FWDIR" > build/rat-results.txt
 
 if [ $? -ne 0 ]; then
    echo "RAT exited abnormally"
