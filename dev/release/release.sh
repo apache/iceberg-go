@@ -61,7 +61,7 @@ svn ci -m "Apache Iceberg Go ${version}"
 popd
 rm -rf "${dist_dir}"
 
-echo "Keep only the latest verisons"
+echo "Keep only the latest versions"
 old_releases=$(
   svn ls https://dist.apache.org/repos/dist/release/iceberg/ |
   grep -E '^apache-iceberg-go-' |
