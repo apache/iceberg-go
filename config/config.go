@@ -19,9 +19,9 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
-	"path/filepath"
 )
 
 const cfgFile = ".iceberg-go.yaml"
@@ -38,7 +38,7 @@ type CatalogConfig struct {
 	Warehouse  string `yaml:"warehouse"`
 }
 
-func LoadConfig(catalogName string) *CatalogConfig {
+func LoadConfig() []byte {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil
@@ -48,8 +48,12 @@ func LoadConfig(catalogName string) *CatalogConfig {
 	if err != nil {
 		return nil
 	}
+	return file
+}
+
+func ParseConfig(file []byte, catalogName string) *CatalogConfig {
 	var config Config
-	err = yaml.Unmarshal(file, &config)
+	err := yaml.Unmarshal(file, &config)
 	if err != nil {
 		return nil
 	}

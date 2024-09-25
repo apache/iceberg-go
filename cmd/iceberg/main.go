@@ -109,7 +109,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	fileCfg := config.LoadConfig("default")
+	fileCfg := config.ParseConfig(config.LoadConfig(), "default")
 	if fileCfg != nil {
 		mergeConf(fileCfg, &cfg)
 	}
@@ -351,19 +351,19 @@ func properties(output Output, cat catalog.Catalog, args propCmd) {
 }
 
 func mergeConf(fileConf *config.CatalogConfig, resConfig *Config) {
-	if len(fileConf.Catalog) > 0 {
+	if len(resConfig.Catalog) == 0 {
 		resConfig.Catalog = fileConf.Catalog
 	}
-	if len(fileConf.URI) > 0 {
+	if len(resConfig.URI) == 0 {
 		resConfig.URI = fileConf.URI
 	}
-	if len(fileConf.Output) > 0 {
+	if len(resConfig.Output) == 0 {
 		resConfig.Output = fileConf.Output
 	}
-	if len(fileConf.Credential) > 0 {
+	if len(resConfig.Cred) == 0 {
 		resConfig.Cred = fileConf.Credential
 	}
-	if len(fileConf.Warehouse) > 0 {
+	if len(resConfig.Warehouse) == 0 {
 		resConfig.Warehouse = fileConf.Warehouse
 	}
 }
