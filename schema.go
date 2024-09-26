@@ -20,11 +20,11 @@ package iceberg
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"sync/atomic"
 
-	"golang.org/x/exp/maps"
 	"golang.org/x/exp/slices"
 )
 

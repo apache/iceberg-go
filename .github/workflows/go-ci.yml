@@ -39,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: [ '1.21', '1.22' ]
+        go: [ '1.22', '1.23' ]
         os: [ 'ubuntu-latest', 'windows-latest', 'macos-latest' ]
     steps:
     - uses: actions/checkout@v4

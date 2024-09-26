@@ -26,11 +26,17 @@ import (
 	"github.com/apache/iceberg-go"
 )
 
+// constants to look for as Keys in Arrow field metadata
 const (
-	ArrowFieldDocKey       = "doc"
+	ArrowFieldDocKey = "doc"
+	// Arrow schemas that are generated from the Parquet library will utilize
+	// this key to identify the field id of the source Parquet field.
+	// We use this when converting to Iceberg to provide field IDs
 	ArrowParquetFieldIDKey = "PARQUET:field_id"
 )
 
+// ArrowSchemaVisitor is an interface that can be implemented and used to
+// call VisitArrowSchema for iterating
 type ArrowSchemaVisitor[T any] interface {
 	Schema(*arrow.Schema, T) T
 	Struct(*arrow.StructType, []T) T
