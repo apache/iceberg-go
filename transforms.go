@@ -28,7 +28,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/apache/arrow/go/v16/arrow/decimal128"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/google/uuid"
 	"github.com/twmb/murmur3"
 )
