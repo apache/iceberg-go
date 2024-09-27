@@ -342,7 +342,7 @@ Loop:
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, context.Cause(ctx)
 		case entries, ok := <-entryChan:
 			if !ok {
 				// closed!

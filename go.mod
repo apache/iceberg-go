@@ -29,7 +29,7 @@ require (
 	github.com/aws/smithy-go v1.20.4
 	github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815
 	github.com/google/uuid v1.6.0
-	github.com/hamba/avro/v2 v2.25.1
+	github.com/hamba/avro/v2 v2.26.0
 	github.com/pterm/pterm v0.12.79
 	github.com/stretchr/testify v1.9.0
 	github.com/twmb/murmur3 v1.1.8
