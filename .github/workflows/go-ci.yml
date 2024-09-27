@@ -22,8 +22,8 @@ on:
     branches:
       - 'main'
     tags:
-      - 'v**'          
-  pull_request:    
+      - 'v**'
+  pull_request:
 
 concurrency:
   group: ${{ github.repository }}-${{ github.head_ref || github.sha }}-${{ github.workflow }}
@@ -40,7 +40,7 @@ jobs:
       fail-fast: false
       matrix:
         go: [ '1.22', '1.23' ]
-        os: [ 'ubuntu-latest', 'windows-latest', 'macos-latest' ]        
+        os: [ 'ubuntu-latest', 'windows-latest', 'macos-latest' ]
     steps:
     - uses: actions/checkout@v4
     - name: Install Go
