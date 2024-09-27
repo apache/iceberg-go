@@ -34,49 +34,50 @@ func fieldIDMeta(id string) arrow.Metadata {
 
 func TestArrowToIceberg(t *testing.T) {
 	tests := []struct {
-		dt  arrow.DataType
-		ice iceberg.Type
-		err string
+		dt         arrow.DataType
+		ice        iceberg.Type
+		reciprocal bool
+		err        string
 	}{
-		{&arrow.FixedSizeBinaryType{ByteWidth: 23}, iceberg.FixedTypeOf(23), ""},
-		{&arrow.Decimal32Type{Precision: 8, Scale: 9}, iceberg.DecimalTypeOf(8, 9), ""},
-		{&arrow.Decimal64Type{Precision: 15, Scale: 14}, iceberg.DecimalTypeOf(15, 14), ""},
-		{&arrow.Decimal128Type{Precision: 26, Scale: 20}, iceberg.DecimalTypeOf(26, 20), ""},
-		{&arrow.Decimal256Type{Precision: 8, Scale: 9}, nil, "unsupported arrow type for conversion - decimal256(8, 9)"},
-		{arrow.FixedWidthTypes.Boolean, iceberg.PrimitiveTypes.Bool, ""},
-		{arrow.PrimitiveTypes.Int8, iceberg.PrimitiveTypes.Int32, ""},
-		{arrow.PrimitiveTypes.Uint8, iceberg.PrimitiveTypes.Int32, ""},
-		{arrow.PrimitiveTypes.Int16, iceberg.PrimitiveTypes.Int32, ""},
-		{arrow.PrimitiveTypes.Uint16, iceberg.PrimitiveTypes.Int32, ""},
-		{arrow.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int32, ""},
-		{arrow.PrimitiveTypes.Uint32, iceberg.PrimitiveTypes.Int32, ""},
-		{arrow.PrimitiveTypes.Int64, iceberg.PrimitiveTypes.Int64, ""},
-		{arrow.PrimitiveTypes.Uint64, iceberg.PrimitiveTypes.Int64, ""},
-		{arrow.FixedWidthTypes.Float16, iceberg.PrimitiveTypes.Float32, ""},
-		{arrow.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float32, ""},
-		{arrow.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Float64, ""},
-		{arrow.FixedWidthTypes.Date32, iceberg.PrimitiveTypes.Date, ""},
-		{arrow.FixedWidthTypes.Date64, nil, "unsupported arrow type for conversion - date64"},
-		{arrow.FixedWidthTypes.Time32s, nil, "unsupported arrow type for conversion - time32[s]"},
-		{arrow.FixedWidthTypes.Time32ms, nil, "unsupported arrow type for conversion - time32[ms]"},
-		{arrow.FixedWidthTypes.Time64us, iceberg.PrimitiveTypes.Time, ""},
-		{arrow.FixedWidthTypes.Time64ns, nil, "unsupported arrow type for conversion - time64[ns]"},
-		{arrow.FixedWidthTypes.Timestamp_s, iceberg.PrimitiveTypes.TimestampTz, ""},
-		{arrow.FixedWidthTypes.Timestamp_ms, iceberg.PrimitiveTypes.TimestampTz, ""},
-		{arrow.FixedWidthTypes.Timestamp_us, iceberg.PrimitiveTypes.TimestampTz, ""},
-		{arrow.FixedWidthTypes.Timestamp_ns, nil, "'ns' timestamp precision not supported"},
-		{&arrow.TimestampType{Unit: arrow.Second}, iceberg.PrimitiveTypes.Timestamp, ""},
-		{&arrow.TimestampType{Unit: arrow.Millisecond}, iceberg.PrimitiveTypes.Timestamp, ""},
-		{&arrow.TimestampType{Unit: arrow.Microsecond}, iceberg.PrimitiveTypes.Timestamp, ""},
-		{&arrow.TimestampType{Unit: arrow.Nanosecond}, nil, "'ns' timestamp precision not supported"},
-		{&arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "US/Pacific"}, nil, "unsupported arrow type for conversion - timestamp[us, tz=US/Pacific]"},
-		{arrow.BinaryTypes.String, iceberg.PrimitiveTypes.String, ""},
-		{arrow.BinaryTypes.LargeString, iceberg.PrimitiveTypes.String, ""},
-		{arrow.BinaryTypes.StringView, nil, "unsupported arrow type for conversion - string_view"},
-		{arrow.BinaryTypes.Binary, iceberg.PrimitiveTypes.Binary, ""},
-		{arrow.BinaryTypes.LargeBinary, iceberg.PrimitiveTypes.Binary, ""},
-		{arrow.BinaryTypes.BinaryView, nil, "unsupported arrow type for conversion - binary_view"},
-		{extensions.NewUUIDType(), iceberg.PrimitiveTypes.UUID, ""},
+		{&arrow.FixedSizeBinaryType{ByteWidth: 23}, iceberg.FixedTypeOf(23), true, ""},
+		{&arrow.Decimal32Type{Precision: 8, Scale: 9}, iceberg.DecimalTypeOf(8, 9), false, ""},
+		{&arrow.Decimal64Type{Precision: 15, Scale: 14}, iceberg.DecimalTypeOf(15, 14), false, ""},
+		{&arrow.Decimal128Type{Precision: 26, Scale: 20}, iceberg.DecimalTypeOf(26, 20), true, ""},
+		{&arrow.Decimal256Type{Precision: 8, Scale: 9}, nil, false, "unsupported arrow type for conversion - decimal256(8, 9)"},
+		{arrow.FixedWidthTypes.Boolean, iceberg.PrimitiveTypes.Bool, true, ""},
+		{arrow.PrimitiveTypes.Int8, iceberg.PrimitiveTypes.Int32, false, ""},
+		{arrow.PrimitiveTypes.Uint8, iceberg.PrimitiveTypes.Int32, false, ""},
+		{arrow.PrimitiveTypes.Int16, iceberg.PrimitiveTypes.Int32, false, ""},
+		{arrow.PrimitiveTypes.Uint16, iceberg.PrimitiveTypes.Int32, false, ""},
+		{arrow.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int32, true, ""},
+		{arrow.PrimitiveTypes.Uint32, iceberg.PrimitiveTypes.Int32, false, ""},
+		{arrow.PrimitiveTypes.Int64, iceberg.PrimitiveTypes.Int64, true, ""},
+		{arrow.PrimitiveTypes.Uint64, iceberg.PrimitiveTypes.Int64, false, ""},
+		{arrow.FixedWidthTypes.Float16, iceberg.PrimitiveTypes.Float32, false, ""},
+		{arrow.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float32, true, ""},
+		{arrow.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Float64, true, ""},
+		{arrow.FixedWidthTypes.Date32, iceberg.PrimitiveTypes.Date, true, ""},
+		{arrow.FixedWidthTypes.Date64, nil, false, "unsupported arrow type for conversion - date64"},
+		{arrow.FixedWidthTypes.Time32s, nil, false, "unsupported arrow type for conversion - time32[s]"},
+		{arrow.FixedWidthTypes.Time32ms, nil, false, "unsupported arrow type for conversion - time32[ms]"},
+		{arrow.FixedWidthTypes.Time64us, iceberg.PrimitiveTypes.Time, true, ""},
+		{arrow.FixedWidthTypes.Time64ns, nil, false, "unsupported arrow type for conversion - time64[ns]"},
+		{arrow.FixedWidthTypes.Timestamp_s, iceberg.PrimitiveTypes.TimestampTz, false, ""},
+		{arrow.FixedWidthTypes.Timestamp_ms, iceberg.PrimitiveTypes.TimestampTz, false, ""},
+		{arrow.FixedWidthTypes.Timestamp_us, iceberg.PrimitiveTypes.TimestampTz, true, ""},
+		{arrow.FixedWidthTypes.Timestamp_ns, nil, false, "'ns' timestamp precision not supported"},
+		{&arrow.TimestampType{Unit: arrow.Second}, iceberg.PrimitiveTypes.Timestamp, false, ""},
+		{&arrow.TimestampType{Unit: arrow.Millisecond}, iceberg.PrimitiveTypes.Timestamp, false, ""},
+		{&arrow.TimestampType{Unit: arrow.Microsecond}, iceberg.PrimitiveTypes.Timestamp, true, ""},
+		{&arrow.TimestampType{Unit: arrow.Nanosecond}, nil, false, "'ns' timestamp precision not supported"},
+		{&arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "US/Pacific"}, nil, false, "unsupported arrow type for conversion - timestamp[us, tz=US/Pacific]"},
+		{arrow.BinaryTypes.String, iceberg.PrimitiveTypes.String, false, ""},
+		{arrow.BinaryTypes.LargeString, iceberg.PrimitiveTypes.String, true, ""},
+		{arrow.BinaryTypes.StringView, nil, false, "unsupported arrow type for conversion - string_view"},
+		{arrow.BinaryTypes.Binary, iceberg.PrimitiveTypes.Binary, false, ""},
+		{arrow.BinaryTypes.LargeBinary, iceberg.PrimitiveTypes.Binary, true, ""},
+		{arrow.BinaryTypes.BinaryView, nil, false, "unsupported arrow type for conversion - binary_view"},
+		{extensions.NewUUIDType(), iceberg.PrimitiveTypes.UUID, true, ""},
 		{arrow.StructOf(arrow.Field{
 			Name:     "foo",
 			Type:     arrow.BinaryTypes.LargeString,
@@ -98,7 +99,7 @@ func TestArrowToIceberg(t *testing.T) {
 				{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: "foo doc"},
 				{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 				{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool, Required: false},
-			}}, ""},
+			}}, true, ""},
 		{arrow.ListOfField(arrow.Field{
 			Name:     "element",
 			Type:     arrow.PrimitiveTypes.Int32,
@@ -108,7 +109,7 @@ func TestArrowToIceberg(t *testing.T) {
 			ElementID:       1,
 			Element:         iceberg.PrimitiveTypes.Int32,
 			ElementRequired: true,
-		}, ""},
+		}, false, ""},
 		{arrow.LargeListOfField(arrow.Field{
 			Name:     "element",
 			Type:     arrow.PrimitiveTypes.Int32,
@@ -118,7 +119,7 @@ func TestArrowToIceberg(t *testing.T) {
 			ElementID:       1,
 			Element:         iceberg.PrimitiveTypes.Int32,
 			ElementRequired: true,
-		}, ""},
+		}, true, ""},
 		{arrow.FixedSizeListOfField(1, arrow.Field{
 			Name:     "element",
 			Type:     arrow.PrimitiveTypes.Int32,
@@ -128,23 +129,23 @@ func TestArrowToIceberg(t *testing.T) {
 			ElementID:       1,
 			Element:         iceberg.PrimitiveTypes.Int32,
 			ElementRequired: true,
-		}, ""},
+		}, false, ""},
 		{arrow.MapOfWithMetadata(arrow.PrimitiveTypes.Int32,
 			fieldIDMeta("1"),
-			arrow.BinaryTypes.String, fieldIDMeta("2")),
+			arrow.BinaryTypes.LargeString, fieldIDMeta("2")),
 			&iceberg.MapType{
 				KeyID: 1, KeyType: iceberg.PrimitiveTypes.Int32,
 				ValueID: 2, ValueType: iceberg.PrimitiveTypes.String, ValueRequired: false,
-			}, ""},
+			}, true, ""},
 		{&arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int32,
-			ValueType: arrow.BinaryTypes.String}, iceberg.PrimitiveTypes.String, ""},
+			ValueType: arrow.BinaryTypes.String}, iceberg.PrimitiveTypes.String, false, ""},
 		{&arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int32,
-			ValueType: arrow.PrimitiveTypes.Int32}, iceberg.PrimitiveTypes.Int32, ""},
+			ValueType: arrow.PrimitiveTypes.Int32}, iceberg.PrimitiveTypes.Int32, false, ""},
 		{&arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int64,
-			ValueType: arrow.PrimitiveTypes.Float64}, iceberg.PrimitiveTypes.Float64, ""},
-		{arrow.RunEndEncodedOf(arrow.PrimitiveTypes.Int32, arrow.BinaryTypes.String), iceberg.PrimitiveTypes.String, ""},
-		{arrow.RunEndEncodedOf(arrow.PrimitiveTypes.Int32, arrow.PrimitiveTypes.Float64), iceberg.PrimitiveTypes.Float64, ""},
-		{arrow.RunEndEncodedOf(arrow.PrimitiveTypes.Int32, arrow.PrimitiveTypes.Int16), iceberg.PrimitiveTypes.Int32, ""},
+			ValueType: arrow.PrimitiveTypes.Float64}, iceberg.PrimitiveTypes.Float64, false, ""},
+		{arrow.RunEndEncodedOf(arrow.PrimitiveTypes.Int32, arrow.BinaryTypes.String), iceberg.PrimitiveTypes.String, false, ""},
+		{arrow.RunEndEncodedOf(arrow.PrimitiveTypes.Int32, arrow.PrimitiveTypes.Float64), iceberg.PrimitiveTypes.Float64, false, ""},
+		{arrow.RunEndEncodedOf(arrow.PrimitiveTypes.Int32, arrow.PrimitiveTypes.Int16), iceberg.PrimitiveTypes.Int32, false, ""},
 	}
 
 	for _, tt := range tests {
@@ -156,11 +157,17 @@ func TestArrowToIceberg(t *testing.T) {
 			} else {
 				assert.ErrorContains(t, err, tt.err)
 			}
+
+			if tt.reciprocal {
+				result, err := table.TypeToArrowType(tt.ice, true)
+				require.NoError(t, err)
+				assert.True(t, arrow.TypeEqual(tt.dt, result), tt.dt.String(), result.String())
+			}
 		})
 	}
 }
 
-func TestArrowSchemaToIceb(t *testing.T) {
+func TestArrowSchemaToIceberg(t *testing.T) {
 	tests := []struct {
 		name     string
 		sc       *arrow.Schema
@@ -291,6 +298,23 @@ var (
 		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool},
 	)
 )
+
+func TestArrowSchemaRoundTripConversion(t *testing.T) {
+	schemas := []*iceberg.Schema{
+		icebergSchemaSimple,
+		icebergSchemaNested,
+	}
+
+	for _, tt := range schemas {
+		sc, err := table.SchemaToArrowSchema(tt, nil, true)
+		require.NoError(t, err)
+
+		ice, err := table.ArrowSchemaToIceberg(sc, false, nil)
+		require.NoError(t, err)
+
+		assert.True(t, tt.Equals(ice), tt.String(), ice.String())
+	}
+}
 
 func TestArrowSchemaWithNameMapping(t *testing.T) {
 	schemaWithoutIDs := arrow.NewSchema([]arrow.Field{
