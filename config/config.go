@@ -38,13 +38,19 @@ type CatalogConfig struct {
 	Warehouse  string `yaml:"warehouse"`
 }
 
-func LoadConfig() []byte {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return nil
+func LoadConfig(configPath string) []byte {
+	var path string
+	if len(configPath) > 0 {
+		path = configPath
+	} else {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return nil
+
+		}
+		path = filepath.Join(homeDir, cfgFile)
 	}
-	filePath := filepath.Join(homeDir, cfgFile)
-	file, err := os.ReadFile(filePath)
+	file, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}

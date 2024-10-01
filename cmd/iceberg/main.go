@@ -59,7 +59,8 @@ Options:
   --uri TEXT         specify the catalog URI
   --output TYPE      output type (json/text) [default: text]
   --credential TEXT  specify credentials for the catalog
-  --warehouse TEXT   specify the warehouse to use`
+  --warehouse TEXT   specify the warehouse to use
+  --config TEXT      specify the path to the configuration file`
 
 type Config struct {
 	List     bool `docopt:"list"`
@@ -95,6 +96,7 @@ type Config struct {
 	History   bool   `docopt:"--history"`
 	Cred      string `docopt:"--credential"`
 	Warehouse string `docopt:"--warehouse"`
+	Config    string `docopt:"--config"`
 }
 
 func main() {
@@ -109,7 +111,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	fileCfg := config.ParseConfig(config.LoadConfig(), "default")
+	fileCfg := config.ParseConfig(config.LoadConfig(cfg.Config), "default")
 	if fileCfg != nil {
 		mergeConf(fileCfg, &cfg)
 	}
