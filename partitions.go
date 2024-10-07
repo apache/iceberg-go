@@ -117,6 +117,11 @@ func (ps PartitionSpec) Equals(other PartitionSpec) bool {
 	return ps.id == other.id && slices.Equal(ps.fields, other.fields)
 }
 
+// Fields returns a clone of the partition fields in this spec.
+func (ps *PartitionSpec) Fields() []PartitionField {
+	return slices.Clone(ps.fields)
+}
+
 func (ps PartitionSpec) MarshalJSON() ([]byte, error) {
 	if ps.fields == nil {
 		ps.fields = []PartitionField{}

@@ -297,12 +297,12 @@ func (s *Schema) accessorForField(id int) (accessor, bool) {
 // Equals compares the fields and identifierIDs, but does not compare
 // the schema ID itself.
 func (s *Schema) Equals(other *Schema) bool {
-	if other == nil {
-		return false
-	}
-
 	if s == other {
 		return true
+	}
+
+	if s == nil || other == nil {
+		return false
 	}
 
 	if len(s.fields) != len(other.fields) {
