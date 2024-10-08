@@ -130,13 +130,13 @@ func WithLocation(loc string) createTableOption {
 	}
 }
 
-func WithPartitionSpec(spec iceberg.PartitionSpec) createTableOption {
+func WithPartitionSpec(spec *iceberg.PartitionSpec) createTableOption {
 	return func(req *createTableRequest) {
 		req.PartitionSpec = spec
 	}
 }
 
-func WithWriteOrder(order table.SortOrder) createTableOption {
+func WithWriteOrder(order *table.SortOrder) createTableOption {
 	return func(req *createTableRequest) {
 		req.WriteOrder = order
 	}
@@ -155,13 +155,13 @@ func WithProperties(props iceberg.Properties) createTableOption {
 }
 
 type createTableRequest struct {
-	Name          string                `json:"name"`
-	Location      string                `json:"location"`
-	Schema        *iceberg.Schema       `json:"schema"`
-	PartitionSpec iceberg.PartitionSpec `json:"partition-spec"`
-	WriteOrder    table.SortOrder       `json:"write-order"`
-	StageCreate   bool                  `json:"stage-create"`
-	Props         iceberg.Properties    `json:"properties"`
+	Name          string                 `json:"name"`
+	Schema        *iceberg.Schema        `json:"schema"`
+	Location      string                 `json:"location,omitempty"`
+	PartitionSpec *iceberg.PartitionSpec `json:"partition-spec,omitempty"`
+	WriteOrder    *table.SortOrder       `json:"write-order,omitempty"`
+	StageCreate   bool                   `json:"stage-create,omitempty"`
+	Props         iceberg.Properties     `json:"properties,omitempty"`
 }
 
 type oauthTokenResponse struct {
