@@ -25,7 +25,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/apache/arrow/go/v16/arrow/decimal128"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"golang.org/x/exp/slices"
 )
 
@@ -239,6 +239,8 @@ func (s *StructType) String() string {
 			f.ID, f.Name)
 		if f.Required {
 			b.WriteString("required ")
+		} else {
+			b.WriteString("optional ")
 		}
 		b.WriteString(f.Type.String())
 		if f.Doc != "" {

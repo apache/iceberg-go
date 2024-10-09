@@ -666,7 +666,12 @@ func avroPartitionData(input map[string]any) map[string]any {
 				}
 			}
 		default:
-			out[k] = v
+			switch v := v.(type) {
+			case time.Time:
+				out[k] = Timestamp(v.UTC().UnixMicro())
+			default:
+				out[k] = v
+			}
 		}
 	}
 	return out
