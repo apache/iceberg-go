@@ -515,6 +515,10 @@ func (c convertToArrow) VisitUUID() arrow.Field {
 	return arrow.Field{Type: extensions.NewUUIDType()}
 }
 
+// SchemaToArrowSchema converts an Iceberg schema to an Arrow schema. If the metadata parameter
+// is non-nil, it will be included as the top-level metadata in the schema. If includeFieldIDs
+// is true, then each field of the schema will contain a metadata key PARQUET:field_id set to
+// the field id from the iceberg schema.
 func SchemaToArrowSchema(sc *iceberg.Schema, metadata map[string]string, includeFieldIDs bool) (*arrow.Schema, error) {
 	top, err := iceberg.Visit(sc, convertToArrow{metadata: metadata, includeFieldIDs: includeFieldIDs})
 	if err != nil {
@@ -524,6 +528,9 @@ func SchemaToArrowSchema(sc *iceberg.Schema, metadata map[string]string, include
 	return arrow.NewSchema(top.Type.(*arrow.StructType).Fields(), &top.Metadata), nil
 }
 
+// TypeToArrowType converts a given iceberg type, into the equivalent Arrow data type.
+// For dealing with nested fields (List, Struct, Map) if includeFieldIDs is true, then
+// the child fields will contain a metadata key PARQUET:field_id set to the field id.
 func TypeToArrowType(t iceberg.Type, includeFieldIDs bool) (arrow.DataType, error) {
 	top, err := iceberg.Visit(iceberg.NewSchema(0, iceberg.NestedField{Type: t}),
 		convertToArrow{includeFieldIDs: includeFieldIDs})
