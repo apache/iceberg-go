@@ -35,7 +35,7 @@ type Update interface {
 // baseUpdate contains the common fields for all updates. It is used to identify the type
 // of the update.
 type baseUpdate struct {
-	ActionName string `json:"Action"`
+	ActionName string `json:"action"`
 }
 
 func (u *baseUpdate) Action() string {
