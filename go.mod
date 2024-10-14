@@ -17,7 +17,9 @@
 
 module github.com/apache/iceberg-go
 
-go 1.22.7
+go 1.23
+
+toolchain go1.23.1
 
 require (
 	github.com/apache/arrow-go/v18 v18.0.0-20240924011512-14844aea3205
@@ -42,6 +44,7 @@ require (
 	atomicgo.dev/cursor v0.2.0 // indirect
 	atomicgo.dev/keyboard v0.2.9 // indirect
 	atomicgo.dev/schedule v0.1.0 // indirect
+	github.com/JohnCGriffin/overflow v0.0.0-20211019200055-46fa312c352c // indirect
 	github.com/andybalholm/brotli v1.1.0 // indirect
 	github.com/apache/thrift v0.20.0 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.6.6 // indirect
