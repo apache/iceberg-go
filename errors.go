@@ -29,4 +29,5 @@ var (
 	ErrBadCast                 = errors.New("could not cast value")
 	ErrBadLiteral              = errors.New("invalid literal value")
 	ErrInvalidBinSerialization = errors.New("invalid binary serialization")
+	ErrResolve                 = errors.New("cannot resolve type")
 )

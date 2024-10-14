@@ -411,6 +411,7 @@ type BoundReference interface {
 
 	Field() NestedField
 	Pos() int
+	PosPath() []int
 }
 
 type boundRef[T LiteralType] struct {
@@ -449,6 +450,15 @@ func createBoundRef(field NestedField, acc accessor) BoundReference {
 }
 
 func (b *boundRef[T]) Pos() int { return b.acc.pos }
+
+func (b *boundRef[T]) PosPath() []int {
+	out, inner := []int{b.acc.pos}, &b.acc
+	for inner.inner != nil {
+		inner = inner.inner
+		out = append(out, inner.pos)
+	}
+	return out
+}
 
 func (*boundRef[T]) isTerm() {}
 
