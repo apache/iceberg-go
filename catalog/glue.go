@@ -30,7 +30,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/glue/types"
 )
 
-const glueTableTypeIceberg = "ICEBERG"
+const glueTypeIceberg = "ICEBERG"
 
 var (
 	_ Catalog = (*GlueCatalog)(nil)
@@ -39,6 +39,7 @@ var (
 type glueAPI interface {
 	GetTable(ctx context.Context, params *glue.GetTableInput, optFns ...func(*glue.Options)) (*glue.GetTableOutput, error)
 	GetTables(ctx context.Context, params *glue.GetTablesInput, optFns ...func(*glue.Options)) (*glue.GetTablesOutput, error)
+	GetDatabases(ctx context.Context, params *glue.GetDatabasesInput, optFns ...func(*glue.Options)) (*glue.GetDatabasesOutput, error)
 }
 
 type GlueCatalog struct {
@@ -77,7 +78,7 @@ func (c *GlueCatalog) ListTables(ctx context.Context, namespace table.Identifier
 		}
 
 		icebergTables = append(icebergTables,
-			filterTableListByType(database, tblsRes.TableList, glueTableTypeIceberg)...)
+			filterTableListByType(database, tblsRes.TableList, glueTypeIceberg)...)
 
 		if tblsRes.NextToken == nil {
 			break
@@ -150,8 +151,33 @@ func (c *GlueCatalog) UpdateNamespaceProperties(ctx context.Context, namespace t
 	return PropertiesUpdateSummary{}, fmt.Errorf("%w: [Glue Catalog] update namespace properties", iceberg.ErrNotImplemented)
 }
 
+// ListNamespaces returns a list of Iceberg namespaces from the given Glue catalog.
 func (c *GlueCatalog) ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error) {
-	return nil, fmt.Errorf("%w: [Glue Catalog] list namespaces", iceberg.ErrNotImplemented)
+	params := &glue.GetDatabasesInput{}
+
+	if parent != nil {
+		return nil, fmt.Errorf("hierarchical namespace is not supported")
+	}
+
+	var icebergNamespaces []table.Identifier
+
+	for {
+		databasesResp, err := c.glueSvc.GetDatabases(ctx, params)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list databases: %w", err)
+		}
+
+		icebergNamespaces = append(icebergNamespaces,
+			filterDatabaseListByType(databasesResp.DatabaseList, glueTypeIceberg)...)
+
+		if databasesResp.NextToken == nil {
+			break
+		}
+
+		params.NextToken = databasesResp.NextToken
+	}
+
+	return icebergNamespaces, nil
 }
 
 // GetTable loads a table from the Glue Catalog using the given database and table name.
@@ -210,6 +236,19 @@ func filterTableListByType(database string, tableList []types.Table, tableType s
 			continue
 		}
 		filtered = append(filtered, GlueTableIdentifier(database, aws.ToString(tbl.Name)))
+	}
+
+	return filtered
+}
+
+func filterDatabaseListByType(databases []types.Database, databaseType string) []table.Identifier {
+	var filtered []table.Identifier
+
+	for _, database := range databases {
+		if database.Parameters["database_type"] != databaseType {
+			continue
+		}
+		filtered = append(filtered, GlueDatabaseIdentifier(aws.ToString(database.Name)))
 	}
 
 	return filtered
