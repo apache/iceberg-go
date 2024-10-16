@@ -20,9 +20,8 @@ package iceberg
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
-
-	"golang.org/x/exp/slices"
 )
 
 const (

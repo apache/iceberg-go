@@ -21,12 +21,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
-	"golang.org/x/exp/slices"
 )
 
 var (
@@ -636,4 +636,46 @@ var PrimitiveTypes = struct {
 	String:      StringType{},
 	Binary:      BinaryType{},
 	UUID:        UUIDType{},
+}
+
+// PromoteType promotes the type being read from a file to a requested read type.
+// fileType is the type from the file being read
+// readType is the requested readType
+func PromoteType(fileType, readType Type) (Type, error) {
+	switch t := fileType.(type) {
+	case Int32Type:
+		if _, ok := readType.(Int64Type); ok {
+			return readType, nil
+		}
+	case Float32Type:
+		if _, ok := readType.(Float64Type); ok {
+			return readType, nil
+		}
+	case StringType:
+		if _, ok := readType.(BinaryType); ok {
+			return readType, nil
+		}
+	case BinaryType:
+		if _, ok := readType.(StringType); ok {
+			return readType, nil
+		}
+	case DecimalType:
+		if rt, ok := readType.(DecimalType); ok {
+			if t.precision <= rt.precision && t.scale <= rt.scale {
+				return readType, nil
+			}
+			return nil, fmt.Errorf("%w: cannot reduce precision from %s to %s",
+				ErrResolve, fileType, readType)
+		}
+	case FixedType:
+		if _, ok := readType.(UUIDType); ok && t.len == 16 {
+			return readType, nil
+		}
+	default:
+		if fileType.Equals(readType) {
+			return fileType, nil
+		}
+	}
+
+	return nil, fmt.Errorf("%w: cannot promote %s to %s", ErrResolve, fileType, readType)
 }

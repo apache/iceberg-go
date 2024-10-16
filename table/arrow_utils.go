@@ -18,11 +18,16 @@
 package table
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strconv"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/extensions"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 )
 
@@ -409,4 +414,449 @@ func ArrowSchemaToIceberg(sc *arrow.Schema, downcastNsTimestamp bool, nameMappin
 		return nil, fmt.Errorf("%w: arrow schema does not have field-ids and no name mapping provided",
 			iceberg.ErrInvalidSchema)
 	}
+}
+
+type convertToSmallTypes struct{}
+
+func (convertToSmallTypes) Schema(_ *arrow.Schema, structResult arrow.Field) arrow.Field {
+	return structResult
+}
+
+func (convertToSmallTypes) Struct(_ *arrow.StructType, results []arrow.Field) arrow.Field {
+	return arrow.Field{Type: arrow.StructOf(results...)}
+}
+
+func (convertToSmallTypes) Field(field arrow.Field, fieldResult arrow.Field) arrow.Field {
+	field.Type = fieldResult.Type
+	return field
+}
+
+func (convertToSmallTypes) List(_ arrow.ListLikeType, elemResult arrow.Field) arrow.Field {
+	return arrow.Field{Type: arrow.ListOfField(elemResult)}
+}
+
+func (convertToSmallTypes) Map(_ *arrow.MapType, keyResult, valueResult arrow.Field) arrow.Field {
+	return arrow.Field{
+		Type: arrow.MapOfWithMetadata(keyResult.Type, keyResult.Metadata,
+			valueResult.Type, valueResult.Metadata),
+	}
+}
+
+func (convertToSmallTypes) Primitive(dt arrow.DataType) arrow.Field {
+	switch dt.ID() {
+	case arrow.LARGE_STRING:
+		dt = arrow.BinaryTypes.String
+	case arrow.LARGE_BINARY:
+		dt = arrow.BinaryTypes.Binary
+	}
+
+	return arrow.Field{Type: dt}
+}
+
+func ensureSmallArrowTypes(dt arrow.DataType) (arrow.DataType, error) {
+	top, err := VisitArrowSchema(arrow.NewSchema([]arrow.Field{{Type: dt}}, nil), convertToSmallTypes{})
+	if err != nil {
+		return nil, err
+	}
+
+	return top.Type.(*arrow.StructType).Field(0).Type, nil
+}
+
+func ensureSmallArrowTypesSchema(schema *arrow.Schema) (*arrow.Schema, error) {
+	top, err := VisitArrowSchema(schema, convertToSmallTypes{})
+	if err != nil {
+		return nil, err
+	}
+
+	return arrow.NewSchema(top.Type.(*arrow.StructType).Fields(), &top.Metadata), nil
+}
+
+type convertToArrow struct {
+	metadata        map[string]string
+	includeFieldIDs bool
+}
+
+func (c convertToArrow) Schema(_ *iceberg.Schema, result arrow.Field) arrow.Field {
+	result.Metadata = arrow.MetadataFrom(c.metadata)
+	return result
+}
+
+func (c convertToArrow) Struct(_ iceberg.StructType, results []arrow.Field) arrow.Field {
+	return arrow.Field{Type: arrow.StructOf(results...)}
+}
+
+func (c convertToArrow) Field(field iceberg.NestedField, result arrow.Field) arrow.Field {
+	meta := map[string]string{}
+	if len(field.Doc) > 0 {
+		meta[ArrowFieldDocKey] = field.Doc
+	}
+
+	if c.includeFieldIDs {
+		meta[ArrowParquetFieldIDKey] = strconv.Itoa(field.ID)
+	}
+
+	if len(meta) > 0 {
+		result.Metadata = arrow.MetadataFrom(meta)
+	}
+
+	result.Name, result.Nullable = field.Name, !field.Required
+	return result
+}
+
+func (c convertToArrow) List(list iceberg.ListType, elemResult arrow.Field) arrow.Field {
+	elemField := c.Field(list.ElementField(), elemResult)
+	return arrow.Field{Type: arrow.LargeListOfField(elemField)}
+}
+
+func (c convertToArrow) Map(m iceberg.MapType, keyResult, valResult arrow.Field) arrow.Field {
+	keyField := c.Field(m.KeyField(), keyResult)
+	valField := c.Field(m.ValueField(), valResult)
+	return arrow.Field{Type: arrow.MapOfWithMetadata(keyField.Type, keyField.Metadata,
+		valField.Type, valField.Metadata)}
+}
+
+func (c convertToArrow) Primitive(iceberg.PrimitiveType) arrow.Field { panic("shouldn't be called") }
+
+func (c convertToArrow) VisitFixed(f iceberg.FixedType) arrow.Field {
+	return arrow.Field{Type: &arrow.FixedSizeBinaryType{ByteWidth: f.Len()}}
+}
+
+func (c convertToArrow) VisitDecimal(d iceberg.DecimalType) arrow.Field {
+	return arrow.Field{Type: &arrow.Decimal128Type{
+		Precision: int32(d.Precision()), Scale: int32(d.Scale())}}
+}
+
+func (c convertToArrow) VisitBoolean() arrow.Field {
+	return arrow.Field{Type: arrow.FixedWidthTypes.Boolean}
+}
+
+func (c convertToArrow) VisitInt32() arrow.Field {
+	return arrow.Field{Type: arrow.PrimitiveTypes.Int32}
+}
+
+func (c convertToArrow) VisitInt64() arrow.Field {
+	return arrow.Field{Type: arrow.PrimitiveTypes.Int64}
+}
+
+func (c convertToArrow) VisitFloat32() arrow.Field {
+	return arrow.Field{Type: arrow.PrimitiveTypes.Float32}
+}
+
+func (c convertToArrow) VisitFloat64() arrow.Field {
+	return arrow.Field{Type: arrow.PrimitiveTypes.Float64}
+}
+
+func (c convertToArrow) VisitDate() arrow.Field {
+	return arrow.Field{Type: arrow.FixedWidthTypes.Date32}
+}
+
+func (c convertToArrow) VisitTime() arrow.Field {
+	return arrow.Field{Type: arrow.FixedWidthTypes.Time64us}
+}
+
+func (c convertToArrow) VisitTimestampTz() arrow.Field {
+	return arrow.Field{Type: arrow.FixedWidthTypes.Timestamp_us}
+}
+
+func (c convertToArrow) VisitTimestamp() arrow.Field {
+	return arrow.Field{Type: &arrow.TimestampType{Unit: arrow.Microsecond}}
+}
+
+func (c convertToArrow) VisitString() arrow.Field {
+	return arrow.Field{Type: arrow.BinaryTypes.LargeString}
+}
+
+func (c convertToArrow) VisitBinary() arrow.Field {
+	return arrow.Field{Type: arrow.BinaryTypes.LargeBinary}
+}
+
+func (c convertToArrow) VisitUUID() arrow.Field {
+	return arrow.Field{Type: extensions.NewUUIDType()}
+}
+
+// SchemaToArrowSchema converts an Iceberg schema to an Arrow schema. If the metadata parameter
+// is non-nil, it will be included as the top-level metadata in the schema. If includeFieldIDs
+// is true, then each field of the schema will contain a metadata key PARQUET:field_id set to
+// the field id from the iceberg schema.
+func SchemaToArrowSchema(sc *iceberg.Schema, metadata map[string]string, includeFieldIDs bool) (*arrow.Schema, error) {
+	top, err := iceberg.Visit(sc, convertToArrow{metadata: metadata, includeFieldIDs: includeFieldIDs})
+	if err != nil {
+		return nil, err
+	}
+
+	return arrow.NewSchema(top.Type.(*arrow.StructType).Fields(), &top.Metadata), nil
+}
+
+// TypeToArrowType converts a given iceberg type, into the equivalent Arrow data type.
+// For dealing with nested fields (List, Struct, Map) if includeFieldIDs is true, then
+// the child fields will contain a metadata key PARQUET:field_id set to the field id.
+func TypeToArrowType(t iceberg.Type, includeFieldIDs bool) (arrow.DataType, error) {
+	top, err := iceberg.Visit(iceberg.NewSchema(0, iceberg.NestedField{Type: t}),
+		convertToArrow{includeFieldIDs: includeFieldIDs})
+	if err != nil {
+		return nil, err
+	}
+
+	return top.Type.(*arrow.StructType).Field(0).Type, nil
+}
+
+type arrowAccessor struct {
+	fileSchema *iceberg.Schema
+}
+
+func (a arrowAccessor) SchemaPartner(partner arrow.Array) arrow.Array {
+	return partner
+}
+
+func (a arrowAccessor) FieldPartner(partnerStruct arrow.Array, fieldID int, _ string) arrow.Array {
+	if partnerStruct == nil {
+		return nil
+	}
+
+	field, ok := a.fileSchema.FindFieldByID(fieldID)
+	if !ok {
+		return nil
+	}
+
+	if st, ok := partnerStruct.(*array.Struct); ok {
+		if idx, ok := st.DataType().(*arrow.StructType).FieldIdx(field.Name); ok {
+			return st.Field(idx)
+		}
+	}
+
+	panic(fmt.Errorf("cannot find %s in expected partner_struct type %s",
+		field.Name, partnerStruct.DataType()))
+}
+
+func (a arrowAccessor) ListElementPartner(partnerList arrow.Array) arrow.Array {
+	if l, ok := partnerList.(array.ListLike); ok {
+		return l.ListValues()
+	}
+	return nil
+}
+
+func (a arrowAccessor) MapKeyPartner(partnerMap arrow.Array) arrow.Array {
+	if m, ok := partnerMap.(*array.Map); ok {
+		return m.Keys()
+	}
+	return nil
+}
+
+func (a arrowAccessor) MapValuePartner(partnerMap arrow.Array) arrow.Array {
+	if m, ok := partnerMap.(*array.Map); ok {
+		return m.Items()
+	}
+	return nil
+}
+
+func retOrPanic[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
+type arrowProjectionVisitor struct {
+	ctx                 context.Context
+	fileSchema          *iceberg.Schema
+	includeFieldIDs     bool
+	downcastNsTimestamp bool
+	useLargeTypes       bool
+}
+
+func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals arrow.Array) arrow.Array {
+	fileField, ok := a.fileSchema.FindFieldByID(field.ID)
+	if !ok {
+		panic(fmt.Errorf("could not find field id %d in schema", field.ID))
+	}
+
+	typ, ok := fileField.Type.(iceberg.PrimitiveType)
+	if !ok {
+		vals.Retain()
+		return vals
+	}
+
+	if !field.Type.Equals(typ) {
+		promoted := retOrPanic(iceberg.PromoteType(fileField.Type, field.Type))
+		targetType := retOrPanic(TypeToArrowType(promoted, a.includeFieldIDs))
+		if !a.useLargeTypes {
+			targetType = retOrPanic(ensureSmallArrowTypes(targetType))
+		}
+
+		return retOrPanic(compute.CastArray(a.ctx, vals,
+			compute.SafeCastOptions(targetType)))
+	}
+
+	targetType := retOrPanic(TypeToArrowType(field.Type, a.includeFieldIDs))
+	if !arrow.TypeEqual(targetType, vals.DataType()) {
+		switch field.Type.(type) {
+		case iceberg.TimestampType:
+			tt, tgtok := targetType.(*arrow.TimestampType)
+			vt, valok := vals.DataType().(*arrow.TimestampType)
+
+			if tgtok && valok && tt.TimeZone == "" && vt.TimeZone == "" && tt.Unit == arrow.Microsecond {
+				if vt.Unit == arrow.Nanosecond && a.downcastNsTimestamp {
+					return retOrPanic(compute.CastArray(a.ctx, vals, compute.UnsafeCastOptions(tt)))
+				} else if vt.Unit == arrow.Second || vt.Unit == arrow.Millisecond {
+					return retOrPanic(compute.CastArray(a.ctx, vals, compute.SafeCastOptions(tt)))
+				}
+			}
+
+			panic(fmt.Errorf("unsupported schema projection from %s to %s",
+				vals.DataType(), targetType))
+		case iceberg.TimestampTzType:
+			tt, tgtok := targetType.(*arrow.TimestampType)
+			vt, valok := vals.DataType().(*arrow.TimestampType)
+
+			if tgtok && valok && tt.TimeZone == "UTC" &&
+				slices.Contains(utcAliases, vt.TimeZone) && tt.Unit == arrow.Microsecond {
+				if vt.Unit == arrow.Nanosecond && a.downcastNsTimestamp {
+					return retOrPanic(compute.CastArray(a.ctx, vals, compute.UnsafeCastOptions(tt)))
+				} else if vt.Unit != arrow.Nanosecond {
+					return retOrPanic(compute.CastArray(a.ctx, vals, compute.SafeCastOptions(tt)))
+				}
+			}
+
+			panic(fmt.Errorf("unsupported schema projection from %s to %s",
+				vals.DataType(), targetType))
+		}
+	}
+	vals.Retain()
+	return vals
+}
+
+func (a *arrowProjectionVisitor) constructField(field iceberg.NestedField, arrowType arrow.DataType) arrow.Field {
+	metadata := map[string]string{}
+	if field.Doc != "" {
+		metadata[ArrowFieldDocKey] = field.Doc
+	}
+
+	if a.includeFieldIDs {
+		metadata[ArrowParquetFieldIDKey] = strconv.Itoa(field.ID)
+	}
+
+	return arrow.Field{
+		Name:     field.Name,
+		Type:     arrowType,
+		Nullable: !field.Required,
+		Metadata: arrow.MetadataFrom(metadata),
+	}
+}
+
+func (a *arrowProjectionVisitor) Schema(_ *iceberg.Schema, _ arrow.Array, result arrow.Array) arrow.Array {
+	return result
+}
+
+func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.Array, fieldResults []arrow.Array) arrow.Array {
+	if structArr == nil {
+		return nil
+	}
+
+	fieldArrs := make([]arrow.Array, len(st.FieldList))
+	fields := make([]arrow.Field, len(st.FieldList))
+	for i, field := range st.FieldList {
+		arr := fieldResults[i]
+		if arr != nil {
+			arr = a.castIfNeeded(field, arr)
+			defer arr.Release()
+			fieldArrs[i] = arr
+			fields[i] = a.constructField(field, arr.DataType())
+		} else if !field.Required {
+			dt := retOrPanic(TypeToArrowType(field.Type, false))
+
+			arr = array.MakeArrayOfNull(compute.GetAllocator(a.ctx), dt, structArr.Len())
+			defer arr.Release()
+			fieldArrs[i] = arr
+			fields[i] = a.constructField(field, arr.DataType())
+		} else {
+			panic(fmt.Errorf("%w: field is required, but could not be found in file: %s",
+				iceberg.ErrInvalidSchema, field))
+		}
+	}
+
+	return retOrPanic(array.NewStructArrayWithFields(fieldArrs, fields))
+}
+
+func (a *arrowProjectionVisitor) Field(_ iceberg.NestedField, _ arrow.Array, fieldArr arrow.Array) arrow.Array {
+	return fieldArr
+}
+
+func (a *arrowProjectionVisitor) List(listType iceberg.ListType, listArr arrow.Array, valArr arrow.Array) arrow.Array {
+	arr, ok := listArr.(array.ListLike)
+	if !ok || valArr == nil {
+		return nil
+	}
+
+	valueArr := a.castIfNeeded(listType.ElementField(), valArr)
+	defer valueArr.Release()
+
+	var outType arrow.ListLikeType
+	elemField := a.constructField(listType.ElementField(), valueArr.DataType())
+	switch arr.DataType().ID() {
+	case arrow.LIST:
+		outType = arrow.ListOfField(elemField)
+	case arrow.LARGE_LIST:
+		outType = arrow.LargeListOfField(elemField)
+	case arrow.LIST_VIEW:
+		outType = arrow.LargeListViewOfField(elemField)
+	}
+
+	data := array.NewData(outType, arr.Len(), arr.Data().Buffers(),
+		[]arrow.ArrayData{valueArr.Data()}, arr.NullN(), arr.Data().Offset())
+	defer data.Release()
+	return array.MakeFromData(data)
+}
+
+func (a *arrowProjectionVisitor) Map(m iceberg.MapType, mapArray, keyResult, valResult arrow.Array) arrow.Array {
+	if keyResult == nil || valResult == nil {
+		return nil
+	}
+
+	arr, ok := mapArray.(*array.Map)
+	if !ok {
+		return nil
+	}
+
+	keys := a.castIfNeeded(m.KeyField(), keyResult)
+	defer keys.Release()
+	vals := a.castIfNeeded(m.ValueField(), valResult)
+	defer vals.Release()
+
+	keyField := a.constructField(m.KeyField(), keys.DataType())
+	valField := a.constructField(m.ValueField(), vals.DataType())
+
+	mapType := arrow.MapOfWithMetadata(keyField.Type, keyField.Metadata, valField.Type, valField.Metadata)
+	childData := array.NewData(mapType.Elem(), arr.Len(), []*memory.Buffer{nil},
+		[]arrow.ArrayData{keys.Data(), vals.Data()}, 0, 0)
+	defer childData.Release()
+	newData := array.NewData(mapType, arr.Len(), arr.Data().Buffers(),
+		[]arrow.ArrayData{childData}, arr.NullN(), arr.Offset())
+	defer newData.Release()
+	return array.NewMapData(newData)
+}
+
+func (a *arrowProjectionVisitor) Primitive(_ iceberg.PrimitiveType, arr arrow.Array) arrow.Array {
+	return arr
+}
+
+// toRequestedSchema will construct a new record batch matching the requested iceberg schema
+// casting columns if necessary as appropriate.
+func toRequestedSchema(requested, fileSchema *iceberg.Schema, batch arrow.Record, downcastTimestamp, includeFieldIDs, useLargeTypes bool) (arrow.Record, error) {
+	st := array.RecordToStructArray(batch)
+	defer st.Release()
+
+	result, err := iceberg.VisitSchemaWithPartner[arrow.Array, arrow.Array](requested, st,
+		&arrowProjectionVisitor{
+			ctx:                 context.Background(),
+			fileSchema:          fileSchema,
+			includeFieldIDs:     includeFieldIDs,
+			downcastNsTimestamp: downcastTimestamp,
+			useLargeTypes:       useLargeTypes,
+		}, arrowAccessor{fileSchema: fileSchema})
+	if err != nil {
+		return nil, err
+	}
+	defer batch.Release()
+
+	return array.RecordFromStructArray(result.(*array.Struct), nil), nil
 }
