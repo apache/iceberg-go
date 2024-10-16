@@ -36,7 +36,6 @@ require (
 	github.com/stretchr/testify v1.9.0
 	github.com/twmb/murmur3 v1.1.8
 	github.com/wolfeidau/s3iofs v1.5.2
-	golang.org/x/exp v0.0.0-20240909161429-701f63a606c0
 )
 
 require (
@@ -82,6 +81,7 @@ require (
 	github.com/stretchr/objx v0.5.2 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/zeebo/xxh3 v1.0.2 // indirect
+	golang.org/x/exp v0.0.0-20240909161429-701f63a606c0 // indirect
 	golang.org/x/mod v0.21.0 // indirect
 	golang.org/x/net v0.29.0 // indirect
 	golang.org/x/sync v0.8.0 // indirect
