@@ -427,6 +427,25 @@ type AfterMapValueVisitor interface {
 	AfterMapValue(value NestedField)
 }
 
+type SchemaVisitorPerPrimitiveType[T any] interface {
+	SchemaVisitor[T]
+
+	VisitFixed(FixedType) T
+	VisitDecimal(DecimalType) T
+	VisitBoolean() T
+	VisitInt32() T
+	VisitInt64() T
+	VisitFloat32() T
+	VisitFloat64() T
+	VisitDate() T
+	VisitTime() T
+	VisitTimestamp() T
+	VisitTimestampTz() T
+	VisitString() T
+	VisitBinary() T
+	VisitUUID() T
+}
+
 // Visit accepts a visitor and performs a post-order traversal of the given schema.
 func Visit[T any](sc *Schema, visitor SchemaVisitor[T]) (res T, err error) {
 	if sc == nil {
@@ -534,6 +553,38 @@ func visitField[T any](f NestedField, visitor SchemaVisitor[T]) T {
 	case *MapType:
 		return visitMap(*typ, visitor)
 	default: // primitive
+		if perPrimitive, ok := visitor.(SchemaVisitorPerPrimitiveType[T]); ok {
+			switch t := typ.(type) {
+			case BooleanType:
+				return perPrimitive.VisitBoolean()
+			case Int32Type:
+				return perPrimitive.VisitInt32()
+			case Int64Type:
+				return perPrimitive.VisitInt64()
+			case Float32Type:
+				return perPrimitive.VisitFloat32()
+			case Float64Type:
+				return perPrimitive.VisitFloat64()
+			case DateType:
+				return perPrimitive.VisitDate()
+			case TimeType:
+				return perPrimitive.VisitTime()
+			case TimestampType:
+				return perPrimitive.VisitTimestamp()
+			case TimestampTzType:
+				return perPrimitive.VisitTimestampTz()
+			case StringType:
+				return perPrimitive.VisitString()
+			case BinaryType:
+				return perPrimitive.VisitBinary()
+			case UUIDType:
+				return perPrimitive.VisitUUID()
+			case DecimalType:
+				return perPrimitive.VisitDecimal(t)
+			case FixedType:
+				return perPrimitive.VisitFixed(t)
+			}
+		}
 		return visitor.Primitive(typ.(PrimitiveType))
 	}
 }
@@ -706,8 +757,7 @@ func (i *indexByName) AfterField(field NestedField) {
 // PruneColumns visits a schema pruning any columns which do not exist in the
 // provided selected set. Parent fields of a selected child will be retained.
 func PruneColumns(schema *Schema, selected map[int]Void, selectFullTypes bool) (*Schema, error) {
-
-	result, err := Visit[Type](schema, &pruneColVisitor{selected: selected,
+	result, err := Visit(schema, &pruneColVisitor{selected: selected,
 		fullTypes: selectFullTypes})
 	if err != nil {
 		return nil, err
