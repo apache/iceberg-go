@@ -71,7 +71,6 @@ type WriteFileIO interface {
 	IO
 
 	// WriteFile writes p to the named file.
-	// An error will be returned if the file already exists.
 	Write(name string, p []byte) error
 	Close() error
 }
