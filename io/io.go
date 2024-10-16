@@ -65,6 +65,17 @@ type ReadFileIO interface {
 	ReadFile(name string) ([]byte, error)
 }
 
+// WriteFileIO is the interface implemented by a file system that
+// provides an optimized implementation of WriteFile
+type WriteFileIO interface {
+	IO
+
+	// WriteFile writes p to the named file.
+	// An error will be returned if the file already exists.
+	Write(name string, p []byte) error
+	Close() error
+}
+
 // A File provides access to a single file. The File interface is the
 // minimum implementation required for Iceberg to interact with a file.
 // Directory files should also implement
@@ -214,7 +225,14 @@ func inferFileIOFromSchema(path string, props map[string]string) (IO, error) {
 
 	switch parsed.Scheme {
 	case "s3", "s3a", "s3n":
+		if props["s3.use-cdk"] == "true" {
+			return CreateBlobFileIO(parsed, props)
+		}
 		return createS3FileIO(parsed, props)
+	case "gs":
+		return CreateBlobFileIO(parsed, props)
+	case "mem":
+		return CreateBlobFileIO(parsed, props)
 	case "file", "":
 		return LocalFS{}, nil
 	default:
@@ -229,7 +247,7 @@ func inferFileIOFromSchema(path string, props map[string]string) (IO, error) {
 // implementation. Otherwise this will return an error if the schema
 // does not yet have an implementation here.
 //
-// Currently only LocalFS and S3 are implemented.
+// Currently local, S3, GCS, and In-Memory FSs are implemented.
 func LoadFS(props map[string]string, location string) (IO, error) {
 	if location == "" {
 		location = props["warehouse"]
