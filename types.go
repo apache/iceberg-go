@@ -21,12 +21,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
-	"golang.org/x/exp/slices"
 )
 
 var (

@@ -21,11 +21,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
-
-	"golang.org/x/exp/slices"
 )
 
 // Schema is an Iceberg table schema, represented as a struct with
