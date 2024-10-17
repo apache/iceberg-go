@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go/internal"
-	"github.com/hamba/avro/v2/ocf"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -69,7 +68,7 @@ var (
 		{
 			EntryStatus: EntryStatusADDED,
 			Snapshot:    entrySnapshotID,
-			Data: dataFile{
+			Data: &dataFile{
 				// bad value for Content but this field doesn't exist in V1
 				// so it shouldn't get written and shouldn't be read back out
 				// so the roundtrip test asserts that we get the default value
@@ -193,7 +192,7 @@ var (
 		{
 			EntryStatus: EntryStatusADDED,
 			Snapshot:    8744736658442914487,
-			Data: dataFile{
+			Data: &dataFile{
 				Path:             "/home/iceberg/warehouse/nyc/taxis_partitioned/data/VendorID=1/00000-633-d8a4223e-dc97-45a1-86e1-adaba6e8abd7-00002.parquet",
 				Format:           ParquetFile,
 				PartitionData:    map[string]any{"VendorID": int(1), "tpep_pickup_datetime": time.Unix(1925, 0)},
@@ -321,45 +320,48 @@ var (
 		},
 	}
 
+	dataRecord0 = manifestEntryV1Records[0].Data.(*dataFile)
+	dataRecord1 = manifestEntryV1Records[0].Data.(*dataFile)
+
 	manifestEntryV2Records = []*manifestEntryV2{
 		{
 			EntryStatus: EntryStatusADDED,
 			Snapshot:    &entrySnapshotID,
-			Data: dataFile{
-				Path:             manifestEntryV1Records[0].Data.Path,
-				Format:           manifestEntryV1Records[0].Data.Format,
-				PartitionData:    manifestEntryV1Records[0].Data.PartitionData,
-				RecordCount:      manifestEntryV1Records[0].Data.RecordCount,
-				FileSize:         manifestEntryV1Records[0].Data.FileSize,
-				BlockSizeInBytes: manifestEntryV1Records[0].Data.BlockSizeInBytes,
-				ColSizes:         manifestEntryV1Records[0].Data.ColSizes,
-				ValCounts:        manifestEntryV1Records[0].Data.ValCounts,
-				NullCounts:       manifestEntryV1Records[0].Data.NullCounts,
-				NaNCounts:        manifestEntryV1Records[0].Data.NaNCounts,
-				LowerBounds:      manifestEntryV1Records[0].Data.LowerBounds,
-				UpperBounds:      manifestEntryV1Records[0].Data.UpperBounds,
-				Splits:           manifestEntryV1Records[0].Data.Splits,
-				SortOrder:        manifestEntryV1Records[0].Data.SortOrder,
+			Data: &dataFile{
+				Path:             dataRecord0.Path,
+				Format:           dataRecord0.Format,
+				PartitionData:    dataRecord0.PartitionData,
+				RecordCount:      dataRecord0.RecordCount,
+				FileSize:         dataRecord0.FileSize,
+				BlockSizeInBytes: dataRecord0.BlockSizeInBytes,
+				ColSizes:         dataRecord0.ColSizes,
+				ValCounts:        dataRecord0.ValCounts,
+				NullCounts:       dataRecord0.NullCounts,
+				NaNCounts:        dataRecord0.NaNCounts,
+				LowerBounds:      dataRecord0.LowerBounds,
+				UpperBounds:      dataRecord0.UpperBounds,
+				Splits:           dataRecord0.Splits,
+				SortOrder:        dataRecord0.SortOrder,
 			},
 		},
 		{
 			EntryStatus: EntryStatusADDED,
 			Snapshot:    &entrySnapshotID,
-			Data: dataFile{
-				Path:             manifestEntryV1Records[1].Data.Path,
-				Format:           manifestEntryV1Records[1].Data.Format,
-				PartitionData:    manifestEntryV1Records[1].Data.PartitionData,
-				RecordCount:      manifestEntryV1Records[1].Data.RecordCount,
-				FileSize:         manifestEntryV1Records[1].Data.FileSize,
-				BlockSizeInBytes: manifestEntryV1Records[1].Data.BlockSizeInBytes,
-				ColSizes:         manifestEntryV1Records[1].Data.ColSizes,
-				ValCounts:        manifestEntryV1Records[1].Data.ValCounts,
-				NullCounts:       manifestEntryV1Records[1].Data.NullCounts,
-				NaNCounts:        manifestEntryV1Records[1].Data.NaNCounts,
-				LowerBounds:      manifestEntryV1Records[1].Data.LowerBounds,
-				UpperBounds:      manifestEntryV1Records[1].Data.UpperBounds,
-				Splits:           manifestEntryV1Records[1].Data.Splits,
-				SortOrder:        manifestEntryV1Records[1].Data.SortOrder,
+			Data: &dataFile{
+				Path:             dataRecord1.Path,
+				Format:           dataRecord1.Format,
+				PartitionData:    dataRecord1.PartitionData,
+				RecordCount:      dataRecord1.RecordCount,
+				FileSize:         dataRecord1.FileSize,
+				BlockSizeInBytes: dataRecord1.BlockSizeInBytes,
+				ColSizes:         dataRecord1.ColSizes,
+				ValCounts:        dataRecord1.ValCounts,
+				NullCounts:       dataRecord1.NullCounts,
+				NaNCounts:        dataRecord1.NaNCounts,
+				LowerBounds:      dataRecord1.LowerBounds,
+				UpperBounds:      dataRecord1.UpperBounds,
+				Splits:           dataRecord1.Splits,
+				SortOrder:        dataRecord1.SortOrder,
 			},
 		},
 	}
@@ -376,50 +378,23 @@ type ManifestTestSuite struct {
 }
 
 func (m *ManifestTestSuite) writeManifestList() {
-	enc, err := ocf.NewEncoder(internal.AvroSchemaCache.Get(internal.ManifestListV1Key).String(),
-		&m.v1ManifestList, ocf.WithMetadata(map[string][]byte{
-			"avro.codec": []byte("deflate"),
-		}),
-		ocf.WithCodec(ocf.Deflate))
-	m.Require().NoError(err)
-
-	m.Require().NoError(enc.Encode(manifestFileRecordsV1[0]))
-	enc.Close()
-
-	enc, err = ocf.NewEncoder(internal.AvroSchemaCache.Get(internal.ManifestListV2Key).String(),
-		&m.v2ManifestList, ocf.WithMetadata(map[string][]byte{
-			"format-version": []byte("2"),
-			"avro.codec":     []byte("deflate"),
-		}), ocf.WithCodec(ocf.Deflate))
-	m.Require().NoError(err)
-
-	m.Require().NoError(enc.Encode(manifestFileRecordsV2[0]))
-	enc.Close()
+	m.Require().NoError(WriteManifestListV1(&m.v1ManifestList, manifestFileRecordsV1))
+	m.Require().NoError(WriteManifestListV2(&m.v2ManifestList, manifestFileRecordsV2))
 }
 
 func (m *ManifestTestSuite) writeManifestEntries() {
-	enc, err := ocf.NewEncoder(internal.AvroSchemaCache.Get(internal.ManifestEntryV1Key).String(), &m.v1ManifestEntries,
-		ocf.WithMetadata(map[string][]byte{
-			"format-version": []byte("1"),
-		}), ocf.WithCodec(ocf.Deflate))
-	m.Require().NoError(err)
-
-	for _, ent := range manifestEntryV1Records {
-		m.Require().NoError(enc.Encode(ent))
+	manifestEntryV1Recs := make([]ManifestEntry, len(manifestEntryV1Records))
+	for i, rec := range manifestEntryV1Records {
+		manifestEntryV1Recs[i] = rec
 	}
-	m.Require().NoError(enc.Close())
 
-	enc, err = ocf.NewEncoder(internal.AvroSchemaCache.Get(internal.ManifestEntryV2Key).String(),
-		&m.v2ManifestEntries, ocf.WithMetadata(map[string][]byte{
-			"format-version": []byte("2"),
-			"avro.codec":     []byte("deflate"),
-		}), ocf.WithCodec(ocf.Deflate))
-	m.Require().NoError(err)
-
-	for _, ent := range manifestEntryV2Records {
-		m.Require().NoError(enc.Encode(ent))
+	manifestEntryV2Recs := make([]ManifestEntry, len(manifestEntryV2Records))
+	for i, rec := range manifestEntryV2Records {
+		manifestEntryV2Recs[i] = rec
 	}
-	m.Require().NoError(enc.Close())
+
+	m.Require().NoError(WriteManifestEntriesV1(&m.v1ManifestEntries, manifestEntryV1Recs))
+	m.Require().NoError(WriteManifestEntriesV2(&m.v2ManifestEntries, manifestEntryV2Recs))
 }
 
 func (m *ManifestTestSuite) SetupSuite() {
@@ -765,6 +740,89 @@ func (m *ManifestTestSuite) TestManifestEntriesV2() {
 	m.Equal([]int64{4}, datafile.SplitOffsets())
 	m.Nil(datafile.EqualityFieldIDs())
 	m.Zero(*datafile.SortOrderID())
+}
+
+func (m *ManifestTestSuite) TestManifestEntryBuilder() {
+	dataFileBuilder := NewDataFileBuilder(
+		EntryContentData,
+		"sample.parquet",
+		ParquetFile,
+		map[string]any{"int": int(1), "datetime": time.Unix(1925, 0)},
+		1,
+		2,
+	)
+
+	dataFileBuilder.ColumnSizes(map[int]int64{
+		1: 1,
+		2: 2,
+	}).ValueCounts(map[int]int64{
+		1: 1,
+		2: 2,
+	}).DistinctValueCounts(map[int]int64{
+		1: 1,
+		2: 2,
+	}).NullValueCounts(map[int]int64{
+		1: 0,
+		2: 0,
+	}).NaNValueCounts(map[int]int64{
+		1: 0,
+		2: 0,
+	}).LowerBoundValues(map[int][]byte{
+		1: {0x01, 0x00, 0x00, 0x00},
+		2: []byte("2020-04-01 00:00"),
+	}).UpperBoundValues(map[int][]byte{
+		1: {0x01, 0x00, 0x00, 0x00},
+		2: []byte("2020-04-30 23:5:"),
+	}).SplitOffsets([]int64{4}).EqualityFieldIDs([]int{1, 1}).SortOrderID(0)
+
+	builder := NewManifestEntryV1Builder(
+		EntryStatusEXISTING,
+		1,
+		dataFileBuilder.Build(),
+	)
+
+	entry := builder.Build()
+	m.Assert().Equal(EntryStatusEXISTING, entry.Status())
+	m.Assert().EqualValues(1, entry.SnapshotID())
+	m.Assert().Equal(int64(0), entry.SequenceNum())
+	m.Assert().Nil(entry.FileSequenceNum())
+	data := entry.DataFile()
+	m.Assert().Equal(EntryContentData, data.ContentType())
+	m.Assert().Equal("sample.parquet", data.FilePath())
+	m.Assert().Equal(ParquetFile, data.FileFormat())
+	m.Assert().EqualValues(1, data.Count())
+	m.Assert().EqualValues(2, data.FileSizeBytes())
+	m.Assert().Equal(map[int]int64{
+		1: 1,
+		2: 2,
+	}, data.ColumnSizes())
+	m.Assert().Equal(map[int]int64{
+		1: 1,
+		2: 2,
+	}, data.ValueCounts())
+	m.Assert().Equal(map[int]int64{
+		1: 0,
+		2: 0,
+	}, data.NullValueCounts())
+	m.Assert().Equal(map[int]int64{
+		1: 1,
+		2: 2,
+	}, data.DistinctValueCounts())
+	m.Assert().Equal(map[int]int64{
+		1: 0,
+		2: 0,
+	}, data.NaNValueCounts())
+	m.Assert().Equal(map[int][]byte{
+		1: {0x01, 0x00, 0x00, 0x00},
+		2: []byte("2020-04-01 00:00"),
+	}, data.LowerBoundValues())
+	m.Assert().Equal(map[int][]byte{
+		1: {0x01, 0x00, 0x00, 0x00},
+		2: []byte("2020-04-30 23:5:"),
+	}, data.UpperBoundValues())
+	m.Assert().Equal([]int64{4}, data.SplitOffsets())
+	m.Assert().Equal([]int{1, 1}, data.EqualityFieldIDs())
+	m.Assert().Equal(0, *data.SortOrderID())
 }
 
 func TestManifests(t *testing.T) {
