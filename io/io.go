@@ -18,12 +18,16 @@
 package io
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"net/url"
 	"strings"
+
+	"gocloud.dev/blob"
+	"gocloud.dev/blob/memblob"
 )
 
 // IO is an interface to a hierarchical file system.
@@ -221,22 +225,32 @@ func inferFileIOFromSchema(path string, props map[string]string) (IO, error) {
 	if err != nil {
 		return nil, err
 	}
+	var bucket *blob.Bucket
+	ctx := context.Background()
 
 	switch parsed.Scheme {
 	case "s3", "s3a", "s3n":
-		if props["s3.use-cdk"] == "true" {
-			return CreateBlobFileIO(parsed, props)
+		bucket, err = createS3Bucket(ctx, parsed, props)
+		if err != nil {
+			return nil, err
 		}
-		return createS3FileIO(parsed, props)
 	case "gs":
-		return CreateBlobFileIO(parsed, props)
+		bucket, err = createGCSBucket(ctx, parsed, props)
+		if err != nil {
+			return nil, err
+		}
 	case "mem":
-		return CreateBlobFileIO(parsed, props)
+		// memblob doesn't use the URL host or path
+		bucket = memblob.OpenBucket(nil)
 	case "file", "":
 		return LocalFS{}, nil
 	default:
 		return nil, fmt.Errorf("IO for file '%s' not implemented", path)
 	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		bucket = blob.PrefixedBucket(bucket, strings.TrimPrefix(parsed.Path, "/"))
+	}
+	return CreateBlobFileIO(parsed, bucket), nil
 }
 
 // LoadFS takes a map of properties and an optional URI location

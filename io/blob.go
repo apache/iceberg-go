@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"gocloud.dev/blob"
-	"gocloud.dev/blob/memblob"
 )
 
 // iofsFileInfo describes a single file in an io/fs.FS.
@@ -294,31 +293,10 @@ func urlToBucketPath(parsed *url.URL) (string, string) {
 	return parsed.Host, parsed.Path
 }
 
-// Create a new BlobFileIO instance
-func CreateBlobFileIO(parsed *url.URL, props map[string]string) (*BlobFileIO, error) {
+// CreateBlobFileIO creates a new BlobFileIO instance
+func CreateBlobFileIO(parsed *url.URL, bucket *blob.Bucket) *BlobFileIO {
 	ctx := context.Background()
-
-	var bucket *blob.Bucket
-	var err error
-	switch parsed.Scheme {
-	case "mem":
-		// memblob doesn't use the URL host or path
-		bucket = memblob.OpenBucket(nil)
-	case "s3", "s3a", "s3n":
-		bucket, err = createS3Bucket(ctx, parsed, props)
-	case "gs":
-		bucket, err = createGCSBucket(ctx, parsed, props)
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	if parsed.Path != "" && parsed.Path != "/" {
-		bucket = blob.PrefixedBucket(bucket, strings.TrimPrefix(parsed.Path, "/"))
-	}
-
-	return &BlobFileIO{Bucket: bucket, ctx: ctx, opts: &blob.ReaderOptions{}, prefix: parsed.Host + parsed.Path}, nil
+	return &BlobFileIO{Bucket: bucket, ctx: ctx, opts: &blob.ReaderOptions{}, prefix: parsed.Host + parsed.Path}
 }
 
 type BlobWriteFile struct {

@@ -24,7 +24,6 @@ import (
 	"net/url"
 	"os"
 	"slices"
-	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
@@ -32,7 +31,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go/auth/bearer"
-	"github.com/wolfeidau/s3iofs"
+	"gocloud.dev/blob"
+	"gocloud.dev/blob/s3blob"
 )
 
 // Constants for S3 configuration options
@@ -122,21 +122,19 @@ func ParseAWSConfig(props map[string]string) (*aws.Config, error) {
 	return awscfg, nil
 }
 
-func createS3FileIO(parsed *url.URL, props map[string]string) (IO, error) {
+func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
 	awscfg, err := ParseAWSConfig(props)
 	if err != nil {
 		return nil, err
 	}
 
-	preprocess := func(n string) string {
-		_, after, found := strings.Cut(n, "://")
-		if found {
-			n = after
-		}
+	client := s3.NewFromConfig(*awscfg)
 
-		return strings.TrimPrefix(n, parsed.Host)
+	// Create a *blob.Bucket.
+	bucket, err := s3blob.OpenBucketV2(ctx, client, parsed.Host, nil)
+	if err != nil {
+		return nil, err
 	}
 
-	s3fs := s3iofs.New(parsed.Host, *awscfg)
-	return FSPreProcName(s3fs, preprocess), nil
+	return bucket, nil
 }
