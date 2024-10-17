@@ -23,8 +23,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -41,45 +43,60 @@ const (
 	S3AccessKeyID     = "s3.access-key-id"
 	S3EndpointURL     = "s3.endpoint"
 	S3ProxyURI        = "s3.proxy-uri"
+	S3ConnectTimeout  = "s3.connect-timeout"
+	S3SignerUri       = "s3.signer.uri"
 )
 
-func createS3FileIO(parsed *url.URL, props map[string]string) (IO, error) {
-	cfgOpts := []func(*config.LoadOptions) error{}
-	opts := []func(*s3.Options){}
+var unsupportedS3Props = []string{
+	S3ConnectTimeout,
+	S3SignerUri,
+}
 
+func ParseAWSConfig(props map[string]string) (*aws.Config, error) {
+	// If any unsupported properties are set, return an error.
+	for k := range props {
+		if slices.Contains(unsupportedS3Props, k) {
+			return nil, fmt.Errorf("unsupported S3 property %q", k)
+		}
+	}
+
+	opts := []func(*config.LoadOptions) error{}
 	endpoint, ok := props[S3EndpointURL]
 	if !ok {
 		endpoint = os.Getenv("AWS_S3_ENDPOINT")
 	}
 
 	if endpoint != "" {
-		opts = append(opts, func(o *s3.Options) {
-			o.BaseEndpoint = &endpoint
-		})
+		opts = append(opts, config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
+			if service != s3.ServiceID {
+				// fallback to default resolution for the service
+				return aws.Endpoint{}, &aws.EndpointNotFoundError{}
+			}
+
+			return aws.Endpoint{
+				URL:               endpoint,
+				SigningRegion:     region,
+				HostnameImmutable: true,
+			}, nil
+		})))
 	}
 
 	if tok, ok := props["token"]; ok {
-		cfgOpts = append(cfgOpts, config.WithBearerAuthTokenProvider(
+		opts = append(opts, config.WithBearerAuthTokenProvider(
 			&bearer.StaticTokenProvider{Token: bearer.Token{Value: tok}}))
 	}
 
 	if region, ok := props[S3Region]; ok {
-		opts = append(opts, func(o *s3.Options) {
-			o.Region = region
-		})
+		opts = append(opts, config.WithRegion(region))
 	} else if region, ok := props["client.region"]; ok {
-		opts = append(opts, func(o *s3.Options) {
-			o.Region = region
-		})
+		opts = append(opts, config.WithRegion(region))
 	}
 
 	accessKey, secretAccessKey := props[S3AccessKeyID], props[S3SecretAccessKey]
 	token := props[S3SessionToken]
 	if accessKey != "" || secretAccessKey != "" || token != "" {
-		opts = append(opts, func(o *s3.Options) {
-			o.Credentials = credentials.NewStaticCredentialsProvider(
-				props[S3AccessKeyID], props[S3SecretAccessKey], props[S3SessionToken])
-		})
+		opts = append(opts, config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+			props[S3AccessKeyID], props[S3SecretAccessKey], props[S3SessionToken])))
 	}
 
 	if proxy, ok := props[S3ProxyURI]; ok {
@@ -88,18 +105,29 @@ func createS3FileIO(parsed *url.URL, props map[string]string) (IO, error) {
 			return nil, fmt.Errorf("invalid s3 proxy url '%s'", proxy)
 		}
 
-		opts = append(opts, func(o *s3.Options) {
-			o.HTTPClient = awshttp.NewBuildableClient().WithTransportOptions(
-				func(t *http.Transport) { t.Proxy = http.ProxyURL(proxyURL) })
-		})
+		opts = append(opts, config.WithHTTPClient(awshttp.NewBuildableClient().WithTransportOptions(
+			func(t *http.Transport) {
+				t.Proxy = http.ProxyURL(proxyURL)
+			},
+		)))
 	}
 
-	awscfg, err := config.LoadDefaultConfig(context.Background(), cfgOpts...)
+	awscfg := new(aws.Config)
+	var err error
+	*awscfg, err = config.LoadDefaultConfig(context.Background(), opts...)
 	if err != nil {
 		return nil, err
 	}
 
-	s3Client := s3.NewFromConfig(awscfg, opts...)
+	return awscfg, nil
+}
+
+func createS3FileIO(parsed *url.URL, props map[string]string) (IO, error) {
+	awscfg, err := ParseAWSConfig(props)
+	if err != nil {
+		return nil, err
+	}
+
 	preprocess := func(n string) string {
 		_, after, found := strings.Cut(n, "://")
 		if found {
@@ -109,6 +137,6 @@ func createS3FileIO(parsed *url.URL, props map[string]string) (IO, error) {
 		return strings.TrimPrefix(n, parsed.Host)
 	}
 
-	s3fs := s3iofs.NewWithClient(parsed.Host, s3Client)
+	s3fs := s3iofs.New(parsed.Host, *awscfg)
 	return FSPreProcName(s3fs, preprocess), nil
 }

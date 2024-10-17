@@ -18,18 +18,28 @@
 package io
 
 import (
-	"os"
-	"strings"
+	"context"
+	"net/url"
+
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"gocloud.dev/blob"
+	"gocloud.dev/blob/s3blob"
 )
 
-// LocalFS is an implementation of IO that implements interaction with
-// the local file system.
-type LocalFS struct{}
+// Construct a S3 bucket from a URL
+func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
+	awscfg, err := ParseAWSConfig(props)
+	if err != nil {
+		return nil, err
+	}
 
-func (LocalFS) Open(name string) (File, error) {
-	return os.Open(strings.TrimPrefix(name, "file://"))
-}
+	client := s3.NewFromConfig(*awscfg)
 
-func (LocalFS) Remove(name string) error {
-	return os.Remove(name)
+	// Create a *blob.Bucket.
+	bucket, err := s3blob.OpenBucketV2(ctx, client, parsed.Host, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return bucket, nil
 }
