@@ -321,7 +321,7 @@ var (
 	}
 
 	dataRecord0 = manifestEntryV1Records[0].Data.(*dataFile)
-	dataRecord1 = manifestEntryV1Records[0].Data.(*dataFile)
+	dataRecord1 = manifestEntryV1Records[1].Data.(*dataFile)
 
 	manifestEntryV2Records = []*manifestEntryV2{
 		{
