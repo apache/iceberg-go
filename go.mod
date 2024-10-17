@@ -35,7 +35,7 @@ require (
 	github.com/twmb/murmur3 v1.1.8
 	github.com/wolfeidau/s3iofs v1.5.2
 	golang.org/x/exp v0.0.0-20240909161429-701f63a606c0
-    gopkg.in/yaml.v3 v3.0.1
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
