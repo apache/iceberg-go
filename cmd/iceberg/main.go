@@ -37,6 +37,7 @@ Usage:
   iceberg list [options] [PARENT]
   iceberg describe [options] [namespace | table] IDENTIFIER
   iceberg (schema | spec | uuid | location) [options] TABLE_ID
+  iceberg create [options] (namespace | table) IDENTIFIER
   iceberg drop [options] (namespace | table) IDENTIFIER
   iceberg files [options] TABLE_ID [--history]
   iceberg rename [options] <from> <to>
@@ -53,12 +54,14 @@ Arguments:
   VALUE          value to set
 
 Options:
-  -h --help          show this helpe messages and exit
-  --catalog TEXT     specify the catalog type [default: rest]
-  --uri TEXT         specify the catalog URI
-  --output TYPE      output type (json/text) [default: text]
-  --credential TEXT  specify credentials for the catalog
-  --warehouse TEXT   specify the warehouse to use`
+  -h --help          	show this helpe messages and exit
+  --catalog TEXT     	specify the catalog type [default: rest]
+  --uri TEXT         	specify the catalog URI
+  --output TYPE      	output type (json/text) [default: text]
+  --credential TEXT  	specify credentials for the catalog
+  --warehouse TEXT   	specify the warehouse to use
+  --description TEXT 	specify a description for the namespace
+  --location-uri TEXT  	specify a location URI for the namespace`
 
 func main() {
 	args, err := docopt.ParseArgs(usage, os.Args[1:], iceberg.Version())
@@ -74,6 +77,7 @@ func main() {
 		Uuid     bool `docopt:"uuid"`
 		Location bool `docopt:"location"`
 		Props    bool `docopt:"properties"`
+		Create   bool `docopt:"create"`
 		Drop     bool `docopt:"drop"`
 		Files    bool `docopt:"files"`
 		Rename   bool `docopt:"rename"`
@@ -94,12 +98,14 @@ func main() {
 		PropName string `docopt:"PROPNAME"`
 		Value    string `docopt:"VALUE"`
 
-		Catalog   string `docopt:"--catalog"`
-		URI       string `docopt:"--uri"`
-		Output    string `docopt:"--output"`
-		History   bool   `docopt:"--history"`
-		Cred      string `docopt:"--credential"`
-		Warehouse string `docopt:"--warehouse"`
+		Catalog     string `docopt:"--catalog"`
+		URI         string `docopt:"--uri"`
+		Output      string `docopt:"--output"`
+		History     bool   `docopt:"--history"`
+		Cred        string `docopt:"--credential"`
+		Warehouse   string `docopt:"--warehouse"`
+		Description string `docopt:"--description"`
+		LocationURI string `docopt:"--location-uri"`
 	}{}
 
 	if err := args.Bind(&cfg); err != nil {
@@ -131,6 +137,9 @@ func main() {
 		if cat, err = catalog.NewRestCatalog("rest", cfg.URI, opts...); err != nil {
 			log.Fatal(err)
 		}
+	case catalog.Glue:
+		opts := []catalog.Option[catalog.GlueCatalog]{}
+		cat = catalog.NewGlueCatalog(opts...)
 	default:
 		log.Fatal("unrecognized catalog type")
 	}
@@ -190,6 +199,28 @@ func main() {
 				output.Error(err)
 				os.Exit(1)
 			}
+		}
+
+	case cfg.Create:
+		switch {
+		case cfg.Namespace:
+			props := iceberg.Properties{}
+			if cfg.Description != "" {
+				props["Description"] = cfg.Description
+			}
+
+			if cfg.LocationURI != "" {
+				props["Location"] = cfg.LocationURI
+			}
+
+			err := cat.CreateNamespace(context.Background(), catalog.ToRestIdentifier(cfg.Ident), props)
+			if err != nil {
+				output.Error(err)
+				os.Exit(1)
+			}
+		default:
+			output.Error(errors.New("not implemented"))
+			os.Exit(1)
 		}
 	case cfg.Files:
 		tbl := loadTable(output, cat, cfg.TableID)

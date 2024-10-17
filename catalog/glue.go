@@ -30,22 +30,40 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/glue/types"
 )
 
-const glueTypeIceberg = "ICEBERG"
+const (
+	glueTypeIceberg      = "ICEBERG"
+	databaseTypePropsKey = "database_type"
+	tableTypePropsKey    = "table_type"
+	descriptionPropsKey  = "Description"
+
+	// Database location.
+	locationPropsKey = "Location"
+
+	// Table metadata location pointer.
+	metadataLocationPropsKey = "metadata_location"
+)
 
 var (
 	_ Catalog = (*GlueCatalog)(nil)
 )
 
 type glueAPI interface {
+	CreateTable(ctx context.Context, params *glue.CreateTableInput, optFns ...func(*glue.Options)) (*glue.CreateTableOutput, error)
 	GetTable(ctx context.Context, params *glue.GetTableInput, optFns ...func(*glue.Options)) (*glue.GetTableOutput, error)
 	GetTables(ctx context.Context, params *glue.GetTablesInput, optFns ...func(*glue.Options)) (*glue.GetTablesOutput, error)
+	DeleteTable(ctx context.Context, params *glue.DeleteTableInput, optFns ...func(*glue.Options)) (*glue.DeleteTableOutput, error)
+	GetDatabase(ctx context.Context, params *glue.GetDatabaseInput, optFns ...func(*glue.Options)) (*glue.GetDatabaseOutput, error)
 	GetDatabases(ctx context.Context, params *glue.GetDatabasesInput, optFns ...func(*glue.Options)) (*glue.GetDatabasesOutput, error)
+	CreateDatabase(ctx context.Context, params *glue.CreateDatabaseInput, optFns ...func(*glue.Options)) (*glue.CreateDatabaseOutput, error)
+	DeleteDatabase(ctx context.Context, params *glue.DeleteDatabaseInput, optFns ...func(*glue.Options)) (*glue.DeleteDatabaseOutput, error)
+	UpdateDatabase(ctx context.Context, params *glue.UpdateDatabaseInput, optFns ...func(*glue.Options)) (*glue.UpdateDatabaseOutput, error)
 }
 
 type GlueCatalog struct {
 	glueSvc glueAPI
 }
 
+// NewGlueCatalog creates a new instance of GlueCatalog with the given options.
 func NewGlueCatalog(opts ...Option[GlueCatalog]) *GlueCatalog {
 	glueOps := &options{}
 
@@ -58,7 +76,11 @@ func NewGlueCatalog(opts ...Option[GlueCatalog]) *GlueCatalog {
 	}
 }
 
-// ListTables returns a list of iceberg tables in the given Glue database.
+func (c *GlueCatalog) CatalogType() CatalogType {
+	return Glue
+}
+
+// ListTables returns a list of Iceberg tables in the given Glue database.
 //
 // The namespace should just contain the Glue database name.
 func (c *GlueCatalog) ListTables(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error) {
@@ -92,7 +114,7 @@ func (c *GlueCatalog) ListTables(ctx context.Context, namespace table.Identifier
 
 // LoadTable loads a table from the catalog table details.
 //
-// The identifier should contain the Glue database name, then glue table name.
+// The identifier should contain the Glue database name, then Glue table name.
 func (c *GlueCatalog) LoadTable(ctx context.Context, identifier table.Identifier, props iceberg.Properties) (*table.Table, error) {
 	database, tableName, err := identifierToGlueTable(identifier)
 	if err != nil {
@@ -103,9 +125,14 @@ func (c *GlueCatalog) LoadTable(ctx context.Context, identifier table.Identifier
 		props = map[string]string{}
 	}
 
-	location, err := c.getTable(ctx, database, tableName)
+	glueTable, err := c.getTable(ctx, database, tableName)
 	if err != nil {
 		return nil, err
+	}
+
+	location, ok := glueTable.Parameters[metadataLocationPropsKey]
+	if !ok {
+		return nil, fmt.Errorf("missing metadata location for table %s.%s", database, tableName)
 	}
 
 	// TODO: consider providing a way to directly access the S3 iofs to enable testing of the catalog.
@@ -122,33 +149,93 @@ func (c *GlueCatalog) LoadTable(ctx context.Context, identifier table.Identifier
 	return icebergTable, nil
 }
 
-func (c *GlueCatalog) CatalogType() CatalogType {
-	return Glue
-}
-
+// DropTable deletes an Iceberg table from the Glue catalog.
 func (c *GlueCatalog) DropTable(ctx context.Context, identifier table.Identifier) error {
-	return fmt.Errorf("%w: [Glue Catalog] drop table", iceberg.ErrNotImplemented)
+	database, tableName, err := identifierToGlueTable(identifier)
+	if err != nil {
+		return err
+	}
+
+	// Check if the table exists and is an Iceberg table.
+	_, err = c.getTable(ctx, database, tableName)
+	if err != nil {
+		return err
+	}
+
+	params := &glue.DeleteTableInput{
+		DatabaseName: aws.String(database),
+		Name:         aws.String(tableName),
+	}
+	_, err = c.glueSvc.DeleteTable(ctx, params)
+	if err != nil {
+		return fmt.Errorf("failed to drop table %s.%s: %w", database, tableName, err)
+	}
+
+	return nil
 }
 
+// RenameTable renames an Iceberg table in the Glue catalog.
 func (c *GlueCatalog) RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error) {
-	return nil, fmt.Errorf("%w: [Glue Catalog] rename table", iceberg.ErrNotImplemented)
-}
+	fromDatabase, fromTable, err := identifierToGlueTable(from)
+	if err != nil {
+		return nil, err
+	}
 
-func (c *GlueCatalog) CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error {
-	return fmt.Errorf("%w: [Glue Catalog] create namespace", iceberg.ErrNotImplemented)
-}
+	toDatabase, toTable, err := identifierToGlueTable(to)
+	if err != nil {
+		return nil, err
+	}
 
-func (c *GlueCatalog) DropNamespace(ctx context.Context, namespace table.Identifier) error {
-	return fmt.Errorf("%w: [Glue Catalog] drop namespace", iceberg.ErrNotImplemented)
-}
+	if fromDatabase != toDatabase {
+		return nil, fmt.Errorf("cannot rename table across namespaces: %s -> %s", fromDatabase, toDatabase)
+	}
 
-func (c *GlueCatalog) LoadNamespaceProperties(ctx context.Context, namespace table.Identifier) (iceberg.Properties, error) {
-	return nil, fmt.Errorf("%w: [Glue Catalog] load namespace properties", iceberg.ErrNotImplemented)
-}
+	// Fetch the existing Glue table to copy the metadata into the new table.
+	fromGlueTable, err := c.getTable(ctx, fromDatabase, fromTable)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch the table %s.%s: %w", fromDatabase, fromTable, err)
+	}
 
-func (c *GlueCatalog) UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier,
-	removals []string, updates iceberg.Properties) (PropertiesUpdateSummary, error) {
-	return PropertiesUpdateSummary{}, fmt.Errorf("%w: [Glue Catalog] update namespace properties", iceberg.ErrNotImplemented)
+	// Create the new table.
+	_, err = c.glueSvc.CreateTable(ctx, &glue.CreateTableInput{
+		DatabaseName: aws.String(toDatabase),
+		TableInput: &types.TableInput{
+			Name:              aws.String(toTable),
+			Owner:             fromGlueTable.Owner,
+			Description:       fromGlueTable.Description,
+			Parameters:        fromGlueTable.Parameters,
+			StorageDescriptor: fromGlueTable.StorageDescriptor,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create the table %s.%s: %w", fromDatabase, fromTable, err)
+	}
+
+	// Drop the old table.
+	_, err = c.glueSvc.DeleteTable(ctx, &glue.DeleteTableInput{
+		DatabaseName: aws.String(fromDatabase),
+		Name:         aws.String(fromTable),
+	})
+	if err != nil {
+		// Best-effort rollback the table creation.
+		_, rollbackErr := c.glueSvc.DeleteTable(ctx, &glue.DeleteTableInput{
+			DatabaseName: aws.String(toDatabase),
+			Name:         aws.String(toTable),
+		})
+		if rollbackErr != nil {
+			fmt.Printf("failed to rollback the new table %s.%s: %v", toDatabase, toTable, rollbackErr)
+		}
+
+		return nil, fmt.Errorf("failed to rename the table %s.%s: %w", fromDatabase, fromTable, err)
+	}
+
+	// Load the new table to return.
+	renamedTable, err := c.LoadTable(ctx, GlueTableIdentifier(toDatabase, toTable), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load renamed table %s.%s: %w", toDatabase, toTable, err)
+	}
+
+	return renamedTable, nil
 }
 
 // ListNamespaces returns a list of Iceberg namespaces from the given Glue catalog.
@@ -180,8 +267,155 @@ func (c *GlueCatalog) ListNamespaces(ctx context.Context, parent table.Identifie
 	return icebergNamespaces, nil
 }
 
+// CreateNamespace creates a new Iceberg namespace in the Glue catalog.
+func (c *GlueCatalog) CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error {
+	database, err := identifierToGlueDatabase(namespace)
+	if err != nil {
+		return err
+	}
+
+	databaseParameters := map[string]string{
+		databaseTypePropsKey: glueTypeIceberg,
+	}
+
+	description := props[descriptionPropsKey]
+	locationURI := props[locationPropsKey]
+
+	if description != "" {
+		databaseParameters[descriptionPropsKey] = description
+	}
+	if locationURI != "" {
+		databaseParameters[locationPropsKey] = locationURI
+	}
+
+	databaseInput := &types.DatabaseInput{
+		Name:       aws.String(database),
+		Parameters: databaseParameters,
+	}
+
+	params := &glue.CreateDatabaseInput{DatabaseInput: databaseInput}
+	_, err = c.glueSvc.CreateDatabase(ctx, params)
+
+	if err != nil {
+		return fmt.Errorf("failed to create database %s: %w", database, err)
+	}
+
+	return nil
+}
+
+// DropNamespace deletes an Iceberg namespace from the Glue catalog.
+func (c *GlueCatalog) DropNamespace(ctx context.Context, namespace table.Identifier) error {
+	databaseName, err := identifierToGlueDatabase(namespace)
+	if err != nil {
+		return err
+	}
+
+	// Check if the database exists and is an iceberg database.
+	_, err = c.getDatabase(ctx, databaseName)
+	if err != nil {
+		return err
+	}
+
+	params := &glue.DeleteDatabaseInput{Name: aws.String(databaseName)}
+	_, err = c.glueSvc.DeleteDatabase(ctx, params)
+	if err != nil {
+		return fmt.Errorf("failed to drop namespace %s: %w", databaseName, err)
+	}
+
+	return nil
+}
+
+// LoadNamespaceProperties loads the properties of an Iceberg namespace from the Glue catalog.
+func (c *GlueCatalog) LoadNamespaceProperties(ctx context.Context, namespace table.Identifier) (iceberg.Properties, error) {
+	databaseName, err := identifierToGlueDatabase(namespace)
+	if err != nil {
+		return nil, err
+	}
+
+	database, err := c.getDatabase(ctx, databaseName)
+	if err != nil {
+		return nil, err
+	}
+
+	props := make(map[string]string)
+	if database.Parameters != nil {
+		for k, v := range database.Parameters {
+			props[k] = v
+		}
+	}
+
+	return props, nil
+}
+
+// UpdateNamespaceProperties updates the properties of an Iceberg namespace in the Glue catalog.
+// The removals list contains the keys to remove, and the updates map contains the keys and values to update.
+func (c *GlueCatalog) UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier,
+	removals []string, updates iceberg.Properties) (PropertiesUpdateSummary, error) {
+
+	databaseName, err := identifierToGlueDatabase(namespace)
+	if err != nil {
+		return PropertiesUpdateSummary{}, err
+	}
+
+	database, err := c.getDatabase(ctx, databaseName)
+	if err != nil {
+		return PropertiesUpdateSummary{}, err
+	}
+
+	overlap := []string{}
+	for _, key := range removals {
+		if _, exists := updates[key]; exists {
+			overlap = append(overlap, key)
+		}
+	}
+	if len(overlap) > 0 {
+		return PropertiesUpdateSummary{}, fmt.Errorf("conflict between removals and updates for keys: %v", overlap)
+	}
+
+	updatedProperties := make(map[string]string)
+	if database.Parameters != nil {
+		for k, v := range database.Parameters {
+			updatedProperties[k] = v
+		}
+	}
+
+	// Removals.
+	removed := []string{}
+	for _, key := range removals {
+		if _, exists := updatedProperties[key]; exists {
+			delete(updatedProperties, key)
+			removed = append(removed, key)
+		}
+	}
+
+	// Updates.
+	updated := []string{}
+	for key, value := range updates {
+		if updatedProperties[key] != value {
+			updatedProperties[key] = value
+			updated = append(updated, key)
+		}
+	}
+
+	_, err = c.glueSvc.UpdateDatabase(ctx, &glue.UpdateDatabaseInput{Name: aws.String(databaseName), DatabaseInput: &types.DatabaseInput{
+		Name:       aws.String(databaseName),
+		Parameters: updatedProperties,
+	}})
+	if err != nil {
+		return PropertiesUpdateSummary{}, fmt.Errorf("failed to update namespace properties %s: %w", databaseName, err)
+	}
+
+	propertiesUpdateSummary := PropertiesUpdateSummary{
+		Removed: removed,
+		Updated: updated,
+		Missing: iceberg.Difference(removals, removed),
+	}
+
+	return propertiesUpdateSummary, nil
+}
+
 // GetTable loads a table from the Glue Catalog using the given database and table name.
-func (c *GlueCatalog) getTable(ctx context.Context, database, tableName string) (string, error) {
+func (c *GlueCatalog) getTable(ctx context.Context, database, tableName string) (*types.Table, error) {
 	tblRes, err := c.glueSvc.GetTable(ctx,
 		&glue.GetTableInput{
 			DatabaseName: aws.String(database),
@@ -190,16 +424,33 @@ func (c *GlueCatalog) getTable(ctx context.Context, database, tableName string) 
 	)
 	if err != nil {
 		if errors.Is(err, &types.EntityNotFoundException{}) {
-			return "", fmt.Errorf("failed to get table %s.%s: %w", database, tableName, ErrNoSuchTable)
+			return nil, fmt.Errorf("failed to get table %s.%s: %w", database, tableName, ErrNoSuchTable)
 		}
-		return "", fmt.Errorf("failed to get table %s.%s: %w", database, tableName, err)
+		return nil, fmt.Errorf("failed to get table %s.%s: %w", database, tableName, err)
 	}
 
-	if tblRes.Table.Parameters["table_type"] != "ICEBERG" {
-		return "", errors.New("table is not an iceberg table")
+	if tblRes.Table.Parameters[tableTypePropsKey] != glueTypeIceberg {
+		return nil, fmt.Errorf("table %s.%s is not an iceberg table", database, tableName)
 	}
 
-	return tblRes.Table.Parameters["metadata_location"], nil
+	return tblRes.Table, nil
+}
+
+// GetDatabase loads a database from the Glue Catalog using the given database name.
+func (c *GlueCatalog) getDatabase(ctx context.Context, databaseName string) (*types.Database, error) {
+	database, err := c.glueSvc.GetDatabase(ctx, &glue.GetDatabaseInput{Name: aws.String(databaseName)})
+	if err != nil {
+		if errors.Is(err, &types.EntityNotFoundException{}) {
+			return nil, fmt.Errorf("failed to get namespace %s: %w", databaseName, ErrNoSuchNamespace)
+		}
+		return nil, fmt.Errorf("failed to get namespace %s: %w", databaseName, err)
+	}
+
+	if database.Database.Parameters[databaseTypePropsKey] != glueTypeIceberg {
+		return nil, fmt.Errorf("namespace %s is not an iceberg namespace", databaseName)
+	}
+
+	return database.Database, nil
 }
 
 func identifierToGlueTable(identifier table.Identifier) (string, string, error) {
@@ -218,7 +469,7 @@ func identifierToGlueDatabase(identifier table.Identifier) (string, error) {
 	return identifier[0], nil
 }
 
-// GlueTableIdentifier returns a glue table identifier for an iceberg table in the format [database, table].
+// GlueTableIdentifier returns a glue table identifier for an Iceberg table in the format [database, table].
 func GlueTableIdentifier(database string, tableName string) table.Identifier {
 	return []string{database, tableName}
 }
@@ -232,7 +483,7 @@ func filterTableListByType(database string, tableList []types.Table, tableType s
 	var filtered []table.Identifier
 
 	for _, tbl := range tableList {
-		if tbl.Parameters["table_type"] != tableType {
+		if tbl.Parameters[tableTypePropsKey] != tableType {
 			continue
 		}
 		filtered = append(filtered, GlueTableIdentifier(database, aws.ToString(tbl.Name)))
@@ -245,7 +496,7 @@ func filterDatabaseListByType(databases []types.Database, databaseType string) [
 	var filtered []table.Identifier
 
 	for _, database := range databases {
-		if database.Parameters["database_type"] != databaseType {
+		if database.Parameters[databaseTypePropsKey] != databaseType {
 			continue
 		}
 		filtered = append(filtered, GlueDatabaseIdentifier(aws.ToString(database.Name)))
