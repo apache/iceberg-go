@@ -37,6 +37,7 @@ Usage:
   iceberg list [options] [PARENT]
   iceberg describe [options] [namespace | table] IDENTIFIER
   iceberg (schema | spec | uuid | location) [options] TABLE_ID
+  iceberg create [options] (namespace | table) IDENTIFIER
   iceberg drop [options] (namespace | table) IDENTIFIER
   iceberg files [options] TABLE_ID [--history]
   iceberg rename [options] <from> <to>
@@ -74,6 +75,7 @@ func main() {
 		Uuid     bool `docopt:"uuid"`
 		Location bool `docopt:"location"`
 		Props    bool `docopt:"properties"`
+		Create   bool `docopt:"create"`
 		Drop     bool `docopt:"drop"`
 		Files    bool `docopt:"files"`
 		Rename   bool `docopt:"rename"`
@@ -176,6 +178,17 @@ func main() {
 		}
 
 		output.Text("Renamed table from " + cfg.RenameFrom + " to " + cfg.RenameTo)
+	case cfg.Create:
+		switch {
+		case cfg.Namespace:
+			err := cat.CreateNamespace(context.Background(), catalog.ToRestIdentifier(cfg.Ident), make(iceberg.Properties))
+			if err != nil {
+				output.Error(err)
+				os.Exit(1)
+			}
+		case cfg.Table:
+			output.Error(errors.New("not implemented: Create Table is WIP"))
+		}
 	case cfg.Drop:
 		switch {
 		case cfg.Namespace:
