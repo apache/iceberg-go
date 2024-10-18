@@ -22,8 +22,8 @@ on:
     branches:
       - 'main'
     tags:
-      - 'v**'          
-  pull_request:    
+      - 'v**'
+  pull_request:
 
 concurrency:
   group: ${{ github.repository }}-${{ github.head_ref || github.sha }}-${{ github.workflow }}
