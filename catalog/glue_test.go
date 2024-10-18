@@ -44,6 +44,11 @@ func (m *mockGlueClient) GetTables(ctx context.Context, params *glue.GetTablesIn
 	return args.Get(0).(*glue.GetTablesOutput), args.Error(1)
 }
 
+func (m *mockGlueClient) GetDatabases(ctx context.Context, params *glue.GetDatabasesInput, optFns ...func(*glue.Options)) (*glue.GetDatabasesOutput, error) {
+	args := m.Called(ctx, params, optFns)
+	return args.Get(0).(*glue.GetDatabasesOutput), args.Error(1)
+}
+
 func TestGlueGetTable(t *testing.T) {
 	assert := require.New(t)
 
@@ -105,7 +110,37 @@ func TestGlueListTables(t *testing.T) {
 	assert.Equal([]string{"test_database", "test_table"}, tables[0])
 }
 
-func TestGlueListTableIntegration(t *testing.T) {
+func TestGlueListNamespaces(t *testing.T) {
+	assert := require.New(t)
+
+	mockGlueSvc := &mockGlueClient{}
+
+	mockGlueSvc.On("GetDatabases", mock.Anything, &glue.GetDatabasesInput{}, mock.Anything).Return(&glue.GetDatabasesOutput{
+		DatabaseList: []types.Database{
+			{
+				Name: aws.String("test_database"),
+				Parameters: map[string]string{
+					"database_type": "ICEBERG",
+				},
+			},
+			{
+				Name:       aws.String("other_database"),
+				Parameters: map[string]string{},
+			},
+		},
+	}, nil).Once()
+
+	glueCatalog := &GlueCatalog{
+		glueSvc: mockGlueSvc,
+	}
+
+	databases, err := glueCatalog.ListNamespaces(context.TODO(), nil)
+	assert.NoError(err)
+	assert.Len(databases, 1)
+	assert.Equal([]string{"test_database"}, databases[0])
+}
+
+func TestGlueListTablesIntegration(t *testing.T) {
 	if os.Getenv("TEST_DATABASE_NAME") == "" {
 		t.Skip()
 	}
@@ -145,4 +180,20 @@ func TestGlueLoadTableIntegration(t *testing.T) {
 	table, err := catalog.LoadTable(context.TODO(), []string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")}, nil)
 	assert.NoError(err)
 	assert.Equal([]string{os.Getenv("TEST_TABLE_NAME")}, table.Identifier())
+}
+
+func TestGlueListNamespacesIntegration(t *testing.T) {
+	if os.Getenv("TEST_DATABASE_NAME") == "" {
+		t.Skip()
+	}
+	assert := require.New(t)
+
+	awscfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
+	assert.NoError(err)
+
+	catalog := NewGlueCatalog(WithAwsConfig(awscfg))
+
+	namespaces, err := catalog.ListNamespaces(context.TODO(), nil)
+	assert.NoError(err)
+	assert.Contains(namespaces, []string{os.Getenv("TEST_DATABASE_NAME")})
 }
