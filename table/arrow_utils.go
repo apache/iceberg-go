@@ -462,14 +462,14 @@ func ensureSmallArrowTypes(dt arrow.DataType) (arrow.DataType, error) {
 	return top.Type.(*arrow.StructType).Field(0).Type, nil
 }
 
-func ensureSmallArrowTypesSchema(schema *arrow.Schema) (*arrow.Schema, error) {
-	top, err := VisitArrowSchema(schema, convertToSmallTypes{})
-	if err != nil {
-		return nil, err
-	}
+// func ensureSmallArrowTypesSchema(schema *arrow.Schema) (*arrow.Schema, error) {
+// 	top, err := VisitArrowSchema(schema, convertToSmallTypes{})
+// 	if err != nil {
+// 		return nil, err
+// 	}
 
-	return arrow.NewSchema(top.Type.(*arrow.StructType).Fields(), &top.Metadata), nil
-}
+// 	return arrow.NewSchema(top.Type.(*arrow.StructType).Fields(), &top.Metadata), nil
+// }
 
 type convertToArrow struct {
 	metadata        map[string]string
