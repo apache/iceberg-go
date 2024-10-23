@@ -1,0 +1,19 @@
+%YAML 1.2
+---
+scalar_functions:
+  -
+    name: "is_in"
+    description: >
+      Checks membership of a value in a list of values
+
+      Returns true or false if `needle` is found in `haystack`.
+    impls:
+      - args:
+        - name: needle
+          value: any1
+        - name: haystack
+          value: list<any1>
+        options:
+          nan_equality:
+            values: [ NAN_IS_NAN, NAN_IS_NOT_NAN ]
+        return: "boolean"
