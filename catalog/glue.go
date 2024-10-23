@@ -92,10 +92,6 @@ func NewGlueCatalog(opts ...Option[GlueCatalog]) *GlueCatalog {
 	}
 }
 
-func (c *GlueCatalog) CatalogType() CatalogType {
-	return Glue
-}
-
 // ListTables returns a list of Iceberg tables in the given Glue database.
 //
 // The namespace should just contain the Glue database name.
@@ -163,6 +159,10 @@ func (c *GlueCatalog) LoadTable(ctx context.Context, identifier table.Identifier
 	}
 
 	return icebergTable, nil
+}
+
+func (c *GlueCatalog) CatalogType() CatalogType {
+	return Glue
 }
 
 // DropTable deletes an Iceberg table from the Glue catalog.
@@ -256,37 +256,6 @@ func (c *GlueCatalog) RenameTable(ctx context.Context, from, to table.Identifier
 	}
 
 	return renamedTable, nil
-}
-
-// ListNamespaces returns a list of Iceberg namespaces from the given Glue catalog.
-func (c *GlueCatalog) ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error) {
-	params := &glue.GetDatabasesInput{
-		CatalogId: c.catalogId,
-	}
-
-	if parent != nil {
-		return nil, fmt.Errorf("hierarchical namespace is not supported")
-	}
-
-	var icebergNamespaces []table.Identifier
-
-	for {
-		databasesResp, err := c.glueSvc.GetDatabases(ctx, params)
-		if err != nil {
-			return nil, fmt.Errorf("failed to list databases: %w", err)
-		}
-
-		icebergNamespaces = append(icebergNamespaces,
-			filterDatabaseListByType(databasesResp.DatabaseList, glueTypeIceberg)...)
-
-		if databasesResp.NextToken == nil {
-			break
-		}
-
-		params.NextToken = databasesResp.NextToken
-	}
-
-	return icebergNamespaces, nil
 }
 
 // CreateNamespace creates a new Iceberg namespace in the Glue catalog.
@@ -434,6 +403,37 @@ func (c *GlueCatalog) UpdateNamespaceProperties(ctx context.Context, namespace t
 	}
 
 	return propertiesUpdateSummary, nil
+}
+
+// ListNamespaces returns a list of Iceberg namespaces from the given Glue catalog.
+func (c *GlueCatalog) ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error) {
+	params := &glue.GetDatabasesInput{
+		CatalogId: c.catalogId,
+	}
+
+	if parent != nil {
+		return nil, fmt.Errorf("hierarchical namespace is not supported")
+	}
+
+	var icebergNamespaces []table.Identifier
+
+	for {
+		databasesResp, err := c.glueSvc.GetDatabases(ctx, params)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list databases: %w", err)
+		}
+
+		icebergNamespaces = append(icebergNamespaces,
+			filterDatabaseListByType(databasesResp.DatabaseList, glueTypeIceberg)...)
+
+		if databasesResp.NextToken == nil {
+			break
+		}
+
+		params.NextToken = databasesResp.NextToken
+	}
+
+	return icebergNamespaces, nil
 }
 
 // GetTable loads a table from the Glue Catalog using the given database and table name.
