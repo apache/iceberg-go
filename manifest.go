@@ -442,12 +442,12 @@ func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]M
 		var tmp ManifestEntry
 		if isVer1 {
 			if isFallback {
-				tmp = &fallbackManifestEntryV1{manifestEntryV1: manifestEntryV1{}}
+				tmp = &fallbackManifestEntryV1{manifestEntryV1: manifestEntryV1{Data: &dataFile{}}}
 			} else {
-				tmp = &manifestEntryV1{}
+				tmp = &manifestEntryV1{Data: &dataFile{}}
 			}
 		} else {
-			tmp = &manifestEntryV2{}
+			tmp = &manifestEntryV2{Data: &dataFile{}}
 		}
 
 		if err := dec.Decode(tmp); err != nil {
@@ -897,16 +897,6 @@ func (d *dataFile) EqualityFieldIDs() []int {
 
 func (d *dataFile) SortOrderID() *int { return d.SortOrder }
 
-func coerceDataFile(data DataFile) (dataFile, error) {
-	if d, ok := data.(*dataFile); !ok {
-		return dataFile{}, fmt.Errorf("%w: data file must be of type dataFile", ErrInvalidArgument)
-	} else if d == nil {
-		return dataFile{}, fmt.Errorf("%w: data file cannot be nil", ErrInvalidArgument)
-	} else {
-		return *d, nil
-	}
-}
-
 // ManifestEntryV1Builder is a helper for building a V1 manifest entry
 // struct which will conform to the ManifestEntry interface.
 type ManifestEntryV1Builder struct {
@@ -917,16 +907,11 @@ type ManifestEntryV1Builder struct {
 // all of the optional fields to be set by calling the corresponding methods
 // before calling [ManifestEntryV1Builder.Build] to construct the object.
 func NewManifestEntryV1Builder(status ManifestEntryStatus, snapshotID int64, data DataFile) (*ManifestEntryV1Builder, error) {
-	d, err := coerceDataFile(data)
-	if err != nil {
-		return nil, err
-	}
-
 	return &ManifestEntryV1Builder{
 		m: &manifestEntryV1{
 			EntryStatus: status,
 			Snapshot:    snapshotID,
-			Data:        d,
+			Data:        data,
 		},
 	}, nil
 }
@@ -940,7 +925,7 @@ type manifestEntryV1 struct {
 	Snapshot    int64               `avro:"snapshot_id"`
 	SeqNum      *int64
 	FileSeqNum  *int64
-	Data        dataFile `avro:"data_file"`
+	Data        DataFile `avro:"data_file"`
 }
 
 type fallbackManifestEntryV1 struct {
@@ -969,7 +954,7 @@ func (m *manifestEntryV1) FileSequenceNum() *int64 {
 	return m.FileSeqNum
 }
 
-func (m *manifestEntryV1) DataFile() DataFile { return &m.Data }
+func (m *manifestEntryV1) DataFile() DataFile { return m.Data }
 
 // ManifestEntryV2Builder is a helper for building a V2 manifest entry
 // struct which will conform to the ManifestEntry interface.
@@ -981,15 +966,11 @@ type ManifestEntryV2Builder struct {
 // all of the optional fields to be set by calling the corresponding methods
 // before calling [ManifestEntryV2Builder.Build] to construct the object.
 func NewManifestEntryV2Builder(status ManifestEntryStatus, snapshotID int64, data DataFile) *ManifestEntryV2Builder {
-	d, err := coerceDataFile(data)
-	if err != nil {
-		return nil
-	}
 	return &ManifestEntryV2Builder{
 		m: &manifestEntryV2{
 			EntryStatus: status,
 			Snapshot:    &snapshotID,
-			Data:        d,
+			Data:        data,
 		},
 	}
 }
@@ -1019,7 +1000,7 @@ type manifestEntryV2 struct {
 	Snapshot    *int64              `avro:"snapshot_id"`
 	SeqNum      *int64              `avro:"sequence_number"`
 	FileSeqNum  *int64              `avro:"file_sequence_number"`
-	Data        dataFile            `avro:"data_file"`
+	Data        DataFile            `avro:"data_file"`
 }
 
 func (m *manifestEntryV2) inheritSeqNum(manifest ManifestFile) {
@@ -1057,7 +1038,7 @@ func (m *manifestEntryV2) FileSequenceNum() *int64 {
 	return m.FileSeqNum
 }
 
-func (m *manifestEntryV2) DataFile() DataFile { return &m.Data }
+func (m *manifestEntryV2) DataFile() DataFile { return m.Data }
 
 // DataFileBuilder is a helper for building a data file struct which will
 // conform to the DataFile interface.

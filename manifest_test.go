@@ -68,7 +68,7 @@ var (
 		{
 			EntryStatus: EntryStatusADDED,
 			Snapshot:    entrySnapshotID,
-			Data: dataFile{
+			Data: &dataFile{
 				// bad value for Content but this field doesn't exist in V1
 				// so it shouldn't get written and shouldn't be read back out
 				// so the roundtrip test asserts that we get the default value
@@ -192,7 +192,7 @@ var (
 		{
 			EntryStatus: EntryStatusADDED,
 			Snapshot:    8744736658442914487,
-			Data: dataFile{
+			Data: &dataFile{
 				Path:             "/home/iceberg/warehouse/nyc/taxis_partitioned/data/VendorID=1/00000-633-d8a4223e-dc97-45a1-86e1-adaba6e8abd7-00002.parquet",
 				Format:           ParquetFile,
 				PartitionData:    map[string]any{"VendorID": int(1), "tpep_pickup_datetime": time.Unix(1925, 0)},
@@ -320,14 +320,14 @@ var (
 		},
 	}
 
-	dataRecord0 = manifestEntryV1Records[0].Data
-	dataRecord1 = manifestEntryV1Records[1].Data
+	dataRecord0 = manifestEntryV1Records[0].Data.(*dataFile)
+	dataRecord1 = manifestEntryV1Records[1].Data.(*dataFile)
 
 	manifestEntryV2Records = []*manifestEntryV2{
 		{
 			EntryStatus: EntryStatusADDED,
 			Snapshot:    &entrySnapshotID,
-			Data: dataFile{
+			Data: &dataFile{
 				Path:             dataRecord0.Path,
 				Format:           dataRecord0.Format,
 				PartitionData:    dataRecord0.PartitionData,
@@ -347,7 +347,7 @@ var (
 		{
 			EntryStatus: EntryStatusADDED,
 			Snapshot:    &entrySnapshotID,
-			Data: dataFile{
+			Data: &dataFile{
 				Path:             dataRecord1.Path,
 				Format:           dataRecord1.Format,
 				PartitionData:    dataRecord1.PartitionData,
