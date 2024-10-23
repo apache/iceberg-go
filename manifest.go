@@ -18,6 +18,7 @@
 package iceberg
 
 import (
+	"fmt"
 	"io"
 	"strconv"
 	"sync"
@@ -441,12 +442,12 @@ func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]M
 		var tmp ManifestEntry
 		if isVer1 {
 			if isFallback {
-				tmp = &fallbackManifestEntryV1{manifestEntryV1: manifestEntryV1{Data: &dataFile{}}}
+				tmp = &fallbackManifestEntryV1{manifestEntryV1: manifestEntryV1{}}
 			} else {
-				tmp = &manifestEntryV1{Data: &dataFile{}}
+				tmp = &manifestEntryV1{}
 			}
 		} else {
-			tmp = &manifestEntryV2{Data: &dataFile{}}
+			tmp = &manifestEntryV2{}
 		}
 
 		if err := dec.Decode(tmp); err != nil {
@@ -595,7 +596,10 @@ func WriteManifestListV1(out io.Writer, files []ManifestFile) error {
 func writeManifestList(out io.Writer, files []ManifestFile, version int) error {
 	for _, file := range files {
 		if file.Version() != version {
-			return ErrInvalidArgument
+			return fmt.Errorf(
+				"%w: ManifestFile '%s' has non-matching version %d instead of %d",
+				ErrInvalidArgument, file.FilePath(), file.Version(), version,
+			)
 		}
 	}
 
@@ -606,7 +610,7 @@ func writeManifestList(out io.Writer, files []ManifestFile, version int) error {
 	case 2:
 		key = internal.ManifestListV2Key
 	default:
-		return ErrInvalidArgument
+		return fmt.Errorf("%w: non-recognized version %d", ErrInvalidArgument, version)
 	}
 
 	enc, err := ocf.NewEncoder(
@@ -648,7 +652,7 @@ func writeManifestEntries(out io.Writer, entries []ManifestEntry, version int) e
 	case 2:
 		key = internal.ManifestEntryV2Key
 	default:
-		return ErrInvalidArgument
+		return fmt.Errorf("%w: non-recognized version %d", ErrInvalidArgument, version)
 	}
 
 	enc, err := ocf.NewEncoder(
@@ -730,6 +734,18 @@ func avroColMapToMap[K comparable, V any](c *[]colMap[K, V]) map[K]V {
 		out[data.Key] = data.Value
 	}
 	return out
+}
+
+func mapToAvroColMap[K comparable, V any](m map[K]V) *[]colMap[K, V] {
+	if m == nil {
+		return nil
+	}
+
+	out := make([]colMap[K, V], 0, len(m))
+	for k, v := range m {
+		out = append(out, colMap[K, V]{Key: k, Value: v})
+	}
+	return &out
 }
 
 func avroPartitionData(input map[string]any, nameToID map[string]int, logicalTypes map[int]avro.LogicalType) map[string]any {
@@ -883,6 +899,16 @@ func (d *dataFile) EqualityFieldIDs() []int {
 
 func (d *dataFile) SortOrderID() *int { return d.SortOrder }
 
+func coerceDataFile(data DataFile) (dataFile, error) {
+	if d, ok := data.(*dataFile); !ok {
+		return dataFile{}, fmt.Errorf("%w: data file must be of type dataFile", ErrInvalidArgument)
+	} else if d == nil {
+		return dataFile{}, fmt.Errorf("%w: data file cannot be nil", ErrInvalidArgument)
+	} else {
+		return *d, nil
+	}
+}
+
 // ManifestEntryV1Builder is a helper for building a V1 manifest entry
 // struct which will conform to the ManifestEntry interface.
 type ManifestEntryV1Builder struct {
@@ -892,14 +918,18 @@ type ManifestEntryV1Builder struct {
 // NewManifestEntryV1Builder is passed all of the required fields and then allows
 // all of the optional fields to be set by calling the corresponding methods
 // before calling [ManifestEntryV1Builder.Build] to construct the object.
-func NewManifestEntryV1Builder(status ManifestEntryStatus, snapshotID int64, data DataFile) *ManifestEntryV1Builder {
+func NewManifestEntryV1Builder(status ManifestEntryStatus, snapshotID int64, data DataFile) (*ManifestEntryV1Builder, error) {
+	d, err := coerceDataFile(data)
+	if err != nil {
+		return nil, err
+	}
 	return &ManifestEntryV1Builder{
 		m: &manifestEntryV1{
 			EntryStatus: status,
 			Snapshot:    snapshotID,
-			Data:        data,
+			Data:        d,
 		},
-	}
+	}, nil
 }
 
 func (b *ManifestEntryV1Builder) Build() ManifestEntry {
@@ -911,7 +941,7 @@ type manifestEntryV1 struct {
 	Snapshot    int64               `avro:"snapshot_id"`
 	SeqNum      *int64
 	FileSeqNum  *int64
-	Data        DataFile `avro:"data_file"`
+	Data        dataFile `avro:"data_file"`
 }
 
 type fallbackManifestEntryV1 struct {
@@ -940,7 +970,7 @@ func (m *manifestEntryV1) FileSequenceNum() *int64 {
 	return m.FileSeqNum
 }
 
-func (m *manifestEntryV1) DataFile() DataFile { return m.Data }
+func (m *manifestEntryV1) DataFile() DataFile { return &m.Data }
 
 // ManifestEntryV2Builder is a helper for building a V2 manifest entry
 // struct which will conform to the ManifestEntry interface.
@@ -952,11 +982,15 @@ type ManifestEntryV2Builder struct {
 // all of the optional fields to be set by calling the corresponding methods
 // before calling [ManifestEntryV2Builder.Build] to construct the object.
 func NewManifestEntryV2Builder(status ManifestEntryStatus, snapshotID int64, data DataFile) *ManifestEntryV2Builder {
+	d, err := coerceDataFile(data)
+	if err != nil {
+		return nil
+	}
 	return &ManifestEntryV2Builder{
 		m: &manifestEntryV2{
 			EntryStatus: status,
 			Snapshot:    &snapshotID,
-			Data:        data,
+			Data:        d,
 		},
 	}
 }
@@ -986,7 +1020,7 @@ type manifestEntryV2 struct {
 	Snapshot    *int64              `avro:"snapshot_id"`
 	SeqNum      *int64              `avro:"sequence_number"`
 	FileSeqNum  *int64              `avro:"file_sequence_number"`
-	Data        DataFile            `avro:"data_file"`
+	Data        dataFile            `avro:"data_file"`
 }
 
 func (m *manifestEntryV2) inheritSeqNum(manifest ManifestFile) {
@@ -1024,7 +1058,7 @@ func (m *manifestEntryV2) FileSequenceNum() *int64 {
 	return m.FileSeqNum
 }
 
-func (m *manifestEntryV2) DataFile() DataFile { return m.Data }
+func (m *manifestEntryV2) DataFile() DataFile { return &m.Data }
 
 // DataFileBuilder is a helper for building a data file struct which will
 // conform to the DataFile interface.
@@ -1063,71 +1097,43 @@ func (b *DataFileBuilder) BlockSizeInBytes(size int64) *DataFileBuilder {
 
 // ColumnSizes sets the column sizes for the data file.
 func (b *DataFileBuilder) ColumnSizes(sizes map[int]int64) *DataFileBuilder {
-	colSizes := make([]colMap[int, int64], 0, len(sizes))
-	for k, v := range sizes {
-		colSizes = append(colSizes, colMap[int, int64]{Key: k, Value: v})
-	}
-	b.d.ColSizes = &colSizes
+	b.d.ColSizes = mapToAvroColMap(sizes)
 	return b
 }
 
 // ValueCounts sets the value counts for the data file.
 func (b *DataFileBuilder) ValueCounts(counts map[int]int64) *DataFileBuilder {
-	vals := make([]colMap[int, int64], 0, len(counts))
-	for k, v := range counts {
-		vals = append(vals, colMap[int, int64]{Key: k, Value: v})
-	}
-	b.d.ValCounts = &vals
+	b.d.ValCounts = mapToAvroColMap(counts)
 	return b
 }
 
 // NullValueCounts sets the null value counts for the data file.
 func (b *DataFileBuilder) NullValueCounts(counts map[int]int64) *DataFileBuilder {
-	nulls := make([]colMap[int, int64], 0, len(counts))
-	for k, v := range counts {
-		nulls = append(nulls, colMap[int, int64]{Key: k, Value: v})
-	}
-	b.d.NullCounts = &nulls
+	b.d.NullCounts = mapToAvroColMap(counts)
 	return b
 }
 
 // NaNValueCounts sets the NaN value counts for the data file.
 func (b *DataFileBuilder) NaNValueCounts(counts map[int]int64) *DataFileBuilder {
-	nans := make([]colMap[int, int64], 0, len(counts))
-	for k, v := range counts {
-		nans = append(nans, colMap[int, int64]{Key: k, Value: v})
-	}
-	b.d.NaNCounts = &nans
+	b.d.NaNCounts = mapToAvroColMap(counts)
 	return b
 }
 
 // DistinctValueCounts sets the distinct value counts for the data file.
 func (b *DataFileBuilder) DistinctValueCounts(counts map[int]int64) *DataFileBuilder {
-	distincts := make([]colMap[int, int64], 0, len(counts))
-	for k, v := range counts {
-		distincts = append(distincts, colMap[int, int64]{Key: k, Value: v})
-	}
-	b.d.DistinctCounts = &distincts
+	b.d.DistinctCounts = mapToAvroColMap(counts)
 	return b
 }
 
 // LowerBoundValues sets the lower bound values for the data file.
 func (b *DataFileBuilder) LowerBoundValues(bounds map[int][]byte) *DataFileBuilder {
-	lb := make([]colMap[int, []byte], 0, len(bounds))
-	for k, v := range bounds {
-		lb = append(lb, colMap[int, []byte]{Key: k, Value: v})
-	}
-	b.d.LowerBounds = &lb
+	b.d.LowerBounds = mapToAvroColMap(bounds)
 	return b
 }
 
 // UpperBoundValues sets the upper bound values for the data file.
 func (b *DataFileBuilder) UpperBoundValues(bounds map[int][]byte) *DataFileBuilder {
-	ub := make([]colMap[int, []byte], 0, len(bounds))
-	for k, v := range bounds {
-		ub = append(ub, colMap[int, []byte]{Key: k, Value: v})
-	}
-	b.d.UpperBounds = &ub
+	b.d.UpperBounds = mapToAvroColMap(bounds)
 	return b
 }
 
