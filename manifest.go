@@ -923,6 +923,7 @@ func NewManifestEntryV1Builder(status ManifestEntryStatus, snapshotID int64, dat
 	if err != nil {
 		return nil, err
 	}
+
 	return &ManifestEntryV1Builder{
 		m: &manifestEntryV1{
 			EntryStatus: status,
@@ -1076,7 +1077,33 @@ func NewDataFileBuilder(
 	partitionData map[string]any,
 	recordCount int64,
 	fileSize int64,
-) *DataFileBuilder {
+) (*DataFileBuilder, error) {
+	if content != EntryContentData && content != EntryContentPosDeletes && content != EntryContentEqDeletes {
+		return nil, fmt.Errorf(
+			"%w: content must be one of %s, %s, or %s",
+			ErrInvalidArgument, EntryContentData, EntryContentPosDeletes, EntryContentEqDeletes,
+		)
+	}
+
+	if path == "" {
+		return nil, fmt.Errorf("%w: path cannot be empty", ErrInvalidArgument)
+	}
+
+	if format != AvroFile && format != OrcFile && format != ParquetFile {
+		return nil, fmt.Errorf(
+			"%w: format must be one of %s, %s, or %s",
+			ErrInvalidArgument, AvroFile, OrcFile, ParquetFile,
+		)
+	}
+
+	if recordCount <= 0 {
+		return nil, fmt.Errorf("%w: record count must be greater than 0", ErrInvalidArgument)
+	}
+
+	if fileSize <= 0 {
+		return nil, fmt.Errorf("%w: file size must be greater than 0", ErrInvalidArgument)
+	}
+
 	return &DataFileBuilder{
 		d: &dataFile{
 			Content:       content,
@@ -1086,7 +1113,7 @@ func NewDataFileBuilder(
 			RecordCount:   recordCount,
 			FileSize:      fileSize,
 		},
-	}
+	}, nil
 }
 
 // BlockSizeInBytes sets the block size in bytes for the data file. Deprecated in v2.
