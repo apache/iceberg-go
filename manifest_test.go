@@ -743,7 +743,7 @@ func (m *ManifestTestSuite) TestManifestEntriesV2() {
 }
 
 func (m *ManifestTestSuite) TestManifestEntryBuilder() {
-	dataFileBuilder := NewDataFileBuilder(
+	dataFileBuilder, err := NewDataFileBuilder(
 		EntryContentData,
 		"sample.parquet",
 		ParquetFile,
@@ -751,6 +751,7 @@ func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 		1,
 		2,
 	)
+	m.Require().NoError(err)
 
 	dataFileBuilder.ColumnSizes(map[int]int64{
 		1: 1,
