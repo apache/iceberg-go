@@ -613,8 +613,8 @@ func writeManifestList(out io.Writer, files []ManifestFile, version int) error {
 		return fmt.Errorf("%w: non-recognized version %d", ErrInvalidArgument, version)
 	}
 
-	enc, err := ocf.NewEncoder(
-		internal.AvroSchemaCache.Get(key).String(),
+	enc, err := ocf.NewEncoderWithSchema(
+		internal.AvroSchemaCache.Get(key),
 		out, ocf.WithMetadata(map[string][]byte{
 			"format-version": []byte(strconv.Itoa(version)),
 			"avro.codec":     []byte("deflate"),
@@ -655,8 +655,8 @@ func writeManifestEntries(out io.Writer, entries []ManifestEntry, version int) e
 		return fmt.Errorf("%w: non-recognized version %d", ErrInvalidArgument, version)
 	}
 
-	enc, err := ocf.NewEncoder(
-		internal.AvroSchemaCache.Get(key).String(),
+	enc, err := ocf.NewEncoderWithSchema(
+		internal.AvroSchemaCache.Get(key),
 		out, ocf.WithMetadata(map[string][]byte{
 			"format-version": []byte(strconv.Itoa(version)),
 			"avro.codec":     []byte("deflate"),
