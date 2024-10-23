@@ -617,7 +617,6 @@ func writeManifestList(out io.Writer, files []ManifestFile, version int) error {
 		internal.AvroSchemaCache.Get(key),
 		out, ocf.WithMetadata(map[string][]byte{
 			"format-version": []byte(strconv.Itoa(version)),
-			"avro.codec":     []byte("deflate"),
 		}),
 		ocf.WithCodec(ocf.Deflate),
 	)
@@ -659,7 +658,6 @@ func writeManifestEntries(out io.Writer, entries []ManifestEntry, version int) e
 		internal.AvroSchemaCache.Get(key),
 		out, ocf.WithMetadata(map[string][]byte{
 			"format-version": []byte(strconv.Itoa(version)),
-			"avro.codec":     []byte("deflate"),
 		}),
 		ocf.WithCodec(ocf.Deflate),
 	)
