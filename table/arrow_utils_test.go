@@ -18,10 +18,15 @@
 package table_test
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
@@ -391,5 +396,116 @@ func TestArrowSchemaWithNameMapping(t *testing.T) {
 				assert.True(t, tt.expected.Equals(out), out.String(), tt.expected.String())
 			}
 		})
+	}
+}
+
+var (
+	ArrowSchemaWithAllTimestampPrec = arrow.NewSchema([]arrow.Field{
+		{Name: "timestamp_s", Type: &arrow.TimestampType{Unit: arrow.Second}, Nullable: true},
+		{Name: "timestamptz_s", Type: arrow.FixedWidthTypes.Timestamp_s, Nullable: true},
+		{Name: "timestamp_ms", Type: &arrow.TimestampType{Unit: arrow.Millisecond}, Nullable: true},
+		{Name: "timestamptz_ms", Type: arrow.FixedWidthTypes.Timestamp_ms, Nullable: true},
+		{Name: "timestamp_us", Type: &arrow.TimestampType{Unit: arrow.Microsecond}, Nullable: true},
+		{Name: "timestamptz_us", Type: arrow.FixedWidthTypes.Timestamp_us, Nullable: true},
+		{Name: "timestamp_ns", Type: &arrow.TimestampType{Unit: arrow.Nanosecond}, Nullable: true},
+		{Name: "timestamptz_ns", Type: arrow.FixedWidthTypes.Timestamp_ns, Nullable: true},
+		{Name: "timestamptz_us_etc_utc", Type: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "Etc/UTC"}, Nullable: true},
+		{Name: "timestamptz_ns_z", Type: &arrow.TimestampType{Unit: arrow.Nanosecond, TimeZone: "Z"}, Nullable: true},
+		{Name: "timestamptz_s_0000", Type: &arrow.TimestampType{Unit: arrow.Second, TimeZone: "+00:00"}, Nullable: true},
+	}, nil)
+
+	ArrowSchemaWithAllMicrosecondsTimestampPrec = arrow.NewSchema([]arrow.Field{
+		{Name: "timestamp_s", Type: &arrow.TimestampType{Unit: arrow.Microsecond}, Nullable: true},
+		{Name: "timestamptz_s", Type: arrow.FixedWidthTypes.Timestamp_us, Nullable: true},
+		{Name: "timestamp_ms", Type: &arrow.TimestampType{Unit: arrow.Microsecond}, Nullable: true},
+		{Name: "timestamptz_ms", Type: arrow.FixedWidthTypes.Timestamp_us, Nullable: true},
+		{Name: "timestamp_us", Type: &arrow.TimestampType{Unit: arrow.Microsecond}, Nullable: true},
+		{Name: "timestamptz_us", Type: arrow.FixedWidthTypes.Timestamp_us, Nullable: true},
+		{Name: "timestamp_ns", Type: &arrow.TimestampType{Unit: arrow.Microsecond}, Nullable: true},
+		{Name: "timestamptz_ns", Type: arrow.FixedWidthTypes.Timestamp_us, Nullable: true},
+		{Name: "timestamptz_us_etc_utc", Type: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}, Nullable: true},
+		{Name: "timestamptz_ns_z", Type: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}, Nullable: true},
+		{Name: "timestamptz_s_0000", Type: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}, Nullable: true},
+	}, nil)
+
+	TableSchemaWithAllMicrosecondsTimestampPrec = iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "timestamp_s", Type: iceberg.PrimitiveTypes.Timestamp},
+		iceberg.NestedField{ID: 2, Name: "timestamptz_s", Type: iceberg.PrimitiveTypes.TimestampTz},
+		iceberg.NestedField{ID: 3, Name: "timestamp_ms", Type: iceberg.PrimitiveTypes.Timestamp},
+		iceberg.NestedField{ID: 4, Name: "timestamptz_ms", Type: iceberg.PrimitiveTypes.TimestampTz},
+		iceberg.NestedField{ID: 5, Name: "timestamp_us", Type: iceberg.PrimitiveTypes.Timestamp},
+		iceberg.NestedField{ID: 6, Name: "timestamptz_us", Type: iceberg.PrimitiveTypes.TimestampTz},
+		iceberg.NestedField{ID: 7, Name: "timestamp_ns", Type: iceberg.PrimitiveTypes.Timestamp},
+		iceberg.NestedField{ID: 8, Name: "timestamptz_ns", Type: iceberg.PrimitiveTypes.TimestampTz},
+		iceberg.NestedField{ID: 9, Name: "timestamptz_us_etc_utc", Type: iceberg.PrimitiveTypes.TimestampTz},
+		iceberg.NestedField{ID: 10, Name: "timestamptz_ns_z", Type: iceberg.PrimitiveTypes.TimestampTz},
+		iceberg.NestedField{ID: 11, Name: "timestamptz_s_0000", Type: iceberg.PrimitiveTypes.TimestampTz},
+	)
+)
+
+func ArrowRecordWithAllTimestampPrec(mem memory.Allocator) arrow.Record {
+	batch, _, err := array.RecordFromJSON(mem, ArrowSchemaWithAllTimestampPrec,
+		strings.NewReader(`[
+		{
+			"timestamp_s": "2023-01-01T19:25:00-05:00",
+			"timestamptz_s": "2023-01-01T19:25:00Z",
+			"timestamp_ms": "2023-01-01T19:25:00.123-05:00",
+			"timestamptz_ms": "2023-01-01T19:25:00.123Z",
+			"timestamp_us": "2023-01-01T19:25:00.123456-05:00",
+			"timestamptz_us": "2023-01-01T19:25:00.123456Z",
+			"timestamp_ns": "2024-07-11T03:30:00.123456789-05:00",
+			"timestamptz_ns": "2023-01-01T19:25:00.123456789Z",
+			"timestamptz_us_etc_utc": "2023-01-01T19:25:00.123456Z",
+			"timestamptz_ns_z": "2024-07-11T03:30:00.123456789Z",
+			"timestamptz_s_0000": "2023-01-01T19:25:00Z"
+		}, {}, {
+			"timestamp_s": "2023-03-01T19:25:00-05:00",
+			"timestamptz_s": "2023-03-01T19:25:00Z",
+			"timestamp_ms": "2023-03-01T19:25:00.123-05:00",
+			"timestamptz_ms": "2023-03-01T19:25:00.123Z",
+			"timestamp_us": "2023-03-01T19:25:00.123456-05:00",
+			"timestamptz_us": "2023-03-01T19:25:00.123456Z",
+			"timestamp_ns": "2024-07-11T03:30:00.9876543210-05:00",
+			"timestamptz_ns": "2023-03-01T19:25:00.9876543210Z",
+			"timestamptz_us_etc_utc": "2023-03-01T19:25:00.123456Z",
+			"timestamptz_ns_z": "2024-07-11T03:30:00.9876543210Z",
+			"timestamptz_s_0000": "2023-03-01T19:25:00Z"
+		}
+	]`))
+
+	if err != nil {
+		panic(err)
+	}
+
+	return batch
+}
+
+func TestToRequestedSchemaTimestamps(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	batch := ArrowRecordWithAllTimestampPrec(mem)
+	defer batch.Release()
+
+	requestedSchema := TableSchemaWithAllMicrosecondsTimestampPrec
+	fileSchema := requestedSchema
+
+	converted, err := table.ToRequestedSchema(requestedSchema, fileSchema, batch, true, false, false)
+	require.NoError(t, err)
+	defer converted.Release()
+
+	assert.True(t, converted.Schema().Equal(ArrowSchemaWithAllMicrosecondsTimestampPrec), "expected: %s\ngot: %s",
+		ArrowSchemaWithAllMicrosecondsTimestampPrec, converted.Schema())
+
+	for i, col := range batch.Columns() {
+		convertedCol := converted.Column(i)
+		if arrow.TypeEqual(col.DataType(), convertedCol.DataType()) {
+			assert.True(t, array.Equal(col, convertedCol), "expected: %s\ngot: %s", col, convertedCol)
+		} else {
+			expected, err := compute.CastArray(context.Background(), col, compute.UnsafeCastOptions(convertedCol.DataType()))
+			require.NoError(t, err)
+			assert.True(t, array.Equal(expected, convertedCol), "expected: %s\ngot: %s", expected, convertedCol)
+			expected.Release()
+		}
 	}
 }
