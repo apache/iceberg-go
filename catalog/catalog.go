@@ -30,6 +30,8 @@ import (
 
 type CatalogType string
 
+type AwsProperties map[string]string
+
 const (
 	REST     CatalogType = "rest"
 	Hive     CatalogType = "hive"
@@ -49,6 +51,12 @@ var (
 func WithAwsConfig(cfg aws.Config) Option[GlueCatalog] {
 	return func(o *options) {
 		o.awsConfig = cfg
+	}
+}
+
+func WithAwsProperties(props AwsProperties) Option[GlueCatalog] {
+	return func(o *options) {
+		o.awsProperties = props
 	}
 }
 
@@ -117,7 +125,8 @@ func WithPrefix(prefix string) Option[RestCatalog] {
 type Option[T GlueCatalog | RestCatalog] func(*options)
 
 type options struct {
-	awsConfig aws.Config
+	awsConfig     aws.Config
+	awsProperties AwsProperties
 
 	tlsConfig         *tls.Config
 	credential        string
