@@ -18,10 +18,13 @@
 package iceberg
 
 import (
+	"fmt"
 	"io"
+	"strconv"
 	"sync"
 	"time"
 
+	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 
 	"github.com/hamba/avro/v2"
@@ -427,12 +430,12 @@ func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]M
 		var tmp ManifestEntry
 		if isVer1 {
 			if isFallback {
-				tmp = &fallbackManifestEntryV1{}
+				tmp = &fallbackManifestEntryV1{manifestEntryV1: manifestEntryV1{Data: &dataFile{}}}
 			} else {
-				tmp = &manifestEntryV1{}
+				tmp = &manifestEntryV1{Data: &dataFile{}}
 			}
 		} else {
-			tmp = &manifestEntryV2{}
+			tmp = &manifestEntryV2{Data: &dataFile{}}
 		}
 
 		if err := dec.Decode(tmp); err != nil {
@@ -567,6 +570,97 @@ func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
 	return out, dec.Error()
 }
 
+// WriteManifestListV2 writes a list of v2 manifest files to an avro file.
+func WriteManifestListV2(out io.Writer, files []ManifestFile) error {
+	return writeManifestList(out, files, 2)
+}
+
+// WriteManifestListV1 writes a list of v1 manifest files to an avro file.
+func WriteManifestListV1(out io.Writer, files []ManifestFile) error {
+	return writeManifestList(out, files, 1)
+}
+
+func writeManifestList(out io.Writer, files []ManifestFile, version int) error {
+	for _, file := range files {
+		if file.Version() != version {
+			return fmt.Errorf(
+				"%w: ManifestFile '%s' has non-matching version %d instead of %d",
+				ErrInvalidArgument, file.FilePath(), file.Version(), version,
+			)
+		}
+	}
+
+	var key string
+	switch version {
+	case 1:
+		key = internal.ManifestListV1Key
+	case 2:
+		key = internal.ManifestListV2Key
+	default:
+		return fmt.Errorf("%w: non-recognized version %d", ErrInvalidArgument, version)
+	}
+
+	enc, err := ocf.NewEncoderWithSchema(
+		internal.AvroSchemaCache.Get(key),
+		out, ocf.WithMetadata(map[string][]byte{
+			"format-version": []byte(strconv.Itoa(version)),
+		}),
+		ocf.WithCodec(ocf.Deflate),
+	)
+	if err != nil {
+		return err
+	}
+
+	for _, file := range files {
+		if err := enc.Encode(file); err != nil {
+			return err
+		}
+	}
+
+	return enc.Close()
+}
+
+// WriteManifestEntriesV2 writes a list of v2 manifest entries to an avro file.
+func WriteManifestEntriesV2(out io.Writer, entries []ManifestEntry) error {
+	return writeManifestEntries(out, entries, 2)
+}
+
+// WriteManifestEntriesV1 writes a list of v1 manifest entries to an avro file.
+func WriteManifestEntriesV1(out io.Writer, entries []ManifestEntry) error {
+	return writeManifestEntries(out, entries, 1)
+}
+
+func writeManifestEntries(out io.Writer, entries []ManifestEntry, version int) error {
+	var key string
+	switch version {
+	case 1:
+		key = internal.ManifestEntryV1Key
+	case 2:
+		key = internal.ManifestEntryV2Key
+	default:
+		return fmt.Errorf("%w: non-recognized version %d", ErrInvalidArgument, version)
+	}
+
+	enc, err := ocf.NewEncoderWithSchema(
+		internal.AvroSchemaCache.Get(key),
+		out, ocf.WithMetadata(map[string][]byte{
+			"format-version": []byte(strconv.Itoa(version)),
+		}),
+		ocf.WithCodec(ocf.Deflate),
+	)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if err := enc.Encode(entry); err != nil {
+			return err
+		}
+	}
+
+	return enc.Close()
+}
+
 // ManifestEntryStatus defines constants for the entry status of
 // existing, added or deleted.
 type ManifestEntryStatus int8
@@ -625,6 +719,18 @@ func avroColMapToMap[K comparable, V any](c *[]colMap[K, V]) map[K]V {
 		out[data.Key] = data.Value
 	}
 	return out
+}
+
+func mapToAvroColMap[K comparable, V any](m map[K]V) *[]colMap[K, V] {
+	if m == nil {
+		return nil
+	}
+
+	out := make([]colMap[K, V], 0, len(m))
+	for k, v := range m {
+		out = append(out, colMap[K, V]{Key: k, Value: v})
+	}
+	return &out
 }
 
 func avroPartitionData(input map[string]any) map[string]any {
@@ -792,17 +898,40 @@ func (d *dataFile) EqualityFieldIDs() []int {
 	if d.EqualityIDs == nil {
 		return nil
 	}
-	return d.EqualityFieldIDs()
+	return *d.EqualityIDs
 }
 
 func (d *dataFile) SortOrderID() *int { return d.SortOrder }
+
+// ManifestEntryV1Builder is a helper for building a V1 manifest entry
+// struct which will conform to the ManifestEntry interface.
+type ManifestEntryV1Builder struct {
+	m *manifestEntryV1
+}
+
+// NewManifestEntryV1Builder is passed all of the required fields and then allows
+// all of the optional fields to be set by calling the corresponding methods
+// before calling [ManifestEntryV1Builder.Build] to construct the object.
+func NewManifestEntryV1Builder(status ManifestEntryStatus, snapshotID int64, data DataFile) (*ManifestEntryV1Builder, error) {
+	return &ManifestEntryV1Builder{
+		m: &manifestEntryV1{
+			EntryStatus: status,
+			Snapshot:    snapshotID,
+			Data:        data,
+		},
+	}, nil
+}
+
+func (b *ManifestEntryV1Builder) Build() ManifestEntry {
+	return b.m
+}
 
 type manifestEntryV1 struct {
 	EntryStatus ManifestEntryStatus `avro:"status"`
 	Snapshot    int64               `avro:"snapshot_id"`
 	SeqNum      *int64
 	FileSeqNum  *int64
-	Data        dataFile `avro:"data_file"`
+	Data        DataFile `avro:"data_file"`
 }
 
 type fallbackManifestEntryV1 struct {
@@ -831,14 +960,53 @@ func (m *manifestEntryV1) FileSequenceNum() *int64 {
 	return m.FileSeqNum
 }
 
-func (m *manifestEntryV1) DataFile() DataFile { return &m.Data }
+func (m *manifestEntryV1) DataFile() DataFile { return m.Data }
+
+// ManifestEntryV2Builder is a helper for building a V2 manifest entry
+// struct which will conform to the ManifestEntry interface.
+type ManifestEntryV2Builder struct {
+	m *manifestEntryV2
+}
+
+// NewManifestEntryV2Builder is passed all of the required fields and then allows
+// all of the optional fields to be set by calling the corresponding methods
+// before calling [ManifestEntryV2Builder.Build] to construct the object.
+func NewManifestEntryV2Builder(status ManifestEntryStatus, snapshotID int64, data DataFile) *ManifestEntryV2Builder {
+	return &ManifestEntryV2Builder{
+		m: &manifestEntryV2{
+			EntryStatus: status,
+			Snapshot:    &snapshotID,
+			Data:        data,
+		},
+	}
+}
+
+// SequenceNum sets the sequence number for the manifest entry.
+func (b *ManifestEntryV2Builder) SequenceNum(num int64) *ManifestEntryV2Builder {
+	b.m.SeqNum = &num
+	return b
+}
+
+// FileSequenceNum sets the file sequence number for the manifest entry.
+func (b *ManifestEntryV2Builder) FileSequenceNum(num int64) *ManifestEntryV2Builder {
+	b.m.FileSeqNum = &num
+	return b
+}
+
+// Build returns the constructed manifest entry, after calling Build this
+// builder should not be used further as we avoid copying by just returning
+// a pointer to the constructed manifest entry. Further calls to the modifier
+// methods after calling build would modify the constructed ManifestEntry.
+func (b *ManifestEntryV2Builder) Build() ManifestEntry {
+	return b.m
+}
 
 type manifestEntryV2 struct {
 	EntryStatus ManifestEntryStatus `avro:"status"`
 	Snapshot    *int64              `avro:"snapshot_id"`
 	SeqNum      *int64              `avro:"sequence_number"`
 	FileSeqNum  *int64              `avro:"file_sequence_number"`
-	Data        dataFile            `avro:"data_file"`
+	Data        DataFile            `avro:"data_file"`
 }
 
 func (m *manifestEntryV2) inheritSeqNum(manifest ManifestFile) {
@@ -876,7 +1044,138 @@ func (m *manifestEntryV2) FileSequenceNum() *int64 {
 	return m.FileSeqNum
 }
 
-func (m *manifestEntryV2) DataFile() DataFile { return &m.Data }
+func (m *manifestEntryV2) DataFile() DataFile { return m.Data }
+
+// DataFileBuilder is a helper for building a data file struct which will
+// conform to the DataFile interface.
+type DataFileBuilder struct {
+	d *dataFile
+}
+
+// NewDataFileBuilder is passed all of the required fields and then allows
+// all of the optional fields to be set by calling the corresponding methods
+// before calling [DataFileBuilder.Build] to construct the object.
+func NewDataFileBuilder(
+	content ManifestEntryContent,
+	path string,
+	format FileFormat,
+	partitionData map[string]any,
+	recordCount int64,
+	fileSize int64,
+) (*DataFileBuilder, error) {
+	if content != EntryContentData && content != EntryContentPosDeletes && content != EntryContentEqDeletes {
+		return nil, fmt.Errorf(
+			"%w: content must be one of %s, %s, or %s",
+			ErrInvalidArgument, EntryContentData, EntryContentPosDeletes, EntryContentEqDeletes,
+		)
+	}
+
+	if path == "" {
+		return nil, fmt.Errorf("%w: path cannot be empty", ErrInvalidArgument)
+	}
+
+	if format != AvroFile && format != OrcFile && format != ParquetFile {
+		return nil, fmt.Errorf(
+			"%w: format must be one of %s, %s, or %s",
+			ErrInvalidArgument, AvroFile, OrcFile, ParquetFile,
+		)
+	}
+
+	if recordCount <= 0 {
+		return nil, fmt.Errorf("%w: record count must be greater than 0", ErrInvalidArgument)
+	}
+
+	if fileSize <= 0 {
+		return nil, fmt.Errorf("%w: file size must be greater than 0", ErrInvalidArgument)
+	}
+
+	return &DataFileBuilder{
+		d: &dataFile{
+			Content:       content,
+			Path:          path,
+			Format:        format,
+			PartitionData: partitionData,
+			RecordCount:   recordCount,
+			FileSize:      fileSize,
+		},
+	}, nil
+}
+
+// BlockSizeInBytes sets the block size in bytes for the data file. Deprecated in v2.
+func (b *DataFileBuilder) BlockSizeInBytes(size int64) *DataFileBuilder {
+	b.d.BlockSizeInBytes = size
+	return b
+}
+
+// ColumnSizes sets the column sizes for the data file.
+func (b *DataFileBuilder) ColumnSizes(sizes map[int]int64) *DataFileBuilder {
+	b.d.ColSizes = mapToAvroColMap(sizes)
+	return b
+}
+
+// ValueCounts sets the value counts for the data file.
+func (b *DataFileBuilder) ValueCounts(counts map[int]int64) *DataFileBuilder {
+	b.d.ValCounts = mapToAvroColMap(counts)
+	return b
+}
+
+// NullValueCounts sets the null value counts for the data file.
+func (b *DataFileBuilder) NullValueCounts(counts map[int]int64) *DataFileBuilder {
+	b.d.NullCounts = mapToAvroColMap(counts)
+	return b
+}
+
+// NaNValueCounts sets the NaN value counts for the data file.
+func (b *DataFileBuilder) NaNValueCounts(counts map[int]int64) *DataFileBuilder {
+	b.d.NaNCounts = mapToAvroColMap(counts)
+	return b
+}
+
+// DistinctValueCounts sets the distinct value counts for the data file.
+func (b *DataFileBuilder) DistinctValueCounts(counts map[int]int64) *DataFileBuilder {
+	b.d.DistinctCounts = mapToAvroColMap(counts)
+	return b
+}
+
+// LowerBoundValues sets the lower bound values for the data file.
+func (b *DataFileBuilder) LowerBoundValues(bounds map[int][]byte) *DataFileBuilder {
+	b.d.LowerBounds = mapToAvroColMap(bounds)
+	return b
+}
+
+// UpperBoundValues sets the upper bound values for the data file.
+func (b *DataFileBuilder) UpperBoundValues(bounds map[int][]byte) *DataFileBuilder {
+	b.d.UpperBounds = mapToAvroColMap(bounds)
+	return b
+}
+
+// KeyMetadata sets the key metadata for the data file.
+func (b *DataFileBuilder) KeyMetadata(key []byte) *DataFileBuilder {
+	b.d.Key = &key
+	return b
+}
+
+// SplitOffsets sets the split offsets for the data file.
+func (b *DataFileBuilder) SplitOffsets(offsets []int64) *DataFileBuilder {
+	b.d.Splits = &offsets
+	return b
+}
+
+// EqualityFieldIDs sets the equality field ids for the data file.
+func (b *DataFileBuilder) EqualityFieldIDs(ids []int) *DataFileBuilder {
+	b.d.EqualityIDs = &ids
+	return b
+}
+
+// SortOrderID sets the sort order id for the data file.
+func (b *DataFileBuilder) SortOrderID(id int) *DataFileBuilder {
+	b.d.SortOrder = &id
+	return b
+}
+
+func (b *DataFileBuilder) Build() DataFile {
+	return b.d
+}
 
 // DataFile is the interface for reading the information about a
 // given data file indicated by an entry in a manifest list.
