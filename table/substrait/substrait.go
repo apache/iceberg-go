@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/iceberg-go"
 	"github.com/substrait-io/substrait-go/expr"
 	"github.com/substrait-io/substrait-go/extensions"
@@ -44,22 +45,32 @@ func init() {
 	}
 }
 
-func ConvertExpr(schema *iceberg.Schema, e iceberg.BooleanExpression) (expr.Expression, error) {
+func NewExtensionSet() exprs.ExtensionIDSet {
+	return exprs.NewExtensionSetDefault(expr.NewEmptyExtensionRegistry(&collection))
+}
+
+// ConvertExpr binds the provided expression to the given schema and converts it to a
+// substrait expression so that it can be utilized for computation.
+func ConvertExpr(schema *iceberg.Schema, e iceberg.BooleanExpression) (*expr.ExtensionRegistry, expr.Expression, error) {
 	base, err := ConvertSchema(schema)
 	if err != nil {
-		return nil, err
-	}
+		return nil, nil, err
+	}	
 
 	reg := expr.NewEmptyExtensionRegistry(&extensions.DefaultCollection)
 
 	bldr := expr.ExprBuilder{Reg: reg, BaseSchema: &base.Struct}
-	b, err := iceberg.VisitExpr(e, &toSubstraitExpr{bldr: bldr})
+	b, err := iceberg.VisitExpr(e, &toSubstraitExpr{bldr: bldr, schema: schema})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return b.BuildExpr()
+
+	out, err := b.BuildExpr()
+	return &reg, out, err
 }
 
+// ConvertSchema converts an Iceberg schema to a substrait NamedStruct using
+// the appropriate types and column names.
 func ConvertSchema(schema *iceberg.Schema) (res types.NamedStruct, err error) {
 	var typ types.Type
 
@@ -167,7 +178,8 @@ var (
 )
 
 type toSubstraitExpr struct {
-	bldr expr.ExprBuilder
+	schema *iceberg.Schema
+	bldr   expr.ExprBuilder
 }
 
 func (t *toSubstraitExpr) VisitTrue() expr.Builder {
@@ -226,7 +238,7 @@ func toFixedLiteral(v iceberg.FixedLiteral) expr.Literal {
 	return expr.NewFixedBinaryLiteral(types.FixedBinary(v), false)
 }
 
-func toSubstraitLiteral(lit iceberg.Literal) expr.Literal {
+func toSubstraitLiteral(typ iceberg.Type, lit iceberg.Literal) expr.Literal {
 	switch lit := lit.(type) {
 	case iceberg.BoolLiteral:
 		return toPrimitiveSubstraitLiteral(bool(lit))
@@ -241,6 +253,9 @@ func toSubstraitLiteral(lit iceberg.Literal) expr.Literal {
 	case iceberg.StringLiteral:
 		return toPrimitiveSubstraitLiteral(string(lit))
 	case iceberg.TimestampLiteral:
+		if typ.Equals(iceberg.PrimitiveTypes.TimestampTz) {
+			return toPrimitiveSubstraitLiteral(types.TimestampTz(lit))
+		}
 		return toPrimitiveSubstraitLiteral(types.Timestamp(lit))
 	case iceberg.DateLiteral:
 		return toPrimitiveSubstraitLiteral(types.Date(lit))
@@ -258,20 +273,25 @@ func toSubstraitLiteral(lit iceberg.Literal) expr.Literal {
 	panic(fmt.Errorf("invalid literal type: %s", lit.Type()))
 }
 
-func toSubstraitLiteralSet(lits []iceberg.Literal) expr.ListLiteralValue {
+func toSubstraitLiteralSet(typ iceberg.Type, lits []iceberg.Literal) expr.ListLiteralValue {
 	if len(lits) == 0 {
 		return nil
 	}
 
 	out := make([]expr.Literal, len(lits))
 	for i, l := range lits {
-		out[i] = toSubstraitLiteral(l)
+		out[i] = toSubstraitLiteral(typ, l)
 	}
 	return out
 }
 
-func getRef(ref iceberg.BoundReference) expr.Reference {
-	path := ref.PosPath()
+func (t *toSubstraitExpr) getRef(ref iceberg.BoundReference) expr.Reference {
+	updatedRef, err := iceberg.Reference(ref.Field().Name).Bind(t.schema, true)
+	if err != nil {
+		panic(err)
+	}
+
+	path := updatedRef.Ref().PosPath()
 	out := expr.NewStructFieldRef(int32(path[0]))
 	if len(path) == 1 {
 		return out
@@ -286,8 +306,8 @@ func getRef(ref iceberg.BoundReference) expr.Reference {
 }
 
 func (t *toSubstraitExpr) makeSetFunc(id extensions.ID, term iceberg.BoundTerm, lits iceberg.Set[iceberg.Literal]) expr.Builder {
-	val := toSubstraitLiteralSet(lits.Members())
-	return t.bldr.ScalarFunc(id).Args(t.bldr.RootRef(getRef(term.Ref())),
+	val := toSubstraitLiteralSet(term.Type(), lits.Members())
+	return t.bldr.ScalarFunc(id).Args(t.bldr.RootRef(t.getRef(term.Ref())),
 		t.bldr.Literal(expr.NewNestedLiteral(val, false)))
 }
 
@@ -300,7 +320,7 @@ func (t *toSubstraitExpr) VisitNotIn(term iceberg.BoundTerm, lits iceberg.Set[ic
 }
 
 func (t *toSubstraitExpr) makeRefFunc(id extensions.ID, term iceberg.BoundTerm) expr.Builder {
-	return t.bldr.ScalarFunc(id).Args(t.bldr.RootRef(getRef(term.Ref())))
+	return t.bldr.ScalarFunc(id).Args(t.bldr.RootRef(t.getRef(term.Ref())))
 }
 
 func (t *toSubstraitExpr) VisitIsNan(term iceberg.BoundTerm) expr.Builder {
@@ -321,8 +341,8 @@ func (t *toSubstraitExpr) VisitNotNull(term iceberg.BoundTerm) expr.Builder {
 }
 
 func (t *toSubstraitExpr) makeLitFunc(id extensions.ID, term iceberg.BoundTerm, lit iceberg.Literal) expr.Builder {
-	return t.bldr.ScalarFunc(id).Args(t.bldr.RootRef(getRef(term.Ref())),
-		t.bldr.Literal(toSubstraitLiteral(lit)))
+	return t.bldr.ScalarFunc(id).Args(t.bldr.RootRef(t.getRef(term.Ref())),
+		t.bldr.Literal(toSubstraitLiteral(term.Type(), lit)))
 }
 
 func (t *toSubstraitExpr) VisitEqual(term iceberg.BoundTerm, lit iceberg.Literal) expr.Builder {

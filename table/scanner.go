@@ -21,13 +21,18 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"iter"
 	"runtime"
 	"slices"
 	"sync"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
 )
+
+const ScanNoLimit = -1
 
 type keyDefaultMap[K comparable, V any] struct {
 	defaultFactory func(K) V
@@ -52,15 +57,15 @@ func (k *keyDefaultMap[K, V]) Get(key K) V {
 	return v
 }
 
-func newKeyDefaultMap[K comparable, V any](factory func(K) V) keyDefaultMap[K, V] {
-	return keyDefaultMap[K, V]{
+func newKeyDefaultMap[K comparable, V any](factory func(K) V) *keyDefaultMap[K, V] {
+	return &keyDefaultMap[K, V]{
 		data:           make(map[K]V),
 		defaultFactory: factory,
 	}
 }
 
-func newKeyDefaultMapWrapErr[K comparable, V any](factory func(K) (V, error)) keyDefaultMap[K, V] {
-	return keyDefaultMap[K, V]{
+func newKeyDefaultMapWrapErr[K comparable, V any](factory func(K) (V, error)) *keyDefaultMap[K, V] {
+	return &keyDefaultMap[K, V]{
 		data: make(map[K]V),
 		defaultFactory: func(k K) V {
 			v, err := factory(k)
@@ -124,8 +129,15 @@ type Scan struct {
 	caseSensitive  bool
 	snapshotID     *int64
 	options        iceberg.Properties
+	limit          int64
 
-	partitionFilters keyDefaultMap[int, iceberg.BooleanExpression]
+	partitionFilters *keyDefaultMap[int, iceberg.BooleanExpression]
+}
+
+func (s *Scan) UseRowLimit(n int64) *Scan {
+	out := *s
+	out.limit = n
+	return &out
 }
 
 func (s *Scan) UseRef(name string) (*Scan, error) {
@@ -289,7 +301,7 @@ func (s *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	dataEntries := make([]iceberg.ManifestEntry, 0)
 	positionalDeleteEntries := make([]iceberg.ManifestEntry, 0)
 
-	nworkers := runtime.NumCPU()
+	nworkers := min(runtime.NumCPU(), len(manifestList))
 	var wg sync.WaitGroup
 
 	manifestChan := make(chan iceberg.ManifestFile, len(manifestList))
@@ -392,4 +404,53 @@ type FileScanTask struct {
 	File          iceberg.DataFile
 	DeleteFiles   []iceberg.DataFile
 	Start, Length int64
+}
+
+func (s *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[arrow.Record, error], error) {
+	tasks, err := s.PlanFiles(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var boundFilter iceberg.BooleanExpression
+	if s.rowFilter != nil {
+		boundFilter, err = iceberg.BindExpr(s.metadata.CurrentSchema(), s.rowFilter, s.caseSensitive)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	schema, err := s.Projection()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return (&arrowScan{
+		metadata:        s.metadata,
+		fs:              s.io,
+		projectedSchema: schema,
+		boundRowFilter:  boundFilter,
+		caseSensitive:   s.caseSensitive,
+		rowLimit:        s.limit,
+		options:         s.options,
+	}).GetRecords(ctx, tasks)
+}
+
+func (s *Scan) ToArrowTable(ctx context.Context) (arrow.Table, error) {
+	schema, itr, err := s.ToArrowRecords(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	records := make([]arrow.Record, 0)
+	for rec, err := range itr {
+		if err != nil {
+			return nil, err
+		}
+
+		defer rec.Release()
+		records = append(records, rec)
+	}
+
+	return array.NewTableFromRecords(schema, records), nil
 }

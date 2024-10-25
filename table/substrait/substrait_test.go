@@ -70,7 +70,7 @@ func TestRefTypes(t *testing.T) {
 
 			idx := ref.(iceberg.BoundPredicate).Term().Ref().Pos()
 
-			converted, err := substrait.ConvertExpr(sc, ref)
+			_, converted, err := substrait.ConvertExpr(sc, ref)
 			require.NoError(t, err)
 
 			assert.Equal(t, fmt.Sprintf("is_null(.field(%d) => %s) => boolean", idx,
@@ -109,10 +109,6 @@ func TestExprs(t *testing.T) {
 		{iceberg.GreaterThan(ref, "hello"), tableSchemaSimple, "gt(.field(0) => string?, string(hello)) => boolean?"},
 		{iceberg.LessThanEqual(ref, "hello"), tableSchemaSimple, "lte(.field(0) => string?, string(hello)) => boolean?"},
 		{iceberg.LessThan(ref, "hello"), tableSchemaSimple, "lt(.field(0) => string?, string(hello)) => boolean?"},
-		// {iceberg.IsIn(ref, "hello", "world").(iceberg.UnboundPredicate), tableSchemaSimple,
-		// 	"is_in(.field(0) => string?, list<string>([string(hello) string(world)])) => boolean?"},
-		// {iceberg.NotIn(ref, "hello", "world").(iceberg.UnboundPredicate), tableSchemaSimple,
-		// 	"not(is_in(.field(0) => string?, list<string>([string(hello) string(world)])) => boolean?) => boolean?"},
 		{iceberg.StartsWith(ref, "he"), tableSchemaSimple, "starts_with(.field(0) => string?, string(he)) => boolean?"},
 		{iceberg.NotStartsWith(ref, "he"), tableSchemaSimple, "not(starts_with(.field(0) => string?, string(he)) => boolean?) => boolean?"},
 		{iceberg.NewAnd(iceberg.EqualTo(ref, "hello"), iceberg.IsNull(ref)), tableSchemaSimple,
@@ -128,7 +124,7 @@ func TestExprs(t *testing.T) {
 			bound, err := iceberg.BindExpr(tt.schema, tt.e, false)
 			require.NoError(t, err)
 
-			result, err := substrait.ConvertExpr(tt.schema, bound)
+			_, result, err := substrait.ConvertExpr(tt.schema, bound)
 			require.NoError(t, err)
 			assert.Equal(t, tt.expected, result.String())
 		})

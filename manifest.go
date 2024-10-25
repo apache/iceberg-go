@@ -363,7 +363,7 @@ func (m *manifestFileV2) FetchEntries(fs iceio.IO, discardDeleted bool) ([]Manif
 	return fetchManifestEntries(m, fs, discardDeleted)
 }
 
-func getFieldIDMap(sc avro.Schema) map[string]int {
+func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType) {
 	getField := func(rs *avro.RecordSchema, name string) *avro.Field {
 		for _, f := range rs.Fields() {
 			if f.Name() == name {
@@ -374,19 +374,31 @@ func getFieldIDMap(sc avro.Schema) map[string]int {
 	}
 
 	result := make(map[string]int)
+	logicalTypes := make(map[int]avro.LogicalType)
 	entryField := getField(sc.(*avro.RecordSchema), "data_file")
 	partitionField := getField(entryField.Type().(*avro.RecordSchema), "partition")
 
 	for _, field := range partitionField.Type().(*avro.RecordSchema).Fields() {
 		if fid, ok := field.Prop("field-id").(float64); ok {
 			result[field.Name()] = int(fid)
+			avroTyp := field.Type()
+			if us, ok := avroTyp.(*avro.UnionSchema); ok {
+				for _, t := range us.Types() {
+					avroTyp = t
+				}
+			}
+
+			if ps, ok := avroTyp.(*avro.PrimitiveSchema); ok && ps.Logical() != nil {
+				logicalTypes[int(fid)] = ps.Logical().Type()
+			}
 		}
 	}
-	return result
+	return result, logicalTypes
 }
 
 type hasFieldToIDMap interface {
 	setFieldNameToIDMap(map[string]int)
+	setFieldIDToLogicalTypeMap(map[int]avro.LogicalType)
 }
 
 func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error) {
@@ -407,7 +419,7 @@ func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]M
 		return nil, err
 	}
 
-	fieldNameToID := getFieldIDMap(sc)
+	fieldNameToID, fieldIDToLogicalType := getFieldIDMap(sc)
 	isVer1, isFallback := true, false
 	if string(metadata["format-version"]) == "2" {
 		isVer1 = false
@@ -447,6 +459,7 @@ func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]M
 			tmp.inheritSeqNum(m)
 			if fieldToIDMap, ok := tmp.DataFile().(hasFieldToIDMap); ok {
 				fieldToIDMap.setFieldNameToIDMap(fieldNameToID)
+				fieldToIDMap.setFieldIDToLogicalTypeMap(fieldIDToLogicalType)
 			}
 			results = append(results, tmp)
 		}
@@ -627,52 +640,29 @@ func avroColMapToMap[K comparable, V any](c *[]colMap[K, V]) map[K]V {
 	return out
 }
 
-func avroPartitionData(input map[string]any) map[string]any {
-	// hambra/avro/v2 will unmarshal a map[string]any such that
-	// each entry will actually be a map[string]any with the key being
-	// the avro type, not the field name.
-	//
-	// This means that partition data that looks like this:
-	//
-	//  [{"field-id": 1000, "name": "ts", "type": {"type": "int", "logicalType": "date"}}]
-	//
-	// Becomes:
-	//
-	//  map[string]any{"ts": map[string]any{"int.date": time.Time{}}}
-	//
-	// so we need to simplify our map and make the partition data handling easier
+func avroPartitionData(input map[string]any, nameToID map[string]int, logicalTypes map[int]avro.LogicalType) map[string]any {
 	out := make(map[string]any)
 	for k, v := range input {
-		switch v := v.(type) {
-		case map[string]any:
-			for typeName, val := range v {
-				switch typeName {
-				case "int.date":
-					out[k] = Date(val.(time.Time).Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
-				case "int.time-millis":
-					out[k] = Time(val.(time.Duration).Microseconds())
-				case "long.time-micros":
-					out[k] = Time(val.(time.Duration).Microseconds())
-				case "long.timestamp-millis":
-					out[k] = Timestamp(val.(time.Time).UTC().UnixMicro())
-				case "long.timestamp-micros":
-					out[k] = Timestamp(val.(time.Time).UTC().UnixMicro())
-				case "bytes.decimal":
-					// not implemented yet
-				case "fixed.decimal":
-					// not implemented yet
+		if id, ok := nameToID[k]; ok {
+			if logical, ok := logicalTypes[id]; ok {
+				switch logical {
+				case avro.Date:
+					out[k] = Date(v.(time.Time).Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
+				case avro.TimeMillis:
+					out[k] = Time(v.(time.Duration).Microseconds())
+				case avro.TimeMicros:
+					out[k] = Time(v.(time.Duration).Microseconds())
+				case avro.TimestampMillis:
+					out[k] = Timestamp(v.(time.Time).UTC().UnixMicro())
+				case avro.TimestampMicros:
+					out[k] = Timestamp(v.(time.Time).UTC().UnixMicro())
 				default:
-					out[k] = val
+					out[k] = v
 				}
-			}
-		default:
-			switch v := v.(type) {
-			case time.Time:
-				out[k] = Timestamp(v.UTC().UnixMicro())
-			default:
-				out[k] = v
+				continue
 			}
 		}
+		out[k] = v
 	}
 	return out
 }
@@ -708,7 +698,8 @@ type dataFile struct {
 	// not used for anything yet, but important to maintain the information
 	// for future development and updates such as when we get to writes,
 	// and scan planning
-	fieldNameToID map[string]int
+	fieldNameToID        map[string]int
+	fieldIDToLogicalType map[int]avro.LogicalType
 
 	initMaps sync.Once
 }
@@ -722,11 +713,14 @@ func (d *dataFile) initializeMapData() {
 		d.distinctCntMap = avroColMapToMap(d.DistinctCounts)
 		d.lowerBoundMap = avroColMapToMap(d.LowerBounds)
 		d.upperBoundMap = avroColMapToMap(d.UpperBounds)
-		d.PartitionData = avroPartitionData(d.PartitionData)
+		d.PartitionData = avroPartitionData(d.PartitionData, d.fieldNameToID, d.fieldIDToLogicalType)
 	})
 }
 
 func (d *dataFile) setFieldNameToIDMap(m map[string]int) { d.fieldNameToID = m }
+func (d *dataFile) setFieldIDToLogicalTypeMap(m map[int]avro.LogicalType) {
+	d.fieldIDToLogicalType = m
+}
 
 func (d *dataFile) ContentType() ManifestEntryContent { return d.Content }
 func (d *dataFile) FilePath() string                  { return d.Path }

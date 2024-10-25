@@ -444,3 +444,53 @@ func (expressionFieldIDs) VisitBound(pred BoundPredicate) map[int]struct{} {
 		pred.Ref().Field().ID: {},
 	}
 }
+
+func TranslateColumnNames(expr BooleanExpression, fileSchema *Schema) (BooleanExpression, error) {
+	return VisitExpr(expr, columnNameTranslator{fileSchema: fileSchema})
+}
+
+type columnNameTranslator struct {
+	fileSchema *Schema
+}
+
+func (columnNameTranslator) VisitTrue() BooleanExpression  { return AlwaysTrue{} }
+func (columnNameTranslator) VisitFalse() BooleanExpression { return AlwaysFalse{} }
+func (columnNameTranslator) VisitNot(child BooleanExpression) BooleanExpression {
+	return NewNot(child)
+}
+
+func (columnNameTranslator) VisitAnd(left, right BooleanExpression) BooleanExpression {
+	return NewAnd(left, right)
+}
+
+func (columnNameTranslator) VisitOr(left, right BooleanExpression) BooleanExpression {
+	return NewOr(left, right)
+}
+
+func (columnNameTranslator) VisitUnbound(pred UnboundPredicate) BooleanExpression {
+	panic(fmt.Errorf("%w: expected bound predicate, got: %s", ErrInvalidArgument, pred.Term()))
+}
+
+func (c columnNameTranslator) VisitBound(pred BoundPredicate) BooleanExpression {
+	fileColName, found := c.fileSchema.FindColumnName(pred.Term().Ref().Field().ID)
+	if !found {
+		// in the case of schema evolution, the column might not be present
+		// in the file schema when reading older data
+		if pred.Op() == OpIsNull {
+			return AlwaysTrue{}
+		}
+		return AlwaysFalse{}
+	}
+
+	ref := Reference(fileColName)
+	switch p := pred.(type) {
+	case BoundUnaryPredicate:
+		return p.AsUnbound(ref)
+	case BoundLiteralPredicate:
+		return p.AsUnbound(ref, p.Literal())
+	case BoundSetPredicate:
+		return p.AsUnbound(ref, p.Literals().Members())
+	default:
+		panic(fmt.Errorf("%w: unsupported predicate: %s", ErrNotImplemented, pred))
+	}
+}
