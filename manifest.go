@@ -216,6 +216,11 @@ func (m *manifestFileV1) FetchEntries(fs iceio.IO, discardDeleted bool) ([]Manif
 	return fetchManifestEntries(m, fs, discardDeleted)
 }
 
+// WriteManifestEntries writes a list of manifest entries to an avro file.
+func (m *manifestFileV1) WriteManifestEntries(out io.Writer, entries []ManifestEntry) error {
+	return writeManifestEntries(out, entries, m.Version())
+}
+
 // ManifestV2Builder is a helper for building a V2 manifest file
 // struct which will conform to the ManifestFile interface.
 type ManifestV2Builder struct {
@@ -364,6 +369,11 @@ func (m *manifestFileV2) HasExistingFiles() bool {
 
 func (m *manifestFileV2) FetchEntries(fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error) {
 	return fetchManifestEntries(m, fs, discardDeleted)
+}
+
+// WriteManifestEntries writes a list of manifest entries to an avro file.
+func (m *manifestFileV2) WriteManifestEntries(out io.Writer, entries []ManifestEntry) error {
+	return writeManifestEntries(out, entries, m.Version())
 }
 
 func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType) {
@@ -583,18 +593,18 @@ func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
 	return out, dec.Error()
 }
 
-// WriteManifestListV2 writes a list of v2 manifest files to an avro file.
-func WriteManifestListV2(out io.Writer, files []ManifestFile) error {
-	return writeManifestList(out, files, 2)
-}
+// WriteManifestList writes a list of v2 manifest files to an avro file.
+func WriteManifestList(out io.Writer, files []ManifestFile) error {
+	var version int
+	if len(files) > 0 {
+		version = files[0].Version()
+	} else {
+		// No files to write
+		return nil
+	}
 
-// WriteManifestListV1 writes a list of v1 manifest files to an avro file.
-func WriteManifestListV1(out io.Writer, files []ManifestFile) error {
-	return writeManifestList(out, files, 1)
-}
-
-func writeManifestList(out io.Writer, files []ManifestFile, version int) error {
 	for _, file := range files {
+
 		if file.Version() != version {
 			return fmt.Errorf(
 				"%w: ManifestFile '%s' has non-matching version %d instead of %d",
@@ -631,16 +641,6 @@ func writeManifestList(out io.Writer, files []ManifestFile, version int) error {
 	}
 
 	return enc.Close()
-}
-
-// WriteManifestEntriesV2 writes a list of v2 manifest entries to an avro file.
-func WriteManifestEntriesV2(out io.Writer, entries []ManifestEntry) error {
-	return writeManifestEntries(out, entries, 2)
-}
-
-// WriteManifestEntriesV1 writes a list of v1 manifest entries to an avro file.
-func WriteManifestEntriesV1(out io.Writer, entries []ManifestEntry) error {
-	return writeManifestEntries(out, entries, 1)
 }
 
 func writeManifestEntries(out io.Writer, entries []ManifestEntry, version int) error {

@@ -378,8 +378,8 @@ type ManifestTestSuite struct {
 }
 
 func (m *ManifestTestSuite) writeManifestList() {
-	m.Require().NoError(WriteManifestListV1(&m.v1ManifestList, manifestFileRecordsV1))
-	m.Require().NoError(WriteManifestListV2(&m.v2ManifestList, manifestFileRecordsV2))
+	m.Require().NoError(WriteManifestList(&m.v1ManifestList, manifestFileRecordsV1))
+	m.Require().NoError(WriteManifestList(&m.v2ManifestList, manifestFileRecordsV2))
 }
 
 func (m *ManifestTestSuite) writeManifestEntries() {
@@ -393,8 +393,8 @@ func (m *ManifestTestSuite) writeManifestEntries() {
 		manifestEntryV2Recs[i] = rec
 	}
 
-	m.Require().NoError(WriteManifestEntriesV1(&m.v1ManifestEntries, manifestEntryV1Recs))
-	m.Require().NoError(WriteManifestEntriesV2(&m.v2ManifestEntries, manifestEntryV2Recs))
+	m.Require().NoError(writeManifestEntries(&m.v1ManifestEntries, manifestEntryV1Recs, 1))
+	m.Require().NoError(writeManifestEntries(&m.v2ManifestEntries, manifestEntryV2Recs, 2))
 }
 
 func (m *ManifestTestSuite) SetupSuite() {
