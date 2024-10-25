@@ -684,7 +684,7 @@ func newInclusiveMetricsEvaluator(s *iceberg.Schema, expr iceberg.BooleanExpress
 }
 
 func newParquetRowGroupStatsEvaluator(fileSchema *iceberg.Schema, expr iceberg.BooleanExpression,
-	caseSensitive bool, includeEmptyFiles bool) (func(*metadata.RowGroupMetaData, []int) (bool, error), error) {
+	includeEmptyFiles bool) (func(*metadata.RowGroupMetaData, []int) (bool, error), error) {
 
 	rewritten, err := iceberg.RewriteNotExpr(expr)
 	if err != nil {

@@ -18,7 +18,6 @@
 package table
 
 import (
-	"container/heap"
 	"context"
 	"io"
 	"iter"
@@ -31,7 +30,6 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/arrow-go/v18/arrow/memory"
-	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table/internal"
@@ -232,63 +230,127 @@ func (as *arrowScan) projectedFieldIDs() (set[int], error) {
 	return idset, nil
 }
 
-type enumerated[T any] struct {
-	value T
-	index int
-	last  bool
-}
-
-type pqueue[T any] struct {
-	queue   []*T
-	compare func(a, b *T) bool
-}
-
-func (pq *pqueue[T]) Len() int { return len(pq.queue) }
-func (pq *pqueue[T]) Less(i, j int) bool {
-	return pq.compare(pq.queue[i], pq.queue[j])
-}
-func (pq *pqueue[T]) Swap(i, j int) {
-	pq.queue[i], pq.queue[j] = pq.queue[j], pq.queue[i]
-}
-
-func (pq *pqueue[T]) Push(x any) {
-	pq.queue = append(pq.queue, x.(*T))
-}
-
-func (pq *pqueue[T]) Pop() any {
-	old := pq.queue
-	n := len(old)
-
-	item := old[n-1]
-	old[n-1] = nil
-	pq.queue = old[0 : n-1]
-	return item
-}
-
-func makeSequencedChan[T any](bufferSize uint, source <-chan T, comesAfter, isNext func(a, b *T) bool, initial T) <-chan T {
-	pq := pqueue[T]{queue: make([]*T, 0), compare: comesAfter}
-	heap.Init(&pq)
-	previous, out := &initial, make(chan T, bufferSize)
-	go func() {
-		defer close(out)
-		for val := range source {
-			heap.Push(&pq, &val)
-			for pq.Len() > 0 && isNext(previous, pq.queue[0]) {
-				previous = heap.Pop(&pq).(*T)
-				out <- *previous
-			}
-		}
-	}()
-	return out
-}
-
 type enumeratedRecord struct {
-	Record enumerated[arrow.Record]
-	Task   enumerated[FileScanTask]
+	Record internal.Enumerated[arrow.Record]
+	Task   internal.Enumerated[FileScanTask]
 	Err    error
 }
 
-func (as *arrowScan) recordsFromTask(ctx context.Context, task enumerated[FileScanTask], out chan<- enumeratedRecord, positionalDeletes []*arrow.Chunked) (err error) {
+func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile) (*iceberg.Schema, []int, internal.FileReader, error) {
+	ids, err := as.projectedFieldIDs()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	src, err := internal.GetFile(ctx, as.fs, file, false)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	rdr, err := src.GetReader(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	fileSchema, colIndices, err := rdr.PrunedSchema(ids)
+	if err != nil {
+		rdr.Close()
+		return nil, nil, nil, err
+	}
+
+	iceSchema, err := ArrowSchemaToIceberg(fileSchema, false, nil)
+	if err != nil {
+		rdr.Close()
+		return nil, nil, nil, err
+	}
+
+	return iceSchema, colIndices, rdr, nil
+}
+
+func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Schema) (func(arrow.Record) (arrow.Record, error), bool, error) {
+	if as.boundRowFilter == nil || as.boundRowFilter.Equals(iceberg.AlwaysTrue{}) {
+		return nil, false, nil
+	}
+
+	translatedFilter, err := iceberg.TranslateColumnNames(as.boundRowFilter, fileSchema)
+	if err != nil {
+		return nil, false, err
+	}
+
+	translatedFilter, err = iceberg.BindExpr(fileSchema, translatedFilter, as.caseSensitive)
+	if err != nil {
+		return nil, false, err
+	}
+
+	if !translatedFilter.Equals(iceberg.AlwaysTrue{}) {
+		extSet, recordFilter, err := substrait.ConvertExpr(fileSchema, translatedFilter)
+		if err != nil {
+			return nil, false, err
+		}
+
+		ctx = exprs.WithExtensionIDSet(ctx, exprs.NewExtensionSetDefault(*extSet))
+		return filterRecords(ctx, recordFilter), false, nil
+	}
+
+	return nil, translatedFilter.Equals(iceberg.AlwaysFalse{}), nil
+}
+
+func (as *arrowScan) processRecords(
+	ctx context.Context,
+	task internal.Enumerated[FileScanTask],
+	fileSchema *iceberg.Schema,
+	rdr internal.FileReader,
+	columns []int,
+	pipeline []func(arrow.Record) (arrow.Record, error),
+	out chan<- enumeratedRecord) error {
+
+	testRg, err := newParquetRowGroupStatsEvaluator(fileSchema, as.boundRowFilter, false)
+	if err != nil {
+		return err
+	}
+
+	recRdr, err := rdr.GetRecords(ctx, columns, testRg)
+	if err != nil {
+		return err
+	}
+	defer recRdr.Release()
+
+	var (
+		idx  int
+		prev arrow.Record
+	)
+
+	for recRdr.Next() {
+		if prev != nil {
+			out <- enumeratedRecord{Record: internal.Enumerated[arrow.Record]{
+				Value: prev, Index: idx, Last: false}, Task: task}
+			idx++
+		}
+
+		prev = recRdr.Record()
+		prev.Retain()
+
+		for _, f := range pipeline {
+			prev, err = f(prev)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	if prev != nil {
+		out <- enumeratedRecord{Record: internal.Enumerated[arrow.Record]{
+			Value: prev, Index: idx, Last: true}, Task: task}
+	}
+
+	if recRdr.Err() != nil && recRdr.Err() != io.EOF {
+		err = recRdr.Err()
+	}
+
+	return err
+}
+
+func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerated[FileScanTask], out chan<- enumeratedRecord, positionalDeletes []*arrow.Chunked) (err error) {
 	defer func() {
 		if err != nil {
 			out <- enumeratedRecord{Task: task, Err: err}
@@ -296,37 +358,14 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task enumerated[FileSc
 	}()
 
 	var (
-		ids set[int]
-		src internal.FileSource
-		rdr internal.FileReader
-
-		fileSchema *arrow.Schema
+		rdr        internal.FileReader
 		iceSchema  *iceberg.Schema
 		colIndices []int
+		filterFunc func(arrow.Record) (arrow.Record, error)
+		dropFile   bool
 	)
 
-	ids, err = as.projectedFieldIDs()
-	if err != nil {
-		return
-	}
-
-	src, err = internal.GetFile(ctx, as.fs, task.value.File, false)
-	if err != nil {
-		return
-	}
-
-	rdr, err = src.GetReader(ctx)
-	if err != nil {
-		return
-	}
-	defer rdr.Close()
-
-	fileSchema, colIndices, err = rdr.PrunedSchema(ids)
-	if err != nil {
-		return
-	}
-
-	iceSchema, err = ArrowSchemaToIceberg(fileSchema, false, nil)
+	iceSchema, colIndices, rdr, err = as.prepareToRead(ctx, task.Value.File)
 	if err != nil {
 		return
 	}
@@ -345,43 +384,24 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task enumerated[FileSc
 		pipeline = append(pipeline, processPositionalDeletes(ctx, deletes))
 	}
 
-	if as.boundRowFilter != nil && !as.boundRowFilter.Equals(iceberg.AlwaysTrue{}) {
-		var (
-			recordFilter     expr.Expression
-			extSet           *expr.ExtensionRegistry
-			translatedFilter iceberg.BooleanExpression
-		)
+	filterFunc, dropFile, err = as.getRecordFilter(ctx, iceSchema)
+	if err != nil {
+		return
+	}
 
-		translatedFilter, err = iceberg.TranslateColumnNames(as.boundRowFilter, iceSchema)
+	if dropFile {
+		var emptySchema *arrow.Schema
+		emptySchema, err = SchemaToArrowSchema(as.projectedSchema, nil, false, as.useLargeTypes)
 		if err != nil {
-			return
+			return err
 		}
+		out <- enumeratedRecord{Task: task, Record: internal.Enumerated[arrow.Record]{
+			Value: array.NewRecord(emptySchema, nil, 0), Index: 0, Last: true}}
+		return
+	}
 
-		translatedFilter, err = iceberg.BindExpr(iceSchema, translatedFilter, as.caseSensitive)
-		if err != nil {
-			return
-		}
-
-		if translatedFilter.Equals(iceberg.AlwaysFalse{}) {
-			var emptySchema *arrow.Schema
-			emptySchema, err = SchemaToArrowSchema(as.projectedSchema, nil, false, as.useLargeTypes)
-			if err != nil {
-				return err
-			}
-			out <- enumeratedRecord{Task: task, Record: enumerated[arrow.Record]{
-				value: array.NewRecord(emptySchema, nil, 0), index: 0, last: true}}
-			return
-		}
-
-		if !translatedFilter.Equals(iceberg.AlwaysTrue{}) {
-			extSet, recordFilter, err = substrait.ConvertExpr(iceSchema, translatedFilter)
-			if err != nil {
-				return
-			}
-
-			ctx = exprs.WithExtensionIDSet(ctx, exprs.NewExtensionSetDefault(*extSet))
-			pipeline = append(pipeline, filterRecords(ctx, recordFilter))
-		}
+	if filterFunc != nil {
+		pipeline = append(pipeline, filterFunc)
 	}
 
 	pipeline = append(pipeline, func(r arrow.Record) (arrow.Record, error) {
@@ -389,102 +409,16 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task enumerated[FileSc
 		return ToRequestedSchema(as.projectedSchema, iceSchema, r, false, false, as.useLargeTypes)
 	})
 
-	var (
-		idx  int
-		prev arrow.Record
-	)
-
-	var testRg func(*metadata.RowGroupMetaData, []int) (bool, error)
-	testRg, err = newParquetRowGroupStatsEvaluator(iceSchema, as.boundRowFilter, as.caseSensitive, false)
-	if err != nil {
-		return
-	}
-
-	var recRdr array.RecordReader
-	recRdr, err = rdr.GetRecords(ctx, colIndices, testRg)
-	if err != nil {
-		return
-	}
-	defer recRdr.Release()
-
-	for recRdr.Next() {
-		if prev != nil {
-			out <- enumeratedRecord{Record: enumerated[arrow.Record]{
-				value: prev, index: idx, last: false}, Task: task}
-			idx++
-		}
-
-		prev = recRdr.Record()
-		prev.Retain()
-
-		for _, f := range pipeline {
-			prev, err = f(prev)
-			if err != nil {
-				return
-			}
-		}
-	}
-
-	if prev != nil {
-		out <- enumeratedRecord{Record: enumerated[arrow.Record]{
-			value: prev, index: idx, last: true}, Task: task}
-	}
-
-	if recRdr.Err() != nil && recRdr.Err() != io.EOF {
-		err = recRdr.Err()
-	}
+	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, out)
 	return
 }
 
-func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks []FileScanTask, deletesPerFile map[string][]*arrow.Chunked) iter.Seq2[arrow.Record, error] {
-	extSet := substrait.NewExtensionSet()
-
-	ctx, cancel := context.WithCancel(exprs.WithExtensionIDSet(ctx, extSet))
-	taskChan := make(chan enumerated[FileScanTask], len(tasks))
-
-	// numWorkers := 1
-	numWorkers := min(runtime.NumCPU(), len(tasks))
-	records := make(chan enumeratedRecord, numWorkers)
-
-	var wg sync.WaitGroup
-	wg.Add(numWorkers)
-	for i := 0; i < numWorkers; i++ {
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case task, ok := <-taskChan:
-					if !ok {
-						return
-					}
-
-					if err := as.recordsFromTask(ctx, task, records,
-						deletesPerFile[task.value.File.FilePath()]); err != nil {
-						return
-					}
-				}
-			}
-		}()
-	}
-
-	go func() {
-		for i, t := range tasks {
-			taskChan <- enumerated[FileScanTask]{
-				value: t, index: i, last: i == len(tasks)-1}
-		}
-		close(taskChan)
-
-		wg.Wait()
-		close(records)
-	}()
-
+func createIterator(ctx context.Context, numWorkers uint, records <-chan enumeratedRecord, deletesPerFile map[string][]*arrow.Chunked, cancel context.CancelFunc, rowLimit int64) iter.Seq2[arrow.Record, error] {
 	isBeforeAny := func(batch enumeratedRecord) bool {
-		return batch.Task.index < 0
+		return batch.Task.Index < 0
 	}
 
-	sequenced := makeSequencedChan(uint(numWorkers), records,
+	sequenced := internal.MakeSequencedChan(uint(numWorkers), records,
 		func(left, right *enumeratedRecord) bool {
 			switch {
 			case isBeforeAny(*left):
@@ -493,31 +427,31 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 				return false
 			case left.Err != nil || right.Err != nil:
 				return true
-			case left.Task.index == right.Task.index:
-				return left.Record.index < right.Record.index
+			case left.Task.Index == right.Task.Index:
+				return left.Record.Index < right.Record.Index
 			default:
-				return left.Task.index < right.Task.index
+				return left.Task.Index < right.Task.Index
 			}
 		}, func(prev, next *enumeratedRecord) bool {
 			switch {
 			case isBeforeAny(*prev):
-				return next.Task.index == 0 && next.Record.index == 0
+				return next.Task.Index == 0 && next.Record.Index == 0
 			case next.Err != nil:
 				return true
-			case prev.Task.index == next.Task.index:
-				return next.Record.index == prev.Record.index+1
+			case prev.Task.Index == next.Task.Index:
+				return next.Record.Index == prev.Record.Index+1
 			default:
-				return next.Task.index == prev.Task.index+1 &&
-					prev.Record.last && next.Record.index == 0
+				return next.Task.Index == prev.Task.Index+1 &&
+					prev.Record.Last && next.Record.Index == 0
 			}
-		}, enumeratedRecord{Task: enumerated[FileScanTask]{index: -1}})
+		}, enumeratedRecord{Task: internal.Enumerated[FileScanTask]{Index: -1}})
 
 	totalRowCount := int64(0)
 	return func(yield func(arrow.Record, error) bool) {
 		defer func() {
 			for rec := range sequenced {
-				if rec.Record.value != nil {
-					rec.Record.value.Release()
+				if rec.Record.Value != nil {
+					rec.Record.Value.Release()
 				}
 			}
 
@@ -544,14 +478,14 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 					return
 				}
 
-				rec := enum.Record.value
-				if as.rowLimit > 0 {
-					if totalRowCount >= as.rowLimit {
+				rec := enum.Record.Value
+				if rowLimit > 0 {
+					if totalRowCount >= rowLimit {
 						rec.Release()
 						return
-					} else if totalRowCount+rec.NumRows() > as.rowLimit {
+					} else if totalRowCount+rec.NumRows() > rowLimit {
 						defer rec.Release()
-						rec = rec.NewSlice(0, as.rowLimit-totalRowCount)
+						rec = rec.NewSlice(0, rowLimit-totalRowCount)
 					}
 				}
 
@@ -564,12 +498,61 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 					return
 				}
 				totalRowCount += rec.NumRows()
-				if as.rowLimit > 0 && totalRowCount >= as.rowLimit {
+				if rowLimit > 0 && totalRowCount >= rowLimit {
 					return
 				}
 			}
 		}
 	}
+}
+
+func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks []FileScanTask, deletesPerFile map[string][]*arrow.Chunked) iter.Seq2[arrow.Record, error] {
+	extSet := substrait.NewExtensionSet()
+
+	ctx, cancel := context.WithCancel(exprs.WithExtensionIDSet(ctx, extSet))
+	taskChan := make(chan internal.Enumerated[FileScanTask], len(tasks))
+
+	// numWorkers := 1
+	numWorkers := min(runtime.NumCPU(), len(tasks))
+	records := make(chan enumeratedRecord, numWorkers)
+
+	var wg sync.WaitGroup
+	wg.Add(numWorkers)
+	for i := 0; i < numWorkers; i++ {
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case task, ok := <-taskChan:
+					if !ok {
+						return
+					}
+
+					if err := as.recordsFromTask(ctx, task, records,
+						deletesPerFile[task.Value.File.FilePath()]); err != nil {
+						cancel()
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	go func() {
+		for i, t := range tasks {
+			taskChan <- internal.Enumerated[FileScanTask]{
+				Value: t, Index: i, Last: i == len(tasks)-1}
+		}
+		close(taskChan)
+
+		wg.Wait()
+		close(records)
+	}()
+
+	return createIterator(ctx, uint(numWorkers), records, deletesPerFile,
+		cancel, as.rowLimit)
 }
 
 func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.Record, error], error) {
