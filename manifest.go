@@ -541,6 +541,10 @@ type ManifestFile interface {
 	// If discardDeleted is true, entries for files containing deleted rows
 	// will be skipped.
 	FetchEntries(fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error)
+	// WriteManifestEntries writes a list of manifest entries to a provided
+	// io.Writer. The version of the manifest file is used to determine the
+	// schema to use for writing the entries.
+	WriteManifestEntries(out io.Writer, entries []ManifestEntry) error
 }
 
 // ReadManifestList reads in an avro manifest list file and returns a slice
