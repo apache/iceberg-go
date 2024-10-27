@@ -17,7 +17,7 @@
 
 module github.com/apache/iceberg-go
 
-go 1.21
+go 1.23
 
 require (
 	github.com/apache/arrow/go/v16 v16.1.0

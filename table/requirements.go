@@ -37,18 +37,18 @@ type baseRequirement struct {
 	Type string `json:"type"`
 }
 
-// AssertCreate validates that the table does not already exist.
-type AssertCreate struct {
+type assertCreate struct {
 	baseRequirement
 }
 
-func NewAssertCreate() *AssertCreate {
-	return &AssertCreate{
+// AssertCreate creates a requirement that the table does not already exist.
+func AssertCreate() Requirement {
+	return &assertCreate{
 		baseRequirement: baseRequirement{Type: "assert-create"},
 	}
 }
 
-func (a *AssertCreate) Validate(meta Metadata) error {
+func (a *assertCreate) Validate(meta Metadata) error {
 	if meta != nil {
 		return fmt.Errorf("Table already exists")
 	}
@@ -56,20 +56,20 @@ func (a *AssertCreate) Validate(meta Metadata) error {
 	return nil
 }
 
-// AssertTableUuid validates that the table UUID matches the requirement's `UUID`.
-type AssertTableUuid struct {
+type assertTableUuid struct {
 	baseRequirement
 	UUID uuid.UUID `json:"uuid"`
 }
 
-func NewAssertTableUUID(uuid uuid.UUID) *AssertTableUuid {
-	return &AssertTableUuid{
+// AssertTableUUID creates a requirement that the table UUID matches the given UUID.
+func AssertTableUUID(uuid uuid.UUID) Requirement {
+	return &assertTableUuid{
 		baseRequirement: baseRequirement{Type: "assert-table-uuid"},
 		UUID:            uuid,
 	}
 }
 
-func (a *AssertTableUuid) Validate(meta Metadata) error {
+func (a *assertTableUuid) Validate(meta Metadata) error {
 	if meta == nil {
 		return fmt.Errorf("requirement failed: current table metadata does not exist")
 	}
@@ -81,58 +81,65 @@ func (a *AssertTableUuid) Validate(meta Metadata) error {
 	return nil
 }
 
-// AssertRefSnapshotID validates that the table branch or tag identified by the
-// requirement's `Ref` must reference the requirement's `SnapshotID`.
-// if `SnapshotID` is `nil`, the ref must not already exist.
-type AssertRefSnapshotID struct {
+type assertRefSnapshotID struct {
 	baseRequirement
 	Ref        string `json:"ref"`
 	SnapshotID *int64 `json:"snapshot-id"`
 }
 
-func NewAssertRefSnapshotID(ref string, id *int64) *AssertRefSnapshotID {
-	return &AssertRefSnapshotID{
+// AssertRefSnapshotID creates a requirement which ensures that the table branch
+// or tag identified by the given ref must reference the given snapshot id.
+// If the id is nil, the ref must not already exist.
+func AssertRefSnapshotID(ref string, id *int64) Requirement {
+	return &assertRefSnapshotID{
 		baseRequirement: baseRequirement{Type: "assert-ref-snapshot-id"},
 		Ref:             ref,
 		SnapshotID:      id,
 	}
 }
 
-func (a *AssertRefSnapshotID) Validate(meta Metadata) error {
+func (a *assertRefSnapshotID) Validate(meta Metadata) error {
 	if meta == nil {
 		return fmt.Errorf("requirement failed: current table metadata does not exist")
 	}
 
-	ref, ok := meta.Refs()[a.Ref]
-	if !ok {
+	var r *SnapshotRef
+	for name, ref := range meta.Refs() {
+		if name == a.Ref {
+			r = &ref
+			break
+		}
+	}
+	if r == nil {
 		return fmt.Errorf("requirement failed: branch or tag %s is missing, expected %d", a.Ref, a.SnapshotID)
 	}
 
 	if a.SnapshotID == nil {
-		return fmt.Errorf("requirement failed: %s %s was created concurrently", ref.SnapshotRefType, a.Ref)
+		return fmt.Errorf("requirement failed: %s %s was created concurrently", r.SnapshotRefType, a.Ref)
 	}
 
-	if ref.SnapshotID != *a.SnapshotID {
-		return fmt.Errorf("requirement failed: %s %s has changed: expected id %d, found %d", ref.SnapshotRefType, a.Ref, a.SnapshotID, ref.SnapshotID)
+	if r.SnapshotID != *a.SnapshotID {
+		return fmt.Errorf("requirement failed: %s %s has changed: expected id %d, found %d", r.SnapshotRefType, a.Ref, a.SnapshotID, r.SnapshotID)
 	}
 
 	return nil
 }
 
-// AssertTableType validates that the table's last assigned column ID matches the requirement's `LastAssignedFieldID`.
-type AssertLastAssignedFieldId struct {
+type assertLastAssignedFieldId struct {
 	baseRequirement
 	LastAssignedFieldID int `json:"last-assigned-field-id"`
 }
 
-func NewAssertLastAssignedFieldID(id int) *AssertLastAssignedFieldId {
-	return &AssertLastAssignedFieldId{
+// AssertLastAssignedFieldID validates that the table's last assigned column ID
+// matches the given id.
+func AssertLastAssignedFieldID(id int) Requirement {
+	return &assertLastAssignedFieldId{
 		baseRequirement:     baseRequirement{Type: "assert-last-assigned-field-id"},
 		LastAssignedFieldID: id,
 	}
 }
 
-func (a *AssertLastAssignedFieldId) Validate(meta Metadata) error {
+func (a *assertLastAssignedFieldId) Validate(meta Metadata) error {
 	if meta == nil {
 		return fmt.Errorf("requirement failed: current table metadata does not exist")
 	}
@@ -144,20 +151,21 @@ func (a *AssertLastAssignedFieldId) Validate(meta Metadata) error {
 	return nil
 }
 
-// AssertCurrentSchemaId validates that the table's current schema ID matches the requirement's `CurrentSchemaID`.
-type AssertCurrentSchemaId struct {
+type assertCurrentSchemaId struct {
 	baseRequirement
 	CurrentSchemaID int `json:"current-schema-id"`
 }
 
-func NewAssertCurrentSchemaID(id int) *AssertCurrentSchemaId {
-	return &AssertCurrentSchemaId{
+// AssertCurrentSchemaId creates a requirement that the table's current schema ID
+// matches the given id.
+func AssertCurrentSchemaID(id int) Requirement {
+	return &assertCurrentSchemaId{
 		baseRequirement: baseRequirement{Type: "assert-current-schema-id"},
 		CurrentSchemaID: id,
 	}
 }
 
-func (a *AssertCurrentSchemaId) Validate(meta Metadata) error {
+func (a *assertCurrentSchemaId) Validate(meta Metadata) error {
 	if meta == nil {
 		return fmt.Errorf("requirement failed: current table metadata does not exist")
 	}
@@ -169,20 +177,21 @@ func (a *AssertCurrentSchemaId) Validate(meta Metadata) error {
 	return nil
 }
 
-// AssertLastAssignedPartitionId validates that the table's last assigned partition ID matches the requirement's `LastAssignedPartitionID`.
-type AssertLastAssignedPartitionId struct {
+type assertLastAssignedPartitionId struct {
 	baseRequirement
 	LastAssignedPartitionID int `json:"last-assigned-partition-id"`
 }
 
-func NewAssertLastAssignedPartitionID(id int) *AssertLastAssignedPartitionId {
-	return &AssertLastAssignedPartitionId{
+// AssertLastAssignedPartitionID creates a requriement that the table's last assigned partition ID
+// matches the given id.
+func AssertLastAssignedPartitionID(id int) Requirement {
+	return &assertLastAssignedPartitionId{
 		baseRequirement:         baseRequirement{Type: "assert-last-assigned-partition-id"},
 		LastAssignedPartitionID: id,
 	}
 }
 
-func (a *AssertLastAssignedPartitionId) Validate(meta Metadata) error {
+func (a *assertLastAssignedPartitionId) Validate(meta Metadata) error {
 	if meta == nil {
 		return fmt.Errorf("requirement failed: current table metadata does not exist")
 	}
@@ -194,20 +203,21 @@ func (a *AssertLastAssignedPartitionId) Validate(meta Metadata) error {
 	return nil
 }
 
-// AssertDefaultSpecId validates that the table's default partition spec ID matches the requirement's `DefaultSpecID`.
-type AssertDefaultSpecId struct {
+type assertDefaultSpecId struct {
 	baseRequirement
 	DefaultSpecID int `json:"default-spec-id"`
 }
 
-func NewAssertDefaultSpecID(id int) *AssertDefaultSpecId {
-	return &AssertDefaultSpecId{
+// AssertDefaultSpecID creates a requirement that the table's default partition spec ID
+// matches the given id.
+func AssertDefaultSpecID(id int) Requirement {
+	return &assertDefaultSpecId{
 		baseRequirement: baseRequirement{Type: "assert-default-spec-id"},
 		DefaultSpecID:   id,
 	}
 }
 
-func (a *AssertDefaultSpecId) Validate(meta Metadata) error {
+func (a *assertDefaultSpecId) Validate(meta Metadata) error {
 	if meta == nil {
 		return fmt.Errorf("requirement failed: current table metadata does not exist")
 	}
@@ -219,20 +229,21 @@ func (a *AssertDefaultSpecId) Validate(meta Metadata) error {
 	return nil
 }
 
-// AssertDefaultSortOrderId validates that the table's default sort order ID matches the requirement's `DefaultSortOrderID`.
-type AssertDefaultSortOrderId struct {
+type assertDefaultSortOrderId struct {
 	baseRequirement
 	DefaultSortOrderID int `json:"default-sort-order-id"`
 }
 
-func NewAssertDefaultSortOrderID(id int) *AssertDefaultSortOrderId {
-	return &AssertDefaultSortOrderId{
+// AssertDefaultSortOrderID creates a requirement that the table's default sort order ID
+// matches the given id.
+func AssertDefaultSortOrderID(id int) Requirement {
+	return &assertDefaultSortOrderId{
 		baseRequirement:    baseRequirement{Type: "assert-default-sort-order-id"},
 		DefaultSortOrderID: id,
 	}
 }
 
-func (a *AssertDefaultSortOrderId) Validate(meta Metadata) error {
+func (a *assertDefaultSortOrderId) Validate(meta Metadata) error {
 	if meta == nil {
 		return fmt.Errorf("requirement failed: current table metadata does not exist")
 	}

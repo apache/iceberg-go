@@ -84,7 +84,7 @@ func (e errorResponse) Error() string {
 	return e.Type + ": " + e.Message
 }
 
-type Identifier struct {
+type identifier struct {
 	Namespace []string `json:"namespace"`
 	Name      string   `json:"name"`
 }
@@ -640,7 +640,7 @@ func (r *RestCatalog) ListTables(ctx context.Context, namespace table.Identifier
 	path := []string{"namespaces", ns, "tables"}
 
 	type resp struct {
-		Identifiers []Identifier `json:"identifiers"`
+		Identifiers []identifier `json:"identifiers"`
 	}
 	rsp, err := doGet[resp](ctx, r.baseURI, path, r.cl, map[int]error{http.StatusNotFound: ErrNoSuchNamespace})
 	if err != nil {
@@ -685,9 +685,7 @@ func (r *RestCatalog) CreateTable(ctx context.Context, identifier table.Identifi
 
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
-	for k, v := range ret.Config {
-		config[k] = v
-	}
+	maps.Copy(config, ret.Config)
 
 	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, config)
 }
@@ -711,10 +709,7 @@ func (r *RestCatalog) RegisterTable(ctx context.Context, identifier table.Identi
 
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
-	for k, v := range ret.Config {
-		config[k] = v
-	}
-
+	maps.Copy(config, ret.Config)
 	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, config)
 }
 
@@ -740,23 +735,23 @@ func (r *RestCatalog) LoadTable(ctx context.Context, identifier table.Identifier
 	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, config)
 }
 
-func (r *RestCatalog) UpdateTable(ctx context.Context, identifier table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
-	ns, tbl, err := splitIdentForPath(identifier)
+func (r *RestCatalog) UpdateTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
+	ns, tbl, err := splitIdentForPath(ident)
 	if err != nil {
 		return nil, err
 	}
 
-	ident := Identifier{
-		Namespace: NamespaceFromIdent(identifier),
+	restIdentifier := identifier{
+		Namespace: NamespaceFromIdent(ident),
 		Name:      tbl,
 	}
 	type payload struct {
-		Identifier   Identifier          `json:"identifier"`
+		Identifier   identifier          `json:"identifier"`
 		Requirements []table.Requirement `json:"requirements"`
 		Updates      []table.Update      `json:"updates"`
 	}
 	ret, err := doPost[payload, commitTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables", tbl},
-		payload{Identifier: ident, Requirements: requirements, Updates: updates}, r.cl,
+		payload{Identifier: restIdentifier, Requirements: requirements, Updates: updates}, r.cl,
 		map[int]error{http.StatusNotFound: ErrNoSuchTable, http.StatusConflict: ErrCommitFailed})
 	if err != nil {
 		return nil, err
@@ -765,7 +760,7 @@ func (r *RestCatalog) UpdateTable(ctx context.Context, identifier table.Identifi
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
 
-	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, config)
+	return r.tableFromResponse(ident, ret.Metadata, ret.MetadataLoc, config)
 }
 
 func (r *RestCatalog) DropTable(ctx context.Context, identifier table.Identifier, purge bool) error {
@@ -789,14 +784,14 @@ func (r *RestCatalog) DropTable(ctx context.Context, identifier table.Identifier
 
 func (r *RestCatalog) RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error) {
 	type payload struct {
-		From Identifier `json:"from"`
-		To   Identifier `json:"to"`
+		From identifier `json:"from"`
+		To   identifier `json:"to"`
 	}
-	f := Identifier{
+	f := identifier{
 		Namespace: NamespaceFromIdent(from),
 		Name:      TableNameFromIdent(from),
 	}
-	t := Identifier{
+	t := identifier{
 		Namespace: NamespaceFromIdent(to),
 		Name:      TableNameFromIdent(to),
 	}

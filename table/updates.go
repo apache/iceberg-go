@@ -42,59 +42,58 @@ func (u *baseUpdate) Action() string {
 	return u.ActionName
 }
 
-// AssignUUIDUpdate assigns a UUID to the table metadata.
-type AssignUUIDUpdate struct {
+type assignUUIDUpdate struct {
 	baseUpdate
 	UUID uuid.UUID `json:"uuid"`
 }
 
-// NewAssignUUIDUpdate creates a new AssignUUIDUpdate with the given UUID.
-func NewAssignUUIDUpdate(uuid uuid.UUID) *AssignUUIDUpdate {
-	return &AssignUUIDUpdate{
+// NewAssignUUIDUpdate creates a new update to assign a UUID to the table metadata.
+func NewAssignUUIDUpdate(uuid uuid.UUID) Update {
+	return &assignUUIDUpdate{
 		baseUpdate: baseUpdate{ActionName: "assign-uuid"},
 		UUID:       uuid,
 	}
 }
 
 // Apply updates the UUID on the given metadata builder.
-func (u *AssignUUIDUpdate) Apply(builder *MetadataBuilder) error {
+func (u *assignUUIDUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.SetUUID(u.UUID)
 	return err
 }
 
-// UpgradeFormatVersionUpdate upgrades the format version of the table metadata.
-type UpgradeFormatVersionUpdate struct {
+type upgradeFormatVersionUpdate struct {
 	baseUpdate
 	FormatVersion int `json:"format-version"`
 }
 
-// NewUpgradeFormatVersionUpdate creates a new UpgradeFormatVersionUpdate with the given format version.
-func NewUpgradeFormatVersionUpdate(formatVersion int) *UpgradeFormatVersionUpdate {
-	return &UpgradeFormatVersionUpdate{
+// NewUpgradeFormatVersionUpdate creates a new update that upgrades the format version
+// of the table metadata to the given formatVersion.
+func NewUpgradeFormatVersionUpdate(formatVersion int) Update {
+	return &upgradeFormatVersionUpdate{
 		baseUpdate:    baseUpdate{ActionName: "upgrade-format-version"},
 		FormatVersion: formatVersion,
 	}
 }
 
 // Apply upgrades the format version on the given metadata builder.
-func (u *UpgradeFormatVersionUpdate) Apply(builder *MetadataBuilder) error {
+func (u *upgradeFormatVersionUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.SetFormatVersion(u.FormatVersion)
 	return err
 }
 
-// AddSchemaUpdate adds a schema to the table metadata.
-type AddSchemaUpdate struct {
+// addSchemaUpdate adds a schema to the table metadata.
+type addSchemaUpdate struct {
 	baseUpdate
 	Schema       *iceberg.Schema `json:"schema"`
 	LastColumnID int             `json:"last-column-id"`
 	initial      bool
 }
 
-// NewAddSchemaUpdate creates a new AddSchemaUpdate with the given schema and last column ID.
-// If the initial flag is set to true, the schema is considered the initial schema of the table,
-// and all previously added schemas in the metadata builder are removed.
-func NewAddSchemaUpdate(schema *iceberg.Schema, lastColumnID int, initial bool) *AddSchemaUpdate {
-	return &AddSchemaUpdate{
+// NewAddSchemaUpdate creates a new update that adds the given schema and last column ID to
+// the table metadata. If the initial flag is set to true, the schema is considered the initial
+// schema of the table, and all previously added schemas in the metadata builder are removed.
+func NewAddSchemaUpdate(schema *iceberg.Schema, lastColumnID int, initial bool) Update {
+	return &addSchemaUpdate{
 		baseUpdate:   baseUpdate{ActionName: "add-schema"},
 		Schema:       schema,
 		LastColumnID: lastColumnID,
@@ -102,135 +101,131 @@ func NewAddSchemaUpdate(schema *iceberg.Schema, lastColumnID int, initial bool) 
 	}
 }
 
-func (u *AddSchemaUpdate) Apply(builder *MetadataBuilder) error {
+func (u *addSchemaUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.AddSchema(u.Schema, u.LastColumnID, u.initial)
 	return err
 }
 
-// SetCurrentSchemaUpdate sets the current schema of the table metadata.
-type SetCurrentSchemaUpdate struct {
+type setCurrentSchemaUpdate struct {
 	baseUpdate
 	SchemaID int `json:"schema-id"`
 }
 
-// NewSetCurrentSchemaUpdate creates a new SetCurrentSchemaUpdate with the given schema ID.
-func NewSetCurrentSchemaUpdate(id int) *SetCurrentSchemaUpdate {
-	return &SetCurrentSchemaUpdate{
+// NewSetCurrentSchemaUpdate creates a new update that sets the current schema of the table
+// metadata to the given schema ID.
+func NewSetCurrentSchemaUpdate(id int) Update {
+	return &setCurrentSchemaUpdate{
 		baseUpdate: baseUpdate{ActionName: "set-current-schema"},
 		SchemaID:   id,
 	}
 }
 
-func (u *SetCurrentSchemaUpdate) Apply(builder *MetadataBuilder) error {
+func (u *setCurrentSchemaUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.SetCurrentSchemaID(u.SchemaID)
 	return err
 }
 
-// AddPartitionSpecUpdate adds a partition spec to the table metadata.
-type AddPartitionSpecUpdate struct {
+type addPartitionSpecUpdate struct {
 	baseUpdate
 	Spec    *iceberg.PartitionSpec `json:"spec"`
 	initial bool
 }
 
-// NewAddPartitionSpecUpdate creates a new AddPartitionSpecUpdate with the given partition spec.
-// If the initial flag is set to true, the spec is considered the initial spec of the table,
+// NewAddPartitionSpecUpdate creates a new update that adds the given partition spec to the table
+// metadata. If the initial flag is set to true, the spec is considered the initial spec of the table,
 // and all other previously added specs in the metadata builder are removed.
-func NewAddPartitionSpecUpdate(spec *iceberg.PartitionSpec, initial bool) *AddPartitionSpecUpdate {
-	return &AddPartitionSpecUpdate{
+func NewAddPartitionSpecUpdate(spec *iceberg.PartitionSpec, initial bool) Update {
+	return &addPartitionSpecUpdate{
 		baseUpdate: baseUpdate{ActionName: "add-spec"},
 		Spec:       spec,
 		initial:    initial,
 	}
 }
 
-func (u *AddPartitionSpecUpdate) Apply(builder *MetadataBuilder) error {
+func (u *addPartitionSpecUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.AddPartitionSpec(u.Spec, u.initial)
 	return err
 }
 
-// SetDefaultSpecUpdate sets the default partition spec of the table metadata.
-type SetDefaultSpecUpdate struct {
+type setDefaultSpecUpdate struct {
 	baseUpdate
 	SpecID int `json:"spec-id"`
 }
 
-// NewSetDefaultSpecUpdate creates a new SetDefaultSpecUpdate with the given spec ID.
-func NewSetDefaultSpecUpdate(id int) *SetDefaultSpecUpdate {
-	return &SetDefaultSpecUpdate{
+// NewSetDefaultSpecUpdate creates a new update that sets the default partition spec of the
+// table metadata to the given spec ID.
+func NewSetDefaultSpecUpdate(id int) Update {
+	return &setDefaultSpecUpdate{
 		baseUpdate: baseUpdate{ActionName: "set-default-spec"},
 		SpecID:     id,
 	}
 }
 
-func (u *SetDefaultSpecUpdate) Apply(builder *MetadataBuilder) error {
+func (u *setDefaultSpecUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.SetDefaultSpecID(u.SpecID)
 	return err
 }
 
-// AddSortOrderUpdate adds a sort order to the table metadata.
-type AddSortOrderUpdate struct {
+type addSortOrderUpdate struct {
 	baseUpdate
 	SortOrder *SortOrder `json:"sort-order"`
 	initial   bool
 }
 
-// NewAddSortOrderUpdate creates a new AddSortOrderUpdate with the given sort order.
+// NewAddSortOrderUpdate creates a new update that adds the given sort order to the table metadata.
 // If the initial flag is set to true, the sort order is considered the initial sort order of the table,
 // and all previously added sort orders in the metadata builder are removed.
-func NewAddSortOrderUpdate(sortOrder *SortOrder, initial bool) *AddSortOrderUpdate {
-	return &AddSortOrderUpdate{
+func NewAddSortOrderUpdate(sortOrder *SortOrder, initial bool) Update {
+	return &addSortOrderUpdate{
 		baseUpdate: baseUpdate{ActionName: "add-sort-order"},
 		SortOrder:  sortOrder,
 		initial:    initial,
 	}
 }
 
-func (u *AddSortOrderUpdate) Apply(builder *MetadataBuilder) error {
+func (u *addSortOrderUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.AddSortOrder(u.SortOrder, u.initial)
 	return err
 }
 
-// SetDefaultSortOrderUpdate sets the default sort order of the table metadata.
-type SetDefaultSortOrderUpdate struct {
+type setDefaultSortOrderUpdate struct {
 	baseUpdate
 	SortOrderID int `json:"sort-order-id"`
 }
 
-// NewSetDefaultSortOrderUpdate creates a new SetDefaultSortOrderUpdate with the given sort order ID.
-func NewSetDefaultSortOrderUpdate(id int) *SetDefaultSortOrderUpdate {
-	return &SetDefaultSortOrderUpdate{
+// NewSetDefaultSortOrderUpdate creates a new update that sets the default sort order of the table metadata
+// to the given sort order ID.
+func NewSetDefaultSortOrderUpdate(id int) Update {
+	return &setDefaultSortOrderUpdate{
 		baseUpdate:  baseUpdate{ActionName: "set-default-sort-order"},
 		SortOrderID: id,
 	}
 }
 
-func (u *SetDefaultSortOrderUpdate) Apply(builder *MetadataBuilder) error {
+func (u *setDefaultSortOrderUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.SetDefaultSortOrderID(u.SortOrderID)
 	return err
 }
 
-// AddSnapshotUpdate adds a snapshot to the table metadata.
-type AddSnapshotUpdate struct {
+type addSnapshotUpdate struct {
 	baseUpdate
 	Snapshot *Snapshot `json:"snapshot"`
 }
 
-// NewAddSnapshotUpdate creates a new AddSnapshotUpdate with the given snapshot.
-func NewAddSnapshotUpdate(snapshot *Snapshot) *AddSnapshotUpdate {
-	return &AddSnapshotUpdate{
+// NewAddSnapshotUpdate creates a new update that adds the given snapshot to the table metadata.
+func NewAddSnapshotUpdate(snapshot *Snapshot) Update {
+	return &addSnapshotUpdate{
 		baseUpdate: baseUpdate{ActionName: "add-snapshot"},
 		Snapshot:   snapshot,
 	}
 }
 
-func (u *AddSnapshotUpdate) Apply(builder *MetadataBuilder) error {
+func (u *addSnapshotUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.AddSnapshot(u.Snapshot)
 	return err
 }
 
-// SetCurrentSnapshotUpdate sets the current snapshot of the table metadata.
-type SetSnapshotRefUpdate struct {
+type setSnapshotRefUpdate struct {
 	baseUpdate
 	RefName            string  `json:"ref-name"`
 	RefType            RefType `json:"type"`
@@ -240,16 +235,17 @@ type SetSnapshotRefUpdate struct {
 	MinSnapshotsToKeep int     `json:"min-snapshots-to-keep,omitempty"`
 }
 
-// NewSetSnapshotRefUpdate creates a new SetSnapshotRefUpdate with the given snapshot reference information.
-// MaxRefAgeMs, MaxSnapshotAgeMs, and MinSnapshotsToKeep are optional, and any non-positive values are ignored.
+// NewSetSnapshotRefUpdate creates a new update that sets the given snapshot reference
+// as the current snapshot of the table metadata. MaxRefAgeMs, MaxSnapshotAgeMs,
+// and MinSnapshotsToKeep are optional, and any non-positive values are ignored.
 func NewSetSnapshotRefUpdate(
 	name string,
 	snapshotID int64,
 	refType RefType,
 	maxRefAgeMs, maxSnapshotAgeMs int64,
 	minSnapshotsToKeep int,
-) *SetSnapshotRefUpdate {
-	return &SetSnapshotRefUpdate{
+) Update {
+	return &setSnapshotRefUpdate{
 		baseUpdate:         baseUpdate{ActionName: "set-snapshot-ref"},
 		RefName:            name,
 		RefType:            refType,
@@ -260,7 +256,7 @@ func NewSetSnapshotRefUpdate(
 	}
 }
 
-func (u *SetSnapshotRefUpdate) Apply(builder *MetadataBuilder) error {
+func (u *setSnapshotRefUpdate) Apply(builder *MetadataBuilder) error {
 	opts := []setSnapshotRefOption{}
 	if u.MaxRefAgeMs >= 0 {
 		opts = append(opts, WithMaxRefAgeMs(u.MaxRefAgeMs))
@@ -281,97 +277,95 @@ func (u *SetSnapshotRefUpdate) Apply(builder *MetadataBuilder) error {
 	return err
 }
 
-// SetLocationUpdate sets the location of the table metadata.
-type SetLocationUpdate struct {
+type setLocationUpdate struct {
 	baseUpdate
 	Location string `json:"location"`
 }
 
-// NewSetLocationUpdate creates a new SetLocationUpdate with the given location.
-func NewSetLocationUpdate(loc string) *SetLocationUpdate {
-	return &SetLocationUpdate{
+// NewSetLocationUpdate creates a new update that sets the location of the table metadata.
+func NewSetLocationUpdate(loc string) Update {
+	return &setLocationUpdate{
 		baseUpdate: baseUpdate{ActionName: "set-location"},
 		Location:   loc,
 	}
 }
 
-func (u *SetLocationUpdate) Apply(builder *MetadataBuilder) error {
+func (u *setLocationUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.SetLoc(u.Location)
 	return err
 }
 
-// SetPropertyUpdate sets a number of properties in the table metadata.
-type SetPropertiesUpdate struct {
+type setPropertiesUpdate struct {
 	baseUpdate
 	Updates iceberg.Properties `json:"updates"`
 }
 
-// NewSetPropertiesUpdate creates a new SetPropertiesUpdate with the given properties.
-func NewSetPropertiesUpdate(updates iceberg.Properties) *SetPropertiesUpdate {
-	return &SetPropertiesUpdate{
+// NewSetPropertiesUpdate creates a new update that sets the given properties in the
+// table metadata.
+func NewSetPropertiesUpdate(updates iceberg.Properties) *setPropertiesUpdate {
+	return &setPropertiesUpdate{
 		baseUpdate: baseUpdate{ActionName: "set-properties"},
 		Updates:    updates,
 	}
 }
 
-func (u *SetPropertiesUpdate) Apply(builder *MetadataBuilder) error {
+func (u *setPropertiesUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.SetProperties(u.Updates)
 	return err
 }
 
-// RemovePropertiesUpdate removes a number of properties from the table metadata.
-// The properties are identified by their names, and if a property with the given name does not exist,
-// it is ignored.
-type RemovePropertiesUpdate struct {
+type removePropertiesUpdate struct {
 	baseUpdate
 	Removals []string `json:"removals"`
 }
 
-// NewRemovePropertiesUpdate creates a new RemovePropertiesUpdate with the given property names.
-func NewRemovePropertiesUpdate(removals []string) *RemovePropertiesUpdate {
-	return &RemovePropertiesUpdate{
+// NewRemovePropertiesUpdate creates a new update that removes properties from the table metadata.
+// The properties are identified by their names, and if a property with the given name does not exist,
+// it is ignored.
+func NewRemovePropertiesUpdate(removals []string) Update {
+	return &removePropertiesUpdate{
 		baseUpdate: baseUpdate{ActionName: "remove-properties"},
 		Removals:   removals,
 	}
 }
 
-func (u *RemovePropertiesUpdate) Apply(builder *MetadataBuilder) error {
+func (u *removePropertiesUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.RemoveProperties(u.Removals)
 	return err
 }
 
-// RemoveSnapshotsUpdate removes a number of snapshots from the table metadata.
-type RemoveSnapshotsUpdate struct {
+type removeSnapshotsUpdate struct {
 	baseUpdate
 	SnapshotIDs []int64 `json:"snapshot-ids"`
 }
 
-// NewRemoveSnapshotsUpdate creates a new RemoveSnapshotsUpdate with the given snapshot IDs.
-func NewRemoveSnapshotsUpdate(ids []int64) *RemoveSnapshotsUpdate {
-	return &RemoveSnapshotsUpdate{
+// NewRemoveSnapshotsUpdate creates a new update that removes all snapshots from
+// the table metadata with the given snapshot IDs.
+func NewRemoveSnapshotsUpdate(ids []int64) Update {
+	return &removeSnapshotsUpdate{
 		baseUpdate:  baseUpdate{ActionName: "remove-snapshots"},
 		SnapshotIDs: ids,
 	}
 }
 
-func (u *RemoveSnapshotsUpdate) Apply(builder *MetadataBuilder) error {
+func (u *removeSnapshotsUpdate) Apply(builder *MetadataBuilder) error {
 	return fmt.Errorf("%w: remove-snapshots", iceberg.ErrNotImplemented)
 }
 
-// RemoveSnapshotRefUpdate removes a snapshot reference from the table metadata.
-type RemoveSnapshotRefUpdate struct {
+type removeSnapshotRefUpdate struct {
 	baseUpdate
 	RefName string `json:"ref-name"`
 }
 
-// NewRemoveSnapshotRefUpdate creates a new RemoveSnapshotRefUpdate with the given reference name.
-func NewRemoveSnapshotRefUpdate(ref string) *RemoveSnapshotRefUpdate {
-	return &RemoveSnapshotRefUpdate{
+// NewRemoveSnapshotRefUpdate creates a new update that removes a snapshot reference
+// from the table metadata.
+func NewRemoveSnapshotRefUpdate(ref string) *removeSnapshotRefUpdate {
+	return &removeSnapshotRefUpdate{
 		baseUpdate: baseUpdate{ActionName: "remove-snapshot-ref"},
 		RefName:    ref,
 	}
 }
 
-func (u *RemoveSnapshotRefUpdate) Apply(builder *MetadataBuilder) error {
+func (u *removeSnapshotRefUpdate) Apply(builder *MetadataBuilder) error {
 	return fmt.Errorf("%w: remove-snapshot-ref", iceberg.ErrNotImplemented)
 }

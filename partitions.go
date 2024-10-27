@@ -20,9 +20,9 @@ package iceberg
 import (
 	"encoding/json"
 	"fmt"
+	"iter"
+	"slices"
 	"strings"
-
-	"golang.org/x/exp/slices"
 )
 
 const (
@@ -118,8 +118,8 @@ func (ps PartitionSpec) Equals(other PartitionSpec) bool {
 }
 
 // Fields returns a clone of the partition fields in this spec.
-func (ps *PartitionSpec) Fields() []PartitionField {
-	return slices.Clone(ps.fields)
+func (ps *PartitionSpec) Fields() iter.Seq[PartitionField] {
+	return slices.Values(ps.fields)
 }
 
 func (ps PartitionSpec) MarshalJSON() ([]byte, error) {
