@@ -216,8 +216,8 @@ func (m *manifestFileV1) FetchEntries(fs iceio.IO, discardDeleted bool) ([]Manif
 	return fetchManifestEntries(m, fs, discardDeleted)
 }
 
-// WriteManifestEntries writes a list of manifest entries to an avro file.
-func (m *manifestFileV1) WriteManifestEntries(out io.Writer, entries []ManifestEntry) error {
+// WriteEntries writes a list of manifest entries to an avro file.
+func (m *manifestFileV1) WriteEntries(out io.Writer, entries []ManifestEntry) error {
 	return writeManifestEntries(out, entries, m.Version())
 }
 
@@ -371,8 +371,8 @@ func (m *manifestFileV2) FetchEntries(fs iceio.IO, discardDeleted bool) ([]Manif
 	return fetchManifestEntries(m, fs, discardDeleted)
 }
 
-// WriteManifestEntries writes a list of manifest entries to an avro file.
-func (m *manifestFileV2) WriteManifestEntries(out io.Writer, entries []ManifestEntry) error {
+// WriteEntries writes a list of manifest entries to an avro file.
+func (m *manifestFileV2) WriteEntries(out io.Writer, entries []ManifestEntry) error {
 	return writeManifestEntries(out, entries, m.Version())
 }
 
@@ -541,10 +541,10 @@ type ManifestFile interface {
 	// If discardDeleted is true, entries for files containing deleted rows
 	// will be skipped.
 	FetchEntries(fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error)
-	// WriteManifestEntries writes a list of manifest entries to a provided
+	// WriteEntries writes a list of manifest entries to a provided
 	// io.Writer. The version of the manifest file is used to determine the
 	// schema to use for writing the entries.
-	WriteManifestEntries(out io.Writer, entries []ManifestEntry) error
+	WriteEntries(out io.Writer, entries []ManifestEntry) error
 }
 
 // ReadManifestList reads in an avro manifest list file and returns a slice
