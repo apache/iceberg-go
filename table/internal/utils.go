@@ -19,12 +19,15 @@ package internal
 
 import "container/heap"
 
+// Enumerated is a quick way to represent a sequenced value that can
+// be processed in parallel and then needs to be reordered.
 type Enumerated[T any] struct {
 	Value T
 	Index int
 	Last  bool
 }
 
+// a simple priority queue
 type pqueue[T any] struct {
 	queue   []*T
 	compare func(a, b *T) bool
@@ -52,6 +55,9 @@ func (pq *pqueue[T]) Pop() any {
 	return item
 }
 
+// MakeSequencedChan creates a channel that outputs values in a given order
+// based on the comesAfter and isNext functions. The values are read in from
+// the provided source and then re-ordered before being sent to the output.
 func MakeSequencedChan[T any](bufferSize uint, source <-chan T, comesAfter, isNext func(a, b *T) bool, initial T) <-chan T {
 	pq := pqueue[T]{queue: make([]*T, 0), compare: comesAfter}
 	heap.Init(&pq)

@@ -445,6 +445,9 @@ func (expressionFieldIDs) VisitBound(pred BoundPredicate) map[int]struct{} {
 	}
 }
 
+// TranslateColumnNames converts the names of columns in an expression by looking up
+// the field IDs in the file schema. If columns don't exist they are replaced with
+// AlwaysFalse or AlwaysTrue depending on the operator.
 func TranslateColumnNames(expr BooleanExpression, fileSchema *Schema) (BooleanExpression, error) {
 	return VisitExpr(expr, columnNameTranslator{fileSchema: fileSchema})
 }

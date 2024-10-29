@@ -36,6 +36,7 @@ var (
 
 type Properties map[string]string
 
+// Get returns the value of the key if it exists, otherwise it returns the default value.
 func (p Properties) Get(key, defVal string) string {
 	if v, ok := p[key]; ok {
 		return v

@@ -29,6 +29,10 @@ import (
 	iceio "github.com/apache/iceberg-go/io"
 )
 
+// GetFile opens the given file using the provided file system.
+//
+// The FileSource interface allows abstracting away the underlying file format
+// while providing utilties to read the file as Arrow record batches.
 func GetFile(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile, isPosDeletes bool) (FileSource, error) {
 	switch dataFile.FileFormat() {
 	case iceberg.ParquetFile:
@@ -51,7 +55,15 @@ type FileSource interface {
 type FileReader interface {
 	io.Closer
 
+	// PrunedSchema takes in the list of projected field IDs and returns the arrow schema
+	// that represents the underlying file schema with only the projected fields. It also
+	// returns the indexes of the projected columns to allow reading *only* the needed
+	// columns.
 	PrunedSchema(projectedIDs map[int]struct{}) (*arrow.Schema, []int, error)
+	// GetRecords returns a record reader for only the provided columns (using nil will read
+	// all of the columns of the underlying file.) The `tester` is a function that can be used,
+	// if non-nil, to filter aspects of the file such as skipping row groups in a parquet file.
 	GetRecords(ctx context.Context, cols []int, tester any) (array.RecordReader, error)
+	// ReadTable reads the entire file and returns it as an arrow table.
 	ReadTable(context.Context) (arrow.Table, error)
 }
