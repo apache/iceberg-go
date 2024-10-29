@@ -22,7 +22,7 @@ go 1.23
 toolchain go1.23.2
 
 require (
-	github.com/apache/arrow-go/v18 v18.0.1-0.20241022184425-56b794f52a9b
+	github.com/apache/arrow-go/v18 v18.0.1-0.20241029153821-f0c5d9939d3f
 	github.com/aws/aws-sdk-go-v2 v1.32.2
 	github.com/aws/aws-sdk-go-v2/config v1.28.0
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.41
