@@ -400,6 +400,16 @@ func getSortedValues(col *arrow.Column) []int32 {
 	return result
 }
 
+func getStrValues(col *arrow.Column) []string {
+	result := make([]string, 0, col.Len())
+	for _, c := range col.Data().Chunks() {
+		for i := 0; i < c.Len(); i++ {
+			result = append(result, c.ValueStr(i))
+		}
+	}
+	return result
+}
+
 func (s *ScannerSuite) TestPartitionedTables() {
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	defer mem.AssertSize(s.T(), 0)
@@ -487,12 +497,9 @@ func (s *ScannerSuite) TestUnpartitionedUUIDTable() {
 	defer neqResults.Release()
 
 	s.EqualValues(3, neqResults.NumRows())
-	resultCol = neqResults.Column(0).Data().Chunk(0).(*extensions.UUIDArray)
-	s.Equal("ec33e4b2-a834-4cc3-8c4a-a1d3bfc2f226", resultCol.ValueStr(0))
-	resultCol = neqResults.Column(0).Data().Chunk(1).(*extensions.UUIDArray)
-	s.Equal("c1b0d8e0-0b0e-4b1e-9b0a-0e0b0d0c0a0b", resultCol.ValueStr(0))
-	resultCol = neqResults.Column(0).Data().Chunk(2).(*extensions.UUIDArray)
-	s.Equal("923dae77-83d6-47cd-b4b0-d383e64ee57e", resultCol.ValueStr(0))
+	s.Equal([]string{"ec33e4b2-a834-4cc3-8c4a-a1d3bfc2f226",
+		"c1b0d8e0-0b0e-4b1e-9b0a-0e0b0d0c0a0b",
+		"923dae77-83d6-47cd-b4b0-d383e64ee57e"}, getStrValues(neqResults.Column(0)))
 }
 
 func (s *ScannerSuite) TestUnpartitionedFixedTable() {
