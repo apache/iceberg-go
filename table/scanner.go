@@ -147,18 +147,11 @@ func (s *Scan) UseRef(name string) (*Scan, error) {
 	}
 
 	if snap := s.metadata.SnapshotByName(name); snap != nil {
-		out := &Scan{
-			metadata:       s.metadata,
-			io:             s.io,
-			rowFilter:      s.rowFilter,
-			selectedFields: s.selectedFields,
-			caseSensitive:  s.caseSensitive,
-			snapshotID:     &snap.SnapshotID,
-			options:        s.options,
-		}
+		out := *s
+		out.snapshotID = &snap.SnapshotID
 		out.partitionFilters = newKeyDefaultMapWrapErr(out.buildPartitionProjection)
 
-		return out, nil
+		return &out, nil
 	}
 
 	return nil, fmt.Errorf("%w: cannot scan unknown ref=%s", iceberg.ErrInvalidArgument, name)

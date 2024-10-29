@@ -282,6 +282,10 @@ func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Sc
 		return nil, false, err
 	}
 
+	if translatedFilter.Equals(iceberg.AlwaysFalse{}) {
+		return nil, true, nil
+	}
+
 	translatedFilter, err = iceberg.BindExpr(fileSchema, translatedFilter, as.caseSensitive)
 	if err != nil {
 		return nil, false, err
@@ -297,7 +301,7 @@ func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Sc
 		return filterRecords(ctx, recordFilter), false, nil
 	}
 
-	return nil, translatedFilter.Equals(iceberg.AlwaysFalse{}), nil
+	return nil, false, nil
 }
 
 func (as *arrowScan) processRecords(
