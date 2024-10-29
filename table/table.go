@@ -18,9 +18,10 @@
 package table
 
 import (
+	"slices"
+
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
-	"golang.org/x/exp/slices"
 )
 
 type Identifier = []string

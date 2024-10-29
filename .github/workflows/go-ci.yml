@@ -39,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: [ '1.22', '1.23' ]
+        go: [ '1.23' ]
         os: [ 'ubuntu-latest', 'windows-latest', 'macos-latest' ]
     steps:
     - uses: actions/checkout@v4
@@ -48,10 +48,7 @@ jobs:
       with:
         go-version: ${{ matrix.go }}
         cache: true
-        cache-dependency-path: go.sum
-    - name: Install staticcheck
-      if: matrix.go == '1.22'
-      run: go install honnef.co/go/tools/cmd/staticcheck@v0.4.7
+        cache-dependency-path: go.sum    
     - name: Install staticcheck
       if: matrix.go == '1.23'
       run: go install honnef.co/go/tools/cmd/staticcheck@v0.5.1

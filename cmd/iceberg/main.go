@@ -61,7 +61,9 @@ Options:
   --output TYPE      output type (json/text) [default: text]
   --credential TEXT  specify credentials for the catalog
   --warehouse TEXT   specify the warehouse to use
-  --config TEXT      specify the path to the configuration file`
+  --config TEXT      specify the path to the configuration file
+  --description TEXT 	specify a description for the namespace
+  --location-uri TEXT  	specify a location URI for the namespace`
 
 type Config struct {
 	List     bool `docopt:"list"`
@@ -92,13 +94,15 @@ type Config struct {
 	PropName string `docopt:"PROPNAME"`
 	Value    string `docopt:"VALUE"`
 
-	Catalog   string `docopt:"--catalog"`
-	URI       string `docopt:"--uri"`
-	Output    string `docopt:"--output"`
-	History   bool   `docopt:"--history"`
-	Cred      string `docopt:"--credential"`
-	Warehouse string `docopt:"--warehouse"`
-	Config    string `docopt:"--config"`
+	Catalog     string `docopt:"--catalog"`
+	URI         string `docopt:"--uri"`
+	Output      string `docopt:"--output"`
+	History     bool   `docopt:"--history"`
+	Cred        string `docopt:"--credential"`
+	Warehouse   string `docopt:"--warehouse"`
+	Config      string `docopt:"--config"`
+	Description string `docopt:"--description"`
+	LocationURI string `docopt:"--location-uri"`
 }
 
 func main() {
@@ -143,6 +147,9 @@ func main() {
 		if cat, err = catalog.NewRestCatalog("rest", cfg.URI, opts...); err != nil {
 			log.Fatal(err)
 		}
+	case catalog.Glue:
+		opts := []catalog.Option[catalog.GlueCatalog]{}
+		cat = catalog.NewGlueCatalog(opts...)
 	default:
 		log.Fatal("unrecognized catalog type")
 	}
@@ -188,17 +195,6 @@ func main() {
 		}
 
 		output.Text("Renamed table from " + cfg.RenameFrom + " to " + cfg.RenameTo)
-	case cfg.Create:
-		switch {
-		case cfg.Namespace:
-			err := cat.CreateNamespace(context.Background(), catalog.ToRestIdentifier(cfg.Ident), make(iceberg.Properties))
-			if err != nil {
-				output.Error(err)
-				os.Exit(1)
-			}
-		case cfg.Table:
-			output.Error(errors.New("not implemented: Create Table is WIP"))
-		}
 	case cfg.Drop:
 		switch {
 		case cfg.Namespace:
@@ -213,6 +209,30 @@ func main() {
 				output.Error(err)
 				os.Exit(1)
 			}
+		}
+
+	case cfg.Create:
+		switch {
+		case cfg.Namespace:
+			props := iceberg.Properties{}
+			if cfg.Description != "" {
+				props["Description"] = cfg.Description
+			}
+
+			if cfg.LocationURI != "" {
+				props["Location"] = cfg.LocationURI
+			}
+
+			err := cat.CreateNamespace(context.Background(), catalog.ToRestIdentifier(cfg.Ident), props)
+			if err != nil {
+				output.Error(err)
+				os.Exit(1)
+			}
+		case cfg.Table:
+			output.Error(errors.New("not implemented: Create Table is WIP"))
+		default:
+			output.Error(errors.New("not implemented"))
+			os.Exit(1)
 		}
 	case cfg.Files:
 		tbl := loadTable(output, cat, cfg.TableID)

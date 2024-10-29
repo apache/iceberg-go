@@ -196,3 +196,19 @@ func (l literalSet) All(fn func(Literal) bool) bool {
 	}
 	return true
 }
+
+// Helper function to find the difference between two slices (a - b).
+func Difference(a, b []string) []string {
+	m := make(map[string]bool)
+	for _, item := range b {
+		m[item] = true
+	}
+
+	diff := make([]string, 0)
+	for _, item := range a {
+		if !m[item] {
+			diff = append(diff, item)
+		}
+	}
+	return diff
+}
