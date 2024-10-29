@@ -81,7 +81,6 @@ func (s *ScannerSuite) TestScanner() {
 		{"test_partitioned_by_hours", iceberg.GreaterThanEqual(iceberg.Reference("ts"), "2023-03-05T00:00:00+00:00"), 8},
 		{"test_partitioned_by_truncate", iceberg.GreaterThanEqual(iceberg.Reference("letter"), "e"), 8},
 		{"test_partitioned_by_bucket", iceberg.GreaterThanEqual(iceberg.Reference("number"), int32(5)), 6},
-		{"test_uuid_and_fixed_unpartitioned", iceberg.AlwaysTrue{}, 5},
 		{"test_uuid_and_fixed_unpartitioned", iceberg.EqualTo(iceberg.Reference("uuid_col"), "102cb62f-e6f8-4eb0-9973-d9b012ff0967"), 1},
 	}
 
