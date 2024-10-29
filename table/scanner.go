@@ -406,6 +406,14 @@ type FileScanTask struct {
 	Start, Length int64
 }
 
+// ToArrowRecords returns the arrow schema of the expected records and an interator
+// that can be used with a range expression to read the records as they are available.
+// If an error is encountered, during the planning and setup then this will return the
+// error directly. If the error occurs while iterating the records, it will be returned
+// by the iterator.
+//
+// The purpose for returning the schema up front is to handle the case where there are no
+// rows returned. The resulting Arrow Schema of the projection will still be known.
 func (s *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[arrow.Record, error], error) {
 	tasks, err := s.PlanFiles(ctx)
 	if err != nil {
@@ -436,6 +444,8 @@ func (s *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[arr
 	}).GetRecords(ctx, tasks)
 }
 
+// ToArrowTable calls ToArrowRecords and then gathers all of the records together
+// and returns an arrow.Table make from those records.
 func (s *Scan) ToArrowTable(ctx context.Context) (arrow.Table, error) {
 	schema, itr, err := s.ToArrowRecords(ctx)
 	if err != nil {

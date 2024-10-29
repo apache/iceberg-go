@@ -42,9 +42,12 @@ const (
 	ScanOptionArrowUseLargeTypes = "arrow.use_large_types"
 )
 
-func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask) (map[string][]*arrow.Chunked, error) {
+type positionDeletes = []*arrow.Chunked
+type perFileDeletes = map[string]positionDeletes
+
+func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask) (perFileDeletes, error) {
 	var (
-		deletesPerFile = make(map[string][]*arrow.Chunked)
+		deletesPerFile = make(perFileDeletes)
 		uniqueDeletes  = make(map[string]iceberg.DataFile)
 		err            error
 	)
@@ -153,7 +156,9 @@ func combinePositionalDeletes(mem memory.Allocator, deletes set[int64], start, e
 	return bldr.NewArray()
 }
 
-func processPositionalDeletes(ctx context.Context, deletes set[int64]) func(arrow.Record) (arrow.Record, error) {
+type recProcessFn func(arrow.Record) (arrow.Record, error)
+
+func processPositionalDeletes(ctx context.Context, deletes set[int64]) recProcessFn {
 	nextIdx, mem := int64(0), compute.GetAllocator(ctx)
 	return func(r arrow.Record) (arrow.Record, error) {
 		defer r.Release()
@@ -174,7 +179,7 @@ func processPositionalDeletes(ctx context.Context, deletes set[int64]) func(arro
 	}
 }
 
-func filterRecords(ctx context.Context, recordFilter expr.Expression) func(arrow.Record) (arrow.Record, error) {
+func filterRecords(ctx context.Context, recordFilter expr.Expression) recProcessFn {
 	return func(rec arrow.Record) (arrow.Record, error) {
 		defer rec.Release()
 
@@ -267,7 +272,7 @@ func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile) (
 	return iceSchema, colIndices, rdr, nil
 }
 
-func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Schema) (func(arrow.Record) (arrow.Record, error), bool, error) {
+func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Schema) (recProcessFn, bool, error) {
 	if as.boundRowFilter == nil || as.boundRowFilter.Equals(iceberg.AlwaysTrue{}) {
 		return nil, false, nil
 	}
@@ -301,15 +306,23 @@ func (as *arrowScan) processRecords(
 	fileSchema *iceberg.Schema,
 	rdr internal.FileReader,
 	columns []int,
-	pipeline []func(arrow.Record) (arrow.Record, error),
-	out chan<- enumeratedRecord) error {
+	pipeline []recProcessFn,
+	out chan<- enumeratedRecord) (err error) {
 
-	testRg, err := newParquetRowGroupStatsEvaluator(fileSchema, as.boundRowFilter, false)
-	if err != nil {
-		return err
+	var (
+		testRowGroups any
+		recRdr        array.RecordReader
+	)
+
+	switch task.Value.File.FileFormat() {
+	case iceberg.ParquetFile:
+		testRowGroups, err = newParquetRowGroupStatsEvaluator(fileSchema, as.boundRowFilter, false)
+		if err != nil {
+			return err
+		}
 	}
 
-	recRdr, err := rdr.GetRecords(ctx, columns, testRg)
+	recRdr, err = rdr.GetRecords(ctx, columns, testRowGroups)
 	if err != nil {
 		return err
 	}
@@ -350,7 +363,7 @@ func (as *arrowScan) processRecords(
 	return err
 }
 
-func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerated[FileScanTask], out chan<- enumeratedRecord, positionalDeletes []*arrow.Chunked) (err error) {
+func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerated[FileScanTask], out chan<- enumeratedRecord, positionalDeletes positionDeletes) (err error) {
 	defer func() {
 		if err != nil {
 			out <- enumeratedRecord{Task: task, Err: err}
@@ -361,7 +374,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 		rdr        internal.FileReader
 		iceSchema  *iceberg.Schema
 		colIndices []int
-		filterFunc func(arrow.Record) (arrow.Record, error)
+		filterFunc recProcessFn
 		dropFile   bool
 	)
 
@@ -370,7 +383,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 		return
 	}
 
-	pipeline := make([]func(arrow.Record) (arrow.Record, error), 0, 2)
+	pipeline := make([]recProcessFn, 0, 2)
 	if len(positionalDeletes) > 0 {
 		deletes := set[int64]{}
 		for _, chunk := range positionalDeletes {
@@ -413,7 +426,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 	return
 }
 
-func createIterator(ctx context.Context, numWorkers uint, records <-chan enumeratedRecord, deletesPerFile map[string][]*arrow.Chunked, cancel context.CancelFunc, rowLimit int64) iter.Seq2[arrow.Record, error] {
+func createIterator(ctx context.Context, numWorkers uint, records <-chan enumeratedRecord, deletesPerFile perFileDeletes, cancel context.CancelFunc, rowLimit int64) iter.Seq2[arrow.Record, error] {
 	isBeforeAny := func(batch enumeratedRecord) bool {
 		return batch.Task.Index < 0
 	}
@@ -506,7 +519,7 @@ func createIterator(ctx context.Context, numWorkers uint, records <-chan enumera
 	}
 }
 
-func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks []FileScanTask, deletesPerFile map[string][]*arrow.Chunked) iter.Seq2[arrow.Record, error] {
+func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks []FileScanTask, deletesPerFile perFileDeletes) iter.Seq2[arrow.Record, error] {
 	extSet := substrait.NewExtensionSet()
 
 	ctx, cancel := context.WithCancel(exprs.WithExtensionIDSet(ctx, extSet))
