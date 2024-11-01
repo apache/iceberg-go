@@ -20,7 +20,6 @@ package iceberg
 import (
 	"fmt"
 	"io"
-	"strconv"
 	"sync"
 	"time"
 
@@ -599,16 +598,13 @@ func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
 
 // WriteManifestList writes a list of v2 manifest files to an avro file.
 func WriteManifestList(out io.Writer, files []ManifestFile) error {
-	var version int
-	if len(files) > 0 {
-		version = files[0].Version()
-	} else {
-		// No files to write
+	if len(files) == 0 {
 		return nil
 	}
 
-	for _, file := range files {
+	version := files[0].Version()
 
+	for _, file := range files[1:] {
 		if file.Version() != version {
 			return fmt.Errorf(
 				"%w: ManifestFile '%s' has non-matching version %d instead of %d",
@@ -627,24 +623,7 @@ func WriteManifestList(out io.Writer, files []ManifestFile) error {
 		return fmt.Errorf("%w: non-recognized version %d", ErrInvalidArgument, version)
 	}
 
-	enc, err := ocf.NewEncoderWithSchema(
-		internal.AvroSchemaCache.Get(key),
-		out, ocf.WithMetadata(map[string][]byte{
-			"format-version": []byte(strconv.Itoa(version)),
-		}),
-		ocf.WithCodec(ocf.Deflate),
-	)
-	if err != nil {
-		return err
-	}
-
-	for _, file := range files {
-		if err := enc.Encode(file); err != nil {
-			return err
-		}
-	}
-
-	return enc.Close()
+	return avroEncode(key, version, files, out)
 }
 
 func writeManifestEntries(out io.Writer, entries []ManifestEntry, version int) error {
@@ -658,24 +637,7 @@ func writeManifestEntries(out io.Writer, entries []ManifestEntry, version int) e
 		return fmt.Errorf("%w: non-recognized version %d", ErrInvalidArgument, version)
 	}
 
-	enc, err := ocf.NewEncoderWithSchema(
-		internal.AvroSchemaCache.Get(key),
-		out, ocf.WithMetadata(map[string][]byte{
-			"format-version": []byte(strconv.Itoa(version)),
-		}),
-		ocf.WithCodec(ocf.Deflate),
-	)
-	if err != nil {
-		return err
-	}
-
-	for _, entry := range entries {
-		if err := enc.Encode(entry); err != nil {
-			return err
-		}
-	}
-
-	return enc.Close()
+	return avroEncode(key, version, entries, out)
 }
 
 // ManifestEntryStatus defines constants for the entry status of
