@@ -653,7 +653,7 @@ func avroPartitionData(input map[string]any, nameToID map[string]int, logicalTyp
 				case avro.TimeMicros:
 					out[k] = Time(v.(time.Duration).Microseconds())
 				case avro.TimestampMillis:
-					out[k] = Timestamp(v.(time.Time).UTC().UnixMicro())
+					out[k] = Timestamp(v.(time.Time).UTC().UnixMilli())
 				case avro.TimestampMicros:
 					out[k] = Timestamp(v.(time.Time).UTC().UnixMicro())
 				default:
