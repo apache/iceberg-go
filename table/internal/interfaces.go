@@ -37,10 +37,9 @@ func GetFile(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile, isPosD
 	switch dataFile.FileFormat() {
 	case iceberg.ParquetFile:
 		return &ParquetFileSource{
-			mem:          compute.GetAllocator(ctx),
-			fs:           fs,
-			file:         dataFile,
-			isPosDeletes: isPosDeletes,
+			mem:  compute.GetAllocator(ctx),
+			fs:   fs,
+			file: dataFile,
 		}, nil
 	default:
 		return nil, fmt.Errorf("%w: only parquet format is implemented, got %s",

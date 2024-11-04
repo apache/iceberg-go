@@ -35,10 +35,9 @@ import (
 )
 
 type ParquetFileSource struct {
-	mem          memory.Allocator
-	fs           iceio.IO
-	file         iceberg.DataFile
-	isPosDeletes bool
+	mem  memory.Allocator
+	fs   iceio.IO
+	file iceberg.DataFile
 }
 
 type wrapPqArrowReader struct {
@@ -104,7 +103,7 @@ func (pfs *ParquetFileSource) GetReader(ctx context.Context) (FileReader, error)
 		BatchSize: 1 << 17,
 	}
 
-	if pfs.isPosDeletes {
+	if pfs.file.ContentType() == iceberg.EntryContentPosDeletes {
 		// for dictionary for filepath col
 		arrProps.SetReadDict(0, true)
 	}

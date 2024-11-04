@@ -69,8 +69,8 @@ func WithSelectedFields(fields ...string) ScanOption {
 		return noopOption
 	}
 
-	return func(s *Scan) {
-		s.selectedFields = fields
+	return func(scan *Scan) {
+		scan.selectedFields = fields
 	}
 }
 
@@ -79,8 +79,8 @@ func WithRowFilter(e iceberg.BooleanExpression) ScanOption {
 		return noopOption
 	}
 
-	return func(s *Scan) {
-		s.rowFilter = e
+	return func(scan *Scan) {
+		scan.rowFilter = e
 	}
 }
 
@@ -89,14 +89,14 @@ func WithSnapshotID(n int64) ScanOption {
 		return noopOption
 	}
 
-	return func(s *Scan) {
-		s.snapshotID = &n
+	return func(scan *Scan) {
+		scan.snapshotID = &n
 	}
 }
 
 func WithCaseSensitive(b bool) ScanOption {
-	return func(s *Scan) {
-		s.caseSensitive = b
+	return func(scan *Scan) {
+		scan.caseSensitive = b
 	}
 }
 
@@ -105,8 +105,8 @@ func WithLimit(n int64) ScanOption {
 		return noopOption
 	}
 
-	return func(s *Scan) {
-		s.limit = n
+	return func(scan *Scan) {
+		scan.limit = n
 	}
 }
 
@@ -115,8 +115,8 @@ func WithOptions(opts iceberg.Properties) ScanOption {
 		return noopOption
 	}
 
-	return func(s *Scan) {
-		s.options = opts
+	return func(scan *Scan) {
+		scan.options = opts
 	}
 }
 

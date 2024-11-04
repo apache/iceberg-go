@@ -292,7 +292,7 @@ func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Sc
 	}
 
 	if !translatedFilter.Equals(iceberg.AlwaysTrue{}) {
-		extSet, recordFilter, err := substrait.ConvertExpr(fileSchema, translatedFilter)
+		extSet, recordFilter, err := substrait.ConvertExpr(fileSchema, translatedFilter, as.caseSensitive)
 		if err != nil {
 			return nil, false, err
 		}

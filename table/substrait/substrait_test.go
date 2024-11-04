@@ -70,7 +70,7 @@ func TestRefTypes(t *testing.T) {
 
 			idx := ref.(iceberg.BoundPredicate).Term().Ref().Pos()
 
-			_, converted, err := substrait.ConvertExpr(sc, ref)
+			_, converted, err := substrait.ConvertExpr(sc, ref, true)
 			require.NoError(t, err)
 
 			assert.Equal(t, fmt.Sprintf("is_null(.field(%d) => %s) => boolean", idx,
@@ -124,7 +124,7 @@ func TestExprs(t *testing.T) {
 			bound, err := iceberg.BindExpr(tt.schema, tt.e, false)
 			require.NoError(t, err)
 
-			_, result, err := substrait.ConvertExpr(tt.schema, bound)
+			_, result, err := substrait.ConvertExpr(tt.schema, bound, true)
 			require.NoError(t, err)
 			assert.Equal(t, tt.expected, result.String())
 		})

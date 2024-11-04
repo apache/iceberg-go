@@ -51,16 +51,17 @@ func NewExtensionSet() exprs.ExtensionIDSet {
 
 // ConvertExpr binds the provided expression to the given schema and converts it to a
 // substrait expression so that it can be utilized for computation.
-func ConvertExpr(schema *iceberg.Schema, e iceberg.BooleanExpression) (*expr.ExtensionRegistry, expr.Expression, error) {
+func ConvertExpr(schema *iceberg.Schema, e iceberg.BooleanExpression, caseSensitive bool) (*expr.ExtensionRegistry, expr.Expression, error) {
 	base, err := ConvertSchema(schema)
 	if err != nil {
 		return nil, nil, err
-	}	
+	}
 
 	reg := expr.NewEmptyExtensionRegistry(&extensions.DefaultCollection)
 
 	bldr := expr.ExprBuilder{Reg: reg, BaseSchema: &base.Struct}
-	b, err := iceberg.VisitExpr(e, &toSubstraitExpr{bldr: bldr, schema: schema})
+	b, err := iceberg.VisitExpr(e, &toSubstraitExpr{bldr: bldr, schema: schema,
+		caseSensitive: caseSensitive})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -178,8 +179,9 @@ var (
 )
 
 type toSubstraitExpr struct {
-	schema *iceberg.Schema
-	bldr   expr.ExprBuilder
+	schema        *iceberg.Schema
+	bldr          expr.ExprBuilder
+	caseSensitive bool
 }
 
 func (t *toSubstraitExpr) VisitTrue() expr.Builder {
@@ -286,7 +288,7 @@ func toSubstraitLiteralSet(typ iceberg.Type, lits []iceberg.Literal) expr.ListLi
 }
 
 func (t *toSubstraitExpr) getRef(ref iceberg.BoundReference) expr.Reference {
-	updatedRef, err := iceberg.Reference(ref.Field().Name).Bind(t.schema, true)
+	updatedRef, err := iceberg.Reference(ref.Field().Name).Bind(t.schema, t.caseSensitive)
 	if err != nil {
 		panic(err)
 	}
