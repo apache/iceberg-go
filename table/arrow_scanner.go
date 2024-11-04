@@ -43,17 +43,21 @@ const (
 )
 
 type positionDeletes = []*arrow.Chunked
-type perFileDeletes = map[string]positionDeletes
+type perFilePosDeletes = map[string]positionDeletes
 
-func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask) (perFileDeletes, error) {
+func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask) (perFilePosDeletes, error) {
 	var (
-		deletesPerFile = make(perFileDeletes)
+		deletesPerFile = make(perFilePosDeletes)
 		uniqueDeletes  = make(map[string]iceberg.DataFile)
 		err            error
 	)
 
 	for _, t := range tasks {
 		for _, d := range t.DeleteFiles {
+			if d.ContentType() != iceberg.EntryContentPosDeletes {
+				continue
+			}
+
 			if _, ok := uniqueDeletes[d.FilePath()]; !ok {
 				uniqueDeletes[d.FilePath()] = d
 			}
@@ -430,7 +434,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 	return
 }
 
-func createIterator(ctx context.Context, numWorkers uint, records <-chan enumeratedRecord, deletesPerFile perFileDeletes, cancel context.CancelFunc, rowLimit int64) iter.Seq2[arrow.Record, error] {
+func createIterator(ctx context.Context, numWorkers uint, records <-chan enumeratedRecord, deletesPerFile perFilePosDeletes, cancel context.CancelFunc, rowLimit int64) iter.Seq2[arrow.Record, error] {
 	isBeforeAny := func(batch enumeratedRecord) bool {
 		return batch.Task.Index < 0
 	}
@@ -523,7 +527,7 @@ func createIterator(ctx context.Context, numWorkers uint, records <-chan enumera
 	}
 }
 
-func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks []FileScanTask, deletesPerFile perFileDeletes) iter.Seq2[arrow.Record, error] {
+func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks []FileScanTask, deletesPerFile perFilePosDeletes) iter.Seq2[arrow.Record, error] {
 	extSet := substrait.NewExtensionSet()
 
 	ctx, cancel := context.WithCancel(exprs.WithExtensionIDSet(ctx, extSet))
