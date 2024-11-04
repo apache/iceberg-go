@@ -79,8 +79,7 @@ $ cd iceberg-go/cmd/iceberg && go build .
 
 * No intrinsic support for writing data yet.
 * Plan to add [Apache Arrow](https://pkg.go.dev/github.com/apache/arrow-go/) support eventually.
-* Data can currently be read as an Arrow Table or as a stream of Arrow
-record batches.
+* Data can currently be read as an Arrow Table or as a stream of Arrow record batches.
 
 # Get in Touch
 
