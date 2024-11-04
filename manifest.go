@@ -792,7 +792,7 @@ func (d *dataFile) EqualityFieldIDs() []int {
 	if d.EqualityIDs == nil {
 		return nil
 	}
-	return d.EqualityFieldIDs()
+	return *d.EqualityIDs
 }
 
 func (d *dataFile) SortOrderID() *int { return d.SortOrder }
