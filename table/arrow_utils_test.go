@@ -76,16 +76,16 @@ func TestArrowToIceberg(t *testing.T) {
 		{&arrow.TimestampType{Unit: arrow.Microsecond}, iceberg.PrimitiveTypes.Timestamp, true, ""},
 		{&arrow.TimestampType{Unit: arrow.Nanosecond}, nil, false, "'ns' timestamp precision not supported"},
 		{&arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "US/Pacific"}, nil, false, "unsupported arrow type for conversion - timestamp[us, tz=US/Pacific]"},
-		{arrow.BinaryTypes.String, iceberg.PrimitiveTypes.String, false, ""},
-		{arrow.BinaryTypes.LargeString, iceberg.PrimitiveTypes.String, true, ""},
+		{arrow.BinaryTypes.String, iceberg.PrimitiveTypes.String, true, ""},
+		{arrow.BinaryTypes.LargeString, iceberg.PrimitiveTypes.String, false, ""},
 		{arrow.BinaryTypes.StringView, nil, false, "unsupported arrow type for conversion - string_view"},
-		{arrow.BinaryTypes.Binary, iceberg.PrimitiveTypes.Binary, false, ""},
-		{arrow.BinaryTypes.LargeBinary, iceberg.PrimitiveTypes.Binary, true, ""},
+		{arrow.BinaryTypes.Binary, iceberg.PrimitiveTypes.Binary, true, ""},
+		{arrow.BinaryTypes.LargeBinary, iceberg.PrimitiveTypes.Binary, false, ""},
 		{arrow.BinaryTypes.BinaryView, nil, false, "unsupported arrow type for conversion - binary_view"},
 		{extensions.NewUUIDType(), iceberg.PrimitiveTypes.UUID, true, ""},
 		{arrow.StructOf(arrow.Field{
 			Name:     "foo",
-			Type:     arrow.BinaryTypes.LargeString,
+			Type:     arrow.BinaryTypes.String,
 			Nullable: true,
 			Metadata: arrow.MetadataFrom(map[string]string{
 				table.ArrowParquetFieldIDKey: "1", table.ArrowFieldDocKey: "foo doc",
@@ -137,7 +137,7 @@ func TestArrowToIceberg(t *testing.T) {
 		}, false, ""},
 		{arrow.MapOfWithMetadata(arrow.PrimitiveTypes.Int32,
 			fieldIDMeta("1"),
-			arrow.BinaryTypes.LargeString, fieldIDMeta("2")),
+			arrow.BinaryTypes.String, fieldIDMeta("2")),
 			&iceberg.MapType{
 				KeyID: 1, KeyType: iceberg.PrimitiveTypes.Int32,
 				ValueID: 2, ValueType: iceberg.PrimitiveTypes.String, ValueRequired: false,
@@ -311,7 +311,7 @@ func TestArrowSchemaRoundTripConversion(t *testing.T) {
 	}
 
 	for _, tt := range schemas {
-		sc, err := table.SchemaToArrowSchema(tt, nil, true)
+		sc, err := table.SchemaToArrowSchema(tt, nil, true, false)
 		require.NoError(t, err)
 
 		ice, err := table.ArrowSchemaToIceberg(sc, false, nil)

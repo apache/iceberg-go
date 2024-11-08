@@ -151,8 +151,12 @@ func LiteralFromBytes(typ Type, data []byte) (Literal, error) {
 		return v, err
 	case FixedType:
 		if len(data) != t.Len() {
-			return nil, fmt.Errorf("%w: expected length %d for type %s, got %d",
-				ErrInvalidBinSerialization, t.Len(), t, len(data))
+			// looks like some writers will write a prefix of the fixed length
+			// for lower/upper bounds instead of the full length. so let's pad
+			// it out to the full length if unpacking a fixed length literal
+			padded := make([]byte, t.Len())
+			copy(padded, data)
+			data = padded
 		}
 		var v FixedLiteral
 		err := v.UnmarshalBinary(data)

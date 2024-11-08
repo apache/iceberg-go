@@ -465,6 +465,7 @@ func ensureSmallArrowTypes(dt arrow.DataType) (arrow.DataType, error) {
 type convertToArrow struct {
 	metadata        map[string]string
 	includeFieldIDs bool
+	useLargeTypes   bool
 }
 
 func (c convertToArrow) Schema(_ *iceberg.Schema, result arrow.Field) arrow.Field {
@@ -554,11 +555,17 @@ func (c convertToArrow) VisitTimestamp() arrow.Field {
 }
 
 func (c convertToArrow) VisitString() arrow.Field {
-	return arrow.Field{Type: arrow.BinaryTypes.LargeString}
+	if c.useLargeTypes {
+		return arrow.Field{Type: arrow.BinaryTypes.LargeString}
+	}
+	return arrow.Field{Type: arrow.BinaryTypes.String}
 }
 
 func (c convertToArrow) VisitBinary() arrow.Field {
-	return arrow.Field{Type: arrow.BinaryTypes.LargeBinary}
+	if c.useLargeTypes {
+		return arrow.Field{Type: arrow.BinaryTypes.LargeBinary}
+	}
+	return arrow.Field{Type: arrow.BinaryTypes.Binary}
 }
 
 func (c convertToArrow) VisitUUID() arrow.Field {
@@ -569,8 +576,9 @@ func (c convertToArrow) VisitUUID() arrow.Field {
 // is non-nil, it will be included as the top-level metadata in the schema. If includeFieldIDs
 // is true, then each field of the schema will contain a metadata key PARQUET:field_id set to
 // the field id from the iceberg schema.
-func SchemaToArrowSchema(sc *iceberg.Schema, metadata map[string]string, includeFieldIDs bool) (*arrow.Schema, error) {
-	top, err := iceberg.Visit(sc, convertToArrow{metadata: metadata, includeFieldIDs: includeFieldIDs})
+func SchemaToArrowSchema(sc *iceberg.Schema, metadata map[string]string, includeFieldIDs, useLargeTypes bool) (*arrow.Schema, error) {
+	top, err := iceberg.Visit(sc, convertToArrow{metadata: metadata,
+		includeFieldIDs: includeFieldIDs, useLargeTypes: useLargeTypes})
 	if err != nil {
 		return nil, err
 	}

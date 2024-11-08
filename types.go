@@ -36,6 +36,14 @@ var (
 
 type Properties map[string]string
 
+// Get returns the value of the key if it exists, otherwise it returns the default value.
+func (p Properties) Get(key, defVal string) string {
+	if v, ok := p[key]; ok {
+		return v
+	}
+	return defVal
+}
+
 // Type is an interface representing any of the available iceberg types,
 // such as primitives (int32/int64/etc.) or nested types (list/struct/map).
 type Type interface {
