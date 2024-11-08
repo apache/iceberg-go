@@ -41,7 +41,6 @@ Usage:
   iceberg describe [options] [namespace | table] IDENTIFIER
   iceberg (schema | spec | uuid | location) [options] TABLE_ID
   iceberg create [options] (namespace | table) IDENTIFIER
-  iceberg create [options] (namespace | table) IDENTIFIER
   iceberg drop [options] (namespace | table) IDENTIFIER
   iceberg files [options] TABLE_ID [--history]
   iceberg rename [options] <from> <to>
@@ -237,6 +236,8 @@ func main() {
 				output.Error(err)
 				os.Exit(1)
 			}
+		case cfg.Table:
+			output.Error(errors.New("not implemented: Create Table is WIP"))
 		default:
 			output.Error(errors.New("not implemented"))
 			os.Exit(1)
