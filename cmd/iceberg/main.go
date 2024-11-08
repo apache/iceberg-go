@@ -29,6 +29,8 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/config"
 	"github.com/apache/iceberg-go/table"
+
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/docopt/docopt-go"
 )
 
@@ -149,7 +151,13 @@ func main() {
 			log.Fatal(err)
 		}
 	case catalog.Glue:
-		opts := []catalog.Option[catalog.GlueCatalog]{}
+		awscfg, err := awsconfig.LoadDefaultConfig(context.Background())
+		if err != nil {
+			log.Fatal(err)
+		}
+		opts := []catalog.Option[catalog.GlueCatalog]{
+			catalog.WithAwsConfig(awscfg),
+		}
 		cat = catalog.NewGlueCatalog(opts...)
 	default:
 		log.Fatal("unrecognized catalog type")
