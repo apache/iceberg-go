@@ -21,7 +21,6 @@ import (
 	"context"
 	"io"
 	"iter"
-	"runtime"
 	"strconv"
 	"sync"
 
@@ -45,7 +44,7 @@ const (
 type positionDeletes = []*arrow.Chunked
 type perFilePosDeletes = map[string]positionDeletes
 
-func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask) (perFilePosDeletes, error) {
+func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, concurrency int) (perFilePosDeletes, error) {
 	var (
 		deletesPerFile = make(perFilePosDeletes)
 		uniqueDeletes  = make(map[string]iceberg.DataFile)
@@ -69,9 +68,9 @@ func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask) 
 	}
 
 	g, ctx := errgroup.WithContext(ctx)
-	g.SetLimit(runtime.NumCPU())
+	g.SetLimit(concurrency)
 
-	perFileChan := make(chan map[string]*arrow.Chunked, runtime.NumCPU())
+	perFileChan := make(chan map[string]*arrow.Chunked, concurrency)
 	go func() {
 		defer close(perFileChan)
 		for _, v := range uniqueDeletes {
@@ -213,6 +212,7 @@ type arrowScan struct {
 	options         iceberg.Properties
 
 	useLargeTypes bool
+	concurrency   int
 }
 
 func (as *arrowScan) projectedFieldIDs() (set[int], error) {
@@ -534,7 +534,7 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 	taskChan := make(chan internal.Enumerated[FileScanTask], len(tasks))
 
 	// numWorkers := 1
-	numWorkers := min(runtime.NumCPU(), len(tasks))
+	numWorkers := min(as.concurrency, len(tasks))
 	records := make(chan enumeratedRecord, numWorkers)
 
 	var wg sync.WaitGroup
@@ -592,7 +592,7 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 		return resultSchema, func(yield func(arrow.Record, error) bool) {}, nil
 	}
 
-	deletesPerFile, err := readAllDeleteFiles(ctx, as.fs, tasks)
+	deletesPerFile, err := readAllDeleteFiles(ctx, as.fs, tasks, as.concurrency)
 	if err != nil {
 		return nil, nil, err
 	}
