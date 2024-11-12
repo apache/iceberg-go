@@ -34,7 +34,7 @@ require (
 	github.com/hamba/avro/v2 v2.27.0
 	github.com/pterm/pterm v0.12.79
 	github.com/stretchr/testify v1.9.0
-	github.com/substrait-io/substrait-go v1.1.0
+	github.com/substrait-io/substrait-go v1.2.0
 	github.com/twmb/murmur3 v1.1.8
 	github.com/wolfeidau/s3iofs v1.5.2
 	golang.org/x/sync v0.9.0
@@ -88,6 +88,7 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/rivo/uniseg v0.4.4 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
+	github.com/substrait-io/substrait v0.57.1 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/zeebo/xxh3 v1.0.2 // indirect
 	golang.org/x/exp v0.0.0-20240909161429-701f63a606c0 // indirect
