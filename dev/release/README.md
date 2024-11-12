@@ -53,7 +53,7 @@ may be helpful.
 
 Your PGP key must be registered to the following:
 
-    * https://dist.apache.org/repos/dist/release/iceberg/KEYS
+    * https://downloads.apache.org/iceberg/KEYS
 
 See the header comment of them for how to add a PGP key.
 
