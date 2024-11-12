@@ -53,7 +53,6 @@ may be helpful.
 
 Your PGP key must be registered to the following:
 
-    * https://dist.apache.org/repos/dist/dev/iceberg/KEYS
     * https://dist.apache.org/repos/dist/release/iceberg/KEYS
 
 See the header comment of them for how to add a PGP key.
@@ -62,7 +61,7 @@ Apache Iceberg committers can update them by Subversion client with their ASF ac
 e.g.:
 
 ```console
-$ svn co https://dist.apache.org/repos/dist/dev/iceberg
+$ svn co https://dist.apache.org/repos/dist/release/iceberg
 $ cd iceberg
 $ editor KEYS
 $ svn ci KEYS
