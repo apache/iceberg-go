@@ -42,17 +42,25 @@ jobs:
       - name: Prepare for tag
         if: github.ref_type == 'tag'
         run: |
-          version=${GITHUB_REF_NAME%-rc}
-          version=${version#v}
-          rc=${GITHUB_REF_NAME#*-rc}
+          # Remove the 'v' prefix and any '-rc' suffix from the tag name to isolate the version number
+          # For a tag like 'v0.1.0-rc1', this will result in '0.1.0'
+          version=${GITHUB_REF_NAME#v}
+          version=${version%-rc*}
+          # Finds the last occurrence of `-rc` and returns everything after it
+          # For a tag like 'v0.1.0-rc1', this will result in '1'
+          rc=${GITHUB_REF_NAME##*-rc}
           echo "VERSION=${version}" >> ${GITHUB_ENV}
           echo "RC=${rc}" >> ${GITHUB_ENV}
+          echo "VERSION=${version}"
+          echo "RC=${rc}"
       - name: Prepare for branch
         if: github.ref_type == 'branch'
         run: |
           rc=100
           echo "VERSION=${version}" >> ${GITHUB_ENV}
           echo "RC=${rc}" >> ${GITHUB_ENV}
+          echo "VERSION=${version}"
+          echo "RC=${rc}"
       - name: Archive
         run: |
           id="apache-iceberg-go-${VERSION}-rc${RC}"
@@ -90,14 +98,20 @@ jobs:
       - name: Verify
         run: |
           tar_gz=$(echo apache-iceberg-go-*.tar.gz)
+          # Extract version by removing the 'apache-iceberg-go-' prefix, '.tar.gz' extension, and '-rc*' suffix
+          # For a file like 'apache-iceberg-go-0.1.0-rc1.tar.gz', this will result in '0.1.0'
           version=${tar_gz#apache-iceberg-go-}
-          version=${version%-rc*}
           version=${version%.tar.gz}
+          version=${version%%-rc*}
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            rc="${GITHUB_REF_NAME#*-rc}"
+            # Finds the last occurrence of `-rc` and returns everything after it
+            # For a tag like 'v0.1.0-rc1', this will result in '1'
+            rc=${GITHUB_REF_NAME##*-rc}
           else
             rc=100
           fi
+          echo "VERSION=${version}"
+          echo "RC=${rc}"
           VERIFY_DEFAULT=0 dev/release/verify_rc.sh "${version}" "${rc}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
