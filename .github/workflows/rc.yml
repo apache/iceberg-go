@@ -55,7 +55,7 @@ jobs:
           echo "RC=${rc}" >> ${GITHUB_ENV}
       - name: Archive
         run: |
-          id="apache-iceberg-go-${VERSION}"
+          id="apache-iceberg-go-${VERSION}-rc${RC}"
           tar_gz="${id}.tar.gz"
           echo "TAR_GZ=${tar_gz}" >> ${GITHUB_ENV}
           git archive HEAD --prefix "${id}/" --output "${tar_gz}"
@@ -91,6 +91,7 @@ jobs:
         run: |
           tar_gz=$(echo apache-iceberg-go-*.tar.gz)
           version=${tar_gz#apache-iceberg-go-}
+          version=${version%-rc*}
           version=${version%.tar.gz}
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             rc="${GITHUB_REF_NAME#*-rc}"
