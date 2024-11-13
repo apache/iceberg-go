@@ -18,6 +18,7 @@
 package table
 
 import (
+	"runtime"
 	"slices"
 
 	"github.com/apache/iceberg-go"
@@ -110,6 +111,18 @@ func WithLimit(n int64) ScanOption {
 	}
 }
 
+// WitMaxConcurrency sets the maximum concurrency for table scan and plan
+// operations. When unset it defaults to runtime.GOMAXPROCS.
+func WitMaxConcurrency(n int) ScanOption {
+	if n <= 0 {
+		return noopOption
+	}
+
+	return func(scan *Scan) {
+		scan.concurrency = n
+	}
+}
+
 func WithOptions(opts iceberg.Properties) ScanOption {
 	if opts == nil {
 		return noopOption
@@ -128,6 +141,7 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 		selectedFields: []string{"*"},
 		caseSensitive:  true,
 		limit:          ScanNoLimit,
+		concurrency:    runtime.GOMAXPROCS(0),
 	}
 
 	for _, opt := range opts {

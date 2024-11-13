@@ -22,7 +22,6 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"runtime"
 	"slices"
 	"sync"
 
@@ -132,6 +131,7 @@ type Scan struct {
 	limit          int64
 
 	partitionFilters *keyDefaultMap[int, iceberg.BooleanExpression]
+	concurrency      int
 }
 
 func (scan *Scan) UseRowLimit(n int64) *Scan {
@@ -294,7 +294,7 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	dataEntries := make([]iceberg.ManifestEntry, 0)
 	positionalDeleteEntries := make([]iceberg.ManifestEntry, 0)
 
-	nworkers := min(runtime.NumCPU(), len(manifestList))
+	nworkers := min(scan.concurrency, len(manifestList))
 	var wg sync.WaitGroup
 
 	manifestChan := make(chan iceberg.ManifestFile, len(manifestList))
@@ -434,6 +434,7 @@ func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[
 		caseSensitive:   scan.caseSensitive,
 		rowLimit:        scan.limit,
 		options:         scan.options,
+		concurrency:     scan.concurrency,
 	}).GetRecords(ctx, tasks)
 }
 
