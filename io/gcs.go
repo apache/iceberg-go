@@ -34,6 +34,7 @@ const (
 	GCSJSONKey  = "gcs.jsonkey"
 )
 
+// ParseGCSConfig parses GCS properties and returns a configuration.
 func ParseGCSConfig(props map[string]string) *gcsblob.Options {
 	var o []option.ClientOption
 	if url := props[GCSEndpoint]; url != "" {
@@ -50,7 +51,7 @@ func ParseGCSConfig(props map[string]string) *gcsblob.Options {
 	}
 }
 
-// Construct a S3 bucket from a URL
+// Construct a GCS bucket from a URL
 func createGCSBucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
 	gcscfg := ParseGCSConfig(props)
 	client := gcp.NewAnonymousHTTPClient(gcp.DefaultTransport())

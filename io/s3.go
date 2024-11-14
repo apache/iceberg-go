@@ -52,6 +52,7 @@ var unsupportedS3Props = []string{
 	S3SignerUri,
 }
 
+// ParseAWSConfig parses S3 properties and returns a configuration.
 func ParseAWSConfig(props map[string]string) (*aws.Config, error) {
 	// If any unsupported properties are set, return an error.
 	for k := range props {

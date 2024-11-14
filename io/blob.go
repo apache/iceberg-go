@@ -50,7 +50,7 @@ func (f *iofsFileInfo) Type() fs.FileMode          { return fs.ModeIrregular }
 // It implements `io/fs.FileInfo`, `io/fs.DirEntry`, and `io/fs.File`.
 // Copied from `gocloud.dev/blob.iofsDir`, but modified to use `iceberg-go/io.File` instead of `io/fs.File`
 type iofsDir struct {
-	b    *BlobFileIO
+	b    *blobFileIO
 	key  string
 	name string
 	// If opened is true, we've read entries via openOnce().
@@ -59,7 +59,7 @@ type iofsDir struct {
 	offset  int
 }
 
-func newDir(b *BlobFileIO, key, name string) *iofsDir {
+func newDir(b *blobFileIO, key, name string) *iofsDir {
 	return &iofsDir{b: b, key: key, name: name}
 }
 
@@ -174,15 +174,15 @@ func (f *blobOpenFile) Sys() interface{}           { return f.Reader }
 func (f *blobOpenFile) IsDir() bool                { return false }
 func (f *blobOpenFile) Stat() (fs.FileInfo, error) { return f, nil }
 
-// BlobFileIO represents a file system backed by a bucket in object store. It implements the `iceberg-go/io.FileIO` interface.
-type BlobFileIO struct {
+// blobFileIO represents a file system backed by a bucket in object store. It implements the `iceberg-go/io.FileIO` interface.
+type blobFileIO struct {
 	*blob.Bucket
 	ctx    context.Context
 	opts   *blob.ReaderOptions
 	prefix string
 }
 
-func (io *BlobFileIO) preprocess(n string) string {
+func (io *blobFileIO) preprocess(n string) string {
 	_, after, found := strings.Cut(n, "://")
 	if found {
 		n = after
@@ -198,10 +198,10 @@ func (io *BlobFileIO) preprocess(n string) string {
 	return out
 }
 
-// Open a Blob from a Bucket using the BlobFileIO. Note this
+// Open a Blob from a Bucket using the blobFileIO. Note this
 // function is copied from blob.Bucket.Open, but extended to
 // return a iceberg-go/io.File instance instead of io/fs.File
-func (io *BlobFileIO) Open(path string) (File, error) {
+func (io *blobFileIO) Open(path string) (File, error) {
 	if _, err := url.Parse(path); err != nil {
 		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrInvalid}
 	}
@@ -243,8 +243,8 @@ func (io *BlobFileIO) Open(path string) (File, error) {
 	return &blobOpenFile{Reader: r, name: name}, nil
 }
 
-// Remove a Blob from a Bucket using the BlobFileIO
-func (io *BlobFileIO) Remove(path string) error {
+// Remove a Blob from a Bucket using the blobFileIO
+func (io *blobFileIO) Remove(path string) error {
 	if !fs.ValidPath(path) {
 		return &fs.PathError{Op: "remove", Path: path, Err: fs.ErrInvalid}
 	}
@@ -265,7 +265,7 @@ func (io *BlobFileIO) Remove(path string) error {
 //
 // The caller must call Close on the returned Writer, even if the write is
 // aborted.
-func (io *BlobFileIO) NewWriter(path string, overwrite bool, opts *blob.WriterOptions) (w *BlobWriteFile, err error) {
+func (io *blobFileIO) NewWriter(path string, overwrite bool, opts *blob.WriterOptions) (w *BlobWriteFile, err error) {
 	if !fs.ValidPath(path) {
 		return nil, &fs.PathError{Op: "new writer", Path: path, Err: fs.ErrInvalid}
 	}
@@ -293,10 +293,10 @@ func urlToBucketPath(parsed *url.URL) (string, string) {
 	return parsed.Host, parsed.Path
 }
 
-// CreateBlobFileIO creates a new BlobFileIO instance
-func CreateBlobFileIO(parsed *url.URL, bucket *blob.Bucket) *BlobFileIO {
+// createblobFileIO creates a new blobFileIO instance
+func createBlobFileIO(parsed *url.URL, bucket *blob.Bucket) *blobFileIO {
 	ctx := context.Background()
-	return &BlobFileIO{Bucket: bucket, ctx: ctx, opts: &blob.ReaderOptions{}, prefix: parsed.Host + parsed.Path}
+	return &blobFileIO{Bucket: bucket, ctx: ctx, opts: &blob.ReaderOptions{}, prefix: parsed.Host + parsed.Path}
 }
 
 type BlobWriteFile struct {
