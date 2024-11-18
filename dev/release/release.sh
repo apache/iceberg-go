@@ -44,26 +44,16 @@ git tag "${tag}" "${rc_tag}"
 git push origin "${tag}"
 
 dist_url="https://dist.apache.org/repos/dist/release/iceberg"
-dist_dir="dev/release/dist"
-echo "Checking out ${dist_url}"
-rm -rf "${dist_dir}"
-svn co --depth=empty "${dist_url}" "${dist_dir}"
-gh release download "${rc_tag}" \
-  --repo "${repository}" \
-  --dir "${dist_dir}" \
-  --skip-existing
+dist_dev_url="https://dist.apache.org/repos/dist/dev/iceberg"
 
-release_id="apache-iceberg-go-${version}"
-echo "Uploading to release/"
-pushd "${dist_dir}"
-svn add .
-svn ci -m "Apache Iceberg Go ${version}"
-popd
-rm -rf "${dist_dir}"
+svn \
+  mv "${dist_dev_url}/apache-iceberg-go-${version}-rc${rc}/" \
+  "${dist_url}/apache-iceberg-go-${version}/" \
+  -m "Apache Iceberg-go ${version}"
 
 echo "Keep only the latest versions"
 old_releases=$(
-  svn ls https://dist.apache.org/repos/dist/release/iceberg/ |
+  svn ls "${dist_url}" |
   grep -E '^apache-iceberg-go-' |
   sort --version-sort --reverse |
   tail -n +2
