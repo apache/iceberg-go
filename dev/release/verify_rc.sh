@@ -35,7 +35,7 @@ VERSION="$1"
 RC="$2"
 
 ICEBERG_DIST_BASE_URL="https://downloads.apache.org/iceberg"
-DOWNLOAD_RC_BASE_URL="https://github.com/apache/iceberg-go/releases/download/v${VERSION}-rc${RC}"
+DOWNLOAD_RC_BASE_URL="https://dist.apache.org/repos/dist/dev/iceberg/apache-iceberg-go-${VERSION}-rc${RC}"
 ARCHIVE_BASE_NAME="apache-iceberg-go-${VERSION}-rc${RC}"
 
 : "${VERIFY_DEFAULT:=1}"
