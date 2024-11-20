@@ -48,8 +48,8 @@ github.com/aws/aws-sdk-go-v2/internal/ini v1.8.1 h1:VaRN3TlFdd6KxX1x3ILT5ynH6HvK
 github.com/aws/aws-sdk-go-v2/internal/ini v1.8.1/go.mod h1:FbtygfRFze9usAadmnGJNc8KsP346kEe+y2/oyhGAGc=
 github.com/aws/aws-sdk-go-v2/internal/v4a v1.3.23 h1:1SZBDiRzzs3sNhOMVApyWPduWYGAX0imGy06XiBnCAM=
 github.com/aws/aws-sdk-go-v2/internal/v4a v1.3.23/go.mod h1:i9TkxgbZmHVh2S0La6CAXtnyFhlCX/pJ0JsOvBAS6Mk=
-github.com/aws/aws-sdk-go-v2/service/glue v1.101.2 h1:0gvXLmkF95b45HD/s0tenCZPRH7fv+C9CDwzyKVnUTg=
-github.com/aws/aws-sdk-go-v2/service/glue v1.101.2/go.mod h1:m9O1Fp+iJWbt7QmRTR/Zfh6HJpMEKNf0L8/chyp7bu8=
+github.com/aws/aws-sdk-go-v2/service/glue v1.102.0 h1:D6OOWCPCSpjzwfya9hOgDQk3BNvgN1N8ie8bzszq3VU=
+github.com/aws/aws-sdk-go-v2/service/glue v1.102.0/go.mod h1:TNh83y7HCK7s/ImCZkiJF/a5/25XZwkvGHtmvDM4y7I=
 github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.12.1 h1:iXtILhvDxB6kPvEXgsDhGaZCSC6LQET5ZHSdJozeI0Y=
 github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.12.1/go.mod h1:9nu0fVANtYiAePIBh2/pFUSwtJ402hLnp854CNoDOeE=
 github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.4.4 h1:aaPpoG15S2qHkWm4KlEyF01zovK1nW4BBbyXuHNSE90=
