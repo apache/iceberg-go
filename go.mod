@@ -22,6 +22,7 @@ go 1.23
 toolchain go1.23.2
 
 require (
+	github.com/aliyun/alibabacloud-oss-go-sdk-v2 v1.1.3
 	github.com/apache/arrow-go/v18 v18.0.1-0.20241029153821-f0c5d9939d3f
 	github.com/aws/aws-sdk-go-v2 v1.32.5
 	github.com/aws/aws-sdk-go-v2/config v1.28.5
@@ -97,6 +98,7 @@ require (
 	golang.org/x/sys v0.26.0 // indirect
 	golang.org/x/term v0.25.0 // indirect
 	golang.org/x/text v0.19.0 // indirect
+	golang.org/x/time v0.4.0 // indirect
 	golang.org/x/tools v0.26.0 // indirect
 	golang.org/x/xerrors v0.0.0-20231012003039-104605ab7028 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240903143218-8af14fe29dc1 // indirect
