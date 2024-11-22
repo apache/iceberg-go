@@ -32,6 +32,12 @@ type CatalogType string
 
 type AwsProperties map[string]string
 
+type OSSConfig struct {
+	Endpoint  string
+	AccessKey string
+	SecretKey string
+}
+
 const (
 	REST     CatalogType = "rest"
 	Hive     CatalogType = "hive"
@@ -122,11 +128,31 @@ func WithPrefix(prefix string) Option[RestCatalog] {
 	}
 }
 
+func WithOSSEndpoint(endpoint string) Option[RestCatalog] {
+	return func(o *options) {
+		o.ossConfig.Endpoint = endpoint
+	}
+}
+
+func WithOSSAccessKey(accessKey string) Option[RestCatalog] {
+	return func(o *options) {
+		o.ossConfig.AccessKey = accessKey
+	}
+}
+
+func WithOSSSecretKey(secretKey string) Option[RestCatalog] {
+	return func(o *options) {
+		o.ossConfig.SecretKey = secretKey
+	}
+}
+
 type Option[T GlueCatalog | RestCatalog] func(*options)
 
 type options struct {
 	awsConfig     aws.Config
 	awsProperties AwsProperties
+
+	ossConfig OSSConfig
 
 	tlsConfig         *tls.Config
 	credential        string

@@ -56,6 +56,10 @@ const (
 	keyRestSigV4Region  = "rest.signing-region"
 	keyRestSigV4Service = "rest.signing-name"
 	keyAuthUrl          = "rest.authorization-url"
+
+	keyOSSAccessKey = "client.oss-access-key"
+	keyOSSSecretKey = "client.oss-secret-key"
+	keyOSSEndpoint  = "client.oss-endpoint"
 )
 
 var (
@@ -356,6 +360,10 @@ func toProps(o *options) iceberg.Properties {
 	if o.authUri != nil {
 		setIf(keyAuthUrl, o.authUri.String())
 	}
+
+	setIf(keyOSSAccessKey, o.ossConfig.AccessKey)
+	setIf(keyOSSSecretKey, o.ossConfig.SecretKey)
+	setIf(keyOSSEndpoint, o.ossConfig.Endpoint)
 	return props
 }
 
@@ -515,6 +523,7 @@ func (r *RestCatalog) fetchConfig(opts *options) (*options, error) {
 
 	o := fromProps(cfg)
 	o.awsConfig = opts.awsConfig
+	o.ossConfig = opts.ossConfig
 	o.tlsConfig = opts.tlsConfig
 
 	if uri, ok := cfg["uri"]; ok {
