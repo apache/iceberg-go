@@ -293,8 +293,8 @@ func urlToBucketPath(parsed *url.URL) (string, string) {
 	return parsed.Host, parsed.Path
 }
 
-// createblobFileIO creates a new blobFileIO instance
-func createBlobFileIO(parsed *url.URL, bucket *blob.Bucket) *blobFileIO {
+// CreateblobFileIO creates a new blobFileIO instance
+func CreateBlobFileIO(parsed *url.URL, bucket *blob.Bucket) *blobFileIO {
 	ctx := context.Background()
 	return &blobFileIO{Bucket: bucket, ctx: ctx, opts: &blob.ReaderOptions{}, prefix: parsed.Host + parsed.Path}
 }

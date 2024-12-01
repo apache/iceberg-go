@@ -31,6 +31,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go/auth/bearer"
+	smithyendpoints "github.com/aws/smithy-go/endpoints"
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/s3blob"
 )
@@ -52,6 +53,24 @@ var unsupportedS3Props = []string{
 	S3SignerUri,
 }
 
+type s3endpointResolver struct {
+	endpoint string
+}
+
+func (r *s3endpointResolver) ResolveEndpoint(ctx context.Context, params s3.EndpointParameters) (smithyendpoints.Endpoint, error) {
+	if r.endpoint == "" {
+		return s3.NewDefaultEndpointResolverV2().ResolveEndpoint(ctx, params)
+	}
+
+	u, err := url.Parse(r.endpoint)
+	if err != nil {
+		return smithyendpoints.Endpoint{}, fmt.Errorf("invalid s3 endpoint url '%s'", r.endpoint)
+	}
+	return smithyendpoints.Endpoint{
+		URI: *u,
+	}, nil
+}
+
 // ParseAWSConfig parses S3 properties and returns a configuration.
 func ParseAWSConfig(props map[string]string) (*aws.Config, error) {
 	// If any unsupported properties are set, return an error.
@@ -62,25 +81,6 @@ func ParseAWSConfig(props map[string]string) (*aws.Config, error) {
 	}
 
 	opts := []func(*config.LoadOptions) error{}
-	endpoint, ok := props[S3EndpointURL]
-	if !ok {
-		endpoint = os.Getenv("AWS_S3_ENDPOINT")
-	}
-
-	if endpoint != "" {
-		opts = append(opts, config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
-			if service != s3.ServiceID {
-				// fallback to default resolution for the service
-				return aws.Endpoint{}, &aws.EndpointNotFoundError{}
-			}
-
-			return aws.Endpoint{
-				URL:               endpoint,
-				SigningRegion:     region,
-				HostnameImmutable: true,
-			}, nil
-		})))
-	}
 
 	if tok, ok := props["token"]; ok {
 		opts = append(opts, config.WithBearerAuthTokenProvider(
@@ -129,7 +129,14 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 		return nil, err
 	}
 
-	client := s3.NewFromConfig(*awscfg)
+	endpoint, ok := props[S3EndpointURL]
+	if !ok {
+		endpoint = os.Getenv("AWS_S3_ENDPOINT")
+	}
+
+	client := s3.NewFromConfig(*awscfg, func(o *s3.Options) {
+		o.EndpointResolverV2 = &s3endpointResolver{endpoint: endpoint}
+	})
 
 	// Create a *blob.Bucket.
 	bucket, err := s3blob.OpenBucketV2(ctx, client, parsed.Host, nil)
