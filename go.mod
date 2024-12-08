@@ -37,7 +37,7 @@ require (
 	github.com/substrait-io/substrait-go v1.2.0
 	github.com/twmb/murmur3 v1.1.8
 	github.com/wolfeidau/s3iofs v1.5.2
-	golang.org/x/sync v0.9.0
+	golang.org/x/sync v0.10.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
