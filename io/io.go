@@ -215,6 +215,8 @@ func inferFileIOFromSchema(path string, props map[string]string) (IO, error) {
 	switch parsed.Scheme {
 	case "s3", "s3a", "s3n":
 		return createS3FileIO(parsed, props)
+	case "oss":
+		return createOSSFileIO(parsed, props)
 	case "file", "":
 		return LocalFS{}, nil
 	default:
