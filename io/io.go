@@ -250,7 +250,7 @@ func inferFileIOFromSchema(path string, props map[string]string) (IO, error) {
 	if parsed.Path != "" && parsed.Path != "/" {
 		bucket = blob.PrefixedBucket(bucket, strings.TrimPrefix(parsed.Path, "/"))
 	}
-	return CreateBlobFileIO(parsed, bucket), nil
+	return createBlobFileIO(parsed, bucket), nil
 }
 
 // LoadFS takes a map of properties and an optional URI location
