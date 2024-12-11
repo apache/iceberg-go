@@ -289,10 +289,6 @@ func (io *blobFileIO) NewWriter(path string, overwrite bool, opts *blob.WriterOp
 		nil
 }
 
-func urlToBucketPath(parsed *url.URL) (string, string) {
-	return parsed.Host, parsed.Path
-}
-
 // createblobFileIO creates a new blobFileIO instance
 func createBlobFileIO(parsed *url.URL, bucket *blob.Bucket) *blobFileIO {
 	ctx := context.Background()
