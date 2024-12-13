@@ -76,7 +76,6 @@ type WriteFileIO interface {
 
 	// WriteFile writes p to the named file.
 	Write(name string, p []byte) error
-	Close() error
 }
 
 // A File provides access to a single file. The File interface is the
@@ -86,6 +85,12 @@ type File interface {
 	fs.File
 	io.ReadSeekCloser
 	io.ReaderAt
+}
+
+// A FileWriter represents an open writable file.
+type FileWriter interface {
+	io.WriteCloser
+	io.ReaderFrom
 }
 
 // A ReadDirFile is a directory file whose entries can be read with the
@@ -247,10 +252,7 @@ func inferFileIOFromSchema(path string, props map[string]string) (IO, error) {
 	default:
 		return nil, fmt.Errorf("IO for file '%s' not implemented", path)
 	}
-	if parsed.Path != "" && parsed.Path != "/" {
-		bucket = blob.PrefixedBucket(bucket, strings.TrimPrefix(parsed.Path, "/"))
-	}
-	return createBlobFileIO(parsed, bucket), nil
+	return createBlobFS(bucket, parsed.Host), nil
 }
 
 // LoadFS takes a map of properties and an optional URI location

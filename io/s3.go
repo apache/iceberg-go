@@ -31,7 +31,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go/auth/bearer"
-	smithyendpoints "github.com/aws/smithy-go/endpoints"
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/s3blob"
 )
@@ -51,24 +50,6 @@ const (
 var unsupportedS3Props = []string{
 	S3ConnectTimeout,
 	S3SignerUri,
-}
-
-type s3endpointResolver struct {
-	endpoint string
-}
-
-func (r *s3endpointResolver) ResolveEndpoint(ctx context.Context, params s3.EndpointParameters) (smithyendpoints.Endpoint, error) {
-	if r.endpoint == "" {
-		return s3.NewDefaultEndpointResolverV2().ResolveEndpoint(ctx, params)
-	}
-
-	u, err := url.Parse(r.endpoint)
-	if err != nil {
-		return smithyendpoints.Endpoint{}, fmt.Errorf("invalid s3 endpoint url '%s'", r.endpoint)
-	}
-	return smithyendpoints.Endpoint{
-		URI: *u,
-	}, nil
 }
 
 // ParseAWSConfig parses S3 properties and returns a configuration.
@@ -135,7 +116,10 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 	}
 
 	client := s3.NewFromConfig(*awscfg, func(o *s3.Options) {
-		o.EndpointResolverV2 = &s3endpointResolver{endpoint: endpoint}
+		if endpoint != "" {
+			o.BaseEndpoint = aws.String(endpoint)
+		}
+		o.UsePathStyle = true
 	})
 
 	// Create a *blob.Bucket.
