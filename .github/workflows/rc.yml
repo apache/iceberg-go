@@ -67,7 +67,6 @@ jobs:
           tar_gz="${id}.tar.gz"
           echo "TAR_GZ=${tar_gz}" >> ${GITHUB_ENV}
           git archive HEAD --prefix "${id}/" --output "${tar_gz}"
-          sha256sum "${tar_gz}" > "${tar_gz}.sha256"
           sha512sum "${tar_gz}" > "${tar_gz}.sha512"
       - name: Audit
         run: |

@@ -89,7 +89,7 @@ You must install the following to run the script:
 
     * `curl`
     * `gpg`
-    * `shasum` or `sha256sum`/`sha512sum`
+    * `shasum` or `sha512sum`
     * `tar`
 
 You don't need to have Go installed, if it isn't on the system the latest Go will be
