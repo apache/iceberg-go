@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
@@ -37,14 +38,15 @@ import (
 
 // Constants for S3 configuration options
 const (
-	S3Region          = "s3.region"
-	S3SessionToken    = "s3.session-token"
-	S3SecretAccessKey = "s3.secret-access-key"
-	S3AccessKeyID     = "s3.access-key-id"
-	S3EndpointURL     = "s3.endpoint"
-	S3ProxyURI        = "s3.proxy-uri"
-	S3ConnectTimeout  = "s3.connect-timeout"
-	S3SignerUri       = "s3.signer.uri"
+	S3Region                 = "s3.region"
+	S3SessionToken           = "s3.session-token"
+	S3SecretAccessKey        = "s3.secret-access-key"
+	S3AccessKeyID            = "s3.access-key-id"
+	S3EndpointURL            = "s3.endpoint"
+	S3ProxyURI               = "s3.proxy-uri"
+	S3ConnectTimeout         = "s3.connect-timeout"
+	S3SignerUri              = "s3.signer.uri"
+	S3ForceVirtualAddressing = "s3.force-virtual-addressing"
 )
 
 var unsupportedS3Props = []string{
@@ -115,11 +117,18 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 		endpoint = os.Getenv("AWS_S3_ENDPOINT")
 	}
 
+	usePathStyle := true
+	if forceVirtual, ok := props[S3ForceVirtualAddressing]; ok {
+		if cfgForceVirtual, err := strconv.ParseBool(forceVirtual); err == nil {
+			usePathStyle = !cfgForceVirtual
+		}
+	}
+
 	client := s3.NewFromConfig(*awscfg, func(o *s3.Options) {
 		if endpoint != "" {
 			o.BaseEndpoint = aws.String(endpoint)
 		}
-		o.UsePathStyle = true
+		o.UsePathStyle = usePathStyle
 	})
 
 	// Create a *blob.Bucket.
