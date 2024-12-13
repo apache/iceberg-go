@@ -390,6 +390,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 	if err != nil {
 		return
 	}
+	defer rdr.Close()
 
 	pipeline := make([]recProcessFn, 0, 2)
 	if len(positionalDeletes) > 0 {
