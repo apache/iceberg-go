@@ -63,13 +63,13 @@ var testArgs = []struct {
     "snapshot-log": [ ],
     "metadata-log": [ ],
     "refs": { }
-}`, 
-`Table format version | 2
-Metadata location    | 
+}`,
+		`Table format version | 2                                   
+Metadata location    |                                     
 Table UUID           | 9c12d441-03fe-4693-9a96-a0705ddf69c1
-Last updated         | 1602638573590
-Sort Order           | 0: []
-Partition Spec       | []
+Last updated         | 1602638573590                       
+Sort Order           | 0: []                               
+Partition Spec       | []                                  
 
 Current Schema, id=0
 └──1: x: required long
@@ -79,7 +79,7 @@ Current Snapshot |
 Snapshots
 
 Properties
-key                    | value
+key                    | value    
 ----------------------------------
 read.split.target.size | 134217728
 
@@ -145,18 +145,18 @@ read.split.target.size | 134217728
     ],
     "metadata-log": [{"metadata-file": "s3://bucket/.../v1.json", "timestamp-ms": 1515100}],
     "refs": {"test": {"snapshot-id": 3051729675574597004, "type": "tag", "max-ref-age-ms": 10000000}}
-}`, 
-`Table format version | 2
-Metadata location    | 
+}`,
+		`Table format version | 2                                   
+Metadata location    |                                     
 Table UUID           | 9c12d441-03fe-4693-9a96-a0705ddf69c1
-Last updated         | 1602638573590
-Sort Order           | 3: [
-                     | 2 asc nulls-first
-                     | bucket[4](3) desc nulls-last
-                     | ]
-Partition Spec       | [
-                     | 	1000: x: identity(1)
-                     | ]
+Last updated         | 1602638573590                       
+Sort Order           | 3: [                                
+                     | 2 asc nulls-first                   
+                     | bucket[4](3) desc nulls-last        
+                     | ]                                   
+Partition Spec       | [                                   
+                     | 	1000: x: identity(1)                
+                     | ]                                   
 
 Current Schema, id=1
 ├──1: x: required long
@@ -170,13 +170,12 @@ Snapshots
 └──Snapshot 3055729675574597004, schema 1: s3://a/b/2.avro
 
 Properties
-key                    | value
+key                    | value    
 ----------------------------------
 read.split.target.size | 134217728
 
 `},
 }
-
 
 func TestDescribeTable(t *testing.T) {
 	var buf bytes.Buffer
