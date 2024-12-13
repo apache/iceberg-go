@@ -23,6 +23,7 @@ import (
 	"errors"
 	"net/url"
 
+	"github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -31,6 +32,18 @@ import (
 type CatalogType string
 
 type AwsProperties map[string]string
+
+// OSSConfig contains configuration for accessing OSS object storage
+type OSSConfig struct {
+	// Endpoint specifies the OSS service endpoint URL
+	Endpoint string
+	// AccessKey is the access key ID for OSS authentication
+	AccessKey string
+	// SecretKey is the secret access key for OSS authentication
+	SecretKey string
+	// SignatureVersion is the signature version for OSS authentication
+	SignatureVersion oss.SignatureVersionType
+}
 
 const (
 	REST     CatalogType = "rest"
@@ -122,11 +135,20 @@ func WithPrefix(prefix string) Option[RestCatalog] {
 	}
 }
 
+// WithOSSConfig sets the OSS configuration for the catalog.
+func WithOSSConfig(cfg OSSConfig) Option[RestCatalog] {
+	return func(o *options) {
+		o.ossConfig = cfg
+	}
+}
+
 type Option[T GlueCatalog | RestCatalog] func(*options)
 
 type options struct {
 	awsConfig     aws.Config
 	awsProperties AwsProperties
+
+	ossConfig OSSConfig
 
 	tlsConfig         *tls.Config
 	credential        string
