@@ -18,12 +18,16 @@
 package io
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"net/url"
 	"strings"
+
+	"gocloud.dev/blob"
+	"gocloud.dev/blob/memblob"
 )
 
 // IO is an interface to a hierarchical file system.
@@ -65,6 +69,15 @@ type ReadFileIO interface {
 	ReadFile(name string) ([]byte, error)
 }
 
+// WriteFileIO is the interface implemented by a file system that
+// provides an optimized implementation of WriteFile
+type WriteFileIO interface {
+	IO
+
+	// WriteFile writes p to the named file.
+	Write(name string, p []byte) error
+}
+
 // A File provides access to a single file. The File interface is the
 // minimum implementation required for Iceberg to interact with a file.
 // Directory files should also implement
@@ -72,6 +85,12 @@ type File interface {
 	fs.File
 	io.ReadSeekCloser
 	io.ReaderAt
+}
+
+// A FileWriter represents an open writable file.
+type FileWriter interface {
+	io.WriteCloser
+	io.ReaderFrom
 }
 
 // A ReadDirFile is a directory file whose entries can be read with the
@@ -211,15 +230,29 @@ func inferFileIOFromSchema(path string, props map[string]string) (IO, error) {
 	if err != nil {
 		return nil, err
 	}
+	var bucket *blob.Bucket
+	ctx := context.Background()
 
 	switch parsed.Scheme {
 	case "s3", "s3a", "s3n":
-		return createS3FileIO(parsed, props)
+		bucket, err = createS3Bucket(ctx, parsed, props)
+		if err != nil {
+			return nil, err
+		}
+	case "gs":
+		bucket, err = createGCSBucket(ctx, parsed, props)
+		if err != nil {
+			return nil, err
+		}
+	case "mem":
+		// memblob doesn't use the URL host or path
+		bucket = memblob.OpenBucket(nil)
 	case "file", "":
 		return LocalFS{}, nil
 	default:
 		return nil, fmt.Errorf("IO for file '%s' not implemented", path)
 	}
+	return createBlobFS(bucket, parsed.Host), nil
 }
 
 // LoadFS takes a map of properties and an optional URI location
@@ -229,7 +262,7 @@ func inferFileIOFromSchema(path string, props map[string]string) (IO, error) {
 // implementation. Otherwise this will return an error if the schema
 // does not yet have an implementation here.
 //
-// Currently only LocalFS and S3 are implemented.
+// Currently local, S3, GCS, and In-Memory FSs are implemented.
 func LoadFS(props map[string]string, location string) (IO, error) {
 	if location == "" {
 		location = props["warehouse"]

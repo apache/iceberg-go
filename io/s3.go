@@ -23,63 +23,64 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strings"
+	"slices"
+	"strconv"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go/auth/bearer"
-	"github.com/wolfeidau/s3iofs"
+	"gocloud.dev/blob"
+	"gocloud.dev/blob/s3blob"
 )
 
 // Constants for S3 configuration options
 const (
-	S3Region          = "s3.region"
-	S3SessionToken    = "s3.session-token"
-	S3SecretAccessKey = "s3.secret-access-key"
-	S3AccessKeyID     = "s3.access-key-id"
-	S3EndpointURL     = "s3.endpoint"
-	S3ProxyURI        = "s3.proxy-uri"
+	S3Region                 = "s3.region"
+	S3SessionToken           = "s3.session-token"
+	S3SecretAccessKey        = "s3.secret-access-key"
+	S3AccessKeyID            = "s3.access-key-id"
+	S3EndpointURL            = "s3.endpoint"
+	S3ProxyURI               = "s3.proxy-uri"
+	S3ConnectTimeout         = "s3.connect-timeout"
+	S3SignerUri              = "s3.signer.uri"
+	S3ForceVirtualAddressing = "s3.force-virtual-addressing"
 )
 
-func createS3FileIO(parsed *url.URL, props map[string]string) (IO, error) {
-	cfgOpts := []func(*config.LoadOptions) error{}
-	opts := []func(*s3.Options){}
+var unsupportedS3Props = []string{
+	S3ConnectTimeout,
+	S3SignerUri,
+}
 
-	endpoint, ok := props[S3EndpointURL]
-	if !ok {
-		endpoint = os.Getenv("AWS_S3_ENDPOINT")
+// ParseAWSConfig parses S3 properties and returns a configuration.
+func ParseAWSConfig(props map[string]string) (*aws.Config, error) {
+	// If any unsupported properties are set, return an error.
+	for k := range props {
+		if slices.Contains(unsupportedS3Props, k) {
+			return nil, fmt.Errorf("unsupported S3 property %q", k)
+		}
 	}
 
-	if endpoint != "" {
-		opts = append(opts, func(o *s3.Options) {
-			o.BaseEndpoint = &endpoint
-		})
-	}
+	opts := []func(*config.LoadOptions) error{}
 
 	if tok, ok := props["token"]; ok {
-		cfgOpts = append(cfgOpts, config.WithBearerAuthTokenProvider(
+		opts = append(opts, config.WithBearerAuthTokenProvider(
 			&bearer.StaticTokenProvider{Token: bearer.Token{Value: tok}}))
 	}
 
 	if region, ok := props[S3Region]; ok {
-		opts = append(opts, func(o *s3.Options) {
-			o.Region = region
-		})
+		opts = append(opts, config.WithRegion(region))
 	} else if region, ok := props["client.region"]; ok {
-		opts = append(opts, func(o *s3.Options) {
-			o.Region = region
-		})
+		opts = append(opts, config.WithRegion(region))
 	}
 
 	accessKey, secretAccessKey := props[S3AccessKeyID], props[S3SecretAccessKey]
 	token := props[S3SessionToken]
 	if accessKey != "" || secretAccessKey != "" || token != "" {
-		opts = append(opts, func(o *s3.Options) {
-			o.Credentials = credentials.NewStaticCredentialsProvider(
-				props[S3AccessKeyID], props[S3SecretAccessKey], props[S3SessionToken])
-		})
+		opts = append(opts, config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+			props[S3AccessKeyID], props[S3SecretAccessKey], props[S3SessionToken])))
 	}
 
 	if proxy, ok := props[S3ProxyURI]; ok {
@@ -88,27 +89,53 @@ func createS3FileIO(parsed *url.URL, props map[string]string) (IO, error) {
 			return nil, fmt.Errorf("invalid s3 proxy url '%s'", proxy)
 		}
 
-		opts = append(opts, func(o *s3.Options) {
-			o.HTTPClient = awshttp.NewBuildableClient().WithTransportOptions(
-				func(t *http.Transport) { t.Proxy = http.ProxyURL(proxyURL) })
-		})
+		opts = append(opts, config.WithHTTPClient(awshttp.NewBuildableClient().WithTransportOptions(
+			func(t *http.Transport) {
+				t.Proxy = http.ProxyURL(proxyURL)
+			},
+		)))
 	}
 
-	awscfg, err := config.LoadDefaultConfig(context.Background(), cfgOpts...)
+	awscfg := new(aws.Config)
+	var err error
+	*awscfg, err = config.LoadDefaultConfig(context.Background(), opts...)
 	if err != nil {
 		return nil, err
 	}
 
-	s3Client := s3.NewFromConfig(awscfg, opts...)
-	preprocess := func(n string) string {
-		_, after, found := strings.Cut(n, "://")
-		if found {
-			n = after
-		}
+	return awscfg, nil
+}
 
-		return strings.TrimPrefix(n, parsed.Host)
+func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
+	awscfg, err := ParseAWSConfig(props)
+	if err != nil {
+		return nil, err
 	}
 
-	s3fs := s3iofs.NewWithClient(parsed.Host, s3Client)
-	return FSPreProcName(s3fs, preprocess), nil
+	endpoint, ok := props[S3EndpointURL]
+	if !ok {
+		endpoint = os.Getenv("AWS_S3_ENDPOINT")
+	}
+
+	usePathStyle := true
+	if forceVirtual, ok := props[S3ForceVirtualAddressing]; ok {
+		if cfgForceVirtual, err := strconv.ParseBool(forceVirtual); err == nil {
+			usePathStyle = !cfgForceVirtual
+		}
+	}
+
+	client := s3.NewFromConfig(*awscfg, func(o *s3.Options) {
+		if endpoint != "" {
+			o.BaseEndpoint = aws.String(endpoint)
+		}
+		o.UsePathStyle = usePathStyle
+	})
+
+	// Create a *blob.Bucket.
+	bucket, err := s3blob.OpenBucketV2(ctx, client, parsed.Host, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return bucket, nil
 }
