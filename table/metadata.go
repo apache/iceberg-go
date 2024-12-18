@@ -277,7 +277,7 @@ func (b *MetadataBuilder) AddSnapshot(snapshot *Snapshot) (*MetadataBuilder, err
 func (b *MetadataBuilder) AddSortOrder(sortOrder *SortOrder, initial bool) (*MetadataBuilder, error) {
 	var sortOrders []SortOrder
 	if !initial {
-		sortOrders = append(b.sortOrderList, *sortOrder)
+		sortOrders = append(sortOrders, b.sortOrderList...)
 	}
 
 	for _, s := range sortOrders {
