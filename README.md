@@ -55,8 +55,8 @@ $ cd iceberg-go/cmd/iceberg && go build .
 | Get Partition Specs      |     X     |
 | Get Manifests            |     X     |
 | Create New Manifests     |     X     |
-| Plan Scan                |           |
-| Plan Scan for Snapshot   |           |
+| Plan Scan                |     x     |
+| Plan Scan for Snapshot   |     x     |
 
 ### Catalog Support
 
@@ -77,9 +77,9 @@ $ cd iceberg-go/cmd/iceberg && go build .
 
 ### Read/Write Data Support
 
-* No intrinsic support for reading/writing data yet
-* Data can be manually read currently by retrieving data files via Manifests.
-* Plan to add [Apache Arrow](https://pkg.go.dev/github.com/apache/arrow/go/v14@v14.0.0) support eventually.
+* No intrinsic support for writing data yet.
+* Plan to add [Apache Arrow](https://pkg.go.dev/github.com/apache/arrow-go/) support eventually.
+* Data can currently be read as an Arrow Table or as a stream of Arrow record batches.
 
 # Get in Touch
 

@@ -22,6 +22,7 @@ import (
 	"math"
 	"slices"
 
+	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/iceberg-go"
 	"github.com/google/uuid"
 )
@@ -682,12 +683,67 @@ func newInclusiveMetricsEvaluator(s *iceberg.Schema, expr iceberg.BooleanExpress
 	}).Eval, nil
 }
 
+func newParquetRowGroupStatsEvaluator(fileSchema *iceberg.Schema, expr iceberg.BooleanExpression,
+	includeEmptyFiles bool) (func(*metadata.RowGroupMetaData, []int) (bool, error), error) {
+
+	rewritten, err := iceberg.RewriteNotExpr(expr)
+	if err != nil {
+		return nil, err
+	}
+
+	return (&inclusiveMetricsEval{
+		st:                fileSchema.AsStruct(),
+		includeEmptyFiles: includeEmptyFiles,
+		expr:              rewritten,
+	}).TestRowGroup, nil
+}
+
 type inclusiveMetricsEval struct {
 	metricsEvaluator
 
 	st                iceberg.StructType
 	expr              iceberg.BooleanExpression
 	includeEmptyFiles bool
+}
+
+func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, colIndices []int) (bool, error) {
+	if !m.includeEmptyFiles && rgmeta.NumRows() == 0 {
+		return rowsCannotMatch, nil
+	}
+
+	m.valueCounts = make(map[int]int64)
+	m.nullCounts = make(map[int]int64)
+	m.nanCounts = nil
+	m.lowerBounds = make(map[int][]byte)
+	m.upperBounds = make(map[int][]byte)
+
+	for _, c := range colIndices {
+		colMeta, err := rgmeta.ColumnChunk(c)
+		if err != nil {
+			return false, err
+		}
+
+		if ok, err := colMeta.StatsSet(); !ok || err != nil {
+			continue
+		}
+
+		stats, err := colMeta.Statistics()
+		if err != nil {
+			return false, err
+		}
+
+		fieldID := int(stats.Descr().SchemaNode().FieldID())
+		m.valueCounts[fieldID] = stats.NumValues()
+		if stats.HasNullCount() {
+			m.nullCounts[fieldID] = stats.NullCount()
+		}
+		if stats.HasMinMax() {
+			m.lowerBounds[fieldID] = stats.EncodeMin()
+			m.upperBounds[fieldID] = stats.EncodeMax()
+		}
+	}
+
+	return iceberg.VisitExpr(m.expr, m)
 }
 
 func (m *inclusiveMetricsEval) Eval(file iceberg.DataFile) (bool, error) {

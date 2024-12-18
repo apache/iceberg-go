@@ -21,9 +21,14 @@ import (
 	"cmp"
 	"fmt"
 	"hash/maphash"
+	"io"
 	"maps"
 	"runtime/debug"
+	"strconv"
 	"strings"
+
+	"github.com/apache/iceberg-go/internal"
+	"github.com/hamba/avro/v2/ocf"
 )
 
 var version string
@@ -195,4 +200,41 @@ func (l literalSet) All(fn func(Literal) bool) bool {
 		}
 	}
 	return true
+}
+
+// Helper function to find the difference between two slices (a - b).
+func Difference(a, b []string) []string {
+	m := make(map[string]bool)
+	for _, item := range b {
+		m[item] = true
+	}
+
+	diff := make([]string, 0)
+	for _, item := range a {
+		if !m[item] {
+			diff = append(diff, item)
+		}
+	}
+	return diff
+}
+
+func avroEncode[T any](key string, version int, vals []T, out io.Writer) error {
+	enc, err := ocf.NewEncoderWithSchema(
+		internal.AvroSchemaCache.Get(key),
+		out, ocf.WithMetadata(map[string][]byte{
+			"format-version": []byte(strconv.Itoa(version)),
+		}),
+		ocf.WithCodec(ocf.Deflate),
+	)
+	if err != nil {
+		return err
+	}
+
+	for _, file := range vals {
+		if err := enc.Encode(file); err != nil {
+			return err
+		}
+	}
+
+	return enc.Close()
 }

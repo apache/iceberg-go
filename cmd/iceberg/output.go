@@ -96,9 +96,13 @@ func (t text) DescribeTable(tbl *table.Table) {
 		}).Render()
 
 	t.Schema(tbl.Schema())
+	snap := ""
+	if tbl.CurrentSnapshot() != nil {
+		snap = tbl.CurrentSnapshot().String()
+	}
 	pterm.DefaultTable.
 		WithData(pterm.TableData{
-			{"Current Snapshot", tbl.CurrentSnapshot().String()},
+			{"Current Snapshot", snap},
 		}).Render()
 	pterm.DefaultTree.WithRoot(snapshotTreeNode).Render()
 	pterm.Println("Properties")

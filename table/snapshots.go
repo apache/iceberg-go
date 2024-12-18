@@ -21,11 +21,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
-	"golang.org/x/exp/maps"
 )
 
 type Operation string

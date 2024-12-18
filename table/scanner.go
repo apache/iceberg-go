@@ -21,13 +21,17 @@ import (
 	"cmp"
 	"context"
 	"fmt"
-	"runtime"
+	"iter"
 	"slices"
 	"sync"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
 )
+
+const ScanNoLimit = -1
 
 type keyDefaultMap[K comparable, V any] struct {
 	defaultFactory func(K) V
@@ -52,15 +56,15 @@ func (k *keyDefaultMap[K, V]) Get(key K) V {
 	return v
 }
 
-func newKeyDefaultMap[K comparable, V any](factory func(K) V) keyDefaultMap[K, V] {
-	return keyDefaultMap[K, V]{
+func newKeyDefaultMap[K comparable, V any](factory func(K) V) *keyDefaultMap[K, V] {
+	return &keyDefaultMap[K, V]{
 		data:           make(map[K]V),
 		defaultFactory: factory,
 	}
 }
 
-func newKeyDefaultMapWrapErr[K comparable, V any](factory func(K) (V, error)) keyDefaultMap[K, V] {
-	return keyDefaultMap[K, V]{
+func newKeyDefaultMapWrapErr[K comparable, V any](factory func(K) (V, error)) *keyDefaultMap[K, V] {
+	return &keyDefaultMap[K, V]{
 		data: make(map[K]V),
 		defaultFactory: func(k K) V {
 			v, err := factory(k)
@@ -124,51 +128,52 @@ type Scan struct {
 	caseSensitive  bool
 	snapshotID     *int64
 	options        iceberg.Properties
+	limit          int64
 
-	partitionFilters keyDefaultMap[int, iceberg.BooleanExpression]
+	partitionFilters *keyDefaultMap[int, iceberg.BooleanExpression]
+	concurrency      int
 }
 
-func (s *Scan) UseRef(name string) (*Scan, error) {
-	if s.snapshotID != nil {
+func (scan *Scan) UseRowLimit(n int64) *Scan {
+	out := *scan
+	out.limit = n
+	return &out
+}
+
+func (scan *Scan) UseRef(name string) (*Scan, error) {
+	if scan.snapshotID != nil {
 		return nil, fmt.Errorf("%w: cannot override ref, already set snapshot id %d",
-			iceberg.ErrInvalidArgument, *s.snapshotID)
+			iceberg.ErrInvalidArgument, *scan.snapshotID)
 	}
 
-	if snap := s.metadata.SnapshotByName(name); snap != nil {
-		out := &Scan{
-			metadata:       s.metadata,
-			io:             s.io,
-			rowFilter:      s.rowFilter,
-			selectedFields: s.selectedFields,
-			caseSensitive:  s.caseSensitive,
-			snapshotID:     &snap.SnapshotID,
-			options:        s.options,
-		}
+	if snap := scan.metadata.SnapshotByName(name); snap != nil {
+		out := *scan
+		out.snapshotID = &snap.SnapshotID
 		out.partitionFilters = newKeyDefaultMapWrapErr(out.buildPartitionProjection)
 
-		return out, nil
+		return &out, nil
 	}
 
 	return nil, fmt.Errorf("%w: cannot scan unknown ref=%s", iceberg.ErrInvalidArgument, name)
 }
 
-func (s *Scan) Snapshot() *Snapshot {
-	if s.snapshotID != nil {
-		return s.metadata.SnapshotByID(*s.snapshotID)
+func (scan *Scan) Snapshot() *Snapshot {
+	if scan.snapshotID != nil {
+		return scan.metadata.SnapshotByID(*scan.snapshotID)
 	}
-	return s.metadata.CurrentSnapshot()
+	return scan.metadata.CurrentSnapshot()
 }
 
-func (s *Scan) Projection() (*iceberg.Schema, error) {
-	curSchema := s.metadata.CurrentSchema()
-	if s.snapshotID != nil {
-		snap := s.metadata.SnapshotByID(*s.snapshotID)
+func (scan *Scan) Projection() (*iceberg.Schema, error) {
+	curSchema := scan.metadata.CurrentSchema()
+	if scan.snapshotID != nil {
+		snap := scan.metadata.SnapshotByID(*scan.snapshotID)
 		if snap == nil {
-			return nil, fmt.Errorf("%w: snapshot not found: %d", ErrInvalidOperation, *s.snapshotID)
+			return nil, fmt.Errorf("%w: snapshot not found: %d", ErrInvalidOperation, *scan.snapshotID)
 		}
 
 		if snap.SchemaID != nil {
-			for _, schema := range s.metadata.Schemas() {
+			for _, schema := range scan.metadata.Schemas() {
 				if schema.ID == *snap.SchemaID {
 					curSchema = schema
 					break
@@ -177,33 +182,33 @@ func (s *Scan) Projection() (*iceberg.Schema, error) {
 		}
 	}
 
-	if slices.Contains(s.selectedFields, "*") {
+	if slices.Contains(scan.selectedFields, "*") {
 		return curSchema, nil
 	}
 
-	return curSchema.Select(s.caseSensitive, s.selectedFields...)
+	return curSchema.Select(scan.caseSensitive, scan.selectedFields...)
 }
 
-func (s *Scan) buildPartitionProjection(specID int) (iceberg.BooleanExpression, error) {
-	project := newInclusiveProjection(s.metadata.CurrentSchema(),
-		s.metadata.PartitionSpecs()[specID], true)
-	return project(s.rowFilter)
+func (scan *Scan) buildPartitionProjection(specID int) (iceberg.BooleanExpression, error) {
+	project := newInclusiveProjection(scan.metadata.CurrentSchema(),
+		scan.metadata.PartitionSpecs()[specID], true)
+	return project(scan.rowFilter)
 }
 
-func (s *Scan) buildManifestEvaluator(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
-	spec := s.metadata.PartitionSpecs()[specID]
-	return newManifestEvaluator(spec, s.metadata.CurrentSchema(),
-		s.partitionFilters.Get(specID), s.caseSensitive)
+func (scan *Scan) buildManifestEvaluator(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
+	spec := scan.metadata.PartitionSpecs()[specID]
+	return newManifestEvaluator(spec, scan.metadata.CurrentSchema(),
+		scan.partitionFilters.Get(specID), scan.caseSensitive)
 }
 
-func (s *Scan) buildPartitionEvaluator(specID int) func(iceberg.DataFile) (bool, error) {
-	spec := s.metadata.PartitionSpecs()[specID]
-	partType := spec.PartitionType(s.metadata.CurrentSchema())
+func (scan *Scan) buildPartitionEvaluator(specID int) func(iceberg.DataFile) (bool, error) {
+	spec := scan.metadata.PartitionSpecs()[specID]
+	partType := spec.PartitionType(scan.metadata.CurrentSchema())
 	partSchema := iceberg.NewSchema(0, partType.FieldList...)
-	partExpr := s.partitionFilters.Get(specID)
+	partExpr := scan.partitionFilters.Get(specID)
 
 	return func(d iceberg.DataFile) (bool, error) {
-		fn, err := iceberg.ExpressionEvaluator(partSchema, partExpr, s.caseSensitive)
+		fn, err := iceberg.ExpressionEvaluator(partSchema, partExpr, scan.caseSensitive)
 		if err != nil {
 			return false, err
 		}
@@ -212,7 +217,7 @@ func (s *Scan) buildPartitionEvaluator(specID int) func(iceberg.DataFile) (bool,
 	}
 }
 
-func (s *Scan) checkSequenceNumber(minSeqNum int64, manifest iceberg.ManifestFile) bool {
+func (scan *Scan) checkSequenceNumber(minSeqNum int64, manifest iceberg.ManifestFile) bool {
 	return manifest.ManifestContent() == iceberg.ManifestContentData ||
 		(manifest.ManifestContent() == iceberg.ManifestContentDeletes &&
 			manifest.SequenceNum() >= minSeqNum)
@@ -254,8 +259,8 @@ func matchDeletesToData(entry iceberg.ManifestEntry, positionalDeletes []iceberg
 	return out, nil
 }
 
-func (s *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
-	snap := s.Snapshot()
+func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
+	snap := scan.Snapshot()
 	if snap == nil {
 		return nil, nil
 	}
@@ -263,8 +268,8 @@ func (s *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	// step 1: filter manifests using partition summaries
 	// the filter depends on the partition spec used to write the manifest file
 	// so create a cache of filters for each spec id
-	manifestEvaluators := newKeyDefaultMapWrapErr(s.buildManifestEvaluator)
-	manifestList, err := snap.Manifests(s.io)
+	manifestEvaluators := newKeyDefaultMapWrapErr(scan.buildManifestEvaluator)
+	manifestList, err := snap.Manifests(scan.io)
 	if err != nil {
 		return nil, err
 	}
@@ -278,9 +283,9 @@ func (s *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 
 	// step 2: filter the data files in each manifest
 	// this filter depends on the partition spec used to write the manifest file
-	partitionEvaluators := newKeyDefaultMap(s.buildPartitionEvaluator)
+	partitionEvaluators := newKeyDefaultMap(scan.buildPartitionEvaluator)
 	metricsEval, err := newInclusiveMetricsEvaluator(
-		s.metadata.CurrentSchema(), s.rowFilter, s.caseSensitive, s.options["include_empty_files"] == "true")
+		scan.metadata.CurrentSchema(), scan.rowFilter, scan.caseSensitive, scan.options["include_empty_files"] == "true")
 	if err != nil {
 		return nil, err
 	}
@@ -289,7 +294,7 @@ func (s *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	dataEntries := make([]iceberg.ManifestEntry, 0)
 	positionalDeleteEntries := make([]iceberg.ManifestEntry, 0)
 
-	nworkers := runtime.NumCPU()
+	nworkers := min(scan.concurrency, len(manifestList))
 	var wg sync.WaitGroup
 
 	manifestChan := make(chan iceberg.ManifestFile, len(manifestList))
@@ -309,11 +314,11 @@ func (s *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 						return
 					}
 
-					if !s.checkSequenceNumber(minSeqNum, m) {
+					if !scan.checkSequenceNumber(minSeqNum, m) {
 						continue
 					}
 
-					entries, err := openManifest(s.io, m,
+					entries, err := openManifest(scan.io, m,
 						partitionEvaluators.Get(int(m.PartitionSpecID())), metricsEval)
 					if err != nil {
 						cancel(err)
@@ -342,7 +347,7 @@ Loop:
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, context.Cause(ctx)
 		case entries, ok := <-entryChan:
 			if !ok {
 				// closed!
@@ -392,4 +397,64 @@ type FileScanTask struct {
 	File          iceberg.DataFile
 	DeleteFiles   []iceberg.DataFile
 	Start, Length int64
+}
+
+// ToArrowRecords returns the arrow schema of the expected records and an interator
+// that can be used with a range expression to read the records as they are available.
+// If an error is encountered, during the planning and setup then this will return the
+// error directly. If the error occurs while iterating the records, it will be returned
+// by the iterator.
+//
+// The purpose for returning the schema up front is to handle the case where there are no
+// rows returned. The resulting Arrow Schema of the projection will still be known.
+func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[arrow.Record, error], error) {
+	tasks, err := scan.PlanFiles(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var boundFilter iceberg.BooleanExpression
+	if scan.rowFilter != nil {
+		boundFilter, err = iceberg.BindExpr(scan.metadata.CurrentSchema(), scan.rowFilter, scan.caseSensitive)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	schema, err := scan.Projection()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return (&arrowScan{
+		metadata:        scan.metadata,
+		fs:              scan.io,
+		projectedSchema: schema,
+		boundRowFilter:  boundFilter,
+		caseSensitive:   scan.caseSensitive,
+		rowLimit:        scan.limit,
+		options:         scan.options,
+		concurrency:     scan.concurrency,
+	}).GetRecords(ctx, tasks)
+}
+
+// ToArrowTable calls ToArrowRecords and then gathers all of the records together
+// and returns an arrow.Table make from those records.
+func (scan *Scan) ToArrowTable(ctx context.Context) (arrow.Table, error) {
+	schema, itr, err := scan.ToArrowRecords(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	records := make([]arrow.Record, 0)
+	for rec, err := range itr {
+		if err != nil {
+			return nil, err
+		}
+
+		defer rec.Release()
+		records = append(records, rec)
+	}
+
+	return array.NewTableFromRecords(schema, records), nil
 }

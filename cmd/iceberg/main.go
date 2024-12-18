@@ -27,7 +27,10 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/config"
 	"github.com/apache/iceberg-go/table"
+
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/docopt/docopt-go"
 )
 
@@ -37,6 +40,7 @@ Usage:
   iceberg list [options] [PARENT]
   iceberg describe [options] [namespace | table] IDENTIFIER
   iceberg (schema | spec | uuid | location) [options] TABLE_ID
+  iceberg create [options] (namespace | table) IDENTIFIER
   iceberg drop [options] (namespace | table) IDENTIFIER
   iceberg files [options] TABLE_ID [--history]
   iceberg rename [options] <from> <to>
@@ -58,7 +62,50 @@ Options:
   --uri TEXT         specify the catalog URI
   --output TYPE      output type (json/text) [default: text]
   --credential TEXT  specify credentials for the catalog
-  --warehouse TEXT   specify the warehouse to use`
+  --warehouse TEXT   specify the warehouse to use
+  --config TEXT      specify the path to the configuration file
+  --description TEXT 	specify a description for the namespace
+  --location-uri TEXT  	specify a location URI for the namespace`
+
+type Config struct {
+	List     bool `docopt:"list"`
+	Describe bool `docopt:"describe"`
+	Schema   bool `docopt:"schema"`
+	Spec     bool `docopt:"spec"`
+	Uuid     bool `docopt:"uuid"`
+	Location bool `docopt:"location"`
+	Props    bool `docopt:"properties"`
+	Create   bool `docopt:"create"`
+	Drop     bool `docopt:"drop"`
+	Files    bool `docopt:"files"`
+	Rename   bool `docopt:"rename"`
+
+	Get    bool `docopt:"get"`
+	Set    bool `docopt:"set"`
+	Remove bool `docopt:"remove"`
+
+	Namespace bool `docopt:"namespace"`
+	Table     bool `docopt:"table"`
+
+	RenameFrom string `docopt:"<from>"`
+	RenameTo   string `docopt:"<to>"`
+
+	Parent   string `docopt:"PARENT"`
+	Ident    string `docopt:"IDENTIFIER"`
+	TableID  string `docopt:"TABLE_ID"`
+	PropName string `docopt:"PROPNAME"`
+	Value    string `docopt:"VALUE"`
+
+	Catalog     string `docopt:"--catalog"`
+	URI         string `docopt:"--uri"`
+	Output      string `docopt:"--output"`
+	History     bool   `docopt:"--history"`
+	Cred        string `docopt:"--credential"`
+	Warehouse   string `docopt:"--warehouse"`
+	Config      string `docopt:"--config"`
+	Description string `docopt:"--description"`
+	LocationURI string `docopt:"--location-uri"`
+}
 
 func main() {
 	args, err := docopt.ParseArgs(usage, os.Args[1:], iceberg.Version())
@@ -66,44 +113,15 @@ func main() {
 		log.Fatal(err)
 	}
 
-	cfg := struct {
-		List     bool `docopt:"list"`
-		Describe bool `docopt:"describe"`
-		Schema   bool `docopt:"schema"`
-		Spec     bool `docopt:"spec"`
-		Uuid     bool `docopt:"uuid"`
-		Location bool `docopt:"location"`
-		Props    bool `docopt:"properties"`
-		Drop     bool `docopt:"drop"`
-		Files    bool `docopt:"files"`
-		Rename   bool `docopt:"rename"`
-
-		Get    bool `docopt:"get"`
-		Set    bool `docopt:"set"`
-		Remove bool `docopt:"remove"`
-
-		Namespace bool `docopt:"namespace"`
-		Table     bool `docopt:"table"`
-
-		RenameFrom string `docopt:"<from>"`
-		RenameTo   string `docopt:"<to>"`
-
-		Parent   string `docopt:"PARENT"`
-		Ident    string `docopt:"IDENTIFIER"`
-		TableID  string `docopt:"TABLE_ID"`
-		PropName string `docopt:"PROPNAME"`
-		Value    string `docopt:"VALUE"`
-
-		Catalog   string `docopt:"--catalog"`
-		URI       string `docopt:"--uri"`
-		Output    string `docopt:"--output"`
-		History   bool   `docopt:"--history"`
-		Cred      string `docopt:"--credential"`
-		Warehouse string `docopt:"--warehouse"`
-	}{}
+	cfg := Config{}
 
 	if err := args.Bind(&cfg); err != nil {
 		log.Fatal(err)
+	}
+
+	fileCfg := config.ParseConfig(config.LoadConfig(cfg.Config), "default")
+	if fileCfg != nil {
+		mergeConf(fileCfg, &cfg)
 	}
 
 	var output Output
@@ -131,6 +149,15 @@ func main() {
 		if cat, err = catalog.NewRestCatalog("rest", cfg.URI, opts...); err != nil {
 			log.Fatal(err)
 		}
+	case catalog.Glue:
+		awscfg, err := awsconfig.LoadDefaultConfig(context.Background())
+		if err != nil {
+			log.Fatal(err)
+		}
+		opts := []catalog.Option[catalog.GlueCatalog]{
+			catalog.WithAwsConfig(awscfg),
+		}
+		cat = catalog.NewGlueCatalog(opts...)
 	default:
 		log.Fatal("unrecognized catalog type")
 	}
@@ -190,6 +217,30 @@ func main() {
 				output.Error(err)
 				os.Exit(1)
 			}
+		}
+
+	case cfg.Create:
+		switch {
+		case cfg.Namespace:
+			props := iceberg.Properties{}
+			if cfg.Description != "" {
+				props["Description"] = cfg.Description
+			}
+
+			if cfg.LocationURI != "" {
+				props["Location"] = cfg.LocationURI
+			}
+
+			err := cat.CreateNamespace(context.Background(), catalog.ToRestIdentifier(cfg.Ident), props)
+			if err != nil {
+				output.Error(err)
+				os.Exit(1)
+			}
+		case cfg.Table:
+			output.Error(errors.New("not implemented: Create Table is WIP"))
+		default:
+			output.Error(errors.New("not implemented"))
+			os.Exit(1)
 		}
 	case cfg.Files:
 		tbl := loadTable(output, cat, cfg.TableID)
@@ -339,5 +390,23 @@ func properties(output Output, cat catalog.Catalog, args propCmd) {
 			output.Text("Setting " + args.propname + "=" + args.value + " on " + args.identifier)
 			output.Error(errors.New("not implemented: Writing is WIP"))
 		}
+	}
+}
+
+func mergeConf(fileConf *config.CatalogConfig, resConfig *Config) {
+	if len(resConfig.Catalog) == 0 {
+		resConfig.Catalog = fileConf.Catalog
+	}
+	if len(resConfig.URI) == 0 {
+		resConfig.URI = fileConf.URI
+	}
+	if len(resConfig.Output) == 0 {
+		resConfig.Output = fileConf.Output
+	}
+	if len(resConfig.Cred) == 0 {
+		resConfig.Cred = fileConf.Credential
+	}
+	if len(resConfig.Warehouse) == 0 {
+		resConfig.Warehouse = fileConf.Warehouse
 	}
 }

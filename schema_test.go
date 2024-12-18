@@ -106,8 +106,8 @@ func TestNestedFieldToString(t *testing.T) {
 		{2, "3: baz: optional boolean"},
 		{3, "4: qux: required list<string>"},
 		{4, "6: quux: required map<string, map<string, int>>"},
-		{5, "11: location: required list<struct<13: latitude: float, 14: longitude: float>>"},
-		{6, "15: person: optional struct<16: name: string, 17: age: required int>"},
+		{5, "11: location: required list<struct<13: latitude: optional float, 14: longitude: optional float>>"},
+		{6, "15: person: optional struct<16: name: optional string, 17: age: required int>"},
 	}
 
 	for _, tt := range tests {

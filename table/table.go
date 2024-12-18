@@ -18,9 +18,11 @@
 package table
 
 import (
+	"runtime"
+	"slices"
+
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
-	"golang.org/x/exp/slices"
 )
 
 type Identifier = []string
@@ -59,17 +61,91 @@ func (t Table) Schemas() map[int]*iceberg.Schema {
 	return m
 }
 
-func (t Table) Scan(rowFilter iceberg.BooleanExpression, snapshotID int64, caseSensitive bool, fields ...string) *Scan {
+type ScanOption func(*Scan)
+
+func noopOption(*Scan) {}
+
+func WithSelectedFields(fields ...string) ScanOption {
+	if len(fields) == 0 || slices.Contains(fields, "*") {
+		return noopOption
+	}
+
+	return func(scan *Scan) {
+		scan.selectedFields = fields
+	}
+}
+
+func WithRowFilter(e iceberg.BooleanExpression) ScanOption {
+	if e == nil || e.Equals(iceberg.AlwaysTrue{}) {
+		return noopOption
+	}
+
+	return func(scan *Scan) {
+		scan.rowFilter = e
+	}
+}
+
+func WithSnapshotID(n int64) ScanOption {
+	if n == 0 {
+		return noopOption
+	}
+
+	return func(scan *Scan) {
+		scan.snapshotID = &n
+	}
+}
+
+func WithCaseSensitive(b bool) ScanOption {
+	return func(scan *Scan) {
+		scan.caseSensitive = b
+	}
+}
+
+func WithLimit(n int64) ScanOption {
+	if n < 0 {
+		return noopOption
+	}
+
+	return func(scan *Scan) {
+		scan.limit = n
+	}
+}
+
+// WitMaxConcurrency sets the maximum concurrency for table scan and plan
+// operations. When unset it defaults to runtime.GOMAXPROCS.
+func WitMaxConcurrency(n int) ScanOption {
+	if n <= 0 {
+		return noopOption
+	}
+
+	return func(scan *Scan) {
+		scan.concurrency = n
+	}
+}
+
+func WithOptions(opts iceberg.Properties) ScanOption {
+	if opts == nil {
+		return noopOption
+	}
+
+	return func(scan *Scan) {
+		scan.options = opts
+	}
+}
+
+func (t Table) Scan(opts ...ScanOption) *Scan {
 	s := &Scan{
 		metadata:       t.metadata,
 		io:             t.fs,
-		rowFilter:      rowFilter,
-		selectedFields: fields,
-		caseSensitive:  caseSensitive,
+		rowFilter:      iceberg.AlwaysTrue{},
+		selectedFields: []string{"*"},
+		caseSensitive:  true,
+		limit:          ScanNoLimit,
+		concurrency:    runtime.GOMAXPROCS(0),
 	}
 
-	if snapshotID != 0 {
-		s.snapshotID = &snapshotID
+	for _, opt := range opts {
+		opt(s)
 	}
 
 	s.partitionFilters = newKeyDefaultMapWrapErr(s.buildPartitionProjection)

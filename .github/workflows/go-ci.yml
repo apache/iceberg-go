@@ -22,8 +22,8 @@ on:
     branches:
       - 'main'
     tags:
-      - 'v**'          
-  pull_request:    
+      - 'v**'
+  pull_request:
 
 concurrency:
   group: ${{ github.repository }}-${{ github.head_ref || github.sha }}-${{ github.workflow }}
@@ -39,18 +39,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: [ '1.21', '1.22' ]
+        go: [ '1.23' ]
         os: [ 'ubuntu-latest', 'windows-latest', 'macos-latest' ]
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Install Go
       uses: actions/setup-go@v4
       with:
         go-version: ${{ matrix.go }}
         cache: true
-        cache-dependency-path: go.sum
+        cache-dependency-path: go.sum    
     - name: Install staticcheck
-      run: go install honnef.co/go/tools/cmd/staticcheck@latest
+      if: matrix.go == '1.23'
+      run: go install honnef.co/go/tools/cmd/staticcheck@v0.5.1
     - name: Lint
       run: staticcheck ./...
     - name: Run tests

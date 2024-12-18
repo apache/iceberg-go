@@ -20,12 +20,11 @@ package iceberg
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
-
-	"golang.org/x/exp/maps"
-	"golang.org/x/exp/slices"
 )
 
 // Schema is an Iceberg table schema, represented as a struct with
@@ -427,6 +426,25 @@ type AfterMapValueVisitor interface {
 	AfterMapValue(value NestedField)
 }
 
+type SchemaVisitorPerPrimitiveType[T any] interface {
+	SchemaVisitor[T]
+
+	VisitFixed(FixedType) T
+	VisitDecimal(DecimalType) T
+	VisitBoolean() T
+	VisitInt32() T
+	VisitInt64() T
+	VisitFloat32() T
+	VisitFloat64() T
+	VisitDate() T
+	VisitTime() T
+	VisitTimestamp() T
+	VisitTimestampTz() T
+	VisitString() T
+	VisitBinary() T
+	VisitUUID() T
+}
+
 // Visit accepts a visitor and performs a post-order traversal of the given schema.
 func Visit[T any](sc *Schema, visitor SchemaVisitor[T]) (res T, err error) {
 	if sc == nil {
@@ -534,6 +552,38 @@ func visitField[T any](f NestedField, visitor SchemaVisitor[T]) T {
 	case *MapType:
 		return visitMap(*typ, visitor)
 	default: // primitive
+		if perPrimitive, ok := visitor.(SchemaVisitorPerPrimitiveType[T]); ok {
+			switch t := typ.(type) {
+			case BooleanType:
+				return perPrimitive.VisitBoolean()
+			case Int32Type:
+				return perPrimitive.VisitInt32()
+			case Int64Type:
+				return perPrimitive.VisitInt64()
+			case Float32Type:
+				return perPrimitive.VisitFloat32()
+			case Float64Type:
+				return perPrimitive.VisitFloat64()
+			case DateType:
+				return perPrimitive.VisitDate()
+			case TimeType:
+				return perPrimitive.VisitTime()
+			case TimestampType:
+				return perPrimitive.VisitTimestamp()
+			case TimestampTzType:
+				return perPrimitive.VisitTimestampTz()
+			case StringType:
+				return perPrimitive.VisitString()
+			case BinaryType:
+				return perPrimitive.VisitBinary()
+			case UUIDType:
+				return perPrimitive.VisitUUID()
+			case DecimalType:
+				return perPrimitive.VisitDecimal(t)
+			case FixedType:
+				return perPrimitive.VisitFixed(t)
+			}
+		}
 		return visitor.Primitive(typ.(PrimitiveType))
 	}
 }
@@ -706,8 +756,7 @@ func (i *indexByName) AfterField(field NestedField) {
 // PruneColumns visits a schema pruning any columns which do not exist in the
 // provided selected set. Parent fields of a selected child will be retained.
 func PruneColumns(schema *Schema, selected map[int]Void, selectFullTypes bool) (*Schema, error) {
-
-	result, err := Visit[Type](schema, &pruneColVisitor{selected: selected,
+	result, err := Visit(schema, &pruneColVisitor{selected: selected,
 		fullTypes: selectFullTypes})
 	if err != nil {
 		return nil, err
@@ -1018,4 +1067,150 @@ func (buildPosAccessors) Primitive(PrimitiveType) map[int]accessor {
 
 func buildAccessors(schema *Schema) (map[int]accessor, error) {
 	return Visit(schema, buildPosAccessors{})
+}
+
+type SchemaWithPartnerVisitor[T, P any] interface {
+	Schema(sc *Schema, schemaPartner P, structResult T) T
+	Struct(st StructType, structPartner P, fieldResults []T) T
+	Field(field NestedField, fieldPartner P, fieldResult T) T
+	List(l ListType, listPartner P, elemResult T) T
+	Map(m MapType, mapPartner P, keyResult, valResult T) T
+	Primitive(p PrimitiveType, primitivePartner P) T
+}
+
+type PartnerAccessor[P any] interface {
+	SchemaPartner(P) P
+	FieldPartner(partnerStruct P, fieldID int, fieldName string) P
+	ListElementPartner(P) P
+	MapKeyPartner(P) P
+	MapValuePartner(P) P
+}
+
+func VisitSchemaWithPartner[T, P any](sc *Schema, partner P, visitor SchemaWithPartnerVisitor[T, P], accessor PartnerAccessor[P]) (res T, err error) {
+	if sc == nil {
+		err = fmt.Errorf("%w: cannot visit nil schema", ErrInvalidArgument)
+		return
+	}
+
+	if visitor == nil || accessor == nil {
+		err = fmt.Errorf("%w: cannot visit with nil visitor or accessor", ErrInvalidArgument)
+		return
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			switch e := r.(type) {
+			case string:
+				err = fmt.Errorf("error encountered during schema visitor: %s", e)
+			case error:
+				err = fmt.Errorf("error encountered during schema visitor: %w", e)
+			}
+		}
+	}()
+
+	structPartner := accessor.SchemaPartner(partner)
+	return visitor.Schema(sc, partner, visitStructWithPartner(sc.AsStruct(), structPartner, visitor, accessor)), nil
+}
+
+func visitStructWithPartner[T, P any](st StructType, partner P, visitor SchemaWithPartnerVisitor[T, P], accessor PartnerAccessor[P]) T {
+	type (
+		beforeField interface {
+			BeforeField(NestedField, P)
+		}
+		afterField interface {
+			AfterField(NestedField, P)
+		}
+	)
+
+	bf, _ := visitor.(beforeField)
+	af, _ := visitor.(afterField)
+
+	fieldResults := make([]T, len(st.FieldList))
+
+	for i, f := range st.FieldList {
+		fieldPartner := accessor.FieldPartner(partner, f.ID, f.Name)
+		if bf != nil {
+			bf.BeforeField(f, fieldPartner)
+		}
+		fieldResult := visitTypeWithPartner(f.Type, fieldPartner, visitor, accessor)
+		fieldResults[i] = visitor.Field(f, fieldPartner, fieldResult)
+		if af != nil {
+			af.AfterField(f, fieldPartner)
+		}
+	}
+
+	return visitor.Struct(st, partner, fieldResults)
+}
+
+func visitListWithPartner[T, P any](listType ListType, partner P, visitor SchemaWithPartnerVisitor[T, P], accessor PartnerAccessor[P]) T {
+	type (
+		beforeListElem interface {
+			BeforeListElement(NestedField, P)
+		}
+		afterListElem interface {
+			AfterListElement(NestedField, P)
+		}
+	)
+
+	elemPartner := accessor.ListElementPartner(partner)
+	if ble, ok := visitor.(beforeListElem); ok {
+		ble.BeforeListElement(listType.ElementField(), elemPartner)
+	}
+	elemResult := visitTypeWithPartner(listType.Element, elemPartner, visitor, accessor)
+	if ale, ok := visitor.(afterListElem); ok {
+		ale.AfterListElement(listType.ElementField(), elemPartner)
+	}
+
+	return visitor.List(listType, partner, elemResult)
+}
+
+func visitMapWithPartner[T, P any](m MapType, partner P, visitor SchemaWithPartnerVisitor[T, P], accessor PartnerAccessor[P]) T {
+	type (
+		beforeMapKey interface {
+			BeforeMapKey(NestedField, P)
+		}
+		afterMapKey interface {
+			AfterMapKey(NestedField, P)
+		}
+
+		beforeMapValue interface {
+			BeforeMapValue(NestedField, P)
+		}
+		afterMapValue interface {
+			AfterMapValue(NestedField, P)
+		}
+	)
+
+	keyPartner := accessor.MapKeyPartner(partner)
+	if bmk, ok := visitor.(beforeMapKey); ok {
+		bmk.BeforeMapKey(m.KeyField(), keyPartner)
+	}
+	keyResult := visitTypeWithPartner(m.KeyType, keyPartner, visitor, accessor)
+	if amk, ok := visitor.(afterMapKey); ok {
+		amk.AfterMapKey(m.KeyField(), keyPartner)
+	}
+
+	valPartner := accessor.MapValuePartner(partner)
+	if bmv, ok := visitor.(beforeMapValue); ok {
+		bmv.BeforeMapValue(m.ValueField(), valPartner)
+	}
+	valResult := visitTypeWithPartner(m.ValueType, valPartner, visitor, accessor)
+	if amv, ok := visitor.(afterMapValue); ok {
+		amv.AfterMapValue(m.ValueField(), valPartner)
+	}
+
+	return visitor.Map(m, partner, keyResult, valResult)
+}
+
+func visitTypeWithPartner[T, P any](t Type, fieldPartner P, visitor SchemaWithPartnerVisitor[T, P], accessor PartnerAccessor[P]) T {
+	switch t := t.(type) {
+	case *ListType:
+		return visitListWithPartner(*t, fieldPartner, visitor, accessor)
+	case *StructType:
+		return visitStructWithPartner(*t, fieldPartner, visitor, accessor)
+	case *MapType:
+		return visitMapWithPartner(*t, fieldPartner, visitor, accessor)
+	default:
+		return visitor.Primitive(t.(PrimitiveType), fieldPartner)
+	}
 }
