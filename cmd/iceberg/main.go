@@ -212,7 +212,7 @@ func main() {
 				os.Exit(1)
 			}
 		case cfg.Table:
-			err := cat.DropTable(context.Background(), catalog.ToRestIdentifier(cfg.Ident), false)
+			err := cat.DropTable(context.Background(), catalog.ToRestIdentifier(cfg.Ident))
 			if err != nil {
 				output.Error(err)
 				os.Exit(1)
