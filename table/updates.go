@@ -24,6 +24,17 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	updateSpec             = "add-spec"
+	updateAddSchema        = "add-schema"
+	updateSortOrder        = "add-sort-order"
+	updateAssignUUID       = "assign-uuid"
+	updateDefaultSpec      = "set-default-spec"
+	updateCurrentSchema    = "set-current-schema"
+	updateDefaultSortOrder = "set-default-sort-order"
+	updateUpgradeFormat    = "upgrade-format-version"
+)
+
 // Update represents a change to a table's metadata.
 type Update interface {
 	// Action returns the name of the action that the update represents.
@@ -50,7 +61,7 @@ type assignUUIDUpdate struct {
 // NewAssignUUIDUpdate creates a new update to assign a UUID to the table metadata.
 func NewAssignUUIDUpdate(uuid uuid.UUID) Update {
 	return &assignUUIDUpdate{
-		baseUpdate: baseUpdate{ActionName: "assign-uuid"},
+		baseUpdate: baseUpdate{ActionName: updateAssignUUID},
 		UUID:       uuid,
 	}
 }
@@ -70,7 +81,7 @@ type upgradeFormatVersionUpdate struct {
 // of the table metadata to the given formatVersion.
 func NewUpgradeFormatVersionUpdate(formatVersion int) Update {
 	return &upgradeFormatVersionUpdate{
-		baseUpdate:    baseUpdate{ActionName: "upgrade-format-version"},
+		baseUpdate:    baseUpdate{ActionName: updateUpgradeFormat},
 		FormatVersion: formatVersion,
 	}
 }
@@ -94,7 +105,7 @@ type addSchemaUpdate struct {
 // schema of the table, and all previously added schemas in the metadata builder are removed.
 func NewAddSchemaUpdate(schema *iceberg.Schema, lastColumnID int, initial bool) Update {
 	return &addSchemaUpdate{
-		baseUpdate:   baseUpdate{ActionName: "add-schema"},
+		baseUpdate:   baseUpdate{ActionName: updateAddSchema},
 		Schema:       schema,
 		LastColumnID: lastColumnID,
 		initial:      initial,
@@ -115,7 +126,7 @@ type setCurrentSchemaUpdate struct {
 // metadata to the given schema ID.
 func NewSetCurrentSchemaUpdate(id int) Update {
 	return &setCurrentSchemaUpdate{
-		baseUpdate: baseUpdate{ActionName: "set-current-schema"},
+		baseUpdate: baseUpdate{ActionName: updateCurrentSchema},
 		SchemaID:   id,
 	}
 }
@@ -136,7 +147,7 @@ type addPartitionSpecUpdate struct {
 // and all other previously added specs in the metadata builder are removed.
 func NewAddPartitionSpecUpdate(spec *iceberg.PartitionSpec, initial bool) Update {
 	return &addPartitionSpecUpdate{
-		baseUpdate: baseUpdate{ActionName: "add-spec"},
+		baseUpdate: baseUpdate{ActionName: updateSpec},
 		Spec:       spec,
 		initial:    initial,
 	}
@@ -156,7 +167,7 @@ type setDefaultSpecUpdate struct {
 // table metadata to the given spec ID.
 func NewSetDefaultSpecUpdate(id int) Update {
 	return &setDefaultSpecUpdate{
-		baseUpdate: baseUpdate{ActionName: "set-default-spec"},
+		baseUpdate: baseUpdate{ActionName: updateDefaultSpec},
 		SpecID:     id,
 	}
 }
@@ -177,7 +188,7 @@ type addSortOrderUpdate struct {
 // and all previously added sort orders in the metadata builder are removed.
 func NewAddSortOrderUpdate(sortOrder *SortOrder, initial bool) Update {
 	return &addSortOrderUpdate{
-		baseUpdate: baseUpdate{ActionName: "add-sort-order"},
+		baseUpdate: baseUpdate{ActionName: updateSortOrder},
 		SortOrder:  sortOrder,
 		initial:    initial,
 	}
@@ -197,7 +208,7 @@ type setDefaultSortOrderUpdate struct {
 // to the given sort order ID.
 func NewSetDefaultSortOrderUpdate(id int) Update {
 	return &setDefaultSortOrderUpdate{
-		baseUpdate:  baseUpdate{ActionName: "set-default-sort-order"},
+		baseUpdate:  baseUpdate{ActionName: updateDefaultSortOrder},
 		SortOrderID: id,
 	}
 }

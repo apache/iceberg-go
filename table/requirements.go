@@ -23,6 +23,17 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	reqAssertCreate                  = "assert-create"
+	reqAssertTableUUID               = "assert-table-uuid"
+	reqAssertRefSnapshotID           = "assert-ref-snapshot-id"
+	reqAssertDefaultSpecID           = "assert-default-spec-id"
+	reqAssertCurrentSchemaID         = "assert-current-schema-id"
+	reqAssertDefaultSortOrderID      = "assert-default-sort-order-id"
+	reqAssertLastAssignedFieldID     = "assert-last-assigned-field-id"
+	reqAssertLastAssignedPartitionID = "assert-last-assigned-partition-id"
+)
+
 // A Requirement is a validation rule that must be satisfied before attempting to
 // make and commit changes to a table. Requirements are used to ensure that the
 // table is in a valid state before making changes.
@@ -44,7 +55,7 @@ type assertCreate struct {
 // AssertCreate creates a requirement that the table does not already exist.
 func AssertCreate() Requirement {
 	return &assertCreate{
-		baseRequirement: baseRequirement{Type: "assert-create"},
+		baseRequirement: baseRequirement{Type: reqAssertCreate},
 	}
 }
 
@@ -64,7 +75,7 @@ type assertTableUuid struct {
 // AssertTableUUID creates a requirement that the table UUID matches the given UUID.
 func AssertTableUUID(uuid uuid.UUID) Requirement {
 	return &assertTableUuid{
-		baseRequirement: baseRequirement{Type: "assert-table-uuid"},
+		baseRequirement: baseRequirement{Type: reqAssertTableUUID},
 		UUID:            uuid,
 	}
 }
@@ -92,7 +103,7 @@ type assertRefSnapshotID struct {
 // If the id is nil, the ref must not already exist.
 func AssertRefSnapshotID(ref string, id *int64) Requirement {
 	return &assertRefSnapshotID{
-		baseRequirement: baseRequirement{Type: "assert-ref-snapshot-id"},
+		baseRequirement: baseRequirement{Type: reqAssertRefSnapshotID},
 		Ref:             ref,
 		SnapshotID:      id,
 	}
@@ -134,7 +145,7 @@ type assertLastAssignedFieldId struct {
 // matches the given id.
 func AssertLastAssignedFieldID(id int) Requirement {
 	return &assertLastAssignedFieldId{
-		baseRequirement:     baseRequirement{Type: "assert-last-assigned-field-id"},
+		baseRequirement:     baseRequirement{Type: reqAssertLastAssignedFieldID},
 		LastAssignedFieldID: id,
 	}
 }
@@ -160,7 +171,7 @@ type assertCurrentSchemaId struct {
 // matches the given id.
 func AssertCurrentSchemaID(id int) Requirement {
 	return &assertCurrentSchemaId{
-		baseRequirement: baseRequirement{Type: "assert-current-schema-id"},
+		baseRequirement: baseRequirement{Type: reqAssertCurrentSchemaID},
 		CurrentSchemaID: id,
 	}
 }
@@ -186,7 +197,7 @@ type assertLastAssignedPartitionId struct {
 // matches the given id.
 func AssertLastAssignedPartitionID(id int) Requirement {
 	return &assertLastAssignedPartitionId{
-		baseRequirement:         baseRequirement{Type: "assert-last-assigned-partition-id"},
+		baseRequirement:         baseRequirement{Type: reqAssertLastAssignedPartitionID},
 		LastAssignedPartitionID: id,
 	}
 }
@@ -212,7 +223,7 @@ type assertDefaultSpecId struct {
 // matches the given id.
 func AssertDefaultSpecID(id int) Requirement {
 	return &assertDefaultSpecId{
-		baseRequirement: baseRequirement{Type: "assert-default-spec-id"},
+		baseRequirement: baseRequirement{Type: reqAssertDefaultSpecID},
 		DefaultSpecID:   id,
 	}
 }
@@ -238,7 +249,7 @@ type assertDefaultSortOrderId struct {
 // matches the given id.
 func AssertDefaultSortOrderID(id int) Requirement {
 	return &assertDefaultSortOrderId{
-		baseRequirement:    baseRequirement{Type: "assert-default-sort-order-id"},
+		baseRequirement:    baseRequirement{Type: reqAssertDefaultSortOrderID},
 		DefaultSortOrderID: id,
 	}
 }
