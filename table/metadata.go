@@ -94,7 +94,7 @@ type Metadata interface {
 	CurrentSnapshot() *Snapshot
 	// Ref returns the snapshot ref for the main branch.
 	Ref() SnapshotRef
-	// Refs returns a map of snapshot refs by name.
+	// Refs returns a list of snapshot name/reference pairs.
 	Refs() iter.Seq2[string, SnapshotRef]
 	// SnapshotLogs returns the list of snapshot logs for the table.
 	SnapshotLogs() iter.Seq[SnapshotLogEntry]
@@ -275,20 +275,18 @@ func (b *MetadataBuilder) AddSnapshot(snapshot *Snapshot) (*MetadataBuilder, err
 }
 
 func (b *MetadataBuilder) AddSortOrder(sortOrder *SortOrder, initial bool) (*MetadataBuilder, error) {
-	for _, s := range b.sortOrderList {
-		if s.OrderID == sortOrder.OrderID && !initial {
+	var sortOrders []SortOrder
+	if !initial {
+		sortOrders = append(b.sortOrderList, *sortOrder)
+	}
+
+	for _, s := range sortOrders {
+		if s.OrderID == sortOrder.OrderID {
 			return nil, fmt.Errorf("sort order with id %d already exists", sortOrder.OrderID)
 		}
 	}
 
-	var sortOrders []SortOrder
-	if initial {
-		sortOrders = []SortOrder{*sortOrder}
-	} else {
-		sortOrders = append(b.sortOrderList, *sortOrder)
-	}
-
-	b.sortOrderList = sortOrders
+	b.sortOrderList = append(sortOrders, *sortOrder)
 	b.updates = append(b.updates, NewAddSortOrderUpdate(sortOrder, initial))
 
 	return b, nil
@@ -945,10 +943,6 @@ func (m *metadataV1) Equals(other Metadata) bool {
 		return true
 	}
 
-	if m == nil || rhs == nil {
-		return false
-	}
-
 	return m.Schema.Equals(rhs.Schema) && slices.Equal(m.Partition, rhs.Partition) &&
 		m.commonMetadata.Equals(&rhs.commonMetadata)
 }
@@ -1018,10 +1012,6 @@ func (m *metadataV2) Equals(other Metadata) bool {
 
 	if m == rhs {
 		return true
-	}
-
-	if m == nil || rhs == nil {
-		return false
 	}
 
 	return m.LastSequenceNumber == rhs.LastSequenceNumber &&
