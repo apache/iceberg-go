@@ -41,7 +41,7 @@ func (t *TableTestSuite) SetupSuite() {
 	var mockfs internal.MockFS
 	mockfs.Test(t.T())
 	mockfs.On("Open", "s3://bucket/test/location/uuid.metadata.json").
-		Return(&internal.MockFile{Contents: bytes.NewReader([]byte(ExampleTableMetadataV2))}, nil)
+		Return(&internal.MockFile{Contents: bytes.NewReader([]byte(table.ExampleTableMetadataV2))}, nil)
 	defer mockfs.AssertExpectations(t.T())
 
 	tbl, err := table.NewFromLocation([]string{"foo"}, "s3://bucket/test/location/uuid.metadata.json", &mockfs)
@@ -59,7 +59,7 @@ func (t *TableTestSuite) TestNewTableFromReadFile() {
 	var mockfsReadFile internal.MockFSReadFile
 	mockfsReadFile.Test(t.T())
 	mockfsReadFile.On("ReadFile", "s3://bucket/test/location/uuid.metadata.json").
-		Return([]byte(ExampleTableMetadataV2), nil)
+		Return([]byte(table.ExampleTableMetadataV2), nil)
 	defer mockfsReadFile.AssertExpectations(t.T())
 
 	tbl2, err := table.NewFromLocation([]string{"foo"}, "s3://bucket/test/location/uuid.metadata.json", &mockfsReadFile)

@@ -20,6 +20,7 @@ package iceberg
 import (
 	"encoding/json"
 	"fmt"
+	"iter"
 	"slices"
 	"strings"
 )
@@ -114,6 +115,11 @@ func (ps *PartitionSpec) CompatibleWith(other *PartitionSpec) bool {
 // is the same between this partition spec and the provided one.
 func (ps PartitionSpec) Equals(other PartitionSpec) bool {
 	return ps.id == other.id && slices.Equal(ps.fields, other.fields)
+}
+
+// Fields returns a clone of the partition fields in this spec.
+func (ps *PartitionSpec) Fields() iter.Seq[PartitionField] {
+	return slices.Values(ps.fields)
 }
 
 func (ps PartitionSpec) MarshalJSON() ([]byte, error) {
