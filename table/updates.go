@@ -66,7 +66,6 @@ func NewAssignUUIDUpdate(uuid uuid.UUID) Update {
 	}
 }
 
-// Apply updates the UUID on the given metadata builder.
 func (u *assignUUIDUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.SetUUID(u.UUID)
 	return err
@@ -86,13 +85,11 @@ func NewUpgradeFormatVersionUpdate(formatVersion int) Update {
 	}
 }
 
-// Apply upgrades the format version on the given metadata builder.
 func (u *upgradeFormatVersionUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.SetFormatVersion(u.FormatVersion)
 	return err
 }
 
-// addSchemaUpdate adds a schema to the table metadata.
 type addSchemaUpdate struct {
 	baseUpdate
 	Schema       *iceberg.Schema `json:"schema"`
