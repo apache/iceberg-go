@@ -763,18 +763,28 @@ func (r *RestCatalog) UpdateTable(ctx context.Context, ident table.Identifier, r
 	return r.tableFromResponse(ident, ret.Metadata, ret.MetadataLoc, config)
 }
 
-func (r *RestCatalog) DropTable(ctx context.Context, identifier table.Identifier, purge bool) error {
+func (r *RestCatalog) DropTable(ctx context.Context, identifier table.Identifier) error {
+	ns, tbl, err := splitIdentForPath(identifier)
+	if err != nil {
+		return err
+	}
+
+	_, err = doDelete[struct{}](ctx, r.baseURI, []string{"namespaces", ns, "tables", tbl}, r.cl,
+		map[int]error{http.StatusNotFound: ErrNoSuchTable})
+
+	return err
+}
+
+func (r *RestCatalog) PurgeTable(ctx context.Context, identifier table.Identifier) error {
 	ns, tbl, err := splitIdentForPath(identifier)
 	if err != nil {
 		return err
 	}
 
 	uri := r.baseURI.JoinPath("namespaces", ns, "tables", tbl)
-	if purge {
-		v := url.Values{}
-		v.Set("purgeRequested", "true")
-		uri.RawQuery = v.Encode()
-	}
+	v := url.Values{}
+	v.Set("purgeRequested", "true")
+	uri.RawQuery = v.Encode()
 
 	_, err = doDelete[struct{}](ctx, uri, []string{}, r.cl,
 		map[int]error{http.StatusNotFound: ErrNoSuchTable})
