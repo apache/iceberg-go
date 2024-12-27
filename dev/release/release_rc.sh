@@ -65,7 +65,7 @@ fi
 
 rc_hash="$(git rev-list --max-count=1 "${rc_tag}")"
 
-id="apache-iceberg-go-${version}-rc${rc}"
+id="apache-iceberg-go-${version}"
 tar_gz="${id}.tar.gz"
 
 if [ "${RELEASE_SIGN}" -gt 0 ]; then
@@ -88,23 +88,28 @@ if [ "${RELEASE_SIGN}" -gt 0 ]; then
   echo "Found GitHub Actions workflow with ID: ${run_id}"
   gh run watch --repo "${repository}" --exit-status "${run_id}"
 
+  # Create release candidate directory structure
+  rc_dir="apache-iceberg-go-${version}-rc${rc}"
+  mkdir -p "${rc_dir}"
+
   echo "Downloading .tar.gz from GitHub Releases"
   gh release download "${rc_tag}" \
-    --dir . \
+    --dir "${rc_dir}" \
     --pattern "${tar_gz}" \
     --repo "${repository}" \
     --skip-existing
 
   echo "Signing tar.gz and creating checksums"
+  cd "${rc_dir}"
   gpg --armor --output "${tar_gz}.asc" --detach-sig "${tar_gz}"
+  sha512sum "${tar_gz}" > "${tar_gz}.sha512"
+  cd ..
 fi
 
 if [ "${RELEASE_UPLOAD}" -gt 0 ]; then
-  echo "Uploading signature"
-  gh release upload "${rc_tag}" \
-    --clobber \
-    --repo "${repository}" \
-    "${tar_gz}.asc"
+  echo "Uploading to ASF dist/dev..."
+  svn mkdir -p "https://dist.apache.org/repos/dist/dev/iceberg/${rc_dir}" --parents
+  svn import "${rc_dir}" "https://dist.apache.org/repos/dist/dev/iceberg/${rc_dir}" -m "Apache Iceberg Go ${version} RC${rc}"
 fi
 
 echo "Draft email for dev@iceberg.apache.org mailing list"
