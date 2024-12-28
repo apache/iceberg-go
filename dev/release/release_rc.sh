@@ -65,7 +65,7 @@ fi
 
 rc_hash="$(git rev-list --max-count=1 "${rc_tag}")"
 
-id="apache-iceberg-go-${version}"
+id="apache-iceberg-go-${version}-rc${rc}"
 tar_gz="${id}.tar.gz"
 
 if [ "${RELEASE_SIGN}" -gt 0 ]; then
@@ -139,7 +139,7 @@ The vote will be open for at least 72 hours.
 [ ] -1 Do not release this as Apache Iceberg Go ${version} because...
 
 [1]: https://github.com/apache/iceberg-go/tree/${rc_hash}
-[2]: https://github.com/apache/iceberg-go/releases/${rc_tag}
+[2]: https://dist.apache.org/repos/dist/dev/iceberg/apache-iceberg-go-${version}-rc${rc}
 [3]: https://github.com/apache/iceberg-go/blob/main/dev/release/README.md#verify
 MAIL
 echo "---------------------------------------------------------"
