@@ -591,6 +591,8 @@ func (t *tblResponse) UnmarshalJSON(b []byte) (err error) {
 }
 
 func (r *RestCatalog) LoadTable(ctx context.Context, identifier table.Identifier, props iceberg.Properties) (*table.Table, error) {
+	// This method only loads an existing table, it cannot create a new one.
+	// For creating a new table, use CreateTable() method instead.
 	ns, tbl, err := splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
@@ -626,11 +628,76 @@ func (r *RestCatalog) LoadTable(ctx context.Context, identifier table.Identifier
 }
 
 func (r *RestCatalog) DropTable(ctx context.Context, identifier table.Identifier) error {
-	return fmt.Errorf("%w: [Rest Catalog] drop table", iceberg.ErrNotImplemented)
+	ns, tbl, err := splitIdentForPath(identifier)
+	if err != nil {
+		return err
+	}
+
+	_, err = doDelete[struct{}](
+		ctx,
+		r.baseURI,
+		[]string{"namespaces", ns, "tables", tbl},
+		r.cl,
+		map[int]error{
+			http.StatusNotFound: ErrNoSuchTable,
+		},
+	)
+	return err
 }
 
 func (r *RestCatalog) RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error) {
-	return nil, fmt.Errorf("%w: [Rest Catalog] rename table", iceberg.ErrNotImplemented)
+	fromNs, fromTbl, err := splitIdentForPath(from)
+	if err != nil {
+		return nil, err
+	}
+
+	toNs, toTbl, err := splitIdentForPath(to)
+	if err != nil {
+		return nil, err
+	}
+
+	payload := map[string]interface{}{
+		"source": map[string]interface{}{
+			"namespace": strings.Split(fromNs, namespaceSeparator),
+			"name": fromTbl,
+		},
+		"destination": map[string]interface{}{
+			"namespace": strings.Split(toNs, namespaceSeparator),
+			"name": toTbl,
+		},
+	}
+
+	ret, err := doPost[map[string]interface{}, tblResponse](
+		ctx,
+		r.baseURI,
+		[]string{"tables", "rename"},
+		payload,
+		r.cl,
+		map[int]error{
+			http.StatusNotFound: ErrNoSuchTable,
+			http.StatusConflict: ErrTableAlreadyExists,
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	id := to
+	if r.name != "" {
+		id = append([]string{r.name}, to...)
+	}
+
+	tblProps := maps.Clone(r.props)
+	maps.Copy(tblProps, ret.Metadata.Properties())
+	for k, v := range ret.Config {
+		tblProps[k] = v
+	}
+
+	iofs, err := iceio.LoadFS(tblProps, ret.MetadataLoc)
+	if err != nil {
+		return nil, err
+	}
+	return table.New(id, ret.Metadata, ret.MetadataLoc, iofs), nil
 }
 
 func (r *RestCatalog) CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error {
@@ -709,4 +776,55 @@ func (r *RestCatalog) UpdateNamespaceProperties(ctx context.Context, namespace t
 	ns := strings.Join(namespace, namespaceSeparator)
 	return doPost[payload, PropertiesUpdateSummary](ctx, r.baseURI, []string{"namespaces", ns, "properties"},
 		payload{Remove: removals, Updates: updates}, r.cl, map[int]error{http.StatusNotFound: ErrNoSuchNamespace})
+}
+
+func (r *RestCatalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, 
+	partition iceberg.PartitionSpec, location string, props iceberg.Properties) (*table.Table, error) {
+	
+	ns, tbl, err := splitIdentForPath(identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	payload := map[string]interface{}{
+		"name": tbl,
+		"location": location,
+		"schema": schema,
+		"partition-spec": partition,
+		"properties": props,
+		"stage-create": false,
+	}
+
+	ret, err := doPost[map[string]interface{}, tblResponse](
+		ctx,
+		r.baseURI,
+		[]string{"namespaces", ns, "tables"},
+		payload,
+		r.cl,
+		map[int]error{
+			http.StatusNotFound: ErrNoSuchNamespace,
+			http.StatusConflict: ErrTableAlreadyExists,
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	id := identifier
+	if r.name != "" {
+		id = append([]string{r.name}, identifier...)
+	}
+
+	tblProps := maps.Clone(r.props)
+	maps.Copy(tblProps, props)
+	maps.Copy(tblProps, ret.Metadata.Properties())
+	for k, v := range ret.Config {
+		tblProps[k] = v
+	}
+
+	iofs, err := iceio.LoadFS(tblProps, ret.MetadataLoc)
+	if err != nil {
+		return nil, err
+	}
+	return table.New(id, ret.Metadata, ret.MetadataLoc, iofs), nil
 }

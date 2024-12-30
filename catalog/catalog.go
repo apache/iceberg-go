@@ -45,6 +45,7 @@ var (
 	ErrNoSuchTable            = errors.New("table does not exist")
 	ErrNoSuchNamespace        = errors.New("namespace does not exist")
 	ErrNamespaceAlreadyExists = errors.New("namespace already exists")
+	ErrTableAlreadyExists     = errors.New("table already exists")
 )
 
 // WithAwsConfig sets the AWS configuration for the catalog.
