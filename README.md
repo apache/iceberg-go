@@ -62,18 +62,18 @@ $ cd iceberg-go/cmd/iceberg && go build .
 
 | Operation                | REST | Hive | DynamoDB | Glue |
 | :----------------------- | :--: | :--: | :------: | :--: |
-| Load Table               |      |      |          |  X   |
-| List Tables              |      |      |          |  X   |
-| Create Table             |      |      |          |      |
+| Load Table               |  X   |      |          |  X   |
+| List Tables              |  X   |      |          |  X   |
+| Create Table             |      |      |          |  X   |
 | Update Current Snapshot  |      |      |          |      |
 | Create New Snapshot      |      |      |          |      |
-| Rename Table             |      |      |          |      |
-| Drop Table               |      |      |          |      |
+| Rename Table             |      |      |          |  X   |
+| Drop Table               |      |      |          |  X   |
 | Alter Table              |      |      |          |      |
 | Set Table Properties     |      |      |          |      |
-| Create Namespace         |      |      |          |      |
-| Drop Namespace           |      |      |          |      |
-| Set Namespace Properties |      |      |          |      |
+| Create Namespace         |  X   |      |          |  X   |
+| Drop Namespace           |  X   |      |          |  X   |
+| Set Namespace Properties |  X   |      |          |  X   |
 
 ### Read/Write Data Support
 
