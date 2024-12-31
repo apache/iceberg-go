@@ -743,6 +743,315 @@ func (r *RestCatalogSuite) TestLoadTable200() {
 	}))
 }
 
+func (r *RestCatalogSuite) TestCreateTable200() {
+	namespace := "examples"
+	tableName := "newtable"
+	location := "s3://warehouse/examples/newtable"
+	
+	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+		r.Require().Equal("application/json", req.Header.Get("Content-Type"))
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		// Verify request payload
+		var payload map[string]interface{}
+		r.Require().NoError(json.NewDecoder(req.Body).Decode(&payload))
+		r.Equal(tableName, payload["name"])
+		r.Equal(location, payload["location"])
+		r.Equal(false, payload["stage-create"])
+
+		// Mock successful response
+		json.NewEncoder(w).Encode(map[string]any{
+			"metadata-location": "s3://warehouse/examples/newtable/metadata.json",
+			"metadata": map[string]any{
+				"format-version": 1,
+				"table-uuid": "d20125c8-7284-442c-9aea-15d2d6e6a0d0",
+				"location": location,
+				"last-updated-ms": 1657810967051,
+				"last-column-id": 1,
+				"schema": map[string]any{
+					"type": "struct",
+					"schema-id": 0,
+					"identifier-field-ids": []int{1},
+					"fields": []map[string]any{
+						{"id": 1, "name": "id", "type": "string", "required": true},
+					},
+				},
+				"current-schema-id": 0,
+				"schemas": []map[string]any{
+					{
+						"type": "struct",
+						"schema-id": 0,
+						"identifier-field-ids": []int{1},
+						"fields": []map[string]any{
+							{"id": 1, "name": "id", "type": "string", "required": true},
+						},
+					},
+				},
+				"partition-spec": []any{},
+				"default-spec-id": 0,
+				"last-partition-id": 999,
+				"default-sort-order-id": 0,
+				"sort-orders": []map[string]any{
+					{"order-id": 0, "fields": []any{}},
+				},
+				"properties": map[string]string{
+					"write.delete.parquet.compression-codec": "zstd",
+					"write.metadata.compression-codec": "gzip",
+					"write.summary.partition-limit": "100",
+					"write.parquet.compression-codec": "zstd",
+				},
+				"current-snapshot-id": -1,
+				"refs": map[string]any{},
+				"snapshots": []any{},
+				"snapshot-log": []any{},
+				"metadata-log": []any{},
+			},
+			"config": map[string]string{},
+		})
+	})
+
+	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	schema := iceberg.NewSchema(
+		1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+	
+	table, err := cat.CreateTable(context.Background(), 
+		catalog.ToRestIdentifier(namespace, tableName),
+		schema,
+		iceberg.PartitionSpec{},
+		location,
+		nil)
+	
+	r.Require().NoError(err)
+	r.NotNil(table)
+	r.Equal(location, table.Location())
+}
+
+func (r *RestCatalogSuite) TestCreateTable409() {
+	namespace := "examples"
+	tableName := "existingtable"
+	
+	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "Table already exists: examples.existingtable",
+				"type":    "AlreadyExistsException",
+				"code":    409,
+			},
+		})
+	})
+
+	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	schema := iceberg.NewSchema(
+		1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+	
+	_, err = cat.CreateTable(context.Background(), 
+		catalog.ToRestIdentifier(namespace, tableName),
+		schema,
+		iceberg.PartitionSpec{},
+		"s3://warehouse/examples/existingtable",
+		nil)
+	
+	r.ErrorIs(err, catalog.ErrTableAlreadyExists)
+	r.ErrorContains(err, "Table already exists: examples.existingtable")
+}
+
+func (r *RestCatalogSuite) TestDropTable204() {
+	namespace := "examples"
+	tableName := "tobedeleted"
+	
+	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables/"+tableName, func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodDelete, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	err = cat.DropTable(context.Background(), catalog.ToRestIdentifier(namespace, tableName))
+	r.NoError(err)
+}
+
+func (r *RestCatalogSuite) TestDropTable404() {
+	namespace := "examples"
+	tableName := "nonexistent"
+	
+	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables/"+tableName, func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodDelete, req.Method)
+
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "Table does not exist: examples.nonexistent",
+				"type":    "NoSuchTableException",
+				"code":    404,
+			},
+		})
+	})
+
+	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	err = cat.DropTable(context.Background(), catalog.ToRestIdentifier(namespace, tableName))
+	r.ErrorIs(err, catalog.ErrNoSuchTable)
+	r.ErrorContains(err, "Table does not exist: examples.nonexistent")
+}
+
+func (r *RestCatalogSuite) TestRenameTable200() {
+	fromNs := "examples"
+	fromTable := "oldname"
+	toNs := "examples"
+	toTable := "newname"
+	location := "s3://warehouse/examples/newname"
+	
+	r.mux.HandleFunc("/v1/namespaces/"+fromNs+"/tables/"+fromTable+"/rename", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+		r.Require().Equal("application/json", req.Header.Get("Content-Type"))
+
+		var payload map[string]interface{}
+		r.Require().NoError(json.NewDecoder(req.Body).Decode(&payload))
+		r.Equal(toNs, payload["new-namespace"])
+		r.Equal(toTable, payload["new-name"])
+
+		// Return response matching the LoadTable format
+		json.NewEncoder(w).Encode(map[string]any{
+			"metadata-location": "s3://warehouse/examples/newname/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.metadata.json",
+			"metadata": map[string]any{
+				"format-version": 1,
+				"table-uuid": "b55d9dda-6561-423a-8bfc-787980ce421f",
+				"location": location,
+				"last-updated-ms": 1646787054459,
+				"last-column-id": 2,
+				"schema": map[string]any{
+					"type": "struct",
+					"schema-id": 0,
+					"fields": []map[string]any{
+						{"id": 1, "name": "id", "required": false, "type": "int"},
+						{"id": 2, "name": "data", "required": false, "type": "string"},
+					},
+				},
+				"current-schema-id": 0,
+				"schemas": []map[string]any{
+					{
+						"type": "struct",
+						"schema-id": 0,
+						"fields": []map[string]any{
+							{"id": 1, "name": "id", "required": false, "type": "int"},
+							{"id": 2, "name": "data", "required": false, "type": "string"},
+						},
+					},
+				},
+				"partition-spec": []any{},
+				"default-spec-id": 0,
+				"partition-specs": []map[string]any{{"spec-id": 0, "fields": []any{}}},
+				"last-partition-id": 999,
+				"default-sort-order-id": 0,
+				"sort-orders": []map[string]any{{"order-id": 0, "fields": []any{}}},
+				"properties": map[string]string{
+					"owner": "bryan",
+					"write.metadata.compression-codec": "gzip",
+				},
+				"current-snapshot-id": 3497810964824022504,
+				"refs": map[string]map[string]any{
+					"main": {"snapshot-id": 3497810964824022504, "type": "branch"},
+				},
+				"snapshots": []map[string]any{
+					{
+						"snapshot-id": 3497810964824022504,
+						"timestamp-ms": 1646787054459,
+						"summary": map[string]string{
+							"operation": "append",
+							"spark.app.id": "local-1646787004168",
+							"added-data-files": "1",
+							"added-records": "1",
+							"added-files-size": "697",
+							"changed-partition-count": "1",
+							"total-records": "1",
+							"total-files-size": "697",
+							"total-data-files": "1",
+							"total-delete-files": "0",
+							"total-position-deletes": "0",
+							"total-equality-deletes": "0",
+						},
+						"manifest-list": "s3://warehouse/examples/newname/metadata/snap-3497810964824022504-1-c4f68204-666b-4e50-a9df-b10c34bf6b82.avro",
+						"schema-id": 0,
+					},
+				},
+				"snapshot-log": []map[string]any{
+					{"timestamp-ms": 1646787054459, "snapshot-id": 3497810964824022504},
+				},
+				"metadata-log": []map[string]any{
+					{
+						"timestamp-ms": 1646787031514,
+						"metadata-file": "s3://warehouse/examples/newname/metadata/00000-88484a1c-00e5-4a07-a787-c0e7aeffa805.metadata.json",
+					},
+				},
+			},
+			"config": map[string]string{},
+		})
+	})
+
+	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	table, err := cat.RenameTable(context.Background(),
+		catalog.ToRestIdentifier(fromNs, fromTable),
+		catalog.ToRestIdentifier(toNs, toTable))
+	
+	r.Require().NoError(err)
+	r.NotNil(table)
+	r.Equal(location, table.Location())
+}
+
+func (r *RestCatalogSuite) TestRenameTable409() {
+	fromNs := "examples"
+	fromTable := "oldname"
+	toNs := "examples"
+	toTable := "existing"
+	
+	r.mux.HandleFunc("/v1/tables/rename", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "Table already exists: examples.existing",
+				"type":    "AlreadyExistsException",
+				"code":    409,
+			},
+		})
+	})
+
+	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.RenameTable(context.Background(),
+		catalog.ToRestIdentifier(fromNs, fromTable),
+		catalog.ToRestIdentifier(toNs, toTable))
+	
+	r.ErrorIs(err, catalog.ErrTableAlreadyExists)
+	r.ErrorContains(err, "Table already exists: examples.existing")
+}
+
 type RestTLSCatalogSuite struct {
 	suite.Suite
 
