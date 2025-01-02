@@ -22,6 +22,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -622,6 +623,105 @@ func (r *RestCatalogSuite) TestUpdateNamespaceProps404() {
 		table.Identifier{"fokko"}, []string{"abc"}, iceberg.Properties{"prop": "yes"})
 	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
 	r.ErrorContains(err, "Namespace does not exist: does_not_exist in warehouse")
+}
+
+var (
+	exampleTableMetadataNoSnapshotV1 = `{
+	"format-version": 1,
+	"table-uuid": "bf289591-dcc0-4234-ad4f-5c3eed811a29",
+	"location": "s3://warehouse/database/table",
+	"last-updated-ms": 1657810967051,
+	"last-column-id": 3,
+	"schema": {
+		"type": "struct",
+		"schema-id": 0,
+		"identifier-field-ids": [2],
+		"fields": [
+			{"id": 1, "name": "foo", "required": false, "type": "string"},
+			{"id": 2, "name": "bar", "required": true, "type": "int"},
+			{"id": 3, "name": "baz", "required": false, "type": "boolean"}
+		]
+	},
+	"current-schema-id": 0,
+	"schemas": [
+		{
+			"type": "struct",
+			"schema-id": 0,
+			"identifier-field-ids": [2],
+			"fields": [
+				{"id": 1, "name": "foo", "required": false, "type": "string"},
+				{"id": 2, "name": "bar", "required": true, "type": "int"},
+				{"id": 3, "name": "baz", "required": false, "type": "boolean"}
+			]
+		}
+	],
+	"partition-spec": [],
+	"default-spec-id": 0,
+	"last-partition-id": 999,
+	"default-sort-order-id": 0,
+	"sort-orders": [{"order-id": 0, "fields": []}],
+	"properties": {
+		"write.delete.parquet.compression-codec": "zstd",
+		"write.metadata.compression-codec": "gzip",
+		"write.summary.partition-limit": "100",
+		"write.parquet.compression-codec": "zstd"
+	},
+	"current-snapshot-id": -1,
+	"refs": {},
+	"snapshots": [],
+	"snapshot-log": [],
+	"metadata-log": []
+}`
+
+	createTableRestExample = fmt.Sprintf(`{
+	"metadata-location": "s3://warehouse/database/table/metadata.json",
+	"metadata": %s,
+	"config": {
+		"client.factory": "io.tabular.iceberg.catalog.TabularAwsClientFactory",
+		"region": "us-west-2"
+	}
+}`, exampleTableMetadataNoSnapshotV1)
+
+	tableSchemaSimple = iceberg.NewSchemaWithIdentifiers(1, []int{2},
+		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.StringType{}, Required: false},
+		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool, Required: false},
+	)
+)
+
+func (r *RestCatalogSuite) TestCreateTable200() {
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.Write([]byte(createTableRestExample))
+	})
+
+	t := createTableRestExample
+	_ = t
+	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	tbl, err := cat.CreateTable(
+		context.Background(),
+		catalog.ToRestIdentifier("fokko", "fokko2"),
+		tableSchemaSimple,
+	)
+	r.Require().NoError(err)
+
+	r.Equal(catalog.ToRestIdentifier("rest", "fokko", "fokko2"), tbl.Identifier())
+	r.Equal("s3://warehouse/database/table/metadata.json", tbl.MetadataLocation())
+	r.EqualValues(1, tbl.Metadata().Version())
+	r.Equal("bf289591-dcc0-4234-ad4f-5c3eed811a29", tbl.Metadata().TableUUID().String())
+	r.EqualValues(1657810967051, tbl.Metadata().LastUpdatedMillis())
+	r.Equal(3, tbl.Metadata().LastColumnID())
+	r.Zero(tbl.Schema().ID)
+	r.Zero(tbl.Metadata().DefaultPartitionSpec())
+	r.Equal(999, *tbl.Metadata().LastPartitionSpecID())
+	r.Equal(table.UnsortedSortOrder, tbl.SortOrder())
 }
 
 func (r *RestCatalogSuite) TestLoadTable200() {

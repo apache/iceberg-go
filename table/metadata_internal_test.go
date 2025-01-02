@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table_test
+package table
 
 import (
 	"encoding/json"
@@ -23,7 +23,6 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -112,14 +111,14 @@ const ExampleTableMetadataV1 = `{
 }`
 
 func TestMetadataV1Parsing(t *testing.T) {
-	meta, err := table.ParseMetadataBytes([]byte(ExampleTableMetadataV1))
+	meta, err := ParseMetadataBytes([]byte(ExampleTableMetadataV1))
 	require.NoError(t, err)
 	require.NotNil(t, meta)
 
-	assert.IsType(t, (*table.MetadataV1)(nil), meta)
+	assert.IsType(t, (*metadataV1)(nil), meta)
 	assert.Equal(t, 1, meta.Version())
 
-	data := meta.(*table.MetadataV1)
+	data := meta.(*metadataV1)
 	assert.Equal(t, uuid.MustParse("d20125c8-7284-442c-9aea-15fee620737c"), meta.TableUUID())
 	assert.Equal(t, "s3://bucket/test/location", meta.Location())
 	assert.Equal(t, int64(1602638573874), meta.LastUpdatedMillis())
@@ -156,21 +155,21 @@ func TestMetadataV1Parsing(t *testing.T) {
 	assert.Nil(t, meta.SnapshotByID(0))
 	assert.Nil(t, meta.SnapshotByName("foo"))
 	assert.Zero(t, data.DefaultSortOrderID)
-	assert.Equal(t, table.UnsortedSortOrder, meta.SortOrder())
+	assert.Equal(t, UnsortedSortOrder, meta.SortOrder())
 }
 
 func TestMetadataV2Parsing(t *testing.T) {
-	meta, err := table.ParseMetadataBytes([]byte(ExampleTableMetadataV2))
+	meta, err := ParseMetadataBytes([]byte(ExampleTableMetadataV2))
 	require.NoError(t, err)
 	require.NotNil(t, meta)
 
-	assert.IsType(t, (*table.MetadataV2)(nil), meta)
+	assert.IsType(t, (*metadataV2)(nil), meta)
 	assert.Equal(t, 2, meta.Version())
 
-	data := meta.(*table.MetadataV2)
+	data := meta.(*metadataV2)
 	assert.Equal(t, uuid.MustParse("9c12d441-03fe-4693-9a96-a0705ddf69c1"), data.UUID)
 	assert.Equal(t, "s3://bucket/test/location", data.Location())
-	assert.Equal(t, 34, data.LastSequenceNumber)
+	assert.Equal(t, int64(34), data.LastSequenceNumber)
 	assert.Equal(t, int64(1602638573590), data.LastUpdatedMS)
 	assert.Equal(t, 3, data.LastColumnId)
 	assert.Equal(t, 0, data.SchemaList[0].ID)
@@ -192,7 +191,7 @@ func TestMetadataV2Parsing(t *testing.T) {
 }
 
 func TestParsingCorrectTypes(t *testing.T) {
-	var meta table.MetadataV2
+	var meta metadataV2
 	require.NoError(t, json.Unmarshal([]byte(ExampleTableMetadataV2), &meta))
 
 	assert.IsType(t, &iceberg.Schema{}, meta.SchemaList[0])
@@ -201,7 +200,7 @@ func TestParsingCorrectTypes(t *testing.T) {
 }
 
 func TestSerializeMetadataV1(t *testing.T) {
-	var meta table.MetadataV1
+	var meta metadataV1
 	require.NoError(t, json.Unmarshal([]byte(ExampleTableMetadataV1), &meta))
 
 	data, err := json.Marshal(&meta)
@@ -212,7 +211,7 @@ func TestSerializeMetadataV1(t *testing.T) {
 }
 
 func TestSerializeMetadataV2(t *testing.T) {
-	var meta table.MetadataV2
+	var meta metadataV2
 	require.NoError(t, json.Unmarshal([]byte(ExampleTableMetadataV2), &meta))
 
 	data, err := json.Marshal(&meta)
@@ -243,9 +242,9 @@ func TestInvalidFormatVersion(t *testing.T) {
         "snapshots": []
     }`
 
-	_, err := table.ParseMetadataBytes([]byte(metadataInvalidFormat))
+	_, err := ParseMetadataBytes([]byte(metadataInvalidFormat))
 	assert.Error(t, err)
-	assert.ErrorIs(t, err, table.ErrInvalidMetadataFormatVersion)
+	assert.ErrorIs(t, err, ErrInvalidMetadataFormatVersion)
 }
 
 func TestCurrentSchemaNotFound(t *testing.T) {
@@ -278,9 +277,9 @@ func TestCurrentSchemaNotFound(t *testing.T) {
         "snapshots": []
     }`
 
-	_, err := table.ParseMetadataBytes([]byte(schemaNotFound))
+	_, err := ParseMetadataBytes([]byte(schemaNotFound))
 	assert.Error(t, err)
-	assert.ErrorIs(t, err, table.ErrInvalidMetadata)
+	assert.ErrorIs(t, err, ErrInvalidMetadata)
 	assert.ErrorContains(t, err, "current-schema-id 2 can't be found in any schema")
 }
 
@@ -322,9 +321,9 @@ func TestSortOrderNotFound(t *testing.T) {
         "snapshots": []
     }`
 
-	_, err := table.ParseMetadataBytes([]byte(metadataSortOrderNotFound))
+	_, err := ParseMetadataBytes([]byte(metadataSortOrderNotFound))
 	assert.Error(t, err)
-	assert.ErrorIs(t, err, table.ErrInvalidMetadata)
+	assert.ErrorIs(t, err, ErrInvalidMetadata)
 	assert.ErrorContains(t, err, "default-sort-order-id 4 can't be found in [3: [\n2 asc nulls-first\nbucket[4](3) desc nulls-last\n]]")
 }
 
@@ -358,10 +357,10 @@ func TestSortOrderUnsorted(t *testing.T) {
         "snapshots": []
     }`
 
-	var meta table.MetadataV2
+	var meta metadataV2
 	require.NoError(t, json.Unmarshal([]byte(sortOrderUnsorted), &meta))
 
-	assert.Equal(t, table.UnsortedSortOrderID, meta.DefaultSortOrderID)
+	assert.Equal(t, UnsortedSortOrderID, meta.DefaultSortOrderID)
 	assert.Len(t, meta.SortOrderList, 0)
 }
 
@@ -394,28 +393,28 @@ func TestInvalidPartitionSpecID(t *testing.T) {
         "last-partition-id": 1000
     }`
 
-	var meta table.MetadataV2
+	var meta metadataV2
 	err := json.Unmarshal([]byte(invalidSpecID), &meta)
-	assert.ErrorIs(t, err, table.ErrInvalidMetadata)
+	assert.ErrorIs(t, err, ErrInvalidMetadata)
 	assert.ErrorContains(t, err, "default-spec-id 1 can't be found")
 }
 
 func TestV2RefCreation(t *testing.T) {
-	var meta table.MetadataV2
+	var meta metadataV2
 	require.NoError(t, json.Unmarshal([]byte(ExampleTableMetadataV2), &meta))
 
 	maxRefAge := int64(10000000)
-	assert.Equal(t, map[string]table.SnapshotRef{
+	assert.Equal(t, map[string]SnapshotRef{
 		"main": {
 			SnapshotID:      3055729675574597004,
-			SnapshotRefType: table.BranchRef,
+			SnapshotRefType: BranchRef,
 		},
 		"test": {
 			SnapshotID:      3051729675574597004,
-			SnapshotRefType: table.TagRef,
+			SnapshotRefType: TagRef,
 			MaxRefAgeMs:     &maxRefAge,
 		},
-	}, meta.Refs)
+	}, meta.SnapshotRefs)
 }
 
 func TestV1WriteMetadataToV2(t *testing.T) {
@@ -453,11 +452,11 @@ func TestV1WriteMetadataToV2(t *testing.T) {
 		"snapshots": [{"snapshot-id": 1925, "timestamp-ms": 1602638573822}]
 	}`
 
-	meta, err := table.ParseMetadataString(minimalV1Example)
+	meta, err := ParseMetadataString(minimalV1Example)
 	require.NoError(t, err)
-	assert.IsType(t, (*table.MetadataV1)(nil), meta)
+	assert.IsType(t, (*metadataV1)(nil), meta)
 
-	metaV2 := meta.(*table.MetadataV1).ToV2()
+	metaV2 := meta.(*metadataV1).ToV2()
 	metaV2Json, err := json.Marshal(metaV2)
 	require.NoError(t, err)
 
