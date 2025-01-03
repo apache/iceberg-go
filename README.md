@@ -64,11 +64,11 @@ $ cd iceberg-go/cmd/iceberg && go build .
 | :----------------------- | :--: | :--: | :------: | :--: |
 | Load Table               |  X   |      |          |  X   |
 | List Tables              |  X   |      |          |  X   |
-| Create Table             |      |      |          |  X   |
+| Create Table             |  X   |      |          |  X   |
 | Update Current Snapshot  |      |      |          |      |
 | Create New Snapshot      |      |      |          |      |
-| Rename Table             |      |      |          |  X   |
-| Drop Table               |      |      |          |  X   |
+| Rename Table             |  X   |      |          |  X   |
+| Drop Table               |  X   |      |          |  X   |
 | Alter Table              |      |      |          |      |
 | Set Table Properties     |      |      |          |      |
 | Create Namespace         |  X   |      |          |  X   |
