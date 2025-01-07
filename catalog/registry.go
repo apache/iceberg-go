@@ -114,13 +114,6 @@ func GetRegisteredCatalogs() []string {
 //     as the REST endpoint, otherwise the URI is used as the endpoint. The REST catalog also
 //     registers "http" and "https" so that Load with an http/s URI will automatically
 //     load the REST Catalog.
-//
-//   - "sql" for SQL catalogs. The registered generic SQL catalog loader looks for the following
-//     properties to create the connection: The value of "sql.driver" will be used to call `sql.Open`.
-//     the DSN to pass to `sql.Open` is set by the "uri" property. Finally, the "sql.dialect" property
-//     will be used which SQL dialect to use for queries and must be one of the supported ones.
-//     In addition, "catalog.name" can be set to specify the catalog name, otherwise it will just default
-//     to "sql".
 func Load(catalogURI string, props iceberg.Properties) (Catalog, error) {
 	var catalogType string
 	if strings.Contains(catalogURI, "://") {
