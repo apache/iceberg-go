@@ -31,7 +31,6 @@ func TestCatalogRegistry(t *testing.T) {
 		"http",
 		"https",
 		"glue",
-		"sql",
 	}, catalog.GetRegisteredCatalogs())
 
 	catalog.Register("foobar", catalog.RegistrarFunc(func(s string, p iceberg.Properties) (catalog.Catalog, error) {
@@ -46,7 +45,6 @@ func TestCatalogRegistry(t *testing.T) {
 		"foobar",
 		"https",
 		"glue",
-		"sql",
 	}, catalog.GetRegisteredCatalogs())
 
 	c, err := catalog.Load("foobar", iceberg.Properties{"foo": "baz"})
@@ -69,6 +67,5 @@ func TestCatalogRegistry(t *testing.T) {
 		"http",
 		"https",
 		"glue",
-		"sql",
 	}, catalog.GetRegisteredCatalogs())
 }
