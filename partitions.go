@@ -236,13 +236,12 @@ func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
 	return &StructType{FieldList: nestedFields}
 }
 
+// AssignFreshPartitionSpecIDs creates a new PartitionSpec by reassigning the field IDs
+// from the old schema to the corresponding fields in the fresh schema, while re-assigning
+// the actual Spec IDs to 1000 + the position of the field in the partition spec.
 func AssignFreshPartitionSpecIDs(spec *PartitionSpec, old, fresh *Schema) (PartitionSpec, error) {
 	if spec == nil {
 		return PartitionSpec{}, nil
-	}
-
-	if old == fresh {
-		return *spec, nil
 	}
 
 	newFields := make([]PartitionField, 0, len(spec.fields))

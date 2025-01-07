@@ -1200,6 +1200,9 @@ func (s *setFreshIDs) Primitive(p PrimitiveType) Type {
 	return p
 }
 
+// AssignFreshSchemaIDs creates a new schema with fresh field IDs for all of the
+// fields in it. The nextID function is used to iteratively generate the ids, if
+// it is nil then a simple incrementing counter is used starting at 1.
 func AssignFreshSchemaIDs(sc *Schema, nextID func() int) (*Schema, error) {
 	if nextID == nil {
 		var id int = 0
