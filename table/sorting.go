@@ -203,5 +203,5 @@ func AssignFreshSortOrderIDsWithID(sortOrder SortOrder, old, fresh *iceberg.Sche
 			NullOrder: field.NullOrder,
 		})
 	}
-	return SortOrder{OrderID: sortOrderID, Fields: fields}, nil
+	return SortOrder{OrderID: 1, Fields: fields}, nil
 }
