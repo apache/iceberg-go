@@ -1033,7 +1033,11 @@ func (m *metadataV2) UnmarshalJSON(b []byte) error {
 
 const DefaultFormatVersion = 2
 
-func NewMetadata(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, sortOrder SortOrder, location string, props iceberg.Properties, tableUuid uuid.UUID) (Metadata, error) {
+func NewMetadata(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, sortOrder SortOrder, location string, props iceberg.Properties) (Metadata, error) {
+	return NewMetadataWithUUID(sc, partitions, sortOrder, location, props, uuid.Nil)
+}
+
+func NewMetadataWithUUID(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, sortOrder SortOrder, location string, props iceberg.Properties, tableUuid uuid.UUID) (Metadata, error) {
 	freshSchema, err := iceberg.AssignFreshSchemaIDs(sc, nil)
 	if err != nil {
 		return nil, err

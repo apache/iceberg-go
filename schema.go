@@ -1216,14 +1216,14 @@ func AssignFreshSchemaIDs(sc *Schema, nextID func() int) (*Schema, error) {
 
 	fields := outType.(*StructType).FieldList
 	var newIdentifierIDs []int
-	if len(sc.IdentifierFieldIDs) == 0 {
+	if len(sc.IdentifierFieldIDs) != 0 {
 		newIdentifierIDs = make([]int, len(sc.IdentifierFieldIDs))
 		for i, id := range sc.IdentifierFieldIDs {
 			newIdentifierIDs[i] = visitor.oldIdToNew[id]
 		}
 	}
 
-	return NewSchemaWithIdentifiers(sc.ID, newIdentifierIDs, fields...), nil
+	return NewSchemaWithIdentifiers(0, newIdentifierIDs, fields...), nil
 }
 
 type SchemaWithPartnerVisitor[T, P any] interface {
