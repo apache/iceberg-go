@@ -25,6 +25,7 @@ import (
 	"iter"
 	"maps"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/apache/iceberg-go"
@@ -1028,4 +1029,68 @@ func (m *metadataV2) UnmarshalJSON(b []byte) error {
 
 	m.preValidate()
 	return m.validate()
+}
+
+const DefaultFormatVersion = 2
+
+func NewMetadata(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, sortOrder SortOrder, location string, props iceberg.Properties, tableUuid uuid.UUID) (Metadata, error) {
+	freshSchema, err := iceberg.AssignFreshSchemaIDs(sc, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	freshPartitions, err := iceberg.AssignFreshPartitionSpecIDs(partitions, sc, freshSchema)
+	if err != nil {
+		return nil, err
+	}
+
+	freshSortOrder, err := AssignFreshSortOrderIDs(sortOrder, sc, freshSchema)
+	if err != nil {
+		return nil, err
+	}
+
+	if tableUuid == uuid.Nil {
+		tableUuid = uuid.New()
+	}
+
+	formatVersion := DefaultFormatVersion
+	if props != nil {
+		verStr, ok := props["format-version"]
+		if ok {
+			if formatVersion, err = strconv.Atoi(verStr); err != nil {
+				formatVersion = DefaultFormatVersion
+			}
+			delete(props, "format-version")
+		}
+	}
+
+	lastPartitionID := freshPartitions.LastAssignedFieldID()
+	common := commonMetadata{
+		LastUpdatedMS:      time.Now().UnixMilli(),
+		LastColumnId:       freshSchema.HighestFieldID(),
+		FormatVersion:      formatVersion,
+		UUID:               tableUuid,
+		Loc:                location,
+		SchemaList:         []*iceberg.Schema{freshSchema},
+		CurrentSchemaID:    freshSchema.ID,
+		Specs:              []iceberg.PartitionSpec{freshPartitions},
+		DefaultSpecID:      freshPartitions.ID(),
+		LastPartitionID:    &lastPartitionID,
+		Props:              props,
+		SortOrderList:      []SortOrder{freshSortOrder},
+		DefaultSortOrderID: freshSortOrder.OrderID,
+	}
+
+	switch formatVersion {
+	case 1:
+		return &metadataV1{
+			commonMetadata: common,
+			Schema:         freshSchema,
+			Partition:      slices.Collect(freshPartitions.Fields()),
+		}, nil
+	case 2:
+		return &metadataV2{commonMetadata: common}, nil
+	default:
+		return nil, fmt.Errorf("invalid format version: %d", formatVersion)
+	}
 }

@@ -175,3 +175,33 @@ func (s *SortOrder) UnmarshalJSON(b []byte) error {
 
 	return nil
 }
+
+func AssignFreshSortOrderIDs(sortOrder SortOrder, old, fresh *iceberg.Schema) (SortOrder, error) {
+	return AssignFreshSortOrderIDsWithID(sortOrder, old, fresh, InitialSortOrderID)
+}
+
+func AssignFreshSortOrderIDsWithID(sortOrder SortOrder, old, fresh *iceberg.Schema, sortOrderID int) (SortOrder, error) {
+	if sortOrder.Equals(UnsortedSortOrder) {
+		return UnsortedSortOrder, nil
+	}
+
+	fields := make([]SortField, 0, len(sortOrder.Fields))
+	for _, field := range sortOrder.Fields {
+		originalField, ok := old.FindColumnName(field.SourceID)
+		if !ok {
+			return SortOrder{}, fmt.Errorf("cannot find source column id %s in old schema", field.String())
+		}
+		freshField, ok := fresh.FindFieldByName(originalField)
+		if !ok {
+			return SortOrder{}, fmt.Errorf("cannot find field %s in fresh schema", originalField)
+		}
+
+		fields = append(fields, SortField{
+			SourceID:  freshField.ID,
+			Transform: field.Transform,
+			Direction: field.Direction,
+			NullOrder: field.NullOrder,
+		})
+	}
+	return SortOrder{OrderID: sortOrderID, Fields: fields}, nil
+}
