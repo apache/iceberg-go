@@ -212,25 +212,25 @@ type createTableCfg struct {
 	properties    iceberg.Properties
 }
 
-func WithLocation(location string) func(*createTableCfg) {
+func WithLocation(location string) createTableOpt {
 	return func(cfg *createTableCfg) {
 		cfg.location = strings.TrimRight(location, "/")
 	}
 }
 
-func WithPartitionSpec(spec *iceberg.PartitionSpec) func(*createTableCfg) {
+func WithPartitionSpec(spec *iceberg.PartitionSpec) createTableOpt {
 	return func(cfg *createTableCfg) {
 		cfg.partitionSpec = spec
 	}
 }
 
-func WithSortOrder(order table.SortOrder) func(*createTableCfg) {
+func WithSortOrder(order table.SortOrder) createTableOpt {
 	return func(cfg *createTableCfg) {
 		cfg.sortOrder = order
 	}
 }
 
-func WithProperties(props iceberg.Properties) func(*createTableCfg) {
+func WithProperties(props iceberg.Properties) createTableOpt {
 	return func(cfg *createTableCfg) {
 		cfg.properties = props
 	}
