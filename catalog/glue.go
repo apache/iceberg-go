@@ -21,11 +21,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/glue"
 	"github.com/aws/aws-sdk-go-v2/service/glue/types"
 )
@@ -53,6 +56,50 @@ const (
 var (
 	_ Catalog = (*GlueCatalog)(nil)
 )
+
+func init() {
+	Register("glue", RegistrarFunc(func(_ string, props iceberg.Properties) (Catalog, error) {
+		awsConfig, err := toAwsConfig(props)
+		if err != nil {
+			return nil, err
+		}
+
+		return NewGlueCatalog(WithAwsConfig(awsConfig), WithAwsProperties(AwsProperties(props))), nil
+	}))
+}
+
+func toAwsConfig(p iceberg.Properties) (aws.Config, error) {
+	opts := make([]func(*config.LoadOptions) error, 0)
+
+	for k, v := range p {
+		switch k {
+		case "glue.region":
+			opts = append(opts, config.WithRegion(v))
+		case "glue.endpoint":
+			opts = append(opts, config.WithBaseEndpoint(v))
+		case "glue.max-retries":
+			maxRetry, err := strconv.Atoi(v)
+			if err != nil {
+				return aws.Config{}, err
+			}
+			opts = append(opts, config.WithRetryMaxAttempts(maxRetry))
+		case "glue.retry-mode":
+			m, err := aws.ParseRetryMode(v)
+			if err != nil {
+				return aws.Config{}, err
+			}
+			opts = append(opts, config.WithRetryMode(m))
+		}
+	}
+
+	key, secret, token := p.Get("glue.access-key", ""), p.Get("glue.secret-access-key", ""), p.Get("glue.session-token", "")
+	if key != "" && secret != "" && token != "" {
+		opts = append(opts, config.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(key, secret, token)))
+	}
+
+	return config.LoadDefaultConfig(context.Background(), opts...)
+}
 
 type glueAPI interface {
 	CreateTable(ctx context.Context, params *glue.CreateTableInput, optFns ...func(*glue.Options)) (*glue.CreateTableOutput, error)
@@ -353,39 +400,9 @@ func (c *GlueCatalog) UpdateNamespaceProperties(ctx context.Context, namespace t
 		return PropertiesUpdateSummary{}, err
 	}
 
-	overlap := []string{}
-	for _, key := range removals {
-		if _, exists := updates[key]; exists {
-			overlap = append(overlap, key)
-		}
-	}
-	if len(overlap) > 0 {
-		return PropertiesUpdateSummary{}, fmt.Errorf("conflict between removals and updates for keys: %v", overlap)
-	}
-
-	updatedProperties := make(map[string]string)
-	if database.Parameters != nil {
-		for k, v := range database.Parameters {
-			updatedProperties[k] = v
-		}
-	}
-
-	// Removals.
-	removed := []string{}
-	for _, key := range removals {
-		if _, exists := updatedProperties[key]; exists {
-			delete(updatedProperties, key)
-			removed = append(removed, key)
-		}
-	}
-
-	// Updates.
-	updated := []string{}
-	for key, value := range updates {
-		if updatedProperties[key] != value {
-			updatedProperties[key] = value
-			updated = append(updated, key)
-		}
+	updatedProperties, propertiesUpdateSummary, err := getUpdatedPropsAndUpdateSummary(database.Parameters, removals, updates)
+	if err != nil {
+		return PropertiesUpdateSummary{}, err
 	}
 
 	_, err = c.glueSvc.UpdateDatabase(ctx, &glue.UpdateDatabaseInput{CatalogId: c.catalogId, Name: aws.String(databaseName), DatabaseInput: &types.DatabaseInput{
@@ -394,12 +411,6 @@ func (c *GlueCatalog) UpdateNamespaceProperties(ctx context.Context, namespace t
 	}})
 	if err != nil {
 		return PropertiesUpdateSummary{}, fmt.Errorf("failed to update namespace properties %s: %w", databaseName, err)
-	}
-
-	propertiesUpdateSummary := PropertiesUpdateSummary{
-		Removed: removed,
-		Updated: updated,
-		Missing: iceberg.Difference(removals, removed),
 	}
 
 	return propertiesUpdateSummary, nil
