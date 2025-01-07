@@ -92,7 +92,7 @@ func toAwsConfig(p iceberg.Properties) (aws.Config, error) {
 		}
 	}
 
-	key, secret, token := p.Get("glue.access-key", ""), p.Get("glue.secret-access-key", ""), p.Get("glue.session-token", "")
+	key, secret, token := p.Get("glue.access-key-id", ""), p.Get("glue.secret-access-key", ""), p.Get("glue.session-token", "")
 	if key != "" && secret != "" && token != "" {
 		opts = append(opts, config.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(key, secret, token)))
