@@ -1033,10 +1033,15 @@ func (m *metadataV2) UnmarshalJSON(b []byte) error {
 
 const DefaultFormatVersion = 2
 
+// NewMetadata creates a new table metadata object using the provided schema, information, generating a fresh UUID for
+// the new table metadata. By default, this will generate a V2 table metadata, but this can be modified
+// by adding a "format-version" property to the props map. An error will be returned if the "format-version"
+// property exists and is not a valid version number.
 func NewMetadata(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, sortOrder SortOrder, location string, props iceberg.Properties) (Metadata, error) {
 	return NewMetadataWithUUID(sc, partitions, sortOrder, location, props, uuid.Nil)
 }
 
+// NewMetadataWithUUID is like NewMetadata, but allows the caller to specify the UUID of the table rather than creating a new one.
 func NewMetadataWithUUID(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, sortOrder SortOrder, location string, props iceberg.Properties, tableUuid uuid.UUID) (Metadata, error) {
 	freshSchema, err := iceberg.AssignFreshSchemaIDs(sc, nil)
 	if err != nil {
