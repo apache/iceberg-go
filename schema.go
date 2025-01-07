@@ -588,6 +588,79 @@ func visitField[T any](f NestedField, visitor SchemaVisitor[T]) T {
 	}
 }
 
+type PreOrderSchemaVisitor[T any] interface {
+	Schema(*Schema, func() T) T
+	Struct(StructType, []func() T) T
+	Field(NestedField, func() T) T
+	List(ListType, func() T) T
+	Map(MapType, func() T, func() T) T
+	Primitive(PrimitiveType) T
+}
+
+func PreOrderVisit[T any](sc *Schema, visitor PreOrderSchemaVisitor[T]) (res T, err error) {
+	if sc == nil {
+		err = fmt.Errorf("%w: cannot visit nil schema", ErrInvalidArgument)
+		return
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			switch e := r.(type) {
+			case string:
+				err = fmt.Errorf("error encountered during schema visitor: %s", e)
+			case error:
+				err = fmt.Errorf("error encountered during schema visitor: %w", e)
+			}
+		}
+	}()
+
+	return visitor.Schema(sc, func() T {
+		return visitStructPreOrder(sc.AsStruct(), visitor)
+	}), nil
+}
+
+func visitStructPreOrder[T any](obj StructType, visitor PreOrderSchemaVisitor[T]) T {
+	results := make([]func() T, len(obj.FieldList))
+
+	for i, f := range obj.FieldList {
+		results[i] = func() T {
+			return visitFieldPreOrder(f, visitor)
+		}
+	}
+
+	return visitor.Struct(obj, results)
+}
+
+func visitListPreOrder[T any](obj ListType, visitor PreOrderSchemaVisitor[T]) T {
+	return visitor.List(obj, func() T {
+		return visitFieldPreOrder(obj.ElementField(), visitor)
+	})
+}
+
+func visitMapPreOrder[T any](obj MapType, visitor PreOrderSchemaVisitor[T]) T {
+	return visitor.Map(obj, func() T {
+		return visitFieldPreOrder(obj.KeyField(), visitor)
+	}, func() T {
+		return visitFieldPreOrder(obj.ValueField(), visitor)
+	})
+}
+
+func visitFieldPreOrder[T any](f NestedField, visitor PreOrderSchemaVisitor[T]) T {
+	var fn func() T
+	switch typ := f.Type.(type) {
+	case *StructType:
+		fn = func() T { return visitStructPreOrder(*typ, visitor) }
+	case *ListType:
+		fn = func() T { return visitListPreOrder(*typ, visitor) }
+	case *MapType:
+		fn = func() T { return visitMapPreOrder(*typ, visitor) }
+	default:
+		fn = func() T { return visitor.Primitive(typ.(PrimitiveType)) }
+	}
+
+	return visitor.Field(f, fn)
+}
+
 // IndexByID performs a post-order traversal of the given schema and
 // returns a mapping from field ID to field.
 func IndexByID(schema *Schema) (map[int]NestedField, error) {
@@ -1067,6 +1140,90 @@ func (buildPosAccessors) Primitive(PrimitiveType) map[int]accessor {
 
 func buildAccessors(schema *Schema) (map[int]accessor, error) {
 	return Visit(schema, buildPosAccessors{})
+}
+
+type setFreshIDs struct {
+	oldIdToNew map[int]int
+	nextIDFunc func() int
+}
+
+func (s *setFreshIDs) getAndInc(currentID int) int {
+	next := s.nextIDFunc()
+	s.oldIdToNew[currentID] = next
+	return next
+}
+
+func (s *setFreshIDs) Schema(_ *Schema, structResult func() Type) Type {
+	return structResult()
+}
+
+func (s *setFreshIDs) Struct(st StructType, fieldResults []func() Type) Type {
+	newFields := make([]NestedField, len(st.FieldList))
+	for idx, f := range st.FieldList {
+		newFields[idx] = NestedField{
+			ID:       s.getAndInc(f.ID),
+			Name:     f.Name,
+			Type:     fieldResults[idx](),
+			Doc:      f.Doc,
+			Required: f.Required,
+		}
+	}
+	return &StructType{FieldList: newFields}
+}
+
+func (s *setFreshIDs) Field(_ NestedField, fieldResult func() Type) Type {
+	return fieldResult()
+}
+
+func (s *setFreshIDs) List(list ListType, elemResult func() Type) Type {
+	elemID := s.getAndInc(list.ElementID)
+	return &ListType{
+		ElementID:       elemID,
+		Element:         elemResult(),
+		ElementRequired: list.ElementRequired,
+	}
+}
+
+func (s *setFreshIDs) Map(mapType MapType, keyResult, valueResult func() Type) Type {
+	keyID := s.getAndInc(mapType.KeyID)
+	valueID := s.getAndInc(mapType.ValueID)
+	return &MapType{
+		KeyID:         keyID,
+		ValueID:       valueID,
+		KeyType:       keyResult(),
+		ValueType:     valueResult(),
+		ValueRequired: mapType.ValueRequired,
+	}
+}
+
+func (s *setFreshIDs) Primitive(p PrimitiveType) Type {
+	return p
+}
+
+func AssignFreshSchemaIDs(sc *Schema, nextID func() int) (*Schema, error) {
+	if nextID == nil {
+		var id int = 0
+		nextID = func() int {
+			id++
+			return id
+		}
+	}
+	visitor := &setFreshIDs{oldIdToNew: make(map[int]int), nextIDFunc: nextID}
+	outType, err := PreOrderVisit(sc, visitor)
+	if err != nil {
+		return nil, err
+	}
+
+	fields := outType.(*StructType).FieldList
+	var newIdentifierIDs []int
+	if len(sc.IdentifierFieldIDs) == 0 {
+		newIdentifierIDs = make([]int, len(sc.IdentifierFieldIDs))
+		for i, id := range sc.IdentifierFieldIDs {
+			newIdentifierIDs[i] = visitor.oldIdToNew[id]
+		}
+	}
+
+	return NewSchemaWithIdentifiers(sc.ID, newIdentifierIDs, fields...), nil
 }
 
 type SchemaWithPartnerVisitor[T, P any] interface {
