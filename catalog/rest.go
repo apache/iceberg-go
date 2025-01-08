@@ -633,7 +633,7 @@ func (r *RestCatalog) tableFromResponse(identifier []string, metadata table.Meta
 		return nil, err
 	}
 
-	return table.New(id, metadata, loc, iofs), nil
+	return table.New(id, metadata, loc, iofs, r), nil
 }
 
 func (r *RestCatalog) ListTables(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error) {
@@ -762,32 +762,33 @@ func (r *RestCatalog) LoadTable(ctx context.Context, identifier table.Identifier
 	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, config)
 }
 
-func (r *RestCatalog) UpdateTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
-	ns, tbl, err := splitIdentForPath(ident)
+func (r *RestCatalog) CommitTable(ctx context.Context, tbl *table.Table, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
+	ident := tbl.Identifier()
+
+	ns, tblName, err := splitIdentForPath(ident)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	restIdentifier := identifier{
 		Namespace: NamespaceFromIdent(ident),
-		Name:      tbl,
+		Name:      tblName,
 	}
 	type payload struct {
 		Identifier   identifier          `json:"identifier"`
 		Requirements []table.Requirement `json:"requirements"`
 		Updates      []table.Update      `json:"updates"`
 	}
-	ret, err := doPost[payload, commitTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables", tbl},
+	ret, err := doPost[payload, commitTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables", tblName},
 		payload{Identifier: restIdentifier, Requirements: requirements, Updates: updates}, r.cl,
 		map[int]error{http.StatusNotFound: ErrNoSuchTable, http.StatusConflict: ErrCommitFailed})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
-
-	return r.tableFromResponse(ident, ret.Metadata, ret.MetadataLoc, config)
+	return ret.Metadata, ret.MetadataLoc, nil
 }
 
 func (r *RestCatalog) DropTable(ctx context.Context, identifier table.Identifier) error {
