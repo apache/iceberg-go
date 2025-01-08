@@ -27,6 +27,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	"github.com/uptrace/bun/driver/sqliteshim"
 )
@@ -83,21 +84,21 @@ var (
 	)
 )
 
-// func TestCreateSQLCatalogNoDriverDialect(t *testing.T) {
-// 	_, err := catalog.Load("sql", iceberg.Properties{})
-// 	assert.Error(t, err)
+func TestCreateSQLCatalogNoDriverDialect(t *testing.T) {
+	_, err := catalog.Load("sql", iceberg.Properties{})
+	assert.Error(t, err)
 
-// 	_, err = catalog.Load("sql", iceberg.Properties{catalog.SqlDriverKey: "sqlite"})
-// 	assert.Error(t, err)
-// }
+	_, err = catalog.Load("sql", iceberg.Properties{catalog.SqlDriverKey: "sqlite"})
+	assert.Error(t, err)
+}
 
-// func TestInvalidDialect(t *testing.T) {
-// 	_, err := catalog.Load("sql", iceberg.Properties{
-// 		catalog.SqlDriverKey:  sqliteshim.ShimName,
-// 		catalog.SqlDialectKey: "foobar",
-// 	})
-// 	assert.Error(t, err)
-// }
+func TestInvalidDialect(t *testing.T) {
+	_, err := catalog.Load("sql", iceberg.Properties{
+		catalog.SqlDriverKey:  sqliteshim.ShimName,
+		catalog.SqlDialectKey: "foobar",
+	})
+	assert.Error(t, err)
+}
 
 type SqliteCatalogTestSuite struct {
 	suite.Suite
@@ -148,17 +149,16 @@ func (s *SqliteCatalogTestSuite) confirmTablesExist(db *sql.DB) {
 }
 
 func (s *SqliteCatalogTestSuite) loadCatalogForTableCreation() *catalog.SQLCatalog {
-	// // cat, err := catalog.Load("sql", iceberg.Properties{
-	// // 	"uri":                 s.catalogUri(),
-	// // 	catalog.SqlDriverKey:  sqliteshim.ShimName,
-	// // 	catalog.SqlDialectKey: string(catalog.SQLite),
-	// // 	"catalog.name":        "default",
-	// // 	"init_catalog_tables": "true",
-	// // })
-	// // s.Require().NoError(err)
+	cat, err := catalog.Load("sql", iceberg.Properties{
+		"uri":                 s.catalogUri(),
+		catalog.SqlDriverKey:  sqliteshim.ShimName,
+		catalog.SqlDialectKey: string(catalog.SQLite),
+		"catalog.name":        "default",
+		"init_catalog_tables": "true",
+	})
+	s.Require().NoError(err)
 
-	// return cat.(*catalog.SQLCatalog)
-	return nil
+	return cat.(*catalog.SQLCatalog)
 }
 
 func (s *SqliteCatalogTestSuite) TearDownTest() {
@@ -173,31 +173,29 @@ func (s *SqliteCatalogTestSuite) getDB() *sql.DB {
 }
 
 func (s *SqliteCatalogTestSuite) getCatalogMemory() *catalog.SQLCatalog {
-	// cat, err := catalog.Load("sql", iceberg.Properties{
-	// 	"uri":                 ":memory:",
-	// 	catalog.SqlDriverKey:  sqliteshim.ShimName,
-	// 	catalog.SqlDialectKey: string(catalog.SQLite),
-	// 	"catalog.name":        "default",
-	// 	"warehouse":           s.warehouse,
-	// })
-	// s.Require().NoError(err)
+	cat, err := catalog.Load("sql", iceberg.Properties{
+		"uri":                 ":memory:",
+		catalog.SqlDriverKey:  sqliteshim.ShimName,
+		catalog.SqlDialectKey: string(catalog.SQLite),
+		"catalog.name":        "default",
+		"warehouse":           s.warehouse,
+	})
+	s.Require().NoError(err)
 
-	// return cat.(*catalog.SQLCatalog)
-	return nil
+	return cat.(*catalog.SQLCatalog)
 }
 
 func (s *SqliteCatalogTestSuite) getCatalogSqlite() *catalog.SQLCatalog {
-	// cat, err := catalog.Load("sql", iceberg.Properties{
-	// 	"uri":                 s.catalogUri(),
-	// 	catalog.SqlDriverKey:  sqliteshim.ShimName,
-	// 	catalog.SqlDialectKey: string(catalog.SQLite),
-	// 	"catalog.name":        "default",
-	// 	"warehouse":           s.warehouse,
-	// })
-	// s.Require().NoError(err)
+	cat, err := catalog.Load("sql", iceberg.Properties{
+		"uri":                 s.catalogUri(),
+		catalog.SqlDriverKey:  sqliteshim.ShimName,
+		catalog.SqlDialectKey: string(catalog.SQLite),
+		"catalog.name":        "default",
+		"warehouse":           s.warehouse,
+	})
+	s.Require().NoError(err)
 
-	// return cat.(*catalog.SQLCatalog)
-	return nil
+	return cat.(*catalog.SQLCatalog)
 }
 
 func (s *SqliteCatalogTestSuite) TestCreationNoTablesExist() {
