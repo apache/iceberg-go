@@ -50,7 +50,15 @@ const (
 	// The ID of the Glue Data Catalog where the tables reside. If none is provided, Glue
 	// automatically uses the caller's AWS account ID by default.
 	// See: https://docs.aws.amazon.com/glue/latest/dg/aws-glue-api-catalog-databases.html
-	glueCatalogIdKey = "glue.id"
+	GlueCatalogIdKey = "glue.id"
+
+	GlueAccessKeyID     = "glue.access-key-id"
+	GlueSecretAccessKey = "glue.secret-access-key"
+	GlueSessionToken    = "glue.session-token"
+	GlueRegion          = "glue.region"
+	GlueEndpoint        = "glue.endpoint"
+	GlueMaxRetries      = "glue.max-retries"
+	GlueRetryMode       = "glue.retry-mode"
 )
 
 var (
@@ -73,17 +81,17 @@ func toAwsConfig(p iceberg.Properties) (aws.Config, error) {
 
 	for k, v := range p {
 		switch k {
-		case "glue.region":
+		case GlueRegion:
 			opts = append(opts, config.WithRegion(v))
-		case "glue.endpoint":
+		case GlueEndpoint:
 			opts = append(opts, config.WithBaseEndpoint(v))
-		case "glue.max-retries":
+		case GlueMaxRetries:
 			maxRetry, err := strconv.Atoi(v)
 			if err != nil {
 				return aws.Config{}, err
 			}
 			opts = append(opts, config.WithRetryMaxAttempts(maxRetry))
-		case "glue.retry-mode":
+		case GlueRetryMode:
 			m, err := aws.ParseRetryMode(v)
 			if err != nil {
 				return aws.Config{}, err
@@ -92,8 +100,8 @@ func toAwsConfig(p iceberg.Properties) (aws.Config, error) {
 		}
 	}
 
-	key, secret, token := p.Get("glue.access-key-id", ""), p.Get("glue.secret-access-key", ""), p.Get("glue.session-token", "")
-	if key != "" && secret != "" && token != "" {
+	key, secret, token := p[GlueAccessKeyID], p[GlueSecretAccessKey], p[GlueSessionToken]
+	if key != "" || secret != "" || token != "" {
 		opts = append(opts, config.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(key, secret, token)))
 	}
@@ -127,7 +135,7 @@ func NewGlueCatalog(opts ...Option[GlueCatalog]) *GlueCatalog {
 	}
 
 	var catalogId *string
-	if val, ok := glueOps.awsProperties[glueCatalogIdKey]; ok {
+	if val, ok := glueOps.awsProperties[GlueCatalogIdKey]; ok {
 		catalogId = &val
 	} else {
 		catalogId = nil
