@@ -18,7 +18,6 @@
 package io
 
 import (
-	"errors"
 	"os"
 	"path"
 	"strings"
@@ -33,14 +32,11 @@ func (LocalFS) Open(name string) (File, error) {
 }
 
 func (LocalFS) Create(name string) (FileWriter, error) {
-	w, err := os.Create(strings.TrimPrefix(name, "file://"))
-	if err != nil && errors.Is(err, os.ErrNotExist) {
-		if err = os.MkdirAll(path.Dir(name), 0755); err != nil {
-			return nil, err
-		}
-		return os.Create(name)
+	filename := strings.TrimPrefix(name, "file://")
+	if err := os.MkdirAll(path.Dir(filename), 0755); err != nil {
+		return nil, err
 	}
-	return w, err
+	return os.Create(filename)
 }
 
 func (LocalFS) WriteFile(name string, content []byte) error {

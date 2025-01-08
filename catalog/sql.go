@@ -200,6 +200,10 @@ func NewSQLCatalog(name string, db *sql.DB, dialect SupportedDialect, props iceb
 	return cat, nil
 }
 
+func (c *SQLCatalog) Name() string {
+	return c.name
+}
+
 func (c *SQLCatalog) CatalogType() CatalogType {
 	return SQL
 }
@@ -280,7 +284,7 @@ func (c *SQLCatalog) getDefaultWarehouseLocation(ctx context.Context, nsname, ta
 	}
 
 	if warehousepath := c.props.Get("warehouse", ""); warehousepath != "" {
-		return path.Join(warehousepath, nsname+".db", tableName), nil
+		return warehousepath + "/" + path.Join(nsname+".db", tableName), nil
 	}
 
 	return "", errors.New("no default path set, please specify a location when creating a table")
@@ -318,7 +322,7 @@ func (c *SQLCatalog) CreateTable(ctx context.Context, ident table.Identifier, sc
 	}
 
 	metadataLocation := getMetadataLocation(loc, 0)
-	metadata, err := table.NewMetadata(sc, cfg.partitionSpec, cfg.sortOrder, metadataLocation, cfg.properties)
+	metadata, err := table.NewMetadata(sc, cfg.partitionSpec, cfg.sortOrder, loc, cfg.properties)
 	if err != nil {
 		return nil, err
 	}
@@ -427,10 +431,8 @@ func (c *SQLCatalog) ListNamespaces(ctx context.Context, parent table.Identifier
 }
 
 func (c *SQLCatalog) LoadTable(ctx context.Context, identifier table.Identifier, props iceberg.Properties) (*table.Table, error) {
-	ns, tbl, err := splitIdentForPath(identifier)
-	if err != nil {
-		return nil, err
-	}
+	ns := NamespaceFromIdent(identifier)
+	tbl := TableNameFromIdent(identifier)
 
 	if props == nil {
 		props = iceberg.Properties{}
@@ -440,7 +442,7 @@ func (c *SQLCatalog) LoadTable(ctx context.Context, identifier table.Identifier,
 		t := new(sqlIcebergTable)
 		err := tx.NewSelect().Model(t).
 			Where("catalog_name = ?", c.name).
-			Where("table_namespace = ?", ns).
+			Where("table_namespace = ?", strings.Join(ns, ".")).
 			Where("table_name = ?", tbl).
 			Scan(ctx)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -457,15 +459,6 @@ func (c *SQLCatalog) LoadTable(ctx context.Context, identifier table.Identifier,
 		return nil, fmt.Errorf("%w: %s", ErrNoSuchTable, identifier)
 	case !result.MetadataLocation.Valid:
 		return nil, fmt.Errorf("%w: %s, metadata location is missing", ErrNoSuchTable, identifier)
-	case len(result.TableNamespace) == 0:
-		return nil, fmt.Errorf("%w: %s, namespace is missing", ErrNoSuchTable, identifier)
-	case len(result.TableName) == 0:
-		return nil, fmt.Errorf("%w: %s, table name is missing", ErrNoSuchTable, identifier)
-	}
-
-	id := identifier
-	if c.name != "" {
-		id = append([]string{c.name}, id...)
 	}
 
 	tblProps := maps.Clone(c.props)
@@ -475,7 +468,7 @@ func (c *SQLCatalog) LoadTable(ctx context.Context, identifier table.Identifier,
 	if err != nil {
 		return nil, err
 	}
-	return table.NewFromLocation(id, result.MetadataLocation.String, iofs)
+	return table.NewFromLocation(identifier, result.MetadataLocation.String, iofs)
 }
 
 func (c *SQLCatalog) DropTable(ctx context.Context, identifier table.Identifier) error {
@@ -520,11 +513,25 @@ func (c *SQLCatalog) RenameTable(ctx context.Context, from, to table.Identifier)
 	}
 
 	err = withWriteTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
+		exists, err := tx.NewSelect().Model(&sqlIcebergTable{
+			CatalogName:    c.name,
+			TableNamespace: toNs,
+			TableName:      toTbl,
+		}).WherePK().Exists(ctx)
+		if err != nil {
+			return err
+		}
+
+		if exists {
+			return ErrTableAlreadyExists
+		}
+
 		res, err := tx.NewUpdate().Model(&sqlIcebergTable{
 			CatalogName:    c.name,
 			TableNamespace: fromNs,
 			TableName:      fromTbl,
-		}).WherePK().Set("table_namespace = ?", toNs).
+		}).WherePK().
+			Set("table_namespace = ?", toNs).
 			Set("table_name = ?", toTbl).
 			Exec(ctx)
 		if err != nil {
