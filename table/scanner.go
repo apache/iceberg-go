@@ -301,6 +301,7 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	entryChan := make(chan []iceberg.ManifestEntry, 20)
 
 	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 	for i := 0; i < nworkers; i++ {
 		wg.Add(1)
 

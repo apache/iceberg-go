@@ -90,16 +90,6 @@ func (t *Table) Refresh(ctx context.Context) (*Table, error) {
 	return t, nil
 }
 
-func (t *Table) doCommit(ctx context.Context, updates []Update, requirements []Requirement) error {
-	newMetadata, newLocation, err := t.cat.CommitTable(ctx, t, requirements, updates)
-	if err != nil {
-		return err
-	}
-
-	t.metadata, t.metadataLocation = newMetadata, newLocation
-	return nil
-}
-
 type ScanOption func(*Scan)
 
 func noopOption(*Scan) {}
