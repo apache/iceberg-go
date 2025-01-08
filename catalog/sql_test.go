@@ -20,7 +20,6 @@ package catalog_test
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -28,8 +27,6 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"
-	"github.com/apache/iceberg-go/table/transaction"
-	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"github.com/uptrace/bun/driver/sqliteshim"
 )
@@ -372,37 +369,4 @@ func (s *SqliteCatalogTestSuite) TestCreateDuplicatedTable() {
 
 func TestSqlCatalog(t *testing.T) {
 	suite.Run(t, new(SqliteCatalogTestSuite))
-}
-
-func TestSqlTransactions(t *testing.T) {
-	ctx := context.Background()
-	sqldb, err := sql.Open(sqliteshim.ShimName, "file:////tmp/warehouse/pyiceberg_catalog.db")
-	require.NoError(t, err)
-	defer sqldb.Close()
-
-	cat, err := catalog.NewSQLCatalog("default", sqldb, catalog.SQLite, iceberg.Properties{
-		"init_catalog_tables": "true",
-	})
-
-	require.NoError(t, err)
-
-	tbl, err := cat.LoadTable(ctx, []string{"default", "taxi_dataset"}, nil)
-	require.NoError(t, err)
-
-	result, err := tbl.Scan(table.WithLimit(10)).ToArrowTable(context.Background())
-	require.NoError(t, err)
-	defer result.Release()
-
-	fmt.Println(result)
-
-	tx := transaction.New(cat, tbl)
-	defer tx.Rollback(ctx)
-
-	if err := tx.SetProperties(iceberg.Properties{"foo": "bar"}); err != nil {
-		panic(err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		panic(err)
-	}
 }
