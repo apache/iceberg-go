@@ -98,7 +98,7 @@ func GetRegisteredCatalogs() []string {
 // be registered and loaded external to this module.
 //
 // The URI is used to determine the catalog type by first checking if it contains
-// the string "://" indicating the presence of a scheme. If so, the schema is used
+// the string "://" indicating the presence of a scheme. If so, the scheme is used
 // to lookup the registered catalog. i.e. "glue://..." would return the Glue catalog
 // implementation, passing the URI and properties to NewGlueCatalog. If no scheme is
 // present, then the URI is used as-is to lookup the catalog factory function.
