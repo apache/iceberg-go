@@ -108,7 +108,7 @@ func GetRegisteredCatalogs() []string {
 //   - "glue" for AWS Glue Data Catalog, the rest of the URI is ignored, all configuration
 //     should be provided using the properties. "glue.region", "glue.endpoint",
 //     "glue.max-retries", etc. Default AWS credentials are used if found, or can be
-//     overridden by setting "glue.access-key", "glue.secret-access-key", and "glue.session-token".
+//     overridden by setting "glue.access-key-id", "glue.secret-access-key", and "glue.session-token".
 //
 //   - "rest" for a REST API catalog, if the properties have a "uri" key, then that will be used
 //     as the REST endpoint, otherwise the URI is used as the endpoint. The REST catalog also
