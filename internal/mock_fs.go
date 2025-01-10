@@ -35,6 +35,11 @@ func (m *MockFS) Open(name string) (io.File, error) {
 	return args.Get(0).(io.File), args.Error(1)
 }
 
+func (m *MockFS) Create(name string) (io.FileWriter, error) {
+	args := m.Called(name)
+	return args.Get(0).(io.FileWriter), args.Error(1)
+}
+
 func (m *MockFS) Remove(name string) error {
 	return m.Called(name).Error(0)
 }

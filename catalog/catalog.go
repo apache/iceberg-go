@@ -20,14 +20,18 @@ package catalog
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"net/url"
+	"strings"
 
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/google/uuid"
 )
 
 type CatalogType string
@@ -156,6 +160,12 @@ type Catalog interface {
 	// CatalogType returns the type of the catalog.
 	CatalogType() CatalogType
 
+	// CreateTable creates a new iceberg table in the catalog using the provided identiifer
+	// and schema. Options can be used to optionally provide location, partition spec, sort order,
+	// and custom properties.
+	CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...createTableOpt) (*table.Table, error)
+	// CommitTable commits the table metadata and updates to the catalog, returning the new metadata
+	CommitTable(context.Context, *table.Table, []table.Requirement, []table.Update) (table.Metadata, string, error)
 	// ListTables returns a list of table identifiers in the catalog, with the returned
 	// identifiers containing the information required to load the table via that catalog.
 	ListTables(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error)
@@ -245,4 +255,62 @@ func getUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals [
 	}
 
 	return updatedProps, summary, nil
+}
+
+func getMetadataLocation(location string, newVersion uint) string {
+	return fmt.Sprintf("%s/metadata/%05d-%s.metadata.json",
+		location, newVersion, uuid.New().String())
+}
+
+func writeMetadata(metadata table.Metadata, location string, props iceberg.Properties) error {
+	fs, err := iceio.LoadFS(props, location)
+	if err != nil {
+		return err
+	}
+
+	wfs, ok := fs.(iceio.WriteFileIO)
+	if !ok {
+		return fmt.Errorf("filesystem IO does not support writing")
+	}
+
+	out, err := wfs.Create(location)
+	if err != nil {
+		return nil
+	}
+	defer out.Close()
+
+	return json.NewEncoder(out).Encode(metadata)
+}
+
+type createTableOpt func(*createTableCfg)
+
+type createTableCfg struct {
+	location      string
+	partitionSpec *iceberg.PartitionSpec
+	sortOrder     table.SortOrder
+	properties    iceberg.Properties
+}
+
+func WithLocation(location string) createTableOpt {
+	return func(cfg *createTableCfg) {
+		cfg.location = strings.TrimRight(location, "/")
+	}
+}
+
+func WithPartitionSpec(spec *iceberg.PartitionSpec) createTableOpt {
+	return func(cfg *createTableCfg) {
+		cfg.partitionSpec = spec
+	}
+}
+
+func WithSortOrder(order table.SortOrder) createTableOpt {
+	return func(cfg *createTableCfg) {
+		cfg.sortOrder = order
+	}
+}
+
+func WithProperties(props iceberg.Properties) createTableOpt {
+	return func(cfg *createTableCfg) {
+		cfg.properties = props
+	}
 }

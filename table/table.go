@@ -18,6 +18,8 @@
 package table
 
 import (
+	"context"
+	"errors"
 	"runtime"
 	"slices"
 
@@ -25,13 +27,24 @@ import (
 	"github.com/apache/iceberg-go/io"
 )
 
+const (
+	KeyMetadataPreviousVersionsMax     = "write.metadata.previous-versions-max"
+	MetadataPreviousVersionsMaxDefault = 100
+)
+
 type Identifier = []string
+
+type MinimalCatalog interface {
+	LoadTable(context.Context, Identifier, iceberg.Properties) (*Table, error)
+	CommitTable(context.Context, *Table, []Requirement, []Update) (Metadata, string, error)
+}
 
 type Table struct {
 	identifier       Identifier
 	metadata         Metadata
 	metadataLocation string
 	fs               io.IO
+	cat              MinimalCatalog
 }
 
 func (t Table) Equals(other Table) bool {
@@ -59,6 +72,22 @@ func (t Table) Schemas() map[int]*iceberg.Schema {
 		m[s.ID] = s
 	}
 	return m
+}
+
+func (t *Table) Refresh(ctx context.Context) (*Table, error) {
+	if t.cat == nil {
+		return nil, errors.New("cannot refresh table without a catalog")
+	}
+
+	fresh, err := t.cat.LoadTable(ctx, t.identifier, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	t.metadata = fresh.metadata
+	t.fs = fresh.fs
+	t.metadataLocation = fresh.metadataLocation
+	return t, nil
 }
 
 type ScanOption func(*Scan)
@@ -152,12 +181,13 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 	return s
 }
 
-func New(ident Identifier, meta Metadata, location string, fs io.IO) *Table {
+func New(ident Identifier, meta Metadata, location string, fs io.IO, cat MinimalCatalog) *Table {
 	return &Table{
 		identifier:       ident,
 		metadata:         meta,
 		metadataLocation: location,
 		fs:               fs,
+		cat:              cat,
 	}
 }
 
@@ -184,5 +214,5 @@ func NewFromLocation(ident Identifier, metalocation string, fsys io.IO) (*Table,
 			return nil, err
 		}
 	}
-	return New(ident, meta, metalocation, fsys), nil
+	return New(ident, meta, metalocation, fsys, nil), nil
 }

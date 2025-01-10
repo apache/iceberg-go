@@ -134,38 +134,6 @@ func (t *loadTableResponse) UnmarshalJSON(b []byte) (err error) {
 	return
 }
 
-type createTableOption func(*createTableRequest)
-
-func WithLocation(loc string) createTableOption {
-	return func(req *createTableRequest) {
-		req.Location = strings.TrimRight(loc, "/")
-	}
-}
-
-func WithPartitionSpec(spec *iceberg.PartitionSpec) createTableOption {
-	return func(req *createTableRequest) {
-		req.PartitionSpec = spec
-	}
-}
-
-func WithWriteOrder(order *table.SortOrder) createTableOption {
-	return func(req *createTableRequest) {
-		req.WriteOrder = order
-	}
-}
-
-func WithStageCreate() createTableOption {
-	return func(req *createTableRequest) {
-		req.StageCreate = true
-	}
-}
-
-func WithProperties(props iceberg.Properties) createTableOption {
-	return func(req *createTableRequest) {
-		req.Props = props
-	}
-}
-
 type createTableRequest struct {
 	Name          string                 `json:"name"`
 	Schema        *iceberg.Schema        `json:"schema"`
@@ -665,7 +633,7 @@ func (r *RestCatalog) tableFromResponse(identifier []string, metadata table.Meta
 		return nil, err
 	}
 
-	return table.New(id, metadata, loc, iofs), nil
+	return table.New(id, metadata, loc, iofs, r), nil
 }
 
 func (r *RestCatalog) ListTables(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error) {
@@ -700,18 +668,40 @@ func splitIdentForPath(ident table.Identifier) (string, string, error) {
 	return strings.Join(NamespaceFromIdent(ident), namespaceSeparator), TableNameFromIdent(ident), nil
 }
 
-func (r *RestCatalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...createTableOption) (*table.Table, error) {
+func (r *RestCatalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...createTableOpt) (*table.Table, error) {
 	ns, tbl, err := splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
 
-	payload := createTableRequest{
-		Name:   tbl,
-		Schema: schema,
-	}
+	var cfg createTableCfg
 	for _, o := range opts {
-		o(&payload)
+		o(&cfg)
+	}
+
+	freshSchema, err := iceberg.AssignFreshSchemaIDs(schema, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	freshPartitionSpec, err := iceberg.AssignFreshPartitionSpecIDs(cfg.partitionSpec, schema, freshSchema)
+	if err != nil {
+		return nil, err
+	}
+
+	freshSortOrder, err := table.AssignFreshSortOrderIDs(cfg.sortOrder, schema, freshSchema)
+	if err != nil {
+		return nil, err
+	}
+
+	payload := createTableRequest{
+		Name:          tbl,
+		Schema:        freshSchema,
+		Location:      cfg.location,
+		PartitionSpec: &freshPartitionSpec,
+		WriteOrder:    &freshSortOrder,
+		StageCreate:   false,
+		Props:         cfg.properties,
 	}
 
 	ret, err := doPost[createTableRequest, loadTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables"}, payload,
@@ -772,32 +762,33 @@ func (r *RestCatalog) LoadTable(ctx context.Context, identifier table.Identifier
 	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, config)
 }
 
-func (r *RestCatalog) UpdateTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
-	ns, tbl, err := splitIdentForPath(ident)
+func (r *RestCatalog) CommitTable(ctx context.Context, tbl *table.Table, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
+	ident := tbl.Identifier()
+
+	ns, tblName, err := splitIdentForPath(ident)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	restIdentifier := identifier{
 		Namespace: NamespaceFromIdent(ident),
-		Name:      tbl,
+		Name:      tblName,
 	}
 	type payload struct {
 		Identifier   identifier          `json:"identifier"`
 		Requirements []table.Requirement `json:"requirements"`
 		Updates      []table.Update      `json:"updates"`
 	}
-	ret, err := doPost[payload, commitTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables", tbl},
+	ret, err := doPost[payload, commitTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables", tblName},
 		payload{Identifier: restIdentifier, Requirements: requirements, Updates: updates}, r.cl,
 		map[int]error{http.StatusNotFound: ErrNoSuchTable, http.StatusConflict: ErrCommitFailed})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
-
-	return r.tableFromResponse(ident, ret.Metadata, ret.MetadataLoc, config)
+	return ret.Metadata, ret.MetadataLoc, nil
 }
 
 func (r *RestCatalog) DropTable(ctx context.Context, identifier table.Identifier) error {

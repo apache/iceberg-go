@@ -235,3 +235,34 @@ func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
 	}
 	return &StructType{FieldList: nestedFields}
 }
+
+// AssignFreshPartitionSpecIDs creates a new PartitionSpec by reassigning the field IDs
+// from the old schema to the corresponding fields in the fresh schema, while re-assigning
+// the actual Spec IDs to 1000 + the position of the field in the partition spec.
+func AssignFreshPartitionSpecIDs(spec *PartitionSpec, old, fresh *Schema) (PartitionSpec, error) {
+	if spec == nil {
+		return PartitionSpec{}, nil
+	}
+
+	newFields := make([]PartitionField, 0, len(spec.fields))
+	for pos, field := range spec.fields {
+		origCol, ok := old.FindColumnName(field.SourceID)
+		if !ok {
+			return PartitionSpec{}, fmt.Errorf("could not find field in old schema: %s", field.Name)
+		}
+
+		freshField, ok := fresh.FindFieldByName(origCol)
+		if !ok {
+			return PartitionSpec{}, fmt.Errorf("could not find field in fresh schema: %s", field.Name)
+		}
+
+		newFields = append(newFields, PartitionField{
+			Name:      field.Name,
+			SourceID:  freshField.ID,
+			FieldID:   partitionDataIDStart + pos,
+			Transform: field.Transform,
+		})
+	}
+
+	return NewPartitionSpec(newFields...), nil
+}
