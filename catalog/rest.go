@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -56,6 +57,7 @@ const (
 	keyRestSigV4Region  = "rest.signing-region"
 	keyRestSigV4Service = "rest.signing-name"
 	keyAuthUrl          = "rest.authorization-url"
+	keyTlsSkipVerify    = "rest.tls.skip-verify"
 )
 
 var (
@@ -70,6 +72,16 @@ var (
 	ErrCommitStateUnknown   = fmt.Errorf("%w: commit failed due to unknown reason", ErrRESTError)
 	ErrOAuthError           = fmt.Errorf("%w: oauth error", ErrRESTError)
 )
+
+func init() {
+	reg := RegistrarFunc(func(endpoint string, p iceberg.Properties) (Catalog, error) {
+		return newRestCatalogFromProps(endpoint, p.Get("uri", endpoint), p)
+	})
+
+	Register(string(REST), reg)
+	Register("http", reg)
+	Register("https", reg)
+}
 
 type errorResponse struct {
 	Message string `json:"message"`
@@ -408,6 +420,15 @@ func fromProps(props iceberg.Properties) *options {
 			o.credential = v
 		case keyPrefix:
 			o.prefix = v
+		case keyTlsSkipVerify:
+			verify := strings.ToLower(v) == "true"
+			if o.tlsConfig == nil {
+				o.tlsConfig = &tls.Config{
+					InsecureSkipVerify: verify,
+				}
+			} else {
+				o.tlsConfig.InsecureSkipVerify = verify
+			}
 		}
 	}
 	return o
@@ -447,29 +468,45 @@ type RestCatalog struct {
 	props iceberg.Properties
 }
 
+func newRestCatalogFromProps(name string, uri string, p iceberg.Properties) (*RestCatalog, error) {
+	ops := fromProps(p)
+
+	r := &RestCatalog{name: name}
+	if err := r.init(ops, uri); err != nil {
+		return nil, err
+	}
+
+	return r, nil
+}
+
 func NewRestCatalog(name, uri string, opts ...Option[RestCatalog]) (*RestCatalog, error) {
 	ops := &options{}
 	for _, o := range opts {
 		o(ops)
 	}
 
+	r := &RestCatalog{name: name}
+	if err := r.init(ops, uri); err != nil {
+		return nil, err
+	}
+
+	return r, nil
+}
+
+func (r *RestCatalog) init(ops *options, uri string) error {
 	baseuri, err := url.Parse(uri)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	r := &RestCatalog{
-		name:    name,
-		baseURI: baseuri.JoinPath("v1"),
-	}
-
+	r.baseURI = baseuri.JoinPath("v1")
 	if ops, err = r.fetchConfig(ops); err != nil {
-		return nil, err
+		return err
 	}
 
 	cl, err := r.createSession(ops)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	r.cl = cl
@@ -477,7 +514,7 @@ func NewRestCatalog(name, uri string, opts ...Option[RestCatalog]) (*RestCatalog
 		r.baseURI = r.baseURI.JoinPath(ops.prefix)
 	}
 	r.props = toProps(ops)
-	return r, nil
+	return nil
 }
 
 func (r *RestCatalog) fetchAccessToken(cl *http.Client, creds string, opts *options) (string, error) {
