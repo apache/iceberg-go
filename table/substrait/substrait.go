@@ -24,9 +24,9 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/iceberg-go"
-	"github.com/substrait-io/substrait-go/expr"
-	"github.com/substrait-io/substrait-go/extensions"
-	"github.com/substrait-io/substrait-go/types"
+	"github.com/substrait-io/substrait-go/v3/expr"
+	"github.com/substrait-io/substrait-go/v3/extensions"
+	"github.com/substrait-io/substrait-go/v3/types"
 )
 
 //go:embed functions_set.yaml
@@ -59,7 +59,7 @@ func ConvertExpr(schema *iceberg.Schema, e iceberg.BooleanExpression, caseSensit
 
 	reg := expr.NewEmptyExtensionRegistry(&extensions.DefaultCollection)
 
-	bldr := expr.ExprBuilder{Reg: reg, BaseSchema: &base.Struct}
+	bldr := expr.ExprBuilder{Reg: reg, BaseSchema: types.NewRecordTypeFromStruct(base.Struct)}
 	b, err := iceberg.VisitExpr(e, &toSubstraitExpr{bldr: bldr, schema: schema,
 		caseSensitive: caseSensitive})
 	if err != nil {
