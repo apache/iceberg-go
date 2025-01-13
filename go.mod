@@ -34,7 +34,6 @@ require (
 	github.com/hamba/avro/v2 v2.27.0
 	github.com/pterm/pterm v0.12.80
 	github.com/stretchr/testify v1.10.0
-	github.com/substrait-io/substrait-go v1.2.0
 	github.com/substrait-io/substrait-go/v3 v3.2.1
 	github.com/twmb/murmur3 v1.1.8
 	gocloud.dev v0.40.0
