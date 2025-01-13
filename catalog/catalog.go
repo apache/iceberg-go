@@ -157,7 +157,7 @@ type Catalog interface {
 	// CatalogType returns the type of the catalog.
 	CatalogType() CatalogType
 
-	// CreateTable creates a new iceberg table in the catalog using the provided identiifer
+	// CreateTable creates a new iceberg table in the catalog using the provided identifier
 	// and schema. Options can be used to optionally provide location, partition spec, sort order,
 	// and custom properties.
 	CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...createTableOpt) (*table.Table, error)
