@@ -709,6 +709,8 @@ func (r *RestCatalogSuite) TestCreateTable200() {
 		context.Background(),
 		catalog.ToRestIdentifier("fokko", "fokko2"),
 		tableSchemaSimple,
+		catalog.WithPartitionSpec(&iceberg.PartitionSpec{}),
+		catalog.WithLocation("s3://warehouse/examples/fokko2"),
 	)
 	r.Require().NoError(err)
 
@@ -871,9 +873,8 @@ func (r *RestCatalogSuite) TestCreateTable409() {
 	_, err = cat.CreateTable(context.Background(), 
 		catalog.ToRestIdentifier(namespace, tableName),
 		schema,
-		iceberg.PartitionSpec{},
-		"s3://warehouse/examples/existingtable",
-		nil)
+		catalog.WithPartitionSpec(&iceberg.PartitionSpec{}),
+		catalog.WithLocation("s3://warehouse/examples/existingtable"))
 	
 	r.ErrorIs(err, catalog.ErrTableAlreadyExists)
 	r.ErrorContains(err, "Table already exists: examples.existingtable")
