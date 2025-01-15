@@ -21,6 +21,8 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
+	"maps"
 	"net/url"
 
 	"github.com/apache/iceberg-go"
@@ -45,6 +47,9 @@ var (
 	ErrNoSuchTable            = errors.New("table does not exist")
 	ErrNoSuchNamespace        = errors.New("namespace does not exist")
 	ErrNamespaceAlreadyExists = errors.New("namespace already exists")
+	ErrTableAlreadyExists     = errors.New("table already exists")
+	ErrCatalogNotFound        = errors.New("catalog type not registered")
+	ErrNamespaceNotEmpty      = errors.New("namespace is not empty")
 )
 
 // WithAwsConfig sets the AWS configuration for the catalog.
@@ -156,7 +161,7 @@ type Catalog interface {
 	ListTables(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error)
 	// LoadTable loads a table from the catalog and returns a Table with the metadata.
 	LoadTable(ctx context.Context, identifier table.Identifier, props iceberg.Properties) (*table.Table, error)
-	// DropTable tells the catalog to drop the table entirely
+	// DropTable tells the catalog to drop the table entirely.
 	DropTable(ctx context.Context, identifier table.Identifier) error
 	// RenameTable tells the catalog to rename a given table by the identifiers
 	// provided, and then loads and returns the destination table
@@ -193,4 +198,51 @@ func TableNameFromIdent(ident table.Identifier) string {
 
 func NamespaceFromIdent(ident table.Identifier) table.Identifier {
 	return ident[:len(ident)-1]
+}
+
+func checkForOverlap(removals []string, updates iceberg.Properties) error {
+	overlap := []string{}
+	for _, key := range removals {
+		if _, ok := updates[key]; ok {
+			overlap = append(overlap, key)
+		}
+	}
+	if len(overlap) > 0 {
+		return fmt.Errorf("conflict between removals and updates for keys: %v", overlap)
+	}
+	return nil
+}
+
+func getUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals []string, updates iceberg.Properties) (iceberg.Properties, PropertiesUpdateSummary, error) {
+	if err := checkForOverlap(removals, updates); err != nil {
+		return nil, PropertiesUpdateSummary{}, err
+	}
+
+	var (
+		updatedProps = maps.Clone(currentProps)
+		removed      = make([]string, 0, len(removals))
+		updated      = make([]string, 0, len(updates))
+	)
+
+	for _, key := range removals {
+		if _, exists := updatedProps[key]; exists {
+			delete(updatedProps, key)
+			removed = append(removed, key)
+		}
+	}
+
+	for key, value := range updates {
+		if updatedProps[key] != value {
+			updated = append(updated, key)
+			updatedProps[key] = value
+		}
+	}
+
+	summary := PropertiesUpdateSummary{
+		Removed: removed,
+		Updated: updated,
+		Missing: iceberg.Difference(removals, removed),
+	}
+
+	return updatedProps, summary, nil
 }

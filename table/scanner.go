@@ -29,6 +29,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
+	"golang.org/x/sync/errgroup"
 )
 
 const ScanNoLimit = -1
@@ -81,6 +82,32 @@ type partitionRecord []any
 func (p partitionRecord) Size() int            { return len(p) }
 func (p partitionRecord) Get(pos int) any      { return p[pos] }
 func (p partitionRecord) Set(pos int, val any) { p[pos] = val }
+
+// manifestEntries holds the data and positional delete entries read from manifests.
+type manifestEntries struct {
+	dataEntries             []iceberg.ManifestEntry
+	positionalDeleteEntries []iceberg.ManifestEntry
+	mu                      sync.Mutex
+}
+
+func newManifestEntries() *manifestEntries {
+	return &manifestEntries{
+		dataEntries:             make([]iceberg.ManifestEntry, 0),
+		positionalDeleteEntries: make([]iceberg.ManifestEntry, 0),
+	}
+}
+
+func (m *manifestEntries) addDataEntry(e iceberg.ManifestEntry) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.dataEntries = append(m.dataEntries, e)
+}
+
+func (m *manifestEntries) addPositionalDeleteEntry(e iceberg.ManifestEntry) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.positionalDeleteEntries = append(m.positionalDeleteEntries, e)
+}
 
 func getPartitionRecord(dataFile iceberg.DataFile, partitionType *iceberg.StructType) partitionRecord {
 	partitionData := dataFile.Partition()
@@ -259,129 +286,119 @@ func matchDeletesToData(entry iceberg.ManifestEntry, positionalDeletes []iceberg
 	return out, nil
 }
 
-func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
+// fetchPartitionSpecFilteredManifests retrieves the table's current snapshot,
+// fetches its manifest files, and applies partition-spec filters to remove irrelevant manifests.
+func (scan *Scan) fetchPartitionSpecFilteredManifests() ([]iceberg.ManifestFile, error) {
 	snap := scan.Snapshot()
 	if snap == nil {
 		return nil, nil
 	}
 
-	// step 1: filter manifests using partition summaries
-	// the filter depends on the partition spec used to write the manifest file
-	// so create a cache of filters for each spec id
-	manifestEvaluators := newKeyDefaultMapWrapErr(scan.buildManifestEvaluator)
+	// Fetch all manifests for the current snapshot.
 	manifestList, err := snap.Manifests(scan.io)
 	if err != nil {
 		return nil, err
 	}
 
-	// remove any manifests that we don't need to use
+	// Build per-spec manifest evaluators and filter out irrelevant manifests.
+	manifestEvaluators := newKeyDefaultMapWrapErr(scan.buildManifestEvaluator)
 	manifestList = slices.DeleteFunc(manifestList, func(mf iceberg.ManifestFile) bool {
 		eval := manifestEvaluators.Get(int(mf.PartitionSpecID()))
 		use, err := eval(mf)
 		return !use || err != nil
 	})
 
-	// step 2: filter the data files in each manifest
-	// this filter depends on the partition spec used to write the manifest file
-	partitionEvaluators := newKeyDefaultMap(scan.buildPartitionEvaluator)
+	return manifestList, nil
+}
+
+// collectManifestEntries concurrently opens manifests, applies partition and metrics
+// filters, and accumulates both data entries and positional-delete entries.
+func (scan *Scan) collectManifestEntries(
+	ctx context.Context,
+	manifestList []iceberg.ManifestFile,
+) (*manifestEntries, error) {
 	metricsEval, err := newInclusiveMetricsEvaluator(
-		scan.metadata.CurrentSchema(), scan.rowFilter, scan.caseSensitive, scan.options["include_empty_files"] == "true")
+		scan.metadata.CurrentSchema(),
+		scan.rowFilter,
+		scan.caseSensitive,
+		scan.options["include_empty_files"] == "true",
+	)
 	if err != nil {
 		return nil, err
 	}
 
 	minSeqNum := minSequenceNum(manifestList)
-	dataEntries := make([]iceberg.ManifestEntry, 0)
-	positionalDeleteEntries := make([]iceberg.ManifestEntry, 0)
+	concurrencyLimit := min(scan.concurrency, len(manifestList))
 
-	nworkers := min(scan.concurrency, len(manifestList))
-	var wg sync.WaitGroup
+	entries := newManifestEntries()
+	g, _ := errgroup.WithContext(ctx)
+	g.SetLimit(concurrencyLimit)
 
-	manifestChan := make(chan iceberg.ManifestFile, len(manifestList))
-	entryChan := make(chan []iceberg.ManifestEntry, 20)
+	partitionEvaluators := newKeyDefaultMap(scan.buildPartitionEvaluator)
 
-	ctx, cancel := context.WithCancelCause(ctx)
-	for i := 0; i < nworkers; i++ {
-		wg.Add(1)
+	for _, mf := range manifestList {
+		if !scan.checkSequenceNumber(minSeqNum, mf) {
+			continue
+		}
 
-		go func() {
-			defer wg.Done()
-
-			for {
-				select {
-				case m, ok := <-manifestChan:
-					if !ok {
-						return
-					}
-
-					if !scan.checkSequenceNumber(minSeqNum, m) {
-						continue
-					}
-
-					entries, err := openManifest(scan.io, m,
-						partitionEvaluators.Get(int(m.PartitionSpecID())), metricsEval)
-					if err != nil {
-						cancel(err)
-						break
-					}
-
-					entryChan <- entries
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-	}
-
-	go func() {
-		wg.Wait()
-		close(entryChan)
-	}()
-
-	for _, m := range manifestList {
-		manifestChan <- m
-	}
-	close(manifestChan)
-
-Loop:
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, context.Cause(ctx)
-		case entries, ok := <-entryChan:
-			if !ok {
-				// closed!
-				break Loop
+		g.Go(func() error {
+			partEval := partitionEvaluators.Get(int(mf.PartitionSpecID()))
+			manifestEntries, err := openManifest(scan.io, mf, partEval, metricsEval)
+			if err != nil {
+				return err
 			}
 
-			for _, e := range entries {
+			for _, e := range manifestEntries {
 				df := e.DataFile()
 				switch df.ContentType() {
 				case iceberg.EntryContentData:
-					dataEntries = append(dataEntries, e)
+					entries.addDataEntry(e)
 				case iceberg.EntryContentPosDeletes:
-					positionalDeleteEntries = append(positionalDeleteEntries, e)
+					entries.addPositionalDeleteEntry(e)
 				case iceberg.EntryContentEqDeletes:
-					return nil, fmt.Errorf("iceberg-go does not yet support equality deletes")
+					return fmt.Errorf("iceberg-go does not yet support equality deletes")
 				default:
-					return nil, fmt.Errorf("%w: unknown DataFileContent type (%s): %s",
+					return fmt.Errorf("%w: unknown DataFileContent type (%s): %s",
 						ErrInvalidMetadata, df.ContentType(), e)
 				}
 			}
-		}
+			return nil
+		})
 	}
 
-	slices.SortFunc(positionalDeleteEntries, func(a, b iceberg.ManifestEntry) int {
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	return entries, nil
+}
+
+// PlanFiles orchestrates the fetching and filtering of manifests, and then
+// building a list of FileScanTasks that match the current Scan criteria.
+func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
+	// Step 1: Retrieve filtered manifests based on snapshot and partition specs.
+	manifestList, err := scan.fetchPartitionSpecFilteredManifests()
+	if err != nil || len(manifestList) == 0 {
+		return nil, err
+	}
+
+	// Step 2: Read manifest entries concurrently, accumulating data and positional deletes.
+	entries, err := scan.collectManifestEntries(ctx, manifestList)
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 3: Sort positional deletes and match them to data files.
+	slices.SortFunc(entries.positionalDeleteEntries, func(a, b iceberg.ManifestEntry) int {
 		return cmp.Compare(a.SequenceNum(), b.SequenceNum())
 	})
 
-	results := make([]FileScanTask, 0)
-	for _, e := range dataEntries {
-		deleteFiles, err := matchDeletesToData(e, positionalDeleteEntries)
+	results := make([]FileScanTask, 0, len(entries.dataEntries))
+	for _, e := range entries.dataEntries {
+		deleteFiles, err := matchDeletesToData(e, entries.positionalDeleteEntries)
 		if err != nil {
 			return nil, err
 		}
-
 		results = append(results, FileScanTask{
 			File:        e.DataFile(),
 			DeleteFiles: deleteFiles,
