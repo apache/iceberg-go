@@ -641,6 +641,32 @@ func TestPruneNilSchema(t *testing.T) {
 	assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 }
 
+func TestAssignFreshSchemaIDs(t *testing.T) {
+	startID := 100
+	sc, err := iceberg.AssignFreshSchemaIDs(tableSchemaNested, func() int {
+		startID++
+		return startID
+	})
+	require.NoError(t, err)
+	require.NotNil(t, sc)
+
+	startID = 100
+	var checkID func(iceberg.NestedField)
+	checkID = func(f iceberg.NestedField) {
+		startID++
+		assert.Equal(t, startID, f.ID)
+		if nested, ok := f.Type.(iceberg.NestedType); ok {
+			for _, nf := range nested.Fields() {
+				checkID(nf)
+			}
+		}
+	}
+
+	for _, f := range sc.Fields() {
+		checkID(f)
+	}
+}
+
 func TestSchemaRoundTrip(t *testing.T) {
 	data, err := json.Marshal(tableSchemaNested)
 	require.NoError(t, err)

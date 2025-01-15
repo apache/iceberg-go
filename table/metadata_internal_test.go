@@ -491,3 +491,118 @@ func TestV1WriteMetadataToV2(t *testing.T) {
 	assert.NotContains(t, rawData, "schema")
 	assert.NotContains(t, rawData, "partition-spec")
 }
+
+func TestNewMetadataWithExplicitV1Format(t *testing.T) {
+	schema := iceberg.NewSchemaWithIdentifiers(10,
+		[]int{22},
+		iceberg.NestedField{ID: 10, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: false},
+		iceberg.NestedField{ID: 22, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 33, Name: "baz", Type: iceberg.PrimitiveTypes.Bool, Required: false},
+	)
+
+	partitionSpec := iceberg.NewPartitionSpecID(10,
+		iceberg.PartitionField{SourceID: 22, FieldID: 1022, Transform: iceberg.IdentityTransform{}, Name: "bar"})
+
+	sortOrder := SortOrder{
+		OrderID: 10,
+		Fields: []SortField{{
+			SourceID:  10,
+			Transform: iceberg.IdentityTransform{},
+			Direction: SortASC, NullOrder: NullsLast}}}
+
+	actual, err := NewMetadata(schema, &partitionSpec, sortOrder, "s3://some_v1_location/", iceberg.Properties{"format-version": "1"})
+	require.NoError(t, err)
+
+	expectedSchema := iceberg.NewSchemaWithIdentifiers(0, []int{2},
+		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool})
+
+	expectedSpec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{SourceID: 2, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "bar"})
+
+	expectedSortOrder := SortOrder{
+		OrderID: 1,
+		Fields: []SortField{{
+			SourceID: 1, Transform: iceberg.IdentityTransform{},
+			Direction: SortASC, NullOrder: NullsLast}}}
+
+	lastPartitionID := 1000
+	expected := &metadataV1{
+		commonMetadata: commonMetadata{
+			Loc:                "s3://some_v1_location/",
+			UUID:               actual.TableUUID(),
+			LastUpdatedMS:      actual.LastUpdatedMillis(),
+			LastColumnId:       3,
+			SchemaList:         []*iceberg.Schema{expectedSchema},
+			CurrentSchemaID:    0,
+			Specs:              []iceberg.PartitionSpec{expectedSpec},
+			DefaultSpecID:      0,
+			LastPartitionID:    &lastPartitionID,
+			SortOrderList:      []SortOrder{expectedSortOrder},
+			DefaultSortOrderID: 1,
+			FormatVersion:      1,
+		},
+		Schema:    expectedSchema,
+		Partition: slices.Collect(expectedSpec.Fields()),
+	}
+
+	assert.Truef(t, expected.Equals(actual), "expected: %s\ngot: %s", expected, actual)
+}
+
+func TestNewMetadataV2Format(t *testing.T) {
+	schema := iceberg.NewSchemaWithIdentifiers(10,
+		[]int{22},
+		iceberg.NestedField{ID: 10, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: false},
+		iceberg.NestedField{ID: 22, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 33, Name: "baz", Type: iceberg.PrimitiveTypes.Bool, Required: false},
+	)
+
+	partitionSpec := iceberg.NewPartitionSpecID(10,
+		iceberg.PartitionField{SourceID: 22, FieldID: 1022, Transform: iceberg.IdentityTransform{}, Name: "bar"})
+
+	sortOrder := SortOrder{
+		OrderID: 10,
+		Fields: []SortField{{
+			SourceID:  10,
+			Transform: iceberg.IdentityTransform{},
+			Direction: SortASC, NullOrder: NullsLast}}}
+
+	tableUUID := uuid.New()
+
+	actual, err := NewMetadataWithUUID(schema, &partitionSpec, sortOrder, "s3://some_v1_location/", nil, tableUUID)
+	require.NoError(t, err)
+
+	expectedSchema := iceberg.NewSchemaWithIdentifiers(0, []int{2},
+		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool})
+
+	expectedSpec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{SourceID: 2, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "bar"})
+
+	expectedSortOrder := SortOrder{
+		OrderID: 1,
+		Fields: []SortField{{
+			SourceID: 1, Transform: iceberg.IdentityTransform{},
+			Direction: SortASC, NullOrder: NullsLast}}}
+
+	lastPartitionID := 1000
+	expected := &metadataV2{
+		commonMetadata: commonMetadata{
+			Loc:                "s3://some_v1_location/",
+			UUID:               tableUUID,
+			LastUpdatedMS:      actual.LastUpdatedMillis(),
+			LastColumnId:       3,
+			SchemaList:         []*iceberg.Schema{expectedSchema},
+			CurrentSchemaID:    0,
+			Specs:              []iceberg.PartitionSpec{expectedSpec},
+			DefaultSpecID:      0,
+			LastPartitionID:    &lastPartitionID,
+			SortOrderList:      []SortOrder{expectedSortOrder},
+			DefaultSortOrderID: 1,
+			FormatVersion:      2,
+		}}
+
+	assert.Truef(t, expected.Equals(actual), "expected: %s\ngot: %s", expected, actual)
+}

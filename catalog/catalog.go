@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"maps"
 	"net/url"
+	"strings"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
@@ -156,6 +157,10 @@ type Catalog interface {
 	// CatalogType returns the type of the catalog.
 	CatalogType() CatalogType
 
+	// CreateTable creates a new iceberg table in the catalog using the provided identifier
+	// and schema. Options can be used to optionally provide location, partition spec, sort order,
+	// and custom properties.
+	CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...createTableOpt) (*table.Table, error)
 	// ListTables returns a list of table identifiers in the catalog, with the returned
 	// identifiers containing the information required to load the table via that catalog.
 	ListTables(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error)
@@ -217,7 +222,6 @@ func getUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals [
 	if err := checkForOverlap(removals, updates); err != nil {
 		return nil, PropertiesUpdateSummary{}, err
 	}
-
 	var (
 		updatedProps = maps.Clone(currentProps)
 		removed      = make([]string, 0, len(removals))
@@ -243,6 +247,38 @@ func getUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals [
 		Updated: updated,
 		Missing: iceberg.Difference(removals, removed),
 	}
-
 	return updatedProps, summary, nil
+}
+
+type createTableOpt func(*createTableCfg)
+
+type createTableCfg struct {
+	location      string
+	partitionSpec *iceberg.PartitionSpec
+	sortOrder     table.SortOrder
+	properties    iceberg.Properties
+}
+
+func WithLocation(location string) createTableOpt {
+	return func(cfg *createTableCfg) {
+		cfg.location = strings.TrimRight(location, "/")
+	}
+}
+
+func WithPartitionSpec(spec *iceberg.PartitionSpec) createTableOpt {
+	return func(cfg *createTableCfg) {
+		cfg.partitionSpec = spec
+	}
+}
+
+func WithSortOrder(order table.SortOrder) createTableOpt {
+	return func(cfg *createTableCfg) {
+		cfg.sortOrder = order
+	}
+}
+
+func WithProperties(props iceberg.Properties) createTableOpt {
+	return func(cfg *createTableCfg) {
+		cfg.properties = props
+	}
 }
