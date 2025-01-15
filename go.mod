@@ -24,8 +24,8 @@ toolchain go1.23.2
 require (
 	github.com/apache/arrow-go/v18 v18.1.0
 	github.com/aws/aws-sdk-go-v2 v1.32.8
-	github.com/aws/aws-sdk-go-v2/config v1.28.10
-	github.com/aws/aws-sdk-go-v2/credentials v1.17.51
+	github.com/aws/aws-sdk-go-v2/config v1.28.11
+	github.com/aws/aws-sdk-go-v2/credentials v1.17.52
 	github.com/aws/aws-sdk-go-v2/service/glue v1.105.1
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.72.2
 	github.com/aws/smithy-go v1.22.1
@@ -70,7 +70,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.18.8 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.24.9 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.28.8 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sts v1.33.6 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sts v1.33.7 // indirect
 	github.com/containerd/console v1.0.3 // indirect
 	github.com/creasty/defaults v1.8.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
