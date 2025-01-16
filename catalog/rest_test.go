@@ -757,6 +757,44 @@ func (r *RestCatalogSuite) TestCreateTable200() {
 	r.Equal(table.UnsortedSortOrder, tbl.SortOrder())
 }
 
+func (r *RestCatalogSuite) TestCreateTable409() {
+    // Mock the create table endpoint with 409 response
+    r.mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
+        r.Require().Equal(http.MethodPost, req.Method)
+
+        for k, v := range TestHeaders {
+            r.Equal(v, req.Header.Values(k))
+        }
+
+        w.WriteHeader(http.StatusConflict)
+        errorResponse := map[string]interface{}{
+            "error": map[string]interface{}{
+                "message": "Table already exists: fokko.already_exists in warehouse 8bcb0838-50fc-472d-9ddb-8feb89ef5f1e",
+                "type":    "AlreadyExistsException",
+                "code":    409,
+            },
+        }
+        json.NewEncoder(w).Encode(errorResponse)
+    })
+
+    cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+    r.Require().NoError(err)
+
+    // Attempt to create table with properties
+    _, err = cat.CreateTable(
+        context.Background(),
+        catalog.ToRestIdentifier("fokko", "fokko2"),
+        tableSchemaSimple,
+        catalog.WithProperties(map[string]string{"owner": "fokko"}),
+    )
+
+    // Verify error
+    r.Error(err)
+    r.Contains(err.Error(), "Table already exists")
+    r.ErrorIs(err, catalog.ErrTableAlreadyExists)
+}
+
+
 func (r *RestCatalogSuite) TestLoadTable200() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/tables/table", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodGet, req.Method)
@@ -874,6 +912,116 @@ func (r *RestCatalogSuite) TestLoadTable200() {
 			},
 		},
 	}))
+}
+
+func (r *RestCatalogSuite) TestRenameTable200() {
+    // Mock the rename table endpoint
+    r.mux.HandleFunc("/v1/tables/rename", func(w http.ResponseWriter, req *http.Request) {
+        r.Require().Equal(http.MethodPost, req.Method)
+
+        for k, v := range TestHeaders {
+            r.Equal(v, req.Header.Values(k))
+        }
+
+        var payload struct {
+            From struct {
+                Namespace []string `json:"namespace"`
+                Name     string   `json:"name"`
+            } `json:"from"`
+            To struct {
+                Namespace []string `json:"namespace"`
+                Name     string   `json:"name"`
+            } `json:"to"`
+        }
+        r.NoError(json.NewDecoder(req.Body).Decode(&payload))
+        r.Equal([]string{"fokko"}, payload.From.Namespace)
+        r.Equal("source", payload.From.Name)
+        r.Equal([]string{"fokko"}, payload.To.Namespace)
+        r.Equal("destination", payload.To.Name)
+
+        w.WriteHeader(http.StatusOK)
+    })
+
+    // Mock the get table endpoint for loading the renamed table
+    r.mux.HandleFunc("/v1/namespaces/fokko/tables/destination", func(w http.ResponseWriter, req *http.Request) {
+        r.Require().Equal(http.MethodGet, req.Method)
+
+        for k, v := range TestHeaders {
+            r.Equal(v, req.Header.Values(k))
+        }
+
+        w.Write([]byte(createTableRestExample))
+    })
+
+    cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+    r.Require().NoError(err)
+
+    fromIdent := catalog.ToRestIdentifier("fokko", "source")
+    toIdent := catalog.ToRestIdentifier("fokko", "destination")
+
+    renamedTable, err := cat.RenameTable(context.Background(), fromIdent, toIdent)
+    r.Require().NoError(err)
+
+    r.Equal(catalog.ToRestIdentifier("rest", "fokko", "destination"), renamedTable.Identifier())
+    r.Equal("s3://warehouse/database/table/metadata.json", renamedTable.MetadataLocation())
+    r.EqualValues(1, renamedTable.Metadata().Version())
+    r.Equal("bf289591-dcc0-4234-ad4f-5c3eed811a29", renamedTable.Metadata().TableUUID().String())
+    r.EqualValues(1657810967051, renamedTable.Metadata().LastUpdatedMillis())
+    r.Equal(3, renamedTable.Metadata().LastColumnID())
+    r.Zero(renamedTable.Schema().ID)
+    r.Zero(renamedTable.Metadata().DefaultPartitionSpec())
+    r.Equal(999, *renamedTable.Metadata().LastPartitionSpecID())
+    r.Equal(table.UnsortedSortOrder, renamedTable.SortOrder())
+}
+
+
+func (r *RestCatalogSuite) TestDropTable204() {
+    // Mock the drop table endpoint
+    r.mux.HandleFunc("/v1/namespaces/fokko/tables/table", func(w http.ResponseWriter, req *http.Request) {
+        r.Require().Equal(http.MethodDelete, req.Method)
+
+        for k, v := range TestHeaders {
+            r.Equal(v, req.Header.Values(k))
+        }
+
+        // Return 204 No Content for successful deletion
+        w.WriteHeader(http.StatusNoContent)
+    })
+
+    cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+    r.Require().NoError(err)
+
+    err = cat.DropTable(context.Background(), catalog.ToRestIdentifier("fokko", "table"))
+    r.NoError(err)
+}
+
+func (r *RestCatalogSuite) TestDropTable404() {
+    // Mock the drop table endpoint with 404 response
+    r.mux.HandleFunc("/v1/namespaces/fokko/tables/table", func(w http.ResponseWriter, req *http.Request) {
+        r.Require().Equal(http.MethodDelete, req.Method)
+
+        for k, v := range TestHeaders {
+            r.Equal(v, req.Header.Values(k))
+        }
+
+        w.WriteHeader(http.StatusNotFound)
+        errorResponse := map[string]interface{}{
+            "error": map[string]interface{}{
+                "message": "Table does not exist: fokko.table",
+                "type":    "NoSuchTableException",
+                "code":    404,
+            },
+        }
+        json.NewEncoder(w).Encode(errorResponse)
+    })
+
+    cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+    r.Require().NoError(err)
+
+    err = cat.DropTable(context.Background(), catalog.ToRestIdentifier("fokko", "table"))
+    r.Error(err)
+    r.ErrorIs(err, catalog.ErrNoSuchTable)
+    r.ErrorContains(err, "Table does not exist: fokko.table")
 }
 
 type RestTLSCatalogSuite struct {
