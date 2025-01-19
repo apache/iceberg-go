@@ -23,7 +23,7 @@ toolchain go1.23.2
 
 require (
 	github.com/apache/arrow-go/v18 v18.1.0
-	github.com/aws/aws-sdk-go-v2 v1.32.8
+	github.com/aws/aws-sdk-go-v2 v1.33.0
 	github.com/aws/aws-sdk-go-v2/config v1.28.11
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.52
 	github.com/aws/aws-sdk-go-v2/service/glue v1.105.1
