@@ -395,7 +395,7 @@ func properties(output Output, cat catalog.Catalog, args propCmd) {
 
 func mergeConf(fileConf *config.CatalogConfig, resConfig *Config) {
 	if len(resConfig.Catalog) == 0 {
-		resConfig.Catalog = fileConf.Catalog
+		resConfig.Catalog = fileConf.CatalogType
 	}
 	if len(resConfig.URI) == 0 {
 		resConfig.URI = fileConf.URI
