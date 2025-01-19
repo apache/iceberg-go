@@ -24,18 +24,21 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const cfgFile = ".iceberg-go.yaml"
+const (
+	cfgFile = ".iceberg-go.yaml"
+)
 
 type Config struct {
-	Catalogs map[string]CatalogConfig `yaml:"catalog"`
+	DefaultCatalog string                   `yaml:"default-catalog"`
+	Catalogs       map[string]CatalogConfig `yaml:"catalog"`
 }
 
 type CatalogConfig struct {
-	Catalog    string `yaml:"catalog"`
-	URI        string `yaml:"uri"`
-	Output     string `yaml:"output"`
-	Credential string `yaml:"credential"`
-	Warehouse  string `yaml:"warehouse"`
+	CatalogType string `yaml:"type"`
+	URI         string `yaml:"uri"`
+	Output      string `yaml:"output"`
+	Credential  string `yaml:"credential"`
+	Warehouse   string `yaml:"warehouse"`
 }
 
 func LoadConfig(configPath string) []byte {
@@ -69,3 +72,23 @@ func ParseConfig(file []byte, catalogName string) *CatalogConfig {
 	}
 	return &res
 }
+
+func fromConfigFiles() Config {
+	dir := os.Getenv("GOICEBERG_HOME")
+	if dir != "" {
+		dir = filepath.Join(dir, cfgFile)
+	}
+
+	var cfg Config
+	if err := yaml.Unmarshal(LoadConfig(dir), &cfg); err != nil {
+		return cfg
+	}
+
+	if cfg.DefaultCatalog == "" {
+		cfg.DefaultCatalog = "default"
+	}
+
+	return cfg
+}
+
+var EnvConfig = fromConfigFiles()
