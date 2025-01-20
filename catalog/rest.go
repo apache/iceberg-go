@@ -74,8 +74,8 @@ var (
 )
 
 func init() {
-	reg := RegistrarFunc(func(endpoint string, p iceberg.Properties) (Catalog, error) {
-		return newRestCatalogFromProps(endpoint, p.Get("uri", endpoint), p)
+	reg := RegistrarFunc(func(name string, p iceberg.Properties) (Catalog, error) {
+		return newRestCatalogFromProps(name, p.Get("uri", ""), p)
 	})
 
 	Register(string(REST), reg)
@@ -595,6 +595,9 @@ func (r *RestCatalog) fetchConfig(opts *options) (*options, error) {
 	}
 
 	cfg := rsp.Defaults
+	if cfg == nil {
+		cfg = iceberg.Properties{}
+	}
 	maps.Copy(cfg, toProps(opts))
 	maps.Copy(cfg, rsp.Overrides)
 
@@ -613,6 +616,7 @@ func (r *RestCatalog) fetchConfig(opts *options) (*options, error) {
 	return o, nil
 }
 
+func (r *RestCatalog) Name() string             { return r.name }
 func (r *RestCatalog) CatalogType() CatalogType { return REST }
 
 func checkValidNamespace(ident table.Identifier) error {

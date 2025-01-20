@@ -26,6 +26,7 @@ import (
 	"sync"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/config"
 )
 
 type registry map[string]Registrar
@@ -97,13 +98,23 @@ func GetRegisteredCatalogs() []string {
 // easier catalog loading but also to allow for custom catalog implementations to
 // be registered and loaded external to this module.
 //
-// The URI is used to determine the catalog type by first checking if it contains
-// the string "://" indicating the presence of a scheme. If so, the scheme is used
-// to lookup the registered catalog. i.e. "glue://..." would return the Glue catalog
-// implementation, passing the URI and properties to NewGlueCatalog. If no scheme is
-// present, then the URI is used as-is to lookup the catalog factory function.
+// The name parameter is used to lookup the catalog configuration, if one exists,
+// that was loaded from the configuration file, ".iceberg-go.yaml". By default,
+// the config file is loaded from the user's home directory, but the directory can
+// be changed by setting the GOICEBERG_HOME environment variable to the path of the
+// directory containing the ".iceberg-go.yaml" file. The name will also be passed to
+// the registered GetCatalog function.
 //
-// Currently the following catalogs are registered by default:
+// The catalog registry will be checked for the catalog's type. The "type" property
+// is used first to search the catalog registry, with the passed properties taking
+// priority over any loaded config.
+//
+// If there is no "type" in the configuration and no "type" in the passed in properties,
+// then the "uri" property is used to lookup the catalog by checking the scheme. Again,
+// if there is a "uri" key set in the passed in "props" it will take priority over the
+// configuration.
+//
+// Currently the following catalog types are registered by default:
 //
 //   - "glue" for AWS Glue Data Catalog, the rest of the URI is ignored, all configuration
 //     should be provided using the properties. "glue.region", "glue.endpoint",
@@ -114,16 +125,33 @@ func GetRegisteredCatalogs() []string {
 //     as the REST endpoint, otherwise the URI is used as the endpoint. The REST catalog also
 //     registers "http" and "https" so that Load with an http/s URI will automatically
 //     load the REST Catalog.
-func Load(catalogURI string, props iceberg.Properties) (Catalog, error) {
-	var catalogType string
-	if strings.Contains(catalogURI, "://") {
-		parsed, err := url.Parse(catalogURI)
-		if err != nil {
-			return nil, err
+func Load(name string, props iceberg.Properties) (Catalog, error) {
+	if name == "" {
+		name = config.EnvConfig.DefaultCatalog
+	}
+
+	conf := config.EnvConfig.Catalogs[name]
+	if props == nil {
+		props = iceberg.Properties{
+			"uri":        conf.URI,
+			"credential": conf.Credential,
+			"warehouse":  conf.Warehouse,
 		}
-		catalogType = parsed.Scheme
 	} else {
-		catalogType = catalogURI
+		props["uri"] = props.Get("uri", conf.URI)
+		props["credential"] = props.Get("credential", conf.Credential)
+		props["warehouse"] = props.Get("warehouse", conf.Warehouse)
+	}
+
+	catalogType := props.Get("type", conf.CatalogType)
+	if catalogType == "" {
+		if strings.Contains(props["uri"], "://") {
+			uri, err := url.Parse(props["uri"])
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse catalog URI: %w", err)
+			}
+			catalogType = uri.Scheme
+		}
 	}
 
 	cat, ok := defaultRegistry.get(catalogType)
@@ -131,5 +159,5 @@ func Load(catalogURI string, props iceberg.Properties) (Catalog, error) {
 		return nil, fmt.Errorf("%w: %s", ErrCatalogNotFound, catalogType)
 	}
 
-	return cat.GetCatalog(catalogURI, props)
+	return cat.GetCatalog(name, props)
 }
