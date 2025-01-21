@@ -161,6 +161,8 @@ type Catalog interface {
 	// and schema. Options can be used to optionally provide location, partition spec, sort order,
 	// and custom properties.
 	CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...createTableOpt) (*table.Table, error)
+	// CommitTable commits the table metadata and updates to the catalog, returning the new metadata
+	CommitTable(context.Context, *table.Table, []table.Requirement, []table.Update) (table.Metadata, string, error)
 	// ListTables returns a list of table identifiers in the catalog, with the returned
 	// identifiers containing the information required to load the table via that catalog.
 	ListTables(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error)

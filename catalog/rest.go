@@ -721,6 +721,37 @@ func (r *RestCatalog) CreateTable(ctx context.Context, identifier table.Identifi
 	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, config)
 }
 
+func (r *RestCatalog) CommitTable(ctx context.Context, tbl *table.Table, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
+	ident := tbl.Identifier()
+
+	ns, tblName, err := splitIdentForPath(ident)
+	if err != nil {
+		return nil, "", err
+	}
+
+	restIdentifier := identifier{
+		Namespace: NamespaceFromIdent(ident),
+		Name:      tblName,
+	}
+
+	type payload struct {
+		Identifier   identifier          `json:"identifier"`
+		Requirements []table.Requirement `json:"requirements"`
+		Updates      []table.Update      `json:"updates"`
+	}
+
+	ret, err := doPost[payload, commitTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables", tblName},
+		payload{Identifier: restIdentifier, Requirements: requirements, Updates: updates}, r.cl,
+		map[int]error{http.StatusNotFound: ErrNoSuchTable, http.StatusConflict: ErrCommitFailed})
+	if err != nil {
+		return nil, "", err
+	}
+
+	config := maps.Clone(r.props)
+	maps.Copy(config, ret.Metadata.Properties())
+	return ret.Metadata, ret.MetadataLoc, nil
+}
+
 func (r *RestCatalog) RegisterTable(ctx context.Context, identifier table.Identifier, metadataLoc string) (*table.Table, error) {
 	ns, tbl, err := splitIdentForPath(identifier)
 	if err != nil {

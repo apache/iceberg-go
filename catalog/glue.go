@@ -224,6 +224,10 @@ func (c *GlueCatalog) CreateTable(ctx context.Context, identifier table.Identifi
 	panic("create table not implemented for Glue Catalog")
 }
 
+func (c *GlueCatalog) CommitTable(context.Context, *table.Table, []table.Requirement, []table.Update) (table.Metadata, string, error) {
+	panic("commit table not implemented for Glue Catalog")
+}
+
 // DropTable deletes an Iceberg table from the Glue catalog.
 func (c *GlueCatalog) DropTable(ctx context.Context, identifier table.Identifier) error {
 	database, tableName, err := identifierToGlueTable(identifier)
