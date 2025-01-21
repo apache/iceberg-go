@@ -88,6 +88,76 @@ func TestCatalogRegistry(t *testing.T) {
 	}, catalog.GetRegisteredCatalogs())
 }
 
+func TestRegistryPanic(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			assert.Equal(t, "catalog: RegisterCatalog catalog factory is nil", r)
+		} else {
+			t.Fatalf("expect a panic but did not get one")
+		}
+
+	}()
+	catalog.Register("foobar", nil)
+	t.Fatalf("expect a panic but Register function did not")
+}
+
+func TestCatalogWithEmptyName(t *testing.T) {
+	config.EnvConfig.DefaultCatalog = "test-default"
+	config.EnvConfig.Catalogs = map[string]config.CatalogConfig{
+		"test-default": {
+			URI:         "http://localhost:8181/",
+			Credential:  "default-credential",
+			Warehouse:   "/default/warehouse",
+			CatalogType: "mock",
+		},
+	}
+	catalog.Register("mock", catalog.RegistrarFunc(func(name string, props iceberg.Properties) (catalog.Catalog, error) {
+		// Ensure the correct name and properties are passed
+		assert.Equal(t, "test-default", name)
+		assert.Equal(t, "http://localhost:8181/", props.Get("uri", ""))
+		assert.Equal(t, "default-credential", props.Get("credential", ""))
+		assert.Equal(t, "/default/warehouse", props.Get("warehouse", ""))
+		return nil, nil
+	}))
+	c, err := catalog.Load("", nil)
+	assert.Nil(t, c)
+	assert.NoError(t, err)
+	assert.ElementsMatch(t, []string{
+		"rest",
+		"http",
+		"https",
+		"glue",
+		"mock",
+	}, catalog.GetRegisteredCatalogs())
+	catalog.Unregister("mock")
+
+}
+
+func TestCatalogLoadInvalidURI(t *testing.T) {
+	config.EnvConfig.DefaultCatalog = "default"
+	config.EnvConfig.Catalogs = map[string]config.CatalogConfig{
+		"default": {
+			URI:         "http://localhost:8181/",
+			Credential:  "default-credential",
+			Warehouse:   "/default/warehouse",
+			CatalogType: "mock",
+		},
+	}
+
+	catalog.Register("mock", catalog.RegistrarFunc(func(name string, props iceberg.Properties) (catalog.Catalog, error) {
+		return nil, nil
+	}))
+	props := iceberg.Properties{
+		"uri": "://invalid-uri", // This will cause url.Parse to fail
+	}
+	c, err := catalog.Load("mock", props)
+
+	assert.Nil(t, c)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to parse catalog URI")
+	catalog.Unregister("mock")
+}
+
 func TestRegistryFromConfig(t *testing.T) {
 	var params url.Values
 

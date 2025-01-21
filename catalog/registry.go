@@ -86,7 +86,7 @@ func Unregister(catalogType string) {
 	defaultRegistry.remove(catalogType)
 }
 
-// GetRegsisteredCatalogs returns the list of registered catalog names that can
+// GetRegisteredCatalogs returns the list of registered catalog names that can
 // be looked up via LoadCatalog.
 func GetRegisteredCatalogs() []string {
 	return defaultRegistry.getKeys()
@@ -98,7 +98,7 @@ func GetRegisteredCatalogs() []string {
 // easier catalog loading but also to allow for custom catalog implementations to
 // be registered and loaded external to this module.
 //
-// The name parameter is used to lookup the catalog configuration, if one exists,
+// The name parameter is used to look up the catalog configuration, if one exists,
 // that was loaded from the configuration file, ".iceberg-go.yaml". By default,
 // the config file is loaded from the user's home directory, but the directory can
 // be changed by setting the GOICEBERG_HOME environment variable to the path of the
@@ -110,20 +110,20 @@ func GetRegisteredCatalogs() []string {
 // priority over any loaded config.
 //
 // If there is no "type" in the configuration and no "type" in the passed in properties,
-// then the "uri" property is used to lookup the catalog by checking the scheme. Again,
-// if there is a "uri" key set in the passed in "props" it will take priority over the
+// then the "uri" property is used to loo kup the catalog by checking the scheme. Again,
+// if there is an "uri" key set in the passed in "props" it will take priority over the
 // configuration.
 //
-// Currently the following catalog types are registered by default:
+// Currently, the following catalog types are registered by default:
 //
 //   - "glue" for AWS Glue Data Catalog, the rest of the URI is ignored, all configuration
 //     should be provided using the properties. "glue.region", "glue.endpoint",
 //     "glue.max-retries", etc. Default AWS credentials are used if found, or can be
 //     overridden by setting "glue.access-key-id", "glue.secret-access-key", and "glue.session-token".
 //
-//   - "rest" for a REST API catalog, if the properties have a "uri" key, then that will be used
+//   - "rest" for a REST API catalog, if the properties have an "uri" key, then that will be used
 //     as the REST endpoint, otherwise the URI is used as the endpoint. The REST catalog also
-//     registers "http" and "https" so that Load with an http/s URI will automatically
+//     registers "http" and "https" so that Load with a http/s URI will automatically
 //     load the REST Catalog.
 func Load(name string, props iceberg.Properties) (Catalog, error) {
 	if name == "" {
