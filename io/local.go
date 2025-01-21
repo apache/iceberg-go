@@ -19,6 +19,7 @@ package io
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -30,6 +31,18 @@ func (LocalFS) Open(name string) (File, error) {
 	return os.Open(strings.TrimPrefix(name, "file://"))
 }
 
+func (LocalFS) Create(name string) (FileWriter, error) {
+	filename := strings.TrimPrefix(name, "file://")
+	if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
+		return nil, err
+	}
+	return os.Create(filename)
+}
+
+func (LocalFS) WriteFile(name string, content []byte) error {
+	return os.WriteFile(strings.TrimPrefix(name, "file://"), content, 0644)
+}
+
 func (LocalFS) Remove(name string) error {
-	return os.Remove(name)
+	return os.Remove(strings.TrimPrefix(name, "file://"))
 }
