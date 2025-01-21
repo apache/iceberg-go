@@ -106,6 +106,10 @@ func (bfs *blobFileIO) Remove(name string) error {
 	return bfs.Bucket.Delete(context.Background(), name)
 }
 
+func (bfs *blobFileIO) Create(name string) (FileWriter, error) {
+	return bfs.NewWriter(name, true, nil)
+}
+
 // NewWriter returns a Writer that writes to the blob stored at path.
 // A nil WriterOptions is treated the same as the zero value.
 //

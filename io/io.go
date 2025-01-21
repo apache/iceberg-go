@@ -74,8 +74,12 @@ type ReadFileIO interface {
 type WriteFileIO interface {
 	IO
 
+	// Create attempts to create the named file and return a writer
+	// for it.
+	Create(name string) (FileWriter, error)
+
 	// WriteFile writes p to the named file.
-	Write(name string, p []byte) error
+	WriteFile(name string, p []byte) error
 }
 
 // A File provides access to a single file. The File interface is the
