@@ -110,7 +110,7 @@ func GetRegisteredCatalogs() []string {
 // priority over any loaded config.
 //
 // If there is no "type" in the configuration and no "type" in the passed in properties,
-// then the "uri" property is used to look kup the catalog by checking the scheme. Again,
+// then the "uri" property is used to look up the catalog by checking the scheme. Again,
 // if there is an "uri" key set in the passed in "props" it will take priority over the
 // configuration.
 //
