@@ -486,8 +486,8 @@ func (r *RestCatalog) fetchAccessToken(cl *http.Client, creds string, opts *opti
 	}
 
 	scope := "catalog"
-	if opts.scope != nil {
-		scope = *opts.scope
+	if opts.scope != "" {
+		scope = opts.scope
 	}
 	data := url.Values{
 		"grant_type":    {"client_credentials"},
