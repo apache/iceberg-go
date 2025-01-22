@@ -128,6 +128,12 @@ func WithPrefix(prefix string) Option[RestCatalog] {
 	}
 }
 
+func WithScope(scope string) Option[RestCatalog] {
+	return func(o *options) {
+		o.scope = &scope
+	}
+}
+
 type Option[T GlueCatalog | RestCatalog] func(*options)
 
 type options struct {
@@ -144,6 +150,7 @@ type options struct {
 	sigv4Service      string
 	prefix            string
 	authUri           *url.URL
+	scope             *string
 }
 
 type PropertiesUpdateSummary struct {
