@@ -150,6 +150,7 @@ func WithProperties(props iceberg.Properties) CreateTableOpt {
 	}
 }
 
+//lint:ignore U1000 this is linked to by catalogs via go:linkname but we don't want to export it
 func checkForOverlap(removals []string, updates iceberg.Properties) error {
 	overlap := []string{}
 	for _, key := range removals {
@@ -163,6 +164,7 @@ func checkForOverlap(removals []string, updates iceberg.Properties) error {
 	return nil
 }
 
+//lint:ignore U1000 this is linked to by catalogs via go:linkname but we don't want to export it
 func getUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals []string, updates iceberg.Properties) (iceberg.Properties, PropertiesUpdateSummary, error) {
 	if err := checkForOverlap(removals, updates); err != nil {
 		return nil, PropertiesUpdateSummary{}, err
