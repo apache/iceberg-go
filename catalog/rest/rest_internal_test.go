@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package catalog
+package rest
 
 import (
 	"encoding/json"
@@ -59,7 +59,7 @@ func TestAuthHeader(t *testing.T) {
 		})
 	})
 
-	cat, err := NewRestCatalog("rest", srv.URL,
+	cat, err := NewCatalog("rest", srv.URL,
 		WithCredential("client:secret"))
 	require.NoError(t, err)
 	assert.NotNil(t, cat)
@@ -107,7 +107,7 @@ func TestAuthUriHeader(t *testing.T) {
 
 	authUri, err := url.Parse(srv.URL)
 	require.NoError(t, err)
-	cat, err := NewRestCatalog("rest", srv.URL,
+	cat, err := NewCatalog("rest", srv.URL,
 		WithCredential("client:secret"), WithAuthURI(authUri.JoinPath("auth-token-url")))
 	require.NoError(t, err)
 	assert.NotNil(t, cat)

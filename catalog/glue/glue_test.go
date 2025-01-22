@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package catalog
+package glue
 
 import (
 	"context"
@@ -23,6 +23,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/apache/iceberg-go/catalog"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/glue"
@@ -105,7 +106,7 @@ func TestGlueGetTable(t *testing.T) {
 		Name:         aws.String("test_table"),
 	}, mock.Anything).Return(&glue.GetTableOutput{Table: &testIcebergGlueTable}, nil)
 
-	glueCatalog := &GlueCatalog{
+	glueCatalog := &Catalog{
 		glueSvc: mockGlueSvc,
 	}
 
@@ -125,11 +126,11 @@ func TestGlueListTables(t *testing.T) {
 		TableList: []types.Table{testIcebergGlueTable, testNonIcebergGlueTable},
 	}, nil).Once()
 
-	glueCatalog := &GlueCatalog{
+	glueCatalog := &Catalog{
 		glueSvc: mockGlueSvc,
 	}
 
-	tables, err := glueCatalog.ListTables(context.TODO(), GlueDatabaseIdentifier("test_database"))
+	tables, err := glueCatalog.ListTables(context.TODO(), DatabaseIdentifier("test_database"))
 	assert.NoError(err)
 	assert.Len(tables, 1)
 	assert.Equal([]string{"test_database", "test_table"}, tables[0])
@@ -155,7 +156,7 @@ func TestGlueListNamespaces(t *testing.T) {
 		},
 	}, nil).Once()
 
-	glueCatalog := &GlueCatalog{
+	glueCatalog := &Catalog{
 		glueSvc: mockGlueSvc,
 	}
 
@@ -182,11 +183,11 @@ func TestGlueDropTable(t *testing.T) {
 		Name:         aws.String("test_table"),
 	}, mock.Anything).Return(&glue.DeleteTableOutput{}, nil).Once()
 
-	glueCatalog := &GlueCatalog{
+	glueCatalog := &Catalog{
 		glueSvc: mockGlueSvc,
 	}
 
-	err := glueCatalog.DropTable(context.TODO(), GlueTableIdentifier("test_database", "test_table"))
+	err := glueCatalog.DropTable(context.TODO(), TableIdentifier("test_database", "test_table"))
 	assert.NoError(err)
 }
 
@@ -206,7 +207,7 @@ func TestGlueCreateNamespace(t *testing.T) {
 		},
 	}, mock.Anything).Return(&glue.CreateDatabaseOutput{}, nil).Once()
 
-	glueCatalog := &GlueCatalog{
+	glueCatalog := &Catalog{
 		glueSvc: mockGlueSvc,
 	}
 
@@ -215,7 +216,7 @@ func TestGlueCreateNamespace(t *testing.T) {
 		locationPropsKey:    "s3://test-location",
 	}
 
-	err := glueCatalog.CreateNamespace(context.TODO(), GlueDatabaseIdentifier("test_namespace"), props)
+	err := glueCatalog.CreateNamespace(context.TODO(), DatabaseIdentifier("test_namespace"), props)
 	assert.NoError(err)
 }
 
@@ -239,11 +240,11 @@ func TestGlueDropNamespace(t *testing.T) {
 		Name: aws.String("test_namespace"),
 	}, mock.Anything).Return(&glue.DeleteDatabaseOutput{}, nil).Once()
 
-	glueCatalog := &GlueCatalog{
+	glueCatalog := &Catalog{
 		glueSvc: mockGlueSvc,
 	}
 
-	err := glueCatalog.DropNamespace(context.TODO(), GlueDatabaseIdentifier("test_namespace"))
+	err := glueCatalog.DropNamespace(context.TODO(), DatabaseIdentifier("test_namespace"))
 	assert.NoError(err)
 }
 
@@ -253,7 +254,7 @@ func TestGlueUpdateNamespaceProperties(t *testing.T) {
 		initial     map[string]string
 		updates     map[string]string
 		removals    []string
-		expected    PropertiesUpdateSummary
+		expected    catalog.PropertiesUpdateSummary
 		shouldError bool
 	}{
 		{
@@ -279,7 +280,7 @@ func TestGlueUpdateNamespaceProperties(t *testing.T) {
 				"key3": "value3",
 			},
 			removals: []string{"key4"},
-			expected: PropertiesUpdateSummary{
+			expected: catalog.PropertiesUpdateSummary{
 				Removed: []string{},
 				Updated: []string{"key3"},
 				Missing: []string{"key4"},
@@ -297,7 +298,7 @@ func TestGlueUpdateNamespaceProperties(t *testing.T) {
 				"key3": "value3",
 			},
 			removals: []string{},
-			expected: PropertiesUpdateSummary{
+			expected: catalog.PropertiesUpdateSummary{
 				Removed: []string{},
 				Updated: []string{"key3"},
 				Missing: []string{},
@@ -315,7 +316,7 @@ func TestGlueUpdateNamespaceProperties(t *testing.T) {
 				"key2": "new_value2",
 			},
 			removals: []string{"key4"},
-			expected: PropertiesUpdateSummary{
+			expected: catalog.PropertiesUpdateSummary{
 				Removed: []string{"key4"},
 				Updated: []string{"key2"},
 				Missing: []string{},
@@ -332,7 +333,7 @@ func TestGlueUpdateNamespaceProperties(t *testing.T) {
 				"key2": "new_value2",
 			},
 			removals: []string{},
-			expected: PropertiesUpdateSummary{
+			expected: catalog.PropertiesUpdateSummary{
 				Removed: []string{},
 				Updated: []string{"key2"},
 				Missing: []string{},
@@ -348,7 +349,7 @@ func TestGlueUpdateNamespaceProperties(t *testing.T) {
 			},
 			updates:  map[string]string{},
 			removals: []string{"key2", "key3"},
-			expected: PropertiesUpdateSummary{
+			expected: catalog.PropertiesUpdateSummary{
 				Removed: []string{"key2", "key3"},
 				Updated: []string{},
 				Missing: []string{},
@@ -378,11 +379,11 @@ func TestGlueUpdateNamespaceProperties(t *testing.T) {
 				mockGlueSvc.On("UpdateDatabase", mock.Anything, mock.Anything, mock.Anything).Return(&glue.UpdateDatabaseOutput{}, nil).Once()
 			}
 
-			glueCatalog := &GlueCatalog{
+			glueCatalog := &Catalog{
 				glueSvc: mockGlueSvc,
 			}
 
-			summary, err := glueCatalog.UpdateNamespaceProperties(context.TODO(), GlueDatabaseIdentifier("test_namespace"), tt.removals, tt.updates)
+			summary, err := glueCatalog.UpdateNamespaceProperties(context.TODO(), DatabaseIdentifier("test_namespace"), tt.removals, tt.updates)
 			if tt.shouldError {
 				assert.Error(err)
 			} else {
@@ -452,11 +453,11 @@ func TestGlueRenameTable(t *testing.T) {
 		Name:         aws.String("test_table"),
 	}, mock.Anything).Return(&glue.DeleteTableOutput{}, nil).Once()
 
-	glueCatalog := &GlueCatalog{
+	glueCatalog := &Catalog{
 		glueSvc: mockGlueSvc,
 	}
 
-	renamedTable, err := glueCatalog.RenameTable(context.TODO(), GlueTableIdentifier("test_database", "test_table"), GlueTableIdentifier("test_database", "new_test_table"))
+	renamedTable, err := glueCatalog.RenameTable(context.TODO(), TableIdentifier("test_database", "test_table"), TableIdentifier("test_database", "new_test_table"))
 	assert.NoError(err)
 	assert.Equal("new_test_table", renamedTable.Identifier()[1])
 }
@@ -506,11 +507,11 @@ func TestGlueRenameTable_DeleteTableFailureRollback(t *testing.T) {
 		Name:         aws.String("new_test_table"),
 	}, mock.Anything).Return(&glue.DeleteTableOutput{}, nil).Once()
 
-	glueCatalog := &GlueCatalog{
+	glueCatalog := &Catalog{
 		glueSvc: mockGlueSvc,
 	}
 
-	renamedTable, err := glueCatalog.RenameTable(context.TODO(), GlueTableIdentifier("test_database", "test_table"), GlueTableIdentifier("test_database", "new_test_table"))
+	renamedTable, err := glueCatalog.RenameTable(context.TODO(), TableIdentifier("test_database", "test_table"), TableIdentifier("test_database", "new_test_table"))
 	assert.Error(err)
 	assert.Nil(renamedTable)
 	mockGlueSvc.AssertCalled(t, "DeleteTable", mock.Anything, &glue.DeleteTableInput{
@@ -531,9 +532,9 @@ func TestGlueListTablesIntegration(t *testing.T) {
 	awscfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
 
-	catalog := NewGlueCatalog(WithAwsConfig(awscfg))
+	catalog := NewCatalog(WithAwsConfig(awscfg))
 
-	tables, err := catalog.ListTables(context.TODO(), GlueDatabaseIdentifier(os.Getenv("TEST_DATABASE_NAME")))
+	tables, err := catalog.ListTables(context.TODO(), DatabaseIdentifier(os.Getenv("TEST_DATABASE_NAME")))
 	assert.NoError(err)
 	assert.Equal([]string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")}, tables[1])
 }
@@ -554,7 +555,7 @@ func TestGlueLoadTableIntegration(t *testing.T) {
 	awscfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
 
-	catalog := NewGlueCatalog(WithAwsConfig(awscfg))
+	catalog := NewCatalog(WithAwsConfig(awscfg))
 
 	table, err := catalog.LoadTable(context.TODO(), []string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")}, nil)
 	assert.NoError(err)
@@ -570,7 +571,7 @@ func TestGlueListNamespacesIntegration(t *testing.T) {
 	awscfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
 
-	catalog := NewGlueCatalog(WithAwsConfig(awscfg))
+	catalog := NewCatalog(WithAwsConfig(awscfg))
 
 	namespaces, err := catalog.ListNamespaces(context.TODO(), nil)
 	assert.NoError(err)

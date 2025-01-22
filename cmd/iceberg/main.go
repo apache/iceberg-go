@@ -27,6 +27,8 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/catalog/glue"
+	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/apache/iceberg-go/config"
 	"github.com/apache/iceberg-go/table"
 
@@ -135,18 +137,18 @@ func main() {
 	}
 
 	var cat catalog.Catalog
-	switch catalog.CatalogType(cfg.Catalog) {
+	switch catalog.Type(cfg.Catalog) {
 	case catalog.REST:
-		opts := []catalog.Option[catalog.RestCatalog]{}
+		opts := []rest.Option{}
 		if len(cfg.Cred) > 0 {
-			opts = append(opts, catalog.WithCredential(cfg.Cred))
+			opts = append(opts, rest.WithCredential(cfg.Cred))
 		}
 
 		if len(cfg.Warehouse) > 0 {
-			opts = append(opts, catalog.WithWarehouseLocation(cfg.Warehouse))
+			opts = append(opts, rest.WithWarehouseLocation(cfg.Warehouse))
 		}
 
-		if cat, err = catalog.NewRestCatalog("rest", cfg.URI, opts...); err != nil {
+		if cat, err = rest.NewCatalog("rest", cfg.URI, opts...); err != nil {
 			log.Fatal(err)
 		}
 	case catalog.Glue:
@@ -154,10 +156,10 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		opts := []catalog.Option[catalog.GlueCatalog]{
-			catalog.WithAwsConfig(awscfg),
+		opts := []glue.Option{
+			glue.WithAwsConfig(awscfg),
 		}
-		cat = catalog.NewGlueCatalog(opts...)
+		cat = glue.NewCatalog(opts...)
 	default:
 		log.Fatal("unrecognized catalog type")
 	}
@@ -196,7 +198,7 @@ func main() {
 		})
 	case cfg.Rename:
 		_, err := cat.RenameTable(context.Background(),
-			catalog.ToRestIdentifier(cfg.RenameFrom), catalog.ToRestIdentifier(cfg.RenameTo))
+			catalog.ToIdentifier(cfg.RenameFrom), catalog.ToIdentifier(cfg.RenameTo))
 		if err != nil {
 			output.Error(err)
 			os.Exit(1)
@@ -206,13 +208,13 @@ func main() {
 	case cfg.Drop:
 		switch {
 		case cfg.Namespace:
-			err := cat.DropNamespace(context.Background(), catalog.ToRestIdentifier(cfg.Ident))
+			err := cat.DropNamespace(context.Background(), catalog.ToIdentifier(cfg.Ident))
 			if err != nil {
 				output.Error(err)
 				os.Exit(1)
 			}
 		case cfg.Table:
-			err := cat.DropTable(context.Background(), catalog.ToRestIdentifier(cfg.Ident))
+			err := cat.DropTable(context.Background(), catalog.ToIdentifier(cfg.Ident))
 			if err != nil {
 				output.Error(err)
 				os.Exit(1)
@@ -231,7 +233,7 @@ func main() {
 				props["Location"] = cfg.LocationURI
 			}
 
-			err := cat.CreateNamespace(context.Background(), catalog.ToRestIdentifier(cfg.Ident), props)
+			err := cat.CreateNamespace(context.Background(), catalog.ToIdentifier(cfg.Ident), props)
 			if err != nil {
 				output.Error(err)
 				os.Exit(1)
@@ -249,7 +251,7 @@ func main() {
 }
 
 func list(output Output, cat catalog.Catalog, parent string) {
-	prnt := catalog.ToRestIdentifier(parent)
+	prnt := catalog.ToIdentifier(parent)
 
 	ids, err := cat.ListNamespaces(context.Background(), prnt)
 	if err != nil {
@@ -270,7 +272,7 @@ func list(output Output, cat catalog.Catalog, parent string) {
 func describe(output Output, cat catalog.Catalog, id string, entityType string) {
 	ctx := context.Background()
 
-	ident := catalog.ToRestIdentifier(id)
+	ident := catalog.ToIdentifier(id)
 
 	isNS, isTbl := false, false
 	if (entityType == "any" || entityType == "ns") && len(ident) > 0 {
@@ -312,7 +314,7 @@ func describe(output Output, cat catalog.Catalog, id string, entityType string) 
 }
 
 func loadTable(output Output, cat catalog.Catalog, id string) *table.Table {
-	tbl, err := cat.LoadTable(context.Background(), catalog.ToRestIdentifier(id), nil)
+	tbl, err := cat.LoadTable(context.Background(), catalog.ToIdentifier(id), nil)
 	if err != nil {
 		output.Error(err)
 		os.Exit(1)
@@ -329,7 +331,7 @@ type propCmd struct {
 }
 
 func properties(output Output, cat catalog.Catalog, args propCmd) {
-	ctx, ident := context.Background(), catalog.ToRestIdentifier(args.identifier)
+	ctx, ident := context.Background(), catalog.ToIdentifier(args.identifier)
 
 	switch {
 	case args.get:

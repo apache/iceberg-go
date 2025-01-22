@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package catalog_test
+package rest_test
 
 import (
 	"context"
@@ -30,6 +30,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/suite"
 )
@@ -106,10 +107,10 @@ func (r *RestCatalogSuite) TestToken200() {
 		})
 	})
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL,
-		catalog.WithWarehouseLocation("s3://some-bucket"),
-		catalog.WithCredential(TestCreds),
-		catalog.WithScope(scope))
+	cat, err := rest.NewCatalog("rest", r.srv.URL,
+		rest.WithWarehouseLocation("s3://some-bucket"),
+		rest.WithCredential(TestCreds),
+		rest.WithScope(scope))
 	r.Require().NoError(err)
 
 	r.NotNil(cat)
@@ -164,11 +165,11 @@ func (r *RestCatalogSuite) TestToken400() {
 		})
 	})
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithCredential(TestCreds))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithCredential(TestCreds))
 	r.Nil(cat)
 
-	r.ErrorIs(err, catalog.ErrRESTError)
-	r.ErrorIs(err, catalog.ErrOAuthError)
+	r.ErrorIs(err, rest.ErrRESTError)
+	r.ErrorIs(err, rest.ErrOAuthError)
 	r.ErrorContains(err, "invalid_client: credentials for key invalid_key do not match")
 }
 
@@ -197,9 +198,9 @@ func (r *RestCatalogSuite) TestToken200AuthUrl() {
 
 	authUri, err := url.Parse(r.srv.URL)
 	r.Require().NoError(err)
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL,
-		catalog.WithWarehouseLocation("s3://some-bucket"),
-		catalog.WithCredential(TestCreds), catalog.WithAuthURI(authUri.JoinPath("auth-token-url")))
+	cat, err := rest.NewCatalog("rest", r.srv.URL,
+		rest.WithWarehouseLocation("s3://some-bucket"),
+		rest.WithCredential(TestCreds), rest.WithAuthURI(authUri.JoinPath("auth-token-url")))
 
 	r.Require().NoError(err)
 
@@ -221,11 +222,11 @@ func (r *RestCatalogSuite) TestToken401() {
 		})
 	})
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithCredential(TestCreds))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithCredential(TestCreds))
 	r.Nil(cat)
 
-	r.ErrorIs(err, catalog.ErrRESTError)
-	r.ErrorIs(err, catalog.ErrOAuthError)
+	r.ErrorIs(err, rest.ErrRESTError)
+	r.ErrorIs(err, rest.ErrOAuthError)
 	r.ErrorContains(err, "invalid_client: credentials for key invalid_key do not match")
 }
 
@@ -248,10 +249,10 @@ func (r *RestCatalogSuite) TestListTables200() {
 		})
 	})
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	tables, err := cat.ListTables(context.Background(), catalog.ToRestIdentifier(namespace))
+	tables, err := cat.ListTables(context.Background(), catalog.ToIdentifier(namespace))
 	r.Require().NoError(err)
 	r.Equal([]table.Identifier{{"examples", "fooshare"}}, tables)
 }
@@ -297,16 +298,16 @@ func (r *RestCatalogSuite) TestListTablesPrefixed200() {
 		})
 	})
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL,
-		catalog.WithPrefix("prefix"),
-		catalog.WithWarehouseLocation("s3://some-bucket"),
-		catalog.WithCredential(TestCreds))
+	cat, err := rest.NewCatalog("rest", r.srv.URL,
+		rest.WithPrefix("prefix"),
+		rest.WithWarehouseLocation("s3://some-bucket"),
+		rest.WithCredential(TestCreds))
 	r.Require().NoError(err)
 
 	r.NotNil(cat)
 	r.Equal(r.configVals.Get("warehouse"), "s3://some-bucket")
 
-	tables, err := cat.ListTables(context.Background(), catalog.ToRestIdentifier(namespace))
+	tables, err := cat.ListTables(context.Background(), catalog.ToIdentifier(namespace))
 	r.Require().NoError(err)
 	r.Equal([]table.Identifier{{"examples", "fooshare"}}, tables)
 }
@@ -330,10 +331,10 @@ func (r *RestCatalogSuite) TestListTables404() {
 		})
 	})
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	_, err = cat.ListTables(context.Background(), catalog.ToRestIdentifier(namespace))
+	_, err = cat.ListTables(context.Background(), catalog.ToIdentifier(namespace))
 	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
 	r.ErrorContains(err, "Namespace does not exist: personal in warehouse 8bcb0838-50fc-472d-9ddb-8feb89ef5f1e")
 }
@@ -353,7 +354,7 @@ func (r *RestCatalogSuite) TestListNamespaces200() {
 		})
 	})
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
 	results, err := cat.ListNamespaces(context.Background(), nil)
@@ -378,10 +379,10 @@ func (r *RestCatalogSuite) TestListNamespaceWithParent200() {
 		})
 	})
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	results, err := cat.ListNamespaces(context.Background(), catalog.ToRestIdentifier("accounting"))
+	results, err := cat.ListNamespaces(context.Background(), catalog.ToIdentifier("accounting"))
 	r.Require().NoError(err)
 
 	r.Equal([]table.Identifier{{"accounting", "tax"}}, results)
@@ -405,10 +406,10 @@ func (r *RestCatalogSuite) TestListNamespaces400() {
 		})
 	})
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	_, err = cat.ListNamespaces(context.Background(), catalog.ToRestIdentifier("accounting"))
+	_, err = cat.ListNamespaces(context.Background(), catalog.ToIdentifier("accounting"))
 	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
 	r.ErrorContains(err, "Namespace does not exist: personal in warehouse 8bcb0838-50fc-472d-9ddb-8feb89ef5f1e")
 }
@@ -438,10 +439,10 @@ func (r *RestCatalogSuite) TestCreateNamespace200() {
 		})
 	})
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	r.Require().NoError(cat.CreateNamespace(context.Background(), catalog.ToRestIdentifier("leden"), nil))
+	r.Require().NoError(cat.CreateNamespace(context.Background(), catalog.ToIdentifier("leden"), nil))
 }
 
 func (r *RestCatalogSuite) TestCreateNamespaceWithProps200() {
@@ -469,10 +470,10 @@ func (r *RestCatalogSuite) TestCreateNamespaceWithProps200() {
 		})
 	})
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	r.Require().NoError(cat.CreateNamespace(context.Background(), catalog.ToRestIdentifier("leden"), iceberg.Properties{"foo": "bar", "super": "duper"}))
+	r.Require().NoError(cat.CreateNamespace(context.Background(), catalog.ToIdentifier("leden"), iceberg.Properties{"foo": "bar", "super": "duper"}))
 }
 
 func (r *RestCatalogSuite) TestCreateNamespace409() {
@@ -505,10 +506,10 @@ func (r *RestCatalogSuite) TestCreateNamespace409() {
 		})
 	})
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	err = cat.CreateNamespace(context.Background(), catalog.ToRestIdentifier("fokko"), nil)
+	err = cat.CreateNamespace(context.Background(), catalog.ToIdentifier("fokko"), nil)
 	r.ErrorIs(err, catalog.ErrNamespaceAlreadyExists)
 	r.ErrorContains(err, "fokko in warehouse")
 }
@@ -524,10 +525,10 @@ func (r *RestCatalogSuite) TestDropNamespace204() {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	r.NoError(cat.DropNamespace(context.Background(), catalog.ToRestIdentifier("examples")))
+	r.NoError(cat.DropNamespace(context.Background(), catalog.ToIdentifier("examples")))
 }
 
 func (r *RestCatalogSuite) TestDropNamespace404() {
@@ -548,10 +549,10 @@ func (r *RestCatalogSuite) TestDropNamespace404() {
 		})
 	})
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	err = cat.DropNamespace(context.Background(), catalog.ToRestIdentifier("examples"))
+	err = cat.DropNamespace(context.Background(), catalog.ToIdentifier("examples"))
 	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
 	r.ErrorContains(err, "examples in warehouse")
 }
@@ -571,10 +572,10 @@ func (r *RestCatalogSuite) TestLoadNamespaceProps200() {
 		})
 	})
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	props, err := cat.LoadNamespaceProperties(context.Background(), catalog.ToRestIdentifier("leden"))
+	props, err := cat.LoadNamespaceProperties(context.Background(), catalog.ToIdentifier("leden"))
 	r.Require().NoError(err)
 	r.Equal(iceberg.Properties{"prop": "yes"}, props)
 }
@@ -597,10 +598,10 @@ func (r *RestCatalogSuite) TestLoadNamespaceProps404() {
 		})
 	})
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	_, err = cat.LoadNamespaceProperties(context.Background(), catalog.ToRestIdentifier("leden"))
+	_, err = cat.LoadNamespaceProperties(context.Background(), catalog.ToIdentifier("leden"))
 	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
 	r.ErrorContains(err, "Namespace does not exist: fokko22 in warehouse")
 }
@@ -620,7 +621,7 @@ func (r *RestCatalogSuite) TestUpdateNamespaceProps200() {
 		})
 	})
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
 	summary, err := cat.UpdateNamespaceProperties(context.Background(), table.Identifier([]string{"fokko"}),
@@ -652,7 +653,7 @@ func (r *RestCatalogSuite) TestUpdateNamespaceProps404() {
 		})
 	})
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
 	_, err = cat.UpdateNamespaceProperties(context.Background(),
@@ -738,17 +739,17 @@ func (r *RestCatalogSuite) TestCreateTable200() {
 
 	t := createTableRestExample
 	_ = t
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
 	tbl, err := cat.CreateTable(
 		context.Background(),
-		catalog.ToRestIdentifier("fokko", "fokko2"),
+		catalog.ToIdentifier("fokko", "fokko2"),
 		tableSchemaSimple,
 	)
 	r.Require().NoError(err)
 
-	r.Equal(catalog.ToRestIdentifier("rest", "fokko", "fokko2"), tbl.Identifier())
+	r.Equal(catalog.ToIdentifier("rest", "fokko", "fokko2"), tbl.Identifier())
 	r.Equal("s3://warehouse/database/table/metadata.json", tbl.MetadataLocation())
 	r.EqualValues(1, tbl.Metadata().Version())
 	r.Equal("bf289591-dcc0-4234-ad4f-5c3eed811a29", tbl.Metadata().TableUUID().String())
@@ -780,13 +781,13 @@ func (r *RestCatalogSuite) TestCreateTable409() {
 		json.NewEncoder(w).Encode(errorResponse)
 	})
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
 	// Attempt to create table with properties
 	_, err = cat.CreateTable(
 		context.Background(),
-		catalog.ToRestIdentifier("fokko", "fokko2"),
+		catalog.ToIdentifier("fokko", "fokko2"),
 		tableSchemaSimple,
 		catalog.WithProperties(map[string]string{"owner": "fokko"}),
 	)
@@ -874,13 +875,13 @@ func (r *RestCatalogSuite) TestLoadTable200() {
 		}`))
 	})
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	tbl, err := cat.LoadTable(context.Background(), catalog.ToRestIdentifier("fokko", "table"), nil)
+	tbl, err := cat.LoadTable(context.Background(), catalog.ToIdentifier("fokko", "table"), nil)
 	r.Require().NoError(err)
 
-	r.Equal(catalog.ToRestIdentifier("rest", "fokko", "table"), tbl.Identifier())
+	r.Equal(catalog.ToIdentifier("rest", "fokko", "table"), tbl.Identifier())
 	r.Equal("s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json", tbl.MetadataLocation())
 	r.EqualValues(1, tbl.Metadata().Version())
 	r.Equal("b55d9dda-6561-423a-8bfc-787980ce421f", tbl.Metadata().TableUUID().String())
@@ -955,16 +956,16 @@ func (r *RestCatalogSuite) TestRenameTable200() {
 		w.Write([]byte(createTableRestExample))
 	})
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	fromIdent := catalog.ToRestIdentifier("fokko", "source")
-	toIdent := catalog.ToRestIdentifier("fokko", "destination")
+	fromIdent := catalog.ToIdentifier("fokko", "source")
+	toIdent := catalog.ToIdentifier("fokko", "destination")
 
 	renamedTable, err := cat.RenameTable(context.Background(), fromIdent, toIdent)
 	r.Require().NoError(err)
 
-	r.Equal(catalog.ToRestIdentifier("rest", "fokko", "destination"), renamedTable.Identifier())
+	r.Equal(catalog.ToIdentifier("rest", "fokko", "destination"), renamedTable.Identifier())
 	r.Equal("s3://warehouse/database/table/metadata.json", renamedTable.MetadataLocation())
 	r.EqualValues(1, renamedTable.Metadata().Version())
 	r.Equal("bf289591-dcc0-4234-ad4f-5c3eed811a29", renamedTable.Metadata().TableUUID().String())
@@ -989,10 +990,10 @@ func (r *RestCatalogSuite) TestDropTable204() {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	err = cat.DropTable(context.Background(), catalog.ToRestIdentifier("fokko", "table"))
+	err = cat.DropTable(context.Background(), catalog.ToIdentifier("fokko", "table"))
 	r.NoError(err)
 }
 
@@ -1016,10 +1017,10 @@ func (r *RestCatalogSuite) TestDropTable404() {
 		json.NewEncoder(w).Encode(errorResponse)
 	})
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	err = cat.DropTable(context.Background(), catalog.ToRestIdentifier("fokko", "table"))
+	err = cat.DropTable(context.Background(), catalog.ToIdentifier("fokko", "table"))
 	r.Error(err)
 	r.ErrorIs(err, catalog.ErrNoSuchTable)
 	r.ErrorContains(err, "Table does not exist: fokko.table")
@@ -1058,7 +1059,7 @@ func (r *RestTLSCatalogSuite) TearDownTest() {
 }
 
 func (r *RestTLSCatalogSuite) TestSSLFail() {
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Nil(cat)
 
 	r.ErrorContains(err, "tls: failed to verify certificate")
@@ -1078,9 +1079,9 @@ func (r *RestTLSCatalogSuite) TestSSLLoadRegisteredCatalog() {
 }
 
 func (r *RestTLSCatalogSuite) TestSSLConfig() {
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken),
-		catalog.WithWarehouseLocation("s3://some-bucket"),
-		catalog.WithTLSConfig(&tls.Config{InsecureSkipVerify: true}))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken),
+		rest.WithWarehouseLocation("s3://some-bucket"),
+		rest.WithTLSConfig(&tls.Config{InsecureSkipVerify: true}))
 	r.NoError(err)
 
 	r.NotNil(cat)
@@ -1097,9 +1098,9 @@ func (r *RestTLSCatalogSuite) TestSSLCerts() {
 		}
 	}
 
-	cat, err := catalog.NewRestCatalog("rest", r.srv.URL, catalog.WithOAuthToken(TestToken),
-		catalog.WithWarehouseLocation("s3://some-bucket"),
-		catalog.WithTLSConfig(&tls.Config{RootCAs: certs}))
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken),
+		rest.WithWarehouseLocation("s3://some-bucket"),
+		rest.WithTLSConfig(&tls.Config{RootCAs: certs}))
 	r.NoError(err)
 
 	r.NotNil(cat)
