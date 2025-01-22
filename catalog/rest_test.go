@@ -83,6 +83,7 @@ func (r *RestCatalogSuite) TearDownTest() {
 }
 
 func (r *RestCatalogSuite) TestToken200() {
+	const scope = "myscope"
 	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
 		r.Equal(http.MethodPost, req.Method)
 
@@ -93,7 +94,7 @@ func (r *RestCatalogSuite) TestToken200() {
 		r.Equal(values.Get("grant_type"), "client_credentials")
 		r.Equal(values.Get("client_id"), "client")
 		r.Equal(values.Get("client_secret"), "secret")
-		r.Equal(values.Get("scope"), "catalog")
+		r.Equal(values.Get("scope"), scope)
 
 		w.WriteHeader(http.StatusOK)
 
@@ -107,7 +108,8 @@ func (r *RestCatalogSuite) TestToken200() {
 
 	cat, err := catalog.NewRestCatalog("rest", r.srv.URL,
 		catalog.WithWarehouseLocation("s3://some-bucket"),
-		catalog.WithCredential(TestCreds))
+		catalog.WithCredential(TestCreds),
+		catalog.WithScope(scope))
 	r.Require().NoError(err)
 
 	r.NotNil(cat)

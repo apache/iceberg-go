@@ -468,16 +468,10 @@ func (r *RestCatalog) init(ops *options, uri string) error {
 	}
 
 	r.baseURI = baseuri.JoinPath("v1")
-	if ops, err = r.fetchConfig(ops); err != nil {
+	if r.cl, ops, err = r.fetchConfig(ops); err != nil {
 		return err
 	}
 
-	cl, err := r.createSession(ops)
-	if err != nil {
-		return err
-	}
-
-	r.cl = cl
 	if ops.prefix != "" {
 		r.baseURI = r.baseURI.JoinPath(ops.prefix)
 	}
@@ -491,11 +485,15 @@ func (r *RestCatalog) fetchAccessToken(cl *http.Client, creds string, opts *opti
 		clientID, clientSecret = "", clientID
 	}
 
+	scope := "catalog"
+	if opts.scope != "" {
+		scope = opts.scope
+	}
 	data := url.Values{
 		"grant_type":    {"client_credentials"},
 		"client_id":     {clientID},
 		"client_secret": {clientSecret},
-		"scope":         {"catalog"},
+		"scope":         {scope},
 	}
 
 	uri := opts.authUri
@@ -575,7 +573,7 @@ func (r *RestCatalog) createSession(opts *options) (*http.Client, error) {
 	return cl, nil
 }
 
-func (r *RestCatalog) fetchConfig(opts *options) (*options, error) {
+func (r *RestCatalog) fetchConfig(opts *options) (*http.Client, *options, error) {
 	params := url.Values{}
 	if opts.warehouseLocation != "" {
 		params.Set(keyWarehouseLocation, opts.warehouseLocation)
@@ -586,12 +584,12 @@ func (r *RestCatalog) fetchConfig(opts *options) (*options, error) {
 
 	sess, err := r.createSession(opts)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	rsp, err := doGet[configResponse](context.Background(), route, []string{}, sess, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	cfg := rsp.Defaults
@@ -608,12 +606,12 @@ func (r *RestCatalog) fetchConfig(opts *options) (*options, error) {
 	if uri, ok := cfg["uri"]; ok {
 		r.baseURI, err = url.Parse(uri)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		r.baseURI = r.baseURI.JoinPath("v1")
 	}
 
-	return o, nil
+	return sess, o, nil
 }
 
 func (r *RestCatalog) Name() string             { return r.name }
