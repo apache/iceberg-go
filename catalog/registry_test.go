@@ -89,16 +89,7 @@ func TestCatalogRegistry(t *testing.T) {
 }
 
 func TestRegistryPanic(t *testing.T) {
-	defer func() {
-		if r := recover(); r != nil {
-			assert.Equal(t, "catalog: RegisterCatalog catalog factory is nil", r)
-		} else {
-			t.Fatalf("expect a panic but did not get one")
-		}
-
-	}()
-	catalog.Register("foobar", nil)
-	t.Fatalf("expect a panic but Register function did not")
+	assert.PanicsWithValue(t, "catalog: RegisterCatalog catalog factory is nil", func() { catalog.Register("foobar", nil) })
 }
 
 func TestCatalogWithEmptyName(t *testing.T) {
