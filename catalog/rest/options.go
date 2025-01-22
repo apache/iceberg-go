@@ -94,6 +94,12 @@ func WithAwsConfig(cfg aws.Config) Option {
 	}
 }
 
+func WithScope(scope string) Option {
+	return func(o *options) {
+		o.scope = scope
+	}
+}
+
 type options struct {
 	awsConfig         aws.Config
 	tlsConfig         *tls.Config
@@ -106,4 +112,5 @@ type options struct {
 	sigv4Service      string
 	prefix            string
 	authUri           *url.URL
+	scope             string
 }
