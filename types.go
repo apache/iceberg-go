@@ -44,6 +44,17 @@ func (p Properties) Get(key, defVal string) string {
 	return defVal
 }
 
+func (p Properties) GetBool(key string, defVal bool) bool {
+	if v, ok := p[key]; ok {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return defVal
+		}
+		return b
+	}
+	return defVal
+}
+
 // Type is an interface representing any of the available iceberg types,
 // such as primitives (int32/int64/etc.) or nested types (list/struct/map).
 type Type interface {

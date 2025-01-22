@@ -21,8 +21,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"strconv"
+	_ "unsafe"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
@@ -403,6 +403,12 @@ func (c *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 	return props, nil
 }
 
+// avoid circular dependency while still avoiding having to export the getUpdatedPropsAndUpdateSummary function
+// so that we can re-use it in the catalog implementations without duplicating the code.
+
+//go:linkname getUpdatedPropsAndUpdateSummary github.com/apache/iceberg-go/catalog.getUpdatedPropsAndUpdateSummary
+func getUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals []string, updates iceberg.Properties) (iceberg.Properties, catalog.PropertiesUpdateSummary, error)
+
 // UpdateNamespaceProperties updates the properties of an Iceberg namespace in the Glue catalog.
 // The removals list contains the keys to remove, and the updates map contains the keys and values to update.
 func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier,
@@ -555,49 +561,4 @@ func filterDatabaseListByType(databases []types.Database, databaseType string) [
 	}
 
 	return filtered
-}
-
-func checkForOverlap(removals []string, updates iceberg.Properties) error {
-	overlap := []string{}
-	for _, key := range removals {
-		if _, ok := updates[key]; ok {
-			overlap = append(overlap, key)
-		}
-	}
-	if len(overlap) > 0 {
-		return fmt.Errorf("conflict between removals and updates for keys: %v", overlap)
-	}
-	return nil
-}
-
-func getUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals []string, updates iceberg.Properties) (iceberg.Properties, catalog.PropertiesUpdateSummary, error) {
-	if err := checkForOverlap(removals, updates); err != nil {
-		return nil, catalog.PropertiesUpdateSummary{}, err
-	}
-	var (
-		updatedProps = maps.Clone(currentProps)
-		removed      = make([]string, 0, len(removals))
-		updated      = make([]string, 0, len(updates))
-	)
-
-	for _, key := range removals {
-		if _, exists := updatedProps[key]; exists {
-			delete(updatedProps, key)
-			removed = append(removed, key)
-		}
-	}
-
-	for key, value := range updates {
-		if updatedProps[key] != value {
-			updated = append(updated, key)
-			updatedProps[key] = value
-		}
-	}
-
-	summary := catalog.PropertiesUpdateSummary{
-		Removed: removed,
-		Updated: updated,
-		Missing: iceberg.Difference(removals, removed),
-	}
-	return updatedProps, summary, nil
 }
