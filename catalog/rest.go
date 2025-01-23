@@ -287,8 +287,6 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 		return
 	}
 
-	req.Header.Add("Content-Type", "application/json")
-
 	rsp, err = cl.Do(req)
 	if err != nil {
 		return
