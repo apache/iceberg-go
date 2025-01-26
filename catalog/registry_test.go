@@ -26,6 +26,8 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	_ "github.com/apache/iceberg-go/catalog/glue"
+	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/apache/iceberg-go/config"
 	"github.com/stretchr/testify/assert"
 )
@@ -178,14 +180,14 @@ func TestRegistryFromConfig(t *testing.T) {
 
 	c, err := catalog.Load("foobar", nil)
 	assert.NoError(t, err)
-	assert.IsType(t, &catalog.RestCatalog{}, c)
-	assert.Equal(t, "foobar", c.(*catalog.RestCatalog).Name())
+	assert.IsType(t, &rest.Catalog{}, c)
+	assert.Equal(t, "foobar", c.(*rest.Catalog).Name())
 	assert.Equal(t, "catalog_name", params.Get("warehouse"))
 
 	c, err = catalog.Load("foobar", iceberg.Properties{"warehouse": "overriden"})
 	assert.NoError(t, err)
-	assert.IsType(t, &catalog.RestCatalog{}, c)
-	assert.Equal(t, "foobar", c.(*catalog.RestCatalog).Name())
+	assert.IsType(t, &rest.Catalog{}, c)
+	assert.Equal(t, "foobar", c.(*rest.Catalog).Name())
 	assert.Equal(t, "overriden", params.Get("warehouse"))
 
 	srv.Close()
@@ -195,7 +197,7 @@ func TestRegistryFromConfig(t *testing.T) {
 
 	c, err = catalog.Load("foobar", iceberg.Properties{"uri": srv2.URL})
 	assert.NoError(t, err)
-	assert.IsType(t, &catalog.RestCatalog{}, c)
-	assert.Equal(t, "foobar", c.(*catalog.RestCatalog).Name())
+	assert.IsType(t, &rest.Catalog{}, c)
+	assert.Equal(t, "foobar", c.(*rest.Catalog).Name())
 	assert.Equal(t, "catalog_name", params.Get("warehouse"))
 }

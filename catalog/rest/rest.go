@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package catalog
+package rest
 
 import (
 	"bytes"
@@ -34,6 +34,8 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/catalog/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -42,10 +44,15 @@ import (
 )
 
 var (
-	_ Catalog = (*RestCatalog)(nil)
+	_ catalog.Catalog = (*Catalog)(nil)
 )
 
 const (
+	keyOauthToken        = "token"
+	keyWarehouseLocation = "warehouse"
+	keyMetadataLocation  = "metadata_location"
+	keyOauthCredential   = "credential"
+
 	authorizationHeader = "Authorization"
 	bearerPrefix        = "Bearer"
 	namespaceSeparator  = "\x1F"
@@ -74,13 +81,13 @@ var (
 )
 
 func init() {
-	reg := RegistrarFunc(func(name string, p iceberg.Properties) (Catalog, error) {
-		return newRestCatalogFromProps(name, p.Get("uri", ""), p)
+	reg := catalog.RegistrarFunc(func(name string, p iceberg.Properties) (catalog.Catalog, error) {
+		return newCatalogFromProps(name, p.Get("uri", ""), p)
 	})
 
-	Register(string(REST), reg)
-	Register("http", reg)
-	Register("https", reg)
+	catalog.Register(string(catalog.REST), reg)
+	catalog.Register("http", reg)
+	catalog.Register("https", reg)
 }
 
 type errorResponse struct {
@@ -349,17 +356,6 @@ func handleNon200(rsp *http.Response, override map[int]error) error {
 	return e
 }
 
-func ToRestIdentifier(ident ...string) table.Identifier {
-	if len(ident) == 1 {
-		if ident[0] == "" {
-			return nil
-		}
-		return table.Identifier(strings.Split(ident[0], "."))
-	}
-
-	return table.Identifier(ident)
-}
-
 func fromProps(props iceberg.Properties) *options {
 	o := &options{}
 	for k, v := range props {
@@ -426,7 +422,7 @@ func toProps(o *options) iceberg.Properties {
 	return props
 }
 
-type RestCatalog struct {
+type Catalog struct {
 	baseURI *url.URL
 	cl      *http.Client
 
@@ -434,10 +430,10 @@ type RestCatalog struct {
 	props iceberg.Properties
 }
 
-func newRestCatalogFromProps(name string, uri string, p iceberg.Properties) (*RestCatalog, error) {
+func newCatalogFromProps(name string, uri string, p iceberg.Properties) (*Catalog, error) {
 	ops := fromProps(p)
 
-	r := &RestCatalog{name: name}
+	r := &Catalog{name: name}
 	if err := r.init(ops, uri); err != nil {
 		return nil, err
 	}
@@ -445,13 +441,13 @@ func newRestCatalogFromProps(name string, uri string, p iceberg.Properties) (*Re
 	return r, nil
 }
 
-func NewRestCatalog(name, uri string, opts ...Option[RestCatalog]) (*RestCatalog, error) {
+func NewCatalog(name, uri string, opts ...Option) (*Catalog, error) {
 	ops := &options{}
 	for _, o := range opts {
 		o(ops)
 	}
 
-	r := &RestCatalog{name: name}
+	r := &Catalog{name: name}
 	if err := r.init(ops, uri); err != nil {
 		return nil, err
 	}
@@ -459,7 +455,7 @@ func NewRestCatalog(name, uri string, opts ...Option[RestCatalog]) (*RestCatalog
 	return r, nil
 }
 
-func (r *RestCatalog) init(ops *options, uri string) error {
+func (r *Catalog) init(ops *options, uri string) error {
 	baseuri, err := url.Parse(uri)
 	if err != nil {
 		return err
@@ -477,7 +473,7 @@ func (r *RestCatalog) init(ops *options, uri string) error {
 	return nil
 }
 
-func (r *RestCatalog) fetchAccessToken(cl *http.Client, creds string, opts *options) (string, error) {
+func (r *Catalog) fetchAccessToken(cl *http.Client, creds string, opts *options) (string, error) {
 	clientID, clientSecret, hasID := strings.Cut(creds, ":")
 	if !hasID {
 		clientID, clientSecret = "", clientID
@@ -530,7 +526,7 @@ func (r *RestCatalog) fetchAccessToken(cl *http.Client, creds string, opts *opti
 	}
 }
 
-func (r *RestCatalog) createSession(opts *options) (*http.Client, error) {
+func (r *Catalog) createSession(opts *options) (*http.Client, error) {
 	session := &sessionTransport{
 		Transport:      http.Transport{TLSClientConfig: opts.tlsConfig},
 		defaultHeaders: http.Header{},
@@ -571,7 +567,7 @@ func (r *RestCatalog) createSession(opts *options) (*http.Client, error) {
 	return cl, nil
 }
 
-func (r *RestCatalog) fetchConfig(opts *options) (*http.Client, *options, error) {
+func (r *Catalog) fetchConfig(opts *options) (*http.Client, *options, error) {
 	params := url.Values{}
 	if opts.warehouseLocation != "" {
 		params.Set(keyWarehouseLocation, opts.warehouseLocation)
@@ -612,17 +608,17 @@ func (r *RestCatalog) fetchConfig(opts *options) (*http.Client, *options, error)
 	return sess, o, nil
 }
 
-func (r *RestCatalog) Name() string             { return r.name }
-func (r *RestCatalog) CatalogType() CatalogType { return REST }
+func (r *Catalog) Name() string              { return r.name }
+func (r *Catalog) CatalogType() catalog.Type { return catalog.REST }
 
 func checkValidNamespace(ident table.Identifier) error {
 	if len(ident) < 1 {
-		return fmt.Errorf("%w: empty namespace identifier", ErrNoSuchNamespace)
+		return fmt.Errorf("%w: empty namespace identifier", catalog.ErrNoSuchNamespace)
 	}
 	return nil
 }
 
-func (r *RestCatalog) tableFromResponse(identifier []string, metadata table.Metadata, loc string, config iceberg.Properties) (*table.Table, error) {
+func (r *Catalog) tableFromResponse(identifier []string, metadata table.Metadata, loc string, config iceberg.Properties) (*table.Table, error) {
 	id := identifier
 	if r.name != "" {
 		id = append([]string{r.name}, identifier...)
@@ -636,7 +632,7 @@ func (r *RestCatalog) tableFromResponse(identifier []string, metadata table.Meta
 	return table.New(id, metadata, loc, iofs), nil
 }
 
-func (r *RestCatalog) ListTables(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error) {
+func (r *Catalog) ListTables(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error) {
 	if err := checkValidNamespace(namespace); err != nil {
 		return nil, err
 	}
@@ -647,7 +643,7 @@ func (r *RestCatalog) ListTables(ctx context.Context, namespace table.Identifier
 	type resp struct {
 		Identifiers []identifier `json:"identifiers"`
 	}
-	rsp, err := doGet[resp](ctx, r.baseURI, path, r.cl, map[int]error{http.StatusNotFound: ErrNoSuchNamespace})
+	rsp, err := doGet[resp](ctx, r.baseURI, path, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
 	if err != nil {
 		return nil, err
 	}
@@ -662,19 +658,19 @@ func (r *RestCatalog) ListTables(ctx context.Context, namespace table.Identifier
 func splitIdentForPath(ident table.Identifier) (string, string, error) {
 	if len(ident) < 1 {
 		return "", "", fmt.Errorf("%w: missing namespace or invalid identifier %v",
-			ErrNoSuchTable, strings.Join(ident, "."))
+			catalog.ErrNoSuchTable, strings.Join(ident, "."))
 	}
 
-	return strings.Join(NamespaceFromIdent(ident), namespaceSeparator), TableNameFromIdent(ident), nil
+	return strings.Join(catalog.NamespaceFromIdent(ident), namespaceSeparator), catalog.TableNameFromIdent(ident), nil
 }
 
-func (r *RestCatalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...createTableOpt) (*table.Table, error) {
+func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
 	ns, tbl, err := splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
 
-	var cfg createTableCfg
+	var cfg internal.CreateTableCfg
 	for _, o := range opts {
 		o(&cfg)
 	}
@@ -684,12 +680,12 @@ func (r *RestCatalog) CreateTable(ctx context.Context, identifier table.Identifi
 		return nil, err
 	}
 
-	freshPartitionSpec, err := iceberg.AssignFreshPartitionSpecIDs(cfg.partitionSpec, schema, freshSchema)
+	freshPartitionSpec, err := iceberg.AssignFreshPartitionSpecIDs(cfg.PartitionSpec, schema, freshSchema)
 	if err != nil {
 		return nil, err
 	}
 
-	freshSortOrder, err := table.AssignFreshSortOrderIDs(cfg.sortOrder, schema, freshSchema)
+	freshSortOrder, err := table.AssignFreshSortOrderIDs(cfg.SortOrder, schema, freshSchema)
 	if err != nil {
 		return nil, err
 	}
@@ -697,15 +693,15 @@ func (r *RestCatalog) CreateTable(ctx context.Context, identifier table.Identifi
 	payload := createTableRequest{
 		Name:          tbl,
 		Schema:        freshSchema,
-		Location:      cfg.location,
+		Location:      cfg.Location,
 		PartitionSpec: &freshPartitionSpec,
 		WriteOrder:    &freshSortOrder,
 		StageCreate:   false,
-		Props:         cfg.properties,
+		Props:         cfg.Properties,
 	}
 
 	ret, err := doPost[createTableRequest, loadTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables"}, payload,
-		r.cl, map[int]error{http.StatusNotFound: ErrNoSuchNamespace, http.StatusConflict: ErrTableAlreadyExists})
+		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrTableAlreadyExists})
 	if err != nil {
 		return nil, err
 	}
@@ -717,7 +713,7 @@ func (r *RestCatalog) CreateTable(ctx context.Context, identifier table.Identifi
 	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, config)
 }
 
-func (r *RestCatalog) CommitTable(ctx context.Context, tbl *table.Table, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
+func (r *Catalog) CommitTable(ctx context.Context, tbl *table.Table, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
 	ident := tbl.Identifier()
 
 	ns, tblName, err := splitIdentForPath(ident)
@@ -726,7 +722,7 @@ func (r *RestCatalog) CommitTable(ctx context.Context, tbl *table.Table, require
 	}
 
 	restIdentifier := identifier{
-		Namespace: NamespaceFromIdent(ident),
+		Namespace: catalog.NamespaceFromIdent(ident),
 		Name:      tblName,
 	}
 
@@ -738,7 +734,7 @@ func (r *RestCatalog) CommitTable(ctx context.Context, tbl *table.Table, require
 
 	ret, err := doPost[payload, commitTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables", tblName},
 		payload{Identifier: restIdentifier, Requirements: requirements, Updates: updates}, r.cl,
-		map[int]error{http.StatusNotFound: ErrNoSuchTable, http.StatusConflict: ErrCommitFailed})
+		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable, http.StatusConflict: ErrCommitFailed})
 	if err != nil {
 		return nil, "", err
 	}
@@ -748,7 +744,7 @@ func (r *RestCatalog) CommitTable(ctx context.Context, tbl *table.Table, require
 	return ret.Metadata, ret.MetadataLoc, nil
 }
 
-func (r *RestCatalog) RegisterTable(ctx context.Context, identifier table.Identifier, metadataLoc string) (*table.Table, error) {
+func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier, metadataLoc string) (*table.Table, error) {
 	ns, tbl, err := splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
@@ -760,7 +756,8 @@ func (r *RestCatalog) RegisterTable(ctx context.Context, identifier table.Identi
 	}
 
 	ret, err := doPost[payload, loadTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables", tbl},
-		payload{Name: tbl, MetadataLoc: metadataLoc}, r.cl, map[int]error{http.StatusNotFound: ErrNoSuchNamespace, http.StatusConflict: ErrTableAlreadyExists})
+		payload{Name: tbl, MetadataLoc: metadataLoc}, r.cl, map[int]error{
+			http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrTableAlreadyExists})
 	if err != nil {
 		return nil, err
 	}
@@ -771,14 +768,14 @@ func (r *RestCatalog) RegisterTable(ctx context.Context, identifier table.Identi
 	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, config)
 }
 
-func (r *RestCatalog) LoadTable(ctx context.Context, identifier table.Identifier, props iceberg.Properties) (*table.Table, error) {
+func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, props iceberg.Properties) (*table.Table, error) {
 	ns, tbl, err := splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
 
 	ret, err := doGet[loadTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables", tbl},
-		r.cl, map[int]error{http.StatusNotFound: ErrNoSuchTable})
+		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable})
 	if err != nil {
 		return nil, err
 	}
@@ -793,14 +790,14 @@ func (r *RestCatalog) LoadTable(ctx context.Context, identifier table.Identifier
 	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, config)
 }
 
-func (r *RestCatalog) UpdateTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
+func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
 	ns, tbl, err := splitIdentForPath(ident)
 	if err != nil {
 		return nil, err
 	}
 
 	restIdentifier := identifier{
-		Namespace: NamespaceFromIdent(ident),
+		Namespace: catalog.NamespaceFromIdent(ident),
 		Name:      tbl,
 	}
 	type payload struct {
@@ -810,7 +807,7 @@ func (r *RestCatalog) UpdateTable(ctx context.Context, ident table.Identifier, r
 	}
 	ret, err := doPost[payload, commitTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables", tbl},
 		payload{Identifier: restIdentifier, Requirements: requirements, Updates: updates}, r.cl,
-		map[int]error{http.StatusNotFound: ErrNoSuchTable, http.StatusConflict: ErrCommitFailed})
+		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable, http.StatusConflict: ErrCommitFailed})
 	if err != nil {
 		return nil, err
 	}
@@ -821,19 +818,19 @@ func (r *RestCatalog) UpdateTable(ctx context.Context, ident table.Identifier, r
 	return r.tableFromResponse(ident, ret.Metadata, ret.MetadataLoc, config)
 }
 
-func (r *RestCatalog) DropTable(ctx context.Context, identifier table.Identifier) error {
+func (r *Catalog) DropTable(ctx context.Context, identifier table.Identifier) error {
 	ns, tbl, err := splitIdentForPath(identifier)
 	if err != nil {
 		return err
 	}
 
 	_, err = doDelete[struct{}](ctx, r.baseURI, []string{"namespaces", ns, "tables", tbl}, r.cl,
-		map[int]error{http.StatusNotFound: ErrNoSuchTable})
+		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable})
 
 	return err
 }
 
-func (r *RestCatalog) PurgeTable(ctx context.Context, identifier table.Identifier) error {
+func (r *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) error {
 	ns, tbl, err := splitIdentForPath(identifier)
 	if err != nil {
 		return err
@@ -845,27 +842,27 @@ func (r *RestCatalog) PurgeTable(ctx context.Context, identifier table.Identifie
 	uri.RawQuery = v.Encode()
 
 	_, err = doDelete[struct{}](ctx, uri, []string{}, r.cl,
-		map[int]error{http.StatusNotFound: ErrNoSuchTable})
+		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable})
 
 	return err
 }
 
-func (r *RestCatalog) RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error) {
+func (r *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error) {
 	type payload struct {
 		From identifier `json:"from"`
 		To   identifier `json:"to"`
 	}
 	f := identifier{
-		Namespace: NamespaceFromIdent(from),
-		Name:      TableNameFromIdent(from),
+		Namespace: catalog.NamespaceFromIdent(from),
+		Name:      catalog.TableNameFromIdent(from),
 	}
 	t := identifier{
-		Namespace: NamespaceFromIdent(to),
-		Name:      TableNameFromIdent(to),
+		Namespace: catalog.NamespaceFromIdent(to),
+		Name:      catalog.TableNameFromIdent(to),
 	}
 
 	_, err := doPost[payload, any](ctx, r.baseURI, []string{"tables", "rename"}, payload{From: f, To: t}, r.cl,
-		map[int]error{http.StatusNotFound: ErrNoSuchTable})
+		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable})
 	if err != nil {
 		return nil, err
 	}
@@ -873,29 +870,29 @@ func (r *RestCatalog) RenameTable(ctx context.Context, from, to table.Identifier
 	return r.LoadTable(ctx, to, nil)
 }
 
-func (r *RestCatalog) CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error {
+func (r *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error {
 	if err := checkValidNamespace(namespace); err != nil {
 		return err
 	}
 
 	_, err := doPost[map[string]any, struct{}](ctx, r.baseURI, []string{"namespaces"},
 		map[string]any{"namespace": namespace, "properties": props}, r.cl, map[int]error{
-			http.StatusNotFound: ErrNoSuchNamespace, http.StatusConflict: ErrNamespaceAlreadyExists})
+			http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrNamespaceAlreadyExists})
 	return err
 }
 
-func (r *RestCatalog) DropNamespace(ctx context.Context, namespace table.Identifier) error {
+func (r *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier) error {
 	if err := checkValidNamespace(namespace); err != nil {
 		return err
 	}
 
 	_, err := doDelete[struct{}](ctx, r.baseURI, []string{"namespaces", strings.Join(namespace, namespaceSeparator)},
-		r.cl, map[int]error{http.StatusNotFound: ErrNoSuchNamespace})
+		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
 
 	return err
 }
 
-func (r *RestCatalog) ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error) {
+func (r *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error) {
 	uri := r.baseURI.JoinPath("namespaces")
 	if len(parent) != 0 {
 		v := url.Values{}
@@ -907,7 +904,7 @@ func (r *RestCatalog) ListNamespaces(ctx context.Context, parent table.Identifie
 		Namespaces []table.Identifier `json:"namespaces"`
 	}
 
-	rsp, err := doGet[rsptype](ctx, uri, []string{}, r.cl, map[int]error{http.StatusNotFound: ErrNoSuchNamespace})
+	rsp, err := doGet[rsptype](ctx, uri, []string{}, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
 	if err != nil {
 		return nil, err
 	}
@@ -915,7 +912,7 @@ func (r *RestCatalog) ListNamespaces(ctx context.Context, parent table.Identifie
 	return rsp.Namespaces, nil
 }
 
-func (r *RestCatalog) LoadNamespaceProperties(ctx context.Context, namespace table.Identifier) (iceberg.Properties, error) {
+func (r *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.Identifier) (iceberg.Properties, error) {
 	if err := checkValidNamespace(namespace); err != nil {
 		return nil, err
 	}
@@ -926,7 +923,7 @@ func (r *RestCatalog) LoadNamespaceProperties(ctx context.Context, namespace tab
 	}
 
 	rsp, err := doGet[nsresponse](ctx, r.baseURI, []string{"namespaces", strings.Join(namespace, namespaceSeparator)},
-		r.cl, map[int]error{http.StatusNotFound: ErrNoSuchNamespace})
+		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
 	if err != nil {
 		return nil, err
 	}
@@ -934,11 +931,11 @@ func (r *RestCatalog) LoadNamespaceProperties(ctx context.Context, namespace tab
 	return rsp.Props, nil
 }
 
-func (r *RestCatalog) UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier,
-	removals []string, updates iceberg.Properties) (PropertiesUpdateSummary, error) {
+func (r *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier,
+	removals []string, updates iceberg.Properties) (catalog.PropertiesUpdateSummary, error) {
 
 	if err := checkValidNamespace(namespace); err != nil {
-		return PropertiesUpdateSummary{}, err
+		return catalog.PropertiesUpdateSummary{}, err
 	}
 
 	type payload struct {
@@ -947,19 +944,19 @@ func (r *RestCatalog) UpdateNamespaceProperties(ctx context.Context, namespace t
 	}
 
 	ns := strings.Join(namespace, namespaceSeparator)
-	return doPost[payload, PropertiesUpdateSummary](ctx, r.baseURI, []string{"namespaces", ns, "properties"},
-		payload{Remove: removals, Updates: updates}, r.cl, map[int]error{http.StatusNotFound: ErrNoSuchNamespace})
+	return doPost[payload, catalog.PropertiesUpdateSummary](ctx, r.baseURI, []string{"namespaces", ns, "properties"},
+		payload{Remove: removals, Updates: updates}, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
 }
 
-func (r *RestCatalog) CheckNamespaceExists(ctx context.Context, namespace table.Identifier) (bool, error) {
+func (r *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Identifier) (bool, error) {
 	if err := checkValidNamespace(namespace); err != nil {
 		return false, err
 	}
 
 	_, err := doGet[struct{}](ctx, r.baseURI, []string{"namespaces", strings.Join(namespace, namespaceSeparator)},
-		r.cl, map[int]error{http.StatusNotFound: ErrNoSuchNamespace})
+		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
 	if err != nil {
-		if errors.Is(err, ErrNoSuchNamespace) {
+		if errors.Is(err, catalog.ErrNoSuchNamespace) {
 			return false, nil
 		}
 		return false, err
