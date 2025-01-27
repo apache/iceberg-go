@@ -280,8 +280,9 @@ func doDelete[T any](ctx context.Context, baseURI *url.URL, path []string, cl *h
 	return do[T](ctx, http.MethodDelete, baseURI, path, cl, override, true)
 }
 
-func doHead[T any](ctx context.Context, baseURI *url.URL, path []string, cl *http.Client, override map[int]error) (ret T, err error) {
-	return do[T](ctx, http.MethodHead, baseURI, path, cl, override, true)
+func doHead(ctx context.Context, baseURI *url.URL, path []string, cl *http.Client, override map[int]error) error {
+	_, err := do[struct{}](ctx, http.MethodHead, baseURI, path, cl, override, true)
+	return err
 }
 
 func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []string, payload Payload, cl *http.Client, override map[int]error) (ret Result, err error) {
@@ -961,7 +962,7 @@ func (r *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Iden
 		return false, err
 	}
 
-	_, err := doHead[struct{}](ctx, r.baseURI, []string{"namespaces", strings.Join(namespace, namespaceSeparator)},
+	err := doHead(ctx, r.baseURI, []string{"namespaces", strings.Join(namespace, namespaceSeparator)},
 		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
 	if err != nil {
 		if errors.Is(err, catalog.ErrNoSuchNamespace) {
