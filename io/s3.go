@@ -106,33 +106,41 @@ func ParseAWSConfig(props map[string]string) (*aws.Config, error) {
 	return awscfg, nil
 }
 
-func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
-	awscfg, err := ParseAWSConfig(props)
-	if err != nil {
-		return nil, err
-	}
-
-	endpoint, ok := props[S3EndpointURL]
-	if !ok {
-		endpoint = os.Getenv("AWS_S3_ENDPOINT")
-	}
-
-	usePathStyle := true
-	if forceVirtual, ok := props[S3ForceVirtualAddressing]; ok {
-		if cfgForceVirtual, err := strconv.ParseBool(forceVirtual); err == nil {
-			usePathStyle = !cfgForceVirtual
+func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]string, client any) (*blob.Bucket, error) {
+	var s3client *s3.Client
+	if client != nil {
+		if c, ok := client.(*s3.Client); ok {
+			s3client = c
+		} else {
+			return nil, fmt.Errorf("invalid S3 client type %T", client)
 		}
-	}
-
-	client := s3.NewFromConfig(*awscfg, func(o *s3.Options) {
-		if endpoint != "" {
-			o.BaseEndpoint = aws.String(endpoint)
+	} else {
+		awscfg, err := ParseAWSConfig(props)
+		if err != nil {
+			return nil, err
 		}
-		o.UsePathStyle = usePathStyle
-	})
+
+		endpoint, ok := props[S3EndpointURL]
+		if !ok {
+			endpoint = os.Getenv("AWS_S3_ENDPOINT")
+		}
+
+		usePathStyle := true
+		if forceVirtual, ok := props[S3ForceVirtualAddressing]; ok {
+			if cfgForceVirtual, err := strconv.ParseBool(forceVirtual); err == nil {
+				usePathStyle = !cfgForceVirtual
+			}
+		}
+		s3client = s3.NewFromConfig(*awscfg, func(o *s3.Options) {
+			if endpoint != "" {
+				o.BaseEndpoint = aws.String(endpoint)
+			}
+			o.UsePathStyle = usePathStyle
+		})
+	}
 
 	// Create a *blob.Bucket.
-	bucket, err := s3blob.OpenBucketV2(ctx, client, parsed.Host, nil)
+	bucket, err := s3blob.OpenBucketV2(ctx, s3client, parsed.Host, nil)
 	if err != nil {
 		return nil, err
 	}

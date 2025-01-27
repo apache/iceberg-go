@@ -229,7 +229,7 @@ func (f ioFile) ReadDir(count int) ([]fs.DirEntry, error) {
 	return d.ReadDir(count)
 }
 
-func inferFileIOFromSchema(path string, props map[string]string) (IO, error) {
+func inferFileIOFromSchema(path string, props map[string]string, client any) (IO, error) {
 	parsed, err := url.Parse(path)
 	if err != nil {
 		return nil, err
@@ -239,7 +239,7 @@ func inferFileIOFromSchema(path string, props map[string]string) (IO, error) {
 
 	switch parsed.Scheme {
 	case "s3", "s3a", "s3n":
-		bucket, err = createS3Bucket(ctx, parsed, props)
+		bucket, err = createS3Bucket(ctx, parsed, props, client)
 		if err != nil {
 			return nil, err
 		}
@@ -267,12 +267,12 @@ func inferFileIOFromSchema(path string, props map[string]string) (IO, error) {
 // does not yet have an implementation here.
 //
 // Currently local, S3, GCS, and In-Memory FSs are implemented.
-func LoadFS(props map[string]string, location string) (IO, error) {
+func LoadFS(props map[string]string, location string, client any) (IO, error) {
 	if location == "" {
 		location = props["warehouse"]
 	}
 
-	iofs, err := inferFileIOFromSchema(location, props)
+	iofs, err := inferFileIOFromSchema(location, props, client)
 	if err != nil {
 		return nil, err
 	}

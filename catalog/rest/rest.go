@@ -624,7 +624,7 @@ func (r *Catalog) tableFromResponse(identifier []string, metadata table.Metadata
 		id = append([]string{r.name}, identifier...)
 	}
 
-	iofs, err := iceio.LoadFS(config, loc)
+	iofs, err := iceio.LoadFS(config, loc, nil)
 	if err != nil {
 		return nil, err
 	}

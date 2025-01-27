@@ -33,6 +33,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/glue"
 	"github.com/aws/aws-sdk-go-v2/service/glue/types"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 const (
@@ -126,6 +127,7 @@ type glueAPI interface {
 type Catalog struct {
 	glueSvc   glueAPI
 	catalogId *string
+	s3Client  *s3.Client
 }
 
 // NewCatalog creates a new instance of glue.Catalog with the given options.
@@ -146,6 +148,7 @@ func NewCatalog(opts ...Option) *Catalog {
 	return &Catalog{
 		glueSvc:   glue.NewFromConfig(glueOps.awsConfig),
 		catalogId: catalogId,
+		s3Client:  s3.NewFromConfig(glueOps.awsConfig),
 	}
 }
 
@@ -205,7 +208,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, pr
 	}
 
 	// TODO: consider providing a way to directly access the S3 iofs to enable testing of the catalog.
-	iofs, err := io.LoadFS(props, location)
+	iofs, err := io.LoadFS(props, location, c.s3Client)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load table %s.%s: %w", database, tableName, err)
 	}
