@@ -447,20 +447,12 @@ func (r *RestCatalogSuite) TestCreateNamespace200() {
 
 func (r *RestCatalogSuite) TestCheckNamespaceExists204() {
 	r.mux.HandleFunc("/v1/namespaces/leden", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		r.Require().Equal(http.MethodHead, req.Method)
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
 		}
-
-		w.WriteHeader(http.StatusOK)
-		err := json.NewEncoder(w).Encode(map[string]any{
-			"namespaces": []string{"leden"},
-			"properties": map[string]any{},
-		})
-		if err != nil {
-			return
-		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
@@ -470,9 +462,9 @@ func (r *RestCatalogSuite) TestCheckNamespaceExists204() {
 	r.Require().True(exists)
 }
 
-func (r *RestCatalogSuite) TestCheckNamespaceExists400() {
+func (r *RestCatalogSuite) TestCheckNamespaceExists404() {
 	r.mux.HandleFunc("/v1/namespaces/noneexistent", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodGet, req.Method)
+		r.Require().Equal(http.MethodHead, req.Method)
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))

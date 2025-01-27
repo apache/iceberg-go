@@ -260,6 +260,10 @@ func do[T any](ctx context.Context, method string, baseURI *url.URL, path []stri
 		return ret, handleNon200(rsp, override)
 	}
 
+	if method == http.MethodHead {
+		return
+	}
+
 	defer rsp.Body.Close()
 	if err = json.NewDecoder(rsp.Body).Decode(&ret); err != nil {
 		return ret, fmt.Errorf("%w: error decoding json payload: `%s`", ErrRESTError, err.Error())
@@ -274,6 +278,10 @@ func doGet[T any](ctx context.Context, baseURI *url.URL, path []string, cl *http
 
 func doDelete[T any](ctx context.Context, baseURI *url.URL, path []string, cl *http.Client, override map[int]error) (ret T, err error) {
 	return do[T](ctx, http.MethodDelete, baseURI, path, cl, override, true)
+}
+
+func doHead[T any](ctx context.Context, baseURI *url.URL, path []string, cl *http.Client, override map[int]error) (ret T, err error) {
+	return do[T](ctx, http.MethodHead, baseURI, path, cl, override, true)
 }
 
 func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []string, payload Payload, cl *http.Client, override map[int]error) (ret Result, err error) {
@@ -953,7 +961,7 @@ func (r *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Iden
 		return false, err
 	}
 
-	_, err := doGet[struct{}](ctx, r.baseURI, []string{"namespaces", strings.Join(namespace, namespaceSeparator)},
+	_, err := doHead[struct{}](ctx, r.baseURI, []string{"namespaces", strings.Join(namespace, namespaceSeparator)},
 		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
 	if err != nil {
 		if errors.Is(err, catalog.ErrNoSuchNamespace) {
