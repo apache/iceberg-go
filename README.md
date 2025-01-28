@@ -61,17 +61,18 @@ $ cd iceberg-go/cmd/iceberg && go build .
 ### Catalog Support
 
 | Operation                | REST | Hive | DynamoDB | Glue |
-| :----------------------- | :--: | :--: | :------: | :--: |
+|:-------------------------|:----:| :--: | :------: |:----:|
 | Load Table               |  X   |      |          |  X   |
 | List Tables              |  X   |      |          |  X   |
-| Create Table             |      |      |          |  X   |
+| Create Table             |  X   |      |          |  X   |
 | Update Current Snapshot  |      |      |          |      |
 | Create New Snapshot      |      |      |          |      |
-| Rename Table             |      |      |          |  X   |
-| Drop Table               |      |      |          |  X   |
+| Rename Table             |  X   |      |          |  X   |
+| Drop Table               |  X   |      |          |  X   |
 | Alter Table              |      |      |          |      |
 | Set Table Properties     |      |      |          |      |
 | Create Namespace         |  X   |      |          |  X   |
+| Check Namespace Exists   |  X   |      |          |      |
 | Drop Namespace           |  X   |      |          |  X   |
 | Set Namespace Properties |  X   |      |          |  X   |
 

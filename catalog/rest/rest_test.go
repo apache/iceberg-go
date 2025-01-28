@@ -445,6 +445,52 @@ func (r *RestCatalogSuite) TestCreateNamespace200() {
 	r.Require().NoError(cat.CreateNamespace(context.Background(), catalog.ToIdentifier("leden"), nil))
 }
 
+func (r *RestCatalogSuite) TestCheckNamespaceExists204() {
+	r.mux.HandleFunc("/v1/namespaces/leden", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodHead, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	exists, err := cat.CheckNamespaceExists(context.Background(), catalog.ToIdentifier("leden"))
+	r.Require().NoError(err)
+	r.Require().True(exists)
+}
+
+func (r *RestCatalogSuite) TestCheckNamespaceExists404() {
+	r.mux.HandleFunc("/v1/namespaces/noneexistent", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodHead, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+		err := json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "The given namespace does not exist",
+				"type":    "NoSuchNamespaceException",
+				"code":    404,
+			},
+		})
+		if err != nil {
+			return
+		}
+	})
+
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	exists, err := cat.CheckNamespaceExists(context.Background(), catalog.ToIdentifier("noneexistent"))
+	r.Require().NoError(err)
+	r.False(exists)
+}
+
 func (r *RestCatalogSuite) TestCreateNamespaceWithProps200() {
 	r.mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodPost, req.Method)
