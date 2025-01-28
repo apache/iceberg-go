@@ -360,18 +360,15 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, pr
 			Where("table_name = ?", tbl).
 			Scan(ctx)
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil
+			return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchTable, identifier)
 		}
-		return t, err
+		return t, fmt.Errorf("error encountered loading table %s: %w", identifier, err)
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	switch {
-	case result == nil:
-		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchTable, identifier)
-	case !result.MetadataLocation.Valid:
+	if !result.MetadataLocation.Valid {
 		return nil, fmt.Errorf("%w: %s, metadata location is missing", catalog.ErrNoSuchTable, identifier)
 	}
 
@@ -396,12 +393,12 @@ func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 			TableName:      tbl,
 		}).WherePK().Exec(ctx)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to delete table entry: %w", err)
 		}
 
 		n, err := res.RowsAffected()
 		if err != nil {
-			return err
+			return fmt.Errorf("error encountered when deleting table entry: %w", err)
 		}
 
 		if n == 0 {
@@ -433,7 +430,7 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 			TableName:      toTbl,
 		}).WherePK().Exists(ctx)
 		if err != nil {
-			return err
+			return fmt.Errorf("error encountered checking existence of table '%s': %w", to, err)
 		}
 
 		if exists {
@@ -449,12 +446,12 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 			Set("table_name = ?", toTbl).
 			Exec(ctx)
 		if err != nil {
-			return err
+			return fmt.Errorf("error renaming table from '%s' to %s': %w", from, to, err)
 		}
 
 		n, err := res.RowsAffected()
 		if err != nil {
-			return err
+			return fmt.Errorf("error renaming table from '%s' to %s': %w", from, to, err)
 		}
 
 		if n == 0 {
@@ -500,7 +497,7 @@ func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifie
 		}
 
 		_, err := tx.NewInsert().Model(&toInsert).Exec(ctx)
-		return err
+		return fmt.Errorf("error inserting namespace properties for namespace '%s': %w", namespace, err)
 	})
 }
 
@@ -533,7 +530,7 @@ func (c *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 		_, err := tx.NewDelete().Model((*sqlIcebergNamespaceProps)(nil)).
 			Where("catalog_name = ?", c.name).
 			Where("namespace = ?", nsToDelete).Exec(ctx)
-		return err
+		return fmt.Errorf("error deleting namespace '%s': %w", namespace, err)
 	})
 }
 
@@ -558,7 +555,7 @@ func (c *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 			Where("catalog_name = ?", c.name).
 			Where("namespace = ?", nsToLoad).Scan(ctx)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("error loading namespace properties for '%s': %w", namespace, err)
 		}
 
 		result := make(iceberg.Properties)
@@ -590,7 +587,7 @@ func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) ([
 		return tables, err
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error listing tables for namespace '%s': %w", namespace, err)
 	}
 
 	ret := make([]table.Identifier, len(tables))
@@ -626,7 +623,7 @@ func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) (
 
 		rows, err := tx.QueryContext(ctx, tableQuery.String()+" UNION "+nsQuery.String())
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("error listing namespaces for '%s': %w", parent, err)
 		}
 
 		err = c.db.ScanRows(ctx, rows, &namespaces)
@@ -670,7 +667,7 @@ func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 				Where("namespace = ?", nsToUpdate).
 				Where("property_key in (?)", bun.In(removals)).Exec(ctx)
 			if err != nil {
-				return err
+				return fmt.Errorf("error deleting properties for '%s': %w", namespace, err)
 			}
 		}
 
@@ -699,12 +696,14 @@ func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 					Where("property_key in (?)", bun.In(slices.Collect(maps.Keys(updates)))).
 					Exec(ctx)
 				if err != nil {
-					return err
+					return fmt.Errorf("error deleting properties for '%s': %w", namespace, err)
 				}
 			}
 
 			_, err := q.Exec(ctx)
-			return err
+			if err != nil {
+				return fmt.Errorf("error updating namespace properties for '%s': %w", namespace, err)
+			}
 		}
 
 		return nil
