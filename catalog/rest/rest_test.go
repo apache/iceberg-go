@@ -844,6 +844,53 @@ func (r *RestCatalogSuite) TestCreateTable409() {
 	r.ErrorIs(err, catalog.ErrTableAlreadyExists)
 }
 
+func (r *RestCatalogSuite) TestCheckTableExists204() {
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables/fokko2", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodHead, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	exists, err := cat.CheckTableExists(context.Background(), catalog.ToIdentifier("fokko", "fokko2"))
+	r.Require().NoError(err)
+	r.True(exists)
+}
+
+func (r *RestCatalogSuite) TestCheckTableExists404() {
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables/nonexistent", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodHead, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+		err := json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "Table not found",
+				"type":    "NoSuchTableException",
+				"code":    http.StatusNotFound,
+			},
+		})
+		if err != nil {
+			return
+		}
+
+		cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+		r.Require().NoError(err)
+
+		exists, err := cat.CheckTableExists(context.Background(), catalog.ToIdentifier("fokko", "nonexistent"))
+		r.Require().NoError(err)
+		r.False(exists)
+	})
+}
+
 func (r *RestCatalogSuite) TestLoadTable200() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/tables/table", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodGet, req.Method)
