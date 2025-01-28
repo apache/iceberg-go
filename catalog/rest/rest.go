@@ -82,7 +82,7 @@ var (
 
 func init() {
 	reg := catalog.RegistrarFunc(func(name string, p iceberg.Properties) (catalog.Catalog, error) {
-		return newCatalogFromProps(name, p.Get("uri", ""), p)
+		return newCatalogFromProps(context.Background(), name, p.Get("uri", ""), p)
 	})
 
 	catalog.Register(string(catalog.REST), reg)
@@ -439,39 +439,39 @@ type Catalog struct {
 	props iceberg.Properties
 }
 
-func newCatalogFromProps(name string, uri string, p iceberg.Properties) (*Catalog, error) {
+func newCatalogFromProps(ctx context.Context, name string, uri string, p iceberg.Properties) (*Catalog, error) {
 	ops := fromProps(p)
 
 	r := &Catalog{name: name}
-	if err := r.init(ops, uri); err != nil {
+	if err := r.init(ctx, ops, uri); err != nil {
 		return nil, err
 	}
 
 	return r, nil
 }
 
-func NewCatalog(name, uri string, opts ...Option) (*Catalog, error) {
+func NewCatalog(ctx context.Context, name, uri string, opts ...Option) (*Catalog, error) {
 	ops := &options{}
 	for _, o := range opts {
 		o(ops)
 	}
 
 	r := &Catalog{name: name}
-	if err := r.init(ops, uri); err != nil {
+	if err := r.init(ctx, ops, uri); err != nil {
 		return nil, err
 	}
 
 	return r, nil
 }
 
-func (r *Catalog) init(ops *options, uri string) error {
+func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 	baseuri, err := url.Parse(uri)
 	if err != nil {
 		return err
 	}
 
 	r.baseURI = baseuri.JoinPath("v1")
-	if r.cl, ops, err = r.fetchConfig(ops); err != nil {
+	if r.cl, ops, err = r.fetchConfig(ctx, ops); err != nil {
 		return err
 	}
 
@@ -535,7 +535,7 @@ func (r *Catalog) fetchAccessToken(cl *http.Client, creds string, opts *options)
 	}
 }
 
-func (r *Catalog) createSession(opts *options) (*http.Client, error) {
+func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Client, error) {
 	session := &sessionTransport{
 		Transport:      http.Transport{TLSClientConfig: opts.tlsConfig},
 		defaultHeaders: http.Header{},
@@ -560,7 +560,7 @@ func (r *Catalog) createSession(opts *options) (*http.Client, error) {
 	session.defaultHeaders.Set("X-Iceberg-Access-Delegation", "vended-credentials")
 
 	if opts.enableSigv4 {
-		cfg, err := config.LoadDefaultConfig(context.Background())
+		cfg, err := config.LoadDefaultConfig(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -576,7 +576,7 @@ func (r *Catalog) createSession(opts *options) (*http.Client, error) {
 	return cl, nil
 }
 
-func (r *Catalog) fetchConfig(opts *options) (*http.Client, *options, error) {
+func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client, *options, error) {
 	params := url.Values{}
 	if opts.warehouseLocation != "" {
 		params.Set(keyWarehouseLocation, opts.warehouseLocation)
@@ -585,12 +585,12 @@ func (r *Catalog) fetchConfig(opts *options) (*http.Client, *options, error) {
 	route := r.baseURI.JoinPath("config")
 	route.RawQuery = params.Encode()
 
-	sess, err := r.createSession(opts)
+	sess, err := r.createSession(ctx, opts)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	rsp, err := doGet[configResponse](context.Background(), route, []string{}, sess, nil)
+	rsp, err := doGet[configResponse](ctx, route, []string{}, sess, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -627,13 +627,13 @@ func checkValidNamespace(ident table.Identifier) error {
 	return nil
 }
 
-func (r *Catalog) tableFromResponse(identifier []string, metadata table.Metadata, loc string, config iceberg.Properties) (*table.Table, error) {
+func (r *Catalog) tableFromResponse(ctx context.Context, identifier []string, metadata table.Metadata, loc string, config iceberg.Properties) (*table.Table, error) {
 	id := identifier
 	if r.name != "" {
 		id = append([]string{r.name}, identifier...)
 	}
 
-	iofs, err := iceio.LoadFS(config, loc)
+	iofs, err := iceio.LoadFS(ctx, config, loc)
 	if err != nil {
 		return nil, err
 	}
@@ -719,7 +719,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	maps.Copy(config, ret.Metadata.Properties())
 	maps.Copy(config, ret.Config)
 
-	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, config)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config)
 }
 
 func (r *Catalog) CommitTable(ctx context.Context, tbl *table.Table, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
@@ -774,7 +774,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
 	maps.Copy(config, ret.Config)
-	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, config)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config)
 }
 
 func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, props iceberg.Properties) (*table.Table, error) {
@@ -796,7 +796,7 @@ func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, pr
 		config[k] = v
 	}
 
-	return r.tableFromResponse(identifier, ret.Metadata, ret.MetadataLoc, config)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config)
 }
 
 func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
@@ -824,7 +824,7 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
 
-	return r.tableFromResponse(ident, ret.Metadata, ret.MetadataLoc, config)
+	return r.tableFromResponse(ctx, ident, ret.Metadata, ret.MetadataLoc, config)
 }
 
 func (r *Catalog) DropTable(ctx context.Context, identifier table.Identifier) error {

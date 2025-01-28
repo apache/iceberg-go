@@ -18,6 +18,7 @@
 package rest
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -59,7 +60,7 @@ func TestAuthHeader(t *testing.T) {
 		})
 	})
 
-	cat, err := NewCatalog("rest", srv.URL,
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL,
 		WithCredential("client:secret"))
 	require.NoError(t, err)
 	assert.NotNil(t, cat)
@@ -107,7 +108,7 @@ func TestAuthUriHeader(t *testing.T) {
 
 	authUri, err := url.Parse(srv.URL)
 	require.NoError(t, err)
-	cat, err := NewCatalog("rest", srv.URL,
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL,
 		WithCredential("client:secret"), WithAuthURI(authUri.JoinPath("auth-token-url")))
 	require.NoError(t, err)
 	assert.NotNil(t, cat)

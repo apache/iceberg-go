@@ -38,10 +38,11 @@ type blobOpenFile struct {
 
 	name, key string
 	b         *blobFileIO
+	ctx       context.Context
 }
 
 func (f *blobOpenFile) ReadAt(p []byte, off int64) (int, error) {
-	rdr, err := f.b.Bucket.NewRangeReader(context.Background(), f.key, off, int64(len(p)), nil)
+	rdr, err := f.b.Bucket.NewRangeReader(f.ctx, f.key, off, int64(len(p)), nil)
 	if err != nil {
 		return 0, err
 	}
@@ -74,6 +75,7 @@ type blobFileIO struct {
 	*blob.Bucket
 
 	bucketName string
+	ctx        context.Context
 }
 
 func (bfs *blobFileIO) preprocess(key string) string {
@@ -94,20 +96,20 @@ func (bfs *blobFileIO) Open(path string) (fs.File, error) {
 		key, name = path, filepath.Base(path)
 	)
 
-	r, err := bfs.NewReader(context.Background(), key, nil)
+	r, err := bfs.NewReader(bfs.ctx, key, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	return &blobOpenFile{Reader: r, name: name, key: key, b: bfs}, nil
+	return &blobOpenFile{Reader: r, name: name, key: key, b: bfs, ctx: bfs.ctx}, nil
 }
 
 func (bfs *blobFileIO) Remove(name string) error {
-	return bfs.Bucket.Delete(context.Background(), name)
+	return bfs.Bucket.Delete(bfs.ctx, name)
 }
 
 func (bfs *blobFileIO) Create(name string) (FileWriter, error) {
-	return bfs.NewWriter(name, true, nil)
+	return bfs.NewWriter(bfs.ctx, name, true, nil)
 }
 
 // NewWriter returns a Writer that writes to the blob stored at path.
@@ -118,13 +120,12 @@ func (bfs *blobFileIO) Create(name string) (FileWriter, error) {
 //
 // The caller must call Close on the returned Writer, even if the write is
 // aborted.
-func (io *blobFileIO) NewWriter(path string, overwrite bool, opts *blob.WriterOptions) (w *blobWriteFile, err error) {
+func (io *blobFileIO) NewWriter(ctx context.Context, path string, overwrite bool, opts *blob.WriterOptions) (w *blobWriteFile, err error) {
 	if !fs.ValidPath(path) {
 		return nil, &fs.PathError{Op: "new writer", Path: path, Err: fs.ErrInvalid}
 	}
 	path = io.preprocess(path)
 
-	ctx := context.Background()
 	if !overwrite {
 		if exists, err := io.Bucket.Exists(ctx, path); exists {
 			if err != nil {
@@ -143,8 +144,8 @@ func (io *blobFileIO) NewWriter(path string, overwrite bool, opts *blob.WriterOp
 		nil
 }
 
-func createBlobFS(bucket *blob.Bucket, bucketName string) IO {
-	iofs := &blobFileIO{Bucket: bucket, bucketName: bucketName}
+func createBlobFS(ctx context.Context, bucket *blob.Bucket, bucketName string) IO {
+	iofs := &blobFileIO{Bucket: bucket, bucketName: bucketName, ctx: ctx}
 	return FSPreProcName(iofs, iofs.preprocess)
 }
 
