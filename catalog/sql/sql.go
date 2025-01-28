@@ -497,7 +497,10 @@ func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifie
 		}
 
 		_, err := tx.NewInsert().Model(&toInsert).Exec(ctx)
-		return fmt.Errorf("error inserting namespace properties for namespace '%s': %w", namespace, err)
+		if err != nil {
+			return fmt.Errorf("error inserting namespace properties for namespace '%s': %w", namespace, err)
+		}
+		return nil
 	})
 }
 
