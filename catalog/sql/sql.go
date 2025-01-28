@@ -362,7 +362,11 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, pr
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchTable, identifier)
 		}
-		return t, fmt.Errorf("error encountered loading table %s: %w", identifier, err)
+
+		if err != nil {
+			return nil, fmt.Errorf("error encountered loading table %s: %w", identifier, err)
+		}
+		return t, nil
 	})
 	if err != nil {
 		return nil, err
@@ -533,7 +537,10 @@ func (c *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 		_, err := tx.NewDelete().Model((*sqlIcebergNamespaceProps)(nil)).
 			Where("catalog_name = ?", c.name).
 			Where("namespace = ?", nsToDelete).Exec(ctx)
-		return fmt.Errorf("error deleting namespace '%s': %w", namespace, err)
+		if err != nil {
+			return fmt.Errorf("error deleting namespace '%s': %w", namespace, err)
+		}
+		return nil
 	})
 }
 
