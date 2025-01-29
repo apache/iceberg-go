@@ -156,7 +156,7 @@ func withReadTx[R any](ctx context.Context, db *bun.DB, fn func(context.Context,
 }
 
 func withWriteTx(ctx context.Context, db *bun.DB, fn func(context.Context, bun.Tx) error) error {
-	return db.RunInTx(ctx, &sql.TxOptions{Isolation: sql.LevelLinearizable}, func(ctx context.Context, tx bun.Tx) error {
+	return db.RunInTx(ctx, &sql.TxOptions{Isolation: sql.LevelDefault}, func(ctx context.Context, tx bun.Tx) error {
 		return fn(ctx, tx)
 	})
 }
