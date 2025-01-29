@@ -39,11 +39,11 @@ $ cd iceberg-go/cmd/iceberg && go build .
 ### FileSystem Support
 
 | Filesystem Type      | Supported |
-| :------------------: | :-------: |
-| S3                   |    X      |
-| Google Cloud Storage |           |
-| Azure Blob Storage   |           |
-| Local Filesystem     |    X      |
+| :------------------: |:---------:|
+| S3                   |     X     |
+| Google Cloud Storage |     X     |
+| Azure Blob Storage   |     X     |
+| Local Filesystem     |     X     |
 
 ### Metadata
 

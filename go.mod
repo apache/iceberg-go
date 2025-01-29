@@ -29,6 +29,9 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/glue v1.105.3
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.74.1
 	github.com/aws/smithy-go v1.22.2
+	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.14.0
+	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.7.0
+	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.3.2
 	github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815
 	github.com/google/uuid v1.6.0
 	github.com/hamba/avro/v2 v2.27.0
