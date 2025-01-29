@@ -65,13 +65,13 @@ var (
 // Registrar is a factory for creating Catalog instances, used for registering to use
 // with LoadCatalog.
 type Registrar interface {
-	GetCatalog(ctx context.Context, catalogURI string, props iceberg.Properties) (Catalog, error)
+	GetCatalog(ctx context.Context, catalogName string, props iceberg.Properties) (Catalog, error)
 }
 
 type RegistrarFunc func(context.Context, string, iceberg.Properties) (Catalog, error)
 
-func (f RegistrarFunc) GetCatalog(ctx context.Context, catalogURI string, props iceberg.Properties) (Catalog, error) {
-	return f(ctx, catalogURI, props)
+func (f RegistrarFunc) GetCatalog(ctx context.Context, catalogName string, props iceberg.Properties) (Catalog, error) {
+	return f(ctx, catalogName, props)
 }
 
 // Register adds the new catalog type to the registry. If the catalog type is already registered, it will be replaced.
