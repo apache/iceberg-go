@@ -455,7 +455,7 @@ func (r *RestCatalogSuite) TestCheckNamespaceExists204() {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
-	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
 	exists, err := cat.CheckNamespaceExists(context.Background(), catalog.ToIdentifier("leden"))
@@ -484,7 +484,7 @@ func (r *RestCatalogSuite) TestCheckNamespaceExists404() {
 		}
 	})
 
-	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
 	exists, err := cat.CheckNamespaceExists(context.Background(), catalog.ToIdentifier("noneexistent"))
@@ -855,7 +855,7 @@ func (r *RestCatalogSuite) TestCheckTableExists204() {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
 	exists, err := cat.CheckTableExists(context.Background(), catalog.ToIdentifier("fokko", "fokko2"))
@@ -880,7 +880,7 @@ func (r *RestCatalogSuite) TestCheckTableExists404() {
 			},
 		})
 	})
-	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
 	exists, err := cat.CheckTableExists(context.Background(), catalog.ToIdentifier("fokko", "nonexistent"))

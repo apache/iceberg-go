@@ -90,15 +90,15 @@ var (
 )
 
 func TestCreateSQLCatalogNoDriverDialect(t *testing.T) {
-	_, err := catalog.Load("sql", iceberg.Properties{})
+	_, err := catalog.Load(context.Background(), "sql", iceberg.Properties{})
 	assert.Error(t, err)
 
-	_, err = catalog.Load("sql", iceberg.Properties{sqlcat.DriverKey: "sqlite"})
+	_, err = catalog.Load(context.Background(), "sql", iceberg.Properties{sqlcat.DriverKey: "sqlite"})
 	assert.Error(t, err)
 }
 
 func TestInvalidDialect(t *testing.T) {
-	_, err := catalog.Load("sql", iceberg.Properties{
+	_, err := catalog.Load(context.Background(), "sql", iceberg.Properties{
 		sqlcat.DriverKey:  sqliteshim.ShimName,
 		sqlcat.DialectKey: "foobar",
 	})
@@ -193,7 +193,7 @@ func (s *SqliteCatalogTestSuite) confirmTablesExist(db *sql.DB) {
 }
 
 func (s *SqliteCatalogTestSuite) loadCatalogForTableCreation() *sqlcat.Catalog {
-	cat, err := catalog.Load("default", iceberg.Properties{
+	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
 		"uri":                 s.catalogUri(),
 		sqlcat.DriverKey:      sqliteshim.ShimName,
 		sqlcat.DialectKey:     string(sqlcat.SQLite),
@@ -217,7 +217,7 @@ func (s *SqliteCatalogTestSuite) getDB() *sql.DB {
 }
 
 func (s *SqliteCatalogTestSuite) getCatalogMemory() *sqlcat.Catalog {
-	cat, err := catalog.Load("default", iceberg.Properties{
+	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
 		"uri":             ":memory:",
 		sqlcat.DriverKey:  sqliteshim.ShimName,
 		sqlcat.DialectKey: string(sqlcat.SQLite),
@@ -230,7 +230,7 @@ func (s *SqliteCatalogTestSuite) getCatalogMemory() *sqlcat.Catalog {
 }
 
 func (s *SqliteCatalogTestSuite) getCatalogSqlite() *sqlcat.Catalog {
-	cat, err := catalog.Load("default", iceberg.Properties{
+	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
 		"uri":             s.catalogUri(),
 		sqlcat.DriverKey:  sqliteshim.ShimName,
 		sqlcat.DialectKey: string(sqlcat.SQLite),

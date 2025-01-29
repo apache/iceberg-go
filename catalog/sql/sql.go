@@ -62,7 +62,7 @@ const (
 )
 
 func init() {
-	catalog.Register("sql", catalog.RegistrarFunc(func(name string, p iceberg.Properties) (c catalog.Catalog, err error) {
+	catalog.Register("sql", catalog.RegistrarFunc(func(ctx context.Context, name string, p iceberg.Properties) (c catalog.Catalog, err error) {
 		driver, ok := p[DriverKey]
 		if !ok {
 			return nil, errors.New("must provide driver to pass to sql.Open")
@@ -315,7 +315,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		return nil, err
 	}
 
-	if err := internal.WriteMetadata(metadata, metadataLocation, c.props); err != nil {
+	if err := internal.WriteMetadata(ctx, metadata, metadataLocation, c.props); err != nil {
 		return nil, err
 	}
 
@@ -379,7 +379,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, pr
 	tblProps := maps.Clone(c.props)
 	maps.Copy(props, tblProps)
 
-	iofs, err := io.LoadFS(tblProps, result.MetadataLocation.String)
+	iofs, err := io.LoadFS(ctx, tblProps, result.MetadataLocation.String)
 	if err != nil {
 		return nil, err
 	}
