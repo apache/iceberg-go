@@ -70,7 +70,8 @@ $ cd iceberg-go/cmd/iceberg && go build .
 | Rename Table             |  X   |      |          |  X   |
 | Drop Table               |  X   |      |          |  X   |
 | Alter Table              |      |      |          |      |
-| Set Table Properties     |      |      |          |      |
+| Check Table Exists       |  X   |      |          |      |
+| Set Table Properties     |  X   |      |          |  X   |
 | Create Namespace         |  X   |      |          |  X   |
 | Check Namespace Exists   |  X   |      |          |      |
 | Drop Namespace           |  X   |      |          |  X   |

@@ -973,3 +973,19 @@ func (r *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Iden
 
 	return true, nil
 }
+
+func (r *Catalog) CheckTableExists(ctx context.Context, identifier table.Identifier) (bool, error) {
+	ns, tbl, err := splitIdentForPath(identifier)
+	if err != nil {
+		return false, err
+	}
+	err = doHead(ctx, r.baseURI, []string{"namespaces", ns, "tables", tbl},
+		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable})
+	if err != nil {
+		if errors.Is(err, catalog.ErrNoSuchTable) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
