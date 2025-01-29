@@ -81,8 +81,8 @@ var (
 )
 
 func init() {
-	reg := catalog.RegistrarFunc(func(name string, p iceberg.Properties) (catalog.Catalog, error) {
-		return newCatalogFromProps(context.Background(), name, p.Get("uri", ""), p)
+	reg := catalog.RegistrarFunc(func(ctx context.Context, name string, p iceberg.Properties) (catalog.Catalog, error) {
+		return newCatalogFromProps(ctx, name, p.Get("uri", ""), p)
 	})
 
 	catalog.Register(string(catalog.REST), reg)

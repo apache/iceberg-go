@@ -118,6 +118,7 @@ func (r *RestCatalogSuite) TestToken200() {
 }
 
 func (r *RestCatalogSuite) TestLoadRegisteredCatalog() {
+	ctx := context.Background()
 	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
 		r.Equal(http.MethodPost, req.Method)
 
@@ -140,7 +141,7 @@ func (r *RestCatalogSuite) TestLoadRegisteredCatalog() {
 		})
 	})
 
-	cat, err := catalog.Load("restful", iceberg.Properties{
+	cat, err := catalog.Load(ctx, "restful", iceberg.Properties{
 		"uri":        r.srv.URL,
 		"warehouse":  "s3://some-bucket",
 		"credential": TestCreds,
@@ -1155,7 +1156,8 @@ func (r *RestTLSCatalogSuite) TestSSLFail() {
 }
 
 func (r *RestTLSCatalogSuite) TestSSLLoadRegisteredCatalog() {
-	cat, err := catalog.Load("foobar", iceberg.Properties{
+	ctx := context.Background()
+	cat, err := catalog.Load(ctx, "foobar", iceberg.Properties{
 		"uri":                  r.srv.URL,
 		"warehouse":            "s3://some-bucket",
 		"token":                TestToken,

@@ -68,8 +68,8 @@ var (
 )
 
 func init() {
-	catalog.Register("glue", catalog.RegistrarFunc(func(_ string, props iceberg.Properties) (catalog.Catalog, error) {
-		awsConfig, err := toAwsConfig(context.Background(), props)
+	catalog.Register("glue", catalog.RegistrarFunc(func(ctx context.Context, _ string, props iceberg.Properties) (catalog.Catalog, error) {
+		awsConfig, err := toAwsConfig(ctx, props)
 		if err != nil {
 			return nil, err
 		}
