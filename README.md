@@ -60,22 +60,21 @@ $ cd iceberg-go/cmd/iceberg && go build .
 
 ### Catalog Support
 
-| Operation                | REST | Hive | DynamoDB | Glue |
-|:-------------------------|:----:| :--: | :------: |:----:|
-| Load Table               |  X   |      |          |  X   |
-| List Tables              |  X   |      |          |  X   |
-| Create Table             |  X   |      |          |  X   |
-| Update Current Snapshot  |      |      |          |      |
-| Create New Snapshot      |      |      |          |      |
-| Rename Table             |  X   |      |          |  X   |
-| Drop Table               |  X   |      |          |  X   |
-| Alter Table              |      |      |          |      |
-| Check Table Exists       |  X   |      |          |      |
-| Set Table Properties     |  X   |      |          |  X   |
-| Create Namespace         |  X   |      |          |  X   |
-| Check Namespace Exists   |  X   |      |          |      |
-| Drop Namespace           |  X   |      |          |  X   |
-| Set Namespace Properties |  X   |      |          |  X   |
+| Operation                | REST | Hive | DynamoDB | Glue | SQL |
+|:-------------------------|:----:| :--: | :------: |:----:|:---:|
+| Load Table               |  X   |      |          |  X   |  X  |
+| List Tables              |  X   |      |          |  X   |  X  |
+| Create Table             |  X   |      |          |  X   |  X  |
+| Update Current Snapshot  |      |      |          |      |     |
+| Create New Snapshot      |      |      |          |      |     |
+| Rename Table             |  X   |      |          |  X   |  X  |
+| Drop Table               |  X   |      |          |  X   |  X  |
+| Alter Table              |      |      |          |      |  X  |
+| Set Table Properties     |  X   |      |          |      |  X  |
+| Create Namespace         |  X   |      |          |  X   |  X  |
+| Check Namespace Exists   |  X   |      |          |      |  X  |
+| Drop Namespace           |  X   |      |          |  X   |  X  |
+| Set Namespace Properties |  X   |      |          |  X   |  X  |
 
 ### Read/Write Data Support
 

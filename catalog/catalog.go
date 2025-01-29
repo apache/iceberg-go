@@ -30,6 +30,8 @@ package catalog
 import (
 	"context"
 	"errors"
+	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/apache/iceberg-go"
@@ -146,4 +148,51 @@ func WithProperties(props iceberg.Properties) CreateTableOpt {
 	return func(cfg *internal.CreateTableCfg) {
 		cfg.Properties = props
 	}
+}
+
+//lint:ignore U1000 this is linked to by catalogs via go:linkname but we don't want to export it
+func checkForOverlap(removals []string, updates iceberg.Properties) error {
+	overlap := []string{}
+	for _, key := range removals {
+		if _, ok := updates[key]; ok {
+			overlap = append(overlap, key)
+		}
+	}
+	if len(overlap) > 0 {
+		return fmt.Errorf("conflict between removals and updates for keys: %v", overlap)
+	}
+	return nil
+}
+
+//lint:ignore U1000 this is linked to by catalogs via go:linkname but we don't want to export it
+func getUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals []string, updates iceberg.Properties) (iceberg.Properties, PropertiesUpdateSummary, error) {
+	if err := checkForOverlap(removals, updates); err != nil {
+		return nil, PropertiesUpdateSummary{}, err
+	}
+	var (
+		updatedProps = maps.Clone(currentProps)
+		removed      = make([]string, 0, len(removals))
+		updated      = make([]string, 0, len(updates))
+	)
+
+	for _, key := range removals {
+		if _, exists := updatedProps[key]; exists {
+			delete(updatedProps, key)
+			removed = append(removed, key)
+		}
+	}
+
+	for key, value := range updates {
+		if updatedProps[key] != value {
+			updated = append(updated, key)
+			updatedProps[key] = value
+		}
+	}
+
+	summary := PropertiesUpdateSummary{
+		Removed: removed,
+		Updated: updated,
+		Missing: iceberg.Difference(removals, removed),
+	}
+	return updatedProps, summary, nil
 }
