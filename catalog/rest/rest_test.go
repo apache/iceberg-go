@@ -871,24 +871,20 @@ func (r *RestCatalogSuite) TestCheckTableExists404() {
 		}
 
 		w.WriteHeader(http.StatusNotFound)
-		err := json.NewEncoder(w).Encode(map[string]any{
+		json.NewEncoder(w).Encode(map[string]any{
 			"error": map[string]any{
 				"message": "Table not found",
 				"type":    "NoSuchTableException",
 				"code":    http.StatusNotFound,
 			},
 		})
-		if err != nil {
-			return
-		}
-
-		cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
-		r.Require().NoError(err)
-
-		exists, err := cat.CheckTableExists(context.Background(), catalog.ToIdentifier("fokko", "nonexistent"))
-		r.Require().NoError(err)
-		r.False(exists)
 	})
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	exists, err := cat.CheckTableExists(context.Background(), catalog.ToIdentifier("fokko", "nonexistent"))
+	r.Require().NoError(err)
+	r.False(exists)
 }
 
 func (r *RestCatalogSuite) TestLoadTable200() {
