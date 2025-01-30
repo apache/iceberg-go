@@ -18,6 +18,7 @@
 package catalog_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -33,6 +34,7 @@ import (
 )
 
 func TestCatalogRegistry(t *testing.T) {
+	ctx := context.Background()
 	assert.ElementsMatch(t, []string{
 		"rest",
 		"http",
@@ -40,7 +42,7 @@ func TestCatalogRegistry(t *testing.T) {
 		"glue",
 	}, catalog.GetRegisteredCatalogs())
 
-	catalog.Register("foobar", catalog.RegistrarFunc(func(s string, p iceberg.Properties) (catalog.Catalog, error) {
+	catalog.Register("foobar", catalog.RegistrarFunc(func(ctx context.Context, s string, p iceberg.Properties) (catalog.Catalog, error) {
 		assert.Equal(t, "foobar", s)
 		assert.Equal(t, "baz", p.Get("foo", ""))
 		return nil, nil
@@ -54,28 +56,28 @@ func TestCatalogRegistry(t *testing.T) {
 		"glue",
 	}, catalog.GetRegisteredCatalogs())
 
-	c, err := catalog.Load("foobar", iceberg.Properties{"foo": "baz"})
+	c, err := catalog.Load(ctx, "foobar", iceberg.Properties{"foo": "baz"})
 	assert.Nil(t, c)
 	assert.ErrorIs(t, err, catalog.ErrCatalogNotFound)
 
-	catalog.Register("foobar", catalog.RegistrarFunc(func(s string, p iceberg.Properties) (catalog.Catalog, error) {
+	catalog.Register("foobar", catalog.RegistrarFunc(func(ctx context.Context, s string, p iceberg.Properties) (catalog.Catalog, error) {
 		assert.Equal(t, "not found", s)
 		assert.Equal(t, "baz", p.Get("foo", ""))
 		return nil, nil
 	}))
 
-	c, err = catalog.Load("not found", iceberg.Properties{"type": "foobar", "foo": "baz"})
+	c, err = catalog.Load(ctx, "not found", iceberg.Properties{"type": "foobar", "foo": "baz"})
 	assert.Nil(t, c)
 	assert.NoError(t, err)
 
-	catalog.Register("foobar", catalog.RegistrarFunc(func(s string, p iceberg.Properties) (catalog.Catalog, error) {
+	catalog.Register("foobar", catalog.RegistrarFunc(func(ctx context.Context, s string, p iceberg.Properties) (catalog.Catalog, error) {
 		assert.Equal(t, "not found", s)
 		assert.Equal(t, "foobar://helloworld", p.Get("uri", ""))
 		assert.Equal(t, "baz", p.Get("foo", ""))
 		return nil, nil
 	}))
 
-	c, err = catalog.Load("not found", iceberg.Properties{
+	c, err = catalog.Load(ctx, "not found", iceberg.Properties{
 		"uri": "foobar://helloworld",
 		"foo": "baz"})
 	assert.Nil(t, c)
@@ -95,6 +97,7 @@ func TestRegistryPanic(t *testing.T) {
 }
 
 func TestCatalogWithEmptyName(t *testing.T) {
+	ctx := context.Background()
 	config.EnvConfig.DefaultCatalog = "test-default"
 	config.EnvConfig.Catalogs = map[string]config.CatalogConfig{
 		"test-default": {
@@ -104,7 +107,7 @@ func TestCatalogWithEmptyName(t *testing.T) {
 			CatalogType: "mock",
 		},
 	}
-	catalog.Register("mock", catalog.RegistrarFunc(func(name string, props iceberg.Properties) (catalog.Catalog, error) {
+	catalog.Register("mock", catalog.RegistrarFunc(func(ctx context.Context, name string, props iceberg.Properties) (catalog.Catalog, error) {
 		// Ensure the correct name and properties are passed
 		assert.Equal(t, "test-default", name)
 		assert.Equal(t, "http://localhost:8181/", props.Get("uri", ""))
@@ -112,7 +115,7 @@ func TestCatalogWithEmptyName(t *testing.T) {
 		assert.Equal(t, "/default/warehouse", props.Get("warehouse", ""))
 		return nil, nil
 	}))
-	c, err := catalog.Load("", nil)
+	c, err := catalog.Load(ctx, "", nil)
 	assert.Nil(t, c)
 	assert.NoError(t, err)
 	assert.ElementsMatch(t, []string{
@@ -127,6 +130,7 @@ func TestCatalogWithEmptyName(t *testing.T) {
 }
 
 func TestCatalogLoadInvalidURI(t *testing.T) {
+	ctx := context.Background()
 	config.EnvConfig.DefaultCatalog = "default"
 	config.EnvConfig.Catalogs = map[string]config.CatalogConfig{
 		"default": {
@@ -137,13 +141,13 @@ func TestCatalogLoadInvalidURI(t *testing.T) {
 		},
 	}
 
-	catalog.Register("mock", catalog.RegistrarFunc(func(name string, props iceberg.Properties) (catalog.Catalog, error) {
+	catalog.Register("mock", catalog.RegistrarFunc(func(ctx context.Context, name string, props iceberg.Properties) (catalog.Catalog, error) {
 		return nil, nil
 	}))
 	props := iceberg.Properties{
 		"uri": "://invalid-uri", // This will cause url.Parse to fail
 	}
-	c, err := catalog.Load("mock", props)
+	c, err := catalog.Load(ctx, "mock", props)
 
 	assert.Nil(t, c)
 	assert.Error(t, err)
@@ -152,6 +156,7 @@ func TestCatalogLoadInvalidURI(t *testing.T) {
 }
 
 func TestRegistryFromConfig(t *testing.T) {
+	ctx := context.Background()
 	var params url.Values
 
 	mux := http.NewServeMux()
@@ -178,13 +183,13 @@ func TestRegistryFromConfig(t *testing.T) {
 		},
 	}
 
-	c, err := catalog.Load("foobar", nil)
+	c, err := catalog.Load(ctx, "foobar", nil)
 	assert.NoError(t, err)
 	assert.IsType(t, &rest.Catalog{}, c)
 	assert.Equal(t, "foobar", c.(*rest.Catalog).Name())
 	assert.Equal(t, "catalog_name", params.Get("warehouse"))
 
-	c, err = catalog.Load("foobar", iceberg.Properties{"warehouse": "overriden"})
+	c, err = catalog.Load(ctx, "foobar", iceberg.Properties{"warehouse": "overriden"})
 	assert.NoError(t, err)
 	assert.IsType(t, &rest.Catalog{}, c)
 	assert.Equal(t, "foobar", c.(*rest.Catalog).Name())
@@ -195,7 +200,7 @@ func TestRegistryFromConfig(t *testing.T) {
 	srv2 := httptest.NewServer(mux)
 	defer srv2.Close()
 
-	c, err = catalog.Load("foobar", iceberg.Properties{"uri": srv2.URL})
+	c, err = catalog.Load(ctx, "foobar", iceberg.Properties{"uri": srv2.URL})
 	assert.NoError(t, err)
 	assert.IsType(t, &rest.Catalog{}, c)
 	assert.Equal(t, "foobar", c.(*rest.Catalog).Name())

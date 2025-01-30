@@ -18,6 +18,7 @@
 package internal
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
@@ -39,8 +40,8 @@ func GetMetadataLoc(location string, newVersion uint) string {
 		location, newVersion, uuid.New().String())
 }
 
-func WriteMetadata(metadata table.Metadata, loc string, props iceberg.Properties) error {
-	fs, err := io.LoadFS(props, loc)
+func WriteMetadata(ctx context.Context, metadata table.Metadata, loc string, props iceberg.Properties) error {
+	fs, err := io.LoadFS(ctx, props, loc)
 	if err != nil {
 		return err
 	}

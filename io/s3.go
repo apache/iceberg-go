@@ -55,7 +55,7 @@ var unsupportedS3Props = []string{
 }
 
 // ParseAWSConfig parses S3 properties and returns a configuration.
-func ParseAWSConfig(props map[string]string) (*aws.Config, error) {
+func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, error) {
 	// If any unsupported properties are set, return an error.
 	for k := range props {
 		if slices.Contains(unsupportedS3Props, k) {
@@ -98,7 +98,7 @@ func ParseAWSConfig(props map[string]string) (*aws.Config, error) {
 
 	awscfg := new(aws.Config)
 	var err error
-	*awscfg, err = config.LoadDefaultConfig(context.Background(), opts...)
+	*awscfg, err = config.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +107,7 @@ func ParseAWSConfig(props map[string]string) (*aws.Config, error) {
 }
 
 func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
-	awscfg, err := ParseAWSConfig(props)
+	awscfg, err := ParseAWSConfig(ctx, props)
 	if err != nil {
 		return nil, err
 	}

@@ -481,6 +481,7 @@ func ArrowRecordWithAllTimestampPrec(mem memory.Allocator) arrow.Record {
 }
 
 func TestToRequestedSchemaTimestamps(t *testing.T) {
+	ctx := context.Background()
 	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
 	defer mem.AssertSize(t, 0)
 
@@ -490,7 +491,7 @@ func TestToRequestedSchemaTimestamps(t *testing.T) {
 	requestedSchema := TableSchemaWithAllMicrosecondsTimestampPrec
 	fileSchema := requestedSchema
 
-	converted, err := table.ToRequestedSchema(requestedSchema, fileSchema, batch, true, false, false)
+	converted, err := table.ToRequestedSchema(ctx, requestedSchema, fileSchema, batch, true, false, false)
 	require.NoError(t, err)
 	defer converted.Release()
 

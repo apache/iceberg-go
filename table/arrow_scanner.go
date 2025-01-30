@@ -428,7 +428,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 
 	pipeline = append(pipeline, func(r arrow.Record) (arrow.Record, error) {
 		defer r.Release()
-		return ToRequestedSchema(as.projectedSchema, iceSchema, r, false, false, as.useLargeTypes)
+		return ToRequestedSchema(ctx, as.projectedSchema, iceSchema, r, false, false, as.useLargeTypes)
 	})
 
 	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, out)

@@ -840,13 +840,13 @@ func (a *arrowProjectionVisitor) Primitive(_ iceberg.PrimitiveType, arr arrow.Ar
 
 // ToRequestedSchema will construct a new record batch matching the requested iceberg schema
 // casting columns if necessary as appropriate.
-func ToRequestedSchema(requested, fileSchema *iceberg.Schema, batch arrow.Record, downcastTimestamp, includeFieldIDs, useLargeTypes bool) (arrow.Record, error) {
+func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schema, batch arrow.Record, downcastTimestamp, includeFieldIDs, useLargeTypes bool) (arrow.Record, error) {
 	st := array.RecordToStructArray(batch)
 	defer st.Release()
 
 	result, err := iceberg.VisitSchemaWithPartner[arrow.Array, arrow.Array](requested, st,
 		&arrowProjectionVisitor{
-			ctx:                 context.Background(),
+			ctx:                 ctx,
 			fileSchema:          fileSchema,
 			includeFieldIDs:     includeFieldIDs,
 			downcastNsTimestamp: downcastTimestamp,

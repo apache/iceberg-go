@@ -110,6 +110,7 @@ type Config struct {
 }
 
 func main() {
+	ctx := context.Background()
 	args, err := docopt.ParseArgs(usage, os.Args[1:], iceberg.Version())
 	if err != nil {
 		log.Fatal(err)
@@ -148,11 +149,11 @@ func main() {
 			opts = append(opts, rest.WithWarehouseLocation(cfg.Warehouse))
 		}
 
-		if cat, err = rest.NewCatalog("rest", cfg.URI, opts...); err != nil {
+		if cat, err = rest.NewCatalog(ctx, "rest", cfg.URI, opts...); err != nil {
 			log.Fatal(err)
 		}
 	case catalog.Glue:
-		awscfg, err := awsconfig.LoadDefaultConfig(context.Background())
+		awscfg, err := awsconfig.LoadDefaultConfig(ctx)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -166,7 +167,7 @@ func main() {
 
 	switch {
 	case cfg.List:
-		list(output, cat, cfg.Parent)
+		list(ctx, output, cat, cfg.Parent)
 	case cfg.Describe:
 		entityType := "any"
 		if cfg.Namespace {
@@ -175,21 +176,21 @@ func main() {
 			entityType = "tbl"
 		}
 
-		describe(output, cat, cfg.Ident, entityType)
+		describe(ctx, output, cat, cfg.Ident, entityType)
 	case cfg.Schema:
-		tbl := loadTable(output, cat, cfg.TableID)
+		tbl := loadTable(ctx, output, cat, cfg.TableID)
 		output.Schema(tbl.Schema())
 	case cfg.Spec:
-		tbl := loadTable(output, cat, cfg.TableID)
+		tbl := loadTable(ctx, output, cat, cfg.TableID)
 		output.Spec(tbl.Spec())
 	case cfg.Location:
-		tbl := loadTable(output, cat, cfg.TableID)
+		tbl := loadTable(ctx, output, cat, cfg.TableID)
 		output.Text(tbl.Location())
 	case cfg.Uuid:
-		tbl := loadTable(output, cat, cfg.TableID)
+		tbl := loadTable(ctx, output, cat, cfg.TableID)
 		output.Uuid(tbl.Metadata().TableUUID())
 	case cfg.Props:
-		properties(output, cat, propCmd{
+		properties(ctx, output, cat, propCmd{
 			get: cfg.Get, set: cfg.Set, remove: cfg.Remove,
 			namespace: cfg.Namespace, table: cfg.Table,
 			identifier: cfg.Ident,
@@ -197,7 +198,7 @@ func main() {
 			value:      cfg.Value,
 		})
 	case cfg.Rename:
-		_, err := cat.RenameTable(context.Background(),
+		_, err := cat.RenameTable(ctx,
 			catalog.ToIdentifier(cfg.RenameFrom), catalog.ToIdentifier(cfg.RenameTo))
 		if err != nil {
 			output.Error(err)
@@ -208,13 +209,13 @@ func main() {
 	case cfg.Drop:
 		switch {
 		case cfg.Namespace:
-			err := cat.DropNamespace(context.Background(), catalog.ToIdentifier(cfg.Ident))
+			err := cat.DropNamespace(ctx, catalog.ToIdentifier(cfg.Ident))
 			if err != nil {
 				output.Error(err)
 				os.Exit(1)
 			}
 		case cfg.Table:
-			err := cat.DropTable(context.Background(), catalog.ToIdentifier(cfg.Ident))
+			err := cat.DropTable(ctx, catalog.ToIdentifier(cfg.Ident))
 			if err != nil {
 				output.Error(err)
 				os.Exit(1)
@@ -233,7 +234,7 @@ func main() {
 				props["Location"] = cfg.LocationURI
 			}
 
-			err := cat.CreateNamespace(context.Background(), catalog.ToIdentifier(cfg.Ident), props)
+			err := cat.CreateNamespace(ctx, catalog.ToIdentifier(cfg.Ident), props)
 			if err != nil {
 				output.Error(err)
 				os.Exit(1)
@@ -245,22 +246,22 @@ func main() {
 			os.Exit(1)
 		}
 	case cfg.Files:
-		tbl := loadTable(output, cat, cfg.TableID)
+		tbl := loadTable(ctx, output, cat, cfg.TableID)
 		output.Files(tbl, cfg.History)
 	}
 }
 
-func list(output Output, cat catalog.Catalog, parent string) {
+func list(ctx context.Context, output Output, cat catalog.Catalog, parent string) {
 	prnt := catalog.ToIdentifier(parent)
 
-	ids, err := cat.ListNamespaces(context.Background(), prnt)
+	ids, err := cat.ListNamespaces(ctx, prnt)
 	if err != nil {
 		output.Error(err)
 		os.Exit(1)
 	}
 
 	if len(ids) == 0 && parent != "" {
-		ids, err = cat.ListTables(context.Background(), prnt)
+		ids, err = cat.ListTables(ctx, prnt)
 		if err != nil {
 			output.Error(err)
 			os.Exit(1)
@@ -269,9 +270,7 @@ func list(output Output, cat catalog.Catalog, parent string) {
 	output.Identifiers(ids)
 }
 
-func describe(output Output, cat catalog.Catalog, id string, entityType string) {
-	ctx := context.Background()
-
+func describe(ctx context.Context, output Output, cat catalog.Catalog, id string, entityType string) {
 	ident := catalog.ToIdentifier(id)
 
 	isNS, isTbl := false, false
@@ -313,8 +312,8 @@ func describe(output Output, cat catalog.Catalog, id string, entityType string) 
 	}
 }
 
-func loadTable(output Output, cat catalog.Catalog, id string) *table.Table {
-	tbl, err := cat.LoadTable(context.Background(), catalog.ToIdentifier(id), nil)
+func loadTable(ctx context.Context, output Output, cat catalog.Catalog, id string) *table.Table {
+	tbl, err := cat.LoadTable(ctx, catalog.ToIdentifier(id), nil)
 	if err != nil {
 		output.Error(err)
 		os.Exit(1)
@@ -330,8 +329,8 @@ type propCmd struct {
 	identifier, propname, value string
 }
 
-func properties(output Output, cat catalog.Catalog, args propCmd) {
-	ctx, ident := context.Background(), catalog.ToIdentifier(args.identifier)
+func properties(ctx context.Context, output Output, cat catalog.Catalog, args propCmd) {
+	ident := catalog.ToIdentifier(args.identifier)
 
 	switch {
 	case args.get:
@@ -345,7 +344,7 @@ func properties(output Output, cat catalog.Catalog, args propCmd) {
 				os.Exit(1)
 			}
 		case args.table:
-			tbl := loadTable(output, cat, args.identifier)
+			tbl := loadTable(ctx, output, cat, args.identifier)
 			props = tbl.Metadata().Properties()
 		}
 
@@ -372,7 +371,7 @@ func properties(output Output, cat catalog.Catalog, args propCmd) {
 
 			output.Text("updated " + args.propname + " on " + args.identifier)
 		case args.table:
-			loadTable(output, cat, args.identifier)
+			loadTable(ctx, output, cat, args.identifier)
 			output.Text("Setting " + args.propname + "=" + args.value + " on " + args.identifier)
 			output.Error(errors.New("not implemented: Writing is WIP"))
 		}
@@ -388,7 +387,7 @@ func properties(output Output, cat catalog.Catalog, args propCmd) {
 
 			output.Text("removing " + args.propname + " from " + args.identifier)
 		case args.table:
-			loadTable(output, cat, args.identifier)
+			loadTable(ctx, output, cat, args.identifier)
 			output.Text("Setting " + args.propname + "=" + args.value + " on " + args.identifier)
 			output.Error(errors.New("not implemented: Writing is WIP"))
 		}

@@ -18,6 +18,7 @@
 package catalog
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"net/url"
@@ -64,13 +65,13 @@ var (
 // Registrar is a factory for creating Catalog instances, used for registering to use
 // with LoadCatalog.
 type Registrar interface {
-	GetCatalog(catalogURI string, props iceberg.Properties) (Catalog, error)
+	GetCatalog(ctx context.Context, catalogName string, props iceberg.Properties) (Catalog, error)
 }
 
-type RegistrarFunc func(string, iceberg.Properties) (Catalog, error)
+type RegistrarFunc func(context.Context, string, iceberg.Properties) (Catalog, error)
 
-func (f RegistrarFunc) GetCatalog(catalogURI string, props iceberg.Properties) (Catalog, error) {
-	return f(catalogURI, props)
+func (f RegistrarFunc) GetCatalog(ctx context.Context, catalogName string, props iceberg.Properties) (Catalog, error) {
+	return f(ctx, catalogName, props)
 }
 
 // Register adds the new catalog type to the registry. If the catalog type is already registered, it will be replaced.
@@ -125,7 +126,7 @@ func GetRegisteredCatalogs() []string {
 //     as the REST endpoint, otherwise the URI is used as the endpoint. The REST catalog also
 //     registers "http" and "https" so that Load with a http/s URI will automatically
 //     load the REST Catalog.
-func Load(name string, props iceberg.Properties) (Catalog, error) {
+func Load(ctx context.Context, name string, props iceberg.Properties) (Catalog, error) {
 	if name == "" {
 		name = config.EnvConfig.DefaultCatalog
 	}
@@ -159,5 +160,5 @@ func Load(name string, props iceberg.Properties) (Catalog, error) {
 		return nil, fmt.Errorf("%w: %s", ErrCatalogNotFound, catalogType)
 	}
 
-	return cat.GetCatalog(name, props)
+	return cat.GetCatalog(ctx, name, props)
 }

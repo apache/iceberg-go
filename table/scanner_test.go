@@ -52,7 +52,7 @@ type ScannerSuite struct {
 func (s *ScannerSuite) SetupTest() {
 	s.ctx = context.Background()
 
-	cat, err := rest.NewCatalog("rest", "http://localhost:8181")
+	cat, err := rest.NewCatalog(s.ctx, "rest", "http://localhost:8181")
 	s.Require().NoError(err)
 
 	s.cat = cat

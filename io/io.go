@@ -229,13 +229,12 @@ func (f ioFile) ReadDir(count int) ([]fs.DirEntry, error) {
 	return d.ReadDir(count)
 }
 
-func inferFileIOFromSchema(path string, props map[string]string) (IO, error) {
+func inferFileIOFromSchema(ctx context.Context, path string, props map[string]string) (IO, error) {
 	parsed, err := url.Parse(path)
 	if err != nil {
 		return nil, err
 	}
 	var bucket *blob.Bucket
-	ctx := context.Background()
 
 	switch parsed.Scheme {
 	case "s3", "s3a", "s3n":
@@ -256,7 +255,7 @@ func inferFileIOFromSchema(path string, props map[string]string) (IO, error) {
 	default:
 		return nil, fmt.Errorf("IO for file '%s' not implemented", path)
 	}
-	return createBlobFS(bucket, parsed.Host), nil
+	return createBlobFS(ctx, bucket, parsed.Host), nil
 }
 
 // LoadFS takes a map of properties and an optional URI location
@@ -267,12 +266,12 @@ func inferFileIOFromSchema(path string, props map[string]string) (IO, error) {
 // does not yet have an implementation here.
 //
 // Currently local, S3, GCS, and In-Memory FSs are implemented.
-func LoadFS(props map[string]string, location string) (IO, error) {
+func LoadFS(ctx context.Context, props map[string]string, location string) (IO, error) {
 	if location == "" {
 		location = props["warehouse"]
 	}
 
-	iofs, err := inferFileIOFromSchema(location, props)
+	iofs, err := inferFileIOFromSchema(ctx, location, props)
 	if err != nil {
 		return nil, err
 	}

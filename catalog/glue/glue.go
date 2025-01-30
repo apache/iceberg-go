@@ -68,8 +68,8 @@ var (
 )
 
 func init() {
-	catalog.Register("glue", catalog.RegistrarFunc(func(_ string, props iceberg.Properties) (catalog.Catalog, error) {
-		awsConfig, err := toAwsConfig(props)
+	catalog.Register("glue", catalog.RegistrarFunc(func(ctx context.Context, _ string, props iceberg.Properties) (catalog.Catalog, error) {
+		awsConfig, err := toAwsConfig(ctx, props)
 		if err != nil {
 			return nil, err
 		}
@@ -78,7 +78,7 @@ func init() {
 	}))
 }
 
-func toAwsConfig(p iceberg.Properties) (aws.Config, error) {
+func toAwsConfig(ctx context.Context, p iceberg.Properties) (aws.Config, error) {
 	opts := make([]func(*config.LoadOptions) error, 0)
 
 	for k, v := range p {
@@ -108,7 +108,7 @@ func toAwsConfig(p iceberg.Properties) (aws.Config, error) {
 			credentials.NewStaticCredentialsProvider(key, secret, token)))
 	}
 
-	return config.LoadDefaultConfig(context.Background(), opts...)
+	return config.LoadDefaultConfig(ctx, opts...)
 }
 
 type glueAPI interface {
@@ -205,7 +205,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, pr
 	}
 
 	// TODO: consider providing a way to directly access the S3 iofs to enable testing of the catalog.
-	iofs, err := io.LoadFS(props, location)
+	iofs, err := io.LoadFS(ctx, props, location)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load table %s.%s: %w", database, tableName, err)
 	}
