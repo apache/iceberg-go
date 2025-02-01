@@ -1265,12 +1265,70 @@ func (r *RestCatalogSuite) TestRegisterTable200() {
 	// TODO Add more asserting on the schema
 }
 
-// TODO
 func (r *RestCatalogSuite) TestRegisterTable404() {
+	r.mux.HandleFunc("/v1/namespaces/nonexistent/tables/fokko2", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		var payload struct {
+			Name        string `json:"name"`
+			MetadataLoc string `json:"metadata-location"`
+		}
+
+		r.NoError(json.NewDecoder(req.Body).Decode(&payload))
+		r.Equal("fokko2", payload.Name)
+		r.Equal("s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json", payload.MetadataLoc)
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{
+			  "error": {
+				"message": "The given namespace does not exist",
+			    "type": "NoSuchNamespaceException",
+			    "code": 404
+			  }
+			}`))
+	})
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.RegisterTable(context.Background(), catalog.ToIdentifier("nonexistent", "fokko2"), "s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json")
+	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	r.ErrorContains(err, "The given namespace does not exist")
 }
 
-// TODO
 func (r *RestCatalogSuite) TestRegisterTable409() {
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables/alreadyexist", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		var payload struct {
+			Name        string `json:"name"`
+			MetadataLoc string `json:"metadata-location"`
+		}
+
+		r.NoError(json.NewDecoder(req.Body).Decode(&payload))
+		r.Equal("alreadyexist", payload.Name)
+		r.Equal("s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json", payload.MetadataLoc)
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte(`{
+			"error": {
+				"message": "The given table already exists",
+				"type": "AlreadyExistsException",
+				"code": 409
+			}
+		}`))
+	})
+	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.RegisterTable(context.Background(), catalog.ToIdentifier("fokko", "alreadyexist"), "s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json")
+	r.ErrorIs(err, catalog.ErrTableAlreadyExists)
+	r.ErrorContains(err, "The given table already exists")
 }
 
 type RestTLSCatalogSuite struct {
