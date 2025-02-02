@@ -36,12 +36,12 @@ require (
 	github.com/stretchr/testify v1.10.0
 	github.com/substrait-io/substrait-go/v3 v3.5.0
 	github.com/twmb/murmur3 v1.1.8
-	github.com/uptrace/bun v1.2.8
+	github.com/uptrace/bun v1.2.9
 	github.com/uptrace/bun/dialect/mssqldialect v1.2.8
 	github.com/uptrace/bun/dialect/mysqldialect v1.2.8
 	github.com/uptrace/bun/dialect/oracledialect v1.2.8
 	github.com/uptrace/bun/dialect/pgdialect v1.2.8
-	github.com/uptrace/bun/dialect/sqlitedialect v1.2.8
+	github.com/uptrace/bun/dialect/sqlitedialect v1.2.9
 	github.com/uptrace/bun/driver/sqliteshim v1.2.8
 	github.com/uptrace/bun/extra/bundebug v1.2.8
 	gocloud.dev v0.40.0
@@ -107,7 +107,7 @@ require (
 	github.com/klauspost/compress v1.17.11 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.9 // indirect
 	github.com/lithammer/fuzzysearch v1.1.8 // indirect
-	github.com/mattn/go-colorable v0.1.13 // indirect
+	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-runewidth v0.0.16 // indirect
 	github.com/mattn/go-sqlite3 v1.14.24 // indirect
@@ -119,7 +119,7 @@ require (
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/pierrec/lz4/v4 v4.1.22 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/puzpuzpuz/xsync/v3 v3.4.0 // indirect
+	github.com/puzpuzpuz/xsync/v3 v3.5.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
