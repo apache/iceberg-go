@@ -106,10 +106,23 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 	return awscfg, nil
 }
 
+const AwsCfgCtxKey string = "awsConfig"
+
 func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
-	awscfg, err := ParseAWSConfig(ctx, props)
-	if err != nil {
-		return nil, err
+	var (
+		awscfg *aws.Config
+		err    error
+	)
+	if v := ctx.Value(AwsCfgCtxKey); v != nil {
+		if a, ok := v.(*aws.Config); ok {
+			awscfg = a
+		}
+		return nil, fmt.Errorf("invalid awsConfig type: %T", v)
+	} else {
+		awscfg, err = ParseAWSConfig(ctx, props)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	endpoint, ok := props[S3EndpointURL]
