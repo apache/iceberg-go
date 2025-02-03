@@ -1117,7 +1117,7 @@ func (r *RestCatalogSuite) TestDropTable404() {
 }
 
 func (r *RestCatalogSuite) TestRegisterTable200() {
-	r.mux.HandleFunc("/v1/namespaces/fokko/tables/table", func(w http.ResponseWriter, req *http.Request) {
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables/fokko2", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodPost, req.Method)
 
 		for k, v := range TestHeaders {
@@ -1129,7 +1129,7 @@ func (r *RestCatalogSuite) TestRegisterTable200() {
 			MetadataLoc string `json:"metadata-location"`
 		}
 		r.NoError(json.NewDecoder(req.Body).Decode(&payload))
-		r.Equal("table", payload.Name)
+		r.Equal("fokko2", payload.Name)
 		r.Equal("s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json", payload.MetadataLoc)
 
 		w.WriteHeader(http.StatusOK)
@@ -1251,7 +1251,7 @@ func (r *RestCatalogSuite) TestRegisterTable200() {
 }`))
 	})
 
-	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
 	tbl, err := cat.RegisterTable(context.Background(), catalog.ToIdentifier("fokko", "fokko2"), "s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json")
@@ -1262,7 +1262,6 @@ func (r *RestCatalogSuite) TestRegisterTable200() {
 	r.EqualValues(1, tbl.Metadata().Version())
 	r.Equal("d55d9dda-6561-423a-8bfc-787980ce421f", tbl.Metadata().TableUUID().String())
 	r.Equal("bryan", tbl.Metadata().Properties()["owner"])
-	// TODO Add more asserting on the schema
 }
 
 func (r *RestCatalogSuite) TestRegisterTable404() {
@@ -1290,7 +1289,7 @@ func (r *RestCatalogSuite) TestRegisterTable404() {
 			  }
 			}`))
 	})
-	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
 	_, err = cat.RegisterTable(context.Background(), catalog.ToIdentifier("nonexistent", "fokko2"), "s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json")
@@ -1323,7 +1322,7 @@ func (r *RestCatalogSuite) TestRegisterTable409() {
 			}
 		}`))
 	})
-	cat, err := rest.NewCatalog("rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
 	_, err = cat.RegisterTable(context.Background(), catalog.ToIdentifier("fokko", "alreadyexist"), "s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json")
