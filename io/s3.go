@@ -106,7 +106,9 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 	return awscfg, nil
 }
 
-const AwsCfgCtxKey string = "awsConfig"
+type ctxkey string
+
+const AwsCfgCtxKey ctxkey = "awsConfig"
 
 func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
 	var (
@@ -116,8 +118,9 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 	if v := ctx.Value(AwsCfgCtxKey); v != nil {
 		if a, ok := v.(*aws.Config); ok {
 			awscfg = a
+		} else {
+			return nil, fmt.Errorf("invalid awsConfig type: %T", v)
 		}
-		return nil, fmt.Errorf("invalid awsConfig type: %T", v)
 	} else {
 		awscfg, err = ParseAWSConfig(ctx, props)
 		if err != nil {
