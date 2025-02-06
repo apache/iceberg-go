@@ -1330,6 +1330,67 @@ func (r *RestCatalogSuite) TestRegisterTable409() {
 	r.ErrorContains(err, "The given table already exists")
 }
 
+func (r *RestCatalogSuite) TestListViews200() {
+	namespace := "accounting"
+	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/views", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"identifiers": []any{
+				map[string]any{
+					"namespace": []string{"accounting", "tax"},
+					"name":      "paid",
+				},
+				map[string]any{
+					"namespace": []string{"accounting", "tax"},
+					"name":      "owed",
+				},
+			},
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	views, err := cat.ListViews(context.Background(), catalog.ToIdentifier(namespace))
+	r.Require().NoError(err)
+	r.Equal([]table.Identifier{
+		{"accounting", "tax", "paid"},
+		{"accounting", "tax", "owed"},
+	}, views)
+}
+
+func (r *RestCatalogSuite) TestListViews404() {
+	namespace := "nonexistent"
+	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/views", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "The given namespace does not exist",
+				"type":    "NoSuchNamespaceException",
+				"code":    404,
+			},
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.ListViews(context.Background(), catalog.ToIdentifier(namespace))
+	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	r.ErrorContains(err, "The given namespace does not exist")
+}
+
 type RestTLSCatalogSuite struct {
 	suite.Suite
 

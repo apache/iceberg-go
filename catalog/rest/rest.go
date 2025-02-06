@@ -989,3 +989,26 @@ func (r *Catalog) CheckTableExists(ctx context.Context, identifier table.Identif
 	}
 	return true, nil
 }
+
+func (r *Catalog) ListViews(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error) {
+	if err := checkValidNamespace(namespace); err != nil {
+		return nil, err
+	}
+
+	ns := strings.Join(namespace, namespaceSeparator)
+	path := []string{"namespaces", ns, "views"}
+
+	type resp struct {
+		Identifiers []identifier `json:"identifiers"`
+	}
+	rsp, err := doGet[resp](ctx, r.baseURI, path, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]table.Identifier, len(rsp.Identifiers))
+	for i, id := range rsp.Identifiers {
+		out[i] = append(id.Namespace, id.Name)
+	}
+	return out, nil
+}
