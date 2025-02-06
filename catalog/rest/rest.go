@@ -238,19 +238,30 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 func do[T any](ctx context.Context, method string, baseURI *url.URL, path []string, cl *http.Client, override map[int]error, allowNoContent bool) (ret T, err error) {
+	fmt.Printf("DEBUG: Making %s request to %s\n", method, baseURI.String())
+	if len(path) > 0 {
+		fmt.Printf("DEBUG: With path segments: %v\n", path)
+	}
+
 	var (
 		req *http.Request
 		rsp *http.Response
 	)
 
 	uri := baseURI.JoinPath(path...).String()
+	fmt.Printf("DEBUG: Full request URI: %s\n", uri)
+
 	if req, err = http.NewRequestWithContext(ctx, method, uri, nil); err != nil {
+		fmt.Printf("DEBUG: Error creating request: %v\n", err)
 		return
 	}
 
+	fmt.Println("DEBUG: Sending request...")
 	if rsp, err = cl.Do(req); err != nil {
+		fmt.Printf("DEBUG: Error sending request: %v\n", err)
 		return
 	}
+	fmt.Printf("DEBUG: Got response with status: %s\n", rsp.Status)
 
 	if allowNoContent && rsp.StatusCode == http.StatusNoContent {
 		return
@@ -276,6 +287,47 @@ func doGet[T any](ctx context.Context, baseURI *url.URL, path []string, cl *http
 	return do[T](ctx, http.MethodGet, baseURI, path, cl, override, false)
 }
 
+func doPut[Result any, Payload any](ctx context.Context, baseURI *url.URL, path []string, payload Payload, cl *http.Client, override map[int]error) (ret Result, err error) {
+	var (
+		data []byte
+		req  *http.Request
+	)
+
+	uri := baseURI.JoinPath(path...).String()
+	fmt.Println("DEBUG: uri: ", uri)
+	fmt.Println("DEBUG: Marshaling request payload...")
+	data, err = json.Marshal(payload)
+	if err != nil {
+		return ret, err
+	}
+
+	fmt.Printf("DEBUG: Marshaled payload: %s\n", string(data))
+	req, err = http.NewRequestWithContext(ctx, http.MethodPut, uri, bytes.NewReader(data))
+	if err != nil {
+		return ret, err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	fmt.Printf("DEBUG: Sending PUT request to %s\n", uri)
+
+	rsp, err := cl.Do(req)
+	if err != nil {
+		return ret, err
+	}
+	defer rsp.Body.Close()
+
+	fmt.Printf("DEBUG: Received response with status: %s\n", rsp.Status)
+	if rsp.StatusCode != http.StatusOK {
+		return ret, handleNon200(rsp, override)
+	}
+
+	if err = json.NewDecoder(rsp.Body).Decode(&ret); err != nil {
+		return ret, err
+	}
+
+	return ret, nil
+}
+
 func doDelete[T any](ctx context.Context, baseURI *url.URL, path []string, cl *http.Client, override map[int]error) (ret T, err error) {
 	return do[T](ctx, http.MethodDelete, baseURI, path, cl, override, true)
 }
@@ -286,6 +338,8 @@ func doHead(ctx context.Context, baseURI *url.URL, path []string, cl *http.Clien
 }
 
 func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []string, payload Payload, cl *http.Client, override map[int]error) (ret Result, err error) {
+	fmt.Printf("DEBUG: Making POST request to %s with path: %v\n", baseURI.String(), path)
+
 	var (
 		req  *http.Request
 		rsp  *http.Response
@@ -293,20 +347,27 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 	)
 
 	uri := baseURI.JoinPath(path...).String()
+	fmt.Println("DEBUG: uri: ", uri)
+	fmt.Println("DEBUG: Marshaling request payload...")
 	data, err = json.Marshal(payload)
 	if err != nil {
+		fmt.Printf("DEBUG: Error marshaling payload: %v\n", err)
 		return
 	}
+	fmt.Printf("DEBUG: Request payload: %s\n", string(data))
 
 	req, err = http.NewRequestWithContext(ctx, http.MethodPost, uri, bytes.NewReader(data))
 	if err != nil {
 		return
 	}
 
+	fmt.Println("DEBUG: Sending POST request...")
 	rsp, err = cl.Do(req)
 	if err != nil {
+		fmt.Printf("DEBUG: Error sending request: %v\n", err)
 		return
 	}
+	fmt.Printf("DEBUG: Got response with status: %s\n", rsp.Status)
 
 	if rsp.StatusCode != http.StatusOK {
 		return ret, handleNon200(rsp, override)
@@ -325,7 +386,10 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 }
 
 func handleNon200(rsp *http.Response, override map[int]error) error {
+	fmt.Printf("DEBUG: Handling non-200 response: %s\n", rsp.Status)
 	var e errorResponse
+
+	fmt.Printf("DEBUG: Error: %v\n", override)
 
 	dec := json.NewDecoder(rsp.Body)
 	dec.Decode(&struct {
@@ -465,15 +529,22 @@ func NewCatalog(ctx context.Context, name, uri string, opts ...Option) (*Catalog
 }
 
 func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
+	fmt.Printf("DEBUG: Initializing catalog with uri=%s\n", uri)
 	baseuri, err := url.Parse(uri)
 	if err != nil {
+		fmt.Printf("DEBUG: Error parsing URI: %v\n", err)
 		return err
 	}
 
 	r.baseURI = baseuri.JoinPath("v1")
+	fmt.Printf("DEBUG: Base URI with v1: %s\n", r.baseURI)
+
+	fmt.Println("DEBUG: Fetching config...")
 	if r.cl, ops, err = r.fetchConfig(ctx, ops); err != nil {
+		fmt.Printf("DEBUG: Error fetching config: %v\n", err)
 		return err
 	}
+	fmt.Println("DEBUG: Config fetched successfully")
 
 	if ops.prefix != "" {
 		r.baseURI = r.baseURI.JoinPath(ops.prefix)
@@ -580,18 +651,22 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client,
 	params := url.Values{}
 	if opts.warehouseLocation != "" {
 		params.Set(keyWarehouseLocation, opts.warehouseLocation)
+		fmt.Printf("DEBUG: Setting warehouse location: %s\n", opts.warehouseLocation)
 	}
 
 	route := r.baseURI.JoinPath("config")
 	route.RawQuery = params.Encode()
+	fmt.Printf("DEBUG: Config request URL: %s\n", route.String())
 
 	sess, err := r.createSession(ctx, opts)
 	if err != nil {
+		fmt.Printf("DEBUG: Error creating session: %v\n", err)
 		return nil, nil, err
 	}
 
 	rsp, err := doGet[configResponse](ctx, route, []string{}, sess, nil)
 	if err != nil {
+		fmt.Printf("DEBUG: Error fetching config: %v\n", err)
 		return nil, nil, err
 	}
 
@@ -674,30 +749,44 @@ func splitIdentForPath(ident table.Identifier) (string, string, error) {
 }
 
 func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
+	fmt.Printf("DEBUG: Creating table with identifier: %v\n", identifier)
 	ns, tbl, err := splitIdentForPath(identifier)
 	if err != nil {
+		fmt.Printf("DEBUG: Error splitting identifier: %v\n", err)
 		return nil, err
 	}
+	fmt.Printf("DEBUG: Namespace: %s, Table: %s\n", ns, tbl)
 
 	var cfg internal.CreateTableCfg
+	fmt.Println("DEBUG: Processing create table options...")
 	for _, o := range opts {
 		o(&cfg)
 	}
+	fmt.Printf("DEBUG: Create table config: %+v\n", cfg)
 
+	fmt.Println("DEBUG: Assigning fresh schema IDs...")
 	freshSchema, err := iceberg.AssignFreshSchemaIDs(schema, nil)
 	if err != nil {
+		fmt.Printf("DEBUG: Error assigning schema IDs: %v\n", err)
 		return nil, err
 	}
+	fmt.Printf("DEBUG: Fresh schema: %+v\n", freshSchema)
 
+	fmt.Println("DEBUG: Assigning fresh partition spec IDs...")
 	freshPartitionSpec, err := iceberg.AssignFreshPartitionSpecIDs(cfg.PartitionSpec, schema, freshSchema)
 	if err != nil {
+		fmt.Printf("DEBUG: Error assigning partition spec IDs: %v\n", err)
 		return nil, err
 	}
+	fmt.Printf("DEBUG: Fresh partition spec: %+v\n", freshPartitionSpec)
 
+	fmt.Println("DEBUG: Assigning fresh sort order IDs...")
 	freshSortOrder, err := table.AssignFreshSortOrderIDs(cfg.SortOrder, schema, freshSchema)
 	if err != nil {
+		fmt.Printf("DEBUG: Error assigning sort order IDs: %v\n", err)
 		return nil, err
 	}
+	fmt.Printf("DEBUG: Fresh sort order: %+v\n", freshSortOrder)
 
 	payload := createTableRequest{
 		Name:          tbl,
@@ -750,6 +839,7 @@ func (r *Catalog) CommitTable(ctx context.Context, tbl *table.Table, requirement
 
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
+
 	return ret.Metadata, ret.MetadataLoc, nil
 }
 
@@ -879,38 +969,55 @@ func (r *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 	return r.LoadTable(ctx, to, nil)
 }
 
-func (r *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error {
+func (r *Catalog) CreateNamespace(ctx context.Context, ref table.Identifier, namespace table.Identifier, props iceberg.Properties) error {
+
 	if err := checkValidNamespace(namespace); err != nil {
 		return err
 	}
+	payload := map[string]any{
+		"type":       "NAMESPACE",
+		"elements":   namespace,
+		"properties": props,
+	}
+	fmt.Printf("DEBUG: Request payload: %+v\n", payload)
 
-	_, err := doPost[map[string]any, struct{}](ctx, r.baseURI, []string{"namespaces"},
-		map[string]any{"namespace": namespace, "properties": props}, r.cl, map[int]error{
-			http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrNamespaceAlreadyExists})
-	return err
+	path := []string{"namespaces", "namespace", strings.Join(ref, "."), strings.Join(namespace, ".")}
+
+	_, err := doPut[map[string]any, map[string]any](ctx, r.baseURI, path, payload, r.cl, map[int]error{
+		http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrNamespaceAlreadyExists})
+
+	if err != nil {
+		fmt.Printf("DEBUG: Failed to create namespace: %v\n", err)
+		return err
+	}
+
+	fmt.Printf("DEBUG: Successfully created namespace: %v\n", namespace)
+	return nil
 }
 
-func (r *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier) error {
+func (r *Catalog) DropNamespace(ctx context.Context, ref table.Identifier, namespace table.Identifier) error {
 	if err := checkValidNamespace(namespace); err != nil {
 		return err
 	}
 
-	_, err := doDelete[struct{}](ctx, r.baseURI, []string{"namespaces", strings.Join(namespace, namespaceSeparator)},
+	path := []string{"namespaces", "namespace", strings.Join(ref, "."), strings.Join(namespace, ".")}
+	_, err := doDelete[struct{}](ctx, r.baseURI, path,
 		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
 
 	return err
 }
 
-func (r *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error) {
-	uri := r.baseURI.JoinPath("namespaces")
-	if len(parent) != 0 {
-		v := url.Values{}
-		v.Set("parent", strings.Join(parent, namespaceSeparator))
-		uri.RawQuery = v.Encode()
+func (r *Catalog) ListNamespaces(ctx context.Context, ref table.Identifier) ([]table.Identifier, error) {
+	uri := r.baseURI.JoinPath("namespaces/", strings.Join(ref, "."))
+
+	type namespaceItem struct {
+		Type     string   `json:"type"`
+		ID       string   `json:"id"`
+		Elements []string `json:"elements"`
 	}
 
 	type rsptype struct {
-		Namespaces []table.Identifier `json:"namespaces"`
+		Namespaces []namespaceItem `json:"namespaces"`
 	}
 
 	rsp, err := doGet[rsptype](ctx, uri, []string{}, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
@@ -918,24 +1025,38 @@ func (r *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) (
 		return nil, err
 	}
 
-	return rsp.Namespaces, nil
+	// Convert the response to table.Identifier format
+	var result []table.Identifier
+	for _, ns := range rsp.Namespaces {
+		result = append(result, ns.Elements)
+	}
+
+	return result, nil
 }
 
-func (r *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.Identifier) (iceberg.Properties, error) {
+func (r *Catalog) LoadNamespaceProperties(ctx context.Context, ref table.Identifier, namespace table.Identifier) (iceberg.Properties, error) {
 	if err := checkValidNamespace(namespace); err != nil {
 		return nil, err
 	}
+	type namespaceItem struct {
+		Type     string   `json:"type"`
+		ID       string   `json:"id"`
+		Elements []string `json:"elements"`
+	}
 
 	type nsresponse struct {
-		Namespace table.Identifier   `json:"namespace"`
+		Namespace []namespaceItem `json:"namespace"`
 		Props     iceberg.Properties `json:"properties"`
 	}
 
-	rsp, err := doGet[nsresponse](ctx, r.baseURI, []string{"namespaces", strings.Join(namespace, namespaceSeparator)},
-		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
+	path := []string{"namespaces", "namespace", strings.Join(ref, "."), strings.Join(namespace, ".")}
+
+	rsp, err := doGet[nsresponse](ctx, r.baseURI, path, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
 	if err != nil {
 		return nil, err
 	}
+
+	fmt.Println("Resp: ", rsp)
 
 	return rsp.Props, nil
 }
