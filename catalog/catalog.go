@@ -88,16 +88,16 @@ type Catalog interface {
 	RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error)
 	// ListNamespaces returns the list of available namespaces, optionally filtering by a
 	// parent namespace
-	ListNamespaces(ctx context.Context, ref table.Identifier) ([]table.Identifier, error)
+	ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error)
 	// CreateNamespace tells the catalog to create a new namespace with the given properties
-	CreateNamespace(ctx context.Context, ref table.Identifier, namespace table.Identifier, props iceberg.Properties) error
+	CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error
 	// DropNamespace tells the catalog to drop the namespace and all tables in that namespace
-	DropNamespace(ctx context.Context, ref table.Identifier, namespace table.Identifier) error
+	DropNamespace(ctx context.Context, namespace table.Identifier) error
 	// LoadNamespaceProperties returns the current properties in the catalog for
 	// a given namespace
-	LoadNamespaceProperties(ctx context.Context, ref table.Identifier, namespace table.Identifier) (iceberg.Properties, error)
+	LoadNamespaceProperties(ctx context.Context, namespace table.Identifier) (iceberg.Properties, error)
 	// UpdateNamespaceProperties allows removing, adding, and/or updating properties of a namespace
-	UpdateNamespaceProperties(ctx context.Context, ref table.Identifier, namespace table.Identifier,
+	UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier,
 		removals []string, updates iceberg.Properties) (PropertiesUpdateSummary, error)
 }
 

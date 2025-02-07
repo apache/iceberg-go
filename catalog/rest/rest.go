@@ -29,6 +29,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+
 	"net/url"
 	"strings"
 	"time"
@@ -331,6 +332,7 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 
 	uri := baseURI.JoinPath(path...).String()
 	data, err = json.Marshal(payload)
+	
 	if err != nil {
 		return
 	}
@@ -339,13 +341,19 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 	if err != nil {
 		return
 	}
+
 	rsp, err = cl.Do(req)
 	if err != nil {
 		return
 	}
 
-	if rsp.StatusCode != http.StatusOK {
+	if rsp.StatusCode != http.StatusOK && rsp.StatusCode != http.StatusNoContent {
 		return ret, handleNon200(rsp, override)
+	}
+
+	// For 204 No Content, return empty result without error
+	if rsp.StatusCode == http.StatusNoContent {
+		return ret, nil
 	}
 
 	if rsp.ContentLength == 0 {
@@ -362,7 +370,7 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 
 func handleNon200(rsp *http.Response, override map[int]error) error {
 	var e errorResponse
-
+	
 	dec := json.NewDecoder(rsp.Body)
 	dec.Decode(&struct {
 		Error *errorResponse `json:"error"`
@@ -914,11 +922,17 @@ func (r *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 	return r.LoadTable(ctx, to, nil)
 }
 
-func (r *Catalog) CreateNamespace(ctx context.Context, ref table.Identifier, namespace table.Identifier, props iceberg.Properties) error {
+func (r *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error {
 
 	if err := checkValidNamespace(namespace); err != nil {
 		return err
 	}
+
+	ref := table.Identifier{}
+	if refStr := iceberg.GetRefFromContext(ctx); refStr != "" {
+		ref = catalog.ToIdentifier(refStr)
+	}
+
 	payload := map[string]any{
 		"type":       "NAMESPACE",
 		"elements":   namespace,
@@ -937,9 +951,14 @@ func (r *Catalog) CreateNamespace(ctx context.Context, ref table.Identifier, nam
 	return nil
 }
 
-func (r *Catalog) DropNamespace(ctx context.Context, ref table.Identifier, namespace table.Identifier) error {
+func (r *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier) error {
 	if err := checkValidNamespace(namespace); err != nil {
 		return err
+	}
+
+	ref := table.Identifier{}
+	if refStr := iceberg.GetRefFromContext(ctx); refStr != "" {
+		ref = catalog.ToIdentifier(refStr)
 	}
 
 	path := []string{"namespaces", "namespace", strings.Join(ref, "."), strings.Join(namespace, ".")}
@@ -949,8 +968,19 @@ func (r *Catalog) DropNamespace(ctx context.Context, ref table.Identifier, names
 	return err
 }
 
-func (r *Catalog) ListNamespaces(ctx context.Context, ref table.Identifier) ([]table.Identifier, error) {
+func (r *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error) {
+	ref := table.Identifier{}
+	if refStr := iceberg.GetRefFromContext(ctx); refStr != "" {
+		ref = catalog.ToIdentifier(refStr)
+	}
+
 	uri := r.baseURI.JoinPath("namespaces/", strings.Join(ref, "."))
+
+	if len(parent) != 0 {
+		v := url.Values{}
+		v.Set("parent", strings.Join(parent, namespaceSeparator))
+		uri.RawQuery = v.Encode()
+	}
 
 	type namespaceItem struct {
 		Type     string   `json:"type"`
@@ -976,10 +1006,16 @@ func (r *Catalog) ListNamespaces(ctx context.Context, ref table.Identifier) ([]t
 	return result, nil
 }
 
-func (r *Catalog) LoadNamespaceProperties(ctx context.Context, ref table.Identifier, namespace table.Identifier) (iceberg.Properties, error) {
+func (r *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.Identifier) (iceberg.Properties, error) {
 	if err := checkValidNamespace(namespace); err != nil {
 		return nil, err
 	}
+
+	ref := table.Identifier{}
+	if refStr := iceberg.GetRefFromContext(ctx); refStr != "" {
+		ref = catalog.ToIdentifier(refStr)
+	}
+
 	type namespaceItem struct {
 		Type     string   `json:"type"`
 		ID       string   `json:"id"`
@@ -987,7 +1023,7 @@ func (r *Catalog) LoadNamespaceProperties(ctx context.Context, ref table.Identif
 	}
 
 	type nsresponse struct {
-		Namespace []namespaceItem `json:"namespace"`
+		Namespace []namespaceItem    `json:"namespace"`
 		Props     iceberg.Properties `json:"properties"`
 	}
 
@@ -1003,22 +1039,35 @@ func (r *Catalog) LoadNamespaceProperties(ctx context.Context, ref table.Identif
 	return rsp.Props, nil
 }
 
-func (r *Catalog) UpdateNamespaceProperties(ctx context.Context, ref table.Identifier, namespace table.Identifier,
+func (r *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier,
 	removals []string, updates iceberg.Properties) (catalog.PropertiesUpdateSummary, error) {
 
 	if err := checkValidNamespace(namespace); err != nil {
 		return catalog.PropertiesUpdateSummary{}, err
 	}
 
-	type payload struct {
-		PropertyUpdates  iceberg.Properties `json:"propertyUpdates"`
-		PropertyRemovals []string          `json:"propertyRemovals,omitempty"`
+	ref := table.Identifier{}
+	if refStr := iceberg.GetRefFromContext(ctx); refStr != "" {
+		ref = catalog.ToIdentifier(refStr)
 	}
 
-	path := []string{"namespaces", "namespace", strings.Join(ref, "."), strings.Join(namespace, ".")}
-	return doPost[payload, catalog.PropertiesUpdateSummary](ctx, r.baseURI, path,
-		payload{PropertyUpdates: updates, PropertyRemovals: removals}, r.cl,
-		map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
+	type payload struct {
+		PropertyUpdates  iceberg.Properties `json:"propertyUpdates"`
+		PropertyRemovals []string           `json:"propertyRemovals,omitempty"`
+	}
+
+	p := payload{PropertyUpdates: updates, PropertyRemovals: removals}
+
+	path := []string{"namespaces", "namespace", strings.Join(ref, "."), strings.Join(namespace, ".")} 
+
+	res, err := doPost[payload, catalog.PropertiesUpdateSummary](ctx, r.baseURI, path,
+		p, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
+
+	if err != nil {
+		return catalog.PropertiesUpdateSummary{}, err
+	}
+
+	return res, nil
 }
 
 func (r *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Identifier) (bool, error) {
