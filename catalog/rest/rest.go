@@ -238,30 +238,19 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 func do[T any](ctx context.Context, method string, baseURI *url.URL, path []string, cl *http.Client, override map[int]error, allowNoContent bool) (ret T, err error) {
-	fmt.Printf("DEBUG: Making %s request to %s\n", method, baseURI.String())
-	if len(path) > 0 {
-		fmt.Printf("DEBUG: With path segments: %v\n", path)
-	}
-
 	var (
 		req *http.Request
 		rsp *http.Response
 	)
 
 	uri := baseURI.JoinPath(path...).String()
-	fmt.Printf("DEBUG: Full request URI: %s\n", uri)
 
 	if req, err = http.NewRequestWithContext(ctx, method, uri, nil); err != nil {
-		fmt.Printf("DEBUG: Error creating request: %v\n", err)
 		return
 	}
-
-	fmt.Println("DEBUG: Sending request...")
 	if rsp, err = cl.Do(req); err != nil {
-		fmt.Printf("DEBUG: Error sending request: %v\n", err)
 		return
 	}
-	fmt.Printf("DEBUG: Got response with status: %s\n", rsp.Status)
 
 	if allowNoContent && rsp.StatusCode == http.StatusNoContent {
 		return
@@ -294,21 +283,17 @@ func doPut[Result any, Payload any](ctx context.Context, baseURI *url.URL, path 
 	)
 
 	uri := baseURI.JoinPath(path...).String()
-	fmt.Println("DEBUG: uri: ", uri)
-	fmt.Println("DEBUG: Marshaling request payload...")
 	data, err = json.Marshal(payload)
 	if err != nil {
 		return ret, err
 	}
 
-	fmt.Printf("DEBUG: Marshaled payload: %s\n", string(data))
 	req, err = http.NewRequestWithContext(ctx, http.MethodPut, uri, bytes.NewReader(data))
 	if err != nil {
 		return ret, err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	fmt.Printf("DEBUG: Sending PUT request to %s\n", uri)
 
 	rsp, err := cl.Do(req)
 	if err != nil {
@@ -316,7 +301,6 @@ func doPut[Result any, Payload any](ctx context.Context, baseURI *url.URL, path 
 	}
 	defer rsp.Body.Close()
 
-	fmt.Printf("DEBUG: Received response with status: %s\n", rsp.Status)
 	if rsp.StatusCode != http.StatusOK {
 		return ret, handleNon200(rsp, override)
 	}
@@ -338,7 +322,6 @@ func doHead(ctx context.Context, baseURI *url.URL, path []string, cl *http.Clien
 }
 
 func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []string, payload Payload, cl *http.Client, override map[int]error) (ret Result, err error) {
-	fmt.Printf("DEBUG: Making POST request to %s with path: %v\n", baseURI.String(), path)
 
 	var (
 		req  *http.Request
@@ -347,27 +330,19 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 	)
 
 	uri := baseURI.JoinPath(path...).String()
-	fmt.Println("DEBUG: uri: ", uri)
-	fmt.Println("DEBUG: Marshaling request payload...")
 	data, err = json.Marshal(payload)
 	if err != nil {
-		fmt.Printf("DEBUG: Error marshaling payload: %v\n", err)
 		return
 	}
-	fmt.Printf("DEBUG: Request payload: %s\n", string(data))
 
 	req, err = http.NewRequestWithContext(ctx, http.MethodPost, uri, bytes.NewReader(data))
 	if err != nil {
 		return
 	}
-
-	fmt.Println("DEBUG: Sending POST request...")
 	rsp, err = cl.Do(req)
 	if err != nil {
-		fmt.Printf("DEBUG: Error sending request: %v\n", err)
 		return
 	}
-	fmt.Printf("DEBUG: Got response with status: %s\n", rsp.Status)
 
 	if rsp.StatusCode != http.StatusOK {
 		return ret, handleNon200(rsp, override)
@@ -386,10 +361,7 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 }
 
 func handleNon200(rsp *http.Response, override map[int]error) error {
-	fmt.Printf("DEBUG: Handling non-200 response: %s\n", rsp.Status)
 	var e errorResponse
-
-	fmt.Printf("DEBUG: Error: %v\n", override)
 
 	dec := json.NewDecoder(rsp.Body)
 	dec.Decode(&struct {
@@ -529,22 +501,16 @@ func NewCatalog(ctx context.Context, name, uri string, opts ...Option) (*Catalog
 }
 
 func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
-	fmt.Printf("DEBUG: Initializing catalog with uri=%s\n", uri)
 	baseuri, err := url.Parse(uri)
 	if err != nil {
-		fmt.Printf("DEBUG: Error parsing URI: %v\n", err)
 		return err
 	}
 
 	r.baseURI = baseuri.JoinPath("v1")
-	fmt.Printf("DEBUG: Base URI with v1: %s\n", r.baseURI)
 
-	fmt.Println("DEBUG: Fetching config...")
 	if r.cl, ops, err = r.fetchConfig(ctx, ops); err != nil {
-		fmt.Printf("DEBUG: Error fetching config: %v\n", err)
 		return err
 	}
-	fmt.Println("DEBUG: Config fetched successfully")
 
 	if ops.prefix != "" {
 		r.baseURI = r.baseURI.JoinPath(ops.prefix)
@@ -651,22 +617,18 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client,
 	params := url.Values{}
 	if opts.warehouseLocation != "" {
 		params.Set(keyWarehouseLocation, opts.warehouseLocation)
-		fmt.Printf("DEBUG: Setting warehouse location: %s\n", opts.warehouseLocation)
 	}
 
 	route := r.baseURI.JoinPath("config")
 	route.RawQuery = params.Encode()
-	fmt.Printf("DEBUG: Config request URL: %s\n", route.String())
 
 	sess, err := r.createSession(ctx, opts)
 	if err != nil {
-		fmt.Printf("DEBUG: Error creating session: %v\n", err)
 		return nil, nil, err
 	}
 
 	rsp, err := doGet[configResponse](ctx, route, []string{}, sess, nil)
 	if err != nil {
-		fmt.Printf("DEBUG: Error fetching config: %v\n", err)
 		return nil, nil, err
 	}
 
@@ -749,44 +711,27 @@ func splitIdentForPath(ident table.Identifier) (string, string, error) {
 }
 
 func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
-	fmt.Printf("DEBUG: Creating table with identifier: %v\n", identifier)
 	ns, tbl, err := splitIdentForPath(identifier)
 	if err != nil {
-		fmt.Printf("DEBUG: Error splitting identifier: %v\n", err)
 		return nil, err
 	}
-	fmt.Printf("DEBUG: Namespace: %s, Table: %s\n", ns, tbl)
 
 	var cfg internal.CreateTableCfg
-	fmt.Println("DEBUG: Processing create table options...")
 	for _, o := range opts {
 		o(&cfg)
 	}
-	fmt.Printf("DEBUG: Create table config: %+v\n", cfg)
-
-	fmt.Println("DEBUG: Assigning fresh schema IDs...")
 	freshSchema, err := iceberg.AssignFreshSchemaIDs(schema, nil)
 	if err != nil {
-		fmt.Printf("DEBUG: Error assigning schema IDs: %v\n", err)
 		return nil, err
 	}
-	fmt.Printf("DEBUG: Fresh schema: %+v\n", freshSchema)
-
-	fmt.Println("DEBUG: Assigning fresh partition spec IDs...")
 	freshPartitionSpec, err := iceberg.AssignFreshPartitionSpecIDs(cfg.PartitionSpec, schema, freshSchema)
 	if err != nil {
-		fmt.Printf("DEBUG: Error assigning partition spec IDs: %v\n", err)
 		return nil, err
 	}
-	fmt.Printf("DEBUG: Fresh partition spec: %+v\n", freshPartitionSpec)
-
-	fmt.Println("DEBUG: Assigning fresh sort order IDs...")
 	freshSortOrder, err := table.AssignFreshSortOrderIDs(cfg.SortOrder, schema, freshSchema)
 	if err != nil {
-		fmt.Printf("DEBUG: Error assigning sort order IDs: %v\n", err)
 		return nil, err
 	}
-	fmt.Printf("DEBUG: Fresh sort order: %+v\n", freshSortOrder)
 
 	payload := createTableRequest{
 		Name:          tbl,
@@ -979,7 +924,6 @@ func (r *Catalog) CreateNamespace(ctx context.Context, ref table.Identifier, nam
 		"elements":   namespace,
 		"properties": props,
 	}
-	fmt.Printf("DEBUG: Request payload: %+v\n", payload)
 
 	path := []string{"namespaces", "namespace", strings.Join(ref, "."), strings.Join(namespace, ".")}
 
@@ -987,11 +931,9 @@ func (r *Catalog) CreateNamespace(ctx context.Context, ref table.Identifier, nam
 		http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrNamespaceAlreadyExists})
 
 	if err != nil {
-		fmt.Printf("DEBUG: Failed to create namespace: %v\n", err)
 		return err
 	}
 
-	fmt.Printf("DEBUG: Successfully created namespace: %v\n", namespace)
 	return nil
 }
 
@@ -1061,7 +1003,7 @@ func (r *Catalog) LoadNamespaceProperties(ctx context.Context, ref table.Identif
 	return rsp.Props, nil
 }
 
-func (r *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier,
+func (r *Catalog) UpdateNamespaceProperties(ctx context.Context, ref table.Identifier, namespace table.Identifier,
 	removals []string, updates iceberg.Properties) (catalog.PropertiesUpdateSummary, error) {
 
 	if err := checkValidNamespace(namespace); err != nil {
@@ -1069,13 +1011,14 @@ func (r *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 	}
 
 	type payload struct {
-		Remove  []string           `json:"removals"`
-		Updates iceberg.Properties `json:"updates"`
+		PropertyUpdates  iceberg.Properties `json:"propertyUpdates"`
+		PropertyRemovals []string          `json:"propertyRemovals,omitempty"`
 	}
 
-	ns := strings.Join(namespace, namespaceSeparator)
-	return doPost[payload, catalog.PropertiesUpdateSummary](ctx, r.baseURI, []string{"namespaces", ns, "properties"},
-		payload{Remove: removals, Updates: updates}, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
+	path := []string{"namespaces", "namespace", strings.Join(ref, "."), strings.Join(namespace, ".")}
+	return doPost[payload, catalog.PropertiesUpdateSummary](ctx, r.baseURI, path,
+		payload{PropertyUpdates: updates, PropertyRemovals: removals}, r.cl,
+		map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
 }
 
 func (r *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Identifier) (bool, error) {

@@ -97,7 +97,7 @@ type Catalog interface {
 	// a given namespace
 	LoadNamespaceProperties(ctx context.Context, ref table.Identifier, namespace table.Identifier) (iceberg.Properties, error)
 	// UpdateNamespaceProperties allows removing, adding, and/or updating properties of a namespace
-	UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier,
+	UpdateNamespaceProperties(ctx context.Context, ref table.Identifier, namespace table.Identifier,
 		removals []string, updates iceberg.Properties) (PropertiesUpdateSummary, error)
 }
 
