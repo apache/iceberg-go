@@ -1116,6 +1116,220 @@ func (r *RestCatalogSuite) TestDropTable404() {
 	r.ErrorContains(err, "Table does not exist: fokko.table")
 }
 
+func (r *RestCatalogSuite) TestRegisterTable200() {
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables/fokko2", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		var payload struct {
+			Name        string `json:"name"`
+			MetadataLoc string `json:"metadata-location"`
+		}
+		r.NoError(json.NewDecoder(req.Body).Decode(&payload))
+		r.Equal("fokko2", payload.Name)
+		r.Equal("s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json", payload.MetadataLoc)
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{
+  "metadata-location": "s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json",
+  "metadata": {
+    "format-version": 1,
+    "table-uuid": "d55d9dda-6561-423a-8bfc-787980ce421f",
+    "location": "s3://warehouse/database/table",
+    "last-updated-ms": 1646787054459,
+    "last-column-id": 2,
+    "schema": {
+      "type": "struct",
+      "schema-id": 0,
+      "fields": [
+        {
+          "id": 1,
+          "name": "id",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "id": 2,
+          "name": "data",
+          "required": false,
+          "type": "string"
+        }
+      ]
+    },
+    "current-schema-id": 0,
+    "schemas": [
+      {
+        "type": "struct",
+        "schema-id": 0,
+        "fields": [
+          {
+            "id": 1,
+            "name": "id",
+            "required": false,
+            "type": "int"
+          },
+          {
+            "id": 2,
+            "name": "data",
+            "required": false,
+            "type": "string"
+          }
+        ]
+      }
+    ],
+    "partition-spec": [
+      
+    ],
+    "default-spec-id": 0,
+    "partition-specs": [
+      {
+        "spec-id": 0,
+        "fields": [
+          
+        ]
+      }
+    ],
+    "last-partition-id": 999,
+    "default-sort-order-id": 0,
+    "sort-orders": [
+      {
+        "order-id": 0,
+        "fields": [
+          
+        ]
+      }
+    ],
+    "properties": {
+      "owner": "bryan",
+      "write.metadata.compression-codec": "gzip"
+    },
+    "current-snapshot-id": 3497810964824022504,
+    "refs": {
+      "main": {
+        "snapshot-id": 3497810964824022504,
+        "type": "branch"
+      }
+    },
+    "snapshots": [
+      {
+        "snapshot-id": 3497810964824022504,
+        "timestamp-ms": 1646787054459,
+        "summary": {
+          "operation": "append",
+          "spark.app.id": "local-1646787004168",
+          "added-data-files": "1",
+          "added-records": "1",
+          "added-files-size": "697",
+          "changed-partition-count": "1",
+          "total-records": "1",
+          "total-files-size": "697",
+          "total-data-files": "1",
+          "total-delete-files": "0",
+          "total-position-deletes": "0",
+          "total-equality-deletes": "0"
+        },
+        "manifest-list": "s3://warehouse/database/table/metadata/snap-3497810964824022504-1-c4f68204-666b-4e50-a9df-b10c34bf6b82.avro",
+        "schema-id": 0
+      }
+    ],
+    "snapshot-log": [
+      {
+        "timestamp-ms": 1646787054459,
+        "snapshot-id": 3497810964824022504
+      }
+    ],
+    "metadata-log": [
+      {
+        "timestamp-ms": 1646787031514,
+        "metadata-file": "s3://warehouse/database/table/metadata/00000-88484a1c-00e5-4a07-a787-c0e7aeffa805.gz.metadata.json"
+      }
+    ]
+  }
+}`))
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	tbl, err := cat.RegisterTable(context.Background(), catalog.ToIdentifier("fokko", "fokko2"), "s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json")
+	r.Require().NoError(err)
+
+	r.Equal(catalog.ToIdentifier("rest", "fokko", "fokko2"), tbl.Identifier())
+	r.Equal("s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json", tbl.MetadataLocation())
+	r.EqualValues(1, tbl.Metadata().Version())
+	r.Equal("d55d9dda-6561-423a-8bfc-787980ce421f", tbl.Metadata().TableUUID().String())
+	r.Equal("bryan", tbl.Metadata().Properties()["owner"])
+}
+
+func (r *RestCatalogSuite) TestRegisterTable404() {
+	r.mux.HandleFunc("/v1/namespaces/nonexistent/tables/fokko2", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		var payload struct {
+			Name        string `json:"name"`
+			MetadataLoc string `json:"metadata-location"`
+		}
+
+		r.NoError(json.NewDecoder(req.Body).Decode(&payload))
+		r.Equal("fokko2", payload.Name)
+		r.Equal("s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json", payload.MetadataLoc)
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{
+			  "error": {
+				"message": "The given namespace does not exist",
+			    "type": "NoSuchNamespaceException",
+			    "code": 404
+			  }
+			}`))
+	})
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.RegisterTable(context.Background(), catalog.ToIdentifier("nonexistent", "fokko2"), "s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json")
+	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	r.ErrorContains(err, "The given namespace does not exist")
+}
+
+func (r *RestCatalogSuite) TestRegisterTable409() {
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables/alreadyexist", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		var payload struct {
+			Name        string `json:"name"`
+			MetadataLoc string `json:"metadata-location"`
+		}
+
+		r.NoError(json.NewDecoder(req.Body).Decode(&payload))
+		r.Equal("alreadyexist", payload.Name)
+		r.Equal("s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json", payload.MetadataLoc)
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte(`{
+			"error": {
+				"message": "The given table already exists",
+				"type": "AlreadyExistsException",
+				"code": 409
+			}
+		}`))
+	})
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.RegisterTable(context.Background(), catalog.ToIdentifier("fokko", "alreadyexist"), "s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json")
+	r.ErrorIs(err, catalog.ErrTableAlreadyExists)
+	r.ErrorContains(err, "The given table already exists")
+}
+
 type RestTLSCatalogSuite struct {
 	suite.Suite
 
