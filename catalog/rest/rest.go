@@ -1012,3 +1012,31 @@ func (r *Catalog) ListViews(ctx context.Context, namespace table.Identifier) ([]
 	}
 	return out, nil
 }
+
+func (r *Catalog) DropView(ctx context.Context, identifier table.Identifier) error {
+	ns, view, err := splitIdentForPath(identifier)
+	if err != nil {
+		return err
+	}
+
+	_, err = doDelete[struct{}](ctx, r.baseURI, []string{"namespaces", ns, "views", view}, r.cl,
+		map[int]error{http.StatusNotFound: catalog.ErrNoSuchView})
+	return err
+}
+
+func (r *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifier) (bool, error) {
+	ns, view, err := splitIdentForPath(identifier)
+	if err != nil {
+		return false, err
+	}
+
+	err = doHead(ctx, r.baseURI, []string{"namespaces", ns, "views", view},
+		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchView})
+	if err != nil {
+		if errors.Is(err, catalog.ErrNoSuchView) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}

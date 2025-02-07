@@ -1391,6 +1391,98 @@ func (r *RestCatalogSuite) TestListViews404() {
 	r.ErrorContains(err, "The given namespace does not exist")
 }
 
+func (r *RestCatalogSuite) TestDropView204() {
+	r.mux.HandleFunc("/v1/namespaces/fokko/views/fokko2", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodDelete, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	err = cat.DropView(context.Background(), catalog.ToIdentifier("fokko", "fokko2"))
+	r.NoError(err)
+}
+
+func (r *RestCatalogSuite) TestDropView404() {
+	r.mux.HandleFunc("/v1/namespaces/fokko/views/nonexistent", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodDelete, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+		errorResponse := map[string]interface{}{
+			"error": map[string]interface{}{
+				"message": "The given view does not exist",
+				"type":    "NoSuchViewException",
+				"code":    404,
+			},
+		}
+		json.NewEncoder(w).Encode(errorResponse)
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	err = cat.DropView(context.Background(), catalog.ToIdentifier("fokko", "nonexistent"))
+	r.Error(err)
+	r.ErrorIs(err, catalog.ErrNoSuchView)
+	r.ErrorContains(err, "The given view does not exist")
+}
+
+func (r *RestCatalogSuite) TestCheckViewExists204() {
+	r.mux.HandleFunc("/v1/namespaces/fokko/views/fokko2", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodHead, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	exists, err := cat.CheckViewExists(context.Background(), catalog.ToIdentifier("fokko", "fokko2"))
+	r.Require().NoError(err)
+	r.Require().True(exists)
+}
+
+func (r *RestCatalogSuite) TestCheckViewExists404() {
+	r.mux.HandleFunc("/v1/namespaces/fokko/views/nonexistent", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodHead, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+		err := json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "The given view does not exist",
+				"type":    "NoSuchViewException",
+				"code":    404,
+			},
+		})
+		if err != nil {
+			return
+		}
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	exists, err := cat.CheckViewExists(context.Background(), catalog.ToIdentifier("fokko", "nonexistent"))
+	r.Require().NoError(err)
+	r.False(exists)
+}
+
 type RestTLSCatalogSuite struct {
 	suite.Suite
 
