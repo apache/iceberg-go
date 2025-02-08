@@ -341,16 +341,45 @@ func (r *RestCatalogSuite) TestListTables404() {
 }
 
 func (r *RestCatalogSuite) TestListNamespaces200() {
-	r.mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
+	r.mux.HandleFunc("/v1/namespaces/main", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodGet, req.Method)
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
 		}
 
-		json.NewEncoder(w).Encode(map[string]any{
-			"namespaces": []table.Identifier{
-				{"default"}, {"examples"}, {"fokko"}, {"system"},
+		type namespaceItem struct {
+			Type     string   `json:"type"`
+			ID       string   `json:"id"`
+			Elements []string `json:"elements"`
+		}
+
+		type rsptype struct {
+			Namespaces []namespaceItem `json:"namespaces"`
+		}
+
+		json.NewEncoder(w).Encode(rsptype{
+			Namespaces: []namespaceItem{
+				{
+					Type:     "NAMESPACE",
+					ID:       "default",
+					Elements: []string{"default"},
+				},
+				{
+					Type:     "NAMESPACE",
+					ID:       "examples",
+					Elements: []string{"examples"},
+				},
+				{
+					Type:     "NAMESPACE",
+					ID:       "fokko",
+					Elements: []string{"fokko"},
+				},
+				{
+					Type:     "NAMESPACE",
+					ID:       "system",
+					Elements: []string{"system"},
+				},
 			},
 		})
 	})
@@ -358,14 +387,15 @@ func (r *RestCatalogSuite) TestListNamespaces200() {
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	results, err := cat.ListNamespaces(context.Background(), nil)
+	ctx := iceberg.WithRef(context.Background(), "main")
+	results, err := cat.ListNamespaces(ctx, nil)
 	r.Require().NoError(err)
 
 	r.Equal([]table.Identifier{{"default"}, {"examples"}, {"fokko"}, {"system"}}, results)
 }
 
 func (r *RestCatalogSuite) TestListNamespaceWithParent200() {
-	r.mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
+	r.mux.HandleFunc("/v1/namespaces/", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodGet, req.Method)
 		r.Require().Equal("accounting", req.URL.Query().Get("parent"))
 
@@ -374,8 +404,12 @@ func (r *RestCatalogSuite) TestListNamespaceWithParent200() {
 		}
 
 		json.NewEncoder(w).Encode(map[string]any{
-			"namespaces": []table.Identifier{
-				{"accounting", "tax"},
+			"namespaces": []map[string]any{
+				{
+					"type":     "NAMESPACE",
+					"id":       "accounting.tax",
+					"elements": []string{"accounting", "tax"},
+				},
 			},
 		})
 	})
@@ -390,7 +424,7 @@ func (r *RestCatalogSuite) TestListNamespaceWithParent200() {
 }
 
 func (r *RestCatalogSuite) TestListNamespaces400() {
-	r.mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
+	r.mux.HandleFunc("/v1/namespaces/main", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodGet, req.Method)
 
 		for k, v := range TestHeaders {
@@ -410,14 +444,15 @@ func (r *RestCatalogSuite) TestListNamespaces400() {
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	_, err = cat.ListNamespaces(context.Background(), catalog.ToIdentifier("accounting"))
+	ctx := iceberg.WithRef(context.Background(), "main")
+	_, err = cat.ListNamespaces(ctx, catalog.ToIdentifier("accounting"))
 	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
 	r.ErrorContains(err, "Namespace does not exist: personal in warehouse 8bcb0838-50fc-472d-9ddb-8feb89ef5f1e")
 }
 
 func (r *RestCatalogSuite) TestCreateNamespace200() {
-	r.mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodPost, req.Method)
+	r.mux.HandleFunc("/v1/namespaces/namespace/main/leden", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPut, req.Method)
 		r.Require().Equal("application/json", req.Header.Get("Content-Type"))
 
 		for k, v := range TestHeaders {
@@ -427,13 +462,16 @@ func (r *RestCatalogSuite) TestCreateNamespace200() {
 		defer req.Body.Close()
 		dec := json.NewDecoder(req.Body)
 		body := struct {
-			Namespace table.Identifier   `json:"namespace"`
-			Props     iceberg.Properties `json:"properties"`
+			Type       string             `json:"type"`
+			Elements   table.Identifier   `json:"elements"`
+			Properties iceberg.Properties `json:"properties"`
 		}{}
 
 		r.Require().NoError(dec.Decode(&body))
-		r.Equal(table.Identifier{"leden"}, body.Namespace)
-		r.Empty(body.Props)
+
+		r.Equal("NAMESPACE", body.Type)
+		r.Equal(table.Identifier{"leden"}, body.Elements)
+		r.Empty(body.Properties)
 
 		json.NewEncoder(w).Encode(map[string]any{
 			"namespace": []string{"leden"}, "properties": map[string]any{},
@@ -443,7 +481,9 @@ func (r *RestCatalogSuite) TestCreateNamespace200() {
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	r.Require().NoError(cat.CreateNamespace(context.Background(), catalog.ToIdentifier("leden"), nil))
+	ctx := iceberg.WithRef(context.Background(), "main")
+
+	r.Require().NoError(cat.CreateNamespace(ctx, catalog.ToIdentifier("leden"), nil))
 }
 
 func (r *RestCatalogSuite) TestCheckNamespaceExists204() {
@@ -493,8 +533,8 @@ func (r *RestCatalogSuite) TestCheckNamespaceExists404() {
 }
 
 func (r *RestCatalogSuite) TestCreateNamespaceWithProps200() {
-	r.mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodPost, req.Method)
+	r.mux.HandleFunc("/v1/namespaces/namespace/main/leden", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPut, req.Method)
 		r.Require().Equal("application/json", req.Header.Get("Content-Type"))
 
 		for k, v := range TestHeaders {
@@ -504,28 +544,32 @@ func (r *RestCatalogSuite) TestCreateNamespaceWithProps200() {
 		defer req.Body.Close()
 		dec := json.NewDecoder(req.Body)
 		body := struct {
-			Namespace table.Identifier   `json:"namespace"`
-			Props     iceberg.Properties `json:"properties"`
+			Type       string             `json:"type"`
+			Elements   []string           `json:"elements"`
+			Properties iceberg.Properties `json:"properties"`
 		}{}
 
 		r.Require().NoError(dec.Decode(&body))
-		r.Equal(table.Identifier{"leden"}, body.Namespace)
-		r.Equal(iceberg.Properties{"foo": "bar", "super": "duper"}, body.Props)
+		r.Equal("NAMESPACE", body.Type)
+		r.Equal([]string{"leden"}, body.Elements)
+		r.Equal(iceberg.Properties{"foo": "bar", "super": "duper"}, body.Properties)
 
 		json.NewEncoder(w).Encode(map[string]any{
-			"namespace": []string{"leden"}, "properties": body.Props,
+			"namespace": []string{"leden"}, "properties": body.Properties,
 		})
 	})
 
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	r.Require().NoError(cat.CreateNamespace(context.Background(), catalog.ToIdentifier("leden"), iceberg.Properties{"foo": "bar", "super": "duper"}))
+	ctx := iceberg.WithRef(context.Background(), "main")
+
+	r.Require().NoError(cat.CreateNamespace(ctx, catalog.ToIdentifier("leden"), iceberg.Properties{"foo": "bar", "super": "duper"}))
 }
 
 func (r *RestCatalogSuite) TestCreateNamespace409() {
-	r.mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
-		r.Require().Equal(http.MethodPost, req.Method)
+	r.mux.HandleFunc("/v1/namespaces/namespace/main/fokko", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPut, req.Method)
 		r.Require().Equal("application/json", req.Header.Get("Content-Type"))
 
 		for k, v := range TestHeaders {
@@ -535,34 +579,35 @@ func (r *RestCatalogSuite) TestCreateNamespace409() {
 		defer req.Body.Close()
 		dec := json.NewDecoder(req.Body)
 		body := struct {
-			Namespace table.Identifier   `json:"namespace"`
-			Props     iceberg.Properties `json:"properties"`
+			Type       string             `json:"type"`
+			Elements   []string           `json:"elements"`
+			Properties iceberg.Properties `json:"properties"`
 		}{}
 
 		r.Require().NoError(dec.Decode(&body))
-		r.Equal(table.Identifier{"fokko"}, body.Namespace)
-		r.Empty(body.Props)
+		r.Equal("NAMESPACE", body.Type)
+		r.Equal([]string{"fokko"}, body.Elements)
+		r.Empty(body.Properties)
 
 		w.WriteHeader(http.StatusConflict)
 		json.NewEncoder(w).Encode(map[string]any{
-			"error": map[string]any{
-				"message": "Namespace already exists: fokko in warehouse 8bcb0838-50fc-472d-9ddb-8feb89ef5f1e",
-				"type":    "AlreadyExistsException",
-				"code":    409,
-			},
+			"message": "Namespace already exists: fokko in warehouse",
+			"type":    "AlreadyExistsException",
+			"code":    409,
 		})
 	})
 
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	err = cat.CreateNamespace(context.Background(), catalog.ToIdentifier("fokko"), nil)
+	ctx := iceberg.WithRef(context.Background(), "main")
+	err = cat.CreateNamespace(ctx, catalog.ToIdentifier("fokko"), nil)
 	r.ErrorIs(err, catalog.ErrNamespaceAlreadyExists)
 	r.ErrorContains(err, "fokko in warehouse")
 }
 
 func (r *RestCatalogSuite) TestDropNamespace204() {
-	r.mux.HandleFunc("/v1/namespaces/examples", func(w http.ResponseWriter, req *http.Request) {
+	r.mux.HandleFunc("/v1/namespaces/namespace/main/examples", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodDelete, req.Method)
 
 		for k, v := range TestHeaders {
@@ -575,11 +620,13 @@ func (r *RestCatalogSuite) TestDropNamespace204() {
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	r.NoError(cat.DropNamespace(context.Background(), catalog.ToIdentifier("examples")))
+	ctx := iceberg.WithRef(context.Background(), "main")
+
+	r.NoError(cat.DropNamespace(ctx, catalog.ToIdentifier("examples")))
 }
 
 func (r *RestCatalogSuite) TestDropNamespace404() {
-	r.mux.HandleFunc("/v1/namespaces/examples", func(w http.ResponseWriter, req *http.Request) {
+	r.mux.HandleFunc("/v1/namespaces/namespace/main/examples", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodDelete, req.Method)
 
 		for k, v := range TestHeaders {
@@ -599,13 +646,15 @@ func (r *RestCatalogSuite) TestDropNamespace404() {
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	err = cat.DropNamespace(context.Background(), catalog.ToIdentifier("examples"))
+	ctx := iceberg.WithRef(context.Background(), "main")
+
+	err = cat.DropNamespace(ctx, catalog.ToIdentifier("examples"))
 	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
 	r.ErrorContains(err, "examples in warehouse")
 }
 
 func (r *RestCatalogSuite) TestLoadNamespaceProps200() {
-	r.mux.HandleFunc("/v1/namespaces/leden", func(w http.ResponseWriter, req *http.Request) {
+	r.mux.HandleFunc("/v1/namespaces/namespace/main/leden", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodGet, req.Method)
 
 		for k, v := range TestHeaders {
@@ -614,7 +663,13 @@ func (r *RestCatalogSuite) TestLoadNamespaceProps200() {
 
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]any{
-			"namespace":  []string{"fokko"},
+			"namespace": []map[string]any{
+				{
+					"type":     "NAMESPACE",
+					"id":       "leden",
+					"elements": []string{"leden"},
+				},
+			},
 			"properties": map[string]any{"prop": "yes"},
 		})
 	})
@@ -622,13 +677,15 @@ func (r *RestCatalogSuite) TestLoadNamespaceProps200() {
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	props, err := cat.LoadNamespaceProperties(context.Background(), catalog.ToIdentifier("leden"))
+	ctx := iceberg.WithRef(context.Background(), "main")
+
+	props, err := cat.LoadNamespaceProperties(ctx, catalog.ToIdentifier("leden"))
 	r.Require().NoError(err)
 	r.Equal(iceberg.Properties{"prop": "yes"}, props)
 }
 
 func (r *RestCatalogSuite) TestLoadNamespaceProps404() {
-	r.mux.HandleFunc("/v1/namespaces/leden", func(w http.ResponseWriter, req *http.Request) {
+	r.mux.HandleFunc("/v1/namespaces/namespace/main/leden", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodGet, req.Method)
 
 		for k, v := range TestHeaders {
@@ -648,30 +705,34 @@ func (r *RestCatalogSuite) TestLoadNamespaceProps404() {
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	_, err = cat.LoadNamespaceProperties(context.Background(), catalog.ToIdentifier("leden"))
+	ctx := iceberg.WithRef(context.Background(), "main")
+
+	_, err = cat.LoadNamespaceProperties(ctx, catalog.ToIdentifier("leden"))
 	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
 	r.ErrorContains(err, "Namespace does not exist: fokko22 in warehouse")
 }
 
 func (r *RestCatalogSuite) TestUpdateNamespaceProps200() {
-	r.mux.HandleFunc("/v1/namespaces/fokko/properties", func(w http.ResponseWriter, req *http.Request) {
+	r.mux.HandleFunc("/v1/namespaces/namespace/main/fokko", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodPost, req.Method)
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
 		}
 
-		json.NewEncoder(w).Encode(map[string]any{
-			"removed": []string{},
-			"updated": []string{"prop"},
-			"missing": []string{"abc"},
+		json.NewEncoder(w).Encode(catalog.PropertiesUpdateSummary{
+			Removed: []string{},
+			Updated: []string{"prop"},
+			Missing: []string{"abc"},
 		})
 	})
 
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	summary, err := cat.UpdateNamespaceProperties(context.Background(), table.Identifier([]string{"fokko"}),
+	ctx := iceberg.WithRef(context.Background(), "main")
+
+	summary, err := cat.UpdateNamespaceProperties(ctx, table.Identifier([]string{"fokko"}),
 		[]string{"abc"}, iceberg.Properties{"prop": "yes"})
 	r.Require().NoError(err)
 
@@ -683,7 +744,7 @@ func (r *RestCatalogSuite) TestUpdateNamespaceProps200() {
 }
 
 func (r *RestCatalogSuite) TestUpdateNamespaceProps404() {
-	r.mux.HandleFunc("/v1/namespaces/fokko/properties", func(w http.ResponseWriter, req *http.Request) {
+	r.mux.HandleFunc("/v1/namespaces/namespace/main/fokko", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodPost, req.Method)
 
 		for k, v := range TestHeaders {
@@ -703,7 +764,9 @@ func (r *RestCatalogSuite) TestUpdateNamespaceProps404() {
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	_, err = cat.UpdateNamespaceProperties(context.Background(),
+	ctx := iceberg.WithRef(context.Background(), "main")
+
+	_, err = cat.UpdateNamespaceProperties(ctx,
 		table.Identifier{"fokko"}, []string{"abc"}, iceberg.Properties{"prop": "yes"})
 	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
 	r.ErrorContains(err, "Namespace does not exist: does_not_exist in warehouse")

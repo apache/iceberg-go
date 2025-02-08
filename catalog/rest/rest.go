@@ -302,6 +302,10 @@ func doPut[Result any, Payload any](ctx context.Context, baseURI *url.URL, path 
 	}
 	defer rsp.Body.Close()
 
+	if rsp.StatusCode == http.StatusNoContent {
+		return ret, nil
+	}
+
 	if rsp.StatusCode != http.StatusOK {
 		return ret, handleNon200(rsp, override)
 	}
@@ -332,7 +336,7 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 
 	uri := baseURI.JoinPath(path...).String()
 	data, err = json.Marshal(payload)
-	
+
 	if err != nil {
 		return
 	}
@@ -369,44 +373,53 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 }
 
 func handleNon200(rsp *http.Response, override map[int]error) error {
+	var rawResponse map[string]any
 	var e errorResponse
-	
-	dec := json.NewDecoder(rsp.Body)
-	dec.Decode(&struct {
-		Error *errorResponse `json:"error"`
-	}{Error: &e})
+
+	body, err := io.ReadAll(rsp.Body)
+	if err != nil {
+		return fmt.Errorf("error reading response body: %w", err)
+	}
+	rsp.Body.Close()
+
+	if err := json.Unmarshal(body, &rawResponse); err != nil {
+		e = errorResponse{
+			Message: "Unknown error",
+			Type:    "UnknownError",
+			Code:    rsp.StatusCode,
+		}
+	} else {
+		if errData, exists := rawResponse["error"].(map[string]any); exists {
+			if msg, ok := errData["message"].(string); ok {
+				e.Message = msg
+			}
+			if errType, ok := errData["type"].(string); ok {
+				e.Type = errType
+			}
+			if code, ok := errData["code"].(float64); ok {
+				e.Code = int(code)
+			}
+		} else {
+			if msg, ok := rawResponse["message"].(string); ok {
+				e.Message = msg
+			}
+			if errType, ok := rawResponse["type"].(string); ok {
+				e.Type = errType
+			}
+			if code, ok := rawResponse["code"].(float64); ok {
+				e.Code = int(code)
+			}
+		}
+	}
 
 	if override != nil {
 		if err, ok := override[rsp.StatusCode]; ok {
 			e.wrapping = err
-			return e
+			return fmt.Errorf("%w: %s", err, e.Message)
 		}
 	}
 
-	switch rsp.StatusCode {
-	case http.StatusBadRequest:
-		e.wrapping = ErrBadRequest
-	case http.StatusUnauthorized:
-		e.wrapping = ErrUnauthorized
-	case http.StatusForbidden:
-		e.wrapping = ErrForbidden
-	case http.StatusUnprocessableEntity:
-		e.wrapping = ErrRESTError
-	case 419:
-		e.wrapping = ErrAuthorizationExpired
-	case http.StatusNotImplemented:
-		e.wrapping = iceberg.ErrNotImplemented
-	case http.StatusServiceUnavailable:
-		e.wrapping = ErrServiceUnavailable
-	default:
-		if 500 <= rsp.StatusCode && rsp.StatusCode < 600 {
-			e.wrapping = ErrServerError
-		} else {
-			e.wrapping = ErrRESTError
-		}
-	}
-
-	return e
+	return fmt.Errorf("%w: %s", ErrRESTError, e.Message)
 }
 
 func fromProps(props iceberg.Properties) *options {
@@ -1058,7 +1071,7 @@ func (r *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 
 	p := payload{PropertyUpdates: updates, PropertyRemovals: removals}
 
-	path := []string{"namespaces", "namespace", strings.Join(ref, "."), strings.Join(namespace, ".")} 
+	path := []string{"namespaces", "namespace", strings.Join(ref, "."), strings.Join(namespace, ".")}
 
 	res, err := doPost[payload, catalog.PropertiesUpdateSummary](ctx, r.baseURI, path,
 		p, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
