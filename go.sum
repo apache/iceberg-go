@@ -269,10 +269,10 @@ github.com/stretchr/testify v1.8.0/go.mod h1:yNjHg4UonilssWZ8iaSj1OCr/vHnekPRkoO
 github.com/stretchr/testify v1.8.1/go.mod h1:w2LPCIKwWwSfY2zedu0+kehJoqGctiVI29o6fzry7u4=
 github.com/stretchr/testify v1.10.0 h1:Xv5erBjTwe/5IxqUQTdXv5kgmIvbHo3QQyRwhJsOfJA=
 github.com/stretchr/testify v1.10.0/go.mod h1:r2ic/lqez/lEtzL7wO/rwa5dbSLXVDPFyf8C91i36aY=
-github.com/substrait-io/substrait v0.63.1 h1:XNPvrEYNPjDqenK4TxqBDDUNzglafdjzjejzQqEwk5Y=
-github.com/substrait-io/substrait v0.63.1/go.mod h1:MPFNw6sToJgpD5Z2rj0rQrdP/Oq8HG7Z2t3CAEHtkHw=
-github.com/substrait-io/substrait-go/v3 v3.5.0 h1:sQqMGtXDzDC3dyCBL0+efnM/E5UbmDVZlOCHdnx+F+k=
-github.com/substrait-io/substrait-go/v3 v3.5.0/go.mod h1:S+yTQwCuWtTe5SD24JJ9S8x8Oae8h9rVDCpZlS9EV5A=
+github.com/substrait-io/substrait v0.66.1-0.20250205013839-a30b3e2d7ec6 h1:XqtxwYFCjS4L0o1QD4ipGHCuFG94U0f6BeldbilGQjU=
+github.com/substrait-io/substrait v0.66.1-0.20250205013839-a30b3e2d7ec6/go.mod h1:MPFNw6sToJgpD5Z2rj0rQrdP/Oq8HG7Z2t3CAEHtkHw=
+github.com/substrait-io/substrait-go/v3 v3.6.0 h1:t+mb4WskugKDVRqAZvV6Y0m34AQcDrd0cZ3NOXDcUjU=
+github.com/substrait-io/substrait-go/v3 v3.6.0/go.mod h1:VG7jCqtUm28bSngHwq86FywtU74knJ25LNX63SZ53+E=
 github.com/tmthrgd/go-hex v0.0.0-20190904060850-447a3041c3bc h1:9lRDQMhESg+zvGYmW5DyG0UqvY96Bu5QYsTLvCHdrgo=
 github.com/tmthrgd/go-hex v0.0.0-20190904060850-447a3041c3bc/go.mod h1:bciPuU6GHm1iF1pBvUfxfsH0Wmnc2VbpgvbI9ZWuIRs=
 github.com/twmb/murmur3 v1.1.8 h1:8Yt9taO/WN3l08xErzjeschgZU2QSrwm1kclYq+0aRg=
