@@ -29,7 +29,6 @@ import (
 	"io"
 	"maps"
 	"net/http"
-
 	"net/url"
 	"strings"
 	"time"
@@ -245,10 +244,10 @@ func do[T any](ctx context.Context, method string, baseURI *url.URL, path []stri
 	)
 
 	uri := baseURI.JoinPath(path...).String()
-
 	if req, err = http.NewRequestWithContext(ctx, method, uri, nil); err != nil {
 		return
 	}
+
 	if rsp, err = cl.Do(req); err != nil {
 		return
 	}
@@ -327,7 +326,6 @@ func doHead(ctx context.Context, baseURI *url.URL, path []string, cl *http.Clien
 }
 
 func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []string, payload Payload, cl *http.Client, override map[int]error) (ret Result, err error) {
-
 	var (
 		req  *http.Request
 		rsp  *http.Response
@@ -336,7 +334,6 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 
 	uri := baseURI.JoinPath(path...).String()
 	data, err = json.Marshal(payload)
-
 	if err != nil {
 		return
 	}
@@ -414,7 +411,6 @@ func handleNon200(rsp *http.Response, override map[int]error) error {
 
 	if override != nil {
 		if err, ok := override[rsp.StatusCode]; ok {
-			e.wrapping = err
 			return fmt.Errorf("%w: %s", err, e.Message)
 		}
 	}
@@ -528,7 +524,6 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 	}
 
 	r.baseURI = baseuri.JoinPath("v1")
-
 	if r.cl, ops, err = r.fetchConfig(ctx, ops); err != nil {
 		return err
 	}
@@ -741,14 +736,17 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	for _, o := range opts {
 		o(&cfg)
 	}
+
 	freshSchema, err := iceberg.AssignFreshSchemaIDs(schema, nil)
 	if err != nil {
 		return nil, err
 	}
+
 	freshPartitionSpec, err := iceberg.AssignFreshPartitionSpecIDs(cfg.PartitionSpec, schema, freshSchema)
 	if err != nil {
 		return nil, err
 	}
+
 	freshSortOrder, err := table.AssignFreshSortOrderIDs(cfg.SortOrder, schema, freshSchema)
 	if err != nil {
 		return nil, err
@@ -1010,7 +1008,6 @@ func (r *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) (
 		return nil, err
 	}
 
-	// Convert the response to table.Identifier format
 	var result []table.Identifier
 	for _, ns := range rsp.Namespaces {
 		result = append(result, ns.Elements)
@@ -1046,8 +1043,6 @@ func (r *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 	if err != nil {
 		return nil, err
 	}
-
-	fmt.Println("Resp: ", rsp)
 
 	return rsp.Props, nil
 }
