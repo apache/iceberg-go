@@ -51,6 +51,18 @@ Usage:
   iceberg properties [options] remove (namespace | table) IDENTIFIER PROPNAME
   iceberg -h | --help | --version
 
+Commands:
+  describe    Describe a namespace or a table.
+  list        List tables or namespaces.
+  schema      Get the schema of the table.
+  spec        Return the partition spec of the table.
+  uuid        Return the UUID of the table.
+  location    Return the location of the table.
+  drop        Operations to drop a namespace or table.
+  files       List all the files of the table.
+  rename      Rename a table.
+  properties  Properties on tables/namespaces.
+
 Arguments:
   PARENT         Catalog parent namespace
   IDENTIFIER     fully qualified namespace or table
@@ -59,7 +71,7 @@ Arguments:
   VALUE          value to set
 
 Options:
-  -h --help          show this helpe messages and exit
+  -h --help          show this help messages and exit
   --catalog TEXT     specify the catalog type [default: rest]
   --uri TEXT         specify the catalog URI
   --output TYPE      output type (json/text) [default: text]
