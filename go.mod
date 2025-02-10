@@ -34,7 +34,7 @@ require (
 	github.com/hamba/avro/v2 v2.27.0
 	github.com/pterm/pterm v0.12.80
 	github.com/stretchr/testify v1.10.0
-	github.com/substrait-io/substrait-go/v3 v3.5.0
+	github.com/substrait-io/substrait-go/v3 v3.6.0
 	github.com/twmb/murmur3 v1.1.8
 	github.com/uptrace/bun v1.2.9
 	github.com/uptrace/bun/dialect/mssqldialect v1.2.9
@@ -122,7 +122,7 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
-	github.com/substrait-io/substrait v0.63.1 // indirect
+	github.com/substrait-io/substrait v0.66.1-0.20250205013839-a30b3e2d7ec6 // indirect
 	github.com/tmthrgd/go-hex v0.0.0-20190904060850-447a3041c3bc // indirect
 	github.com/vmihailenco/msgpack/v5 v5.4.1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
