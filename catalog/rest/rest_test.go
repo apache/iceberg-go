@@ -1339,6 +1339,11 @@ func (r *RestCatalogSuite) TestListViews200() {
 			r.Equal(v, req.Header.Values(k))
 		}
 
+		pageToken := req.URL.Query().Get("page-token")
+		pageSize := req.URL.Query().Get("page-size")
+		r.Equal("", pageToken)
+		r.Equal("", pageSize)
+
 		json.NewEncoder(w).Encode(map[string]any{
 			"identifiers": []any{
 				map[string]any{
@@ -1356,11 +1361,78 @@ func (r *RestCatalogSuite) TestListViews200() {
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	views, err := cat.ListViews(context.Background(), catalog.ToIdentifier(namespace))
+	views, nextToken, err := cat.ListViews(context.Background(), catalog.ToIdentifier(namespace), nil, nil)
 	r.Require().NoError(err)
+	r.Nil(nextToken)
 	r.Equal([]table.Identifier{
 		{"accounting", "tax", "paid"},
 		{"accounting", "tax", "owed"},
+	}, views)
+}
+
+func (r *RestCatalogSuite) TestListViewsPagination() {
+	namespace := "accounting"
+	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/views", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		pageToken := req.URL.Query().Get("page-token")
+		pageSize := req.URL.Query().Get("page-size")
+		r.Equal("2", pageSize)
+
+		var response map[string]any
+		if pageToken == "" {
+			response = map[string]any{
+				"identifiers": []any{
+					map[string]any{
+						"namespace": []string{"accounting", "tax"},
+						"name":      "paid",
+					},
+					map[string]any{
+						"namespace": []string{"accounting", "tax"},
+						"name":      "owed",
+					},
+				},
+				"next-page-token": "token1",
+			}
+		} else {
+			r.Equal("token1", pageToken)
+			response = map[string]any{
+				"identifiers": []any{
+					map[string]any{
+						"namespace": []string{"accounting", "tax"},
+						"name":      "pending",
+					},
+				},
+			}
+		}
+
+		json.NewEncoder(w).Encode(response)
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	pageSize := 2
+	// First page
+	views, nextToken, err := cat.ListViews(context.Background(), catalog.ToIdentifier(namespace), nil, &pageSize)
+	r.Require().NoError(err)
+	r.NotNil(nextToken)
+	r.Equal("token1", *nextToken)
+	r.Equal([]table.Identifier{
+		{"accounting", "tax", "paid"},
+		{"accounting", "tax", "owed"},
+	}, views)
+
+	// Second page
+	views, nextToken, err = cat.ListViews(context.Background(), catalog.ToIdentifier(namespace), nextToken, &pageSize)
+	r.Require().NoError(err)
+	r.Nil(nextToken) // No more pages
+	r.Equal([]table.Identifier{
+		{"accounting", "tax", "pending"},
 	}, views)
 }
 
@@ -1386,7 +1458,7 @@ func (r *RestCatalogSuite) TestListViews404() {
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	_, err = cat.ListViews(context.Background(), catalog.ToIdentifier(namespace))
+	_, _, err = cat.ListViews(context.Background(), catalog.ToIdentifier(namespace), nil, nil)
 	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
 	r.ErrorContains(err, "The given namespace does not exist")
 }

@@ -30,6 +30,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -990,27 +991,39 @@ func (r *Catalog) CheckTableExists(ctx context.Context, identifier table.Identif
 	return true, nil
 }
 
-func (r *Catalog) ListViews(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error) {
+func (r *Catalog) ListViews(ctx context.Context, namespace table.Identifier, pageToken *string, pageSize *int) ([]table.Identifier, *string, error) {
 	if err := checkValidNamespace(namespace); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-
 	ns := strings.Join(namespace, namespaceSeparator)
-	path := []string{"namespaces", ns, "views"}
+	uri := r.baseURI.JoinPath("namespaces", ns, "views")
+
+	v := url.Values{}
+	if pageSize != nil {
+		v.Set("page-size", strconv.Itoa(*pageSize))
+	}
+	if pageToken != nil {
+		v.Set("page-token", *pageToken)
+	}
+	if len(v) > 0 {
+		uri.RawQuery = v.Encode()
+	}
 
 	type resp struct {
-		Identifiers []identifier `json:"identifiers"`
+		Identifiers   []identifier `json:"identifiers"`
+		NextPageToken *string      `json:"next-page-token,omitempty"`
 	}
-	rsp, err := doGet[resp](ctx, r.baseURI, path, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
+
+	rsp, err := doGet[resp](ctx, uri, []string{}, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	out := make([]table.Identifier, len(rsp.Identifiers))
 	for i, id := range rsp.Identifiers {
 		out[i] = append(id.Namespace, id.Name)
 	}
-	return out, nil
+	return out, rsp.NextPageToken, nil
 }
 
 func (r *Catalog) DropView(ctx context.Context, identifier table.Identifier) error {
