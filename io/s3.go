@@ -26,6 +26,7 @@ import (
 	"slices"
 	"strconv"
 
+	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -106,21 +107,13 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 	return awscfg, nil
 }
 
-type ctxkey string
-
-const AwsCfgCtxKey ctxkey = "awsConfig"
-
 func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
 	var (
 		awscfg *aws.Config
 		err    error
 	)
-	if v := ctx.Value(AwsCfgCtxKey); v != nil {
-		if a, ok := v.(*aws.Config); ok {
-			awscfg = a
-		} else {
-			return nil, fmt.Errorf("invalid awsConfig type: %T", v)
-		}
+	if v := utils.GetAwsConfig(ctx); v != nil {
+		awscfg = v
 	} else {
 		awscfg, err = ParseAWSConfig(ctx, props)
 		if err != nil {
