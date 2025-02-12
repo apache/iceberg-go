@@ -47,6 +47,7 @@ const (
 	Glue     Type = "glue"
 	DynamoDB Type = "dynamodb"
 	SQL      Type = "sql"
+	NESSIE   Type = "nessie"
 )
 
 var (
