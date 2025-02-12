@@ -1,3 +1,5 @@
+# yaml-language-server: $schema=https://json.schemastore.org/dependabot-2.0.json
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -22,3 +24,7 @@ updates:
     schedule:
       interval: "weekly"
       day: "sunday"
+    groups:
+      gomod_updates:
+        applies-to: version-updates
+        dependency-type: production
