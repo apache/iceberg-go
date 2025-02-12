@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -1331,6 +1332,7 @@ func (r *RestCatalogSuite) TestRegisterTable409() {
 }
 
 func (r *RestCatalogSuite) TestListViews200() {
+	customPageSize := 100
 	namespace := "accounting"
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/views", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodGet, req.Method)
@@ -1342,7 +1344,7 @@ func (r *RestCatalogSuite) TestListViews200() {
 		pageToken := req.URL.Query().Get("page-token")
 		pageSize := req.URL.Query().Get("page-size")
 		r.Equal("", pageToken)
-		r.Equal("", pageSize)
+		r.Equal(strconv.Itoa(customPageSize), pageSize)
 
 		json.NewEncoder(w).Encode(map[string]any{
 			"identifiers": []any{
@@ -1358,19 +1360,32 @@ func (r *RestCatalogSuite) TestListViews200() {
 		})
 	})
 
-	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	// Passing in a custom page size through context
+	ctx := context.WithValue(context.Background(), "page_size", customPageSize)
+	cat, err := rest.NewCatalog(ctx, "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	views, nextToken, err := cat.ListViews(context.Background(), catalog.ToIdentifier(namespace), nil, nil)
-	r.Require().NoError(err)
-	r.Nil(nextToken)
+	var lastErr error
+	views := make([]table.Identifier, 0)
+	iter := cat.ListViews(ctx, catalog.ToIdentifier(namespace))
+
+	for view, err := range iter {
+		views = append(views, view)
+		if err != nil {
+			lastErr = err
+			r.FailNow("unexpected error:", err)
+		}
+	}
+
 	r.Equal([]table.Identifier{
 		{"accounting", "tax", "paid"},
 		{"accounting", "tax", "owed"},
 	}, views)
+	r.Require().NoError(lastErr)
 }
 
 func (r *RestCatalogSuite) TestListViewsPagination() {
+	defaultPageSize := 20
 	namespace := "accounting"
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/views", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodGet, req.Method)
@@ -1381,7 +1396,7 @@ func (r *RestCatalogSuite) TestListViewsPagination() {
 
 		pageToken := req.URL.Query().Get("page-token")
 		pageSize := req.URL.Query().Get("page-size")
-		r.Equal("2", pageSize)
+		r.Equal(strconv.Itoa(defaultPageSize), pageSize)
 
 		var response map[string]any
 		if pageToken == "" {
@@ -1416,24 +1431,23 @@ func (r *RestCatalogSuite) TestListViewsPagination() {
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	pageSize := 2
-	// First page
-	views, nextToken, err := cat.ListViews(context.Background(), catalog.ToIdentifier(namespace), nil, &pageSize)
-	r.Require().NoError(err)
-	r.NotNil(nextToken)
-	r.Equal("token1", *nextToken)
+	var lastErr error
+	views := make([]table.Identifier, 0)
+	iter := cat.ListViews(context.Background(), catalog.ToIdentifier(namespace))
+	for view, err := range iter {
+		views = append(views, view)
+		if err != nil {
+			lastErr = err
+			r.FailNow("unexpected error:", err)
+		}
+	}
+
 	r.Equal([]table.Identifier{
 		{"accounting", "tax", "paid"},
 		{"accounting", "tax", "owed"},
-	}, views)
-
-	// Second page
-	views, nextToken, err = cat.ListViews(context.Background(), catalog.ToIdentifier(namespace), nextToken, &pageSize)
-	r.Require().NoError(err)
-	r.Nil(nextToken) // No more pages
-	r.Equal([]table.Identifier{
 		{"accounting", "tax", "pending"},
 	}, views)
+	r.Require().NoError(lastErr)
 }
 
 func (r *RestCatalogSuite) TestListViews404() {
@@ -1458,9 +1472,17 @@ func (r *RestCatalogSuite) TestListViews404() {
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	_, _, err = cat.ListViews(context.Background(), catalog.ToIdentifier(namespace), nil, nil)
-	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
-	r.ErrorContains(err, "The given namespace does not exist")
+	var lastErr error
+	iter := cat.ListViews(context.Background(), catalog.ToIdentifier(namespace))
+	views := make([]table.Identifier, 0)
+	for view, err := range iter {
+		views = append(views, view)
+		if err != nil {
+			lastErr = err
+		}
+	}
+	r.ErrorIs(lastErr, catalog.ErrNoSuchNamespace)
+	r.ErrorContains(lastErr, "The given namespace does not exist")
 }
 
 func (r *RestCatalogSuite) TestDropView204() {

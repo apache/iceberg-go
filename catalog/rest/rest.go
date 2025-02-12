@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"iter"
 	"maps"
 	"net/http"
 	"net/url"
@@ -66,6 +67,7 @@ const (
 	keyRestSigV4Service = "rest.signing-name"
 	keyAuthUrl          = "rest.authorization-url"
 	keyTlsSkipVerify    = "rest.tls.skip-verify"
+	defaultPageSize     = 20
 )
 
 var (
@@ -991,32 +993,54 @@ func (r *Catalog) CheckTableExists(ctx context.Context, identifier table.Identif
 	return true, nil
 }
 
-func (r *Catalog) ListViews(ctx context.Context, namespace table.Identifier, pageToken *string, pageSize *int) ([]table.Identifier, *string, error) {
+func (r *Catalog) ListViews(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
+	return func(yield func(table.Identifier, error) bool) {
+		pageSize := r.getPageSize(ctx)
+		var pageToken string
+
+		for {
+			views, nextPageToken, err := r.listViewsPage(ctx, namespace, pageToken, pageSize)
+			if err != nil {
+				yield(table.Identifier{}, err)
+				return
+			}
+			for _, view := range views {
+				if !yield(view, nil) {
+					return
+				}
+			}
+			if nextPageToken == "" {
+				return
+			}
+			pageToken = nextPageToken
+		}
+	}
+}
+
+func (r *Catalog) listViewsPage(ctx context.Context, namespace table.Identifier, pageToken string, pageSize int) ([]table.Identifier, string, error) {
 	if err := checkValidNamespace(namespace); err != nil {
-		return nil, nil, err
+		return nil, "", err
 	}
 	ns := strings.Join(namespace, namespaceSeparator)
 	uri := r.baseURI.JoinPath("namespaces", ns, "views")
 
 	v := url.Values{}
-	if pageSize != nil {
-		v.Set("page-size", strconv.Itoa(*pageSize))
+	if pageSize >= 0 {
+		v.Set("page-size", strconv.Itoa(pageSize))
 	}
-	if pageToken != nil {
-		v.Set("page-token", *pageToken)
-	}
-	if len(v) > 0 {
-		uri.RawQuery = v.Encode()
+	if pageToken != "" {
+		v.Set("page-token", pageToken)
 	}
 
+	uri.RawQuery = v.Encode()
 	type resp struct {
 		Identifiers   []identifier `json:"identifiers"`
-		NextPageToken *string      `json:"next-page-token,omitempty"`
+		NextPageToken string       `json:"next-page-token,omitempty"`
 	}
 
 	rsp, err := doGet[resp](ctx, uri, []string{}, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
 	if err != nil {
-		return nil, nil, err
+		return nil, "", err
 	}
 
 	out := make([]table.Identifier, len(rsp.Identifiers))
@@ -1024,6 +1048,13 @@ func (r *Catalog) ListViews(ctx context.Context, namespace table.Identifier, pag
 		out[i] = append(id.Namespace, id.Name)
 	}
 	return out, rsp.NextPageToken, nil
+}
+
+func (r *Catalog) getPageSize(ctx context.Context) int {
+	if pageSize, ok := ctx.Value("page_size").(int); ok {
+		return pageSize
+	}
+	return defaultPageSize
 }
 
 func (r *Catalog) DropView(ctx context.Context, identifier table.Identifier) error {
