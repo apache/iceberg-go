@@ -82,6 +82,42 @@ $ cd iceberg-go/cmd/iceberg && go build .
 * Plan to add [Apache Arrow](https://pkg.go.dev/github.com/apache/arrow-go/) support eventually.
 * Data can currently be read as an Arrow Table or as a stream of Arrow record batches.
 
+
+### CLI Usage
+The `iceberg` CLI usage is very similar to [pyiceberg CLI](https://py.iceberg.apache.org/cli/) \
+You can pass the catalog URI with `--uri` argument.
+
+Example:
+You can start the Iceberg REST API docker image which runs on default in port `8181`
+```
+docker pull tabulario/iceberg-rest:latest
+docker run -p 8181:8181 tabulario/iceberg-rest:latest
+```
+and run the `iceberg` CLI pointing to the REST API server.
+
+```
+ ./iceberg --uri http://0.0.0.0:8181 list
+┌─────┐
+| IDs |
+| --- |
+└─────┘
+```
+**Create Namespace**
+```
+./iceberg --uri http://0.0.0.0:8181 create namespace taxitrips
+```
+
+**List Namespace**
+```
+ ./iceberg --uri http://0.0.0.0:8181 list
+┌───────────┐
+| IDs       |
+| --------- |
+| taxitrips |
+└───────────┘
+
+
+```
 # Get in Touch
 
 - [Iceberg community](https://iceberg.apache.org/community/)
