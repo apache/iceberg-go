@@ -50,6 +50,10 @@ var (
 )
 
 const (
+	pageSizeKey contextKey = "page_size"
+
+	defaultPageSize = 20
+
 	keyOauthToken        = "token"
 	keyWarehouseLocation = "warehouse"
 	keyMetadataLocation  = "metadata_location"
@@ -67,7 +71,6 @@ const (
 	keyRestSigV4Service = "rest.signing-name"
 	keyAuthUrl          = "rest.authorization-url"
 	keyTlsSkipVerify    = "rest.tls.skip-verify"
-	defaultPageSize     = 20
 )
 
 var (
@@ -100,6 +103,8 @@ type errorResponse struct {
 
 	wrapping error
 }
+
+type contextKey string
 
 func (e errorResponse) Unwrap() error { return e.wrapping }
 func (e errorResponse) Error() string {
@@ -1051,10 +1056,14 @@ func (r *Catalog) listViewsPage(ctx context.Context, namespace table.Identifier,
 }
 
 func (r *Catalog) getPageSize(ctx context.Context) int {
-	if pageSize, ok := ctx.Value("page_size").(int); ok {
+	if pageSize, ok := ctx.Value(pageSizeKey).(int); ok {
 		return pageSize
 	}
 	return defaultPageSize
+}
+
+func (r *Catalog) SetPageSize(ctx context.Context, sz int) context.Context {
+	return context.WithValue(ctx, pageSizeKey, sz)
 }
 
 func (r *Catalog) DropView(ctx context.Context, identifier table.Identifier) error {

@@ -1360,10 +1360,10 @@ func (r *RestCatalogSuite) TestListViews200() {
 		})
 	})
 
-	// Passing in a custom page size through context
-	ctx := context.WithValue(context.Background(), "page_size", customPageSize)
-	cat, err := rest.NewCatalog(ctx, "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
+	// Passing in a custom page size through context
+	ctx := cat.SetPageSize(context.Background(), customPageSize)
 
 	var lastErr error
 	views := make([]table.Identifier, 0)
@@ -1404,22 +1404,37 @@ func (r *RestCatalogSuite) TestListViewsPagination() {
 				"identifiers": []any{
 					map[string]any{
 						"namespace": []string{"accounting", "tax"},
-						"name":      "paid",
+						"name":      "paid1",
 					},
 					map[string]any{
 						"namespace": []string{"accounting", "tax"},
-						"name":      "owed",
+						"name":      "paid2",
 					},
 				},
 				"next-page-token": "token1",
 			}
-		} else {
+		} else if pageToken == "token1" {
 			r.Equal("token1", pageToken)
 			response = map[string]any{
 				"identifiers": []any{
 					map[string]any{
 						"namespace": []string{"accounting", "tax"},
-						"name":      "pending",
+						"name":      "pending1",
+					},
+					map[string]any{
+						"namespace": []string{"accounting", "tax"},
+						"name":      "pending2",
+					},
+				},
+				"next-page-token": "token2",
+			}
+		} else {
+			r.Equal("token2", pageToken)
+			response = map[string]any{
+				"identifiers": []any{
+					map[string]any{
+						"namespace": []string{"accounting", "tax"},
+						"name":      "owned",
 					},
 				},
 			}
@@ -1443,11 +1458,83 @@ func (r *RestCatalogSuite) TestListViewsPagination() {
 	}
 
 	r.Equal([]table.Identifier{
-		{"accounting", "tax", "paid"},
-		{"accounting", "tax", "owed"},
-		{"accounting", "tax", "pending"},
+		{"accounting", "tax", "paid1"},
+		{"accounting", "tax", "paid2"},
+		{"accounting", "tax", "pending1"},
+		{"accounting", "tax", "pending2"},
+		{"accounting", "tax", "owned"},
 	}, views)
 	r.Require().NoError(lastErr)
+}
+
+func (r *RestCatalogSuite) TestListViewsPaginationErrorOnSubsequentPage() {
+	namespace := "accounting"
+	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/views", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		pageToken := req.URL.Query().Get("page-token")
+
+		// First page succeeds
+		if pageToken == "" {
+			json.NewEncoder(w).Encode(map[string]any{
+				"identifiers": []any{
+					map[string]any{
+						"namespace": []string{"accounting", "tax"},
+						"name":      "paid1",
+					},
+					map[string]any{
+						"namespace": []string{"accounting", "tax"},
+						"name":      "paid2",
+					},
+				},
+				"next-page-token": "token1",
+			})
+			return
+		}
+
+		// Second page fails with an error
+		if pageToken == "token1" {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{
+					"message": "Token expired or invalid",
+					"type":    "NoSuchPageTokenException",
+					"code":    404,
+				},
+			})
+			return
+		}
+
+		r.FailNow("unexpected page token:", pageToken)
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	views := make([]table.Identifier, 0)
+	var lastErr error
+	iter := cat.ListViews(context.Background(), catalog.ToIdentifier(namespace))
+	for view, err := range iter {
+		if err != nil {
+			lastErr = err
+			break
+		}
+		views = append(views, view)
+	}
+
+	// Check that we got the views from the first page
+	r.Equal([]table.Identifier{
+		{"accounting", "tax", "paid1"},
+		{"accounting", "tax", "paid2"},
+	}, views)
+
+	// Check that we got the error from the second page
+	r.Error(lastErr)
+	r.ErrorContains(lastErr, "Token expired or invalid")
 }
 
 func (r *RestCatalogSuite) TestListViews404() {
