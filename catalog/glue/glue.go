@@ -28,6 +28,7 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -126,6 +127,7 @@ type glueAPI interface {
 type Catalog struct {
 	glueSvc   glueAPI
 	catalogId *string
+	awsCfg    *aws.Config
 }
 
 // NewCatalog creates a new instance of glue.Catalog with the given options.
@@ -146,6 +148,7 @@ func NewCatalog(opts ...Option) *Catalog {
 	return &Catalog{
 		glueSvc:   glue.NewFromConfig(glueOps.awsConfig),
 		catalogId: catalogId,
+		awsCfg:    &glueOps.awsConfig,
 	}
 }
 
@@ -204,6 +207,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, pr
 		return nil, fmt.Errorf("missing metadata location for table %s.%s", database, tableName)
 	}
 
+	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
 	// TODO: consider providing a way to directly access the S3 iofs to enable testing of the catalog.
 	iofs, err := io.LoadFS(ctx, props, location)
 	if err != nil {
