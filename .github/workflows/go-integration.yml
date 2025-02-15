@@ -65,6 +65,7 @@ jobs:
           AWS_REGION: "us-east-1"
         run: |          
           go test -tags integration -v -run="^TestScanner" ./table
+          go test -tags integration -v ./io
 
       - name: Show debug logs
         if: ${{ failure() }}

@@ -138,6 +138,7 @@ func FSPreProcName(fsys fs.FS, fn func(string) string) IO {
 	if _, ok := fsys.(fs.ReadFileFS); ok {
 		return readFileFS{ioFS{fsys, fn}}
 	}
+
 	return ioFS{fsys, fn}
 }
 
