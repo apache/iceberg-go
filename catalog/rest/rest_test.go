@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -1328,6 +1329,339 @@ func (r *RestCatalogSuite) TestRegisterTable409() {
 	_, err = cat.RegisterTable(context.Background(), catalog.ToIdentifier("fokko", "alreadyexist"), "s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json")
 	r.ErrorIs(err, catalog.ErrTableAlreadyExists)
 	r.ErrorContains(err, "The given table already exists")
+}
+
+func (r *RestCatalogSuite) TestListViews200() {
+	customPageSize := 100
+	namespace := "accounting"
+	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/views", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		pageToken := req.URL.Query().Get("page-token")
+		pageSize := req.URL.Query().Get("page-size")
+		r.Equal("", pageToken)
+		r.Equal(strconv.Itoa(customPageSize), pageSize)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"identifiers": []any{
+				map[string]any{
+					"namespace": []string{"accounting", "tax"},
+					"name":      "paid",
+				},
+				map[string]any{
+					"namespace": []string{"accounting", "tax"},
+					"name":      "owed",
+				},
+			},
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+	// Passing in a custom page size through context
+	ctx := cat.SetPageSize(context.Background(), customPageSize)
+
+	var lastErr error
+	views := make([]table.Identifier, 0)
+	iter := cat.ListViews(ctx, catalog.ToIdentifier(namespace))
+
+	for view, err := range iter {
+		views = append(views, view)
+		if err != nil {
+			lastErr = err
+			r.FailNow("unexpected error:", err)
+		}
+	}
+
+	r.Equal([]table.Identifier{
+		{"accounting", "tax", "paid"},
+		{"accounting", "tax", "owed"},
+	}, views)
+	r.Require().NoError(lastErr)
+}
+
+func (r *RestCatalogSuite) TestListViewsPagination() {
+	defaultPageSize := 20
+	namespace := "accounting"
+	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/views", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		pageToken := req.URL.Query().Get("page-token")
+		pageSize := req.URL.Query().Get("page-size")
+		r.Equal(strconv.Itoa(defaultPageSize), pageSize)
+
+		var response map[string]any
+		if pageToken == "" {
+			response = map[string]any{
+				"identifiers": []any{
+					map[string]any{
+						"namespace": []string{"accounting", "tax"},
+						"name":      "paid1",
+					},
+					map[string]any{
+						"namespace": []string{"accounting", "tax"},
+						"name":      "paid2",
+					},
+				},
+				"next-page-token": "token1",
+			}
+		} else if pageToken == "token1" {
+			r.Equal("token1", pageToken)
+			response = map[string]any{
+				"identifiers": []any{
+					map[string]any{
+						"namespace": []string{"accounting", "tax"},
+						"name":      "pending1",
+					},
+					map[string]any{
+						"namespace": []string{"accounting", "tax"},
+						"name":      "pending2",
+					},
+				},
+				"next-page-token": "token2",
+			}
+		} else {
+			r.Equal("token2", pageToken)
+			response = map[string]any{
+				"identifiers": []any{
+					map[string]any{
+						"namespace": []string{"accounting", "tax"},
+						"name":      "owned",
+					},
+				},
+			}
+		}
+
+		json.NewEncoder(w).Encode(response)
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	var lastErr error
+	views := make([]table.Identifier, 0)
+	iter := cat.ListViews(context.Background(), catalog.ToIdentifier(namespace))
+	for view, err := range iter {
+		views = append(views, view)
+		if err != nil {
+			lastErr = err
+			r.FailNow("unexpected error:", err)
+		}
+	}
+
+	r.Equal([]table.Identifier{
+		{"accounting", "tax", "paid1"},
+		{"accounting", "tax", "paid2"},
+		{"accounting", "tax", "pending1"},
+		{"accounting", "tax", "pending2"},
+		{"accounting", "tax", "owned"},
+	}, views)
+	r.Require().NoError(lastErr)
+}
+
+func (r *RestCatalogSuite) TestListViewsPaginationErrorOnSubsequentPage() {
+	namespace := "accounting"
+	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/views", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		pageToken := req.URL.Query().Get("page-token")
+
+		// First page succeeds
+		if pageToken == "" {
+			json.NewEncoder(w).Encode(map[string]any{
+				"identifiers": []any{
+					map[string]any{
+						"namespace": []string{"accounting", "tax"},
+						"name":      "paid1",
+					},
+					map[string]any{
+						"namespace": []string{"accounting", "tax"},
+						"name":      "paid2",
+					},
+				},
+				"next-page-token": "token1",
+			})
+			return
+		}
+
+		// Second page fails with an error
+		if pageToken == "token1" {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{
+					"message": "Token expired or invalid",
+					"type":    "NoSuchPageTokenException",
+					"code":    404,
+				},
+			})
+			return
+		}
+
+		r.FailNow("unexpected page token:", pageToken)
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	views := make([]table.Identifier, 0)
+	var lastErr error
+	iter := cat.ListViews(context.Background(), catalog.ToIdentifier(namespace))
+	for view, err := range iter {
+		if err != nil {
+			lastErr = err
+			break
+		}
+		views = append(views, view)
+	}
+
+	// Check that we got the views from the first page
+	r.Equal([]table.Identifier{
+		{"accounting", "tax", "paid1"},
+		{"accounting", "tax", "paid2"},
+	}, views)
+
+	// Check that we got the error from the second page
+	r.Error(lastErr)
+	r.ErrorContains(lastErr, "Token expired or invalid")
+}
+
+func (r *RestCatalogSuite) TestListViews404() {
+	namespace := "nonexistent"
+	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/views", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "The given namespace does not exist",
+				"type":    "NoSuchNamespaceException",
+				"code":    404,
+			},
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	var lastErr error
+	iter := cat.ListViews(context.Background(), catalog.ToIdentifier(namespace))
+	views := make([]table.Identifier, 0)
+	for view, err := range iter {
+		views = append(views, view)
+		if err != nil {
+			lastErr = err
+		}
+	}
+	r.ErrorIs(lastErr, catalog.ErrNoSuchNamespace)
+	r.ErrorContains(lastErr, "The given namespace does not exist")
+}
+
+func (r *RestCatalogSuite) TestDropView204() {
+	r.mux.HandleFunc("/v1/namespaces/fokko/views/fokko2", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodDelete, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	err = cat.DropView(context.Background(), catalog.ToIdentifier("fokko", "fokko2"))
+	r.NoError(err)
+}
+
+func (r *RestCatalogSuite) TestDropView404() {
+	r.mux.HandleFunc("/v1/namespaces/fokko/views/nonexistent", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodDelete, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+		errorResponse := map[string]interface{}{
+			"error": map[string]interface{}{
+				"message": "The given view does not exist",
+				"type":    "NoSuchViewException",
+				"code":    404,
+			},
+		}
+		json.NewEncoder(w).Encode(errorResponse)
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	err = cat.DropView(context.Background(), catalog.ToIdentifier("fokko", "nonexistent"))
+	r.Error(err)
+	r.ErrorIs(err, catalog.ErrNoSuchView)
+	r.ErrorContains(err, "The given view does not exist")
+}
+
+func (r *RestCatalogSuite) TestCheckViewExists204() {
+	r.mux.HandleFunc("/v1/namespaces/fokko/views/fokko2", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodHead, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	exists, err := cat.CheckViewExists(context.Background(), catalog.ToIdentifier("fokko", "fokko2"))
+	r.Require().NoError(err)
+	r.Require().True(exists)
+}
+
+func (r *RestCatalogSuite) TestCheckViewExists404() {
+	r.mux.HandleFunc("/v1/namespaces/fokko/views/nonexistent", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodHead, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+		err := json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "The given view does not exist",
+				"type":    "NoSuchViewException",
+				"code":    404,
+			},
+		})
+		if err != nil {
+			return
+		}
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	exists, err := cat.CheckViewExists(context.Background(), catalog.ToIdentifier("fokko", "nonexistent"))
+	r.Require().NoError(err)
+	r.False(exists)
 }
 
 type RestTLSCatalogSuite struct {

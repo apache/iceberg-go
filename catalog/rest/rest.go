@@ -27,9 +27,11 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"iter"
 	"maps"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -48,6 +50,10 @@ var (
 )
 
 const (
+	pageSizeKey contextKey = "page_size"
+
+	defaultPageSize = 20
+
 	keyOauthToken        = "token"
 	keyWarehouseLocation = "warehouse"
 	keyMetadataLocation  = "metadata_location"
@@ -97,6 +103,8 @@ type errorResponse struct {
 
 	wrapping error
 }
+
+type contextKey string
 
 func (e errorResponse) Unwrap() error { return e.wrapping }
 func (e errorResponse) Error() string {
@@ -983,6 +991,102 @@ func (r *Catalog) CheckTableExists(ctx context.Context, identifier table.Identif
 		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable})
 	if err != nil {
 		if errors.Is(err, catalog.ErrNoSuchTable) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func (r *Catalog) ListViews(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
+	return func(yield func(table.Identifier, error) bool) {
+		pageSize := r.getPageSize(ctx)
+		var pageToken string
+
+		for {
+			views, nextPageToken, err := r.listViewsPage(ctx, namespace, pageToken, pageSize)
+			if err != nil {
+				yield(table.Identifier{}, err)
+				return
+			}
+			for _, view := range views {
+				if !yield(view, nil) {
+					return
+				}
+			}
+			if nextPageToken == "" {
+				return
+			}
+			pageToken = nextPageToken
+		}
+	}
+}
+
+func (r *Catalog) listViewsPage(ctx context.Context, namespace table.Identifier, pageToken string, pageSize int) ([]table.Identifier, string, error) {
+	if err := checkValidNamespace(namespace); err != nil {
+		return nil, "", err
+	}
+	ns := strings.Join(namespace, namespaceSeparator)
+	uri := r.baseURI.JoinPath("namespaces", ns, "views")
+
+	v := url.Values{}
+	if pageSize >= 0 {
+		v.Set("page-size", strconv.Itoa(pageSize))
+	}
+	if pageToken != "" {
+		v.Set("page-token", pageToken)
+	}
+
+	uri.RawQuery = v.Encode()
+	type resp struct {
+		Identifiers   []identifier `json:"identifiers"`
+		NextPageToken string       `json:"next-page-token,omitempty"`
+	}
+
+	rsp, err := doGet[resp](ctx, uri, []string{}, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
+	if err != nil {
+		return nil, "", err
+	}
+
+	out := make([]table.Identifier, len(rsp.Identifiers))
+	for i, id := range rsp.Identifiers {
+		out[i] = append(id.Namespace, id.Name)
+	}
+	return out, rsp.NextPageToken, nil
+}
+
+func (r *Catalog) getPageSize(ctx context.Context) int {
+	if pageSize, ok := ctx.Value(pageSizeKey).(int); ok {
+		return pageSize
+	}
+	return defaultPageSize
+}
+
+func (r *Catalog) SetPageSize(ctx context.Context, sz int) context.Context {
+	return context.WithValue(ctx, pageSizeKey, sz)
+}
+
+func (r *Catalog) DropView(ctx context.Context, identifier table.Identifier) error {
+	ns, view, err := splitIdentForPath(identifier)
+	if err != nil {
+		return err
+	}
+
+	_, err = doDelete[struct{}](ctx, r.baseURI, []string{"namespaces", ns, "views", view}, r.cl,
+		map[int]error{http.StatusNotFound: catalog.ErrNoSuchView})
+	return err
+}
+
+func (r *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifier) (bool, error) {
+	ns, view, err := splitIdentForPath(identifier)
+	if err != nil {
+		return false, err
+	}
+
+	err = doHead(ctx, r.baseURI, []string{"namespaces", ns, "views", view},
+		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchView})
+	if err != nil {
+		if errors.Is(err, catalog.ErrNoSuchView) {
 			return false, nil
 		}
 		return false, err

@@ -57,6 +57,7 @@ var (
 	ErrTableAlreadyExists     = errors.New("table already exists")
 	ErrCatalogNotFound        = errors.New("catalog type not registered")
 	ErrNamespaceNotEmpty      = errors.New("namespace is not empty")
+	ErrNoSuchView             = errors.New("view does not exist")
 )
 
 type PropertiesUpdateSummary struct {
