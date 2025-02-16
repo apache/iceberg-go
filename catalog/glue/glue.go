@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"strconv"
 	_ "unsafe"
 
@@ -155,33 +156,42 @@ func NewCatalog(opts ...Option) *Catalog {
 // ListTables returns a list of Iceberg tables in the given Glue database.
 //
 // The namespace should just contain the Glue database name.
-func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error) {
+
+func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
+	return func(yield func(table.Identifier, error) bool) {
+		for {
+			tbls, nextPageToken, err := c.ListTablesPage(ctx, namespace)
+			if err != nil {
+				yield(table.Identifier{}, err)
+				return
+			}
+			for _, tbl := range tbls {
+				if !yield(tbl, nil) {
+					return
+				}
+			}
+			if nextPageToken == nil {
+				return
+			}
+		}
+	}
+}
+
+func (c *Catalog) ListTablesPage(ctx context.Context, namespace table.Identifier) ([]table.Identifier, *string, error) {
 	database, err := identifierToGlueDatabase(namespace)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-
 	params := &glue.GetTablesInput{CatalogId: c.catalogId, DatabaseName: aws.String(database)}
-
-	var icebergTables []table.Identifier
-
-	for {
-		tblsRes, err := c.glueSvc.GetTables(ctx, params)
-		if err != nil {
-			return nil, fmt.Errorf("failed to list tables in namespace %s: %w", database, err)
-		}
-
-		icebergTables = append(icebergTables,
-			filterTableListByType(database, tblsRes.TableList, glueTypeIceberg)...)
-
-		if tblsRes.NextToken == nil {
-			break
-		}
-
-		params.NextToken = tblsRes.NextToken
+	tblsRes, err := c.glueSvc.GetTables(ctx, params)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to list tables in namespace %s: %w", database, err)
 	}
+	var icebergTables []table.Identifier
+	icebergTables = append(icebergTables,
+		filterTableListByType(database, tblsRes.TableList, glueTypeIceberg)...)
 
-	return icebergTables, nil
+	return icebergTables, tblsRes.NextToken, nil
 }
 
 // LoadTable loads a table from the catalog table details.

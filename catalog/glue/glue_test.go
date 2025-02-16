@@ -20,6 +20,7 @@ package glue
 import (
 	"context"
 	"errors"
+	"github.com/apache/iceberg-go/table"
 	"os"
 	"testing"
 
@@ -130,10 +131,19 @@ func TestGlueListTables(t *testing.T) {
 		glueSvc: mockGlueSvc,
 	}
 
-	tables, err := glueCatalog.ListTables(context.TODO(), DatabaseIdentifier("test_database"))
-	assert.NoError(err)
-	assert.Len(tables, 1)
-	assert.Equal([]string{"test_database", "test_table"}, tables[0])
+	var lastErr error
+	tbls := make([]table.Identifier, 0)
+	iter := glueCatalog.ListTables(context.TODO(), DatabaseIdentifier("test_database"))
+
+	for tbl, err := range iter {
+		tbls = append(tbls, tbl)
+		if err != nil {
+			lastErr = err
+		}
+	}
+	assert.NoError(lastErr)
+	assert.Len(tbls, 1)
+	assert.Equal([]string{"test_database", "test_table"}, tbls[0])
 }
 
 func TestGlueListNamespaces(t *testing.T) {
@@ -534,9 +544,18 @@ func TestGlueListTablesIntegration(t *testing.T) {
 
 	catalog := NewCatalog(WithAwsConfig(awscfg))
 
-	tables, err := catalog.ListTables(context.TODO(), DatabaseIdentifier(os.Getenv("TEST_DATABASE_NAME")))
-	assert.NoError(err)
-	assert.Equal([]string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")}, tables[1])
+	iter := catalog.ListTables(context.TODO(), DatabaseIdentifier(os.Getenv("TEST_DATABASE_NAME")))
+	var lastErr error
+	tbls := make([]table.Identifier, 0)
+	for tbl, err := range iter {
+		tbls = append(tbls, tbl)
+		if err != nil {
+			lastErr = err
+		}
+	}
+
+	assert.NoError(lastErr)
+	assert.Equal([]string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")}, tbls[1])
 }
 
 func TestGlueLoadTableIntegration(t *testing.T) {

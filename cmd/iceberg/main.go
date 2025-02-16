@@ -273,10 +273,12 @@ func list(ctx context.Context, output Output, cat catalog.Catalog, parent string
 	}
 
 	if len(ids) == 0 && parent != "" {
-		ids, err = cat.ListTables(ctx, prnt)
-		if err != nil {
-			output.Error(err)
-			os.Exit(1)
+		iter := cat.ListTables(ctx, prnt)
+		for id, err := range iter {
+			ids = append(ids, id)
+			if err != nil {
+				output.Error(err)
+			}
 		}
 	}
 	output.Identifiers(ids)
