@@ -27,7 +27,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/apache/iceberg-go/internal"
+	"github.com/hamba/avro/v2"
 	"github.com/hamba/avro/v2/ocf"
 )
 
@@ -218,10 +218,11 @@ func Difference(a, b []string) []string {
 	return diff
 }
 
-func avroEncode[T any](key string, version int, vals []T, out io.Writer) error {
+func avroEncode[T any](sch avro.Schema, version int, vals []T, out io.Writer) error {
 	enc, err := ocf.NewEncoderWithSchema(
-		internal.AvroSchemaCache.Get(key),
-		out, ocf.WithMetadata(map[string][]byte{
+		sch,
+		out,
+		ocf.WithMetadata(map[string][]byte{
 			"format-version": []byte(strconv.Itoa(version)),
 		}),
 		ocf.WithCodec(ocf.Deflate),
@@ -237,4 +238,69 @@ func avroEncode[T any](key string, version int, vals []T, out io.Writer) error {
 	}
 
 	return enc.Close()
+}
+
+func structTypeToAvroPartitionSchema(st *StructType) (avro.Schema, error) {
+	var aFields []*avro.Field
+
+	for _, field := range st.Fields() {
+		aField, err := nestedFieldToAvroField(field)
+
+		if err != nil {
+			return nil, err
+		}
+
+		aFields = append(aFields, aField)
+	}
+
+	return avro.NewRecordSchema("r102", "", aFields)
+}
+
+func nestedFieldToAvroField(f NestedField) (*avro.Field, error) {
+	sch, err := nestedFieldToAvroSchema(f)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return avro.NewField(
+		f.Name,
+		sch,
+		avro.WithDoc(f.Doc),
+		avro.WithProps(map[string]any{"field-id": f.ID}),
+	)
+}
+
+func nestedFieldToAvroSchema(f NestedField) (avro.Schema, error) {
+	var sch avro.Schema
+
+	switch f.Type.(type) {
+	case *StringType:
+		sch = avro.NewPrimitiveSchema(avro.String, nil)
+	case *Int32Type:
+		sch = avro.NewPrimitiveSchema(avro.Int, nil)
+	case *Int64Type:
+		sch = avro.NewPrimitiveSchema(avro.Long, nil)
+	case *BinaryType:
+		sch = avro.NewPrimitiveSchema(avro.Bytes, nil)
+	case *BooleanType:
+		sch = avro.NewPrimitiveSchema(avro.Boolean, nil)
+	case *Float32Type:
+		sch = avro.NewPrimitiveSchema(avro.Float, nil)
+	case *Float64Type:
+		sch = avro.NewPrimitiveSchema(avro.Double, nil)
+	case *DateType:
+		sch = avro.NewPrimitiveSchema(avro.Int, avro.NewPrimitiveLogicalSchema(avro.Date))
+	default:
+		return nil, fmt.Errorf("unsupported Iceberg type: %s", f.Type.String())
+	}
+
+	if !f.Required {
+		return avro.NewUnionSchema([]avro.Schema{
+			avro.NewNullSchema(),
+			sch,
+		})
+	}
+
+	return sch, nil
 }

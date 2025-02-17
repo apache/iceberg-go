@@ -393,8 +393,25 @@ func (m *ManifestTestSuite) writeManifestEntries() {
 		manifestEntryV2Recs[i] = rec
 	}
 
-	m.Require().NoError(writeManifestEntries(&m.v1ManifestEntries, manifestEntryV1Recs, 1))
-	m.Require().NoError(writeManifestEntries(&m.v2ManifestEntries, manifestEntryV2Recs, 2))
+	var partitionType = StructType{
+		FieldList: []NestedField{
+			{
+				ID:       1000,
+				Name:     "VendorID",
+				Type:     &Int32Type{},
+				Required: false,
+			},
+			{
+				ID:       1001,
+				Name:     "tpep_pickup_datetime",
+				Type:     &DateType{},
+				Required: false,
+			},
+		},
+	}
+
+	m.Require().NoError(writeManifestEntries(&m.v1ManifestEntries, &partitionType, manifestEntryV1Recs, 1))
+	m.Require().NoError(writeManifestEntries(&m.v2ManifestEntries, &partitionType, manifestEntryV2Recs, 2))
 }
 
 func (m *ManifestTestSuite) SetupSuite() {

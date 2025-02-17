@@ -67,6 +67,11 @@ func NewManifestV1Builder(path string, length int64, partitionSpecID int32, adde
 	}
 }
 
+func (b *ManifestV1Builder) PartitionType(st *StructType) *ManifestV1Builder {
+	b.m.partitionType = st
+	return b
+}
+
 func (b *ManifestV1Builder) AddedFiles(cnt int32) *ManifestV1Builder {
 	b.m.AddedFilesCount = &cnt
 	return b
@@ -112,6 +117,10 @@ func (b *ManifestV1Builder) KeyMetadata(km []byte) *ManifestV1Builder {
 // a pointer to the constructed manifest file. Further calls to the modifier
 // methods after calling build would modify the constructed ManifestFile.
 func (b *ManifestV1Builder) Build() ManifestFile {
+	if b.m.partitionType == nil {
+		b.m.partitionType = UnpartitionedSpec.PartitionType(nil)
+	}
+
 	return b.m
 }
 
@@ -126,6 +135,7 @@ func (f *fallbackManifestFileV1) toManifest() *manifestFileV1 {
 }
 
 type manifestFileV1 struct {
+	partitionType      *StructType
 	Path               string          `avro:"manifest_path"`
 	Len                int64           `avro:"manifest_length"`
 	SpecID             int32           `avro:"partition_spec_id"`
@@ -217,7 +227,7 @@ func (m *manifestFileV1) FetchEntries(fs iceio.IO, discardDeleted bool) ([]Manif
 
 // WriteEntries writes a list of manifest entries to an avro file.
 func (m *manifestFileV1) WriteEntries(out io.Writer, entries []ManifestEntry) error {
-	return writeManifestEntries(out, entries, m.Version())
+	return writeManifestEntries(out, m.partitionType, entries, m.Version())
 }
 
 // ManifestV2Builder is a helper for building a V2 manifest file
@@ -240,6 +250,11 @@ func NewManifestV2Builder(path string, length int64, partitionSpecID int32, cont
 			AddedSnapshotID: addedSnapshotID,
 		},
 	}
+}
+
+func (b *ManifestV2Builder) PartitionSchema(st *StructType) *ManifestV2Builder {
+	b.m.partitionType = st
+	return b
 }
 
 func (b *ManifestV2Builder) SequenceNum(num, minSeqNum int64) *ManifestV2Builder {
@@ -292,10 +307,15 @@ func (b *ManifestV2Builder) KeyMetadata(km []byte) *ManifestV2Builder {
 // a pointer to the constructed manifest file. Further calls to the modifier
 // methods after calling build would modify the constructed ManifestFile.
 func (b *ManifestV2Builder) Build() ManifestFile {
+	if b.m.partitionType == nil {
+		b.m.partitionType = UnpartitionedSpec.PartitionType(nil)
+	}
+
 	return b.m
 }
 
 type manifestFileV2 struct {
+	partitionType      *StructType
 	Path               string          `avro:"manifest_path"`
 	Len                int64           `avro:"manifest_length"`
 	SpecID             int32           `avro:"partition_spec_id"`
@@ -372,7 +392,7 @@ func (m *manifestFileV2) FetchEntries(fs iceio.IO, discardDeleted bool) ([]Manif
 
 // WriteEntries writes a list of manifest entries to an avro file.
 func (m *manifestFileV2) WriteEntries(out io.Writer, entries []ManifestEntry) error {
-	return writeManifestEntries(out, entries, m.Version())
+	return writeManifestEntries(out, m.partitionType, entries, m.Version())
 }
 
 func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType) {
@@ -613,31 +633,37 @@ func WriteManifestList(out io.Writer, files []ManifestFile) error {
 		}
 	}
 
-	var key string
+	var sch avro.Schema
 	switch version {
 	case 1:
-		key = internal.ManifestListV1Key
+		sch = internal.MustNewManifestListV1Schema()
 	case 2:
-		key = internal.ManifestListV2Key
+		sch = internal.MustNewManifestListV2Schema()
 	default:
 		return fmt.Errorf("%w: non-recognized version %d", ErrInvalidArgument, version)
 	}
 
-	return avroEncode(key, version, files, out)
+	return avroEncode(sch, version, files, out)
 }
 
-func writeManifestEntries(out io.Writer, entries []ManifestEntry, version int) error {
-	var key string
+func writeManifestEntries(out io.Writer, partitionType *StructType, entries []ManifestEntry, version int) error {
+	partitionSchema, err := structTypeToAvroPartitionSchema(partitionType)
+
+	if err != nil {
+		return err
+	}
+
+	var sch avro.Schema
 	switch version {
 	case 1:
-		key = internal.ManifestEntryV1Key
+		sch = internal.MustNewManifestEntryV1Schema(partitionSchema)
 	case 2:
-		key = internal.ManifestEntryV2Key
+		sch = internal.MustNewManifestEntryV2Schema(partitionSchema)
 	default:
 		return fmt.Errorf("%w: non-recognized version %d", ErrInvalidArgument, version)
 	}
 
-	return avroEncode(key, version, entries, out)
+	return avroEncode(sch, version, entries, out)
 }
 
 // ManifestEntryStatus defines constants for the entry status of
