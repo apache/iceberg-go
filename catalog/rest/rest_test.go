@@ -37,9 +37,9 @@ import (
 )
 
 const (
-	TestCreds        = "client:secret"
-	TestToken        = "some_jwt_token"
-	defaultPageToken = 20
+	TestCreds       = "client:secret"
+	TestToken       = "some_jwt_token"
+	defaultPageSize = 20
 )
 
 var (
@@ -310,7 +310,7 @@ func (r *RestCatalogSuite) TestListTablesPrefixed200() {
 		pageToken := req.URL.Query().Get("page-token")
 		pageSize := req.URL.Query().Get("page-size")
 		r.Equal("", pageToken)
-		r.Equal(strconv.Itoa(defaultPageToken), pageSize)
+		r.Equal(strconv.Itoa(defaultPageSize), pageSize)
 
 		json.NewEncoder(w).Encode(map[string]any{
 			"identifiers": []any{
@@ -509,7 +509,7 @@ func (r *RestCatalogSuite) TestListTables404() {
 		pageToken := req.URL.Query().Get("page-token")
 		pageSize := req.URL.Query().Get("page-size")
 		r.Equal("", pageToken)
-		r.Equal(strconv.Itoa(defaultPageToken), pageSize)
+		r.Equal(strconv.Itoa(defaultPageSize), pageSize)
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]any{
 			"error": map[string]any{

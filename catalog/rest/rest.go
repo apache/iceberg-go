@@ -655,7 +655,7 @@ func (r *Catalog) ListTables(ctx context.Context, namespace table.Identifier) it
 		var pageToken string
 
 		for {
-			tables, nextPageToken, err := r.ListTablesPage(ctx, namespace, pageToken, pageSize)
+			tables, nextPageToken, err := r.listTablesPage(ctx, namespace, pageToken, pageSize)
 			if err != nil {
 				yield(table.Identifier{}, err)
 				return
@@ -673,7 +673,7 @@ func (r *Catalog) ListTables(ctx context.Context, namespace table.Identifier) it
 	}
 }
 
-func (r *Catalog) ListTablesPage(ctx context.Context, namespace table.Identifier, pageToken string, pageSize int) ([]table.Identifier, string, error) {
+func (r *Catalog) listTablesPage(ctx context.Context, namespace table.Identifier, pageToken string, pageSize int) ([]table.Identifier, string, error) {
 	if err := checkValidNamespace(namespace); err != nil {
 		return nil, "", err
 	}

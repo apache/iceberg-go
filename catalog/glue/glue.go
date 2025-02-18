@@ -160,7 +160,7 @@ func NewCatalog(opts ...Option) *Catalog {
 func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
 	return func(yield func(table.Identifier, error) bool) {
 		for {
-			tbls, nextPageToken, err := c.ListTablesPage(ctx, namespace)
+			tbls, nextPageToken, err := c.listTablesPage(ctx, namespace)
 			if err != nil {
 				yield(table.Identifier{}, err)
 				return
@@ -170,28 +170,32 @@ func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) it
 					return
 				}
 			}
-			if nextPageToken == nil {
+			if nextPageToken == "" {
 				return
 			}
 		}
 	}
 }
 
-func (c *Catalog) ListTablesPage(ctx context.Context, namespace table.Identifier) ([]table.Identifier, *string, error) {
+func (c *Catalog) listTablesPage(ctx context.Context, namespace table.Identifier) ([]table.Identifier, string, error) {
 	database, err := identifierToGlueDatabase(namespace)
 	if err != nil {
-		return nil, nil, err
+		return nil, "", err
 	}
 	params := &glue.GetTablesInput{CatalogId: c.catalogId, DatabaseName: aws.String(database)}
 	tblsRes, err := c.glueSvc.GetTables(ctx, params)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to list tables in namespace %s: %w", database, err)
+		return nil, "", fmt.Errorf("failed to list tables in namespace %s: %w", database, err)
 	}
 	var icebergTables []table.Identifier
 	icebergTables = append(icebergTables,
 		filterTableListByType(database, tblsRes.TableList, glueTypeIceberg)...)
 
-	return icebergTables, tblsRes.NextToken, nil
+	var nextToken string
+	if tblsRes.NextToken != nil {
+		nextToken = *tblsRes.NextToken
+	}
+	return icebergTables, nextToken, nil
 }
 
 // LoadTable loads a table from the catalog table details.
