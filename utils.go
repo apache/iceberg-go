@@ -272,7 +272,10 @@ func nestedFieldToAvroField(f NestedField) (*avro.Field, error) {
 }
 
 func nestedFieldToAvroSchema(f NestedField) (avro.Schema, error) {
-	var sch avro.Schema
+	var (
+		sch avro.Schema
+		err error
+	)
 
 	switch f.Type.(type) {
 	case *StringType:
@@ -291,8 +294,28 @@ func nestedFieldToAvroSchema(f NestedField) (avro.Schema, error) {
 		sch = avro.NewPrimitiveSchema(avro.Double, nil)
 	case *DateType:
 		sch = avro.NewPrimitiveSchema(avro.Int, avro.NewPrimitiveLogicalSchema(avro.Date))
+	case *TimeType:
+		sch = avro.NewPrimitiveSchema(avro.Long, avro.NewPrimitiveLogicalSchema(avro.TimeMicros))
+	case *TimestampType:
+		sch = avro.NewPrimitiveSchema(
+			avro.Long,
+			avro.NewPrimitiveLogicalSchema(avro.TimeMicros),
+			avro.WithProps(map[string]any{"adjust-to-utc": false}),
+		)
+	case *TimestampTzType:
+		sch = avro.NewPrimitiveSchema(
+			avro.Long,
+			avro.NewPrimitiveLogicalSchema(avro.TimeMicros),
+			avro.WithProps(map[string]any{"adjust-to-utc": true}),
+		)
+	case *UUIDType:
+		sch, err = avro.NewFixedSchema("uuid_fixed", "", 16, avro.NewPrimitiveLogicalSchema(avro.UUID))
 	default:
 		return nil, fmt.Errorf("unsupported Iceberg type: %s", f.Type.String())
+	}
+
+	if err != nil {
+		return nil, err
 	}
 
 	if !f.Required {
