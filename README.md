@@ -84,6 +84,9 @@ $ cd iceberg-go/cmd/iceberg && go build .
 
 
 ### CLI Usage
+Run `go build` command to build the CLI command. 
+The CLI executable(`iceberg`) will be available in `cmd/iceberg` path.
+
 The `iceberg` CLI usage is very similar to [pyiceberg CLI](https://py.iceberg.apache.org/cli/) \
 You can pass the catalog URI with `--uri` argument.
 
