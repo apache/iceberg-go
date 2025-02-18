@@ -33,7 +33,7 @@ import (
 var funcsetYAML string
 
 var (
-	collection = extensions.DefaultCollection
+	collection = extensions.GetDefaultCollectionWithNoError()
 	funcSetURI = "https://github.com/apache/iceberg-go/blob/main/table/substrait/functions_set.yaml"
 )
 
@@ -46,7 +46,7 @@ func init() {
 }
 
 func NewExtensionSet() exprs.ExtensionIDSet {
-	return exprs.NewExtensionSetDefault(expr.NewEmptyExtensionRegistry(&collection))
+	return exprs.NewExtensionSetDefault(expr.NewEmptyExtensionRegistry(collection))
 }
 
 // ConvertExpr binds the provided expression to the given schema and converts it to a
@@ -57,7 +57,7 @@ func ConvertExpr(schema *iceberg.Schema, e iceberg.BooleanExpression, caseSensit
 		return nil, nil, err
 	}
 
-	reg := expr.NewEmptyExtensionRegistry(&extensions.DefaultCollection)
+	reg := expr.NewEmptyExtensionRegistry(collection)
 
 	bldr := expr.ExprBuilder{Reg: reg, BaseSchema: types.NewRecordTypeFromStruct(base.Struct)}
 	b, err := iceberg.VisitExpr(e, &toSubstraitExpr{bldr: bldr, schema: schema,
