@@ -636,9 +636,9 @@ func WriteManifestList(out io.Writer, files []ManifestFile) error {
 	var sch avro.Schema
 	switch version {
 	case 1:
-		sch = internal.MustNewManifestListV1Schema()
+		sch = internal.ManifestListV1Schema
 	case 2:
-		sch = internal.MustNewManifestListV2Schema()
+		sch = internal.ManifestListV2Schema
 	default:
 		return fmt.Errorf("%w: non-recognized version %d", ErrInvalidArgument, version)
 	}
