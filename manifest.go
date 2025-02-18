@@ -647,7 +647,7 @@ func WriteManifestList(out io.Writer, files []ManifestFile) error {
 }
 
 func writeManifestEntries(out io.Writer, partitionType *StructType, entries []ManifestEntry, version int) error {
-	partitionSchema, err := structTypeToAvroPartitionSchema(partitionType)
+	partitionSchema, err := TypeToAvroSchema("r102", partitionType)
 
 	if err != nil {
 		return err
