@@ -19,7 +19,7 @@ module github.com/apache/iceberg-go
 
 go 1.23.0
 
-toolchain go1.24.0
+toolchain go1.23.6
 
 require (
 	github.com/apache/arrow-go/v18 v18.1.1-0.20250218215100-460f5004b92d
