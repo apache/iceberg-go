@@ -156,46 +156,34 @@ func NewCatalog(opts ...Option) *Catalog {
 // ListTables returns a list of Iceberg tables in the given Glue database.
 //
 // The namespace should just contain the Glue database name.
-
 func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
 	return func(yield func(table.Identifier, error) bool) {
-		for {
-			tbls, nextPageToken, err := c.listTablesPage(ctx, namespace)
+		database, err := identifierToGlueDatabase(namespace)
+		if err != nil {
+			yield(table.Identifier{}, err)
+			return
+		}
+
+		paginator := glue.NewGetTablesPaginator(c.glueSvc, &glue.GetTablesInput{
+			CatalogId:    c.catalogId,
+			DatabaseName: aws.String(database),
+		})
+
+		for paginator.HasMorePages() {
+			page, err := paginator.NextPage(ctx)
 			if err != nil {
-				yield(table.Identifier{}, err)
+				yield(table.Identifier{}, fmt.Errorf("failed to list tables in namespace %s: %w", database, err))
 				return
 			}
-			for _, tbl := range tbls {
+
+			icebergTables := filterTableListByType(database, page.TableList, glueTypeIceberg)
+			for _, tbl := range icebergTables {
 				if !yield(tbl, nil) {
 					return
 				}
 			}
-			if nextPageToken == "" {
-				return
-			}
 		}
 	}
-}
-
-func (c *Catalog) listTablesPage(ctx context.Context, namespace table.Identifier) ([]table.Identifier, string, error) {
-	database, err := identifierToGlueDatabase(namespace)
-	if err != nil {
-		return nil, "", err
-	}
-	params := &glue.GetTablesInput{CatalogId: c.catalogId, DatabaseName: aws.String(database)}
-	tblsRes, err := c.glueSvc.GetTables(ctx, params)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to list tables in namespace %s: %w", database, err)
-	}
-	var icebergTables []table.Identifier
-	icebergTables = append(icebergTables,
-		filterTableListByType(database, tblsRes.TableList, glueTypeIceberg)...)
-
-	var nextToken string
-	if tblsRes.NextToken != nil {
-		nextToken = *tblsRes.NextToken
-	}
-	return icebergTables, nextToken, nil
 }
 
 // LoadTable loads a table from the catalog table details.
@@ -557,14 +545,12 @@ func DatabaseIdentifier(database string) table.Identifier {
 
 func filterTableListByType(database string, tableList []types.Table, tableType string) []table.Identifier {
 	var filtered []table.Identifier
-
 	for _, tbl := range tableList {
 		if tbl.Parameters[tableTypePropsKey] != tableType {
 			continue
 		}
 		filtered = append(filtered, TableIdentifier(database, aws.ToString(tbl.Name)))
 	}
-
 	return filtered
 }
 
