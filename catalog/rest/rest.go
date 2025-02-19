@@ -268,7 +268,7 @@ func do[T any](ctx context.Context, method string, baseURI *url.URL, path []stri
 		return ret, handleNon200(rsp, override)
 	}
 
-	if method == http.MethodHead {
+	if method == http.MethodHead || method == http.MethodDelete {
 		return
 	}
 
