@@ -155,7 +155,7 @@ type createTableRequest struct {
 	Location      string                 `json:"location,omitempty"`
 	PartitionSpec *iceberg.PartitionSpec `json:"partition-spec,omitempty"`
 	WriteOrder    *table.SortOrder       `json:"write-order,omitempty"`
-	StageCreate   *bool                  `json:"stage-create"` // Required by Nessie REST API
+	StageCreate   bool                   `json:"stage-create"`
 	Props         iceberg.Properties     `json:"properties,omitempty"`
 }
 
@@ -707,15 +707,13 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, err
 	}
 
-	stageCreate := false // Required by Nessie REST API
-
 	payload := createTableRequest{
 		Name:          tbl,
 		Schema:        freshSchema,
 		Location:      cfg.Location,
 		PartitionSpec: &freshPartitionSpec,
 		WriteOrder:    &freshSortOrder,
-		StageCreate:   &stageCreate,
+		StageCreate:   false,
 		Props:         cfg.Properties,
 	}
 
