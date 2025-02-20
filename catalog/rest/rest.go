@@ -649,27 +649,60 @@ func (r *Catalog) tableFromResponse(ctx context.Context, identifier []string, me
 	return table.New(id, metadata, loc, iofs), nil
 }
 
-func (r *Catalog) ListTables(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error) {
+func (r *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
+	return func(yield func(table.Identifier, error) bool) {
+		pageSize := r.getPageSize(ctx)
+		var pageToken string
+
+		for {
+			tables, nextPageToken, err := r.listTablesPage(ctx, namespace, pageToken, pageSize)
+			if err != nil {
+				yield(table.Identifier{}, err)
+				return
+			}
+			for _, tbl := range tables {
+				if !yield(tbl, nil) {
+					return
+				}
+			}
+			if nextPageToken == "" {
+				return
+			}
+			pageToken = nextPageToken
+		}
+	}
+}
+
+func (r *Catalog) listTablesPage(ctx context.Context, namespace table.Identifier, pageToken string, pageSize int) ([]table.Identifier, string, error) {
 	if err := checkValidNamespace(namespace); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-
 	ns := strings.Join(namespace, namespaceSeparator)
-	path := []string{"namespaces", ns, "tables"}
+	uri := r.baseURI.JoinPath("namespaces", ns, "tables")
 
+	v := url.Values{}
+	if pageSize >= 0 {
+		v.Set("page-size", strconv.Itoa(pageSize))
+	}
+	if pageToken != "" {
+		v.Set("page-token", pageToken)
+	}
+
+	uri.RawQuery = v.Encode()
 	type resp struct {
-		Identifiers []identifier `json:"identifiers"`
+		Identifiers   []identifier `json:"identifiers"`
+		NextPageToken string       `json:"next-page-token,omitempty"`
 	}
-	rsp, err := doGet[resp](ctx, r.baseURI, path, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
+	rsp, err := doGet[resp](ctx, uri, []string{}, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-
 	out := make([]table.Identifier, len(rsp.Identifiers))
 	for i, id := range rsp.Identifiers {
 		out[i] = append(id.Namespace, id.Name)
 	}
-	return out, nil
+	return out, rsp.NextPageToken, nil
+
 }
 
 func splitIdentForPath(ident table.Identifier) (string, string, error) {

@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"strconv"
 	_ "unsafe"
 
@@ -155,33 +156,34 @@ func NewCatalog(opts ...Option) *Catalog {
 // ListTables returns a list of Iceberg tables in the given Glue database.
 //
 // The namespace should just contain the Glue database name.
-func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error) {
-	database, err := identifierToGlueDatabase(namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	params := &glue.GetTablesInput{CatalogId: c.catalogId, DatabaseName: aws.String(database)}
-
-	var icebergTables []table.Identifier
-
-	for {
-		tblsRes, err := c.glueSvc.GetTables(ctx, params)
+func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
+	return func(yield func(table.Identifier, error) bool) {
+		database, err := identifierToGlueDatabase(namespace)
 		if err != nil {
-			return nil, fmt.Errorf("failed to list tables in namespace %s: %w", database, err)
+			yield(table.Identifier{}, err)
+			return
 		}
 
-		icebergTables = append(icebergTables,
-			filterTableListByType(database, tblsRes.TableList, glueTypeIceberg)...)
+		paginator := glue.NewGetTablesPaginator(c.glueSvc, &glue.GetTablesInput{
+			CatalogId:    c.catalogId,
+			DatabaseName: aws.String(database),
+		})
 
-		if tblsRes.NextToken == nil {
-			break
+		for paginator.HasMorePages() {
+			page, err := paginator.NextPage(ctx)
+			if err != nil {
+				yield(table.Identifier{}, fmt.Errorf("failed to list tables in namespace %s: %w", database, err))
+				return
+			}
+
+			icebergTables := filterTableListByType(database, page.TableList, glueTypeIceberg)
+			for _, tbl := range icebergTables {
+				if !yield(tbl, nil) {
+					return
+				}
+			}
 		}
-
-		params.NextToken = tblsRes.NextToken
 	}
-
-	return icebergTables, nil
 }
 
 // LoadTable loads a table from the catalog table details.
@@ -543,14 +545,12 @@ func DatabaseIdentifier(database string) table.Identifier {
 
 func filterTableListByType(database string, tableList []types.Table, tableType string) []table.Identifier {
 	var filtered []table.Identifier
-
 	for _, tbl := range tableList {
 		if tbl.Parameters[tableTypePropsKey] != tableType {
 			continue
 		}
 		filtered = append(filtered, TableIdentifier(database, aws.ToString(tbl.Name)))
 	}
-
 	return filtered
 }
 

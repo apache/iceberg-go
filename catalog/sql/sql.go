@@ -22,6 +22,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"iter"
 	"maps"
 	"path"
 	"slices"
@@ -524,9 +525,15 @@ func (c *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 		return fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, nsToDelete)
 	}
 
-	tbls, err := c.ListTables(ctx, namespace)
-	if err != nil {
-		return err
+	tbls := make([]table.Identifier, 0)
+	iter := c.ListTables(ctx, namespace)
+
+	for tbl, err := range iter {
+		tbls = append(tbls, tbl)
+		if err != nil {
+			return err
+		}
+		break // there is already at least a table
 	}
 
 	if len(tbls) > 0 {
@@ -576,7 +583,23 @@ func (c *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 	})
 }
 
-func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error) {
+func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
+	tables, err := c.listTablesAll(ctx, namespace)
+	if err != nil {
+		return func(yield func(table.Identifier, error) bool) {
+			yield(table.Identifier{}, err)
+		}
+	}
+	return func(yield func(table.Identifier, error) bool) {
+		for _, t := range tables {
+			if !yield(t, nil) {
+				return
+			}
+		}
+	}
+}
+
+func (c *Catalog) listTablesAll(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error) {
 	if len(namespace) > 0 {
 		exists, err := c.namespaceExists(ctx, strings.Join(namespace, "."))
 		if err != nil {
