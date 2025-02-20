@@ -24,7 +24,6 @@ import (
 	"io"
 	"maps"
 	"runtime/debug"
-	"strconv"
 	"strings"
 
 	"github.com/hamba/avro/v2"
@@ -218,13 +217,11 @@ func Difference(a, b []string) []string {
 	return diff
 }
 
-func avroEncode[T any](sch avro.Schema, version int, vals []T, out io.Writer) error {
+func avroEncode[T any](sch avro.Schema, vals []T, md map[string][]byte, out io.Writer) error {
 	enc, err := ocf.NewEncoderWithSchema(
 		sch,
 		out,
-		ocf.WithMetadata(map[string][]byte{
-			"format-version": []byte(strconv.Itoa(version)),
-		}),
+		ocf.WithMetadata(md),
 		ocf.WithCodec(ocf.Deflate),
 	)
 	if err != nil {

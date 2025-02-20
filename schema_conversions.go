@@ -303,7 +303,7 @@ func TypeToAvroSchema(recordName string, t Type, opts ...avro.SchemaOption) (avr
 		)
 
 	case *StructType:
-		var aFields []*avro.Field
+		var aFields = make([]*avro.Field, 0)
 
 		for _, field := range t.Fields() {
 			aField, err := NestedFieldToAvroField(field)

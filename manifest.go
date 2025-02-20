@@ -18,8 +18,10 @@
 package iceberg
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"sync"
 	"time"
 
@@ -39,6 +41,17 @@ const (
 	ManifestContentData    ManifestContent = 0
 	ManifestContentDeletes ManifestContent = 1
 )
+
+func (m ManifestContent) String() string {
+	switch m {
+	case ManifestContentData:
+		return "data"
+	case ManifestContentDeletes:
+		return "deletes"
+	default:
+		return "UNKNOWN"
+	}
+}
 
 type FieldSummary struct {
 	ContainsNull bool    `avro:"contains_null"`
@@ -643,7 +656,69 @@ func WriteManifestList(out io.Writer, files []ManifestFile) error {
 		return fmt.Errorf("%w: non-recognized version %d", ErrInvalidArgument, version)
 	}
 
-	return avroEncode(sch, version, files, out)
+	return avroEncode(
+		sch,
+		files,
+		map[string][]byte{
+			"format-version": []byte(strconv.Itoa(version)),
+		},
+		out,
+	)
+}
+
+// WriteManifestEntries writes a list of manifest entries to an avro file.
+func WriteManifestEntries(
+	out io.Writer,
+	content ManifestContent,
+	partitionSpec PartitionSpec,
+	tableSchema *Schema,
+	entries []ManifestEntry,
+	version int,
+) error {
+	var partSchema, err = TypeToAvroSchema("r102", partitionSpec.PartitionType(tableSchema))
+
+	if err != nil {
+		return err
+	}
+
+	var manSchema avro.Schema
+	switch version {
+	case 1:
+		manSchema = internal.MustNewManifestEntryV1Schema(partSchema)
+	case 2:
+		manSchema = internal.MustNewManifestEntryV2Schema(partSchema)
+	default:
+		return fmt.Errorf("%w: non-recognized version %d", ErrInvalidArgument, version)
+	}
+
+	var partSpecFields = partSchema.(*avro.RecordSchema).Fields()
+
+	if partSpecFields == nil {
+		partSpecFields = []*avro.Field{}
+	}
+
+	partSpecFieldsJson, err := json.Marshal(partSpecFields)
+
+	if err != nil {
+		return err
+	}
+
+	tableSchemaJson, err := json.Marshal(tableSchema)
+
+	if err != nil {
+		return err
+	}
+
+	var md = map[string][]byte{
+		"schema":            tableSchemaJson,
+		"schema-id":         []byte(strconv.Itoa(tableSchema.ID)),
+		"partition-spec":    []byte(partSpecFieldsJson),
+		"partition-spec-id": []byte(strconv.Itoa(partitionSpec.ID())),
+		"format-version":    []byte(strconv.Itoa(version)),
+		"content":           []byte(content.String()),
+	}
+
+	return avroEncode(manSchema, entries, md, out)
 }
 
 func writeManifestEntries(out io.Writer, partitionType *StructType, entries []ManifestEntry, version int) error {
@@ -663,7 +738,11 @@ func writeManifestEntries(out io.Writer, partitionType *StructType, entries []Ma
 		return fmt.Errorf("%w: non-recognized version %d", ErrInvalidArgument, version)
 	}
 
-	return avroEncode(sch, version, entries, out)
+	var md = map[string][]byte{
+		"format-version": []byte(strconv.Itoa(version)),
+	}
+
+	return avroEncode(sch, entries, md, out)
 }
 
 // ManifestEntryStatus defines constants for the entry status of
