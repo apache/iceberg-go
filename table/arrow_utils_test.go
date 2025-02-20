@@ -115,7 +115,7 @@ func TestArrowToIceberg(t *testing.T) {
 			ElementID:       1,
 			Element:         iceberg.PrimitiveTypes.Int32,
 			ElementRequired: true,
-		}, false, ""},
+		}, true, ""},
 		{arrow.LargeListOfField(arrow.Field{
 			Name:     "element",
 			Type:     arrow.PrimitiveTypes.Int32,
@@ -125,7 +125,7 @@ func TestArrowToIceberg(t *testing.T) {
 			ElementID:       1,
 			Element:         iceberg.PrimitiveTypes.Int32,
 			ElementRequired: true,
-		}, true, ""},
+		}, false, ""},
 		{arrow.FixedSizeListOfField(1, arrow.Field{
 			Name:     "element",
 			Type:     arrow.PrimitiveTypes.Int32,
@@ -165,7 +165,7 @@ func TestArrowToIceberg(t *testing.T) {
 			}
 
 			if tt.reciprocal {
-				result, err := table.TypeToArrowType(tt.ice, true)
+				result, err := table.TypeToArrowType(tt.ice, true, false)
 				require.NoError(t, err)
 				assert.True(t, arrow.TypeEqual(tt.dt, result), tt.dt.String(), result.String())
 			}

@@ -592,9 +592,9 @@ func SchemaToArrowSchema(sc *iceberg.Schema, metadata map[string]string, include
 // TypeToArrowType converts a given iceberg type, into the equivalent Arrow data type.
 // For dealing with nested fields (List, Struct, Map) if includeFieldIDs is true, then
 // the child fields will contain a metadata key PARQUET:field_id set to the field id.
-func TypeToArrowType(t iceberg.Type, includeFieldIDs bool) (arrow.DataType, error) {
+func TypeToArrowType(t iceberg.Type, includeFieldIDs bool, useLargeTypes bool) (arrow.DataType, error) {
 	top, err := iceberg.Visit(iceberg.NewSchema(0, iceberg.NestedField{Type: t}),
-		convertToArrow{includeFieldIDs: includeFieldIDs})
+		convertToArrow{includeFieldIDs: includeFieldIDs, useLargeTypes: useLargeTypes})
 	if err != nil {
 		return nil, err
 	}
@@ -680,7 +680,7 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 
 	if !field.Type.Equals(typ) {
 		promoted := retOrPanic(iceberg.PromoteType(fileField.Type, field.Type))
-		targetType := retOrPanic(TypeToArrowType(promoted, a.includeFieldIDs))
+		targetType := retOrPanic(TypeToArrowType(promoted, a.includeFieldIDs, a.useLargeTypes))
 		if !a.useLargeTypes {
 			targetType = retOrPanic(ensureSmallArrowTypes(targetType))
 		}
@@ -689,7 +689,7 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 			compute.SafeCastOptions(targetType)))
 	}
 
-	targetType := retOrPanic(TypeToArrowType(field.Type, a.includeFieldIDs))
+	targetType := retOrPanic(TypeToArrowType(field.Type, a.includeFieldIDs, a.useLargeTypes))
 	if !arrow.TypeEqual(targetType, vals.DataType()) {
 		switch field.Type.(type) {
 		case iceberg.TimestampType:
@@ -768,7 +768,7 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 			fieldArrs[i] = arr
 			fields[i] = a.constructField(field, arr.DataType())
 		} else if !field.Required {
-			dt := retOrPanic(TypeToArrowType(field.Type, false))
+			dt := retOrPanic(TypeToArrowType(field.Type, false, a.useLargeTypes))
 
 			arr = array.MakeArrayOfNull(compute.GetAllocator(a.ctx), dt, structArr.Len())
 			defer arr.Release()
