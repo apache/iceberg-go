@@ -490,6 +490,9 @@ func createIterator(ctx context.Context, numWorkers uint, records <-chan enumera
 		for {
 			select {
 			case <-ctx.Done():
+				if err := context.Cause(ctx); err != nil {
+					yield(nil, err)
+				}
 				return
 			case enum, ok := <-sequenced:
 				if !ok {
