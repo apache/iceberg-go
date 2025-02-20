@@ -365,6 +365,19 @@ func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifie
 	return nil
 }
 
+func (c *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Identifier) (bool, error) {
+	databaseName, err := identifierToGlueDatabase(namespace)
+	if err != nil {
+		return false, err
+	}
+
+	_, err = c.getDatabase(ctx, databaseName)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // DropNamespace deletes an Iceberg namespace from the Glue catalog.
 func (c *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier) error {
 	databaseName, err := identifierToGlueDatabase(namespace)

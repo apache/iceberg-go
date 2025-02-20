@@ -396,6 +396,47 @@ func TestGlueDropNamespace(t *testing.T) {
 	assert.NoError(err)
 }
 
+func TestGlueCheckNamespaceExists(t *testing.T) {
+	assert := require.New(t)
+	mockGlueSvc := &mockGlueClient{}
+	mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
+		Name: aws.String("test_namespace"),
+	}, mock.Anything).Return(&glue.GetDatabaseOutput{
+		Database: &types.Database{
+			Name: aws.String("test_namespace"),
+			Parameters: map[string]string{
+				"database_type": "ICEBERG",
+			},
+		},
+	}, nil).Once()
+	glueCatalog := &Catalog{
+		glueSvc: mockGlueSvc,
+	}
+	exists, err := glueCatalog.CheckNamespaceExists(context.TODO(), DatabaseIdentifier("test_namespace"))
+	assert.NoError(err)
+	assert.True(exists)
+
+}
+
+func TestGlueCheckNamespaceNotExists(t *testing.T) {
+	assert := require.New(t)
+	mockGlueSvc := &mockGlueClient{}
+
+	mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
+		Name: aws.String("nonexistent_namespace"),
+	}, mock.Anything).Return(&glue.GetDatabaseOutput{},
+		&types.EntityNotFoundException{Message: aws.String("Database not found")}).Once()
+
+	glueCatalog := &Catalog{
+		glueSvc: mockGlueSvc,
+	}
+
+	exists, err := glueCatalog.CheckNamespaceExists(context.TODO(), DatabaseIdentifier("nonexistent_namespace"))
+	assert.Error(err)
+	assert.False(exists)
+	assert.ErrorContains(err, "Database not found")
+}
+
 func TestGlueUpdateNamespaceProperties(t *testing.T) {
 	tests := []struct {
 		name        string
