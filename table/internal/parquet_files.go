@@ -149,7 +149,8 @@ func visitParquetManifestStruct[T any](field pqarrow.SchemaField, visitor manife
 	results := make([]T, len(field.Children))
 
 	for i, f := range field.Children {
-		results[i] = visitManifestField(f, visitor)
+		res := visitManifestField(f, visitor)
+		results[i] = visitor.Field(f, res)
 	}
 
 	return visitor.Struct(field, results)
@@ -189,7 +190,7 @@ func pruneParquetColumns(manifest *pqarrow.SchemaManifest, selected map[int]stru
 		indices:   []int{},
 	}
 
-	result, err := visitParquetManifest[arrow.Field](manifest, visitor)
+	result, err := visitParquetManifest(manifest, visitor)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -335,7 +336,7 @@ func (p *pruneParquetSchema) List(field pqarrow.SchemaField, elemResult arrow.Fi
 		panic(fmt.Errorf("cannot explicitly project list or map types"))
 	}
 
-	p.indices = append(p.indices, field.ColIndex)
+	p.indices = append(p.indices, field.Children[0].ColIndex)
 	return *field.Field
 }
 
@@ -371,11 +372,13 @@ func (p *pruneParquetSchema) Map(field pqarrow.SchemaField, keyResult, valResult
 		panic("cannot explicitly project list or map types")
 	}
 
+	p.indices = append(p.indices, field.Children[0].Children[0].ColIndex)
+	p.indices = append(p.indices, field.Children[0].Children[1].ColIndex)
 	return *field.Field
 }
 
 func (p *pruneParquetSchema) Primitive(field pqarrow.SchemaField) arrow.Field {
-	return arrow.Field{}
+	return *field.Field
 }
 
 func (p *pruneParquetSchema) projectSelectedStruct(projected arrow.DataType) *arrow.StructType {

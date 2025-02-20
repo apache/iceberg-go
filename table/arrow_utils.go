@@ -497,7 +497,10 @@ func (c convertToArrow) Field(field iceberg.NestedField, result arrow.Field) arr
 
 func (c convertToArrow) List(list iceberg.ListType, elemResult arrow.Field) arrow.Field {
 	elemField := c.Field(list.ElementField(), elemResult)
-	return arrow.Field{Type: arrow.LargeListOfField(elemField)}
+	if c.useLargeTypes {
+		return arrow.Field{Type: arrow.LargeListOfField(elemField)}
+	}
+	return arrow.Field{Type: arrow.ListOfField(elemField)}
 }
 
 func (c convertToArrow) Map(m iceberg.MapType, keyResult, valResult arrow.Field) arrow.Field {
@@ -756,6 +759,10 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 	for i, field := range st.FieldList {
 		arr := fieldResults[i]
 		if arr != nil {
+			if _, ok := arr.DataType().(arrow.NestedType); ok {
+				defer arr.Release()
+			}
+
 			arr = a.castIfNeeded(field, arr)
 			defer arr.Release()
 			fieldArrs[i] = arr
@@ -786,11 +793,11 @@ func (a *arrowProjectionVisitor) List(listType iceberg.ListType, listArr arrow.A
 		return nil
 	}
 
-	valueArr := a.castIfNeeded(listType.ElementField(), valArr)
-	defer valueArr.Release()
+	valArr = a.castIfNeeded(listType.ElementField(), valArr)
+	defer valArr.Release()
 
 	var outType arrow.ListLikeType
-	elemField := a.constructField(listType.ElementField(), valueArr.DataType())
+	elemField := a.constructField(listType.ElementField(), valArr.DataType())
 	switch arr.DataType().ID() {
 	case arrow.LIST:
 		outType = arrow.ListOfField(elemField)
@@ -801,7 +808,7 @@ func (a *arrowProjectionVisitor) List(listType iceberg.ListType, listArr arrow.A
 	}
 
 	data := array.NewData(outType, arr.Len(), arr.Data().Buffers(),
-		[]arrow.ArrayData{valueArr.Data()}, arr.NullN(), arr.Data().Offset())
+		[]arrow.ArrayData{valArr.Data()}, arr.NullN(), arr.Data().Offset())
 	defer data.Release()
 	return array.MakeFromData(data)
 }
@@ -855,7 +862,8 @@ func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schem
 	if err != nil {
 		return nil, err
 	}
-	defer result.Release()
-
-	return array.RecordFromStructArray(result.(*array.Struct), nil), nil
+	st.Release()
+	out := array.RecordFromStructArray(result.(*array.Struct), nil)
+	result.Release()
+	return out, nil
 }

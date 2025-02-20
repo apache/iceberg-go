@@ -165,6 +165,10 @@ func (s *Schema) AsStruct() StructType    { return StructType{FieldList: s.field
 func (s *Schema) NumFields() int          { return len(s.fields) }
 func (s *Schema) Field(i int) NestedField { return s.fields[i] }
 func (s *Schema) Fields() []NestedField   { return slices.Clone(s.fields) }
+func (s *Schema) FieldIDs() []int {
+	idx, _ := s.lazyNameToID()
+	return slices.Collect(maps.Values(idx))
+}
 
 func (s *Schema) UnmarshalJSON(b []byte) error {
 	type Alias Schema

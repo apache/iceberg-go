@@ -217,11 +217,12 @@ type arrowScan struct {
 
 func (as *arrowScan) projectedFieldIDs() (set[int], error) {
 	idset := set[int]{}
-	for _, field := range as.projectedSchema.Fields() {
-		switch field.Type.(type) {
+	for _, id := range as.projectedSchema.FieldIDs() {
+		typ, _ := as.projectedSchema.FindTypeByID(id)
+		switch typ.(type) {
 		case *iceberg.MapType, *iceberg.ListType:
 		default:
-			idset[field.ID] = struct{}{}
+			idset[id] = struct{}{}
 		}
 	}
 
@@ -435,7 +436,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 	return
 }
 
-func createIterator(ctx context.Context, numWorkers uint, records <-chan enumeratedRecord, deletesPerFile perFilePosDeletes, cancel context.CancelFunc, rowLimit int64) iter.Seq2[arrow.Record, error] {
+func createIterator(ctx context.Context, numWorkers uint, records <-chan enumeratedRecord, deletesPerFile perFilePosDeletes, cancel context.CancelCauseFunc, rowLimit int64) iter.Seq2[arrow.Record, error] {
 	isBeforeAny := func(batch enumeratedRecord) bool {
 		return batch.Task.Index < 0
 	}
@@ -484,7 +485,7 @@ func createIterator(ctx context.Context, numWorkers uint, records <-chan enumera
 			}
 		}()
 
-		defer cancel()
+		defer cancel(nil)
 
 		for {
 			select {
@@ -531,7 +532,7 @@ func createIterator(ctx context.Context, numWorkers uint, records <-chan enumera
 func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks []FileScanTask, deletesPerFile perFilePosDeletes) iter.Seq2[arrow.Record, error] {
 	extSet := substrait.NewExtensionSet()
 
-	ctx, cancel := context.WithCancel(exprs.WithExtensionIDSet(ctx, extSet))
+	ctx, cancel := context.WithCancelCause(exprs.WithExtensionIDSet(ctx, extSet))
 	taskChan := make(chan internal.Enumerated[FileScanTask], len(tasks))
 
 	// numWorkers := 1
@@ -554,7 +555,7 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 
 					if err := as.recordsFromTask(ctx, task, records,
 						deletesPerFile[task.Value.File.FilePath()]); err != nil {
-						cancel()
+						cancel(err)
 						return
 					}
 				}
