@@ -155,3 +155,5 @@ require (
 	modernc.org/memory v1.8.2 // indirect
 	modernc.org/sqlite v1.34.5 // indirect
 )
+
+replace github.com/apache/arrow-go/v18 => github.com/zeroshade/arrow-go/v18 v18.0.1-0.20250220191901-9d00b55d4459
