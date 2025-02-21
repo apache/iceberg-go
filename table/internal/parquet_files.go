@@ -377,8 +377,8 @@ func (p *pruneParquetSchema) Map(field pqarrow.SchemaField, keyResult, valResult
 	return *field.Field
 }
 
-func (p *pruneParquetSchema) Primitive(field pqarrow.SchemaField) arrow.Field {
-	return *field.Field
+func (p *pruneParquetSchema) Primitive(_ pqarrow.SchemaField) arrow.Field {
+	return arrow.Field{}
 }
 
 func (p *pruneParquetSchema) projectSelectedStruct(projected arrow.DataType) *arrow.StructType {
