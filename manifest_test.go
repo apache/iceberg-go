@@ -76,7 +76,7 @@ var (
 				Content:          EntryContentEqDeletes,
 				Path:             "/home/iceberg/warehouse/nyc/taxis_partitioned/data/VendorID=null/00000-633-d8a4223e-dc97-45a1-86e1-adaba6e8abd7-00001.parquet",
 				Format:           ParquetFile,
-				PartitionData:    map[string]any{"VendorID": int(1), "tpep_pickup_datetime": time.Unix(1925, 0)},
+				PartitionData:    map[string]any{"VendorID": int(1), "tpep_pickup_datetime": time.Unix(1925, 0).UnixMicro()},
 				RecordCount:      19513,
 				FileSize:         388872,
 				BlockSizeInBytes: 67108864,
@@ -195,7 +195,7 @@ var (
 			Data: &dataFile{
 				Path:             "/home/iceberg/warehouse/nyc/taxis_partitioned/data/VendorID=1/00000-633-d8a4223e-dc97-45a1-86e1-adaba6e8abd7-00002.parquet",
 				Format:           ParquetFile,
-				PartitionData:    map[string]any{"VendorID": int(1), "tpep_pickup_datetime": time.Unix(1925, 0)},
+				PartitionData:    map[string]any{"VendorID": int(1), "tpep_pickup_datetime": time.Unix(1925, 0).UnixMicro()},
 				RecordCount:      95050,
 				FileSize:         1265950,
 				BlockSizeInBytes: 67108864,
@@ -365,6 +365,28 @@ var (
 			},
 		},
 	}
+
+	testSchema = NewSchema(0,
+		NestedField{ID: 1, Name: "VendorID", Type: PrimitiveTypes.Int32, Required: true},
+		NestedField{ID: 2, Name: "tpep_pickup_datetime", Type: PrimitiveTypes.Timestamp, Required: true},
+		NestedField{ID: 3, Name: "tpep_dropoff_datetime", Type: PrimitiveTypes.Timestamp, Required: true},
+		NestedField{ID: 4, Name: "passenger_count", Type: PrimitiveTypes.Int64, Required: false},
+		NestedField{ID: 5, Name: "trip_distance", Type: PrimitiveTypes.Float64, Required: true},
+		NestedField{ID: 6, Name: "RatecodeID", Type: PrimitiveTypes.Int64, Required: false},
+		NestedField{ID: 7, Name: "store_and_fwd_flag", Type: PrimitiveTypes.String, Required: false},
+		NestedField{ID: 8, Name: "PULocationID", Type: PrimitiveTypes.Int32, Required: false},
+		NestedField{ID: 9, Name: "DOLocationID", Type: PrimitiveTypes.Int32, Required: false},
+		NestedField{ID: 10, Name: "payment_type", Type: PrimitiveTypes.Int64, Required: true},
+		NestedField{ID: 11, Name: "fare_amount", Type: PrimitiveTypes.Float64, Required: true},
+		NestedField{ID: 12, Name: "extra", Type: PrimitiveTypes.Float64, Required: false},
+		NestedField{ID: 13, Name: "mta_tax", Type: PrimitiveTypes.Float64, Required: false},
+		NestedField{ID: 14, Name: "tip_amount", Type: PrimitiveTypes.Float64, Required: false},
+		NestedField{ID: 15, Name: "tolls_amount", Type: PrimitiveTypes.Float64, Required: false},
+		NestedField{ID: 16, Name: "improvement_surcharge", Type: PrimitiveTypes.Float64, Required: false},
+		NestedField{ID: 17, Name: "total_amount", Type: PrimitiveTypes.Float64, Required: true},
+		NestedField{ID: 18, Name: "congestion_surcharge", Type: PrimitiveTypes.Float64, Required: false},
+		NestedField{ID: 19, Name: "VendorID", Type: PrimitiveTypes.Int32, Required: false},
+	)
 )
 
 type ManifestTestSuite struct {
@@ -378,8 +400,9 @@ type ManifestTestSuite struct {
 }
 
 func (m *ManifestTestSuite) writeManifestList() {
-	m.Require().NoError(WriteManifestList(&m.v1ManifestList, manifestFileRecordsV1))
-	m.Require().NoError(WriteManifestList(&m.v2ManifestList, manifestFileRecordsV2))
+	m.Require().NoError(WriteManifestList(1, &m.v1ManifestList, snapshotID, nil, nil, manifestFileRecordsV1))
+	unassignedSequenceNum := int64(-1)
+	m.Require().NoError(WriteManifestList(2, &m.v2ManifestList, snapshotID, nil, &unassignedSequenceNum, manifestFileRecordsV2))
 }
 
 func (m *ManifestTestSuite) writeManifestEntries() {
@@ -393,25 +416,21 @@ func (m *ManifestTestSuite) writeManifestEntries() {
 		manifestEntryV2Recs[i] = rec
 	}
 
-	var partitionType = StructType{
-		FieldList: []NestedField{
-			{
-				ID:       1000,
-				Name:     "VendorID",
-				Type:     &Int32Type{},
-				Required: false,
-			},
-			{
-				ID:       1001,
-				Name:     "tpep_pickup_datetime",
-				Type:     &DateType{},
-				Required: false,
-			},
-		},
-	}
+	var partitionSpec = NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceID: 1, Name: "VendorID", Transform: IdentityTransform{}},
+		PartitionField{FieldID: 1001, SourceID: 2, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
 
-	m.Require().NoError(writeManifestEntries(&m.v1ManifestEntries, &partitionType, manifestEntryV1Recs, 1))
-	m.Require().NoError(writeManifestEntries(&m.v2ManifestEntries, &partitionType, manifestEntryV2Recs, 2))
+	fn, err := WriteManifest(&m.v1ManifestEntries, 1, partitionSpec, testSchema, entrySnapshotID, manifestEntryV1Recs)
+	m.Require().NoError(err)
+
+	_, err = fn("/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro", int64(m.v1ManifestList.Len()))
+	m.Require().NoError(err)
+
+	fn, err = WriteManifest(&m.v2ManifestEntries, 2, partitionSpec, testSchema, entrySnapshotID, manifestEntryV2Recs)
+	m.Require().NoError(err)
+
+	_, err = fn("/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro", int64(m.v1ManifestList.Len()))
+	m.Require().NoError(err)
 }
 
 func (m *ManifestTestSuite) SetupSuite() {
@@ -764,7 +783,7 @@ func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 		EntryContentData,
 		"sample.parquet",
 		ParquetFile,
-		map[string]any{"int": int(1), "datetime": time.Unix(1925, 0)},
+		map[string]any{"int": int(1), "datetime": time.Unix(1925, 0).UnixMicro()},
 		1,
 		2,
 	)

@@ -21,13 +21,9 @@ import (
 	"cmp"
 	"fmt"
 	"hash/maphash"
-	"io"
 	"maps"
 	"runtime/debug"
 	"strings"
-
-	"github.com/hamba/avro/v2"
-	"github.com/hamba/avro/v2/ocf"
 )
 
 var version string
@@ -215,24 +211,4 @@ func Difference(a, b []string) []string {
 		}
 	}
 	return diff
-}
-
-func avroEncode[T any](sch avro.Schema, vals []T, md map[string][]byte, out io.Writer) error {
-	enc, err := ocf.NewEncoderWithSchema(
-		sch,
-		out,
-		ocf.WithMetadata(md),
-		ocf.WithCodec(ocf.Deflate),
-	)
-	if err != nil {
-		return err
-	}
-
-	for _, file := range vals {
-		if err := enc.Encode(file); err != nil {
-			return err
-		}
-	}
-
-	return enc.Close()
 }

@@ -19,14 +19,19 @@ package iceberg
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
+	"reflect"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/google/uuid"
 
 	"github.com/hamba/avro/v2"
 	"github.com/hamba/avro/v2/ocf"
@@ -153,9 +158,9 @@ type manifestFileV1 struct {
 	Len                int64           `avro:"manifest_length"`
 	SpecID             int32           `avro:"partition_spec_id"`
 	AddedSnapshotID    int64           `avro:"added_snapshot_id"`
-	AddedFilesCount    *int32          `avro:"added_data_files_count"`
-	ExistingFilesCount *int32          `avro:"existing_data_files_count"`
-	DeletedFilesCount  *int32          `avro:"deleted_data_files_count"`
+	AddedFilesCount    *int32          `avro:"added_files_count"`
+	ExistingFilesCount *int32          `avro:"existing_files_count"`
+	DeletedFilesCount  *int32          `avro:"deleted_files_count"`
 	AddedRowsCount     *int64          `avro:"added_rows_count"`
 	ExistingRowsCount  *int64          `avro:"existing_rows_count"`
 	DeletedRowsCount   *int64          `avro:"deleted_rows_count"`
@@ -238,10 +243,10 @@ func (m *manifestFileV1) FetchEntries(fs iceio.IO, discardDeleted bool) ([]Manif
 	return fetchManifestEntries(m, fs, discardDeleted)
 }
 
-// WriteEntries writes a list of manifest entries to an avro file.
-func (m *manifestFileV1) WriteEntries(out io.Writer, entries []ManifestEntry) error {
-	return writeManifestEntries(out, m.partitionType, entries, m.Version())
-}
+// // WriteEntries writes a list of manifest entries to an avro file.
+// func (m *manifestFileV1) WriteEntries(out io.Writer, entries []ManifestEntry) error {
+// 	return writeManifestEntries(out, m.partitionType, entries, m.Version())
+// }
 
 // ManifestV2Builder is a helper for building a V2 manifest file
 // struct which will conform to the ManifestFile interface.
@@ -403,10 +408,10 @@ func (m *manifestFileV2) FetchEntries(fs iceio.IO, discardDeleted bool) ([]Manif
 	return fetchManifestEntries(m, fs, discardDeleted)
 }
 
-// WriteEntries writes a list of manifest entries to an avro file.
-func (m *manifestFileV2) WriteEntries(out io.Writer, entries []ManifestEntry) error {
-	return writeManifestEntries(out, m.partitionType, entries, m.Version())
-}
+// // WriteEntries writes a list of manifest entries to an avro file.
+// func (m *manifestFileV2) WriteEntries(out io.Writer, entries []ManifestEntry) error {
+// 	return writeManifestEntries(out, m.partitionType, entries, m.Version())
+// }
 
 func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType) {
 	getField := func(rs *avro.RecordSchema, name string) *avro.Field {
@@ -573,10 +578,10 @@ type ManifestFile interface {
 	// If discardDeleted is true, entries for files containing deleted rows
 	// will be skipped.
 	FetchEntries(fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error)
-	// WriteEntries writes a list of manifest entries to a provided
-	// io.Writer. The version of the manifest file is used to determine the
-	// schema to use for writing the entries.
-	WriteEntries(out io.Writer, entries []ManifestEntry) error
+	// // WriteEntries writes a list of manifest entries to a provided
+	// // io.Writer. The version of the manifest file is used to determine the
+	// // schema to use for writing the entries.
+	// WriteEntries(out io.Writer, entries []ManifestEntry) error
 }
 
 // ReadManifestList reads in an avro manifest list file and returns a slice
@@ -629,120 +634,566 @@ func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
 	return out, dec.Error()
 }
 
-// WriteManifestList writes a list of v2 manifest files to an avro file.
-func WriteManifestList(out io.Writer, files []ManifestFile) error {
+type writerImpl interface {
+	content() ManifestContent
+	prepareEntry(ManifestEntry, int64) (ManifestEntry, error)
+}
+
+type v1writerImpl struct{}
+
+func (v1writerImpl) content() ManifestContent { return ManifestContentData }
+func (v1writerImpl) prepareEntry(entry ManifestEntry, _ int64) (ManifestEntry, error) {
+	return entry, nil
+}
+
+type v2writerImpl struct{}
+
+func (v2writerImpl) content() ManifestContent { return ManifestContentData }
+func (v2writerImpl) prepareEntry(entry ManifestEntry, snapshotID int64) (ManifestEntry, error) {
+	if entry.SequenceNum() <= 0 {
+		if entry.SnapshotID() > 0 && entry.SnapshotID() != snapshotID {
+			return nil, fmt.Errorf("found unassigned sequence number for entry from snapshot: %d", entry.SnapshotID())
+		}
+
+		if entry.Status() != EntryStatusADDED {
+			return nil, errors.New("only entries with status ADDED can be missing a sequence number")
+		}
+	}
+
+	return entry, nil
+}
+
+type fieldStats interface {
+	toSummary() FieldSummary
+	update(value any)
+}
+
+type partitionFieldStats[T LiteralType] struct {
+	containsNull bool
+	containsNan  bool
+	min          *T
+	max          *T
+
+	cmp Comparator[T]
+}
+
+func newPartitionFieldStat(typ PrimitiveType) fieldStats {
+	switch typ.(type) {
+	case Int32Type:
+		return &partitionFieldStats[int32]{cmp: getComparator[int32]()}
+	case Int64Type:
+		return &partitionFieldStats[int64]{cmp: getComparator[int64]()}
+	case Float32Type:
+		return &partitionFieldStats[float32]{cmp: getComparator[float32]()}
+	case Float64Type:
+		return &partitionFieldStats[float64]{cmp: getComparator[float64]()}
+	case StringType:
+		return &partitionFieldStats[string]{cmp: getComparator[string]()}
+	case DateType:
+		return &partitionFieldStats[Date]{cmp: getComparator[Date]()}
+	case TimeType:
+		return &partitionFieldStats[Time]{cmp: getComparator[Time]()}
+	case TimestampType:
+		return &partitionFieldStats[Timestamp]{cmp: getComparator[Timestamp]()}
+	case UUIDType:
+		return &partitionFieldStats[uuid.UUID]{cmp: getComparator[uuid.UUID]()}
+	case BinaryType:
+		return &partitionFieldStats[[]byte]{cmp: getComparator[[]byte]()}
+	case FixedType:
+		return &partitionFieldStats[[]byte]{cmp: getComparator[[]byte]()}
+	case DecimalType:
+		return &partitionFieldStats[Decimal]{cmp: getComparator[Decimal]()}
+	default:
+		panic(fmt.Sprintf("expected primitive type for partition type: %s", typ))
+	}
+}
+
+func (p *partitionFieldStats[T]) toSummary() FieldSummary {
+	var (
+		lowerBound *[]byte
+		upperBound *[]byte
+		lit        Literal
+	)
+
+	if p.min != nil {
+		lit = NewLiteral(*p.min)
+		lb, _ := lit.MarshalBinary()
+		lowerBound = &lb
+	}
+
+	if p.max != nil {
+		lit = NewLiteral(*p.max)
+		ub, _ := lit.MarshalBinary()
+		upperBound = &ub
+	}
+
+	return FieldSummary{
+		ContainsNull: p.containsNull,
+		ContainsNaN:  &p.containsNan,
+		LowerBound:   lowerBound,
+		UpperBound:   upperBound,
+	}
+}
+
+func (p *partitionFieldStats[T]) update(value any) {
+	if value == nil {
+		p.containsNull = true
+		return
+	}
+
+	var actualVal T
+	v := reflect.ValueOf(value)
+	if !v.CanConvert(reflect.TypeOf(actualVal)) {
+		panic(fmt.Sprintf("expected type %T, got %T", actualVal, value))
+	}
+
+	actualVal = v.Convert(reflect.TypeOf(actualVal)).Interface().(T)
+
+	switch f := any(actualVal).(type) {
+	case float32:
+		if math.IsNaN(float64(f)) {
+			p.containsNan = true
+			return
+		}
+	case float64:
+		if math.IsNaN(f) {
+			p.containsNan = true
+			return
+		}
+	}
+
+	if p.min == nil {
+		p.min = &actualVal
+		p.max = &actualVal
+	} else {
+		if p.cmp(actualVal, *p.min) < 0 {
+			p.min = &actualVal
+		}
+
+		if p.cmp(actualVal, *p.max) > 0 {
+			p.max = &actualVal
+		}
+	}
+}
+
+func constructPartitionSummaries(spec PartitionSpec, schema *Schema, partitions []map[string]any) ([]FieldSummary, error) {
+	partType := spec.PartitionType(schema)
+	fieldStats := make([]fieldStats, len(partType.FieldList))
+	for i, field := range partType.FieldList {
+		pt, ok := field.Type.(PrimitiveType)
+		if !ok {
+			return nil, fmt.Errorf("expected primitive type for partition field, got %s", field.Type)
+		}
+
+		fieldStats[i] = newPartitionFieldStat(pt)
+	}
+
+	for _, part := range partitions {
+		for i, field := range partType.FieldList {
+			fieldStats[i].update(part[field.Name])
+		}
+	}
+
+	summaries := make([]FieldSummary, len(fieldStats))
+	for i, stat := range fieldStats {
+		summaries[i] = stat.toSummary()
+	}
+	return summaries, nil
+}
+
+type ManifestWriter struct {
+	closed  bool
+	version int
+	impl    writerImpl
+
+	output io.Writer
+	writer *ocf.Encoder
+
+	spec   PartitionSpec
+	schema *Schema
+
+	snapshotID    int64
+	addedFiles    int32
+	addedRows     int64
+	existingFiles int32
+	existingRows  int64
+	deletedFiles  int32
+	deletedRows   int64
+
+	partitions  []map[string]any
+	minSeqNum   int64
+	reusedEntry ManifestEntry
+}
+
+func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *Schema, snapshotID int64) (*ManifestWriter, error) {
+	var (
+		impl        writerImpl
+		reusedEntry ManifestEntry
+	)
+
+	switch version {
+	case 1:
+		impl = v1writerImpl{}
+		reusedEntry = &manifestEntryV1{}
+	case 2:
+		impl = v2writerImpl{}
+		reusedEntry = &manifestEntryV2{}
+	default:
+		return nil, fmt.Errorf("unsupported manifest version: %d", version)
+	}
+
+	sc, err := partitionTypeToAvroSchema(spec.PartitionType(schema))
+	if err != nil {
+		return nil, err
+	}
+
+	fileSchema, err := internal.NewManifestEntrySchema(sc, version)
+	if err != nil {
+		return nil, err
+	}
+
+	w := &ManifestWriter{
+		impl:        impl,
+		version:     version,
+		output:      out,
+		spec:        spec,
+		schema:      schema,
+		snapshotID:  snapshotID,
+		minSeqNum:   -1,
+		partitions:  make([]map[string]any, 0),
+		reusedEntry: reusedEntry,
+	}
+
+	md, err := w.meta()
+	if err != nil {
+		return nil, err
+	}
+
+	enc, err := ocf.NewEncoderWithSchema(fileSchema, out,
+		ocf.WithMetadata(md),
+		ocf.WithCodec(ocf.Deflate))
+
+	w.writer = enc
+	return w, err
+}
+
+func (w *ManifestWriter) Close() error {
+	if w.closed {
+		return nil
+	}
+
+	if w.addedFiles+w.existingFiles+w.deletedFiles == 0 {
+		return errors.New("empty manifest file has been written")
+	}
+
+	w.closed = true
+	return w.writer.Close()
+}
+
+func (w *ManifestWriter) ToManifestFile(location string, length int64) (ManifestFile, error) {
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+
+	if w.minSeqNum == 0 {
+		w.minSeqNum = -1
+	}
+
+	partitions, err := constructPartitionSummaries(w.spec, w.schema, w.partitions)
+	if err != nil {
+		return nil, err
+	}
+
+	switch w.version {
+	case 1:
+		return &manifestFileV1{
+			Path:               location,
+			Len:                length,
+			SpecID:             int32(w.spec.id),
+			AddedSnapshotID:    w.snapshotID,
+			AddedFilesCount:    &w.addedFiles,
+			ExistingFilesCount: &w.existingFiles,
+			DeletedFilesCount:  &w.deletedFiles,
+			AddedRowsCount:     &w.addedRows,
+			ExistingRowsCount:  &w.existingRows,
+			DeletedRowsCount:   &w.deletedRows,
+			PartitionList:      &partitions,
+			Key:                nil,
+		}, nil
+	case 2:
+		return &manifestFileV2{
+			Path:               location,
+			Len:                length,
+			SpecID:             int32(w.spec.id),
+			Content:            ManifestContentData,
+			SeqNumber:          -1,
+			MinSeqNumber:       w.minSeqNum,
+			AddedSnapshotID:    w.snapshotID,
+			AddedFilesCount:    w.addedFiles,
+			ExistingFilesCount: w.existingFiles,
+			DeletedFilesCount:  w.deletedFiles,
+			AddedRowsCount:     w.addedRows,
+			ExistingRowsCount:  w.existingRows,
+			DeletedRowsCount:   w.deletedRows,
+			PartitionList:      &partitions,
+			Key:                nil,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported manifest version: %d", w.version)
+	}
+}
+
+func (w *ManifestWriter) meta() (map[string][]byte, error) {
+	schemaJson, err := json.Marshal(w.schema)
+	if err != nil {
+		return nil, err
+	}
+
+	specFieldsJson, err := json.Marshal(w.spec.fields)
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string][]byte{
+		"schema":            schemaJson,
+		"schema-id":         []byte(strconv.Itoa(w.schema.ID)),
+		"partition-spec":    specFieldsJson,
+		"partition-spec-id": []byte(strconv.Itoa(w.spec.ID())),
+		"format-version":    []byte(strconv.Itoa(w.version)),
+		"content":           []byte(w.impl.content().String()),
+	}, nil
+}
+
+func (w *ManifestWriter) addEntry(entry ManifestEntry) error {
+	if w.closed {
+		return errors.New("cannot add entry to closed manifest writer")
+	}
+
+	switch entry.Status() {
+	case EntryStatusADDED:
+		w.addedFiles++
+		w.addedRows += entry.DataFile().Count()
+	case EntryStatusEXISTING:
+		w.existingFiles++
+		w.existingRows += entry.DataFile().Count()
+	case EntryStatusDELETED:
+		w.deletedFiles++
+		w.deletedRows += entry.DataFile().Count()
+	default:
+		return fmt.Errorf("unknown entry status: %v", entry.Status())
+	}
+
+	w.partitions = append(w.partitions, entry.DataFile().Partition())
+	if (entry.Status() == EntryStatusADDED || entry.Status() == EntryStatusEXISTING) &&
+		entry.SequenceNum() > 0 && (w.minSeqNum < 0 || entry.SequenceNum() < w.minSeqNum) {
+		w.minSeqNum = entry.SequenceNum()
+	}
+
+	entry, err := w.impl.prepareEntry(entry, w.snapshotID)
+	if err != nil {
+		return err
+	}
+
+	return w.writer.Encode(entry)
+}
+
+func (w *ManifestWriter) Add(entry ManifestEntry) error {
+	w.reusedEntry.wrap(EntryStatusADDED, w.snapshotID, entry.SequenceNum(), nil, entry.DataFile())
+	return w.addEntry(w.reusedEntry)
+}
+
+func (w *ManifestWriter) Delete(entry ManifestEntry) error {
+	w.reusedEntry.wrap(EntryStatusDELETED, w.snapshotID, entry.SequenceNum(), entry.FileSequenceNum(), entry.DataFile())
+	return w.addEntry(w.reusedEntry)
+}
+
+func (w *ManifestWriter) Existing(entry ManifestEntry) error {
+	w.reusedEntry.wrap(EntryStatusEXISTING, w.snapshotID, entry.SequenceNum(), entry.FileSequenceNum(), entry.DataFile())
+	return w.addEntry(w.reusedEntry)
+}
+
+type ManifestListWriter struct {
+	version          int
+	out              io.Writer
+	commitSnapshotID int64
+	sequenceNumber   int64
+	writer           *ocf.Encoder
+}
+
+func NewManifestListWriterV1(out io.Writer, snapshotID int64, parentSnapshot *int64) (*ManifestListWriter, error) {
+	m := &ManifestListWriter{
+		version:          1,
+		out:              out,
+		commitSnapshotID: snapshotID,
+		sequenceNumber:   -1,
+	}
+
+	parentSnapshotStr := "null"
+	if parentSnapshot != nil {
+		parentSnapshotStr = strconv.Itoa(int(*parentSnapshot))
+	}
+
+	return m, m.init(map[string][]byte{
+		"format-version":     []byte(strconv.Itoa(m.version)),
+		"snapshot-id":        []byte(strconv.Itoa(int(snapshotID))),
+		"parent-snapshot-id": []byte(parentSnapshotStr),
+	})
+}
+
+func NewManifestListWriterV2(out io.Writer, snapshotID, sequenceNumber int64, parentSnapshot *int64) (*ManifestListWriter, error) {
+	m := &ManifestListWriter{
+		version:          2,
+		out:              out,
+		commitSnapshotID: snapshotID,
+		sequenceNumber:   sequenceNumber,
+	}
+
+	parentSnapshotStr := "null"
+	if parentSnapshot != nil {
+		parentSnapshotStr = strconv.Itoa(int(*parentSnapshot))
+	}
+
+	return m, m.init(map[string][]byte{
+		"format-version":     []byte(strconv.Itoa(m.version)),
+		"snapshot-id":        []byte(strconv.Itoa(int(snapshotID))),
+		"sequence-number":    []byte(strconv.Itoa(int(sequenceNumber))),
+		"parent-snapshot-id": []byte(parentSnapshotStr),
+	})
+}
+
+func (m *ManifestListWriter) init(meta map[string][]byte) error {
+	fileSchema, err := internal.NewManifestFileSchema(m.version)
+	if err != nil {
+		return err
+	}
+
+	enc, err := ocf.NewEncoderWithSchema(fileSchema, m.out,
+		ocf.WithMetadata(meta),
+		ocf.WithCodec(ocf.Deflate))
+	if err != nil {
+		return err
+	}
+
+	m.writer = enc
+	return nil
+}
+
+func (m *ManifestListWriter) Close() error {
+	if m.writer == nil {
+		return nil
+	}
+
+	return m.writer.Close()
+}
+
+func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 	if len(files) == 0 {
 		return nil
 	}
 
-	version := files[0].Version()
+	switch m.version {
+	case 1:
+		if slices.ContainsFunc(files, func(f ManifestFile) bool {
+			return f.Version() != 1
+		}) {
+			return fmt.Errorf("%w: ManifestListWriter only supports version 1 manifest files", ErrInvalidArgument)
+		}
 
-	for _, file := range files[1:] {
-		if file.Version() != version {
-			return fmt.Errorf(
-				"%w: ManifestFile '%s' has non-matching version %d instead of %d",
-				ErrInvalidArgument, file.FilePath(), file.Version(), version,
-			)
+		for _, file := range files {
+			if err := m.writer.Encode(file); err != nil {
+				return err
+			}
+		}
+
+	case 2:
+		for _, file := range files {
+			if file.Version() != 2 {
+				return fmt.Errorf("%w: ManifestListWriter only supports version 2 manifest files", ErrInvalidArgument)
+			}
+
+			wrapped := *(file.(*manifestFileV2))
+			if wrapped.SeqNumber == -1 {
+				// if the sequence number is being assigned here,
+				// then the manifest must be created by the current
+				// operation.
+				// to validate this, check the snapshot id matches the current commmit
+				if m.commitSnapshotID != wrapped.AddedSnapshotID {
+					return fmt.Errorf("found unassigned sequence number for a manifest from snapshot %d != %d",
+						m.commitSnapshotID, wrapped.AddedSnapshotID)
+				}
+				wrapped.SeqNumber = m.sequenceNumber
+			}
+
+			if wrapped.MinSeqNumber == -1 {
+				if m.commitSnapshotID != wrapped.AddedSnapshotID {
+					return fmt.Errorf("found unassigned sequence number for a manifest from snapshot: %d", wrapped.AddedSnapshotID)
+				}
+				// if the min sequence number is not determined, then there was no assigned sequence number
+				// for any file written to the wrapped manifest. replace the unassigned sequence number with
+				// the one for this commit
+				wrapped.MinSeqNumber = m.sequenceNumber
+			}
+			if err := m.writer.Encode(wrapped); err != nil {
+				return err
+			}
+		}
+	default:
+		return fmt.Errorf("unsupported manifest version: %d", m.version)
+	}
+
+	return nil
+}
+
+// WriteManifestList writes a list of manifest files to an avro file.
+func WriteManifestList(version int, out io.Writer, snapshotID int64, parentSnapshotID, sequenceNumber *int64, files []ManifestFile) error {
+	var (
+		writer *ManifestListWriter
+		err    error
+	)
+
+	switch version {
+	case 1:
+		writer, err = NewManifestListWriterV1(out, snapshotID, parentSnapshotID)
+	case 2:
+		if sequenceNumber == nil {
+			return errors.New("sequence number is required for V2 tables")
+		}
+		writer, err = NewManifestListWriterV2(out, snapshotID, *sequenceNumber, parentSnapshotID)
+	default:
+		return fmt.Errorf("unsupported manifest version: %d", version)
+	}
+
+	if err != nil {
+		return err
+	}
+
+	if err = writer.AddManifests(files); err != nil {
+		return err
+	}
+
+	return writer.Close()
+}
+
+func WriteManifest(
+	out io.Writer,
+	version int,
+	spec PartitionSpec,
+	schema *Schema,
+	snapshotID int64,
+	entries []ManifestEntry,
+) (func(string, int64) (ManifestFile, error), error) {
+	w, err := NewManifestWriter(version, out, spec, schema, snapshotID)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, entry := range entries {
+		if err := w.addEntry(entry); err != nil {
+			return nil, err
 		}
 	}
 
-	var sch avro.Schema
-	switch version {
-	case 1:
-		sch = internal.ManifestListV1Schema
-	case 2:
-		sch = internal.ManifestListV2Schema
-	default:
-		return fmt.Errorf("%w: non-recognized version %d", ErrInvalidArgument, version)
-	}
-
-	return avroEncode(
-		sch,
-		files,
-		map[string][]byte{
-			"format-version": []byte(strconv.Itoa(version)),
-		},
-		out,
-	)
-}
-
-// WriteManifestEntries writes a list of manifest entries to an avro file.
-func WriteManifestEntries(
-	out io.Writer,
-	content ManifestContent,
-	partitionSpec PartitionSpec,
-	tableSchema *Schema,
-	entries []ManifestEntry,
-	version int,
-) error {
-	var partSchema, err = TypeToAvroSchema("r102", partitionSpec.PartitionType(tableSchema))
-
-	if err != nil {
-		return err
-	}
-
-	var manSchema avro.Schema
-	switch version {
-	case 1:
-		manSchema = internal.MustNewManifestEntryV1Schema(partSchema)
-	case 2:
-		manSchema = internal.MustNewManifestEntryV2Schema(partSchema)
-	default:
-		return fmt.Errorf("%w: non-recognized version %d", ErrInvalidArgument, version)
-	}
-
-	var partSpecFields = partSchema.(*avro.RecordSchema).Fields()
-
-	if partSpecFields == nil {
-		partSpecFields = []*avro.Field{}
-	}
-
-	partSpecFieldsJson, err := json.Marshal(partSpecFields)
-
-	if err != nil {
-		return err
-	}
-
-	tableSchemaJson, err := json.Marshal(tableSchema)
-
-	if err != nil {
-		return err
-	}
-
-	var md = map[string][]byte{
-		"schema":            tableSchemaJson,
-		"schema-id":         []byte(strconv.Itoa(tableSchema.ID)),
-		"partition-spec":    []byte(partSpecFieldsJson),
-		"partition-spec-id": []byte(strconv.Itoa(partitionSpec.ID())),
-		"format-version":    []byte(strconv.Itoa(version)),
-		"content":           []byte(content.String()),
-	}
-
-	return avroEncode(manSchema, entries, md, out)
-}
-
-func writeManifestEntries(out io.Writer, partitionType *StructType, entries []ManifestEntry, version int) error {
-	partitionSchema, err := TypeToAvroSchema("r102", partitionType)
-
-	if err != nil {
-		return err
-	}
-
-	var sch avro.Schema
-	switch version {
-	case 1:
-		sch = internal.MustNewManifestEntryV1Schema(partitionSchema)
-	case 2:
-		sch = internal.MustNewManifestEntryV2Schema(partitionSchema)
-	default:
-		return fmt.Errorf("%w: non-recognized version %d", ErrInvalidArgument, version)
-	}
-
-	var md = map[string][]byte{
-		"format-version": []byte(strconv.Itoa(version)),
-	}
-
-	return avroEncode(sch, entries, md, out)
+	return w.ToManifestFile, w.Close()
 }
 
 // ManifestEntryStatus defines constants for the entry status of
@@ -1027,6 +1478,19 @@ func (m *manifestEntryV1) FileSequenceNum() *int64 {
 
 func (m *manifestEntryV1) DataFile() DataFile { return m.Data }
 
+func (m *manifestEntryV1) wrap(status ManifestEntryStatus, snapshotID int64, seqNum int64, fileSeqNum *int64, datafile DataFile) ManifestEntry {
+	m.EntryStatus = status
+	m.Snapshot = snapshotID
+	if seqNum > 0 {
+		m.SeqNum = &seqNum
+	}
+
+	m.FileSeqNum = fileSeqNum
+
+	m.Data = datafile
+	return m
+}
+
 // ManifestEntryV2Builder is a helper for building a V2 manifest entry
 // struct which will conform to the ManifestEntry interface.
 type ManifestEntryV2Builder struct {
@@ -1110,6 +1574,20 @@ func (m *manifestEntryV2) FileSequenceNum() *int64 {
 }
 
 func (m *manifestEntryV2) DataFile() DataFile { return m.Data }
+
+func (m *manifestEntryV2) wrap(status ManifestEntryStatus, snapshotID int64, seqNum int64, fileSeqNum *int64, datafile DataFile) ManifestEntry {
+	m.EntryStatus = status
+	if snapshotID > 0 {
+		m.Snapshot = &snapshotID
+	}
+	if seqNum > 0 {
+		m.SeqNum = &seqNum
+	}
+	m.FileSeqNum = fileSeqNum
+
+	m.Data = datafile
+	return m
+}
 
 // DataFileBuilder is a helper for building a data file struct which will
 // conform to the DataFile interface.
@@ -1324,6 +1802,7 @@ type ManifestEntry interface {
 	DataFile() DataFile
 
 	inheritSeqNum(manifest ManifestFile)
+	wrap(status ManifestEntryStatus, snapshotID int64, seqNum int64, fileSeqNum *int64, datafile DataFile) ManifestEntry
 }
 
 var PositionalDeleteSchema = NewSchema(0,
