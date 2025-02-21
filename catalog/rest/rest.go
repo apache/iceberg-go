@@ -155,7 +155,7 @@ type createTableRequest struct {
 	Location      string                 `json:"location,omitempty"`
 	PartitionSpec *iceberg.PartitionSpec `json:"partition-spec,omitempty"`
 	WriteOrder    *table.SortOrder       `json:"write-order,omitempty"`
-	StageCreate   bool                   `json:"stage-create,omitempty"`
+	StageCreate   bool                   `json:"stage-create"`
 	Props         iceberg.Properties     `json:"properties,omitempty"`
 }
 
@@ -899,19 +899,19 @@ func (r *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 
 func (r *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error) {
 	type payload struct {
-		From identifier `json:"from"`
-		To   identifier `json:"to"`
+		Source      identifier `json:"source"`
+		Destination identifier `json:"destination"`
 	}
-	f := identifier{
+	src := identifier{
 		Namespace: catalog.NamespaceFromIdent(from),
 		Name:      catalog.TableNameFromIdent(from),
 	}
-	t := identifier{
+	dst := identifier{
 		Namespace: catalog.NamespaceFromIdent(to),
 		Name:      catalog.TableNameFromIdent(to),
 	}
 
-	_, err := doPost[payload, any](ctx, r.baseURI, []string{"tables", "rename"}, payload{From: f, To: t}, r.cl,
+	_, err := doPost[payload, any](ctx, r.baseURI, []string{"tables", "rename"}, payload{Source: src, Destination: dst}, r.cl,
 		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable})
 	if err != nil {
 		return nil, err

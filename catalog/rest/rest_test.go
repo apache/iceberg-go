@@ -1215,20 +1215,20 @@ func (r *RestCatalogSuite) TestRenameTable200() {
 		}
 
 		var payload struct {
-			From struct {
+			Source struct {
 				Namespace []string `json:"namespace"`
 				Name      string   `json:"name"`
-			} `json:"from"`
-			To struct {
+			} `json:"source"`
+			Destination struct {
 				Namespace []string `json:"namespace"`
 				Name      string   `json:"name"`
-			} `json:"to"`
+			} `json:"destination"`
 		}
 		r.NoError(json.NewDecoder(req.Body).Decode(&payload))
-		r.Equal([]string{"fokko"}, payload.From.Namespace)
-		r.Equal("source", payload.From.Name)
-		r.Equal([]string{"fokko"}, payload.To.Namespace)
-		r.Equal("destination", payload.To.Name)
+		r.Equal([]string{"fokko"}, payload.Source.Namespace)
+		r.Equal("source", payload.Source.Name)
+		r.Equal([]string{"fokko"}, payload.Destination.Namespace)
+		r.Equal("destination", payload.Destination.Name)
 
 		w.WriteHeader(http.StatusOK)
 	})
