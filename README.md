@@ -72,7 +72,7 @@ $ cd iceberg-go/cmd/iceberg && go build .
 | Alter Table              |      |      |          |      |  X  |
 | Set Table Properties     |  X   |      |          |      |  X  |
 | Create Namespace         |  X   |      |          |  X   |  X  |
-| Check Namespace Exists   |  X   |      |          |      |  X  |
+| Check Namespace Exists   |  X   |      |          |  X   |  X  |
 | Drop Namespace           |  X   |      |          |  X   |  X  |
 | Set Namespace Properties |  X   |      |          |  X   |  X  |
 | List View                |  X   |      |          |      |     |
