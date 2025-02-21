@@ -66,6 +66,7 @@ jobs:
         run: |          
           go test -tags integration -v -run="^TestScanner" ./table
           go test -tags integration -v ./io
+          go test -tags integration -v -run="^TestRestIntegration$" ./catalog/rest
 
       - name: Show debug logs
         if: ${{ failure() }}
