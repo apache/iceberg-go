@@ -33,8 +33,8 @@ var (
 	// for x := range 24 {
 	// 		math.Floor(math.Log10(math.Abs(math.Pow(2, float64(8*x-1)-1))))
 	// }
-	maxPrecision = [...]int{-1, 2, 4, 6, 9, 11, 14, 16, 18, 21,
-		23, 26, 28, 31, 33, 35, 38, 40, 43, 45, 47, 50, 52, 55}
+	// maxPrecision = [...]int{-1, 2, 4, 6, 9, 11, 14, 16, 18, 21,
+	// 	23, 26, 28, 31, 33, 35, 38, 40, 43, 45, 47, 50, 52, 55}
 	// for p := range 40 {
 	//	  for pos := range 24 {
 	//       if p > maxPrecision[pos] {
