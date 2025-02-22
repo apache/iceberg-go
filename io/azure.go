@@ -19,56 +19,86 @@ package io
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/url"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/azureblob"
-	"google.golang.org/api/option"
 )
 
 // Constants for Azure configuration options
 const (
-    AzureContainerName = "azure.container.name"
-    AzureAccountName = "azure.account.name"
-    AzureSasToken = "azure.sas.token"
-    AzureStorageDomain = "azure.storage.domain"
-    AzureProtocol = "azure.protocol"
+	ADLS_SAS_TOKEN_PREFIX         = "adls.sas-token."
+	ADLS_CONNECTION_STRING_PREFIX = "adls.connection-string."
+	ADLS_READ_BLOCK_SIZE          = "adls.read.block-size-bytes"
+	ADLS_WRITE_BLOCK_SIZE         = "adls.write.block-size-bytes"
+	ADLS_SHARED_KEY_ACCOUNT_NAME  = "adls.auth.shared-key.account.name"
+	ADLS_SHARED_KEY_ACCOUNT_KEY   = "adls.auth.shared-key.account.key"
 )
 
-// Construct
-func parseAzureOptions(props map[string]string) *azureblob.ServiceURLOptions {
-    opts := azureblob.NewDefaultServiceURLOptions()
-    if account := props[AzureAccountName]; account != "" {
-        opts.AccountName := account
-    }
-    if token := props[AzureSasToken]; token != "" {
-        opts.SASToken := token
-    }
-    if domain := props[AzureStorageDomain]; domain != "" {
-        opts.StorageDomain := domain
-    }
-    if protocol := props[AzureProtocol]; protocol != "" {
-        opts.Protocol := protocol
-    }
-    return opts
-}
-
-
 // Construct a Azure bucket from a URL
-func createAzureBucket(ctx context.Context, props map[string]string) (*blob.Bucket, error) {
-    // Construct the ServiceURL
-    opts := parseAzureOptions(props)
-    serviceURL, err := azureblob.NewServiceURL(opts)
-    if err != nil {
-    	return nil, err
-    }
+func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
+	adlsSasTokens := propertiesWithPrefix(props, ADLS_SAS_TOKEN_PREFIX)
+	adlsConnectionStrings := propertiesWithPrefix(props, ADLS_CONNECTION_STRING_PREFIX)
 
-    // Construct the client
-    client := azureblob.NewDefaultClient(serviceURL, props[AzureContainerName])
-    bucket, err := azureblob.OpenBucket(ctx, client, nil)
-    if err != nil {
-        return nil, err
-    }
+	// Construct the client
+	accountName := props[ADLS_SHARED_KEY_ACCOUNT_NAME]
+	var client *container.Client
 
-    return bucket, nil
+	if accountName != "" {
+		var sharedKeyCred *azblob.SharedKeyCredential
+		var err error
+
+		if accountKey, ok := props[ADLS_SHARED_KEY_ACCOUNT_KEY]; ok {
+			svcURL := fmt.Sprintf("https://%s.blob.core.windows.net", accountName)
+			containerURL, err := url.JoinPath(svcURL, parsed.Host)
+			if err != nil {
+				return nil, err
+			}
+			sharedKeyCred, err = azblob.NewSharedKeyCredential(accountName, accountKey)
+			if err != nil {
+				return nil, fmt.Errorf("failed azblob.NewSharedKeyCredential: %w", err)
+			}
+
+			client, err = container.NewClientWithSharedKeyCredential(containerURL, sharedKeyCred, nil)
+			if err != nil {
+				return nil, fmt.Errorf("failed container.NewClientWithSharedKeyCredential: %w", err)
+			}
+		} else if sasToken, ok := adlsSasTokens[accountName]; ok {
+			svcURL, err := azureblob.NewServiceURL(&azureblob.ServiceURLOptions{
+				AccountName: accountName,
+				SASToken:    sasToken,
+			})
+			if err != nil {
+				return nil, err
+			}
+
+			containerURL, err := url.JoinPath(string(svcURL), parsed.Host)
+			if err != nil {
+				return nil, err
+			}
+
+			client, err = container.NewClientWithNoCredential(containerURL, nil)
+			if err != nil {
+				return nil, fmt.Errorf("failed container.NewClientWithNoCredential: %w", err)
+			}
+		} else if connectionString, ok := adlsConnectionStrings[accountName]; ok {
+			client, err = container.NewClientFromConnectionString(connectionString, parsed.Host, nil)
+			if err != nil {
+				return nil, fmt.Errorf("failed container.NewClientFromConnectionString: %w", err)
+			}
+		}
+
+		bucket, err := azureblob.OpenBucket(ctx, client, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		return bucket, nil
+	}
+
+	return nil, errors.New("xxxx")
 }
