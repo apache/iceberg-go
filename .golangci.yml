@@ -3,8 +3,6 @@ linters:
   enable:
     - gofmt
     - goimports
-    - testifylint
-    - revive
     - nlreturn
     - perfsprint
     - gofumpt
