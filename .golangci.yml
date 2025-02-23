@@ -1,0 +1,11 @@
+linters:
+  disable-all: true
+  enable:
+    - gofmt
+    - goimports
+    - testifylint
+    - revive
+    - nlreturn
+    - perfsprint
+    - gofumpt
+    - misspell
