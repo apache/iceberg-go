@@ -22,6 +22,7 @@ import (
 	"database/sql"
 	"fmt"
 	"maps"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,7 +35,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	"github.com/uptrace/bun/driver/sqliteshim"
-	"golang.org/x/exp/rand"
 )
 
 var (
@@ -110,7 +110,7 @@ func randomString(n int) string {
 	var b strings.Builder
 	b.Grow(n)
 	for range n {
-		b.WriteByte(letters[rand.Intn(len(letters))])
+		b.WriteByte(letters[rand.IntN(len(letters))])
 	}
 	return b.String()
 }
