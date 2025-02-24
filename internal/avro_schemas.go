@@ -17,552 +17,407 @@
 
 package internal
 
-import "github.com/hamba/avro/v2"
+import (
+	"fmt"
 
-const (
-	ManifestListV1Key  = "manifest-list-v1"
-	ManifestListV2Key  = "manifest-list-v2"
-	ManifestEntryV1Key = "manifest-entry-v1"
-	ManifestEntryV2Key = "manifest-entry-v2"
+	"github.com/hamba/avro/v2"
 )
 
+func NullableSchema(schema avro.Schema) avro.Schema {
+	return Must(avro.NewUnionSchema([]avro.Schema{
+		NullSchema, schema,
+	}))
+}
+
 var (
+	// for x := range 24 {
+	// 		math.Floor(math.Log10(math.Abs(math.Pow(2, float64(8*x-1)-1))))
+	// }
+	// maxPrecision = [...]int{-1, 2, 4, 6, 9, 11, 14, 16, 18, 21,
+	// 	23, 26, 28, 31, 33, 35, 38, 40, 43, 45, 47, 50, 52, 55}
+	// for p := range 40 {
+	//	  for pos := range 24 {
+	//       if p > maxPrecision[pos] {
+	//          requiredLength[p] = pos-1
+	//          break
+	//       }
+	//    }
+	// }
+	requiredLength = [...]int{1, 1, 1, 2, 2, 3, 3, 4, 4, 4, 5, 5,
+		6, 6, 6, 7, 7, 8, 8, 9, 9, 9, 10, 10, 11, 11, 11, 12, 12,
+		13, 13, 13, 14, 14, 15, 15, 16, 16, 16, 17}
+)
+
+// DecimalRequiredBytes returns the required number of bytes to store a
+// decimal value of the given precision. If the precision is outside of
+// the range (0, 40], this returns -1 as it is invalid.
+func DecimalRequiredBytes(precision int) int {
+	if precision <= 0 || precision >= 40 {
+		return -1
+	}
+
+	return requiredLength[precision]
+}
+
+func DecimalSchema(precision, scale int) avro.Schema {
+	return Must(avro.NewFixedSchema("fixed", "",
+		DecimalRequiredBytes(precision), avro.NewDecimalLogicalSchema(precision, scale)))
+}
+
+var (
+	NullSchema           = avro.NewNullSchema()
+	BoolSchema           = avro.NewPrimitiveSchema(avro.Boolean, nil)
+	NullableBoolSchema   = NullableSchema(BoolSchema)
+	BinarySchema         = avro.NewPrimitiveSchema(avro.Bytes, nil)
+	NullableBinarySchema = NullableSchema(BinarySchema)
+	StringSchema         = avro.NewPrimitiveSchema(avro.String, nil)
+	IntSchema            = avro.NewPrimitiveSchema(avro.Int, nil)
+	NullableIntSchema    = NullableSchema(IntSchema)
+	LongSchema           = avro.NewPrimitiveSchema(avro.Long, nil)
+	NullableLongSchema   = NullableSchema(LongSchema)
+	FloatSchema          = avro.NewPrimitiveSchema(avro.Float, nil)
+	DoubleSchema         = avro.NewPrimitiveSchema(avro.Double, nil)
+	DateSchema           = avro.NewPrimitiveSchema(avro.Int, avro.NewPrimitiveLogicalSchema(avro.Date))
+	TimeSchema           = avro.NewPrimitiveSchema(avro.Long, avro.NewPrimitiveLogicalSchema(avro.TimeMicros))
+	TimestampSchema      = avro.NewPrimitiveSchema(avro.Long, avro.NewPrimitiveLogicalSchema(avro.TimestampMicros),
+		avro.WithProps(map[string]any{"adjust-to-utc": false}))
+	TimestampTzSchema = avro.NewPrimitiveSchema(avro.Long, avro.NewPrimitiveLogicalSchema(avro.TimestampMicros),
+		avro.WithProps(map[string]any{"adjust-to-utc": true}))
+	UUIDSchema = Must(avro.NewFixedSchema("uuid", "", 16, avro.NewPrimitiveLogicalSchema(avro.UUID)))
+
 	AvroSchemaCache avro.SchemaCache
 )
 
+func newMapSchema(name string, keySchema, valueSchema avro.Schema, keyFieldID, valueFieldID int) avro.Schema {
+	return avro.NewArraySchema(
+		Must(avro.NewRecordSchema(name, "", []*avro.Field{
+			Must(avro.NewField("key", keySchema, avro.WithProps(map[string]any{"field-id": keyFieldID}))),
+			Must(avro.NewField("value", valueSchema, avro.WithProps(map[string]any{"field-id": valueFieldID}))),
+		})), avro.WithProps(map[string]any{"logicalType": "map"}))
+}
+
+func WithFieldID(id int) avro.SchemaOption {
+	return avro.WithProps(map[string]any{"field-id": id})
+}
+
 func init() {
-	AvroSchemaCache.Add(ManifestListV1Key, avro.MustParse(`{
-		"type": "record",
-		"name": "manifest_file",
-		"fields": [
-			{"name": "manifest_path", "type": "string", "doc": "Location URI with FS scheme", "field-id": 500},
-			{"name": "manifest_length", "type": "long", "doc": "Total file size in bytes", "field-id": 501},
-			{"name": "partition_spec_id", "type": "int", "doc": "Spec ID used to write", "field-id": 502},
-			{
-				"name": "added_snapshot_id",
-				"type": "long",
-				"doc": "Snapshot ID that added the manifest",
-				"field-id": 503
-			},
-			{
-				"name": "added_data_files_count",
-				"type": ["null", "int"],
-				"doc": "Added entry count",
-				"field-id": 504
-			},
-			{
-				"name": "existing_data_files_count",
-				"type": ["null", "int"],
-				"doc": "Existing entry count",
-				"field-id": 505
-			},
-			{
-				"name": "deleted_data_files_count",
-				"type": ["null", "int"],
-				"doc": "Deleted entry count",
-				"field-id": 506
-			},
-			{
-				"name": "partitions",
-				"type": [
-					"null",
-					{
-						"type": "array",
-						"items": {
-							"type": "record",
-							"name": "r508",
-							"fields": [
-								{
-									"name": "contains_null",
-									"type": "boolean",
-									"doc": "True if any file has a null partition value",
-									"field-id": 509
-								},
-								{
-									"name": "contains_nan",
-									"type": ["null", "boolean"],
-									"doc": "True if any file has a nan partition value",
-									"field-id": 518
-								},
-								{
-									"name": "lower_bound",
-									"type": ["null", "bytes"],
-									"doc": "Partition lower bound for all files",								
-									"field-id": 510
-								},
-								{
-									"name": "upper_bound",
-									"type": ["null", "bytes"],
-									"doc": "Partition upper bound for all files",								
-									"field-id": 511
-								}
-							]
-						},
-						"element-id": 508
-					}
-				],
-				"doc": "Summary for each partition",			
-				"field-id": 507
-			},
-			{"name": "added_rows_count", "type": ["null", "long"], "doc": "Added rows count", "field-id": 512},
-			{
-				"name": "existing_rows_count",
-				"type": ["null", "long"],
-				"doc": "Existing rows count",			
-				"field-id": 513
-			},
-			{
-				"name": "deleted_rows_count",
-				"type": ["null", "long"],
-				"doc": "Deleted rows count",			
-				"field-id": 514
-			}
-		]
-	}`))
+	AvroSchemaCache.Add("field_summary", Must(avro.NewRecordSchema("field_summary", "", []*avro.Field{
+		Must(avro.NewField("contains_null",
+			BoolSchema,
+			avro.WithDoc("true if the field contains null values"),
+			WithFieldID(509))),
+		Must(avro.NewField("contains_nan",
+			NullableBoolSchema,
+			avro.WithDoc("true if the field contains NaN values"),
+			WithFieldID(518))),
+		Must(avro.NewField("lower_bound", NullableBinarySchema,
+			avro.WithDoc("serialized lower bound"),
+			WithFieldID(510))),
+		Must(avro.NewField("upper_bound", NullableBinarySchema,
+			avro.WithDoc("serialized upper bound"),
+			WithFieldID(511))),
+	}, WithFieldID(508))))
 
-	AvroSchemaCache.Add(ManifestListV2Key, avro.MustParse(`{
-        "type": "record",
-        "name": "manifest_file",
-        "fields": [
-            {"name": "manifest_path", "type": "string", "doc": "Location URI with FS scheme", "field-id": 500},
-            {"name": "manifest_length", "type": "long", "doc": "Total file size in bytes", "field-id": 501},
-            {"name": "partition_spec_id", "type": "int", "doc": "Spec ID used to write", "field-id": 502},
-            {"name": "content", "type": "int", "doc": "Contents of the manifest: 0=data, 1=deletes", "field-id": 517},
-            {
-                "name": "sequence_number",
-                "type": "long",
-                "doc": "Sequence number when the manifest was added",
-                "field-id": 515
-            },
-            {
-                "name": "min_sequence_number",
-                "type": "long",
-                "doc": "Lowest sequence number in the manifest",
-                "field-id": 516
-            },
-            {"name": "added_snapshot_id", "type": "long", "doc": "Snapshot ID that added the manifest", "field-id": 503},
-            {"name": "added_files_count", "type": "int", "doc": "Added entry count", "field-id": 504},
-            {"name": "existing_files_count", "type": "int", "doc": "Existing entry count", "field-id": 505},
-            {"name": "deleted_files_count", "type": "int", "doc": "Deleted entry count", "field-id": 506},
-            {"name": "added_rows_count", "type": "long", "doc": "Added rows count", "field-id": 512},
-            {"name": "existing_rows_count", "type": "long", "doc": "Existing rows count", "field-id": 513},
-            {"name": "deleted_rows_count", "type": "long", "doc": "Deleted rows count", "field-id": 514},
-            {
-                "name": "partitions",
-                "type": [
-                    "null",
-                    {
-                        "type": "array",
-                        "items": {
-                            "type": "record",
-                            "name": "r508",
-                            "fields": [
-                                {
-                                    "name": "contains_null",
-                                    "type": "boolean",
-                                    "doc": "True if any file has a null partition value",
-                                    "field-id": 509
-                                },
-                                {
-                                    "name": "contains_nan",
-                                    "type": ["null", "boolean"],
-                                    "doc": "True if any file has a nan partition value",                                  
-                                    "field-id": 518
-                                },
-                                {
-                                    "name": "lower_bound",
-                                    "type": ["null", "bytes"],
-                                    "doc": "Partition lower bound for all files",                                    
-                                    "field-id": 510
-                                },
-                                {
-                                    "name": "upper_bound",
-                                    "type": ["null", "bytes"],
-                                    "doc": "Partition upper bound for all files",
-                                    "field-id": 511
-                                }
-                            ]
-                        },
-                        "element-id": 508
-                    }
-                ],
-                "doc": "Summary for each partition",
-                "field-id": 507
-            }
-        ]
-    }`))
+	AvroSchemaCache.Add("manifest_list_file_v1", Must(avro.NewRecordSchema("manifest_file", "", []*avro.Field{
+		Must(avro.NewField("manifest_path",
+			StringSchema,
+			avro.WithDoc("Location URI with FS scheme"),
+			WithFieldID(500))),
+		Must(avro.NewField("manifest_length",
+			LongSchema,
+			avro.WithDoc("Total file size in bytes"),
+			WithFieldID(501))),
+		Must(avro.NewField("partition_spec_id",
+			IntSchema,
+			avro.WithDoc("Spec ID used to write"),
+			WithFieldID(502))),
+		Must(avro.NewField("added_snapshot_id",
+			LongSchema,
+			avro.WithDoc("Snapshot ID that added the manifest"),
+			WithFieldID(503))),
+		Must(avro.NewField("added_files_count",
+			NullableIntSchema,
+			avro.WithDoc("Added entry count"),
+			WithFieldID(504))),
+		Must(avro.NewField("existing_files_count",
+			NullableIntSchema,
+			avro.WithDoc("Existing entry count"),
+			WithFieldID(505))),
+		Must(avro.NewField("deleted_files_count",
+			NullableIntSchema,
+			avro.WithDoc("Deleted entry count"),
+			WithFieldID(506))),
+		Must(avro.NewField("partitions",
+			NullableSchema(
+				avro.NewArraySchema(AvroSchemaCache.Get("field_summary"))),
+			avro.WithDoc("Partition field summaries"),
+			WithFieldID(507))),
+		Must(avro.NewField("added_rows_count",
+			NullableLongSchema,
+			avro.WithDoc("Added row count"),
+			WithFieldID(512))),
+		Must(avro.NewField("existing_rows_count",
+			NullableLongSchema,
+			avro.WithDoc("Existing row count"),
+			WithFieldID(513))),
+		Must(avro.NewField("deleted_rows_count",
+			NullableLongSchema,
+			avro.WithDoc("Deleted row count"),
+			WithFieldID(514))),
+		Must(avro.NewField("key_metadata", NullableBinarySchema,
+			avro.WithDoc("Key metadata"),
+			WithFieldID(519))),
+	})))
 
-	AvroSchemaCache.Add(ManifestEntryV1Key, avro.MustParse(`{
-        "type": "record",
-        "name": "manifest_entry",
-        "fields": [
-            {"name": "status", "type": "int", "field-id": 0},
-            {"name": "snapshot_id", "type": "long", "field-id": 1},
-            {
-                "name": "data_file",
-                "type": {
-                    "type": "record",
-                    "name": "r2",
-                    "fields": [
-                        {"name": "file_path", "type": "string", "doc": "Location URI with FS scheme", "field-id": 100},
-                        {
-                            "name": "file_format",
-                            "type": "string",
-                            "doc": "File format name: avro, orc, or parquet",
-                            "field-id": 101
-                        },
-                        {
-                            "name": "partition",
-                            "type": {
-                                "type": "record",
-                                "name": "r102",
-                                "fields": [
-                                    {"field-id": 1000, "name": "VendorID", "type": ["null", "int"]},
-                                    {
-                                        "field-id": 1001,                                        
-                                        "name": "tpep_pickup_datetime",
-                                        "type": ["null", {"type": "int", "logicalType": "date"}]
-                                    }
-                                ]
-                            },
-                            "field-id": 102
-                        },
-                        {"name": "record_count", "type": "long", "doc": "Number of records in the file", "field-id": 103},
-                        {"name": "file_size_in_bytes", "type": "long", "doc": "Total file size in bytes", "field-id": 104},
-                        {"name": "block_size_in_bytes", "type": "long", "field-id": 105},
-                        {
-                            "name": "column_sizes",
-                            "type": [
-                                "null",
-                                {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "record",
-                                        "name": "k117_v118",
-                                        "fields": [
-                                            {"name": "key", "type": "int", "field-id": 117},
-                                            {"name": "value", "type": "long", "field-id": 118}
-                                        ]
-                                    },
-                                    "logicalType": "map"
-                                }
-                            ],
-                            "doc": "Map of column id to total size on disk",                            
-                            "field-id": 108
-                        },
-                        {
-                            "name": "value_counts",
-                            "type": [
-                                "null",
-                                {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "record",
-                                        "name": "k119_v120",
-                                        "fields": [
-                                            {"name": "key", "type": "int", "field-id": 119},
-                                            {"name": "value", "type": "long", "field-id": 120}
-                                        ]
-                                    },
-                                    "logicalType": "map"
-                                }
-                            ],
-                            "doc": "Map of column id to total count, including null and NaN",                            
-                            "field-id": 109
-                        },
-                        {
-                            "name": "null_value_counts",
-                            "type": [
-                                "null",
-                                {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "record",
-                                        "name": "k121_v122",
-                                        "fields": [
-                                            {"name": "key", "type": "int", "field-id": 121},
-                                            {"name": "value", "type": "long", "field-id": 122}
-                                        ]
-                                    },
-                                    "logicalType": "map"
-                                }
-                            ],
-                            "doc": "Map of column id to null value count",                            
-                            "field-id": 110
-                        },
-                        {
-                            "name": "nan_value_counts",
-                            "type": [
-                                "null",
-                                {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "record",
-                                        "name": "k138_v139",
-                                        "fields": [
-                                            {"name": "key", "type": "int", "field-id": 138},
-                                            {"name": "value", "type": "long", "field-id": 139}
-                                        ]
-                                    },
-                                    "logicalType": "map"
-                                }
-                            ],
-                            "doc": "Map of column id to number of NaN values in the column",                            
-                            "field-id": 137
-                        },
-                        {
-                            "name": "lower_bounds",
-                            "type": [
-                                "null",
-                                {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "record",
-                                        "name": "k126_v127",
-                                        "fields": [
-                                            {"name": "key", "type": "int", "field-id": 126},
-                                            {"name": "value", "type": "bytes", "field-id": 127}
-                                        ]
-                                    },
-                                    "logicalType": "map"
-                                }
-                            ],
-                            "doc": "Map of column id to lower bound",                            
-                            "field-id": 125
-                        },
-                        {
-                            "name": "upper_bounds",
-                            "type": [
-                                "null",
-                                {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "record",
-                                        "name": "k129_v130",
-                                        "fields": [
-                                            {"name": "key", "type": "int", "field-id": 129},
-                                            {"name": "value", "type": "bytes", "field-id": 130}
-                                        ]
-                                    },
-                                    "logicalType": "map"
-                                }
-                            ],
-                            "doc": "Map of column id to upper bound",                            
-                            "field-id": 128
-                        },
-                        {
-                            "name": "key_metadata",
-                            "type": ["null", "bytes"],
-                            "doc": "Encryption key metadata blob",                            
-                            "field-id": 131
-                        },
-                        {
-                            "name": "split_offsets",
-                            "type": ["null", {"type": "array", "items": "long", "element-id": 133}],
-                            "doc": "Splittable offsets",                            
-                            "field-id": 132
-                        },
-                        {
-                            "name": "sort_order_id",
-                            "type": ["null", "int"],
-                            "doc": "Sort order ID",                            
-                            "field-id": 140
-                        }
-                    ]
-                },
-                "field-id": 2
-            }
-        ]
-    }`))
+	AvroSchemaCache.Add("manifest_list_file_v2", Must(avro.NewRecordSchema("manifest_file", "", []*avro.Field{
+		Must(avro.NewField("manifest_path",
+			StringSchema,
+			avro.WithDoc("Location URI with FS scheme"),
+			WithFieldID(500))),
+		Must(avro.NewField("manifest_length",
+			LongSchema,
+			avro.WithDoc("Total file size in bytes"),
+			WithFieldID(501))),
+		Must(avro.NewField("partition_spec_id",
+			IntSchema,
+			avro.WithDoc("Spec ID used to write"),
+			WithFieldID(502))),
+		Must(avro.NewField("content", IntSchema,
+			avro.WithDoc("Content type"),
+			avro.WithDefault(0),
+			WithFieldID(517))),
+		Must(avro.NewField("sequence_number", LongSchema,
+			avro.WithDoc("Sequence number"),
+			avro.WithDefault(int64(0)),
+			WithFieldID(515))),
+		Must(avro.NewField("min_sequence_number", LongSchema,
+			avro.WithDoc("Minimum sequence number"),
+			avro.WithDefault(int64(0)),
+			WithFieldID(516))),
+		Must(avro.NewField("added_snapshot_id",
+			LongSchema,
+			avro.WithDoc("Snapshot ID that added the manifest"),
+			WithFieldID(503))),
+		Must(avro.NewField("added_files_count",
+			IntSchema,
+			avro.WithDoc("Added entry count"),
+			WithFieldID(504))),
+		Must(avro.NewField("existing_files_count",
+			IntSchema,
+			avro.WithDoc("Existing entry count"),
+			WithFieldID(505))),
+		Must(avro.NewField("deleted_files_count",
+			IntSchema,
+			avro.WithDoc("Deleted entry count"),
+			WithFieldID(506))),
+		Must(avro.NewField("partitions",
+			NullableSchema(
+				avro.NewArraySchema(AvroSchemaCache.Get("field_summary"))),
+			avro.WithDoc("Partition field summaries"),
+			WithFieldID(507))),
+		Must(avro.NewField("added_rows_count",
+			LongSchema,
+			avro.WithDoc("Added row count"),
+			WithFieldID(512))),
+		Must(avro.NewField("existing_rows_count",
+			LongSchema,
+			avro.WithDoc("Existing row count"),
+			WithFieldID(513))),
+		Must(avro.NewField("deleted_rows_count",
+			LongSchema,
+			avro.WithDoc("Deleted row count"),
+			WithFieldID(514))),
+		Must(avro.NewField("key_metadata", NullableBinarySchema,
+			avro.WithDoc("Key metadata"),
+			WithFieldID(519))),
+	})))
 
-	AvroSchemaCache.Add(ManifestEntryV2Key, avro.MustParse(`{
-        "type": "record",
-        "name": "manifest_entry",
-        "fields": [
-            {"name": "status", "type": "int", "field-id": 0},
-            {"name": "snapshot_id", "type": ["null", "long"], "field-id": 1},
-			{"name": "sequence_number", "type": ["null", "long"], "field-id": 3},
-			{"name": "file_sequence_number", "type": ["null", "long"], "field-id": 4},
-            {
-                "name": "data_file",
-                "type": {
-                    "type": "record",
-                    "name": "r2",
-                    "fields": [
-						{"name": "content", "type": "int", "doc": "Type of content stored by the data file", "field-id": 134},
-                        {"name": "file_path", "type": "string", "doc": "Location URI with FS scheme", "field-id": 100},
-                        {
-                            "name": "file_format",
-                            "type": "string",
-                            "doc": "File format name: avro, orc, or parquet",
-                            "field-id": 101
-                        },
-                        {
-                            "name": "partition",
-                            "type": {
-                                "type": "record",
-                                "name": "r102",
-                                "fields": [
-                                    {"field-id": 1000, "name": "VendorID", "type": ["null", "int"]},
-                                    {
-                                        "field-id": 1001,                                        
-                                        "name": "tpep_pickup_datetime",
-                                        "type": ["null", {"type": "int", "logicalType": "date"}]
-                                    }
-                                ]
-                            },
-                            "field-id": 102
-                        },
-                        {"name": "record_count", "type": "long", "doc": "Number of records in the file", "field-id": 103},
-                        {"name": "file_size_in_bytes", "type": "long", "doc": "Total file size in bytes", "field-id": 104},                        
-                        {
-                            "name": "column_sizes",
-                            "type": [
-                                "null",
-                                {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "record",
-                                        "name": "k117_v118",
-                                        "fields": [
-                                            {"name": "key", "type": "int", "field-id": 117},
-                                            {"name": "value", "type": "long", "field-id": 118}
-                                        ]
-                                    },
-                                    "logicalType": "map"
-                                }
-                            ],
-                            "doc": "Map of column id to total size on disk",                            
-                            "field-id": 108
-                        },
-                        {
-                            "name": "value_counts",
-                            "type": [
-                                "null",
-                                {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "record",
-                                        "name": "k119_v120",
-                                        "fields": [
-                                            {"name": "key", "type": "int", "field-id": 119},
-                                            {"name": "value", "type": "long", "field-id": 120}
-                                        ]
-                                    },
-                                    "logicalType": "map"
-                                }
-                            ],
-                            "doc": "Map of column id to total count, including null and NaN",                            
-                            "field-id": 109
-                        },
-                        {
-                            "name": "null_value_counts",
-                            "type": [
-                                "null",
-                                {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "record",
-                                        "name": "k121_v122",
-                                        "fields": [
-                                            {"name": "key", "type": "int", "field-id": 121},
-                                            {"name": "value", "type": "long", "field-id": 122}
-                                        ]
-                                    },
-                                    "logicalType": "map"
-                                }
-                            ],
-                            "doc": "Map of column id to null value count",                            
-                            "field-id": 110
-                        },
-                        {
-                            "name": "nan_value_counts",
-                            "type": [
-                                "null",
-                                {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "record",
-                                        "name": "k138_v139",
-                                        "fields": [
-                                            {"name": "key", "type": "int", "field-id": 138},
-                                            {"name": "value", "type": "long", "field-id": 139}
-                                        ]
-                                    },
-                                    "logicalType": "map"
-                                }
-                            ],
-                            "doc": "Map of column id to number of NaN values in the column",                            
-                            "field-id": 137
-                        },
-                        {
-                            "name": "lower_bounds",
-                            "type": [
-                                "null",
-                                {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "record",
-                                        "name": "k126_v127",
-                                        "fields": [
-                                            {"name": "key", "type": "int", "field-id": 126},
-                                            {"name": "value", "type": "bytes", "field-id": 127}
-                                        ]
-                                    },
-                                    "logicalType": "map"
-                                }
-                            ],
-                            "doc": "Map of column id to lower bound",                            
-                            "field-id": 125
-                        },
-                        {
-                            "name": "upper_bounds",
-                            "type": [
-                                "null",
-                                {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "record",
-                                        "name": "k129_v130",
-                                        "fields": [
-                                            {"name": "key", "type": "int", "field-id": 129},
-                                            {"name": "value", "type": "bytes", "field-id": 130}
-                                        ]
-                                    },
-                                    "logicalType": "map"
-                                }
-                            ],
-                            "doc": "Map of column id to upper bound",                            
-                            "field-id": 128
-                        },
-                        {
-                            "name": "key_metadata",
-                            "type": ["null", "bytes"],
-                            "doc": "Encryption key metadata blob",                            
-                            "field-id": 131
-                        },
-                        {
-                            "name": "split_offsets",
-                            "type": ["null", {"type": "array", "items": "long", "element-id": 133}],
-                            "doc": "Splittable offsets",                            
-                            "field-id": 132
-                        },
-						{
-							"name": "equality_ids",
-							"type": ["null", {"type": "array", "items": "int", "element-id": 136}],
-							"doc": "Field ids used to determine row equality for delete files",
-							"field-id": 135
-						},
-                        {
-                            "name": "sort_order_id",
-                            "type": ["null", "int"],
-                            "doc": "Sort order ID",                            
-                            "field-id": 140
-                        }
-                    ]
-                },
-                "field-id": 2
-            }
-        ]
-    }`))
+	AvroSchemaCache.Add("data_file_v1", Must(avro.NewRecordSchema("data_file", "", []*avro.Field{
+		Must(avro.NewField("file_path",
+			StringSchema,
+			avro.WithDoc("Location URI with FS scheme"),
+			WithFieldID(100))),
+		Must(avro.NewField("file_format",
+			StringSchema,
+			avro.WithDoc("File format name: avro, orc, parquet"),
+			WithFieldID(101))),
+		// skip partition field, we'll add that dynamically as needed
+		Must(avro.NewField("record_count",
+			LongSchema,
+			avro.WithDoc("Number of records in the file"),
+			WithFieldID(103))),
+		Must(avro.NewField("file_size_in_bytes",
+			LongSchema,
+			avro.WithDoc("Size of the file in bytes"),
+			WithFieldID(104))),
+		Must(avro.NewField("block_size_in_bytes",
+			LongSchema,
+			avro.WithDoc("Deprecated. Always write default in v1. Do not write in v2."),
+			avro.WithDefault(int64(64*1024*1024)),
+			WithFieldID(105))),
+		Must(avro.NewField("column_sizes",
+			NullableSchema(newMapSchema("k117_v118", IntSchema, LongSchema, 117, 118)),
+			avro.WithDoc("map of column id to total size on disk"),
+			WithFieldID(108))),
+		Must(avro.NewField("value_counts",
+			NullableSchema(newMapSchema("k119_v120", IntSchema, LongSchema, 119, 120)),
+			avro.WithDoc("map of value to count"),
+			WithFieldID(109))),
+		Must(avro.NewField("null_value_counts",
+			NullableSchema(newMapSchema("k121_v122", IntSchema, LongSchema, 121, 122)),
+			avro.WithDoc("map of value to count"),
+			WithFieldID(110))),
+		Must(avro.NewField("nan_value_counts",
+			NullableSchema(newMapSchema("k138_v139", IntSchema, LongSchema, 138, 139)),
+			avro.WithDoc("map of value to count"),
+			WithFieldID(137))),
+		Must(avro.NewField("lower_bounds",
+			NullableSchema(newMapSchema("k126_v127", IntSchema, BinarySchema, 126, 127)),
+			avro.WithDoc("map of column id to lower bound"),
+			WithFieldID(125))),
+		Must(avro.NewField("upper_bounds",
+			NullableSchema(newMapSchema("k129_v130", IntSchema, BinarySchema, 129, 130)),
+			avro.WithDoc("map of column id to upper bound"),
+			WithFieldID(128))),
+		Must(avro.NewField("key_metadata", NullableBinarySchema,
+			avro.WithDoc("Encryption Key Metadata Blob"),
+			WithFieldID(131))),
+		Must(avro.NewField("split_offsets",
+			NullableSchema(avro.NewArraySchema(LongSchema,
+				WithFieldID(133))),
+			avro.WithDoc("splitable offsets"),
+			WithFieldID(132))),
+		Must(avro.NewField("sort_order_id",
+			NullableIntSchema,
+			avro.WithDoc("Sort order ID"),
+			WithFieldID(140))),
+	})))
+
+	AvroSchemaCache.Add("data_file_v2", Must(avro.NewRecordSchema("data_file", "", []*avro.Field{
+		Must(avro.NewField("content", IntSchema,
+			avro.WithDoc("Content type"),
+			avro.WithDefault(0),
+			WithFieldID(134))),
+		Must(avro.NewField("file_path",
+			StringSchema,
+			avro.WithDoc("Location URI with FS scheme"),
+			WithFieldID(100))),
+		Must(avro.NewField("file_format",
+			StringSchema,
+			avro.WithDoc("File format name: avro, orc, parquet"),
+			WithFieldID(101))),
+		// skip partition field, we'll add that dynamically as needed
+		Must(avro.NewField("record_count",
+			LongSchema,
+			avro.WithDoc("Number of records in the file"),
+			WithFieldID(103))),
+		Must(avro.NewField("file_size_in_bytes",
+			LongSchema,
+			avro.WithDoc("Size of the file in bytes"),
+			WithFieldID(104))),
+		Must(avro.NewField("column_sizes",
+			NullableSchema(newMapSchema("k117_v118", IntSchema, LongSchema, 117, 118)),
+			avro.WithDoc("map of column id to total size on disk"),
+			WithFieldID(108))),
+		Must(avro.NewField("value_counts",
+			NullableSchema(newMapSchema("k119_v120", IntSchema, LongSchema, 119, 120)),
+			avro.WithDoc("map of value to count"),
+			WithFieldID(109))),
+		Must(avro.NewField("null_value_counts",
+			NullableSchema(newMapSchema("k121_v122", IntSchema, LongSchema, 121, 122)),
+			avro.WithDoc("map of value to count"),
+			WithFieldID(110))),
+		Must(avro.NewField("nan_value_counts",
+			NullableSchema(newMapSchema("k138_v139", IntSchema, LongSchema, 138, 139)),
+			avro.WithDoc("map of value to count"),
+			WithFieldID(137))),
+		Must(avro.NewField("lower_bounds",
+			NullableSchema(newMapSchema("k126_v127", IntSchema, BinarySchema, 126, 127)),
+			avro.WithDoc("map of column id to lower bound"),
+			WithFieldID(125))),
+		Must(avro.NewField("upper_bounds",
+			NullableSchema(newMapSchema("k129_v130", IntSchema, BinarySchema, 129, 130)),
+			avro.WithDoc("map of column id to upper bound"),
+			WithFieldID(128))),
+		Must(avro.NewField("key_metadata", NullableBinarySchema,
+			avro.WithDoc("Encryption Key Metadata Blob"),
+			WithFieldID(131))),
+		Must(avro.NewField("split_offsets",
+			NullableSchema(avro.NewArraySchema(LongSchema,
+				WithFieldID(133))),
+			avro.WithDoc("splitable offsets"),
+			WithFieldID(132))),
+		Must(avro.NewField("equality_ids",
+			NullableSchema(avro.NewArraySchema(LongSchema,
+				WithFieldID(136))),
+			avro.WithDoc("field ids used to determine row equality in equality delete files"),
+			WithFieldID(135))),
+		Must(avro.NewField("sort_order_id",
+			NullableIntSchema,
+			avro.WithDoc("Sort order ID"),
+			WithFieldID(140))),
+	})))
+
+	AvroSchemaCache.Add("manifest_entry_v1", Must(avro.NewRecordSchema("manifest_entry", "", []*avro.Field{
+		Must(avro.NewField("status", IntSchema, WithFieldID(0))),
+		Must(avro.NewField("snapshot_id", LongSchema, WithFieldID(1))),
+		// leave data_file for dyanmic generation
+	})))
+
+	AvroSchemaCache.Add("manifest_entry_v2", Must(avro.NewRecordSchema("manifest_entry", "", []*avro.Field{
+		Must(avro.NewField("status", IntSchema, WithFieldID(0))),
+		Must(avro.NewField("snapshot_id", NullableLongSchema, WithFieldID(1))),
+		Must(avro.NewField("sequence_number", NullableLongSchema, WithFieldID(3))),
+		Must(avro.NewField("file_sequence_number", NullableLongSchema, WithFieldID(4))),
+		// leave data_file for dynamic generation
+	})))
+}
+
+func newDataFileSchema(partitionType avro.Schema, version int) (avro.Schema, error) {
+	key := fmt.Sprintf("data_file_v%d", version)
+	schema := AvroSchemaCache.Get(key)
+
+	partField, err := avro.NewField("partition",
+		partitionType, WithFieldID(102))
+	if err != nil {
+		return nil, err
+	}
+
+	return avro.NewRecordSchema("data_file", "",
+		append(schema.(*avro.RecordSchema).Fields(), partField))
+}
+
+func NewManifestFileSchema(version int) (avro.Schema, error) {
+	switch version {
+	case 1, 2:
+	default:
+		return nil, fmt.Errorf("unsupported iceberg spec version: %d", version)
+	}
+
+	key := fmt.Sprintf("manifest_list_file_v%d", version)
+	return AvroSchemaCache.Get(key), nil
+}
+
+func NewManifestEntrySchema(partitionType avro.Schema, version int) (avro.Schema, error) {
+	switch version {
+	case 1, 2:
+	default:
+		return nil, fmt.Errorf("unsupported iceberg spec version: %d", version)
+	}
+
+	dfschema, err := newDataFileSchema(partitionType, version)
+	if err != nil {
+		return nil, err
+	}
+
+	dfField, err := avro.NewField("data_file", dfschema, WithFieldID(2))
+	if err != nil {
+		return nil, err
+	}
+
+	key := fmt.Sprintf("manifest_entry_v%d", version)
+	schema := AvroSchemaCache.Get(key)
+
+	return avro.NewRecordSchema("manifest_entry", "",
+		append(schema.(*avro.RecordSchema).Fields(), dfField))
 }
