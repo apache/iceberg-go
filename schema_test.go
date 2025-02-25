@@ -32,14 +32,19 @@ var (
 	tableSchemaNested = iceberg.NewSchemaWithIdentifiers(1,
 		[]int{1},
 		iceberg.NestedField{
-			ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: false},
+			ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: false,
+		},
 		iceberg.NestedField{
-			ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+			ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+		},
 		iceberg.NestedField{
-			ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool, Required: false},
+			ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool, Required: false,
+		},
 		iceberg.NestedField{
 			ID: 4, Name: "qux", Required: true, Type: &iceberg.ListType{
-				ElementID: 5, Element: iceberg.PrimitiveTypes.String, ElementRequired: true}},
+				ElementID: 5, Element: iceberg.PrimitiveTypes.String, ElementRequired: true,
+			},
+		},
 		iceberg.NestedField{
 			ID: 6, Name: "quux",
 			Type: &iceberg.MapType{
@@ -55,7 +60,8 @@ var (
 				},
 				ValueRequired: true,
 			},
-			Required: true},
+			Required: true,
+		},
 		iceberg.NestedField{
 			ID: 11, Name: "location", Type: &iceberg.ListType{
 				ElementID: 12, Element: &iceberg.StructType{
@@ -64,8 +70,10 @@ var (
 						{ID: 14, Name: "longitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
 					},
 				},
-				ElementRequired: true},
-			Required: true},
+				ElementRequired: true,
+			},
+			Required: true,
+		},
 		iceberg.NestedField{
 			ID:   15,
 			Name: "person",
@@ -519,7 +527,8 @@ func TestPruneColumnsEmptyStruct(t *testing.T) {
 
 	assert.True(t, sc.Equals(iceberg.NewSchema(0,
 		iceberg.NestedField{
-			ID: 15, Name: "person", Type: &iceberg.StructType{}, Required: false})))
+			ID: 15, Name: "person", Type: &iceberg.StructType{}, Required: false,
+		})))
 }
 
 func TestPruneColumnsEmptyStructFull(t *testing.T) {
@@ -532,7 +541,8 @@ func TestPruneColumnsEmptyStructFull(t *testing.T) {
 
 	assert.True(t, sc.Equals(iceberg.NewSchema(0,
 		iceberg.NestedField{
-			ID: 15, Name: "person", Type: &iceberg.StructType{}, Required: false})))
+			ID: 15, Name: "person", Type: &iceberg.StructType{}, Required: false,
+		})))
 }
 
 func TestPruneColumnsStructInMap(t *testing.T) {
@@ -645,6 +655,7 @@ func TestAssignFreshSchemaIDs(t *testing.T) {
 	startID := 100
 	sc, err := iceberg.AssignFreshSchemaIDs(tableSchemaNested, func() int {
 		startID++
+
 		return startID
 	})
 	require.NoError(t, err)

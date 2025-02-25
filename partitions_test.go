@@ -31,7 +31,8 @@ func TestPartitionSpec(t *testing.T) {
 
 	bucket := iceberg.BucketTransform{NumBuckets: 4}
 	idField1 := iceberg.PartitionField{
-		SourceID: 3, FieldID: 1001, Name: "id", Transform: bucket}
+		SourceID: 3, FieldID: 1001, Name: "id", Transform: bucket,
+	}
 	spec1 := iceberg.NewPartitionSpec(idField1)
 
 	assert.Zero(t, spec1.ID())
@@ -46,7 +47,8 @@ func TestPartitionSpec(t *testing.T) {
 
 	// only differs by PartitionField FieldID
 	idField2 := iceberg.PartitionField{
-		SourceID: 3, FieldID: 1002, Name: "id", Transform: bucket}
+		SourceID: 3, FieldID: 1002, Name: "id", Transform: bucket,
+	}
 	spec2 := iceberg.NewPartitionSpec(idField2)
 
 	assert.False(t, spec1.Equals(spec2))
@@ -85,10 +87,14 @@ func TestSerializeUnpartitionedSpec(t *testing.T) {
 
 func TestSerializePartitionSpec(t *testing.T) {
 	spec := iceberg.NewPartitionSpecID(3,
-		iceberg.PartitionField{SourceID: 1, FieldID: 1000,
-			Transform: iceberg.TruncateTransform{Width: 19}, Name: "str_truncate"},
-		iceberg.PartitionField{SourceID: 2, FieldID: 1001,
-			Transform: iceberg.BucketTransform{NumBuckets: 25}, Name: "int_bucket"},
+		iceberg.PartitionField{
+			SourceID: 1, FieldID: 1000,
+			Transform: iceberg.TruncateTransform{Width: 19}, Name: "str_truncate",
+		},
+		iceberg.PartitionField{
+			SourceID: 2, FieldID: 1001,
+			Transform: iceberg.BucketTransform{NumBuckets: 25}, Name: "int_bucket",
+		},
 	)
 
 	data, err := json.Marshal(spec)
@@ -120,14 +126,22 @@ func TestSerializePartitionSpec(t *testing.T) {
 
 func TestPartitionType(t *testing.T) {
 	spec := iceberg.NewPartitionSpecID(3,
-		iceberg.PartitionField{SourceID: 1, FieldID: 1000,
-			Transform: iceberg.TruncateTransform{Width: 19}, Name: "str_truncate"},
-		iceberg.PartitionField{SourceID: 2, FieldID: 1001,
-			Transform: iceberg.BucketTransform{NumBuckets: 25}, Name: "int_bucket"},
-		iceberg.PartitionField{SourceID: 3, FieldID: 1002,
-			Transform: iceberg.IdentityTransform{}, Name: "bool_identity"},
-		iceberg.PartitionField{SourceID: 1, FieldID: 1003,
-			Transform: iceberg.VoidTransform{}, Name: "str_void"},
+		iceberg.PartitionField{
+			SourceID: 1, FieldID: 1000,
+			Transform: iceberg.TruncateTransform{Width: 19}, Name: "str_truncate",
+		},
+		iceberg.PartitionField{
+			SourceID: 2, FieldID: 1001,
+			Transform: iceberg.BucketTransform{NumBuckets: 25}, Name: "int_bucket",
+		},
+		iceberg.PartitionField{
+			SourceID: 3, FieldID: 1002,
+			Transform: iceberg.IdentityTransform{}, Name: "bool_identity",
+		},
+		iceberg.PartitionField{
+			SourceID: 1, FieldID: 1003,
+			Transform: iceberg.VoidTransform{}, Name: "str_void",
+		},
 	)
 
 	expected := &iceberg.StructType{

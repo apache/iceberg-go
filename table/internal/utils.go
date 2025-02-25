@@ -37,6 +37,7 @@ func (pq *pqueue[T]) Len() int { return len(pq.queue) }
 func (pq *pqueue[T]) Less(i, j int) bool {
 	return pq.compare(pq.queue[i], pq.queue[j])
 }
+
 func (pq *pqueue[T]) Swap(i, j int) {
 	pq.queue[i], pq.queue[j] = pq.queue[j], pq.queue[i]
 }
@@ -52,6 +53,7 @@ func (pq *pqueue[T]) Pop() any {
 	item := old[n-1]
 	old[n-1] = nil
 	pq.queue = old[0 : n-1]
+
 	return item
 }
 
@@ -72,5 +74,6 @@ func MakeSequencedChan[T any](bufferSize uint, source <-chan T, comesAfter, isNe
 			}
 		}
 	}()
+
 	return out
 }

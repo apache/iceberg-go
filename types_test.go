@@ -48,7 +48,7 @@ func TestTypesBasic(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.expected, func(t *testing.T) {
-			var data = `{
+			data := `{
 				"id": 1,
 				"name": "test",
 				"type": "` + tt.expected + `",
@@ -170,22 +170,20 @@ func TestMapType(t *testing.T) {
 	assert.True(t, typ.Equals(&actual))
 }
 
-var (
-	NonParameterizedTypes = []iceberg.Type{
-		iceberg.PrimitiveTypes.Bool,
-		iceberg.PrimitiveTypes.Int32,
-		iceberg.PrimitiveTypes.Int64,
-		iceberg.PrimitiveTypes.Float32,
-		iceberg.PrimitiveTypes.Float64,
-		iceberg.PrimitiveTypes.Date,
-		iceberg.PrimitiveTypes.Time,
-		iceberg.PrimitiveTypes.Timestamp,
-		iceberg.PrimitiveTypes.TimestampTz,
-		iceberg.PrimitiveTypes.String,
-		iceberg.PrimitiveTypes.Binary,
-		iceberg.PrimitiveTypes.UUID,
-	}
-)
+var NonParameterizedTypes = []iceberg.Type{
+	iceberg.PrimitiveTypes.Bool,
+	iceberg.PrimitiveTypes.Int32,
+	iceberg.PrimitiveTypes.Int64,
+	iceberg.PrimitiveTypes.Float32,
+	iceberg.PrimitiveTypes.Float64,
+	iceberg.PrimitiveTypes.Date,
+	iceberg.PrimitiveTypes.Time,
+	iceberg.PrimitiveTypes.Timestamp,
+	iceberg.PrimitiveTypes.TimestampTz,
+	iceberg.PrimitiveTypes.String,
+	iceberg.PrimitiveTypes.Binary,
+	iceberg.PrimitiveTypes.UUID,
+}
 
 func TestNonParameterizedTypeEquality(t *testing.T) {
 	for i, in := range NonParameterizedTypes {
@@ -225,9 +223,12 @@ func TestTypeStrings(t *testing.T) {
 			},
 		}, "struct<1: required_field: required string (this is a doc), 2: optional_field: required int>"},
 		{&iceberg.ListType{
-			ElementID: 22, Element: iceberg.PrimitiveTypes.String}, "list<string>"},
-		{&iceberg.MapType{KeyID: 19, KeyType: iceberg.PrimitiveTypes.String, ValueID: 25, ValueType: iceberg.PrimitiveTypes.Float64},
-			"map<string, double>"},
+			ElementID: 22, Element: iceberg.PrimitiveTypes.String,
+		}, "list<string>"},
+		{
+			&iceberg.MapType{KeyID: 19, KeyType: iceberg.PrimitiveTypes.String, ValueID: 25, ValueType: iceberg.PrimitiveTypes.Float64},
+			"map<string, double>",
+		},
 	}
 
 	for _, tt := range tests {

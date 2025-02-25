@@ -105,7 +105,8 @@ func TestArrowToIceberg(t *testing.T) {
 				{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: "foo doc"},
 				{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 				{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool, Required: false},
-			}}, true, ""},
+			},
+		}, true, ""},
 		{arrow.ListOfField(arrow.Field{
 			Name:     "element",
 			Type:     arrow.PrimitiveTypes.Int32,
@@ -136,19 +137,27 @@ func TestArrowToIceberg(t *testing.T) {
 			Element:         iceberg.PrimitiveTypes.Int32,
 			ElementRequired: true,
 		}, false, ""},
-		{arrow.MapOfWithMetadata(arrow.PrimitiveTypes.Int32,
-			fieldIDMeta("1"),
-			arrow.BinaryTypes.String, fieldIDMeta("2")),
+		{
+			arrow.MapOfWithMetadata(arrow.PrimitiveTypes.Int32,
+				fieldIDMeta("1"),
+				arrow.BinaryTypes.String, fieldIDMeta("2")),
 			&iceberg.MapType{
 				KeyID: 1, KeyType: iceberg.PrimitiveTypes.Int32,
 				ValueID: 2, ValueType: iceberg.PrimitiveTypes.String, ValueRequired: false,
-			}, true, ""},
-		{&arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int32,
-			ValueType: arrow.BinaryTypes.String}, iceberg.PrimitiveTypes.String, false, ""},
-		{&arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int32,
-			ValueType: arrow.PrimitiveTypes.Int32}, iceberg.PrimitiveTypes.Int32, false, ""},
-		{&arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int64,
-			ValueType: arrow.PrimitiveTypes.Float64}, iceberg.PrimitiveTypes.Float64, false, ""},
+			}, true, "",
+		},
+		{&arrow.DictionaryType{
+			IndexType: arrow.PrimitiveTypes.Int32,
+			ValueType: arrow.BinaryTypes.String,
+		}, iceberg.PrimitiveTypes.String, false, ""},
+		{&arrow.DictionaryType{
+			IndexType: arrow.PrimitiveTypes.Int32,
+			ValueType: arrow.PrimitiveTypes.Int32,
+		}, iceberg.PrimitiveTypes.Int32, false, ""},
+		{&arrow.DictionaryType{
+			IndexType: arrow.PrimitiveTypes.Int64,
+			ValueType: arrow.PrimitiveTypes.Float64,
+		}, iceberg.PrimitiveTypes.Float64, false, ""},
 		{arrow.RunEndEncodedOf(arrow.PrimitiveTypes.Int32, arrow.BinaryTypes.String), iceberg.PrimitiveTypes.String, false, ""},
 		{arrow.RunEndEncodedOf(arrow.PrimitiveTypes.Int32, arrow.PrimitiveTypes.Float64), iceberg.PrimitiveTypes.Float64, false, ""},
 		{arrow.RunEndEncodedOf(arrow.PrimitiveTypes.Int32, arrow.PrimitiveTypes.Int16), iceberg.PrimitiveTypes.Int32, false, ""},
@@ -181,43 +190,62 @@ func TestArrowSchemaToIceberg(t *testing.T) {
 		err      string
 	}{
 		{"simple", arrow.NewSchema([]arrow.Field{
-			{Name: "foo", Nullable: true, Type: arrow.BinaryTypes.String,
-				Metadata: fieldIDMeta("1")},
-			{Name: "bar", Nullable: false, Type: arrow.PrimitiveTypes.Int32,
-				Metadata: fieldIDMeta("2")},
-			{Name: "baz", Nullable: true, Type: arrow.FixedWidthTypes.Boolean,
-				Metadata: fieldIDMeta("3")},
+			{
+				Name: "foo", Nullable: true, Type: arrow.BinaryTypes.String,
+				Metadata: fieldIDMeta("1"),
+			},
+			{
+				Name: "bar", Nullable: false, Type: arrow.PrimitiveTypes.Int32,
+				Metadata: fieldIDMeta("2"),
+			},
+			{
+				Name: "baz", Nullable: true, Type: arrow.FixedWidthTypes.Boolean,
+				Metadata: fieldIDMeta("3"),
+			},
 		}, nil), `table {
 	1: foo: optional string
 	2: bar: required int
 	3: baz: optional boolean
 }`, ""},
 		{"nested", arrow.NewSchema([]arrow.Field{
-			{Name: "qux", Nullable: false, Metadata: fieldIDMeta("4"),
+			{
+				Name: "qux", Nullable: false, Metadata: fieldIDMeta("4"),
 				Type: arrow.ListOfField(arrow.Field{
 					Name:     "element",
 					Type:     arrow.BinaryTypes.String,
 					Metadata: fieldIDMeta("5"),
-				})},
-			{Name: "quux", Nullable: false, Metadata: fieldIDMeta("6"),
+				}),
+			},
+			{
+				Name: "quux", Nullable: false, Metadata: fieldIDMeta("6"),
 				Type: arrow.MapOfWithMetadata(arrow.BinaryTypes.String, fieldIDMeta("7"),
 					arrow.MapOfWithMetadata(arrow.BinaryTypes.String, fieldIDMeta("9"),
-						arrow.PrimitiveTypes.Int32, fieldIDMeta("10")), fieldIDMeta("8"))},
-			{Name: "location", Nullable: false, Metadata: fieldIDMeta("11"),
+						arrow.PrimitiveTypes.Int32, fieldIDMeta("10")), fieldIDMeta("8")),
+			},
+			{
+				Name: "location", Nullable: false, Metadata: fieldIDMeta("11"),
 				Type: arrow.ListOfField(
 					arrow.Field{
 						Name: "element", Metadata: fieldIDMeta("12"),
 						Type: arrow.StructOf(
-							arrow.Field{Name: "latitude", Nullable: true,
-								Type: arrow.PrimitiveTypes.Float32, Metadata: fieldIDMeta("13")},
-							arrow.Field{Name: "longitude", Nullable: true,
-								Type: arrow.PrimitiveTypes.Float32, Metadata: fieldIDMeta("14")},
-						)})},
-			{Name: "person", Nullable: true, Metadata: fieldIDMeta("15"),
+							arrow.Field{
+								Name: "latitude", Nullable: true,
+								Type: arrow.PrimitiveTypes.Float32, Metadata: fieldIDMeta("13"),
+							},
+							arrow.Field{
+								Name: "longitude", Nullable: true,
+								Type: arrow.PrimitiveTypes.Float32, Metadata: fieldIDMeta("14"),
+							},
+						),
+					}),
+			},
+			{
+				Name: "person", Nullable: true, Metadata: fieldIDMeta("15"),
 				Type: arrow.StructOf(
 					arrow.Field{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true, Metadata: fieldIDMeta("16")},
 					arrow.Field{Name: "age", Type: arrow.PrimitiveTypes.Int32, Metadata: fieldIDMeta("17")},
-				)},
+				),
+			},
 		}, nil), `table {
 	4: qux: required list<string>
 	6: quux: required map<string, map<string, int>>
@@ -251,14 +279,19 @@ func makeID(v int) *int { return &v }
 var (
 	icebergSchemaNested = iceberg.NewSchema(0,
 		iceberg.NestedField{
-			ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: true},
+			ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: true,
+		},
 		iceberg.NestedField{
-			ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+			ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+		},
 		iceberg.NestedField{
-			ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool, Required: false},
+			ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool, Required: false,
+		},
 		iceberg.NestedField{
 			ID: 4, Name: "qux", Required: true, Type: &iceberg.ListType{
-				ElementID: 5, Element: iceberg.PrimitiveTypes.String, ElementRequired: false}},
+				ElementID: 5, Element: iceberg.PrimitiveTypes.String, ElementRequired: false,
+			},
+		},
 		iceberg.NestedField{
 			ID: 6, Name: "quux",
 			Type: &iceberg.MapType{
@@ -274,7 +307,8 @@ var (
 				},
 				ValueRequired: false,
 			},
-			Required: true},
+			Required: true,
+		},
 		iceberg.NestedField{
 			ID: 11, Name: "location", Type: &iceberg.ListType{
 				ElementID: 12, Element: &iceberg.StructType{
@@ -283,8 +317,10 @@ var (
 						{ID: 14, Name: "longitude", Type: iceberg.PrimitiveTypes.Float32, Required: true},
 					},
 				},
-				ElementRequired: false},
-			Required: true},
+				ElementRequired: false,
+			},
+			Required: true,
+		},
 		iceberg.NestedField{
 			ID:   15,
 			Name: "person",
@@ -365,8 +401,10 @@ func TestArrowSchemaWithNameMapping(t *testing.T) {
 			{FieldID: makeID(1), Names: []string{"foo"}},
 			{FieldID: makeID(2), Names: []string{"bar"}},
 			{FieldID: makeID(3), Names: []string{"baz"}},
-			{FieldID: makeID(4), Names: []string{"qux"},
-				Fields: []table.MappedField{{FieldID: makeID(5), Names: []string{"element"}}}},
+			{
+				FieldID: makeID(4), Names: []string{"qux"},
+				Fields: []table.MappedField{{FieldID: makeID(5), Names: []string{"element"}}},
+			},
 			{FieldID: makeID(6), Names: []string{"quux"}, Fields: []table.MappedField{
 				{FieldID: makeID(7), Names: []string{"key"}},
 				{FieldID: makeID(8), Names: []string{"value"}, Fields: []table.MappedField{
@@ -473,7 +511,6 @@ func ArrowRecordWithAllTimestampPrec(mem memory.Allocator) arrow.Record {
 			"timestamptz_s_0000": "2023-03-01T19:25:00Z"
 		}
 	]`))
-
 	if err != nil {
 		panic(err)
 	}

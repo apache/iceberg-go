@@ -32,11 +32,13 @@ type MockFS struct {
 
 func (m *MockFS) Open(name string) (io.File, error) {
 	args := m.Called(name)
+
 	return args.Get(0).(io.File), args.Error(1)
 }
 
 func (m *MockFS) Create(name string) (io.FileWriter, error) {
 	args := m.Called(name)
+
 	return args.Get(0).(io.FileWriter), args.Error(1)
 }
 
@@ -54,6 +56,7 @@ type MockFSReadFile struct {
 
 func (m *MockFSReadFile) ReadFile(name string) ([]byte, error) {
 	args := m.Called(name)
+
 	return args.Get(0).([]byte), args.Error(1)
 }
 
@@ -76,6 +79,7 @@ func (m *MockFile) Close() error {
 		return errors.New("already closed")
 	}
 	m.closed = true
+
 	return nil
 }
 
@@ -83,6 +87,7 @@ func (m *MockFile) ReadAt(p []byte, off int64) (n int, err error) {
 	if m.closed {
 		return 0, errors.New("already closed")
 	}
+
 	return m.Contents.ReadAt(p, off)
 }
 
@@ -90,5 +95,6 @@ func (m *MockFile) Seek(offset int64, whence int) (n int64, err error) {
 	if m.closed {
 		return 0, errors.New("already closed")
 	}
+
 	return m.Contents.Seek(offset, whence)
 }

@@ -108,6 +108,7 @@ func ToIdentifier(ident ...string) table.Identifier {
 		if ident[0] == "" {
 			return nil
 		}
+
 		return table.Identifier(strings.Split(ident[0], "."))
 	}
 
@@ -163,6 +164,7 @@ func checkForOverlap(removals []string, updates iceberg.Properties) error {
 	if len(overlap) > 0 {
 		return fmt.Errorf("conflict between removals and updates for keys: %v", overlap)
 	}
+
 	return nil
 }
 
@@ -196,5 +198,6 @@ func getUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals [
 		Updated: updated,
 		Missing: iceberg.Difference(removals, removed),
 	}
+
 	return updatedProps, summary, nil
 }

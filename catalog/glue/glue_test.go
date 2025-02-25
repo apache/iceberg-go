@@ -20,7 +20,6 @@ package glue
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"testing"
 
@@ -40,46 +39,55 @@ type mockGlueClient struct {
 
 func (m *mockGlueClient) CreateTable(ctx context.Context, params *glue.CreateTableInput, optFns ...func(*glue.Options)) (*glue.CreateTableOutput, error) {
 	args := m.Called(ctx, params, optFns)
+
 	return args.Get(0).(*glue.CreateTableOutput), args.Error(1)
 }
 
 func (m *mockGlueClient) GetTable(ctx context.Context, params *glue.GetTableInput, optFns ...func(*glue.Options)) (*glue.GetTableOutput, error) {
 	args := m.Called(ctx, params, optFns)
+
 	return args.Get(0).(*glue.GetTableOutput), args.Error(1)
 }
 
 func (m *mockGlueClient) GetTables(ctx context.Context, params *glue.GetTablesInput, optFns ...func(*glue.Options)) (*glue.GetTablesOutput, error) {
 	args := m.Called(ctx, params, optFns)
+
 	return args.Get(0).(*glue.GetTablesOutput), args.Error(1)
 }
 
 func (m *mockGlueClient) DeleteTable(ctx context.Context, params *glue.DeleteTableInput, optFns ...func(*glue.Options)) (*glue.DeleteTableOutput, error) {
 	args := m.Called(ctx, params, optFns)
+
 	return args.Get(0).(*glue.DeleteTableOutput), args.Error(1)
 }
 
 func (m *mockGlueClient) GetDatabase(ctx context.Context, params *glue.GetDatabaseInput, optFns ...func(*glue.Options)) (*glue.GetDatabaseOutput, error) {
 	args := m.Called(ctx, params, optFns)
+
 	return args.Get(0).(*glue.GetDatabaseOutput), args.Error(1)
 }
 
 func (m *mockGlueClient) GetDatabases(ctx context.Context, params *glue.GetDatabasesInput, optFns ...func(*glue.Options)) (*glue.GetDatabasesOutput, error) {
 	args := m.Called(ctx, params, optFns)
+
 	return args.Get(0).(*glue.GetDatabasesOutput), args.Error(1)
 }
 
 func (m *mockGlueClient) CreateDatabase(ctx context.Context, params *glue.CreateDatabaseInput, optFns ...func(*glue.Options)) (*glue.CreateDatabaseOutput, error) {
 	args := m.Called(ctx, params, optFns)
+
 	return args.Get(0).(*glue.CreateDatabaseOutput), args.Error(1)
 }
 
 func (m *mockGlueClient) DeleteDatabase(ctx context.Context, params *glue.DeleteDatabaseInput, optFns ...func(*glue.Options)) (*glue.DeleteDatabaseOutput, error) {
 	args := m.Called(ctx, params, optFns)
+
 	return args.Get(0).(*glue.DeleteDatabaseOutput), args.Error(1)
 }
 
 func (m *mockGlueClient) UpdateDatabase(ctx context.Context, params *glue.UpdateDatabaseInput, optFns ...func(*glue.Options)) (*glue.UpdateDatabaseOutput, error) {
 	args := m.Called(ctx, params, optFns)
+
 	return args.Get(0).(*glue.UpdateDatabaseOutput), args.Error(1)
 }
 
@@ -90,6 +98,7 @@ var testIcebergGlueTable1 = types.Table{
 		metadataLocationPropsKey: "s3://test-bucket/test_table/metadata/abc123-123.metadata.json",
 	},
 }
+
 var testIcebergGlueTable2 = types.Table{
 	Name: aws.String("test_table2"),
 	Parameters: map[string]string{
@@ -105,6 +114,7 @@ var testIcebergGlueTable3 = types.Table{
 		metadataLocationPropsKey: "s3://test-bucket/test_table/metadata/abc789-789.metadata.json",
 	},
 }
+
 var testIcebergGlueTable4 = types.Table{
 	Name: aws.String("test_table4"),
 	Parameters: map[string]string{
@@ -112,6 +122,7 @@ var testIcebergGlueTable4 = types.Table{
 		metadataLocationPropsKey: "s3://test-bucket/test_table/metadata/abc123-789.metadata.json",
 	},
 }
+
 var testIcebergGlueTable5 = types.Table{
 	Name: aws.String("test_table5"),
 	Parameters: map[string]string{
@@ -259,7 +270,7 @@ func TestGlueListTablesError(t *testing.T) {
 	mockGlueSvc.On("GetTables", mock.Anything, &glue.GetTablesInput{
 		DatabaseName: aws.String("test_database"),
 		NextToken:    aws.String("token1"),
-	}, mock.Anything).Return(&glue.GetTablesOutput{}, fmt.Errorf("token expired")).Once()
+	}, mock.Anything).Return(&glue.GetTablesOutput{}, errors.New("token expired")).Once()
 
 	glueCatalog := &Catalog{
 		glueSvc: mockGlueSvc,
@@ -272,6 +283,7 @@ func TestGlueListTablesError(t *testing.T) {
 	for tbl, err := range iter {
 		if err != nil {
 			lastErr = err
+
 			break
 		}
 		tbls = append(tbls, tbl)
@@ -284,6 +296,7 @@ func TestGlueListTablesError(t *testing.T) {
 
 	mockGlueSvc.AssertExpectations(t)
 }
+
 func TestGlueListNamespaces(t *testing.T) {
 	assert := require.New(t)
 

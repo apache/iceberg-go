@@ -346,6 +346,7 @@ func (r *RestCatalogSuite) TestListTablesPrefixed200() {
 	r.Require().NoError(lastErr)
 	r.Equal([]table.Identifier{{"examples", "fooshare"}}, tbls)
 }
+
 func (r *RestCatalogSuite) TestListTablesPagination() {
 	defaultPageSize := 20
 	namespace := "accounting"
@@ -428,6 +429,7 @@ func (r *RestCatalogSuite) TestListTablesPagination() {
 	}, tbls)
 	r.Require().NoError(lastErr)
 }
+
 func (r *RestCatalogSuite) TestListTablesPaginationErrorOnSubsequentPage() {
 	namespace := "accounting"
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables", func(w http.ResponseWriter, req *http.Request) {
@@ -454,6 +456,7 @@ func (r *RestCatalogSuite) TestListTablesPaginationErrorOnSubsequentPage() {
 				},
 				"next-page-token": "token1",
 			})
+
 			return
 		}
 
@@ -467,6 +470,7 @@ func (r *RestCatalogSuite) TestListTablesPaginationErrorOnSubsequentPage() {
 					"code":    404,
 				},
 			})
+
 			return
 		}
 
@@ -482,6 +486,7 @@ func (r *RestCatalogSuite) TestListTablesPaginationErrorOnSubsequentPage() {
 	for tbl, err := range iter {
 		if err != nil {
 			lastErr = err
+
 			break
 		}
 		tbls = append(tbls, tbl)
@@ -497,6 +502,7 @@ func (r *RestCatalogSuite) TestListTablesPaginationErrorOnSubsequentPage() {
 	r.Error(lastErr)
 	r.ErrorContains(lastErr, "Token expired or invalid")
 }
+
 func (r *RestCatalogSuite) TestListTables404() {
 	namespace := "examples"
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables", func(w http.ResponseWriter, req *http.Request) {
@@ -1690,6 +1696,7 @@ func (r *RestCatalogSuite) TestListViewsPaginationErrorOnSubsequentPage() {
 				},
 				"next-page-token": "token1",
 			})
+
 			return
 		}
 
@@ -1703,6 +1710,7 @@ func (r *RestCatalogSuite) TestListViewsPaginationErrorOnSubsequentPage() {
 					"code":    404,
 				},
 			})
+
 			return
 		}
 
@@ -1718,6 +1726,7 @@ func (r *RestCatalogSuite) TestListViewsPaginationErrorOnSubsequentPage() {
 	for view, err := range iter {
 		if err != nil {
 			lastErr = err
+
 			break
 		}
 		views = append(views, view)

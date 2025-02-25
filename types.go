@@ -41,6 +41,7 @@ func (p Properties) Get(key, defVal string) string {
 	if v, ok := p[key]; ok {
 		return v
 	}
+
 	return defVal
 }
 
@@ -50,8 +51,10 @@ func (p Properties) GetBool(key string, defVal bool) bool {
 		if err != nil {
 			return defVal
 		}
+
 		return b
 	}
+
 	return defVal
 }
 
@@ -89,6 +92,7 @@ func (t *typeIFace) MarshalJSON() ([]byte, error) {
 	if nested, ok := t.Type.(NestedType); ok {
 		return json.Marshal(nested)
 	}
+
 	return []byte(`"` + t.Type.Type() + `"`), nil
 }
 
@@ -144,6 +148,7 @@ func (t *typeIFace) UnmarshalJSON(b []byte) error {
 				return fmt.Errorf("%w: unrecognized field type", ErrInvalidSchema)
 			}
 		}
+
 		return nil
 	}
 
@@ -183,6 +188,7 @@ func optOrReq(required bool) string {
 	if required {
 		return "required"
 	}
+
 	return "optional"
 }
 
@@ -208,6 +214,7 @@ func (n *NestedField) Equals(other NestedField) bool {
 
 func (n NestedField) MarshalJSON() ([]byte, error) {
 	type Alias NestedField
+
 	return json.Marshal(struct {
 		Type *typeIFace `json:"type"`
 		*Alias
@@ -251,6 +258,7 @@ func (s *StructType) Fields() []NestedField { return s.FieldList }
 
 func (s *StructType) MarshalJSON() ([]byte, error) {
 	type Alias StructType
+
 	return json.Marshal(struct {
 		Type string `json:"type"`
 		*Alias
@@ -292,6 +300,7 @@ type ListType struct {
 
 func (l *ListType) MarshalJSON() ([]byte, error) {
 	type Alias ListType
+
 	return json.Marshal(struct {
 		Type string `json:"type"`
 		*Alias
@@ -339,6 +348,7 @@ func (l *ListType) UnmarshalJSON(b []byte) error {
 	l.ElementID = aux.ID
 	l.Element = aux.Elem.Type
 	l.ElementRequired = aux.Req
+
 	return nil
 }
 
@@ -352,14 +362,17 @@ type MapType struct {
 
 func (m *MapType) MarshalJSON() ([]byte, error) {
 	type Alias MapType
+
 	return json.Marshal(struct {
 		Type string `json:"type"`
 		*Alias
 		KeyType   *typeIFace `json:"key"`
 		ValueType *typeIFace `json:"value"`
-	}{Type: m.Type(), Alias: (*Alias)(m),
+	}{
+		Type: m.Type(), Alias: (*Alias)(m),
 		KeyType:   &typeIFace{m.KeyType},
-		ValueType: &typeIFace{m.ValueType}})
+		ValueType: &typeIFace{m.ValueType},
+	})
 }
 
 func (m *MapType) Equals(other Type) bool {
@@ -421,6 +434,7 @@ func (m *MapType) UnmarshalJSON(b []byte) error {
 	} else {
 		m.ValueRequired = *aux.ValueReq
 	}
+
 	return nil
 }
 
@@ -485,6 +499,7 @@ type BooleanType struct{}
 
 func (BooleanType) Equals(other Type) bool {
 	_, ok := other.(BooleanType)
+
 	return ok
 }
 
@@ -497,6 +512,7 @@ type Int32Type struct{}
 
 func (Int32Type) Equals(other Type) bool {
 	_, ok := other.(Int32Type)
+
 	return ok
 }
 
@@ -509,6 +525,7 @@ type Int64Type struct{}
 
 func (Int64Type) Equals(other Type) bool {
 	_, ok := other.(Int64Type)
+
 	return ok
 }
 
@@ -521,6 +538,7 @@ type Float32Type struct{}
 
 func (Float32Type) Equals(other Type) bool {
 	_, ok := other.(Float32Type)
+
 	return ok
 }
 
@@ -533,6 +551,7 @@ type Float64Type struct{}
 
 func (Float64Type) Equals(other Type) bool {
 	_, ok := other.(Float64Type)
+
 	return ok
 }
 
@@ -553,6 +572,7 @@ type DateType struct{}
 
 func (DateType) Equals(other Type) bool {
 	_, ok := other.(DateType)
+
 	return ok
 }
 
@@ -571,6 +591,7 @@ type TimeType struct{}
 
 func (TimeType) Equals(other Type) bool {
 	_, ok := other.(TimeType)
+
 	return ok
 }
 
@@ -586,6 +607,7 @@ func (t Timestamp) ToTime() time.Time {
 
 func (t Timestamp) ToDate() Date {
 	tm := time.UnixMicro(int64(t)).UTC()
+
 	return Date(tm.Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
 }
 
@@ -595,6 +617,7 @@ type TimestampType struct{}
 
 func (TimestampType) Equals(other Type) bool {
 	_, ok := other.(TimestampType)
+
 	return ok
 }
 
@@ -608,6 +631,7 @@ type TimestampTzType struct{}
 
 func (TimestampTzType) Equals(other Type) bool {
 	_, ok := other.(TimestampTzType)
+
 	return ok
 }
 
@@ -619,6 +643,7 @@ type StringType struct{}
 
 func (StringType) Equals(other Type) bool {
 	_, ok := other.(StringType)
+
 	return ok
 }
 
@@ -630,6 +655,7 @@ type UUIDType struct{}
 
 func (UUIDType) Equals(other Type) bool {
 	_, ok := other.(UUIDType)
+
 	return ok
 }
 
@@ -641,6 +667,7 @@ type BinaryType struct{}
 
 func (BinaryType) Equals(other Type) bool {
 	_, ok := other.(BinaryType)
+
 	return ok
 }
 
@@ -702,6 +729,7 @@ func PromoteType(fileType, readType Type) (Type, error) {
 			if t.precision <= rt.precision && t.scale <= rt.scale {
 				return readType, nil
 			}
+
 			return nil, fmt.Errorf("%w: cannot reduce precision from %s to %s",
 				ErrResolve, fileType, readType)
 		}

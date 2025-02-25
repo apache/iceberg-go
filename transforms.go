@@ -47,6 +47,7 @@ func ParseTransform(s string) (Transform, error) {
 		}
 
 		n, _ := strconv.Atoi(matches[1])
+
 		return BucketTransform{NumBuckets: n}, nil
 	case strings.HasPrefix(s, "truncate"):
 		matches := regexFromBrackets.FindStringSubmatch(s)
@@ -55,6 +56,7 @@ func ParseTransform(s string) (Transform, error) {
 		}
 
 		n, _ := strconv.Atoi(matches[1])
+
 		return TruncateTransform{Width: n}, nil
 	default:
 		switch s {
@@ -105,6 +107,7 @@ func (IdentityTransform) ResultType(t Type) Type { return t }
 
 func (IdentityTransform) Equals(other Transform) bool {
 	_, ok := other.(IdentityTransform)
+
 	return ok
 }
 
@@ -161,6 +164,7 @@ func (VoidTransform) ResultType(t Type) Type { return t }
 
 func (VoidTransform) Equals(other Transform) bool {
 	_, ok := other.(VoidTransform)
+
 	return ok
 }
 
@@ -198,6 +202,7 @@ func hashHelperInt[T ~int32 | ~int64](v any) uint32 {
 	)
 
 	binary.LittleEndian.PutUint64(b, val)
+
 	return murmur3.Sum32(b)
 }
 
@@ -242,7 +247,8 @@ func (t BucketTransform) Apply(value Optional[Literal]) Optional[Literal] {
 
 	return Optional[Literal]{
 		Valid: true,
-		Val:   Int32Literal((int32(hash) & math.MaxInt32) % int32(t.NumBuckets))}
+		Val:   Int32Literal((int32(hash) & math.MaxInt32) % int32(t.NumBuckets)),
+	}
 }
 
 func (t BucketTransform) Transformer(src Type) func(any) Optional[int32] {
@@ -264,6 +270,7 @@ func (t BucketTransform) Transformer(src Type) func(any) Optional[int32] {
 	case DecimalType:
 		h = func(v any) uint32 {
 			b, _ := DecimalLiteral(v.(Decimal)).MarshalBinary()
+
 			return murmur3.Sum32(b)
 		}
 	case StringType, FixedType, BinaryType:
@@ -273,6 +280,7 @@ func (t BucketTransform) Transformer(src Type) func(any) Optional[int32] {
 			}
 
 			str := v.(string)
+
 			return murmur3.Sum32(unsafe.Slice(unsafe.StringData(str), len(str)))
 		}
 	case UUIDType:
@@ -282,6 +290,7 @@ func (t BucketTransform) Transformer(src Type) func(any) Optional[int32] {
 			}
 
 			u := v.(uuid.UUID)
+
 			return murmur3.Sum32(u[:])
 		}
 	}
@@ -293,7 +302,8 @@ func (t BucketTransform) Transformer(src Type) func(any) Optional[int32] {
 
 		return Optional[int32]{
 			Valid: true,
-			Val:   int32((int32(h(v)) & math.MaxInt32) % int32(t.NumBuckets))}
+			Val:   int32((int32(h(v)) & math.MaxInt32) % int32(t.NumBuckets)),
+		}
 	}
 }
 
@@ -318,6 +328,7 @@ func (t BucketTransform) Project(name string, pred BoundPredicate) (UnboundPredi
 		if p.Op() != OpEQ {
 			break
 		}
+
 		return p.AsUnbound(Reference(name), transformLiteral(transformer, p.Literal())), nil
 	case BoundSetPredicate:
 		if p.Op() != OpIn {
@@ -361,6 +372,7 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 			}
 
 			val := v.(int32)
+
 			return val - (val % int32(t.Width))
 		}, nil
 	case Int64Type:
@@ -370,6 +382,7 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 			}
 
 			val := v.(int64)
+
 			return val - (val % int64(t.Width))
 		}, nil
 	case StringType, BinaryType:
@@ -385,6 +398,7 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 		}, nil
 	case DecimalType:
 		bigWidth := big.NewInt(int64(t.Width))
+
 		return func(v any) any {
 			if v == nil {
 				return nil
@@ -396,6 +410,7 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 			applied := (&big.Int{}).Mod(unscaled, bigWidth)
 			applied.Add(applied, bigWidth).Mod(applied, bigWidth)
 			val.Val = decimal128.FromBigInt(unscaled.Sub(unscaled, applied))
+
 			return val
 		}, nil
 	}
@@ -538,6 +553,7 @@ func (YearTransform) ResultType(Type) Type { return PrimitiveTypes.Int32 }
 
 func (YearTransform) Equals(other Transform) bool {
 	_, ok := other.(YearTransform)
+
 	return ok
 }
 
@@ -614,6 +630,7 @@ func (MonthTransform) ResultType(Type) Type { return PrimitiveTypes.Int32 }
 
 func (MonthTransform) Equals(other Transform) bool {
 	_, ok := other.(MonthTransform)
+
 	return ok
 }
 
@@ -626,11 +643,11 @@ func (MonthTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 			}
 
 			d := v.(Date).ToTime()
+
 			return Optional[int32]{
 				Valid: true,
 				Val:   int32((d.Year()-epochTM.Year())*12 + (int(d.Month()) - int(epochTM.Month()))),
 			}
-
 		}, nil
 	case TimestampType, TimestampTzType:
 		return func(v any) Optional[int32] {
@@ -639,11 +656,11 @@ func (MonthTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 			}
 
 			d := v.(Timestamp).ToTime()
+
 			return Optional[int32]{
 				Valid: true,
 				Val:   int32((d.Year()-epochTM.Year())*12 + (int(d.Month()) - int(epochTM.Month()))),
 			}
-
 		}, nil
 
 	}
@@ -669,6 +686,7 @@ func (MonthTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 
 	out.Valid = true
 	out.Val = Int32Literal(int32((tm.Year()-epochTM.Year())*12 + (int(tm.Month()) - int(epochTM.Month()))))
+
 	return
 }
 
@@ -699,6 +717,7 @@ func (DayTransform) ResultType(Type) Type { return PrimitiveTypes.Date }
 
 func (DayTransform) Equals(other Transform) bool {
 	_, ok := other.(DayTransform)
+
 	return ok
 }
 
@@ -743,6 +762,7 @@ func (DayTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	case TimestampLiteral:
 		out.Valid, out.Val = true, Int32Literal(Timestamp(v).ToDate())
 	}
+
 	return
 }
 
@@ -773,6 +793,7 @@ func (HourTransform) ResultType(Type) Type { return PrimitiveTypes.Int32 }
 
 func (HourTransform) Equals(other Transform) bool {
 	_, ok := other.(HourTransform)
+
 	return ok
 }
 
@@ -780,6 +801,7 @@ func (HourTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 	switch src.(type) {
 	case TimestampType, TimestampTzType:
 		const factor = int64(time.Hour / time.Microsecond)
+
 		return func(v any) Optional[int32] {
 			if v == nil {
 				return Optional[int32]{}
@@ -887,6 +909,7 @@ func wrapTransformFn[T LiteralType](fn func(any) any) func(any) Optional[T] {
 		if out == nil {
 			return Optional[T]{}
 		}
+
 		return Optional[T]{Valid: true, Val: out.(T)}
 	}
 }

@@ -49,6 +49,7 @@ func ValidOperation(s string) (Operation, error) {
 	case "append", "replace", "overwrite", "delete":
 		return Operation(s), nil
 	}
+
 	return "", fmt.Errorf("%w: found '%s'", ErrInvalidOperation, s)
 }
 
@@ -68,6 +69,7 @@ func (s *Summary) String() string {
 		data, _ := json.Marshal(s.Properties)
 		out += ", " + string(data)
 	}
+
 	return out
 }
 
@@ -108,6 +110,7 @@ func (s *Summary) UnmarshalJSON(b []byte) (err error) {
 
 	delete(alias, operationKey)
 	s.Properties = alias
+
 	return nil
 }
 
@@ -134,9 +137,7 @@ type Snapshot struct {
 }
 
 func (s Snapshot) String() string {
-	var (
-		op, parent, schema string
-	)
+	var op, parent, schema string
 
 	if s.Summary != nil {
 		op = s.Summary.String() + ": "
@@ -147,6 +148,7 @@ func (s Snapshot) String() string {
 	if s.SchemaID != nil {
 		schema = ", schema_id=" + strconv.Itoa(*s.SchemaID)
 	}
+
 	return fmt.Sprintf("%sid=%d%s%s, sequence_number=%d, timestamp_ms=%d, manifest_list=%s",
 		op, s.SnapshotID, parent, schema, s.SequenceNumber, s.TimestampMs, s.ManifestList)
 }
@@ -179,6 +181,7 @@ func (s Snapshot) Manifests(fio io.IO) ([]iceberg.ManifestFile, error) {
 			return nil, fmt.Errorf("could not open manifest file: %w", err)
 		}
 		defer f.Close()
+
 		return iceberg.ReadManifestList(f)
 	}
 

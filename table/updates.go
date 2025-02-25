@@ -68,6 +68,7 @@ func NewAssignUUIDUpdate(uuid uuid.UUID) Update {
 
 func (u *assignUUIDUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.SetUUID(u.UUID)
+
 	return err
 }
 
@@ -87,6 +88,7 @@ func NewUpgradeFormatVersionUpdate(formatVersion int) Update {
 
 func (u *upgradeFormatVersionUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.SetFormatVersion(u.FormatVersion)
+
 	return err
 }
 
@@ -111,6 +113,7 @@ func NewAddSchemaUpdate(schema *iceberg.Schema, lastColumnID int, initial bool) 
 
 func (u *addSchemaUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.AddSchema(u.Schema, u.LastColumnID, u.initial)
+
 	return err
 }
 
@@ -130,6 +133,7 @@ func NewSetCurrentSchemaUpdate(id int) Update {
 
 func (u *setCurrentSchemaUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.SetCurrentSchemaID(u.SchemaID)
+
 	return err
 }
 
@@ -152,6 +156,7 @@ func NewAddPartitionSpecUpdate(spec *iceberg.PartitionSpec, initial bool) Update
 
 func (u *addPartitionSpecUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.AddPartitionSpec(u.Spec, u.initial)
+
 	return err
 }
 
@@ -171,6 +176,7 @@ func NewSetDefaultSpecUpdate(id int) Update {
 
 func (u *setDefaultSpecUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.SetDefaultSpecID(u.SpecID)
+
 	return err
 }
 
@@ -193,6 +199,7 @@ func NewAddSortOrderUpdate(sortOrder *SortOrder, initial bool) Update {
 
 func (u *addSortOrderUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.AddSortOrder(u.SortOrder, u.initial)
+
 	return err
 }
 
@@ -212,6 +219,7 @@ func NewSetDefaultSortOrderUpdate(id int) Update {
 
 func (u *setDefaultSortOrderUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.SetDefaultSortOrderID(u.SortOrderID)
+
 	return err
 }
 
@@ -230,6 +238,7 @@ func NewAddSnapshotUpdate(snapshot *Snapshot) Update {
 
 func (u *addSnapshotUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.AddSnapshot(u.Snapshot)
+
 	return err
 }
 
@@ -282,6 +291,7 @@ func (u *setSnapshotRefUpdate) Apply(builder *MetadataBuilder) error {
 		u.RefType,
 		opts...,
 	)
+
 	return err
 }
 
@@ -300,6 +310,7 @@ func NewSetLocationUpdate(loc string) Update {
 
 func (u *setLocationUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.SetLoc(u.Location)
+
 	return err
 }
 
@@ -319,6 +330,7 @@ func NewSetPropertiesUpdate(updates iceberg.Properties) *setPropertiesUpdate {
 
 func (u *setPropertiesUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.SetProperties(u.Updates)
+
 	return err
 }
 
@@ -339,6 +351,7 @@ func NewRemovePropertiesUpdate(removals []string) Update {
 
 func (u *removePropertiesUpdate) Apply(builder *MetadataBuilder) error {
 	_, err := builder.RemoveProperties(u.Removals)
+
 	return err
 }
 

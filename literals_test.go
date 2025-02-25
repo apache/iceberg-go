@@ -75,12 +75,18 @@ func TestIntToDecimalConversion(t *testing.T) {
 		ty  iceberg.DecimalType
 		val iceberg.Decimal
 	}{
-		{iceberg.DecimalTypeOf(9, 0),
-			iceberg.Decimal{Val: decimal128.FromI64(34), Scale: 0}},
-		{iceberg.DecimalTypeOf(9, 2),
-			iceberg.Decimal{Val: decimal128.FromI64(3400), Scale: 2}},
-		{iceberg.DecimalTypeOf(9, 4),
-			iceberg.Decimal{Val: decimal128.FromI64(340000), Scale: 4}},
+		{
+			iceberg.DecimalTypeOf(9, 0),
+			iceberg.Decimal{Val: decimal128.FromI64(34), Scale: 0},
+		},
+		{
+			iceberg.DecimalTypeOf(9, 2),
+			iceberg.Decimal{Val: decimal128.FromI64(3400), Scale: 2},
+		},
+		{
+			iceberg.DecimalTypeOf(9, 4),
+			iceberg.Decimal{Val: decimal128.FromI64(340000), Scale: 4},
+		},
 	}
 
 	for _, tt := range tests {
@@ -128,12 +134,18 @@ func TestInt64Conversions(t *testing.T) {
 		{iceberg.Int64Literal(19709), iceberg.NewLiteral(iceberg.Date(19709))},
 		{iceberg.Int64Literal(51661919000), iceberg.NewLiteral(iceberg.Time(51661919000))},
 		{iceberg.Int64Literal(1647305201), iceberg.NewLiteral(iceberg.Timestamp(1647305201))},
-		{iceberg.Int64Literal(34),
-			iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(34), Scale: 0})},
-		{iceberg.Int64Literal(34),
-			iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(3400), Scale: 2})},
-		{iceberg.Int64Literal(34),
-			iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(340000), Scale: 4})},
+		{
+			iceberg.Int64Literal(34),
+			iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(34), Scale: 0}),
+		},
+		{
+			iceberg.Int64Literal(34),
+			iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(3400), Scale: 2}),
+		},
+		{
+			iceberg.Int64Literal(34),
+			iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(340000), Scale: 4}),
+		},
 	}
 
 	for _, tt := range tests {
@@ -171,12 +183,18 @@ func TestFloatConversions(t *testing.T) {
 		to   iceberg.Literal
 	}{
 		{iceberg.Float32Literal(34.5), iceberg.NewLiteral(float64(34.5))},
-		{iceberg.Float32Literal(34.56),
-			iceberg.NewLiteral(iceberg.Decimal{Val: n1, Scale: 1})},
-		{iceberg.Float32Literal(34.56),
-			iceberg.NewLiteral(iceberg.Decimal{Val: n2, Scale: 2})},
-		{iceberg.Float32Literal(34.56),
-			iceberg.NewLiteral(iceberg.Decimal{Val: n3, Scale: 4})},
+		{
+			iceberg.Float32Literal(34.56),
+			iceberg.NewLiteral(iceberg.Decimal{Val: n1, Scale: 1}),
+		},
+		{
+			iceberg.Float32Literal(34.56),
+			iceberg.NewLiteral(iceberg.Decimal{Val: n2, Scale: 2}),
+		},
+		{
+			iceberg.Float32Literal(34.56),
+			iceberg.NewLiteral(iceberg.Decimal{Val: n3, Scale: 4}),
+		},
 	}
 
 	for _, tt := range tests {
@@ -198,12 +216,18 @@ func TestFloat64Conversions(t *testing.T) {
 		to   iceberg.Literal
 	}{
 		{iceberg.Float64Literal(34.5), iceberg.NewLiteral(float32(34.5))},
-		{iceberg.Float64Literal(34.56),
-			iceberg.NewLiteral(iceberg.Decimal{Val: n1, Scale: 1})},
-		{iceberg.Float64Literal(34.56),
-			iceberg.NewLiteral(iceberg.Decimal{Val: n2, Scale: 2})},
-		{iceberg.Float64Literal(34.56),
-			iceberg.NewLiteral(iceberg.Decimal{Val: n3, Scale: 4})},
+		{
+			iceberg.Float64Literal(34.56),
+			iceberg.NewLiteral(iceberg.Decimal{Val: n1, Scale: 1}),
+		},
+		{
+			iceberg.Float64Literal(34.56),
+			iceberg.NewLiteral(iceberg.Decimal{Val: n2, Scale: 2}),
+		},
+		{
+			iceberg.Float64Literal(34.56),
+			iceberg.NewLiteral(iceberg.Decimal{Val: n3, Scale: 4}),
+		},
 	}
 
 	for _, tt := range tests {
@@ -354,15 +378,23 @@ func TestStringLiteralConversion(t *testing.T) {
 		from iceberg.StringLiteral
 		to   iceberg.Literal
 	}{
-		{iceberg.StringLiteral("2017-08-18"),
-			iceberg.NewLiteral(iceberg.Date(arrow.Date32FromTime(tm)))},
-		{iceberg.StringLiteral("14:21:01.919"),
-			iceberg.NewLiteral(iceberg.Time(51661919000))},
-		{iceberg.StringLiteral("2017-08-18T14:21:01.919234"),
-			iceberg.NewLiteral(iceberg.Timestamp(1503066061919234))},
+		{
+			iceberg.StringLiteral("2017-08-18"),
+			iceberg.NewLiteral(iceberg.Date(arrow.Date32FromTime(tm))),
+		},
+		{
+			iceberg.StringLiteral("14:21:01.919"),
+			iceberg.NewLiteral(iceberg.Time(51661919000)),
+		},
+		{
+			iceberg.StringLiteral("2017-08-18T14:21:01.919234"),
+			iceberg.NewLiteral(iceberg.Timestamp(1503066061919234)),
+		},
 		{iceberg.StringLiteral(expected.String()), iceberg.NewLiteral(expected)},
-		{iceberg.StringLiteral("34.560"),
-			iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(34560), Scale: 3})},
+		{
+			iceberg.StringLiteral("34.560"),
+			iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(34560), Scale: 3}),
+		},
 		{iceberg.StringLiteral("true"), iceberg.NewLiteral(true)},
 		{iceberg.StringLiteral("True"), iceberg.NewLiteral(true)},
 		{iceberg.StringLiteral("false"), iceberg.NewLiteral(false)},
@@ -411,11 +443,15 @@ func TestLiteralIdentityConversions(t *testing.T) {
 		{iceberg.NewLiteral(int64(340000000)), iceberg.PrimitiveTypes.Int64},
 		{iceberg.NewLiteral(float32(34.11)), iceberg.PrimitiveTypes.Float32},
 		{iceberg.NewLiteral(float64(3.5028235e38)), iceberg.PrimitiveTypes.Float64},
-		{iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(3455), Scale: 2}),
-			iceberg.DecimalTypeOf(9, 2)},
+		{
+			iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(3455), Scale: 2}),
+			iceberg.DecimalTypeOf(9, 2),
+		},
 		{iceberg.NewLiteral(iceberg.Date(19079)), iceberg.PrimitiveTypes.Date},
-		{iceberg.NewLiteral(iceberg.Timestamp(1503091261919234)),
-			iceberg.PrimitiveTypes.Timestamp},
+		{
+			iceberg.NewLiteral(iceberg.Timestamp(1503091261919234)),
+			iceberg.PrimitiveTypes.Timestamp,
+		},
 		{iceberg.NewLiteral("abc"), iceberg.PrimitiveTypes.String},
 		{iceberg.NewLiteral(uuid.New()), iceberg.PrimitiveTypes.UUID},
 		{fixedLit, iceberg.FixedTypeOf(3)},
@@ -737,38 +773,73 @@ func TestUnmarshalBinary(t *testing.T) {
 		{iceberg.PrimitiveTypes.Bool, []byte{0x0}, iceberg.BoolLiteral(false)},
 		{iceberg.PrimitiveTypes.Bool, []byte{0x1}, iceberg.BoolLiteral(true)},
 		{iceberg.PrimitiveTypes.Int32, []byte{0xd2, 0x04, 0x00, 0x00}, iceberg.Int32Literal(1234)},
-		{iceberg.PrimitiveTypes.Int64, []byte{0xd2, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-			iceberg.Int64Literal(1234)},
+		{
+			iceberg.PrimitiveTypes.Int64,
+			[]byte{0xd2, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			iceberg.Int64Literal(1234),
+		},
 		{iceberg.PrimitiveTypes.Float32, []byte{0x00, 0x00, 0x90, 0xc0}, iceberg.Float32Literal(-4.5)},
-		{iceberg.PrimitiveTypes.Float64, []byte{0x8d, 0x97, 0x6e, 0x12, 0x83, 0xc0, 0xf3, 0x3f},
-			iceberg.Float64Literal(1.2345)},
+		{
+			iceberg.PrimitiveTypes.Float64,
+			[]byte{0x8d, 0x97, 0x6e, 0x12, 0x83, 0xc0, 0xf3, 0x3f},
+			iceberg.Float64Literal(1.2345),
+		},
 		{iceberg.PrimitiveTypes.Date, []byte{0xe8, 0x03, 0x00, 0x00}, iceberg.DateLiteral(1000)},
 		{iceberg.PrimitiveTypes.Date, []byte{0xd2, 0x04, 0x00, 0x00}, iceberg.DateLiteral(1234)},
-		{iceberg.PrimitiveTypes.Time, []byte{0x10, 0x27, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-			iceberg.TimeLiteral(10000)},
-		{iceberg.PrimitiveTypes.Time, []byte{0x00, 0xe8, 0x76, 0x48, 0x17, 0x00, 0x00, 0x00},
-			iceberg.TimeLiteral(100000000000)},
-		{iceberg.PrimitiveTypes.TimestampTz, []byte{0x80, 0x1a, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00},
-			iceberg.TimestampLiteral(400000)},
-		{iceberg.PrimitiveTypes.TimestampTz, []byte{0x00, 0xe8, 0x76, 0x48, 0x17, 0x00, 0x00, 0x00},
-			iceberg.TimestampLiteral(100000000000)},
-		{iceberg.PrimitiveTypes.Timestamp, []byte{0x80, 0x1a, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00},
-			iceberg.TimestampLiteral(400000)},
-		{iceberg.PrimitiveTypes.Timestamp, []byte{0x00, 0xe8, 0x76, 0x48, 0x17, 0x00, 0x00, 0x00},
-			iceberg.TimestampLiteral(100000000000)},
+		{
+			iceberg.PrimitiveTypes.Time,
+			[]byte{0x10, 0x27, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			iceberg.TimeLiteral(10000),
+		},
+		{
+			iceberg.PrimitiveTypes.Time,
+			[]byte{0x00, 0xe8, 0x76, 0x48, 0x17, 0x00, 0x00, 0x00},
+			iceberg.TimeLiteral(100000000000),
+		},
+		{
+			iceberg.PrimitiveTypes.TimestampTz,
+			[]byte{0x80, 0x1a, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00},
+			iceberg.TimestampLiteral(400000),
+		},
+		{
+			iceberg.PrimitiveTypes.TimestampTz,
+			[]byte{0x00, 0xe8, 0x76, 0x48, 0x17, 0x00, 0x00, 0x00},
+			iceberg.TimestampLiteral(100000000000),
+		},
+		{
+			iceberg.PrimitiveTypes.Timestamp,
+			[]byte{0x80, 0x1a, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00},
+			iceberg.TimestampLiteral(400000),
+		},
+		{
+			iceberg.PrimitiveTypes.Timestamp,
+			[]byte{0x00, 0xe8, 0x76, 0x48, 0x17, 0x00, 0x00, 0x00},
+			iceberg.TimestampLiteral(100000000000),
+		},
 		{iceberg.PrimitiveTypes.String, []byte("ABC"), iceberg.StringLiteral("ABC")},
 		{iceberg.PrimitiveTypes.String, []byte("foo"), iceberg.StringLiteral("foo")},
-		{iceberg.PrimitiveTypes.UUID,
+		{
+			iceberg.PrimitiveTypes.UUID,
 			[]byte{0xf7, 0x9c, 0x3e, 0x09, 0x67, 0x7c, 0x4b, 0xbd, 0xa4, 0x79, 0x3f, 0x34, 0x9c, 0xb7, 0x85, 0xe7},
-			iceberg.UUIDLiteral(uuid.UUID{0xf7, 0x9c, 0x3e, 0x09, 0x67, 0x7c, 0x4b, 0xbd, 0xa4, 0x79, 0x3f, 0x34, 0x9c, 0xb7, 0x85, 0xe7})},
+			iceberg.UUIDLiteral(uuid.UUID{0xf7, 0x9c, 0x3e, 0x09, 0x67, 0x7c, 0x4b, 0xbd, 0xa4, 0x79, 0x3f, 0x34, 0x9c, 0xb7, 0x85, 0xe7}),
+		},
 		{iceberg.FixedTypeOf(3), []byte("foo"), iceberg.FixedLiteral([]byte("foo"))},
 		{iceberg.PrimitiveTypes.Binary, []byte("foo"), iceberg.BinaryLiteral([]byte("foo"))},
-		{iceberg.DecimalTypeOf(5, 2), []byte{0x30, 0x39},
-			iceberg.DecimalLiteral{Scale: 2, Val: decimal128.FromU64(12345)}},
-		{iceberg.DecimalTypeOf(7, 4), []byte{0x12, 0xd6, 0x87},
-			iceberg.DecimalLiteral{Scale: 4, Val: decimal128.FromU64(1234567)}},
-		{iceberg.DecimalTypeOf(7, 4), []byte{0xff, 0xed, 0x29, 0x79},
-			iceberg.DecimalLiteral{Scale: 4, Val: decimal128.FromI64(-1234567)}},
+		{
+			iceberg.DecimalTypeOf(5, 2),
+			[]byte{0x30, 0x39},
+			iceberg.DecimalLiteral{Scale: 2, Val: decimal128.FromU64(12345)},
+		},
+		{
+			iceberg.DecimalTypeOf(7, 4),
+			[]byte{0x12, 0xd6, 0x87},
+			iceberg.DecimalLiteral{Scale: 4, Val: decimal128.FromU64(1234567)},
+		},
+		{
+			iceberg.DecimalTypeOf(7, 4),
+			[]byte{0xff, 0xed, 0x29, 0x79},
+			iceberg.DecimalLiteral{Scale: 4, Val: decimal128.FromI64(-1234567)},
+		},
 	}
 
 	for _, tt := range tests {
@@ -790,45 +861,80 @@ func TestRoundTripLiteralBinary(t *testing.T) {
 		{iceberg.PrimitiveTypes.Bool, []byte{0x0}, iceberg.BoolLiteral(false)},
 		{iceberg.PrimitiveTypes.Bool, []byte{0x1}, iceberg.BoolLiteral(true)},
 		{iceberg.PrimitiveTypes.Int32, []byte{0xd2, 0x04, 0x00, 0x00}, iceberg.Int32Literal(1234)},
-		{iceberg.PrimitiveTypes.Int64, []byte{0xd2, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-			iceberg.Int64Literal(1234)},
+		{
+			iceberg.PrimitiveTypes.Int64,
+			[]byte{0xd2, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			iceberg.Int64Literal(1234),
+		},
 		{iceberg.PrimitiveTypes.Float32, []byte{0x00, 0x00, 0x90, 0xc0}, iceberg.Float32Literal(-4.5)},
 		{iceberg.PrimitiveTypes.Float32, []byte{0x19, 0x04, 0x9e, 0x3f}, iceberg.Float32Literal(1.2345)},
-		{iceberg.PrimitiveTypes.Float64, []byte{0x8d, 0x97, 0x6e, 0x12, 0x83, 0xc0, 0xf3, 0x3f},
-			iceberg.Float64Literal(1.2345)},
+		{
+			iceberg.PrimitiveTypes.Float64,
+			[]byte{0x8d, 0x97, 0x6e, 0x12, 0x83, 0xc0, 0xf3, 0x3f},
+			iceberg.Float64Literal(1.2345),
+		},
 		{iceberg.PrimitiveTypes.Date, []byte{0xe8, 0x03, 0x00, 0x00}, iceberg.DateLiteral(1000)},
 		{iceberg.PrimitiveTypes.Date, []byte{0xd2, 0x04, 0x00, 0x00}, iceberg.DateLiteral(1234)},
-		{iceberg.PrimitiveTypes.Time, []byte{0x10, 0x27, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-			iceberg.TimeLiteral(10000)},
-		{iceberg.PrimitiveTypes.Time, []byte{0x00, 0xe8, 0x76, 0x48, 0x17, 0x00, 0x00, 0x00},
-			iceberg.TimeLiteral(100000000000)},
-		{iceberg.PrimitiveTypes.TimestampTz, []byte{0x80, 0x1a, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00},
-			iceberg.TimestampLiteral(400000)},
-		{iceberg.PrimitiveTypes.TimestampTz, []byte{0x00, 0xe8, 0x76, 0x48, 0x17, 0x00, 0x00, 0x00},
-			iceberg.TimestampLiteral(100000000000)},
-		{iceberg.PrimitiveTypes.Timestamp, []byte{0x80, 0x1a, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00},
-			iceberg.TimestampLiteral(400000)},
-		{iceberg.PrimitiveTypes.Timestamp, []byte{0x00, 0xe8, 0x76, 0x48, 0x17, 0x00, 0x00, 0x00},
-			iceberg.TimestampLiteral(100000000000)},
+		{
+			iceberg.PrimitiveTypes.Time,
+			[]byte{0x10, 0x27, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			iceberg.TimeLiteral(10000),
+		},
+		{
+			iceberg.PrimitiveTypes.Time,
+			[]byte{0x00, 0xe8, 0x76, 0x48, 0x17, 0x00, 0x00, 0x00},
+			iceberg.TimeLiteral(100000000000),
+		},
+		{
+			iceberg.PrimitiveTypes.TimestampTz,
+			[]byte{0x80, 0x1a, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00},
+			iceberg.TimestampLiteral(400000),
+		},
+		{
+			iceberg.PrimitiveTypes.TimestampTz,
+			[]byte{0x00, 0xe8, 0x76, 0x48, 0x17, 0x00, 0x00, 0x00},
+			iceberg.TimestampLiteral(100000000000),
+		},
+		{
+			iceberg.PrimitiveTypes.Timestamp,
+			[]byte{0x80, 0x1a, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00},
+			iceberg.TimestampLiteral(400000),
+		},
+		{
+			iceberg.PrimitiveTypes.Timestamp,
+			[]byte{0x00, 0xe8, 0x76, 0x48, 0x17, 0x00, 0x00, 0x00},
+			iceberg.TimestampLiteral(100000000000),
+		},
 		{iceberg.PrimitiveTypes.String, []byte("ABC"), iceberg.StringLiteral("ABC")},
 		{iceberg.PrimitiveTypes.String, []byte("foo"), iceberg.StringLiteral("foo")},
-		{iceberg.PrimitiveTypes.UUID,
+		{
+			iceberg.PrimitiveTypes.UUID,
 			[]byte{0xf7, 0x9c, 0x3e, 0x09, 0x67, 0x7c, 0x4b, 0xbd, 0xa4, 0x79, 0x3f, 0x34, 0x9c, 0xb7, 0x85, 0xe7},
-			iceberg.UUIDLiteral(uuid.UUID{0xf7, 0x9c, 0x3e, 0x09, 0x67, 0x7c, 0x4b, 0xbd, 0xa4, 0x79, 0x3f, 0x34, 0x9c, 0xb7, 0x85, 0xe7})},
+			iceberg.UUIDLiteral(uuid.UUID{0xf7, 0x9c, 0x3e, 0x09, 0x67, 0x7c, 0x4b, 0xbd, 0xa4, 0x79, 0x3f, 0x34, 0x9c, 0xb7, 0x85, 0xe7}),
+		},
 		{iceberg.FixedTypeOf(3), []byte("foo"), iceberg.FixedLiteral([]byte("foo"))},
 		{iceberg.PrimitiveTypes.Binary, []byte("foo"), iceberg.BinaryLiteral([]byte("foo"))},
-		{iceberg.DecimalTypeOf(5, 2), []byte{0x30, 0x39},
-			iceberg.DecimalLiteral{Scale: 2, Val: decimal128.FromU64(12345)}},
+		{
+			iceberg.DecimalTypeOf(5, 2),
+			[]byte{0x30, 0x39},
+			iceberg.DecimalLiteral{Scale: 2, Val: decimal128.FromU64(12345)},
+		},
 		// decimal on 3-bytes to test that we use the minimum number of bytes and not a power of 2
 		// 1234567 is 00010010|11010110|10000111 in binary
 		// 00010010 -> 18, 11010110 -> 214, 10000111 -> 135
-		{iceberg.DecimalTypeOf(7, 4), []byte{0x12, 0xd6, 0x87},
-			iceberg.DecimalLiteral{Scale: 4, Val: decimal128.FromU64(1234567)}},
+		{
+			iceberg.DecimalTypeOf(7, 4),
+			[]byte{0x12, 0xd6, 0x87},
+			iceberg.DecimalLiteral{Scale: 4, Val: decimal128.FromU64(1234567)},
+		},
 		// negative decimal to test two's complement
 		// -1234567 is 11101101|00101001|01111001 in binary
 		// 11101101 -> 237, 00101001 -> 41, 01111001 -> 121
-		{iceberg.DecimalTypeOf(7, 4), []byte{0xed, 0x29, 0x79},
-			iceberg.DecimalLiteral{Scale: 4, Val: decimal128.FromI64(-1234567)}},
+		{
+			iceberg.DecimalTypeOf(7, 4),
+			[]byte{0xed, 0x29, 0x79},
+			iceberg.DecimalLiteral{Scale: 4, Val: decimal128.FromI64(-1234567)},
+		},
 		// test empty byte in decimal
 		// 11 is 00001011 in binary
 		// 00001011 -> 11
@@ -857,99 +963,181 @@ func TestLargeDecimalRoundTrip(t *testing.T) {
 		b   []byte
 		val string
 	}{
-		{iceberg.DecimalTypeOf(38, 21),
-			[]byte{0x09, 0x49, 0xb0, 0xf7, 0x13, 0xe9, 0x18, 0x30, 0x73, 0xb9, 0x1e,
-				0x7e, 0xa2, 0xb3, 0x6a, 0x83},
-			"12345678912345678.123456789123456789123"},
-		{iceberg.DecimalTypeOf(38, 22),
-			[]byte{0x09, 0x49, 0xb0, 0xf7, 0x13, 0xe9, 0x16, 0xbb, 0x01, 0x2f,
-				0x4c, 0xc3, 0x2b, 0x42, 0x29, 0x22},
-			"1234567891234567.1234567891234567891234"},
-		{iceberg.DecimalTypeOf(38, 23),
-			[]byte{0x09, 0x49, 0xb0, 0xf7, 0x13, 0xe9, 0x0a, 0x42, 0xa1, 0xad,
-				0xe5, 0x2b, 0x33, 0x15, 0x9b, 0x59},
-			"123456789123456.12345678912345678912345"},
-		{iceberg.DecimalTypeOf(38, 24),
-			[]byte{0x09, 0x49, 0xb0, 0xf7, 0x13, 0xe8, 0xa2, 0xbb, 0xe9, 0x67,
-				0xba, 0x86, 0x77, 0xd8, 0x11, 0x80},
-			"12345678912345.123456789123456789123456"},
-		{iceberg.DecimalTypeOf(38, 25),
-			[]byte{0x09, 0x49, 0xb0, 0xf7, 0x13, 0xe5, 0x6b, 0x3a, 0xd2, 0x78,
-				0xdd, 0x04, 0xc8, 0x70, 0xaf, 0x07},
-			"1234567891234.1234567891234567891234567"},
-		{iceberg.DecimalTypeOf(38, 26),
-			[]byte{0x09, 0x49, 0xb0, 0xf7, 0x13, 0xcd, 0x85, 0xc5, 0x03, 0x38, 0x37,
-				0x3c, 0x38, 0x66, 0xd6, 0x4e},
-			"123456789123.12345678912345678912345678"},
-		{iceberg.DecimalTypeOf(38, 27),
-			[]byte{0x09, 0x49, 0xb0, 0xf7, 0x13, 0x31, 0x46, 0xfd, 0xc7, 0x79,
-				0xca, 0x39, 0x7c, 0x04, 0x5f, 0x15},
-			"12345678912.123456789123456789123456789"},
-		{iceberg.DecimalTypeOf(38, 28),
-			[]byte{0x09, 0x49, 0xb0, 0xf7, 0x10, 0x52, 0x01, 0x72, 0x11, 0xda,
-				0x08, 0x5b, 0x08, 0x2b, 0xb6, 0xd3},
-			"1234567891.1234567891234567891234567891"},
-		{iceberg.DecimalTypeOf(38, 29),
-			[]byte{0x09, 0x49, 0xb0, 0xf7, 0x13, 0xe9, 0x18, 0x5b, 0x37, 0xc1,
-				0x78, 0x0b, 0x91, 0xb5, 0x24, 0x40},
-			"123456789.12345678912345678912345678912"},
-		{iceberg.DecimalTypeOf(38, 30),
-			[]byte{0x09, 0x49, 0xb0, 0xed, 0x1e, 0xdf, 0x80, 0x03, 0x47, 0x3b,
-				0x16, 0x9b, 0xf1, 0x13, 0x6a, 0x83},
-			"12345678.123456789123456789123456789123"},
-		{iceberg.DecimalTypeOf(38, 31),
-			[]byte{0x09, 0x49, 0xb0, 0x96, 0x2b, 0xac, 0x29, 0x64, 0x28, 0x70,
-				0x36, 0x29, 0xea, 0xc2, 0x29, 0x22},
-			"1234567.1234567891234567891234567891234"},
-		{iceberg.DecimalTypeOf(38, 32),
-			[]byte{0x09, 0x49, 0xad, 0xae, 0xe3, 0x68, 0xe7, 0x4f, 0xb5, 0x14,
-				0xbc, 0xdc, 0x2b, 0x95, 0x9b, 0x59},
-			"123456.12345678912345678912345678912345"},
-		{iceberg.DecimalTypeOf(38, 33),
-			[]byte{0x09, 0x49, 0x95, 0x94, 0x3e, 0x35, 0x93, 0xde, 0xb9, 0x2e,
-				0xef, 0x53, 0xb3, 0xd8, 0x11, 0x80},
-			"12345.123456789123456789123456789123456"},
-		{iceberg.DecimalTypeOf(38, 34),
-			[]byte{0x09, 0x48, 0xd5, 0xd7, 0x90, 0x78, 0xdf, 0x08, 0x1a, 0xf6,
-				0x43, 0x09, 0x06, 0x70, 0xaf, 0x07},
-			"1234.1234567891234567891234567891234567"},
-		{iceberg.DecimalTypeOf(38, 35),
-			[]byte{0x09, 0x43, 0x45, 0x82, 0x85, 0xc7, 0x56, 0x66, 0x24, 0x4d,
-				0x16, 0x82, 0x40, 0x66, 0xd6, 0x4e},
-			"123.12345678912345678912345678912345678"},
-		{iceberg.DecimalTypeOf(21, 16),
+		{
+			iceberg.DecimalTypeOf(38, 21),
+			[]byte{
+				0x09, 0x49, 0xb0, 0xf7, 0x13, 0xe9, 0x18, 0x30, 0x73, 0xb9, 0x1e,
+				0x7e, 0xa2, 0xb3, 0x6a, 0x83,
+			},
+			"12345678912345678.123456789123456789123",
+		},
+		{
+			iceberg.DecimalTypeOf(38, 22),
+			[]byte{
+				0x09, 0x49, 0xb0, 0xf7, 0x13, 0xe9, 0x16, 0xbb, 0x01, 0x2f,
+				0x4c, 0xc3, 0x2b, 0x42, 0x29, 0x22,
+			},
+			"1234567891234567.1234567891234567891234",
+		},
+		{
+			iceberg.DecimalTypeOf(38, 23),
+			[]byte{
+				0x09, 0x49, 0xb0, 0xf7, 0x13, 0xe9, 0x0a, 0x42, 0xa1, 0xad,
+				0xe5, 0x2b, 0x33, 0x15, 0x9b, 0x59,
+			},
+			"123456789123456.12345678912345678912345",
+		},
+		{
+			iceberg.DecimalTypeOf(38, 24),
+			[]byte{
+				0x09, 0x49, 0xb0, 0xf7, 0x13, 0xe8, 0xa2, 0xbb, 0xe9, 0x67,
+				0xba, 0x86, 0x77, 0xd8, 0x11, 0x80,
+			},
+			"12345678912345.123456789123456789123456",
+		},
+		{
+			iceberg.DecimalTypeOf(38, 25),
+			[]byte{
+				0x09, 0x49, 0xb0, 0xf7, 0x13, 0xe5, 0x6b, 0x3a, 0xd2, 0x78,
+				0xdd, 0x04, 0xc8, 0x70, 0xaf, 0x07,
+			},
+			"1234567891234.1234567891234567891234567",
+		},
+		{
+			iceberg.DecimalTypeOf(38, 26),
+			[]byte{
+				0x09, 0x49, 0xb0, 0xf7, 0x13, 0xcd, 0x85, 0xc5, 0x03, 0x38, 0x37,
+				0x3c, 0x38, 0x66, 0xd6, 0x4e,
+			},
+			"123456789123.12345678912345678912345678",
+		},
+		{
+			iceberg.DecimalTypeOf(38, 27),
+			[]byte{
+				0x09, 0x49, 0xb0, 0xf7, 0x13, 0x31, 0x46, 0xfd, 0xc7, 0x79,
+				0xca, 0x39, 0x7c, 0x04, 0x5f, 0x15,
+			},
+			"12345678912.123456789123456789123456789",
+		},
+		{
+			iceberg.DecimalTypeOf(38, 28),
+			[]byte{
+				0x09, 0x49, 0xb0, 0xf7, 0x10, 0x52, 0x01, 0x72, 0x11, 0xda,
+				0x08, 0x5b, 0x08, 0x2b, 0xb6, 0xd3,
+			},
+			"1234567891.1234567891234567891234567891",
+		},
+		{
+			iceberg.DecimalTypeOf(38, 29),
+			[]byte{
+				0x09, 0x49, 0xb0, 0xf7, 0x13, 0xe9, 0x18, 0x5b, 0x37, 0xc1,
+				0x78, 0x0b, 0x91, 0xb5, 0x24, 0x40,
+			},
+			"123456789.12345678912345678912345678912",
+		},
+		{
+			iceberg.DecimalTypeOf(38, 30),
+			[]byte{
+				0x09, 0x49, 0xb0, 0xed, 0x1e, 0xdf, 0x80, 0x03, 0x47, 0x3b,
+				0x16, 0x9b, 0xf1, 0x13, 0x6a, 0x83,
+			},
+			"12345678.123456789123456789123456789123",
+		},
+		{
+			iceberg.DecimalTypeOf(38, 31),
+			[]byte{
+				0x09, 0x49, 0xb0, 0x96, 0x2b, 0xac, 0x29, 0x64, 0x28, 0x70,
+				0x36, 0x29, 0xea, 0xc2, 0x29, 0x22,
+			},
+			"1234567.1234567891234567891234567891234",
+		},
+		{
+			iceberg.DecimalTypeOf(38, 32),
+			[]byte{
+				0x09, 0x49, 0xad, 0xae, 0xe3, 0x68, 0xe7, 0x4f, 0xb5, 0x14,
+				0xbc, 0xdc, 0x2b, 0x95, 0x9b, 0x59,
+			},
+			"123456.12345678912345678912345678912345",
+		},
+		{
+			iceberg.DecimalTypeOf(38, 33),
+			[]byte{
+				0x09, 0x49, 0x95, 0x94, 0x3e, 0x35, 0x93, 0xde, 0xb9, 0x2e,
+				0xef, 0x53, 0xb3, 0xd8, 0x11, 0x80,
+			},
+			"12345.123456789123456789123456789123456",
+		},
+		{
+			iceberg.DecimalTypeOf(38, 34),
+			[]byte{
+				0x09, 0x48, 0xd5, 0xd7, 0x90, 0x78, 0xdf, 0x08, 0x1a, 0xf6,
+				0x43, 0x09, 0x06, 0x70, 0xaf, 0x07,
+			},
+			"1234.1234567891234567891234567891234567",
+		},
+		{
+			iceberg.DecimalTypeOf(38, 35),
+			[]byte{
+				0x09, 0x43, 0x45, 0x82, 0x85, 0xc7, 0x56, 0x66, 0x24, 0x4d,
+				0x16, 0x82, 0x40, 0x66, 0xd6, 0x4e,
+			},
+			"123.12345678912345678912345678912345678",
+		},
+		{
+			iceberg.DecimalTypeOf(21, 16),
 			[]byte{0x06, 0xb1, 0x3a, 0xe3, 0xc4, 0x4e, 0x94, 0xaf, 0x07},
-			"12345.1234567891234567"},
-		{iceberg.DecimalTypeOf(22, 17),
+			"12345.1234567891234567",
+		},
+		{
+			iceberg.DecimalTypeOf(22, 17),
 			[]byte{0x42, 0xec, 0x4c, 0xe5, 0xab, 0x11, 0xce, 0xd6, 0x4e},
-			"12345.12345678912345678"},
-		{iceberg.DecimalTypeOf(23, 18),
+			"12345.12345678912345678",
+		},
+		{
+			iceberg.DecimalTypeOf(23, 18),
 			[]byte{0x02, 0x9d, 0x3b, 0x00, 0xf8, 0xae, 0xb2, 0x14, 0x5f, 0x15},
-			"12345.123456789123456789"},
-		{iceberg.DecimalTypeOf(24, 19),
+			"12345.123456789123456789",
+		},
+		{
+			iceberg.DecimalTypeOf(24, 19),
 			[]byte{0x1a, 0x24, 0x4e, 0x09, 0xb6, 0xd2, 0xf4, 0xcb, 0xb6, 0xd3},
-			"12345.1234567891234567891"},
-		{iceberg.DecimalTypeOf(25, 20),
+			"12345.1234567891234567891",
+		},
+		{
+			iceberg.DecimalTypeOf(25, 20),
 			[]byte{0x01, 0x05, 0x6b, 0x0c, 0x61, 0x24, 0x3d, 0x8f, 0xf5, 0x24, 0x40},
-			"12345.12345678912345678912"},
-		{iceberg.DecimalTypeOf(26, 21),
+			"12345.12345678912345678912",
+		},
+		{
+			iceberg.DecimalTypeOf(26, 21),
 			[]byte{0x0a, 0x36, 0x2e, 0x7b, 0xcb, 0x6a, 0x67, 0x9f, 0x93, 0x6a, 0x83},
-			"12345.123456789123456789123"},
-		{iceberg.DecimalTypeOf(27, 22),
+			"12345.123456789123456789123",
+		},
+		{
+			iceberg.DecimalTypeOf(27, 22),
 			[]byte{0x66, 0x1d, 0xd0, 0xd5, 0xf2, 0x28, 0x0c, 0x3b, 0xc2, 0x29, 0x22},
-			"12345.1234567891234567891234"},
-		{iceberg.DecimalTypeOf(28, 23),
+			"12345.1234567891234567891234",
+		},
+		{
+			iceberg.DecimalTypeOf(28, 23),
 			[]byte{0x03, 0xfd, 0x2a, 0x28, 0x5b, 0x75, 0x90, 0x7a, 0x55, 0x95, 0x9b, 0x59},
-			"12345.12345678912345678912345"},
-		{iceberg.DecimalTypeOf(29, 24),
+			"12345.12345678912345678912345",
+		},
+		{
+			iceberg.DecimalTypeOf(29, 24),
 			[]byte{0x27, 0xe3, 0xa5, 0x93, 0x92, 0x97, 0xa4, 0xc7, 0x57, 0xd8, 0x11, 0x80},
-			"12345.123456789123456789123456"},
-		{iceberg.DecimalTypeOf(30, 25),
+			"12345.123456789123456789123456",
+		},
+		{
+			iceberg.DecimalTypeOf(30, 25),
 			[]byte{0x01, 0x8e, 0xe4, 0x77, 0xc3, 0xb9, 0xec, 0x6f, 0xc9, 0x6e, 0x70, 0xaf, 0x07},
-			"12345.1234567891234567891234567"},
-		{iceberg.DecimalTypeOf(31, 26),
+			"12345.1234567891234567891234567",
+		},
+		{
+			iceberg.DecimalTypeOf(31, 26),
 			[]byte{0x0f, 0x94, 0xec, 0xad, 0xa5, 0x43, 0x3c, 0x5d, 0xde, 0x50, 0x66, 0xd6, 0x4e},
-			"12345.12345678912345678912345678"},
+			"12345.12345678912345678912345678",
+		},
 	}
 
 	for _, tt := range tests {

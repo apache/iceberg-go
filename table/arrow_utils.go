@@ -65,6 +65,7 @@ func recoverError(err *error) {
 func VisitArrowSchema[T any](sc *arrow.Schema, visitor ArrowSchemaVisitor[T]) (res T, err error) {
 	if sc == nil {
 		err = fmt.Errorf("%w: cannot visit nil arrow schema", iceberg.ErrInvalidArgument)
+
 		return
 	}
 
@@ -217,6 +218,7 @@ func (hasIDs) Field(f arrow.Field, result bool) bool {
 
 func (hasIDs) List(dt arrow.ListLikeType, elem bool) bool {
 	elemField := dt.ElemField()
+
 	return elem && getFieldID(elemField) != nil
 }
 
@@ -253,6 +255,7 @@ func (c convertToIceberg) Field(field arrow.Field, result iceberg.NestedField) i
 
 	result.Required = !field.Nullable
 	result.Name = field.Name
+
 	return result
 }
 
@@ -284,9 +287,7 @@ func (c convertToIceberg) Map(m *arrow.MapType, keyResult, valueResult iceberg.N
 	}
 }
 
-var (
-	utcAliases = []string{"UTC", "+00:00", "Etc/UTC", "Z"}
-)
+var utcAliases = []string{"UTC", "+00:00", "Etc/UTC", "Z"}
 
 func (c convertToIceberg) Primitive(dt arrow.DataType) (result iceberg.NestedField) {
 	switch dt := dt.(type) {
@@ -294,11 +295,13 @@ func (c convertToIceberg) Primitive(dt arrow.DataType) (result iceberg.NestedFie
 		if _, ok := dt.ValueType.(arrow.NestedType); ok {
 			panic(fmt.Errorf("%w: unsupported arrow type for conversion - %s", iceberg.ErrInvalidSchema, dt))
 		}
+
 		return c.Primitive(dt.ValueType)
 	case *arrow.RunEndEncodedType:
 		if _, ok := dt.Encoded().(arrow.NestedType); ok {
 			panic(fmt.Errorf("%w: unsupported arrow type for conversion - %s", iceberg.ErrInvalidSchema, dt))
 		}
+
 		return c.Primitive(dt.Encoded())
 	case *arrow.BooleanType:
 		result.Type = iceberg.PrimitiveTypes.Bool
@@ -357,8 +360,10 @@ func (c convertToIceberg) Primitive(dt arrow.DataType) (result iceberg.NestedFie
 }
 
 func ArrowTypeToIceberg(dt arrow.DataType, downcastNsTimestamp bool) (iceberg.Type, error) {
-	sc := arrow.NewSchema([]arrow.Field{{Type: dt,
-		Metadata: arrow.NewMetadata([]string{ArrowParquetFieldIDKey}, []string{"1"})}}, nil)
+	sc := arrow.NewSchema([]arrow.Field{{
+		Type:     dt,
+		Metadata: arrow.NewMetadata([]string{ArrowParquetFieldIDKey}, []string{"1"}),
+	}}, nil)
 
 	out, err := VisitArrowSchema(sc, convertToIceberg{
 		downcastTimestamp: downcastNsTimestamp,
@@ -409,6 +414,7 @@ func ArrowSchemaToIceberg(sc *arrow.Schema, downcastNsTimestamp bool, nameMappin
 		}
 
 		schemaWithoutIDs := iceberg.NewSchema(0, withoutIDs.Type.(*iceberg.StructType).FieldList...)
+
 		return ApplyNameMapping(schemaWithoutIDs, nameMapping)
 	default:
 		return nil, fmt.Errorf("%w: arrow schema does not have field-ids and no name mapping provided",
@@ -428,6 +434,7 @@ func (convertToSmallTypes) Struct(_ *arrow.StructType, results []arrow.Field) ar
 
 func (convertToSmallTypes) Field(field arrow.Field, fieldResult arrow.Field) arrow.Field {
 	field.Type = fieldResult.Type
+
 	return field
 }
 
@@ -470,6 +477,7 @@ type convertToArrow struct {
 
 func (c convertToArrow) Schema(_ *iceberg.Schema, result arrow.Field) arrow.Field {
 	result.Metadata = arrow.MetadataFrom(c.metadata)
+
 	return result
 }
 
@@ -492,6 +500,7 @@ func (c convertToArrow) Field(field iceberg.NestedField, result arrow.Field) arr
 	}
 
 	result.Name, result.Nullable = field.Name, !field.Required
+
 	return result
 }
 
@@ -506,6 +515,7 @@ func (c convertToArrow) List(list iceberg.ListType, elemResult arrow.Field) arro
 func (c convertToArrow) Map(m iceberg.MapType, keyResult, valResult arrow.Field) arrow.Field {
 	keyField := c.Field(m.KeyField(), keyResult)
 	valField := c.Field(m.ValueField(), valResult)
+
 	return arrow.Field{Type: arrow.MapOfWithMetadata(keyField.Type, keyField.Metadata,
 		valField.Type, valField.Metadata)}
 }
@@ -518,7 +528,8 @@ func (c convertToArrow) VisitFixed(f iceberg.FixedType) arrow.Field {
 
 func (c convertToArrow) VisitDecimal(d iceberg.DecimalType) arrow.Field {
 	return arrow.Field{Type: &arrow.Decimal128Type{
-		Precision: int32(d.Precision()), Scale: int32(d.Scale())}}
+		Precision: int32(d.Precision()), Scale: int32(d.Scale()),
+	}}
 }
 
 func (c convertToArrow) VisitBoolean() arrow.Field {
@@ -561,6 +572,7 @@ func (c convertToArrow) VisitString() arrow.Field {
 	if c.useLargeTypes {
 		return arrow.Field{Type: arrow.BinaryTypes.LargeString}
 	}
+
 	return arrow.Field{Type: arrow.BinaryTypes.String}
 }
 
@@ -568,6 +580,7 @@ func (c convertToArrow) VisitBinary() arrow.Field {
 	if c.useLargeTypes {
 		return arrow.Field{Type: arrow.BinaryTypes.LargeBinary}
 	}
+
 	return arrow.Field{Type: arrow.BinaryTypes.Binary}
 }
 
@@ -580,8 +593,10 @@ func (c convertToArrow) VisitUUID() arrow.Field {
 // is true, then each field of the schema will contain a metadata key PARQUET:field_id set to
 // the field id from the iceberg schema.
 func SchemaToArrowSchema(sc *iceberg.Schema, metadata map[string]string, includeFieldIDs, useLargeTypes bool) (*arrow.Schema, error) {
-	top, err := iceberg.Visit(sc, convertToArrow{metadata: metadata,
-		includeFieldIDs: includeFieldIDs, useLargeTypes: useLargeTypes})
+	top, err := iceberg.Visit(sc, convertToArrow{
+		metadata:        metadata,
+		includeFieldIDs: includeFieldIDs, useLargeTypes: useLargeTypes,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -634,6 +649,7 @@ func (a arrowAccessor) ListElementPartner(partnerList arrow.Array) arrow.Array {
 	if l, ok := partnerList.(array.ListLike); ok {
 		return l.ListValues()
 	}
+
 	return nil
 }
 
@@ -641,6 +657,7 @@ func (a arrowAccessor) MapKeyPartner(partnerMap arrow.Array) arrow.Array {
 	if m, ok := partnerMap.(*array.Map); ok {
 		return m.Keys()
 	}
+
 	return nil
 }
 
@@ -648,6 +665,7 @@ func (a arrowAccessor) MapValuePartner(partnerMap arrow.Array) arrow.Array {
 	if m, ok := partnerMap.(*array.Map); ok {
 		return m.Items()
 	}
+
 	return nil
 }
 
@@ -655,6 +673,7 @@ func retOrPanic[T any](v T, err error) T {
 	if err != nil {
 		panic(err)
 	}
+
 	return v
 }
 
@@ -675,6 +694,7 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 	typ, ok := fileField.Type.(iceberg.PrimitiveType)
 	if !ok {
 		vals.Retain()
+
 		return vals
 	}
 
@@ -724,6 +744,7 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 		}
 	}
 	vals.Retain()
+
 	return vals
 }
 
@@ -810,6 +831,7 @@ func (a *arrowProjectionVisitor) List(listType iceberg.ListType, listArr arrow.A
 	data := array.NewData(outType, arr.Len(), arr.Data().Buffers(),
 		[]arrow.ArrayData{valArr.Data()}, arr.NullN(), arr.Data().Offset())
 	defer data.Release()
+
 	return array.MakeFromData(data)
 }
 
@@ -838,6 +860,7 @@ func (a *arrowProjectionVisitor) Map(m iceberg.MapType, mapArray, keyResult, val
 	newData := array.NewData(mapType, arr.Len(), arr.Data().Buffers(),
 		[]arrow.ArrayData{childData}, arr.NullN(), arr.Offset())
 	defer newData.Release()
+
 	return array.NewMapData(newData)
 }
 

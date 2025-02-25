@@ -508,7 +508,9 @@ func TestNewMetadataWithExplicitV1Format(t *testing.T) {
 		Fields: []SortField{{
 			SourceID:  10,
 			Transform: iceberg.IdentityTransform{},
-			Direction: SortASC, NullOrder: NullsLast}}}
+			Direction: SortASC, NullOrder: NullsLast,
+		}},
+	}
 
 	actual, err := NewMetadata(schema, &partitionSpec, sortOrder, "s3://some_v1_location/", iceberg.Properties{"format-version": "1"})
 	require.NoError(t, err)
@@ -525,7 +527,9 @@ func TestNewMetadataWithExplicitV1Format(t *testing.T) {
 		OrderID: 1,
 		Fields: []SortField{{
 			SourceID: 1, Transform: iceberg.IdentityTransform{},
-			Direction: SortASC, NullOrder: NullsLast}}}
+			Direction: SortASC, NullOrder: NullsLast,
+		}},
+	}
 
 	lastPartitionID := 1000
 	expected := &metadataV1{
@@ -566,7 +570,9 @@ func TestNewMetadataV2Format(t *testing.T) {
 		Fields: []SortField{{
 			SourceID:  10,
 			Transform: iceberg.IdentityTransform{},
-			Direction: SortASC, NullOrder: NullsLast}}}
+			Direction: SortASC, NullOrder: NullsLast,
+		}},
+	}
 
 	tableUUID := uuid.New()
 
@@ -585,7 +591,9 @@ func TestNewMetadataV2Format(t *testing.T) {
 		OrderID: 1,
 		Fields: []SortField{{
 			SourceID: 1, Transform: iceberg.IdentityTransform{},
-			Direction: SortASC, NullOrder: NullsLast}}}
+			Direction: SortASC, NullOrder: NullsLast,
+		}},
+	}
 
 	lastPartitionID := 1000
 	expected := &metadataV2{
@@ -602,7 +610,8 @@ func TestNewMetadataV2Format(t *testing.T) {
 			SortOrderList:      []SortOrder{expectedSortOrder},
 			DefaultSortOrderID: 1,
 			FormatVersion:      2,
-		}}
+		},
+	}
 
 	assert.Truef(t, expected.Equals(actual), "expected: %s\ngot: %s", expected, actual)
 }
