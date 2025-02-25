@@ -45,6 +45,7 @@ func TestCatalogRegistry(t *testing.T) {
 	catalog.Register("foobar", catalog.RegistrarFunc(func(ctx context.Context, s string, p iceberg.Properties) (catalog.Catalog, error) {
 		assert.Equal(t, "foobar", s)
 		assert.Equal(t, "baz", p.Get("foo", ""))
+
 		return nil, nil
 	}))
 
@@ -63,6 +64,7 @@ func TestCatalogRegistry(t *testing.T) {
 	catalog.Register("foobar", catalog.RegistrarFunc(func(ctx context.Context, s string, p iceberg.Properties) (catalog.Catalog, error) {
 		assert.Equal(t, "not found", s)
 		assert.Equal(t, "baz", p.Get("foo", ""))
+
 		return nil, nil
 	}))
 
@@ -74,12 +76,14 @@ func TestCatalogRegistry(t *testing.T) {
 		assert.Equal(t, "not found", s)
 		assert.Equal(t, "foobar://helloworld", p.Get("uri", ""))
 		assert.Equal(t, "baz", p.Get("foo", ""))
+
 		return nil, nil
 	}))
 
 	c, err = catalog.Load(ctx, "not found", iceberg.Properties{
 		"uri": "foobar://helloworld",
-		"foo": "baz"})
+		"foo": "baz",
+	})
 	assert.Nil(t, c)
 	assert.NoError(t, err)
 
@@ -113,6 +117,7 @@ func TestCatalogWithEmptyName(t *testing.T) {
 		assert.Equal(t, "http://localhost:8181/", props.Get("uri", ""))
 		assert.Equal(t, "default-credential", props.Get("credential", ""))
 		assert.Equal(t, "/default/warehouse", props.Get("warehouse", ""))
+
 		return nil, nil
 	}))
 	c, err := catalog.Load(ctx, "", nil)
@@ -126,7 +131,6 @@ func TestCatalogWithEmptyName(t *testing.T) {
 		"mock",
 	}, catalog.GetRegisteredCatalogs())
 	catalog.Unregister("mock")
-
 }
 
 func TestCatalogLoadInvalidURI(t *testing.T) {
@@ -189,11 +193,11 @@ func TestRegistryFromConfig(t *testing.T) {
 	assert.Equal(t, "foobar", c.(*rest.Catalog).Name())
 	assert.Equal(t, "catalog_name", params.Get("warehouse"))
 
-	c, err = catalog.Load(ctx, "foobar", iceberg.Properties{"warehouse": "overriden"})
+	c, err = catalog.Load(ctx, "foobar", iceberg.Properties{"warehouse": "overridden"})
 	assert.NoError(t, err)
 	assert.IsType(t, &rest.Catalog{}, c)
 	assert.Equal(t, "foobar", c.(*rest.Catalog).Name())
-	assert.Equal(t, "overriden", params.Get("warehouse"))
+	assert.Equal(t, "overridden", params.Get("warehouse"))
 
 	srv.Close()
 

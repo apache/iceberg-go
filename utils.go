@@ -34,6 +34,7 @@ func init() {
 		for _, dep := range info.Deps {
 			if strings.HasPrefix(dep.Path, "github.com/apache/iceberg-go") {
 				version = dep.Version
+
 				break
 			}
 		}
@@ -53,6 +54,7 @@ func max[T cmp.Ordered](vals ...T) T {
 			out = v
 		}
 	}
+
 	return out
 }
 
@@ -89,6 +91,7 @@ func (a *accessor) Get(s structLike) any {
 		inner = inner.inner
 		val = val.(structLike).Get(inner.pos)
 	}
+
 	return val
 }
 
@@ -110,6 +113,7 @@ func newLiteralSet(vals ...Literal) Set[Literal] {
 	for _, v := range vals {
 		s.addliteral(v)
 	}
+
 	return s
 }
 
@@ -137,15 +141,18 @@ func (l literalSet) Contains(lit Literal) bool {
 		if !ok {
 			return false
 		}
+
 		return lit.Equals(v.orig)
 	case FixedLiteral:
 		v, ok := l[maphash.Bytes(lzseed, []byte(lit))]
 		if !ok {
 			return false
 		}
+
 		return lit.Equals(v.orig)
 	default:
 		_, ok := l[lit]
+
 		return ok
 	}
 }
@@ -159,6 +166,7 @@ func (l literalSet) Members() []Literal {
 			result = append(result, v.orig)
 		}
 	}
+
 	return result
 }
 
@@ -167,6 +175,7 @@ func (l literalSet) Equals(other Set[Literal]) bool {
 	if !ok {
 		return false
 	}
+
 	return maps.EqualFunc(l, rhs, func(v1, v2 struct{ orig Literal }) bool {
 		switch {
 		case v1.orig == nil:
@@ -194,6 +203,7 @@ func (l literalSet) All(fn func(Literal) bool) bool {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -210,5 +220,6 @@ func Difference(a, b []string) []string {
 			diff = append(diff, item)
 		}
 	}
+
 	return diff
 }

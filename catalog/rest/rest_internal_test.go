@@ -35,7 +35,8 @@ func TestAuthHeader(t *testing.T) {
 
 	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
-			"defaults": map[string]any{}, "overrides": map[string]any{}})
+			"defaults": map[string]any{}, "overrides": map[string]any{},
+		})
 	})
 
 	mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
@@ -81,7 +82,8 @@ func TestAuthUriHeader(t *testing.T) {
 
 	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
-			"defaults": map[string]any{}, "overrides": map[string]any{}})
+			"defaults": map[string]any{}, "overrides": map[string]any{},
+		})
 	})
 
 	mux.HandleFunc("/auth-token-url", func(w http.ResponseWriter, req *http.Request) {

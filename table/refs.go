@@ -33,9 +33,7 @@ const (
 	TagRef    RefType = "tag"
 )
 
-var (
-	ErrInvalidRefType = errors.New("invalid snapshot ref type, should be 'branch' or 'tag'")
-)
+var ErrInvalidRefType = errors.New("invalid snapshot ref type, should be 'branch' or 'tag'")
 
 // SnapshotRef represents the reference information for a specific snapshot
 type SnapshotRef struct {

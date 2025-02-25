@@ -134,6 +134,7 @@ func (AlwaysTrue) Op() Operation             { return OpTrue }
 func (AlwaysTrue) Negate() BooleanExpression { return AlwaysFalse{} }
 func (AlwaysTrue) Equals(other BooleanExpression) bool {
 	_, ok := other.(AlwaysTrue)
+
 	return ok
 }
 
@@ -145,6 +146,7 @@ func (AlwaysFalse) Op() Operation             { return OpFalse }
 func (AlwaysFalse) Negate() BooleanExpression { return AlwaysTrue{} }
 func (AlwaysFalse) Equals(other BooleanExpression) bool {
 	_, ok := other.(AlwaysFalse)
+
 	return ok
 }
 
@@ -184,6 +186,7 @@ func (n NotExpr) Equals(other BooleanExpression) bool {
 	if !ok {
 		return false
 	}
+
 	return n.child.Equals(rhs.child)
 }
 
@@ -224,6 +227,7 @@ func NewAnd(left, right BooleanExpression, addl ...BooleanExpression) BooleanExp
 	for _, a := range addl {
 		folded = newAnd(folded, a)
 	}
+
 	return folded
 }
 
@@ -284,6 +288,7 @@ func NewOr(left, right BooleanExpression, addl ...BooleanExpression) BooleanExpr
 	for _, a := range addl {
 		folded = newOr(folded, a)
 	}
+
 	return folded
 }
 
@@ -457,6 +462,7 @@ func (b *boundRef[T]) PosPath() []int {
 		inner = inner.inner
 		out = append(out, inner.pos)
 	}
+
 	return out
 }
 
@@ -510,11 +516,13 @@ func (b *boundRef[T]) evalToLiteral(st structLike) Optional[Literal] {
 	if !lit.Type().Equals(b.field.Type) {
 		lit, _ = lit.To(b.field.Type)
 	}
+
 	return Optional[Literal]{Val: lit, Valid: true}
 }
 
 func (b *boundRef[T]) evalIsNull(st structLike) bool {
 	v := b.eval(st)
+
 	return !v.Valid
 }
 
@@ -755,8 +763,10 @@ type BoundLiteralPredicate interface {
 }
 
 func newBoundLiteralPredicate[T LiteralType](op Operation, term BoundTerm, lit Literal) BoundPredicate {
-	return &boundLiteralPredicate[T]{op: op, term: term.(bound[T]),
-		lit: lit.(TypedLiteral[T])}
+	return &boundLiteralPredicate[T]{
+		op: op, term: term.(bound[T]),
+		lit: lit.(TypedLiteral[T]),
+	}
 }
 
 func createBoundLiteralPredicate(op Operation, term BoundTerm, lit Literal) (BoundPredicate, error) {
@@ -791,6 +801,7 @@ func createBoundLiteralPredicate(op Operation, term BoundTerm, lit Literal) (Bou
 	case UUIDType:
 		return newBoundLiteralPredicate[uuid.UUID](op, term, finalLit), nil
 	}
+
 	return nil, fmt.Errorf("%w: could not create bound literal predicate for term type %s",
 		ErrInvalidArgument, term.Type())
 }
@@ -981,14 +992,17 @@ func (bsp *boundSetPredicate[T]) Equals(other BooleanExpression) bool {
 
 func (bsp *boundSetPredicate[T]) Op() Operation { return bsp.op }
 func (bsp *boundSetPredicate[T]) Negate() BooleanExpression {
-	return &boundSetPredicate[T]{op: bsp.op.Negate(), term: bsp.term,
-		lits: bsp.lits}
+	return &boundSetPredicate[T]{
+		op: bsp.op.Negate(), term: bsp.term,
+		lits: bsp.lits,
+	}
 }
 func (bsp *boundSetPredicate[T]) Term() BoundTerm     { return bsp.term }
 func (bsp *boundSetPredicate[T]) Ref() BoundReference { return bsp.term.Ref() }
 func (bsp *boundSetPredicate[T]) String() string {
 	return fmt.Sprintf("Bound%s(term=%s, {%v})", bsp.op, bsp.term, bsp.lits.Members())
 }
+
 func (bsp *boundSetPredicate[T]) AsUnbound(r Reference, lits []Literal) UnboundPredicate {
 	litSet := newLiteralSet(lits...)
 	if litSet.Len() == 1 {

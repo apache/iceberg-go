@@ -37,56 +37,62 @@ import (
 	"github.com/uptrace/bun/driver/sqliteshim"
 )
 
-var (
-	tableSchemaNested = iceberg.NewSchemaWithIdentifiers(1,
-		[]int{1},
-		iceberg.NestedField{
-			ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: false},
-		iceberg.NestedField{
-			ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{
-			ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool, Required: false},
-		iceberg.NestedField{
-			ID: 4, Name: "qux", Required: true, Type: &iceberg.ListType{
-				ElementID: 5, Element: iceberg.PrimitiveTypes.String, ElementRequired: true}},
-		iceberg.NestedField{
-			ID: 6, Name: "quux",
-			Type: &iceberg.MapType{
-				KeyID:   7,
-				KeyType: iceberg.PrimitiveTypes.String,
-				ValueID: 8,
-				ValueType: &iceberg.MapType{
-					KeyID:         9,
-					KeyType:       iceberg.PrimitiveTypes.String,
-					ValueID:       10,
-					ValueType:     iceberg.PrimitiveTypes.Int32,
-					ValueRequired: true,
-				},
+var tableSchemaNested = iceberg.NewSchemaWithIdentifiers(1,
+	[]int{1},
+	iceberg.NestedField{
+		ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: false,
+	},
+	iceberg.NestedField{
+		ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	},
+	iceberg.NestedField{
+		ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool, Required: false,
+	},
+	iceberg.NestedField{
+		ID: 4, Name: "qux", Required: true, Type: &iceberg.ListType{
+			ElementID: 5, Element: iceberg.PrimitiveTypes.String, ElementRequired: true,
+		},
+	},
+	iceberg.NestedField{
+		ID: 6, Name: "quux",
+		Type: &iceberg.MapType{
+			KeyID:   7,
+			KeyType: iceberg.PrimitiveTypes.String,
+			ValueID: 8,
+			ValueType: &iceberg.MapType{
+				KeyID:         9,
+				KeyType:       iceberg.PrimitiveTypes.String,
+				ValueID:       10,
+				ValueType:     iceberg.PrimitiveTypes.Int32,
 				ValueRequired: true,
 			},
-			Required: true},
-		iceberg.NestedField{
-			ID: 11, Name: "location", Type: &iceberg.ListType{
-				ElementID: 12, Element: &iceberg.StructType{
-					FieldList: []iceberg.NestedField{
-						{ID: 13, Name: "latitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
-						{ID: 14, Name: "longitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
-					},
-				},
-				ElementRequired: true},
-			Required: true},
-		iceberg.NestedField{
-			ID:   15,
-			Name: "person",
-			Type: &iceberg.StructType{
+			ValueRequired: true,
+		},
+		Required: true,
+	},
+	iceberg.NestedField{
+		ID: 11, Name: "location", Type: &iceberg.ListType{
+			ElementID: 12, Element: &iceberg.StructType{
 				FieldList: []iceberg.NestedField{
-					{ID: 16, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
-					{ID: 17, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+					{ID: 13, Name: "latitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
+					{ID: 14, Name: "longitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
 				},
 			},
-			Required: false,
+			ElementRequired: true,
 		},
-	)
+		Required: true,
+	},
+	iceberg.NestedField{
+		ID:   15,
+		Name: "person",
+		Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 16, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
+				{ID: 17, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+			},
+		},
+		Required: false,
+	},
 )
 
 func TestCreateSQLCatalogNoDriverDialect(t *testing.T) {
@@ -112,6 +118,7 @@ func randomString(n int) string {
 	for range n {
 		b.WriteByte(letters[rand.IntN(len(letters))])
 	}
+
 	return b.String()
 }
 
@@ -129,6 +136,7 @@ func hiearchicalNamespaceName() string {
 	prefix := "my-iceberg-ns-"
 	tag1 := randomString(randomLen)
 	tag2 := randomString(randomLen)
+
 	return strings.Join([]string{prefix + tag1, prefix + tag2}, ".")
 }
 
@@ -140,13 +148,15 @@ type SqliteCatalogTestSuite struct {
 
 func (s *SqliteCatalogTestSuite) randomTableIdentifier() table.Identifier {
 	dbname, tablename := databaseName(), tableName()
-	s.Require().NoError(os.MkdirAll(filepath.Join(s.warehouse, dbname+".db", tablename, "metadata"), 0755))
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.warehouse, dbname+".db", tablename, "metadata"), 0o755))
+
 	return table.Identifier{dbname, tablename}
 }
 
 func (s *SqliteCatalogTestSuite) randomHierarchicalIdentifier() table.Identifier {
 	hierarchicalNsName, tableName := hiearchicalNamespaceName(), tableName()
-	s.Require().NoError(os.MkdirAll(filepath.Join(s.warehouse, hierarchicalNsName+".db", tableName, "metadata"), 0755))
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.warehouse, hierarchicalNsName+".db", tableName, "metadata"), 0o755))
+
 	return strings.Split(hierarchicalNsName+"."+tableName, ".")
 }
 

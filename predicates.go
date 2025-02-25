@@ -57,6 +57,7 @@ func IsIn[T LiteralType](t UnboundTerm, vals ...T) BooleanExpression {
 	for _, v := range vals {
 		lits = append(lits, NewLiteral(v))
 	}
+
 	return SetPredicate(OpIn, t, lits)
 }
 
@@ -72,6 +73,7 @@ func NotIn[T LiteralType](t UnboundTerm, vals ...T) BooleanExpression {
 	for _, v := range vals {
 		lits = append(lits, NewLiteral(v))
 	}
+
 	return SetPredicate(OpNotIn, t, lits)
 }
 
