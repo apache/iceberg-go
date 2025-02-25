@@ -20,6 +20,7 @@ package internal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/apache/iceberg-go"
@@ -48,7 +49,7 @@ func WriteMetadata(ctx context.Context, metadata table.Metadata, loc string, pro
 
 	wfs, ok := fs.(io.WriteFileIO)
 	if !ok {
-		return fmt.Errorf("filesystem IO does not support writing")
+		return errors.New("filesystem IO does not support writing")
 	}
 
 	out, err := wfs.Create(loc)
@@ -57,5 +58,6 @@ func WriteMetadata(ctx context.Context, metadata table.Metadata, loc string, pro
 	}
 
 	defer out.Close()
+
 	return json.NewEncoder(out).Encode(metadata)
 }

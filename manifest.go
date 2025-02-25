@@ -92,41 +92,49 @@ func (b *ManifestV1Builder) PartitionType(st *StructType) *ManifestV1Builder {
 
 func (b *ManifestV1Builder) AddedFiles(cnt int32) *ManifestV1Builder {
 	b.m.AddedFilesCount = &cnt
+
 	return b
 }
 
 func (b *ManifestV1Builder) ExistingFiles(cnt int32) *ManifestV1Builder {
 	b.m.ExistingFilesCount = &cnt
+
 	return b
 }
 
 func (b *ManifestV1Builder) DeletedFiles(cnt int32) *ManifestV1Builder {
 	b.m.DeletedFilesCount = &cnt
+
 	return b
 }
 
 func (b *ManifestV1Builder) AddedRows(cnt int64) *ManifestV1Builder {
 	b.m.AddedRowsCount = &cnt
+
 	return b
 }
 
 func (b *ManifestV1Builder) ExistingRows(cnt int64) *ManifestV1Builder {
 	b.m.ExistingRowsCount = &cnt
+
 	return b
 }
 
 func (b *ManifestV1Builder) DeletedRows(cnt int64) *ManifestV1Builder {
 	b.m.DeletedRowsCount = &cnt
+
 	return b
 }
 
 func (b *ManifestV1Builder) Partitions(p []FieldSummary) *ManifestV1Builder {
 	b.m.PartitionList = &p
+
 	return b
 }
 
 func (b *ManifestV1Builder) KeyMetadata(km []byte) *ManifestV1Builder {
 	b.m.Key = km
+
 	return b
 }
 
@@ -149,6 +157,7 @@ type fallbackManifestFileV1 struct {
 
 func (f *fallbackManifestFileV1) toManifest() *manifestFileV1 {
 	f.manifestFileV1.AddedSnapshotID = *f.AddedSnapshotID
+
 	return &f.manifestFileV1
 }
 
@@ -175,6 +184,7 @@ func (m *manifestFileV1) PartitionSpecID() int32 { return m.SpecID }
 func (m *manifestFileV1) ManifestContent() ManifestContent {
 	return ManifestContentData
 }
+
 func (m *manifestFileV1) SnapshotID() int64 {
 	return m.AddedSnapshotID
 }
@@ -183,6 +193,7 @@ func (m *manifestFileV1) AddedDataFiles() int32 {
 	if m.AddedFilesCount == nil {
 		return 0
 	}
+
 	return *m.AddedFilesCount
 }
 
@@ -190,6 +201,7 @@ func (m *manifestFileV1) ExistingDataFiles() int32 {
 	if m.ExistingFilesCount == nil {
 		return 0
 	}
+
 	return *m.ExistingFilesCount
 }
 
@@ -197,6 +209,7 @@ func (m *manifestFileV1) DeletedDataFiles() int32 {
 	if m.DeletedFilesCount == nil {
 		return 0
 	}
+
 	return *m.DeletedFilesCount
 }
 
@@ -204,6 +217,7 @@ func (m *manifestFileV1) AddedRows() int64 {
 	if m.AddedRowsCount == nil {
 		return 0
 	}
+
 	return *m.AddedRowsCount
 }
 
@@ -211,6 +225,7 @@ func (m *manifestFileV1) ExistingRows() int64 {
 	if m.ExistingRowsCount == nil {
 		return 0
 	}
+
 	return *m.ExistingRowsCount
 }
 
@@ -218,6 +233,7 @@ func (m *manifestFileV1) DeletedRows() int64 {
 	if m.DeletedRowsCount == nil {
 		return 0
 	}
+
 	return *m.DeletedRowsCount
 }
 
@@ -236,6 +252,7 @@ func (m *manifestFileV1) Partitions() []FieldSummary {
 	if m.PartitionList == nil {
 		return nil
 	}
+
 	return *m.PartitionList
 }
 
@@ -277,46 +294,55 @@ func (b *ManifestV2Builder) PartitionSchema(st *StructType) *ManifestV2Builder {
 
 func (b *ManifestV2Builder) SequenceNum(num, minSeqNum int64) *ManifestV2Builder {
 	b.m.SeqNumber, b.m.MinSeqNumber = num, minSeqNum
+
 	return b
 }
 
 func (b *ManifestV2Builder) AddedFiles(cnt int32) *ManifestV2Builder {
 	b.m.AddedFilesCount = cnt
+
 	return b
 }
 
 func (b *ManifestV2Builder) ExistingFiles(cnt int32) *ManifestV2Builder {
 	b.m.ExistingFilesCount = cnt
+
 	return b
 }
 
 func (b *ManifestV2Builder) DeletedFiles(cnt int32) *ManifestV2Builder {
 	b.m.DeletedFilesCount = cnt
+
 	return b
 }
 
 func (b *ManifestV2Builder) AddedRows(cnt int64) *ManifestV2Builder {
 	b.m.AddedRowsCount = cnt
+
 	return b
 }
 
 func (b *ManifestV2Builder) ExistingRows(cnt int64) *ManifestV2Builder {
 	b.m.ExistingRowsCount = cnt
+
 	return b
 }
 
 func (b *ManifestV2Builder) DeletedRows(cnt int64) *ManifestV2Builder {
 	b.m.DeletedRowsCount = cnt
+
 	return b
 }
 
 func (b *ManifestV2Builder) Partitions(p []FieldSummary) *ManifestV2Builder {
 	b.m.PartitionList = &p
+
 	return b
 }
 
 func (b *ManifestV2Builder) KeyMetadata(km []byte) *ManifestV2Builder {
 	b.m.Key = km
+
 	return b
 }
 
@@ -393,6 +419,7 @@ func (m *manifestFileV2) Partitions() []FieldSummary {
 	if m.PartitionList == nil {
 		return nil
 	}
+
 	return *m.PartitionList
 }
 
@@ -420,6 +447,7 @@ func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType) {
 				return f
 			}
 		}
+
 		return nil
 	}
 
@@ -443,6 +471,7 @@ func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType) {
 			}
 		}
 	}
+
 	return result, logicalTypes
 }
 
@@ -479,6 +508,7 @@ func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]M
 				if f.Type().Type() == avro.Union {
 					isFallback = true
 				}
+
 				break
 			}
 		}
@@ -603,6 +633,7 @@ func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
 			if f.Type().Type() == avro.Union {
 				fallbackAddedSnapshot = true
 			}
+
 			break
 		}
 	}
@@ -1253,6 +1284,7 @@ func avroColMapToMap[K comparable, V any](c *[]colMap[K, V]) map[K]V {
 	for _, data := range *c {
 		out[data.Key] = data.Value
 	}
+
 	return out
 }
 
@@ -1265,6 +1297,7 @@ func mapToAvroColMap[K comparable, V any](m map[K]V) *[]colMap[K, V] {
 	for k, v := range m {
 		out = append(out, colMap[K, V]{Key: k, Value: v})
 	}
+
 	return &out
 }
 
@@ -1287,11 +1320,13 @@ func avroPartitionData(input map[string]any, nameToID map[string]int, logicalTyp
 				default:
 					out[k] = v
 				}
+
 				continue
 			}
 		}
 		out[k] = v
 	}
+
 	return out
 }
 
@@ -1355,6 +1390,7 @@ func (d *dataFile) FilePath() string                  { return d.Path }
 func (d *dataFile) FileFormat() FileFormat            { return d.Format }
 func (d *dataFile) Partition() map[string]any {
 	d.initializeMapData()
+
 	return d.PartitionData
 }
 
@@ -1363,36 +1399,43 @@ func (d *dataFile) FileSizeBytes() int64 { return d.FileSize }
 
 func (d *dataFile) ColumnSizes() map[int]int64 {
 	d.initializeMapData()
+
 	return d.colSizeMap
 }
 
 func (d *dataFile) ValueCounts() map[int]int64 {
 	d.initializeMapData()
+
 	return d.valCntMap
 }
 
 func (d *dataFile) NullValueCounts() map[int]int64 {
 	d.initializeMapData()
+
 	return d.nullCntMap
 }
 
 func (d *dataFile) NaNValueCounts() map[int]int64 {
 	d.initializeMapData()
+
 	return d.nanCntMap
 }
 
 func (d *dataFile) DistinctValueCounts() map[int]int64 {
 	d.initializeMapData()
+
 	return d.distinctCntMap
 }
 
 func (d *dataFile) LowerBoundValues() map[int][]byte {
 	d.initializeMapData()
+
 	return d.lowerBoundMap
 }
 
 func (d *dataFile) UpperBoundValues() map[int][]byte {
 	d.initializeMapData()
+
 	return d.upperBoundMap
 }
 
@@ -1400,6 +1443,7 @@ func (d *dataFile) KeyMetadata() []byte {
 	if d.Key == nil {
 		return nil
 	}
+
 	return *d.Key
 }
 
@@ -1407,6 +1451,7 @@ func (d *dataFile) SplitOffsets() []int64 {
 	if d.Splits == nil {
 		return nil
 	}
+
 	return *d.Splits
 }
 
@@ -1414,6 +1459,7 @@ func (d *dataFile) EqualityFieldIDs() []int {
 	if d.EqualityIDs == nil {
 		return nil
 	}
+
 	return *d.EqualityIDs
 }
 
@@ -1457,6 +1503,7 @@ type fallbackManifestEntryV1 struct {
 
 func (f *fallbackManifestEntryV1) toEntry() *manifestEntryV1 {
 	f.manifestEntryV1.Snapshot = *f.Snapshot
+
 	return &f.manifestEntryV1
 }
 
@@ -1469,6 +1516,7 @@ func (m *manifestEntryV1) SequenceNum() int64 {
 	if m.SeqNum == nil {
 		return 0
 	}
+
 	return *m.SeqNum
 }
 
@@ -1513,12 +1561,14 @@ func NewManifestEntryV2Builder(status ManifestEntryStatus, snapshotID int64, dat
 // SequenceNum sets the sequence number for the manifest entry.
 func (b *ManifestEntryV2Builder) SequenceNum(num int64) *ManifestEntryV2Builder {
 	b.m.SeqNum = &num
+
 	return b
 }
 
 // FileSequenceNum sets the file sequence number for the manifest entry.
 func (b *ManifestEntryV2Builder) FileSequenceNum(num int64) *ManifestEntryV2Builder {
 	b.m.FileSeqNum = &num
+
 	return b
 }
 
@@ -1559,6 +1609,7 @@ func (m *manifestEntryV2) SnapshotID() int64 {
 	if m.Snapshot == nil {
 		return 0
 	}
+
 	return *m.Snapshot
 }
 
@@ -1566,6 +1617,7 @@ func (m *manifestEntryV2) SequenceNum() int64 {
 	if m.SeqNum == nil {
 		return 0
 	}
+
 	return *m.SeqNum
 }
 
@@ -1647,72 +1699,84 @@ func NewDataFileBuilder(
 // BlockSizeInBytes sets the block size in bytes for the data file. Deprecated in v2.
 func (b *DataFileBuilder) BlockSizeInBytes(size int64) *DataFileBuilder {
 	b.d.BlockSizeInBytes = size
+
 	return b
 }
 
 // ColumnSizes sets the column sizes for the data file.
 func (b *DataFileBuilder) ColumnSizes(sizes map[int]int64) *DataFileBuilder {
 	b.d.ColSizes = mapToAvroColMap(sizes)
+
 	return b
 }
 
 // ValueCounts sets the value counts for the data file.
 func (b *DataFileBuilder) ValueCounts(counts map[int]int64) *DataFileBuilder {
 	b.d.ValCounts = mapToAvroColMap(counts)
+
 	return b
 }
 
 // NullValueCounts sets the null value counts for the data file.
 func (b *DataFileBuilder) NullValueCounts(counts map[int]int64) *DataFileBuilder {
 	b.d.NullCounts = mapToAvroColMap(counts)
+
 	return b
 }
 
 // NaNValueCounts sets the NaN value counts for the data file.
 func (b *DataFileBuilder) NaNValueCounts(counts map[int]int64) *DataFileBuilder {
 	b.d.NaNCounts = mapToAvroColMap(counts)
+
 	return b
 }
 
 // DistinctValueCounts sets the distinct value counts for the data file.
 func (b *DataFileBuilder) DistinctValueCounts(counts map[int]int64) *DataFileBuilder {
 	b.d.DistinctCounts = mapToAvroColMap(counts)
+
 	return b
 }
 
 // LowerBoundValues sets the lower bound values for the data file.
 func (b *DataFileBuilder) LowerBoundValues(bounds map[int][]byte) *DataFileBuilder {
 	b.d.LowerBounds = mapToAvroColMap(bounds)
+
 	return b
 }
 
 // UpperBoundValues sets the upper bound values for the data file.
 func (b *DataFileBuilder) UpperBoundValues(bounds map[int][]byte) *DataFileBuilder {
 	b.d.UpperBounds = mapToAvroColMap(bounds)
+
 	return b
 }
 
 // KeyMetadata sets the key metadata for the data file.
 func (b *DataFileBuilder) KeyMetadata(key []byte) *DataFileBuilder {
 	b.d.Key = &key
+
 	return b
 }
 
 // SplitOffsets sets the split offsets for the data file.
 func (b *DataFileBuilder) SplitOffsets(offsets []int64) *DataFileBuilder {
 	b.d.Splits = &offsets
+
 	return b
 }
 
 // EqualityFieldIDs sets the equality field ids for the data file.
 func (b *DataFileBuilder) EqualityFieldIDs(ids []int) *DataFileBuilder {
 	b.d.EqualityIDs = &ids
+
 	return b
 }
 
 // SortOrderID sets the sort order id for the data file.
 func (b *DataFileBuilder) SortOrderID(id int) *DataFileBuilder {
 	b.d.SortOrder = &id
+
 	return b
 }
 

@@ -64,6 +64,7 @@ func (s *SortField) String() string {
 	if _, ok := s.Transform.(iceberg.IdentityTransform); ok {
 		return fmt.Sprintf("%d %s %s", s.SourceID, s.Direction, s.NullOrder)
 	}
+
 	return fmt.Sprintf("%s(%d) %s %s", s.Transform, s.SourceID, s.Direction, s.NullOrder)
 }
 
@@ -81,12 +82,13 @@ func (s *SortField) MarshalJSON() ([]byte, error) {
 	}
 
 	type Alias SortField
+
 	return json.Marshal((*Alias)(s))
 }
 
 func (s *SortField) UnmarshalJSON(b []byte) error {
 	type Alias SortField
-	var aux = struct {
+	aux := struct {
 		TransformString string `json:"transform"`
 		*Alias
 	}{
@@ -152,6 +154,7 @@ func (s SortOrder) String() string {
 		b.WriteByte('\n')
 	}
 	b.WriteByte(']')
+
 	return b.String()
 }
 
@@ -166,6 +169,7 @@ func (s *SortOrder) UnmarshalJSON(b []byte) error {
 	if len(s.Fields) == 0 {
 		s.Fields = []SortField{}
 		s.OrderID = 0
+
 		return nil
 	}
 
@@ -208,5 +212,6 @@ func AssignFreshSortOrderIDsWithID(sortOrder SortOrder, old, fresh *iceberg.Sche
 			NullOrder: field.NullOrder,
 		})
 	}
+
 	return SortOrder{OrderID: sortOrderID, Fields: fields}, nil
 }

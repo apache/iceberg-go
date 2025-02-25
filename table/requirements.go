@@ -18,6 +18,7 @@
 package table
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -61,7 +62,7 @@ func AssertCreate() Requirement {
 
 func (a *assertCreate) Validate(meta Metadata) error {
 	if meta != nil {
-		return fmt.Errorf("Table already exists")
+		return errors.New("Table already exists")
 	}
 
 	return nil
@@ -82,7 +83,7 @@ func AssertTableUUID(uuid uuid.UUID) Requirement {
 
 func (a *assertTableUuid) Validate(meta Metadata) error {
 	if meta == nil {
-		return fmt.Errorf("requirement failed: current table metadata does not exist")
+		return errors.New("requirement failed: current table metadata does not exist")
 	}
 
 	if meta.TableUUID() != a.UUID {
@@ -111,13 +112,14 @@ func AssertRefSnapshotID(ref string, id *int64) Requirement {
 
 func (a *assertRefSnapshotID) Validate(meta Metadata) error {
 	if meta == nil {
-		return fmt.Errorf("requirement failed: current table metadata does not exist")
+		return errors.New("requirement failed: current table metadata does not exist")
 	}
 
 	var r *SnapshotRef
 	for name, ref := range meta.Refs() {
 		if name == a.Ref {
 			r = &ref
+
 			break
 		}
 	}
@@ -152,7 +154,7 @@ func AssertLastAssignedFieldID(id int) Requirement {
 
 func (a *assertLastAssignedFieldId) Validate(meta Metadata) error {
 	if meta == nil {
-		return fmt.Errorf("requirement failed: current table metadata does not exist")
+		return errors.New("requirement failed: current table metadata does not exist")
 	}
 
 	if meta.LastColumnID() != a.LastAssignedFieldID {
@@ -178,7 +180,7 @@ func AssertCurrentSchemaID(id int) Requirement {
 
 func (a *assertCurrentSchemaId) Validate(meta Metadata) error {
 	if meta == nil {
-		return fmt.Errorf("requirement failed: current table metadata does not exist")
+		return errors.New("requirement failed: current table metadata does not exist")
 	}
 
 	if meta.CurrentSchema().ID != a.CurrentSchemaID {
@@ -204,7 +206,7 @@ func AssertLastAssignedPartitionID(id int) Requirement {
 
 func (a *assertLastAssignedPartitionId) Validate(meta Metadata) error {
 	if meta == nil {
-		return fmt.Errorf("requirement failed: current table metadata does not exist")
+		return errors.New("requirement failed: current table metadata does not exist")
 	}
 
 	if *meta.LastPartitionSpecID() != a.LastAssignedPartitionID {
@@ -230,7 +232,7 @@ func AssertDefaultSpecID(id int) Requirement {
 
 func (a *assertDefaultSpecId) Validate(meta Metadata) error {
 	if meta == nil {
-		return fmt.Errorf("requirement failed: current table metadata does not exist")
+		return errors.New("requirement failed: current table metadata does not exist")
 	}
 
 	if meta.DefaultPartitionSpec() != a.DefaultSpecID {
@@ -256,7 +258,7 @@ func AssertDefaultSortOrderID(id int) Requirement {
 
 func (a *assertDefaultSortOrderId) Validate(meta Metadata) error {
 	if meta == nil {
-		return fmt.Errorf("requirement failed: current table metadata does not exist")
+		return errors.New("requirement failed: current table metadata does not exist")
 	}
 
 	if meta.DefaultSortOrder() != a.DefaultSortOrderID {

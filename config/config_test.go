@@ -41,7 +41,8 @@ catalog:
     warehouse: catalog_name
 `), "default", nil},
 	// default catalog
-	{[]byte(`
+	{
+		[]byte(`
 catalog:
   default:
     type: rest
@@ -56,9 +57,11 @@ catalog:
 			Output:      "text",
 			Credential:  "client-id:client-secret",
 			Warehouse:   "catalog_name",
-		}},
+		},
+	},
 	// custom catalog
-	{[]byte(`
+	{
+		[]byte(`
 catalog:
   custom-catalog:
     type: rest
@@ -73,7 +76,8 @@ catalog:
 			Output:      "text",
 			Credential:  "client-id:client-secret",
 			Warehouse:   "catalog_name",
-		}},
+		},
+	},
 }
 
 func TestParseConfig(t *testing.T) {

@@ -32,7 +32,6 @@ const (
 )
 
 func TestManifestEvaluator(t *testing.T) {
-
 	var (
 		IntMin, IntMax       = []byte{byte(IntMinValue), 0x00, 0x00, 0x00}, []byte{byte(IntMaxValue), 0x00, 0x00, 0x00}
 		StringMin, StringMax = []byte("a"), []byte("z")
@@ -43,32 +42,58 @@ func TestManifestEvaluator(t *testing.T) {
 		NanTrue, NanFalse    = true, false
 
 		testSchema = iceberg.NewSchema(1,
-			iceberg.NestedField{ID: 1, Name: "id",
-				Type: iceberg.PrimitiveTypes.Int32, Required: true},
-			iceberg.NestedField{ID: 2, Name: "all_nulls_missing_nan",
-				Type: iceberg.PrimitiveTypes.String, Required: false},
-			iceberg.NestedField{ID: 3, Name: "some_nulls",
-				Type: iceberg.PrimitiveTypes.String, Required: false},
-			iceberg.NestedField{ID: 4, Name: "no_nulls",
-				Type: iceberg.PrimitiveTypes.String, Required: false},
-			iceberg.NestedField{ID: 5, Name: "float",
-				Type: iceberg.PrimitiveTypes.Float32, Required: false},
-			iceberg.NestedField{ID: 6, Name: "all_nulls_double",
-				Type: iceberg.PrimitiveTypes.Float64, Required: false},
-			iceberg.NestedField{ID: 7, Name: "all_nulls_no_nans",
-				Type: iceberg.PrimitiveTypes.Float32, Required: false},
-			iceberg.NestedField{ID: 8, Name: "all_nans",
-				Type: iceberg.PrimitiveTypes.Float64, Required: false},
-			iceberg.NestedField{ID: 9, Name: "both_nan_and_null",
-				Type: iceberg.PrimitiveTypes.Float32, Required: false},
-			iceberg.NestedField{ID: 10, Name: "no_nan_or_null",
-				Type: iceberg.PrimitiveTypes.Float64, Required: false},
-			iceberg.NestedField{ID: 11, Name: "all_nulls_missing_nan_float",
-				Type: iceberg.PrimitiveTypes.Float32, Required: false},
-			iceberg.NestedField{ID: 12, Name: "all_same_value_or_null",
-				Type: iceberg.PrimitiveTypes.String, Required: false},
-			iceberg.NestedField{ID: 13, Name: "no_nulls_same_value_a",
-				Type: iceberg.PrimitiveTypes.Binary, Required: false},
+			iceberg.NestedField{
+				ID: 1, Name: "id",
+				Type: iceberg.PrimitiveTypes.Int32, Required: true,
+			},
+			iceberg.NestedField{
+				ID: 2, Name: "all_nulls_missing_nan",
+				Type: iceberg.PrimitiveTypes.String, Required: false,
+			},
+			iceberg.NestedField{
+				ID: 3, Name: "some_nulls",
+				Type: iceberg.PrimitiveTypes.String, Required: false,
+			},
+			iceberg.NestedField{
+				ID: 4, Name: "no_nulls",
+				Type: iceberg.PrimitiveTypes.String, Required: false,
+			},
+			iceberg.NestedField{
+				ID: 5, Name: "float",
+				Type: iceberg.PrimitiveTypes.Float32, Required: false,
+			},
+			iceberg.NestedField{
+				ID: 6, Name: "all_nulls_double",
+				Type: iceberg.PrimitiveTypes.Float64, Required: false,
+			},
+			iceberg.NestedField{
+				ID: 7, Name: "all_nulls_no_nans",
+				Type: iceberg.PrimitiveTypes.Float32, Required: false,
+			},
+			iceberg.NestedField{
+				ID: 8, Name: "all_nans",
+				Type: iceberg.PrimitiveTypes.Float64, Required: false,
+			},
+			iceberg.NestedField{
+				ID: 9, Name: "both_nan_and_null",
+				Type: iceberg.PrimitiveTypes.Float32, Required: false,
+			},
+			iceberg.NestedField{
+				ID: 10, Name: "no_nan_or_null",
+				Type: iceberg.PrimitiveTypes.Float64, Required: false,
+			},
+			iceberg.NestedField{
+				ID: 11, Name: "all_nulls_missing_nan_float",
+				Type: iceberg.PrimitiveTypes.Float32, Required: false,
+			},
+			iceberg.NestedField{
+				ID: 12, Name: "all_same_value_or_null",
+				Type: iceberg.PrimitiveTypes.String, Required: false,
+			},
+			iceberg.NestedField{
+				ID: 13, Name: "no_nulls_same_value_a",
+				Type: iceberg.PrimitiveTypes.Binary, Required: false,
+			},
 		)
 	)
 
@@ -293,203 +318,387 @@ func TestManifestEvaluator(t *testing.T) {
 			expect bool
 			msg    string
 		}{
-			{iceberg.NewNot(iceberg.LessThan(iceberg.Reference("id"), int32(IntMinValue-25))),
-				true, "should read: not(false)"},
-			{iceberg.NewNot(iceberg.GreaterThan(iceberg.Reference("id"), int32(IntMinValue-25))),
-				false, "should skip: not(true)"},
-			{iceberg.NewAnd(
-				iceberg.LessThan(iceberg.Reference("id"), int32(IntMinValue-25)),
-				iceberg.GreaterThanEqual(iceberg.Reference("id"), int32(IntMinValue-30))),
-				false, "should skip: and(false, true)"},
-			{iceberg.NewAnd(
-				iceberg.LessThan(iceberg.Reference("id"), int32(IntMinValue-25)),
-				iceberg.GreaterThanEqual(iceberg.Reference("id"), int32(IntMaxValue+1))),
-				false, "should skip: and(false, false)"},
-			{iceberg.NewAnd(
-				iceberg.GreaterThan(iceberg.Reference("id"), int32(IntMinValue-25)),
-				iceberg.LessThanEqual(iceberg.Reference("id"), int32(IntMinValue))),
-				true, "should read: and(true, true)"},
-			{iceberg.NewOr(
-				iceberg.LessThan(iceberg.Reference("id"), int32(IntMinValue-25)),
-				iceberg.GreaterThanEqual(iceberg.Reference("id"), int32(IntMaxValue+1))),
-				false, "should skip: or(false, false)"},
-			{iceberg.NewOr(
-				iceberg.LessThan(iceberg.Reference("id"), int32(IntMinValue-25)),
-				iceberg.GreaterThanEqual(iceberg.Reference("id"), int32(IntMaxValue-19))),
-				true, "should read: or(false, true)"},
-			{iceberg.LessThan(iceberg.Reference("some_nulls"), "1"), false,
-				"should not read: id range below lower bound"},
-			{iceberg.LessThan(iceberg.Reference("some_nulls"), "b"), true,
-				"should read: lower bound in range"},
-			{iceberg.LessThan(iceberg.Reference("float"), 15.50), true,
-				"should read: lower bound in range"},
-			{iceberg.LessThan(iceberg.Reference("no_nan_or_null"), 15.50), true,
-				"should read: lower bound in range"},
-			{iceberg.LessThanEqual(iceberg.Reference("no_nulls_same_value_a"), "a"), true,
-				"should read: lower bound in range"},
-			{iceberg.LessThan(iceberg.Reference("id"), int32(IntMinValue-25)), false,
-				"should not read: id range below lower bound (5 < 30)"},
-			{iceberg.LessThan(iceberg.Reference("id"), int32(IntMinValue)), false,
-				"should not read: id range below lower bound (30 is not < 30)"},
-			{iceberg.LessThan(iceberg.Reference("id"), int32(IntMinValue+1)), true,
-				"should read: one possible id"},
-			{iceberg.LessThan(iceberg.Reference("id"), int32(IntMaxValue)), true,
-				"should read: many possible ids"},
-			{iceberg.LessThanEqual(iceberg.Reference("id"), int32(IntMinValue-25)), false,
-				"should not read: id range below lower bound (5 < 30)"},
-			{iceberg.LessThanEqual(iceberg.Reference("id"), int32(IntMinValue-1)), false,
-				"should not read: id range below lower bound 29 < 30"},
-			{iceberg.LessThanEqual(iceberg.Reference("id"), int32(IntMinValue)), true,
-				"should read: one possible id"},
-			{iceberg.LessThanEqual(iceberg.Reference("id"), int32(IntMaxValue)), true,
-				"should read: many possible ids"},
-			{iceberg.GreaterThan(iceberg.Reference("id"), int32(IntMaxValue+6)), false,
-				"should not read: id range above upper bound (85 < 79)"},
-			{iceberg.GreaterThan(iceberg.Reference("id"), int32(IntMaxValue)), false,
-				"should not read: id range above upper bound (79 is not > 79)"},
-			{iceberg.GreaterThan(iceberg.Reference("id"), int32(IntMaxValue-1)), true,
-				"should read: one possible id"},
-			{iceberg.GreaterThan(iceberg.Reference("id"), int32(IntMaxValue-4)), true,
-				"should read: many possible ids"},
-			{iceberg.GreaterThanEqual(iceberg.Reference("id"), int32(IntMaxValue+6)), false,
-				"should not read: id range is above upper bound (85 < 79)"},
-			{iceberg.GreaterThanEqual(iceberg.Reference("id"), int32(IntMaxValue+1)), false,
-				"should not read: id range above upper bound (80 > 79)"},
-			{iceberg.GreaterThanEqual(iceberg.Reference("id"), int32(IntMaxValue)), true,
-				"should read: one possible id"},
-			{iceberg.GreaterThanEqual(iceberg.Reference("id"), int32(IntMaxValue)), true,
-				"should read: many possible ids"},
-			{iceberg.EqualTo(iceberg.Reference("id"), int32(IntMinValue-25)), false,
-				"should not read: id below lower bound"},
-			{iceberg.EqualTo(iceberg.Reference("id"), int32(IntMinValue-1)), false,
-				"should not read: id below lower bound"},
-			{iceberg.EqualTo(iceberg.Reference("id"), int32(IntMinValue)), true,
-				"should read: id equal to lower bound"},
-			{iceberg.EqualTo(iceberg.Reference("id"), int32(IntMaxValue-4)), true,
-				"should read: id between lower and upper bounds"},
-			{iceberg.EqualTo(iceberg.Reference("id"), int32(IntMaxValue)), true,
-				"should read: id equal to upper bound"},
-			{iceberg.EqualTo(iceberg.Reference("id"), int32(IntMaxValue+1)), false,
-				"should not read: id above upper bound"},
-			{iceberg.EqualTo(iceberg.Reference("id"), int32(IntMaxValue+6)), false,
-				"should not read: id above upper bound"},
-			{iceberg.NotEqualTo(iceberg.Reference("id"), int32(IntMinValue-25)), true,
-				"should read: id below lower bound"},
-			{iceberg.NotEqualTo(iceberg.Reference("id"), int32(IntMinValue-1)), true,
-				"should read: id below lower bound"},
-			{iceberg.NotEqualTo(iceberg.Reference("id"), int32(IntMinValue)), true,
-				"should read: id equal to lower bound"},
-			{iceberg.NotEqualTo(iceberg.Reference("id"), int32(IntMaxValue-4)), true,
-				"should read: id between lower and upper bounds"},
-			{iceberg.NotEqualTo(iceberg.Reference("id"), int32(IntMaxValue)), true,
-				"should read: id equal to upper bound"},
-			{iceberg.NotEqualTo(iceberg.Reference("id"), int32(IntMaxValue+1)), true,
-				"should read: id above upper bound"},
-			{iceberg.NotEqualTo(iceberg.Reference("id"), int32(IntMaxValue+6)), true,
-				"should read: id above upper bound"},
-			{iceberg.NewNot(iceberg.EqualTo(iceberg.Reference("id"), int32(IntMinValue-25))), true,
-				"should read: id below lower bound"},
-			{iceberg.NewNot(iceberg.EqualTo(iceberg.Reference("id"), int32(IntMinValue-1))), true,
-				"should read: id below lower bound"},
-			{iceberg.NewNot(iceberg.EqualTo(iceberg.Reference("id"), int32(IntMinValue))), true,
-				"should read: id equal to lower bound"},
-			{iceberg.NewNot(iceberg.EqualTo(iceberg.Reference("id"), int32(IntMaxValue-4))), true,
-				"should read: id between lower and upper bounds"},
-			{iceberg.NewNot(iceberg.EqualTo(iceberg.Reference("id"), int32(IntMaxValue))), true,
-				"should read: id equal to upper bound"},
-			{iceberg.NewNot(iceberg.EqualTo(iceberg.Reference("id"), int32(IntMaxValue+1))), true,
-				"should read: id above upper bound"},
-			{iceberg.NewNot(iceberg.EqualTo(iceberg.Reference("id"), int32(IntMaxValue+6))), true,
-				"should read: id above upper bound"},
-			{iceberg.IsIn(iceberg.Reference("id"), int32(IntMinValue-25), IntMinValue-24), false,
-				"should not read: id below lower bound (5 < 30, 6 < 30)"},
-			{iceberg.IsIn(iceberg.Reference("id"), int32(IntMinValue-2), IntMinValue-1), false,
-				"should not read: id below lower bound (28 < 30, 29 < 30)"},
-			{iceberg.IsIn(iceberg.Reference("id"), int32(IntMinValue-1), IntMinValue), true,
-				"should read: id equal to lower bound (30 == 30)"},
-			{iceberg.IsIn(iceberg.Reference("id"), int32(IntMaxValue-4), IntMaxValue-3), true,
-				"should read: id between lower and upper bounds (30 < 75 < 79, 30 < 76 < 79)"},
-			{iceberg.IsIn(iceberg.Reference("id"), int32(IntMaxValue), IntMaxValue+1), true,
-				"should read: id equal to upper bound (79 == 79)"},
-			{iceberg.IsIn(iceberg.Reference("id"), int32(IntMaxValue+1), IntMaxValue+2), false,
-				"should not read: id above upper bound (80 > 79, 81 > 79)"},
-			{iceberg.IsIn(iceberg.Reference("id"), int32(IntMaxValue+6), IntMaxValue+7), false,
-				"should not read: id above upper bound (85 > 79, 86 > 79)"},
-			{iceberg.IsIn(iceberg.Reference("all_nulls_missing_nan"), "abc", "def"), false,
-				"should skip: in on all nulls column"},
-			{iceberg.IsIn(iceberg.Reference("some_nulls"), "abc", "def"), true,
-				"should read: in on some nulls column"},
-			{iceberg.IsIn(iceberg.Reference("no_nulls"), "abc", "def"), true,
-				"should read: in on no nulls column"},
-			{iceberg.IsIn(iceberg.Reference("no_nulls_same_value_a"), "a", "b"), true,
-				"should read: in on no nulls column"},
-			{iceberg.IsIn(iceberg.Reference("float"), 0, -5.5), true,
-				"should read: float equal to lower bound"},
-			{iceberg.IsIn(iceberg.Reference("no_nan_or_null"), 0, -5.5), true,
-				"should read: float equal to lower bound"},
-			{iceberg.NotIn(iceberg.Reference("id"), int32(IntMinValue-25), IntMinValue-24), true,
-				"should read: id below lower bound (5 < 30, 6 < 30)"},
-			{iceberg.NotIn(iceberg.Reference("id"), int32(IntMinValue-2), IntMinValue-1), true,
-				"should read: id below lower bound (28 < 30, 29 < 30)"},
-			{iceberg.NotIn(iceberg.Reference("id"), int32(IntMinValue-1), IntMinValue), true,
-				"should read: id equal to lower bound (30 == 30)"},
-			{iceberg.NotIn(iceberg.Reference("id"), int32(IntMaxValue-4), IntMaxValue-3), true,
-				"should read: id between lower and upper bounds (30 < 75 < 79, 30 < 76 < 79)"},
-			{iceberg.NotIn(iceberg.Reference("id"), int32(IntMaxValue), IntMaxValue+1), true,
-				"should read: id equal to upper bound (79 == 79)"},
-			{iceberg.NotIn(iceberg.Reference("id"), int32(IntMaxValue+1), IntMaxValue+2), true,
-				"should read: id above upper bound (80 > 79, 81 > 79)"},
-			{iceberg.NotIn(iceberg.Reference("id"), int32(IntMaxValue+6), IntMaxValue+7), true,
-				"should read: id above upper bound (85 > 79, 86 > 79)"},
-			{iceberg.NotIn(iceberg.Reference("all_nulls_missing_nan"), "abc", "def"), true,
-				"should read: notIn on all nulls column"},
-			{iceberg.NotIn(iceberg.Reference("some_nulls"), "abc", "def"), true,
-				"should read: notIn on some nulls column"},
-			{iceberg.NotIn(iceberg.Reference("no_nulls"), "abc", "def"), true,
-				"should read: notIn on no nulls column"},
-			{iceberg.StartsWith(iceberg.Reference("some_nulls"), "a"), true,
-				"should read: range matches"},
-			{iceberg.StartsWith(iceberg.Reference("some_nulls"), "aa"), true,
-				"should read: range matches"},
-			{iceberg.StartsWith(iceberg.Reference("some_nulls"), "dddd"), true,
-				"should read: range matches"},
-			{iceberg.StartsWith(iceberg.Reference("some_nulls"), "z"), true,
-				"should read: range matches"},
-			{iceberg.StartsWith(iceberg.Reference("no_nulls"), "a"), true,
-				"should read: range matches"},
-			{iceberg.StartsWith(iceberg.Reference("some_nulls"), "zzzz"), false,
-				"should skip: range doesn't match"},
-			{iceberg.StartsWith(iceberg.Reference("some_nulls"), "1"), false,
-				"should skip: range doesn't match"},
-			{iceberg.StartsWith(iceberg.Reference("no_nulls_same_value_a"), "a"), true,
-				"should read: all values start with the prefix"},
-			{iceberg.NotStartsWith(iceberg.Reference("some_nulls"), "a"), true,
-				"should read: range matches"},
-			{iceberg.NotStartsWith(iceberg.Reference("some_nulls"), "aa"), true,
-				"should read: range matches"},
-			{iceberg.NotStartsWith(iceberg.Reference("some_nulls"), "dddd"), true,
-				"should read: range matches"},
-			{iceberg.NotStartsWith(iceberg.Reference("some_nulls"), "z"), true,
-				"should read: range matches"},
-			{iceberg.NotStartsWith(iceberg.Reference("no_nulls"), "a"), true,
-				"should read: range matches"},
-			{iceberg.NotStartsWith(iceberg.Reference("some_nulls"), "zzzz"), true,
-				"should read: range matches"},
-			{iceberg.NotStartsWith(iceberg.Reference("some_nulls"), "1"), true,
-				"should read: range matches"},
-			{iceberg.NotStartsWith(iceberg.Reference("all_same_value_or_null"), "a"), true,
-				"should read: range matches"},
-			{iceberg.NotStartsWith(iceberg.Reference("all_same_value_or_null"), "aa"), true,
-				"should read: range matches"},
-			{iceberg.NotStartsWith(iceberg.Reference("all_same_value_or_null"), "A"), true,
-				"should read: range matches"},
+			{
+				iceberg.NewNot(iceberg.LessThan(iceberg.Reference("id"), int32(IntMinValue-25))),
+				true, "should read: not(false)",
+			},
+			{
+				iceberg.NewNot(iceberg.GreaterThan(iceberg.Reference("id"), int32(IntMinValue-25))),
+				false, "should skip: not(true)",
+			},
+			{
+				iceberg.NewAnd(
+					iceberg.LessThan(iceberg.Reference("id"), int32(IntMinValue-25)),
+					iceberg.GreaterThanEqual(iceberg.Reference("id"), int32(IntMinValue-30))),
+				false, "should skip: and(false, true)",
+			},
+			{
+				iceberg.NewAnd(
+					iceberg.LessThan(iceberg.Reference("id"), int32(IntMinValue-25)),
+					iceberg.GreaterThanEqual(iceberg.Reference("id"), int32(IntMaxValue+1))),
+				false, "should skip: and(false, false)",
+			},
+			{
+				iceberg.NewAnd(
+					iceberg.GreaterThan(iceberg.Reference("id"), int32(IntMinValue-25)),
+					iceberg.LessThanEqual(iceberg.Reference("id"), int32(IntMinValue))),
+				true, "should read: and(true, true)",
+			},
+			{
+				iceberg.NewOr(
+					iceberg.LessThan(iceberg.Reference("id"), int32(IntMinValue-25)),
+					iceberg.GreaterThanEqual(iceberg.Reference("id"), int32(IntMaxValue+1))),
+				false, "should skip: or(false, false)",
+			},
+			{
+				iceberg.NewOr(
+					iceberg.LessThan(iceberg.Reference("id"), int32(IntMinValue-25)),
+					iceberg.GreaterThanEqual(iceberg.Reference("id"), int32(IntMaxValue-19))),
+				true, "should read: or(false, true)",
+			},
+			{
+				iceberg.LessThan(iceberg.Reference("some_nulls"), "1"), false,
+				"should not read: id range below lower bound",
+			},
+			{
+				iceberg.LessThan(iceberg.Reference("some_nulls"), "b"), true,
+				"should read: lower bound in range",
+			},
+			{
+				iceberg.LessThan(iceberg.Reference("float"), 15.50), true,
+				"should read: lower bound in range",
+			},
+			{
+				iceberg.LessThan(iceberg.Reference("no_nan_or_null"), 15.50), true,
+				"should read: lower bound in range",
+			},
+			{
+				iceberg.LessThanEqual(iceberg.Reference("no_nulls_same_value_a"), "a"), true,
+				"should read: lower bound in range",
+			},
+			{
+				iceberg.LessThan(iceberg.Reference("id"), int32(IntMinValue-25)), false,
+				"should not read: id range below lower bound (5 < 30)",
+			},
+			{
+				iceberg.LessThan(iceberg.Reference("id"), int32(IntMinValue)), false,
+				"should not read: id range below lower bound (30 is not < 30)",
+			},
+			{
+				iceberg.LessThan(iceberg.Reference("id"), int32(IntMinValue+1)), true,
+				"should read: one possible id",
+			},
+			{
+				iceberg.LessThan(iceberg.Reference("id"), int32(IntMaxValue)), true,
+				"should read: many possible ids",
+			},
+			{
+				iceberg.LessThanEqual(iceberg.Reference("id"), int32(IntMinValue-25)), false,
+				"should not read: id range below lower bound (5 < 30)",
+			},
+			{
+				iceberg.LessThanEqual(iceberg.Reference("id"), int32(IntMinValue-1)), false,
+				"should not read: id range below lower bound 29 < 30",
+			},
+			{
+				iceberg.LessThanEqual(iceberg.Reference("id"), int32(IntMinValue)), true,
+				"should read: one possible id",
+			},
+			{
+				iceberg.LessThanEqual(iceberg.Reference("id"), int32(IntMaxValue)), true,
+				"should read: many possible ids",
+			},
+			{
+				iceberg.GreaterThan(iceberg.Reference("id"), int32(IntMaxValue+6)), false,
+				"should not read: id range above upper bound (85 < 79)",
+			},
+			{
+				iceberg.GreaterThan(iceberg.Reference("id"), int32(IntMaxValue)), false,
+				"should not read: id range above upper bound (79 is not > 79)",
+			},
+			{
+				iceberg.GreaterThan(iceberg.Reference("id"), int32(IntMaxValue-1)), true,
+				"should read: one possible id",
+			},
+			{
+				iceberg.GreaterThan(iceberg.Reference("id"), int32(IntMaxValue-4)), true,
+				"should read: many possible ids",
+			},
+			{
+				iceberg.GreaterThanEqual(iceberg.Reference("id"), int32(IntMaxValue+6)), false,
+				"should not read: id range is above upper bound (85 < 79)",
+			},
+			{
+				iceberg.GreaterThanEqual(iceberg.Reference("id"), int32(IntMaxValue+1)), false,
+				"should not read: id range above upper bound (80 > 79)",
+			},
+			{
+				iceberg.GreaterThanEqual(iceberg.Reference("id"), int32(IntMaxValue)), true,
+				"should read: one possible id",
+			},
+			{
+				iceberg.GreaterThanEqual(iceberg.Reference("id"), int32(IntMaxValue)), true,
+				"should read: many possible ids",
+			},
+			{
+				iceberg.EqualTo(iceberg.Reference("id"), int32(IntMinValue-25)), false,
+				"should not read: id below lower bound",
+			},
+			{
+				iceberg.EqualTo(iceberg.Reference("id"), int32(IntMinValue-1)), false,
+				"should not read: id below lower bound",
+			},
+			{
+				iceberg.EqualTo(iceberg.Reference("id"), int32(IntMinValue)), true,
+				"should read: id equal to lower bound",
+			},
+			{
+				iceberg.EqualTo(iceberg.Reference("id"), int32(IntMaxValue-4)), true,
+				"should read: id between lower and upper bounds",
+			},
+			{
+				iceberg.EqualTo(iceberg.Reference("id"), int32(IntMaxValue)), true,
+				"should read: id equal to upper bound",
+			},
+			{
+				iceberg.EqualTo(iceberg.Reference("id"), int32(IntMaxValue+1)), false,
+				"should not read: id above upper bound",
+			},
+			{
+				iceberg.EqualTo(iceberg.Reference("id"), int32(IntMaxValue+6)), false,
+				"should not read: id above upper bound",
+			},
+			{
+				iceberg.NotEqualTo(iceberg.Reference("id"), int32(IntMinValue-25)), true,
+				"should read: id below lower bound",
+			},
+			{
+				iceberg.NotEqualTo(iceberg.Reference("id"), int32(IntMinValue-1)), true,
+				"should read: id below lower bound",
+			},
+			{
+				iceberg.NotEqualTo(iceberg.Reference("id"), int32(IntMinValue)), true,
+				"should read: id equal to lower bound",
+			},
+			{
+				iceberg.NotEqualTo(iceberg.Reference("id"), int32(IntMaxValue-4)), true,
+				"should read: id between lower and upper bounds",
+			},
+			{
+				iceberg.NotEqualTo(iceberg.Reference("id"), int32(IntMaxValue)), true,
+				"should read: id equal to upper bound",
+			},
+			{
+				iceberg.NotEqualTo(iceberg.Reference("id"), int32(IntMaxValue+1)), true,
+				"should read: id above upper bound",
+			},
+			{
+				iceberg.NotEqualTo(iceberg.Reference("id"), int32(IntMaxValue+6)), true,
+				"should read: id above upper bound",
+			},
+			{
+				iceberg.NewNot(iceberg.EqualTo(iceberg.Reference("id"), int32(IntMinValue-25))), true,
+				"should read: id below lower bound",
+			},
+			{
+				iceberg.NewNot(iceberg.EqualTo(iceberg.Reference("id"), int32(IntMinValue-1))), true,
+				"should read: id below lower bound",
+			},
+			{
+				iceberg.NewNot(iceberg.EqualTo(iceberg.Reference("id"), int32(IntMinValue))), true,
+				"should read: id equal to lower bound",
+			},
+			{
+				iceberg.NewNot(iceberg.EqualTo(iceberg.Reference("id"), int32(IntMaxValue-4))), true,
+				"should read: id between lower and upper bounds",
+			},
+			{
+				iceberg.NewNot(iceberg.EqualTo(iceberg.Reference("id"), int32(IntMaxValue))), true,
+				"should read: id equal to upper bound",
+			},
+			{
+				iceberg.NewNot(iceberg.EqualTo(iceberg.Reference("id"), int32(IntMaxValue+1))), true,
+				"should read: id above upper bound",
+			},
+			{
+				iceberg.NewNot(iceberg.EqualTo(iceberg.Reference("id"), int32(IntMaxValue+6))), true,
+				"should read: id above upper bound",
+			},
+			{
+				iceberg.IsIn(iceberg.Reference("id"), int32(IntMinValue-25), IntMinValue-24), false,
+				"should not read: id below lower bound (5 < 30, 6 < 30)",
+			},
+			{
+				iceberg.IsIn(iceberg.Reference("id"), int32(IntMinValue-2), IntMinValue-1), false,
+				"should not read: id below lower bound (28 < 30, 29 < 30)",
+			},
+			{
+				iceberg.IsIn(iceberg.Reference("id"), int32(IntMinValue-1), IntMinValue), true,
+				"should read: id equal to lower bound (30 == 30)",
+			},
+			{
+				iceberg.IsIn(iceberg.Reference("id"), int32(IntMaxValue-4), IntMaxValue-3), true,
+				"should read: id between lower and upper bounds (30 < 75 < 79, 30 < 76 < 79)",
+			},
+			{
+				iceberg.IsIn(iceberg.Reference("id"), int32(IntMaxValue), IntMaxValue+1), true,
+				"should read: id equal to upper bound (79 == 79)",
+			},
+			{
+				iceberg.IsIn(iceberg.Reference("id"), int32(IntMaxValue+1), IntMaxValue+2), false,
+				"should not read: id above upper bound (80 > 79, 81 > 79)",
+			},
+			{
+				iceberg.IsIn(iceberg.Reference("id"), int32(IntMaxValue+6), IntMaxValue+7), false,
+				"should not read: id above upper bound (85 > 79, 86 > 79)",
+			},
+			{
+				iceberg.IsIn(iceberg.Reference("all_nulls_missing_nan"), "abc", "def"), false,
+				"should skip: in on all nulls column",
+			},
+			{
+				iceberg.IsIn(iceberg.Reference("some_nulls"), "abc", "def"), true,
+				"should read: in on some nulls column",
+			},
+			{
+				iceberg.IsIn(iceberg.Reference("no_nulls"), "abc", "def"), true,
+				"should read: in on no nulls column",
+			},
+			{
+				iceberg.IsIn(iceberg.Reference("no_nulls_same_value_a"), "a", "b"), true,
+				"should read: in on no nulls column",
+			},
+			{
+				iceberg.IsIn(iceberg.Reference("float"), 0, -5.5), true,
+				"should read: float equal to lower bound",
+			},
+			{
+				iceberg.IsIn(iceberg.Reference("no_nan_or_null"), 0, -5.5), true,
+				"should read: float equal to lower bound",
+			},
+			{
+				iceberg.NotIn(iceberg.Reference("id"), int32(IntMinValue-25), IntMinValue-24), true,
+				"should read: id below lower bound (5 < 30, 6 < 30)",
+			},
+			{
+				iceberg.NotIn(iceberg.Reference("id"), int32(IntMinValue-2), IntMinValue-1), true,
+				"should read: id below lower bound (28 < 30, 29 < 30)",
+			},
+			{
+				iceberg.NotIn(iceberg.Reference("id"), int32(IntMinValue-1), IntMinValue), true,
+				"should read: id equal to lower bound (30 == 30)",
+			},
+			{
+				iceberg.NotIn(iceberg.Reference("id"), int32(IntMaxValue-4), IntMaxValue-3), true,
+				"should read: id between lower and upper bounds (30 < 75 < 79, 30 < 76 < 79)",
+			},
+			{
+				iceberg.NotIn(iceberg.Reference("id"), int32(IntMaxValue), IntMaxValue+1), true,
+				"should read: id equal to upper bound (79 == 79)",
+			},
+			{
+				iceberg.NotIn(iceberg.Reference("id"), int32(IntMaxValue+1), IntMaxValue+2), true,
+				"should read: id above upper bound (80 > 79, 81 > 79)",
+			},
+			{
+				iceberg.NotIn(iceberg.Reference("id"), int32(IntMaxValue+6), IntMaxValue+7), true,
+				"should read: id above upper bound (85 > 79, 86 > 79)",
+			},
+			{
+				iceberg.NotIn(iceberg.Reference("all_nulls_missing_nan"), "abc", "def"), true,
+				"should read: notIn on all nulls column",
+			},
+			{
+				iceberg.NotIn(iceberg.Reference("some_nulls"), "abc", "def"), true,
+				"should read: notIn on some nulls column",
+			},
+			{
+				iceberg.NotIn(iceberg.Reference("no_nulls"), "abc", "def"), true,
+				"should read: notIn on no nulls column",
+			},
+			{
+				iceberg.StartsWith(iceberg.Reference("some_nulls"), "a"), true,
+				"should read: range matches",
+			},
+			{
+				iceberg.StartsWith(iceberg.Reference("some_nulls"), "aa"), true,
+				"should read: range matches",
+			},
+			{
+				iceberg.StartsWith(iceberg.Reference("some_nulls"), "dddd"), true,
+				"should read: range matches",
+			},
+			{
+				iceberg.StartsWith(iceberg.Reference("some_nulls"), "z"), true,
+				"should read: range matches",
+			},
+			{
+				iceberg.StartsWith(iceberg.Reference("no_nulls"), "a"), true,
+				"should read: range matches",
+			},
+			{
+				iceberg.StartsWith(iceberg.Reference("some_nulls"), "zzzz"), false,
+				"should skip: range doesn't match",
+			},
+			{
+				iceberg.StartsWith(iceberg.Reference("some_nulls"), "1"), false,
+				"should skip: range doesn't match",
+			},
+			{
+				iceberg.StartsWith(iceberg.Reference("no_nulls_same_value_a"), "a"), true,
+				"should read: all values start with the prefix",
+			},
+			{
+				iceberg.NotStartsWith(iceberg.Reference("some_nulls"), "a"), true,
+				"should read: range matches",
+			},
+			{
+				iceberg.NotStartsWith(iceberg.Reference("some_nulls"), "aa"), true,
+				"should read: range matches",
+			},
+			{
+				iceberg.NotStartsWith(iceberg.Reference("some_nulls"), "dddd"), true,
+				"should read: range matches",
+			},
+			{
+				iceberg.NotStartsWith(iceberg.Reference("some_nulls"), "z"), true,
+				"should read: range matches",
+			},
+			{
+				iceberg.NotStartsWith(iceberg.Reference("no_nulls"), "a"), true,
+				"should read: range matches",
+			},
+			{
+				iceberg.NotStartsWith(iceberg.Reference("some_nulls"), "zzzz"), true,
+				"should read: range matches",
+			},
+			{
+				iceberg.NotStartsWith(iceberg.Reference("some_nulls"), "1"), true,
+				"should read: range matches",
+			},
+			{
+				iceberg.NotStartsWith(iceberg.Reference("all_same_value_or_null"), "a"), true,
+				"should read: range matches",
+			},
+			{
+				iceberg.NotStartsWith(iceberg.Reference("all_same_value_or_null"), "aa"), true,
+				"should read: range matches",
+			},
+			{
+				iceberg.NotStartsWith(iceberg.Reference("all_same_value_or_null"), "A"), true,
+				"should read: range matches",
+			},
 			// Iceberg does not implement SQL 3-way boolean logic, so the choice of an
 			// all null column matching is by definition in order to surface more values
 			// to the query engine to allow it to make its own decision
-			{iceberg.NotStartsWith(iceberg.Reference("all_nulls_missing_nan"), "A"), true,
-				"should read: range matches"},
-			{iceberg.NotStartsWith(iceberg.Reference("no_nulls_same_value_a"), "a"), false,
-				"should not read: all values start with the prefix"},
+			{
+				iceberg.NotStartsWith(iceberg.Reference("all_nulls_missing_nan"), "A"), true,
+				"should read: range matches",
+			},
+			{
+				iceberg.NotStartsWith(iceberg.Reference("no_nulls_same_value_a"), "a"), false,
+				"should not read: all values start with the prefix",
+			},
 		}
 
 		for _, tt := range tests {
@@ -525,54 +734,72 @@ func (*ProjectionTestSuite) emptySpec() iceberg.PartitionSpec {
 
 func (*ProjectionTestSuite) idSpec() iceberg.PartitionSpec {
 	return iceberg.NewPartitionSpec(
-		iceberg.PartitionField{SourceID: 1, FieldID: 1000,
-			Transform: iceberg.IdentityTransform{}, Name: "id_part"},
+		iceberg.PartitionField{
+			SourceID: 1, FieldID: 1000,
+			Transform: iceberg.IdentityTransform{}, Name: "id_part",
+		},
 	)
 }
 
 func (*ProjectionTestSuite) bucketSpec() iceberg.PartitionSpec {
 	return iceberg.NewPartitionSpec(
-		iceberg.PartitionField{SourceID: 2, FieldID: 1000,
-			Transform: iceberg.BucketTransform{NumBuckets: 16}, Name: "data_bucket"},
+		iceberg.PartitionField{
+			SourceID: 2, FieldID: 1000,
+			Transform: iceberg.BucketTransform{NumBuckets: 16}, Name: "data_bucket",
+		},
 	)
 }
 
 func (*ProjectionTestSuite) daySpec() iceberg.PartitionSpec {
 	return iceberg.NewPartitionSpec(
-		iceberg.PartitionField{SourceID: 4, FieldID: 1000,
-			Transform: iceberg.DayTransform{}, Name: "date"},
-		iceberg.PartitionField{SourceID: 3, FieldID: 1001,
-			Transform: iceberg.DayTransform{}, Name: "ddate"},
+		iceberg.PartitionField{
+			SourceID: 4, FieldID: 1000,
+			Transform: iceberg.DayTransform{}, Name: "date",
+		},
+		iceberg.PartitionField{
+			SourceID: 3, FieldID: 1001,
+			Transform: iceberg.DayTransform{}, Name: "ddate",
+		},
 	)
 }
 
 func (*ProjectionTestSuite) hourSpec() iceberg.PartitionSpec {
 	return iceberg.NewPartitionSpec(
-		iceberg.PartitionField{SourceID: 4, FieldID: 1000,
-			Transform: iceberg.HourTransform{}, Name: "hour"},
+		iceberg.PartitionField{
+			SourceID: 4, FieldID: 1000,
+			Transform: iceberg.HourTransform{}, Name: "hour",
+		},
 	)
 }
 
 func (*ProjectionTestSuite) truncateStrSpec() iceberg.PartitionSpec {
 	return iceberg.NewPartitionSpec(
-		iceberg.PartitionField{SourceID: 2, FieldID: 1000,
-			Transform: iceberg.TruncateTransform{Width: 2}, Name: "data_trunc"},
+		iceberg.PartitionField{
+			SourceID: 2, FieldID: 1000,
+			Transform: iceberg.TruncateTransform{Width: 2}, Name: "data_trunc",
+		},
 	)
 }
 
 func (*ProjectionTestSuite) truncateIntSpec() iceberg.PartitionSpec {
 	return iceberg.NewPartitionSpec(
-		iceberg.PartitionField{SourceID: 1, FieldID: 1000,
-			Transform: iceberg.TruncateTransform{Width: 10}, Name: "id_trunc"},
+		iceberg.PartitionField{
+			SourceID: 1, FieldID: 1000,
+			Transform: iceberg.TruncateTransform{Width: 10}, Name: "id_trunc",
+		},
 	)
 }
 
 func (*ProjectionTestSuite) idAndBucketSpec() iceberg.PartitionSpec {
 	return iceberg.NewPartitionSpec(
-		iceberg.PartitionField{SourceID: 1, FieldID: 1000,
-			Transform: iceberg.IdentityTransform{}, Name: "id_part"},
-		iceberg.PartitionField{SourceID: 2, FieldID: 1001,
-			Transform: iceberg.BucketTransform{NumBuckets: 16}, Name: "data_bucket"},
+		iceberg.PartitionField{
+			SourceID: 1, FieldID: 1000,
+			Transform: iceberg.IdentityTransform{}, Name: "id_part",
+		},
+		iceberg.PartitionField{
+			SourceID: 2, FieldID: 1001,
+			Transform: iceberg.BucketTransform{NumBuckets: 16}, Name: "data_bucket",
+		},
 	)
 }
 

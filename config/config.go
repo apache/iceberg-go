@@ -49,7 +49,6 @@ func LoadConfig(configPath string) []byte {
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
 			return nil
-
 		}
 		path = filepath.Join(homeDir, cfgFile)
 	}
@@ -57,6 +56,7 @@ func LoadConfig(configPath string) []byte {
 	if err != nil {
 		return nil
 	}
+
 	return file
 }
 
@@ -70,6 +70,7 @@ func ParseConfig(file []byte, catalogName string) *CatalogConfig {
 	if !ok {
 		return nil
 	}
+
 	return &res
 }
 

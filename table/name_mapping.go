@@ -60,6 +60,7 @@ func (m *MappedField) String() string {
 	}
 
 	bldr.WriteByte(')')
+
 	return bldr.String()
 }
 
@@ -74,6 +75,7 @@ func (nm NameMapping) String() string {
 		bldr.WriteByte('\n')
 	}
 	bldr.WriteByte(']')
+
 	return bldr.String()
 }
 
@@ -86,6 +88,7 @@ type NameMappingVisitor[S, T any] interface {
 func VisitNameMapping[S, T any](obj NameMapping, visitor NameMappingVisitor[S, T]) (res S, err error) {
 	if obj == nil {
 		err = fmt.Errorf("%w: cannot visit nil NameMapping", iceberg.ErrInvalidArgument)
+
 		return
 	}
 
@@ -230,6 +233,7 @@ func (nameMapProjectVisitor) mappedFieldID(mapped *MappedField, name string) int
 			if f.FieldID != nil {
 				return *f.FieldID
 			}
+
 			return -1
 		}
 	}
@@ -262,6 +266,7 @@ func (n *nameMapProjectVisitor) Map(m iceberg.MapType, mapPartner *MappedField, 
 
 	keyID := n.mappedFieldID(mapPartner, "key")
 	valID := n.mappedFieldID(mapPartner, "value")
+
 	return iceberg.NestedField{
 		Type: &iceberg.MapType{
 			KeyID:         keyID,

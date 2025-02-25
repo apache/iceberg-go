@@ -58,6 +58,7 @@ func (t Table) Schemas() map[int]*iceberg.Schema {
 	for _, s := range t.metadata.Schemas() {
 		m[s.ID] = s
 	}
+
 	return m
 }
 
@@ -149,6 +150,7 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 	}
 
 	s.partitionFilters = newKeyDefaultMapWrapErr(s.buildPartitionProjection)
+
 	return s
 }
 
@@ -184,5 +186,6 @@ func NewFromLocation(ident Identifier, metalocation string, fsys io.IO) (*Table,
 			return nil, err
 		}
 	}
+
 	return New(ident, meta, metalocation, fsys), nil
 }

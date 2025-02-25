@@ -35,6 +35,7 @@ func (ExprA) Op() iceberg.Operation             { return iceberg.OpFalse }
 func (ExprA) Negate() iceberg.BooleanExpression { return ExprB{} }
 func (ExprA) Equals(o iceberg.BooleanExpression) bool {
 	_, ok := o.(ExprA)
+
 	return ok
 }
 
@@ -45,6 +46,7 @@ func (ExprB) Op() iceberg.Operation             { return iceberg.OpTrue }
 func (ExprB) Negate() iceberg.BooleanExpression { return ExprA{} }
 func (ExprB) Equals(o iceberg.BooleanExpression) bool {
 	_, ok := o.(ExprB)
+
 	return ok
 }
 
@@ -67,13 +69,17 @@ func TestUnaryExpr(t *testing.T) {
 	})
 
 	sc := iceberg.NewSchema(1, iceberg.NestedField{
-		ID: 2, Name: "a", Type: iceberg.PrimitiveTypes.Int32})
+		ID: 2, Name: "a", Type: iceberg.PrimitiveTypes.Int32,
+	})
 	sc2 := iceberg.NewSchema(1, iceberg.NestedField{
-		ID: 2, Name: "a", Type: iceberg.PrimitiveTypes.Float64})
+		ID: 2, Name: "a", Type: iceberg.PrimitiveTypes.Float64,
+	})
 	sc3 := iceberg.NewSchema(1, iceberg.NestedField{
-		ID: 2, Name: "a", Type: iceberg.PrimitiveTypes.Int32, Required: true})
+		ID: 2, Name: "a", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
 	sc4 := iceberg.NewSchema(1, iceberg.NestedField{
-		ID: 2, Name: "a", Type: iceberg.PrimitiveTypes.Float32, Required: true})
+		ID: 2, Name: "a", Type: iceberg.PrimitiveTypes.Float32, Required: true,
+	})
 
 	t.Run("isnull and notnull", func(t *testing.T) {
 		t.Run("bind", func(t *testing.T) {
@@ -475,27 +481,39 @@ func TestBoolExprEQ(t *testing.T) {
 	tests := []struct {
 		exp, testexpra, testexprb iceberg.BooleanExpression
 	}{
-		{iceberg.NewAnd(ExprA{}, ExprB{}),
+		{
 			iceberg.NewAnd(ExprA{}, ExprB{}),
-			iceberg.NewOr(ExprA{}, ExprB{})},
-		{iceberg.NewOr(ExprA{}, ExprB{}),
+			iceberg.NewAnd(ExprA{}, ExprB{}),
 			iceberg.NewOr(ExprA{}, ExprB{}),
-			iceberg.NewAnd(ExprA{}, ExprB{})},
-		{iceberg.NewAnd(ExprA{}, ExprB{}),
+		},
+		{
+			iceberg.NewOr(ExprA{}, ExprB{}),
+			iceberg.NewOr(ExprA{}, ExprB{}),
+			iceberg.NewAnd(ExprA{}, ExprB{}),
+		},
+		{
+			iceberg.NewAnd(ExprA{}, ExprB{}),
 			iceberg.NewAnd(ExprB{}, ExprA{}),
-			iceberg.NewOr(ExprB{}, ExprA{})},
-		{iceberg.NewOr(ExprA{}, ExprB{}),
 			iceberg.NewOr(ExprB{}, ExprA{}),
-			iceberg.NewAnd(ExprB{}, ExprA{})},
+		},
+		{
+			iceberg.NewOr(ExprA{}, ExprB{}),
+			iceberg.NewOr(ExprB{}, ExprA{}),
+			iceberg.NewAnd(ExprB{}, ExprA{}),
+		},
 		{iceberg.NewNot(ExprA{}), iceberg.NewNot(ExprA{}), ExprB{}},
 		{ExprA{}, ExprA{}, ExprB{}},
 		{ExprB{}, ExprB{}, ExprA{}},
-		{iceberg.IsIn(iceberg.Reference("foo"), "hello", "world"),
+		{
 			iceberg.IsIn(iceberg.Reference("foo"), "hello", "world"),
-			iceberg.IsIn(iceberg.Reference("not_foo"), "hello", "world")},
-		{iceberg.IsIn(iceberg.Reference("foo"), "hello", "world"),
 			iceberg.IsIn(iceberg.Reference("foo"), "hello", "world"),
-			iceberg.IsIn(iceberg.Reference("foo"), "goodbye", "world")},
+			iceberg.IsIn(iceberg.Reference("not_foo"), "hello", "world"),
+		},
+		{
+			iceberg.IsIn(iceberg.Reference("foo"), "hello", "world"),
+			iceberg.IsIn(iceberg.Reference("foo"), "hello", "world"),
+			iceberg.IsIn(iceberg.Reference("foo"), "goodbye", "world"),
+		},
 	}
 
 	for i, tt := range tests {
@@ -513,16 +531,26 @@ func TestBoolExprNegate(t *testing.T) {
 		{iceberg.NewAnd(ExprA{}, ExprB{}), iceberg.NewOr(ExprB{}, ExprA{})},
 		{iceberg.NewOr(ExprB{}, ExprA{}), iceberg.NewAnd(ExprA{}, ExprB{})},
 		{iceberg.NewNot(ExprA{}), ExprA{}},
-		{iceberg.IsIn(iceberg.Reference("foo"), "hello", "world"),
-			iceberg.NotIn(iceberg.Reference("foo"), "hello", "world")},
-		{iceberg.NotIn(iceberg.Reference("foo"), "hello", "world"),
-			iceberg.IsIn(iceberg.Reference("foo"), "hello", "world")},
-		{iceberg.GreaterThan(iceberg.Reference("foo"), int32(5)),
-			iceberg.LessThanEqual(iceberg.Reference("foo"), int32(5))},
-		{iceberg.LessThan(iceberg.Reference("foo"), int32(5)),
-			iceberg.GreaterThanEqual(iceberg.Reference("foo"), int32(5))},
-		{iceberg.EqualTo(iceberg.Reference("foo"), int32(5)),
-			iceberg.NotEqualTo(iceberg.Reference("foo"), int32(5))},
+		{
+			iceberg.IsIn(iceberg.Reference("foo"), "hello", "world"),
+			iceberg.NotIn(iceberg.Reference("foo"), "hello", "world"),
+		},
+		{
+			iceberg.NotIn(iceberg.Reference("foo"), "hello", "world"),
+			iceberg.IsIn(iceberg.Reference("foo"), "hello", "world"),
+		},
+		{
+			iceberg.GreaterThan(iceberg.Reference("foo"), int32(5)),
+			iceberg.LessThanEqual(iceberg.Reference("foo"), int32(5)),
+		},
+		{
+			iceberg.LessThan(iceberg.Reference("foo"), int32(5)),
+			iceberg.GreaterThanEqual(iceberg.Reference("foo"), int32(5)),
+		},
+		{
+			iceberg.EqualTo(iceberg.Reference("foo"), int32(5)),
+			iceberg.NotEqualTo(iceberg.Reference("foo"), int32(5)),
+		},
 		{ExprA{}, ExprB{}},
 	}
 
@@ -554,10 +582,14 @@ func TestExprFolding(t *testing.T) {
 	tests := []struct {
 		lhs, rhs iceberg.BooleanExpression
 	}{
-		{iceberg.NewAnd(ExprA{}, ExprB{}, ExprA{}),
-			iceberg.NewAnd(iceberg.NewAnd(ExprA{}, ExprB{}), ExprA{})},
-		{iceberg.NewOr(ExprA{}, ExprB{}, ExprA{}),
-			iceberg.NewOr(iceberg.NewOr(ExprA{}, ExprB{}), ExprA{})},
+		{
+			iceberg.NewAnd(ExprA{}, ExprB{}, ExprA{}),
+			iceberg.NewAnd(iceberg.NewAnd(ExprA{}, ExprB{}), ExprA{}),
+		},
+		{
+			iceberg.NewOr(ExprA{}, ExprB{}, ExprA{}),
+			iceberg.NewOr(iceberg.NewOr(ExprA{}, ExprB{}), ExprA{}),
+		},
 		{iceberg.NewNot(iceberg.NewNot(ExprA{})), ExprA{}},
 	}
 
@@ -636,54 +668,100 @@ func TestToString(t *testing.T) {
 		e        iceberg.BooleanExpression
 		expected string
 	}{
-		{iceberg.NewAnd(null, nan),
-			"And(left=IsNull(term=Reference(name='a')), right=IsNaN(term=Reference(name='g')))"},
-		{iceberg.NewOr(null, nan),
-			"Or(left=IsNull(term=Reference(name='a')), right=IsNaN(term=Reference(name='g')))"},
-		{iceberg.NewNot(null),
-			"Not(child=IsNull(term=Reference(name='a')))"},
+		{
+			iceberg.NewAnd(null, nan),
+			"And(left=IsNull(term=Reference(name='a')), right=IsNaN(term=Reference(name='g')))",
+		},
+		{
+			iceberg.NewOr(null, nan),
+			"Or(left=IsNull(term=Reference(name='a')), right=IsNaN(term=Reference(name='g')))",
+		},
+		{
+			iceberg.NewNot(null),
+			"Not(child=IsNull(term=Reference(name='a')))",
+		},
 		{iceberg.AlwaysTrue{}, "AlwaysTrue()"},
 		{iceberg.AlwaysFalse{}, "AlwaysFalse()"},
-		{boundNull,
-			"BoundIsNull(term=BoundReference(field=1: a: optional string, accessor=Accessor(position=0, inner=<nil>)))"},
-		{boundNull.Negate(),
-			"BoundNotNull(term=BoundReference(field=1: a: optional string, accessor=Accessor(position=0, inner=<nil>)))"},
-		{boundNan,
-			"BoundIsNaN(term=BoundReference(field=7: g: optional float, accessor=Accessor(position=6, inner=<nil>)))"},
-		{boundNan.Negate(),
-			"BoundNotNaN(term=BoundReference(field=7: g: optional float, accessor=Accessor(position=6, inner=<nil>)))"},
-		{equal,
-			"Equal(term=Reference(name='c'), literal=a)"},
-		{equal.Negate(),
-			"NotEqual(term=Reference(name='c'), literal=a)"},
-		{grtequal,
-			"GreaterThanEqual(term=Reference(name='a'), literal=a)"},
-		{grtequal.Negate(),
-			"LessThan(term=Reference(name='a'), literal=a)"},
-		{greater,
-			"GreaterThan(term=Reference(name='a'), literal=a)"},
-		{greater.Negate(),
-			"LessThanEqual(term=Reference(name='a'), literal=a)"},
-		{startsWith,
-			"StartsWith(term=Reference(name='b'), literal=foo)"},
-		{startsWith.Negate(),
-			"NotStartsWith(term=Reference(name='b'), literal=foo)"},
-		{boundEqual,
-			"BoundEqual(term=BoundReference(field=3: c: optional string, accessor=Accessor(position=2, inner=<nil>)), literal=a)"},
-		{boundEqual.Negate(),
-			"BoundNotEqual(term=BoundReference(field=3: c: optional string, accessor=Accessor(position=2, inner=<nil>)), literal=a)"},
-		{boundGreater,
-			"BoundGreaterThan(term=BoundReference(field=1: a: optional string, accessor=Accessor(position=0, inner=<nil>)), literal=a)"},
-		{boundGreater.Negate(),
-			"BoundLessThanEqual(term=BoundReference(field=1: a: optional string, accessor=Accessor(position=0, inner=<nil>)), literal=a)"},
-		{boundGrtEqual,
-			"BoundGreaterThanEqual(term=BoundReference(field=1: a: optional string, accessor=Accessor(position=0, inner=<nil>)), literal=a)"},
-		{boundGrtEqual.Negate(),
-			"BoundLessThan(term=BoundReference(field=1: a: optional string, accessor=Accessor(position=0, inner=<nil>)), literal=a)"},
-		{boundStarts,
-			"BoundStartsWith(term=BoundReference(field=2: b: optional string, accessor=Accessor(position=1, inner=<nil>)), literal=foo)"},
-		{boundStarts.Negate(),
-			"BoundNotStartsWith(term=BoundReference(field=2: b: optional string, accessor=Accessor(position=1, inner=<nil>)), literal=foo)"},
+		{
+			boundNull,
+			"BoundIsNull(term=BoundReference(field=1: a: optional string, accessor=Accessor(position=0, inner=<nil>)))",
+		},
+		{
+			boundNull.Negate(),
+			"BoundNotNull(term=BoundReference(field=1: a: optional string, accessor=Accessor(position=0, inner=<nil>)))",
+		},
+		{
+			boundNan,
+			"BoundIsNaN(term=BoundReference(field=7: g: optional float, accessor=Accessor(position=6, inner=<nil>)))",
+		},
+		{
+			boundNan.Negate(),
+			"BoundNotNaN(term=BoundReference(field=7: g: optional float, accessor=Accessor(position=6, inner=<nil>)))",
+		},
+		{
+			equal,
+			"Equal(term=Reference(name='c'), literal=a)",
+		},
+		{
+			equal.Negate(),
+			"NotEqual(term=Reference(name='c'), literal=a)",
+		},
+		{
+			grtequal,
+			"GreaterThanEqual(term=Reference(name='a'), literal=a)",
+		},
+		{
+			grtequal.Negate(),
+			"LessThan(term=Reference(name='a'), literal=a)",
+		},
+		{
+			greater,
+			"GreaterThan(term=Reference(name='a'), literal=a)",
+		},
+		{
+			greater.Negate(),
+			"LessThanEqual(term=Reference(name='a'), literal=a)",
+		},
+		{
+			startsWith,
+			"StartsWith(term=Reference(name='b'), literal=foo)",
+		},
+		{
+			startsWith.Negate(),
+			"NotStartsWith(term=Reference(name='b'), literal=foo)",
+		},
+		{
+			boundEqual,
+			"BoundEqual(term=BoundReference(field=3: c: optional string, accessor=Accessor(position=2, inner=<nil>)), literal=a)",
+		},
+		{
+			boundEqual.Negate(),
+			"BoundNotEqual(term=BoundReference(field=3: c: optional string, accessor=Accessor(position=2, inner=<nil>)), literal=a)",
+		},
+		{
+			boundGreater,
+			"BoundGreaterThan(term=BoundReference(field=1: a: optional string, accessor=Accessor(position=0, inner=<nil>)), literal=a)",
+		},
+		{
+			boundGreater.Negate(),
+			"BoundLessThanEqual(term=BoundReference(field=1: a: optional string, accessor=Accessor(position=0, inner=<nil>)), literal=a)",
+		},
+		{
+			boundGrtEqual,
+			"BoundGreaterThanEqual(term=BoundReference(field=1: a: optional string, accessor=Accessor(position=0, inner=<nil>)), literal=a)",
+		},
+		{
+			boundGrtEqual.Negate(),
+			"BoundLessThan(term=BoundReference(field=1: a: optional string, accessor=Accessor(position=0, inner=<nil>)), literal=a)",
+		},
+		{
+			boundStarts,
+			"BoundStartsWith(term=BoundReference(field=2: b: optional string, accessor=Accessor(position=1, inner=<nil>)), literal=foo)",
+		},
+		{
+			boundStarts.Negate(),
+			"BoundNotStartsWith(term=BoundReference(field=2: b: optional string, accessor=Accessor(position=1, inner=<nil>)), literal=foo)",
+		},
 	}
 
 	for _, tt := range tests {

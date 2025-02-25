@@ -35,6 +35,7 @@ type registry map[string]Registrar
 func (r registry) getKeys() []string {
 	regMutex.Lock()
 	defer regMutex.Unlock()
+
 	return slices.Collect(maps.Keys(r))
 }
 
@@ -48,6 +49,7 @@ func (r registry) get(catalogType string) (Registrar, bool) {
 	regMutex.Lock()
 	defer regMutex.Unlock()
 	reg, ok := r[catalogType]
+
 	return reg, ok
 }
 

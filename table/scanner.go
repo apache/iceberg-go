@@ -20,6 +20,7 @@ package table
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"slices"
@@ -45,6 +46,7 @@ func (k *keyDefaultMap[K, V]) Get(key K) V {
 	k.mx.RLock()
 	if v, ok := k.data[key]; ok {
 		k.mx.RUnlock()
+
 		return v
 	}
 
@@ -54,6 +56,7 @@ func (k *keyDefaultMap[K, V]) Get(key K) V {
 
 	v := k.defaultFactory(key)
 	k.data[key] = v
+
 	return v
 }
 
@@ -72,6 +75,7 @@ func newKeyDefaultMapWrapErr[K comparable, V any](factory func(K) (V, error)) *k
 			if err != nil {
 				panic(err)
 			}
+
 			return v
 		},
 	}
@@ -116,12 +120,13 @@ func getPartitionRecord(dataFile iceberg.DataFile, partitionType *iceberg.Struct
 	for i, f := range partitionType.FieldList {
 		out[i] = partitionData[f.Name]
 	}
+
 	return out
 }
 
 func openManifest(io io.IO, manifest iceberg.ManifestFile,
-	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error)) ([]iceberg.ManifestEntry, error) {
-
+	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error),
+) ([]iceberg.ManifestEntry, error) {
 	entries, err := manifest.FetchEntries(io, true)
 	if err != nil {
 		return nil, err
@@ -164,6 +169,7 @@ type Scan struct {
 func (scan *Scan) UseRowLimit(n int64) *Scan {
 	out := *scan
 	out.limit = n
+
 	return &out
 }
 
@@ -188,6 +194,7 @@ func (scan *Scan) Snapshot() *Snapshot {
 	if scan.snapshotID != nil {
 		return scan.metadata.SnapshotByID(*scan.snapshotID)
 	}
+
 	return scan.metadata.CurrentSnapshot()
 }
 
@@ -203,6 +210,7 @@ func (scan *Scan) Projection() (*iceberg.Schema, error) {
 			for _, schema := range scan.metadata.Schemas() {
 				if schema.ID == *snap.SchemaID {
 					curSchema = schema
+
 					break
 				}
 			}
@@ -219,11 +227,13 @@ func (scan *Scan) Projection() (*iceberg.Schema, error) {
 func (scan *Scan) buildPartitionProjection(specID int) (iceberg.BooleanExpression, error) {
 	project := newInclusiveProjection(scan.metadata.CurrentSchema(),
 		scan.metadata.PartitionSpecs()[specID], true)
+
 	return project(scan.rowFilter)
 }
 
 func (scan *Scan) buildManifestEvaluator(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
 	spec := scan.metadata.PartitionSpecs()[specID]
+
 	return newManifestEvaluator(spec, scan.metadata.CurrentSchema(),
 		scan.partitionFilters.Get(specID), scan.caseSensitive)
 }
@@ -257,6 +267,7 @@ func minSequenceNum(manifests []iceberg.ManifestFile) int64 {
 			n = min(n, m.MinSequenceNum())
 		}
 	}
+
 	return n
 }
 
@@ -305,6 +316,7 @@ func (scan *Scan) fetchPartitionSpecFilteredManifests() ([]iceberg.ManifestFile,
 	manifestList = slices.DeleteFunc(manifestList, func(mf iceberg.ManifestFile) bool {
 		eval := manifestEvaluators.Get(int(mf.PartitionSpecID()))
 		use, err := eval(mf)
+
 		return !use || err != nil
 	})
 
@@ -356,12 +368,13 @@ func (scan *Scan) collectManifestEntries(
 				case iceberg.EntryContentPosDeletes:
 					entries.addPositionalDeleteEntry(e)
 				case iceberg.EntryContentEqDeletes:
-					return fmt.Errorf("iceberg-go does not yet support equality deletes")
+					return errors.New("iceberg-go does not yet support equality deletes")
 				default:
 					return fmt.Errorf("%w: unknown DataFileContent type (%s): %s",
 						ErrInvalidMetadata, df.ContentType(), e)
 				}
 			}
+
 			return nil
 		})
 	}
