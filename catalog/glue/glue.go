@@ -374,6 +374,7 @@ func (c *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Iden
 	if err != nil {
 		return false, err
 	}
+
 	return true, nil
 }
 

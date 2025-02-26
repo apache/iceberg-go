@@ -110,6 +110,7 @@ func NewLiteral[T LiteralType](val T) Literal {
 
 func getComparator[T LiteralType]() Comparator[T] {
 	var z T
+
 	return NewLiteral(z).(TypedLiteral[T]).Comparator()
 }
 

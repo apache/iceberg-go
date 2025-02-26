@@ -87,6 +87,7 @@ func NewManifestV1Builder(path string, length int64, partitionSpecID int32, adde
 
 func (b *ManifestV1Builder) PartitionType(st *StructType) *ManifestV1Builder {
 	b.m.partitionType = st
+
 	return b
 }
 
@@ -289,6 +290,7 @@ func NewManifestV2Builder(path string, length int64, partitionSpecID int32, cont
 
 func (b *ManifestV2Builder) PartitionSchema(st *StructType) *ManifestV2Builder {
 	b.m.partitionType = st
+
 	return b
 }
 
@@ -769,6 +771,7 @@ func (p *partitionFieldStats[T]) toSummary() FieldSummary {
 func (p *partitionFieldStats[T]) update(value any) {
 	if value == nil {
 		p.containsNull = true
+
 		return
 	}
 
@@ -784,11 +787,13 @@ func (p *partitionFieldStats[T]) update(value any) {
 	case float32:
 		if math.IsNaN(float64(f)) {
 			p.containsNan = true
+
 			return
 		}
 	case float64:
 		if math.IsNaN(f) {
 			p.containsNan = true
+
 			return
 		}
 	}
@@ -829,6 +834,7 @@ func constructPartitionSummaries(spec PartitionSpec, schema *Schema, partitions 
 	for i, stat := range fieldStats {
 		summaries[i] = stat.toSummary()
 	}
+
 	return summaries, nil
 }
 
@@ -905,6 +911,7 @@ func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *S
 		ocf.WithCodec(ocf.Deflate))
 
 	w.writer = enc
+
 	return w, err
 }
 
@@ -918,6 +925,7 @@ func (w *ManifestWriter) Close() error {
 	}
 
 	w.closed = true
+
 	return w.writer.Close()
 }
 
@@ -1030,16 +1038,19 @@ func (w *ManifestWriter) addEntry(entry ManifestEntry) error {
 
 func (w *ManifestWriter) Add(entry ManifestEntry) error {
 	w.reusedEntry.wrap(EntryStatusADDED, w.snapshotID, entry.SequenceNum(), nil, entry.DataFile())
+
 	return w.addEntry(w.reusedEntry)
 }
 
 func (w *ManifestWriter) Delete(entry ManifestEntry) error {
 	w.reusedEntry.wrap(EntryStatusDELETED, w.snapshotID, entry.SequenceNum(), entry.FileSequenceNum(), entry.DataFile())
+
 	return w.addEntry(w.reusedEntry)
 }
 
 func (w *ManifestWriter) Existing(entry ManifestEntry) error {
 	w.reusedEntry.wrap(EntryStatusEXISTING, w.snapshotID, entry.SequenceNum(), entry.FileSequenceNum(), entry.DataFile())
+
 	return w.addEntry(w.reusedEntry)
 }
 
@@ -1106,6 +1117,7 @@ func (m *ManifestListWriter) init(meta map[string][]byte) error {
 	}
 
 	m.writer = enc
+
 	return nil
 }
 
@@ -1536,6 +1548,7 @@ func (m *manifestEntryV1) wrap(status ManifestEntryStatus, snapshotID int64, seq
 	m.FileSeqNum = fileSeqNum
 
 	m.Data = datafile
+
 	return m
 }
 
@@ -1638,6 +1651,7 @@ func (m *manifestEntryV2) wrap(status ManifestEntryStatus, snapshotID int64, seq
 	m.FileSeqNum = fileSeqNum
 
 	m.Data = datafile
+
 	return m
 }
 

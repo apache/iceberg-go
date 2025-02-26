@@ -418,7 +418,7 @@ func (m *ManifestTestSuite) writeManifestEntries() {
 		manifestEntryV2Recs[i] = rec
 	}
 
-	var partitionSpec = NewPartitionSpecID(1,
+	partitionSpec := NewPartitionSpecID(1,
 		PartitionField{FieldID: 1000, SourceID: 1, Name: "VendorID", Transform: IdentityTransform{}},
 		PartitionField{FieldID: 1001, SourceID: 2, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
 

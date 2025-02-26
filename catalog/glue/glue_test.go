@@ -428,7 +428,6 @@ func TestGlueCheckNamespaceExists(t *testing.T) {
 	exists, err := glueCatalog.CheckNamespaceExists(context.TODO(), DatabaseIdentifier("test_namespace"))
 	assert.NoError(err)
 	assert.True(exists)
-
 }
 
 func TestGlueCheckNamespaceNotExists(t *testing.T) {
