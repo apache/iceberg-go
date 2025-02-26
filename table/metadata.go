@@ -176,9 +176,12 @@ func MetadataBuilderFromBase(metadata Metadata) (*MetadataBuilder, error) {
 	b.lastPartitionID = metadata.LastPartitionSpecID()
 	b.props = metadata.Properties()
 	b.snapshotList = metadata.Snapshots()
-	b.currentSnapshotID = &metadata.CurrentSnapshot().SnapshotID
 	b.sortOrderList = metadata.SortOrders()
 	b.defaultSortOrderID = metadata.DefaultSortOrder()
+
+	if metadata.CurrentSnapshot() != nil {
+		b.currentSnapshotID = &metadata.CurrentSnapshot().SnapshotID
+	}
 
 	b.refs = make(map[string]SnapshotRef)
 	for name, ref := range metadata.Refs() {
@@ -262,8 +265,8 @@ func (b *MetadataBuilder) AddSnapshot(snapshot *Snapshot) (*MetadataBuilder, err
 		return nil, fmt.Errorf("can't add snapshot with id %d, already exists", snapshot.SnapshotID)
 	} else if b.formatVersion == 2 &&
 		snapshot.SequenceNumber > 0 &&
-		snapshot.SequenceNumber <= *b.lastSequenceNumber &&
-		snapshot.ParentSnapshotID != nil {
+		snapshot.ParentSnapshotID != nil &&
+		snapshot.SequenceNumber <= *b.lastSequenceNumber {
 		return nil, fmt.Errorf("can't add snapshot with sequence number %d, must be > than last sequence number %d",
 			snapshot.SequenceNumber, b.lastSequenceNumber)
 	}
@@ -490,7 +493,7 @@ func (b *MetadataBuilder) SetSnapshotRef(
 		return nil, fmt.Errorf("can't set snapshot ref %s to unknown snapshot %d: %w", name, snapshotID, err)
 	}
 
-	if refType == MainBranch {
+	if name == MainBranch {
 		b.updates = append(b.updates, NewSetSnapshotRefUpdate(name, snapshotID, refType, maxRefAgeMs, maxSnapshotAgeMs, minSnapshotsToKeep))
 		b.currentSnapshotID = &snapshotID
 		b.snapshotLog = append(b.snapshotLog, SnapshotLogEntry{
@@ -521,6 +524,10 @@ func (b *MetadataBuilder) SetUUID(uuid uuid.UUID) (*MetadataBuilder, error) {
 }
 
 func (b *MetadataBuilder) buildCommonMetadata() *commonMetadata {
+	if b.lastUpdatedMS == 0 {
+		b.lastUpdatedMS = time.Now().UnixMilli()
+	}
+
 	return &commonMetadata{
 		FormatVersion:      b.formatVersion,
 		UUID:               b.uuid,
@@ -609,8 +616,14 @@ func (b *MetadataBuilder) Build() (Metadata, error) {
 		}, nil
 
 	case 2:
+		var lastSequenceNumber int64
+
+		if b.lastSequenceNumber != nil {
+			lastSequenceNumber = *b.lastSequenceNumber
+		}
+
 		return &metadataV2{
-			LastSequenceNumber: *b.lastSequenceNumber,
+			LastSequenceNumber: lastSequenceNumber,
 			commonMetadata:     *common,
 		}, nil
 

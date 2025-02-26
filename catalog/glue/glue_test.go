@@ -20,10 +20,12 @@ package glue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 
 	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/glue"
@@ -81,11 +83,40 @@ func (m *mockGlueClient) UpdateDatabase(ctx context.Context, params *glue.Update
 	return args.Get(0).(*glue.UpdateDatabaseOutput), args.Error(1)
 }
 
-var testIcebergGlueTable = types.Table{
+var testIcebergGlueTable1 = types.Table{
 	Name: aws.String("test_table"),
 	Parameters: map[string]string{
 		tableTypePropsKey:        "ICEBERG",
 		metadataLocationPropsKey: "s3://test-bucket/test_table/metadata/abc123-123.metadata.json",
+	},
+}
+var testIcebergGlueTable2 = types.Table{
+	Name: aws.String("test_table2"),
+	Parameters: map[string]string{
+		tableTypePropsKey:        "ICEBERG",
+		metadataLocationPropsKey: "s3://test-bucket/test_table/metadata/abc456-456.metadata.json",
+	},
+}
+
+var testIcebergGlueTable3 = types.Table{
+	Name: aws.String("test_table3"),
+	Parameters: map[string]string{
+		tableTypePropsKey:        "ICEBERG",
+		metadataLocationPropsKey: "s3://test-bucket/test_table/metadata/abc789-789.metadata.json",
+	},
+}
+var testIcebergGlueTable4 = types.Table{
+	Name: aws.String("test_table4"),
+	Parameters: map[string]string{
+		tableTypePropsKey:        "ICEBERG",
+		metadataLocationPropsKey: "s3://test-bucket/test_table/metadata/abc123-789.metadata.json",
+	},
+}
+var testIcebergGlueTable5 = types.Table{
+	Name: aws.String("test_table5"),
+	Parameters: map[string]string{
+		tableTypePropsKey:        "ICEBERG",
+		metadataLocationPropsKey: "s3://test-bucket/test_table/metadata/abc12345-789.metadata.json",
 	},
 }
 
@@ -104,7 +135,7 @@ func TestGlueGetTable(t *testing.T) {
 	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
 		DatabaseName: aws.String("test_database"),
 		Name:         aws.String("test_table"),
-	}, mock.Anything).Return(&glue.GetTableOutput{Table: &testIcebergGlueTable}, nil)
+	}, mock.Anything).Return(&glue.GetTableOutput{Table: &testIcebergGlueTable1}, nil)
 
 	glueCatalog := &Catalog{
 		glueSvc: mockGlueSvc,
@@ -123,19 +154,136 @@ func TestGlueListTables(t *testing.T) {
 	mockGlueSvc.On("GetTables", mock.Anything, &glue.GetTablesInput{
 		DatabaseName: aws.String("test_database"),
 	}, mock.Anything).Return(&glue.GetTablesOutput{
-		TableList: []types.Table{testIcebergGlueTable, testNonIcebergGlueTable},
+		TableList: []types.Table{testIcebergGlueTable1, testNonIcebergGlueTable},
 	}, nil).Once()
 
 	glueCatalog := &Catalog{
 		glueSvc: mockGlueSvc,
 	}
 
-	tables, err := glueCatalog.ListTables(context.TODO(), DatabaseIdentifier("test_database"))
-	assert.NoError(err)
-	assert.Len(tables, 1)
-	assert.Equal([]string{"test_database", "test_table"}, tables[0])
+	var lastErr error
+	tbls := make([]table.Identifier, 0)
+	iter := glueCatalog.ListTables(context.TODO(), DatabaseIdentifier("test_database"))
+
+	for tbl, err := range iter {
+		tbls = append(tbls, tbl)
+		if err != nil {
+			lastErr = err
+		}
+	}
+	assert.NoError(lastErr)
+	assert.Len(tbls, 1)
+	assert.Equal([]string{"test_database", "test_table"}, tbls[0])
 }
 
+func TestGlueListTablesPagination(t *testing.T) {
+	assert := require.New(t)
+
+	mockGlueSvc := &mockGlueClient{}
+
+	// First page
+	mockGlueSvc.On("GetTables", mock.Anything, &glue.GetTablesInput{
+		DatabaseName: aws.String("test_database"),
+	}, mock.Anything).Return(&glue.GetTablesOutput{
+		TableList: []types.Table{
+			testIcebergGlueTable1,
+			testIcebergGlueTable2,
+		},
+		NextToken: aws.String("token1"),
+	}, nil).Once()
+
+	// Second page
+	mockGlueSvc.On("GetTables", mock.Anything, &glue.GetTablesInput{
+		DatabaseName: aws.String("test_database"),
+		NextToken:    aws.String("token1"),
+	}, mock.Anything).Return(&glue.GetTablesOutput{
+		TableList: []types.Table{
+			testIcebergGlueTable3,
+			testIcebergGlueTable4,
+		},
+		NextToken: aws.String("token2"),
+	}, nil).Once()
+
+	// Third page
+	mockGlueSvc.On("GetTables", mock.Anything, &glue.GetTablesInput{
+		DatabaseName: aws.String("test_database"),
+		NextToken:    aws.String("token2"),
+	}, mock.Anything).Return(&glue.GetTablesOutput{
+		TableList: []types.Table{
+			testIcebergGlueTable5,
+			testNonIcebergGlueTable,
+		},
+	}, nil).Once()
+
+	glueCatalog := &Catalog{
+		glueSvc: mockGlueSvc,
+	}
+
+	var lastErr error
+	tbls := make([]table.Identifier, 0)
+	iter := glueCatalog.ListTables(context.TODO(), DatabaseIdentifier("test_database"))
+
+	for tbl, err := range iter {
+		tbls = append(tbls, tbl)
+		if err != nil {
+			lastErr = err
+		}
+	}
+
+	assert.NoError(lastErr)
+	assert.Len(tbls, 5) // Only Iceberg tables should be included
+	assert.Equal([]string{"test_database", "test_table"}, tbls[0])
+	assert.Equal([]string{"test_database", "test_table2"}, tbls[1])
+	assert.Equal([]string{"test_database", "test_table3"}, tbls[2])
+	assert.Equal([]string{"test_database", "test_table4"}, tbls[3])
+	assert.Equal([]string{"test_database", "test_table5"}, tbls[4])
+
+	mockGlueSvc.AssertExpectations(t)
+}
+
+func TestGlueListTablesError(t *testing.T) {
+	assert := require.New(t)
+
+	mockGlueSvc := &mockGlueClient{}
+
+	// First page succeeds
+	mockGlueSvc.On("GetTables", mock.Anything, &glue.GetTablesInput{
+		DatabaseName: aws.String("test_database"),
+	}, mock.Anything).Return(&glue.GetTablesOutput{
+		TableList: []types.Table{
+			testIcebergGlueTable1,
+		},
+		NextToken: aws.String("token1"),
+	}, nil).Once()
+
+	mockGlueSvc.On("GetTables", mock.Anything, &glue.GetTablesInput{
+		DatabaseName: aws.String("test_database"),
+		NextToken:    aws.String("token1"),
+	}, mock.Anything).Return(&glue.GetTablesOutput{}, fmt.Errorf("token expired")).Once()
+
+	glueCatalog := &Catalog{
+		glueSvc: mockGlueSvc,
+	}
+
+	var lastErr error
+	tbls := make([]table.Identifier, 0)
+	iter := glueCatalog.ListTables(context.TODO(), DatabaseIdentifier("test_database"))
+
+	for tbl, err := range iter {
+		if err != nil {
+			lastErr = err
+			break
+		}
+		tbls = append(tbls, tbl)
+	}
+
+	assert.Error(lastErr)
+	assert.Contains(lastErr.Error(), "token expired")
+	assert.Len(tbls, 1)
+	assert.Equal([]string{"test_database", "test_table"}, tbls[0])
+
+	mockGlueSvc.AssertExpectations(t)
+}
 func TestGlueListNamespaces(t *testing.T) {
 	assert := require.New(t)
 
@@ -175,7 +323,7 @@ func TestGlueDropTable(t *testing.T) {
 		DatabaseName: aws.String("test_database"),
 		Name:         aws.String("test_table"),
 	}, mock.Anything).Return(&glue.GetTableOutput{
-		Table: &testIcebergGlueTable,
+		Table: &testIcebergGlueTable1,
 	}, nil).Once()
 
 	mockGlueSvc.On("DeleteTable", mock.Anything, &glue.DeleteTableInput{
@@ -246,6 +394,47 @@ func TestGlueDropNamespace(t *testing.T) {
 
 	err := glueCatalog.DropNamespace(context.TODO(), DatabaseIdentifier("test_namespace"))
 	assert.NoError(err)
+}
+
+func TestGlueCheckNamespaceExists(t *testing.T) {
+	assert := require.New(t)
+	mockGlueSvc := &mockGlueClient{}
+	mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
+		Name: aws.String("test_namespace"),
+	}, mock.Anything).Return(&glue.GetDatabaseOutput{
+		Database: &types.Database{
+			Name: aws.String("test_namespace"),
+			Parameters: map[string]string{
+				"database_type": "ICEBERG",
+			},
+		},
+	}, nil).Once()
+	glueCatalog := &Catalog{
+		glueSvc: mockGlueSvc,
+	}
+	exists, err := glueCatalog.CheckNamespaceExists(context.TODO(), DatabaseIdentifier("test_namespace"))
+	assert.NoError(err)
+	assert.True(exists)
+
+}
+
+func TestGlueCheckNamespaceNotExists(t *testing.T) {
+	assert := require.New(t)
+	mockGlueSvc := &mockGlueClient{}
+
+	mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
+		Name: aws.String("nonexistent_namespace"),
+	}, mock.Anything).Return(&glue.GetDatabaseOutput{},
+		&types.EntityNotFoundException{Message: aws.String("Database not found")}).Once()
+
+	glueCatalog := &Catalog{
+		glueSvc: mockGlueSvc,
+	}
+
+	exists, err := glueCatalog.CheckNamespaceExists(context.TODO(), DatabaseIdentifier("nonexistent_namespace"))
+	assert.Error(err)
+	assert.False(exists)
+	assert.ErrorContains(err, "Database not found")
 }
 
 func TestGlueUpdateNamespaceProperties(t *testing.T) {
@@ -534,9 +723,18 @@ func TestGlueListTablesIntegration(t *testing.T) {
 
 	catalog := NewCatalog(WithAwsConfig(awscfg))
 
-	tables, err := catalog.ListTables(context.TODO(), DatabaseIdentifier(os.Getenv("TEST_DATABASE_NAME")))
-	assert.NoError(err)
-	assert.Equal([]string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")}, tables[1])
+	iter := catalog.ListTables(context.TODO(), DatabaseIdentifier(os.Getenv("TEST_DATABASE_NAME")))
+	var lastErr error
+	tbls := make([]table.Identifier, 0)
+	for tbl, err := range iter {
+		tbls = append(tbls, tbl)
+		if err != nil {
+			lastErr = err
+		}
+	}
+
+	assert.NoError(lastErr)
+	assert.Equal([]string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")}, tbls[1])
 }
 
 func TestGlueLoadTableIntegration(t *testing.T) {

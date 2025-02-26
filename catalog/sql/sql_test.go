@@ -22,6 +22,7 @@ import (
 	"database/sql"
 	"fmt"
 	"maps"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,7 +35,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	"github.com/uptrace/bun/driver/sqliteshim"
-	"golang.org/x/exp/rand"
 )
 
 var (
@@ -110,7 +110,7 @@ func randomString(n int) string {
 	var b strings.Builder
 	b.Grow(n)
 	for range n {
-		b.WriteByte(letters[rand.Intn(len(letters))])
+		b.WriteByte(letters[rand.IntN(len(letters))])
 	}
 	return b.String()
 }
@@ -486,18 +486,41 @@ func (s *SqliteCatalogTestSuite) TestListTables() {
 		_, err = cat.CreateTable(ctx, tbl2, tableSchemaNested)
 		s.Require().NoError(err)
 
-		tables, err := cat.ListTables(ctx, ns1)
-		s.Require().NoError(err)
+		var lastErr error
+		tables := make([]table.Identifier, 0)
+		iter := cat.ListTables(ctx, ns1)
+		for tbl, err := range iter {
+			tables = append(tables, tbl)
+			if err != nil {
+				lastErr = err
+			}
+		}
+
+		s.Require().NoError(lastErr)
 		s.Len(tables, 1)
 		s.Equal(tbl1, tables[0])
 
-		tables, err = cat.ListTables(ctx, ns2)
-		s.Require().NoError(err)
-		s.Len(tables, 1)
-		s.Equal(tbl2, tables[0])
+		tables2 := make([]table.Identifier, 0)
+		iter = cat.ListTables(ctx, ns2)
+		for tbl, err := range iter {
+			tables2 = append(tables2, tbl)
+			if err != nil {
+				lastErr = err
+			}
+		}
+		s.Require().NoError(lastErr)
+		s.Len(tables2, 1)
+		s.Equal(tbl2, tables2[0])
 
-		_, err = cat.ListTables(ctx, table.Identifier{"does_not_exist"})
-		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+		table3 := make([]table.Identifier, 0)
+		iter = cat.ListTables(ctx, table.Identifier{"does_not_exist"})
+		for tbl, err := range iter {
+			table3 = append(table3, tbl)
+			if err != nil {
+				lastErr = err
+			}
+		}
+		s.ErrorIs(lastErr, catalog.ErrNoSuchNamespace)
 	}
 }
 

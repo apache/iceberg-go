@@ -108,6 +108,11 @@ func NewLiteral[T LiteralType](val T) Literal {
 	panic("can't happen due to literal type constraint")
 }
 
+func getComparator[T LiteralType]() Comparator[T] {
+	var z T
+	return NewLiteral(z).(TypedLiteral[T]).Comparator()
+}
+
 // LiteralFromBytes uses the defined Iceberg spec for how to serialize a value of
 // a the provided type and returns the appropriate Literal value from it.
 //
