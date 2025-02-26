@@ -156,7 +156,7 @@ func (s *RestIntegrationSuite) TestUpdateNamespaceProps() {
 func (s *RestIntegrationSuite) TestCreateTable() {
 	s.ensureNamespace()
 
-	const location = "s3://warehouse/iceberg/"
+	const location = "s3://warehouse/iceberg"
 
 	tbl, err := s.cat.CreateTable(s.ctx,
 		catalog.ToIdentifier(TestNamespaceIdent, "test-table"),
