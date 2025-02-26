@@ -156,14 +156,16 @@ func (s *RestIntegrationSuite) TestUpdateNamespaceProps() {
 func (s *RestIntegrationSuite) TestCreateTable() {
 	s.ensureNamespace()
 
+	const location = "s3://warehouse/iceberg/"
+
 	tbl, err := s.cat.CreateTable(s.ctx,
 		catalog.ToIdentifier(TestNamespaceIdent, "test-table"),
 		tableSchemaSimple, catalog.WithProperties(iceberg.Properties{"foobar": "baz"}),
-		catalog.WithLocation("s3a://warehouse/iceberg/"))
+		catalog.WithLocation(location))
 	s.Require().NoError(err)
 	s.Require().NotNil(tbl)
 
-	s.Equal("s3a://warehouse/iceberg", tbl.Location())
+	s.Equal(location, tbl.Location())
 	s.Equal("baz", tbl.Properties()["foobar"])
 
 	exists, err := s.cat.CheckTableExists(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table"))
