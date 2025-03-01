@@ -313,17 +313,17 @@ type SnapshotLogEntry struct {
 	TimestampMs int64 `json:"timestamp-ms"`
 }
 
-type snapshotSummaryCollector struct {
+type SnapshotSummaryCollector struct {
 	metrics                          updateMetrics
 	partitionMetrics                 map[string]updateMetrics
 	maxChangedPartitionsForSummaries int
 }
 
-func (s *snapshotSummaryCollector) setPartitionSummaryLimit(limit int) {
+func (s *SnapshotSummaryCollector) setPartitionSummaryLimit(limit int) {
 	s.maxChangedPartitionsForSummaries = limit
 }
 
-func (s *snapshotSummaryCollector) updatePartitionMetrics(spec iceberg.PartitionSpec, df iceberg.DataFile, isAddFile bool, sc *iceberg.Schema) error {
+func (s *SnapshotSummaryCollector) updatePartitionMetrics(spec iceberg.PartitionSpec, df iceberg.DataFile, isAddFile bool, sc *iceberg.Schema) error {
 	partitionPath := spec.PartitionToPath(getPartitionRecord(df, spec.PartitionType(sc)), sc)
 	if s.partitionMetrics == nil {
 		s.partitionMetrics = make(map[string]updateMetrics)
@@ -344,7 +344,7 @@ func (s *snapshotSummaryCollector) updatePartitionMetrics(spec iceberg.Partition
 	return nil
 }
 
-func (s *snapshotSummaryCollector) addFile(df iceberg.DataFile, sc *iceberg.Schema, spec iceberg.PartitionSpec) error {
+func (s *SnapshotSummaryCollector) addFile(df iceberg.DataFile, sc *iceberg.Schema, spec iceberg.PartitionSpec) error {
 	if err := s.metrics.addFile(df); err != nil {
 		return err
 	}
@@ -355,7 +355,7 @@ func (s *snapshotSummaryCollector) addFile(df iceberg.DataFile, sc *iceberg.Sche
 	return nil
 }
 
-func (s *snapshotSummaryCollector) removeFile(df iceberg.DataFile, sc *iceberg.Schema, spec iceberg.PartitionSpec) error {
+func (s *SnapshotSummaryCollector) removeFile(df iceberg.DataFile, sc *iceberg.Schema, spec iceberg.PartitionSpec) error {
 	if err := s.metrics.removeFile(df); err != nil {
 		return err
 	}
@@ -366,7 +366,7 @@ func (s *snapshotSummaryCollector) removeFile(df iceberg.DataFile, sc *iceberg.S
 	return nil
 }
 
-func (s *snapshotSummaryCollector) partitionSummary(metrics *updateMetrics) string {
+func (s *SnapshotSummaryCollector) partitionSummary(metrics *updateMetrics) string {
 	props := metrics.toProps()
 	return strings.Join(slices.Collect(func(yield func(s string) bool) {
 		for k, v := range props {
@@ -377,7 +377,7 @@ func (s *snapshotSummaryCollector) partitionSummary(metrics *updateMetrics) stri
 	}), ",")
 }
 
-func (s *snapshotSummaryCollector) build() iceberg.Properties {
+func (s *SnapshotSummaryCollector) build() iceberg.Properties {
 	props := s.metrics.toProps()
 	changedPartitionsSize := len(s.partitionMetrics)
 	setWhenPositive(props, changedPartitionCountProp, int64(changedPartitionsSize))
