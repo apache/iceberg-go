@@ -305,7 +305,6 @@ func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
 	}
 
 	s.partitionFilters = newKeyDefaultMapWrapErr(s.buildPartitionProjection)
-
 	return s, nil
 }
 

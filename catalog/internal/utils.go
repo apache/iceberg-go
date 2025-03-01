@@ -120,6 +120,5 @@ func ParseMetadataVersion(location string) int {
 	if err != nil {
 		return -1
 	}
-
 	return v
 }
