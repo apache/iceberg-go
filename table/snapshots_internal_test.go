@@ -102,8 +102,8 @@ func TestSnapshotSummaryCollectorWithPartition(t *testing.T) {
 		"added-records":           "100",
 		"deleted-records":         "300",
 		"changed-partition-count": "2",
-		"partitions.int_field=1":  "added-files-size=1234,removed-files-size=1234,added-data-files=1,deleted-data-files=1,added-records=100,deleted-records=100",
-		"partitions.int_field=2":  "removed-files-size=4321,deleted-data-files=1,deleted-records=200",
+		"partitions.int_field=1":  "added-data-files=1,added-files-size=1234,added-records=100,deleted-data-files=1,deleted-records=100,removed-files-size=1234",
+		"partitions.int_field=2":  "deleted-data-files=1,deleted-records=200,removed-files-size=4321",
 	}, ssc.build())
 }
 
