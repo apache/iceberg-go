@@ -335,7 +335,6 @@ func (b *ManifestV2Builder) Build() ManifestFile {
 }
 
 type manifestFileV2 struct {
-	partitionType      *StructType
 	Path               string          `avro:"manifest_path"`
 	Len                int64           `avro:"manifest_length"`
 	SpecID             int32           `avro:"partition_spec_id"`
