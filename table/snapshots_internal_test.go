@@ -32,6 +32,13 @@ var tableSchemaSimple = iceberg.NewSchemaWithIdentifiers(1,
 	iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool},
 )
 
+func must[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
 func TestSnapshotSummaryCollector(t *testing.T) {
 	var ssc SnapshotSummaryCollector
 
