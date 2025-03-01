@@ -169,12 +169,18 @@ func TestPartitionSpecToPath(t *testing.T) {
 		iceberg.NestedField{ID: 3, Name: "int", Type: iceberg.PrimitiveTypes.Int32, Required: true})
 
 	spec := iceberg.NewPartitionSpecID(3,
-		iceberg.PartitionField{SourceID: 1, FieldID: 1000,
-			Transform: iceberg.TruncateTransform{Width: 19}, Name: "my#str%bucket"},
-		iceberg.PartitionField{SourceID: 2, FieldID: 1001,
-			Transform: iceberg.IdentityTransform{}, Name: "other str+bucket"},
-		iceberg.PartitionField{SourceID: 3, FieldID: 1002,
-			Transform: iceberg.BucketTransform{NumBuckets: 25}, Name: "my!int:bucket"})
+		iceberg.PartitionField{
+			SourceID: 1, FieldID: 1000,
+			Transform: iceberg.TruncateTransform{Width: 19}, Name: "my#str%bucket",
+		},
+		iceberg.PartitionField{
+			SourceID: 2, FieldID: 1001,
+			Transform: iceberg.IdentityTransform{}, Name: "other str+bucket",
+		},
+		iceberg.PartitionField{
+			SourceID: 3, FieldID: 1002,
+			Transform: iceberg.BucketTransform{NumBuckets: 25}, Name: "my!int:bucket",
+		})
 
 	record := partitionRecord{"my+str", "( )", int32(10)}
 	// both partition field names and values should be URL encoded, with spaces

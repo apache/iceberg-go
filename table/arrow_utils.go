@@ -509,6 +509,7 @@ func (c convertToArrow) List(list iceberg.ListType, elemResult arrow.Field) arro
 	if c.useLargeTypes {
 		return arrow.Field{Type: arrow.LargeListOfField(elemField)}
 	}
+
 	return arrow.Field{Type: arrow.ListOfField(elemField)}
 }
 
@@ -888,5 +889,6 @@ func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schem
 	st.Release()
 	out := array.RecordFromStructArray(result.(*array.Struct), nil)
 	result.Release()
+
 	return out, nil
 }

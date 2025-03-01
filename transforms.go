@@ -694,6 +694,7 @@ func (t MonthTransform) ToHumanStr(val any) string {
 	switch v := val.(type) {
 	case int32:
 		tm := epochTM.AddDate(0, int(v), 0)
+
 		return tm.Format("2006-01")
 	default:
 		return "null"
@@ -770,6 +771,7 @@ func (DayTransform) ToHumanStr(val any) string {
 	switch v := val.(type) {
 	case int32:
 		tm := epochTM.AddDate(0, 0, int(v))
+
 		return tm.Format("2006-01-02")
 	default:
 		return "null"
@@ -836,6 +838,7 @@ func (HourTransform) ToHumanStr(val any) string {
 	switch v := val.(type) {
 	case int32:
 		tm := epochTM.Add(time.Duration(v) * time.Hour)
+
 		return tm.Format("2006-01-02-15")
 	default:
 		return "null"

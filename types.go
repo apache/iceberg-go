@@ -64,8 +64,10 @@ func (p Properties) GetInt(key string, defVal int) int {
 		if err != nil {
 			return defVal
 		}
+
 		return int(i)
 	}
+
 	return defVal
 }
 

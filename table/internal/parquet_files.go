@@ -346,6 +346,7 @@ func (p *pruneParquetSchema) List(field pqarrow.SchemaField, elemResult arrow.Fi
 	}
 
 	p.indices = append(p.indices, field.Children[0].ColIndex)
+
 	return *field.Field
 }
 
@@ -385,6 +386,7 @@ func (p *pruneParquetSchema) Map(field pqarrow.SchemaField, keyResult, valResult
 
 	p.indices = append(p.indices, field.Children[0].Children[0].ColIndex)
 	p.indices = append(p.indices, field.Children[0].Children[1].ColIndex)
+
 	return *field.Field
 }
 

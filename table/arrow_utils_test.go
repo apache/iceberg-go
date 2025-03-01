@@ -559,7 +559,8 @@ func TestToRequestedSchema(t *testing.T) {
 				Name: "element", Type: arrow.PrimitiveTypes.Int32, Nullable: false,
 				Metadata: arrow.NewMetadata([]string{table.ArrowParquetFieldIDKey}, []string{"2"}),
 			}),
-			Metadata: arrow.NewMetadata([]string{table.ArrowParquetFieldIDKey}, []string{"1"})},
+			Metadata: arrow.NewMetadata([]string{table.ArrowParquetFieldIDKey}, []string{"1"}),
+		},
 	}, nil)
 
 	bldr := array.NewRecordBuilder(mem, schema)

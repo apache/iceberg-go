@@ -509,6 +509,7 @@ func createIterator(ctx context.Context, numWorkers uint, records <-chan enumera
 				if err := context.Cause(ctx); err != nil {
 					yield(nil, err)
 				}
+
 				return
 			case enum, ok := <-sequenced:
 				if !ok {
@@ -577,6 +578,7 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 					if err := as.recordsFromTask(ctx, task, records,
 						deletesPerFile[task.Value.File.FilePath()]); err != nil {
 						cancel(err)
+
 						return
 					}
 				}
