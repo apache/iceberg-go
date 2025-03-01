@@ -18,6 +18,7 @@
 package table
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,6 +43,24 @@ const (
 	addSnapshotAction    = "add-snapshot"
 	addSortOrderAction   = "add-sort-order"
 )
+
+func generateSnapshotID() int64 {
+	var (
+		rndUUID = uuid.New()
+		out     [8]byte
+	)
+
+	for i := range 8 {
+		lhs, rhs := rndUUID[i], rndUUID[i+8]
+		out[i] = lhs ^ rhs
+	}
+
+	snapshotID := int64(binary.LittleEndian.Uint64(out[:]))
+	if snapshotID < 0 {
+		snapshotID = -snapshotID
+	}
+	return snapshotID
+}
 
 // Metadata for an iceberg table as specified in the Iceberg spec
 //
@@ -114,8 +133,11 @@ type Metadata interface {
 	Properties() iceberg.Properties
 	// PreviousFiles returns the list of metadata log entries for the table.
 	PreviousFiles() iter.Seq[MetadataLogEntry]
-
 	Equals(Metadata) bool
+
+	NameMapping() iceberg.NameMapping
+
+	LastSequenceNumber() int64
 }
 
 type MetadataBuilder struct {
@@ -199,6 +221,36 @@ func MetadataBuilderFromBase(metadata Metadata) (*MetadataBuilder, error) {
 	}
 
 	return b, nil
+}
+
+func (b *MetadataBuilder) nextSequenceNumber() int64 {
+	if b.formatVersion > 1 {
+		if b.lastSequenceNumber == nil {
+			return 0
+		}
+
+		return *b.lastSequenceNumber + 1
+	}
+
+	return 0
+}
+
+func (b *MetadataBuilder) newSnapshotID() int64 {
+	snapshotID := generateSnapshotID()
+	for slices.ContainsFunc(b.snapshotList, func(s Snapshot) bool { return s.SnapshotID == snapshotID }) {
+		snapshotID = generateSnapshotID()
+	}
+
+	return snapshotID
+}
+
+func (b *MetadataBuilder) CurrentSpec() iceberg.PartitionSpec {
+	return b.specs[b.defaultSpecID]
+}
+
+func (b *MetadataBuilder) CurrentSchema() *iceberg.Schema {
+	s, _ := b.GetSchemaByID(b.currentSchemaID)
+	return s
 }
 
 func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema, newLastColumnID int, initial bool) (*MetadataBuilder, error) {
@@ -592,6 +644,15 @@ func (b *MetadataBuilder) GetSortOrderByID(id int) (*SortOrder, error) {
 	return nil, fmt.Errorf("sort order with id %d not found", id)
 }
 
+func (b *MetadataBuilder) currentSnapshot() *Snapshot {
+	if b.currentSnapshotID == nil {
+		return nil
+	}
+
+	s, _ := b.SnapshotByID(*b.currentSnapshotID)
+	return s
+}
+
 func (b *MetadataBuilder) SnapshotByID(id int64) (*Snapshot, error) {
 	for _, s := range b.snapshotList {
 		if s.SnapshotID == id {
@@ -602,8 +663,22 @@ func (b *MetadataBuilder) SnapshotByID(id int64) (*Snapshot, error) {
 	return nil, fmt.Errorf("snapshot with id %d not found", id)
 }
 
+func (b *MetadataBuilder) NameMapping() iceberg.NameMapping {
+	if nameMappingJson, ok := b.props[DefaultNameMappingKey]; ok {
+		nm := iceberg.NameMapping{}
+		if err := json.Unmarshal([]byte(nameMappingJson), &nm); err == nil {
+			return nm
+		}
+	}
+	return nil
+}
+
 func (b *MetadataBuilder) Build() (Metadata, error) {
 	common := b.buildCommonMetadata()
+	if err := common.validate(); err != nil {
+		return nil, err
+	}
+
 	switch b.formatVersion {
 	case 1:
 		schema, err := b.GetSchemaByID(b.currentSchemaID)
@@ -635,8 +710,8 @@ func (b *MetadataBuilder) Build() (Metadata, error) {
 		}
 
 		return &metadataV2{
-			LastSequenceNumber: lastSequenceNumber,
-			commonMetadata:     *common,
+			LastSeqNum:     lastSequenceNumber,
+			commonMetadata: *common,
 		}, nil
 
 	default:
@@ -930,6 +1005,18 @@ func (c *commonMetadata) checkSortOrders() error {
 		ErrInvalidMetadata, c.DefaultSortOrderID, c.SortOrderList)
 }
 
+func (c *commonMetadata) constructRefs() {
+	if c.CurrentSnapshotID != nil {
+		_, ok := c.SnapshotRefs[MainBranch]
+		if !ok {
+			c.SnapshotRefs[MainBranch] = SnapshotRef{
+				SnapshotID:      *c.CurrentSnapshotID,
+				SnapshotRefType: BranchRef,
+			}
+		}
+	}
+}
+
 func (c *commonMetadata) validate() error {
 	if err := c.checkSchemas(); err != nil {
 		return err
@@ -943,6 +1030,8 @@ func (c *commonMetadata) validate() error {
 		return err
 	}
 
+	c.constructRefs()
+
 	switch {
 	case c.LastUpdatedMS == 0:
 		// last-updated-ms is required
@@ -955,6 +1044,16 @@ func (c *commonMetadata) validate() error {
 	return nil
 }
 
+func (c *commonMetadata) NameMapping() iceberg.NameMapping {
+	if nameMappingJson, ok := c.Props[DefaultNameMappingKey]; ok {
+		nm := iceberg.NameMapping{}
+		if err := json.Unmarshal([]byte(nameMappingJson), &nm); err == nil {
+			return nm
+		}
+	}
+	return nil
+}
+
 func (c *commonMetadata) Version() int { return c.FormatVersion }
 
 type metadataV1 struct {
@@ -963,6 +1062,8 @@ type metadataV1 struct {
 
 	commonMetadata
 }
+
+func (m *metadataV1) LastSequenceNumber() int64 { return 0 }
 
 func (m *metadataV1) Equals(other Metadata) bool {
 	rhs, ok := other.(*metadataV1)
@@ -1032,10 +1133,12 @@ func (m *metadataV1) ToV2() metadataV2 {
 }
 
 type metadataV2 struct {
-	LastSequenceNumber int64 `json:"last-sequence-number"`
+	LastSeqNum int64 `json:"last-sequence-number"`
 
 	commonMetadata
 }
+
+func (m *metadataV2) LastSequenceNumber() int64 { return m.LastSeqNum }
 
 func (m *metadataV2) Equals(other Metadata) bool {
 	rhs, ok := other.(*metadataV2)
@@ -1047,7 +1150,7 @@ func (m *metadataV2) Equals(other Metadata) bool {
 		return true
 	}
 
-	return m.LastSequenceNumber == rhs.LastSequenceNumber &&
+	return m.LastSeqNum == rhs.LastSeqNum &&
 		m.commonMetadata.Equals(&rhs.commonMetadata)
 }
 
