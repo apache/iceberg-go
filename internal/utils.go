@@ -140,6 +140,5 @@ type CountingWriter struct {
 func (w *CountingWriter) Write(p []byte) (int, error) {
 	n, err := w.W.Write(p)
 	w.Count += int64(n)
-
 	return n, err
 }
