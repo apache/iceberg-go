@@ -1258,6 +1258,8 @@ func createStatsAgg(typ iceberg.PrimitiveType, physicalTypeStr string, truncLen 
 		default:
 			return newStatAgg[[]byte](typ, truncLen), nil
 		}
+
+		return newStatAgg[[]byte](typ, truncLen), nil
 	case "BYTE_ARRAY":
 		if typ.Equals(iceberg.PrimitiveTypes.String) {
 			return newStatAgg[string](typ, truncLen), nil
