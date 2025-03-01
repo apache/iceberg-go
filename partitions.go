@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"net/url"
+	"path"
 	"slices"
 	"strings"
 )
@@ -234,6 +236,27 @@ func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
 		})
 	}
 	return &StructType{FieldList: nestedFields}
+}
+
+// PartitionToPath produces a proper partition path from the data and schema by
+// converting the values to human readable strings and properly escaping.
+//
+// The path will be in the form of `name1=value1/name2=value2/...`.
+//
+// This does not apply the transforms to the data, it is assumed the provided data
+// has already been transformed appropriately.
+func (ps *PartitionSpec) PartitionToPath(data structLike, sc *Schema) string {
+	partType := ps.PartitionType(sc)
+
+	segments := make([]string, 0, len(partType.FieldList))
+	for i := range partType.Fields() {
+		valueStr := ps.fields[i].Transform.ToHumanStr(data.Get(i))
+
+		segments = append(segments, fmt.Sprintf("%s=%s",
+			url.QueryEscape(ps.fields[i].Name), url.QueryEscape(valueStr)))
+	}
+
+	return path.Join(segments...)
 }
 
 // AssignFreshPartitionSpecIDs creates a new PartitionSpec by reassigning the field IDs
