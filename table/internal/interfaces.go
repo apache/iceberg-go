@@ -58,7 +58,7 @@ type FileReader interface {
 	// that represents the underlying file schema with only the projected fields. It also
 	// returns the indexes of the projected columns to allow reading *only* the needed
 	// columns.
-	PrunedSchema(projectedIDs map[int]struct{}) (*arrow.Schema, []int, error)
+	PrunedSchema(projectedIDs map[int]struct{}, mapping iceberg.NameMapping) (*arrow.Schema, []int, error)
 	// GetRecords returns a record reader for only the provided columns (using nil will read
 	// all of the columns of the underlying file.) The `tester` is a function that can be used,
 	// if non-nil, to filter aspects of the file such as skipping row groups in a parquet file.
