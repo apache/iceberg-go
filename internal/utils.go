@@ -17,6 +17,10 @@
 
 package internal
 
+import (
+	"io"
+)
+
 // Helper function to find the difference between two slices (a - b).
 func Difference(a, b []string) []string {
 	m := make(map[string]bool)
@@ -32,4 +36,15 @@ func Difference(a, b []string) []string {
 	}
 
 	return diff
+}
+
+type CountingWriter struct {
+	Count int64
+	W     io.Writer
+}
+
+func (w *CountingWriter) Write(p []byte) (int, error) {
+	n, err := w.W.Write(p)
+	w.Count += int64(n)
+	return n, err
 }
