@@ -42,7 +42,7 @@ func must[T any](v T, err error) T {
 }
 
 func TestSnapshotSummaryCollector(t *testing.T) {
-	var ssc snapshotSummaryCollector
+	var ssc SnapshotSummaryCollector
 
 	assert.Equal(t, iceberg.Properties{}, ssc.build())
 
@@ -59,7 +59,7 @@ func TestSnapshotSummaryCollector(t *testing.T) {
 }
 
 func TestSnapshotSummaryCollectorWithPartition(t *testing.T) {
-	var ssc snapshotSummaryCollector
+	var ssc SnapshotSummaryCollector
 
 	assert.Equal(t, iceberg.Properties{}, ssc.build())
 	sc := iceberg.NewSchema(0,
