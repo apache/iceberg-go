@@ -55,6 +55,17 @@ func (p Properties) GetBool(key string, defVal bool) bool {
 	return defVal
 }
 
+func (p Properties) GetInt(key string, defVal int) int {
+	if v, ok := p[key]; ok {
+		i, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return defVal
+		}
+		return int(i)
+	}
+	return defVal
+}
+
 // Type is an interface representing any of the available iceberg types,
 // such as primitives (int32/int64/etc.) or nested types (list/struct/map).
 type Type interface {
@@ -461,6 +472,10 @@ type Decimal struct {
 	Scale int
 }
 
+func (d Decimal) String() string {
+	return d.Val.ToString(int32(d.Scale))
+}
+
 type PrimitiveType interface {
 	Type
 	primitive()
@@ -546,6 +561,10 @@ func (DateType) Type() string   { return "date" }
 func (DateType) String() string { return "date" }
 
 type Time int64
+
+func (t Time) ToTime() time.Time {
+	return time.UnixMicro(int64(t)).UTC()
+}
 
 // TimeType represents a number of microseconds since midnight.
 type TimeType struct{}

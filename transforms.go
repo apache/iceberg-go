@@ -19,6 +19,7 @@ package iceberg
 
 import (
 	"encoding"
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -86,6 +87,8 @@ type Transform interface {
 	Equals(Transform) bool
 	Apply(Optional[Literal]) Optional[Literal]
 	Project(name string, pred BoundPredicate) (UnboundPredicate, error)
+
+	ToHumanStr(any) string
 }
 
 // IdentityTransform uses the identity function, performing no transformation
@@ -107,6 +110,25 @@ func (IdentityTransform) Equals(other Transform) bool {
 
 func (IdentityTransform) Apply(value Optional[Literal]) Optional[Literal] {
 	return value
+}
+
+func (IdentityTransform) ToHumanStr(val any) string {
+	switch v := val.(type) {
+	case nil:
+		return "null"
+	case []byte:
+		return base64.StdEncoding.EncodeToString(v)
+	case bool:
+		return strconv.FormatBool(v)
+	case Date:
+		return v.ToTime().Format("2006-01-02")
+	case Time:
+		return v.ToTime().Format("15:04:05.999999")
+	case Timestamp:
+		return v.ToTime().Format("2006-01-02T15:04:05.999999")
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
 
 func (t IdentityTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
@@ -145,6 +167,8 @@ func (VoidTransform) Equals(other Transform) bool {
 func (VoidTransform) Apply(value Optional[Literal]) Optional[Literal] {
 	return Optional[Literal]{}
 }
+
+func (VoidTransform) ToHumanStr(any) string { return "null" }
 
 func (VoidTransform) Project(string, BoundPredicate) (UnboundPredicate, error) {
 	return nil, nil
@@ -273,6 +297,14 @@ func (t BucketTransform) Transformer(src Type) func(any) Optional[int32] {
 	}
 }
 
+func (BucketTransform) ToHumanStr(val any) string {
+	if val == nil {
+		return "null"
+	}
+
+	return fmt.Sprintf("%v", val)
+}
+
 func (t BucketTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
 	if _, ok := pred.Term().(*BoundTransform); ok {
 		return projectTransformPredicate(t, name, pred)
@@ -397,6 +429,17 @@ func (t TruncateTransform) Apply(value Optional[Literal]) (out Optional[Literal]
 	}
 
 	return
+}
+
+func (TruncateTransform) ToHumanStr(val any) string {
+	switch v := val.(type) {
+	case nil:
+		return "null"
+	case []byte:
+		return base64.StdEncoding.EncodeToString(v)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
 
 func (t TruncateTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
@@ -545,6 +588,15 @@ func (YearTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	return
 }
 
+func (YearTransform) ToHumanStr(val any) string {
+	switch v := val.(type) {
+	case int32:
+		return strconv.Itoa(int(v) + epochTM.Year())
+	default:
+		return "null"
+	}
+}
+
 func (t YearTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
 	return projectTimeTransform(t, name, pred)
 }
@@ -620,6 +672,16 @@ func (MonthTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	return
 }
 
+func (t MonthTransform) ToHumanStr(val any) string {
+	switch v := val.(type) {
+	case int32:
+		tm := epochTM.AddDate(0, int(v), 0)
+		return tm.Format("2006-01")
+	default:
+		return "null"
+	}
+}
+
 func (t MonthTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
 	return projectTimeTransform(t, name, pred)
 }
@@ -684,6 +746,16 @@ func (DayTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	return
 }
 
+func (DayTransform) ToHumanStr(val any) string {
+	switch v := val.(type) {
+	case int32:
+		tm := epochTM.AddDate(0, 0, int(v))
+		return tm.Format("2006-01-02")
+	default:
+		return "null"
+	}
+}
+
 func (t DayTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
 	return projectTimeTransform(t, name, pred)
 }
@@ -736,6 +808,16 @@ func (HourTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	}
 
 	return
+}
+
+func (HourTransform) ToHumanStr(val any) string {
+	switch v := val.(type) {
+	case int32:
+		tm := epochTM.Add(time.Duration(v) * time.Hour)
+		return tm.Format("2006-01-02-15")
+	default:
+		return "null"
+	}
 }
 
 func (t HourTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
