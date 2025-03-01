@@ -15,64 +15,62 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table_test
+package iceberg_test
 
 import (
 	"encoding/json"
 	"testing"
 
-	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-var tableNameMappingNested = table.NameMapping{
-	{FieldID: makeID(1), Names: []string{"foo"}},
-	{FieldID: makeID(2), Names: []string{"bar"}},
-	{FieldID: makeID(3), Names: []string{"baz"}},
-	{
-		FieldID: makeID(4), Names: []string{"qux"},
-		Fields: []table.MappedField{{FieldID: makeID(5), Names: []string{"element"}}},
-	},
-	{FieldID: makeID(6), Names: []string{"quux"}, Fields: []table.MappedField{
-		{FieldID: makeID(7), Names: []string{"key"}},
-		{FieldID: makeID(8), Names: []string{"value"}, Fields: []table.MappedField{
-			{FieldID: makeID(9), Names: []string{"key"}},
-			{FieldID: makeID(10), Names: []string{"value"}},
+func makeID(v int) *int { return &v }
+
+var (
+	tableNameMappingNested = iceberg.NameMapping{
+		{FieldID: makeID(1), Names: []string{"foo"}},
+		{FieldID: makeID(2), Names: []string{"bar"}},
+		{FieldID: makeID(3), Names: []string{"baz"}},
+		{FieldID: makeID(4), Names: []string{"qux"},
+			Fields: []iceberg.MappedField{{FieldID: makeID(5), Names: []string{"element"}}}},
+		{FieldID: makeID(6), Names: []string{"quux"}, Fields: []iceberg.MappedField{
+			{FieldID: makeID(7), Names: []string{"key"}},
+			{FieldID: makeID(8), Names: []string{"value"}, Fields: []iceberg.MappedField{
+				{FieldID: makeID(9), Names: []string{"key"}},
+				{FieldID: makeID(10), Names: []string{"value"}},
+			}},
 		}},
-	}},
-	{FieldID: makeID(11), Names: []string{"location"}, Fields: []table.MappedField{
-		{FieldID: makeID(12), Names: []string{"element"}, Fields: []table.MappedField{
-			{FieldID: makeID(13), Names: []string{"latitude"}},
-			{FieldID: makeID(14), Names: []string{"longitude"}},
+		{FieldID: makeID(11), Names: []string{"location"}, Fields: []iceberg.MappedField{
+			{FieldID: makeID(12), Names: []string{"element"}, Fields: []iceberg.MappedField{
+				{FieldID: makeID(13), Names: []string{"latitude"}},
+				{FieldID: makeID(14), Names: []string{"longitude"}},
+			}},
 		}},
-	}},
-	{FieldID: makeID(15), Names: []string{"person"}, Fields: []table.MappedField{
-		{FieldID: makeID(16), Names: []string{"name"}},
-		{FieldID: makeID(17), Names: []string{"age"}},
-	}},
-}
+		{FieldID: makeID(15), Names: []string{"person"}, Fields: []iceberg.MappedField{
+			{FieldID: makeID(16), Names: []string{"name"}},
+			{FieldID: makeID(17), Names: []string{"age"}},
+		}},
+	}
+)
 
 func TestJsonMappedField(t *testing.T) {
 	tests := []struct {
 		name string
 		str  string
-		exp  table.MappedField
+		exp  iceberg.MappedField
 	}{
-		{
-			"simple", `{"field-id": 1, "names": ["id", "record_id"]}`,
-			table.MappedField{FieldID: makeID(1), Names: []string{"id", "record_id"}},
-		},
-		{
-			"with null fields", `{"field-id": 1, "names": ["id", "record_id"], "fields": null}`,
-			table.MappedField{FieldID: makeID(1), Names: []string{"id", "record_id"}},
-		},
-		{"no names", `{"field-id": 1, "names": []}`, table.MappedField{FieldID: makeID(1), Names: []string{}}},
+		{"simple", `{"field-id": 1, "names": ["id", "record_id"]}`,
+			iceberg.MappedField{FieldID: makeID(1), Names: []string{"id", "record_id"}}},
+		{"with null fields", `{"field-id": 1, "names": ["id", "record_id"], "fields": null}`,
+			iceberg.MappedField{FieldID: makeID(1), Names: []string{"id", "record_id"}}},
+		{"no names", `{"field-id": 1, "names": []}`, iceberg.MappedField{FieldID: makeID(1), Names: []string{}}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var n table.MappedField
+			var n iceberg.MappedField
 			require.NoError(t, json.Unmarshal([]byte(tt.str), &n))
 			assert.Equal(t, tt.exp, n)
 		})
@@ -90,14 +88,14 @@ func TestNameMappingFromJson(t *testing.T) {
 		]}
 	]`
 
-	var nm table.NameMapping
+	var nm iceberg.NameMapping
 	require.NoError(t, json.Unmarshal([]byte(mapping), &nm))
 
-	assert.Equal(t, nm, table.NameMapping{
+	assert.Equal(t, nm, iceberg.NameMapping{
 		{FieldID: nil, Names: []string{"foo", "bar"}},
 		{FieldID: makeID(1), Names: []string{"id", "record_id"}},
 		{FieldID: makeID(2), Names: []string{"data"}},
-		{FieldID: makeID(3), Names: []string{"location"}, Fields: []table.MappedField{
+		{FieldID: makeID(3), Names: []string{"location"}, Fields: []iceberg.MappedField{
 			{FieldID: makeID(4), Names: []string{"latitude", "lat"}},
 			{FieldID: makeID(5), Names: []string{"longitude", "long"}},
 		}},
@@ -138,11 +136,11 @@ func TestNameMappingToString(t *testing.T) {
 	([id, record_id] -> 1)
 	([data] -> 2)
 	([location] -> 3 ([lat, latitude] -> 4), ([long, longitude] -> 5))
-]`, table.NameMapping{
+]`, iceberg.NameMapping{
 		{Names: []string{"foo"}},
 		{FieldID: makeID(1), Names: []string{"id", "record_id"}},
 		{FieldID: makeID(2), Names: []string{"data"}},
-		{FieldID: makeID(3), Names: []string{"location"}, Fields: []table.MappedField{
+		{FieldID: makeID(3), Names: []string{"location"}, Fields: []iceberg.MappedField{
 			{FieldID: makeID(4), Names: []string{"lat", "latitude"}},
 			{FieldID: makeID(5), Names: []string{"long", "longitude"}},
 		}},

@@ -20,15 +20,20 @@ package table
 import (
 	"context"
 	"fmt"
+	"maps"
+	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
 )
 
 // constants to look for as Keys in Arrow field metadata
@@ -51,17 +56,6 @@ type ArrowSchemaVisitor[T any] interface {
 	Primitive(arrow.DataType) T
 }
 
-func recoverError(err *error) {
-	if r := recover(); r != nil {
-		switch e := r.(type) {
-		case string:
-			*err = fmt.Errorf("error encountered during arrow schema visitor: %s", e)
-		case error:
-			*err = fmt.Errorf("error encountered during arrow schema visitor: %w", e)
-		}
-	}
-}
-
 func VisitArrowSchema[T any](sc *arrow.Schema, visitor ArrowSchemaVisitor[T]) (res T, err error) {
 	if sc == nil {
 		err = fmt.Errorf("%w: cannot visit nil arrow schema", iceberg.ErrInvalidArgument)
@@ -69,7 +63,7 @@ func VisitArrowSchema[T any](sc *arrow.Schema, visitor ArrowSchemaVisitor[T]) (r
 		return
 	}
 
-	defer recoverError(&err)
+	defer internal.RecoverError(&err)
 
 	return visitor.Schema(sc, visitArrowStruct(arrow.StructOf(sc.Fields()...), visitor)), err
 }
@@ -199,7 +193,10 @@ func getFieldID(f arrow.Field) *int {
 		return nil
 	}
 
-	return &id
+	if id > 0 {
+		return &id
+	}
+	return nil
 }
 
 type hasIDs struct{}
@@ -383,7 +380,7 @@ func ArrowTypeToIceberg(dt arrow.DataType, downcastNsTimestamp bool) (iceberg.Ty
 	return out.Type.(*iceberg.StructType).FieldList[0].Type, nil
 }
 
-func ArrowSchemaToIceberg(sc *arrow.Schema, downcastNsTimestamp bool, nameMapping NameMapping) (*iceberg.Schema, error) {
+func ArrowSchemaToIceberg(sc *arrow.Schema, downcastNsTimestamp bool, nameMapping iceberg.NameMapping) (*iceberg.Schema, error) {
 	hasIDs, _ := VisitArrowSchema(sc, hasIDs{})
 
 	switch {
@@ -405,21 +402,28 @@ func ArrowSchemaToIceberg(sc *arrow.Schema, downcastNsTimestamp bool, nameMappin
 
 		return iceberg.NewSchema(0, out.Type.(*iceberg.StructType).FieldList...), nil
 	case nameMapping != nil:
-		withoutIDs, err := VisitArrowSchema(sc, convertToIceberg{
-			downcastTimestamp: downcastNsTimestamp,
-			fieldID:           func(_ arrow.Field) int { return -1 },
-		})
+		schemaWithoutIDs, err := arrowToSchemaWithoutIDs(sc, downcastNsTimestamp)
 		if err != nil {
 			return nil, err
 		}
-
-		schemaWithoutIDs := iceberg.NewSchema(0, withoutIDs.Type.(*iceberg.StructType).FieldList...)
-
-		return ApplyNameMapping(schemaWithoutIDs, nameMapping)
+		return iceberg.ApplyNameMapping(schemaWithoutIDs, nameMapping)
 	default:
 		return nil, fmt.Errorf("%w: arrow schema does not have field-ids and no name mapping provided",
 			iceberg.ErrInvalidSchema)
 	}
+}
+
+func arrowToSchemaWithoutIDs(sc *arrow.Schema, downcastNsTimestamp bool) (*iceberg.Schema, error) {
+	withoutIDs, err := VisitArrowSchema(sc, convertToIceberg{
+		downcastTimestamp: downcastNsTimestamp,
+		fieldID:           func(_ arrow.Field) int { return -1 },
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	schemaWithoutIDs := iceberg.NewSchema(0, withoutIDs.Type.(*iceberg.StructType).FieldList...)
+	return schemaWithoutIDs, nil
 }
 
 type convertToSmallTypes struct{}
@@ -891,4 +895,345 @@ func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schem
 	result.Release()
 
 	return out, nil
+}
+
+func must[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
+type metricModeType string
+
+const (
+	metricModeTruncate metricModeType = "truncate"
+	metricModeNone     metricModeType = "none"
+	metricModeCounts   metricModeType = "counts"
+	metricModeFull     metricModeType = "full"
+)
+
+type metricsMode struct {
+	typ metricModeType
+	len int
+}
+
+var truncationExpr = regexp.MustCompile(`^truncate\((\d+)\)$`)
+
+func matchMetricsMode(mode string) (metricsMode, error) {
+	sanitized := strings.ToLower(strings.TrimSpace(mode))
+	if strings.HasPrefix(sanitized, string(metricModeTruncate)) {
+		m := truncationExpr.FindStringSubmatch(sanitized)
+		if len(m) < 2 {
+			return metricsMode{}, fmt.Errorf("malformed truncate metrics mode: %s", mode)
+		}
+
+		truncLen, err := strconv.Atoi(m[1])
+		if err != nil {
+			return metricsMode{}, fmt.Errorf("malformed truncate metrics mode: %s", mode)
+		}
+
+		if truncLen <= 0 {
+			return metricsMode{}, fmt.Errorf("invalid truncate length: %d", truncLen)
+		}
+		return metricsMode{typ: metricModeTruncate, len: truncLen}, nil
+	}
+
+	switch sanitized {
+	case string(metricModeNone):
+		return metricsMode{typ: metricModeNone}, nil
+	case string(metricModeCounts):
+		return metricsMode{typ: metricModeCounts}, nil
+	case string(metricModeFull):
+		return metricsMode{typ: metricModeFull}, nil
+	default:
+		return metricsMode{}, fmt.Errorf("unsupported metrics mode: %s", mode)
+	}
+}
+
+type statisticsCollector struct {
+	fieldID    int
+	icebergTyp iceberg.PrimitiveType
+	mode       metricsMode
+	colName    string
+}
+
+type arrowStatsCollector struct {
+	fieldID     int
+	schema      *iceberg.Schema
+	props       iceberg.Properties
+	defaultMode string
+}
+
+func (a *arrowStatsCollector) Schema(_ *iceberg.Schema, results func() []statisticsCollector) []statisticsCollector {
+	return results()
+}
+
+func (a *arrowStatsCollector) Struct(_ iceberg.StructType, results []func() []statisticsCollector) []statisticsCollector {
+	result := make([]statisticsCollector, 0, len(results))
+	for _, res := range results {
+		result = append(result, res()...)
+	}
+	return result
+}
+
+func (a *arrowStatsCollector) Field(field iceberg.NestedField, fieldRes func() []statisticsCollector) []statisticsCollector {
+	a.fieldID = field.ID
+	return fieldRes()
+}
+
+func (a *arrowStatsCollector) List(list iceberg.ListType, elemResult func() []statisticsCollector) []statisticsCollector {
+	a.fieldID = list.ElementID
+	return elemResult()
+}
+
+func (a *arrowStatsCollector) Map(m iceberg.MapType, keyResult func() []statisticsCollector, valResult func() []statisticsCollector) []statisticsCollector {
+	a.fieldID = m.KeyID
+	keyRes := keyResult()
+
+	a.fieldID = m.ValueID
+	valRes := valResult()
+
+	return append(keyRes, valRes...)
+}
+
+func (a *arrowStatsCollector) Primitive(dt iceberg.PrimitiveType) []statisticsCollector {
+	colName, ok := a.schema.FindColumnName(a.fieldID)
+	if !ok {
+		return []statisticsCollector{}
+	}
+
+	metMode, err := matchMetricsMode(a.defaultMode)
+	if err != nil {
+		panic(err)
+	}
+
+	colMode, ok := a.props[MetricsModeColumnConfPrefix+"."+colName]
+	if ok {
+		metMode, err = matchMetricsMode(colMode)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	switch dt.(type) {
+	case iceberg.StringType:
+	case iceberg.BinaryType:
+	default:
+		if metMode.typ == metricModeTruncate {
+			metMode = metricsMode{typ: metricModeFull, len: 0}
+		}
+	}
+
+	isNested := strings.Contains(colName, ".")
+	if isNested && (metMode.typ == metricModeTruncate || metMode.typ == metricModeFull) {
+		metMode = metricsMode{typ: metricModeCounts}
+	}
+
+	return []statisticsCollector{{
+		fieldID:    a.fieldID,
+		icebergTyp: dt,
+		colName:    colName,
+		mode:       metMode,
+	}}
+}
+
+func computeStatsPlan(sc *iceberg.Schema, props iceberg.Properties) (map[int]statisticsCollector, error) {
+	result := make(map[int]statisticsCollector)
+
+	visitor := &arrowStatsCollector{
+		schema: sc, props: props,
+		defaultMode: props.Get(DefaultWriteMetricsModeKey, DefaultWriteMetricsModeDefault)}
+
+	collectors, err := iceberg.PreOrderVisit(sc, visitor)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, entry := range collectors {
+		result[entry.fieldID] = entry
+	}
+
+	return result, nil
+}
+
+type id2ParquetPath struct {
+	fieldID int
+	path    string
+}
+
+type id2ParquetPathVisitor struct {
+	fieldID int
+	path    []string
+}
+
+func (v *id2ParquetPathVisitor) Schema(_ *iceberg.Schema, res func() []id2ParquetPath) []id2ParquetPath {
+	return res()
+}
+
+func (v *id2ParquetPathVisitor) Struct(_ iceberg.StructType, results []func() []id2ParquetPath) []id2ParquetPath {
+	result := make([]id2ParquetPath, 0, len(results))
+	for _, res := range results {
+		result = append(result, res()...)
+	}
+	return result
+}
+
+func (v *id2ParquetPathVisitor) Field(field iceberg.NestedField, res func() []id2ParquetPath) []id2ParquetPath {
+	v.fieldID = field.ID
+	v.path = append(v.path, field.Name)
+	result := res()
+	v.path = v.path[:len(v.path)-1]
+	return result
+}
+
+func (v *id2ParquetPathVisitor) List(listType iceberg.ListType, elemResult func() []id2ParquetPath) []id2ParquetPath {
+	v.fieldID = listType.ElementID
+	v.path = append(v.path, "list")
+	result := elemResult()
+	v.path = v.path[:len(v.path)-1]
+	return result
+}
+
+func (v *id2ParquetPathVisitor) Map(m iceberg.MapType, keyResult func() []id2ParquetPath, valResult func() []id2ParquetPath) []id2ParquetPath {
+	v.fieldID = m.KeyID
+	v.path = append(v.path, "key_value")
+	keyRes := keyResult()
+	v.path = v.path[:len(v.path)-1]
+
+	v.fieldID = m.ValueID
+	v.path = append(v.path, "key_value")
+	valRes := valResult()
+	v.path = v.path[:len(v.path)-1]
+
+	return append(keyRes, valRes...)
+}
+
+func (v *id2ParquetPathVisitor) Primitive(iceberg.PrimitiveType) []id2ParquetPath {
+	return []id2ParquetPath{{fieldID: v.fieldID, path: strings.Join(v.path, ".")}}
+}
+
+func parquetPathToIDMapping(sc *iceberg.Schema) (map[string]int, error) {
+	result := make(map[string]int)
+
+	paths, err := iceberg.PreOrderVisit(sc, &id2ParquetPathVisitor{})
+	if err != nil {
+		return nil, err
+	}
+
+	for _, entry := range paths {
+		result[entry.path] = entry.fieldID
+	}
+
+	return result, nil
+}
+
+type dataFileStatistics struct {
+	recordCount     int64
+	colSizes        map[int]int64
+	valueCounts     map[int]int64
+	nullValueCounts map[int]int64
+	nanValueCounts  map[int]int64
+	// column aggregates
+	splitOffsets []int64
+}
+
+func (d *dataFileStatistics) toDataFile(spec iceberg.PartitionSpec, path string, format iceberg.FileFormat, filesize int64) (iceberg.DataFile, error) {
+	bldr, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData,
+		path, iceberg.ParquetFile, nil, d.recordCount, filesize)
+	if err != nil {
+		return nil, err
+	}
+
+	bldr.ColumnSizes(d.colSizes)
+	bldr.ValueCounts(d.valueCounts)
+	bldr.NullValueCounts(d.nullValueCounts)
+	bldr.NaNValueCounts(d.nanValueCounts)
+	bldr.SplitOffsets(d.splitOffsets)
+
+	return bldr.Build(), nil
+}
+
+func dataFileStatsFromParquetMetadata(pqmeta *metadata.FileMetaData, statsCols map[int]statisticsCollector, colMapping map[string]int) *dataFileStatistics {
+	var (
+		colSizes        = make(map[int]int64)
+		valueCounts     = make(map[int]int64)
+		splitOffsets    = make([]int64, 0)
+		nullValueCounts = make(map[int]int64)
+		nanValueCounts  = make(map[int]int64)
+		invalidateCol   = make(map[int]struct{})
+	)
+
+	for rg := range pqmeta.NumRowGroups() {
+		// reference: https://github.com/apache/iceberg-python/blob/main/pyiceberg/io/pyarrow.py#L2285
+		rowGroup := pqmeta.RowGroup(rg)
+		colChunk, err := rowGroup.ColumnChunk(0)
+		if err != nil {
+			panic(err)
+		}
+
+		dataOffset, dictOffset := colChunk.DataPageOffset(), colChunk.DictionaryPageOffset()
+		if colChunk.HasDictionaryPage() && dictOffset < dataOffset {
+			splitOffsets = append(splitOffsets, dictOffset)
+		} else {
+			splitOffsets = append(splitOffsets, dataOffset)
+		}
+
+		for pos := range rowGroup.NumColumns() {
+			colChunk, err = rowGroup.ColumnChunk(pos)
+			if err != nil {
+				panic(err)
+			}
+
+			fieldID := colMapping[colChunk.PathInSchema().String()]
+			statsCol := statsCols[fieldID]
+			if statsCol.mode.typ == metricModeNone {
+				continue
+			}
+
+			colSizes[fieldID] += colChunk.TotalCompressedSize()
+			valueCounts[fieldID] += colChunk.NumValues()
+			set, err := colChunk.StatsSet()
+			if err != nil {
+				panic(err)
+			}
+
+			if !set {
+				invalidateCol[fieldID] = struct{}{}
+				continue
+			}
+
+			stats, err := colChunk.Statistics()
+			if err != nil {
+				invalidateCol[fieldID] = struct{}{}
+				continue
+			}
+
+			if stats.HasNullCount() {
+				nullValueCounts[fieldID] += stats.NullCount()
+			}
+
+			if statsCol.mode.typ == metricModeCounts {
+				continue
+			}
+
+			// TODO stats aggregator!
+		}
+
+	}
+
+	slices.Sort(splitOffsets)
+	maps.DeleteFunc(nullValueCounts, func(fieldID int, _ int64) bool {
+		_, ok := invalidateCol[fieldID]
+		return ok
+	})
+
+	return &dataFileStatistics{
+		recordCount:     pqmeta.GetNumRows(),
+		colSizes:        colSizes,
+		valueCounts:     valueCounts,
+		nullValueCounts: nullValueCounts,
+		nanValueCounts:  nanValueCounts,
+		splitOffsets:    splitOffsets,
+	}
 }

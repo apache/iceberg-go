@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package iceberg
 
 import (
 	"fmt"
@@ -23,7 +23,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
 )
 
 type MappedField struct {
@@ -33,6 +33,24 @@ type MappedField struct {
 	// the spec not say field-id is optional?
 	FieldID *int          `json:"field-id,omitempty"`
 	Fields  []MappedField `json:"fields,omitempty"`
+}
+
+func (m *MappedField) ID() int {
+	if m.FieldID == nil {
+		return -1
+	}
+
+	return *m.FieldID
+}
+
+func (m *MappedField) GetField(field string) *MappedField {
+	for _, f := range m.Fields {
+		if slices.Contains(f.Names, field) {
+			return &f
+		}
+	}
+
+	return nil
 }
 
 func (m *MappedField) Len() int { return len(m.Fields) }
@@ -87,18 +105,17 @@ type NameMappingVisitor[S, T any] interface {
 
 func VisitNameMapping[S, T any](obj NameMapping, visitor NameMappingVisitor[S, T]) (res S, err error) {
 	if obj == nil {
-		err = fmt.Errorf("%w: cannot visit nil NameMapping", iceberg.ErrInvalidArgument)
-
+		err = fmt.Errorf("%w: cannot visit nil NameMapping", ErrInvalidArgument)
 		return
 	}
 
-	defer recoverError(&err)
+	defer internal.RecoverError(&err)
 
 	return visitor.Mapping(obj, visitMappedFields([]MappedField(obj), visitor)), err
 }
 
 func VisitMappedFields[S, T any](fields []MappedField, visitor NameMappingVisitor[S, T]) (res S, err error) {
-	defer recoverError(&err)
+	defer internal.RecoverError(&err)
 
 	return visitMappedFields(fields, visitor), err
 }
@@ -118,22 +135,12 @@ func (NameMappingAccessor) SchemaPartner(partner *MappedField) *MappedField {
 	return partner
 }
 
-func (NameMappingAccessor) getField(p *MappedField, field string) *MappedField {
-	for _, f := range p.Fields {
-		if slices.Contains(f.Names, field) {
-			return &f
-		}
-	}
-
-	return nil
-}
-
 func (n NameMappingAccessor) FieldPartner(partnerStruct *MappedField, _ int, fieldName string) *MappedField {
 	if partnerStruct == nil {
 		return nil
 	}
 
-	return n.getField(partnerStruct, fieldName)
+	return partnerStruct.GetField(fieldName)
 }
 
 func (n NameMappingAccessor) ListElementPartner(partnerList *MappedField) *MappedField {
@@ -141,7 +148,7 @@ func (n NameMappingAccessor) ListElementPartner(partnerList *MappedField) *Mappe
 		return nil
 	}
 
-	return n.getField(partnerList, "element")
+	return partnerList.GetField("element")
 }
 
 func (n NameMappingAccessor) MapKeyPartner(partnerMap *MappedField) *MappedField {
@@ -149,7 +156,7 @@ func (n NameMappingAccessor) MapKeyPartner(partnerMap *MappedField) *MappedField
 		return nil
 	}
 
-	return n.getField(partnerMap, "key")
+	return partnerMap.GetField("key")
 }
 
 func (n NameMappingAccessor) MapValuePartner(partnerMap *MappedField) *MappedField {
@@ -157,7 +164,7 @@ func (n NameMappingAccessor) MapValuePartner(partnerMap *MappedField) *MappedFie
 		return nil
 	}
 
-	return n.getField(partnerMap, "value")
+	return partnerMap.GetField("value")
 }
 
 type nameMapProjectVisitor struct {
@@ -168,55 +175,55 @@ func (n *nameMapProjectVisitor) popPath() {
 	n.currentPath = n.currentPath[:len(n.currentPath)-1]
 }
 
-func (n *nameMapProjectVisitor) BeforeField(f iceberg.NestedField, _ *MappedField) {
+func (n *nameMapProjectVisitor) BeforeField(f NestedField, _ *MappedField) {
 	n.currentPath = append(n.currentPath, f.Name)
 }
 
-func (n *nameMapProjectVisitor) AfterField(iceberg.NestedField, *MappedField) {
+func (n *nameMapProjectVisitor) AfterField(NestedField, *MappedField) {
 	n.popPath()
 }
 
-func (n *nameMapProjectVisitor) BeforeListElement(iceberg.NestedField, *MappedField) {
+func (n *nameMapProjectVisitor) BeforeListElement(NestedField, *MappedField) {
 	n.currentPath = append(n.currentPath, "element")
 }
 
-func (n *nameMapProjectVisitor) AfterListElement(iceberg.NestedField, *MappedField) {
+func (n *nameMapProjectVisitor) AfterListElement(NestedField, *MappedField) {
 	n.popPath()
 }
 
-func (n *nameMapProjectVisitor) BeforeMapKey(iceberg.NestedField, *MappedField) {
+func (n *nameMapProjectVisitor) BeforeMapKey(NestedField, *MappedField) {
 	n.currentPath = append(n.currentPath, "key")
 }
 
-func (n *nameMapProjectVisitor) AfterMapKey(iceberg.NestedField, *MappedField) {
+func (n *nameMapProjectVisitor) AfterMapKey(NestedField, *MappedField) {
 	n.popPath()
 }
 
-func (n *nameMapProjectVisitor) BeforeMapValue(iceberg.NestedField, *MappedField) {
+func (n *nameMapProjectVisitor) BeforeMapValue(NestedField, *MappedField) {
 	n.currentPath = append(n.currentPath, "value")
 }
 
-func (n *nameMapProjectVisitor) AfterMapValue(iceberg.NestedField, *MappedField) {
+func (n *nameMapProjectVisitor) AfterMapValue(NestedField, *MappedField) {
 	n.popPath()
 }
 
-func (n *nameMapProjectVisitor) Schema(_ *iceberg.Schema, _ *MappedField, structResult iceberg.NestedField) iceberg.NestedField {
+func (n *nameMapProjectVisitor) Schema(_ *Schema, _ *MappedField, structResult NestedField) NestedField {
 	return structResult
 }
 
-func (n *nameMapProjectVisitor) Struct(_ iceberg.StructType, _ *MappedField, fieldResults []iceberg.NestedField) iceberg.NestedField {
-	return iceberg.NestedField{
-		Type: &iceberg.StructType{FieldList: fieldResults},
+func (n *nameMapProjectVisitor) Struct(_ StructType, _ *MappedField, fieldResults []NestedField) NestedField {
+	return NestedField{
+		Type: &StructType{FieldList: fieldResults},
 	}
 }
 
-func (n *nameMapProjectVisitor) Field(field iceberg.NestedField, fieldPartner *MappedField, fieldResult iceberg.NestedField) iceberg.NestedField {
+func (n *nameMapProjectVisitor) Field(field NestedField, fieldPartner *MappedField, fieldResult NestedField) NestedField {
 	if fieldPartner == nil {
 		panic(fmt.Errorf("%w: field missing from name mapping: %s",
-			iceberg.ErrInvalidArgument, strings.Join(n.currentPath, ".")))
+			ErrInvalidArgument, strings.Join(n.currentPath, ".")))
 	}
 
-	return iceberg.NestedField{
+	return NestedField{
 		ID:             *fieldPartner.FieldID,
 		Name:           field.Name,
 		Type:           fieldResult.Type,
@@ -241,16 +248,16 @@ func (nameMapProjectVisitor) mappedFieldID(mapped *MappedField, name string) int
 	return -1
 }
 
-func (n *nameMapProjectVisitor) List(lt iceberg.ListType, listPartner *MappedField, elemResult iceberg.NestedField) iceberg.NestedField {
+func (n *nameMapProjectVisitor) List(lt ListType, listPartner *MappedField, elemResult NestedField) NestedField {
 	if listPartner == nil {
 		panic(fmt.Errorf("%w: field missing from name mapping: %s",
-			iceberg.ErrInvalidArgument, strings.Join(n.currentPath, ".")))
+			ErrInvalidArgument, strings.Join(n.currentPath, ".")))
 	}
 
 	elementID := n.mappedFieldID(listPartner, "element")
 
-	return iceberg.NestedField{
-		Type: &iceberg.ListType{
+	return NestedField{
+		Type: &ListType{
 			ElementID:       elementID,
 			Element:         elemResult.Type,
 			ElementRequired: lt.ElementRequired,
@@ -258,17 +265,16 @@ func (n *nameMapProjectVisitor) List(lt iceberg.ListType, listPartner *MappedFie
 	}
 }
 
-func (n *nameMapProjectVisitor) Map(m iceberg.MapType, mapPartner *MappedField, keyResult, valResult iceberg.NestedField) iceberg.NestedField {
+func (n *nameMapProjectVisitor) Map(m MapType, mapPartner *MappedField, keyResult, valResult NestedField) NestedField {
 	if mapPartner == nil {
 		panic(fmt.Errorf("%w: field missing from name mapping: %s",
-			iceberg.ErrInvalidArgument, strings.Join(n.currentPath, ".")))
+			ErrInvalidArgument, strings.Join(n.currentPath, ".")))
 	}
 
 	keyID := n.mappedFieldID(mapPartner, "key")
 	valID := n.mappedFieldID(mapPartner, "value")
-
-	return iceberg.NestedField{
-		Type: &iceberg.MapType{
+	return NestedField{
+		Type: &MapType{
 			KeyID:         keyID,
 			KeyType:       keyResult.Type,
 			ValueID:       valID,
@@ -278,17 +284,17 @@ func (n *nameMapProjectVisitor) Map(m iceberg.MapType, mapPartner *MappedField, 
 	}
 }
 
-func (n *nameMapProjectVisitor) Primitive(p iceberg.PrimitiveType, primitivePartner *MappedField) iceberg.NestedField {
+func (n *nameMapProjectVisitor) Primitive(p PrimitiveType, primitivePartner *MappedField) NestedField {
 	if primitivePartner == nil {
 		panic(fmt.Errorf("%w: field missing from name mapping: %s",
-			iceberg.ErrInvalidArgument, strings.Join(n.currentPath, ".")))
+			ErrInvalidArgument, strings.Join(n.currentPath, ".")))
 	}
 
-	return iceberg.NestedField{Type: p}
+	return NestedField{Type: p}
 }
 
-func ApplyNameMapping(schemaWithoutIDs *iceberg.Schema, nameMapping NameMapping) (*iceberg.Schema, error) {
-	top, err := iceberg.VisitSchemaWithPartner[iceberg.NestedField, *MappedField](schemaWithoutIDs,
+func ApplyNameMapping(schemaWithoutIDs *Schema, nameMapping NameMapping) (*Schema, error) {
+	top, err := VisitSchemaWithPartner(schemaWithoutIDs,
 		&MappedField{Fields: nameMapping},
 		&nameMapProjectVisitor{currentPath: make([]string, 0, 1)},
 		NameMappingAccessor{})
@@ -296,6 +302,60 @@ func ApplyNameMapping(schemaWithoutIDs *iceberg.Schema, nameMapping NameMapping)
 		return nil, err
 	}
 
-	return iceberg.NewSchema(schemaWithoutIDs.ID,
-		top.Type.(*iceberg.StructType).FieldList...), nil
+	return NewSchema(schemaWithoutIDs.ID,
+		top.Type.(*StructType).FieldList...), nil
+}
+
+type createMapping struct{}
+
+func (createMapping) Schema(_ *Schema, result []MappedField) []MappedField {
+	return result
+}
+
+func (createMapping) Struct(st StructType, result [][]MappedField) []MappedField {
+	output := make([]MappedField, len(st.FieldList))
+	for i, field := range st.FieldList {
+		output[i] = MappedField{
+			Names:   []string{field.Name},
+			FieldID: &field.ID,
+			Fields:  result[i],
+		}
+	}
+	return output
+}
+
+func (createMapping) Field(_ NestedField, result []MappedField) []MappedField {
+	return result
+}
+
+func (createMapping) List(listType ListType, elemResult []MappedField) []MappedField {
+	return []MappedField{{
+		Names:   []string{"element"},
+		FieldID: &listType.ElementID,
+		Fields:  elemResult,
+	}}
+}
+
+func (createMapping) Map(mapType MapType, keyResult, valResult []MappedField) []MappedField {
+	return []MappedField{
+		{
+			Names:   []string{"key"},
+			FieldID: &mapType.KeyID,
+			Fields:  keyResult,
+		},
+		{
+			Names:   []string{"value"},
+			FieldID: &mapType.ValueID,
+			Fields:  valResult,
+		},
+	}
+}
+
+func (createMapping) Primitive(_ PrimitiveType) []MappedField {
+	return []MappedField{}
+}
+
+func createMappingFromSchema(schema *Schema) NameMapping {
+	result, _ := Visit(schema, createMapping{})
+	return NameMapping(result)
 }

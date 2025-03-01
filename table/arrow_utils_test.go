@@ -385,40 +385,38 @@ func TestArrowSchemaWithNameMapping(t *testing.T) {
 	tests := []struct {
 		name     string
 		schema   *arrow.Schema
-		mapping  table.NameMapping
+		mapping  iceberg.NameMapping
 		expected *iceberg.Schema
 		err      string
 	}{
-		{"simple", schemaWithoutIDs, table.NameMapping{
+		{"simple", schemaWithoutIDs, iceberg.NameMapping{
 			{FieldID: makeID(1), Names: []string{"foo"}},
 			{FieldID: makeID(2), Names: []string{"bar"}},
 			{FieldID: makeID(3), Names: []string{"baz"}},
 		}, icebergSchemaSimple, ""},
-		{"field missing", schemaWithoutIDs, table.NameMapping{
+		{"field missing", schemaWithoutIDs, iceberg.NameMapping{
 			{FieldID: makeID(1), Names: []string{"foo"}},
 		}, nil, "field missing from name mapping: bar"},
-		{"nested schema", schemaNestedWithoutIDs, table.NameMapping{
+		{"nested schema", schemaNestedWithoutIDs, iceberg.NameMapping{
 			{FieldID: makeID(1), Names: []string{"foo"}},
 			{FieldID: makeID(2), Names: []string{"bar"}},
 			{FieldID: makeID(3), Names: []string{"baz"}},
-			{
-				FieldID: makeID(4), Names: []string{"qux"},
-				Fields: []table.MappedField{{FieldID: makeID(5), Names: []string{"element"}}},
-			},
-			{FieldID: makeID(6), Names: []string{"quux"}, Fields: []table.MappedField{
+			{FieldID: makeID(4), Names: []string{"qux"},
+				Fields: []iceberg.MappedField{{FieldID: makeID(5), Names: []string{"element"}}}},
+			{FieldID: makeID(6), Names: []string{"quux"}, Fields: []iceberg.MappedField{
 				{FieldID: makeID(7), Names: []string{"key"}},
-				{FieldID: makeID(8), Names: []string{"value"}, Fields: []table.MappedField{
+				{FieldID: makeID(8), Names: []string{"value"}, Fields: []iceberg.MappedField{
 					{FieldID: makeID(9), Names: []string{"key"}},
 					{FieldID: makeID(10), Names: []string{"value"}},
 				}},
 			}},
-			{FieldID: makeID(11), Names: []string{"location"}, Fields: []table.MappedField{
-				{FieldID: makeID(12), Names: []string{"element"}, Fields: []table.MappedField{
+			{FieldID: makeID(11), Names: []string{"location"}, Fields: []iceberg.MappedField{
+				{FieldID: makeID(12), Names: []string{"element"}, Fields: []iceberg.MappedField{
 					{FieldID: makeID(13), Names: []string{"latitude"}},
 					{FieldID: makeID(14), Names: []string{"longitude"}},
 				}},
 			}},
-			{FieldID: makeID(15), Names: []string{"person"}, Fields: []table.MappedField{
+			{FieldID: makeID(15), Names: []string{"person"}, Fields: []iceberg.MappedField{
 				{FieldID: makeID(16), Names: []string{"name"}},
 				{FieldID: makeID(17), Names: []string{"age"}},
 			}},

@@ -49,8 +49,8 @@ func (w wrapPqArrowReader) Close() error {
 	return w.ParquetReader().Close()
 }
 
-func (w wrapPqArrowReader) PrunedSchema(projectedIDs map[int]struct{}) (*arrow.Schema, []int, error) {
-	return pruneParquetColumns(w.Manifest, projectedIDs, false)
+func (w wrapPqArrowReader) PrunedSchema(projectedIDs map[int]struct{}, mapping iceberg.NameMapping) (*arrow.Schema, []int, error) {
+	return pruneParquetColumns(w.Manifest, projectedIDs, false, mapping)
 }
 
 func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester any) (array.RecordReader, error) {
@@ -118,15 +118,15 @@ func (pfs *ParquetFileSource) GetReader(ctx context.Context) (FileReader, error)
 }
 
 type manifestVisitor[T any] interface {
-	Manifest(*pqarrow.SchemaManifest, []T) T
-	Field(pqarrow.SchemaField, T) T
-	Struct(pqarrow.SchemaField, []T) T
-	List(pqarrow.SchemaField, T) T
-	Map(pqarrow.SchemaField, T, T) T
-	Primitive(pqarrow.SchemaField) T
+	Manifest(*pqarrow.SchemaManifest, []T, *iceberg.MappedField) T
+	Field(pqarrow.SchemaField, T, *iceberg.MappedField) T
+	Struct(pqarrow.SchemaField, []T, *iceberg.MappedField) T
+	List(pqarrow.SchemaField, T, *iceberg.MappedField) T
+	Map(pqarrow.SchemaField, T, T, *iceberg.MappedField) T
+	Primitive(pqarrow.SchemaField, *iceberg.MappedField) T
 }
 
-func visitParquetManifest[T any](manifest *pqarrow.SchemaManifest, visitor manifestVisitor[T]) (res T, err error) {
+func visitParquetManifest[T any](manifest *pqarrow.SchemaManifest, visitor manifestVisitor[T], mapping *iceberg.MappedField) (res T, err error) {
 	if manifest == nil {
 		err = fmt.Errorf("%w: cannot visit nil manifest", iceberg.ErrInvalidArgument)
 
@@ -139,54 +139,68 @@ func visitParquetManifest[T any](manifest *pqarrow.SchemaManifest, visitor manif
 		}
 	}()
 
+	var fieldMap *iceberg.MappedField
+
 	results := make([]T, len(manifest.Fields))
 	for i, f := range manifest.Fields {
-		res := visitManifestField(f, visitor)
-		results[i] = visitor.Field(f, res)
+		if mapping != nil {
+			fieldMap = mapping.GetField(f.Field.Name)
+		}
+		res := visitManifestField(f, visitor, fieldMap)
+		results[i] = visitor.Field(f, res, fieldMap)
 	}
-
-	return visitor.Manifest(manifest, results), nil
+	return visitor.Manifest(manifest, results, mapping), nil
 }
 
-func visitParquetManifestStruct[T any](field pqarrow.SchemaField, visitor manifestVisitor[T]) T {
+func visitParquetManifestStruct[T any](field pqarrow.SchemaField, visitor manifestVisitor[T], mapping *iceberg.MappedField) T {
 	results := make([]T, len(field.Children))
-
+	var fieldMap *iceberg.MappedField
 	for i, f := range field.Children {
-		res := visitManifestField(f, visitor)
-		results[i] = visitor.Field(f, res)
+		if mapping != nil {
+			fieldMap = mapping.GetField(f.Field.Name)
+		}
+		res := visitManifestField(f, visitor, fieldMap)
+		results[i] = visitor.Field(f, res, fieldMap)
 	}
 
-	return visitor.Struct(field, results)
+	return visitor.Struct(field, results, mapping)
 }
 
-func visitManifestList[T any](field pqarrow.SchemaField, visitor manifestVisitor[T]) T {
+func visitManifestList[T any](field pqarrow.SchemaField, visitor manifestVisitor[T], mapping *iceberg.MappedField) T {
 	elemField := field.Children[0]
-	res := visitManifestField(elemField, visitor)
-
-	return visitor.List(field, res)
+	var elemMapping *iceberg.MappedField
+	if mapping != nil {
+		elemMapping = mapping.GetField("element")
+	}
+	res := visitManifestField(elemField, visitor, elemMapping)
+	return visitor.List(field, res, mapping)
 }
 
-func visitManifestMap[T any](field pqarrow.SchemaField, visitor manifestVisitor[T]) T {
+func visitManifestMap[T any](field pqarrow.SchemaField, visitor manifestVisitor[T], mapping *iceberg.MappedField) T {
 	kvfield := field.Children[0]
 	keyField, valField := kvfield.Children[0], kvfield.Children[1]
-
-	return visitor.Map(field, visitManifestField(keyField, visitor), visitManifestField(valField, visitor))
+	var keyMapping, valMapping *iceberg.MappedField
+	if mapping != nil {
+		keyMapping = mapping.GetField("key")
+		valMapping = mapping.GetField("value")
+	}
+	return visitor.Map(field, visitManifestField(keyField, visitor, keyMapping), visitManifestField(valField, visitor, valMapping), mapping)
 }
 
-func visitManifestField[T any](field pqarrow.SchemaField, visitor manifestVisitor[T]) T {
+func visitManifestField[T any](field pqarrow.SchemaField, visitor manifestVisitor[T], mapping *iceberg.MappedField) T {
 	switch field.Field.Type.(type) {
 	case *arrow.StructType:
-		return visitParquetManifestStruct(field, visitor)
+		return visitParquetManifestStruct(field, visitor, mapping)
 	case *arrow.MapType:
-		return visitManifestMap(field, visitor)
+		return visitManifestMap(field, visitor, mapping)
 	case arrow.ListLikeType:
-		return visitManifestList(field, visitor)
+		return visitManifestList(field, visitor, mapping)
 	default:
-		return visitor.Primitive(field)
+		return visitor.Primitive(field, mapping)
 	}
 }
 
-func pruneParquetColumns(manifest *pqarrow.SchemaManifest, selected map[int]struct{}, selectFullTypes bool) (*arrow.Schema, []int, error) {
+func pruneParquetColumns(manifest *pqarrow.SchemaManifest, selected map[int]struct{}, selectFullTypes bool, mapping iceberg.NameMapping) (*arrow.Schema, []int, error) {
 	visitor := &pruneParquetSchema{
 		selected:  selected,
 		manifest:  manifest,
@@ -194,7 +208,7 @@ func pruneParquetColumns(manifest *pqarrow.SchemaManifest, selected map[int]stru
 		indices:   []int{},
 	}
 
-	result, err := visitParquetManifest(manifest, visitor)
+	result, err := visitParquetManifest(manifest, visitor, &iceberg.MappedField{Fields: mapping})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -229,7 +243,13 @@ type pruneParquetSchema struct {
 	indices []int
 }
 
-func (p *pruneParquetSchema) fieldID(field arrow.Field) int {
+func (p *pruneParquetSchema) fieldID(field arrow.Field, mapping *iceberg.MappedField) int {
+	if mapping != nil {
+		if mapping.FieldID != nil {
+			return *mapping.FieldID
+		}
+	}
+
 	if id := getFieldID(field); id != nil {
 		return *id
 	}
@@ -238,7 +258,7 @@ func (p *pruneParquetSchema) fieldID(field arrow.Field) int {
 		iceberg.ErrInvalidSchema, field))
 }
 
-func (p *pruneParquetSchema) Manifest(manifest *pqarrow.SchemaManifest, fields []arrow.Field) arrow.Field {
+func (p *pruneParquetSchema) Manifest(manifest *pqarrow.SchemaManifest, fields []arrow.Field, _ *iceberg.MappedField) arrow.Field {
 	finalFields := slices.DeleteFunc(fields, func(f arrow.Field) bool { return f.Type == nil })
 	result := arrow.Field{
 		Type: arrow.StructOf(finalFields...),
@@ -250,7 +270,7 @@ func (p *pruneParquetSchema) Manifest(manifest *pqarrow.SchemaManifest, fields [
 	return result
 }
 
-func (p *pruneParquetSchema) Struct(field pqarrow.SchemaField, children []arrow.Field) arrow.Field {
+func (p *pruneParquetSchema) Struct(field pqarrow.SchemaField, children []arrow.Field, _ *iceberg.MappedField) arrow.Field {
 	selected, fields := []arrow.Field{}, field.Children
 	sameType := true
 
@@ -285,8 +305,8 @@ func (p *pruneParquetSchema) Struct(field pqarrow.SchemaField, children []arrow.
 	return arrow.Field{}
 }
 
-func (p *pruneParquetSchema) Field(field pqarrow.SchemaField, result arrow.Field) arrow.Field {
-	_, ok := p.selected[p.fieldID(*field.Field)]
+func (p *pruneParquetSchema) Field(field pqarrow.SchemaField, result arrow.Field, mapping *iceberg.MappedField) arrow.Field {
+	_, ok := p.selected[p.fieldID(*field.Field, mapping)]
 	if !ok {
 		if result.Type != nil {
 			return result
@@ -315,8 +335,8 @@ func (p *pruneParquetSchema) Field(field pqarrow.SchemaField, result arrow.Field
 	return *field.Field
 }
 
-func (p *pruneParquetSchema) List(field pqarrow.SchemaField, elemResult arrow.Field) arrow.Field {
-	_, ok := p.selected[p.fieldID(*field.Children[0].Field)]
+func (p *pruneParquetSchema) List(field pqarrow.SchemaField, elemResult arrow.Field, mapping *iceberg.MappedField) arrow.Field {
+	_, ok := p.selected[p.fieldID(*field.Children[0].Field, mapping)]
 	if !ok {
 		if elemResult.Type != nil {
 			result := *field.Field
@@ -350,18 +370,19 @@ func (p *pruneParquetSchema) List(field pqarrow.SchemaField, elemResult arrow.Fi
 	return *field.Field
 }
 
-func (p *pruneParquetSchema) Map(field pqarrow.SchemaField, keyResult, valResult arrow.Field) arrow.Field {
-	_, ok := p.selected[p.fieldID(*field.Children[0].Children[1].Field)]
+func (p *pruneParquetSchema) Map(field pqarrow.SchemaField, keyResult, valResult arrow.Field, mapping *iceberg.MappedField) arrow.Field {
+	var valMapping *iceberg.MappedField
+	if mapping != nil {
+		valMapping = mapping.GetField("value")
+	}
+
+	_, ok := p.selected[p.fieldID(*field.Children[0].Children[1].Field, valMapping)]
 	if !ok {
 		if valResult.Type != nil {
 			result := *field.Field
 			result.Type = p.projectMap(field.Field.Type.(*arrow.MapType), valResult.Type)
 
 			return result
-		}
-
-		if _, ok = p.selected[p.fieldID(*field.Children[0].Children[1].Field)]; ok {
-			return *field.Field
 		}
 
 		return arrow.Field{}
@@ -390,7 +411,7 @@ func (p *pruneParquetSchema) Map(field pqarrow.SchemaField, keyResult, valResult
 	return *field.Field
 }
 
-func (p *pruneParquetSchema) Primitive(_ pqarrow.SchemaField) arrow.Field {
+func (p *pruneParquetSchema) Primitive(_ pqarrow.SchemaField, _ *iceberg.MappedField) arrow.Field {
 	return arrow.Field{}
 }
 
