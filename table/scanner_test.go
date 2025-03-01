@@ -458,6 +458,23 @@ func (s *ScannerSuite) TestPartitionedTables() {
 	}
 }
 
+func (s *ScannerSuite) TestNestedColumns() {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(s.T(), 0)
+
+	ident := catalog.ToIdentifier("default", "test_all_types")
+
+	tbl, err := s.cat.LoadTable(s.ctx, ident, s.props)
+	s.Require().NoError(err)
+
+	ctx := compute.WithAllocator(s.ctx, mem)
+	results, err := tbl.Scan().ToArrowTable(ctx)
+	s.Require().NoError(err)
+	defer results.Release()
+
+	s.EqualValues(5, results.NumRows())
+}
+
 func (s *ScannerSuite) TestUnpartitionedUUIDTable() {
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	defer mem.AssertSize(s.T(), 0)

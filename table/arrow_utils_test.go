@@ -18,6 +18,7 @@
 package table_test
 
 import (
+	"bufio"
 	"context"
 	"strings"
 	"testing"
@@ -114,7 +115,7 @@ func TestArrowToIceberg(t *testing.T) {
 			ElementID:       1,
 			Element:         iceberg.PrimitiveTypes.Int32,
 			ElementRequired: true,
-		}, false, ""},
+		}, true, ""},
 		{arrow.LargeListOfField(arrow.Field{
 			Name:     "element",
 			Type:     arrow.PrimitiveTypes.Int32,
@@ -124,7 +125,7 @@ func TestArrowToIceberg(t *testing.T) {
 			ElementID:       1,
 			Element:         iceberg.PrimitiveTypes.Int32,
 			ElementRequired: true,
-		}, true, ""},
+		}, false, ""},
 		{arrow.FixedSizeListOfField(1, arrow.Field{
 			Name:     "element",
 			Type:     arrow.PrimitiveTypes.Int32,
@@ -164,7 +165,7 @@ func TestArrowToIceberg(t *testing.T) {
 			}
 
 			if tt.reciprocal {
-				result, err := table.TypeToArrowType(tt.ice, true)
+				result, err := table.TypeToArrowType(tt.ice, true, false)
 				require.NoError(t, err)
 				assert.True(t, arrow.TypeEqual(tt.dt, result), tt.dt.String(), result.String())
 			}
@@ -509,4 +510,40 @@ func TestToRequestedSchemaTimestamps(t *testing.T) {
 			expected.Release()
 		}
 	}
+}
+
+func TestToRequestedSchema(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	schema := arrow.NewSchema([]arrow.Field{
+		{
+			Name: "nested", Type: arrow.ListOfField(arrow.Field{
+				Name: "element", Type: arrow.PrimitiveTypes.Int32, Nullable: false,
+				Metadata: arrow.NewMetadata([]string{table.ArrowParquetFieldIDKey}, []string{"2"}),
+			}),
+			Metadata: arrow.NewMetadata([]string{table.ArrowParquetFieldIDKey}, []string{"1"})},
+	}, nil)
+
+	bldr := array.NewRecordBuilder(mem, schema)
+	defer bldr.Release()
+
+	const data = `{"nested": [1, 2, 3]}
+				  {"nested": [4, 5, 6]}`
+
+	s := bufio.NewScanner(strings.NewReader(data))
+	require.True(t, s.Scan())
+	require.NoError(t, bldr.UnmarshalJSON(s.Bytes()))
+
+	rec := bldr.NewRecord()
+	defer rec.Release()
+
+	icesc, err := table.ArrowSchemaToIceberg(schema, false, nil)
+	require.NoError(t, err)
+
+	rec2, err := table.ToRequestedSchema(context.Background(), icesc, icesc, rec, true, true, false)
+	require.NoError(t, err)
+	defer rec2.Release()
+
+	assert.True(t, array.RecordEqual(rec, rec2))
 }

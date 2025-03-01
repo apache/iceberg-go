@@ -138,6 +138,7 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 			o.BaseEndpoint = aws.String(endpoint)
 		}
 		o.UsePathStyle = usePathStyle
+		o.DisableLogOutputChecksumValidationSkipped = true
 	})
 
 	// Create a *blob.Bucket.
