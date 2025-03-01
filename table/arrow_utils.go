@@ -900,14 +900,6 @@ func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schem
 	return out, nil
 }
 
-func must[T any](v T, err error) T {
-	if err != nil {
-		panic(err)
-	}
-
-	return v
-}
-
 type metricModeType string
 
 const (
