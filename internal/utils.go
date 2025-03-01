@@ -19,6 +19,7 @@ package internal
 
 import (
 	"cmp"
+	"io"
 	"slices"
 )
 
@@ -129,4 +130,15 @@ func (s *SlicePacker[T]) PackEnd(items []T, weightFunc func(T) int64) [][]T {
 	}
 
 	return result
+}
+
+type CountingWriter struct {
+	Count int64
+	W     io.Writer
+}
+
+func (w *CountingWriter) Write(p []byte) (int, error) {
+	n, err := w.W.Write(p)
+	w.Count += int64(n)
+	return n, err
 }
