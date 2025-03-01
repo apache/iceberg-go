@@ -85,12 +85,6 @@ func NewManifestV1Builder(path string, length int64, partitionSpecID int32, adde
 	}
 }
 
-func (b *ManifestV1Builder) PartitionType(st *StructType) *ManifestV1Builder {
-	b.m.partitionType = st
-
-	return b
-}
-
 func (b *ManifestV1Builder) AddedFiles(cnt int32) *ManifestV1Builder {
 	b.m.AddedFilesCount = &cnt
 
@@ -144,10 +138,6 @@ func (b *ManifestV1Builder) KeyMetadata(km []byte) *ManifestV1Builder {
 // a pointer to the constructed manifest file. Further calls to the modifier
 // methods after calling build would modify the constructed ManifestFile.
 func (b *ManifestV1Builder) Build() ManifestFile {
-	if b.m.partitionType == nil {
-		b.m.partitionType = UnpartitionedSpec.PartitionType(nil)
-	}
-
 	return b.m
 }
 
@@ -163,7 +153,6 @@ func (f *fallbackManifestFileV1) toManifest() *manifestFileV1 {
 }
 
 type manifestFileV1 struct {
-	partitionType      *StructType
 	Path               string          `avro:"manifest_path"`
 	Len                int64           `avro:"manifest_length"`
 	SpecID             int32           `avro:"partition_spec_id"`
@@ -261,11 +250,6 @@ func (m *manifestFileV1) FetchEntries(fs iceio.IO, discardDeleted bool) ([]Manif
 	return fetchManifestEntries(m, fs, discardDeleted)
 }
 
-// // WriteEntries writes a list of manifest entries to an avro file.
-// func (m *manifestFileV1) WriteEntries(out io.Writer, entries []ManifestEntry) error {
-// 	return writeManifestEntries(out, m.partitionType, entries, m.Version())
-// }
-
 // ManifestV2Builder is a helper for building a V2 manifest file
 // struct which will conform to the ManifestFile interface.
 type ManifestV2Builder struct {
@@ -286,12 +270,6 @@ func NewManifestV2Builder(path string, length int64, partitionSpecID int32, cont
 			AddedSnapshotID: addedSnapshotID,
 		},
 	}
-}
-
-func (b *ManifestV2Builder) PartitionSchema(st *StructType) *ManifestV2Builder {
-	b.m.partitionType = st
-
-	return b
 }
 
 func (b *ManifestV2Builder) SequenceNum(num, minSeqNum int64) *ManifestV2Builder {
@@ -353,10 +331,6 @@ func (b *ManifestV2Builder) KeyMetadata(km []byte) *ManifestV2Builder {
 // a pointer to the constructed manifest file. Further calls to the modifier
 // methods after calling build would modify the constructed ManifestFile.
 func (b *ManifestV2Builder) Build() ManifestFile {
-	if b.m.partitionType == nil {
-		b.m.partitionType = UnpartitionedSpec.PartitionType(nil)
-	}
-
 	return b.m
 }
 
@@ -436,11 +410,6 @@ func (m *manifestFileV2) HasExistingFiles() bool {
 func (m *manifestFileV2) FetchEntries(fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error) {
 	return fetchManifestEntries(m, fs, discardDeleted)
 }
-
-// // WriteEntries writes a list of manifest entries to an avro file.
-// func (m *manifestFileV2) WriteEntries(out io.Writer, entries []ManifestEntry) error {
-// 	return writeManifestEntries(out, m.partitionType, entries, m.Version())
-// }
 
 func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType) {
 	getField := func(rs *avro.RecordSchema, name string) *avro.Field {
@@ -538,7 +507,7 @@ func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]M
 		}
 
 		if !discardDeleted || tmp.Status() != EntryStatusDELETED {
-			tmp.inheritSeqNum(m)
+			tmp.inherit(m)
 			if fieldToIDMap, ok := tmp.DataFile().(hasFieldToIDMap); ok {
 				fieldToIDMap.setFieldNameToIDMap(fieldNameToID)
 				fieldToIDMap.setFieldIDToLogicalTypeMap(fieldIDToLogicalType)
@@ -1218,14 +1187,17 @@ func WriteManifestList(version int, out io.Writer, snapshotID int64, parentSnaps
 }
 
 func WriteManifest(
+	filename string,
 	out io.Writer,
 	version int,
 	spec PartitionSpec,
 	schema *Schema,
 	snapshotID int64,
 	entries []ManifestEntry,
-) (func(string, int64) (ManifestFile, error), error) {
-	w, err := NewManifestWriter(version, out, spec, schema, snapshotID)
+) (ManifestFile, error) {
+	cnt := &internal.CountingWriter{W: out}
+
+	w, err := NewManifestWriter(version, cnt, spec, schema, snapshotID)
 	if err != nil {
 		return nil, err
 	}
@@ -1236,7 +1208,7 @@ func WriteManifest(
 		}
 	}
 
-	return w.ToManifestFile, w.Close()
+	return w.ToManifestFile(filename, cnt.Count)
 }
 
 // ManifestEntryStatus defines constants for the entry status of
@@ -1376,6 +1348,7 @@ type dataFile struct {
 	fieldNameToID        map[string]int
 	fieldIDToLogicalType map[int]avro.LogicalType
 
+	specID   int32
 	initMaps sync.Once
 }
 
@@ -1408,6 +1381,7 @@ func (d *dataFile) Partition() map[string]any {
 
 func (d *dataFile) Count() int64         { return d.RecordCount }
 func (d *dataFile) FileSizeBytes() int64 { return d.FileSize }
+func (d *dataFile) SpecID() int32        { return d.specID }
 
 func (d *dataFile) ColumnSizes() map[int]int64 {
 	d.initializeMapData()
@@ -1519,7 +1493,13 @@ func (f *fallbackManifestEntryV1) toEntry() *manifestEntryV1 {
 	return &f.manifestEntryV1
 }
 
-func (m *manifestEntryV1) inheritSeqNum(manifest ManifestFile) {}
+func (m *manifestEntryV1) inherit(manifest ManifestFile) {
+	if m.Snapshot <= 0 {
+		m.Snapshot = manifest.SnapshotID()
+	}
+
+	m.Data.(*dataFile).specID = manifest.PartitionSpecID()
+}
 
 func (m *manifestEntryV1) Status() ManifestEntryStatus { return m.EntryStatus }
 func (m *manifestEntryV1) SnapshotID() int64           { return m.Snapshot }
@@ -1601,7 +1581,7 @@ type manifestEntryV2 struct {
 	Data        DataFile            `avro:"data_file"`
 }
 
-func (m *manifestEntryV2) inheritSeqNum(manifest ManifestFile) {
+func (m *manifestEntryV2) inherit(manifest ManifestFile) {
 	if m.Snapshot == nil {
 		snap := manifest.SnapshotID()
 		m.Snapshot = &snap
@@ -1615,6 +1595,8 @@ func (m *manifestEntryV2) inheritSeqNum(manifest ManifestFile) {
 	if m.FileSeqNum == nil && (manifestSequenceNum == 0 || m.EntryStatus == EntryStatusADDED) {
 		m.FileSeqNum = &manifestSequenceNum
 	}
+
+	m.Data.(*dataFile).specID = manifest.PartitionSpecID()
 }
 
 func (m *manifestEntryV2) Status() ManifestEntryStatus { return m.EntryStatus }
@@ -1655,6 +1637,16 @@ func (m *manifestEntryV2) wrap(status ManifestEntryStatus, snapshotID int64, seq
 	return m
 }
 
+func NewManifestEntry(status ManifestEntryStatus, snapshotID int64, seqNum, fileSeqNum *int64, df DataFile) ManifestEntry {
+	return &manifestEntryV2{
+		EntryStatus: status,
+		Snapshot:    &snapshotID,
+		SeqNum:      seqNum,
+		FileSeqNum:  fileSeqNum,
+		Data:        df,
+	}
+}
+
 // DataFileBuilder is a helper for building a data file struct which will
 // conform to the DataFile interface.
 type DataFileBuilder struct {
@@ -1665,6 +1657,7 @@ type DataFileBuilder struct {
 // all of the optional fields to be set by calling the corresponding methods
 // before calling [DataFileBuilder.Build] to construct the object.
 func NewDataFileBuilder(
+	spec PartitionSpec,
 	content ManifestEntryContent,
 	path string,
 	format FileFormat,
@@ -1706,6 +1699,7 @@ func NewDataFileBuilder(
 			PartitionData: partitionData,
 			RecordCount:   recordCount,
 			FileSize:      fileSize,
+			specID:        int32(spec.id),
 		},
 	}, nil
 }
@@ -1857,6 +1851,9 @@ type DataFile interface {
 	// SortOrderID returns the id representing the sort order for this
 	// file, or nil if there is no sort order.
 	SortOrderID() *int
+	// SpecID returns the partition spec id for this data file, inherited
+	// from the manifest that the data file was read from
+	SpecID() int32
 }
 
 // ManifestEntry is an interface for both v1 and v2 manifest entries.
@@ -1879,7 +1876,7 @@ type ManifestEntry interface {
 	// by this manifest entry.
 	DataFile() DataFile
 
-	inheritSeqNum(manifest ManifestFile)
+	inherit(manifest ManifestFile)
 	wrap(status ManifestEntryStatus, snapshotID int64, seqNum int64, fileSeqNum *int64, datafile DataFile) ManifestEntry
 }
 
