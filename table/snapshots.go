@@ -120,7 +120,6 @@ func (m *updateMetrics) addDataFile(df iceberg.DataFile) error {
 	default:
 		return fmt.Errorf("unknown data file content: %s", df.ContentType())
 	}
-
 	return nil
 }
 
@@ -141,7 +140,6 @@ func (m *updateMetrics) removeFile(df iceberg.DataFile) error {
 	default:
 		return fmt.Errorf("unknown data file content: %s", df.ContentType())
 	}
-
 	return nil
 }
 
@@ -169,7 +167,6 @@ func (m *updateMetrics) toProps() iceberg.Properties {
 	setWhenPositive(props, removedPosDeletesKey, m.removedPosDeletes)
 	setWhenPositive(props, addedEqDeletesKey, m.addedEqDeletes)
 	setWhenPositive(props, removedEqDeletesKey, m.removedEqDeletes)
-
 	return props
 }
 
@@ -378,7 +375,6 @@ func (s *SnapshotSummaryCollector) removeFile(df iceberg.DataFile, sc *iceberg.S
 
 func (s *SnapshotSummaryCollector) partitionSummary(metrics *updateMetrics) string {
 	props := metrics.toProps()
-
 	return strings.Join(slices.Sorted(func(yield func(s string) bool) {
 		for k, v := range props {
 			if !yield(fmt.Sprintf("%s=%s", k, v)) {
@@ -399,7 +395,6 @@ func (s *SnapshotSummaryCollector) build() iceberg.Properties {
 			}
 		}
 	}
-
 	return props
 }
 
