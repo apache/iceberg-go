@@ -422,16 +422,12 @@ func (m *ManifestTestSuite) writeManifestEntries() {
 		PartitionField{FieldID: 1000, SourceID: 1, Name: "VendorID", Transform: IdentityTransform{}},
 		PartitionField{FieldID: 1001, SourceID: 2, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
 
-	fn, err := WriteManifest(&m.v1ManifestEntries, 1, partitionSpec, testSchema, entrySnapshotID, manifestEntryV1Recs)
+	_, err := WriteManifest("/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro",
+		&m.v1ManifestEntries, 1, partitionSpec, testSchema, entrySnapshotID, manifestEntryV1Recs)
 	m.Require().NoError(err)
 
-	_, err = fn("/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro", int64(m.v1ManifestList.Len()))
-	m.Require().NoError(err)
-
-	fn, err = WriteManifest(&m.v2ManifestEntries, 2, partitionSpec, testSchema, entrySnapshotID, manifestEntryV2Recs)
-	m.Require().NoError(err)
-
-	_, err = fn("/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro", int64(m.v1ManifestList.Len()))
+	_, err = WriteManifest("/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro",
+		&m.v2ManifestEntries, 2, partitionSpec, testSchema, entrySnapshotID, manifestEntryV2Recs)
 	m.Require().NoError(err)
 }
 
@@ -784,6 +780,7 @@ func (m *ManifestTestSuite) TestManifestEntriesV2() {
 
 func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 	dataFileBuilder, err := NewDataFileBuilder(
+		NewPartitionSpec(),
 		EntryContentData,
 		"sample.parquet",
 		ParquetFile,
