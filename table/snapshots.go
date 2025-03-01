@@ -375,7 +375,6 @@ func (s *SnapshotSummaryCollector) removeFile(df iceberg.DataFile, sc *iceberg.S
 
 func (s *SnapshotSummaryCollector) partitionSummary(metrics *updateMetrics) string {
 	props := metrics.toProps()
-
 	return strings.Join(slices.Sorted(func(yield func(s string) bool) {
 		for k, v := range props {
 			if !yield(fmt.Sprintf("%s=%s", k, v)) {
