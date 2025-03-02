@@ -31,28 +31,30 @@ import (
 
 // Constants for Azure configuration options
 const (
-	ADLS_SAS_TOKEN_PREFIX         = "adls.sas-token."
-	ADLS_CONNECTION_STRING_PREFIX = "adls.connection-string."
-	ADLS_READ_BLOCK_SIZE          = "adls.read.block-size-bytes"
-	ADLS_WRITE_BLOCK_SIZE         = "adls.write.block-size-bytes"
-	ADLS_SHARED_KEY_ACCOUNT_NAME  = "adls.auth.shared-key.account.name"
-	ADLS_SHARED_KEY_ACCOUNT_KEY   = "adls.auth.shared-key.account.key"
+	AdlsSasTokenPrefix         = "adls.sas-token."
+	AdlsConnectionStringPrefix = "adls.connection-string."
+	AdlsSharedKeyAccountName   = "adls.auth.shared-key.account.name"
+	AdlsSharedKeyAccountKey    = "adls.auth.shared-key.account.key"
+
+	// Not in use yet
+	// AdlsReadBlockSize          = "adls.read.block-size-bytes"
+	// AdlsWriteBlockSize         = "adls.write.block-size-bytes"
 )
 
 // Construct a Azure bucket from a URL
 func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
-	adlsSasTokens := propertiesWithPrefix(props, ADLS_SAS_TOKEN_PREFIX)
-	adlsConnectionStrings := propertiesWithPrefix(props, ADLS_CONNECTION_STRING_PREFIX)
+	adlsSasTokens := propertiesWithPrefix(props, AdlsSasTokenPrefix)
+	adlsConnectionStrings := propertiesWithPrefix(props, AdlsConnectionStringPrefix)
 
 	// Construct the client
-	accountName := props[ADLS_SHARED_KEY_ACCOUNT_NAME]
+	accountName := props[AdlsSharedKeyAccountName]
 	var client *container.Client
 
 	if accountName != "" {
 		var sharedKeyCred *azblob.SharedKeyCredential
 		var err error
 
-		if accountKey, ok := props[ADLS_SHARED_KEY_ACCOUNT_KEY]; ok {
+		if accountKey, ok := props[AdlsSharedKeyAccountKey]; ok {
 			svcURL := fmt.Sprintf("https://%s.blob.core.windows.net", accountName)
 			containerURL, err := url.JoinPath(svcURL, parsed.Host)
 			if err != nil {
