@@ -342,8 +342,7 @@ func (s *Schema) Equals(other *Schema) bool {
 // HighestFieldID returns the value of the numerically highest field ID
 // in this schema.
 func (s *Schema) HighestFieldID() int {
-	id, _ := Visit[int](s, findLastFieldID{})
-
+	id, _ := Visit(s, findLastFieldID{})
 	return id
 }
 
@@ -742,7 +741,7 @@ func IndexByName(schema *Schema) (map[string]int, error) {
 			fieldNames:      make([]string, 0),
 			shortFieldNames: make([]string, 0),
 		}
-		if _, err := Visit[map[string]int](schema, indexer); err != nil {
+		if _, err := Visit(schema, indexer); err != nil {
 			return nil, err
 		}
 
@@ -761,7 +760,7 @@ func IndexNameByID(schema *Schema) (map[int]string, error) {
 		fieldNames:      make([]string, 0),
 		shortFieldNames: make([]string, 0),
 	}
-	if _, err := Visit[map[string]int](schema, indexer); err != nil {
+	if _, err := Visit(schema, indexer); err != nil {
 		return nil, err
 	}
 
