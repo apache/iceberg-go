@@ -40,11 +40,10 @@ func (t Table) Equals(other Table) bool {
 		t.metadata.Equals(other.metadata)
 }
 
-func (t Table) Identifier() Identifier   { return t.identifier }
-func (t Table) Metadata() Metadata       { return t.metadata }
-func (t Table) MetadataLocation() string { return t.metadataLocation }
-func (t Table) FS() io.IO                { return t.fs }
-
+func (t Table) Identifier() Identifier               { return t.identifier }
+func (t Table) Metadata() Metadata                   { return t.metadata }
+func (t Table) MetadataLocation() string             { return t.metadataLocation }
+func (t Table) FS() io.IO                            { return t.fs }
 func (t Table) Schema() *iceberg.Schema              { return t.metadata.CurrentSchema() }
 func (t Table) Spec() iceberg.PartitionSpec          { return t.metadata.PartitionSpec() }
 func (t Table) SortOrder() SortOrder                 { return t.metadata.SortOrder() }
@@ -60,6 +59,10 @@ func (t Table) Schemas() map[int]*iceberg.Schema {
 	}
 
 	return m
+}
+
+func (t Table) LocationProvider() (LocationProvider, error) {
+	return LoadLocationProvider(t.metadataLocation, t.metadata.Properties())
 }
 
 type ScanOption func(*Scan)
