@@ -46,6 +46,7 @@ func ParseGCSConfig(props map[string]string) *gcsblob.Options {
 	if path := props[GCSKeyPath]; path != "" {
 		o = append(o, option.WithCredentialsFile(path))
 	}
+
 	return &gcsblob.Options{
 		ClientOptions: o,
 	}

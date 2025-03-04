@@ -33,14 +33,15 @@ func (LocalFS) Open(name string) (File, error) {
 
 func (LocalFS) Create(name string) (FileWriter, error) {
 	filename := strings.TrimPrefix(name, "file://")
-	if err := os.MkdirAll(filepath.Dir(filename), 0777); err != nil {
+	if err := os.MkdirAll(filepath.Dir(filename), 0o777); err != nil {
 		return nil, err
 	}
+
 	return os.Create(filename)
 }
 
 func (LocalFS) WriteFile(name string, content []byte) error {
-	return os.WriteFile(strings.TrimPrefix(name, "file://"), content, 0777)
+	return os.WriteFile(strings.TrimPrefix(name, "file://"), content, 0o777)
 }
 
 func (LocalFS) Remove(name string) error {

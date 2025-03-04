@@ -29,6 +29,7 @@ import (
 func Snapshot() table.Snapshot {
 	parentID := int64(19)
 	manifest, schemaid := "s3:/a/b/c.avro", 3
+
 	return table.Snapshot{
 		SnapshotID:       25,
 		ParentSnapshotID: &parentID,
@@ -45,6 +46,7 @@ func Snapshot() table.Snapshot {
 func SnapshotWithProperties() table.Snapshot {
 	parentID := int64(19)
 	manifest, schemaid := "s3:/a/b/c.avro", 3
+
 	return table.Snapshot{
 		SnapshotID:       25,
 		ParentSnapshotID: &parentID,

@@ -30,7 +30,8 @@ var testArgs = []struct {
 	meta     string
 	expected string
 }{
-	{`{
+	{
+		`{
     "format-version": 2,
     "table-uuid": "9c12d441-03fe-4693-9a96-a0705ddf69c1",
     "location": "s3://bucket/test/location",
@@ -83,8 +84,10 @@ key                    | value
 ----------------------------------
 read.split.target.size | 134217728
 
-`},
-	{`{
+`,
+	},
+	{
+		`{
     "format-version": 2,
     "table-uuid": "9c12d441-03fe-4693-9a96-a0705ddf69c1",
     "location": "s3://bucket/test/location",
@@ -174,7 +177,8 @@ key                    | value
 ----------------------------------
 read.split.target.size | 134217728
 
-`},
+`,
+	},
 }
 
 func TestDescribeTable(t *testing.T) {

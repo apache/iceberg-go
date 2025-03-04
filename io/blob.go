@@ -93,9 +93,7 @@ func (bfs *blobFileIO) Open(path string) (File, error) {
 		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrInvalid}
 	}
 
-	var (
-		key, name = path, filepath.Base(path)
-	)
+	key, name := path, filepath.Base(path)
 
 	r, err := bfs.NewReader(bfs.ctx, key, nil)
 	if err != nil {
@@ -107,6 +105,7 @@ func (bfs *blobFileIO) Open(path string) (File, error) {
 
 func (bfs *blobFileIO) Remove(name string) error {
 	name = bfs.preprocess(name)
+
 	return bfs.Bucket.Delete(bfs.ctx, name)
 }
 
@@ -116,6 +115,7 @@ func (bfs *blobFileIO) Create(name string) (FileWriter, error) {
 
 func (bfs *blobFileIO) WriteFile(name string, content []byte) error {
 	name = bfs.preprocess(name)
+
 	return bfs.Bucket.WriteAll(bfs.ctx, name, content, nil)
 }
 
@@ -138,6 +138,7 @@ func (io *blobFileIO) NewWriter(ctx context.Context, path string, overwrite bool
 			if err != nil {
 				return nil, &fs.PathError{Op: "new writer", Path: path, Err: err}
 			}
+
 			return nil, &fs.PathError{Op: "new writer", Path: path, Err: fs.ErrInvalid}
 		}
 	}
@@ -145,9 +146,11 @@ func (io *blobFileIO) NewWriter(ctx context.Context, path string, overwrite bool
 	if err != nil {
 		return nil, err
 	}
+
 	return &blobWriteFile{
 			Writer: bw,
-			name:   path},
+			name:   path,
+		},
 		nil
 }
 

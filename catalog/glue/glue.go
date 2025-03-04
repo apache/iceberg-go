@@ -65,9 +65,7 @@ const (
 	RetryMode       = "glue.retry-mode"
 )
 
-var (
-	_ catalog.Catalog = (*Catalog)(nil)
-)
+var _ catalog.Catalog = (*Catalog)(nil)
 
 func init() {
 	catalog.Register("glue", catalog.RegistrarFunc(func(ctx context.Context, _ string, props iceberg.Properties) (catalog.Catalog, error) {
@@ -161,6 +159,7 @@ func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) it
 		database, err := identifierToGlueDatabase(namespace)
 		if err != nil {
 			yield(table.Identifier{}, err)
+
 			return
 		}
 
@@ -173,6 +172,7 @@ func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) it
 			page, err := paginator.NextPage(ctx)
 			if err != nil {
 				yield(table.Identifier{}, fmt.Errorf("failed to list tables in namespace %s: %w", database, err))
+
 				return
 			}
 
@@ -357,7 +357,6 @@ func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifie
 
 	params := &glue.CreateDatabaseInput{CatalogId: c.catalogId, DatabaseInput: databaseInput}
 	_, err = c.glueSvc.CreateDatabase(ctx, params)
-
 	if err != nil {
 		return fmt.Errorf("failed to create database %s: %w", database, err)
 	}
@@ -375,6 +374,7 @@ func (c *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Iden
 	if err != nil {
 		return false, err
 	}
+
 	return true, nil
 }
 
@@ -431,8 +431,8 @@ func getUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals [
 // UpdateNamespaceProperties updates the properties of an Iceberg namespace in the Glue catalog.
 // The removals list contains the keys to remove, and the updates map contains the keys and values to update.
 func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier,
-	removals []string, updates iceberg.Properties) (catalog.PropertiesUpdateSummary, error) {
-
+	removals []string, updates iceberg.Properties,
+) (catalog.PropertiesUpdateSummary, error) {
 	databaseName, err := identifierToGlueDatabase(namespace)
 	if err != nil {
 		return catalog.PropertiesUpdateSummary{}, err
@@ -466,7 +466,7 @@ func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) (
 	}
 
 	if parent != nil {
-		return nil, fmt.Errorf("hierarchical namespace is not supported")
+		return nil, errors.New("hierarchical namespace is not supported")
 	}
 
 	var icebergNamespaces []table.Identifier
@@ -503,6 +503,7 @@ func (c *Catalog) getTable(ctx context.Context, database, tableName string) (*ty
 		if errors.Is(err, &types.EntityNotFoundException{}) {
 			return nil, fmt.Errorf("failed to get table %s.%s: %w", database, tableName, catalog.ErrNoSuchTable)
 		}
+
 		return nil, fmt.Errorf("failed to get table %s.%s: %w", database, tableName, err)
 	}
 
@@ -520,6 +521,7 @@ func (c *Catalog) getDatabase(ctx context.Context, databaseName string) (*types.
 		if errors.Is(err, &types.EntityNotFoundException{}) {
 			return nil, fmt.Errorf("failed to get namespace %s: %w", databaseName, catalog.ErrNoSuchNamespace)
 		}
+
 		return nil, fmt.Errorf("failed to get namespace %s: %w", databaseName, err)
 	}
 
@@ -564,6 +566,7 @@ func filterTableListByType(database string, tableList []types.Table, tableType s
 		}
 		filtered = append(filtered, TableIdentifier(database, aws.ToString(tbl.Name)))
 	}
+
 	return filtered
 }
 

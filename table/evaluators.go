@@ -60,6 +60,7 @@ type manifestEvalVisitor struct {
 func (m *manifestEvalVisitor) Eval(manifest iceberg.ManifestFile) (bool, error) {
 	if parts := manifest.Partitions(); len(parts) > 0 {
 		m.partitionFields = parts
+
 		return iceberg.VisitExpr(m.partitionFilter, m)
 	}
 
@@ -240,6 +241,7 @@ func (m *manifestEvalVisitor) VisitNotNull(term iceberg.BoundTerm) bool {
 
 func getCmp[T iceberg.LiteralType](b iceberg.TypedLiteral[T]) func(iceberg.Literal, iceberg.Literal) int {
 	cmp := b.Comparator()
+
 	return func(l1, l2 iceberg.Literal) int {
 		return cmp(l1.(iceberg.TypedLiteral[T]).Value(), l2.(iceberg.TypedLiteral[T]).Value())
 	}
@@ -482,9 +484,7 @@ func (m *manifestEvalVisitor) VisitNotStartsWith(term iceberg.BoundTerm, lit ice
 		panic(err)
 	}
 
-	var (
-		prefix, lowerBound, upperBound string
-	)
+	var prefix, lowerBound, upperBound string
 	if val, ok := lit.(iceberg.TypedLiteral[string]); ok {
 		prefix = val.Value()
 		lowerBound, upperBound = lower.(iceberg.TypedLiteral[string]).Value(), upper.(iceberg.TypedLiteral[string]).Value()
@@ -664,8 +664,8 @@ func (m *metricsEvaluator) isNan(v iceberg.Literal) bool {
 }
 
 func newInclusiveMetricsEvaluator(s *iceberg.Schema, expr iceberg.BooleanExpression,
-	caseSensitive bool, includeEmptyFiles bool) (func(iceberg.DataFile) (bool, error), error) {
-
+	caseSensitive bool, includeEmptyFiles bool,
+) (func(iceberg.DataFile) (bool, error), error) {
 	rewritten, err := iceberg.RewriteNotExpr(expr)
 	if err != nil {
 		return nil, err
@@ -684,8 +684,8 @@ func newInclusiveMetricsEvaluator(s *iceberg.Schema, expr iceberg.BooleanExpress
 }
 
 func newParquetRowGroupStatsEvaluator(fileSchema *iceberg.Schema, expr iceberg.BooleanExpression,
-	includeEmptyFiles bool) (func(*metadata.RowGroupMetaData, []int) (bool, error), error) {
-
+	includeEmptyFiles bool,
+) (func(*metadata.RowGroupMetaData, []int) (bool, error), error) {
 	rewritten, err := iceberg.RewriteNotExpr(expr)
 	if err != nil {
 		return nil, err
@@ -764,6 +764,7 @@ func (m *inclusiveMetricsEval) mayContainNull(fieldID int) bool {
 	}
 
 	_, ok := m.nullCounts[fieldID]
+
 	return ok
 }
 
@@ -780,6 +781,7 @@ func (m *inclusiveMetricsEval) VisitIsNull(t iceberg.BoundTerm) bool {
 	if cnt, exists := m.nullCounts[fieldID]; exists && cnt == 0 {
 		return rowsCannotMatch
 	}
+
 	return rowsMightMatch
 }
 
@@ -790,6 +792,7 @@ func (m *inclusiveMetricsEval) VisitNotNull(t iceberg.BoundTerm) bool {
 	if m.containsNullsOnly(fieldID) {
 		return rowsCannotMatch
 	}
+
 	return rowsMightMatch
 }
 
@@ -803,6 +806,7 @@ func (m *inclusiveMetricsEval) VisitIsNan(t iceberg.BoundTerm) bool {
 	if m.containsNullsOnly(fieldID) {
 		return rowsCannotMatch
 	}
+
 	return rowsMightMatch
 }
 
@@ -812,6 +816,7 @@ func (m *inclusiveMetricsEval) VisitNotNan(t iceberg.BoundTerm) bool {
 	if m.containsNansOnly(fieldID) {
 		return rowsCannotMatch
 	}
+
 	return rowsMightMatch
 }
 

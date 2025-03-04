@@ -364,6 +364,7 @@ func properties(ctx context.Context, output Output, cat catalog.Catalog, args pr
 
 		if args.propname == "" {
 			output.DescribeProperties(props)
+
 			return
 		}
 

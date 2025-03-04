@@ -88,12 +88,15 @@ func visitBoolExpr[T any](e BooleanExpression, visitor BooleanExprVisitor[T]) T 
 		return visitor.VisitTrue()
 	case AndExpr:
 		left, right := visitBoolExpr(e.left, visitor), visitBoolExpr(e.right, visitor)
+
 		return visitor.VisitAnd(left, right)
 	case OrExpr:
 		left, right := visitBoolExpr(e.left, visitor), visitBoolExpr(e.right, visitor)
+
 		return visitor.VisitOr(left, right)
 	case NotExpr:
 		child := visitBoolExpr(e.child, visitor)
+
 		return visitor.VisitNot(child)
 	case UnboundPredicate:
 		return visitor.VisitUnbound(e)
@@ -158,19 +161,24 @@ func (*bindVisitor) VisitFalse() BooleanExpression { return AlwaysFalse{} }
 func (*bindVisitor) VisitNot(child BooleanExpression) BooleanExpression {
 	return NewNot(child)
 }
+
 func (*bindVisitor) VisitAnd(left, right BooleanExpression) BooleanExpression {
 	return NewAnd(left, right)
 }
+
 func (*bindVisitor) VisitOr(left, right BooleanExpression) BooleanExpression {
 	return NewOr(left, right)
 }
+
 func (b *bindVisitor) VisitUnbound(pred UnboundPredicate) BooleanExpression {
 	expr, err := pred.Bind(b.schema, b.caseSensitive)
 	if err != nil {
 		panic(err)
 	}
+
 	return expr
 }
+
 func (*bindVisitor) VisitBound(pred BoundPredicate) BooleanExpression {
 	panic(fmt.Errorf("%w: found already bound predicate: %s", ErrInvalidArgument, pred))
 }
@@ -194,6 +202,7 @@ type exprEvaluator struct {
 
 func (e *exprEvaluator) Eval(st structLike) (bool, error) {
 	e.st = st
+
 	return VisitExpr(e.bound, e)
 }
 
@@ -231,12 +240,14 @@ func (e *exprEvaluator) VisitIsNan(term BoundTerm) bool {
 		if !v.Valid {
 			break
 		}
+
 		return math.IsNaN(float64(v.Val))
 	case Float64Type:
 		v := term.(bound[float64]).eval(e.st)
 		if !v.Valid {
 			break
 		}
+
 		return math.IsNaN(v.Val)
 	}
 
@@ -408,6 +419,7 @@ func ExtractFieldIDs(expr BooleanExpression) ([]int, error) {
 	}
 
 	out := make([]int, 0, len(res))
+
 	return slices.AppendSeq(out, maps.Keys(res)), nil
 }
 
@@ -427,11 +439,13 @@ func (expressionFieldIDs) VisitNot(child map[int]struct{}) map[int]struct{} {
 
 func (expressionFieldIDs) VisitAnd(left, right map[int]struct{}) map[int]struct{} {
 	maps.Insert(left, maps.All(right))
+
 	return left
 }
 
 func (expressionFieldIDs) VisitOr(left, right map[int]struct{}) map[int]struct{} {
 	maps.Insert(left, maps.All(right))
+
 	return left
 }
 
@@ -482,6 +496,7 @@ func (c columnNameTranslator) VisitBound(pred BoundPredicate) BooleanExpression 
 		if pred.Op() == OpIsNull {
 			return AlwaysTrue{}
 		}
+
 		return AlwaysFalse{}
 	}
 
