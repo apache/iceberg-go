@@ -59,7 +59,6 @@ func generateSnapshotID() int64 {
 	if snapshotID < 0 {
 		snapshotID = -snapshotID
 	}
-
 	return snapshotID
 }
 
@@ -230,7 +229,6 @@ func (b *MetadataBuilder) CurrentSpec() iceberg.PartitionSpec {
 
 func (b *MetadataBuilder) CurrentSchema() *iceberg.Schema {
 	s, _ := b.GetSchemaByID(b.currentSchemaID)
-
 	return s
 }
 
@@ -656,6 +654,15 @@ func (b *MetadataBuilder) GetSortOrderByID(id int) (*SortOrder, error) {
 	return nil, fmt.Errorf("sort order with id %d not found", id)
 }
 
+func (b *MetadataBuilder) currentSnapshot() *Snapshot {
+	if b.currentSnapshotID == nil {
+		return nil
+	}
+
+	s, _ := b.SnapshotByID(*b.currentSnapshotID)
+	return s
+}
+
 func (b *MetadataBuilder) SnapshotByID(id int64) (*Snapshot, error) {
 	for _, s := range b.snapshotList {
 		if s.SnapshotID == id {
@@ -673,7 +680,6 @@ func (b *MetadataBuilder) NameMapping() iceberg.NameMapping {
 			return nm
 		}
 	}
-
 	return nil
 }
 
@@ -1055,7 +1061,6 @@ func (c *commonMetadata) NameMapping() iceberg.NameMapping {
 			return nm
 		}
 	}
-
 	return nil
 }
 
