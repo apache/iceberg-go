@@ -118,7 +118,8 @@ func TestToHumanString(t *testing.T) {
 		{iceberg.IdentityTransform{}, nil, "null"},
 		{iceberg.TruncateTransform{Width: 1}, []byte{0x00, 0x01, 0x02, 0x03}, "AAECAw=="},
 		{iceberg.TruncateTransform{Width: 1}, iceberg.Decimal{
-			Val: decVal, Scale: 2}, "14.21"},
+			Val: decVal, Scale: 2,
+		}, "14.21"},
 		{iceberg.TruncateTransform{Width: 1}, int32(123), "123"},
 		{iceberg.TruncateTransform{Width: 1}, int64(123), "123"},
 		{iceberg.TruncateTransform{Width: 1}, "foo", "foo"},

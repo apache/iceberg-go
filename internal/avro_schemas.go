@@ -29,27 +29,14 @@ func NullableSchema(schema avro.Schema) avro.Schema {
 	}))
 }
 
-var (
-	// for x := range 24 {
-	// 		math.Floor(math.Log10(math.Abs(math.Pow(2, float64(8*x-1)-1))))
-	// }
-	// maxPrecision = [...]int{-1, 2, 4, 6, 9, 11, 14, 16, 18, 21,
-	// 	23, 26, 28, 31, 33, 35, 38, 40, 43, 45, 47, 50, 52, 55}
-	// for p := range 40 {
-	//	  for pos := range 24 {
-	//       if p > maxPrecision[pos] {
-	//          requiredLength[p] = pos-1
-	//          break
-	//       }
-	//    }
-	// }
-	requiredLength = [...]int{1, 1, 1, 2, 2, 3, 3, 4, 4, 4, 5, 5,
-		6, 6, 6, 7, 7, 8, 8, 9, 9, 9, 10, 10, 11, 11, 11, 12, 12,
-		13, 13, 13, 14, 14, 15, 15, 16, 16, 16, 17}
-)
+var requiredLength = [...]int{
+	1, 1, 1, 2, 2, 3, 3, 4, 4, 4, 5, 5,
+	6, 6, 6, 7, 7, 8, 8, 9, 9, 9, 10, 10, 11, 11, 11, 12, 12,
+	13, 13, 13, 14, 14, 15, 15, 16, 16, 16, 17,
+}
 
 // DecimalRequiredBytes returns the required number of bytes to store a
-// decimal value of the given precision. If the precision is outside of
+// decimal value of the given precision. If the precision is outside
 // the range (0, 40], this returns -1 as it is invalid.
 func DecimalRequiredBytes(precision int) int {
 	if precision <= 0 || precision >= 40 {
@@ -395,6 +382,7 @@ func NewManifestFileSchema(version int) (avro.Schema, error) {
 	}
 
 	key := fmt.Sprintf("manifest_list_file_v%d", version)
+
 	return AvroSchemaCache.Get(key), nil
 }
 

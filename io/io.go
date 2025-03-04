@@ -128,6 +128,7 @@ func FS(fsys fs.FS) IO {
 	if _, ok := fsys.(fs.ReadFileFS); ok {
 		return readFileFS{ioFS{fsys, nil}}
 	}
+
 	return ioFS{fsys, nil}
 }
 
@@ -155,6 +156,7 @@ func (r readFileFS) ReadFile(name string) ([]byte, error) {
 	if !ok {
 		return nil, errMissingReadFile
 	}
+
 	return rfs.ReadFile(name)
 }
 
@@ -187,6 +189,7 @@ func (f ioFS) Remove(name string) error {
 	if !ok {
 		return errMissingRemove
 	}
+
 	return r.Remove(name)
 }
 
@@ -210,6 +213,7 @@ func (f ioFile) Seek(offset int64, whence int) (int64, error) {
 	if !ok {
 		return 0, errMissingSeek
 	}
+
 	return s.Seek(offset, whence)
 }
 
@@ -218,6 +222,7 @@ func (f ioFile) ReadAt(p []byte, off int64) (n int, err error) {
 	if !ok {
 		return 0, errMissingReadAt
 	}
+
 	return r.ReadAt(p, off)
 }
 
@@ -256,6 +261,7 @@ func inferFileIOFromSchema(ctx context.Context, path string, props map[string]st
 	default:
 		return nil, fmt.Errorf("IO for file '%s' not implemented", path)
 	}
+
 	return createBlobFS(ctx, bucket, parsed.Host), nil
 }
 

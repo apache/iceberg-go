@@ -35,36 +35,43 @@ type ExampleVisitor struct {
 
 func (e *ExampleVisitor) VisitTrue() []string {
 	e.visitHistory = append(e.visitHistory, "TRUE")
+
 	return e.visitHistory
 }
 
 func (e *ExampleVisitor) VisitFalse() []string {
 	e.visitHistory = append(e.visitHistory, "FALSE")
+
 	return e.visitHistory
 }
 
 func (e *ExampleVisitor) VisitNot([]string) []string {
 	e.visitHistory = append(e.visitHistory, "NOT")
+
 	return e.visitHistory
 }
 
 func (e *ExampleVisitor) VisitAnd(_, _ []string) []string {
 	e.visitHistory = append(e.visitHistory, "AND")
+
 	return e.visitHistory
 }
 
 func (e *ExampleVisitor) VisitOr(_, _ []string) []string {
 	e.visitHistory = append(e.visitHistory, "OR")
+
 	return e.visitHistory
 }
 
 func (e *ExampleVisitor) VisitUnbound(pred iceberg.UnboundPredicate) []string {
 	e.visitHistory = append(e.visitHistory, strings.ToUpper(pred.Op().String()))
+
 	return e.visitHistory
 }
 
 func (e *ExampleVisitor) VisitBound(pred iceberg.BoundPredicate) []string {
 	e.visitHistory = append(e.visitHistory, strings.ToUpper(pred.Op().String()))
+
 	return e.visitHistory
 }
 
@@ -82,71 +89,85 @@ func (e *FooBoundExprVisitor) VisitUnbound(pred iceberg.UnboundPredicate) []stri
 
 func (e *FooBoundExprVisitor) VisitIn(iceberg.BoundTerm, iceberg.Set[iceberg.Literal]) []string {
 	e.visitHistory = append(e.visitHistory, "IN")
+
 	return e.visitHistory
 }
 
 func (e *FooBoundExprVisitor) VisitNotIn(iceberg.BoundTerm, iceberg.Set[iceberg.Literal]) []string {
 	e.visitHistory = append(e.visitHistory, "NOT_IN")
+
 	return e.visitHistory
 }
 
 func (e *FooBoundExprVisitor) VisitIsNan(iceberg.BoundTerm) []string {
 	e.visitHistory = append(e.visitHistory, "IS_NAN")
+
 	return e.visitHistory
 }
 
 func (e *FooBoundExprVisitor) VisitNotNan(iceberg.BoundTerm) []string {
 	e.visitHistory = append(e.visitHistory, "NOT_NAN")
+
 	return e.visitHistory
 }
 
 func (e *FooBoundExprVisitor) VisitIsNull(iceberg.BoundTerm) []string {
 	e.visitHistory = append(e.visitHistory, "IS_NULL")
+
 	return e.visitHistory
 }
 
 func (e *FooBoundExprVisitor) VisitNotNull(iceberg.BoundTerm) []string {
 	e.visitHistory = append(e.visitHistory, "NOT_NULL")
+
 	return e.visitHistory
 }
 
 func (e *FooBoundExprVisitor) VisitEqual(iceberg.BoundTerm, iceberg.Literal) []string {
 	e.visitHistory = append(e.visitHistory, "EQUAL")
+
 	return e.visitHistory
 }
 
 func (e *FooBoundExprVisitor) VisitNotEqual(iceberg.BoundTerm, iceberg.Literal) []string {
 	e.visitHistory = append(e.visitHistory, "NOT_EQUAL")
+
 	return e.visitHistory
 }
 
 func (e *FooBoundExprVisitor) VisitGreaterEqual(iceberg.BoundTerm, iceberg.Literal) []string {
 	e.visitHistory = append(e.visitHistory, "GREATER_THAN_OR_EQUAL")
+
 	return e.visitHistory
 }
 
 func (e *FooBoundExprVisitor) VisitGreater(iceberg.BoundTerm, iceberg.Literal) []string {
 	e.visitHistory = append(e.visitHistory, "GREATER_THAN")
+
 	return e.visitHistory
 }
 
 func (e *FooBoundExprVisitor) VisitLessEqual(iceberg.BoundTerm, iceberg.Literal) []string {
 	e.visitHistory = append(e.visitHistory, "LESS_THAN_OR_EQUAL")
+
 	return e.visitHistory
 }
 
 func (e *FooBoundExprVisitor) VisitLess(iceberg.BoundTerm, iceberg.Literal) []string {
 	e.visitHistory = append(e.visitHistory, "LESS_THAN")
+
 	return e.visitHistory
 }
 
 func (e *FooBoundExprVisitor) VisitStartsWith(iceberg.BoundTerm, iceberg.Literal) []string {
 	e.visitHistory = append(e.visitHistory, "STARTS_WITH")
+
 	return e.visitHistory
 }
 
 func (e *FooBoundExprVisitor) VisitNotStartsWith(iceberg.BoundTerm, iceberg.Literal) []string {
 	e.visitHistory = append(e.visitHistory, "NOT_STARTS_WITH")
+
 	return e.visitHistory
 }
 
@@ -219,9 +240,11 @@ func TestBoundBoolExprVisitor(t *testing.T) {
 	}{
 		{iceberg.NewAnd(iceberg.IsIn(iceberg.Reference("foo"), "foo", "bar"),
 			iceberg.IsIn(iceberg.Reference("bar"), int32(1), int32(2))), []string{"IN", "IN", "AND"}},
-		{iceberg.NewOr(iceberg.NewNot(iceberg.IsIn(iceberg.Reference("foo"), "foo", "bar")),
-			iceberg.NewNot(iceberg.IsIn(iceberg.Reference("bar"), int32(1), int32(2)))),
-			[]string{"IN", "NOT", "IN", "NOT", "OR"}},
+		{
+			iceberg.NewOr(iceberg.NewNot(iceberg.IsIn(iceberg.Reference("foo"), "foo", "bar")),
+				iceberg.NewNot(iceberg.IsIn(iceberg.Reference("bar"), int32(1), int32(2)))),
+			[]string{"IN", "NOT", "IN", "NOT", "OR"},
+		},
 		{iceberg.EqualTo(iceberg.Reference("bar"), int32(1)), []string{"EQUAL"}},
 		{iceberg.NotEqualTo(iceberg.Reference("foo"), "foo"), []string{"NOT_EQUAL"}},
 		{iceberg.AlwaysTrue{}, []string{"TRUE"}},
@@ -265,13 +288,20 @@ func rowOf(vals ...any) rowTester {
 }
 
 var testSchema = iceberg.NewSchema(1,
-	iceberg.NestedField{ID: 13, Name: "x",
-		Type: iceberg.PrimitiveTypes.Int32, Required: true},
-	iceberg.NestedField{ID: 14, Name: "y",
-		Type: iceberg.PrimitiveTypes.Float64, Required: true},
-	iceberg.NestedField{ID: 15, Name: "z",
-		Type: iceberg.PrimitiveTypes.Int32},
-	iceberg.NestedField{ID: 16, Name: "s1",
+	iceberg.NestedField{
+		ID: 13, Name: "x",
+		Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	},
+	iceberg.NestedField{
+		ID: 14, Name: "y",
+		Type: iceberg.PrimitiveTypes.Float64, Required: true,
+	},
+	iceberg.NestedField{
+		ID: 15, Name: "z",
+		Type: iceberg.PrimitiveTypes.Int32,
+	},
+	iceberg.NestedField{
+		ID: 16, Name: "s1",
 		Type: &iceberg.StructType{
 			FieldList: []iceberg.NestedField{{
 				ID: 17, Name: "s2", Required: true,
@@ -292,7 +322,8 @@ var testSchema = iceberg.NewSchema(1,
 					}},
 				},
 			}},
-		}},
+		},
+	},
 	iceberg.NestedField{ID: 21, Name: "s5", Type: &iceberg.StructType{
 		FieldList: []iceberg.NestedField{{
 			ID: 22, Name: "s6", Required: true, Type: &iceberg.StructType{
@@ -580,19 +611,29 @@ func TestRewriteNot(t *testing.T) {
 	tests := []struct {
 		expr, expected iceberg.BooleanExpression
 	}{
-		{iceberg.NewNot(iceberg.EqualTo(iceberg.Reference("x"), 34.56)),
-			iceberg.NotEqualTo(iceberg.Reference("x"), 34.56)},
-		{iceberg.NewNot(iceberg.NotEqualTo(iceberg.Reference("x"), 34.56)),
-			iceberg.EqualTo(iceberg.Reference("x"), 34.56)},
-		{iceberg.NewNot(iceberg.IsIn(iceberg.Reference("x"), 34.56, 23.45)),
-			iceberg.NotIn(iceberg.Reference("x"), 34.56, 23.45)},
-		{iceberg.NewNot(iceberg.NewAnd(
-			iceberg.EqualTo(iceberg.Reference("x"), 34.56), iceberg.EqualTo(iceberg.Reference("y"), 34.56))),
+		{
+			iceberg.NewNot(iceberg.EqualTo(iceberg.Reference("x"), 34.56)),
+			iceberg.NotEqualTo(iceberg.Reference("x"), 34.56),
+		},
+		{
+			iceberg.NewNot(iceberg.NotEqualTo(iceberg.Reference("x"), 34.56)),
+			iceberg.EqualTo(iceberg.Reference("x"), 34.56),
+		},
+		{
+			iceberg.NewNot(iceberg.IsIn(iceberg.Reference("x"), 34.56, 23.45)),
+			iceberg.NotIn(iceberg.Reference("x"), 34.56, 23.45),
+		},
+		{
+			iceberg.NewNot(iceberg.NewAnd(
+				iceberg.EqualTo(iceberg.Reference("x"), 34.56), iceberg.EqualTo(iceberg.Reference("y"), 34.56))),
 			iceberg.NewOr(
-				iceberg.NotEqualTo(iceberg.Reference("x"), 34.56), iceberg.NotEqualTo(iceberg.Reference("y"), 34.56))},
-		{iceberg.NewNot(iceberg.NewOr(
-			iceberg.EqualTo(iceberg.Reference("x"), 34.56), iceberg.EqualTo(iceberg.Reference("y"), 34.56))),
-			iceberg.NewAnd(iceberg.NotEqualTo(iceberg.Reference("x"), 34.56), iceberg.NotEqualTo(iceberg.Reference("y"), 34.56))},
+				iceberg.NotEqualTo(iceberg.Reference("x"), 34.56), iceberg.NotEqualTo(iceberg.Reference("y"), 34.56)),
+		},
+		{
+			iceberg.NewNot(iceberg.NewOr(
+				iceberg.EqualTo(iceberg.Reference("x"), 34.56), iceberg.EqualTo(iceberg.Reference("y"), 34.56))),
+			iceberg.NewAnd(iceberg.NotEqualTo(iceberg.Reference("x"), 34.56), iceberg.NotEqualTo(iceberg.Reference("y"), 34.56)),
+		},
 		{iceberg.NewNot(iceberg.AlwaysFalse{}), iceberg.AlwaysTrue{}},
 		{iceberg.NewNot(iceberg.AlwaysTrue{}), iceberg.AlwaysFalse{}},
 	}

@@ -60,13 +60,16 @@ func ConvertExpr(schema *iceberg.Schema, e iceberg.BooleanExpression, caseSensit
 	reg := expr.NewEmptyExtensionRegistry(collection)
 
 	bldr := expr.ExprBuilder{Reg: reg, BaseSchema: types.NewRecordTypeFromStruct(base.Struct)}
-	b, err := iceberg.VisitExpr(e, &toSubstraitExpr{bldr: bldr, schema: schema,
-		caseSensitive: caseSensitive})
+	b, err := iceberg.VisitExpr(e, &toSubstraitExpr{
+		bldr: bldr, schema: schema,
+		caseSensitive: caseSensitive,
+	})
 	if err != nil {
 		return nil, nil, err
 	}
 
 	out, err := b.BuildExpr()
+
 	return &reg, out, err
 }
 
@@ -108,6 +111,7 @@ func getNullability(required bool) types.Nullability {
 	if required {
 		return types.NullabilityRequired
 	}
+
 	return types.NullabilityNullable
 }
 
@@ -153,9 +157,7 @@ func (convertToSubstrait) VisitString() types.Type      { return &types.StringTy
 func (convertToSubstrait) VisitBinary() types.Type      { return &types.BinaryType{} }
 func (convertToSubstrait) VisitUUID() types.Type        { return &types.UUIDType{} }
 
-var (
-	_ iceberg.SchemaVisitorPerPrimitiveType[types.Type] = (*convertToSubstrait)(nil)
-)
+var _ iceberg.SchemaVisitorPerPrimitiveType[types.Type] = (*convertToSubstrait)(nil)
 
 var (
 	boolURI    = extensions.SubstraitDefaultURIPrefix + "functions_boolean.yaml"
@@ -233,6 +235,7 @@ func toDecimalLiteral(v iceberg.DecimalLiteral) expr.Literal {
 		Value:     byts,
 		Precision: int32(v.Type().(*iceberg.DecimalType).Precision()),
 	}, false)
+
 	return result
 }
 
@@ -258,6 +261,7 @@ func toSubstraitLiteral(typ iceberg.Type, lit iceberg.Literal) expr.Literal {
 		if typ.Equals(iceberg.PrimitiveTypes.TimestampTz) {
 			return toPrimitiveSubstraitLiteral(types.TimestampTz(lit))
 		}
+
 		return toPrimitiveSubstraitLiteral(types.Timestamp(lit))
 	case iceberg.DateLiteral:
 		return toPrimitiveSubstraitLiteral(types.Date(lit))
@@ -284,6 +288,7 @@ func toSubstraitLiteralSet(typ iceberg.Type, lits []iceberg.Literal) expr.ListLi
 	for i, l := range lits {
 		out[i] = toSubstraitLiteral(typ, l)
 	}
+
 	return out
 }
 
@@ -304,11 +309,13 @@ func (t *toSubstraitExpr) getRef(ref iceberg.BoundReference) expr.Reference {
 		next := expr.NewStructFieldRef(int32(p))
 		cur.Child, cur = next, next
 	}
+
 	return out
 }
 
 func (t *toSubstraitExpr) makeSetFunc(id extensions.ID, term iceberg.BoundTerm, lits iceberg.Set[iceberg.Literal]) expr.Builder {
 	val := toSubstraitLiteralSet(term.Type(), lits.Members())
+
 	return t.bldr.ScalarFunc(id).Args(t.bldr.RootRef(t.getRef(term.Ref())),
 		t.bldr.Literal(expr.NewNestedLiteral(val, false)))
 }

@@ -19,6 +19,7 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -128,6 +129,7 @@ type manifestVisitor[T any] interface {
 func visitParquetManifest[T any](manifest *pqarrow.SchemaManifest, visitor manifestVisitor[T]) (res T, err error) {
 	if manifest == nil {
 		err = fmt.Errorf("%w: cannot visit nil manifest", iceberg.ErrInvalidArgument)
+
 		return
 	}
 
@@ -142,6 +144,7 @@ func visitParquetManifest[T any](manifest *pqarrow.SchemaManifest, visitor manif
 		res := visitManifestField(f, visitor)
 		results[i] = visitor.Field(f, res)
 	}
+
 	return visitor.Manifest(manifest, results), nil
 }
 
@@ -159,6 +162,7 @@ func visitParquetManifestStruct[T any](field pqarrow.SchemaField, visitor manife
 func visitManifestList[T any](field pqarrow.SchemaField, visitor manifestVisitor[T]) T {
 	elemField := field.Children[0]
 	res := visitManifestField(elemField, visitor)
+
 	return visitor.List(field, res)
 }
 
@@ -273,6 +277,7 @@ func (p *pruneParquetSchema) Struct(field pqarrow.SchemaField, children []arrow.
 		} else {
 			result := *field.Field
 			result.Type = arrow.StructOf(selected...)
+
 			return result
 		}
 	}
@@ -297,14 +302,16 @@ func (p *pruneParquetSchema) Field(field pqarrow.SchemaField, result arrow.Field
 	if _, ok := field.Field.Type.(*arrow.StructType); ok {
 		result := *field.Field
 		result.Type = p.projectSelectedStruct(result.Type)
+
 		return result
 	}
 
 	if !field.IsLeaf() {
-		panic(fmt.Errorf("cannot explicitly project list or map types"))
+		panic(errors.New("cannot explicitly project list or map types"))
 	}
 
 	p.indices = append(p.indices, field.ColIndex)
+
 	return *field.Field
 }
 
@@ -314,6 +321,7 @@ func (p *pruneParquetSchema) List(field pqarrow.SchemaField, elemResult arrow.Fi
 		if elemResult.Type != nil {
 			result := *field.Field
 			result.Type = p.projectList(field.Field.Type.(arrow.ListLikeType), elemResult.Type)
+
 			return result
 		}
 
@@ -329,14 +337,16 @@ func (p *pruneParquetSchema) List(field pqarrow.SchemaField, elemResult arrow.Fi
 		result := *field.Field
 		projected := p.projectSelectedStruct(elemResult.Type)
 		result.Type = p.projectList(field.Field.Type.(arrow.ListLikeType), projected)
+
 		return result
 	}
 
 	if !field.Children[0].IsLeaf() {
-		panic(fmt.Errorf("cannot explicitly project list or map types"))
+		panic(errors.New("cannot explicitly project list or map types"))
 	}
 
 	p.indices = append(p.indices, field.Children[0].ColIndex)
+
 	return *field.Field
 }
 
@@ -346,6 +356,7 @@ func (p *pruneParquetSchema) Map(field pqarrow.SchemaField, keyResult, valResult
 		if valResult.Type != nil {
 			result := *field.Field
 			result.Type = p.projectMap(field.Field.Type.(*arrow.MapType), valResult.Type)
+
 			return result
 		}
 
@@ -365,6 +376,7 @@ func (p *pruneParquetSchema) Map(field pqarrow.SchemaField, keyResult, valResult
 		result := *field.Field
 		projected := p.projectSelectedStruct(valResult.Type)
 		result.Type = p.projectMap(field.Field.Type.(*arrow.MapType), projected)
+
 		return result
 	}
 
@@ -374,6 +386,7 @@ func (p *pruneParquetSchema) Map(field pqarrow.SchemaField, keyResult, valResult
 
 	p.indices = append(p.indices, field.Children[0].Children[0].ColIndex)
 	p.indices = append(p.indices, field.Children[0].Children[1].ColIndex)
+
 	return *field.Field
 }
 
@@ -411,6 +424,7 @@ func (p *pruneParquetSchema) projectList(listType arrow.ListLikeType, elemResult
 	}
 
 	n := listType.(*arrow.FixedSizeListType).Len()
+
 	return arrow.FixedSizeListOfField(n, origField)
 }
 

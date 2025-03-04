@@ -26,32 +26,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var (
-	tableNameMappingNested = table.NameMapping{
-		{FieldID: makeID(1), Names: []string{"foo"}},
-		{FieldID: makeID(2), Names: []string{"bar"}},
-		{FieldID: makeID(3), Names: []string{"baz"}},
-		{FieldID: makeID(4), Names: []string{"qux"},
-			Fields: []table.MappedField{{FieldID: makeID(5), Names: []string{"element"}}}},
-		{FieldID: makeID(6), Names: []string{"quux"}, Fields: []table.MappedField{
-			{FieldID: makeID(7), Names: []string{"key"}},
-			{FieldID: makeID(8), Names: []string{"value"}, Fields: []table.MappedField{
-				{FieldID: makeID(9), Names: []string{"key"}},
-				{FieldID: makeID(10), Names: []string{"value"}},
-			}},
+var tableNameMappingNested = table.NameMapping{
+	{FieldID: makeID(1), Names: []string{"foo"}},
+	{FieldID: makeID(2), Names: []string{"bar"}},
+	{FieldID: makeID(3), Names: []string{"baz"}},
+	{
+		FieldID: makeID(4), Names: []string{"qux"},
+		Fields: []table.MappedField{{FieldID: makeID(5), Names: []string{"element"}}},
+	},
+	{FieldID: makeID(6), Names: []string{"quux"}, Fields: []table.MappedField{
+		{FieldID: makeID(7), Names: []string{"key"}},
+		{FieldID: makeID(8), Names: []string{"value"}, Fields: []table.MappedField{
+			{FieldID: makeID(9), Names: []string{"key"}},
+			{FieldID: makeID(10), Names: []string{"value"}},
 		}},
-		{FieldID: makeID(11), Names: []string{"location"}, Fields: []table.MappedField{
-			{FieldID: makeID(12), Names: []string{"element"}, Fields: []table.MappedField{
-				{FieldID: makeID(13), Names: []string{"latitude"}},
-				{FieldID: makeID(14), Names: []string{"longitude"}},
-			}},
+	}},
+	{FieldID: makeID(11), Names: []string{"location"}, Fields: []table.MappedField{
+		{FieldID: makeID(12), Names: []string{"element"}, Fields: []table.MappedField{
+			{FieldID: makeID(13), Names: []string{"latitude"}},
+			{FieldID: makeID(14), Names: []string{"longitude"}},
 		}},
-		{FieldID: makeID(15), Names: []string{"person"}, Fields: []table.MappedField{
-			{FieldID: makeID(16), Names: []string{"name"}},
-			{FieldID: makeID(17), Names: []string{"age"}},
-		}},
-	}
-)
+	}},
+	{FieldID: makeID(15), Names: []string{"person"}, Fields: []table.MappedField{
+		{FieldID: makeID(16), Names: []string{"name"}},
+		{FieldID: makeID(17), Names: []string{"age"}},
+	}},
+}
 
 func TestJsonMappedField(t *testing.T) {
 	tests := []struct {
@@ -59,10 +59,14 @@ func TestJsonMappedField(t *testing.T) {
 		str  string
 		exp  table.MappedField
 	}{
-		{"simple", `{"field-id": 1, "names": ["id", "record_id"]}`,
-			table.MappedField{FieldID: makeID(1), Names: []string{"id", "record_id"}}},
-		{"with null fields", `{"field-id": 1, "names": ["id", "record_id"], "fields": null}`,
-			table.MappedField{FieldID: makeID(1), Names: []string{"id", "record_id"}}},
+		{
+			"simple", `{"field-id": 1, "names": ["id", "record_id"]}`,
+			table.MappedField{FieldID: makeID(1), Names: []string{"id", "record_id"}},
+		},
+		{
+			"with null fields", `{"field-id": 1, "names": ["id", "record_id"], "fields": null}`,
+			table.MappedField{FieldID: makeID(1), Names: []string{"id", "record_id"}},
+		},
 		{"no names", `{"field-id": 1, "names": []}`, table.MappedField{FieldID: makeID(1), Names: []string{}}},
 	}
 
@@ -141,5 +145,6 @@ func TestNameMappingToString(t *testing.T) {
 		{FieldID: makeID(3), Names: []string{"location"}, Fields: []table.MappedField{
 			{FieldID: makeID(4), Names: []string{"lat", "latitude"}},
 			{FieldID: makeID(5), Names: []string{"long", "longitude"}},
-		}}}.String())
+		}},
+	}.String())
 }

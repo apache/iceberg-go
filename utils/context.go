@@ -36,5 +36,6 @@ func GetAwsConfig(ctx context.Context) *aws.Config {
 	if v := ctx.Value(awsctxkey{}); v != nil {
 		return v.(*aws.Config)
 	}
+
 	return nil
 }

@@ -43,7 +43,8 @@ var (
 				ContainsNull: true, ContainsNaN: &falseBool,
 				LowerBound: &[]byte{0x01, 0x00, 0x00, 0x00},
 				UpperBound: &[]byte{0x02, 0x00, 0x00, 0x00},
-			}}).Build()}
+			}}).Build(),
+	}
 
 	manifestFileRecordsV2 = []ManifestFile{
 		NewManifestV2Builder("/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro",
@@ -60,7 +61,8 @@ var (
 				ContainsNaN:  &falseBool,
 				LowerBound:   &[]byte{0x01, 0x00, 0x00, 0x00},
 				UpperBound:   &[]byte{0x02, 0x00, 0x00, 0x00},
-			}}).Build()}
+			}}).Build(),
+	}
 
 	entrySnapshotID        int64 = 8744736658442914487
 	intZero                      = 0
@@ -416,7 +418,7 @@ func (m *ManifestTestSuite) writeManifestEntries() {
 		manifestEntryV2Recs[i] = rec
 	}
 
-	var partitionSpec = NewPartitionSpecID(1,
+	partitionSpec := NewPartitionSpecID(1,
 		PartitionField{FieldID: 1000, SourceID: 1, Name: "VendorID", Transform: IdentityTransform{}},
 		PartitionField{FieldID: 1001, SourceID: 2, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
 
@@ -446,7 +448,8 @@ func (m *ManifestTestSuite) TestManifestEntriesV1() {
 
 	mockfs.Test(m.T())
 	mockfs.On("Open", manifest.FilePath()).Return(&internal.MockFile{
-		Contents: bytes.NewReader(m.v1ManifestEntries.Bytes())}, nil)
+		Contents: bytes.NewReader(m.v1ManifestEntries.Bytes()),
+	}, nil)
 	defer mockfs.AssertExpectations(m.T())
 	entries, err := manifest.FetchEntries(&mockfs, false)
 	m.Require().NoError(err)
@@ -646,7 +649,8 @@ func (m *ManifestTestSuite) TestManifestEntriesV2() {
 
 	mockfs.Test(m.T())
 	mockfs.On("Open", manifest.FilePath()).Return(&internal.MockFile{
-		Contents: bytes.NewReader(m.v2ManifestEntries.Bytes())}, nil)
+		Contents: bytes.NewReader(m.v2ManifestEntries.Bytes()),
+	}, nil)
 	defer mockfs.AssertExpectations(m.T())
 	entries, err := manifest.FetchEntries(&mockfs, false)
 	m.Require().NoError(err)
