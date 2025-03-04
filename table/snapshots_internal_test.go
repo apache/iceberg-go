@@ -25,19 +25,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var (
-	tableSchemaSimple = iceberg.NewSchemaWithIdentifiers(1,
-		[]int{2},
-		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String},
-		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool},
-	)
+var tableSchemaSimple = iceberg.NewSchemaWithIdentifiers(1,
+	[]int{2},
+	iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String},
+	iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool},
 )
 
 func must[T any](v T, err error) T {
 	if err != nil {
 		panic(err)
 	}
+
 	return v
 }
 
@@ -114,7 +113,9 @@ func TestMergeSnapshotSummaries(t *testing.T) {
 		truncateTable bool
 		expected      Summary
 	}{
-		{Summary{Operation: OpAppend}, nil, false,
+		{
+			Summary{Operation: OpAppend},
+			nil, false,
 			Summary{Operation: OpAppend, Properties: iceberg.Properties{
 				"total-data-files":       "0",
 				"total-delete-files":     "0",
@@ -122,15 +123,18 @@ func TestMergeSnapshotSummaries(t *testing.T) {
 				"total-files-size":       "0",
 				"total-position-deletes": "0",
 				"total-equality-deletes": "0",
-			}}},
-		{Summary{Operation: OpAppend, Properties: iceberg.Properties{
-			"added-data-files":       "1",
-			"added-delete-files":     "2",
-			"added-equality-deletes": "3",
-			"added-files-size":       "4",
-			"added-position-deletes": "5",
-			"added-records":          "6",
-		}}, nil, false,
+			}},
+		},
+		{
+			Summary{Operation: OpAppend, Properties: iceberg.Properties{
+				"added-data-files":       "1",
+				"added-delete-files":     "2",
+				"added-equality-deletes": "3",
+				"added-files-size":       "4",
+				"added-position-deletes": "5",
+				"added-records":          "6",
+			}},
+			nil, false,
 			Summary{Operation: OpAppend, Properties: iceberg.Properties{
 				"added-data-files":       "1",
 				"added-delete-files":     "2",
@@ -144,7 +148,8 @@ func TestMergeSnapshotSummaries(t *testing.T) {
 				"total-files-size":       "4",
 				"total-position-deletes": "5",
 				"total-equality-deletes": "3",
-			}}},
+			}},
+		},
 		{
 			Summary{Operation: OpOverwrite, Properties: iceberg.Properties{
 				"added-data-files":       "1",
@@ -162,7 +167,8 @@ func TestMergeSnapshotSummaries(t *testing.T) {
 				"total-position-deletes": "1",
 				"total-records":          "1",
 			},
-			true, Summary{Operation: OpOverwrite, Properties: iceberg.Properties{
+			true,
+			Summary{Operation: OpOverwrite, Properties: iceberg.Properties{
 				"added-data-files":         "1",
 				"added-delete-files":       "2",
 				"added-equality-deletes":   "3",
