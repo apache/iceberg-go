@@ -120,6 +120,7 @@ func (m *updateMetrics) addFile(df iceberg.DataFile) error {
 	default:
 		return fmt.Errorf("unknown data file content: %s", df.ContentType())
 	}
+
 	return nil
 }
 
@@ -140,6 +141,7 @@ func (m *updateMetrics) removeFile(df iceberg.DataFile) error {
 	default:
 		return fmt.Errorf("unknown data file content: %s", df.ContentType())
 	}
+
 	return nil
 }
 
@@ -167,6 +169,7 @@ func (m *updateMetrics) toProps() iceberg.Properties {
 	setWhenPositive(props, removedPosDeletesKey, m.removedPosDeletes)
 	setWhenPositive(props, addedEqDeletesKey, m.addedEqDeletes)
 	setWhenPositive(props, removedEqDeletesKey, m.removedEqDeletes)
+
 	return props
 }
 
@@ -352,6 +355,7 @@ func (s *SnapshotSummaryCollector) addFile(df iceberg.DataFile, sc *iceberg.Sche
 	if len(df.Partition()) > 0 {
 		return s.updatePartitionMetrics(spec, df, true, sc)
 	}
+
 	return nil
 }
 
@@ -363,11 +367,13 @@ func (s *SnapshotSummaryCollector) removeFile(df iceberg.DataFile, sc *iceberg.S
 	if len(df.Partition()) > 0 {
 		return s.updatePartitionMetrics(spec, df, false, sc)
 	}
+
 	return nil
 }
 
 func (s *SnapshotSummaryCollector) partitionSummary(metrics *updateMetrics) string {
 	props := metrics.toProps()
+
 	return strings.Join(slices.Sorted(func(yield func(s string) bool) {
 		for k, v := range props {
 			if !yield(fmt.Sprintf("%s=%s", k, v)) {
@@ -388,12 +394,15 @@ func (s *SnapshotSummaryCollector) build() iceberg.Properties {
 			}
 		}
 	}
+
 	return props
 }
 
 func truncateTableSummary(sum Summary, previous iceberg.Properties) Summary {
-	keys := []string{totalDataFilesKey, totalDeleteFilesKey, totalRecordsKey,
-		totalFileSizeKey, totalPosDeletesKey, totalEqDeletesKey}
+	keys := []string{
+		totalDataFilesKey, totalDeleteFilesKey, totalRecordsKey,
+		totalFileSizeKey, totalPosDeletesKey, totalEqDeletesKey,
+	}
 	for _, prop := range keys {
 		sum.Properties[prop] = "0"
 	}
