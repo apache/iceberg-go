@@ -67,7 +67,6 @@ func NewSchemaWithIdentifiers(id int, identifierIDs []int, fields ...NestedField
 	s.lazyNameMapping = sync.OnceValue(func() NameMapping {
 		return createMappingFromSchema(s)
 	})
-
 	return s
 }
 
