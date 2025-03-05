@@ -20,20 +20,26 @@ package table
 import (
 	"context"
 	"fmt"
+	"iter"
 	"maps"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/metadata"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
+	iceio "github.com/apache/iceberg-go/io"
+	"github.com/google/uuid"
 )
 
 // constants to look for as Keys in Arrow field metadata
@@ -900,6 +906,259 @@ func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schem
 	return out, nil
 }
 
+func must[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+
+	return v
+}
+
+func primitiveToPhysicalType(typ iceberg.Type) string {
+	switch typ.(type) {
+	case iceberg.BooleanType:
+		return "BOOLEAN"
+	case iceberg.Int32Type:
+		return "INT32"
+	case iceberg.Int64Type:
+		return "INT64"
+	case iceberg.Float32Type:
+		return "FLOAT"
+	case iceberg.Float64Type:
+		return "DOUBLE"
+	case iceberg.DateType:
+		return "INT32"
+	case iceberg.TimeType:
+		return "INT64"
+	case iceberg.TimestampType:
+		return "INT64"
+	case iceberg.TimestampTzType:
+		return "INT64"
+	case iceberg.StringType:
+		return "BYTE_ARRAY"
+	case iceberg.UUIDType:
+		return "FIXED_LEN_BYTE_ARRAY"
+	case iceberg.FixedType:
+		return "FIXED_LEN_BYTE_ARRAY"
+	case iceberg.BinaryType:
+		return "BYTE_ARRAY"
+	case iceberg.DecimalType:
+		return "FIXED_LEN_BYTE_ARRAY"
+	default:
+		panic(fmt.Errorf("expected primitive type, got: %s", typ))
+	}
+}
+
+type typedStat[T iceberg.LiteralType] interface {
+	Min() T
+	Max() T
+}
+
+type wrappedBinaryStats struct {
+	*metadata.ByteArrayStatistics
+}
+
+func (w *wrappedBinaryStats) Min() []byte {
+	return w.ByteArrayStatistics.Min()
+}
+
+func (w *wrappedBinaryStats) Max() []byte {
+	return w.ByteArrayStatistics.Max()
+}
+
+type wrappedStringStats struct {
+	*metadata.ByteArrayStatistics
+}
+
+func (w *wrappedStringStats) Min() string {
+	data := w.ByteArrayStatistics.Min()
+	return unsafe.String(unsafe.SliceData(data), len(data))
+}
+
+func (w *wrappedStringStats) Max() string {
+	data := w.ByteArrayStatistics.Max()
+	return unsafe.String(unsafe.SliceData(data), len(data))
+}
+
+type wrappedUUIDStats struct {
+	*metadata.FixedLenByteArrayStatistics
+}
+
+func (w *wrappedUUIDStats) Min() uuid.UUID {
+	uid, err := uuid.FromBytes(w.FixedLenByteArrayStatistics.Min())
+	if err != nil {
+		panic(err)
+	}
+	return uid
+}
+
+func (w *wrappedUUIDStats) Max() uuid.UUID {
+	uid, err := uuid.FromBytes(w.FixedLenByteArrayStatistics.Max())
+	if err != nil {
+		panic(err)
+	}
+	return uid
+}
+
+type wrappedFLBAStats struct {
+	*metadata.FixedLenByteArrayStatistics
+}
+
+func (w *wrappedFLBAStats) Min() []byte {
+	return w.FixedLenByteArrayStatistics.Min()
+}
+
+func (w *wrappedFLBAStats) Max() []byte {
+	return w.FixedLenByteArrayStatistics.Max()
+}
+
+type statsAgg interface {
+	update(stats metadata.TypedStatistics)
+	minAsBytes() ([]byte, error)
+	maxAsBytes() ([]byte, error)
+}
+
+type statsAggregator[T iceberg.LiteralType] struct {
+	curMin iceberg.TypedLiteral[T]
+	curMax iceberg.TypedLiteral[T]
+
+	cmp           iceberg.Comparator[T]
+	primitiveType iceberg.PrimitiveType
+	truncLen      int
+}
+
+func newStatAgg[T iceberg.LiteralType](typ iceberg.PrimitiveType, trunc int) statsAgg {
+	var z T
+	return &statsAggregator[T]{
+		primitiveType: typ,
+		truncLen:      trunc,
+		cmp:           iceberg.NewLiteral(z).(iceberg.TypedLiteral[T]).Comparator(),
+	}
+}
+
+func createStatsAgg(typ iceberg.PrimitiveType, physicalTypeStr string, truncLen int) (statsAgg, error) {
+	expectedPhysical := primitiveToPhysicalType(typ)
+	if physicalTypeStr != expectedPhysical {
+		switch {
+		case physicalTypeStr == "INT32" && expectedPhysical == "INT64":
+		case physicalTypeStr == "FLOAT" && expectedPhysical == "DOUBLE":
+		default:
+			return nil, fmt.Errorf("unexpected physical type %s for %s, expected %s",
+				physicalTypeStr, typ, expectedPhysical)
+		}
+	}
+
+	switch physicalTypeStr {
+	case "BOOLEAN":
+		return newStatAgg[bool](typ, truncLen), nil
+	case "INT32":
+		return newStatAgg[int32](typ, truncLen), nil
+	case "INT64":
+		return newStatAgg[int64](typ, truncLen), nil
+	case "FLOAT":
+		return newStatAgg[float32](typ, truncLen), nil
+	case "DOUBLE":
+		return newStatAgg[float64](typ, truncLen), nil
+	case "FIXED_LEN_BYTE_ARRAY":
+		if typ.Equals(iceberg.PrimitiveTypes.UUID) {
+			return newStatAgg[uuid.UUID](typ, truncLen), nil
+		}
+		return newStatAgg[[]byte](typ, truncLen), nil
+	case "BYTE_ARRAY":
+		if typ.Equals(iceberg.PrimitiveTypes.String) {
+			return newStatAgg[string](typ, truncLen), nil
+		}
+		return newStatAgg[[]byte](typ, truncLen), nil
+	default:
+		return nil, fmt.Errorf("unsupported physical type: %s", physicalTypeStr)
+	}
+}
+
+func (s *statsAggregator[T]) update(stats metadata.TypedStatistics) {
+	st := stats.(typedStat[T])
+	s.updateMin(st.Min())
+	s.updateMax(st.Max())
+}
+
+func (s *statsAggregator[T]) toBytes(val iceberg.Literal) ([]byte, error) {
+	v, err := val.To(s.primitiveType)
+	if err != nil {
+		return nil, err
+	}
+
+	return v.MarshalBinary()
+}
+
+func (s *statsAggregator[T]) updateMin(val T) {
+	if s.curMin == nil {
+		s.curMin = iceberg.NewLiteral(val).(iceberg.TypedLiteral[T])
+	} else {
+		if s.cmp(val, s.curMin.Value()) < 0 {
+			s.curMin = iceberg.NewLiteral(val).(iceberg.TypedLiteral[T])
+		}
+	}
+}
+
+func (s *statsAggregator[T]) updateMax(val T) {
+	if s.curMax == nil {
+		s.curMax = iceberg.NewLiteral(val).(iceberg.TypedLiteral[T])
+	} else {
+		if s.cmp(val, s.curMax.Value()) > 0 {
+			s.curMax = iceberg.NewLiteral(val).(iceberg.TypedLiteral[T])
+		}
+	}
+}
+
+func (s *statsAggregator[T]) minAsBytes() ([]byte, error) {
+	if s.curMin == nil {
+		return nil, nil
+	}
+
+	if s.truncLen > 0 {
+		return s.toBytes((&iceberg.TruncateTransform{Width: s.truncLen}).
+			Apply(iceberg.Optional[iceberg.Literal]{Valid: true, Val: s.curMin}).Val)
+	}
+
+	return s.toBytes(s.curMin)
+}
+
+func (s *statsAggregator[T]) maxAsBytes() ([]byte, error) {
+	if s.curMax == nil {
+		return nil, nil
+	}
+
+	if s.truncLen <= 0 {
+		return s.toBytes(s.curMax)
+	}
+
+	switch s.primitiveType.(type) {
+	case iceberg.StringType:
+		if !s.curMax.Type().Equals(s.primitiveType) {
+			return nil, fmt.Errorf("expected current max to be a string")
+		}
+
+		curMax := any(s.curMax.Value()).(string)
+		result := truncateUpperBoundText(curMax, s.truncLen)
+		if result != "" {
+			return s.toBytes(iceberg.StringLiteral(result))
+		}
+		return nil, nil
+	case iceberg.BinaryType:
+		if !s.curMax.Type().Equals(s.primitiveType) {
+			return nil, fmt.Errorf("expected current max to be a binary")
+		}
+
+		curMax := any(s.curMax.Value()).([]byte)
+		result := truncateUpperBoundBinary(curMax, s.truncLen)
+		if len(result) > 0 {
+			return s.toBytes(iceberg.BinaryLiteral(result))
+		}
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("%s cannot be truncated for upper bound", s.primitiveType)
+	}
+}
+
 type metricModeType string
 
 const (
@@ -1138,17 +1397,45 @@ type dataFileStatistics struct {
 	valueCounts     map[int]int64
 	nullValueCounts map[int]int64
 	nanValueCounts  map[int]int64
-	// column aggregates
-	splitOffsets []int64
+	colAggs         map[int]statsAgg
+	splitOffsets    []int64
 }
 
 func (d *dataFileStatistics) toDataFile(spec iceberg.PartitionSpec, path string, format iceberg.FileFormat, filesize int64) (iceberg.DataFile, error) {
 	bldr, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData,
-		path, iceberg.ParquetFile, nil, d.recordCount, filesize)
+		path, format, nil, d.recordCount, filesize)
 	if err != nil {
 		return nil, err
 	}
 
+	lowerBounds := make(map[int][]byte)
+	upperBounds := make(map[int][]byte)
+
+	for fieldID, agg := range d.colAggs {
+		min, err := agg.minAsBytes()
+		if err != nil {
+			return nil, err
+		}
+
+		max, err := agg.maxAsBytes()
+		if err != nil {
+			return nil, err
+		}
+
+		if len(min) > 0 {
+			lowerBounds[fieldID] = min
+		}
+		if len(max) > 0 {
+			upperBounds[fieldID] = max
+		}
+	}
+
+	if len(lowerBounds) > 0 {
+		bldr.LowerBoundValues(lowerBounds)
+	}
+	if len(upperBounds) > 0 {
+		bldr.UpperBoundValues(upperBounds)
+	}
 	bldr.ColumnSizes(d.colSizes)
 	bldr.ValueCounts(d.valueCounts)
 	bldr.NullValueCounts(d.nullValueCounts)
@@ -1166,6 +1453,7 @@ func dataFileStatsFromParquetMetadata(pqmeta *metadata.FileMetaData, statsCols m
 		nullValueCounts = make(map[int]int64)
 		nanValueCounts  = make(map[int]int64)
 		invalidateCol   = make(map[int]struct{})
+		colAggs         = make(map[int]statsAgg)
 	)
 
 	for rg := range pqmeta.NumRowGroups() {
@@ -1219,11 +1507,32 @@ func dataFileStatsFromParquetMetadata(pqmeta *metadata.FileMetaData, statsCols m
 				nullValueCounts[fieldID] += stats.NullCount()
 			}
 
-			if statsCol.mode.typ == metricModeCounts {
+			if statsCol.mode.typ == metricModeCounts || !stats.HasMinMax() {
 				continue
 			}
 
-			// TODO stats aggregator!
+			agg, ok := colAggs[fieldID]
+			if !ok {
+				agg, err = createStatsAgg(statsCol.icebergTyp, stats.Type().String(), statsCol.mode.len)
+				if err != nil {
+					panic(err)
+				}
+
+				colAggs[fieldID] = agg
+			}
+
+			switch statsCol.icebergTyp.(type) {
+			case iceberg.BinaryType:
+				stats = &wrappedBinaryStats{stats.(*metadata.ByteArrayStatistics)}
+			case iceberg.UUIDType:
+				stats = &wrappedUUIDStats{stats.(*metadata.FixedLenByteArrayStatistics)}
+			case iceberg.StringType:
+				stats = &wrappedStringStats{stats.(*metadata.ByteArrayStatistics)}
+			case iceberg.FixedType:
+				stats = &wrappedFLBAStats{stats.(*metadata.FixedLenByteArrayStatistics)}
+			}
+
+			agg.update(stats)
 		}
 
 	}
@@ -1234,6 +1543,10 @@ func dataFileStatsFromParquetMetadata(pqmeta *metadata.FileMetaData, statsCols m
 
 		return ok
 	})
+	maps.DeleteFunc(colAggs, func(fieldID int, _ statsAgg) bool {
+		_, ok := invalidateCol[fieldID]
+		return ok
+	})
 
 	return &dataFileStatistics{
 		recordCount:     pqmeta.GetNumRows(),
@@ -1242,5 +1555,55 @@ func dataFileStatsFromParquetMetadata(pqmeta *metadata.FileMetaData, statsCols m
 		nullValueCounts: nullValueCounts,
 		nanValueCounts:  nanValueCounts,
 		splitOffsets:    splitOffsets,
+		colAggs:         colAggs,
+	}
+}
+
+func parquetFilesToDataFiles(fileIO iceio.IO, meta *MetadataBuilder, paths iter.Seq[string]) iter.Seq2[iceberg.DataFile, error] {
+	return func(yield func(iceberg.DataFile, error) bool) {
+		defer func() {
+			if r := recover(); r != nil {
+				switch e := r.(type) {
+				case string:
+					yield(nil, fmt.Errorf("error encountered during parquet file conversion: %s", e))
+				case error:
+					yield(nil, fmt.Errorf("error encountered during parquet file conversion: %w", e))
+				}
+			}
+		}()
+
+		for filePath := range paths {
+			inputFile := must(fileIO.Open(filePath))
+			defer inputFile.Close()
+
+			rdr := must(file.NewParquetReader(inputFile))
+			defer rdr.Close()
+
+			arrRdr := must(pqarrow.NewFileReader(rdr, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator))
+			arrSchema := must(arrRdr.Schema())
+
+			if hasIDs := must(VisitArrowSchema(arrSchema, hasIDs{})); hasIDs {
+				yield(nil, fmt.Errorf("%w: cannot add file %s because it has field-ids. add-files only supports the addition of files without field_ids",
+					iceberg.ErrNotImplemented, filePath))
+				return
+			}
+
+			if err := checkArrowSchemaCompat(meta.CurrentSchema(), arrSchema, false); err != nil {
+				panic(err)
+			}
+
+			statistics := dataFileStatsFromParquetMetadata(rdr.MetaData(),
+				must(computeStatsPlan(meta.CurrentSchema(), meta.props)),
+				must(parquetPathToIDMapping(meta.CurrentSchema())))
+
+			df, err := statistics.toDataFile(meta.CurrentSpec(), filePath, iceberg.ParquetFile, rdr.MetaData().GetSourceFileSize())
+			if err != nil {
+				panic(err)
+			}
+
+			if !yield(df, nil) {
+				return
+			}
+		}
 	}
 }
