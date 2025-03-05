@@ -49,6 +49,7 @@ func (s *SlicePacker[T]) Pack(items []T, weightFunc func(T) int64) [][]T {
 				return &bins[i]
 			}
 		}
+
 		return nil
 	}
 
@@ -62,11 +63,13 @@ func (s *SlicePacker[T]) Pack(items []T, weightFunc func(T) int64) [][]T {
 			})
 
 			bins = slices.Delete(bins, i, i+1)
+
 			return maxBin
 		}
 
 		var out Bin[T]
 		out, bins = bins[0], bins[1:]
+
 		return out
 	}
 
@@ -95,7 +98,6 @@ func (s *SlicePacker[T]) Pack(items []T, weightFunc func(T) int64) [][]T {
 			}
 		}
 	})
-
 }
 
 func (s *SlicePacker[T]) PackEnd(items []T, weightFunc func(T) int64) [][]T {
@@ -108,5 +110,6 @@ func (s *SlicePacker[T]) PackEnd(items []T, weightFunc func(T) int64) [][]T {
 		slices.Reverse(items)
 		result = append(result, items)
 	}
+
 	return result
 }
