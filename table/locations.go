@@ -84,12 +84,6 @@ func newSimpleLocationProvider(tableLoc *url.URL, tableProps iceberg.Properties)
 	return out, nil
 }
 
-// const (
-// 	hashBinaryStringBits = 20
-// 	entropyDirLen        = 4
-// 	entropyDirDepth      = 3
-// )
-
 type objectStoreLocationProvider struct {
 	*simpleLocationProvider
 
