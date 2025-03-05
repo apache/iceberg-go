@@ -30,5 +30,6 @@ func Difference(a, b []string) []string {
 			diff = append(diff, item)
 		}
 	}
+
 	return diff
 }
