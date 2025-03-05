@@ -37,4 +37,19 @@ const (
 	WriteObjectStorePartitionedPathsDefault = true
 	ObjectStoreEnabledKey                   = "write.object-storage.enabled"
 	ObjectStoreEnabledDefault               = false
+
+	ManifestMergeEnabledKey     = "commit.manifest-merge.enabled"
+	ManifestMergeEnabledDefault = false
+
+	ManifestTargetSizeBytesKey     = "commit.manifest.target-size-bytes"
+	ManifestTargetSizeBytesDefault = 8 * 1024 * 1024 // 8 MB
+
+	ManifestMinMergeCountKey     = "commit.manifest.min-count-to-merge"
+	ManifestMinMergeCountDefault = 100
+
+	WritePartitionSummaryLimitKey     = "write.summary.partition-limit"
+	WritePartitionSummaryLimitDefault = 0
+
+	MetadataDeleteAfterCommitEnabledKey     = "write.metadata.delete-after-commit.enabled"
+	MetadataDeleteAfterCommitEnabledDefault = false
 )

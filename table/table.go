@@ -19,10 +19,13 @@ package table
 
 import (
 	"context"
+	"fmt"
+	"iter"
 	"runtime"
 	"slices"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/io"
 )
 
@@ -55,6 +58,7 @@ func (t Table) Schema() *iceberg.Schema              { return t.metadata.Current
 func (t Table) Spec() iceberg.PartitionSpec          { return t.metadata.PartitionSpec() }
 func (t Table) SortOrder() SortOrder                 { return t.metadata.SortOrder() }
 func (t Table) Properties() iceberg.Properties       { return t.metadata.Properties() }
+func (t Table) NameMapping() iceberg.NameMapping     { return t.metadata.NameMapping() }
 func (t Table) Location() string                     { return t.metadata.Location() }
 func (t Table) CurrentSnapshot() *Snapshot           { return t.metadata.CurrentSnapshot() }
 func (t Table) SnapshotByID(id int64) *Snapshot      { return t.metadata.SnapshotByID(id) }
@@ -70,6 +74,63 @@ func (t Table) Schemas() map[int]*iceberg.Schema {
 
 func (t Table) LocationProvider() (LocationProvider, error) {
 	return LoadLocationProvider(t.metadataLocation, t.metadata.Properties())
+}
+
+func (t Table) NewTransaction() *Transaction {
+	meta, _ := MetadataBuilderFromBase(t.metadata)
+	return &Transaction{
+		tbl:  &t,
+		meta: meta,
+		reqs: []Requirement{},
+	}
+}
+
+func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requirement) (*Table, error) {
+	newMeta, newLoc, err := t.cat.CommitTable(ctx, &t, reqs, updates)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := deleteOldMetadata(t.fs, t.metadata, newMeta); err != nil {
+		return nil, err
+	}
+
+	return New(t.identifier, newMeta, newLoc, t.fs, t.cat), nil
+}
+
+func getFiles(it iter.Seq[MetadataLogEntry]) iter.Seq[string] {
+	return func(yield func(string) bool) {
+		next, stop := iter.Pull(it)
+		defer stop()
+		for {
+			entry, ok := next()
+			if !ok {
+				return
+			}
+			if !yield(entry.MetadataFile) {
+				return
+			}
+		}
+	}
+}
+
+func deleteOldMetadata(fs io.IO, baseMeta, newMeta Metadata) error {
+	deleteAfterCommit := newMeta.Properties().GetBool(MetadataDeleteAfterCommitEnabledKey,
+		MetadataDeleteAfterCommitEnabledDefault)
+
+	if deleteAfterCommit {
+		removedPrevious := slices.Collect(getFiles(baseMeta.PreviousFiles()))
+		currentMetadata := slices.Collect(getFiles(newMeta.PreviousFiles()))
+		toRemove := internal.Difference(removedPrevious, currentMetadata)
+
+		for _, file := range toRemove {
+			if err := fs.Remove(file); err != nil {
+				return fmt.Errorf("failed to delete old metadata file %s: %w", file, err)
+			}
+		}
+	}
+
+	return nil
 }
 
 type ScanOption func(*Scan)
