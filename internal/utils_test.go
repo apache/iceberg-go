@@ -15,11 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package iceberg
+package internal_test
 
 import (
 	"testing"
 
+	"github.com/apache/iceberg-go/internal"
 	"github.com/stretchr/testify/require"
 )
 
@@ -71,7 +72,7 @@ func TestDifference(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert := require.New(t)
-			result := Difference(tt.a, tt.b)
+			result := internal.Difference(tt.a, tt.b)
 			assert.ElementsMatch(tt.expected, result)
 		})
 	}
