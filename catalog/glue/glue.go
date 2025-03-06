@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/apache/iceberg-go/catalog/internal"
 	"iter"
 	"strconv"
 	_ "unsafe"
@@ -229,7 +230,55 @@ func (c *Catalog) CatalogType() catalog.Type {
 }
 
 func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
-	panic("create table not implemented for Glue Catalog")
+	database, tableName, err := identifierToGlueTable(identifier)
+	if err != nil {
+		return nil, err
+	}
+	var cfg internal.CreateTableCfg
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	if cfg.Location == "" {
+		return nil, fmt.Errorf("metadata location is required for table creation")
+	}
+	parameters := map[string]string{
+		tableTypePropsKey:        glueTypeIceberg,
+		metadataLocationPropsKey: cfg.Location,
+	}
+	for k, v := range cfg.Properties {
+		parameters[k] = v
+	}
+	tableInput := &types.TableInput{
+		Name:       aws.String(tableName),
+		Parameters: parameters,
+		StorageDescriptor: &types.StorageDescriptor{
+			Location: aws.String(cfg.Location),
+			Columns:  schemaToGlueColumns(schema),
+		},
+	}
+	_, err = c.glueSvc.CreateTable(ctx, &glue.CreateTableInput{
+		CatalogId:    c.catalogId,
+		DatabaseName: aws.String(database),
+		TableInput:   tableInput,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create table %s.%s: %w", database, tableName, err)
+	}
+	createdTable, err := c.LoadTable(ctx, identifier, cfg.Properties)
+	if err != nil {
+		// Attempt to clean up the table if loading fails
+		_, cleanupErr := c.glueSvc.DeleteTable(ctx, &glue.DeleteTableInput{
+			CatalogId:    c.catalogId,
+			DatabaseName: aws.String(database),
+			Name:         aws.String(tableName),
+		})
+		if cleanupErr != nil {
+			return nil, fmt.Errorf("failed to create table %s.%s and cleanup failed: %v (original error: %w)",
+				database, tableName, cleanupErr, err)
+		}
+		return nil, fmt.Errorf("failed to create table %s.%s: %w", database, tableName, err)
+	}
+	return createdTable, nil
 }
 
 func (c *Catalog) CommitTable(context.Context, *table.Table, []table.Requirement, []table.Update) (table.Metadata, string, error) {
@@ -581,4 +630,15 @@ func filterDatabaseListByType(databases []types.Database, databaseType string) [
 	}
 
 	return filtered
+}
+func schemaToGlueColumns(schema *iceberg.Schema) []types.Column {
+	var columns []types.Column
+	for _, field := range schema.Fields() {
+		columns = append(columns, types.Column{
+			Name:    aws.String(field.Name),
+			Type:    aws.String(field.Type.String()),
+			Comment: aws.String(field.Doc),
+		})
+	}
+	return columns
 }
