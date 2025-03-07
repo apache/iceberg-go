@@ -1081,6 +1081,8 @@ type mockDataFile struct {
 	nanCounts   map[int]int64
 	lowerBounds map[int][]byte
 	upperBounds map[int][]byte
+
+	specid int32
 }
 
 func (*mockDataFile) ContentType() iceberg.ManifestEntryContent { return iceberg.EntryContentData }
@@ -1100,6 +1102,7 @@ func (*mockDataFile) KeyMetadata() []byte                       { return nil }
 func (*mockDataFile) SplitOffsets() []int64                     { return nil }
 func (*mockDataFile) EqualityFieldIDs() []int                   { return nil }
 func (*mockDataFile) SortOrderID() *int                         { return nil }
+func (m *mockDataFile) SpecID() int32                           { return m.specid }
 
 type InclusiveMetricsTestSuite struct {
 	suite.Suite
