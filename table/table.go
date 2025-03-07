@@ -18,6 +18,7 @@
 package table
 
 import (
+	"context"
 	"runtime"
 	"slices"
 
@@ -27,11 +28,17 @@ import (
 
 type Identifier = []string
 
+type CatalogIO interface {
+	LoadTable(context.Context, Identifier, iceberg.Properties) (*Table, error)
+	CommitTable(context.Context, *Table, []Requirement, []Update) (Metadata, string, error)
+}
+
 type Table struct {
 	identifier       Identifier
 	metadata         Metadata
 	metadataLocation string
 	fs               io.IO
+	cat              CatalogIO
 }
 
 func (t Table) Equals(other Table) bool {
@@ -154,16 +161,17 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 	return s
 }
 
-func New(ident Identifier, meta Metadata, location string, fs io.IO) *Table {
+func New(ident Identifier, meta Metadata, location string, fs io.IO, cat CatalogIO) *Table {
 	return &Table{
 		identifier:       ident,
 		metadata:         meta,
 		metadataLocation: location,
 		fs:               fs,
+		cat:              cat,
 	}
 }
 
-func NewFromLocation(ident Identifier, metalocation string, fsys io.IO) (*Table, error) {
+func NewFromLocation(ident Identifier, metalocation string, fsys io.IO, cat CatalogIO) (*Table, error) {
 	var meta Metadata
 
 	if rf, ok := fsys.(io.ReadFileIO); ok {
@@ -187,5 +195,5 @@ func NewFromLocation(ident Identifier, metalocation string, fsys io.IO) (*Table,
 		}
 	}
 
-	return New(ident, meta, metalocation, fsys), nil
+	return New(ident, meta, metalocation, fsys, cat), nil
 }
