@@ -501,13 +501,11 @@ func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]M
 	}
 
 	fieldNameToID, fieldIDToLogicalType := getFieldIDMap(sc)
-	isVer1, isFallback := true, false
-	if string(metadata["format-version"]) == "2" {
-		isVer1 = false
-	} else {
+	isFallback := false
+	if string(metadata["format-version"]) != "2" {
 		for _, f := range sc.(*avro.RecordSchema).Fields() {
 			if f.Name() == "snapshot_id" {
-				if f.Type().Type() == avro.Union {
+				if f.Type().Type() != avro.Union {
 					isFallback = true
 				}
 
@@ -519,14 +517,12 @@ func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]M
 	results := make([]ManifestEntry, 0)
 	for dec.HasNext() {
 		var tmp ManifestEntry
-		if isVer1 {
-			if isFallback {
-				tmp = &fallbackManifestEntryV1{manifestEntryV1: manifestEntryV1{Data: &dataFile{}}}
-			} else {
-				tmp = &manifestEntryV1{Data: &dataFile{}}
+		if isFallback {
+			tmp = &fallbackManifestEntry{
+				manifestEntry: manifestEntry{Data: &dataFile{}},
 			}
 		} else {
-			tmp = &manifestEntryV2{Data: &dataFile{}}
+			tmp = &manifestEntry{Data: &dataFile{}}
 		}
 
 		if err := dec.Decode(tmp); err != nil {
@@ -534,11 +530,11 @@ func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]M
 		}
 
 		if isFallback {
-			tmp = tmp.(*fallbackManifestEntryV1).toEntry()
+			tmp = tmp.(*fallbackManifestEntry).toEntry()
 		}
 
 		if !discardDeleted || tmp.Status() != EntryStatusDELETED {
-			tmp.inheritSeqNum(m)
+			tmp.inherit(m)
 			if fieldToIDMap, ok := tmp.DataFile().(hasFieldToIDMap); ok {
 				fieldToIDMap.setFieldNameToIDMap(fieldNameToID)
 				fieldToIDMap.setFieldIDToLogicalTypeMap(fieldIDToLogicalType)
@@ -669,26 +665,29 @@ func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
 
 type writerImpl interface {
 	content() ManifestContent
-	prepareEntry(ManifestEntry, int64) (ManifestEntry, error)
+	prepareEntry(*manifestEntry, int64) (ManifestEntry, error)
 }
 
 type v1writerImpl struct{}
 
 func (v1writerImpl) content() ManifestContent { return ManifestContentData }
-func (v1writerImpl) prepareEntry(entry ManifestEntry, _ int64) (ManifestEntry, error) {
-	return entry, nil
+func (v1writerImpl) prepareEntry(entry *manifestEntry, sn int64) (ManifestEntry, error) {
+	return &fallbackManifestEntry{
+		manifestEntry: *entry,
+		Snapshot:      sn,
+	}, nil
 }
 
 type v2writerImpl struct{}
 
 func (v2writerImpl) content() ManifestContent { return ManifestContentData }
-func (v2writerImpl) prepareEntry(entry ManifestEntry, snapshotID int64) (ManifestEntry, error) {
-	if entry.SequenceNum() <= 0 {
-		if entry.SnapshotID() > 0 && entry.SnapshotID() != snapshotID {
+func (v2writerImpl) prepareEntry(entry *manifestEntry, snapshotID int64) (ManifestEntry, error) {
+	if entry.SeqNum == nil {
+		if entry.Snapshot != nil && *entry.Snapshot != snapshotID {
 			return nil, fmt.Errorf("found unassigned sequence number for entry from snapshot: %d", entry.SnapshotID())
 		}
 
-		if entry.Status() != EntryStatusADDED {
+		if entry.EntryStatus != EntryStatusADDED {
 			return nil, errors.New("only entries with status ADDED can be missing a sequence number")
 		}
 	}
@@ -859,22 +858,19 @@ type ManifestWriter struct {
 
 	partitions  []map[string]any
 	minSeqNum   int64
-	reusedEntry ManifestEntry
+	reusedEntry manifestEntry
 }
 
 func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *Schema, snapshotID int64) (*ManifestWriter, error) {
 	var (
-		impl        writerImpl
-		reusedEntry ManifestEntry
+		impl writerImpl
 	)
 
 	switch version {
 	case 1:
 		impl = v1writerImpl{}
-		reusedEntry = &manifestEntryV1{}
 	case 2:
 		impl = v2writerImpl{}
-		reusedEntry = &manifestEntryV2{}
 	default:
 		return nil, fmt.Errorf("unsupported manifest version: %d", version)
 	}
@@ -890,15 +886,14 @@ func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *S
 	}
 
 	w := &ManifestWriter{
-		impl:        impl,
-		version:     version,
-		output:      out,
-		spec:        spec,
-		schema:      schema,
-		snapshotID:  snapshotID,
-		minSeqNum:   -1,
-		partitions:  make([]map[string]any, 0),
-		reusedEntry: reusedEntry,
+		impl:       impl,
+		version:    version,
+		output:     out,
+		spec:       spec,
+		schema:     schema,
+		snapshotID: snapshotID,
+		minSeqNum:  -1,
+		partitions: make([]map[string]any, 0),
 	}
 
 	md, err := w.meta()
@@ -1003,7 +998,7 @@ func (w *ManifestWriter) meta() (map[string][]byte, error) {
 	}, nil
 }
 
-func (w *ManifestWriter) addEntry(entry ManifestEntry) error {
+func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 	if w.closed {
 		return errors.New("cannot add entry to closed manifest writer")
 	}
@@ -1028,30 +1023,30 @@ func (w *ManifestWriter) addEntry(entry ManifestEntry) error {
 		w.minSeqNum = entry.SequenceNum()
 	}
 
-	entry, err := w.impl.prepareEntry(entry, w.snapshotID)
+	toEncode, err := w.impl.prepareEntry(entry, w.snapshotID)
 	if err != nil {
 		return err
 	}
 
-	return w.writer.Encode(entry)
+	return w.writer.Encode(toEncode)
 }
 
 func (w *ManifestWriter) Add(entry ManifestEntry) error {
-	w.reusedEntry.wrap(EntryStatusADDED, w.snapshotID, entry.SequenceNum(), nil, entry.DataFile())
+	w.reusedEntry.wrap(EntryStatusADDED, &w.snapshotID, entry.(*manifestEntry).SeqNum, nil, entry.DataFile())
 
-	return w.addEntry(w.reusedEntry)
+	return w.addEntry(&w.reusedEntry)
 }
 
 func (w *ManifestWriter) Delete(entry ManifestEntry) error {
-	w.reusedEntry.wrap(EntryStatusDELETED, w.snapshotID, entry.SequenceNum(), entry.FileSequenceNum(), entry.DataFile())
+	w.reusedEntry.wrap(EntryStatusDELETED, &w.snapshotID, entry.(*manifestEntry).SeqNum, entry.FileSequenceNum(), entry.DataFile())
 
-	return w.addEntry(w.reusedEntry)
+	return w.addEntry(&w.reusedEntry)
 }
 
 func (w *ManifestWriter) Existing(entry ManifestEntry) error {
-	w.reusedEntry.wrap(EntryStatusEXISTING, w.snapshotID, entry.SequenceNum(), entry.FileSequenceNum(), entry.DataFile())
+	w.reusedEntry.wrap(EntryStatusEXISTING, &w.snapshotID, entry.(*manifestEntry).SeqNum, entry.FileSequenceNum(), entry.DataFile())
 
-	return w.addEntry(w.reusedEntry)
+	return w.addEntry(&w.reusedEntry)
 }
 
 type ManifestListWriter struct {
@@ -1231,7 +1226,7 @@ func WriteManifest(
 	}
 
 	for _, entry := range entries {
-		if err := w.addEntry(entry); err != nil {
+		if err := w.addEntry(entry.(*manifestEntry)); err != nil {
 			return nil, err
 		}
 	}
@@ -1477,123 +1472,37 @@ func (d *dataFile) EqualityFieldIDs() []int {
 
 func (d *dataFile) SortOrderID() *int { return d.SortOrder }
 
-// ManifestEntryV1Builder is a helper for building a V1 manifest entry
-// struct which will conform to the ManifestEntry interface.
-type ManifestEntryV1Builder struct {
-	m *manifestEntryV1
+type ManifestEntryBuilder struct {
+	m *manifestEntry
 }
 
-// NewManifestEntryV1Builder is passed all of the required fields and then allows
-// all of the optional fields to be set by calling the corresponding methods
-// before calling [ManifestEntryV1Builder.Build] to construct the object.
-func NewManifestEntryV1Builder(status ManifestEntryStatus, snapshotID int64, data DataFile) (*ManifestEntryV1Builder, error) {
-	return &ManifestEntryV1Builder{
-		m: &manifestEntryV1{
+func NewManifestEntryBuilder(status ManifestEntryStatus, snapshotID *int64, data DataFile) *ManifestEntryBuilder {
+	return &ManifestEntryBuilder{
+		m: &manifestEntry{
 			EntryStatus: status,
 			Snapshot:    snapshotID,
 			Data:        data,
 		},
-	}, nil
-}
-
-func (b *ManifestEntryV1Builder) Build() ManifestEntry {
-	return b.m
-}
-
-type manifestEntryV1 struct {
-	EntryStatus ManifestEntryStatus `avro:"status"`
-	Snapshot    int64               `avro:"snapshot_id"`
-	SeqNum      *int64
-	FileSeqNum  *int64
-	Data        DataFile `avro:"data_file"`
-}
-
-type fallbackManifestEntryV1 struct {
-	manifestEntryV1
-	Snapshot *int64 `avro:"snapshot_id"`
-}
-
-func (f *fallbackManifestEntryV1) toEntry() *manifestEntryV1 {
-	f.manifestEntryV1.Snapshot = *f.Snapshot
-
-	return &f.manifestEntryV1
-}
-
-func (m *manifestEntryV1) inheritSeqNum(manifest ManifestFile) {}
-
-func (m *manifestEntryV1) Status() ManifestEntryStatus { return m.EntryStatus }
-func (m *manifestEntryV1) SnapshotID() int64           { return m.Snapshot }
-
-func (m *manifestEntryV1) SequenceNum() int64 {
-	if m.SeqNum == nil {
-		return 0
-	}
-
-	return *m.SeqNum
-}
-
-func (m *manifestEntryV1) FileSequenceNum() *int64 {
-	return m.FileSeqNum
-}
-
-func (m *manifestEntryV1) DataFile() DataFile { return m.Data }
-
-func (m *manifestEntryV1) wrap(status ManifestEntryStatus, snapshotID int64, seqNum int64, fileSeqNum *int64, datafile DataFile) ManifestEntry {
-	m.EntryStatus = status
-	m.Snapshot = snapshotID
-	if seqNum > 0 {
-		m.SeqNum = &seqNum
-	}
-
-	m.FileSeqNum = fileSeqNum
-
-	m.Data = datafile
-
-	return m
-}
-
-// ManifestEntryV2Builder is a helper for building a V2 manifest entry
-// struct which will conform to the ManifestEntry interface.
-type ManifestEntryV2Builder struct {
-	m *manifestEntryV2
-}
-
-// NewManifestEntryV2Builder is passed all of the required fields and then allows
-// all of the optional fields to be set by calling the corresponding methods
-// before calling [ManifestEntryV2Builder.Build] to construct the object.
-func NewManifestEntryV2Builder(status ManifestEntryStatus, snapshotID int64, data DataFile) *ManifestEntryV2Builder {
-	return &ManifestEntryV2Builder{
-		m: &manifestEntryV2{
-			EntryStatus: status,
-			Snapshot:    &snapshotID,
-			Data:        data,
-		},
 	}
 }
 
-// SequenceNum sets the sequence number for the manifest entry.
-func (b *ManifestEntryV2Builder) SequenceNum(num int64) *ManifestEntryV2Builder {
+func (b *ManifestEntryBuilder) SequenceNum(num int64) *ManifestEntryBuilder {
 	b.m.SeqNum = &num
 
 	return b
 }
 
-// FileSequenceNum sets the file sequence number for the manifest entry.
-func (b *ManifestEntryV2Builder) FileSequenceNum(num int64) *ManifestEntryV2Builder {
+func (b *ManifestEntryBuilder) FileSequenceNum(num int64) *ManifestEntryBuilder {
 	b.m.FileSeqNum = &num
 
 	return b
 }
 
-// Build returns the constructed manifest entry, after calling Build this
-// builder should not be used further as we avoid copying by just returning
-// a pointer to the constructed manifest entry. Further calls to the modifier
-// methods after calling build would modify the constructed ManifestEntry.
-func (b *ManifestEntryV2Builder) Build() ManifestEntry {
+func (b *ManifestEntryBuilder) Build() ManifestEntry {
 	return b.m
 }
 
-type manifestEntryV2 struct {
+type manifestEntry struct {
 	EntryStatus ManifestEntryStatus `avro:"status"`
 	Snapshot    *int64              `avro:"snapshot_id"`
 	SeqNum      *int64              `avro:"sequence_number"`
@@ -1601,7 +1510,30 @@ type manifestEntryV2 struct {
 	Data        DataFile            `avro:"data_file"`
 }
 
-func (m *manifestEntryV2) inheritSeqNum(manifest ManifestFile) {
+func (m *manifestEntry) Status() ManifestEntryStatus { return m.EntryStatus }
+func (m *manifestEntry) SnapshotID() int64 {
+	if m.Snapshot == nil {
+		return -1
+	}
+
+	return *m.Snapshot
+}
+
+func (m *manifestEntry) SequenceNum() int64 {
+	if m.SeqNum == nil {
+		return -1
+	}
+
+	return *m.SeqNum
+}
+
+func (m *manifestEntry) FileSequenceNum() *int64 {
+	return m.FileSeqNum
+}
+
+func (m *manifestEntry) DataFile() DataFile { return m.Data }
+
+func (m *manifestEntry) inherit(manifest ManifestFile) {
 	if m.Snapshot == nil {
 		snap := manifest.SnapshotID()
 		m.Snapshot = &snap
@@ -1617,42 +1549,35 @@ func (m *manifestEntryV2) inheritSeqNum(manifest ManifestFile) {
 	}
 }
 
-func (m *manifestEntryV2) Status() ManifestEntryStatus { return m.EntryStatus }
-func (m *manifestEntryV2) SnapshotID() int64 {
-	if m.Snapshot == nil {
-		return 0
-	}
-
-	return *m.Snapshot
-}
-
-func (m *manifestEntryV2) SequenceNum() int64 {
-	if m.SeqNum == nil {
-		return 0
-	}
-
-	return *m.SeqNum
-}
-
-func (m *manifestEntryV2) FileSequenceNum() *int64 {
-	return m.FileSeqNum
-}
-
-func (m *manifestEntryV2) DataFile() DataFile { return m.Data }
-
-func (m *manifestEntryV2) wrap(status ManifestEntryStatus, snapshotID int64, seqNum int64, fileSeqNum *int64, datafile DataFile) ManifestEntry {
+func (m *manifestEntry) wrap(status ManifestEntryStatus, newSnapID, newSeq, newFileSeq *int64, data DataFile) ManifestEntry {
 	m.EntryStatus = status
-	if snapshotID > 0 {
-		m.Snapshot = &snapshotID
-	}
-	if seqNum > 0 {
-		m.SeqNum = &seqNum
-	}
-	m.FileSeqNum = fileSeqNum
-
-	m.Data = datafile
+	m.Snapshot = newSnapID
+	m.SeqNum = newSeq
+	m.FileSeqNum = newFileSeq
+	m.Data = data
 
 	return m
+}
+
+type fallbackManifestEntry struct {
+	manifestEntry
+	Snapshot int64 `avro:"snapshot_id"`
+}
+
+func (f *fallbackManifestEntry) toEntry() *manifestEntry {
+	f.manifestEntry.Snapshot = &f.Snapshot
+
+	return &f.manifestEntry
+}
+
+func NewManifestEntry(status ManifestEntryStatus, snapshotID *int64, seqNum, fileSeqNum *int64, df DataFile) ManifestEntry {
+	return &manifestEntry{
+		EntryStatus: status,
+		Snapshot:    snapshotID,
+		SeqNum:      seqNum,
+		FileSeqNum:  fileSeqNum,
+		Data:        df,
+	}
 }
 
 // DataFileBuilder is a helper for building a data file struct which will
@@ -1879,8 +1804,8 @@ type ManifestEntry interface {
 	// by this manifest entry.
 	DataFile() DataFile
 
-	inheritSeqNum(manifest ManifestFile)
-	wrap(status ManifestEntryStatus, snapshotID int64, seqNum int64, fileSeqNum *int64, datafile DataFile) ManifestEntry
+	inherit(manifest ManifestFile)
+	wrap(status ManifestEntryStatus, snapshotID, seqNum, fileSeqNum *int64, datafile DataFile) ManifestEntry
 }
 
 var PositionalDeleteSchema = NewSchema(0,
