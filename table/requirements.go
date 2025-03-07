@@ -41,12 +41,17 @@ const (
 type Requirement interface {
 	// Validate checks that the current table metadata satisfies the requirement.
 	Validate(Metadata) error
+	GetType() string
 }
 
 // baseRequirement is a common struct that all requirements embed. It is used to
 // identify the type of the requirement.
 type baseRequirement struct {
 	Type string `json:"type"`
+}
+
+func (b baseRequirement) GetType() string {
+	return b.Type
 }
 
 type assertCreate struct {
@@ -123,16 +128,17 @@ func (a *assertRefSnapshotID) Validate(meta Metadata) error {
 			break
 		}
 	}
-	if r == nil {
+
+	if r != nil {
+		if a.SnapshotID == nil {
+			return fmt.Errorf("requirement failed: %s %s was created concurrently", r.SnapshotRefType, a.Ref)
+		}
+
+		if r.SnapshotID != *a.SnapshotID {
+			return fmt.Errorf("requirement failed: %s %s has changed: expected id %d, found %d", r.SnapshotRefType, a.Ref, a.SnapshotID, r.SnapshotID)
+		}
+	} else if a.SnapshotID != nil {
 		return fmt.Errorf("requirement failed: branch or tag %s is missing, expected %d", a.Ref, a.SnapshotID)
-	}
-
-	if a.SnapshotID == nil {
-		return fmt.Errorf("requirement failed: %s %s was created concurrently", r.SnapshotRefType, a.Ref)
-	}
-
-	if r.SnapshotID != *a.SnapshotID {
-		return fmt.Errorf("requirement failed: %s %s has changed: expected id %d, found %d", r.SnapshotRefType, a.Ref, a.SnapshotID, r.SnapshotID)
 	}
 
 	return nil

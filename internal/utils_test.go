@@ -19,9 +19,10 @@ package internal_test
 
 import (
 	"math"
-	"testing"
+	"testing"	
 
 	"github.com/apache/iceberg-go/internal"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -125,6 +126,60 @@ func TestReverseBinPackingLookback(t *testing.T) {
 
 			bins := p.PackEnd(tt.splits, weightFn)
 			assert.Equal(t, tt.expected, bins)
+    })
+  }
+}
+
+func TestDifference(t *testing.T) {
+	tests := []struct {
+		name     string
+		a        []string
+		b        []string
+		expected []string
+	}{
+		{
+			name:     "No elements in common",
+			a:        []string{"a", "b", "c"},
+			b:        []string{"d", "e", "f"},
+			expected: []string{"a", "b", "c"},
+		},
+		{
+			name:     "Some elements in common",
+			a:        []string{"a", "b", "c"},
+			b:        []string{"b"},
+			expected: []string{"a", "c"},
+		},
+		{
+			name:     "All elements in common",
+			a:        []string{"a", "b", "c"},
+			b:        []string{"a", "b", "c"},
+			expected: []string{},
+		},
+		{
+			name:     "Empty slice a",
+			a:        []string{},
+			b:        []string{"a", "b", "c"},
+			expected: []string{},
+		},
+		{
+			name:     "Empty slice b",
+			a:        []string{"a", "b", "c"},
+			b:        []string{},
+			expected: []string{"a", "b", "c"},
+		},
+		{
+			name:     "No elements in slice b present in slice a",
+			a:        []string{"a", "b", "c"},
+			b:        []string{"x", "y", "z"},
+			expected: []string{"a", "b", "c"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert := require.New(t)
+			result := internal.Difference(tt.a, tt.b)
+			assert.ElementsMatch(tt.expected, result)
 		})
 	}
 }

@@ -37,6 +37,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog/internal"
+	iceinternal "github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/table"
 )
 
@@ -196,7 +197,7 @@ func getUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals [
 	summary := PropertiesUpdateSummary{
 		Removed: removed,
 		Updated: updated,
-		Missing: iceberg.Difference(removals, removed),
+		Missing: iceinternal.Difference(removals, removed),
 	}
 
 	return updatedProps, summary, nil
