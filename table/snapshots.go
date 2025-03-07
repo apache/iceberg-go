@@ -103,7 +103,7 @@ type updateMetrics struct {
 	removedEqDeletes      int64
 }
 
-func (m *updateMetrics) addFile(df iceberg.DataFile) error {
+func (m *updateMetrics) addDataFile(df iceberg.DataFile) error {
 	m.addedFileSize += df.FileSizeBytes()
 	switch df.ContentType() {
 	case iceberg.EntryContentData:
@@ -326,15 +326,14 @@ func (s *SnapshotSummaryCollector) setPartitionSummaryLimit(limit int) {
 	s.maxChangedPartitionsForSummaries = limit
 }
 
-func (s *SnapshotSummaryCollector) updatePartitionMetrics(spec iceberg.PartitionSpec, df iceberg.DataFile, isAddFile bool, sc *iceberg.Schema) error {
-	partitionPath := spec.PartitionToPath(getPartitionRecord(df, spec.PartitionType(sc)), sc)
+func (s *SnapshotSummaryCollector) updatePartitionMetrics(partitionPath string, df iceberg.DataFile, isAddFile bool) error {
 	if s.partitionMetrics == nil {
 		s.partitionMetrics = make(map[string]updateMetrics)
 	}
 
 	metrics := s.partitionMetrics[partitionPath]
 	if isAddFile {
-		if err := metrics.addFile(df); err != nil {
+		if err := metrics.addDataFile(df); err != nil {
 			return err
 		}
 	} else {
@@ -348,12 +347,14 @@ func (s *SnapshotSummaryCollector) updatePartitionMetrics(spec iceberg.Partition
 }
 
 func (s *SnapshotSummaryCollector) addFile(df iceberg.DataFile, sc *iceberg.Schema, spec iceberg.PartitionSpec) error {
-	if err := s.metrics.addFile(df); err != nil {
+	if err := s.metrics.addDataFile(df); err != nil {
 		return err
 	}
 
 	if len(df.Partition()) > 0 {
-		return s.updatePartitionMetrics(spec, df, true, sc)
+		partitionPath := spec.PartitionToPath(
+			getPartitionRecord(df, spec.PartitionType(sc)), sc)
+		return s.updatePartitionMetrics(partitionPath, df, true)
 	}
 
 	return nil
@@ -365,7 +366,9 @@ func (s *SnapshotSummaryCollector) removeFile(df iceberg.DataFile, sc *iceberg.S
 	}
 
 	if len(df.Partition()) > 0 {
-		return s.updatePartitionMetrics(spec, df, false, sc)
+		partitionPath := spec.PartitionToPath(
+			getPartitionRecord(df, spec.PartitionType(sc)), sc)
+		return s.updatePartitionMetrics(partitionPath, df, false)
 	}
 
 	return nil
