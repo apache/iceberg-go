@@ -862,9 +862,7 @@ type ManifestWriter struct {
 }
 
 func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *Schema, snapshotID int64) (*ManifestWriter, error) {
-	var (
-		impl writerImpl
-	)
+	var impl writerImpl
 
 	switch version {
 	case 1:
