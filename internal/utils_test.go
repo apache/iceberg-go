@@ -19,11 +19,11 @@ package internal_test
 
 import (
 	"math"
-	"testing"	
+	"testing"
 
 	"github.com/apache/iceberg-go/internal"
-	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestBinPacking(t *testing.T) {
@@ -126,8 +126,8 @@ func TestReverseBinPackingLookback(t *testing.T) {
 
 			bins := p.PackEnd(tt.splits, weightFn)
 			assert.Equal(t, tt.expected, bins)
-    })
-  }
+		})
+	}
 }
 
 func TestDifference(t *testing.T) {
