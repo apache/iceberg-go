@@ -354,6 +354,7 @@ func (s *SnapshotSummaryCollector) addFile(df iceberg.DataFile, sc *iceberg.Sche
 	if len(df.Partition()) > 0 {
 		partitionPath := spec.PartitionToPath(
 			getPartitionRecord(df, spec.PartitionType(sc)), sc)
+
 		return s.updatePartitionMetrics(partitionPath, df, true)
 	}
 
@@ -368,6 +369,7 @@ func (s *SnapshotSummaryCollector) removeFile(df iceberg.DataFile, sc *iceberg.S
 	if len(df.Partition()) > 0 {
 		partitionPath := spec.PartitionToPath(
 			getPartitionRecord(df, spec.PartitionType(sc)), sc)
+
 		return s.updatePartitionMetrics(partitionPath, df, false)
 	}
 
