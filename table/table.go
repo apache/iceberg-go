@@ -18,6 +18,7 @@
 package table
 
 import (
+	"context"
 	"runtime"
 	"slices"
 
@@ -27,11 +28,17 @@ import (
 
 type Identifier = []string
 
+type CatalogIO interface {
+	LoadTable(context.Context, Identifier, iceberg.Properties) (*Table, error)
+	CommitTable(context.Context, *Table, []Requirement, []Update) (Metadata, string, error)
+}
+
 type Table struct {
 	identifier       Identifier
 	metadata         Metadata
 	metadataLocation string
 	fs               io.IO
+	cat              CatalogIO
 }
 
 func (t Table) Equals(other Table) bool {
@@ -40,11 +47,10 @@ func (t Table) Equals(other Table) bool {
 		t.metadata.Equals(other.metadata)
 }
 
-func (t Table) Identifier() Identifier   { return t.identifier }
-func (t Table) Metadata() Metadata       { return t.metadata }
-func (t Table) MetadataLocation() string { return t.metadataLocation }
-func (t Table) FS() io.IO                { return t.fs }
-
+func (t Table) Identifier() Identifier               { return t.identifier }
+func (t Table) Metadata() Metadata                   { return t.metadata }
+func (t Table) MetadataLocation() string             { return t.metadataLocation }
+func (t Table) FS() io.IO                            { return t.fs }
 func (t Table) Schema() *iceberg.Schema              { return t.metadata.CurrentSchema() }
 func (t Table) Spec() iceberg.PartitionSpec          { return t.metadata.PartitionSpec() }
 func (t Table) SortOrder() SortOrder                 { return t.metadata.SortOrder() }
@@ -60,6 +66,10 @@ func (t Table) Schemas() map[int]*iceberg.Schema {
 	}
 
 	return m
+}
+
+func (t Table) LocationProvider() (LocationProvider, error) {
+	return LoadLocationProvider(t.metadataLocation, t.metadata.Properties())
 }
 
 type ScanOption func(*Scan)
@@ -154,16 +164,17 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 	return s
 }
 
-func New(ident Identifier, meta Metadata, location string, fs io.IO) *Table {
+func New(ident Identifier, meta Metadata, location string, fs io.IO, cat CatalogIO) *Table {
 	return &Table{
 		identifier:       ident,
 		metadata:         meta,
 		metadataLocation: location,
 		fs:               fs,
+		cat:              cat,
 	}
 }
 
-func NewFromLocation(ident Identifier, metalocation string, fsys io.IO) (*Table, error) {
+func NewFromLocation(ident Identifier, metalocation string, fsys io.IO, cat CatalogIO) (*Table, error) {
 	var meta Metadata
 
 	if rf, ok := fsys.(io.ReadFileIO); ok {
@@ -187,5 +198,5 @@ func NewFromLocation(ident Identifier, metalocation string, fsys io.IO) (*Table,
 		}
 	}
 
-	return New(ident, meta, metalocation, fsys), nil
+	return New(ident, meta, metalocation, fsys, cat), nil
 }

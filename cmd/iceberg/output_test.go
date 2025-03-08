@@ -188,7 +188,7 @@ func TestDescribeTable(t *testing.T) {
 
 	for _, tt := range testArgs {
 		meta, _ := table.ParseMetadataBytes([]byte(tt.meta))
-		table := table.New([]string{"t"}, meta, "", nil)
+		table := table.New([]string{"t"}, meta, "", nil, nil)
 		buf.Reset()
 
 		text{}.DescribeTable(table)

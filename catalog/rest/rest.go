@@ -653,7 +653,7 @@ func (r *Catalog) tableFromResponse(ctx context.Context, identifier []string, me
 		return nil, err
 	}
 
-	return table.New(id, metadata, loc, iofs), nil
+	return table.New(id, metadata, loc, iofs, r), nil
 }
 
 func (r *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {

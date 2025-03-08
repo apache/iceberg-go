@@ -389,7 +389,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, pr
 		return nil, err
 	}
 
-	return table.NewFromLocation(identifier, result.MetadataLocation.String, iofs)
+	return table.NewFromLocation(identifier, result.MetadataLocation.String, iofs, c)
 }
 
 func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) error {
