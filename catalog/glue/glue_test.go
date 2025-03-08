@@ -869,14 +869,15 @@ func TestGlueCreateTableInvalidMetadataRollback(t *testing.T) {
 	assert.Error(err, "expected table to not exist after failed creation")
 	assert.True(strings.Contains(err.Error(), "EntityNotFoundException: Entity Not Found"), "expected EntityNotFoundException error")
 	// Verify that the table was not left in the catalog
-	tables := ctlg.ListTables(context.TODO(), DatabaseIdentifier(dbName)) // TODO: Implement CheckTableExists
+	tablesIter := ctlg.ListTables(context.TODO(), DatabaseIdentifier(dbName)) // TODO: Implement CheckTableExists
 	found := false
-	for tbl := range tables {
+	for tbl, err := range tablesIter {
 		if tbl[1] == newTableName {
 			found = true
 
 			break
 		}
+		assert.NoError(err)
 	}
 	assert.False(found, "expected table to be rolled back and not exist in the catalog")
 }
