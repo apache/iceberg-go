@@ -21,13 +21,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/apache/iceberg-go/catalog/internal"
 	"iter"
 	"strconv"
 	_ "unsafe"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/catalog/internal"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/utils"
@@ -239,7 +239,7 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		opt(&cfg)
 	}
 	if cfg.Location == "" {
-		return nil, fmt.Errorf("metadata location is required for table creation")
+		return nil, errors.New("metadata location is required for table creation")
 	}
 	parameters := map[string]string{
 		tableTypePropsKey:        glueTypeIceberg,
@@ -276,8 +276,10 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 			return nil, fmt.Errorf("failed to create table %s.%s and cleanup failed: %v (original error: %w)",
 				database, tableName, cleanupErr, err)
 		}
+
 		return nil, fmt.Errorf("failed to create table %s.%s: %w", database, tableName, err)
 	}
+
 	return createdTable, nil
 }
 
@@ -631,6 +633,7 @@ func filterDatabaseListByType(databases []types.Database, databaseType string) [
 
 	return filtered
 }
+
 func schemaToGlueColumns(schema *iceberg.Schema) []types.Column {
 	var columns []types.Column
 	for _, field := range schema.Fields() {
@@ -640,5 +643,6 @@ func schemaToGlueColumns(schema *iceberg.Schema) []types.Column {
 			Comment: aws.String(field.Doc),
 		})
 	}
+
 	return columns
 }

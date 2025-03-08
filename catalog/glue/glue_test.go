@@ -20,8 +20,11 @@ package glue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"
@@ -152,9 +155,9 @@ func TestGlueGetTable(t *testing.T) {
 		glueSvc: mockGlueSvc,
 	}
 
-	table, err := glueCatalog.getTable(context.TODO(), "test_database", "test_table")
+	tbl, err := glueCatalog.getTable(context.TODO(), "test_database", "test_table")
 	assert.NoError(err)
-	assert.Equal("s3://test-bucket/test_table/metadata/abc123-123.metadata.json", table.Parameters[metadataLocationPropsKey])
+	assert.Equal("s3://test-bucket/test_table/metadata/abc123-123.metadata.json", tbl.Parameters[metadataLocationPropsKey])
 }
 
 func TestGlueListTables(t *testing.T) {
@@ -730,12 +733,12 @@ func TestGlueListTablesIntegration(t *testing.T) {
 	}
 	assert := require.New(t)
 
-	awscfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
+	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
 
-	catalog := NewCatalog(WithAwsConfig(awscfg))
+	ctlg := NewCatalog(WithAwsConfig(awsCfg))
 
-	iter := catalog.ListTables(context.TODO(), DatabaseIdentifier(os.Getenv("TEST_DATABASE_NAME")))
+	iter := ctlg.ListTables(context.TODO(), DatabaseIdentifier(os.Getenv("TEST_DATABASE_NAME")))
 	var lastErr error
 	tbls := make([]table.Identifier, 0)
 	for tbl, err := range iter {
@@ -762,14 +765,14 @@ func TestGlueLoadTableIntegration(t *testing.T) {
 
 	assert := require.New(t)
 
-	awscfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
+	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
 
-	catalog := NewCatalog(WithAwsConfig(awscfg))
+	ctlg := NewCatalog(WithAwsConfig(awsCfg))
 
-	table, err := catalog.LoadTable(context.TODO(), []string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")}, nil)
+	tbl, err := ctlg.LoadTable(context.TODO(), []string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")}, nil)
 	assert.NoError(err)
-	assert.Equal([]string{os.Getenv("TEST_TABLE_NAME")}, table.Identifier())
+	assert.Equal([]string{os.Getenv("TEST_TABLE_NAME")}, tbl.Identifier())
 }
 
 func TestGlueListNamespacesIntegration(t *testing.T) {
@@ -778,12 +781,102 @@ func TestGlueListNamespacesIntegration(t *testing.T) {
 	}
 	assert := require.New(t)
 
-	awscfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
+	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
 
-	catalog := NewCatalog(WithAwsConfig(awscfg))
+	ctlg := NewCatalog(WithAwsConfig(awsCfg))
 
-	namespaces, err := catalog.ListNamespaces(context.TODO(), nil)
+	namespaces, err := ctlg.ListNamespaces(context.TODO(), nil)
 	assert.NoError(err)
 	assert.Contains(namespaces, []string{os.Getenv("TEST_DATABASE_NAME")})
+}
+
+func TestGlueCreateTableSuccessIntegration(t *testing.T) {
+	if os.Getenv("TEST_DATABASE_NAME") == "" {
+		t.Skip()
+	}
+	if os.Getenv("TEST_TABLE_NAME") == "" {
+		t.Skip()
+	}
+	if os.Getenv("TEST_TABLE_LOCATION") == "" {
+		t.Skip()
+	}
+	assert := require.New(t)
+	sourceTableName := os.Getenv("TEST_TABLE_NAME")
+	dbName := os.Getenv("TEST_DATABASE_NAME")
+	metadataLocation := os.Getenv("TEST_TABLE_LOCATION")
+	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
+	assert.NoError(err)
+
+	ctlg := NewCatalog(WithAwsConfig(awsCfg))
+	sourceTable, err := ctlg.LoadTable(context.TODO(), []string{dbName, sourceTableName}, nil)
+	assert.NoError(err)
+	assert.Equal([]string{sourceTableName}, sourceTable.Identifier())
+
+	newTableName := fmt.Sprintf("%d_%s", time.Now().UnixNano(), sourceTableName)
+	createOpts := []catalog.CreateTableOpt{
+		catalog.WithLocation(metadataLocation),
+		catalog.WithProperties(map[string]string{
+			"table_type":        "ICEBERG",
+			"metadata_location": metadataLocation,
+		}),
+	}
+	newTableLoaded, err := ctlg.CreateTable(context.TODO(), TableIdentifier(dbName, newTableName), sourceTable.Schema(), createOpts...)
+	assert.NoError(err)
+	assert.Equal([]string{newTableName}, newTableLoaded.Identifier())
+
+	// Load the newly created newTableLoaded
+	tableNewLoaded, err := ctlg.LoadTable(context.TODO(), []string{dbName, newTableName}, nil)
+	assert.NoError(err)
+	assert.Equal([]string{newTableName}, tableNewLoaded.Identifier())
+	assert.Equal(sourceTable.Schema().Fields(), tableNewLoaded.Schema().Fields())
+	assert.Equal(sourceTable.MetadataLocation(), tableNewLoaded.MetadataLocation())
+	// clean up the newly created newTableLoaded
+	err = ctlg.DropTable(context.TODO(), TableIdentifier(dbName, newTableName))
+	assert.NoError(err)
+}
+
+func TestGlueCreateTableInvalidMetadataRollback(t *testing.T) {
+	if os.Getenv("TEST_DATABASE_NAME") == "" {
+		t.Skip()
+	}
+	if os.Getenv("TEST_TABLE_NAME") == "" {
+		t.Skip()
+	}
+	assert := require.New(t)
+	// Use a non-existent S3 location for metadata
+	invalidMetadataLocation := "s3://test-bucket/nonexistent/metadata/00000-123.metadata.json"
+	dbName := os.Getenv("TEST_DATABASE_NAME")
+	sourceTableName := os.Getenv("TEST_TABLE_NAME")
+	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
+	assert.NoError(err)
+
+	ctlg := NewCatalog(WithAwsConfig(awsCfg))
+	sourceTable, err := ctlg.LoadTable(context.TODO(), []string{dbName, sourceTableName}, nil)
+	assert.NoError(err)
+
+	newTableName := fmt.Sprintf("%d_%s", time.Now().UnixNano(), sourceTableName)
+	createOpts := []catalog.CreateTableOpt{
+		catalog.WithLocation(invalidMetadataLocation),
+		catalog.WithProperties(map[string]string{
+			"table_type":        "ICEBERG",
+			"metadata_location": invalidMetadataLocation,
+		}),
+	}
+	_, err = ctlg.CreateTable(context.TODO(), TableIdentifier(dbName, newTableName), sourceTable.Schema(), createOpts...)
+	assert.Error(err, "expected error when creating table with invalid metadata location")
+	_, err = ctlg.LoadTable(context.TODO(), []string{dbName, newTableName}, nil)
+	assert.Error(err, "expected table to not exist after failed creation")
+	assert.True(strings.Contains(err.Error(), "EntityNotFoundException: Entity Not Found"), "expected EntityNotFoundException error")
+	// Verify that the table was not left in the catalog
+	tables := ctlg.ListTables(context.TODO(), DatabaseIdentifier(dbName)) // TODO: Implement CheckTableExists
+	found := false
+	for tbl := range tables {
+		if tbl[1] == newTableName {
+			found = true
+
+			break
+		}
+	}
+	assert.False(found, "expected table to be rolled back and not exist in the catalog")
 }
