@@ -66,10 +66,10 @@ var (
 
 	entrySnapshotID        int64 = 8744736658442914487
 	intZero                      = 0
-	manifestEntryV1Records       = []*manifestEntryV1{
+	manifestEntryV1Records       = []*manifestEntry{
 		{
 			EntryStatus: EntryStatusADDED,
-			Snapshot:    entrySnapshotID,
+			Snapshot:    &entrySnapshotID,
 			Data: &dataFile{
 				// bad value for Content but this field doesn't exist in V1
 				// so it shouldn't get written and shouldn't be read back out
@@ -193,7 +193,7 @@ var (
 		},
 		{
 			EntryStatus: EntryStatusADDED,
-			Snapshot:    8744736658442914487,
+			Snapshot:    &entrySnapshotID,
 			Data: &dataFile{
 				Path:             "/home/iceberg/warehouse/nyc/taxis_partitioned/data/VendorID=1/00000-633-d8a4223e-dc97-45a1-86e1-adaba6e8abd7-00002.parquet",
 				Format:           ParquetFile,
@@ -325,7 +325,7 @@ var (
 	dataRecord0 = manifestEntryV1Records[0].Data.(*dataFile)
 	dataRecord1 = manifestEntryV1Records[1].Data.(*dataFile)
 
-	manifestEntryV2Records = []*manifestEntryV2{
+	manifestEntryV2Records = []*manifestEntry{
 		{
 			EntryStatus: EntryStatusADDED,
 			Snapshot:    &entrySnapshotID,
@@ -468,7 +468,8 @@ func (m *ManifestTestSuite) TestManifestEntriesV1() {
 	m.Equal(EntryStatusADDED, entry1.Status())
 	m.EqualValues(8744736658442914487, entry1.SnapshotID())
 	m.Zero(entry1.SequenceNum())
-	m.Nil(entry1.FileSequenceNum())
+	m.NotNil(entry1.FileSequenceNum())
+	m.Zero(*entry1.FileSequenceNum())
 
 	datafile := entry1.DataFile()
 	m.Equal(EntryContentData, datafile.ContentType())
@@ -816,17 +817,16 @@ func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 		2: []byte("2020-04-30 23:5:"),
 	}).SplitOffsets([]int64{4}).EqualityFieldIDs([]int{1, 1}).SortOrderID(0)
 
-	builder, err := NewManifestEntryV1Builder(
+	snapshotEntryID := int64(1)
+	entry := NewManifestEntryBuilder(
 		EntryStatusEXISTING,
-		1,
-		dataFileBuilder.Build(),
-	)
-	m.Require().NoError(err)
+		&snapshotEntryID,
+		dataFileBuilder.Build()).Build()
 
-	entry := builder.Build()
 	m.Assert().Equal(EntryStatusEXISTING, entry.Status())
 	m.Assert().EqualValues(1, entry.SnapshotID())
-	m.Assert().Equal(int64(0), entry.SequenceNum())
+	// unassigned sequence number
+	m.Assert().Equal(int64(-1), entry.SequenceNum())
 	m.Assert().Nil(entry.FileSequenceNum())
 	data := entry.DataFile()
 	m.Assert().Equal(EntryContentData, data.ContentType())
