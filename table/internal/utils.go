@@ -17,7 +17,9 @@
 
 package internal
 
-import "container/heap"
+import (
+	"container/heap"
+)
 
 // Enumerated is a quick way to represent a sequenced value that can
 // be processed in parallel and then needs to be reordered.
