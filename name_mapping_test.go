@@ -28,32 +28,32 @@ import (
 
 func makeID(v int) *int { return &v }
 
-var (
-	tableNameMappingNested = iceberg.NameMapping{
-		{FieldID: makeID(1), Names: []string{"foo"}},
-		{FieldID: makeID(2), Names: []string{"bar"}},
-		{FieldID: makeID(3), Names: []string{"baz"}},
-		{FieldID: makeID(4), Names: []string{"qux"},
-			Fields: []iceberg.MappedField{{FieldID: makeID(5), Names: []string{"element"}}}},
-		{FieldID: makeID(6), Names: []string{"quux"}, Fields: []iceberg.MappedField{
-			{FieldID: makeID(7), Names: []string{"key"}},
-			{FieldID: makeID(8), Names: []string{"value"}, Fields: []iceberg.MappedField{
-				{FieldID: makeID(9), Names: []string{"key"}},
-				{FieldID: makeID(10), Names: []string{"value"}},
-			}},
+var tableNameMappingNested = iceberg.NameMapping{
+	{FieldID: makeID(1), Names: []string{"foo"}},
+	{FieldID: makeID(2), Names: []string{"bar"}},
+	{FieldID: makeID(3), Names: []string{"baz"}},
+	{
+		FieldID: makeID(4), Names: []string{"qux"},
+		Fields: []iceberg.MappedField{{FieldID: makeID(5), Names: []string{"element"}}},
+	},
+	{FieldID: makeID(6), Names: []string{"quux"}, Fields: []iceberg.MappedField{
+		{FieldID: makeID(7), Names: []string{"key"}},
+		{FieldID: makeID(8), Names: []string{"value"}, Fields: []iceberg.MappedField{
+			{FieldID: makeID(9), Names: []string{"key"}},
+			{FieldID: makeID(10), Names: []string{"value"}},
 		}},
-		{FieldID: makeID(11), Names: []string{"location"}, Fields: []iceberg.MappedField{
-			{FieldID: makeID(12), Names: []string{"element"}, Fields: []iceberg.MappedField{
-				{FieldID: makeID(13), Names: []string{"latitude"}},
-				{FieldID: makeID(14), Names: []string{"longitude"}},
-			}},
+	}},
+	{FieldID: makeID(11), Names: []string{"location"}, Fields: []iceberg.MappedField{
+		{FieldID: makeID(12), Names: []string{"element"}, Fields: []iceberg.MappedField{
+			{FieldID: makeID(13), Names: []string{"latitude"}},
+			{FieldID: makeID(14), Names: []string{"longitude"}},
 		}},
-		{FieldID: makeID(15), Names: []string{"person"}, Fields: []iceberg.MappedField{
-			{FieldID: makeID(16), Names: []string{"name"}},
-			{FieldID: makeID(17), Names: []string{"age"}},
-		}},
-	}
-)
+	}},
+	{FieldID: makeID(15), Names: []string{"person"}, Fields: []iceberg.MappedField{
+		{FieldID: makeID(16), Names: []string{"name"}},
+		{FieldID: makeID(17), Names: []string{"age"}},
+	}},
+}
 
 func TestJsonMappedField(t *testing.T) {
 	tests := []struct {
@@ -61,10 +61,14 @@ func TestJsonMappedField(t *testing.T) {
 		str  string
 		exp  iceberg.MappedField
 	}{
-		{"simple", `{"field-id": 1, "names": ["id", "record_id"]}`,
-			iceberg.MappedField{FieldID: makeID(1), Names: []string{"id", "record_id"}}},
-		{"with null fields", `{"field-id": 1, "names": ["id", "record_id"], "fields": null}`,
-			iceberg.MappedField{FieldID: makeID(1), Names: []string{"id", "record_id"}}},
+		{
+			"simple", `{"field-id": 1, "names": ["id", "record_id"]}`,
+			iceberg.MappedField{FieldID: makeID(1), Names: []string{"id", "record_id"}},
+		},
+		{
+			"with null fields", `{"field-id": 1, "names": ["id", "record_id"], "fields": null}`,
+			iceberg.MappedField{FieldID: makeID(1), Names: []string{"id", "record_id"}},
+		},
 		{"no names", `{"field-id": 1, "names": []}`, iceberg.MappedField{FieldID: makeID(1), Names: []string{}}},
 	}
 

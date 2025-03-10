@@ -67,6 +67,7 @@ func NewSchemaWithIdentifiers(id int, identifierIDs []int, fields ...NestedField
 	s.lazyNameMapping = sync.OnceValue(func() NameMapping {
 		return createMappingFromSchema(s)
 	})
+
 	return s
 }
 
@@ -343,6 +344,7 @@ func (s *Schema) Equals(other *Schema) bool {
 // in this schema.
 func (s *Schema) HighestFieldID() int {
 	id, _ := Visit(s, findLastFieldID{})
+
 	return id
 }
 

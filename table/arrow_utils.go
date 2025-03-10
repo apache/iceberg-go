@@ -196,6 +196,7 @@ func getFieldID(f arrow.Field) *int {
 	if id > 0 {
 		return &id
 	}
+
 	return nil
 }
 
@@ -406,6 +407,7 @@ func ArrowSchemaToIceberg(sc *arrow.Schema, downcastNsTimestamp bool, nameMappin
 		if err != nil {
 			return nil, err
 		}
+
 		return iceberg.ApplyNameMapping(schemaWithoutIDs, nameMapping)
 	default:
 		return nil, fmt.Errorf("%w: arrow schema does not have field-ids and no name mapping provided",
@@ -423,6 +425,7 @@ func arrowToSchemaWithoutIDs(sc *arrow.Schema, downcastNsTimestamp bool) (*icebe
 	}
 
 	schemaWithoutIDs := iceberg.NewSchema(0, withoutIDs.Type.(*iceberg.StructType).FieldList...)
+
 	return schemaWithoutIDs, nil
 }
 
@@ -901,6 +904,7 @@ func must[T any](v T, err error) T {
 	if err != nil {
 		panic(err)
 	}
+
 	return v
 }
 
@@ -936,6 +940,7 @@ func matchMetricsMode(mode string) (metricsMode, error) {
 		if truncLen <= 0 {
 			return metricsMode{}, fmt.Errorf("invalid truncate length: %d", truncLen)
 		}
+
 		return metricsMode{typ: metricModeTruncate, len: truncLen}, nil
 	}
 
@@ -974,16 +979,19 @@ func (a *arrowStatsCollector) Struct(_ iceberg.StructType, results []func() []st
 	for _, res := range results {
 		result = append(result, res()...)
 	}
+
 	return result
 }
 
 func (a *arrowStatsCollector) Field(field iceberg.NestedField, fieldRes func() []statisticsCollector) []statisticsCollector {
 	a.fieldID = field.ID
+
 	return fieldRes()
 }
 
 func (a *arrowStatsCollector) List(list iceberg.ListType, elemResult func() []statisticsCollector) []statisticsCollector {
 	a.fieldID = list.ElementID
+
 	return elemResult()
 }
 
@@ -1043,7 +1051,8 @@ func computeStatsPlan(sc *iceberg.Schema, props iceberg.Properties) (map[int]sta
 
 	visitor := &arrowStatsCollector{
 		schema: sc, props: props,
-		defaultMode: props.Get(DefaultWriteMetricsModeKey, DefaultWriteMetricsModeDefault)}
+		defaultMode: props.Get(DefaultWriteMetricsModeKey, DefaultWriteMetricsModeDefault),
+	}
 
 	collectors, err := iceberg.PreOrderVisit(sc, visitor)
 	if err != nil {
@@ -1076,6 +1085,7 @@ func (v *id2ParquetPathVisitor) Struct(_ iceberg.StructType, results []func() []
 	for _, res := range results {
 		result = append(result, res()...)
 	}
+
 	return result
 }
 
@@ -1084,6 +1094,7 @@ func (v *id2ParquetPathVisitor) Field(field iceberg.NestedField, res func() []id
 	v.path = append(v.path, field.Name)
 	result := res()
 	v.path = v.path[:len(v.path)-1]
+
 	return result
 }
 
@@ -1092,6 +1103,7 @@ func (v *id2ParquetPathVisitor) List(listType iceberg.ListType, elemResult func(
 	v.path = append(v.path, "list")
 	result := elemResult()
 	v.path = v.path[:len(v.path)-1]
+
 	return result
 }
 
@@ -1200,12 +1212,14 @@ func dataFileStatsFromParquetMetadata(pqmeta *metadata.FileMetaData, statsCols m
 
 			if !set {
 				invalidateCol[fieldID] = struct{}{}
+
 				continue
 			}
 
 			stats, err := colChunk.Statistics()
 			if err != nil {
 				invalidateCol[fieldID] = struct{}{}
+
 				continue
 			}
 
@@ -1225,6 +1239,7 @@ func dataFileStatsFromParquetMetadata(pqmeta *metadata.FileMetaData, statsCols m
 	slices.Sort(splitOffsets)
 	maps.DeleteFunc(nullValueCounts, func(fieldID int, _ int64) bool {
 		_, ok := invalidateCol[fieldID]
+
 		return ok
 	})
 

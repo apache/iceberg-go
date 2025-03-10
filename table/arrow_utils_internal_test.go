@@ -97,7 +97,8 @@ func constructTestTable(t *testing.T, writeStats bool) (*metadata.FileMetaData, 
 	defer bldr.Release()
 
 	bldr.Field(0).(*array.StringBuilder).AppendValues([]string{
-		"zzzzzzzzzzzzzzzzzzzz", "rrrrrrrrrrrrrrrrrrrr", "", "aaaaaaaaaaaaaaaaaaaa"},
+		"zzzzzzzzzzzzzzzzzzzz", "rrrrrrrrrrrrrrrrrrrr", "", "aaaaaaaaaaaaaaaaaaaa",
+	},
 		[]bool{true, true, false, true})
 	bldr.Field(1).(*array.Float32Builder).AppendValues(
 		[]float32{3.14, float32(math.NaN()), 1.69, 100}, nil)
@@ -319,56 +320,62 @@ func TestMetricsModePairs(t *testing.T) {
 	assert.ErrorContains(t, err, "invalid truncate length: 0")
 }
 
-var (
-	tableSchemaNested = iceberg.NewSchemaWithIdentifiers(1,
-		[]int{1},
-		iceberg.NestedField{
-			ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: false},
-		iceberg.NestedField{
-			ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{
-			ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool, Required: false},
-		iceberg.NestedField{
-			ID: 4, Name: "qux", Required: true, Type: &iceberg.ListType{
-				ElementID: 5, Element: iceberg.PrimitiveTypes.String, ElementRequired: true}},
-		iceberg.NestedField{
-			ID: 6, Name: "quux",
-			Type: &iceberg.MapType{
-				KeyID:   7,
-				KeyType: iceberg.PrimitiveTypes.String,
-				ValueID: 8,
-				ValueType: &iceberg.MapType{
-					KeyID:         9,
-					KeyType:       iceberg.PrimitiveTypes.String,
-					ValueID:       10,
-					ValueType:     iceberg.PrimitiveTypes.Int32,
-					ValueRequired: true,
-				},
+var tableSchemaNested = iceberg.NewSchemaWithIdentifiers(1,
+	[]int{1},
+	iceberg.NestedField{
+		ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: false,
+	},
+	iceberg.NestedField{
+		ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	},
+	iceberg.NestedField{
+		ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool, Required: false,
+	},
+	iceberg.NestedField{
+		ID: 4, Name: "qux", Required: true, Type: &iceberg.ListType{
+			ElementID: 5, Element: iceberg.PrimitiveTypes.String, ElementRequired: true,
+		},
+	},
+	iceberg.NestedField{
+		ID: 6, Name: "quux",
+		Type: &iceberg.MapType{
+			KeyID:   7,
+			KeyType: iceberg.PrimitiveTypes.String,
+			ValueID: 8,
+			ValueType: &iceberg.MapType{
+				KeyID:         9,
+				KeyType:       iceberg.PrimitiveTypes.String,
+				ValueID:       10,
+				ValueType:     iceberg.PrimitiveTypes.Int32,
 				ValueRequired: true,
 			},
-			Required: true},
-		iceberg.NestedField{
-			ID: 11, Name: "location", Type: &iceberg.ListType{
-				ElementID: 12, Element: &iceberg.StructType{
-					FieldList: []iceberg.NestedField{
-						{ID: 13, Name: "latitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
-						{ID: 14, Name: "longitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
-					},
-				},
-				ElementRequired: true},
-			Required: true},
-		iceberg.NestedField{
-			ID:   15,
-			Name: "person",
-			Type: &iceberg.StructType{
+			ValueRequired: true,
+		},
+		Required: true,
+	},
+	iceberg.NestedField{
+		ID: 11, Name: "location", Type: &iceberg.ListType{
+			ElementID: 12, Element: &iceberg.StructType{
 				FieldList: []iceberg.NestedField{
-					{ID: 16, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
-					{ID: 17, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+					{ID: 13, Name: "latitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
+					{ID: 14, Name: "longitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
 				},
 			},
-			Required: false,
+			ElementRequired: true,
 		},
-	)
+		Required: true,
+	},
+	iceberg.NestedField{
+		ID:   15,
+		Name: "person",
+		Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 16, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
+				{ID: 17, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+			},
+		},
+		Required: false,
+	},
 )
 
 func TestStatsTypes(t *testing.T) {

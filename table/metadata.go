@@ -59,6 +59,7 @@ func generateSnapshotID() int64 {
 	if snapshotID < 0 {
 		snapshotID = -snapshotID
 	}
+
 	return snapshotID
 }
 
@@ -250,6 +251,7 @@ func (b *MetadataBuilder) CurrentSpec() iceberg.PartitionSpec {
 
 func (b *MetadataBuilder) CurrentSchema() *iceberg.Schema {
 	s, _ := b.GetSchemaByID(b.currentSchemaID)
+
 	return s
 }
 
@@ -650,6 +652,7 @@ func (b *MetadataBuilder) currentSnapshot() *Snapshot {
 	}
 
 	s, _ := b.SnapshotByID(*b.currentSnapshotID)
+
 	return s
 }
 
@@ -670,6 +673,7 @@ func (b *MetadataBuilder) NameMapping() iceberg.NameMapping {
 			return nm
 		}
 	}
+
 	return nil
 }
 
@@ -1051,6 +1055,7 @@ func (c *commonMetadata) NameMapping() iceberg.NameMapping {
 			return nm
 		}
 	}
+
 	return nil
 }
 

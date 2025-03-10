@@ -149,6 +149,7 @@ func visitParquetManifest[T any](manifest *pqarrow.SchemaManifest, visitor manif
 		res := visitManifestField(f, visitor, fieldMap)
 		results[i] = visitor.Field(f, res, fieldMap)
 	}
+
 	return visitor.Manifest(manifest, results, mapping), nil
 }
 
@@ -173,6 +174,7 @@ func visitManifestList[T any](field pqarrow.SchemaField, visitor manifestVisitor
 		elemMapping = mapping.GetField("element")
 	}
 	res := visitManifestField(elemField, visitor, elemMapping)
+
 	return visitor.List(field, res, mapping)
 }
 
@@ -184,6 +186,7 @@ func visitManifestMap[T any](field pqarrow.SchemaField, visitor manifestVisitor[
 		keyMapping = mapping.GetField("key")
 		valMapping = mapping.GetField("value")
 	}
+
 	return visitor.Map(field, visitManifestField(keyField, visitor, keyMapping), visitManifestField(valField, visitor, valMapping), mapping)
 }
 

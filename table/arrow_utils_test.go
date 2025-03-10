@@ -401,8 +401,10 @@ func TestArrowSchemaWithNameMapping(t *testing.T) {
 			{FieldID: makeID(1), Names: []string{"foo"}},
 			{FieldID: makeID(2), Names: []string{"bar"}},
 			{FieldID: makeID(3), Names: []string{"baz"}},
-			{FieldID: makeID(4), Names: []string{"qux"},
-				Fields: []iceberg.MappedField{{FieldID: makeID(5), Names: []string{"element"}}}},
+			{
+				FieldID: makeID(4), Names: []string{"qux"},
+				Fields: []iceberg.MappedField{{FieldID: makeID(5), Names: []string{"element"}}},
+			},
 			{FieldID: makeID(6), Names: []string{"quux"}, Fields: []iceberg.MappedField{
 				{FieldID: makeID(7), Names: []string{"key"}},
 				{FieldID: makeID(8), Names: []string{"value"}, Fields: []iceberg.MappedField{
