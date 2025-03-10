@@ -344,6 +344,7 @@ func (s *Schema) Equals(other *Schema) bool {
 // in this schema.
 func (s *Schema) HighestFieldID() int {
 	id, _ := Visit(s, findLastFieldID{})
+
 	return id
 }
 

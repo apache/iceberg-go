@@ -662,6 +662,7 @@ func (b *MetadataBuilder) currentSnapshot() *Snapshot {
 	}
 
 	s, _ := b.SnapshotByID(*b.currentSnapshotID)
+
 	return s
 }
 

@@ -106,6 +106,7 @@ type NameMappingVisitor[S, T any] interface {
 func VisitNameMapping[S, T any](obj NameMapping, visitor NameMappingVisitor[S, T]) (res S, err error) {
 	if obj == nil {
 		err = fmt.Errorf("%w: cannot visit nil NameMapping", ErrInvalidArgument)
+
 		return
 	}
 
@@ -273,6 +274,7 @@ func (n *nameMapProjectVisitor) Map(m MapType, mapPartner *MappedField, keyResul
 
 	keyID := n.mappedFieldID(mapPartner, "key")
 	valID := n.mappedFieldID(mapPartner, "value")
+
 	return NestedField{
 		Type: &MapType{
 			KeyID:         keyID,
@@ -321,6 +323,7 @@ func (createMapping) Struct(st StructType, result [][]MappedField) []MappedField
 			Fields:  result[i],
 		}
 	}
+
 	return output
 }
 
@@ -357,5 +360,6 @@ func (createMapping) Primitive(_ PrimitiveType) []MappedField {
 
 func createMappingFromSchema(schema *Schema) NameMapping {
 	result, _ := Visit(schema, createMapping{})
+
 	return NameMapping(result)
 }
