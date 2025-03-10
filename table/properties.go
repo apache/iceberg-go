@@ -31,13 +31,6 @@ const (
 	DefaultWriteMetricsModeKey     = "write.metadata.metrics.default"
 	DefaultWriteMetricsModeDefault = "truncate(16)"
 
-	WriteDataPathKey                        = "write.data.path"
-	WriteMetadataPathKey                    = "write.metadata.path"
-	WriteObjectStorePartitionedPathsKey     = "write.object-storage.partitioned-paths"
-	WriteObjectStorePartitionedPathsDefault = true
-	ObjectStoreEnabledKey                   = "write.object-storage.enabled"
-	ObjectStoreEnabledDefault               = false
-
 	ManifestMergeEnabledKey     = "commit.manifest-merge.enabled"
 	ManifestMergeEnabledDefault = false
 
