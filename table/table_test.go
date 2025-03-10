@@ -367,6 +367,123 @@ func (t *TableWritingTestSuite) TestAddFilesFailsSchemaMismatch() {
 `)
 }
 
+func (t *TableWritingTestSuite) TestAddFilesPartitionedTable() {
+	ident := table.Identifier{"default", "partitioned_table_v" + strconv.Itoa(t.formatVersion)}
+	spec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{SourceID: 4, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "baz"},
+		iceberg.PartitionField{SourceID: 10, FieldID: 1001, Transform: iceberg.MonthTransform{}, Name: "qux_month"})
+
+	tbl := t.createTable(ident, t.formatVersion,
+		spec, t.tableSchema)
+
+	t.NotNil(tbl)
+
+	dates := []string{
+		"2024-03-07", "2024-03-08", "2024-03-16", "2024-03-18", "2024-03-19",
+	}
+
+	files := make([]string, 0)
+	for i := range 5 {
+		filePath := fmt.Sprintf("%s/partitioned_table/test-%d.parquet", t.location, i)
+		table, err := array.TableFromJSON(memory.DefaultAllocator, t.arrSchema, []string{
+			`[{"foo": true, "bar": "bar_string", "baz": 123, "qux": "` + dates[i] + `"}]`,
+		})
+		t.Require().NoError(err)
+		defer table.Release()
+
+		t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePath, table)
+		files = append(files, filePath)
+	}
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddFiles(files, nil, false))
+
+	stagedTbl, err := tx.StagedTable()
+	t.Require().NoError(err)
+	t.NotNil(stagedTbl.NameMapping())
+
+	t.Equal(stagedTbl.CurrentSnapshot().Summary,
+		&table.Summary{Operation: table.OpAppend,
+			Properties: iceberg.Properties{
+				"added-data-files":        "5",
+				"added-files-size":        "3660",
+				"added-records":           "5",
+				"changed-partition-count": "1",
+				"total-data-files":        "5",
+				"total-delete-files":      "0",
+				"total-equality-deletes":  "0",
+				"total-files-size":        "3660",
+				"total-position-deletes":  "0",
+				"total-records":           "5",
+			}})
+
+	m, err := stagedTbl.CurrentSnapshot().Manifests(tbl.FS())
+	t.Require().NoError(err)
+
+	for _, manifest := range m {
+		entries, err := manifest.FetchEntries(tbl.FS(), false)
+		t.Require().NoError(err)
+
+		for _, e := range entries {
+			t.Equal(map[string]any{
+				"baz": 123, "qux_month": 650}, e.DataFile().Partition())
+		}
+	}
+}
+
+func (t *TableWritingTestSuite) TestAddFilesToBucketPartitionedTableFails() {
+	ident := table.Identifier{"default", "partitioned_table_bucket_fails_v" + strconv.Itoa(t.formatVersion)}
+	spec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{SourceID: 4, FieldID: 1000, Transform: iceberg.BucketTransform{NumBuckets: 3}, Name: "baz_bucket_3"})
+
+	tbl := t.createTable(ident, t.formatVersion, spec, t.tableSchema)
+	files := make([]string, 0)
+	for i := range 5 {
+		filePath := fmt.Sprintf("%s/partitioned_table/test-%d.parquet", t.location, i)
+		table, err := array.TableFromJSON(memory.DefaultAllocator, t.arrSchema, []string{
+			`[{"foo": true, "bar": "bar_string", "baz": ` + strconv.Itoa(i) + `, "qux": "2024-03-07"}]`,
+		})
+		t.Require().NoError(err)
+		defer table.Release()
+
+		t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePath, table)
+		files = append(files, filePath)
+	}
+
+	tx := tbl.NewTransaction()
+	err := tx.AddFiles(files, nil, false)
+	t.Error(err)
+	t.ErrorContains(err, "cannot infer partition value from parquet metadata for a non-linear partition field: baz_bucket_3 with transform bucket[3]")
+}
+
+func (t *TableWritingTestSuite) TestAddFilesToPartitionedTableFailsLowerAndUpperMismatch() {
+	ident := table.Identifier{"default", "partitioned_table_bucket_fails_v" + strconv.Itoa(t.formatVersion)}
+	spec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{SourceID: 4, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "baz"})
+
+	tbl := t.createTable(ident, t.formatVersion, spec, t.tableSchema)
+	files := make([]string, 0)
+	for i := range 5 {
+		filePath := fmt.Sprintf("%s/partitioned_table/test-%d.parquet", t.location, i)
+		table, err := array.TableFromJSON(memory.DefaultAllocator, t.arrSchema, []string{
+			`[
+				{"foo": true, "bar": "bar_string", "baz": 123, "qux": "2024-03-07"},
+				{"foo": true, "bar": "bar_string", "baz": 124, "qux": "2024-03-07"}
+			]`,
+		})
+		t.Require().NoError(err)
+		defer table.Release()
+
+		t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePath, table)
+		files = append(files, filePath)
+	}
+
+	tx := tbl.NewTransaction()
+	err := tx.AddFiles(files, nil, false)
+	t.Error(err)
+	t.ErrorContains(err, "cannot infer partition value from parquet metadata as there is more than one value for partition field: baz. (low: 123, high: 124)")
+}
+
 func TestTableWriting(t *testing.T) {
 	suite.Run(t, &TableWritingTestSuite{formatVersion: 1})
 	suite.Run(t, &TableWritingTestSuite{formatVersion: 2})
