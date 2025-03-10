@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"iter"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -65,4 +66,14 @@ type FileReader interface {
 	GetRecords(ctx context.Context, cols []int, tester any) (array.RecordReader, error)
 	// ReadTable reads the entire file and returns it as an arrow table.
 	ReadTable(context.Context) (arrow.Table, error)
+}
+
+type TableInfo struct {
+	Schema        *iceberg.Schema
+	Spec          iceberg.PartitionSpec
+	DefaultSpecID int
+}
+
+type WriterSource interface {
+	FilesToDataFiles(fileIO iceio.IO, info TableInfo, paths iter.Seq[string]) iter.Seq2[iceberg.DataFile, error]
 }
