@@ -167,7 +167,8 @@ func (t *TableWritingTestSuite) SetupSuite() {
 		{Name: "foo", Type: arrow.FixedWidthTypes.Boolean, Nullable: true},
 		{Name: "bar", Type: arrow.BinaryTypes.String, Nullable: true},
 		{Name: "baz", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
-		{Name: "qux", Type: arrow.PrimitiveTypes.Date32, Nullable: true}}, nil)
+		{Name: "qux", Type: arrow.PrimitiveTypes.Date32, Nullable: true},
+	}, nil)
 
 	var err error
 	t.arrTbl, err = array.TableFromJSON(mem, t.arrSchema, []string{
@@ -176,14 +177,22 @@ func (t *TableWritingTestSuite) SetupSuite() {
 	t.Require().NoError(err)
 
 	t.arrSchemaWithIDs = arrow.NewSchema([]arrow.Field{
-		{Name: "foo", Type: arrow.FixedWidthTypes.Boolean,
-			Metadata: arrow.MetadataFrom(map[string]string{"PARQUET:field_id": "1"})},
-		{Name: "bar", Type: arrow.BinaryTypes.String,
-			Metadata: arrow.MetadataFrom(map[string]string{"PARQUET:field_id": "2"})},
-		{Name: "baz", Type: arrow.PrimitiveTypes.Int32,
-			Metadata: arrow.MetadataFrom(map[string]string{"PARQUET:field_id": "3"})},
-		{Name: "qux", Type: arrow.PrimitiveTypes.Date32,
-			Metadata: arrow.MetadataFrom(map[string]string{"PARQUET:field_id": "4"})},
+		{
+			Name: "foo", Type: arrow.FixedWidthTypes.Boolean,
+			Metadata: arrow.MetadataFrom(map[string]string{"PARQUET:field_id": "1"}),
+		},
+		{
+			Name: "bar", Type: arrow.BinaryTypes.String,
+			Metadata: arrow.MetadataFrom(map[string]string{"PARQUET:field_id": "2"}),
+		},
+		{
+			Name: "baz", Type: arrow.PrimitiveTypes.Int32,
+			Metadata: arrow.MetadataFrom(map[string]string{"PARQUET:field_id": "3"}),
+		},
+		{
+			Name: "qux", Type: arrow.PrimitiveTypes.Date32,
+			Metadata: arrow.MetadataFrom(map[string]string{"PARQUET:field_id": "4"}),
+		},
 	}, nil)
 
 	t.arrTblWithIDs, err = array.TableFromJSON(mem, t.arrSchemaWithIDs, []string{
@@ -195,7 +204,8 @@ func (t *TableWritingTestSuite) SetupSuite() {
 		{Name: "foo", Type: arrow.FixedWidthTypes.Boolean, Nullable: true},
 		{Name: "baz", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
 		{Name: "qux", Type: arrow.PrimitiveTypes.Date32, Nullable: true},
-		{Name: "quux", Type: arrow.PrimitiveTypes.Int32, Nullable: true}}, nil)
+		{Name: "quux", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+	}, nil)
 
 	t.arrTblUpdated, err = array.TableFromJSON(mem, t.arrSchemaUpdated, []string{
 		`[{"foo": true, "baz": 123, "qux": "2024-03-07", "quux": 234}]`,
@@ -256,7 +266,8 @@ func (t *TableWritingTestSuite) TestAddFilesUnpartitioned() {
 	t.NotNil(stagedTbl.NameMapping())
 
 	t.Equal(stagedTbl.CurrentSnapshot().Summary,
-		&table.Summary{Operation: table.OpAppend,
+		&table.Summary{
+			Operation: table.OpAppend,
 			Properties: iceberg.Properties{
 				"added-data-files":       "5",
 				"added-files-size":       "3660",
@@ -267,7 +278,8 @@ func (t *TableWritingTestSuite) TestAddFilesUnpartitioned() {
 				"total-files-size":       "3660",
 				"total-position-deletes": "0",
 				"total-records":          "5",
-			}})
+			},
+		})
 
 	contents, err := stagedTbl.Scan().ToArrowTable(context.Background())
 	t.Require().NoError(err)
@@ -290,7 +302,7 @@ func (t *TableWritingTestSuite) TestAddFilesFileNotFound() {
 		files = append(files, filePath)
 	}
 
-	files = append(files, fmt.Sprintf("%s/unpartitioned_file_not_found/unknown.parquet", t.location))
+	files = append(files, t.location+"/unpartitioned_file_not_found/unknown.parquet")
 	tx := tbl.NewTransaction()
 	err := tx.AddFiles(files, nil, false)
 	t.Error(err)

@@ -47,6 +47,7 @@ func (m *manifestMergeManager) groupBySpec(manifests []iceberg.ManifestFile) map
 		group := groups[specid]
 		groups[specid] = append(group, m)
 	}
+
 	return groups
 }
 
@@ -108,6 +109,7 @@ func (m *manifestMergeManager) mergeGroup(firstManifest iceberg.ManifestFile, sp
 			}
 			output = append(output, created)
 		}
+
 		return output, nil
 	}
 
@@ -118,6 +120,7 @@ func (m *manifestMergeManager) mergeGroup(firstManifest iceberg.ManifestFile, sp
 		g.Go(func() error {
 			var err error
 			binResults[i], err = mergeBin(bin)
+
 			return err
 		})
 	}
@@ -169,6 +172,7 @@ func newManifestListFileName(snapshotID int64, attempt int, commit uuid.UUID) st
 func newFastAppendFilesProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties) *snapshotProducer {
 	prod := createSnapshotProducer(op, txn, fs, commitUUID, snapshotProps)
 	prod.producerImpl = &fastAppendFiles{base: prod}
+
 	return prod
 }
 
@@ -199,6 +203,7 @@ func (fa *fastAppendFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 			}
 		}
 	}
+
 	return existing, nil
 }
 
@@ -303,16 +308,19 @@ func (sp *snapshotProducer) spec(id int) iceberg.PartitionSpec {
 	if spec, _ := sp.txn.meta.GetSpecByID(id); spec != nil {
 		return *spec
 	}
+
 	return iceberg.NewPartitionSpec()
 }
 
 func (sp *snapshotProducer) appendDataFile(df iceberg.DataFile) *snapshotProducer {
 	sp.addedFiles = append(sp.addedFiles, df)
+
 	return sp
 }
 
 func (sp *snapshotProducer) deleteDataFile(df iceberg.DataFile) *snapshotProducer {
 	sp.deletedFiles[df.FilePath()] = df
+
 	return sp
 }
 
@@ -328,6 +336,7 @@ func (sp *snapshotProducer) newManifestWriter(spec iceberg.PartitionSpec) (*iceb
 		sp.txn.meta.CurrentSchema(), sp.snapshotID)
 	if err != nil {
 		defer out.Close()
+
 		return nil, "", nil, err
 	}
 
@@ -356,7 +365,7 @@ func (sp *snapshotProducer) fetchManifestEntry(m iceberg.ManifestFile, discardDe
 func (sp *snapshotProducer) manifests() ([]iceberg.ManifestFile, error) {
 	var g errgroup.Group
 
-	var results = [...][]iceberg.ManifestFile{nil, nil, nil}
+	results := [...][]iceberg.ManifestFile{nil, nil, nil}
 
 	if len(sp.addedFiles) > 0 {
 		g.Go(func() error {
@@ -376,7 +385,7 @@ func (sp *snapshotProducer) manifests() ([]iceberg.ManifestFile, error) {
 			}
 
 			for _, df := range sp.addedFiles {
-				err := wr.Add(iceberg.NewManifestEntry(iceberg.EntryStatusADDED, sp.snapshotID,
+				err := wr.Add(iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &sp.snapshotID,
 					nil, nil, df))
 				if err != nil {
 					return err
@@ -387,6 +396,7 @@ func (sp *snapshotProducer) manifests() ([]iceberg.ManifestFile, error) {
 			if err == nil {
 				results[0] = append(results[0], mf)
 			}
+
 			return err
 		})
 	}
@@ -420,6 +430,7 @@ func (sp *snapshotProducer) manifests() ([]iceberg.ManifestFile, error) {
 				}
 				results[1] = append(results[1], mf)
 			}
+
 			return nil
 		})
 	}
@@ -430,6 +441,7 @@ func (sp *snapshotProducer) manifests() ([]iceberg.ManifestFile, error) {
 			return err
 		}
 		results[2] = m
+
 		return nil
 	})
 
@@ -438,6 +450,7 @@ func (sp *snapshotProducer) manifests() ([]iceberg.ManifestFile, error) {
 	}
 
 	manifests := slices.Concat(results[0], results[1], results[2])
+
 	return sp.processManifests(manifests)
 }
 
@@ -472,6 +485,7 @@ func (sp *snapshotProducer) summary(props iceberg.Properties) (Summary, error) {
 
 	summaryProps := ssc.build()
 	maps.Copy(summaryProps, props)
+
 	return updateSnapshotSummaries(Summary{
 		Operation:  sp.op,
 		Properties: summaryProps,
@@ -542,9 +556,11 @@ func truncateUpperBoundText(s string, trunc int) string {
 		next := result[i] + 1
 		if utf8.ValidRune(next) {
 			result[i] = next
+
 			return string(result)
 		}
 	}
+
 	return ""
 }
 
@@ -557,6 +573,7 @@ func truncateUpperBoundBinary(val []byte, trunc int) []byte {
 	for i := len(result) - 1; i >= 0; i-- {
 		if result[i] < 255 {
 			result[i]++
+
 			return result
 		}
 	}
