@@ -1345,6 +1345,7 @@ func (s *statsAggregator[T]) maxAsBytes() ([]byte, error) {
 		if len(result) > 0 {
 			return s.toBytes(iceberg.BinaryLiteral(result))
 		}
+
 		return nil, nil
 	default:
 		return nil, fmt.Errorf("%s cannot be truncated for upper bound", s.primitiveType)
