@@ -502,7 +502,7 @@ func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]M
 
 	fieldNameToID, fieldIDToLogicalType := getFieldIDMap(sc)
 	isFallback := false
-	if string(metadata["format-version"]) != "2" {
+	if string(metadata["format-version"]) == "1" {
 		for _, f := range sc.(*avro.RecordSchema).Fields() {
 			if f.Name() == "snapshot_id" {
 				if f.Type().Type() != avro.Union {
