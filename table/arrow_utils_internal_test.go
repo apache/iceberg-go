@@ -343,8 +343,14 @@ func (suite *FileStatsMetricsSuite) TestColumnMetricsMode() {
 func (suite *FileStatsMetricsSuite) TestReadMissingStats() {
 	df := suite.getDataFile(nil, []string{"strings"})
 
-	suite.Len(df.ValueCounts(), 1)
+	stringColIdx := 1
+	suite.Len(df.LowerBoundValues(), 1)
+	suite.Equal([]byte("aaaaaaaaaaaaaaaa"), df.LowerBoundValues()[stringColIdx])
+	suite.Len(df.UpperBoundValues(), 1)
+	suite.Equal([]byte("zzzzzzzzzzzzzzz{"), df.UpperBoundValues()[stringColIdx])
+
 	suite.Len(df.NullValueCounts(), 1)
+	suite.EqualValues(1, df.NullValueCounts()[stringColIdx])
 }
 
 func TestFileMetrics(t *testing.T) {
