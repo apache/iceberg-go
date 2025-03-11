@@ -508,5 +508,6 @@ func partitionRecordValue(field iceberg.PartitionField, val iceberg.Literal, sch
 
 	ret.Val = out
 	ret.Valid = true
+
 	return ret, nil
 }

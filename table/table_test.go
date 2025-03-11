@@ -218,17 +218,21 @@ func (t *TableWritingTestSuite) SetupSuite() {
 
 	t.tableSchemaPromotedTypes = iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "long", Type: iceberg.PrimitiveTypes.Int64},
-		iceberg.NestedField{ID: 2, Name: "list",
+		iceberg.NestedField{
+			ID: 2, Name: "list",
 			Type:     &iceberg.ListType{ElementID: 4, Element: iceberg.PrimitiveTypes.Int64},
-			Required: true},
-		iceberg.NestedField{ID: 3, Name: "map",
+			Required: true,
+		},
+		iceberg.NestedField{
+			ID: 3, Name: "map",
 			Type: &iceberg.MapType{
 				KeyID:     5,
 				KeyType:   iceberg.PrimitiveTypes.String,
 				ValueID:   6,
 				ValueType: iceberg.PrimitiveTypes.Int64,
 			},
-			Required: true},
+			Required: true,
+		},
 		iceberg.NestedField{ID: 7, Name: "double", Type: iceberg.PrimitiveTypes.Float64})
 	// arrow-go needs to implement cast_extension for [16]byte -> uuid
 	// iceberg.NestedField{ID: 8, Name: "uuid", Type: iceberg.PrimitiveTypes.UUID})
@@ -237,7 +241,8 @@ func (t *TableWritingTestSuite) SetupSuite() {
 		{Name: "long", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
 		{Name: "list", Type: arrow.ListOf(arrow.PrimitiveTypes.Int32), Nullable: false},
 		{Name: "map", Type: arrow.MapOf(arrow.BinaryTypes.String, arrow.PrimitiveTypes.Int32), Nullable: false},
-		{Name: "double", Type: arrow.PrimitiveTypes.Float32, Nullable: true}}, nil)
+		{Name: "double", Type: arrow.PrimitiveTypes.Float32, Nullable: true},
+	}, nil)
 	// arrow-go needs to implement cast_extension for [16]byte -> uuid
 	// {Name: "uuid", Type: &arrow.FixedSizeBinaryType{ByteWidth: 16}, Nullable: true}}, nil)
 
@@ -245,7 +250,8 @@ func (t *TableWritingTestSuite) SetupSuite() {
 		`[
 			{"long": 1, "list": [1, 1], "map": [{"key": "a", "value": 1}], "double": 1.1, "uuid": "cVp4705TQImb+TrQ7pv1RQ=="},
 			{"long": 9, "list": [2, 2], "map": [{"key": "b", "value": 2}], "double": 9.2, "uuid": "l12HVF5KREqWl/R25AMM3g=="}
-		]`})
+		]`,
+	})
 	t.Require().NoError(err)
 }
 
@@ -439,7 +445,8 @@ func (t *TableWritingTestSuite) TestAddFilesPartitionedTable() {
 	t.NotNil(stagedTbl.NameMapping())
 
 	t.Equal(stagedTbl.CurrentSnapshot().Summary,
-		&table.Summary{Operation: table.OpAppend,
+		&table.Summary{
+			Operation: table.OpAppend,
 			Properties: iceberg.Properties{
 				"added-data-files":        "5",
 				"added-files-size":        "3660",
@@ -451,7 +458,8 @@ func (t *TableWritingTestSuite) TestAddFilesPartitionedTable() {
 				"total-files-size":        "3660",
 				"total-position-deletes":  "0",
 				"total-records":           "5",
-			}})
+			},
+		})
 
 	m, err := stagedTbl.CurrentSnapshot().Manifests(tbl.FS())
 	t.Require().NoError(err)
@@ -462,7 +470,8 @@ func (t *TableWritingTestSuite) TestAddFilesPartitionedTable() {
 
 		for _, e := range entries {
 			t.Equal(map[string]any{
-				"baz": 123, "qux_month": 650}, e.DataFile().Partition())
+				"baz": 123, "qux_month": 650,
+			}, e.DataFile().Partition())
 		}
 	}
 }
@@ -526,9 +535,11 @@ func (t *TableWritingTestSuite) TestAddFilesWithLargeAndRegular() {
 		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: true})
 
 	arrowSchema := arrow.NewSchema([]arrow.Field{
-		{Name: "foo", Type: arrow.BinaryTypes.String}}, nil)
+		{Name: "foo", Type: arrow.BinaryTypes.String},
+	}, nil)
 	arrowSchemaLarge := arrow.NewSchema([]arrow.Field{
-		{Name: "foo", Type: arrow.BinaryTypes.LargeString}}, nil)
+		{Name: "foo", Type: arrow.BinaryTypes.LargeString},
+	}, nil)
 
 	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, ice)
 	t.Require().NotNil(tbl)
@@ -537,7 +548,8 @@ func (t *TableWritingTestSuite) TestAddFilesWithLargeAndRegular() {
 	filePathLarge := fmt.Sprintf("%s/unpartitioned_with_large_types/v%d/test-1.parquet", t.location, t.formatVersion)
 
 	arrTable, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
-		`[{"foo": "bar"}]`})
+		`[{"foo": "bar"}]`,
+	})
 	t.Require().NoError(err)
 	defer arrTable.Release()
 
@@ -587,7 +599,8 @@ func (t *TableWritingTestSuite) TestAddFilesValidUpcast() {
 		{Name: "long", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
 		{Name: "list", Type: arrow.ListOf(arrow.PrimitiveTypes.Int64), Nullable: false},
 		{Name: "map", Type: arrow.MapOf(arrow.BinaryTypes.String, arrow.PrimitiveTypes.Int64), Nullable: false},
-		{Name: "double", Type: arrow.PrimitiveTypes.Float64, Nullable: true}}, nil)
+		{Name: "double", Type: arrow.PrimitiveTypes.Float64, Nullable: true},
+	}, nil)
 	t.True(expectedSchema.Equal(written.Schema()))
 }
 
@@ -606,6 +619,7 @@ func dropColFromTable(idx int, tbl arrow.Table) arrow.Table {
 		}
 		cols = append(cols, *tbl.Column(i))
 	}
+
 	return array.NewTable(arrow.NewSchema(fields, nil), cols, tbl.NumRows())
 }
 
@@ -633,7 +647,8 @@ func (t *TableWritingTestSuite) TestAddFilesSubsetOfSchema() {
 		{Name: "foo", Type: arrow.FixedWidthTypes.Boolean, Nullable: true},
 		{Name: "bar", Type: arrow.BinaryTypes.String, Nullable: true},
 		{Name: "baz", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
-		{Name: "qux", Type: arrow.PrimitiveTypes.Date32, Nullable: true}}, nil)
+		{Name: "qux", Type: arrow.PrimitiveTypes.Date32, Nullable: true},
+	}, nil)
 	t.True(expectedSchema.Equal(written.Schema()), expectedSchema.String(), written.Schema().String())
 
 	result, err := array.TableFromJSON(memory.DefaultAllocator, t.arrSchema, []string{

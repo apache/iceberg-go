@@ -102,6 +102,7 @@ func (t Table) AllManifests() iter.Seq2[iceberg.ManifestFile, error] {
 			}
 
 			ch <- list{Index: i, Value: manifests, Last: i == n-1}
+
 			return nil
 		})
 	}
@@ -149,6 +150,7 @@ func (t Table) AllManifests() iter.Seq2[iceberg.ManifestFile, error] {
 			case err := <-errch:
 				if err != nil {
 					yield(nil, err)
+
 					return
 				}
 			case next, ok := <-results:

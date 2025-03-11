@@ -312,6 +312,7 @@ func (s Snapshot) files(fio iceio.IO, fileFilter set[iceberg.ManifestEntryConten
 		manifests, err := s.Manifests(fio)
 		if err != nil {
 			yield(nil, err)
+
 			return
 		}
 
@@ -319,6 +320,7 @@ func (s Snapshot) files(fio iceio.IO, fileFilter set[iceberg.ManifestEntryConten
 			dataFiles, err := m.FetchEntries(fio, false)
 			if err != nil {
 				yield(nil, err)
+
 				return
 			}
 
