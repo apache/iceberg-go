@@ -20,7 +20,7 @@ package table
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"slices"
 	"sync"
 	"time"
@@ -45,6 +45,7 @@ func checkSchemaCompat(requested, provided *iceberg.Schema) error {
 	}
 
 	_, compat := iceberg.PreOrderVisit(requested, sc)
+
 	return compat
 }
 
@@ -54,6 +55,7 @@ func checkArrowSchemaCompat(requested *iceberg.Schema, provided *arrow.Schema, d
 	if err != nil {
 		return err
 	}
+
 	return checkSchemaCompat(requested, providedSchema)
 }
 
@@ -63,22 +65,26 @@ func (sc *schemaCompatVisitor) isFieldCompat(lhs iceberg.NestedField) bool {
 		if lhs.Required {
 			sc.errorData = append(sc.errorData,
 				[]string{"❌", lhs.String(), "missing"})
+
 			return false
 		}
 		sc.errorData = append(sc.errorData,
 			[]string{"✅", lhs.String(), "missing"})
+
 		return true
 	}
 
 	if lhs.Required && !rhs.Required {
 		sc.errorData = append(sc.errorData,
 			[]string{"❌", lhs.String(), rhs.String()})
+
 		return false
 	}
 
 	if lhs.Type.Equals(rhs.Type) {
 		sc.errorData = append(sc.errorData,
 			[]string{"✅", lhs.String(), rhs.String()})
+
 		return true
 	}
 
@@ -89,18 +95,21 @@ func (sc *schemaCompatVisitor) isFieldCompat(lhs iceberg.NestedField) bool {
 		if rhs, ok := rhs.Type.(*iceberg.StructType); ok {
 			sc.errorData = append(sc.errorData,
 				[]string{"✅", lhs.String(), rhs.String()})
+
 			return true
 		}
 	case *iceberg.ListType:
 		if rhs, ok := rhs.Type.(*iceberg.ListType); ok {
 			sc.errorData = append(sc.errorData,
 				[]string{"✅", lhs.String(), rhs.String()})
+
 			return true
 		}
 	case *iceberg.MapType:
 		if rhs, ok := rhs.Type.(*iceberg.MapType); ok {
 			sc.errorData = append(sc.errorData,
 				[]string{"✅", lhs.String(), rhs.String()})
+
 			return true
 		}
 	}
@@ -108,11 +117,13 @@ func (sc *schemaCompatVisitor) isFieldCompat(lhs iceberg.NestedField) bool {
 	if _, err := iceberg.PromoteType(rhs.Type, lhs.Type); err != nil {
 		sc.errorData = append(sc.errorData,
 			[]string{"❌", lhs.String(), rhs.String()})
+
 		return false
 	}
 
 	sc.errorData = append(sc.errorData,
 		[]string{"✅", lhs.String(), rhs.String()})
+
 	return true
 }
 
@@ -183,7 +194,7 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 	defer t.mx.Unlock()
 
 	if t.committed {
-		return fmt.Errorf("transaction has already been committed")
+		return errors.New("transaction has already been committed")
 	}
 
 	current, err := t.meta.Build()
@@ -239,6 +250,7 @@ func (t *Transaction) appendSnapshotProducer(props iceberg.Properties) *snapshot
 	if manifestMerge {
 		return updateSnapshot.mergeAppend()
 	}
+
 	return updateSnapshot.fastAppend()
 }
 
@@ -246,6 +258,7 @@ func (t *Transaction) SetProperties(props iceberg.Properties) error {
 	if len(props) > 0 {
 		return t.apply([]Update{NewSetPropertiesUpdate(props)}, nil)
 	}
+
 	return nil
 }
 
@@ -255,6 +268,7 @@ func (t *Transaction) Append(rdr array.RecordReader, snapshotProps iceberg.Prope
 	}
 
 	t.appendSnapshotProducer(snapshotProps)
+
 	return nil
 }
 
@@ -265,7 +279,7 @@ func (t *Transaction) AddFiles(files []string, snapshotProps iceberg.Properties,
 	}
 
 	if len(set) != len(files) {
-		return fmt.Errorf("file paths must be unique for AppendDataFiles")
+		return errors.New("file paths must be unique for AppendDataFiles")
 	}
 
 	if checkDuplicates {
@@ -317,14 +331,16 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 	defer t.mx.Unlock()
 
 	if t.committed {
-		return nil, fmt.Errorf("transaction has already been committed")
+		return nil, errors.New("transaction has already been committed")
 	}
-	
+
 	t.committed = true
 
 	if len(t.meta.updates) > 0 {
 		t.reqs = append(t.reqs, AssertTableUUID(t.meta.uuid))
+
 		return t.tbl.doCommit(ctx, t.meta.updates, t.reqs)
 	}
+
 	return t.tbl, nil
 }

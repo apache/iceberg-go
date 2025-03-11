@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"maps"
@@ -972,11 +973,13 @@ type wrappedStringStats struct {
 
 func (w *wrappedStringStats) Min() string {
 	data := w.ByteArrayStatistics.Min()
+
 	return unsafe.String(unsafe.SliceData(data), len(data))
 }
 
 func (w *wrappedStringStats) Max() string {
 	data := w.ByteArrayStatistics.Max()
+
 	return unsafe.String(unsafe.SliceData(data), len(data))
 }
 
@@ -989,6 +992,7 @@ func (w *wrappedUUIDStats) Min() uuid.UUID {
 	if err != nil {
 		panic(err)
 	}
+
 	return uid
 }
 
@@ -997,6 +1001,7 @@ func (w *wrappedUUIDStats) Max() uuid.UUID {
 	if err != nil {
 		panic(err)
 	}
+
 	return uid
 }
 
@@ -1029,6 +1034,7 @@ type statsAggregator[T iceberg.LiteralType] struct {
 
 func newStatAgg[T iceberg.LiteralType](typ iceberg.PrimitiveType, trunc int) statsAgg {
 	var z T
+
 	return &statsAggregator[T]{
 		primitiveType: typ,
 		truncLen:      trunc,
@@ -1063,11 +1069,13 @@ func createStatsAgg(typ iceberg.PrimitiveType, physicalTypeStr string, truncLen 
 		if typ.Equals(iceberg.PrimitiveTypes.UUID) {
 			return newStatAgg[uuid.UUID](typ, truncLen), nil
 		}
+
 		return newStatAgg[[]byte](typ, truncLen), nil
 	case "BYTE_ARRAY":
 		if typ.Equals(iceberg.PrimitiveTypes.String) {
 			return newStatAgg[string](typ, truncLen), nil
 		}
+
 		return newStatAgg[[]byte](typ, truncLen), nil
 	default:
 		return nil, fmt.Errorf("unsupported physical type: %s", physicalTypeStr)
@@ -1134,7 +1142,7 @@ func (s *statsAggregator[T]) maxAsBytes() ([]byte, error) {
 	switch s.primitiveType.(type) {
 	case iceberg.StringType:
 		if !s.curMax.Type().Equals(s.primitiveType) {
-			return nil, fmt.Errorf("expected current max to be a string")
+			return nil, errors.New("expected current max to be a string")
 		}
 
 		curMax := any(s.curMax.Value()).(string)
@@ -1142,10 +1150,11 @@ func (s *statsAggregator[T]) maxAsBytes() ([]byte, error) {
 		if result != "" {
 			return s.toBytes(iceberg.StringLiteral(result))
 		}
+
 		return nil, nil
 	case iceberg.BinaryType:
 		if !s.curMax.Type().Equals(s.primitiveType) {
-			return nil, fmt.Errorf("expected current max to be a binary")
+			return nil, errors.New("expected current max to be a binary")
 		}
 
 		curMax := any(s.curMax.Value()).([]byte)
@@ -1153,6 +1162,7 @@ func (s *statsAggregator[T]) maxAsBytes() ([]byte, error) {
 		if len(result) > 0 {
 			return s.toBytes(iceberg.BinaryLiteral(result))
 		}
+
 		return nil, nil
 	default:
 		return nil, fmt.Errorf("%s cannot be truncated for upper bound", s.primitiveType)
@@ -1545,6 +1555,7 @@ func dataFileStatsFromParquetMetadata(pqmeta *metadata.FileMetaData, statsCols m
 	})
 	maps.DeleteFunc(colAggs, func(fieldID int, _ statsAgg) bool {
 		_, ok := invalidateCol[fieldID]
+
 		return ok
 	})
 
@@ -1585,6 +1596,7 @@ func parquetFilesToDataFiles(fileIO iceio.IO, meta *MetadataBuilder, paths iter.
 			if hasIDs := must(VisitArrowSchema(arrSchema, hasIDs{})); hasIDs {
 				yield(nil, fmt.Errorf("%w: cannot add file %s because it has field-ids. add-files only supports the addition of files without field_ids",
 					iceberg.ErrNotImplemented, filePath))
+
 				return
 			}
 
