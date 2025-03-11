@@ -512,7 +512,7 @@ func (b *boundRef[T]) evalToLiteral(st structLike) Optional[Literal] {
 		return Optional[Literal]{}
 	}
 
-	lit := NewLiteral[T](v.Val)
+	lit := NewLiteral(v.Val)
 	if !lit.Type().Equals(b.field.Type) {
 		lit, _ = lit.To(b.field.Type)
 	}

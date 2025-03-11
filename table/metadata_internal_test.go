@@ -169,7 +169,7 @@ func TestMetadataV2Parsing(t *testing.T) {
 	data := meta.(*metadataV2)
 	assert.Equal(t, uuid.MustParse("9c12d441-03fe-4693-9a96-a0705ddf69c1"), data.UUID)
 	assert.Equal(t, "s3://bucket/test/location", data.Location())
-	assert.Equal(t, int64(34), data.LastSequenceNumber)
+	assert.Equal(t, int64(34), data.LastSeqNum)
 	assert.Equal(t, int64(1602638573590), data.LastUpdatedMS)
 	assert.Equal(t, 3, data.LastColumnId)
 	assert.Equal(t, 0, data.SchemaList[0].ID)

@@ -46,7 +46,8 @@ type Schema struct {
 	nameToIDLower atomic.Pointer[map[string]int]
 	idToAccessor  atomic.Pointer[map[int]accessor]
 
-	lazyIDToParent func() (map[int]int, error)
+	lazyIDToParent  func() (map[int]int, error)
+	lazyNameMapping func() NameMapping
 }
 
 // NewSchema constructs a new schema with the provided ID
@@ -62,6 +63,9 @@ func NewSchemaWithIdentifiers(id int, identifierIDs []int, fields ...NestedField
 	s := &Schema{ID: id, fields: fields, IdentifierFieldIDs: identifierIDs}
 	s.lazyIDToParent = sync.OnceValues(func() (map[int]int, error) {
 		return IndexParents(s)
+	})
+	s.lazyNameMapping = sync.OnceValue(func() NameMapping {
+		return createMappingFromSchema(s)
 	})
 
 	return s
@@ -163,6 +167,8 @@ func (s *Schema) lazyIdToAccessor() (map[int]accessor, error) {
 
 	return idx, nil
 }
+
+func (s *Schema) NameMapping() NameMapping { return s.lazyNameMapping() }
 
 func (s *Schema) Type() string { return "struct" }
 
@@ -337,7 +343,7 @@ func (s *Schema) Equals(other *Schema) bool {
 // HighestFieldID returns the value of the numerically highest field ID
 // in this schema.
 func (s *Schema) HighestFieldID() int {
-	id, _ := Visit[int](s, findLastFieldID{})
+	id, _ := Visit(s, findLastFieldID{})
 
 	return id
 }
@@ -685,7 +691,7 @@ func visitFieldPreOrder[T any](f NestedField, visitor PreOrderSchemaVisitor[T]) 
 // IndexByID performs a post-order traversal of the given schema and
 // returns a mapping from field ID to field.
 func IndexByID(schema *Schema) (map[int]NestedField, error) {
-	return Visit[map[int]NestedField](schema, &indexByID{index: make(map[int]NestedField)})
+	return Visit(schema, &indexByID{index: make(map[int]NestedField)})
 }
 
 type indexByID struct {
@@ -737,7 +743,7 @@ func IndexByName(schema *Schema) (map[string]int, error) {
 			fieldNames:      make([]string, 0),
 			shortFieldNames: make([]string, 0),
 		}
-		if _, err := Visit[map[string]int](schema, indexer); err != nil {
+		if _, err := Visit(schema, indexer); err != nil {
 			return nil, err
 		}
 
@@ -756,7 +762,7 @@ func IndexNameByID(schema *Schema) (map[int]string, error) {
 		fieldNames:      make([]string, 0),
 		shortFieldNames: make([]string, 0),
 	}
-	if _, err := Visit[map[string]int](schema, indexer); err != nil {
+	if _, err := Visit(schema, indexer); err != nil {
 		return nil, err
 	}
 

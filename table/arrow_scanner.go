@@ -219,6 +219,8 @@ type arrowScan struct {
 
 	useLargeTypes bool
 	concurrency   int
+
+	nameMapping iceberg.NameMapping
 }
 
 func (as *arrowScan) projectedFieldIDs() (set[int], error) {
@@ -268,14 +270,14 @@ func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile) (
 		return nil, nil, nil, err
 	}
 
-	fileSchema, colIndices, err := rdr.PrunedSchema(ids)
+	fileSchema, colIndices, err := rdr.PrunedSchema(ids, as.nameMapping)
 	if err != nil {
 		rdr.Close()
 
 		return nil, nil, nil, err
 	}
 
-	iceSchema, err := ArrowSchemaToIceberg(fileSchema, false, nil)
+	iceSchema, err := ArrowSchemaToIceberg(fileSchema, false, as.nameMapping)
 	if err != nil {
 		rdr.Close()
 
@@ -553,6 +555,7 @@ func createIterator(ctx context.Context, numWorkers uint, records <-chan enumera
 
 func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks []FileScanTask, deletesPerFile perFilePosDeletes) iter.Seq2[arrow.Record, error] {
 	extSet := substrait.NewExtensionSet()
+	as.nameMapping = as.metadata.NameMapping()
 
 	ctx, cancel := context.WithCancelCause(exprs.WithExtensionIDSet(ctx, extSet))
 	taskChan := make(chan internal.Enumerated[FileScanTask], len(tasks))
