@@ -318,11 +318,11 @@ func (sp *snapshotProducer) appendDataFile(df iceberg.DataFile) *snapshotProduce
 	return sp
 }
 
-func (sp *snapshotProducer) deleteDataFile(df iceberg.DataFile) *snapshotProducer {
-	sp.deletedFiles[df.FilePath()] = df
+// func (sp *snapshotProducer) deleteDataFile(df iceberg.DataFile) *snapshotProducer {
+// 	sp.deletedFiles[df.FilePath()] = df
 
-	return sp
-}
+// 	return sp
+// }
 
 func (sp *snapshotProducer) newManifestWriter(spec iceberg.PartitionSpec) (*iceberg.ManifestWriter, string, *internal.CountingWriter, error) {
 	out, path, err := sp.newManifestOutput()
