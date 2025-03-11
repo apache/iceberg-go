@@ -369,4 +369,5 @@ func (t *TableWritingTestSuite) TestAddFilesFailsSchemaMismatch() {
 
 func TestTableWriting(t *testing.T) {
 	suite.Run(t, &TableWritingTestSuite{formatVersion: 1})
+	suite.Run(t, &TableWritingTestSuite{formatVersion: 2})
 }
