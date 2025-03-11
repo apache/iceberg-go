@@ -339,7 +339,12 @@ func (p *pruneParquetSchema) Field(field pqarrow.SchemaField, result arrow.Field
 }
 
 func (p *pruneParquetSchema) List(field pqarrow.SchemaField, elemResult arrow.Field, mapping *iceberg.MappedField) arrow.Field {
-	_, ok := p.selected[p.fieldID(*field.Children[0].Field, mapping)]
+	var elemMapping *iceberg.MappedField
+	if mapping != nil {
+		elemMapping = mapping.GetField("element")
+	}
+
+	_, ok := p.selected[p.fieldID(*field.Children[0].Field, elemMapping)]
 	if !ok {
 		if elemResult.Type != nil {
 			result := *field.Field

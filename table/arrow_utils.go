@@ -759,6 +759,9 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 
 			panic(fmt.Errorf("unsupported schema projection from %s to %s",
 				vals.DataType(), targetType))
+		default:
+			return retOrPanic(compute.CastArray(a.ctx, vals,
+				compute.SafeCastOptions(targetType)))
 		}
 	}
 	vals.Retain()

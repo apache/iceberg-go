@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"time"
@@ -119,7 +120,7 @@ func (t *Transaction) Append(rdr array.RecordReader, snapshotProps iceberg.Prope
 	return iceberg.ErrNotImplemented
 }
 
-func (t *Transaction) AddFiles(files []string, snapshotProps iceberg.Properties, checkDuplicates bool) error {
+func (t *Transaction) AddFiles(files []string, snapshotProps iceberg.Properties, ignoreDuplicates bool) error {
 	set := make(map[string]string)
 	for _, f := range files {
 		set[f] = f
@@ -129,8 +130,22 @@ func (t *Transaction) AddFiles(files []string, snapshotProps iceberg.Properties,
 		return errors.New("file paths must be unique for AppendDataFiles")
 	}
 
-	if checkDuplicates {
-		return iceberg.ErrNotImplemented
+	if !ignoreDuplicates {
+		if s := t.meta.currentSnapshot(); s != nil {
+			referenced := make([]string, 0)
+			for df, err := range s.files(t.tbl.fs, nil) {
+				if err != nil {
+					return err
+				}
+
+				if _, ok := set[df.FilePath()]; ok {
+					referenced = append(referenced, df.FilePath())
+				}
+			}
+			if len(referenced) > 0 {
+				return fmt.Errorf("cannot add files that are already referenced by table, files: %s", referenced)
+			}
+		}
 	}
 
 	if t.meta.NameMapping() == nil {
