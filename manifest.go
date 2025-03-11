@@ -1553,16 +1553,6 @@ func NewManifestEntry(status ManifestEntryStatus, snapshotID *int64, seqNum, fil
 	}
 }
 
-func NewManifestEntry(status ManifestEntryStatus, snapshotID int64, seqNum, fileSeqNum *int64, df DataFile) ManifestEntry {
-	return &manifestEntryV2{
-		EntryStatus: status,
-		Snapshot:    &snapshotID,
-		SeqNum:      seqNum,
-		FileSeqNum:  fileSeqNum,
-		Data:        df,
-	}
-}
-
 // DataFileBuilder is a helper for building a data file struct which will
 // conform to the DataFile interface.
 type DataFileBuilder struct {
