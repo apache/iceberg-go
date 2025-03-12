@@ -33,126 +33,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-type manifestMergeManager struct {
-	targetSizeBytes int
-	minCountToMerge int
-	mergeEnabled    bool
-	snap            *snapshotProducer
-}
-
-func (m *manifestMergeManager) groupBySpec(manifests []iceberg.ManifestFile) map[int][]iceberg.ManifestFile {
-	groups := make(map[int][]iceberg.ManifestFile)
-	for _, m := range manifests {
-		specid := int(m.PartitionSpecID())
-		group := groups[specid]
-		groups[specid] = append(group, m)
-	}
-
-	return groups
-}
-
-func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.ManifestFile) (iceberg.ManifestFile, error) {
-	wr, path, counter, err := m.snap.newManifestWriter(m.snap.spec(specID))
-	if err != nil {
-		return nil, err
-	}
-	defer counter.W.(io.Closer).Close()
-
-	for _, manifest := range bin {
-		entries, err := m.snap.fetchManifestEntry(manifest, false)
-		if err != nil {
-			return nil, err
-		}
-
-		for _, entry := range entries {
-			switch {
-			case entry.Status() == iceberg.EntryStatusDELETED && entry.SnapshotID() == m.snap.snapshotID:
-				// only files deleted by this snapshot should be added to the new manifest
-				wr.Delete(entry)
-			case entry.Status() == iceberg.EntryStatusADDED && entry.SnapshotID() == m.snap.snapshotID:
-				// added entries from this snapshot are still added, otherwise they should be existing
-				wr.Add(entry)
-			case entry.Status() != iceberg.EntryStatusDELETED:
-				// add all non-deleted files from the old manifest as existing files
-				wr.Existing(entry)
-			}
-		}
-	}
-
-	return wr.ToManifestFile(path, counter.Count)
-}
-
-func (m *manifestMergeManager) mergeGroup(firstManifest iceberg.ManifestFile, specID int, manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
-	packer := internal.SlicePacker[iceberg.ManifestFile]{
-		TargetWeight:    int64(m.targetSizeBytes),
-		Lookback:        1,
-		LargestBinFirst: false,
-	}
-	bins := packer.PackEnd(manifests, func(m iceberg.ManifestFile) int64 {
-		return m.Length()
-	})
-
-	mergeBin := func(bin []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
-		output := make([]iceberg.ManifestFile, 0, 1)
-		if len(bin) == 1 {
-			output = append(output, bin[0])
-		} else if len(bin) < m.minCountToMerge && slices.ContainsFunc(bin, func(m iceberg.ManifestFile) bool { return m == firstManifest }) {
-			// if the bin has the first manifest (the new data files or an appended
-			// manifest file) then only merge it if the number of manifests is above
-			// the minimum count. this is applied only to bins with an in-memory manifest
-			// so that large manifests don't prevent merging older groups
-			output = append(output, bin...)
-		} else {
-			created, err := m.createManifest(specID, bin)
-			if err != nil {
-				return nil, err
-			}
-			output = append(output, created)
-		}
-
-		return output, nil
-	}
-
-	binResults := make([][]iceberg.ManifestFile, len(bins))
-	g := errgroup.Group{}
-	for i, bin := range bins {
-		i, bin := i, bin
-		g.Go(func() error {
-			var err error
-			binResults[i], err = mergeBin(bin)
-
-			return err
-		})
-	}
-
-	if err := g.Wait(); err != nil {
-		return nil, err
-	}
-
-	return slices.Concat(binResults...), nil
-}
-
-func (m *manifestMergeManager) mergeManifests(manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
-	if !m.mergeEnabled || len(manifests) == 0 {
-		return manifests, nil
-	}
-
-	first := manifests[0]
-	groups := m.groupBySpec(manifests)
-
-	merged := make([]iceberg.ManifestFile, 0, len(groups))
-	for _, specID := range slices.Backward(slices.Sorted(maps.Keys(groups))) {
-		manifests, err := m.mergeGroup(first, specID, groups[specID])
-		if err != nil {
-			return nil, err
-		}
-
-		merged = append(merged, manifests...)
-	}
-
-	return merged, nil
-}
-
 type producerImpl interface {
 	processManifests(manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error)
 	existingManifests() ([]iceberg.ManifestFile, error)
@@ -209,51 +89,6 @@ func (fa *fastAppendFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 
 func (fa *fastAppendFiles) deletedEntries() ([]iceberg.ManifestEntry, error) {
 	return nil, nil
-}
-
-type mergeAppendFiles struct {
-	fastAppendFiles
-
-	targetSizeBytes int
-	minCountToMerge int
-	mergeEnabled    bool
-}
-
-func newMergeAppendFilesProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties) *snapshotProducer {
-	prod := createSnapshotProducer(op, txn, fs, commitUUID, snapshotProps)
-	prod.producerImpl = &mergeAppendFiles{
-		fastAppendFiles: fastAppendFiles{base: prod},
-		targetSizeBytes: snapshotProps.GetInt(ManifestTargetSizeBytesKey, ManifestTargetSizeBytesDefault),
-		minCountToMerge: snapshotProps.GetInt(ManifestMinMergeCountKey, ManifestMinMergeCountDefault),
-		mergeEnabled:    snapshotProps.GetBool(ManifestMergeEnabledKey, ManifestMergeEnabledDefault),
-	}
-
-	return prod
-}
-
-func (m *mergeAppendFiles) processManifests(manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
-	unmergedDataManifests, unmergedDeleteManifests := []iceberg.ManifestFile{}, []iceberg.ManifestFile{}
-	for _, m := range manifests {
-		if m.ManifestContent() == iceberg.ManifestContentData {
-			unmergedDataManifests = append(unmergedDataManifests, m)
-		} else if m.ManifestContent() == iceberg.ManifestContentDeletes {
-			unmergedDeleteManifests = append(unmergedDeleteManifests, m)
-		}
-	}
-
-	dataManifestMergeMgr := manifestMergeManager{
-		targetSizeBytes: m.targetSizeBytes,
-		minCountToMerge: m.minCountToMerge,
-		mergeEnabled:    m.mergeEnabled,
-		snap:            m.base,
-	}
-
-	result, err := dataManifestMergeMgr.mergeManifests(unmergedDataManifests)
-	if err != nil {
-		return nil, err
-	}
-
-	return append(result, unmergedDeleteManifests...), nil
 }
 
 const (
@@ -318,31 +153,6 @@ func (sp *snapshotProducer) appendDataFile(df iceberg.DataFile) *snapshotProduce
 	return sp
 }
 
-// func (sp *snapshotProducer) deleteDataFile(df iceberg.DataFile) *snapshotProducer {
-// 	sp.deletedFiles[df.FilePath()] = df
-
-// 	return sp
-// }
-
-func (sp *snapshotProducer) newManifestWriter(spec iceberg.PartitionSpec) (*iceberg.ManifestWriter, string, *internal.CountingWriter, error) {
-	out, path, err := sp.newManifestOutput()
-	if err != nil {
-		return nil, "", nil, err
-	}
-
-	counter := &internal.CountingWriter{W: out}
-
-	wr, err := iceberg.NewManifestWriter(sp.txn.meta.formatVersion, counter, spec,
-		sp.txn.meta.CurrentSchema(), sp.snapshotID)
-	if err != nil {
-		defer out.Close()
-
-		return nil, "", nil, err
-	}
-
-	return wr, path, counter, nil
-}
-
 func (sp *snapshotProducer) newManifestOutput() (io.WriteCloser, string, error) {
 	provider, err := sp.txn.tbl.LocationProvider()
 	if err != nil {
@@ -356,10 +166,6 @@ func (sp *snapshotProducer) newManifestOutput() (io.WriteCloser, string, error) 
 	}
 
 	return f, filepath, nil
-}
-
-func (sp *snapshotProducer) fetchManifestEntry(m iceberg.ManifestFile, discardDeleted bool) ([]iceberg.ManifestEntry, error) {
-	return m.FetchEntries(sp.io, discardDeleted)
 }
 
 func (sp *snapshotProducer) manifests() ([]iceberg.ManifestFile, error) {

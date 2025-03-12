@@ -175,9 +175,9 @@ func (s snapshotUpdate) fastAppend() *snapshotProducer {
 	return newFastAppendFilesProducer(OpAppend, s.txn, s.io, nil, s.snapshotProps)
 }
 
-func (s snapshotUpdate) mergeAppend() *snapshotProducer {
-	return newMergeAppendFilesProducer(OpAppend, s.txn, s.io, nil, s.snapshotProps)
-}
+// func (s snapshotUpdate) mergeAppend() *snapshotProducer {
+// 	return newMergeAppendFilesProducer(OpAppend, s.txn, s.io, nil, s.snapshotProps)
+// }
 
 type Transaction struct {
 	tbl  *Table
@@ -243,16 +243,16 @@ func (t *Transaction) updateSnapshot(props iceberg.Properties) snapshotUpdate {
 	}
 }
 
-func (t *Transaction) appendSnapshotProducer(props iceberg.Properties) *snapshotProducer {
-	manifestMerge := t.meta.props.GetBool(ManifestMergeEnabledKey, ManifestMergeEnabledDefault)
+// func (t *Transaction) appendSnapshotProducer(props iceberg.Properties) *snapshotProducer {
+// 	manifestMerge := t.meta.props.GetBool(ManifestMergeEnabledKey, ManifestMergeEnabledDefault)
 
-	updateSnapshot := t.updateSnapshot(props)
-	if manifestMerge {
-		return updateSnapshot.mergeAppend()
-	}
+// 	updateSnapshot := t.updateSnapshot(props)
+// 	if manifestMerge {
+// 		return updateSnapshot.mergeAppend()
+// 	}
 
-	return updateSnapshot.fastAppend()
-}
+// 	return updateSnapshot.fastAppend()
+// }
 
 func (t *Transaction) SetProperties(props iceberg.Properties) error {
 	if len(props) > 0 {
