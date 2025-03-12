@@ -25,11 +25,16 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/catalog/internal"
 	sqlcat "github.com/apache/iceberg-go/catalog/sql"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
@@ -970,6 +975,69 @@ func (s *SqliteCatalogTestSuite) TestUpdateNamespaceProperties() {
 			"test_property4": "4",
 			"test_property5": "5",
 		}, props)
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestCommitTable() {
+	tests := []struct {
+		cat   *sqlcat.Catalog
+		tblID table.Identifier
+	}{
+		{s.getCatalogMemory(), s.randomTableIdentifier()},
+		{s.getCatalogSqlite(), s.randomHierarchicalIdentifier()},
+	}
+
+	arrSchema, err := table.SchemaToArrowSchema(tableSchemaNested, nil, false, false)
+	s.Require().NoError(err)
+
+	table, err := array.TableFromJSON(memory.DefaultAllocator, arrSchema,
+		[]string{`[
+		{
+			"foo": "foo_string",
+			"bar": 123,
+			"baz": true,
+			"qux": ["a", "b", "c"],
+			"quux": [{"key": "gopher", "value": [
+				{"key": "golang", "value": "1337"}]}],
+			"location": [{"latitude": 37.7749, "longitude": -122.4194}],
+			"person": {"name": "gopher", "age": 10}
+		}
+	]`})
+	s.Require().NoError(err)
+	defer table.Release()
+
+	pqfile := filepath.Join(s.warehouse, "test_commit_table_data", "test.parquet")
+	s.Require().NoError(os.MkdirAll(filepath.Dir(pqfile), 0777))
+	f, err := os.Create(pqfile)
+	s.Require().NoError(err)
+
+	s.Require().NoError(pqarrow.WriteTable(table, f, table.NumRows(),
+		nil, pqarrow.DefaultWriterProps()))
+
+	ctx := context.Background()
+	for _, tt := range tests {
+		ns := catalog.NamespaceFromIdent(tt.tblID)
+		s.Require().NoError(tt.cat.CreateNamespace(ctx, ns, nil))
+
+		tbl, err := tt.cat.CreateTable(ctx, tt.tblID, tableSchemaNested)
+		s.Require().NoError(err)
+		originalMetadataLocation := tbl.MetadataLocation()
+		originalLastUpdated := tbl.Metadata().LastUpdatedMillis()
+
+		s.EqualValues(0, internal.ParseMetadataVersion(tbl.MetadataLocation()))
+		s.EqualValues(0, tbl.Metadata().CurrentSchema().ID)
+
+		tx := tbl.NewTransaction()
+		s.Require().NoError(tx.AddFiles([]string{pqfile}, nil, false))
+		updated, err := tx.Commit(ctx)
+		s.Require().NoError(err)
+
+		s.EqualValues(1, internal.ParseMetadataVersion(updated.MetadataLocation()))
+		s.Greater(updated.Metadata().LastUpdatedMillis(), originalLastUpdated)
+		logs := slices.Collect(updated.Metadata().PreviousFiles())
+		s.Len(logs, 1)
+		s.Equal(originalMetadataLocation, logs[0].MetadataFile)
+		s.Equal(originalLastUpdated, logs[0].TimestampMs)
 	}
 }
 

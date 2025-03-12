@@ -45,4 +45,7 @@ const (
 
 	MetadataDeleteAfterCommitEnabledKey     = "write.metadata.delete-after-commit.enabled"
 	MetadataDeleteAfterCommitEnabledDefault = false
+
+	MetadataPreviousVersionsMaxKey     = "write.metadata.previous-versions-max"
+	MetadataPreviousVersionsMaxDefault = 100
 )

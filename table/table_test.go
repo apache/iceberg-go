@@ -29,11 +29,15 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/apache/iceberg-go/internal"
+	"github.com/apache/iceberg-go/io"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 	"github.com/pterm/pterm"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -323,7 +327,10 @@ func (t *TableWritingTestSuite) TestAddFilesUnpartitioned() {
 			},
 		})
 
-	contents, err := stagedTbl.Scan().ToArrowTable(context.Background())
+	scan, err := tx.Scan()
+	t.Require().NoError(err)
+
+	contents, err := scan.ToArrowTable(context.Background())
 	t.Require().NoError(err)
 	defer contents.Release()
 
@@ -564,12 +571,12 @@ func (t *TableWritingTestSuite) TestAddFilesWithLargeAndRegular() {
 	tx := tbl.NewTransaction()
 	t.Require().NoError(tx.AddFiles([]string{filePath, filePathLarge}, nil, false))
 
-	stagedTbl, err := tx.StagedTable()
+	scan, err := tx.Scan(table.WithOptions(iceberg.Properties{
+		table.ScanOptionArrowUseLargeTypes: "true",
+	}))
 	t.Require().NoError(err)
 
-	result, err := stagedTbl.Scan(table.WithOptions(iceberg.Properties{
-		table.ScanOptionArrowUseLargeTypes: "true",
-	})).ToArrowTable(context.Background())
+	result, err := scan.ToArrowTable(context.Background())
 	t.Require().NoError(err)
 	defer result.Release()
 
@@ -587,10 +594,10 @@ func (t *TableWritingTestSuite) TestAddFilesValidUpcast() {
 	tx := tbl.NewTransaction()
 	t.Require().NoError(tx.AddFiles([]string{filePath}, nil, false))
 
-	staged, err := tx.StagedTable()
+	scan, err := tx.Scan()
 	t.Require().NoError(err)
 
-	written, err := staged.Scan().ToArrowTable(context.Background())
+	written, err := scan.ToArrowTable(context.Background())
 	t.Require().NoError(err)
 	defer written.Release()
 
@@ -635,10 +642,10 @@ func (t *TableWritingTestSuite) TestAddFilesSubsetOfSchema() {
 	tx := tbl.NewTransaction()
 	t.Require().NoError(tx.AddFiles([]string{filePath}, nil, false))
 
-	staged, err := tx.StagedTable()
+	scan, err := tx.Scan()
 	t.Require().NoError(err)
 
-	written, err := staged.Scan().ToArrowTable(context.Background())
+	written, err := scan.ToArrowTable(context.Background())
 	t.Require().NoError(err)
 	defer written.Release()
 
@@ -732,4 +739,38 @@ func (t *TableWritingTestSuite) TestAddFilesReferencedCurrentSnapshotIgnoreDupli
 func TestTableWriting(t *testing.T) {
 	suite.Run(t, &TableWritingTestSuite{formatVersion: 1})
 	suite.Run(t, &TableWritingTestSuite{formatVersion: 2})
+}
+
+func TestAddToTable(t *testing.T) {
+	ctx := context.Background()
+	cat, err := rest.NewCatalog(ctx, "rest", "http://localhost:8181")
+	require.NoError(t, err)
+
+	props := iceberg.Properties{
+		io.S3Region:      "us-east-1",
+		io.S3AccessKeyID: "admin", io.S3SecretAccessKey: "password"}
+
+	tbl, err := cat.LoadTable(ctx, catalog.ToIdentifier("default", "test_limit"), props)
+	require.NoError(t, err)
+
+	fmt.Println(tbl.Schema())
+
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "idx", Type: arrow.PrimitiveTypes.Int32, Nullable: true}}, nil)
+
+	arrTbl, err := array.TableFromJSON(memory.DefaultAllocator, arrSchema, []string{
+		`[{"idx": 2}, {"idx": 3}, {"idx": 4}]`})
+	require.NoError(t, err)
+	defer arrTbl.Release()
+
+	fw, err := tbl.FS().(iceio.WriteFileIO).Create("s3://warehouse/default/test_limit/data/sample_test.parquet")
+	require.NoError(t, err)
+	require.NoError(t, pqarrow.WriteTable(arrTbl, fw, arrTbl.NumRows(), nil, pqarrow.DefaultWriterProps()))
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddFiles([]string{"s3://warehouse/default/test_limit/data/sample_test.parquet"}, nil, false))
+	result, err := tx.Commit(ctx)
+	require.NoError(t, err)
+
+	fmt.Println(result.CurrentSnapshot())
 }

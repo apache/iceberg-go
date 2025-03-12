@@ -888,6 +888,7 @@ func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *S
 	}
 
 	enc, err := ocf.NewEncoderWithSchema(fileSchema, out,
+		ocf.WithSchemaMarshaler(ocf.FullSchemaMarshaler),
 		ocf.WithMetadata(md),
 		ocf.WithCodec(ocf.Deflate))
 

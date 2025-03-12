@@ -24,6 +24,7 @@ import (
 	"maps"
 	"slices"
 	"sync/atomic"
+	"time"
 	"unicode/utf8"
 
 	"github.com/apache/iceberg-go"
@@ -338,6 +339,7 @@ func (sp *snapshotProducer) commit() ([]Update, []Requirement, error) {
 		ManifestList:     manifestListFilePath,
 		Summary:          &summary,
 		SchemaID:         &sp.txn.meta.currentSchemaID,
+		TimestampMs:      time.Now().UnixMilli(),
 	}
 
 	return []Update{
