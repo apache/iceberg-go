@@ -25,9 +25,9 @@ const (
 	ObjectStoreEnabledKey                   = "write.object-storage.enabled"
 	ObjectStoreEnabledDefault               = false
 
-	DefaultNameMappingKey       = "schema.name-mapping.default"
-	MetricsModeColumnConfPrefix = "write.metadata.metrics.column"
+	DefaultNameMappingKey = "schema.name-mapping.default"
 
+	MetricsModeColumnConfPrefix    = "write.metadata.metrics.column"
 	DefaultWriteMetricsModeKey     = "write.metadata.metrics.default"
 	DefaultWriteMetricsModeDefault = "truncate(16)"
 

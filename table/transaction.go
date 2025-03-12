@@ -263,13 +263,7 @@ func (t *Transaction) SetProperties(props iceberg.Properties) error {
 }
 
 func (t *Transaction) Append(rdr array.RecordReader, snapshotProps iceberg.Properties) error {
-	if err := checkArrowSchemaCompat(t.meta.CurrentSchema(), rdr.Schema(), false); err != nil {
-		return err
-	}
-
-	t.appendSnapshotProducer(snapshotProps)
-
-	return nil
+	return iceberg.ErrNotImplemented
 }
 
 func (t *Transaction) AddFiles(files []string, snapshotProps iceberg.Properties, checkDuplicates bool) error {
@@ -283,7 +277,7 @@ func (t *Transaction) AddFiles(files []string, snapshotProps iceberg.Properties,
 	}
 
 	if checkDuplicates {
-		// TODO: implement
+		return iceberg.ErrNotImplemented
 	}
 
 	if t.meta.NameMapping() == nil {
