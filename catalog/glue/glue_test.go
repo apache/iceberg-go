@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -880,4 +881,44 @@ func TestGlueCreateTableInvalidMetadataRollback(t *testing.T) {
 		assert.NoError(err)
 	}
 	assert.False(found, "expected table to be rolled back and not exist in the catalog")
+}
+
+func TestGlueCreateTableRollbackOnInvalidMetadata(t *testing.T) {
+	assert := require.New(t)
+	mockGlueSvc := &mockGlueClient{}
+	schema := iceberg.NewSchemaWithIdentifiers(1, []int{1},
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.StringType{}, Required: true},
+	)
+	mockGlueSvc.On("CreateTable", mock.Anything, mock.Anything, mock.Anything).Return(&glue.CreateTableOutput{}, nil)
+	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_rollback_table"),
+	}, mock.Anything).Return(&glue.GetTableOutput{
+		Table: &types.Table{
+			Name: aws.String("test_rollback_table"),
+			Parameters: map[string]string{
+				tableTypePropsKey:        glueTypeIceberg,
+				metadataLocationPropsKey: "s3://test-bucket/nonexistent/metadata.json",
+			},
+		},
+	}, nil)
+	mockGlueSvc.On("DeleteTable", mock.Anything, &glue.DeleteTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_rollback_table"),
+	}, mock.Anything).Return(&glue.DeleteTableOutput{}, nil)
+	glueCatalog := &Catalog{
+		glueSvc: mockGlueSvc,
+		awsCfg:  &aws.Config{},
+	}
+	_, err := glueCatalog.CreateTable(context.TODO(),
+		TableIdentifier("test_database", "test_rollback_table"),
+		schema,
+		catalog.WithLocation("s3://test-bucket/nonexistent/metadata.json"))
+	// Should fail because LoadTable will fail to load the nonexistent metadata
+	assert.Error(err)
+	assert.Contains(err.Error(), "failed to create table")
+	mockGlueSvc.AssertCalled(t, "CreateTable", mock.Anything, mock.Anything, mock.Anything)
+	mockGlueSvc.AssertCalled(t, "DeleteTable", mock.Anything, mock.Anything, mock.Anything)
+	mockGlueSvc.AssertCalled(t, "GetTable", mock.Anything, mock.Anything, mock.Anything)
 }

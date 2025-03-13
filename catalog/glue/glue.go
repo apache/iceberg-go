@@ -633,16 +633,3 @@ func filterDatabaseListByType(databases []types.Database, databaseType string) [
 
 	return filtered
 }
-
-func schemaToGlueColumns(schema *iceberg.Schema) []types.Column {
-	var columns []types.Column
-	for _, field := range schema.Fields() {
-		columns = append(columns, types.Column{
-			Name:    aws.String(field.Name),
-			Type:    aws.String(field.Type.String()),
-			Comment: aws.String(field.Doc),
-		})
-	}
-
-	return columns
-}
