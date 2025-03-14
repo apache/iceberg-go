@@ -49,6 +49,8 @@ func fieldToGlueColumn(field iceberg.NestedField) types.Column {
 
 // icebergTypeToGlueType converts an Iceberg type to a Glue type string representation.
 // It handles primitive types as well as nested types like structs, lists, and maps.
+// Reference: https://docs.aws.amazon.com/glue/latest/dg/glue-types.html#glue-types-cataloghttps://cwiki.apache.org/confluence/display/hive/languagemanual+types%23LanguageManualTypes-Date/TimeTypes
+// Apache Hive type: https://cwiki.apache.org/confluence/display/hive/languagemanual+types
 func icebergTypeToGlueType(typ iceberg.Type) string {
 	switch t := typ.(type) {
 	case iceberg.BooleanType:
@@ -64,11 +66,11 @@ func icebergTypeToGlueType(typ iceberg.Type) string {
 	case iceberg.DateType:
 		return "date"
 	case iceberg.TimeType:
-		return "string" // Glue doesn't have a time type. TODO: Double check if this is correct
+		return "string"
 	case iceberg.TimestampType:
 		return "timestamp"
 	case iceberg.TimestampTzType:
-		return "timestamp" // TODO: Double check if this is correct
+		return "timestamp"
 	case iceberg.StringType:
 		return "string"
 	case iceberg.UUIDType:
