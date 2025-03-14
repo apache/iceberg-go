@@ -1093,15 +1093,19 @@ func createStatsAgg(typ iceberg.PrimitiveType, physicalTypeStr string, truncLen 
 		switch typ.(type) {
 		case iceberg.DecimalType:
 			return &decAsIntAgg[int32]{
-				newStatAgg[int32](typ, truncLen).(*statsAggregator[int32])}, nil
+				newStatAgg[int32](typ, truncLen).(*statsAggregator[int32]),
+			}, nil
 		}
+
 		return newStatAgg[int32](typ, truncLen), nil
 	case "INT64":
 		switch typ.(type) {
 		case iceberg.DecimalType:
 			return &decAsIntAgg[int64]{
-				newStatAgg[int64](typ, truncLen).(*statsAggregator[int64])}, nil
+				newStatAgg[int64](typ, truncLen).(*statsAggregator[int64]),
+			}, nil
 		}
+
 		return newStatAgg[int64](typ, truncLen), nil
 	case "FLOAT":
 		return newStatAgg[float32](typ, truncLen), nil
@@ -1225,7 +1229,8 @@ func (s *decAsIntAgg[T]) minAsBytes() ([]byte, error) {
 
 	lit := iceberg.DecimalLiteral(iceberg.Decimal{
 		Val:   decimal128.FromI64(int64(s.curMin.Value())),
-		Scale: s.primitiveType.(iceberg.DecimalType).Scale()})
+		Scale: s.primitiveType.(iceberg.DecimalType).Scale(),
+	})
 	if s.truncLen > 0 {
 		return s.toBytes((&iceberg.TruncateTransform{Width: s.truncLen}).
 			Apply(iceberg.Optional[iceberg.Literal]{Valid: true, Val: lit}).Val)
@@ -1241,7 +1246,8 @@ func (s *decAsIntAgg[T]) maxAsBytes() ([]byte, error) {
 
 	lit := iceberg.DecimalLiteral(iceberg.Decimal{
 		Val:   decimal128.FromI64(int64(s.curMax.Value())),
-		Scale: s.primitiveType.(iceberg.DecimalType).Scale()})
+		Scale: s.primitiveType.(iceberg.DecimalType).Scale(),
+	})
 	if s.truncLen <= 0 {
 		return s.toBytes(lit)
 	}
