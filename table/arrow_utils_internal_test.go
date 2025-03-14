@@ -21,12 +21,14 @@ import (
 	"bytes"
 	"cmp"
 	"math"
+	"math/big"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/file"
@@ -501,7 +503,10 @@ func constructTestTablePrimitiveTypes(t *testing.T) (*metadata.FileMetaData, Met
                     {"id": 9, "name": "timestamptzs", "required": false, "type": "timestamptz"},
                     {"id": 10, "name": "strings", "required": false, "type": "string"},
                     {"id": 11, "name": "uuids", "required": false, "type": "uuid"},
-                    {"id": 12, "name": "binaries", "required": false, "type": "binary"}
+                    {"id": 12, "name": "binaries", "required": false, "type": "binary"},
+					{"id": 13, "name": "small_dec", "required": false, "type": "decimal(8, 2)"},
+					{"id": 14, "name": "med_dec", "required": false, "type": "decimal(16, 2)"},
+					{"id": 15, "name": "large_dec", "required": false, "type": "decimal(24, 2)"}
                 ]
             }
         ],
@@ -528,7 +533,10 @@ func constructTestTablePrimitiveTypes(t *testing.T) (*metadata.FileMetaData, Met
 			"timestamptzs": "2022-01-02T17:30:34.399",
 			"strings": "hello",
 			"uuids": "`+uuid.NewMD5(uuid.NameSpaceDNS, []byte("foo")).String()+`",
-			"binaries": "aGVsbG8="
+			"binaries": "aGVsbG8=",
+			"small_dec": "123456.78",
+			"med_dec": "12345678901234.56",
+			"large_dec": "1234567890123456789012.34"
 		},
 		{
 			"booleans": false,
@@ -542,7 +550,10 @@ func constructTestTablePrimitiveTypes(t *testing.T) (*metadata.FileMetaData, Met
 			"timestamptzs": "2023-02-04T13:21:04.354",
 			"strings": "world",
 			"uuids": "`+uuid.NewMD5(uuid.NameSpaceDNS, []byte("bar")).String()+`",
-			"binaries": "d29ybGQ="
+			"binaries": "d29ybGQ=",
+			"small_dec": "876543.21",
+			"med_dec": "65432109876543.21",
+			"large_dec": "4321098765432109876543.21"
 		}
 	]`))
 	require.NoError(t, err)
@@ -550,7 +561,8 @@ func constructTestTablePrimitiveTypes(t *testing.T) (*metadata.FileMetaData, Met
 
 	var buf bytes.Buffer
 	wr, err := pqarrow.NewFileWriter(arrowSchema, &buf,
-		parquet.NewWriterProperties(parquet.WithStats(true)),
+		parquet.NewWriterProperties(parquet.WithStats(true),
+			parquet.WithStoreDecimalAsInteger(true)),
 		pqarrow.DefaultWriterProps())
 	require.NoError(t, err)
 
@@ -591,11 +603,11 @@ func TestMetricsPrimitiveTypes(t *testing.T) {
 		iceberg.ParquetFile, meta.GetSourceFileSize())
 	require.NoError(t, err)
 
-	assert.Len(t, df.ValueCounts(), 12)
-	assert.Len(t, df.NullValueCounts(), 12)
+	assert.Len(t, df.ValueCounts(), 15)
+	assert.Len(t, df.NullValueCounts(), 15)
 	assert.Len(t, df.NaNValueCounts(), 0)
 
-	assert.Len(t, df.LowerBoundValues(), 12)
+	assert.Len(t, df.LowerBoundValues(), 15)
 	assertBounds(t, df.LowerBoundValues()[1], iceberg.PrimitiveTypes.Bool, false)
 	assertBounds(t, df.LowerBoundValues()[2], iceberg.PrimitiveTypes.Int32, int32(23))
 	assertBounds(t, df.LowerBoundValues()[3], iceberg.PrimitiveTypes.Int64, int64(2))
@@ -613,8 +625,21 @@ func TestMetricsPrimitiveTypes(t *testing.T) {
 	assertBounds(t, df.LowerBoundValues()[11], iceberg.PrimitiveTypes.UUID,
 		uuid.NewMD5(uuid.NameSpaceDNS, []byte("foo")))
 	assertBounds(t, df.LowerBoundValues()[12], iceberg.PrimitiveTypes.Binary, []byte("he"))
+	assertBounds(t, df.LowerBoundValues()[13], iceberg.DecimalTypeOf(8, 2), iceberg.Decimal{
+		Val:   decimal128.FromI64(12345678),
+		Scale: 2,
+	})
+	assertBounds(t, df.LowerBoundValues()[14], iceberg.DecimalTypeOf(16, 2), iceberg.Decimal{
+		Val:   decimal128.FromI64(1234567890123456),
+		Scale: 2,
+	})
+	expected, _ := (&big.Int{}).SetString("123456789012345678901234", 10)
+	assertBounds(t, df.LowerBoundValues()[15], iceberg.DecimalTypeOf(24, 2), iceberg.Decimal{
+		Val:   decimal128.FromBigInt(expected),
+		Scale: 2,
+	})
 
-	assert.Len(t, df.UpperBoundValues(), 12)
+	assert.Len(t, df.UpperBoundValues(), 15)
 	assertBounds(t, df.UpperBoundValues()[1], iceberg.PrimitiveTypes.Bool, true)
 	assertBounds(t, df.UpperBoundValues()[2], iceberg.PrimitiveTypes.Int32, int32(89))
 	assertBounds(t, df.UpperBoundValues()[3], iceberg.PrimitiveTypes.Int64, int64(54))
@@ -632,4 +657,17 @@ func TestMetricsPrimitiveTypes(t *testing.T) {
 	assertBounds(t, df.UpperBoundValues()[11], iceberg.PrimitiveTypes.UUID,
 		uuid.NewMD5(uuid.NameSpaceDNS, []byte("bar")))
 	assertBounds(t, df.UpperBoundValues()[12], iceberg.PrimitiveTypes.Binary, []byte("wp"))
+	assertBounds(t, df.UpperBoundValues()[13], iceberg.DecimalTypeOf(8, 2), iceberg.Decimal{
+		Val:   decimal128.FromI64(87654321),
+		Scale: 2,
+	})
+	assertBounds(t, df.UpperBoundValues()[14], iceberg.DecimalTypeOf(16, 2), iceberg.Decimal{
+		Val:   decimal128.FromI64(6543210987654321),
+		Scale: 2,
+	})
+	expectedUpper, _ := (&big.Int{}).SetString("432109876543210987654321", 10)
+	assertBounds(t, df.UpperBoundValues()[15], iceberg.DecimalTypeOf(24, 2), iceberg.Decimal{
+		Val:   decimal128.FromBigInt(expectedUpper),
+		Scale: 2,
+	})
 }
