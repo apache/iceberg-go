@@ -19,15 +19,11 @@ package table
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"iter"
-	"maps"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
-	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -35,9 +31,6 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
-	"github.com/apache/arrow-go/v18/parquet/file"
-	"github.com/apache/arrow-go/v18/parquet/metadata"
-	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
@@ -1460,12 +1453,12 @@ type arrowStatsCollector struct {
 	defaultMode string
 }
 
-func (a *arrowStatsCollector) Schema(_ *iceberg.Schema, results func() []statisticsCollector) []statisticsCollector {
+func (a *arrowStatsCollector) Schema(_ *iceberg.Schema, results func() []tblutils.StatisticsCollector) []tblutils.StatisticsCollector {
 	return results()
 }
 
-func (a *arrowStatsCollector) Struct(_ iceberg.StructType, results []func() []statisticsCollector) []statisticsCollector {
-	result := make([]statisticsCollector, 0, len(results))
+func (a *arrowStatsCollector) Struct(_ iceberg.StructType, results []func() []tblutils.StatisticsCollector) []tblutils.StatisticsCollector {
+	result := make([]tblutils.StatisticsCollector, 0, len(results))
 	for _, res := range results {
 		result = append(result, res()...)
 	}
@@ -1473,19 +1466,19 @@ func (a *arrowStatsCollector) Struct(_ iceberg.StructType, results []func() []st
 	return result
 }
 
-func (a *arrowStatsCollector) Field(field iceberg.NestedField, fieldRes func() []statisticsCollector) []statisticsCollector {
+func (a *arrowStatsCollector) Field(field iceberg.NestedField, fieldRes func() []tblutils.StatisticsCollector) []tblutils.StatisticsCollector {
 	a.fieldID = field.ID
 
 	return fieldRes()
 }
 
-func (a *arrowStatsCollector) List(list iceberg.ListType, elemResult func() []statisticsCollector) []statisticsCollector {
+func (a *arrowStatsCollector) List(list iceberg.ListType, elemResult func() []tblutils.StatisticsCollector) []tblutils.StatisticsCollector {
 	a.fieldID = list.ElementID
 
 	return elemResult()
 }
 
-func (a *arrowStatsCollector) Map(m iceberg.MapType, keyResult func() []statisticsCollector, valResult func() []statisticsCollector) []statisticsCollector {
+func (a *arrowStatsCollector) Map(m iceberg.MapType, keyResult, valResult func() []tblutils.StatisticsCollector) []tblutils.StatisticsCollector {
 	a.fieldID = m.KeyID
 	keyRes := keyResult()
 
@@ -1495,20 +1488,20 @@ func (a *arrowStatsCollector) Map(m iceberg.MapType, keyResult func() []statisti
 	return append(keyRes, valRes...)
 }
 
-func (a *arrowStatsCollector) Primitive(dt iceberg.PrimitiveType) []statisticsCollector {
+func (a *arrowStatsCollector) Primitive(dt iceberg.PrimitiveType) []tblutils.StatisticsCollector {
 	colName, ok := a.schema.FindColumnName(a.fieldID)
 	if !ok {
-		return []statisticsCollector{}
+		return []tblutils.StatisticsCollector{}
 	}
 
-	metMode, err := matchMetricsMode(a.defaultMode)
+	metMode, err := tblutils.MatchMetricsMode(a.defaultMode)
 	if err != nil {
 		panic(err)
 	}
 
 	colMode, ok := a.props[MetricsModeColumnConfPrefix+"."+colName]
 	if ok {
-		metMode, err = matchMetricsMode(colMode)
+		metMode, err = tblutils.MatchMetricsMode(colMode)
 		if err != nil {
 			panic(err)
 		}
@@ -1518,26 +1511,26 @@ func (a *arrowStatsCollector) Primitive(dt iceberg.PrimitiveType) []statisticsCo
 	case iceberg.StringType:
 	case iceberg.BinaryType:
 	default:
-		if metMode.typ == metricModeTruncate {
-			metMode = metricsMode{typ: metricModeFull, len: 0}
+		if metMode.Typ == tblutils.MetricModeTruncate {
+			metMode = tblutils.MetricsMode{Typ: tblutils.MetricModeFull, Len: 0}
 		}
 	}
 
 	isNested := strings.Contains(colName, ".")
-	if isNested && (metMode.typ == metricModeTruncate || metMode.typ == metricModeFull) {
-		metMode = metricsMode{typ: metricModeCounts}
+	if isNested && (metMode.Typ == tblutils.MetricModeTruncate || metMode.Typ == tblutils.MetricModeFull) {
+		metMode = tblutils.MetricsMode{Typ: tblutils.MetricModeCounts}
 	}
 
-	return []statisticsCollector{{
-		fieldID:    a.fieldID,
-		icebergTyp: dt,
-		colName:    colName,
-		mode:       metMode,
+	return []tblutils.StatisticsCollector{{
+		FieldID:    a.fieldID,
+		IcebergTyp: dt,
+		ColName:    colName,
+		Mode:       metMode,
 	}}
 }
 
-func computeStatsPlan(sc *iceberg.Schema, props iceberg.Properties) (map[int]statisticsCollector, error) {
-	result := make(map[int]statisticsCollector)
+func computeStatsPlan(sc *iceberg.Schema, props iceberg.Properties) (map[int]tblutils.StatisticsCollector, error) {
+	result := make(map[int]tblutils.StatisticsCollector)
 
 	visitor := &arrowStatsCollector{
 		schema: sc, props: props,
@@ -1550,7 +1543,7 @@ func computeStatsPlan(sc *iceberg.Schema, props iceberg.Properties) (map[int]sta
 	}
 
 	for _, entry := range collectors {
-		result[entry.fieldID] = entry
+		result[entry.FieldID] = entry
 	}
 
 	return result, nil
@@ -1848,14 +1841,11 @@ func parquetFilesToDataFiles(fileIO iceio.IO, meta *MetadataBuilder, paths iter.
 		currentSchema, currentSpec := meta.CurrentSchema(), meta.CurrentSpec()
 
 		for filePath := range paths {
-			inputFile := must(fileIO.Open(filePath))
-			defer inputFile.Close()
-
-			rdr := must(file.NewParquetReader(inputFile))
+			format := tblutils.FormatFromFileName(filePath)
+			rdr := must(format.Open(ctx, fileIO, filePath))
 			defer rdr.Close()
 
-			arrRdr := must(pqarrow.NewFileReader(rdr, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator))
-			arrSchema := must(arrRdr.Schema())
+			arrSchema := must(rdr.Schema())
 
 			if hasIDs := must(VisitArrowSchema(arrSchema, hasIDs{})); hasIDs {
 				yield(nil, fmt.Errorf("%w: cannot add file %s because it has field-ids. add-files only supports the addition of files without field_ids",
@@ -1865,14 +1855,14 @@ func parquetFilesToDataFiles(fileIO iceio.IO, meta *MetadataBuilder, paths iter.
 			}
 
 			if err := checkArrowSchemaCompat(currentSchema, arrSchema, false); err != nil {
-				panic(err)
+				yield(nil, err)
+				return
 			}
 
-			statistics := dataFileStatsFromParquetMetadata(rdr.MetaData(),
-				must(computeStatsPlan(currentSchema, meta.props)),
-				must(parquetPathToIDMapping(currentSchema)))
+			statistics := format.DataFileStatsFromMeta(rdr, must(computeStatsPlan(currentSchema, meta.props)),
+				must(format.PathToIDMapping(currentSchema)))
 
-			df := statistics.toDataFile(currentSchema, currentSpec, filePath, iceberg.ParquetFile, rdr.MetaData().GetSourceFileSize())
+			df := statistics.ToDataFile(currentSchema, currentSpec, filePath, iceberg.ParquetFile, rdr.SourceFileSize())
 			if !yield(df, nil) {
 				return
 			}

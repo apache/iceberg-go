@@ -23,9 +23,7 @@ import (
 	"math"
 	"math/big"
 	"slices"
-	"strings"
 	"testing"
-	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
@@ -35,7 +33,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
-	"github.com/google/uuid"
+	"github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -177,6 +175,8 @@ type FileStatsMetricsSuite struct {
 }
 
 func (suite *FileStatsMetricsSuite) getDataFile(meta iceberg.Properties, writeStats []string) iceberg.DataFile {
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+
 	fileMeta, tableMeta := constructTestTable(suite.T(), writeStats)
 	require.NotNil(suite.T(), tableMeta)
 	require.NotNil(suite.T(), fileMeta)
@@ -193,12 +193,12 @@ func (suite *FileStatsMetricsSuite) getDataFile(meta iceberg.Properties, writeSt
 
 	collector, err := computeStatsPlan(schema, tableMeta.Properties())
 	suite.Require().NoError(err)
-	mapping, err := parquetPathToIDMapping(schema)
+	mapping, err := format.PathToIDMapping(schema)
 	suite.Require().NoError(err)
 
-	stats := dataFileStatsFromParquetMetadata(fileMeta, collector, mapping)
+	stats := format.DataFileStatsFromMeta(fileMeta, collector, mapping)
 
-	return stats.toDataFile(tableMeta.CurrentSchema(), tableMeta.PartitionSpec(), "fake-path.parquet",
+	return stats.ToDataFile(tableMeta.CurrentSchema(), tableMeta.PartitionSpec(), "fake-path.parquet",
 		iceberg.ParquetFile, fileMeta.GetSourceFileSize())
 }
 
@@ -357,39 +357,6 @@ func TestFileMetrics(t *testing.T) {
 	suite.Run(t, new(FileStatsMetricsSuite))
 }
 
-func TestMetricsModePairs(t *testing.T) {
-	tests := []struct {
-		str      string
-		expected metricsMode
-	}{
-		{"none", metricsMode{typ: metricModeNone}},
-		{"nOnE", metricsMode{typ: metricModeNone}},
-		{"counts", metricsMode{typ: metricModeCounts}},
-		{"Counts", metricsMode{typ: metricModeCounts}},
-		{"full", metricsMode{typ: metricModeFull}},
-		{"FuLl", metricsMode{typ: metricModeFull}},
-		{" FuLl", metricsMode{typ: metricModeFull}},
-		{"truncate(16)", metricsMode{typ: metricModeTruncate, len: 16}},
-		{"trUncatE(16)", metricsMode{typ: metricModeTruncate, len: 16}},
-		{"trUncatE(7)", metricsMode{typ: metricModeTruncate, len: 7}},
-		{"trUncatE(07)", metricsMode{typ: metricModeTruncate, len: 7}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.str, func(t *testing.T) {
-			mode, err := matchMetricsMode(tt.str)
-			require.NoError(t, err)
-			assert.Equal(t, tt.expected, mode)
-		})
-	}
-
-	_, err := matchMetricsMode("truncatE(-7)")
-	assert.ErrorContains(t, err, "malformed truncate metrics mode: truncatE(-7)")
-
-	_, err = matchMetricsMode("truncatE(0)")
-	assert.ErrorContains(t, err, "invalid truncate length: 0")
-}
-
 var tableSchemaNested = iceberg.NewSchemaWithIdentifiers(1,
 	[]int{1},
 	iceberg.NestedField{
@@ -455,13 +422,13 @@ func TestStatsTypes(t *testing.T) {
 	require.NoError(t, err)
 
 	// field ids should be sorted
-	assert.True(t, slices.IsSortedFunc(statsCols, func(a, b statisticsCollector) int {
-		return cmp.Compare(a.fieldID, b.fieldID)
+	assert.True(t, slices.IsSortedFunc(statsCols, func(a, b internal.StatisticsCollector) int {
+		return cmp.Compare(a.FieldID, b.FieldID)
 	}))
 
 	actual := make([]iceberg.Type, len(statsCols))
 	for i, col := range statsCols {
-		actual[i] = col.icebergTyp
+		actual[i] = col.IcebergTyp
 	}
 
 	assert.Equal(t, []iceberg.Type{

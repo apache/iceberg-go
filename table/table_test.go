@@ -32,7 +32,6 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/apache/iceberg-go/internal"
-	"github.com/apache/iceberg-go/io"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
@@ -146,6 +145,8 @@ func (t *TableTestSuite) TestSnapshotByName() {
 type TableWritingTestSuite struct {
 	suite.Suite
 
+	ctx context.Context
+
 	tableSchema      *iceberg.Schema
 	arrSchema        *arrow.Schema
 	arrTbl           arrow.Table
@@ -163,6 +164,7 @@ type TableWritingTestSuite struct {
 }
 
 func (t *TableWritingTestSuite) SetupSuite() {
+	t.ctx = context.Background()
 	mem := memory.DefaultAllocator
 
 	t.tableSchema = iceberg.NewSchema(0,
@@ -305,7 +307,7 @@ func (t *TableWritingTestSuite) TestAddFilesUnpartitioned() {
 	}
 
 	tx := tbl.NewTransaction()
-	t.Require().NoError(tx.AddFiles(files, nil, false))
+	t.Require().NoError(tx.AddFiles(t.ctx, files, nil, false))
 
 	stagedTbl, err := tx.StagedTable()
 	t.Require().NoError(err)
@@ -353,7 +355,7 @@ func (t *TableWritingTestSuite) TestAddFilesFileNotFound() {
 
 	files = append(files, t.location+"/unpartitioned_file_not_found/unknown.parquet")
 	tx := tbl.NewTransaction()
-	err := tx.AddFiles(files, nil, false)
+	err := tx.AddFiles(t.ctx, files, nil, false)
 	t.Error(err)
 	t.ErrorContains(err, "no such file or directory")
 }
@@ -373,7 +375,7 @@ func (t *TableWritingTestSuite) TestAddFilesUnpartitionedHasFieldIDs() {
 	}
 
 	tx := tbl.NewTransaction()
-	err := tx.AddFiles(files, nil, false)
+	err := tx.AddFiles(t.ctx, files, nil, false)
 	t.Error(err)
 	t.ErrorIs(err, iceberg.ErrNotImplemented)
 }
@@ -405,7 +407,7 @@ func (t *TableWritingTestSuite) TestAddFilesFailsSchemaMismatch() {
 	defer pterm.EnableOutput()
 
 	tx := tbl.NewTransaction()
-	err = tx.AddFiles(files, nil, false)
+	err = tx.AddFiles(t.ctx, files, nil, false)
 	t.Error(err)
 	t.EqualError(err, `error encountered during parquet file conversion: error encountered during schema visitor: mismatch in fields:
    | Table Field              | Requested Field         
@@ -445,7 +447,7 @@ func (t *TableWritingTestSuite) TestAddFilesPartitionedTable() {
 	}
 
 	tx := tbl.NewTransaction()
-	t.Require().NoError(tx.AddFiles(files, nil, false))
+	t.Require().NoError(tx.AddFiles(t.ctx, files, nil, false))
 
 	stagedTbl, err := tx.StagedTable()
 	t.Require().NoError(err)
@@ -503,7 +505,7 @@ func (t *TableWritingTestSuite) TestAddFilesToBucketPartitionedTableFails() {
 	}
 
 	tx := tbl.NewTransaction()
-	err := tx.AddFiles(files, nil, false)
+	err := tx.AddFiles(t.ctx, files, nil, false)
 	t.Error(err)
 	t.ErrorContains(err, "cannot infer partition value from parquet metadata for a non-linear partition field: baz_bucket_3 with transform bucket[3]")
 }
@@ -531,7 +533,7 @@ func (t *TableWritingTestSuite) TestAddFilesToPartitionedTableFailsLowerAndUpper
 	}
 
 	tx := tbl.NewTransaction()
-	err := tx.AddFiles(files, nil, false)
+	err := tx.AddFiles(t.ctx, files, nil, false)
 	t.Error(err)
 	t.ErrorContains(err, "cannot infer partition value from parquet metadata as there is more than one value for partition field: baz. (low: 123, high: 124)")
 }
@@ -569,7 +571,7 @@ func (t *TableWritingTestSuite) TestAddFilesWithLargeAndRegular() {
 	t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePathLarge, arrTableLarge)
 
 	tx := tbl.NewTransaction()
-	t.Require().NoError(tx.AddFiles([]string{filePath, filePathLarge}, nil, false))
+	t.Require().NoError(tx.AddFiles(t.ctx, []string{filePath, filePathLarge}, nil, false))
 
 	scan, err := tx.Scan(table.WithOptions(iceberg.Properties{
 		table.ScanOptionArrowUseLargeTypes: "true",
@@ -592,7 +594,7 @@ func (t *TableWritingTestSuite) TestAddFilesValidUpcast() {
 	t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePath, t.arrTablePromotedTypes)
 
 	tx := tbl.NewTransaction()
-	t.Require().NoError(tx.AddFiles([]string{filePath}, nil, false))
+	t.Require().NoError(tx.AddFiles(t.ctx, []string{filePath}, nil, false))
 
 	scan, err := tx.Scan()
 	t.Require().NoError(err)
@@ -640,7 +642,7 @@ func (t *TableWritingTestSuite) TestAddFilesSubsetOfSchema() {
 	t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePath, withoutCol)
 
 	tx := tbl.NewTransaction()
-	t.Require().NoError(tx.AddFiles([]string{filePath}, nil, false))
+	t.Require().NoError(tx.AddFiles(t.ctx, []string{filePath}, nil, false))
 
 	scan, err := tx.Scan()
 	t.Require().NoError(err)
@@ -675,7 +677,7 @@ func (t *TableWritingTestSuite) TestAddFilesDuplicateFilesInFilePaths() {
 	t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePath, t.arrTbl)
 
 	tx := tbl.NewTransaction()
-	err := tx.AddFiles([]string{filePath, filePath}, nil, false)
+	err := tx.AddFiles(t.ctx, []string{filePath, filePath}, nil, false)
 	t.Error(err)
 	t.ErrorContains(err, "file paths must be unique for AddFiles")
 }
@@ -695,9 +697,9 @@ func (t *TableWritingTestSuite) TestAddFilesReferencedByCurrentSnapshot() {
 	}
 
 	tx := tbl.NewTransaction()
-	t.Require().NoError(tx.AddFiles(files, nil, false))
+	t.Require().NoError(tx.AddFiles(t.ctx, files, nil, false))
 
-	err := tx.AddFiles(files[len(files)-1:], nil, false)
+	err := tx.AddFiles(t.ctx, files[len(files)-1:], nil, false)
 	t.Error(err)
 	t.ErrorContains(err, "cannot add files that are already referenced by table, files:")
 }
@@ -717,9 +719,9 @@ func (t *TableWritingTestSuite) TestAddFilesReferencedCurrentSnapshotIgnoreDupli
 	}
 
 	tx := tbl.NewTransaction()
-	t.Require().NoError(tx.AddFiles(files, nil, false))
+	t.Require().NoError(tx.AddFiles(t.ctx, files, nil, false))
 
-	t.Require().NoError(tx.AddFiles(files[len(files)-1:], nil, true))
+	t.Require().NoError(tx.AddFiles(t.ctx, files[len(files)-1:], nil, true))
 	staged, err := tx.StagedTable()
 	t.Require().NoError(err)
 
@@ -747,8 +749,8 @@ func TestAddToTable(t *testing.T) {
 	require.NoError(t, err)
 
 	props := iceberg.Properties{
-		io.S3Region:      "us-east-1",
-		io.S3AccessKeyID: "admin", io.S3SecretAccessKey: "password"}
+		iceio.S3Region:      "us-east-1",
+		iceio.S3AccessKeyID: "admin", iceio.S3SecretAccessKey: "password"}
 
 	tbl, err := cat.LoadTable(ctx, catalog.ToIdentifier("default", "test_limit"), props)
 	require.NoError(t, err)
@@ -768,7 +770,7 @@ func TestAddToTable(t *testing.T) {
 	require.NoError(t, pqarrow.WriteTable(arrTbl, fw, arrTbl.NumRows(), nil, pqarrow.DefaultWriterProps()))
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles([]string{"s3://warehouse/default/test_limit/data/sample_test.parquet"}, nil, false))
+	require.NoError(t, tx.AddFiles(ctx, []string{"s3://warehouse/default/test_limit/data/sample_test.parquet"}, nil, false))
 	result, err := tx.Commit(ctx)
 	require.NoError(t, err)
 
