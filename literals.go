@@ -1215,8 +1215,9 @@ func (d DecimalLiteral) MarshalBinary() (data []byte, err error) {
 	// stored as unscaled value in two's compliment big-endian values
 	// using the minimum number of bytes for the values
 	n := decimal128.Num(d.Val).BigInt()
+	minBytes := (n.BitLen() + 8) / 8
 	// bytes gives absolute value as big-endian bytes
-	data = n.Bytes()
+	data = n.FillBytes(make([]byte, minBytes))
 	if n.Sign() < 0 {
 		// convert to 2's complement for negative value
 		for i, v := range data {

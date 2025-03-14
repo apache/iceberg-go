@@ -26,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/apache/arrow-go/v18/arrow/decimal128"
+	"github.com/apache/arrow-go/v18/arrow/decimal"
 )
 
 var (
@@ -484,7 +484,7 @@ func (d DecimalType) Scale() int     { return d.scale }
 func (DecimalType) primitive()       {}
 
 type Decimal struct {
-	Val   decimal128.Num
+	Val   decimal.Decimal128
 	Scale int
 }
 
