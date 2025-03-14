@@ -88,6 +88,7 @@ func MakeSequencedChan[T any](bufferSize uint, source <-chan T, comesAfter, isNe
 func u64FromBigEndianShifted(buf []byte) uint64 {
 	var bytes [8]byte
 	copy(bytes[8-len(buf):], buf)
+
 	return binary.BigEndian.Uint64(bytes[:])
 }
 
