@@ -108,8 +108,8 @@ func TestManifestEvaluator(t *testing.T) {
 	}
 
 	spec := iceberg.NewPartitionSpec(partFields...)
-	manifestNoStats := iceberg.NewManifestV1Builder("", 0, 0, 0).Build()
-	manifest := iceberg.NewManifestV1Builder("", 0, 0, 0).Partitions(
+	manifestNoStats := iceberg.NewManifestFile(1, "", 0, 0, 0).Build()
+	manifest := iceberg.NewManifestFile(1, "", 0, 0, 0).Partitions(
 		[]iceberg.FieldSummary{
 			{ // id
 				ContainsNull: false,
