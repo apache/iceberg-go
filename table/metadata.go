@@ -18,6 +18,7 @@
 package table
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,6 +43,25 @@ const (
 	addSnapshotAction    = "add-snapshot"
 	addSortOrderAction   = "add-sort-order"
 )
+
+func generateSnapshotID() int64 {
+	var (
+		rndUUID = uuid.New()
+		out     [8]byte
+	)
+
+	for i := range 8 {
+		lhs, rhs := rndUUID[i], rndUUID[i+8]
+		out[i] = lhs ^ rhs
+	}
+
+	snapshotID := int64(binary.LittleEndian.Uint64(out[:]))
+	if snapshotID < 0 {
+		snapshotID = -snapshotID
+	}
+
+	return snapshotID
+}
 
 // Metadata for an iceberg table as specified in the Iceberg spec
 //
@@ -210,6 +230,37 @@ func (b *MetadataBuilder) CurrentSpec() iceberg.PartitionSpec {
 
 func (b *MetadataBuilder) CurrentSchema() *iceberg.Schema {
 	s, _ := b.GetSchemaByID(b.currentSchemaID)
+
+	return s
+}
+
+func (b *MetadataBuilder) nextSequenceNumber() int64 {
+	if b.formatVersion > 1 {
+		if b.lastSequenceNumber == nil {
+			return 0
+		}
+
+		return *b.lastSequenceNumber + 1
+	}
+
+	return 0
+}
+
+func (b *MetadataBuilder) newSnapshotID() int64 {
+	snapshotID := generateSnapshotID()
+	for slices.ContainsFunc(b.snapshotList, func(s Snapshot) bool { return s.SnapshotID == snapshotID }) {
+		snapshotID = generateSnapshotID()
+	}
+
+	return snapshotID
+}
+
+func (b *MetadataBuilder) currentSnapshot() *Snapshot {
+	if b.currentSnapshotID == nil {
+		return nil
+	}
+
+	s, _ := b.SnapshotByID(*b.currentSnapshotID)
 
 	return s
 }

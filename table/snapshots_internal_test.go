@@ -194,3 +194,14 @@ func TestInvalidOperation(t *testing.T) {
 	_, err := updateSnapshotSummaries(Summary{Operation: OpReplace}, nil, false)
 	assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
 }
+
+func TestTruncateUpperBoundString(t *testing.T) {
+	assert.Equal(t, "ab", truncateUpperBoundText("aaaa", 2))
+	// \u10FFFF\u10FFFF\x00
+	assert.Equal(t, "", truncateUpperBoundText("\xf4\x8f\xbf\xbf\xf4\x8f\xbf\xbf\x00", 2))
+}
+
+func TestTruncateUpperBoundBinary(t *testing.T) {
+	assert.Equal(t, []byte{0x01, 0x03}, truncateUpperBoundBinary([]byte{0x01, 0x02, 0x03}, 2))
+	assert.Nil(t, truncateUpperBoundBinary([]byte{0xff, 0xff, 0x00}, 2))
+}
