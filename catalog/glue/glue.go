@@ -283,8 +283,62 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	return createdTable, nil
 }
 
-func (c *Catalog) CommitTable(context.Context, *table.Table, []table.Requirement, []table.Update) (table.Metadata, string, error) {
-	panic("commit table not implemented for Glue Catalog")
+func (c *Catalog) CommitTable(ctx context.Context, table *table.Table, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
+	tableIdentifier := table.Identifier()
+	database, tableName, err := identifierToGlueTable(tableIdentifier)
+	if err != nil {
+		return nil, "", err
+	}
+
+	currentGlueTable, err := c.getTable(ctx, database, tableName)
+	if err != nil {
+		return nil, "", err
+	}
+
+	glueTableVersionID := currentGlueTable.VersionId
+	currentTable, err := c.glueToIcebergTable(ctx, currentGlueTable)
+	if err != nil {
+		return nil, "", err
+	}
+
+	updatedStageTable, err := c
+}
+
+func (c *Catalog) updateAndStageTable(currentTable *table.Table, identifier table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
+	var metadata table.Metadata
+	if currentTable != nil {
+		metadata = currentTable.Metadata()
+	}
+
+	for _, req := range requirements {
+		err := req.Validate(metadata)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	updatedMetadata, err := table.UpdateTableMetadata(metadata, updates)
+	if err != nil {
+		return nil, err
+	}
+}
+
+func (c *Catalog) glueToIcebergTable(ctx context.Context, gTable *types.Table) (*table.Table, error) {
+	location, ok := gTable.Parameters[metadataLocationPropsKey]
+	if !ok {
+		return nil, fmt.Errorf("missing metadata location for table %s.%s", *gTable.DatabaseName, *gTable.Name)
+	}
+	props := gTable.Parameters
+	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
+	// TODO: consider providing a way to directly access the S3 iofs to enable testing of the catalog.
+	iofs, err := io.LoadFS(ctx, props, location)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load table %s.%s: %w", *gTable.DatabaseName, *gTable.Name, err)
+	}
+
+	return table.NewFromLocation(
+		TableIdentifier(*gTable.DatabaseName, *gTable.Name),
+		location, iofs, c)
 }
 
 // DropTable deletes an Iceberg table from the Glue catalog.
