@@ -87,6 +87,9 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 		}
 	}
 
+	// u.Apply will add updates to t.meta.updates if they are not no-ops
+	// and actually perform changes. So let's check if we actually had any
+	// changes added and thus need to update the lastupdated value.
 	if prevUpdates < len(t.meta.updates) {
 		if prevLastUpdated == t.meta.lastUpdatedMS {
 			t.meta.lastUpdatedMS = time.Now().UnixMilli()
