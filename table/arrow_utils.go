@@ -43,6 +43,7 @@ import (
 	iceio "github.com/apache/iceberg-go/io"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
+	"github.com/pterm/pterm"
 )
 
 // constants to look for as Keys in Arrow field metadata
@@ -907,6 +908,139 @@ func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schem
 	result.Release()
 
 	return out, nil
+}
+
+type schemaCompatVisitor struct {
+	provided *iceberg.Schema
+
+	errorData pterm.TableData
+}
+
+func checkSchemaCompat(requested, provided *iceberg.Schema) error {
+	sc := &schemaCompatVisitor{
+		provided:  provided,
+		errorData: pterm.TableData{{"", "Table Field", "Requested Field"}},
+	}
+
+	_, compat := iceberg.PreOrderVisit(requested, sc)
+
+	return compat
+}
+
+func checkArrowSchemaCompat(requested *iceberg.Schema, provided *arrow.Schema, downcastNanoToMicro bool) error {
+	mapping := requested.NameMapping()
+	providedSchema, err := ArrowSchemaToIceberg(provided, downcastNanoToMicro, mapping)
+	if err != nil {
+		return err
+	}
+
+	return checkSchemaCompat(requested, providedSchema)
+}
+
+func (sc *schemaCompatVisitor) isFieldCompat(lhs iceberg.NestedField) bool {
+	rhs, ok := sc.provided.FindFieldByID(lhs.ID)
+	if !ok {
+		if lhs.Required {
+			sc.errorData = append(sc.errorData,
+				[]string{"❌", lhs.String(), "missing"})
+
+			return false
+		}
+		sc.errorData = append(sc.errorData,
+			[]string{"✅", lhs.String(), "missing"})
+
+		return true
+	}
+
+	if lhs.Required && !rhs.Required {
+		sc.errorData = append(sc.errorData,
+			[]string{"❌", lhs.String(), rhs.String()})
+
+		return false
+	}
+
+	if lhs.Type.Equals(rhs.Type) {
+		sc.errorData = append(sc.errorData,
+			[]string{"✅", lhs.String(), rhs.String()})
+
+		return true
+	}
+
+	// we only check that parent node is also of the same type
+	// we check the type of the child nodes as we traverse them later
+	switch lhs.Type.(type) {
+	case *iceberg.StructType:
+		if rhs, ok := rhs.Type.(*iceberg.StructType); ok {
+			sc.errorData = append(sc.errorData,
+				[]string{"✅", lhs.String(), rhs.String()})
+
+			return true
+		}
+	case *iceberg.ListType:
+		if rhs, ok := rhs.Type.(*iceberg.ListType); ok {
+			sc.errorData = append(sc.errorData,
+				[]string{"✅", lhs.String(), rhs.String()})
+
+			return true
+		}
+	case *iceberg.MapType:
+		if rhs, ok := rhs.Type.(*iceberg.MapType); ok {
+			sc.errorData = append(sc.errorData,
+				[]string{"✅", lhs.String(), rhs.String()})
+
+			return true
+		}
+	}
+
+	if _, err := iceberg.PromoteType(rhs.Type, lhs.Type); err != nil {
+		sc.errorData = append(sc.errorData,
+			[]string{"❌", lhs.String(), rhs.String()})
+
+		return false
+	}
+
+	sc.errorData = append(sc.errorData,
+		[]string{"✅", lhs.String(), rhs.String()})
+
+	return true
+}
+
+func (sc *schemaCompatVisitor) Schema(s *iceberg.Schema, v func() bool) bool {
+	if !v() {
+		pterm.DisableColor()
+		tbl := pterm.DefaultTable.WithHasHeader(true).WithData(sc.errorData)
+		tbl.Render()
+		txt, _ := tbl.Srender()
+		pterm.EnableColor()
+		panic("mismatch in fields:\n" + txt)
+	}
+
+	return true
+}
+
+func (sc *schemaCompatVisitor) Struct(st iceberg.StructType, v []func() bool) bool {
+	out := true
+	for _, res := range v {
+		out = res() && out
+	}
+
+	return out
+}
+
+func (sc *schemaCompatVisitor) Field(n iceberg.NestedField, v func() bool) bool {
+	return sc.isFieldCompat(n) && v()
+}
+
+func (sc *schemaCompatVisitor) List(l iceberg.ListType, v func() bool) bool {
+	return sc.isFieldCompat(l.ElementField()) && v()
+}
+
+func (sc *schemaCompatVisitor) Map(m iceberg.MapType, vk, vv func() bool) bool {
+	return sc.isFieldCompat(m.KeyField()) && sc.isFieldCompat(m.ValueField()) && vk() && vv()
+}
+
+func (sc *schemaCompatVisitor) Primitive(p iceberg.PrimitiveType) bool {
+	return true
 }
 
 func must[T any](v T, err error) T {

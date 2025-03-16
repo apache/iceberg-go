@@ -91,10 +91,6 @@ func (fa *fastAppendFiles) deletedEntries() ([]iceberg.ManifestEntry, error) {
 	return nil, nil
 }
 
-const (
-	SnapshotMinFileGroupSize = 10_000
-)
-
 type snapshotProducer struct {
 	producerImpl
 
