@@ -58,6 +58,8 @@ func (m ManifestContent) String() string {
 	}
 }
 
+const initialSequenceNumber = 0
+
 type FieldSummary struct {
 	ContainsNull bool    `avro:"contains_null"`
 	ContainsNaN  *bool   `avro:"contains_nan"`
@@ -179,7 +181,7 @@ type manifestFileV1 struct {
 func (m *manifestFileV1) toFile() *manifestFile {
 	m.manifestFile.version = 1
 	m.Content = ManifestContentData
-	m.SeqNumber, m.MinSeqNumber = 0, 0
+	m.SeqNumber, m.MinSeqNumber = initialSequenceNumber, initialSequenceNumber
 
 	if m.AddedFilesCount != nil {
 		m.manifestFile.AddedFilesCount = *m.AddedFilesCount
@@ -913,7 +915,7 @@ func (w *ManifestWriter) ToManifestFile(location string, length int64) (Manifest
 		return nil, err
 	}
 
-	if w.minSeqNum == 0 {
+	if w.minSeqNum == initialSequenceNumber {
 		w.minSeqNum = -1
 	}
 
@@ -1513,11 +1515,11 @@ func (m *manifestEntry) inherit(manifest ManifestFile) {
 	}
 
 	manifestSequenceNum := manifest.SequenceNum()
-	if m.SeqNum == nil && (manifestSequenceNum == 0 || m.EntryStatus == EntryStatusADDED) {
+	if m.SeqNum == nil && (manifestSequenceNum == initialSequenceNumber || m.EntryStatus == EntryStatusADDED) {
 		m.SeqNum = &manifestSequenceNum
 	}
 
-	if m.FileSeqNum == nil && (manifestSequenceNum == 0 || m.EntryStatus == EntryStatusADDED) {
+	if m.FileSeqNum == nil && (manifestSequenceNum == initialSequenceNumber || m.EntryStatus == EntryStatusADDED) {
 		m.FileSeqNum = &manifestSequenceNum
 	}
 
