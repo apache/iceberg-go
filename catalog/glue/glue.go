@@ -229,6 +229,8 @@ func (c *Catalog) CatalogType() catalog.Type {
 	return catalog.Glue
 }
 
+// CreateTable creates a new Iceberg table in the Glue catalog.
+// AWS Glue will create a new table and a new metadata file in S3 with the format: metadataLocation/metadata/00000-00000-00000-00000-00000.metadata.json.
 func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
 	database, tableName, err := identifierToGlueTable(identifier)
 	if err != nil {
@@ -241,16 +243,14 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	if cfg.Location == "" {
 		return nil, errors.New("metadata location is required for table creation")
 	}
-	parameters := map[string]string{
-		tableTypePropsKey:        glueTypeIceberg,
-		metadataLocationPropsKey: cfg.Location,
-	}
+	parameters := map[string]string{}
 	for k, v := range cfg.Properties {
 		parameters[k] = v
 	}
 	tableInput := &types.TableInput{
 		Name:       aws.String(tableName),
 		Parameters: parameters,
+		TableType:  aws.String("EXTERNAL_TABLE"),
 		StorageDescriptor: &types.StorageDescriptor{
 			Location: aws.String(cfg.Location),
 			Columns:  schemaToGlueColumns(schema),
@@ -260,6 +260,11 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		CatalogId:    c.catalogId,
 		DatabaseName: aws.String(database),
 		TableInput:   tableInput,
+		OpenTableFormatInput: &types.OpenTableFormatInput{
+			IcebergInput: &types.IcebergInput{
+				MetadataOperation: types.MetadataOperationCreate,
+			},
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create table %s.%s: %w", database, tableName, err)

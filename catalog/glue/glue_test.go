@@ -33,6 +33,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/glue"
 	"github.com/aws/aws-sdk-go-v2/service/glue/types"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -808,33 +809,58 @@ func TestGlueCreateTableSuccessIntegration(t *testing.T) {
 	metadataLocation := os.Getenv("TEST_TABLE_LOCATION")
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
-
 	ctlg := NewCatalog(WithAwsConfig(awsCfg))
 	sourceTable, err := ctlg.LoadTable(context.TODO(), []string{dbName, sourceTableName}, nil)
 	assert.NoError(err)
 	assert.Equal([]string{sourceTableName}, sourceTable.Identifier())
-
 	newTableName := fmt.Sprintf("%d_%s", time.Now().UnixNano(), sourceTableName)
 	createOpts := []catalog.CreateTableOpt{
 		catalog.WithLocation(metadataLocation),
-		catalog.WithProperties(map[string]string{
-			"table_type":        "ICEBERG",
-			"metadata_location": metadataLocation,
-		}),
 	}
-	newTableLoaded, err := ctlg.CreateTable(context.TODO(), TableIdentifier(dbName, newTableName), sourceTable.Schema(), createOpts...)
+	newTable, err := ctlg.CreateTable(context.TODO(), TableIdentifier(dbName, newTableName), sourceTable.Schema(), createOpts...)
+	defer func() {
+		cleanupErr := ctlg.DropTable(context.TODO(), TableIdentifier(dbName, newTableName))
+		if cleanupErr != nil {
+			t.Logf("Warning: Failed to clean up table %s.%s: %v", dbName, newTableName, cleanupErr)
+		}
+		// Clean up the newly created metadata file in S3
+		if newTable != nil {
+			s3Client := s3.NewFromConfig(awsCfg)
+			metadataLoc := newTable.MetadataLocation()
+			if strings.HasPrefix(metadataLoc, "s3://") {
+				parts := strings.SplitN(strings.TrimPrefix(metadataLoc, "s3://"), "/", 2)
+				if len(parts) == 2 {
+					bucket := parts[0]
+					key := parts[1]
+					_, deleteErr := s3Client.DeleteObject(context.TODO(), &s3.DeleteObjectInput{
+						Bucket: aws.String(bucket),
+						Key:    aws.String(key),
+					})
+					if deleteErr != nil {
+						t.Logf("Warning: Failed to delete metadata file at %s: %v", metadataLoc, deleteErr)
+					}
+				}
+			}
+		}
+	}()
+	assert.True(false)
 	assert.NoError(err)
-	assert.Equal([]string{newTableName}, newTableLoaded.Identifier())
+	assert.Equal([]string{newTableName}, newTable.Identifier())
 
-	// Load the newly created newTableLoaded
 	tableNewLoaded, err := ctlg.LoadTable(context.TODO(), []string{dbName, newTableName}, nil)
 	assert.NoError(err)
 	assert.Equal([]string{newTableName}, tableNewLoaded.Identifier())
 	assert.Equal(sourceTable.Schema().Fields(), tableNewLoaded.Schema().Fields())
-	assert.Equal(sourceTable.MetadataLocation(), tableNewLoaded.MetadataLocation())
-	// clean up the newly created newTableLoaded
-	err = ctlg.DropTable(context.TODO(), TableIdentifier(dbName, newTableName))
+	assert.Contains(tableNewLoaded.MetadataLocation(), metadataLocation)
+
+	glueClient := glue.NewFromConfig(awsCfg)
+	tableResponse, err := glueClient.GetTable(context.TODO(), &glue.GetTableInput{
+		DatabaseName: aws.String(dbName),
+		Name:         aws.String(newTableName),
+	})
 	assert.NoError(err)
+	assert.Equal("EXTERNAL_TABLE", aws.ToString(tableResponse.Table.TableType))
+	assert.Equal(glueTypeIceberg, tableResponse.Table.Parameters[tableTypePropsKey])
 }
 
 func TestGlueCreateTableInvalidMetadataRollback(t *testing.T) {
@@ -846,23 +872,17 @@ func TestGlueCreateTableInvalidMetadataRollback(t *testing.T) {
 	}
 	assert := require.New(t)
 	// Use a non-existent S3 location for metadata
-	invalidMetadataLocation := "s3://test-bucket/nonexistent/metadata/00000-123.metadata.json"
+	invalidMetadataLocation := "s3://nonexistent-test-bucket"
 	dbName := os.Getenv("TEST_DATABASE_NAME")
 	sourceTableName := os.Getenv("TEST_TABLE_NAME")
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
-
 	ctlg := NewCatalog(WithAwsConfig(awsCfg))
 	sourceTable, err := ctlg.LoadTable(context.TODO(), []string{dbName, sourceTableName}, nil)
 	assert.NoError(err)
-
 	newTableName := fmt.Sprintf("%d_%s", time.Now().UnixNano(), sourceTableName)
 	createOpts := []catalog.CreateTableOpt{
 		catalog.WithLocation(invalidMetadataLocation),
-		catalog.WithProperties(map[string]string{
-			"table_type":        "ICEBERG",
-			"metadata_location": invalidMetadataLocation,
-		}),
 	}
 	_, err = ctlg.CreateTable(context.TODO(), TableIdentifier(dbName, newTableName), sourceTable.Schema(), createOpts...)
 	assert.Error(err, "expected error when creating table with invalid metadata location")
@@ -897,10 +917,6 @@ func TestGlueCreateTableRollbackOnInvalidMetadata(t *testing.T) {
 	}, mock.Anything).Return(&glue.GetTableOutput{
 		Table: &types.Table{
 			Name: aws.String("test_rollback_table"),
-			Parameters: map[string]string{
-				tableTypePropsKey:        glueTypeIceberg,
-				metadataLocationPropsKey: "s3://test-bucket/nonexistent/metadata.json",
-			},
 		},
 	}, nil)
 	mockGlueSvc.On("DeleteTable", mock.Anything, &glue.DeleteTableInput{
@@ -914,7 +930,7 @@ func TestGlueCreateTableRollbackOnInvalidMetadata(t *testing.T) {
 	_, err := glueCatalog.CreateTable(context.TODO(),
 		TableIdentifier("test_database", "test_rollback_table"),
 		schema,
-		catalog.WithLocation("s3://test-bucket/nonexistent/metadata.json"))
+		catalog.WithLocation("s3://non-existent-test-bucket"))
 	// Should fail because LoadTable will fail to load the nonexistent metadata
 	assert.Error(err)
 	assert.Contains(err.Error(), "failed to create table")
