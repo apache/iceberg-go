@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"iter"
 	"strconv"
+	"strings"
 	_ "unsafe"
 
 	"github.com/apache/iceberg-go"
@@ -50,7 +51,8 @@ const (
 	locationPropsKey = "Location"
 
 	// Table metadata location pointer.
-	metadataLocationPropsKey = "metadata_location"
+	metadataLocationPropsKey         = "metadata_location"
+	previousMetadataLocationPropsKey = "previous_metadata_location"
 
 	// The ID of the Glue Data Catalog where the tables reside. If none is provided, Glue
 	// automatically uses the caller's AWS account ID by default.
@@ -64,6 +66,8 @@ const (
 	Endpoint        = "glue.endpoint"
 	MaxRetries      = "glue.max-retries"
 	RetryMode       = "glue.retry-mode"
+
+	ExternalTable = "EXTERNAL_TABLE"
 )
 
 var _ catalog.Catalog = (*Catalog)(nil)
@@ -301,13 +305,59 @@ func (c *Catalog) CommitTable(ctx context.Context, table *table.Table, requireme
 		return nil, "", err
 	}
 
-	updatedStageTable, err := c
+	updatedStageTable, err := c.updateAndStageTable(ctx, table, tableIdentifier, requirements, updates)
+	if err != nil {
+		return nil, "", err
+	}
+
+	// no change; do nothing
+	if currentTable != nil && updatedStageTable.Metadata() == currentTable.Metadata() {
+		return currentTable.Metadata(), currentTable.MetadataLocation(), nil
+	}
+
+	err = internal.WriteMetadata(ctx, updatedStageTable.Metadata(),
+		updatedStageTable.MetadataLocation(), updatedStageTable.Properties())
+	if err != nil {
+		return nil, "", err
+	}
+
+	if table != nil {
+		if glueTableVersionID == nil {
+			return nil, "", fmt.Errorf("Cannot commit %s.%s because Glue Table version id is missing", database, tableName)
+		}
+
+		newParameters := currentTable.Properties()
+		newParameters[tableTypePropsKey] = glueTypeIceberg
+		newParameters[metadataLocationPropsKey] = updatedStageTable.Location()
+		if currentTable != nil {
+			newParameters[previousMetadataLocationPropsKey] = currentTable.MetadataLocation()
+		}
+
+		updateTableInput = &glue.UpdateTableInput{
+			DatabaseName: &database,
+			TableInput: &types.TableInput{
+				Name:       &tableName,
+				TableType:  aws.String(ExternalTable),
+				Parameters: newParameters,
+				StorageDescriptor: &types.StorageDescriptor{
+					Columns:  toColumns(updatedStageTable.Metadata()),
+					Location: aws.String(updatedStageTable.MetadataLocation()),
+				},
+				Description: aws.String(updatedStageTable.Properties()["Description"]),
+			},
+		}
+	}
+
+	return nil, "", nil
 }
 
-func (c *Catalog) updateAndStageTable(currentTable *table.Table, identifier table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
+func (c *Catalog) updateAndStageTable(ctx context.Context, currentTable *table.Table, identifier table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
 	var metadata table.Metadata
+	newMetadataVersion := 0
+
 	if currentTable != nil {
 		metadata = currentTable.Metadata()
+		newMetadataVersion = metadata.Version() + 1
 	}
 
 	for _, req := range requirements {
@@ -321,6 +371,23 @@ func (c *Catalog) updateAndStageTable(currentTable *table.Table, identifier tabl
 	if err != nil {
 		return nil, err
 	}
+
+	provider, err := table.LoadLocationProvider(updatedMetadata.Location(), updatedMetadata.Properties())
+	if err != nil {
+		return nil, err
+	}
+
+	newMetadataLocation, err := provider.NewTableMetadataFileLocation(newMetadataVersion)
+	if err != nil {
+		return nil, err
+	}
+
+	iofs, err := io.LoadFS(ctx, updatedMetadata.Properties(), newMetadataLocation)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load table %s: %w", strings.Join(currentTable.Identifier(), "."), err)
+	}
+
+	return table.New(identifier, updatedMetadata, newMetadataLocation, iofs, c), nil
 }
 
 func (c *Catalog) glueToIcebergTable(ctx context.Context, gTable *types.Table) (*table.Table, error) {
