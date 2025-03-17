@@ -30,6 +30,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/file"
@@ -93,19 +94,36 @@ func (p parquetFormat) createStatsAgg(typ iceberg.PrimitiveType, physicalTypeStr
 	case "BOOLEAN":
 		return newStatAgg[bool](typ, truncLen), nil
 	case "INT32":
+		switch typ.(type) {
+		case iceberg.DecimalType:
+			return &decAsIntAgg[int32]{
+				newStatAgg[int32](typ, truncLen).(*statsAggregator[int32]),
+			}, nil
+		}
+
 		return newStatAgg[int32](typ, truncLen), nil
 	case "INT64":
+		switch typ.(type) {
+		case iceberg.DecimalType:
+			return &decAsIntAgg[int64]{
+				newStatAgg[int64](typ, truncLen).(*statsAggregator[int64]),
+			}, nil
+		}
+
 		return newStatAgg[int64](typ, truncLen), nil
 	case "FLOAT":
 		return newStatAgg[float32](typ, truncLen), nil
 	case "DOUBLE":
 		return newStatAgg[float64](typ, truncLen), nil
 	case "FIXED_LEN_BYTE_ARRAY":
-		if typ.Equals(iceberg.PrimitiveTypes.UUID) {
+		switch typ.(type) {
+		case iceberg.UUIDType:
 			return newStatAgg[uuid.UUID](typ, truncLen), nil
+		case iceberg.DecimalType:
+			return newStatAgg[iceberg.Decimal](typ, truncLen), nil
+		default:
+			return newStatAgg[[]byte](typ, truncLen), nil
 		}
-
-		return newStatAgg[[]byte](typ, truncLen), nil
 	case "BYTE_ARRAY":
 		if typ.Equals(iceberg.PrimitiveTypes.String) {
 			return newStatAgg[string](typ, truncLen), nil
@@ -150,6 +168,43 @@ func (parquetFormat) PrimitiveTypeToPhysicalType(typ iceberg.PrimitiveType) stri
 	default:
 		panic(fmt.Errorf("expected primitive type, got: %s", typ))
 	}
+}
+
+type decAsIntAgg[T int32 | int64] struct {
+	*statsAggregator[T]
+}
+
+func (s *decAsIntAgg[T]) minAsBytes() ([]byte, error) {
+	if s.curMin == nil {
+		return nil, nil
+	}
+
+	lit := iceberg.DecimalLiteral(iceberg.Decimal{
+		Val:   decimal128.FromI64(int64(s.curMin.Value())),
+		Scale: s.primitiveType.(iceberg.DecimalType).Scale(),
+	})
+	if s.truncLen > 0 {
+		return s.toBytes((&iceberg.TruncateTransform{Width: s.truncLen}).
+			Apply(iceberg.Optional[iceberg.Literal]{Valid: true, Val: lit}).Val)
+	}
+
+	return s.toBytes(lit)
+}
+
+func (s *decAsIntAgg[T]) maxAsBytes() ([]byte, error) {
+	if s.curMax == nil {
+		return nil, nil
+	}
+
+	lit := iceberg.DecimalLiteral(iceberg.Decimal{
+		Val:   decimal128.FromI64(int64(s.curMax.Value())),
+		Scale: s.primitiveType.(iceberg.DecimalType).Scale(),
+	})
+	if s.truncLen <= 0 {
+		return s.toBytes(lit)
+	}
+
+	return nil, fmt.Errorf("%s cannot be truncated for upper bound", s.primitiveType)
 }
 
 type wrappedBinaryStats struct {
@@ -214,7 +269,28 @@ func (w *wrappedFLBAStats) Max() []byte {
 	return w.FixedLenByteArrayStatistics.Max()
 }
 
-type createStatsAggFunc func(icebergType iceberg.PrimitiveType, physicalTypeStr string, truncLen int, primitiveToPhysicalFn func(iceberg.PrimitiveType) string) (StatsAgg, error)
+type wrappedDecStats struct {
+	*metadata.FixedLenByteArrayStatistics
+	scale int
+}
+
+func (w wrappedDecStats) Min() iceberg.Decimal {
+	dec, err := BigEndianToDecimal(w.FixedLenByteArrayStatistics.Min())
+	if err != nil {
+		panic(err)
+	}
+
+	return iceberg.Decimal{Val: dec, Scale: w.scale}
+}
+
+func (w wrappedDecStats) Max() iceberg.Decimal {
+	dec, err := BigEndianToDecimal(w.FixedLenByteArrayStatistics.Max())
+	if err != nil {
+		panic(err)
+	}
+
+	return iceberg.Decimal{Val: dec, Scale: w.scale}
+}
 
 func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]StatisticsCollector, colMapping map[string]int) *DataFileStatistics {
 	pqmeta := meta.(*metadata.FileMetaData)
@@ -293,7 +369,7 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 				colAggs[fieldID] = agg
 			}
 
-			switch statsCol.IcebergTyp.(type) {
+			switch t := statsCol.IcebergTyp.(type) {
 			case iceberg.BinaryType:
 				stats = &wrappedBinaryStats{stats.(*metadata.ByteArrayStatistics)}
 			case iceberg.UUIDType:
@@ -302,6 +378,8 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 				stats = &wrappedStringStats{stats.(*metadata.ByteArrayStatistics)}
 			case iceberg.FixedType:
 				stats = &wrappedFLBAStats{stats.(*metadata.FixedLenByteArrayStatistics)}
+			case iceberg.DecimalType:
+				stats = &wrappedDecStats{stats.(*metadata.FixedLenByteArrayStatistics), t.Scale()}
 			}
 
 			agg.Update(stats)
