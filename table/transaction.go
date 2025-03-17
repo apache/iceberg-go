@@ -127,7 +127,7 @@ func (t *Transaction) AddFiles(files []string, snapshotProps iceberg.Properties,
 	}
 
 	if len(set) != len(files) {
-		return errors.New("file paths must be unique for AppendDataFiles")
+		return errors.New("file paths must be unique for AddFiles")
 	}
 
 	if !ignoreDuplicates {
