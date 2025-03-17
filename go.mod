@@ -26,7 +26,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.36.3
 	github.com/aws/aws-sdk-go-v2/config v1.29.9
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.62
-	github.com/aws/aws-sdk-go-v2/service/glue v1.106.1
+	github.com/aws/aws-sdk-go-v2/service/glue v1.107.0
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.78.2
 	github.com/aws/smithy-go v1.22.3
 	github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815
