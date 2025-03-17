@@ -840,6 +840,11 @@ func TestUnmarshalBinary(t *testing.T) {
 			[]byte{0xff, 0xed, 0x29, 0x79},
 			iceberg.DecimalLiteral{Scale: 4, Val: decimal128.FromI64(-1234567)},
 		},
+		{
+			iceberg.DecimalTypeOf(8, 2),
+			[]byte{0x00, 0xbc, 0x61, 0x4e},
+			iceberg.DecimalLiteral{Scale: 2, Val: decimal128.FromI64(12345678)},
+		},
 	}
 
 	for _, tt := range tests {
