@@ -133,7 +133,7 @@ func (t *Transaction) AddFiles(files []string, snapshotProps iceberg.Properties,
 	if !ignoreDuplicates {
 		if s := t.meta.currentSnapshot(); s != nil {
 			referenced := make([]string, 0)
-			for df, err := range s.files(t.tbl.fs, nil) {
+			for df, err := range s.dataFiles(t.tbl.fs, nil) {
 				if err != nil {
 					return err
 				}

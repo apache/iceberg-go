@@ -307,7 +307,7 @@ func (s Snapshot) Manifests(fio iceio.IO) ([]iceberg.ManifestFile, error) {
 	return nil, nil
 }
 
-func (s Snapshot) files(fio iceio.IO, fileFilter set[iceberg.ManifestEntryContent]) iter.Seq2[iceberg.DataFile, error] {
+func (s Snapshot) dataFiles(fio iceio.IO, fileFilter set[iceberg.ManifestEntryContent]) iter.Seq2[iceberg.DataFile, error] {
 	return func(yield func(iceberg.DataFile, error) bool) {
 		manifests, err := s.Manifests(fio)
 		if err != nil {
