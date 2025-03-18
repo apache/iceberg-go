@@ -836,6 +836,76 @@ func (t *TableWritingTestSuite) TestReplaceDataFiles() {
 	}, staged.CurrentSnapshot().Summary)
 }
 
+func (t *TableWritingTestSuite) TestWriteSpecialCharacterColumn() {
+	ident := table.Identifier{"default", "write_special_character_column"}
+	colNameWithSpecialChar := "letter/abc"
+
+	s := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: colNameWithSpecialChar, Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 3, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: true},
+		iceberg.NestedField{ID: 4, Name: "address", Required: true, Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 5, Name: "street", Type: iceberg.PrimitiveTypes.String, Required: true},
+				{ID: 6, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: true},
+				{ID: 7, Name: "zip", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+				{ID: 8, Name: colNameWithSpecialChar, Type: iceberg.PrimitiveTypes.String, Required: true},
+			}}})
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: colNameWithSpecialChar, Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String},
+		{Name: "address", Type: arrow.StructOf(
+			arrow.Field{Name: "street", Type: arrow.BinaryTypes.String},
+			arrow.Field{Name: "city", Type: arrow.BinaryTypes.String},
+			arrow.Field{Name: "zip", Type: arrow.PrimitiveTypes.Int32},
+			arrow.Field{Name: colNameWithSpecialChar, Type: arrow.BinaryTypes.String},
+		)},
+	}, nil)
+
+	arrowTable, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[
+			{
+				"letter/abc": "a",
+				"id": 1,
+				"name": "AB",
+				"address": {"street": "123", "city": "SFO", "zip": 12345, "letter/abc": "a"}
+			},
+			{
+				"letter/abc": null,
+				"id": 2,
+				"name": "CD",
+				"address": {"street": "456", "city": "SW", "zip": 67890, "letter/abc": "b"}
+			},
+			{
+				"letter/abc": "z",
+				"id": 3,
+				"name": "EF",
+				"address": {"street": "789", "city": "Random", "zip": 10112, "letter/abc": "c"}
+			}
+		 ]`,
+	})
+	t.Require().NoError(err)
+	defer arrowTable.Release()
+
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, s)
+	rdr := array.NewTableReader(arrowTable, 1)
+	defer rdr.Release()
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.Append(t.ctx, rdr, nil))
+
+	scan, err := tx.Scan()
+	t.Require().NoError(err)
+
+	result, err := scan.ToArrowTable(t.ctx)
+	t.Require().NoError(err)
+	defer result.Release()
+
+	t.True(array.TableEqual(arrowTable, result), "expected:\n %s\ngot:\n %s", arrowTable, result)
+}
+
 func TestTableWriting(t *testing.T) {
 	suite.Run(t, &TableWritingTestSuite{formatVersion: 1})
 	suite.Run(t, &TableWritingTestSuite{formatVersion: 2})
