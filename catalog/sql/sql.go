@@ -424,7 +424,6 @@ func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, reqs []tabl
 				PreviousMetadataLocation: sql.NullString{Valid: true, String: current.MetadataLocation()},
 			}).WherePK().Where("metadata_location = ?", current.MetadataLocation()).
 				Exec(ctx)
-
 			if err != nil {
 				return fmt.Errorf("error updating table information: %w", err)
 			}
@@ -453,7 +452,6 @@ func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, reqs []tabl
 
 		return nil
 	})
-
 	if err != nil {
 		return nil, "", err
 	}

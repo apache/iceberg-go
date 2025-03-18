@@ -1007,7 +1007,7 @@ func (s *SqliteCatalogTestSuite) TestCommitTable() {
 	defer table.Release()
 
 	pqfile := filepath.Join(s.warehouse, "test_commit_table_data", "test.parquet")
-	s.Require().NoError(os.MkdirAll(filepath.Dir(pqfile), 0777))
+	s.Require().NoError(os.MkdirAll(filepath.Dir(pqfile), 0o777))
 	f, err := os.Create(pqfile)
 	s.Require().NoError(err)
 

@@ -213,6 +213,7 @@ func MetadataBuilderFromBase(metadata Metadata) (*MetadataBuilder, error) {
 	b.refs = maps.Collect(metadata.Refs())
 	b.snapshotLog = slices.Collect(metadata.SnapshotLogs())
 	b.metadataLog = slices.Collect(metadata.PreviousFiles())
+
 	return b, nil
 }
 
@@ -610,6 +611,7 @@ func (b *MetadataBuilder) SetUUID(uuid uuid.UUID) (*MetadataBuilder, error) {
 
 func (b *MetadataBuilder) SetLastUpdatedMS() *MetadataBuilder {
 	b.lastUpdatedMS = time.Now().UnixMilli()
+
 	return b
 }
 
@@ -697,11 +699,13 @@ func (b *MetadataBuilder) TrimMetadataLogs(maxEntries int) *MetadataBuilder {
 	}
 
 	b.metadataLog = b.metadataLog[len(b.metadataLog)-maxEntries:]
+
 	return b
 }
 
 func (b *MetadataBuilder) AppendMetadataLog(entry MetadataLogEntry) *MetadataBuilder {
 	b.metadataLog = append(b.metadataLog, entry)
+
 	return b
 }
 
