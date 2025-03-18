@@ -32,7 +32,6 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/apache/iceberg-go/internal"
-	"github.com/apache/iceberg-go/io"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
@@ -747,8 +746,8 @@ func TestAddToTable(t *testing.T) {
 	require.NoError(t, err)
 
 	props := iceberg.Properties{
-		io.S3Region:      "us-east-1",
-		io.S3AccessKeyID: "admin", io.S3SecretAccessKey: "password",
+		iceio.S3Region:      "us-east-1",
+		iceio.S3AccessKeyID: "admin", iceio.S3SecretAccessKey: "password",
 	}
 
 	tbl, err := cat.LoadTable(ctx, catalog.ToIdentifier("default", "test_limit"), props)
