@@ -31,6 +31,24 @@ const (
 	DefaultWriteMetricsModeKey     = "write.metadata.metrics.default"
 	DefaultWriteMetricsModeDefault = "truncate(16)"
 
+	ParquetRowGroupSizeBytesKey              = "write.parquet.row-group-size-bytes"
+	ParquetRowGroupSizeBytesDefault          = 128 * 1024 * 1024 // 128 MB
+	ParquetRowGroupLimitKey                  = "write.parquet.row-group-limit"
+	ParquetRowGroupLimitDefault              = 1048576
+	ParquetPageSizeBytesKey                  = "write.parquet.page-size-bytes"
+	ParquetPageSizeBytesDefault              = 1024 * 1024 // 1 MB
+	ParquetPageRowLimitKey                   = "write.parquet.page-row-limit"
+	ParquetPageRowLimitDefault               = 20000
+	ParquetDictSizeBytes                     = "write.parquet.dict-size-bytes"
+	ParquetDictSizeBytesDefault              = 2 * 1024 * 1024 // 2 MB
+	ParquetCompressionKey                    = "write.parquet.compression-codec"
+	ParquetCompressionDefault                = "zstd"
+	ParquetCompressionLevelKey               = "write.parquet.compression-level"
+	ParquetCompressionLevelDefault           = -1
+	ParquetBloomFilterMaxBytesKey            = "write.parquet.bloom-filter-max-bytes"
+	ParquetBloomFilterMaxBytesDefault        = 1024 * 1024
+	ParquetBloomFilterColumnEnabledKeyPrefix = "write.parquet.bloom-filter-enabled.column"
+
 	ManifestMergeEnabledKey     = "commit.manifest-merge.enabled"
 	ManifestMergeEnabledDefault = false
 
@@ -48,4 +66,7 @@ const (
 
 	MetadataPreviousVersionsMaxKey     = "write.metadata.previous-versions-max"
 	MetadataPreviousVersionsMaxDefault = 100
+
+	WriteTargetFileSizeBytesKey     = "write.target-file-size-bytes"
+	WriteTargetFileSizeBytesDefault = 512 * 1024 * 1024 // 512 MB
 )

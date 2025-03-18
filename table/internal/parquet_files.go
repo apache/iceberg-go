@@ -33,10 +33,12 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/compress"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
 )
@@ -168,6 +170,86 @@ func (parquetFormat) PrimitiveTypeToPhysicalType(typ iceberg.PrimitiveType) stri
 	default:
 		panic(fmt.Errorf("expected primitive type, got: %s", typ))
 	}
+}
+
+func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
+	writerProps := []parquet.WriterProperty{
+		parquet.WithDictionaryDefault(false),
+		parquet.WithMaxRowGroupLength(int64(props.GetInt("write.parquet.row-group-limit", 1048576))),
+		parquet.WithDataPageSize(int64(props.GetInt("write.parquet.page-size-bytes", 1024*1024))),
+		parquet.WithDataPageVersion(parquet.DataPageV2),
+		parquet.WithBatchSize(int64(props.GetInt("write.parquet.page-row-limit", 20000))),
+		parquet.WithDictionaryPageSizeLimit(int64(props.GetInt("write.parquet.dict-size-bytes", 2*1024*1024))),
+	}
+
+	compression := props.Get("write.parquet.compression-codec", "zstd")
+	compressionLevel := props.GetInt("write.parquet.compression-level", compress.DefaultCompressionLevel)
+
+	var codec compress.Compression
+	switch compression {
+	case "snappy":
+		codec = compress.Codecs.Snappy
+	case "zstd":
+		codec = compress.Codecs.Zstd
+	case "uncompressed":
+		codec = compress.Codecs.Uncompressed
+	case "gzip":
+		codec = compress.Codecs.Gzip
+	case "brotli":
+		codec = compress.Codecs.Brotli
+	case "lz4":
+		codec = compress.Codecs.Lz4
+	case "lz4raw":
+		codec = compress.Codecs.Lz4Raw
+	case "lzo":
+		codec = compress.Codecs.Lzo
+	default:
+		// warn
+	}
+
+	return append(writerProps, parquet.WithCompression(codec),
+		parquet.WithCompressionLevel(compressionLevel))
+}
+
+func (p parquetFormat) WriteDataFile(ctx context.Context, fs iceio.WriteFileIO, info WriteFileInfo, batches []arrow.Record) (iceberg.DataFile, error) {
+	fw, err := fs.Create(info.FileName)
+	if err != nil {
+		return nil, err
+	}
+	defer fw.Close()
+
+	cntWriter := internal.CountingWriter{W: fw}
+	mem := compute.GetAllocator(ctx)
+	writerProps := parquet.NewWriterProperties(info.WriteProps.([]parquet.WriterProperty)...)
+	arrProps := pqarrow.NewArrowWriterProperties(pqarrow.WithAllocator(mem), pqarrow.WithStoreSchema())
+
+	writer, err := pqarrow.NewFileWriter(batches[0].Schema(), &cntWriter, writerProps, arrProps)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, batch := range batches {
+		if err := writer.WriteBuffered(batch); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+
+	filemeta, err := writer.FileMetadata()
+	if err != nil {
+		return nil, err
+	}
+
+	colMapping, err := p.PathToIDMapping(info.FileSchema)
+	if err != nil {
+		return nil, err
+	}
+
+	return p.DataFileStatsFromMeta(filemeta, info.StatsCols, colMapping).
+		ToDataFile(info.FileSchema, info.Spec, info.FileName, iceberg.ParquetFile, cntWriter.Count), nil
 }
 
 type decAsIntAgg[T int32 | int64] struct {

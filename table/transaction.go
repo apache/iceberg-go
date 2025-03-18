@@ -111,6 +111,16 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 	return nil
 }
 
+func (t *Transaction) appendSnapshotProducer(props iceberg.Properties) *snapshotProducer {
+	manifestMerge := t.meta.props.GetBool(ManifestMergeEnabledKey, ManifestMergeEnabledDefault)
+	updateSnapshot := t.updateSnapshot(props)
+	if manifestMerge {
+		panic(iceberg.ErrNotImplemented)
+	}
+
+	return updateSnapshot.fastAppend()
+}
+
 func (t *Transaction) updateSnapshot(props iceberg.Properties) snapshotUpdate {
 	return snapshotUpdate{
 		txn:           t,

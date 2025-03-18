@@ -163,7 +163,7 @@ func (ps *PartitionSpec) ID() int                    { return ps.id }
 func (ps *PartitionSpec) NumFields() int             { return len(ps.fields) }
 func (ps *PartitionSpec) Field(i int) PartitionField { return ps.fields[i] }
 
-func (ps *PartitionSpec) IsUnpartitioned() bool {
+func (ps PartitionSpec) IsUnpartitioned() bool {
 	if len(ps.fields) == 0 {
 		return true
 	}

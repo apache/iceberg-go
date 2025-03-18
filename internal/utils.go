@@ -21,6 +21,7 @@ import (
 	"cmp"
 	"fmt"
 	"io"
+	"iter"
 	"slices"
 )
 
@@ -54,13 +55,7 @@ func (b *Bin[T]) Add(item T, weight int64) {
 	b.items = append(b.items, item)
 }
 
-type SlicePacker[T any] struct {
-	TargetWeight    int64
-	Lookback        int
-	LargestBinFirst bool
-}
-
-func (s *SlicePacker[T]) Pack(items []T, weightFunc func(T) int64) [][]T {
+func PackingIterator[T any](itr iter.Seq[T], targetWeight int64, lookback int, weightFunc func(T) int64, largestBinFirst bool) iter.Seq[[]T] {
 	bins := make([]Bin[T], 0)
 	findBin := func(weight int64) *Bin[T] {
 		for i := range bins {
@@ -73,7 +68,7 @@ func (s *SlicePacker[T]) Pack(items []T, weightFunc func(T) int64) [][]T {
 	}
 
 	removeBin := func() Bin[T] {
-		if s.LargestBinFirst {
+		if largestBinFirst {
 			maxBin := slices.MaxFunc(bins, func(a, b Bin[T]) int {
 				return cmp.Compare(a.Weight(), b.Weight())
 			})
@@ -92,18 +87,18 @@ func (s *SlicePacker[T]) Pack(items []T, weightFunc func(T) int64) [][]T {
 		return out
 	}
 
-	return slices.Collect(func(yield func([]T) bool) {
-		for _, item := range items {
+	return func(yield func([]T) bool) {
+		for item := range itr {
 			w := weightFunc(item)
 			bin := findBin(w)
 			if bin != nil {
 				bin.Add(item, w)
 			} else {
-				bin := Bin[T]{targetWeight: s.TargetWeight}
+				bin := Bin[T]{targetWeight: targetWeight}
 				bin.Add(item, w)
 				bins = append(bins, bin)
 
-				if len(bins) > s.Lookback {
+				if len(bins) > lookback {
 					if !yield(removeBin().items) {
 						return
 					}
@@ -116,7 +111,18 @@ func (s *SlicePacker[T]) Pack(items []T, weightFunc func(T) int64) [][]T {
 				return
 			}
 		}
-	})
+	}
+}
+
+type SlicePacker[T any] struct {
+	TargetWeight    int64
+	Lookback        int
+	LargestBinFirst bool
+}
+
+func (s *SlicePacker[T]) Pack(items []T, weightFunc func(T) int64) [][]T {
+	return slices.Collect(PackingIterator(slices.Values(items), s.TargetWeight,
+		s.Lookback, weightFunc, s.LargestBinFirst))
 }
 
 func (s *SlicePacker[T]) PackEnd(items []T, weightFunc func(T) int64) [][]T {
@@ -152,6 +158,17 @@ func RecoverError(err *error) {
 			*err = fmt.Errorf("error encountered during arrow schema visitor: %s", e)
 		case error:
 			*err = fmt.Errorf("error encountered during arrow schema visitor: %w", e)
+		}
+	}
+}
+
+func Counter(start int) iter.Seq[int] {
+	return func(yield func(int) bool) {
+		for {
+			if !yield(start) {
+				return
+			}
+			start++
 		}
 	}
 }

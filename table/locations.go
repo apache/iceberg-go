@@ -26,6 +26,7 @@ import (
 )
 
 type LocationProvider interface {
+	NewDataLocation(dataFileName string) string
 	NewTableMetadataFileLocation(newVersion int) (string, error)
 	NewMetadataLocation(metadataFileName string) string
 }
@@ -35,6 +36,10 @@ type simpleLocationProvider struct {
 	tableProps   iceberg.Properties
 	dataPath     *url.URL
 	metadataPath *url.URL
+}
+
+func (slp *simpleLocationProvider) NewDataLocation(dataFileName string) string {
+	return slp.dataPath.JoinPath(dataFileName).String()
 }
 
 func (slp *simpleLocationProvider) NewTableMetadataFileLocation(newVersion int) (string, error) {

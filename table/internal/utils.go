@@ -447,7 +447,7 @@ func (s *statsAggregator[T]) MaxAsBytes() ([]byte, error) {
 }
 
 func TruncateUpperBoundText(s string, trunc int) string {
-	if trunc == utf8.RuneCountInString(s) {
+	if trunc >= utf8.RuneCountInString(s) {
 		return s
 	}
 
@@ -465,6 +465,10 @@ func TruncateUpperBoundText(s string, trunc int) string {
 }
 
 func TruncateUpperBoundBinary(val []byte, trunc int) []byte {
+	if trunc >= len(val) {
+		return val
+	}
+
 	result := val[:trunc]
 	if bytes.Equal(result, val) {
 		return result

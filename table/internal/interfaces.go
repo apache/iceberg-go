@@ -77,6 +77,8 @@ type FileFormat interface {
 	Open(context.Context, iceio.IO, string) (FileReader, error)
 	PathToIDMapping(*iceberg.Schema) (map[string]int, error)
 	DataFileStatsFromMeta(rdr Metadata, statsCols map[int]StatisticsCollector, colMapping map[string]int) *DataFileStatistics
+	GetWriteProperties(iceberg.Properties) any
+	WriteDataFile(ctx context.Context, fs iceio.WriteFileIO, info WriteFileInfo, batches []arrow.Record) (iceberg.DataFile, error)
 }
 
 func GetFileFormat(format iceberg.FileFormat) FileFormat {
@@ -95,4 +97,12 @@ func FormatFromFileName(fileName string) FileFormat {
 	default:
 		return nil
 	}
+}
+
+type WriteFileInfo struct {
+	FileSchema *iceberg.Schema
+	Spec       iceberg.PartitionSpec
+	FileName   string
+	StatsCols  map[int]StatisticsCollector
+	WriteProps any
 }
