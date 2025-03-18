@@ -197,11 +197,9 @@ func (suite *FileStatsMetricsSuite) getDataFile(meta iceberg.Properties, writeSt
 	suite.Require().NoError(err)
 
 	stats := dataFileStatsFromParquetMetadata(fileMeta, collector, mapping)
-	df, err := stats.toDataFile(tableMeta.PartitionSpec(), "fake-path.parquet",
-		iceberg.ParquetFile, fileMeta.GetSourceFileSize())
-	suite.Require().NoError(err)
 
-	return df
+	return stats.toDataFile(tableMeta.CurrentSchema(), tableMeta.PartitionSpec(), "fake-path.parquet",
+		iceberg.ParquetFile, fileMeta.GetSourceFileSize())
 }
 
 func (suite *FileStatsMetricsSuite) TestRecordCount() {
@@ -345,14 +343,14 @@ func (suite *FileStatsMetricsSuite) TestColumnMetricsMode() {
 func (suite *FileStatsMetricsSuite) TestReadMissingStats() {
 	df := suite.getDataFile(nil, []string{"strings"})
 
-	stringColIdx := 1
-	suite.Len(df.LowerBoundValues(), 1)
-	suite.Equal([]byte("aaaaaaaaaaaaaaaa"), df.LowerBoundValues()[stringColIdx])
-	suite.Len(df.UpperBoundValues(), 1)
-	suite.Equal([]byte("zzzzzzzzzzzzzzz{"), df.UpperBoundValues()[stringColIdx])
-
 	suite.Len(df.NullValueCounts(), 1)
-	suite.EqualValues(1, df.NullValueCounts()[stringColIdx])
+	suite.Len(df.UpperBoundValues(), 1)
+	suite.Len(df.LowerBoundValues(), 1)
+
+	stringsColIdx := 1
+	suite.Equal("aaaaaaaaaaaaaaaa", string(df.LowerBoundValues()[stringsColIdx]))
+	suite.Equal("zzzzzzzzzzzzzzz{", string(df.UpperBoundValues()[stringsColIdx]))
+	suite.EqualValues(1, df.NullValueCounts()[stringsColIdx])
 }
 
 func TestFileMetrics(t *testing.T) {
@@ -599,9 +597,8 @@ func TestMetricsPrimitiveTypes(t *testing.T) {
 	require.NoError(t, err)
 
 	stats := dataFileStatsFromParquetMetadata(meta, collector, mapping)
-	df, err := stats.toDataFile(tblMeta.PartitionSpec(), "fake-path.parquet",
+	df := stats.toDataFile(tblMeta.CurrentSchema(), tblMeta.PartitionSpec(), "fake-path.parquet",
 		iceberg.ParquetFile, meta.GetSourceFileSize())
-	require.NoError(t, err)
 
 	assert.Len(t, df.ValueCounts(), 15)
 	assert.Len(t, df.NullValueCounts(), 15)

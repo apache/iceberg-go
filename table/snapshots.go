@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"iter"
 	"maps"
 	"slices"
 	"strconv"
@@ -304,6 +305,37 @@ func (s Snapshot) Manifests(fio iceio.IO) ([]iceberg.ManifestFile, error) {
 	}
 
 	return nil, nil
+}
+
+func (s Snapshot) dataFiles(fio iceio.IO, fileFilter set[iceberg.ManifestEntryContent]) iter.Seq2[iceberg.DataFile, error] {
+	return func(yield func(iceberg.DataFile, error) bool) {
+		manifests, err := s.Manifests(fio)
+		if err != nil {
+			yield(nil, err)
+
+			return
+		}
+
+		for _, m := range manifests {
+			dataFiles, err := m.FetchEntries(fio, false)
+			if err != nil {
+				yield(nil, err)
+
+				return
+			}
+
+			for _, f := range dataFiles {
+				if fileFilter != nil {
+					if _, ok := fileFilter[f.DataFile().ContentType()]; !ok {
+						continue
+					}
+				}
+				if !yield(f.DataFile(), nil) {
+					return
+				}
+			}
+		}
+	}
 }
 
 type MetadataLogEntry struct {

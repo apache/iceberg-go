@@ -759,6 +759,9 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 
 			panic(fmt.Errorf("unsupported schema projection from %s to %s",
 				vals.DataType(), targetType))
+		default:
+			return retOrPanic(compute.CastArray(a.ctx, vals,
+				compute.SafeCastOptions(targetType)))
 		}
 	}
 	vals.Retain()
@@ -1184,6 +1187,8 @@ func (w wrappedDecStats) Max() iceberg.Decimal {
 }
 
 type statsAgg interface {
+	min() iceberg.Literal
+	max() iceberg.Literal
 	update(stats metadata.TypedStatistics)
 	minAsBytes() ([]byte, error)
 	maxAsBytes() ([]byte, error)
@@ -1264,6 +1269,9 @@ func createStatsAgg(typ iceberg.PrimitiveType, physicalTypeStr string, truncLen 
 		return nil, fmt.Errorf("unsupported physical type: %s", physicalTypeStr)
 	}
 }
+
+func (s *statsAggregator[T]) min() iceberg.Literal { return s.curMin }
+func (s *statsAggregator[T]) max() iceberg.Literal { return s.curMax }
 
 func (s *statsAggregator[T]) update(stats metadata.TypedStatistics) {
 	st := stats.(typedStat[T])
@@ -1631,27 +1639,55 @@ type dataFileStatistics struct {
 	splitOffsets    []int64
 }
 
-func (d *dataFileStatistics) toDataFile(spec iceberg.PartitionSpec, path string, format iceberg.FileFormat, filesize int64) (iceberg.DataFile, error) {
+func (d *dataFileStatistics) partitionValue(field iceberg.PartitionField, sc *iceberg.Schema) any {
+	agg, ok := d.colAggs[field.SourceID]
+	if !ok {
+		return nil
+	}
+
+	if !field.Transform.PreservesOrder() {
+		panic(fmt.Errorf("cannot infer partition value from parquet metadata for a non-linear partition field: %s with transform %s",
+			field.Name, field.Transform))
+	}
+
+	lowerVal, upperVal := agg.min(), agg.max()
+	if !lowerVal.Equals(upperVal) {
+		panic(fmt.Errorf("cannot infer partition value from parquet metadata as there is more than one value for partition field: %s. (low: %s, high: %s)",
+			field.Name, lowerVal, upperVal))
+	}
+
+	val := field.Transform.Apply(must(partitionRecordValue(field, lowerVal, sc)))
+	if !val.Valid {
+		return nil
+	}
+
+	return val.Val.Any()
+}
+
+func (d *dataFileStatistics) toDataFile(schema *iceberg.Schema, spec iceberg.PartitionSpec, path string, format iceberg.FileFormat, filesize int64) iceberg.DataFile {
+	var partitionData map[string]any
+	if !spec.Equals(*iceberg.UnpartitionedSpec) {
+		partitionData = make(map[string]any)
+		for field := range spec.Fields() {
+			val := d.partitionValue(field, schema)
+			if val != nil {
+				partitionData[field.Name] = val
+			}
+		}
+	}
+
 	bldr, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData,
-		path, format, nil, d.recordCount, filesize)
+		path, format, partitionData, d.recordCount, filesize)
 	if err != nil {
-		return nil, err
+		panic(err)
 	}
 
 	lowerBounds := make(map[int][]byte)
 	upperBounds := make(map[int][]byte)
 
 	for fieldID, agg := range d.colAggs {
-		min, err := agg.minAsBytes()
-		if err != nil {
-			return nil, err
-		}
-
-		max, err := agg.maxAsBytes()
-		if err != nil {
-			return nil, err
-		}
-
+		min := must(agg.minAsBytes())
+		max := must(agg.maxAsBytes())
 		if len(min) > 0 {
 			lowerBounds[fieldID] = min
 		}
@@ -1666,13 +1702,14 @@ func (d *dataFileStatistics) toDataFile(spec iceberg.PartitionSpec, path string,
 	if len(upperBounds) > 0 {
 		bldr.UpperBoundValues(upperBounds)
 	}
+
 	bldr.ColumnSizes(d.colSizes)
 	bldr.ValueCounts(d.valueCounts)
 	bldr.NullValueCounts(d.nullValueCounts)
 	bldr.NaNValueCounts(d.nanValueCounts)
 	bldr.SplitOffsets(d.splitOffsets)
 
-	return bldr.Build(), nil
+	return bldr.Build()
 }
 
 func dataFileStatsFromParquetMetadata(pqmeta *metadata.FileMetaData, statsCols map[int]statisticsCollector, colMapping map[string]int) *dataFileStatistics {
@@ -1807,6 +1844,8 @@ func parquetFilesToDataFiles(fileIO iceio.IO, meta *MetadataBuilder, paths iter.
 			}
 		}()
 
+		currentSchema, currentSpec := meta.CurrentSchema(), meta.CurrentSpec()
+
 		for filePath := range paths {
 			inputFile := must(fileIO.Open(filePath))
 			defer inputFile.Close()
@@ -1824,19 +1863,15 @@ func parquetFilesToDataFiles(fileIO iceio.IO, meta *MetadataBuilder, paths iter.
 				return
 			}
 
-			if err := checkArrowSchemaCompat(meta.CurrentSchema(), arrSchema, false); err != nil {
+			if err := checkArrowSchemaCompat(currentSchema, arrSchema, false); err != nil {
 				panic(err)
 			}
 
 			statistics := dataFileStatsFromParquetMetadata(rdr.MetaData(),
-				must(computeStatsPlan(meta.CurrentSchema(), meta.props)),
-				must(parquetPathToIDMapping(meta.CurrentSchema())))
+				must(computeStatsPlan(currentSchema, meta.props)),
+				must(parquetPathToIDMapping(currentSchema)))
 
-			df, err := statistics.toDataFile(meta.CurrentSpec(), filePath, iceberg.ParquetFile, rdr.MetaData().GetSourceFileSize())
-			if err != nil {
-				panic(err)
-			}
-
+			df := statistics.toDataFile(currentSchema, currentSpec, filePath, iceberg.ParquetFile, rdr.MetaData().GetSourceFileSize())
 			if !yield(df, nil) {
 				return
 			}
