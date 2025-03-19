@@ -89,18 +89,17 @@ if [ "${RELEASE_SIGN}" -gt 0 ]; then
   gh run watch --repo "${repository}" --exit-status "${run_id}"
 
   # Create release candidate directory structure
-  rc_dir="apache-iceberg-go-${version}-rc${rc}"
-  mkdir -p "${rc_dir}"
+  mkdir -p "${id}"
 
   echo "Downloading .tar.gz from GitHub Releases"
   gh release download "${rc_tag}" \
-    --dir "${rc_dir}" \
+    --dir "${id}" \
     --pattern "${tar_gz}" \
     --repo "${repository}" \
     --skip-existing
 
   echo "Signing tar.gz and creating checksums"
-  cd "${rc_dir}"
+  cd "${id}"
   gpg --armor --output "${tar_gz}.asc" --detach-sig "${tar_gz}"
   sha512sum "${tar_gz}" > "${tar_gz}.sha512"
   cd ..
@@ -108,8 +107,7 @@ fi
 
 if [ "${RELEASE_UPLOAD}" -gt 0 ]; then
   echo "Uploading to ASF dist/dev..."
-  svn mkdir -p "https://dist.apache.org/repos/dist/dev/iceberg/${rc_dir}" --parents
-  svn import "${rc_dir}" "https://dist.apache.org/repos/dist/dev/iceberg/${rc_dir}" -m "Apache Iceberg Go ${version} RC${rc}"
+  svn import "${id}" "https://dist.apache.org/repos/dist/dev/iceberg/${id}" -m "Apache Iceberg Go ${version} RC${rc}"
 fi
 
 echo "Draft email for dev@iceberg.apache.org mailing list"
@@ -117,12 +115,12 @@ echo ""
 echo "---------------------------------------------------------"
 cat <<MAIL
 To: dev@iceberg.apache.org
-Subject: [VOTE][Go] Release Apache Iceberg Go ${version} RC${rc}
+Subject: [VOTE][Go] Release Apache Iceberg Go v${version} RC${rc}
 
 Hi,
 
 I would like to propose the following release candidate (RC${rc}) of
-Apache Iceberg Go version ${version}.
+Apache Iceberg Go version v${version}.
 
 This release candidate is based on commit:
 ${rc_hash} [1]
@@ -134,9 +132,9 @@ and vote on the release. See [3] for how to validate a release candidate.
 
 The vote will be open for at least 72 hours.
 
-[ ] +1 Release this as Apache Iceberg Go ${version}
+[ ] +1 Release this as Apache Iceberg Go v${version}
 [ ] +0
-[ ] -1 Do not release this as Apache Iceberg Go ${version} because...
+[ ] -1 Do not release this as Apache Iceberg Go v${version} because...
 
 [1]: https://github.com/apache/iceberg-go/tree/${rc_hash}
 [2]: https://dist.apache.org/repos/dist/dev/iceberg/apache-iceberg-go-${version}-rc${rc}
