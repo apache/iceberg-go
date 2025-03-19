@@ -109,8 +109,8 @@ You can pass the catalog URI with `--uri` argument.
 Example:
 You can start the Iceberg REST API docker image which runs on default in port `8181`
 ```
-docker pull tabulario/iceberg-rest:latest
-docker run -p 8181:8181 tabulario/iceberg-rest:latest
+docker pull apache/iceberg-rest-fixture:latest
+docker run -p 8181:8181 apache/iceberg-rest-fixture:latest
 ```
 and run the `iceberg` CLI pointing to the REST API server.
 
