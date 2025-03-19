@@ -89,7 +89,6 @@ if [ "${RELEASE_SIGN}" -gt 0 ]; then
   gh run watch --repo "${repository}" --exit-status "${run_id}"
 
   # Create release candidate directory structure
-  rc_dir="apache-iceberg-go-${version}-rc${rc}"
   mkdir -p "${rc_dir}"
 
   echo "Downloading .tar.gz from GitHub Releases"
@@ -108,7 +107,6 @@ fi
 
 if [ "${RELEASE_UPLOAD}" -gt 0 ]; then
   echo "Uploading to ASF dist/dev..."
-  svn mkdir -p "https://dist.apache.org/repos/dist/dev/iceberg/${rc_dir}" --parents
   svn import "${rc_dir}" "https://dist.apache.org/repos/dist/dev/iceberg/${rc_dir}" -m "Apache Iceberg Go ${version} RC${rc}"
 fi
 
