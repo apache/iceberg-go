@@ -951,7 +951,14 @@ func (w *ManifestWriter) meta() (map[string][]byte, error) {
 		return nil, err
 	}
 
-	specFieldsJson, err := json.Marshal(w.spec.fields)
+	var specFields = w.spec.fields
+
+	if specFields == nil {
+		specFields = []PartitionField{}
+	}
+
+	specFieldsJson, err := json.Marshal(specFields)
+
 	if err != nil {
 		return nil, err
 	}
