@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"slices"
 	"sync"
 	"time"
@@ -178,14 +179,39 @@ func (t *Transaction) AddFiles(files []string, snapshotProps iceberg.Properties,
 	return t.apply(updates, reqs)
 }
 
-func (t *Transaction) StagedTable() (*Table, error) {
+func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
 	updatedMeta, err := t.meta.Build()
 	if err != nil {
 		return nil, err
 	}
 
-	return New(t.tbl.identifier, updatedMeta,
-		updatedMeta.Location(), t.tbl.fs, t.tbl.cat), nil
+	s := &Scan{
+		metadata:       updatedMeta,
+		io:             t.tbl.fs,
+		rowFilter:      iceberg.AlwaysTrue{},
+		selectedFields: []string{"*"},
+		caseSensitive:  true,
+		limit:          ScanNoLimit,
+		concurrency:    runtime.GOMAXPROCS(0),
+	}
+
+	for _, opt := range opts {
+		opt(s)
+	}
+
+	s.partitionFilters = newKeyDefaultMapWrapErr(s.buildPartitionProjection)
+
+	return s, nil
+}
+
+func (t *Transaction) StagedTable() (*StagedTable, error) {
+	updatedMeta, err := t.meta.Build()
+	if err != nil {
+		return nil, err
+	}
+
+	return &StagedTable{Table: New(t.tbl.identifier, updatedMeta,
+		updatedMeta.Location(), t.tbl.fs, t.tbl.cat)}, nil
 }
 
 func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
@@ -205,4 +231,16 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 	}
 
 	return t.tbl, nil
+}
+
+type StagedTable struct {
+	*Table
+}
+
+func (s *StagedTable) Refresh(ctx context.Context) (*Table, error) {
+	return nil, fmt.Errorf("%w: cannot refresh a staged table", ErrInvalidOperation)
+}
+
+func (s *StagedTable) Scan(opts ...ScanOption) *Scan {
+	panic(fmt.Errorf("%w: cannot scan a staged table", ErrInvalidOperation))
 }

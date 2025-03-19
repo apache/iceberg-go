@@ -165,7 +165,7 @@ type MetadataBuilder struct {
 	defaultSortOrderID int
 	refs               map[string]SnapshotRef
 
-	// V2 specific
+	// >v1 specific
 	lastSequenceNumber *int64
 }
 
@@ -201,28 +201,23 @@ func MetadataBuilderFromBase(metadata Metadata) (*MetadataBuilder, error) {
 	b.snapshotList = metadata.Snapshots()
 	b.sortOrderList = metadata.SortOrders()
 	b.defaultSortOrderID = metadata.DefaultSortOrder()
+	if metadata.Version() > 1 {
+		seq := metadata.LastSequenceNumber()
+		b.lastSequenceNumber = &seq
+	}
 
 	if metadata.CurrentSnapshot() != nil {
 		b.currentSnapshotID = &metadata.CurrentSnapshot().SnapshotID
 	}
 
-	b.refs = make(map[string]SnapshotRef)
-	for name, ref := range metadata.Refs() {
-		b.refs[name] = ref
-	}
-
-	b.snapshotLog = make([]SnapshotLogEntry, 0)
-	for log := range metadata.SnapshotLogs() {
-		b.snapshotLog = append(b.snapshotLog, log)
-	}
-
-	b.metadataLog = make([]MetadataLogEntry, 0)
-	for entry := range metadata.PreviousFiles() {
-		b.metadataLog = append(b.metadataLog, entry)
-	}
+	b.refs = maps.Collect(metadata.Refs())
+	b.snapshotLog = slices.Collect(metadata.SnapshotLogs())
+	b.metadataLog = slices.Collect(metadata.PreviousFiles())
 
 	return b, nil
 }
+
+func (b *MetadataBuilder) HasChanges() bool { return len(b.updates) > 0 }
 
 func (b *MetadataBuilder) CurrentSpec() iceberg.PartitionSpec {
 	return b.specs[b.defaultSpecID]
@@ -233,6 +228,8 @@ func (b *MetadataBuilder) CurrentSchema() *iceberg.Schema {
 
 	return s
 }
+
+func (b *MetadataBuilder) LastUpdatedMS() int64 { return b.lastUpdatedMS }
 
 func (b *MetadataBuilder) nextSequenceNumber() int64 {
 	if b.formatVersion > 1 {
@@ -490,7 +487,11 @@ func (b *MetadataBuilder) SetProperties(props iceberg.Properties) (*MetadataBuil
 	}
 
 	b.updates = append(b.updates, NewSetPropertiesUpdate(props))
-	maps.Copy(b.props, props)
+	if b.props == nil {
+		b.props = props
+	} else {
+		maps.Copy(b.props, props)
+	}
 
 	return b, nil
 }
@@ -567,14 +568,23 @@ func (b *MetadataBuilder) SetSnapshotRef(
 		return nil, fmt.Errorf("can't set snapshot ref %s to unknown snapshot %d: %w", name, snapshotID, err)
 	}
 
+	isAddedSnapshot := slices.ContainsFunc(b.updates, func(u Update) bool {
+		return u.Action() == addSnapshotAction && u.(*addSnapshotUpdate).Snapshot.SnapshotID == snapshotID
+	})
+	if isAddedSnapshot {
+		b.lastUpdatedMS = snapshot.TimestampMs
+	}
+
 	if name == MainBranch {
 		b.updates = append(b.updates, NewSetSnapshotRefUpdate(name, snapshotID, refType, maxRefAgeMs, maxSnapshotAgeMs, minSnapshotsToKeep))
 		b.currentSnapshotID = &snapshotID
+		if !isAddedSnapshot {
+			b.lastUpdatedMS = time.Now().Local().UnixMilli()
+		}
 		b.snapshotLog = append(b.snapshotLog, SnapshotLogEntry{
 			SnapshotID:  snapshotID,
-			TimestampMs: snapshot.TimestampMs,
+			TimestampMs: b.lastUpdatedMS,
 		})
-		b.lastUpdatedMS = time.Now().Local().UnixMilli()
 	}
 
 	if slices.ContainsFunc(b.updates, func(u Update) bool {
@@ -597,6 +607,12 @@ func (b *MetadataBuilder) SetUUID(uuid uuid.UUID) (*MetadataBuilder, error) {
 	b.uuid = uuid
 
 	return b, nil
+}
+
+func (b *MetadataBuilder) SetLastUpdatedMS() *MetadataBuilder {
+	b.lastUpdatedMS = time.Now().UnixMilli()
+
+	return b
 }
 
 func (b *MetadataBuilder) buildCommonMetadata() *commonMetadata {
@@ -675,6 +691,22 @@ func (b *MetadataBuilder) NameMapping() iceberg.NameMapping {
 	}
 
 	return nil
+}
+
+func (b *MetadataBuilder) TrimMetadataLogs(maxEntries int) *MetadataBuilder {
+	if len(b.metadataLog) <= maxEntries {
+		return b
+	}
+
+	b.metadataLog = b.metadataLog[len(b.metadataLog)-maxEntries:]
+
+	return b
+}
+
+func (b *MetadataBuilder) AppendMetadataLog(entry MetadataLogEntry) *MetadataBuilder {
+	b.metadataLog = append(b.metadataLog, entry)
+
+	return b
 }
 
 func (b *MetadataBuilder) Build() (Metadata, error) {

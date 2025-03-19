@@ -75,7 +75,7 @@ func (t Table) Schemas() map[int]*iceberg.Schema {
 }
 
 func (t Table) LocationProvider() (LocationProvider, error) {
-	return LoadLocationProvider(t.metadataLocation, t.metadata.Properties())
+	return LoadLocationProvider(t.metadata.Location(), t.metadata.Properties())
 }
 
 func (t Table) NewTransaction() *Transaction {

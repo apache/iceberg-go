@@ -534,8 +534,7 @@ func (c convertToArrow) Map(m iceberg.MapType, keyResult, valResult arrow.Field)
 	keyField := c.Field(m.KeyField(), keyResult)
 	valField := c.Field(m.ValueField(), valResult)
 
-	return arrow.Field{Type: arrow.MapOfWithMetadata(keyField.Type, keyField.Metadata,
-		valField.Type, valField.Metadata)}
+	return arrow.Field{Type: arrow.MapOfFields(keyField, valField)}
 }
 
 func (c convertToArrow) Primitive(iceberg.PrimitiveType) arrow.Field { panic("shouldn't be called") }

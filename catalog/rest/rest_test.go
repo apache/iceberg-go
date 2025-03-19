@@ -1000,7 +1000,7 @@ func (r *RestCatalogSuite) TestCreateTable200() {
 	)
 	r.Require().NoError(err)
 
-	r.Equal(catalog.ToIdentifier("rest", "fokko", "fokko2"), tbl.Identifier())
+	r.Equal(catalog.ToIdentifier("fokko", "fokko2"), tbl.Identifier())
 	r.Equal("s3://warehouse/database/table/metadata.json", tbl.MetadataLocation())
 	r.EqualValues(1, tbl.Metadata().Version())
 	r.Equal("bf289591-dcc0-4234-ad4f-5c3eed811a29", tbl.Metadata().TableUUID().String())
@@ -1175,7 +1175,7 @@ func (r *RestCatalogSuite) TestLoadTable200() {
 	tbl, err := cat.LoadTable(context.Background(), catalog.ToIdentifier("fokko", "table"), nil)
 	r.Require().NoError(err)
 
-	r.Equal(catalog.ToIdentifier("rest", "fokko", "table"), tbl.Identifier())
+	r.Equal(catalog.ToIdentifier("fokko", "table"), tbl.Identifier())
 	r.Equal("s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json", tbl.MetadataLocation())
 	r.EqualValues(1, tbl.Metadata().Version())
 	r.Equal("b55d9dda-6561-423a-8bfc-787980ce421f", tbl.Metadata().TableUUID().String())
@@ -1259,7 +1259,7 @@ func (r *RestCatalogSuite) TestRenameTable200() {
 	renamedTable, err := cat.RenameTable(context.Background(), fromIdent, toIdent)
 	r.Require().NoError(err)
 
-	r.Equal(catalog.ToIdentifier("rest", "fokko", "destination"), renamedTable.Identifier())
+	r.Equal(catalog.ToIdentifier("fokko", "destination"), renamedTable.Identifier())
 	r.Equal("s3://warehouse/database/table/metadata.json", renamedTable.MetadataLocation())
 	r.EqualValues(1, renamedTable.Metadata().Version())
 	r.Equal("bf289591-dcc0-4234-ad4f-5c3eed811a29", renamedTable.Metadata().TableUUID().String())
@@ -1461,7 +1461,7 @@ func (r *RestCatalogSuite) TestRegisterTable200() {
 	tbl, err := cat.RegisterTable(context.Background(), catalog.ToIdentifier("fokko", "fokko2"), "s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json")
 	r.Require().NoError(err)
 
-	r.Equal(catalog.ToIdentifier("rest", "fokko", "fokko2"), tbl.Identifier())
+	r.Equal(catalog.ToIdentifier("fokko", "fokko2"), tbl.Identifier())
 	r.Equal("s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json", tbl.MetadataLocation())
 	r.EqualValues(1, tbl.Metadata().Version())
 	r.Equal("d55d9dda-6561-423a-8bfc-787980ce421f", tbl.Metadata().TableUUID().String())

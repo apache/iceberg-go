@@ -323,7 +323,10 @@ func (t *TableWritingTestSuite) TestAddFilesUnpartitioned() {
 			},
 		})
 
-	contents, err := stagedTbl.Scan().ToArrowTable(context.Background())
+	scan, err := tx.Scan()
+	t.Require().NoError(err)
+
+	contents, err := scan.ToArrowTable(context.Background())
 	t.Require().NoError(err)
 	defer contents.Release()
 
@@ -564,12 +567,12 @@ func (t *TableWritingTestSuite) TestAddFilesWithLargeAndRegular() {
 	tx := tbl.NewTransaction()
 	t.Require().NoError(tx.AddFiles([]string{filePath, filePathLarge}, nil, false))
 
-	stagedTbl, err := tx.StagedTable()
+	scan, err := tx.Scan(table.WithOptions(iceberg.Properties{
+		table.ScanOptionArrowUseLargeTypes: "true",
+	}))
 	t.Require().NoError(err)
 
-	result, err := stagedTbl.Scan(table.WithOptions(iceberg.Properties{
-		table.ScanOptionArrowUseLargeTypes: "true",
-	})).ToArrowTable(context.Background())
+	result, err := scan.ToArrowTable(context.Background())
 	t.Require().NoError(err)
 	defer result.Release()
 
@@ -587,10 +590,10 @@ func (t *TableWritingTestSuite) TestAddFilesValidUpcast() {
 	tx := tbl.NewTransaction()
 	t.Require().NoError(tx.AddFiles([]string{filePath}, nil, false))
 
-	staged, err := tx.StagedTable()
+	scan, err := tx.Scan()
 	t.Require().NoError(err)
 
-	written, err := staged.Scan().ToArrowTable(context.Background())
+	written, err := scan.ToArrowTable(context.Background())
 	t.Require().NoError(err)
 	defer written.Release()
 
@@ -635,10 +638,10 @@ func (t *TableWritingTestSuite) TestAddFilesSubsetOfSchema() {
 	tx := tbl.NewTransaction()
 	t.Require().NoError(tx.AddFiles([]string{filePath}, nil, false))
 
-	staged, err := tx.StagedTable()
+	scan, err := tx.Scan()
 	t.Require().NoError(err)
 
-	written, err := staged.Scan().ToArrowTable(context.Background())
+	written, err := scan.ToArrowTable(context.Background())
 	t.Require().NoError(err)
 	defer written.Release()
 
