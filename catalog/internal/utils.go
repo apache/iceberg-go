@@ -97,6 +97,11 @@ func UpdateTableMetadata(base table.Metadata, updates []table.Update, metadataLo
 	return bldr.Build()
 }
 
+// (\d+)            -> version number
+// -                -> separator
+// ([\w-]{36})      -> UUID (36 characters, including hyphens)
+// (?:\.\w+)?       -> optional codec name
+// \.metadata\.json -> file extension
 var tableMetadataFileNameRegex = regexp.MustCompile(`^(\d+)-([\w-]{36})(?:\.\w+)?\.metadata\.json`)
 
 func ParseMetadataVersion(location string) int {

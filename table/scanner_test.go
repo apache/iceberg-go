@@ -638,6 +638,28 @@ func (s *ScannerSuite) TestFilterOnNewColumn() {
 	s.False(results.Column(1).Data().Chunk(0).(*array.String).IsValid(0))
 }
 
+func (s *ScannerSuite) TestFilterIsIn() {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(s.T(), 0)
+
+	ident := catalog.ToIdentifier("default", "test_uuid_and_fixed_unpartitioned")
+
+	tbl, err := s.cat.LoadTable(s.ctx, ident, s.props)
+	s.Require().NoError(err)
+
+	ctx := compute.WithAllocator(s.ctx, mem)
+	neqResults, err := tbl.Scan(table.WithRowFilter(
+		iceberg.NewNot(
+			iceberg.IsIn(iceberg.Reference("uuid_col"),
+				"102cb62f-e6f8-4eb0-9973-d9b012ff0967",
+				"639cccce-c9d2-494a-a78c-278ab234f024"))),
+		table.WithSelectedFields("uuid_col")).ToArrowTable(ctx)
+	s.Require().NoError(err)
+	defer neqResults.Release()
+
+	s.EqualValues(3, neqResults.NumRows())
+}
+
 func TestScanner(t *testing.T) {
 	suite.Run(t, new(ScannerSuite))
 }

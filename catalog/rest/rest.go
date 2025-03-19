@@ -643,17 +643,12 @@ func checkValidNamespace(ident table.Identifier) error {
 }
 
 func (r *Catalog) tableFromResponse(ctx context.Context, identifier []string, metadata table.Metadata, loc string, config iceberg.Properties) (*table.Table, error) {
-	id := identifier
-	if r.name != "" {
-		id = append([]string{r.name}, identifier...)
-	}
-
 	iofs, err := iceio.LoadFS(ctx, config, loc)
 	if err != nil {
 		return nil, err
 	}
 
-	return table.New(id, metadata, loc, iofs, r), nil
+	return table.New(identifier, metadata, loc, iofs, r), nil
 }
 
 func (r *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
@@ -773,9 +768,6 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 
 func (r *Catalog) CommitTable(ctx context.Context, tbl *table.Table, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
 	ident := tbl.Identifier()
-	if ident[0] == r.name {
-		ident = ident[1:]
-	}
 
 	ns, tblName, err := splitIdentForPath(ident)
 	if err != nil {
