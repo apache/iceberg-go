@@ -24,3 +24,7 @@ func Must[T any](v T, err error) T {
 
 	return v
 }
+
+func ToPtr[T any](v T) *T {
+	return &v
+}

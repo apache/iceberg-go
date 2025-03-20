@@ -92,6 +92,65 @@ func (fa *fastAppendFiles) deletedEntries() ([]iceberg.ManifestEntry, error) {
 	return nil, nil
 }
 
+func newMergeFilesProducer(
+	op Operation,
+	txn *Transaction,
+	fs iceio.WriteFileIO,
+	commitUUID *uuid.UUID,
+	snapshotProps iceberg.Properties,
+	existingManifestFiles []iceberg.ManifestFile,
+	deletedManifestFiles []iceberg.ManifestFile,
+	deletedManifestEntries []iceberg.ManifestEntry,
+) *snapshotProducer {
+	prod := createSnapshotProducer(op, txn, fs, commitUUID, snapshotProps)
+	prod.producerImpl = &mergeFiles{
+		base:                   prod,
+		existingManifestFiles:  existingManifestFiles,
+		deletedManifestFiles:   deletedManifestFiles,
+		deletedManifestEntries: deletedManifestEntries,
+	}
+
+	return prod
+}
+
+type mergeFiles struct {
+	base *snapshotProducer
+
+	existingManifestFiles  []iceberg.ManifestFile
+	deletedManifestFiles   []iceberg.ManifestFile
+	deletedManifestEntries []iceberg.ManifestEntry
+}
+
+func (mf *mergeFiles) processManifests(manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
+	var manifestsToKeep []iceberg.ManifestFile
+
+	for _, manifest := range manifests {
+		var found bool
+
+		for _, deletedManifest := range mf.deletedManifestFiles {
+			if manifest.FilePath() == deletedManifest.FilePath() {
+				found = true
+
+				break
+			}
+		}
+
+		if !found {
+			manifestsToKeep = append(manifestsToKeep, manifest)
+		}
+	}
+
+	return manifestsToKeep, nil
+}
+
+func (mf *mergeFiles) existingManifests() ([]iceberg.ManifestFile, error) {
+	return mf.existingManifestFiles, nil
+}
+
+func (mf *mergeFiles) deletedEntries() ([]iceberg.ManifestEntry, error) {
+	return mf.deletedManifestEntries, nil
+}
+
 type snapshotProducer struct {
 	producerImpl
 
