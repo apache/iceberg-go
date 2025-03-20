@@ -174,7 +174,7 @@ type decAsIntAgg[T int32 | int64] struct {
 	*statsAggregator[T]
 }
 
-func (s *decAsIntAgg[T]) minAsBytes() ([]byte, error) {
+func (s *decAsIntAgg[T]) MinAsBytes() ([]byte, error) {
 	if s.curMin == nil {
 		return nil, nil
 	}
@@ -191,7 +191,7 @@ func (s *decAsIntAgg[T]) minAsBytes() ([]byte, error) {
 	return s.toBytes(lit)
 }
 
-func (s *decAsIntAgg[T]) maxAsBytes() ([]byte, error) {
+func (s *decAsIntAgg[T]) MaxAsBytes() ([]byte, error) {
 	if s.curMax == nil {
 		return nil, nil
 	}
@@ -905,19 +905,4 @@ func (v *id2ParquetPathVisitor) Map(m iceberg.MapType, keyResult func() []id2Par
 
 func (v *id2ParquetPathVisitor) Primitive(iceberg.PrimitiveType) []id2ParquetPath {
 	return []id2ParquetPath{{fieldID: v.fieldID, path: strings.Join(v.path, ".")}}
-}
-
-func parquetPathToIDMapping(sc *iceberg.Schema) (map[string]int, error) {
-	result := make(map[string]int)
-
-	paths, err := iceberg.PreOrderVisit(sc, &id2ParquetPathVisitor{})
-	if err != nil {
-		return nil, err
-	}
-
-	for _, entry := range paths {
-		result[entry.path] = entry.fieldID
-	}
-
-	return result, nil
 }
