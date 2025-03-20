@@ -874,8 +874,8 @@ func (m *ManifestTestSuite) TestManifestWriterMeta() {
 	m.Require().NoError(err)
 	md, err := w.meta()
 	m.Require().NoError(err)
-	m.Assert().NotEqual("null", string(md["partition-spec"]))
-	m.Assert().Equal("[]", string(md["partition-spec"]))
+	m.NotEqual("null", string(md["partition-spec"]))
+	m.Equal("[]", string(md["partition-spec"]))
 }
 
 func TestManifests(t *testing.T) {
