@@ -59,3 +59,32 @@ func TestMinioWarehouse(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, tbl)
 }
+
+func TestMinioWarehouseNoLocation(t *testing.T) {
+	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
+		"uri":                ":memory:",
+		sqlcat.DriverKey:     sqliteshim.ShimName,
+		sqlcat.DialectKey:    string(sqlcat.SQLite),
+		"type":               "sql",
+		"warehouse":          "s3a://warehouse/iceberg/",
+		io.S3Region:          "local",
+		io.S3AccessKeyID:     "admin",
+		io.S3SecretAccessKey: "password",
+		// endpoint is passed via AWS_S3_ENDPOINT env var
+	})
+	require.NoError(t, err)
+
+	require.NotNil(t, cat)
+
+	c := cat.(*sqlcat.Catalog)
+	ctx := context.Background()
+	require.NoError(t, c.CreateNamespace(ctx, catalog.ToIdentifier("iceberg-test-2"), nil))
+
+	tbl, err := c.CreateTable(ctx,
+		catalog.ToIdentifier("iceberg-test-2", "test-table-2"),
+		iceberg.NewSchema(0, iceberg.NestedField{
+			Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, ID: 1,
+		}))
+	require.NoError(t, err)
+	require.NotNil(t, tbl)
+}
