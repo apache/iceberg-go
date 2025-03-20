@@ -280,10 +280,10 @@ func (t *TableWritingTestSuite) writeParquet(fio iceio.WriteFileIO, filePath str
 
 func (t *TableWritingTestSuite) createTable(identifier table.Identifier, formatVersion int, spec iceberg.PartitionSpec, sc *iceberg.Schema) *table.Table {
 	meta, err := table.NewMetadata(sc, &spec, table.UnsortedSortOrder,
-		t.getMetadataLoc(), iceberg.Properties{"format-version": strconv.Itoa(formatVersion)})
+		t.location, iceberg.Properties{"format-version": strconv.Itoa(formatVersion)})
 	t.Require().NoError(err)
 
-	return table.New(identifier, meta, t.location, iceio.LocalFS{}, nil)
+	return table.New(identifier, meta, t.getMetadataLoc(), iceio.LocalFS{}, nil)
 }
 
 func (t *TableWritingTestSuite) TestAddFilesUnpartitioned() {
