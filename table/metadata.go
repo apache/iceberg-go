@@ -1094,7 +1094,7 @@ func (c *commonMetadata) NameMapping() iceberg.NameMapping {
 func (c *commonMetadata) Version() int { return c.FormatVersion }
 
 type metadataV1 struct {
-	Schema    *iceberg.Schema          `json:"schema"`
+	Schema    *iceberg.Schema          `json:"schema,omitempty"`
 	Partition []iceberg.PartitionField `json:"partition-spec,omitempty"`
 
 	commonMetadata
