@@ -24,7 +24,7 @@ import (
 	"fmt"
 	"iter"
 	"maps"
-	"path"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -265,11 +265,11 @@ func (c *Catalog) getDefaultWarehouseLocation(ctx context.Context, nsname, table
 	}
 
 	if dblocation := dbprops.Get("location", ""); dblocation != "" {
-		return path.Join(dblocation, tableName), nil
+		return url.JoinPath(dblocation, tableName)
 	}
 
 	if warehousepath := c.props.Get("warehouse", ""); warehousepath != "" {
-		return warehousepath + "/" + path.Join(nsname+".db", tableName), nil
+		return url.JoinPath(warehousepath, nsname+".db", tableName)
 	}
 
 	return "", errors.New("no default path set, please specify a location when creating a table")
