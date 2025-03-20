@@ -262,39 +262,6 @@ func (b *MetadataBuilder) currentSnapshot() *Snapshot {
 	return s
 }
 
-func (b *MetadataBuilder) LastUpdatedMS() int64 { return b.lastUpdatedMS }
-
-func (b *MetadataBuilder) nextSequenceNumber() int64 {
-	if b.formatVersion > 1 {
-		if b.lastSequenceNumber == nil {
-			return 0
-		}
-
-		return *b.lastSequenceNumber + 1
-	}
-
-	return 0
-}
-
-func (b *MetadataBuilder) newSnapshotID() int64 {
-	snapshotID := generateSnapshotID()
-	for slices.ContainsFunc(b.snapshotList, func(s Snapshot) bool { return s.SnapshotID == snapshotID }) {
-		snapshotID = generateSnapshotID()
-	}
-
-	return snapshotID
-}
-
-func (b *MetadataBuilder) currentSnapshot() *Snapshot {
-	if b.currentSnapshotID == nil {
-		return nil
-	}
-
-	s, _ := b.SnapshotByID(*b.currentSnapshotID)
-
-	return s
-}
-
 func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema, newLastColumnID int, initial bool) (*MetadataBuilder, error) {
 	if newLastColumnID < b.lastColumnId {
 		return nil, fmt.Errorf("%w: newLastColumnID %d, must be >= %d", iceberg.ErrInvalidArgument, newLastColumnID, b.lastColumnId)
