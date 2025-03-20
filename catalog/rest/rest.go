@@ -768,9 +768,6 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 
 func (r *Catalog) CommitTable(ctx context.Context, tbl *table.Table, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
 	ident := tbl.Identifier()
-	if ident[0] == r.name {
-		ident = ident[1:]
-	}
 
 	ns, tblName, err := splitIdentForPath(ident)
 	if err != nil {
