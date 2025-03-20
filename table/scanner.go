@@ -488,26 +488,3 @@ func (scan *Scan) ToArrowTable(ctx context.Context) (arrow.Table, error) {
 
 	return array.NewTableFromRecords(schema, records), nil
 }
-
-func partitionRecordValue(field iceberg.PartitionField, val iceberg.Literal, schema *iceberg.Schema) (iceberg.Optional[iceberg.Literal], error) {
-	var ret iceberg.Optional[iceberg.Literal]
-	if val == nil {
-		return ret, nil
-	}
-
-	f, ok := schema.FindFieldByID(field.SourceID)
-	if !ok {
-		return ret, fmt.Errorf("%w: could not find source field in schema for %s",
-			iceberg.ErrInvalidSchema, field.String())
-	}
-
-	out, err := val.To(f.Type)
-	if err != nil {
-		return ret, err
-	}
-
-	ret.Val = out
-	ret.Valid = true
-
-	return ret, nil
-}

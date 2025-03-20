@@ -121,7 +121,7 @@ func (t *Transaction) Append(rdr array.RecordReader, snapshotProps iceberg.Prope
 	return iceberg.ErrNotImplemented
 }
 
-func (t *Transaction) AddFiles(files []string, snapshotProps iceberg.Properties, ignoreDuplicates bool) error {
+func (t *Transaction) AddFiles(ctx context.Context, files []string, snapshotProps iceberg.Properties, ignoreDuplicates bool) error {
 	set := make(map[string]string)
 	for _, f := range files {
 		set[f] = f
@@ -163,7 +163,7 @@ func (t *Transaction) AddFiles(files []string, snapshotProps iceberg.Properties,
 
 	updater := t.updateSnapshot(snapshotProps).fastAppend()
 
-	dataFiles := parquetFilesToDataFiles(t.tbl.fs, t.meta, slices.Values(files))
+	dataFiles := filesToDataFiles(ctx, t.tbl.fs, t.meta, slices.Values(files))
 	for df, err := range dataFiles {
 		if err != nil {
 			return err

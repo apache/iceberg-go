@@ -18,14 +18,12 @@
 package table
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"maps"
 	"slices"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
@@ -348,39 +346,4 @@ func (sp *snapshotProducer) commit() ([]Update, []Requirement, error) {
 		}, []Requirement{
 			AssertRefSnapshotID("main", sp.txn.meta.currentSnapshotID),
 		}, nil
-}
-
-func truncateUpperBoundText(s string, trunc int) string {
-	if trunc == utf8.RuneCountInString(s) {
-		return s
-	}
-
-	result := []rune(s)[:trunc]
-	for i := len(result) - 1; i >= 0; i-- {
-		next := result[i] + 1
-		if utf8.ValidRune(next) {
-			result[i] = next
-
-			return string(result)
-		}
-	}
-
-	return ""
-}
-
-func truncateUpperBoundBinary(val []byte, trunc int) []byte {
-	result := val[:trunc]
-	if bytes.Equal(result, val) {
-		return result
-	}
-
-	for i := len(result) - 1; i >= 0; i-- {
-		if result[i] < 255 {
-			result[i]++
-
-			return result
-		}
-	}
-
-	return nil
 }

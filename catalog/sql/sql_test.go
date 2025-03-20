@@ -1028,7 +1028,7 @@ func (s *SqliteCatalogTestSuite) TestCommitTable() {
 		s.EqualValues(0, tbl.Metadata().CurrentSchema().ID)
 
 		tx := tbl.NewTransaction()
-		s.Require().NoError(tx.AddFiles([]string{pqfile}, nil, false))
+		s.Require().NoError(tx.AddFiles(ctx, []string{pqfile}, nil, false))
 		updated, err := tx.Commit(ctx)
 		s.Require().NoError(err)
 
