@@ -428,6 +428,8 @@ func toProps(o *options) iceberg.Properties {
 	var props iceberg.Properties
 	if o.additionalProps != nil {
 		props = o.additionalProps
+	} else {
+		props = iceberg.Properties{}
 	}
 
 	setIf := func(key, v string) {
