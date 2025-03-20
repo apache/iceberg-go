@@ -1182,7 +1182,7 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 				return
 			}
 
-			statistics := format.DataFileStatsFromMeta(rdr, must(computeStatsPlan(currentSchema, meta.props)),
+			statistics := format.DataFileStatsFromMeta(rdr.Metadata(), must(computeStatsPlan(currentSchema, meta.props)),
 				must(format.PathToIDMapping(currentSchema)))
 
 			df := statistics.ToDataFile(currentSchema, currentSpec, filePath, iceberg.ParquetFile, rdr.SourceFileSize())
