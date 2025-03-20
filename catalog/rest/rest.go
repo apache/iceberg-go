@@ -377,7 +377,9 @@ func handleNon200(rsp *http.Response, override map[int]error) error {
 }
 
 func fromProps(props iceberg.Properties) *options {
-	o := &options{}
+	o := &options{
+		additionalProps: iceberg.Properties{},
+	}
 	for k, v := range props {
 		switch k {
 		case keyOauthToken:
@@ -411,6 +413,11 @@ func fromProps(props iceberg.Properties) *options {
 			} else {
 				o.tlsConfig.InsecureSkipVerify = verify
 			}
+		case "uri", "type":
+		default:
+			if v != "" {
+				o.additionalProps[k] = v
+			}
 		}
 	}
 
@@ -418,7 +425,12 @@ func fromProps(props iceberg.Properties) *options {
 }
 
 func toProps(o *options) iceberg.Properties {
-	props := iceberg.Properties{}
+	var props iceberg.Properties
+	if o.additionalProps != nil {
+		props = o.additionalProps
+	} else {
+		props = iceberg.Properties{}
+	}
 
 	setIf := func(key, v string) {
 		if v != "" {
