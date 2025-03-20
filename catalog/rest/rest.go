@@ -425,7 +425,10 @@ func fromProps(props iceberg.Properties) *options {
 }
 
 func toProps(o *options) iceberg.Properties {
-	props := o.additionalProps
+	var props iceberg.Properties
+	if o.additionalProps != nil {
+		props = o.additionalProps
+	}
 
 	setIf := func(key, v string) {
 		if v != "" {
