@@ -29,14 +29,11 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/catalog"
-	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 	"github.com/pterm/pterm"
-	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -741,41 +738,4 @@ func (t *TableWritingTestSuite) TestAddFilesReferencedCurrentSnapshotIgnoreDupli
 func TestTableWriting(t *testing.T) {
 	suite.Run(t, &TableWritingTestSuite{formatVersion: 1})
 	suite.Run(t, &TableWritingTestSuite{formatVersion: 2})
-}
-
-func TestAddToTable(t *testing.T) {
-	ctx := context.Background()
-	cat, err := rest.NewCatalog(ctx, "rest", "http://localhost:8181")
-	require.NoError(t, err)
-
-	props := iceberg.Properties{
-		iceio.S3Region:      "us-east-1",
-		iceio.S3AccessKeyID: "admin", iceio.S3SecretAccessKey: "password",
-	}
-
-	tbl, err := cat.LoadTable(ctx, catalog.ToIdentifier("default", "test_limit"), props)
-	require.NoError(t, err)
-
-	fmt.Println(tbl.Schema())
-
-	arrSchema := arrow.NewSchema([]arrow.Field{
-		{Name: "idx", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
-	}, nil)
-
-	arrTbl, err := array.TableFromJSON(memory.DefaultAllocator, arrSchema, []string{
-		`[{"idx": 2}, {"idx": 3}, {"idx": 4}]`,
-	})
-	require.NoError(t, err)
-	defer arrTbl.Release()
-
-	fw, err := tbl.FS().(iceio.WriteFileIO).Create("s3://warehouse/default/test_limit/data/sample_test.parquet")
-	require.NoError(t, err)
-	require.NoError(t, pqarrow.WriteTable(arrTbl, fw, arrTbl.NumRows(), nil, pqarrow.DefaultWriterProps()))
-
-	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(ctx, []string{"s3://warehouse/default/test_limit/data/sample_test.parquet"}, nil, false))
-	result, err := tx.Commit(ctx)
-	require.NoError(t, err)
-
-	fmt.Println(result.CurrentSnapshot())
 }
