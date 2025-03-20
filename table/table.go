@@ -308,11 +308,11 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 	return s
 }
 
-func New(ident Identifier, meta Metadata, location string, fs io.IO, cat CatalogIO) *Table {
+func New(ident Identifier, meta Metadata, metadataLocation string, fs io.IO, cat CatalogIO) *Table {
 	return &Table{
 		identifier:       ident,
 		metadata:         meta,
-		metadataLocation: location,
+		metadataLocation: metadataLocation,
 		fs:               fs,
 		cat:              cat,
 	}
