@@ -19,6 +19,7 @@ package iceberg
 
 import (
 	"bytes"
+	"io"
 	"testing"
 	"time"
 
@@ -865,6 +866,16 @@ func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 	m.Assert().Equal([]int64{4}, data.SplitOffsets())
 	m.Assert().Equal([]int{1, 1}, data.EqualityFieldIDs())
 	m.Assert().Equal(0, *data.SortOrderID())
+}
+
+func (m *ManifestTestSuite) TestManifestWriterMeta() {
+	sch := NewSchema(0, NestedField{ID: 0, Name: "test01", Type: StringType{}})
+	w, err := NewManifestWriter(2, io.Discard, *UnpartitionedSpec, sch, 1)
+	m.Require().NoError(err)
+	md, err := w.meta()
+	m.Require().NoError(err)
+	m.Assert().NotEqual("null", string(md["partition-spec"]))
+	m.Assert().Equal("[]", string(md["partition-spec"]))
 }
 
 func TestManifests(t *testing.T) {
