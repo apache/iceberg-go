@@ -750,7 +750,8 @@ func TestAddToTable(t *testing.T) {
 
 	props := iceberg.Properties{
 		iceio.S3Region:      "us-east-1",
-		iceio.S3AccessKeyID: "admin", iceio.S3SecretAccessKey: "password"}
+		iceio.S3AccessKeyID: "admin", iceio.S3SecretAccessKey: "password",
+	}
 
 	tbl, err := cat.LoadTable(ctx, catalog.ToIdentifier("default", "test_limit"), props)
 	require.NoError(t, err)
@@ -758,10 +759,12 @@ func TestAddToTable(t *testing.T) {
 	fmt.Println(tbl.Schema())
 
 	arrSchema := arrow.NewSchema([]arrow.Field{
-		{Name: "idx", Type: arrow.PrimitiveTypes.Int32, Nullable: true}}, nil)
+		{Name: "idx", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+	}, nil)
 
 	arrTbl, err := array.TableFromJSON(memory.DefaultAllocator, arrSchema, []string{
-		`[{"idx": 2}, {"idx": 3}, {"idx": 4}]`})
+		`[{"idx": 2}, {"idx": 3}, {"idx": 4}]`,
+	})
 	require.NoError(t, err)
 	defer arrTbl.Release()
 

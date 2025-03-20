@@ -1178,6 +1178,7 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 
 			if err := checkArrowSchemaCompat(currentSchema, arrSchema, false); err != nil {
 				yield(nil, err)
+
 				return
 			}
 
