@@ -828,14 +828,14 @@ type commonMetadata struct {
 	Specs              []iceberg.PartitionSpec `json:"partition-specs"`
 	DefaultSpecID      int                     `json:"default-spec-id"`
 	LastPartitionID    *int                    `json:"last-partition-id,omitempty"`
-	Props              iceberg.Properties      `json:"properties"`
+	Props              iceberg.Properties      `json:"properties,omitempty"`
 	SnapshotList       []Snapshot              `json:"snapshots,omitempty"`
 	CurrentSnapshotID  *int64                  `json:"current-snapshot-id,omitempty"`
-	SnapshotLog        []SnapshotLogEntry      `json:"snapshot-log"`
-	MetadataLog        []MetadataLogEntry      `json:"metadata-log"`
+	SnapshotLog        []SnapshotLogEntry      `json:"snapshot-log,omitempty"`
+	MetadataLog        []MetadataLogEntry      `json:"metadata-log,omitempty"`
 	SortOrderList      []SortOrder             `json:"sort-orders"`
 	DefaultSortOrderID int                     `json:"default-sort-order-id"`
-	SnapshotRefs       map[string]SnapshotRef  `json:"refs"`
+	SnapshotRefs       map[string]SnapshotRef  `json:"refs,omitempty"`
 }
 
 func (c *commonMetadata) Ref() SnapshotRef                     { return c.SnapshotRefs[MainBranch] }
@@ -1095,7 +1095,7 @@ func (c *commonMetadata) Version() int { return c.FormatVersion }
 
 type metadataV1 struct {
 	Schema    *iceberg.Schema          `json:"schema"`
-	Partition []iceberg.PartitionField `json:"partition-spec"`
+	Partition []iceberg.PartitionField `json:"partition-spec,omitempty"`
 
 	commonMetadata
 }
