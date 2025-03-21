@@ -30,6 +30,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
+	"github.com/google/uuid"
 )
 
 type snapshotUpdate struct {
@@ -40,6 +41,15 @@ type snapshotUpdate struct {
 
 func (s snapshotUpdate) fastAppend() *snapshotProducer {
 	return newFastAppendFilesProducer(OpAppend, s.txn, s.io, nil, s.snapshotProps)
+}
+
+func (s snapshotUpdate) mergeOverwrite(commitUUID *uuid.UUID) *snapshotProducer {
+	op := OpOverwrite
+	if s.txn.meta.currentSnapshot() == nil {
+		op = OpAppend
+	}
+
+	return newOverwriteFilesProducer(op, s.txn, s.io, commitUUID, s.snapshotProps)
 }
 
 type Transaction struct {
@@ -115,6 +125,91 @@ func (t *Transaction) SetProperties(props iceberg.Properties) error {
 	}
 
 	return nil
+}
+
+// ReplaceFiles is actually just an overwrite operation with multiple
+// files deleted and added.
+func (t *Transaction) ReplaceDataFiles(filesToDelete []string, filesToAdd []string, snapshotProps iceberg.Properties) error {
+	if len(filesToDelete) == 0 {
+		if len(filesToAdd) > 0 {
+			return t.AddFiles(filesToAdd, snapshotProps, true)
+		}
+	}
+
+	var (
+		setToDelete = make(map[string]struct{})
+		setToAdd    = make(map[string]struct{})
+	)
+
+	for _, f := range filesToDelete {
+		setToDelete[f] = struct{}{}
+	}
+
+	for _, f := range filesToAdd {
+		setToAdd[f] = struct{}{}
+	}
+
+	if len(setToDelete) != len(filesToDelete) {
+		return errors.New("file paths must be unique for ReplaceDataFiles")
+	}
+
+	if len(setToAdd) != len(filesToAdd) {
+		return errors.New("file paths must be unique for ReplaceDataFiles")
+	}
+
+	s := t.meta.currentSnapshot()
+	if s == nil {
+		return fmt.Errorf("%w: cannot replace files in a table without an existing snapshot", ErrInvalidOperation)
+	}
+
+	markedForDeletion := make([]iceberg.DataFile, 0, len(setToDelete))
+	for df, err := range s.dataFiles(t.tbl.fs, nil) {
+		if err != nil {
+			return err
+		}
+
+		if _, ok := setToDelete[df.FilePath()]; ok {
+			markedForDeletion = append(markedForDeletion, df)
+		}
+
+		if _, ok := setToAdd[df.FilePath()]; ok {
+			return fmt.Errorf("cannot add files that are already referenced by table, files: %s", df.FilePath())
+		}
+	}
+
+	if t.meta.NameMapping() == nil {
+		nameMapping := t.meta.CurrentSchema().NameMapping()
+		mappingJson, err := json.Marshal(nameMapping)
+		if err != nil {
+			return err
+		}
+		err = t.SetProperties(iceberg.Properties{DefaultNameMappingKey: string(mappingJson)})
+		if err != nil {
+			return err
+		}
+	}
+
+	commitUUID := uuid.New()
+	updater := t.updateSnapshot(snapshotProps).mergeOverwrite(&commitUUID)
+
+	for _, df := range markedForDeletion {
+		updater.deleteDataFile(df)
+	}
+
+	dataFiles := parquetFilesToDataFiles(t.tbl.fs, t.meta, slices.Values(filesToAdd))
+	for df, err := range dataFiles {
+		if err != nil {
+			return err
+		}
+		updater.appendDataFile(df)
+	}
+
+	updates, reqs, err := updater.commit()
+	if err != nil {
+		return err
+	}
+
+	return t.apply(updates, reqs)
 }
 
 func (t *Transaction) Append(rdr array.RecordReader, snapshotProps iceberg.Properties) error {

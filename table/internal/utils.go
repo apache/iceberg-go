@@ -23,7 +23,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"iter"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -32,6 +34,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go"
+	"golang.org/x/sync/errgroup"
 )
 
 // Enumerated is a quick way to represent a sequenced value that can
@@ -477,4 +480,58 @@ func TruncateUpperBoundBinary(val []byte, trunc int) []byte {
 	}
 
 	return nil
+}
+func MapExec[T, S any](nWorkers int, slice []T, fn func(T) (S, error)) iter.Seq2[S, error] {
+	if nWorkers <= 0 {
+		nWorkers = runtime.GOMAXPROCS(0)
+	}
+
+	nWorkers = min(nWorkers, len(slice))
+
+	var g errgroup.Group
+	ch := make(chan T, len(slice))
+	out := make(chan S, nWorkers)
+
+	for range nWorkers {
+		g.Go(func() error {
+			for v := range ch {
+				result, err := fn(v)
+				if err != nil {
+					return err
+				}
+				out <- result
+			}
+			return nil
+		})
+	}
+
+	for _, v := range slice {
+		ch <- v
+	}
+	close(ch)
+
+	var err error
+	go func() {
+		defer close(out)
+		err = g.Wait()
+	}()
+
+	return func(yield func(S, error) bool) {
+		defer func() {
+			// drain out if we exit early
+			for range out {
+			}
+		}()
+
+		for v := range out {
+			if !yield(v, nil) {
+				return
+			}
+		}
+
+		if err != nil {
+			var z S
+			yield(z, err)
+		}
+	}
 }
