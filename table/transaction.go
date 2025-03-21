@@ -115,7 +115,7 @@ func (t *Transaction) appendSnapshotProducer(props iceberg.Properties) *snapshot
 	manifestMerge := t.meta.props.GetBool(ManifestMergeEnabledKey, ManifestMergeEnabledDefault)
 	updateSnapshot := t.updateSnapshot(props)
 	if manifestMerge {
-		panic(iceberg.ErrNotImplemented)
+		return updateSnapshot.mergeAppend()
 	}
 
 	return updateSnapshot.fastAppend()

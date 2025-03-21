@@ -30,12 +30,15 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/catalog/sql"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 	"github.com/pterm/pterm"
 	"github.com/stretchr/testify/suite"
+	"github.com/uptrace/bun/driver/sqliteshim"
 )
 
 type TableTestSuite struct {
@@ -904,6 +907,112 @@ func (t *TableWritingTestSuite) TestWriteSpecialCharacterColumn() {
 	defer result.Release()
 
 	t.True(array.TableEqual(arrowTable, result), "expected:\n %s\ngot:\n %s", arrowTable, result)
+}
+
+func (t *TableWritingTestSuite) getInMemCatalog() catalog.Catalog {
+	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
+		"uri":          ":memory:",
+		"type":         "sql",
+		sql.DriverKey:  sqliteshim.ShimName,
+		sql.DialectKey: string(sql.SQLite),
+		"warehouse":    "file://" + t.location,
+	})
+	t.Require().NoError(err)
+
+	return cat
+}
+
+func (t *TableWritingTestSuite) createTableWithProps(identifier table.Identifier, props iceberg.Properties, spec iceberg.PartitionSpec, sc *iceberg.Schema) *table.Table {
+	cat := t.getInMemCatalog()
+	cat.DropTable(t.ctx, identifier)
+	cat.DropNamespace(t.ctx, catalog.NamespaceFromIdent(identifier))
+
+	t.Require().NoError(cat.CreateNamespace(t.ctx, catalog.NamespaceFromIdent(identifier), nil))
+	tbl, err := cat.CreateTable(t.ctx, identifier, sc, catalog.WithProperties(props),
+		catalog.WithLocation(t.location))
+
+	t.Require().NoError(err)
+	return tbl
+}
+
+func (t *TableWritingTestSuite) TestMergeManifests() {
+	tblA := t.createTableWithProps(table.Identifier{"default", "merge_manifest_a"},
+		iceberg.Properties{
+			table.ManifestMergeEnabledKey:  "true",
+			table.ManifestMinMergeCountKey: "1",
+			"format-version":               strconv.Itoa(t.formatVersion),
+		}, *iceberg.UnpartitionedSpec, tableSchema())
+
+	tblB := t.createTableWithProps(table.Identifier{"default", "merge_manifest_b"},
+		iceberg.Properties{
+			table.ManifestMergeEnabledKey:    "true",
+			table.ManifestMinMergeCountKey:   "1",
+			table.ManifestTargetSizeBytesKey: "1",
+			"format-version":                 strconv.Itoa(t.formatVersion),
+		}, *iceberg.UnpartitionedSpec, tableSchema())
+
+	tblC := t.createTableWithProps(table.Identifier{"default", "merge_manifest_c"},
+		iceberg.Properties{
+			table.ManifestMinMergeCountKey: "1",
+			"format-version":               strconv.Itoa(t.formatVersion),
+		}, *iceberg.UnpartitionedSpec, tableSchema())
+
+	arrTable := arrowTableWithNull()
+	defer arrTable.Release()
+
+	var err error
+	// tblA should merge all manifests into 1
+	tblA, err = tblA.AppendTable(t.ctx, arrTable, 1, nil)
+	t.Require().NoError(err)
+	tblA, err = tblA.AppendTable(t.ctx, arrTable, 1, nil)
+	t.Require().NoError(err)
+	tblA, err = tblA.AppendTable(t.ctx, arrTable, 1, nil)
+	t.Require().NoError(err)
+
+	// tblB should not merge any manifests because the target size is too small
+	tblB, err = tblB.AppendTable(t.ctx, arrTable, 1, nil)
+	t.Require().NoError(err)
+	tblB, err = tblB.AppendTable(t.ctx, arrTable, 1, nil)
+	t.Require().NoError(err)
+	tblB, err = tblB.AppendTable(t.ctx, arrTable, 1, nil)
+	t.Require().NoError(err)
+
+	// tblC should not merge any manifests because merging is disabled
+	tblC, err = tblC.AppendTable(t.ctx, arrTable, 1, nil)
+	t.Require().NoError(err)
+	tblC, err = tblC.AppendTable(t.ctx, arrTable, 1, nil)
+	t.Require().NoError(err)
+	tblC, err = tblC.AppendTable(t.ctx, arrTable, 1, nil)
+	t.Require().NoError(err)
+
+	manifestList, err := tblA.CurrentSnapshot().Manifests(tblA.FS())
+	t.Require().NoError(err)
+	t.Len(manifestList, 1)
+
+	manifestList, err = tblB.CurrentSnapshot().Manifests(tblB.FS())
+	t.Require().NoError(err)
+	t.Len(manifestList, 3)
+
+	manifestList, err = tblC.CurrentSnapshot().Manifests(tblC.FS())
+	t.Require().NoError(err)
+	t.Len(manifestList, 3)
+
+	resultA, err := tblA.Scan().ToArrowTable(t.ctx)
+	t.Require().NoError(err)
+	defer resultA.Release()
+
+	resultB, err := tblB.Scan().ToArrowTable(t.ctx)
+	t.Require().NoError(err)
+	defer resultB.Release()
+
+	resultC, err := tblC.Scan().ToArrowTable(t.ctx)
+	t.Require().NoError(err)
+	defer resultC.Release()
+
+	// tblA and tblC should contain the same data
+	t.True(array.TableEqual(resultA, resultC), "expected:\n %s\ngot:\n %s", resultA, resultC)
+	// tblB and tblC should contain the same data
+	t.True(array.TableEqual(resultB, resultC), "expected:\n %s\ngot:\n %s", resultB, resultC)
 }
 
 func TestTableWriting(t *testing.T) {

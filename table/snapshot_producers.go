@@ -312,7 +312,6 @@ func (sp *snapshotProducer) newManifestWriter(spec iceberg.PartitionSpec) (*iceb
 		sp.txn.meta.CurrentSchema(), sp.snapshotID)
 	if err != nil {
 		defer out.Close()
-
 		return nil, "", nil, err
 	}
 
