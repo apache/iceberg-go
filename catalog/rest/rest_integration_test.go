@@ -181,7 +181,7 @@ func (s *RestIntegrationSuite) TestCreateTable() {
 func (s *RestIntegrationSuite) TestWriteCommitTable() {
 	s.ensureNamespace()
 
-	const expected_location = "s3://warehouse/rest-integration-test/test-write-commit-table"
+	const expectedLocation = "s3://warehouse/rest-integration-test/test-write-commit-table"
 
 	tbl, err := s.cat.CreateTable(s.ctx,
 		catalog.ToIdentifier(TestNamespaceIdent, "test-table-2"),
@@ -193,7 +193,7 @@ func (s *RestIntegrationSuite) TestWriteCommitTable() {
 		s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table-2")))
 	}()
 
-	s.Equal(expected_location, tbl.Location())
+	s.Equal(expectedLocation, tbl.Location())
 
 	arrSchema, err := table.SchemaToArrowSchema(tableSchemaNested, nil, false, false)
 	s.Require().NoError(err)
@@ -214,7 +214,7 @@ func (s *RestIntegrationSuite) TestWriteCommitTable() {
 	s.Require().NoError(err)
 	defer table.Release()
 
-	pqfile, err := url.JoinPath(expected_location, "data", "test_commit_table_data", "test.parquet")
+	pqfile, err := url.JoinPath(expectedLocation, "data", "test_commit_table_data", "test.parquet")
 	s.Require().NoError(err)
 
 	fw, err := tbl.FS().(io.WriteFileIO).Create(pqfile)
