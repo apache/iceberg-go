@@ -922,7 +922,7 @@ func (t *TableWritingTestSuite) getInMemCatalog() catalog.Catalog {
 	return cat
 }
 
-func (t *TableWritingTestSuite) createTableWithProps(identifier table.Identifier, props iceberg.Properties, spec iceberg.PartitionSpec, sc *iceberg.Schema) *table.Table {
+func (t *TableWritingTestSuite) createTableWithProps(identifier table.Identifier, props iceberg.Properties, sc *iceberg.Schema) *table.Table {
 	cat := t.getInMemCatalog()
 	cat.DropTable(t.ctx, identifier)
 	cat.DropNamespace(t.ctx, catalog.NamespaceFromIdent(identifier))
@@ -941,7 +941,7 @@ func (t *TableWritingTestSuite) TestMergeManifests() {
 			table.ManifestMergeEnabledKey:  "true",
 			table.ManifestMinMergeCountKey: "1",
 			"format-version":               strconv.Itoa(t.formatVersion),
-		}, *iceberg.UnpartitionedSpec, tableSchema())
+		}, tableSchema())
 
 	tblB := t.createTableWithProps(table.Identifier{"default", "merge_manifest_b"},
 		iceberg.Properties{
@@ -949,13 +949,13 @@ func (t *TableWritingTestSuite) TestMergeManifests() {
 			table.ManifestMinMergeCountKey:   "1",
 			table.ManifestTargetSizeBytesKey: "1",
 			"format-version":                 strconv.Itoa(t.formatVersion),
-		}, *iceberg.UnpartitionedSpec, tableSchema())
+		}, tableSchema())
 
 	tblC := t.createTableWithProps(table.Identifier{"default", "merge_manifest_c"},
 		iceberg.Properties{
 			table.ManifestMinMergeCountKey: "1",
 			"format-version":               strconv.Itoa(t.formatVersion),
-		}, *iceberg.UnpartitionedSpec, tableSchema())
+		}, tableSchema())
 
 	arrTable := arrowTableWithNull()
 	defer arrTable.Release()
