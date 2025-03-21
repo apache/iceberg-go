@@ -42,7 +42,7 @@ type RestIntegrationSuite struct {
 	cat *rest.Catalog
 }
 
-const TestNamespaceIdent = "TEST NS"
+const TestNamespaceIdent = "rest-integration-test"
 
 func (s *RestIntegrationSuite) loadCatalog(ctx context.Context) *rest.Catalog {
 	cat, err := catalog.Load(ctx, "local", iceberg.Properties{
