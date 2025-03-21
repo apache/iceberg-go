@@ -501,6 +501,7 @@ func MapExec[T, S any](nWorkers int, slice []T, fn func(T) (S, error)) iter.Seq2
 				}
 				out <- result
 			}
+
 			return nil
 		})
 	}

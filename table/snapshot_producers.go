@@ -147,6 +147,7 @@ func (of *overwriteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 
 		if len(foundDeleted) == 0 {
 			existingFiles = append(existingFiles, m)
+
 			continue
 		}
 
@@ -219,6 +220,7 @@ func (of *overwriteFiles) deletedEntries() ([]iceberg.ManifestEntry, error) {
 						entry.DataFile()))
 			}
 		}
+
 		return result, nil
 	}
 
@@ -309,6 +311,7 @@ func (sp *snapshotProducer) newManifestWriter(spec iceberg.PartitionSpec) (*iceb
 		sp.txn.meta.CurrentSchema(), sp.snapshotID)
 	if err != nil {
 		defer out.Close()
+
 		return nil, "", nil, err
 	}
 
