@@ -46,7 +46,7 @@ require (
 	github.com/uptrace/bun/extra/bundebug v1.2.11
 	gocloud.dev v0.40.0
 	golang.org/x/sync v0.12.0
-	google.golang.org/api v0.226.0
+	google.golang.org/api v0.227.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
