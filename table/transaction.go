@@ -129,7 +129,13 @@ func (t *Transaction) SetProperties(props iceberg.Properties) error {
 
 // ReplaceFiles is actually just an overwrite operation with multiple
 // files deleted and added.
-func (t *Transaction) ReplaceDataFiles(filesToDelete []string, filesToAdd []string, snapshotProps iceberg.Properties) error {
+//
+// TODO: technically, this could be a REPLACE operation but we aren't performing
+// any validation here that there are no changes to the underlying data. A REPLACE
+// operation is only valid if the data is exactly the same as the previous snapshot.
+//
+// For now, we'll keep using an overwrite operation.
+func (t *Transaction) ReplaceDataFiles(filesToDelete, filesToAdd []string, snapshotProps iceberg.Properties) error {
 	if len(filesToDelete) == 0 {
 		if len(filesToAdd) > 0 {
 			return t.AddFiles(filesToAdd, snapshotProps, true)
