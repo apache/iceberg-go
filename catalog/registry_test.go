@@ -167,7 +167,7 @@ func TestRegistryFromConfig(t *testing.T) {
 	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
 		params = r.URL.Query()
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"default":   map[string]any{},
 			"overrides": map[string]any{},
 		})

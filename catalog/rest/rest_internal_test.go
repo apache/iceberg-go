@@ -34,7 +34,7 @@ func TestAuthHeader(t *testing.T) {
 	srv := httptest.NewServer(mux)
 
 	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"defaults": map[string]any{}, "overrides": map[string]any{},
 		})
 	})
@@ -53,7 +53,7 @@ func TestAuthHeader(t *testing.T) {
 
 		w.WriteHeader(http.StatusOK)
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"access_token":      "some_jwt_token",
 			"token_type":        "Bearer",
 			"expires_in":        86400,
@@ -81,7 +81,7 @@ func TestAuthUriHeader(t *testing.T) {
 	srv := httptest.NewServer(mux)
 
 	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"defaults": map[string]any{}, "overrides": map[string]any{},
 		})
 	})
@@ -100,7 +100,7 @@ func TestAuthUriHeader(t *testing.T) {
 
 		w.WriteHeader(http.StatusOK)
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"access_token":      "some_jwt_token",
 			"token_type":        "Bearer",
 			"expires_in":        86400,

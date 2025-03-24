@@ -266,13 +266,17 @@ func (sp *snapshotProducer) summary(props iceberg.Properties) (Summary, error) {
 	currentSchema := sp.txn.meta.CurrentSchema()
 	partitionSpec := sp.txn.meta.CurrentSpec()
 	for _, df := range sp.addedFiles {
-		ssc.addFile(df, currentSchema, partitionSpec)
+		if err := ssc.addFile(df, currentSchema, partitionSpec); err != nil {
+			return Summary{}, err
+		}
 	}
 
 	if len(sp.deletedFiles) > 0 {
 		specs := sp.txn.meta.specs
 		for _, df := range sp.deletedFiles {
-			ssc.removeFile(df, currentSchema, specs[df.SpecID()])
+			if err := ssc.removeFile(df, currentSchema, specs[df.SpecID()]); err != nil {
+				return Summary{}, err
+			}
 		}
 	}
 

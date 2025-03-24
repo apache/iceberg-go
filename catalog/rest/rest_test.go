@@ -69,7 +69,7 @@ func (r *RestCatalogSuite) SetupTest() {
 		r.Require().Equal(http.MethodGet, req.Method)
 		r.configVals = req.URL.Query()
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"defaults":  map[string]any{},
 			"overrides": map[string]any{},
 		})
@@ -101,7 +101,7 @@ func (r *RestCatalogSuite) TestToken200() {
 
 		w.WriteHeader(http.StatusOK)
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"access_token":      TestToken,
 			"token_type":        "Bearer",
 			"expires_in":        86400,
@@ -135,7 +135,7 @@ func (r *RestCatalogSuite) TestLoadRegisteredCatalog() {
 
 		w.WriteHeader(http.StatusOK)
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"access_token":      TestToken,
 			"token_type":        "Bearer",
 			"expires_in":        86400,
@@ -162,7 +162,7 @@ func (r *RestCatalogSuite) TestToken400() {
 
 		w.WriteHeader(http.StatusBadRequest)
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"error":             "invalid_client",
 			"error_description": "credentials for key invalid_key do not match",
 		})
@@ -191,7 +191,7 @@ func (r *RestCatalogSuite) TestToken200AuthUrl() {
 
 		w.WriteHeader(http.StatusOK)
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"access_token":      TestToken,
 			"token_type":        "Bearer",
 			"expires_in":        86400,
@@ -219,7 +219,7 @@ func (r *RestCatalogSuite) TestToken401() {
 
 		w.WriteHeader(http.StatusUnauthorized)
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"error":             "invalid_client",
 			"error_description": "credentials for key invalid_key do not match",
 		})
@@ -246,7 +246,7 @@ func (r *RestCatalogSuite) TestListTables200() {
 		pageSize := req.URL.Query().Get("page-size")
 		r.Equal("", pageToken)
 		r.Equal(strconv.Itoa(customPageSize), pageSize)
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"identifiers": []any{
 				map[string]any{
 					"namespace": []string{namespace},
@@ -292,7 +292,7 @@ func (r *RestCatalogSuite) TestListTablesPrefixed200() {
 
 		w.WriteHeader(http.StatusOK)
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"access_token":      TestToken,
 			"token_type":        "Bearer",
 			"expires_in":        86400,
@@ -312,7 +312,7 @@ func (r *RestCatalogSuite) TestListTablesPrefixed200() {
 		r.Equal("", pageToken)
 		r.Equal(strconv.Itoa(defaultPageSize), pageSize)
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"identifiers": []any{
 				map[string]any{
 					"namespace": []string{namespace},
@@ -403,7 +403,7 @@ func (r *RestCatalogSuite) TestListTablesPagination() {
 			}
 		}
 
-		json.NewEncoder(w).Encode(response)
+		_ = json.NewEncoder(w).Encode(response)
 	})
 
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
@@ -443,7 +443,7 @@ func (r *RestCatalogSuite) TestListTablesPaginationErrorOnSubsequentPage() {
 
 		// First page succeeds
 		if pageToken == "" {
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"identifiers": []any{
 					map[string]any{
 						"namespace": []string{namespace},
@@ -463,7 +463,7 @@ func (r *RestCatalogSuite) TestListTablesPaginationErrorOnSubsequentPage() {
 		// Second page fails with an error
 		if pageToken == "token1" {
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"error": map[string]any{
 					"message": "Token expired or invalid",
 					"type":    "NoSuchPageTokenException",
@@ -517,7 +517,7 @@ func (r *RestCatalogSuite) TestListTables404() {
 		r.Equal("", pageToken)
 		r.Equal(strconv.Itoa(defaultPageSize), pageSize)
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"error": map[string]any{
 				"message": "Namespace does not exist: personal in warehouse 8bcb0838-50fc-472d-9ddb-8feb89ef5f1e",
 				"type":    "NoSuchNamespaceException",
@@ -552,7 +552,7 @@ func (r *RestCatalogSuite) TestListNamespaces200() {
 			r.Equal(v, req.Header.Values(k))
 		}
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"namespaces": []table.Identifier{
 				{"default"}, {"examples"}, {"fokko"}, {"system"},
 			},
@@ -577,7 +577,7 @@ func (r *RestCatalogSuite) TestListNamespaceWithParent200() {
 			r.Equal(v, req.Header.Values(k))
 		}
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"namespaces": []table.Identifier{
 				{"accounting", "tax"},
 			},
@@ -602,7 +602,7 @@ func (r *RestCatalogSuite) TestListNamespaces400() {
 		}
 
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"error": map[string]any{
 				"message": "Namespace does not exist: personal in warehouse 8bcb0838-50fc-472d-9ddb-8feb89ef5f1e",
 				"type":    "NoSuchNamespaceException",
@@ -639,7 +639,7 @@ func (r *RestCatalogSuite) TestCreateNamespace200() {
 		r.Equal(table.Identifier{"leden"}, body.Namespace)
 		r.Empty(body.Props)
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"namespace": []string{"leden"}, "properties": map[string]any{},
 		})
 	})
@@ -716,7 +716,7 @@ func (r *RestCatalogSuite) TestCreateNamespaceWithProps200() {
 		r.Equal(table.Identifier{"leden"}, body.Namespace)
 		r.Equal(iceberg.Properties{"foo": "bar", "super": "duper"}, body.Props)
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"namespace": []string{"leden"}, "properties": body.Props,
 		})
 	})
@@ -748,7 +748,7 @@ func (r *RestCatalogSuite) TestCreateNamespace409() {
 		r.Empty(body.Props)
 
 		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"error": map[string]any{
 				"message": "Namespace already exists: fokko in warehouse 8bcb0838-50fc-472d-9ddb-8feb89ef5f1e",
 				"type":    "AlreadyExistsException",
@@ -791,7 +791,7 @@ func (r *RestCatalogSuite) TestDropNamespace404() {
 		}
 
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"error": map[string]any{
 				"message": "Namespace does not exist: examples in warehouse",
 				"type":    "NoSuchNamespaceException",
@@ -817,7 +817,7 @@ func (r *RestCatalogSuite) TestLoadNamespaceProps200() {
 		}
 
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"namespace":  []string{"fokko"},
 			"properties": map[string]any{"prop": "yes"},
 		})
@@ -840,7 +840,7 @@ func (r *RestCatalogSuite) TestLoadNamespaceProps404() {
 		}
 
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"error": map[string]any{
 				"message": "Namespace does not exist: fokko22 in warehouse",
 				"type":    "NoSuchNamespaceException",
@@ -865,7 +865,7 @@ func (r *RestCatalogSuite) TestUpdateNamespaceProps200() {
 			r.Equal(v, req.Header.Values(k))
 		}
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"removed": []string{},
 			"updated": []string{"prop"},
 			"missing": []string{"abc"},
@@ -895,7 +895,7 @@ func (r *RestCatalogSuite) TestUpdateNamespaceProps404() {
 		}
 
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"error": map[string]any{
 				"message": "Namespace does not exist: does_not_exist in warehouse",
 				"type":    "NoSuchNamespaceException",
@@ -985,7 +985,7 @@ func (r *RestCatalogSuite) TestCreateTable200() {
 			r.Equal(v, req.Header.Values(k))
 		}
 
-		w.Write([]byte(createTableRestExample))
+		_, _ = w.Write([]byte(createTableRestExample))
 	})
 
 	t := createTableRestExample
@@ -1029,7 +1029,7 @@ func (r *RestCatalogSuite) TestCreateTable409() {
 				"code":    409,
 			},
 		}
-		json.NewEncoder(w).Encode(errorResponse)
+		_ = json.NewEncoder(w).Encode(errorResponse)
 	})
 
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
@@ -1076,7 +1076,7 @@ func (r *RestCatalogSuite) TestCheckTableExists404() {
 		}
 
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"error": map[string]any{
 				"message": "Table not found",
 				"type":    "NoSuchTableException",
@@ -1100,7 +1100,7 @@ func (r *RestCatalogSuite) TestLoadTable200() {
 			r.Equal(v, req.Header.Values(k))
 		}
 
-		w.Write([]byte(`{			
+		_, _ = w.Write([]byte(`{			
 			"metadata-location": "s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json",
 			"metadata": {
 				"format-version": 1,
@@ -1247,7 +1247,7 @@ func (r *RestCatalogSuite) TestRenameTable200() {
 			r.Equal(v, req.Header.Values(k))
 		}
 
-		w.Write([]byte(createTableRestExample))
+		_, _ = w.Write([]byte(createTableRestExample))
 	})
 
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
@@ -1308,7 +1308,7 @@ func (r *RestCatalogSuite) TestDropTable404() {
 				"code":    404,
 			},
 		}
-		json.NewEncoder(w).Encode(errorResponse)
+		_ = json.NewEncoder(w).Encode(errorResponse)
 	})
 
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
@@ -1337,7 +1337,7 @@ func (r *RestCatalogSuite) TestRegisterTable200() {
 		r.Equal("s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json", payload.MetadataLoc)
 
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{
+		_, _ = w.Write([]byte(`{
   "metadata-location": "s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json",
   "metadata": {
     "format-version": 1,
@@ -1485,7 +1485,7 @@ func (r *RestCatalogSuite) TestRegisterTable404() {
 		r.Equal("fokko2", payload.Name)
 		r.Equal("s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json", payload.MetadataLoc)
 		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`{
+		_, _ = w.Write([]byte(`{
 			  "error": {
 				"message": "The given namespace does not exist",
 			    "type": "NoSuchNamespaceException",
@@ -1518,7 +1518,7 @@ func (r *RestCatalogSuite) TestRegisterTable409() {
 		r.Equal("alreadyexist", payload.Name)
 		r.Equal("s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json", payload.MetadataLoc)
 		w.WriteHeader(http.StatusConflict)
-		w.Write([]byte(`{
+		_, _ = w.Write([]byte(`{
 			"error": {
 				"message": "The given table already exists",
 				"type": "AlreadyExistsException",
@@ -1549,7 +1549,7 @@ func (r *RestCatalogSuite) TestListViews200() {
 		r.Equal("", pageToken)
 		r.Equal(strconv.Itoa(customPageSize), pageSize)
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"identifiers": []any{
 				map[string]any{
 					"namespace": []string{"accounting", "tax"},
@@ -1643,7 +1643,7 @@ func (r *RestCatalogSuite) TestListViewsPagination() {
 			}
 		}
 
-		json.NewEncoder(w).Encode(response)
+		_ = json.NewEncoder(w).Encode(response)
 	})
 
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
@@ -1683,7 +1683,7 @@ func (r *RestCatalogSuite) TestListViewsPaginationErrorOnSubsequentPage() {
 
 		// First page succeeds
 		if pageToken == "" {
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"identifiers": []any{
 					map[string]any{
 						"namespace": []string{"accounting", "tax"},
@@ -1703,7 +1703,7 @@ func (r *RestCatalogSuite) TestListViewsPaginationErrorOnSubsequentPage() {
 		// Second page fails with an error
 		if pageToken == "token1" {
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"error": map[string]any{
 					"message": "Token expired or invalid",
 					"type":    "NoSuchPageTokenException",
@@ -1753,7 +1753,7 @@ func (r *RestCatalogSuite) TestListViews404() {
 		}
 
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"error": map[string]any{
 				"message": "The given namespace does not exist",
 				"type":    "NoSuchNamespaceException",
@@ -1812,7 +1812,7 @@ func (r *RestCatalogSuite) TestDropView404() {
 				"code":    404,
 			},
 		}
-		json.NewEncoder(w).Encode(errorResponse)
+		_ = json.NewEncoder(w).Encode(errorResponse)
 	})
 
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
@@ -1886,7 +1886,7 @@ func (r *RestTLSCatalogSuite) SetupTest() {
 		r.Require().Equal(http.MethodGet, req.Method)
 		r.configVals = req.URL.Query()
 
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"defaults":  map[string]any{},
 			"overrides": map[string]any{},
 		})

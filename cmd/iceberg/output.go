@@ -52,7 +52,7 @@ func (text) Identifiers(idlist []table.Identifier) {
 		data = append(data, []string{strings.Join(ids, ".")})
 	}
 
-	pterm.DefaultTable.
+	_ = pterm.DefaultTable.
 		WithBoxed(true).
 		WithHasHeader(true).
 		WithHeaderRowSeparator("-").
@@ -85,7 +85,7 @@ func (t text) DescribeTable(tbl *table.Table) {
 	snapshotTreeNode := putils.TreeFromLeveledList(snapshotList)
 	snapshotTreeNode.Text = "Snapshots"
 
-	pterm.DefaultTable.
+	_ = pterm.DefaultTable.
 		WithData(pterm.TableData{
 			{"Table format version", strconv.Itoa(tbl.Metadata().Version())},
 			{"Metadata location", tbl.MetadataLocation()},
@@ -100,13 +100,13 @@ func (t text) DescribeTable(tbl *table.Table) {
 	if tbl.CurrentSnapshot() != nil {
 		snap = tbl.CurrentSnapshot().String()
 	}
-	pterm.DefaultTable.
+	_ = pterm.DefaultTable.
 		WithData(pterm.TableData{
 			{"Current Snapshot", snap},
 		}).Render()
-	pterm.DefaultTree.WithRoot(snapshotTreeNode).Render()
+	_ = pterm.DefaultTree.WithRoot(snapshotTreeNode).Render()
 	pterm.Println("Properties")
-	propTable.Render()
+	_ = propTable.Render()
 }
 
 func (t text) Files(tbl *table.Table, history bool) {
@@ -158,7 +158,7 @@ func (t text) Files(tbl *table.Table, history bool) {
 
 	node := putils.TreeFromLeveledList(snapshotTree)
 	node.Text = "Snapshots: " + strings.Join(tbl.Identifier(), ".")
-	pterm.DefaultTree.WithRoot(node).Render()
+	_ = pterm.DefaultTree.WithRoot(node).Render()
 }
 
 func (text) DescribeProperties(props iceberg.Properties) {
@@ -167,7 +167,7 @@ func (text) DescribeProperties(props iceberg.Properties) {
 		data = append(data, []string{k, v})
 	}
 
-	pterm.DefaultTable.
+	_ = pterm.DefaultTable.
 		WithBoxed(true).
 		WithHasHeader(true).
 		WithHeaderRowSeparator("-").
@@ -200,7 +200,7 @@ func (text) Schema(schema *iceberg.Schema) {
 	}
 	schemaTreeNode := putils.TreeFromLeveledList(schemaTree)
 	schemaTreeNode.Text = "Current Schema, id=" + strconv.Itoa(schema.ID)
-	pterm.DefaultTree.WithRoot(schemaTreeNode).Render()
+	_ = pterm.DefaultTree.WithRoot(schemaTreeNode).Render()
 }
 
 func (text) Spec(spec iceberg.PartitionSpec) {

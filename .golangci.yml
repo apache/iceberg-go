@@ -15,8 +15,9 @@
 # specific language governing permissions and limitations
 # under the License.
 ---
+version: "2"
 linters:
-  disable-all: true
+  default: none
   enable:
     - gofmt
     - goimports

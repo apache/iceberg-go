@@ -70,9 +70,9 @@ func TestSnapshotSummaryCollectorWithPartition(t *testing.T) {
 		spec, iceberg.EntryContentData, "/path/to/file2.parquet",
 		iceberg.ParquetFile, map[string]any{"int_field": int32(2)}, 200, 4321)).Build()
 
-	ssc.addFile(dataFile1, sc, spec)
-	ssc.removeFile(dataFile1, sc, spec)
-	ssc.removeFile(dataFile2, sc, spec)
+	require.NoError(t, ssc.addFile(dataFile1, sc, spec))
+	require.NoError(t, ssc.removeFile(dataFile1, sc, spec))
+	require.NoError(t, ssc.removeFile(dataFile2, sc, spec))
 
 	assert.Equal(t, iceberg.Properties{
 		"added-files-size":        "1234",

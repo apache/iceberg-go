@@ -1011,7 +1011,7 @@ func (sc *schemaCompatVisitor) Schema(s *iceberg.Schema, v func() bool) bool {
 	if !v() {
 		pterm.DisableColor()
 		tbl := pterm.DefaultTable.WithHasHeader(true).WithData(sc.errorData)
-		tbl.Render()
+		_ = tbl.Render()
 		txt, _ := tbl.Srender()
 		pterm.EnableColor()
 		panic("mismatch in fields:\n" + txt)

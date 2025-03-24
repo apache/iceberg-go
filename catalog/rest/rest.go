@@ -338,9 +338,11 @@ func handleNon200(rsp *http.Response, override map[int]error) error {
 	var e errorResponse
 
 	dec := json.NewDecoder(rsp.Body)
-	dec.Decode(&struct {
+	if err := dec.Decode(&struct {
 		Error *errorResponse `json:"error"`
-	}{Error: &e})
+	}{Error: &e}); err != nil {
+		return err
+	}
 
 	if override != nil {
 		if err, ok := override[rsp.StatusCode]; ok {
@@ -548,7 +550,7 @@ func (r *Catalog) fetchAccessToken(cl *http.Client, creds string, opts *options)
 
 	switch rsp.StatusCode {
 	case http.StatusUnauthorized, http.StatusBadRequest:
-		defer rsp.Request.GetBody()
+		defer rsp.Body.Close()
 		dec := json.NewDecoder(rsp.Body)
 		var oauthErr oauthErrorResponse
 		if err := dec.Decode(&oauthErr); err != nil {
