@@ -435,7 +435,7 @@ func (s *SnapshotSummaryCollector) build() iceberg.Properties {
 	return props
 }
 
-func updateSnapshotSummaries(sum Summary, previous iceberg.Properties, truncateFullTable bool) (Summary, error) {
+func updateSnapshotSummaries(sum Summary, previous iceberg.Properties) (Summary, error) {
 	switch sum.Operation {
 	case OpAppend, OpOverwrite, OpDelete:
 	default:

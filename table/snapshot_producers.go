@@ -464,7 +464,7 @@ func (sp *snapshotProducer) summary(props iceberg.Properties) (Summary, error) {
 	return updateSnapshotSummaries(Summary{
 		Operation:  sp.op,
 		Properties: summaryProps,
-	}, previousSummary, sp.op == OpOverwrite)
+	}, previousSummary)
 }
 
 func (sp *snapshotProducer) commit() ([]Update, []Requirement, error) {
