@@ -288,6 +288,49 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	return createdTable, nil
 }
 
+// RegisterTable registers a new table using existing metadata.
+func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier, metadataLocation string) (*table.Table, error) {
+	database, tableName, err := identifierToGlueTable(identifier)
+	if err != nil {
+		return nil, err
+	}
+	// Load the metadata file to get table properties
+	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
+	iofs, err := io.LoadFS(ctx, nil, metadataLocation)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load metadata file at %s: %w", metadataLocation, err)
+	}
+	// Read the metadata file
+	metadata, err := table.NewFromLocation([]string{tableName}, metadataLocation, iofs, c)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read table metadata from %s: %w", metadataLocation, err)
+	}
+	tableInput := &types.TableInput{
+		Name:       aws.String(tableName),
+		Parameters: map[string]string{},
+		TableType:  aws.String("EXTERNAL_TABLE"),
+		StorageDescriptor: &types.StorageDescriptor{
+			Location: aws.String(metadataLocation),
+			Columns:  schemaToGlueColumns(metadata.Schema()),
+		},
+	}
+	_, err = c.glueSvc.CreateTable(ctx, &glue.CreateTableInput{
+		CatalogId:    c.catalogId,
+		DatabaseName: aws.String(database),
+		TableInput:   tableInput,
+		OpenTableFormatInput: &types.OpenTableFormatInput{
+			IcebergInput: &types.IcebergInput{
+				MetadataOperation: types.MetadataOperationCreate,
+			},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to register table %s.%s: %w", database, tableName, err)
+	}
+
+	return c.LoadTable(ctx, identifier, nil)
+}
+
 func (c *Catalog) CommitTable(context.Context, *table.Table, []table.Requirement, []table.Update) (table.Metadata, string, error) {
 	panic("commit table not implemented for Glue Catalog")
 }

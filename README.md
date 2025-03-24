@@ -65,6 +65,7 @@ $ cd iceberg-go/cmd/iceberg && go build .
 | Load Table               |  X   |      |          |  X   |  X  |
 | List Tables              |  X   |      |          |  X   |  X  |
 | Create Table             |  X   |      |          |  X   |  X  |
+| Register Table           |  X   |      |          |  X   |     |
 | Update Current Snapshot  |  X   |      |          |      |     |
 | Create New Snapshot      |  X   |      |          |      |     |
 | Rename Table             |  X   |      |          |  X   |  X  |

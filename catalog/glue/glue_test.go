@@ -938,3 +938,47 @@ func TestGlueCreateTableRollbackOnInvalidMetadata(t *testing.T) {
 	mockGlueSvc.AssertCalled(t, "DeleteTable", mock.Anything, mock.Anything, mock.Anything)
 	mockGlueSvc.AssertCalled(t, "GetTable", mock.Anything, mock.Anything, mock.Anything)
 }
+
+func TestRegisterTableMetadataNotFound(t *testing.T) {
+	assert := require.New(t)
+	mockGlueSvc := &mockGlueClient{}
+	awsCfg, err := config.LoadDefaultConfig(context.TODO())
+	assert.NoError(err)
+	cat := &Catalog{
+		glueSvc: mockGlueSvc,
+		awsCfg:  &awsCfg,
+	}
+	_, err = cat.RegisterTable(context.Background(), catalog.ToIdentifier("test_db", "test_table"), "s3://nonexistent-bucket/metadata/metadata.json")
+	assert.Error(err)
+	assert.Contains(err.Error(), "failed to read table metadata from s3://nonexistent-bucket/metadata/metadata.json")
+}
+
+func TestRegisterTableIntegration(t *testing.T) {
+	if os.Getenv("TEST_DATABASE_NAME") == "" {
+		t.Skip()
+	}
+	if os.Getenv("TEST_TABLE_LOCATION") == "" {
+		t.Skip()
+	}
+	assert := require.New(t)
+	dbName := os.Getenv("TEST_DATABASE_NAME")
+	tableName := "test_register_table_integration"
+	// Metadata location example s3://test-bucket/metadata/0000-0000-0000.metadata.json
+	metadataLocation := os.Getenv("TEST_TABLE_LOCATION")
+
+	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
+	assert.NoError(err)
+	ctlg := NewCatalog(WithAwsConfig(awsCfg))
+
+	// Drop table if it exists
+	_ = ctlg.DropTable(context.TODO(), TableIdentifier(dbName, tableName))
+
+	tbl, err := ctlg.RegisterTable(context.TODO(), TableIdentifier(dbName, tableName), metadataLocation)
+	defer func() {
+		err = ctlg.DropTable(context.TODO(), TableIdentifier(dbName, tableName))
+		assert.NoError(err)
+	}()
+	assert.NoError(err)
+	assert.Equal([]string{tableName}, tbl.Identifier())
+	assert.Equal(metadataLocation, tbl.MetadataLocation())
+}
