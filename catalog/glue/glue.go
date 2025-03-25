@@ -217,7 +217,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, pr
 		return nil, fmt.Errorf("failed to load table %s.%s: %w", database, tableName, err)
 	}
 
-	icebergTable, err := table.NewFromLocation([]string{tableName}, location, iofs, c)
+	icebergTable, err := table.NewFromLocation(identifier, location, iofs, c)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create table from location %s.%s: %w", database, tableName, err)
 	}
