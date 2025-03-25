@@ -183,6 +183,10 @@ func (t *Transaction) ReplaceDataFiles(filesToDelete, filesToAdd []string, snaps
 		}
 	}
 
+	if len(markedForDeletion) != len(setToDelete) {
+		return fmt.Errorf("cannot delete files that do not belong to the table")
+	}
+
 	if t.meta.NameMapping() == nil {
 		nameMapping := t.meta.CurrentSchema().NameMapping()
 		mappingJson, err := json.Marshal(nameMapping)
