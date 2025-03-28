@@ -781,7 +781,7 @@ func (t *TableWritingTestSuite) TestReplaceDataFiles() {
 	tbl := table.New(ident, meta, t.getMetadataLoc(), fs, &mockedCatalog{})
 	for i := range 5 {
 		tx := tbl.NewTransaction()
-		t.Require().NoError(tx.AddFiles(files[i:i+1], nil, false))
+		t.Require().NoError(tx.AddFiles(ctx, files[i:i+1], nil, false))
 		tbl, err = tx.Commit(ctx)
 		t.Require().NoError(err)
 	}
@@ -811,7 +811,7 @@ func (t *TableWritingTestSuite) TestReplaceDataFiles() {
 	t.writeParquet(fs, combinedFilePath, combined)
 
 	tx := tbl.NewTransaction()
-	t.Require().NoError(tx.ReplaceDataFiles(files[:2], []string{combinedFilePath}, nil))
+	t.Require().NoError(tx.ReplaceDataFiles(ctx, files[:2], []string{combinedFilePath}, nil))
 
 	staged, err := tx.StagedTable()
 	t.Require().NoError(err)

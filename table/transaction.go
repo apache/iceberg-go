@@ -135,10 +135,10 @@ func (t *Transaction) SetProperties(props iceberg.Properties) error {
 // operation is only valid if the data is exactly the same as the previous snapshot.
 //
 // For now, we'll keep using an overwrite operation.
-func (t *Transaction) ReplaceDataFiles(filesToDelete, filesToAdd []string, snapshotProps iceberg.Properties) error {
+func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, filesToAdd []string, snapshotProps iceberg.Properties) error {
 	if len(filesToDelete) == 0 {
 		if len(filesToAdd) > 0 {
-			return t.AddFiles(filesToAdd, snapshotProps, false)
+			return t.AddFiles(ctx, filesToAdd, snapshotProps, false)
 		}
 	}
 
@@ -206,7 +206,7 @@ func (t *Transaction) ReplaceDataFiles(filesToDelete, filesToAdd []string, snaps
 		updater.deleteDataFile(df)
 	}
 
-	dataFiles := parquetFilesToDataFiles(t.tbl.fs, t.meta, slices.Values(filesToAdd))
+	dataFiles := filesToDataFiles(ctx, t.tbl.fs, t.meta, slices.Values(filesToAdd))
 	for df, err := range dataFiles {
 		if err != nil {
 			return err

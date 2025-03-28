@@ -227,7 +227,7 @@ func (s *RestIntegrationSuite) TestWriteCommitTable() {
 	defer tbl.FS().Remove(pqfile)
 
 	txn := tbl.NewTransaction()
-	s.Require().NoError(txn.AddFiles([]string{pqfile}, nil, false))
+	s.Require().NoError(txn.AddFiles(s.ctx, []string{pqfile}, nil, false))
 	updated, err := txn.Commit(s.ctx)
 	s.Require().NoError(err)
 
