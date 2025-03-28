@@ -21,21 +21,17 @@ import (
 	"bytes"
 	"cmp"
 	"math"
-	"math/big"
 	"slices"
-	"strings"
 	"testing"
-	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
-	"github.com/google/uuid"
+	"github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -177,6 +173,8 @@ type FileStatsMetricsSuite struct {
 }
 
 func (suite *FileStatsMetricsSuite) getDataFile(meta iceberg.Properties, writeStats []string) iceberg.DataFile {
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+
 	fileMeta, tableMeta := constructTestTable(suite.T(), writeStats)
 	require.NotNil(suite.T(), tableMeta)
 	require.NotNil(suite.T(), fileMeta)
@@ -193,12 +191,12 @@ func (suite *FileStatsMetricsSuite) getDataFile(meta iceberg.Properties, writeSt
 
 	collector, err := computeStatsPlan(schema, tableMeta.Properties())
 	suite.Require().NoError(err)
-	mapping, err := parquetPathToIDMapping(schema)
+	mapping, err := format.PathToIDMapping(schema)
 	suite.Require().NoError(err)
 
-	stats := dataFileStatsFromParquetMetadata(fileMeta, collector, mapping)
+	stats := format.DataFileStatsFromMeta(fileMeta, collector, mapping)
 
-	return stats.toDataFile(tableMeta.CurrentSchema(), tableMeta.PartitionSpec(), "fake-path.parquet",
+	return stats.ToDataFile(tableMeta.CurrentSchema(), tableMeta.PartitionSpec(), "fake-path.parquet",
 		iceberg.ParquetFile, fileMeta.GetSourceFileSize())
 }
 
@@ -357,39 +355,6 @@ func TestFileMetrics(t *testing.T) {
 	suite.Run(t, new(FileStatsMetricsSuite))
 }
 
-func TestMetricsModePairs(t *testing.T) {
-	tests := []struct {
-		str      string
-		expected metricsMode
-	}{
-		{"none", metricsMode{typ: metricModeNone}},
-		{"nOnE", metricsMode{typ: metricModeNone}},
-		{"counts", metricsMode{typ: metricModeCounts}},
-		{"Counts", metricsMode{typ: metricModeCounts}},
-		{"full", metricsMode{typ: metricModeFull}},
-		{"FuLl", metricsMode{typ: metricModeFull}},
-		{" FuLl", metricsMode{typ: metricModeFull}},
-		{"truncate(16)", metricsMode{typ: metricModeTruncate, len: 16}},
-		{"trUncatE(16)", metricsMode{typ: metricModeTruncate, len: 16}},
-		{"trUncatE(7)", metricsMode{typ: metricModeTruncate, len: 7}},
-		{"trUncatE(07)", metricsMode{typ: metricModeTruncate, len: 7}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.str, func(t *testing.T) {
-			mode, err := matchMetricsMode(tt.str)
-			require.NoError(t, err)
-			assert.Equal(t, tt.expected, mode)
-		})
-	}
-
-	_, err := matchMetricsMode("truncatE(-7)")
-	assert.ErrorContains(t, err, "malformed truncate metrics mode: truncatE(-7)")
-
-	_, err = matchMetricsMode("truncatE(0)")
-	assert.ErrorContains(t, err, "invalid truncate length: 0")
-}
-
 var tableSchemaNested = iceberg.NewSchemaWithIdentifiers(1,
 	[]int{1},
 	iceberg.NestedField{
@@ -455,13 +420,13 @@ func TestStatsTypes(t *testing.T) {
 	require.NoError(t, err)
 
 	// field ids should be sorted
-	assert.True(t, slices.IsSortedFunc(statsCols, func(a, b statisticsCollector) int {
-		return cmp.Compare(a.fieldID, b.fieldID)
+	assert.True(t, slices.IsSortedFunc(statsCols, func(a, b internal.StatisticsCollector) int {
+		return cmp.Compare(a.FieldID, b.FieldID)
 	}))
 
 	actual := make([]iceberg.Type, len(statsCols))
 	for i, col := range statsCols {
-		actual[i] = col.icebergTyp
+		actual[i] = col.IcebergTyp
 	}
 
 	assert.Equal(t, []iceberg.Type{
@@ -477,194 +442,4 @@ func TestStatsTypes(t *testing.T) {
 		iceberg.PrimitiveTypes.String,
 		iceberg.PrimitiveTypes.Int32,
 	}, actual)
-}
-
-func constructTestTablePrimitiveTypes(t *testing.T) (*metadata.FileMetaData, Metadata) {
-	tableMeta, err := ParseMetadataString(`{
-        "format-version": 2,
-        "location": "s3://bucket/test/location",
-        "last-column-id": 7,
-        "current-schema-id": 0,
-        "schemas": [
-            {
-                "type": "struct",
-                "schema-id": 0,
-                "fields": [
-                    {"id": 1, "name": "booleans", "required": false, "type": "boolean"},
-                    {"id": 2, "name": "ints", "required": false, "type": "int"},
-                    {"id": 3, "name": "longs", "required": false, "type": "long"},
-                    {"id": 4, "name": "floats", "required": false, "type": "float"},
-                    {"id": 5, "name": "doubles", "required": false, "type": "double"},
-                    {"id": 6, "name": "dates", "required": false, "type": "date"},
-                    {"id": 7, "name": "times", "required": false, "type": "time"},
-                    {"id": 8, "name": "timestamps", "required": false, "type": "timestamp"},
-                    {"id": 9, "name": "timestamptzs", "required": false, "type": "timestamptz"},
-                    {"id": 10, "name": "strings", "required": false, "type": "string"},
-                    {"id": 11, "name": "uuids", "required": false, "type": "uuid"},
-                    {"id": 12, "name": "binaries", "required": false, "type": "binary"},
-					{"id": 13, "name": "small_dec", "required": false, "type": "decimal(8, 2)"},
-					{"id": 14, "name": "med_dec", "required": false, "type": "decimal(16, 2)"},
-					{"id": 15, "name": "large_dec", "required": false, "type": "decimal(24, 2)"}
-                ]
-            }
-        ],
-		"last-updated-ms": -1,
-        "default-spec-id": 0,
-        "partition-specs": [{"spec-id": 0, "fields": []}],
-        "properties": {}
-	}`)
-	require.NoError(t, err)
-
-	arrowSchema, err := SchemaToArrowSchema(tableMeta.Schemas()[0], nil, true, false)
-	require.NoError(t, err)
-
-	rec, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSchema, strings.NewReader(`[
-		{
-			"booleans": true, 
-			"ints": 23,
-			"longs": 54,
-			"floats": 454.1223,
-			"doubles": 8542.12,
-			"dates": "2022-01-02",
-			"times": "17:30:34",
-			"timestamps": "2022-01-02T17:30:34.399",
-			"timestamptzs": "2022-01-02T17:30:34.399",
-			"strings": "hello",
-			"uuids": "`+uuid.NewMD5(uuid.NameSpaceDNS, []byte("foo")).String()+`",
-			"binaries": "aGVsbG8=",
-			"small_dec": "123456.78",
-			"med_dec": "12345678901234.56",
-			"large_dec": "1234567890123456789012.34"
-		},
-		{
-			"booleans": false,
-			"ints": 89,
-			"longs": 2,
-			"floats": 24342.29,
-			"doubles": -43.9,
-			"dates": "2023-02-04",
-			"times": "13:21:04",
-			"timestamps": "2023-02-04T13:21:04.354",
-			"timestamptzs": "2023-02-04T13:21:04.354",
-			"strings": "world",
-			"uuids": "`+uuid.NewMD5(uuid.NameSpaceDNS, []byte("bar")).String()+`",
-			"binaries": "d29ybGQ=",
-			"small_dec": "876543.21",
-			"med_dec": "65432109876543.21",
-			"large_dec": "4321098765432109876543.21"
-		}
-	]`))
-	require.NoError(t, err)
-	defer rec.Release()
-
-	var buf bytes.Buffer
-	wr, err := pqarrow.NewFileWriter(arrowSchema, &buf,
-		parquet.NewWriterProperties(parquet.WithStats(true),
-			parquet.WithStoreDecimalAsInteger(true)),
-		pqarrow.DefaultWriterProps())
-	require.NoError(t, err)
-
-	require.NoError(t, wr.Write(rec))
-	require.NoError(t, wr.Close())
-
-	rdr, err := file.NewParquetReader(bytes.NewReader(buf.Bytes()))
-	require.NoError(t, err)
-	defer rdr.Close()
-
-	return rdr.MetaData(), tableMeta
-}
-
-func assertBounds[T iceberg.LiteralType](t *testing.T, bound []byte, typ iceberg.Type, expected T) {
-	lit, err := iceberg.LiteralFromBytes(typ, bound)
-	require.NoError(t, err)
-	assert.Equal(t, expected, lit.(iceberg.TypedLiteral[T]).Value())
-}
-
-func toDate(tm time.Time) iceberg.Date {
-	return iceberg.Date(tm.Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
-}
-
-func TestMetricsPrimitiveTypes(t *testing.T) {
-	meta, tblMeta := constructTestTablePrimitiveTypes(t)
-	require.NotNil(t, tblMeta)
-	require.NotNil(t, meta)
-
-	tblMeta.Properties()["write.metadata.metrics.default"] = "truncate(2)"
-
-	collector, err := computeStatsPlan(tblMeta.CurrentSchema(), tblMeta.Properties())
-	require.NoError(t, err)
-	mapping, err := parquetPathToIDMapping(tblMeta.CurrentSchema())
-	require.NoError(t, err)
-
-	stats := dataFileStatsFromParquetMetadata(meta, collector, mapping)
-	df := stats.toDataFile(tblMeta.CurrentSchema(), tblMeta.PartitionSpec(), "fake-path.parquet",
-		iceberg.ParquetFile, meta.GetSourceFileSize())
-
-	assert.Len(t, df.ValueCounts(), 15)
-	assert.Len(t, df.NullValueCounts(), 15)
-	assert.Len(t, df.NaNValueCounts(), 0)
-
-	assert.Len(t, df.LowerBoundValues(), 15)
-	assertBounds(t, df.LowerBoundValues()[1], iceberg.PrimitiveTypes.Bool, false)
-	assertBounds(t, df.LowerBoundValues()[2], iceberg.PrimitiveTypes.Int32, int32(23))
-	assertBounds(t, df.LowerBoundValues()[3], iceberg.PrimitiveTypes.Int64, int64(2))
-	assertBounds(t, df.LowerBoundValues()[4], iceberg.PrimitiveTypes.Float32, float32(454.1223))
-	assertBounds(t, df.LowerBoundValues()[5], iceberg.PrimitiveTypes.Float64, -43.9)
-	assertBounds(t, df.LowerBoundValues()[6], iceberg.PrimitiveTypes.Date,
-		toDate(time.Date(2022, time.January, 2, 0, 0, 0, 0, time.UTC)))
-	assertBounds(t, df.LowerBoundValues()[7], iceberg.PrimitiveTypes.Time,
-		iceberg.Time(time.Duration(13*time.Hour+21*time.Minute+4*time.Second).Microseconds()))
-	assertBounds(t, df.LowerBoundValues()[8], iceberg.PrimitiveTypes.Timestamp,
-		iceberg.Timestamp(time.Date(2022, time.January, 2, 17, 30, 34, 399000000, time.UTC).UnixMicro()))
-	assertBounds(t, df.LowerBoundValues()[9], iceberg.PrimitiveTypes.TimestampTz,
-		iceberg.Timestamp(time.Date(2022, time.January, 2, 17, 30, 34, 399000000, time.UTC).UnixMicro()))
-	assertBounds(t, df.LowerBoundValues()[10], iceberg.PrimitiveTypes.String, "he")
-	assertBounds(t, df.LowerBoundValues()[11], iceberg.PrimitiveTypes.UUID,
-		uuid.NewMD5(uuid.NameSpaceDNS, []byte("foo")))
-	assertBounds(t, df.LowerBoundValues()[12], iceberg.PrimitiveTypes.Binary, []byte("he"))
-	assertBounds(t, df.LowerBoundValues()[13], iceberg.DecimalTypeOf(8, 2), iceberg.Decimal{
-		Val:   decimal128.FromI64(12345678),
-		Scale: 2,
-	})
-	assertBounds(t, df.LowerBoundValues()[14], iceberg.DecimalTypeOf(16, 2), iceberg.Decimal{
-		Val:   decimal128.FromI64(1234567890123456),
-		Scale: 2,
-	})
-	expected, _ := (&big.Int{}).SetString("123456789012345678901234", 10)
-	assertBounds(t, df.LowerBoundValues()[15], iceberg.DecimalTypeOf(24, 2), iceberg.Decimal{
-		Val:   decimal128.FromBigInt(expected),
-		Scale: 2,
-	})
-
-	assert.Len(t, df.UpperBoundValues(), 15)
-	assertBounds(t, df.UpperBoundValues()[1], iceberg.PrimitiveTypes.Bool, true)
-	assertBounds(t, df.UpperBoundValues()[2], iceberg.PrimitiveTypes.Int32, int32(89))
-	assertBounds(t, df.UpperBoundValues()[3], iceberg.PrimitiveTypes.Int64, int64(54))
-	assertBounds(t, df.UpperBoundValues()[4], iceberg.PrimitiveTypes.Float32, float32(24342.29))
-	assertBounds(t, df.UpperBoundValues()[5], iceberg.PrimitiveTypes.Float64, 8542.12)
-	assertBounds(t, df.UpperBoundValues()[6], iceberg.PrimitiveTypes.Date,
-		toDate(time.Date(2023, time.February, 4, 0, 0, 0, 0, time.UTC)))
-	assertBounds(t, df.UpperBoundValues()[7], iceberg.PrimitiveTypes.Time,
-		iceberg.Time(time.Duration(17*time.Hour+30*time.Minute+34*time.Second).Microseconds()))
-	assertBounds(t, df.UpperBoundValues()[8], iceberg.PrimitiveTypes.Timestamp,
-		iceberg.Timestamp(time.Date(2023, time.February, 4, 13, 21, 4, 354000000, time.UTC).UnixMicro()))
-	assertBounds(t, df.UpperBoundValues()[9], iceberg.PrimitiveTypes.TimestampTz,
-		iceberg.Timestamp(time.Date(2023, time.February, 4, 13, 21, 4, 354000000, time.UTC).UnixMicro()))
-	assertBounds(t, df.UpperBoundValues()[10], iceberg.PrimitiveTypes.String, "wp")
-	assertBounds(t, df.UpperBoundValues()[11], iceberg.PrimitiveTypes.UUID,
-		uuid.NewMD5(uuid.NameSpaceDNS, []byte("bar")))
-	assertBounds(t, df.UpperBoundValues()[12], iceberg.PrimitiveTypes.Binary, []byte("wp"))
-	assertBounds(t, df.UpperBoundValues()[13], iceberg.DecimalTypeOf(8, 2), iceberg.Decimal{
-		Val:   decimal128.FromI64(87654321),
-		Scale: 2,
-	})
-	assertBounds(t, df.UpperBoundValues()[14], iceberg.DecimalTypeOf(16, 2), iceberg.Decimal{
-		Val:   decimal128.FromI64(6543210987654321),
-		Scale: 2,
-	})
-	expectedUpper, _ := (&big.Int{}).SetString("432109876543210987654321", 10)
-	assertBounds(t, df.UpperBoundValues()[15], iceberg.DecimalTypeOf(24, 2), iceberg.Decimal{
-		Val:   decimal128.FromBigInt(expectedUpper),
-		Scale: 2,
-	})
 }
