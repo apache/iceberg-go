@@ -481,6 +481,7 @@ func TruncateUpperBoundBinary(val []byte, trunc int) []byte {
 
 	return nil
 }
+
 func MapExec[T, S any](nWorkers int, slice []T, fn func(T) (S, error)) iter.Seq2[S, error] {
 	if nWorkers <= 0 {
 		nWorkers = runtime.GOMAXPROCS(0)
