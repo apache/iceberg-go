@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/config"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	tblutils "github.com/apache/iceberg-go/table/internal"
@@ -224,7 +225,7 @@ func (of *overwriteFiles) deletedEntries() ([]iceberg.ManifestEntry, error) {
 		return result, nil
 	}
 
-	nWorkers := 5
+	nWorkers := config.EnvConfig.MaxWorkers
 	finalResult := make([]iceberg.ManifestEntry, 0, len(previousManifests))
 	for entries, err := range tblutils.MapExec(nWorkers, previousManifests, getEntries) {
 		if err != nil {
