@@ -735,6 +735,106 @@ func (t *TableWritingTestSuite) TestAddFilesReferencedCurrentSnapshotIgnoreDupli
 	t.Equal([]int32{0, 0, 0}, deleted)
 }
 
+type mockedCatalog struct{}
+
+func (m *mockedCatalog) LoadTable(ctx context.Context, ident table.Identifier, props iceberg.Properties) (*table.Table, error) {
+	return nil, nil
+}
+
+func (m *mockedCatalog) CommitTable(ctx context.Context, tbl *table.Table, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
+	bldr, err := table.MetadataBuilderFromBase(tbl.Metadata())
+	if err != nil {
+		return nil, "", err
+	}
+
+	for _, u := range updates {
+		if err := u.Apply(bldr); err != nil {
+			return nil, "", err
+		}
+	}
+
+	meta, err := bldr.Build()
+	if err != nil {
+		return nil, "", err
+	}
+
+	return meta, "", nil
+}
+
+func (t *TableWritingTestSuite) TestReplaceDataFiles() {
+	fs := iceio.LocalFS{}
+
+	files := make([]string, 0)
+	for i := range 5 {
+		filePath := fmt.Sprintf("%s/replace_data_files_v%d/data-%d.parquet", t.location, t.formatVersion, i)
+		t.writeParquet(fs, filePath, t.arrTablePromotedTypes)
+		files = append(files, filePath)
+	}
+
+	ident := table.Identifier{"default", "replace_data_files_v" + strconv.Itoa(t.formatVersion)}
+	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, t.location, iceberg.Properties{"format-version": strconv.Itoa(t.formatVersion)})
+	t.Require().NoError(err)
+
+	ctx := context.Background()
+
+	tbl := table.New(ident, meta, t.getMetadataLoc(), fs, &mockedCatalog{})
+	for i := range 5 {
+		tx := tbl.NewTransaction()
+		t.Require().NoError(tx.AddFiles(ctx, files[i:i+1], nil, false))
+		tbl, err = tx.Commit(ctx)
+		t.Require().NoError(err)
+	}
+
+	mflist, err := tbl.CurrentSnapshot().Manifests(tbl.FS())
+	t.Require().NoError(err)
+	t.Len(mflist, 5)
+
+	// create a parquet file that is essentially as if we merged two of
+	// the data files together
+	cols := make([]arrow.Column, 0, t.arrTablePromotedTypes.NumCols())
+	for i := range int(t.arrTablePromotedTypes.NumCols()) {
+		chkd := t.arrTablePromotedTypes.Column(i).Data()
+		duplicated := arrow.NewChunked(chkd.DataType(), append(chkd.Chunks(), chkd.Chunks()...))
+		defer duplicated.Release()
+
+		col := arrow.NewColumn(t.arrSchemaPromotedTypes.Fields()[i], duplicated)
+		defer col.Release()
+
+		cols = append(cols, *col)
+	}
+
+	combined := array.NewTable(t.arrSchemaPromotedTypes, cols, -1)
+	defer combined.Release()
+
+	combinedFilePath := fmt.Sprintf("%s/replace_data_files_v%d/combined.parquet", t.location, t.formatVersion)
+	t.writeParquet(fs, combinedFilePath, combined)
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.ReplaceDataFiles(ctx, files[:2], []string{combinedFilePath}, nil))
+
+	staged, err := tx.StagedTable()
+	t.Require().NoError(err)
+
+	t.Equal(&table.Summary{
+		Operation: table.OpOverwrite,
+		Properties: iceberg.Properties{
+			"added-data-files":       "1",
+			"added-files-size":       "1082",
+			"added-records":          "4",
+			"deleted-data-files":     "2",
+			"deleted-records":        "4",
+			"removed-files-size":     "2164",
+			"total-data-files":       "4",
+			"total-delete-files":     "0",
+			"total-equality-deletes": "0",
+			"total-files-size":       "4328",
+			"total-position-deletes": "0",
+			"total-records":          "10",
+		},
+	}, staged.CurrentSnapshot().Summary)
+}
+
 func TestTableWriting(t *testing.T) {
 	suite.Run(t, &TableWritingTestSuite{formatVersion: 1})
 	suite.Run(t, &TableWritingTestSuite{formatVersion: 2})
