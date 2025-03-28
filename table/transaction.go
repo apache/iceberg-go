@@ -138,7 +138,7 @@ func (t *Transaction) SetProperties(props iceberg.Properties) error {
 func (t *Transaction) ReplaceDataFiles(filesToDelete, filesToAdd []string, snapshotProps iceberg.Properties) error {
 	if len(filesToDelete) == 0 {
 		if len(filesToAdd) > 0 {
-			return t.AddFiles(filesToAdd, snapshotProps, true)
+			return t.AddFiles(filesToAdd, snapshotProps, false)
 		}
 	}
 
