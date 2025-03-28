@@ -156,7 +156,7 @@ func (t *Transaction) ReplaceDataFiles(filesToDelete, filesToAdd []string, snaps
 	}
 
 	if len(setToDelete) != len(filesToDelete) {
-		return errors.New("file paths must be unique for ReplaceDataFiles")
+		return errors.New("delete file paths must be unique for ReplaceDataFiles")
 	}
 
 	if len(setToAdd) != len(filesToAdd) {
