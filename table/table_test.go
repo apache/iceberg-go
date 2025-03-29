@@ -142,6 +142,8 @@ func (t *TableTestSuite) TestSnapshotByName() {
 type TableWritingTestSuite struct {
 	suite.Suite
 
+	ctx context.Context
+
 	tableSchema      *iceberg.Schema
 	arrSchema        *arrow.Schema
 	arrTbl           arrow.Table
@@ -159,6 +161,7 @@ type TableWritingTestSuite struct {
 }
 
 func (t *TableWritingTestSuite) SetupSuite() {
+	t.ctx = context.Background()
 	mem := memory.DefaultAllocator
 
 	t.tableSchema = iceberg.NewSchema(0,
@@ -301,7 +304,7 @@ func (t *TableWritingTestSuite) TestAddFilesUnpartitioned() {
 	}
 
 	tx := tbl.NewTransaction()
-	t.Require().NoError(tx.AddFiles(files, nil, false))
+	t.Require().NoError(tx.AddFiles(t.ctx, files, nil, false))
 
 	stagedTbl, err := tx.StagedTable()
 	t.Require().NoError(err)
@@ -349,7 +352,7 @@ func (t *TableWritingTestSuite) TestAddFilesFileNotFound() {
 
 	files = append(files, t.location+"/unpartitioned_file_not_found/unknown.parquet")
 	tx := tbl.NewTransaction()
-	err := tx.AddFiles(files, nil, false)
+	err := tx.AddFiles(t.ctx, files, nil, false)
 	t.Error(err)
 	t.ErrorContains(err, "no such file or directory")
 }
@@ -369,7 +372,7 @@ func (t *TableWritingTestSuite) TestAddFilesUnpartitionedHasFieldIDs() {
 	}
 
 	tx := tbl.NewTransaction()
-	err := tx.AddFiles(files, nil, false)
+	err := tx.AddFiles(t.ctx, files, nil, false)
 	t.Error(err)
 	t.ErrorIs(err, iceberg.ErrNotImplemented)
 }
@@ -401,9 +404,9 @@ func (t *TableWritingTestSuite) TestAddFilesFailsSchemaMismatch() {
 	defer pterm.EnableOutput()
 
 	tx := tbl.NewTransaction()
-	err = tx.AddFiles(files, nil, false)
+	err = tx.AddFiles(t.ctx, files, nil, false)
 	t.Error(err)
-	t.EqualError(err, `error encountered during parquet file conversion: error encountered during schema visitor: mismatch in fields:
+	t.EqualError(err, `error encountered during schema visitor: mismatch in fields:
    | Table Field              | Requested Field         
 ✅ | 1: foo: optional boolean | 1: foo: optional boolean
 ✅ | 2: bar: optional string  | 2: bar: optional string 
@@ -441,7 +444,7 @@ func (t *TableWritingTestSuite) TestAddFilesPartitionedTable() {
 	}
 
 	tx := tbl.NewTransaction()
-	t.Require().NoError(tx.AddFiles(files, nil, false))
+	t.Require().NoError(tx.AddFiles(t.ctx, files, nil, false))
 
 	stagedTbl, err := tx.StagedTable()
 	t.Require().NoError(err)
@@ -499,7 +502,7 @@ func (t *TableWritingTestSuite) TestAddFilesToBucketPartitionedTableFails() {
 	}
 
 	tx := tbl.NewTransaction()
-	err := tx.AddFiles(files, nil, false)
+	err := tx.AddFiles(t.ctx, files, nil, false)
 	t.Error(err)
 	t.ErrorContains(err, "cannot infer partition value from parquet metadata for a non-linear partition field: baz_bucket_3 with transform bucket[3]")
 }
@@ -527,7 +530,7 @@ func (t *TableWritingTestSuite) TestAddFilesToPartitionedTableFailsLowerAndUpper
 	}
 
 	tx := tbl.NewTransaction()
-	err := tx.AddFiles(files, nil, false)
+	err := tx.AddFiles(t.ctx, files, nil, false)
 	t.Error(err)
 	t.ErrorContains(err, "cannot infer partition value from parquet metadata as there is more than one value for partition field: baz. (low: 123, high: 124)")
 }
@@ -565,7 +568,7 @@ func (t *TableWritingTestSuite) TestAddFilesWithLargeAndRegular() {
 	t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePathLarge, arrTableLarge)
 
 	tx := tbl.NewTransaction()
-	t.Require().NoError(tx.AddFiles([]string{filePath, filePathLarge}, nil, false))
+	t.Require().NoError(tx.AddFiles(t.ctx, []string{filePath, filePathLarge}, nil, false))
 
 	scan, err := tx.Scan(table.WithOptions(iceberg.Properties{
 		table.ScanOptionArrowUseLargeTypes: "true",
@@ -588,7 +591,7 @@ func (t *TableWritingTestSuite) TestAddFilesValidUpcast() {
 	t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePath, t.arrTablePromotedTypes)
 
 	tx := tbl.NewTransaction()
-	t.Require().NoError(tx.AddFiles([]string{filePath}, nil, false))
+	t.Require().NoError(tx.AddFiles(t.ctx, []string{filePath}, nil, false))
 
 	scan, err := tx.Scan()
 	t.Require().NoError(err)
@@ -636,7 +639,7 @@ func (t *TableWritingTestSuite) TestAddFilesSubsetOfSchema() {
 	t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePath, withoutCol)
 
 	tx := tbl.NewTransaction()
-	t.Require().NoError(tx.AddFiles([]string{filePath}, nil, false))
+	t.Require().NoError(tx.AddFiles(t.ctx, []string{filePath}, nil, false))
 
 	scan, err := tx.Scan()
 	t.Require().NoError(err)
@@ -671,7 +674,7 @@ func (t *TableWritingTestSuite) TestAddFilesDuplicateFilesInFilePaths() {
 	t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePath, t.arrTbl)
 
 	tx := tbl.NewTransaction()
-	err := tx.AddFiles([]string{filePath, filePath}, nil, false)
+	err := tx.AddFiles(t.ctx, []string{filePath, filePath}, nil, false)
 	t.Error(err)
 	t.ErrorContains(err, "file paths must be unique for AddFiles")
 }
@@ -691,9 +694,9 @@ func (t *TableWritingTestSuite) TestAddFilesReferencedByCurrentSnapshot() {
 	}
 
 	tx := tbl.NewTransaction()
-	t.Require().NoError(tx.AddFiles(files, nil, false))
+	t.Require().NoError(tx.AddFiles(t.ctx, files, nil, false))
 
-	err := tx.AddFiles(files[len(files)-1:], nil, false)
+	err := tx.AddFiles(t.ctx, files[len(files)-1:], nil, false)
 	t.Error(err)
 	t.ErrorContains(err, "cannot add files that are already referenced by table, files:")
 }
@@ -713,9 +716,9 @@ func (t *TableWritingTestSuite) TestAddFilesReferencedCurrentSnapshotIgnoreDupli
 	}
 
 	tx := tbl.NewTransaction()
-	t.Require().NoError(tx.AddFiles(files, nil, false))
+	t.Require().NoError(tx.AddFiles(t.ctx, files, nil, false))
 
-	t.Require().NoError(tx.AddFiles(files[len(files)-1:], nil, true))
+	t.Require().NoError(tx.AddFiles(t.ctx, files[len(files)-1:], nil, true))
 	staged, err := tx.StagedTable()
 	t.Require().NoError(err)
 
@@ -730,6 +733,106 @@ func (t *TableWritingTestSuite) TestAddFilesReferencedCurrentSnapshotIgnoreDupli
 	t.Equal([]int32{5, 1, 5}, added)
 	t.Equal([]int32{0, 0, 0}, existing)
 	t.Equal([]int32{0, 0, 0}, deleted)
+}
+
+type mockedCatalog struct{}
+
+func (m *mockedCatalog) LoadTable(ctx context.Context, ident table.Identifier, props iceberg.Properties) (*table.Table, error) {
+	return nil, nil
+}
+
+func (m *mockedCatalog) CommitTable(ctx context.Context, tbl *table.Table, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
+	bldr, err := table.MetadataBuilderFromBase(tbl.Metadata())
+	if err != nil {
+		return nil, "", err
+	}
+
+	for _, u := range updates {
+		if err := u.Apply(bldr); err != nil {
+			return nil, "", err
+		}
+	}
+
+	meta, err := bldr.Build()
+	if err != nil {
+		return nil, "", err
+	}
+
+	return meta, "", nil
+}
+
+func (t *TableWritingTestSuite) TestReplaceDataFiles() {
+	fs := iceio.LocalFS{}
+
+	files := make([]string, 0)
+	for i := range 5 {
+		filePath := fmt.Sprintf("%s/replace_data_files_v%d/data-%d.parquet", t.location, t.formatVersion, i)
+		t.writeParquet(fs, filePath, t.arrTablePromotedTypes)
+		files = append(files, filePath)
+	}
+
+	ident := table.Identifier{"default", "replace_data_files_v" + strconv.Itoa(t.formatVersion)}
+	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, t.location, iceberg.Properties{"format-version": strconv.Itoa(t.formatVersion)})
+	t.Require().NoError(err)
+
+	ctx := context.Background()
+
+	tbl := table.New(ident, meta, t.getMetadataLoc(), fs, &mockedCatalog{})
+	for i := range 5 {
+		tx := tbl.NewTransaction()
+		t.Require().NoError(tx.AddFiles(ctx, files[i:i+1], nil, false))
+		tbl, err = tx.Commit(ctx)
+		t.Require().NoError(err)
+	}
+
+	mflist, err := tbl.CurrentSnapshot().Manifests(tbl.FS())
+	t.Require().NoError(err)
+	t.Len(mflist, 5)
+
+	// create a parquet file that is essentially as if we merged two of
+	// the data files together
+	cols := make([]arrow.Column, 0, t.arrTablePromotedTypes.NumCols())
+	for i := range int(t.arrTablePromotedTypes.NumCols()) {
+		chkd := t.arrTablePromotedTypes.Column(i).Data()
+		duplicated := arrow.NewChunked(chkd.DataType(), append(chkd.Chunks(), chkd.Chunks()...))
+		defer duplicated.Release()
+
+		col := arrow.NewColumn(t.arrSchemaPromotedTypes.Fields()[i], duplicated)
+		defer col.Release()
+
+		cols = append(cols, *col)
+	}
+
+	combined := array.NewTable(t.arrSchemaPromotedTypes, cols, -1)
+	defer combined.Release()
+
+	combinedFilePath := fmt.Sprintf("%s/replace_data_files_v%d/combined.parquet", t.location, t.formatVersion)
+	t.writeParquet(fs, combinedFilePath, combined)
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.ReplaceDataFiles(ctx, files[:2], []string{combinedFilePath}, nil))
+
+	staged, err := tx.StagedTable()
+	t.Require().NoError(err)
+
+	t.Equal(&table.Summary{
+		Operation: table.OpOverwrite,
+		Properties: iceberg.Properties{
+			"added-data-files":       "1",
+			"added-files-size":       "1082",
+			"added-records":          "4",
+			"deleted-data-files":     "2",
+			"deleted-records":        "4",
+			"removed-files-size":     "2164",
+			"total-data-files":       "4",
+			"total-delete-files":     "0",
+			"total-equality-deletes": "0",
+			"total-files-size":       "4328",
+			"total-position-deletes": "0",
+			"total-records":          "10",
+		},
+	}, staged.CurrentSnapshot().Summary)
 }
 
 func TestTableWriting(t *testing.T) {

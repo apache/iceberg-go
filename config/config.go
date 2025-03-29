@@ -25,12 +25,14 @@ import (
 )
 
 const (
-	cfgFile = ".iceberg-go.yaml"
+	cfgFile           = ".iceberg-go.yaml"
+	defaultMaxWorkers = 5
 )
 
 type Config struct {
 	DefaultCatalog string                   `yaml:"default-catalog"`
 	Catalogs       map[string]CatalogConfig `yaml:"catalog"`
+	MaxWorkers     int                      `yaml:"max-workers"`
 }
 
 type CatalogConfig struct {
@@ -87,6 +89,9 @@ func fromConfigFiles() Config {
 
 	if cfg.DefaultCatalog == "" {
 		cfg.DefaultCatalog = "default"
+	}
+	if cfg.MaxWorkers <= 0 {
+		cfg.MaxWorkers = defaultMaxWorkers
 	}
 
 	return cfg

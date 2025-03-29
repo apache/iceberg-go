@@ -142,66 +142,16 @@ func TestMergeSnapshotSummaries(t *testing.T) {
 				"total-equality-deletes": "3",
 			}},
 		},
-		{
-			Summary{Operation: OpOverwrite, Properties: iceberg.Properties{
-				"added-data-files":       "1",
-				"added-delete-files":     "2",
-				"added-equality-deletes": "3",
-				"added-files-size":       "4",
-				"added-position-deletes": "5",
-				"added-records":          "6",
-			}},
-			iceberg.Properties{
-				"total-data-files":       "1",
-				"total-delete-files":     "1",
-				"total-equality-deletes": "1",
-				"total-files-size":       "1",
-				"total-position-deletes": "1",
-				"total-records":          "1",
-			},
-			true,
-			Summary{Operation: OpOverwrite, Properties: iceberg.Properties{
-				"added-data-files":         "1",
-				"added-delete-files":       "2",
-				"added-equality-deletes":   "3",
-				"added-files-size":         "4",
-				"added-position-deletes":   "5",
-				"added-records":            "6",
-				"total-data-files":         "1",
-				"total-records":            "6",
-				"total-delete-files":       "2",
-				"total-equality-deletes":   "3",
-				"total-files-size":         "4",
-				"total-position-deletes":   "5",
-				"deleted-data-files":       "1",
-				"removed-delete-files":     "1",
-				"deleted-records":          "1",
-				"removed-files-size":       "1",
-				"removed-position-deletes": "1",
-				"removed-equality-deletes": "1",
-			}},
-		},
 	}
 
 	for _, tt := range tests {
-		result, err := updateSnapshotSummaries(tt.sum, tt.previous, tt.truncateTable)
+		result, err := updateSnapshotSummaries(tt.sum, tt.previous)
 		require.NoError(t, err)
 		assert.Equal(t, tt.expected, result)
 	}
 }
 
 func TestInvalidOperation(t *testing.T) {
-	_, err := updateSnapshotSummaries(Summary{Operation: OpReplace}, nil, false)
+	_, err := updateSnapshotSummaries(Summary{Operation: OpReplace}, nil)
 	assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
-}
-
-func TestTruncateUpperBoundString(t *testing.T) {
-	assert.Equal(t, "ab", truncateUpperBoundText("aaaa", 2))
-	// \u10FFFF\u10FFFF\x00
-	assert.Equal(t, "", truncateUpperBoundText("\xf4\x8f\xbf\xbf\xf4\x8f\xbf\xbf\x00", 2))
-}
-
-func TestTruncateUpperBoundBinary(t *testing.T) {
-	assert.Equal(t, []byte{0x01, 0x03}, truncateUpperBoundBinary([]byte{0x01, 0x02, 0x03}, 2))
-	assert.Nil(t, truncateUpperBoundBinary([]byte{0xff, 0xff, 0x00}, 2))
 }

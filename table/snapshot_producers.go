@@ -18,25 +18,32 @@
 package table
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"maps"
 	"slices"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/config"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 )
 
 type producerImpl interface {
+	// to perform any post-processing on the manifests before writing them
+	// to the new snapshot. This will be called as the last step
+	// before writing a manifest list file, using the result of this function
+	// as the final list of manifests to write.
 	processManifests(manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error)
+	// perform any processing necessary and return the list of existing
+	// manifests that should be included in the snapshot
 	existingManifests() ([]iceberg.ManifestFile, error)
+	// return the deleted entries for writing delete file manifests
 	deletedEntries() ([]iceberg.ManifestEntry, error)
 }
 
@@ -89,7 +96,145 @@ func (fa *fastAppendFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 }
 
 func (fa *fastAppendFiles) deletedEntries() ([]iceberg.ManifestEntry, error) {
+	// for fast appends, there are no deleted entries
 	return nil, nil
+}
+
+type overwriteFiles struct {
+	base *snapshotProducer
+}
+
+func newOverwriteFilesProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties) *snapshotProducer {
+	prod := createSnapshotProducer(op, txn, fs, commitUUID, snapshotProps)
+	prod.producerImpl = &overwriteFiles{base: prod}
+
+	return prod
+}
+
+func (of *overwriteFiles) processManifests(manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
+	// no post processing
+	return manifests, nil
+}
+
+func (of *overwriteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
+	// determine if there are any existing manifest files
+	existingFiles := make([]iceberg.ManifestFile, 0)
+
+	snap := of.base.txn.meta.currentSnapshot()
+	if snap == nil {
+		return existingFiles, nil
+	}
+
+	manifestList, err := snap.Manifests(of.base.io)
+	if err != nil {
+		return existingFiles, err
+	}
+
+	for _, m := range manifestList {
+		entries, err := of.base.fetchManifestEntry(m, true)
+		if err != nil {
+			return existingFiles, err
+		}
+
+		foundDeleted := make([]iceberg.ManifestEntry, 0)
+		notDeleted := make([]iceberg.ManifestEntry, 0, len(entries))
+		for _, entry := range entries {
+			if _, ok := of.base.deletedFiles[entry.DataFile().FilePath()]; ok {
+				foundDeleted = append(foundDeleted, entry)
+			} else {
+				notDeleted = append(notDeleted, entry)
+			}
+		}
+
+		if len(foundDeleted) == 0 {
+			existingFiles = append(existingFiles, m)
+
+			continue
+		}
+
+		if len(notDeleted) == 0 {
+			continue
+		}
+
+		spec, err := of.base.txn.meta.GetSpecByID(int(m.PartitionSpecID()))
+		if err != nil {
+			return existingFiles, err
+		}
+
+		wr, path, counter, err := of.base.newManifestWriter(*spec)
+		if err != nil {
+			return existingFiles, err
+		}
+		defer counter.W.(io.Closer).Close()
+
+		for _, entry := range notDeleted {
+			if err := wr.Existing(entry); err != nil {
+				return existingFiles, err
+			}
+		}
+
+		mf, err := wr.ToManifestFile(path, counter.Count)
+		if err != nil {
+			return existingFiles, err
+		}
+
+		existingFiles = append(existingFiles, mf)
+	}
+
+	return existingFiles, nil
+}
+
+func (of *overwriteFiles) deletedEntries() ([]iceberg.ManifestEntry, error) {
+	// determine if we need to record any deleted entries
+	//
+	// with a full overwrite all the entries are considered deleted
+	// with partial overwrites we have to use the predicate to evaluate
+	// which entries are affected
+	if of.base.parentSnapshotID <= 0 {
+		return nil, nil
+	}
+
+	parent, err := of.base.txn.meta.SnapshotByID(of.base.parentSnapshotID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: cannot overwrite empty table", err)
+	}
+
+	previousManifests, err := parent.Manifests(of.base.io)
+	if err != nil {
+		return nil, err
+	}
+
+	getEntries := func(m iceberg.ManifestFile) ([]iceberg.ManifestEntry, error) {
+		entries, err := of.base.fetchManifestEntry(m, true)
+		if err != nil {
+			return nil, err
+		}
+
+		result := make([]iceberg.ManifestEntry, 0, len(entries))
+		for _, entry := range entries {
+			_, ok := of.base.deletedFiles[entry.DataFile().FilePath()]
+			if ok && entry.DataFile().ContentType() == iceberg.EntryContentData {
+				seqNum := entry.SequenceNum()
+				result = append(result,
+					iceberg.NewManifestEntry(iceberg.EntryStatusDELETED,
+						&of.base.snapshotID, &seqNum, entry.FileSequenceNum(),
+						entry.DataFile()))
+			}
+		}
+
+		return result, nil
+	}
+
+	nWorkers := config.EnvConfig.MaxWorkers
+	finalResult := make([]iceberg.ManifestEntry, 0, len(previousManifests))
+	for entries, err := range tblutils.MapExec(nWorkers, previousManifests, getEntries) {
+		if err != nil {
+			return nil, err
+		}
+		finalResult = append(finalResult, entries...)
+	}
+
+	return finalResult, nil
 }
 
 type snapshotProducer struct {
@@ -150,6 +295,30 @@ func (sp *snapshotProducer) appendDataFile(df iceberg.DataFile) *snapshotProduce
 	return sp
 }
 
+func (sp *snapshotProducer) deleteDataFile(df iceberg.DataFile) *snapshotProducer {
+	sp.deletedFiles[df.FilePath()] = df
+
+	return sp
+}
+
+func (sp *snapshotProducer) newManifestWriter(spec iceberg.PartitionSpec) (*iceberg.ManifestWriter, string, *internal.CountingWriter, error) {
+	out, path, err := sp.newManifestOutput()
+	if err != nil {
+		return nil, "", nil, err
+	}
+
+	counter := &internal.CountingWriter{W: out}
+	wr, err := iceberg.NewManifestWriter(sp.txn.meta.formatVersion, counter, spec,
+		sp.txn.meta.CurrentSchema(), sp.snapshotID)
+	if err != nil {
+		defer out.Close()
+
+		return nil, "", nil, err
+	}
+
+	return wr, path, counter, nil
+}
+
 func (sp *snapshotProducer) newManifestOutput() (io.WriteCloser, string, error) {
 	provider, err := sp.txn.tbl.LocationProvider()
 	if err != nil {
@@ -163,6 +332,10 @@ func (sp *snapshotProducer) newManifestOutput() (io.WriteCloser, string, error) 
 	}
 
 	return f, filepath, nil
+}
+
+func (sp *snapshotProducer) fetchManifestEntry(m iceberg.ManifestFile, discardDeleted bool) ([]iceberg.ManifestEntry, error) {
+	return m.FetchEntries(sp.io, discardDeleted)
 }
 
 func (sp *snapshotProducer) manifests() ([]iceberg.ManifestFile, error) {
@@ -292,7 +465,7 @@ func (sp *snapshotProducer) summary(props iceberg.Properties) (Summary, error) {
 	return updateSnapshotSummaries(Summary{
 		Operation:  sp.op,
 		Properties: summaryProps,
-	}, previousSummary, sp.op == OpOverwrite)
+	}, previousSummary)
 }
 
 func (sp *snapshotProducer) commit() ([]Update, []Requirement, error) {
@@ -348,39 +521,4 @@ func (sp *snapshotProducer) commit() ([]Update, []Requirement, error) {
 		}, []Requirement{
 			AssertRefSnapshotID("main", sp.txn.meta.currentSnapshotID),
 		}, nil
-}
-
-func truncateUpperBoundText(s string, trunc int) string {
-	if trunc == utf8.RuneCountInString(s) {
-		return s
-	}
-
-	result := []rune(s)[:trunc]
-	for i := len(result) - 1; i >= 0; i-- {
-		next := result[i] + 1
-		if utf8.ValidRune(next) {
-			result[i] = next
-
-			return string(result)
-		}
-	}
-
-	return ""
-}
-
-func truncateUpperBoundBinary(val []byte, trunc int) []byte {
-	result := val[:trunc]
-	if bytes.Equal(result, val) {
-		return result
-	}
-
-	for i := len(result) - 1; i >= 0; i-- {
-		if result[i] < 255 {
-			result[i]++
-
-			return result
-		}
-	}
-
-	return nil
 }

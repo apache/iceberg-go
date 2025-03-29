@@ -225,7 +225,7 @@ func init() {
 			WithFieldID(519))),
 	})))
 
-	AvroSchemaCache.Add("data_file_v1", Must(avro.NewRecordSchema("data_file", "", []*avro.Field{
+	AvroSchemaCache.Add("data_file_v1", Must(avro.NewRecordSchema("r2", "", []*avro.Field{
 		Must(avro.NewField("file_path",
 			StringSchema,
 			avro.WithDoc("Location URI with FS scheme"),
@@ -286,7 +286,7 @@ func init() {
 			WithFieldID(140))),
 	})))
 
-	AvroSchemaCache.Add("data_file_v2", Must(avro.NewRecordSchema("data_file", "", []*avro.Field{
+	AvroSchemaCache.Add("data_file_v2", Must(avro.NewRecordSchema("r2", "", []*avro.Field{
 		Must(avro.NewField("content", IntSchema,
 			avro.WithDoc("Content type"),
 			avro.WithDefault(0),
@@ -376,7 +376,7 @@ func newDataFileSchema(partitionType avro.Schema, version int) (avro.Schema, err
 		return nil, err
 	}
 
-	return avro.NewRecordSchema("data_file", "",
+	return avro.NewRecordSchema("r2", "",
 		append(schema.(*avro.RecordSchema).Fields(), partField))
 }
 

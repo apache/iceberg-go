@@ -23,7 +23,7 @@ toolchain go1.23.6
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.3.2
-	github.com/apache/arrow-go/v18 v18.2.0
+	github.com/apache/arrow-go/v18 v18.2.1-0.20250325140533-276892c275de
 	github.com/aws/aws-sdk-go-v2 v1.36.3
 	github.com/aws/aws-sdk-go-v2/config v1.29.9
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.62
@@ -47,7 +47,7 @@ require (
 	github.com/uptrace/bun/extra/bundebug v1.2.11
 	gocloud.dev v0.40.0
 	golang.org/x/sync v0.12.0
-	google.golang.org/api v0.226.0
+	google.golang.org/api v0.227.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
