@@ -42,7 +42,7 @@ $ cd iceberg-go/cmd/iceberg && go build .
 | :------------------: | :-------: |
 | S3                   |    X      |
 | Google Cloud Storage |    X      |
-| Azure Blob Storage   |           |
+| Azure Blob Storage   |    X      |
 | Local Filesystem     |    X      |
 
 ### Metadata
