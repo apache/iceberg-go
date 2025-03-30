@@ -68,8 +68,6 @@ services:
   azurite:
     image: mcr.microsoft.com/azure-storage/azurite
     container_name: azurite
-    environment:
-      - AZURITE_ACCOUNTS="account:key"
     hostname: azurite
     ports:
       - 10010:10010

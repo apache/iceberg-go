@@ -68,7 +68,7 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 			if err != nil {
 				return nil, err
 			}
-			containerURL, err := url.JoinPath(string(svcURL), "/warehouse")
+			containerURL, err := url.JoinPath(string(svcURL), parsed.Host)
 			if err != nil {
 				return nil, err
 			}
@@ -116,5 +116,5 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 		return bucket, nil
 	}
 
-	return nil, errors.New("xxxx")
+	return nil, errors.New("Account name is required")
 }

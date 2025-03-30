@@ -24,46 +24,125 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	sqlcat "github.com/apache/iceberg-go/catalog/sql"
 	"github.com/apache/iceberg-go/io"
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
 	"github.com/uptrace/bun/driver/sqliteshim"
+	"gocloud.dev/blob/azureblob"
 )
 
-func TestAzuriteWarehouse(t *testing.T) {
+const (
+	accountName      = "devstoreaccount1"
+	accountKey       = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+	endpoint         = "127.0.0.1:10010"
+	protocol         = "http"
+	containerName    = "warehouse"
+	connectionString = "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10010/devstoreaccount1;QueueEndpoint=http://127.0.0.1:10001/devstoreaccount1;TableEndpoint=http://127.0.0.1:10002/devstoreaccount1;"
+)
+
+type AzureBlobIOTestSuite struct {
+	suite.Suite
+
+	ctx context.Context
+}
+
+func (s *AzureBlobIOTestSuite) SetupTest() {
+	s.ctx = context.Background()
+
+	err := createContainerIfNotExist(containerName)
+	s.NoError(err)
+}
+
+func (s *AzureBlobIOTestSuite) TestAzureBlobWarehouseKey() {
 	path := "iceberg-test-azure/test-table-azure"
-	containerName := "container"
-	accountName := "devstoreaccount1"
-	accountKey := "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
-	warehouseLocation := fmt.Sprintf("abfs://%s@%s.dfs.core.windows.net", containerName, accountName)
-	// endpoint := fmt.Sprintf("http://127.0.0.1:10010/%s", accountName)
+	containerName := "warehouse"
 
 	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
 		"uri":                       ":memory:",
 		sqlcat.DriverKey:            sqliteshim.ShimName,
 		sqlcat.DialectKey:           string(sqlcat.SQLite),
 		"type":                      "sql",
-		"warehouse":                 warehouseLocation,
 		io.AdlsSharedKeyAccountName: accountName,
 		io.AdlsSharedKeyAccountKey:  accountKey,
-		io.AdlsEndpoint:             "127.0.0.1:10010",
-		io.AdlsProtocol:             "http",
+		io.AdlsEndpoint:             endpoint,
+		io.AdlsProtocol:             protocol,
 	})
-	require.NoError(t, err)
+	s.NoError(err)
+	s.NotNil(cat)
 
-	require.NotNil(t, cat)
+	c := cat.(*sqlcat.Catalog)
+	s.NoError(c.CreateNamespace(s.ctx, catalog.ToIdentifier("iceberg-test-azure"), nil))
+
+	tbl, err := c.CreateTable(s.ctx,
+		catalog.ToIdentifier("iceberg-test-azure", "test-table-azure"),
+		iceberg.NewSchema(0, iceberg.NestedField{
+			Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, ID: 1,
+		}), catalog.WithLocation(fmt.Sprintf("abfs://%s/iceberg/%s", containerName, path)))
+	s.NoError(err)
+	s.NotNil(tbl)
+}
+
+func (s *AzureBlobIOTestSuite) TestAzuriteWarehouseConnectionString() {
+	path := "iceberg-test-azure/test-table-azure"
+	containerName := "warehouse"
+
+	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
+		"uri":                       ":memory:",
+		sqlcat.DriverKey:            sqliteshim.ShimName,
+		sqlcat.DialectKey:           string(sqlcat.SQLite),
+		"type":                      "sql",
+		io.AdlsSharedKeyAccountName: accountName,
+		io.AdlsConnectionStringPrefix + accountName: connectionString,
+	})
+	s.NoError(err)
+
+	s.NotNil(cat)
 
 	c := cat.(*sqlcat.Catalog)
 	ctx := context.Background()
-	require.NoError(t, c.CreateNamespace(ctx, catalog.ToIdentifier("iceberg-test-azure"), nil))
+	s.NoError(c.CreateNamespace(ctx, catalog.ToIdentifier("iceberg-test-azure"), nil))
 
 	tbl, err := c.CreateTable(ctx,
 		catalog.ToIdentifier("iceberg-test-azure", "test-table-azure"),
 		iceberg.NewSchema(0, iceberg.NestedField{
 			Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, ID: 1,
-		}), catalog.WithLocation(fmt.Sprintf("abfs://warehouse/iceberg/%s", path)))
-	require.NoError(t, err)
-	require.NotNil(t, tbl)
+		}), catalog.WithLocation(fmt.Sprintf("abfs://%s/iceberg/%s", containerName, path)))
+	s.NoError(err)
+	s.NotNil(tbl)
+}
+
+func createContainerIfNotExist(containerName string) error {
+	svcURL, err := azureblob.NewServiceURL(&azureblob.ServiceURLOptions{
+		AccountName:   accountName,
+		Protocol:      protocol,
+		StorageDomain: endpoint,
+	})
+	if err != nil {
+		return err
+	}
+
+	sharedKeyCred, err := azblob.NewSharedKeyCredential(accountName, accountKey)
+	if err != nil {
+		return err
+	}
+
+	client, err := azblob.NewClientWithSharedKeyCredential(string(svcURL), sharedKeyCred, nil)
+	if err != nil {
+		return err
+	}
+
+	_, err = client.CreateContainer(context.Background(), containerName, nil)
+	if err != nil && !bloberror.HasCode(err, bloberror.ContainerAlreadyExists) {
+		return err
+	}
+
+	return nil
+}
+
+func TestAzureBlobIOIntegration(t *testing.T) {
+	suite.Run(t, new(AzureBlobIOTestSuite))
 }
