@@ -35,6 +35,8 @@ const (
 	AdlsConnectionStringPrefix = "adls.connection-string."
 	AdlsSharedKeyAccountName   = "adls.auth.shared-key.account.name"
 	AdlsSharedKeyAccountKey    = "adls.auth.shared-key.account.key"
+	AdlsEndpoint               = "adls.endpoint"
+	AdlsProtocol               = "adls.protocol"
 
 	// Not in use yet
 	// AdlsReadBlockSize          = "adls.read.block-size-bytes"
@@ -48,6 +50,9 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 
 	// Construct the client
 	accountName := props[AdlsSharedKeyAccountName]
+	endpoint := props[AdlsEndpoint]
+	protocol := props[AdlsProtocol]
+
 	var client *container.Client
 
 	if accountName != "" {
@@ -55,8 +60,15 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 		var err error
 
 		if accountKey, ok := props[AdlsSharedKeyAccountKey]; ok {
-			svcURL := fmt.Sprintf("https://%s.blob.core.windows.net", accountName)
-			containerURL, err := url.JoinPath(svcURL, parsed.Host)
+			svcURL, err := azureblob.NewServiceURL(&azureblob.ServiceURLOptions{
+				AccountName:   accountName,
+				Protocol:      protocol,
+				StorageDomain: endpoint,
+			})
+			if err != nil {
+				return nil, err
+			}
+			containerURL, err := url.JoinPath(string(svcURL), "/warehouse")
 			if err != nil {
 				return nil, err
 			}
@@ -71,8 +83,10 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 			}
 		} else if sasToken, ok := adlsSasTokens[accountName]; ok {
 			svcURL, err := azureblob.NewServiceURL(&azureblob.ServiceURLOptions{
-				AccountName: accountName,
-				SASToken:    sasToken,
+				AccountName:   accountName,
+				SASToken:      sasToken,
+				Protocol:      protocol,
+				StorageDomain: endpoint,
 			})
 			if err != nil {
 				return nil, err
