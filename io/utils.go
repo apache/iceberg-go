@@ -26,5 +26,6 @@ func propertiesWithPrefix(props map[string]string, prefix string) map[string]str
 			result[strings.TrimPrefix(k, prefix)] = v
 		}
 	}
+
 	return result
 }
