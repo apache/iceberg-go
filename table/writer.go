@@ -120,6 +120,7 @@ func writeFiles(ctx context.Context, rootLocation string, fs io.WriteFileIO, met
 	}
 
 	nworkers := config.EnvConfig.MaxWorkers
+
 	return internal.MapExec(nworkers, tasks, func(t WriteTask) (iceberg.DataFile, error) {
 		return w.writeFile(ctx, t)
 	})
