@@ -251,6 +251,7 @@ func (m *manifestMergeManager) groupBySpec(manifests []iceberg.ManifestFile) map
 		group := groups[specid]
 		groups[specid] = append(group, m)
 	}
+
 	return groups
 }
 
@@ -312,6 +313,7 @@ func (m *manifestMergeManager) mergeGroup(firstManifest iceberg.ManifestFile, sp
 			}
 			output = append(output, created)
 		}
+
 		return output, nil
 	}
 
@@ -322,6 +324,7 @@ func (m *manifestMergeManager) mergeGroup(firstManifest iceberg.ManifestFile, sp
 		g.Go(func() error {
 			var err error
 			binResults[i], err = mergeBin(bin)
+
 			return err
 		})
 	}
@@ -474,6 +477,7 @@ func (sp *snapshotProducer) newManifestWriter(spec iceberg.PartitionSpec) (*iceb
 		sp.txn.meta.CurrentSchema(), sp.snapshotID)
 	if err != nil {
 		defer out.Close()
+
 		return nil, "", nil, err
 	}
 

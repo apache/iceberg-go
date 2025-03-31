@@ -54,6 +54,7 @@ func (slp *simpleLocationProvider) NewTableMetadataFileLocation(newVersion int) 
 	}
 
 	fname := fmt.Sprintf("%05d-%s.metadata.json", newVersion, newUUID)
+
 	return slp.NewMetadataLocation(fname), nil
 }
 
@@ -100,6 +101,7 @@ func newObjectStoreLocationProvider(tableLoc *url.URL, tableProps iceberg.Proper
 	if err != nil {
 		return nil, err
 	}
+
 	return &objectStoreLocationProvider{
 		simpleLocationProvider: slp,
 		includePartitionPaths: tableProps.GetBool(WriteObjectStorePartitionedPathsKey,
@@ -116,5 +118,6 @@ func LoadLocationProvider(tableLocation string, tableProps iceberg.Properties) (
 	if tableProps.GetBool(ObjectStoreEnabledKey, ObjectStoreEnabledDefault) {
 		return newObjectStoreLocationProvider(u, tableProps)
 	}
+
 	return newSimpleLocationProvider(u, tableProps)
 }

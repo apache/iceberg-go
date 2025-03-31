@@ -853,7 +853,8 @@ func (t *TableWritingTestSuite) TestWriteSpecialCharacterColumn() {
 				{ID: 6, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: true},
 				{ID: 7, Name: "zip", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 				{ID: 8, Name: colNameWithSpecialChar, Type: iceberg.PrimitiveTypes.String, Required: true},
-			}}})
+			},
+		}})
 
 	arrowSchema := arrow.NewSchema([]arrow.Field{
 		{Name: colNameWithSpecialChar, Type: arrow.BinaryTypes.String, Nullable: true},
@@ -932,6 +933,7 @@ func (t *TableWritingTestSuite) createTableWithProps(identifier table.Identifier
 		catalog.WithLocation(t.location))
 
 	t.Require().NoError(err)
+
 	return tbl
 }
 

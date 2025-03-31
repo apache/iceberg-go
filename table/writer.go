@@ -89,6 +89,7 @@ func (w *writer) writeFile(ctx context.Context, task WriteTask, ch chan<- iceber
 	}
 
 	ch <- df
+
 	return nil
 }
 
