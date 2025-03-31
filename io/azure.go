@@ -116,5 +116,5 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 		return bucket, nil
 	}
 
-	return nil, errors.New("Account name is required")
+	return nil, errors.New("account name is required")
 }
