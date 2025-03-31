@@ -152,8 +152,12 @@ func (t *Transaction) AppendTable(ctx context.Context, tbl arrow.Table, batchSiz
 func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapshotProps iceberg.Properties) error {
 	appendFiles := t.appendSnapshotProducer(snapshotProps)
 
-	itr := recordsToDataFiles(ctx, t.tbl.Location(), t.meta, rdr.Schema(),
-		array.IterFromReader(rdr), t.tbl.fs.(io.WriteFileIO), &appendFiles.commitUuid, nil)
+	itr := recordsToDataFiles(ctx, t.tbl.Location(), t.meta, recordWritingArgs{
+		sc:        rdr.Schema(),
+		itr:       array.IterFromReader(rdr),
+		fs:        t.tbl.fs.(io.WriteFileIO),
+		writeUUID: &appendFiles.commitUuid,
+	})
 
 	for df, err := range itr {
 		if err != nil {

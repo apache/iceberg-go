@@ -24,10 +24,10 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/config"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
-	"golang.org/x/sync/errgroup"
 )
 
 type WriteTask struct {
@@ -53,7 +53,7 @@ type writer struct {
 	meta       *MetadataBuilder
 }
 
-func (w *writer) writeFile(ctx context.Context, task WriteTask, ch chan<- iceberg.DataFile) error {
+func (w *writer) writeFile(ctx context.Context, task WriteTask) (iceberg.DataFile, error) {
 	defer func() {
 		for _, b := range task.Batches {
 			b.Release()
@@ -65,32 +65,25 @@ func (w *writer) writeFile(ctx context.Context, task WriteTask, ch chan<- iceber
 		rec, err := ToRequestedSchema(ctx, w.fileSchema,
 			task.Schema, b, false, true, false)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		batches[i] = rec
 	}
 
 	statsCols, err := computeStatsPlan(w.fileSchema, w.meta.props)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	filePath := w.loc.NewDataLocation(
 		task.GenerateDataFileName("parquet"))
 
-	df, err := w.format.WriteDataFile(ctx, w.fs, internal.WriteFileInfo{
+	return w.format.WriteDataFile(ctx, w.fs, internal.WriteFileInfo{
 		FileSchema: w.fileSchema,
 		FileName:   filePath,
 		StatsCols:  statsCols,
 		WriteProps: w.props,
 	}, batches)
-	if err != nil {
-		return err
-	}
-
-	ch <- df
-
-	return nil
 }
 
 func writeFiles(ctx context.Context, rootLocation string, fs io.WriteFileIO, meta *MetadataBuilder, tasks iter.Seq[WriteTask]) iter.Seq2[iceberg.DataFile, error] {
@@ -100,23 +93,6 @@ func writeFiles(ctx context.Context, rootLocation string, fs io.WriteFileIO, met
 			yield(nil, err)
 		}
 	}
-
-	ch := make(chan iceberg.DataFile, 10)
-
-	var g *errgroup.Group
-	g, ctx = errgroup.WithContext(ctx)
-
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	nworkers := 5
-	input := make(chan WriteTask, nworkers)
-	go func() {
-		defer close(input)
-		for t := range tasks {
-			input <- t
-		}
-	}()
 
 	format := internal.GetFileFormat(iceberg.ParquetFile)
 	fileSchema := meta.CurrentSchema()
@@ -143,33 +119,8 @@ func writeFiles(ctx context.Context, rootLocation string, fs io.WriteFileIO, met
 		meta:       meta,
 	}
 
-	for range nworkers {
-		g.Go(func() error {
-			for task := range input {
-				if err := w.writeFile(ctx, task, ch); err != nil {
-					return err
-				}
-			}
-
-			return nil
-		})
-	}
-
-	go func() {
-		defer close(ch)
-		err = g.Wait()
-	}()
-
-	return func(yield func(iceberg.DataFile, error) bool) {
-		defer cancel()
-		for file := range ch {
-			if !yield(file, nil) {
-				return
-			}
-		}
-
-		if err != nil {
-			yield(nil, err)
-		}
-	}
+	nworkers := config.EnvConfig.MaxWorkers
+	return internal.MapExec(nworkers, tasks, func(t WriteTask) (iceberg.DataFile, error) {
+		return w.writeFile(ctx, t)
+	})
 }

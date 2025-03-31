@@ -227,7 +227,7 @@ func (of *overwriteFiles) deletedEntries() ([]iceberg.ManifestEntry, error) {
 
 	nWorkers := config.EnvConfig.MaxWorkers
 	finalResult := make([]iceberg.ManifestEntry, 0, len(previousManifests))
-	for entries, err := range tblutils.MapExec(nWorkers, previousManifests, getEntries) {
+	for entries, err := range tblutils.MapExec(nWorkers, slices.Values(previousManifests), getEntries) {
 		if err != nil {
 			return nil, err
 		}
