@@ -53,8 +53,7 @@ type AzureBlobIOTestSuite struct {
 func (s *AzureBlobIOTestSuite) SetupTest() {
 	s.ctx = context.Background()
 
-	err := createContainerIfNotExist(containerName)
-	s.NoError(err)
+	s.Require().NoError(createContainerIfNotExist(containerName))
 }
 
 func (s *AzureBlobIOTestSuite) TestAzureBlobWarehouseKey() {
@@ -71,19 +70,19 @@ func (s *AzureBlobIOTestSuite) TestAzureBlobWarehouseKey() {
 		io.AdlsEndpoint:             endpoint,
 		io.AdlsProtocol:             protocol,
 	})
-	s.NoError(err)
-	s.NotNil(cat)
+	s.Require().NoError(err)
+	s.Require().NotNil(cat)
 
 	c := cat.(*sqlcat.Catalog)
-	s.NoError(c.CreateNamespace(s.ctx, catalog.ToIdentifier("iceberg-test-azure"), nil))
+	s.Require().NoError(c.CreateNamespace(s.ctx, catalog.ToIdentifier("iceberg-test-azure"), nil))
 
 	tbl, err := c.CreateTable(s.ctx,
 		catalog.ToIdentifier("iceberg-test-azure", "test-table-azure"),
 		iceberg.NewSchema(0, iceberg.NestedField{
 			Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, ID: 1,
 		}), catalog.WithLocation(fmt.Sprintf("abfs://%s/iceberg/%s", containerName, path)))
-	s.NoError(err)
-	s.NotNil(tbl)
+	s.Require().NoError(err)
+	s.Require().NotNil(tbl)
 }
 
 func (s *AzureBlobIOTestSuite) TestAzuriteWarehouseConnectionString() {
@@ -98,21 +97,20 @@ func (s *AzureBlobIOTestSuite) TestAzuriteWarehouseConnectionString() {
 		io.AdlsSharedKeyAccountName: accountName,
 		io.AdlsConnectionStringPrefix + accountName: connectionString,
 	})
-	s.NoError(err)
-
-	s.NotNil(cat)
+	s.Require().NoError(err)
+	s.Require().NotNil(cat)
 
 	c := cat.(*sqlcat.Catalog)
 	ctx := context.Background()
-	s.NoError(c.CreateNamespace(ctx, catalog.ToIdentifier("iceberg-test-azure"), nil))
+	s.Require().NoError(c.CreateNamespace(ctx, catalog.ToIdentifier("iceberg-test-azure"), nil))
 
 	tbl, err := c.CreateTable(ctx,
 		catalog.ToIdentifier("iceberg-test-azure", "test-table-azure"),
 		iceberg.NewSchema(0, iceberg.NestedField{
 			Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, ID: 1,
 		}), catalog.WithLocation(fmt.Sprintf("abfs://%s/iceberg/%s", containerName, path)))
-	s.NoError(err)
-	s.NotNil(tbl)
+	s.Require().NoError(err)
+	s.Require().NotNil(tbl)
 }
 
 func createContainerIfNotExist(containerName string) error {

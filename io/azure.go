@@ -55,66 +55,59 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 
 	var client *container.Client
 
-	if accountName != "" {
-		var sharedKeyCred *azblob.SharedKeyCredential
-		var err error
+	if accountName == "" {
+		return nil, errors.New("account name is required for azure bucket")
+	}
 
-		if accountKey, ok := props[AdlsSharedKeyAccountKey]; ok {
-			svcURL, err := azureblob.NewServiceURL(&azureblob.ServiceURLOptions{
-				AccountName:   accountName,
-				Protocol:      protocol,
-				StorageDomain: endpoint,
-			})
-			if err != nil {
-				return nil, err
-			}
-			containerURL, err := url.JoinPath(string(svcURL), parsed.Host)
-			if err != nil {
-				return nil, err
-			}
-			sharedKeyCred, err = azblob.NewSharedKeyCredential(accountName, accountKey)
-			if err != nil {
-				return nil, fmt.Errorf("failed azblob.NewSharedKeyCredential: %w", err)
-			}
-
-			client, err = container.NewClientWithSharedKeyCredential(containerURL, sharedKeyCred, nil)
-			if err != nil {
-				return nil, fmt.Errorf("failed container.NewClientWithSharedKeyCredential: %w", err)
-			}
-		} else if sasToken, ok := adlsSasTokens[accountName]; ok {
-			svcURL, err := azureblob.NewServiceURL(&azureblob.ServiceURLOptions{
-				AccountName:   accountName,
-				SASToken:      sasToken,
-				Protocol:      protocol,
-				StorageDomain: endpoint,
-			})
-			if err != nil {
-				return nil, err
-			}
-
-			containerURL, err := url.JoinPath(string(svcURL), parsed.Host)
-			if err != nil {
-				return nil, err
-			}
-
-			client, err = container.NewClientWithNoCredential(containerURL, nil)
-			if err != nil {
-				return nil, fmt.Errorf("failed container.NewClientWithNoCredential: %w", err)
-			}
-		} else if connectionString, ok := adlsConnectionStrings[accountName]; ok {
-			client, err = container.NewClientFromConnectionString(connectionString, parsed.Host, nil)
-			if err != nil {
-				return nil, fmt.Errorf("failed container.NewClientFromConnectionString: %w", err)
-			}
+	if accountKey, ok := props[AdlsSharedKeyAccountKey]; ok {
+		svcURL, err := azureblob.NewServiceURL(&azureblob.ServiceURLOptions{
+			AccountName:   accountName,
+			Protocol:      protocol,
+			StorageDomain: endpoint,
+		})
+		if err != nil {
+			return nil, err
+		}
+		containerURL, err := url.JoinPath(string(svcURL), parsed.Host)
+		if err != nil {
+			return nil, err
+		}
+		sharedKeyCred, err := azblob.NewSharedKeyCredential(accountName, accountKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed azblob.NewSharedKeyCredential: %w", err)
 		}
 
-		bucket, err := azureblob.OpenBucket(ctx, client, nil)
+		client, err = container.NewClientWithSharedKeyCredential(containerURL, sharedKeyCred, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed container.NewClientWithSharedKeyCredential: %w", err)
+		}
+	} else if sasToken, ok := adlsSasTokens[accountName]; ok {
+		svcURL, err := azureblob.NewServiceURL(&azureblob.ServiceURLOptions{
+			AccountName:   accountName,
+			SASToken:      sasToken,
+			Protocol:      protocol,
+			StorageDomain: endpoint,
+		})
 		if err != nil {
 			return nil, err
 		}
 
-		return bucket, nil
+		containerURL, err := url.JoinPath(string(svcURL), parsed.Host)
+		if err != nil {
+			return nil, err
+		}
+
+		client, err = container.NewClientWithNoCredential(containerURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed container.NewClientWithNoCredential: %w", err)
+		}
+	} else if connectionString, ok := adlsConnectionStrings[accountName]; ok {
+		var err error
+		client, err = container.NewClientFromConnectionString(connectionString, parsed.Host, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed container.NewClientFromConnectionString: %w", err)
+		}
 	}
 
-	return nil, errors.New("account name is required")
+	return azureblob.OpenBucket(ctx, client, nil)
 }
