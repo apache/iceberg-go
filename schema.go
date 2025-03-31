@@ -1436,6 +1436,7 @@ func makeCompatibleName(n string) string {
 	if !validAvroName(n) {
 		return sanitizeName(n)
 	}
+
 	return n
 }
 
@@ -1506,6 +1507,7 @@ func (sanitizeColumnNameVisitor) Schema(_ *Schema, structResult NestedField) Nes
 func (sanitizeColumnNameVisitor) Field(field NestedField, fieldResult NestedField) NestedField {
 	field.Type = fieldResult.Type
 	field.Name = makeCompatibleName(field.Name)
+
 	return field
 }
 
@@ -1515,12 +1517,14 @@ func (sanitizeColumnNameVisitor) Struct(_ StructType, fieldResults []NestedField
 
 func (sanitizeColumnNameVisitor) List(list ListType, elemResult NestedField) NestedField {
 	list.Element = elemResult.Type
+
 	return NestedField{Type: &list}
 }
 
 func (sanitizeColumnNameVisitor) Map(mapType MapType, keyResult, valueResult NestedField) NestedField {
 	mapType.KeyType = keyResult.Type
 	mapType.ValueType = valueResult.Type
+
 	return NestedField{Type: &mapType}
 }
 
