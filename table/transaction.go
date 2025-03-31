@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
@@ -50,6 +51,10 @@ func (s snapshotUpdate) mergeOverwrite(commitUUID *uuid.UUID) *snapshotProducer 
 	}
 
 	return newOverwriteFilesProducer(op, s.txn, s.io, commitUUID, s.snapshotProps)
+}
+
+func (s snapshotUpdate) mergeAppend() *snapshotProducer {
+	return newMergeAppendFilesProducer(OpAppend, s.txn, s.io, nil, s.snapshotProps)
 }
 
 type Transaction struct {
@@ -135,6 +140,34 @@ func (t *Transaction) SetProperties(props iceberg.Properties) error {
 	}
 
 	return nil
+}
+
+func (t *Transaction) AppendTable(ctx context.Context, tbl arrow.Table, batchSize int64, snapshotProps iceberg.Properties) error {
+	rdr := array.NewTableReader(tbl, batchSize)
+	defer rdr.Release()
+
+	return t.Append(ctx, rdr, snapshotProps)
+}
+
+func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapshotProps iceberg.Properties) error {
+	appendFiles := t.appendSnapshotProducer(snapshotProps)
+
+	itr := recordsToDataFiles(ctx, t.tbl.Location(), t.meta, rdr.Schema(),
+		array.IterFromReader(rdr), t.tbl.fs.(io.WriteFileIO), &appendFiles.commitUuid, nil)
+
+	for df, err := range itr {
+		if err != nil {
+			return err
+		}
+		appendFiles.appendDataFile(df)
+	}
+
+	updates, reqs, err := appendFiles.commit()
+	if err != nil {
+		return err
+	}
+
+	return t.apply(updates, reqs)
 }
 
 // ReplaceFiles is actually just an overwrite operation with multiple
@@ -230,10 +263,6 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	}
 
 	return t.apply(updates, reqs)
-}
-
-func (t *Transaction) Append(rdr array.RecordReader, snapshotProps iceberg.Properties) error {
-	return iceberg.ErrNotImplemented
 }
 
 func (t *Transaction) AddFiles(ctx context.Context, files []string, snapshotProps iceberg.Properties, ignoreDuplicates bool) error {

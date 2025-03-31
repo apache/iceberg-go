@@ -411,11 +411,11 @@ func (t *TableWritingTestSuite) TestAddFilesFailsSchemaMismatch() {
 	err = tx.AddFiles(t.ctx, files, nil, false)
 	t.Error(err)
 	t.EqualError(err, `error encountered during schema visitor: mismatch in fields:
-   | Table Field              | Requested Field         
+   | Table Field              | Requested Field
 ✅ | 1: foo: optional boolean | 1: foo: optional boolean
-✅ | 2: bar: optional string  | 2: bar: optional string 
-❌ | 3: baz: optional int     | 3: baz: optional string 
-✅ | 4: qux: optional date    | 4: qux: optional date   
+✅ | 2: bar: optional string  | 2: bar: optional string
+❌ | 3: baz: optional int     | 3: baz: optional string
+✅ | 4: qux: optional date    | 4: qux: optional date
 `)
 }
 
@@ -935,9 +935,94 @@ func (t *TableWritingTestSuite) createTableWithProps(identifier table.Identifier
 	return tbl
 }
 
+func tableSchema() *iceberg.Schema {
+	return iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "bool", Type: iceberg.PrimitiveTypes.Bool},
+		iceberg.NestedField{ID: 2, Name: "string", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "string_long", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 4, Name: "int", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 5, Name: "long", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 6, Name: "float", Type: iceberg.PrimitiveTypes.Float32},
+		iceberg.NestedField{ID: 7, Name: "double", Type: iceberg.PrimitiveTypes.Float64},
+		iceberg.NestedField{ID: 8, Name: "time", Type: iceberg.PrimitiveTypes.Time},
+		iceberg.NestedField{ID: 9, Name: "timestamp", Type: iceberg.PrimitiveTypes.Timestamp},
+		iceberg.NestedField{ID: 10, Name: "timestamptz", Type: iceberg.PrimitiveTypes.TimestampTz},
+		iceberg.NestedField{ID: 11, Name: "date", Type: iceberg.PrimitiveTypes.Date},
+		iceberg.NestedField{ID: 12, Name: "uuid", Type: iceberg.PrimitiveTypes.UUID},
+		iceberg.NestedField{ID: 13, Name: "binary", Type: iceberg.PrimitiveTypes.Binary},
+		iceberg.NestedField{ID: 14, Name: "fixed", Type: iceberg.FixedTypeOf(16)},
+	)
+}
+
+func arrowTableWithNull() arrow.Table {
+	sc, err := table.SchemaToArrowSchema(tableSchema(), nil, true, false)
+	if err != nil {
+		panic(err)
+	}
+
+	arrTable, err := array.TableFromJSON(memory.DefaultAllocator, sc, []string{
+		`[
+			{
+				"bool": false,
+				"string": "a",
+				"string_long": "` + strings.Repeat("a", 22) + `",
+				"int": 1,
+				"long": 1,
+				"float": 0.0,
+				"double": 0.0,
+				"time": "00:00:01.000000",
+				"timestamp": "2023-01-01T19:25:00.000000+08:00",
+				"timestamptz": "2023-01-01T19:25:00.000000Z",
+				"date": "2023-01-01",
+				"uuid": "00000000-0000-0000-0000-000000000000",
+				"binary": "AQ==",
+				"fixed": "AAAAAAAAAAAAAAAAAAAAAA=="
+			},
+			{
+				"bool": null,
+				"string": null,
+				"string_long": null,
+				"int": null,
+				"long": null,
+				"float": null,
+				"double": null,
+				"time": null,
+				"timestamp": null,
+				"timestamptz": null,
+				"date": null,
+				"uuid": null,
+				"binary": null,
+				"fixed": null
+			},
+			{
+				"bool": true,
+				"string": "z",
+				"string_long": "` + strings.Repeat("z", 22) + `",
+				"int": 9,
+				"long": 9,
+				"float": 0.9,
+				"double": 0.9,
+				"time": "00:00:03.000000",
+				"timestamp": "2023-03-01T19:25:00.000000+08:00",
+				"timestamptz": "2023-03-01T19:25:00.000000Z",
+				"date": "2023-03-01",
+				"uuid": "11111111-1111-1111-1111-111111111111",
+				"binary": "Eg==",
+				"fixed": "EREREREREREREREREREREQ=="
+			}
+		 ]`,
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	return arrTable
+}
+
 func (t *TableWritingTestSuite) TestMergeManifests() {
 	tblA := t.createTableWithProps(table.Identifier{"default", "merge_manifest_a"},
 		iceberg.Properties{
+			table.ParquetCompressionKey:    "snappy",
 			table.ManifestMergeEnabledKey:  "true",
 			table.ManifestMinMergeCountKey: "1",
 			"format-version":               strconv.Itoa(t.formatVersion),
@@ -945,6 +1030,7 @@ func (t *TableWritingTestSuite) TestMergeManifests() {
 
 	tblB := t.createTableWithProps(table.Identifier{"default", "merge_manifest_b"},
 		iceberg.Properties{
+			table.ParquetCompressionKey:      "snappy",
 			table.ManifestMergeEnabledKey:    "true",
 			table.ManifestMinMergeCountKey:   "1",
 			table.ManifestTargetSizeBytesKey: "1",
@@ -953,6 +1039,7 @@ func (t *TableWritingTestSuite) TestMergeManifests() {
 
 	tblC := t.createTableWithProps(table.Identifier{"default", "merge_manifest_c"},
 		iceberg.Properties{
+			table.ParquetCompressionKey:    "snappy",
 			table.ManifestMinMergeCountKey: "1",
 			"format-version":               strconv.Itoa(t.formatVersion),
 		}, tableSchema())
