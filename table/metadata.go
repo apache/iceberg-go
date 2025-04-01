@@ -18,6 +18,7 @@
 package table
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,6 +43,25 @@ const (
 	addSnapshotAction    = "add-snapshot"
 	addSortOrderAction   = "add-sort-order"
 )
+
+func generateSnapshotID() int64 {
+	var (
+		rndUUID = uuid.New()
+		out     [8]byte
+	)
+
+	for i := range 8 {
+		lhs, rhs := rndUUID[i], rndUUID[i+8]
+		out[i] = lhs ^ rhs
+	}
+
+	snapshotID := int64(binary.LittleEndian.Uint64(out[:]))
+	if snapshotID < 0 {
+		snapshotID = -snapshotID
+	}
+
+	return snapshotID
+}
 
 // Metadata for an iceberg table as specified in the Iceberg spec
 //
@@ -145,7 +165,7 @@ type MetadataBuilder struct {
 	defaultSortOrderID int
 	refs               map[string]SnapshotRef
 
-	// V2 specific
+	// >v1 specific
 	lastSequenceNumber *int64
 }
 
@@ -181,28 +201,23 @@ func MetadataBuilderFromBase(metadata Metadata) (*MetadataBuilder, error) {
 	b.snapshotList = metadata.Snapshots()
 	b.sortOrderList = metadata.SortOrders()
 	b.defaultSortOrderID = metadata.DefaultSortOrder()
+	if metadata.Version() > 1 {
+		seq := metadata.LastSequenceNumber()
+		b.lastSequenceNumber = &seq
+	}
 
 	if metadata.CurrentSnapshot() != nil {
 		b.currentSnapshotID = &metadata.CurrentSnapshot().SnapshotID
 	}
 
-	b.refs = make(map[string]SnapshotRef)
-	for name, ref := range metadata.Refs() {
-		b.refs[name] = ref
-	}
-
-	b.snapshotLog = make([]SnapshotLogEntry, 0)
-	for log := range metadata.SnapshotLogs() {
-		b.snapshotLog = append(b.snapshotLog, log)
-	}
-
-	b.metadataLog = make([]MetadataLogEntry, 0)
-	for entry := range metadata.PreviousFiles() {
-		b.metadataLog = append(b.metadataLog, entry)
-	}
+	b.refs = maps.Collect(metadata.Refs())
+	b.snapshotLog = slices.Collect(metadata.SnapshotLogs())
+	b.metadataLog = slices.Collect(metadata.PreviousFiles())
 
 	return b, nil
 }
+
+func (b *MetadataBuilder) HasChanges() bool { return len(b.updates) > 0 }
 
 func (b *MetadataBuilder) CurrentSpec() iceberg.PartitionSpec {
 	return b.specs[b.defaultSpecID]
@@ -210,6 +225,39 @@ func (b *MetadataBuilder) CurrentSpec() iceberg.PartitionSpec {
 
 func (b *MetadataBuilder) CurrentSchema() *iceberg.Schema {
 	s, _ := b.GetSchemaByID(b.currentSchemaID)
+
+	return s
+}
+
+func (b *MetadataBuilder) LastUpdatedMS() int64 { return b.lastUpdatedMS }
+
+func (b *MetadataBuilder) nextSequenceNumber() int64 {
+	if b.formatVersion > 1 {
+		if b.lastSequenceNumber == nil {
+			return 0
+		}
+
+		return *b.lastSequenceNumber + 1
+	}
+
+	return 0
+}
+
+func (b *MetadataBuilder) newSnapshotID() int64 {
+	snapshotID := generateSnapshotID()
+	for slices.ContainsFunc(b.snapshotList, func(s Snapshot) bool { return s.SnapshotID == snapshotID }) {
+		snapshotID = generateSnapshotID()
+	}
+
+	return snapshotID
+}
+
+func (b *MetadataBuilder) currentSnapshot() *Snapshot {
+	if b.currentSnapshotID == nil {
+		return nil
+	}
+
+	s, _ := b.SnapshotByID(*b.currentSnapshotID)
 
 	return s
 }
@@ -439,7 +487,11 @@ func (b *MetadataBuilder) SetProperties(props iceberg.Properties) (*MetadataBuil
 	}
 
 	b.updates = append(b.updates, NewSetPropertiesUpdate(props))
-	maps.Copy(b.props, props)
+	if b.props == nil {
+		b.props = props
+	} else {
+		maps.Copy(b.props, props)
+	}
 
 	return b, nil
 }
@@ -516,14 +568,23 @@ func (b *MetadataBuilder) SetSnapshotRef(
 		return nil, fmt.Errorf("can't set snapshot ref %s to unknown snapshot %d: %w", name, snapshotID, err)
 	}
 
+	isAddedSnapshot := slices.ContainsFunc(b.updates, func(u Update) bool {
+		return u.Action() == addSnapshotAction && u.(*addSnapshotUpdate).Snapshot.SnapshotID == snapshotID
+	})
+	if isAddedSnapshot {
+		b.lastUpdatedMS = snapshot.TimestampMs
+	}
+
 	if name == MainBranch {
 		b.updates = append(b.updates, NewSetSnapshotRefUpdate(name, snapshotID, refType, maxRefAgeMs, maxSnapshotAgeMs, minSnapshotsToKeep))
 		b.currentSnapshotID = &snapshotID
+		if !isAddedSnapshot {
+			b.lastUpdatedMS = time.Now().Local().UnixMilli()
+		}
 		b.snapshotLog = append(b.snapshotLog, SnapshotLogEntry{
 			SnapshotID:  snapshotID,
-			TimestampMs: snapshot.TimestampMs,
+			TimestampMs: b.lastUpdatedMS,
 		})
-		b.lastUpdatedMS = time.Now().Local().UnixMilli()
 	}
 
 	if slices.ContainsFunc(b.updates, func(u Update) bool {
@@ -546,6 +607,12 @@ func (b *MetadataBuilder) SetUUID(uuid uuid.UUID) (*MetadataBuilder, error) {
 	b.uuid = uuid
 
 	return b, nil
+}
+
+func (b *MetadataBuilder) SetLastUpdatedMS() *MetadataBuilder {
+	b.lastUpdatedMS = time.Now().UnixMilli()
+
+	return b
 }
 
 func (b *MetadataBuilder) buildCommonMetadata() *commonMetadata {
@@ -624,6 +691,22 @@ func (b *MetadataBuilder) NameMapping() iceberg.NameMapping {
 	}
 
 	return nil
+}
+
+func (b *MetadataBuilder) TrimMetadataLogs(maxEntries int) *MetadataBuilder {
+	if len(b.metadataLog) <= maxEntries {
+		return b
+	}
+
+	b.metadataLog = b.metadataLog[len(b.metadataLog)-maxEntries:]
+
+	return b
+}
+
+func (b *MetadataBuilder) AppendMetadataLog(entry MetadataLogEntry) *MetadataBuilder {
+	b.metadataLog = append(b.metadataLog, entry)
+
+	return b
 }
 
 func (b *MetadataBuilder) Build() (Metadata, error) {
@@ -745,14 +828,14 @@ type commonMetadata struct {
 	Specs              []iceberg.PartitionSpec `json:"partition-specs"`
 	DefaultSpecID      int                     `json:"default-spec-id"`
 	LastPartitionID    *int                    `json:"last-partition-id,omitempty"`
-	Props              iceberg.Properties      `json:"properties"`
+	Props              iceberg.Properties      `json:"properties,omitempty"`
 	SnapshotList       []Snapshot              `json:"snapshots,omitempty"`
 	CurrentSnapshotID  *int64                  `json:"current-snapshot-id,omitempty"`
-	SnapshotLog        []SnapshotLogEntry      `json:"snapshot-log"`
-	MetadataLog        []MetadataLogEntry      `json:"metadata-log"`
+	SnapshotLog        []SnapshotLogEntry      `json:"snapshot-log,omitempty"`
+	MetadataLog        []MetadataLogEntry      `json:"metadata-log,omitempty"`
 	SortOrderList      []SortOrder             `json:"sort-orders"`
 	DefaultSortOrderID int                     `json:"default-sort-order-id"`
-	SnapshotRefs       map[string]SnapshotRef  `json:"refs"`
+	SnapshotRefs       map[string]SnapshotRef  `json:"refs,omitempty"`
 }
 
 func (c *commonMetadata) Ref() SnapshotRef                     { return c.SnapshotRefs[MainBranch] }
@@ -1011,8 +1094,8 @@ func (c *commonMetadata) NameMapping() iceberg.NameMapping {
 func (c *commonMetadata) Version() int { return c.FormatVersion }
 
 type metadataV1 struct {
-	Schema    *iceberg.Schema          `json:"schema"`
-	Partition []iceberg.PartitionField `json:"partition-spec"`
+	Schema    *iceberg.Schema          `json:"schema,omitempty"`
+	Partition []iceberg.PartitionField `json:"partition-spec,omitempty"`
 
 	commonMetadata
 }

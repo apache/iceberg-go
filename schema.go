@@ -61,14 +61,18 @@ func NewSchema(id int, fields ...NestedField) *Schema {
 // fields.
 func NewSchemaWithIdentifiers(id int, identifierIDs []int, fields ...NestedField) *Schema {
 	s := &Schema{ID: id, fields: fields, IdentifierFieldIDs: identifierIDs}
+	s.init()
+
+	return s
+}
+
+func (s *Schema) init() {
 	s.lazyIDToParent = sync.OnceValues(func() (map[int]int, error) {
 		return IndexParents(s)
 	})
 	s.lazyNameMapping = sync.OnceValue(func() NameMapping {
 		return createMappingFromSchema(s)
 	})
-
-	return s
 }
 
 func (s *Schema) String() string {
@@ -195,11 +199,7 @@ func (s *Schema) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	if s.lazyIDToParent == nil {
-		s.lazyIDToParent = sync.OnceValues(func() (map[int]int, error) {
-			return IndexParents(s)
-		})
-	}
+	s.init()
 
 	s.fields = aux.Fields
 	if s.IdentifierFieldIDs == nil {

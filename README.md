@@ -41,7 +41,7 @@ $ cd iceberg-go/cmd/iceberg && go build .
 | Filesystem Type      | Supported |
 | :------------------: | :-------: |
 | S3                   |    X      |
-| Google Cloud Storage |           |
+| Google Cloud Storage |    X      |
 | Azure Blob Storage   |           |
 | Local Filesystem     |    X      |
 
@@ -65,11 +65,12 @@ $ cd iceberg-go/cmd/iceberg && go build .
 | Load Table               |  X   |      |          |  X   |  X  |
 | List Tables              |  X   |      |          |  X   |  X  |
 | Create Table             |  X   |      |          |  X   |  X  |
-| Update Current Snapshot  |      |      |          |      |     |
-| Create New Snapshot      |      |      |          |      |     |
+| Register Table           |  X   |      |          |  X   |     |
+| Update Current Snapshot  |  X   |      |          |      |     |
+| Create New Snapshot      |  X   |      |          |      |     |
 | Rename Table             |  X   |      |          |  X   |  X  |
 | Drop Table               |  X   |      |          |  X   |  X  |
-| Alter Table              |      |      |          |      |  X  |
+| Alter Table              |  X   |      |          |      |  X  |
 | Set Table Properties     |  X   |      |          |      |  X  |
 | Create Namespace         |  X   |      |          |  X   |  X  |
 | Check Namespace Exists   |  X   |      |          |  X   |  X  |
@@ -81,9 +82,23 @@ $ cd iceberg-go/cmd/iceberg && go build .
 
 ### Read/Write Data Support
 
-* No intrinsic support for writing data yet.
-* Plan to add [Apache Arrow](https://pkg.go.dev/github.com/apache/arrow-go/) support eventually.
 * Data can currently be read as an Arrow Table or as a stream of Arrow record batches.
+
+#### Supported Write Operations
+
+As long as the FileSystem is supported and the Catalog supports altering
+the table, the following tracks the current write support:
+
+| Operation         |Supported|
+|:-----------------:|:-------:|
+| Append Stream     |         |
+| Append Data Files |   X     |
+| Rewrite Files     |         |
+| Rewrite manifests |         |
+| Overwrite Files   |         |
+| Write Pos Delete  |         |
+| Write Eq Delete   |         |
+| Row Delta         |         |
 
 
 ### CLI Usage
@@ -95,8 +110,8 @@ You can pass the catalog URI with `--uri` argument.
 Example:
 You can start the Iceberg REST API docker image which runs on default in port `8181`
 ```
-docker pull tabulario/iceberg-rest:latest
-docker run -p 8181:8181 tabulario/iceberg-rest:latest
+docker pull apache/iceberg-rest-fixture:latest
+docker run -p 8181:8181 apache/iceberg-rest-fixture:latest
 ```
 and run the `iceberg` CLI pointing to the REST API server.
 

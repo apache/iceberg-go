@@ -19,11 +19,16 @@ package table
 
 import (
 	"context"
+	"fmt"
+	"iter"
 	"runtime"
 	"slices"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/io"
+	tblutils "github.com/apache/iceberg-go/table/internal"
+	"golang.org/x/sync/errgroup"
 )
 
 type Identifier = []string
@@ -55,6 +60,7 @@ func (t Table) Schema() *iceberg.Schema              { return t.metadata.Current
 func (t Table) Spec() iceberg.PartitionSpec          { return t.metadata.PartitionSpec() }
 func (t Table) SortOrder() SortOrder                 { return t.metadata.SortOrder() }
 func (t Table) Properties() iceberg.Properties       { return t.metadata.Properties() }
+func (t Table) NameMapping() iceberg.NameMapping     { return t.metadata.NameMapping() }
 func (t Table) Location() string                     { return t.metadata.Location() }
 func (t Table) CurrentSnapshot() *Snapshot           { return t.metadata.CurrentSnapshot() }
 func (t Table) SnapshotByID(id int64) *Snapshot      { return t.metadata.SnapshotByID(id) }
@@ -69,7 +75,145 @@ func (t Table) Schemas() map[int]*iceberg.Schema {
 }
 
 func (t Table) LocationProvider() (LocationProvider, error) {
-	return LoadLocationProvider(t.metadataLocation, t.metadata.Properties())
+	return LoadLocationProvider(t.metadata.Location(), t.metadata.Properties())
+}
+
+func (t Table) NewTransaction() *Transaction {
+	meta, _ := MetadataBuilderFromBase(t.metadata)
+
+	return &Transaction{
+		tbl:  &t,
+		meta: meta,
+		reqs: []Requirement{},
+	}
+}
+
+func (t Table) AllManifests() iter.Seq2[iceberg.ManifestFile, error] {
+	type list = tblutils.Enumerated[[]iceberg.ManifestFile]
+	g := errgroup.Group{}
+
+	n := len(t.metadata.Snapshots())
+	ch := make(chan list, n)
+	for i, sn := range t.metadata.Snapshots() {
+		g.Go(func() error {
+			manifests, err := sn.Manifests(t.fs)
+			if err != nil {
+				return err
+			}
+
+			ch <- list{Index: i, Value: manifests, Last: i == n-1}
+
+			return nil
+		})
+	}
+
+	errch := make(chan error, 1)
+	go func() {
+		defer close(errch)
+		defer close(ch)
+		if err := g.Wait(); err != nil {
+			errch <- err
+		}
+	}()
+
+	results := tblutils.MakeSequencedChan(uint(n), ch,
+		func(left, right *list) bool {
+			switch {
+			case left.Index < 0:
+				return true
+			case right.Index < 0:
+				return false
+			default:
+				return left.Index < right.Index
+			}
+		}, func(prev, next *list) bool {
+			if prev.Index < 0 {
+				return next.Index == 0
+			}
+
+			return next.Index == prev.Index+1
+		}, list{Index: -1})
+
+	return func(yield func(iceberg.ManifestFile, error) bool) {
+		defer func() {
+			// drain channels if we exited early
+			go func() {
+				for range results {
+				}
+				for range errch {
+				}
+			}()
+		}()
+
+		for {
+			select {
+			case err := <-errch:
+				if err != nil {
+					yield(nil, err)
+
+					return
+				}
+			case next, ok := <-results:
+				for _, mf := range next.Value {
+					if !yield(mf, nil) {
+						return
+					}
+				}
+
+				if next.Last || !ok {
+					return
+				}
+			}
+		}
+	}
+}
+
+func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requirement) (*Table, error) {
+	newMeta, newLoc, err := t.cat.CommitTable(ctx, &t, reqs, updates)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := deleteOldMetadata(t.fs, t.metadata, newMeta); err != nil {
+		return nil, err
+	}
+
+	return New(t.identifier, newMeta, newLoc, t.fs, t.cat), nil
+}
+
+func getFiles(it iter.Seq[MetadataLogEntry]) iter.Seq[string] {
+	return func(yield func(string) bool) {
+		next, stop := iter.Pull(it)
+		defer stop()
+		for {
+			entry, ok := next()
+			if !ok {
+				return
+			}
+			if !yield(entry.MetadataFile) {
+				return
+			}
+		}
+	}
+}
+
+func deleteOldMetadata(fs io.IO, baseMeta, newMeta Metadata) error {
+	deleteAfterCommit := newMeta.Properties().GetBool(MetadataDeleteAfterCommitEnabledKey,
+		MetadataDeleteAfterCommitEnabledDefault)
+
+	if deleteAfterCommit {
+		removedPrevious := slices.Collect(getFiles(baseMeta.PreviousFiles()))
+		currentMetadata := slices.Collect(getFiles(newMeta.PreviousFiles()))
+		toRemove := internal.Difference(removedPrevious, currentMetadata)
+
+		for _, file := range toRemove {
+			if err := fs.Remove(file); err != nil {
+				return fmt.Errorf("failed to delete old metadata file %s: %w", file, err)
+			}
+		}
+	}
+
+	return nil
 }
 
 type ScanOption func(*Scan)
@@ -164,11 +308,11 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 	return s
 }
 
-func New(ident Identifier, meta Metadata, location string, fs io.IO, cat CatalogIO) *Table {
+func New(ident Identifier, meta Metadata, metadataLocation string, fs io.IO, cat CatalogIO) *Table {
 	return &Table{
 		identifier:       ident,
 		metadata:         meta,
-		metadataLocation: location,
+		metadataLocation: metadataLocation,
 		fs:               fs,
 		cat:              cat,
 	}

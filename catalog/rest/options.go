@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"net/url"
 
+	"github.com/apache/iceberg-go"
 	"github.com/aws/aws-sdk-go-v2/aws"
 )
 
@@ -100,6 +101,12 @@ func WithScope(scope string) Option {
 	}
 }
 
+func WithAdditionalProps(props iceberg.Properties) Option {
+	return func(o *options) {
+		o.additionalProps = props
+	}
+}
+
 type options struct {
 	awsConfig         aws.Config
 	tlsConfig         *tls.Config
@@ -113,4 +120,6 @@ type options struct {
 	prefix            string
 	authUri           *url.URL
 	scope             string
+
+	additionalProps iceberg.Properties
 }

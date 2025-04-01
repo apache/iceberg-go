@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"iter"
 	"maps"
 	"slices"
 	"strconv"
@@ -306,6 +307,37 @@ func (s Snapshot) Manifests(fio iceio.IO) ([]iceberg.ManifestFile, error) {
 	return nil, nil
 }
 
+func (s Snapshot) dataFiles(fio iceio.IO, fileFilter set[iceberg.ManifestEntryContent]) iter.Seq2[iceberg.DataFile, error] {
+	return func(yield func(iceberg.DataFile, error) bool) {
+		manifests, err := s.Manifests(fio)
+		if err != nil {
+			yield(nil, err)
+
+			return
+		}
+
+		for _, m := range manifests {
+			dataFiles, err := m.FetchEntries(fio, false)
+			if err != nil {
+				yield(nil, err)
+
+				return
+			}
+
+			for _, f := range dataFiles {
+				if fileFilter != nil {
+					if _, ok := fileFilter[f.DataFile().ContentType()]; !ok {
+						continue
+					}
+				}
+				if !yield(f.DataFile(), nil) {
+					return
+				}
+			}
+		}
+	}
+}
+
 type MetadataLogEntry struct {
 	MetadataFile string `json:"metadata-file"`
 	TimestampMs  int64  `json:"timestamp-ms"`
@@ -403,32 +435,7 @@ func (s *SnapshotSummaryCollector) build() iceberg.Properties {
 	return props
 }
 
-func truncateTableSummary(sum Summary, previous iceberg.Properties) Summary {
-	keys := []string{
-		totalDataFilesKey, totalDeleteFilesKey, totalRecordsKey,
-		totalFileSizeKey, totalPosDeletesKey, totalEqDeletesKey,
-	}
-	for _, prop := range keys {
-		sum.Properties[prop] = "0"
-	}
-
-	updateProp := func(prop, prevProp string) {
-		if val := previous.GetInt(prevProp, 0); val > 0 {
-			sum.Properties[prop] = strconv.Itoa(val)
-		}
-	}
-
-	updateProp(deletedDataFilesKey, totalDataFilesKey)
-	updateProp(removedDeleteFilesKey, totalDeleteFilesKey)
-	updateProp(deletedRecordsKey, totalRecordsKey)
-	updateProp(removedFileSizeKey, totalFileSizeKey)
-	updateProp(removedPosDeletesKey, totalPosDeletesKey)
-	updateProp(removedEqDeletesKey, totalEqDeletesKey)
-
-	return sum
-}
-
-func updateSnapshotSummaries(sum Summary, previous iceberg.Properties, truncateFullTable bool) (Summary, error) {
+func updateSnapshotSummaries(sum Summary, previous iceberg.Properties) (Summary, error) {
 	switch sum.Operation {
 	case OpAppend, OpOverwrite, OpDelete:
 	default:
@@ -437,10 +444,6 @@ func updateSnapshotSummaries(sum Summary, previous iceberg.Properties, truncateF
 
 	if sum.Properties == nil {
 		sum.Properties = make(iceberg.Properties)
-	}
-
-	if truncateFullTable && sum.Operation == OpOverwrite && previous != nil {
-		sum = truncateTableSummary(sum, previous)
 	}
 
 	if previous == nil {

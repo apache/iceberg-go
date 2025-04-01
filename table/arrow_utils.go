@@ -20,8 +20,7 @@ package table
 import (
 	"context"
 	"fmt"
-	"maps"
-	"regexp"
+	"iter"
 	"slices"
 	"strconv"
 	"strings"
@@ -31,9 +30,11 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
-	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
+	iceio "github.com/apache/iceberg-go/io"
+	tblutils "github.com/apache/iceberg-go/table/internal"
+	"github.com/pterm/pterm"
 )
 
 // constants to look for as Keys in Arrow field metadata
@@ -524,8 +525,7 @@ func (c convertToArrow) Map(m iceberg.MapType, keyResult, valResult arrow.Field)
 	keyField := c.Field(m.KeyField(), keyResult)
 	valField := c.Field(m.ValueField(), valResult)
 
-	return arrow.Field{Type: arrow.MapOfWithMetadata(keyField.Type, keyField.Metadata,
-		valField.Type, valField.Metadata)}
+	return arrow.Field{Type: arrow.MapOfFields(keyField, valField)}
 }
 
 func (c convertToArrow) Primitive(iceberg.PrimitiveType) arrow.Field { panic("shouldn't be called") }
@@ -749,6 +749,9 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 
 			panic(fmt.Errorf("unsupported schema projection from %s to %s",
 				vals.DataType(), targetType))
+		default:
+			return retOrPanic(compute.CastArray(a.ctx, vals,
+				compute.SafeCastOptions(targetType)))
 		}
 	}
 	vals.Retain()
@@ -900,67 +903,145 @@ func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schem
 	return out, nil
 }
 
+type schemaCompatVisitor struct {
+	provided *iceberg.Schema
+
+	errorData pterm.TableData
+}
+
+func checkSchemaCompat(requested, provided *iceberg.Schema) error {
+	sc := &schemaCompatVisitor{
+		provided:  provided,
+		errorData: pterm.TableData{{"", "Table Field", "Requested Field"}},
+	}
+
+	_, compat := iceberg.PreOrderVisit(requested, sc)
+
+	return compat
+}
+
+func checkArrowSchemaCompat(requested *iceberg.Schema, provided *arrow.Schema, downcastNanoToMicro bool) error {
+	mapping := requested.NameMapping()
+	providedSchema, err := ArrowSchemaToIceberg(provided, downcastNanoToMicro, mapping)
+	if err != nil {
+		return err
+	}
+
+	return checkSchemaCompat(requested, providedSchema)
+}
+
+func (sc *schemaCompatVisitor) isFieldCompat(lhs iceberg.NestedField) bool {
+	rhs, ok := sc.provided.FindFieldByID(lhs.ID)
+	if !ok {
+		if lhs.Required {
+			sc.errorData = append(sc.errorData,
+				[]string{"❌", lhs.String(), "missing"})
+
+			return false
+		}
+		sc.errorData = append(sc.errorData,
+			[]string{"✅", lhs.String(), "missing"})
+
+		return true
+	}
+
+	if lhs.Required && !rhs.Required {
+		sc.errorData = append(sc.errorData,
+			[]string{"❌", lhs.String(), rhs.String()})
+
+		return false
+	}
+
+	if lhs.Type.Equals(rhs.Type) {
+		sc.errorData = append(sc.errorData,
+			[]string{"✅", lhs.String(), rhs.String()})
+
+		return true
+	}
+
+	// we only check that parent node is also of the same type
+	// we check the type of the child nodes as we traverse them later
+	switch lhs.Type.(type) {
+	case *iceberg.StructType:
+		if rhs, ok := rhs.Type.(*iceberg.StructType); ok {
+			sc.errorData = append(sc.errorData,
+				[]string{"✅", lhs.String(), rhs.String()})
+
+			return true
+		}
+	case *iceberg.ListType:
+		if rhs, ok := rhs.Type.(*iceberg.ListType); ok {
+			sc.errorData = append(sc.errorData,
+				[]string{"✅", lhs.String(), rhs.String()})
+
+			return true
+		}
+	case *iceberg.MapType:
+		if rhs, ok := rhs.Type.(*iceberg.MapType); ok {
+			sc.errorData = append(sc.errorData,
+				[]string{"✅", lhs.String(), rhs.String()})
+
+			return true
+		}
+	}
+
+	if _, err := iceberg.PromoteType(rhs.Type, lhs.Type); err != nil {
+		sc.errorData = append(sc.errorData,
+			[]string{"❌", lhs.String(), rhs.String()})
+
+		return false
+	}
+
+	sc.errorData = append(sc.errorData,
+		[]string{"✅", lhs.String(), rhs.String()})
+
+	return true
+}
+
+func (sc *schemaCompatVisitor) Schema(s *iceberg.Schema, v func() bool) bool {
+	if !v() {
+		pterm.DisableColor()
+		tbl := pterm.DefaultTable.WithHasHeader(true).WithData(sc.errorData)
+		tbl.Render()
+		txt, _ := tbl.Srender()
+		pterm.EnableColor()
+		panic("mismatch in fields:\n" + txt)
+	}
+
+	return true
+}
+
+func (sc *schemaCompatVisitor) Struct(st iceberg.StructType, v []func() bool) bool {
+	out := true
+	for _, res := range v {
+		out = res() && out
+	}
+
+	return out
+}
+
+func (sc *schemaCompatVisitor) Field(n iceberg.NestedField, v func() bool) bool {
+	return sc.isFieldCompat(n) && v()
+}
+
+func (sc *schemaCompatVisitor) List(l iceberg.ListType, v func() bool) bool {
+	return sc.isFieldCompat(l.ElementField()) && v()
+}
+
+func (sc *schemaCompatVisitor) Map(m iceberg.MapType, vk, vv func() bool) bool {
+	return sc.isFieldCompat(m.KeyField()) && sc.isFieldCompat(m.ValueField()) && vk() && vv()
+}
+
+func (sc *schemaCompatVisitor) Primitive(p iceberg.PrimitiveType) bool {
+	return true
+}
+
 func must[T any](v T, err error) T {
 	if err != nil {
 		panic(err)
 	}
 
 	return v
-}
-
-type metricModeType string
-
-const (
-	metricModeTruncate metricModeType = "truncate"
-	metricModeNone     metricModeType = "none"
-	metricModeCounts   metricModeType = "counts"
-	metricModeFull     metricModeType = "full"
-)
-
-type metricsMode struct {
-	typ metricModeType
-	len int
-}
-
-var truncationExpr = regexp.MustCompile(`^truncate\((\d+)\)$`)
-
-func matchMetricsMode(mode string) (metricsMode, error) {
-	sanitized := strings.ToLower(strings.TrimSpace(mode))
-	if strings.HasPrefix(sanitized, string(metricModeTruncate)) {
-		m := truncationExpr.FindStringSubmatch(sanitized)
-		if len(m) < 2 {
-			return metricsMode{}, fmt.Errorf("malformed truncate metrics mode: %s", mode)
-		}
-
-		truncLen, err := strconv.Atoi(m[1])
-		if err != nil {
-			return metricsMode{}, fmt.Errorf("malformed truncate metrics mode: %s", mode)
-		}
-
-		if truncLen <= 0 {
-			return metricsMode{}, fmt.Errorf("invalid truncate length: %d", truncLen)
-		}
-
-		return metricsMode{typ: metricModeTruncate, len: truncLen}, nil
-	}
-
-	switch sanitized {
-	case string(metricModeNone):
-		return metricsMode{typ: metricModeNone}, nil
-	case string(metricModeCounts):
-		return metricsMode{typ: metricModeCounts}, nil
-	case string(metricModeFull):
-		return metricsMode{typ: metricModeFull}, nil
-	default:
-		return metricsMode{}, fmt.Errorf("unsupported metrics mode: %s", mode)
-	}
-}
-
-type statisticsCollector struct {
-	fieldID    int
-	icebergTyp iceberg.PrimitiveType
-	mode       metricsMode
-	colName    string
 }
 
 type arrowStatsCollector struct {
@@ -970,12 +1051,12 @@ type arrowStatsCollector struct {
 	defaultMode string
 }
 
-func (a *arrowStatsCollector) Schema(_ *iceberg.Schema, results func() []statisticsCollector) []statisticsCollector {
+func (a *arrowStatsCollector) Schema(_ *iceberg.Schema, results func() []tblutils.StatisticsCollector) []tblutils.StatisticsCollector {
 	return results()
 }
 
-func (a *arrowStatsCollector) Struct(_ iceberg.StructType, results []func() []statisticsCollector) []statisticsCollector {
-	result := make([]statisticsCollector, 0, len(results))
+func (a *arrowStatsCollector) Struct(_ iceberg.StructType, results []func() []tblutils.StatisticsCollector) []tblutils.StatisticsCollector {
+	result := make([]tblutils.StatisticsCollector, 0, len(results))
 	for _, res := range results {
 		result = append(result, res()...)
 	}
@@ -983,19 +1064,19 @@ func (a *arrowStatsCollector) Struct(_ iceberg.StructType, results []func() []st
 	return result
 }
 
-func (a *arrowStatsCollector) Field(field iceberg.NestedField, fieldRes func() []statisticsCollector) []statisticsCollector {
+func (a *arrowStatsCollector) Field(field iceberg.NestedField, fieldRes func() []tblutils.StatisticsCollector) []tblutils.StatisticsCollector {
 	a.fieldID = field.ID
 
 	return fieldRes()
 }
 
-func (a *arrowStatsCollector) List(list iceberg.ListType, elemResult func() []statisticsCollector) []statisticsCollector {
+func (a *arrowStatsCollector) List(list iceberg.ListType, elemResult func() []tblutils.StatisticsCollector) []tblutils.StatisticsCollector {
 	a.fieldID = list.ElementID
 
 	return elemResult()
 }
 
-func (a *arrowStatsCollector) Map(m iceberg.MapType, keyResult func() []statisticsCollector, valResult func() []statisticsCollector) []statisticsCollector {
+func (a *arrowStatsCollector) Map(m iceberg.MapType, keyResult, valResult func() []tblutils.StatisticsCollector) []tblutils.StatisticsCollector {
 	a.fieldID = m.KeyID
 	keyRes := keyResult()
 
@@ -1005,20 +1086,20 @@ func (a *arrowStatsCollector) Map(m iceberg.MapType, keyResult func() []statisti
 	return append(keyRes, valRes...)
 }
 
-func (a *arrowStatsCollector) Primitive(dt iceberg.PrimitiveType) []statisticsCollector {
+func (a *arrowStatsCollector) Primitive(dt iceberg.PrimitiveType) []tblutils.StatisticsCollector {
 	colName, ok := a.schema.FindColumnName(a.fieldID)
 	if !ok {
-		return []statisticsCollector{}
+		return []tblutils.StatisticsCollector{}
 	}
 
-	metMode, err := matchMetricsMode(a.defaultMode)
+	metMode, err := tblutils.MatchMetricsMode(a.defaultMode)
 	if err != nil {
 		panic(err)
 	}
 
 	colMode, ok := a.props[MetricsModeColumnConfPrefix+"."+colName]
 	if ok {
-		metMode, err = matchMetricsMode(colMode)
+		metMode, err = tblutils.MatchMetricsMode(colMode)
 		if err != nil {
 			panic(err)
 		}
@@ -1028,26 +1109,26 @@ func (a *arrowStatsCollector) Primitive(dt iceberg.PrimitiveType) []statisticsCo
 	case iceberg.StringType:
 	case iceberg.BinaryType:
 	default:
-		if metMode.typ == metricModeTruncate {
-			metMode = metricsMode{typ: metricModeFull, len: 0}
+		if metMode.Typ == tblutils.MetricModeTruncate {
+			metMode = tblutils.MetricsMode{Typ: tblutils.MetricModeFull, Len: 0}
 		}
 	}
 
 	isNested := strings.Contains(colName, ".")
-	if isNested && (metMode.typ == metricModeTruncate || metMode.typ == metricModeFull) {
-		metMode = metricsMode{typ: metricModeCounts}
+	if isNested && (metMode.Typ == tblutils.MetricModeTruncate || metMode.Typ == tblutils.MetricModeFull) {
+		metMode = tblutils.MetricsMode{Typ: tblutils.MetricModeCounts}
 	}
 
-	return []statisticsCollector{{
-		fieldID:    a.fieldID,
-		icebergTyp: dt,
-		colName:    colName,
-		mode:       metMode,
+	return []tblutils.StatisticsCollector{{
+		FieldID:    a.fieldID,
+		IcebergTyp: dt,
+		ColName:    colName,
+		Mode:       metMode,
 	}}
 }
 
-func computeStatsPlan(sc *iceberg.Schema, props iceberg.Properties) (map[int]statisticsCollector, error) {
-	result := make(map[int]statisticsCollector)
+func computeStatsPlan(sc *iceberg.Schema, props iceberg.Properties) (map[int]tblutils.StatisticsCollector, error) {
+	result := make(map[int]tblutils.StatisticsCollector)
 
 	visitor := &arrowStatsCollector{
 		schema: sc, props: props,
@@ -1060,195 +1141,54 @@ func computeStatsPlan(sc *iceberg.Schema, props iceberg.Properties) (map[int]sta
 	}
 
 	for _, entry := range collectors {
-		result[entry.fieldID] = entry
+		result[entry.FieldID] = entry
 	}
 
 	return result, nil
 }
 
-type id2ParquetPath struct {
-	fieldID int
-	path    string
-}
+func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilder, paths iter.Seq[string]) iter.Seq2[iceberg.DataFile, error] {
+	return func(yield func(iceberg.DataFile, error) bool) {
+		defer func() {
+			if r := recover(); r != nil {
+				switch e := r.(type) {
+				case string:
+					yield(nil, fmt.Errorf("error encountered during parquet file conversion: %s", e))
+				case error:
+					yield(nil, fmt.Errorf("error encountered during parquet file conversion: %w", e))
+				}
+			}
+		}()
 
-type id2ParquetPathVisitor struct {
-	fieldID int
-	path    []string
-}
+		currentSchema, currentSpec := meta.CurrentSchema(), meta.CurrentSpec()
 
-func (v *id2ParquetPathVisitor) Schema(_ *iceberg.Schema, res func() []id2ParquetPath) []id2ParquetPath {
-	return res()
-}
+		for filePath := range paths {
+			format := tblutils.FormatFromFileName(filePath)
+			rdr := must(format.Open(ctx, fileIO, filePath))
+			defer rdr.Close()
 
-func (v *id2ParquetPathVisitor) Struct(_ iceberg.StructType, results []func() []id2ParquetPath) []id2ParquetPath {
-	result := make([]id2ParquetPath, 0, len(results))
-	for _, res := range results {
-		result = append(result, res()...)
-	}
+			arrSchema := must(rdr.Schema())
 
-	return result
-}
+			if hasIDs := must(VisitArrowSchema(arrSchema, hasIDs{})); hasIDs {
+				yield(nil, fmt.Errorf("%w: cannot add file %s because it has field-ids. add-files only supports the addition of files without field_ids",
+					iceberg.ErrNotImplemented, filePath))
 
-func (v *id2ParquetPathVisitor) Field(field iceberg.NestedField, res func() []id2ParquetPath) []id2ParquetPath {
-	v.fieldID = field.ID
-	v.path = append(v.path, field.Name)
-	result := res()
-	v.path = v.path[:len(v.path)-1]
+				return
+			}
 
-	return result
-}
+			if err := checkArrowSchemaCompat(currentSchema, arrSchema, false); err != nil {
+				yield(nil, err)
 
-func (v *id2ParquetPathVisitor) List(listType iceberg.ListType, elemResult func() []id2ParquetPath) []id2ParquetPath {
-	v.fieldID = listType.ElementID
-	v.path = append(v.path, "list")
-	result := elemResult()
-	v.path = v.path[:len(v.path)-1]
+				return
+			}
 
-	return result
-}
+			statistics := format.DataFileStatsFromMeta(rdr.Metadata(), must(computeStatsPlan(currentSchema, meta.props)),
+				must(format.PathToIDMapping(currentSchema)))
 
-func (v *id2ParquetPathVisitor) Map(m iceberg.MapType, keyResult func() []id2ParquetPath, valResult func() []id2ParquetPath) []id2ParquetPath {
-	v.fieldID = m.KeyID
-	v.path = append(v.path, "key_value")
-	keyRes := keyResult()
-	v.path = v.path[:len(v.path)-1]
-
-	v.fieldID = m.ValueID
-	v.path = append(v.path, "key_value")
-	valRes := valResult()
-	v.path = v.path[:len(v.path)-1]
-
-	return append(keyRes, valRes...)
-}
-
-func (v *id2ParquetPathVisitor) Primitive(iceberg.PrimitiveType) []id2ParquetPath {
-	return []id2ParquetPath{{fieldID: v.fieldID, path: strings.Join(v.path, ".")}}
-}
-
-func parquetPathToIDMapping(sc *iceberg.Schema) (map[string]int, error) {
-	result := make(map[string]int)
-
-	paths, err := iceberg.PreOrderVisit(sc, &id2ParquetPathVisitor{})
-	if err != nil {
-		return nil, err
-	}
-
-	for _, entry := range paths {
-		result[entry.path] = entry.fieldID
-	}
-
-	return result, nil
-}
-
-type dataFileStatistics struct {
-	recordCount     int64
-	colSizes        map[int]int64
-	valueCounts     map[int]int64
-	nullValueCounts map[int]int64
-	nanValueCounts  map[int]int64
-	// column aggregates
-	splitOffsets []int64
-}
-
-func (d *dataFileStatistics) toDataFile(spec iceberg.PartitionSpec, path string, format iceberg.FileFormat, filesize int64) (iceberg.DataFile, error) {
-	bldr, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData,
-		path, iceberg.ParquetFile, nil, d.recordCount, filesize)
-	if err != nil {
-		return nil, err
-	}
-
-	bldr.ColumnSizes(d.colSizes)
-	bldr.ValueCounts(d.valueCounts)
-	bldr.NullValueCounts(d.nullValueCounts)
-	bldr.NaNValueCounts(d.nanValueCounts)
-	bldr.SplitOffsets(d.splitOffsets)
-
-	return bldr.Build(), nil
-}
-
-func dataFileStatsFromParquetMetadata(pqmeta *metadata.FileMetaData, statsCols map[int]statisticsCollector, colMapping map[string]int) *dataFileStatistics {
-	var (
-		colSizes        = make(map[int]int64)
-		valueCounts     = make(map[int]int64)
-		splitOffsets    = make([]int64, 0)
-		nullValueCounts = make(map[int]int64)
-		nanValueCounts  = make(map[int]int64)
-		invalidateCol   = make(map[int]struct{})
-	)
-
-	for rg := range pqmeta.NumRowGroups() {
-		// reference: https://github.com/apache/iceberg-python/blob/main/pyiceberg/io/pyarrow.py#L2285
-		rowGroup := pqmeta.RowGroup(rg)
-		colChunk, err := rowGroup.ColumnChunk(0)
-		if err != nil {
-			panic(err)
+			df := statistics.ToDataFile(currentSchema, currentSpec, filePath, iceberg.ParquetFile, rdr.SourceFileSize())
+			if !yield(df, nil) {
+				return
+			}
 		}
-
-		dataOffset, dictOffset := colChunk.DataPageOffset(), colChunk.DictionaryPageOffset()
-		if colChunk.HasDictionaryPage() && dictOffset < dataOffset {
-			splitOffsets = append(splitOffsets, dictOffset)
-		} else {
-			splitOffsets = append(splitOffsets, dataOffset)
-		}
-
-		for pos := range rowGroup.NumColumns() {
-			colChunk, err = rowGroup.ColumnChunk(pos)
-			if err != nil {
-				panic(err)
-			}
-
-			fieldID := colMapping[colChunk.PathInSchema().String()]
-			statsCol := statsCols[fieldID]
-			if statsCol.mode.typ == metricModeNone {
-				continue
-			}
-
-			colSizes[fieldID] += colChunk.TotalCompressedSize()
-			valueCounts[fieldID] += colChunk.NumValues()
-			set, err := colChunk.StatsSet()
-			if err != nil {
-				panic(err)
-			}
-
-			if !set {
-				invalidateCol[fieldID] = struct{}{}
-
-				continue
-			}
-
-			stats, err := colChunk.Statistics()
-			if err != nil {
-				invalidateCol[fieldID] = struct{}{}
-
-				continue
-			}
-
-			if stats.HasNullCount() {
-				nullValueCounts[fieldID] += stats.NullCount()
-			}
-
-			if statsCol.mode.typ == metricModeCounts {
-				continue
-			}
-
-			// TODO stats aggregator!
-		}
-
-	}
-
-	slices.Sort(splitOffsets)
-	maps.DeleteFunc(nullValueCounts, func(fieldID int, _ int64) bool {
-		_, ok := invalidateCol[fieldID]
-
-		return ok
-	})
-
-	return &dataFileStatistics{
-		recordCount:     pqmeta.GetNumRows(),
-		colSizes:        colSizes,
-		valueCounts:     valueCounts,
-		nullValueCounts: nullValueCounts,
-		nanValueCounts:  nanValueCounts,
-		splitOffsets:    splitOffsets,
 	}
 }

@@ -35,6 +35,10 @@ github:
 
   protected_branches:
     main:
+      required_status_checks:
+        # strict means "Require branches to be up to date before merging".
+        strict: true
+
       required_pull_request_reviews:
         required_approving_review_count: 1
 

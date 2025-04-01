@@ -22,6 +22,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
+	"regexp"
+	"strconv"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
@@ -60,4 +63,63 @@ func WriteMetadata(ctx context.Context, metadata table.Metadata, loc string, pro
 	defer out.Close()
 
 	return json.NewEncoder(out).Encode(metadata)
+}
+
+func UpdateTableMetadata(base table.Metadata, updates []table.Update, metadataLoc string) (table.Metadata, error) {
+	bldr, err := table.MetadataBuilderFromBase(base)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, update := range updates {
+		if err := update.Apply(bldr); err != nil {
+			return nil, err
+		}
+	}
+
+	if bldr.HasChanges() {
+		if metadataLoc != "" {
+			maxMetadataLogEntries := max(1,
+				base.Properties().GetInt(
+					table.MetadataPreviousVersionsMaxKey, table.MetadataPreviousVersionsMaxDefault))
+
+			bldr.TrimMetadataLogs(maxMetadataLogEntries + 1).
+				AppendMetadataLog(table.MetadataLogEntry{
+					MetadataFile: metadataLoc,
+					TimestampMs:  base.LastUpdatedMillis(),
+				})
+		}
+		if base.LastUpdatedMillis() == bldr.LastUpdatedMS() {
+			bldr.SetLastUpdatedMS()
+		}
+	}
+
+	return bldr.Build()
+}
+
+// (\d+)            -> version number
+// -                -> separator
+// ([\w-]{36})      -> UUID (36 characters, including hyphens)
+// (?:\.\w+)?       -> optional codec name
+// \.metadata\.json -> file extension
+var tableMetadataFileNameRegex = regexp.MustCompile(`^(\d+)-([\w-]{36})(?:\.\w+)?\.metadata\.json`)
+
+func ParseMetadataVersion(location string) int {
+	fileName := path.Base(location)
+	matches := tableMetadataFileNameRegex.FindStringSubmatch(fileName)
+
+	if len(matches) != 3 {
+		return -1
+	}
+
+	if _, err := uuid.Parse(matches[2]); err != nil {
+		return -1
+	}
+
+	v, err := strconv.Atoi(matches[1])
+	if err != nil {
+		return -1
+	}
+
+	return v
 }

@@ -206,8 +206,54 @@ func TestSerializeMetadataV1(t *testing.T) {
 	data, err := json.Marshal(&meta)
 	require.NoError(t, err)
 
-	assert.JSONEq(t, `{"location": "s3://bucket/test/location", "table-uuid": "d20125c8-7284-442c-9aea-15fee620737c", "last-updated-ms": 1602638573874, "last-column-id": 3, "schemas": [{"type": "struct", "fields": [{"id": 1, "name": "x", "type": "long", "required": true}, {"id": 2, "name": "y", "type": "long", "required": true, "doc": "comment"}, {"id": 3, "name": "z", "type": "long", "required": true}], "schema-id": 0, "identifier-field-ids": []}], "current-schema-id": 0, "partition-specs": [{"spec-id": 0, "fields": [{"source-id": 1, "field-id": 1000, "transform": "identity", "name": "x"}]}], "default-spec-id": 0, "last-partition-id": 1000, "properties": {}, "snapshots": [{"snapshot-id": 1925, "sequence-number": 0, "timestamp-ms": 1602638573822}], "snapshot-log": [], "metadata-log": [], "sort-orders": [{"order-id": 0, "fields": []}], "default-sort-order-id": 0, "refs": {}, "format-version": 1, "schema": {"type": "struct", "fields": [{"id": 1, "name": "x", "type": "long", "required": true}, {"id": 2, "name": "y", "type": "long", "required": true, "doc": "comment"}, {"id": 3, "name": "z", "type": "long", "required": true}], "schema-id": 0, "identifier-field-ids": []}, "partition-spec": [{"name": "x", "transform": "identity", "source-id": 1, "field-id": 1000}]}`,
-		string(data))
+	assert.JSONEq(t, `{
+		"location": "s3://bucket/test/location", 
+		"table-uuid": "d20125c8-7284-442c-9aea-15fee620737c", 
+		"last-updated-ms": 1602638573874, 
+		"last-column-id": 3, 
+		"schemas": [
+			{
+				"type": "struct", 
+				"fields": [
+					{"id": 1, "name": "x", "type": "long", "required": true}, 
+					{"id": 2, "name": "y", "type": "long", "required": true, "doc": "comment"}, 
+					{"id": 3, "name": "z", "type": "long", "required": true}
+				], 
+				"schema-id": 0, 
+				"identifier-field-ids": []
+			}
+		], 
+		"current-schema-id": 0, 
+		"partition-specs": [
+			{
+				"spec-id": 0, 
+				"fields": [
+					{"source-id": 1, "field-id": 1000, "transform": "identity", "name": "x"}
+				]
+			}
+		], 
+		"default-spec-id": 0, 
+		"last-partition-id": 1000, 
+		"snapshots": [
+			{"snapshot-id": 1925, "sequence-number": 0, "timestamp-ms": 1602638573822}
+		], 
+		"sort-orders": [{"order-id": 0, "fields": []}], 
+		"default-sort-order-id": 0,
+		"format-version": 1, 
+		"schema": {
+			"type": "struct", 
+			"fields": [
+				{"id": 1, "name": "x", "type": "long", "required": true}, 
+				{"id": 2, "name": "y", "type": "long", "required": true, "doc": "comment"}, 
+				{"id": 3, "name": "z", "type": "long", "required": true}
+			], 
+			"schema-id": 0, 
+			"identifier-field-ids": []
+		}, 
+		"partition-spec": [
+			{"name": "x", "transform": "identity", "source-id": 1, "field-id": 1000}
+		]
+	}`, string(data))
 }
 
 func TestSerializeMetadataV2(t *testing.T) {
@@ -614,4 +660,92 @@ func TestNewMetadataV2Format(t *testing.T) {
 	}
 
 	assert.Truef(t, expected.Equals(actual), "expected: %s\ngot: %s", expected, actual)
+}
+
+func TestMetadataV1Serialize(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "int", Type: iceberg.PrimitiveTypes.Int32})
+	toserialize := &metadataV1{
+		commonMetadata: commonMetadata{
+			FormatVersion:      1,
+			UUID:               uuid.MustParse("dd93fa46-a1a7-43bb-8748-6cc7eff107a3"),
+			Loc:                "s3a://warehouse/iceberg/iceberg-test-2.db/test-table-2",
+			LastUpdatedMS:      1742412491193,
+			LastColumnId:       1,
+			SchemaList:         []*iceberg.Schema{sc},
+			CurrentSchemaID:    0,
+			Specs:              []iceberg.PartitionSpec{*iceberg.UnpartitionedSpec},
+			DefaultSpecID:      0,
+			SortOrderList:      []SortOrder{UnsortedSortOrder},
+			DefaultSortOrderID: 0,
+		},
+	}
+
+	data, err := json.Marshal(toserialize)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{		
+		"format-version":1,
+		"table-uuid":"dd93fa46-a1a7-43bb-8748-6cc7eff107a3",
+		"location":"s3a://warehouse/iceberg/iceberg-test-2.db/test-table-2",
+		"last-updated-ms":1742412491193,
+		"last-column-id":1,
+		"schemas": [
+			{
+				"type":"struct",
+				"fields":[{"type":"int","id":1,"name":"int","required":false}],
+				"schema-id":0,
+				"identifier-field-ids":[]
+			}
+		],
+		"current-schema-id":0,
+		"partition-specs":[{"spec-id":0,"fields":[]}],
+		"default-spec-id":0,
+		"sort-orders":[{"order-id":0,"fields":[]}],
+		"default-sort-order-id":0
+	}`, string(data))
+}
+
+func TestMetadataV2Serialize(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "int", Type: iceberg.PrimitiveTypes.Int32})
+	toserialize := &metadataV2{
+		LastSeqNum: 1,
+		commonMetadata: commonMetadata{
+			FormatVersion:      1,
+			UUID:               uuid.MustParse("dd93fa46-a1a7-43bb-8748-6cc7eff107a3"),
+			Loc:                "s3a://warehouse/iceberg/iceberg-test-2.db/test-table-2",
+			LastUpdatedMS:      1742412491193,
+			LastColumnId:       1,
+			SchemaList:         []*iceberg.Schema{sc},
+			CurrentSchemaID:    0,
+			Specs:              []iceberg.PartitionSpec{*iceberg.UnpartitionedSpec},
+			DefaultSpecID:      0,
+			SortOrderList:      []SortOrder{UnsortedSortOrder},
+			DefaultSortOrderID: 0,
+		},
+	}
+
+	data, err := json.Marshal(toserialize)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{
+		"last-sequence-number": 1,
+		"format-version":1,
+		"table-uuid":"dd93fa46-a1a7-43bb-8748-6cc7eff107a3",
+		"location":"s3a://warehouse/iceberg/iceberg-test-2.db/test-table-2",
+		"last-updated-ms":1742412491193,
+		"last-column-id":1,
+		"schemas": [
+			{
+				"type":"struct",
+				"fields":[{"type":"int","id":1,"name":"int","required":false}],
+				"schema-id":0,
+				"identifier-field-ids":[]
+			}
+		],
+		"current-schema-id":0,
+		"partition-specs":[{"spec-id":0,"fields":[]}],
+		"default-spec-id":0,
+		"sort-orders":[{"order-id":0,"fields":[]}],
+		"default-sort-order-id":0
+	}`, string(data))
 }

@@ -78,13 +78,17 @@ var (
 func newMapSchema(name string, keySchema, valueSchema avro.Schema, keyFieldID, valueFieldID int) avro.Schema {
 	return avro.NewArraySchema(
 		Must(avro.NewRecordSchema(name, "", []*avro.Field{
-			Must(avro.NewField("key", keySchema, avro.WithProps(map[string]any{"field-id": keyFieldID}))),
-			Must(avro.NewField("value", valueSchema, avro.WithProps(map[string]any{"field-id": valueFieldID}))),
+			Must(avro.NewField("key", keySchema, WithFieldID(keyFieldID))),
+			Must(avro.NewField("value", valueSchema, WithFieldID(valueFieldID))),
 		})), avro.WithProps(map[string]any{"logicalType": "map"}))
 }
 
 func WithFieldID(id int) avro.SchemaOption {
 	return avro.WithProps(map[string]any{"field-id": id})
+}
+
+func WithElementID(id int) avro.SchemaOption {
+	return avro.WithProps(map[string]any{"element-id": id})
 }
 
 func init() {
@@ -136,7 +140,8 @@ func init() {
 			WithFieldID(506))),
 		Must(avro.NewField("partitions",
 			NullableSchema(
-				avro.NewArraySchema(AvroSchemaCache.Get("field_summary"))),
+				avro.NewArraySchema(AvroSchemaCache.Get("field_summary"),
+					WithElementID(508))),
 			avro.WithDoc("Partition field summaries"),
 			WithFieldID(507))),
 		Must(avro.NewField("added_rows_count",
@@ -199,7 +204,8 @@ func init() {
 			WithFieldID(506))),
 		Must(avro.NewField("partitions",
 			NullableSchema(
-				avro.NewArraySchema(AvroSchemaCache.Get("field_summary"))),
+				avro.NewArraySchema(AvroSchemaCache.Get("field_summary"),
+					WithElementID(508))),
 			avro.WithDoc("Partition field summaries"),
 			WithFieldID(507))),
 		Must(avro.NewField("added_rows_count",
@@ -219,7 +225,7 @@ func init() {
 			WithFieldID(519))),
 	})))
 
-	AvroSchemaCache.Add("data_file_v1", Must(avro.NewRecordSchema("data_file", "", []*avro.Field{
+	AvroSchemaCache.Add("data_file_v1", Must(avro.NewRecordSchema("r2", "", []*avro.Field{
 		Must(avro.NewField("file_path",
 			StringSchema,
 			avro.WithDoc("Location URI with FS scheme"),
@@ -271,7 +277,7 @@ func init() {
 			WithFieldID(131))),
 		Must(avro.NewField("split_offsets",
 			NullableSchema(avro.NewArraySchema(LongSchema,
-				WithFieldID(133))),
+				WithElementID(133))),
 			avro.WithDoc("splitable offsets"),
 			WithFieldID(132))),
 		Must(avro.NewField("sort_order_id",
@@ -280,7 +286,7 @@ func init() {
 			WithFieldID(140))),
 	})))
 
-	AvroSchemaCache.Add("data_file_v2", Must(avro.NewRecordSchema("data_file", "", []*avro.Field{
+	AvroSchemaCache.Add("data_file_v2", Must(avro.NewRecordSchema("r2", "", []*avro.Field{
 		Must(avro.NewField("content", IntSchema,
 			avro.WithDoc("Content type"),
 			avro.WithDefault(0),
@@ -331,12 +337,12 @@ func init() {
 			WithFieldID(131))),
 		Must(avro.NewField("split_offsets",
 			NullableSchema(avro.NewArraySchema(LongSchema,
-				WithFieldID(133))),
+				WithElementID(133))),
 			avro.WithDoc("splitable offsets"),
 			WithFieldID(132))),
 		Must(avro.NewField("equality_ids",
 			NullableSchema(avro.NewArraySchema(LongSchema,
-				WithFieldID(136))),
+				WithElementID(136))),
 			avro.WithDoc("field ids used to determine row equality in equality delete files"),
 			WithFieldID(135))),
 		Must(avro.NewField("sort_order_id",
@@ -370,7 +376,7 @@ func newDataFileSchema(partitionType avro.Schema, version int) (avro.Schema, err
 		return nil, err
 	}
 
-	return avro.NewRecordSchema("data_file", "",
+	return avro.NewRecordSchema("r2", "",
 		append(schema.(*avro.RecordSchema).Fields(), partField))
 }
 

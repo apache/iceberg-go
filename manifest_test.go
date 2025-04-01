@@ -19,6 +19,7 @@ package iceberg
 
 import (
 	"bytes"
+	"io"
 	"testing"
 	"time"
 
@@ -31,7 +32,7 @@ var (
 	snapshotID            int64 = 9182715666859759686
 	addedRows             int64 = 237993
 	manifestFileRecordsV1       = []ManifestFile{
-		NewManifestV1Builder("/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro",
+		NewManifestFile(1, "/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro",
 			7989, 0, snapshotID).
 			AddedFiles(3).
 			ExistingFiles(0).
@@ -47,8 +48,9 @@ var (
 	}
 
 	manifestFileRecordsV2 = []ManifestFile{
-		NewManifestV2Builder("/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro",
-			7989, 0, ManifestContentDeletes, snapshotID).
+		NewManifestFile(2, "/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro",
+			7989, 0, snapshotID).
+			Content(ManifestContentDeletes).
 			SequenceNum(3, 3).
 			AddedFiles(3).
 			ExistingFiles(0).
@@ -438,8 +440,9 @@ func (m *ManifestTestSuite) SetupSuite() {
 
 func (m *ManifestTestSuite) TestManifestEntriesV1() {
 	var mockfs internal.MockFS
-	manifest := manifestFileV1{
-		Path: manifestFileRecordsV1[0].FilePath(),
+	manifest := manifestFile{
+		version: 1,
+		Path:    manifestFileRecordsV1[0].FilePath(),
 	}
 
 	mockfs.Test(m.T())
@@ -640,8 +643,9 @@ func (m *ManifestTestSuite) TestReadManifestListV2() {
 
 func (m *ManifestTestSuite) TestManifestEntriesV2() {
 	var mockfs internal.MockFS
-	manifest := manifestFileV2{
-		Path: manifestFileRecordsV2[0].FilePath(),
+	manifest := manifestFile{
+		version: 2,
+		Path:    manifestFileRecordsV2[0].FilePath(),
 	}
 
 	mockfs.Test(m.T())
@@ -862,6 +866,16 @@ func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 	m.Assert().Equal([]int64{4}, data.SplitOffsets())
 	m.Assert().Equal([]int{1, 1}, data.EqualityFieldIDs())
 	m.Assert().Equal(0, *data.SortOrderID())
+}
+
+func (m *ManifestTestSuite) TestManifestWriterMeta() {
+	sch := NewSchema(0, NestedField{ID: 0, Name: "test01", Type: StringType{}})
+	w, err := NewManifestWriter(2, io.Discard, *UnpartitionedSpec, sch, 1)
+	m.Require().NoError(err)
+	md, err := w.meta()
+	m.Require().NoError(err)
+	m.NotEqual("null", string(md["partition-spec"]))
+	m.Equal("[]", string(md["partition-spec"]))
 }
 
 func TestManifests(t *testing.T) {

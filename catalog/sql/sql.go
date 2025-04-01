@@ -24,7 +24,7 @@ import (
 	"fmt"
 	"iter"
 	"maps"
-	"path"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -265,11 +265,11 @@ func (c *Catalog) getDefaultWarehouseLocation(ctx context.Context, nsname, table
 	}
 
 	if dblocation := dbprops.Get("location", ""); dblocation != "" {
-		return path.Join(dblocation, tableName), nil
+		return url.JoinPath(dblocation, tableName)
 	}
 
 	if warehousepath := c.props.Get("warehouse", ""); warehousepath != "" {
-		return warehousepath + "/" + path.Join(nsname+".db", tableName), nil
+		return url.JoinPath(warehousepath, nsname+".db", tableName)
 	}
 
 	return "", errors.New("no default path set, please specify a location when creating a table")
@@ -344,8 +344,119 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 	return c.LoadTable(ctx, ident, cfg.Properties)
 }
 
+func (c *Catalog) updateAndStageTable(ctx context.Context, current *table.Table, ident table.Identifier, reqs []table.Requirement, updates []table.Update) (*table.StagedTable, error) {
+	var (
+		baseMeta    table.Metadata
+		metadataLoc string
+	)
+
+	if current != nil {
+		for _, r := range reqs {
+			if err := r.Validate(current.Metadata()); err != nil {
+				return nil, err
+			}
+		}
+
+		baseMeta = current.Metadata()
+		metadataLoc = current.MetadataLocation()
+	} else {
+		var err error
+		baseMeta, err = table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, "", nil)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	updated, err := internal.UpdateTableMetadata(baseMeta, updates, metadataLoc)
+	if err != nil {
+		return nil, err
+	}
+
+	provider, err := table.LoadLocationProvider(updated.Location(), updated.Properties())
+	if err != nil {
+		return nil, err
+	}
+
+	newVersion := internal.ParseMetadataVersion(metadataLoc) + 1
+	newLocation, err := provider.NewTableMetadataFileLocation(newVersion)
+	if err != nil {
+		return nil, err
+	}
+
+	fs, err := io.LoadFS(ctx, updated.Properties(), newLocation)
+	if err != nil {
+		return nil, err
+	}
+
+	return &table.StagedTable{Table: table.New(ident, updated, newLocation, fs, c)}, nil
+}
+
 func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
-	panic("commit table not implemented for SQLCatalog")
+	ns := catalog.NamespaceFromIdent(tbl.Identifier())
+	tblName := catalog.TableNameFromIdent(tbl.Identifier())
+
+	current, err := c.LoadTable(ctx, tbl.Identifier(), nil)
+	if err != nil && !errors.Is(err, catalog.ErrNoSuchTable) {
+		return nil, "", err
+	}
+
+	staged, err := c.updateAndStageTable(ctx, current, tbl.Identifier(), reqs, updates)
+	if err != nil {
+		return nil, "", err
+	}
+
+	if current != nil && staged.Metadata().Equals(current.Metadata()) {
+		// no changes, do nothing
+		return current.Metadata(), current.MetadataLocation(), nil
+	}
+
+	if err := internal.WriteMetadata(ctx, staged.Metadata(), staged.MetadataLocation(), staged.Properties()); err != nil {
+		return nil, "", err
+	}
+
+	err = withWriteTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
+		if current != nil {
+			res, err := tx.NewUpdate().Model(&sqlIcebergTable{
+				CatalogName:              c.name,
+				TableNamespace:           strings.Join(ns, "."),
+				TableName:                tblName,
+				MetadataLocation:         sql.NullString{Valid: true, String: staged.MetadataLocation()},
+				PreviousMetadataLocation: sql.NullString{Valid: true, String: current.MetadataLocation()},
+			}).WherePK().Where("metadata_location = ?", current.MetadataLocation()).
+				Exec(ctx)
+			if err != nil {
+				return fmt.Errorf("error updating table information: %w", err)
+			}
+
+			n, err := res.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("error updating table information: %w", err)
+			}
+
+			if n == 0 {
+				return fmt.Errorf("table has been updated by another process: %s.%s", strings.Join(ns, "."), tblName)
+			}
+
+			return nil
+		}
+
+		_, err := tx.NewInsert().Model(&sqlIcebergTable{
+			CatalogName:      c.name,
+			TableNamespace:   strings.Join(ns, "."),
+			TableName:        tblName,
+			MetadataLocation: sql.NullString{Valid: true, String: staged.MetadataLocation()},
+		}).Exec(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to create table: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+
+	return staged.Metadata(), staged.MetadataLocation(), nil
 }
 
 func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, props iceberg.Properties) (*table.Table, error) {

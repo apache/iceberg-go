@@ -275,13 +275,13 @@ func NewSetSnapshotRefUpdate(
 
 func (u *setSnapshotRefUpdate) Apply(builder *MetadataBuilder) error {
 	opts := []setSnapshotRefOption{}
-	if u.MaxRefAgeMs >= 0 {
+	if u.MaxRefAgeMs > 0 {
 		opts = append(opts, WithMaxRefAgeMs(u.MaxRefAgeMs))
 	}
-	if u.MaxSnapshotAgeMs >= 0 {
+	if u.MaxSnapshotAgeMs > 0 {
 		opts = append(opts, WithMaxSnapshotAgeMs(u.MaxSnapshotAgeMs))
 	}
-	if u.MinSnapshotsToKeep >= 0 {
+	if u.MinSnapshotsToKeep > 0 {
 		opts = append(opts, WithMinSnapshotsToKeep(u.MinSnapshotsToKeep))
 	}
 

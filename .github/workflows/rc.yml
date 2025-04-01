@@ -134,6 +134,7 @@ jobs:
           gh release create ${GITHUB_REF_NAME} \
             --prerelease \
             --title "Apache Iceberg Go ${GITHUB_REF_NAME}" \
+            --generate-notes \
             --verify-tag \
             apache-iceberg-go-*.tar.gz \
             apache-iceberg-go-*.tar.gz.sha*

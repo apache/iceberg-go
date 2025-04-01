@@ -31,12 +31,13 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
-func constructTestTable(t *testing.T, writeStats bool) (*metadata.FileMetaData, Metadata) {
+func constructTestTable(t *testing.T, writeStats []string) (*metadata.FileMetaData, Metadata) {
 	tableMeta, err := ParseMetadataString(`{
 		"format-version": 2,
         "location": "s3://bucket/test/location",
@@ -141,9 +142,19 @@ func constructTestTable(t *testing.T, writeStats bool) (*metadata.FileMetaData, 
 	rec := bldr.NewRecord()
 	defer rec.Release()
 
+	var opts []parquet.WriterProperty
+	if len(writeStats) == 0 {
+		opts = append(opts, parquet.WithStats(true))
+	} else {
+		opts = append(opts, parquet.WithStats(false))
+		for _, stat := range writeStats {
+			opts = append(opts, parquet.WithStatsFor(stat, true))
+		}
+	}
+
 	var buf bytes.Buffer
 	wr, err := pqarrow.NewFileWriter(arrowSchema, &buf,
-		parquet.NewWriterProperties(parquet.WithStats(writeStats)),
+		parquet.NewWriterProperties(opts...),
 		pqarrow.DefaultWriterProps())
 	require.NoError(t, err)
 
@@ -161,8 +172,10 @@ type FileStatsMetricsSuite struct {
 	suite.Suite
 }
 
-func (suite *FileStatsMetricsSuite) getDataFile(meta iceberg.Properties) iceberg.DataFile {
-	fileMeta, tableMeta := constructTestTable(suite.T(), true)
+func (suite *FileStatsMetricsSuite) getDataFile(meta iceberg.Properties, writeStats []string) iceberg.DataFile {
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+
+	fileMeta, tableMeta := constructTestTable(suite.T(), writeStats)
 	require.NotNil(suite.T(), tableMeta)
 	require.NotNil(suite.T(), fileMeta)
 
@@ -178,24 +191,22 @@ func (suite *FileStatsMetricsSuite) getDataFile(meta iceberg.Properties) iceberg
 
 	collector, err := computeStatsPlan(schema, tableMeta.Properties())
 	suite.Require().NoError(err)
-	mapping, err := parquetPathToIDMapping(schema)
+	mapping, err := format.PathToIDMapping(schema)
 	suite.Require().NoError(err)
 
-	stats := dataFileStatsFromParquetMetadata(fileMeta, collector, mapping)
-	df, err := stats.toDataFile(tableMeta.PartitionSpec(), "fake-path.parquet",
+	stats := format.DataFileStatsFromMeta(fileMeta, collector, mapping)
+
+	return stats.ToDataFile(tableMeta.CurrentSchema(), tableMeta.PartitionSpec(), "fake-path.parquet",
 		iceberg.ParquetFile, fileMeta.GetSourceFileSize())
-	suite.Require().NoError(err)
-
-	return df
 }
 
 func (suite *FileStatsMetricsSuite) TestRecordCount() {
-	df := suite.getDataFile(nil)
+	df := suite.getDataFile(nil, nil)
 	suite.EqualValues(int64(4), df.Count())
 }
 
 func (suite *FileStatsMetricsSuite) TestValueCounts() {
-	df := suite.getDataFile(nil)
+	df := suite.getDataFile(nil, nil)
 	suite.Len(df.ValueCounts(), 7)
 	suite.EqualValues(4, df.ValueCounts()[1])
 	suite.EqualValues(4, df.ValueCounts()[2])
@@ -207,7 +218,7 @@ func (suite *FileStatsMetricsSuite) TestValueCounts() {
 }
 
 func (suite *FileStatsMetricsSuite) TestColumnSizes() {
-	df := suite.getDataFile(nil)
+	df := suite.getDataFile(nil, nil)
 	suite.Len(df.ColumnSizes(), 7)
 	suite.Greater(df.ColumnSizes()[1], int64(0))
 	suite.Greater(df.ColumnSizes()[2], int64(0))
@@ -217,13 +228,13 @@ func (suite *FileStatsMetricsSuite) TestColumnSizes() {
 }
 
 func (suite *FileStatsMetricsSuite) TestOffsets() {
-	df := suite.getDataFile(nil)
+	df := suite.getDataFile(nil, nil)
 	suite.Len(df.SplitOffsets(), 1)
 	suite.EqualValues(4, df.SplitOffsets()[0])
 }
 
 func (suite *FileStatsMetricsSuite) TestNullValueCounts() {
-	df := suite.getDataFile(nil)
+	df := suite.getDataFile(nil, nil)
 	suite.Len(df.NullValueCounts(), 7)
 	suite.EqualValues(1, df.NullValueCounts()[1])
 	suite.EqualValues(0, df.NullValueCounts()[2])
@@ -236,8 +247,23 @@ func (suite *FileStatsMetricsSuite) TestNullValueCounts() {
 	// pqarrow doesn't currently write the NaN counts
 }
 
+func (suite *FileStatsMetricsSuite) TestBounds() {
+	df := suite.getDataFile(nil, nil)
+	suite.Len(df.LowerBoundValues(), 2)
+	suite.Equal([]byte("aaaaaaaaaaaaaaaa"), df.LowerBoundValues()[1])
+	lb, err := iceberg.LiteralFromBytes(iceberg.PrimitiveTypes.Float32, df.LowerBoundValues()[2])
+	suite.Require().NoError(err)
+	suite.Equal(float32(1.69), lb.(iceberg.Float32Literal).Value())
+
+	suite.Len(df.UpperBoundValues(), 2)
+	suite.Equal([]byte("zzzzzzzzzzzzzzz{"), df.UpperBoundValues()[1])
+	ub, err := iceberg.LiteralFromBytes(iceberg.PrimitiveTypes.Float32, df.UpperBoundValues()[2])
+	suite.Require().NoError(err)
+	suite.Equal(float32(100), ub.(iceberg.Float32Literal).Value())
+}
+
 func (suite *FileStatsMetricsSuite) TestMetricsModeNone() {
-	df := suite.getDataFile(iceberg.Properties{"write.metadata.metrics.default": "none"})
+	df := suite.getDataFile(iceberg.Properties{"write.metadata.metrics.default": "none"}, nil)
 	suite.Len(df.ValueCounts(), 0)
 	suite.Len(df.ColumnSizes(), 0)
 	suite.Len(df.NullValueCounts(), 0)
@@ -247,7 +273,7 @@ func (suite *FileStatsMetricsSuite) TestMetricsModeNone() {
 }
 
 func (suite *FileStatsMetricsSuite) TestMetricsModeCounts() {
-	df := suite.getDataFile(iceberg.Properties{"write.metadata.metrics.default": "counts"})
+	df := suite.getDataFile(iceberg.Properties{"write.metadata.metrics.default": "counts"}, nil)
 	suite.Len(df.ValueCounts(), 7)
 	suite.Len(df.NullValueCounts(), 7)
 	suite.Len(df.NaNValueCounts(), 0)
@@ -256,68 +282,77 @@ func (suite *FileStatsMetricsSuite) TestMetricsModeCounts() {
 }
 
 func (suite *FileStatsMetricsSuite) TestMetricsModeFull() {
-	df := suite.getDataFile(iceberg.Properties{"write.metadata.metrics.default": "full"})
+	df := suite.getDataFile(iceberg.Properties{"write.metadata.metrics.default": "full"}, nil)
 	suite.Len(df.ValueCounts(), 7)
 	suite.Len(df.NullValueCounts(), 7)
 	suite.Len(df.NaNValueCounts(), 0)
-	// bound values not yet implemented
+	suite.Len(df.LowerBoundValues(), 2)
+	suite.Equal([]byte("aaaaaaaaaaaaaaaaaaaa"), df.LowerBoundValues()[1])
+	lb, err := iceberg.LiteralFromBytes(iceberg.PrimitiveTypes.Float32, df.LowerBoundValues()[2])
+	suite.Require().NoError(err)
+	suite.Equal(float32(1.69), lb.(iceberg.Float32Literal).Value())
+
+	suite.Len(df.UpperBoundValues(), 2)
+	suite.Equal([]byte("zzzzzzzzzzzzzzzzzzzz"), df.UpperBoundValues()[1])
+	ub, err := iceberg.LiteralFromBytes(iceberg.PrimitiveTypes.Float32, df.UpperBoundValues()[2])
+	suite.Require().NoError(err)
+	suite.Equal(float32(100), ub.(iceberg.Float32Literal).Value())
 }
 
 func (suite *FileStatsMetricsSuite) TestMetricsModeNonDefaultTrunc() {
-	df := suite.getDataFile(iceberg.Properties{"write.metadata.metrics.default": "truncate(2)"})
+	df := suite.getDataFile(iceberg.Properties{"write.metadata.metrics.default": "truncate(2)"}, nil)
 	suite.Len(df.ValueCounts(), 7)
 	suite.Len(df.NullValueCounts(), 7)
 	suite.Len(df.NaNValueCounts(), 0)
-	// bound values not yet implemented
+	suite.Len(df.LowerBoundValues(), 2)
+	suite.Equal([]byte("aa"), df.LowerBoundValues()[1])
+	lb, err := iceberg.LiteralFromBytes(iceberg.PrimitiveTypes.Float32, df.LowerBoundValues()[2])
+	suite.Require().NoError(err)
+	suite.Equal(float32(1.69), lb.(iceberg.Float32Literal).Value())
+
+	suite.Len(df.UpperBoundValues(), 2)
+	suite.Equal([]byte("z{"), df.UpperBoundValues()[1])
+	ub, err := iceberg.LiteralFromBytes(iceberg.PrimitiveTypes.Float32, df.UpperBoundValues()[2])
+	suite.Require().NoError(err)
+	suite.Equal(float32(100), ub.(iceberg.Float32Literal).Value())
 }
 
 func (suite *FileStatsMetricsSuite) TestColumnMetricsMode() {
 	df := suite.getDataFile(iceberg.Properties{
 		"write.metadata.metrics.default":        "truncate(2)",
 		"write.metadata.metrics.column.strings": "none",
-	})
+	}, nil)
 
 	suite.Len(df.ValueCounts(), 6)
 	suite.Len(df.NullValueCounts(), 6)
 	suite.Len(df.NaNValueCounts(), 0)
-	// bound values not yet implemented
+
+	suite.Len(df.LowerBoundValues(), 1)
+	lb, err := iceberg.LiteralFromBytes(iceberg.PrimitiveTypes.Float32, df.LowerBoundValues()[2])
+	suite.Require().NoError(err)
+	suite.Equal(float32(1.69), lb.(iceberg.Float32Literal).Value())
+
+	suite.Len(df.UpperBoundValues(), 1)
+	ub, err := iceberg.LiteralFromBytes(iceberg.PrimitiveTypes.Float32, df.UpperBoundValues()[2])
+	suite.Require().NoError(err)
+	suite.Equal(float32(100), ub.(iceberg.Float32Literal).Value())
+}
+
+func (suite *FileStatsMetricsSuite) TestReadMissingStats() {
+	df := suite.getDataFile(nil, []string{"strings"})
+
+	suite.Len(df.NullValueCounts(), 1)
+	suite.Len(df.UpperBoundValues(), 1)
+	suite.Len(df.LowerBoundValues(), 1)
+
+	stringsColIdx := 1
+	suite.Equal("aaaaaaaaaaaaaaaa", string(df.LowerBoundValues()[stringsColIdx]))
+	suite.Equal("zzzzzzzzzzzzzzz{", string(df.UpperBoundValues()[stringsColIdx]))
+	suite.EqualValues(1, df.NullValueCounts()[stringsColIdx])
 }
 
 func TestFileMetrics(t *testing.T) {
 	suite.Run(t, new(FileStatsMetricsSuite))
-}
-
-func TestMetricsModePairs(t *testing.T) {
-	tests := []struct {
-		str      string
-		expected metricsMode
-	}{
-		{"none", metricsMode{typ: metricModeNone}},
-		{"nOnE", metricsMode{typ: metricModeNone}},
-		{"counts", metricsMode{typ: metricModeCounts}},
-		{"Counts", metricsMode{typ: metricModeCounts}},
-		{"full", metricsMode{typ: metricModeFull}},
-		{"FuLl", metricsMode{typ: metricModeFull}},
-		{" FuLl", metricsMode{typ: metricModeFull}},
-		{"truncate(16)", metricsMode{typ: metricModeTruncate, len: 16}},
-		{"trUncatE(16)", metricsMode{typ: metricModeTruncate, len: 16}},
-		{"trUncatE(7)", metricsMode{typ: metricModeTruncate, len: 7}},
-		{"trUncatE(07)", metricsMode{typ: metricModeTruncate, len: 7}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.str, func(t *testing.T) {
-			mode, err := matchMetricsMode(tt.str)
-			require.NoError(t, err)
-			assert.Equal(t, tt.expected, mode)
-		})
-	}
-
-	_, err := matchMetricsMode("truncatE(-7)")
-	assert.ErrorContains(t, err, "malformed truncate metrics mode: truncatE(-7)")
-
-	_, err = matchMetricsMode("truncatE(0)")
-	assert.ErrorContains(t, err, "invalid truncate length: 0")
 }
 
 var tableSchemaNested = iceberg.NewSchemaWithIdentifiers(1,
@@ -385,13 +420,13 @@ func TestStatsTypes(t *testing.T) {
 	require.NoError(t, err)
 
 	// field ids should be sorted
-	assert.True(t, slices.IsSortedFunc(statsCols, func(a, b statisticsCollector) int {
-		return cmp.Compare(a.fieldID, b.fieldID)
+	assert.True(t, slices.IsSortedFunc(statsCols, func(a, b internal.StatisticsCollector) int {
+		return cmp.Compare(a.FieldID, b.FieldID)
 	}))
 
 	actual := make([]iceberg.Type, len(statsCols))
 	for i, col := range statsCols {
-		actual[i] = col.icebergTyp
+		actual[i] = col.IcebergTyp
 	}
 
 	assert.Equal(t, []iceberg.Type{

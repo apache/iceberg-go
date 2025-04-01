@@ -475,6 +475,30 @@ func (s *ScannerSuite) TestNestedColumns() {
 	s.EqualValues(5, results.NumRows())
 }
 
+func (s *ScannerSuite) TestIsInFilterTable() {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(s.T(), 0)
+
+	ident := catalog.ToIdentifier("default", "test_uuid_and_fixed_unpartitioned")
+
+	tbl, err := s.cat.LoadTable(s.ctx, ident, s.props)
+	s.Require().NoError(err)
+
+	ctx := compute.WithAllocator(s.ctx, mem)
+	results, err := tbl.Scan(table.WithRowFilter(
+		iceberg.NewNot(iceberg.IsIn(iceberg.Reference("uuid_col"),
+			"102cb62f-e6f8-4eb0-9973-d9b012ff0967",
+			"639cccce-c9d2-494a-a78c-278ab234f024"))),
+		table.WithSelectedFields("uuid_col")).ToArrowTable(ctx)
+	s.Require().NoError(err)
+	defer results.Release()
+
+	s.EqualValues(3, results.NumRows())
+	s.Equal([]string{"ec33e4b2-a834-4cc3-8c4a-a1d3bfc2f226",
+		"c1b0d8e0-0b0e-4b1e-9b0a-0e0b0d0c0a0b",
+		"923dae77-83d6-47cd-b4b0-d383e64ee57e"}, getStrValues(results.Column(0)))
+}
+
 func (s *ScannerSuite) TestUnpartitionedUUIDTable() {
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	defer mem.AssertSize(s.T(), 0)
