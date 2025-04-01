@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1089,6 +1090,20 @@ func (t *TableWritingTestSuite) TestMergeManifests() {
 	manifestList, err := tblA.CurrentSnapshot().Manifests(tblA.FS())
 	t.Require().NoError(err)
 	t.Len(manifestList, 1)
+
+	entries, err := manifestList[0].FetchEntries(tblA.FS(), false)
+	t.Require().NoError(err)
+	t.Len(entries, 3)
+
+	// entries should match the snapshot ID they were added in
+	snapshotList := tblA.Metadata().Snapshots()
+	slices.Reverse(snapshotList)
+	for i, entry := range entries {
+		t.Equal(snapshotList[i].SnapshotID, entry.SnapshotID())
+		if t.formatVersion > 1 {
+			t.EqualValues(3-i, entry.SequenceNum())
+		}
+	}
 
 	manifestList, err = tblB.CurrentSnapshot().Manifests(tblB.FS())
 	t.Require().NoError(err)
