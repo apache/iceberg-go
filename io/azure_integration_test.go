@@ -53,7 +53,7 @@ type AzureBlobIOTestSuite struct {
 func (s *AzureBlobIOTestSuite) SetupTest() {
 	s.ctx = context.Background()
 
-	s.Require().NoError(createContainerIfNotExist(containerName))
+	s.Require().NoError(s.createContainerIfNotExist(containerName))
 }
 
 func (s *AzureBlobIOTestSuite) TestAzureBlobWarehouseKey() {
@@ -126,7 +126,7 @@ func (s *AzureBlobIOTestSuite) TestAzuriteWarehouseConnectionString() {
 	s.Require().NotNil(tbl)
 }
 
-func createContainerIfNotExist(containerName string) error {
+func (s *AzureBlobIOTestSuite) createContainerIfNotExist(containerName string) error {
 	svcURL, err := azureblob.NewServiceURL(&azureblob.ServiceURLOptions{
 		AccountName:   accountName,
 		Protocol:      protocol,
@@ -146,7 +146,7 @@ func createContainerIfNotExist(containerName string) error {
 		return err
 	}
 
-	_, err = client.CreateContainer(context.Background(), containerName, nil)
+	_, err = client.CreateContainer(s.ctx, containerName, nil)
 	if err != nil && !bloberror.HasCode(err, bloberror.ContainerAlreadyExists) {
 		return err
 	}
