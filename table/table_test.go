@@ -953,6 +953,9 @@ func tableSchema() *iceberg.Schema {
 		iceberg.NestedField{ID: 12, Name: "uuid", Type: iceberg.PrimitiveTypes.UUID},
 		iceberg.NestedField{ID: 13, Name: "binary", Type: iceberg.PrimitiveTypes.Binary},
 		iceberg.NestedField{ID: 14, Name: "fixed", Type: iceberg.FixedTypeOf(16)},
+		iceberg.NestedField{ID: 15, Name: "small_dec", Type: iceberg.DecimalTypeOf(8, 2)},
+		iceberg.NestedField{ID: 16, Name: "med_dec", Type: iceberg.DecimalTypeOf(16, 2)},
+		iceberg.NestedField{ID: 17, Name: "large_dec", Type: iceberg.DecimalTypeOf(24, 2)},
 	)
 }
 
@@ -978,7 +981,10 @@ func arrowTableWithNull() arrow.Table {
 				"date": "2023-01-01",
 				"uuid": "00000000-0000-0000-0000-000000000000",
 				"binary": "AQ==",
-				"fixed": "AAAAAAAAAAAAAAAAAAAAAA=="
+				"fixed": "AAAAAAAAAAAAAAAAAAAAAA==",
+				"small_dec": "123456.78",
+				"med_dec": "12345678901234.56",
+				"large_dec": "1234567890123456789012.34"
 			},
 			{
 				"bool": null,
@@ -994,7 +1000,10 @@ func arrowTableWithNull() arrow.Table {
 				"date": null,
 				"uuid": null,
 				"binary": null,
-				"fixed": null
+				"fixed": null,
+				"small_dec": null,
+				"med_dec": null,
+				"large_dec": null
 			},
 			{
 				"bool": true,
@@ -1010,7 +1019,10 @@ func arrowTableWithNull() arrow.Table {
 				"date": "2023-03-01",
 				"uuid": "11111111-1111-1111-1111-111111111111",
 				"binary": "Eg==",
-				"fixed": "EREREREREREREREREREREQ=="
+				"fixed": "EREREREREREREREREREREQ==",
+				"small_dec": "876543.21",
+				"med_dec": "65432109876543.21",
+				"large_dec": "4321098765432109876543.21"
 			}
 		 ]`,
 	})
