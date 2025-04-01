@@ -18,10 +18,9 @@
 package glue
 
 import (
+	"github.com/apache/iceberg-go"
 	"github.com/aws/aws-sdk-go-v2/aws"
 )
-
-type AwsProperties map[string]string
 
 type Option func(*options)
 
@@ -32,13 +31,13 @@ func WithAwsConfig(cfg aws.Config) Option {
 	}
 }
 
-func WithAwsProperties(props AwsProperties) Option {
+func WithProperties(props iceberg.Properties) Option {
 	return func(o *options) {
-		o.awsProperties = props
+		o.properties = props
 	}
 }
 
 type options struct {
-	awsConfig     aws.Config
-	awsProperties AwsProperties
+	awsConfig  aws.Config
+	properties iceberg.Properties
 }

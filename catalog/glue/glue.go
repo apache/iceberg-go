@@ -59,13 +59,15 @@ const (
 	// See: https://docs.aws.amazon.com/glue/latest/dg/aws-glue-api-catalog-databases.html
 	CatalogIdKey = "glue.id"
 
-	AccessKeyID     = "glue.access-key-id"
-	SecretAccessKey = "glue.secret-access-key"
-	SessionToken    = "glue.session-token"
-	Region          = "glue.region"
-	Endpoint        = "glue.endpoint"
-	MaxRetries      = "glue.max-retries"
-	RetryMode       = "glue.retry-mode"
+	AccessKeyID        = "glue.access-key-id"
+	SecretAccessKey    = "glue.secret-access-key"
+	SessionToken       = "glue.session-token"
+	Region             = "glue.region"
+	Endpoint           = "glue.endpoint"
+	MaxRetries         = "glue.max-retries"
+	RetryMode          = "glue.retry-mode"
+	SkipArchive        = "glue.skip-archive"
+	SkipArchiveDefault = true
 
 	ExternalTable = "EXTERNAL_TABLE"
 )
@@ -79,7 +81,7 @@ func init() {
 			return nil, err
 		}
 
-		return NewCatalog(WithAwsConfig(awsConfig), WithAwsProperties(AwsProperties(props))), nil
+		return NewCatalog(WithAwsConfig(awsConfig), WithProperties(props)), nil
 	}))
 }
 
@@ -126,12 +128,14 @@ type glueAPI interface {
 	CreateDatabase(ctx context.Context, params *glue.CreateDatabaseInput, optFns ...func(*glue.Options)) (*glue.CreateDatabaseOutput, error)
 	DeleteDatabase(ctx context.Context, params *glue.DeleteDatabaseInput, optFns ...func(*glue.Options)) (*glue.DeleteDatabaseOutput, error)
 	UpdateDatabase(ctx context.Context, params *glue.UpdateDatabaseInput, optFns ...func(*glue.Options)) (*glue.UpdateDatabaseOutput, error)
+	UpdateTable(ctx context.Context, params *glue.UpdateTableInput, optFns ...func(*glue.Options)) (*glue.UpdateTableOutput, error)
 }
 
 type Catalog struct {
 	glueSvc   glueAPI
 	catalogId *string
 	awsCfg    *aws.Config
+	props     iceberg.Properties
 }
 
 // NewCatalog creates a new instance of glue.Catalog with the given options.
@@ -143,7 +147,7 @@ func NewCatalog(opts ...Option) *Catalog {
 	}
 
 	var catalogId *string
-	if val, ok := glueOps.awsProperties[CatalogIdKey]; ok {
+	if val, ok := glueOps.properties[CatalogIdKey]; ok {
 		catalogId = &val
 	} else {
 		catalogId = nil
@@ -153,6 +157,7 @@ func NewCatalog(opts ...Option) *Catalog {
 		glueSvc:   glue.NewFromConfig(glueOps.awsConfig),
 		catalogId: catalogId,
 		awsCfg:    &glueOps.awsConfig,
+		props:     glueOps.properties,
 	}
 }
 
@@ -323,7 +328,7 @@ func (c *Catalog) CommitTable(ctx context.Context, table *table.Table, requireme
 
 	if table != nil {
 		if glueTableVersionID == nil {
-			return nil, "", fmt.Errorf("Cannot commit %s.%s because Glue Table version id is missing", database, tableName)
+			return nil, "", fmt.Errorf("cannot commit %s.%s because Glue Table version id is missing", database, tableName)
 		}
 
 		newParameters := currentTable.Properties()
@@ -333,7 +338,7 @@ func (c *Catalog) CommitTable(ctx context.Context, table *table.Table, requireme
 			newParameters[previousMetadataLocationPropsKey] = currentTable.MetadataLocation()
 		}
 
-		updateTableInput = &glue.UpdateTableInput{
+		updateTableInput := &glue.UpdateTableInput{
 			DatabaseName: &database,
 			TableInput: &types.TableInput{
 				Name:       &tableName,
@@ -345,9 +350,27 @@ func (c *Catalog) CommitTable(ctx context.Context, table *table.Table, requireme
 				},
 				Description: aws.String(updatedStageTable.Properties()["Description"]),
 			},
+			SkipArchive: aws.Bool(c.props.GetBool(SkipArchive, SkipArchiveDefault)),
+			VersionId:   glueTableVersionID,
 		}
+
+		_, err := c.glueSvc.UpdateTable(ctx, updateTableInput)
+		if err != nil {
+			if errors.Is(err, &types.EntityNotFoundException{}) {
+				return nil, "", fmt.Errorf("table does not exist: %s.%s (Glue table version %s)",
+					database, tableName, *glueTableVersionID)
+			} else if errors.Is(err, &types.ConcurrentModificationException{}) {
+				return nil, "", fmt.Errorf("cannot commit %s.%s because Glue detected concurrent update to table version %s",
+					database, tableName, *glueTableVersionID)
+			}
+
+			return nil, "", err
+		}
+	} else {
+		// TODO finish
 	}
 
+	// TODO finish
 	return nil, "", nil
 }
 
