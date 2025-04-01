@@ -43,6 +43,26 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	ParquetRowGroupSizeBytesKey              = "write.parquet.row-group-size-bytes"
+	ParquetRowGroupSizeBytesDefault          = 128 * 1024 * 1024 // 128 MB
+	ParquetRowGroupLimitKey                  = "write.parquet.row-group-limit"
+	ParquetRowGroupLimitDefault              = 1048576
+	ParquetPageSizeBytesKey                  = "write.parquet.page-size-bytes"
+	ParquetPageSizeBytesDefault              = 1024 * 1024 // 1 MB
+	ParquetPageRowLimitKey                   = "write.parquet.page-row-limit"
+	ParquetPageRowLimitDefault               = 20000
+	ParquetDictSizeBytesKey                  = "write.parquet.dict-size-bytes"
+	ParquetDictSizeBytesDefault              = 2 * 1024 * 1024 // 2 MB
+	ParquetCompressionKey                    = "write.parquet.compression-codec"
+	ParquetCompressionDefault                = "zstd"
+	ParquetCompressionLevelKey               = "write.parquet.compression-level"
+	ParquetCompressionLevelDefault           = -1
+	ParquetBloomFilterMaxBytesKey            = "write.parquet.bloom-filter-max-bytes"
+	ParquetBloomFilterMaxBytesDefault        = 1024 * 1024
+	ParquetBloomFilterColumnEnabledKeyPrefix = "write.parquet.bloom-filter-enabled.column"
+)
+
 type parquetFormat struct{}
 
 func (parquetFormat) Open(ctx context.Context, fs iceio.IO, path string) (FileReader, error) {
@@ -175,15 +195,20 @@ func (parquetFormat) PrimitiveTypeToPhysicalType(typ iceberg.PrimitiveType) stri
 func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 	writerProps := []parquet.WriterProperty{
 		parquet.WithDictionaryDefault(false),
-		parquet.WithMaxRowGroupLength(int64(props.GetInt("write.parquet.row-group-limit", 1048576))),
-		parquet.WithDataPageSize(int64(props.GetInt("write.parquet.page-size-bytes", 1024*1024))),
+		parquet.WithMaxRowGroupLength(int64(props.GetInt(ParquetRowGroupLimitKey,
+			ParquetRowGroupLimitDefault))),
+		parquet.WithDataPageSize(int64(props.GetInt(ParquetPageSizeBytesKey,
+			ParquetPageSizeBytesDefault))),
 		parquet.WithDataPageVersion(parquet.DataPageV2),
-		parquet.WithBatchSize(int64(props.GetInt("write.parquet.page-row-limit", 20000))),
-		parquet.WithDictionaryPageSizeLimit(int64(props.GetInt("write.parquet.dict-size-bytes", 2*1024*1024))),
+		parquet.WithBatchSize(int64(props.GetInt(ParquetPageRowLimitKey,
+			ParquetPageRowLimitDefault))),
+		parquet.WithDictionaryPageSizeLimit(int64(props.GetInt(ParquetDictSizeBytesKey,
+			ParquetDictSizeBytesDefault))),
 	}
 
-	compression := props.Get("write.parquet.compression-codec", "zstd")
-	compressionLevel := props.GetInt("write.parquet.compression-level", compress.DefaultCompressionLevel)
+	compression := props.Get(ParquetCompressionKey, ParquetCompressionDefault)
+	compressionLevel := props.GetInt(ParquetCompressionLevelKey,
+		ParquetCompressionLevelDefault)
 
 	var codec compress.Compression
 	switch compression {
