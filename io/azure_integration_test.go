@@ -36,12 +36,12 @@ import (
 )
 
 const (
-	accountName      = "devstoreaccount1"
-	accountKey       = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
-	endpoint         = "127.0.0.1:10010"
-	protocol         = "http"
-	containerName    = "warehouse"
-	connectionString = "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10010/devstoreaccount1;QueueEndpoint=http://127.0.0.1:10001/devstoreaccount1;TableEndpoint=http://127.0.0.1:10002/devstoreaccount1;"
+	accountName              = "devstoreaccount1"
+	accountKey               = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+	endpoint                 = "127.0.0.1:11000"
+	protocol                 = "http"
+	containerName            = "warehouse"
+	connectionStringTemplate = "DefaultEndpointsProtocol=%s;AccountName=%s;AccountKey=%s;BlobEndpoint=%s://%s/%s;"
 )
 
 type AzureBlobIOTestSuite struct {
@@ -93,6 +93,7 @@ func (s *AzureBlobIOTestSuite) TestAzureBlobWarehouseKey() {
 }
 
 func (s *AzureBlobIOTestSuite) TestAzuriteWarehouseConnectionString() {
+	connectionString := fmt.Sprintf(connectionStringTemplate, protocol, accountName, accountKey, protocol, endpoint, accountName)
 	path := "iceberg-test-azure/test-table-azure"
 	containerName := "warehouse"
 	properties := iceberg.Properties{
@@ -115,7 +116,7 @@ func (s *AzureBlobIOTestSuite) TestAzuriteWarehouseConnectionString() {
 		catalog.ToIdentifier("iceberg-test-azure", "test-table-azure"),
 		iceberg.NewSchema(0, iceberg.NestedField{
 			Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, ID: 1,
-		}), catalog.WithLocation(fmt.Sprintf("abfs://%s/iceberg/%s", containerName, path)))
+		}), catalog.WithLocation(fmt.Sprintf("wasb://%s/iceberg/%s", containerName, path)))
 	s.Require().NoError(err)
 	s.Require().NotNil(tbl)
 

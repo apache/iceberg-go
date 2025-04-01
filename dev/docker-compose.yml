@@ -70,7 +70,7 @@ services:
     container_name: azurite
     hostname: azurite
     ports:
-      - 10010:10000
+      - 11000:10000
     command: ["azurite-blob", "--loose", "--blobHost", "0.0.0.0"]
   mc:
     depends_on:
