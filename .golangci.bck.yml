@@ -15,32 +15,12 @@
 # specific language governing permissions and limitations
 # under the License.
 ---
-version: "2"
 linters:
-  default: none
-  enable:
-    - misspell
-    - nlreturn
-    - perfsprint
-  exclusions:
-    generated: lax
-    presets:
-      - comments
-      - common-false-positives
-      - legacy
-      - std-error-handling
-    paths:
-      - third_party$
-      - builtin$
-      - examples$
-formatters:
+  disable-all: true
   enable:
     - gofmt
-    - gofumpt
     - goimports
-  exclusions:
-    generated: lax
-    paths:
-      - third_party$
-      - builtin$
-      - examples$
+    - nlreturn
+    - perfsprint
+    - gofumpt
+    - misspell
