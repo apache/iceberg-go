@@ -697,10 +697,10 @@ func (r *Catalog) listTablesPage(ctx context.Context, namespace table.Identifier
 
 	v := url.Values{}
 	if pageSize >= 0 {
-		v.Set("page-size", strconv.Itoa(pageSize))
+		v.Set("pageSize", strconv.Itoa(pageSize))
 	}
 	if pageToken != "" {
-		v.Set("page-token", pageToken)
+		v.Set("pageToken", pageToken)
 	}
 
 	uri.RawQuery = v.Encode()
@@ -1089,10 +1089,10 @@ func (r *Catalog) listViewsPage(ctx context.Context, namespace table.Identifier,
 
 	v := url.Values{}
 	if pageSize >= 0 {
-		v.Set("page-size", strconv.Itoa(pageSize))
+		v.Set("pageSize", strconv.Itoa(pageSize))
 	}
 	if pageToken != "" {
-		v.Set("page-token", pageToken)
+		v.Set("pageToken", pageToken)
 	}
 
 	uri.RawQuery = v.Encode()
