@@ -242,8 +242,8 @@ func (r *RestCatalogSuite) TestListTables200() {
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
 		}
-		pageToken := req.URL.Query().Get("page-token")
-		pageSize := req.URL.Query().Get("page-size")
+		pageToken := req.URL.Query().Get("pageToken")
+		pageSize := req.URL.Query().Get("pageSize")
 		r.Equal("", pageToken)
 		r.Equal(strconv.Itoa(customPageSize), pageSize)
 		json.NewEncoder(w).Encode(map[string]any{
@@ -307,8 +307,8 @@ func (r *RestCatalogSuite) TestListTablesPrefixed200() {
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
 		}
-		pageToken := req.URL.Query().Get("page-token")
-		pageSize := req.URL.Query().Get("page-size")
+		pageToken := req.URL.Query().Get("pageToken")
+		pageSize := req.URL.Query().Get("pageSize")
 		r.Equal("", pageToken)
 		r.Equal(strconv.Itoa(defaultPageSize), pageSize)
 
@@ -357,8 +357,8 @@ func (r *RestCatalogSuite) TestListTablesPagination() {
 			r.Equal(v, req.Header.Values(k))
 		}
 
-		pageToken := req.URL.Query().Get("page-token")
-		pageSize := req.URL.Query().Get("page-size")
+		pageToken := req.URL.Query().Get("pageToken")
+		pageSize := req.URL.Query().Get("pageSize")
 		r.Equal(strconv.Itoa(defaultPageSize), pageSize)
 
 		var response map[string]any
@@ -439,7 +439,7 @@ func (r *RestCatalogSuite) TestListTablesPaginationErrorOnSubsequentPage() {
 			r.Equal(v, req.Header.Values(k))
 		}
 
-		pageToken := req.URL.Query().Get("page-token")
+		pageToken := req.URL.Query().Get("pageToken")
 
 		// First page succeeds
 		if pageToken == "" {
@@ -512,8 +512,8 @@ func (r *RestCatalogSuite) TestListTables404() {
 			r.Equal(v, req.Header.Values(k))
 		}
 
-		pageToken := req.URL.Query().Get("page-token")
-		pageSize := req.URL.Query().Get("page-size")
+		pageToken := req.URL.Query().Get("pageToken")
+		pageSize := req.URL.Query().Get("pageSize")
 		r.Equal("", pageToken)
 		r.Equal(strconv.Itoa(defaultPageSize), pageSize)
 		w.WriteHeader(http.StatusNotFound)
@@ -1544,8 +1544,8 @@ func (r *RestCatalogSuite) TestListViews200() {
 			r.Equal(v, req.Header.Values(k))
 		}
 
-		pageToken := req.URL.Query().Get("page-token")
-		pageSize := req.URL.Query().Get("page-size")
+		pageToken := req.URL.Query().Get("pageToken")
+		pageSize := req.URL.Query().Get("pageSize")
 		r.Equal("", pageToken)
 		r.Equal(strconv.Itoa(customPageSize), pageSize)
 
@@ -1597,8 +1597,8 @@ func (r *RestCatalogSuite) TestListViewsPagination() {
 			r.Equal(v, req.Header.Values(k))
 		}
 
-		pageToken := req.URL.Query().Get("page-token")
-		pageSize := req.URL.Query().Get("page-size")
+		pageToken := req.URL.Query().Get("pageToken")
+		pageSize := req.URL.Query().Get("pageSize")
 		r.Equal(strconv.Itoa(defaultPageSize), pageSize)
 
 		var response map[string]any
@@ -1679,7 +1679,7 @@ func (r *RestCatalogSuite) TestListViewsPaginationErrorOnSubsequentPage() {
 			r.Equal(v, req.Header.Values(k))
 		}
 
-		pageToken := req.URL.Query().Get("page-token")
+		pageToken := req.URL.Query().Get("pageToken")
 
 		// First page succeeds
 		if pageToken == "" {
