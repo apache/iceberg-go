@@ -55,7 +55,7 @@ jobs:
     - name: Run golangci-lint
       uses: golangci/golangci-lint-action@1481404843c368bc19ca9406f87d6e0fc97bdcfd # v7
       with:
-        version: v1.64.5
+        version: v2.0.2
         args: --timeout=10m
     - name: Lint
       run: staticcheck ./...
