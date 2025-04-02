@@ -660,6 +660,13 @@ type v1writerImpl struct{}
 
 func (v1writerImpl) content() ManifestContent { return ManifestContentData }
 func (v1writerImpl) prepareEntry(entry *manifestEntry, sn int64) (ManifestEntry, error) {
+	if entry.Snapshot != nil && *entry.Snapshot != sn {
+		if entry.EntryStatus != EntryStatusEXISTING {
+			return nil, fmt.Errorf("mismatched snapshot id for entry: %d vs %d", *entry.Snapshot, sn)
+		}
+		sn = *entry.Snapshot
+	}
+
 	return &fallbackManifestEntry{
 		manifestEntry: *entry,
 		Snapshot:      sn,
@@ -1018,7 +1025,8 @@ func (w *ManifestWriter) Delete(entry ManifestEntry) error {
 }
 
 func (w *ManifestWriter) Existing(entry ManifestEntry) error {
-	w.reusedEntry.wrap(EntryStatusEXISTING, &w.snapshotID, entry.(*manifestEntry).SeqNum, entry.FileSequenceNum(), entry.DataFile())
+	snapshotID := entry.SnapshotID()
+	w.reusedEntry.wrap(EntryStatusEXISTING, &snapshotID, entry.(*manifestEntry).SeqNum, entry.FileSequenceNum(), entry.DataFile())
 
 	return w.addEntry(&w.reusedEntry)
 }
@@ -1522,18 +1530,24 @@ func (m *manifestEntry) inherit(manifest ManifestFile) {
 	}
 
 	manifestSequenceNum := manifest.SequenceNum()
-	if m.SeqNum == nil && (manifestSequenceNum == initialSequenceNumber || m.EntryStatus == EntryStatusADDED) {
-		m.SeqNum = &manifestSequenceNum
-	}
+	if manifestSequenceNum != -1 {
+		if m.SeqNum == nil && (manifestSequenceNum == initialSequenceNumber || m.EntryStatus == EntryStatusADDED) {
+			m.SeqNum = &manifestSequenceNum
+		}
 
-	if m.FileSeqNum == nil && (manifestSequenceNum == initialSequenceNumber || m.EntryStatus == EntryStatusADDED) {
-		m.FileSeqNum = &manifestSequenceNum
+		if m.FileSeqNum == nil && (manifestSequenceNum == initialSequenceNumber || m.EntryStatus == EntryStatusADDED) {
+			m.FileSeqNum = &manifestSequenceNum
+		}
 	}
 
 	m.Data.(*dataFile).specID = manifest.PartitionSpecID()
 }
 
 func (m *manifestEntry) wrap(status ManifestEntryStatus, newSnapID, newSeq, newFileSeq *int64, data DataFile) ManifestEntry {
+	if newSeq != nil && *newSeq == -1 {
+		newSeq = nil
+	}
+
 	m.EntryStatus = status
 	m.Snapshot = newSnapID
 	m.SeqNum = newSeq

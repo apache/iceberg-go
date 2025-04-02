@@ -21,7 +21,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -29,12 +31,15 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/catalog/sql"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 	"github.com/pterm/pterm"
 	"github.com/stretchr/testify/suite"
+	"github.com/uptrace/bun/driver/sqliteshim"
 )
 
 type TableTestSuite struct {
@@ -259,7 +264,7 @@ func (t *TableWritingTestSuite) SetupSuite() {
 }
 
 func (t *TableWritingTestSuite) SetupTest() {
-	t.location = t.T().TempDir()
+	t.location = strings.Replace(t.T().TempDir(), "#", "", -1)
 }
 
 func (t *TableWritingTestSuite) TearDownSuite() {
@@ -833,6 +838,297 @@ func (t *TableWritingTestSuite) TestReplaceDataFiles() {
 			"total-records":          "10",
 		},
 	}, staged.CurrentSnapshot().Summary)
+}
+
+func (t *TableWritingTestSuite) TestWriteSpecialCharacterColumn() {
+	ident := table.Identifier{"default", "write_special_character_column"}
+	colNameWithSpecialChar := "letter/abc"
+
+	s := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: colNameWithSpecialChar, Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 3, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: true},
+		iceberg.NestedField{ID: 4, Name: "address", Required: true, Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 5, Name: "street", Type: iceberg.PrimitiveTypes.String, Required: true},
+				{ID: 6, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: true},
+				{ID: 7, Name: "zip", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+				{ID: 8, Name: colNameWithSpecialChar, Type: iceberg.PrimitiveTypes.String, Required: true},
+			},
+		}})
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: colNameWithSpecialChar, Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String},
+		{Name: "address", Type: arrow.StructOf(
+			arrow.Field{Name: "street", Type: arrow.BinaryTypes.String},
+			arrow.Field{Name: "city", Type: arrow.BinaryTypes.String},
+			arrow.Field{Name: "zip", Type: arrow.PrimitiveTypes.Int32},
+			arrow.Field{Name: colNameWithSpecialChar, Type: arrow.BinaryTypes.String},
+		)},
+	}, nil)
+
+	arrowTable, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[
+			{
+				"letter/abc": "a",
+				"id": 1,
+				"name": "AB",
+				"address": {"street": "123", "city": "SFO", "zip": 12345, "letter/abc": "a"}
+			},
+			{
+				"letter/abc": null,
+				"id": 2,
+				"name": "CD",
+				"address": {"street": "456", "city": "SW", "zip": 67890, "letter/abc": "b"}
+			},
+			{
+				"letter/abc": "z",
+				"id": 3,
+				"name": "EF",
+				"address": {"street": "789", "city": "Random", "zip": 10112, "letter/abc": "c"}
+			}
+		 ]`,
+	})
+	t.Require().NoError(err)
+	defer arrowTable.Release()
+
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, s)
+	rdr := array.NewTableReader(arrowTable, 1)
+	defer rdr.Release()
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.Append(t.ctx, rdr, nil))
+
+	scan, err := tx.Scan()
+	t.Require().NoError(err)
+
+	result, err := scan.ToArrowTable(t.ctx)
+	t.Require().NoError(err)
+	defer result.Release()
+
+	t.True(array.TableEqual(arrowTable, result), "expected:\n %s\ngot:\n %s", arrowTable, result)
+}
+
+func (t *TableWritingTestSuite) getInMemCatalog() catalog.Catalog {
+	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
+		"uri":          ":memory:",
+		"type":         "sql",
+		sql.DriverKey:  sqliteshim.ShimName,
+		sql.DialectKey: string(sql.SQLite),
+		"warehouse":    "file://" + t.location,
+	})
+	t.Require().NoError(err)
+
+	return cat
+}
+
+func (t *TableWritingTestSuite) createTableWithProps(identifier table.Identifier, props iceberg.Properties, sc *iceberg.Schema) *table.Table {
+	cat := t.getInMemCatalog()
+	cat.DropTable(t.ctx, identifier)
+	cat.DropNamespace(t.ctx, catalog.NamespaceFromIdent(identifier))
+
+	t.Require().NoError(cat.CreateNamespace(t.ctx, catalog.NamespaceFromIdent(identifier), nil))
+	tbl, err := cat.CreateTable(t.ctx, identifier, sc, catalog.WithProperties(props),
+		catalog.WithLocation(t.location))
+
+	t.Require().NoError(err)
+
+	return tbl
+}
+
+func tableSchema() *iceberg.Schema {
+	return iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "bool", Type: iceberg.PrimitiveTypes.Bool},
+		iceberg.NestedField{ID: 2, Name: "string", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "string_long", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 4, Name: "int", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 5, Name: "long", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 6, Name: "float", Type: iceberg.PrimitiveTypes.Float32},
+		iceberg.NestedField{ID: 7, Name: "double", Type: iceberg.PrimitiveTypes.Float64},
+		iceberg.NestedField{ID: 8, Name: "time", Type: iceberg.PrimitiveTypes.Time},
+		iceberg.NestedField{ID: 9, Name: "timestamp", Type: iceberg.PrimitiveTypes.Timestamp},
+		iceberg.NestedField{ID: 10, Name: "timestamptz", Type: iceberg.PrimitiveTypes.TimestampTz},
+		iceberg.NestedField{ID: 11, Name: "date", Type: iceberg.PrimitiveTypes.Date},
+		iceberg.NestedField{ID: 12, Name: "uuid", Type: iceberg.PrimitiveTypes.UUID},
+		iceberg.NestedField{ID: 13, Name: "binary", Type: iceberg.PrimitiveTypes.Binary},
+		iceberg.NestedField{ID: 14, Name: "fixed", Type: iceberg.FixedTypeOf(16)},
+		iceberg.NestedField{ID: 15, Name: "small_dec", Type: iceberg.DecimalTypeOf(8, 2)},
+		iceberg.NestedField{ID: 16, Name: "med_dec", Type: iceberg.DecimalTypeOf(16, 2)},
+		iceberg.NestedField{ID: 17, Name: "large_dec", Type: iceberg.DecimalTypeOf(24, 2)},
+	)
+}
+
+func arrowTableWithNull() arrow.Table {
+	sc, err := table.SchemaToArrowSchema(tableSchema(), nil, true, false)
+	if err != nil {
+		panic(err)
+	}
+
+	arrTable, err := array.TableFromJSON(memory.DefaultAllocator, sc, []string{
+		`[
+			{
+				"bool": false,
+				"string": "a",
+				"string_long": "` + strings.Repeat("a", 22) + `",
+				"int": 1,
+				"long": 1,
+				"float": 0.0,
+				"double": 0.0,
+				"time": "00:00:01.000000",
+				"timestamp": "2023-01-01T19:25:00.000000+08:00",
+				"timestamptz": "2023-01-01T19:25:00.000000Z",
+				"date": "2023-01-01",
+				"uuid": "00000000-0000-0000-0000-000000000000",
+				"binary": "AQ==",
+				"fixed": "AAAAAAAAAAAAAAAAAAAAAA==",
+				"small_dec": "123456.78",
+				"med_dec": "12345678901234.56",
+				"large_dec": "1234567890123456789012.34"
+			},
+			{
+				"bool": null,
+				"string": null,
+				"string_long": null,
+				"int": null,
+				"long": null,
+				"float": null,
+				"double": null,
+				"time": null,
+				"timestamp": null,
+				"timestamptz": null,
+				"date": null,
+				"uuid": null,
+				"binary": null,
+				"fixed": null,
+				"small_dec": null,
+				"med_dec": null,
+				"large_dec": null
+			},
+			{
+				"bool": true,
+				"string": "z",
+				"string_long": "` + strings.Repeat("z", 22) + `",
+				"int": 9,
+				"long": 9,
+				"float": 0.9,
+				"double": 0.9,
+				"time": "00:00:03.000000",
+				"timestamp": "2023-03-01T19:25:00.000000+08:00",
+				"timestamptz": "2023-03-01T19:25:00.000000Z",
+				"date": "2023-03-01",
+				"uuid": "11111111-1111-1111-1111-111111111111",
+				"binary": "Eg==",
+				"fixed": "EREREREREREREREREREREQ==",
+				"small_dec": "876543.21",
+				"med_dec": "65432109876543.21",
+				"large_dec": "4321098765432109876543.21"
+			}
+		 ]`,
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	return arrTable
+}
+
+func (t *TableWritingTestSuite) TestMergeManifests() {
+	tblA := t.createTableWithProps(table.Identifier{"default", "merge_manifest_a"},
+		iceberg.Properties{
+			table.ParquetCompressionKey:    "snappy",
+			table.ManifestMergeEnabledKey:  "true",
+			table.ManifestMinMergeCountKey: "1",
+			"format-version":               strconv.Itoa(t.formatVersion),
+		}, tableSchema())
+
+	tblB := t.createTableWithProps(table.Identifier{"default", "merge_manifest_b"},
+		iceberg.Properties{
+			table.ParquetCompressionKey:      "snappy",
+			table.ManifestMergeEnabledKey:    "true",
+			table.ManifestMinMergeCountKey:   "1",
+			table.ManifestTargetSizeBytesKey: "1",
+			"format-version":                 strconv.Itoa(t.formatVersion),
+		}, tableSchema())
+
+	tblC := t.createTableWithProps(table.Identifier{"default", "merge_manifest_c"},
+		iceberg.Properties{
+			table.ParquetCompressionKey:    "snappy",
+			table.ManifestMinMergeCountKey: "1",
+			"format-version":               strconv.Itoa(t.formatVersion),
+		}, tableSchema())
+
+	arrTable := arrowTableWithNull()
+	defer arrTable.Release()
+
+	var err error
+	// tblA should merge all manifests into 1
+	tblA, err = tblA.AppendTable(t.ctx, arrTable, 1, nil)
+	t.Require().NoError(err)
+	tblA, err = tblA.AppendTable(t.ctx, arrTable, 1, nil)
+	t.Require().NoError(err)
+	tblA, err = tblA.AppendTable(t.ctx, arrTable, 1, nil)
+	t.Require().NoError(err)
+
+	// tblB should not merge any manifests because the target size is too small
+	tblB, err = tblB.AppendTable(t.ctx, arrTable, 1, nil)
+	t.Require().NoError(err)
+	tblB, err = tblB.AppendTable(t.ctx, arrTable, 1, nil)
+	t.Require().NoError(err)
+	tblB, err = tblB.AppendTable(t.ctx, arrTable, 1, nil)
+	t.Require().NoError(err)
+
+	// tblC should not merge any manifests because merging is disabled
+	tblC, err = tblC.AppendTable(t.ctx, arrTable, 1, nil)
+	t.Require().NoError(err)
+	tblC, err = tblC.AppendTable(t.ctx, arrTable, 1, nil)
+	t.Require().NoError(err)
+	tblC, err = tblC.AppendTable(t.ctx, arrTable, 1, nil)
+	t.Require().NoError(err)
+
+	manifestList, err := tblA.CurrentSnapshot().Manifests(tblA.FS())
+	t.Require().NoError(err)
+	t.Len(manifestList, 1)
+
+	entries, err := manifestList[0].FetchEntries(tblA.FS(), false)
+	t.Require().NoError(err)
+	t.Len(entries, 3)
+
+	// entries should match the snapshot ID they were added in
+	snapshotList := tblA.Metadata().Snapshots()
+	slices.Reverse(snapshotList)
+	for i, entry := range entries {
+		t.Equal(snapshotList[i].SnapshotID, entry.SnapshotID())
+		if t.formatVersion > 1 {
+			t.EqualValues(3-i, entry.SequenceNum())
+		}
+	}
+
+	manifestList, err = tblB.CurrentSnapshot().Manifests(tblB.FS())
+	t.Require().NoError(err)
+	t.Len(manifestList, 3)
+
+	manifestList, err = tblC.CurrentSnapshot().Manifests(tblC.FS())
+	t.Require().NoError(err)
+	t.Len(manifestList, 3)
+
+	resultA, err := tblA.Scan().ToArrowTable(t.ctx)
+	t.Require().NoError(err)
+	defer resultA.Release()
+
+	resultB, err := tblB.Scan().ToArrowTable(t.ctx)
+	t.Require().NoError(err)
+	defer resultB.Release()
+
+	resultC, err := tblC.Scan().ToArrowTable(t.ctx)
+	t.Require().NoError(err)
+	defer resultC.Release()
+
+	// tblA and tblC should contain the same data
+	t.True(array.TableEqual(resultA, resultC), "expected:\n %s\ngot:\n %s", resultA, resultC)
+	// tblB and tblC should contain the same data
+	t.True(array.TableEqual(resultB, resultC), "expected:\n %s\ngot:\n %s", resultB, resultC)
 }
 
 func TestTableWriting(t *testing.T) {

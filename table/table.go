@@ -24,6 +24,8 @@ import (
 	"runtime"
 	"slices"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/io"
@@ -86,6 +88,26 @@ func (t Table) NewTransaction() *Transaction {
 		meta: meta,
 		reqs: []Requirement{},
 	}
+}
+
+// AppendTable is a shortcut for NewTransaction().AppendTable() and then committing the transaction
+func (t Table) AppendTable(ctx context.Context, tbl arrow.Table, batchSize int64, snapshotProps iceberg.Properties) (*Table, error) {
+	txn := t.NewTransaction()
+	if err := txn.AppendTable(ctx, tbl, batchSize, snapshotProps); err != nil {
+		return nil, err
+	}
+
+	return txn.Commit(ctx)
+}
+
+// Append is a shortcut for NewTransaction().Append() and then committing the transaction
+func (t Table) Append(ctx context.Context, rdr array.RecordReader, snapshotProps iceberg.Properties) (*Table, error) {
+	txn := t.NewTransaction()
+	if err := txn.Append(ctx, rdr, snapshotProps); err != nil {
+		return nil, err
+	}
+
+	return txn.Commit(ctx)
 }
 
 func (t Table) AllManifests() iter.Seq2[iceberg.ManifestFile, error] {

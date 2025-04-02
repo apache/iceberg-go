@@ -17,6 +17,8 @@
 
 package table
 
+import "github.com/apache/iceberg-go/table/internal"
+
 const (
 	WriteDataPathKey                        = "write.data.path"
 	WriteMetadataPathKey                    = "write.metadata.path"
@@ -30,6 +32,24 @@ const (
 	MetricsModeColumnConfPrefix    = "write.metadata.metrics.column"
 	DefaultWriteMetricsModeKey     = "write.metadata.metrics.default"
 	DefaultWriteMetricsModeDefault = "truncate(16)"
+
+	ParquetRowGroupSizeBytesKey              = internal.ParquetRowGroupSizeBytesKey
+	ParquetRowGroupSizeBytesDefault          = internal.ParquetRowGroupSizeBytesDefault
+	ParquetRowGroupLimitKey                  = internal.ParquetRowGroupLimitKey
+	ParquetRowGroupLimitDefault              = internal.ParquetRowGroupLimitDefault
+	ParquetPageSizeBytesKey                  = internal.ParquetPageSizeBytesKey
+	ParquetPageSizeBytesDefault              = internal.ParquetPageSizeBytesDefault
+	ParquetPageRowLimitKey                   = internal.ParquetPageRowLimitKey
+	ParquetPageRowLimitDefault               = internal.ParquetPageRowLimitDefault
+	ParquetDictSizeBytesKey                  = internal.ParquetDictSizeBytesKey
+	ParquetDictSizeBytesDefault              = internal.ParquetDictSizeBytesDefault
+	ParquetCompressionKey                    = internal.ParquetCompressionKey
+	ParquetCompressionDefault                = internal.ParquetCompressionDefault
+	ParquetCompressionLevelKey               = internal.ParquetCompressionLevelKey
+	ParquetCompressionLevelDefault           = internal.ParquetCompressionLevelDefault
+	ParquetBloomFilterMaxBytesKey            = internal.ParquetBloomFilterMaxBytesKey
+	ParquetBloomFilterMaxBytesDefault        = internal.ParquetBloomFilterMaxBytesDefault
+	ParquetBloomFilterColumnEnabledKeyPrefix = internal.ParquetBloomFilterColumnEnabledKeyPrefix
 
 	ManifestMergeEnabledKey     = "commit.manifest-merge.enabled"
 	ManifestMergeEnabledDefault = false
@@ -48,4 +68,7 @@ const (
 
 	MetadataPreviousVersionsMaxKey     = "write.metadata.previous-versions-max"
 	MetadataPreviousVersionsMaxDefault = 100
+
+	WriteTargetFileSizeBytesKey     = "write.target-file-size-bytes"
+	WriteTargetFileSizeBytesDefault = 512 * 1024 * 1024 // 512 MB
 )

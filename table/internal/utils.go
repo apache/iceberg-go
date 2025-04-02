@@ -448,7 +448,7 @@ func (s *statsAggregator[T]) MaxAsBytes() ([]byte, error) {
 }
 
 func TruncateUpperBoundText(s string, trunc int) string {
-	if trunc == utf8.RuneCountInString(s) {
+	if trunc >= utf8.RuneCountInString(s) {
 		return s
 	}
 
@@ -466,6 +466,10 @@ func TruncateUpperBoundText(s string, trunc int) string {
 }
 
 func TruncateUpperBoundBinary(val []byte, trunc int) []byte {
+	if trunc >= len(val) {
+		return val
+	}
+
 	result := val[:trunc]
 	if bytes.Equal(result, val) {
 		return result
@@ -482,15 +486,13 @@ func TruncateUpperBoundBinary(val []byte, trunc int) []byte {
 	return nil
 }
 
-func MapExec[T, S any](nWorkers int, slice []T, fn func(T) (S, error)) iter.Seq2[S, error] {
+func MapExec[T, S any](nWorkers int, slice iter.Seq[T], fn func(T) (S, error)) iter.Seq2[S, error] {
 	if nWorkers <= 0 {
 		nWorkers = runtime.GOMAXPROCS(0)
 	}
 
-	nWorkers = min(nWorkers, len(slice))
-
 	var g errgroup.Group
-	ch := make(chan T, len(slice))
+	ch := make(chan T, nWorkers)
 	out := make(chan S, nWorkers)
 
 	for range nWorkers {
@@ -507,7 +509,7 @@ func MapExec[T, S any](nWorkers int, slice []T, fn func(T) (S, error)) iter.Seq2
 		})
 	}
 
-	for _, v := range slice {
+	for v := range slice {
 		ch <- v
 	}
 	close(ch)

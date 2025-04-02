@@ -34,6 +34,7 @@ import (
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	tblutils "github.com/apache/iceberg-go/table/internal"
+	"github.com/google/uuid"
 	"github.com/pterm/pterm"
 )
 
@@ -1153,9 +1154,9 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 			if r := recover(); r != nil {
 				switch e := r.(type) {
 				case string:
-					yield(nil, fmt.Errorf("error encountered during parquet file conversion: %s", e))
+					yield(nil, fmt.Errorf("error encountered during file conversion: %s", e))
 				case error:
-					yield(nil, fmt.Errorf("error encountered during parquet file conversion: %w", e))
+					yield(nil, fmt.Errorf("error encountered during file conversion: %w", e))
 				}
 			}
 		}()
@@ -1191,4 +1192,94 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 			}
 		}
 	}
+}
+
+func recordNBytes(rec arrow.Record) (total int64) {
+	for _, c := range rec.Columns() {
+		total += int64(c.Data().SizeInBytes())
+	}
+
+	return total
+}
+
+func binPackRecords(itr iter.Seq2[arrow.Record, error], recordLookback int, targetFileSize int64) iter.Seq[[]arrow.Record] {
+	return internal.PackingIterator(func(yield func(arrow.Record) bool) {
+		for rec, err := range itr {
+			if err != nil {
+				panic(err)
+			}
+
+			rec.Retain()
+			if !yield(rec) {
+				return
+			}
+		}
+	}, targetFileSize, recordLookback, recordNBytes, false)
+}
+
+type recordWritingArgs struct {
+	sc        *arrow.Schema
+	itr       iter.Seq2[arrow.Record, error]
+	fs        iceio.WriteFileIO
+	writeUUID *uuid.UUID
+	counter   iter.Seq[int]
+}
+
+func recordsToDataFiles(ctx context.Context, rootLocation string, meta *MetadataBuilder, args recordWritingArgs) (ret iter.Seq2[iceberg.DataFile, error]) {
+	if args.counter == nil {
+		args.counter = internal.Counter(0)
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			var err error
+			switch e := r.(type) {
+			case string:
+				err = fmt.Errorf("error encountered during file writing %s", e)
+			case error:
+				err = fmt.Errorf("error encountered during file writing: %w", e)
+			}
+			ret = func(yield func(iceberg.DataFile, error) bool) {
+				yield(nil, err)
+			}
+		}
+	}()
+
+	if args.writeUUID == nil {
+		u := uuid.Must(uuid.NewRandom())
+		args.writeUUID = &u
+	}
+
+	targetFileSize := int64(meta.props.GetInt(WriteTargetFileSizeBytesKey,
+		WriteTargetFileSizeBytesDefault))
+
+	nameMapping := meta.CurrentSchema().NameMapping()
+	taskSchema, err := ArrowSchemaToIceberg(args.sc, false, nameMapping)
+	if err != nil {
+		panic(err)
+	}
+
+	nextCount, stopCount := iter.Pull(args.counter)
+	if meta.CurrentSpec().IsUnpartitioned() {
+		tasks := func(yield func(WriteTask) bool) {
+			defer stopCount()
+
+			for batch := range binPackRecords(args.itr, 20, targetFileSize) {
+				cnt, _ := nextCount()
+				t := WriteTask{
+					Uuid:    *args.writeUUID,
+					ID:      cnt,
+					Schema:  taskSchema,
+					Batches: batch,
+				}
+				if !yield(t) {
+					return
+				}
+			}
+		}
+
+		return writeFiles(ctx, rootLocation, args.fs, meta, tasks)
+	}
+
+	panic(fmt.Errorf("%w: write stream with partitions", iceberg.ErrNotImplemented))
 }

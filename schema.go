@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode"
 )
 
 // Schema is an Iceberg table schema, represented as a struct with
@@ -1429,4 +1430,104 @@ func visitTypeWithPartner[T, P any](t Type, fieldPartner P, visitor SchemaWithPa
 	default:
 		return visitor.Primitive(t.(PrimitiveType), fieldPartner)
 	}
+}
+
+func makeCompatibleName(n string) string {
+	if !validAvroName(n) {
+		return sanitizeName(n)
+	}
+
+	return n
+}
+
+func validAvroName(n string) bool {
+	if len(n) == 0 {
+		panic("cannot validate empty name")
+	}
+
+	if !unicode.IsLetter(rune(n[0])) && n[0] != '_' {
+		return false
+	}
+
+	for _, r := range n[1:] {
+		if !unicode.In(r, unicode.Number, unicode.Letter) && r != '_' {
+			return false
+		}
+	}
+
+	return true
+}
+
+func sanitize(r rune) string {
+	if unicode.IsDigit(r) {
+		return "_" + string(r)
+	}
+
+	return fmt.Sprintf("_x%X", r)
+}
+
+func sanitizeName(n string) string {
+	var b strings.Builder
+	b.Grow(len(n))
+
+	first := n[0]
+	if !(unicode.IsLetter(rune(first)) || first == '_') {
+		b.WriteString(sanitize(rune(first)))
+	} else {
+		b.WriteByte(first)
+	}
+
+	for _, r := range n[1:] {
+		if !unicode.In(r, unicode.Number, unicode.Letter) && r != '_' {
+			b.WriteString(sanitize(r))
+		} else {
+			b.WriteRune(r)
+		}
+	}
+
+	return b.String()
+}
+
+func SanitizeColumnNames(sc *Schema) (*Schema, error) {
+	result, err := Visit(sc, sanitizeColumnNameVisitor{})
+	if err != nil {
+		return nil, err
+	}
+
+	return NewSchemaWithIdentifiers(sc.ID, sc.IdentifierFieldIDs,
+		result.Type.(*StructType).FieldList...), nil
+}
+
+type sanitizeColumnNameVisitor struct{}
+
+func (sanitizeColumnNameVisitor) Schema(_ *Schema, structResult NestedField) NestedField {
+	return structResult
+}
+
+func (sanitizeColumnNameVisitor) Field(field NestedField, fieldResult NestedField) NestedField {
+	field.Type = fieldResult.Type
+	field.Name = makeCompatibleName(field.Name)
+
+	return field
+}
+
+func (sanitizeColumnNameVisitor) Struct(_ StructType, fieldResults []NestedField) NestedField {
+	return NestedField{Type: &StructType{FieldList: fieldResults}}
+}
+
+func (sanitizeColumnNameVisitor) List(list ListType, elemResult NestedField) NestedField {
+	list.Element = elemResult.Type
+
+	return NestedField{Type: &list}
+}
+
+func (sanitizeColumnNameVisitor) Map(mapType MapType, keyResult, valueResult NestedField) NestedField {
+	mapType.KeyType = keyResult.Type
+	mapType.ValueType = valueResult.Type
+
+	return NestedField{Type: &mapType}
+}
+
+func (sanitizeColumnNameVisitor) Primitive(p PrimitiveType) NestedField {
+	return NestedField{Type: p}
 }
