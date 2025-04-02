@@ -390,3 +390,72 @@ func NewRemoveSnapshotRefUpdate(ref string) *removeSnapshotRefUpdate {
 func (u *removeSnapshotRefUpdate) Apply(builder *MetadataBuilder) error {
 	return fmt.Errorf("%w: remove-snapshot-ref", iceberg.ErrNotImplemented)
 }
+
+// type MetadataUpdateCtx struct {
+// 	updates []Update
+// }
+
+// func (m *MetadataUpdateCtx) AddUpdate(update Update) {
+// 	m.updates = append(m.updates, update)
+// }
+
+// func (m *MetadataUpdateCtx) IsAddedSnapshot(snapshotID int64) bool {
+// 	for _, update := range m.updates {
+// 		addSnapshotUpdate, yes := update.(*addSnapshotUpdate)
+// 		if yes && addSnapshotUpdate.Snapshot.SnapshotID == snapshotID {
+// 			return true
+// 		}
+// 	}
+
+// 	return false
+// }
+
+// func (m *MetadataUpdateCtx) IsAddedSchema(schemaID int) bool {
+// 	for _, update := range m.updates {
+// 		addSchemaUpdate, yes := update.(*addSchemaUpdate)
+// 		if yes && addSchemaUpdate.Schema.ID == schemaID {
+// 			return true
+// 		}
+// 	}
+
+// 	return false
+// }
+
+// func (m *MetadataUpdateCtx) IsAddedPartitionSpec(specID int) bool {
+// 	for _, update := range m.updates {
+// 		addPartitionSpecUpdate, yes := update.(*addPartitionSpecUpdate)
+// 		if yes && addPartitionSpecUpdate.Spec.ID() == specID {
+// 			return true
+// 		}
+// 	}
+
+// 	return false
+// }
+
+// func (m *MetadataUpdateCtx) IsAddedSortOrder(sortOrderID int) bool {
+// 	for _, update := range m.updates {
+// 		addSortOrderUpdate, yes := update.(*addSortOrderUpdate)
+// 		if yes && addSortOrderUpdate.SortOrder.OrderID == sortOrderID {
+// 			return true
+// 		}
+// 	}
+
+// 	return false
+// }
+
+// func (m *MetadataUpdateCtx) HasChanges() bool {
+// 	return len(m.updates) > 0
+// }
+
+// Update the table metada with the given updaes in one transactions
+//
+// Returns metadata with updates applied
+func UpdateTableMetadata(baseMetadata Metadata, updates []Update) (Metadata, error) {
+	newMetadataBuilder, err := MetadataBuilderFromBase(baseMetadata)
+	if err != nil {
+		return nil, err
+	}
+	newMetadataBuilder.updates = updates
+
+	return newMetadataBuilder.Build()
+}
