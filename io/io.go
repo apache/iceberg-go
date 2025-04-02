@@ -258,6 +258,11 @@ func inferFileIOFromSchema(ctx context.Context, path string, props map[string]st
 		bucket = memblob.OpenBucket(nil)
 	case "file", "":
 		return LocalFS{}, nil
+	case "abfs", "abfss", "wasb", "wasbs":
+		bucket, err = createAzureBucket(ctx, parsed, props)
+		if err != nil {
+			return nil, err
+		}
 	default:
 		return nil, fmt.Errorf("IO for file '%s' not implemented", path)
 	}

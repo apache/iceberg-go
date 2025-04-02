@@ -65,6 +65,13 @@ services:
       - 9001:9001
       - 9000:9000
     command: ["server", "/data", "--console-address", ":9001"]
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite
+    container_name: azurite
+    hostname: azurite
+    ports:
+      - 11000:11000
+    command: ["azurite-blob", "--loose", "--blobHost", "0.0.0.0" ,"--blobPort", "11000"]
   mc:
     depends_on:
       - minio
