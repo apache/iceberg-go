@@ -1156,3 +1156,80 @@ func (r *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifi
 
 	return true, nil
 }
+
+type viewVersion struct {
+	VersionID       int64             `json:"version-id"`
+	TimestampMs     int64             `json:"timestamp-ms"`
+	SchemaID        int               `json:"schema-id"`
+	Summary         map[string]string `json:"summary"`
+	Representations []struct {
+		Type    string `json:"type"`
+		SQL     string `json:"sql"`
+		Dialect string `json:"dialect"`
+	} `json:"representations"`
+	DefaultCatalog   string   `json:"default-catalog"`
+	DefaultNamespace []string `json:"default-namespace"`
+}
+
+type createViewRequest struct {
+	Name        string             `json:"name"`
+	Schema      *iceberg.Schema    `json:"schema"`
+	Location    string             `json:"location,omitempty"`
+	Props       iceberg.Properties `json:"properties,omitempty"`
+	SQL         string             `json:"sql"`
+	ViewVersion viewVersion        `json:"view-version"`
+}
+
+type viewResponse struct {
+	MetadataLoc string             `json:"metadata-location"`
+	RawMetadata json.RawMessage    `json:"metadata"`
+	Config      iceberg.Properties `json:"config"`
+	Metadata    table.Metadata     `json:"-"`
+}
+
+// CreateView creates a new view in the catalog.
+func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, sql string, props iceberg.Properties) error {
+	ns, view, err := splitIdentForPath(identifier)
+	if err != nil {
+		return err
+	}
+
+	freshSchema, err := iceberg.AssignFreshSchemaIDs(schema, nil)
+	if err != nil {
+		return err
+	}
+
+	payload := createViewRequest{
+		Name:   view,
+		Schema: freshSchema,
+		SQL:    sql,
+		Props:  props,
+		ViewVersion: viewVersion{
+			VersionID:   1,
+			TimestampMs: time.Now().UnixMilli(),
+			SchemaID:    freshSchema.ID,
+			Summary:     map[string]string{"sql": sql},
+			Representations: []struct {
+				Type    string `json:"type"`
+				SQL     string `json:"sql"`
+				Dialect string `json:"dialect"`
+			}{
+				{Type: "sql", SQL: sql, Dialect: "default"},
+			},
+			DefaultCatalog:   r.name,
+			DefaultNamespace: strings.Split(ns, namespaceSeparator),
+		},
+	}
+
+	_, err = doPost[createViewRequest, viewResponse](ctx, r.baseURI, []string{"namespaces", ns, "views"}, payload,
+		r.cl, map[int]error{
+			http.StatusNotFound: catalog.ErrNoSuchNamespace,
+			http.StatusConflict: catalog.ErrViewAlreadyExists,
+		})
+	if err != nil {
+		return err
+	}
+	fmt.Println("Created view", identifier)
+
+	return nil
+}
