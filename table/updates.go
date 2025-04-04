@@ -33,6 +33,7 @@ const (
 	updateCurrentSchema    = "set-current-schema"
 	updateDefaultSortOrder = "set-default-sort-order"
 	updateUpgradeFormat    = "upgrade-format-version"
+	updateSetProperties    = "set-properties"
 )
 
 // Update represents a change to a table's metadata.
@@ -323,7 +324,7 @@ type setPropertiesUpdate struct {
 // table metadata.
 func NewSetPropertiesUpdate(updates iceberg.Properties) *setPropertiesUpdate {
 	return &setPropertiesUpdate{
-		baseUpdate: baseUpdate{ActionName: "set-properties"},
+		baseUpdate: baseUpdate{ActionName: updateSetProperties},
 		Updates:    updates,
 	}
 }
