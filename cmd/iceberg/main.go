@@ -386,9 +386,15 @@ func properties(ctx context.Context, output Output, cat catalog.Catalog, args pr
 
 			output.Text("updated " + args.propname + " on " + args.identifier)
 		case args.table:
-			loadTable(ctx, output, cat, args.identifier)
+			tbl := loadTable(ctx, output, cat, args.identifier)
 			output.Text("Setting " + args.propname + "=" + args.value + " on " + args.identifier)
-			output.Error(errors.New("not implemented: Writing is WIP"))
+			//ToDo handle other Update operations
+			_, _, err := cat.CommitTable(ctx, tbl, nil, []table.Update{
+				table.NewSetPropertiesUpdate(iceberg.Properties{args.propname: args.value})})
+			if err != nil {
+				output.Error(err)
+				os.Exit(1)
+			}
 		}
 	case args.remove:
 		switch {

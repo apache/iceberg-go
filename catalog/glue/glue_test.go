@@ -99,6 +99,12 @@ func (m *mockGlueClient) UpdateDatabase(ctx context.Context, params *glue.Update
 	return args.Get(0).(*glue.UpdateDatabaseOutput), args.Error(1)
 }
 
+func (m *mockGlueClient) UpdateTable(ctx context.Context, params *glue.UpdateTableInput, optFns ...func(*glue.Options)) (*glue.UpdateTableOutput, error) {
+	args := m.Called(ctx, params, optFns)
+
+	return args.Get(0).(*glue.UpdateTableOutput), args.Error(1)
+}
+
 var testIcebergGlueTable1 = types.Table{
 	Name: aws.String("test_table"),
 	Parameters: map[string]string{
