@@ -27,7 +27,6 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
-	"github.com/apache/iceberg-go/catalog/internal"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/utils"
@@ -236,7 +235,7 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	if err != nil {
 		return nil, err
 	}
-	var cfg internal.CreateTableCfg
+	var cfg catalog.CreateTableCfg
 	for _, opt := range opts {
 		opt(&cfg)
 	}
