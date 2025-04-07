@@ -1229,7 +1229,6 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 	if err != nil {
 		return err
 	}
-	fmt.Println("created view", identifier)
 
 	return nil
 }
