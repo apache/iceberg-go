@@ -38,7 +38,7 @@ const (
 	partitionFieldStartID       = 1000
 	supportedTableFormatVersion = 2
 
-	addPartionSpecAction = "add-partition-spec"
+	addPartionSpecAction = "add-spec"
 	addSchemaAction      = "add-schema"
 	addSnapshotAction    = "add-snapshot"
 	addSortOrderAction   = "add-sort-order"
