@@ -67,7 +67,7 @@ type PropertiesUpdateSummary struct {
 	Missing []string `json:"missing"`
 }
 
-// Optional config of CreateTable operation
+// CreateTableCfg represents the configuration used for CreateTable operations
 type CreateTableCfg struct {
 	Location      string
 	PartitionSpec *iceberg.PartitionSpec
