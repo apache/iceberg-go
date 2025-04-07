@@ -36,7 +36,6 @@ import (
 	"strings"
 
 	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/catalog/internal"
 	iceinternal "github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/table"
 )
@@ -66,6 +65,14 @@ type PropertiesUpdateSummary struct {
 	Removed []string `json:"removed"`
 	Updated []string `json:"updated"`
 	Missing []string `json:"missing"`
+}
+
+// CreateTableCfg represents the configuration used for CreateTable operations
+type CreateTableCfg struct {
+	Location      string
+	PartitionSpec *iceberg.PartitionSpec
+	SortOrder     table.SortOrder
+	Properties    iceberg.Properties
 }
 
 // Catalog for iceberg table operations like create, drop, load, list and others.
@@ -128,28 +135,28 @@ func NamespaceFromIdent(ident table.Identifier) table.Identifier {
 	return ident[:len(ident)-1]
 }
 
-type CreateTableOpt func(*internal.CreateTableCfg)
+type CreateTableOpt func(*CreateTableCfg)
 
 func WithLocation(location string) CreateTableOpt {
-	return func(cfg *internal.CreateTableCfg) {
+	return func(cfg *CreateTableCfg) {
 		cfg.Location = strings.TrimRight(location, "/")
 	}
 }
 
 func WithPartitionSpec(spec *iceberg.PartitionSpec) CreateTableOpt {
-	return func(cfg *internal.CreateTableCfg) {
+	return func(cfg *CreateTableCfg) {
 		cfg.PartitionSpec = spec
 	}
 }
 
 func WithSortOrder(order table.SortOrder) CreateTableOpt {
-	return func(cfg *internal.CreateTableCfg) {
+	return func(cfg *CreateTableCfg) {
 		cfg.SortOrder = order
 	}
 }
 
 func WithProperties(props iceberg.Properties) CreateTableOpt {
-	return func(cfg *internal.CreateTableCfg) {
+	return func(cfg *CreateTableCfg) {
 		cfg.Properties = props
 	}
 }

@@ -292,7 +292,7 @@ func checkValidNamespace(ident table.Identifier) error {
 }
 
 func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
-	var cfg internal.CreateTableCfg
+	var cfg catalog.CreateTableCfg
 	for _, opt := range opts {
 		opt(&cfg)
 	}

@@ -32,13 +32,6 @@ import (
 	"github.com/google/uuid"
 )
 
-type CreateTableCfg struct {
-	Location      string
-	PartitionSpec *iceberg.PartitionSpec
-	SortOrder     table.SortOrder
-	Properties    iceberg.Properties
-}
-
 func GetMetadataLoc(location string, newVersion uint) string {
 	return fmt.Sprintf("%s/metadata/%05d-%s.metadata.json",
 		location, newVersion, uuid.New().String())
