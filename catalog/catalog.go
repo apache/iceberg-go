@@ -59,6 +59,7 @@ var (
 	ErrCatalogNotFound        = errors.New("catalog type not registered")
 	ErrNamespaceNotEmpty      = errors.New("namespace is not empty")
 	ErrNoSuchView             = errors.New("view does not exist")
+	ErrViewAlreadyExists      = errors.New("view already exists")
 )
 
 type PropertiesUpdateSummary struct {
