@@ -450,7 +450,7 @@ func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]M
 	}
 	defer f.Close()
 
-	dec, err := ocf.NewDecoder(f)
+	dec, err := ocf.NewDecoder(f, ocf.WithDecoderSchemaCache(&avro.SchemaCache{}))
 	if err != nil {
 		return nil, err
 	}
@@ -616,7 +616,7 @@ func decodeManifests[I interface {
 // ReadManifestList reads in an avro manifest list file and returns a slice
 // of manifest files or an error if one is encountered.
 func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
-	dec, err := ocf.NewDecoder(in)
+	dec, err := ocf.NewDecoder(in, ocf.WithDecoderSchemaCache(&avro.SchemaCache{}))
 	if err != nil {
 		return nil, err
 	}
@@ -896,6 +896,7 @@ func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *S
 
 	enc, err := ocf.NewEncoderWithSchema(fileSchema, out,
 		ocf.WithSchemaMarshaler(ocf.FullSchemaMarshaler),
+		ocf.WithEncoderSchemaCache(&avro.SchemaCache{}),
 		ocf.WithMetadata(md),
 		ocf.WithCodec(ocf.Deflate))
 
@@ -1088,6 +1089,7 @@ func (m *ManifestListWriter) init(meta map[string][]byte) error {
 
 	enc, err := ocf.NewEncoderWithSchema(fileSchema, m.out,
 		ocf.WithSchemaMarshaler(ocf.FullSchemaMarshaler),
+		ocf.WithEncoderSchemaCache(&avro.SchemaCache{}),
 		ocf.WithMetadata(meta),
 		ocf.WithCodec(ocf.Deflate))
 	if err != nil {
