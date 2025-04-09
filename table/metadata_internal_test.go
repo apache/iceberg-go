@@ -749,3 +749,17 @@ func TestMetadataV2Serialize(t *testing.T) {
 		"default-sort-order-id":0
 	}`, string(data))
 }
+
+func TestMetadataBuilderSetDefaultSpecIDLastPartition(t *testing.T) {
+	builder, err := NewMetadataBuilder()
+	assert.NoError(t, err)
+
+	partitionSpec := iceberg.NewPartitionSpecID(0)
+	_, err = builder.AddPartitionSpec(&partitionSpec, false)
+	assert.NoError(t, err)
+
+	_, err = builder.SetDefaultSpecID(-1)
+	assert.NoError(t, err)
+
+	assert.Equal(t, 0, builder.defaultSpecID)
+}

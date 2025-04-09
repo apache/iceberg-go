@@ -27,6 +27,7 @@ import (
 const (
 	updateSpec             = "add-spec"
 	updateAddSchema        = "add-schema"
+	updateSnapshot         = "add-snapshot"
 	updateSortOrder        = "add-sort-order"
 	updateAssignUUID       = "assign-uuid"
 	updateDefaultSpec      = "set-default-spec"
@@ -231,7 +232,7 @@ type addSnapshotUpdate struct {
 // NewAddSnapshotUpdate creates a new update that adds the given snapshot to the table metadata.
 func NewAddSnapshotUpdate(snapshot *Snapshot) Update {
 	return &addSnapshotUpdate{
-		baseUpdate: baseUpdate{ActionName: "add-snapshot"},
+		baseUpdate: baseUpdate{ActionName: updateSnapshot},
 		Snapshot:   snapshot,
 	}
 }

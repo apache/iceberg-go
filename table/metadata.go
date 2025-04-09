@@ -37,11 +37,6 @@ import (
 const (
 	partitionFieldStartID       = 1000
 	supportedTableFormatVersion = 2
-
-	addPartionSpecAction = "add-partition-spec"
-	addSchemaAction      = "add-schema"
-	addSnapshotAction    = "add-snapshot"
-	addSortOrderAction   = "add-sort-order"
 )
 
 func generateSnapshotID() int64 {
@@ -377,7 +372,7 @@ func (b *MetadataBuilder) SetCurrentSchemaID(currentSchemaID int) (*MetadataBuil
 			return s.ID
 		})
 		if !slices.ContainsFunc(b.updates, func(u Update) bool {
-			return u.Action() == addSchemaAction && u.(*addSchemaUpdate).Schema.ID == currentSchemaID
+			return u.Action() == updateAddSchema && u.(*addSchemaUpdate).Schema.ID == currentSchemaID
 		}) {
 			return nil, errors.New("can't set current schema to last added schema, no schema has been added")
 		}
@@ -404,7 +399,7 @@ func (b *MetadataBuilder) SetDefaultSortOrderID(defaultSortOrderID int) (*Metada
 			return s.OrderID
 		})
 		if !slices.ContainsFunc(b.updates, func(u Update) bool {
-			return u.Action() == addSortOrderAction && u.(*addSortOrderUpdate).SortOrder.OrderID == defaultSortOrderID
+			return u.Action() == updateSortOrder && u.(*addSortOrderUpdate).SortOrder.OrderID == defaultSortOrderID
 		}) {
 			return nil, errors.New("can't set default sort order to last added with no added sort orders")
 		}
@@ -430,7 +425,7 @@ func (b *MetadataBuilder) SetDefaultSpecID(defaultSpecID int) (*MetadataBuilder,
 			return s.ID()
 		})
 		if !slices.ContainsFunc(b.updates, func(u Update) bool {
-			return u.Action() == addPartionSpecAction && u.(*addPartitionSpecUpdate).Spec.ID() == defaultSpecID
+			return u.Action() == updateSpec && u.(*addPartitionSpecUpdate).Spec.ID() == defaultSpecID
 		}) {
 			return nil, errors.New("can't set default spec to last added with no added partition specs")
 		}
@@ -569,7 +564,7 @@ func (b *MetadataBuilder) SetSnapshotRef(
 	}
 
 	isAddedSnapshot := slices.ContainsFunc(b.updates, func(u Update) bool {
-		return u.Action() == addSnapshotAction && u.(*addSnapshotUpdate).Snapshot.SnapshotID == snapshotID
+		return u.Action() == updateSnapshot && u.(*addSnapshotUpdate).Snapshot.SnapshotID == snapshotID
 	})
 	if isAddedSnapshot {
 		b.lastUpdatedMS = snapshot.TimestampMs
@@ -588,7 +583,7 @@ func (b *MetadataBuilder) SetSnapshotRef(
 	}
 
 	if slices.ContainsFunc(b.updates, func(u Update) bool {
-		return u.Action() == addSnapshotAction && u.(*addSnapshotUpdate).Snapshot.SnapshotID == snapshotID
+		return u.Action() == updateSnapshot && u.(*addSnapshotUpdate).Snapshot.SnapshotID == snapshotID
 	}) {
 		b.lastUpdatedMS = snapshot.TimestampMs
 	}
