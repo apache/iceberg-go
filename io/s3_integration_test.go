@@ -27,11 +27,14 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	sqlcat "github.com/apache/iceberg-go/catalog/sql"
 	"github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/recipe"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/driver/sqliteshim"
 )
 
 func TestMinioWarehouse(t *testing.T) {
+	require.NoError(t, recipe.Start(t))
+
 	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
 		"uri":                ":memory:",
 		sqlcat.DriverKey:     sqliteshim.ShimName,
@@ -61,6 +64,8 @@ func TestMinioWarehouse(t *testing.T) {
 }
 
 func TestMinioWarehouseNoLocation(t *testing.T) {
+	require.NoError(t, recipe.Start(t))
+
 	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
 		"uri":                ":memory:",
 		sqlcat.DriverKey:     sqliteshim.ShimName,
