@@ -198,7 +198,7 @@ type sessionTransport struct {
 	signer         v4.HTTPSigner
 	cfg            aws.Config
 	service        string
-	h              hash.Hash
+	newHash        func() hash.Hash
 }
 
 // from https://pkg.go.dev/github.com/aws/aws-sdk-go-v2/aws/signer/v4#Signer.SignHTTP
@@ -221,12 +221,12 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 				return nil, err
 			}
 
-			if _, err = io.Copy(s.h, rdr); err != nil {
+			h := s.newHash()
+			if _, err = io.Copy(h, rdr); err != nil {
 				return nil, err
 			}
 
-			payloadHash = string(s.h.Sum(nil))
-			s.h.Reset()
+			payloadHash = string(h.Sum(nil))
 		}
 
 		creds, err := s.cfg.Credentials.Retrieve(r.Context())
@@ -595,7 +595,7 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		}
 
 		session.cfg, session.service = cfg, opts.sigv4Service
-		session.signer, session.h = v4.NewSigner(), sha256.New()
+		session.signer, session.newHash = v4.NewSigner(), sha256.New
 	}
 
 	return cl, nil
