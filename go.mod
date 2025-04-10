@@ -17,15 +17,9 @@
 
 module github.com/apache/iceberg-go
 
-<<<<<<< HEAD
 go 1.24
 
 toolchain go1.24.2
-=======
-go 1.23.0
-
-toolchain go1.23.6
->>>>>>> d4bb113 (rollback go version + toolchain)
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.6.0
