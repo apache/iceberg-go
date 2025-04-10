@@ -17,9 +17,9 @@
 
 module github.com/apache/iceberg-go
 
-go 1.23.0
+go 1.23.6
 
-toolchain go1.23.6
+toolchain go1.23.8
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.5.0
