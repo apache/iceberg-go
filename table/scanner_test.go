@@ -21,6 +21,7 @@ package table_test
 
 import (
 	"context"
+	"github.com/apache/iceberg-go/internal/recipe"
 	"iter"
 	"math"
 	"slices"
@@ -37,7 +38,6 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/recipe"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
