@@ -19,7 +19,6 @@ package recipe
 
 import (
 	"bytes"
-	"context"
 	_ "embed"
 	"fmt"
 	"io"
@@ -44,14 +43,14 @@ func Start(t *testing.T) error {
 	if err != nil {
 		return xerrors.Errorf("fail to start compose: %w", err)
 	}
-	if err := stack.Up(context.TODO()); err != nil {
+	if err := stack.Up(t.Context()); err != nil {
 		return xerrors.Errorf("fail to up compose: %w", err)
 	}
-	spark, err := stack.ServiceContainer(context.TODO(), "spark-iceberg")
+	spark, err := stack.ServiceContainer(t.Context(), "spark-iceberg")
 	if err != nil {
 		return xerrors.Errorf("fail to find spark-iceberg: %w", err)
 	}
-	_, stdout, err := spark.Exec(context.TODO(), []string{"ipython", "./provision.py"})
+	_, stdout, err := spark.Exec(t.Context(), []string{"ipython", "./provision.py"})
 	if err != nil {
 		return xerrors.Errorf("fail to seed provision.py: %w", err)
 	}
