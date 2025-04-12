@@ -86,9 +86,5 @@ func TestMapExecFinish(t *testing.T) {
 		}
 	}()
 
-	select {
-	case <-time.After(time.Second * 1):
-		assert.FailNow(t, "MapExec took suspiciously long. Migh be a deadlock.")
-	case <-ch:
-	}
+	assert.Eventually(t, func() bool { <-ch; return true }, time.Second, 10*time.Millisecond)
 }
