@@ -25,15 +25,21 @@ import (
 )
 
 const (
-	updateSpec             = "add-spec"
-	updateAddSchema        = "add-schema"
-	updateSnapshot         = "add-snapshot"
-	updateSortOrder        = "add-sort-order"
-	updateAssignUUID       = "assign-uuid"
-	updateDefaultSpec      = "set-default-spec"
-	updateCurrentSchema    = "set-current-schema"
-	updateDefaultSortOrder = "set-default-sort-order"
-	updateUpgradeFormat    = "upgrade-format-version"
+	updateSpec              = "add-spec"
+	updateAddSchema         = "add-schema"
+	updateSnapshot          = "add-snapshot"
+	updateSortOrder         = "add-sort-order"
+	updateAssignUUID        = "assign-uuid"
+	updateDefaultSpec       = "set-default-spec"
+	updateCurrentSchema     = "set-current-schema"
+	updateDefaultSortOrder  = "set-default-sort-order"
+	updateSnapshotRef       = "set-snapshot-ref"
+	updateLocation          = "set-location"
+	updateProperties        = "set-properties"
+	updateRemoveProperties  = "remove-properties"
+	updateRemoveSnapshots   = "remove-snapshots"
+	updateRemoveSnapshotRef = "remove-snapshot-ref"
+	updateUpgradeFormat     = "upgrade-format-version"
 )
 
 // Update represents a change to a table's metadata.
@@ -264,7 +270,7 @@ func NewSetSnapshotRefUpdate(
 	minSnapshotsToKeep int,
 ) Update {
 	return &setSnapshotRefUpdate{
-		baseUpdate:         baseUpdate{ActionName: "set-snapshot-ref"},
+		baseUpdate:         baseUpdate{ActionName: updateSnapshotRef},
 		RefName:            name,
 		RefType:            refType,
 		SnapshotID:         snapshotID,
@@ -304,7 +310,7 @@ type setLocationUpdate struct {
 // NewSetLocationUpdate creates a new update that sets the location of the table metadata.
 func NewSetLocationUpdate(loc string) Update {
 	return &setLocationUpdate{
-		baseUpdate: baseUpdate{ActionName: "set-location"},
+		baseUpdate: baseUpdate{ActionName: updateLocation},
 		Location:   loc,
 	}
 }
@@ -324,7 +330,7 @@ type setPropertiesUpdate struct {
 // table metadata.
 func NewSetPropertiesUpdate(updates iceberg.Properties) *setPropertiesUpdate {
 	return &setPropertiesUpdate{
-		baseUpdate: baseUpdate{ActionName: "set-properties"},
+		baseUpdate: baseUpdate{ActionName: updateProperties},
 		Updates:    updates,
 	}
 }
@@ -345,7 +351,7 @@ type removePropertiesUpdate struct {
 // it is ignored.
 func NewRemovePropertiesUpdate(removals []string) Update {
 	return &removePropertiesUpdate{
-		baseUpdate: baseUpdate{ActionName: "remove-properties"},
+		baseUpdate: baseUpdate{ActionName: updateRemoveProperties},
 		Removals:   removals,
 	}
 }
@@ -365,13 +371,13 @@ type removeSnapshotsUpdate struct {
 // the table metadata with the given snapshot IDs.
 func NewRemoveSnapshotsUpdate(ids []int64) Update {
 	return &removeSnapshotsUpdate{
-		baseUpdate:  baseUpdate{ActionName: "remove-snapshots"},
+		baseUpdate:  baseUpdate{ActionName: updateRemoveSnapshots},
 		SnapshotIDs: ids,
 	}
 }
 
 func (u *removeSnapshotsUpdate) Apply(builder *MetadataBuilder) error {
-	return fmt.Errorf("%w: remove-snapshots", iceberg.ErrNotImplemented)
+	return fmt.Errorf("%w: %s", iceberg.ErrNotImplemented, updateRemoveSnapshots)
 }
 
 type removeSnapshotRefUpdate struct {
@@ -383,11 +389,11 @@ type removeSnapshotRefUpdate struct {
 // from the table metadata.
 func NewRemoveSnapshotRefUpdate(ref string) *removeSnapshotRefUpdate {
 	return &removeSnapshotRefUpdate{
-		baseUpdate: baseUpdate{ActionName: "remove-snapshot-ref"},
+		baseUpdate: baseUpdate{ActionName: updateRemoveSnapshotRef},
 		RefName:    ref,
 	}
 }
 
 func (u *removeSnapshotRefUpdate) Apply(builder *MetadataBuilder) error {
-	return fmt.Errorf("%w: remove-snapshot-ref", iceberg.ErrNotImplemented)
+	return fmt.Errorf("%w: %s", iceberg.ErrNotImplemented, updateRemoveSnapshotRef)
 }
