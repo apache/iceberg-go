@@ -70,4 +70,4 @@ jobs:
 
       - name: Show debug logs
         if: ${{ failure() }}
-        run: docker compose -f dev/docker-compose.yml logs
+        run: docker compose -f internal/recipe/docker-compose.yml logs
