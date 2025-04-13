@@ -86,5 +86,13 @@ func TestMapExecFinish(t *testing.T) {
 		}
 	}()
 
-	assert.Eventually(t, func() bool { <-ch; return true }, time.Second, 10*time.Millisecond)
+	assert.Eventually(
+		t,
+		func() bool {
+			<-ch
+
+			return true
+		},
+		time.Second, 10*time.Millisecond,
+	)
 }
