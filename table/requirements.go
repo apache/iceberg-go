@@ -37,9 +37,7 @@ const (
 	reqAssertLastAssignedPartitionID = "assert-last-assigned-partition-id"
 )
 
-var (
-	ErrInvalidRequirement = errors.New("invalid requirement")
-)
+var ErrInvalidRequirement = errors.New("invalid requirement")
 
 // A Requirement is a validation rule that must be satisfied before attempting to
 // make and commit changes to a table. Requirements are used to ensure that the
@@ -286,6 +284,7 @@ func ParseRequirement(r io.Reader) (Requirement, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return ParseRequirementBytes(data)
 }
 
@@ -310,6 +309,7 @@ func ParseRequirementBytes(b []byte) (Requirement, error) {
 		if err := json.Unmarshal(b, &req); err != nil {
 			return nil, err
 		}
+
 		return AssertTableUUID(req.UUID), nil
 
 	case reqAssertRefSnapshotID:
@@ -317,6 +317,7 @@ func ParseRequirementBytes(b []byte) (Requirement, error) {
 		if err := json.Unmarshal(b, &req); err != nil {
 			return nil, err
 		}
+
 		return AssertRefSnapshotID(req.Ref, req.SnapshotID), nil
 
 	case reqAssertDefaultSpecID:
@@ -324,6 +325,7 @@ func ParseRequirementBytes(b []byte) (Requirement, error) {
 		if err := json.Unmarshal(b, &req); err != nil {
 			return nil, err
 		}
+
 		return AssertDefaultSpecID(req.DefaultSpecID), nil
 
 	case reqAssertCurrentSchemaID:
@@ -331,6 +333,7 @@ func ParseRequirementBytes(b []byte) (Requirement, error) {
 		if err := json.Unmarshal(b, &req); err != nil {
 			return nil, err
 		}
+
 		return AssertCurrentSchemaID(req.CurrentSchemaID), nil
 
 	case reqAssertDefaultSortOrderID:
@@ -338,6 +341,7 @@ func ParseRequirementBytes(b []byte) (Requirement, error) {
 		if err := json.Unmarshal(b, &req); err != nil {
 			return nil, err
 		}
+
 		return AssertDefaultSortOrderID(req.DefaultSortOrderID), nil
 
 	case reqAssertLastAssignedFieldID:
@@ -345,6 +349,7 @@ func ParseRequirementBytes(b []byte) (Requirement, error) {
 		if err := json.Unmarshal(b, &req); err != nil {
 			return nil, err
 		}
+
 		return AssertLastAssignedFieldID(req.LastAssignedFieldID), nil
 
 	case reqAssertLastAssignedPartitionID:
@@ -352,6 +357,7 @@ func ParseRequirementBytes(b []byte) (Requirement, error) {
 		if err := json.Unmarshal(b, &req); err != nil {
 			return nil, err
 		}
+
 		return AssertLastAssignedPartitionID(req.LastAssignedPartitionID), nil
 	}
 
