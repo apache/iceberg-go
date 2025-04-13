@@ -116,6 +116,7 @@ type glueAPI interface {
 	GetTable(ctx context.Context, params *glue.GetTableInput, optFns ...func(*glue.Options)) (*glue.GetTableOutput, error)
 	GetTables(ctx context.Context, params *glue.GetTablesInput, optFns ...func(*glue.Options)) (*glue.GetTablesOutput, error)
 	DeleteTable(ctx context.Context, params *glue.DeleteTableInput, optFns ...func(*glue.Options)) (*glue.DeleteTableOutput, error)
+	UpdateTable(ctx context.Context, params *glue.UpdateTableInput, optFns ...func(*glue.Options)) (*glue.UpdateTableOutput, error)
 	GetDatabase(ctx context.Context, params *glue.GetDatabaseInput, optFns ...func(*glue.Options)) (*glue.GetDatabaseOutput, error)
 	GetDatabases(ctx context.Context, params *glue.GetDatabasesInput, optFns ...func(*glue.Options)) (*glue.GetDatabasesOutput, error)
 	CreateDatabase(ctx context.Context, params *glue.CreateDatabaseInput, optFns ...func(*glue.Options)) (*glue.CreateDatabaseOutput, error)
@@ -328,6 +329,53 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	}
 
 	return c.LoadTable(ctx, identifier, nil)
+}
+
+// SetTableProperties updates the properties of an existing Iceberg table.
+// The properties will be merged with existing properties. If a property key already exists,
+// its value will be overwritten.
+func (c *Catalog) SetTableProperties(ctx context.Context, identifier table.Identifier, props iceberg.Properties) error {
+	database, tableName, err := identifierToGlueTable(identifier)
+	if err != nil {
+		return err
+	}
+
+	existingTable, err := c.getTable(ctx, database, tableName)
+	if err != nil {
+		return err
+	}
+
+	updatedParameters := map[string]string{}
+	for k, v := range existingTable.Parameters {
+		updatedParameters[k] = v
+	}
+	for k, v := range props {
+		updatedParameters[k] = v
+	}
+
+	tableInput := &types.TableInput{
+		Name:              aws.String(tableName),
+		Owner:             existingTable.Owner,
+		Description:       existingTable.Description,
+		Parameters:        updatedParameters,
+		StorageDescriptor: existingTable.StorageDescriptor,
+		PartitionKeys:     existingTable.PartitionKeys,
+		ViewOriginalText:  existingTable.ViewOriginalText,
+		ViewExpandedText:  existingTable.ViewExpandedText,
+		TableType:         existingTable.TableType,
+		TargetTable:       existingTable.TargetTable,
+	}
+
+	_, err = c.glueSvc.UpdateTable(ctx, &glue.UpdateTableInput{
+		CatalogId:    c.catalogId,
+		DatabaseName: aws.String(database),
+		TableInput:   tableInput,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to update properties for table %s.%s: %w", database, tableName, err)
+	}
+
+	return nil
 }
 
 func (c *Catalog) CommitTable(context.Context, *table.Table, []table.Requirement, []table.Update) (table.Metadata, string, error) {

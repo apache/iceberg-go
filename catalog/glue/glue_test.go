@@ -66,6 +66,12 @@ func (m *mockGlueClient) DeleteTable(ctx context.Context, params *glue.DeleteTab
 	return args.Get(0).(*glue.DeleteTableOutput), args.Error(1)
 }
 
+func (m *mockGlueClient) UpdateTable(ctx context.Context, params *glue.UpdateTableInput, optFns ...func(*glue.Options)) (*glue.UpdateTableOutput, error) {
+	args := m.Called(ctx, params, optFns)
+
+	return args.Get(0).(*glue.UpdateTableOutput), args.Error(1)
+}
+
 func (m *mockGlueClient) GetDatabase(ctx context.Context, params *glue.GetDatabaseInput, optFns ...func(*glue.Options)) (*glue.GetDatabaseOutput, error) {
 	args := m.Called(ctx, params, optFns)
 
@@ -951,6 +957,94 @@ func TestRegisterTableMetadataNotFound(t *testing.T) {
 	_, err = cat.RegisterTable(context.Background(), catalog.ToIdentifier("test_db", "test_table"), "s3://nonexistent-bucket/metadata/metadata.json")
 	assert.Error(err)
 	assert.Contains(err.Error(), "failed to read table metadata from s3://nonexistent-bucket/metadata/metadata.json")
+}
+
+func TestSetTableProperties(t *testing.T) {
+	assert := require.New(t)
+	mockGlueSvc := &mockGlueClient{}
+
+	tableIdentifier := table.Identifier{"test_database", "test_table"}
+	existingProps := map[string]string{
+		"existing_key":    "existing_value",
+		tableTypePropsKey: glueTypeIceberg,
+		"key_to_update":   "old_value",
+	}
+	newProps := iceberg.Properties{
+		"new_key":       "new_value",
+		"key_to_update": "updated_value",
+	}
+
+	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything).Return(&glue.GetTableOutput{
+		Table: &types.Table{
+			Name:       aws.String("test_table"),
+			Parameters: existingProps,
+			Owner:      aws.String("owner"),
+			TableType:  aws.String("EXTERNAL_TABLE"),
+			StorageDescriptor: &types.StorageDescriptor{
+				Location: aws.String("s3://bucket/path"),
+			},
+		},
+	}, nil)
+
+	expectedMergedProps := map[string]string{
+		"existing_key":    "existing_value",
+		tableTypePropsKey: glueTypeIceberg,
+		"key_to_update":   "updated_value",
+		"new_key":         "new_value",
+	}
+
+	mockGlueSvc.On("UpdateTable", mock.Anything, mock.MatchedBy(func(params *glue.UpdateTableInput) bool {
+		if *params.DatabaseName != "test_database" ||
+			*params.TableInput.Name != "test_table" {
+			return false
+		}
+
+		for k, v := range expectedMergedProps {
+			if params.TableInput.Parameters[k] != v {
+				return false
+			}
+		}
+
+		return *params.TableInput.Owner == "owner" &&
+			*params.TableInput.TableType == "EXTERNAL_TABLE" &&
+			*params.TableInput.StorageDescriptor.Location == "s3://bucket/path"
+	}), mock.Anything).Return(&glue.UpdateTableOutput{}, nil)
+
+	glueCatalog := &Catalog{
+		glueSvc: mockGlueSvc,
+	}
+
+	err := glueCatalog.SetTableProperties(context.TODO(), tableIdentifier, newProps)
+
+	assert.NoError(err)
+	mockGlueSvc.AssertExpectations(t)
+}
+
+func TestSetTableProperties_TableNotFound(t *testing.T) {
+	assert := require.New(t)
+	mockGlueSvc := &mockGlueClient{}
+
+	tableIdentifier := table.Identifier{"test_database", "nonexistent"}
+
+	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("nonexistent"),
+	}, mock.Anything).Return(&glue.GetTableOutput{}, &types.EntityNotFoundException{
+		Message: aws.String("Table not found"),
+	})
+
+	glueCatalog := &Catalog{
+		glueSvc: mockGlueSvc,
+	}
+
+	err := glueCatalog.SetTableProperties(context.TODO(), tableIdentifier, iceberg.Properties{"key": "value"})
+
+	assert.Error(err)
+	assert.Contains(err.Error(), "Table not found")
+	mockGlueSvc.AssertExpectations(t)
 }
 
 func TestRegisterTableIntegration(t *testing.T) {
