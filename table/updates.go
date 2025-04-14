@@ -25,6 +25,7 @@ import (
 )
 
 const (
+	// These are the various update actions defined in the iceberg spec
 	UpdateAddSpec      = "add-spec"
 	UpdateAddSchema    = "add-schema"
 	UpdateAddSnapshot  = "add-snapshot"
