@@ -48,11 +48,11 @@ jobs:
 
       - name: Start docker
         run: |
-          docker compose -f dev/docker-compose.yml up -d
+          docker compose -f internal/recipe/docker-compose.yml up -d
           sleep 10
       - name: Provision Tables
         run: |
-          docker compose -f dev/docker-compose.yml exec -T spark-iceberg ipython ./provision.py
+          docker compose -f internal/recipe/docker-compose.yml exec -T spark-iceberg ipython ./provision.py
           sleep 10
 
       - name: Get minio container IP
@@ -70,4 +70,4 @@ jobs:
 
       - name: Show debug logs
         if: ${{ failure() }}
-        run: docker compose -f dev/docker-compose.yml logs
+        run: docker compose -f internal/recipe/docker-compose.yml logs
