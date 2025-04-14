@@ -509,14 +509,13 @@ func MapExec[T, S any](nWorkers int, slice iter.Seq[T], fn func(T) (S, error)) i
 		})
 	}
 
-	for v := range slice {
-		ch <- v
-	}
-	close(ch)
-
 	var err error
 	go func() {
 		defer close(out)
+		for v := range slice {
+			ch <- v
+		}
+		close(ch)
 		err = g.Wait()
 	}()
 

@@ -18,7 +18,9 @@
 package internal_test
 
 import (
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/assert"
@@ -67,4 +69,30 @@ func TestTruncateUpperBoundString(t *testing.T) {
 func TestTruncateUpperBoundBinary(t *testing.T) {
 	assert.Equal(t, []byte{0x01, 0x03}, internal.TruncateUpperBoundBinary([]byte{0x01, 0x02, 0x03}, 2))
 	assert.Nil(t, internal.TruncateUpperBoundBinary([]byte{0xff, 0xff, 0x00}, 2))
+}
+
+func TestMapExecFinish(t *testing.T) {
+	var (
+		ch = make(chan struct{}, 1)
+		f  = func(i int) (int, error) {
+			return i * 2, nil
+		}
+	)
+
+	go func() {
+		defer close(ch)
+		for _, err := range internal.MapExec(3, slices.Values([]int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}), f) {
+			assert.NoError(t, err)
+		}
+	}()
+
+	assert.Eventually(
+		t,
+		func() bool {
+			<-ch
+
+			return true
+		},
+		time.Second, 10*time.Millisecond,
+	)
 }
