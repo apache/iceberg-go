@@ -25,21 +25,25 @@ import (
 )
 
 const (
-	updateSpec              = "add-spec"
-	updateAddSchema         = "add-schema"
-	updateSnapshot          = "add-snapshot"
-	updateSortOrder         = "add-sort-order"
-	updateAssignUUID        = "assign-uuid"
-	updateDefaultSpec       = "set-default-spec"
-	updateCurrentSchema     = "set-current-schema"
-	updateDefaultSortOrder  = "set-default-sort-order"
-	updateSnapshotRef       = "set-snapshot-ref"
-	updateLocation          = "set-location"
-	updateProperties        = "set-properties"
-	updateRemoveProperties  = "remove-properties"
-	updateRemoveSnapshots   = "remove-snapshots"
-	updateRemoveSnapshotRef = "remove-snapshot-ref"
-	updateUpgradeFormat     = "upgrade-format-version"
+	UpdateAddSpec      = "add-spec"
+	UpdateAddSchema    = "add-schema"
+	UpdateAddSnapshot  = "add-snapshot"
+	UpdateAddSortOrder = "add-sort-order"
+
+	UpdateAssignUUID = "assign-uuid"
+
+	UpdateRemoveProperties  = "remove-properties"
+	UpdateRemoveSnapshots   = "remove-snapshots"
+	UpdateRemoveSnapshotRef = "remove-snapshot-ref"
+
+	UpdateSetCurrentSchema    = "set-current-schema"
+	UpdateSetDefaultSortOrder = "set-default-sort-order"
+	UpdateSetDefaultSpec      = "set-default-spec"
+	UpdateSetLocation         = "set-location"
+	UpdateSetProperties       = "set-properties"
+	UpdateSetSnapshotRef      = "set-snapshot-ref"
+
+	UpdateUpgradeFormatVersion = "upgrade-format-version"
 )
 
 // Update represents a change to a table's metadata.
@@ -68,7 +72,7 @@ type assignUUIDUpdate struct {
 // NewAssignUUIDUpdate creates a new update to assign a UUID to the table metadata.
 func NewAssignUUIDUpdate(uuid uuid.UUID) Update {
 	return &assignUUIDUpdate{
-		baseUpdate: baseUpdate{ActionName: updateAssignUUID},
+		baseUpdate: baseUpdate{ActionName: UpdateAssignUUID},
 		UUID:       uuid,
 	}
 }
@@ -88,7 +92,7 @@ type upgradeFormatVersionUpdate struct {
 // of the table metadata to the given formatVersion.
 func NewUpgradeFormatVersionUpdate(formatVersion int) Update {
 	return &upgradeFormatVersionUpdate{
-		baseUpdate:    baseUpdate{ActionName: updateUpgradeFormat},
+		baseUpdate:    baseUpdate{ActionName: UpdateUpgradeFormatVersion},
 		FormatVersion: formatVersion,
 	}
 }
@@ -111,7 +115,7 @@ type addSchemaUpdate struct {
 // schema of the table, and all previously added schemas in the metadata builder are removed.
 func NewAddSchemaUpdate(schema *iceberg.Schema, lastColumnID int, initial bool) Update {
 	return &addSchemaUpdate{
-		baseUpdate:   baseUpdate{ActionName: updateAddSchema},
+		baseUpdate:   baseUpdate{ActionName: UpdateAddSchema},
 		Schema:       schema,
 		LastColumnID: lastColumnID,
 		initial:      initial,
@@ -133,7 +137,7 @@ type setCurrentSchemaUpdate struct {
 // metadata to the given schema ID.
 func NewSetCurrentSchemaUpdate(id int) Update {
 	return &setCurrentSchemaUpdate{
-		baseUpdate: baseUpdate{ActionName: updateCurrentSchema},
+		baseUpdate: baseUpdate{ActionName: UpdateSetCurrentSchema},
 		SchemaID:   id,
 	}
 }
@@ -155,7 +159,7 @@ type addPartitionSpecUpdate struct {
 // and all other previously added specs in the metadata builder are removed.
 func NewAddPartitionSpecUpdate(spec *iceberg.PartitionSpec, initial bool) Update {
 	return &addPartitionSpecUpdate{
-		baseUpdate: baseUpdate{ActionName: updateSpec},
+		baseUpdate: baseUpdate{ActionName: UpdateAddSpec},
 		Spec:       spec,
 		initial:    initial,
 	}
@@ -176,7 +180,7 @@ type setDefaultSpecUpdate struct {
 // table metadata to the given spec ID.
 func NewSetDefaultSpecUpdate(id int) Update {
 	return &setDefaultSpecUpdate{
-		baseUpdate: baseUpdate{ActionName: updateDefaultSpec},
+		baseUpdate: baseUpdate{ActionName: UpdateSetDefaultSpec},
 		SpecID:     id,
 	}
 }
@@ -198,7 +202,7 @@ type addSortOrderUpdate struct {
 // and all previously added sort orders in the metadata builder are removed.
 func NewAddSortOrderUpdate(sortOrder *SortOrder, initial bool) Update {
 	return &addSortOrderUpdate{
-		baseUpdate: baseUpdate{ActionName: updateSortOrder},
+		baseUpdate: baseUpdate{ActionName: UpdateAddSortOrder},
 		SortOrder:  sortOrder,
 		initial:    initial,
 	}
@@ -219,7 +223,7 @@ type setDefaultSortOrderUpdate struct {
 // to the given sort order ID.
 func NewSetDefaultSortOrderUpdate(id int) Update {
 	return &setDefaultSortOrderUpdate{
-		baseUpdate:  baseUpdate{ActionName: updateDefaultSortOrder},
+		baseUpdate:  baseUpdate{ActionName: UpdateSetDefaultSortOrder},
 		SortOrderID: id,
 	}
 }
@@ -238,7 +242,7 @@ type addSnapshotUpdate struct {
 // NewAddSnapshotUpdate creates a new update that adds the given snapshot to the table metadata.
 func NewAddSnapshotUpdate(snapshot *Snapshot) Update {
 	return &addSnapshotUpdate{
-		baseUpdate: baseUpdate{ActionName: updateSnapshot},
+		baseUpdate: baseUpdate{ActionName: UpdateAddSnapshot},
 		Snapshot:   snapshot,
 	}
 }
@@ -270,7 +274,7 @@ func NewSetSnapshotRefUpdate(
 	minSnapshotsToKeep int,
 ) Update {
 	return &setSnapshotRefUpdate{
-		baseUpdate:         baseUpdate{ActionName: updateSnapshotRef},
+		baseUpdate:         baseUpdate{ActionName: UpdateSetSnapshotRef},
 		RefName:            name,
 		RefType:            refType,
 		SnapshotID:         snapshotID,
@@ -310,7 +314,7 @@ type setLocationUpdate struct {
 // NewSetLocationUpdate creates a new update that sets the location of the table metadata.
 func NewSetLocationUpdate(loc string) Update {
 	return &setLocationUpdate{
-		baseUpdate: baseUpdate{ActionName: updateLocation},
+		baseUpdate: baseUpdate{ActionName: UpdateSetLocation},
 		Location:   loc,
 	}
 }
@@ -330,7 +334,7 @@ type setPropertiesUpdate struct {
 // table metadata.
 func NewSetPropertiesUpdate(updates iceberg.Properties) *setPropertiesUpdate {
 	return &setPropertiesUpdate{
-		baseUpdate: baseUpdate{ActionName: updateProperties},
+		baseUpdate: baseUpdate{ActionName: UpdateSetProperties},
 		Updates:    updates,
 	}
 }
@@ -351,7 +355,7 @@ type removePropertiesUpdate struct {
 // it is ignored.
 func NewRemovePropertiesUpdate(removals []string) Update {
 	return &removePropertiesUpdate{
-		baseUpdate: baseUpdate{ActionName: updateRemoveProperties},
+		baseUpdate: baseUpdate{ActionName: UpdateRemoveProperties},
 		Removals:   removals,
 	}
 }
@@ -371,13 +375,13 @@ type removeSnapshotsUpdate struct {
 // the table metadata with the given snapshot IDs.
 func NewRemoveSnapshotsUpdate(ids []int64) Update {
 	return &removeSnapshotsUpdate{
-		baseUpdate:  baseUpdate{ActionName: updateRemoveSnapshots},
+		baseUpdate:  baseUpdate{ActionName: UpdateRemoveSnapshots},
 		SnapshotIDs: ids,
 	}
 }
 
 func (u *removeSnapshotsUpdate) Apply(builder *MetadataBuilder) error {
-	return fmt.Errorf("%w: %s", iceberg.ErrNotImplemented, updateRemoveSnapshots)
+	return fmt.Errorf("%w: %s", iceberg.ErrNotImplemented, UpdateRemoveSnapshots)
 }
 
 type removeSnapshotRefUpdate struct {
@@ -389,11 +393,11 @@ type removeSnapshotRefUpdate struct {
 // from the table metadata.
 func NewRemoveSnapshotRefUpdate(ref string) *removeSnapshotRefUpdate {
 	return &removeSnapshotRefUpdate{
-		baseUpdate: baseUpdate{ActionName: updateRemoveSnapshotRef},
+		baseUpdate: baseUpdate{ActionName: UpdateRemoveSnapshotRef},
 		RefName:    ref,
 	}
 }
 
 func (u *removeSnapshotRefUpdate) Apply(builder *MetadataBuilder) error {
-	return fmt.Errorf("%w: %s", iceberg.ErrNotImplemented, updateRemoveSnapshotRef)
+	return fmt.Errorf("%w: %s", iceberg.ErrNotImplemented, UpdateRemoveSnapshotRef)
 }
