@@ -156,9 +156,11 @@ var testPartitionSpec = iceberg.NewPartitionSpec(
 
 var testSortOrder = table.SortOrder{
 	OrderID: 1,
-	Fields: []table.SortField{{
-		SourceID: 1, Transform: iceberg.IdentityTransform{},
-		Direction: table.SortASC, NullOrder: table.NullsLast},
+	Fields: []table.SortField{
+		{
+			SourceID: 1, Transform: iceberg.IdentityTransform{},
+			Direction: table.SortASC, NullOrder: table.NullsLast,
+		},
 	},
 }
 
