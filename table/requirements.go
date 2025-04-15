@@ -18,8 +18,10 @@
 package table
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/google/uuid"
 )
@@ -34,6 +36,8 @@ const (
 	reqAssertLastAssignedFieldID     = "assert-last-assigned-field-id"
 	reqAssertLastAssignedPartitionID = "assert-last-assigned-partition-id"
 )
+
+var ErrInvalidRequirement = errors.New("invalid requirement")
 
 // A Requirement is a validation rule that must be satisfied before attempting to
 // make and commit changes to a table. Requirements are used to ensure that the
@@ -272,4 +276,90 @@ func (a *assertDefaultSortOrderId) Validate(meta Metadata) error {
 	}
 
 	return nil
+}
+
+// ParseRequirement parses json data provided by the reader into a Requirement
+func ParseRequirement(r io.Reader) (Requirement, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+
+	return ParseRequirementBytes(data)
+}
+
+// ParseRequirementString parses json string into a Requirement
+func ParseRequirementString(s string) (Requirement, error) {
+	return ParseRequirementBytes([]byte(s))
+}
+
+// ParseRequirementBytes parses json bytes into a Requirement
+func ParseRequirementBytes(b []byte) (Requirement, error) {
+	var base baseRequirement
+	if err := json.Unmarshal(b, &base); err != nil {
+		return nil, err
+	}
+
+	switch base.Type {
+	case reqAssertCreate:
+		return AssertCreate(), nil
+
+	case reqAssertTableUUID:
+		var req assertTableUuid
+		if err := json.Unmarshal(b, &req); err != nil {
+			return nil, err
+		}
+
+		return AssertTableUUID(req.UUID), nil
+
+	case reqAssertRefSnapshotID:
+		var req assertRefSnapshotID
+		if err := json.Unmarshal(b, &req); err != nil {
+			return nil, err
+		}
+
+		return AssertRefSnapshotID(req.Ref, req.SnapshotID), nil
+
+	case reqAssertDefaultSpecID:
+		var req assertDefaultSpecId
+		if err := json.Unmarshal(b, &req); err != nil {
+			return nil, err
+		}
+
+		return AssertDefaultSpecID(req.DefaultSpecID), nil
+
+	case reqAssertCurrentSchemaID:
+		var req assertCurrentSchemaId
+		if err := json.Unmarshal(b, &req); err != nil {
+			return nil, err
+		}
+
+		return AssertCurrentSchemaID(req.CurrentSchemaID), nil
+
+	case reqAssertDefaultSortOrderID:
+		var req assertDefaultSortOrderId
+		if err := json.Unmarshal(b, &req); err != nil {
+			return nil, err
+		}
+
+		return AssertDefaultSortOrderID(req.DefaultSortOrderID), nil
+
+	case reqAssertLastAssignedFieldID:
+		var req assertLastAssignedFieldId
+		if err := json.Unmarshal(b, &req); err != nil {
+			return nil, err
+		}
+
+		return AssertLastAssignedFieldID(req.LastAssignedFieldID), nil
+
+	case reqAssertLastAssignedPartitionID:
+		var req assertLastAssignedPartitionId
+		if err := json.Unmarshal(b, &req); err != nil {
+			return nil, err
+		}
+
+		return AssertLastAssignedPartitionID(req.LastAssignedPartitionID), nil
+	}
+
+	return nil, ErrInvalidRequirement
 }

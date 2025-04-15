@@ -21,6 +21,7 @@ package rest_test
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"testing"
 
@@ -179,6 +180,39 @@ func (s *RestIntegrationSuite) TestCreateTable() {
 	s.True(exists)
 
 	s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table")))
+}
+
+func (s *RestIntegrationSuite) TestCreateView() {
+	s.ensureNamespace()
+
+	const location = "s3://warehouse/iceberg"
+	// create a table first
+	tbl, err := s.cat.CreateTable(s.ctx,
+		catalog.ToIdentifier(TestNamespaceIdent, "test-table"),
+		tableSchemaSimple, catalog.WithProperties(iceberg.Properties{"foobar": "baz"}),
+		catalog.WithLocation(location))
+	s.Require().NoError(err)
+	s.Require().NotNil(tbl)
+
+	s.Equal(location, tbl.Location())
+	s.Equal("baz", tbl.Properties()["foobar"])
+
+	exists, err := s.cat.CheckTableExists(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table"))
+	s.Require().NoError(err)
+	s.True(exists)
+
+	// Create a view
+	viewSQL := fmt.Sprintf("SELECT * FROM  %s.%s", TestNamespaceIdent, "test-table")
+
+	err = s.cat.CreateView(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view"), tableSchemaSimple, viewSQL, iceberg.Properties{"foobar": "baz"})
+	s.Require().NoError(err)
+
+	exists, err = s.cat.CheckViewExists(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view"))
+	s.Require().NoError(err)
+	s.True(exists)
+
+	s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table")))
+	s.Require().NoError(s.cat.DropView(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view")))
 }
 
 func (s *RestIntegrationSuite) TestWriteCommitTable() {

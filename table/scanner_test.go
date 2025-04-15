@@ -36,8 +36,10 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/rest"
+	"github.com/apache/iceberg-go/internal/recipe"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -47,6 +49,10 @@ type ScannerSuite struct {
 	ctx   context.Context
 	cat   catalog.Catalog
 	props iceberg.Properties
+}
+
+func (s *ScannerSuite) SetupSuite() {
+	require.NoError(s.T(), recipe.Start(s.T()))
 }
 
 func (s *ScannerSuite) SetupTest() {
