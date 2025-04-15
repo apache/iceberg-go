@@ -19,8 +19,10 @@ package glue
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -34,6 +36,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/glue"
 	"github.com/aws/aws-sdk-go-v2/service/glue/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/awsdocs/aws-doc-sdk-examples/gov2/testtools"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -140,6 +143,24 @@ var testNonIcebergGlueTable = types.Table{
 	Name: aws.String("other_table"),
 	Parameters: map[string]string{
 		metadataLocationPropsKey: "s3://test-bucket/other_table/",
+	},
+}
+
+var testSchema = iceberg.NewSchemaWithIdentifiers(0, []int{2},
+	iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String},
+	iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool})
+
+var testPartitionSpec = iceberg.NewPartitionSpec(
+	iceberg.PartitionField{SourceID: 2, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "bar"})
+
+var testSortOrder = table.SortOrder{
+	OrderID: 1,
+	Fields: []table.SortField{
+		{
+			SourceID: 1, Transform: iceberg.IdentityTransform{},
+			Direction: table.SortASC, NullOrder: table.NullsLast,
+		},
 	},
 }
 
@@ -603,8 +624,6 @@ func TestGlueUpdateNamespaceProperties(t *testing.T) {
 }
 
 func TestGlueRenameTable(t *testing.T) {
-	t.Skip("Skipping this test temporarily because LoadTable is not testable due to the dependency on the IO.")
-
 	assert := require.New(t)
 
 	mockGlueSvc := &mockGlueClient{}
@@ -659,13 +678,35 @@ func TestGlueRenameTable(t *testing.T) {
 		Name:         aws.String("test_table"),
 	}, mock.Anything).Return(&glue.DeleteTableOutput{}, nil).Once()
 
+	// Setup S3 FS stubs to mimic reading json metadata file
+	stubber := testtools.NewStubber()
+	testMetadata, err := table.NewMetadata(
+		testSchema, &testPartitionSpec, testSortOrder, "s3://test-bucket/new_test_table/", nil)
+	assert.NoError(err)
+	strMeta, err := json.Marshal(testMetadata)
+	assert.NoError(err)
+
+	stubber.Add(testtools.Stub{
+		OperationName: "GetObject",
+		Input: &s3.GetObjectInput{
+			Bucket:       aws.String("test-bucket"),
+			Key:          aws.String("new_test_table/metadata/abc123-123.metadata.json"),
+			ChecksumMode: "ENABLED",
+		},
+		Output: &s3.GetObjectOutput{
+			Body: io.NopCloser(strings.NewReader(string(strMeta))),
+		},
+	})
+
 	glueCatalog := &Catalog{
 		glueSvc: mockGlueSvc,
+		awsCfg:  stubber.SdkConfig,
 	}
 
 	renamedTable, err := glueCatalog.RenameTable(context.TODO(), TableIdentifier("test_database", "test_table"), TableIdentifier("test_database", "new_test_table"))
 	assert.NoError(err)
 	assert.Equal("new_test_table", renamedTable.Identifier()[1])
+	assert.True(testSchema.Equals(renamedTable.Schema()))
 }
 
 func TestGlueRenameTable_DeleteTableFailureRollback(t *testing.T) {
