@@ -427,6 +427,24 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 	return renamedTable, nil
 }
 
+// CheckTableExists returns if an Iceberg table exists in the Glue catalog.
+func (c *Catalog) CheckTableExists(ctx context.Context, identifier table.Identifier) (bool, error) {
+	database, tableName, err := identifierToGlueTable(identifier)
+	if err != nil {
+		return false, err
+	}
+
+	_, err = c.getTable(ctx, database, tableName)
+	if err != nil {
+		if errors.Is(err, catalog.ErrNoSuchTable) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	return true, nil
+}
+
 // CreateNamespace creates a new Iceberg namespace in the Glue catalog.
 func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error {
 	database, err := identifierToGlueDatabase(namespace)
@@ -470,6 +488,9 @@ func (c *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Iden
 
 	_, err = c.getDatabase(ctx, databaseName)
 	if err != nil {
+		if errors.Is(err, catalog.ErrNoSuchNamespace) {
+			return false, nil
+		}
 		return false, err
 	}
 
@@ -598,7 +619,8 @@ func (c *Catalog) getTable(ctx context.Context, database, tableName string) (*ty
 		},
 	)
 	if err != nil {
-		if errors.Is(err, &types.EntityNotFoundException{}) {
+		var notFoundErr *types.EntityNotFoundException
+		if errors.As(err, &notFoundErr) {
 			return nil, fmt.Errorf("failed to get table %s.%s: %w", database, tableName, catalog.ErrNoSuchTable)
 		}
 
@@ -616,7 +638,8 @@ func (c *Catalog) getTable(ctx context.Context, database, tableName string) (*ty
 func (c *Catalog) getDatabase(ctx context.Context, databaseName string) (*types.Database, error) {
 	database, err := c.glueSvc.GetDatabase(ctx, &glue.GetDatabaseInput{CatalogId: c.catalogId, Name: aws.String(databaseName)})
 	if err != nil {
-		if errors.Is(err, &types.EntityNotFoundException{}) {
+		var notFoundErr *types.EntityNotFoundException
+		if errors.As(err, &notFoundErr) {
 			return nil, fmt.Errorf("failed to get namespace %s: %w", databaseName, catalog.ErrNoSuchNamespace)
 		}
 
