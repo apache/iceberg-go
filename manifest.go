@@ -456,10 +456,7 @@ func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]M
 	}
 
 	metadata := dec.Metadata()
-	sc, err := avro.ParseBytes(dec.Metadata()["avro.schema"])
-	if err != nil {
-		return nil, err
-	}
+	sc := dec.Schema()
 
 	fieldNameToID, fieldIDToLogicalType := getFieldIDMap(sc)
 	isFallback := false
