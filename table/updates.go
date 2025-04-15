@@ -24,8 +24,8 @@ import (
 	"github.com/google/uuid"
 )
 
+// These are the various update actions defined in the iceberg spec
 const (
-	// These are the various update actions defined in the iceberg spec
 	UpdateAddSpec      = "add-spec"
 	UpdateAddSchema    = "add-schema"
 	UpdateAddSnapshot  = "add-snapshot"
