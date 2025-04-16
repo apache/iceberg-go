@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -226,7 +227,7 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 				return nil, err
 			}
 
-			payloadHash = string(h.Sum(nil))
+			payloadHash = hex.EncodeToString(h.Sum(nil))
 		}
 
 		creds, err := s.cfg.Credentials.Retrieve(r.Context())
