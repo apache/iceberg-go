@@ -92,6 +92,7 @@ func WithPrefix(prefix string) Option {
 func WithAwsConfig(cfg aws.Config) Option {
 	return func(o *options) {
 		o.awsConfig = cfg
+		o.awsConfigSet = true
 	}
 }
 
@@ -109,6 +110,7 @@ func WithAdditionalProps(props iceberg.Properties) Option {
 
 type options struct {
 	awsConfig         aws.Config
+	awsConfigSet      bool
 	tlsConfig         *tls.Config
 	credential        string
 	oauthToken        string

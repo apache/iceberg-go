@@ -375,10 +375,7 @@ func handleNon200(rsp *http.Response, override map[int]error) error {
 	return e
 }
 
-func fromProps(props iceberg.Properties) *options {
-	o := &options{
-		additionalProps: iceberg.Properties{},
-	}
+func fromProps(props iceberg.Properties, o *options) {
 	for k, v := range props {
 		switch k {
 		case keyOauthToken:
@@ -415,21 +412,18 @@ func fromProps(props iceberg.Properties) *options {
 		case "uri", "type":
 		default:
 			if v != "" {
+				if o.additionalProps == nil {
+					o.additionalProps = iceberg.Properties{}
+				}
 				o.additionalProps[k] = v
 			}
 		}
 	}
-
-	return o
 }
 
 func toProps(o *options) iceberg.Properties {
-	var props iceberg.Properties
-	if o.additionalProps != nil {
-		props = o.additionalProps
-	} else {
-		props = iceberg.Properties{}
-	}
+	props := iceberg.Properties{}
+	maps.Copy(props, o.additionalProps)
 
 	setIf := func(key, v string) {
 		if v != "" {
@@ -464,10 +458,11 @@ type Catalog struct {
 }
 
 func newCatalogFromProps(ctx context.Context, name string, uri string, p iceberg.Properties) (*Catalog, error) {
-	ops := fromProps(p)
+	var ops options
+	fromProps(p, &ops)
 
 	r := &Catalog{name: name}
-	if err := r.init(ctx, ops, uri); err != nil {
+	if err := r.init(ctx, &ops, uri); err != nil {
 		return nil, err
 	}
 
@@ -585,11 +580,15 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	session.defaultHeaders.Set("X-Iceberg-Access-Delegation", "vended-credentials")
 
 	if opts.enableSigv4 {
-		cfg, err := config.LoadDefaultConfig(ctx)
-		if err != nil {
-			return nil, err
+		cfg := opts.awsConfig
+		if !opts.awsConfigSet {
+			// If no config provided, load defaults from environment.
+			var err error
+			cfg, err = config.LoadDefaultConfig(ctx)
+			if err != nil {
+				return nil, err
+			}
 		}
-
 		if opts.sigv4Region != "" {
 			cfg.Region = opts.sigv4Region
 		}
@@ -627,9 +626,8 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client,
 	maps.Copy(cfg, toProps(opts))
 	maps.Copy(cfg, rsp.Overrides)
 
-	o := fromProps(cfg)
-	o.awsConfig = opts.awsConfig
-	o.tlsConfig = opts.tlsConfig
+	o := *opts
+	fromProps(cfg, &o)
 
 	if uri, ok := cfg["uri"]; ok {
 		r.baseURI, err = url.Parse(uri)
@@ -639,7 +637,7 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client,
 		r.baseURI = r.baseURI.JoinPath("v1")
 	}
 
-	return sess, o, nil
+	return sess, &o, nil
 }
 
 func (r *Catalog) Name() string              { return r.name }
