@@ -172,6 +172,7 @@ func TestSigv4ConcurrentSigners(t *testing.T) {
 				SecretAccessKey: "01234567abcdefgh01234567abcdefgh01234567abcdefgh01234567abcdefgh",
 			},
 		}
+
 		return nil
 	})
 	require.NoError(t, err)
