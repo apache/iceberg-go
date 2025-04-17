@@ -595,8 +595,10 @@ func (c *Catalog) CheckTableExists(ctx context.Context, identifier table.Identif
 		if errors.Unwrap(err) == catalog.ErrNoSuchTable {
 			return false, nil
 		}
+
 		return false, err
 	}
+
 	return true, nil
 }
 
