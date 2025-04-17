@@ -439,6 +439,7 @@ func (c *Catalog) CheckTableExists(ctx context.Context, identifier table.Identif
 		if errors.Is(err, catalog.ErrNoSuchTable) {
 			return false, nil
 		}
+
 		return false, err
 	}
 
