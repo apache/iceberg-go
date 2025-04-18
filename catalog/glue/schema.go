@@ -22,8 +22,16 @@ import (
 	"strings"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/glue/types"
+	"golang.org/x/exp/maps"
+)
+
+const (
+	icebergFieldID       = "iceberg.field.id"
+	icebergFieldOptional = "iceberg.field.optional"
+	icebergFieldCurrent  = "iceberg.field.current"
 )
 
 // schemaToGlueColumns converts an Iceberg schema to a list of Glue columns.
@@ -106,4 +114,37 @@ func icebergTypeToGlueType(typ iceberg.Type) string {
 	default:
 		return "string"
 	}
+}
+
+func toColumns(metadata table.Metadata) []types.Column {
+	result := make(map[string]types.Column)
+
+	appendToResult := func(field iceberg.NestedField, isCurrent bool) {
+		if _, found := result[field.Name]; found {
+			return
+		}
+
+		glueColumn := fieldToGlueColumn(field)
+		glueColumn.Parameters[icebergFieldID] = fmt.Sprintf("%d", field.ID)
+		glueColumn.Parameters[icebergFieldOptional] = fmt.Sprintf("%t", field.Required)
+		glueColumn.Parameters[icebergFieldCurrent] = fmt.Sprintf("%t", isCurrent)
+		result[field.Name] = glueColumn
+	}
+
+	currentSchema := metadata.CurrentSchema()
+	for _, field := range currentSchema.Fields() {
+		appendToResult(field, true)
+	}
+
+	for _, schema := range metadata.Schemas() {
+		if schema.ID == metadata.CurrentSchema().ID {
+			continue
+		}
+
+		for _, field := range schema.Fields() {
+			appendToResult(field, false)
+		}
+	}
+
+	return maps.Values(result)
 }
