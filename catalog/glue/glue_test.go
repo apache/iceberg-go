@@ -470,9 +470,8 @@ func TestGlueCheckNamespaceNotExists(t *testing.T) {
 	}
 
 	exists, err := glueCatalog.CheckNamespaceExists(context.TODO(), DatabaseIdentifier("nonexistent_namespace"))
-	assert.Error(err)
+	assert.Nil(err)
 	assert.False(exists)
-	assert.ErrorContains(err, "Database not found")
 }
 
 func TestGlueUpdateNamespaceProperties(t *testing.T) {
@@ -1022,4 +1021,38 @@ func TestRegisterTableIntegration(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal([]string{tableName}, tbl.Identifier())
 	assert.Equal(metadataLocation, tbl.MetadataLocation())
+}
+
+func TestGlueCheckTableExists(t *testing.T) {
+	assert := require.New(t)
+	mockGlueSvc := &mockGlueClient{}
+	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything).Return(&glue.GetTableOutput{Table: &testIcebergGlueTable1}, nil).Once()
+	glueCatalog := &Catalog{
+		glueSvc: mockGlueSvc,
+	}
+	exists, err := glueCatalog.CheckTableExists(context.TODO(), TableIdentifier("test_database", "test_table"))
+	assert.NoError(err)
+	assert.True(exists)
+}
+
+func TestGlueCheckTableNotExists(t *testing.T) {
+	assert := require.New(t)
+	mockGlueSvc := &mockGlueClient{}
+
+	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("nonexistent_table"),
+	}, mock.Anything).Return(&glue.GetTableOutput{},
+		&types.EntityNotFoundException{}).Once()
+
+	glueCatalog := &Catalog{
+		glueSvc: mockGlueSvc,
+	}
+
+	exists, err := glueCatalog.CheckTableExists(context.TODO(), TableIdentifier("test_database", "nonexistent_table"))
+	assert.Nil(err)
+	assert.False(exists)
 }
