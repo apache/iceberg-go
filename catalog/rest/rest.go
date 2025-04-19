@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -198,7 +199,7 @@ type sessionTransport struct {
 	signer         v4.HTTPSigner
 	cfg            aws.Config
 	service        string
-	h              hash.Hash
+	newHash        func() hash.Hash
 }
 
 // from https://pkg.go.dev/github.com/aws/aws-sdk-go-v2/aws/signer/v4#Signer.SignHTTP
@@ -221,12 +222,12 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 				return nil, err
 			}
 
-			if _, err = io.Copy(s.h, rdr); err != nil {
+			h := s.newHash()
+			if _, err = io.Copy(h, rdr); err != nil {
 				return nil, err
 			}
 
-			payloadHash = string(s.h.Sum(nil))
-			s.h.Reset()
+			payloadHash = hex.EncodeToString(h.Sum(nil))
 		}
 
 		creds, err := s.cfg.Credentials.Retrieve(r.Context())
@@ -375,10 +376,7 @@ func handleNon200(rsp *http.Response, override map[int]error) error {
 	return e
 }
 
-func fromProps(props iceberg.Properties) *options {
-	o := &options{
-		additionalProps: iceberg.Properties{},
-	}
+func fromProps(props iceberg.Properties, o *options) {
 	for k, v := range props {
 		switch k {
 		case keyOauthToken:
@@ -415,21 +413,18 @@ func fromProps(props iceberg.Properties) *options {
 		case "uri", "type":
 		default:
 			if v != "" {
+				if o.additionalProps == nil {
+					o.additionalProps = iceberg.Properties{}
+				}
 				o.additionalProps[k] = v
 			}
 		}
 	}
-
-	return o
 }
 
 func toProps(o *options) iceberg.Properties {
-	var props iceberg.Properties
-	if o.additionalProps != nil {
-		props = o.additionalProps
-	} else {
-		props = iceberg.Properties{}
-	}
+	props := iceberg.Properties{}
+	maps.Copy(props, o.additionalProps)
 
 	setIf := func(key, v string) {
 		if v != "" {
@@ -464,10 +459,11 @@ type Catalog struct {
 }
 
 func newCatalogFromProps(ctx context.Context, name string, uri string, p iceberg.Properties) (*Catalog, error) {
-	ops := fromProps(p)
+	var ops options
+	fromProps(p, &ops)
 
 	r := &Catalog{name: name}
-	if err := r.init(ctx, ops, uri); err != nil {
+	if err := r.init(ctx, &ops, uri); err != nil {
 		return nil, err
 	}
 
@@ -585,17 +581,21 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	session.defaultHeaders.Set("X-Iceberg-Access-Delegation", "vended-credentials")
 
 	if opts.enableSigv4 {
-		cfg, err := config.LoadDefaultConfig(ctx)
-		if err != nil {
-			return nil, err
+		cfg := opts.awsConfig
+		if !opts.awsConfigSet {
+			// If no config provided, load defaults from environment.
+			var err error
+			cfg, err = config.LoadDefaultConfig(ctx)
+			if err != nil {
+				return nil, err
+			}
 		}
-
 		if opts.sigv4Region != "" {
 			cfg.Region = opts.sigv4Region
 		}
 
 		session.cfg, session.service = cfg, opts.sigv4Service
-		session.signer, session.h = v4.NewSigner(), sha256.New()
+		session.signer, session.newHash = v4.NewSigner(), sha256.New
 	}
 
 	return cl, nil
@@ -627,9 +627,8 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client,
 	maps.Copy(cfg, toProps(opts))
 	maps.Copy(cfg, rsp.Overrides)
 
-	o := fromProps(cfg)
-	o.awsConfig = opts.awsConfig
-	o.tlsConfig = opts.tlsConfig
+	o := *opts
+	fromProps(cfg, &o)
 
 	if uri, ok := cfg["uri"]; ok {
 		r.baseURI, err = url.Parse(uri)
@@ -639,7 +638,7 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client,
 		r.baseURI = r.baseURI.JoinPath("v1")
 	}
 
-	return sess, o, nil
+	return sess, &o, nil
 }
 
 func (r *Catalog) Name() string              { return r.name }
