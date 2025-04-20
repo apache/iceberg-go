@@ -592,7 +592,7 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 func (c *Catalog) CheckTableExists(ctx context.Context, identifier table.Identifier) (bool, error) {
 	_, err := c.LoadTable(ctx, identifier, nil)
 	if err != nil {
-		if errors.Unwrap(err) == catalog.ErrNoSuchTable {
+		if errors.Is(err, catalog.ErrNoSuchTable) {
 			return false, nil
 		}
 
