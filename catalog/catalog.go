@@ -97,6 +97,8 @@ type Catalog interface {
 	// RenameTable tells the catalog to rename a given table by the identifiers
 	// provided, and then loads and returns the destination table
 	RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error)
+	// CheckTableExists returns if the table exists
+	CheckTableExists(ctx context.Context, identifier table.Identifier) (bool, error)
 	// ListNamespaces returns the list of available namespaces, optionally filtering by a
 	// parent namespace
 	ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error)
@@ -104,6 +106,8 @@ type Catalog interface {
 	CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error
 	// DropNamespace tells the catalog to drop the namespace and all tables in that namespace
 	DropNamespace(ctx context.Context, namespace table.Identifier) error
+	// CheckNamespaceExists returns if the namespace exists
+	CheckNamespaceExists(ctx context.Context, namespace table.Identifier) (bool, error)
 	// LoadNamespaceProperties returns the current properties in the catalog for
 	// a given namespace
 	LoadNamespaceProperties(ctx context.Context, namespace table.Identifier) (iceberg.Properties, error)

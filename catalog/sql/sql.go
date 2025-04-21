@@ -589,6 +589,19 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 	return c.LoadTable(ctx, to, nil)
 }
 
+func (c *Catalog) CheckTableExists(ctx context.Context, identifier table.Identifier) (bool, error) {
+	_, err := c.LoadTable(ctx, identifier, nil)
+	if err != nil {
+		if errors.Is(err, catalog.ErrNoSuchTable) {
+			return false, nil
+		}
+
+		return false, err
+	}
+
+	return true, nil
+}
+
 func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error {
 	if err := checkValidNamespace(namespace); err != nil {
 		return err
@@ -870,4 +883,8 @@ func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 
 		return nil
 	})
+}
+
+func (c *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Identifier) (bool, error) {
+	return c.namespaceExists(ctx, strings.Join(namespace, "."))
 }
