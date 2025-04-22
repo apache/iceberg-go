@@ -335,6 +335,27 @@ func (b *MetadataBuilder) AddSnapshot(snapshot *Snapshot) (*MetadataBuilder, err
 	return b, nil
 }
 
+func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64) (*MetadataBuilder, error) {
+	var snapshotsToKeep []Snapshot
+
+	for _, snapshot := range b.snapshotList {
+		if slices.Contains(snapshotIds, snapshot.SnapshotID) {
+			if snapshot.SnapshotID == *b.currentSnapshotID {
+				return nil, errors.New("current snapshot cannot be removed")
+			}
+
+			continue
+		}
+
+		snapshotsToKeep = append(snapshotsToKeep, snapshot)
+	}
+
+	b.updates = append(b.updates, NewRemoveSnapshotsUpdate(snapshotIds))
+	b.snapshotList = snapshotsToKeep
+
+	return b, nil
+}
+
 func (b *MetadataBuilder) AddSortOrder(sortOrder *SortOrder, initial bool) (*MetadataBuilder, error) {
 	var sortOrders []SortOrder
 	if !initial {
@@ -589,6 +610,21 @@ func (b *MetadataBuilder) SetSnapshotRef(
 	}
 
 	b.refs[name] = ref
+
+	return b, nil
+}
+
+func (b *MetadataBuilder) RemoveSnapshotRef(name string) (*MetadataBuilder, error) {
+	if _, found := b.refs[name]; !found {
+		return nil, fmt.Errorf("snapshot ref not found: %s", name)
+	}
+
+	if name == MainBranch {
+		return nil, errors.New("cannot remove main branch's snapshot ref")
+	}
+
+	delete(b.refs, name)
+	b.updates = append(b.updates, NewRemoveSnapshotRefUpdate(name))
 
 	return b, nil
 }

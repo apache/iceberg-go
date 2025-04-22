@@ -30,6 +30,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
 )
@@ -144,6 +145,120 @@ func (t *Transaction) SetProperties(props iceberg.Properties) error {
 
 func (t *Transaction) UpdateSpec(caseSensitive bool) *UpdateSpec {
 	return NewUpdateSpec(t, caseSensitive)
+}
+
+type expireSnapshotsCfg struct {
+	minSnapshotsToKeep *int
+	maxSnapshotAgeMs   *int64
+}
+
+type ExpireSnapshotsOpt func(*expireSnapshotsCfg)
+
+func WithRetainLast(n int) ExpireSnapshotsOpt {
+	return func(cfg *expireSnapshotsCfg) {
+		cfg.minSnapshotsToKeep = &n
+	}
+}
+
+func WithOlderThan(t time.Duration) ExpireSnapshotsOpt {
+	return func(cfg *expireSnapshotsCfg) {
+		n := t.Milliseconds()
+		cfg.maxSnapshotAgeMs = &n
+	}
+}
+
+func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
+	var (
+		cfg          expireSnapshotsCfg
+		updates      []Update
+		snapsToKeep  = make(map[int64]struct{})
+		refsToDelete = make(map[string]struct{})
+	)
+
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	for refName, ref := range t.meta.refs {
+		if refName == MainBranch {
+			continue
+		}
+
+		snap, err := t.meta.SnapshotByID(ref.SnapshotID)
+		if err != nil {
+			return err
+		}
+
+		maxRefAgeMs := internal.Coalesce(ref.MaxRefAgeMs, cfg.maxSnapshotAgeMs)
+		if maxRefAgeMs == nil {
+			return errors.New("cannot find a valid value for maxRefAgeMs")
+		}
+
+		refAge := time.Now().UnixMilli() - snap.TimestampMs
+		if refAge > *maxRefAgeMs {
+			updates = append(updates, NewRemoveSnapshotRefUpdate(refName))
+			refsToDelete[refName] = struct{}{}
+		}
+	}
+
+	for refName, ref := range t.meta.refs {
+		if _, found := refsToDelete[refName]; found {
+			continue
+		}
+
+		var (
+			minSnapshotsToKeep = internal.Coalesce(ref.MinSnapshotsToKeep, cfg.minSnapshotsToKeep)
+			maxSnapshotAgeMs   = internal.Coalesce(ref.MaxSnapshotAgeMs, cfg.maxSnapshotAgeMs)
+		)
+
+		if minSnapshotsToKeep == nil || maxSnapshotAgeMs == nil {
+			return errors.New("cannot find a valid value for minSnapshotsToKeep and maxSnapshotAgeMs")
+		}
+
+		if ref.SnapshotRefType != BranchRef {
+			snapsToKeep[ref.SnapshotID] = struct{}{}
+
+			continue
+		}
+
+		var (
+			numSnapshots int
+			snapId       = ref.SnapshotID
+		)
+
+		for {
+			snap, err := t.meta.SnapshotByID(snapId)
+			if err != nil {
+				return err
+			}
+
+			snapAge := time.Now().UnixMilli() - snap.TimestampMs
+			if (snapAge > *maxSnapshotAgeMs) && (numSnapshots >= *minSnapshotsToKeep) {
+				break
+			}
+
+			snapsToKeep[snap.SnapshotID] = struct{}{}
+
+			if snap.ParentSnapshotID == nil {
+				break
+			}
+
+			snapId = *snap.ParentSnapshotID
+			numSnapshots++
+		}
+	}
+
+	var snapsToDelete []int64
+
+	for _, snap := range t.meta.snapshotList {
+		if _, found := snapsToKeep[snap.SnapshotID]; !found {
+			snapsToDelete = append(snapsToDelete, snap.SnapshotID)
+		}
+	}
+
+	updates = append(updates, NewRemoveSnapshotsUpdate(snapsToDelete))
+
+	return t.apply(updates, nil)
 }
 
 func (t *Transaction) AppendTable(ctx context.Context, tbl arrow.Table, batchSize int64, snapshotProps iceberg.Properties) error {
