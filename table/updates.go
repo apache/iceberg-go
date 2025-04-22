@@ -18,8 +18,6 @@
 package table
 
 import (
-	"fmt"
-
 	"github.com/apache/iceberg-go"
 	"github.com/google/uuid"
 )
@@ -382,7 +380,9 @@ func NewRemoveSnapshotsUpdate(ids []int64) Update {
 }
 
 func (u *removeSnapshotsUpdate) Apply(builder *MetadataBuilder) error {
-	return fmt.Errorf("%w: %s", iceberg.ErrNotImplemented, UpdateRemoveSnapshots)
+	_, err := builder.RemoveSnapshots(u.SnapshotIDs)
+
+	return err
 }
 
 type removeSnapshotRefUpdate struct {
@@ -400,5 +400,7 @@ func NewRemoveSnapshotRefUpdate(ref string) *removeSnapshotRefUpdate {
 }
 
 func (u *removeSnapshotRefUpdate) Apply(builder *MetadataBuilder) error {
-	return fmt.Errorf("%w: %s", iceberg.ErrNotImplemented, UpdateRemoveSnapshotRef)
+	_, err := builder.RemoveSnapshotRef(u.RefName)
+
+	return err
 }
