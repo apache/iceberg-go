@@ -449,7 +449,10 @@ func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]M
 		return nil, err
 	}
 	defer f.Close()
+	return readManifestEntries(m, f, discardDeleted)
+}
 
+func readManifestEntries(m ManifestFile, f io.Reader, discardDeleted bool) ([]ManifestEntry, error) {
 	dec, err := ocf.NewDecoder(f, ocf.WithDecoderSchemaCache(&avro.SchemaCache{}))
 	if err != nil {
 		return nil, err
