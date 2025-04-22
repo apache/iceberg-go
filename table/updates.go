@@ -448,7 +448,9 @@ func NewRemoveSnapshotsUpdate(ids []int64) *removeSnapshotsUpdate {
 }
 
 func (u *removeSnapshotsUpdate) Apply(builder *MetadataBuilder) error {
-	return fmt.Errorf("%w: %s", iceberg.ErrNotImplemented, UpdateRemoveSnapshots)
+	_, err := builder.RemoveSnapshots(u.SnapshotIDs)
+
+	return err
 }
 
 type removeSnapshotRefUpdate struct {
@@ -466,7 +468,9 @@ func NewRemoveSnapshotRefUpdate(ref string) *removeSnapshotRefUpdate {
 }
 
 func (u *removeSnapshotRefUpdate) Apply(builder *MetadataBuilder) error {
-	return fmt.Errorf("%w: %s", iceberg.ErrNotImplemented, UpdateRemoveSnapshotRef)
+	_, err := builder.RemoveSnapshotRef(u.RefName)
+
+	return err
 }
 
 type removeSpecUpdate struct {
