@@ -341,7 +341,7 @@ func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64) (*MetadataBuilder
 	for _, snapshot := range b.snapshotList {
 		if slices.Contains(snapshotIds, snapshot.SnapshotID) {
 			if snapshot.SnapshotID == *b.currentSnapshotID {
-				return nil, fmt.Errorf("current snapshot cannot be removed")
+				return nil, errors.New("current snapshot cannot be removed")
 			}
 
 			continue
@@ -352,6 +352,7 @@ func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64) (*MetadataBuilder
 
 	b.updates = append(b.updates, NewRemoveSnapshotsUpdate(snapshotIds))
 	b.snapshotList = snapshotsToKeep
+
 	return b, nil
 }
 
@@ -619,11 +620,12 @@ func (b *MetadataBuilder) RemoveSnapshotRef(name string) (*MetadataBuilder, erro
 	}
 
 	if name == MainBranch {
-		return nil, fmt.Errorf("cannot remove main branch's snapshot ref")
+		return nil, errors.New("cannot remove main branch's snapshot ref")
 	}
 
 	delete(b.refs, name)
 	b.updates = append(b.updates, NewRemoveSnapshotRefUpdate(name))
+
 	return b, nil
 }
 

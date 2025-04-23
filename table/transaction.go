@@ -158,7 +158,7 @@ func WithRetainLast(n int) ExpireSnapshotsOpt {
 
 func WithOlderThan(t time.Duration) ExpireSnapshotsOpt {
 	return func(cfg *expireSnapshotsCfg) {
-		var n = t.Milliseconds()
+		n := t.Milliseconds()
 		cfg.maxSnapshotAgeMs = &n
 	}
 }
@@ -181,17 +181,16 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		}
 
 		snap, err := t.meta.SnapshotByID(ref.SnapshotID)
-
 		if err != nil {
 			return err
 		}
 
-		var maxRefAgeMs = internal.Coalesce(ref.MaxRefAgeMs, cfg.maxSnapshotAgeMs)
+		maxRefAgeMs := internal.Coalesce(ref.MaxRefAgeMs, cfg.maxSnapshotAgeMs)
 		if maxRefAgeMs == nil {
-			return fmt.Errorf("cannot find a valid value for maxRefAgeMs")
+			return errors.New("cannot find a valid value for maxRefAgeMs")
 		}
 
-		var refAge = time.Now().UnixMilli() - snap.TimestampMs
+		refAge := time.Now().UnixMilli() - snap.TimestampMs
 		if refAge > *maxRefAgeMs {
 			updates = append(updates, NewRemoveSnapshotRefUpdate(refName))
 			refsToDelete[refName] = struct{}{}
@@ -209,11 +208,12 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		)
 
 		if minSnapshotsToKeep == nil || maxSnapshotAgeMs == nil {
-			return fmt.Errorf("cannot find a valid value for minSnapshotsToKeep and maxSnapshotAgeMs")
+			return errors.New("cannot find a valid value for minSnapshotsToKeep and maxSnapshotAgeMs")
 		}
 
 		if ref.SnapshotRefType != BranchRef {
 			snapsToKeep[ref.SnapshotID] = struct{}{}
+
 			continue
 		}
 
@@ -228,7 +228,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 				return err
 			}
 
-			var snapAge = time.Now().UnixMilli() - snap.TimestampMs
+			snapAge := time.Now().UnixMilli() - snap.TimestampMs
 			if (snapAge > *maxSnapshotAgeMs) && (numSnapshots >= *minSnapshotsToKeep) {
 				break
 			}
@@ -253,6 +253,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	}
 
 	updates = append(updates, NewRemoveSnapshotsUpdate(snapsToDelete))
+
 	return t.apply(updates, nil)
 }
 
