@@ -337,22 +337,17 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 func updateAndStageTable(ctx context.Context, current *table.Table, ident table.Identifier, reqs []table.Requirement, updates []table.Update, cat Catalog) (*table.StagedTable, error)
 
 func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
-	for _, update := range updates {
-		if update.Action() != "set-properties" {
-			panic("Only set table property is supported ")
-		}
-	}
-
+	// Load current table
 	database, tableName, err := identifierToGlueTable(tbl.Identifier())
 	if err != nil {
 		return nil, "", err
 	}
-
 	current, err := c.LoadTable(ctx, tbl.Identifier(), nil)
 	if err != nil && !errors.Is(err, catalog.ErrNoSuchTable) {
 		return nil, "", err
 	}
 
+	// Create a staging table with the updates applied
 	staged, err := updateAndStageTable(ctx, tbl, tbl.Identifier(), requirements, updates, *c)
 	if err != nil {
 		return nil, "", err
@@ -364,6 +359,7 @@ func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, requirement
 		return nil, "", err
 	}
 
+	// Build and call Glue update request
 	tableInput, err := buildGlueTableInput(ctx, database, tableName, staged, c)
 	if err != nil {
 		return nil, "", err
@@ -760,7 +756,7 @@ func buildGlueTableInput(ctx context.Context, database string, tableName string,
 	glueProperties := prepareProperties(staged.Properties(), staged.MetadataLocation())
 	description := staged.Properties()["comment"]
 	if description == "" {
-		description = *glueTable.Description
+		description = aws.ToString(glueTable.Description)
 	}
 	existingColumnMap := map[string]string{}
 	for _, column := range glueTable.StorageDescriptor.Columns {
