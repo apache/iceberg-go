@@ -781,17 +781,17 @@ func TestGlueListTablesIntegration(t *testing.T) {
 	ctlg := NewCatalog(WithAwsConfig(awsCfg))
 
 	iter := ctlg.ListTables(context.TODO(), DatabaseIdentifier(os.Getenv("TEST_DATABASE_NAME")))
-	var lastErr error
-	tbls := make([]table.Identifier, 0)
+
+	found := false
 	for tbl, err := range iter {
-		tbls = append(tbls, tbl)
-		if err != nil {
-			lastErr = err
+		assert.NoError(err)
+		if tbl[1] == os.Getenv("TEST_TABLE_NAME") {
+			found = true
+
+			break
 		}
 	}
-
-	assert.NoError(lastErr)
-	assert.Contains(tbls, []string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")})
+	assert.True(found, "expect test table name exists to be part of the list table results")
 }
 
 func TestGlueLoadTableIntegration(t *testing.T) {
