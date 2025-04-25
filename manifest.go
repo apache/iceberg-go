@@ -449,6 +449,7 @@ func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]M
 		return nil, err
 	}
 	defer f.Close()
+
 	return readManifestEntries(m, f, discardDeleted)
 }
 
