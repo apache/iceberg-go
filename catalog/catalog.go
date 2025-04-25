@@ -31,14 +31,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/apache/iceberg-go/catalog/internal"
-	"github.com/apache/iceberg-go/io"
 	"iter"
 	"maps"
 	"strings"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/catalog/internal"
 	iceinternal "github.com/apache/iceberg-go/internal"
+	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 )
 

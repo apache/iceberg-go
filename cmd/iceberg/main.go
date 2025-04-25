@@ -388,6 +388,7 @@ func properties(ctx context.Context, output Output, cat catalog.Catalog, args pr
 		case args.table:
 			tbl := loadTable(ctx, output, cat, args.identifier)
 			output.Text("Setting " + args.propname + "=" + args.value + " on " + args.identifier)
+
 			//ToDo handle other Update operations
 			_, _, err := cat.CommitTable(ctx, tbl, nil, []table.Update{
 				table.NewSetPropertiesUpdate(iceberg.Properties{args.propname: args.value})})

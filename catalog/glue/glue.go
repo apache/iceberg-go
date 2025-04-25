@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/apache/iceberg-go/catalog/internal"
 	"iter"
 	"maps"
 	"strconv"
@@ -29,6 +28,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/catalog/internal"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/utils"
@@ -372,6 +372,7 @@ func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, requirement
 	if err != nil {
 		return nil, "", err
 	}
+
 	return staged.Metadata(), staged.MetadataLocation(), err
 }
 
@@ -774,6 +775,7 @@ func buildGlueTableInput(ctx context.Context, database string, tableName string,
 		}
 		glueColumns = append(glueColumns, col)
 	}
+
 	return &types.TableInput{
 		Name:        aws.String(tableName),
 		Description: aws.String(description),
