@@ -791,6 +791,126 @@ func (m *ManifestTestSuite) TestReadManifestListIncompleteSchema() {
 	m.ErrorContains(err, "unknown type: field_summary")
 }
 
+func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
+	// This prevents a regression that could be caused by using a schema cache
+	// across multiple read/write operations of an avro file. While it may sound
+	// like a reasonable idea (caches speed things up, right?), it isn't that
+	// sort of cache: it's really a resolver to allow files with incomplete
+	// schemas, which we don't want.
+
+	// If a schema cache *were* in use, this would populate it with a definition for
+	// the missing record type in the incomplete schema. So we'll first "warm up"
+	// any cache. (Note: if working correctly, this will have no such side effect.)
+	var buf bytes.Buffer
+	partitionSpec := NewPartitionSpecID(1)
+	snapshotID := int64(12345678)
+	seqNum := int64(9876)
+	dataFileBuilder, err := NewDataFileBuilder(
+		partitionSpec,
+		EntryContentData,
+		"s3://bucket/namespace/table/data/abcd-0123.parquet",
+		ParquetFile,
+		map[string]any{},
+		100,
+		100*1000*1000,
+	)
+	m.NoError(err)
+	file, err := WriteManifest(
+		"s3://bucket/namespace/table/metadata/abcd-0123.avro", &buf, 2,
+		partitionSpec,
+		NewSchema(123,
+			NestedField{ID: 1, Name: "id", Type: Int64Type{}},
+			NestedField{ID: 2, Name: "name", Type: StringType{}},
+		),
+		snapshotID,
+		[]ManifestEntry{NewManifestEntry(
+			EntryStatusADDED,
+			&snapshotID,
+			&seqNum, &seqNum,
+			dataFileBuilder.Build(),
+		)},
+	)
+	m.NoError(err)
+
+	entries, err := readManifestEntries(file, &buf, false)
+	m.NoError(err)
+	m.Len(entries, 1)
+
+	// This schema is that of a v2 manifest file, except that it refers to
+	// a type named "r2" for the "data_file" field, instead of actually
+	// including the definition of the "data_file" record type.
+	// This omission should result in an error. But if a schema cache were
+	// in use, this could get resolved based on a type of the same name read
+	// from a file that defined it.
+	incompleteSchema := `
+	{
+		"name": "manifest_entry",
+		"type": "record",
+		"fields": [
+			{
+				"name": "status",
+				"type": "int",
+				"field-id": 0
+			},
+			{
+				"name": "snapshot_id",
+				"type": [
+					"null",
+					"long"
+				],
+				"field-id": 1
+			},
+			{
+				"name": "sequence_number",
+				"type": [
+					"null",
+					"long"
+				],
+				"field-id": 3
+			},
+			{
+				"name": "file_sequence_number",
+				"type": [
+					"null",
+					"long"
+				],
+				"field-id": 4
+			},
+			{
+				"name": "data_file",
+				"type": "r2",
+				"field-id": 2
+			}
+		]
+	}`
+
+	// We'll generate a file that is missing part of its schema
+	cache := &avro.SchemaCache{}
+	partitionSchema, err := avro.NewRecordSchema("r102", "", nil) // empty struct
+	m.NoError(err)
+	sch, err := internal.NewManifestEntrySchema(partitionSchema, 2)
+	m.NoError(err)
+	enc, err := ocf.NewEncoderWithSchema(sch, &buf,
+		ocf.WithEncoderSchemaCache(cache),
+		ocf.WithSchemaMarshaler(func(schema avro.Schema) ([]byte, error) {
+			return []byte(incompleteSchema), nil
+		}),
+		ocf.WithMetadata(map[string][]byte{
+			"format-version": {'2'},
+			// TODO: spec says other things are required, like schema and partition-spec info,
+			//       but this package currently only looks at this one value when reading...
+		}),
+	)
+	m.NoError(err)
+	for _, entry := range entries {
+		m.NoError(enc.Encode(entry))
+	}
+
+	// This should fail because the file's schema is incomplete.
+	_, err = readManifestEntries(file, &buf, false)
+	m.ErrorContains(err, "unknown type: r2")
+}
+
 func (m *ManifestTestSuite) TestManifestEntriesV2() {
 	var mockfs internal.MockFS
 	manifest := manifestFile{
