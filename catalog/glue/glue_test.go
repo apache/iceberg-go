@@ -781,17 +781,17 @@ func TestGlueListTablesIntegration(t *testing.T) {
 	ctlg := NewCatalog(WithAwsConfig(awsCfg))
 
 	iter := ctlg.ListTables(context.TODO(), DatabaseIdentifier(os.Getenv("TEST_DATABASE_NAME")))
-	var lastErr error
-	tbls := make([]table.Identifier, 0)
+
+	found := false
 	for tbl, err := range iter {
-		tbls = append(tbls, tbl)
-		if err != nil {
-			lastErr = err
+		assert.NoError(err)
+		if tbl[1] == os.Getenv("TEST_TABLE_NAME") {
+			found = true
+
+			break
 		}
 	}
-
-	assert.NoError(lastErr)
-	assert.Equal([]string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")}, tbls[1])
+	assert.True(found, "expect test table name exists to be part of the list table results")
 }
 
 func TestGlueLoadTableIntegration(t *testing.T) {
@@ -814,7 +814,7 @@ func TestGlueLoadTableIntegration(t *testing.T) {
 
 	tbl, err := ctlg.LoadTable(context.TODO(), []string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")}, nil)
 	assert.NoError(err)
-	assert.Equal([]string{os.Getenv("TEST_TABLE_NAME")}, tbl.Identifier())
+	assert.Equal([]string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")}, tbl.Identifier())
 }
 
 func TestGlueListNamespacesIntegration(t *testing.T) {
@@ -852,7 +852,7 @@ func TestGlueCreateTableSuccessIntegration(t *testing.T) {
 	ctlg := NewCatalog(WithAwsConfig(awsCfg))
 	sourceTable, err := ctlg.LoadTable(context.TODO(), []string{dbName, sourceTableName}, nil)
 	assert.NoError(err)
-	assert.Equal([]string{sourceTableName}, sourceTable.Identifier())
+	assert.Equal([]string{dbName, sourceTableName}, sourceTable.Identifier())
 	newTableName := fmt.Sprintf("%d_%s", time.Now().UnixNano(), sourceTableName)
 	createOpts := []catalog.CreateTableOpt{
 		catalog.WithLocation(metadataLocation),
@@ -883,13 +883,12 @@ func TestGlueCreateTableSuccessIntegration(t *testing.T) {
 			}
 		}
 	}()
-	assert.True(false)
 	assert.NoError(err)
-	assert.Equal([]string{newTableName}, newTable.Identifier())
+	assert.Equal([]string{dbName, newTableName}, newTable.Identifier())
 
 	tableNewLoaded, err := ctlg.LoadTable(context.TODO(), []string{dbName, newTableName}, nil)
 	assert.NoError(err)
-	assert.Equal([]string{newTableName}, tableNewLoaded.Identifier())
+	assert.Equal([]string{dbName, newTableName}, tableNewLoaded.Identifier())
 	assert.Equal(sourceTable.Schema().Fields(), tableNewLoaded.Schema().Fields())
 	assert.Contains(tableNewLoaded.MetadataLocation(), metadataLocation)
 
@@ -928,7 +927,7 @@ func TestGlueCreateTableInvalidMetadataRollback(t *testing.T) {
 	assert.Error(err, "expected error when creating table with invalid metadata location")
 	_, err = ctlg.LoadTable(context.TODO(), []string{dbName, newTableName}, nil)
 	assert.Error(err, "expected table to not exist after failed creation")
-	assert.True(strings.Contains(err.Error(), "EntityNotFoundException: Entity Not Found"), "expected EntityNotFoundException error")
+	assert.True(strings.Contains(err.Error(), "table does not exist"), "expected EntityNotFoundException error")
 	// Verify that the table was not left in the catalog
 	tablesIter := ctlg.ListTables(context.TODO(), DatabaseIdentifier(dbName)) // TODO: Implement CheckTableExists
 	found := false
