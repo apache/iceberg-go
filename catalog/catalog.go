@@ -218,7 +218,7 @@ func getUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals [
 }
 
 //lint:ignore U1000 this is linked to by catalogs via go:linkname but we don't want to export it
-func updateAndStageTable(ctx context.Context, current *table.Table, ident table.Identifier, reqs []table.Requirement, updates []table.Update, cat Catalog) (*table.StagedTable, error) {
+func updateAndStageTable(ctx context.Context, current *table.Table, ident table.Identifier, reqs []table.Requirement, updates []table.Update, cat table.CatalogIO) (*table.StagedTable, error) {
 	var (
 		baseMeta    table.Metadata
 		metadataLoc string
