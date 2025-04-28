@@ -422,6 +422,7 @@ func ArrowSchemaToIcebergWithoutIDs(sc *arrow.Schema, downcastNsTimestamp bool) 
 	if err != nil {
 		return nil, err
 	}
+
 	return iceberg.AssignFreshSchemaIDs(schemaWithoutIDs, nil)
 }
 
