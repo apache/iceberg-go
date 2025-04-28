@@ -813,7 +813,8 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 		}
 	}
 
-	return retOrPanic(array.NewStructArrayWithFields(fieldArrs, fields))
+	return retOrPanic(array.NewStructArrayWithFieldsAndNulls(fieldArrs, fields,
+		structArr.Data().Buffers()[0], structArr.NullN(), structArr.Data().Offset()))
 }
 
 func (a *arrowProjectionVisitor) Field(_ iceberg.NestedField, _ arrow.Array, fieldArr arrow.Array) arrow.Array {
