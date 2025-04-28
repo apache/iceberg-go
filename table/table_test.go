@@ -38,6 +38,7 @@ import (
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 	"github.com/pterm/pterm"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"github.com/uptrace/bun/driver/sqliteshim"
 )
@@ -1134,4 +1135,74 @@ func (t *TableWritingTestSuite) TestMergeManifests() {
 func TestTableWriting(t *testing.T) {
 	suite.Run(t, &TableWritingTestSuite{formatVersion: 1})
 	suite.Run(t, &TableWritingTestSuite{formatVersion: 2})
+}
+
+func TestNullableStructRequiredField(t *testing.T) {
+	loc := t.TempDir()
+
+	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
+		"uri":          ":memory:",
+		"type":         "sql",
+		sql.DriverKey:  sqliteshim.ShimName,
+		sql.DialectKey: string(sql.SQLite),
+		"warehouse":    "file://" + loc,
+	})
+	require.NoError(t, err)
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{
+			Name: "analytic", Type: arrow.StructOf(
+				arrow.Field{Name: "category", Type: arrow.BinaryTypes.String, Nullable: true},
+				arrow.Field{Name: "desc", Type: arrow.BinaryTypes.String, Nullable: true},
+				arrow.Field{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+				arrow.Field{Name: "related_analytics", Type: arrow.ListOf(
+					arrow.StructOf(
+						arrow.Field{Name: "category", Type: arrow.BinaryTypes.String, Nullable: true},
+						arrow.Field{Name: "desc", Type: arrow.BinaryTypes.String, Nullable: true},
+						arrow.Field{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+						arrow.Field{Name: "type", Type: arrow.BinaryTypes.String, Nullable: true},
+						arrow.Field{Name: "type_id", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+						arrow.Field{Name: "uid", Type: arrow.BinaryTypes.String, Nullable: true},
+						arrow.Field{Name: "version", Type: arrow.BinaryTypes.String, Nullable: true},
+					),
+				), Nullable: true},
+				arrow.Field{Name: "type", Type: arrow.BinaryTypes.String, Nullable: true},
+				arrow.Field{Name: "type_id", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+				arrow.Field{Name: "uid", Type: arrow.BinaryTypes.String, Nullable: true},
+				arrow.Field{Name: "version", Type: arrow.BinaryTypes.String, Nullable: true},
+			), Nullable: true,
+		},
+		{Name: "uid", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	sc, err := table.ArrowSchemaToIcebergWithoutIDs(arrowSchema, false)
+	if err != nil {
+		panic(err)
+	}
+
+	ctx := context.TODO()
+	require.NoError(t, cat.CreateNamespace(ctx, table.Identifier{"testing"}, nil))
+	tbl, err := cat.CreateTable(ctx, table.Identifier{"testing", "nullable_struct_required_field"}, sc,
+		catalog.WithProperties(iceberg.Properties{"format-version": "2"}),
+		catalog.WithLocation(loc))
+	require.NoError(t, err)
+	require.NotNil(t, tbl)
+
+	bldr := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
+	defer bldr.Release()
+
+	bldr.Field(0).AppendNulls(100)
+	bldr.Field(1).AppendNulls(100)
+
+	rec := bldr.NewRecord()
+	defer rec.Release()
+
+	arrTable := array.NewTableFromRecords(arrowSchema, []arrow.Record{rec})
+	defer arrTable.Release()
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AppendTable(ctx, arrTable, 100, nil))
+	stagedTbl, err := tx.StagedTable()
+	require.NoError(t, err)
+	require.NotNil(t, stagedTbl)
 }

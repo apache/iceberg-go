@@ -417,6 +417,14 @@ func ArrowSchemaToIceberg(sc *arrow.Schema, downcastNsTimestamp bool, nameMappin
 	}
 }
 
+func ArrowSchemaToIcebergWithoutIDs(sc *arrow.Schema, downcastNsTimestamp bool) (*iceberg.Schema, error) {
+	schemaWithoutIDs, err := arrowToSchemaWithoutIDs(sc, downcastNsTimestamp)
+	if err != nil {
+		return nil, err
+	}
+	return iceberg.AssignFreshSchemaIDs(schemaWithoutIDs, nil)
+}
+
 func arrowToSchemaWithoutIDs(sc *arrow.Schema, downcastNsTimestamp bool) (*iceberg.Schema, error) {
 	withoutIDs, err := VisitArrowSchema(sc, convertToIceberg{
 		downcastTimestamp: downcastNsTimestamp,
