@@ -389,9 +389,9 @@ func properties(ctx context.Context, output Output, cat catalog.Catalog, args pr
 			tbl := loadTable(ctx, output, cat, args.identifier)
 			output.Text("Setting " + args.propname + "=" + args.value + " on " + args.identifier)
 
-			//ToDo handle other Update operations
-			_, _, err := cat.CommitTable(ctx, tbl, nil, []table.Update{
-				table.NewSetPropertiesUpdate(iceberg.Properties{args.propname: args.value})})
+			// TODO: handle other Update operations
+			_, _, err := cat.CommitTable(ctx, tbl, nil,
+				[]table.Update{table.NewSetPropertiesUpdate(iceberg.Properties{args.propname: args.value})})
 			if err != nil {
 				output.Error(err)
 				os.Exit(1)
