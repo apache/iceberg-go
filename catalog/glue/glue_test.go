@@ -1042,6 +1042,10 @@ func TestAlterTableIntegration(t *testing.T) {
 	metadataLocation := os.Getenv("TEST_TABLE_LOCATION")
 	tbName := fmt.Sprintf("table_%d", time.Now().UnixNano())
 	tbIdent := TableIdentifier(dbName, tbName)
+	schema := iceberg.NewSchemaWithIdentifiers(0, []int{},
+		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool})
 
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
@@ -1055,13 +1059,13 @@ func TestAlterTableIntegration(t *testing.T) {
 		catalog.WithLocation(metadataLocation),
 		catalog.WithProperties(testProps),
 	}
-	_, err = ctlg.CreateTable(context.TODO(), tbIdent, testSchema, createOpts...)
+	_, err = ctlg.CreateTable(context.TODO(), tbIdent, schema, createOpts...)
 	assert.NoError(err)
 
 	testTable, err := ctlg.LoadTable(context.TODO(), tbIdent, nil)
 	assert.NoError(err)
 	assert.Equal(testProps, testTable.Properties())
-	assert.True(testSchema.Equals(testTable.Schema()))
+	assert.True(schema.Equals(testTable.Schema()))
 
 	// Clean up table and table location after tests
 	defer func() {
@@ -1135,8 +1139,8 @@ func TestAlterTableIntegration(t *testing.T) {
 		Type:     iceberg.PrimitiveTypes.String,
 		Required: false,
 	}
-	newFields := append(currentSchema.Fields(), addField)
-	newFields = append(newFields[:1], newFields[2:]...) // drop column 'bar'
+	newFields := append(currentSchema.Fields(), addField) // add column 'new_col'
+	newFields = append(newFields[:1], newFields[2:]...)   // drop column 'bar'
 	updateColumns := table.NewAddSchemaUpdate(
 		iceberg.NewSchemaWithIdentifiers(newSchemaId, currentSchema.IdentifierFieldIDs, newFields...),
 		addField.ID,
