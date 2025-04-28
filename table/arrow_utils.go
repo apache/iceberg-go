@@ -27,6 +27,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/bitutil"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -822,8 +823,26 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 		}
 	}
 
+	var nullBitmap *memory.Buffer
+	if structArr.NullN() > 0 {
+		if structArr.Data().Offset() > 0 {
+			// the children already accounted for any offset because we used the `Field` method
+			// on the struct array in the FieldPartner accessor. So we just need to adjust the
+			// bitmap to account for the offset.
+			nullBitmap = memory.NewResizableBuffer(compute.GetAllocator(a.ctx))
+			defer nullBitmap.Release()
+			nullBitmap.Resize(int(bitutil.BytesForBits(int64(structArr.Len()))))
+
+			bitutil.CopyBitmap(structArr.NullBitmapBytes(), structArr.Data().Offset(), structArr.Len(),
+				nullBitmap.Bytes(), 0)
+
+		} else {
+			nullBitmap = structArr.Data().Buffers()[0]
+		}
+	}
+
 	return retOrPanic(array.NewStructArrayWithFieldsAndNulls(fieldArrs, fields,
-		structArr.Data().Buffers()[0], structArr.NullN(), structArr.Data().Offset()))
+		nullBitmap, structArr.NullN(), 0))
 }
 
 func (a *arrowProjectionVisitor) Field(_ iceberg.NestedField, _ arrow.Array, fieldArr arrow.Array) arrow.Array {
