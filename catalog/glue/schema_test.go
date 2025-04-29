@@ -130,6 +130,11 @@ func TestFieldToGlueColumn(t *testing.T) {
 				Name:    aws.String("simple_field"),
 				Type:    aws.String("string"),
 				Comment: aws.String("A simple string field"),
+				Parameters: map[string]string{
+					icebergFieldIDKey:       "1",
+					icebergFieldOptionalKey: "false",
+					icebergFieldCurrentKey:  "true",
+				},
 			},
 		},
 		{
@@ -138,22 +143,28 @@ func TestFieldToGlueColumn(t *testing.T) {
 				ID:       2,
 				Name:     "price",
 				Type:     iceberg.DecimalTypeOf(10, 2),
-				Required: true,
+				Required: false,
 				Doc:      "Price with 2 decimal places",
 			},
 			expected: types.Column{
 				Name:    aws.String("price"),
 				Type:    aws.String("decimal(10,2)"),
 				Comment: aws.String("Price with 2 decimal places"),
+				Parameters: map[string]string{
+					icebergFieldIDKey:       "2",
+					icebergFieldOptionalKey: "true",
+					icebergFieldCurrentKey:  "true",
+				},
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := fieldToGlueColumn(tt.field)
-			assert.Equal(t, aws.ToString(tt.expected.Name), aws.ToString(result.Name))
-			assert.Equal(t, aws.ToString(tt.expected.Type), aws.ToString(result.Type))
-			assert.Equal(t, aws.ToString(tt.expected.Comment), aws.ToString(result.Comment))
+			result := fieldToGlueColumn(tt.field, true)
+			assert.Equal(t, tt.expected.Name, result.Name)
+			assert.Equal(t, tt.expected.Type, result.Type)
+			assert.Equal(t, tt.expected.Comment, result.Comment)
+			assert.Equal(t, tt.expected.Parameters, result.Parameters)
 		})
 	}
 }
@@ -191,7 +202,7 @@ func TestNestedStructType(t *testing.T) {
 		Required: true,
 		Doc:      "User address",
 	}
-	column := fieldToGlueColumn(field)
+	column := fieldToGlueColumn(field, true)
 	assert.Equal(t, "address", aws.ToString(column.Name))
 	assert.Equal(t, expected, aws.ToString(column.Type))
 	assert.Equal(t, "User address", aws.ToString(column.Comment))
@@ -212,7 +223,7 @@ func TestNestedListType(t *testing.T) {
 		Required: false,
 		Doc:      "User tags",
 	}
-	column := fieldToGlueColumn(field)
+	column := fieldToGlueColumn(field, false)
 	assert.Equal(t, "tags", aws.ToString(column.Name))
 	assert.Equal(t, "array<string>", aws.ToString(column.Type))
 	assert.Equal(t, "User tags", aws.ToString(column.Comment))
@@ -235,7 +246,7 @@ func TestNestedMapType(t *testing.T) {
 		Required: true,
 		Doc:      "User properties",
 	}
-	column := fieldToGlueColumn(field)
+	column := fieldToGlueColumn(field, true)
 	assert.Equal(t, "properties", aws.ToString(column.Name))
 	assert.Equal(t, "map<string,int>", aws.ToString(column.Type))
 	assert.Equal(t, "User properties", aws.ToString(column.Comment))
@@ -281,7 +292,7 @@ func TestComplexNestedTypes(t *testing.T) {
 		Required: true,
 		Doc:      "A complex nested field",
 	}
-	column := fieldToGlueColumn(field)
+	column := fieldToGlueColumn(field, true)
 	assert.Equal(t, "complex_field", aws.ToString(column.Name))
 	assert.Equal(t, expected, aws.ToString(column.Type))
 	assert.Equal(t, "A complex nested field", aws.ToString(column.Comment))
@@ -338,7 +349,7 @@ func TestSchemaToGlueColumns(t *testing.T) {
 		},
 	}
 	schema := iceberg.NewSchema(1, fields...)
-	columns := schemaToGlueColumns(schema)
+	columns := schemaToGlueColumns(schema, true)
 	assert.Equal(t, 4, len(columns))
 	assert.Equal(t, "id", aws.ToString(columns[0].Name))
 	assert.Equal(t, "bigint", aws.ToString(columns[0].Type))

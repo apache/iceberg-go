@@ -65,6 +65,10 @@ const (
 	Endpoint        = "glue.endpoint"
 	MaxRetries      = "glue.max-retries"
 	RetryMode       = "glue.retry-mode"
+
+	icebergFieldIDKey       = "iceberg.field.id"
+	icebergFieldOptionalKey = "iceberg.field.optional"
+	icebergFieldCurrentKey  = "iceberg.field.current"
 )
 
 var _ catalog.Catalog = (*Catalog)(nil)
@@ -130,6 +134,7 @@ type Catalog struct {
 	glueSvc   glueAPI
 	catalogId *string
 	awsCfg    *aws.Config
+	props     iceberg.Properties
 }
 
 // NewCatalog creates a new instance of glue.Catalog with the given options.
@@ -151,6 +156,7 @@ func NewCatalog(opts ...Option) *Catalog {
 		glueSvc:   glue.NewFromConfig(glueOps.awsConfig),
 		catalogId: catalogId,
 		awsCfg:    &glueOps.awsConfig,
+		props:     iceberg.Properties(glueOps.awsProperties),
 	}
 }
 
@@ -234,29 +240,42 @@ func (c *Catalog) CatalogType() catalog.Type {
 // CreateTable creates a new Iceberg table in the Glue catalog.
 // AWS Glue will create a new table and a new metadata file in S3 with the format: metadataLocation/metadata/00000-00000-00000-00000-00000.metadata.json.
 func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
+	staged, err := internal.CreateStagedTable(ctx, c.props, c.LoadNamespaceProperties, identifier, schema, opts...)
+	if err != nil {
+		return nil, err
+	}
+
 	database, tableName, err := identifierToGlueTable(identifier)
 	if err != nil {
 		return nil, err
 	}
-	var cfg catalog.CreateTableCfg
-	for _, opt := range opts {
-		opt(&cfg)
+
+	wfs, ok := staged.FS().(io.WriteFileIO)
+	if !ok {
+		return nil, errors.New("loaded filesystem IO does not support writing")
 	}
-	if cfg.Location == "" {
-		return nil, errors.New("metadata location is required for table creation")
+
+	if err := internal.WriteTableMetadata(staged.Metadata(), wfs, staged.MetadataLocation()); err != nil {
+		return nil, err
 	}
-	parameters := map[string]string{}
-	for k, v := range cfg.Properties {
-		parameters[k] = v
+
+	var tableDescription *string
+	if desc := staged.Properties().Get("Description", ""); desc != "" {
+		tableDescription = aws.String(desc)
 	}
+
 	tableInput := &types.TableInput{
-		Name:       aws.String(tableName),
-		Parameters: parameters,
-		TableType:  aws.String("EXTERNAL_TABLE"),
-		StorageDescriptor: &types.StorageDescriptor{
-			Location: aws.String(cfg.Location),
-			Columns:  schemaToGlueColumns(schema),
+		Name: aws.String(tableName),
+		Parameters: map[string]string{
+			tableTypePropsKey:        glueTypeIceberg,
+			metadataLocationPropsKey: staged.MetadataLocation(),
 		},
+		TableType: aws.String("EXTERNAL_TABLE"),
+		StorageDescriptor: &types.StorageDescriptor{
+			Location: aws.String(staged.Metadata().Location()),
+			Columns:  schemaToGlueColumns(schema, true),
+		},
+		Description: tableDescription,
 	}
 	_, err = c.glueSvc.CreateTable(ctx, &glue.CreateTableInput{
 		CatalogId:    c.catalogId,
@@ -271,7 +290,7 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create table %s.%s: %w", database, tableName, err)
 	}
-	createdTable, err := c.LoadTable(ctx, identifier, cfg.Properties)
+	createdTable, err := c.LoadTable(ctx, identifier, nil)
 	if err != nil {
 		// Attempt to clean up the table if loading fails
 		_, cleanupErr := c.glueSvc.DeleteTable(ctx, &glue.DeleteTableInput{
@@ -313,7 +332,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		TableType:  aws.String("EXTERNAL_TABLE"),
 		StorageDescriptor: &types.StorageDescriptor{
 			Location: aws.String(metadataLocation),
-			Columns:  schemaToGlueColumns(metadata.Schema()),
+			Columns:  schemaToGlueColumns(metadata.Schema(), true),
 		},
 	}
 	_, err = c.glueSvc.CreateTable(ctx, &glue.CreateTableInput{

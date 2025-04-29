@@ -292,9 +292,9 @@ func checkValidNamespace(ident table.Identifier) error {
 }
 
 func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
-	var cfg catalog.CreateTableCfg
-	for _, opt := range opts {
-		opt(&cfg)
+	staged, err := internal.CreateStagedTable(ctx, c.props, c.LoadNamespaceProperties, ident, sc, opts...)
+	if err != nil {
+		return nil, err
 	}
 
 	nsIdent := catalog.NamespaceFromIdent(ident)
@@ -309,18 +309,12 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, ns)
 	}
 
-	loc, err := c.resolveTableLocation(ctx, cfg.Location, ns, tblIdent)
-	if err != nil {
-		return nil, err
+	wfs, ok := staged.FS().(io.WriteFileIO)
+	if !ok {
+		return nil, errors.New("loaded filesystem IO does not support writing")
 	}
 
-	metadataLocation := internal.GetMetadataLoc(loc, 0)
-	metadata, err := table.NewMetadata(sc, cfg.PartitionSpec, cfg.SortOrder, loc, cfg.Properties)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := internal.WriteMetadata(ctx, metadata, metadataLocation, c.props); err != nil {
+	if err := internal.WriteTableMetadata(staged.Metadata(), wfs, staged.MetadataLocation()); err != nil {
 		return nil, err
 	}
 
@@ -329,7 +323,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 			CatalogName:      c.name,
 			TableNamespace:   ns,
 			TableName:        tblIdent,
-			MetadataLocation: sql.NullString{String: metadataLocation, Valid: true},
+			MetadataLocation: sql.NullString{String: staged.MetadataLocation(), Valid: true},
 		}).Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to create table: %w", err)
@@ -341,7 +335,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		return nil, err
 	}
 
-	return c.LoadTable(ctx, ident, cfg.Properties)
+	return c.LoadTable(ctx, ident, staged.Properties())
 }
 
 //go:linkname updateAndStageTable github.com/apache/iceberg-go/catalog.updateAndStageTable

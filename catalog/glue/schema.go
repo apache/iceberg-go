@@ -19,6 +19,7 @@ package glue
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/apache/iceberg-go"
@@ -27,22 +28,27 @@ import (
 )
 
 // schemaToGlueColumns converts an Iceberg schema to a list of Glue columns.
-func schemaToGlueColumns(schema *iceberg.Schema) []types.Column {
+func schemaToGlueColumns(schema *iceberg.Schema, isCurrent bool) []types.Column {
 	var columns []types.Column
 	for _, field := range schema.Fields() {
-		columns = append(columns, fieldToGlueColumn(field))
+		columns = append(columns, fieldToGlueColumn(field, isCurrent))
 	}
 
 	return columns
 }
 
 // fieldToGlueColumn converts an Iceberg nested field to a Glue column.
-func fieldToGlueColumn(field iceberg.NestedField) types.Column {
+func fieldToGlueColumn(field iceberg.NestedField, isCurrent bool) types.Column {
 	column := types.Column{
 		Name:    aws.String(field.Name),
 		Comment: aws.String(field.Doc),
+		Type:    aws.String(icebergTypeToGlueType(field.Type)),
+		Parameters: map[string]string{
+			icebergFieldIDKey:       strconv.Itoa(field.ID),
+			icebergFieldOptionalKey: strconv.FormatBool(!field.Required),
+			icebergFieldCurrentKey:  strconv.FormatBool(isCurrent),
+		},
 	}
-	column.Type = aws.String(icebergTypeToGlueType(field.Type))
 
 	return column
 }
