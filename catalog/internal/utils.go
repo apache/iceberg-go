@@ -47,6 +47,7 @@ func WriteTableMetadata(metadata table.Metadata, fs io.WriteFileIO, loc string) 
 		return nil
 	}
 	defer out.Close()
+
 	return json.NewEncoder(out).Encode(metadata)
 }
 
@@ -141,7 +142,8 @@ func CreateStagedTable(ctx context.Context, catprops iceberg.Properties, nsprops
 	}
 
 	return table.StagedTable{
-		Table: table.New(ident, metadata, metadataLoc, fs, nil)}, nil
+		Table: table.New(ident, metadata, metadataLoc, fs, nil),
+	}, nil
 }
 
 type GetNamespacePropsFn func(context.Context, table.Identifier) (iceberg.Properties, error)
@@ -152,6 +154,7 @@ func ResolveTableLocation(ctx context.Context, loc, dbname, tablename string, ca
 		if err != nil {
 			return "", err
 		}
+
 		return getDefaultWarehouseLocation(dbname, tablename, dbprops, catprops)
 	}
 
