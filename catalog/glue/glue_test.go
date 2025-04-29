@@ -99,6 +99,12 @@ func (m *mockGlueClient) UpdateDatabase(ctx context.Context, params *glue.Update
 	return args.Get(0).(*glue.UpdateDatabaseOutput), args.Error(1)
 }
 
+func (m *mockGlueClient) UpdateTable(ctx context.Context, params *glue.UpdateTableInput, optFns ...func(*glue.Options)) (*glue.UpdateTableOutput, error) {
+	args := m.Called(ctx, params, optFns)
+
+	return args.Get(0).(*glue.UpdateTableOutput), args.Error(1)
+}
+
 var testIcebergGlueTable1 = types.Table{
 	Name: aws.String("test_table"),
 	Parameters: map[string]string{
@@ -146,7 +152,7 @@ var testNonIcebergGlueTable = types.Table{
 	},
 }
 
-var testSchema = iceberg.NewSchemaWithIdentifiers(0, []int{2},
+var testSchema = iceberg.NewSchemaWithIdentifiers(0, []int{},
 	iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String},
 	iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 	iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool})
@@ -1020,6 +1026,137 @@ func TestRegisterTableIntegration(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal([]string{tableName}, tbl.Identifier())
 	assert.Equal(metadataLocation, tbl.MetadataLocation())
+}
+
+func TestAlterTableIntegration(t *testing.T) {
+	if os.Getenv("TEST_DATABASE_NAME") == "" {
+		t.Skip()
+	}
+	if os.Getenv("TEST_TABLE_LOCATION") == "" {
+		t.Skip()
+	}
+
+	assert := require.New(t)
+	dbName := os.Getenv("TEST_DATABASE_NAME")
+	metadataLocation := os.Getenv("TEST_TABLE_LOCATION")
+	tbName := fmt.Sprintf("table_%d", time.Now().UnixNano())
+	tbIdent := TableIdentifier(dbName, tbName)
+	schema := iceberg.NewSchemaWithIdentifiers(0, []int{},
+		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool})
+
+	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
+	assert.NoError(err)
+	ctlg := NewCatalog(WithAwsConfig(awsCfg))
+
+	// Create a table within the input database and location
+	testProps := iceberg.Properties{
+		"write.parquet.compression-codec": "zstd",
+	}
+	createOpts := []catalog.CreateTableOpt{
+		catalog.WithLocation(metadataLocation),
+		catalog.WithProperties(testProps),
+	}
+	_, err = ctlg.CreateTable(context.TODO(), tbIdent, schema, createOpts...)
+	assert.NoError(err)
+
+	testTable, err := ctlg.LoadTable(context.TODO(), tbIdent, nil)
+	assert.NoError(err)
+	assert.Equal(testProps, testTable.Properties())
+	assert.True(schema.Equals(testTable.Schema()))
+
+	// Clean up table and table location after tests
+	defer func() {
+		cleanupErr := ctlg.DropTable(context.TODO(), TableIdentifier(dbName, tbName))
+		if cleanupErr != nil {
+			t.Logf("Warning: Failed to clean up table %s.%s: %v", dbName, tbName, cleanupErr)
+		}
+		// Clean up the newly created metadata file in S3
+		if testTable != nil {
+			s3Client := s3.NewFromConfig(awsCfg)
+			metadataLoc := testTable.MetadataLocation()
+			if strings.HasPrefix(metadataLoc, "s3://") {
+				parts := strings.SplitN(strings.TrimPrefix(metadataLoc, "s3://"), "/", 2)
+				if len(parts) == 2 {
+					bucket := parts[0]
+					key := parts[1]
+					_, deleteErr := s3Client.DeleteObject(context.TODO(), &s3.DeleteObjectInput{
+						Bucket: aws.String(bucket),
+						Key:    aws.String(key),
+					})
+					if deleteErr != nil {
+						t.Logf("Warning: Failed to delete metadata file at %s: %v", metadataLoc, deleteErr)
+					}
+				}
+			}
+		}
+	}()
+
+	// Test set table properties
+	updateProps := table.NewSetPropertiesUpdate(map[string]string{
+		"read.split.target-size": "134217728",
+		"key":                    "val",
+	})
+	_, _, err = ctlg.CommitTable(
+		context.TODO(),
+		testTable,
+		nil,
+		[]table.Update{updateProps},
+	)
+	assert.NoError(err)
+	testTable, err = ctlg.LoadTable(context.TODO(), tbIdent, nil)
+	assert.NoError(err)
+	assert.Equal(iceberg.Properties{
+		"write.parquet.compression-codec": "zstd",
+		"read.split.target-size":          "134217728",
+		"key":                             "val",
+	}, testTable.Properties())
+
+	// Test unset table properties
+	removeProps := table.NewRemovePropertiesUpdate([]string{"key"})
+	_, _, err = ctlg.CommitTable(
+		context.TODO(),
+		testTable,
+		nil,
+		[]table.Update{removeProps},
+	)
+	assert.NoError(err)
+	testTable, err = ctlg.LoadTable(context.TODO(), tbIdent, nil)
+	assert.NoError(err)
+	assert.Equal(iceberg.Properties{
+		"write.parquet.compression-codec": "zstd",
+		"read.split.target-size":          "134217728",
+	}, testTable.Properties())
+
+	// Test Alter Table Add / Drop Column
+	currentSchema := testTable.Schema()
+	newSchemaId := currentSchema.ID + 1
+	addField := iceberg.NestedField{
+		ID:       currentSchema.HighestFieldID() + 1,
+		Name:     "new_col",
+		Type:     iceberg.PrimitiveTypes.String,
+		Required: false,
+	}
+	newFields := append(currentSchema.Fields(), addField) // add column 'new_col'
+	newFields = append(newFields[:1], newFields[2:]...)   // drop column 'bar'
+	updateColumns := table.NewAddSchemaUpdate(
+		iceberg.NewSchemaWithIdentifiers(newSchemaId, currentSchema.IdentifierFieldIDs, newFields...),
+		addField.ID,
+		false,
+	)
+	setSchema := table.NewSetCurrentSchemaUpdate(newSchemaId)
+
+	_, _, err = ctlg.CommitTable(
+		context.TODO(),
+		testTable,
+		nil,
+		[]table.Update{updateColumns, setSchema},
+	)
+	assert.NoError(err)
+	testTable, err = ctlg.LoadTable(context.TODO(), tbIdent, nil)
+	assert.NoError(err)
+	assert.Equal(newFields, testTable.Schema().Fields())
 }
 
 func TestGlueCheckTableExists(t *testing.T) {
