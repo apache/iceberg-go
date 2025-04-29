@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"iter"
 	"maps"
-	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -256,31 +255,6 @@ func (c *Catalog) namespaceExists(ctx context.Context, ns string) (bool, error) 
 			Where("catalog_name = ?", c.name).Where("namespace = ?", ns).
 			Limit(1).Exists(ctx)
 	})
-}
-
-func (c *Catalog) getDefaultWarehouseLocation(ctx context.Context, nsname, tableName string) (string, error) {
-	dbprops, err := c.LoadNamespaceProperties(ctx, strings.Split(nsname, "."))
-	if err != nil {
-		return "", err
-	}
-
-	if dblocation := dbprops.Get("location", ""); dblocation != "" {
-		return url.JoinPath(dblocation, tableName)
-	}
-
-	if warehousepath := c.props.Get("warehouse", ""); warehousepath != "" {
-		return url.JoinPath(warehousepath, nsname+".db", tableName)
-	}
-
-	return "", errors.New("no default path set, please specify a location when creating a table")
-}
-
-func (c *Catalog) resolveTableLocation(ctx context.Context, loc, nsname, tablename string) (string, error) {
-	if len(loc) == 0 {
-		return c.getDefaultWarehouseLocation(ctx, nsname, tablename)
-	}
-
-	return strings.TrimSuffix(loc, "/"), nil
 }
 
 func checkValidNamespace(ident table.Identifier) error {
