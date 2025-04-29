@@ -1176,9 +1176,7 @@ func TestNullableStructRequiredField(t *testing.T) {
 	}, nil)
 
 	sc, err := table.ArrowSchemaToIcebergWithoutIDs(arrowSchema, false)
-	if err != nil {
-		panic(err)
-	}
+	require.NoError(t, err)
 
 	ctx := context.TODO()
 	require.NoError(t, cat.CreateNamespace(ctx, table.Identifier{"testing"}, nil))
