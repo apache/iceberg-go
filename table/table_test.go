@@ -1175,7 +1175,7 @@ func TestNullableStructRequiredField(t *testing.T) {
 		{Name: "uid", Type: arrow.BinaryTypes.String, Nullable: true},
 	}, nil)
 
-	sc, err := table.ArrowSchemaToIcebergWithoutIDs(arrowSchema, false)
+	sc, err := table.ArrowSchemaToIcebergWithFreshIDs(arrowSchema, false)
 	require.NoError(t, err)
 
 	ctx := context.TODO()
@@ -1189,8 +1189,9 @@ func TestNullableStructRequiredField(t *testing.T) {
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
 	defer bldr.Release()
 
-	bldr.Field(0).AppendNulls(100)
-	bldr.Field(1).AppendNulls(100)
+	const N = 100
+	bldr.Field(0).AppendNulls(N)
+	bldr.Field(1).AppendNulls(N)
 
 	rec := bldr.NewRecord()
 	defer rec.Release()
@@ -1199,7 +1200,7 @@ func TestNullableStructRequiredField(t *testing.T) {
 	defer arrTable.Release()
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AppendTable(ctx, arrTable, 100, nil))
+	require.NoError(t, tx.AppendTable(ctx, arrTable, N, nil))
 	stagedTbl, err := tx.StagedTable()
 	require.NoError(t, err)
 	require.NotNil(t, stagedTbl)

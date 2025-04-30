@@ -418,7 +418,7 @@ func ArrowSchemaToIceberg(sc *arrow.Schema, downcastNsTimestamp bool, nameMappin
 	}
 }
 
-func ArrowSchemaToIcebergWithoutIDs(sc *arrow.Schema, downcastNsTimestamp bool) (*iceberg.Schema, error) {
+func ArrowSchemaToIcebergWithFreshIDs(sc *arrow.Schema, downcastNsTimestamp bool) (*iceberg.Schema, error) {
 	schemaWithoutIDs, err := arrowToSchemaWithoutIDs(sc, downcastNsTimestamp)
 	if err != nil {
 		return nil, err
