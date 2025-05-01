@@ -238,7 +238,8 @@ func (c *Catalog) CatalogType() catalog.Type {
 }
 
 // CreateTable creates a new Iceberg table in the Glue catalog.
-// AWS Glue will create a new table and a new metadata file in S3 with the format: metadataLocation/metadata/00000-00000-00000-00000-00000.metadata.json.
+// This function will create the metadata file in S3 using the catalog and table properties,
+// to determine the bucket and key for the metadata location.
 func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
 	staged, err := internal.CreateStagedTable(ctx, c.props, c.LoadNamespaceProperties, identifier, schema, opts...)
 	if err != nil {
@@ -281,11 +282,6 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		CatalogId:    c.catalogId,
 		DatabaseName: aws.String(database),
 		TableInput:   tableInput,
-		OpenTableFormatInput: &types.OpenTableFormatInput{
-			IcebergInput: &types.IcebergInput{
-				MetadataOperation: types.MetadataOperationCreate,
-			},
-		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create table %s.%s: %w", database, tableName, err)
@@ -783,7 +779,7 @@ func buildGlueTableInput(ctx context.Context, database string, tableName string,
 		existingColumnMap[*column.Name] = *column.Comment
 	}
 	var glueColumns []types.Column
-	for _, column := range schemaToGlueColumns(staged.Metadata().CurrentSchema()) {
+	for _, column := range schemaToGlueColumns(staged.Metadata().CurrentSchema(), true) {
 		col := types.Column{
 			Name:    column.Name,
 			Comment: column.Comment,
