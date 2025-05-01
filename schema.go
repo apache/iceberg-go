@@ -21,7 +21,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1486,6 +1488,27 @@ func sanitizeName(n string) string {
 	}
 
 	return b.String()
+}
+
+func desanitizeName(n string) string {
+	// Regular expression to match Unicode escape sequences
+	re := regexp.MustCompile(`_x([0-9A-Fa-f]{2,4})`)
+
+	// Replace all matches with their Unicode character equivalents
+	result := re.ReplaceAllStringFunc(n, func(match string) string {
+		// Extract the hex code from the match
+		hexCode := strings.TrimPrefix(match, "_x")
+		// Convert the hex code to an integer
+		codePoint, err := strconv.ParseInt(hexCode, 16, 32)
+		if err != nil {
+			// If parsing fails, return the original match
+			return match
+		}
+		// Convert the code point to a string
+		return string(rune(codePoint))
+	})
+
+	return result
 }
 
 func SanitizeColumnNames(sc *Schema) (*Schema, error) {

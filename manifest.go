@@ -421,7 +421,7 @@ func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType) {
 
 	for _, field := range partitionField.Type().(*avro.RecordSchema).Fields() {
 		if fid, ok := field.Prop("field-id").(float64); ok {
-			result[field.Name()] = int(fid)
+			result[desanitizeName(field.Name())] = int(fid)
 			avroTyp := field.Type()
 			if us, ok := avroTyp.(*avro.UnionSchema); ok {
 				for _, t := range us.Types() {
