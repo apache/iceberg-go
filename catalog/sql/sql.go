@@ -20,6 +20,7 @@ package sql
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
@@ -27,6 +28,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 	_ "unsafe"
 
 	"github.com/apache/iceberg-go"
@@ -146,6 +148,19 @@ type sqlIcebergNamespaceProps struct {
 	PropertyValue sql.NullString
 }
 
+type sqlIcebergView struct {
+	bun.BaseModel `bun:"table:iceberg_views"`
+
+	CatalogName              string `bun:",pk"`
+	ViewNamespace            string `bun:",pk"`
+	ViewName                 string `bun:",pk"`
+	ViewSQL                  string
+	SchemaJSON               string
+	MetadataLocation         sql.NullString
+	PreviousMetadataLocation sql.NullString
+	Properties               map[string]string `bun:",json"`
+}
+
 func withReadTx[R any](ctx context.Context, db *bun.DB, fn func(context.Context, bun.Tx) (R, error)) (result R, err error) {
 	db.RunInTx(ctx, &sql.TxOptions{ReadOnly: true}, func(ctx context.Context, tx bun.Tx) error {
 		result, err = fn(ctx, tx)
@@ -217,6 +232,12 @@ func (c *Catalog) CreateSQLTables(ctx context.Context) error {
 
 	_, err = c.db.NewCreateTable().Model((*sqlIcebergNamespaceProps)(nil)).
 		IfNotExists().Exec(ctx)
+	if err != nil {
+		return err
+	}
+
+	_, err = c.db.NewCreateTable().Model((*sqlIcebergView)(nil)).
+		IfNotExists().Exec(ctx)
 
 	return err
 }
@@ -229,6 +250,12 @@ func (c *Catalog) DropSQLTables(ctx context.Context) error {
 	}
 
 	_, err = c.db.NewDropTable().Model((*sqlIcebergNamespaceProps)(nil)).
+		IfExists().Exec(ctx)
+	if err != nil {
+		return err
+	}
+
+	_, err = c.db.NewDropTable().Model((*sqlIcebergView)(nil)).
 		IfExists().Exec(ctx)
 
 	return err
@@ -808,4 +835,232 @@ func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 
 func (c *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Identifier) (bool, error) {
 	return c.namespaceExists(ctx, strings.Join(namespace, "."))
+}
+
+// CreateView creates a new view in the catalog.
+func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, viewSQL string, props iceberg.Properties) error {
+	nsIdent := catalog.NamespaceFromIdent(identifier)
+	viewIdent := catalog.TableNameFromIdent(identifier)
+	ns := strings.Join(nsIdent, ".")
+
+	exists, err := c.namespaceExists(ctx, ns)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, ns)
+	}
+
+	exists, err = c.CheckViewExists(ctx, identifier)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return fmt.Errorf("%w: %s", catalog.ErrViewAlreadyExists, identifier)
+	}
+
+	viewVersion := struct {
+		VersionID       int64             `json:"version-id"`
+		TimestampMs     int64             `json:"timestamp-ms"`
+		SchemaID        int               `json:"schema-id"`
+		Summary         map[string]string `json:"summary"`
+		Representations []struct {
+			Type    string `json:"type"`
+			SQL     string `json:"sql"`
+			Dialect string `json:"dialect"`
+		} `json:"representations"`
+		DefaultCatalog   string   `json:"default-catalog"`
+		DefaultNamespace []string `json:"default-namespace"`
+	}{
+		VersionID:   1,
+		TimestampMs: time.Now().UnixMilli(),
+		SchemaID:    schema.ID,
+		Summary:     map[string]string{"sql": viewSQL},
+		Representations: []struct {
+			Type    string `json:"type"`
+			SQL     string `json:"sql"`
+			Dialect string `json:"dialect"`
+		}{
+			{Type: "sql", SQL: viewSQL, Dialect: "default"},
+		},
+		DefaultCatalog:   c.name,
+		DefaultNamespace: nsIdent,
+	}
+
+	viewVersionBytes, err := json.Marshal(viewVersion)
+	if err != nil {
+		return fmt.Errorf("failed to marshal view version: %w", err)
+	}
+
+	if props == nil {
+		props = iceberg.Properties{}
+	}
+	props["view-version"] = string(viewVersionBytes)
+	props["view-format"] = "iceberg"
+	props["view-sql"] = viewSQL
+
+	schemaBytes, err := json.Marshal(schema)
+	if err != nil {
+		return fmt.Errorf("failed to marshal schema: %w", err)
+	}
+
+	// Create metadata location (even though we're not actually writing a metadata file)
+	metadataLocation := fmt.Sprintf("virtual://%s/%s/%s.view.json", c.name, ns, viewIdent)
+
+	err = withWriteTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
+		_, err := tx.NewInsert().Model(&sqlIcebergView{
+			CatalogName:      c.name,
+			ViewNamespace:    ns,
+			ViewName:         viewIdent,
+			ViewSQL:          viewSQL,
+			SchemaJSON:       string(schemaBytes),
+			MetadataLocation: sql.NullString{String: metadataLocation, Valid: true},
+			Properties:       props,
+		}).Exec(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to create view: %w", err)
+		}
+		return nil
+	})
+
+	return err
+}
+
+// ListViews returns a list of view identifiers in the catalog.
+func (c *Catalog) ListViews(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
+	views, err := c.listViewsAll(ctx, namespace)
+	if err != nil {
+		return func(yield func(table.Identifier, error) bool) {
+			yield(table.Identifier{}, err)
+		}
+	}
+
+	return func(yield func(table.Identifier, error) bool) {
+		for _, v := range views {
+			if !yield(v, nil) {
+				return
+			}
+		}
+	}
+}
+
+func (c *Catalog) listViewsAll(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error) {
+	if len(namespace) > 0 {
+		exists, err := c.namespaceExists(ctx, strings.Join(namespace, "."))
+		if err != nil {
+			return nil, err
+		}
+		if !exists {
+			return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(namespace, "."))
+		}
+	}
+
+	ns := strings.Join(namespace, ".")
+	views, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) ([]sqlIcebergView, error) {
+		var views []sqlIcebergView
+		err := tx.NewSelect().Model(&views).
+			Where("catalog_name = ?", c.name).
+			Where("view_namespace = ?", ns).
+			Scan(ctx)
+		return views, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("error listing views for namespace '%s': %w", namespace, err)
+	}
+
+	ret := make([]table.Identifier, len(views))
+	for i, v := range views {
+		ret[i] = append(strings.Split(v.ViewNamespace, "."), v.ViewName)
+	}
+
+	return ret, nil
+}
+
+// DropView deletes a view from the catalog.
+func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) error {
+	ns := strings.Join(catalog.NamespaceFromIdent(identifier), ".")
+	viewName := catalog.TableNameFromIdent(identifier)
+
+	return withWriteTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
+		res, err := tx.NewDelete().Model(&sqlIcebergView{
+			CatalogName:   c.name,
+			ViewNamespace: ns,
+			ViewName:      viewName,
+		}).WherePK().Exec(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to delete view entry: %w", err)
+		}
+
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("error encountered when deleting view entry: %w", err)
+		}
+
+		if n == 0 {
+			return fmt.Errorf("%w: %s", catalog.ErrNoSuchView, identifier)
+		}
+
+		return nil
+	})
+}
+
+// CheckViewExists returns true if a view exists in the catalog.
+func (c *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifier) (bool, error) {
+	ns := strings.Join(catalog.NamespaceFromIdent(identifier), ".")
+	viewName := catalog.TableNameFromIdent(identifier)
+
+	return withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) (bool, error) {
+		exists, err := tx.NewSelect().Model(&sqlIcebergView{
+			CatalogName:   c.name,
+			ViewNamespace: ns,
+			ViewName:      viewName,
+		}).WherePK().Exists(ctx)
+		if err != nil {
+			return false, fmt.Errorf("error checking view existence: %w", err)
+		}
+		return exists, nil
+	})
+}
+
+// LoadView loads a view from the catalog.
+func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (map[string]interface{}, error) {
+	ns := strings.Join(catalog.NamespaceFromIdent(identifier), ".")
+	viewName := catalog.TableNameFromIdent(identifier)
+
+	view, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) (*sqlIcebergView, error) {
+		v := new(sqlIcebergView)
+		err := tx.NewSelect().Model(v).
+			Where("catalog_name = ?", c.name).
+			Where("view_namespace = ?", ns).
+			Where("view_name = ?", viewName).
+			Scan(ctx)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchView, identifier)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("error encountered loading view %s: %w", identifier, err)
+		}
+		return v, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse schema from JSON
+	var schema *iceberg.Schema
+	if err := json.Unmarshal([]byte(view.SchemaJSON), &schema); err != nil {
+		return nil, fmt.Errorf("error parsing view schema: %w", err)
+	}
+
+	// Build view information
+	result := map[string]interface{}{
+		"name":              viewName,
+		"namespace":         ns,
+		"schema":            schema,
+		"sql":               view.ViewSQL,
+		"properties":        view.Properties,
+		"metadata-location": view.MetadataLocation.String,
+	}
+
+	return result, nil
 }
