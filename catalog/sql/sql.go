@@ -312,9 +312,6 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 	return c.LoadTable(ctx, ident, staged.Properties())
 }
 
-//go:linkname updateAndStageTable github.com/apache/iceberg-go/catalog.updateAndStageTable
-func updateAndStageTable(ctx context.Context, current *table.Table, ident table.Identifier, reqs []table.Requirement, updates []table.Update, cat table.CatalogIO) (*table.StagedTable, error)
-
 func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
 	ns := catalog.NamespaceFromIdent(tbl.Identifier())
 	tblName := catalog.TableNameFromIdent(tbl.Identifier())
@@ -324,7 +321,7 @@ func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, reqs []tabl
 		return nil, "", err
 	}
 
-	staged, err := updateAndStageTable(ctx, current, tbl.Identifier(), reqs, updates, c)
+	staged, err := internal.UpdateAndStageTable(ctx, current, tbl.Identifier(), reqs, updates, c)
 	if err != nil {
 		return nil, "", err
 	}

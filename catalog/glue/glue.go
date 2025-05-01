@@ -348,9 +348,6 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	return c.LoadTable(ctx, identifier, nil)
 }
 
-//go:linkname updateAndStageTable github.com/apache/iceberg-go/catalog.updateAndStageTable
-func updateAndStageTable(ctx context.Context, current *table.Table, ident table.Identifier, reqs []table.Requirement, updates []table.Update, cat table.CatalogIO) (*table.StagedTable, error)
-
 func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
 	// Load current table
 	database, tableName, err := identifierToGlueTable(tbl.Identifier())
@@ -363,7 +360,7 @@ func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, requirement
 	}
 
 	// Create a staging table with the updates applied
-	staged, err := updateAndStageTable(ctx, tbl, tbl.Identifier(), requirements, updates, c)
+	staged, err := internal.UpdateAndStageTable(ctx, tbl, tbl.Identifier(), requirements, updates, c)
 	if err != nil {
 		return nil, "", err
 	}

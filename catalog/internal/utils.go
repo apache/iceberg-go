@@ -199,3 +199,50 @@ func ParseMetadataVersion(location string) int {
 
 	return v
 }
+
+func UpdateAndStageTable(ctx context.Context, current *table.Table, ident table.Identifier, reqs []table.Requirement, updates []table.Update, cat table.CatalogIO) (*table.StagedTable, error) {
+	var (
+		baseMeta    table.Metadata
+		metadataLoc string
+	)
+
+	if current != nil {
+		for _, r := range reqs {
+			if err := r.Validate(current.Metadata()); err != nil {
+				return nil, err
+			}
+		}
+
+		baseMeta = current.Metadata()
+		metadataLoc = current.MetadataLocation()
+	} else {
+		var err error
+		baseMeta, err = table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, "", nil)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	updated, err := UpdateTableMetadata(baseMeta, updates, metadataLoc)
+	if err != nil {
+		return nil, err
+	}
+
+	provider, err := table.LoadLocationProvider(updated.Location(), updated.Properties())
+	if err != nil {
+		return nil, err
+	}
+
+	newVersion := ParseMetadataVersion(metadataLoc) + 1
+	newLocation, err := provider.NewTableMetadataFileLocation(newVersion)
+	if err != nil {
+		return nil, err
+	}
+
+	fs, err := io.LoadFS(ctx, updated.Properties(), newLocation)
+	if err != nil {
+		return nil, err
+	}
+
+	return &table.StagedTable{Table: table.New(ident, updated, newLocation, fs, cat)}, nil
+}
