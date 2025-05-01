@@ -191,7 +191,7 @@ func TestDescribeTable(t *testing.T) {
 		table := table.New([]string{"t"}, meta, "", nil, nil)
 		buf.Reset()
 
-		text{}.DescribeTable(table)
+		textOutput{}.DescribeTable(table)
 
 		assert.Equal(t, tt.expected, buf.String())
 	}
