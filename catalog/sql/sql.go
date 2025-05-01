@@ -955,6 +955,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 		if err != nil {
 			return fmt.Errorf("failed to create view: %w", err)
 		}
+
 		return nil
 	})
 
@@ -997,6 +998,7 @@ func (c *Catalog) listViewsAll(ctx context.Context, namespace table.Identifier) 
 			Where("catalog_name = ?", c.name).
 			Where("view_namespace = ?", ns).
 			Scan(ctx)
+
 		return views, err
 	})
 	if err != nil {
@@ -1053,6 +1055,7 @@ func (c *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifi
 		if err != nil {
 			return false, fmt.Errorf("error checking view existence: %w", err)
 		}
+
 		return exists, nil
 	})
 }
@@ -1075,6 +1078,7 @@ func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (ma
 		if err != nil {
 			return nil, fmt.Errorf("error encountered loading view %s: %w", identifier, err)
 		}
+
 		return v, nil
 	})
 	if err != nil {
