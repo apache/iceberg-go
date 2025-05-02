@@ -886,6 +886,44 @@ func (t *TableWritingTestSuite) TestReplaceDataFiles() {
 	}, staged.CurrentSnapshot().Summary)
 }
 
+func (t *TableWritingTestSuite) TestExpireSnapshots() {
+	fs := iceio.LocalFS{}
+
+	files := make([]string, 0)
+	for i := range 5 {
+		filePath := fmt.Sprintf("%s/replace_data_files_v%d/data-%d.parquet", t.location, t.formatVersion, i)
+		t.writeParquet(fs, filePath, t.arrTablePromotedTypes)
+		files = append(files, filePath)
+	}
+
+	ident := table.Identifier{"default", "replace_data_files_v" + strconv.Itoa(t.formatVersion)}
+	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, t.location, iceberg.Properties{"format-version": strconv.Itoa(t.formatVersion)})
+	t.Require().NoError(err)
+
+	ctx := context.Background()
+
+	tbl := table.New(ident, meta, t.getMetadataLoc(), fs, &mockedCatalog{})
+	for i := range 5 {
+		tx := tbl.NewTransaction()
+		t.Require().NoError(tx.AddFiles(ctx, files[i:i+1], nil, false))
+		tbl, err = tx.Commit(ctx)
+		t.Require().NoError(err)
+	}
+
+	mflist, err := tbl.CurrentSnapshot().Manifests(tbl.FS())
+	t.Require().NoError(err)
+	t.Len(mflist, 5)
+	t.Require().Equal(5, len(tbl.Metadata().Snapshots()))
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.ExpireSnapshots(table.WithOlderThan(0), table.WithRetainLast(2)))
+	tbl, err = tx.Commit(ctx)
+	t.Require().NoError(err)
+	t.Require().Equal(2, len(tbl.Metadata().Snapshots()))
+	t.Require().Equal(2, len(slices.Collect(tbl.Metadata().SnapshotLogs())))
+}
+
 func (t *TableWritingTestSuite) TestWriteSpecialCharacterColumn() {
 	ident := table.Identifier{"default", "write_special_character_column"}
 	colNameWithSpecialChar := "letter/abc"
