@@ -350,8 +350,17 @@ func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64) (*MetadataBuilder
 		snapshotsToKeep = append(snapshotsToKeep, snapshot)
 	}
 
+	var prunedSnapshotLog []SnapshotLogEntry
+
+	for _, entry := range b.snapshotLog {
+		if !slices.Contains(snapshotIds, entry.SnapshotID) {
+			prunedSnapshotLog = append(prunedSnapshotLog, entry)
+		}
+	}
+
 	b.updates = append(b.updates, NewRemoveSnapshotsUpdate(snapshotIds))
 	b.snapshotList = snapshotsToKeep
+	b.snapshotLog = prunedSnapshotLog
 
 	return b, nil
 }
