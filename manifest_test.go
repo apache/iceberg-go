@@ -918,11 +918,27 @@ func (m *ManifestTestSuite) TestManifestEntriesV2() {
 		Path:    manifestFileRecordsV2[0].FilePath(),
 	}
 
-	mockfs.Test(m.T())
-	mockfs.On("Open", manifest.FilePath()).Return(&internal.MockFile{
+	partitionSpec := NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceID: 1, Name: "VendorID", Transform: IdentityTransform{}},
+		PartitionField{FieldID: 1001, SourceID: 2, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
+
+	mockedFile := &internal.MockFile{
 		Contents: bytes.NewReader(m.v2ManifestEntries.Bytes()),
-	}, nil)
+	}
+
+	mockfs.Test(m.T())
+	mockfs.On("Open", manifest.FilePath()).Twice().Return(mockedFile, nil)
 	defer mockfs.AssertExpectations(m.T())
+
+	meta, err := manifest.FetchMetadata(&mockfs)
+	m.Require().NoError(err)
+	m.Equal(2, meta.FormatVersion)
+	m.Equal(ManifestContentData, meta.Content)
+	m.True(meta.Schema.Equals(testSchema))
+	m.True(meta.PartitionSpec.Equals(partitionSpec))
+
+	mockedFile.Contents = bytes.NewReader(m.v2ManifestEntries.Bytes())
+
 	entries, err := manifest.FetchEntries(&mockfs, false)
 	m.Require().NoError(err)
 	m.Len(entries, 2)

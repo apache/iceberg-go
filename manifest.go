@@ -403,6 +403,45 @@ func (m *manifestFile) FetchEntries(fs iceio.IO, discardDeleted bool) ([]Manifes
 	return fetchManifestEntries(m, fs, discardDeleted)
 }
 
+func (m *manifestFile) FetchMetadata(fs iceio.IO) (ManifestFileMetadata, error) {
+	var ret ManifestFileMetadata
+
+	f, err := fs.Open(m.FilePath())
+	if err != nil {
+		return ret, err
+	}
+	defer f.Close()
+
+	dec, err := ocf.NewDecoder(f, ocf.WithDecoderSchemaCache(&avro.SchemaCache{}))
+	if err != nil {
+		return ret, err
+	}
+
+	metadata := dec.Metadata()
+	ret.Schema = new(Schema)
+	if err := json.Unmarshal(metadata["schema"], ret.Schema); err != nil {
+		return ret, fmt.Errorf("failed to unmarshal schema: %w", err)
+	}
+
+	ret.Schema.ID, _ = strconv.Atoi(string(metadata["schema-id"]))
+
+	if err := json.Unmarshal(metadata["partition-spec"], &ret.PartitionSpec.fields); err != nil {
+		return ret, fmt.Errorf("failed to unmarshal partition spec: %w", err)
+	}
+
+	ret.PartitionSpec.id, _ = strconv.Atoi(string(metadata["partition-spec-id"]))
+	ret.PartitionSpec.initialize()
+	ret.FormatVersion, _ = strconv.Atoi(string(metadata["format-version"]))
+	switch string(metadata["content"]) {
+	case "data":
+		ret.Content = ManifestContentData
+	case "deletes":
+		ret.Content = ManifestContentDeletes
+	}
+
+	return ret, nil
+}
+
 func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType) {
 	getField := func(rs *avro.RecordSchema, name string) *avro.Field {
 		for _, f := range rs.Fields() {
@@ -441,6 +480,13 @@ func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType) {
 type hasFieldToIDMap interface {
 	setFieldNameToIDMap(map[string]int)
 	setFieldIDToLogicalTypeMap(map[int]avro.LogicalType)
+}
+
+type ManifestFileMetadata struct {
+	Schema        *Schema
+	PartitionSpec PartitionSpec
+	FormatVersion int
+	Content       ManifestContent
 }
 
 func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error) {
@@ -568,6 +614,9 @@ type ManifestFile interface {
 	// If discardDeleted is true, entries for files containing deleted rows
 	// will be skipped.
 	FetchEntries(fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error)
+	// FetchMetadata reads just the metadata from the Manifest File and converts
+	// the Avro Metadata fields into a ManifestFileMetadata struct.
+	FetchMetadata(fs iceio.IO) (ManifestFileMetadata, error)
 	// // WriteEntries writes a list of manifest entries to a provided
 	// // io.Writer. The version of the manifest file is used to determine the
 	// // schema to use for writing the entries.
