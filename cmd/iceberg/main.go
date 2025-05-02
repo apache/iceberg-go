@@ -142,9 +142,9 @@ func main() {
 	var output Output
 	switch strings.ToLower(cfg.Output) {
 	case "text":
-		output = text{}
+		output = textOutput{}
 	case "json":
-		fallthrough
+		output = jsonOutput{}
 	default:
 		log.Fatal("unimplemented output type")
 	}

@@ -18,6 +18,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -44,9 +45,9 @@ type Output interface {
 	Error(error)
 }
 
-type text struct{}
+type textOutput struct{}
 
-func (text) Identifiers(idlist []table.Identifier) {
+func (textOutput) Identifiers(idlist []table.Identifier) {
 	data := pterm.TableData{[]string{"IDs"}}
 	for _, ids := range idlist {
 		data = append(data, []string{strings.Join(ids, ".")})
@@ -59,7 +60,7 @@ func (text) Identifiers(idlist []table.Identifier) {
 		WithData(data).Render()
 }
 
-func (t text) DescribeTable(tbl *table.Table) {
+func (t textOutput) DescribeTable(tbl *table.Table) {
 	propData := pterm.TableData{{"key", "value"}}
 	for k, v := range tbl.Metadata().Properties() {
 		propData = append(propData, []string{k, v})
@@ -109,7 +110,7 @@ func (t text) DescribeTable(tbl *table.Table) {
 	propTable.Render()
 }
 
-func (t text) Files(tbl *table.Table, history bool) {
+func (t textOutput) Files(tbl *table.Table, history bool) {
 	var snapshots []table.Snapshot
 	if history {
 		snapshots = tbl.Metadata().Snapshots()
@@ -161,7 +162,7 @@ func (t text) Files(tbl *table.Table, history bool) {
 	pterm.DefaultTree.WithRoot(node).Render()
 }
 
-func (text) DescribeProperties(props iceberg.Properties) {
+func (textOutput) DescribeProperties(props iceberg.Properties) {
 	data := pterm.TableData{[]string{"Key", "Value"}}
 	for k, v := range props {
 		data = append(data, []string{k, v})
@@ -174,11 +175,11 @@ func (text) DescribeProperties(props iceberg.Properties) {
 		WithData(data).Render()
 }
 
-func (text) Text(val string) {
+func (textOutput) Text(val string) {
 	fmt.Println(val)
 }
 
-func (text) Schema(schema *iceberg.Schema) {
+func (textOutput) Schema(schema *iceberg.Schema) {
 	schemaTree := pterm.LeveledList{}
 	var addChildren func(iceberg.NestedField, int)
 	addChildren = func(nf iceberg.NestedField, depth int) {
@@ -203,11 +204,11 @@ func (text) Schema(schema *iceberg.Schema) {
 	pterm.DefaultTree.WithRoot(schemaTreeNode).Render()
 }
 
-func (text) Spec(spec iceberg.PartitionSpec) {
+func (textOutput) Spec(spec iceberg.PartitionSpec) {
 	fmt.Println(spec)
 }
 
-func (text) Uuid(u uuid.UUID) {
+func (textOutput) Uuid(u uuid.UUID) {
 	if u.String() != "" {
 		fmt.Println(u.String())
 	} else {
@@ -215,6 +216,116 @@ func (text) Uuid(u uuid.UUID) {
 	}
 }
 
-func (text) Error(err error) {
+func (textOutput) Error(err error) {
+	log.Fatal(err)
+}
+
+type jsonOutput struct{}
+
+func (j jsonOutput) Identifiers(idList []table.Identifier) {
+	type dataType struct {
+		Identifiers []table.Identifier `json:"identifiers"`
+	}
+
+	data := dataType{Identifiers: idList}
+	if err := json.NewEncoder(os.Stdout).Encode(data); err != nil {
+		j.Error(err)
+	}
+}
+
+func (j jsonOutput) DescribeTable(tbl *table.Table) {
+	type dataType struct {
+		Metadata         table.Metadata        `json:"metadata,omitempty"`
+		MetadataLocation string                `json:"metadata-location,omitempty"`
+		SortOrder        table.SortOrder       `json:"sort-order,omitempty"`
+		CurrentSnapshot  *table.Snapshot       `json:"current-snapshot,omitempty"`
+		Spec             iceberg.PartitionSpec `json:"spec,omitempty"`
+		Schema           *iceberg.Schema       `json:"schema,omitempty"`
+	}
+
+	data := dataType{
+		Metadata:         tbl.Metadata(),
+		MetadataLocation: tbl.MetadataLocation(),
+		SortOrder:        tbl.SortOrder(),
+		CurrentSnapshot:  tbl.CurrentSnapshot(),
+		Spec:             tbl.Spec(),
+		Schema:           tbl.Schema(),
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(data); err != nil {
+		j.Error(err)
+	}
+}
+
+func (j jsonOutput) Files(tbl *table.Table, history bool) {
+	if history {
+		type dataType struct {
+			Snapshots []table.Snapshot `json:"snapshots"`
+		}
+
+		data := dataType{
+			Snapshots: tbl.Metadata().Snapshots(),
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(data); err != nil {
+			j.Error(err)
+		}
+	} else {
+		type dataType struct {
+			Snapshot *table.Snapshot `json:"snapshot"`
+		}
+
+		data := dataType{
+			Snapshot: tbl.CurrentSnapshot(),
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(data); err != nil {
+			j.Error(err)
+		}
+	}
+}
+
+func (j jsonOutput) DescribeProperties(props iceberg.Properties) {
+	if err := json.NewEncoder(os.Stdout).Encode(props); err != nil {
+		j.Error(err)
+	}
+}
+
+func (j jsonOutput) Text(s string) {
+	type dataType struct {
+		Data string `json:"data"`
+	}
+
+	data := dataType{
+		Data: s,
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(data); err != nil {
+		j.Error(err)
+	}
+}
+
+func (j jsonOutput) Schema(schema *iceberg.Schema) {
+	if err := json.NewEncoder(os.Stdout).Encode(schema); err != nil {
+		j.Error(err)
+	}
+}
+
+func (j jsonOutput) Spec(spec iceberg.PartitionSpec) {
+	if err := json.NewEncoder(os.Stdout).Encode(spec); err != nil {
+		j.Error(err)
+	}
+}
+
+func (j jsonOutput) Uuid(u uuid.UUID) {
+	type dataType struct {
+		UUID uuid.UUID `json:"uuid"`
+	}
+
+	data := dataType{
+		UUID: u,
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(data); err != nil {
+		j.Error(err)
+	}
+}
+
+func (j jsonOutput) Error(err error) {
 	log.Fatal(err)
 }
