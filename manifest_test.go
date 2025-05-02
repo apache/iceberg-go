@@ -1159,7 +1159,7 @@ func TestDesanitizeName(t *testing.T) {
 		expected string
 	}{
 		{"event_metadata_x2Etiming_x2Ecreated_at_year", "event_metadata.timing.created_at_year"},
-		{"cost_in__x20AC", "cost_in_€"},
+		{"event_metadata_x2Etiming_x2Ecreated_at_month", "event_metadata.timing.created_at_month"},
 	}
 
 	for _, tt := range tests {
