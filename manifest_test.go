@@ -26,6 +26,7 @@ import (
 	"github.com/apache/iceberg-go/internal"
 	"github.com/hamba/avro/v2"
 	"github.com/hamba/avro/v2/ocf"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -1150,4 +1151,20 @@ func (m *ManifestTestSuite) TestManifestWriterMeta() {
 
 func TestManifests(t *testing.T) {
 	suite.Run(t, new(ManifestTestSuite))
+}
+
+func TestDesanitizeName(t *testing.T) {
+	tests := []struct {
+		name     string
+		expected string
+	}{
+		{"event_metadata_x2Etiming_x2Ecreated_at_year", "event_metadata.timing.created_at_year"},
+		{"cost_in__x20AC", "cost_in_€"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, desanitizeName(tt.name))
+		})
+	}
 }

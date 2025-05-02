@@ -1492,7 +1492,7 @@ func sanitizeName(n string) string {
 
 func desanitizeName(n string) string {
 	// Regular expression to match Unicode escape sequences
-	re := regexp.MustCompile(`_x([0-9A-Fa-f]{2,4})`)
+	re := regexp.MustCompile(`_x([0-9A-F]{2,4})`)
 
 	// Replace all matches with their Unicode character equivalents
 	result := re.ReplaceAllStringFunc(n, func(match string) string {
