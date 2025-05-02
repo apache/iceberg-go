@@ -227,15 +227,10 @@ func (j jsonOutput) Identifiers(idList []table.Identifier) {
 		Identifiers []table.Identifier `json:"identifiers"`
 	}
 
-	var data dataType
-	data.Identifiers = idList
-
-	encodedData, err := json.Marshal(data)
-	if err != nil {
+	data := dataType{Identifiers: idList}
+	if err := json.NewEncoder(os.Stdout).Encode(data); err != nil {
 		j.Error(err)
 	}
-
-	fmt.Println(string(encodedData))
 }
 
 func (j jsonOutput) DescribeTable(tbl *table.Table) {
@@ -245,19 +240,20 @@ func (j jsonOutput) DescribeTable(tbl *table.Table) {
 		SortOrder        table.SortOrder       `json:"sort-order,omitempty"`
 		CurrentSnapshot  *table.Snapshot       `json:"current-snapshot,omitempty"`
 		Spec             iceberg.PartitionSpec `json:"spec,omitempty"`
-		Schema           *iceberg.Schema       `json:"schema"`
+		Schema           *iceberg.Schema       `json:"schema,omitempty"`
 	}
 
-	var data dataType
-	data.Metadata = tbl.Metadata()
-	data.MetadataLocation = tbl.MetadataLocation()
-	data.SortOrder = tbl.SortOrder()
-	data.CurrentSnapshot = tbl.CurrentSnapshot()
-	data.Spec = tbl.Spec()
-	data.Schema = tbl.Schema()
-
-	encodedData, _ := json.Marshal(data)
-	fmt.Println(string(encodedData))
+	data := dataType{
+		Metadata:         tbl.Metadata(),
+		MetadataLocation: tbl.MetadataLocation(),
+		SortOrder:        tbl.SortOrder(),
+		CurrentSnapshot:  tbl.CurrentSnapshot(),
+		Spec:             tbl.Spec(),
+		Schema:           tbl.Schema(),
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(data); err != nil {
+		j.Error(err)
+	}
 }
 
 func (j jsonOutput) Files(tbl *table.Table, history bool) {
@@ -266,39 +262,30 @@ func (j jsonOutput) Files(tbl *table.Table, history bool) {
 			Snapshots []table.Snapshot `json:"snapshots"`
 		}
 
-		var data dataType
-		data.Snapshots = tbl.Metadata().Snapshots()
-
-		encodedData, err := json.Marshal(data)
-		if err != nil {
+		data := dataType{
+			Snapshots: tbl.Metadata().Snapshots(),
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(data); err != nil {
 			j.Error(err)
 		}
-
-		fmt.Println(string(encodedData))
 	} else {
 		type dataType struct {
 			Snapshot *table.Snapshot `json:"snapshot"`
 		}
 
-		var data dataType
-		data.Snapshot = tbl.CurrentSnapshot()
-
-		encodedData, err := json.Marshal(data)
-		if err != nil {
+		data := dataType{
+			Snapshot: tbl.CurrentSnapshot(),
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(data); err != nil {
 			j.Error(err)
 		}
-
-		fmt.Println(string(encodedData))
 	}
 }
 
 func (j jsonOutput) DescribeProperties(props iceberg.Properties) {
-	encodedData, err := json.Marshal(props)
-	if err != nil {
+	if err := json.NewEncoder(os.Stdout).Encode(props); err != nil {
 		j.Error(err)
 	}
-
-	fmt.Println(string(encodedData))
 }
 
 func (j jsonOutput) Text(s string) {
@@ -306,33 +293,24 @@ func (j jsonOutput) Text(s string) {
 		Data string `json:"data"`
 	}
 
-	var data dataType
-	data.Data = s
-
-	encodedData, err := json.Marshal(data)
-	if err != nil {
+	data := dataType{
+		Data: s,
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(data); err != nil {
 		j.Error(err)
 	}
-
-	fmt.Println(string(encodedData))
 }
 
 func (j jsonOutput) Schema(schema *iceberg.Schema) {
-	encodedData, err := json.Marshal(schema)
-	if err != nil {
+	if err := json.NewEncoder(os.Stdout).Encode(schema); err != nil {
 		j.Error(err)
 	}
-
-	fmt.Println(string(encodedData))
 }
 
 func (j jsonOutput) Spec(spec iceberg.PartitionSpec) {
-	encodedData, err := json.Marshal(spec)
-	if err != nil {
+	if err := json.NewEncoder(os.Stdout).Encode(spec); err != nil {
 		j.Error(err)
 	}
-
-	fmt.Println(string(encodedData))
 }
 
 func (j jsonOutput) Uuid(u uuid.UUID) {
@@ -340,15 +318,12 @@ func (j jsonOutput) Uuid(u uuid.UUID) {
 		UUID uuid.UUID `json:"uuid"`
 	}
 
-	var data dataType
-	data.UUID = u
-
-	encodedData, err := json.Marshal(data)
-	if err != nil {
+	data := dataType{
+		UUID: u,
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(data); err != nil {
 		j.Error(err)
 	}
-
-	fmt.Println(string(encodedData))
 }
 
 func (j jsonOutput) Error(err error) {
