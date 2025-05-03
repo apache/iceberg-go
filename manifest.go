@@ -450,62 +450,7 @@ func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]M
 	}
 	defer f.Close()
 
-	return readManifestEntries(m, f, discardDeleted)
-}
-
-func readManifestEntries(m ManifestFile, f io.Reader, discardDeleted bool) ([]ManifestEntry, error) {
-	dec, err := ocf.NewDecoder(f, ocf.WithDecoderSchemaCache(&avro.SchemaCache{}))
-	if err != nil {
-		return nil, err
-	}
-
-	metadata := dec.Metadata()
-	sc := dec.Schema()
-
-	fieldNameToID, fieldIDToLogicalType := getFieldIDMap(sc)
-	isFallback := false
-	if string(metadata["format-version"]) == "1" {
-		for _, f := range sc.(*avro.RecordSchema).Fields() {
-			if f.Name() == "snapshot_id" {
-				if f.Type().Type() != avro.Union {
-					isFallback = true
-				}
-
-				break
-			}
-		}
-	}
-
-	results := make([]ManifestEntry, 0)
-	for dec.HasNext() {
-		var tmp ManifestEntry
-		if isFallback {
-			tmp = &fallbackManifestEntry{
-				manifestEntry: manifestEntry{Data: &dataFile{}},
-			}
-		} else {
-			tmp = &manifestEntry{Data: &dataFile{}}
-		}
-
-		if err := dec.Decode(tmp); err != nil {
-			return nil, err
-		}
-
-		if isFallback {
-			tmp = tmp.(*fallbackManifestEntry).toEntry()
-		}
-
-		if !discardDeleted || tmp.Status() != EntryStatusDELETED {
-			tmp.inherit(m)
-			if fieldToIDMap, ok := tmp.DataFile().(hasFieldToIDMap); ok {
-				fieldToIDMap.setFieldNameToIDMap(fieldNameToID)
-				fieldToIDMap.setFieldIDToLogicalTypeMap(fieldIDToLogicalType)
-			}
-			results = append(results, tmp)
-		}
-	}
-
-	return results, dec.Error()
+	return ReadManifest(m, f, discardDeleted)
 }
 
 // ManifestFile is the interface which covers both V1 and V2 manifest files.
@@ -612,6 +557,203 @@ func decodeManifests[I interface {
 	}
 
 	return results, dec.Error()
+}
+
+// ManifestReader reads the metadata and data from an avro manifest file.
+type ManifestReader struct {
+	dec           *ocf.Decoder
+	file          ManifestFile
+	formatVersion int
+	isFallback    bool
+	content       ManifestContent
+
+	// The rest are lazily populated, on demand. Most readers
+	// will likely only try to load the entries.
+	schema              Schema
+	schemaLoaded        bool
+	partitionSpec       PartitionSpec
+	partitionSpecLoaded bool
+	entriesRead         bool
+}
+
+// NewManifestReader returns a value that can read the contents of an avro manifest
+// file. If the caller is interested in the manifest entries in the file, it must call
+// [ManifestReader.Entries] before closing the provided reader.
+func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error) {
+	dec, err := ocf.NewDecoder(in, ocf.WithDecoderSchemaCache(&avro.SchemaCache{}))
+	if err != nil {
+		return nil, err
+	}
+
+	metadata := dec.Metadata()
+	sc := dec.Schema()
+
+	formatVersion, err := strconv.Atoi(string(metadata["format-version"]))
+	if err != nil {
+		return nil, fmt.Errorf("manifest file's 'format-version' metadata is invalid: %w", err)
+	}
+	if formatVersion != file.Version() {
+		return nil, fmt.Errorf("manifest file's 'format-version' metadata indicates version %d, but entry from manifest list indicates version %d",
+			formatVersion, file.Version())
+	}
+
+	var content ManifestContent
+	switch contentStr := string(metadata["content"]); contentStr {
+	case "data":
+		content = ManifestContentData
+	case "deletes":
+		content = ManifestContentDeletes
+	default:
+		return nil, fmt.Errorf("manifest file's 'content' metadata is invalid, should be \"data\" or \"deletes\" but instead is %q",
+			contentStr)
+	}
+	if content != file.ManifestContent() {
+		return nil, fmt.Errorf("manifest file's 'content' metadata indicates %q, but entry from manifest list indicates %q",
+			content.String(), file.ManifestContent().String())
+	}
+
+	isFallback := false
+	if formatVersion == 1 {
+		for _, f := range sc.(*avro.RecordSchema).Fields() {
+			if f.Name() == "snapshot_id" {
+				if f.Type().Type() != avro.Union {
+					isFallback = true
+				}
+
+				break
+			}
+		}
+	}
+
+	return &ManifestReader{
+		dec:           dec,
+		file:          file,
+		formatVersion: formatVersion,
+		isFallback:    isFallback,
+		content:       content,
+	}, nil
+}
+
+// Version returns the file's format version.
+func (c *ManifestReader) Version() int {
+	return c.formatVersion
+}
+
+// ManifestContent returns the type of content in the manifest file.
+func (c *ManifestReader) ManifestContent() ManifestContent {
+	return c.content
+}
+
+// SchemaID returns the schema ID encoded in the avro file's metadata.
+func (c *ManifestReader) SchemaID() (int, error) {
+	id, err := strconv.Atoi(string(c.dec.Metadata()["schema-id"]))
+	if err != nil {
+		return 0, fmt.Errorf("manifest file's 'schema-id' metadata is invalid: %w", err)
+	}
+	return id, nil
+}
+
+// Schema returns the schema encoded in the avro file's metadata.
+func (c *ManifestReader) Schema() (*Schema, error) {
+	if !c.schemaLoaded {
+		schemaID, err := c.SchemaID()
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(c.dec.Metadata()["schema"], &c.schema); err != nil {
+			return nil, fmt.Errorf("manifest file's 'schema' metadata is invalid: %w", err)
+		}
+		c.schema.ID = schemaID
+		c.schemaLoaded = true
+	}
+	return &c.schema, nil
+}
+
+// PartitionSpecID returns the partition spec ID encoded in the avro file's metadata.
+func (c *ManifestReader) PartitionSpecID() (int, error) {
+	id, err := strconv.Atoi(string(c.dec.Metadata()["partition-spec-id"]))
+	if err != nil {
+		return 0, fmt.Errorf("manifest file's 'partition-spec-id' metadata is invalid: %w", err)
+	}
+	if id != int(c.file.PartitionSpecID()) {
+
+	}
+	return id, nil
+}
+
+// PartitionSpec returns the partition spec encoded in the avro file's metadata.
+func (c *ManifestReader) PartitionSpec() (*PartitionSpec, error) {
+	if !c.partitionSpecLoaded {
+		partitionSpecID, err := c.PartitionSpecID()
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(c.dec.Metadata()["partition-spec"], &c.partitionSpec.fields); err != nil {
+			return nil, fmt.Errorf("manifest file's 'partition-spec' metadata is invalid: %w", err)
+		}
+		c.partitionSpec.id = partitionSpecID
+		c.partitionSpec.initialize()
+		c.partitionSpecLoaded = true
+	}
+	return &c.partitionSpec, nil
+}
+
+// ReadEntries reads the manifest entries in the avro file's data. If discardDeleted is true,
+// the returned slice omits entries whose status is "deleted". This will exhaust the underlying
+// reader, so calling it a second time will result in nil, io.EOF.
+func (c *ManifestReader) ReadEntries(discardDeleted bool) ([]ManifestEntry, error) {
+	if c.entriesRead {
+		return nil, io.EOF
+	}
+
+	defer func() {
+		c.entriesRead = true
+	}()
+
+	sc := c.dec.Schema()
+	fieldNameToID, fieldIDToLogicalType := getFieldIDMap(sc)
+
+	results := make([]ManifestEntry, 0)
+	for c.dec.HasNext() {
+		var tmp ManifestEntry
+		if c.isFallback {
+			tmp = &fallbackManifestEntry{
+				manifestEntry: manifestEntry{Data: &dataFile{}},
+			}
+		} else {
+			tmp = &manifestEntry{Data: &dataFile{}}
+		}
+
+		if err := c.dec.Decode(tmp); err != nil {
+			return results, err
+		}
+
+		if c.isFallback {
+			tmp = tmp.(*fallbackManifestEntry).toEntry()
+		}
+
+		if !discardDeleted || tmp.Status() != EntryStatusDELETED {
+			tmp.inherit(c.file)
+			if fieldToIDMap, ok := tmp.DataFile().(hasFieldToIDMap); ok {
+				fieldToIDMap.setFieldNameToIDMap(fieldNameToID)
+				fieldToIDMap.setFieldIDToLogicalTypeMap(fieldIDToLogicalType)
+			}
+			results = append(results, tmp)
+		}
+	}
+
+	return results, c.dec.Error()
+}
+
+// ReadManifest reads in an avro list file and returns a slice
+// of manifest entries or an error if one is encountered. If discardDeleted
+// is true, the returned slice omits entries whose status is "deleted".
+func ReadManifest(m ManifestFile, f io.Reader, discardDeleted bool) ([]ManifestEntry, error) {
+	manifestReader, err := NewManifestReader(m, f)
+	if err != nil {
+		return nil, err
+	}
+	return manifestReader.ReadEntries(discardDeleted)
 }
 
 // ReadManifestList reads in an avro manifest list file and returns a slice
