@@ -566,6 +566,8 @@ type ManifestReader struct {
 	formatVersion int
 	isFallback    bool
 	content       ManifestContent
+	fieldNameToID map[string]int
+	fieldIDToType map[int]avro.LogicalType
 
 	// The rest are lazily populated, on demand. Most readers
 	// will likely only try to load the entries.
@@ -573,7 +575,6 @@ type ManifestReader struct {
 	schemaLoaded        bool
 	partitionSpec       PartitionSpec
 	partitionSpecLoaded bool
-	entriesRead         bool
 }
 
 // NewManifestReader returns a value that can read the contents of an avro manifest
@@ -624,6 +625,7 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 			}
 		}
 	}
+	fieldNameToID, fieldIDToType := getFieldIDMap(sc)
 
 	return &ManifestReader{
 		dec:           dec,
@@ -631,6 +633,8 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 		formatVersion: formatVersion,
 		isFallback:    isFallback,
 		content:       content,
+		fieldNameToID: fieldNameToID,
+		fieldIDToType: fieldIDToType,
 	}, nil
 }
 
@@ -650,6 +654,7 @@ func (c *ManifestReader) SchemaID() (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("manifest file's 'schema-id' metadata is invalid: %w", err)
 	}
+
 	return id, nil
 }
 
@@ -666,6 +671,7 @@ func (c *ManifestReader) Schema() (*Schema, error) {
 		c.schema.ID = schemaID
 		c.schemaLoaded = true
 	}
+
 	return &c.schema, nil
 }
 
@@ -676,8 +682,10 @@ func (c *ManifestReader) PartitionSpecID() (int, error) {
 		return 0, fmt.Errorf("manifest file's 'partition-spec-id' metadata is invalid: %w", err)
 	}
 	if id != int(c.file.PartitionSpecID()) {
-
+		return 0, fmt.Errorf("manifest file's 'partition-spec-id' metadata indicates %d, but entry from manifest list indicates %d",
+			id, c.file.PartitionSpecID())
 	}
+
 	return id, nil
 }
 
@@ -695,54 +703,40 @@ func (c *ManifestReader) PartitionSpec() (*PartitionSpec, error) {
 		c.partitionSpec.initialize()
 		c.partitionSpecLoaded = true
 	}
+
 	return &c.partitionSpec, nil
 }
 
-// ReadEntries reads the manifest entries in the avro file's data. If discardDeleted is true,
-// the returned slice omits entries whose status is "deleted". This will exhaust the underlying
-// reader, so calling it a second time will result in nil, io.EOF.
-func (c *ManifestReader) ReadEntries(discardDeleted bool) ([]ManifestEntry, error) {
-	if c.entriesRead {
+// ReadEntry reads the next manifest entry in the avro file's data.
+func (c *ManifestReader) ReadEntry() (ManifestEntry, error) {
+	if err := c.dec.Error(); err != nil {
+		return nil, err
+	}
+	if !c.dec.HasNext() {
 		return nil, io.EOF
 	}
-
-	defer func() {
-		c.entriesRead = true
-	}()
-
-	sc := c.dec.Schema()
-	fieldNameToID, fieldIDToLogicalType := getFieldIDMap(sc)
-
-	results := make([]ManifestEntry, 0)
-	for c.dec.HasNext() {
-		var tmp ManifestEntry
-		if c.isFallback {
-			tmp = &fallbackManifestEntry{
-				manifestEntry: manifestEntry{Data: &dataFile{}},
-			}
-		} else {
-			tmp = &manifestEntry{Data: &dataFile{}}
+	var tmp ManifestEntry
+	if c.isFallback {
+		tmp = &fallbackManifestEntry{
+			manifestEntry: manifestEntry{Data: &dataFile{}},
 		}
-
-		if err := c.dec.Decode(tmp); err != nil {
-			return results, err
-		}
-
-		if c.isFallback {
-			tmp = tmp.(*fallbackManifestEntry).toEntry()
-		}
-
-		if !discardDeleted || tmp.Status() != EntryStatusDELETED {
-			tmp.inherit(c.file)
-			if fieldToIDMap, ok := tmp.DataFile().(hasFieldToIDMap); ok {
-				fieldToIDMap.setFieldNameToIDMap(fieldNameToID)
-				fieldToIDMap.setFieldIDToLogicalTypeMap(fieldIDToLogicalType)
-			}
-			results = append(results, tmp)
-		}
+	} else {
+		tmp = &manifestEntry{Data: &dataFile{}}
 	}
 
-	return results, c.dec.Error()
+	if err := c.dec.Decode(tmp); err != nil {
+		return nil, err
+	}
+	if c.isFallback {
+		tmp = tmp.(*fallbackManifestEntry).toEntry()
+	}
+	tmp.inherit(c.file)
+	if fieldToIDMap, ok := tmp.DataFile().(hasFieldToIDMap); ok {
+		fieldToIDMap.setFieldNameToIDMap(c.fieldNameToID)
+		fieldToIDMap.setFieldIDToLogicalTypeMap(c.fieldIDToType)
+	}
+
+	return tmp, nil
 }
 
 // ReadManifest reads in an avro list file and returns a slice
@@ -753,7 +747,21 @@ func ReadManifest(m ManifestFile, f io.Reader, discardDeleted bool) ([]ManifestE
 	if err != nil {
 		return nil, err
 	}
-	return manifestReader.ReadEntries(discardDeleted)
+	var results []ManifestEntry
+	for {
+		entry, err := manifestReader.ReadEntry()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return results, nil
+			}
+
+			return results, err
+		}
+		if discardDeleted && entry.Status() == EntryStatusDELETED {
+			continue
+		}
+		results = append(results, entry)
+	}
 }
 
 // ReadManifestList reads in an avro manifest list file and returns a slice

@@ -914,6 +914,7 @@ func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
 func (m *ManifestTestSuite) TestManifestEntriesV2() {
 	manifest := manifestFile{
 		version: 2,
+		SpecID:  1,
 		Path:    manifestFileRecordsV2[0].FilePath(),
 	}
 
@@ -935,10 +936,14 @@ func (m *ManifestTestSuite) TestManifestEntriesV2() {
 	m.Require().NoError(err)
 	m.True(loadedPartitionSpec.Equals(partitionSpec))
 
-	entries, err := manifestReader.ReadEntries(false)
+	entry1, err := manifestReader.ReadEntry()
 	m.Require().NoError(err)
-	m.Len(entries, 2)
-	m.Zero(manifest.PartitionSpecID())
+	_, err = manifestReader.ReadEntry()
+	m.Require().NoError(err)
+	_, err = manifestReader.ReadEntry()
+	m.Require().ErrorIs(err, io.EOF)
+
+	m.Equal(int32(1), manifest.PartitionSpecID())
 	m.Zero(manifest.SnapshotID())
 	m.Zero(manifest.AddedDataFiles())
 	m.Zero(manifest.ExistingDataFiles())
@@ -946,8 +951,6 @@ func (m *ManifestTestSuite) TestManifestEntriesV2() {
 	m.Zero(manifest.ExistingRows())
 	m.Zero(manifest.DeletedRows())
 	m.Zero(manifest.AddedRows())
-
-	entry1 := entries[0]
 
 	m.Equal(EntryStatusADDED, entry1.Status())
 	m.Equal(entrySnapshotID, entry1.SnapshotID())
