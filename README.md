@@ -78,10 +78,11 @@ $ cd iceberg-go/cmd/iceberg && go build .
 | Check Namespace Exists      |  X   |      |          |  X   |  X  |
 | Drop Namespace              |  X   |      |          |  X   |  X  |
 | Update Namespace Properties |  X   |      |          |  X   |  X  |
-| Create View                 |  X   |      |          |      |     |
-| List View                   |  X   |      |          |      |     |
-| Drop View                   |  X   |      |          |      |     |
-| Check View Exists           |  X   |      |          |      |     |
+| Create View                 |  X   |      |          |      |  X  |
+| Load View                   |      |      |          |      |  X  |
+| List View                   |  X   |      |          |      |  X  |
+| Drop View                   |  X   |      |          |      |  X  |
+| Check View Exists           |  X   |      |          |      |  X  |
 
 ### Read/Write Data Support
 
