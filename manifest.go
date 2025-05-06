@@ -560,6 +560,8 @@ func decodeManifests[I interface {
 }
 
 // ManifestReader reads the metadata and data from an avro manifest file.
+// This type is not thread-safe; its methods should not be called from
+// multiple goroutines.
 type ManifestReader struct {
 	dec           *ocf.Decoder
 	file          ManifestFile
