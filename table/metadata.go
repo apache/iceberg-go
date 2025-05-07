@@ -1034,7 +1034,6 @@ func (c *commonMetadata) checkSortOrders() error {
 
 	return fmt.Errorf("%w: default-sort-order-id %d can't be found in %+v",
 		ErrInvalidMetadata, c.DefaultSortOrderID, c.SortOrderList)
-
 }
 
 func (c *commonMetadata) constructRefs() {
