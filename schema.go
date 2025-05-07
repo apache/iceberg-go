@@ -51,6 +51,17 @@ type Schema struct {
 	lazyNameMapping func() NameMapping
 }
 
+// NewSchemaFromJson constructs a new schema with the provided ID and a string in json form
+func NewSchemaFromJson(id int, jsonStr string) (*Schema, error) {
+	var fields []NestedField
+	err := json.Unmarshal([]byte(jsonStr), &fields)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse schema JSON: %w", err)
+	}
+
+	return NewSchema(id, fields...), nil
+}
+
 // NewSchema constructs a new schema with the provided ID
 // and list of fields.
 func NewSchema(id int, fields ...NestedField) *Schema {
