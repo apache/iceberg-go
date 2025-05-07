@@ -266,21 +266,28 @@ func main() {
 func list(ctx context.Context, output Output, cat catalog.Catalog, parent string) {
 	prnt := catalog.ToIdentifier(parent)
 
-	ids, err := cat.ListNamespaces(ctx, prnt)
-	if err != nil {
-		output.Error(err)
-		os.Exit(1)
-	}
+	var ids []table.Identifier
 
-	if len(ids) == 0 && parent != "" {
+	if parent != "" {
 		iter := cat.ListTables(ctx, prnt)
 		for id, err := range iter {
-			ids = append(ids, id)
 			if err != nil {
 				output.Error(err)
+				os.Exit(1)
 			}
+			ids = append(ids, id)
 		}
 	}
+
+	if len(ids) == 0 {
+		ns, err := cat.ListNamespaces(ctx, prnt)
+		if err != nil {
+			output.Error(err)
+			os.Exit(1)
+		}
+		ids = ns
+	}
+
 	output.Identifiers(ids)
 }
 
