@@ -403,7 +403,7 @@ func (m *manifestFile) FetchEntries(fs iceio.IO, discardDeleted bool) ([]Manifes
 	return fetchManifestEntries(m, fs, discardDeleted)
 }
 
-func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType) {
+func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]any, map[int]avro.LogicalType) {
 	getField := func(rs *avro.RecordSchema, name string) *avro.Field {
 		for _, f := range rs.Fields() {
 			if f.Name() == name {
@@ -415,6 +415,7 @@ func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType) {
 	}
 
 	result := make(map[string]int)
+	fieldIDToPartition := make(map[int]any)
 	logicalTypes := make(map[int]avro.LogicalType)
 	entryField := getField(sc.(*avro.RecordSchema), "data_file")
 	partitionField := getField(entryField.Type().(*avro.RecordSchema), "partition")
@@ -428,18 +429,19 @@ func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType) {
 					avroTyp = t
 				}
 			}
-
+			fieldIDToPartition[int(fid)] = avroTyp
 			if ps, ok := avroTyp.(*avro.PrimitiveSchema); ok && ps.Logical() != nil {
 				logicalTypes[int(fid)] = ps.Logical().Type()
 			}
 		}
 	}
 
-	return result, logicalTypes
+	return result, fieldIDToPartition, logicalTypes
 }
 
 type hasFieldToIDMap interface {
 	setFieldNameToIDMap(map[string]int)
+	setFieldIDToPartitionDataMap(m map[int]any)
 	setFieldIDToLogicalTypeMap(map[int]avro.LogicalType)
 }
 
@@ -462,7 +464,7 @@ func readManifestEntries(m ManifestFile, f io.Reader, discardDeleted bool) ([]Ma
 	metadata := dec.Metadata()
 	sc := dec.Schema()
 
-	fieldNameToID, fieldIDToLogicalType := getFieldIDMap(sc)
+	fieldNameToID, fieldIDToPartition, fieldIDToLogicalType := getFieldIDMap(sc)
 	isFallback := false
 	if string(metadata["format-version"]) == "1" {
 		for _, f := range sc.(*avro.RecordSchema).Fields() {
@@ -499,6 +501,7 @@ func readManifestEntries(m ManifestFile, f io.Reader, discardDeleted bool) ([]Ma
 			tmp.inherit(m)
 			if fieldToIDMap, ok := tmp.DataFile().(hasFieldToIDMap); ok {
 				fieldToIDMap.setFieldNameToIDMap(fieldNameToID)
+				fieldToIDMap.setFieldIDToPartitionDataMap(fieldIDToPartition)
 				fieldToIDMap.setFieldIDToLogicalTypeMap(fieldIDToLogicalType)
 			}
 			results = append(results, tmp)
@@ -1328,6 +1331,33 @@ func avroPartitionData(input map[string]any, nameToID map[string]int, logicalTyp
 	return out
 }
 
+func avroFieldPartitionData(input map[int]any, logicalTypes map[int]avro.LogicalType) map[int]any {
+	out := make(map[int]any)
+	for k, v := range input {
+		if logical, ok := logicalTypes[k]; ok {
+			switch logical {
+			case avro.Date:
+				out[k] = Date(v.(time.Time).Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
+			case avro.TimeMillis:
+				out[k] = Time(v.(time.Duration).Milliseconds())
+			case avro.TimeMicros:
+				out[k] = Time(v.(time.Duration).Microseconds())
+			case avro.TimestampMillis:
+				out[k] = Timestamp(v.(time.Time).UTC().UnixMilli())
+			case avro.TimestampMicros:
+				out[k] = Timestamp(v.(time.Time).UTC().UnixMicro())
+			default:
+				out[k] = v
+			}
+
+			continue
+		}
+		out[k] = v
+	}
+
+	return out
+}
+
 type dataFile struct {
 	Content          ManifestEntryContent   `avro:"content"`
 	Path             string                 `avro:"file_path"`
@@ -1359,8 +1389,9 @@ type dataFile struct {
 	// not used for anything yet, but important to maintain the information
 	// for future development and updates such as when we get to writes,
 	// and scan planning
-	fieldNameToID        map[string]int
-	fieldIDToLogicalType map[int]avro.LogicalType
+	fieldNameToID          map[string]int
+	fieldIDToLogicalType   map[int]avro.LogicalType
+	fieldIDToPartitionData map[int]any
 
 	specID   int32
 	initMaps sync.Once
@@ -1376,10 +1407,14 @@ func (d *dataFile) initializeMapData() {
 		d.lowerBoundMap = avroColMapToMap(d.LowerBounds)
 		d.upperBoundMap = avroColMapToMap(d.UpperBounds)
 		d.PartitionData = avroPartitionData(d.PartitionData, d.fieldNameToID, d.fieldIDToLogicalType)
+		d.fieldIDToPartitionData = avroFieldPartitionData(d.fieldIDToPartitionData, d.fieldIDToLogicalType)
 	})
 }
 
 func (d *dataFile) setFieldNameToIDMap(m map[string]int) { d.fieldNameToID = m }
+func (d *dataFile) setFieldIDToPartitionDataMap(m map[int]any) {
+	d.fieldIDToPartitionData = m
+}
 func (d *dataFile) setFieldIDToLogicalTypeMap(m map[int]avro.LogicalType) {
 	d.fieldIDToLogicalType = m
 }
@@ -1391,6 +1426,11 @@ func (d *dataFile) Partition() map[string]any {
 	d.initializeMapData()
 
 	return d.PartitionData
+}
+func (d *dataFile) PartitionFieldData() map[int]any {
+	d.initializeMapData()
+
+	return d.fieldIDToPartitionData
 }
 
 func (d *dataFile) Count() int64         { return d.RecordCount }
@@ -1596,6 +1636,7 @@ func NewDataFileBuilder(
 	path string,
 	format FileFormat,
 	partitionData map[string]any,
+	fieldIDToPartitionData map[int]any,
 	recordCount int64,
 	fileSize int64,
 ) (*DataFileBuilder, error) {
@@ -1627,13 +1668,14 @@ func NewDataFileBuilder(
 
 	return &DataFileBuilder{
 		d: &dataFile{
-			Content:       content,
-			Path:          path,
-			Format:        format,
-			PartitionData: partitionData,
-			RecordCount:   recordCount,
-			FileSize:      fileSize,
-			specID:        int32(spec.id),
+			Content:                content,
+			Path:                   path,
+			Format:                 format,
+			PartitionData:          partitionData,
+			RecordCount:            recordCount,
+			FileSize:               fileSize,
+			specID:                 int32(spec.id),
+			fieldIDToPartitionData: fieldIDToPartitionData,
 		},
 	}, nil
 }
@@ -1740,6 +1782,9 @@ type DataFile interface {
 	// Partition returns a mapping of field name to partition value for
 	// each of the partition spec's fields.
 	Partition() map[string]any
+	// PartitionFieldData returns a mapping of field id to partition value
+	// for each of the partition spec's fields.
+	PartitionFieldData() map[int]any
 	// Count returns the number of records in this file.
 	Count() int64
 	// FileSizeBytes is the total file size in bytes.
