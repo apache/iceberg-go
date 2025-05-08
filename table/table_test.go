@@ -1288,12 +1288,14 @@ func (t *TableWritingTestSuite) TestDeleteOldMetadataLogsErrorOnFileNotFound() {
 	tx := tbl.NewTransaction()
 	tx.AddFiles(ctx, files[0:1], nil, false)
 	tbl_new, err := tx.Commit(ctx)
+	t.Require().NoError(err)
 
 	// transaction 2 to add files
 	tx_new := tbl_new.NewTransaction()
 	tx_new.AddFiles(ctx, files[1:2], nil, false)
 
 	_, err = tx_new.Commit(ctx)
+	t.Require().NoError(err)
 
 	// validate that error is logged
 	logOutput := logBuf.String()
@@ -1316,9 +1318,7 @@ func (t *TableWritingTestSuite) TestDeleteOldMetadataNoErrorLogsOnFileFound() {
 	}
 
 	ident := table.Identifier{"default", "file_v" + strconv.Itoa(t.formatVersion)}
-	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec,
-		table.UnsortedSortOrder, t.location, iceberg.Properties{"format-version": strconv.Itoa(t.formatVersion), "write.metadata.delete-after-commit.enabled": "true"})
-
+	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, t.location, iceberg.Properties{"format-version": strconv.Itoa(t.formatVersion), "write.metadata.delete-after-commit.enabled": "true"})
 	t.Require().NoError(err)
 
 	tbl := table.New(ident, meta, t.getMetadataLoc(), fs, &DeleteOldMetadataMockedCatalog{})
@@ -1329,6 +1329,7 @@ func (t *TableWritingTestSuite) TestDeleteOldMetadataNoErrorLogsOnFileFound() {
 	tx := tbl.NewTransaction()
 	tx.AddFiles(ctx, files[0:1], nil, false)
 	tbl_new, err := tx.Commit(ctx)
+	t.Require().NoError(err)
 
 	// Now we have the first metadata location - create the file there so that deleteOldMetadata does not log an error
 	firstMetadataLoc := tbl_new.MetadataLocation()
@@ -1340,6 +1341,7 @@ func (t *TableWritingTestSuite) TestDeleteOldMetadataNoErrorLogsOnFileFound() {
 	tx_new := tbl_new.NewTransaction()
 	tx_new.AddFiles(ctx, files[1:2], nil, false)
 	_, err = tx_new.Commit(ctx)
+	t.Require().NoError(err)
 
 	// validate that no error is logged
 	logOutput := logBuf.String()
