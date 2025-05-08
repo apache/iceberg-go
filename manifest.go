@@ -1327,28 +1327,50 @@ func avroPartitionData(input map[string]any, nameToID map[string]int, logicalTyp
 	return out
 }
 
-func avroFieldPartitionData(input map[int]any, logicalTypes map[int]avro.LogicalType) map[int]any {
+func avroFieldPartitionData(input map[string]any, nameToID map[string]int, logicalTypes map[int]avro.LogicalType) map[int]any {
 	out := make(map[int]any)
 	for k, v := range input {
-		if logical, ok := logicalTypes[k]; ok {
-			switch logical {
-			case avro.Date:
-				out[k] = Date(v.(time.Time).Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
-			case avro.TimeMillis:
-				out[k] = Time(v.(time.Duration).Milliseconds())
-			case avro.TimeMicros:
-				out[k] = Time(v.(time.Duration).Microseconds())
-			case avro.TimestampMillis:
-				out[k] = Timestamp(v.(time.Time).UTC().UnixMilli())
-			case avro.TimestampMicros:
-				out[k] = Timestamp(v.(time.Time).UTC().UnixMicro())
-			default:
-				out[k] = v
-			}
+		if id, ok := nameToID[k]; ok {
+			if logical, ok := logicalTypes[id]; ok {
+				switch logical {
+				case avro.Date:
+					switch v.(type) {
+					case Date:
+					default:
+						out[id] = Date(v.(time.Time).Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
+					}
+				case avro.TimeMillis:
+					switch v.(type) {
+					case Time:
+					default:
+						out[id] = Time(v.(time.Duration).Milliseconds())
+					}
+				case avro.TimeMicros:
+					switch v.(type) {
+					case Time:
+					default:
+						out[id] = Time(v.(time.Duration).Microseconds())
+					}
+				case avro.TimestampMillis:
+					switch v.(type) {
+					case Timestamp:
+					default:
+						out[id] = Timestamp(v.(time.Time).UTC().UnixMilli())
+					}
+				case avro.TimestampMicros:
+					switch v.(type) {
+					case Timestamp:
+					default:
+						out[id] = Timestamp(v.(time.Time).UTC().UnixMicro())
+					}
+				default:
+					out[id] = v
+				}
 
-			continue
+				continue
+			}
+			out[id] = v
 		}
-		out[k] = v
 	}
 
 	return out
@@ -1385,9 +1407,9 @@ type dataFile struct {
 	// not used for anything yet, but important to maintain the information
 	// for future development and updates such as when we get to writes,
 	// and scan planning
-	fieldNameToID             map[string]int
-	fieldIDToLogicalType      map[int]avro.LogicalType
-	fieldIDToPartitionDataMap map[int]any
+	fieldNameToID          map[string]int
+	fieldIDToLogicalType   map[int]avro.LogicalType
+	fieldIDToPartitionData map[int]any
 
 	specID   int32
 	initMaps sync.Once
@@ -1403,7 +1425,7 @@ func (d *dataFile) initializeMapData() {
 		d.lowerBoundMap = avroColMapToMap(d.LowerBounds)
 		d.upperBoundMap = avroColMapToMap(d.UpperBounds)
 		d.PartitionData = avroPartitionData(d.PartitionData, d.fieldNameToID, d.fieldIDToLogicalType)
-		d.fieldIDToPartitionDataMap = avroFieldPartitionData(d.fieldIDToPartitionDataMap, d.fieldIDToLogicalType)
+		d.fieldIDToPartitionData = avroFieldPartitionData(d.PartitionData, d.fieldNameToID, d.fieldIDToLogicalType)
 	})
 }
 
@@ -1423,7 +1445,7 @@ func (d *dataFile) Partition() map[string]any {
 func (d *dataFile) PartitionFieldData() map[int]any {
 	d.initializeMapData()
 
-	return d.fieldIDToPartitionDataMap
+	return d.fieldIDToPartitionData
 }
 
 func (d *dataFile) Count() int64         { return d.RecordCount }
@@ -1661,14 +1683,14 @@ func NewDataFileBuilder(
 
 	return &DataFileBuilder{
 		d: &dataFile{
-			Content:                   content,
-			Path:                      path,
-			Format:                    format,
-			PartitionData:             partitionData,
-			RecordCount:               recordCount,
-			FileSize:                  fileSize,
-			specID:                    int32(spec.id),
-			fieldIDToPartitionDataMap: fieldIDToPartitionData,
+			Content:                content,
+			Path:                   path,
+			Format:                 format,
+			PartitionData:          partitionData,
+			RecordCount:            recordCount,
+			FileSize:               fileSize,
+			specID:                 int32(spec.id),
+			fieldIDToPartitionData: fieldIDToPartitionData,
 		},
 	}, nil
 }
