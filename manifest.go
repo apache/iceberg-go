@@ -403,7 +403,7 @@ func (m *manifestFile) FetchEntries(fs iceio.IO, discardDeleted bool) ([]Manifes
 	return fetchManifestEntries(m, fs, discardDeleted)
 }
 
-func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]any, map[int]avro.LogicalType) {
+func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType) {
 	getField := func(rs *avro.RecordSchema, name string) *avro.Field {
 		for _, f := range rs.Fields() {
 			if f.Name() == name {
@@ -415,7 +415,6 @@ func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]any, map[int]avro.Lo
 	}
 
 	result := make(map[string]int)
-	fieldIDToPartition := make(map[int]any)
 	logicalTypes := make(map[int]avro.LogicalType)
 	entryField := getField(sc.(*avro.RecordSchema), "data_file")
 	partitionField := getField(entryField.Type().(*avro.RecordSchema), "partition")
@@ -429,19 +428,17 @@ func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]any, map[int]avro.Lo
 					avroTyp = t
 				}
 			}
-			fieldIDToPartition[int(fid)] = avroTyp
 			if ps, ok := avroTyp.(*avro.PrimitiveSchema); ok && ps.Logical() != nil {
 				logicalTypes[int(fid)] = ps.Logical().Type()
 			}
 		}
 	}
 
-	return result, fieldIDToPartition, logicalTypes
+	return result, logicalTypes
 }
 
 type hasFieldToIDMap interface {
 	setFieldNameToIDMap(map[string]int)
-	setFieldIDToPartitionDataMap(m map[int]any)
 	setFieldIDToLogicalTypeMap(map[int]avro.LogicalType)
 }
 
@@ -464,7 +461,7 @@ func readManifestEntries(m ManifestFile, f io.Reader, discardDeleted bool) ([]Ma
 	metadata := dec.Metadata()
 	sc := dec.Schema()
 
-	fieldNameToID, fieldIDToPartition, fieldIDToLogicalType := getFieldIDMap(sc)
+	fieldNameToID, fieldIDToLogicalType := getFieldIDMap(sc)
 	isFallback := false
 	if string(metadata["format-version"]) == "1" {
 		for _, f := range sc.(*avro.RecordSchema).Fields() {
@@ -501,7 +498,6 @@ func readManifestEntries(m ManifestFile, f io.Reader, discardDeleted bool) ([]Ma
 			tmp.inherit(m)
 			if fieldToIDMap, ok := tmp.DataFile().(hasFieldToIDMap); ok {
 				fieldToIDMap.setFieldNameToIDMap(fieldNameToID)
-				fieldToIDMap.setFieldIDToPartitionDataMap(fieldIDToPartition)
 				fieldToIDMap.setFieldIDToLogicalTypeMap(fieldIDToLogicalType)
 			}
 			results = append(results, tmp)
@@ -1389,9 +1385,9 @@ type dataFile struct {
 	// not used for anything yet, but important to maintain the information
 	// for future development and updates such as when we get to writes,
 	// and scan planning
-	fieldNameToID          map[string]int
-	fieldIDToLogicalType   map[int]avro.LogicalType
-	fieldIDToPartitionData map[int]any
+	fieldNameToID             map[string]int
+	fieldIDToLogicalType      map[int]avro.LogicalType
+	fieldIDToPartitionDataMap map[int]any
 
 	specID   int32
 	initMaps sync.Once
@@ -1407,14 +1403,11 @@ func (d *dataFile) initializeMapData() {
 		d.lowerBoundMap = avroColMapToMap(d.LowerBounds)
 		d.upperBoundMap = avroColMapToMap(d.UpperBounds)
 		d.PartitionData = avroPartitionData(d.PartitionData, d.fieldNameToID, d.fieldIDToLogicalType)
-		d.fieldIDToPartitionData = avroFieldPartitionData(d.fieldIDToPartitionData, d.fieldIDToLogicalType)
+		d.fieldIDToPartitionDataMap = avroFieldPartitionData(d.fieldIDToPartitionDataMap, d.fieldIDToLogicalType)
 	})
 }
 
 func (d *dataFile) setFieldNameToIDMap(m map[string]int) { d.fieldNameToID = m }
-func (d *dataFile) setFieldIDToPartitionDataMap(m map[int]any) {
-	d.fieldIDToPartitionData = m
-}
 func (d *dataFile) setFieldIDToLogicalTypeMap(m map[int]avro.LogicalType) {
 	d.fieldIDToLogicalType = m
 }
@@ -1430,7 +1423,7 @@ func (d *dataFile) Partition() map[string]any {
 func (d *dataFile) PartitionFieldData() map[int]any {
 	d.initializeMapData()
 
-	return d.fieldIDToPartitionData
+	return d.fieldIDToPartitionDataMap
 }
 
 func (d *dataFile) Count() int64         { return d.RecordCount }
@@ -1668,14 +1661,14 @@ func NewDataFileBuilder(
 
 	return &DataFileBuilder{
 		d: &dataFile{
-			Content:                content,
-			Path:                   path,
-			Format:                 format,
-			PartitionData:          partitionData,
-			RecordCount:            recordCount,
-			FileSize:               fileSize,
-			specID:                 int32(spec.id),
-			fieldIDToPartitionData: fieldIDToPartitionData,
+			Content:                   content,
+			Path:                      path,
+			Format:                    format,
+			PartitionData:             partitionData,
+			RecordCount:               recordCount,
+			FileSize:                  fileSize,
+			specID:                    int32(spec.id),
+			fieldIDToPartitionDataMap: fieldIDToPartitionData,
 		},
 	}, nil
 }
