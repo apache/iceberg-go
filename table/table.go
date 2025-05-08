@@ -19,8 +19,8 @@ package table
 
 import (
 	"context"
-	"fmt"
 	"iter"
+	"log"
 	"runtime"
 	"slices"
 
@@ -196,9 +196,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		return nil, err
 	}
 
-	if err := deleteOldMetadata(t.fs, t.metadata, newMeta); err != nil {
-		return nil, err
-	}
+	deleteOldMetadata(t.fs, t.metadata, newMeta)
 
 	return New(t.identifier, newMeta, newLoc, t.fs, t.cat), nil
 }
@@ -219,7 +217,7 @@ func getFiles(it iter.Seq[MetadataLogEntry]) iter.Seq[string] {
 	}
 }
 
-func deleteOldMetadata(fs io.IO, baseMeta, newMeta Metadata) error {
+func deleteOldMetadata(fs io.IO, baseMeta, newMeta Metadata) {
 	deleteAfterCommit := newMeta.Properties().GetBool(MetadataDeleteAfterCommitEnabledKey,
 		MetadataDeleteAfterCommitEnabledDefault)
 
@@ -230,12 +228,11 @@ func deleteOldMetadata(fs io.IO, baseMeta, newMeta Metadata) error {
 
 		for _, file := range toRemove {
 			if err := fs.Remove(file); err != nil {
-				return fmt.Errorf("failed to delete old metadata file %s: %w", file, err)
+				// Log the error instead of raising it when deleting old metadata files, as an external entity like a compactor may have already deleted them
+				log.Printf("Warning: Failed to delete old metadata file: %s error: %v", file, err)
 			}
 		}
 	}
-
-	return nil
 }
 
 type ScanOption func(*Scan)

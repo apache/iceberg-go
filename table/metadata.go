@@ -1067,7 +1067,7 @@ func (c *commonMetadata) validate() error {
 	case c.LastUpdatedMS == 0:
 		// last-updated-ms is required
 		return fmt.Errorf("%w: missing last-updated-ms", ErrInvalidMetadata)
-	case c.LastColumnId == 0:
+	case c.LastColumnId < 0:
 		// last-column-id is required
 		return fmt.Errorf("%w: missing last-column-id", ErrInvalidMetadata)
 	}
@@ -1145,6 +1145,9 @@ func (m *metadataV1) UnmarshalJSON(b []byte) error {
 	type Alias metadataV1
 	aux := (*Alias)(m)
 
+	// Set LastColumnId to -1 to indicate that it is not set as LastColumnId = 0 is a valid value for when no schema is present
+	aux.LastColumnId = -1
+
 	if err := json.Unmarshal(b, aux); err != nil {
 		return err
 	}
@@ -1189,6 +1192,9 @@ func (m *metadataV2) Equals(other Metadata) bool {
 func (m *metadataV2) UnmarshalJSON(b []byte) error {
 	type Alias metadataV2
 	aux := (*Alias)(m)
+
+	// Set LastColumnId to -1 to indicate that it is not set as LastColumnId = 0 is a valid value for when no schema is present
+	aux.LastColumnId = -1
 
 	if err := json.Unmarshal(b, aux); err != nil {
 		return err

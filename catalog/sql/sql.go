@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"iter"
 	"maps"
-	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -258,31 +257,6 @@ func (c *Catalog) namespaceExists(ctx context.Context, ns string) (bool, error) 
 	})
 }
 
-func (c *Catalog) getDefaultWarehouseLocation(ctx context.Context, nsname, tableName string) (string, error) {
-	dbprops, err := c.LoadNamespaceProperties(ctx, strings.Split(nsname, "."))
-	if err != nil {
-		return "", err
-	}
-
-	if dblocation := dbprops.Get("location", ""); dblocation != "" {
-		return url.JoinPath(dblocation, tableName)
-	}
-
-	if warehousepath := c.props.Get("warehouse", ""); warehousepath != "" {
-		return url.JoinPath(warehousepath, nsname+".db", tableName)
-	}
-
-	return "", errors.New("no default path set, please specify a location when creating a table")
-}
-
-func (c *Catalog) resolveTableLocation(ctx context.Context, loc, nsname, tablename string) (string, error) {
-	if len(loc) == 0 {
-		return c.getDefaultWarehouseLocation(ctx, nsname, tablename)
-	}
-
-	return strings.TrimSuffix(loc, "/"), nil
-}
-
 func checkValidNamespace(ident table.Identifier) error {
 	if len(ident) < 1 {
 		return fmt.Errorf("%w: empty namespace identifier", catalog.ErrNoSuchNamespace)
@@ -292,9 +266,9 @@ func checkValidNamespace(ident table.Identifier) error {
 }
 
 func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
-	var cfg catalog.CreateTableCfg
-	for _, opt := range opts {
-		opt(&cfg)
+	staged, err := internal.CreateStagedTable(ctx, c.props, c.LoadNamespaceProperties, ident, sc, opts...)
+	if err != nil {
+		return nil, err
 	}
 
 	nsIdent := catalog.NamespaceFromIdent(ident)
@@ -309,18 +283,12 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, ns)
 	}
 
-	loc, err := c.resolveTableLocation(ctx, cfg.Location, ns, tblIdent)
-	if err != nil {
-		return nil, err
+	wfs, ok := staged.FS().(io.WriteFileIO)
+	if !ok {
+		return nil, errors.New("loaded filesystem IO does not support writing")
 	}
 
-	metadataLocation := internal.GetMetadataLoc(loc, 0)
-	metadata, err := table.NewMetadata(sc, cfg.PartitionSpec, cfg.SortOrder, loc, cfg.Properties)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := internal.WriteMetadata(ctx, metadata, metadataLocation, c.props); err != nil {
+	if err := internal.WriteTableMetadata(staged.Metadata(), wfs, staged.MetadataLocation()); err != nil {
 		return nil, err
 	}
 
@@ -329,7 +297,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 			CatalogName:      c.name,
 			TableNamespace:   ns,
 			TableName:        tblIdent,
-			MetadataLocation: sql.NullString{String: metadataLocation, Valid: true},
+			MetadataLocation: sql.NullString{String: staged.MetadataLocation(), Valid: true},
 		}).Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to create table: %w", err)
@@ -341,11 +309,8 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		return nil, err
 	}
 
-	return c.LoadTable(ctx, ident, cfg.Properties)
+	return c.LoadTable(ctx, ident, staged.Properties())
 }
-
-//go:linkname updateAndStageTable github.com/apache/iceberg-go/catalog.updateAndStageTable
-func updateAndStageTable(ctx context.Context, current *table.Table, ident table.Identifier, reqs []table.Requirement, updates []table.Update, cat table.CatalogIO) (*table.StagedTable, error)
 
 func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
 	ns := catalog.NamespaceFromIdent(tbl.Identifier())
@@ -356,7 +321,7 @@ func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, reqs []tabl
 		return nil, "", err
 	}
 
-	staged, err := updateAndStageTable(ctx, current, tbl.Identifier(), reqs, updates, c)
+	staged, err := internal.UpdateAndStageTable(ctx, current, tbl.Identifier(), reqs, updates, c)
 	if err != nil {
 		return nil, "", err
 	}

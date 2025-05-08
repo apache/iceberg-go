@@ -763,3 +763,118 @@ func TestMetadataBuilderSetDefaultSpecIDLastPartition(t *testing.T) {
 
 	assert.Equal(t, 0, builder.defaultSpecID)
 }
+
+func TestMetadataV1Validation(t *testing.T) {
+	// Test case 1: JSON with no last-column-id field
+	noColumnID := `{
+		"format-version": 1,
+		"table-uuid": "d20125c8-7284-442c-9aea-15fee620737c",
+		"location": "s3://bucket/test/location",
+		"last-updated-ms": 1602638573874,
+		"schema": {},
+		"partition-spec": [],
+		"properties": {},
+		"current-snapshot-id": -1,
+		"snapshots": []
+	}`
+
+	// Test case 2: JSON with explicit last-column-id field
+	withColumnID := `{
+		"format-version": 1,
+		"table-uuid": "d20125c8-7284-442c-9aea-15fee620737c",
+		"location": "s3://bucket/test/location",
+		"last-updated-ms": 1602638573874,
+		"last-column-id": 5,
+		"schema": {},
+		"partition-spec": [],
+		"properties": {},
+		"current-snapshot-id": -1,
+		"snapshots": []
+	}`
+
+	// Test case 3: JSON with last-column-id explicitly set to 0
+	zeroColumnID := `{
+		"format-version": 1,
+		"table-uuid": "d20125c8-7284-442c-9aea-15fee620737c",
+		"location": "s3://bucket/test/location",
+		"last-updated-ms": 1602638573874,
+		"last-column-id": 0,
+		"schema": {},
+		"partition-spec": [],
+		"properties": {},
+		"current-snapshot-id": -1,
+		"snapshots": []
+	}`
+
+	// Parse each test case
+	var meta1, meta2, meta3 metadataV1
+
+	// Test case 1: Verify LastColumnId is -1 when not specified
+	require.Error(t, meta1.UnmarshalJSON([]byte(noColumnID)))
+	assert.Equal(t, -1, meta1.LastColumnId, "LastColumnId should be -1 when not specified in JSON")
+
+	// Test case 2: Verify LastColumnId maintains the specified value
+	require.NoError(t, meta2.UnmarshalJSON([]byte(withColumnID)))
+
+	// Test case 3: Verify LastColumnId maintains 0 when explicitly set
+	require.NoError(t, meta3.UnmarshalJSON([]byte(zeroColumnID)))
+}
+
+func TestMetadataV2Validation(t *testing.T) {
+	// Test case 1: JSON with no last-column-id field
+	noColumnID := `{
+		"format-version": 2,
+		"table-uuid": "9c12d441-03fe-4693-9a96-a0705ddf69c1",
+		"location": "s3://bucket/test/location",
+		"last-sequence-number": 34,
+		"current-schema-id": 0,
+		"last-updated-ms": 1602638573590,
+		"schemas": [{"type":"struct","schema-id":0,"fields":[]}],
+		"default-spec-id": 0,
+		"partition-specs": [{"spec-id": 0, "fields": []}],
+		"sort-orders": [{"order-id": 0, "fields": []}],
+		"default-sort-order-id": 0
+	}`
+
+	// Test case 2: JSON with explicit last-column-id field
+	withColumnID := `{
+		"format-version": 2,
+		"table-uuid": "d20125c8-7284-442c-9aea-15fee620737c",
+		"location": "s3://bucket/test/location",
+		"last-updated-ms": 1602638573874,
+		"last-column-id": 5,
+		"current-schema-id": 0,
+		"schemas": [{"type":"struct","schema-id":0,"fields":[]}],
+		"partition-specs": [{"spec-id": 0, "fields": []}],
+		"properties": {},
+		"current-snapshot-id": -1,
+		"snapshots": []
+	}`
+
+	// Test case 3: JSON with last-column-id explicitly set to 0
+	zeroColumnID := `{
+		"format-version": 2,
+		"table-uuid": "9c12d441-03fe-4693-9a96-a0705ddf69c1",
+		"location": "s3://bucket/test/location",
+		"last-sequence-number": 34,
+		"current-schema-id": 0,
+		"last-updated-ms": 1602638573590,
+		"last-column-id": 0,
+		"schemas": [{"type":"struct","schema-id":0,"fields":[]}],
+		"partition-specs": [{"spec-id": 0, "fields": []}],
+		"sort-orders": [],
+		"default-sort-order-id": 0
+	}`
+
+	// Parse each test case
+	var meta1, meta2, meta3 metadataV2
+
+	// Test case 1: Verify LastColumnId is -1 when not specified
+	require.Error(t, meta1.UnmarshalJSON([]byte(noColumnID)))
+	assert.Equal(t, -1, meta1.LastColumnId, "LastColumnId should be -1 when not specified in JSON")
+	// Test case 2: Verify LastColumnId maintains the specified value
+	require.NoError(t, meta2.UnmarshalJSON([]byte(withColumnID)))
+
+	// Test case 3: Verify LastColumnId maintains 0 when explicitly set
+	require.NoError(t, meta3.UnmarshalJSON([]byte(zeroColumnID)))
+}

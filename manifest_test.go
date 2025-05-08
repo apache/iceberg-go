@@ -833,7 +833,7 @@ func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
 	)
 	m.NoError(err)
 
-	entries, err := readManifestEntries(file, &buf, false)
+	entries, err := ReadManifest(file, &buf, false)
 	m.NoError(err)
 	m.Len(entries, 1)
 
@@ -908,26 +908,43 @@ func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
 	}
 
 	// This should fail because the file's schema is incomplete.
-	_, err = readManifestEntries(file, &buf, false)
+	_, err = ReadManifest(file, &buf, false)
 	m.ErrorContains(err, "unknown type: r2")
 }
 
 func (m *ManifestTestSuite) TestManifestEntriesV2() {
-	var mockfs internal.MockFS
 	manifest := manifestFile{
 		version: 2,
+		SpecID:  1,
 		Path:    manifestFileRecordsV2[0].FilePath(),
 	}
 
-	mockfs.Test(m.T())
-	mockfs.On("Open", manifest.FilePath()).Return(&internal.MockFile{
+	partitionSpec := NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceID: 1, Name: "VendorID", Transform: IdentityTransform{}},
+		PartitionField{FieldID: 1001, SourceID: 2, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
+
+	mockedFile := &internal.MockFile{
 		Contents: bytes.NewReader(m.v2ManifestEntries.Bytes()),
-	}, nil)
-	defer mockfs.AssertExpectations(m.T())
-	entries, err := manifest.FetchEntries(&mockfs, false)
+	}
+	manifestReader, err := NewManifestReader(&manifest, mockedFile)
 	m.Require().NoError(err)
-	m.Len(entries, 2)
-	m.Zero(manifest.PartitionSpecID())
+	m.Equal(2, manifestReader.Version())
+	m.Equal(ManifestContentData, manifestReader.ManifestContent())
+	loadedSchema, err := manifestReader.Schema()
+	m.Require().NoError(err)
+	m.True(loadedSchema.Equals(testSchema))
+	loadedPartitionSpec, err := manifestReader.PartitionSpec()
+	m.Require().NoError(err)
+	m.True(loadedPartitionSpec.Equals(partitionSpec))
+
+	entry1, err := manifestReader.ReadEntry()
+	m.Require().NoError(err)
+	_, err = manifestReader.ReadEntry()
+	m.Require().NoError(err)
+	_, err = manifestReader.ReadEntry()
+	m.Require().ErrorIs(err, io.EOF)
+
+	m.Equal(int32(1), manifest.PartitionSpecID())
 	m.Zero(manifest.SnapshotID())
 	m.Zero(manifest.AddedDataFiles())
 	m.Zero(manifest.ExistingDataFiles())
@@ -935,8 +952,6 @@ func (m *ManifestTestSuite) TestManifestEntriesV2() {
 	m.Zero(manifest.ExistingRows())
 	m.Zero(manifest.DeletedRows())
 	m.Zero(manifest.AddedRows())
-
-	entry1 := entries[0]
 
 	m.Equal(EntryStatusADDED, entry1.Status())
 	m.Equal(entrySnapshotID, entry1.SnapshotID())

@@ -558,7 +558,7 @@ func (r *Catalog) fetchAccessToken(cl *http.Client, creds string, opts *options)
 
 func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Client, error) {
 	session := &sessionTransport{
-		Transport:      http.Transport{TLSClientConfig: opts.tlsConfig},
+		Transport:      http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: opts.tlsConfig},
 		defaultHeaders: http.Header{},
 	}
 	cl := &http.Client{Transport: session}
