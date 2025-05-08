@@ -80,7 +80,8 @@ Options:
   --config TEXT      specify the path to the configuration file
   --description TEXT 	specify a description for the namespace
   --location-uri TEXT  	specify a location URI for the namespace
-  --schema TEXT        specify table schema in json`
+  --fields TEXT        specify table schema fields in json (for create table use only).
+                       Ex: [{"id":1,"name":"id","type":"long","required":true,"doc":"unique id"}]`
 
 type Config struct {
 	List     bool `docopt:"list"`
@@ -120,7 +121,7 @@ type Config struct {
 	Config      string `docopt:"--config"`
 	Description string `docopt:"--description"`
 	LocationURI string `docopt:"--location-uri"`
-	SchemaStr   string `docopt:"--schema"`
+	FieldsStr   string `docopt:"--fields"`
 }
 
 func main() {
@@ -254,12 +255,12 @@ func main() {
 				os.Exit(1)
 			}
 		case cfg.Table:
-			if cfg.SchemaStr == "" {
-				output.Error(errors.New("missing --schema for table creation"))
+			if cfg.FieldsStr == "" {
+				output.Error(errors.New("missing --fields for table creation"))
 				os.Exit(1)
 			}
 
-			schema, err := iceberg.NewSchemaFromJson(0, cfg.SchemaStr)
+			schema, err := iceberg.NewSchemaFromJsonFields(0, cfg.FieldsStr)
 			if err != nil {
 				output.Error(err)
 				os.Exit(1)

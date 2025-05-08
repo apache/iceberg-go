@@ -52,9 +52,9 @@ type Schema struct {
 }
 
 // NewSchemaFromJson constructs a new schema with the provided ID and a string in json form
-func NewSchemaFromJson(id int, jsonStr string) (*Schema, error) {
+func NewSchemaFromJsonFields(id int, jsonFieldsStr string) (*Schema, error) {
 	var fields []NestedField
-	err := json.Unmarshal([]byte(jsonStr), &fields)
+	err := json.Unmarshal([]byte(jsonFieldsStr), &fields)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse schema JSON: %w", err)
 	}
