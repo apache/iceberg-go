@@ -21,10 +21,14 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -1204,4 +1208,143 @@ func TestNullableStructRequiredField(t *testing.T) {
 	stagedTbl, err := tx.StagedTable()
 	require.NoError(t, err)
 	require.NotNil(t, stagedTbl)
+}
+
+type DeleteOldMetadataMockedCatalog struct{}
+
+func (m *DeleteOldMetadataMockedCatalog) LoadTable(ctx context.Context, ident table.Identifier, props iceberg.Properties) (*table.Table, error) {
+	return nil, nil
+}
+
+func (m *DeleteOldMetadataMockedCatalog) CommitTable(ctx context.Context, tbl *table.Table, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
+	bldr, err := table.MetadataBuilderFromBase(tbl.Metadata())
+	if err != nil {
+		return nil, "", err
+	}
+
+	location := tbl.Metadata().Location()
+
+	randid := uuid.New().String()
+	metdatafile := fmt.Sprintf("%s/metadata/%s.metadata.json", location, randid)
+
+	// removing old metadata files
+	bldr.TrimMetadataLogs(0)
+
+	bldr.AppendMetadataLog(table.MetadataLogEntry{
+		MetadataFile: metdatafile,
+		TimestampMs:  time.Now().UnixMilli(),
+	})
+
+	for _, u := range updates {
+		if err := u.Apply(bldr); err != nil {
+			return nil, "", err
+		}
+	}
+
+	meta, err := bldr.Build()
+	if err != nil {
+		return nil, "", err
+	}
+
+	return meta, metdatafile, nil
+}
+
+func createMetadataFile(metadatadir, metadataFile string) error {
+	// Ensure the directory exists
+	metadataDir := filepath.Dir(metadatadir)
+	err := os.MkdirAll(metadataDir, 0o755)
+	if err != nil {
+		return err
+	}
+
+	err = os.WriteFile(metadataFile, []byte("first commit metadata content"), 0o644)
+
+	return err
+}
+
+func (t *TableWritingTestSuite) TestDeleteOldMetadataLogsErrorOnFileNotFound() {
+	// capture logs to validate that no error is logged
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(os.Stderr) // restore default output
+
+	fs := iceio.LocalFS{}
+	files := make([]string, 0)
+	for i := range 5 {
+		filePath := fmt.Sprintf("%s/file_v%d/data-%d.parquet", t.location, t.formatVersion, i)
+		t.writeParquet(fs, filePath, t.arrTablePromotedTypes)
+		files = append(files, filePath)
+	}
+
+	ident := table.Identifier{"default", "file_v" + strconv.Itoa(t.formatVersion)}
+	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, t.location, iceberg.Properties{"format-version": strconv.Itoa(t.formatVersion), "write.metadata.delete-after-commit.enabled": "true"})
+	t.Require().NoError(err)
+
+	tbl := table.New(ident, meta, t.getMetadataLoc(), fs, &DeleteOldMetadataMockedCatalog{})
+	ctx := context.Background()
+
+	// transaction 1 to create metadata file
+	tx := tbl.NewTransaction()
+	tx.AddFiles(ctx, files[0:1], nil, false)
+	tbl_new, err := tx.Commit(ctx)
+	t.Require().NoError(err)
+
+	// transaction 2 to add files
+	tx_new := tbl_new.NewTransaction()
+	tx_new.AddFiles(ctx, files[1:2], nil, false)
+
+	_, err = tx_new.Commit(ctx)
+	t.Require().NoError(err)
+
+	// validate that error is logged
+	logOutput := logBuf.String()
+	t.Contains(logOutput, "Warning: Failed to delete old metadata file")
+	t.Contains(logOutput, "no such file or directory")
+}
+
+func (t *TableWritingTestSuite) TestDeleteOldMetadataNoErrorLogsOnFileFound() {
+	// capture logs to validate that no error is logged
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(os.Stderr) // restore default output
+
+	fs := iceio.LocalFS{}
+	files := make([]string, 0)
+	for i := range 5 {
+		filePath := fmt.Sprintf("%s/file_v%d/data-%d.parquet", t.location, t.formatVersion, i)
+		t.writeParquet(fs, filePath, t.arrTablePromotedTypes)
+		files = append(files, filePath)
+	}
+
+	ident := table.Identifier{"default", "file_v" + strconv.Itoa(t.formatVersion)}
+	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, t.location, iceberg.Properties{"format-version": strconv.Itoa(t.formatVersion), "write.metadata.delete-after-commit.enabled": "true"})
+	t.Require().NoError(err)
+
+	tbl := table.New(ident, meta, t.getMetadataLoc(), fs, &DeleteOldMetadataMockedCatalog{})
+
+	ctx := context.Background()
+
+	// transaction 1 to create metadata file
+	tx := tbl.NewTransaction()
+	tx.AddFiles(ctx, files[0:1], nil, false)
+	tbl_new, err := tx.Commit(ctx)
+	t.Require().NoError(err)
+
+	// Now we have the first metadata location - create the file there so that deleteOldMetadata does not log an error
+	firstMetadataLoc := tbl_new.MetadataLocation()
+	metadataFile := tbl_new.MetadataLocation()
+	err = createMetadataFile(firstMetadataLoc, metadataFile)
+	t.Require().NoError(err)
+
+	// transaction 2 to add files
+	tx_new := tbl_new.NewTransaction()
+	tx_new.AddFiles(ctx, files[1:2], nil, false)
+	_, err = tx_new.Commit(ctx)
+	t.Require().NoError(err)
+
+	// validate that no error is logged
+	logOutput := logBuf.String()
+	t.NotContains(logOutput, "Warning: Failed to delete old metadata file")
+	t.NotContains(logOutput, "no such file or directory")
 }
