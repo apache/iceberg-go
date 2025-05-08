@@ -1479,50 +1479,28 @@ func avroPartitionData(input map[string]any, nameToID map[string]int, logicalTyp
 	return out
 }
 
-func avroFieldPartitionData(input map[string]any, nameToID map[string]int, logicalTypes map[int]avro.LogicalType) map[int]any {
+func avroFieldPartitionData(input map[int]any, logicalTypes map[int]avro.LogicalType) map[int]any {
 	out := make(map[int]any)
 	for k, v := range input {
-		if id, ok := nameToID[k]; ok {
-			if logical, ok := logicalTypes[id]; ok {
-				switch logical {
-				case avro.Date:
-					switch v.(type) {
-					case Date:
-					default:
-						out[id] = Date(v.(time.Time).Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
-					}
-				case avro.TimeMillis:
-					switch v.(type) {
-					case Time:
-					default:
-						out[id] = Time(v.(time.Duration).Milliseconds())
-					}
-				case avro.TimeMicros:
-					switch v.(type) {
-					case Time:
-					default:
-						out[id] = Time(v.(time.Duration).Microseconds())
-					}
-				case avro.TimestampMillis:
-					switch v.(type) {
-					case Timestamp:
-					default:
-						out[id] = Timestamp(v.(time.Time).UTC().UnixMilli())
-					}
-				case avro.TimestampMicros:
-					switch v.(type) {
-					case Timestamp:
-					default:
-						out[id] = Timestamp(v.(time.Time).UTC().UnixMicro())
-					}
-				default:
-					out[id] = v
-				}
-
-				continue
+		if logical, ok := logicalTypes[k]; ok {
+			switch logical {
+			case avro.Date:
+				out[k] = Date(v.(time.Time).Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
+			case avro.TimeMillis:
+				out[k] = Time(v.(time.Duration).Milliseconds())
+			case avro.TimeMicros:
+				out[k] = Time(v.(time.Duration).Microseconds())
+			case avro.TimestampMillis:
+				out[k] = Timestamp(v.(time.Time).UTC().UnixMilli())
+			case avro.TimestampMicros:
+				out[k] = Timestamp(v.(time.Time).UTC().UnixMicro())
+			default:
+				out[k] = v
 			}
-			out[id] = v
+
+			continue
 		}
+		out[k] = v
 	}
 
 	return out
@@ -1577,7 +1555,7 @@ func (d *dataFile) initializeMapData() {
 		d.lowerBoundMap = avroColMapToMap(d.LowerBounds)
 		d.upperBoundMap = avroColMapToMap(d.UpperBounds)
 		d.PartitionData = avroPartitionData(d.PartitionData, d.fieldNameToID, d.fieldIDToLogicalType)
-		d.fieldIDToPartitionData = avroFieldPartitionData(d.PartitionData, d.fieldNameToID, d.fieldIDToLogicalType)
+		d.fieldIDToPartitionData = avroFieldPartitionData(d.fieldIDToPartitionData, d.fieldIDToLogicalType)
 	})
 }
 
