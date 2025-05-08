@@ -19,8 +19,8 @@ package table
 
 import (
 	"context"
-	"fmt"
 	"iter"
+	"log"
 	"runtime"
 	"slices"
 
@@ -228,12 +228,11 @@ func deleteOldMetadata(fs io.IO, baseMeta, newMeta Metadata) {
 
 		for _, file := range toRemove {
 			if err := fs.Remove(file); err != nil {
-				//Log the error instead of raising it when deleting old metadata files, as an external entity like a compactor may have already deleted them
-				fmt.Printf("Warning: Failed to delete old metadata file %s: %v", file, err)
+				// Log the error instead of raising it when deleting old metadata files, as an external entity like a compactor may have already deleted them
+				log.Printf("Warning: Failed to delete old metadata file: %s error: %v", file, err)
 			}
 		}
 	}
-
 }
 
 type ScanOption func(*Scan)
