@@ -38,7 +38,7 @@ func TestSnapshotSummaryCollector(t *testing.T) {
 	assert.Equal(t, iceberg.Properties{}, ssc.build())
 
 	dataFile, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
-		iceberg.EntryContentData, "/path/to/file.parquet", iceberg.ParquetFile, nil, nil, 100, 1234)
+		iceberg.EntryContentData, "/path/to/file.parquet", iceberg.ParquetFile, nil, 100, 1234)
 	require.NoError(t, err)
 	require.NoError(t, ssc.addFile(dataFile.Build(), tableSchemaSimple, *iceberg.UnpartitionedSpec))
 
@@ -64,11 +64,11 @@ func TestSnapshotSummaryCollectorWithPartition(t *testing.T) {
 
 	dataFile1 := must(iceberg.NewDataFileBuilder(
 		spec, iceberg.EntryContentData, "/path/to/file1.parquet",
-		iceberg.ParquetFile, map[string]any{"int_field": int32(1)}, map[int]any{3: int32(1)}, 100, 1234)).Build()
+		iceberg.ParquetFile, map[int]any{1001: int32(1)}, 100, 1234)).Build()
 
 	dataFile2 := must(iceberg.NewDataFileBuilder(
 		spec, iceberg.EntryContentData, "/path/to/file2.parquet",
-		iceberg.ParquetFile, map[string]any{"int_field": int32(2)}, map[int]any{3: int32(1)}, 200, 4321)).Build()
+		iceberg.ParquetFile, map[int]any{1001: int32(2)}, 200, 4321)).Build()
 
 	ssc.addFile(dataFile1, sc, spec)
 	ssc.removeFile(dataFile1, sc, spec)
