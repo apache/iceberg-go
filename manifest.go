@@ -1589,6 +1589,7 @@ func (d *dataFile) Partition() map[string]any {
 
 	return d.PartitionData
 }
+
 func (d *dataFile) PartitionFieldData() map[int]any {
 	d.initializeMapData()
 
@@ -1797,7 +1798,6 @@ func NewDataFileBuilder(
 	content ManifestEntryContent,
 	path string,
 	format FileFormat,
-	// partitionData map[string]any,
 	fieldIDToPartitionData map[int]any,
 	recordCount int64,
 	fileSize int64,
@@ -1833,6 +1833,7 @@ func NewDataFileBuilder(
 			partitionData[p.Name] = pData
 		}
 	}
+
 	return &DataFileBuilder{
 		d: &dataFile{
 			Content:                content,
