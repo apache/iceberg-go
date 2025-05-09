@@ -80,7 +80,7 @@ Options:
   --config TEXT      specify the path to the configuration file
   --description TEXT 	specify a description for the namespace
   --location-uri TEXT  	specify a location URI for the namespace
-  --schema TEXT        specify table schema in json (for create table use only)
+  --schema JSON        specify table schema in json (for create table use only)
                        Ex: [{"name":"id","type":"int","required":false,"doc":"unique id"}]`
 
 type Config struct {
