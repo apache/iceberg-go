@@ -95,6 +95,51 @@ var (
 	)
 )
 
+func TestSchemaFromJson(t *testing.T) {
+	testFieldsStr := `[
+		{"id":1,"name":"foo","type":"string","required":false},
+		{"id":2,"name":"bar","type":"int","required":true},
+		{"id":3,"name":"baz","type":"boolean","required":false}
+	]`
+
+	simpleSchema, err := iceberg.NewSchemaFromJsonFields(1, testFieldsStr)
+	assert.NoError(t, err)
+	assert.Equal(t, tableSchemaSimple.Fields(), simpleSchema.Fields())
+
+	testFieldsStr = `[
+		{"id":1,"name":"id","type":"int","required":true,"doc":"primary key"},
+		{"id":2,"name":"name","type":"string","required":false,"doc":"user name"}
+	]`
+	commentSchema, err := iceberg.NewSchemaFromJsonFields(1, testFieldsStr)
+	assert.NoError(t, err)
+	assert.Equal(t, "primary key", commentSchema.Fields()[0].Doc)
+	assert.Equal(t, "user name", commentSchema.Fields()[1].Doc)
+
+	testFieldsStr = `[{
+		"id": 1,
+		"name": "location",
+		"type": {
+			"type": "struct",
+			"fields": [
+				{"id": 11, "name": "address", "type": "string", "required": true},
+				{"id": 12, "name": "zip", "type": "int", "required": false}
+			]
+		},
+		"required": true
+	}]`
+	nestedSchema, err := iceberg.NewSchemaFromJsonFields(1, testFieldsStr)
+	assert.NoError(t, err)
+	assert.Len(t, nestedSchema.Fields(), 1)
+
+	structType, ok := nestedSchema.Fields()[0].Type.(*iceberg.StructType)
+	assert.True(t, ok)
+	assert.Len(t, structType.Fields(), 2)
+	assert.Equal(t, "address", structType.Fields()[0].Name)
+	assert.Equal(t, iceberg.PrimitiveTypes.String, structType.Fields()[0].Type)
+	assert.Equal(t, "zip", structType.Fields()[1].Name)
+	assert.Equal(t, iceberg.PrimitiveTypes.Int32, structType.Fields()[1].Type)
+}
+
 func TestSchemaToString(t *testing.T) {
 	assert.Equal(t, 3, tableSchemaSimple.NumFields())
 	assert.Equal(t, `table {
