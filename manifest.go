@@ -568,7 +568,6 @@ type ManifestReader struct {
 	isFallback    bool
 	content       ManifestContent
 	fieldNameToID map[string]int
-	fieldIDToName map[int]string
 	fieldIDToType map[int]avro.LogicalType
 
 	// The rest are lazily populated, on demand. Most readers
@@ -1539,7 +1538,6 @@ type dataFile struct {
 	// for future development and updates such as when we get to writes,
 	// and scan planning
 	fieldNameToID          map[string]int
-	fieldIDToName          map[int]string
 	fieldIDToLogicalType   map[int]avro.LogicalType
 	fieldIDToPartitionData map[int]any
 
