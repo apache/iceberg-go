@@ -1074,7 +1074,7 @@ func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 		EntryContentData,
 		"sample.parquet",
 		ParquetFile,
-		nil,
+		map[int]any{1001: int(1), 1002: time.Unix(1925, 0).UnixMicro()},
 		1,
 		2,
 	)
