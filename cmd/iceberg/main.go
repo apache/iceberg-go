@@ -79,7 +79,9 @@ Options:
   --warehouse TEXT   specify the warehouse to use
   --config TEXT      specify the path to the configuration file
   --description TEXT 	specify a description for the namespace
-  --location-uri TEXT  	specify a location URI for the namespace`
+  --location-uri TEXT  	specify a location URI for the namespace
+  --schema JSON        specify table schema in json (for create table use only)
+                       Ex: [{"name":"id","type":"int","required":false,"doc":"unique id"}]`
 
 type Config struct {
 	List     bool `docopt:"list"`
@@ -119,6 +121,7 @@ type Config struct {
 	Config      string `docopt:"--config"`
 	Description string `docopt:"--description"`
 	LocationURI string `docopt:"--location-uri"`
+	SchemaStr   string `docopt:"--schema"`
 }
 
 func main() {
@@ -252,7 +255,29 @@ func main() {
 				os.Exit(1)
 			}
 		case cfg.Table:
-			output.Error(errors.New("not implemented: Create Table is WIP"))
+			if cfg.SchemaStr == "" {
+				output.Error(errors.New("missing --schema for table creation"))
+				os.Exit(1)
+			}
+
+			schema, err := iceberg.NewSchemaFromJsonFields(0, cfg.SchemaStr)
+			if err != nil {
+				output.Error(err)
+				os.Exit(1)
+			}
+
+			var opts []catalog.CreateTableOpt
+			if cfg.LocationURI != "" {
+				opts = append(opts, catalog.WithLocation(cfg.LocationURI))
+			}
+			// TODO: Support CreateTableOpt with table properties, partition spec & sort order
+
+			ident := catalog.ToIdentifier(cfg.Ident)
+			_, err = cat.CreateTable(ctx, ident, schema, opts...)
+			if err != nil {
+				output.Error(fmt.Errorf("failed to create table: %w", err))
+				os.Exit(1)
+			}
 		default:
 			output.Error(errors.New("not implemented"))
 			os.Exit(1)

@@ -23,11 +23,11 @@ toolchain go1.24.2
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.6.1
-	github.com/apache/arrow-go/v18 v18.2.1-0.20250425153947-5ae8b27ab357
+	github.com/apache/arrow-go/v18 v18.3.0
 	github.com/aws/aws-sdk-go-v2 v1.36.3
 	github.com/aws/aws-sdk-go-v2/config v1.29.14
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.67
-	github.com/aws/aws-sdk-go-v2/service/glue v1.109.2
+	github.com/aws/aws-sdk-go-v2/service/glue v1.110.0
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.79.3
 	github.com/aws/smithy-go v1.22.3
 	github.com/awsdocs/aws-doc-sdk-examples/gov2/testtools v0.0.0-20250407191926-092f3e54b837
@@ -48,9 +48,9 @@ require (
 	github.com/uptrace/bun/driver/sqliteshim v1.2.11
 	github.com/uptrace/bun/extra/bundebug v1.2.11
 	gocloud.dev v0.41.0
-	golang.org/x/sync v0.13.0
+	golang.org/x/sync v0.14.0
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da
-	google.golang.org/api v0.231.0
+	google.golang.org/api v0.232.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -300,15 +300,15 @@ require (
 	golang.org/x/exp v0.0.0-20250408133849-7e4ce0ab07d0 // indirect
 	golang.org/x/mod v0.24.0 // indirect
 	golang.org/x/net v0.39.0 // indirect
-	golang.org/x/oauth2 v0.29.0 // indirect
-	golang.org/x/sys v0.32.0 // indirect
+	golang.org/x/oauth2 v0.30.0 // indirect
+	golang.org/x/sys v0.33.0 // indirect
 	golang.org/x/term v0.31.0 // indirect
 	golang.org/x/text v0.24.0 // indirect
 	golang.org/x/time v0.11.0 // indirect
 	golang.org/x/tools v0.32.0 // indirect
 	google.golang.org/genproto v0.0.0-20250324211829-b45e905df463 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20250324211829-b45e905df463 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20250425173222-7b384671a197 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20250428153025-10db94c68c34 // indirect
 	google.golang.org/grpc v1.72.0 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
 	gopkg.in/cenkalti/backoff.v1 v1.1.0 // indirect
