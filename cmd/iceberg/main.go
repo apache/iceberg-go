@@ -430,7 +430,7 @@ func properties(ctx context.Context, output Output, cat catalog.Catalog, args pr
 		}
 		output.Text("Updated " + args.propname + " on " + args.identifier)
 	case args.remove:
-		output.Text("Setting " + args.propname + "=" + args.value + " on " + args.identifier)
+		output.Text("Removing " + args.propname + " on " + args.identifier)
 		switch {
 		case args.namespace:
 			_, err := cat.UpdateNamespaceProperties(ctx, ident,
