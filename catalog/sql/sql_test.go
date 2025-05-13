@@ -280,9 +280,13 @@ func (s *SqliteCatalogTestSuite) TestCreationOneTableExists() {
 	_, err := sqldb.Exec(`CREATE TABLE "iceberg_tables" (
 		"catalog_name" VARCHAR NOT NULL, 
 		"table_namespace" VARCHAR NOT NULL, 
-		"table_name" VARCHAR NOT NULL, 
+		"table_name" VARCHAR NOT NULL,
+        "iceberg_type" VARCHAR,
 		"metadata_location" VARCHAR, 
 		"previous_metadata_location" VARCHAR, 
+		"view_sql" VARCHAR,
+		"schema_json" VARCHAR,
+		"properties" JSON,
 		PRIMARY KEY ("catalog_name", "table_namespace", "table_name"))`)
 	s.Require().NoError(err)
 
@@ -299,8 +303,12 @@ func (s *SqliteCatalogTestSuite) TestCreationAllTablesExist() {
 		"catalog_name" VARCHAR NOT NULL, 
 		"table_namespace" VARCHAR NOT NULL, 
 		"table_name" VARCHAR NOT NULL, 
+        "iceberg_type" VARCHAR,
 		"metadata_location" VARCHAR, 
 		"previous_metadata_location" VARCHAR, 
+		"view_sql" VARCHAR,
+		"schema_json" VARCHAR,
+		"properties" JSON,
 		PRIMARY KEY ("catalog_name", "table_namespace", "table_name"))`)
 	s.Require().NoError(err)
 
