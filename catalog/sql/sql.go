@@ -152,19 +152,6 @@ type sqlIcebergNamespaceProps struct {
 	PropertyValue sql.NullString
 }
 
-type sqlIcebergView struct {
-	bun.BaseModel `bun:"table:iceberg_views"`
-
-	CatalogName              string `bun:",pk"`
-	ViewNamespace            string `bun:",pk"`
-	ViewName                 string `bun:",pk"`
-	ViewSQL                  string
-	SchemaJSON               string
-	MetadataLocation         sql.NullString
-	PreviousMetadataLocation sql.NullString
-	Properties               map[string]string `bun:",json"`
-}
-
 func withReadTx[R any](ctx context.Context, db *bun.DB, fn func(context.Context, bun.Tx) (R, error)) (result R, err error) {
 	db.RunInTx(ctx, &sql.TxOptions{ReadOnly: true}, func(ctx context.Context, tx bun.Tx) error {
 		result, err = fn(ctx, tx)
