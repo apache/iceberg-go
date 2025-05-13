@@ -1070,18 +1070,17 @@ func (p *ProjectionTestSuite) TestPartialProjectedFields() {
 }
 
 type mockDataFile struct {
-	path              string
-	format            iceberg.FileFormat
-	partition         map[string]any
-	partitionFieldMap map[int]any
-	count             int64
-	columnSizes       map[int]int64
-	filesize          int64
-	valueCounts       map[int]int64
-	nullCounts        map[int]int64
-	nanCounts         map[int]int64
-	lowerBounds       map[int][]byte
-	upperBounds       map[int][]byte
+	path        string
+	format      iceberg.FileFormat
+	partition   map[int]any
+	count       int64
+	columnSizes map[int]int64
+	filesize    int64
+	valueCounts map[int]int64
+	nullCounts  map[int]int64
+	nanCounts   map[int]int64
+	lowerBounds map[int][]byte
+	upperBounds map[int][]byte
 
 	specid int32
 }
@@ -1089,8 +1088,7 @@ type mockDataFile struct {
 func (*mockDataFile) ContentType() iceberg.ManifestEntryContent { return iceberg.EntryContentData }
 func (m *mockDataFile) FilePath() string                        { return m.path }
 func (m *mockDataFile) FileFormat() iceberg.FileFormat          { return m.format }
-func (m *mockDataFile) Partition() map[string]any               { return m.partition }
-func (m *mockDataFile) PartitionFieldData() map[int]any         { return m.partitionFieldMap }
+func (m *mockDataFile) Partition() map[int]any                  { return m.partition }
 func (m *mockDataFile) Count() int64                            { return m.count }
 func (m *mockDataFile) FileSizeBytes() int64                    { return m.filesize }
 func (m *mockDataFile) ColumnSizes() map[int]int64              { return m.columnSizes }

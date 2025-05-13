@@ -114,7 +114,7 @@ func (m *manifestEntries) addPositionalDeleteEntry(e iceberg.ManifestEntry) {
 }
 
 func getPartitionRecord(dataFile iceberg.DataFile, partitionType *iceberg.StructType) partitionRecord {
-	partitionData := dataFile.PartitionFieldData()
+	partitionData := dataFile.Partition()
 
 	out := make(partitionRecord, len(partitionType.FieldList))
 	for i, f := range partitionType.FieldList {
