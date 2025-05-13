@@ -135,8 +135,12 @@ type sqlIcebergTable struct {
 	CatalogName              string `bun:",pk"`
 	TableNamespace           string `bun:",pk"`
 	TableName                string `bun:",pk"`
+	IcebergType              string // "TABLE" or "VIEW"
 	MetadataLocation         sql.NullString
 	PreviousMetadataLocation sql.NullString
+	ViewSQL                  sql.NullString    // Only populated for views
+	SchemaJSON               sql.NullString    // Only populated for views
+	Properties               map[string]string `bun:",json"` // Only populated for views
 }
 
 type sqlIcebergNamespaceProps struct {
@@ -232,12 +236,6 @@ func (c *Catalog) CreateSQLTables(ctx context.Context) error {
 
 	_, err = c.db.NewCreateTable().Model((*sqlIcebergNamespaceProps)(nil)).
 		IfNotExists().Exec(ctx)
-	if err != nil {
-		return err
-	}
-
-	_, err = c.db.NewCreateTable().Model((*sqlIcebergView)(nil)).
-		IfNotExists().Exec(ctx)
 
 	return err
 }
@@ -250,12 +248,6 @@ func (c *Catalog) DropSQLTables(ctx context.Context) error {
 	}
 
 	_, err = c.db.NewDropTable().Model((*sqlIcebergNamespaceProps)(nil)).
-		IfExists().Exec(ctx)
-	if err != nil {
-		return err
-	}
-
-	_, err = c.db.NewDropTable().Model((*sqlIcebergView)(nil)).
 		IfExists().Exec(ctx)
 
 	return err
@@ -325,6 +317,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 			TableNamespace:   ns,
 			TableName:        tblIdent,
 			MetadataLocation: sql.NullString{String: staged.MetadataLocation(), Valid: true},
+			IcebergType:      "TABLE",
 		}).Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to create table: %w", err)
@@ -368,9 +361,11 @@ func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, reqs []tabl
 				CatalogName:              c.name,
 				TableNamespace:           strings.Join(ns, "."),
 				TableName:                tblName,
+				IcebergType:              "TABLE",
 				MetadataLocation:         sql.NullString{Valid: true, String: staged.MetadataLocation()},
 				PreviousMetadataLocation: sql.NullString{Valid: true, String: current.MetadataLocation()},
 			}).WherePK().Where("metadata_location = ?", current.MetadataLocation()).
+				Where("iceberg_type = ?", "TABLE").
 				Exec(ctx)
 			if err != nil {
 				return fmt.Errorf("error updating table information: %w", err)
@@ -392,6 +387,7 @@ func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, reqs []tabl
 			CatalogName:      c.name,
 			TableNamespace:   strings.Join(ns, "."),
 			TableName:        tblName,
+			IcebergType:      "TABLE",
 			MetadataLocation: sql.NullString{Valid: true, String: staged.MetadataLocation()},
 		}).Exec(ctx)
 		if err != nil {
@@ -460,7 +456,7 @@ func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 			CatalogName:    c.name,
 			TableNamespace: ns,
 			TableName:      tbl,
-		}).WherePK().Exec(ctx)
+		}).WherePK().Where("iceberg_type = ?", "TABLE").Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to delete table entry: %w", err)
 		}
@@ -511,7 +507,7 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 			CatalogName:    c.name,
 			TableNamespace: fromNs,
 			TableName:      fromTbl,
-		}).WherePK().
+		}).WherePK().Where("iceberg_type = ?", "TABLE").
 			Set("table_namespace = ?", toNs).
 			Set("table_name = ?", toTbl).
 			Exec(ctx)
@@ -701,6 +697,7 @@ func (c *Catalog) listTablesAll(ctx context.Context, namespace table.Identifier)
 		err := tx.NewSelect().Model(&tables).
 			Where("catalog_name = ?", c.name).
 			Where("table_namespace = ?", ns).
+			Where("iceberg_type = ?", "TABLE").
 			Scan(ctx)
 
 		return tables, err
@@ -908,19 +905,19 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 	metadataLocation := fmt.Sprintf("virtual://%s/%s/%s.view.json", c.name, ns, viewIdent)
 
 	err = withWriteTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
-		_, err := tx.NewInsert().Model(&sqlIcebergView{
+		_, err := tx.NewInsert().Model(&sqlIcebergTable{
 			CatalogName:      c.name,
-			ViewNamespace:    ns,
-			ViewName:         viewIdent,
-			ViewSQL:          viewSQL,
-			SchemaJSON:       string(schemaBytes),
+			TableNamespace:   ns,
+			TableName:        viewIdent,
+			IcebergType:      "VIEW",
 			MetadataLocation: sql.NullString{String: metadataLocation, Valid: true},
+			ViewSQL:          sql.NullString{String: viewSQL, Valid: true},
+			SchemaJSON:       sql.NullString{String: string(schemaBytes), Valid: true},
 			Properties:       props,
 		}).Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to create view: %w", err)
 		}
-
 		return nil
 	})
 
@@ -957,13 +954,13 @@ func (c *Catalog) listViewsAll(ctx context.Context, namespace table.Identifier) 
 	}
 
 	ns := strings.Join(namespace, ".")
-	views, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) ([]sqlIcebergView, error) {
-		var views []sqlIcebergView
+	views, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) ([]sqlIcebergTable, error) {
+		var views []sqlIcebergTable
 		err := tx.NewSelect().Model(&views).
 			Where("catalog_name = ?", c.name).
-			Where("view_namespace = ?", ns).
+			Where("table_namespace = ?", ns).
+			Where("iceberg_type = ?", "VIEW").
 			Scan(ctx)
-
 		return views, err
 	})
 	if err != nil {
@@ -972,7 +969,7 @@ func (c *Catalog) listViewsAll(ctx context.Context, namespace table.Identifier) 
 
 	ret := make([]table.Identifier, len(views))
 	for i, v := range views {
-		ret[i] = append(strings.Split(v.ViewNamespace, "."), v.ViewName)
+		ret[i] = append(strings.Split(v.TableNamespace, "."), v.TableName)
 	}
 
 	return ret, nil
@@ -984,11 +981,11 @@ func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 	viewName := catalog.TableNameFromIdent(identifier)
 
 	return withWriteTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
-		res, err := tx.NewDelete().Model(&sqlIcebergView{
-			CatalogName:   c.name,
-			ViewNamespace: ns,
-			ViewName:      viewName,
-		}).WherePK().Exec(ctx)
+		res, err := tx.NewDelete().Model(&sqlIcebergTable{
+			CatalogName:    c.name,
+			TableNamespace: ns,
+			TableName:      viewName,
+		}).WherePK().Where("iceberg_type = ?", "VIEW").Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to delete view entry: %w", err)
 		}
@@ -1012,15 +1009,14 @@ func (c *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifi
 	viewName := catalog.TableNameFromIdent(identifier)
 
 	return withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) (bool, error) {
-		exists, err := tx.NewSelect().Model(&sqlIcebergView{
-			CatalogName:   c.name,
-			ViewNamespace: ns,
-			ViewName:      viewName,
-		}).WherePK().Exists(ctx)
+		exists, err := tx.NewSelect().Model(&sqlIcebergTable{
+			CatalogName:    c.name,
+			TableNamespace: ns,
+			TableName:      viewName,
+		}).WherePK().Where("iceberg_type = ?", "VIEW").Exists(ctx)
 		if err != nil {
 			return false, fmt.Errorf("error checking view existence: %w", err)
 		}
-
 		return exists, nil
 	})
 }
@@ -1030,12 +1026,13 @@ func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (ma
 	ns := strings.Join(catalog.NamespaceFromIdent(identifier), ".")
 	viewName := catalog.TableNameFromIdent(identifier)
 
-	view, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) (*sqlIcebergView, error) {
-		v := new(sqlIcebergView)
+	view, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) (*sqlIcebergTable, error) {
+		v := new(sqlIcebergTable)
 		err := tx.NewSelect().Model(v).
 			Where("catalog_name = ?", c.name).
-			Where("view_namespace = ?", ns).
-			Where("view_name = ?", viewName).
+			Where("table_namespace = ?", ns).
+			Where("table_name = ?", viewName).
+			Where("iceberg_type = ?", "VIEW").
 			Scan(ctx)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchView, identifier)
@@ -1043,7 +1040,6 @@ func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (ma
 		if err != nil {
 			return nil, fmt.Errorf("error encountered loading view %s: %w", identifier, err)
 		}
-
 		return v, nil
 	})
 	if err != nil {
@@ -1052,7 +1048,7 @@ func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (ma
 
 	// Parse schema from JSON
 	var schema *iceberg.Schema
-	if err := json.Unmarshal([]byte(view.SchemaJSON), &schema); err != nil {
+	if err := json.Unmarshal([]byte(view.SchemaJSON.String), &schema); err != nil {
 		return nil, fmt.Errorf("error parsing view schema: %w", err)
 	}
 
@@ -1061,7 +1057,7 @@ func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (ma
 		"name":              viewName,
 		"namespace":         ns,
 		"schema":            schema,
-		"sql":               view.ViewSQL,
+		"sql":               view.ViewSQL.String,
 		"properties":        view.Properties,
 		"metadata-location": view.MetadataLocation.String,
 	}
