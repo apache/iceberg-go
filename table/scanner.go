@@ -118,7 +118,7 @@ func getPartitionRecord(dataFile iceberg.DataFile, partitionType *iceberg.Struct
 
 	out := make(partitionRecord, len(partitionType.FieldList))
 	for i, f := range partitionType.FieldList {
-		out[i] = partitionData[f.Name]
+		out[i] = partitionData[f.ID]
 	}
 
 	return out

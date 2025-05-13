@@ -64,11 +64,11 @@ func TestSnapshotSummaryCollectorWithPartition(t *testing.T) {
 
 	dataFile1 := must(iceberg.NewDataFileBuilder(
 		spec, iceberg.EntryContentData, "/path/to/file1.parquet",
-		iceberg.ParquetFile, map[string]any{"int_field": int32(1)}, 100, 1234)).Build()
+		iceberg.ParquetFile, map[int]any{1001: int32(1)}, 100, 1234)).Build()
 
 	dataFile2 := must(iceberg.NewDataFileBuilder(
 		spec, iceberg.EntryContentData, "/path/to/file2.parquet",
-		iceberg.ParquetFile, map[string]any{"int_field": int32(2)}, 200, 4321)).Build()
+		iceberg.ParquetFile, map[int]any{1001: int32(2)}, 200, 4321)).Build()
 
 	ssc.addFile(dataFile1, sc, spec)
 	ssc.removeFile(dataFile1, sc, spec)

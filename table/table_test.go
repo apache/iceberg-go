@@ -485,8 +485,8 @@ func (t *TableWritingTestSuite) TestAddFilesPartitionedTable() {
 		t.Require().NoError(err)
 
 		for _, e := range entries {
-			t.Equal(map[string]any{
-				"baz": 123, "qux_month": 650,
+			t.Equal(map[int]any{
+				1000: 123, 1001: 650,
 			}, e.DataFile().Partition())
 		}
 	}

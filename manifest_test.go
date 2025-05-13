@@ -810,7 +810,7 @@ func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
 		EntryContentData,
 		"s3://bucket/namespace/table/data/abcd-0123.parquet",
 		ParquetFile,
-		map[string]any{},
+		map[int]any{},
 		100,
 		100*1000*1000,
 	)
@@ -1074,7 +1074,7 @@ func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 		EntryContentData,
 		"sample.parquet",
 		ParquetFile,
-		map[string]any{"int": int(1), "datetime": time.Unix(1925, 0).UnixMicro()},
+		map[int]any{1001: int(1), 1002: time.Unix(1925, 0).UnixMicro()},
 		1,
 		2,
 	)
