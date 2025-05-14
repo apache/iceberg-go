@@ -516,8 +516,18 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 
 	if len(t.meta.updates) > 0 {
 		t.reqs = append(t.reqs, AssertTableUUID(t.meta.uuid))
+		tbl, err := t.tbl.doCommit(ctx, t.meta.updates, t.reqs)
+		if err != nil {
+			return tbl, err
+		}
 
-		return t.tbl.doCommit(ctx, t.meta.updates, t.reqs)
+		for _, u := range t.meta.updates {
+			if perr := u.PostCommit(t.tbl, tbl); perr != nil {
+				err = errors.Join(err, perr)
+			}
+		}
+
+		return tbl, err
 	}
 
 	return t.tbl, nil
