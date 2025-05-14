@@ -336,31 +336,17 @@ func (b *MetadataBuilder) AddSnapshot(snapshot *Snapshot) (*MetadataBuilder, err
 }
 
 func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64) (*MetadataBuilder, error) {
-	var snapshotsToKeep []Snapshot
-
-	for _, snapshot := range b.snapshotList {
-		if slices.Contains(snapshotIds, snapshot.SnapshotID) {
-			if snapshot.SnapshotID == *b.currentSnapshotID {
-				return nil, errors.New("current snapshot cannot be removed")
-			}
-
-			continue
-		}
-
-		snapshotsToKeep = append(snapshotsToKeep, snapshot)
+	if slices.Contains(snapshotIds, *b.currentSnapshotID) {
+		return nil, errors.New("current snapshot cannot be removed")
 	}
 
-	var prunedSnapshotLog []SnapshotLogEntry
-
-	for _, entry := range b.snapshotLog {
-		if !slices.Contains(snapshotIds, entry.SnapshotID) {
-			prunedSnapshotLog = append(prunedSnapshotLog, entry)
-		}
-	}
-
+	b.snapshotList = slices.DeleteFunc(b.snapshotList, func(e Snapshot) bool {
+		return slices.Contains(snapshotIds, e.SnapshotID)
+	})
+	b.snapshotLog = slices.DeleteFunc(b.snapshotLog, func(e SnapshotLogEntry) bool {
+		return slices.Contains(snapshotIds, e.SnapshotID)
+	})
 	b.updates = append(b.updates, NewRemoveSnapshotsUpdate(snapshotIds))
-	b.snapshotList = snapshotsToKeep
-	b.snapshotLog = prunedSnapshotLog
 
 	return b, nil
 }
