@@ -228,7 +228,7 @@ func TestManifestPartitionVals(t *testing.T) {
 			require.NoError(t, err)
 
 			buf.Reset()
-			manifestFile, err = iceberg.WriteManifest(
+			_, err = iceberg.WriteManifest(
 				"abc.avro", &buf,
 				2, partitionSpec, schema, 123,
 				entries,
