@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -95,4 +96,80 @@ func TestMapExecFinish(t *testing.T) {
 		},
 		time.Second, 10*time.Millisecond,
 	)
+}
+
+type mockStatsAgg struct {
+	min, max iceberg.Literal
+}
+
+var _ internal.StatsAgg = (*mockStatsAgg)(nil)
+
+func (m *mockStatsAgg) Min() iceberg.Literal                       { return m.min }
+func (m *mockStatsAgg) Max() iceberg.Literal                       { return m.max }
+func (m *mockStatsAgg) Update(stats interface{ HasMinMax() bool }) {}
+func (m *mockStatsAgg) MinAsBytes() ([]byte, error)                { return nil, nil }
+func (m *mockStatsAgg) MaxAsBytes() ([]byte, error)                { return nil, nil }
+
+func TestPartitionValueTransform(t *testing.T) {
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID:   1,
+		Name: "ts_col",
+		Type: iceberg.TimestampType{},
+	})
+
+	partitionField := iceberg.PartitionField{
+		SourceID:  1,
+		FieldID:   100,
+		Name:      "date_part",
+		Transform: iceberg.DayTransform{},
+	}
+
+	morningTs := iceberg.Timestamp(time.Date(2023, 5, 15, 0, 0, 0, 0, time.UTC).UnixMicro())
+	afternoonTs := iceberg.Timestamp(time.Date(2023, 5, 15, 12, 0, 0, 0, time.UTC).UnixMicro())
+
+	transform := iceberg.DayTransform{}
+	morningTransformed := transform.Apply(iceberg.Some(iceberg.NewLiteral(morningTs)))
+	afternoonTransformed := transform.Apply(iceberg.Some(iceberg.NewLiteral(afternoonTs)))
+	assert.Equal(t, morningTransformed.Val, afternoonTransformed.Val, "Both timestamps should transform to the same day")
+	expectedDay := morningTransformed.Val
+
+	stats := internal.DataFileStatistics{
+		ColAggs: map[int]internal.StatsAgg{
+			1: &mockStatsAgg{
+				min: iceberg.NewLiteral(morningTs),
+				max: iceberg.NewLiteral(afternoonTs),
+			},
+		},
+	}
+	partitionValue := stats.PartitionValue(partitionField, schema)
+	assert.Equal(t, expectedDay.Any(), partitionValue)
+}
+
+func TestPartitionValueTransformMismatch(t *testing.T) {
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID:   1,
+		Name: "ts_col",
+		Type: iceberg.TimestampType{},
+	})
+	partitionField := iceberg.PartitionField{
+		SourceID:  1,
+		FieldID:   100,
+		Name:      "date_part",
+		Transform: iceberg.DayTransform{},
+	}
+
+	day1Ts := iceberg.Timestamp(time.Date(2023, 5, 15, 12, 0, 0, 0, time.UTC).UnixMicro())
+	day2Ts := iceberg.Timestamp(time.Date(2023, 5, 16, 12, 0, 0, 0, time.UTC).UnixMicro())
+
+	stats := internal.DataFileStatistics{
+		ColAggs: map[int]internal.StatsAgg{
+			1: &mockStatsAgg{
+				min: iceberg.NewLiteral(day1Ts),
+				max: iceberg.NewLiteral(day2Ts),
+			},
+		},
+	}
+	assert.Panics(t, func() {
+		stats.PartitionValue(partitionField, schema)
+	}, "Should panic if min/max transform to different values")
 }

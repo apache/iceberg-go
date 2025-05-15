@@ -216,13 +216,15 @@ func (d *DataFileStatistics) PartitionValue(field iceberg.PartitionField, sc *ic
 			field.Name, field.Transform))
 	}
 
+	transformFn := field.Transform.Apply
 	lowerVal, upperVal := agg.Min(), agg.Max()
-	if !lowerVal.Equals(upperVal) {
+	transformedLowerVal, transformedUpperVal := transformFn(iceberg.Some(lowerVal)).Val, transformFn(iceberg.Some(upperVal)).Val
+	if !transformedLowerVal.Equals(transformedUpperVal) {
 		panic(fmt.Errorf("cannot infer partition value from parquet metadata as there is more than one value for partition field: %s. (low: %s, high: %s)",
-			field.Name, lowerVal, upperVal))
+			field.Name, transformedLowerVal, transformedUpperVal))
 	}
 
-	val := field.Transform.Apply(must(PartitionRecordValue(field, lowerVal, sc)))
+	val := transformFn(must(PartitionRecordValue(field, lowerVal, sc)))
 	if !val.Valid {
 		return nil
 	}

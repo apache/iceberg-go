@@ -64,6 +64,11 @@ type Optional[T any] struct {
 	Valid bool
 }
 
+// Some wraps the provided value in a valid Optional.
+func Some[T any](val T) Optional[T] {
+	return Optional[T]{Val: val, Valid: true}
+}
+
 // represents a single row in a record
 type structLike interface {
 	// Size returns the number of columns in this row
