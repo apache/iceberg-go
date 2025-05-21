@@ -139,9 +139,6 @@ type sqlIcebergTable struct {
 	IcebergType              string // "TABLE" or "VIEW"
 	MetadataLocation         sql.NullString
 	PreviousMetadataLocation sql.NullString
-	ViewSQL                  sql.NullString    // Only populated for views
-	SchemaJSON               sql.NullString    // Only populated for views
-	Properties               map[string]string `bun:"type:jsonb"` // Only populated for views
 }
 
 type sqlIcebergNamespaceProps struct {
@@ -857,6 +854,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 		TimestampMs     int64             `json:"timestamp-ms"`
 		SchemaID        int               `json:"schema-id"`
 		Summary         map[string]string `json:"summary"`
+		Operation       string            `json:"operation"`
 		Representations []struct {
 			Type    string `json:"type"`
 			SQL     string `json:"sql"`
@@ -869,6 +867,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 		TimestampMs: timestampMs,
 		SchemaID:    schema.ID,
 		Summary:     map[string]string{"sql": viewSQL},
+		Operation:   "create",
 		Representations: []struct {
 			Type    string `json:"type"`
 			SQL     string `json:"sql"`
@@ -940,11 +939,6 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 		return fmt.Errorf("failed to write view metadata: %w", err)
 	}
 
-	schemaBytes, err := json.Marshal(schema)
-	if err != nil {
-		return fmt.Errorf("failed to marshal schema: %w", err)
-	}
-
 	err = withWriteTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
 		_, err := tx.NewInsert().Model(&sqlIcebergTable{
 			CatalogName:      c.name,
@@ -952,13 +946,11 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 			TableName:        viewIdent,
 			IcebergType:      "VIEW",
 			MetadataLocation: sql.NullString{String: metadataLocation, Valid: true},
-			ViewSQL:          sql.NullString{String: viewSQL, Valid: true},
-			SchemaJSON:       sql.NullString{String: string(schemaBytes), Valid: true},
-			Properties:       props,
 		}).Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to create view: %w", err)
 		}
+
 		return nil
 	})
 
@@ -1002,6 +994,7 @@ func (c *Catalog) listViewsAll(ctx context.Context, namespace table.Identifier) 
 			Where("table_namespace = ?", ns).
 			Where("iceberg_type = ?", "VIEW").
 			Scan(ctx)
+
 		return views, err
 	})
 	if err != nil {
@@ -1036,6 +1029,7 @@ func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 		if err != nil {
 			return nil, fmt.Errorf("error encountered loading view %s: %w", identifier, err)
 		}
+
 		return v, nil
 	})
 	if err != nil {
@@ -1097,6 +1091,7 @@ func (c *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifi
 		if err != nil {
 			return false, fmt.Errorf("error checking view existence: %w", err)
 		}
+
 		return exists, nil
 	})
 }
@@ -1120,6 +1115,7 @@ func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (ma
 		if err != nil {
 			return nil, fmt.Errorf("error encountered loading view %s: %w", identifier, err)
 		}
+
 		return v, nil
 	})
 	if err != nil {
@@ -1130,59 +1126,38 @@ func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (ma
 		return nil, fmt.Errorf("%w: %s, metadata location is missing", catalog.ErrNoSuchView, identifier)
 	}
 
-	var schema *iceberg.Schema
-	if err := json.Unmarshal([]byte(view.SchemaJSON.String), &schema); err != nil {
-		return nil, fmt.Errorf("error parsing view schema: %w", err)
-	}
-
 	viewMetadata := map[string]interface{}{
 		"name":              viewName,
 		"namespace":         ns,
-		"schema":            schema,
-		"sql":               view.ViewSQL.String,
-		"properties":        view.Properties,
 		"metadata-location": view.MetadataLocation.String,
 	}
 
-	viewProps := maps.Clone(c.props)
-	maps.Copy(view.Properties, viewProps)
+	fs, err := io.LoadFS(ctx, c.props, view.MetadataLocation.String)
+	inputFile, err := fs.Open(view.MetadataLocation.String)
+	if err != nil {
+		return viewMetadata, fmt.Errorf("error encountered loading view metadata %s: %w", identifier, err)
+	}
+	defer inputFile.Close()
 
-	fs, err := io.LoadFS(ctx, viewProps, view.MetadataLocation.String)
-	if err == nil {
-		inputFile, err := fs.Open(view.MetadataLocation.String)
-		if err == nil {
-			defer inputFile.Close()
+	var fullViewMetadata map[string]interface{}
+	if err := json.NewDecoder(inputFile).Decode(&fullViewMetadata); err != nil {
+		return viewMetadata, fmt.Errorf("error encountered decoding view metadata %s: %w", identifier, err)
+	}
 
-			var fullViewMetadata map[string]interface{}
-			if err := json.NewDecoder(inputFile).Decode(&fullViewMetadata); err == nil {
-				fullViewMetadata["name"] = viewName
-				fullViewMetadata["namespace"] = ns
-				fullViewMetadata["metadata-location"] = view.MetadataLocation.String
+	fullViewMetadata["name"] = viewName
+	fullViewMetadata["namespace"] = ns
+	fullViewMetadata["metadata-location"] = view.MetadataLocation.String
 
-				if _, ok := fullViewMetadata["sql"]; !ok {
-					fullViewMetadata["sql"] = view.ViewSQL.String
-				}
-				if _, ok := fullViewMetadata["schema"]; !ok && schema != nil {
-					fullViewMetadata["schema"] = schema
-				}
-
-				if props, ok := fullViewMetadata["properties"].(map[string]interface{}); ok {
-					strProps := make(map[string]string)
-					for k, v := range props {
-						if str, ok := v.(string); ok {
-							strProps[k] = str
-						} else if vJson, err := json.Marshal(v); err == nil {
-							strProps[k] = string(vJson)
-						}
-					}
-					fullViewMetadata["properties"] = strProps
-				} else {
-					fullViewMetadata["properties"] = view.Properties
-				}
-
-				return fullViewMetadata, nil
+	if props, ok := fullViewMetadata["properties"].(map[string]interface{}); ok {
+		strProps := make(map[string]string)
+		for k, v := range props {
+			if str, ok := v.(string); ok {
+				strProps[k] = str
+			} else if vJson, err := json.Marshal(v); err == nil {
+				strProps[k] = string(vJson)
 			}
 		}
+		fullViewMetadata["properties"] = strProps
 	}
 
 	return viewMetadata, nil
