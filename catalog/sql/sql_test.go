@@ -281,7 +281,7 @@ func (s *SqliteCatalogTestSuite) TestCreationOneTableExists() {
 		"catalog_name" VARCHAR NOT NULL, 
 		"table_namespace" VARCHAR NOT NULL, 
 		"table_name" VARCHAR NOT NULL,
-        "iceberg_type" VARCHAR,
+		"iceberg_type" VARCHAR,
 		"metadata_location" VARCHAR, 
 		"previous_metadata_location" VARCHAR, 
 		"view_sql" VARCHAR,
