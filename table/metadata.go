@@ -187,14 +187,14 @@ func MetadataBuilderFromBase(metadata Metadata) (*MetadataBuilder, error) {
 	b.loc = metadata.Location()
 	b.lastUpdatedMS = metadata.LastUpdatedMillis()
 	b.lastColumnId = metadata.LastColumnID()
-	b.schemaList = metadata.Schemas()
+	b.schemaList = slices.Clone(metadata.Schemas())
 	b.currentSchemaID = metadata.CurrentSchema().ID
-	b.specs = metadata.PartitionSpecs()
+	b.specs = slices.Clone(metadata.PartitionSpecs())
 	b.defaultSpecID = metadata.DefaultPartitionSpec()
 	b.lastPartitionID = metadata.LastPartitionSpecID()
-	b.props = metadata.Properties()
-	b.snapshotList = metadata.Snapshots()
-	b.sortOrderList = metadata.SortOrders()
+	b.props = maps.Clone(metadata.Properties())
+	b.snapshotList = slices.Clone(metadata.Snapshots())
+	b.sortOrderList = slices.Clone(metadata.SortOrders())
 	b.defaultSortOrderID = metadata.DefaultSortOrder()
 	if metadata.Version() > 1 {
 		seq := metadata.LastSequenceNumber()
@@ -331,6 +331,22 @@ func (b *MetadataBuilder) AddSnapshot(snapshot *Snapshot) (*MetadataBuilder, err
 	b.lastUpdatedMS = snapshot.TimestampMs
 	b.lastSequenceNumber = &snapshot.SequenceNumber
 	b.snapshotList = append(b.snapshotList, *snapshot)
+
+	return b, nil
+}
+
+func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64) (*MetadataBuilder, error) {
+	if slices.Contains(snapshotIds, *b.currentSnapshotID) {
+		return nil, errors.New("current snapshot cannot be removed")
+	}
+
+	b.snapshotList = slices.DeleteFunc(b.snapshotList, func(e Snapshot) bool {
+		return slices.Contains(snapshotIds, e.SnapshotID)
+	})
+	b.snapshotLog = slices.DeleteFunc(b.snapshotLog, func(e SnapshotLogEntry) bool {
+		return slices.Contains(snapshotIds, e.SnapshotID)
+	})
+	b.updates = append(b.updates, NewRemoveSnapshotsUpdate(snapshotIds))
 
 	return b, nil
 }
@@ -589,6 +605,21 @@ func (b *MetadataBuilder) SetSnapshotRef(
 	}
 
 	b.refs[name] = ref
+
+	return b, nil
+}
+
+func (b *MetadataBuilder) RemoveSnapshotRef(name string) (*MetadataBuilder, error) {
+	if _, found := b.refs[name]; !found {
+		return nil, fmt.Errorf("snapshot ref not found: %s", name)
+	}
+
+	if name == MainBranch {
+		return nil, errors.New("cannot remove main branch's snapshot ref")
+	}
+
+	delete(b.refs, name)
+	b.updates = append(b.updates, NewRemoveSnapshotRefUpdate(name))
 
 	return b, nil
 }
