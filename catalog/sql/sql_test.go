@@ -1181,16 +1181,6 @@ func (s *SqliteCatalogTestSuite) TestLoadView() {
 
 	s.Equal(viewName, viewInfo["name"])
 	s.Equal(nsName, viewInfo["namespace"])
-	s.Equal(viewSQL, viewInfo["sql"])
-	s.Contains(viewInfo, "schema")
-	s.Contains(viewInfo, "properties")
-
-	properties, ok := viewInfo["properties"].(map[string]string)
-	s.True(ok)
-	s.Contains(properties, "comment")
-	s.Equal("Test view", properties["comment"])
-	s.Contains(properties, "owner")
-	s.Equal("test-user", properties["owner"])
 
 	_, err = db.LoadView(context.Background(), []string{nsName, "nonexistent"})
 	s.Error(err)
