@@ -40,7 +40,6 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/sql"
 	"github.com/apache/iceberg-go/internal"
-	"github.com/apache/iceberg-go/io"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
@@ -1042,7 +1041,7 @@ func arrowTableWithNull() arrow.Table {
 	return arrTable
 }
 
-func (t *TableWritingTestSuite) validateManifestFileLength(fs io.IO, m iceberg.ManifestFile) {
+func (t *TableWritingTestSuite) validateManifestFileLength(fs iceio.IO, m iceberg.ManifestFile) {
 	f, err := fs.Open(m.FilePath())
 	t.Require().NoError(err)
 	defer f.Close()
