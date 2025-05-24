@@ -1373,6 +1373,11 @@ func WriteManifest(
 		}
 	}
 
+	// flush the writer to ensure cnt.Count is accurate
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+
 	return w.ToManifestFile(filename, cnt.Count)
 }
 
