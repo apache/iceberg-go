@@ -284,9 +284,6 @@ func (s *SqliteCatalogTestSuite) TestCreationOneTableExists() {
 		"iceberg_type" VARCHAR,
 		"metadata_location" VARCHAR, 
 		"previous_metadata_location" VARCHAR, 
-		"view_sql" VARCHAR,
-		"schema_json" VARCHAR,
-		"properties" JSON,
 		PRIMARY KEY ("catalog_name", "table_namespace", "table_name"))`)
 	s.Require().NoError(err)
 
@@ -306,9 +303,6 @@ func (s *SqliteCatalogTestSuite) TestCreationAllTablesExist() {
         "iceberg_type" VARCHAR,
 		"metadata_location" VARCHAR, 
 		"previous_metadata_location" VARCHAR, 
-		"view_sql" VARCHAR,
-		"schema_json" VARCHAR,
-		"properties" JSON,
 		PRIMARY KEY ("catalog_name", "table_namespace", "table_name"))`)
 	s.Require().NoError(err)
 

@@ -64,6 +64,11 @@ const (
 	initCatalogTablesKey = "init_catalog_tables"
 )
 
+const (
+	TableType = "TABLE"
+	ViewType  = "VIEW"
+)
+
 func init() {
 	catalog.Register("sql", catalog.RegistrarFunc(func(ctx context.Context, name string, p iceberg.Properties) (c catalog.Catalog, err error) {
 		driver, ok := p[DriverKey]
@@ -136,7 +141,7 @@ type sqlIcebergTable struct {
 	CatalogName              string `bun:",pk"`
 	TableNamespace           string `bun:",pk"`
 	TableName                string `bun:",pk"`
-	IcebergType              string // "TABLE" or "VIEW"
+	IcebergType              string // TableType or ViewType
 	MetadataLocation         sql.NullString
 	PreviousMetadataLocation sql.NullString
 }
@@ -302,7 +307,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 			TableNamespace:   ns,
 			TableName:        tblIdent,
 			MetadataLocation: sql.NullString{String: staged.MetadataLocation(), Valid: true},
-			IcebergType:      "TABLE",
+			IcebergType:      TableType,
 		}).Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to create table: %w", err)
@@ -346,11 +351,11 @@ func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, reqs []tabl
 				CatalogName:              c.name,
 				TableNamespace:           strings.Join(ns, "."),
 				TableName:                tblName,
-				IcebergType:              "TABLE",
+				IcebergType:              TableType,
 				MetadataLocation:         sql.NullString{Valid: true, String: staged.MetadataLocation()},
 				PreviousMetadataLocation: sql.NullString{Valid: true, String: current.MetadataLocation()},
 			}).WherePK().Where("metadata_location = ?", current.MetadataLocation()).
-				Where("iceberg_type = ?", "TABLE").
+				Where("iceberg_type = ?", TableType).
 				Exec(ctx)
 			if err != nil {
 				return fmt.Errorf("error updating table information: %w", err)
@@ -372,7 +377,7 @@ func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, reqs []tabl
 			CatalogName:      c.name,
 			TableNamespace:   strings.Join(ns, "."),
 			TableName:        tblName,
-			IcebergType:      "TABLE",
+			IcebergType:      TableType,
 			MetadataLocation: sql.NullString{Valid: true, String: staged.MetadataLocation()},
 		}).Exec(ctx)
 		if err != nil {
@@ -441,7 +446,7 @@ func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 			CatalogName:    c.name,
 			TableNamespace: ns,
 			TableName:      tbl,
-		}).WherePK().Where("iceberg_type = ?", "TABLE").Exec(ctx)
+		}).WherePK().Where("iceberg_type = ?", TableType).Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to delete table entry: %w", err)
 		}
@@ -492,7 +497,7 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 			CatalogName:    c.name,
 			TableNamespace: fromNs,
 			TableName:      fromTbl,
-		}).WherePK().Where("iceberg_type = ?", "TABLE").
+		}).WherePK().Where("iceberg_type = ?", TableType).
 			Set("table_namespace = ?", toNs).
 			Set("table_name = ?", toTbl).
 			Exec(ctx)
@@ -682,7 +687,7 @@ func (c *Catalog) listTablesAll(ctx context.Context, namespace table.Identifier)
 		err := tx.NewSelect().Model(&tables).
 			Where("catalog_name = ?", c.name).
 			Where("table_namespace = ?", ns).
-			Where("iceberg_type = ?", "TABLE").
+			Where("iceberg_type = ?", TableType).
 			Scan(ctx)
 
 		return tables, err
@@ -944,7 +949,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 			CatalogName:      c.name,
 			TableNamespace:   ns,
 			TableName:        viewIdent,
-			IcebergType:      "VIEW",
+			IcebergType:      ViewType,
 			MetadataLocation: sql.NullString{String: metadataLocation, Valid: true},
 		}).Exec(ctx)
 		if err != nil {
@@ -992,7 +997,7 @@ func (c *Catalog) listViewsAll(ctx context.Context, namespace table.Identifier) 
 		err := tx.NewSelect().Model(&views).
 			Where("catalog_name = ?", c.name).
 			Where("table_namespace = ?", ns).
-			Where("iceberg_type = ?", "VIEW").
+			Where("iceberg_type = ?", ViewType).
 			Scan(ctx)
 
 		return views, err
@@ -1021,7 +1026,7 @@ func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 			Where("catalog_name = ?", c.name).
 			Where("table_namespace = ?", ns).
 			Where("table_name = ?", viewName).
-			Where("iceberg_type = ?", "VIEW").
+			Where("iceberg_type = ?", ViewType).
 			Scan(ctx)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchView, identifier)
@@ -1045,7 +1050,7 @@ func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 			CatalogName:    c.name,
 			TableNamespace: ns,
 			TableName:      viewName,
-		}).WherePK().Where("iceberg_type = ?", "VIEW").Exec(ctx)
+		}).WherePK().Where("iceberg_type = ?", ViewType).Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to delete view entry: %w", err)
 		}
@@ -1087,7 +1092,7 @@ func (c *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifi
 			CatalogName:    c.name,
 			TableNamespace: ns,
 			TableName:      viewName,
-		}).WherePK().Where("iceberg_type = ?", "VIEW").Exists(ctx)
+		}).WherePK().Where("iceberg_type = ?", ViewType).Exists(ctx)
 		if err != nil {
 			return false, fmt.Errorf("error checking view existence: %w", err)
 		}
@@ -1107,7 +1112,7 @@ func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (ma
 			Where("catalog_name = ?", c.name).
 			Where("table_namespace = ?", ns).
 			Where("table_name = ?", viewName).
-			Where("iceberg_type = ?", "VIEW").
+			Where("iceberg_type = ?", ViewType).
 			Scan(ctx)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchView, identifier)
@@ -1133,6 +1138,9 @@ func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (ma
 	}
 
 	fs, err := io.LoadFS(ctx, c.props, view.MetadataLocation.String)
+	if err != nil {
+		return nil, fmt.Errorf("error loading view metadata: %w", err)
+	}
 	inputFile, err := fs.Open(view.MetadataLocation.String)
 	if err != nil {
 		return viewMetadata, fmt.Errorf("error encountered loading view metadata %s: %w", identifier, err)
