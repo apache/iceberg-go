@@ -299,8 +299,8 @@ func (s *SqliteCatalogTestSuite) TestCreationAllTablesExist() {
 	_, err := sqldb.Exec(`CREATE TABLE "iceberg_tables" (
 		"catalog_name" VARCHAR NOT NULL, 
 		"table_namespace" VARCHAR NOT NULL, 
-		"table_name" VARCHAR NOT NULL, 
-        "iceberg_type" VARCHAR,
+		"table_name" VARCHAR NOT NULL,
+		"iceberg_type" VARCHAR,
 		"metadata_location" VARCHAR, 
 		"previous_metadata_location" VARCHAR, 
 		PRIMARY KEY ("catalog_name", "table_namespace", "table_name"))`)
