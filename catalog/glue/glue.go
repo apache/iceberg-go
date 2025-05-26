@@ -135,6 +135,7 @@ type Catalog struct {
 	catalogId *string
 	awsCfg    *aws.Config
 	props     iceberg.Properties
+	fsLoader  FSLoaderFunction
 }
 
 // NewCatalog creates a new instance of glue.Catalog with the given options.
@@ -152,11 +153,17 @@ func NewCatalog(opts ...Option) *Catalog {
 		catalogId = nil
 	}
 
+	fsLoaderFn := io.LoadFS
+	if glueOps.fsLoaderFn != nil {
+		fsLoaderFn = glueOps.fsLoaderFn
+	}
+
 	return &Catalog{
 		glueSvc:   glue.NewFromConfig(glueOps.awsConfig),
 		catalogId: catalogId,
 		awsCfg:    &glueOps.awsConfig,
 		props:     iceberg.Properties(glueOps.awsProperties),
+		fsLoader:  fsLoaderFn,
 	}
 }
 
@@ -220,7 +227,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, pr
 
 	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
 	// TODO: consider providing a way to directly access the S3 iofs to enable testing of the catalog.
-	iofs, err := io.LoadFS(ctx, props, location)
+	iofs, err := c.fsLoader(ctx, props, location)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load table %s.%s: %w", database, tableName, err)
 	}
@@ -313,7 +320,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	}
 	// Load the metadata file to get table properties
 	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
-	iofs, err := io.LoadFS(ctx, nil, metadataLocation)
+	iofs, err := c.fsLoader(ctx, nil, metadataLocation)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load metadata file at %s: %w", metadataLocation, err)
 	}
