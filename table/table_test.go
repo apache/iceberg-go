@@ -21,9 +21,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -269,7 +271,7 @@ func (t *TableWritingTestSuite) SetupSuite() {
 }
 
 func (t *TableWritingTestSuite) SetupTest() {
-	t.location = strings.Replace(t.T().TempDir(), "#", "", -1)
+	t.location = filepath.ToSlash(strings.Replace(t.T().TempDir(), "#", "", -1))
 }
 
 func (t *TableWritingTestSuite) TearDownSuite() {
@@ -364,7 +366,7 @@ func (t *TableWritingTestSuite) TestAddFilesFileNotFound() {
 	tx := tbl.NewTransaction()
 	err := tx.AddFiles(t.ctx, files, nil, false)
 	t.Error(err)
-	t.ErrorContains(err, "no such file or directory")
+	t.ErrorIs(err, fs.ErrNotExist)
 }
 
 func (t *TableWritingTestSuite) TestAddFilesUnpartitionedHasFieldIDs() {
@@ -936,7 +938,7 @@ func (t *TableWritingTestSuite) createTableWithProps(identifier table.Identifier
 
 	t.Require().NoError(cat.CreateNamespace(t.ctx, catalog.NamespaceFromIdent(identifier), nil))
 	tbl, err := cat.CreateTable(t.ctx, identifier, sc, catalog.WithProperties(props),
-		catalog.WithLocation(t.location))
+		catalog.WithLocation("file://"+t.location))
 
 	t.Require().NoError(err)
 
@@ -1039,6 +1041,17 @@ func arrowTableWithNull() arrow.Table {
 	return arrTable
 }
 
+func (t *TableWritingTestSuite) validateManifestFileLength(fs iceio.IO, m iceberg.ManifestFile) {
+	f, err := fs.Open(m.FilePath())
+	t.Require().NoError(err)
+	defer f.Close()
+
+	info, err := f.Stat()
+	t.Require().NoError(err)
+
+	t.EqualValues(info.Size(), m.Length(), "expected size: %d, got: %d", info.Size(), m.Length())
+}
+
 func (t *TableWritingTestSuite) TestMergeManifests() {
 	tblA := t.createTableWithProps(table.Identifier{"default", "merge_manifest_a"},
 		iceberg.Properties{
@@ -1095,6 +1108,7 @@ func (t *TableWritingTestSuite) TestMergeManifests() {
 	manifestList, err := tblA.CurrentSnapshot().Manifests(tblA.FS())
 	t.Require().NoError(err)
 	t.Len(manifestList, 1)
+	t.validateManifestFileLength(tblA.FS(), manifestList[0])
 
 	entries, err := manifestList[0].FetchEntries(tblA.FS(), false)
 	t.Require().NoError(err)
@@ -1114,9 +1128,17 @@ func (t *TableWritingTestSuite) TestMergeManifests() {
 	t.Require().NoError(err)
 	t.Len(manifestList, 3)
 
+	for _, m := range manifestList {
+		t.validateManifestFileLength(tblB.FS(), m)
+	}
+
 	manifestList, err = tblC.CurrentSnapshot().Manifests(tblC.FS())
 	t.Require().NoError(err)
 	t.Len(manifestList, 3)
+
+	for _, m := range manifestList {
+		t.validateManifestFileLength(tblC.FS(), m)
+	}
 
 	resultA, err := tblA.Scan().ToArrowTable(t.ctx)
 	t.Require().NoError(err)
@@ -1142,7 +1164,7 @@ func TestTableWriting(t *testing.T) {
 }
 
 func TestNullableStructRequiredField(t *testing.T) {
-	loc := t.TempDir()
+	loc := filepath.ToSlash(t.TempDir())
 
 	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
 		"uri":          ":memory:",
@@ -1186,7 +1208,7 @@ func TestNullableStructRequiredField(t *testing.T) {
 	require.NoError(t, cat.CreateNamespace(ctx, table.Identifier{"testing"}, nil))
 	tbl, err := cat.CreateTable(ctx, table.Identifier{"testing", "nullable_struct_required_field"}, sc,
 		catalog.WithProperties(iceberg.Properties{"format-version": "2"}),
-		catalog.WithLocation(loc))
+		catalog.WithLocation("file://"+loc))
 	require.NoError(t, err)
 	require.NotNil(t, tbl)
 
@@ -1300,7 +1322,11 @@ func (t *TableWritingTestSuite) TestDeleteOldMetadataLogsErrorOnFileNotFound() {
 	// validate that error is logged
 	logOutput := logBuf.String()
 	t.Contains(logOutput, "Warning: Failed to delete old metadata file")
-	t.Contains(logOutput, "no such file or directory")
+	if runtime.GOOS == "windows" {
+		t.Contains(logOutput, "The system cannot find the file specified")
+	} else {
+		t.Contains(logOutput, "no such file or directory")
+	}
 }
 
 func (t *TableWritingTestSuite) TestDeleteOldMetadataNoErrorLogsOnFileFound() {
