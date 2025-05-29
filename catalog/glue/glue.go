@@ -145,6 +145,10 @@ func NewCatalog(opts ...Option) *Catalog {
 		o(glueOps)
 	}
 
+	if glueOps.awsProperties == nil {
+		glueOps.awsProperties = AwsProperties{}
+	}
+
 	var catalogId *string
 	if val, ok := glueOps.awsProperties[CatalogIdKey]; ok {
 		catalogId = &val
@@ -800,7 +804,8 @@ func buildGlueTableInput(ctx context.Context, database string, tableName string,
 }
 
 func prepareProperties(icebergProperties iceberg.Properties, newMetadataLocation string) iceberg.Properties {
-	glueProperties := maps.Clone(icebergProperties)
+	glueProperties := make(iceberg.Properties)
+	maps.Copy(glueProperties, icebergProperties)
 	glueProperties[tableTypePropsKey] = glueTypeIceberg
 	glueProperties[metadataLocationPropsKey] = newMetadataLocation
 
