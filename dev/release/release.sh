@@ -40,16 +40,40 @@ fi
 tag="v${version}"
 rc_tag="${tag}-rc${rc}"
 echo "Tagging for release: ${tag}"
-git tag "${tag}" "${rc_tag}"
+git tag "${tag}" "${rc_tag}^{}" -m "Release ${tag}"
 git push origin "${tag}"
 
+release_id="apache-iceberg-go-${version}"
 dist_url="https://dist.apache.org/repos/dist/release/iceberg"
 dist_dev_url="https://dist.apache.org/repos/dist/dev/iceberg"
+dist_base_dir="dev/release/dist"
+dist_dir="${dist_base_dir}/${release_id}"
 
-svn \
-  mv "${dist_dev_url}/apache-iceberg-go-${version}-rc${rc}/" \
-  "${dist_url}/apache-iceberg-go-${version}/" \
-  -m "Apache Iceberg-go ${version}"
+rm -rf "${dist_base_dir}"
+svn co --depth=empty "${dist_url}" "${dist_base_dir}"
+gh release download "${rc_tag}" \
+  --dir "${dist_dir}" \
+  --skip-existing
+
+mv "${dist_dir}/${release_id}-rc${rc}.tar.gz" "${dist_dir}/${release_id}.tar.gz"
+mv "${dist_dir}/${release_id}-rc${rc}.tar.gz.sha512" "${dist_dir}/${release_id}.tar.gz.sha512"
+
+pushd "${dist_base_dir}"
+pushd "${release_id}"
+gpg --armor --output "${release_id}.tar.gz.asc" --detach-sig "${release_id}.tar.gz"
+gh release create "${tag}" \
+  --title "Apache Iceberg Go ${version}" \
+  --generate-notes \
+  --verify-tag \
+  ${release_id}.tar.gz \
+  ${release_id}.tar.gz.asc \
+  ${release_id}.tar.gz.sha512
+popd
+
+svn add "${release_id}"
+svn ci -m "Apache Iceberg Go ${version}"
+popd
+rm -rf "${dist_base_dir}"
 
 echo "Keep only the latest versions"
 old_releases=$(
