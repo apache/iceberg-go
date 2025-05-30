@@ -864,31 +864,7 @@ func TestGlueCreateTableSuccessIntegration(t *testing.T) {
 		catalog.WithLocation(metadataLocation),
 	}
 	newTable, err := ctlg.CreateTable(context.TODO(), TableIdentifier(dbName, newTableName), sourceTable.Schema(), createOpts...)
-	defer func() {
-		cleanupErr := ctlg.DropTable(context.TODO(), TableIdentifier(dbName, newTableName))
-		if cleanupErr != nil {
-			t.Logf("Warning: Failed to clean up table %s.%s: %v", dbName, newTableName, cleanupErr)
-		}
-		// Clean up the newly created metadata file in S3
-		if newTable != nil {
-			s3Client := s3.NewFromConfig(awsCfg)
-			metadataLoc := newTable.MetadataLocation()
-			if strings.HasPrefix(metadataLoc, "s3://") {
-				parts := strings.SplitN(strings.TrimPrefix(metadataLoc, "s3://"), "/", 2)
-				if len(parts) == 2 {
-					bucket := parts[0]
-					key := parts[1]
-					_, deleteErr := s3Client.DeleteObject(context.TODO(), &s3.DeleteObjectInput{
-						Bucket: aws.String(bucket),
-						Key:    aws.String(key),
-					})
-					if deleteErr != nil {
-						t.Logf("Warning: Failed to delete metadata file at %s: %v", metadataLoc, deleteErr)
-					}
-				}
-			}
-		}
-	}()
+	defer cleanupTable(t, ctlg, TableIdentifier(dbName, newTableName), awsCfg)
 	assert.NoError(err)
 	assert.Equal([]string{dbName, newTableName}, newTable.Identifier())
 
@@ -1067,31 +1043,7 @@ func TestAlterTableIntegration(t *testing.T) {
 	assert.True(schema.Equals(testTable.Schema()))
 
 	// Clean up table and table location after tests
-	defer func() {
-		cleanupErr := ctlg.DropTable(context.TODO(), TableIdentifier(dbName, tbName))
-		if cleanupErr != nil {
-			t.Logf("Warning: Failed to clean up table %s.%s: %v", dbName, tbName, cleanupErr)
-		}
-		// Clean up the newly created metadata file in S3
-		if testTable != nil {
-			s3Client := s3.NewFromConfig(awsCfg)
-			metadataLoc := testTable.MetadataLocation()
-			if strings.HasPrefix(metadataLoc, "s3://") {
-				parts := strings.SplitN(strings.TrimPrefix(metadataLoc, "s3://"), "/", 2)
-				if len(parts) == 2 {
-					bucket := parts[0]
-					key := parts[1]
-					_, deleteErr := s3Client.DeleteObject(context.TODO(), &s3.DeleteObjectInput{
-						Bucket: aws.String(bucket),
-						Key:    aws.String(key),
-					})
-					if deleteErr != nil {
-						t.Logf("Warning: Failed to delete metadata file at %s: %v", metadataLoc, deleteErr)
-					}
-				}
-			}
-		}
-	}()
+	defer cleanupTable(t, ctlg, tbIdent, awsCfg)
 
 	// Test set table properties
 	updateProps := table.NewSetPropertiesUpdate(map[string]string{
@@ -1159,6 +1111,79 @@ func TestAlterTableIntegration(t *testing.T) {
 	assert.Equal(newFields, testTable.Schema().Fields())
 }
 
+func TestSnapshotManagementIntegration(t *testing.T) {
+	if os.Getenv("TEST_DATABASE_NAME") == "" || os.Getenv("TEST_TABLE_LOCATION") == "" {
+		t.Skip()
+	}
+
+	assert := require.New(t)
+	dbName := os.Getenv("TEST_DATABASE_NAME")
+	tbLocation := os.Getenv("TEST_TABLE_LOCATION")
+	tbName := fmt.Sprintf("table_%d", time.Now().UnixNano())
+	tbIdent := TableIdentifier(dbName, tbName)
+
+	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
+	assert.NoError(err)
+	ctlg := NewCatalog(WithAwsConfig(awsCfg))
+
+	// clean up table after test
+	defer cleanupTable(t, ctlg, tbIdent, awsCfg)
+
+	createOpts := []catalog.CreateTableOpt{
+		catalog.WithLocation(tbLocation),
+	}
+	_, err = ctlg.CreateTable(context.TODO(), tbIdent, testSchema, createOpts...)
+	assert.NoError(err)
+
+	testTable, err := ctlg.LoadTable(context.TODO(), tbIdent, nil)
+	assert.NoError(err)
+
+	// Test add new snapshot
+	manifest, schemaid := "s3:/a/b/c.avro", 3
+	newSnap := table.Snapshot{
+		SnapshotID:     25,
+		SequenceNumber: 200,
+		TimestampMs:    1602638573590,
+		ManifestList:   manifest,
+		SchemaID:       &schemaid,
+		Summary: &table.Summary{
+			Operation: table.OpAppend,
+		},
+	}
+
+	_, _, err = ctlg.CommitTable(context.TODO(), testTable, nil, []table.Update{
+		table.NewAddSnapshotUpdate(&newSnap),
+	})
+
+	testTable, err = ctlg.LoadTable(context.TODO(), tbIdent, nil)
+	assert.NoError(err)
+
+	actualSnap := testTable.SnapshotByID(25)
+	assert.Equal(newSnap.SnapshotID, actualSnap.SnapshotID)
+	assert.Equal(newSnap.SequenceNumber, actualSnap.SequenceNumber)
+	assert.Equal(newSnap.ManifestList, actualSnap.ManifestList)
+	assert.Equal(newSnap.TimestampMs, actualSnap.TimestampMs)
+	assert.Equal(*newSnap.SchemaID, *actualSnap.SchemaID)
+	assert.Equal(newSnap.Summary.Operation, actualSnap.Summary.Operation)
+
+	// Test update current snapshot
+	_, _, err = ctlg.CommitTable(context.TODO(), testTable, nil, []table.Update{
+		table.NewSetSnapshotRefUpdate(table.MainBranch, 25, table.BranchRef,
+			-1, -1, -1),
+	})
+
+	testTable, err = ctlg.LoadTable(context.TODO(), tbIdent, nil)
+	assert.NoError(err)
+
+	currSnap := testTable.CurrentSnapshot()
+	assert.Equal(newSnap.SnapshotID, currSnap.SnapshotID)
+	assert.Equal(newSnap.SequenceNumber, currSnap.SequenceNumber)
+	assert.Equal(newSnap.ManifestList, currSnap.ManifestList)
+	assert.Equal(newSnap.TimestampMs, currSnap.TimestampMs)
+	assert.Equal(*newSnap.SchemaID, *currSnap.SchemaID)
+	assert.Equal(newSnap.Summary.Operation, currSnap.Summary.Operation)
+}
+
 func TestGlueCheckTableExists(t *testing.T) {
 	assert := require.New(t)
 	mockGlueSvc := &mockGlueClient{}
@@ -1191,4 +1216,37 @@ func TestGlueCheckTableNotExists(t *testing.T) {
 	exists, err := glueCatalog.CheckTableExists(context.TODO(), TableIdentifier("test_database", "nonexistent_table"))
 	assert.Nil(err)
 	assert.False(exists)
+}
+
+func cleanupTable(t *testing.T, ctlg catalog.Catalog, tbIdent table.Identifier, awsCfg aws.Config) {
+	t.Helper()
+
+	testTable, err := ctlg.LoadTable(context.TODO(), tbIdent, nil)
+	if err != nil {
+		t.Logf("Warning: Failed to load table %s: %v", tbIdent, err)
+	}
+
+	cleanupErr := ctlg.DropTable(context.TODO(), tbIdent)
+	if cleanupErr != nil {
+		t.Logf("Warning: Failed to clean up table %s: %v", tbIdent, cleanupErr)
+	}
+
+	if testTable != nil {
+		s3Client := s3.NewFromConfig(awsCfg)
+		metadataLoc := testTable.MetadataLocation()
+		if strings.HasPrefix(metadataLoc, "s3://") {
+			parts := strings.SplitN(strings.TrimPrefix(metadataLoc, "s3://"), "/", 2)
+			if len(parts) == 2 {
+				bucket := parts[0]
+				key := parts[1]
+				_, deleteErr := s3Client.DeleteObject(context.TODO(), &s3.DeleteObjectInput{
+					Bucket: aws.String(bucket),
+					Key:    aws.String(key),
+				})
+				if deleteErr != nil {
+					t.Logf("Warning: Failed to delete metadata file at %s: %v", metadataLoc, deleteErr)
+				}
+			}
+		}
+	}
 }
