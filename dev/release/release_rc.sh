@@ -102,11 +102,22 @@ if [ "${RELEASE_SIGN}" -gt 0 ]; then
   cd "${id}"
   gpg --armor --output "${tar_gz}.asc" --detach-sig "${tar_gz}"
   sha512sum "${tar_gz}" > "${tar_gz}.sha512"
+  echo "Add signature and checksum to GitHub release"
+  gh release upload "${rc_tag}" \
+    --clobber \
+    --repo "${repository}" \
+    "${tar_gz}".asc "${tar_gz}.sha512"
   cd ..
 fi
 
 if [ "${RELEASE_UPLOAD}" -gt 0 ]; then
   echo "Uploading to ASF dist/dev..."
+  # rename files to remove -rc${rc} suffix before uploading
+  pushd "${id}"
+  for fname in "./*"; do
+    mv "${fname}" "${fname//-rc${rc}/}"
+  done
+  popd
   svn import "${id}" "https://dist.apache.org/repos/dist/dev/iceberg/${id}" -m "Apache Iceberg Go ${version} RC${rc}"
 fi
 
