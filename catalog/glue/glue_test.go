@@ -1154,6 +1154,7 @@ func TestSnapshotManagementIntegration(t *testing.T) {
 	_, _, err = ctlg.CommitTable(context.TODO(), testTable, nil, []table.Update{
 		table.NewAddSnapshotUpdate(&newSnap),
 	})
+	assert.NoError(err)
 
 	testTable, err = ctlg.LoadTable(context.TODO(), tbIdent, nil)
 	assert.NoError(err)
@@ -1172,6 +1173,7 @@ func TestSnapshotManagementIntegration(t *testing.T) {
 		table.NewSetSnapshotRefUpdate(table.MainBranch, 25, table.BranchRef,
 			-1, -1, -1),
 	})
+	assert.NoError(err)
 
 	testTable, err = ctlg.LoadTable(context.TODO(), tbIdent, nil)
 	assert.NoError(err)
