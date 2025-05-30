@@ -1160,6 +1160,7 @@ func TestSnapshotManagementIntegration(t *testing.T) {
 
 	actualSnap := testTable.SnapshotByID(25)
 	assert.Equal(newSnap.SnapshotID, actualSnap.SnapshotID)
+	assert.Equal(newSnap.ParentSnapshotID, actualSnap.ParentSnapshotID)
 	assert.Equal(newSnap.SequenceNumber, actualSnap.SequenceNumber)
 	assert.Equal(newSnap.ManifestList, actualSnap.ManifestList)
 	assert.Equal(newSnap.TimestampMs, actualSnap.TimestampMs)
@@ -1177,6 +1178,7 @@ func TestSnapshotManagementIntegration(t *testing.T) {
 
 	currSnap := testTable.CurrentSnapshot()
 	assert.Equal(newSnap.SnapshotID, currSnap.SnapshotID)
+	assert.Equal(newSnap.ParentSnapshotID, actualSnap.ParentSnapshotID)
 	assert.Equal(newSnap.SequenceNumber, currSnap.SequenceNumber)
 	assert.Equal(newSnap.ManifestList, currSnap.ManifestList)
 	assert.Equal(newSnap.TimestampMs, currSnap.TimestampMs)
