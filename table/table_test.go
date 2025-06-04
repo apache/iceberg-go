@@ -59,6 +59,12 @@ func TestTable(t *testing.T) {
 	suite.Run(t, new(TableTestSuite))
 }
 
+func mustFS(t *testing.T, tbl *table.Table) iceio.IO {
+	r, err := tbl.FS(context.Background())
+	require.NoError(t, err)
+	return r
+}
+
 func (t *TableTestSuite) SetupSuite() {
 	var mockfs internal.MockFS
 	mockfs.Test(t.T())
@@ -66,13 +72,21 @@ func (t *TableTestSuite) SetupSuite() {
 		Return(&internal.MockFile{Contents: bytes.NewReader([]byte(table.ExampleTableMetadataV2))}, nil)
 	defer mockfs.AssertExpectations(t.T())
 
-	tbl, err := table.NewFromLocation([]string{"foo"}, "s3://bucket/test/location/uuid.metadata.json", &mockfs, nil)
+	tbl, err := table.NewFromLocation(
+		context.Background(),
+		[]string{"foo"},
+		"s3://bucket/test/location/uuid.metadata.json",
+		func(ctx context.Context) (iceio.IO, error) {
+			return &mockfs, nil
+		},
+		nil,
+	)
 	t.Require().NoError(err)
 	t.Require().NotNil(tbl)
 
 	t.Equal([]string{"foo"}, tbl.Identifier())
 	t.Equal("s3://bucket/test/location/uuid.metadata.json", tbl.MetadataLocation())
-	t.Equal(&mockfs, tbl.FS())
+	t.Equal(&mockfs, mustFS(t.T(), tbl))
 
 	t.tbl = tbl
 }
@@ -84,7 +98,15 @@ func (t *TableTestSuite) TestNewTableFromReadFile() {
 		Return([]byte(table.ExampleTableMetadataV2), nil)
 	defer mockfsReadFile.AssertExpectations(t.T())
 
-	tbl2, err := table.NewFromLocation([]string{"foo"}, "s3://bucket/test/location/uuid.metadata.json", &mockfsReadFile, nil)
+	tbl2, err := table.NewFromLocation(
+		context.TODO(),
+		[]string{"foo"},
+		"s3://bucket/test/location/uuid.metadata.json",
+		func(ctx context.Context) (iceio.IO, error) {
+			return &mockfsReadFile, nil
+		},
+		nil,
+	)
 	t.Require().NoError(err)
 	t.Require().NotNil(tbl2)
 
@@ -298,7 +320,15 @@ func (t *TableWritingTestSuite) createTable(identifier table.Identifier, formatV
 		t.location, iceberg.Properties{"format-version": strconv.Itoa(formatVersion)})
 	t.Require().NoError(err)
 
-	return table.New(identifier, meta, t.getMetadataLoc(), iceio.LocalFS{}, nil)
+	return table.New(
+		identifier,
+		meta,
+		t.getMetadataLoc(),
+		func(ctx context.Context) (iceio.IO, error) {
+			return iceio.LocalFS{}, nil
+		},
+		nil,
+	)
 }
 
 func (t *TableWritingTestSuite) TestAddFilesUnpartitioned() {
@@ -311,7 +341,7 @@ func (t *TableWritingTestSuite) TestAddFilesUnpartitioned() {
 	files := make([]string, 0)
 	for i := range 5 {
 		filePath := fmt.Sprintf("%s/unpartitioned/test-%d.parquet", t.location, i)
-		t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePath, t.arrTbl)
+		t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, t.arrTbl)
 		files = append(files, filePath)
 	}
 
@@ -358,7 +388,7 @@ func (t *TableWritingTestSuite) TestAddFilesFileNotFound() {
 	files := make([]string, 0)
 	for i := range 5 {
 		filePath := fmt.Sprintf("%s/unpartitioned_file_not_found/test-%d.parquet", t.location, i)
-		t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePath, t.arrTbl)
+		t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, t.arrTbl)
 		files = append(files, filePath)
 	}
 
@@ -379,7 +409,7 @@ func (t *TableWritingTestSuite) TestAddFilesUnpartitionedHasFieldIDs() {
 	files := make([]string, 0)
 	for i := range 5 {
 		filePath := fmt.Sprintf("%s/unpartitioned_with_ids/test-%d.parquet", t.location, i)
-		t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePath, t.arrTblWithIDs)
+		t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, t.arrTblWithIDs)
 		files = append(files, filePath)
 	}
 
@@ -408,7 +438,7 @@ func (t *TableWritingTestSuite) TestAddFilesFailsSchemaMismatch() {
 		  {"foo": false, "bar": "bar_string", "baz": "456", "qux": "2024-03-07"}]`,
 	})
 	t.Require().NoError(err)
-	t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePath, mismatchTable)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, mismatchTable)
 
 	files := []string{filePath}
 
@@ -451,7 +481,7 @@ func (t *TableWritingTestSuite) TestAddFilesPartitionedTable() {
 		t.Require().NoError(err)
 		defer table.Release()
 
-		t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePath, table)
+		t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, table)
 		files = append(files, filePath)
 	}
 
@@ -479,11 +509,11 @@ func (t *TableWritingTestSuite) TestAddFilesPartitionedTable() {
 			},
 		})
 
-	m, err := stagedTbl.CurrentSnapshot().Manifests(tbl.FS())
+	m, err := stagedTbl.CurrentSnapshot().Manifests(mustFS(t.T(), tbl))
 	t.Require().NoError(err)
 
 	for _, manifest := range m {
-		entries, err := manifest.FetchEntries(tbl.FS(), false)
+		entries, err := manifest.FetchEntries(mustFS(t.T(), tbl), false)
 		t.Require().NoError(err)
 
 		for _, e := range entries {
@@ -509,7 +539,7 @@ func (t *TableWritingTestSuite) TestAddFilesToBucketPartitionedTableFails() {
 		t.Require().NoError(err)
 		defer table.Release()
 
-		t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePath, table)
+		t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, table)
 		files = append(files, filePath)
 	}
 
@@ -537,7 +567,7 @@ func (t *TableWritingTestSuite) TestAddFilesToPartitionedTableFailsLowerAndUpper
 		t.Require().NoError(err)
 		defer table.Release()
 
-		t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePath, table)
+		t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, table)
 		files = append(files, filePath)
 	}
 
@@ -576,8 +606,8 @@ func (t *TableWritingTestSuite) TestAddFilesWithLargeAndRegular() {
 	t.Require().NoError(err)
 	defer arrTableLarge.Release()
 
-	t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePath, arrTable)
-	t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePathLarge, arrTableLarge)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, arrTable)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePathLarge, arrTableLarge)
 
 	tx := tbl.NewTransaction()
 	t.Require().NoError(tx.AddFiles(t.ctx, []string{filePath, filePathLarge}, nil, false))
@@ -600,7 +630,7 @@ func (t *TableWritingTestSuite) TestAddFilesValidUpcast() {
 	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchemaPromotedTypes)
 
 	filePath := fmt.Sprintf("%s/test_table_with_valid_upcast_v%d/test.parquet", t.location, t.formatVersion)
-	t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePath, t.arrTablePromotedTypes)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, t.arrTablePromotedTypes)
 
 	tx := tbl.NewTransaction()
 	t.Require().NoError(tx.AddFiles(t.ctx, []string{filePath}, nil, false))
@@ -648,7 +678,7 @@ func (t *TableWritingTestSuite) TestAddFilesSubsetOfSchema() {
 	filePath := fmt.Sprintf("%s/test_table_with_subset_of_schema_v%d/test.parquet", t.location, t.formatVersion)
 	withoutCol := dropColFromTable(0, t.arrTbl)
 	defer withoutCol.Release()
-	t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePath, withoutCol)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, withoutCol)
 
 	tx := tbl.NewTransaction()
 	t.Require().NoError(tx.AddFiles(t.ctx, []string{filePath}, nil, false))
@@ -683,7 +713,7 @@ func (t *TableWritingTestSuite) TestAddFilesDuplicateFilesInFilePaths() {
 	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
 
 	filePath := fmt.Sprintf("%s/test_table_with_duplicate_files_v%d/test.parquet", t.location, t.formatVersion)
-	t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePath, t.arrTbl)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, t.arrTbl)
 
 	tx := tbl.NewTransaction()
 	err := tx.AddFiles(t.ctx, []string{filePath, filePath}, nil, false)
@@ -701,7 +731,7 @@ func (t *TableWritingTestSuite) TestAddFilesReferencedByCurrentSnapshot() {
 	files := make([]string, 0)
 	for i := range 5 {
 		filePath := fmt.Sprintf("%s/add_files_referenced/test-%d.parquet", t.location, i)
-		t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePath, t.arrTbl)
+		t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, t.arrTbl)
 		files = append(files, filePath)
 	}
 
@@ -723,7 +753,7 @@ func (t *TableWritingTestSuite) TestAddFilesReferencedCurrentSnapshotIgnoreDupli
 	files := make([]string, 0)
 	for i := range 5 {
 		filePath := fmt.Sprintf("%s/add_files_referenced/test-%d.parquet", t.location, i)
-		t.writeParquet(tbl.FS().(iceio.WriteFileIO), filePath, t.arrTbl)
+		t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, t.arrTbl)
 		files = append(files, filePath)
 	}
 
@@ -735,7 +765,7 @@ func (t *TableWritingTestSuite) TestAddFilesReferencedCurrentSnapshotIgnoreDupli
 	t.Require().NoError(err)
 
 	added, existing, deleted := []int32{}, []int32{}, []int32{}
-	for m, err := range staged.AllManifests() {
+	for m, err := range staged.AllManifests(context.TODO()) {
 		t.Require().NoError(err)
 		added = append(added, m.AddedDataFiles())
 		existing = append(existing, m.ExistingDataFiles())
@@ -790,7 +820,15 @@ func (t *TableWritingTestSuite) TestReplaceDataFiles() {
 
 	ctx := context.Background()
 
-	tbl := table.New(ident, meta, t.getMetadataLoc(), fs, &mockedCatalog{})
+	tbl := table.New(
+		ident,
+		meta,
+		t.getMetadataLoc(),
+		func(ctx context.Context) (iceio.IO, error) {
+			return fs, nil
+		},
+		&mockedCatalog{},
+	)
 	for i := range 5 {
 		tx := tbl.NewTransaction()
 		t.Require().NoError(tx.AddFiles(ctx, files[i:i+1], nil, false))
@@ -798,7 +836,7 @@ func (t *TableWritingTestSuite) TestReplaceDataFiles() {
 		t.Require().NoError(err)
 	}
 
-	mflist, err := tbl.CurrentSnapshot().Manifests(tbl.FS())
+	mflist, err := tbl.CurrentSnapshot().Manifests(mustFS(t.T(), tbl))
 	t.Require().NoError(err)
 	t.Len(mflist, 5)
 
@@ -1105,12 +1143,12 @@ func (t *TableWritingTestSuite) TestMergeManifests() {
 	tblC, err = tblC.AppendTable(t.ctx, arrTable, 1, nil)
 	t.Require().NoError(err)
 
-	manifestList, err := tblA.CurrentSnapshot().Manifests(tblA.FS())
+	manifestList, err := tblA.CurrentSnapshot().Manifests(mustFS(t.T(), tblA))
 	t.Require().NoError(err)
 	t.Len(manifestList, 1)
-	t.validateManifestFileLength(tblA.FS(), manifestList[0])
+	t.validateManifestFileLength(mustFS(t.T(), tblA), manifestList[0])
 
-	entries, err := manifestList[0].FetchEntries(tblA.FS(), false)
+	entries, err := manifestList[0].FetchEntries(mustFS(t.T(), tblA), false)
 	t.Require().NoError(err)
 	t.Len(entries, 3)
 
@@ -1124,20 +1162,20 @@ func (t *TableWritingTestSuite) TestMergeManifests() {
 		}
 	}
 
-	manifestList, err = tblB.CurrentSnapshot().Manifests(tblB.FS())
+	manifestList, err = tblB.CurrentSnapshot().Manifests(mustFS(t.T(), tblB))
 	t.Require().NoError(err)
 	t.Len(manifestList, 3)
 
 	for _, m := range manifestList {
-		t.validateManifestFileLength(tblB.FS(), m)
+		t.validateManifestFileLength(mustFS(t.T(), tblB), m)
 	}
 
-	manifestList, err = tblC.CurrentSnapshot().Manifests(tblC.FS())
+	manifestList, err = tblC.CurrentSnapshot().Manifests(mustFS(t.T(), tblC))
 	t.Require().NoError(err)
 	t.Len(manifestList, 3)
 
 	for _, m := range manifestList {
-		t.validateManifestFileLength(tblC.FS(), m)
+		t.validateManifestFileLength(mustFS(t.T(), tblC), m)
 	}
 
 	resultA, err := tblA.Scan().ToArrowTable(t.ctx)
@@ -1303,7 +1341,9 @@ func (t *TableWritingTestSuite) TestDeleteOldMetadataLogsErrorOnFileNotFound() {
 		table.UnsortedSortOrder, t.location, iceberg.Properties{"format-version": strconv.Itoa(t.formatVersion), "write.metadata.delete-after-commit.enabled": "true"})
 	t.Require().NoError(err)
 
-	tbl := table.New(ident, meta, t.getMetadataLoc(), fs, &DeleteOldMetadataMockedCatalog{})
+	tbl := table.New(ident, meta, t.getMetadataLoc(), func(ctx context.Context) (iceio.IO, error) {
+		return fs, nil
+	}, &DeleteOldMetadataMockedCatalog{})
 	ctx := context.Background()
 
 	// transaction 1 to create metadata file
@@ -1347,7 +1387,15 @@ func (t *TableWritingTestSuite) TestDeleteOldMetadataNoErrorLogsOnFileFound() {
 	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, t.location, iceberg.Properties{"format-version": strconv.Itoa(t.formatVersion), "write.metadata.delete-after-commit.enabled": "true"})
 	t.Require().NoError(err)
 
-	tbl := table.New(ident, meta, t.getMetadataLoc(), fs, &DeleteOldMetadataMockedCatalog{})
+	tbl := table.New(
+		ident,
+		meta,
+		t.getMetadataLoc(),
+		func(ctx context.Context) (iceio.IO, error) {
+			return fs, nil
+		},
+		&DeleteOldMetadataMockedCatalog{},
+	)
 
 	ctx := context.Background()
 

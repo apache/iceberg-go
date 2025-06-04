@@ -229,7 +229,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, pr
 		return nil, fmt.Errorf("failed to load table %s.%s: %w", database, tableName, err)
 	}
 
-	icebergTable, err := table.NewFromLocation(identifier, location, iofs, c)
+	icebergTable, err := table.NewFromLocation(context.TODO(), identifier, location, iofs, c)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create table from location %s.%s: %w", database, tableName, err)
 	}
@@ -255,7 +255,11 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, err
 	}
 
-	wfs, ok := staged.FS().(io.WriteFileIO)
+	afs, err := staged.FS(ctx)
+	if err != nil {
+		return nil, err
+	}
+	wfs, ok := afs.(io.WriteFileIO)
 	if !ok {
 		return nil, errors.New("loaded filesystem IO does not support writing")
 	}
@@ -322,7 +326,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		return nil, fmt.Errorf("failed to load metadata file at %s: %w", metadataLocation, err)
 	}
 	// Read the metadata file
-	metadata, err := table.NewFromLocation([]string{tableName}, metadataLocation, iofs, c)
+	metadata, err := table.NewFromLocation(context.TODO(), []string{tableName}, metadataLocation, iofs, c)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read table metadata from %s: %w", metadataLocation, err)
 	}

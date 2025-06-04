@@ -136,13 +136,15 @@ func CreateStagedTable(ctx context.Context, catprops iceberg.Properties, nsprops
 
 	ioProps := maps.Clone(catprops)
 	maps.Copy(ioProps, cfg.Properties)
-	fs, err := io.LoadFS(ctx, ioProps, metadataLoc)
-	if err != nil {
-		return table.StagedTable{}, err
-	}
 
 	return table.StagedTable{
-		Table: table.New(ident, metadata, metadataLoc, fs, nil),
+		Table: table.New(ident, metadata, metadataLoc, func(ctx context.Context) (io.IO, error) {
+			fs, err := io.LoadFS(ctx, ioProps, metadataLoc)
+			if err != nil {
+				return nil, err
+			}
+			return fs, nil
+		}, nil),
 	}, nil
 }
 
@@ -239,10 +241,19 @@ func UpdateAndStageTable(ctx context.Context, current *table.Table, ident table.
 		return nil, err
 	}
 
-	fs, err := io.LoadFS(ctx, updated.Properties(), newLocation)
-	if err != nil {
-		return nil, err
-	}
-
-	return &table.StagedTable{Table: table.New(ident, updated, newLocation, fs, cat)}, nil
+	return &table.StagedTable{
+		Table: table.New(
+			ident,
+			updated,
+			newLocation,
+			func(ctx context.Context) (io.IO, error) {
+				fs, err := io.LoadFS(ctx, updated.Properties(), newLocation)
+				if err != nil {
+					return nil, err
+				}
+				return fs, nil
+			},
+			cat,
+		),
+	}, nil
 }
