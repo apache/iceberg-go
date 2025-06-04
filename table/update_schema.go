@@ -21,8 +21,6 @@ type UpdateSchema struct {
 	caseSensitive            bool
 }
 
-// ══════════════════════════════USER-FACING═══════════════════════════════════║
-
 func NewUpdateSchema(ops Operation, base *Metadata, s *iceberg.Schema, lastColumnID int) *UpdateSchema {
 	identifierFields := make(map[string]struct{})
 
@@ -50,22 +48,22 @@ func (us *UpdateSchema) AllowIncompatibleChanges() *UpdateSchema {
 
 // AddNestedColumn adds a nested column to the schema.
 func (us *UpdateSchema) AddNestedColumn(parent, name string, required bool, dataType iceberg.Type, doc string, initialDefaultValue any) *UpdateSchema {
-	return us.internalAddColumn(parent, name, us.assignNewColumnID(), required, dataType, doc, initialDefaultValue)
+	return us.InternalAddColumn(parent, name, us.assignNewColumnID(), required, dataType, doc, initialDefaultValue)
 }
 
 // AddColumn adds a column to the schema.
 func (us *UpdateSchema) AddColumn(name string, required bool, dataType iceberg.Type, doc string, initialDefaultValue any) *UpdateSchema {
-	return us.internalAddColumn("", name, us.assignNewColumnID(), required, dataType, doc, initialDefaultValue)
+	return us.InternalAddColumn("", name, us.assignNewColumnID(), required, dataType, doc, initialDefaultValue)
 }
 
 // AddRequiredColumn adds a required column to the schema.
 func (us *UpdateSchema) AddRequiredColumn(name string, dataType iceberg.Type, doc string, initialDefaultValue any) *UpdateSchema {
-	return us.internalAddColumn("", name, us.assignNewColumnID(), true, dataType, doc, initialDefaultValue)
+	return us.InternalAddColumn("", name, us.assignNewColumnID(), true, dataType, doc, initialDefaultValue)
 }
 
 // AddOptionalColumn adds an optional column to the schema.
 func (us *UpdateSchema) AddOptionalColumn(name string, dataType iceberg.Type, doc string, initialDefaultValue any) *UpdateSchema {
-	return us.internalAddColumn("", name, us.assignNewColumnID(), false, dataType, doc, initialDefaultValue)
+	return us.InternalAddColumn("", name, us.assignNewColumnID(), false, dataType, doc, initialDefaultValue)
 }
 
 // DeleteColumn removes a column from the schema.
@@ -191,14 +189,12 @@ func (us *UpdateSchema) Apply() *iceberg.Schema {
 	return us.applyChanges()
 }
 
-// ══════════════════════════════INTERNAL══════════════════════════════════════║
-
 func (su *UpdateSchema) isAdded(name string) bool {
 	_, ok := su.addedNameToID[name]
 	return ok
 }
 
-func (us *UpdateSchema) internalAddColumn(parent, name string, new_id int, required bool, dataType iceberg.Type, doc string, initialDefaultValue any) *UpdateSchema {
+func (us *UpdateSchema) InternalAddColumn(parent, name string, new_id int, required bool, dataType iceberg.Type, doc string, initialDefaultValue any) *UpdateSchema {
 	parentID := -1
 	fullName := ""
 
