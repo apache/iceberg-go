@@ -208,7 +208,7 @@ func TestManifestPartitionVals(t *testing.T) {
 			dataFile, err := iceberg.NewDataFileBuilder(
 				partitionSpec, iceberg.EntryContentData,
 				"1234.parquet", iceberg.ParquetFile,
-				map[string]any{"transformed_abc": result.Val.Any()},
+				map[int]any{1000: result.Val.Any()},
 				100, 100_000,
 			)
 			require.NoError(t, err)
