@@ -165,12 +165,16 @@ func (of *overwriteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 		if err != nil {
 			return existingFiles, err
 		}
-		defer counter.W.(io.Closer).Close()
 
 		for _, entry := range notDeleted {
 			if err := wr.Existing(entry); err != nil {
 				return existingFiles, err
 			}
+		}
+
+		// close the writer to force a flush and ensure counter.Count is accurate
+		if err := wr.Close(); err != nil {
+			return existingFiles, err
 		}
 
 		mf, err := wr.ToManifestFile(path, counter.Count)
@@ -260,7 +264,6 @@ func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.Manifest
 	if err != nil {
 		return nil, err
 	}
-	defer counter.W.(io.Closer).Close()
 
 	for _, manifest := range bin {
 		entries, err := m.snap.fetchManifestEntry(manifest, false)
@@ -281,6 +284,11 @@ func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.Manifest
 				wr.Existing(entry)
 			}
 		}
+	}
+
+	// close the writer to force a flush and ensure counter.Count is accurate
+	if err := wr.Close(); err != nil {
+		return nil, err
 	}
 
 	return wr.ToManifestFile(path, counter.Count)
@@ -531,6 +539,11 @@ func (sp *snapshotProducer) manifests() ([]iceberg.ManifestFile, error) {
 				if err != nil {
 					return err
 				}
+			}
+
+			// close the writer to force a flush and ensure counter.Count is accurate
+			if err := wr.Close(); err != nil {
+				return err
 			}
 
 			mf, err := wr.ToManifestFile(path, counter.Count)

@@ -216,34 +216,38 @@ func (d *DataFileStatistics) PartitionValue(field iceberg.PartitionField, sc *ic
 			field.Name, field.Transform))
 	}
 
-	lowerVal, upperVal := agg.Min(), agg.Max()
-	if !lowerVal.Equals(upperVal) {
-		panic(fmt.Errorf("cannot infer partition value from parquet metadata as there is more than one value for partition field: %s. (low: %s, high: %s)",
-			field.Name, lowerVal, upperVal))
-	}
+	lowerRec := must(PartitionRecordValue(field, agg.Min(), sc))
+	upperRec := must(PartitionRecordValue(field, agg.Max(), sc))
 
-	val := field.Transform.Apply(must(PartitionRecordValue(field, lowerVal, sc)))
-	if !val.Valid {
+	lowerT := field.Transform.Apply(lowerRec)
+	upperT := field.Transform.Apply(upperRec)
+
+	if !lowerT.Valid || !upperT.Valid {
 		return nil
 	}
 
-	return val.Val.Any()
+	if !lowerT.Val.Equals(upperT.Val) {
+		panic(fmt.Errorf("cannot infer partition value from parquet metadata as there is more than one value for partition field: %s. (low: %s, high: %s)",
+			field.Name, lowerT.Val, upperT.Val))
+	}
+
+	return lowerT.Val.Any()
 }
 
 func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.PartitionSpec, path string, format iceberg.FileFormat, filesize int64) iceberg.DataFile {
-	var partitionData map[string]any
+	var fieldIDToPartitionData map[int]any
 	if !spec.Equals(*iceberg.UnpartitionedSpec) {
-		partitionData = make(map[string]any)
+		fieldIDToPartitionData = make(map[int]any)
 		for field := range spec.Fields() {
 			val := d.PartitionValue(field, schema)
 			if val != nil {
-				partitionData[field.Name] = val
+				fieldIDToPartitionData[field.FieldID] = val
 			}
 		}
 	}
 
 	bldr, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData,
-		path, format, partitionData, d.RecordCount, filesize)
+		path, format, fieldIDToPartitionData, d.RecordCount, filesize)
 	if err != nil {
 		panic(err)
 	}
