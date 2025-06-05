@@ -1,8 +1,6 @@
 package table
 
 import (
-	"fmt"
-
 	"github.com/apache/iceberg-go"
 )
 
@@ -41,6 +39,7 @@ func NewUpdateSchema(base *Metadata, s *iceberg.Schema, lastColumnID int) *Updat
 // AllowIncompatibleChanges permits incompatible schema changes.
 func (us *UpdateSchema) AllowIncompatibleChanges() *UpdateSchema {
 	us.allowIncompatibleChanges = true
+
 	return us
 }
 
@@ -51,7 +50,7 @@ func (us *UpdateSchema) AddColumn(parent, name string, new_id int, required bool
 	if parent != "" {
 		parentField := us.findField(parent)
 		if parentField == nil {
-			panic(fmt.Sprintf("Cannot find parent struct: %s", parent))
+			panic("Cannot find parent struct: " + parent)
 		}
 
 		// Get the parent struct's ID
@@ -70,7 +69,7 @@ func (us *UpdateSchema) AddColumn(parent, name string, new_id int, required bool
 
 		parentType := parentField.Type
 
-		//ToDo: handle Nested columns
+		// ToDo: handle Nested columns
 		if nestedType, ok := parentType.(iceberg.NestedType); ok {
 			if mapType, ok := nestedType.(*iceberg.MapType); ok {
 				// fields are added to the map value type
@@ -86,7 +85,7 @@ func (us *UpdateSchema) AddColumn(parent, name string, new_id int, required bool
 				parentField = &fields[len(fields)-1]
 			}
 		} else {
-			panic(fmt.Sprintf("Cannot add to non-nested DataType: %s: %s", parent, parentField.Type))
+			panic("Cannot add to non-nested DataType: " + parent + ": " + parentField.Type.String())
 		}
 
 		parentID = parentField.ID
@@ -94,7 +93,7 @@ func (us *UpdateSchema) AddColumn(parent, name string, new_id int, required bool
 
 		for _, id := range us.deletes {
 			if id == parentID {
-				panic(fmt.Sprintf("Cannot add to a column that will be deleted: %s", parent))
+				panic("Cannot add to a column that will be deleted: " + parent)
 			}
 		}
 
@@ -103,11 +102,12 @@ func (us *UpdateSchema) AddColumn(parent, name string, new_id int, required bool
 			for _, id := range us.deletes {
 				if id == currentField.ID {
 					foundInDeletes = true
+
 					break
 				}
 			}
 			if !foundInDeletes {
-				panic(fmt.Sprintf("Cannot add column, name already exists: %s.%s", parent, name))
+				panic("Cannot add column, name already exists: " + parent + "." + name)
 			}
 		}
 		_, present := us.schema.FindColumnName(parentID)
@@ -140,14 +140,14 @@ func (us *UpdateSchema) AddColumn(parent, name string, new_id int, required bool
 				}
 			}
 			if !foundInDeletes {
-				panic(fmt.Sprintf("Cannot add column, name already exists: %s", name))
+				panic("Cannot add column, name already exists: " + name)
 			}
 
 		}
 
 		// cannot add a required column without a default value
 		if initialDefaultValue == nil && !required && !us.allowIncompatibleChanges {
-			panic(fmt.Sprintf("incompatible change: cannot add required column without a default value: %s", name))
+			panic("incompatible change: cannot add required column without a default value: " + name)
 		}
 
 		nestedField := &iceberg.NestedField{
@@ -168,13 +168,12 @@ func (us *UpdateSchema) AddColumn(parent, name string, new_id int, required bool
 	}
 
 	return us
-
 }
 
 func (su *UpdateSchema) internalUpdateColumnRequirement(name string, isRequired bool) {
 	field := su.findForUpdate(name)
 	if field == nil {
-		panic(fmt.Sprintf("Cannot update missing column: %s", name))
+		panic("Cannot update missing column: " + name)
 	}
 
 	if (!isRequired && !field.Required) || (isRequired && field.Required) {
@@ -185,12 +184,12 @@ func (su *UpdateSchema) internalUpdateColumnRequirement(name string, isRequired 
 	isDefaultedAdd := su.isAdded(name) && field.InitialDefault != nil
 
 	if !isRequired && !isDefaultedAdd && !su.allowIncompatibleChanges {
-		panic(fmt.Sprintf("Cannot change column nullability: %s: optional -> required", name))
+		panic("Cannot change column nullability: " + name + ": optional -> required")
 	}
 
 	for _, id := range su.deletes {
 		if id == field.ID {
-			panic(fmt.Sprintf("Cannot update a column that will be deleted: %s", field.Name))
+			panic("Cannot update a column that will be deleted: " + field.Name)
 		}
 	}
 
@@ -201,18 +200,17 @@ func (su *UpdateSchema) internalUpdateColumnRequirement(name string, isRequired 
 
 // DeleteColumn removes a column from the schema.
 func (us *UpdateSchema) DeleteColumn(name string) *UpdateSchema {
-
 	field := us.findField(name)
 	if field == nil {
-		panic(fmt.Sprintf("Cannot delete missing column: %s", name))
+		panic("Cannot delete missing column: " + name)
 	}
 
 	if _, ok := us.parentToAddedIDs[field.ID]; ok {
-		panic(fmt.Sprintf("Cannot delete a column that has additions: %s", name))
+		panic("Cannot delete a column that has additions: " + name)
 	}
 
 	if _, ok := us.updates[field.ID]; ok {
-		panic(fmt.Sprintf("Cannot delete a column that has updates: %s", name))
+		panic("Cannot delete a column that has updates: " + name)
 	}
 
 	us.deletes = append(us.deletes, field.ID)
@@ -223,12 +221,12 @@ func (us *UpdateSchema) DeleteColumn(name string) *UpdateSchema {
 func (us *UpdateSchema) UpdateColumnType(name string, newType iceberg.Type) *UpdateSchema {
 	field := us.findForUpdate(name)
 	if field == nil {
-		panic(fmt.Sprintf("Cannot update type of missing column: %s", name))
+		panic("Cannot update type of missing column: " + name)
 	}
 
 	for _, id := range us.deletes {
 		if id == field.ID {
-			panic(fmt.Sprintf("Cannot update a column that will be deleted: %s", field.Name))
+			panic("Cannot update a column that will be deleted: " + field.Name)
 		}
 	}
 
@@ -236,24 +234,25 @@ func (us *UpdateSchema) UpdateColumnType(name string, newType iceberg.Type) *Upd
 		return us
 	}
 
-	//check promotion
+	// check promotion
 	if !allowedPromotion(field.Type, newType) {
-		panic(fmt.Sprintf("Cannot update type of column: %s: %s", field.Name, newType))
+		panic("Cannot update type of column: " + field.Name + ": " + newType.String())
 	}
 
 	us.updates[field.ID].Type = newType
+
 	return us
 }
 
 func (us *UpdateSchema) UpdateColumnDoc(name string, doc string) *UpdateSchema {
 	field := us.findForUpdate(name)
 	if field == nil {
-		panic(fmt.Sprintf("Cannot update type of missing column: %s", name))
+		panic("Cannot update type of missing column: " + name)
 	}
 
 	for _, id := range us.deletes {
 		if id == field.ID {
-			panic(fmt.Sprintf("Cannot update a column that will be deleted: %s", field.Name))
+			panic("Cannot update a column that will be deleted: " + field.Name)
 		}
 	}
 
@@ -269,12 +268,12 @@ func (us *UpdateSchema) UpdateColumnDoc(name string, doc string) *UpdateSchema {
 func (us *UpdateSchema) UpdateColumnDefault(name string, defaultValue any) *UpdateSchema {
 	field := us.findForUpdate(name)
 	if field == nil {
-		panic(fmt.Sprintf("Cannot update default value of missing column: %s", name))
+		panic("Cannot update default value of missing column: " + name)
 	}
 
 	for _, id := range us.deletes {
 		if id == field.ID {
-			panic(fmt.Sprintf("Cannot update a column that will be deleted: %s", field.Name))
+			panic("Cannot update a column that will be deleted: " + field.Name)
 		}
 	}
 
@@ -283,18 +282,21 @@ func (us *UpdateSchema) UpdateColumnDefault(name string, defaultValue any) *Upda
 	}
 
 	us.updates[field.ID].InitialDefault = defaultValue
+
 	return us
 }
 
 // RequireColumn changes an optional column to required.
 func (us *UpdateSchema) RequireColumn(name string) *UpdateSchema {
 	us.internalUpdateColumnRequirement(name, true)
+
 	return us
 }
 
 // MakeColumnOptional changes a required column to optional.
 func (us *UpdateSchema) MakeColumnOptional(name string) *UpdateSchema {
 	us.internalUpdateColumnRequirement(name, false)
+
 	return us
 }
 
@@ -307,6 +309,7 @@ func (us *UpdateSchema) findForUpdate(name string) *iceberg.NestedField {
 
 		// adding to updates
 		us.updates[existing.ID] = existing
+
 		return existing
 	}
 
@@ -324,12 +327,14 @@ func (us *UpdateSchema) Apply() *iceberg.Schema {
 
 func (su *UpdateSchema) isAdded(name string) bool {
 	_, ok := su.addedNameToID[name]
+
 	return ok
 }
 
 func (us *UpdateSchema) assignNewColumnID() int {
 	next := us.lastColumnID + 1
 	us.lastColumnID = next
+
 	return next
 }
 
@@ -339,6 +344,7 @@ func (us *UpdateSchema) findField(name string) *iceberg.NestedField {
 		if !ok {
 			return nil
 		}
+
 		return &field
 	}
 	field, ok := us.schema.FindFieldByNameCaseInsensitive(name)
@@ -366,14 +372,15 @@ func allowedPromotion(oldType, newType iceberg.Type) bool {
 		case "decimal":
 			o := oldType.(iceberg.DecimalType)
 			n := newType.(iceberg.DecimalType)
+
 			return o.Scale() == n.Scale() && n.Precision() > o.Precision()
 		}
 	}
+
 	return false
 }
 
 func (u *UpdateSchema) applyChanges() *iceberg.Schema {
-
 	// Helper to check if a field ID is marked for deletion
 	isDeleted := func(id int) bool {
 		for _, d := range u.deletes {
@@ -381,13 +388,13 @@ func (u *UpdateSchema) applyChanges() *iceberg.Schema {
 				return true
 			}
 		}
+
 		return false
 	}
 
 	var visit func(fields []iceberg.NestedField, parentID int) []iceberg.NestedField
 
 	visit = func(fields []iceberg.NestedField, parentID int) []iceberg.NestedField {
-
 		var newFields []iceberg.NestedField
 		// 1) Apply deletes and updates
 		for _, f := range fields {
@@ -454,11 +461,9 @@ func (u *UpdateSchema) applyChanges() *iceberg.Schema {
 }
 
 func (us *UpdateSchema) Commit() (Metadata, error) {
-
 	newSchema := us.applyChanges()
 
 	for _, existingSchema := range (*us.base).Schemas() {
-
 		if newSchema.Equals(existingSchema) {
 			if existingSchema.ID != (*us.base).CurrentSchema().ID {
 				builder, err := MetadataBuilderFromBase(*us.base)
