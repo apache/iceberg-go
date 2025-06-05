@@ -55,16 +55,20 @@ func ParseGCSConfig(props map[string]string) *gcsblob.Options {
 // Construct a GCS bucket from a URL
 func createGCSBucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
 	gcscfg := ParseGCSConfig(props)
-	creds, err := gcp.DefaultCredentials(ctx)                     // or use service-account JSON
-	if err != nil {
-		return nil, err
+	creds, _ := gcp.DefaultCredentials(ctx)
+	var client *gcp.HTTPClient
+	if creds == nil {
+		client = gcp.NewAnonymousHTTPClient(gcp.DefaultTransport())
+	} else {
+		var err error
+		client, err = gcp.NewHTTPClient(
+			gcp.DefaultTransport(),
+			gcp.CredentialsTokenSource(creds))
+		if err != nil {
+			return nil, err
+		}
 	}
-	client, err := gcp.NewHTTPClient(
-		gcp.DefaultTransport(),
-		gcp.CredentialsTokenSource(creds))
-	if err != nil {
-		return nil, err
-	}
+
 	bucket, err := gcsblob.OpenBucket(ctx, client, parsed.Host, gcscfg)
 	if err != nil {
 		return nil, err
