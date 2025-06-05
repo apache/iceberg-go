@@ -62,6 +62,7 @@ func TestTable(t *testing.T) {
 func mustFS(t *testing.T, tbl *table.Table) iceio.IO {
 	r, err := tbl.FS(context.Background())
 	require.NoError(t, err)
+
 	return r
 }
 
