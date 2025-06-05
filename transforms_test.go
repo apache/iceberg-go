@@ -18,8 +18,11 @@
 package iceberg_test
 
 import (
+	"bytes"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal"
 	"github.com/apache/iceberg-go"
@@ -136,6 +139,101 @@ func TestToHumanString(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.expected, func(t *testing.T) {
 			assert.Equal(t, tt.expected, tt.transform.ToHumanStr(tt.input))
+		})
+	}
+}
+
+func TestManifestPartitionVals(t *testing.T) {
+	// Sanity checks that the source and result types of the transform are
+	// compatible with their use to generate partition data in manifests.
+	ts := time.Date(1971, 2, 10, 10, 20, 30, 4_000_000, time.UTC)
+	tests := []struct {
+		transform    iceberg.Transform
+		input        iceberg.Literal
+		expectResult iceberg.Literal
+	}{
+		{
+			transform:    iceberg.HourTransform{},
+			input:        iceberg.TimestampLiteral(ts.UnixMicro()),
+			expectResult: iceberg.Int32Literal((365+40)*24 + 10),
+		},
+		{
+			transform:    iceberg.DayTransform{},
+			input:        iceberg.TimestampLiteral(ts.UnixMicro()),
+			expectResult: iceberg.Int32Literal(365 + 40),
+		},
+		{
+			transform:    iceberg.MonthTransform{},
+			input:        iceberg.TimestampLiteral(ts.UnixMicro()),
+			expectResult: iceberg.Int32Literal(13),
+		},
+		{
+			transform:    iceberg.YearTransform{},
+			input:        iceberg.TimestampLiteral(ts.UnixMicro()),
+			expectResult: iceberg.Int32Literal(1),
+		},
+		{
+			transform:    iceberg.TruncateTransform{Width: 100},
+			input:        iceberg.Int64Literal(123456789),
+			expectResult: iceberg.Int64Literal(123456700),
+		},
+		{
+			transform:    iceberg.IdentityTransform{},
+			input:        iceberg.StringLiteral("foobar"),
+			expectResult: iceberg.StringLiteral("foobar"),
+		},
+		{
+			transform:    iceberg.BucketTransform{NumBuckets: 128},
+			input:        iceberg.StringLiteral("foobar"),
+			expectResult: iceberg.Int32Literal(61),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(reflect.TypeOf(tt.transform).String(), func(t *testing.T) {
+			result := tt.transform.Apply(iceberg.Optional[iceberg.Literal]{Val: tt.input, Valid: true})
+			require.True(t, result.Valid)
+			assert.Equal(t, tt.expectResult, result.Val)
+
+			schema := iceberg.NewSchema(0, iceberg.NestedField{
+				Name: "abc",
+				ID:   1,
+				Type: tt.input.Type(),
+			})
+			partitionSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+				Name:      "transformed_abc",
+				SourceID:  1,
+				FieldID:   1000,
+				Transform: tt.transform,
+			})
+			dataFile, err := iceberg.NewDataFileBuilder(
+				partitionSpec, iceberg.EntryContentData,
+				"1234.parquet", iceberg.ParquetFile,
+				map[int]any{1000: result.Val.Any()},
+				100, 100_000,
+			)
+			require.NoError(t, err)
+			snapshotID := int64(123)
+			seqNum := int64(456)
+			manifestEntry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &seqNum, &seqNum, dataFile.Build())
+			var buf bytes.Buffer
+			manifestFile, err := iceberg.WriteManifest(
+				"abc.avro", &buf,
+				2, partitionSpec, schema, 123,
+				[]iceberg.ManifestEntry{manifestEntry},
+			)
+			require.NoError(t, err)
+
+			// Now make sure we can deserialize and re-serialize the manifest, too.
+			entries, err := iceberg.ReadManifest(manifestFile, &buf, false)
+			require.NoError(t, err)
+
+			buf.Reset()
+			_, err = iceberg.WriteManifest(
+				"abc.avro", &buf,
+				2, partitionSpec, schema, 123,
+				entries,
+			)
+			require.NoError(t, err)
 		})
 	}
 }
