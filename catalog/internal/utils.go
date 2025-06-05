@@ -143,6 +143,7 @@ func CreateStagedTable(ctx context.Context, catprops iceberg.Properties, nsprops
 			if err != nil {
 				return nil, err
 			}
+
 			return fs, nil
 		}, nil),
 	}, nil
@@ -251,6 +252,7 @@ func UpdateAndStageTable(ctx context.Context, current *table.Table, ident table.
 				if err != nil {
 					return nil, err
 				}
+
 				return fs, nil
 			},
 			cat,

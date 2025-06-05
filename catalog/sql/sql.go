@@ -429,6 +429,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, pr
 			if err != nil {
 				return nil, err
 			}
+
 			return iofs, nil
 		},
 		c,
