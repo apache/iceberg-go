@@ -283,7 +283,11 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, ns)
 	}
 
-	wfs, ok := staged.FS().(io.WriteFileIO)
+	afs, err := staged.FS(ctx)
+	if err != nil {
+		return nil, err
+	}
+	wfs, ok := afs.(io.WriteFileIO)
 	if !ok {
 		return nil, errors.New("loaded filesystem IO does not support writing")
 	}
@@ -416,12 +420,13 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, pr
 	tblProps := maps.Clone(c.props)
 	maps.Copy(props, tblProps)
 
-	iofs, err := io.LoadFS(ctx, tblProps, result.MetadataLocation.String)
-	if err != nil {
-		return nil, err
-	}
-
-	return table.NewFromLocation(identifier, result.MetadataLocation.String, iofs, c)
+	return table.NewFromLocation(
+		ctx,
+		identifier,
+		result.MetadataLocation.String,
+		io.LoadFSFunc(tblProps, result.MetadataLocation.String),
+		c,
+	)
 }
 
 func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) error {

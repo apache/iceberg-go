@@ -33,6 +33,7 @@ import (
 	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -254,11 +255,11 @@ func (s *RestIntegrationSuite) TestWriteCommitTable() {
 	pqfile, err := url.JoinPath(location, "data", "test_commit_table_data", "test.parquet")
 	s.Require().NoError(err)
 
-	fw, err := tbl.FS().(io.WriteFileIO).Create(pqfile)
+	fw, err := mustFS(s.T(), tbl).(io.WriteFileIO).Create(pqfile)
 	s.Require().NoError(err)
 	s.Require().NoError(pqarrow.WriteTable(table, fw, table.NumRows(),
 		nil, pqarrow.DefaultWriterProps()))
-	defer tbl.FS().Remove(pqfile)
+	defer mustFS(s.T(), tbl).Remove(pqfile)
 
 	txn := tbl.NewTransaction()
 	s.Require().NoError(txn.AddFiles(s.ctx, []string{pqfile}, nil, false))
@@ -266,7 +267,7 @@ func (s *RestIntegrationSuite) TestWriteCommitTable() {
 	s.Require().NoError(err)
 
 	mf := []iceberg.ManifestFile{}
-	for m, err := range updated.AllManifests() {
+	for m, err := range updated.AllManifests(s.ctx) {
 		s.Require().NoError(err)
 		s.Require().NotNil(m)
 		mf = append(mf, m)
@@ -274,11 +275,17 @@ func (s *RestIntegrationSuite) TestWriteCommitTable() {
 
 	s.Len(mf, 1)
 	s.EqualValues(1, mf[0].AddedDataFiles())
-	entries, err := mf[0].FetchEntries(updated.FS(), false)
+	entries, err := mf[0].FetchEntries(mustFS(s.T(), updated), false)
 	s.Require().NoError(err)
 
 	s.Len(entries, 1)
 	s.Equal(pqfile, entries[0].DataFile().FilePath())
+}
+
+func mustFS(t *testing.T, tbl *table.Table) io.IO {
+	r, err := tbl.FS(context.Background())
+	require.NoError(t, err)
+	return r
 }
 
 func TestRestIntegration(t *testing.T) {

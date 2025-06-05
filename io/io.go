@@ -294,3 +294,15 @@ func LoadFS(ctx context.Context, props map[string]string, location string) (IO, 
 
 	return iofs, nil
 }
+
+// LoadFSFunc is a helper function to create IO Func factory for later usage
+func LoadFSFunc(props map[string]string, location string) func(ctx context.Context) (IO, error) {
+	return func(ctx context.Context) (IO, error) {
+		iofs, err := LoadFS(ctx, props, location)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load metadata file at %s: %w", location, err)
+		}
+
+		return iofs, nil
+	}
+}

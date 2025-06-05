@@ -97,7 +97,7 @@ func (s *SparkIntegrationTestSuite) TestAddFile() {
 	rec := bldr.NewRecord()
 	defer rec.Release()
 
-	fw, err := tbl.FS().(iceio.WriteFileIO).Create(filename)
+	fw, err := mustFS(s.T(), tbl).(iceio.WriteFileIO).Create(filename)
 	if err != nil {
 		panic(err)
 	}

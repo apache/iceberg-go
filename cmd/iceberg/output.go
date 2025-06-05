@@ -18,6 +18,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -134,7 +135,12 @@ func (t textOutput) Files(tbl *table.Table, history bool) {
 				snap.SnapshotID, *snap.SchemaID, manifest),
 		})
 
-		manifestList, err := snap.Manifests(tbl.FS())
+		afs, err := tbl.FS(context.TODO())
+		if err != nil {
+			t.Error(err)
+			os.Exit(1)
+		}
+		manifestList, err := snap.Manifests(afs)
 		if err != nil {
 			t.Error(err)
 			os.Exit(1)
@@ -144,7 +150,7 @@ func (t textOutput) Files(tbl *table.Table, history bool) {
 			snapshotTree = append(snapshotTree, pterm.LeveledListItem{
 				Level: 1, Text: "Manifest: " + m.FilePath(),
 			})
-			datafiles, err := m.FetchEntries(tbl.FS(), false)
+			datafiles, err := m.FetchEntries(afs, false)
 			if err != nil {
 				t.Error(err)
 				os.Exit(1)
