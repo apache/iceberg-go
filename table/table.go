@@ -113,17 +113,21 @@ func (t Table) Append(ctx context.Context, rdr array.RecordReader, snapshotProps
 }
 
 func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile, error] {
+	fs, err := t.fsF(ctx)
+	if err != nil {
+		return func(yield func(iceberg.ManifestFile, error) bool) {
+			yield(nil, err)
+		}
+	}
+
 	type list = tblutils.Enumerated[[]iceberg.ManifestFile]
 	g := errgroup.Group{}
 
 	n := len(t.metadata.Snapshots())
 	ch := make(chan list, n)
+
 	for i, sn := range t.metadata.Snapshots() {
 		g.Go(func() error {
-			fs, err := t.fsF(ctx)
-			if err != nil {
-				return err
-			}
 			manifests, err := sn.Manifests(fs)
 			if err != nil {
 				return err
