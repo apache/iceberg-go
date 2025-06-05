@@ -20,7 +20,6 @@ package sql
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
@@ -28,7 +27,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"time"
 	_ "unsafe"
 
 	"github.com/apache/iceberg-go"
@@ -36,7 +34,6 @@ import (
 	"github.com/apache/iceberg-go/catalog/internal"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
-	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/feature"
 	"github.com/uptrace/bun/dialect/mssqldialect"
@@ -851,99 +848,10 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 		return err
 	}
 
-	timestampMs := time.Now().UnixMilli()
-	versionId := int64(1)
-
-	viewVersion := struct {
-		VersionID       int64             `json:"version-id"`
-		TimestampMs     int64             `json:"timestamp-ms"`
-		SchemaID        int               `json:"schema-id"`
-		Summary         map[string]string `json:"summary"`
-		Operation       string            `json:"operation"`
-		Representations []struct {
-			Type    string `json:"type"`
-			SQL     string `json:"sql"`
-			Dialect string `json:"dialect"`
-		} `json:"representations"`
-		DefaultCatalog   string   `json:"default-catalog"`
-		DefaultNamespace []string `json:"default-namespace"`
-	}{
-		VersionID:   versionId,
-		TimestampMs: timestampMs,
-		SchemaID:    schema.ID,
-		Summary:     map[string]string{"sql": viewSQL},
-		Operation:   "create",
-		Representations: []struct {
-			Type    string `json:"type"`
-			SQL     string `json:"sql"`
-			Dialect string `json:"dialect"`
-		}{
-			{Type: "sql", SQL: viewSQL, Dialect: "default"},
-		},
-		DefaultCatalog:   c.name,
-		DefaultNamespace: nsIdent,
-	}
-
-	viewVersionBytes, err := json.Marshal(viewVersion)
+	metadataLocation, err := internal.CreateViewMetadata(ctx, c.name, nsIdent, schema, viewSQL, loc, props)
 	if err != nil {
-		return fmt.Errorf("failed to marshal view version: %w", err)
+		return err
 	}
-
-	if props == nil {
-		props = iceberg.Properties{}
-	}
-	props["view-version"] = string(viewVersionBytes)
-	props["view-format"] = "iceberg"
-	props["view-sql"] = viewSQL
-
-	metadataLocation := loc + "/metadata/view-" + uuid.New().String() + ".metadata.json"
-
-	viewUUID := uuid.New().String()
-	props["view-uuid"] = viewUUID
-
-	viewMetadata := map[string]interface{}{
-		"view-uuid":          viewUUID,
-		"format-version":     1,
-		"location":           loc,
-		"schema":             schema,
-		"current-version-id": versionId,
-		"versions": map[string]interface{}{
-			"1": viewVersion,
-		},
-		"properties": props,
-		"version-log": []map[string]interface{}{
-			{
-				"timestamp-ms": timestampMs,
-				"version-id":   versionId,
-			},
-		},
-	}
-
-	viewMetadataBytes, err := json.Marshal(viewMetadata)
-	if err != nil {
-		return fmt.Errorf("failed to marshal view metadata: %w", err)
-	}
-
-	fs, err := io.LoadFS(ctx, c.props, metadataLocation)
-	if err != nil {
-		return fmt.Errorf("failed to load filesystem for view metadata: %w", err)
-	}
-
-	wfs, ok := fs.(io.WriteFileIO)
-	if !ok {
-		return errors.New("filesystem IO does not support writing")
-	}
-
-	out, err := wfs.Create(metadataLocation)
-	if err != nil {
-		return fmt.Errorf("failed to create view metadata file: %w", err)
-	}
-	defer out.Close()
-
-	if _, err := out.Write(viewMetadataBytes); err != nil {
-		return fmt.Errorf("failed to write view metadata: %w", err)
-	}
-
 	err = withWriteTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
 		_, err := tx.NewInsert().Model(&sqlIcebergTable{
 			CatalogName:      c.name,
@@ -1131,42 +1039,6 @@ func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (ma
 		return nil, fmt.Errorf("%w: %s, metadata location is missing", catalog.ErrNoSuchView, identifier)
 	}
 
-	viewMetadata := map[string]interface{}{
-		"name":              viewName,
-		"namespace":         ns,
-		"metadata-location": view.MetadataLocation.String,
-	}
-
-	fs, err := io.LoadFS(ctx, c.props, view.MetadataLocation.String)
-	if err != nil {
-		return nil, fmt.Errorf("error loading view metadata: %w", err)
-	}
-	inputFile, err := fs.Open(view.MetadataLocation.String)
-	if err != nil {
-		return viewMetadata, fmt.Errorf("error encountered loading view metadata %s: %w", identifier, err)
-	}
-	defer inputFile.Close()
-
-	var fullViewMetadata map[string]interface{}
-	if err := json.NewDecoder(inputFile).Decode(&fullViewMetadata); err != nil {
-		return viewMetadata, fmt.Errorf("error encountered decoding view metadata %s: %w", identifier, err)
-	}
-
-	fullViewMetadata["name"] = viewName
-	fullViewMetadata["namespace"] = ns
-	fullViewMetadata["metadata-location"] = view.MetadataLocation.String
-
-	if props, ok := fullViewMetadata["properties"].(map[string]interface{}); ok {
-		strProps := make(map[string]string)
-		for k, v := range props {
-			if str, ok := v.(string); ok {
-				strProps[k] = str
-			} else if vJson, err := json.Marshal(v); err == nil {
-				strProps[k] = string(vJson)
-			}
-		}
-		fullViewMetadata["properties"] = strProps
-	}
-
+	viewMetadata, err := internal.LoadViewMetadata(ctx, c.props, view.MetadataLocation.String, viewName, ns)
 	return viewMetadata, nil
 }
