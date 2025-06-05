@@ -99,7 +99,7 @@ func (t *TableTestSuite) TestNewTableFromReadFile() {
 	defer mockfsReadFile.AssertExpectations(t.T())
 
 	tbl2, err := table.NewFromLocation(
-		context.TODO(),
+		t.T().Context(),
 		[]string{"foo"},
 		"s3://bucket/test/location/uuid.metadata.json",
 		func(ctx context.Context) (iceio.IO, error) {
@@ -765,7 +765,7 @@ func (t *TableWritingTestSuite) TestAddFilesReferencedCurrentSnapshotIgnoreDupli
 	t.Require().NoError(err)
 
 	added, existing, deleted := []int32{}, []int32{}, []int32{}
-	for m, err := range staged.AllManifests(context.TODO()) {
+	for m, err := range staged.AllManifests(t.T().Context()) {
 		t.Require().NoError(err)
 		added = append(added, m.AddedDataFiles())
 		existing = append(existing, m.ExistingDataFiles())
@@ -1242,9 +1242,8 @@ func TestNullableStructRequiredField(t *testing.T) {
 	sc, err := table.ArrowSchemaToIcebergWithFreshIDs(arrowSchema, false)
 	require.NoError(t, err)
 
-	ctx := context.TODO()
-	require.NoError(t, cat.CreateNamespace(ctx, table.Identifier{"testing"}, nil))
-	tbl, err := cat.CreateTable(ctx, table.Identifier{"testing", "nullable_struct_required_field"}, sc,
+	require.NoError(t, cat.CreateNamespace(t.Context(), table.Identifier{"testing"}, nil))
+	tbl, err := cat.CreateTable(t.Context(), table.Identifier{"testing", "nullable_struct_required_field"}, sc,
 		catalog.WithProperties(iceberg.Properties{"format-version": "2"}),
 		catalog.WithLocation("file://"+loc))
 	require.NoError(t, err)
@@ -1264,7 +1263,7 @@ func TestNullableStructRequiredField(t *testing.T) {
 	defer arrTable.Release()
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AppendTable(ctx, arrTable, N, nil))
+	require.NoError(t, tx.AppendTable(t.Context(), arrTable, N, nil))
 	stagedTbl, err := tx.StagedTable()
 	require.NoError(t, err)
 	require.NotNil(t, stagedTbl)

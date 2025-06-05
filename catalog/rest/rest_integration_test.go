@@ -267,7 +267,7 @@ func (s *RestIntegrationSuite) TestWriteCommitTable() {
 	s.Require().NoError(err)
 
 	mf := []iceberg.ManifestFile{}
-	for m, err := range updated.AllManifests(context.TODO()) {
+	for m, err := range updated.AllManifests(s.ctx) {
 		s.Require().NoError(err)
 		s.Require().NotNil(m)
 		mf = append(mf, m)
