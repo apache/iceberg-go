@@ -280,7 +280,8 @@ func (s *SqliteCatalogTestSuite) TestCreationOneTableExists() {
 	_, err := sqldb.Exec(`CREATE TABLE "iceberg_tables" (
 		"catalog_name" VARCHAR NOT NULL, 
 		"table_namespace" VARCHAR NOT NULL, 
-		"table_name" VARCHAR NOT NULL, 
+		"table_name" VARCHAR NOT NULL,
+		"iceberg_type" VARCHAR NOT NULL DEFAULT 'TABLE',
 		"metadata_location" VARCHAR, 
 		"previous_metadata_location" VARCHAR, 
 		PRIMARY KEY ("catalog_name", "table_namespace", "table_name"))`)
@@ -298,7 +299,8 @@ func (s *SqliteCatalogTestSuite) TestCreationAllTablesExist() {
 	_, err := sqldb.Exec(`CREATE TABLE "iceberg_tables" (
 		"catalog_name" VARCHAR NOT NULL, 
 		"table_namespace" VARCHAR NOT NULL, 
-		"table_name" VARCHAR NOT NULL, 
+		"table_name" VARCHAR NOT NULL,
+		"iceberg_type" VARCHAR,
 		"metadata_location" VARCHAR, 
 		"previous_metadata_location" VARCHAR, 
 		PRIMARY KEY ("catalog_name", "table_namespace", "table_name"))`)
@@ -1039,6 +1041,144 @@ func (s *SqliteCatalogTestSuite) TestCommitTable() {
 		s.Equal(originalMetadataLocation, logs[0].MetadataFile)
 		s.Equal(originalLastUpdated, logs[0].TimestampMs)
 	}
+}
+
+func (s *SqliteCatalogTestSuite) TestCreateView() {
+	db := s.getCatalogSqlite()
+	s.Require().NoError(db.CreateSQLTables(context.Background()))
+
+	nsName := databaseName()
+	viewName := tableName()
+	s.Require().NoError(db.CreateNamespace(context.Background(), []string{nsName}, nil))
+
+	viewSQL := "SELECT * FROM test_table"
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, nil))
+
+	exists, err := db.CheckViewExists(context.Background(), []string{nsName, viewName})
+	s.Require().NoError(err)
+	s.True(exists)
+}
+
+func (s *SqliteCatalogTestSuite) TestDropView() {
+	db := s.getCatalogSqlite()
+	s.Require().NoError(db.CreateSQLTables(context.Background()))
+
+	nsName := databaseName()
+	viewName := tableName()
+	s.Require().NoError(db.CreateNamespace(context.Background(), []string{nsName}, nil))
+
+	viewSQL := "SELECT * FROM test_table"
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, nil))
+
+	exists, err := db.CheckViewExists(context.Background(), []string{nsName, viewName})
+	s.Require().NoError(err)
+	s.True(exists)
+
+	s.Require().NoError(db.DropView(context.Background(), []string{nsName, viewName}))
+
+	exists, err = db.CheckViewExists(context.Background(), []string{nsName, viewName})
+	s.Require().NoError(err)
+	s.False(exists)
+
+	err = db.DropView(context.Background(), []string{nsName, "nonexistent"})
+	s.Error(err)
+	s.ErrorIs(err, catalog.ErrNoSuchView)
+}
+
+func (s *SqliteCatalogTestSuite) TestCheckViewExists() {
+	db := s.getCatalogSqlite()
+	s.Require().NoError(db.CreateSQLTables(context.Background()))
+
+	nsName := databaseName()
+	viewName := tableName()
+	s.Require().NoError(db.CreateNamespace(context.Background(), []string{nsName}, nil))
+
+	exists, err := db.CheckViewExists(context.Background(), []string{nsName, viewName})
+	s.Require().NoError(err)
+	s.False(exists)
+
+	viewSQL := "SELECT * FROM test_table"
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, nil))
+
+	exists, err = db.CheckViewExists(context.Background(), []string{nsName, viewName})
+	s.Require().NoError(err)
+	s.True(exists)
+}
+
+func (s *SqliteCatalogTestSuite) TestListViews() {
+	db := s.getCatalogSqlite()
+	s.Require().NoError(db.CreateSQLTables(context.Background()))
+
+	nsName := databaseName()
+	s.Require().NoError(db.CreateNamespace(context.Background(), []string{nsName}, nil))
+
+	viewNames := []string{tableName(), tableName(), tableName()}
+	for _, viewName := range viewNames {
+		viewSQL := "SELECT * FROM test_table"
+		schema := iceberg.NewSchema(1, iceberg.NestedField{
+			ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+		})
+		s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, nil))
+	}
+
+	var foundViews []table.Identifier
+	viewsIter := db.ListViews(context.Background(), []string{nsName})
+	for view, err := range viewsIter {
+		s.Require().NoError(err)
+		foundViews = append(foundViews, view)
+	}
+
+	s.Require().Len(foundViews, len(viewNames))
+	for _, view := range foundViews {
+		s.Equal(nsName, view[0])
+		s.Contains(viewNames, view[1])
+	}
+
+	viewsIter = db.ListViews(context.Background(), []string{"nonexistent"})
+	for _, err := range viewsIter {
+		s.Error(err)
+		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+
+		break
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestLoadView() {
+	db := s.getCatalogSqlite()
+	s.Require().NoError(db.CreateSQLTables(context.Background()))
+
+	nsName := databaseName()
+	viewName := tableName()
+	s.Require().NoError(db.CreateNamespace(context.Background(), []string{nsName}, nil))
+
+	viewSQL := "SELECT * FROM test_table"
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+	props := iceberg.Properties{
+		"comment": "Test view",
+		"owner":   "test-user",
+	}
+	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, props))
+
+	viewInfo, err := db.LoadView(context.Background(), []string{nsName, viewName})
+	s.Require().NoError(err)
+
+	s.Equal(viewName, viewInfo["name"])
+	s.Equal(nsName, viewInfo["namespace"])
+
+	_, err = db.LoadView(context.Background(), []string{nsName, "nonexistent"})
+	s.Error(err)
+	s.ErrorIs(err, catalog.ErrNoSuchView)
 }
 
 func TestSqlCatalog(t *testing.T) {
