@@ -18,12 +18,17 @@
 package glue
 
 import (
+	"context"
+
+	"github.com/apache/iceberg-go/io"
 	"github.com/aws/aws-sdk-go-v2/aws"
 )
 
 type AwsProperties map[string]string
 
 type Option func(*options)
+
+type FSLoaderFunction func(ctx context.Context, props map[string]string, location string) (io.IO, error)
 
 // WithAwsConfig sets the AWS configuration for the catalog.
 func WithAwsConfig(cfg aws.Config) Option {
@@ -38,7 +43,14 @@ func WithAwsProperties(props AwsProperties) Option {
 	}
 }
 
+func WithFSLoaderFunction(fsLoaderFn FSLoaderFunction) Option {
+	return func(o *options) {
+		o.fsLoaderFn = fsLoaderFn
+	}
+}
+
 type options struct {
 	awsConfig     aws.Config
 	awsProperties AwsProperties
+	fsLoaderFn    FSLoaderFunction
 }
