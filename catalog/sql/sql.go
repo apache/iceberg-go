@@ -424,14 +424,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, pr
 		ctx,
 		identifier,
 		result.MetadataLocation.String,
-		func(ctx context.Context) (io.IO, error) {
-			iofs, err := io.LoadFS(ctx, tblProps, result.MetadataLocation.String)
-			if err != nil {
-				return nil, err
-			}
-
-			return iofs, nil
-		},
+		io.LoadFSFunc(tblProps, result.MetadataLocation.String),
 		c,
 	)
 }

@@ -224,14 +224,13 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, pr
 
 	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
 
-	icebergTable, err := table.NewFromLocation(ctx, identifier, location, func(ctx context.Context) (io.IO, error) {
-		// TODO: consider providing a way to directly access the S3 iofs to enable testing of the catalog.
-		iofs, err := io.LoadFS(ctx, props, location)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load table %s.%s: %w", database, tableName, err)
-		}
-		return iofs, nil
-	}, c)
+	icebergTable, err := table.NewFromLocation(
+		ctx,
+		identifier,
+		location,
+		io.LoadFSFunc(props, location),
+		c,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create table from location %s.%s: %w", database, tableName, err)
 	}
@@ -328,13 +327,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		ctx,
 		[]string{tableName},
 		metadataLocation,
-		func(ctx context.Context) (io.IO, error) {
-			iofs, err := io.LoadFS(ctx, nil, metadataLocation)
-			if err != nil {
-				return nil, fmt.Errorf("failed to load metadata file at %s: %w", metadataLocation, err)
-			}
-			return iofs, nil
-		},
+		io.LoadFSFunc(nil, metadataLocation),
 		c,
 	)
 	if err != nil {

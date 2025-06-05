@@ -657,13 +657,7 @@ func (r *Catalog) tableFromResponse(ctx context.Context, identifier []string, me
 		identifier,
 		metadata,
 		loc,
-		func(ctx context.Context) (iceio.IO, error) {
-			iofs, err := iceio.LoadFS(ctx, config, loc)
-			if err != nil {
-				return nil, err
-			}
-			return iofs, nil
-		},
+		iceio.LoadFSFunc(config, loc),
 		r,
 	), nil
 }
