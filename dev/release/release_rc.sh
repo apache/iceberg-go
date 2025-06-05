@@ -98,15 +98,14 @@ if [ "${RELEASE_SIGN}" -gt 0 ]; then
     --repo "${repository}" \
     --skip-existing
 
-  echo "Signing tar.gz and creating checksums"
+  echo "Signing tar.gz"
   cd "${id}"
   gpg --armor --output "${tar_gz}.asc" --detach-sig "${tar_gz}"
-  sha512sum "${tar_gz}" > "${tar_gz}.sha512"
-  echo "Add signature and checksum to GitHub release"
+  echo "Add signature to GitHub release"
   gh release upload "${rc_tag}" \
     --clobber \
     --repo "${repository}" \
-    "${tar_gz}".asc "${tar_gz}.sha512"
+    "${tar_gz}".asc
   cd ..
 fi
 
