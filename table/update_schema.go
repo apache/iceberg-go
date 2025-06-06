@@ -198,6 +198,36 @@ func (su *UpdateSchema) internalUpdateColumnRequirement(name string, isRequired 
 	su.updates[field.ID] = field
 }
 
+func (us *UpdateSchema) RenameColumn(fromPath, newName string) *UpdateSchema {
+	field := us.findField(fromPath)
+	if field == nil {
+		panic("Cannot rename missing column: " + fromPath)
+	}
+	// block rename if the column is being deleted
+	for _, id := range us.deletes {
+		if id == field.ID {
+			panic("Cannot rename a column that will be deleted: " + fromPath)
+		}
+	}
+
+	// clone or create update entry
+	upd, ok := us.updates[field.ID]
+	if !ok {
+		c := *field // copy
+		upd = &c
+	}
+
+	upd.Name = newName
+	us.updates[field.ID] = upd
+
+	// identifier set book-keeping
+	if _, ok := us.identifierFields[fromPath]; ok {
+		delete(us.identifierFields, fromPath)
+		us.identifierFields[newName] = struct{}{}
+	}
+	return us
+}
+
 // DeleteColumn removes a column from the schema.
 func (us *UpdateSchema) DeleteColumn(name string) *UpdateSchema {
 	field := us.findField(name)
