@@ -220,7 +220,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, pr
 
 	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
 	// TODO: consider providing a way to directly access the S3 iofs to enable testing of the catalog.
-	iofs, err := io.LoadFS(ctx, props, location)
+	iofs, err := io.Load(ctx, props, location)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load table %s.%s: %w", database, tableName, err)
 	}
@@ -313,7 +313,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	}
 	// Load the metadata file to get table properties
 	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
-	iofs, err := io.LoadFS(ctx, nil, metadataLocation)
+	iofs, err := io.Load(ctx, nil, metadataLocation)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load metadata file at %s: %w", metadataLocation, err)
 	}

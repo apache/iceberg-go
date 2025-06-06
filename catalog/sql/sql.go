@@ -416,7 +416,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, pr
 	tblProps := maps.Clone(c.props)
 	maps.Copy(props, tblProps)
 
-	iofs, err := io.LoadFS(ctx, tblProps, result.MetadataLocation.String)
+	iofs, err := io.Load(ctx, tblProps, result.MetadataLocation.String)
 	if err != nil {
 		return nil, err
 	}

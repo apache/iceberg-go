@@ -111,3 +111,30 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 
 	return azureblob.OpenBucket(ctx, client, nil)
 }
+
+func init() {
+	azureRegistrar := RegistrarFunc(func(ctx context.Context, props map[string]string) (IO, error) {
+		// We need a warehouse location to extract the bucket name
+		location := props["warehouse"]
+		if location == "" {
+			return nil, fmt.Errorf("warehouse location required for Azure IO")
+		}
+
+		parsed, err := url.Parse(location)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse Azure location: %w", err)
+		}
+
+		bucket, err := createAzureBucket(ctx, parsed, props)
+		if err != nil {
+			return nil, err
+		}
+
+		return createBlobFS(ctx, bucket, parsed.Host), nil
+	})
+
+	Register("abfs", azureRegistrar)
+	Register("abfss", azureRegistrar)
+	Register("wasb", azureRegistrar)
+	Register("wasbs", azureRegistrar)
+}

@@ -653,7 +653,7 @@ func checkValidNamespace(ident table.Identifier) error {
 }
 
 func (r *Catalog) tableFromResponse(ctx context.Context, identifier []string, metadata table.Metadata, loc string, config iceberg.Properties) (*table.Table, error) {
-	iofs, err := iceio.LoadFS(ctx, config, loc)
+	iofs, err := iceio.Load(ctx, config, loc)
 	if err != nil {
 		return nil, err
 	}

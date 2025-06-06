@@ -19,6 +19,7 @@ package io
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 
 	"gocloud.dev/blob"
@@ -62,4 +63,26 @@ func createGCSBucket(ctx context.Context, parsed *url.URL, props map[string]stri
 	}
 
 	return bucket, nil
+}
+
+func init() {
+	Register("gs", RegistrarFunc(func(ctx context.Context, props map[string]string) (IO, error) {
+		// We need a warehouse location to extract the bucket name
+		location := props["warehouse"]
+		if location == "" {
+			return nil, fmt.Errorf("warehouse location required for GCS IO")
+		}
+
+		parsed, err := url.Parse(location)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse GCS location: %w", err)
+		}
+
+		bucket, err := createGCSBucket(ctx, parsed, props)
+		if err != nil {
+			return nil, err
+		}
+
+		return createBlobFS(ctx, bucket, parsed.Host), nil
+	}))
 }
