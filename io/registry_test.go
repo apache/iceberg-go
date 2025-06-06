@@ -82,7 +82,7 @@ func TestDefaultRegisteredIOs(t *testing.T) {
 }
 
 func TestLoadWithRegisteredIO(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Test loading local filesystem
 	io, err := Load(ctx, map[string]string{}, "file:///tmp/test")
@@ -101,8 +101,21 @@ func TestLoadWithRegisteredIO(t *testing.T) {
 	assert.NotNil(t, io)
 }
 
+func TestDefaultsCanBeOverridden(t *testing.T) {
+	ctx := t.Context()
+	registrar := RegistrarFunc(func(ctx context.Context, props map[string]string) (IO, error) {
+		return LocalFS{}, nil
+	})
+
+	// override default registration for mem scheme
+	Register("mem", registrar)
+	io, err := Load(ctx, map[string]string{}, "mem://bucket/path")
+	require.NoError(t, err)
+	assert.IsType(t, LocalFS{}, io)
+}
+
 func TestLoadWithWarehouseFromProps(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Test loading from warehouse property
 	io, err := Load(ctx, map[string]string{"warehouse": "file:///tmp/warehouse"}, "")
@@ -111,7 +124,7 @@ func TestLoadWithWarehouseFromProps(t *testing.T) {
 }
 
 func TestLoadWhenUnknownScheme(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_, err := Load(ctx, map[string]string{}, "unknown://bucket/path")
 	assert.Error(t, err)
@@ -126,7 +139,7 @@ func TestRegisterPanic(t *testing.T) {
 
 func TestConcurrentAccess(t *testing.T) {
 	// Test that concurrent access to registry doesn't cause data races
-	ctx := context.Background()
+	ctx := t.Context()
 
 	done := make(chan bool, 100)
 
