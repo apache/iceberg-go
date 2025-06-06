@@ -52,7 +52,7 @@ func WriteTableMetadata(metadata table.Metadata, fs io.WriteFileIO, loc string) 
 }
 
 func WriteMetadata(ctx context.Context, metadata table.Metadata, loc string, props iceberg.Properties) error {
-	fs, err := io.LoadFS(ctx, props, loc)
+	fs, err := io.Load(ctx, props, loc)
 	if err != nil {
 		return err
 	}
@@ -136,7 +136,7 @@ func CreateStagedTable(ctx context.Context, catprops iceberg.Properties, nsprops
 
 	ioProps := maps.Clone(catprops)
 	maps.Copy(ioProps, cfg.Properties)
-	fs, err := io.LoadFS(ctx, ioProps, metadataLoc)
+	fs, err := io.Load(ctx, ioProps, metadataLoc)
 	if err != nil {
 		return table.StagedTable{}, err
 	}
@@ -239,7 +239,7 @@ func UpdateAndStageTable(ctx context.Context, current *table.Table, ident table.
 		return nil, err
 	}
 
-	fs, err := io.LoadFS(ctx, updated.Properties(), newLocation)
+	fs, err := io.Load(ctx, updated.Properties(), newLocation)
 	if err != nil {
 		return nil, err
 	}

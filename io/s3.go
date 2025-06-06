@@ -149,3 +149,29 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 
 	return bucket, nil
 }
+
+func init() {
+	s3Registrar := RegistrarFunc(func(ctx context.Context, props map[string]string) (IO, error) {
+		// We need a warehouse location to extract the bucket name
+		location := props["warehouse"]
+		if location == "" {
+			return nil, fmt.Errorf("warehouse location required for S3 IO")
+		}
+
+		parsed, err := url.Parse(location)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse S3 location: %w", err)
+		}
+
+		bucket, err := createS3Bucket(ctx, parsed, props)
+		if err != nil {
+			return nil, err
+		}
+
+		return createBlobFS(ctx, bucket, parsed.Host), nil
+	})
+
+	Register("s3", s3Registrar)
+	Register("s3a", s3Registrar)
+	Register("s3n", s3Registrar)
+}

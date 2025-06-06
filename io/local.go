@@ -18,6 +18,7 @@
 package io
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,4 +47,13 @@ func (LocalFS) WriteFile(name string, content []byte) error {
 
 func (LocalFS) Remove(name string) error {
 	return os.Remove(strings.TrimPrefix(name, "file://"))
+}
+
+func init() {
+	Register("file", RegistrarFunc(func(ctx context.Context, props map[string]string) (IO, error) {
+		return LocalFS{}, nil
+	}))
+	Register("", RegistrarFunc(func(ctx context.Context, props map[string]string) (IO, error) {
+		return LocalFS{}, nil
+	}))
 }

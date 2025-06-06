@@ -18,16 +18,10 @@
 package io
 
 import (
-	"context"
 	"errors"
-	"fmt"
 	"io"
 	"io/fs"
-	"net/url"
 	"strings"
-
-	"gocloud.dev/blob"
-	"gocloud.dev/blob/memblob"
 )
 
 // IO is an interface to a hierarchical file system.
@@ -233,64 +227,4 @@ func (f ioFile) ReadDir(count int) ([]fs.DirEntry, error) {
 	}
 
 	return d.ReadDir(count)
-}
-
-func inferFileIOFromSchema(ctx context.Context, path string, props map[string]string) (IO, error) {
-	parsed, err := url.Parse(path)
-	if err != nil {
-		return nil, err
-	}
-	var bucket *blob.Bucket
-
-	switch parsed.Scheme {
-	case "s3", "s3a", "s3n":
-		bucket, err = createS3Bucket(ctx, parsed, props)
-		if err != nil {
-			return nil, err
-		}
-	case "gs":
-		bucket, err = createGCSBucket(ctx, parsed, props)
-		if err != nil {
-			return nil, err
-		}
-	case "mem":
-		// memblob doesn't use the URL host or path
-		bucket = memblob.OpenBucket(nil)
-	case "file", "":
-		return LocalFS{}, nil
-	case "abfs", "abfss", "wasb", "wasbs":
-		bucket, err = createAzureBucket(ctx, parsed, props)
-		if err != nil {
-			return nil, err
-		}
-	default:
-		return nil, fmt.Errorf("IO for file '%s' not implemented", path)
-	}
-
-	return createBlobFS(ctx, bucket, parsed.Host), nil
-}
-
-// LoadFS takes a map of properties and an optional URI location
-// and attempts to infer an IO object from it.
-//
-// A schema of "file://" or an empty string will result in a LocalFS
-// implementation. Otherwise this will return an error if the schema
-// does not yet have an implementation here.
-//
-// Currently local, S3, GCS, and In-Memory FSs are implemented.
-func LoadFS(ctx context.Context, props map[string]string, location string) (IO, error) {
-	if location == "" {
-		location = props["warehouse"]
-	}
-
-	iofs, err := inferFileIOFromSchema(ctx, location, props)
-	if err != nil {
-		return nil, err
-	}
-
-	if iofs == nil {
-		iofs = LocalFS{}
-	}
-
-	return iofs, nil
 }
