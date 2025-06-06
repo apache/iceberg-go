@@ -18,6 +18,7 @@
 package io
 
 import (
+	"cloud.google.com/go/storage"
 	"context"
 	"net/url"
 
@@ -32,6 +33,7 @@ const (
 	GCSEndpoint = "gcs.endpoint"
 	GCSKeyPath  = "gcs.keypath"
 	GCSJSONKey  = "gcs.jsonkey"
+	GCSUseJsonAPI  = "gcs.usejsonapi"  // set to anything to enable
 )
 
 // ParseGCSConfig parses GCS properties and returns a configuration.
@@ -46,6 +48,10 @@ func ParseGCSConfig(props map[string]string) *gcsblob.Options {
 	if path := props[GCSKeyPath]; path != "" {
 		o = append(o, option.WithCredentialsFile(path))
 	}
+	if _, ok := props[GCSUseJsonAPI]; ok {
+		o = append(o, storage.WithJSONReads())
+	}
+
 
 	return &gcsblob.Options{
 		ClientOptions: o,
