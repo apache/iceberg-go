@@ -63,7 +63,6 @@ func (us *UpdateSchema) AllowIncompatibleChanges() *UpdateSchema {
 }
 
 func (us *UpdateSchema) AddColumn(path []string, required bool, dataType iceberg.Type, doc string, initialDefault any) (*UpdateSchema, error) {
-
 	if len(path) == 0 {
 		return nil, fmt.Errorf("AddColumn: path must contain at least the new column name")
 	}
@@ -165,9 +164,9 @@ func (us *UpdateSchema) UpdateColumn(path []string, updates ColumnUpdate) (*Upda
 	if updates.Required != nil && field.Required != *updates.Required {
 		isRequired := *updates.Required
 
-		// Apply the same logic as internalUpdateColumnRequirement
 		if isRequired == field.Required {
 			// No change needed
+			return nil, fmt.Errorf("Cannot change column nullability: %s: %t -> %t", strings.Join(path, "."), field.Required, isRequired)
 		} else {
 			isDefaultedAdd := us.isAdded(field.ID) && field.InitialDefault != nil
 
@@ -191,7 +190,6 @@ func (us *UpdateSchema) UpdateColumn(path []string, updates ColumnUpdate) (*Upda
 
 // DeleteColumn removes a column from the schema.
 func (us *UpdateSchema) DeleteColumn(path []string) (*UpdateSchema, error) {
-
 	field := us.findField(path)
 	if field == nil {
 		return nil, fmt.Errorf("Cannot delete missing column: %s", strings.Join(path, "."))
@@ -211,7 +209,6 @@ func (us *UpdateSchema) DeleteColumn(path []string) (*UpdateSchema, error) {
 }
 
 func (us *UpdateSchema) findForUpdate(path []string) *iceberg.NestedField {
-
 	existing := us.findField(path)
 	if existing != nil {
 		if update, ok := us.updates[existing.ID]; ok {
@@ -274,7 +271,6 @@ func (us *UpdateSchema) findField(path []string) *iceberg.NestedField {
 }
 
 func allowedPromotion(oldType, newType iceberg.Type) bool {
-
 	switch old := oldType.(type) {
 
 	case iceberg.PrimitiveType:
@@ -296,7 +292,6 @@ func allowedPromotion(oldType, newType iceberg.Type) bool {
 }
 
 func (u *UpdateSchema) applyChanges() *iceberg.Schema {
-
 	newFields := rebuild(u.schema.AsStruct().FieldList, -1, u)
 
 	idList := u.schema.IdentifierFieldIDs
@@ -306,7 +301,6 @@ func (u *UpdateSchema) applyChanges() *iceberg.Schema {
 }
 
 func rebuild(fields []iceberg.NestedField, parentID int, u *UpdateSchema) []iceberg.NestedField {
-
 	var out []iceberg.NestedField
 
 	for _, f := range fields {
@@ -352,7 +346,6 @@ func rebuild(fields []iceberg.NestedField, parentID int, u *UpdateSchema) []iceb
 }
 
 func validateDefaultValue(typ iceberg.Type, val any) error {
-
 	//Defaults are only allowed on primitive columns
 	prim, ok := typ.(iceberg.PrimitiveType)
 	if !ok {
