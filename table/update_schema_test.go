@@ -1,232 +1,241 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package table
 
 import (
-	"fmt"
+	"iter"
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestAddDeleteColumnUpdateSchema(t *testing.T) {
+type mockMetadata struct {
+	schema       *iceberg.Schema
+	lastColumnID int
+}
+
+func (m *mockMetadata) Version() int                            { return 2 }
+func (m *mockMetadata) TableUUID() uuid.UUID                    { return uuid.UUID{} }
+func (m *mockMetadata) Location() string                        { return "s3://test-bucket/test-table" }
+func (m *mockMetadata) LastUpdatedMillis() int64                { return 1234567890 }
+func (m *mockMetadata) LastColumnID() int                       { return m.lastColumnID }
+func (m *mockMetadata) Schemas() []*iceberg.Schema              { return []*iceberg.Schema{m.schema} }
+func (m *mockMetadata) CurrentSchema() *iceberg.Schema          { return m.schema }
+func (m *mockMetadata) PartitionSpecs() []iceberg.PartitionSpec { return []iceberg.PartitionSpec{} }
+func (m *mockMetadata) PartitionSpec() iceberg.PartitionSpec    { return iceberg.NewPartitionSpec() }
+func (m *mockMetadata) DefaultPartitionSpec() int               { return 0 }
+func (m *mockMetadata) LastPartitionSpecID() *int               { return nil }
+func (m *mockMetadata) Snapshots() []Snapshot                   { return []Snapshot{} }
+func (m *mockMetadata) CurrentSnapshot() *Snapshot              { return nil }
+func (m *mockMetadata) SnapshotByID(int64) *Snapshot            { return nil }
+func (m *mockMetadata) SnapshotByName(string) *Snapshot         { return nil }
+func (m *mockMetadata) Properties() iceberg.Properties          { return iceberg.Properties{} }
+func (m *mockMetadata) SortOrders() []SortOrder                 { return []SortOrder{} }
+func (m *mockMetadata) DefaultSortOrder() int                   { return 0 }
+func (m *mockMetadata) SortOrder() SortOrder                    { return SortOrder{} }
+func (m *mockMetadata) LastSequenceNumber() int64               { return 0 }
+func (m *mockMetadata) Ref() SnapshotRef                        { return SnapshotRef{} }
+func (m *mockMetadata) Refs() iter.Seq2[string, SnapshotRef] {
+	return func(func(string, SnapshotRef) bool) {}
+}
+func (m *mockMetadata) SnapshotLogs() iter.Seq[SnapshotLogEntry] {
+	return func(func(SnapshotLogEntry) bool) {}
+}
+func (m *mockMetadata) PreviousFiles() iter.Seq[MetadataLogEntry] {
+	return func(func(MetadataLogEntry) bool) {}
+}
+func (m *mockMetadata) NameMapping() iceberg.NameMapping { return nil }
+func (m *mockMetadata) Equals(other Metadata) bool       { return false }
+
+func TestUpdateSchemaAddColumn(t *testing.T) {
+	structType := &iceberg.StructType{
+		FieldList: []iceberg.NestedField{
+			{ID: 5, Name: "street", Type: iceberg.PrimitiveTypes.String, Required: true},
+			{ID: 6, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: true},
+			{ID: 7, Name: "zip_code", Type: iceberg.PrimitiveTypes.String, Required: false},
+		},
+	}
 
 	schema := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "name", Required: true, Type: iceberg.StringType{}, Doc: "", InitialDefault: nil},
-		iceberg.NestedField{ID: 2, Name: "age", Required: true, Type: iceberg.StringType{}, Doc: "comment", InitialDefault: nil},
-		iceberg.NestedField{ID: 3, Name: "city", Required: true, Type: iceberg.StringType{}, Doc: "", InitialDefault: nil},
+		iceberg.NestedField{ID: 1, Name: "id", Required: true, Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "name", Required: true, Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "age", Required: false, Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 4, Name: "address", Required: false, Type: structType},
 	)
 
-	minimalV1Example := `{
-		"format-version": 1,
-		"location": "s3://bucket/test/location",
-		"last-updated-ms": 1062638573874,
-		"last-column-id": 3,
-		"schema": {
-			"type": "struct",
-			"fields": [
-				{"id": 1, "name": "name", "required": true, "type": "string"},
-				{"id": 2, "name": "age", "required": true, "type": "int", "doc": "comment"},
-				{"id": 3, "name": "city", "required": true, "type": "string"}
-			]
-		},
-		"partition-specs":[{"spec-id":0,"fields":[]}],
-		"properties": {},
-		"current-snapshot-id": -1,
-		"snapshots": [{"snapshot-id": 1925, "timestamp-ms": 1602638573822}]
-	}`
+	// Create mock metadata
+	metadata := createMockMetadata(schema, 7)
 
-	meta, err := ParseMetadataString(minimalV1Example)
-	if err != nil {
-		t.Fatal(err)
-	}
+	updateSchema := NewUpdateSchema(metadata, schema, 7)
 
-	su := NewUpdateSchema(&meta, schema, 3)
-	su.AddColumn("", "name_new", 4, true, iceberg.StringType{}, "", nil)
-	su.AddColumn("", "name_new_2", 5, true, iceberg.StringType{}, "", nil)
+	t.Run("add struct column", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(metadata, schema, 7)
 
-	su.DeleteColumn("name")
-	su.UpdateColumnDoc("age", "new doc")
-	newSchema := su.applyChanges()
-	fmt.Println(newSchema.String())
-}
-
-func TestAddDeleteNestedColumnUpdateSchema(t *testing.T) {
-
-	nestedSchema := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "name", Required: true, Type: iceberg.StringType{}, Doc: "", InitialDefault: nil},
-		iceberg.NestedField{ID: 2, Name: "age", Required: true, Type: iceberg.StringType{}, Doc: "comment", InitialDefault: nil},
-		iceberg.NestedField{
-			ID:       3,
-			Name:     "id_to_person",
-			Required: true,
-			Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 4, Name: "name", Type: iceberg.PrimitiveTypes.String},
-					{ID: 5, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-				},
+		// Create a struct type with nested fields
+		structType := &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 8, Name: "street", Type: iceberg.PrimitiveTypes.String, Required: true},
+				{ID: 9, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: true},
+				{ID: 10, Name: "zip_code", Type: iceberg.PrimitiveTypes.String, Required: false},
 			},
-		},
-	)
-
-	minimalV1Example := `{
-		"format-version": 1,
-		"location": "s3://bucket/test/location",
-		"last-updated-ms": 1062638573874,
-		"last-column-id": 3,
-		"schema": {
-			"type": "struct",
-			"fields": [
-				{"id": 1, "name": "name", "required": true, "type": "string"},
-				{"id": 2, "name": "age", "required": true, "type": "int", "doc": "comment"},
-				{
-					"type": {
-						"type": "struct",
-						"fields": [
-							{
-								"type": "string",
-								"id": 4,
-								"name": "name",
-								"required": false
-							},
-							{
-								"type": "int",
-								"id": 5,
-								"name": "age",
-								"required": true
-							}
-						]
-					},
-					"id": 3,
-					"name": "id_to_person",
-					"required": true
-				}
-			]
-		},
-		"partition-specs":[{"spec-id":0,"fields":[]}],
-		"properties": {},
-		"current-snapshot-id": -1,
-		"snapshots": [{"snapshot-id": 1925, "timestamp-ms": 1602638573822}]
-	}`
-
-	meta, err := ParseMetadataString(minimalV1Example)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	su := NewUpdateSchema(&meta, nestedSchema, 5)
-	su.AddColumn("id_to_person", "name_new", 6, true, iceberg.StringType{}, "", nil)
-	su.DeleteColumn("name")
-	newSchema := su.applyChanges()
-	fmt.Println(newSchema.String())
-}
-
-func TestUpdateSchemaCommit(t *testing.T) {
-	schema := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "name", Required: true, Type: iceberg.StringType{}, Doc: "", InitialDefault: nil},
-		iceberg.NestedField{ID: 2, Name: "age", Required: true, Type: iceberg.Int32Type{}, Doc: "comment", InitialDefault: nil},
-		iceberg.NestedField{ID: 3, Name: "city", Required: true, Type: iceberg.StringType{}, Doc: "", InitialDefault: nil},
-	)
-
-	minimalV1Example := `{
-		"format-version": 1,
-		"location": "s3://bucket/test/location",
-		"last-updated-ms": 1062638573874,
-		"last-column-id": 3,
-		"schema": {
-			"type": "struct",
-			"fields": [
-				{"id": 1, "name": "name", "required": true, "type": "string"},
-				{"id": 2, "name": "age", "required": true, "type": "int", "doc": "comment"},
-				{"id": 3, "name": "city", "required": true, "type": "string"}
-			]
-		},
-		"partition-specs":[{"spec-id":0,"fields":[]}],
-		"properties": {},
-		"current-snapshot-id": -1,
-		"snapshots": [{"snapshot-id": 1925, "timestamp-ms": 1602638573822}]
-	}`
-
-	meta, err := ParseMetadataString(minimalV1Example)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Create UpdateSchema and make changes
-	su := NewUpdateSchema(&meta, schema, 3)
-	su.AddColumn("", "email", 4, false, iceberg.StringType{}, "User email address", "default@example.com")
-	su.UpdateColumnDoc("age", "User age in years")
-
-	// Commit the changes
-	updatedMetadata, err := su.Commit()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Verify the new schema
-	newSchema := updatedMetadata.CurrentSchema()
-	if newSchema.ID <= schema.ID {
-		t.Errorf("Expected new schema ID to be greater than %d, got %d", schema.ID, newSchema.ID)
-	}
-
-	// Verify the email field was added
-	emailField, found := newSchema.FindFieldByName("email")
-	if !found {
-		t.Error("Expected to find 'email' field in new schema")
-	}
-	if emailField.ID != 4 {
-		t.Errorf("Expected email field ID to be 4, got %d", emailField.ID)
-	}
-
-	// Verify the age field documentation was updated
-	ageField, found := newSchema.FindFieldByName("age")
-	if !found {
-		t.Error("Expected to find 'age' field in new schema")
-	}
-	if ageField.Doc != "User age in years" {
-		t.Errorf("Expected age field doc to be 'User age in years', got '%s'", ageField.Doc)
-	}
-
-	// Verify the updated metadata has more schemas
-	if len(updatedMetadata.Schemas()) <= len(meta.Schemas()) {
-		t.Error("Expected updated metadata to have more schemas")
-	}
-
-	fmt.Printf("Successfully committed schema changes. New schema ID: %d\n", newSchema.ID)
-}
-
-func TestNewdataType(t *testing.T) {
-
-	nestedSchema := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "name", Required: true, Type: iceberg.StringType{}, Doc: "", InitialDefault: nil},
-		iceberg.NestedField{ID: 2, Name: "age", Required: true, Type: iceberg.StringType{}, Doc: "comment", InitialDefault: nil},
-		iceberg.NestedField{
-			ID:       3,
-			Name:     "id_to_person",
-			Required: true,
-			Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 1, Name: "name", Type: iceberg.PrimitiveTypes.String},
-					{ID: 2, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-				},
-			},
-		},
-	)
-
-	for _, field := range nestedSchema.Fields() {
-		printType(field.Type)
-	}
-}
-
-func printType(t iceberg.Type) {
-
-	typeis := t.Type()
-	fmt.Println(typeis)
-	if nestedType, ok := t.(iceberg.NestedType); ok {
-		if _, ok := nestedType.(*iceberg.MapType); ok {
-			fmt.Println("mapType")
-		} else if _, ok := nestedType.(*iceberg.ListType); ok {
-			fmt.Println("listType")
-		} else if _, ok := nestedType.(*iceberg.StructType); ok {
-			fmt.Println("structType")
 		}
+
+		updated, err := updateSchema.AddColumn([]string{"address_new"}, false, structType, "User address", nil)
+		require.NoError(t, err)
+		require.NotNil(t, updated)
+
+		newSchema := updated.Apply()
+		require.NotNil(t, newSchema)
+
+		// Check that the struct field was added
+		field, found := newSchema.FindFieldByName("address_new")
+		require.True(t, found)
+		assert.Equal(t, "address_new", field.Name)
+		assert.False(t, field.Required)
+		assert.Equal(t, "User address", field.Doc)
+
+		// Verify it's a struct type
+		structField, ok := field.Type.(*iceberg.StructType)
+		require.True(t, ok)
+		assert.Len(t, structField.FieldList, 3)
+
+		//check if we can find the nested fields
+		field, found = newSchema.FindFieldByName("address_new.city")
+		require.True(t, found)
+		assert.Equal(t, "city", field.Name)
+		assert.True(t, field.Required)
+
+		// Check nested fields
+		assert.Equal(t, "street", structField.FieldList[0].Name)
+		assert.Equal(t, iceberg.PrimitiveTypes.String, structField.FieldList[0].Type)
+		assert.True(t, structField.FieldList[0].Required)
+
+		assert.Equal(t, "city", structField.FieldList[1].Name)
+		assert.Equal(t, iceberg.PrimitiveTypes.String, structField.FieldList[1].Type)
+		assert.True(t, structField.FieldList[1].Required)
+
+		assert.Equal(t, "zip_code", structField.FieldList[2].Name)
+		assert.Equal(t, iceberg.PrimitiveTypes.String, structField.FieldList[2].Type)
+		assert.False(t, structField.FieldList[2].Required)
+
+		//trying to add a new field to the struct
+		updated, err = updateSchema.AddColumn([]string{"address", "new"}, false, iceberg.PrimitiveTypes.String, "new field", nil)
+		require.NoError(t, err)
+		require.NotNil(t, updated)
+
+		newSchema = updated.Apply()
+		require.NotNil(t, newSchema)
+
+		field, found = newSchema.FindFieldByName("address.new")
+		require.True(t, found)
+
+	})
+
+	t.Run("add simple column", func(t *testing.T) {
+		updated, err := updateSchema.AddColumn([]string{"email"}, false, iceberg.PrimitiveTypes.String, "User email", "default@example.com")
+		require.NoError(t, err)
+		require.NotNil(t, updated)
+
+		newSchema := updated.Apply()
+		require.NotNil(t, newSchema)
+
+		// Check that the new field was added
+		field, found := newSchema.FindFieldByName("email")
+		require.True(t, found)
+		assert.Equal(t, "email", field.Name)
+		assert.Equal(t, iceberg.PrimitiveTypes.String, field.Type)
+		assert.False(t, field.Required)
+		assert.Equal(t, "User email", field.Doc)
+		assert.Equal(t, "default@example.com", field.InitialDefault)
+	})
+
+	t.Run("add required column without default should fail", func(t *testing.T) {
+		_, err := updateSchema.AddColumn([]string{"required_field"}, true, iceberg.PrimitiveTypes.String, "", nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot add required column without default value")
+	})
+
+	t.Run("add required column with default should succeed", func(t *testing.T) {
+		updated, err := updateSchema.AddColumn([]string{"required_field"}, true, iceberg.PrimitiveTypes.String, "", "default")
+		require.NoError(t, err)
+		require.NotNil(t, updated)
+
+		newSchema := updated.Apply()
+		field, found := newSchema.FindFieldByName("required_field")
+		require.True(t, found)
+		assert.True(t, field.Required)
+		assert.Equal(t, "default", field.InitialDefault)
+	})
+
+	t.Run("add duplicate column should fail", func(t *testing.T) {
+		_, err := updateSchema.AddColumn([]string{"name"}, false, iceberg.PrimitiveTypes.String, "", nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot add column; name already exists")
+	})
+
+	t.Run("empty path should fail", func(t *testing.T) {
+		_, err := updateSchema.AddColumn([]string{}, false, iceberg.PrimitiveTypes.String, "", nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "path must contain at least the new column name")
+	})
+}
+
+func TestUpdateSchemaDeleteColumn(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Required: true, Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "name", Required: true, Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "age", Required: false, Type: iceberg.PrimitiveTypes.Int32},
+	)
+
+	metadata := createMockMetadata(schema, 3)
+	updateSchema := NewUpdateSchema(metadata, schema, 3)
+
+	t.Run("delete existing column", func(t *testing.T) {
+		updated, err := updateSchema.DeleteColumn([]string{"age"})
+		require.NoError(t, err)
+		require.NotNil(t, updated)
+
+		newSchema := updated.Apply()
+		_, found := newSchema.FindFieldByName("age")
+		assert.False(t, found, "age field should be deleted")
+
+		// Other fields should still exist
+		_, found = newSchema.FindFieldByName("id")
+		assert.True(t, found)
+		_, found = newSchema.FindFieldByName("name")
+		assert.True(t, found)
+	})
+
+	t.Run("delete non-existent column should fail", func(t *testing.T) {
+		_, err := updateSchema.DeleteColumn([]string{"nonexistent"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "Cannot delete missing column")
+	})
+}
+
+// Helper function to create mock metadata for testing
+func createMockMetadata(schema *iceberg.Schema, lastColumnID int) Metadata {
+	// For testing purposes, we'll use a simple mock that implements the Metadata interface
+	return &mockMetadata{
+		schema:       schema,
+		lastColumnID: lastColumnID,
 	}
 }
