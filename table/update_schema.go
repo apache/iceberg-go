@@ -72,7 +72,7 @@ func (us *UpdateSchema) AddColumn(path []string, required bool, dataType iceberg
 
 	if parentPath != "" {
 
-		pf := us.findField(path)
+		pf := us.findField(path[:len(path)-1])
 		if pf == nil {
 			return nil, fmt.Errorf("cannot find parent struct: %s", parentPath)
 		}
@@ -316,14 +316,12 @@ func (u *UpdateSchema) applyChanges() *iceberg.Schema {
 
 	newFields := rebuild(u.schema.AsStruct().FieldList, -1, u)
 
-	// Build the new schema, preserving identifier field IDs
 	idList := u.schema.IdentifierFieldIDs
 	newID := u.schema.ID + 1
 
 	return iceberg.NewSchemaWithIdentifiers(newID, idList, newFields...)
 }
 
-// rebuild walks original fields, applies deletes/updates, then appends adds.
 func rebuild(fields []iceberg.NestedField, parentID int, u *UpdateSchema) []iceberg.NestedField {
 	var out []iceberg.NestedField
 
