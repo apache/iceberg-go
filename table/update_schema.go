@@ -71,39 +71,31 @@ func (us *UpdateSchema) AddColumn(path []string, required bool, dataType iceberg
 	colName := path[len(path)-1]
 	parentID := -1
 
-	var parentField *iceberg.NestedField
-	parentPath := strings.Join(path[:len(path)-1], ".")
-
-	if parentPath != "" {
-
-		pf := us.findField(path[:len(path)-1])
+	if len(path) > 1 {
+		parentPath := path[:len(path)-1]
+		pf := us.findField(parentPath)
 		if pf == nil {
-			return nil, fmt.Errorf("cannot find parent struct: %s", parentPath)
+			return nil, fmt.Errorf("cannot find parent struct: %s", strings.Join(parentPath, "."))
 		}
 
-		// Only Struct / List(element) / Map(value) can accept children.
 		switch nt := pf.Type.(type) {
 		case *iceberg.StructType:
-			parentField = pf
+			parentID = pf.ID
 		case *iceberg.MapType:
 			vf := nt.ValueField()
-			parentField = &vf
+			parentID = vf.ID
 		case *iceberg.ListType:
 			ef := nt.ElementField()
-			parentField = &ef
+			parentID = ef.ID
 		default:
-			return nil, fmt.Errorf("parent is not a nested type: %s", parentPath)
+			return nil, fmt.Errorf("parent is not a nested type: %s", strings.Join(parentPath, "."))
 		}
-
-		parentID = parentField.ID
-
 	}
 
 	if existing := us.findField(path); existing != nil && !us.isDeleted(existing.ID) {
 		return nil, fmt.Errorf("cannot add column; name already exists: %s", strings.Join(path, "."))
 	}
 
-	// checking if a required column has a default value
 	if required && initialDefault == nil && !us.allowIncompatibleChanges {
 		return nil, fmt.Errorf("cannot add required column without default value: %s", strings.Join(path, "."))
 	}
@@ -146,10 +138,8 @@ func (us *UpdateSchema) UpdateColumn(path []string, updates ColumnUpdate) (*Upda
 		return nil, fmt.Errorf("Cannot update a column that will be deleted: %s", strings.Join(path, "."))
 	}
 
-	// Track if any changes were made
 	hasChanges := false
 
-	// Update type if provided
 	if updates.Type != nil && !field.Type.Equals(updates.Type) {
 		if !allowedPromotion(field.Type, updates.Type) {
 			return nil, fmt.Errorf("Cannot update type of column: %s: %s -> %s",
