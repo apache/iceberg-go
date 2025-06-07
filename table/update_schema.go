@@ -19,9 +19,11 @@ package table
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/apache/iceberg-go"
+	"github.com/google/uuid"
 )
 
 type UpdateSchema struct {
@@ -102,6 +104,12 @@ func (us *UpdateSchema) AddColumn(path []string, required bool, dataType iceberg
 	// checking if a required column has a default value
 	if required && initialDefault == nil && !us.allowIncompatibleChanges {
 		return nil, fmt.Errorf("cannot add required column without default value: %s", strings.Join(path, "."))
+	}
+
+	if initialDefault != nil {
+		if err := validateDefaultValue(dataType, initialDefault); err != nil {
+			return nil, err
+		}
 	}
 
 	newID := us.assignNewColumnID()
@@ -323,6 +331,7 @@ func (u *UpdateSchema) applyChanges() *iceberg.Schema {
 }
 
 func rebuild(fields []iceberg.NestedField, parentID int, u *UpdateSchema) []iceberg.NestedField {
+
 	var out []iceberg.NestedField
 
 	for _, f := range fields {
@@ -366,43 +375,57 @@ func rebuild(fields []iceberg.NestedField, parentID int, u *UpdateSchema) []iceb
 	return out
 }
 
-// func (us *UpdateSchema) Commit() (Metadata, error) {
-// 	newSchema := us.applyChanges()
+func validateDefaultValue(typ iceberg.Type, val any) error {
 
-// 	for _, existingSchema := range (*us.base).Schemas() {
-// 		if newSchema.Equals(existingSchema) {
-// 			if existingSchema.ID != (*us.base).CurrentSchema().ID {
-// 				builder, err := MetadataBuilderFromBase(*us.base)
-// 				if err != nil {
-// 					return nil, err
-// 				}
+	//Defaults are only allowed on primitive columns
+	prim, ok := typ.(iceberg.PrimitiveType)
+	if !ok {
+		return fmt.Errorf("defaults are only allowed on primitive columns, got %s", typ.Type())
+	}
 
-// 				_, err = builder.SetCurrentSchemaID(existingSchema.ID)
-// 				if err != nil {
-// 					return nil, err
-// 				}
+	lit, err := literalFromAny(val)
+	if err != nil {
+		return err
+	}
 
-// 				return builder.Build()
-// 			}
+	litType := lit.Type()
 
-// 			return *us.base, nil
-// 		}
-// 	}
+	// Exact match?
+	if litType.Equals(prim) {
+		return nil
+	}
 
-// 	builder, err := MetadataBuilderFromBase(*us.base)
-// 	if err != nil {
-// 		return nil, err
-// 	}
+	return fmt.Errorf("default literal of type %s is not assignable to of type %s",
+		litType.String(), prim.Type())
+}
 
-// 	_, err = builder.AddSchema(newSchema, us.lastColumnID, false)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-
-// 	_, err = builder.SetCurrentSchemaID(newSchema.ID)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-
-// 	return builder.Build()
-// }
+func literalFromAny(v any) (iceberg.Literal, error) {
+	switch x := v.(type) {
+	case bool:
+		return iceberg.NewLiteral(x), nil
+	case int32:
+		return iceberg.NewLiteral(x), nil
+	case int64, int:
+		return iceberg.NewLiteral(int64(reflect.ValueOf(x).Int())), nil
+	case float32:
+		return iceberg.NewLiteral(x), nil
+	case float64:
+		return iceberg.NewLiteral(x), nil
+	case string:
+		return iceberg.NewLiteral(x), nil
+	case []byte:
+		return iceberg.NewLiteral(x), nil
+	case uuid.UUID:
+		return iceberg.NewLiteral(x), nil
+	case iceberg.Date:
+		return iceberg.NewLiteral(x), nil
+	case iceberg.Time:
+		return iceberg.NewLiteral(x), nil
+	case iceberg.Timestamp:
+		return iceberg.NewLiteral(x), nil
+	case iceberg.Decimal:
+		return iceberg.NewLiteral(x), nil
+	default:
+		return nil, fmt.Errorf("unsupported literal type %T", v)
+	}
+}
