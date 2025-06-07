@@ -86,6 +86,14 @@ func TestUpdateSchemaAddColumn(t *testing.T) {
 
 	updateSchema := NewUpdateSchema(metadata, schema, 7)
 
+	t.Run("add struct column with default value", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(metadata, schema, 7)
+
+		_, err := updateSchema.AddColumn([]string{"new_col"}, false, iceberg.PrimitiveTypes.Int32, "doc string", "string_value")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "default literal of type string is not assignable to of type int")
+	})
+
 	t.Run("add struct column", func(t *testing.T) {
 		updateSchema := NewUpdateSchema(metadata, schema, 7)
 
