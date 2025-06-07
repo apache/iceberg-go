@@ -27,6 +27,7 @@ import (
 )
 
 type UpdateSchema struct {
+	txn          *Transaction
 	schema       *iceberg.Schema
 	lastColumnID int
 
@@ -39,9 +40,10 @@ type UpdateSchema struct {
 	caseSensitive            bool
 }
 
-func NewUpdateSchema(base Metadata, s *iceberg.Schema, lastColumnID int) *UpdateSchema {
+func NewUpdateSchema(txn *Transaction, s *iceberg.Schema, lastColumnID int) *UpdateSchema {
 
 	return &UpdateSchema{
+		txn:                      txn,
 		schema:                   s,
 		deletes:                  make(map[int]struct{}),
 		updates:                  make(map[int]*iceberg.NestedField),
@@ -197,18 +199,6 @@ func (us *UpdateSchema) UpdateColumn(path []string, updates ColumnUpdate) (*Upda
 	return us, nil
 }
 
-func stringPtr(s string) *string {
-	return &s
-}
-
-func boolPtr(b bool) *bool {
-	return &b
-}
-
-func anyPtr(a any) *any {
-	return &a
-}
-
 // DeleteColumn removes a column from the schema.
 func (us *UpdateSchema) DeleteColumn(path []string) (*UpdateSchema, error) {
 
@@ -228,11 +218,6 @@ func (us *UpdateSchema) DeleteColumn(path []string) (*UpdateSchema, error) {
 	us.deletes[field.ID] = struct{}{}
 
 	return us, nil
-}
-
-func (us *UpdateSchema) isDeleted(id int) bool {
-	_, ok := us.deletes[id]
-	return ok
 }
 
 func (us *UpdateSchema) findForUpdate(path []string) *iceberg.NestedField {
@@ -372,6 +357,7 @@ func rebuild(fields []iceberg.NestedField, parentID int, u *UpdateSchema) []iceb
 	for _, nf := range u.adds[parentID] {
 		out = append(out, *nf)
 	}
+
 	return out
 }
 
@@ -395,8 +381,7 @@ func validateDefaultValue(typ iceberg.Type, val any) error {
 		return nil
 	}
 
-	return fmt.Errorf("default literal of type %s is not assignable to of type %s",
-		litType.String(), prim.Type())
+	return fmt.Errorf("default literal of type %s is not assignable to of type %s", litType.String(), prim.Type())
 }
 
 func literalFromAny(v any) (iceberg.Literal, error) {
@@ -428,4 +413,24 @@ func literalFromAny(v any) (iceberg.Literal, error) {
 	default:
 		return nil, fmt.Errorf("unsupported literal type %T", v)
 	}
+}
+
+func (us *UpdateSchema) isDeleted(id int) bool {
+	_, ok := us.deletes[id]
+	return ok
+}
+
+func stringPtr(s string) *string {
+
+	return &s
+}
+
+func boolPtr(b bool) *bool {
+
+	return &b
+}
+
+func anyPtr(a any) *any {
+
+	return &a
 }

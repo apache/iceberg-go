@@ -110,10 +110,6 @@ func (t Table) Append(ctx context.Context, rdr array.RecordReader, snapshotProps
 	return txn.Commit(ctx)
 }
 
-func (t Table) UpdateSchema() *UpdateSchema {
-	return NewUpdateSchema(&t.metadata, t.metadata.CurrentSchema(), t.metadata.LastColumnID())
-}
-
 func (t Table) AllManifests() iter.Seq2[iceberg.ManifestFile, error] {
 	type list = tblutils.Enumerated[[]iceberg.ManifestFile]
 	g := errgroup.Group{}
