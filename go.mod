@@ -25,31 +25,31 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.6.1
 	github.com/apache/arrow-go/v18 v18.3.0
 	github.com/aws/aws-sdk-go-v2 v1.36.3
-	github.com/aws/aws-sdk-go-v2/config v1.29.14
-	github.com/aws/aws-sdk-go-v2/credentials v1.17.67
+	github.com/aws/aws-sdk-go-v2/config v1.29.15
+	github.com/aws/aws-sdk-go-v2/credentials v1.17.68
 	github.com/aws/aws-sdk-go-v2/service/glue v1.113.0
-	github.com/aws/aws-sdk-go-v2/service/s3 v1.80.0
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.80.1
 	github.com/aws/smithy-go v1.22.3
 	github.com/awsdocs/aws-doc-sdk-examples/gov2/testtools v0.0.0-20250407191926-092f3e54b837
 	github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815
 	github.com/google/uuid v1.6.0
 	github.com/hamba/avro/v2 v2.28.0
-	github.com/pterm/pterm v0.12.80
+	github.com/pterm/pterm v0.12.81
 	github.com/stretchr/testify v1.10.0
 	github.com/substrait-io/substrait-go/v3 v3.9.1
 	github.com/testcontainers/testcontainers-go/modules/compose v0.37.0
 	github.com/twmb/murmur3 v1.1.8
-	github.com/uptrace/bun v1.2.11
-	github.com/uptrace/bun/dialect/mssqldialect v1.2.11
-	github.com/uptrace/bun/dialect/mysqldialect v1.2.11
-	github.com/uptrace/bun/dialect/oracledialect v1.2.11
-	github.com/uptrace/bun/dialect/pgdialect v1.2.11
-	github.com/uptrace/bun/dialect/sqlitedialect v1.2.11
-	github.com/uptrace/bun/driver/sqliteshim v1.2.11
-	github.com/uptrace/bun/extra/bundebug v1.2.11
+	github.com/uptrace/bun v1.2.12
+	github.com/uptrace/bun/dialect/mssqldialect v1.2.12
+	github.com/uptrace/bun/dialect/mysqldialect v1.2.12
+	github.com/uptrace/bun/dialect/oracledialect v1.2.12
+	github.com/uptrace/bun/dialect/pgdialect v1.2.12
+	github.com/uptrace/bun/dialect/sqlitedialect v1.2.12
+	github.com/uptrace/bun/driver/sqliteshim v1.2.12
+	github.com/uptrace/bun/extra/bundebug v1.2.12
 	gocloud.dev v0.41.0
-	golang.org/x/sync v0.14.0
-	google.golang.org/api v0.235.0
+	golang.org/x/sync v0.15.0
+	google.golang.org/api v0.236.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -100,7 +100,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.18.15 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.25.3 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.30.1 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sts v1.33.19 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sts v1.33.20 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/buger/goterm v1.0.4 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
@@ -108,7 +108,7 @@ require (
 	github.com/cncf/xds/go v0.0.0-20250326154945-ae57f3c0d45f // indirect
 	github.com/cockroachdb/apd/v3 v3.2.1 // indirect
 	github.com/compose-spec/compose-go/v2 v2.6.0 // indirect
-	github.com/containerd/console v1.0.4 // indirect
+	github.com/containerd/console v1.0.5 // indirect
 	github.com/containerd/containerd/api v1.8.0 // indirect
 	github.com/containerd/containerd/v2 v2.0.5 // indirect
 	github.com/containerd/continuity v0.4.5 // indirect
@@ -199,7 +199,7 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-runewidth v0.0.16 // indirect
 	github.com/mattn/go-shellwords v1.0.12 // indirect
-	github.com/mattn/go-sqlite3 v1.14.24 // indirect
+	github.com/mattn/go-sqlite3 v1.14.28 // indirect
 	github.com/mgutz/ansi v0.0.0-20170206155736-9520e82c474b // indirect
 	github.com/miekg/pkcs11 v1.1.1 // indirect
 	github.com/minio/asm2plan9s v0.0.0-20200509001527-cdd76441f9d8 // indirect
@@ -296,20 +296,20 @@ require (
 	go.opentelemetry.io/proto/otlp v1.3.1 // indirect
 	go.uber.org/mock v0.5.0 // indirect
 	golang.org/x/crypto v0.38.0 // indirect
-	golang.org/x/exp v0.0.0-20250408133849-7e4ce0ab07d0 // indirect
-	golang.org/x/mod v0.24.0 // indirect
+	golang.org/x/exp v0.0.0-20250531010427-b6e5de432a8b // indirect
+	golang.org/x/mod v0.25.0 // indirect
 	golang.org/x/net v0.40.0 // indirect
 	golang.org/x/oauth2 v0.30.0 // indirect
 	golang.org/x/sys v0.33.0 // indirect
 	golang.org/x/term v0.32.0 // indirect
-	golang.org/x/text v0.25.0 // indirect
+	golang.org/x/text v0.26.0 // indirect
 	golang.org/x/time v0.11.0 // indirect
-	golang.org/x/tools v0.32.0 // indirect
+	golang.org/x/tools v0.33.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 	google.golang.org/genproto v0.0.0-20250505200425-f936aa4a68b2 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20250505200425-f936aa4a68b2 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20250512202823-5a2f75b736a9 // indirect
-	google.golang.org/grpc v1.72.1 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20250528174236-200df99c418a // indirect
+	google.golang.org/grpc v1.72.2 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
 	gopkg.in/cenkalti/backoff.v1 v1.1.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
@@ -321,10 +321,10 @@ require (
 	k8s.io/klog/v2 v2.130.1 // indirect
 	k8s.io/kube-openapi v0.0.0-20240228011516-70dd3763d340 // indirect
 	k8s.io/utils v0.0.0-20240711033017-18e509b52bc8 // indirect
-	modernc.org/libc v1.61.13 // indirect
+	modernc.org/libc v1.65.10 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
-	modernc.org/memory v1.8.2 // indirect
-	modernc.org/sqlite v1.36.1 // indirect
+	modernc.org/memory v1.11.0 // indirect
+	modernc.org/sqlite v1.37.1 // indirect
 	sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.4.1 // indirect
 	sigs.k8s.io/yaml v1.4.0 // indirect
