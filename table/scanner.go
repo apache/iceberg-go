@@ -154,7 +154,7 @@ func openManifest(io io.IO, manifest iceberg.ManifestFile,
 
 type Scan struct {
 	metadata       Metadata
-	io             io.IO
+	ioF            FSysF
 	rowFilter      iceberg.BooleanExpression
 	selectedFields []string
 	caseSensitive  bool
@@ -299,14 +299,18 @@ func matchDeletesToData(entry iceberg.ManifestEntry, positionalDeletes []iceberg
 
 // fetchPartitionSpecFilteredManifests retrieves the table's current snapshot,
 // fetches its manifest files, and applies partition-spec filters to remove irrelevant manifests.
-func (scan *Scan) fetchPartitionSpecFilteredManifests() ([]iceberg.ManifestFile, error) {
+func (scan *Scan) fetchPartitionSpecFilteredManifests(ctx context.Context) ([]iceberg.ManifestFile, error) {
 	snap := scan.Snapshot()
 	if snap == nil {
 		return nil, nil
 	}
 
+	afs, err := scan.ioF(ctx)
+	if err != nil {
+		return nil, err
+	}
 	// Fetch all manifests for the current snapshot.
-	manifestList, err := snap.Manifests(scan.io)
+	manifestList, err := snap.Manifests(afs)
 	if err != nil {
 		return nil, err
 	}
@@ -354,8 +358,12 @@ func (scan *Scan) collectManifestEntries(
 		}
 
 		g.Go(func() error {
+			fs, err := scan.ioF(ctx)
+			if err != nil {
+				return err
+			}
 			partEval := partitionEvaluators.Get(int(mf.PartitionSpecID()))
-			manifestEntries, err := openManifest(scan.io, mf, partEval, metricsEval)
+			manifestEntries, err := openManifest(fs, mf, partEval, metricsEval)
 			if err != nil {
 				return err
 			}
@@ -390,7 +398,7 @@ func (scan *Scan) collectManifestEntries(
 // building a list of FileScanTasks that match the current Scan criteria.
 func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	// Step 1: Retrieve filtered manifests based on snapshot and partition specs.
-	manifestList, err := scan.fetchPartitionSpecFilteredManifests()
+	manifestList, err := scan.fetchPartitionSpecFilteredManifests(ctx)
 	if err != nil || len(manifestList) == 0 {
 		return nil, err
 	}
@@ -456,9 +464,14 @@ func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[
 		return nil, nil, err
 	}
 
+	fs, err := scan.ioF(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	return (&arrowScan{
 		metadata:        scan.metadata,
-		fs:              scan.io,
+		fs:              fs,
 		projectedSchema: schema,
 		boundRowFilter:  boundFilter,
 		caseSensitive:   scan.caseSensitive,
