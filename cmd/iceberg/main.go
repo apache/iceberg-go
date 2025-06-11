@@ -19,9 +19,11 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"strings"
 
@@ -159,6 +161,28 @@ func main() {
 		opts := []rest.Option{}
 		if len(cfg.Cred) > 0 {
 			opts = append(opts, rest.WithCredential(cfg.Cred))
+		}
+		if fileCfg != nil && &fileCfg.RestConfig != nil {
+			restCfg := fileCfg.RestConfig
+			if restCfg.SigV4Enabled {
+				opts = append(opts, rest.WithSigV4())
+			}
+
+			if len(restCfg.SigV4Region) > 0 && len(restCfg.SigV4Service) > 0 {
+				opts = append(opts, rest.WithSigV4RegionSvc(restCfg.SigV4Region, restCfg.SigV4Service))
+			}
+
+			if len(restCfg.AuthUrl) > 0 {
+				authUri, err := url.Parse(restCfg.AuthUrl)
+				if err != nil {
+					log.Fatal(err)
+				}
+				opts = append(opts, rest.WithAuthURI(authUri))
+			}
+
+			if restCfg.TlsSkipVerify {
+				opts = append(opts, rest.WithTLSConfig(&tls.Config{InsecureSkipVerify: true}))
+			}
 		}
 
 		if len(cfg.Warehouse) > 0 {
