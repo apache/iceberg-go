@@ -255,7 +255,8 @@ func CreateViewMetadata(
 	schema *iceberg.Schema,
 	viewSQL string,
 	loc string,
-	props iceberg.Properties) (metadataLocation string, err error) {
+	props iceberg.Properties,
+) (metadataLocation string, err error) {
 
 	versionId := int64(1)
 	timestampMs := time.Now().UnixMilli()

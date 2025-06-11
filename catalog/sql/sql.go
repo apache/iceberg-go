@@ -1040,5 +1040,6 @@ func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (ma
 	}
 
 	viewMetadata, err := internal.LoadViewMetadata(ctx, c.props, view.MetadataLocation.String, viewName, ns)
+
 	return viewMetadata, nil
 }
