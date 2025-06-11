@@ -34,10 +34,25 @@ type UpdateSchema struct {
 	deletes map[int]struct{}
 	updates map[int]*iceberg.NestedField
 	adds    map[int][]*iceberg.NestedField
+	moves   map[int][]moveReq // ← NEW (key = parent-field-id, −1 for root)
 
 	allowIncompatibleChanges bool
 	identifierFields         map[string]struct{}
 	caseSensitive            bool
+}
+
+type moveOp string
+
+const (
+	OpFirst  moveOp = "first"
+	OpBefore moveOp = "before"
+	OpAfter  moveOp = "after"
+)
+
+type moveReq struct {
+	fieldID      int
+	otherFieldID int // 0 when opFirst
+	op           moveOp
 }
 
 func NewUpdateSchema(txn *Transaction, s *iceberg.Schema, lastColumnID int) *UpdateSchema {
@@ -48,6 +63,7 @@ func NewUpdateSchema(txn *Transaction, s *iceberg.Schema, lastColumnID int) *Upd
 		deletes:                  make(map[int]struct{}),
 		updates:                  make(map[int]*iceberg.NestedField),
 		adds:                     make(map[int][]*iceberg.NestedField),
+		moves:                    make(map[int][]moveReq),
 		lastColumnID:             lastColumnID,
 		allowIncompatibleChanges: false,
 		identifierFields:         make(map[string]struct{}),
@@ -62,6 +78,12 @@ func (us *UpdateSchema) AllowIncompatibleChanges() *UpdateSchema {
 	return us
 }
 
+// AddColumn adds a new column to the schema.
+// usage:
+// a is a struct/list/map b is a sub field of a
+//
+// us.AddColumn([]string{"a","b"}, true, iceberg.StringType{}, "doc", "default")
+// us.AddColumn([]string{"a","b"}, true, iceberg.StringType{}, "doc", "default")
 func (us *UpdateSchema) AddColumn(path []string, required bool, dataType iceberg.Type, doc string, initialDefault any) (*UpdateSchema, error) {
 	if len(path) == 0 {
 		return nil, fmt.Errorf("AddColumn: path must contain at least the new column name")
@@ -127,6 +149,14 @@ type ColumnUpdate struct {
 	Required *bool        // nil means no change
 }
 
+// UpdateColumn updates a column in the schema.
+// usage:
+// a is a struct/list/map b is a sub field of a
+//
+// us.UpdateColumn([]string{"a","b"}, ColumnUpdate{Type: iceberg.StringType{}})
+// us.UpdateColumn([]string{"a","b"}, ColumnUpdate{Doc: "doc"})
+// us.UpdateColumn([]string{"a","b"}, ColumnUpdate{Default: "default"})
+// us.UpdateColumn([]string{"a","b"}, ColumnUpdate{Required: true})
 func (us *UpdateSchema) UpdateColumn(path []string, updates ColumnUpdate) (*UpdateSchema, error) {
 	field := us.findForUpdate(path)
 	if field == nil {
@@ -189,6 +219,9 @@ func (us *UpdateSchema) UpdateColumn(path []string, updates ColumnUpdate) (*Upda
 }
 
 // DeleteColumn removes a column from the schema.
+// usage:
+// us.DeleteColumn([]string{"a","b"})
+// us.DeleteColumn([]string{"a","b","c"})
 func (us *UpdateSchema) DeleteColumn(path []string) (*UpdateSchema, error) {
 	field := us.findField(path)
 	if field == nil {
@@ -208,8 +241,68 @@ func (us *UpdateSchema) DeleteColumn(path []string) (*UpdateSchema, error) {
 	return us, nil
 }
 
+// Move re-orders a column relative to its siblings.
+//
+//	op = OpFirst             → column becomes first in its struct
+//	op = OpBefore / OpAfter  → place column before / after anotherColumn
+//
+// Paths use the same slice notation as Add/Update/Delete (["a","b"]) which means "a.b".
+// usage:
+//
+//	us.Move([]string{"a","b"}, []string{"c"}, OpBefore)
+//	us.Move([]string{"a","b"}, []string{"c"}, OpAfter)
+//	us.Move([]string{"a","b"}, []string{"c"}, OpFirst)
+//
+//	us.Move([]string{"a","b"}, []string{"c"}, OpBefore)
+func (us *UpdateSchema) Move(column, anotherColumn []string, op moveOp) (*UpdateSchema, error) {
+
+	colField := us.findFieldIncludingAdded(column)
+	if colField == nil {
+		return nil, fmt.Errorf("cannot move missing column: %s", strings.Join(column, "."))
+	}
+
+	parentID := us.parentIDForPath(column)
+
+	var otherID int
+	if op == OpBefore || op == OpAfter {
+		other := us.findFieldIncludingAdded(anotherColumn)
+		if other == nil {
+			return nil, fmt.Errorf("reference column for move not found: %s", strings.Join(anotherColumn, "."))
+		}
+		if us.parentIDForPath(anotherColumn) != parentID {
+			return nil, fmt.Errorf("cannot move column across different parent structs")
+		}
+		otherID = other.ID
+		if otherID == colField.ID {
+			return nil, fmt.Errorf("cannot move column relative to itself")
+		}
+	}
+
+	us.moves[parentID] = append(us.moves[parentID], moveReq{
+		fieldID:      colField.ID,
+		otherFieldID: otherID,
+		op:           op,
+	})
+	return us, nil
+}
+
+// parentIDForPath returns the field-id of the direct parent struct
+// (-1 means root level).
+func (us *UpdateSchema) parentIDForPath(path []string) int {
+
+	if len(path) == 1 {
+		return -1
+	}
+
+	if f := us.findFieldIncludingAdded(path[:len(path)-1]); f != nil {
+		return f.ID
+	}
+
+	return -1
+}
+
 func (us *UpdateSchema) findForUpdate(path []string) *iceberg.NestedField {
-	existing := us.findField(path)
+	existing := us.findFieldIncludingAdded(path)
 	if existing != nil {
 		if update, ok := us.updates[existing.ID]; ok {
 			return update
@@ -221,11 +314,26 @@ func (us *UpdateSchema) findForUpdate(path []string) *iceberg.NestedField {
 		return existing
 	}
 
-	// Check in added fields if no existing field found
-	for _, addedFields := range us.adds {
-		for _, add := range addedFields {
-			if add.Name == path[len(path)-1] {
-				return add
+	return nil
+}
+
+// findFieldIncludingAdded finds a field by path, including both existing fields and newly added fields
+func (us *UpdateSchema) findFieldIncludingAdded(path []string) *iceberg.NestedField {
+	// First try to find in existing schema
+	if field := us.findField(path); field != nil {
+		return field
+	}
+
+	// If not found in existing schema, search in added fields
+	// For now, we only support top-level added fields in move operations
+	if len(path) == 1 {
+		colName := path[0]
+		for _, addedFields := range us.adds {
+			for _, add := range addedFields {
+				if (us.caseSensitive && add.Name == colName) ||
+					(!us.caseSensitive && strings.EqualFold(add.Name, colName)) {
+					return add
+				}
 			}
 		}
 	}
@@ -292,7 +400,10 @@ func allowedPromotion(oldType, newType iceberg.Type) bool {
 }
 
 func (u *UpdateSchema) applyChanges() *iceberg.Schema {
-	newFields := rebuild(u.schema.AsStruct().FieldList, -1, u)
+	newFields, err := rebuild(u.schema.AsStruct().FieldList, -1, u)
+	if err != nil {
+		panic(err)
+	}
 
 	idList := u.schema.IdentifierFieldIDs
 	newID := u.schema.ID + 1
@@ -300,32 +411,46 @@ func (u *UpdateSchema) applyChanges() *iceberg.Schema {
 	return iceberg.NewSchemaWithIdentifiers(newID, idList, newFields...)
 }
 
-func rebuild(fields []iceberg.NestedField, parentID int, u *UpdateSchema) []iceberg.NestedField {
+func rebuild(fields []iceberg.NestedField, parentID int, us *UpdateSchema) ([]iceberg.NestedField, error) {
 	var out []iceberg.NestedField
 
+	//iterate over the current fields to apply updates and deletes and if struct, list or map, we call rebuild for the fields in them recursively
 	for _, f := range fields {
-		if _, gone := u.deletes[f.ID]; gone {
+		if _, gone := us.deletes[f.ID]; gone {
 			continue
 		}
-		if upd, ok := u.updates[f.ID]; ok {
+		if upd, ok := us.updates[f.ID]; ok {
 			f = *upd
 		}
 		switch t := f.Type.(type) {
+
 		case *iceberg.StructType:
-			f.Type = &iceberg.StructType{FieldList: rebuild(t.Fields(), f.ID, u)}
+			fields, err := rebuild(t.Fields(), f.ID, us)
+			if err != nil {
+				return nil, fmt.Errorf("error rebuilding struct type: %w", err)
+			}
+			f.Type = &iceberg.StructType{FieldList: fields}
+
 		case *iceberg.ListType:
 			el := t.ElementField()
-			elSlice := rebuild([]iceberg.NestedField{el}, el.ID, u)
-			el = elSlice[0]
+			fields, err := rebuild([]iceberg.NestedField{el}, el.ID, us)
+			if err != nil {
+				return nil, fmt.Errorf("error rebuilding list type: %w", err)
+			}
+			el = fields[0]
 			f.Type = &iceberg.ListType{
 				ElementID:       el.ID,
 				Element:         el.Type,
 				ElementRequired: el.Required,
 			}
+
 		case *iceberg.MapType:
 			val := t.ValueField()
-			valSlice := rebuild([]iceberg.NestedField{val}, val.ID, u)
-			val = valSlice[0]
+			fields, err := rebuild([]iceberg.NestedField{val}, val.ID, us)
+			if err != nil {
+				return nil, fmt.Errorf("error rebuilding list type: %w", err)
+			}
+			val = fields[0]
 			f.Type = &iceberg.MapType{
 				KeyID:         t.KeyField().ID,
 				KeyType:       t.KeyField().Type,
@@ -337,12 +462,66 @@ func rebuild(fields []iceberg.NestedField, parentID int, u *UpdateSchema) []iceb
 		out = append(out, f)
 	}
 
-	// append new children for this parent
-	for _, nf := range u.adds[parentID] {
+	// append new children for this parent id (-1 means root)
+	for _, nf := range us.adds[parentID] {
 		out = append(out, *nf)
 	}
 
-	return out
+	//check if there are any moves for this parent id (-1 means root)
+	if reqs := us.moves[parentID]; len(reqs) > 0 {
+		var err error
+		out, err = reorder(out, reqs)
+		if err != nil {
+			return nil, fmt.Errorf("error reordering fields: %w", err)
+		}
+	}
+
+	return out, nil
+}
+
+func reorder(fields []iceberg.NestedField, reqs []moveReq) ([]iceberg.NestedField, error) {
+	//find the index of a field by its id
+	indexOf := func(id int) int {
+		for i, f := range fields {
+			if f.ID == id {
+				return i
+			}
+		}
+		return -1
+	}
+
+	for _, m := range reqs {
+		pos := indexOf(m.fieldID)
+		if pos == -1 {
+			continue // field might have been deleted
+		}
+
+		f := fields[pos]
+		fields = append(fields[:pos], fields[pos+1:]...)
+
+		switch m.op {
+		case OpFirst:
+			fields = append([]iceberg.NestedField{f}, fields...)
+		case OpBefore:
+			idx := indexOf(m.otherFieldID)
+			if idx == -1 {
+				return nil, fmt.Errorf("move-before target not found at commit time")
+			}
+			fields = append(fields[:idx],
+				append([]iceberg.NestedField{f}, fields[idx:]...)...)
+		case OpAfter:
+			idx := indexOf(m.otherFieldID)
+			if idx == -1 {
+				return nil, fmt.Errorf("move-after target not found at commit time")
+			}
+			fields = append(fields[:idx+1],
+				append([]iceberg.NestedField{f}, fields[idx+1:]...)...)
+		default:
+			return nil, fmt.Errorf("unknown move op: %s", m.op)
+		}
+	}
+
+	return fields, nil
 }
 
 func validateDefaultValue(typ iceberg.Type, val any) error {
@@ -401,19 +580,4 @@ func literalFromAny(v any) (iceberg.Literal, error) {
 func (us *UpdateSchema) isDeleted(id int) bool {
 	_, ok := us.deletes[id]
 	return ok
-}
-
-func stringPtr(s string) *string {
-
-	return &s
-}
-
-func boolPtr(b bool) *bool {
-
-	return &b
-}
-
-func anyPtr(a any) *any {
-
-	return &a
 }

@@ -303,7 +303,7 @@ func TestUpdateSchemaUpdateColumnDoc(t *testing.T) {
 	t.Run("update documentation", func(t *testing.T) {
 		newDoc := "Updated documentation"
 		updated, err := updateSchema.UpdateColumn([]string{"name"}, ColumnUpdate{
-			Doc: stringPtr(newDoc),
+			Doc: &newDoc,
 		})
 		require.NoError(t, err)
 		require.NotNil(t, updated)
@@ -317,15 +317,16 @@ func TestUpdateSchemaUpdateColumnDoc(t *testing.T) {
 	t.Run("update with same doc should not error", func(t *testing.T) {
 		sameDoc := "old doc"
 		updated, err := updateSchema.UpdateColumn([]string{"name"}, ColumnUpdate{
-			Doc: stringPtr(sameDoc),
+			Doc: &sameDoc,
 		})
 		require.NoError(t, err)
 		require.NotNil(t, updated)
 	})
 
 	t.Run("update non-existent column should fail", func(t *testing.T) {
+		newDoc := "new doc"
 		_, err := updateSchema.UpdateColumn([]string{"nonexistent"}, ColumnUpdate{
-			Doc: stringPtr("new doc"),
+			Doc: &newDoc,
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "Cannot update missing column")
@@ -397,6 +398,7 @@ func TestUpdateSchemaRequireColumn(t *testing.T) {
 		require.True(t, found)
 		assert.True(t, field.Required)
 	})
+
 }
 
 func TestUpdateSchemaMakeColumnOptional(t *testing.T) {
@@ -420,6 +422,7 @@ func TestUpdateSchemaMakeColumnOptional(t *testing.T) {
 		require.True(t, found)
 		assert.False(t, field.Required)
 	})
+
 }
 
 func TestUpdateSchemaAllowIncompatibleChanges(t *testing.T) {
@@ -443,6 +446,7 @@ func TestUpdateSchemaAllowIncompatibleChanges(t *testing.T) {
 		assert.True(t, field.Required)
 		assert.Nil(t, field.InitialDefault)
 	})
+
 }
 
 func TestUpdateSchemaAssignNewColumnID(t *testing.T) {
@@ -462,6 +466,7 @@ func TestUpdateSchemaAssignNewColumnID(t *testing.T) {
 		assert.Equal(t, 3, id2)
 		assert.Equal(t, 4, id3)
 	})
+
 }
 
 func TestUpdateSchemaFindField(t *testing.T) {
@@ -496,6 +501,7 @@ func TestUpdateSchemaFindField(t *testing.T) {
 		require.NotNil(t, field)
 		assert.Equal(t, "Name", field.Name)
 	})
+
 }
 
 func TestUpdateSchemaApplyChanges(t *testing.T) {
@@ -513,9 +519,10 @@ func TestUpdateSchemaApplyChanges(t *testing.T) {
 		updated, err := updateSchema.AddColumn([]string{"email"}, false, iceberg.PrimitiveTypes.String, "User email", nil)
 		require.NoError(t, err)
 
+		doc := "Updated name field"
 		// Update documentation
 		updated, err = updated.UpdateColumn([]string{"name"}, ColumnUpdate{
-			Doc: stringPtr("Updated name field"),
+			Doc: &doc,
 		})
 		require.NoError(t, err)
 
@@ -547,6 +554,224 @@ func TestUpdateSchemaApplyChanges(t *testing.T) {
 		_, found = newSchema.FindFieldByName("id")
 		assert.True(t, found)
 	})
+
+}
+
+func TestUpdateSchemaMove(t *testing.T) {
+	// Create a more complex schema with nested structures for comprehensive testing
+	addressType := &iceberg.StructType{
+		FieldList: []iceberg.NestedField{
+			{ID: 5, Name: "street", Type: iceberg.PrimitiveTypes.String, Required: true},
+			{ID: 6, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: true},
+			{ID: 7, Name: "zip_code", Type: iceberg.PrimitiveTypes.String, Required: false},
+		},
+	}
+
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Required: true, Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "name", Required: true, Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "age", Required: false, Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 4, Name: "address", Required: false, Type: addressType},
+		iceberg.NestedField{ID: 8, Name: "email", Required: false, Type: iceberg.PrimitiveTypes.String},
+	)
+
+	txn := &Transaction{}
+
+	t.Run("move column to first position", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 8)
+
+		// Move 'email' to first position
+		updated, err := updateSchema.Move([]string{"email"}, nil, OpFirst)
+		require.NoError(t, err)
+		require.NotNil(t, updated)
+
+		newSchema := updated.Apply()
+		fields := newSchema.AsStruct().FieldList
+
+		// Email should now be first
+		assert.Equal(t, "email", fields[0].Name)
+		assert.Equal(t, "id", fields[1].Name)
+		assert.Equal(t, "name", fields[2].Name)
+		assert.Equal(t, "age", fields[3].Name)
+		assert.Equal(t, "address", fields[4].Name)
+	})
+
+	t.Run("move column before another column", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 8)
+
+		// Move 'email' before 'name'
+		updated, err := updateSchema.Move([]string{"email"}, []string{"name"}, OpBefore)
+		require.NoError(t, err)
+		require.NotNil(t, updated)
+
+		newSchema := updated.Apply()
+		fields := newSchema.AsStruct().FieldList
+
+		// Email should now be before name
+		assert.Equal(t, "id", fields[0].Name)
+		assert.Equal(t, "email", fields[1].Name)
+		assert.Equal(t, "name", fields[2].Name)
+		assert.Equal(t, "age", fields[3].Name)
+		assert.Equal(t, "address", fields[4].Name)
+	})
+
+	t.Run("move column after another column", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 8)
+
+		// Move 'age' after 'name'
+		updated, err := updateSchema.Move([]string{"age"}, []string{"name"}, OpAfter)
+		require.NoError(t, err)
+		require.NotNil(t, updated)
+
+		newSchema := updated.Apply()
+		fields := newSchema.AsStruct().FieldList
+
+		// Age should now be after name
+		assert.Equal(t, "id", fields[0].Name)
+		assert.Equal(t, "name", fields[1].Name)
+		assert.Equal(t, "age", fields[2].Name)
+		assert.Equal(t, "address", fields[3].Name)
+		assert.Equal(t, "email", fields[4].Name)
+	})
+
+	t.Run("move nested column within struct", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 8)
+
+		// Move 'zip_code' to first position within address struct
+		updated, err := updateSchema.Move([]string{"address", "zip_code"}, nil, OpFirst)
+		require.NoError(t, err)
+		require.NotNil(t, updated)
+
+		newSchema := updated.Apply()
+		addressField, found := newSchema.FindFieldByName("address")
+		require.True(t, found)
+
+		addressStruct, ok := addressField.Type.(*iceberg.StructType)
+		require.True(t, ok)
+
+		// zip_code should now be first in the struct
+		assert.Equal(t, "zip_code", addressStruct.FieldList[0].Name)
+		assert.Equal(t, "street", addressStruct.FieldList[1].Name)
+		assert.Equal(t, "city", addressStruct.FieldList[2].Name)
+	})
+
+	t.Run("move nested column before another nested column", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 8)
+
+		// Move 'city' before 'street' within address struct
+		updated, err := updateSchema.Move([]string{"address", "city"}, []string{"address", "street"}, OpBefore)
+		require.NoError(t, err)
+		require.NotNil(t, updated)
+
+		newSchema := updated.Apply()
+		addressField, found := newSchema.FindFieldByName("address")
+		require.True(t, found)
+
+		addressStruct, ok := addressField.Type.(*iceberg.StructType)
+		require.True(t, ok)
+
+		// city should now be before street
+		assert.Equal(t, "city", addressStruct.FieldList[0].Name)
+		assert.Equal(t, "street", addressStruct.FieldList[1].Name)
+		assert.Equal(t, "zip_code", addressStruct.FieldList[2].Name)
+	})
+
+	t.Run("multiple moves in same update", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 8)
+
+		// Move email to first
+		updated, err := updateSchema.Move([]string{"email"}, nil, OpFirst)
+		require.NoError(t, err)
+
+		// Then move age after name
+		updated, err = updated.Move([]string{"age"}, []string{"name"}, OpAfter)
+		require.NoError(t, err)
+
+		newSchema := updated.Apply()
+		fields := newSchema.AsStruct().FieldList
+
+		// Verify both moves were applied
+		assert.Equal(t, "email", fields[0].Name)
+		assert.Equal(t, "id", fields[1].Name)
+		assert.Equal(t, "name", fields[2].Name)
+		assert.Equal(t, "age", fields[3].Name)
+		assert.Equal(t, "address", fields[4].Name)
+	})
+
+	t.Run("move non-existent column should fail", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 8)
+
+		_, err := updateSchema.Move([]string{"nonexistent"}, []string{"name"}, OpBefore)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot move missing column")
+	})
+
+	t.Run("move before non-existent reference column should fail", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 8)
+
+		_, err := updateSchema.Move([]string{"email"}, []string{"nonexistent"}, OpBefore)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "reference column for move not found")
+	})
+
+	t.Run("move after non-existent reference column should fail", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 8)
+
+		_, err := updateSchema.Move([]string{"email"}, []string{"nonexistent"}, OpAfter)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "reference column for move not found")
+	})
+
+	t.Run("move column relative to itself should fail", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 8)
+
+		_, err := updateSchema.Move([]string{"email"}, []string{"email"}, OpBefore)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot move column relative to itself")
+	})
+
+	t.Run("move columns with different parents should fail", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 8)
+
+		// Try to move a top-level column relative to a nested column
+		_, err := updateSchema.Move([]string{"email"}, []string{"address", "street"}, OpBefore)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot move column across different parent structs")
+	})
+
+	t.Run("move with add and delete operations", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 8)
+
+		// Add a new column
+		updated, err := updateSchema.AddColumn([]string{"phone"}, false, iceberg.PrimitiveTypes.String, "Phone number", nil)
+		require.NoError(t, err)
+
+		// Delete a column
+		updated, err = updated.DeleteColumn([]string{"age"})
+		require.NoError(t, err)
+
+		// Move the new column to first position
+		updated, err = updated.Move([]string{"phone"}, nil, OpFirst)
+		require.NoError(t, err)
+
+		// Move email before name
+		updated, err = updated.Move([]string{"email"}, []string{"name"}, OpBefore)
+		require.NoError(t, err)
+
+		newSchema := updated.Apply()
+		fields := newSchema.AsStruct().FieldList
+
+		// Verify all operations were applied correctly
+		assert.Equal(t, "phone", fields[0].Name)
+		assert.Equal(t, "id", fields[1].Name)
+		assert.Equal(t, "email", fields[2].Name)
+		assert.Equal(t, "name", fields[3].Name)
+		assert.Equal(t, "address", fields[4].Name)
+
+		// Verify age was deleted
+		_, found := newSchema.FindFieldByName("age")
+		assert.False(t, found)
+	})
 }
 
 // Helper function to create mock metadata for testing
@@ -556,4 +781,14 @@ func createMockMetadata(schema *iceberg.Schema, lastColumnID int) Metadata {
 		schema:       schema,
 		lastColumnID: lastColumnID,
 	}
+}
+
+// Helper function to create a pointer to any value
+func anyPtr(v any) *any {
+	return &v
+}
+
+func boolPtr(b bool) *bool {
+
+	return &b
 }
