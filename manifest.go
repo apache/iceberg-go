@@ -956,6 +956,7 @@ func (p *partitionFieldStats[T]) update(value any) (err error) {
 			p.max = &actualVal
 		}
 	}
+
 	return nil
 }
 
