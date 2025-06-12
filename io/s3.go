@@ -26,7 +26,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -57,21 +56,8 @@ const (
 	S3ForceVirtualAddressing = "s3.force-virtual-addressing"
 )
 
-var unsupportedS3Props = []string{
-	S3ConnectTimeout,
-}
-
 // ParseAWSConfig parses S3 properties and returns a configuration.
 func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, error) {
-	// If any unsupported properties are set, return an error.
-	for k := range props {
-		if k == S3ConnectTimeout {
-			continue // no need to error for timeout prop
-		} else if slices.Contains(unsupportedS3Props, k) {
-			return nil, fmt.Errorf("unsupported S3 property %q", k)
-		}
-	}
-
 	opts := []func(*config.LoadOptions) error{}
 
 	if tok, ok := props["token"]; ok {
@@ -119,8 +105,9 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 
 		// Get auth token if configured
 		authToken := props[S3SignerAuthToken]
+		timeoutStr := props[S3ConnectTimeout]
 
-		remoteSigningTransport := newRemoteSigningTransport(baseTransport, signerURI, region, authToken)
+		remoteSigningTransport := newRemoteSigningTransport(baseTransport, signerURI, region, authToken, timeoutStr)
 		httpClient := &http.Client{
 			Transport: remoteSigningTransport,
 		}
@@ -225,14 +212,20 @@ type remoteSigningTransport struct {
 }
 
 // newRemoteSigningTransport creates a new remote signing transport
-func newRemoteSigningTransport(base http.RoundTripper, signerURI, region, authToken string) *remoteSigningTransport {
+func newRemoteSigningTransport(base http.RoundTripper, signerURI, region, authToken, timeoutStr string) *remoteSigningTransport {
+
+	timeout := 30 // default timeout in seconds
+	if t, err := strconv.Atoi(timeoutStr); timeoutStr != "" && err == nil {
+		timeout = t
+	}
+
 	return &remoteSigningTransport{
 		base:      base,
 		signerURI: signerURI,
 		region:    region,
 		authToken: authToken,
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: time.Duration(timeout) * time.Second,
 		},
 	}
 }
