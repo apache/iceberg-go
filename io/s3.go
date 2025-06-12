@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -240,7 +241,7 @@ func (r *remoteSigningTransport) RoundTrip(req *http.Request) (*http.Response, e
 	// Get signed headers from remote signer
 	signedHeaders, err := r.getRemoteSignature(req.Context(), req.Method, req.URL.String(), r.extractHeaders(req))
 	if err != nil {
-		fmt.Printf("\033[31m%s\033[0m\n", err.Error()) // fails silently
+		log.Printf("ERROR: Failed to get remote signature: %v", err) // fails silently
 		return nil, fmt.Errorf("failed to get remote signature: %w", err)
 	}
 
