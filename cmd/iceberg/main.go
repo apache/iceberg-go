@@ -162,7 +162,7 @@ func main() {
 		if len(cfg.Cred) > 0 {
 			opts = append(opts, rest.WithCredential(cfg.Cred))
 		}
-		if fileCfg != nil && &fileCfg.RestConfig != nil {
+		if fileCfg != nil {
 			restCfg := fileCfg.RestConfig
 			if restCfg.SigV4Enabled {
 				opts = append(opts, rest.WithSigV4())
