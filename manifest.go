@@ -844,7 +844,7 @@ func (v2writerImpl) prepareEntry(entry *manifestEntry, snapshotID int64) (Manife
 
 type fieldStats interface {
 	toSummary() FieldSummary
-	update(value any)
+	update(value any) error
 }
 
 type partitionFieldStats[T LiteralType] struct {
@@ -856,34 +856,34 @@ type partitionFieldStats[T LiteralType] struct {
 	cmp Comparator[T]
 }
 
-func newPartitionFieldStat(typ PrimitiveType) fieldStats {
+func newPartitionFieldStat(typ PrimitiveType) (fieldStats, error) {
 	switch typ.(type) {
 	case Int32Type:
-		return &partitionFieldStats[int32]{cmp: getComparator[int32]()}
+		return &partitionFieldStats[int32]{cmp: getComparator[int32]()}, nil
 	case Int64Type:
-		return &partitionFieldStats[int64]{cmp: getComparator[int64]()}
+		return &partitionFieldStats[int64]{cmp: getComparator[int64]()}, nil
 	case Float32Type:
-		return &partitionFieldStats[float32]{cmp: getComparator[float32]()}
+		return &partitionFieldStats[float32]{cmp: getComparator[float32]()}, nil
 	case Float64Type:
-		return &partitionFieldStats[float64]{cmp: getComparator[float64]()}
+		return &partitionFieldStats[float64]{cmp: getComparator[float64]()}, nil
 	case StringType:
-		return &partitionFieldStats[string]{cmp: getComparator[string]()}
+		return &partitionFieldStats[string]{cmp: getComparator[string]()}, nil
 	case DateType:
-		return &partitionFieldStats[Date]{cmp: getComparator[Date]()}
+		return &partitionFieldStats[Date]{cmp: getComparator[Date]()}, nil
 	case TimeType:
-		return &partitionFieldStats[Time]{cmp: getComparator[Time]()}
+		return &partitionFieldStats[Time]{cmp: getComparator[Time]()}, nil
 	case TimestampType:
-		return &partitionFieldStats[Timestamp]{cmp: getComparator[Timestamp]()}
+		return &partitionFieldStats[Timestamp]{cmp: getComparator[Timestamp]()}, nil
 	case UUIDType:
-		return &partitionFieldStats[uuid.UUID]{cmp: getComparator[uuid.UUID]()}
+		return &partitionFieldStats[uuid.UUID]{cmp: getComparator[uuid.UUID]()}, nil
 	case BinaryType:
-		return &partitionFieldStats[[]byte]{cmp: getComparator[[]byte]()}
+		return &partitionFieldStats[[]byte]{cmp: getComparator[[]byte]()}, nil
 	case FixedType:
-		return &partitionFieldStats[[]byte]{cmp: getComparator[[]byte]()}
+		return &partitionFieldStats[[]byte]{cmp: getComparator[[]byte]()}, nil
 	case DecimalType:
-		return &partitionFieldStats[Decimal]{cmp: getComparator[Decimal]()}
+		return &partitionFieldStats[Decimal]{cmp: getComparator[Decimal]()}, nil
 	default:
-		panic(fmt.Sprintf("expected primitive type for partition type: %s", typ))
+		return nil, fmt.Errorf("expected primitive type for partition type: %s", typ)
 	}
 }
 
@@ -914,7 +914,7 @@ func (p *partitionFieldStats[T]) toSummary() FieldSummary {
 	}
 }
 
-func (p *partitionFieldStats[T]) update(value any) {
+func (p *partitionFieldStats[T]) update(value any) (err error) {
 	if value == nil {
 		p.containsNull = true
 
@@ -924,7 +924,7 @@ func (p *partitionFieldStats[T]) update(value any) {
 	var actualVal T
 	v := reflect.ValueOf(value)
 	if !v.CanConvert(reflect.TypeOf(actualVal)) {
-		panic(fmt.Sprintf("expected type %T, got %T", actualVal, value))
+		return fmt.Errorf("expected type %T, got %T", actualVal, value)
 	}
 
 	actualVal = v.Convert(reflect.TypeOf(actualVal)).Interface().(T)
@@ -956,18 +956,24 @@ func (p *partitionFieldStats[T]) update(value any) {
 			p.max = &actualVal
 		}
 	}
+
+	return nil
 }
 
 func constructPartitionSummaries(spec PartitionSpec, schema *Schema, partitions []map[int]any) ([]FieldSummary, error) {
 	partType := spec.PartitionType(schema)
 	fieldStats := make([]fieldStats, len(partType.FieldList))
+	var err error
 	for i, field := range partType.FieldList {
 		pt, ok := field.Type.(PrimitiveType)
 		if !ok {
 			return nil, fmt.Errorf("expected primitive type for partition field, got %s", field.Type)
 		}
 
-		fieldStats[i] = newPartitionFieldStat(pt)
+		fieldStats[i], err = newPartitionFieldStat(pt)
+		if err != nil {
+			return nil, fmt.Errorf("error constructing field stats for partition %d: %s: %s", i, field.Name, err)
+		}
 	}
 
 	for _, part := range partitions {
