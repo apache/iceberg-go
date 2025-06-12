@@ -78,6 +78,7 @@ Options:
   --output TYPE      	output type (json/text) [default: text]
   --credential TEXT  	specify credentials for the catalog
   --warehouse TEXT   	specify the warehouse to use
+  --scope TEXT       	specify the OAuth scope for authentication [default: catalog]
   --config TEXT      	specify the path to the configuration file
   --description TEXT 	specify a description for the namespace
   --location-uri TEXT  	specify a location URI for the namespace
@@ -120,6 +121,7 @@ type Config struct {
 	Cred        string `docopt:"--credential"`
 	Warehouse   string `docopt:"--warehouse"`
 	Config      string `docopt:"--config"`
+	Scope       string `docopt:"--scope"`
 	Description string `docopt:"--description"`
 	LocationURI string `docopt:"--location-uri"`
 	SchemaStr   string `docopt:"--schema"`
@@ -163,6 +165,10 @@ func main() {
 
 		if len(cfg.Warehouse) > 0 {
 			opts = append(opts, rest.WithWarehouseLocation(cfg.Warehouse))
+		}
+
+		if len(cfg.Scope) > 0 {
+			opts = append(opts, rest.WithScope(cfg.Scope))
 		}
 
 		if cat, err = rest.NewCatalog(ctx, "rest", cfg.URI, opts...); err != nil {
