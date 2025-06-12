@@ -811,6 +811,10 @@ func sliceEqualHelper[T interface{ Equals(T) bool }](s1, s2 []T) bool {
 	})
 }
 
+func equalPtr[T comparable](a, b *T) bool {
+	return a == b || (a != nil && b != nil && *a == *b)
+}
+
 // https://iceberg.apache.org/spec/#iceberg-table-spec
 type commonMetadata struct {
 	FormatVersion      int                     `json:"format-version"`
@@ -877,8 +881,8 @@ func (c *commonMetadata) Equals(other *commonMetadata) bool {
 	}
 
 	return c.FormatVersion == other.FormatVersion && c.UUID == other.UUID &&
-		((c.LastPartitionID == other.LastPartitionID) || (*c.LastPartitionID == *other.LastPartitionID)) &&
-		((c.CurrentSnapshotID == other.CurrentSnapshotID) || (*c.CurrentSnapshotID == *other.CurrentSnapshotID)) &&
+		equalPtr(c.LastPartitionID, other.LastPartitionID) &&
+		equalPtr(c.CurrentSnapshotID, other.CurrentSnapshotID) &&
 		c.Loc == other.Loc && c.LastUpdatedMS == other.LastUpdatedMS &&
 		c.LastColumnId == other.LastColumnId && c.CurrentSchemaID == other.CurrentSchemaID &&
 		c.DefaultSpecID == other.DefaultSpecID && c.DefaultSortOrderID == other.DefaultSortOrderID &&

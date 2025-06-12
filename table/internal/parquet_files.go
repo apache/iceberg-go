@@ -452,7 +452,7 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 			}
 
 			stats, err := colChunk.Statistics()
-			if err != nil {
+			if err != nil || stats == nil {
 				invalidateCol[fieldID] = struct{}{}
 
 				continue
