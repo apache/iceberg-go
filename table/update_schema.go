@@ -154,9 +154,7 @@ type ColumnUpdate struct {
 // a is a struct/list/map b is a sub field of a
 //
 // us.UpdateColumn([]string{"a","b"}, ColumnUpdate{Type: iceberg.StringType{}})
-// us.UpdateColumn([]string{"a","b"}, ColumnUpdate{Doc: "doc"})
-// us.UpdateColumn([]string{"a","b"}, ColumnUpdate{Default: "default"})
-// us.UpdateColumn([]string{"a","b"}, ColumnUpdate{Required: true})
+// us.UpdateColumn([]string{"a","b"}, ColumnUpdate{...})
 func (us *UpdateSchema) UpdateColumn(path []string, updates ColumnUpdate) (*UpdateSchema, error) {
 	field := us.findForUpdate(path)
 	if field == nil {
@@ -254,22 +252,22 @@ func (us *UpdateSchema) DeleteColumn(path []string) (*UpdateSchema, error) {
 //	us.Move([]string{"a","b"}, []string{"c"}, OpFirst)
 //
 //	us.Move([]string{"a","b"}, []string{"c"}, OpBefore)
-func (us *UpdateSchema) Move(column, anotherColumn []string, op moveOp) (*UpdateSchema, error) {
+func (us *UpdateSchema) Move(columnToMove, referenceColumn []string, op moveOp) (*UpdateSchema, error) {
 
-	colField := us.findFieldIncludingAdded(column)
+	colField := us.findFieldIncludingAdded(columnToMove)
 	if colField == nil {
-		return nil, fmt.Errorf("cannot move missing column: %s", strings.Join(column, "."))
+		return nil, fmt.Errorf("cannot move missing column: %s", strings.Join(columnToMove, "."))
 	}
 
-	parentID := us.parentIDForPath(column)
+	parentID := us.parentIDForPath(columnToMove)
 
 	var otherID int
 	if op == OpBefore || op == OpAfter {
-		other := us.findFieldIncludingAdded(anotherColumn)
+		other := us.findFieldIncludingAdded(referenceColumn)
 		if other == nil {
-			return nil, fmt.Errorf("reference column for move not found: %s", strings.Join(anotherColumn, "."))
+			return nil, fmt.Errorf("reference column for move not found: %s", strings.Join(referenceColumn, "."))
 		}
-		if us.parentIDForPath(anotherColumn) != parentID {
+		if us.parentIDForPath(referenceColumn) != parentID {
 			return nil, fmt.Errorf("cannot move column across different parent structs")
 		}
 		otherID = other.ID
