@@ -68,7 +68,7 @@ func TestRemoteSigningTransport(t *testing.T) {
 
 	// Create the remote signing transport
 	baseTransport := &http.Transport{}
-	transport := newRemoteSigningTransport(baseTransport, signerServer.URL, "us-east-1", "")
+	transport := newRemoteSigningTransport(baseTransport, signerServer.URL, "us-east-1", "", "")
 
 	// Create a test request to the mock S3 server
 	req, err := http.NewRequest("GET", s3Server.URL+"/bucket/key", nil)
@@ -153,7 +153,7 @@ func TestRemoteSigningTransport403Error(t *testing.T) {
 
 	// Create the remote signing transport
 	baseTransport := &http.Transport{}
-	transport := newRemoteSigningTransport(baseTransport, signerServer.URL, "us-east-1", "")
+	transport := newRemoteSigningTransport(baseTransport, signerServer.URL, "us-east-1", "", "")
 
 	// Create a test request
 	req, err := http.NewRequest("PUT", "https://example.s3.amazonaws.com/bucket/key", nil)
@@ -182,7 +182,7 @@ func TestRemoteSigningTransport404Error(t *testing.T) {
 	// Create the remote signing transport with a wrong endpoint
 	baseTransport := &http.Transport{}
 	wrongURL := signerServer.URL + "/wrong-path"
-	transport := newRemoteSigningTransport(baseTransport, wrongURL, "us-east-1", "")
+	transport := newRemoteSigningTransport(baseTransport, wrongURL, "us-east-1", "", "")
 
 	// Create a test request
 	req, err := http.NewRequest("GET", "https://example.s3.amazonaws.com/bucket/key", nil)
@@ -226,7 +226,7 @@ func TestRemoteSigningTransportWithAuth(t *testing.T) {
 	// Test with valid auth token
 	t.Run("ValidAuthToken", func(t *testing.T) {
 		baseTransport := &http.Transport{}
-		transport := newRemoteSigningTransport(baseTransport, signerServer.URL, "us-east-1", expectedToken)
+		transport := newRemoteSigningTransport(baseTransport, signerServer.URL, "us-east-1", expectedToken, "")
 
 		req, err := http.NewRequest("GET", "https://example.s3.amazonaws.com/bucket/key", nil)
 		require.NoError(t, err)
@@ -240,7 +240,7 @@ func TestRemoteSigningTransportWithAuth(t *testing.T) {
 	// Test without auth token
 	t.Run("MissingAuthToken", func(t *testing.T) {
 		baseTransport := &http.Transport{}
-		transport := newRemoteSigningTransport(baseTransport, signerServer.URL, "us-east-1", "")
+		transport := newRemoteSigningTransport(baseTransport, signerServer.URL, "us-east-1", "", "")
 
 		req, err := http.NewRequest("GET", "https://example.s3.amazonaws.com/bucket/key", nil)
 		require.NoError(t, err)
