@@ -18,6 +18,7 @@
 package table
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -34,7 +35,7 @@ type UpdateSchema struct {
 	deletes map[int]struct{}
 	updates map[int]*iceberg.NestedField
 	adds    map[int][]*iceberg.NestedField
-	moves   map[int][]moveReq // ← NEW (key = parent-field-id, −1 for root)
+	moves   map[int][]moveReq
 
 	allowIncompatibleChanges bool
 	identifierFields         map[string]struct{}
@@ -253,7 +254,6 @@ func (us *UpdateSchema) DeleteColumn(path []string) (*UpdateSchema, error) {
 //
 //	us.Move([]string{"a","b"}, []string{"c"}, OpBefore)
 func (us *UpdateSchema) Move(columnToMove, referenceColumn []string, op moveOp) (*UpdateSchema, error) {
-
 	colField := us.findFieldIncludingAdded(columnToMove)
 	if colField == nil {
 		return nil, fmt.Errorf("cannot move missing column: %s", strings.Join(columnToMove, "."))
@@ -578,4 +578,82 @@ func literalFromAny(v any) (iceberg.Literal, error) {
 func (us *UpdateSchema) isDeleted(id int) bool {
 	_, ok := us.deletes[id]
 	return ok
+}
+
+func (us *UpdateSchema) Commit() error {
+	updates, requirements, err := us.CommitUpdates()
+	if err != nil {
+		return err
+	}
+
+	if len(updates) == 0 {
+		return nil
+	}
+
+	return us.txn.apply(updates, requirements)
+}
+
+// CommitUpdates returns the updates and requirements needed
+func (us *UpdateSchema) CommitUpdates() ([]Update, []Requirement, error) {
+	// If there are no changes, return nil updates and requirements
+	if !(len(us.deletes) > 0 || len(us.updates) > 0 || len(us.adds) > 0 || len(us.moves) > 0) {
+		return nil, nil, nil
+	}
+
+	newSchema := us.applyChanges()
+
+	// Check if equivalent schema exists
+	existingSchemaID := us.findExistingSchemaInTransaction(newSchema)
+
+	var updates []Update
+	var requirements []Requirement
+
+	// for Commit Contention
+	requirements = append(requirements, AssertCurrentSchemaID(us.schema.ID))
+
+	if existingSchemaID == nil {
+		updates = append(updates,
+			NewAddSchemaUpdate(newSchema, us.lastColumnID, false),
+			NewSetCurrentSchemaUpdate(newSchema.ID),
+		)
+	} else {
+		updates = append(updates, NewSetCurrentSchemaUpdate(*existingSchemaID))
+	}
+
+	if nameMapUpdates := us.getNameMappingUpdates(newSchema); len(nameMapUpdates) > 0 {
+		updates = append(updates, nameMapUpdates...)
+	}
+
+	return updates, requirements, nil
+}
+
+func (us *UpdateSchema) findExistingSchemaInTransaction(newSchema *iceberg.Schema) *int {
+
+	for _, schema := range us.txn.tbl.metadata.Schemas() {
+		if newSchema.Equals(schema) {
+			return &schema.ID
+		}
+	}
+
+	return nil
+}
+
+func (us *UpdateSchema) getNameMappingUpdates(newSchema *iceberg.Schema) []Update {
+	// Only update name mapping if we have adds/updates that might need it
+	if len(us.adds) == 0 && len(us.updates) == 0 {
+		return nil
+	}
+
+	completeMapping := newSchema.NameMapping()
+
+	mappingJson, err := json.Marshal(completeMapping)
+	if err != nil {
+		return nil
+	}
+
+	return []Update{
+		NewSetPropertiesUpdate(iceberg.Properties{
+			DefaultNameMappingKey: string(mappingJson),
+		}),
+	}
 }
