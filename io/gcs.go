@@ -21,6 +21,8 @@ import (
 	"context"
 	"net/url"
 
+	"cloud.google.com/go/storage"
+
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/gcsblob"
 	"gocloud.dev/gcp"
@@ -29,9 +31,10 @@ import (
 
 // Constants for GCS configuration options
 const (
-	GCSEndpoint = "gcs.endpoint"
-	GCSKeyPath  = "gcs.keypath"
-	GCSJSONKey  = "gcs.jsonkey"
+	GCSEndpoint   = "gcs.endpoint"
+	GCSKeyPath    = "gcs.keypath"
+	GCSJSONKey    = "gcs.jsonkey"
+	GCSUseJsonAPI = "gcs.usejsonapi" // set to anything to enable
 )
 
 // ParseGCSConfig parses GCS properties and returns a configuration.
@@ -46,6 +49,9 @@ func ParseGCSConfig(props map[string]string) *gcsblob.Options {
 	if path := props[GCSKeyPath]; path != "" {
 		o = append(o, option.WithCredentialsFile(path))
 	}
+	if _, ok := props[GCSUseJsonAPI]; ok {
+		o = append(o, storage.WithJSONReads())
+	}
 
 	return &gcsblob.Options{
 		ClientOptions: o,
@@ -55,7 +61,20 @@ func ParseGCSConfig(props map[string]string) *gcsblob.Options {
 // Construct a GCS bucket from a URL
 func createGCSBucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
 	gcscfg := ParseGCSConfig(props)
-	client := gcp.NewAnonymousHTTPClient(gcp.DefaultTransport())
+	creds, _ := gcp.DefaultCredentials(ctx)
+	var client *gcp.HTTPClient
+	if creds == nil {
+		client = gcp.NewAnonymousHTTPClient(gcp.DefaultTransport())
+	} else {
+		var err error
+		client, err = gcp.NewHTTPClient(
+			gcp.DefaultTransport(),
+			gcp.CredentialsTokenSource(creds))
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	bucket, err := gcsblob.OpenBucket(ctx, client, parsed.Host, gcscfg)
 	if err != nil {
 		return nil, err
