@@ -885,30 +885,13 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 	return r.tableFromResponse(ctx, ident, ret.Metadata, ret.MetadataLoc, config)
 }
 
-func (r *Catalog) DropTableOld(ctx context.Context, identifier table.Identifier) error {
-	ns, tbl, err := splitIdentForPath(identifier)
-	if err != nil {
-		return err
-	}
-
-	_, err = doDelete[struct{}](ctx, r.baseURI, []string{"namespaces", ns, "tables", tbl}, r.cl,
-		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable})
-
-	return err
-}
-
 func (r *Catalog) DropTable(ctx context.Context, identifier table.Identifier) error {
 	ns, tbl, err := splitIdentForPath(identifier)
 	if err != nil {
 		return err
 	}
 
-	uri := r.baseURI.JoinPath("namespaces", ns, "tables", tbl)
-	v := url.Values{}
-	v.Set("purgeRequested", "true")
-	uri.RawQuery = v.Encode()
-
-	_, err = doDelete[struct{}](ctx, uri, []string{}, r.cl,
+	_, err = doDelete[struct{}](ctx, r.baseURI, []string{"namespaces", ns, "tables", tbl}, r.cl,
 		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable})
 
 	return err
