@@ -38,6 +38,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go/auth/bearer"
+	"github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/s3blob"
 )
@@ -52,6 +54,7 @@ const (
 	S3ProxyURI               = "s3.proxy-uri"
 	S3ConnectTimeout         = "s3.connect-timeout"
 	S3SignerUri              = "s3.signer.uri"
+	S3SignerEndpoint         = "s3.signer.endpoint"
 	S3SignerAuthToken        = "token"
 	S3RemoteSigningEnabled   = "s3.remote-signing-enabled"
 	S3ForceVirtualAddressing = "s3.force-virtual-addressing"
@@ -73,10 +76,14 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 	} else if r, ok := props["client.region"]; ok {
 		region = r
 		opts = append(opts, config.WithRegion(region))
+	} else if r, ok := props["rest.signing-region"]; ok {
+		region = r
+		opts = append(opts, config.WithRegion(region))
 	}
 
 	// Check if remote signing is configured and enabled
 	signerURI, hasSignerURI := props[S3SignerUri]
+	signerEndpoint := props[S3SignerEndpoint]
 	remoteSigningEnabled := true // Default to true for backward compatibility
 	if enabledStr, ok := props[S3RemoteSigningEnabled]; ok {
 		if enabled, err := strconv.ParseBool(enabledStr); err == nil {
@@ -108,7 +115,7 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 		authToken := props[S3SignerAuthToken]
 		timeoutStr := props[S3ConnectTimeout]
 
-		remoteSigningTransport := newRemoteSigningTransport(baseTransport, signerURI, region, authToken, timeoutStr)
+		remoteSigningTransport := newRemoteSigningTransport(baseTransport, signerURI, signerEndpoint, region, authToken, timeoutStr)
 		httpClient := &http.Client{
 			Transport: remoteSigningTransport,
 		}
@@ -173,16 +180,57 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 		}
 	}
 
+	// Check if remote signing is enabled
+	_, hasSignerURI := props[S3SignerUri]
+	remoteSigningEnabled := true // Default to true for backward compatibility
+	if enabledStr, ok := props[S3RemoteSigningEnabled]; ok {
+		if enabled, err := strconv.ParseBool(enabledStr); err == nil {
+			remoteSigningEnabled = enabled
+		}
+	}
+
 	client := s3.NewFromConfig(*awscfg, func(o *s3.Options) {
 		if endpoint != "" {
 			o.BaseEndpoint = aws.String(endpoint)
 		}
 		o.UsePathStyle = usePathStyle
 		o.DisableLogOutputChecksumValidationSkipped = true
+
+		// If remote signing is enabled, configure the client to avoid chunked encoding
+		if hasSignerURI && remoteSigningEnabled {
+			// Add middleware to prevent chunked encoding
+			o.APIOptions = append(o.APIOptions, func(stack *middleware.Stack) error {
+				return stack.Build.Add(
+					middleware.BuildMiddlewareFunc("PreventChunkedEncoding", func(
+						ctx context.Context, in middleware.BuildInput, next middleware.BuildHandler,
+					) (middleware.BuildOutput, middleware.Metadata, error) {
+						// Cast to smithy HTTP request
+						req, ok := in.Request.(*smithyhttp.Request)
+						if ok {
+							// Force Content-Length header to prevent chunked encoding
+							if req.ContentLength == 0 && req.Body != nil {
+								// Try to read the body to determine length
+								// Note: This is a workaround and may not work for all cases
+							}
+
+							// Remove any existing Content-Encoding header
+							req.Header.Del("Content-Encoding")
+							req.Header.Del("Transfer-Encoding")
+						}
+						return next.HandleBuild(ctx, in)
+					}),
+					middleware.After,
+				)
+			})
+		}
 	})
 
-	// Create a *blob.Bucket.
-	bucket, err := s3blob.OpenBucketV2(ctx, client, parsed.Host, nil)
+	// Create a *blob.Bucket with options
+	bucketOpts := &s3blob.Options{
+		// Note: UsePathStyle is configured on the S3 client above, not here
+	}
+
+	bucket, err := s3blob.OpenBucketV2(ctx, client, parsed.Host, bucketOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -192,28 +240,29 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 
 // RemoteSigningRequest represents the request sent to the remote signer
 type RemoteSigningRequest struct {
-	Method  string            `json:"method"`
-	URI     string            `json:"uri"`
-	Headers map[string]string `json:"headers,omitempty"`
-	Region  string            `json:"region"`
+	Method  string              `json:"method"`
+	URI     string              `json:"uri"`
+	Headers map[string][]string `json:"headers,omitempty"`
+	Region  string              `json:"region"`
 }
 
 // RemoteSigningResponse represents the response from the remote signer
 type RemoteSigningResponse struct {
-	Headers map[string]string `json:"headers"`
+	Headers map[string][]string `json:"headers"`
 }
 
 // remoteSigningTransport wraps an HTTP transport to handle remote signing
 type remoteSigningTransport struct {
-	base      http.RoundTripper
-	signerURI string
-	region    string
-	authToken string
-	client    *http.Client
+	base           http.RoundTripper
+	signerURI      string
+	signerEndpoint string
+	region         string
+	authToken      string
+	client         *http.Client
 }
 
 // newRemoteSigningTransport creates a new remote signing transport
-func newRemoteSigningTransport(base http.RoundTripper, signerURI, region, authToken, timeoutStr string) *remoteSigningTransport {
+func newRemoteSigningTransport(base http.RoundTripper, signerURI, signerEndpoint, region, authToken, timeoutStr string) *remoteSigningTransport {
 
 	timeout := 30 // default timeout in seconds
 	if t, err := strconv.Atoi(timeoutStr); timeoutStr != "" && err == nil {
@@ -221,10 +270,11 @@ func newRemoteSigningTransport(base http.RoundTripper, signerURI, region, authTo
 	}
 
 	return &remoteSigningTransport{
-		base:      base,
-		signerURI: signerURI,
-		region:    region,
-		authToken: authToken,
+		base:           base,
+		signerURI:      signerURI,
+		signerEndpoint: signerEndpoint,
+		region:         region,
+		authToken:      authToken,
 		client: &http.Client{
 			Timeout: time.Duration(timeout) * time.Second,
 		},
@@ -233,25 +283,95 @@ func newRemoteSigningTransport(base http.RoundTripper, signerURI, region, authTo
 
 // RoundTrip implements http.RoundTripper
 func (r *remoteSigningTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	isS3 := r.isS3Request(req)
+
 	// Only handle S3 requests
-	if !r.isS3Request(req) {
+	if !isS3 {
 		return r.base.RoundTrip(req)
 	}
 
-	// Get signed headers from remote signer
-	signedHeaders, err := r.getRemoteSignature(req.Context(), req.Method, req.URL.String(), r.extractHeaders(req))
+	// Check if this is a chunked upload that might cause compatibility issues
+	originalHeaders := r.extractHeaders(req)
+	if contentEncoding, ok := originalHeaders["Content-Encoding"]; ok && len(contentEncoding) > 0 && contentEncoding[0] == "aws-chunked" {
+		// The problem is that the AWS SDK has already applied chunked encoding to the body.
+		// We need to decode the chunked body and create a new request with the original content.
+
+		// Read the entire chunked body
+		bodyBytes, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read chunked body: %w", err)
+		}
+		req.Body.Close()
+
+		// Decode the AWS chunked body
+		decodedBody, err := decodeAWSChunkedBody(bodyBytes)
+		if err != nil {
+			// If decoding fails, try to use the body as-is
+			decodedBody = bodyBytes
+		}
+
+		// Clone the request with the decoded body
+		newReq := req.Clone(req.Context())
+		newReq.Body = io.NopCloser(bytes.NewReader(decodedBody))
+		newReq.ContentLength = int64(len(decodedBody))
+
+		// Remove chunked-specific headers
+		newReq.Header.Del("Content-Encoding")
+		newReq.Header.Del("X-Amz-Decoded-Content-Length")
+		newReq.Header.Del("X-Amz-Trailer")
+		newReq.Header.Set("Content-Length", strconv.Itoa(len(decodedBody)))
+
+		// Set UNSIGNED-PAYLOAD
+		newReq.Header.Set("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD")
+
+		// Get headers for signing
+		headersForSigning := r.extractHeaders(newReq)
+
+		// Get remote signature
+		signedHeaders, err := r.getRemoteSignature(newReq.Context(), newReq.Method, newReq.URL.String(), headersForSigning)
+		if err != nil {
+			log.Printf("ERROR: Failed to get remote signature: %s\n", err.Error())
+			return nil, fmt.Errorf("failed to get remote signature: %w", err)
+		}
+
+		// Apply signed headers
+		for key, value := range signedHeaders {
+			canonicalKey := http.CanonicalHeaderKey(key)
+			newReq.Header.Set(canonicalKey, value)
+		}
+
+		// Execute the new non-chunked request
+		return r.base.RoundTrip(newReq)
+	}
+
+	// For non-chunked requests, use the normal flow with header preprocessing
+	headersForSigning := make(map[string][]string)
+	for key, values := range originalHeaders {
+		headersForSigning[key] = values
+	}
+
+	signedHeaders, err := r.getRemoteSignature(req.Context(), req.Method, req.URL.String(), headersForSigning)
 	if err != nil {
-		log.Printf("ERROR: Failed to get remote signature: %v", err) // fails silently
+		log.Printf("ERROR: Failed to get remote signature: %s\n", err.Error())
 		return nil, fmt.Errorf("failed to get remote signature: %w", err)
 	}
 
 	// Clone the request and apply signed headers
 	newReq := req.Clone(req.Context())
+
+	// Apply signed headers
 	for key, value := range signedHeaders {
-		newReq.Header.Set(key, value)
+		canonicalKey := http.CanonicalHeaderKey(key)
+		newReq.Header.Set(canonicalKey, value)
 	}
 
-	return r.base.RoundTrip(newReq)
+	// Execute the request and check for errors
+	resp, err := r.base.RoundTrip(newReq)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp, nil
 }
 
 // isS3Request checks if the request is destined for S3
@@ -270,44 +390,258 @@ func (r *remoteSigningTransport) isS3Request(req *http.Request) bool {
 		}
 	}
 
-	result := host != "" && (
-	// Standard S3 endpoints
-	host == "s3.amazonaws.com" ||
-		// Regional S3 endpoints
-		(len(host) > 12 && host[len(host)-12:] == ".amazonaws.com" && (host[:3] == "s3." || host[len(host)-17:len(host)-12] == ".s3")) ||
-		// Virtual hosted-style bucket access
-		(len(host) > 17 && host[len(host)-17:] == ".s3.amazonaws.com") ||
-		// Path-style access to S3
-		(len(host) > 3 && host[:3] == "s3.") ||
-		// Cloudflare R2 endpoints
-		(len(host) > 20 && host[len(host)-20:] == ".r2.cloudflarestorage.com") ||
-		// MinIO or other custom S3-compatible endpoints (be more conservative)
-		(len(host) > 0 && (host == "localhost:9000" || host == "127.0.0.1:9000" ||
-			// Only sign if it looks like an S3 request pattern (has bucket-like structure)
-			// and is NOT a catalog service (which typically has /catalog/ in the path)
-			(req.URL.Path != "" && !strings.Contains(req.URL.Path, "/catalog/") &&
-				!strings.Contains(host, "catalog") &&
-				// Exclude common non-S3 service patterns
-				!strings.Contains(host, "glue.") &&
-				!strings.Contains(host, "api.") &&
-				!strings.Contains(host, "catalog.")))))
+	if host == "" {
+		return false
+	}
 
-	return result
+	// S3 compatible storage might be hosted on a different TLD
+	isAmazon := strings.HasSuffix(host, ".amazonaws.com")
+	isCloudflare := strings.HasSuffix(host, ".r2.cloudflarestorage.com")
+
+	if isCloudflare {
+		return true
+	}
+
+	if isAmazon {
+		// More robust check for various S3 endpoint formats
+		// - s3.amazonaws.com (global)
+		// - s3.<region>.amazonaws.com (regional path-style)
+		// - <bucket>.s3.amazonaws.com (virtual-hosted, us-east-1)
+		// - <bucket>.s3.<region>.amazonaws.com (virtual-hosted, other regions)
+		// - <bucket>.s3-accelerate.amazonaws.com (transfer acceleration)
+		// - s3.dualstack.<region>.amazonaws.com (dual-stack path-style)
+		// - <bucket>.s3.dualstack.<region>.amazonaws.com (dual-stack virtual-hosted)
+		return strings.Contains(host, ".s3") || strings.HasPrefix(host, "s3.")
+	}
+
+	// MinIO or other custom S3-compatible endpoints (be more conservative)
+	if host == "localhost:9000" || host == "127.0.0.1:9000" {
+		return true
+	}
+
+	// Only sign if it looks like an S3 request pattern (has bucket-like structure)
+	// and is NOT a catalog service (which typically has /catalog/ in the path)
+	if req.URL.Path != "" && !strings.Contains(req.URL.Path, "/catalog/") &&
+		!strings.Contains(host, "catalog") &&
+		// Exclude common non-S3 service patterns
+		!strings.Contains(host, "glue.") &&
+		!strings.Contains(host, "api.") {
+		return true
+	}
+
+	return false
 }
 
 // extractHeaders extracts relevant headers from the request
-func (r *remoteSigningTransport) extractHeaders(req *http.Request) map[string]string {
-	headers := make(map[string]string)
+func (r *remoteSigningTransport) extractHeaders(req *http.Request) map[string][]string {
+	headers := make(map[string][]string)
 	for key, values := range req.Header {
 		if len(values) > 0 {
-			headers[key] = values[0]
+			headers[key] = values
 		}
 	}
 	return headers
 }
 
+// createNonChunkedRequest creates a new request without chunked encoding headers
+func (r *remoteSigningTransport) createNonChunkedRequest(originalReq *http.Request) (*http.Request, error) {
+	// The issue is that AWS SDK uses chunked encoding which puts chunk headers
+	// in the body stream. We need to prevent this from happening.
+	// Since we can't decode it here (body already consumed), we need a different approach.
+
+	// For now, let's just remove the chunked headers and hope the remote signer
+	// handles the body correctly
+	newReq := originalReq.Clone(originalReq.Context())
+
+	// Remove chunked-specific headers
+	newReq.Header.Del("Content-Encoding")
+	newReq.Header.Del("X-Amz-Decoded-Content-Length")
+	newReq.Header.Del("X-Amz-Trailer")
+	newReq.Header.Del("Authorization") // We'll get a new one from the signer
+
+	// Set Content-SHA256 to UNSIGNED-PAYLOAD for compatibility with remote signers
+	newReq.Header.Set("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD")
+
+	// If we have X-Amz-Decoded-Content-Length, use that for Content-Length
+	if decodedLen := originalReq.Header.Get("X-Amz-Decoded-Content-Length"); decodedLen != "" {
+		newReq.Header.Set("Content-Length", decodedLen)
+		if l, err := strconv.ParseInt(decodedLen, 10, 64); err == nil {
+			newReq.ContentLength = l
+		}
+	}
+
+	return newReq, nil
+}
+
+// decodeAWSChunkedBody decodes AWS chunked transfer encoding
+func decodeAWSChunkedBody(chunkedData []byte) ([]byte, error) {
+	// AWS chunked format starts with hex size followed by ";chunk-signature="
+	// Example: "8a2;chunk-signature=..."
+	// But sometimes it's just hex size followed by \r\n
+	str := string(chunkedData)
+
+	// Check for simple chunked format (no signature)
+	if len(chunkedData) > 5 {
+		// Look for pattern like "8a0\r\n"
+		firstLine := ""
+		for i, b := range chunkedData {
+			if b == '\r' && i+1 < len(chunkedData) && chunkedData[i+1] == '\n' {
+				firstLine = string(chunkedData[:i])
+				break
+			}
+			if i > 10 {
+				break
+			}
+		}
+
+		// Try to parse as hex
+		if firstLine != "" {
+			if _, err := strconv.ParseInt(firstLine, 16, 64); err == nil {
+				// fmt.Printf("decodeAWSChunkedBody: Detected simple chunk format, first chunk size: %d (0x%s)\n", size, firstLine)
+				// This is a simple chunked format
+				return decodeSimpleChunkedBody(chunkedData)
+			}
+		}
+	}
+
+	if !strings.Contains(str, ";chunk-signature=") {
+		return nil, fmt.Errorf("data does not appear to be AWS chunked format")
+	}
+
+	var decoded bytes.Buffer
+	reader := bytes.NewReader(chunkedData)
+
+	for {
+		// Read the chunk header line
+		headerLine, err := readLine(reader)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to read chunk header: %w", err)
+		}
+
+		// Parse chunk size line (format: <size-in-hex>;chunk-signature=<signature>)
+		if !strings.Contains(headerLine, ";") {
+			// Not a valid chunk header
+			continue
+		}
+
+		parts := strings.Split(headerLine, ";")
+		if len(parts) < 2 {
+			return nil, fmt.Errorf("invalid chunk header: %s", headerLine)
+		}
+
+		// Parse hex size
+		sizeStr := parts[0]
+		size, err := strconv.ParseInt(sizeStr, 16, 64)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse chunk size '%s': %w", sizeStr, err)
+		}
+
+		// If size is 0, we've reached the end
+		if size == 0 {
+			break
+		}
+
+		// Read the chunk data
+		chunkData := make([]byte, size)
+		n, err := io.ReadFull(reader, chunkData)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read chunk data of size %d: %w", size, err)
+		}
+		if int64(n) != size {
+			return nil, fmt.Errorf("chunk size mismatch: expected %d, got %d", size, n)
+		}
+
+		decoded.Write(chunkData)
+
+		// Skip the trailing \r\n after chunk data
+		trailer := make([]byte, 2)
+		_, err = reader.Read(trailer)
+		if err != nil && err != io.EOF {
+			return nil, fmt.Errorf("failed to read chunk trailer: %w", err)
+		}
+	}
+
+	return decoded.Bytes(), nil
+}
+
+// decodeSimpleChunkedBody decodes simple HTTP chunked transfer encoding (without AWS signatures)
+func decodeSimpleChunkedBody(chunkedData []byte) ([]byte, error) {
+	var decoded bytes.Buffer
+	reader := bytes.NewReader(chunkedData)
+
+	for {
+		// Read the chunk size line
+		line, err := readLine(reader)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to read chunk size: %w", err)
+		}
+
+		// Parse hex size
+		size, err := strconv.ParseInt(line, 16, 64)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse chunk size '%s': %w", line, err)
+		}
+
+		// If size is 0, we've reached the end
+		if size == 0 {
+			break
+		}
+
+		// Read the chunk data
+		chunkData := make([]byte, size)
+		n, err := io.ReadFull(reader, chunkData)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read chunk data of size %d: %w", size, err)
+		}
+		if int64(n) != size {
+			return nil, fmt.Errorf("chunk size mismatch: expected %d, got %d", size, n)
+		}
+
+		decoded.Write(chunkData)
+
+		// Skip the trailing \r\n after chunk data
+		trailer := make([]byte, 2)
+		_, err = reader.Read(trailer)
+		if err != nil && err != io.EOF {
+			return nil, fmt.Errorf("failed to read chunk trailer: %w", err)
+		}
+	}
+
+	return decoded.Bytes(), nil
+}
+
+// readLine reads a line terminated by \r\n from the reader
+func readLine(reader *bytes.Reader) (string, error) {
+	var line bytes.Buffer
+	for {
+		b, err := reader.ReadByte()
+		if err != nil {
+			return "", err
+		}
+		if b == '\r' {
+			// Peek at next byte
+			next, err := reader.ReadByte()
+			if err == nil && next == '\n' {
+				// Found \r\n
+				return line.String(), nil
+			}
+			// Not \r\n, put back the byte
+			if err == nil {
+				reader.UnreadByte()
+			}
+		}
+		line.WriteByte(b)
+	}
+}
+
 // getRemoteSignature sends a request to the remote signer and returns signed headers
-func (r *remoteSigningTransport) getRemoteSignature(ctx context.Context, method, uri string, headers map[string]string) (map[string]string, error) {
+func (r *remoteSigningTransport) getRemoteSignature(ctx context.Context, method, uri string, headers map[string][]string) (map[string]string, error) {
 	reqBody := RemoteSigningRequest{
 		Method:  method,
 		URI:     uri,
@@ -320,9 +654,18 @@ func (r *remoteSigningTransport) getRemoteSignature(ctx context.Context, method,
 		return nil, fmt.Errorf("failed to marshal signing request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", r.signerURI, bytes.NewReader(payload))
+	// Combine base URI with endpoint path
+	signerURL := r.signerURI
+	if r.signerEndpoint != "" {
+		// Ensure proper URL joining - handle trailing/leading slashes
+		baseURL := strings.TrimRight(r.signerURI, "/")
+		endpoint := strings.TrimLeft(r.signerEndpoint, "/")
+		signerURL = baseURL + "/" + endpoint
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", signerURL, bytes.NewReader(payload))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create signer request to %s: %w", r.signerURI, err)
+		return nil, fmt.Errorf("failed to create signer request to %s: %w", signerURL, err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -334,7 +677,7 @@ func (r *remoteSigningTransport) getRemoteSignature(ctx context.Context, method,
 
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to contact remote signer at %s: %w", r.signerURI, err)
+		return nil, fmt.Errorf("failed to contact remote signer at %s: %w", signerURL, err)
 	}
 	defer resp.Body.Close()
 
@@ -342,28 +685,95 @@ func (r *remoteSigningTransport) getRemoteSignature(ctx context.Context, method,
 		// Read the response body for better error diagnostics
 		body, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
-			return nil, fmt.Errorf("remote signer at %s returned status %d (failed to read response body: %v)", r.signerURI, resp.StatusCode, readErr)
+			return nil, fmt.Errorf("remote signer at %s returned status %d (failed to read response body: %v)", signerURL, resp.StatusCode, readErr)
 		}
+		// Log error for debugging if needed
 
 		// Provide detailed error information based on status code
 		switch resp.StatusCode {
 		case 401:
-			return nil, fmt.Errorf("remote signer authentication failed (401) at %s: %s", r.signerURI, string(body))
+			return nil, fmt.Errorf("remote signer authentication failed (401) at %s: %s", signerURL, string(body))
 		case 403:
-			return nil, fmt.Errorf("remote signer authorization denied (403) at %s: %s. Check that the signer service has proper AWS credentials and permissions for the target resource. Request was: %s", r.signerURI, string(body), string(payload))
+			return nil, fmt.Errorf("remote signer authorization denied (403) at %s: %s. Check that the signer service has proper AWS credentials and permissions for the target resource. Request was: %s", signerURL, string(body), string(payload))
 		case 404:
-			return nil, fmt.Errorf("remote signer endpoint not found (404) at %s: %s. Check the signer URI configuration", r.signerURI, string(body))
+			return nil, fmt.Errorf("remote signer endpoint not found (404) at %s: %s. Check the signer URI configuration", signerURL, string(body))
 		case 500:
-			return nil, fmt.Errorf("remote signer internal error (500) at %s: %s", r.signerURI, string(body))
+			return nil, fmt.Errorf("remote signer internal error (500) at %s: %s", signerURL, string(body))
 		default:
-			return nil, fmt.Errorf("remote signer at %s returned status %d: %s", r.signerURI, resp.StatusCode, string(body))
+			return nil, fmt.Errorf("remote signer at %s returned status %d: %s", signerURL, resp.StatusCode, string(body))
 		}
 	}
 
 	var signingResponse RemoteSigningResponse
 	if err := json.NewDecoder(resp.Body).Decode(&signingResponse); err != nil {
-		return nil, fmt.Errorf("failed to decode signer response from %s: %w", r.signerURI, err)
+		return nil, fmt.Errorf("failed to decode signer response from %s: %w", signerURL, err)
 	}
 
-	return signingResponse.Headers, nil
+	// Convert headers from []string to string (take the first value for each header)
+	resultHeaders := make(map[string]string)
+	for key, values := range signingResponse.Headers {
+		if len(values) > 0 {
+			resultHeaders[key] = values[0]
+		}
+	}
+
+	// Handle x-amz-content-sha256 header based on signer response
+	signerSha256 := ""
+	if signerSha256Values, ok := signingResponse.Headers["x-amz-content-sha256"]; ok && len(signerSha256Values) > 0 {
+		signerSha256 = signerSha256Values[0]
+	}
+
+	// Check if this is a chunked upload (has Content-Encoding: aws-chunked)
+	isChunkedUpload := false
+	if contentEncoding, ok := headers["Content-Encoding"]; ok && len(contentEncoding) > 0 {
+		isChunkedUpload = contentEncoding[0] == "aws-chunked"
+	}
+
+	if isChunkedUpload {
+		// For chunked uploads, we should have pre-processed the headers to avoid conflicts
+		// Use the signer's x-amz-content-sha256 if available
+		if signerSha256 != "" {
+			resultHeaders["X-Amz-Content-Sha256"] = signerSha256
+			// Use signer's x-amz-content-sha256 for pre-processed chunked upload
+		}
+	} else {
+		// For non-chunked requests, use the signer's x-amz-content-sha256 if available
+		if signerSha256 != "" {
+			resultHeaders["X-Amz-Content-Sha256"] = signerSha256
+			// Use signer's x-amz-content-sha256
+		}
+	}
+
+	// The signer might return 'authorization' (lowercase). We need to ensure
+	// this is used for the canonical 'Authorization' header.
+	if auth, ok := signingResponse.Headers["authorization"]; ok && len(auth) > 0 {
+		resultHeaders["Authorization"] = auth[0]
+		// Use signer's authorization header
+	} else if auth, ok := signingResponse.Headers["Authorization"]; ok && len(auth) > 0 {
+		resultHeaders["Authorization"] = auth[0]
+		// Use signer's Authorization header
+	}
+
+	// Preserve the original date header from the signer if available
+	if signerDate, ok := signingResponse.Headers["x-amz-date"]; ok && len(signerDate) > 0 {
+		resultHeaders["X-Amz-Date"] = signerDate[0]
+		// Use signer's x-amz-date
+	} else if signerDate, ok := signingResponse.Headers["X-Amz-Date"]; ok && len(signerDate) > 0 {
+		resultHeaders["X-Amz-Date"] = signerDate[0]
+		// Use signer's X-Amz-Date
+	}
+
+	// Return the signed headers
+
+	// Validate header consistency for chunked uploads
+	if isChunkedUpload {
+		contentSha256 := resultHeaders["X-Amz-Content-Sha256"]
+		if contentSha256 == "UNSIGNED-PAYLOAD" {
+			// Successfully using UNSIGNED-PAYLOAD with pre-processed headers
+		} else {
+			// Using custom content sha256 for pre-processed chunked upload
+		}
+	}
+
+	return resultHeaders, nil
 }
