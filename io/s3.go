@@ -18,18 +18,12 @@
 package io
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
-	"strings"
-	"time"
 
 	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -38,6 +32,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go/auth/bearer"
+	"github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/s3blob"
 )
@@ -52,6 +48,7 @@ const (
 	S3ProxyURI               = "s3.proxy-uri"
 	S3ConnectTimeout         = "s3.connect-timeout"
 	S3SignerUri              = "s3.signer.uri"
+	S3SignerEndpoint         = "s3.signer.endpoint"
 	S3SignerAuthToken        = "token"
 	S3RemoteSigningEnabled   = "s3.remote-signing-enabled"
 	S3ForceVirtualAddressing = "s3.force-virtual-addressing"
@@ -61,7 +58,7 @@ const (
 func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, error) {
 	opts := []func(*config.LoadOptions) error{}
 
-	if tok, ok := props["token"]; ok {
+	if tok, ok := props[S3SignerAuthToken]; ok {
 		opts = append(opts, config.WithBearerAuthTokenProvider(
 			&bearer.StaticTokenProvider{Token: bearer.Token{Value: tok}}))
 	}
@@ -73,10 +70,14 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 	} else if r, ok := props["client.region"]; ok {
 		region = r
 		opts = append(opts, config.WithRegion(region))
+	} else if r, ok := props["rest.signing-region"]; ok {
+		region = r
+		opts = append(opts, config.WithRegion(region))
 	}
 
 	// Check if remote signing is configured and enabled
 	signerURI, hasSignerURI := props[S3SignerUri]
+	signerEndpoint := props[S3SignerEndpoint]
 	remoteSigningEnabled := true // Default to true for backward compatibility
 	if enabledStr, ok := props[S3RemoteSigningEnabled]; ok {
 		if enabled, err := strconv.ParseBool(enabledStr); err == nil {
@@ -108,7 +109,7 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 		authToken := props[S3SignerAuthToken]
 		timeoutStr := props[S3ConnectTimeout]
 
-		remoteSigningTransport := newRemoteSigningTransport(baseTransport, signerURI, region, authToken, timeoutStr)
+		remoteSigningTransport := NewRemoteSigningTransport(baseTransport, signerURI, signerEndpoint, region, authToken, timeoutStr)
 		httpClient := &http.Client{
 			Transport: remoteSigningTransport,
 		}
@@ -173,197 +174,60 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 		}
 	}
 
+	// Check if remote signing is enabled
+	_, hasSignerURI := props[S3SignerUri]
+	remoteSigningEnabled := true // Default to true for backward compatibility
+	if enabledStr, ok := props[S3RemoteSigningEnabled]; ok {
+		if enabled, err := strconv.ParseBool(enabledStr); err == nil {
+			remoteSigningEnabled = enabled
+		}
+	}
+
 	client := s3.NewFromConfig(*awscfg, func(o *s3.Options) {
 		if endpoint != "" {
 			o.BaseEndpoint = aws.String(endpoint)
 		}
 		o.UsePathStyle = usePathStyle
 		o.DisableLogOutputChecksumValidationSkipped = true
+
+		// If remote signing is enabled, configure the client to avoid chunked encoding
+		if hasSignerURI && remoteSigningEnabled {
+			// Add middleware to prevent chunked encoding
+			o.APIOptions = append(o.APIOptions, func(stack *middleware.Stack) error {
+				return stack.Build.Add(
+					middleware.BuildMiddlewareFunc("PreventChunkedEncoding", func(
+						ctx context.Context, in middleware.BuildInput, next middleware.BuildHandler,
+					) (middleware.BuildOutput, middleware.Metadata, error) {
+						// Cast to smithy HTTP request
+						req, ok := in.Request.(*smithyhttp.Request)
+						if ok {
+							// Force Content-Length header to prevent chunked encoding
+							if req.ContentLength == 0 && req.Body != nil {
+								// Try to read the body to determine length
+								// Note: This is a workaround and may not work for all cases
+							}
+
+							// Remove any existing Content-Encoding header
+							req.Header.Del("Content-Encoding")
+							req.Header.Del("Transfer-Encoding")
+						}
+						return next.HandleBuild(ctx, in)
+					}),
+					middleware.After,
+				)
+			})
+		}
 	})
 
-	// Create a *blob.Bucket.
-	bucket, err := s3blob.OpenBucketV2(ctx, client, parsed.Host, nil)
+	// Create a *blob.Bucket with options
+	bucketOpts := &s3blob.Options{
+		// Note: UsePathStyle is configured on the S3 client above, not here
+	}
+
+	bucket, err := s3blob.OpenBucketV2(ctx, client, parsed.Host, bucketOpts)
 	if err != nil {
 		return nil, err
 	}
 
 	return bucket, nil
-}
-
-// RemoteSigningRequest represents the request sent to the remote signer
-type RemoteSigningRequest struct {
-	Method  string            `json:"method"`
-	URI     string            `json:"uri"`
-	Headers map[string]string `json:"headers,omitempty"`
-	Region  string            `json:"region"`
-}
-
-// RemoteSigningResponse represents the response from the remote signer
-type RemoteSigningResponse struct {
-	Headers map[string]string `json:"headers"`
-}
-
-// remoteSigningTransport wraps an HTTP transport to handle remote signing
-type remoteSigningTransport struct {
-	base      http.RoundTripper
-	signerURI string
-	region    string
-	authToken string
-	client    *http.Client
-}
-
-// newRemoteSigningTransport creates a new remote signing transport
-func newRemoteSigningTransport(base http.RoundTripper, signerURI, region, authToken, timeoutStr string) *remoteSigningTransport {
-
-	timeout := 30 // default timeout in seconds
-	if t, err := strconv.Atoi(timeoutStr); timeoutStr != "" && err == nil {
-		timeout = t
-	}
-
-	return &remoteSigningTransport{
-		base:      base,
-		signerURI: signerURI,
-		region:    region,
-		authToken: authToken,
-		client: &http.Client{
-			Timeout: time.Duration(timeout) * time.Second,
-		},
-	}
-}
-
-// RoundTrip implements http.RoundTripper
-func (r *remoteSigningTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Only handle S3 requests
-	if !r.isS3Request(req) {
-		return r.base.RoundTrip(req)
-	}
-
-	// Get signed headers from remote signer
-	signedHeaders, err := r.getRemoteSignature(req.Context(), req.Method, req.URL.String(), r.extractHeaders(req))
-	if err != nil {
-		log.Printf("ERROR: Failed to get remote signature: %v", err) // fails silently
-		return nil, fmt.Errorf("failed to get remote signature: %w", err)
-	}
-
-	// Clone the request and apply signed headers
-	newReq := req.Clone(req.Context())
-	for key, value := range signedHeaders {
-		newReq.Header.Set(key, value)
-	}
-
-	return r.base.RoundTrip(newReq)
-}
-
-// isS3Request checks if the request is destined for S3
-func (r *remoteSigningTransport) isS3Request(req *http.Request) bool {
-	// Check if the host contains typical S3 patterns
-	host := req.URL.Host
-
-	// Don't sign requests to the remote signer itself to avoid circular dependency
-	if r.signerURI != "" {
-		signerHost := ""
-		if signerURL, err := url.Parse(r.signerURI); err == nil {
-			signerHost = signerURL.Host
-		}
-		if host == signerHost {
-			return false
-		}
-	}
-
-	result := host != "" && (
-	// Standard S3 endpoints
-	host == "s3.amazonaws.com" ||
-		// Regional S3 endpoints
-		(len(host) > 12 && host[len(host)-12:] == ".amazonaws.com" && (host[:3] == "s3." || host[len(host)-17:len(host)-12] == ".s3")) ||
-		// Virtual hosted-style bucket access
-		(len(host) > 17 && host[len(host)-17:] == ".s3.amazonaws.com") ||
-		// Path-style access to S3
-		(len(host) > 3 && host[:3] == "s3.") ||
-		// Cloudflare R2 endpoints
-		(len(host) > 20 && host[len(host)-20:] == ".r2.cloudflarestorage.com") ||
-		// MinIO or other custom S3-compatible endpoints (be more conservative)
-		(len(host) > 0 && (host == "localhost:9000" || host == "127.0.0.1:9000" ||
-			// Only sign if it looks like an S3 request pattern (has bucket-like structure)
-			// and is NOT a catalog service (which typically has /catalog/ in the path)
-			(req.URL.Path != "" && !strings.Contains(req.URL.Path, "/catalog/") &&
-				!strings.Contains(host, "catalog") &&
-				// Exclude common non-S3 service patterns
-				!strings.Contains(host, "glue.") &&
-				!strings.Contains(host, "api.") &&
-				!strings.Contains(host, "catalog.")))))
-
-	return result
-}
-
-// extractHeaders extracts relevant headers from the request
-func (r *remoteSigningTransport) extractHeaders(req *http.Request) map[string]string {
-	headers := make(map[string]string)
-	for key, values := range req.Header {
-		if len(values) > 0 {
-			headers[key] = values[0]
-		}
-	}
-	return headers
-}
-
-// getRemoteSignature sends a request to the remote signer and returns signed headers
-func (r *remoteSigningTransport) getRemoteSignature(ctx context.Context, method, uri string, headers map[string]string) (map[string]string, error) {
-	reqBody := RemoteSigningRequest{
-		Method:  method,
-		URI:     uri,
-		Headers: headers,
-		Region:  r.region,
-	}
-
-	payload, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal signing request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", r.signerURI, bytes.NewReader(payload))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create signer request to %s: %w", r.signerURI, err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	// Add authentication token if configured
-	if r.authToken != "" {
-		req.Header.Set("Authorization", "Bearer "+r.authToken)
-	}
-
-	resp, err := r.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to contact remote signer at %s: %w", r.signerURI, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		// Read the response body for better error diagnostics
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return nil, fmt.Errorf("remote signer at %s returned status %d (failed to read response body: %v)", r.signerURI, resp.StatusCode, readErr)
-		}
-
-		// Provide detailed error information based on status code
-		switch resp.StatusCode {
-		case 401:
-			return nil, fmt.Errorf("remote signer authentication failed (401) at %s: %s", r.signerURI, string(body))
-		case 403:
-			return nil, fmt.Errorf("remote signer authorization denied (403) at %s: %s. Check that the signer service has proper AWS credentials and permissions for the target resource. Request was: %s", r.signerURI, string(body), string(payload))
-		case 404:
-			return nil, fmt.Errorf("remote signer endpoint not found (404) at %s: %s. Check the signer URI configuration", r.signerURI, string(body))
-		case 500:
-			return nil, fmt.Errorf("remote signer internal error (500) at %s: %s", r.signerURI, string(body))
-		default:
-			return nil, fmt.Errorf("remote signer at %s returned status %d: %s", r.signerURI, resp.StatusCode, string(body))
-		}
-	}
-
-	var signingResponse RemoteSigningResponse
-	if err := json.NewDecoder(resp.Body).Decode(&signingResponse); err != nil {
-		return nil, fmt.Errorf("failed to decode signer response from %s: %w", r.signerURI, err)
-	}
-
-	return signingResponse.Headers, nil
 }

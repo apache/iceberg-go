@@ -44,9 +44,9 @@ func TestRemoteSigningTransport(t *testing.T) {
 
 		// Return mock signed headers
 		response := RemoteSigningResponse{
-			Headers: map[string]string{
-				"Authorization": "AWS4-HMAC-SHA256 Credential=test/20231201/us-east-1/s3/aws4_request",
-				"X-Amz-Date":    "20231201T120000Z",
+			Headers: map[string][]string{
+				"Authorization": {"AWS4-HMAC-SHA256 Credential=test/20231201/us-east-1/s3/aws4_request"},
+				"X-Amz-Date":    {"20231201T120000Z"},
 			},
 		}
 
@@ -68,7 +68,7 @@ func TestRemoteSigningTransport(t *testing.T) {
 
 	// Create the remote signing transport
 	baseTransport := &http.Transport{}
-	transport := newRemoteSigningTransport(baseTransport, signerServer.URL, "us-east-1", "", "")
+	transport := NewRemoteSigningTransport(baseTransport, signerServer.URL, "", "us-east-1", "", "")
 
 	// Create a test request to the mock S3 server
 	req, err := http.NewRequest("GET", s3Server.URL+"/bucket/key", nil)
@@ -86,9 +86,9 @@ func TestParseAWSConfigWithRemoteSigner(t *testing.T) {
 	// Create a mock signer server
 	signerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		response := RemoteSigningResponse{
-			Headers: map[string]string{
-				"Authorization": "AWS4-HMAC-SHA256 Credential=test/20231201/us-east-1/s3/aws4_request",
-				"X-Amz-Date":    "20231201T120000Z",
+			Headers: map[string][]string{
+				"Authorization": {"AWS4-HMAC-SHA256 Credential=test/20231201/us-east-1/s3/aws4_request"},
+				"X-Amz-Date":    {"20231201T120000Z"},
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -121,7 +121,7 @@ func TestParseAWSConfigWithoutRemoteSigner(t *testing.T) {
 }
 
 func TestRemoteSigningTransportIsS3Request(t *testing.T) {
-	transport := &remoteSigningTransport{}
+	transport := &RemoteSigningTransport{}
 
 	tests := []struct {
 		url      string
@@ -153,7 +153,7 @@ func TestRemoteSigningTransport403Error(t *testing.T) {
 
 	// Create the remote signing transport
 	baseTransport := &http.Transport{}
-	transport := newRemoteSigningTransport(baseTransport, signerServer.URL, "us-east-1", "", "")
+	transport := NewRemoteSigningTransport(baseTransport, signerServer.URL, "", "us-east-1", "", "")
 
 	// Create a test request
 	req, err := http.NewRequest("PUT", "https://example.s3.amazonaws.com/bucket/key", nil)
@@ -182,7 +182,7 @@ func TestRemoteSigningTransport404Error(t *testing.T) {
 	// Create the remote signing transport with a wrong endpoint
 	baseTransport := &http.Transport{}
 	wrongURL := signerServer.URL + "/wrong-path"
-	transport := newRemoteSigningTransport(baseTransport, wrongURL, "us-east-1", "", "")
+	transport := NewRemoteSigningTransport(baseTransport, wrongURL, "", "us-east-1", "", "")
 
 	// Create a test request
 	req, err := http.NewRequest("GET", "https://example.s3.amazonaws.com/bucket/key", nil)
@@ -213,9 +213,9 @@ func TestRemoteSigningTransportWithAuth(t *testing.T) {
 
 		// Return signed headers if auth is valid
 		response := RemoteSigningResponse{
-			Headers: map[string]string{
-				"Authorization": "AWS4-HMAC-SHA256 Credential=test/20231201/us-east-1/s3/aws4_request",
-				"X-Amz-Date":    "20231201T120000Z",
+			Headers: map[string][]string{
+				"Authorization": {"AWS4-HMAC-SHA256 Credential=test/20231201/us-east-1/s3/aws4_request"},
+				"X-Amz-Date":    {"20231201T120000Z"},
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -226,7 +226,7 @@ func TestRemoteSigningTransportWithAuth(t *testing.T) {
 	// Test with valid auth token
 	t.Run("ValidAuthToken", func(t *testing.T) {
 		baseTransport := &http.Transport{}
-		transport := newRemoteSigningTransport(baseTransport, signerServer.URL, "us-east-1", expectedToken, "")
+		transport := NewRemoteSigningTransport(baseTransport, signerServer.URL, "", "us-east-1", expectedToken, "")
 
 		req, err := http.NewRequest("GET", "https://example.s3.amazonaws.com/bucket/key", nil)
 		require.NoError(t, err)
@@ -240,7 +240,7 @@ func TestRemoteSigningTransportWithAuth(t *testing.T) {
 	// Test without auth token
 	t.Run("MissingAuthToken", func(t *testing.T) {
 		baseTransport := &http.Transport{}
-		transport := newRemoteSigningTransport(baseTransport, signerServer.URL, "us-east-1", "", "")
+		transport := NewRemoteSigningTransport(baseTransport, signerServer.URL, "", "us-east-1", "", "")
 
 		req, err := http.NewRequest("GET", "https://example.s3.amazonaws.com/bucket/key", nil)
 		require.NoError(t, err)
@@ -262,9 +262,9 @@ func TestParseAWSConfigWithRemoteSignerAuth(t *testing.T) {
 		}
 
 		response := RemoteSigningResponse{
-			Headers: map[string]string{
-				"Authorization": "AWS4-HMAC-SHA256 Credential=test/20231201/us-east-1/s3/aws4_request",
-				"X-Amz-Date":    "20231201T120000Z",
+			Headers: map[string][]string{
+				"Authorization": {"AWS4-HMAC-SHA256 Credential=test/20231201/us-east-1/s3/aws4_request"},
+				"X-Amz-Date":    {"20231201T120000Z"},
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
