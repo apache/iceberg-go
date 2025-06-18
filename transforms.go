@@ -85,6 +85,7 @@ func ParseTransform(s string) (Transform, error) {
 type Transform interface {
 	fmt.Stringer
 	encoding.TextMarshaler
+	CanTransform(t Type) bool
 	ResultType(t Type) Type
 	PreservesOrder() bool
 	Equals(Transform) bool
@@ -104,6 +105,10 @@ func (t IdentityTransform) MarshalText() ([]byte, error) {
 
 func (IdentityTransform) String() string { return "identity" }
 
+func (IdentityTransform) CanTransform(t Type) bool {
+	_, ok := t.(PrimitiveType)
+	return ok
+}
 func (IdentityTransform) ResultType(t Type) Type { return t }
 func (IdentityTransform) PreservesOrder() bool   { return true }
 
@@ -162,6 +167,7 @@ func (t VoidTransform) MarshalText() ([]byte, error) {
 
 func (VoidTransform) String() string { return "void" }
 
+func (VoidTransform) CanTransform(Type) bool { return true }
 func (VoidTransform) ResultType(t Type) Type { return t }
 func (VoidTransform) PreservesOrder() bool   { return false }
 
@@ -195,6 +201,24 @@ func (t BucketTransform) MarshalText() ([]byte, error) {
 
 func (t BucketTransform) String() string { return fmt.Sprintf("bucket[%d]", t.NumBuckets) }
 
+func (BucketTransform) CanTransform(t Type) bool {
+	switch t.(type) {
+	case Int32Type,
+		DateType,
+		Int64Type,
+		TimeType,
+		TimestampType,
+		TimestampTzType,
+		DecimalType,
+		StringType,
+		FixedType,
+		BinaryType,
+		UUIDType:
+		return true
+	default:
+		return false
+	}
+}
 func (BucketTransform) ResultType(Type) Type { return PrimitiveTypes.Int32 }
 func (BucketTransform) PreservesOrder() bool { return false }
 
@@ -356,6 +380,18 @@ func (t TruncateTransform) MarshalText() ([]byte, error) {
 
 func (t TruncateTransform) String() string { return fmt.Sprintf("truncate[%d]", t.Width) }
 
+func (TruncateTransform) CanTransform(t Type) bool {
+	switch t.(type) {
+	case Int32Type,
+		Int64Type,
+		StringType,
+		BinaryType,
+		DecimalType:
+		return true
+	default:
+		return false
+	}
+}
 func (TruncateTransform) ResultType(t Type) Type { return t }
 func (TruncateTransform) PreservesOrder() bool   { return true }
 func (t TruncateTransform) Equals(other Transform) bool {
@@ -518,6 +554,14 @@ type timeTransform interface {
 	Transformer(Type) (func(any) Optional[int32], error)
 }
 
+func canTransformTime(t timeTransform, sourceType Type) bool {
+	switch sourceType.(type) {
+	case DateType, TimestampType, TimestampTzType:
+		return true
+	default:
+		return false
+	}
+}
 func projectTimeTransform(t timeTransform, name string, pred BoundPredicate) (UnboundPredicate, error) {
 	if _, ok := pred.Term().(*BoundTransform); ok {
 		return projectTransformPredicate(t, name, pred)
@@ -553,8 +597,9 @@ func (t YearTransform) MarshalText() ([]byte, error) {
 
 func (YearTransform) String() string { return "year" }
 
-func (YearTransform) ResultType(Type) Type { return PrimitiveTypes.Int32 }
-func (YearTransform) PreservesOrder() bool { return true }
+func (t YearTransform) CanTransform(sourceType Type) bool { return canTransformTime(t, sourceType) }
+func (YearTransform) ResultType(Type) Type                { return PrimitiveTypes.Int32 }
+func (YearTransform) PreservesOrder() bool                { return true }
 
 func (YearTransform) Equals(other Transform) bool {
 	_, ok := other.(YearTransform)
@@ -631,8 +676,9 @@ func (t MonthTransform) MarshalText() ([]byte, error) {
 
 func (MonthTransform) String() string { return "month" }
 
-func (MonthTransform) ResultType(Type) Type { return PrimitiveTypes.Int32 }
-func (MonthTransform) PreservesOrder() bool { return true }
+func (t MonthTransform) CanTransform(sourceType Type) bool { return canTransformTime(t, sourceType) }
+func (MonthTransform) ResultType(Type) Type                { return PrimitiveTypes.Int32 }
+func (MonthTransform) PreservesOrder() bool                { return true }
 
 func (MonthTransform) Equals(other Transform) bool {
 	_, ok := other.(MonthTransform)
@@ -720,8 +766,9 @@ func (t DayTransform) MarshalText() ([]byte, error) {
 
 func (DayTransform) String() string { return "day" }
 
-func (DayTransform) ResultType(Type) Type { return PrimitiveTypes.Int32 }
-func (DayTransform) PreservesOrder() bool { return true }
+func (t DayTransform) CanTransform(sourceType Type) bool { return canTransformTime(t, sourceType) }
+func (DayTransform) ResultType(Type) Type                { return PrimitiveTypes.Int32 }
+func (DayTransform) PreservesOrder() bool                { return true }
 
 func (DayTransform) Equals(other Transform) bool {
 	_, ok := other.(DayTransform)
@@ -798,6 +845,14 @@ func (t HourTransform) MarshalText() ([]byte, error) {
 
 func (HourTransform) String() string { return "hour" }
 
+func (t HourTransform) CanTransform(sourceType Type) bool {
+	switch sourceType.(type) {
+	case TimestampType, TimestampTzType:
+		return true
+	default:
+		return false
+	}
+}
 func (HourTransform) ResultType(Type) Type { return PrimitiveTypes.Int32 }
 func (HourTransform) PreservesOrder() bool { return true }
 
