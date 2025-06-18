@@ -107,6 +107,7 @@ func (IdentityTransform) String() string { return "identity" }
 
 func (IdentityTransform) CanTransform(t Type) bool {
 	_, ok := t.(PrimitiveType)
+
 	return ok
 }
 func (IdentityTransform) ResultType(t Type) Type { return t }
@@ -562,6 +563,7 @@ func canTransformTime(t timeTransform, sourceType Type) bool {
 		return false
 	}
 }
+
 func projectTimeTransform(t timeTransform, name string, pred BoundPredicate) (UnboundPredicate, error) {
 	if _, ok := pred.Term().(*BoundTransform); ok {
 		return projectTransformPredicate(t, name, pred)
