@@ -237,3 +237,121 @@ func TestManifestPartitionVals(t *testing.T) {
 		})
 	}
 }
+
+func TestCanTransform(t *testing.T) {
+	tests := []struct {
+		transform  iceberg.Transform
+		allowed    []iceberg.Type
+		notAllowed []iceberg.Type
+	}{
+		{
+			transform: iceberg.IdentityTransform{},
+			allowed: []iceberg.Type{
+				iceberg.PrimitiveTypes.Bool, iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64,
+				iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Date,
+				iceberg.PrimitiveTypes.Time, iceberg.PrimitiveTypes.Timestamp, iceberg.PrimitiveTypes.TimestampTz,
+				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
+				iceberg.DecimalType{}, iceberg.FixedType{},
+			},
+			notAllowed: []iceberg.Type{
+				&iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+			},
+		},
+		{
+			transform: iceberg.VoidTransform{},
+			allowed: []iceberg.Type{
+				iceberg.PrimitiveTypes.Bool, iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64,
+				iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Date,
+				iceberg.PrimitiveTypes.Time, iceberg.PrimitiveTypes.Timestamp, iceberg.PrimitiveTypes.TimestampTz,
+				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
+				iceberg.DecimalType{}, iceberg.FixedType{}, &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+			},
+			notAllowed: []iceberg.Type{},
+		},
+		{
+			transform: iceberg.BucketTransform{},
+			allowed: []iceberg.Type{
+				iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64, iceberg.PrimitiveTypes.Date,
+				iceberg.PrimitiveTypes.Time, iceberg.PrimitiveTypes.Timestamp, iceberg.PrimitiveTypes.TimestampTz,
+				iceberg.DecimalType{}, iceberg.PrimitiveTypes.String, iceberg.FixedType{}, iceberg.PrimitiveTypes.Binary,
+				iceberg.PrimitiveTypes.UUID,
+			},
+			notAllowed: []iceberg.Type{
+				iceberg.PrimitiveTypes.Bool, iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64,
+				&iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+			},
+		},
+		{
+			transform: iceberg.TruncateTransform{},
+			allowed: []iceberg.Type{
+				iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64, iceberg.PrimitiveTypes.String,
+				iceberg.PrimitiveTypes.Binary, iceberg.DecimalType{},
+			},
+			notAllowed: []iceberg.Type{
+				iceberg.PrimitiveTypes.Bool, iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64,
+				iceberg.PrimitiveTypes.Date, iceberg.PrimitiveTypes.Time, iceberg.PrimitiveTypes.Timestamp,
+				iceberg.PrimitiveTypes.TimestampTz, iceberg.PrimitiveTypes.UUID, iceberg.FixedType{},
+				&iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+			},
+		},
+		{
+			transform: iceberg.YearTransform{},
+			allowed: []iceberg.Type{
+				iceberg.PrimitiveTypes.Date, iceberg.PrimitiveTypes.Timestamp, iceberg.PrimitiveTypes.TimestampTz,
+			},
+			notAllowed: []iceberg.Type{
+				iceberg.PrimitiveTypes.Bool, iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64,
+				iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Time,
+				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
+				iceberg.DecimalType{}, iceberg.FixedType{}, &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+			},
+		},
+		{
+			transform: iceberg.MonthTransform{},
+			allowed: []iceberg.Type{
+				iceberg.PrimitiveTypes.Date, iceberg.PrimitiveTypes.Timestamp, iceberg.PrimitiveTypes.TimestampTz,
+			},
+			notAllowed: []iceberg.Type{
+				iceberg.PrimitiveTypes.Bool, iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64,
+				iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Time,
+				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
+				iceberg.DecimalType{}, iceberg.FixedType{}, &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+			},
+		},
+		{
+			transform: iceberg.DayTransform{},
+			allowed: []iceberg.Type{
+				iceberg.PrimitiveTypes.Date, iceberg.PrimitiveTypes.Timestamp, iceberg.PrimitiveTypes.TimestampTz,
+			},
+			notAllowed: []iceberg.Type{
+				iceberg.PrimitiveTypes.Bool, iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64,
+				iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Time,
+				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
+				iceberg.DecimalType{}, iceberg.FixedType{}, &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+			},
+		},
+		{
+			transform: iceberg.HourTransform{},
+			allowed: []iceberg.Type{
+				iceberg.PrimitiveTypes.Timestamp, iceberg.PrimitiveTypes.TimestampTz,
+			},
+			notAllowed: []iceberg.Type{
+				iceberg.PrimitiveTypes.Bool, iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64,
+				iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Time,
+				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
+				iceberg.PrimitiveTypes.Date, iceberg.DecimalType{}, iceberg.FixedType{},
+				&iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		for _, typ := range tt.allowed {
+			assert.True(t, tt.transform.CanTransform(typ), "%s: expected CanTransform(%T) to be true", tt.transform.String(), typ)
+		}
+		for _, typ := range tt.notAllowed {
+			assert.False(t, tt.transform.CanTransform(typ), "%s: expected CanTransform(%T) to be false", tt.transform.String(), typ)
+		}
+	}
+
+}
