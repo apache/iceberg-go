@@ -257,7 +257,6 @@ func CreateViewMetadata(
 	loc string,
 	props iceberg.Properties,
 ) (metadataLocation string, err error) {
-
 	versionId := int64(1)
 	timestampMs := time.Now().UnixMilli()
 
@@ -358,8 +357,8 @@ func LoadViewMetadata(ctx context.Context,
 	props iceberg.Properties,
 	metadataLocation string,
 	viewName string,
-	namespace string) (map[string]interface{}, error) {
-
+	namespace string,
+) (map[string]interface{}, error) {
 	// Initial metadata with basic information
 	viewMetadata := map[string]interface{}{
 		"name":              viewName,
