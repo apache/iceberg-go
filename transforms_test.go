@@ -251,7 +251,7 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Date,
 				iceberg.PrimitiveTypes.Time, iceberg.PrimitiveTypes.Timestamp, iceberg.PrimitiveTypes.TimestampTz,
 				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
-				&iceberg.DecimalType{}, &iceberg.FixedType{},
+				iceberg.DecimalTypeOf(2, 1), iceberg.FixedTypeOf(2),
 			},
 			notAllowed: []iceberg.Type{
 				&iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
@@ -264,7 +264,7 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Date,
 				iceberg.PrimitiveTypes.Time, iceberg.PrimitiveTypes.Timestamp, iceberg.PrimitiveTypes.TimestampTz,
 				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
-				&iceberg.DecimalType{}, &iceberg.FixedType{}, &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+				iceberg.DecimalTypeOf(2, 1), iceberg.FixedTypeOf(2), &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
 			},
 			notAllowed: []iceberg.Type{},
 		},
@@ -273,7 +273,7 @@ func TestCanTransform(t *testing.T) {
 			allowed: []iceberg.Type{
 				iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64, iceberg.PrimitiveTypes.Date,
 				iceberg.PrimitiveTypes.Time, iceberg.PrimitiveTypes.Timestamp, iceberg.PrimitiveTypes.TimestampTz,
-				&iceberg.DecimalType{}, iceberg.PrimitiveTypes.String, &iceberg.FixedType{}, iceberg.PrimitiveTypes.Binary,
+				iceberg.DecimalTypeOf(2, 1), iceberg.PrimitiveTypes.String, iceberg.FixedTypeOf(2), iceberg.PrimitiveTypes.Binary,
 				iceberg.PrimitiveTypes.UUID,
 			},
 			notAllowed: []iceberg.Type{
@@ -285,12 +285,12 @@ func TestCanTransform(t *testing.T) {
 			transform: iceberg.TruncateTransform{},
 			allowed: []iceberg.Type{
 				iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64, iceberg.PrimitiveTypes.String,
-				iceberg.PrimitiveTypes.Binary, &iceberg.DecimalType{},
+				iceberg.PrimitiveTypes.Binary, iceberg.DecimalTypeOf(2, 1),
 			},
 			notAllowed: []iceberg.Type{
 				iceberg.PrimitiveTypes.Bool, iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64,
 				iceberg.PrimitiveTypes.Date, iceberg.PrimitiveTypes.Time, iceberg.PrimitiveTypes.Timestamp,
-				iceberg.PrimitiveTypes.TimestampTz, iceberg.PrimitiveTypes.UUID, &iceberg.FixedType{},
+				iceberg.PrimitiveTypes.TimestampTz, iceberg.PrimitiveTypes.UUID, iceberg.FixedTypeOf(2),
 				&iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
 			},
 		},
@@ -303,7 +303,7 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.Bool, iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64,
 				iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Time,
 				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
-				&iceberg.DecimalType{}, &iceberg.FixedType{}, &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+				iceberg.DecimalTypeOf(2, 1), iceberg.FixedTypeOf(2), &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
 			},
 		},
 		{
@@ -315,7 +315,7 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.Bool, iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64,
 				iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Time,
 				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
-				&iceberg.DecimalType{}, &iceberg.FixedType{}, &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+				iceberg.DecimalTypeOf(2, 1), iceberg.FixedTypeOf(2), &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
 			},
 		},
 		{
@@ -327,7 +327,7 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.Bool, iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64,
 				iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Time,
 				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
-				&iceberg.DecimalType{}, &iceberg.FixedType{}, &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+				iceberg.DecimalTypeOf(2, 1), iceberg.FixedTypeOf(2), &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
 			},
 		},
 		{
@@ -339,7 +339,7 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.Bool, iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64,
 				iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Time,
 				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
-				iceberg.PrimitiveTypes.Date, &iceberg.DecimalType{}, &iceberg.FixedType{},
+				iceberg.PrimitiveTypes.Date, iceberg.DecimalTypeOf(2, 1), iceberg.FixedTypeOf(2),
 				&iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
 			},
 		},
