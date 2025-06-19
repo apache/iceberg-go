@@ -40,16 +40,30 @@ fi
 tag="v${version}"
 rc_tag="${tag}-rc${rc}"
 echo "Tagging for release: ${tag}"
-git tag "${tag}" "${rc_tag}"
+git tag "${tag}" "${rc_tag}^{}" -m "Release ${tag}"
 git push origin "${tag}"
 
+release_id="apache-iceberg-go-${version}"
 dist_url="https://dist.apache.org/repos/dist/release/iceberg"
 dist_dev_url="https://dist.apache.org/repos/dist/dev/iceberg"
 
 svn \
-  mv "${dist_dev_url}/apache-iceberg-go-${version}-rc${rc}/" \
-  "${dist_url}/apache-iceberg-go-${version}/" \
-  -m "Apache Iceberg-go ${version}"
+  mv "${dist_dev_url}/${release_id}-rc${rc}/" \
+  "${dist_url}/${release_id}" \
+  -m "Apache Iceberg Go ${version}"
+
+svn co "${dist_url}/${release_id}"
+pushd "${release_id}"
+gh release create "${tag}" \
+  --title "Apache Iceberg Go ${version}" \
+  --generate-notes \
+  --verify-tag \
+  ${release_id}.tar.gz \
+  ${release_id}.tar.gz.asc \
+  ${release_id}.tar.gz.sha512
+popd
+
+rm -rf "${release_id}"
 
 echo "Keep only the latest versions"
 old_releases=$(
