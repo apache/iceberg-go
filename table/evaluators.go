@@ -732,6 +732,10 @@ func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, c
 			return false, err
 		}
 
+		if stats == nil {
+			continue
+		}
+
 		fieldID := int(stats.Descr().SchemaNode().FieldID())
 		m.valueCounts[fieldID] = stats.NumValues()
 		if stats.HasNullCount() {
