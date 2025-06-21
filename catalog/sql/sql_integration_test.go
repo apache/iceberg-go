@@ -21,6 +21,7 @@ package sql_test
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -208,37 +209,37 @@ func (s *SQLIntegrationSuite) TestCreateTable() {
 	s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table")))
 }
 
-//func (s *SQLIntegrationSuite) TestCreateView() {
-//	s.ensureNamespace()
-//
-//	// create a table first
-//	tbl, err := s.cat.CreateTable(s.ctx,
-//		catalog.ToIdentifier(TestNamespaceIdent, "test-table"),
-//		tableSchemaSimple, catalog.WithProperties(iceberg.Properties{"foobar": "baz"}),
-//		catalog.WithLocation(location))
-//	s.Require().NoError(err)
-//	s.Require().NotNil(tbl)
-//
-//	s.Equal(location, tbl.Location())
-//	s.Equal("baz", tbl.Properties()["foobar"])
-//
-//	exists, err := s.cat.CheckTableExists(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table"))
-//	s.Require().NoError(err)
-//	s.True(exists)
-//
-//	// Create a view
-//	viewSQL := fmt.Sprintf("SELECT * FROM %s.%s", TestNamespaceIdent, "test-table")
-//
-//	err = s.cat.CreateView(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view"), tableSchemaSimple, viewSQL, iceberg.Properties{"foobar": "baz"})
-//	s.Require().NoError(err)
-//
-//	exists, err = s.cat.CheckViewExists(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view"))
-//	s.Require().NoError(err)
-//	s.True(exists)
-//
-//	s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table")))
-//	s.Require().NoError(s.cat.DropView(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view")))
-//}
+func (s *SQLIntegrationSuite) TestCreateView() {
+	s.ensureNamespace()
+
+	// create a table first
+	tbl, err := s.cat.CreateTable(s.ctx,
+		catalog.ToIdentifier(TestNamespaceIdent, "test-table"),
+		tableSchemaSimple, catalog.WithProperties(iceberg.Properties{"foobar": "baz"}),
+		catalog.WithLocation(location))
+	s.Require().NoError(err)
+	s.Require().NotNil(tbl)
+
+	s.Equal(location, tbl.Location())
+	s.Equal("baz", tbl.Properties()["foobar"])
+
+	exists, err := s.cat.CheckTableExists(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table"))
+	s.Require().NoError(err)
+	s.True(exists)
+
+	// Create a view
+	viewSQL := fmt.Sprintf("SELECT * FROM %s.%s", TestNamespaceIdent, "test-table")
+
+	err = s.cat.CreateView(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view"), tableSchemaSimple, viewSQL, iceberg.Properties{"foobar": "baz"})
+	s.Require().NoError(err)
+
+	exists, err = s.cat.CheckViewExists(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view"))
+	s.Require().NoError(err)
+	s.True(exists)
+
+	s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table")))
+	s.Require().NoError(s.cat.DropView(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view")))
+}
 
 func (s *SQLIntegrationSuite) TestWriteCommitTable() {
 	s.ensureNamespace()
@@ -277,16 +278,16 @@ func (s *SQLIntegrationSuite) TestWriteCommitTable() {
 	pqfile, err := url.JoinPath(location, "data", "test_commit_table_data", "test.parquet")
 	s.Require().NoError(err)
 
-	fw, err := tbl.FS().(io.WriteFileIO).Create(pqfile)
+	fs, err := tbl.FS(s.ctx)
+	s.Require().NoError(err)
+	fw, err := fs.(io.WriteFileIO).Create(pqfile)
 	s.Require().NoError(err)
 	s.Require().NoError(pqarrow.WriteTable(table, fw, table.NumRows(),
 		nil, pqarrow.DefaultWriterProps()))
 	defer func(fs io.IO, name string) {
-		err := fs.Remove(name)
-		if err != nil {
-
-		}
-	}(tbl.FS(), pqfile)
+		err = fs.Remove(name)
+		s.Require().NoError(err)
+	}(fs, pqfile)
 
 	txn := tbl.NewTransaction()
 	s.Require().NoError(txn.AddFiles(s.ctx, []string{pqfile}, nil, false))
@@ -294,7 +295,7 @@ func (s *SQLIntegrationSuite) TestWriteCommitTable() {
 	s.Require().NoError(err)
 
 	mf := []iceberg.ManifestFile{}
-	for m, err := range updated.AllManifests() {
+	for m, err := range updated.AllManifests(s.ctx) {
 		s.Require().NoError(err)
 		s.Require().NotNil(m)
 		mf = append(mf, m)
@@ -302,7 +303,10 @@ func (s *SQLIntegrationSuite) TestWriteCommitTable() {
 
 	s.Len(mf, 1)
 	s.EqualValues(1, mf[0].AddedDataFiles())
-	entries, err := mf[0].FetchEntries(updated.FS(), false)
+	updatedFS, err := updated.FS(s.ctx)
+	s.Require().NoError(err)
+
+	entries, err := mf[0].FetchEntries(updatedFS, false)
 	s.Require().NoError(err)
 
 	s.Len(entries, 1)
