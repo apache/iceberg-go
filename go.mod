@@ -22,14 +22,15 @@ go 1.24
 toolchain go1.24.2
 
 require (
+	cloud.google.com/go/storage v1.51.0
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.6.1
-	github.com/apache/arrow-go/v18 v18.3.0
-	github.com/aws/aws-sdk-go-v2 v1.36.4
-	github.com/aws/aws-sdk-go-v2/config v1.29.16
-	github.com/aws/aws-sdk-go-v2/credentials v1.17.69
-	github.com/aws/aws-sdk-go-v2/service/glue v1.113.2
-	github.com/aws/aws-sdk-go-v2/service/s3 v1.80.2
-	github.com/aws/smithy-go v1.22.3
+	github.com/apache/arrow-go/v18 v18.3.1
+	github.com/aws/aws-sdk-go-v2 v1.36.5
+	github.com/aws/aws-sdk-go-v2/config v1.29.17
+	github.com/aws/aws-sdk-go-v2/credentials v1.17.70
+	github.com/aws/aws-sdk-go-v2/service/glue v1.114.0
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.81.0
+	github.com/aws/smithy-go v1.22.4
 	github.com/awsdocs/aws-doc-sdk-examples/gov2/testtools v0.0.0-20250407191926-092f3e54b837
 	github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815
 	github.com/google/uuid v1.6.0
@@ -39,17 +40,17 @@ require (
 	github.com/substrait-io/substrait-go/v3 v3.9.1
 	github.com/testcontainers/testcontainers-go/modules/compose v0.37.0
 	github.com/twmb/murmur3 v1.1.8
-	github.com/uptrace/bun v1.2.13
-	github.com/uptrace/bun/dialect/mssqldialect v1.2.13
-	github.com/uptrace/bun/dialect/mysqldialect v1.2.13
-	github.com/uptrace/bun/dialect/oracledialect v1.2.13
-	github.com/uptrace/bun/dialect/pgdialect v1.2.13
-	github.com/uptrace/bun/dialect/sqlitedialect v1.2.13
-	github.com/uptrace/bun/driver/sqliteshim v1.2.13
-	github.com/uptrace/bun/extra/bundebug v1.2.13
+	github.com/uptrace/bun v1.2.14
+	github.com/uptrace/bun/dialect/mssqldialect v1.2.14
+	github.com/uptrace/bun/dialect/mysqldialect v1.2.14
+	github.com/uptrace/bun/dialect/oracledialect v1.2.14
+	github.com/uptrace/bun/dialect/pgdialect v1.2.14
+	github.com/uptrace/bun/dialect/sqlitedialect v1.2.14
+	github.com/uptrace/bun/driver/sqliteshim v1.2.14
+	github.com/uptrace/bun/extra/bundebug v1.2.14
 	gocloud.dev v0.41.0
 	golang.org/x/sync v0.15.0
-	google.golang.org/api v0.237.0
+	google.golang.org/api v0.238.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -64,7 +65,6 @@ require (
 	cloud.google.com/go/compute/metadata v0.7.0 // indirect
 	cloud.google.com/go/iam v1.5.2 // indirect
 	cloud.google.com/go/monitoring v1.24.2 // indirect
-	cloud.google.com/go/storage v1.51.0 // indirect
 	dario.cat/mergo v1.0.1 // indirect
 	github.com/AdaLogics/go-fuzz-headers v0.0.0-20240806141605-e8a1dd7889d6 // indirect
 	github.com/AlecAivazis/survey/v2 v2.3.7 // indirect
@@ -87,20 +87,20 @@ require (
 	github.com/apache/thrift v0.21.0 // indirect
 	github.com/apparentlymart/go-textseg/v15 v15.0.0 // indirect
 	github.com/aws/aws-sdk-go v1.55.6 // indirect
-	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.6.10 // indirect
-	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.16.31 // indirect
+	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.6.11 // indirect
+	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.16.32 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.17.69 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/configsources v1.3.35 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.6.35 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/configsources v1.3.36 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.6.36 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/ini v1.8.3 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/v4a v1.3.35 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.12.3 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.7.3 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.12.16 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.18.16 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sso v1.25.4 // indirect
-	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.30.2 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sts v1.33.21 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/v4a v1.3.36 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.12.4 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.7.4 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.12.17 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.18.17 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sso v1.25.5 // indirect
+	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.30.3 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sts v1.34.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/buger/goterm v1.0.4 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
