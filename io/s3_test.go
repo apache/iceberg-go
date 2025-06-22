@@ -283,3 +283,28 @@ func TestParseAWSConfigWithRemoteSignerAuth(t *testing.T) {
 	assert.NotNil(t, cfg)
 	assert.Equal(t, "us-east-1", cfg.Region)
 }
+
+func TestParseAWSConfigWithGCS(t *testing.T) {
+	ctx := context.Background()
+	props := map[string]string{
+		"s3.endpoint":          "https://storage.googleapis.com",
+		"s3.access-key-id":     "GOOG1EB4JNAPTCHXECZMWKLPDJ5O2DSULWZE6VA6QGXRQS3E2TZ32NKZXRUDC",
+		"s3.secret-access-key": "CfoAAR5j/1hxxxxxxxxxxxxxxx",
+		"client.region":        "auto",
+	}
+
+	awscfg, err := ParseAWSConfig(ctx, props)
+	if err != nil {
+		t.Fatalf("ParseAWSConfig failed: %v", err)
+	}
+
+	// Verify region was converted from "auto" to "us-east-1" for GCS
+	if awscfg.Region != "us-east-1" {
+		t.Errorf("Expected region 'us-east-1' for GCS, got '%s'", awscfg.Region)
+	}
+
+	// Verify credentials are set (should be static credentials, not anonymous)
+	if awscfg.Credentials == nil {
+		t.Error("Expected credentials to be set for GCS")
+	}
+}

@@ -59,22 +59,32 @@ func NewRemoteSigningTransport(base http.RoundTripper, signerURI, signerEndpoint
 
 // RoundTrip implements http.RoundTripper
 func (r *RemoteSigningTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	log.Printf("RoundTrip: Processing request to %s %s\n", req.Method, req.URL.String())
+
 	isS3 := r.isS3Request(req)
+	log.Printf("RoundTrip: isS3Request result: %v\n", isS3)
 
 	// Only handle S3 requests
 	if !isS3 {
+		log.Printf("RoundTrip: Not an S3 request, using base transport\n")
 		return r.base.RoundTrip(req)
 	}
 
+	log.Printf("RoundTrip: Handling S3 request with remote signing\n")
+
 	// Check if this is a chunked upload that might cause compatibility issues
 	originalHeaders := r.extractHeaders(req)
+	log.Printf("RoundTrip: Original headers count: %d\n", len(originalHeaders))
+
 	if contentEncoding, ok := originalHeaders["Content-Encoding"]; ok && len(contentEncoding) > 0 && contentEncoding[0] == "aws-chunked" {
+		log.Printf("RoundTrip: Detected AWS chunked encoding, processing...\n")
 		// The problem is that the AWS SDK has already applied chunked encoding to the body.
 		// We need to decode the chunked body and create a new request with the original content.
 
 		// Read the entire chunked body
 		bodyBytes, err := io.ReadAll(req.Body)
 		if err != nil {
+			log.Printf("RoundTrip: ERROR reading chunked body: %v\n", err)
 			return nil, fmt.Errorf("failed to read chunked body: %w", err)
 		}
 		req.Body.Close()
@@ -82,9 +92,12 @@ func (r *RemoteSigningTransport) RoundTrip(req *http.Request) (*http.Response, e
 		// Decode the AWS chunked body
 		decodedBody, err := decodeAWSChunkedBody(bodyBytes)
 		if err != nil {
+			log.Printf("RoundTrip: WARNING: Failed to decode chunked body, using as-is: %v\n", err)
 			// If decoding fails, try to use the body as-is
 			decodedBody = bodyBytes
 		}
+
+		log.Printf("RoundTrip: Decoded body length: %d\n", len(decodedBody))
 
 		// Clone the request with the decoded body
 		newReq := req.Clone(req.Context())
@@ -103,12 +116,15 @@ func (r *RemoteSigningTransport) RoundTrip(req *http.Request) (*http.Response, e
 		// Get headers for signing
 		headersForSigning := r.extractHeaders(newReq)
 
+		log.Printf("RoundTrip: Getting remote signature for chunked request\n")
 		// Get remote signature
 		signedHeaders, err := r.getRemoteSignature(newReq.Context(), newReq.Method, newReq.URL.String(), headersForSigning)
 		if err != nil {
-			log.Printf("ERROR: Failed to get remote signature: %s\n", err.Error())
+			log.Printf("RoundTrip: ERROR: Failed to get remote signature: %s\n", err.Error())
 			return nil, fmt.Errorf("failed to get remote signature: %w", err)
 		}
+
+		log.Printf("RoundTrip: Received %d signed headers\n", len(signedHeaders))
 
 		// Apply signed headers
 		for key, value := range signedHeaders {
@@ -117,20 +133,25 @@ func (r *RemoteSigningTransport) RoundTrip(req *http.Request) (*http.Response, e
 		}
 
 		// Execute the new non-chunked request
+		log.Printf("RoundTrip: Executing decoded request\n")
 		return r.base.RoundTrip(newReq)
 	}
 
+	log.Printf("RoundTrip: Processing non-chunked request\n")
 	// For non-chunked requests, use the normal flow with header preprocessing
 	headersForSigning := make(map[string][]string)
 	for key, values := range originalHeaders {
 		headersForSigning[key] = values
 	}
 
+	log.Printf("RoundTrip: Getting remote signature for non-chunked request\n")
 	signedHeaders, err := r.getRemoteSignature(req.Context(), req.Method, req.URL.String(), headersForSigning)
 	if err != nil {
-		log.Printf("ERROR: Failed to get remote signature: %s\n", err.Error())
+		log.Printf("RoundTrip: ERROR: Failed to get remote signature: %s\n", err.Error())
 		return nil, fmt.Errorf("failed to get remote signature: %w", err)
 	}
+
+	log.Printf("RoundTrip: Received %d signed headers\n", len(signedHeaders))
 
 	// Clone the request and apply signed headers
 	newReq := req.Clone(req.Context())
@@ -142,11 +163,14 @@ func (r *RemoteSigningTransport) RoundTrip(req *http.Request) (*http.Response, e
 	}
 
 	// Execute the request and check for errors
+	log.Printf("RoundTrip: Executing signed request\n")
 	resp, err := r.base.RoundTrip(newReq)
 	if err != nil {
+		log.Printf("RoundTrip: ERROR executing request: %v\n", err)
 		return nil, err
 	}
 
+	log.Printf("RoundTrip: Request completed with status: %s\n", resp.Status)
 	return resp, nil
 }
 
@@ -154,6 +178,7 @@ func (r *RemoteSigningTransport) RoundTrip(req *http.Request) (*http.Response, e
 func (r *RemoteSigningTransport) isS3Request(req *http.Request) bool {
 	// Check if the host contains typical S3 patterns
 	host := req.URL.Host
+	log.Printf("isS3Request: Checking host: %s, URL: %s\n", host, req.URL.String())
 
 	// Don't sign requests to the remote signer itself to avoid circular dependency
 	if r.signerURI != "" {
@@ -162,19 +187,25 @@ func (r *RemoteSigningTransport) isS3Request(req *http.Request) bool {
 			signerHost = signerURL.Host
 		}
 		if host == signerHost {
+			log.Printf("isS3Request: Host matches signer host (%s), not signing\n", signerHost)
 			return false
 		}
 	}
 
 	if host == "" {
+		log.Printf("isS3Request: Empty host, not signing\n")
 		return false
 	}
 
 	// S3 compatible storage might be hosted on a different TLD
 	isAmazon := strings.HasSuffix(host, ".amazonaws.com")
 	isCloudflare := strings.HasSuffix(host, ".r2.cloudflarestorage.com")
+	isGoogleCloudStorage := host == "storage.googleapis.com" || strings.HasSuffix(host, ".storage.googleapis.com")
 
-	if isCloudflare {
+	log.Printf("isS3Request: Checks - isAmazon: %v, isCloudflare: %v, isGoogleCloudStorage: %v\n", isAmazon, isCloudflare, isGoogleCloudStorage)
+
+	if isCloudflare || isGoogleCloudStorage {
+		log.Printf("isS3Request: Recognized as S3-compatible storage (Cloudflare or GCS)\n")
 		return true
 	}
 
@@ -187,24 +218,18 @@ func (r *RemoteSigningTransport) isS3Request(req *http.Request) bool {
 		// - <bucket>.s3-accelerate.amazonaws.com (transfer acceleration)
 		// - s3.dualstack.<region>.amazonaws.com (dual-stack path-style)
 		// - <bucket>.s3.dualstack.<region>.amazonaws.com (dual-stack virtual-hosted)
-		return strings.Contains(host, ".s3") || strings.HasPrefix(host, "s3.")
+		isS3Pattern := strings.Contains(host, ".s3") || strings.HasPrefix(host, "s3.")
+		log.Printf("isS3Request: Amazon host detected, S3 pattern check: %v\n", isS3Pattern)
+		return isS3Pattern
 	}
 
 	// MinIO or other custom S3-compatible endpoints (be more conservative)
 	if host == "localhost:9000" || host == "127.0.0.1:9000" {
+		log.Printf("isS3Request: Recognized as MinIO endpoint\n")
 		return true
 	}
 
-	// Only sign if it looks like an S3 request pattern (has bucket-like structure)
-	// and is NOT a catalog service (which typically has /catalog/ in the path)
-	if req.URL.Path != "" && !strings.Contains(req.URL.Path, "/catalog/") &&
-		!strings.Contains(host, "catalog") &&
-		// Exclude common non-S3 service patterns
-		!strings.Contains(host, "glue.") &&
-		!strings.Contains(host, "api.") {
-		return true
-	}
-
+	log.Printf("isS3Request: Host not recognized as S3-compatible: %s\n", host)
 	return false
 }
 
