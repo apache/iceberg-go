@@ -18,7 +18,9 @@
 package table
 
 import (
+	"errors"
 	"fmt"
+
 	"github.com/apache/iceberg-go"
 )
 
@@ -42,7 +44,7 @@ func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 	partitionSpec := t.tbl.Metadata().PartitionSpec()
 	for partitionField := range partitionSpec.Fields() {
 		transformToField[transformKey{
-			FieldID:   partitionField.SourceID,
+			SourceId:  partitionField.SourceID,
 			Transform: partitionField.Transform.String(),
 		}] = partitionField
 		nameToField[partitionField.Name] = partitionField
@@ -64,7 +66,7 @@ func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 }
 
 type transformKey struct {
-	FieldID   int
+	SourceId  int
 	Transform string
 }
 
@@ -84,7 +86,7 @@ func (us *UpdateSpec) AddField(sourceColName string, transform iceberg.Transform
 
 	// Check for duplicate transform on same column
 	key := transformKey{
-		FieldID:   boundTerm.Ref().Field().ID,
+		SourceId:  boundTerm.Ref().Field().ID,
 		Transform: transform.String(),
 	}
 	existingPartitionField, exists := us.transformToField[key]
@@ -130,11 +132,29 @@ func (us *UpdateSpec) AddField(sourceColName string, transform iceberg.Transform
 	// Register the new field
 	us.nameToAddedField[newField.Name] = newField
 	us.adds = append(us.adds, newField)
+
 	return us, nil
 }
 
 func (us *UpdateSpec) RenameField(name string, newName string) (*UpdateSpec, error) {
-	return nil, nil
+	existingField, exists := us.nameToField[newName]
+	_, isVoidTransform := existingField.Transform.(iceberg.VoidTransform)
+	if exists && isVoidTransform {
+		return us.RenameField(name, fmt.Sprintf("%s_%d", name, existingField.FieldID))
+	}
+	if _, added := us.nameToAddedField[name]; added {
+		return nil, errors.New("cannot rename recently added partitions")
+	}
+	field, exists := us.nameToField[name]
+	if !exists {
+		return nil, fmt.Errorf("cannot find partition field: %s", name)
+	}
+	if _, deleted := us.deletes[field.FieldID]; deleted {
+		return nil, fmt.Errorf("cannot delete and rename partition field: %s", name)
+	}
+	us.renames[name] = newName
+
+	return us, nil
 }
 
 func (us *UpdateSpec) Apply() *iceberg.PartitionSpec {
@@ -178,12 +198,14 @@ func (us *UpdateSpec) Apply() *iceberg.PartitionSpec {
 	for _, spec = range us.txn.tbl.Metadata().PartitionSpecs() {
 		if newSpec.CompatibleWith(&spec) {
 			newSpecId = spec.ID()
+
 			break
 		} else if newSpecId <= spec.ID() {
 			newSpecId = spec.ID() + 1
 		}
 	}
 	newSpec = iceberg.NewPartitionSpecID(newSpecId, partitionFields...)
+
 	return &newSpec
 }
 
@@ -193,13 +215,29 @@ func (us *UpdateSpec) Commit() ([]Update, []Requirement, error) {
 
 func (us *UpdateSpec) partitionField(key transformKey, name string) iceberg.PartitionField {
 	if us.txn.tbl.Metadata().Version() == 2 {
-		fmt.Println("table metadata version is 2")
+		sourceId, transform := key.SourceId, key.Transform
+		historicalFields := make([]iceberg.PartitionField, 0)
+		for _, spec := range us.txn.tbl.Metadata().PartitionSpecs() {
+			for field := range spec.Fields() {
+				historicalFields = append(historicalFields, field)
+			}
+		}
+		for _, fields := range historicalFields {
+			if fields.SourceID == sourceId && fields.Transform.String() == transform {
+				return iceberg.PartitionField{
+					SourceID:  sourceId,
+					FieldID:   fields.FieldID,
+					Name:      name,
+					Transform: fields.Transform,
+				}
+			}
+		}
 	}
 	newFieldId := us.newFieldId()
 	transform, _ := iceberg.ParseTransform(key.Transform)
 
 	return iceberg.PartitionField{
-		SourceID:  key.FieldID,
+		SourceID:  key.SourceId,
 		FieldID:   newFieldId,
 		Name:      name,
 		Transform: transform,
@@ -208,11 +246,13 @@ func (us *UpdateSpec) partitionField(key transformKey, name string) iceberg.Part
 
 func (us *UpdateSpec) newFieldId() int {
 	us.lastAssignedFieldId += 1
+
 	return us.lastAssignedFieldId
 }
 
 func (us *UpdateSpec) isDuplicatePartition(transform iceberg.Transform, partitionField iceberg.PartitionField) bool {
 	_, exists := us.deletes[partitionField.FieldID]
+
 	return !exists && transform == partitionField.Transform
 }
 
@@ -225,6 +265,7 @@ func (us *UpdateSpec) checkAndAddPartitionName(schema *iceberg.Schema, name stri
 		return fmt.Errorf("partition name has to be unique: %s", name)
 	}
 	partitionNames[name] = true
+
 	return nil
 }
 
@@ -233,6 +274,7 @@ func (us *UpdateSpec) addNewField(schema *iceberg.Schema, sourceId int, fieldId 
 	if err != nil {
 		return iceberg.PartitionField{}, err
 	}
+
 	return iceberg.PartitionField{
 		SourceID:  sourceId,
 		FieldID:   fieldId,
