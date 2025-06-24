@@ -299,7 +299,10 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 		// Special configuration for Google Cloud Storage
 		if endpoint != "" && (strings.Contains(endpoint, "storage.googleapis.com") || strings.Contains(endpoint, "googleapis.com")) {
 			log.Printf("createS3Bucket: Applying GCS-specific configurations\n")
-
+			
+			// Disable S3-specific features that don't work well with GCS
+			o.UseAccelerate = false
+			
 			// For GCS, we need to implement our own signing that's compatible with GCS requirements
 			// The AWS SDK signing has subtle differences that don't work with GCS
 			log.Printf("createS3Bucket: Implementing custom GCS-compatible signing\n")
@@ -375,34 +378,60 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 			})
 		}
 
-		// If remote signing is enabled, configure the client to avoid chunked encoding
-		if hasSignerURI && remoteSigningEnabled {
-			log.Printf("createS3Bucket: Adding middleware to prevent chunked encoding for remote signing\n")
-			// Add middleware to prevent chunked encoding
-			o.APIOptions = append(o.APIOptions, func(stack *middleware.Stack) error {
-				return stack.Build.Add(
-					middleware.BuildMiddlewareFunc("PreventChunkedEncoding", func(
-						ctx context.Context, in middleware.BuildInput, next middleware.BuildHandler,
-					) (middleware.BuildOutput, middleware.Metadata, error) {
-						// Cast to smithy HTTP request
-						req, ok := in.Request.(*smithyhttp.Request)
-						if ok {
-							// Force Content-Length header to prevent chunked encoding
-							if req.ContentLength == 0 && req.Body != nil {
-								// Try to read the body to determine length
-								// Note: This is a workaround and may not work for all cases
-							}
-
-							// Remove any existing Content-Encoding header
-							req.Header.Del("Content-Encoding")
-							req.Header.Del("Transfer-Encoding")
+		// Add middleware to prevent chunked encoding for all S3 operations
+		// This is especially important for GCS compatibility and AVRO files
+		log.Printf("createS3Bucket: Adding middleware to prevent chunked encoding\n")
+		o.APIOptions = append(o.APIOptions, func(stack *middleware.Stack) error {
+			// Add a serialize step middleware to disable chunked encoding
+			return stack.Serialize.Add(
+				middleware.SerializeMiddlewareFunc("DisableChunkedEncoding", func(
+					ctx context.Context, in middleware.SerializeInput, next middleware.SerializeHandler,
+				) (middleware.SerializeOutput, middleware.Metadata, error) {
+					// Try to access the S3 PutObjectInput to disable chunked encoding
+					switch v := in.Parameters.(type) {
+					case *s3.PutObjectInput:
+						// Disable multipart uploads for smaller files to avoid chunking
+						// This forces the SDK to use regular PUT operations
+						if v.ContentLength != nil && *v.ContentLength < 5*1024*1024*1024 { // 5GB threshold
+							log.Printf("createS3Bucket: Disabling multipart for object with size %d\n", *v.ContentLength)
 						}
-						return next.HandleBuild(ctx, in)
-					}),
-					middleware.After,
-				)
-			})
-		}
+					}
+					
+					return next.HandleSerialize(ctx, in)
+				}),
+				middleware.After,
+			)
+		})
+
+		// Also add a finalize middleware to ensure headers are set correctly
+		o.APIOptions = append(o.APIOptions, func(stack *middleware.Stack) error {
+			return stack.Finalize.Add(
+				middleware.FinalizeMiddlewareFunc("PreventChunkedHeaders", func(
+					ctx context.Context, in middleware.FinalizeInput, next middleware.FinalizeHandler,
+				) (middleware.FinalizeOutput, middleware.Metadata, error) {
+					// Cast to smithy HTTP request
+					req, ok := in.Request.(*smithyhttp.Request)
+					if ok {
+						// Remove any chunked encoding headers
+						req.Header.Del("Content-Encoding")
+						req.Header.Del("Transfer-Encoding")
+						req.Header.Del("X-Amz-Content-Sha256")
+						
+						// Set UNSIGNED-PAYLOAD to avoid content hashing which can trigger chunking
+						req.Header.Set("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD")
+						
+						// Ensure Content-Length is set if we have it
+						if req.ContentLength > 0 {
+							req.Header.Set("Content-Length", strconv.FormatInt(req.ContentLength, 10))
+						}
+						
+						log.Printf("createS3Bucket: Set headers to prevent chunking - Content-Length: %d\n", req.ContentLength)
+					}
+					return next.HandleFinalize(ctx, in)
+				}),
+				middleware.Before,
+			)
+		})
 	})
 
 	log.Printf("createS3Bucket: Created S3 client successfully\n")

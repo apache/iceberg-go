@@ -22,6 +22,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"log"
 	"path/filepath"
 	"strings"
 
@@ -72,6 +73,37 @@ func (f *blobOpenFile) Sys() interface{}           { return f.b }
 func (f *blobOpenFile) IsDir() bool                { return false }
 func (f *blobOpenFile) Stat() (fs.FileInfo, error) { return f, nil }
 
+// blobOpenFileWithChunkedReader wraps a blobOpenFile with a ChunkedReader
+// to handle AWS chunked transfer encoding for AVRO files.
+type blobOpenFileWithChunkedReader struct {
+	blobOpenFile
+	chunkedReader *ChunkedReader
+}
+
+// Read implements io.Reader using the chunked reader
+func (f *blobOpenFileWithChunkedReader) Read(p []byte) (int, error) {
+	return f.chunkedReader.Read(p)
+}
+
+// ReadAt implements io.ReaderAt. Since chunked encoding is a streaming format,
+// we cannot support random access. However, for AVRO files, the OCF decoder
+// typically reads sequentially, so this should not be called.
+// If it is called, we fall back to the original implementation which will
+// create a new range reader.
+func (f *blobOpenFileWithChunkedReader) ReadAt(p []byte, off int64) (int, error) {
+	// For ReadAt, we bypass the chunked reader and use the original implementation
+	// This creates a new range reader that should not have chunked encoding
+	return f.blobOpenFile.ReadAt(p, off)
+}
+
+// Close closes both the chunked reader and the underlying blob reader
+func (f *blobOpenFileWithChunkedReader) Close() error {
+	if err := f.chunkedReader.Close(); err != nil {
+		return err
+	}
+	return f.blobOpenFile.Close()
+}
+
 type blobFileIO struct {
 	*blob.Bucket
 
@@ -101,6 +133,15 @@ func (bfs *blobFileIO) Open(path string) (File, error) {
 		return nil, err
 	}
 
+	// For AVRO files, wrap the reader to handle potential AWS chunked encoding
+	if strings.HasSuffix(strings.ToLower(path), ".avro") {
+		log.Printf("blobFileIO.Open: Opening AVRO file %s with chunked reader wrapper", path)
+		return &blobOpenFileWithChunkedReader{
+			blobOpenFile: blobOpenFile{Reader: r, name: name, key: key, b: bfs, ctx: bfs.ctx},
+			chunkedReader: NewChunkedReader(r),
+		}, nil
+	}
+
 	return &blobOpenFile{Reader: r, name: name, key: key, b: bfs, ctx: bfs.ctx}, nil
 }
 
@@ -114,9 +155,17 @@ func (bfs *blobFileIO) Create(name string) (FileWriter, error) {
 	// Configure writer options to prevent chunked encoding issues
 	opts := &blob.WriterOptions{
 		BeforeWrite: func(as func(any) bool) error {
-			// Try to access S3-specific upload input to disable chunked encoding
+			// Try to access S3-specific upload input to configure it
 			var uploadInput *s3.PutObjectInput
-			as(&uploadInput)
+			if as(&uploadInput) && uploadInput != nil {
+				// Ensure metadata is set for AVRO files
+				if uploadInput.Key != nil && strings.HasSuffix(*uploadInput.Key, ".avro") {
+					if uploadInput.Metadata == nil {
+						uploadInput.Metadata = make(map[string]string)
+					}
+					uploadInput.Metadata["Content-Type"] = "application/avro"
+				}
+			}
 			return nil
 		},
 	}
@@ -129,9 +178,21 @@ func (bfs *blobFileIO) WriteFile(name string, content []byte) error {
 	// Configure writer options to prevent chunked encoding issues
 	opts := &blob.WriterOptions{
 		BeforeWrite: func(as func(any) bool) error {
-			// Try to access S3-specific upload input to disable chunked encoding
+			// Try to access S3-specific upload input to configure it
 			var uploadInput *s3.PutObjectInput
-			as(&uploadInput)
+			if as(&uploadInput) && uploadInput != nil {
+				// Ensure metadata is set for AVRO files
+				if uploadInput.Key != nil && strings.HasSuffix(*uploadInput.Key, ".avro") {
+					if uploadInput.Metadata == nil {
+						uploadInput.Metadata = make(map[string]string)
+					}
+					uploadInput.Metadata["Content-Type"] = "application/avro"
+				}
+				
+				// For WriteAll, we know the content length
+				contentLength := int64(len(content))
+				uploadInput.ContentLength = &contentLength
+			}
 			return nil
 		},
 	}
@@ -163,14 +224,31 @@ func (io *blobFileIO) NewWriter(ctx context.Context, path string, overwrite bool
 	}
 	// If no options provided, create default ones to prevent chunked encoding
 	if opts == nil {
-		opts = &blob.WriterOptions{
-			BeforeWrite: func(as func(any) bool) error {
-				// Try to access S3-specific upload input to disable chunked encoding
-				var uploadInput *s3.PutObjectInput
-				as(&uploadInput)
-				return nil
-			},
+		opts = &blob.WriterOptions{}
+	}
+	
+	// Always add our BeforeWrite handler to configure S3 uploads
+	originalBeforeWrite := opts.BeforeWrite
+	opts.BeforeWrite = func(as func(any) bool) error {
+		// Call original BeforeWrite if it exists
+		if originalBeforeWrite != nil {
+			if err := originalBeforeWrite(as); err != nil {
+				return err
+			}
 		}
+		
+		// Try to access S3-specific upload input to configure it
+		var uploadInput *s3.PutObjectInput
+		if as(&uploadInput) && uploadInput != nil {
+			// Ensure metadata is set for AVRO files
+			if uploadInput.Key != nil && strings.HasSuffix(*uploadInput.Key, ".avro") {
+				if uploadInput.Metadata == nil {
+					uploadInput.Metadata = make(map[string]string)
+				}
+				uploadInput.Metadata["Content-Type"] = "application/avro"
+			}
+		}
+		return nil
 	}
 	
 	bw, err := io.Bucket.NewWriter(ctx, path, opts)
