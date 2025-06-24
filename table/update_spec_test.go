@@ -178,3 +178,52 @@ func TestUpdateSpecAddField(t *testing.T) {
 		assert.Equal(t, "street_void_1001", newSpec.FieldsBySourceID(5)[0].Name)
 	})
 }
+
+func TestUpdateSpecRenameField(t *testing.T) {
+	var txn *table.Transaction
+
+	t.Run("rename partition fields", func(t *testing.T) {
+		txn = testPartitionedTable.NewTransaction()
+		updates := table.NewUpdateSpec(txn, false)
+		updates, err := updates.RenameField("id_identity", "new_id_identity")
+		assert.NoError(t, err)
+		assert.NotNil(t, updates)
+
+		updates, err = updates.RenameField("street_void", "new_street_void")
+		assert.NoError(t, err)
+		assert.NotNil(t, updates)
+
+		newSpec := updates.Apply()
+		assert.NotNil(t, newSpec)
+
+		assert.Equal(t, 1, newSpec.ID())
+		assert.Equal(t, "new_id_identity", newSpec.FieldsBySourceID(1)[0].Name)
+		assert.Equal(t, "new_street_void", newSpec.FieldsBySourceID(5)[0].Name)
+	})
+
+	t.Run("rename recently added partition", func(t *testing.T) {
+		txn = testPartitionedTable.NewTransaction()
+		updates := table.NewUpdateSpec(txn, false)
+
+		updates, err := updates.AddField("ts", iceberg.YearTransform{}, "year_transform")
+		assert.NoError(t, err)
+		assert.NotNil(t, updates)
+
+		updates, err = updates.RenameField("year_transform", "new_year_transform")
+		assert.ErrorContains(t, err, "cannot rename recently added partitions")
+		assert.Nil(t, updates)
+	})
+
+	t.Run("rename a partition field that doesn't exist", func(t *testing.T) {
+		txn = testPartitionedTable.NewTransaction()
+		updates := table.NewUpdateSpec(txn, false)
+
+		updates, err := updates.RenameField("non_exist_field", "new_non_exist_field")
+		assert.ErrorContains(t, err, "cannot find partition field")
+		assert.Nil(t, updates)
+	})
+
+	t.Run("rename a partition field deleted in the same transaction", func(t *testing.T) {
+		// Todo: add test once remove field is implemented
+	})
+}

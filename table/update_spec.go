@@ -136,6 +136,14 @@ func (us *UpdateSpec) AddField(sourceColName string, transform iceberg.Transform
 	return us, nil
 }
 
+func (us *UpdateSpec) AddIdentity(sourceColName string) (*UpdateSpec, error) {
+	return nil, nil
+}
+
+func (us *UpdateSpec) RemoveField(name string) (*UpdateSpec, error) {
+	return nil, nil
+}
+
 func (us *UpdateSpec) RenameField(name string, newName string) (*UpdateSpec, error) {
 	existingField, exists := us.nameToField[newName]
 	_, isVoidTransform := existingField.Transform.(iceberg.VoidTransform)
