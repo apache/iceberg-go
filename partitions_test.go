@@ -189,3 +189,28 @@ func TestPartitionSpecToPath(t *testing.T) {
 	assert.Equal(t, "my%23str%25bucket=my%2Bstr/other+str%2Bbucket=%28+%29/my%21int%3Abucket=10",
 		spec.PartitionToPath(record, schema))
 }
+
+func TestVisitPartitionField(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "str", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 2, Name: "other_str", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "int", Type: iceberg.PrimitiveTypes.Int32, Required: true})
+
+	t.Run("visit partition field with partition name generator", func(t *testing.T) {
+		field := iceberg.PartitionField{
+			SourceID: 1, FieldID: 1000,
+			Transform: iceberg.TruncateTransform{Width: 19}, Name: "random_name",
+		}
+		name, err := iceberg.VisitPartitionField(schema, field, iceberg.PartitionNameGenerator{})
+		assert.NoError(t, err)
+		assert.Equal(t, "str_trunc_19", name)
+
+		field = iceberg.PartitionField{
+			SourceID: 2, FieldID: 1001,
+			Transform: iceberg.BucketTransform{NumBuckets: 7}, Name: "another_random_name",
+		}
+		name, err = iceberg.VisitPartitionField(schema, field, iceberg.PartitionNameGenerator{})
+		assert.NoError(t, err)
+		assert.Equal(t, "other_str_bucket_7", name)
+	})
+}
