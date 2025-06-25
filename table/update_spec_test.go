@@ -289,3 +289,71 @@ func TestUpdateSpecRemoveField(t *testing.T) {
 		assert.Nil(t, updates)
 	})
 }
+
+func TestUpdateSpecCommit(t *testing.T) {
+	var txn *table.Transaction
+
+	t.Run("commit added partition fields", func(t *testing.T) {
+		txn = testNonPartitionedTable.NewTransaction()
+		specUpdates := table.NewUpdateSpec(txn, false)
+
+		specUpdates, err := specUpdates.AddField("ts", iceberg.YearTransform{}, "year_transform")
+		assert.NoError(t, err)
+		assert.NotNil(t, specUpdates)
+
+		specUpdates, err = specUpdates.AddField("address.zip_code", iceberg.BucketTransform{NumBuckets: 5}, "zipcode_bucket")
+		assert.NoError(t, err)
+		assert.NotNil(t, specUpdates)
+
+		updates, requirements, err := specUpdates.CommitUpdates()
+		assert.NoError(t, err)
+		assert.NotNil(t, updates)
+
+		assert.Equal(t, 2, len(updates))
+		assert.Equal(t, 1, len(requirements))
+
+		assert.Equal(t, table.UpdateAddSpec, updates[0].Action())
+		assert.Equal(t, table.UpdateSetDefaultSpec, updates[1].Action())
+		assert.Equal(t, "assert-last-assigned-partition-id", requirements[0].GetType())
+	})
+
+	t.Run("commit removed partition field", func(t *testing.T) {
+		txn = testPartitionedTable.NewTransaction()
+		specUpdates := table.NewUpdateSpec(txn, false)
+
+		specUpdates, err := specUpdates.RemoveField("street_void")
+		assert.NoError(t, err)
+		assert.NotNil(t, specUpdates)
+
+		updates, requirements, err := specUpdates.CommitUpdates()
+		assert.NoError(t, err)
+		assert.NotNil(t, updates)
+
+		assert.Equal(t, 2, len(updates))
+		assert.Equal(t, 1, len(requirements))
+
+		assert.Equal(t, table.UpdateAddSpec, updates[0].Action())
+		assert.Equal(t, table.UpdateSetDefaultSpec, updates[1].Action())
+		assert.Equal(t, "assert-last-assigned-partition-id", requirements[0].GetType())
+	})
+
+	t.Run("commit renamed partition field", func(t *testing.T) {
+		txn = testPartitionedTable.NewTransaction()
+		specUpdates := table.NewUpdateSpec(txn, false)
+
+		specUpdates, err := specUpdates.RenameField("street_void", "new_street_void")
+		assert.NoError(t, err)
+		assert.NotNil(t, specUpdates)
+
+		updates, requirements, err := specUpdates.CommitUpdates()
+		assert.NoError(t, err)
+		assert.NotNil(t, updates)
+
+		assert.Equal(t, 2, len(updates))
+		assert.Equal(t, 1, len(requirements))
+
+		assert.Equal(t, table.UpdateAddSpec, updates[0].Action())
+		assert.Equal(t, table.UpdateSetDefaultSpec, updates[1].Action())
+		assert.Equal(t, "assert-last-assigned-partition-id", requirements[0].GetType())
+	})
+}

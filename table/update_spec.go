@@ -49,6 +49,11 @@ func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 		}] = partitionField
 		nameToField[partitionField.Name] = partitionField
 	}
+	lastAssignedFieldId := t.tbl.Metadata().LastPartitionSpecID()
+	if lastAssignedFieldId == nil {
+		v := iceberg.PartitionDataIDStart - 1
+		lastAssignedFieldId = &v
+	}
 
 	return &UpdateSpec{
 		txn:                   t,
@@ -61,7 +66,7 @@ func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 		caseSensitive:         caseSensitive,
 		adds:                  make([]iceberg.PartitionField, 0),
 		deletes:               make(map[int]bool),
-		lastAssignedFieldId:   partitionSpec.LastAssignedFieldID(),
+		lastAssignedFieldId:   *lastAssignedFieldId,
 	}
 }
 
@@ -233,8 +238,36 @@ func (us *UpdateSpec) Apply() *iceberg.PartitionSpec {
 	return &newSpec
 }
 
-func (us *UpdateSpec) Commit() ([]Update, []Requirement, error) {
-	return nil, nil, nil
+func (us *UpdateSpec) Commit() error {
+	updates, requirements, err := us.CommitUpdates()
+	if err != nil {
+		return err
+	}
+
+	if len(updates) == 0 {
+		return nil
+	}
+
+	return us.txn.apply(updates, requirements)
+}
+
+func (us *UpdateSpec) CommitUpdates() ([]Update, []Requirement, error) {
+	newSpec := us.Apply()
+	updates := make([]Update, 0)
+	requirements := make([]Requirement, 0)
+
+	if us.txn.tbl.Metadata().DefaultPartitionSpec() != newSpec.ID() {
+		if us.isNewPartitionSpec(newSpec.ID()) {
+			updates = append(updates, NewAddPartitionSpecUpdate(newSpec, false))
+			updates = append(updates, NewSetDefaultSpecUpdate(-1))
+		} else {
+			updates = append(updates, NewSetDefaultSpecUpdate(newSpec.ID()))
+		}
+		requiredLastAssignedPartitionId := us.txn.tbl.Metadata().LastPartitionSpecID()
+		requirements = append(requirements, AssertLastAssignedPartitionID(*requiredLastAssignedPartitionId))
+	}
+
+	return updates, requirements, nil
 }
 
 func (us *UpdateSpec) partitionField(key transformKey, name string) iceberg.PartitionField {
@@ -305,4 +338,14 @@ func (us *UpdateSpec) addNewField(schema *iceberg.Schema, sourceId int, fieldId 
 		Name:      name,
 		Transform: transform,
 	}, nil
+}
+
+func (us *UpdateSpec) isNewPartitionSpec(newSpecId int) bool {
+	for _, spec := range us.txn.tbl.Metadata().PartitionSpecs() {
+		if spec.ID() == newSpecId {
+			return false
+		}
+	}
+
+	return true
 }
