@@ -179,6 +179,42 @@ func TestUpdateSpecAddField(t *testing.T) {
 	})
 }
 
+func TestUpdateSpecAddIdentityField(t *testing.T) {
+	var txn *table.Transaction
+
+	t.Run("add identity partition fields", func(t *testing.T) {
+		txn = testPartitionedTable.NewTransaction()
+		updates := table.NewUpdateSpec(txn, false)
+		updates, err := updates.AddIdentity("ts")
+		assert.NoError(t, err)
+		assert.NotNil(t, updates)
+
+		updates, err = updates.AddIdentity("name")
+		assert.NoError(t, err)
+		assert.NotNil(t, updates)
+
+		newSpec := updates.Apply()
+		assert.NotNil(t, newSpec)
+		assert.Equal(t, 1, newSpec.ID())
+		assert.Equal(t, 1003, newSpec.LastAssignedFieldID())
+		assert.Equal(t, 4, newSpec.NumFields())
+		assert.Equal(t, "id_identity", newSpec.FieldsBySourceID(1)[0].Name)
+		assert.Equal(t, "street_void", newSpec.FieldsBySourceID(5)[0].Name)
+
+		addedField := newSpec.FieldsBySourceID(3)[0]
+		assert.Equal(t, 3, addedField.SourceID)
+		assert.Equal(t, 1002, addedField.FieldID)
+		assert.Equal(t, "ts", addedField.Name)
+		assert.Equal(t, iceberg.IdentityTransform{}, addedField.Transform)
+
+		addedField = newSpec.FieldsBySourceID(2)[0]
+		assert.Equal(t, 2, addedField.SourceID)
+		assert.Equal(t, 1003, addedField.FieldID)
+		assert.Equal(t, "name", addedField.Name)
+		assert.Equal(t, iceberg.IdentityTransform{}, addedField.Transform)
+	})
+}
+
 func TestUpdateSpecRenameField(t *testing.T) {
 	var txn *table.Transaction
 

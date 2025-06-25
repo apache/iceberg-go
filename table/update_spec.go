@@ -107,7 +107,10 @@ func (us *UpdateSpec) AddField(sourceColName string, transform iceberg.Transform
 
 	// Create the new partition field and Check for name collisions
 	// with existing fields
-	newField := us.partitionField(key, partitionFieldName)
+	newField, err := us.partitionField(key, partitionFieldName)
+	if err != nil {
+		return nil, err
+	}
 	if _, exists = us.nameToAddedField[newField.Name]; exists {
 		return nil, fmt.Errorf("already added partition field with name: %s", newField.Name)
 	}
@@ -142,7 +145,7 @@ func (us *UpdateSpec) AddField(sourceColName string, transform iceberg.Transform
 }
 
 func (us *UpdateSpec) AddIdentity(sourceColName string) (*UpdateSpec, error) {
-	return nil, nil
+	return us.AddField(sourceColName, iceberg.IdentityTransform{}, "")
 }
 
 func (us *UpdateSpec) RemoveField(name string) (*UpdateSpec, error) {
@@ -270,7 +273,7 @@ func (us *UpdateSpec) CommitUpdates() ([]Update, []Requirement, error) {
 	return updates, requirements, nil
 }
 
-func (us *UpdateSpec) partitionField(key transformKey, name string) iceberg.PartitionField {
+func (us *UpdateSpec) partitionField(key transformKey, name string) (iceberg.PartitionField, error) {
 	if us.txn.tbl.Metadata().Version() == 2 {
 		sourceId, transform := key.SourceId, key.Transform
 		historicalFields := make([]iceberg.PartitionField, 0)
@@ -286,19 +289,32 @@ func (us *UpdateSpec) partitionField(key transformKey, name string) iceberg.Part
 					FieldID:   fields.FieldID,
 					Name:      name,
 					Transform: fields.Transform,
-				}
+				}, nil
 			}
 		}
 	}
 	newFieldId := us.newFieldId()
 	transform, _ := iceberg.ParseTransform(key.Transform)
+	if name == "" {
+		tmp_field := iceberg.PartitionField{
+			SourceID:  key.SourceId,
+			FieldID:   newFieldId,
+			Name:      "unassigned_field_name",
+			Transform: transform,
+		}
+		var err error
+		name, err = iceberg.VisitPartitionField(us.txn.tbl.Schema(), tmp_field, iceberg.PartitionNameGenerator{})
+		if err != nil {
+			return iceberg.PartitionField{}, err
+		}
+	}
 
 	return iceberg.PartitionField{
 		SourceID:  key.SourceId,
 		FieldID:   newFieldId,
 		Name:      name,
 		Transform: transform,
-	}
+	}, nil
 }
 
 func (us *UpdateSpec) newFieldId() int {
