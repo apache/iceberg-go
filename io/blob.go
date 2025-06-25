@@ -158,13 +158,8 @@ func (bfs *blobFileIO) Create(name string) (FileWriter, error) {
 			// Try to access S3-specific upload input to configure it
 			var uploadInput *s3.PutObjectInput
 			if as(&uploadInput) && uploadInput != nil {
-				// Ensure metadata is set for AVRO files
-				if uploadInput.Key != nil && strings.HasSuffix(*uploadInput.Key, ".avro") {
-					if uploadInput.Metadata == nil {
-						uploadInput.Metadata = make(map[string]string)
-					}
-					uploadInput.Metadata["Content-Type"] = "application/avro"
-				}
+				// S3 Tables doesn't support custom metadata headers
+				// So we don't set Content-Type for AVRO files
 			}
 			return nil
 		},
@@ -182,12 +177,8 @@ func (bfs *blobFileIO) WriteFile(name string, content []byte) error {
 			var uploadInput *s3.PutObjectInput
 			if as(&uploadInput) && uploadInput != nil {
 				// Ensure metadata is set for AVRO files
-				if uploadInput.Key != nil && strings.HasSuffix(*uploadInput.Key, ".avro") {
-					if uploadInput.Metadata == nil {
-						uploadInput.Metadata = make(map[string]string)
-					}
-					uploadInput.Metadata["Content-Type"] = "application/avro"
-				}
+				// S3 Tables doesn't support custom metadata headers
+				// So we don't set any metadata for AVRO files
 				
 				// For WriteAll, we know the content length
 				contentLength := int64(len(content))
@@ -237,17 +228,8 @@ func (io *blobFileIO) NewWriter(ctx context.Context, path string, overwrite bool
 			}
 		}
 		
-		// Try to access S3-specific upload input to configure it
-		var uploadInput *s3.PutObjectInput
-		if as(&uploadInput) && uploadInput != nil {
-			// Ensure metadata is set for AVRO files
-			if uploadInput.Key != nil && strings.HasSuffix(*uploadInput.Key, ".avro") {
-				if uploadInput.Metadata == nil {
-					uploadInput.Metadata = make(map[string]string)
-				}
-				uploadInput.Metadata["Content-Type"] = "application/avro"
-			}
-		}
+		// S3 Tables doesn't support custom metadata headers
+		// So we don't set any metadata
 		return nil
 	}
 	
