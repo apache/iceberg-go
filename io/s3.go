@@ -270,19 +270,6 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 					)
 				})
 			}
-
-			// Add request/response logging for debugging
-			o.APIOptions = append(o.APIOptions, func(stack *middleware.Stack) error {
-				return stack.Deserialize.Add(
-					middleware.DeserializeMiddlewareFunc("GCSDebugLogging", func(
-						ctx context.Context, in middleware.DeserializeInput, next middleware.DeserializeHandler,
-					) (middleware.DeserializeOutput, middleware.Metadata, error) {
-						out, metadata, err := next.HandleDeserialize(ctx, in)
-						return out, metadata, err
-					}),
-					middleware.Before,
-				)
-			})
 		}
 
 		// Only add middleware to prevent chunked encoding for GCS endpoints
