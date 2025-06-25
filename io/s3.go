@@ -287,6 +287,7 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 							// Disable multipart uploads for smaller files to avoid chunking
 							// This forces the SDK to use regular PUT operations
 							if v.ContentLength != nil && *v.ContentLength < 5*1024*1024*1024 { // 5GB threshold
+								// Processing handled by AWS SDK
 							}
 						}
 

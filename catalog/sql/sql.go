@@ -335,7 +335,11 @@ func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, reqs []tabl
 		return current.Metadata(), current.MetadataLocation(), nil
 	}
 
-	if err := internal.WriteMetadata(ctx, staged.Metadata(), staged.MetadataLocation(), staged.Properties()); err != nil {
+	// Merge catalog properties with staged properties to ensure S3 configuration is included
+	writeProps := maps.Clone(c.props)
+	maps.Copy(writeProps, staged.Properties())
+
+	if err := internal.WriteMetadata(ctx, staged.Metadata(), staged.MetadataLocation(), writeProps); err != nil {
 		return nil, "", err
 	}
 

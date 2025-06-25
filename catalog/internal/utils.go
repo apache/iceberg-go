@@ -44,7 +44,7 @@ func GetMetadataLoc(location string, newVersion uint) string {
 func WriteTableMetadata(metadata table.Metadata, fs io.WriteFileIO, loc string) error {
 	out, err := fs.Create(loc)
 	if err != nil {
-		return nil
+		return err
 	}
 	defer out.Close()
 
@@ -64,12 +64,19 @@ func WriteMetadata(ctx context.Context, metadata table.Metadata, loc string, pro
 
 	out, err := wfs.Create(loc)
 	if err != nil {
-		return nil
+		return fmt.Errorf("failed to create metadata file at %s: %w", loc, err)
 	}
 
-	defer out.Close()
+	defer func() {
+		if closeErr := out.Close(); closeErr != nil {
+		}
+	}()
 
-	return json.NewEncoder(out).Encode(metadata)
+	if err := json.NewEncoder(out).Encode(metadata); err != nil {
+		return fmt.Errorf("failed to encode metadata to %s: %w", loc, err)
+	}
+
+	return nil
 }
 
 func UpdateTableMetadata(base table.Metadata, updates []table.Update, metadataLoc string) (table.Metadata, error) {

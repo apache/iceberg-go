@@ -204,11 +204,12 @@ func (io *blobFileIO) NewWriter(ctx context.Context, path string, overwrite bool
 	}
 
 	if !overwrite {
-		if exists, err := io.Bucket.Exists(ctx, path); exists {
-			if err != nil {
-				return nil, &fs.PathError{Op: "new writer", Path: path, Err: err}
-			}
-			return nil, &fs.PathError{Op: "new writer", Path: path, Err: fs.ErrInvalid}
+		exists, err := io.Bucket.Exists(ctx, path)
+		if err != nil {
+			return nil, &fs.PathError{Op: "new writer", Path: path, Err: err}
+		}
+		if exists {
+			return nil, &fs.PathError{Op: "new writer", Path: path, Err: fs.ErrExist}
 		}
 	}
 	// If no options provided, create default ones to prevent chunked encoding
