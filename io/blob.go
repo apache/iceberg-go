@@ -22,7 +22,6 @@ import (
 	"errors"
 	"io"
 	"io/fs"
-	"log"
 	"path/filepath"
 	"strings"
 
@@ -135,9 +134,8 @@ func (bfs *blobFileIO) Open(path string) (File, error) {
 
 	// For AVRO files, wrap the reader to handle potential AWS chunked encoding
 	if strings.HasSuffix(strings.ToLower(path), ".avro") {
-		log.Printf("blobFileIO.Open: Opening AVRO file %s with chunked reader wrapper", path)
 		return &blobOpenFileWithChunkedReader{
-			blobOpenFile: blobOpenFile{Reader: r, name: name, key: key, b: bfs, ctx: bfs.ctx},
+			blobOpenFile:  blobOpenFile{Reader: r, name: name, key: key, b: bfs, ctx: bfs.ctx},
 			chunkedReader: NewChunkedReader(r),
 		}, nil
 	}
@@ -164,7 +162,7 @@ func (bfs *blobFileIO) Create(name string) (FileWriter, error) {
 			return nil
 		},
 	}
-	
+
 	return bfs.NewWriter(bfs.ctx, name, true, opts)
 }
 
@@ -179,7 +177,7 @@ func (bfs *blobFileIO) WriteFile(name string, content []byte) error {
 				// Ensure metadata is set for AVRO files
 				// S3 Tables doesn't support custom metadata headers
 				// So we don't set any metadata for AVRO files
-				
+
 				// For WriteAll, we know the content length
 				contentLength := int64(len(content))
 				uploadInput.ContentLength = &contentLength
@@ -217,7 +215,7 @@ func (io *blobFileIO) NewWriter(ctx context.Context, path string, overwrite bool
 	if opts == nil {
 		opts = &blob.WriterOptions{}
 	}
-	
+
 	// Always add our BeforeWrite handler to configure S3 uploads
 	originalBeforeWrite := opts.BeforeWrite
 	opts.BeforeWrite = func(as func(any) bool) error {
@@ -227,12 +225,12 @@ func (io *blobFileIO) NewWriter(ctx context.Context, path string, overwrite bool
 				return err
 			}
 		}
-		
+
 		// S3 Tables doesn't support custom metadata headers
 		// So we don't set any metadata
 		return nil
 	}
-	
+
 	bw, err := io.Bucket.NewWriter(ctx, path, opts)
 	if err != nil {
 		return nil, err

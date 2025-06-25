@@ -20,7 +20,6 @@ package io
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -65,50 +64,32 @@ const (
 func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, error) {
 	opts := []func(*config.LoadOptions) error{}
 
-	// bytes, _ := json.Marshal(props)
-	// log.Printf("ParseAWSConfig: props => %s\n", string(bytes))
-
 	if tok, ok := props[S3SignerAuthToken]; ok {
-		log.Printf("ParseAWSConfig: Found signer auth token\n")
 		opts = append(opts, config.WithBearerAuthTokenProvider(
 			&bearer.StaticTokenProvider{Token: bearer.Token{Value: tok}}))
 	}
 
 	region := ""
-	originalRegion := ""
 	if r, ok := props[S3Region]; ok {
-		originalRegion = r
 		region = r
-		log.Printf("ParseAWSConfig: Found s3.region = '%s'\n", region)
 		opts = append(opts, config.WithRegion(region))
 	} else if r, ok := props["client.region"]; ok {
-		originalRegion = r
 		region = r
-		log.Printf("ParseAWSConfig: Found client.region = '%s'\n", region)
 		// For Google Cloud Storage, "auto" region should be converted to a valid AWS region
 		if region == "auto" && (strings.Contains(props[S3EndpointURL], "storage.googleapis.com") || strings.Contains(props[S3EndpointURL], "googleapis.com")) {
-			log.Printf("ParseAWSConfig: Converting 'auto' region to 'us-east-1' for GCS compatibility\n")
 			region = "us-east-1" // Default region for GCS compatibility
 		}
-		log.Printf("ParseAWSConfig: Using region = '%s' (original: '%s')\n", region, originalRegion)
 		opts = append(opts, config.WithRegion(region))
 	} else if r, ok := props["rest.signing-region"]; ok {
-		originalRegion = r
 		region = r
-		log.Printf("ParseAWSConfig: Found rest.signing-region = '%s'\n", region)
 		// For Google Cloud Storage, "auto" region should be converted to a valid AWS region
 		if region == "auto" && (strings.Contains(props[S3EndpointURL], "storage.googleapis.com") || strings.Contains(props[S3EndpointURL], "googleapis.com")) {
-			log.Printf("ParseAWSConfig: Converting 'auto' region to 'us-east-1' for GCS compatibility\n")
 			region = "us-east-1" // Default region for GCS compatibility
 		}
-		log.Printf("ParseAWSConfig: Using region = '%s' (original: '%s')\n", region, originalRegion)
 		opts = append(opts, config.WithRegion(region))
-	} else {
-		log.Printf("ParseAWSConfig: No region specified, using default\n")
 	}
 
 	endpoint := props[S3EndpointURL]
-	log.Printf("ParseAWSConfig: Endpoint = '%s'\n", endpoint)
 
 	// Check if remote signing is configured and enabled
 	signerURI, hasSignerURI := props[S3SignerUri]
@@ -120,11 +101,7 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 		}
 	}
 
-	log.Printf("ParseAWSConfig: Remote signing - hasSignerURI: %v, signerURI: '%s', signerEndpoint: '%s', enabled: %v\n",
-		hasSignerURI, signerURI, signerEndpoint, remoteSigningEnabled)
-
 	if hasSignerURI && signerURI != "" && remoteSigningEnabled {
-		log.Printf("ParseAWSConfig: Using remote signing configuration\n")
 		// For remote signing, we still need valid (but potentially dummy) credentials
 		// The actual signing will be handled by the transport layer
 		opts = append(opts, config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
@@ -142,7 +119,6 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 				return nil, fmt.Errorf("invalid s3 proxy url '%s'", proxy)
 			}
 			baseTransport.Proxy = http.ProxyURL(proxyURL)
-			log.Printf("ParseAWSConfig: Using proxy: %s\n", proxy)
 		}
 
 		// Get auth token if configured
@@ -156,20 +132,13 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 
 		opts = append(opts, config.WithHTTPClient(httpClient))
 	} else {
-		log.Printf("ParseAWSConfig: Using regular credentials (not remote signing)\n")
 		// Use regular credentials if no remote signer
 		accessKey, secretAccessKey := props[S3AccessKeyID], props[S3SecretAccessKey]
 		token := props[S3SessionToken]
-		log.Printf("ParseAWSConfig: Credentials - accessKey: '%s' (len=%d), secretKey: (len=%d), token: (len=%d)\n",
-			accessKey, len(accessKey), len(secretAccessKey), len(token))
 
 		if accessKey != "" || secretAccessKey != "" || token != "" {
-			log.Printf("ParseAWSConfig: Setting static credentials provider\n")
-
 			// Special handling for GCS - try a different approach
 			if endpoint != "" && (strings.Contains(endpoint, "storage.googleapis.com") || strings.Contains(endpoint, "googleapis.com")) {
-				log.Printf("ParseAWSConfig: Using GCS-compatible credential configuration\n")
-
 				// For GCS, let's try using the credentials but with special handling
 				// The key insight is that GCS HMAC keys work differently than AWS keys
 				opts = append(opts, config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
@@ -179,8 +148,6 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 				opts = append(opts, config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
 					props[S3AccessKeyID], props[S3SecretAccessKey], props[S3SessionToken])))
 			}
-		} else {
-			log.Printf("ParseAWSConfig: No credentials provided, using default provider chain\n")
 		}
 
 		if proxy, ok := props[S3ProxyURI]; ok {
@@ -194,23 +161,18 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 					t.Proxy = http.ProxyURL(proxyURL)
 				},
 			)))
-			log.Printf("ParseAWSConfig: Using proxy: %s\n", proxy)
 		}
 	}
 
-	log.Printf("ParseAWSConfig: Loading AWS config with %d options\n", len(opts))
 	awscfg := new(aws.Config)
 	var err error
 	*awscfg, err = config.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
-		log.Printf("ParseAWSConfig: ERROR loading config: %v\n", err)
 		return nil, err
 	}
 
 	// Special handling for Google Cloud Storage
 	if endpoint != "" && (strings.Contains(endpoint, "storage.googleapis.com") || strings.Contains(endpoint, "googleapis.com")) {
-		log.Printf("ParseAWSConfig: Applying GCS-specific AWS config modifications\n")
-
 		// GCS S3-compatible API has some specific requirements
 		// Try to disable certain AWS-specific features that might not work with GCS
 		awscfg.ClientLogMode = 0 // Disable detailed client logging that might interfere
@@ -220,33 +182,23 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 		if accessKey := props[S3AccessKeyID]; accessKey != "" {
 			secretKey := props[S3SecretAccessKey]
 			token := props[S3SessionToken]
-			log.Printf("ParseAWSConfig: Using HMAC credentials for GCS compatibility\n")
 			awscfg.Credentials = credentials.NewStaticCredentialsProvider(accessKey, secretKey, token)
 		}
-
-		log.Printf("ParseAWSConfig: Applied GCS compatibility settings\n")
 	}
 
-	log.Printf("ParseAWSConfig: Successfully loaded AWS config with region: %s\n", awscfg.Region)
 	return awscfg, nil
 }
 
 func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
-	log.Printf("createS3Bucket: Starting bucket creation for URL: %s\n", parsed.String())
-	log.Printf("createS3Bucket: Host: %s, Path: %s\n", parsed.Host, parsed.Path)
-
 	var (
 		awscfg *aws.Config
 		err    error
 	)
 	if v := utils.GetAwsConfig(ctx); v != nil {
-		log.Printf("createS3Bucket: Using existing AWS config from context\n")
 		awscfg = v
 	} else {
-		log.Printf("createS3Bucket: Parsing new AWS config from props\n")
 		awscfg, err = ParseAWSConfig(ctx, props)
 		if err != nil {
-			log.Printf("createS3Bucket: ERROR parsing AWS config: %v\n", err)
 			return nil, err
 		}
 	}
@@ -254,66 +206,40 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 	endpoint, ok := props[S3EndpointURL]
 	if !ok {
 		endpoint = os.Getenv("AWS_S3_ENDPOINT")
-		log.Printf("createS3Bucket: No endpoint in props, using env var: %s\n", endpoint)
-	} else {
-		log.Printf("createS3Bucket: Using endpoint from props: %s\n", endpoint)
 	}
 
 	usePathStyle := true
 	if forceVirtual, ok := props[S3ForceVirtualAddressing]; ok {
 		if cfgForceVirtual, err := strconv.ParseBool(forceVirtual); err == nil {
 			usePathStyle = !cfgForceVirtual
-			log.Printf("createS3Bucket: Force virtual addressing set to %v, usePathStyle = %v\n", cfgForceVirtual, usePathStyle)
 		}
-	} else {
-		log.Printf("createS3Bucket: No force virtual addressing specified, defaulting to path style\n")
 	}
 
 	// Google Cloud Storage requires path-style access when using S3-compatible API
 	if endpoint != "" && (strings.Contains(endpoint, "storage.googleapis.com") || strings.Contains(endpoint, "googleapis.com")) {
-		log.Printf("createS3Bucket: Detected Google Cloud Storage endpoint, forcing path-style access\n")
 		usePathStyle = true
 	}
-
-	// Check if remote signing is enabled
-	_, hasSignerURI := props[S3SignerUri]
-	remoteSigningEnabled := true // Default to true for backward compatibility
-	if enabledStr, ok := props[S3RemoteSigningEnabled]; ok {
-		if enabled, err := strconv.ParseBool(enabledStr); err == nil {
-			remoteSigningEnabled = enabled
-		}
-	}
-
-	log.Printf("createS3Bucket: Remote signing - hasSignerURI: %v, enabled: %v\n", hasSignerURI, remoteSigningEnabled)
-	log.Printf("createS3Bucket: Final configuration - endpoint: %s, usePathStyle: %v, region: %s\n", endpoint, usePathStyle, awscfg.Region)
 
 	client := s3.NewFromConfig(*awscfg, func(o *s3.Options) {
 		if endpoint != "" {
 			o.BaseEndpoint = aws.String(endpoint)
-			log.Printf("createS3Bucket: Set S3 client base endpoint to: %s\n", endpoint)
 		}
 		o.UsePathStyle = usePathStyle
-		log.Printf("createS3Bucket: Set S3 client UsePathStyle to: %v\n", usePathStyle)
 		o.DisableLogOutputChecksumValidationSkipped = true
 
 		// Special configuration for Google Cloud Storage
 		if endpoint != "" && (strings.Contains(endpoint, "storage.googleapis.com") || strings.Contains(endpoint, "googleapis.com")) {
-			log.Printf("createS3Bucket: Applying GCS-specific configurations\n")
-			
 			// Disable S3-specific features that don't work well with GCS
 			o.UseAccelerate = false
-			
+
 			// For GCS, we need to implement our own signing that's compatible with GCS requirements
 			// The AWS SDK signing has subtle differences that don't work with GCS
-			log.Printf("createS3Bucket: Implementing custom GCS-compatible signing\n")
 
 			// Get the credentials for custom signing
 			accessKey := props[S3AccessKeyID]
 			secretKey := props[S3SecretAccessKey]
 
 			if accessKey != "" && secretKey != "" {
-				log.Printf("createS3Bucket: Setting up custom GCS signing transport\n")
-
 				// Add custom transport that implements GCS-compatible signing
 				o.APIOptions = append(o.APIOptions, func(stack *middleware.Stack) error {
 					return stack.Finalize.Add(
@@ -333,14 +259,10 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 								// Create GCS-compatible authorization header
 								authHeader, err := createGCSAuthHeader(req, accessKey, secretKey, awscfg.Region)
 								if err != nil {
-									log.Printf("createS3Bucket: Error creating GCS auth header: %v\n", err)
 									// Fall back to AWS signing
 								} else {
 									req.Header.Set("Authorization", authHeader)
-									log.Printf("createS3Bucket: Set custom GCS authorization header\n")
 								}
-
-								log.Printf("createS3Bucket: Applied custom GCS signing\n")
 							}
 							return next.HandleFinalize(ctx, in)
 						}),
@@ -355,22 +277,7 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 					middleware.DeserializeMiddlewareFunc("GCSDebugLogging", func(
 						ctx context.Context, in middleware.DeserializeInput, next middleware.DeserializeHandler,
 					) (middleware.DeserializeOutput, middleware.Metadata, error) {
-						// Log the request
-						if req, ok := in.Request.(*smithyhttp.Request); ok {
-							log.Printf("GCS Request: %s %s\n", req.Method, req.URL.String())
-							log.Printf("GCS Request Headers: %v\n", req.Header)
-						}
-
 						out, metadata, err := next.HandleDeserialize(ctx, in)
-
-						// Log the response
-						if err != nil {
-							log.Printf("GCS Response Error: %v\n", err)
-						} else if resp, ok := out.RawResponse.(*smithyhttp.Response); ok {
-							log.Printf("GCS Response Status: %d %s\n", resp.StatusCode, resp.Status)
-							log.Printf("GCS Response Headers: %v\n", resp.Header)
-						}
-
 						return out, metadata, err
 					}),
 					middleware.Before,
@@ -381,7 +288,6 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 		// Only add middleware to prevent chunked encoding for GCS endpoints
 		// For regular S3, these middleware can interfere with authentication
 		if endpoint != "" && (strings.Contains(endpoint, "storage.googleapis.com") || strings.Contains(endpoint, "googleapis.com")) {
-			log.Printf("createS3Bucket: Adding middleware to prevent chunked encoding for GCS\n")
 			o.APIOptions = append(o.APIOptions, func(stack *middleware.Stack) error {
 				// Add a serialize step middleware to disable chunked encoding
 				return stack.Serialize.Add(
@@ -394,10 +300,9 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 							// Disable multipart uploads for smaller files to avoid chunking
 							// This forces the SDK to use regular PUT operations
 							if v.ContentLength != nil && *v.ContentLength < 5*1024*1024*1024 { // 5GB threshold
-								log.Printf("createS3Bucket: Disabling multipart for object with size %d\n", *v.ContentLength)
 							}
 						}
-						
+
 						return next.HandleSerialize(ctx, in)
 					}),
 					middleware.After,
@@ -417,16 +322,14 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 							req.Header.Del("Content-Encoding")
 							req.Header.Del("Transfer-Encoding")
 							req.Header.Del("X-Amz-Content-Sha256")
-							
+
 							// Set UNSIGNED-PAYLOAD to avoid content hashing which can trigger chunking
 							req.Header.Set("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD")
-							
+
 							// Ensure Content-Length is set if we have it
 							if req.ContentLength > 0 {
 								req.Header.Set("Content-Length", strconv.FormatInt(req.ContentLength, 10))
 							}
-							
-							log.Printf("createS3Bucket: Set headers to prevent chunking - Content-Length: %d\n", req.ContentLength)
 						}
 						return next.HandleFinalize(ctx, in)
 					}),
@@ -436,21 +339,16 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 		}
 	})
 
-	log.Printf("createS3Bucket: Created S3 client successfully\n")
-
 	// Create a *blob.Bucket with options
 	bucketOpts := &s3blob.Options{
 		// Note: UsePathStyle is configured on the S3 client above, not here
 	}
 
-	log.Printf("createS3Bucket: Opening bucket with host: %s\n", parsed.Host)
 	bucket, err := s3blob.OpenBucketV2(ctx, client, parsed.Host, bucketOpts)
 	if err != nil {
-		log.Printf("createS3Bucket: ERROR opening bucket: %v\n", err)
 		return nil, err
 	}
 
-	log.Printf("createS3Bucket: Successfully created bucket\n")
 	return bucket, nil
 }
 
@@ -543,7 +441,6 @@ func createGCSAuthHeader(req *smithyhttp.Request, accessKey, secretKey, region s
 	authHeader := fmt.Sprintf("%s Credential=%s/%s, SignedHeaders=%s, Signature=%s",
 		algorithm, accessKey, credentialScope, signedHeaders, signature)
 
-	log.Printf("createGCSAuthHeader: Generated signature for GCS: %s\n", authHeader[:50]+"...")
 	return authHeader, nil
 }
 

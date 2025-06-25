@@ -22,7 +22,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"log"
 	"strconv"
 	"strings"
 )
@@ -73,7 +72,7 @@ func (cr *ChunkedReader) Read(p []byte) (int, error) {
 
 		// Parse chunk size (hexadecimal)
 		line = strings.TrimSpace(line)
-		
+
 		// Handle chunk extensions (e.g., "1a3;chunk-signature=...")
 		if idx := strings.Index(line, ";"); idx != -1 {
 			line = line[:idx]
@@ -138,7 +137,6 @@ func (cr *ChunkedReader) detectChunkedEncoding() error {
 	if len(peek) >= 4 && bytes.Equal(peek[:4], []byte("Obj\x01")) {
 		// This is raw AVRO content, not chunked
 		cr.isChunked = false
-		log.Printf("ChunkedReader: Detected raw AVRO content (magic bytes), not using chunked decoding")
 		return nil
 	}
 
@@ -146,7 +144,7 @@ func (cr *ChunkedReader) detectChunkedEncoding() error {
 	// AWS chunked format starts with hex size followed by optional ;extensions
 	firstLine := bytes.Split(peek, []byte("\n"))[0]
 	firstLine = bytes.TrimSpace(firstLine)
-	
+
 	// Remove any chunk extensions
 	if idx := bytes.Index(firstLine, []byte(";")); idx != -1 {
 		firstLine = firstLine[:idx]
@@ -156,13 +154,11 @@ func (cr *ChunkedReader) detectChunkedEncoding() error {
 	if _, err := strconv.ParseInt(string(firstLine), 16, 64); err == nil {
 		// Successfully parsed as hex, this is chunked encoding
 		cr.isChunked = true
-		log.Printf("ChunkedReader: Detected AWS chunked encoding (hex size: %s)", string(firstLine))
 		return nil
 	}
 
 	// Default to not chunked
 	cr.isChunked = false
-	log.Printf("ChunkedReader: No chunked encoding detected, passing through raw content")
 	return nil
 }
 
