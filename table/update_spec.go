@@ -141,7 +141,19 @@ func (us *UpdateSpec) AddIdentity(sourceColName string) (*UpdateSpec, error) {
 }
 
 func (us *UpdateSpec) RemoveField(name string) (*UpdateSpec, error) {
-	return nil, nil
+	if _, added := us.nameToAddedField[name]; added {
+		return nil, fmt.Errorf("cannot remove newly added field %s", name)
+	}
+	if _, renamed := us.renames[name]; renamed {
+		return nil, fmt.Errorf("cannot rename and delete field %s", name)
+	}
+	field, exists := us.nameToField[name]
+	if !exists {
+		return nil, fmt.Errorf("cannot find partition field %s", name)
+	}
+	us.deletes[field.FieldID] = true
+
+	return us, nil
 }
 
 func (us *UpdateSpec) RenameField(name string, newName string) (*UpdateSpec, error) {
@@ -178,17 +190,21 @@ func (us *UpdateSpec) Apply() *iceberg.PartitionSpec {
 			} else {
 				newField, err = us.addNewField(us.txn.tbl.Schema(), field.SourceID, field.FieldID, field.Name, field.Transform, partitionNames)
 			}
+			if err != nil {
+				return nil
+			}
+			partitionFields = append(partitionFields, newField)
 		} else if us.txn.tbl.Metadata().Version() == 1 {
 			if rename, renamed := us.renames[field.Name]; renamed {
 				newField, err = us.addNewField(us.txn.tbl.Schema(), field.SourceID, field.FieldID, rename, iceberg.VoidTransform{}, partitionNames)
 			} else {
 				newField, err = us.addNewField(us.txn.tbl.Schema(), field.SourceID, field.FieldID, field.Name, iceberg.VoidTransform{}, partitionNames)
 			}
+			if err != nil {
+				return nil
+			}
+			partitionFields = append(partitionFields, newField)
 		}
-		if err != nil {
-			return nil
-		}
-		partitionFields = append(partitionFields, newField)
 	}
 
 	for _, field := range us.adds {

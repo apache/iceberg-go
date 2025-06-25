@@ -224,6 +224,68 @@ func TestUpdateSpecRenameField(t *testing.T) {
 	})
 
 	t.Run("rename a partition field deleted in the same transaction", func(t *testing.T) {
-		// Todo: add test once remove field is implemented
+		txn = testPartitionedTable.NewTransaction()
+		updates := table.NewUpdateSpec(txn, false)
+
+		updates, err := updates.RemoveField("id_identity")
+		assert.NoError(t, err)
+		assert.NotNil(t, updates)
+
+		updates, err = updates.RenameField("id_identity", "new_id_identity")
+		assert.ErrorContains(t, err, "cannot delete and rename partition field")
+		assert.Nil(t, updates)
+	})
+}
+
+func TestUpdateSpecRemoveField(t *testing.T) {
+	var txn *table.Transaction
+
+	t.Run("remove existing partition fields", func(t *testing.T) {
+		txn = testPartitionedTable.NewTransaction()
+		updates := table.NewUpdateSpec(txn, false)
+
+		updates, err := updates.RemoveField("street_void")
+		assert.NoError(t, err)
+		assert.NotNil(t, updates)
+
+		updates, err = updates.RemoveField("id_identity")
+		assert.NoError(t, err)
+		assert.NotNil(t, updates)
+
+		newSpec := updates.Apply()
+		assert.NotNil(t, newSpec)
+		assert.Equal(t, 1, newSpec.ID())
+		assert.Equal(t, 999, newSpec.LastAssignedFieldID())
+		assert.Equal(t, 0, newSpec.NumFields())
+		assert.Equal(t, true, newSpec.IsUnpartitioned())
+	})
+
+	t.Run("remove newly added partition field", func(t *testing.T) {
+		txn = testPartitionedTable.NewTransaction()
+		updates := table.NewUpdateSpec(txn, false)
+
+		updates, err := updates.AddField("ts", iceberg.YearTransform{}, "year_transform")
+		updates, err = updates.RemoveField("year_transform")
+		assert.ErrorContains(t, err, "cannot remove newly added field")
+		assert.Nil(t, updates)
+	})
+
+	t.Run("remove renamed partition field", func(t *testing.T) {
+		txn = testPartitionedTable.NewTransaction()
+		updates := table.NewUpdateSpec(txn, false)
+
+		updates, err := updates.RenameField("id_identity", "new_id_identity")
+		updates, err = updates.RemoveField("id_identity")
+		assert.ErrorContains(t, err, "cannot rename and delete field")
+		assert.Nil(t, updates)
+	})
+
+	t.Run("remove partition field that doesn't exist", func(t *testing.T) {
+		txn = testPartitionedTable.NewTransaction()
+		updates := table.NewUpdateSpec(txn, false)
+
+		updates, err := updates.RemoveField("non_exist_field")
+		assert.ErrorContains(t, err, "cannot find partition field")
+		assert.Nil(t, updates)
 	})
 }
