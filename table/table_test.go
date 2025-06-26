@@ -903,7 +903,20 @@ func (t *TableWritingTestSuite) TestExpireSnapshots() {
 
 	ctx := context.Background()
 
-	tbl := table.New(ident, meta, t.getMetadataLoc(), fs, &mockedCatalog{})
+	tbl := table.New(
+		ident,
+		meta,
+		t.getMetadataLoc(),
+		func(ctx context.Context) (iceio.IO, error) {
+			return fs, nil
+		},
+		&mockedCatalog{},
+	)
+
+	tblfs, err := tbl.FS(ctx)
+
+	t.Require().NoError(err)
+
 	for i := range 5 {
 		tx := tbl.NewTransaction()
 		t.Require().NoError(tx.AddFiles(ctx, files[i:i+1], nil, false))
@@ -911,7 +924,7 @@ func (t *TableWritingTestSuite) TestExpireSnapshots() {
 		t.Require().NoError(err)
 	}
 
-	mflist, err := tbl.CurrentSnapshot().Manifests(tbl.FS())
+	mflist, err := tbl.CurrentSnapshot().Manifests(tblfs)
 	t.Require().NoError(err)
 	t.Len(mflist, 5)
 	t.Require().Equal(5, len(tbl.Metadata().Snapshots()))
