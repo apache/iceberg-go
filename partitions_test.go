@@ -200,7 +200,7 @@ func TestGetPartitionFieldName(t *testing.T) {
 		SourceID: 1, FieldID: 1000,
 		Transform: iceberg.TruncateTransform{Width: 19}, Name: "random_name",
 	}
-	name, err := iceberg.GetPartitionFieldName(schema, field)
+	name, err := iceberg.GeneratePartitionFieldName(schema, field)
 	assert.NoError(t, err)
 	assert.Equal(t, "str_trunc_19", name)
 
@@ -208,7 +208,7 @@ func TestGetPartitionFieldName(t *testing.T) {
 		SourceID: 2, FieldID: 1001,
 		Transform: iceberg.BucketTransform{NumBuckets: 7}, Name: "another_random_name",
 	}
-	name, err = iceberg.GetPartitionFieldName(schema, field)
+	name, err = iceberg.GeneratePartitionFieldName(schema, field)
 	assert.NoError(t, err)
 	assert.Equal(t, "other_str_bucket_7", name)
 }

@@ -294,7 +294,7 @@ func AssignFreshPartitionSpecIDs(spec *PartitionSpec, old, fresh *Schema) (Parti
 	return NewPartitionSpec(newFields...), nil
 }
 
-func GetPartitionFieldName(schema *Schema, field PartitionField) (string, error) {
+func GeneratePartitionFieldName(schema *Schema, field PartitionField) (string, error) {
 	sourceName, exists := schema.FindColumnName(field.SourceID)
 	if !exists {
 		return "", fmt.Errorf("could not find field with id %d", field.SourceID)
