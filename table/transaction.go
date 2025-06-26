@@ -169,6 +169,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		updates      []Update
 		snapsToKeep  = make(map[int64]struct{})
 		refsToDelete = make(map[string]struct{})
+		nowMs        = time.Now().UnixMilli()
 	)
 
 	for _, opt := range opts {
@@ -190,7 +191,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 			return errors.New("cannot find a valid value for maxRefAgeMs")
 		}
 
-		refAge := time.Now().UnixMilli() - snap.TimestampMs
+		refAge := nowMs - snap.TimestampMs
 		if refAge > *maxRefAgeMs {
 			updates = append(updates, NewRemoveSnapshotRefUpdate(refName))
 			refsToDelete[refName] = struct{}{}
@@ -518,7 +519,7 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 		}
 
 		for _, u := range t.meta.updates {
-			if perr := u.PostCommit(t.tbl, tbl); perr != nil {
+			if perr := u.PostCommit(ctx, t.tbl, tbl); perr != nil {
 				err = errors.Join(err, perr)
 			}
 		}
