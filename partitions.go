@@ -295,6 +295,7 @@ func AssignFreshPartitionSpecIDs(spec *PartitionSpec, old, fresh *Schema) (Parti
 }
 
 // GeneratePartitionFieldName returns default partition field name based on field transform type
+//
 // The default names are aligned with other client implementations
 // https://github.com/apache/iceberg/blob/main/core/src/main/java/org/apache/iceberg/BaseUpdatePartitionSpec.java#L518-L563
 func GeneratePartitionFieldName(schema *Schema, field PartitionField) (string, error) {
