@@ -303,21 +303,9 @@ func GeneratePartitionFieldName(schema *Schema, field PartitionField) (string, e
 	switch t := transform.(type) {
 	case IdentityTransform:
 		return sourceName, nil
-	case BucketTransform:
-		return fmt.Sprintf("%s_bucket_%d", sourceName, t.NumBuckets), nil
-	case TruncateTransform:
-		return fmt.Sprintf("%s_trunc_%d", sourceName, t.Width), nil
-	case YearTransform:
-		return sourceName + "_year", nil
-	case MonthTransform:
-		return sourceName + "_month", nil
-	case DayTransform:
-		return sourceName + "_day", nil
-	case HourTransform:
-		return sourceName + "_hour", nil
 	case VoidTransform:
 		return sourceName + "_null", nil
 	default:
-		return "", fmt.Errorf("unknown transform type: %T", transform)
+		return sourceName + "_" + t.String(), nil
 	}
 }
