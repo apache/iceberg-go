@@ -294,6 +294,9 @@ func AssignFreshPartitionSpecIDs(spec *PartitionSpec, old, fresh *Schema) (Parti
 	return NewPartitionSpec(newFields...), nil
 }
 
+// GeneratePartitionFieldName returns default partition field name based on field transform type
+// The default names are aligned with other client implementations
+// https://github.com/apache/iceberg/blob/main/core/src/main/java/org/apache/iceberg/BaseUpdatePartitionSpec.java#L518-L563
 func GeneratePartitionFieldName(schema *Schema, field PartitionField) (string, error) {
 	sourceName, exists := schema.FindColumnName(field.SourceID)
 	if !exists {
@@ -305,6 +308,10 @@ func GeneratePartitionFieldName(schema *Schema, field PartitionField) (string, e
 		return sourceName, nil
 	case VoidTransform:
 		return sourceName + "_null", nil
+	case BucketTransform:
+		return fmt.Sprintf("%s_bucket_%d", sourceName, t.NumBuckets), nil
+	case TruncateTransform:
+		return fmt.Sprintf("%s_trunc_%d", sourceName, t.Width), nil
 	default:
 		return sourceName + "_" + t.String(), nil
 	}
