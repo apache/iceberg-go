@@ -172,13 +172,3 @@ func Counter(start int) iter.Seq[int] {
 		}
 	}
 }
-
-func Coalesce[T any](vals ...*T) *T {
-	for _, val := range vals {
-		if val != nil {
-			return val
-		}
-	}
-
-	return nil
-}
