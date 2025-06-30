@@ -18,6 +18,7 @@
 package table
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -30,7 +31,6 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
 )
@@ -190,7 +190,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 			return err
 		}
 
-		maxRefAgeMs := internal.Coalesce(ref.MaxRefAgeMs, cfg.maxSnapshotAgeMs)
+		maxRefAgeMs := cmp.Or(ref.MaxRefAgeMs, cfg.maxSnapshotAgeMs)
 		if maxRefAgeMs == nil {
 			return errors.New("cannot find a valid value for maxRefAgeMs")
 		}
@@ -208,8 +208,8 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		}
 
 		var (
-			minSnapshotsToKeep = internal.Coalesce(ref.MinSnapshotsToKeep, cfg.minSnapshotsToKeep)
-			maxSnapshotAgeMs   = internal.Coalesce(ref.MaxSnapshotAgeMs, cfg.maxSnapshotAgeMs)
+			minSnapshotsToKeep = cmp.Or(ref.MinSnapshotsToKeep, cfg.minSnapshotsToKeep)
+			maxSnapshotAgeMs   = cmp.Or(ref.MaxSnapshotAgeMs, cfg.maxSnapshotAgeMs)
 		)
 
 		if minSnapshotsToKeep == nil || maxSnapshotAgeMs == nil {
