@@ -299,10 +299,15 @@ func AssignFreshPartitionSpecIDs(spec *PartitionSpec, old, fresh *Schema) (Parti
 // The default names are aligned with other client implementations
 // https://github.com/apache/iceberg/blob/main/core/src/main/java/org/apache/iceberg/BaseUpdatePartitionSpec.java#L518-L563
 func GeneratePartitionFieldName(schema *Schema, field PartitionField) (string, error) {
+	if len(field.Name) > 0 {
+		return field.Name, nil
+	}
+
 	sourceName, exists := schema.FindColumnName(field.SourceID)
 	if !exists {
 		return "", fmt.Errorf("could not find field with id %d", field.SourceID)
 	}
+
 	transform := field.Transform
 	switch t := transform.(type) {
 	case IdentityTransform:

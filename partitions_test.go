@@ -201,35 +201,35 @@ func TestGetPartitionFieldName(t *testing.T) {
 		expectedName string
 	}{
 		{
-			field:        iceberg.PartitionField{SourceID: 1, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "foo"},
+			field:        iceberg.PartitionField{SourceID: 1, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: ""},
 			expectedName: "str",
 		},
 		{
-			field:        iceberg.PartitionField{SourceID: 2, FieldID: 1001, Transform: iceberg.BucketTransform{NumBuckets: 7}, Name: "bar"},
+			field:        iceberg.PartitionField{SourceID: 2, FieldID: 1001, Transform: iceberg.BucketTransform{NumBuckets: 7}, Name: ""},
 			expectedName: "int_bucket_7",
 		},
 		{
-			field:        iceberg.PartitionField{SourceID: 2, FieldID: 1002, Transform: iceberg.TruncateTransform{Width: 19}, Name: "baz"},
+			field:        iceberg.PartitionField{SourceID: 2, FieldID: 1002, Transform: iceberg.TruncateTransform{Width: 19}, Name: ""},
 			expectedName: "int_trunc_19",
 		},
 		{
-			field:        iceberg.PartitionField{SourceID: 3, FieldID: 1003, Transform: iceberg.VoidTransform{}, Name: "qux"},
+			field:        iceberg.PartitionField{SourceID: 3, FieldID: 1003, Transform: iceberg.VoidTransform{}, Name: ""},
 			expectedName: "ts_null",
 		},
 		{
-			field:        iceberg.PartitionField{SourceID: 3, FieldID: 1004, Transform: iceberg.YearTransform{}, Name: "foo"},
+			field:        iceberg.PartitionField{SourceID: 3, FieldID: 1004, Transform: iceberg.YearTransform{}, Name: ""},
 			expectedName: "ts_year",
 		},
 		{
-			field:        iceberg.PartitionField{SourceID: 3, FieldID: 1004, Transform: iceberg.MonthTransform{}, Name: "foo"},
+			field:        iceberg.PartitionField{SourceID: 3, FieldID: 1004, Transform: iceberg.MonthTransform{}, Name: ""},
 			expectedName: "ts_month",
 		},
 		{
-			field:        iceberg.PartitionField{SourceID: 3, FieldID: 1004, Transform: iceberg.DayTransform{}, Name: "foo"},
+			field:        iceberg.PartitionField{SourceID: 3, FieldID: 1004, Transform: iceberg.DayTransform{}, Name: ""},
 			expectedName: "ts_day",
 		},
 		{
-			field:        iceberg.PartitionField{SourceID: 3, FieldID: 1004, Transform: iceberg.HourTransform{}, Name: "foo"},
+			field:        iceberg.PartitionField{SourceID: 3, FieldID: 1004, Transform: iceberg.HourTransform{}, Name: ""},
 			expectedName: "ts_hour",
 		},
 	}
