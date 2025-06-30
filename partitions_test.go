@@ -193,38 +193,52 @@ func TestPartitionSpecToPath(t *testing.T) {
 func TestGetPartitionFieldName(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "str", Type: iceberg.PrimitiveTypes.String},
-		iceberg.NestedField{ID: 2, Name: "other_str", Type: iceberg.PrimitiveTypes.String},
-		iceberg.NestedField{ID: 3, Name: "int", Type: iceberg.PrimitiveTypes.Int32, Required: true})
+		iceberg.NestedField{ID: 2, Name: "int", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 3, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp})
 
-	field := iceberg.PartitionField{
-		SourceID: 1, FieldID: 1000,
-		Transform: iceberg.TruncateTransform{Width: 19}, Name: "random_name",
+	tests := []struct {
+		field        iceberg.PartitionField
+		expectedName string
+	}{
+		{
+			field:        iceberg.PartitionField{SourceID: 1, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "foo"},
+			expectedName: "str",
+		},
+		{
+			field:        iceberg.PartitionField{SourceID: 2, FieldID: 1001, Transform: iceberg.BucketTransform{NumBuckets: 7}, Name: "bar"},
+			expectedName: "int_bucket_7",
+		},
+		{
+			field:        iceberg.PartitionField{SourceID: 2, FieldID: 1002, Transform: iceberg.TruncateTransform{Width: 19}, Name: "baz"},
+			expectedName: "int_trunc_19",
+		},
+		{
+			field:        iceberg.PartitionField{SourceID: 3, FieldID: 1003, Transform: iceberg.VoidTransform{}, Name: "qux"},
+			expectedName: "ts_null",
+		},
+		{
+			field:        iceberg.PartitionField{SourceID: 3, FieldID: 1004, Transform: iceberg.YearTransform{}, Name: "foo"},
+			expectedName: "ts_year",
+		},
+		{
+			field:        iceberg.PartitionField{SourceID: 3, FieldID: 1004, Transform: iceberg.MonthTransform{}, Name: "foo"},
+			expectedName: "ts_month",
+		},
+		{
+			field:        iceberg.PartitionField{SourceID: 3, FieldID: 1004, Transform: iceberg.DayTransform{}, Name: "foo"},
+			expectedName: "ts_day",
+		},
+		{
+			field:        iceberg.PartitionField{SourceID: 3, FieldID: 1004, Transform: iceberg.HourTransform{}, Name: "foo"},
+			expectedName: "ts_hour",
+		},
 	}
-	name, err := iceberg.GeneratePartitionFieldName(schema, field)
-	assert.NoError(t, err)
-	assert.Equal(t, "str_trunc_19", name)
 
-	field = iceberg.PartitionField{
-		SourceID: 2, FieldID: 1001,
-		Transform: iceberg.BucketTransform{NumBuckets: 7}, Name: "another_random_name",
+	for _, test := range tests {
+		t.Run(test.field.Transform.String(), func(t *testing.T) {
+			name, err := iceberg.GeneratePartitionFieldName(schema, test.field)
+			assert.NoError(t, err)
+			assert.Equal(t, test.expectedName, name)
+		})
 	}
-	name, err = iceberg.GeneratePartitionFieldName(schema, field)
-	assert.NoError(t, err)
-	assert.Equal(t, "other_str_bucket_7", name)
-
-	field = iceberg.PartitionField{
-		SourceID: 2, FieldID: 1001,
-		Transform: iceberg.IdentityTransform{}, Name: "name",
-	}
-	name, err = iceberg.GeneratePartitionFieldName(schema, field)
-	assert.NoError(t, err)
-	assert.Equal(t, "other_str", name)
-
-	field = iceberg.PartitionField{
-		SourceID: 3, FieldID: 1001,
-		Transform: iceberg.VoidTransform{}, Name: "name",
-	}
-	name, err = iceberg.GeneratePartitionFieldName(schema, field)
-	assert.NoError(t, err)
-	assert.Equal(t, "int_null", name)
 }
