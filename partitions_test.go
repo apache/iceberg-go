@@ -201,6 +201,10 @@ func TestGetPartitionFieldName(t *testing.T) {
 		expectedName string
 	}{
 		{
+			field:        iceberg.PartitionField{SourceID: 1, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "foo"},
+			expectedName: "foo",
+		},
+		{
 			field:        iceberg.PartitionField{SourceID: 1, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: ""},
 			expectedName: "str",
 		},
