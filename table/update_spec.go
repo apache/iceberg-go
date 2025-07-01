@@ -299,11 +299,11 @@ func (us *UpdateSpec) partitionField(key transformKey, name string) (iceberg.Par
 		tmp_field := iceberg.PartitionField{
 			SourceID:  key.SourceId,
 			FieldID:   newFieldId,
-			Name:      "unassigned_field_name",
+			Name:      "",
 			Transform: transform,
 		}
 		var err error
-		name, err = iceberg.VisitPartitionField(us.txn.tbl.Schema(), tmp_field, iceberg.PartitionNameGenerator{})
+		name, err = iceberg.GeneratePartitionFieldName(us.txn.tbl.Schema(), tmp_field)
 		if err != nil {
 			return iceberg.PartitionField{}, err
 		}
