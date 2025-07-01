@@ -294,76 +294,31 @@ func AssignFreshPartitionSpecIDs(spec *PartitionSpec, old, fresh *Schema) (Parti
 	return NewPartitionSpec(newFields...), nil
 }
 
-type PartitionSpecVisitor[T any] interface {
-	Identity(fieldId int, sourceName string, sourceId int) T
-	Bucket(fieldId int, sourceName string, sourceId int, numBuckets int) T
-	Truncate(fieldId int, sourceName string, sourceId int, width int) T
-	Year(fieldId int, sourceName string, sourceId int) T
-	Month(fieldId int, sourceName string, sourceId int) T
-	Day(fieldId int, sourceName string, sourceId int) T
-	Hour(fieldId int, sourceName string, sourceId int) T
-	Void(fieldId int, sourceName string, sourceId int) T
-}
-
-type PartitionNameGenerator struct{}
-
-func (g PartitionNameGenerator) Identity(fieldID int, sourceName string, sourceID int) string {
-	return sourceName
-}
-
-func (g PartitionNameGenerator) Bucket(fieldID int, sourceName string, sourceID int, numBuckets int) string {
-	return fmt.Sprintf("%s_bucket_%d", sourceName, numBuckets)
-}
-
-func (g PartitionNameGenerator) Truncate(fieldID int, sourceName string, sourceID int, width int) string {
-	return fmt.Sprintf("%s_trunc_%d", sourceName, width)
-}
-
-func (g PartitionNameGenerator) Year(fieldID int, sourceName string, sourceID int) string {
-	return sourceName + "_year"
-}
-
-func (g PartitionNameGenerator) Month(fieldID int, sourceName string, sourceID int) string {
-	return sourceName + "_month"
-}
-
-func (g PartitionNameGenerator) Day(fieldID int, sourceName string, sourceID int) string {
-	return sourceName + "_day"
-}
-
-func (g PartitionNameGenerator) Hour(fieldID int, sourceName string, sourceID int) string {
-	return sourceName + "_hour"
-}
-
-func (g PartitionNameGenerator) Void(fieldID int, sourceName string, sourceID int) string {
-	return sourceName + "_null"
-}
-
-func VisitPartitionField[R any](schema *Schema, field PartitionField, visitor PartitionSpecVisitor[R]) (R, error) {
-	sourceName, exists := schema.FindColumnName(field.SourceID)
-	var empty R
-	if !exists {
-		return empty, fmt.Errorf("could not find field with id %d", field.SourceID)
+// GeneratePartitionFieldName returns default partition field name based on field transform type
+//
+// The default names are aligned with other client implementations
+// https://github.com/apache/iceberg/blob/main/core/src/main/java/org/apache/iceberg/BaseUpdatePartitionSpec.java#L518-L563
+func GeneratePartitionFieldName(schema *Schema, field PartitionField) (string, error) {
+	if len(field.Name) > 0 {
+		return field.Name, nil
 	}
+
+	sourceName, exists := schema.FindColumnName(field.SourceID)
+	if !exists {
+		return "", fmt.Errorf("could not find field with id %d", field.SourceID)
+	}
+
 	transform := field.Transform
 	switch t := transform.(type) {
 	case IdentityTransform:
-		return visitor.Identity(field.FieldID, sourceName, field.SourceID), nil
-	case BucketTransform:
-		return visitor.Bucket(field.FieldID, sourceName, field.SourceID, t.NumBuckets), nil
-	case TruncateTransform:
-		return visitor.Truncate(field.FieldID, sourceName, field.SourceID, t.Width), nil
-	case DayTransform:
-		return visitor.Day(field.FieldID, sourceName, field.SourceID), nil
-	case HourTransform:
-		return visitor.Hour(field.FieldID, sourceName, field.SourceID), nil
-	case MonthTransform:
-		return visitor.Month(field.FieldID, sourceName, field.SourceID), nil
-	case YearTransform:
-		return visitor.Year(field.FieldID, sourceName, field.SourceID), nil
+		return sourceName, nil
 	case VoidTransform:
-		return visitor.Void(field.FieldID, sourceName, field.SourceID), nil
+		return sourceName + "_null", nil
+	case BucketTransform:
+		return fmt.Sprintf("%s_bucket_%d", sourceName, t.NumBuckets), nil
+	case TruncateTransform:
+		return fmt.Sprintf("%s_trunc_%d", sourceName, t.Width), nil
 	default:
-		return empty, fmt.Errorf("unknown transform type: %T", transform)
+		return sourceName + "_" + t.String(), nil
 	}
 }

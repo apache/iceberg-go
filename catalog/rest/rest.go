@@ -56,6 +56,7 @@ const (
 	keyWarehouseLocation = "warehouse"
 	keyMetadataLocation  = "metadata_location"
 	keyOauthCredential   = "credential"
+	keyScope             = "scope"
 
 	authorizationHeader = "Authorization"
 	bearerPrefix        = "Bearer"
@@ -399,6 +400,8 @@ func fromProps(props iceberg.Properties, o *options) {
 			o.authUri = u
 		case keyOauthCredential:
 			o.credential = v
+		case keyScope:
+			o.scope = v
 		case keyPrefix:
 			o.prefix = v
 		case keyTlsSkipVerify:
