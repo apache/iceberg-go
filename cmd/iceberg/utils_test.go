@@ -1,0 +1,182 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+package main
+
+import (
+	"testing"
+
+	"github.com/apache/iceberg-go"
+)
+
+func TestParseProperties(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  iceberg.Properties
+		isErr bool
+	}{
+		{
+			name:  "empty string",
+			input: "",
+			want:  iceberg.Properties{},
+		},
+		{
+			name:  "single property",
+			input: "key1=value1",
+			want:  iceberg.Properties{"key1": "value1"},
+		},
+		{
+			name:  "multiple properties",
+			input: "key1=value1,key2=value2,key3=value3",
+			want:  iceberg.Properties{"key1": "value1", "key2": "value2", "key3": "value3"},
+		},
+		{
+			name:  "with spaces",
+			input: " key1 = value1 , key2 = value2 ",
+			want:  iceberg.Properties{"key1": "value1", "key2": "value2"},
+		},
+		{
+			name:  "invalid format - no equals",
+			input: "key1value1",
+			isErr: true,
+		},
+		{
+			name:  "invalid format - empty key",
+			input: "=value1",
+			isErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseProperties(tt.input)
+			if (err != nil) != tt.isErr {
+				t.Errorf("parseProperties() error = %v, isErr %v", err, tt.isErr)
+				return
+			}
+			if !tt.isErr && !mapsEqual(got, tt.want) {
+				t.Errorf("parseProperties() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParsePartitionSpec(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		isErr bool
+	}{
+		{
+			name:  "empty string",
+			input: "",
+		},
+		{
+			name:  "single field",
+			input: "field1",
+		},
+		{
+			name:  "multiple fields",
+			input: "field1,field2,field3",
+		},
+		{
+			name:  "with spaces",
+			input: " field1 , field2 , field3 ",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parsePartitionSpec(tt.input)
+			if (err != nil) != tt.isErr {
+				t.Errorf("parsePartitionSpec() error = %v, isErr %v", err, tt.isErr)
+				return
+			}
+			if !tt.isErr && got == nil {
+				t.Errorf("parsePartitionSpec() returned nil for valid input")
+			}
+		})
+	}
+}
+
+func TestParseSortOrder(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		isErr bool
+	}{
+		{
+			name:  "empty string",
+			input: "",
+		},
+		{
+			name:  "single field ascending",
+			input: "field1:asc",
+		},
+		{
+			name:  "single field descending",
+			input: "field1:desc",
+		},
+		{
+			name:  "multiple fields",
+			input: "field1:asc,field2:desc,field3:asc",
+		},
+		{
+			name:  "with spaces",
+			input: " field1 : asc , field2 : desc ",
+		},
+		{
+			name:  "invalid direction",
+			input: "field1:invalid",
+			isErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseSortOrder(tt.input)
+			if (err != nil) != tt.isErr {
+				t.Errorf("parseSortOrder() error = %v, isErr %v", err, tt.isErr)
+				return
+			}
+			if !tt.isErr {
+				// For empty string, we expect UnsortedSortOrder with OrderID 0
+				if tt.input == "" {
+					if got.OrderID != 0 {
+						t.Errorf("parseSortOrder() for empty string should return OrderID 0, got %d", got.OrderID)
+					}
+				} else if got.OrderID == 0 {
+					t.Errorf("parseSortOrder() returned invalid sort order for valid input")
+				}
+			}
+		})
+	}
+}
+
+// mapsEqual compares two maps for equality
+func mapsEqual(a, b iceberg.Properties) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
