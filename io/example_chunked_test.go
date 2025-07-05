@@ -32,11 +32,11 @@ func ExampleChunkedReader() {
 		"0;chunk-signature=final\r\n\r\n"
 
 	reader := io.NewChunkedReader(strings.NewReader(chunkedData))
-	
+
 	// Read the data - it will be transparently decoded
 	buf := make([]byte, 100)
 	n, _ := reader.Read(buf)
-	
+
 	fmt.Printf("Read %d bytes: %s\n", n, string(buf[:n]))
 	// Output: Read 26 bytes: abcdefghijklmnopqrstuvwxyz
 }
@@ -45,11 +45,11 @@ func ExampleChunkedReader() {
 func Example_blobFileIO() {
 	// When opening an AVRO file through the blob file system,
 	// the chunked reader is automatically applied
-	
+
 	// This would happen internally when reading manifest files:
 	// fs.Open("s3://bucket/path/to/manifest.avro")
 	// The file would be wrapped with ChunkedReader automatically
-	
+
 	fmt.Println("AVRO files are automatically wrapped with ChunkedReader")
 	// Output: AVRO files are automatically wrapped with ChunkedReader
 }

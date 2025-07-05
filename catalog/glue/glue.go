@@ -24,6 +24,7 @@ import (
 	"iter"
 	"maps"
 	"strconv"
+	"time"
 	_ "unsafe"
 
 	"github.com/apache/iceberg-go"
@@ -258,15 +259,23 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 
 	afs, err := staged.FS(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("staged.FS failed: %w", err)
 	}
-	wfs, ok := afs.(io.WriteFileIO)
-	if !ok {
-		return nil, errors.New("loaded filesystem IO does not support writing")
+	if afs == nil {
+		return nil, fmt.Errorf("staged.FS returned nil")
 	}
 
-	if err := internal.WriteTableMetadata(staged.Metadata(), wfs, staged.MetadataLocation()); err != nil {
-		return nil, err
+	wfs, ok := afs.(io.WriteFileIO)
+	if !ok {
+		return nil, fmt.Errorf("loaded filesystem IO does not support writing (type=%T)", afs)
+	}
+
+	if staged.Metadata() == nil {
+		return nil, fmt.Errorf("staged metadata is nil")
+	}
+	writeErr := internal.WriteTableMetadata(staged.Metadata(), wfs, staged.MetadataLocation())
+	if writeErr != nil {
+		return nil, fmt.Errorf("WriteTableMetadata failed: %w", writeErr)
 	}
 
 	var tableDescription *string
@@ -295,8 +304,20 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create table %s.%s: %w", database, tableName, err)
 	}
-	createdTable, err := c.LoadTable(ctx, identifier, nil)
-	if err != nil {
+	// Add retry logic for S3 eventual consistency
+	var createdTable *table.Table
+	var loadErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		createdTable, loadErr = c.LoadTable(ctx, identifier, nil)
+		if loadErr == nil {
+			break
+		}
+		if attempt < 3 {
+			time.Sleep(1 * time.Second)
+		}
+	}
+	if loadErr != nil {
+		err = loadErr
 		// Attempt to clean up the table if loading fails
 		_, cleanupErr := c.glueSvc.DeleteTable(ctx, &glue.DeleteTableInput{
 			CatalogId:    c.catalogId,

@@ -42,13 +42,26 @@ func GetMetadataLoc(location string, newVersion uint) string {
 }
 
 func WriteTableMetadata(metadata table.Metadata, fs io.WriteFileIO, loc string) error {
+	if fs == nil {
+		return fmt.Errorf("WriteTableMetadata: filesystem is nil")
+	}
 	out, err := fs.Create(loc)
 	if err != nil {
-		return err
+		return fmt.Errorf("WriteTableMetadata: Create failed: %w", err)
 	}
-	defer out.Close()
+	if out == nil {
+		return fmt.Errorf("WriteTableMetadata: Create returned nil writer")
+	}
+	err = json.NewEncoder(out).Encode(metadata)
+	if err != nil {
+		out.Close() // Try to close before returning error
+		return fmt.Errorf("WriteTableMetadata: Encode failed: %w", err)
+	}
 
-	return json.NewEncoder(out).Encode(metadata)
+	if closeErr := out.Close(); closeErr != nil {
+		return fmt.Errorf("WriteTableMetadata: Close failed: %w", closeErr)
+	}
+	return nil
 }
 
 func WriteMetadata(ctx context.Context, metadata table.Metadata, loc string, props iceberg.Properties) error {

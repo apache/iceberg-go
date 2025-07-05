@@ -20,8 +20,10 @@ package io
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"path/filepath"
 	"strings"
 
@@ -111,12 +113,29 @@ type blobFileIO struct {
 }
 
 func (bfs *blobFileIO) preprocess(key string) string {
-	_, after, found := strings.Cut(key, "://")
-	if found {
-		key = after
+	result := key
+
+	// Handle full URLs like s3://bucket/path/to/file
+	if strings.Contains(key, "://") {
+		// Parse the URL to extract just the path part
+		if parsed, err := url.Parse(key); err == nil {
+			// For S3 URLs, the host is the bucket name
+			// We want just the path without the leading slash
+			result = strings.TrimPrefix(parsed.Path, "/")
+		} else {
+			// Fallback to simple string manipulation if URL parsing fails
+			_, after, found := strings.Cut(key, "://")
+			if found {
+				key = after
+				result = after
+			}
+		}
+	} else {
+		// Remove bucket name prefix if present
+		result = strings.TrimPrefix(key, bfs.bucketName+"/")
 	}
 
-	return strings.TrimPrefix(key, bfs.bucketName+"/")
+	return result
 }
 
 func (bfs *blobFileIO) Open(path string) (File, error) {
@@ -150,6 +169,13 @@ func (bfs *blobFileIO) Remove(name string) error {
 }
 
 func (bfs *blobFileIO) Create(name string) (FileWriter, error) {
+	if bfs == nil {
+		return nil, fmt.Errorf("blobFileIO is nil")
+	}
+	if bfs.Bucket == nil {
+		return nil, fmt.Errorf("Bucket is nil")
+	}
+
 	// Configure writer options to prevent chunked encoding issues
 	opts := &blob.WriterOptions{
 		BeforeWrite: func(as func(any) bool) error {
@@ -163,11 +189,19 @@ func (bfs *blobFileIO) Create(name string) (FileWriter, error) {
 		},
 	}
 
-	return bfs.NewWriter(bfs.ctx, name, true, opts)
+	w, err := bfs.NewWriter(bfs.ctx, name, true, opts)
+	if err != nil {
+		return nil, fmt.Errorf("NewWriter failed: %w", err)
+	}
+	if w == nil {
+		return nil, fmt.Errorf("NewWriter returned nil")
+	}
+	return w, nil
 }
 
 func (bfs *blobFileIO) WriteFile(name string, content []byte) error {
 	name = bfs.preprocess(name)
+
 	// Configure writer options to prevent chunked encoding issues
 	opts := &blob.WriterOptions{
 		BeforeWrite: func(as func(any) bool) error {
@@ -185,7 +219,6 @@ func (bfs *blobFileIO) WriteFile(name string, content []byte) error {
 			return nil
 		},
 	}
-
 	return bfs.Bucket.WriteAll(bfs.ctx, name, content, opts)
 }
 
@@ -197,14 +230,18 @@ func (bfs *blobFileIO) WriteFile(name string, content []byte) error {
 //
 // The caller must call Close on the returned Writer, even if the write is
 // aborted.
-func (io *blobFileIO) NewWriter(ctx context.Context, path string, overwrite bool, opts *blob.WriterOptions) (w *blobWriteFile, err error) {
-	path = io.preprocess(path)
+func (bfs *blobFileIO) NewWriter(ctx context.Context, path string, overwrite bool, opts *blob.WriterOptions) (w FileWriter, err error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("context is nil")
+	}
+	path = bfs.preprocess(path)
+
 	if !fs.ValidPath(path) {
 		return nil, &fs.PathError{Op: "new writer", Path: path, Err: fs.ErrInvalid}
 	}
 
 	if !overwrite {
-		exists, err := io.Bucket.Exists(ctx, path)
+		exists, err := bfs.Bucket.Exists(ctx, path)
 		if err != nil {
 			return nil, &fs.PathError{Op: "new writer", Path: path, Err: err}
 		}
@@ -212,6 +249,7 @@ func (io *blobFileIO) NewWriter(ctx context.Context, path string, overwrite bool
 			return nil, &fs.PathError{Op: "new writer", Path: path, Err: fs.ErrExist}
 		}
 	}
+
 	// If no options provided, create default ones to prevent chunked encoding
 	if opts == nil {
 		opts = &blob.WriterOptions{}
@@ -232,16 +270,19 @@ func (io *blobFileIO) NewWriter(ctx context.Context, path string, overwrite bool
 		return nil
 	}
 
-	bw, err := io.Bucket.NewWriter(ctx, path, opts)
+	bw, err := bfs.Bucket.NewWriter(ctx, path, opts)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Bucket.NewWriter failed: %w", err)
+	}
+	if bw == nil {
+		return nil, fmt.Errorf("Bucket.NewWriter returned nil")
 	}
 
-	return &blobWriteFile{
-			Writer: bw,
-			name:   path,
-		},
-		nil
+	result := &blobWriteFile{
+		Writer: bw,
+		name:   path,
+	}
+	return result, nil
 }
 
 func createBlobFS(ctx context.Context, bucket *blob.Bucket, bucketName string) IO {
