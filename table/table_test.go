@@ -1203,7 +1203,6 @@ func TestTableWriting(t *testing.T) {
 }
 
 func (t *TableWritingTestSuite) TestSchemaEvolution() {
-
 	initialSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Required: true, Type: iceberg.PrimitiveTypes.Int64},
 		iceberg.NestedField{ID: 2, Name: "name", Required: true, Type: iceberg.PrimitiveTypes.String},

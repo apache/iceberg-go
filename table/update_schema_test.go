@@ -56,9 +56,11 @@ func (m *mockMetadata) Ref() SnapshotRef                        { return Snapsho
 func (m *mockMetadata) Refs() iter.Seq2[string, SnapshotRef] {
 	return func(func(string, SnapshotRef) bool) {}
 }
+
 func (m *mockMetadata) SnapshotLogs() iter.Seq[SnapshotLogEntry] {
 	return func(func(SnapshotLogEntry) bool) {}
 }
+
 func (m *mockMetadata) PreviousFiles() iter.Seq[MetadataLogEntry] {
 	return func(func(MetadataLogEntry) bool) {}
 }
@@ -124,7 +126,7 @@ func TestUpdateSchemaAddColumn(t *testing.T) {
 		require.True(t, ok)
 		assert.Len(t, structField.FieldList, 3)
 
-		//check if we can find the nested fields
+		// check if we can find the nested fields
 		field, found = newSchema.FindFieldByName("address_new.city")
 		require.True(t, found)
 		assert.Equal(t, "city", field.Name)
@@ -143,7 +145,7 @@ func TestUpdateSchemaAddColumn(t *testing.T) {
 		assert.Equal(t, iceberg.PrimitiveTypes.String, structField.FieldList[2].Type)
 		assert.False(t, structField.FieldList[2].Required)
 
-		//trying to add a new field to the struct
+		// trying to add a new field to the struct
 		updated, err = updateSchema.AddColumn([]string{"address", "new"}, false, iceberg.PrimitiveTypes.String, "new field", nil)
 		require.NoError(t, err)
 		require.NotNil(t, updated)
@@ -153,7 +155,6 @@ func TestUpdateSchemaAddColumn(t *testing.T) {
 
 		field, found = newSchema.FindFieldByName("address.new")
 		require.True(t, found)
-
 	})
 
 	t.Run("add simple column", func(t *testing.T) {
@@ -398,7 +399,6 @@ func TestUpdateSchemaRequireColumn(t *testing.T) {
 		require.True(t, found)
 		assert.True(t, field.Required)
 	})
-
 }
 
 func TestUpdateSchemaMakeColumnOptional(t *testing.T) {
@@ -422,7 +422,6 @@ func TestUpdateSchemaMakeColumnOptional(t *testing.T) {
 		require.True(t, found)
 		assert.False(t, field.Required)
 	})
-
 }
 
 func TestUpdateSchemaAllowIncompatibleChanges(t *testing.T) {
@@ -446,7 +445,6 @@ func TestUpdateSchemaAllowIncompatibleChanges(t *testing.T) {
 		assert.True(t, field.Required)
 		assert.Nil(t, field.InitialDefault)
 	})
-
 }
 
 func TestUpdateSchemaAssignNewColumnID(t *testing.T) {
@@ -466,7 +464,6 @@ func TestUpdateSchemaAssignNewColumnID(t *testing.T) {
 		assert.Equal(t, 3, id2)
 		assert.Equal(t, 4, id3)
 	})
-
 }
 
 func TestUpdateSchemaFindField(t *testing.T) {
@@ -501,7 +498,6 @@ func TestUpdateSchemaFindField(t *testing.T) {
 		require.NotNil(t, field)
 		assert.Equal(t, "Name", field.Name)
 	})
-
 }
 
 func TestUpdateSchemaApplyChanges(t *testing.T) {
@@ -554,7 +550,6 @@ func TestUpdateSchemaApplyChanges(t *testing.T) {
 		_, found = newSchema.FindFieldByName("id")
 		assert.True(t, found)
 	})
-
 }
 
 func TestUpdateSchemaMove(t *testing.T) {
@@ -789,6 +784,5 @@ func anyPtr(v any) *any {
 }
 
 func boolPtr(b bool) *bool {
-
 	return &b
 }

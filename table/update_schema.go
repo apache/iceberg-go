@@ -19,6 +19,7 @@ package table
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -55,7 +56,6 @@ type moveReq struct {
 }
 
 func NewUpdateSchema(txn *Transaction, s *iceberg.Schema, lastColumnID int) *UpdateSchema {
-
 	return &UpdateSchema{
 		txn:                      txn,
 		schema:                   s,
@@ -85,7 +85,7 @@ func (us *UpdateSchema) AllowIncompatibleChanges() *UpdateSchema {
 // us.AddColumn([]string{"a","b"}, true, iceberg.StringType{}, "doc", "default")
 func (us *UpdateSchema) AddColumn(path []string, required bool, dataType iceberg.Type, doc string, initialDefault any) (*UpdateSchema, error) {
 	if len(path) == 0 {
-		return nil, fmt.Errorf("AddColumn: path must contain at least the new column name")
+		return nil, errors.New("AddColumn: path must contain at least the new column name")
 	}
 
 	colName := path[len(path)-1]
@@ -267,11 +267,11 @@ func (us *UpdateSchema) Move(columnToMove, referenceColumn []string, op moveOp) 
 			return nil, fmt.Errorf("reference column for move not found: %s", strings.Join(referenceColumn, "."))
 		}
 		if us.parentIDForPath(referenceColumn) != parentID {
-			return nil, fmt.Errorf("cannot move column across different parent structs")
+			return nil, errors.New("cannot move column across different parent structs")
 		}
 		otherID = other.ID
 		if otherID == colField.ID {
-			return nil, fmt.Errorf("cannot move column relative to itself")
+			return nil, errors.New("cannot move column relative to itself")
 		}
 	}
 
@@ -280,13 +280,13 @@ func (us *UpdateSchema) Move(columnToMove, referenceColumn []string, op moveOp) 
 		otherFieldID: otherID,
 		op:           op,
 	})
+
 	return us, nil
 }
 
 // parentIDForPath returns the field-id of the direct parent struct
 // (-1 means root level).
 func (us *UpdateSchema) parentIDForPath(path []string) int {
-
 	if len(path) == 1 {
 		return -1
 	}
@@ -339,7 +339,6 @@ func (us *UpdateSchema) findFieldIncludingAdded(path []string) *iceberg.NestedFi
 }
 
 func (us *UpdateSchema) Apply() *iceberg.Schema {
-
 	return us.applyChanges()
 }
 
@@ -390,7 +389,7 @@ func (u *UpdateSchema) applyChanges() *iceberg.Schema {
 func rebuild(fields []iceberg.NestedField, parentID int, us *UpdateSchema) ([]iceberg.NestedField, error) {
 	var out []iceberg.NestedField
 
-	//iterate over the current fields to apply updates and deletes and if struct, list or map, we call rebuild for the fields in them recursively
+	// iterate over the current fields to apply updates and deletes and if struct, list or map, we call rebuild for the fields in them recursively
 	for _, f := range fields {
 		if _, gone := us.deletes[f.ID]; gone {
 			continue
@@ -443,7 +442,7 @@ func rebuild(fields []iceberg.NestedField, parentID int, us *UpdateSchema) ([]ic
 		out = append(out, *nf)
 	}
 
-	//check if there are any moves for this parent id (-1 means root)
+	// check if there are any moves for this parent id (-1 means root)
 	if reqs := us.moves[parentID]; len(reqs) > 0 {
 		var err error
 		out, err = reorder(out, reqs)
@@ -456,13 +455,14 @@ func rebuild(fields []iceberg.NestedField, parentID int, us *UpdateSchema) ([]ic
 }
 
 func reorder(fields []iceberg.NestedField, reqs []moveReq) ([]iceberg.NestedField, error) {
-	//find the index of a field by its id
+	// find the index of a field by its id
 	indexOf := func(id int) int {
 		for i, f := range fields {
 			if f.ID == id {
 				return i
 			}
 		}
+
 		return -1
 	}
 
@@ -481,14 +481,14 @@ func reorder(fields []iceberg.NestedField, reqs []moveReq) ([]iceberg.NestedFiel
 		case OpBefore:
 			idx := indexOf(m.otherFieldID)
 			if idx == -1 {
-				return nil, fmt.Errorf("move-before target not found at commit time")
+				return nil, errors.New("move-before target not found at commit time")
 			}
 			fields = append(fields[:idx],
 				append([]iceberg.NestedField{f}, fields[idx:]...)...)
 		case OpAfter:
 			idx := indexOf(m.otherFieldID)
 			if idx == -1 {
-				return nil, fmt.Errorf("move-after target not found at commit time")
+				return nil, errors.New("move-after target not found at commit time")
 			}
 			fields = append(fields[:idx+1],
 				append([]iceberg.NestedField{f}, fields[idx+1:]...)...)
@@ -501,7 +501,7 @@ func reorder(fields []iceberg.NestedField, reqs []moveReq) ([]iceberg.NestedFiel
 }
 
 func validateDefaultValue(typ iceberg.Type, val any) error {
-	//Defaults are only allowed on primitive columns
+	// Defaults are only allowed on primitive columns
 	prim, ok := typ.(iceberg.PrimitiveType)
 	if !ok {
 		return fmt.Errorf("defaults are only allowed on primitive columns, got %s", typ.Type())
@@ -524,6 +524,7 @@ func validateDefaultValue(typ iceberg.Type, val any) error {
 
 func (us *UpdateSchema) isDeleted(id int) bool {
 	_, ok := us.deletes[id]
+
 	return ok
 }
 
@@ -575,7 +576,6 @@ func (us *UpdateSchema) CommitUpdates() ([]Update, []Requirement, error) {
 }
 
 func (us *UpdateSchema) findExistingSchemaInTransaction(newSchema *iceberg.Schema) *int {
-
 	for _, schema := range us.txn.tbl.metadata.Schemas() {
 		if newSchema.Equals(schema) {
 			return &schema.ID
