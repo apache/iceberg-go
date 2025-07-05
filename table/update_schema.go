@@ -20,11 +20,9 @@ package table
 import (
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"strings"
 
 	"github.com/apache/iceberg-go"
-	"github.com/google/uuid"
 )
 
 type UpdateSchema struct {
@@ -144,10 +142,10 @@ func (us *UpdateSchema) AddColumn(path []string, required bool, dataType iceberg
 }
 
 type ColumnUpdate struct {
-	Type     iceberg.Type // nil means no change
-	Doc      *string      // nil means no change
-	Default  *any         // nil means no change
-	Required *bool        // nil means no change
+	Type     iceberg.Optional[iceberg.Type] // nil means no change
+	Doc      iceberg.Optional[string]       // nil means no change
+	Default  any                            // nil means no change
+	Required iceberg.Optional[bool]         // nil means no change
 }
 
 // UpdateColumn updates a column in the schema.
@@ -168,30 +166,31 @@ func (us *UpdateSchema) UpdateColumn(path []string, updates ColumnUpdate) (*Upda
 
 	hasChanges := false
 
-	if updates.Type != nil && !field.Type.Equals(updates.Type) {
-		if !allowedPromotion(field.Type, updates.Type) {
-			return nil, fmt.Errorf("Cannot update type of column: %s: %s -> %s",
-				strings.Join(path, "."), field.Type.String(), updates.Type.String())
+	if updates.Type.Valid && !field.Type.Equals(updates.Type.Val) {
+		newType, err := iceberg.PromoteType(field.Type, updates.Type.Val)
+		if err != nil {
+			return nil, fmt.Errorf("Cannot update type of column: %s: %s -> %s: %w",
+				strings.Join(path, "."), field.Type.String(), updates.Type.Val.String(), err)
 		}
-		field.Type = updates.Type
+		field.Type = newType
 		hasChanges = true
 	}
 
 	// Update documentation if provided
-	if updates.Doc != nil && field.Doc != *updates.Doc {
-		field.Doc = *updates.Doc
+	if updates.Doc.Valid && field.Doc != updates.Doc.Val {
+		field.Doc = updates.Doc.Val
 		hasChanges = true
 	}
 
 	// Update default value if provided
-	if updates.Default != nil && field.InitialDefault != *updates.Default {
-		field.InitialDefault = *updates.Default
+	if updates.Default != nil && field.InitialDefault != updates.Default {
+		field.InitialDefault = updates.Default
 		hasChanges = true
 	}
 
 	// Update required flag if provided
-	if updates.Required != nil && field.Required != *updates.Required {
-		isRequired := *updates.Required
+	if updates.Required.Valid && field.Required != updates.Required.Val {
+		isRequired := updates.Required.Val
 
 		if isRequired == field.Required {
 			// No change needed
@@ -376,27 +375,6 @@ func (us *UpdateSchema) findField(path []string) *iceberg.NestedField {
 	return &field
 }
 
-func allowedPromotion(oldType, newType iceberg.Type) bool {
-	switch old := oldType.(type) {
-
-	case iceberg.PrimitiveType:
-		switch old.Type() {
-		case "int":
-			return newType.Type() == "long"
-		case "float":
-			return newType.Type() == "double"
-		case "decimal":
-			o := oldType.(iceberg.DecimalType)
-			n, ok := newType.(iceberg.DecimalType)
-			return ok && o.Scale() == n.Scale() && n.Precision() > o.Precision()
-		case "date":
-			return newType.Type() == "timestamp" || newType.Type() == "timestamp_ns"
-		}
-	}
-
-	return false
-}
-
 func (u *UpdateSchema) applyChanges() *iceberg.Schema {
 	newFields, err := rebuild(u.schema.AsStruct().FieldList, -1, u)
 	if err != nil {
@@ -529,50 +507,19 @@ func validateDefaultValue(typ iceberg.Type, val any) error {
 		return fmt.Errorf("defaults are only allowed on primitive columns, got %s", typ.Type())
 	}
 
-	lit, err := literalFromAny(val)
+	lit, err := iceberg.LiteralFromAny(val)
 	if err != nil {
 		return err
 	}
 
 	litType := lit.Type()
 
-	// Exact match?
+	// Exact match ?
 	if litType.Equals(prim) {
 		return nil
 	}
 
 	return fmt.Errorf("default literal of type %s is not assignable to of type %s", litType.String(), prim.Type())
-}
-
-func literalFromAny(v any) (iceberg.Literal, error) {
-	switch x := v.(type) {
-	case bool:
-		return iceberg.NewLiteral(x), nil
-	case int32:
-		return iceberg.NewLiteral(x), nil
-	case int64, int:
-		return iceberg.NewLiteral(int64(reflect.ValueOf(x).Int())), nil
-	case float32:
-		return iceberg.NewLiteral(x), nil
-	case float64:
-		return iceberg.NewLiteral(x), nil
-	case string:
-		return iceberg.NewLiteral(x), nil
-	case []byte:
-		return iceberg.NewLiteral(x), nil
-	case uuid.UUID:
-		return iceberg.NewLiteral(x), nil
-	case iceberg.Date:
-		return iceberg.NewLiteral(x), nil
-	case iceberg.Time:
-		return iceberg.NewLiteral(x), nil
-	case iceberg.Timestamp:
-		return iceberg.NewLiteral(x), nil
-	case iceberg.Decimal:
-		return iceberg.NewLiteral(x), nil
-	default:
-		return nil, fmt.Errorf("unsupported literal type %T", v)
-	}
 }
 
 func (us *UpdateSchema) isDeleted(id int) bool {

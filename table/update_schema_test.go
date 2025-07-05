@@ -250,7 +250,7 @@ func TestUpdateSchemaUpdateColumnType(t *testing.T) {
 
 	t.Run("valid type promotion int to long", func(t *testing.T) {
 		updated, err := updateSchema.UpdateColumn([]string{"id"}, ColumnUpdate{
-			Type: iceberg.PrimitiveTypes.Int64,
+			Type: iceberg.Optional[iceberg.Type]{Val: iceberg.PrimitiveTypes.Int64, Valid: true},
 		})
 		require.NoError(t, err)
 		require.NotNil(t, updated)
@@ -263,7 +263,7 @@ func TestUpdateSchemaUpdateColumnType(t *testing.T) {
 
 	t.Run("valid type promotion float to double", func(t *testing.T) {
 		updated, err := updateSchema.UpdateColumn([]string{"price"}, ColumnUpdate{
-			Type: iceberg.PrimitiveTypes.Float64,
+			Type: iceberg.Optional[iceberg.Type]{Val: iceberg.PrimitiveTypes.Float64, Valid: true},
 		})
 		require.NoError(t, err)
 		require.NotNil(t, updated)
@@ -276,7 +276,7 @@ func TestUpdateSchemaUpdateColumnType(t *testing.T) {
 
 	t.Run("invalid type change should fail", func(t *testing.T) {
 		_, err := updateSchema.UpdateColumn([]string{"name"}, ColumnUpdate{
-			Type: iceberg.PrimitiveTypes.Int32,
+			Type: iceberg.Optional[iceberg.Type]{Val: iceberg.PrimitiveTypes.Int32, Valid: true},
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "Cannot update type of column")
@@ -284,7 +284,7 @@ func TestUpdateSchemaUpdateColumnType(t *testing.T) {
 
 	t.Run("update non-existent column should fail", func(t *testing.T) {
 		_, err := updateSchema.UpdateColumn([]string{"nonexistent"}, ColumnUpdate{
-			Type: iceberg.PrimitiveTypes.String,
+			Type: iceberg.Optional[iceberg.Type]{Val: iceberg.PrimitiveTypes.String, Valid: true},
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "Cannot update missing column")
@@ -303,7 +303,7 @@ func TestUpdateSchemaUpdateColumnDoc(t *testing.T) {
 	t.Run("update documentation", func(t *testing.T) {
 		newDoc := "Updated documentation"
 		updated, err := updateSchema.UpdateColumn([]string{"name"}, ColumnUpdate{
-			Doc: &newDoc,
+			Doc: iceberg.Optional[string]{Val: newDoc, Valid: true},
 		})
 		require.NoError(t, err)
 		require.NotNil(t, updated)
@@ -317,7 +317,7 @@ func TestUpdateSchemaUpdateColumnDoc(t *testing.T) {
 	t.Run("update with same doc should not error", func(t *testing.T) {
 		sameDoc := "old doc"
 		updated, err := updateSchema.UpdateColumn([]string{"name"}, ColumnUpdate{
-			Doc: &sameDoc,
+			Doc: iceberg.Optional[string]{Val: sameDoc, Valid: true},
 		})
 		require.NoError(t, err)
 		require.NotNil(t, updated)
@@ -326,7 +326,7 @@ func TestUpdateSchemaUpdateColumnDoc(t *testing.T) {
 	t.Run("update non-existent column should fail", func(t *testing.T) {
 		newDoc := "new doc"
 		_, err := updateSchema.UpdateColumn([]string{"nonexistent"}, ColumnUpdate{
-			Doc: &newDoc,
+			Doc: iceberg.Optional[string]{Val: newDoc, Valid: true},
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "Cannot update missing column")
@@ -345,7 +345,7 @@ func TestUpdateSchemaUpdateColumnDefault(t *testing.T) {
 	t.Run("update default value", func(t *testing.T) {
 		newDefault := "inactive"
 		updated, err := updateSchema.UpdateColumn([]string{"status"}, ColumnUpdate{
-			Default: anyPtr(newDefault),
+			Default: newDefault,
 		})
 		require.NoError(t, err)
 		require.NotNil(t, updated)
@@ -359,7 +359,7 @@ func TestUpdateSchemaUpdateColumnDefault(t *testing.T) {
 	t.Run("update with same default should not error", func(t *testing.T) {
 		sameDefault := "active"
 		updated, err := updateSchema.UpdateColumn([]string{"status"}, ColumnUpdate{
-			Default: anyPtr(sameDefault),
+			Default: sameDefault,
 		})
 		require.NoError(t, err)
 		require.NotNil(t, updated)
@@ -367,7 +367,7 @@ func TestUpdateSchemaUpdateColumnDefault(t *testing.T) {
 
 	t.Run("update non-existent column should fail", func(t *testing.T) {
 		_, err := updateSchema.UpdateColumn([]string{"nonexistent"}, ColumnUpdate{
-			Default: anyPtr("default"),
+			Default: "default",
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "Cannot update missing column")
@@ -388,7 +388,7 @@ func TestUpdateSchemaRequireColumn(t *testing.T) {
 		updateSchema.AllowIncompatibleChanges()
 
 		updated, err := updateSchema.UpdateColumn([]string{"optional_field"}, ColumnUpdate{
-			Required: boolPtr(true),
+			Required: iceberg.Optional[bool]{Val: true, Valid: true},
 		})
 		require.NoError(t, err)
 		require.NotNil(t, updated)
@@ -412,7 +412,7 @@ func TestUpdateSchemaMakeColumnOptional(t *testing.T) {
 
 	t.Run("make column optional", func(t *testing.T) {
 		updated, err := updateSchema.UpdateColumn([]string{"required_field"}, ColumnUpdate{
-			Required: boolPtr(false),
+			Required: iceberg.Optional[bool]{Val: false, Valid: true},
 		})
 		require.NoError(t, err)
 		require.NotNil(t, updated)
@@ -522,7 +522,7 @@ func TestUpdateSchemaApplyChanges(t *testing.T) {
 		doc := "Updated name field"
 		// Update documentation
 		updated, err = updated.UpdateColumn([]string{"name"}, ColumnUpdate{
-			Doc: &doc,
+			Doc: iceberg.Optional[string]{Val: doc, Valid: true},
 		})
 		require.NoError(t, err)
 
