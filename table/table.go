@@ -33,6 +33,8 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+type FSysF func(ctx context.Context) (io.IO, error)
+
 type Identifier = []string
 
 type CatalogIO interface {
@@ -44,8 +46,8 @@ type Table struct {
 	identifier       Identifier
 	metadata         Metadata
 	metadataLocation string
-	fs               io.IO
 	cat              CatalogIO
+	fsF              FSysF
 }
 
 func (t Table) Equals(other Table) bool {
@@ -54,19 +56,19 @@ func (t Table) Equals(other Table) bool {
 		t.metadata.Equals(other.metadata)
 }
 
-func (t Table) Identifier() Identifier               { return t.identifier }
-func (t Table) Metadata() Metadata                   { return t.metadata }
-func (t Table) MetadataLocation() string             { return t.metadataLocation }
-func (t Table) FS() io.IO                            { return t.fs }
-func (t Table) Schema() *iceberg.Schema              { return t.metadata.CurrentSchema() }
-func (t Table) Spec() iceberg.PartitionSpec          { return t.metadata.PartitionSpec() }
-func (t Table) SortOrder() SortOrder                 { return t.metadata.SortOrder() }
-func (t Table) Properties() iceberg.Properties       { return t.metadata.Properties() }
-func (t Table) NameMapping() iceberg.NameMapping     { return t.metadata.NameMapping() }
-func (t Table) Location() string                     { return t.metadata.Location() }
-func (t Table) CurrentSnapshot() *Snapshot           { return t.metadata.CurrentSnapshot() }
-func (t Table) SnapshotByID(id int64) *Snapshot      { return t.metadata.SnapshotByID(id) }
-func (t Table) SnapshotByName(name string) *Snapshot { return t.metadata.SnapshotByName(name) }
+func (t Table) Identifier() Identifier                { return t.identifier }
+func (t Table) Metadata() Metadata                    { return t.metadata }
+func (t Table) MetadataLocation() string              { return t.metadataLocation }
+func (t Table) FS(ctx context.Context) (io.IO, error) { return t.fsF(ctx) }
+func (t Table) Schema() *iceberg.Schema               { return t.metadata.CurrentSchema() }
+func (t Table) Spec() iceberg.PartitionSpec           { return t.metadata.PartitionSpec() }
+func (t Table) SortOrder() SortOrder                  { return t.metadata.SortOrder() }
+func (t Table) Properties() iceberg.Properties        { return t.metadata.Properties() }
+func (t Table) NameMapping() iceberg.NameMapping      { return t.metadata.NameMapping() }
+func (t Table) Location() string                      { return t.metadata.Location() }
+func (t Table) CurrentSnapshot() *Snapshot            { return t.metadata.CurrentSnapshot() }
+func (t Table) SnapshotByID(id int64) *Snapshot       { return t.metadata.SnapshotByID(id) }
+func (t Table) SnapshotByName(name string) *Snapshot  { return t.metadata.SnapshotByName(name) }
 func (t Table) Schemas() map[int]*iceberg.Schema {
 	m := make(map[int]*iceberg.Schema)
 	for _, s := range t.metadata.Schemas() {
@@ -110,15 +112,23 @@ func (t Table) Append(ctx context.Context, rdr array.RecordReader, snapshotProps
 	return txn.Commit(ctx)
 }
 
-func (t Table) AllManifests() iter.Seq2[iceberg.ManifestFile, error] {
+func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile, error] {
+	fs, err := t.fsF(ctx)
+	if err != nil {
+		return func(yield func(iceberg.ManifestFile, error) bool) {
+			yield(nil, err)
+		}
+	}
+
 	type list = tblutils.Enumerated[[]iceberg.ManifestFile]
 	g := errgroup.Group{}
 
 	n := len(t.metadata.Snapshots())
 	ch := make(chan list, n)
+
 	for i, sn := range t.metadata.Snapshots() {
 		g.Go(func() error {
-			manifests, err := sn.Manifests(t.fs)
+			manifests, err := sn.Manifests(fs)
 			if err != nil {
 				return err
 			}
@@ -195,10 +205,13 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 	if err != nil {
 		return nil, err
 	}
+	fs, err := t.fsF(ctx)
+	if err != nil {
+		return nil, err
+	}
+	deleteOldMetadata(fs, t.metadata, newMeta)
 
-	deleteOldMetadata(t.fs, t.metadata, newMeta)
-
-	return New(t.identifier, newMeta, newLoc, t.fs, t.cat), nil
+	return New(t.identifier, newMeta, newLoc, t.fsF, t.cat), nil
 }
 
 func getFiles(it iter.Seq[MetadataLogEntry]) iter.Seq[string] {
@@ -310,7 +323,7 @@ func WithOptions(opts iceberg.Properties) ScanOption {
 func (t Table) Scan(opts ...ScanOption) *Scan {
 	s := &Scan{
 		metadata:       t.metadata,
-		io:             t.fs,
+		ioF:            t.fsF,
 		rowFilter:      iceberg.AlwaysTrue{},
 		selectedFields: []string{"*"},
 		caseSensitive:  true,
@@ -327,19 +340,29 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 	return s
 }
 
-func New(ident Identifier, meta Metadata, metadataLocation string, fs io.IO, cat CatalogIO) *Table {
+func New(ident Identifier, meta Metadata, metadataLocation string, fsF FSysF, cat CatalogIO) *Table {
 	return &Table{
 		identifier:       ident,
 		metadata:         meta,
 		metadataLocation: metadataLocation,
-		fs:               fs,
+		fsF:              fsF,
 		cat:              cat,
 	}
 }
 
-func NewFromLocation(ident Identifier, metalocation string, fsys io.IO, cat CatalogIO) (*Table, error) {
+func NewFromLocation(
+	ctx context.Context,
+	ident Identifier,
+	metalocation string,
+	fsysF FSysF,
+	cat CatalogIO,
+) (*Table, error) {
 	var meta Metadata
 
+	fsys, err := fsysF(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if rf, ok := fsys.(io.ReadFileIO); ok {
 		data, err := rf.ReadFile(metalocation)
 		if err != nil {
@@ -361,5 +384,5 @@ func NewFromLocation(ident Identifier, metalocation string, fsys io.IO, cat Cata
 		}
 	}
 
-	return New(ident, meta, metalocation, fsys, cat), nil
+	return New(ident, meta, metalocation, fsysF, cat), nil
 }

@@ -21,8 +21,9 @@ package io_test
 
 import (
 	"context"
-	"github.com/apache/iceberg-go/internal/recipe"
 	"testing"
+
+	"github.com/apache/iceberg-go/internal/recipe"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
@@ -33,7 +34,8 @@ import (
 )
 
 func TestMinioWarehouse(t *testing.T) {
-	require.NoError(t, recipe.Start(t))
+	_, err := recipe.Start(t)
+	require.NoError(t, err)
 
 	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
 		"uri":                ":memory:",
@@ -64,7 +66,8 @@ func TestMinioWarehouse(t *testing.T) {
 }
 
 func TestMinioWarehouseNoLocation(t *testing.T) {
-	require.NoError(t, recipe.Start(t))
+	_, err := recipe.Start(t)
+	require.NoError(t, err)
 
 	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
 		"uri":                ":memory:",

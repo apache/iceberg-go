@@ -116,9 +116,9 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 	return nil
 }
 
-func (t *Transaction) appendSnapshotProducer(props iceberg.Properties) *snapshotProducer {
+func (t *Transaction) appendSnapshotProducer(afs io.IO, props iceberg.Properties) *snapshotProducer {
 	manifestMerge := t.meta.props.GetBool(ManifestMergeEnabledKey, ManifestMergeEnabledDefault)
-	updateSnapshot := t.updateSnapshot(props)
+	updateSnapshot := t.updateSnapshot(afs, props)
 	if manifestMerge {
 		return updateSnapshot.mergeAppend()
 	}
@@ -126,10 +126,10 @@ func (t *Transaction) appendSnapshotProducer(props iceberg.Properties) *snapshot
 	return updateSnapshot.fastAppend()
 }
 
-func (t *Transaction) updateSnapshot(props iceberg.Properties) snapshotUpdate {
+func (t *Transaction) updateSnapshot(fs io.IO, props iceberg.Properties) snapshotUpdate {
 	return snapshotUpdate{
 		txn:           t,
-		io:            t.tbl.fs.(io.WriteFileIO),
+		io:            fs.(io.WriteFileIO),
 		snapshotProps: props,
 	}
 }
@@ -150,12 +150,15 @@ func (t *Transaction) AppendTable(ctx context.Context, tbl arrow.Table, batchSiz
 }
 
 func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapshotProps iceberg.Properties) error {
-	appendFiles := t.appendSnapshotProducer(snapshotProps)
-
+	fs, err := t.tbl.fsF(ctx)
+	if err != nil {
+		return err
+	}
+	appendFiles := t.appendSnapshotProducer(fs, snapshotProps)
 	itr := recordsToDataFiles(ctx, t.tbl.Location(), t.meta, recordWritingArgs{
 		sc:        rdr.Schema(),
 		itr:       array.IterFromReader(rdr),
-		fs:        t.tbl.fs.(io.WriteFileIO),
+		fs:        fs.(io.WriteFileIO),
 		writeUUID: &appendFiles.commitUuid,
 	})
 
@@ -215,8 +218,12 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 		return fmt.Errorf("%w: cannot replace files in a table without an existing snapshot", ErrInvalidOperation)
 	}
 
+	fs, err := t.tbl.fsF(ctx)
+	if err != nil {
+		return err
+	}
 	markedForDeletion := make([]iceberg.DataFile, 0, len(setToDelete))
-	for df, err := range s.dataFiles(t.tbl.fs, nil) {
+	for df, err := range s.dataFiles(fs, nil) {
 		if err != nil {
 			return err
 		}
@@ -247,13 +254,13 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(snapshotProps).mergeOverwrite(&commitUUID)
+	updater := t.updateSnapshot(fs, snapshotProps).mergeOverwrite(&commitUUID)
 
 	for _, df := range markedForDeletion {
 		updater.deleteDataFile(df)
 	}
 
-	dataFiles := filesToDataFiles(ctx, t.tbl.fs, t.meta, slices.Values(filesToAdd))
+	dataFiles := filesToDataFiles(ctx, fs, t.meta, slices.Values(filesToAdd))
 	for df, err := range dataFiles {
 		if err != nil {
 			return err
@@ -282,7 +289,11 @@ func (t *Transaction) AddFiles(ctx context.Context, files []string, snapshotProp
 	if !ignoreDuplicates {
 		if s := t.meta.currentSnapshot(); s != nil {
 			referenced := make([]string, 0)
-			for df, err := range s.dataFiles(t.tbl.fs, nil) {
+			fs, err := t.tbl.fsF(ctx)
+			if err != nil {
+				return err
+			}
+			for df, err := range s.dataFiles(fs, nil) {
 				if err != nil {
 					return err
 				}
@@ -309,9 +320,14 @@ func (t *Transaction) AddFiles(ctx context.Context, files []string, snapshotProp
 		}
 	}
 
-	updater := t.updateSnapshot(snapshotProps).fastAppend()
+	fs, err := t.tbl.fsF(ctx)
+	if err != nil {
+		return err
+	}
 
-	dataFiles := filesToDataFiles(ctx, t.tbl.fs, t.meta, slices.Values(files))
+	updater := t.updateSnapshot(fs, snapshotProps).fastAppend()
+
+	dataFiles := filesToDataFiles(ctx, fs, t.meta, slices.Values(files))
 	for df, err := range dataFiles {
 		if err != nil {
 			return err
@@ -335,7 +351,7 @@ func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
 
 	s := &Scan{
 		metadata:       updatedMeta,
-		io:             t.tbl.fs,
+		ioF:            t.tbl.fsF,
 		rowFilter:      iceberg.AlwaysTrue{},
 		selectedFields: []string{"*"},
 		caseSensitive:  true,
@@ -358,8 +374,15 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 		return nil, err
 	}
 
-	return &StagedTable{Table: New(t.tbl.identifier, updatedMeta,
-		updatedMeta.Location(), t.tbl.fs, t.tbl.cat)}, nil
+	return &StagedTable{
+		Table: New(
+			t.tbl.identifier,
+			updatedMeta,
+			updatedMeta.Location(),
+			t.tbl.fsF,
+			t.tbl.cat,
+		),
+	}, nil
 }
 
 func (t *Transaction) UpdateSchema() *UpdateSchema {

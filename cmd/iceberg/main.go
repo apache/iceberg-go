@@ -55,6 +55,7 @@ Commands:
   describe    Describe a namespace or a table.
   list        List tables or namespaces.
   schema      Get the schema of the table.
+  create      Create a namespace or a table.
   spec        Return the partition spec of the table.
   uuid        Return the UUID of the table.
   location    Return the location of the table.
@@ -71,17 +72,18 @@ Arguments:
   VALUE          value to set
 
 Options:
-  -h --help          show this help messages and exit
-  --catalog TEXT     specify the catalog type [default: rest]
-  --uri TEXT         specify the catalog URI
-  --output TYPE      output type (json/text) [default: text]
-  --credential TEXT  specify credentials for the catalog
-  --warehouse TEXT   specify the warehouse to use
-  --config TEXT      specify the path to the configuration file
+  -h --help          	show this help messages and exit
+  --catalog TEXT     	specify the catalog type [default: rest]
+  --uri TEXT         	specify the catalog URI
+  --output TYPE      	output type (json/text) [default: text]
+  --credential TEXT  	specify credentials for the catalog
+  --warehouse TEXT   	specify the warehouse to use
+  --scope TEXT       	specify the OAuth scope for authentication [default: catalog]
+  --config TEXT      	specify the path to the configuration file
   --description TEXT 	specify a description for the namespace
   --location-uri TEXT  	specify a location URI for the namespace
-  --schema JSON        specify table schema in json (for create table use only)
-                       Ex: [{"name":"id","type":"int","required":false,"doc":"unique id"}]`
+  --schema JSON        	specify table schema in json (for create table use only)
+                       	Ex: [{"name":"id","type":"int","required":false,"doc":"unique id"}]`
 
 type Config struct {
 	List     bool `docopt:"list"`
@@ -119,6 +121,7 @@ type Config struct {
 	Cred        string `docopt:"--credential"`
 	Warehouse   string `docopt:"--warehouse"`
 	Config      string `docopt:"--config"`
+	Scope       string `docopt:"--scope"`
 	Description string `docopt:"--description"`
 	LocationURI string `docopt:"--location-uri"`
 	SchemaStr   string `docopt:"--schema"`
@@ -162,6 +165,10 @@ func main() {
 
 		if len(cfg.Warehouse) > 0 {
 			opts = append(opts, rest.WithWarehouseLocation(cfg.Warehouse))
+		}
+
+		if len(cfg.Scope) > 0 {
+			opts = append(opts, rest.WithScope(cfg.Scope))
 		}
 
 		if cat, err = rest.NewCatalog(ctx, "rest", cfg.URI, opts...); err != nil {
@@ -254,6 +261,7 @@ func main() {
 				output.Error(err)
 				os.Exit(1)
 			}
+			output.Text("Namespace " + cfg.Ident + " created successfully")
 		case cfg.Table:
 			if cfg.SchemaStr == "" {
 				output.Error(errors.New("missing --schema for table creation"))
@@ -278,6 +286,7 @@ func main() {
 				output.Error(fmt.Errorf("failed to create table: %w", err))
 				os.Exit(1)
 			}
+			output.Text("Table " + cfg.Ident + " created successfully")
 		default:
 			output.Error(errors.New("not implemented"))
 			os.Exit(1)
@@ -407,6 +416,7 @@ func properties(ctx context.Context, output Output, cat catalog.Catalog, args pr
 			os.Exit(1)
 		}
 	case args.set:
+		output.Text("Setting " + args.propname + "=" + args.value + " on " + args.identifier)
 		switch {
 		case args.namespace:
 			_, err := cat.UpdateNamespaceProperties(ctx, ident,
@@ -415,13 +425,8 @@ func properties(ctx context.Context, output Output, cat catalog.Catalog, args pr
 				output.Error(err)
 				os.Exit(1)
 			}
-
-			output.Text("updated " + args.propname + " on " + args.identifier)
 		case args.table:
 			tbl := loadTable(ctx, output, cat, args.identifier)
-			output.Text("Setting " + args.propname + "=" + args.value + " on " + args.identifier)
-
-			// TODO: handle other Update operations
 			_, _, err := cat.CommitTable(ctx, tbl, nil,
 				[]table.Update{table.NewSetPropertiesUpdate(iceberg.Properties{args.propname: args.value})})
 			if err != nil {
@@ -429,7 +434,9 @@ func properties(ctx context.Context, output Output, cat catalog.Catalog, args pr
 				os.Exit(1)
 			}
 		}
+		output.Text("Updated " + args.propname + " on " + args.identifier)
 	case args.remove:
+		output.Text("Removing " + args.propname + " on " + args.identifier)
 		switch {
 		case args.namespace:
 			_, err := cat.UpdateNamespaceProperties(ctx, ident,
@@ -438,13 +445,17 @@ func properties(ctx context.Context, output Output, cat catalog.Catalog, args pr
 				output.Error(err)
 				os.Exit(1)
 			}
-
-			output.Text("removing " + args.propname + " from " + args.identifier)
 		case args.table:
-			loadTable(ctx, output, cat, args.identifier)
-			output.Text("Setting " + args.propname + "=" + args.value + " on " + args.identifier)
-			output.Error(errors.New("not implemented: Writing is WIP"))
+			tbl := loadTable(ctx, output, cat, args.identifier)
+
+			_, _, err := cat.CommitTable(ctx, tbl, nil,
+				[]table.Update{table.NewRemovePropertiesUpdate([]string{args.propname})})
+			if err != nil {
+				output.Error(err)
+				os.Exit(1)
+			}
 		}
+		output.Text("Removed " + args.propname + " from " + args.identifier)
 	}
 }
 

@@ -145,6 +145,10 @@ func NewCatalog(opts ...Option) *Catalog {
 		o(glueOps)
 	}
 
+	if glueOps.awsProperties == nil {
+		glueOps.awsProperties = AwsProperties{}
+	}
+
 	var catalogId *string
 	if val, ok := glueOps.awsProperties[CatalogIdKey]; ok {
 		catalogId = &val
@@ -219,13 +223,14 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, pr
 	}
 
 	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
-	// TODO: consider providing a way to directly access the S3 iofs to enable testing of the catalog.
-	iofs, err := io.LoadFS(ctx, props, location)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load table %s.%s: %w", database, tableName, err)
-	}
 
-	icebergTable, err := table.NewFromLocation(identifier, location, iofs, c)
+	icebergTable, err := table.NewFromLocation(
+		ctx,
+		identifier,
+		location,
+		io.LoadFSFunc(props, location),
+		c,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create table from location %s.%s: %w", database, tableName, err)
 	}
@@ -251,7 +256,11 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, err
 	}
 
-	wfs, ok := staged.FS().(io.WriteFileIO)
+	afs, err := staged.FS(ctx)
+	if err != nil {
+		return nil, err
+	}
+	wfs, ok := afs.(io.WriteFileIO)
 	if !ok {
 		return nil, errors.New("loaded filesystem IO does not support writing")
 	}
@@ -313,12 +322,14 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	}
 	// Load the metadata file to get table properties
 	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
-	iofs, err := io.LoadFS(ctx, nil, metadataLocation)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load metadata file at %s: %w", metadataLocation, err)
-	}
 	// Read the metadata file
-	metadata, err := table.NewFromLocation([]string{tableName}, metadataLocation, iofs, c)
+	metadata, err := table.NewFromLocation(
+		ctx,
+		[]string{tableName},
+		metadataLocation,
+		io.LoadFSFunc(nil, metadataLocation),
+		c,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read table metadata from %s: %w", metadataLocation, err)
 	}
@@ -800,7 +811,8 @@ func buildGlueTableInput(ctx context.Context, database string, tableName string,
 }
 
 func prepareProperties(icebergProperties iceberg.Properties, newMetadataLocation string) iceberg.Properties {
-	glueProperties := maps.Clone(icebergProperties)
+	glueProperties := make(iceberg.Properties)
+	maps.Copy(glueProperties, icebergProperties)
 	glueProperties[tableTypePropsKey] = glueTypeIceberg
 	glueProperties[metadataLocationPropsKey] = newMetadataLocation
 

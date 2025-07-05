@@ -732,6 +732,10 @@ func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, c
 			return false, err
 		}
 
+		if stats == nil {
+			continue
+		}
+
 		fieldID := int(stats.Descr().SchemaNode().FieldID())
 		m.valueCounts[fieldID] = stats.NumValues()
 		if stats.HasNullCount() {
@@ -751,11 +755,18 @@ func (m *inclusiveMetricsEval) Eval(file iceberg.DataFile) (bool, error) {
 		return rowsCannotMatch, nil
 	}
 
-	m.valueCounts, m.nullCounts = file.ValueCounts(), file.NullValueCounts()
-	m.nanCounts = file.NaNValueCounts()
-	m.lowerBounds, m.upperBounds = file.LowerBoundValues(), file.UpperBoundValues()
+	// avoid race condition while maintaining existing state
+	ev := inclusiveMetricsEval{
+		st:                m.st,
+		includeEmptyFiles: m.includeEmptyFiles,
+		expr:              m.expr,
+	}
 
-	return iceberg.VisitExpr(m.expr, m)
+	ev.valueCounts, ev.nullCounts = file.ValueCounts(), file.NullValueCounts()
+	ev.nanCounts = file.NaNValueCounts()
+	ev.lowerBounds, ev.upperBounds = file.LowerBoundValues(), file.UpperBoundValues()
+
+	return iceberg.VisitExpr(m.expr, &ev)
 }
 
 func (m *inclusiveMetricsEval) mayContainNull(fieldID int) bool {

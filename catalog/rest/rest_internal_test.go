@@ -42,6 +42,49 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+func TestScope(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{}, "overrides": map[string]any{},
+		})
+	})
+
+	mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		assert.Equal(t, http.MethodPost, req.Method)
+
+		assert.Equal(t, req.Header.Get("Content-Type"), "application/x-www-form-urlencoded")
+
+		require.NoError(t, req.ParseForm())
+		values := req.PostForm
+		assert.Equal(t, values.Get("grant_type"), "client_credentials")
+		assert.Equal(t, values.Get("client_secret"), "secret")
+		assert.Equal(t, values.Get("scope"), "my_scope")
+
+		w.WriteHeader(http.StatusOK)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token":      "some_jwt_token",
+			"token_type":        "Bearer",
+			"expires_in":        86400,
+			"issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+		})
+	})
+
+	cat, err := NewCatalog(
+		context.Background(),
+		"rest",
+		srv.URL,
+		WithCredential("secret"),
+		WithScope("my_scope"),
+	)
+	require.NoError(t, err)
+	assert.NotNil(t, cat)
+}
+
 func TestAuthHeader(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()

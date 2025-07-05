@@ -56,6 +56,7 @@ const (
 	keyWarehouseLocation = "warehouse"
 	keyMetadataLocation  = "metadata_location"
 	keyOauthCredential   = "credential"
+	keyScope             = "scope"
 
 	authorizationHeader = "Authorization"
 	bearerPrefix        = "Bearer"
@@ -399,6 +400,8 @@ func fromProps(props iceberg.Properties, o *options) {
 			o.authUri = u
 		case keyOauthCredential:
 			o.credential = v
+		case keyScope:
+			o.scope = v
 		case keyPrefix:
 			o.prefix = v
 		case keyTlsSkipVerify:
@@ -653,12 +656,13 @@ func checkValidNamespace(ident table.Identifier) error {
 }
 
 func (r *Catalog) tableFromResponse(ctx context.Context, identifier []string, metadata table.Metadata, loc string, config iceberg.Properties) (*table.Table, error) {
-	iofs, err := iceio.LoadFS(ctx, config, loc)
-	if err != nil {
-		return nil, err
-	}
-
-	return table.New(identifier, metadata, loc, iofs, r), nil
+	return table.New(
+		identifier,
+		metadata,
+		loc,
+		iceio.LoadFSFunc(config, loc),
+		r,
+	), nil
 }
 
 func (r *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {

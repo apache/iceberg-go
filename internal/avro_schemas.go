@@ -92,7 +92,7 @@ func WithElementID(id int) avro.SchemaOption {
 }
 
 func init() {
-	AvroSchemaCache.Add("field_summary", Must(avro.NewRecordSchema("field_summary", "", []*avro.Field{
+	AvroSchemaCache.Add("field_summary", Must(avro.NewRecordSchema("r508", "", []*avro.Field{
 		Must(avro.NewField("contains_null",
 			BoolSchema,
 			avro.WithDoc("true if the field contains null values"),
