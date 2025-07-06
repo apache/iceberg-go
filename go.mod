@@ -28,8 +28,8 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.36.5
 	github.com/aws/aws-sdk-go-v2/config v1.29.17
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.70
-	github.com/aws/aws-sdk-go-v2/service/glue v1.116.0
-	github.com/aws/aws-sdk-go-v2/service/s3 v1.82.0
+	github.com/aws/aws-sdk-go-v2/service/glue v1.117.0
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.83.0
 	github.com/aws/smithy-go v1.22.4
 	github.com/awsdocs/aws-doc-sdk-examples/gov2/testtools v0.0.0-20250407191926-092f3e54b837
 	github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815
@@ -50,7 +50,7 @@ require (
 	github.com/uptrace/bun/extra/bundebug v1.2.14
 	gocloud.dev v0.42.0
 	golang.org/x/sync v0.15.0
-	google.golang.org/api v0.239.0
+	google.golang.org/api v0.240.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
