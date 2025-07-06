@@ -27,6 +27,5 @@
 
 # Developer Guide
 
-- [Contributing](./CONTRIBUTING.md)
 - [Glossary](./glossary.md)
 
