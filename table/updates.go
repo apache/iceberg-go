@@ -21,7 +21,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 
 	"github.com/apache/iceberg-go"
 	"github.com/google/uuid"
@@ -531,7 +530,6 @@ func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table,
 		if err := prefs.Remove(f); err != nil {
 			res = errors.Join(res, err)
 		}
-		fmt.Println("remove", f)
 	}
 
 	return res
