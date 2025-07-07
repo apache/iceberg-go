@@ -169,11 +169,10 @@ func WithOlderThan(t time.Duration) ExpireSnapshotsOpt {
 
 func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	var (
-		cfg          expireSnapshotsCfg
-		updates      []Update
-		snapsToKeep  = make(map[int64]struct{})
-		refsToDelete = make(map[string]struct{})
-		nowMs        = time.Now().UnixMilli()
+		cfg         expireSnapshotsCfg
+		updates     []Update
+		snapsToKeep = make(map[int64]struct{})
+		nowMs       = time.Now().UnixMilli()
 	)
 
 	for _, opt := range opts {
@@ -182,6 +181,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 
 	for refName, ref := range t.meta.refs {
 		if refName == MainBranch {
+			snapsToKeep[ref.SnapshotID] = struct{}{}
 			continue
 		}
 
@@ -198,12 +198,6 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		refAge := nowMs - snap.TimestampMs
 		if refAge > *maxRefAgeMs {
 			updates = append(updates, NewRemoveSnapshotRefUpdate(refName))
-			refsToDelete[refName] = struct{}{}
-		}
-	}
-
-	for refName, ref := range t.meta.refs {
-		if _, found := refsToDelete[refName]; found {
 			continue
 		}
 
@@ -218,7 +212,6 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 
 		if ref.SnapshotRefType != BranchRef {
 			snapsToKeep[ref.SnapshotID] = struct{}{}
-
 			continue
 		}
 
