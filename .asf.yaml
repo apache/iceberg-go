@@ -20,7 +20,7 @@
 
 github:
   description: "Apache Iceberg - Go"
-  homepage: https://iceberg.apache.org/
+  homepage: https://go.iceberg.apache.org/
   labels:
     - iceberg
     - apache

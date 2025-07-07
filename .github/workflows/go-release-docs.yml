@@ -48,12 +48,11 @@ jobs:
         working-directory: website
         run: mdbook build
 
-      - name: Copy asf file
-        run: cp .asf.yaml ./website/book/.asf.yaml
-
-      - name: Build API docs
+      - name: Copy file
         run: |
-          cp -r target/doc ./website/book/api
+          echo "go.iceberg.apache.org" > CNAME
+          cp CNAME ./website/book/CNAME
+          cp .asf.yaml ./website/book/.asf.yaml
 
       - name: Deploy to gh-pages
         uses: peaceiris/actions-gh-pages@v4.0.0
