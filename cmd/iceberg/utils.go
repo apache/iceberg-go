@@ -19,9 +19,10 @@ package main
 
 import (
 	"fmt"
+	"strings"
+
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
-	"strings"
 )
 
 func parseProperties(propStr string) (iceberg.Properties, error) {
@@ -43,6 +44,7 @@ func parseProperties(propStr string) (iceberg.Properties, error) {
 		}
 		props[key] = value
 	}
+
 	return props, nil
 }
 
@@ -71,6 +73,7 @@ func parsePartitionSpec(specStr string) (*iceberg.PartitionSpec, error) {
 		return iceberg.UnpartitionedSpec, nil
 	}
 	spec := iceberg.NewPartitionSpec(partitionFields...)
+
 	return &spec, nil
 }
 
