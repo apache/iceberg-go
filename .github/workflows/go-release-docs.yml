@@ -23,7 +23,6 @@ on:
   push:
     branches:
       - main
-      - webstite
   pull_request:
     branches:
       - main
@@ -55,7 +54,7 @@ jobs:
 
       - name: Deploy to gh-pages
         uses: peaceiris/actions-gh-pages@v4.0.0
-        if: github.event_name == 'push' && github.ref_name == 'webstite'
+        if: github.event_name == 'push' && github.ref_name == 'main'
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: website/book
