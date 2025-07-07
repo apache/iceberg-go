@@ -1,0 +1,385 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Glossary - Iceberg Golang</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+        <link rel="stylesheet" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded "><a href="introduction.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">User Guide</li><li class="chapter-item expanded "><a href="install.html">Install</a></li><li class="chapter-item expanded "><a href="cli.html">CLI</a></li><li class="chapter-item expanded "><a href="api.html">API</a></li><li class="chapter-item expanded affix "><li class="part-title">Developer Guide</li><li class="chapter-item expanded "><a href="glossary.html" class="active">Glossary</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Iceberg Golang</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/apache/iceberg-go" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/apache/iceberg-go/edit/main/website/src/glossary.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <!--
+  ~ Licensed to the Apache Software Foundation (ASF) under one
+  ~ or more contributor license agreements.  See the NOTICE file
+  ~ distributed with this work for additional information
+  ~ regarding copyright ownership.  The ASF licenses this file
+  ~ to you under the Apache License, Version 2.0 (the
+  ~ "License"); you may not use this file except in compliance
+  ~ with the License.  You may obtain a copy of the License at
+  ~
+  ~   http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing,
+  ~ software distributed under the License is distributed on an
+  ~ "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+  ~ KIND, either express or implied.  See the License for the
+  ~ specific language governing permissions and limitations
+  ~ under the License.
+-->
+<h1 id="glossary"><a class="header" href="#glossary">Glossary</a></h1>
+<p>This glossary defines important terms used throughout the Iceberg ecosystem, organized in tables for easy reference.</p>
+<h2 id="core-concepts"><a class="header" href="#core-concepts">Core Concepts</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Term</th><th>Definition</th></tr></thead><tbody>
+<tr><td><strong>Catalog</strong></td><td>A centralized service that manages table metadata and provides a unified interface for accessing Iceberg tables. Catalogs can be implemented as Hive metastore, AWS Glue, REST API, or SQL-based solutions.</td></tr>
+<tr><td><strong>Table</strong></td><td>A collection of data files organized by a schema, with metadata tracking changes over time through snapshots. Tables support ACID transactions and schema evolution.</td></tr>
+<tr><td><strong>Schema</strong></td><td>The structure definition of a table, specifying field names, types, and whether fields are required or optional. Schemas are versioned and can evolve over time.</td></tr>
+<tr><td><strong>Snapshot</strong></td><td>A point-in-time view of a table's data, representing the state after a specific operation (append, overwrite, delete, etc.). Each snapshot contains metadata about the operation and references to data files.</td></tr>
+<tr><td><strong>Manifest</strong></td><td>A metadata file that lists data files and their metadata (location, partition information, record counts, etc.). Manifests are organized into manifest lists for efficient access.</td></tr>
+<tr><td><strong>Manifest List</strong></td><td>A file that contains references to manifest files for a specific snapshot, enabling efficient discovery of data files without reading all manifests.</td></tr>
+</tbody></table>
+</div>
+<h2 id="data-types"><a class="header" href="#data-types">Data Types</a></h2>
+<h3 id="primitive-types"><a class="header" href="#primitive-types">Primitive Types</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>boolean</code></td><td>True/false values</td></tr>
+<tr><td><code>int</code> (32-bit)</td><td>Integer values</td></tr>
+<tr><td><code>long</code> (64-bit)</td><td>Long integer values</td></tr>
+<tr><td><code>float</code> (32-bit)</td><td>Single precision floating point</td></tr>
+<tr><td><code>double</code> (64-bit)</td><td>Double precision floating point</td></tr>
+<tr><td><code>date</code></td><td>Date values (days since epoch)</td></tr>
+<tr><td><code>time</code></td><td>Time values (microseconds since midnight)</td></tr>
+<tr><td><code>timestamp</code></td><td>Timestamp values (microseconds since epoch)</td></tr>
+<tr><td><code>timestamptz</code></td><td>Timestamp with timezone</td></tr>
+<tr><td><code>string</code></td><td>UTF-8 encoded strings</td></tr>
+<tr><td><code>uuid</code></td><td>UUID values</td></tr>
+<tr><td><code>binary</code></td><td>Variable length binary data</td></tr>
+<tr><td><code>fixed[n]</code></td><td>Fixed length binary data of n bytes</td></tr>
+<tr><td><code>decimal(p,s)</code></td><td>Decimal values with precision p and scale s</td></tr>
+</tbody></table>
+</div>
+<h3 id="nested-types"><a class="header" href="#nested-types">Nested Types</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>struct</code></td><td>Collection of named fields</td></tr>
+<tr><td><code>list</code></td><td>Ordered collection of elements</td></tr>
+<tr><td><code>map</code></td><td>Key-value pairs</td></tr>
+</tbody></table>
+</div>
+<h2 id="operations"><a class="header" href="#operations">Operations</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Operation</th><th>Description</th></tr></thead><tbody>
+<tr><td><strong>Append</strong></td><td>An operation that adds new data files to a table without removing existing data. Creates a new snapshot with the additional files.</td></tr>
+<tr><td><strong>Overwrite</strong></td><td>An operation that replaces existing data files with new ones, typically based on a partition predicate. Creates a new snapshot with the replacement files.</td></tr>
+<tr><td><strong>Delete</strong></td><td>An operation that removes data files from a table, either by marking them as deleted or by removing references to them.</td></tr>
+<tr><td><strong>Replace</strong></td><td>An operation that completely replaces all data in a table with new data, typically used for full table refreshes.</td></tr>
+</tbody></table>
+</div>
+<h2 id="partitioning"><a class="header" href="#partitioning">Partitioning</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Term</th><th>Definition</th></tr></thead><tbody>
+<tr><td><strong>Partition</strong></td><td>A logical division of table data based on column values, used to improve query performance by allowing selective reading of relevant data files.</td></tr>
+<tr><td><strong>Partition Spec</strong></td><td>Defines how table data is partitioned by specifying source columns and transformations (identity, bucket, truncate, year, month, day, hour).</td></tr>
+<tr><td><strong>Partition Field</strong></td><td>A field in the partition spec that defines how a source column is transformed for partitioning.</td></tr>
+<tr><td><strong>Partition Path</strong></td><td>The file system path structure created by partition values, typically in the format <code>partition_name=value/</code>.</td></tr>
+</tbody></table>
+</div>
+<h3 id="partition-transforms"><a class="header" href="#partition-transforms">Partition Transforms</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Transform</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>identity</code></td><td>Use the column value directly</td></tr>
+<tr><td><code>bucket[n]</code></td><td>Hash the value into n buckets</td></tr>
+<tr><td><code>truncate[n]</code></td><td>Truncate strings to n characters</td></tr>
+<tr><td><code>year</code></td><td>Extract year from date/timestamp</td></tr>
+<tr><td><code>month</code></td><td>Extract month from date/timestamp</td></tr>
+<tr><td><code>day</code></td><td>Extract day from date/timestamp</td></tr>
+<tr><td><code>hour</code></td><td>Extract hour from timestamp</td></tr>
+<tr><td><code>void</code></td><td>Always returns null (used for unpartitioned tables)</td></tr>
+</tbody></table>
+</div>
+<h2 id="expressions-and-predicates"><a class="header" href="#expressions-and-predicates">Expressions and Predicates</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Term</th><th>Definition</th></tr></thead><tbody>
+<tr><td><strong>Expression</strong></td><td>A computation or comparison that can be evaluated against table data, used for filtering and transformations.</td></tr>
+<tr><td><strong>Predicate</strong></td><td>A boolean expression used to filter data, such as column comparisons, null checks, or set membership tests.</td></tr>
+<tr><td><strong>Bound Predicate</strong></td><td>A predicate that has been resolved against a specific schema, with field references bound to actual columns.</td></tr>
+<tr><td><strong>Unbound Predicate</strong></td><td>A predicate that contains unresolved field references, typically in string form before binding to a schema.</td></tr>
+<tr><td><strong>Literal</strong></td><td>A constant value used in expressions and predicates, such as numbers, strings, dates, etc.</td></tr>
+</tbody></table>
+</div>
+<h2 id="file-formats"><a class="header" href="#file-formats">File Formats</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Format</th><th>Usage</th><th>Description</th></tr></thead><tbody>
+<tr><td><strong>Parquet</strong></td><td>Data files</td><td>The primary data file format used by Iceberg, providing columnar storage with compression and encoding optimizations.</td></tr>
+<tr><td><strong>Avro</strong></td><td>Metadata files</td><td>Used for manifests and manifest lists due to its schema evolution capabilities and compact binary format.</td></tr>
+<tr><td><strong>ORC</strong></td><td>Data files</td><td>An alternative columnar format supported by some Iceberg implementations.</td></tr>
+</tbody></table>
+</div>
+<h2 id="metadata"><a class="header" href="#metadata">Metadata</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Term</th><th>Definition</th></tr></thead><tbody>
+<tr><td><strong>Metadata File</strong></td><td>A JSON file containing table metadata including schema, partition spec, properties, and snapshot information.</td></tr>
+<tr><td><strong>Metadata Location</strong></td><td>The URI pointing to the current metadata file for a table, stored in the catalog.</td></tr>
+<tr><td><strong>Properties</strong></td><td>Key-value pairs that configure table behavior, such as compression settings, write options, and custom metadata.</td></tr>
+<tr><td><strong>Statistics</strong></td><td>Metadata about data files including record counts, file sizes, and value ranges for optimization.</td></tr>
+</tbody></table>
+</div>
+<h2 id="transactions"><a class="header" href="#transactions">Transactions</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Term</th><th>Definition</th></tr></thead><tbody>
+<tr><td><strong>Transaction</strong></td><td>A sequence of operations that are committed atomically, ensuring data consistency and ACID properties.</td></tr>
+<tr><td><strong>Commit</strong></td><td>The process of finalizing a transaction by creating a new snapshot and updating the metadata file.</td></tr>
+<tr><td><strong>Rollback</strong></td><td>The process of undoing changes in a transaction, typically by reverting to a previous snapshot.</td></tr>
+</tbody></table>
+</div>
+<h2 id="references"><a class="header" href="#references">References</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Term</th><th>Definition</th></tr></thead><tbody>
+<tr><td><strong>Branch</strong></td><td>A named reference to a specific snapshot, allowing multiple concurrent views of table data.</td></tr>
+<tr><td><strong>Tag</strong></td><td>An immutable reference to a specific snapshot, typically used for versioning and releases.</td></tr>
+</tbody></table>
+</div>
+<h2 id="storage"><a class="header" href="#storage">Storage</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Term</th><th>Definition</th></tr></thead><tbody>
+<tr><td><strong>Warehouse</strong></td><td>The root directory or bucket where table data and metadata are stored.</td></tr>
+<tr><td><strong>Location Provider</strong></td><td>A component that generates file paths for table data and metadata based on table location and naming conventions.</td></tr>
+<tr><td><strong>FileIO</strong></td><td>An abstraction layer for reading and writing files across different storage systems (local filesystem, S3, GCS, Azure Blob, etc.).</td></tr>
+</tbody></table>
+</div>
+<h2 id="query-optimization"><a class="header" href="#query-optimization">Query Optimization</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Technique</th><th>Description</th></tr></thead><tbody>
+<tr><td><strong>Column Pruning</strong></td><td>A technique that reads only the columns needed for a query, reducing I/O and improving performance.</td></tr>
+<tr><td><strong>Partition Pruning</strong></td><td>A technique that skips reading data files from irrelevant partitions based on query predicates.</td></tr>
+<tr><td><strong>Predicate Pushdown</strong></td><td>A technique that applies filtering predicates at the storage layer, reducing data transfer and processing.</td></tr>
+<tr><td><strong>Statistics-based Optimization</strong></td><td>Using table and file statistics to optimize query execution plans and file selection.</td></tr>
+</tbody></table>
+</div>
+<h2 id="schema-evolution"><a class="header" href="#schema-evolution">Schema Evolution</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Term</th><th>Definition</th></tr></thead><tbody>
+<tr><td><strong>Schema Evolution</strong></td><td>The process of modifying a table's schema over time while maintaining backward compatibility.</td></tr>
+<tr><td><strong>Column Addition</strong></td><td>Adding new columns to a table schema, which are typically optional to maintain compatibility.</td></tr>
+<tr><td><strong>Column Deletion</strong></td><td>Removing columns from a table schema, which may be logical (marking as deleted) or physical.</td></tr>
+<tr><td><strong>Column Renaming</strong></td><td>Changing column names while preserving data and type information.</td></tr>
+<tr><td><strong>Type Evolution</strong></td><td>Changing column types in ways that maintain data compatibility (e.g., int32 to int64).</td></tr>
+</tbody></table>
+</div>
+<h2 id="time-travel"><a class="header" href="#time-travel">Time Travel</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Term</th><th>Definition</th></tr></thead><tbody>
+<tr><td><strong>Time Travel</strong></td><td>The ability to query a table as it existed at a specific point in time using snapshot timestamps.</td></tr>
+<tr><td><strong>Snapshot Isolation</strong></td><td>A property that ensures queries see a consistent view of data as it existed at a specific snapshot.</td></tr>
+</tbody></table>
+</div>
+<h2 id="acid-properties"><a class="header" href="#acid-properties">ACID Properties</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Property</th><th>Description</th></tr></thead><tbody>
+<tr><td><strong>Atomicity</strong></td><td>Ensures that all operations in a transaction either succeed completely or fail completely.</td></tr>
+<tr><td><strong>Consistency</strong></td><td>Ensures that the table remains in a valid state after each transaction.</td></tr>
+<tr><td><strong>Isolation</strong></td><td>Ensures that concurrent transactions do not interfere with each other.</td></tr>
+<tr><td><strong>Durability</strong></td><td>Ensures that committed changes are permanently stored and survive system failures.</td></tr>
+</tbody></table>
+</div>
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="api.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="api.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

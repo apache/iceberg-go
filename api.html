@@ -1,0 +1,505 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>API - Iceberg Golang</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+        <link rel="stylesheet" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded "><a href="introduction.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">User Guide</li><li class="chapter-item expanded "><a href="install.html">Install</a></li><li class="chapter-item expanded "><a href="cli.html">CLI</a></li><li class="chapter-item expanded "><a href="api.html" class="active">API</a></li><li class="chapter-item expanded affix "><li class="part-title">Developer Guide</li><li class="chapter-item expanded "><a href="glossary.html">Glossary</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Iceberg Golang</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/apache/iceberg-go" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/apache/iceberg-go/edit/main/website/src/api.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <!--
+  ~ Licensed to the Apache Software Foundation (ASF) under one
+  ~ or more contributor license agreements.  See the NOTICE file
+  ~ distributed with this work for additional information
+  ~ regarding copyright ownership.  The ASF licenses this file
+  ~ to you under the Apache License, Version 2.0 (the
+  ~ "License"); you may not use this file except in compliance
+  ~ with the License.  You may obtain a copy of the License at
+  ~
+  ~   http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing,
+  ~ software distributed under the License is distributed on an
+  ~ "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+  ~ KIND, either express or implied.  See the License for the
+  ~ specific language governing permissions and limitations
+  ~ under the License.
+-->
+<h1 id="catalog"><a class="header" href="#catalog">Catalog</a></h1>
+<p><code>Catalog</code> is the entry point for accessing iceberg tables. You can use a catalog to:</p>
+<ul>
+<li>Create and list namespaces.</li>
+<li>Create, load, and drop tables</li>
+</ul>
+<p>Currently only rest catalog has been implemented, and other catalogs are under active development. Here is an 
+example of how to create a <code>RestCatalog</code>:</p>
+<pre><code class="language-go">import (
+    &quot;context&quot;
+    &quot;github.com/apache/iceberg-go/catalog&quot;
+    &quot;github.com/apache/iceberg-go/catalog/rest&quot;
+)
+
+// Create a REST catalog
+cat, err := rest.NewCatalog(context.Background(), &quot;rest&quot;, &quot;http://localhost:8181&quot;, 
+    rest.WithOAuthToken(&quot;your-token&quot;))
+if err != nil {
+    log.Fatal(err)
+}
+</code></pre>
+<p>You can run following code to list all root namespaces:</p>
+<pre><code class="language-go">// List all root namespaces
+namespaces, err := cat.ListNamespaces(context.Background(), nil)
+if err != nil {
+    log.Fatal(err)
+}
+
+for _, ns := range namespaces {
+    fmt.Printf(&quot;Namespace: %v\n&quot;, ns)
+}
+</code></pre>
+<p>Then you can run following code to create namespace:</p>
+<pre><code class="language-go">// Create a namespace
+namespace := catalog.ToIdentifier(&quot;my_namespace&quot;)
+err = cat.CreateNamespace(context.Background(), namespace, nil)
+if err != nil {
+    log.Fatal(err)
+}
+</code></pre>
+<h2 id="other-catalog-types"><a class="header" href="#other-catalog-types">Other Catalog Types</a></h2>
+<h3 id="sql-catalog"><a class="header" href="#sql-catalog">SQL Catalog</a></h3>
+<p>You can also use SQL-based catalogs:</p>
+<pre><code class="language-go">import (
+    &quot;github.com/apache/iceberg-go/catalog&quot;
+    &quot;github.com/apache/iceberg-go/io&quot;
+)
+
+// Create a SQLite catalog
+cat, err := catalog.Load(context.Background(), &quot;local&quot;, iceberg.Properties{
+    &quot;type&quot;:               &quot;sql&quot;,
+    &quot;uri&quot;:                &quot;file:iceberg-catalog.db&quot;,
+    &quot;sql.dialect&quot;:        &quot;sqlite&quot;,
+    &quot;sql.driver&quot;:         &quot;sqlite&quot;,
+    io.S3Region:          &quot;us-east-1&quot;,
+    io.S3AccessKeyID:     &quot;admin&quot;,
+    io.S3SecretAccessKey: &quot;password&quot;,
+    &quot;warehouse&quot;:          &quot;file:///tmp/warehouse&quot;,
+})
+if err != nil {
+    log.Fatal(err)
+}
+</code></pre>
+<h3 id="glue-catalog"><a class="header" href="#glue-catalog">Glue Catalog</a></h3>
+<p>For AWS Glue integration:</p>
+<pre><code class="language-go">import (
+    &quot;github.com/apache/iceberg-go/catalog/glue&quot;
+    &quot;github.com/aws/aws-sdk-go-v2/config&quot;
+)
+
+// Create AWS config
+awsCfg, err := config.LoadDefaultConfig(context.TODO())
+if err != nil {
+    log.Fatal(err)
+}
+
+// Create Glue catalog
+cat := glue.NewCatalog(glue.WithAwsConfig(awsCfg))
+
+// Create table in Glue
+tableIdent := catalog.ToIdentifier(&quot;my_database&quot;, &quot;my_table&quot;)
+tbl, err := cat.CreateTable(
+    context.Background(),
+    tableIdent,
+    schema,
+    catalog.WithLocation(&quot;s3://my-bucket/tables/my_table&quot;),
+)
+if err != nil {
+    log.Fatal(err)
+}
+</code></pre>
+<h1 id="table"><a class="header" href="#table">Table</a></h1>
+<p>After creating <code>Catalog</code>, we can manipulate tables through <code>Catalog</code>.</p>
+<p>You can use following code to create a table:</p>
+<pre><code class="language-go">import (
+    &quot;github.com/apache/iceberg-go&quot;
+    &quot;github.com/apache/iceberg-go/catalog&quot;
+    &quot;github.com/apache/iceberg-go/table&quot;
+)
+
+// Create a simple schema
+schema := iceberg.NewSchemaWithIdentifiers(1, []int{2},
+    iceberg.NestedField{ID: 1, Name: &quot;foo&quot;, Type: iceberg.PrimitiveTypes.String, Required: false},
+    iceberg.NestedField{ID: 2, Name: &quot;bar&quot;, Type: iceberg.PrimitiveTypes.Int32, Required: true},
+    iceberg.NestedField{ID: 3, Name: &quot;baz&quot;, Type: iceberg.PrimitiveTypes.Bool, Required: false},
+)
+
+// Create table identifier
+tableIdent := catalog.ToIdentifier(&quot;my_namespace&quot;, &quot;my_table&quot;)
+
+// Create table with optional properties
+tbl, err := cat.CreateTable(
+    context.Background(),
+    tableIdent,
+    schema,
+    catalog.WithProperties(map[string]string{&quot;owner&quot;: &quot;me&quot;}),
+    catalog.WithLocation(&quot;s3://my-bucket/tables/my_table&quot;),
+)
+if err != nil {
+    log.Fatal(err)
+}
+</code></pre>
+<p>Also, you can load a table directly:</p>
+<pre><code class="language-go">// Load an existing table
+tbl, err := cat.LoadTable(context.Background(), tableIdent, nil)
+if err != nil {
+    log.Fatal(err)
+}
+
+fmt.Printf(&quot;Table: %s\n&quot;, tbl.Identifier())
+fmt.Printf(&quot;Location: %s\n&quot;, tbl.MetadataLocation())
+</code></pre>
+<h2 id="schema-creation"><a class="header" href="#schema-creation">Schema Creation</a></h2>
+<p>Here are some examples of creating different types of schemas:</p>
+<pre><code class="language-go">// Simple schema with primitive types
+simpleSchema := iceberg.NewSchemaWithIdentifiers(1, []int{2},
+    iceberg.NestedField{ID: 1, Name: &quot;id&quot;, Type: iceberg.PrimitiveTypes.Int32, Required: true},
+    iceberg.NestedField{ID: 2, Name: &quot;name&quot;, Type: iceberg.PrimitiveTypes.String, Required: false},
+    iceberg.NestedField{ID: 3, Name: &quot;active&quot;, Type: iceberg.PrimitiveTypes.Bool, Required: false},
+)
+
+// Schema with nested struct
+nestedSchema := iceberg.NewSchemaWithIdentifiers(1, []int{1},
+    iceberg.NestedField{ID: 1, Name: &quot;person&quot;, Type: &amp;iceberg.StructType{
+        FieldList: []iceberg.NestedField{
+            {ID: 2, Name: &quot;name&quot;, Type: iceberg.PrimitiveTypes.String, Required: false},
+            {ID: 3, Name: &quot;age&quot;, Type: iceberg.PrimitiveTypes.Int32, Required: true},
+        },
+    }, Required: false},
+)
+
+// Schema with list and map types
+complexSchema := iceberg.NewSchemaWithIdentifiers(1, []int{1},
+    iceberg.NestedField{ID: 1, Name: &quot;tags&quot;, Type: &amp;iceberg.ListType{
+        ElementID: 2, Element: iceberg.PrimitiveTypes.String, ElementRequired: true,
+    }, Required: false},
+    iceberg.NestedField{ID: 3, Name: &quot;metadata&quot;, Type: &amp;iceberg.MapType{
+        KeyID: 4, KeyType: iceberg.PrimitiveTypes.String,
+        ValueID: 5, ValueType: iceberg.PrimitiveTypes.String, ValueRequired: true,
+    }, Required: false},
+)
+</code></pre>
+<h2 id="table-operations"><a class="header" href="#table-operations">Table Operations</a></h2>
+<p>Here are some common table operations:</p>
+<pre><code class="language-go">// List tables in a namespace
+tables := cat.ListTables(context.Background(), catalog.ToIdentifier(&quot;my_namespace&quot;))
+for tableIdent, err := range tables {
+    if err != nil {
+        log.Printf(&quot;Error listing table: %v&quot;, err)
+        continue
+    }
+    fmt.Printf(&quot;Table: %v\n&quot;, tableIdent)
+}
+
+// Check if table exists
+exists, err := cat.CheckTableExists(context.Background(), tableIdent)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf(&quot;Table exists: %t\n&quot;, exists)
+
+// Drop a table
+err = cat.DropTable(context.Background(), tableIdent)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Rename a table
+fromIdent := catalog.ToIdentifier(&quot;my_namespace&quot;, &quot;old_table&quot;)
+toIdent := catalog.ToIdentifier(&quot;my_namespace&quot;, &quot;new_table&quot;)
+renamedTable, err := cat.RenameTable(context.Background(), fromIdent, toIdent)
+if err != nil {
+    log.Fatal(err)
+}
+</code></pre>
+<h2 id="working-with-table-metadata"><a class="header" href="#working-with-table-metadata">Working with Table Metadata</a></h2>
+<p>Once you have a table, you can access its metadata and properties:</p>
+<pre><code class="language-go">// Access table metadata
+metadata := tbl.Metadata()
+fmt.Printf(&quot;Table UUID: %s\n&quot;, metadata.TableUUID())
+fmt.Printf(&quot;Format version: %d\n&quot;, metadata.Version())
+fmt.Printf(&quot;Last updated: %d\n&quot;, metadata.LastUpdatedMillis())
+
+// Access table schema
+schema := tbl.Schema()
+fmt.Printf(&quot;Schema ID: %d\n&quot;, schema.ID)
+fmt.Printf(&quot;Number of fields: %d\n&quot;, schema.NumFields())
+
+// Access table properties
+props := tbl.Properties()
+fmt.Printf(&quot;Owner: %s\n&quot;, props[&quot;owner&quot;])
+
+// Access current snapshot
+if snapshot := tbl.CurrentSnapshot(); snapshot != nil {
+    fmt.Printf(&quot;Current snapshot ID: %d\n&quot;, snapshot.SnapshotID)
+    fmt.Printf(&quot;Snapshot timestamp: %d\n&quot;, snapshot.TimestampMs)
+}
+
+// List all snapshots
+for _, snapshot := range tbl.Snapshots() {
+    fmt.Printf(&quot;Snapshot %d: %s\n&quot;, snapshot.SnapshotID, snapshot.Summary.Operation)
+}
+</code></pre>
+<h2 id="creating-tables-with-partitioning"><a class="header" href="#creating-tables-with-partitioning">Creating Tables with Partitioning</a></h2>
+<p>You can create tables with partitioning:</p>
+<pre><code class="language-go">import (
+    &quot;github.com/apache/iceberg-go&quot;
+    &quot;github.com/apache/iceberg-go/catalog&quot;
+)
+
+// Create schema
+schema := iceberg.NewSchemaWithIdentifiers(1, []int{1},
+    iceberg.NestedField{ID: 1, Name: &quot;id&quot;, Type: iceberg.PrimitiveTypes.Int32, Required: true},
+    iceberg.NestedField{ID: 2, Name: &quot;name&quot;, Type: iceberg.PrimitiveTypes.String, Required: false},
+    iceberg.NestedField{ID: 3, Name: &quot;date&quot;, Type: iceberg.PrimitiveTypes.Date, Required: false},
+)
+
+// Create partition spec
+partitionSpec := iceberg.NewPartitionSpec(
+    iceberg.PartitionField{SourceID: 3, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: &quot;date&quot;},
+)
+
+// Create table with partitioning
+tbl, err := cat.CreateTable(
+    context.Background(),
+    tableIdent,
+    schema,
+    catalog.WithPartitionSpec(&amp;partitionSpec),
+    catalog.WithLocation(&quot;s3://my-bucket/tables/partitioned_table&quot;),
+)
+if err != nil {
+    log.Fatal(err)
+}
+</code></pre>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="cli.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="glossary.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="cli.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="glossary.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>
