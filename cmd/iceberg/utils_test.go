@@ -107,6 +107,7 @@ func TestParsePartitionSpec(t *testing.T) {
 			got, err := parsePartitionSpec(tt.input)
 			if (err != nil) != tt.isErr {
 				t.Errorf("parsePartitionSpec() error = %v, isErr %v", err, tt.isErr)
+
 				return
 			}
 			if !tt.isErr && got == nil {
@@ -154,6 +155,7 @@ func TestParseSortOrder(t *testing.T) {
 			got, err := parseSortOrder(tt.input)
 			if (err != nil) != tt.isErr {
 				t.Errorf("parseSortOrder() error = %v, isErr %v", err, tt.isErr)
+
 				return
 			}
 			if !tt.isErr {
