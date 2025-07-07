@@ -287,7 +287,6 @@ func main() {
 			if cfg.LocationURI != "" {
 				opts = append(opts, catalog.WithLocation(cfg.LocationURI))
 			}
-			// TODO: Support CreateTableOpt with table properties, partition spec & sort order
 			if cfg.TableProps != "" {
 				props, err := parseProperties(cfg.TableProps)
 				if err != nil {

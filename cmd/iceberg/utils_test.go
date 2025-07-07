@@ -18,6 +18,7 @@
 package main
 
 import (
+	"maps"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -67,9 +68,10 @@ func TestParseProperties(t *testing.T) {
 			got, err := parseProperties(tt.input)
 			if (err != nil) != tt.isErr {
 				t.Errorf("parseProperties() error = %v, isErr %v", err, tt.isErr)
+
 				return
 			}
-			if !tt.isErr && !mapsEqual(got, tt.want) {
+			if !tt.isErr && !maps.Equal(got, tt.want) {
 				t.Errorf("parseProperties() = %v, want %v", got, tt.want)
 			}
 		})
@@ -155,7 +157,7 @@ func TestParseSortOrder(t *testing.T) {
 				return
 			}
 			if !tt.isErr {
-				// For empty string, we expect UnsortedSortOrder with OrderID 0
+				// For an empty string, we expect UnsortedSortOrder with OrderID 0
 				if tt.input == "" {
 					if got.OrderID != 0 {
 						t.Errorf("parseSortOrder() for empty string should return OrderID 0, got %d", got.OrderID)
@@ -166,17 +168,4 @@ func TestParseSortOrder(t *testing.T) {
 			}
 		})
 	}
-}
-
-// mapsEqual compares two maps for equality
-func mapsEqual(a, b iceberg.Properties) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if b[k] != v {
-			return false
-		}
-	}
-	return true
 }
