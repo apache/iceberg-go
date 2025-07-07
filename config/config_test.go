@@ -88,12 +88,7 @@ catalog:
     output: json
     credential: client-id:client-secret
     warehouse: 123456789012
-    rest-config:
-      auth-url: https://auth.example.com
-      sigv4-enabled: true
-      sigv4-region: us-east-1
-      sigv4-service: glue
-      tls-skip-verify: false
+    rest-config: auth-url=https://auth.example.com,sigv4-enabled=true,sigv4-region=us-east-1,sigv4-service=glue,tls-skip-verify=false
 `), "rest-catalog",
 		&CatalogConfig{
 			CatalogType: "rest",
@@ -101,13 +96,7 @@ catalog:
 			Output:      "json",
 			Credential:  "client-id:client-secret",
 			Warehouse:   "123456789012",
-			RestConfig: RestCatalogConfig{
-				AuthUrl:       "https://auth.example.com",
-				SigV4Enabled:  true,
-				SigV4Region:   "us-east-1",
-				SigV4Service:  "glue",
-				TlsSkipVerify: false,
-			},
+			RestConfig:  "auth-url=https://auth.example.com,sigv4-enabled=true,sigv4-region=us-east-1,sigv4-service=glue,tls-skip-verify=false",
 		},
 	},
 }
@@ -127,21 +116,18 @@ catalog:
     type: rest
     uri: https://glue.us-east-1.amazonaws.com/iceberg
     output: json
-    rest-config:
-      auth-url: https://auth.example.com
-      sigv4-enabled: true
-      sigv4-region: us-east-1
-      sigv4-service: glue
-      tls-skip-verify: false
+    rest-config: auth-url=https://auth.example.com,sigv4-enabled=true,sigv4-region=us-east-1,sigv4-service=glue,tls-skip-verify=false
 `)
 
 	config := ParseConfig(yamlData, "default")
 	assert.NotNil(t, config)
+	restConfig := ParseRestConfig(config.RestConfig)
+	assert.NotEmpty(t, restConfig)
 
-	// Test RestCatalogConfig fields
-	assert.Equal(t, "https://auth.example.com", config.RestConfig.AuthUrl)
-	assert.True(t, config.RestConfig.SigV4Enabled)
-	assert.Equal(t, "us-east-1", config.RestConfig.SigV4Region)
-	assert.Equal(t, "glue", config.RestConfig.SigV4Service)
-	assert.False(t, config.RestConfig.TlsSkipVerify)
+	// Test RestCatalog config fields
+	assert.Equal(t, "https://auth.example.com", restConfig["auth-url"])
+	assert.Equal(t, "true", restConfig["sigv4-enabled"])
+	assert.Equal(t, "us-east-1", restConfig["sigv4-region"])
+	assert.Equal(t, "glue", restConfig["sigv4-service"])
+	assert.Equal(t, "false", restConfig["tls-skip-verify"])
 }
