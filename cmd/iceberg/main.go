@@ -87,7 +87,7 @@ Options:
   --schema JSON        	specify table schema in json (for create table use only)
                        	Ex: [{"name":"id","type":"int","required":false,"doc":"unique id"}]
   --rest-config TEXT	specify the REST configuration to use
-						Ex: sigv4-enabled=true,sigv4-region=us-east-1,sigv4-service=glue`
+                       	Ex: sigv4-enabled=true,sigv4-region=us-east-1,sigv4-service=glue`
 
 type Config struct {
 	List     bool `docopt:"list"`

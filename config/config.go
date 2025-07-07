@@ -45,14 +45,6 @@ type CatalogConfig struct {
 	RestConfig  string `yaml:"rest-config"`
 }
 
-type RestCatalogConfig struct {
-	AuthUrl       string `yaml:"auth-url"`
-	SigV4Enabled  bool   `yaml:"sigv4-enabled"`
-	SigV4Region   string `yaml:"sigv4-region"`
-	SigV4Service  string `yaml:"sigv4-service"`
-	TlsSkipVerify bool   `yaml:"tls-skip-verify"`
-}
-
 func LoadConfig(configPath string) []byte {
 	var path string
 	if len(configPath) > 0 {
