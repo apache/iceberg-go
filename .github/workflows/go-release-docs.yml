@@ -51,8 +51,6 @@ jobs:
 
       - name: Copy file
         run: |
-          echo "go.iceberg.apache.org" > CNAME
-          cp CNAME ./website/book/CNAME
           cp .asf.yaml ./website/book/.asf.yaml
 
       - name: Deploy to gh-pages
