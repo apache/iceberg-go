@@ -24,6 +24,7 @@ import (
 	"iter"
 	"maps"
 	"strconv"
+	"strings"
 	_ "unsafe"
 
 	"github.com/apache/iceberg-go"
@@ -694,7 +695,7 @@ func (c *Catalog) getTable(ctx context.Context, database, tableName string) (*ty
 		return nil, fmt.Errorf("failed to get table %s.%s: %w", database, tableName, err)
 	}
 
-	if tblRes.Table.Parameters[tableTypePropsKey] != glueTypeIceberg {
+	if !strings.EqualFold(tblRes.Table.Parameters[tableTypePropsKey], glueTypeIceberg) {
 		return nil, fmt.Errorf("table %s.%s is not an iceberg table", database, tableName)
 	}
 
@@ -749,7 +750,7 @@ func DatabaseIdentifier(database string) table.Identifier {
 func filterTableListByType(database string, tableList []types.Table, tableType string) []table.Identifier {
 	var filtered []table.Identifier
 	for _, tbl := range tableList {
-		if tbl.Parameters[tableTypePropsKey] != tableType {
+		if !strings.EqualFold(tbl.Parameters[tableTypePropsKey], tableType) {
 			continue
 		}
 		filtered = append(filtered, TableIdentifier(database, aws.ToString(tbl.Name)))
