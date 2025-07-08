@@ -34,9 +34,11 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/rest"
+	"github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/internal/recipe"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	"github.com/testcontainers/testcontainers-go/modules/compose"
 )
@@ -134,3 +136,203 @@ func (s *SparkIntegrationTestSuite) TestAddFile() {
 func TestSparkIntegration(t *testing.T) {
 	suite.Run(t, new(SparkIntegrationTestSuite))
 }
+
+// Dynamic Partition Overwrite Tests
+func TestDynamicPartitionOverwrite_UnpartitionedTable(t *testing.T) {
+	// Create a table with no partition spec
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+
+	metadata, err := table.NewMetadataBuilder()
+	assert.NoError(t, err)
+	_, err = metadata.AddSchema(schema, 2, true)
+	assert.NoError(t, err)
+	_, err = metadata.SetCurrentSchemaID(0)
+	assert.NoError(t, err)
+	_, err = metadata.AddPartitionSpec(iceberg.UnpartitionedSpec, true)
+	assert.NoError(t, err)
+	_, err = metadata.SetDefaultSpecID(0)
+	assert.NoError(t, err)
+	_, err = metadata.SetFormatVersion(2)
+	assert.NoError(t, err)
+
+	meta, err := metadata.Build()
+	assert.NoError(t, err)
+
+	var mockfs internal.MockFS
+	mockfs.Test(t)
+
+	table := table.New(
+		[]string{"test", "table"},
+		meta,
+		"test/location",
+		func(ctx context.Context) (iceio.IO, error) {
+			return &mockfs, nil
+		},
+		nil,
+	)
+
+	txn := table.NewTransaction()
+
+	// Create test data
+	mem := memory.DefaultAllocator
+	builder := array.NewInt32Builder(mem)
+	builder.AppendValues([]int32{1, 2, 3}, nil)
+	idArray := builder.NewArray()
+
+	builder2 := array.NewStringBuilder(mem)
+	builder2.AppendValues([]string{"a", "b", "c"}, nil)
+	dataArray := builder2.NewArray()
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	record := array.NewRecord(arrowSchema, []arrow.Array{idArray, dataArray}, 3)
+	tableData := array.NewTableFromRecords(arrowSchema, []arrow.Record{record})
+
+	// Should return an error for an unpartitioned table
+	err = txn.DynamicPartitionOverwrite(context.Background(), tableData, 1000, iceberg.Properties{})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot apply dynamic overwrite on an unpartitioned table")
+}
+
+func TestDynamicPartitionOverwrite_NonIdentityTransform(t *testing.T) {
+	// Create a table with a non-identity transform
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+
+	partitionSpec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{
+			SourceID:  1,
+			FieldID:   1000,
+			Name:      "id_bucket",
+			Transform: iceberg.BucketTransform{NumBuckets: 4},
+		},
+	)
+
+	metadata, err := table.NewMetadataBuilder()
+	assert.NoError(t, err)
+	_, err = metadata.AddSchema(schema, 2, true)
+	assert.NoError(t, err)
+	_, err = metadata.SetCurrentSchemaID(0)
+	assert.NoError(t, err)
+	_, err = metadata.AddPartitionSpec(&partitionSpec, true)
+	assert.NoError(t, err)
+	_, err = metadata.SetDefaultSpecID(0)
+	assert.NoError(t, err)
+	_, err = metadata.SetFormatVersion(2)
+	assert.NoError(t, err)
+
+	meta, err := metadata.Build()
+	assert.NoError(t, err)
+
+	var mockfs internal.MockFS
+	mockfs.Test(t)
+
+	table := table.New(
+		[]string{"test", "table"},
+		meta,
+		"test/location",
+		func(ctx context.Context) (iceio.IO, error) {
+			return &mockfs, nil
+		},
+		nil,
+	)
+
+	txn := table.NewTransaction()
+
+	// Create test data
+	mem := memory.DefaultAllocator
+	builder := array.NewInt32Builder(mem)
+	builder.AppendValues([]int32{1, 2, 3}, nil)
+	idArray := builder.NewArray()
+
+	builder2 := array.NewStringBuilder(mem)
+	builder2.AppendValues([]string{"a", "b", "c"}, nil)
+	dataArray := builder2.NewArray()
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	record := array.NewRecord(arrowSchema, []arrow.Array{idArray, dataArray}, 3)
+	tableData := array.NewTableFromRecords(arrowSchema, []arrow.Record{record})
+
+	// Should return an error for non-identity transform
+	err = txn.DynamicPartitionOverwrite(context.Background(), tableData, 1000, iceberg.Properties{})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "dynamic overwrite does not support non-identity-transform fields in partition spec")
+}
+
+func TestDynamicPartitionOverwrite_EmptyTable(t *testing.T) {
+	// Create a table with identity transform
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+
+	partitionSpec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{
+			SourceID:  1,
+			FieldID:   1000,
+			Name:      "id",
+			Transform: iceberg.IdentityTransform{},
+		},
+	)
+
+	metadata, err := table.NewMetadataBuilder()
+	assert.NoError(t, err)
+	_, err = metadata.AddSchema(schema, 2, true)
+	assert.NoError(t, err)
+	_, err = metadata.SetCurrentSchemaID(0)
+	assert.NoError(t, err)
+	_, err = metadata.AddPartitionSpec(&partitionSpec, true)
+	assert.NoError(t, err)
+	_, err = metadata.SetDefaultSpecID(0)
+	assert.NoError(t, err)
+
+	_, err = metadata.SetFormatVersion(2)
+	assert.NoError(t, err)
+
+	meta, err := metadata.Build()
+	assert.NoError(t, err)
+
+	var mockfs internal.MockFS
+	mockfs.Test(t)
+
+	tbl := table.New(
+		[]string{"test", "table"},
+		meta,
+		"test/location",
+		func(ctx context.Context) (iceio.IO, error) {
+			return &mockfs, nil
+		},
+		nil,
+	)
+
+	txn := tbl.NewTransaction()
+
+	// Create empty test data (empty arrays for each field)
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+	mem := memory.DefaultAllocator
+	idArr := array.NewInt32Builder(mem).NewArray()
+	dataArr := array.NewStringBuilder(mem).NewArray()
+	record := array.NewRecord(arrowSchema, []arrow.Array{idArr, dataArr}, 0)
+	tableData := array.NewTableFromRecords(arrowSchema, []arrow.Record{record})
+
+	// Should return no error for an empty table
+	err = txn.DynamicPartitionOverwrite(context.Background(), tableData, 1000, iceberg.Properties{})
+	assert.NoError(t, err)
+}
+
+// TODO: Find a way to test the happy path of DynamicPartitionOverwrite
