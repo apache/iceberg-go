@@ -182,6 +182,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	for refName, ref := range t.meta.refs {
 		if refName == MainBranch {
 			snapsToKeep[ref.SnapshotID] = struct{}{}
+
 			continue
 		}
 
@@ -198,6 +199,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		refAge := nowMs - snap.TimestampMs
 		if refAge > *maxRefAgeMs {
 			updates = append(updates, NewRemoveSnapshotRefUpdate(refName))
+
 			continue
 		}
 
@@ -212,6 +214,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 
 		if ref.SnapshotRefType != BranchRef {
 			snapsToKeep[ref.SnapshotID] = struct{}{}
+
 			continue
 		}
 
