@@ -145,6 +145,14 @@ var testIcebergGlueTable5 = types.Table{
 	},
 }
 
+var testIcebergGlueTable6 = types.Table{
+	Name: aws.String("test_table6"),
+	Parameters: map[string]string{
+		tableTypePropsKey:        "iceberg",
+		metadataLocationPropsKey: "s3://test-bucket/test_table/metadata/abc123456-789.metadata.json",
+	},
+}
+
 var testNonIcebergGlueTable = types.Table{
 	Name: aws.String("other_table"),
 	Parameters: map[string]string{
@@ -189,6 +197,53 @@ func TestGlueGetTable(t *testing.T) {
 	assert.Equal("s3://test-bucket/test_table/metadata/abc123-123.metadata.json", tbl.Parameters[metadataLocationPropsKey])
 }
 
+func TestGlueGetTableCaseInsensitive(t *testing.T) {
+	assert := require.New(t)
+
+	testCases := []struct {
+		name      string
+		tableType string
+		shouldErr bool
+	}{
+		{"uppercase", "ICEBERG", false},
+		{"lowercase", "iceberg", false},
+		{"mixed case", "IcEbErG", false},
+		{"non-iceberg", "HIVE", true},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			mockGlueSvc := &mockGlueClient{}
+
+			testTable := types.Table{
+				Name: aws.String("test_table"),
+				Parameters: map[string]string{
+					tableTypePropsKey:        tc.tableType,
+					metadataLocationPropsKey: "s3://test-bucket/test_table/metadata/abc123-123.metadata.json",
+				},
+			}
+
+			mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+				DatabaseName: aws.String("test_database"),
+				Name:         aws.String("test_table"),
+			}, mock.Anything).Return(&glue.GetTableOutput{Table: &testTable}, nil)
+
+			glueCatalog := &Catalog{
+				glueSvc: mockGlueSvc,
+			}
+
+			tbl, err := glueCatalog.getTable(context.TODO(), "test_database", "test_table")
+			if tc.shouldErr {
+				assert.Error(err)
+				assert.Contains(err.Error(), "is not an iceberg table")
+			} else {
+				assert.NoError(err)
+				assert.Equal("s3://test-bucket/test_table/metadata/abc123-123.metadata.json", tbl.Parameters[metadataLocationPropsKey])
+			}
+		})
+	}
+}
+
 func TestGlueListTables(t *testing.T) {
 	assert := require.New(t)
 
@@ -197,7 +252,7 @@ func TestGlueListTables(t *testing.T) {
 	mockGlueSvc.On("GetTables", mock.Anything, &glue.GetTablesInput{
 		DatabaseName: aws.String("test_database"),
 	}, mock.Anything).Return(&glue.GetTablesOutput{
-		TableList: []types.Table{testIcebergGlueTable1, testNonIcebergGlueTable},
+		TableList: []types.Table{testIcebergGlueTable1, testIcebergGlueTable6, testNonIcebergGlueTable},
 	}, nil).Once()
 
 	glueCatalog := &Catalog{
@@ -215,8 +270,9 @@ func TestGlueListTables(t *testing.T) {
 		}
 	}
 	assert.NoError(lastErr)
-	assert.Len(tbls, 1)
+	assert.Len(tbls, 2)
 	assert.Equal([]string{"test_database", "test_table"}, tbls[0])
+	assert.Equal([]string{"test_database", "test_table6"}, tbls[1])
 }
 
 func TestGlueListTablesPagination(t *testing.T) {
