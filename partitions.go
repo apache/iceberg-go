@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	partitionDataIDStart   = 1000
+	PartitionDataIDStart   = 1000
 	InitialPartitionSpecID = 0
 )
 
@@ -199,7 +199,7 @@ func (ps PartitionSpec) String() string {
 
 func (ps *PartitionSpec) LastAssignedFieldID() int {
 	if len(ps.fields) == 0 {
-		return partitionDataIDStart - 1
+		return PartitionDataIDStart - 1
 	}
 
 	id := ps.fields[0].FieldID
@@ -286,7 +286,7 @@ func AssignFreshPartitionSpecIDs(spec *PartitionSpec, old, fresh *Schema) (Parti
 		newFields = append(newFields, PartitionField{
 			Name:      field.Name,
 			SourceID:  freshField.ID,
-			FieldID:   partitionDataIDStart + pos,
+			FieldID:   PartitionDataIDStart + pos,
 			Transform: field.Transform,
 		})
 	}
