@@ -182,8 +182,6 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	for refName, ref := range t.meta.refs {
 		if refName == MainBranch {
 			snapsToKeep[ref.SnapshotID] = struct{}{}
-
-			continue
 		}
 
 		snap, err := t.meta.SnapshotByID(ref.SnapshotID)
