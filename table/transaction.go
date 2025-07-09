@@ -398,7 +398,7 @@ func (t *Transaction) DynamicPartitionOverwrite(ctx context.Context, tbl arrow.T
 
 	deleteFilter := t.buildPartitionPredicate(partitionsToOverwrite)
 
-	if err := t.Delete(ctx, deleteFilter, snapshotProps); err != nil {
+	if err := t.deleteFileByFilter(ctx, deleteFilter, snapshotProps); err != nil {
 		return err
 	}
 
@@ -415,8 +415,8 @@ func (t *Transaction) DynamicPartitionOverwrite(ctx context.Context, tbl arrow.T
 	return t.apply(updates, reqs)
 }
 
-// Delete performs a delete operation with the given filter and snapshot properties.
-func (t *Transaction) Delete(ctx context.Context, filter iceberg.BooleanExpression, snapshotProps iceberg.Properties) error {
+// deleteFileByFilter performs a delete operation with the given filter and snapshot properties.
+func (t *Transaction) deleteFileByFilter(ctx context.Context, filter iceberg.BooleanExpression, snapshotProps iceberg.Properties) error {
 	fs, err := t.tbl.fsF(ctx)
 	if err != nil {
 		return err
