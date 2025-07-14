@@ -445,8 +445,9 @@ func TestUpdateSpecCommit(t *testing.T) {
 		assert.NoError(t, err)
 
 		stagedTbl, err := txn.StagedTable()
-		currSpec := stagedTbl.Spec()
+		assert.NoError(t, err)
 
+		currSpec := stagedTbl.Spec()
 		assert.NotNil(t, currSpec)
 		assert.Equal(t, 1, currSpec.ID())
 		assert.Equal(t, 1003, currSpec.LastAssignedFieldID())
