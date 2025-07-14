@@ -41,13 +41,13 @@ var testSchema = iceberg.NewSchema(1,
 var partitionSpec = iceberg.NewPartitionSpec(
 	iceberg.PartitionField{
 		SourceID:  1,
-		FieldID:   iceberg.InitialPartitionSpecID,
+		FieldID:   iceberg.PartitionDataIDStart,
 		Name:      "id_identity",
 		Transform: iceberg.IdentityTransform{},
 	},
 	iceberg.PartitionField{
 		SourceID:  5,
-		FieldID:   iceberg.InitialPartitionSpecID + 1,
+		FieldID:   iceberg.PartitionDataIDStart + 1,
 		Name:      "street_void",
 		Transform: iceberg.VoidTransform{},
 	})
@@ -65,16 +65,17 @@ func TestUpdateSpecAddField(t *testing.T) {
 
 	t.Run("add partition fields", func(t *testing.T) {
 		txn = testPartitionedTable.NewTransaction()
-		updates := table.NewUpdateSpec(txn, false)
-		updates, err := updates.AddField("ts", iceberg.YearTransform{}, "year_transform")
+		specUpdate := table.NewUpdateSpec(txn, false)
+
+		updates, reqs, err := specUpdate.
+			AddField("ts", iceberg.YearTransform{}, "year_transform").
+			AddField("address.Zip_cOdE", iceberg.BucketTransform{NumBuckets: 5}, "zipcode_bucket").
+			BuildUpdates()
 		assert.NoError(t, err)
 		assert.NotNil(t, updates)
+		assert.NotNil(t, reqs)
 
-		updates, err = updates.AddField("address.Zip_cOdE", iceberg.BucketTransform{NumBuckets: 5}, "zipcode_bucket")
-		assert.NoError(t, err)
-		assert.NotNil(t, updates)
-
-		newSpec := updates.Apply()
+		newSpec := specUpdate.Apply()
 		assert.NotNil(t, newSpec)
 		assert.Equal(t, 1, newSpec.ID())
 		assert.Equal(t, 1003, newSpec.LastAssignedFieldID())
@@ -98,82 +99,106 @@ func TestUpdateSpecAddField(t *testing.T) {
 	t.Run("add partition field case sensitive", func(t *testing.T) {
 		txn = testNonPartitionedTable.NewTransaction()
 		updates := table.NewUpdateSpec(txn, true)
-		updates, err := updates.AddField("NaMe", iceberg.VoidTransform{}, "name_void")
+		_, _, err := updates.
+			AddField("NaMe", iceberg.VoidTransform{}, "name_void").
+			BuildUpdates()
+		assert.Error(t, err)
 		assert.ErrorContains(t, err, "invalid schema: could not bind reference")
-		assert.Nil(t, updates)
 	})
 
 	t.Run("add invalid partition transform field", func(t *testing.T) {
 		txn = testNonPartitionedTable.NewTransaction()
-		updates := table.NewUpdateSpec(txn, true)
-		updates, err := updates.AddField("name", iceberg.YearTransform{}, "name_year")
+		specUpdate := table.NewUpdateSpec(txn, true)
+		updates, reqs, err := specUpdate.
+			AddField("name", iceberg.YearTransform{}, "name_year").
+			BuildUpdates()
+		assert.Error(t, err)
 		assert.ErrorContains(t, err, "year cannot transform string values from name")
 		assert.Nil(t, updates)
+		assert.Nil(t, reqs)
 	})
 
 	t.Run("add duplicate partition field", func(t *testing.T) {
 		txn = testPartitionedTable.NewTransaction()
-		updates := table.NewUpdateSpec(txn, true)
-		updates, err := updates.AddField("id", iceberg.IdentityTransform{}, "id_transform")
+		specUpdate := table.NewUpdateSpec(txn, true)
+		updates, reqs, err := specUpdate.
+			AddField("id", iceberg.IdentityTransform{}, "id_transform").
+			BuildUpdates()
+		assert.Error(t, err)
 		assert.ErrorContains(t, err, "duplicate partition field")
 		assert.Nil(t, updates)
+		assert.Nil(t, reqs)
 	})
 
 	t.Run("add already added partition field", func(t *testing.T) {
 		txn = testPartitionedTable.NewTransaction()
-		updates := table.NewUpdateSpec(txn, true)
+		updateSpec := table.NewUpdateSpec(txn, true)
 
-		updates, err := updates.AddField("ts", iceberg.YearTransform{}, "year_transform_1")
-		assert.NoError(t, err)
-		assert.NotNil(t, updates)
-		updates, err = updates.AddField("ts", iceberg.YearTransform{}, "year_transform_2")
+		updates, reqs, err := updateSpec.
+			AddField("ts", iceberg.YearTransform{}, "year_transform_1").
+			AddField("ts", iceberg.YearTransform{}, "year_transform_2").
+			BuildUpdates()
+		assert.Error(t, err)
 		assert.ErrorContains(t, err, "already added partition")
 		assert.Nil(t, updates)
+		assert.Nil(t, reqs)
 	})
 
 	t.Run("add duplicate partition field name", func(t *testing.T) {
 		txn = testPartitionedTable.NewTransaction()
-		updates := table.NewUpdateSpec(txn, true)
+		specUpdate := table.NewUpdateSpec(txn, true)
 
-		updates, err := updates.AddField("ts", iceberg.YearTransform{}, "year_transform_1")
-		assert.NoError(t, err)
-		assert.NotNil(t, updates)
-		updates, err = updates.AddField("ts", iceberg.MonthTransform{}, "year_transform_1")
+		updates, reqs, err := specUpdate.
+			AddField("ts", iceberg.YearTransform{}, "year_transform_1").
+			AddField("ts", iceberg.MonthTransform{}, "year_transform_1").
+			BuildUpdates()
+
+		assert.Error(t, err)
 		assert.ErrorContains(t, err, "already added partition field with name")
 		assert.Nil(t, updates)
+		assert.Nil(t, reqs)
 	})
 
 	t.Run("add conflicted time transform partition field", func(t *testing.T) {
 		txn = testNonPartitionedTable.NewTransaction()
-		updates := table.NewUpdateSpec(txn, true)
+		updateSpec := table.NewUpdateSpec(txn, true)
 
-		updates, err := updates.AddField("ts", iceberg.YearTransform{}, "ts_year")
-		assert.NoError(t, err)
-		assert.NotNil(t, updates)
+		updates, reqs, err := updateSpec.
+			AddField("ts", iceberg.YearTransform{}, "ts_year").
+			AddField("ts", iceberg.MonthTransform{}, "ts_month").
+			BuildUpdates()
 
-		updates, err = updates.AddField("ts", iceberg.MonthTransform{}, "ts_month")
+		assert.Error(t, err)
 		assert.ErrorContains(t, err, "cannot add time partition field")
 		assert.Nil(t, updates)
+		assert.Nil(t, reqs)
 	})
 
 	t.Run("add duplicate partition field", func(t *testing.T) {
 		txn = testPartitionedTable.NewTransaction()
-		updates := table.NewUpdateSpec(txn, true)
+		updateSpec := table.NewUpdateSpec(txn, true)
 
-		updates, err := updates.AddField("ts", iceberg.YearTransform{}, "id_identity")
+		updates, reqs, err := updateSpec.
+			AddField("ts", iceberg.YearTransform{}, "id_identity").
+			BuildUpdates()
+		assert.Error(t, err)
 		assert.ErrorContains(t, err, "cannot add duplicate partition field name")
 		assert.Nil(t, updates)
+		assert.Nil(t, reqs)
 	})
 
 	t.Run("add duplicate partition field name with void transform", func(t *testing.T) {
 		txn = testPartitionedTable.NewTransaction()
-		updates := table.NewUpdateSpec(txn, true)
+		specUpdate := table.NewUpdateSpec(txn, true)
 
-		updates, err := updates.AddField("ts", iceberg.VoidTransform{}, "street_void")
+		updates, reqs, err := specUpdate.
+			AddField("ts", iceberg.VoidTransform{}, "street_void").
+			BuildUpdates()
 		assert.NoError(t, err)
 		assert.NotNil(t, updates)
+		assert.NotNil(t, reqs)
 
-		newSpec := updates.Apply()
+		newSpec := specUpdate.Apply()
 		assert.NotNil(t, newSpec)
 		assert.Equal(t, "street_void_1001", newSpec.FieldsBySourceID(5)[0].Name)
 	})
@@ -184,16 +209,16 @@ func TestUpdateSpecAddIdentityField(t *testing.T) {
 
 	t.Run("add identity partition fields", func(t *testing.T) {
 		txn = testPartitionedTable.NewTransaction()
-		updates := table.NewUpdateSpec(txn, false)
-		updates, err := updates.AddIdentity("ts")
+		specUpdate := table.NewUpdateSpec(txn, false)
+		updates, reqs, err := specUpdate.
+			AddIdentity("ts").
+			AddIdentity("name").
+			BuildUpdates()
 		assert.NoError(t, err)
 		assert.NotNil(t, updates)
+		assert.NotNil(t, reqs)
 
-		updates, err = updates.AddIdentity("name")
-		assert.NoError(t, err)
-		assert.NotNil(t, updates)
-
-		newSpec := updates.Apply()
+		newSpec := specUpdate.Apply()
 		assert.NotNil(t, newSpec)
 		assert.Equal(t, 1, newSpec.ID())
 		assert.Equal(t, 1003, newSpec.LastAssignedFieldID())
@@ -220,18 +245,17 @@ func TestUpdateSpecRenameField(t *testing.T) {
 
 	t.Run("rename partition fields", func(t *testing.T) {
 		txn = testPartitionedTable.NewTransaction()
-		updates := table.NewUpdateSpec(txn, false)
-		updates, err := updates.RenameField("id_identity", "new_id_identity")
+		updateSpec := table.NewUpdateSpec(txn, false)
+		updates, reqs, err := updateSpec.
+			RenameField("id_identity", "new_id_identity").
+			RenameField("street_void", "new_street_void").
+			BuildUpdates()
 		assert.NoError(t, err)
 		assert.NotNil(t, updates)
+		assert.NotNil(t, reqs)
 
-		updates, err = updates.RenameField("street_void", "new_street_void")
-		assert.NoError(t, err)
-		assert.NotNil(t, updates)
-
-		newSpec := updates.Apply()
+		newSpec := updateSpec.Apply()
 		assert.NotNil(t, newSpec)
-
 		assert.Equal(t, 1, newSpec.ID())
 		assert.Equal(t, "new_id_identity", newSpec.FieldsBySourceID(1)[0].Name)
 		assert.Equal(t, "new_street_void", newSpec.FieldsBySourceID(5)[0].Name)
@@ -239,37 +263,43 @@ func TestUpdateSpecRenameField(t *testing.T) {
 
 	t.Run("rename recently added partition", func(t *testing.T) {
 		txn = testPartitionedTable.NewTransaction()
-		updates := table.NewUpdateSpec(txn, false)
+		updateSpec := table.NewUpdateSpec(txn, false)
 
-		updates, err := updates.AddField("ts", iceberg.YearTransform{}, "year_transform")
-		assert.NoError(t, err)
-		assert.NotNil(t, updates)
-
-		updates, err = updates.RenameField("year_transform", "new_year_transform")
+		updates, reqs, err := updateSpec.
+			AddField("ts", iceberg.YearTransform{}, "year_transform").
+			RenameField("year_transform", "new_year_transform").
+			BuildUpdates()
+		assert.Error(t, err)
 		assert.ErrorContains(t, err, "cannot rename recently added partitions")
 		assert.Nil(t, updates)
+		assert.Nil(t, reqs)
 	})
 
 	t.Run("rename a partition field that doesn't exist", func(t *testing.T) {
 		txn = testPartitionedTable.NewTransaction()
-		updates := table.NewUpdateSpec(txn, false)
+		updateSpec := table.NewUpdateSpec(txn, false)
 
-		updates, err := updates.RenameField("non_exist_field", "new_non_exist_field")
+		updates, reqs, err := updateSpec.
+			RenameField("non_exist_field", "new_non_exist_field").
+			BuildUpdates()
+		assert.Error(t, err)
 		assert.ErrorContains(t, err, "cannot find partition field")
 		assert.Nil(t, updates)
+		assert.Nil(t, reqs)
 	})
 
 	t.Run("rename a partition field deleted in the same transaction", func(t *testing.T) {
 		txn = testPartitionedTable.NewTransaction()
-		updates := table.NewUpdateSpec(txn, false)
+		updateSpec := table.NewUpdateSpec(txn, false)
 
-		updates, err := updates.RemoveField("id_identity")
-		assert.NoError(t, err)
-		assert.NotNil(t, updates)
-
-		updates, err = updates.RenameField("id_identity", "new_id_identity")
+		updates, reqs, err := updateSpec.
+			RemoveField("id_identity").
+			RenameField("id_identity", "new_id_identity").
+			BuildUpdates()
+		assert.Error(t, err)
 		assert.ErrorContains(t, err, "cannot delete and rename partition field")
 		assert.Nil(t, updates)
+		assert.Nil(t, reqs)
 	})
 }
 
@@ -278,17 +308,17 @@ func TestUpdateSpecRemoveField(t *testing.T) {
 
 	t.Run("remove existing partition fields", func(t *testing.T) {
 		txn = testPartitionedTable.NewTransaction()
-		updates := table.NewUpdateSpec(txn, false)
+		updateSpec := table.NewUpdateSpec(txn, false)
 
-		updates, err := updates.RemoveField("street_void")
+		updates, reqs, err := updateSpec.
+			RemoveField("street_void").
+			RemoveField("id_identity").
+			BuildUpdates()
 		assert.NoError(t, err)
 		assert.NotNil(t, updates)
+		assert.NotNil(t, reqs)
 
-		updates, err = updates.RemoveField("id_identity")
-		assert.NoError(t, err)
-		assert.NotNil(t, updates)
-
-		newSpec := updates.Apply()
+		newSpec := updateSpec.Apply()
 		assert.NotNil(t, newSpec)
 		assert.Equal(t, 1, newSpec.ID())
 		assert.Equal(t, 999, newSpec.LastAssignedFieldID())
@@ -298,98 +328,102 @@ func TestUpdateSpecRemoveField(t *testing.T) {
 
 	t.Run("remove newly added partition field", func(t *testing.T) {
 		txn = testPartitionedTable.NewTransaction()
-		updates := table.NewUpdateSpec(txn, false)
+		updateSpec := table.NewUpdateSpec(txn, false)
 
-		updates, err := updates.AddField("ts", iceberg.YearTransform{}, "year_transform")
-		updates, err = updates.RemoveField("year_transform")
+		updates, reqs, err := updateSpec.
+			AddField("ts", iceberg.YearTransform{}, "year_transform").
+			RemoveField("year_transform").
+			BuildUpdates()
+		assert.Error(t, err)
 		assert.ErrorContains(t, err, "cannot remove newly added field")
 		assert.Nil(t, updates)
+		assert.Nil(t, reqs)
 	})
 
 	t.Run("remove renamed partition field", func(t *testing.T) {
 		txn = testPartitionedTable.NewTransaction()
-		updates := table.NewUpdateSpec(txn, false)
+		updateSpec := table.NewUpdateSpec(txn, false)
 
-		updates, err := updates.RenameField("id_identity", "new_id_identity")
-		updates, err = updates.RemoveField("id_identity")
+		updates, reqs, err := updateSpec.
+			RenameField("id_identity", "new_id_identity").
+			RemoveField("id_identity").
+			BuildUpdates()
+		assert.Error(t, err)
 		assert.ErrorContains(t, err, "cannot rename and delete field")
 		assert.Nil(t, updates)
+		assert.Nil(t, reqs)
 	})
 
 	t.Run("remove partition field that doesn't exist", func(t *testing.T) {
 		txn = testPartitionedTable.NewTransaction()
-		updates := table.NewUpdateSpec(txn, false)
+		updateSpec := table.NewUpdateSpec(txn, false)
 
-		updates, err := updates.RemoveField("non_exist_field")
+		updates, reqs, err := updateSpec.
+			RemoveField("non_exist_field").
+			BuildUpdates()
+		assert.Error(t, err)
 		assert.ErrorContains(t, err, "cannot find partition field")
 		assert.Nil(t, updates)
+		assert.Nil(t, reqs)
 	})
 }
 
-func TestUpdateSpecCommit(t *testing.T) {
+func TestUpdateSpecBuildChanges(t *testing.T) {
 	var txn *table.Transaction
 
-	t.Run("commit added partition fields", func(t *testing.T) {
+	t.Run("build changes on added partition fields", func(t *testing.T) {
 		txn = testNonPartitionedTable.NewTransaction()
-		specUpdates := table.NewUpdateSpec(txn, false)
+		specUpdate := table.NewUpdateSpec(txn, false)
 
-		specUpdates, err := specUpdates.AddField("ts", iceberg.YearTransform{}, "year_transform")
-		assert.NoError(t, err)
-		assert.NotNil(t, specUpdates)
-
-		specUpdates, err = specUpdates.AddField("address.zip_code", iceberg.BucketTransform{NumBuckets: 5}, "zipcode_bucket")
-		assert.NoError(t, err)
-		assert.NotNil(t, specUpdates)
-
-		updates, requirements, err := specUpdates.CommitUpdates()
+		updates, reqs, err := specUpdate.
+			AddField("ts", iceberg.YearTransform{}, "year_transform").
+			AddField("address.zip_code", iceberg.BucketTransform{NumBuckets: 5}, "zipcode_bucket").
+			BuildUpdates()
 		assert.NoError(t, err)
 		assert.NotNil(t, updates)
+		assert.NotNil(t, reqs)
 
 		assert.Equal(t, 2, len(updates))
-		assert.Equal(t, 1, len(requirements))
+		assert.Equal(t, 1, len(reqs))
 
 		assert.Equal(t, table.UpdateAddSpec, updates[0].Action())
 		assert.Equal(t, table.UpdateSetDefaultSpec, updates[1].Action())
-		assert.Equal(t, "assert-last-assigned-partition-id", requirements[0].GetType())
+		assert.Equal(t, "assert-last-assigned-partition-id", reqs[0].GetType())
 	})
 
-	t.Run("commit removed partition field", func(t *testing.T) {
+	t.Run("build changes on removed partition field", func(t *testing.T) {
 		txn = testPartitionedTable.NewTransaction()
-		specUpdates := table.NewUpdateSpec(txn, false)
+		specUpdate := table.NewUpdateSpec(txn, false)
 
-		specUpdates, err := specUpdates.RemoveField("street_void")
-		assert.NoError(t, err)
-		assert.NotNil(t, specUpdates)
-
-		updates, requirements, err := specUpdates.CommitUpdates()
+		updates, reqs, err := specUpdate.
+			RemoveField("street_void").
+			BuildUpdates()
 		assert.NoError(t, err)
 		assert.NotNil(t, updates)
+		assert.NotNil(t, reqs)
 
 		assert.Equal(t, 2, len(updates))
-		assert.Equal(t, 1, len(requirements))
+		assert.Equal(t, 1, len(reqs))
 
 		assert.Equal(t, table.UpdateAddSpec, updates[0].Action())
 		assert.Equal(t, table.UpdateSetDefaultSpec, updates[1].Action())
-		assert.Equal(t, "assert-last-assigned-partition-id", requirements[0].GetType())
+		assert.Equal(t, "assert-last-assigned-partition-id", reqs[0].GetType())
 	})
 
-	t.Run("commit renamed partition field", func(t *testing.T) {
+	t.Run("build changes on renamed partition field", func(t *testing.T) {
 		txn = testPartitionedTable.NewTransaction()
-		specUpdates := table.NewUpdateSpec(txn, false)
+		specUpdate := table.NewUpdateSpec(txn, false)
 
-		specUpdates, err := specUpdates.RenameField("street_void", "new_street_void")
+		updates, reqs, err := specUpdate.
+			RenameField("street_void", "new_street_void").
+			BuildUpdates()
+
 		assert.NoError(t, err)
-		assert.NotNil(t, specUpdates)
-
-		updates, requirements, err := specUpdates.CommitUpdates()
-		assert.NoError(t, err)
-		assert.NotNil(t, updates)
-
 		assert.Equal(t, 2, len(updates))
-		assert.Equal(t, 1, len(requirements))
+		assert.Equal(t, 1, len(reqs))
 
 		assert.Equal(t, table.UpdateAddSpec, updates[0].Action())
 		assert.Equal(t, table.UpdateSetDefaultSpec, updates[1].Action())
-		assert.Equal(t, "assert-last-assigned-partition-id", requirements[0].GetType())
+		assert.Equal(t, "assert-last-assigned-partition-id", reqs[0].GetType())
 	})
 }
