@@ -156,15 +156,7 @@ func (us *UpdateSpec) Apply() iceberg.PartitionSpec {
 		}
 	}
 
-	for _, field := range us.adds {
-		newField := iceberg.PartitionField{
-			SourceID:  field.SourceID,
-			FieldID:   field.FieldID,
-			Name:      field.Name,
-			Transform: field.Transform,
-		}
-		partitionFields = append(partitionFields, newField)
-	}
+	partitionFields = append(partitionFields, us.adds...)
 
 	newSpec := iceberg.NewPartitionSpec(partitionFields...)
 	newSpecId := iceberg.InitialPartitionSpecID
