@@ -427,3 +427,64 @@ func TestUpdateSpecBuildChanges(t *testing.T) {
 		assert.Equal(t, "assert-last-assigned-partition-id", reqs[0].GetType())
 	})
 }
+
+func TestUpdateSpecCommit(t *testing.T) {
+	var txn *table.Transaction
+
+	t.Run("test commit apply changes on transaction", func(t *testing.T) {
+		txn = testPartitionedTable.NewTransaction()
+
+		specUpdate := table.NewUpdateSpec(txn, false)
+
+		err := specUpdate.
+			AddField("address.city", iceberg.TruncateTransform{Width: 3}, "").
+			AddIdentity("address.zip_code").
+			RenameField("street_void", "new_street_void").
+			RemoveField("id_identity").
+			Commit()
+		assert.NoError(t, err)
+
+		stagedTbl, err := txn.StagedTable()
+		currSpec := stagedTbl.Spec()
+
+		assert.NotNil(t, currSpec)
+		assert.Equal(t, 1, currSpec.ID())
+		assert.Equal(t, 1003, currSpec.LastAssignedFieldID())
+		assert.Equal(t, 3, currSpec.NumFields())
+		assert.Equal(t, "new_street_void", currSpec.FieldsBySourceID(5)[0].Name)
+		assert.Equal(t, []iceberg.PartitionField(nil), currSpec.FieldsBySourceID(1))
+
+		addedField := currSpec.FieldsBySourceID(6)[0]
+		assert.Equal(t, 6, addedField.SourceID)
+		assert.Equal(t, 1002, addedField.FieldID)
+		assert.Equal(t, "address.city_trunc_3", addedField.Name)
+		assert.Equal(t, iceberg.TruncateTransform{Width: 3}, addedField.Transform)
+
+		addedIdentity := currSpec.FieldsBySourceID(7)[0]
+		assert.Equal(t, 7, addedIdentity.SourceID)
+		assert.Equal(t, 1003, addedIdentity.FieldID)
+		assert.Equal(t, "address.zip_code", addedIdentity.Name)
+		assert.Equal(t, iceberg.IdentityTransform{}, addedIdentity.Transform)
+	})
+
+	t.Run("test commit with build errors", func(t *testing.T) {
+		txn = testPartitionedTable.NewTransaction()
+
+		specUpdate := table.NewUpdateSpec(txn, false)
+
+		err := specUpdate.
+			AddField("id", iceberg.IdentityTransform{}, "id_transform").
+			Commit()
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, "duplicate partition field")
+	})
+
+	t.Run("test commit with empty updates", func(t *testing.T) {
+		txn = testPartitionedTable.NewTransaction()
+
+		specUpdate := table.NewUpdateSpec(txn, false)
+
+		err := specUpdate.Commit()
+		assert.Nil(t, err)
+	})
+}

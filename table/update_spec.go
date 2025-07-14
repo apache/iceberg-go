@@ -25,6 +25,13 @@ import (
 	"github.com/apache/iceberg-go"
 )
 
+// UpdateSpec implements a builder for evolving a table's partition specification.
+//
+// It accumulates a sequence of partition spec update operations (e.g., AddField, RemoveField, RenameField)
+// which are applied during BuildUpdates.
+//
+// Use the builder methods to chain operations, and call BuildUpdates to apply them and produce the
+// final set of partition fields and update requirements, or call Commit to apply the updates in the transaction.
 type UpdateSpec struct {
 	operations []updateSpecOp
 
