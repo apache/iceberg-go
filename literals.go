@@ -206,6 +206,37 @@ func LiteralFromBytes(typ Type, data []byte) (Literal, error) {
 	return nil, ErrType
 }
 
+func LiteralFromAny(v any) (Literal, error) {
+	switch x := v.(type) {
+	case bool:
+		return NewLiteral(x), nil
+	case int32:
+		return NewLiteral(x), nil
+	case int64, int:
+		return NewLiteral(int64(reflect.ValueOf(x).Int())), nil
+	case float32:
+		return NewLiteral(x), nil
+	case float64:
+		return NewLiteral(x), nil
+	case string:
+		return NewLiteral(x), nil
+	case []byte:
+		return NewLiteral(x), nil
+	case uuid.UUID:
+		return NewLiteral(x), nil
+	case Date:
+		return NewLiteral(x), nil
+	case Time:
+		return NewLiteral(x), nil
+	case Timestamp:
+		return NewLiteral(x), nil
+	case Decimal:
+		return NewLiteral(x), nil
+	default:
+		return nil, fmt.Errorf("unsupported literal type %T", v)
+	}
+}
+
 // convenience to avoid repreating this pattern for primitive types
 func literalEq[L interface {
 	comparable
