@@ -1308,7 +1308,7 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 		}
 
 		return writeFiles(ctx, rootLocation, args.fs, meta, tasks)
+	} else {
+		return FanoutWriter(ctx, rootLocation, args, meta, targetFileSize)
 	}
-
-	panic(fmt.Errorf("%w: write stream with partitions", iceberg.ErrNotImplemented))
 }
