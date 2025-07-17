@@ -89,6 +89,7 @@ func (r *Requirements) UnmarshalJSON(data []byte) error {
 		}
 		*r = append(*r, req)
 	}
+	
 	return nil
 }
 

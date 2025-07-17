@@ -111,6 +111,7 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 		}
 		*u = append(*u, upd)
 	}
+	
 	return nil
 }
 

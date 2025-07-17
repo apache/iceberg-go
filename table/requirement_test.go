@@ -18,6 +18,7 @@
 package table_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/apache/iceberg-go/table"
@@ -94,4 +95,53 @@ func TestParseRequirementBytes(t *testing.T) {
 			assert.Equal(t, tc.expectedErr, err)
 		})
 	}
+}
+
+func TestParseRequirementList(t *testing.T) {
+	t.Run("should parse a list of requirements", func(t *testing.T) {
+		jsonData := []byte(`[
+			{"type": "assert-create"},
+			{"type": "assert-table-uuid", "uuid": "550e8400-e29b-41d4-a716-446655440000"},
+			{"type": "assert-default-spec-id", "default-spec-id": 1}
+		]`)
+
+		expected := table.Requirements{
+			table.AssertCreate(),
+			table.AssertTableUUID(uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")),
+			table.AssertDefaultSpecID(1),
+		}
+
+		var actual table.Requirements
+		err := json.Unmarshal(jsonData, &actual)
+
+		assert.NoError(t, err)
+		assert.Equal(t, expected, actual)
+	})
+
+	t.Run("should handle an empty list", func(t *testing.T) {
+		jsonData := []byte(`[]`)
+		var actual table.Requirements
+		err := json.Unmarshal(jsonData, &actual)
+		assert.NoError(t, err)
+		assert.Empty(t, actual)
+	})
+
+	t.Run("should return an error for an unknown requirement type in the list", func(t *testing.T) {
+		jsonData := []byte(`[
+			{"type": "assert-create"},
+			{"type": "assert-foo-bar"}
+		]`)
+
+		var actual table.Requirements
+		err := json.Unmarshal(jsonData, &actual)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown requirement type: assert-foo-bar")
+	})
+
+	t.Run("should return an error for invalid json", func(t *testing.T) {
+		jsonData := []byte(`[{"type": "assert-create"},]`) // trailing comma
+		var actual table.Requirements
+		err := json.Unmarshal(jsonData, &actual)
+		assert.Error(t, err)
+	})
 }
