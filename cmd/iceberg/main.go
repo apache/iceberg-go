@@ -19,9 +19,11 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"strings"
 
@@ -83,7 +85,9 @@ Options:
   --description TEXT 	specify a description for the namespace
   --location-uri TEXT  	specify a location URI for the namespace
   --schema JSON        	specify table schema in json (for create table use only)
-                       	Ex: [{"name":"id","type":"int","required":false,"doc":"unique id"}]`
+                       	Ex: [{"name":"id","type":"int","required":false,"doc":"unique id"}]
+  --rest-config TEXT	specify the REST configuration to use
+                       	Ex: sigv4-enabled=true,sigv4-region=us-east-1,sigv4-service=glue`
 
 type Config struct {
 	List     bool `docopt:"list"`
@@ -125,6 +129,7 @@ type Config struct {
 	Description string `docopt:"--description"`
 	LocationURI string `docopt:"--location-uri"`
 	SchemaStr   string `docopt:"--schema"`
+	RestConfig  string `docopt:"--rest-config"`
 }
 
 func main() {
@@ -161,6 +166,29 @@ func main() {
 		opts := []rest.Option{}
 		if len(cfg.Cred) > 0 {
 			opts = append(opts, rest.WithCredential(cfg.Cred))
+		}
+		if len(cfg.RestConfig) > 0 {
+			restCfg := config.ParseRestConfig(cfg.RestConfig)
+
+			if strings.ToLower(restCfg["sigv4-enabled"]) == "true" {
+				opts = append(opts, rest.WithSigV4())
+			}
+
+			if len(restCfg["sigv4-region"]) > 0 && len(restCfg["sigv4-service"]) > 0 {
+				opts = append(opts, rest.WithSigV4RegionSvc(restCfg["sigv4-region"], restCfg["sigv4-service"]))
+			}
+
+			if len(restCfg["auth-url"]) > 0 {
+				authUri, err := url.Parse(restCfg["auth-url"])
+				if err != nil {
+					log.Fatal(err)
+				}
+				opts = append(opts, rest.WithAuthURI(authUri))
+			}
+
+			if restCfg["tls-skip-verify"] == "true" {
+				opts = append(opts, rest.WithTLSConfig(&tls.Config{InsecureSkipVerify: true}))
+			}
 		}
 
 		if len(cfg.Warehouse) > 0 {
@@ -474,5 +502,8 @@ func mergeConf(fileConf *config.CatalogConfig, resConfig *Config) {
 	}
 	if len(resConfig.Warehouse) == 0 {
 		resConfig.Warehouse = fileConf.Warehouse
+	}
+	if len(resConfig.RestConfig) == 0 {
+		resConfig.RestConfig = fileConf.RestConfig
 	}
 }
