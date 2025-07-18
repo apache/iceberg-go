@@ -31,6 +31,8 @@ import (
 //go:embed docker-compose.yml
 var composeFile []byte
 
+const sparkContainer = "spark-iceberg"
+
 func Start(t *testing.T) (*compose.DockerCompose, error) {
 	if _, ok := os.LookupEnv("AWS_S3_ENDPOINT"); ok {
 		return nil, nil
@@ -61,4 +63,35 @@ func Start(t *testing.T) (*compose.DockerCompose, error) {
 	t.Setenv("AWS_REGION", "us-east-1")
 
 	return stack, nil
+}
+
+func ExecuteSpark(t *testing.T, stack *compose.DockerCompose, scriptPath string, args ...string) error {
+	spark, err := stack.ServiceContainer(t.Context(), sparkContainer)
+	if err != nil {
+		return fmt.Errorf("failed to get container %s: %w", sparkContainer, err)
+	}
+	cmd := append([]string{"python", scriptPath}, args...)
+
+	exitCode, output, err := spark.Exec(t.Context(), cmd)
+	if err != nil {
+		return fmt.Errorf("failed to run execution: %w", err)
+	}
+
+	result, err := io.ReadAll(output)
+	if err != nil {
+		return fmt.Errorf("failed to read output: %w", err)
+	}
+	fmt.Printf("%s\n", string(result))
+
+	//return fmt.Errorf("(exit=%d):\n%s\n", exitCode, string(output))
+
+	if exitCode != 0 {
+		//	output, err := io.ReadAll(output)
+		//	if err != nil {
+		//		return fmt.Errorf("failed to read output: %w", err)
+		//	}
+		return fmt.Errorf("(exit=%d)\n", exitCode)
+	}
+
+	return nil
 }

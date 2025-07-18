@@ -21,7 +21,7 @@ package table_test
 
 import (
 	"context"
-	"io"
+	"github.com/apache/iceberg-go/internal/recipe"
 	"strings"
 	"testing"
 	"time"
@@ -34,7 +34,6 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/rest"
-	"github.com/apache/iceberg-go/internal/recipe"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/suite"
@@ -54,9 +53,6 @@ func (s *SparkIntegrationTestSuite) SetupSuite() {
 	var err error
 	s.stack, err = recipe.Start(s.T())
 	s.Require().NoError(err)
-	if s.stack == nil {
-		s.T().Skip("skipping test, AWS_S3_ENDPOINT is set")
-	}
 }
 
 func (s *SparkIntegrationTestSuite) SetupTest() {
@@ -71,6 +67,33 @@ func (s *SparkIntegrationTestSuite) SetupTest() {
 	cat, err := rest.NewCatalog(s.ctx, "rest", "http://localhost:8181", rest.WithAdditionalProps(s.props))
 	s.Require().NoError(err)
 	s.cat = cat
+}
+
+func (s *SparkIntegrationTestSuite) TestSetProperties() {
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.Bool},
+		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Int32},
+	)
+
+	tbl, err := s.cat.CreateTable(s.ctx, catalog.ToIdentifier("default", "go_test_set_properties"), icebergSchema)
+	s.Require().NoError(err)
+
+	tx := tbl.NewTransaction()
+
+	err = tx.SetProperties(iceberg.Properties{
+		table.ParquetCompressionKey:      "snappy",
+		table.ManifestMergeEnabledKey:    "true",
+		table.ManifestMinMergeCountKey:   "1",
+		table.ManifestTargetSizeBytesKey: "1",
+	})
+	s.Require().NoError(err)
+
+	_, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	err = recipe.ExecuteSpark(s.T(), s.stack, "./validation.py", "--test", "testSetProperties")
+	s.Require().NoError(err)
 }
 
 func (s *SparkIntegrationTestSuite) TestAddFile() {
@@ -114,21 +137,142 @@ func (s *SparkIntegrationTestSuite) TestAddFile() {
 	tbl, err = tx.Commit(s.ctx)
 	s.Require().NoError(err)
 
-	spark, err := s.stack.ServiceContainer(s.T().Context(), "spark-iceberg")
+	err = recipe.ExecuteSpark(s.T(), s.stack, "./validation.py", "--test", "TestAddedFile")
+	s.Require().NoError(err)
+}
+
+func (s *SparkIntegrationTestSuite) TestDifferentDataTypes() {
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "bool", Type: iceberg.PrimitiveTypes.Bool},
+		iceberg.NestedField{ID: 2, Name: "string", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "string_long", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 4, Name: "int", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 5, Name: "long", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 6, Name: "float", Type: iceberg.PrimitiveTypes.Float32},
+		iceberg.NestedField{ID: 7, Name: "double", Type: iceberg.PrimitiveTypes.Float64},
+		iceberg.NestedField{ID: 8, Name: "timestamp", Type: iceberg.PrimitiveTypes.Timestamp},
+		iceberg.NestedField{ID: 9, Name: "timestamptz", Type: iceberg.PrimitiveTypes.TimestampTz},
+		iceberg.NestedField{ID: 10, Name: "date", Type: iceberg.PrimitiveTypes.Date},
+		iceberg.NestedField{ID: 11, Name: "uuid", Type: iceberg.PrimitiveTypes.UUID},
+		iceberg.NestedField{ID: 12, Name: "binary", Type: iceberg.PrimitiveTypes.Binary},
+		iceberg.NestedField{ID: 13, Name: "fixed", Type: iceberg.FixedTypeOf(16)},
+		iceberg.NestedField{ID: 14, Name: "small_dec", Type: iceberg.DecimalTypeOf(8, 2)},
+		iceberg.NestedField{ID: 15, Name: "med_dec", Type: iceberg.DecimalTypeOf(16, 2)},
+		iceberg.NestedField{ID: 16, Name: "large_dec", Type: iceberg.DecimalTypeOf(24, 2)},
+		iceberg.NestedField{ID: 17, Name: "list", Type: &iceberg.ListType{
+			ElementID: 18,
+			Element:   iceberg.PrimitiveTypes.Int32},
+		},
+	)
+
+	arrowSchema, err := table.SchemaToArrowSchema(icebergSchema, nil, true, false)
 	s.Require().NoError(err)
 
-	_, stdout, err := spark.Exec(s.ctx, []string{"ipython", "./run_spark_count_sql.py"})
+	arrTable, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[
+			{
+				"bool": false,
+				"string": "a",
+				"string_long": "` + strings.Repeat("a", 22) + `",
+				"int": 1,
+				"long": 1,
+				"float": 0.0,
+				"double": 0.0,
+				"timestamp": "2023-01-01T19:25:00.000000+08:00",
+				"timestamptz": "2023-01-01T19:25:00.000000Z",
+				"date": "2023-01-01",
+				"uuid": "00000000-0000-0000-0000-000000000000",
+				"binary": "AQ==",
+				"fixed": "AAAAAAAAAAAAAAAAAAAAAA==",
+				"small_dec": "123456.78",
+				"med_dec": "12345678901234.56",
+				"large_dec": "1234567890123456789012.34",
+				"list": [1, 2, 3]
+			},
+			{
+				"bool": null,
+				"string": null,
+				"string_long": null,
+				"int": null,
+				"long": null,
+				"float": null,
+				"double": null,
+				"timestamp": null,
+				"timestamptz": null,
+				"date": null,
+				"uuid": null,
+				"binary": null,
+				"fixed": null,
+				"small_dec": null,
+				"med_dec": null,
+				"large_dec": null,
+				"list": null
+			},
+			{
+				"bool": true,
+				"string": "z",
+				"string_long": "` + strings.Repeat("z", 22) + `",
+				"int": 9,
+				"long": 9,
+				"float": 0.9,
+				"double": 0.9,
+				"timestamp": "2023-03-01T19:25:00.000000+08:00",
+				"timestamptz": "2023-03-01T19:25:00.000000Z",
+				"date": "2023-03-01",
+				"uuid": "11111111-1111-1111-1111-111111111111",
+				"binary": "Eg==",
+				"fixed": "EREREREREREREREREREREQ==",
+				"small_dec": "876543.21",
+				"med_dec": "65432109876543.21",
+				"large_dec": "4321098765432109876543.21",
+				"list": [-1, -2, -3]
+			}
+		 ]`,
+	})
 	s.Require().NoError(err)
 
-	output, err := io.ReadAll(stdout)
+	tbl, err := s.cat.CreateTable(s.ctx, catalog.ToIdentifier("default", "go_test_different_data_types"), icebergSchema)
 	s.Require().NoError(err)
-	strings.HasSuffix(string(output), `
-+--------+
-|count(1)|
-+--------+
-|      13|
-+--------+
-`)
+
+	tx := tbl.NewTransaction()
+	err = tx.AppendTable(s.ctx, arrTable, 1, nil)
+	s.Require().NoError(err)
+
+	_, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	err = recipe.ExecuteSpark(s.T(), s.stack, "./validation.py", "--test", "TestReadDifferentDataTypes")
+	s.Require().NoError(err)
+}
+
+func (s *SparkIntegrationTestSuite) TestUpdateSpec() {
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.Bool},
+		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Int32},
+	)
+
+	partitionSpec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{SourceID: 3, FieldID: 1000, Transform: iceberg.TruncateTransform{Width: 5}, Name: "baz_truncate"},
+	)
+
+	tbl, err := s.cat.CreateTable(
+		s.ctx,
+		catalog.ToIdentifier("default", "go_test_update_spec"),
+		icebergSchema,
+		catalog.WithPartitionSpec(&partitionSpec),
+	)
+	s.Require().NoError(err)
+
+	tx := tbl.NewTransaction()
+	err = tx.UpdateSpec(false).
+		AddField("baz", iceberg.BucketTransform{NumBuckets: 3}, "").
+		Commit()
+	s.Require().NoError(err)
+	_, err = tx.Commit(s.ctx)
+
+	err = recipe.ExecuteSpark(s.T(), s.stack, "./validation.py", "--test", "TestReadSpecUpdate")
+	s.Require().NoError(err)
 }
 
 func TestSparkIntegration(t *testing.T) {

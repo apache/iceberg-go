@@ -21,6 +21,7 @@ on:
   push:
     branches:
       - 'main'
+      - 'spark-interops-test'
     tags:
       - 'v**'
   pull_request:
@@ -64,9 +65,22 @@ jobs:
           AWS_S3_ENDPOINT: "${{ env.AWS_S3_ENDPOINT }}"
           AWS_REGION: "us-east-1"
         run: |          
-          go test -tags integration -v -run="^TestScanner" ./table
           go test -tags integration -v ./io
           go test -tags integration -v -run="^TestRestIntegration$" ./catalog/rest
+
+      - name: Run consumer integration tests
+        env:
+          AWS_S3_ENDPOINT: "${{ env.AWS_S3_ENDPOINT }}"
+          AWS_REGION: "us-east-1"
+        run: |
+          go test -tags integration -v -run="^TestScanner" ./table
+
+      - name: Run producer integration tests
+        env:
+          AWS_S3_ENDPOINT: "${{ env.AWS_S3_ENDPOINT }}"
+          AWS_REGION: "us-east-1"
+        run: |
+          go test -tags integration -v -run="^TestSparkIntegration" ./table
 
       - name: Show debug logs
         if: ${{ failure() }}

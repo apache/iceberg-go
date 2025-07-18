@@ -20,3 +20,10 @@ from pyspark.sql import SparkSession
 spark = SparkSession.builder.getOrCreate()
 
 spark.sql("SELECT COUNT(*) FROM default.test_partitioned_by_days").show()
+
+def testAddFile():
+    df = spark.sql("SELECT COUNT(*) FROM default.test_partitioned_by_days")
+
+
+if __name__ == "__main__":
+    testWriterAppendUnpartitioned()
