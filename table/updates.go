@@ -18,6 +18,7 @@
 package table
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/apache/iceberg-go"
@@ -53,6 +54,65 @@ type Update interface {
 	Action() string
 	// Apply applies the update to the given metadata builder.
 	Apply(*MetadataBuilder) error
+}
+
+type Updates []Update
+
+func (u *Updates) UnmarshalJSON(data []byte) error {
+	var rawUpdates []json.RawMessage
+	if err := json.Unmarshal(data, &rawUpdates); err != nil {
+		return err
+	}
+
+	for _, raw := range rawUpdates {
+		var base baseUpdate
+		if err := json.Unmarshal(raw, &base); err != nil {
+			return err
+		}
+
+		var upd Update
+		switch base.ActionName {
+		case UpdateAddSchema:
+			upd = &addSchemaUpdate{}
+		case UpdateSetCurrentSchema:
+			upd = &setCurrentSchemaUpdate{}
+		case UpdateAddSpec:
+			upd = &addPartitionSpecUpdate{}
+		case UpdateSetDefaultSpec:
+			upd = &setDefaultSpecUpdate{}
+		case UpdateAddSortOrder:
+			upd = &addSortOrderUpdate{}
+		case UpdateSetDefaultSortOrder:
+			upd = &setDefaultSortOrderUpdate{}
+		case UpdateAddSnapshot:
+			upd = &addSnapshotUpdate{}
+		case UpdateSetSnapshotRef:
+			upd = &setSnapshotRefUpdate{}
+		case UpdateSetLocation:
+			upd = &setLocationUpdate{}
+		case UpdateSetProperties:
+			upd = &setPropertiesUpdate{}
+		case UpdateRemoveProperties:
+			upd = &removePropertiesUpdate{}
+		case UpdateRemoveSnapshots:
+			upd = &removeSnapshotsUpdate{}
+		case UpdateRemoveSnapshotRef:
+			upd = &removeSnapshotRefUpdate{}
+		case UpdateAssignUUID:
+			upd = &assignUUIDUpdate{}
+		case UpdateUpgradeFormatVersion:
+			upd = &upgradeFormatVersionUpdate{}
+		default:
+			return fmt.Errorf("unknown update action: %s", base.ActionName)
+		}
+
+		if err := json.Unmarshal(raw, upd); err != nil {
+			return err
+		}
+		*u = append(*u, upd)
+	}
+
+	return nil
 }
 
 // baseUpdate contains the common fields for all updates. It is used to identify the type
