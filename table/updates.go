@@ -35,8 +35,10 @@ const (
 	UpdateAssignUUID = "assign-uuid"
 
 	UpdateRemoveProperties  = "remove-properties"
+	UpdateRemoveSchemas     = "remove-schemas"
 	UpdateRemoveSnapshots   = "remove-snapshots"
 	UpdateRemoveSnapshotRef = "remove-snapshot-ref"
+	UpdateRemoveSpec        = "remove-partition-specs"
 
 	UpdateSetCurrentSchema    = "set-current-schema"
 	UpdateSetDefaultSortOrder = "set-default-sort-order"
@@ -72,6 +74,10 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 
 		var upd Update
 		switch base.ActionName {
+		case UpdateAssignUUID:
+			upd = &assignUUIDUpdate{}
+		case UpdateUpgradeFormatVersion:
+			upd = &upgradeFormatVersionUpdate{}
 		case UpdateAddSchema:
 			upd = &addSchemaUpdate{}
 		case UpdateSetCurrentSchema:
@@ -88,20 +94,20 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 			upd = &addSnapshotUpdate{}
 		case UpdateSetSnapshotRef:
 			upd = &setSnapshotRefUpdate{}
+		case UpdateRemoveSnapshots:
+			upd = &removeSnapshotsUpdate{}
+		case UpdateRemoveSnapshotRef:
+			upd = &removeSnapshotRefUpdate{}
 		case UpdateSetLocation:
 			upd = &setLocationUpdate{}
 		case UpdateSetProperties:
 			upd = &setPropertiesUpdate{}
 		case UpdateRemoveProperties:
 			upd = &removePropertiesUpdate{}
-		case UpdateRemoveSnapshots:
-			upd = &removeSnapshotsUpdate{}
-		case UpdateRemoveSnapshotRef:
-			upd = &removeSnapshotRefUpdate{}
-		case UpdateAssignUUID:
-			upd = &assignUUIDUpdate{}
-		case UpdateUpgradeFormatVersion:
-			upd = &upgradeFormatVersionUpdate{}
+		case UpdateRemoveSpec:
+			upd = &removeSpecUpdate{}
+		case UpdateRemoveSchemas:
+			upd = &removeSchemasUpdate{}
 		default:
 			return fmt.Errorf("unknown update action: %s", base.ActionName)
 		}
@@ -452,7 +458,7 @@ type removeSnapshotRefUpdate struct {
 
 // NewRemoveSnapshotRefUpdate creates a new update that removes a snapshot reference
 // from the table metadata.
-func NewRemoveSnapshotRefUpdate(ref string) *removeSnapshotRefUpdate {
+func NewRemoveSnapshotRefUpdate(ref string) Update {
 	return &removeSnapshotRefUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateRemoveSnapshotRef},
 		RefName:    ref,
@@ -461,4 +467,36 @@ func NewRemoveSnapshotRefUpdate(ref string) *removeSnapshotRefUpdate {
 
 func (u *removeSnapshotRefUpdate) Apply(builder *MetadataBuilder) error {
 	return fmt.Errorf("%w: %s", iceberg.ErrNotImplemented, UpdateRemoveSnapshotRef)
+}
+
+type removeSpecUpdate struct {
+	baseUpdate
+	SpecIds []int64 `json:"spec-ids"`
+}
+
+func NewRemoveSpecUpdate(specIds []int64) Update {
+	return &removeSpecUpdate{
+		baseUpdate: baseUpdate{ActionName: UpdateRemoveSpec},
+		SpecIds:    specIds,
+	}
+}
+
+func (u *removeSpecUpdate) Apply(builder *MetadataBuilder) error {
+	return fmt.Errorf("%w: %s", iceberg.ErrNotImplemented, UpdateRemoveSpec)
+}
+
+type removeSchemasUpdate struct {
+	baseUpdate
+	SchemaIds []int64 `json:"schema-ids"`
+}
+
+func NewRemoveSchemasUpdate(specIds []int64) Update {
+	return &removeSpecUpdate{
+		baseUpdate: baseUpdate{ActionName: UpdateRemoveSchemas},
+		SpecIds:    specIds,
+	}
+}
+
+func (u *removeSchemasUpdate) Apply(builder *MetadataBuilder) error {
+	return fmt.Errorf("%w: %s", iceberg.ErrNotImplemented, UpdateRemoveSchemas)
 }
