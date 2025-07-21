@@ -20,6 +20,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -41,6 +42,7 @@ type CatalogConfig struct {
 	Output      string `yaml:"output"`
 	Credential  string `yaml:"credential"`
 	Warehouse   string `yaml:"warehouse"`
+	RestConfig  string `yaml:"rest-config"`
 }
 
 func LoadConfig(configPath string) []byte {
@@ -74,6 +76,21 @@ func ParseConfig(file []byte, catalogName string) *CatalogConfig {
 	}
 
 	return &res
+}
+
+func ParseRestConfig(restConfig string) map[string]string {
+	result := make(map[string]string)
+	if restConfig == "" {
+		return result
+	}
+
+	pairs := strings.Split(restConfig, ",")
+	for _, pair := range pairs {
+		if kv := strings.SplitN(pair, "=", 2); len(kv) == 2 {
+			result[kv[0]] = kv[1]
+		}
+	}
+	return result
 }
 
 func fromConfigFiles() Config {
