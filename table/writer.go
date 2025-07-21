@@ -83,6 +83,7 @@ func (w *writer) writeFile(ctx context.Context, task WriteTask) (iceberg.DataFil
 		FileName:   filePath,
 		StatsCols:  statsCols,
 		WriteProps: w.props,
+		Spec:       w.meta.CurrentSpec(),
 	}, batches)
 }
 

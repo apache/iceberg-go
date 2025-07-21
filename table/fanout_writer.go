@@ -21,7 +21,6 @@ import (
 	"context"
 	"iter"
 	"runtime"
-	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -30,115 +29,154 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-type fanoutArgs struct {
+type PartitionedFanoutWriter struct {
 	partitionSpec  iceberg.PartitionSpec
-	args           recordWritingArgs
-	meta           *MetadataBuilder
+	schema         *iceberg.Schema
 	rootLocation   string
 	targetFileSize int64
+	args           recordWritingArgs
+	meta           *MetadataBuilder
+	writers        WriterFactory
 }
 
-var rollingDataWriters = make(map[string]*RollingDataWriter)
-
-func FanoutWriter(ctx context.Context, rootLocation string, args recordWritingArgs, meta *MetadataBuilder, targetFileSize int64) iter.Seq2[iceberg.DataFile, error] {
-	fanoutArgs := fanoutArgs{
-		partitionSpec:  meta.CurrentSpec(),
-		meta:           meta,
+func NewPartitionedFanoutWriter(partitionSpec iceberg.PartitionSpec, schema *iceberg.Schema, rootLocation string, targetFileSize int64, args recordWritingArgs, meta *MetadataBuilder) *PartitionedFanoutWriter {
+	return &PartitionedFanoutWriter{
+		partitionSpec:  partitionSpec,
+		schema:         schema,
 		rootLocation:   rootLocation,
 		targetFileSize: targetFileSize,
 		args:           args,
+		meta:           meta,
+		writers:        NewWriterFactory(rootLocation, args, meta, targetFileSize),
 	}
+}
 
-	workers, ok := ctx.Value("fanoutWorkers").(int)
-	if !ok {
-		workers = runtime.NumCPU()
+func (p *PartitionedFanoutWriter) partitionPath(data partitionRecord) string {
+	return p.partitionSpec.PartitionToPath(data, p.schema)
+}
+
+func getWorkerCount(ctx context.Context) int {
+	if workers, ok := ctx.Value("fanoutWorkers").(int); ok {
+		return workers
 	}
+	return runtime.NumCPU()
+}
 
-	fanoutWriters := errgroup.Group{}
-	inputRecordsCh := make(chan arrow.Record, workers)
-	outputDataFilesCh := make(chan iceberg.DataFile, workers)
+func (p *PartitionedFanoutWriter) write(ctx context.Context) iter.Seq2[iceberg.DataFile, error] {
+	numWorkers := getWorkerCount(ctx)
 
-	go func() {
-		defer close(inputRecordsCh)
-		for record, err := range args.itr {
-			if err != nil {
-				panic(err)
-			}
-			inputRecordsCh <- record
-		}
-	}()
+	inputRecordsCh := make(chan arrow.Record, numWorkers)
+	outputDataFilesCh := make(chan iceberg.DataFile, numWorkers)
 
-	for range workers {
-		fanoutWriters.Go(func() error {
-			return fanout(ctx, fanoutArgs, inputRecordsCh, outputDataFilesCh)
+	fanoutWorkers, ctx := errgroup.WithContext(ctx)
+	p.startRecordFeeder(ctx, fanoutWorkers, inputRecordsCh)
+
+	for range numWorkers {
+		fanoutWorkers.Go(func() error {
+			return p.fanout(ctx, inputRecordsCh, outputDataFilesCh)
 		})
 	}
 
-	go func() {
-		fanoutWriters.Wait()
-		close(outputDataFilesCh)
-	}()
-
-	if err := fanoutWriters.Wait(); err != nil {
-		panic(err)
-	}
-
-	partitionedDataFiles := iter.Seq2[iceberg.DataFile, error](func(yield func(iceberg.DataFile, error) bool) {
-		for dataFile := range outputDataFilesCh {
-			if !yield(dataFile, nil) {
-				break
-			}
-		}
-	})
-
-	return partitionedDataFiles
+	return p.yieldDataFiles(ctx, fanoutWorkers, outputDataFilesCh)
 }
 
-func fanout(ctx context.Context, fanoutArgs fanoutArgs, inputRecordsCh <-chan arrow.Record, dataFilesChannel chan<- iceberg.DataFile) error {
-	for record := range inputRecordsCh {
-		partitionMap := getPartitionMap(record, fanoutArgs.partitionSpec)
-		for partition, rowIndices := range partitionMap {
-			partitionRecord, err := partitionBatchByKey(ctx)(record, rowIndices)
+func (p *PartitionedFanoutWriter) startRecordFeeder(ctx context.Context, fanoutWorkers *errgroup.Group, inputRecordsCh chan<- arrow.Record) {
+	fanoutWorkers.Go(func() error {
+		defer close(inputRecordsCh)
+		for record, err := range p.args.itr {
 			if err != nil {
 				return err
 			}
-
-			rollingDataWriter, ok := rollingDataWriters[partition]
-			if !ok {
-				rollingDataWriter = NewRollingDataWriter(partition, fanoutArgs)
-				rollingDataWriters[partition] = rollingDataWriter
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case inputRecordsCh <- record:
 			}
-
-			rollingDataWriter.Add(ctx, partitionRecord, dataFilesChannel)
 		}
-	}
-
-	return nil
+		return nil
+	})
 }
 
-func getPartitionMap(record arrow.Record, partitionSpec iceberg.PartitionSpec) map[string][]int64 {
-	partitionFields := partitionSpec.Fields()
-	recordSchema := record.Schema()
+func (p *PartitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-chan arrow.Record, dataFilesChannel chan<- iceberg.DataFile) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		case record, ok := <-inputRecordsCh:
+			if !ok {
+				return nil
+			}
+			partitionMap := p.getPartitionMap(record)
 
-	partitionFieldIndexes := make([]int, 0, partitionSpec.NumFields())
-	for field := range partitionFields {
-		index := recordSchema.FieldIndices(field.Name)[0]
-		partitionFieldIndexes = append(partitionFieldIndexes, index)
-	}
+			for partition, rowIndices := range partitionMap {
+				select {
+				case <-ctx.Done():
+					return context.Cause(ctx)
+				default:
+				}
 
-	partitionMap := make(map[string][]int64)
+				partitionRecord, err := partitionBatchByKey(ctx)(record, rowIndices)
+				if err != nil {
+					return err
+				}
 
-	for rowIdx := range record.NumRows() {
-		var partitionKey []string
-		for colIdx, fieldIdx := range partitionFieldIndexes {
-			partitionField := partitionSpec.Field(colIdx)
-			partitionValue := iceberg.StringLiteral(record.Column(fieldIdx).ValueStr(int(rowIdx)))
-			transform := partitionField.Transform.Apply(iceberg.Optional[iceberg.Literal]{Val: partitionValue})
-			partitionKey = append(partitionKey, transform.Val.String())
+				rollingDataWriter, err := p.writers.getOrCreateRollingDataWriter(partition)
+				if err != nil {
+					return err
+				}
+
+				rollingDataWriter.Add(ctx, partitionRecord, dataFilesChannel)
+			}
 		}
+	}
+}
 
-		partition := strings.Join(partitionKey, "/")
-		partitionMap[partition] = append(partitionMap[partition], int64(rowIdx))
+func (p *PartitionedFanoutWriter) yieldDataFiles(ctx context.Context, fanoutWorkers *errgroup.Group, outputDataFilesCh chan iceberg.DataFile) iter.Seq2[iceberg.DataFile, error] {
+	return iter.Seq2[iceberg.DataFile, error](func(yield func(iceberg.DataFile, error) bool) {
+		done := make(chan struct{})
+		var waitErr error
+
+		go func() {
+			defer close(done)
+			waitErr = fanoutWorkers.Wait()
+			p.writers.closeAll(ctx, outputDataFilesCh)
+			close(outputDataFilesCh)
+		}()
+
+		for {
+			select {
+			case <-ctx.Done():
+				<-done
+				return
+			case dataFile, ok := <-outputDataFilesCh:
+				if !ok {
+					if waitErr != nil {
+						_ = yield(nil, waitErr)
+					}
+					return
+				}
+				if !yield(dataFile, nil) {
+					return
+				}
+			}
+		}
+	})
+}
+
+func (p *PartitionedFanoutWriter) getPartitionMap(record arrow.Record) map[string][]int64 {
+	partitionMap := make(map[string][]int64)
+	partitionFields := p.partitionSpec.PartitionType(p.schema).FieldList
+
+	for row := range record.NumRows() {
+		partitionRec := make(partitionRecord, len(partitionFields))
+
+		for i, field := range partitionFields {
+			colIdx := record.Schema().FieldIndices(field.Name)[0]
+			col := record.Column(colIdx)
+			partitionRec[i] = col.GetOneForMarshal(int(row))
+		}
+		partitionKey := p.partitionPath(partitionRec)
+		partitionMap[partitionKey] = append(partitionMap[partitionKey], row)
 	}
 
 	return partitionMap

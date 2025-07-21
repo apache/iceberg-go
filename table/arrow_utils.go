@@ -1309,6 +1309,7 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 
 		return writeFiles(ctx, rootLocation, args.fs, meta, tasks)
 	} else {
-		return FanoutWriter(ctx, rootLocation, args, meta, targetFileSize)
+		partitionWriter := NewPartitionedFanoutWriter(meta.CurrentSpec(), meta.CurrentSchema(), rootLocation, targetFileSize, args, meta)
+		return partitionWriter.write(ctx)
 	}
 }
