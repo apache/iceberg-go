@@ -88,8 +88,8 @@ Options:
 						Ex:"format-version=2,write.format.default=parquet"
   --partition-spec TEXT specify partition spec as comma-separated field names(for create table use only)
 						Ex:"field1,field2"
-  --sort-order TEXT 	specify sort order as field:direction format(for create table use only)
-						Ex:"field1:asc,field2:desc"`
+  --sort-order TEXT 	specify sort order as field:direction[:null-order] format(for create table use only)
+						Ex:"field1:asc,field2:desc:nulls-first,field3:asc:nulls-last"`
 
 type Config struct {
 	List     bool `docopt:"list"`

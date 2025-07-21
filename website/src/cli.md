@@ -55,3 +55,45 @@ and run the `iceberg` CLI pointing to the REST API server.
 
 
 ```
+
+**Create Table**
+- Notes: Only identity transform is supported at this moment
+```
+# Create a simple table with REST catalog and Minio
+./iceberg create table default.table-1 
+        --properties write.format.default=parquet \
+        --partition-spec foo \
+        --sort-order foo:desc:nulls-last \
+        --schema '[{"id":1,"name":"foo","type":"string","required":false},{"id":2,"name":"bar","type":"int","required":true}]' \
+        --catalog rest \
+        --uri http://localhost:8181
+Table default.table-1 created successfully
+
+# Describe the newly created table
+./iceberg describe --catalog rest --uri http://localhost:8181 default.table-1
+Table format version | 2                                                                                               
+Metadata location    | s3://warehouse/default/table-1/metadata/00000-f0ccaadd-d988-482e-99da-3a37870288fe.metadata.json
+Table UUID           | 33fa3fac-e638-4335-a085-343c6d9e7de5                                                            
+Last updated         | 1753133512562                                                                                   
+Sort Order           | 1: [                                                                                            
+                     | 1 desc nulls-last                                                                               
+                     | ]                                                                                               
+Partition Spec       | [                                                                                               
+                     |  1000: foo: identity(1)                                                                          
+                     | ]                                                                                               
+
+Current Schema, id=0
+├──1: foo: optional string
+└──2: bar: required int
+
+Current Snapshot | 
+
+Snapshots
+
+Properties
+key                             | value  
+-----------------------------------------
+write.format.default            | parquet
+write.parquet.compression-codec | zstd   
+
+```

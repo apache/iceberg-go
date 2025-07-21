@@ -64,7 +64,7 @@ func parsePartitionSpec(specStr string) (*iceberg.PartitionSpec, error) {
 
 		partitionFields = append(partitionFields, iceberg.PartitionField{
 			SourceID:  i + 1,
-			FieldID:   i + 100,
+			FieldID:   i + 1000,
 			Name:      field,
 			Transform: iceberg.IdentityTransform{},
 		})
@@ -90,25 +90,42 @@ func parseSortOrder(sortStr string) (table.SortOrder, error) {
 		if field == "" {
 			continue
 		}
-		parts := strings.SplitN(field, ":", 2)
+		parts := strings.Split(field, ":")
 		direction := "asc" // default value
+		var nullOrder table.NullOrder
 
 		if len(parts) > 1 {
 			direction = strings.TrimSpace(parts[1])
 		}
 
-		var nullOrder table.NullOrder
 		var sortDirection table.SortDirection
 
 		switch strings.ToLower(direction) {
 		case "asc":
 			sortDirection = table.SortASC
-			nullOrder = table.NullsFirst
 		case "desc":
 			sortDirection = table.SortDESC
-			nullOrder = table.NullsLast
 		default:
 			return table.UnsortedSortOrder, fmt.Errorf("invalid sort direction: %s", direction)
+		}
+
+		// Parse null order
+		if len(parts) > 2 {
+			nullOrderStr := strings.TrimSpace(parts[2])
+			switch strings.ToLower(nullOrderStr) {
+			case "nulls-first":
+				nullOrder = table.NullsFirst
+			case "nulls-last":
+				nullOrder = table.NullsLast
+			default:
+				return table.UnsortedSortOrder, fmt.Errorf("invalid null order: %s", nullOrderStr)
+			}
+		} else {
+			if sortDirection == table.SortDESC {
+				nullOrder = table.NullsLast
+			} else {
+				nullOrder = table.NullsFirst
+			}
 		}
 		sortFields = append(sortFields, table.SortField{
 			SourceID:  i + 1,

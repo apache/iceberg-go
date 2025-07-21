@@ -18,6 +18,7 @@
 package main
 
 import (
+	"github.com/apache/iceberg-go/table"
 	"maps"
 	"testing"
 
@@ -119,33 +120,82 @@ func TestParsePartitionSpec(t *testing.T) {
 
 func TestParseSortOrder(t *testing.T) {
 	tests := []struct {
-		name  string
-		input string
-		isErr bool
+		name                string
+		input               string
+		isErr               bool
+		expectedFieldsCount int
+		expectedNullOrders  []table.NullOrder // for validation
+		expectedDirections  []table.SortDirection
 	}{
 		{
-			name:  "empty string",
-			input: "",
+			name:                "empty string",
+			input:               "",
+			expectedFieldsCount: 0,
 		},
 		{
-			name:  "single field ascending",
-			input: "field1:asc",
+			name:                "single field ascending (default null order)",
+			input:               "field1:asc",
+			expectedFieldsCount: 1,
+			expectedDirections:  []table.SortDirection{table.SortASC},
+			expectedNullOrders:  []table.NullOrder{table.NullsFirst},
 		},
 		{
-			name:  "single field descending",
-			input: "field1:desc",
+			name:                "single field descending (default null order)",
+			input:               "field1:desc",
+			expectedFieldsCount: 1,
+			expectedDirections:  []table.SortDirection{table.SortDESC},
+			expectedNullOrders:  []table.NullOrder{table.NullsLast},
 		},
 		{
-			name:  "multiple fields",
-			input: "field1:asc,field2:desc,field3:asc",
+			name:                "single field with explicit nulls-first",
+			input:               "field1:asc:nulls-first",
+			expectedFieldsCount: 1,
+			expectedDirections:  []table.SortDirection{table.SortASC},
+			expectedNullOrders:  []table.NullOrder{table.NullsFirst},
 		},
 		{
-			name:  "with spaces",
-			input: " field1 : asc , field2 : desc ",
+			name:                "single field with explicit nulls-last",
+			input:               "field1:desc:nulls-last",
+			expectedFieldsCount: 1,
+			expectedDirections:  []table.SortDirection{table.SortDESC},
+			expectedNullOrders:  []table.NullOrder{table.NullsLast},
+		},
+		{
+			name:                "asc with nulls-last (overriding default)",
+			input:               "field1:asc:nulls-last",
+			expectedFieldsCount: 1,
+			expectedDirections:  []table.SortDirection{table.SortASC},
+			expectedNullOrders:  []table.NullOrder{table.NullsLast},
+		},
+		{
+			name:                "desc with nulls-first (overriding default)",
+			input:               "field1:desc:nulls-first",
+			expectedFieldsCount: 1,
+			expectedDirections:  []table.SortDirection{table.SortDESC},
+			expectedNullOrders:  []table.NullOrder{table.NullsFirst},
+		},
+		{
+			name:                "multiple fields with mixed null orders",
+			input:               "field1:asc,field2:desc:nulls-first,field3:asc:nulls-last",
+			expectedFieldsCount: 3,
+			expectedDirections:  []table.SortDirection{table.SortASC, table.SortDESC, table.SortASC},
+			expectedNullOrders:  []table.NullOrder{table.NullsFirst, table.NullsFirst, table.NullsLast},
+		},
+		{
+			name:                "with spaces",
+			input:               " field1 : asc : nulls-last , field2 : desc ",
+			expectedFieldsCount: 2,
+			expectedDirections:  []table.SortDirection{table.SortASC, table.SortDESC},
+			expectedNullOrders:  []table.NullOrder{table.NullsLast, table.NullsLast},
 		},
 		{
 			name:  "invalid direction",
 			input: "field1:invalid",
+			isErr: true,
+		},
+		{
+			name:  "invalid null order",
+			input: "field1:asc:invalid-order",
 			isErr: true,
 		},
 	}
@@ -166,6 +216,23 @@ func TestParseSortOrder(t *testing.T) {
 					}
 				} else if got.OrderID == 0 {
 					t.Errorf("parseSortOrder() returned invalid sort order for valid input")
+				}
+
+				// Validate the number of fields
+				if len(got.Fields) != tt.expectedFieldsCount {
+					t.Errorf("parseSortOrder() returned %d fields, expected %d", len(got.Fields), tt.expectedFieldsCount)
+
+					return
+				}
+
+				// Validate sort directions and null orders
+				for i, field := range got.Fields {
+					if i < len(tt.expectedDirections) && field.Direction != tt.expectedDirections[i] {
+						t.Errorf("parseSortOrder() field %d direction = %v, expected %v", i, field.Direction, tt.expectedDirections[i])
+					}
+					if i < len(tt.expectedNullOrders) && field.NullOrder != tt.expectedNullOrders[i] {
+						t.Errorf("parseSortOrder() field %d null order = %v, expected %v", i, field.NullOrder, tt.expectedNullOrders[i])
+					}
 				}
 			}
 		})
