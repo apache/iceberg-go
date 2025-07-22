@@ -141,7 +141,9 @@ func (p *PartitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 					return err
 				}
 
-				rollingDataWriter.Add(ctx, partitionRecord, dataFilesChannel)
+				if err := rollingDataWriter.Add(ctx, partitionRecord, dataFilesChannel); err != nil {
+					return err
+				}
 			}
 		}
 	}

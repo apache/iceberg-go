@@ -76,29 +76,27 @@ func (w *WriterFactory) getOrCreateRollingDataWriter(partition string) (*Rolling
 	return writer, nil
 }
 
-func (r *RollingDataWriter) Add(ctx context.Context, record arrow.Record, outputDataFilesCh chan<- iceberg.DataFile) {
+func (r *RollingDataWriter) Add(ctx context.Context, record arrow.Record, outputDataFilesCh chan<- iceberg.DataFile) error {
 	recordSize := recordNBytes(record)
 	record.Retain()
 	defer record.Release()
 
+	if r.currentSize > 0 && r.currentSize+recordSize > r.factory.targetFileSize {
+		if err := r.flushToDataFile(ctx, outputDataFilesCh); err != nil {
+			return err
+		}
+	}
+
 	r.data = append(r.data, record)
 	r.currentSize += recordSize
 
-	if r.shouldFlush(recordSize) {
-		r.flushToDataFile(ctx, outputDataFilesCh)
-	}
-}
-
-func (r *RollingDataWriter) shouldFlush(recordSize int64) bool {
-	if r.currentSize > 0 && r.currentSize+recordSize > r.factory.targetFileSize {
-		return true
-	} else if recordSize > r.factory.targetFileSize {
-		return true
-	} else {
-		return true
+	if r.currentSize > r.factory.targetFileSize {
+		if err := r.flushToDataFile(ctx, outputDataFilesCh); err != nil {
+			return err
+		}
 	}
 
-	return false
+	return nil
 }
 
 func (r *RollingDataWriter) flushToDataFile(ctx context.Context, outputDataFilesCh chan<- iceberg.DataFile) error {
