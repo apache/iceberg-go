@@ -21,7 +21,6 @@ RUN pip3 install pyarrow
 
 COPY provision.py .
 COPY validation.py .
-COPY run_spark_count_sql.py .
 
 ENTRYPOINT ["./entrypoint.sh"]
 CMD ["notebook"]

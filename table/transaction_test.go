@@ -21,7 +21,6 @@ package table_test
 
 import (
 	"context"
-	"github.com/apache/iceberg-go/internal/recipe"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +33,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/rest"
+	"github.com/apache/iceberg-go/internal/recipe"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/suite"
@@ -92,8 +92,26 @@ func (s *SparkIntegrationTestSuite) TestSetProperties() {
 	_, err = tx.Commit(s.ctx)
 	s.Require().NoError(err)
 
-	err = recipe.ExecuteSpark(s.T(), s.stack, "./validation.py", "--test", "testSetProperties")
+	expectedOutput := `
++----------------------------------+---------------+
+|key                               |value          |
++----------------------------------+---------------+
+|commit.manifest-merge.enabled     |true           |
+|commit.manifest.min-count-to-merge|1              |
+|commit.manifest.target-size-bytes |1              |
+|current-snapshot-id               |none           |
+|format                            |iceberg/parquet|
+|format-version                    |2              |
+|write.parquet.compression-codec   |snappy         |
++----------------------------------+---------------+
+`
+
+	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--test", "TestSetProperties")
 	s.Require().NoError(err)
+	s.Require().True(
+		strings.HasSuffix(strings.TrimSpace(output), strings.TrimSpace(expectedOutput)),
+		"result does not contain expected output: %s", expectedOutput,
+	)
 }
 
 func (s *SparkIntegrationTestSuite) TestAddFile() {
@@ -137,8 +155,20 @@ func (s *SparkIntegrationTestSuite) TestAddFile() {
 	tbl, err = tx.Commit(s.ctx)
 	s.Require().NoError(err)
 
-	err = recipe.ExecuteSpark(s.T(), s.stack, "./validation.py", "--test", "TestAddedFile")
+	expectedOutput := `
++--------+
+|count(1)|
++--------+
+|13      |
++--------+
+`
+
+	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--test", "TestAddedFile")
 	s.Require().NoError(err)
+	s.Require().True(
+		strings.HasSuffix(strings.TrimSpace(output), strings.TrimSpace(expectedOutput)),
+		"result does not contain expected output: %s", expectedOutput,
+	)
 }
 
 func (s *SparkIntegrationTestSuite) TestDifferentDataTypes() {
@@ -230,6 +260,7 @@ func (s *SparkIntegrationTestSuite) TestDifferentDataTypes() {
 		 ]`,
 	})
 	s.Require().NoError(err)
+	defer arrTable.Release()
 
 	tbl, err := s.cat.CreateTable(s.ctx, catalog.ToIdentifier("default", "go_test_different_data_types"), icebergSchema)
 	s.Require().NoError(err)
@@ -241,8 +272,49 @@ func (s *SparkIntegrationTestSuite) TestDifferentDataTypes() {
 	_, err = tx.Commit(s.ctx)
 	s.Require().NoError(err)
 
-	err = recipe.ExecuteSpark(s.T(), s.stack, "./validation.py", "--test", "TestReadDifferentDataTypes")
+	expectedSchema := `
++------------------+-------------+-------+
+|col_name          |data_type    |comment|
++------------------+-------------+-------+
+|bool              |boolean      |NULL   |
+|string            |string       |NULL   |
+|string_long       |string       |NULL   |
+|int               |int          |NULL   |
+|long              |bigint       |NULL   |
+|float             |float        |NULL   |
+|double            |double       |NULL   |
+|timestamp         |timestamp_ntz|NULL   |
+|timestamptz       |timestamp    |NULL   |
+|date              |date         |NULL   |
+|uuid              |string       |NULL   |
+|binary            |binary       |NULL   |
+|fixed             |binary       |NULL   |
+|small_dec         |decimal(8,2) |NULL   |
+|med_dec           |decimal(16,2)|NULL   |
+|large_dec         |decimal(24,2)|NULL   |
+|list              |array<int>   |NULL   |
+`
+
+	expectedOutput := `
++-----+------+----------------------+----+----+-----+------+-------------------+-------------------+----------+------------------------------------+------+-------------------------------------------------+---------+-----------------+-------------------------+------------+
+|bool |string|string_long           |int |long|float|double|timestamp          |timestamptz        |date      |uuid                                |binary|fixed                                            |small_dec|med_dec          |large_dec                |list        |
++-----+------+----------------------+----+----+-----+------+-------------------+-------------------+----------+------------------------------------+------+-------------------------------------------------+---------+-----------------+-------------------------+------------+
+|false|a     |aaaaaaaaaaaaaaaaaaaaaa|1   |1   |0.0  |0.0   |2023-01-01 11:25:00|2023-01-01 19:25:00|2023-01-01|00000000-0000-0000-0000-000000000000|[01]  |[00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00]|123456.78|12345678901234.56|1234567890123456789012.34|[1, 2, 3]   |
+|NULL |NULL  |NULL                  |NULL|NULL|NULL |NULL  |NULL               |NULL               |NULL      |NULL                                |NULL  |NULL                                             |NULL     |NULL             |NULL                     |NULL        |
+|true |z     |zzzzzzzzzzzzzzzzzzzzzz|9   |9   |0.9  |0.9   |2023-03-01 11:25:00|2023-03-01 19:25:00|2023-03-01|11111111-1111-1111-1111-111111111111|[12]  |[11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11]|876543.21|65432109876543.21|4321098765432109876543.21|[-1, -2, -3]|
++-----+------+----------------------+----+----+-----+------+-------------------+-------------------+----------+------------------------------------+------+-------------------------------------------------+---------+-----------------+-------------------------+------------+
+`
+
+	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--test", "TestReadDifferentDataTypes")
 	s.Require().NoError(err)
+	s.Require().True(
+		strings.Contains(strings.TrimSpace(output), strings.TrimSpace(expectedSchema)),
+		"result does not contain expected output: %s", expectedOutput,
+	)
+	s.Require().True(
+		strings.HasSuffix(strings.TrimSpace(output), strings.TrimSpace(expectedOutput)),
+		"result does not contain expected output: %s", expectedOutput,
+	)
 }
 
 func (s *SparkIntegrationTestSuite) TestUpdateSpec() {
@@ -253,7 +325,7 @@ func (s *SparkIntegrationTestSuite) TestUpdateSpec() {
 	)
 
 	partitionSpec := iceberg.NewPartitionSpec(
-		iceberg.PartitionField{SourceID: 3, FieldID: 1000, Transform: iceberg.TruncateTransform{Width: 5}, Name: "baz_truncate"},
+		iceberg.PartitionField{SourceID: 2, FieldID: 1000, Transform: iceberg.TruncateTransform{Width: 5}, Name: "bar_truncate"},
 	)
 
 	tbl, err := s.cat.CreateTable(
@@ -271,8 +343,22 @@ func (s *SparkIntegrationTestSuite) TestUpdateSpec() {
 	s.Require().NoError(err)
 	_, err = tx.Commit(s.ctx)
 
-	err = recipe.ExecuteSpark(s.T(), s.stack, "./validation.py", "--test", "TestReadSpecUpdate")
+	partitionExpectedOutput := `
+|# Partitioning              |                                            |       |
+|Part 0                      |truncate(5, bar)                            |       |
+|Part 1                      |bucket(3, baz)                              |       |
+|                            |                                            |       |
+`
+	metadataPartition := `
+|_partition                  |struct<bar_truncate:string,baz_bucket_3:int>|       |
+`
+
+	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--test", "TestReadSpecUpdate")
 	s.Require().NoError(err)
+	s.Require().True(
+		strings.Contains(strings.TrimSpace(output), strings.TrimSpace(partitionExpectedOutput)),
+		"result does not contain expected output: %s", metadataPartition,
+	)
 }
 
 func TestSparkIntegration(t *testing.T) {

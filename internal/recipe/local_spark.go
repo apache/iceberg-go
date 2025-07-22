@@ -19,12 +19,16 @@ package recipe
 
 import (
 	"bytes"
-	_ "embed"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"testing"
 
+	_ "embed"
+
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/client"
 	"github.com/testcontainers/testcontainers-go/modules/compose"
 )
 
@@ -46,7 +50,7 @@ func Start(t *testing.T) (*compose.DockerCompose, error) {
 	if err := stack.Up(t.Context()); err != nil {
 		return stack, fmt.Errorf("fail to up compose: %w", err)
 	}
-	spark, err := stack.ServiceContainer(t.Context(), "spark-iceberg")
+	spark, err := stack.ServiceContainer(t.Context(), sparkContainer)
 	if err != nil {
 		return stack, fmt.Errorf("fail to find spark-iceberg: %w", err)
 	}
@@ -65,33 +69,70 @@ func Start(t *testing.T) (*compose.DockerCompose, error) {
 	return stack, nil
 }
 
-func ExecuteSpark(t *testing.T, stack *compose.DockerCompose, scriptPath string, args ...string) error {
-	spark, err := stack.ServiceContainer(t.Context(), sparkContainer)
+func ExecuteSpark(t *testing.T, scriptPath string, args ...string) (string, error) {
+	cli, err := client.NewClientWithOpts(
+		client.FromEnv,
+		client.WithVersion("1.48"),
+	)
 	if err != nil {
-		return fmt.Errorf("failed to get container %s: %w", sparkContainer, err)
+		return "", err
 	}
-	cmd := append([]string{"python", scriptPath}, args...)
+	defer func(cli *client.Client) {
+		err := cli.Close()
+		if err != nil {
+			t.Logf("failed to close docker client")
+		}
+	}(cli)
 
-	exitCode, output, err := spark.Exec(t.Context(), cmd)
+	containers, err := cli.ContainerList(t.Context(), container.ListOptions{
+		All: true,
+	})
 	if err != nil {
-		return fmt.Errorf("failed to run execution: %w", err)
+		return "", err
 	}
 
-	result, err := io.ReadAll(output)
+	var sparkContainerID string
+	for _, c := range containers {
+		for _, name := range c.Names {
+			if strings.Contains(name, sparkContainer) {
+				sparkContainerID = c.ID
+
+				break
+			}
+		}
+	}
+	if sparkContainerID == "" {
+		return "", fmt.Errorf("unable to find container: %s", sparkContainer)
+	}
+
+	response, err := cli.ContainerExecCreate(t.Context(), sparkContainerID, container.ExecOptions{
+		Cmd:          append([]string{"python", scriptPath}, args...),
+		AttachStdout: true,
+		AttachStderr: true,
+	})
 	if err != nil {
-		return fmt.Errorf("failed to read output: %w", err)
-	}
-	fmt.Printf("%s\n", string(result))
-
-	//return fmt.Errorf("(exit=%d):\n%s\n", exitCode, string(output))
-
-	if exitCode != 0 {
-		//	output, err := io.ReadAll(output)
-		//	if err != nil {
-		//		return fmt.Errorf("failed to read output: %w", err)
-		//	}
-		return fmt.Errorf("(exit=%d)\n", exitCode)
+		return "", err
 	}
 
-	return nil
+	attachResp, err := cli.ContainerExecAttach(t.Context(), response.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return "", err
+	}
+	defer attachResp.Close()
+
+	output, err := io.ReadAll(attachResp.Reader)
+	if err != nil {
+		return "", err
+	}
+	fmt.Printf("%s\n", string(output))
+
+	inspect, err := cli.ContainerExecInspect(t.Context(), response.ID)
+	if err != nil {
+		return "", err
+	}
+	if inspect.ExitCode != 0 {
+		return "", fmt.Errorf("failed to execute script with exit code: %d", inspect.ExitCode)
+	}
+
+	return string(output), nil
 }
