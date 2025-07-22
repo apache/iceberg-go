@@ -21,7 +21,6 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"log"
 	"net/url"
 	"sync"
 
@@ -33,21 +32,20 @@ type WriterFactory struct {
 	rootLocation   string
 	args           recordWritingArgs
 	meta           *MetadataBuilder
+	taskSchema     *iceberg.Schema
 	targetFileSize int64
 	writers        sync.Map
 	nextCount      func() (int, bool)
 	stopCount      func()
 }
 
-func NewWriterFactory(rootLocation string, args recordWritingArgs, meta *MetadataBuilder, targetFileSize int64) WriterFactory {
-	nextCount, stopCount := iter.Pull(args.counter)
+func NewWriterFactory(rootLocation string, args recordWritingArgs, meta *MetadataBuilder, taskSchema *iceberg.Schema, targetFileSize int64) WriterFactory {
 	return WriterFactory{
 		rootLocation:   rootLocation,
 		args:           args,
 		meta:           meta,
+		taskSchema:     taskSchema,
 		targetFileSize: targetFileSize,
-		nextCount:      nextCount,
-		stopCount:      stopCount,
 	}
 }
 
@@ -104,36 +102,28 @@ func (r *RollingDataWriter) flushToDataFile(ctx context.Context, outputDataFiles
 		return nil
 	}
 
-	nameMapping := r.factory.meta.CurrentSchema().NameMapping()
-	taskSchema, err := ArrowSchemaToIceberg(r.factory.args.sc, false, nameMapping)
-	if err != nil {
-		return fmt.Errorf("failed to convert arrow schema to iceberg schema: %w", err)
-	}
-
 	task := iter.Seq[WriteTask](func(yield func(WriteTask) bool) {
 		cnt, _ := r.factory.nextCount()
 		yield(WriteTask{
 			Uuid:    *r.factory.args.writeUUID,
 			ID:      cnt,
-			Schema:  taskSchema,
+			Schema:  r.factory.taskSchema,
 			Batches: r.data,
 		})
 	})
 
 	parseDataLoc, err := url.Parse(r.factory.rootLocation)
 	if err != nil {
-		fmt.Errorf("failed to parse rootLocation: %v", err)
+		return fmt.Errorf("failed to parse rootLocation: %v", err)
 	}
 
-	metaProps := *r.factory.meta
-	metaProps.props = make(map[string]string)
-	metaProps.props[WriteDataPathKey] = parseDataLoc.JoinPath("data").JoinPath(r.partitionKey).String()
+	partitionMeta := *r.factory.meta
+	partitionMeta.props = map[string]string{WriteDataPathKey: parseDataLoc.JoinPath("data").JoinPath(r.partitionKey).String()}
 
-	outputDataFiles := writeFiles(ctx, r.factory.rootLocation, r.factory.args.fs, &metaProps, task)
+	outputDataFiles := writeFiles(ctx, r.factory.rootLocation, r.factory.args.fs, &partitionMeta, task)
 	for dataFile, err := range outputDataFiles {
 		if err != nil {
-			log.Printf("Warning: Failed to write data file for partition %s: %v", r.partitionKey, err)
-			continue
+			return err
 		}
 		outputDataFilesCh <- dataFile
 	}
@@ -170,7 +160,6 @@ func (w *WriterFactory) closeAll(ctx context.Context, outputDataFilesCh chan<- i
 			return false
 		}
 		if err := writer.close(ctx, outputDataFilesCh); err != nil {
-			err = fmt.Errorf("failed to close writer for partition %s: %w", key, err)
 			return false
 		}
 		return true

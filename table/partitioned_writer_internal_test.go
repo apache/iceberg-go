@@ -20,6 +20,7 @@ package table
 import (
 	"context"
 	"fmt"
+	"iter"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -181,9 +182,19 @@ func (s *FanoutWriterTestSuite) TestDifferentTransforms() {
 			meta := s.createMetadataBuilder()
 			args := s.createRecordWritingArgs()
 
-			writer := NewPartitionedFanoutWriter(spec, s.schema, s.location, 1024*1024, args, meta)
+			nextCount, stopCount := iter.Pull(args.counter)
+			partitionWriter := NewPartitionedFanoutWriter(spec, s.schema, args.itr)
+			rollingDataWriters := NewWriterFactory(s.location, args, meta, s.schema, 1024*1024)
+			rollingDataWriters.nextCount = nextCount
+			rollingDataWriters.stopCount = stopCount
 
-			dataFiles := writer.Write(s.ctx)
+			partitionWriter.writers = &rollingDataWriters
+			workers := meta.props.GetInt(FanoutWriterWorkersKey, FanoutWriterWorkersDefault)
+			if workers <= 0 {
+				workers = runtime.NumCPU()
+			}
+
+			dataFiles := partitionWriter.Write(s.ctx, workers)
 
 			fileCount := 0
 			for dataFile, err := range dataFiles {
@@ -193,48 +204,6 @@ func (s *FanoutWriterTestSuite) TestDifferentTransforms() {
 			}
 
 			s.Greater(fileCount, 0, "Should create at least one file for transform %s", tt.name)
-		})
-	}
-}
-
-func (s *FanoutWriterTestSuite) createMetadataBuilderWithProps(props iceberg.Properties) *MetadataBuilder {
-	defaultProps := iceberg.Properties{"format-version": "2"}
-	for k, v := range props {
-		defaultProps[k] = v
-	}
-
-	meta, err := NewMetadata(s.schema, iceberg.UnpartitionedSpec, UnsortedSortOrder,
-		s.location, defaultProps)
-	s.Require().NoError(err)
-
-	builder, err := MetadataBuilderFromBase(meta)
-	s.Require().NoError(err)
-
-	return builder
-}
-
-func (s *FanoutWriterTestSuite) TestWorkerConfiguration() {
-	tests := []struct {
-		name            string
-		workerConfig    string
-		expectedWorkers int
-	}{
-		{"default workers", "", runtime.NumCPU()},
-		{"custom workers", "4", 4},
-		{"negative workers", "-1", runtime.NumCPU()},
-		{"zero workers", "0", runtime.NumCPU()},
-	}
-
-	for _, tt := range tests {
-		s.Run(tt.name, func() {
-			props := iceberg.Properties{}
-			if tt.workerConfig != "" {
-				props[FanoutWriterWorkersKey] = tt.workerConfig
-			}
-
-			meta := s.createMetadataBuilderWithProps(props)
-			actualWorkers := getWorkerCount(meta)
-			s.Equal(tt.expectedWorkers, actualWorkers)
 		})
 	}
 }

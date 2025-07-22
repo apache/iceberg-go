@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -1289,9 +1290,10 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 	}
 
 	nextCount, stopCount := iter.Pull(args.counter)
+
 	if meta.CurrentSpec().IsUnpartitioned() {
+		defer stopCount()
 		tasks := func(yield func(WriteTask) bool) {
-			defer stopCount()
 
 			for batch := range binPackRecords(args.itr, 20, targetFileSize) {
 				cnt, _ := nextCount()
@@ -1309,7 +1311,17 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 
 		return writeFiles(ctx, rootLocation, args.fs, meta, tasks)
 	} else {
-		partitionWriter := NewPartitionedFanoutWriter(meta.CurrentSpec(), meta.CurrentSchema(), rootLocation, targetFileSize, args, meta)
-		return partitionWriter.Write(ctx)
+		partitionWriter := NewPartitionedFanoutWriter(meta.CurrentSpec(), meta.CurrentSchema(), args.itr)
+		rollingDataWriters := NewWriterFactory(rootLocation, args, meta, taskSchema, targetFileSize)
+		rollingDataWriters.nextCount = nextCount
+		rollingDataWriters.stopCount = stopCount
+
+		partitionWriter.writers = &rollingDataWriters
+		workers := meta.props.GetInt(FanoutWriterWorkersKey, FanoutWriterWorkersDefault)
+		if workers <= 0 {
+			workers = runtime.NumCPU()
+		}
+
+		return partitionWriter.Write(ctx, workers)
 	}
 }

@@ -21,7 +21,6 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"runtime"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -31,24 +30,17 @@ import (
 )
 
 type PartitionedFanoutWriter struct {
-	partitionSpec  iceberg.PartitionSpec
-	schema         *iceberg.Schema
-	rootLocation   string
-	targetFileSize int64
-	args           recordWritingArgs
-	meta           *MetadataBuilder
-	writers        WriterFactory
+	partitionSpec iceberg.PartitionSpec
+	schema        *iceberg.Schema
+	itr           iter.Seq2[arrow.Record, error]
+	writers       *WriterFactory
 }
 
-func NewPartitionedFanoutWriter(partitionSpec iceberg.PartitionSpec, schema *iceberg.Schema, rootLocation string, targetFileSize int64, args recordWritingArgs, meta *MetadataBuilder) *PartitionedFanoutWriter {
+func NewPartitionedFanoutWriter(partitionSpec iceberg.PartitionSpec, schema *iceberg.Schema, itr iter.Seq2[arrow.Record, error]) *PartitionedFanoutWriter {
 	return &PartitionedFanoutWriter{
-		partitionSpec:  partitionSpec,
-		schema:         schema,
-		rootLocation:   rootLocation,
-		targetFileSize: targetFileSize,
-		args:           args,
-		meta:           meta,
-		writers:        NewWriterFactory(rootLocation, args, meta, targetFileSize),
+		partitionSpec: partitionSpec,
+		schema:        schema,
+		itr:           itr,
 	}
 }
 
@@ -56,19 +48,9 @@ func (p *PartitionedFanoutWriter) partitionPath(data partitionRecord) string {
 	return p.partitionSpec.PartitionToPath(data, p.schema)
 }
 
-func getWorkerCount(meta *MetadataBuilder) int {
-	workers := meta.props.GetInt(FanoutWriterWorkersKey, FanoutWriterWorkersDefault)
-	if workers <= 0 {
-		return runtime.NumCPU()
-	}
-	return workers
-}
-
-func (p *PartitionedFanoutWriter) Write(ctx context.Context) iter.Seq2[iceberg.DataFile, error] {
-	numWorkers := getWorkerCount(p.meta)
-
-	inputRecordsCh := make(chan arrow.Record, numWorkers)
-	outputDataFilesCh := make(chan iceberg.DataFile, numWorkers)
+func (p *PartitionedFanoutWriter) Write(ctx context.Context, workers int) iter.Seq2[iceberg.DataFile, error] {
+	inputRecordsCh := make(chan arrow.Record, workers)
+	outputDataFilesCh := make(chan iceberg.DataFile, workers)
 
 	fanoutWorkers, ctx := errgroup.WithContext(ctx)
 	if err := p.startRecordFeeder(ctx, fanoutWorkers, inputRecordsCh); err != nil {
@@ -77,7 +59,7 @@ func (p *PartitionedFanoutWriter) Write(ctx context.Context) iter.Seq2[iceberg.D
 		}
 	}
 
-	for range numWorkers {
+	for i := 0; i < workers; i++ {
 		fanoutWorkers.Go(func() error {
 			return p.fanout(ctx, inputRecordsCh, outputDataFilesCh)
 		})
@@ -90,7 +72,7 @@ func (p *PartitionedFanoutWriter) startRecordFeeder(ctx context.Context, fanoutW
 	fanoutWorkers.Go(func() error {
 		defer close(inputRecordsCh)
 
-		for record, err := range p.args.itr {
+		for record, err := range p.itr {
 			if err != nil {
 				return err
 			}
@@ -115,7 +97,10 @@ func (p *PartitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 	for {
 		select {
 		case <-ctx.Done():
-			return context.Cause(ctx)
+			if err := context.Cause(ctx); err != nil {
+				return err
+			}
+			return nil
 		case record, ok := <-inputRecordsCh:
 			if !ok {
 				return nil
@@ -127,7 +112,10 @@ func (p *PartitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 			for partition, rowIndices := range partitionMap {
 				select {
 				case <-ctx.Done():
-					return context.Cause(ctx)
+					if err := context.Cause(ctx); err != nil {
+						return err
+					}
+					return nil
 				default:
 				}
 
@@ -141,7 +129,8 @@ func (p *PartitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 					return err
 				}
 
-				if err := rollingDataWriter.Add(ctx, partitionRecord, dataFilesChannel); err != nil {
+				err = rollingDataWriter.Add(ctx, partitionRecord, dataFilesChannel)
+				if err != nil {
 					return err
 				}
 			}
@@ -199,7 +188,7 @@ func (p *PartitionedFanoutWriter) getPartitionMap(record arrow.Record) map[strin
 	for row := range record.NumRows() {
 		partitionRec := make(partitionRecord, len(partitionFields))
 
-		for i, _ := range partitionFields {
+		for i := range partitionFields {
 			sourceField := p.partitionSpec.Field(i)
 			colName, _ := p.schema.FindColumnName(sourceField.SourceID)
 			colIdx := record.Schema().FieldIndices(colName)[0]
