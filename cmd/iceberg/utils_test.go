@@ -18,11 +18,11 @@
 package main
 
 import (
-	"github.com/apache/iceberg-go/table"
 	"maps"
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table"
 )
 
 func TestParseProperties(t *testing.T) {
