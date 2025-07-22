@@ -85,6 +85,18 @@ var (
 			},
 			Required: false,
 		},
+		iceberg.NestedField{
+			ID:   18,
+			Name: "thing",
+			Type: &iceberg.MapType{
+				KeyID:         19,
+				KeyType:       iceberg.PrimitiveTypes.String,
+				ValueID:       20,
+				ValueType:     iceberg.PrimitiveTypes.Int32,
+				ValueRequired: true,
+			},
+			Required: false,
+		},
 	)
 
 	tableSchemaSimple = iceberg.NewSchemaWithIdentifiers(1,
@@ -201,6 +213,15 @@ func TestSchemaIndexByIDVisitor(t *testing.T) {
 		15: tableSchemaNested.Field(6),
 		16: {ID: 16, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
 		17: {ID: 17, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		18: {ID: 18, Name: "thing", Type: &iceberg.MapType{
+			KeyID:         19,
+			KeyType:       iceberg.PrimitiveTypes.String,
+			ValueID:       20,
+			ValueType:     iceberg.PrimitiveTypes.Int32,
+			ValueRequired: true,
+		}, Required: false},
+		19: {ID: 19, Name: "key", Type: iceberg.PrimitiveTypes.String, Required: true},
+		20: {ID: 20, Name: "value", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 	}, index)
 }
 
@@ -228,6 +249,9 @@ func TestSchemaIndexByName(t *testing.T) {
 		"person":                     15,
 		"person.name":                16,
 		"person.age":                 17,
+		"thing":                      18,
+		"thing.key":                  19,
+		"thing.value":                20,
 	}, index)
 }
 
@@ -829,6 +853,19 @@ func TestSchemaRoundTrip(t *testing.T) {
 						}
 					]
 				}
+			},
+			{
+				"id": 18,
+				"name": "thing",
+				"required": false,
+				"type": {
+					"type": "map",
+					"key-id": 19,
+					"key": "string",
+					"value-id": 20,
+					"value": "int",
+					"value-required": true
+				}
 			}
 		]
 	}`, string(data))
@@ -837,4 +874,9 @@ func TestSchemaRoundTrip(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &sc))
 
 	assert.Truef(t, tableSchemaNested.Equals(&sc), "expected: %s\ngot: %s", tableSchemaNested, &sc)
+}
+
+func TestHighestFieldID(t *testing.T) {
+	id := tableSchemaNested.HighestFieldID()
+	assert.Equal(t, 20, id, "expected highest field ID to be 20, got %d", id)
 }
