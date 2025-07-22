@@ -37,6 +37,7 @@ type WriterFactory struct {
 	writers        sync.Map
 	nextCount      func() (int, bool)
 	stopCount      func()
+	mu             sync.Mutex
 }
 
 func NewWriterFactory(rootLocation string, args recordWritingArgs, meta *MetadataBuilder, taskSchema *iceberg.Schema, targetFileSize int64) WriterFactory {
@@ -54,6 +55,7 @@ type RollingDataWriter struct {
 	data         []arrow.Record
 	currentSize  int64
 	factory      *WriterFactory
+	mu           sync.Mutex
 }
 
 func (w *WriterFactory) NewRollingDataWriter(partition string) *RollingDataWriter {
@@ -75,9 +77,11 @@ func (w *WriterFactory) getOrCreateRollingDataWriter(partition string) (*Rolling
 }
 
 func (r *RollingDataWriter) Add(ctx context.Context, record arrow.Record, outputDataFilesCh chan<- iceberg.DataFile) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	recordSize := recordNBytes(record)
 	record.Retain()
-	defer record.Release()
 
 	if r.currentSize > 0 && r.currentSize+recordSize > r.factory.targetFileSize {
 		if err := r.flushToDataFile(ctx, outputDataFilesCh); err != nil {
@@ -103,7 +107,10 @@ func (r *RollingDataWriter) flushToDataFile(ctx context.Context, outputDataFiles
 	}
 
 	task := iter.Seq[WriteTask](func(yield func(WriteTask) bool) {
+		r.factory.mu.Lock()
 		cnt, _ := r.factory.nextCount()
+		r.factory.mu.Unlock()
+
 		yield(WriteTask{
 			Uuid:    *r.factory.args.writeUUID,
 			ID:      cnt,
@@ -118,7 +125,10 @@ func (r *RollingDataWriter) flushToDataFile(ctx context.Context, outputDataFiles
 	}
 
 	partitionMeta := *r.factory.meta
-	partitionMeta.props = map[string]string{WriteDataPathKey: parseDataLoc.JoinPath("data").JoinPath(r.partitionKey).String()}
+	if partitionMeta.props == nil {
+		partitionMeta.props = make(map[string]string)
+	}
+	partitionMeta.props[WriteDataPathKey] = parseDataLoc.JoinPath("data").JoinPath(r.partitionKey).String()
 
 	outputDataFiles := writeFiles(ctx, r.factory.rootLocation, r.factory.args.fs, &partitionMeta, task)
 	for dataFile, err := range outputDataFiles {
@@ -159,7 +169,7 @@ func (w *WriterFactory) closeAll(ctx context.Context, outputDataFilesCh chan<- i
 			err = fmt.Errorf("invalid writer type for partition %s", key)
 			return false
 		}
-		if err := writer.close(ctx, outputDataFilesCh); err != nil {
+		if err = writer.close(ctx, outputDataFilesCh); err != nil {
 			return false
 		}
 		return true

@@ -1292,8 +1292,8 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 	nextCount, stopCount := iter.Pull(args.counter)
 
 	if meta.CurrentSpec().IsUnpartitioned() {
-		defer stopCount()
 		tasks := func(yield func(WriteTask) bool) {
+			defer stopCount()
 
 			for batch := range binPackRecords(args.itr, 20, targetFileSize) {
 				cnt, _ := nextCount()
