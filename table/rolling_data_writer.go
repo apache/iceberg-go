@@ -19,9 +19,9 @@ package table
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"iter"
+	"log"
 	"net/url"
 	"sync"
 
@@ -71,7 +71,7 @@ func (w *WriterFactory) getOrCreateRollingDataWriter(partition string) (*Rolling
 	rollingDataWriter, _ := w.writers.LoadOrStore(partition, w.NewRollingDataWriter(partition))
 	writer, ok := rollingDataWriter.(*RollingDataWriter)
 	if !ok {
-		return nil, errors.New("failed to create Rolling Data Writer")
+		return nil, fmt.Errorf("failed to create rolling data writer: %s", partition)
 	}
 	return writer, nil
 }
@@ -79,23 +79,37 @@ func (w *WriterFactory) getOrCreateRollingDataWriter(partition string) (*Rolling
 func (r *RollingDataWriter) Add(ctx context.Context, record arrow.Record, outputDataFilesCh chan<- iceberg.DataFile) {
 	recordSize := recordNBytes(record)
 	record.Retain()
+	defer record.Release()
 
-	if r.currentSize > 0 && r.currentSize+recordSize > r.factory.targetFileSize {
-		r.flushToDataFile(ctx, outputDataFilesCh)
-	} else if recordSize > r.factory.targetFileSize {
-		r.flushToDataFile(ctx, outputDataFilesCh)
-	}
-
-	record.Retain()
 	r.data = append(r.data, record)
 	r.currentSize += recordSize
+
+	if r.shouldFlush(recordSize) {
+		r.flushToDataFile(ctx, outputDataFilesCh)
+	}
 }
 
-func (r *RollingDataWriter) flushToDataFile(ctx context.Context, outputDataFilesCh chan<- iceberg.DataFile) {
+func (r *RollingDataWriter) shouldFlush(recordSize int64) bool {
+	if r.currentSize > 0 && r.currentSize+recordSize > r.factory.targetFileSize {
+		return true
+	} else if recordSize > r.factory.targetFileSize {
+		return true
+	} else {
+		return true
+	}
+
+	return false
+}
+
+func (r *RollingDataWriter) flushToDataFile(ctx context.Context, outputDataFilesCh chan<- iceberg.DataFile) error {
+	if len(r.data) == 0 {
+		return nil
+	}
+
 	nameMapping := r.factory.meta.CurrentSchema().NameMapping()
 	taskSchema, err := ArrowSchemaToIceberg(r.factory.args.sc, false, nameMapping)
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("failed to convert arrow schema to iceberg schema: %w", err)
 	}
 
 	task := iter.Seq[WriteTask](func(yield func(WriteTask) bool) {
@@ -110,7 +124,7 @@ func (r *RollingDataWriter) flushToDataFile(ctx context.Context, outputDataFiles
 
 	parseDataLoc, err := url.Parse(r.factory.rootLocation)
 	if err != nil {
-		fmt.Errorf("Failed to parse rootLocation: %v", err)
+		fmt.Errorf("failed to parse rootLocation: %v", err)
 	}
 
 	metaProps := *r.factory.meta
@@ -118,30 +132,52 @@ func (r *RollingDataWriter) flushToDataFile(ctx context.Context, outputDataFiles
 	metaProps.props[WriteDataPathKey] = parseDataLoc.JoinPath("data").JoinPath(r.partitionKey).String()
 
 	outputDataFiles := writeFiles(ctx, r.factory.rootLocation, r.factory.args.fs, &metaProps, task)
-	for dataFile := range outputDataFiles {
+	for dataFile, err := range outputDataFiles {
+		if err != nil {
+			log.Printf("Warning: Failed to write data file for partition %s: %v", r.partitionKey, err)
+			continue
+		}
 		outputDataFilesCh <- dataFile
 	}
+	r.clear()
 
+	return nil
+}
+
+func (r *RollingDataWriter) clear() {
+	for _, rec := range r.data {
+		rec.Release()
+	}
 	r.data = r.data[:0]
 	r.currentSize = 0
 }
 
-func (r *RollingDataWriter) close(ctx context.Context, outputDataFilesCh chan<- iceberg.DataFile) {
+func (r *RollingDataWriter) close(ctx context.Context, outputDataFilesCh chan<- iceberg.DataFile) error {
 	if r.currentSize > 0 {
-		r.flushToDataFile(ctx, outputDataFilesCh)
+		if err := r.flushToDataFile(ctx, outputDataFilesCh); err != nil {
+			return fmt.Errorf("failed to flush remaining data on close: %w", err)
+		}
 	}
 
 	r.factory.writers.Delete(r.partitionKey)
+	return nil
 }
 
-func (w *WriterFactory) closeAll(ctx context.Context, outputDataFilesCh chan<- iceberg.DataFile) {
-	w.writers.Range(func(key, value interface{}) bool {
+func (w *WriterFactory) closeAll(ctx context.Context, outputDataFilesCh chan<- iceberg.DataFile) error {
+	var err error
+	w.writers.Range(func(key, value any) bool {
 		writer, ok := value.(*RollingDataWriter)
 		if !ok {
+			err = fmt.Errorf("invalid writer type for partition %s", key)
 			return false
 		}
-		writer.close(ctx, outputDataFilesCh)
+		if err := writer.close(ctx, outputDataFilesCh); err != nil {
+			err = fmt.Errorf("failed to close writer for partition %s: %w", key, err)
+			return false
+		}
 		return true
 	})
+
 	w.stopCount()
+	return err
 }
