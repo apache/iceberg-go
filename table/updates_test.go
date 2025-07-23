@@ -143,11 +143,9 @@ func TestUnmarshalUpdates(t *testing.T) {
   }
 ]`),
 			expected: Updates{
-				NewAddSchemaUpdate(
-					iceberg.NewSchema(1,
-						iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.StringType{}, Required: true},
-					), 1, false,
-				),
+				NewAddSchemaUpdate(iceberg.NewSchema(1,
+					iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.StringType{}, Required: true},
+				), false),
 				NewAddPartitionSpecUpdate(
 					&spec, false),
 				NewAddSortOrderUpdate(&sortOrder, false),
@@ -202,7 +200,6 @@ func TestUnmarshalUpdates(t *testing.T) {
 						actualAddSchema := actual[idx].(*addSchemaUpdate)
 						assert.True(t, expectedAddSchema.Schema.Equals(actualAddSchema.Schema))
 						assert.Equal(t, actualAddSchema.initial, expectedAddSchema.initial)
-						assert.Equal(t, actualAddSchema.LastColumnID, expectedAddSchema.LastColumnID)
 					case "add-partition-spec":
 						expectedAddPartitionSpec := u.(*addPartitionSpecUpdate)
 						actualAddPartitionSpec := actual[idx].(*addPartitionSpecUpdate)

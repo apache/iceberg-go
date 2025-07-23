@@ -149,7 +149,7 @@ type MetadataBuilder struct {
 	schemaList         []*iceberg.Schema
 	currentSchemaID    int
 	specs              []iceberg.PartitionSpec
-	defaultSpecID      int
+	defaultSpecID      *int
 	lastPartitionID    *int
 	props              iceberg.Properties
 	snapshotList       []Snapshot
@@ -162,6 +162,8 @@ type MetadataBuilder struct {
 
 	// >v1 specific
 	lastSequenceNumber *int64
+	// update tracking
+	lastAddedSchemaID *int
 }
 
 func NewMetadataBuilder() (*MetadataBuilder, error) {
@@ -190,7 +192,8 @@ func MetadataBuilderFromBase(metadata Metadata) (*MetadataBuilder, error) {
 	b.schemaList = slices.Clone(metadata.Schemas())
 	b.currentSchemaID = metadata.CurrentSchema().ID
 	b.specs = slices.Clone(metadata.PartitionSpecs())
-	b.defaultSpecID = metadata.DefaultPartitionSpec()
+	defaultSpecID := metadata.DefaultPartitionSpec()
+	b.defaultSpecID = &defaultSpecID
 	b.lastPartitionID = metadata.LastPartitionSpecID()
 	b.props = maps.Clone(metadata.Properties())
 	b.snapshotList = slices.Clone(metadata.Snapshots())
@@ -215,7 +218,8 @@ func MetadataBuilderFromBase(metadata Metadata) (*MetadataBuilder, error) {
 func (b *MetadataBuilder) HasChanges() bool { return len(b.updates) > 0 }
 
 func (b *MetadataBuilder) CurrentSpec() iceberg.PartitionSpec {
-	return b.specs[b.defaultSpecID]
+	// FIXME: this should return a pointer which can be nil to avoid out of bounds indexing / np derefs
+	return b.specs[*b.defaultSpecID]
 }
 
 func (b *MetadataBuilder) CurrentSchema() *iceberg.Schema {
@@ -257,21 +261,31 @@ func (b *MetadataBuilder) currentSnapshot() *Snapshot {
 	return s
 }
 
-func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema, newLastColumnID int, initial bool) (*MetadataBuilder, error) {
+func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) (*MetadataBuilder, error) {
+	newLastColumnID := schema.HighestFieldID()
 	if newLastColumnID < b.lastColumnId {
 		return nil, fmt.Errorf("%w: newLastColumnID %d, must be >= %d", iceberg.ErrInvalidArgument, newLastColumnID, b.lastColumnId)
 	}
 
-	var schemas []*iceberg.Schema
-	if initial {
-		schemas = []*iceberg.Schema{schema}
-	} else {
-		schemas = append(b.schemaList, schema)
+	newSchemaID := b.reuseOrCreateNewSchemaID(schema)
+	_, err := b.GetSchemaByID(newSchemaID)
+	schemaFound := err == nil
+
+	if schemaFound {
+		if b.lastAddedSchemaID == nil || *b.lastAddedSchemaID != newSchemaID {
+			b.updates = append(b.updates, NewAddSchemaUpdate(schema))
+			b.lastAddedSchemaID = &newSchemaID
+		}
+		return b, nil
 	}
 
-	b.lastColumnId = newLastColumnID
-	b.schemaList = schemas
-	b.updates = append(b.updates, NewAddSchemaUpdate(schema, newLastColumnID, initial))
+	b.lastColumnId = max(b.lastColumnId, schema.HighestFieldID())
+
+	schema.WithID(newSchemaID)
+
+	b.schemaList = append(b.schemaList, schema)
+	b.updates = append(b.updates, NewAddSchemaUpdate(schema))
+	b.lastAddedSchemaID = &newSchemaID
 
 	return b, nil
 }
@@ -384,14 +398,10 @@ func (b *MetadataBuilder) RemoveProperties(keys []string) (*MetadataBuilder, err
 
 func (b *MetadataBuilder) SetCurrentSchemaID(currentSchemaID int) (*MetadataBuilder, error) {
 	if currentSchemaID == -1 {
-		currentSchemaID = maxBy(b.schemaList, func(s *iceberg.Schema) int {
-			return s.ID
-		})
-		if !slices.ContainsFunc(b.updates, func(u Update) bool {
-			return u.Action() == UpdateAddSchema && u.(*addSchemaUpdate).Schema.ID == currentSchemaID
-		}) {
+		if b.lastAddedSchemaID == nil {
 			return nil, errors.New("can't set current schema to last added schema, no schema has been added")
 		}
+		currentSchemaID = *b.lastAddedSchemaID
 	}
 
 	if currentSchemaID == b.currentSchemaID {
@@ -447,7 +457,7 @@ func (b *MetadataBuilder) SetDefaultSpecID(defaultSpecID int) (*MetadataBuilder,
 		}
 	}
 
-	if defaultSpecID == b.defaultSpecID {
+	if b.defaultSpecID != nil && defaultSpecID == *b.defaultSpecID {
 		return b, nil
 	}
 
@@ -456,7 +466,7 @@ func (b *MetadataBuilder) SetDefaultSpecID(defaultSpecID int) (*MetadataBuilder,
 	}
 
 	b.updates = append(b.updates, NewSetDefaultSpecUpdate(defaultSpecID))
-	b.defaultSpecID = defaultSpecID
+	b.defaultSpecID = &defaultSpecID
 
 	return b, nil
 }
@@ -641,7 +651,12 @@ func (b *MetadataBuilder) SetLastUpdatedMS() *MetadataBuilder {
 	return b
 }
 
-func (b *MetadataBuilder) buildCommonMetadata() *commonMetadata {
+func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
+	if b.defaultSpecID == nil {
+		return nil, errors.New("no default spec ID specified")
+	}
+	defaultSpecID := *b.defaultSpecID
+
 	if b.lastUpdatedMS == 0 {
 		b.lastUpdatedMS = time.Now().UnixMilli()
 	}
@@ -655,7 +670,7 @@ func (b *MetadataBuilder) buildCommonMetadata() *commonMetadata {
 		SchemaList:         b.schemaList,
 		CurrentSchemaID:    b.currentSchemaID,
 		Specs:              b.specs,
-		DefaultSpecID:      b.defaultSpecID,
+		DefaultSpecID:      defaultSpecID,
 		LastPartitionID:    b.lastPartitionID,
 		Props:              b.props,
 		SnapshotList:       b.snapshotList,
@@ -665,7 +680,7 @@ func (b *MetadataBuilder) buildCommonMetadata() *commonMetadata {
 		SortOrderList:      b.sortOrderList,
 		DefaultSortOrderID: b.defaultSortOrderID,
 		SnapshotRefs:       b.refs,
-	}
+	}, nil
 }
 
 func (b *MetadataBuilder) GetSchemaByID(id int) (*iceberg.Schema, error) {
@@ -736,7 +751,10 @@ func (b *MetadataBuilder) AppendMetadataLog(entry MetadataLogEntry) *MetadataBui
 }
 
 func (b *MetadataBuilder) Build() (Metadata, error) {
-	common := b.buildCommonMetadata()
+	common, err := b.buildCommonMetadata()
+	if err != nil {
+		return nil, err
+	}
 	if err := common.validate(); err != nil {
 		return nil, err
 	}
@@ -748,7 +766,7 @@ func (b *MetadataBuilder) Build() (Metadata, error) {
 			return nil, fmt.Errorf("can't build metadata, missing schema for schema ID %d: %w", b.currentSchemaID, err)
 		}
 
-		partition, err := b.GetSpecByID(b.defaultSpecID)
+		partition, err := b.GetSpecByID(common.DefaultSpecID)
 		if err != nil {
 			return nil, fmt.Errorf("can't build metadata, missing partition spec for spec ID %d: %w", b.defaultSpecID, err)
 		}
@@ -777,8 +795,21 @@ func (b *MetadataBuilder) Build() (Metadata, error) {
 		}, nil
 
 	default:
-		panic("unreachable: invalid format version")
+		return nil, fmt.Errorf("unknown format version %d", b.formatVersion)
 	}
+}
+
+func (b *MetadataBuilder) reuseOrCreateNewSchemaID(newSchema *iceberg.Schema) int {
+	newSchemaID := newSchema.ID
+	for _, schema := range b.schemaList {
+		if newSchema.Equals(schema) {
+			return schema.ID
+		}
+		if schema.ID >= newSchemaID {
+			newSchemaID = schema.ID + 1
+		}
+	}
+	return newSchemaID
 }
 
 // maxBy returns the maximum value of extract(e) for all e in elems.
