@@ -474,6 +474,8 @@ type removeSpecUpdate struct {
 	SpecIds []int64 `json:"spec-ids"`
 }
 
+// NewRemoveSpecUpdate creates a new Update that removes a list of partition specs
+// from the table metadata.
 func NewRemoveSpecUpdate(specIds []int64) *removeSpecUpdate {
 	return &removeSpecUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateRemoveSpec},
@@ -490,6 +492,8 @@ type removeSchemasUpdate struct {
 	SchemaIds []int64 `json:"schema-ids"`
 }
 
+// NewRemoveSchemasUpdate creates a new Update that removes a list of schemas from
+// the table metadata.
 func NewRemoveSchemasUpdate(schemaIds []int64) *removeSchemasUpdate {
 	return &removeSchemasUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateRemoveSchemas},
