@@ -64,7 +64,7 @@ func parsePartitionSpec(specStr string) (*iceberg.PartitionSpec, error) {
 
 		partitionFields = append(partitionFields, iceberg.PartitionField{
 			SourceID:  i + 1,
-			FieldID:   i + 1000,
+			FieldID:   i + iceberg.PartitionDataIDStart,
 			Name:      field,
 			Transform: iceberg.IdentityTransform{},
 		})
