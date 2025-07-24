@@ -153,14 +153,14 @@ type SqliteCatalogTestSuite struct {
 
 func (s *SqliteCatalogTestSuite) randomTableIdentifier() table.Identifier {
 	dbname, tablename := databaseName(), tableName()
-	s.Require().NoError(os.MkdirAll(filepath.Join(s.warehouse, dbname+".db", tablename, "metadata"), 0o755))
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.warehouse, dbname, tablename, "metadata"), 0o755))
 
 	return table.Identifier{dbname, tablename}
 }
 
 func (s *SqliteCatalogTestSuite) randomHierarchicalIdentifier() table.Identifier {
 	hierarchicalNsName, tableName := hiearchicalNamespaceName(), tableName()
-	s.Require().NoError(os.MkdirAll(filepath.Join(s.warehouse, hierarchicalNsName+".db", tableName, "metadata"), 0o755))
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.warehouse, hierarchicalNsName, tableName, "metadata"), 0o755))
 
 	return strings.Split(hierarchicalNsName+"."+tableName, ".")
 }

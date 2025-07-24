@@ -170,7 +170,7 @@ func getDefaultWarehouseLocation(dbname, tablename string, nsprops, catprops ice
 	}
 
 	if warehousepath := catprops.Get("warehouse", ""); warehousepath != "" {
-		return url.JoinPath(warehousepath, dbname+".db", tablename)
+		return url.JoinPath(warehousepath, dbname, tablename)
 	}
 
 	return "", errors.New("no default path set, please specify a location when creating a table")
