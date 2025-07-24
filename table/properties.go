@@ -31,6 +31,11 @@ const (
 	ObjectStoreEnabledKey                   = "write.object-storage.enabled"
 	ObjectStoreEnabledDefault               = false
 
+	DeleteMode            = "write.delete.mode"
+	DeleteModeCopyOnWrite = "copy-on-write"
+	DeleteModeMergeOnRead = "merge-on-read"
+	DeleteModeDefault     = DeleteModeCopyOnWrite
+
 	DefaultNameMappingKey = "schema.name-mapping.default"
 
 	MetricsModeColumnConfPrefix    = "write.metadata.metrics.column"

@@ -23,6 +23,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
+	"github.com/apache/iceberg-go/table/substrait"
 	"runtime"
 	"slices"
 	"sync"
@@ -56,6 +58,10 @@ func (s snapshotUpdate) mergeOverwrite(commitUUID *uuid.UUID) *snapshotProducer 
 
 func (s snapshotUpdate) mergeAppend() *snapshotProducer {
 	return newMergeAppendFilesProducer(OpAppend, s.txn, s.io, nil, s.snapshotProps)
+}
+
+func (s snapshotUpdate) delete() *snapshotProducer {
+	return newDeleteFilesProducer(OpDelete, s.txn, s.io, nil, s.snapshotProps)
 }
 
 type Transaction struct {
@@ -289,6 +295,148 @@ func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapsh
 	}
 
 	return t.apply(updates, reqs)
+}
+
+type replacedFiles struct {
+	originalFile iceberg.DataFile
+	replaceFiles []iceberg.DataFile
+}
+
+func (t *Transaction) Delete(ctx context.Context, deleteFilter iceberg.BooleanExpression, snapshotProps iceberg.Properties, caseSensitive bool) error {
+
+	if deleteMode := t.tbl.metadata.Properties().Get(DeleteMode, DeleteModeDefault); deleteMode == DeleteModeMergeOnRead {
+		fmt.Println("Merge on read is not yet supported, falling back to copy-on-write")
+	}
+
+	fs, err := t.tbl.fsF(ctx)
+	if err != nil {
+		return err
+	}
+
+	deleteSnapshot := t.updateSnapshot(fs, snapshotProps).delete()
+	df := deleteSnapshot.producerImpl.(*deleteFiles)
+	df.deleteByPredicate(deleteFilter, caseSensitive)
+	err = df.computeDeletes()
+	if err != nil {
+		return err
+	}
+
+	// check if any data file require a rewrite
+	if df.rewriteNeeded() {
+		schema := t.tbl.Schema()
+		_, err := iceberg.BindExpr(schema, deleteFilter, caseSensitive)
+		if err != nil {
+			return err
+		}
+
+		preserveRowFilter := iceberg.NewNot(deleteFilter)
+		boundRowFilter, err := iceberg.BindExpr(schema, preserveRowFilter, caseSensitive)
+		if err != nil {
+			return err
+		}
+
+		extSet, recordFilter, err := substrait.ConvertExpr(schema, boundRowFilter, caseSensitive)
+		if err != nil {
+			return err
+		}
+
+		scan, err := t.Scan(WithRowFilter(deleteFilter), WithCaseSensitive(caseSensitive))
+		if err != nil {
+			return err
+		}
+
+		files, err := scan.PlanFiles(ctx)
+		if err != nil {
+			return err
+		}
+
+		replacement := make([]replacedFiles, 0)
+		commitUuid := uuid.New()
+
+		for _, originalFile := range files {
+			arrSchema, allRecords, err := (&arrowScan{
+				metadata:        scan.metadata,
+				fs:              fs,
+				projectedSchema: schema,
+				boundRowFilter:  iceberg.AlwaysTrue{},
+				caseSensitive:   scan.caseSensitive,
+				rowLimit:        scan.limit,
+				options:         scan.options,
+				concurrency:     scan.concurrency,
+			}).GetRecords(ctx, []FileScanTask{originalFile})
+			if err != nil {
+				return err
+			}
+
+			filterFn := filterRecords(
+				exprs.WithExtensionIDSet(ctx, exprs.NewExtensionSetDefault(*extSet)),
+				recordFilter,
+			)
+			allRecordCnt := 0
+			records := make([]arrow.Record, 0)
+			for rec, err := range allRecords {
+				allRecordCnt += 1
+				if err != nil {
+					return err
+				}
+				defer rec.Release()
+
+				filtered, err := filterFn(rec)
+				if err != nil {
+					return err
+				}
+				if filtered != nil {
+					records = append(records, rec)
+				}
+			}
+
+			if allRecordCnt == 0 || allRecordCnt == len(records) {
+				replacement = append(replacement, replacedFiles{
+					originalFile.File,
+					[]iceberg.DataFile{},
+				})
+			} else if allRecordCnt != len(records) {
+				replaceFiles := make([]iceberg.DataFile, 0)
+				arrTbl := array.NewTableFromRecords(arrSchema, records)
+				defer arrTbl.Release()
+				rdr := array.NewTableReader(arrTbl, -1)
+				defer rdr.Release()
+				itr := recordsToDataFiles(ctx, t.tbl.Location(), t.meta, recordWritingArgs{
+					sc:        arrSchema,
+					itr:       array.IterFromReader(rdr),
+					fs:        fs.(io.WriteFileIO),
+					writeUUID: &commitUuid,
+				})
+				for df, err := range itr {
+					if err != nil {
+						return err
+					}
+					replaceFiles = append(replaceFiles, df)
+				}
+				replacement = append(replacement, replacedFiles{
+					originalFile.File,
+					replaceFiles,
+				})
+			}
+		}
+
+		if len(replacement) > 0 {
+			overwriteSnapshot := t.updateSnapshot(fs, snapshotProps).mergeOverwrite(&commitUuid)
+			for _, rf := range replacement {
+				overwriteSnapshot.deleteDataFile(rf.originalFile)
+				for _, replaceFile := range rf.replaceFiles {
+					overwriteSnapshot.appendDataFile(replaceFile)
+				}
+			}
+			updates, reqs, err := overwriteSnapshot.commit()
+			if err != nil {
+				return err
+			}
+
+			return t.apply(updates, reqs)
+		}
+	}
+	return nil
 }
 
 // ReplaceFiles is actually just an overwrite operation with multiple

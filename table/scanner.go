@@ -501,3 +501,17 @@ func (scan *Scan) ToArrowTable(ctx context.Context) (arrow.Table, error) {
 
 	return array.NewTableFromRecords(schema, records), nil
 }
+
+func toArrowTableFromRecords(schema *arrow.Schema, recordItr iter.Seq2[arrow.Record, error]) (arrow.Table, error) {
+	records := make([]arrow.Record, 0)
+	for rec, err := range recordItr {
+		if err != nil {
+			return nil, err
+		}
+
+		defer rec.Release()
+		records = append(records, rec)
+	}
+
+	return array.NewTableFromRecords(schema, records), nil
+}
