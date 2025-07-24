@@ -35,8 +35,10 @@ const (
 	UpdateAssignUUID = "assign-uuid"
 
 	UpdateRemoveProperties  = "remove-properties"
+	UpdateRemoveSchemas     = "remove-schemas"
 	UpdateRemoveSnapshots   = "remove-snapshots"
 	UpdateRemoveSnapshotRef = "remove-snapshot-ref"
+	UpdateRemoveSpec        = "remove-partition-specs"
 
 	UpdateSetCurrentSchema    = "set-current-schema"
 	UpdateSetDefaultSortOrder = "set-default-sort-order"
@@ -72,6 +74,10 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 
 		var upd Update
 		switch base.ActionName {
+		case UpdateAssignUUID:
+			upd = &assignUUIDUpdate{}
+		case UpdateUpgradeFormatVersion:
+			upd = &upgradeFormatVersionUpdate{}
 		case UpdateAddSchema:
 			upd = &addSchemaUpdate{}
 		case UpdateSetCurrentSchema:
@@ -88,20 +94,20 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 			upd = &addSnapshotUpdate{}
 		case UpdateSetSnapshotRef:
 			upd = &setSnapshotRefUpdate{}
+		case UpdateRemoveSnapshots:
+			upd = &removeSnapshotsUpdate{}
+		case UpdateRemoveSnapshotRef:
+			upd = &removeSnapshotRefUpdate{}
 		case UpdateSetLocation:
 			upd = &setLocationUpdate{}
 		case UpdateSetProperties:
 			upd = &setPropertiesUpdate{}
 		case UpdateRemoveProperties:
 			upd = &removePropertiesUpdate{}
-		case UpdateRemoveSnapshots:
-			upd = &removeSnapshotsUpdate{}
-		case UpdateRemoveSnapshotRef:
-			upd = &removeSnapshotRefUpdate{}
-		case UpdateAssignUUID:
-			upd = &assignUUIDUpdate{}
-		case UpdateUpgradeFormatVersion:
-			upd = &upgradeFormatVersionUpdate{}
+		case UpdateRemoveSpec:
+			upd = &removeSpecUpdate{}
+		case UpdateRemoveSchemas:
+			upd = &removeSchemasUpdate{}
 		default:
 			return fmt.Errorf("unknown update action: %s", base.ActionName)
 		}
@@ -131,7 +137,7 @@ type assignUUIDUpdate struct {
 }
 
 // NewAssignUUIDUpdate creates a new update to assign a UUID to the table metadata.
-func NewAssignUUIDUpdate(uuid uuid.UUID) Update {
+func NewAssignUUIDUpdate(uuid uuid.UUID) *assignUUIDUpdate {
 	return &assignUUIDUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateAssignUUID},
 		UUID:       uuid,
@@ -151,7 +157,7 @@ type upgradeFormatVersionUpdate struct {
 
 // NewUpgradeFormatVersionUpdate creates a new update that upgrades the format version
 // of the table metadata to the given formatVersion.
-func NewUpgradeFormatVersionUpdate(formatVersion int) Update {
+func NewUpgradeFormatVersionUpdate(formatVersion int) *upgradeFormatVersionUpdate {
 	return &upgradeFormatVersionUpdate{
 		baseUpdate:    baseUpdate{ActionName: UpdateUpgradeFormatVersion},
 		FormatVersion: formatVersion,
@@ -174,7 +180,7 @@ type addSchemaUpdate struct {
 // NewAddSchemaUpdate creates a new update that adds the given schema and last column ID to
 // the table metadata. If the initial flag is set to true, the schema is considered the initial
 // schema of the table, and all previously added schemas in the metadata builder are removed.
-func NewAddSchemaUpdate(schema *iceberg.Schema, lastColumnID int, initial bool) Update {
+func NewAddSchemaUpdate(schema *iceberg.Schema, lastColumnID int, initial bool) *addSchemaUpdate {
 	return &addSchemaUpdate{
 		baseUpdate:   baseUpdate{ActionName: UpdateAddSchema},
 		Schema:       schema,
@@ -196,7 +202,7 @@ type setCurrentSchemaUpdate struct {
 
 // NewSetCurrentSchemaUpdate creates a new update that sets the current schema of the table
 // metadata to the given schema ID.
-func NewSetCurrentSchemaUpdate(id int) Update {
+func NewSetCurrentSchemaUpdate(id int) *setCurrentSchemaUpdate {
 	return &setCurrentSchemaUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateSetCurrentSchema},
 		SchemaID:   id,
@@ -218,7 +224,7 @@ type addPartitionSpecUpdate struct {
 // NewAddPartitionSpecUpdate creates a new update that adds the given partition spec to the table
 // metadata. If the initial flag is set to true, the spec is considered the initial spec of the table,
 // and all other previously added specs in the metadata builder are removed.
-func NewAddPartitionSpecUpdate(spec *iceberg.PartitionSpec, initial bool) Update {
+func NewAddPartitionSpecUpdate(spec *iceberg.PartitionSpec, initial bool) *addPartitionSpecUpdate {
 	return &addPartitionSpecUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateAddSpec},
 		Spec:       spec,
@@ -239,7 +245,7 @@ type setDefaultSpecUpdate struct {
 
 // NewSetDefaultSpecUpdate creates a new update that sets the default partition spec of the
 // table metadata to the given spec ID.
-func NewSetDefaultSpecUpdate(id int) Update {
+func NewSetDefaultSpecUpdate(id int) *setDefaultSpecUpdate {
 	return &setDefaultSpecUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateSetDefaultSpec},
 		SpecID:     id,
@@ -261,7 +267,7 @@ type addSortOrderUpdate struct {
 // NewAddSortOrderUpdate creates a new update that adds the given sort order to the table metadata.
 // If the initial flag is set to true, the sort order is considered the initial sort order of the table,
 // and all previously added sort orders in the metadata builder are removed.
-func NewAddSortOrderUpdate(sortOrder *SortOrder, initial bool) Update {
+func NewAddSortOrderUpdate(sortOrder *SortOrder, initial bool) *addSortOrderUpdate {
 	return &addSortOrderUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateAddSortOrder},
 		SortOrder:  sortOrder,
@@ -282,7 +288,7 @@ type setDefaultSortOrderUpdate struct {
 
 // NewSetDefaultSortOrderUpdate creates a new update that sets the default sort order of the table metadata
 // to the given sort order ID.
-func NewSetDefaultSortOrderUpdate(id int) Update {
+func NewSetDefaultSortOrderUpdate(id int) *setDefaultSortOrderUpdate {
 	return &setDefaultSortOrderUpdate{
 		baseUpdate:  baseUpdate{ActionName: UpdateSetDefaultSortOrder},
 		SortOrderID: id,
@@ -301,7 +307,7 @@ type addSnapshotUpdate struct {
 }
 
 // NewAddSnapshotUpdate creates a new update that adds the given snapshot to the table metadata.
-func NewAddSnapshotUpdate(snapshot *Snapshot) Update {
+func NewAddSnapshotUpdate(snapshot *Snapshot) *addSnapshotUpdate {
 	return &addSnapshotUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateAddSnapshot},
 		Snapshot:   snapshot,
@@ -333,7 +339,7 @@ func NewSetSnapshotRefUpdate(
 	refType RefType,
 	maxRefAgeMs, maxSnapshotAgeMs int64,
 	minSnapshotsToKeep int,
-) Update {
+) *setSnapshotRefUpdate {
 	return &setSnapshotRefUpdate{
 		baseUpdate:         baseUpdate{ActionName: UpdateSetSnapshotRef},
 		RefName:            name,
@@ -414,7 +420,7 @@ type removePropertiesUpdate struct {
 // NewRemovePropertiesUpdate creates a new update that removes properties from the table metadata.
 // The properties are identified by their names, and if a property with the given name does not exist,
 // it is ignored.
-func NewRemovePropertiesUpdate(removals []string) Update {
+func NewRemovePropertiesUpdate(removals []string) *removePropertiesUpdate {
 	return &removePropertiesUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateRemoveProperties},
 		Removals:   removals,
@@ -434,7 +440,7 @@ type removeSnapshotsUpdate struct {
 
 // NewRemoveSnapshotsUpdate creates a new update that removes all snapshots from
 // the table metadata with the given snapshot IDs.
-func NewRemoveSnapshotsUpdate(ids []int64) Update {
+func NewRemoveSnapshotsUpdate(ids []int64) *removeSnapshotsUpdate {
 	return &removeSnapshotsUpdate{
 		baseUpdate:  baseUpdate{ActionName: UpdateRemoveSnapshots},
 		SnapshotIDs: ids,
@@ -461,4 +467,40 @@ func NewRemoveSnapshotRefUpdate(ref string) *removeSnapshotRefUpdate {
 
 func (u *removeSnapshotRefUpdate) Apply(builder *MetadataBuilder) error {
 	return fmt.Errorf("%w: %s", iceberg.ErrNotImplemented, UpdateRemoveSnapshotRef)
+}
+
+type removeSpecUpdate struct {
+	baseUpdate
+	SpecIds []int64 `json:"spec-ids"`
+}
+
+// NewRemoveSpecUpdate creates a new Update that removes a list of partition specs
+// from the table metadata.
+func NewRemoveSpecUpdate(specIds []int64) *removeSpecUpdate {
+	return &removeSpecUpdate{
+		baseUpdate: baseUpdate{ActionName: UpdateRemoveSpec},
+		SpecIds:    specIds,
+	}
+}
+
+func (u *removeSpecUpdate) Apply(builder *MetadataBuilder) error {
+	return fmt.Errorf("%w: %s", iceberg.ErrNotImplemented, UpdateRemoveSpec)
+}
+
+type removeSchemasUpdate struct {
+	baseUpdate
+	SchemaIds []int64 `json:"schema-ids"`
+}
+
+// NewRemoveSchemasUpdate creates a new Update that removes a list of schemas from
+// the table metadata.
+func NewRemoveSchemasUpdate(schemaIds []int64) *removeSchemasUpdate {
+	return &removeSchemasUpdate{
+		baseUpdate: baseUpdate{ActionName: UpdateRemoveSchemas},
+		SchemaIds:  schemaIds,
+	}
+}
+
+func (u *removeSchemasUpdate) Apply(builder *MetadataBuilder) error {
+	return fmt.Errorf("%w: %s", iceberg.ErrNotImplemented, UpdateRemoveSchemas)
 }
