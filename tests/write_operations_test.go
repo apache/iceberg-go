@@ -281,6 +281,33 @@ func (s *WriteOperationsTestSuite) validateDataIntegrity(tbl *table.Table, expec
 	s.T().Logf("Data integrity validation passed: %d rows, %d columns", results.NumRows(), results.NumCols())
 }
 
+// getSnapshotFiles extracts the list of data file paths from a snapshot for comparison
+func (s *WriteOperationsTestSuite) getSnapshotFiles(snapshot *table.Snapshot, fs iceio.IO) []string {
+	if snapshot == nil {
+		return []string{}
+	}
+	
+	manifests, err := snapshot.Manifests(fs)
+	s.Require().NoError(err, "Failed to read manifests from snapshot")
+	
+	var files []string
+	for _, manifest := range manifests {
+		entries, err := manifest.FetchEntries(fs, false)
+		s.Require().NoError(err, "Failed to fetch entries from manifest")
+		
+		for _, entry := range entries {
+			// Only include data files (not delete files)
+			if entry.DataFile().ContentType() == iceberg.EntryContentData {
+				files = append(files, entry.DataFile().FilePath())
+			}
+		}
+	}
+	
+	// Sort for consistent comparison
+	slices.Sort(files)
+	return files
+}
+
 // =============================================================================
 // TESTS WITH ENHANCED VALIDATION
 // =============================================================================
@@ -302,6 +329,9 @@ func (s *WriteOperationsTestSuite) TestRewriteFiles() {
 			"added-records":    "9", // 3 files × 3 rows each
 		})
 		s.validateDataIntegrity(tbl, 9) // 3 files × 3 rows each
+		
+		// Capture initial file list for comparison
+		initialFiles := s.getSnapshotFiles(initialSnapshot, s.getFS(tbl))
 		
 		// Create new consolidated file
 		consolidatedPath := fmt.Sprintf("%s/data/consolidated.parquet", s.location)
@@ -333,6 +363,11 @@ func (s *WriteOperationsTestSuite) TestRewriteFiles() {
 		
 		// VALIDATE FINAL STATE WITH ENHANCED CHECKS
 		finalSnapshot := newTbl.CurrentSnapshot()
+		
+		// Assert that file lists differ before and after the operation
+		finalFiles := s.getSnapshotFiles(finalSnapshot, s.getFS(newTbl))
+		s.NotEqual(initialFiles, finalFiles, "File lists should differ before and after rewrite operation")
+		s.Greater(len(finalFiles), len(initialFiles), "Rewrite operation should result in more files (current behavior)")
 		
 		// NOTE: Current ReplaceDataFiles implementation keeps both old and new files
 		// In a full implementation, it should only contain the consolidated file
@@ -439,6 +474,9 @@ func (s *WriteOperationsTestSuite) TestOverwriteFiles() {
 		})
 		s.validateDataIntegrity(tbl, 3)
 		
+		// Capture initial file list for comparison
+		initialFiles := s.getSnapshotFiles(initialSnapshot, s.getFS(tbl))
+		
 		// Create new data to simulate partition overwrite
 		mem := memory.DefaultAllocator
 		newData, err := array.TableFromJSON(mem, s.arrSchema, []string{
@@ -465,6 +503,11 @@ func (s *WriteOperationsTestSuite) TestOverwriteFiles() {
 		
 		// VALIDATE FINAL STATE WITH ENHANCED CHECKS
 		newSnapshot := newTbl.CurrentSnapshot()
+		
+		// Assert that file lists differ before and after the operation
+		finalFiles := s.getSnapshotFiles(newSnapshot, s.getFS(newTbl))
+		s.NotEqual(initialFiles, finalFiles, "File lists should differ before and after partition overwrite operation")
+		s.Greater(len(finalFiles), len(initialFiles), "Partition overwrite should result in more files (current behavior)")
 		
 		// Current behavior: keeps both original and new files
 		expectedFiles := append(originalFiles, newFilePath)
@@ -516,6 +559,9 @@ func (s *WriteOperationsTestSuite) TestOverwriteFiles() {
 		// and replacing specific known files rather than discovering them dynamically
 		// In a real scenario, you'd use manifest information to determine which files to replace
 		
+		// Capture initial file list for comparison
+		initialFiles := s.getSnapshotFiles(initialSnapshot, s.getFS(tbl))
+		
 		// Replace with filtered data - using the known original files from table creation
 		tx := tbl.NewTransaction()
 		err = tx.ReplaceDataFiles(s.ctx, originalFiles, []string{consolidatedPath}, nil)
@@ -526,6 +572,11 @@ func (s *WriteOperationsTestSuite) TestOverwriteFiles() {
 		
 		// VALIDATE FINAL STATE WITH ENHANCED CHECKS
 		finalSnapshot := newTbl.CurrentSnapshot()
+		
+		// Assert that file lists differ before and after the operation
+		finalFiles := s.getSnapshotFiles(finalSnapshot, s.getFS(newTbl))
+		s.NotEqual(initialFiles, finalFiles, "File lists should differ before and after replace operation")
+		s.Greater(len(finalFiles), len(initialFiles), "Replace operation should result in more files (current behavior)")
 		
 		// Current behavior: keeps both original and replacement files
 		expectedFiles := append(originalFiles, consolidatedPath)
