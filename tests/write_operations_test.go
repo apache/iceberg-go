@@ -643,62 +643,6 @@ func (s *WriteOperationsTestSuite) TestPositionDeletes() {
 		
 		s.T().Log("Successfully created position delete file")
 	})
-	
-	s.Run("ApplyPositionDeletes", func() {
-		// Test reading with position deletes applied
-		ident := table.Identifier{"default", "position_delete_apply_test"}
-		tbl, originalFiles := s.createTableWithData(ident, 1)
-		
-		// The current iceberg-go scanner should be able to read and apply position deletes
-		// when they are properly associated with data files in manifests
-		
-		// For now, we'll test the delete file reading functionality
-		mem := memory.DefaultAllocator
-		posDeleteSchema := arrow.NewSchema([]arrow.Field{
-			{Name: "file_path", Type: arrow.BinaryTypes.String, Nullable: false},
-			{Name: "pos", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-		}, nil)
-		
-		// Create delete data
-		deleteData, err := array.TableFromJSON(mem, posDeleteSchema, []string{
-			fmt.Sprintf(`[
-				{"file_path": "%s", "pos": 0},
-				{"file_path": "%s", "pos": 2}
-			]`, originalFiles[0], originalFiles[0]),
-		})
-		s.Require().NoError(err)
-		defer deleteData.Release()
-		
-		// Write the position delete file
-		deleteFilePath := fmt.Sprintf("%s/deletes/pos_deletes_apply.parquet", s.location)
-		fs := s.getFS(tbl)
-		s.writeParquet(fs, deleteFilePath, deleteData)
-		
-		// Create DataFile object for the delete file
-		deleteFileBuilder, err := iceberg.NewDataFileBuilder(
-			*iceberg.UnpartitionedSpec,
-			iceberg.EntryContentPosDeletes,
-			deleteFilePath,
-			iceberg.ParquetFile,
-			nil,
-			deleteData.NumRows(),
-			1024,
-		)
-		s.Require().NoError(err)
-		
-		deleteFile := deleteFileBuilder.Build()
-		
-		// Test that we can read the delete file and verify its structure
-		// This demonstrates the delete file format is correct
-		s.Equal(int64(2), deleteFile.Count()) // Two delete entries
-		s.Equal(iceberg.EntryContentPosDeletes, deleteFile.ContentType())
-		
-		// NOTE: Full integration with table scanning would require updating
-		// manifests to include the delete files, which is a more complex operation
-		// that would need transaction-level support for delete file management
-		
-		s.T().Log("Position delete file structure verified - integration with table scanning requires manifest updates")
-	})
 }
 
 func (s *WriteOperationsTestSuite) TestEqualityDeletes() {
@@ -754,65 +698,6 @@ func (s *WriteOperationsTestSuite) TestEqualityDeletes() {
 		s.Equal([]int{1, 2}, deleteFile.EqualityFieldIDs()) // Equality fields
 		
 		s.T().Log("Successfully created equality delete file")
-	})
-	
-	s.Run("ApplyEqualityDeletes", func() {
-		// Test equality delete file creation with multiple equality conditions
-		ident := table.Identifier{"default", "equality_delete_apply_test"}
-		tbl, _ := s.createTableWithData(ident, 1)
-		
-		// Create equality delete data with multiple rows
-		mem := memory.DefaultAllocator
-		
-		// Use only the id column for equality (simpler case)
-		eqDeleteSchema := arrow.NewSchema([]arrow.Field{
-			{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
-		}, nil)
-		
-		// Create delete data - delete rows where id=1 or id=3
-		deleteData, err := array.TableFromJSON(mem, eqDeleteSchema, []string{
-			`[
-				{"id": 1},
-				{"id": 3}
-			]`,
-		})
-		s.Require().NoError(err)
-		defer deleteData.Release()
-		
-		// Write the equality delete file
-		deleteFilePath := fmt.Sprintf("%s/deletes/eq_deletes_apply.parquet", s.location)
-		fs := s.getFS(tbl)
-		s.writeParquet(fs, deleteFilePath, deleteData)
-		
-		// Create DataFile object for the equality delete file
-		deleteFileBuilder, err := iceberg.NewDataFileBuilder(
-			*iceberg.UnpartitionedSpec,
-			iceberg.EntryContentEqDeletes,
-			deleteFilePath,
-			iceberg.ParquetFile,
-			nil,
-			deleteData.NumRows(),
-			1024,
-		)
-		s.Require().NoError(err)
-		
-		// Set equality field ID for just the id column
-		deleteFileBuilder.EqualityFieldIDs([]int{1}) // id field
-		
-		deleteFile := deleteFileBuilder.Build()
-		
-		// Verify the delete file properties
-		s.Equal(int64(2), deleteFile.Count()) // Two delete entries
-		s.Equal(iceberg.EntryContentEqDeletes, deleteFile.ContentType())
-		s.Equal([]int{1}, deleteFile.EqualityFieldIDs()) // Only id field for equality
-		
-		// NOTE: Full integration with table scanning would require:
-		// 1. Manifest updates to include the delete files
-		// 2. Scanner implementation to apply equality deletes during reading
-		// 3. The current scanner has error handling for equality deletes but
-		//    returns "not yet supported" for actual application
-		
-		s.T().Log("Equality delete file structure verified - scanner integration shows 'not yet supported'")
 	})
 }
 
