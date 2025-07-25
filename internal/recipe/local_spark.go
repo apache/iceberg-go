@@ -19,17 +19,23 @@ package recipe
 
 import (
 	"bytes"
-	_ "embed"
 	"fmt"
 	"io"
 	"os"
 	"testing"
 
+	_ "embed"
+
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/client"
 	"github.com/testcontainers/testcontainers-go/modules/compose"
 )
 
 //go:embed docker-compose.yml
 var composeFile []byte
+
+const sparkContainer = "spark-iceberg"
 
 func Start(t *testing.T) (*compose.DockerCompose, error) {
 	if _, ok := os.LookupEnv("AWS_S3_ENDPOINT"); ok {
@@ -44,7 +50,7 @@ func Start(t *testing.T) (*compose.DockerCompose, error) {
 	if err := stack.Up(t.Context()); err != nil {
 		return stack, fmt.Errorf("fail to up compose: %w", err)
 	}
-	spark, err := stack.ServiceContainer(t.Context(), "spark-iceberg")
+	spark, err := stack.ServiceContainer(t.Context(), sparkContainer)
 	if err != nil {
 		return stack, fmt.Errorf("fail to find spark-iceberg: %w", err)
 	}
@@ -61,4 +67,69 @@ func Start(t *testing.T) (*compose.DockerCompose, error) {
 	t.Setenv("AWS_REGION", "us-east-1")
 
 	return stack, nil
+}
+
+func ExecuteSpark(t *testing.T, scriptPath string, args ...string) (string, error) {
+	cli, err := client.NewClientWithOpts(
+		client.FromEnv,
+		client.WithVersion("1.48"), // Use explicit version to avoid compatibility issues
+	)
+	if err != nil {
+		return "", err
+	}
+	defer func(cli *client.Client) {
+		err := cli.Close()
+		if err != nil {
+			t.Logf("failed to close docker client")
+		}
+	}(cli)
+
+	var sparkContainerID string
+	if _, ok := os.LookupEnv("SPARK_CONTAINER_ID"); ok {
+		sparkContainerID = os.Getenv("SPARK_CONTAINER_ID")
+		fmt.Printf("from env var: %s\n", sparkContainerID)
+	} else {
+		filter := filters.NewArgs(filters.Arg("name", sparkContainer))
+		containers, err := cli.ContainerList(t.Context(), container.ListOptions{
+			Filters: filter,
+		})
+		if err != nil {
+			return "", err
+		}
+		if len(containers) != 1 {
+			return "", fmt.Errorf("unable to find container: %s", sparkContainer)
+		}
+		sparkContainerID = containers[0].ID
+	}
+
+	response, err := cli.ContainerExecCreate(t.Context(), sparkContainerID, container.ExecOptions{
+		Cmd:          append([]string{"python", scriptPath}, args...),
+		AttachStdout: true,
+		AttachStderr: true,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	attachResp, err := cli.ContainerExecAttach(t.Context(), response.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return "", err
+	}
+	defer attachResp.Close()
+
+	output, err := io.ReadAll(attachResp.Reader)
+	if err != nil {
+		return "", err
+	}
+	fmt.Printf("%s\n", string(output))
+
+	inspect, err := cli.ContainerExecInspect(t.Context(), response.ID)
+	if err != nil {
+		return "", err
+	}
+	if inspect.ExitCode != 0 {
+		return "", fmt.Errorf("failed to execute script with exit code: %d", inspect.ExitCode)
+	}
+
+	return string(output), nil
 }
