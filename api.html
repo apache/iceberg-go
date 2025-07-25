@@ -203,7 +203,7 @@
 <li>Create and list namespaces.</li>
 <li>Create, load, and drop tables</li>
 </ul>
-<p>Currently only rest catalog has been implemented, and other catalogs are under active development. Here is an 
+<p>Currently, only the REST catalog has been implemented, and other catalogs are under active development. Here is an 
 example of how to create a <code>RestCatalog</code>:</p>
 <pre><code class="language-go">import (
     &quot;context&quot;
@@ -218,7 +218,7 @@ if err != nil {
     log.Fatal(err)
 }
 </code></pre>
-<p>You can run following code to list all root namespaces:</p>
+<p>You can run the following code to list all root namespaces:</p>
 <pre><code class="language-go">// List all root namespaces
 namespaces, err := cat.ListNamespaces(context.Background(), nil)
 if err != nil {
@@ -229,7 +229,7 @@ for _, ns := range namespaces {
     fmt.Printf(&quot;Namespace: %v\n&quot;, ns)
 }
 </code></pre>
-<p>Then you can run following code to create namespace:</p>
+<p>Then you can run the following code to create namespace:</p>
 <pre><code class="language-go">// Create a namespace
 namespace := catalog.ToIdentifier(&quot;my_namespace&quot;)
 err = cat.CreateNamespace(context.Background(), namespace, nil)
@@ -276,7 +276,7 @@ if err != nil {
 // Create Glue catalog
 cat := glue.NewCatalog(glue.WithAwsConfig(awsCfg))
 
-// Create table in Glue
+// Create a table in Glue
 tableIdent := catalog.ToIdentifier(&quot;my_database&quot;, &quot;my_table&quot;)
 tbl, err := cat.CreateTable(
     context.Background(),
@@ -290,7 +290,7 @@ if err != nil {
 </code></pre>
 <h1 id="table"><a class="header" href="#table">Table</a></h1>
 <p>After creating <code>Catalog</code>, we can manipulate tables through <code>Catalog</code>.</p>
-<p>You can use following code to create a table:</p>
+<p>You can use the following code to create a table:</p>
 <pre><code class="language-go">import (
     &quot;github.com/apache/iceberg-go&quot;
     &quot;github.com/apache/iceberg-go/catalog&quot;
@@ -304,10 +304,10 @@ schema := iceberg.NewSchemaWithIdentifiers(1, []int{2},
     iceberg.NestedField{ID: 3, Name: &quot;baz&quot;, Type: iceberg.PrimitiveTypes.Bool, Required: false},
 )
 
-// Create table identifier
+// Create a table identifier
 tableIdent := catalog.ToIdentifier(&quot;my_namespace&quot;, &quot;my_table&quot;)
 
-// Create table with optional properties
+// Create a table with optional properties
 tbl, err := cat.CreateTable(
     context.Background(),
     tableIdent,
@@ -409,7 +409,7 @@ fmt.Printf(&quot;Number of fields: %d\n&quot;, schema.NumFields())
 props := tbl.Properties()
 fmt.Printf(&quot;Owner: %s\n&quot;, props[&quot;owner&quot;])
 
-// Access current snapshot
+// Access the current snapshot
 if snapshot := tbl.CurrentSnapshot(); snapshot != nil {
     fmt.Printf(&quot;Current snapshot ID: %d\n&quot;, snapshot.SnapshotID)
     fmt.Printf(&quot;Snapshot timestamp: %d\n&quot;, snapshot.TimestampMs)
@@ -434,12 +434,12 @@ schema := iceberg.NewSchemaWithIdentifiers(1, []int{1},
     iceberg.NestedField{ID: 3, Name: &quot;date&quot;, Type: iceberg.PrimitiveTypes.Date, Required: false},
 )
 
-// Create partition spec
+// Create a partition spec
 partitionSpec := iceberg.NewPartitionSpec(
     iceberg.PartitionField{SourceID: 3, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: &quot;date&quot;},
 )
 
-// Create table with partitioning
+// Create a table with partitioning
 tbl, err := cat.CreateTable(
     context.Background(),
     tableIdent,
