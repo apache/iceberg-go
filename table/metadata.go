@@ -276,6 +276,7 @@ func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) (*MetadataBuilder, e
 			b.updates = append(b.updates, NewAddSchemaUpdate(schema))
 			b.lastAddedSchemaID = &newSchemaID
 		}
+
 		return b, nil
 	}
 
@@ -778,6 +779,7 @@ func (b *MetadataBuilder) reuseOrCreateNewSchemaID(newSchema *iceberg.Schema) in
 			newSchemaID = schema.ID + 1
 		}
 	}
+
 	return newSchemaID
 }
 
