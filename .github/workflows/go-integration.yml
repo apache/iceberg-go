@@ -21,7 +21,6 @@ on:
   push:
     branches:
       - 'main'
-      - 'local-spark-interops-test'
     tags:
       - 'v**'
   pull_request:
