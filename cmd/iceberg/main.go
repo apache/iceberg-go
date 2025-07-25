@@ -83,7 +83,13 @@ Options:
   --description TEXT 	specify a description for the namespace
   --location-uri TEXT  	specify a location URI for the namespace
   --schema JSON        	specify table schema in json (for create table use only)
-                       	Ex: [{"name":"id","type":"int","required":false,"doc":"unique id"}]`
+                       	Ex: [{"name":"id","type":"int","required":false,"doc":"unique id"}]
+  --properties TEXT 	specify table properties in key=value format (for create table use only)
+						Ex:"format-version=2,write.format.default=parquet"
+  --partition-spec TEXT specify partition spec as comma-separated field names(for create table use only)
+						Ex:"field1,field2"
+  --sort-order TEXT 	specify sort order as field:direction[:null-order] format(for create table use only)
+						Ex:"field1:asc,field2:desc:nulls-first,field3:asc:nulls-last"`
 
 type Config struct {
 	List     bool `docopt:"list"`
@@ -114,17 +120,20 @@ type Config struct {
 	PropName string `docopt:"PROPNAME"`
 	Value    string `docopt:"VALUE"`
 
-	Catalog     string `docopt:"--catalog"`
-	URI         string `docopt:"--uri"`
-	Output      string `docopt:"--output"`
-	History     bool   `docopt:"--history"`
-	Cred        string `docopt:"--credential"`
-	Warehouse   string `docopt:"--warehouse"`
-	Config      string `docopt:"--config"`
-	Scope       string `docopt:"--scope"`
-	Description string `docopt:"--description"`
-	LocationURI string `docopt:"--location-uri"`
-	SchemaStr   string `docopt:"--schema"`
+	Catalog       string `docopt:"--catalog"`
+	URI           string `docopt:"--uri"`
+	Output        string `docopt:"--output"`
+	History       bool   `docopt:"--history"`
+	Cred          string `docopt:"--credential"`
+	Warehouse     string `docopt:"--warehouse"`
+	Config        string `docopt:"--config"`
+	Scope         string `docopt:"--scope"`
+	Description   string `docopt:"--description"`
+	LocationURI   string `docopt:"--location-uri"`
+	SchemaStr     string `docopt:"--schema"`
+	TableProps    string `docopt:"--properties"`
+	PartitionSpec string `docopt:"--partition-spec"`
+	SortOrder     string `docopt:"--sort-order"`
 }
 
 func main() {
@@ -278,7 +287,31 @@ func main() {
 			if cfg.LocationURI != "" {
 				opts = append(opts, catalog.WithLocation(cfg.LocationURI))
 			}
-			// TODO: Support CreateTableOpt with table properties, partition spec & sort order
+			if cfg.TableProps != "" {
+				props, err := parseProperties(cfg.TableProps)
+				if err != nil {
+					output.Error(fmt.Errorf("failed to parse properties: %w", err))
+					os.Exit(1)
+				}
+				opts = append(opts, catalog.WithProperties(props))
+			}
+			if cfg.PartitionSpec != "" {
+				spec, err := parsePartitionSpec(cfg.PartitionSpec)
+				if err != nil {
+					output.Error(fmt.Errorf("failed to parse partition spec: %w", err))
+					os.Exit(1)
+				}
+				opts = append(opts, catalog.WithPartitionSpec(spec))
+			}
+
+			if cfg.SortOrder != "" {
+				sortOrder, err := parseSortOrder(cfg.SortOrder)
+				if err != nil {
+					output.Error(fmt.Errorf("failed to parse sort order: %w", err))
+					os.Exit(1)
+				}
+				opts = append(opts, catalog.WithSortOrder(sortOrder))
+			}
 
 			ident := catalog.ToIdentifier(cfg.Ident)
 			_, err = cat.CreateTable(ctx, ident, schema, opts...)
