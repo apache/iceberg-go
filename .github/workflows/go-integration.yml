@@ -55,9 +55,10 @@ jobs:
           docker compose -f internal/recipe/docker-compose.yml exec -T spark-iceberg ipython ./provision.py
           sleep 10
 
-      - name: Get minio container IP
+      - name: Setup environment variables
         run: |
           echo "AWS_S3_ENDPOINT=http://$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' minio):9000" >> $GITHUB_ENV
+          echo "SPARK_CONTAINER_ID=$(docker ps -qf 'name=spark-iceberg')" >> $GITHUB_ENV
 
       - name: Run integration tests
         env:
@@ -72,6 +73,7 @@ jobs:
         env:
           AWS_S3_ENDPOINT: "${{ env.AWS_S3_ENDPOINT }}"
           AWS_REGION: "us-east-1"
+          SPARK_CONTAINER_ID: "${{ env.SPARK_CONTAINER_ID }}"
         run: |
           go test -tags integration -v -run="^TestSparkIntegration" ./table
 
