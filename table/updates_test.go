@@ -145,7 +145,7 @@ func TestUnmarshalUpdates(t *testing.T) {
 			expected: Updates{
 				NewAddSchemaUpdate(iceberg.NewSchema(1,
 					iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.StringType{}, Required: true},
-				), false),
+				)),
 				NewAddPartitionSpecUpdate(
 					&spec, false),
 				NewAddSortOrderUpdate(&sortOrder, false),

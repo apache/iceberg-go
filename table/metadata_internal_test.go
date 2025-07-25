@@ -816,7 +816,6 @@ func TestMetadataBuilderSchemaIncreasingNumbering(t *testing.T) {
 	assert.Equal(t, 1, builder.schemaList[0].ID)
 	assert.Equal(t, 3, builder.schemaList[1].ID)
 	assert.Equal(t, 4, builder.schemaList[2].ID)
-
 }
 
 func TestMetadataBuilderReuseSchema(t *testing.T) {
@@ -834,7 +833,6 @@ func TestMetadataBuilderReuseSchema(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, len(builder.schemaList), 1)
 	assert.Equal(t, *builder.lastAddedSchemaID, 1)
-
 }
 
 func TestMetadataV1Validation(t *testing.T) {
