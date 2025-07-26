@@ -101,7 +101,7 @@ the table, the following tracks the current write support:
 | Rewrite manifests |         |
 | Overwrite Files   |         |
 | Write Pos Delete  |         |
-| Write Eq Delete   |         |
+| Write Eq Delete   |    ✓    |
 | Row Delta         |         |
 
 

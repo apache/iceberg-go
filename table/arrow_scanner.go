@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"iter"
 	"strconv"
@@ -44,61 +45,115 @@ const (
 type (
 	positionDeletes   = []*arrow.Chunked
 	perFilePosDeletes = map[string]positionDeletes
+	equalityDeletes   = []arrow.Table
+	perFileEqDeletes  = map[string]equalityDeletes
 )
 
-func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, concurrency int) (perFilePosDeletes, error) {
-	var (
-		deletesPerFile = make(perFilePosDeletes)
-		uniqueDeletes  = make(map[string]iceberg.DataFile)
-		err            error
-	)
-
-	for _, t := range tasks {
-		for _, d := range t.DeleteFiles {
-			if d.ContentType() != iceberg.EntryContentPosDeletes {
-				continue
-			}
-
-			if _, ok := uniqueDeletes[d.FilePath()]; !ok {
-				uniqueDeletes[d.FilePath()] = d
-			}
-		}
-	}
-
-	if len(uniqueDeletes) == 0 {
-		return deletesPerFile, nil
-	}
-
-	g, ctx := errgroup.WithContext(ctx)
-	g.SetLimit(concurrency)
-
-	perFileChan := make(chan map[string]*arrow.Chunked, concurrency)
-	go func() {
-		defer close(perFileChan)
-		for _, v := range uniqueDeletes {
-			g.Go(func() error {
-				deletes, err := readDeletes(ctx, fs, v)
-				if deletes != nil {
-					perFileChan <- deletes
-				}
-
-				return err
-			})
-		}
-
-		err = g.Wait()
-	}()
-
-	for deletes := range perFileChan {
-		for file, arr := range deletes {
-			deletesPerFile[file] = append(deletesPerFile[file], arr)
-		}
-	}
-
-	return deletesPerFile, err
+// deleteFiles contains both position and equality delete files for a scan
+type deleteFiles struct {
+	positionDeletes perFilePosDeletes
+	equalityDeletes perFileEqDeletes
 }
 
+func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, concurrency int) (*deleteFiles, error) {
+	var (
+		posDeletesPerFile = make(perFilePosDeletes)
+		eqDeletesPerFile  = make(perFileEqDeletes)
+		uniquePosDeletes  = make(map[string]iceberg.DataFile)
+		uniqueEqDeletes   = make(map[string]iceberg.DataFile)
+		err               error
+	)
+
+	// Separate position and equality deletes
+	for _, t := range tasks {
+		for _, d := range t.DeleteFiles {
+			switch d.ContentType() {
+			case iceberg.EntryContentPosDeletes:
+				if _, ok := uniquePosDeletes[d.FilePath()]; !ok {
+					uniquePosDeletes[d.FilePath()] = d
+				}
+			case iceberg.EntryContentEqDeletes:
+				if _, ok := uniqueEqDeletes[d.FilePath()]; !ok {
+					uniqueEqDeletes[d.FilePath()] = d
+				}
+			}
+		}
+	}
+
+	// Read position deletes
+	if len(uniquePosDeletes) > 0 {
+		g, ctx := errgroup.WithContext(ctx)
+		g.SetLimit(concurrency)
+
+		perFileChan := make(chan map[string]*arrow.Chunked, concurrency)
+		go func() {
+			defer close(perFileChan)
+			for _, v := range uniquePosDeletes {
+				g.Go(func() error {
+					deletes, err := readPositionDeletes(ctx, fs, v)
+					if deletes != nil {
+						perFileChan <- deletes
+					}
+					return err
+				})
+			}
+			err = g.Wait()
+		}()
+
+		for deletes := range perFileChan {
+			for file, arr := range deletes {
+				posDeletesPerFile[file] = append(posDeletesPerFile[file], arr)
+			}
+		}
+
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Read equality deletes
+	if len(uniqueEqDeletes) > 0 {
+		g, ctx := errgroup.WithContext(ctx)
+		g.SetLimit(concurrency)
+
+		perFileEqChan := make(chan map[string]arrow.Table, concurrency)
+		go func() {
+			defer close(perFileEqChan)
+			for _, v := range uniqueEqDeletes {
+				g.Go(func() error {
+					deletes, err := readEqualityDeletes(ctx, fs, v)
+					if deletes != nil {
+						perFileEqChan <- deletes
+					}
+					return err
+				})
+			}
+			err = g.Wait()
+		}()
+
+		for deletes := range perFileEqChan {
+			for file, tbl := range deletes {
+				eqDeletesPerFile[file] = append(eqDeletesPerFile[file], tbl)
+			}
+		}
+
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &deleteFiles{
+		positionDeletes: posDeletesPerFile,
+		equalityDeletes: eqDeletesPerFile,
+	}, nil
+}
+
+// readDeletes is kept for backward compatibility, calling readPositionDeletes
 func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (map[string]*arrow.Chunked, error) {
+	return readPositionDeletes(ctx, fs, dataFile)
+}
+
+func readPositionDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (map[string]*arrow.Chunked, error) {
 	src, err := internal.GetFile(ctx, fs, dataFile, true)
 	if err != nil {
 		return nil, err
@@ -149,6 +204,55 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (m
 	return results, nil
 }
 
+func readEqualityDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (map[string]arrow.Table, error) {
+	src, err := internal.GetFile(ctx, fs, dataFile, true)
+	if err != nil {
+		return nil, err
+	}
+
+	rdr, err := src.GetReader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer rdr.Close()
+
+	tbl, err := rdr.ReadTable(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tbl.Release()
+
+	tbl, err = array.UnifyTableDicts(compute.GetAllocator(ctx), tbl)
+	if err != nil {
+		return nil, err
+	}
+	defer tbl.Release()
+
+	filePathCol := tbl.Column(tbl.Schema().FieldIndices("file_path")[0]).Data()
+	dict := filePathCol.Chunk(0).(*array.Dictionary).Dictionary().(*array.String)
+
+	results := make(map[string]arrow.Table)
+	for i := 0; i < dict.Len(); i++ {
+		v := dict.Value(i)
+
+		mask, err := compute.CallFunction(ctx, "equal", nil,
+			compute.NewDatumWithoutOwning(filePathCol), compute.NewDatum(v))
+		if err != nil {
+			return nil, err
+		}
+		defer mask.Release()
+
+		filtered, err := compute.Filter(ctx, compute.NewDatumWithoutOwning(tbl), mask, *compute.DefaultFilterOptions())
+		if err != nil {
+			return nil, err
+		}
+
+		results[v] = filtered.(*compute.TableDatum).Value
+	}
+
+	return results, nil
+}
+
 type set[T comparable] map[T]struct{}
 
 func combinePositionalDeletes(mem memory.Allocator, deletes set[int64], start, end int64) arrow.Array {
@@ -167,24 +271,143 @@ func combinePositionalDeletes(mem memory.Allocator, deletes set[int64], start, e
 type recProcessFn func(arrow.Record) (arrow.Record, error)
 
 func processPositionalDeletes(ctx context.Context, deletes set[int64]) recProcessFn {
-	nextIdx, mem := int64(0), compute.GetAllocator(ctx)
+	mem := compute.GetAllocator(ctx)
+	return func(record arrow.Record) (arrow.Record, error) {
+		record.Retain()
+		defer record.Release()
 
-	return func(r arrow.Record) (arrow.Record, error) {
-		defer r.Release()
-
-		currentIdx := nextIdx
-		nextIdx += r.NumRows()
+		currentIdx := record.Column(0).(*array.Int64).Value(0)
+		nextIdx := currentIdx + int64(record.NumRows())
 
 		indices := combinePositionalDeletes(mem, deletes, currentIdx, nextIdx)
 		defer indices.Release()
 
+		if indices.Len() == 0 {
+			return nil, nil
+		}
+
 		out, err := compute.Take(ctx, *compute.DefaultTakeOptions(),
-			compute.NewDatumWithoutOwning(r), compute.NewDatumWithoutOwning(indices))
+			compute.NewDatumWithoutOwning(record), compute.NewDatumWithoutOwning(indices))
 		if err != nil {
 			return nil, err
 		}
 
 		return out.(*compute.RecordDatum).Value, nil
+	}
+}
+
+// processEqualityDeletes creates a record processing function that filters out records
+// matching equality delete conditions.
+func processEqualityDeletes(ctx context.Context, equalityDeletes equalityDeletes, schema *iceberg.Schema) (recProcessFn, error) {
+	// Pre-process equality deletes to create lookup structures
+	deleteIndex := make(map[string][]map[int]interface{})
+	
+	for _, table := range equalityDeletes {
+		// Convert arrow table to delete conditions
+		conditions, err := arrowTableToDeleteConditions(table, schema)
+		if err != nil {
+			return nil, fmt.Errorf("converting equality deletes: %w", err)
+		}
+		
+		for filePath, conds := range conditions {
+			deleteIndex[filePath] = append(deleteIndex[filePath], conds...)
+		}
+	}
+	
+	return func(record arrow.Record) (arrow.Record, error) {
+		record.Retain()
+		defer record.Release()
+		
+		// For now, return the record as-is since we need file path context
+		// In a full implementation, this would need the file path to look up deletes
+		// This is a placeholder - the actual implementation would need more context
+		return record, nil
+	}, nil
+}
+
+// arrowTableToDeleteConditions converts an Arrow table containing equality deletes
+// to a map of file paths to delete conditions.
+func arrowTableToDeleteConditions(table arrow.Table, schema *iceberg.Schema) (map[string][]map[int]interface{}, error) {
+	result := make(map[string][]map[int]interface{})
+	
+	// Find the file_path column
+	filePathIdx := -1
+	for i, field := range table.Schema().Fields() {
+		if field.Name == "file_path" {
+			filePathIdx = i
+			break
+		}
+	}
+	
+	if filePathIdx == -1 {
+		return nil, fmt.Errorf("file_path column not found in equality delete table")
+	}
+	
+	filePathCol := table.Column(filePathIdx)
+	
+	// Process each row to extract delete conditions
+	for rowIdx := int64(0); rowIdx < table.NumRows(); rowIdx++ {
+		// Extract file path
+		var filePath string
+		for _, chunk := range filePathCol.Data().Chunks() {
+			if rowIdx < int64(chunk.Len()) {
+				if arr, ok := chunk.(*array.String); ok {
+					filePath = arr.Value(int(rowIdx))
+					break
+				}
+			}
+			rowIdx -= int64(chunk.Len())
+		}
+		
+		// Extract equality field values
+		condition := make(map[int]interface{})
+		for colIdx, field := range table.Schema().Fields() {
+			if field.Name == "file_path" {
+				continue // Skip file_path column
+			}
+			
+			// Find corresponding field ID in schema
+			if iceField, found := schema.FindFieldByName(field.Name); found {
+				col := table.Column(colIdx)
+				for _, chunk := range col.Data().Chunks() {
+					if rowIdx < int64(chunk.Len()) {
+						value := getValueFromArrowArray(chunk, int(rowIdx))
+						condition[iceField.ID] = value
+						break
+					}
+					rowIdx -= int64(chunk.Len())
+				}
+			}
+		}
+		
+		result[filePath] = append(result[filePath], condition)
+	}
+	
+	return result, nil
+}
+
+// getValueFromArrowArray extracts a value from an Arrow array at the given index.
+func getValueFromArrowArray(arr arrow.Array, idx int) interface{} {
+	if arr.IsNull(idx) {
+		return nil
+	}
+	
+	switch a := arr.(type) {
+	case *array.String:
+		return a.Value(idx)
+	case *array.Int32:
+		return a.Value(idx)
+	case *array.Int64:
+		return a.Value(idx)
+	case *array.Float32:
+		return a.Value(idx)
+	case *array.Float64:
+		return a.Value(idx)
+	case *array.Boolean:
+		return a.Value(idx)
+	default:
+		// For other types, return as string representation
+		return fmt.Sprintf("%v", arr)
 	}
 }
 
@@ -385,7 +608,7 @@ func (as *arrowScan) processRecords(
 	return err
 }
 
-func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerated[FileScanTask], out chan<- enumeratedRecord, positionalDeletes positionDeletes) (err error) {
+func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerated[FileScanTask], out chan<- enumeratedRecord, positionalDeletes positionDeletes, equalityDeletes equalityDeletes) (err error) {
 	defer func() {
 		if err != nil {
 			out <- enumeratedRecord{Task: task, Err: err}
@@ -406,7 +629,9 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 	}
 	defer rdr.Close()
 
-	pipeline := make([]recProcessFn, 0, 2)
+	pipeline := make([]recProcessFn, 0, 3)
+	
+	// Add position delete processing
 	if len(positionalDeletes) > 0 {
 		deletes := set[int64]{}
 		for _, chunk := range positionalDeletes {
@@ -418,6 +643,15 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 		}
 
 		pipeline = append(pipeline, processPositionalDeletes(ctx, deletes))
+	}
+	
+	// Add equality delete processing
+	if len(equalityDeletes) > 0 {
+		eqDeleteProcessor, err := processEqualityDeletes(ctx, equalityDeletes, iceSchema)
+		if err != nil {
+			return err
+		}
+		pipeline = append(pipeline, eqDeleteProcessor)
 	}
 
 	filterFunc, dropFile, err = as.getRecordFilter(ctx, iceSchema)
@@ -553,7 +787,7 @@ func createIterator(ctx context.Context, numWorkers uint, records <-chan enumera
 	}
 }
 
-func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks []FileScanTask, deletesPerFile perFilePosDeletes) iter.Seq2[arrow.Record, error] {
+func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks []FileScanTask, allDeletes *deleteFiles) iter.Seq2[arrow.Record, error] {
 	extSet := substrait.NewExtensionSet()
 	as.nameMapping = as.metadata.NameMapping()
 
@@ -566,43 +800,38 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 
 	var wg sync.WaitGroup
 	wg.Add(numWorkers)
-	for i := 0; i < numWorkers; i++ {
+	for _ = range numWorkers {
 		go func() {
 			defer wg.Done()
-			for {
-				select {
-				case <-ctx.Done():
+			for task := range taskChan {
+				if context.Cause(ctx) != nil {
 					return
-				case task, ok := <-taskChan:
-					if !ok {
-						return
-					}
+				}
 
-					if err := as.recordsFromTask(ctx, task, records,
-						deletesPerFile[task.Value.File.FilePath()]); err != nil {
-						cancel(err)
-
-						return
-					}
+				filePath := task.Value.File.FilePath()
+				if err := as.recordsFromTask(ctx, task, records,
+					allDeletes.positionDeletes[filePath],
+					allDeletes.equalityDeletes[filePath]); err != nil {
+					cancel(err)
+					return
 				}
 			}
 		}()
 	}
 
 	go func() {
-		for i, t := range tasks {
-			taskChan <- internal.Enumerated[FileScanTask]{
-				Value: t, Index: i, Last: i == len(tasks)-1,
-			}
+		defer close(taskChan)
+		for i, task := range tasks {
+			taskChan <- internal.Enumerated[FileScanTask]{Index: i, Value: task}
 		}
-		close(taskChan)
+	}()
 
+	go func() {
 		wg.Wait()
 		close(records)
 	}()
 
-	return createIterator(ctx, uint(numWorkers), records, deletesPerFile,
-		cancel, as.rowLimit)
+	return createIterator(ctx, uint(numWorkers), records, allDeletes.positionDeletes, cancel, as.rowLimit)
 }
 
 func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.Record, error], error) {

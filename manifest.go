@@ -2000,3 +2000,32 @@ var PositionalDeleteSchema = NewSchema(0,
 	NestedField{ID: 2147483546, Type: PrimitiveTypes.String, Name: "file_path", Required: true},
 	NestedField{ID: 2147483545, Type: PrimitiveTypes.Int32, Name: "pos", Required: true},
 )
+
+// EqualityDeleteSchema creates a schema for equality delete files.
+// It includes the file_path field and all the equality fields from the table schema.
+func EqualityDeleteSchema(equalityFieldIDs []int, tableSchema *Schema) *Schema {
+	fields := make([]NestedField, 0, len(equalityFieldIDs)+1)
+	
+	// Add file_path field (same as position deletes)
+	fields = append(fields, NestedField{
+		ID:       2147483546,
+		Type:     PrimitiveTypes.String,
+		Name:     "file_path",
+		Required: true,
+	})
+	
+	// Add equality fields from the table schema
+	for _, fieldID := range equalityFieldIDs {
+		if field, found := tableSchema.FindFieldByID(fieldID); found {
+			// Use the same field ID, type, and name but make it required for equality comparison
+			fields = append(fields, NestedField{
+				ID:       fieldID,
+				Type:     field.Type,
+				Name:     field.Name,
+				Required: true, // Equality fields must be non-null for comparison
+			})
+		}
+	}
+	
+	return NewSchema(0, fields...)
+}
