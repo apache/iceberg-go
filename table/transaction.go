@@ -146,6 +146,11 @@ func (t *Transaction) UpdateSpec(caseSensitive bool) *UpdateSpec {
 	return NewUpdateSpec(t, caseSensitive)
 }
 
+// NewReplacePartitions creates a new replace partitions operation for this transaction
+func (t *Transaction) NewReplacePartitions() ReplacePartitions {
+	return NewReplacePartitions(t)
+}
+
 func (t *Transaction) AppendTable(ctx context.Context, tbl arrow.Table, batchSize int64, snapshotProps iceberg.Properties) error {
 	rdr := array.NewTableReader(tbl, batchSize)
 	defer rdr.Release()

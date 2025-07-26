@@ -92,6 +92,12 @@ func (t Table) NewTransaction() *Transaction {
 	}
 }
 
+// NewReplacePartitions creates a new replace partitions operation within a new transaction
+func (t Table) NewReplacePartitions() ReplacePartitions {
+	txn := t.NewTransaction()
+	return NewReplacePartitions(txn)
+}
+
 // AppendTable is a shortcut for NewTransaction().AppendTable() and then committing the transaction
 func (t Table) AppendTable(ctx context.Context, tbl arrow.Table, batchSize int64, snapshotProps iceberg.Properties) (*Table, error) {
 	txn := t.NewTransaction()
