@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/apache/iceberg-go"
 	"github.com/google/uuid"
 )
 
@@ -35,6 +36,8 @@ const (
 	reqAssertDefaultSortOrderID      = "assert-default-sort-order-id"
 	reqAssertLastAssignedFieldID     = "assert-last-assigned-field-id"
 	reqAssertLastAssignedPartitionID = "assert-last-assigned-partition-id"
+	reqAssertNoConflictingData       = "assert-no-conflicting-data"
+	reqAssertNoConflictingDeletes    = "assert-no-conflicting-deletes"
 )
 
 var ErrInvalidRequirement = errors.New("invalid requirement")
@@ -80,6 +83,10 @@ func (r *Requirements) UnmarshalJSON(data []byte) error {
 			req = &assertLastAssignedFieldId{}
 		case reqAssertLastAssignedPartitionID:
 			req = &assertLastAssignedPartitionId{}
+		case reqAssertNoConflictingData:
+			req = &assertNoConflictingData{}
+		case reqAssertNoConflictingDeletes:
+			req = &assertNoConflictingDeletes{}
 		default:
 			return fmt.Errorf("unknown requirement type: %s", base.Type)
 		}
@@ -323,6 +330,90 @@ func (a *assertDefaultSortOrderId) Validate(meta Metadata) error {
 	return nil
 }
 
+type assertNoConflictingData struct {
+	baseRequirement
+	FromSnapshotID *int64                       `json:"from-snapshot-id,omitempty"`
+	Filter         iceberg.BooleanExpression    `json:"conflict-detection-filter,omitempty"`
+}
+
+// AssertNoConflictingData creates a requirement that validates no concurrent data
+// additions conflict with the current operation.
+func AssertNoConflictingData(fromSnapshotID *int64, filter iceberg.BooleanExpression) Requirement {
+	return &assertNoConflictingData{
+		baseRequirement: baseRequirement{Type: reqAssertNoConflictingData},
+		FromSnapshotID:  fromSnapshotID,
+		Filter:          filter,
+	}
+}
+
+func (a *assertNoConflictingData) Validate(meta Metadata) error {
+	if meta == nil {
+		return errors.New("requirement failed: current table metadata does not exist")
+	}
+
+	// Get the baseline snapshot for validation
+	fromID := int64(-1)
+	if a.FromSnapshotID != nil {
+		fromID = *a.FromSnapshotID
+	}
+
+	// Check all snapshots after the baseline
+	snapshots := meta.Snapshots()
+	for _, snapshot := range snapshots {
+		if snapshot.SnapshotID > fromID {
+			// This would need implementation to check actual data files
+			// For now, we'll do a basic validation
+			if snapshot.Summary != nil && snapshot.Summary.Operation == OpAppend {
+				return fmt.Errorf("conflicting data addition detected in snapshot %d", snapshot.SnapshotID)
+			}
+		}
+	}
+
+	return nil
+}
+
+type assertNoConflictingDeletes struct {
+	baseRequirement
+	FromSnapshotID *int64                       `json:"from-snapshot-id,omitempty"`
+	Filter         iceberg.BooleanExpression    `json:"conflict-detection-filter,omitempty"`
+}
+
+// AssertNoConflictingDeletes creates a requirement that validates no concurrent delete
+// operations conflict with the current operation.
+func AssertNoConflictingDeletes(fromSnapshotID *int64, filter iceberg.BooleanExpression) Requirement {
+	return &assertNoConflictingDeletes{
+		baseRequirement: baseRequirement{Type: reqAssertNoConflictingDeletes},
+		FromSnapshotID:  fromSnapshotID,
+		Filter:          filter,
+	}
+}
+
+func (a *assertNoConflictingDeletes) Validate(meta Metadata) error {
+	if meta == nil {
+		return errors.New("requirement failed: current table metadata does not exist")
+	}
+
+	// Get the baseline snapshot for validation
+	fromID := int64(-1)
+	if a.FromSnapshotID != nil {
+		fromID = *a.FromSnapshotID
+	}
+
+	// Check all snapshots after the baseline
+	snapshots := meta.Snapshots()
+	for _, snapshot := range snapshots {
+		if snapshot.SnapshotID > fromID {
+			// This would need implementation to check actual delete files
+			// For now, we'll do a basic validation
+			if snapshot.Summary != nil && (snapshot.Summary.Operation == OpDelete || snapshot.Summary.Operation == OpOverwrite) {
+				return fmt.Errorf("conflicting delete operation detected in snapshot %d", snapshot.SnapshotID)
+			}
+		}
+	}
+
+	return nil
+}
+
 // ParseRequirement parses json data provided by the reader into a Requirement
 func ParseRequirement(r io.Reader) (Requirement, error) {
 	data, err := io.ReadAll(r)
@@ -404,6 +495,22 @@ func ParseRequirementBytes(b []byte) (Requirement, error) {
 		}
 
 		return AssertLastAssignedPartitionID(req.LastAssignedPartitionID), nil
+
+	case reqAssertNoConflictingData:
+		var req assertNoConflictingData
+		if err := json.Unmarshal(b, &req); err != nil {
+			return nil, err
+		}
+
+		return AssertNoConflictingData(req.FromSnapshotID, req.Filter), nil
+
+	case reqAssertNoConflictingDeletes:
+		var req assertNoConflictingDeletes
+		if err := json.Unmarshal(b, &req); err != nil {
+			return nil, err
+		}
+
+		return AssertNoConflictingDeletes(req.FromSnapshotID, req.Filter), nil
 	}
 
 	return nil, ErrInvalidRequirement

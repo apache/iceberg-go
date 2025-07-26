@@ -57,6 +57,10 @@ func (s snapshotUpdate) mergeAppend() *snapshotProducer {
 	return newMergeAppendFilesProducer(OpAppend, s.txn, s.io, nil, s.snapshotProps)
 }
 
+func (s snapshotUpdate) rewriteFiles(commitUUID *uuid.UUID) *snapshotProducer {
+	return newRewriteFilesProducer(OpOverwrite, s.txn, s.io, commitUUID, s.snapshotProps)
+}
+
 type Transaction struct {
 	tbl  *Table
 	meta *MetadataBuilder
@@ -345,6 +349,84 @@ func (t *Transaction) AddFiles(ctx context.Context, files []string, snapshotProp
 	}
 
 	return t.apply(updates, reqs)
+}
+
+// OverwriteFiles creates a new OverwriteFiles instance for rewriting files with conflict detection.
+func (t *Transaction) OverwriteFiles(snapshotProps iceberg.Properties) OverwriteFiles {
+	fs, err := t.tbl.fsF(context.Background())
+	if err != nil {
+		// Return a dummy implementation that will fail on commit
+		return &BaseOverwriteFiles{txn: t, snapshotProps: snapshotProps}
+	}
+	
+	return NewOverwriteFiles(t, fs.(io.WriteFileIO), snapshotProps)
+}
+
+// commitRewriteFiles commits a rewrite files operation with conflict detection.
+func (t *Transaction) commitRewriteFiles(ctx context.Context, addedFiles []iceberg.DataFile, deletedFiles map[string]iceberg.DataFile, snapshotProps iceberg.Properties) (*Table, error) {
+	fs, err := t.tbl.fsF(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create a rewrite files snapshot producer
+	updater := t.updateSnapshot(fs, snapshotProps).rewriteFiles(nil)
+	
+	// Add all the new files
+	for _, df := range addedFiles {
+		updater.appendDataFile(df)
+	}
+	
+	// Delete all the specified files
+	for _, df := range deletedFiles {
+		updater.deleteDataFile(df)
+	}
+
+	updates, reqs, err := updater.commit()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := t.apply(updates, reqs); err != nil {
+		return nil, err
+	}
+
+	return t.Commit(ctx)
+}
+
+// commitRewriteFilesWithRequirements commits a rewrite files operation with specific requirements.
+func (t *Transaction) commitRewriteFilesWithRequirements(ctx context.Context, addedFiles []iceberg.DataFile, deletedFiles map[string]iceberg.DataFile, snapshotProps iceberg.Properties, requirements []Requirement) (*Table, error) {
+	fs, err := t.tbl.fsF(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create a rewrite files snapshot producer
+	updater := t.updateSnapshot(fs, snapshotProps).rewriteFiles(nil)
+	
+	// Add all the new files
+	for _, df := range addedFiles {
+		updater.appendDataFile(df)
+	}
+	
+	// Delete all the specified files
+	for _, df := range deletedFiles {
+		updater.deleteDataFile(df)
+	}
+
+	updates, reqs, err := updater.commit()
+	if err != nil {
+		return nil, err
+	}
+
+	// Merge with provided requirements
+	allReqs := append(reqs, requirements...)
+
+	if err := t.apply(updates, allReqs); err != nil {
+		return nil, err
+	}
+
+	return t.Commit(ctx)
 }
 
 func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
