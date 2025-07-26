@@ -1422,3 +1422,147 @@ func (t *TableWritingTestSuite) TestDeleteOldMetadataNoErrorLogsOnFileFound() {
 	t.NotContains(logOutput, "Warning: Failed to delete old metadata file")
 	t.NotContains(logOutput, "no such file or directory")
 }
+
+func (t *TableWritingTestSuite) TestOverwriteFilesBasic() {
+	ident := table.Identifier{"default", "overwrite_files_basic_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	// First, add some files
+	files := make([]string, 0)
+	for i := range 3 {
+		filePath := fmt.Sprintf("%s/overwrite_basic/test-%d.parquet", t.location, i)
+		t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, t.arrTbl)
+		files = append(files, filePath)
+	}
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddFiles(t.ctx, files, nil, false))
+	tbl, err := tx.Commit(t.ctx)
+	t.Require().NoError(err)
+
+	// Now use OverwriteFiles to replace some files
+	newFiles := make([]string, 0)
+	for i := range 2 {
+		filePath := fmt.Sprintf("%s/overwrite_basic/new-%d.parquet", t.location, i)
+		t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, t.arrTbl)
+		newFiles = append(newFiles, filePath)
+	}
+
+	// Get original data files to delete
+	dataFiles := make([]iceberg.DataFile, 0)
+	for df, err := range tbl.CurrentSnapshot().DataFiles(mustFS(t.T(), tbl), nil) {
+		t.Require().NoError(err)
+		dataFiles = append(dataFiles, df)
+	}
+
+	// Create overwrite operation
+	overwrite := tbl.OverwriteFiles(nil)
+	
+	// Add new files
+	for _, filePath := range newFiles {
+		// Convert file path to DataFile - simplified for test
+		// In real usage, you'd properly read the parquet file metadata
+		df := &testDataFile{filePath: filePath}
+		overwrite.AddFile(df)
+	}
+
+	// Delete first two original files
+	for i := 0; i < 2; i++ {
+		overwrite.DeleteFile(dataFiles[i])
+	}
+
+	// Commit the overwrite
+	resultTbl, err := overwrite.Commit(t.ctx)
+	t.Require().NoError(err)
+	t.NotNil(resultTbl)
+
+	// Verify the results
+	currentSnapshot := resultTbl.CurrentSnapshot()
+	t.NotNil(currentSnapshot)
+	t.Equal(table.OpOverwrite, currentSnapshot.Summary.Operation)
+}
+
+func (t *TableWritingTestSuite) TestOverwriteFilesWithConflictDetection() {
+	ident := table.Identifier{"default", "overwrite_files_conflict_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	// First, add some files
+	files := make([]string, 0)
+	for i := range 3 {
+		filePath := fmt.Sprintf("%s/overwrite_conflict/test-%d.parquet", t.location, i)
+		t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, t.arrTbl)
+		files = append(files, filePath)
+	}
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddFiles(t.ctx, files, nil, false))
+	tbl, err := tx.Commit(t.ctx)
+	t.Require().NoError(err)
+
+	// Get the current snapshot for validation
+	currentSnapshot := tbl.CurrentSnapshot()
+	baseSnapshotId := currentSnapshot.SnapshotID
+
+	// Create overwrite operation with conflict detection
+	overwrite := tbl.OverwriteFiles(nil).
+		ValidateFromSnapshot(baseSnapshotId).
+		ValidateNoConflictingData().
+		ValidateNoConflictingDeletes()
+
+	// Add a new file
+	newFilePath := fmt.Sprintf("%s/overwrite_conflict/new.parquet", t.location)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), newFilePath, t.arrTbl)
+	
+	df := &testDataFile{filePath: newFilePath}
+	overwrite.AddFile(df)
+
+	// This should succeed since there are no conflicts
+	resultTbl, err := overwrite.Commit(t.ctx)
+	t.Require().NoError(err)
+	t.NotNil(resultTbl)
+}
+
+func (t *TableWritingTestSuite) TestOverwriteFilesWithRowFilter() {
+	ident := table.Identifier{"default", "overwrite_files_filter_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	// Create overwrite operation with row filter
+	overwrite := tbl.OverwriteFiles(nil).
+		OverwriteByRowFilter(iceberg.Equal(iceberg.Reference("baz"), iceberg.NewLiteralFromValue(123))).
+		ValidateAddedFilesMatchOverwriteFilter()
+
+	// Add a new file
+	newFilePath := fmt.Sprintf("%s/overwrite_filter/new.parquet", t.location)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), newFilePath, t.arrTbl)
+	
+	df := &testDataFile{filePath: newFilePath}
+	overwrite.AddFile(df)
+
+	// This should succeed (validation is basic for now)
+	resultTbl, err := overwrite.Commit(t.ctx)
+	t.Require().NoError(err)
+	t.NotNil(resultTbl)
+}
+
+// testDataFile is a minimal implementation of iceberg.DataFile for testing
+type testDataFile struct {
+	filePath string
+}
+
+func (t *testDataFile) ContentType() iceberg.EntryContent { return iceberg.EntryContentData }
+func (t *testDataFile) FilePath() string                  { return t.filePath }
+func (t *testDataFile) FileFormat() iceberg.FileFormat   { return iceberg.ParquetFile }
+func (t *testDataFile) Partition() map[int]any           { return make(map[int]any) }
+func (t *testDataFile) RecordCount() int64               { return 1 }
+func (t *testDataFile) FileSizeBytes() int64             { return 1000 }
+func (t *testDataFile) ColumnSizes() map[int]int64       { return make(map[int]int64) }
+func (t *testDataFile) ValueCounts() map[int]int64       { return make(map[int]int64) }
+func (t *testDataFile) NullValueCounts() map[int]int64   { return make(map[int]int64) }
+func (t *testDataFile) NaNValueCounts() map[int]int64    { return make(map[int]int64) }
+func (t *testDataFile) LowerBounds() map[int][]byte      { return make(map[int][]byte) }
+func (t *testDataFile) UpperBounds() map[int][]byte      { return make(map[int][]byte) }
+func (t *testDataFile) KeyMetadata() []byte              { return nil }
+func (t *testDataFile) SplitOffsets() []int64            { return nil }
+func (t *testDataFile) EqualityIDs() []int               { return nil }
+func (t *testDataFile) SortOrderID() *int                { return nil }
+func (t *testDataFile) SpecID() int32                    { return 0 }

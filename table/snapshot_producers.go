@@ -410,6 +410,143 @@ func (m *mergeAppendFiles) processManifests(manifests []iceberg.ManifestFile) ([
 	return append(result, unmergedDeleteManifests...), nil
 }
 
+type rewriteFiles struct {
+	base *snapshotProducer
+}
+
+func newRewriteFilesProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties) *snapshotProducer {
+	prod := createSnapshotProducer(op, txn, fs, commitUUID, snapshotProps)
+	prod.producerImpl = &rewriteFiles{base: prod}
+
+	return prod
+}
+
+func (rf *rewriteFiles) processManifests(manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
+	// no post processing for rewrite files
+	return manifests, nil
+}
+
+func (rf *rewriteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
+	// Similar to overwriteFiles but for rewrite operations
+	// determine if there are any existing manifest files
+	existingFiles := make([]iceberg.ManifestFile, 0)
+
+	snap := rf.base.txn.meta.currentSnapshot()
+	if snap == nil {
+		return existingFiles, nil
+	}
+
+	manifestList, err := snap.Manifests(rf.base.io)
+	if err != nil {
+		return existingFiles, err
+	}
+
+	for _, m := range manifestList {
+		entries, err := rf.base.fetchManifestEntry(m, true)
+		if err != nil {
+			return existingFiles, err
+		}
+
+		foundDeleted := make([]iceberg.ManifestEntry, 0)
+		notDeleted := make([]iceberg.ManifestEntry, 0, len(entries))
+		for _, entry := range entries {
+			if _, ok := rf.base.deletedFiles[entry.DataFile().FilePath()]; ok {
+				foundDeleted = append(foundDeleted, entry)
+			} else {
+				notDeleted = append(notDeleted, entry)
+			}
+		}
+
+		if len(foundDeleted) == 0 {
+			existingFiles = append(existingFiles, m)
+			continue
+		}
+
+		if len(notDeleted) == 0 {
+			continue
+		}
+
+		spec, err := rf.base.txn.meta.GetSpecByID(int(m.PartitionSpecID()))
+		if err != nil {
+			return existingFiles, err
+		}
+
+		wr, path, counter, err := rf.base.newManifestWriter(*spec)
+		if err != nil {
+			return existingFiles, err
+		}
+
+		for _, entry := range notDeleted {
+			if err := wr.Existing(entry); err != nil {
+				return existingFiles, err
+			}
+		}
+
+		// close the writer to force a flush and ensure counter.Count is accurate
+		if err := wr.Close(); err != nil {
+			return existingFiles, err
+		}
+
+		mf, err := wr.ToManifestFile(path, counter.Count)
+		if err != nil {
+			return existingFiles, err
+		}
+
+		existingFiles = append(existingFiles, mf)
+	}
+
+	return existingFiles, nil
+}
+
+func (rf *rewriteFiles) deletedEntries() ([]iceberg.ManifestEntry, error) {
+	// For rewrite files, we need to record deleted entries for any files being replaced
+	if rf.base.parentSnapshotID <= 0 {
+		return nil, nil
+	}
+
+	parent, err := rf.base.txn.meta.SnapshotByID(rf.base.parentSnapshotID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: cannot rewrite files in empty table", err)
+	}
+
+	previousManifests, err := parent.Manifests(rf.base.io)
+	if err != nil {
+		return nil, err
+	}
+
+	getEntries := func(m iceberg.ManifestFile) ([]iceberg.ManifestEntry, error) {
+		entries, err := rf.base.fetchManifestEntry(m, true)
+		if err != nil {
+			return nil, err
+		}
+
+		result := make([]iceberg.ManifestEntry, 0, len(entries))
+		for _, entry := range entries {
+			_, ok := rf.base.deletedFiles[entry.DataFile().FilePath()]
+			if ok && entry.DataFile().ContentType() == iceberg.EntryContentData {
+				seqNum := entry.SequenceNum()
+				result = append(result,
+					iceberg.NewManifestEntry(iceberg.EntryStatusDELETED,
+						&rf.base.snapshotID, &seqNum, entry.FileSequenceNum(),
+						entry.DataFile()))
+			}
+		}
+
+		return result, nil
+	}
+
+	nWorkers := config.EnvConfig.MaxWorkers
+	finalResult := make([]iceberg.ManifestEntry, 0, len(previousManifests))
+	for entries, err := range tblutils.MapExec(nWorkers, slices.Values(previousManifests), getEntries) {
+		if err != nil {
+			return nil, err
+		}
+		finalResult = append(finalResult, entries...)
+	}
+
+	return finalResult, nil
+}
+
 type snapshotProducer struct {
 	producerImpl
 

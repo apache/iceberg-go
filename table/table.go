@@ -92,6 +92,11 @@ func (t Table) NewTransaction() *Transaction {
 	}
 }
 
+// OverwriteFiles creates a new OverwriteFiles instance for rewriting files with conflict detection.
+func (t Table) OverwriteFiles(snapshotProps iceberg.Properties) OverwriteFiles {
+	return t.NewTransaction().OverwriteFiles(snapshotProps)
+}
+
 // AppendTable is a shortcut for NewTransaction().AppendTable() and then committing the transaction
 func (t Table) AppendTable(ctx context.Context, tbl arrow.Table, batchSize int64, snapshotProps iceberg.Properties) (*Table, error) {
 	txn := t.NewTransaction()
