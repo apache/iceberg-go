@@ -146,6 +146,11 @@ func (t *Transaction) UpdateSpec(caseSensitive bool) *UpdateSpec {
 	return NewUpdateSpec(t, caseSensitive)
 }
 
+// NewRewriteManifests returns a new BaseRewriteManifests instance for manifest rewriting operations
+func (t *Transaction) NewRewriteManifests() *BaseRewriteManifests {
+	return NewRewriteManifests(t)
+}
+
 func (t *Transaction) AppendTable(ctx context.Context, tbl arrow.Table, batchSize int64, snapshotProps iceberg.Properties) error {
 	rdr := array.NewTableReader(tbl, batchSize)
 	defer rdr.Release()

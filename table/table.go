@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"errors"
 	"iter"
 	"log"
 	"runtime"
@@ -110,6 +111,44 @@ func (t Table) Append(ctx context.Context, rdr array.RecordReader, snapshotProps
 	}
 
 	return txn.Commit(ctx)
+}
+
+// RewriteManifests is a shortcut for NewTransaction().NewRewriteManifests().RewriteManifests() and then committing the transaction
+func (t Table) RewriteManifests(ctx context.Context, options ManifestRewriteOptions, snapshotProps iceberg.Properties) (*Table, error) {
+	txn := t.NewTransaction()
+	rewriter := txn.NewRewriteManifests()
+	if err := rewriter.RewriteManifests(ctx, options, snapshotProps); err != nil {
+		return nil, err
+	}
+
+	return txn.Commit(ctx)
+}
+
+// RewriteManifestsBySpec is a shortcut for NewTransaction().NewRewriteManifests().RewriteManifestsBySpec() and then committing the transaction
+func (t Table) RewriteManifestsBySpec(ctx context.Context, specIDs []int, options ManifestRewriteOptions, snapshotProps iceberg.Properties) (*Table, error) {
+	txn := t.NewTransaction()
+	rewriter := txn.NewRewriteManifests()
+	if err := rewriter.RewriteManifestsBySpec(ctx, specIDs, options, snapshotProps); err != nil {
+		return nil, err
+	}
+
+	return txn.Commit(ctx)
+}
+
+// RewriteManifestsByPredicate is a shortcut for NewTransaction().NewRewriteManifests().RewriteManifestsByPredicate() and then committing the transaction
+func (t Table) RewriteManifestsByPredicate(ctx context.Context, predicate func(iceberg.ManifestFile) bool, options ManifestRewriteOptions, snapshotProps iceberg.Properties) (*Table, error) {
+	txn := t.NewTransaction()
+	rewriter := txn.NewRewriteManifests()
+	if err := rewriter.RewriteManifestsByPredicate(ctx, predicate, options, snapshotProps); err != nil {
+		return nil, err
+	}
+
+	return txn.Commit(ctx)
+}
+
+func (t Table) OverwriteData(ctx context.Context, filter iceberg.BooleanExpression, rdr array.RecordReader, snapshotProps iceberg.Properties) (*Table, error) {
+	// TODO: Implement OverwriteData operation - not related to RewriteManifests feature
+	return nil, errors.New("OverwriteData operation not yet implemented")
 }
 
 func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile, error] {
