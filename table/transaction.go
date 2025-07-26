@@ -280,6 +280,20 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	return t.apply(updates, reqs)
 }
 
+// RewriteFiles creates a new BaseRewriteFiles instance for this transaction.
+// This provides a fluent API for configuring and executing rewrite operations
+// with conflict detection capabilities.
+func (t *Transaction) RewriteFiles() *BaseRewriteFiles {
+	return NewRewriteFiles(t)
+}
+
+// RewriteDataFiles is a convenience method that performs a basic rewrite operation
+// using file paths. For more advanced control over conflict detection and validation,
+// use RewriteFiles() to get a BaseRewriteFiles instance.
+func (t *Transaction) RewriteDataFiles(ctx context.Context, filesToDelete, filesToAdd []string, snapshotProps iceberg.Properties) error {
+	return t.RewriteFiles().RewriteFilesByPath(ctx, filesToDelete, filesToAdd, snapshotProps)
+}
+
 func (t *Transaction) AddFiles(ctx context.Context, files []string, snapshotProps iceberg.Properties, ignoreDuplicates bool) error {
 	set := make(map[string]string)
 	for _, f := range files {
