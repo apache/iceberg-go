@@ -190,6 +190,34 @@ func (scan *Scan) UseRef(name string) (*Scan, error) {
 	return nil, fmt.Errorf("%w: cannot scan unknown ref=%s", iceberg.ErrInvalidArgument, name)
 }
 
+// AppendsBetween creates an incremental scan for data appended between two snapshots.
+// This method creates an incremental append-only scan from startSnapshotID (exclusive)
+// to endSnapshotID (inclusive).
+func (scan *Scan) AppendsBetween(startSnapshotID, endSnapshotID int64) IncrementalAppendScan {
+	return newIncrementalAppendScan(scan.metadata, scan.ioF).
+		UseStartSnapshotID(startSnapshotID).
+		UseStartSnapshotExclusive(true).
+		UseEndSnapshotID(endSnapshotID).(*incrementalAppendScan)
+}
+
+// AppendsAfter creates an incremental scan for data appended after a given snapshot.
+// This method creates an incremental append-only scan from startSnapshotID (exclusive)
+// to the current snapshot.
+func (scan *Scan) AppendsAfter(startSnapshotID int64) IncrementalAppendScan {
+	currentSnapshot := scan.metadata.CurrentSnapshot()
+	if currentSnapshot == nil {
+		// Return an empty scan if there's no current snapshot
+		return newIncrementalAppendScan(scan.metadata, scan.ioF).
+			UseStartSnapshotID(startSnapshotID).
+			UseStartSnapshotExclusive(true).(*incrementalAppendScan)
+	}
+	
+	return newIncrementalAppendScan(scan.metadata, scan.ioF).
+		UseStartSnapshotID(startSnapshotID).
+		UseStartSnapshotExclusive(true).
+		UseEndSnapshotID(currentSnapshot.SnapshotID).(*incrementalAppendScan)
+}
+
 func (scan *Scan) Snapshot() *Snapshot {
 	if scan.snapshotID != nil {
 		return scan.metadata.SnapshotByID(*scan.snapshotID)

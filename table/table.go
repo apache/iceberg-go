@@ -340,6 +340,23 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 	return s
 }
 
+// NewIncrementalScan creates a new general incremental scan for this table.
+func (t Table) NewIncrementalScan() IncrementalScan {
+	return newBaseIncrementalScan(t.metadata, t.fsF)
+}
+
+// NewIncrementalAppendScan creates a new incremental append-only scan for this table.
+// This is optimized for tables that only have data appended (no deletes or updates).
+func (t Table) NewIncrementalAppendScan() IncrementalAppendScan {
+	return newIncrementalAppendScan(t.metadata, t.fsF)
+}
+
+// NewIncrementalChangelogScan creates a new incremental changelog scan for this table.
+// This includes change information (inserted, updated, deleted records).
+func (t Table) NewIncrementalChangelogScan() IncrementalChangelogScan {
+	return newIncrementalChangelogScan(t.metadata, t.fsF)
+}
+
 func New(ident Identifier, meta Metadata, metadataLocation string, fsF FSysF, cat CatalogIO) *Table {
 	return &Table{
 		identifier:       ident,
