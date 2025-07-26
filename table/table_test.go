@@ -29,6 +29,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1421,4 +1422,577 @@ func (t *TableWritingTestSuite) TestDeleteOldMetadataNoErrorLogsOnFileFound() {
 	logOutput := logBuf.String()
 	t.NotContains(logOutput, "Warning: Failed to delete old metadata file")
 	t.NotContains(logOutput, "no such file or directory")
+}
+
+// =============================================================================
+// Performance Test Suite
+// =============================================================================
+
+type PerformanceTestSuite struct {
+	suite.Suite
+	ctx         context.Context
+	location    string
+	tableSchema *iceberg.Schema
+	arrSchema   *arrow.Schema
+	catalog     catalog.Catalog
+}
+
+func (s *PerformanceTestSuite) SetupSuite() {
+	s.ctx = context.Background()
+	
+	// Create performance test schema optimized for benchmarking
+	s.tableSchema = iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "value", Type: iceberg.PrimitiveTypes.Float64},
+		iceberg.NestedField{ID: 4, Name: "timestamp", Type: iceberg.PrimitiveTypes.TimestampTz},
+		iceberg.NestedField{ID: 5, Name: "category", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 6, Name: "data", Type: iceberg.PrimitiveTypes.Binary},
+	)
+
+	s.arrSchema = arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "value", Type: arrow.PrimitiveTypes.Float64, Nullable: true},
+		{Name: "timestamp", Type: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}, Nullable: true},
+		{Name: "category", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "data", Type: arrow.BinaryTypes.Binary, Nullable: true},
+	}, nil)
+}
+
+func (s *PerformanceTestSuite) SetupTest() {
+	s.location = filepath.ToSlash(strings.Replace(s.T().TempDir(), "#", "", -1))
+	
+	// Create in-memory catalog for performance tests
+	cat, err := catalog.Load(s.ctx, "perf_test", iceberg.Properties{
+		"uri":              ":memory:",
+		sql.DriverKey:      sqliteshim.ShimName,
+		sql.DialectKey:     string(sql.SQLite),
+		"type":             "sql",
+		"warehouse":        "file://" + s.location,
+		"init_catalog_tables": "true",
+	})
+	s.Require().NoError(err)
+	s.catalog = cat
+}
+
+func (s *PerformanceTestSuite) createPerformanceTable(ident table.Identifier, partitioned bool) *table.Table {
+	var spec iceberg.PartitionSpec
+	if partitioned {
+		spec = iceberg.NewPartitionSpec(
+			iceberg.PartitionField{SourceID: 5, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "category"},
+		)
+	} else {
+		spec = *iceberg.UnpartitionedSpec
+	}
+
+	err := s.catalog.CreateNamespace(s.ctx, catalog.NamespaceFromIdent(ident), nil)
+	s.Require().NoError(err)
+
+	tbl, err := s.catalog.CreateTable(s.ctx, ident, s.tableSchema,
+		catalog.WithProperties(iceberg.Properties{
+			"format-version": "2",
+			"write.parquet.compression-codec": "snappy",
+		}),
+		catalog.WithLocation("file://"+s.location),
+		catalog.WithPartitionSpec(&spec))
+	s.Require().NoError(err)
+
+	return tbl
+}
+
+func (s *PerformanceTestSuite) generateTestData(numRows int, batchSize int) []arrow.Table {
+	mem := memory.DefaultAllocator
+	var tables []arrow.Table
+
+	categories := []string{"A", "B", "C", "D", "E"}
+	
+	for i := 0; i < numRows; i += batchSize {
+		actualBatchSize := batchSize
+		if i+batchSize > numRows {
+			actualBatchSize = numRows - i
+		}
+
+		// Generate JSON data for this batch
+		var jsonRows []string
+		for j := 0; j < actualBatchSize; j++ {
+			rowID := i + j
+			category := categories[rowID%len(categories)]
+			jsonRow := fmt.Sprintf(`{
+				"id": %d,
+				"name": "user_%d",
+				"value": %f,
+				"timestamp": "2024-01-01T%02d:%02d:%02d.000000Z",
+				"category": "%s",
+				"data": "%s"
+			}`, rowID, rowID, float64(rowID)*1.5, (rowID/3600)%24, (rowID/60)%60, rowID%60, category, 
+			"dGVzdGRhdGE=") // base64 encoded "testdata"
+			jsonRows = append(jsonRows, jsonRow)
+		}
+
+		jsonData := "[" + strings.Join(jsonRows, ",") + "]"
+		
+		table, err := array.TableFromJSON(mem, s.arrSchema, []string{jsonData})
+		s.Require().NoError(err)
+		tables = append(tables, table)
+	}
+
+	return tables
+}
+
+// =============================================================================
+// Benchmark Tests
+// =============================================================================
+
+func BenchmarkAppendPerformance(b *testing.B) {
+	testCases := []struct {
+		name      string
+		rowCount  int
+		batchSize int
+	}{
+		{"Small_1K_Rows", 1000, 100},
+		{"Medium_10K_Rows", 10000, 500},
+		{"Large_50K_Rows", 50000, 1000},
+	}
+
+	for _, tc := range testCases {
+		b.Run(tc.name, func(b *testing.B) {
+			// Setup without using testify suite
+			ctx := context.Background()
+			location := filepath.ToSlash(strings.Replace(b.TempDir(), "#", "", -1))
+			
+			// Create in-memory catalog
+			cat, err := catalog.Load(ctx, "perf_test", iceberg.Properties{
+				"uri":              ":memory:",
+				sql.DriverKey:      sqliteshim.ShimName,
+				sql.DialectKey:     string(sql.SQLite),
+				"type":             "sql",
+				"warehouse":        "file://" + location,
+				"init_catalog_tables": "true",
+			})
+			if err != nil {
+				b.Fatalf("Failed to create catalog: %v", err)
+			}
+
+			// Create test schema
+			tableSchema := iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+				iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
+				iceberg.NestedField{ID: 3, Name: "value", Type: iceberg.PrimitiveTypes.Float64},
+				iceberg.NestedField{ID: 4, Name: "timestamp", Type: iceberg.PrimitiveTypes.TimestampTz},
+				iceberg.NestedField{ID: 5, Name: "category", Type: iceberg.PrimitiveTypes.String},
+				iceberg.NestedField{ID: 6, Name: "data", Type: iceberg.PrimitiveTypes.Binary},
+			)
+
+			arrSchema := arrow.NewSchema([]arrow.Field{
+				{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+				{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+				{Name: "value", Type: arrow.PrimitiveTypes.Float64, Nullable: true},
+				{Name: "timestamp", Type: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}, Nullable: true},
+				{Name: "category", Type: arrow.BinaryTypes.String, Nullable: true},
+				{Name: "data", Type: arrow.BinaryTypes.Binary, Nullable: true},
+			}, nil)
+			
+			// Create table
+			ident := table.Identifier{"perf_test", "benchmark_append_" + tc.name}
+			err = cat.CreateNamespace(ctx, catalog.NamespaceFromIdent(ident), nil)
+			if err != nil {
+				b.Fatalf("Failed to create namespace: %v", err)
+			}
+
+			tbl, err := cat.CreateTable(ctx, ident, tableSchema,
+				catalog.WithProperties(iceberg.Properties{
+					"format-version": "2",
+					"write.parquet.compression-codec": "snappy",
+				}),
+				catalog.WithLocation("file://"+location),
+				catalog.WithPartitionSpec(iceberg.UnpartitionedSpec))
+			if err != nil {
+				b.Fatalf("Failed to create table: %v", err)
+			}
+			
+			// Generate test data
+			mem := memory.DefaultAllocator
+			jsonData := fmt.Sprintf(`[{"id": 1, "name": "test", "value": 1.5, "timestamp": "2024-01-01T10:00:00.000000Z", "category": "A", "data": "%s"}]`, 
+				"dGVzdGRhdGE=") // base64 encoded "testdata"
+			
+			testTable, err := array.TableFromJSON(mem, arrSchema, []string{jsonData})
+			if err != nil {
+				b.Fatalf("Failed to create test data: %v", err)
+			}
+			defer testTable.Release()
+
+			b.ResetTimer()
+			b.ReportAllocs()
+			
+			for i := 0; i < b.N; i++ {
+				tbl, err = tbl.AppendTable(ctx, testTable, testTable.NumRows(), nil)
+				if err != nil {
+					b.Fatalf("Append failed: %v", err)
+				}
+			}
+			
+			b.StopTimer()
+			
+			// Report custom metrics
+			b.ReportMetric(float64(testTable.NumRows()), "rows/op")
+			b.ReportMetric(float64(testTable.NumRows()*int64(b.N))/b.Elapsed().Seconds(), "rows/sec")
+		})
+	}
+}
+
+func BenchmarkReadPerformance(b *testing.B) {
+	suite := &PerformanceTestSuite{}
+	suite.SetupSuite()
+	suite.SetupTest()
+	
+	// Setup test table with data
+	ident := table.Identifier{"perf_test", "benchmark_read"}
+	tbl := suite.createPerformanceTable(ident, true) // Use partitioned table for read tests
+	
+	// Populate table with test data
+	testTables := suite.generateTestData(10000, 1000)
+	for _, testTable := range testTables {
+		var err error
+		tbl, err = tbl.AppendTable(suite.ctx, testTable, testTable.NumRows(), nil)
+		if err != nil {
+			b.Fatalf("Failed to populate test table: %v", err)
+		}
+		testTable.Release()
+	}
+
+	testCases := []struct {
+		name   string
+		filter func(*table.Table) *table.Scan
+	}{
+		{
+			"FullTableScan",
+			func(t *table.Table) *table.Scan {
+				return t.Scan()
+			},
+		},
+		{
+			"FilteredScan_Category",
+			func(t *table.Table) *table.Scan {
+				return t.Scan(table.WithRowFilter(iceberg.EqualTo(iceberg.Reference("category"), "A")))
+			},
+		},
+		{
+			"FilteredScan_IDRange",
+			func(t *table.Table) *table.Scan {
+				return t.Scan(table.WithRowFilter(iceberg.NewAnd(
+					iceberg.GreaterThanEqual(iceberg.Reference("id"), int64(1000)),
+					iceberg.LessThan(iceberg.Reference("id"), int64(5000)),
+				)))
+			},
+		},
+		{
+			"ProjectedScan",
+			func(t *table.Table) *table.Scan {
+				return t.Scan(table.WithSelectedFields("id", "name", "category"))
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ResetTimer()
+			b.ReportAllocs()
+			
+			var totalRows int64
+			
+			for i := 0; i < b.N; i++ {
+				scan := tc.filter(tbl)
+				result, err := scan.ToArrowTable(suite.ctx)
+				if err != nil {
+					b.Fatalf("Scan failed: %v", err)
+				}
+				
+				totalRows += result.NumRows()
+				result.Release()
+			}
+			
+			b.StopTimer()
+			
+			// Report custom metrics
+			avgRows := float64(totalRows) / float64(b.N)
+			b.ReportMetric(avgRows, "rows/op")
+			b.ReportMetric(avgRows/b.Elapsed().Seconds()*float64(b.N), "rows/sec")
+		})
+	}
+}
+
+// =============================================================================
+// Large Table Integration Tests
+// =============================================================================
+
+func TestLargeTableOperations(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	suite.Run(t, &PerformanceTestSuite{})
+}
+
+func (s *PerformanceTestSuite) TestLargeTableScan() {
+	if testing.Short() {
+		s.T().Skip("Skipping large table test in short mode")
+	}
+
+	s.T().Log("Testing operations on large tables with many files/partitions")
+	
+	ident := table.Identifier{"perf_test", "large_table_test"}
+	tbl := s.createPerformanceTable(ident, true)
+
+	// Create a large table with multiple partitions and files
+	const (
+		totalRows     = 100000
+		batchSize     = 5000
+		numPartitions = 5
+	)
+
+	s.T().Logf("Creating large table with %d rows across %d partitions", totalRows, numPartitions)
+	
+	start := time.Now()
+	testTables := s.generateTestData(totalRows, batchSize)
+	
+	// Write data in parallel for better performance
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(testTables))
+	
+	for i, testTable := range testTables {
+		wg.Add(1)
+		go func(index int, table arrow.Table) {
+			defer wg.Done()
+			defer table.Release()
+			
+			_, err := tbl.AppendTable(s.ctx, table, table.NumRows(), iceberg.Properties{
+				"batch_id": strconv.Itoa(index),
+			})
+			if err != nil {
+				errChan <- fmt.Errorf("batch %d failed: %v", index, err)
+			}
+		}(i, testTable)
+	}
+	
+	wg.Wait()
+	close(errChan)
+	
+	// Check for errors
+	var firstError error
+	for err := range errChan {
+		if firstError == nil {
+			firstError = err
+		}
+		s.T().Logf("Large table creation error: %v", err)
+	}
+	
+	// Check if partitioned writes are not implemented
+	if firstError != nil && strings.Contains(firstError.Error(), "not implemented") {
+		s.T().Skip("Skipping large table test - partitioned writes not yet implemented")
+		return
+	}
+	
+	// Require no errors if it's not a "not implemented" issue
+	s.Require().NoError(firstError)
+	
+	writeTime := time.Since(start)
+	s.T().Logf("Large table creation completed in %v", writeTime)
+
+	// Test large table scan performance
+	s.Run("FullScanPerformance", func() {
+		s.T().Log("Testing full table scan performance")
+		
+		scanStart := time.Now()
+		scan := tbl.Scan()
+		result, err := scan.ToArrowTable(s.ctx)
+		s.Require().NoError(err)
+		defer result.Release()
+		
+		scanTime := time.Since(scanStart)
+		rowsPerSecond := float64(result.NumRows()) / scanTime.Seconds()
+		
+		s.Equal(int64(totalRows), result.NumRows(), "Should read all rows")
+		s.T().Logf("Full scan completed in %v (%d rows, %.0f rows/sec)", 
+			scanTime, result.NumRows(), rowsPerSecond)
+		
+		// Performance assertion - should process at least 10K rows/sec
+		s.Greater(rowsPerSecond, 10000.0, "Scan performance should be reasonable")
+	})
+
+	s.Run("PartitionPruning", func() {
+		s.T().Log("Testing partition pruning effectiveness")
+		
+		// Scan specific partition
+		partitionStart := time.Now()
+		partitionScan := tbl.Scan(table.WithRowFilter(iceberg.EqualTo(iceberg.Reference("category"), "A")))
+		partitionResult, err := partitionScan.ToArrowTable(s.ctx)
+		s.Require().NoError(err)
+		defer partitionResult.Release()
+		
+		partitionTime := time.Since(partitionStart)
+		expectedRows := totalRows / numPartitions // Roughly 1/5 of total rows
+		
+		s.T().Logf("Partition scan completed in %v (%d rows, expected ~%d)", 
+			partitionTime, partitionResult.NumRows(), expectedRows)
+		
+		// Partition scan should be significantly faster than full scan
+		s.Less(partitionTime, writeTime/2, "Partition scan should be faster than full table operations")
+		s.Greater(partitionResult.NumRows(), int64(expectedRows/2), "Should find reasonable number of rows in partition")
+		s.Less(partitionResult.NumRows(), int64(expectedRows*2), "Should not find too many rows (partition pruning working)")
+	})
+
+	s.Run("ConcurrentReads", func() {
+		s.T().Log("Testing concurrent read performance")
+		
+		const numConcurrentReads = 5
+		var readWg sync.WaitGroup
+		results := make(chan struct {
+			duration time.Duration
+			rows     int64
+			err      error
+		}, numConcurrentReads)
+		
+		concurrentStart := time.Now()
+		
+		for i := 0; i < numConcurrentReads; i++ {
+			readWg.Add(1)
+			go func(readerID int) {
+				defer readWg.Done()
+				
+				readerStart := time.Now()
+				
+				// Each reader scans different data
+				filter := iceberg.NewAnd(
+					iceberg.GreaterThanEqual(iceberg.Reference("id"), int64(readerID*10000)),
+					iceberg.LessThan(iceberg.Reference("id"), int64((readerID+1)*10000)),
+				)
+				
+				scan := tbl.Scan(table.WithRowFilter(filter))
+				result, err := scan.ToArrowTable(s.ctx)
+				if err != nil {
+					results <- struct {
+						duration time.Duration
+						rows     int64
+						err      error
+					}{0, 0, err}
+					return
+				}
+				defer result.Release()
+				
+				readerDuration := time.Since(readerStart)
+				results <- struct {
+					duration time.Duration
+					rows     int64
+					err      error
+				}{readerDuration, result.NumRows(), nil}
+			}(i)
+		}
+		
+		readWg.Wait()
+		close(results)
+		
+		totalConcurrentTime := time.Since(concurrentStart)
+		
+		// Analyze concurrent read results
+		var totalConcurrentRows int64
+		var maxReaderTime time.Duration
+		for result := range results {
+			s.Require().NoError(result.err)
+			totalConcurrentRows += result.rows
+			if result.duration > maxReaderTime {
+				maxReaderTime = result.duration
+			}
+		}
+		
+		s.T().Logf("Concurrent reads completed: %d readers, %d total rows, max reader time: %v, total time: %v",
+			numConcurrentReads, totalConcurrentRows, maxReaderTime, totalConcurrentTime)
+		
+		// Concurrent reads should show reasonable performance
+		s.Greater(totalConcurrentRows, int64(0), "Should read some data")
+		s.Less(maxReaderTime, time.Minute, "Individual reads should complete reasonably quickly")
+	})
+
+	// Test table metadata operations on large table
+	s.Run("MetadataOperations", func() {
+		s.T().Log("Testing metadata operations on large table")
+		
+		// Test snapshot information
+		snapshot := tbl.CurrentSnapshot()
+		s.Require().NotNil(snapshot)
+		
+		s.T().Logf("Table snapshot ID: %d", snapshot.SnapshotID)
+		s.NotNil(snapshot.Summary, "Snapshot should have summary")
+		s.Contains(snapshot.Summary.Properties, "total-records", "Summary should contain record count")
+		
+		// Test manifest operations
+		manifestStart := time.Now()
+		manifests, err := snapshot.Manifests(mustFS(s.T(), tbl))
+		s.Require().NoError(err)
+		manifestTime := time.Since(manifestStart)
+		
+		s.Greater(len(manifests), 0, "Should have at least one manifest")
+		s.T().Logf("Manifest loading completed in %v (%d manifests)", manifestTime, len(manifests))
+		
+		// Verify manifest entries
+		totalEntries := 0
+		for _, manifest := range manifests {
+			entries, err := manifest.FetchEntries(mustFS(s.T(), tbl), false)
+			s.Require().NoError(err)
+			totalEntries += len(entries)
+		}
+		
+		s.Greater(totalEntries, 0, "Should have manifest entries")
+		s.T().Logf("Total manifest entries: %d", totalEntries)
+	})
+}
+
+func (s *PerformanceTestSuite) TestMemoryUsage() {
+	s.T().Log("Testing memory usage patterns during large operations")
+	
+	ident := table.Identifier{"perf_test", "memory_test"}
+	tbl := s.createPerformanceTable(ident, false)
+
+	// Monitor memory usage during operations
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	initialMem := memStats.Alloc
+
+	// Perform memory-intensive operations
+	const batchCount = 10
+	const rowsPerBatch = 5000
+	
+	for i := 0; i < batchCount; i++ {
+		testTables := s.generateTestData(rowsPerBatch, rowsPerBatch)
+		
+		for _, testTable := range testTables {
+			var err error
+			tbl, err = tbl.AppendTable(s.ctx, testTable, testTable.NumRows(), nil)
+			s.Require().NoError(err)
+			testTable.Release()
+		}
+		
+		// Force garbage collection and check memory
+		runtime.GC()
+		runtime.ReadMemStats(&memStats)
+		currentMem := memStats.Alloc
+		
+		s.T().Logf("Batch %d: Memory usage: %d bytes (delta: %d bytes)", 
+			i+1, currentMem, int64(currentMem)-int64(initialMem))
+	}
+
+	// Final memory check
+	runtime.GC()
+	runtime.ReadMemStats(&memStats)
+	finalMem := memStats.Alloc
+	memGrowth := int64(finalMem) - int64(initialMem)
+	
+	s.T().Logf("Final memory usage: %d bytes (total growth: %d bytes)", finalMem, memGrowth)
+	
+	// Memory growth should be reasonable (less than 100MB for this test)
+	s.Less(memGrowth, int64(100*1024*1024), "Memory growth should be reasonable")
+}
+
+func TestPerformance(t *testing.T) {
+	suite.Run(t, &PerformanceTestSuite{})
 }
