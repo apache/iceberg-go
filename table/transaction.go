@@ -146,6 +146,22 @@ func (t *Transaction) UpdateSpec(caseSensitive bool) *UpdateSpec {
 	return NewUpdateSpec(t, caseSensitive)
 }
 
+// NewRowDelta creates a new row delta operation for this transaction.
+// Row delta operations allow combining data files with equality and position delete files
+// in a single atomic operation.
+func (t *Transaction) NewRowDelta(snapshotProps iceberg.Properties) (*BaseRowDelta, error) {
+	fs, err := t.tbl.fsF(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("getting filesystem for row delta: %w", err)
+	}
+	
+	if snapshotProps == nil {
+		snapshotProps = make(iceberg.Properties)
+	}
+	
+	return NewRowDelta(t, fs, snapshotProps)
+}
+
 func (t *Transaction) AppendTable(ctx context.Context, tbl arrow.Table, batchSize int64, snapshotProps iceberg.Properties) error {
 	rdr := array.NewTableReader(tbl, batchSize)
 	defer rdr.Release()

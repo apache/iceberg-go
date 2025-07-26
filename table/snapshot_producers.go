@@ -700,3 +700,66 @@ func (sp *snapshotProducer) commit() ([]Update, []Requirement, error) {
 			AssertRefSnapshotID("main", sp.txn.meta.currentSnapshotID),
 		}, nil
 }
+
+// Enhanced snapshot producer methods for delete file support
+
+// appendDeleteFile adds a delete file to the snapshot producer
+func (sp *snapshotProducer) appendDeleteFile(df iceberg.DataFile) *snapshotProducer {
+	// Add to the same list as data files, but they'll be written to different manifests
+	// based on their content type
+	sp.addedFiles = append(sp.addedFiles, df)
+	return sp
+}
+
+// Row Delta Producer Implementation
+
+// newRowDeltaProducer creates a snapshot producer for row delta operations that can handle
+// both data files and delete files in a single atomic operation.
+func newRowDeltaProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties) *snapshotProducer {
+	prod := createSnapshotProducer(op, txn, fs, commitUUID, snapshotProps)
+	prod.producerImpl = &rowDeltaFiles{base: prod}
+	
+	return prod
+}
+
+// rowDeltaFiles implements producerImpl for row delta operations
+type rowDeltaFiles struct {
+	base *snapshotProducer
+}
+
+func (rd *rowDeltaFiles) processManifests(manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
+	// For row delta operations, we may need to process both data and delete manifests
+	// For now, use the same approach as fast append
+	return manifests, nil
+}
+
+func (rd *rowDeltaFiles) existingManifests() ([]iceberg.ManifestFile, error) {
+	existing := make([]iceberg.ManifestFile, 0)
+	if rd.base.parentSnapshotID > 0 {
+		previous, err := rd.base.txn.meta.SnapshotByID(rd.base.parentSnapshotID)
+		if err != nil {
+			return nil, fmt.Errorf("could not find parent snapshot %d", rd.base.parentSnapshotID)
+		}
+
+		manifests, err := previous.Manifests(rd.base.io)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, m := range manifests {
+			// Include all manifests from parent snapshot for row delta operations
+			// This ensures we maintain the complete view of the table
+			if m.HasAddedFiles() || m.HasExistingFiles() || m.SnapshotID() == rd.base.snapshotID {
+				existing = append(existing, m)
+			}
+		}
+	}
+
+	return existing, nil
+}
+
+func (rd *rowDeltaFiles) deletedEntries() ([]iceberg.ManifestEntry, error) {
+	// Row delta operations don't typically have deleted entries in the traditional sense
+	// Delete operations are handled via delete files rather than removing manifest entries
+	return nil, nil
+}

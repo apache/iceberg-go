@@ -92,6 +92,14 @@ func (t Table) NewTransaction() *Transaction {
 	}
 }
 
+// NewRowDelta creates a new row delta operation for this table.
+// Row delta operations allow combining data files with equality and position delete files
+// in a single atomic operation. This is a shortcut for NewTransaction().NewRowDelta().
+func (t Table) NewRowDelta(snapshotProps iceberg.Properties) (*BaseRowDelta, error) {
+	txn := t.NewTransaction()
+	return txn.NewRowDelta(snapshotProps)
+}
+
 // AppendTable is a shortcut for NewTransaction().AppendTable() and then committing the transaction
 func (t Table) AppendTable(ctx context.Context, tbl arrow.Table, batchSize int64, snapshotProps iceberg.Properties) (*Table, error) {
 	txn := t.NewTransaction()
