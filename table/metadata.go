@@ -149,7 +149,7 @@ type MetadataBuilder struct {
 	schemaList         []*iceberg.Schema
 	currentSchemaID    int
 	specs              []iceberg.PartitionSpec
-	defaultSpecID      *int
+	defaultSpecID      int
 	lastPartitionID    *int
 	props              iceberg.Properties
 	snapshotList       []Snapshot
@@ -193,7 +193,7 @@ func MetadataBuilderFromBase(metadata Metadata) (*MetadataBuilder, error) {
 	b.currentSchemaID = metadata.CurrentSchema().ID
 	b.specs = slices.Clone(metadata.PartitionSpecs())
 	defaultSpecID := metadata.DefaultPartitionSpec()
-	b.defaultSpecID = &defaultSpecID
+	b.defaultSpecID = defaultSpecID
 	b.lastPartitionID = metadata.LastPartitionSpecID()
 	b.props = maps.Clone(metadata.Properties())
 	b.snapshotList = slices.Clone(metadata.Snapshots())
@@ -219,7 +219,7 @@ func (b *MetadataBuilder) HasChanges() bool { return len(b.updates) > 0 }
 
 func (b *MetadataBuilder) CurrentSpec() iceberg.PartitionSpec {
 	// FIXME: this should return a pointer which can be nil to avoid out of bounds indexing / np derefs
-	return b.specs[*b.defaultSpecID]
+	return b.specs[b.defaultSpecID]
 }
 
 func (b *MetadataBuilder) CurrentSchema() *iceberg.Schema {
@@ -268,10 +268,8 @@ func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) (*MetadataBuilder, e
 	}
 
 	newSchemaID := b.reuseOrCreateNewSchemaID(schema)
-	_, err := b.GetSchemaByID(newSchemaID)
-	schemaFound := err == nil
 
-	if schemaFound {
+	if _, err := b.GetSchemaByID(newSchemaID); err == nil {
 		if b.lastAddedSchemaID == nil || *b.lastAddedSchemaID != newSchemaID {
 			b.updates = append(b.updates, NewAddSchemaUpdate(schema))
 			b.lastAddedSchemaID = &newSchemaID
@@ -282,7 +280,7 @@ func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) (*MetadataBuilder, e
 
 	b.lastColumnId = max(b.lastColumnId, schema.HighestFieldID())
 
-	schema.WithID(newSchemaID)
+	schema.ID = newSchemaID
 
 	b.schemaList = append(b.schemaList, schema)
 	b.updates = append(b.updates, NewAddSchemaUpdate(schema))
@@ -458,7 +456,7 @@ func (b *MetadataBuilder) SetDefaultSpecID(defaultSpecID int) (*MetadataBuilder,
 		}
 	}
 
-	if b.defaultSpecID != nil && defaultSpecID == *b.defaultSpecID {
+	if defaultSpecID == b.defaultSpecID {
 		return b, nil
 	}
 
@@ -467,7 +465,7 @@ func (b *MetadataBuilder) SetDefaultSpecID(defaultSpecID int) (*MetadataBuilder,
 	}
 
 	b.updates = append(b.updates, NewSetDefaultSpecUpdate(defaultSpecID))
-	b.defaultSpecID = &defaultSpecID
+	b.defaultSpecID = defaultSpecID
 
 	return b, nil
 }
@@ -653,10 +651,10 @@ func (b *MetadataBuilder) SetLastUpdatedMS() *MetadataBuilder {
 }
 
 func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
-	if b.defaultSpecID == nil {
-		return nil, errors.New("no default spec ID specified")
+	if _, err := b.GetSpecByID(b.defaultSpecID); err != nil {
+		return nil, fmt.Errorf("defaultSpecID is invalid: %w", err)
 	}
-	defaultSpecID := *b.defaultSpecID
+	defaultSpecID := b.defaultSpecID
 
 	if b.lastUpdatedMS == 0 {
 		b.lastUpdatedMS = time.Now().UnixMilli()
