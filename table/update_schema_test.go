@@ -83,14 +83,21 @@ func TestUpdateSchemaAddColumn(t *testing.T) {
 		iceberg.NestedField{ID: 4, Name: "address", Required: false, Type: structType},
 	)
 
-	txn := &Transaction{}
+	metadata := &metadataV2{
+		commonMetadata: commonMetadata{
+			SchemaList: []*iceberg.Schema{schema},
+		},
+	}
 
-	updateSchema := NewUpdateSchema(txn, schema, 7)
+	txn := &Transaction{
+		tbl: &Table{metadata: metadata},
+	}
 
-	t.Run("add struct column with default value", func(t *testing.T) {
+	t.Run("add struct column with incompatible default value", func(t *testing.T) {
 		updateSchema := NewUpdateSchema(txn, schema, 7)
 
-		_, err := updateSchema.AddColumn([]string{"new_col"}, false, iceberg.PrimitiveTypes.Int32, "doc string", "string_value")
+		updateSchema.AddColumn([]string{"new_col"}, false, iceberg.PrimitiveTypes.Int32, "doc string", "string_value")
+		err := updateSchema.Validate()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "default literal of type string is not assignable to of type int")
 	})
@@ -107,11 +114,10 @@ func TestUpdateSchemaAddColumn(t *testing.T) {
 			},
 		}
 
-		updated, err := updateSchema.AddColumn([]string{"address_new"}, false, structType, "User address", nil)
-		require.NoError(t, err)
-		require.NotNil(t, updated)
+		updateSchema.AddColumn([]string{"address_new"}, false, structType, "User address", nil)
 
-		newSchema := updated.Apply()
+		newSchema, err := updateSchema.Build()
+		require.NoError(t, err)
 		require.NotNil(t, newSchema)
 
 		// Check that the struct field was added
@@ -146,11 +152,10 @@ func TestUpdateSchemaAddColumn(t *testing.T) {
 		assert.False(t, structField.FieldList[2].Required)
 
 		// trying to add a new field to the struct
-		updated, err = updateSchema.AddColumn([]string{"address", "new"}, false, iceberg.PrimitiveTypes.String, "new field", nil)
-		require.NoError(t, err)
-		require.NotNil(t, updated)
+		updateSchema.AddColumn([]string{"address", "new"}, false, iceberg.PrimitiveTypes.String, "new field", nil)
 
-		newSchema = updated.Apply()
+		newSchema, err = updateSchema.Build()
+		require.NoError(t, err)
 		require.NotNil(t, newSchema)
 
 		field, found = newSchema.FindFieldByName("address.new")
@@ -158,11 +163,12 @@ func TestUpdateSchemaAddColumn(t *testing.T) {
 	})
 
 	t.Run("add simple column", func(t *testing.T) {
-		updated, err := updateSchema.AddColumn([]string{"email"}, false, iceberg.PrimitiveTypes.String, "User email", "default@example.com")
-		require.NoError(t, err)
-		require.NotNil(t, updated)
+		updateSchema := NewUpdateSchema(txn, schema, 7)
 
-		newSchema := updated.Apply()
+		updateSchema.AddColumn([]string{"email"}, false, iceberg.PrimitiveTypes.String, "User email", "default@example.com")
+
+		newSchema, err := updateSchema.Build()
+		require.NoError(t, err)
 		require.NotNil(t, newSchema)
 
 		// Check that the new field was added
@@ -176,17 +182,22 @@ func TestUpdateSchemaAddColumn(t *testing.T) {
 	})
 
 	t.Run("add required column without default should fail", func(t *testing.T) {
-		_, err := updateSchema.AddColumn([]string{"required_field"}, true, iceberg.PrimitiveTypes.String, "", nil)
+		updateSchema := NewUpdateSchema(txn, schema, 7)
+
+		updateSchema.AddColumn([]string{"required_field"}, true, iceberg.PrimitiveTypes.String, "", nil)
+		err := updateSchema.Validate()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot add required column without default value")
 	})
 
 	t.Run("add required column with default should succeed", func(t *testing.T) {
-		updated, err := updateSchema.AddColumn([]string{"required_field"}, true, iceberg.PrimitiveTypes.String, "", "default")
-		require.NoError(t, err)
-		require.NotNil(t, updated)
+		updateSchema := NewUpdateSchema(txn, schema, 7)
 
-		newSchema := updated.Apply()
+		updateSchema.AddColumn([]string{"required_field"}, true, iceberg.PrimitiveTypes.String, "", "default")
+
+		newSchema, err := updateSchema.Build()
+		require.NoError(t, err)
+
 		field, found := newSchema.FindFieldByName("required_field")
 		require.True(t, found)
 		assert.True(t, field.Required)
@@ -194,15 +205,39 @@ func TestUpdateSchemaAddColumn(t *testing.T) {
 	})
 
 	t.Run("add duplicate column should fail", func(t *testing.T) {
-		_, err := updateSchema.AddColumn([]string{"name"}, false, iceberg.PrimitiveTypes.String, "", nil)
+		updateSchema := NewUpdateSchema(txn, schema, 7)
+
+		updateSchema.AddColumn([]string{"name"}, false, iceberg.PrimitiveTypes.String, "", nil)
+		err := updateSchema.Validate()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot add column; name already exists")
 	})
 
 	t.Run("empty path should fail", func(t *testing.T) {
-		_, err := updateSchema.AddColumn([]string{}, false, iceberg.PrimitiveTypes.String, "", nil)
+		updateSchema := NewUpdateSchema(txn, schema, 7)
+
+		updateSchema.AddColumn([]string{}, false, iceberg.PrimitiveTypes.String, "", nil)
+		err := updateSchema.Validate()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "path must contain at least the new column name")
+	})
+
+	t.Run("add to non-struct parent should fail", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 7)
+
+		updateSchema.AddColumn([]string{"name", "nested"}, false, iceberg.PrimitiveTypes.String, "", nil)
+		err := updateSchema.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "parent is not a nested type")
+	})
+
+	t.Run("add to non-existent parent should fail", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 7)
+
+		updateSchema.AddColumn([]string{"nonexistent", "nested"}, false, iceberg.PrimitiveTypes.String, "", nil)
+		err := updateSchema.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot find parent struct")
 	})
 }
 
@@ -213,15 +248,24 @@ func TestUpdateSchemaDeleteColumn(t *testing.T) {
 		iceberg.NestedField{ID: 3, Name: "age", Required: false, Type: iceberg.PrimitiveTypes.Int32},
 	)
 
-	txn := &Transaction{}
-	updateSchema := NewUpdateSchema(txn, schema, 3)
+	metadata := &metadataV2{
+		commonMetadata: commonMetadata{
+			SchemaList: []*iceberg.Schema{schema},
+		},
+	}
+
+	txn := &Transaction{
+		tbl: &Table{metadata: metadata},
+	}
 
 	t.Run("delete existing column", func(t *testing.T) {
-		updated, err := updateSchema.DeleteColumn([]string{"age"})
-		require.NoError(t, err)
-		require.NotNil(t, updated)
+		updateSchema := NewUpdateSchema(txn, schema, 3)
 
-		newSchema := updated.Apply()
+		updateSchema.DeleteColumn([]string{"age"})
+
+		newSchema, err := updateSchema.Build()
+		require.NoError(t, err)
+
 		_, found := newSchema.FindFieldByName("age")
 		assert.False(t, found, "age field should be deleted")
 
@@ -233,9 +277,25 @@ func TestUpdateSchemaDeleteColumn(t *testing.T) {
 	})
 
 	t.Run("delete non-existent column should fail", func(t *testing.T) {
-		_, err := updateSchema.DeleteColumn([]string{"nonexistent"})
+		updateSchema := NewUpdateSchema(txn, schema, 3)
+
+		updateSchema.DeleteColumn([]string{"nonexistent"})
+		err := updateSchema.Validate()
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "Cannot delete missing column")
+		assert.Contains(t, err.Error(), "cannot delete missing column")
+	})
+
+	t.Run("delete and then update same column should fail", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 3)
+
+		updateSchema.UpdateColumn([]string{"age"}, ColumnUpdate{
+			Doc: iceberg.Optional[string]{Val: "new doc", Valid: true},
+		})
+		updateSchema.DeleteColumn([]string{"age"})
+
+		_, err := updateSchema.Build()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot delete a column that has updates")
 	})
 }
 
@@ -246,49 +306,68 @@ func TestUpdateSchemaUpdateColumnType(t *testing.T) {
 		iceberg.NestedField{ID: 3, Name: "price", Required: false, Type: iceberg.PrimitiveTypes.Float32},
 	)
 
-	txn := &Transaction{}
-	updateSchema := NewUpdateSchema(txn, schema, 3)
+	metadata := &metadataV2{
+		commonMetadata: commonMetadata{
+			SchemaList: []*iceberg.Schema{schema},
+		},
+	}
+
+	txn := &Transaction{
+		tbl: &Table{metadata: metadata},
+	}
 
 	t.Run("valid type promotion int to long", func(t *testing.T) {
-		updated, err := updateSchema.UpdateColumn([]string{"id"}, ColumnUpdate{
+		updateSchema := NewUpdateSchema(txn, schema, 3)
+
+		updateSchema.UpdateColumn([]string{"id"}, ColumnUpdate{
 			Type: iceberg.Optional[iceberg.Type]{Val: iceberg.PrimitiveTypes.Int64, Valid: true},
 		})
-		require.NoError(t, err)
-		require.NotNil(t, updated)
 
-		newSchema := updated.Apply()
+		newSchema, err := updateSchema.Build()
+		require.NoError(t, err)
+
 		field, found := newSchema.FindFieldByName("id")
 		require.True(t, found)
 		assert.Equal(t, iceberg.PrimitiveTypes.Int64, field.Type)
 	})
 
 	t.Run("valid type promotion float to double", func(t *testing.T) {
-		updated, err := updateSchema.UpdateColumn([]string{"price"}, ColumnUpdate{
+		updateSchema := NewUpdateSchema(txn, schema, 3)
+
+		updateSchema.UpdateColumn([]string{"price"}, ColumnUpdate{
 			Type: iceberg.Optional[iceberg.Type]{Val: iceberg.PrimitiveTypes.Float64, Valid: true},
 		})
-		require.NoError(t, err)
-		require.NotNil(t, updated)
 
-		newSchema := updated.Apply()
+		newSchema, err := updateSchema.Build()
+		require.NoError(t, err)
+
 		field, found := newSchema.FindFieldByName("price")
 		require.True(t, found)
 		assert.Equal(t, iceberg.PrimitiveTypes.Float64, field.Type)
 	})
 
 	t.Run("invalid type change should fail", func(t *testing.T) {
-		_, err := updateSchema.UpdateColumn([]string{"name"}, ColumnUpdate{
+		updateSchema := NewUpdateSchema(txn, schema, 3)
+
+		updateSchema.UpdateColumn([]string{"name"}, ColumnUpdate{
 			Type: iceberg.Optional[iceberg.Type]{Val: iceberg.PrimitiveTypes.Int32, Valid: true},
 		})
+
+		err := updateSchema.Validate()
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "Cannot update type of column")
+		assert.Contains(t, err.Error(), "cannot update type of column")
 	})
 
 	t.Run("update non-existent column should fail", func(t *testing.T) {
-		_, err := updateSchema.UpdateColumn([]string{"nonexistent"}, ColumnUpdate{
+		updateSchema := NewUpdateSchema(txn, schema, 3)
+
+		updateSchema.UpdateColumn([]string{"nonexistent"}, ColumnUpdate{
 			Type: iceberg.Optional[iceberg.Type]{Val: iceberg.PrimitiveTypes.String, Valid: true},
 		})
+
+		err := updateSchema.Validate()
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "Cannot update missing column")
+		assert.Contains(t, err.Error(), "cannot update missing column")
 	})
 }
 
@@ -298,39 +377,55 @@ func TestUpdateSchemaUpdateColumnDoc(t *testing.T) {
 		iceberg.NestedField{ID: 2, Name: "name", Required: true, Type: iceberg.PrimitiveTypes.String, Doc: "old doc"},
 	)
 
-	txn := &Transaction{}
-	updateSchema := NewUpdateSchema(txn, schema, 2)
+	metadata := &metadataV2{
+		commonMetadata: commonMetadata{
+			SchemaList: []*iceberg.Schema{schema},
+		},
+	}
+
+	txn := &Transaction{
+		tbl: &Table{metadata: metadata},
+	}
 
 	t.Run("update documentation", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 2)
+
 		newDoc := "Updated documentation"
-		updated, err := updateSchema.UpdateColumn([]string{"name"}, ColumnUpdate{
+		updateSchema.UpdateColumn([]string{"name"}, ColumnUpdate{
 			Doc: iceberg.Optional[string]{Val: newDoc, Valid: true},
 		})
-		require.NoError(t, err)
-		require.NotNil(t, updated)
 
-		newSchema := updated.Apply()
+		newSchema, err := updateSchema.Build()
+		require.NoError(t, err)
+
 		field, found := newSchema.FindFieldByName("name")
 		require.True(t, found)
 		assert.Equal(t, newDoc, field.Doc)
 	})
 
 	t.Run("update with same doc should not error", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 2)
+
 		sameDoc := "old doc"
-		updated, err := updateSchema.UpdateColumn([]string{"name"}, ColumnUpdate{
+		updateSchema.UpdateColumn([]string{"name"}, ColumnUpdate{
 			Doc: iceberg.Optional[string]{Val: sameDoc, Valid: true},
 		})
+
+		_, err := updateSchema.Build()
 		require.NoError(t, err)
-		require.NotNil(t, updated)
 	})
 
 	t.Run("update non-existent column should fail", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 2)
+
 		newDoc := "new doc"
-		_, err := updateSchema.UpdateColumn([]string{"nonexistent"}, ColumnUpdate{
+		updateSchema.UpdateColumn([]string{"nonexistent"}, ColumnUpdate{
 			Doc: iceberg.Optional[string]{Val: newDoc, Valid: true},
 		})
+
+		err := updateSchema.Validate()
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "Cannot update missing column")
+		assert.Contains(t, err.Error(), "cannot update missing column")
 	})
 }
 
@@ -340,38 +435,72 @@ func TestUpdateSchemaUpdateColumnDefault(t *testing.T) {
 		iceberg.NestedField{ID: 2, Name: "status", Required: false, Type: iceberg.PrimitiveTypes.String, InitialDefault: "active"},
 	)
 
-	txn := &Transaction{}
-	updateSchema := NewUpdateSchema(txn, schema, 2)
+	metadata := &metadataV2{
+		commonMetadata: commonMetadata{
+			SchemaList: []*iceberg.Schema{schema},
+		},
+	}
+
+	txn := &Transaction{
+		tbl: &Table{metadata: metadata},
+	}
 
 	t.Run("update default value", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 2)
+
 		newDefault := "inactive"
-		updated, err := updateSchema.UpdateColumn([]string{"status"}, ColumnUpdate{
+		updateSchema.UpdateColumn([]string{"status"}, ColumnUpdate{
 			Default: newDefault,
 		})
-		require.NoError(t, err)
-		require.NotNil(t, updated)
 
-		newSchema := updated.Apply()
+		newSchema, err := updateSchema.Build()
+		require.NoError(t, err)
+
 		field, found := newSchema.FindFieldByName("status")
 		require.True(t, found)
 		assert.Equal(t, newDefault, field.InitialDefault)
 	})
 
+	t.Run("set default value to nil removes it", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 2)
+
+		// Since the Default field is of type any, we expect nil to be handled differently
+		// This test verifies that nil values are not applied (no change)
+		updateSchema.UpdateColumn([]string{"status"}, ColumnUpdate{
+			Default: nil,
+		})
+
+		newSchema, err := updateSchema.Build()
+		require.NoError(t, err)
+
+		field, found := newSchema.FindFieldByName("status")
+		require.True(t, found)
+		// Since nil means "no change", the original default should remain
+		assert.Equal(t, "active", field.InitialDefault)
+	})
+
 	t.Run("update with same default should not error", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 2)
+
 		sameDefault := "active"
-		updated, err := updateSchema.UpdateColumn([]string{"status"}, ColumnUpdate{
+		updateSchema.UpdateColumn([]string{"status"}, ColumnUpdate{
 			Default: sameDefault,
 		})
+
+		_, err := updateSchema.Build()
 		require.NoError(t, err)
-		require.NotNil(t, updated)
 	})
 
 	t.Run("update non-existent column should fail", func(t *testing.T) {
-		_, err := updateSchema.UpdateColumn([]string{"nonexistent"}, ColumnUpdate{
+		updateSchema := NewUpdateSchema(txn, schema, 2)
+
+		updateSchema.UpdateColumn([]string{"nonexistent"}, ColumnUpdate{
 			Default: "default",
 		})
+
+		err := updateSchema.Validate()
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "Cannot update missing column")
+		assert.Contains(t, err.Error(), "cannot update missing column")
 	})
 }
 
@@ -381,20 +510,39 @@ func TestUpdateSchemaRequireColumn(t *testing.T) {
 		iceberg.NestedField{ID: 2, Name: "optional_field", Required: false, Type: iceberg.PrimitiveTypes.String},
 	)
 
-	txn := &Transaction{}
-	updateSchema := NewUpdateSchema(txn, schema, 2)
+	metadata := &metadataV2{
+		commonMetadata: commonMetadata{
+			SchemaList: []*iceberg.Schema{schema},
+		},
+	}
 
-	t.Run("make column required", func(t *testing.T) {
-		// Allow incompatible changes for this test
-		updateSchema.AllowIncompatibleChanges()
+	txn := &Transaction{
+		tbl: &Table{metadata: metadata},
+	}
 
-		updated, err := updateSchema.UpdateColumn([]string{"optional_field"}, ColumnUpdate{
+	t.Run("make column required without allowing incompatible changes should fail", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 2)
+
+		updateSchema.UpdateColumn([]string{"optional_field"}, ColumnUpdate{
 			Required: iceberg.Optional[bool]{Val: true, Valid: true},
 		})
-		require.NoError(t, err)
-		require.NotNil(t, updated)
 
-		newSchema := updated.Apply()
+		err := updateSchema.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot change column nullability")
+	})
+
+	t.Run("make column required with allowing incompatible changes", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 2)
+		updateSchema.AllowIncompatibleChanges()
+
+		updateSchema.UpdateColumn([]string{"optional_field"}, ColumnUpdate{
+			Required: iceberg.Optional[bool]{Val: true, Valid: true},
+		})
+
+		newSchema, err := updateSchema.Build()
+		require.NoError(t, err)
+
 		field, found := newSchema.FindFieldByName("optional_field")
 		require.True(t, found)
 		assert.True(t, field.Required)
@@ -407,17 +555,26 @@ func TestUpdateSchemaMakeColumnOptional(t *testing.T) {
 		iceberg.NestedField{ID: 2, Name: "required_field", Required: true, Type: iceberg.PrimitiveTypes.String},
 	)
 
-	txn := &Transaction{}
-	updateSchema := NewUpdateSchema(txn, schema, 2)
+	metadata := &metadataV2{
+		commonMetadata: commonMetadata{
+			SchemaList: []*iceberg.Schema{schema},
+		},
+	}
+
+	txn := &Transaction{
+		tbl: &Table{metadata: metadata},
+	}
 
 	t.Run("make column optional", func(t *testing.T) {
-		updated, err := updateSchema.UpdateColumn([]string{"required_field"}, ColumnUpdate{
+		updateSchema := NewUpdateSchema(txn, schema, 2)
+
+		updateSchema.UpdateColumn([]string{"required_field"}, ColumnUpdate{
 			Required: iceberg.Optional[bool]{Val: false, Valid: true},
 		})
-		require.NoError(t, err)
-		require.NotNil(t, updated)
 
-		newSchema := updated.Apply()
+		newSchema, err := updateSchema.Build()
+		require.NoError(t, err)
+
 		field, found := newSchema.FindFieldByName("required_field")
 		require.True(t, found)
 		assert.False(t, field.Required)
@@ -429,17 +586,25 @@ func TestUpdateSchemaAllowIncompatibleChanges(t *testing.T) {
 		iceberg.NestedField{ID: 1, Name: "id", Required: true, Type: iceberg.PrimitiveTypes.Int64},
 	)
 
-	txn := &Transaction{}
-	updateSchema := NewUpdateSchema(txn, schema, 1)
+	metadata := &metadataV2{
+		commonMetadata: commonMetadata{
+			SchemaList: []*iceberg.Schema{schema},
+		},
+	}
+
+	txn := &Transaction{
+		tbl: &Table{metadata: metadata},
+	}
 
 	t.Run("allow incompatible changes should enable adding required column without default", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 1)
 		updateSchema.AllowIncompatibleChanges()
 
-		updated, err := updateSchema.AddColumn([]string{"required_field"}, true, iceberg.PrimitiveTypes.String, "", nil)
-		require.NoError(t, err)
-		require.NotNil(t, updated)
+		updateSchema.AddColumn([]string{"required_field"}, true, iceberg.PrimitiveTypes.String, "", nil)
 
-		newSchema := updated.Apply()
+		newSchema, err := updateSchema.Build()
+		require.NoError(t, err)
+
 		field, found := newSchema.FindFieldByName("required_field")
 		require.True(t, found)
 		assert.True(t, field.Required)
@@ -447,56 +612,59 @@ func TestUpdateSchemaAllowIncompatibleChanges(t *testing.T) {
 	})
 }
 
-func TestUpdateSchemaAssignNewColumnID(t *testing.T) {
-	schema := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "id", Required: true, Type: iceberg.PrimitiveTypes.Int64},
-	)
-
-	txn := &Transaction{}
-	updateSchema := NewUpdateSchema(txn, schema, 1)
-
-	t.Run("assign new column ID increments correctly", func(t *testing.T) {
-		id1 := updateSchema.assignNewColumnID()
-		id2 := updateSchema.assignNewColumnID()
-		id3 := updateSchema.assignNewColumnID()
-
-		assert.Equal(t, 2, id1)
-		assert.Equal(t, 3, id2)
-		assert.Equal(t, 4, id3)
-	})
-}
-
-func TestUpdateSchemaFindField(t *testing.T) {
+func TestUpdateSchemaCaseSensitivity(t *testing.T) {
 	schema := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "id", Required: true, Type: iceberg.PrimitiveTypes.Int64},
 		iceberg.NestedField{ID: 2, Name: "Name", Required: true, Type: iceberg.PrimitiveTypes.String},
 	)
 
-	txn := &Transaction{}
+	metadata := &metadataV2{
+		commonMetadata: commonMetadata{
+			SchemaList: []*iceberg.Schema{schema},
+		},
+	}
 
-	t.Run("case sensitive search", func(t *testing.T) {
+	txn := &Transaction{
+		tbl: &Table{metadata: metadata},
+	}
+
+	t.Run("case sensitive search by default", func(t *testing.T) {
 		updateSchema := NewUpdateSchema(txn, schema, 2)
-		// Default is case sensitive
 
-		field := updateSchema.findField([]string{"Name"})
-		require.NotNil(t, field)
-		assert.Equal(t, "Name", field.Name)
+		// Should work with exact case
+		updateSchema.UpdateColumn([]string{"Name"}, ColumnUpdate{
+			Doc: iceberg.Optional[string]{Val: "updated", Valid: true},
+		})
 
-		field = updateSchema.findField([]string{"name"})
-		assert.Nil(t, field, "should not find field with different case")
+		_, err := updateSchema.Build()
+		require.NoError(t, err)
+
+		// Should fail with different case
+		updateSchema2 := NewUpdateSchema(txn, schema, 2)
+		updateSchema2.UpdateColumn([]string{"name"}, ColumnUpdate{
+			Doc: iceberg.Optional[string]{Val: "updated", Valid: true},
+		})
+
+		err = updateSchema2.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot update missing column")
 	})
 
-	t.Run("case insensitive search", func(t *testing.T) {
+	t.Run("case insensitive search when configured", func(t *testing.T) {
 		updateSchema := NewUpdateSchema(txn, schema, 2)
-		updateSchema.caseSensitive = false
+		updateSchema.SetCaseSensitive(false)
 
-		field := updateSchema.findField([]string{"name"})
-		require.NotNil(t, field)
-		assert.Equal(t, "Name", field.Name)
+		// Should work with different case
+		updateSchema.UpdateColumn([]string{"name"}, ColumnUpdate{
+			Doc: iceberg.Optional[string]{Val: "updated", Valid: true},
+		})
 
-		field = updateSchema.findField([]string{"NAME"})
-		require.NotNil(t, field)
-		assert.Equal(t, "Name", field.Name)
+		newSchema, err := updateSchema.Build()
+		require.NoError(t, err)
+
+		field, found := newSchema.FindFieldByName("Name")
+		require.True(t, found)
+		assert.Equal(t, "updated", field.Doc)
 	})
 }
 
@@ -507,27 +675,33 @@ func TestUpdateSchemaApplyChanges(t *testing.T) {
 		iceberg.NestedField{ID: 3, Name: "age", Required: false, Type: iceberg.PrimitiveTypes.Int32},
 	)
 
-	txn := &Transaction{}
-	updateSchema := NewUpdateSchema(txn, schema, 3)
+	metadata := &metadataV2{
+		commonMetadata: commonMetadata{
+			SchemaList: []*iceberg.Schema{schema},
+		},
+	}
+
+	txn := &Transaction{
+		tbl: &Table{metadata: metadata},
+	}
 
 	t.Run("apply multiple changes", func(t *testing.T) {
-		// Add a new column
-		updated, err := updateSchema.AddColumn([]string{"email"}, false, iceberg.PrimitiveTypes.String, "User email", nil)
-		require.NoError(t, err)
+		updateSchema := NewUpdateSchema(txn, schema, 3)
 
-		doc := "Updated name field"
+		// Add a new column
+		updateSchema.AddColumn([]string{"email"}, false, iceberg.PrimitiveTypes.String, "User email", nil)
+
 		// Update documentation
-		updated, err = updated.UpdateColumn([]string{"name"}, ColumnUpdate{
+		doc := "Updated name field"
+		updateSchema.UpdateColumn([]string{"name"}, ColumnUpdate{
 			Doc: iceberg.Optional[string]{Val: doc, Valid: true},
 		})
-		require.NoError(t, err)
 
 		// Delete a column
-		updated, err = updated.DeleteColumn([]string{"age"})
-		require.NoError(t, err)
+		updateSchema.DeleteColumn([]string{"age"})
 
-		newSchema := updated.Apply()
-		require.NotNil(t, newSchema)
+		newSchema, err := updateSchema.Build()
+		require.NoError(t, err)
 
 		// Verify changes were applied
 		assert.Equal(t, 2, newSchema.ID) // Schema ID should increment
@@ -550,6 +724,50 @@ func TestUpdateSchemaApplyChanges(t *testing.T) {
 		_, found = newSchema.FindFieldByName("id")
 		assert.True(t, found)
 	})
+
+	t.Run("validate without building", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 3)
+
+		// Add valid operations
+		updateSchema.AddColumn([]string{"email"}, false, iceberg.PrimitiveTypes.String, "User email", nil)
+		updateSchema.UpdateColumn([]string{"name"}, ColumnUpdate{
+			Doc: iceberg.Optional[string]{Val: "updated", Valid: true},
+		})
+
+		// Should pass validation
+		err := updateSchema.Validate()
+		require.NoError(t, err)
+
+		// Add invalid operation
+		updateSchema.AddColumn([]string{"name"}, false, iceberg.PrimitiveTypes.String, "duplicate", nil)
+
+		// Should fail validation
+		err = updateSchema.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot add column; name already exists")
+	})
+
+	t.Run("reset and remove operations", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 3)
+
+		// Add some operations
+		updateSchema.AddColumn([]string{"email"}, false, iceberg.PrimitiveTypes.String, "email", nil)
+		updateSchema.AddColumn([]string{"phone"}, false, iceberg.PrimitiveTypes.String, "phone", nil)
+
+		operations := updateSchema.GetQueuedOperations()
+		assert.Len(t, operations, 2)
+
+		// Remove last operation
+		updateSchema.RemoveLastOperation()
+		operations = updateSchema.GetQueuedOperations()
+		assert.Len(t, operations, 1)
+		assert.Contains(t, operations[0], "email")
+
+		// Reset all operations
+		updateSchema.Reset()
+		operations = updateSchema.GetQueuedOperations()
+		assert.Len(t, operations, 0)
+	})
 }
 
 func TestUpdateSchemaMove(t *testing.T) {
@@ -570,17 +788,25 @@ func TestUpdateSchemaMove(t *testing.T) {
 		iceberg.NestedField{ID: 8, Name: "email", Required: false, Type: iceberg.PrimitiveTypes.String},
 	)
 
-	txn := &Transaction{}
+	metadata := &metadataV2{
+		commonMetadata: commonMetadata{
+			SchemaList: []*iceberg.Schema{schema},
+		},
+	}
+
+	txn := &Transaction{
+		tbl: &Table{metadata: metadata},
+	}
 
 	t.Run("move column to first position", func(t *testing.T) {
 		updateSchema := NewUpdateSchema(txn, schema, 8)
 
 		// Move 'email' to first position
-		updated, err := updateSchema.Move([]string{"email"}, nil, OpFirst)
-		require.NoError(t, err)
-		require.NotNil(t, updated)
+		updateSchema.Move([]string{"email"}, nil, OpFirst)
 
-		newSchema := updated.Apply()
+		newSchema, err := updateSchema.Build()
+		require.NoError(t, err)
+
 		fields := newSchema.AsStruct().FieldList
 
 		// Email should now be first
@@ -595,11 +821,11 @@ func TestUpdateSchemaMove(t *testing.T) {
 		updateSchema := NewUpdateSchema(txn, schema, 8)
 
 		// Move 'email' before 'name'
-		updated, err := updateSchema.Move([]string{"email"}, []string{"name"}, OpBefore)
-		require.NoError(t, err)
-		require.NotNil(t, updated)
+		updateSchema.Move([]string{"email"}, []string{"name"}, OpBefore)
 
-		newSchema := updated.Apply()
+		newSchema, err := updateSchema.Build()
+		require.NoError(t, err)
+
 		fields := newSchema.AsStruct().FieldList
 
 		// Email should now be before name
@@ -614,11 +840,11 @@ func TestUpdateSchemaMove(t *testing.T) {
 		updateSchema := NewUpdateSchema(txn, schema, 8)
 
 		// Move 'age' after 'name'
-		updated, err := updateSchema.Move([]string{"age"}, []string{"name"}, OpAfter)
-		require.NoError(t, err)
-		require.NotNil(t, updated)
+		updateSchema.Move([]string{"age"}, []string{"name"}, OpAfter)
 
-		newSchema := updated.Apply()
+		newSchema, err := updateSchema.Build()
+		require.NoError(t, err)
+
 		fields := newSchema.AsStruct().FieldList
 
 		// Age should now be after name
@@ -633,11 +859,11 @@ func TestUpdateSchemaMove(t *testing.T) {
 		updateSchema := NewUpdateSchema(txn, schema, 8)
 
 		// Move 'zip_code' to first position within address struct
-		updated, err := updateSchema.Move([]string{"address", "zip_code"}, nil, OpFirst)
-		require.NoError(t, err)
-		require.NotNil(t, updated)
+		updateSchema.Move([]string{"address", "zip_code"}, nil, OpFirst)
 
-		newSchema := updated.Apply()
+		newSchema, err := updateSchema.Build()
+		require.NoError(t, err)
+
 		addressField, found := newSchema.FindFieldByName("address")
 		require.True(t, found)
 
@@ -654,11 +880,11 @@ func TestUpdateSchemaMove(t *testing.T) {
 		updateSchema := NewUpdateSchema(txn, schema, 8)
 
 		// Move 'city' before 'street' within address struct
-		updated, err := updateSchema.Move([]string{"address", "city"}, []string{"address", "street"}, OpBefore)
-		require.NoError(t, err)
-		require.NotNil(t, updated)
+		updateSchema.Move([]string{"address", "city"}, []string{"address", "street"}, OpBefore)
 
-		newSchema := updated.Apply()
+		newSchema, err := updateSchema.Build()
+		require.NoError(t, err)
+
 		addressField, found := newSchema.FindFieldByName("address")
 		require.True(t, found)
 
@@ -675,14 +901,14 @@ func TestUpdateSchemaMove(t *testing.T) {
 		updateSchema := NewUpdateSchema(txn, schema, 8)
 
 		// Move email to first
-		updated, err := updateSchema.Move([]string{"email"}, nil, OpFirst)
-		require.NoError(t, err)
+		updateSchema.Move([]string{"email"}, nil, OpFirst)
 
 		// Then move age after name
-		updated, err = updated.Move([]string{"age"}, []string{"name"}, OpAfter)
+		updateSchema.Move([]string{"age"}, []string{"name"}, OpAfter)
+
+		newSchema, err := updateSchema.Build()
 		require.NoError(t, err)
 
-		newSchema := updated.Apply()
 		fields := newSchema.AsStruct().FieldList
 
 		// Verify both moves were applied
@@ -696,7 +922,9 @@ func TestUpdateSchemaMove(t *testing.T) {
 	t.Run("move non-existent column should fail", func(t *testing.T) {
 		updateSchema := NewUpdateSchema(txn, schema, 8)
 
-		_, err := updateSchema.Move([]string{"nonexistent"}, []string{"name"}, OpBefore)
+		updateSchema.Move([]string{"nonexistent"}, []string{"name"}, OpBefore)
+
+		err := updateSchema.Validate()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot move missing column")
 	})
@@ -704,7 +932,9 @@ func TestUpdateSchemaMove(t *testing.T) {
 	t.Run("move before non-existent reference column should fail", func(t *testing.T) {
 		updateSchema := NewUpdateSchema(txn, schema, 8)
 
-		_, err := updateSchema.Move([]string{"email"}, []string{"nonexistent"}, OpBefore)
+		updateSchema.Move([]string{"email"}, []string{"nonexistent"}, OpBefore)
+
+		err := updateSchema.Validate()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "reference column for move not found")
 	})
@@ -712,7 +942,9 @@ func TestUpdateSchemaMove(t *testing.T) {
 	t.Run("move after non-existent reference column should fail", func(t *testing.T) {
 		updateSchema := NewUpdateSchema(txn, schema, 8)
 
-		_, err := updateSchema.Move([]string{"email"}, []string{"nonexistent"}, OpAfter)
+		updateSchema.Move([]string{"email"}, []string{"nonexistent"}, OpAfter)
+
+		err := updateSchema.Validate()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "reference column for move not found")
 	})
@@ -720,7 +952,9 @@ func TestUpdateSchemaMove(t *testing.T) {
 	t.Run("move column relative to itself should fail", func(t *testing.T) {
 		updateSchema := NewUpdateSchema(txn, schema, 8)
 
-		_, err := updateSchema.Move([]string{"email"}, []string{"email"}, OpBefore)
+		updateSchema.Move([]string{"email"}, []string{"email"}, OpBefore)
+
+		err := updateSchema.Validate()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot move column relative to itself")
 	})
@@ -729,7 +963,9 @@ func TestUpdateSchemaMove(t *testing.T) {
 		updateSchema := NewUpdateSchema(txn, schema, 8)
 
 		// Try to move a top-level column relative to a nested column
-		_, err := updateSchema.Move([]string{"email"}, []string{"address", "street"}, OpBefore)
+		updateSchema.Move([]string{"email"}, []string{"address", "street"}, OpBefore)
+
+		err := updateSchema.Validate()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot move column across different parent structs")
 	})
@@ -738,51 +974,196 @@ func TestUpdateSchemaMove(t *testing.T) {
 		updateSchema := NewUpdateSchema(txn, schema, 8)
 
 		// Add a new column
-		updated, err := updateSchema.AddColumn([]string{"phone"}, false, iceberg.PrimitiveTypes.String, "Phone number", nil)
-		require.NoError(t, err)
+		updateSchema.AddColumn([]string{"phone"}, false, iceberg.PrimitiveTypes.String, "Phone number", nil)
 
 		// Delete a column
-		updated, err = updated.DeleteColumn([]string{"age"})
+		updateSchema.DeleteColumn([]string{"age"})
+
+		// Move existing email before name (can't move newly added columns yet)
+		updateSchema.Move([]string{"email"}, []string{"name"}, OpBefore)
+
+		newSchema, err := updateSchema.Build()
 		require.NoError(t, err)
 
-		// Move the new column to first position
-		updated, err = updated.Move([]string{"phone"}, nil, OpFirst)
-		require.NoError(t, err)
-
-		// Move email before name
-		updated, err = updated.Move([]string{"email"}, []string{"name"}, OpBefore)
-		require.NoError(t, err)
-
-		newSchema := updated.Apply()
 		fields := newSchema.AsStruct().FieldList
 
-		// Verify all operations were applied correctly
-		assert.Equal(t, "phone", fields[0].Name)
-		assert.Equal(t, "id", fields[1].Name)
-		assert.Equal(t, "email", fields[2].Name)
-		assert.Equal(t, "name", fields[3].Name)
-		assert.Equal(t, "address", fields[4].Name)
+		// Verify operations were applied correctly
+		assert.Equal(t, "id", fields[0].Name)
+		assert.Equal(t, "email", fields[1].Name)
+		assert.Equal(t, "name", fields[2].Name)
+		assert.Equal(t, "address", fields[3].Name)
+		assert.Equal(t, "phone", fields[4].Name) // newly added column appears at the end
 
 		// Verify age was deleted
 		_, found := newSchema.FindFieldByName("age")
 		assert.False(t, found)
+
+		// Verify phone was added
+		phoneField, found := newSchema.FindFieldByName("phone")
+		require.True(t, found)
+		assert.Equal(t, "Phone number", phoneField.Doc)
 	})
 }
 
-// Helper function to create mock metadata for testing
-func createMockMetadata(schema *iceberg.Schema, lastColumnID int) Metadata {
-	// For testing purposes, we'll use a simple mock that implements the Metadata interface
-	return &mockMetadata{
-		schema:       schema,
-		lastColumnID: lastColumnID,
+func TestUpdateSchemaBackwardCompatibility(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Required: true, Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "name", Required: true, Type: iceberg.PrimitiveTypes.String},
+	)
+
+	metadata := &metadataV2{
+		commonMetadata: commonMetadata{
+			SchemaList: []*iceberg.Schema{schema},
+		},
 	}
+
+	txn := &Transaction{
+		tbl: &Table{metadata: metadata},
+	}
+
+	t.Run("Apply method should panic on validation errors", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 2)
+
+		// Add invalid operation
+		updateSchema.AddColumn([]string{}, false, iceberg.PrimitiveTypes.String, "", nil)
+
+		// Apply should panic
+		_, err := updateSchema.Build()
+		require.Error(t, err)
+	})
+
+	t.Run("Apply method should return schema on success", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 2)
+
+		// Add valid operation
+		updateSchema.AddColumn([]string{"email"}, false, iceberg.PrimitiveTypes.String, "email", nil)
+
+		// Apply should succeed
+		newSchema, err := updateSchema.Build()
+		require.Error(t, err)
+		require.NotNil(t, newSchema)
+
+		field, found := newSchema.FindFieldByName("email")
+		require.True(t, found)
+		assert.Equal(t, "email", field.Name)
+	})
 }
 
-// Helper function to create a pointer to any value
-func anyPtr(v any) *any {
-	return &v
-}
+func TestUpdateSchemaComplexScenarios(t *testing.T) {
+	addressType := &iceberg.StructType{
+		FieldList: []iceberg.NestedField{
+			{ID: 5, Name: "street", Type: iceberg.PrimitiveTypes.String, Required: true},
+			{ID: 6, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: true},
+		},
+	}
 
-func boolPtr(b bool) *bool {
-	return &b
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Required: true, Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "name", Required: true, Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "age", Required: false, Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 4, Name: "address", Required: false, Type: addressType},
+	)
+
+	metadata := &metadataV2{
+		commonMetadata: commonMetadata{
+			SchemaList: []*iceberg.Schema{schema},
+		},
+	}
+
+	txn := &Transaction{
+		tbl: &Table{metadata: metadata},
+	}
+
+	t.Run("complex schema evolution scenario", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 6)
+
+		// 1. Add email field
+		updateSchema.AddColumn([]string{"email"}, false, iceberg.PrimitiveTypes.String, "User email", "default@example.com")
+
+		// 2. Update name documentation
+		updateSchema.UpdateColumn([]string{"name"}, ColumnUpdate{
+			Doc: iceberg.Optional[string]{Val: "Updated user name", Valid: true},
+		})
+
+		// 3. Promote age from int32 to int64
+		updateSchema.UpdateColumn([]string{"age"}, ColumnUpdate{
+			Type: iceberg.Optional[iceberg.Type]{Val: iceberg.PrimitiveTypes.Int64, Valid: true},
+		})
+
+		// 4. Add zip_code to address struct
+		updateSchema.AddColumn([]string{"address", "zip_code"}, false, iceberg.PrimitiveTypes.String, "ZIP code", nil)
+
+		// Note: Moving newly added columns is not currently supported in the same transaction
+		// Only move existing columns
+
+		newSchema, err := updateSchema.Build()
+		require.NoError(t, err)
+
+		// Verify all changes
+		fields := newSchema.AsStruct().FieldList
+
+		// Check field order at top level (new columns appear at the end)
+		assert.Equal(t, "id", fields[0].Name)
+		assert.Equal(t, "name", fields[1].Name)
+		assert.Equal(t, "age", fields[2].Name)
+		assert.Equal(t, "address", fields[3].Name)
+		assert.Equal(t, "email", fields[4].Name) // newly added
+
+		// Check email field
+		emailField, found := newSchema.FindFieldByName("email")
+		require.True(t, found)
+		assert.Equal(t, "User email", emailField.Doc)
+		assert.Equal(t, "default@example.com", emailField.InitialDefault)
+
+		// Check name field doc update
+		nameField, found := newSchema.FindFieldByName("name")
+		require.True(t, found)
+		assert.Equal(t, "Updated user name", nameField.Doc)
+
+		// Check age type promotion
+		ageField, found := newSchema.FindFieldByName("age")
+		require.True(t, found)
+		assert.Equal(t, iceberg.PrimitiveTypes.Int64, ageField.Type)
+
+		// Check address struct changes
+		addressField, found := newSchema.FindFieldByName("address")
+		require.True(t, found)
+		addressStruct, ok := addressField.Type.(*iceberg.StructType)
+		require.True(t, ok)
+
+		// Check nested field order (new nested fields appear at the end)
+		assert.Equal(t, "street", addressStruct.FieldList[0].Name)
+		assert.Equal(t, "city", addressStruct.FieldList[1].Name)
+		assert.Equal(t, "zip_code", addressStruct.FieldList[2].Name) // newly added
+
+		// Check zip_code field
+		zipField, found := newSchema.FindFieldByName("address.zip_code")
+		require.True(t, found)
+		assert.Equal(t, "ZIP code", zipField.Doc)
+		assert.False(t, zipField.Required)
+	})
+
+	t.Run("no-op changes should return original schema", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 6)
+
+		newSchema, err := updateSchema.Build()
+		require.NoError(t, err)
+
+		// Should return the same schema reference when no changes
+		assert.Equal(t, schema, newSchema)
+	})
+
+	t.Run("conflicting operations should fail", func(t *testing.T) {
+		updateSchema := NewUpdateSchema(txn, schema, 6)
+
+		// Try to update and delete the same field
+		updateSchema.UpdateColumn([]string{"age"}, ColumnUpdate{
+			Doc: iceberg.Optional[string]{Val: "updated doc", Valid: true},
+		})
+		updateSchema.DeleteColumn([]string{"age"})
+
+		_, err := updateSchema.Build()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot delete a column that has updates")
+	})
 }

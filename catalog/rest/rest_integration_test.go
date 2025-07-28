@@ -53,7 +53,6 @@ func (s *RestIntegrationSuite) loadCatalog(ctx context.Context) *rest.Catalog {
 		io.S3Region:          "us-east-1",
 		io.S3AccessKeyID:     "admin",
 		io.S3SecretAccessKey: "password",
-		io.S3EndpointURL:     "http://localhost:9000",
 	})
 	s.Require().NoError(err)
 	s.Require().IsType(&rest.Catalog{}, cat)
@@ -337,11 +336,11 @@ func (s *RestIntegrationSuite) TestUpdateSchema() {
 	pqfile, err := url.JoinPath(location, "data", "test_schema_update_data", "initial.parquet")
 	s.Require().NoError(err)
 
-	fw, err := tbl.FS().(io.WriteFileIO).Create(pqfile)
+	fw, err := mustFS(s.T(), tbl).(io.WriteFileIO).Create(pqfile)
 	s.Require().NoError(err)
 	s.Require().NoError(pqarrow.WriteTable(initialTable, fw, initialTable.NumRows(),
 		nil, pqarrow.DefaultWriterProps()))
-	defer tbl.FS().Remove(pqfile)
+	defer mustFS(s.T(), tbl).Remove(pqfile)
 
 	// Add initial data to the table
 	txn := tbl.NewTransaction()
@@ -354,25 +353,21 @@ func (s *RestIntegrationSuite) TestUpdateSchema() {
 	updateSchema := txn.UpdateSchema()
 
 	// Update schema 1. Add a new column
-	updated, err := updateSchema.AddColumn([]string{"baz"}, false, iceberg.PrimitiveTypes.Bool, "Boolean flag", nil)
-	s.Require().NoError(err)
+	updated := updateSchema.AddColumn([]string{"baz"}, false, iceberg.PrimitiveTypes.Bool, "Boolean flag", nil)
 
 	// Update schema 2. Update existing column (type promotion: Int32 -> Int64)
-	updated, err = updated.UpdateColumn([]string{"bar"}, table.ColumnUpdate{
+	updated = updated.UpdateColumn([]string{"bar"}, table.ColumnUpdate{
 		Type: iceberg.Optional[iceberg.Type]{Val: iceberg.PrimitiveTypes.Int64, Valid: true},
 		Doc:  iceberg.Optional[string]{Val: "Updated bar column - promoted to int64", Valid: true},
 	})
-	s.Require().NoError(err)
 
 	// Update schema 3. Update another column (documentation only)
-	updated, err = updated.UpdateColumn([]string{"foo"}, table.ColumnUpdate{
+	updated = updated.UpdateColumn([]string{"foo"}, table.ColumnUpdate{
 		Doc: iceberg.Optional[string]{Val: "Updated foo column documentation", Valid: true},
 	})
-	s.Require().NoError(err)
 
 	// Update schema 4. Delete the temporary column
-	updated, err = updated.DeleteColumn([]string{"temp_col"})
-	s.Require().NoError(err)
+	updated = updated.DeleteColumn([]string{"temp_col"})
 
 	// Commit schema changes
 	s.Require().NoError(updated.Commit())
@@ -456,6 +451,8 @@ func (s *RestIntegrationSuite) TestUpdateSchema() {
 	for i := 0; i < int(scanResult.NumCols()); i++ {
 		s.NotEqual("temp_col", scanResult.Schema().Field(i).Name, "temp_col should not be present in results")
 	}
+}
+
 func mustFS(t *testing.T, tbl *table.Table) io.IO {
 	r, err := tbl.FS(context.Background())
 	require.NoError(t, err)

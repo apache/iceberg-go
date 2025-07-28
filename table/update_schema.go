@@ -1,20 +1,3 @@
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
-//
-//   http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
-
 package table
 
 import (
@@ -26,21 +9,79 @@ import (
 	"github.com/apache/iceberg-go"
 )
 
+// UpdateSchema accumulates operations and validates on Build/Commit
 type UpdateSchema struct {
 	txn          *Transaction
 	schema       *iceberg.Schema
 	lastColumnID int
 
-	deletes map[int]struct{}
-	updates map[int]*iceberg.NestedField
-	adds    map[int][]*iceberg.NestedField
-	moves   map[int][]moveReq
+	operations []SchemaOperation
+	errors     []error // Collect validation errors
 
 	allowIncompatibleChanges bool
 	identifierFields         map[string]struct{}
 	caseSensitive            bool
 }
 
+// Operation represents a deferred schema operation
+type SchemaOperation interface {
+	Apply(builder *schemaBuilder) error
+	Validate(schema *iceberg.Schema, settings *validationSettings) error
+	String() string
+}
+
+// Validation settings passed to operations
+type validationSettings struct {
+	allowIncompatibleChanges bool
+	caseSensitive            bool
+}
+
+type schemaBuilder struct {
+	deletes      map[int]struct{}
+	updates      map[int]*iceberg.NestedField
+	adds         map[int][]*iceberg.NestedField
+	moves        map[int][]moveReq
+	lastColumnID int
+	baseSchema   *iceberg.Schema
+	settings     *validationSettings
+}
+
+// Operation Types
+// Each schema update operation is represented by a struct that implements the SchemaOperation interface
+// and has a Validate and Apply method.
+// The Validate method validates the operation and returns an error if the operation is invalid.
+// The Apply method applies the operation to the schema builder.
+type addColumnOp struct {
+	path           []string
+	required       bool
+	dataType       iceberg.Type
+	doc            string
+	initialDefault any
+}
+
+type updateColumnOp struct {
+	path    []string
+	updates ColumnUpdate
+}
+
+type deleteColumnOp struct {
+	path []string
+}
+
+type moveColumnOp struct {
+	columnToMove    []string
+	referenceColumn []string
+	op              moveOp
+}
+
+type ColumnUpdate struct {
+	Type     iceberg.Optional[iceberg.Type] // nil means no change
+	Doc      iceberg.Optional[string]       // nil means no change
+	Default  any                            // nil means no change
+	Required iceberg.Optional[bool]         // nil means no change
+}
+
+// Move operation
 type moveOp string
 
 const (
@@ -59,43 +100,280 @@ func NewUpdateSchema(txn *Transaction, s *iceberg.Schema, lastColumnID int) *Upd
 	return &UpdateSchema{
 		txn:                      txn,
 		schema:                   s,
-		deletes:                  make(map[int]struct{}),
-		updates:                  make(map[int]*iceberg.NestedField),
-		adds:                     make(map[int][]*iceberg.NestedField),
-		moves:                    make(map[int][]moveReq),
 		lastColumnID:             lastColumnID,
+		operations:               make([]SchemaOperation, 0),
+		errors:                   make([]error, 0),
 		allowIncompatibleChanges: false,
 		identifierFields:         make(map[string]struct{}),
 		caseSensitive:            true,
 	}
 }
 
-// AllowIncompatibleChanges permits incompatible schema changes.
+// AllowIncompatibleChanges permits incompatible schema changes
 func (us *UpdateSchema) AllowIncompatibleChanges() *UpdateSchema {
 	us.allowIncompatibleChanges = true
-
 	return us
 }
 
-// AddColumn adds a new column to the schema.
-// usage:
-// a is a struct/list/map b is a sub field of a
-//
-// us.AddColumn([]string{"a","b"}, true, iceberg.StringType{}, "doc", "default")
-// us.AddColumn([]string{"a","b"}, true, iceberg.StringType{}, "doc", "default")
-func (us *UpdateSchema) AddColumn(path []string, required bool, dataType iceberg.Type, doc string, initialDefault any) (*UpdateSchema, error) {
-	if len(path) == 0 {
-		return nil, errors.New("AddColumn: path must contain at least the new column name")
+// SetCaseSensitive controls case sensitivity for field lookups
+func (us *UpdateSchema) SetCaseSensitive(caseSensitive bool) *UpdateSchema {
+	us.caseSensitive = caseSensitive
+	return us
+}
+
+// AddColumn queues an add column operation - validation deferred until Build is called
+func (us *UpdateSchema) AddColumn(path []string, required bool, dataType iceberg.Type, doc string, initialDefault any) *UpdateSchema {
+	op := &addColumnOp{
+		path:           path,
+		required:       required,
+		dataType:       dataType,
+		doc:            doc,
+		initialDefault: initialDefault,
+	}
+	us.operations = append(us.operations, op)
+	return us
+}
+
+// UpdateColumn queues an update column operation - validation deferred until Build is called
+func (us *UpdateSchema) UpdateColumn(path []string, updates ColumnUpdate) *UpdateSchema {
+	op := &updateColumnOp{
+		path:    path,
+		updates: updates,
+	}
+	us.operations = append(us.operations, op)
+	return us
+}
+
+// DeleteColumn queues a delete column operation - validation deferred until Build is called
+func (us *UpdateSchema) DeleteColumn(path []string) *UpdateSchema {
+	op := &deleteColumnOp{
+		path: path,
+	}
+	us.operations = append(us.operations, op)
+	return us
+}
+
+// Move queues a move column operation - validation deferred until Build is called
+func (us *UpdateSchema) Move(columnToMove, referenceColumn []string, op moveOp) *UpdateSchema {
+	moveOp := &moveColumnOp{
+		columnToMove:    columnToMove,
+		referenceColumn: referenceColumn,
+		op:              op,
+	}
+	us.operations = append(us.operations, moveOp)
+	return us
+}
+
+/// Operation Methods
+
+// Reset clears all queued operations and errors - validation deferred until Build is called
+func (us *UpdateSchema) Reset() *UpdateSchema {
+	us.operations = us.operations[:0]
+	us.errors = us.errors[:0]
+	return us
+}
+
+// RemoveLastOperation removes the most recently added operation
+func (us *UpdateSchema) RemoveLastOperation() *UpdateSchema {
+	if len(us.operations) > 0 {
+		us.operations = us.operations[:len(us.operations)-1]
+	}
+	return us
+}
+
+// GetQueuedOperations returns a copy of the queued operations
+func (us *UpdateSchema) GetQueuedOperations() []string {
+	result := make([]string, len(us.operations))
+	for i, op := range us.operations {
+		result[i] = op.String()
+	}
+	return result
+}
+
+// Validate runs all deferred validations for operations without building
+// basically just checks if the operations are valid
+func (us *UpdateSchema) Validate() error {
+	// Clear the previous errors
+	// because if validation is called multiple times, the errors will accumulate even after removing operations causing error
+	us.errors = us.errors[:0]
+
+	settings := &validationSettings{
+		allowIncompatibleChanges: us.allowIncompatibleChanges,
+		caseSensitive:            us.caseSensitive,
 	}
 
-	colName := path[len(path)-1]
+	for _, op := range us.operations {
+		if err := op.Validate(us.schema, settings); err != nil {
+			us.errors = append(us.errors, err)
+		}
+	}
+
+	if len(us.errors) > 0 {
+		return fmt.Errorf("validation failed with %d errors: %v", len(us.errors), us.errors)
+	}
+	return nil
+}
+
+// Build validates and constructs the final schema
+func (us *UpdateSchema) Build() (*iceberg.Schema, error) {
+	// First validate all operations
+	if err := us.Validate(); err != nil {
+		return nil, err
+	}
+
+	// No operations means no changes
+	if len(us.operations) == 0 {
+		return us.schema, nil
+	}
+
+	// Create builder and apply operations
+	builder := &schemaBuilder{
+		deletes:      make(map[int]struct{}),
+		updates:      make(map[int]*iceberg.NestedField),
+		adds:         make(map[int][]*iceberg.NestedField),
+		moves:        make(map[int][]moveReq),
+		lastColumnID: us.lastColumnID,
+		baseSchema:   us.schema,
+		settings: &validationSettings{
+			allowIncompatibleChanges: us.allowIncompatibleChanges,
+			caseSensitive:            us.caseSensitive,
+		},
+	}
+
+	// Apply operations in order
+	for _, op := range us.operations {
+		if err := op.Apply(builder); err != nil {
+			return nil, fmt.Errorf("failed to apply operation %s: %w", op.String(), err)
+		}
+	}
+
+	// Build final schema
+	return us.buildFinalSchema(builder)
+}
+
+// Commit validates, builds, and commits the schema changes
+func (us *UpdateSchema) Commit() error {
+	updates, requirements, err := us.CommitUpdates()
+	if err != nil {
+		return err
+	}
+
+	if len(updates) == 0 {
+		return nil
+	}
+
+	return us.txn.apply(updates, requirements)
+}
+
+// CommitUpdates returns the updates and requirements needed
+func (us *UpdateSchema) CommitUpdates() ([]Update, []Requirement, error) {
+	// If there are no operations, return nil updates and requirements
+	if len(us.operations) == 0 {
+		return nil, nil, nil
+	}
+
+	newSchema, err := us.Build()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Check if equivalent schema exists
+	existingSchemaID := us.findExistingSchemaInTransaction(newSchema)
+
+	var updates []Update
+	var requirements []Requirement
+
+	// for Commit Contention
+	requirements = append(requirements, AssertCurrentSchemaID(us.schema.ID))
+
+	if existingSchemaID == nil {
+		// Get the final lastColumnID from the builder
+		builder := &schemaBuilder{
+			deletes:      make(map[int]struct{}),
+			updates:      make(map[int]*iceberg.NestedField),
+			adds:         make(map[int][]*iceberg.NestedField),
+			moves:        make(map[int][]moveReq),
+			lastColumnID: us.lastColumnID,
+			baseSchema:   us.schema,
+			settings: &validationSettings{
+				allowIncompatibleChanges: us.allowIncompatibleChanges,
+				caseSensitive:            us.caseSensitive,
+			},
+		}
+
+		for _, op := range us.operations {
+			if err := op.Apply(builder); err != nil {
+				return nil, nil, fmt.Errorf("failed to recompute lastColumnID: %w", err)
+			}
+		}
+		updates = append(updates,
+			NewAddSchemaUpdate(newSchema, builder.lastColumnID, false),
+			NewSetCurrentSchemaUpdate(newSchema.ID),
+		)
+	} else {
+		updates = append(updates, NewSetCurrentSchemaUpdate(*existingSchemaID))
+	}
+
+	if nameMapUpdates := us.getNameMappingUpdates(newSchema); len(nameMapUpdates) > 0 {
+		updates = append(updates, nameMapUpdates...)
+	}
+
+	return updates, requirements, nil
+}
+
+/// AddColumn Operation
+
+// Implementation of Operation interface for addColumnOp
+func (op *addColumnOp) Validate(schema *iceberg.Schema, settings *validationSettings) error {
+	if len(op.path) == 0 {
+		return errors.New("AddColumn: path must contain at least the new column name")
+	}
+
+	// Check if field already exists
+	if existing := findField(schema, op.path, settings.caseSensitive); existing != nil {
+		return fmt.Errorf("cannot add column; name already exists: %s", strings.Join(op.path, "."))
+	}
+
+	// Validate parent exists and is a nested type
+	if len(op.path) > 1 {
+		parentPath := op.path[:len(op.path)-1]
+		pf := findField(schema, parentPath, settings.caseSensitive)
+		if pf == nil {
+			return fmt.Errorf("cannot find parent struct: %s", strings.Join(parentPath, "."))
+		}
+
+		switch pf.Type.(type) {
+		case *iceberg.StructType, *iceberg.MapType, *iceberg.ListType:
+			// Valid parent types
+		default:
+			return fmt.Errorf("parent is not a nested type: %s", strings.Join(parentPath, "."))
+		}
+	}
+
+	// Validate required column has default or incompatible changes are allowed
+	if op.required && op.initialDefault == nil && !settings.allowIncompatibleChanges {
+		return fmt.Errorf("cannot add required column without default value: %s", strings.Join(op.path, "."))
+	}
+
+	// Validate default value type compatibility
+	if op.initialDefault != nil {
+		if err := validateDefaultValue(op.dataType, op.initialDefault); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (op *addColumnOp) Apply(builder *schemaBuilder) error {
+	colName := op.path[len(op.path)-1]
 	parentID := -1
 
-	if len(path) > 1 {
-		parentPath := path[:len(path)-1]
-		pf := us.findField(parentPath)
+	if len(op.path) > 1 {
+		parentPath := op.path[:len(op.path)-1]
+		pf := findField(builder.baseSchema, parentPath, builder.settings.caseSensitive)
 		if pf == nil {
-			return nil, fmt.Errorf("cannot find parent struct: %s", strings.Join(parentPath, "."))
+			return fmt.Errorf("cannot find parent struct: %s", strings.Join(parentPath, "."))
 		}
 
 		switch nt := pf.Type.(type) {
@@ -108,299 +386,260 @@ func (us *UpdateSchema) AddColumn(path []string, required bool, dataType iceberg
 			ef := nt.ElementField()
 			parentID = ef.ID
 		default:
-			return nil, fmt.Errorf("parent is not a nested type: %s", strings.Join(parentPath, "."))
+			return fmt.Errorf("parent is not a nested type: %s", strings.Join(parentPath, "."))
 		}
 	}
 
-	if existing := us.findField(path); existing != nil && !us.isDeleted(existing.ID) {
-		return nil, fmt.Errorf("cannot add column; name already exists: %s", strings.Join(path, "."))
-	}
-
-	if required && initialDefault == nil && !us.allowIncompatibleChanges {
-		return nil, fmt.Errorf("cannot add required column without default value: %s", strings.Join(path, "."))
-	}
-
-	if initialDefault != nil {
-		if err := validateDefaultValue(dataType, initialDefault); err != nil {
-			return nil, err
-		}
-	}
-
-	newID := us.assignNewColumnID()
+	newID := builder.assignNewColumnID()
 	nf := &iceberg.NestedField{
 		Name:           colName,
 		ID:             newID,
-		Required:       required,
-		Type:           dataType,
-		Doc:            doc,
-		InitialDefault: initialDefault,
+		Required:       op.required,
+		Type:           op.dataType,
+		Doc:            op.doc,
+		InitialDefault: op.initialDefault,
 	}
 
-	us.adds[parentID] = append(us.adds[parentID], nf)
-
-	return us, nil
+	builder.adds[parentID] = append(builder.adds[parentID], nf)
+	return nil
 }
 
-type ColumnUpdate struct {
-	Type     iceberg.Optional[iceberg.Type] // nil means no change
-	Doc      iceberg.Optional[string]       // nil means no change
-	Default  any                            // nil means no change
-	Required iceberg.Optional[bool]         // nil means no change
+func (op *addColumnOp) String() string {
+	return fmt.Sprintf("AddColumn(%s, required=%t, type=%s)",
+		strings.Join(op.path, "."), op.required, op.dataType.String())
 }
 
-// UpdateColumn updates a column in the schema.
-// usage:
-// a is a struct/list/map b is a sub field of a
-//
-// us.UpdateColumn([]string{"a","b"}, ColumnUpdate{Type: iceberg.StringType{}})
-// us.UpdateColumn([]string{"a","b"}, ColumnUpdate{...})
-func (us *UpdateSchema) UpdateColumn(path []string, updates ColumnUpdate) (*UpdateSchema, error) {
-	field := us.findForUpdate(path)
+/// UpdateColumn Operation
+
+// Implementation for updateColumnOp
+func (op *updateColumnOp) Validate(schema *iceberg.Schema, settings *validationSettings) error {
+	field := findField(schema, op.path, settings.caseSensitive)
 	if field == nil {
-		return nil, fmt.Errorf("Cannot update missing column: %s", strings.Join(path, "."))
+		return fmt.Errorf("cannot update missing column: %s", strings.Join(op.path, "."))
 	}
 
-	if us.isDeleted(field.ID) {
-		return nil, fmt.Errorf("Cannot update a column that will be deleted: %s", strings.Join(path, "."))
+	// Type promotion validation
+	if op.updates.Type.Valid && !field.Type.Equals(op.updates.Type.Val) {
+		_, err := iceberg.PromoteType(field.Type, op.updates.Type.Val)
+		if err != nil {
+			return fmt.Errorf("cannot update type of column: %s: %s -> %s: %w",
+				strings.Join(op.path, "."), field.Type.String(), op.updates.Type.Val.String(), err)
+		}
 	}
 
+	// Required flag validation
+	if op.updates.Required.Valid && field.Required != op.updates.Required.Val {
+		isRequired := op.updates.Required.Val
+		if isRequired && !settings.allowIncompatibleChanges {
+			return fmt.Errorf("cannot change column nullability: %s: optional -> required",
+				strings.Join(op.path, "."))
+		}
+	}
+
+	return nil
+}
+
+func (op *updateColumnOp) Apply(builder *schemaBuilder) error {
+	field := findField(builder.baseSchema, op.path, builder.settings.caseSensitive)
+	if field == nil {
+		return fmt.Errorf("cannot update missing column: %s", strings.Join(op.path, "."))
+	}
+
+	// Create a copy of the field for modification
+	updatedField := *field
 	hasChanges := false
 
-	if updates.Type.Valid && !field.Type.Equals(updates.Type.Val) {
-		newType, err := iceberg.PromoteType(field.Type, updates.Type.Val)
+	// Update type if provided
+	if op.updates.Type.Valid && !field.Type.Equals(op.updates.Type.Val) {
+		newType, err := iceberg.PromoteType(field.Type, op.updates.Type.Val)
 		if err != nil {
-			return nil, fmt.Errorf("Cannot update type of column: %s: %s -> %s: %w",
-				strings.Join(path, "."), field.Type.String(), updates.Type.Val.String(), err)
+			return fmt.Errorf("cannot update type of column: %s: %s -> %s: %w",
+				strings.Join(op.path, "."), field.Type.String(), op.updates.Type.Val.String(), err)
 		}
-		field.Type = newType
+		updatedField.Type = newType
 		hasChanges = true
 	}
 
 	// Update documentation if provided
-	if updates.Doc.Valid && field.Doc != updates.Doc.Val {
-		field.Doc = updates.Doc.Val
+	if op.updates.Doc.Valid && field.Doc != op.updates.Doc.Val {
+		updatedField.Doc = op.updates.Doc.Val
 		hasChanges = true
 	}
 
 	// Update default value if provided
-	if updates.Default != nil && field.InitialDefault != updates.Default {
-		field.InitialDefault = updates.Default
+	if op.updates.Default != nil && field.InitialDefault != op.updates.Default {
+		updatedField.InitialDefault = op.updates.Default
 		hasChanges = true
 	}
 
 	// Update required flag if provided
-	if updates.Required.Valid && field.Required != updates.Required.Val {
-		isRequired := updates.Required.Val
-
-		if isRequired == field.Required {
-			// No change needed
-			return nil, fmt.Errorf("Cannot change column nullability: %s: %t -> %t", strings.Join(path, "."), field.Required, isRequired)
-		} else {
-			isDefaultedAdd := us.isAdded(field.ID) && field.InitialDefault != nil
-
-			if isRequired && !isDefaultedAdd && !us.allowIncompatibleChanges {
-				return nil, fmt.Errorf("Cannot change column nullability: %s: optional -> required",
-					strings.Join(path, "."))
-			}
-
-			field.Required = isRequired
-			hasChanges = true
-		}
+	if op.updates.Required.Valid && field.Required != op.updates.Required.Val {
+		updatedField.Required = op.updates.Required.Val
+		hasChanges = true
 	}
 
 	// Only update the map if changes were made
 	if hasChanges {
-		us.updates[field.ID] = field
+		builder.updates[field.ID] = &updatedField
 	}
 
-	return us, nil
+	return nil
 }
 
-// DeleteColumn removes a column from the schema.
-// usage:
-// us.DeleteColumn([]string{"a","b"})
-// us.DeleteColumn([]string{"a","b","c"})
-func (us *UpdateSchema) DeleteColumn(path []string) (*UpdateSchema, error) {
-	field := us.findField(path)
+func (op *updateColumnOp) String() string {
+	var changes []string
+	if op.updates.Type.Valid {
+		changes = append(changes, fmt.Sprintf("type=%s", op.updates.Type.Val.String()))
+	}
+	if op.updates.Doc.Valid {
+		changes = append(changes, fmt.Sprintf("doc=%s", op.updates.Doc.Val))
+	}
+	if op.updates.Default != nil {
+		changes = append(changes, "default=<value>")
+	}
+	if op.updates.Required.Valid {
+		changes = append(changes, fmt.Sprintf("required=%t", op.updates.Required.Val))
+	}
+	return fmt.Sprintf("UpdateColumn(%s, %s)",
+		strings.Join(op.path, "."), strings.Join(changes, ", "))
+}
+
+/// DeleteColumn Operation
+
+// Implementation for deleteColumnOp
+func (op *deleteColumnOp) Validate(schema *iceberg.Schema, settings *validationSettings) error {
+	field := findField(schema, op.path, settings.caseSensitive)
 	if field == nil {
-		return nil, fmt.Errorf("Cannot delete missing column: %s", strings.Join(path, "."))
+		return fmt.Errorf("cannot delete missing column: %s", strings.Join(op.path, "."))
 	}
-
-	if _, ok := us.adds[field.ID]; ok {
-		return nil, fmt.Errorf("Cannot delete a column that has additions: %s", strings.Join(path, "."))
-	}
-
-	if _, ok := us.updates[field.ID]; ok {
-		return nil, fmt.Errorf("Cannot delete a column that has updates: %s", strings.Join(path, "."))
-	}
-
-	us.deletes[field.ID] = struct{}{}
-
-	return us, nil
+	return nil
 }
 
-// Move re-orders a column relative to its siblings.
-//
-//	op = OpFirst             → column becomes first in its struct
-//	op = OpBefore / OpAfter  → place column before / after anotherColumn
-//
-// Paths use the same slice notation as Add/Update/Delete (["a","b"]) which means "a.b".
-// usage:
-//
-//	us.Move([]string{"a","b"}, []string{"c"}, OpBefore)
-//	us.Move([]string{"a","b"}, []string{"c"}, OpAfter)
-//	us.Move([]string{"a","b"}, []string{"c"}, OpFirst)
-//
-//	us.Move([]string{"a","b"}, []string{"c"}, OpBefore)
-func (us *UpdateSchema) Move(columnToMove, referenceColumn []string, op moveOp) (*UpdateSchema, error) {
-	colField := us.findFieldIncludingAdded(columnToMove)
-	if colField == nil {
-		return nil, fmt.Errorf("cannot move missing column: %s", strings.Join(columnToMove, "."))
+func (op *deleteColumnOp) Apply(builder *schemaBuilder) error {
+	field := findField(builder.baseSchema, op.path, builder.settings.caseSensitive)
+	if field == nil {
+		return fmt.Errorf("cannot delete missing column: %s", strings.Join(op.path, "."))
 	}
 
-	parentID := us.parentIDForPath(columnToMove)
+	// Check for conflicts with adds/updates
+	if _, ok := builder.adds[field.ID]; ok {
+		return fmt.Errorf("cannot delete a column that has additions: %s", strings.Join(op.path, "."))
+	}
+
+	if _, ok := builder.updates[field.ID]; ok {
+		return fmt.Errorf("cannot delete a column that has updates: %s", strings.Join(op.path, "."))
+	}
+
+	builder.deletes[field.ID] = struct{}{}
+	return nil
+}
+
+func (op *deleteColumnOp) String() string {
+	return fmt.Sprintf("DeleteColumn(%s)", strings.Join(op.path, "."))
+}
+
+/// MoveColumn Operation
+
+// Implementation for moveColumnOp
+func (op *moveColumnOp) Validate(schema *iceberg.Schema, settings *validationSettings) error {
+	// Validate column to move exists
+	colField := findField(schema, op.columnToMove, settings.caseSensitive)
+	if colField == nil {
+		return fmt.Errorf("cannot move missing column: %s", strings.Join(op.columnToMove, "."))
+	}
+
+	// Validate reference column for before/after operations
+	if op.op == OpBefore || op.op == OpAfter {
+		other := findField(schema, op.referenceColumn, settings.caseSensitive)
+		if other == nil {
+			return fmt.Errorf("reference column for move not found: %s", strings.Join(op.referenceColumn, "."))
+		}
+
+		// Check same parent
+		colParentID := parentIDForPath(schema, op.columnToMove, settings.caseSensitive)
+		refParentID := parentIDForPath(schema, op.referenceColumn, settings.caseSensitive)
+		if colParentID != refParentID {
+			return errors.New("cannot move column across different parent structs")
+		}
+
+		if other.ID == colField.ID {
+			return errors.New("cannot move column relative to itself")
+		}
+	}
+
+	return nil
+}
+
+func (op *moveColumnOp) Apply(builder *schemaBuilder) error {
+	colField := findField(builder.baseSchema, op.columnToMove, builder.settings.caseSensitive)
+	if colField == nil {
+		return fmt.Errorf("cannot move missing column: %s", strings.Join(op.columnToMove, "."))
+	}
+
+	parentID := parentIDForPath(builder.baseSchema, op.columnToMove, builder.settings.caseSensitive)
 
 	var otherID int
-	if op == OpBefore || op == OpAfter {
-		other := us.findFieldIncludingAdded(referenceColumn)
+	if op.op == OpBefore || op.op == OpAfter {
+		other := findField(builder.baseSchema, op.referenceColumn, builder.settings.caseSensitive)
 		if other == nil {
-			return nil, fmt.Errorf("reference column for move not found: %s", strings.Join(referenceColumn, "."))
-		}
-		if us.parentIDForPath(referenceColumn) != parentID {
-			return nil, errors.New("cannot move column across different parent structs")
+			return fmt.Errorf("reference column for move not found: %s", strings.Join(op.referenceColumn, "."))
 		}
 		otherID = other.ID
-		if otherID == colField.ID {
-			return nil, errors.New("cannot move column relative to itself")
-		}
 	}
 
-	us.moves[parentID] = append(us.moves[parentID], moveReq{
+	builder.moves[parentID] = append(builder.moves[parentID], moveReq{
 		fieldID:      colField.ID,
 		otherFieldID: otherID,
-		op:           op,
+		op:           op.op,
 	})
 
-	return us, nil
-}
-
-// parentIDForPath returns the field-id of the direct parent struct
-// (-1 means root level).
-func (us *UpdateSchema) parentIDForPath(path []string) int {
-	if len(path) == 1 {
-		return -1
-	}
-
-	if f := us.findFieldIncludingAdded(path[:len(path)-1]); f != nil {
-		return f.ID
-	}
-
-	return -1
-}
-
-func (us *UpdateSchema) findForUpdate(path []string) *iceberg.NestedField {
-	existing := us.findFieldIncludingAdded(path)
-	if existing != nil {
-		if update, ok := us.updates[existing.ID]; ok {
-			return update
-		}
-
-		// adding to updates
-		us.updates[existing.ID] = existing
-
-		return existing
-	}
-
 	return nil
 }
 
-// findFieldIncludingAdded finds a field by path, including both existing fields and newly added fields
-func (us *UpdateSchema) findFieldIncludingAdded(path []string) *iceberg.NestedField {
-	// First try to find in existing schema
-	if field := us.findField(path); field != nil {
-		return field
+func (op *moveColumnOp) String() string {
+	if op.op == OpFirst {
+		return fmt.Sprintf("Move(%s, %s)", strings.Join(op.columnToMove, "."), op.op)
 	}
-
-	// If not found in existing schema, search in added fields
-	// For now, we only support top-level added fields in move operations
-	if len(path) == 1 {
-		colName := path[0]
-		for _, addedFields := range us.adds {
-			for _, add := range addedFields {
-				if (us.caseSensitive && add.Name == colName) ||
-					(!us.caseSensitive && strings.EqualFold(add.Name, colName)) {
-					return add
-				}
-			}
-		}
-	}
-
-	return nil
+	return fmt.Sprintf("Move(%s, %s %s)",
+		strings.Join(op.columnToMove, "."), op.op, strings.Join(op.referenceColumn, "."))
 }
 
-func (us *UpdateSchema) Apply() *iceberg.Schema {
-	return us.applyChanges()
-}
-
-func (us *UpdateSchema) isAdded(id int) bool {
-	_, ok := us.adds[id]
-
-	return ok
-}
-
-func (us *UpdateSchema) assignNewColumnID() int {
-	next := us.lastColumnID + 1
-	us.lastColumnID = next
-
+// Helper methods for schemaBuilder
+func (b *schemaBuilder) assignNewColumnID() int {
+	next := b.lastColumnID + 1
+	b.lastColumnID = next
 	return next
 }
 
-func (us *UpdateSchema) findField(path []string) *iceberg.NestedField {
-	name := strings.Join(path, ".")
-
-	var field iceberg.NestedField
-	var ok bool
-
-	if us.caseSensitive {
-		field, ok = us.schema.FindFieldByName(name)
-	} else {
-		field, ok = us.schema.FindFieldByNameCaseInsensitive(name)
-	}
-
-	if !ok {
-		return nil
-	}
-
-	return &field
-}
-
-func (u *UpdateSchema) applyChanges() *iceberg.Schema {
-	newFields, err := rebuild(u.schema.AsStruct().FieldList, -1, u)
+// Build the final schema using existing logic
+func (us *UpdateSchema) buildFinalSchema(builder *schemaBuilder) (*iceberg.Schema, error) {
+	newFields, err := rebuild(us.schema.AsStruct().FieldList, -1, builder)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 
-	idList := u.schema.IdentifierFieldIDs
-	newID := u.schema.ID + 1
+	idList := us.schema.IdentifierFieldIDs
+	newID := us.schema.ID + 1
 
-	return iceberg.NewSchemaWithIdentifiers(newID, idList, newFields...)
+	return iceberg.NewSchemaWithIdentifiers(newID, idList, newFields...), nil
 }
 
-func rebuild(fields []iceberg.NestedField, parentID int, us *UpdateSchema) ([]iceberg.NestedField, error) {
+// Rebuild schema with builder state
+func rebuild(fields []iceberg.NestedField, parentID int, builder *schemaBuilder) ([]iceberg.NestedField, error) {
 	var out []iceberg.NestedField
 
-	// iterate over the current fields to apply updates and deletes and if struct, list or map, we call rebuild for the fields in them recursively
+	// iterate over the current fields to apply updates and deletes
 	for _, f := range fields {
-		if _, gone := us.deletes[f.ID]; gone {
+		if _, gone := builder.deletes[f.ID]; gone {
 			continue
 		}
-		if upd, ok := us.updates[f.ID]; ok {
+		if upd, ok := builder.updates[f.ID]; ok {
 			f = *upd
 		}
-		switch t := f.Type.(type) {
 
+		switch t := f.Type.(type) {
 		case *iceberg.StructType:
-			fields, err := rebuild(t.Fields(), f.ID, us)
+			fields, err := rebuild(t.Fields(), f.ID, builder)
 			if err != nil {
 				return nil, fmt.Errorf("error rebuilding struct type: %w", err)
 			}
@@ -408,7 +647,7 @@ func rebuild(fields []iceberg.NestedField, parentID int, us *UpdateSchema) ([]ic
 
 		case *iceberg.ListType:
 			el := t.ElementField()
-			fields, err := rebuild([]iceberg.NestedField{el}, el.ID, us)
+			fields, err := rebuild([]iceberg.NestedField{el}, el.ID, builder)
 			if err != nil {
 				return nil, fmt.Errorf("error rebuilding list type: %w", err)
 			}
@@ -421,9 +660,9 @@ func rebuild(fields []iceberg.NestedField, parentID int, us *UpdateSchema) ([]ic
 
 		case *iceberg.MapType:
 			val := t.ValueField()
-			fields, err := rebuild([]iceberg.NestedField{val}, val.ID, us)
+			fields, err := rebuild([]iceberg.NestedField{val}, val.ID, builder)
 			if err != nil {
-				return nil, fmt.Errorf("error rebuilding list type: %w", err)
+				return nil, fmt.Errorf("error rebuilding map type: %w", err)
 			}
 			val = fields[0]
 			f.Type = &iceberg.MapType{
@@ -438,12 +677,12 @@ func rebuild(fields []iceberg.NestedField, parentID int, us *UpdateSchema) ([]ic
 	}
 
 	// append new children for this parent id (-1 means root)
-	for _, nf := range us.adds[parentID] {
+	for _, nf := range builder.adds[parentID] {
 		out = append(out, *nf)
 	}
 
 	// check if there are any moves for this parent id (-1 means root)
-	if reqs := us.moves[parentID]; len(reqs) > 0 {
+	if reqs := builder.moves[parentID]; len(reqs) > 0 {
 		var err error
 		out, err = reorder(out, reqs)
 		if err != nil {
@@ -454,6 +693,7 @@ func rebuild(fields []iceberg.NestedField, parentID int, us *UpdateSchema) ([]ic
 	return out, nil
 }
 
+// Reorder fields based on move operations
 func reorder(fields []iceberg.NestedField, reqs []moveReq) ([]iceberg.NestedField, error) {
 	// find the index of a field by its id
 	indexOf := func(id int) int {
@@ -462,7 +702,6 @@ func reorder(fields []iceberg.NestedField, reqs []moveReq) ([]iceberg.NestedFiel
 				return i
 			}
 		}
-
 		return -1
 	}
 
@@ -500,6 +739,38 @@ func reorder(fields []iceberg.NestedField, reqs []moveReq) ([]iceberg.NestedFiel
 	return fields, nil
 }
 
+// Helper functions
+func findField(schema *iceberg.Schema, path []string, caseSensitive bool) *iceberg.NestedField {
+	name := strings.Join(path, ".")
+
+	var field iceberg.NestedField
+	var ok bool
+
+	if caseSensitive {
+		field, ok = schema.FindFieldByName(name)
+	} else {
+		field, ok = schema.FindFieldByNameCaseInsensitive(name)
+	}
+
+	if !ok {
+		return nil
+	}
+
+	return &field
+}
+
+func parentIDForPath(schema *iceberg.Schema, path []string, caseSensitive bool) int {
+	if len(path) == 1 {
+		return -1
+	}
+
+	if f := findField(schema, path[:len(path)-1], caseSensitive); f != nil {
+		return f.ID
+	}
+
+	return -1
+}
+
 func validateDefaultValue(typ iceberg.Type, val any) error {
 	// Defaults are only allowed on primitive columns
 	prim, ok := typ.(iceberg.PrimitiveType)
@@ -522,72 +793,29 @@ func validateDefaultValue(typ iceberg.Type, val any) error {
 	return fmt.Errorf("default literal of type %s is not assignable to of type %s", litType.String(), prim.Type())
 }
 
-func (us *UpdateSchema) isDeleted(id int) bool {
-	_, ok := us.deletes[id]
-
-	return ok
-}
-
-func (us *UpdateSchema) Commit() error {
-	updates, requirements, err := us.CommitUpdates()
-	if err != nil {
-		return err
-	}
-
-	if len(updates) == 0 {
-		return nil
-	}
-
-	return us.txn.apply(updates, requirements)
-}
-
-// CommitUpdates returns the updates and requirements needed
-func (us *UpdateSchema) CommitUpdates() ([]Update, []Requirement, error) {
-	// If there are no changes, return nil updates and requirements
-	if !(len(us.deletes) > 0 || len(us.updates) > 0 || len(us.adds) > 0 || len(us.moves) > 0) {
-		return nil, nil, nil
-	}
-
-	newSchema := us.applyChanges()
-
-	// Check if equivalent schema exists
-	existingSchemaID := us.findExistingSchemaInTransaction(newSchema)
-
-	var updates []Update
-	var requirements []Requirement
-
-	// for Commit Contention
-	requirements = append(requirements, AssertCurrentSchemaID(us.schema.ID))
-
-	if existingSchemaID == nil {
-		updates = append(updates,
-			NewAddSchemaUpdate(newSchema, us.lastColumnID, false),
-			NewSetCurrentSchemaUpdate(newSchema.ID),
-		)
-	} else {
-		updates = append(updates, NewSetCurrentSchemaUpdate(*existingSchemaID))
-	}
-
-	if nameMapUpdates := us.getNameMappingUpdates(newSchema); len(nameMapUpdates) > 0 {
-		updates = append(updates, nameMapUpdates...)
-	}
-
-	return updates, requirements, nil
-}
-
 func (us *UpdateSchema) findExistingSchemaInTransaction(newSchema *iceberg.Schema) *int {
 	for _, schema := range us.txn.tbl.metadata.Schemas() {
 		if newSchema.Equals(schema) {
 			return &schema.ID
 		}
 	}
-
 	return nil
 }
 
 func (us *UpdateSchema) getNameMappingUpdates(newSchema *iceberg.Schema) []Update {
 	// Only update name mapping if we have adds/updates that might need it
-	if len(us.adds) == 0 && len(us.updates) == 0 {
+	hasAdds := false
+	hasUpdates := false
+	for _, op := range us.operations {
+		switch op.(type) {
+		case *addColumnOp:
+			hasAdds = true
+		case *updateColumnOp:
+			hasUpdates = true
+		}
+	}
+
+	if !hasAdds && !hasUpdates {
 		return nil
 	}
 

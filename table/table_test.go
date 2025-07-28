@@ -1239,14 +1239,12 @@ func (t *TableWritingTestSuite) TestSchemaEvolution() {
 	tx := tbl.NewTransaction()
 	updateSchema := tx.UpdateSchema()
 
-	updated, err := updateSchema.AddColumn([]string{"email"}, false,
+	updated := updateSchema.AddColumn([]string{"email"}, false,
 		iceberg.PrimitiveTypes.String, "User email", "unknown@example.com")
-	t.Require().NoError(err)
 
-	updated, err = updated.UpdateColumn([]string{"value"}, table.ColumnUpdate{
+	updated = updated.UpdateColumn([]string{"value"}, table.ColumnUpdate{
 		Type: iceberg.Optional[iceberg.Type]{Val: iceberg.PrimitiveTypes.Int64, Valid: true},
 	})
-	t.Require().NoError(err)
 
 	t.Require().NoError(updated.Commit())
 
@@ -1344,15 +1342,13 @@ func (t *TableWritingTestSuite) TestSchemaEvolutionTypePromotions() {
 	tx := tbl.NewTransaction()
 	updateSchema := tx.UpdateSchema()
 
-	updated, err := updateSchema.UpdateColumn([]string{"int_field"}, table.ColumnUpdate{
+	updated := updateSchema.UpdateColumn([]string{"int_field"}, table.ColumnUpdate{
 		Type: iceberg.Optional[iceberg.Type]{Val: iceberg.PrimitiveTypes.Int64, Valid: true},
 	})
-	t.Require().NoError(err, "int32 to int64 promotion should succeed")
 
-	updated, err = updated.UpdateColumn([]string{"float_field"}, table.ColumnUpdate{
+	updated = updated.UpdateColumn([]string{"float_field"}, table.ColumnUpdate{
 		Type: iceberg.Optional[iceberg.Type]{Val: iceberg.PrimitiveTypes.Float64, Valid: true},
 	})
-	t.Require().NoError(err, "float32 to float64 promotion should succeed")
 
 	// Commit schema changes
 	t.Require().NoError(updated.Commit())
@@ -1424,19 +1420,22 @@ func (t *TableWritingTestSuite) TestSchemaEvolutionTypePromotions() {
 	tx2 := finalTbl.NewTransaction()
 	updateSchema2 := tx2.UpdateSchema()
 
-	_, err = updateSchema2.UpdateColumn([]string{"id"}, table.ColumnUpdate{
+	invalid1 := updateSchema2.UpdateColumn([]string{"id"}, table.ColumnUpdate{
 		Type: iceberg.Optional[iceberg.Type]{Val: iceberg.PrimitiveTypes.String, Valid: true},
 	})
+	err = invalid1.Commit()
 	t.Error(err, "int64 to string promotion should fail")
 
-	_, err = updateSchema2.UpdateColumn([]string{"int_field"}, table.ColumnUpdate{
+	invalid2 := updateSchema2.UpdateColumn([]string{"int_field"}, table.ColumnUpdate{
 		Type: iceberg.Optional[iceberg.Type]{Val: iceberg.PrimitiveTypes.Int32, Valid: true},
 	})
+	err = invalid2.Commit()
 	t.Error(err, "int64 to int32 downgrade should fail")
 
-	_, err = updateSchema2.UpdateColumn([]string{"float_field"}, table.ColumnUpdate{
+	invalid3 := updateSchema2.UpdateColumn([]string{"float_field"}, table.ColumnUpdate{
 		Type: iceberg.Optional[iceberg.Type]{Val: iceberg.PrimitiveTypes.Float32, Valid: true},
 	})
+	err = invalid3.Commit()
 	t.Error(err, "float64 to float32 downgrade should fail")
 }
 
