@@ -60,8 +60,8 @@ func (s snapshotUpdate) mergeAppend() *snapshotProducer {
 	return newMergeAppendFilesProducer(OpAppend, s.txn, s.io, nil, s.snapshotProps)
 }
 
-func (s snapshotUpdate) delete() *snapshotProducer {
-	return newDeleteFilesProducer(OpDelete, s.txn, s.io, nil, s.snapshotProps)
+func (s snapshotUpdate) delete(predicate iceberg.BooleanExpression, caseSensitive bool) *snapshotProducer {
+	return newDeleteFilesProducer(OpDelete, s.txn, predicate, caseSensitive, s.io, nil, s.snapshotProps)
 }
 
 type Transaction struct {
@@ -313,9 +313,8 @@ func (t *Transaction) Delete(ctx context.Context, deleteFilter iceberg.BooleanEx
 		return err
 	}
 
-	deleteSnapshot := t.updateSnapshot(fs, snapshotProps).delete()
+	deleteSnapshot := t.updateSnapshot(fs, snapshotProps).delete(deleteFilter, caseSensitive)
 	df := deleteSnapshot.producerImpl.(*deleteFiles)
-	df.deleteByPredicate(deleteFilter, caseSensitive)
 	err = df.computeDeletes()
 	if err != nil {
 		return err
@@ -436,7 +435,13 @@ func (t *Transaction) Delete(ctx context.Context, deleteFilter iceberg.BooleanEx
 			return t.apply(updates, reqs)
 		}
 	}
-	return nil
+
+	updates, reqs, err := deleteSnapshot.commit()
+	if err != nil {
+		return err
+	}
+
+	return t.apply(updates, reqs)
 }
 
 // ReplaceFiles is actually just an overwrite operation with multiple
