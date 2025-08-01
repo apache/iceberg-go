@@ -550,12 +550,12 @@ func (t TruncateTransform) Project(name string, pred BoundPredicate) (UnboundPre
 
 var epochTM = time.Unix(0, 0).UTC()
 
-type timeTransform interface {
+type TimeTransform interface {
 	Transform
 	Transformer(Type) (func(any) Optional[int32], error)
 }
 
-func canTransformTime(t timeTransform, sourceType Type) bool {
+func canTransformTime(t TimeTransform, sourceType Type) bool {
 	switch sourceType.(type) {
 	case DateType, TimestampType, TimestampTzType:
 		return true
@@ -564,7 +564,7 @@ func canTransformTime(t timeTransform, sourceType Type) bool {
 	}
 }
 
-func projectTimeTransform(t timeTransform, name string, pred BoundPredicate) (UnboundPredicate, error) {
+func projectTimeTransform(t TimeTransform, name string, pred BoundPredicate) (UnboundPredicate, error) {
 	if _, ok := pred.Term().(*BoundTransform); ok {
 		return projectTransformPredicate(t, name, pred)
 	}

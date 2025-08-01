@@ -48,6 +48,51 @@ type Requirement interface {
 	GetType() string
 }
 
+type Requirements []Requirement
+
+func (r *Requirements) UnmarshalJSON(data []byte) error {
+	var rawRequirements []json.RawMessage
+	if err := json.Unmarshal(data, &rawRequirements); err != nil {
+		return err
+	}
+
+	for _, raw := range rawRequirements {
+		var base baseRequirement
+		if err := json.Unmarshal(raw, &base); err != nil {
+			return err
+		}
+
+		var req Requirement
+		switch base.Type {
+		case reqAssertCreate:
+			req = &assertCreate{}
+		case reqAssertTableUUID:
+			req = &assertTableUuid{}
+		case reqAssertRefSnapshotID:
+			req = &assertRefSnapshotID{}
+		case reqAssertDefaultSpecID:
+			req = &assertDefaultSpecId{}
+		case reqAssertCurrentSchemaID:
+			req = &assertCurrentSchemaId{}
+		case reqAssertDefaultSortOrderID:
+			req = &assertDefaultSortOrderId{}
+		case reqAssertLastAssignedFieldID:
+			req = &assertLastAssignedFieldId{}
+		case reqAssertLastAssignedPartitionID:
+			req = &assertLastAssignedPartitionId{}
+		default:
+			return fmt.Errorf("unknown requirement type: %s", base.Type)
+		}
+
+		if err := json.Unmarshal(raw, req); err != nil {
+			return err
+		}
+		*r = append(*r, req)
+	}
+
+	return nil
+}
+
 // baseRequirement is a common struct that all requirements embed. It is used to
 // identify the type of the requirement.
 type baseRequirement struct {
