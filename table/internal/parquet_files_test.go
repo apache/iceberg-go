@@ -253,7 +253,7 @@ func TestMetricsPrimitiveTypes(t *testing.T) {
 
 	stats := format.DataFileStatsFromMeta(internal.Metadata(meta), getCollector(), mapping)
 	df := stats.ToDataFile(tblMeta.CurrentSchema(), tblMeta.PartitionSpec(), "fake-path.parquet",
-		iceberg.ParquetFile, meta.GetSourceFileSize())
+		iceberg.ParquetFile, meta.GetSourceFileSize(), map[int]any{})
 
 	assert.Len(t, df.ValueCounts(), 15)
 	assert.Len(t, df.NullValueCounts(), 15)

@@ -51,24 +51,26 @@ func NewWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 }
 
 type RollingDataWriter struct {
-	partitionKey string
-	data         []arrow.Record
-	currentSize  int64
-	factory      *WriterFactory
-	mu           sync.Mutex
+	partitionKey    string
+	data            []arrow.Record
+	currentSize     int64
+	factory         *WriterFactory
+	mu              sync.Mutex
+	partitionValues map[int]any
 }
 
-func (w *WriterFactory) NewRollingDataWriter(partition string) *RollingDataWriter {
+func (w *WriterFactory) NewRollingDataWriter(partition string, partitionValues map[int]any) *RollingDataWriter {
 	return &RollingDataWriter{
-		partitionKey: partition,
-		data:         make([]arrow.Record, 0),
-		currentSize:  0,
-		factory:      w,
+		partitionKey:    partition,
+		data:            make([]arrow.Record, 0),
+		currentSize:     0,
+		factory:         w,
+		partitionValues: partitionValues,
 	}
 }
 
-func (w *WriterFactory) getOrCreateRollingDataWriter(partition string) (*RollingDataWriter, error) {
-	rollingDataWriter, _ := w.writers.LoadOrStore(partition, w.NewRollingDataWriter(partition))
+func (w *WriterFactory) getOrCreateRollingDataWriter(partition string, partitionValues map[int]any) (*RollingDataWriter, error) {
+	rollingDataWriter, _ := w.writers.LoadOrStore(partition, w.NewRollingDataWriter(partition, partitionValues))
 	writer, ok := rollingDataWriter.(*RollingDataWriter)
 	if !ok {
 		return nil, fmt.Errorf("failed to create rolling data writer: %s", partition)
@@ -130,7 +132,7 @@ func (r *RollingDataWriter) flushToDataFile(ctx context.Context, outputDataFiles
 	}
 	partitionMeta.props[WriteDataPathKey] = parseDataLoc.JoinPath("data").JoinPath(r.partitionKey).String()
 
-	outputDataFiles := writeFiles(ctx, r.factory.rootLocation, r.factory.args.fs, &partitionMeta, task)
+	outputDataFiles := writeFiles(ctx, r.factory.rootLocation, r.factory.args.fs, &partitionMeta, r.partitionValues, task)
 	for dataFile, err := range outputDataFiles {
 		if err != nil {
 			return err

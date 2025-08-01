@@ -1216,7 +1216,7 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 			statistics := format.DataFileStatsFromMeta(rdr.Metadata(), must(computeStatsPlan(currentSchema, meta.props)),
 				must(format.PathToIDMapping(currentSchema)))
 
-			df := statistics.ToDataFile(currentSchema, currentSpec, filePath, iceberg.ParquetFile, rdr.SourceFileSize())
+			df := statistics.ToDataFile(currentSchema, currentSpec, filePath, iceberg.ParquetFile, rdr.SourceFileSize(), map[int]any{})
 			if !yield(df, nil) {
 				return
 			}
@@ -1309,7 +1309,7 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 			}
 		}
 
-		return writeFiles(ctx, rootLocation, args.fs, meta, tasks)
+		return writeFiles(ctx, rootLocation, args.fs, meta, map[int]any{}, tasks)
 	} else {
 		partitionWriter := NewPartitionedFanoutWriter(meta.CurrentSpec(), meta.CurrentSchema(), args.itr)
 		rollingDataWriters := NewWriterFactory(rootLocation, args, meta, taskSchema, targetFileSize)

@@ -36,6 +36,11 @@ type PartitionedFanoutWriter struct {
 	writers       *WriterFactory
 }
 
+type PartitionInfo struct {
+	rows            []int64
+	partitionValues map[int]any
+}
+
 func NewPartitionedFanoutWriter(partitionSpec iceberg.PartitionSpec, schema *iceberg.Schema, itr iter.Seq2[arrow.Record, error]) *PartitionedFanoutWriter {
 	return &PartitionedFanoutWriter{
 		partitionSpec: partitionSpec,
@@ -107,9 +112,12 @@ func (p *PartitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 			}
 			defer record.Release()
 
-			partitionMap := p.getPartitionMap(record)
+			partitionMap, err := p.getPartitionMap(record)
+			if err != nil {
+				return err
+			}
 
-			for partition, rowIndices := range partitionMap {
+			for partition, val := range partitionMap {
 				select {
 				case <-ctx.Done():
 					if err := context.Cause(ctx); err != nil {
@@ -119,12 +127,12 @@ func (p *PartitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 				default:
 				}
 
-				partitionRecord, err := partitionBatchByKey(ctx)(record, rowIndices)
+				partitionRecord, err := partitionBatchByKey(ctx)(record, val.rows)
 				if err != nil {
 					return err
 				}
 
-				rollingDataWriter, err := p.writers.getOrCreateRollingDataWriter(partition)
+				rollingDataWriter, err := p.writers.getOrCreateRollingDataWriter(partition, val.partitionValues)
 				if err != nil {
 					return err
 				}
@@ -182,24 +190,43 @@ func (p *PartitionedFanoutWriter) yieldDataFiles(ctx context.Context, fanoutWork
 	})
 }
 
-func (p *PartitionedFanoutWriter) getPartitionMap(record arrow.Record) map[string][]int64 {
-	partitionMap := make(map[string][]int64)
+func (p *PartitionedFanoutWriter) getPartitionMap(record arrow.Record) (map[string]PartitionInfo, error) {
+	partitionMap := make(map[string]PartitionInfo)
 	partitionFields := p.partitionSpec.PartitionType(p.schema).FieldList
+
 	for row := range record.NumRows() {
 		partitionRec := make(partitionRecord, len(partitionFields))
+		partitionValues := make(map[int]any)
 
 		for i := range partitionFields {
 			sourceField := p.partitionSpec.Field(i)
 			colName, _ := p.schema.FindColumnName(sourceField.SourceID)
 			colIdx := record.Schema().FieldIndices(colName)[0]
 			col := record.Column(colIdx)
-			partitionRec[i] = col.GetOneForMarshal(int(row))
+
+			val, err := getArrowValueAsIcebergLiteral(col, int(row))
+			if err != nil {
+				return nil, fmt.Errorf("failed to get arrow value as iceberg literal: %w", err)
+			}
+
+			transformedLiteral := sourceField.Transform.Apply(iceberg.Optional[iceberg.Literal]{
+				Valid: val != nil,
+				Val:   val,
+			})
+
+			if transformedLiteral.Valid {
+				partitionRec[i] = transformedLiteral.Val.Any()
+				partitionValues[sourceField.FieldID] = transformedLiteral.Val.Any()
+			}
 		}
 		partitionKey := p.partitionPath(partitionRec)
-		partitionMap[partitionKey] = append(partitionMap[partitionKey], row)
+		partVal := partitionMap[partitionKey]
+		partVal.rows = append(partitionMap[partitionKey].rows, row)
+		partVal.partitionValues = partitionValues
+		partitionMap[partitionKey] = partVal
 	}
 
-	return partitionMap
+	return partitionMap, nil
 }
 
 type partitionBatchFn func(arrow.Record, []int64) (arrow.Record, error)
@@ -226,5 +253,47 @@ func partitionBatchByKey(ctx context.Context) partitionBatchFn {
 		}
 
 		return partitionedRecord.(*compute.RecordDatum).Value, nil
+	}
+}
+
+func getArrowValueAsIcebergLiteral(column arrow.Array, row int) (iceberg.Literal, error) {
+	if column.IsNull(row) {
+		return nil, nil
+	}
+
+	switch arr := column.(type) {
+	case *array.Date32:
+		return iceberg.NewLiteral(iceberg.Date(arr.Value(row))), nil
+	case *array.Time64:
+		return iceberg.NewLiteral(iceberg.Time(arr.Value(row))), nil
+	case *array.Timestamp:
+		return iceberg.NewLiteral(iceberg.Timestamp(arr.Value(row))), nil
+	case *array.Decimal128:
+		val := arr.Value(row)
+		dec := iceberg.Decimal{
+			Val:   val,
+			Scale: int(arr.DataType().(*arrow.Decimal128Type).Scale),
+		}
+		return iceberg.NewLiteral(dec), nil
+	default:
+		val := column.GetOneForMarshal(row)
+		switch v := val.(type) {
+		case bool:
+			return iceberg.NewLiteral(v), nil
+		case int32:
+			return iceberg.NewLiteral(v), nil
+		case int64:
+			return iceberg.NewLiteral(v), nil
+		case float32:
+			return iceberg.NewLiteral(v), nil
+		case float64:
+			return iceberg.NewLiteral(v), nil
+		case string:
+			return iceberg.NewLiteral(v), nil
+		case []byte:
+			return iceberg.NewLiteral(v), nil
+		default:
+			return nil, fmt.Errorf("unsupported value type: %T", v)
+		}
 	}
 }

@@ -212,8 +212,7 @@ func (d *DataFileStatistics) PartitionValue(field iceberg.PartitionField, sc *ic
 	}
 
 	if !field.Transform.PreservesOrder() {
-		panic(fmt.Errorf("cannot infer partition value from parquet metadata for a non-linear partition field: %s with transform %s",
-			field.Name, field.Transform))
+		return nil
 	}
 
 	lowerRec := must(PartitionRecordValue(field, agg.Min(), sc))
@@ -234,14 +233,21 @@ func (d *DataFileStatistics) PartitionValue(field iceberg.PartitionField, sc *ic
 	return lowerT.Val.Any()
 }
 
-func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.PartitionSpec, path string, format iceberg.FileFormat, filesize int64) iceberg.DataFile {
+func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.PartitionSpec, path string, format iceberg.FileFormat, filesize int64, partitionValues map[int]any) iceberg.DataFile {
 	var fieldIDToPartitionData map[int]any
 	if !spec.Equals(*iceberg.UnpartitionedSpec) {
 		fieldIDToPartitionData = make(map[int]any)
 		for field := range spec.Fields() {
-			val := d.PartitionValue(field, schema)
-			if val != nil {
-				fieldIDToPartitionData[field.FieldID] = val
+			partitionVal := partitionValues[field.FieldID]
+			if partitionVal != nil {
+				val := d.PartitionValue(field, schema)
+				if val != nil {
+					fieldIDToPartitionData[field.FieldID] = val
+				} else {
+					fieldIDToPartitionData[field.FieldID] = partitionVal
+				}
+			} else {
+				fieldIDToPartitionData[field.FieldID] = nil
 			}
 		}
 	}
