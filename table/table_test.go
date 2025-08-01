@@ -1422,3 +1422,50 @@ func (t *TableWritingTestSuite) TestDeleteOldMetadataNoErrorLogsOnFileFound() {
 	t.NotContains(logOutput, "Warning: Failed to delete old metadata file")
 	t.NotContains(logOutput, "no such file or directory")
 }
+
+func (t *TableTestSuite) TestRefresh() {
+	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
+		"uri":          ":memory:",
+		"type":         "sql",
+		sql.DriverKey:  sqliteshim.ShimName,
+		sql.DialectKey: string(sql.SQLite),
+		"warehouse":    "file://" + t.T().TempDir(),
+	})
+	t.Require().NoError(err)
+
+	ident := table.Identifier{"test", "refresh_table"}
+	t.Require().NoError(cat.CreateNamespace(context.Background(), catalog.NamespaceFromIdent(ident), nil))
+
+	originalTbl, err := cat.CreateTable(context.Background(), ident, t.tbl.Schema(),
+		catalog.WithProperties(iceberg.Properties{"original": "true"}))
+	t.Require().NoError(err)
+	t.Require().NotNil(originalTbl)
+
+	originalProperties := originalTbl.Properties()
+	originalIdentifier := originalTbl.Identifier()
+	originalLocation := originalTbl.Location()
+	originalSchema := originalTbl.Schema()
+	originalSpec := originalTbl.Spec()
+
+	_, _, err = cat.CommitTable(context.Background(), originalTbl, nil, []table.Update{
+		table.NewSetPropertiesUpdate(iceberg.Properties{
+			"refreshed": "true",
+			"timestamp": fmt.Sprintf("%d", time.Now().Unix()),
+		}),
+	})
+	t.Require().NoError(err)
+
+	refreshedTbl, err := originalTbl.Refresh(context.Background())
+	t.Require().NoError(err)
+	t.Require().NotNil(refreshedTbl)
+
+	t.NotEqual(originalTbl, refreshedTbl)
+
+	t.Equal("true", refreshedTbl.Properties()["refreshed"])
+	t.NotEqual(originalProperties, refreshedTbl.Properties())
+
+	t.Equal(originalIdentifier, refreshedTbl.Identifier())
+	t.Equal(originalLocation, refreshedTbl.Location())
+	t.True(originalSchema.Equals(refreshedTbl.Schema()))
+	t.Equal(originalSpec, refreshedTbl.Spec())
+}
