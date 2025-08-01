@@ -570,8 +570,8 @@ func (b *MetadataBuilder) SetSnapshotRef(
 		b.lastUpdatedMS = snapshot.TimestampMs
 	}
 
+	b.updates = append(b.updates, NewSetSnapshotRefUpdate(name, snapshotID, refType, maxRefAgeMs, maxSnapshotAgeMs, minSnapshotsToKeep))
 	if name == MainBranch {
-		b.updates = append(b.updates, NewSetSnapshotRefUpdate(name, snapshotID, refType, maxRefAgeMs, maxSnapshotAgeMs, minSnapshotsToKeep))
 		b.currentSnapshotID = &snapshotID
 		if !isAddedSnapshot {
 			b.lastUpdatedMS = time.Now().Local().UnixMilli()
