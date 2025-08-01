@@ -150,3 +150,254 @@ func TestNameMappingToString(t *testing.T) {
 		}},
 	}.String())
 }
+
+func TestCreateNameMappingFromSchema(t *testing.T) {
+	// Create a nested schema similar to the Python test
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "foo", Type: &iceberg.StringType{}, Required: false},
+		iceberg.NestedField{ID: 2, Name: "bar", Type: &iceberg.Int64Type{}, Required: true},
+		iceberg.NestedField{ID: 3, Name: "baz", Type: &iceberg.BooleanType{}, Required: false},
+		iceberg.NestedField{
+			ID: 4, Name: "qux", Type: &iceberg.ListType{
+				ElementID:       5,
+				Element:         &iceberg.StringType{},
+				ElementRequired: true,
+			}, Required: true,
+		},
+		iceberg.NestedField{
+			ID: 6, Name: "quux", Type: &iceberg.MapType{
+				KeyID:   7,
+				KeyType: &iceberg.StringType{},
+				ValueID: 8,
+				ValueType: &iceberg.MapType{
+					KeyID:         9,
+					KeyType:       &iceberg.StringType{},
+					ValueID:       10,
+					ValueType:     &iceberg.Int64Type{},
+					ValueRequired: true,
+				},
+				ValueRequired: true,
+			}, Required: true,
+		},
+		iceberg.NestedField{
+			ID: 11, Name: "location", Type: &iceberg.ListType{
+				ElementID: 12,
+				Element: &iceberg.StructType{
+					FieldList: []iceberg.NestedField{
+						{ID: 13, Name: "latitude", Type: &iceberg.Float64Type{}, Required: false},
+						{ID: 14, Name: "longitude", Type: &iceberg.Float64Type{}, Required: false},
+					},
+				},
+				ElementRequired: true,
+			}, Required: true,
+		},
+		iceberg.NestedField{
+			ID: 15, Name: "person", Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 16, Name: "name", Type: &iceberg.StringType{}, Required: false},
+					{ID: 17, Name: "age", Type: &iceberg.Int64Type{}, Required: true},
+				},
+			}, Required: false,
+		},
+	)
+
+	// Create name mapping from schema
+	result, err := iceberg.CreateNameMappingFromSchema(schema)
+	require.NoError(t, err)
+
+	// Expected name mapping based on the Python test
+	expected := iceberg.NameMapping{
+		{FieldID: makeID(1), Names: []string{"foo"}},
+		{FieldID: makeID(2), Names: []string{"bar"}},
+		{FieldID: makeID(3), Names: []string{"baz"}},
+		{
+			FieldID: makeID(4), Names: []string{"qux"},
+			Fields: []iceberg.MappedField{{FieldID: makeID(5), Names: []string{"element"}}},
+		},
+		{FieldID: makeID(6), Names: []string{"quux"}, Fields: []iceberg.MappedField{
+			{FieldID: makeID(7), Names: []string{"key"}},
+			{FieldID: makeID(8), Names: []string{"value"}, Fields: []iceberg.MappedField{
+				{FieldID: makeID(9), Names: []string{"key"}},
+				{FieldID: makeID(10), Names: []string{"value"}},
+			}},
+		}},
+		{FieldID: makeID(11), Names: []string{"location"}, Fields: []iceberg.MappedField{
+			{FieldID: makeID(12), Names: []string{"element"}, Fields: []iceberg.MappedField{
+				{FieldID: makeID(13), Names: []string{"latitude"}},
+				{FieldID: makeID(14), Names: []string{"longitude"}},
+			}},
+		}},
+		{FieldID: makeID(15), Names: []string{"person"}, Fields: []iceberg.MappedField{
+			{FieldID: makeID(16), Names: []string{"name"}},
+			{FieldID: makeID(17), Names: []string{"age"}},
+		}},
+	}
+
+	assert.Equal(t, expected, result)
+}
+
+func TestUpdateNameMapping(t *testing.T) {
+	originalMapping := iceberg.NameMapping{
+		{FieldID: makeID(1), Names: []string{"foo"}},
+		{FieldID: makeID(2), Names: []string{"bar"}},
+		{FieldID: makeID(3), Names: []string{"baz"}},
+		{FieldID: makeID(4), Names: []string{"qux"}, Fields: []iceberg.MappedField{
+			{FieldID: makeID(5), Names: []string{"element"}},
+		}},
+		{FieldID: makeID(6), Names: []string{"quux"}, Fields: []iceberg.MappedField{
+			{FieldID: makeID(7), Names: []string{"key"}},
+			{FieldID: makeID(8), Names: []string{"value"}, Fields: []iceberg.MappedField{
+				{FieldID: makeID(9), Names: []string{"key"}},
+				{FieldID: makeID(10), Names: []string{"value"}},
+			}},
+		}},
+		{FieldID: makeID(11), Names: []string{"location"}, Fields: []iceberg.MappedField{
+			{FieldID: makeID(12), Names: []string{"element"}, Fields: []iceberg.MappedField{
+				{FieldID: makeID(13), Names: []string{"latitude"}},
+				{FieldID: makeID(14), Names: []string{"longitude"}},
+			}},
+		}},
+		{FieldID: makeID(15), Names: []string{"person"}, Fields: []iceberg.MappedField{
+			{FieldID: makeID(16), Names: []string{"name"}},
+			{FieldID: makeID(17), Names: []string{"age"}},
+		}},
+	}
+
+	t.Run("no updates or adds", func(t *testing.T) {
+		result, err := iceberg.UpdateNameMapping(originalMapping, map[int]iceberg.NestedField{}, map[int][]iceberg.NestedField{})
+		require.NoError(t, err)
+		assert.Equal(t, originalMapping, result)
+	})
+
+	t.Run("update mapping with updates and adds", func(t *testing.T) {
+		updates := map[int]iceberg.NestedField{
+			1: {ID: 1, Name: "foo_update", Type: &iceberg.StringType{}},
+		}
+		adds := map[int][]iceberg.NestedField{
+			-1: {
+				{ID: 18, Name: "add_18", Type: &iceberg.StringType{}},
+			},
+			15: {
+				{ID: 19, Name: "name", Type: &iceberg.StringType{}},
+				{ID: 20, Name: "add_20", Type: &iceberg.StringType{}},
+			},
+		}
+
+		result, err := iceberg.UpdateNameMapping(originalMapping, updates, adds)
+		require.NoError(t, err)
+
+		expected := iceberg.NameMapping{
+			{FieldID: makeID(1), Names: []string{"foo", "foo_update"}},
+			{FieldID: makeID(2), Names: []string{"bar"}},
+			{FieldID: makeID(3), Names: []string{"baz"}},
+			{FieldID: makeID(4), Names: []string{"qux"}, Fields: []iceberg.MappedField{
+				{FieldID: makeID(5), Names: []string{"element"}},
+			}},
+			{FieldID: makeID(6), Names: []string{"quux"}, Fields: []iceberg.MappedField{
+				{FieldID: makeID(7), Names: []string{"key"}},
+				{FieldID: makeID(8), Names: []string{"value"}, Fields: []iceberg.MappedField{
+					{FieldID: makeID(9), Names: []string{"key"}},
+					{FieldID: makeID(10), Names: []string{"value"}},
+				}},
+			}},
+			{FieldID: makeID(11), Names: []string{"location"}, Fields: []iceberg.MappedField{
+				{FieldID: makeID(12), Names: []string{"element"}, Fields: []iceberg.MappedField{
+					{FieldID: makeID(13), Names: []string{"latitude"}},
+					{FieldID: makeID(14), Names: []string{"longitude"}},
+				}},
+			}},
+			{FieldID: makeID(15), Names: []string{"person"}, Fields: []iceberg.MappedField{
+				{FieldID: makeID(17), Names: []string{"age"}},
+				{FieldID: makeID(19), Names: []string{"name"}},
+				{FieldID: makeID(20), Names: []string{"add_20"}},
+			}},
+			{FieldID: makeID(18), Names: []string{"add_18"}},
+		}
+
+		assert.Equal(t, expected, result)
+	})
+
+	t.Run("update field names only", func(t *testing.T) {
+		updates := map[int]iceberg.NestedField{
+			1: {ID: 1, Name: "new_foo", Type: &iceberg.StringType{}},
+			2: {ID: 2, Name: "new_bar", Type: &iceberg.StringType{}},
+		}
+		adds := map[int][]iceberg.NestedField{}
+
+		result, err := iceberg.UpdateNameMapping(originalMapping, updates, adds)
+		require.NoError(t, err)
+
+		expected := iceberg.NameMapping{
+			{FieldID: makeID(1), Names: []string{"foo", "new_foo"}},
+			{FieldID: makeID(2), Names: []string{"bar", "new_bar"}},
+			{FieldID: makeID(3), Names: []string{"baz"}},
+			{FieldID: makeID(4), Names: []string{"qux"}, Fields: []iceberg.MappedField{
+				{FieldID: makeID(5), Names: []string{"element"}},
+			}},
+			{FieldID: makeID(6), Names: []string{"quux"}, Fields: []iceberg.MappedField{
+				{FieldID: makeID(7), Names: []string{"key"}},
+				{FieldID: makeID(8), Names: []string{"value"}, Fields: []iceberg.MappedField{
+					{FieldID: makeID(9), Names: []string{"key"}},
+					{FieldID: makeID(10), Names: []string{"value"}},
+				}},
+			}},
+			{FieldID: makeID(11), Names: []string{"location"}, Fields: []iceberg.MappedField{
+				{FieldID: makeID(12), Names: []string{"element"}, Fields: []iceberg.MappedField{
+					{FieldID: makeID(13), Names: []string{"latitude"}},
+					{FieldID: makeID(14), Names: []string{"longitude"}},
+				}},
+			}},
+			{FieldID: makeID(15), Names: []string{"person"}, Fields: []iceberg.MappedField{
+				{FieldID: makeID(16), Names: []string{"name"}},
+				{FieldID: makeID(17), Names: []string{"age"}},
+			}},
+		}
+
+		assert.Equal(t, expected, result)
+	})
+
+	t.Run("add new fields only", func(t *testing.T) {
+		updates := map[int]iceberg.NestedField{}
+		adds := map[int][]iceberg.NestedField{
+			-1: {
+				{ID: 21, Name: "new_root_field", Type: &iceberg.StringType{}},
+			},
+			15: {
+				{ID: 22, Name: "email", Type: &iceberg.StringType{}},
+			},
+		}
+
+		result, err := iceberg.UpdateNameMapping(originalMapping, updates, adds)
+		require.NoError(t, err)
+
+		expected := iceberg.NameMapping{
+			{FieldID: makeID(1), Names: []string{"foo"}},
+			{FieldID: makeID(2), Names: []string{"bar"}},
+			{FieldID: makeID(3), Names: []string{"baz"}},
+			{FieldID: makeID(4), Names: []string{"qux"}, Fields: []iceberg.MappedField{
+				{FieldID: makeID(5), Names: []string{"element"}},
+			}},
+			{FieldID: makeID(6), Names: []string{"quux"}, Fields: []iceberg.MappedField{
+				{FieldID: makeID(7), Names: []string{"key"}},
+				{FieldID: makeID(8), Names: []string{"value"}, Fields: []iceberg.MappedField{
+					{FieldID: makeID(9), Names: []string{"key"}},
+					{FieldID: makeID(10), Names: []string{"value"}},
+				}},
+			}},
+			{FieldID: makeID(11), Names: []string{"location"}, Fields: []iceberg.MappedField{
+				{FieldID: makeID(12), Names: []string{"element"}, Fields: []iceberg.MappedField{
+					{FieldID: makeID(13), Names: []string{"latitude"}},
+					{FieldID: makeID(14), Names: []string{"longitude"}},
+				}},
+			}},
+			{FieldID: makeID(15), Names: []string{"person"}, Fields: []iceberg.MappedField{
+				{FieldID: makeID(16), Names: []string{"name"}},
+				{FieldID: makeID(17), Names: []string{"age"}},
+				{FieldID: makeID(22), Names: []string{"email"}},
+			}},
+			{FieldID: makeID(21), Names: []string{"new_root_field"}},
+		}
+
+		assert.Equal(t, expected, result)
+	})
+}
