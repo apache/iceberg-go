@@ -2192,6 +2192,33 @@ func (suite *StrictMetricsTestSuite) TestNoNulls() {
 	}
 }
 
+func (suite *StrictMetricsTestSuite) TestSomeNulls() {
+	someNull := iceberg.Reference("some_nulls")
+
+	tests := []struct {
+		expr     iceberg.BooleanExpression
+		dataFile int
+		expected bool
+		msg      string
+	}{
+		{iceberg.LessThan(someNull, "ggg"), 2, false, "should skip: some values are null"},
+		{iceberg.LessThanEqual(someNull, "ggg"), 2, false, "should skip: some values are null"},
+		{iceberg.GreaterThan(someNull, "aaa"), 2, false, "should skip: some values are null"},
+		{iceberg.GreaterThanEqual(someNull, "bbb"), 2, false, "should skip: some values are null"},
+		{iceberg.EqualTo(someNull, "bbb"), 3, false, "should skip: some values are null"},
+	}
+
+	for _, tt := range tests {
+		suite.Run(tt.expr.String(), func() {
+			eval, err := newStrictMetricsEvaluator(suite.schemaDataFile, tt.expr, true, true)
+			suite.Require().NoError(err)
+			shouldRead, err := eval(suite.dataFiles[tt.dataFile])
+			suite.Require().NoError(err)
+			suite.Equal(tt.expected, shouldRead, tt.msg)
+		})
+	}
+}
+
 func (suite *StrictMetricsTestSuite) TestIsNan() {
 	allNan, someNan, noNan := iceberg.Reference("all_nans"), iceberg.Reference("some_nans"), iceberg.Reference("no_nans")
 	allNullsDbl, noNanStats := iceberg.Reference("all_nulls_double"), iceberg.Reference("no_nan_stats")
@@ -2407,15 +2434,15 @@ func (suite *StrictMetricsTestSuite) TestOr() {
 			iceberg.GreaterThanEqual(ref, IntMaxValue+1)), false, "should skip: no matching values"},
 		{iceberg.NewOr(
 			iceberg.LessThan(ref, IntMinValue-25),
-			iceberg.GreaterThanEqual(ref, IntMaxValue-19)), true, "should skip: some values do not match"},
+			iceberg.GreaterThanEqual(ref, IntMaxValue-19)), false, "should skip: some values do not match"},
 		{iceberg.NewOr(
 			iceberg.LessThan(ref, IntMinValue-25),
-			iceberg.GreaterThan(ref, IntMinValue)), true, "should match: all values match"},
+			iceberg.GreaterThanEqual(ref, IntMinValue)), true, "should match: all values match"},
 	}
 
 	for _, tt := range tests {
 		suite.Run(tt.expr.String(), func() {
-			eval, err := newInclusiveMetricsEvaluator(suite.schemaDataFile, tt.expr, true, true)
+			eval, err := newStrictMetricsEvaluator(suite.schemaDataFile, tt.expr, true, true)
 			suite.Require().NoError(err)
 			shouldRead, err := eval(suite.dataFiles[0])
 			suite.Require().NoError(err)
@@ -2481,7 +2508,7 @@ func (suite *StrictMetricsTestSuite) TestIntGt() {
 	}{
 		{iceberg.GreaterThan(ref, IntMaxValue), false, "should skip: always false"},
 		{iceberg.GreaterThan(ref, IntMaxValue-1), false, "should skip: 77 and less not in range"},
-		{iceberg.GreaterThan(ref, IntMinValue), false, "should read: 30 not in range"},
+		{iceberg.GreaterThan(ref, IntMinValue), false, "should skip: 30 not in range"},
 		{iceberg.GreaterThan(ref, IntMinValue-1), true, "should read: all values in range"},
 	}
 
@@ -2527,12 +2554,12 @@ func (suite *StrictMetricsTestSuite) TestIntEq() {
 		expected bool
 		msg      string
 	}{
-		{iceberg.EqualTo(id, IntMinValue-25), false, "should skip: id range below lower bound"},
-		{iceberg.EqualTo(id, IntMinValue), false, "should skip: id range below lower bound"},
-		{iceberg.EqualTo(id, IntMinValue-4), false, "should read: id equal to lower bound"},
-		{iceberg.EqualTo(id, IntMaxValue), false, "should read: id equal to upper bound"},
-		{iceberg.EqualTo(id, IntMaxValue+1), false, "should skip: id above upper bound"},
-		{iceberg.EqualTo(alwaysFive, IntMinValue-25), true, "should skip: id above upper bound"},
+		{iceberg.EqualTo(id, IntMinValue-25), false, "should skip: all values != 5"},
+		{iceberg.EqualTo(id, IntMinValue), false, "should skip: some values != 30"},
+		{iceberg.EqualTo(id, IntMinValue-4), false, "should skip: some values != 75"},
+		{iceberg.EqualTo(id, IntMaxValue), false, "should skip: some values != 79"},
+		{iceberg.EqualTo(id, IntMaxValue+1), false, "should skip: some values != 80"},
+		{iceberg.EqualTo(alwaysFive, IntMinValue-25), true, "should read: all values == 5"},
 	}
 
 	for _, tt := range tests {
@@ -2640,15 +2667,15 @@ func (suite *StrictMetricsTestSuite) TestInMetrics() {
 		expected bool
 		msg      string
 	}{
-		{iceberg.IsIn(ref, IntMinValue-25, IntMinValue-24), false, "should skip: id below lower bound"},
-		{iceberg.IsIn(ref, IntMinValue-1, IntMinValue), false, "should read: id equal to lower bound"},
-		{iceberg.IsIn(ref, IntMaxValue-4, IntMaxValue-3), false, "should read: id between upper and lower bounds"},
-		{iceberg.IsIn(ref, IntMaxValue, IntMaxValue+1), false, "should read: id equal to upper bound"},
-		{iceberg.IsIn(ref, IntMaxValue+1, IntMaxValue+2), false, "should skip: id above upper bound"},
-		{iceberg.IsIn(iceberg.Reference("always_5"), int32(5), int32(6)), true, "should skip: id above upper bound"},
+		{iceberg.IsIn(ref, IntMinValue-25, IntMinValue-24), false, "should skip: all values != 5 and != 6"},
+		{iceberg.IsIn(ref, IntMinValue-1, IntMinValue), false, "should skip: some values != 30 and != 31"},
+		{iceberg.IsIn(ref, IntMaxValue-4, IntMaxValue-3), false, "should skip: some values != 75 and != 76"},
+		{iceberg.IsIn(ref, IntMaxValue, IntMaxValue+1), false, "should skip: some values != 78 and != 79"},
+		{iceberg.IsIn(ref, IntMaxValue+1, IntMaxValue+2), false, "should skip: some values != 80 and != 81"},
+		{iceberg.IsIn(iceberg.Reference("always_5"), int32(5), int32(6)), true, "should read: all values == 5"},
 		{iceberg.IsIn(iceberg.Reference("all_nulls"), "abc", "def"), false, "should skip: in on all nulls column"},
-		{iceberg.IsIn(iceberg.Reference("some_nulls"), "abc", "def"), false, "should read: in on some nulls column"},
-		{iceberg.IsIn(iceberg.Reference("no_nulls"), "abc", "def"), false, "should read: in on no nulls column"},
+		{iceberg.IsIn(iceberg.Reference("some_nulls"), "abc", "def"), false, "should skip: in on some nulls column"},
+		{iceberg.IsIn(iceberg.Reference("no_nulls"), "abc", "def"), false, "should skip: in on no nulls column"},
 	}
 
 	for _, tt := range tests {
@@ -2670,14 +2697,14 @@ func (suite *StrictMetricsTestSuite) TestNotInMetrics() {
 		expected bool
 		msg      string
 	}{
-		{iceberg.NotIn(ref, IntMinValue-1, IntMinValue), false, "should read: id equal to lower bound"},
-		{iceberg.NotIn(ref, IntMaxValue-4, IntMaxValue-3), false, "should read: id between upper and lower bounds"},
-		{iceberg.NotIn(ref, IntMaxValue, IntMaxValue+1), false, "should read: id equal to upper bound"},
-		{iceberg.NotIn(ref, IntMaxValue+1, IntMaxValue+2), true, "should read: id above upper bound"},
-		{iceberg.NotIn(iceberg.Reference("always_5"), int32(5), int32(6)), false, "should skip: id above upper bound"},
-		{iceberg.NotIn(iceberg.Reference("all_nulls"), "abc", "def"), true, "should read: in on all nulls column"},
-		{iceberg.NotIn(iceberg.Reference("some_nulls"), "abc", "def"), true, "should read: in on some nulls column"},
-		{iceberg.NotIn(iceberg.Reference("no_nulls"), "abc", "def"), false, "should read: in on no nulls column"},
+		{iceberg.NotIn(ref, IntMinValue-1, IntMinValue), false, "should skip: some values may be == 30"},
+		{iceberg.NotIn(ref, IntMaxValue-4, IntMaxValue-3), false, "should skip: some value may be == 75 or == 76"},
+		{iceberg.NotIn(ref, IntMaxValue, IntMaxValue+1), false, "should skip: some value may be == 79"},
+		{iceberg.NotIn(ref, IntMaxValue+1, IntMaxValue+2), true, "should read: no values == 80 or == 81"},
+		{iceberg.NotIn(iceberg.Reference("always_5"), int32(5), int32(6)), false, "should skip: all values == 5"},
+		{iceberg.NotIn(iceberg.Reference("all_nulls"), "abc", "def"), true, "should read: notIn on all nulls column"},
+		{iceberg.NotIn(iceberg.Reference("some_nulls"), "abc", "def"), true, "should read: notIn on some nulls column"},
+		{iceberg.NotIn(iceberg.Reference("no_nulls"), "abc", "def"), false, "should read: notIn on no nulls column"},
 	}
 
 	for _, tt := range tests {

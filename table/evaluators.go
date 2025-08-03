@@ -1552,10 +1552,12 @@ func (m *strictMetricsEval) VisitNotStartsWith(iceberg.BoundTerm, iceberg.Litera
 
 func (m *strictMetricsEval) canContainNulls(fieldID int) bool {
 	cnt, exists := m.nullCounts[fieldID]
+
 	return exists && cnt > 0
 }
 
 func (m *strictMetricsEval) canContainNans(fieldID int) bool {
 	cnt, exists := m.nanCounts[fieldID]
+
 	return exists && cnt > 0
 }
