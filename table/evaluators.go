@@ -1341,7 +1341,7 @@ func (m *strictMetricsEval) VisitGreater(t iceberg.BoundTerm, lit iceberg.Litera
 	field := t.Ref().Field()
 	fieldID := field.ID
 
-	if m.canContainNulls(fieldID) && m.canContainNans(fieldID) {
+	if m.canContainNulls(fieldID) || m.canContainNans(fieldID) {
 		return rowsMightNotMatch
 	}
 
@@ -1368,7 +1368,7 @@ func (m *strictMetricsEval) VisitGreaterEqual(t iceberg.BoundTerm, lit iceberg.L
 	field := t.Ref().Field()
 	fieldID := field.ID
 
-	if m.canContainNulls(fieldID) && m.canContainNans(fieldID) {
+	if m.canContainNulls(fieldID) || m.canContainNans(fieldID) {
 		return rowsMightNotMatch
 	}
 

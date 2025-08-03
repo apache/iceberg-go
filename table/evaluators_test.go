@@ -2095,7 +2095,7 @@ func (suite *StrictMetricsTestSuite) SetupSuite() {
 			valueCounts: map[int]int64{4: 50, 5: 50, 6: 50, 8: 50},
 			nullCounts:  map[int]int64{4: 50, 5: 10, 6: 0},
 			nanCounts:   nil,
-			lowerBounds: map[int][]byte{5: {'e', 'e', 'b'}},
+			lowerBounds: map[int][]byte{5: {'b', 'b', 'b'}},
 			upperBounds: map[int][]byte{5: {'e', 'e', 'e'}},
 		},
 		&mockDataFile{
@@ -2106,7 +2106,7 @@ func (suite *StrictMetricsTestSuite) SetupSuite() {
 			valueCounts: map[int]int64{4: 50, 5: 50, 6: 50},
 			nullCounts:  map[int]int64{4: 50, 5: 10, 6: 0},
 			nanCounts:   nil,
-			lowerBounds: map[int][]byte{5: {'e', 'e', 'b'}},
+			lowerBounds: map[int][]byte{5: {'b', 'b', 'b'}},
 			upperBounds: map[int][]byte{5: {'e', 'e', 'e'}},
 		},
 	}
@@ -2201,11 +2201,11 @@ func (suite *StrictMetricsTestSuite) TestSomeNulls() {
 		expected bool
 		msg      string
 	}{
-		{iceberg.LessThan(someNull, "ggg"), 2, false, "should skip: some values are null"},
-		{iceberg.LessThanEqual(someNull, "ggg"), 2, false, "should skip: some values are null"},
-		{iceberg.GreaterThan(someNull, "aaa"), 2, false, "should skip: some values are null"},
-		{iceberg.GreaterThanEqual(someNull, "bbb"), 2, false, "should skip: some values are null"},
-		{iceberg.EqualTo(someNull, "bbb"), 3, false, "should skip: some values are null"},
+		{iceberg.LessThan(someNull, "ggg"), 1, false, "should skip: some values are null"},
+		{iceberg.LessThanEqual(someNull, "ggg"), 1, false, "should skip: some values are null"},
+		{iceberg.GreaterThan(someNull, "aaa"), 1, false, "should skip: some values are null"},
+		{iceberg.GreaterThanEqual(someNull, "bbb"), 1, false, "should skip: some values are null"},
+		{iceberg.EqualTo(someNull, "bbb"), 2, false, "should skip: some values are null"},
 	}
 
 	for _, tt := range tests {
