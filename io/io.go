@@ -82,6 +82,17 @@ type WriteFileIO interface {
 	WriteFile(name string, p []byte) error
 }
 
+// ListIO is the interface implemented by a file system that
+// provides listing functionality for object stores
+type ListIO interface {
+	IO
+
+	// ListObjects lists all objects with the given prefix.
+	// For object stores like S3, this provides proper prefix-based listing.
+	// The callback function is called for each object found.
+	ListObjects(prefix string, fn func(path string, info fs.FileInfo) error) error
+}
+
 // A File provides access to a single file. The File interface is the
 // minimum implementation required for Iceberg to interact with a file.
 // Directory files should also implement
@@ -267,7 +278,7 @@ func inferFileIOFromSchema(ctx context.Context, path string, props map[string]st
 		return nil, fmt.Errorf("IO for file '%s' not implemented", path)
 	}
 
-	return createBlobFS(ctx, bucket, parsed.Host), nil
+	return createBlobFS(ctx, bucket, parsed.Host, parsed.Scheme), nil
 }
 
 // LoadFS takes a map of properties and an optional URI location
