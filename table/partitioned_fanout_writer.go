@@ -29,6 +29,9 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// PartitionedFanoutWriter distributes Arrow records across multiple partitions based on
+// a partition specification, writing data to separate files for each partition using
+// a fanout pattern with configurable parallelism.
 type PartitionedFanoutWriter struct {
 	partitionSpec iceberg.PartitionSpec
 	schema        *iceberg.Schema
@@ -36,11 +39,15 @@ type PartitionedFanoutWriter struct {
 	writers       *WriterFactory
 }
 
+// PartitionInfo holds the row indices and partition values for a specific partition,
+// used during the fanout process to group rows by their partition key.
 type PartitionInfo struct {
 	rows            []int64
 	partitionValues map[int]any
 }
 
+// NewPartitionedFanoutWriter creates a new PartitionedFanoutWriter with the specified
+// partition specification, schema, and record iterator.
 func NewPartitionedFanoutWriter(partitionSpec iceberg.PartitionSpec, schema *iceberg.Schema, itr iter.Seq2[arrow.Record, error]) *PartitionedFanoutWriter {
 	return &PartitionedFanoutWriter{
 		partitionSpec: partitionSpec,
@@ -53,6 +60,9 @@ func (p *PartitionedFanoutWriter) partitionPath(data partitionRecord) string {
 	return p.partitionSpec.PartitionToPath(data, p.schema)
 }
 
+// Write writes the Arrow records to the specified location using a fanout pattern with
+// the specified number of workers. The returned iterator yields the data files written
+// by the fanout process.
 func (p *PartitionedFanoutWriter) Write(ctx context.Context, workers int) iter.Seq2[iceberg.DataFile, error] {
 	inputRecordsCh := make(chan arrow.Record, workers)
 	outputDataFilesCh := make(chan iceberg.DataFile, workers)

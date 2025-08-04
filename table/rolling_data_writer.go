@@ -28,6 +28,9 @@ import (
 	"github.com/apache/iceberg-go"
 )
 
+// WriterFactory manages the creation and lifecycle of RollingDataWriter instances
+// for different partitions, providing shared configuration and coordination
+// across all writers in a partitioned write operation.
 type WriterFactory struct {
 	rootLocation   string
 	args           recordWritingArgs
@@ -40,6 +43,8 @@ type WriterFactory struct {
 	mu             sync.Mutex
 }
 
+// NewWriterFactory creates a new WriterFactory with the specified configuration
+// for managing rolling data writers across partitions.
 func NewWriterFactory(rootLocation string, args recordWritingArgs, meta *MetadataBuilder, taskSchema *iceberg.Schema, targetFileSize int64) WriterFactory {
 	return WriterFactory{
 		rootLocation:   rootLocation,
@@ -50,6 +55,9 @@ func NewWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 	}
 }
 
+// RollingDataWriter accumulates Arrow records for a specific partition and flushes
+// them to data files when the target file size is reached, implementing a rolling
+// file strategy to manage file sizes.
 type RollingDataWriter struct {
 	partitionKey    string
 	data            []arrow.Record
@@ -59,6 +67,8 @@ type RollingDataWriter struct {
 	partitionValues map[int]any
 }
 
+// NewRollingDataWriter creates a new RollingDataWriter for the specified partition
+// with the given partition values.
 func (w *WriterFactory) NewRollingDataWriter(partition string, partitionValues map[int]any) *RollingDataWriter {
 	return &RollingDataWriter{
 		partitionKey:    partition,
@@ -78,6 +88,8 @@ func (w *WriterFactory) getOrCreateRollingDataWriter(partition string, partition
 	return writer, nil
 }
 
+// Add appends a record to the writer's buffer and flushes to a data file if the
+// target file size is reached.
 func (r *RollingDataWriter) Add(ctx context.Context, record arrow.Record, outputDataFilesCh chan<- iceberg.DataFile) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

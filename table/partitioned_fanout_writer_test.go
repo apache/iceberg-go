@@ -24,7 +24,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
-	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -99,7 +98,7 @@ func (s *FanoutWriterTestSuite) testTransformPartition(transform iceberg.Transfo
 		},
 	)
 
-	loc := filepath.ToSlash(strings.Replace(s.T().TempDir(), "#", "", -1))
+	loc := filepath.ToSlash(s.T().TempDir())
 	meta, err := NewMetadata(icebergSchema, &spec, UnsortedSortOrder, loc, iceberg.Properties{})
 	s.Require().NoError(err)
 
