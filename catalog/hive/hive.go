@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"path"
 	"sync"
 
 	"github.com/apache/iceberg-go"
@@ -147,20 +148,23 @@ func (c *HiveCatalog) CreateTable(ctx context.Context, identifier table.Identifi
 
 	// Build the Hive table definition using the staged metadata. Only the
 	// fields required by the metastore are populated. The metadata location
-	// is stored as a table parameter so that it can be retrieved later.
+	// is stored as a table property so that it can be retrieved later when
+	// loading the table.
 	database := identifier[0]
 	tableName := identifier[1]
 
-	hTable := &hms.Table{
+	metadataLocation := staged.MetadataLocation()
+	sdLocation := path.Dir(metadataLocation)
+
+	input := &hms.Table{
 		DbName:    database,
 		TableName: tableName,
-		TableType: "EXTERNAL_TABLE",
+		TableType: "ICEBERG",
 		Parameters: map[string]string{
-			"table_type":        "ICEBERG",
-			"metadata_location": staged.MetadataLocation(),
+			"metadata_location": metadataLocation,
 		},
 		Sd: &hms.StorageDescriptor{
-			Location: staged.Metadata().Location(),
+			Location: sdLocation,
 		},
 	}
 
@@ -168,7 +172,7 @@ func (c *HiveCatalog) CreateTable(ctx context.Context, identifier table.Identifi
 	// ensures that the operation is retried once if the connection was
 	// dropped and then re-established.
 	if err := c.withRetry(func(cl *gohive.HiveMetastoreClient) error {
-		return cl.Client.CreateTable(ctx, hTable)
+		return cl.Client.CreateTable(ctx, input)
 	}); err != nil {
 		return nil, fmt.Errorf("create table %s.%s: %w", database, tableName, err)
 	}
@@ -228,17 +232,12 @@ func (c *HiveCatalog) LoadTable(ctx context.Context, identifier table.Identifier
 		return nil, fmt.Errorf("load table %s.%s: %w", db, tbl, err)
 	}
 
-	var metadataLocation string
-	if hTable != nil && hTable.Parameters != nil {
-		if loc, ok := hTable.Parameters["metadata_location"]; ok {
-			metadataLocation = loc
-		}
+	if hTable == nil {
+		return nil, fmt.Errorf("load table %s.%s: no table returned", db, tbl)
 	}
-	if metadataLocation == "" && hTable != nil && hTable.Sd != nil {
-		metadataLocation = hTable.Sd.Location
-	}
-	if metadataLocation == "" {
-		return nil, fmt.Errorf("missing metadata location for table %s.%s", db, tbl)
+	metadataLocation, ok := hTable.Parameters["metadata_location"]
+	if !ok || metadataLocation == "" {
+		return nil, fmt.Errorf("not an Iceberg table")
 	}
 
 	if props == nil {
