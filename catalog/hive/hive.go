@@ -8,8 +8,11 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	cataloginternal "github.com/apache/iceberg-go/catalog/internal"
+	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/beltran/gohive"
+	hms "github.com/beltran/gohive/hive_metastore"
 )
 
 // HiveCatalog implements the catalog.Catalog interface for the Hive Metastore.
@@ -114,7 +117,65 @@ func (c *HiveCatalog) CatalogType() catalog.Type {
 
 // CreateTable creates a new Iceberg table.
 func (c *HiveCatalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
-	panic("not implemented")
+	// Stage metadata for the new table. This generates a metadata file on the
+	// provided or derived table location using the helper from the catalog
+	// internal package. The staged table is returned with a metadata file
+	// location but the file still needs to be written.
+	staged, err := cataloginternal.CreateStagedTable(ctx, nil,
+		func(context.Context, table.Identifier) (iceberg.Properties, error) {
+			// Namespace properties are not used by the Hive catalog at the
+			// moment, so return an empty set.
+			return iceberg.Properties{}, nil
+		}, identifier, schema, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	// Write the metadata file to the file system specified by the table
+	// location. The staged table already knows which file system to use.
+	fs, err := staged.FS(ctx)
+	if err != nil {
+		return nil, err
+	}
+	wfs, ok := fs.(io.WriteFileIO)
+	if !ok {
+		return nil, fmt.Errorf("loaded filesystem IO does not support writing")
+	}
+	if err := cataloginternal.WriteTableMetadata(staged.Metadata(), wfs, staged.MetadataLocation()); err != nil {
+		return nil, err
+	}
+
+	// Build the Hive table definition using the staged metadata. Only the
+	// fields required by the metastore are populated. The metadata location
+	// is stored as a table parameter so that it can be retrieved later.
+	database := identifier[0]
+	tableName := identifier[1]
+
+	hTable := &hms.Table{
+		DbName:    database,
+		TableName: tableName,
+		TableType: "EXTERNAL_TABLE",
+		Parameters: map[string]string{
+			"table_type":        "ICEBERG",
+			"metadata_location": staged.MetadataLocation(),
+		},
+		Sd: &hms.StorageDescriptor{
+			Location: staged.Metadata().Location(),
+		},
+	}
+
+	// Create the table using the metastore client. The withRetry helper
+	// ensures that the operation is retried once if the connection was
+	// dropped and then re-established.
+	if err := c.withRetry(func(cl *gohive.HiveMetastoreClient) error {
+		return cl.Client.CreateTable(ctx, hTable)
+	}); err != nil {
+		return nil, fmt.Errorf("create table %s.%s: %w", database, tableName, err)
+	}
+
+	// Finally load the table from the catalog to return a fully initialised
+	// Iceberg table instance to the caller.
+	return c.LoadTable(ctx, identifier, staged.Properties())
 }
 
 // CommitTable commits table metadata to the catalog.
@@ -124,22 +185,109 @@ func (c *HiveCatalog) CommitTable(ctx context.Context, tbl *table.Table, reqs []
 
 // ListTables returns identifiers of tables in the provided namespace.
 func (c *HiveCatalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
-	return nil
+	return func(yield func(table.Identifier, error) bool) {
+		if len(namespace) != 1 {
+			yield(table.Identifier{}, fmt.Errorf("invalid namespace: %v", namespace))
+
+			return
+		}
+		db := namespace[0]
+
+		var tables []string
+		if err := c.withRetry(func(cl *gohive.HiveMetastoreClient) error {
+			var err error
+			tables, err = cl.Client.GetAllTables(ctx, db)
+			return err
+		}); err != nil {
+			yield(table.Identifier{}, err)
+			return
+		}
+
+		for _, t := range tables {
+			if !yield(table.Identifier{db, t}, nil) {
+				return
+			}
+		}
+	}
 }
 
 // LoadTable loads a table and returns its representation.
 func (c *HiveCatalog) LoadTable(ctx context.Context, identifier table.Identifier, props iceberg.Properties) (*table.Table, error) {
-	panic("not implemented")
+	if len(identifier) != 2 {
+		return nil, fmt.Errorf("invalid identifier: %v", identifier)
+	}
+	db := identifier[0]
+	tbl := identifier[1]
+
+	var hTable *hms.Table
+	if err := c.withRetry(func(cl *gohive.HiveMetastoreClient) error {
+		var err error
+		hTable, err = cl.Client.GetTable(ctx, db, tbl)
+		return err
+	}); err != nil {
+		return nil, fmt.Errorf("load table %s.%s: %w", db, tbl, err)
+	}
+
+	var metadataLocation string
+	if hTable != nil && hTable.Parameters != nil {
+		if loc, ok := hTable.Parameters["metadata_location"]; ok {
+			metadataLocation = loc
+		}
+	}
+	if metadataLocation == "" && hTable != nil && hTable.Sd != nil {
+		metadataLocation = hTable.Sd.Location
+	}
+	if metadataLocation == "" {
+		return nil, fmt.Errorf("missing metadata location for table %s.%s", db, tbl)
+	}
+
+	if props == nil {
+		props = iceberg.Properties{}
+	}
+
+	return table.NewFromLocation(
+		ctx,
+		identifier,
+		metadataLocation,
+		io.LoadFSFunc(props, metadataLocation),
+		c,
+	)
 }
 
 // DropTable removes a table from the catalog.
 func (c *HiveCatalog) DropTable(ctx context.Context, identifier table.Identifier) error {
-	panic("not implemented")
+	if len(identifier) != 2 {
+		return fmt.Errorf("invalid identifier: %v", identifier)
+	}
+	db := identifier[0]
+	tbl := identifier[1]
+
+	return c.withRetry(func(cl *gohive.HiveMetastoreClient) error {
+		return cl.Client.DropTable(ctx, db, tbl, true)
+	})
 }
 
 // RenameTable renames a table in the catalog.
 func (c *HiveCatalog) RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error) {
-	panic("not implemented")
+	if len(from) != 2 || len(to) != 2 {
+		return nil, fmt.Errorf("invalid identifiers: %v -> %v", from, to)
+	}
+
+	var tblObj *hms.Table
+	if err := c.withRetry(func(cl *gohive.HiveMetastoreClient) error {
+		var err error
+		tblObj, err = cl.Client.GetTable(ctx, from[0], from[1])
+		if err != nil {
+			return err
+		}
+		tblObj.DbName = to[0]
+		tblObj.TableName = to[1]
+		return cl.Client.AlterTable(ctx, from[0], from[1], tblObj)
+	}); err != nil {
+		return nil, fmt.Errorf("rename table %v to %v: %w", from, to, err)
+	}
+
+	return c.LoadTable(ctx, to, nil)
 }
 
 // CheckTableExists checks whether a table exists.
@@ -149,17 +297,61 @@ func (c *HiveCatalog) CheckTableExists(ctx context.Context, identifier table.Ide
 
 // ListNamespaces lists available namespaces, optionally filtering by parent.
 func (c *HiveCatalog) ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error) {
-	panic("not implemented")
+	if len(parent) > 0 {
+		return nil, fmt.Errorf("hive catalog does not support nested namespaces: %v", parent)
+	}
+
+	var dbs []string
+	if err := c.withRetry(func(cl *gohive.HiveMetastoreClient) error {
+		var err error
+		dbs, err = cl.Client.GetAllDatabases(ctx)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+
+	namespaces := make([]table.Identifier, 0, len(dbs))
+	for _, db := range dbs {
+		namespaces = append(namespaces, table.Identifier{db})
+	}
+
+	return namespaces, nil
 }
 
 // CreateNamespace creates a namespace with optional properties.
 func (c *HiveCatalog) CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error {
-	panic("not implemented")
+	if len(namespace) != 1 {
+		return fmt.Errorf("invalid namespace: %v", namespace)
+	}
+
+	db := &hms.Database{
+		Name:       namespace[0],
+		Parameters: map[string]string{},
+	}
+	if props != nil {
+		db.Parameters = props
+		if loc := props["location"]; loc != "" {
+			db.LocationUri = loc
+		}
+	}
+
+	return c.withRetry(func(cl *gohive.HiveMetastoreClient) error {
+		return cl.Client.CreateDatabase(ctx, db)
+	})
 }
 
 // DropNamespace drops the specified namespace and its tables.
 func (c *HiveCatalog) DropNamespace(ctx context.Context, namespace table.Identifier) error {
-	panic("not implemented")
+	if len(namespace) != 1 {
+		return fmt.Errorf("invalid namespace: %v", namespace)
+	}
+	db := namespace[0]
+
+	return c.withRetry(func(cl *gohive.HiveMetastoreClient) error {
+		// deleteData=true ensures underlying data is deleted, cascade=true
+		// removes all tables contained in the namespace.
+		return cl.Client.DropDatabase(ctx, db, true, true)
+	})
 }
 
 // CheckNamespaceExists checks whether the namespace exists.
