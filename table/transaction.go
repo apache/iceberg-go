@@ -195,7 +195,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		}
 
 		refAge := nowMs - snap.TimestampMs
-		if refAge > *maxRefAgeMs {
+		if refAge > *maxRefAgeMs && refName != MainBranch {
 			updates = append(updates, NewRemoveSnapshotRefUpdate(refName))
 
 			continue
