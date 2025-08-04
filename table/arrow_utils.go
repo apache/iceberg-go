@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -1215,7 +1216,7 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 			statistics := format.DataFileStatsFromMeta(rdr.Metadata(), must(computeStatsPlan(currentSchema, meta.props)),
 				must(format.PathToIDMapping(currentSchema)))
 
-			df := statistics.ToDataFile(currentSchema, currentSpec, filePath, iceberg.ParquetFile, rdr.SourceFileSize())
+			df := statistics.ToDataFile(currentSchema, currentSpec, filePath, iceberg.ParquetFile, rdr.SourceFileSize(), nil)
 			if !yield(df, nil) {
 				return
 			}
@@ -1289,6 +1290,7 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 	}
 
 	nextCount, stopCount := iter.Pull(args.counter)
+
 	if meta.CurrentSpec().IsUnpartitioned() {
 		tasks := func(yield func(WriteTask) bool) {
 			defer stopCount()
@@ -1307,8 +1309,19 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 			}
 		}
 
-		return writeFiles(ctx, rootLocation, args.fs, meta, tasks)
-	}
+		return writeFiles(ctx, rootLocation, args.fs, meta, nil, tasks)
+	} else {
+		partitionWriter := NewPartitionedFanoutWriter(meta.CurrentSpec(), meta.CurrentSchema(), args.itr)
+		rollingDataWriters := NewWriterFactory(rootLocation, args, meta, taskSchema, targetFileSize)
+		rollingDataWriters.nextCount = nextCount
+		rollingDataWriters.stopCount = stopCount
 
-	panic(fmt.Errorf("%w: write stream with partitions", iceberg.ErrNotImplemented))
+		partitionWriter.writers = &rollingDataWriters
+		workers := meta.props.GetInt(FanoutWriterWorkersKey, FanoutWriterWorkersDefault)
+		if workers <= 0 {
+			workers = runtime.NumCPU()
+		}
+
+		return partitionWriter.Write(ctx, workers)
+	}
 }
