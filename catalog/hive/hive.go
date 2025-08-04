@@ -2,7 +2,9 @@ package hive
 
 import (
 	"context"
+	"fmt"
 	"iter"
+	"sync"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
@@ -11,13 +13,96 @@ import (
 )
 
 // HiveCatalog implements the catalog.Catalog interface for the Hive Metastore.
+// The catalog maintains an active Hive metastore client and automatically
+// attempts to reconnect when operations fail due to a lost connection.
 type HiveCatalog struct {
-	// metastoreURI is the address of the Hive Metastore service.
-	metastoreURI string
-	// options contains connection options for the Hive Metastore client.
+	host string
+	port int
+	auth string
+
 	options *gohive.MetastoreConnectConfiguration
-	// client is the underlying Hive Metastore client.
-	client *gohive.HiveMetastoreClient
+	client  *gohive.HiveMetastoreClient
+
+	mu sync.Mutex
+}
+
+// Config contains parameters used to establish a connection to the Hive
+// metastore.
+type Config struct {
+	Host          string
+	Port          int
+	Auth          string
+	Username      string
+	Password      string
+	TransportMode string
+}
+
+// NewHiveCatalog initializes a HiveCatalog using the provided configuration. If
+// the connection to the metastore cannot be established, an error is returned.
+func NewHiveCatalog(cfg Config) (*HiveCatalog, error) {
+	opts := gohive.NewMetastoreConnectConfiguration()
+	if cfg.TransportMode != "" {
+		opts.TransportMode = cfg.TransportMode
+	}
+	opts.Username = cfg.Username
+	opts.Password = cfg.Password
+
+	client, err := gohive.ConnectToMetastore(cfg.Host, cfg.Port, cfg.Auth, opts)
+	if err != nil {
+		return nil, fmt.Errorf("connect to metastore: %w", err)
+	}
+
+	return &HiveCatalog{
+		host:    cfg.Host,
+		port:    cfg.Port,
+		auth:    cfg.Auth,
+		options: opts,
+		client:  client,
+	}, nil
+}
+
+// reconnect attempts to re-establish the connection to the metastore.
+func (c *HiveCatalog) reconnect() error {
+	client, err := gohive.ConnectToMetastore(c.host, c.port, c.auth, c.options)
+	if err != nil {
+		return fmt.Errorf("reconnect to metastore: %w", err)
+	}
+
+	if c.client != nil {
+		c.client.Close()
+	}
+	c.client = client
+	return nil
+}
+
+// withRetry executes fn using the current metastore client. If fn returns an
+// error, the catalog will attempt to reconnect and invoke fn again once.
+func (c *HiveCatalog) withRetry(fn func(*gohive.HiveMetastoreClient) error) error {
+	c.mu.Lock()
+	client := c.client
+	c.mu.Unlock()
+
+	if client == nil {
+		if err := c.reconnect(); err != nil {
+			return err
+		}
+		c.mu.Lock()
+		client = c.client
+		c.mu.Unlock()
+	}
+
+	if err := fn(client); err != nil {
+		if rerr := c.reconnect(); rerr != nil {
+			return err
+		}
+
+		c.mu.Lock()
+		client = c.client
+		c.mu.Unlock()
+		return fn(client)
+	}
+
+	return nil
 }
 
 var _ catalog.Catalog = (*HiveCatalog)(nil)
