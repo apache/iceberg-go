@@ -6,6 +6,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -371,4 +372,116 @@ func TestAppendAndReadData(t *testing.T) {
 	require.NoError(t, err)
 	defer result.Release()
 	require.Equal(t, int64(2), result.NumRows())
+}
+
+// TestCreateLoadAppendDropIcebergTableWithAllParams demonstrates full table lifecycle
+// including custom schema, partition spec, table properties and snapshot management.
+func TestCreateLoadAppendDropIcebergTableWithAllParams(t *testing.T) {
+	cat := setupHiveCatalog(t)
+	ctx := context.Background()
+
+	// isolate test data by using a unique namespace and table name
+	ns := table.Identifier{randName("ns_")}
+	require.NoError(t, cat.CreateNamespace(ctx, ns, nil))
+	t.Cleanup(func() { _ = cat.DropNamespace(ctx, ns) })
+
+	tblName := randName("tbl_")
+	ident := append(ns, tblName)
+	baseDir := t.TempDir()
+	// location: ensure data is written to this filesystem path
+	location := "file://" + filepath.ToSlash(filepath.Join(baseDir, tblName))
+
+	// schema: verify multiple column types are stored correctly
+	schema := ice.NewSchema(0,
+		ice.NestedField{ID: 1, Name: "id", Type: ice.PrimitiveTypes.Int64, Required: true},
+		ice.NestedField{ID: 2, Name: "name", Type: ice.PrimitiveTypes.String, Required: false},
+		ice.NestedField{ID: 3, Name: "ts", Type: ice.PrimitiveTypes.Timestamp, Required: true},
+	)
+
+	// partition spec: partition by year(ts) to test transform handling
+	spec := ice.NewPartitionSpec(
+		ice.PartitionField{SourceID: 3, FieldID: ice.PartitionDataIDStart, Name: "year", Transform: ice.YearTransform{}},
+	)
+
+	// table properties: specify format, version, owner and compression codec
+	props := ice.Properties{
+		"write.format.default":             "parquet",
+		"format-version":                   "2",
+		"owner":                            "testuser",
+		"write.metadata.compression-codec": "zstd",
+		"custom":                           "val",
+	}
+
+	t.Logf("creating table %s at %s", ident, location)
+	tbl, err := cat.CreateTable(ctx, ident, schema,
+		catpkg.WithPartitionSpec(&spec),
+		catpkg.WithProperties(props),
+		catpkg.WithLocation(location),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.DropTable(ctx, ident) })
+
+	// verify metadata stored in catalog
+	require.True(t, tbl.Schema().Equals(schema))
+	require.True(t, tbl.Spec().Equals(spec))
+	require.Equal(t, location, tbl.Location())
+	for k, v := range props {
+		require.Equal(t, v, tbl.Properties()[k])
+	}
+
+	// metadata file should exist on disk
+	meta := strings.TrimPrefix(tbl.MetadataLocation(), "file://")
+	_, err = os.Stat(meta)
+	require.NoError(t, err)
+
+	// snapshot after creation
+	first := tbl.CurrentSnapshot()
+	require.NotNil(t, first)
+
+	// append data to create a new snapshot
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "ts", Type: arrow.FixedWidthTypes.Timestamp_us},
+	}, nil)
+	bldr := array.NewRecordBuilder(memory.DefaultAllocator, arrSchema)
+	defer bldr.Release()
+	bldr.Field(0).(*array.Int64Builder).AppendValues([]int64{1, 2}, nil)
+	bldr.Field(1).(*array.StringBuilder).AppendValues([]string{"a", "b"}, nil)
+	now := time.Now()
+	tsVals := []arrow.Timestamp{arrow.Timestamp(now.UnixMicro()), arrow.Timestamp(now.Add(time.Hour).UnixMicro())}
+	bldr.Field(2).(*array.TimestampBuilder).AppendValues(tsVals, nil)
+	rec := bldr.NewRecord()
+	defer rec.Release()
+	arrTbl := array.NewTableFromRecords(arrSchema, []arrow.Record{rec})
+	defer arrTbl.Release()
+
+	tbl, err = tbl.AppendTable(ctx, arrTbl, arrTbl.NumRows(), nil)
+	require.NoError(t, err)
+	second := tbl.CurrentSnapshot()
+	require.NotNil(t, second)
+	require.NotEqual(t, first.SnapshotID, second.SnapshotID)
+
+	// load table and confirm persisted parameters
+	loaded, err := cat.LoadTable(ctx, ident, nil)
+	require.NoError(t, err)
+	require.True(t, loaded.Schema().Equals(schema))
+	require.True(t, loaded.Spec().Equals(spec))
+	require.Equal(t, location, loaded.Location())
+	require.Equal(t, "parquet", loaded.Properties()["write.format.default"])
+
+	// check Hive metastore metadata
+	hmsTbl, err := cat.client.GetTable(ctx, ns[0], tblName)
+	require.NoError(t, err)
+	require.Equal(t, "EXTERNAL_TABLE", hmsTbl.TableType)
+	require.Equal(t, location, hmsTbl.Sd.Location)
+	require.Equal(t, "ICEBERG", hmsTbl.Parameters["table_type"])
+
+	// drop table and ensure it is removed from catalog and filesystem
+	require.NoError(t, cat.DropTable(ctx, ident))
+	exists, err := cat.CheckTableExists(ctx, ident)
+	require.NoError(t, err)
+	require.False(t, exists)
+	_, err = os.Stat(strings.TrimPrefix(location, "file://"))
+	require.Error(t, err)
 }
