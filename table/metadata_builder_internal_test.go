@@ -18,9 +18,10 @@
 package table
 
 import (
+	"testing"
+
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/require"
-	"testing"
 )
 
 func schema() iceberg.Schema {
@@ -62,7 +63,6 @@ func builderWithoutChanges(formatVersion int) MetadataBuilder {
 	sortOrder := sortOrder()
 
 	builder, err := NewMetadataBuilder()
-
 	if err != nil {
 		panic(err)
 	}
