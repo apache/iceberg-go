@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"net/url"
 	"path"
+	"strconv"
 	"sync"
 
 	"github.com/apache/iceberg-go"
@@ -39,6 +41,49 @@ type Config struct {
 	Username      string
 	Password      string
 	TransportMode string
+}
+
+func init() {
+	catalog.Register(string(catalog.Hive), catalog.RegistrarFunc(func(ctx context.Context, name string, p iceberg.Properties) (catalog.Catalog, error) {
+		cfg := Config{
+			Host:          p.Get("host", ""),
+			Port:          p.GetInt("port", 0),
+			Auth:          p.Get("auth", "NONE"),
+			Username:      p.Get("username", ""),
+			Password:      p.Get("password", ""),
+			TransportMode: p.Get("transport-mode", ""),
+		}
+
+		if uri := p.Get("uri", ""); uri != "" {
+			u, err := url.Parse(uri)
+			if err != nil {
+				return nil, fmt.Errorf("parse catalog URI: %w", err)
+			}
+			if host := u.Hostname(); host != "" {
+				cfg.Host = host
+			}
+			if port := u.Port(); port != "" {
+				v, err := strconv.Atoi(port)
+				if err != nil {
+					return nil, fmt.Errorf("parse port: %w", err)
+				}
+				cfg.Port = v
+			}
+			if auth := u.Query().Get("auth"); auth != "" {
+				cfg.Auth = auth
+			}
+			if user := u.User; user != nil {
+				cfg.Username = user.Username()
+				cfg.Password, _ = user.Password()
+			}
+		}
+
+		if cfg.Port == 0 {
+			cfg.Port = 9083
+		}
+
+		return NewHiveCatalog(cfg)
+	}))
 }
 
 // NewHiveCatalog initializes a HiveCatalog using the provided configuration. If

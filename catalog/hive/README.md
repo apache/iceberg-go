@@ -53,5 +53,18 @@ func main() {
 }
 ```
 
+The catalog can also be created via the generic factory using connection
+properties or a `hive://` URI:
+
+```go
+cat, err := catalog.Load(ctx, "hive", iceberg.Properties{
+    "type": "hive",
+    "uri":  "hive://metastore:9083?auth=NONE",
+})
+if err != nil {
+    panic(err)
+}
+```
+
 The table metadata location is stored in the Hive table properties under the
 `metadata_location` key.
