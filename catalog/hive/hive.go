@@ -2,6 +2,7 @@ package hive
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"net/url"
@@ -26,6 +27,7 @@ type metastoreClient interface {
 	DropTable(ctx context.Context, db, tbl string, deleteData bool) error
 	AlterTable(ctx context.Context, db, tbl string, newTable *hms.Table) error
 	GetAllDatabases(ctx context.Context) ([]string, error)
+	GetDatabase(ctx context.Context, name string) (*hms.Database, error)
 	CreateDatabase(ctx context.Context, db *hms.Database) error
 	DropDatabase(ctx context.Context, name string, deleteData, cascade bool) error
 }
@@ -50,6 +52,9 @@ func (g gohiveClient) AlterTable(ctx context.Context, db, tbl string, newTable *
 }
 func (g gohiveClient) GetAllDatabases(ctx context.Context) ([]string, error) {
 	return g.Client.GetAllDatabases(ctx)
+}
+func (g gohiveClient) GetDatabase(ctx context.Context, name string) (*hms.Database, error) {
+	return g.Client.GetDatabase(ctx, name)
 }
 func (g gohiveClient) CreateDatabase(ctx context.Context, db *hms.Database) error {
 	return g.Client.CreateDatabase(ctx, db)
@@ -468,7 +473,37 @@ func (c *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Iden
 
 // LoadNamespaceProperties loads properties for the given namespace.
 func (c *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.Identifier) (iceberg.Properties, error) {
-	panic("not implemented")
+	if len(namespace) != 1 {
+		return nil, fmt.Errorf("invalid namespace: %v", namespace)
+	}
+
+	dbName := namespace[0]
+
+	var dbObj *hms.Database
+	if err := c.withRetry(func(cl metastoreClient) error {
+		var err error
+		dbObj, err = cl.GetDatabase(ctx, dbName)
+		return err
+	}); err != nil {
+		var noSuch *hms.NoSuchObjectException
+		if errors.As(err, &noSuch) {
+			return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, dbName)
+		}
+		return nil, err
+	}
+
+	if dbObj == nil {
+		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, dbName)
+	}
+
+	props := make(iceberg.Properties)
+	if dbObj.Parameters != nil {
+		for k, v := range dbObj.Parameters {
+			props[k] = v
+		}
+	}
+
+	return props, nil
 }
 
 // UpdateNamespaceProperties updates properties on the namespace.

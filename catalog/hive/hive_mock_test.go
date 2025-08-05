@@ -21,14 +21,14 @@ import (
 )
 
 type mockMetastore struct {
-	databases map[string]struct{}
+	databases map[string]*hms.Database
 	tables    map[string]*hms.Table // key db.table
 	failOnce  map[string]bool
 }
 
 func newMockMetastore() *mockMetastore {
 	return &mockMetastore{
-		databases: map[string]struct{}{},
+		databases: map[string]*hms.Database{},
 		tables:    map[string]*hms.Table{},
 		failOnce:  map[string]bool{},
 	}
@@ -99,7 +99,7 @@ func (m *mockMetastore) CreateDatabase(ctx context.Context, db *hms.Database) er
 		m.failOnce["create_database"] = false
 		return errors.New("connection error")
 	}
-	m.databases[db.Name] = struct{}{}
+	m.databases[db.Name] = db
 	return nil
 }
 
@@ -115,6 +115,17 @@ func (m *mockMetastore) DropDatabase(ctx context.Context, name string, _, _ bool
 		}
 	}
 	return nil
+}
+
+func (m *mockMetastore) GetDatabase(ctx context.Context, name string) (*hms.Database, error) {
+	if m.failOnce["get_database"] {
+		m.failOnce["get_database"] = false
+		return nil, errors.New("connection error")
+	}
+	if db, ok := m.databases[name]; ok {
+		return db, nil
+	}
+	return nil, nil
 }
 
 // helper to prepare metadata file
@@ -150,7 +161,7 @@ func TestNewHiveCatalogSuccess(t *testing.T) {
 
 func TestHiveCatalogListTables(t *testing.T) {
 	mt := newMockMetastore()
-	mt.databases["db"] = struct{}{}
+	mt.databases["db"] = &hms.Database{Name: "db"}
 	mt.tables["db.t1"] = &hms.Table{DbName: "db", TableName: "t1", Parameters: map[string]string{"metadata_location": "loc"}}
 	mt.tables["db.t2"] = &hms.Table{DbName: "db", TableName: "t2", Parameters: map[string]string{"metadata_location": "loc"}}
 	cat := &Catalog{client: mt}
@@ -184,7 +195,7 @@ func TestHiveCatalogListTablesInvalid(t *testing.T) {
 
 func TestHiveCatalogCreateTable(t *testing.T) {
 	mt := newMockMetastore()
-	mt.databases["db"] = struct{}{}
+	mt.databases["db"] = &hms.Database{Name: "db"}
 	cat := &Catalog{client: mt}
 	sc := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true})
 	loc := t.TempDir()
@@ -206,7 +217,7 @@ func TestHiveCatalogCreateTableRetry(t *testing.T) {
 		return good, nil
 	}
 	defer func() { connectToMetastore = orig }()
-	good.databases["db"] = struct{}{}
+	good.databases["db"] = &hms.Database{Name: "db"}
 	sc := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true})
 	loc := t.TempDir()
 	id := table.Identifier{"db", "tbl"}
@@ -251,8 +262,8 @@ func TestHiveCatalogDropTable(t *testing.T) {
 
 func TestHiveCatalogListNamespaces(t *testing.T) {
 	mt := newMockMetastore()
-	mt.databases["db1"] = struct{}{}
-	mt.databases["db2"] = struct{}{}
+	mt.databases["db1"] = &hms.Database{Name: "db1"}
+	mt.databases["db2"] = &hms.Database{Name: "db2"}
 	cat := &Catalog{client: mt}
 	namespaces, err := cat.ListNamespaces(context.Background(), nil)
 	if err != nil {
@@ -294,7 +305,7 @@ func TestHiveCatalogCreateNamespaceInvalid(t *testing.T) {
 
 func TestHiveCatalogDropNamespace(t *testing.T) {
 	mt := newMockMetastore()
-	mt.databases["db"] = struct{}{}
+	mt.databases["db"] = &hms.Database{Name: "db"}
 	mt.tables["db.tbl"] = &hms.Table{DbName: "db", TableName: "tbl"}
 	cat := &Catalog{client: mt}
 	if err := cat.DropNamespace(context.Background(), table.Identifier{"db"}); err != nil {
@@ -313,5 +324,26 @@ func TestHiveCatalogDropNamespaceInvalid(t *testing.T) {
 	cat := &Catalog{client: mt}
 	if err := cat.DropNamespace(context.Background(), table.Identifier{"a", "b"}); err == nil {
 		t.Fatalf("expected error")
+	}
+}
+
+func TestHiveCatalogLoadNamespaceProperties(t *testing.T) {
+	mt := newMockMetastore()
+	mt.databases["db"] = &hms.Database{Name: "db", Parameters: map[string]string{"p1": "v1", "p2": "v2"}}
+	cat := &Catalog{client: mt}
+
+	props, err := cat.LoadNamespaceProperties(context.Background(), table.Identifier{"db"})
+	if err != nil {
+		t.Fatalf("load namespace properties: %v", err)
+	}
+	assert.Equal(t, iceberg.Properties{"p1": "v1", "p2": "v2"}, props)
+}
+
+func TestHiveCatalogLoadNamespacePropertiesMissing(t *testing.T) {
+	mt := newMockMetastore()
+	cat := &Catalog{client: mt}
+	_, err := cat.LoadNamespaceProperties(context.Background(), table.Identifier{"missing"})
+	if err == nil || !errors.Is(err, catalog.ErrNoSuchNamespace) {
+		t.Fatalf("expected ErrNoSuchNamespace, got %v", err)
 	}
 }
