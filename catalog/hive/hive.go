@@ -18,6 +18,54 @@ import (
 	hms "github.com/beltran/gohive/hive_metastore"
 )
 
+type metastoreClient interface {
+	Close()
+	GetAllTables(ctx context.Context, db string) ([]string, error)
+	GetTable(ctx context.Context, db, tbl string) (*hms.Table, error)
+	CreateTable(ctx context.Context, tbl *hms.Table) error
+	DropTable(ctx context.Context, db, tbl string, deleteData bool) error
+	AlterTable(ctx context.Context, db, tbl string, newTable *hms.Table) error
+	GetAllDatabases(ctx context.Context) ([]string, error)
+	CreateDatabase(ctx context.Context, db *hms.Database) error
+	DropDatabase(ctx context.Context, name string, deleteData, cascade bool) error
+}
+
+type gohiveClient struct{ *gohive.HiveMetastoreClient }
+
+func (g gohiveClient) Close() { g.HiveMetastoreClient.Close() }
+func (g gohiveClient) GetAllTables(ctx context.Context, db string) ([]string, error) {
+	return g.Client.GetAllTables(ctx, db)
+}
+func (g gohiveClient) GetTable(ctx context.Context, db, tbl string) (*hms.Table, error) {
+	return g.Client.GetTable(ctx, db, tbl)
+}
+func (g gohiveClient) CreateTable(ctx context.Context, tbl *hms.Table) error {
+	return g.Client.CreateTable(ctx, tbl)
+}
+func (g gohiveClient) DropTable(ctx context.Context, db, tbl string, deleteData bool) error {
+	return g.Client.DropTable(ctx, db, tbl, deleteData)
+}
+func (g gohiveClient) AlterTable(ctx context.Context, db, tbl string, newTable *hms.Table) error {
+	return g.Client.AlterTable(ctx, db, tbl, newTable)
+}
+func (g gohiveClient) GetAllDatabases(ctx context.Context) ([]string, error) {
+	return g.Client.GetAllDatabases(ctx)
+}
+func (g gohiveClient) CreateDatabase(ctx context.Context, db *hms.Database) error {
+	return g.Client.CreateDatabase(ctx, db)
+}
+func (g gohiveClient) DropDatabase(ctx context.Context, name string, deleteData, cascade bool) error {
+	return g.Client.DropDatabase(ctx, name, deleteData, cascade)
+}
+
+var connectToMetastore = func(host string, port int, auth string, cfg *gohive.MetastoreConnectConfiguration) (metastoreClient, error) {
+	client, err := gohive.ConnectToMetastore(host, port, auth, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return gohiveClient{client}, nil
+}
+
 // HiveCatalog implements the catalog.Catalog interface for the Hive Metastore.
 // The catalog maintains an active Hive metastore client and automatically
 // attempts to reconnect when operations fail due to a lost connection.
@@ -27,7 +75,7 @@ type HiveCatalog struct {
 	auth string
 
 	options *gohive.MetastoreConnectConfiguration
-	client  *gohive.HiveMetastoreClient
+	client  metastoreClient
 
 	mu sync.Mutex
 }
@@ -96,7 +144,7 @@ func NewHiveCatalog(cfg Config) (*HiveCatalog, error) {
 	opts.Username = cfg.Username
 	opts.Password = cfg.Password
 
-	client, err := gohive.ConnectToMetastore(cfg.Host, cfg.Port, cfg.Auth, opts)
+	client, err := connectToMetastore(cfg.Host, cfg.Port, cfg.Auth, opts)
 	if err != nil {
 		return nil, fmt.Errorf("connect to metastore: %w", err)
 	}
@@ -112,7 +160,7 @@ func NewHiveCatalog(cfg Config) (*HiveCatalog, error) {
 
 // reconnect attempts to re-establish the connection to the metastore.
 func (c *HiveCatalog) reconnect() error {
-	client, err := gohive.ConnectToMetastore(c.host, c.port, c.auth, c.options)
+	client, err := connectToMetastore(c.host, c.port, c.auth, c.options)
 	if err != nil {
 		return fmt.Errorf("reconnect to metastore: %w", err)
 	}
@@ -126,7 +174,7 @@ func (c *HiveCatalog) reconnect() error {
 
 // withRetry executes fn using the current metastore client. If fn returns an
 // error, the catalog will attempt to reconnect and invoke fn again once.
-func (c *HiveCatalog) withRetry(fn func(*gohive.HiveMetastoreClient) error) error {
+func (c *HiveCatalog) withRetry(fn func(metastoreClient) error) error {
 	c.mu.Lock()
 	client := c.client
 	c.mu.Unlock()
@@ -216,8 +264,8 @@ func (c *HiveCatalog) CreateTable(ctx context.Context, identifier table.Identifi
 	// Create the table using the metastore client. The withRetry helper
 	// ensures that the operation is retried once if the connection was
 	// dropped and then re-established.
-	if err := c.withRetry(func(cl *gohive.HiveMetastoreClient) error {
-		return cl.Client.CreateTable(ctx, input)
+	if err := c.withRetry(func(cl metastoreClient) error {
+		return cl.CreateTable(ctx, input)
 	}); err != nil {
 		return nil, fmt.Errorf("create table %s.%s: %w", database, tableName, err)
 	}
@@ -243,9 +291,9 @@ func (c *HiveCatalog) ListTables(ctx context.Context, namespace table.Identifier
 		db := namespace[0]
 
 		var tables []string
-		if err := c.withRetry(func(cl *gohive.HiveMetastoreClient) error {
+		if err := c.withRetry(func(cl metastoreClient) error {
 			var err error
-			tables, err = cl.Client.GetAllTables(ctx, db)
+			tables, err = cl.GetAllTables(ctx, db)
 			return err
 		}); err != nil {
 			yield(table.Identifier{}, err)
@@ -269,9 +317,9 @@ func (c *HiveCatalog) LoadTable(ctx context.Context, identifier table.Identifier
 	tbl := identifier[1]
 
 	var hTable *hms.Table
-	if err := c.withRetry(func(cl *gohive.HiveMetastoreClient) error {
+	if err := c.withRetry(func(cl metastoreClient) error {
 		var err error
-		hTable, err = cl.Client.GetTable(ctx, db, tbl)
+		hTable, err = cl.GetTable(ctx, db, tbl)
 		return err
 	}); err != nil {
 		return nil, fmt.Errorf("load table %s.%s: %w", db, tbl, err)
@@ -306,8 +354,8 @@ func (c *HiveCatalog) DropTable(ctx context.Context, identifier table.Identifier
 	db := identifier[0]
 	tbl := identifier[1]
 
-	return c.withRetry(func(cl *gohive.HiveMetastoreClient) error {
-		return cl.Client.DropTable(ctx, db, tbl, true)
+	return c.withRetry(func(cl metastoreClient) error {
+		return cl.DropTable(ctx, db, tbl, true)
 	})
 }
 
@@ -318,15 +366,15 @@ func (c *HiveCatalog) RenameTable(ctx context.Context, from, to table.Identifier
 	}
 
 	var tblObj *hms.Table
-	if err := c.withRetry(func(cl *gohive.HiveMetastoreClient) error {
+	if err := c.withRetry(func(cl metastoreClient) error {
 		var err error
-		tblObj, err = cl.Client.GetTable(ctx, from[0], from[1])
+		tblObj, err = cl.GetTable(ctx, from[0], from[1])
 		if err != nil {
 			return err
 		}
 		tblObj.DbName = to[0]
 		tblObj.TableName = to[1]
-		return cl.Client.AlterTable(ctx, from[0], from[1], tblObj)
+		return cl.AlterTable(ctx, from[0], from[1], tblObj)
 	}); err != nil {
 		return nil, fmt.Errorf("rename table %v to %v: %w", from, to, err)
 	}
@@ -346,9 +394,9 @@ func (c *HiveCatalog) ListNamespaces(ctx context.Context, parent table.Identifie
 	}
 
 	var dbs []string
-	if err := c.withRetry(func(cl *gohive.HiveMetastoreClient) error {
+	if err := c.withRetry(func(cl metastoreClient) error {
 		var err error
-		dbs, err = cl.Client.GetAllDatabases(ctx)
+		dbs, err = cl.GetAllDatabases(ctx)
 		return err
 	}); err != nil {
 		return nil, err
@@ -379,8 +427,8 @@ func (c *HiveCatalog) CreateNamespace(ctx context.Context, namespace table.Ident
 		}
 	}
 
-	return c.withRetry(func(cl *gohive.HiveMetastoreClient) error {
-		return cl.Client.CreateDatabase(ctx, db)
+	return c.withRetry(func(cl metastoreClient) error {
+		return cl.CreateDatabase(ctx, db)
 	})
 }
 
@@ -391,10 +439,10 @@ func (c *HiveCatalog) DropNamespace(ctx context.Context, namespace table.Identif
 	}
 	db := namespace[0]
 
-	return c.withRetry(func(cl *gohive.HiveMetastoreClient) error {
+	return c.withRetry(func(cl metastoreClient) error {
 		// deleteData=true ensures underlying data is deleted, cascade=true
 		// removes all tables contained in the namespace.
-		return cl.Client.DropDatabase(ctx, db, true, true)
+		return cl.DropDatabase(ctx, db, true, true)
 	})
 }
 
