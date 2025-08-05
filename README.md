@@ -103,7 +103,92 @@ the table, the following tracks the current write support:
 | Write Pos Delete  |         |
 | Write Eq Delete   |         |
 | Row Delta         |         |
+## Hive Metastore Catalog
 
+The project provides an experimental catalog backed by the Hive Metastore using
+[gohive](https://github.com/beltran/gohive).
+
+### Configuration
+
+The catalog can be configured programmatically with `hive.Config` or via the
+generic catalog loader. Examples below show Plain and Kerberos authentication
+modes.
+
+#### Plain (NONE)
+
+```go
+cfg := hive.Config{
+    Host:     "hm.example.com",
+    Port:     9083,
+    Auth:     "NONE",
+    Username: "myuser",
+    Password: "mypassword",
+}
+cat, err := hive.NewHiveCatalog(cfg)
+if err != nil {
+    panic(err)
+}
+```
+
+#### Kerberos (KERBEROS)
+
+Kerberos requires building gohive with the `kerberos` build tag and a valid
+ticket (for example via `kinit`).
+
+```go
+cfg := hive.Config{
+    Host: "hm.example.com",
+    Port: 9083,
+    Auth: "KERBEROS",
+}
+cat, err := hive.NewHiveCatalog(cfg)
+if err != nil {
+    panic(err)
+}
+```
+
+Connection properties can also be expressed using the generic catalog factory:
+
+```go
+cat, err := catalog.Load(ctx, "hive", iceberg.Properties{
+    "uri": "hive://hm.example.com:9083?auth=KERBEROS",
+})
+if err != nil {
+    panic(err)
+}
+```
+
+### Usage
+
+```go
+ctx := context.Background()
+cat, err := hive.NewHiveCatalog(hive.Config{Host: "hm.example.com", Port: 9083, Auth: "NONE"})
+if err != nil {
+    panic(err)
+}
+
+schema := iceberg.NewSchema(iceberg.NestedFieldMap{
+    1: iceberg.PrimitiveField(1, "id", iceberg.IntType{}, false),
+})
+
+tbl, err := cat.CreateTable(ctx, table.Identifier{"db", "tbl"}, schema)
+if err != nil {
+    panic(err)
+}
+
+if _, err := cat.LoadTable(ctx, table.Identifier{"db", "tbl"}, nil); err != nil {
+    panic(err)
+}
+```
+
+### Limitations and Known Issues
+
+- Only a subset of catalog operations is implemented; write commits are not
+  supported.
+- Connections use the binary Thrift protocol; HTTP transport and TLS are not
+  supported.
+- Kerberos authentication relies on external tickets and has limited test
+  coverage.
 
 ### CLI Usage
 Run `go build ./cmd/iceberg` from the root of this repository to build the CLI executable, alternately you can run `go install github.com/apache/iceberg-go/cmd/iceberg` to install it to the `bin` directory of your `GOPATH`.
