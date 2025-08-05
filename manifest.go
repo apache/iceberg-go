@@ -858,6 +858,8 @@ type partitionFieldStats[T LiteralType] struct {
 
 func newPartitionFieldStat(typ PrimitiveType) (fieldStats, error) {
 	switch typ.(type) {
+	case BooleanType:
+		return &partitionFieldStats[bool]{cmp: getComparator[bool]()}, nil
 	case Int32Type:
 		return &partitionFieldStats[int32]{cmp: getComparator[int32]()}, nil
 	case Int64Type:

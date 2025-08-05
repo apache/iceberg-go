@@ -53,7 +53,7 @@ type writer struct {
 	meta       *MetadataBuilder
 }
 
-func (w *writer) writeFile(ctx context.Context, task WriteTask) (iceberg.DataFile, error) {
+func (w *writer) writeFile(ctx context.Context, partitionValues map[int]any, task WriteTask) (iceberg.DataFile, error) {
 	defer func() {
 		for _, b := range task.Batches {
 			b.Release()
@@ -78,15 +78,16 @@ func (w *writer) writeFile(ctx context.Context, task WriteTask) (iceberg.DataFil
 	filePath := w.loc.NewDataLocation(
 		task.GenerateDataFileName("parquet"))
 
-	return w.format.WriteDataFile(ctx, w.fs, internal.WriteFileInfo{
+	return w.format.WriteDataFile(ctx, w.fs, partitionValues, internal.WriteFileInfo{
 		FileSchema: w.fileSchema,
 		FileName:   filePath,
 		StatsCols:  statsCols,
 		WriteProps: w.props,
+		Spec:       w.meta.CurrentSpec(),
 	}, batches)
 }
 
-func writeFiles(ctx context.Context, rootLocation string, fs io.WriteFileIO, meta *MetadataBuilder, tasks iter.Seq[WriteTask]) iter.Seq2[iceberg.DataFile, error] {
+func writeFiles(ctx context.Context, rootLocation string, fs io.WriteFileIO, meta *MetadataBuilder, partitionValues map[int]any, tasks iter.Seq[WriteTask]) iter.Seq2[iceberg.DataFile, error] {
 	locProvider, err := LoadLocationProvider(rootLocation, meta.props)
 	if err != nil {
 		return func(yield func(iceberg.DataFile, error) bool) {
@@ -122,6 +123,6 @@ func writeFiles(ctx context.Context, rootLocation string, fs io.WriteFileIO, met
 	nworkers := config.EnvConfig.MaxWorkers
 
 	return internal.MapExec(nworkers, tasks, func(t WriteTask) (iceberg.DataFile, error) {
-		return w.writeFile(ctx, t)
+		return w.writeFile(ctx, partitionValues, t)
 	})
 }

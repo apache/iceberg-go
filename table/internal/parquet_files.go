@@ -236,7 +236,7 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 		parquet.WithCompressionLevel(compressionLevel))
 }
 
-func (p parquetFormat) WriteDataFile(ctx context.Context, fs iceio.WriteFileIO, info WriteFileInfo, batches []arrow.Record) (iceberg.DataFile, error) {
+func (p parquetFormat) WriteDataFile(ctx context.Context, fs iceio.WriteFileIO, partitionValues map[int]any, info WriteFileInfo, batches []arrow.Record) (iceberg.DataFile, error) {
 	fw, err := fs.Create(info.FileName)
 	if err != nil {
 		return nil, err
@@ -274,7 +274,7 @@ func (p parquetFormat) WriteDataFile(ctx context.Context, fs iceio.WriteFileIO, 
 	}
 
 	return p.DataFileStatsFromMeta(filemeta, info.StatsCols, colMapping).
-		ToDataFile(info.FileSchema, info.Spec, info.FileName, iceberg.ParquetFile, cntWriter.Count), nil
+		ToDataFile(info.FileSchema, info.Spec, info.FileName, iceberg.ParquetFile, cntWriter.Count, partitionValues), nil
 }
 
 type decAsIntAgg[T int32 | int64] struct {
