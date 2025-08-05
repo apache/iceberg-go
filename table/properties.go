@@ -17,7 +17,11 @@
 
 package table
 
-import "github.com/apache/iceberg-go/table/internal"
+import (
+	"math"
+
+	"github.com/apache/iceberg-go/table/internal"
+)
 
 const (
 	WriteDataPathKey                        = "write.data.path"
@@ -71,4 +75,13 @@ const (
 
 	WriteTargetFileSizeBytesKey     = "write.target-file-size-bytes"
 	WriteTargetFileSizeBytesDefault = 512 * 1024 * 1024 // 512 MB
+
+	MinSnapshotsToKeepKey     = "min-snapshots-to-keep"
+	MinSnapshotsToKeepDefault = math.MaxInt
+
+	MaxSnapshotAgeMsKey     = "max-snapshot-age-ms"
+	MaxSnapshotAgeMsDefault = math.MaxInt
+
+	MaxRefAgeMsKey     = "max-ref-age-ms"
+	MaxRefAgeMsDefault = math.MaxInt
 )

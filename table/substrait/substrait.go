@@ -24,9 +24,9 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/iceberg-go"
-	"github.com/substrait-io/substrait-go/v3/expr"
-	"github.com/substrait-io/substrait-go/v3/extensions"
-	"github.com/substrait-io/substrait-go/v3/types"
+	"github.com/substrait-io/substrait-go/v4/expr"
+	"github.com/substrait-io/substrait-go/v4/extensions"
+	"github.com/substrait-io/substrait-go/v4/types"
 )
 
 //go:embed functions_set.yaml
