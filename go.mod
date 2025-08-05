@@ -37,7 +37,7 @@ require (
 	github.com/hamba/avro/v2 v2.29.0
 	github.com/pterm/pterm v0.12.81
 	github.com/stretchr/testify v1.10.0
-	github.com/substrait-io/substrait-go/v3 v3.9.1
+	github.com/substrait-io/substrait-go/v4 v4.3.0
 	github.com/testcontainers/testcontainers-go/modules/compose v0.38.0
 	github.com/twmb/murmur3 v1.1.8
 	github.com/uptrace/bun v1.2.15
@@ -256,7 +256,6 @@ require (
 	github.com/spiffe/go-spiffe/v2 v2.5.0 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
 	github.com/substrait-io/substrait v0.69.0 // indirect
-	github.com/substrait-io/substrait-go/v4 v4.3.0 // indirect
 	github.com/substrait-io/substrait-protobuf/go v0.71.0 // indirect
 	github.com/testcontainers/testcontainers-go v0.38.0 // indirect
 	github.com/theupdateframework/notary v0.7.0 // indirect
