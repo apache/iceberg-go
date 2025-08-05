@@ -180,25 +180,20 @@ func (u *upgradeFormatVersionUpdate) Apply(builder *MetadataBuilder) error {
 
 type addSchemaUpdate struct {
 	baseUpdate
-	Schema       *iceberg.Schema `json:"schema"`
-	LastColumnID int             `json:"last-column-id"`
-	initial      bool
+	Schema  *iceberg.Schema `json:"schema"`
+	initial bool
 }
 
-// NewAddSchemaUpdate creates a new update that adds the given schema and last column ID to
-// the table metadata. If the initial flag is set to true, the schema is considered the initial
-// schema of the table, and all previously added schemas in the metadata builder are removed.
-func NewAddSchemaUpdate(schema *iceberg.Schema, lastColumnID int, initial bool) *addSchemaUpdate {
+// NewAddSchemaUpdate creates a new update that adds the given schema and updates the lastColumnID based on the schema.
+func NewAddSchemaUpdate(schema *iceberg.Schema) *addSchemaUpdate {
 	return &addSchemaUpdate{
-		baseUpdate:   baseUpdate{ActionName: UpdateAddSchema},
-		Schema:       schema,
-		LastColumnID: lastColumnID,
-		initial:      initial,
+		baseUpdate: baseUpdate{ActionName: UpdateAddSchema},
+		Schema:     schema,
 	}
 }
 
 func (u *addSchemaUpdate) Apply(builder *MetadataBuilder) error {
-	_, err := builder.AddSchema(u.Schema, u.LastColumnID, u.initial)
+	_, err := builder.AddSchema(u.Schema)
 
 	return err
 }

@@ -1148,11 +1148,7 @@ func TestAlterTableIntegration(t *testing.T) {
 	}
 	newFields := append(currentSchema.Fields(), addField) // add column 'new_col'
 	newFields = append(newFields[:1], newFields[2:]...)   // drop column 'bar'
-	updateColumns := table.NewAddSchemaUpdate(
-		iceberg.NewSchemaWithIdentifiers(newSchemaId, currentSchema.IdentifierFieldIDs, newFields...),
-		addField.ID,
-		false,
-	)
+	updateColumns := table.NewAddSchemaUpdate(iceberg.NewSchemaWithIdentifiers(newSchemaId, currentSchema.IdentifierFieldIDs, newFields...))
 	setSchema := table.NewSetCurrentSchemaUpdate(newSchemaId)
 
 	_, _, err = ctlg.CommitTable(

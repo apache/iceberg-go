@@ -1190,7 +1190,14 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 			}
 		}()
 
-		currentSchema, currentSpec := meta.CurrentSchema(), meta.CurrentSpec()
+		partitionSpec, err := meta.CurrentSpec()
+		if err != nil || partitionSpec == nil {
+			yield(nil, fmt.Errorf("%w: cannot add files without a current spec", err))
+
+			return
+		}
+
+		currentSchema, currentSpec := meta.CurrentSchema(), *partitionSpec
 
 		for filePath := range paths {
 			format := tblutils.FormatFromFileName(filePath)
@@ -1287,9 +1294,12 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 	if err != nil {
 		panic(err)
 	}
-
+	currentSpec, err := meta.CurrentSpec()
+	if err != nil || currentSpec == nil {
+		panic(fmt.Errorf("%w: cannot write files without a current spec", err))
+	}
 	nextCount, stopCount := iter.Pull(args.counter)
-	if meta.CurrentSpec().IsUnpartitioned() {
+	if currentSpec.IsUnpartitioned() {
 		tasks := func(yield func(WriteTask) bool) {
 			defer stopCount()
 
