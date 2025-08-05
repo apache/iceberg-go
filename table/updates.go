@@ -18,7 +18,9 @@
 package table
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/apache/iceberg-go"
@@ -56,6 +58,8 @@ type Update interface {
 	Action() string
 	// Apply applies the update to the given metadata builder.
 	Apply(*MetadataBuilder) error
+	// PostCommit is called after successful commit of the update
+	PostCommit(context.Context, *Table, *Table) error
 }
 
 type Updates []Update
@@ -129,6 +133,10 @@ type baseUpdate struct {
 
 func (u *baseUpdate) Action() string {
 	return u.ActionName
+}
+
+func (u *baseUpdate) PostCommit(_ context.Context, _ *Table, _ *Table) error {
+	return nil
 }
 
 type assignUUIDUpdate struct {
@@ -448,7 +456,84 @@ func NewRemoveSnapshotsUpdate(ids []int64) *removeSnapshotsUpdate {
 }
 
 func (u *removeSnapshotsUpdate) Apply(builder *MetadataBuilder) error {
-	return fmt.Errorf("%w: %s", iceberg.ErrNotImplemented, UpdateRemoveSnapshots)
+	_, err := builder.RemoveSnapshots(u.SnapshotIDs)
+
+	return err
+}
+
+func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table, postTable *Table) error {
+	prefs, err := preTable.FS(ctx)
+	if err != nil {
+		return err
+	}
+
+	filesToDelete := make(map[string]struct{})
+
+	for _, snapId := range u.SnapshotIDs {
+		snap := preTable.Metadata().SnapshotByID(snapId)
+		if snap == nil {
+			return errors.New("snapshot should never be nil")
+		}
+
+		filesToDelete[snap.ManifestList] = struct{}{}
+	}
+
+	for _, snapId := range u.SnapshotIDs {
+		snap := preTable.SnapshotByID(snapId)
+		if snap == nil {
+			return errors.New("missing snapshot")
+		}
+
+		mans, err := snap.Manifests(prefs)
+		if err != nil {
+			return err
+		}
+
+		for _, man := range mans {
+			filesToDelete[man.FilePath()] = struct{}{}
+
+			entries, err := man.FetchEntries(prefs, false)
+			if err != nil {
+				return err
+			}
+
+			for _, entry := range entries {
+				filesToDelete[entry.DataFile().FilePath()] = struct{}{}
+			}
+		}
+	}
+
+	for _, snap := range postTable.Metadata().Snapshots() {
+		mans, err := snap.Manifests(prefs)
+		if err != nil {
+			return err
+		}
+
+		for _, man := range mans {
+			delete(filesToDelete, man.FilePath())
+
+			entries, err := man.FetchEntries(prefs, false)
+			if err != nil {
+				return err
+			}
+
+			for _, entry := range entries {
+				if entry.Status() != iceberg.EntryStatusDELETED {
+					delete(filesToDelete, entry.DataFile().FilePath())
+				}
+			}
+		}
+	}
+
+	var res error
+
+	for f := range filesToDelete {
+		if err := prefs.Remove(f); err != nil {
+			res = errors.Join(res, err)
+		}
+	}
+
+	return res
 }
 
 type removeSnapshotRefUpdate struct {
@@ -466,7 +551,9 @@ func NewRemoveSnapshotRefUpdate(ref string) *removeSnapshotRefUpdate {
 }
 
 func (u *removeSnapshotRefUpdate) Apply(builder *MetadataBuilder) error {
-	return fmt.Errorf("%w: %s", iceberg.ErrNotImplemented, UpdateRemoveSnapshotRef)
+	_, err := builder.RemoveSnapshotRef(u.RefName)
+
+	return err
 }
 
 type removeSpecUpdate struct {
