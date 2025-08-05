@@ -409,3 +409,13 @@ func LoadViewMetadata(ctx context.Context,
 
 	return fullViewMetadata, nil
 }
+
+func Contains[V comparable](slice []V, val V) bool {
+	for i := range slice {
+		if slice[i] == val {
+			return true
+		}
+	}
+
+	return false
+}

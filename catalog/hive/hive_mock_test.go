@@ -153,7 +153,7 @@ func TestHiveCatalogListTables(t *testing.T) {
 	mt.databases["db"] = struct{}{}
 	mt.tables["db.t1"] = &hms.Table{DbName: "db", TableName: "t1", Parameters: map[string]string{"metadata_location": "loc"}}
 	mt.tables["db.t2"] = &hms.Table{DbName: "db", TableName: "t2", Parameters: map[string]string{"metadata_location": "loc"}}
-	cat := &HiveCatalog{client: mt}
+	cat := &Catalog{client: mt}
 
 	next, stop := iter.Pull2(cat.ListTables(context.Background(), table.Identifier{"db"}))
 	defer stop()
@@ -173,7 +173,7 @@ func TestHiveCatalogListTables(t *testing.T) {
 
 func TestHiveCatalogListTablesInvalid(t *testing.T) {
 	mt := newMockMetastore()
-	cat := &HiveCatalog{client: mt}
+	cat := &Catalog{client: mt}
 	next, stop := iter.Pull2(cat.ListTables(context.Background(), table.Identifier{"a", "b"}))
 	defer stop()
 	_, err, ok := next()
@@ -185,7 +185,7 @@ func TestHiveCatalogListTablesInvalid(t *testing.T) {
 func TestHiveCatalogCreateTable(t *testing.T) {
 	mt := newMockMetastore()
 	mt.databases["db"] = struct{}{}
-	cat := &HiveCatalog{client: mt}
+	cat := &Catalog{client: mt}
 	sc := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true})
 	loc := t.TempDir()
 	id := table.Identifier{"db", "tbl"}
@@ -200,7 +200,7 @@ func TestHiveCatalogCreateTableRetry(t *testing.T) {
 	fail := newMockMetastore()
 	fail.failOnce["create_table"] = true
 	good := newMockMetastore()
-	cat := &HiveCatalog{client: fail, host: "h", port: 1, auth: "NONE", options: gohive.NewMetastoreConnectConfiguration()}
+	cat := &Catalog{client: fail, host: "h", port: 1, auth: "NONE", options: gohive.NewMetastoreConnectConfiguration()}
 	orig := connectToMetastore
 	connectToMetastore = func(host string, port int, auth string, cfg *gohive.MetastoreConnectConfiguration) (metastoreClient, error) {
 		return good, nil
@@ -221,7 +221,7 @@ func TestHiveCatalogLoadTable(t *testing.T) {
 	dir := t.TempDir()
 	loc := writeMetadata(t, dir, sc)
 	mt.tables["db.tbl"] = &hms.Table{DbName: "db", TableName: "tbl", Parameters: map[string]string{"metadata_location": loc}, Sd: &hms.StorageDescriptor{Location: dir}}
-	cat := &HiveCatalog{client: mt}
+	cat := &Catalog{client: mt}
 	tbl, err := cat.LoadTable(context.Background(), table.Identifier{"db", "tbl"}, nil)
 	if err != nil {
 		t.Fatalf("load table: %v", err)
@@ -231,7 +231,7 @@ func TestHiveCatalogLoadTable(t *testing.T) {
 
 func TestHiveCatalogLoadTableInvalid(t *testing.T) {
 	mt := newMockMetastore()
-	cat := &HiveCatalog{client: mt}
+	cat := &Catalog{client: mt}
 	if _, err := cat.LoadTable(context.Background(), table.Identifier{"db"}, nil); err == nil {
 		t.Fatalf("expected error")
 	}
@@ -240,7 +240,7 @@ func TestHiveCatalogLoadTableInvalid(t *testing.T) {
 func TestHiveCatalogDropTable(t *testing.T) {
 	mt := newMockMetastore()
 	mt.tables["db.tbl"] = &hms.Table{DbName: "db", TableName: "tbl", Parameters: map[string]string{"metadata_location": "loc"}}
-	cat := &HiveCatalog{client: mt}
+	cat := &Catalog{client: mt}
 	if err := cat.DropTable(context.Background(), table.Identifier{"db", "tbl"}); err != nil {
 		t.Fatalf("drop table: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestHiveCatalogListNamespaces(t *testing.T) {
 	mt := newMockMetastore()
 	mt.databases["db1"] = struct{}{}
 	mt.databases["db2"] = struct{}{}
-	cat := &HiveCatalog{client: mt}
+	cat := &Catalog{client: mt}
 	namespaces, err := cat.ListNamespaces(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("list namespaces: %v", err)
@@ -267,7 +267,7 @@ func TestHiveCatalogListNamespaces(t *testing.T) {
 
 func TestHiveCatalogListNamespacesError(t *testing.T) {
 	mt := newMockMetastore()
-	cat := &HiveCatalog{client: mt}
+	cat := &Catalog{client: mt}
 	if _, err := cat.ListNamespaces(context.Background(), table.Identifier{"a"}); err == nil {
 		t.Fatalf("expected error")
 	}
@@ -275,7 +275,7 @@ func TestHiveCatalogListNamespacesError(t *testing.T) {
 
 func TestHiveCatalogCreateNamespace(t *testing.T) {
 	mt := newMockMetastore()
-	cat := &HiveCatalog{client: mt}
+	cat := &Catalog{client: mt}
 	if err := cat.CreateNamespace(context.Background(), table.Identifier{"db"}, nil); err != nil {
 		t.Fatalf("create namespace: %v", err)
 	}
@@ -286,7 +286,7 @@ func TestHiveCatalogCreateNamespace(t *testing.T) {
 
 func TestHiveCatalogCreateNamespaceInvalid(t *testing.T) {
 	mt := newMockMetastore()
-	cat := &HiveCatalog{client: mt}
+	cat := &Catalog{client: mt}
 	if err := cat.CreateNamespace(context.Background(), table.Identifier{"a", "b"}, nil); err == nil {
 		t.Fatalf("expected error")
 	}
@@ -296,7 +296,7 @@ func TestHiveCatalogDropNamespace(t *testing.T) {
 	mt := newMockMetastore()
 	mt.databases["db"] = struct{}{}
 	mt.tables["db.tbl"] = &hms.Table{DbName: "db", TableName: "tbl"}
-	cat := &HiveCatalog{client: mt}
+	cat := &Catalog{client: mt}
 	if err := cat.DropNamespace(context.Background(), table.Identifier{"db"}); err != nil {
 		t.Fatalf("drop namespace: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestHiveCatalogDropNamespace(t *testing.T) {
 
 func TestHiveCatalogDropNamespaceInvalid(t *testing.T) {
 	mt := newMockMetastore()
-	cat := &HiveCatalog{client: mt}
+	cat := &Catalog{client: mt}
 	if err := cat.DropNamespace(context.Background(), table.Identifier{"a", "b"}); err == nil {
 		t.Fatalf("expected error")
 	}

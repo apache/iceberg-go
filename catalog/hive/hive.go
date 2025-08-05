@@ -69,7 +69,7 @@ var connectToMetastore = func(host string, port int, auth string, cfg *gohive.Me
 // HiveCatalog implements the catalog.Catalog interface for the Hive Metastore.
 // The catalog maintains an active Hive metastore client and automatically
 // attempts to reconnect when operations fail due to a lost connection.
-type HiveCatalog struct {
+type Catalog struct {
 	host string
 	port int
 	auth string
@@ -136,7 +136,7 @@ func init() {
 
 // NewHiveCatalog initializes a HiveCatalog using the provided configuration. If
 // the connection to the metastore cannot be established, an error is returned.
-func NewHiveCatalog(cfg Config) (*HiveCatalog, error) {
+func NewHiveCatalog(cfg Config) (*Catalog, error) {
 	opts := gohive.NewMetastoreConnectConfiguration()
 	if cfg.TransportMode != "" {
 		opts.TransportMode = cfg.TransportMode
@@ -149,7 +149,7 @@ func NewHiveCatalog(cfg Config) (*HiveCatalog, error) {
 		return nil, fmt.Errorf("connect to metastore: %w", err)
 	}
 
-	return &HiveCatalog{
+	return &Catalog{
 		host:    cfg.Host,
 		port:    cfg.Port,
 		auth:    cfg.Auth,
@@ -159,7 +159,7 @@ func NewHiveCatalog(cfg Config) (*HiveCatalog, error) {
 }
 
 // reconnect attempts to re-establish the connection to the metastore.
-func (c *HiveCatalog) reconnect() error {
+func (c *Catalog) reconnect() error {
 	client, err := connectToMetastore(c.host, c.port, c.auth, c.options)
 	if err != nil {
 		return fmt.Errorf("reconnect to metastore: %w", err)
@@ -174,7 +174,7 @@ func (c *HiveCatalog) reconnect() error {
 
 // withRetry executes fn using the current metastore client. If fn returns an
 // error, the catalog will attempt to reconnect and invoke fn again once.
-func (c *HiveCatalog) withRetry(fn func(metastoreClient) error) error {
+func (c *Catalog) withRetry(fn func(metastoreClient) error) error {
 	c.mu.Lock()
 	client := c.client
 	c.mu.Unlock()
@@ -202,15 +202,15 @@ func (c *HiveCatalog) withRetry(fn func(metastoreClient) error) error {
 	return nil
 }
 
-var _ catalog.Catalog = (*HiveCatalog)(nil)
+var _ catalog.Catalog = (*Catalog)(nil)
 
 // CatalogType returns the catalog type for this implementation.
-func (c *HiveCatalog) CatalogType() catalog.Type {
+func (c *Catalog) CatalogType() catalog.Type {
 	return catalog.Hive
 }
 
 // CreateTable creates a new Iceberg table.
-func (c *HiveCatalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
+func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
 	// Stage metadata for the new table. This generates a metadata file on the
 	// provided or derived table location using the helper from the catalog
 	// internal package. The staged table is returned with a metadata file
@@ -276,12 +276,12 @@ func (c *HiveCatalog) CreateTable(ctx context.Context, identifier table.Identifi
 }
 
 // CommitTable commits table metadata to the catalog.
-func (c *HiveCatalog) CommitTable(ctx context.Context, tbl *table.Table, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
+func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
 	panic("not implemented")
 }
 
 // ListTables returns identifiers of tables in the provided namespace.
-func (c *HiveCatalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
+func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
 	return func(yield func(table.Identifier, error) bool) {
 		if len(namespace) != 1 {
 			yield(table.Identifier{}, fmt.Errorf("invalid namespace: %v", namespace))
@@ -309,7 +309,7 @@ func (c *HiveCatalog) ListTables(ctx context.Context, namespace table.Identifier
 }
 
 // LoadTable loads a table and returns its representation.
-func (c *HiveCatalog) LoadTable(ctx context.Context, identifier table.Identifier, props iceberg.Properties) (*table.Table, error) {
+func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, props iceberg.Properties) (*table.Table, error) {
 	if len(identifier) != 2 {
 		return nil, fmt.Errorf("invalid identifier: %v", identifier)
 	}
@@ -347,7 +347,7 @@ func (c *HiveCatalog) LoadTable(ctx context.Context, identifier table.Identifier
 }
 
 // DropTable removes a table from the catalog.
-func (c *HiveCatalog) DropTable(ctx context.Context, identifier table.Identifier) error {
+func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) error {
 	if len(identifier) != 2 {
 		return fmt.Errorf("invalid identifier: %v", identifier)
 	}
@@ -360,7 +360,7 @@ func (c *HiveCatalog) DropTable(ctx context.Context, identifier table.Identifier
 }
 
 // RenameTable renames a table in the catalog.
-func (c *HiveCatalog) RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error) {
+func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error) {
 	if len(from) != 2 || len(to) != 2 {
 		return nil, fmt.Errorf("invalid identifiers: %v -> %v", from, to)
 	}
@@ -383,12 +383,12 @@ func (c *HiveCatalog) RenameTable(ctx context.Context, from, to table.Identifier
 }
 
 // CheckTableExists checks whether a table exists.
-func (c *HiveCatalog) CheckTableExists(ctx context.Context, identifier table.Identifier) (bool, error) {
+func (c *Catalog) CheckTableExists(ctx context.Context, identifier table.Identifier) (bool, error) {
 	panic("not implemented")
 }
 
 // ListNamespaces lists available namespaces, optionally filtering by parent.
-func (c *HiveCatalog) ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error) {
+func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error) {
 	if len(parent) > 0 {
 		return nil, fmt.Errorf("hive catalog does not support nested namespaces: %v", parent)
 	}
@@ -411,7 +411,7 @@ func (c *HiveCatalog) ListNamespaces(ctx context.Context, parent table.Identifie
 }
 
 // CreateNamespace creates a namespace with optional properties.
-func (c *HiveCatalog) CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error {
+func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error {
 	if len(namespace) != 1 {
 		return fmt.Errorf("invalid namespace: %v", namespace)
 	}
@@ -433,7 +433,7 @@ func (c *HiveCatalog) CreateNamespace(ctx context.Context, namespace table.Ident
 }
 
 // DropNamespace drops the specified namespace and its tables.
-func (c *HiveCatalog) DropNamespace(ctx context.Context, namespace table.Identifier) error {
+func (c *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier) error {
 	if len(namespace) != 1 {
 		return fmt.Errorf("invalid namespace: %v", namespace)
 	}
@@ -447,16 +447,31 @@ func (c *HiveCatalog) DropNamespace(ctx context.Context, namespace table.Identif
 }
 
 // CheckNamespaceExists checks whether the namespace exists.
-func (c *HiveCatalog) CheckNamespaceExists(ctx context.Context, namespace table.Identifier) (bool, error) {
-	panic("not implemented")
+func (c *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Identifier) (bool, error) {
+	if len(namespace) != 1 {
+		return false, fmt.Errorf("invalid namespace: %v", namespace)
+	}
+
+	var exists bool
+	err := c.withRetry(func(cl metastoreClient) error {
+		databaseList, err := cl.GetAllDatabases(ctx)
+		if err != nil {
+			return err
+		}
+
+		exists = cataloginternal.Contains(databaseList, namespace[0])
+		return nil
+	})
+
+	return exists, err
 }
 
 // LoadNamespaceProperties loads properties for the given namespace.
-func (c *HiveCatalog) LoadNamespaceProperties(ctx context.Context, namespace table.Identifier) (iceberg.Properties, error) {
+func (c *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.Identifier) (iceberg.Properties, error) {
 	panic("not implemented")
 }
 
 // UpdateNamespaceProperties updates properties on the namespace.
-func (c *HiveCatalog) UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier, removals []string, updates iceberg.Properties) (catalog.PropertiesUpdateSummary, error) {
+func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier, removals []string, updates iceberg.Properties) (catalog.PropertiesUpdateSummary, error) {
 	panic("not implemented")
 }
