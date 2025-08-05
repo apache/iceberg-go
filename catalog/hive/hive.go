@@ -9,6 +9,7 @@ import (
 	"path"
 	"strconv"
 	"sync"
+	_ "unsafe"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
@@ -29,6 +30,7 @@ type metastoreClient interface {
 	GetAllDatabases(ctx context.Context) ([]string, error)
 	GetDatabase(ctx context.Context, name string) (*hms.Database, error)
 	CreateDatabase(ctx context.Context, db *hms.Database) error
+	AlterDatabase(ctx context.Context, name string, db *hms.Database) error
 	DropDatabase(ctx context.Context, name string, deleteData, cascade bool) error
 }
 
@@ -58,6 +60,9 @@ func (g gohiveClient) GetDatabase(ctx context.Context, name string) (*hms.Databa
 }
 func (g gohiveClient) CreateDatabase(ctx context.Context, db *hms.Database) error {
 	return g.Client.CreateDatabase(ctx, db)
+}
+func (g gohiveClient) AlterDatabase(ctx context.Context, name string, db *hms.Database) error {
+	return g.Client.AlterDatabase(ctx, name, db)
 }
 func (g gohiveClient) DropDatabase(ctx context.Context, name string, deleteData, cascade bool) error {
 	return g.Client.DropDatabase(ctx, name, deleteData, cascade)
@@ -506,7 +511,53 @@ func (c *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 	return props, nil
 }
 
+// avoid circular dependency while still avoiding having to export the getUpdatedPropsAndUpdateSummary function
+// so that we can reuse it here without duplicating the logic.
+//
+//go:linkname getUpdatedPropsAndUpdateSummary github.com/apache/iceberg-go/catalog.getUpdatedPropsAndUpdateSummary
+func getUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals []string, updates iceberg.Properties) (iceberg.Properties, catalog.PropertiesUpdateSummary, error)
+
 // UpdateNamespaceProperties updates properties on the namespace.
 func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier, removals []string, updates iceberg.Properties) (catalog.PropertiesUpdateSummary, error) {
-	panic("not implemented")
+	var summary catalog.PropertiesUpdateSummary
+	if len(namespace) != 1 {
+		return summary, fmt.Errorf("invalid namespace: %v", namespace)
+	}
+
+	dbName := namespace[0]
+
+	err := c.withRetry(func(cl metastoreClient) error {
+		dbObj, err := cl.GetDatabase(ctx, dbName)
+		if err != nil {
+			var noSuch *hms.NoSuchObjectException
+			if errors.As(err, &noSuch) {
+				return fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, dbName)
+			}
+			return err
+		}
+		if dbObj == nil {
+			return fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, dbName)
+		}
+
+		current := iceberg.Properties{}
+		if dbObj.Parameters != nil {
+			current = iceberg.Properties(dbObj.Parameters)
+		}
+
+		updatedProps, sum, err := getUpdatedPropsAndUpdateSummary(current, removals, updates)
+		if err != nil {
+			return err
+		}
+		summary = sum
+
+		if len(sum.Removed) == 0 && len(sum.Updated) == 0 {
+			// No changes
+			return nil
+		}
+
+		dbObj.Parameters = map[string]string(updatedProps)
+		return cl.AlterDatabase(ctx, dbName, dbObj)
+	})
+
+	return summary, err
 }
