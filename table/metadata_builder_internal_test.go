@@ -78,7 +78,7 @@ func builderWithoutChanges(formatVersion int) MetadataBuilder {
 	if err != nil {
 		panic(err)
 	}
-	_, err = builder.AddSchema(&tableSchema, tableSchema.HighestFieldID(), true)
+	_, err = builder.AddSchema(&tableSchema)
 	if err != nil {
 		panic(err)
 	}
@@ -90,6 +90,7 @@ func builderWithoutChanges(formatVersion int) MetadataBuilder {
 	if err != nil {
 		panic(err)
 	}
+
 	return *builder
 }
 
