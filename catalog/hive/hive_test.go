@@ -15,7 +15,7 @@ func TestNewHiveCatalogConnectionError(t *testing.T) {
 
 func TestHiveCatalogReconnectError(t *testing.T) {
 	c := &HiveCatalog{host: "127.0.0.1", port: 1, auth: "NONE", options: gohive.NewMetastoreConnectConfiguration()}
-	if err := c.withRetry(func(client *gohive.HiveMetastoreClient) error { return nil }); err == nil {
+	if err := c.withRetry(func(client metastoreClient) error { return nil }); err == nil {
 		t.Fatalf("expected reconnection error")
 	}
 }
