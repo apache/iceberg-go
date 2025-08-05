@@ -217,9 +217,8 @@ func MetadataBuilderFromBase(metadata Metadata) (*MetadataBuilder, error) {
 
 func (b *MetadataBuilder) HasChanges() bool { return len(b.updates) > 0 }
 
-func (b *MetadataBuilder) CurrentSpec() iceberg.PartitionSpec {
-	// FIXME: this should return a pointer which can be nil to avoid out of bounds indexing / np derefs
-	return b.specs[b.defaultSpecID]
+func (b *MetadataBuilder) CurrentSpec() (*iceberg.PartitionSpec, error) {
+	return b.GetSpecByID(b.defaultSpecID)
 }
 
 func (b *MetadataBuilder) CurrentSchema() *iceberg.Schema {
