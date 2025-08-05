@@ -1299,7 +1299,7 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 		panic(fmt.Errorf("%w: cannot write files without a current spec", err))
 	}
 	nextCount, stopCount := iter.Pull(args.counter)
-	if (*currentSpec).IsUnpartitioned() {
+	if currentSpec.IsUnpartitioned() {
 		tasks := func(yield func(WriteTask) bool) {
 			defer stopCount()
 
