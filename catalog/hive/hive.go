@@ -462,18 +462,27 @@ func (c *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Iden
 		return false, fmt.Errorf("invalid namespace: %v", namespace)
 	}
 
-	var exists bool
+	dbName := namespace[0]
+
+	var dbObj *hms.Database
 	err := c.withRetry(func(cl metastoreClient) error {
-		databaseList, err := cl.GetAllDatabases(ctx)
-		if err != nil {
-			return err
-		}
-
-		exists = cataloginternal.Contains(databaseList, namespace[0])
-		return nil
+		var err error
+		dbObj, err = cl.GetDatabase(ctx, dbName)
+		return err
 	})
+	if err != nil {
+		var noSuch *hms.NoSuchObjectException
+		if errors.As(err, &noSuch) {
+			return false, nil
+		}
+		return false, err
+	}
 
-	return exists, err
+	if dbObj == nil {
+		return false, nil
+	}
+
+	return true, nil
 }
 
 // LoadNamespaceProperties loads properties for the given namespace.
