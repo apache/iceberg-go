@@ -103,6 +103,15 @@ func (m *mockMetastore) CreateDatabase(ctx context.Context, db *hms.Database) er
 	return nil
 }
 
+func (m *mockMetastore) AlterDatabase(ctx context.Context, name string, db *hms.Database) error {
+	if m.failOnce["alter_database"] {
+		m.failOnce["alter_database"] = false
+		return errors.New("connection error")
+	}
+	m.databases[name] = db
+	return nil
+}
+
 func (m *mockMetastore) DropDatabase(ctx context.Context, name string, _, _ bool) error {
 	if m.failOnce["drop_database"] {
 		m.failOnce["drop_database"] = false
@@ -343,6 +352,159 @@ func TestHiveCatalogLoadNamespacePropertiesMissing(t *testing.T) {
 	mt := newMockMetastore()
 	cat := &Catalog{client: mt}
 	_, err := cat.LoadNamespaceProperties(context.Background(), table.Identifier{"missing"})
+	if err == nil || !errors.Is(err, catalog.ErrNoSuchNamespace) {
+		t.Fatalf("expected ErrNoSuchNamespace, got %v", err)
+	}
+}
+
+func TestHiveCatalogUpdateNamespaceProperties(t *testing.T) {
+	tests := []struct {
+		name          string
+		initial       map[string]string
+		updates       map[string]string
+		removals      []string
+		expected      catalog.PropertiesUpdateSummary
+		expectedFinal map[string]string
+		shouldError   bool
+	}{
+		{
+			name: "overlap removals and updates",
+			initial: map[string]string{
+				"k1": "v1",
+				"k2": "v2",
+			},
+			updates:     map[string]string{"k1": "new"},
+			removals:    []string{"k1"},
+			shouldError: true,
+		},
+		{
+			name: "missing removal key",
+			initial: map[string]string{
+				"k1": "v1",
+			},
+			updates: map[string]string{
+				"k2": "v2",
+			},
+			removals: []string{"k3"},
+			expected: catalog.PropertiesUpdateSummary{
+				Removed: []string{},
+				Updated: []string{"k2"},
+				Missing: []string{"k3"},
+			},
+			expectedFinal: map[string]string{
+				"k1": "v1",
+				"k2": "v2",
+			},
+		},
+		{
+			name: "no change for same value",
+			initial: map[string]string{
+				"k1": "v1",
+				"k2": "v2",
+			},
+			updates: map[string]string{
+				"k1": "v1",
+				"k3": "v3",
+			},
+			expected: catalog.PropertiesUpdateSummary{
+				Removed: []string{},
+				Updated: []string{"k3"},
+				Missing: []string{},
+			},
+			expectedFinal: map[string]string{
+				"k1": "v1",
+				"k2": "v2",
+				"k3": "v3",
+			},
+		},
+		{
+			name: "updates and removals",
+			initial: map[string]string{
+				"k1": "v1",
+				"k2": "v2",
+				"k4": "v4",
+			},
+			updates: map[string]string{
+				"k2": "newv2",
+			},
+			removals: []string{"k4"},
+			expected: catalog.PropertiesUpdateSummary{
+				Removed: []string{"k4"},
+				Updated: []string{"k2"},
+				Missing: []string{},
+			},
+			expectedFinal: map[string]string{
+				"k1": "v1",
+				"k2": "newv2",
+			},
+		},
+		{
+			name: "only updates",
+			initial: map[string]string{
+				"k1": "v1",
+				"k2": "v2",
+			},
+			updates: map[string]string{
+				"k2": "newv2",
+			},
+			expected: catalog.PropertiesUpdateSummary{
+				Removed: []string{},
+				Updated: []string{"k2"},
+				Missing: []string{},
+			},
+			expectedFinal: map[string]string{
+				"k1": "v1",
+				"k2": "newv2",
+			},
+		},
+		{
+			name: "only removals",
+			initial: map[string]string{
+				"k1": "v1",
+				"k2": "v2",
+				"k3": "v3",
+			},
+			removals: []string{"k2", "k3"},
+			expected: catalog.PropertiesUpdateSummary{
+				Removed: []string{"k2", "k3"},
+				Updated: []string{},
+				Missing: []string{},
+			},
+			expectedFinal: map[string]string{
+				"k1": "v1",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mt := newMockMetastore()
+			mt.databases["db"] = &hms.Database{Name: "db", Parameters: tt.initial}
+			cat := &Catalog{client: mt}
+			summary, err := cat.UpdateNamespaceProperties(context.Background(), table.Identifier{"db"}, tt.removals, tt.updates)
+			if tt.shouldError {
+				if err == nil {
+					t.Fatalf("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("update properties: %v", err)
+			}
+			assert.ElementsMatch(t, tt.expected.Removed, summary.Removed)
+			assert.ElementsMatch(t, tt.expected.Updated, summary.Updated)
+			assert.ElementsMatch(t, tt.expected.Missing, summary.Missing)
+			if tt.expectedFinal != nil {
+				assert.Equal(t, tt.expectedFinal, mt.databases["db"].Parameters)
+			}
+		})
+	}
+}
+
+func TestHiveCatalogUpdateNamespacePropertiesMissing(t *testing.T) {
+	mt := newMockMetastore()
+	cat := &Catalog{client: mt}
+	_, err := cat.UpdateNamespaceProperties(context.Background(), table.Identifier{"missing"}, nil, nil)
 	if err == nil || !errors.Is(err, catalog.ErrNoSuchNamespace) {
 		t.Fatalf("expected ErrNoSuchNamespace, got %v", err)
 	}
