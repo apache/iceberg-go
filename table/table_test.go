@@ -1436,18 +1436,18 @@ func (t *TableTestSuite) TestRefresh() {
 	ident := table.Identifier{"test", "refresh_table"}
 	t.Require().NoError(cat.CreateNamespace(context.Background(), catalog.NamespaceFromIdent(ident), nil))
 
-	originalTbl, err := cat.CreateTable(context.Background(), ident, t.tbl.Schema(),
+	tbl, err := cat.CreateTable(context.Background(), ident, t.tbl.Schema(),
 		catalog.WithProperties(iceberg.Properties{"original": "true"}))
 	t.Require().NoError(err)
-	t.Require().NotNil(originalTbl)
+	t.Require().NotNil(tbl)
 
-	originalProperties := originalTbl.Properties()
-	originalIdentifier := originalTbl.Identifier()
-	originalLocation := originalTbl.Location()
-	originalSchema := originalTbl.Schema()
-	originalSpec := originalTbl.Spec()
+	originalProperties := tbl.Properties()
+	originalIdentifier := tbl.Identifier()
+	originalLocation := tbl.Location()
+	originalSchema := tbl.Schema()
+	originalSpec := tbl.Spec()
 
-	_, _, err = cat.CommitTable(context.Background(), originalTbl, nil, []table.Update{
+	_, _, err = cat.CommitTable(context.Background(), tbl, nil, []table.Update{
 		table.NewSetPropertiesUpdate(iceberg.Properties{
 			"refreshed": "true",
 			"timestamp": fmt.Sprintf("%d", time.Now().Unix()),
@@ -1455,17 +1455,15 @@ func (t *TableTestSuite) TestRefresh() {
 	})
 	t.Require().NoError(err)
 
-	refreshedTbl, err := originalTbl.Refresh(context.Background())
+	err = tbl.Refresh(context.Background())
 	t.Require().NoError(err)
-	t.Require().NotNil(refreshedTbl)
+	t.Require().NotNil(tbl)
 
-	t.NotEqual(originalTbl, refreshedTbl)
+	t.Equal("true", tbl.Properties()["refreshed"])
+	t.NotEqual(originalProperties, tbl.Properties())
 
-	t.Equal("true", refreshedTbl.Properties()["refreshed"])
-	t.NotEqual(originalProperties, refreshedTbl.Properties())
-
-	t.Equal(originalIdentifier, refreshedTbl.Identifier())
-	t.Equal(originalLocation, refreshedTbl.Location())
-	t.True(originalSchema.Equals(refreshedTbl.Schema()))
-	t.Equal(originalSpec, refreshedTbl.Spec())
+	t.Equal(originalIdentifier, tbl.Identifier())
+	t.Equal(originalLocation, tbl.Location())
+	t.True(originalSchema.Equals(tbl.Schema()))
+	t.Equal(originalSpec, tbl.Spec())
 }

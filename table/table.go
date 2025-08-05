@@ -92,16 +92,16 @@ func (t Table) NewTransaction() *Transaction {
 	}
 }
 
-func (t Table) Refresh(ctx context.Context) (*Table, error) {
+func (t *Table) Refresh(ctx context.Context) error {
 	fresh, err := t.cat.LoadTable(ctx, t.identifier, nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	t.metadata = fresh.metadata
 	t.fsF = fresh.fsF
 	t.metadataLocation = fresh.metadataLocation
-	return &t, nil
+	return nil
 }
 
 // AppendTable is a shortcut for NewTransaction().AppendTable() and then committing the transaction
