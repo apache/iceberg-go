@@ -69,9 +69,19 @@ func Start(t *testing.T) (*compose.DockerCompose, error) {
 }
 
 func ExecuteSpark(t *testing.T, scriptPath string, args ...string) (string, error) {
-	cli, err := client.NewClientWithOpts(
-		client.FromEnv,
-	)
+	var cli *client.Client
+	var err error
+
+	if apiVersion, ok := os.LookupEnv("DOCKER_API_VERSION"); ok {
+		cli, err = client.NewClientWithOpts(
+			client.FromEnv,
+			client.WithVersion(apiVersion),
+		)
+	} else {
+		cli, err = client.NewClientWithOpts(
+			client.FromEnv,
+		)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -85,7 +95,6 @@ func ExecuteSpark(t *testing.T, scriptPath string, args ...string) (string, erro
 	var sparkContainerID string
 	if _, ok := os.LookupEnv("SPARK_CONTAINER_ID"); ok {
 		sparkContainerID = os.Getenv("SPARK_CONTAINER_ID")
-		fmt.Printf("from env var: %s\n", sparkContainerID)
 	} else {
 		filter := filters.NewArgs(filters.Arg("name", sparkContainer))
 		containers, err := cli.ContainerList(t.Context(), container.ListOptions{
