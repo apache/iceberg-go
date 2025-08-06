@@ -130,71 +130,12 @@ func visitMappedFields[S, T any](fields []MappedField, visitor NameMappingVisito
 	return visitor.Fields(fields, results)
 }
 
-type createNameMappingVisitor struct{}
-
-func (createNameMappingVisitor) Schema(_ *Schema, structResult []MappedField) []MappedField {
-	return structResult
-}
-
-func (createNameMappingVisitor) Struct(st StructType, fieldResults [][]MappedField) []MappedField {
-	output := make([]MappedField, len(st.FieldList))
-	for i, field := range st.Fields() {
-		output[i] = MappedField{
-			FieldID: &field.ID,
-			Names:   []string{field.Name},
-			Fields:  fieldResults[i],
-		}
-	}
-	return output
-}
-
-func (createNameMappingVisitor) Field(_ NestedField, fieldResult []MappedField) []MappedField {
-	return fieldResult
-}
-
-func (createNameMappingVisitor) List(lt ListType, elementResult []MappedField) []MappedField {
-	return []MappedField{
-		{
-			FieldID: &lt.ElementID,
-			Names:   []string{"element"},
-			Fields:  elementResult,
-		},
-	}
-}
-
-func (createNameMappingVisitor) Map(m MapType, keyResult, valResult []MappedField) []MappedField {
-	return []MappedField{
-		{
-			FieldID: &m.KeyID,
-			Names:   []string{"key"},
-			Fields:  keyResult,
-		},
-		{
-			FieldID: &m.ValueID,
-			Names:   []string{"value"},
-			Fields:  valResult,
-		},
-	}
-}
-
-func (createNameMappingVisitor) Primitive(_ PrimitiveType) []MappedField {
-	return nil
-}
-
-func CreateNameMappingFromSchema(schema *Schema) (NameMapping, error) {
-	result, err := Visit(schema, createNameMappingVisitor{})
-	if err != nil {
-		return nil, err
-	}
-
-	return NameMapping(result), nil
-}
-
 func UpdateNameMapping(nameMapping NameMapping, updates map[int]NestedField, adds map[int][]NestedField) (NameMapping, error) {
 	result, err := VisitNameMapping(nameMapping, &updateNameMappingVisitor{updates: updates, adds: adds})
 	if err != nil {
 		return nil, err
 	}
+
 	return NameMapping(result), nil
 }
 
@@ -237,6 +178,7 @@ func (u *updateNameMappingVisitor) Field(field MappedField, fieldResult []Mapped
 	if update, exists := u.updates[*field.FieldID]; exists && !slices.Contains(fieldNames, update.Name) {
 		fieldNames = append(fieldNames, update.Name)
 	}
+
 	return MappedField{
 		FieldID: field.FieldID,
 		Names:   fieldNames,
@@ -278,7 +220,7 @@ func (u *updateNameMappingVisitor) addNewFields(mappedFields []MappedField, pare
 
 	newFields := make([]MappedField, 0, len(fieldsToAdd))
 	for _, add := range fieldsToAdd {
-		fields := visitField(add, createNameMappingVisitor{})
+		fields := visitField(add, createMapping{})
 		if len(fields) == 0 {
 			fields = nil
 		}
