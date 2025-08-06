@@ -1450,7 +1450,7 @@ func (t *TableTestSuite) TestRefresh() {
 	_, _, err = cat.CommitTable(context.Background(), tbl, nil, []table.Update{
 		table.NewSetPropertiesUpdate(iceberg.Properties{
 			"refreshed": "true",
-			"timestamp": fmt.Sprintf("%d", time.Now().Unix()),
+			"timestamp": strconv.FormatInt(time.Now().Unix(), 10),
 		}),
 	})
 	t.Require().NoError(err)
