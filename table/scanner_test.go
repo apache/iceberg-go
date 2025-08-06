@@ -65,7 +65,8 @@ func (s *ScannerSuite) SetupTest() {
 	s.cat = cat
 	s.props = iceberg.Properties{
 		io.S3Region:      "us-east-1",
-		io.S3AccessKeyID: "admin", io.S3SecretAccessKey: "password"}
+		io.S3AccessKeyID: "admin", io.S3SecretAccessKey: "password",
+	}
 }
 
 func (s *ScannerSuite) TestScanner() {
@@ -77,10 +78,14 @@ func (s *ScannerSuite) TestScanner() {
 		{"test_all_types", iceberg.AlwaysTrue{}, 5},
 		{"test_all_types", iceberg.LessThan(iceberg.Reference("intCol"), int32(3)), 3},
 		{"test_all_types", iceberg.GreaterThanEqual(iceberg.Reference("intCol"), int32(3)), 2},
-		{"test_partitioned_by_identity",
-			iceberg.GreaterThanEqual(iceberg.Reference("ts"), "2023-03-05T00:00:00+00:00"), 8},
-		{"test_partitioned_by_identity",
-			iceberg.LessThan(iceberg.Reference("ts"), "2023-03-05T00:00:00+00:00"), 4},
+		{
+			"test_partitioned_by_identity",
+			iceberg.GreaterThanEqual(iceberg.Reference("ts"), "2023-03-05T00:00:00+00:00"), 8,
+		},
+		{
+			"test_partitioned_by_identity",
+			iceberg.LessThan(iceberg.Reference("ts"), "2023-03-05T00:00:00+00:00"), 4,
+		},
 		{"test_partitioned_by_years", iceberg.AlwaysTrue{}, 2},
 		{"test_partitioned_by_years", iceberg.LessThan(iceberg.Reference("dt"), "2023-03-05"), 1},
 		{"test_partitioned_by_years", iceberg.GreaterThanEqual(iceberg.Reference("dt"), "2023-03-05"), 1},
@@ -253,8 +258,12 @@ func (s *ScannerSuite) TestScannerRecordsDeletes() {
 		rowLimit int64
 		expected string
 	}{
-		{"all", iceberg.AlwaysTrue{}, table.ScanNoLimit,
-			`[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12]`},
+		{
+			"all",
+			iceberg.AlwaysTrue{},
+			table.ScanNoLimit,
+			`[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12]`,
+		},
 		{"filter", iceberg.NewAnd(iceberg.GreaterThanEqual(ref, "e"),
 			iceberg.LessThan(ref, "k")), table.ScanNoLimit, `[5, 6, 7, 8, 10]`},
 		{"filter and limit", iceberg.NewAnd(iceberg.GreaterThanEqual(ref, "e"),
@@ -342,8 +351,12 @@ func (s *ScannerSuite) TestScannerRecordsDoubleDeletes() {
 		rowLimit int64
 		expected string
 	}{
-		{"all", iceberg.AlwaysTrue{}, table.ScanNoLimit,
-			`[1, 2, 3, 4, 5, 7, 8, 10, 11, 12]`},
+		{
+			"all",
+			iceberg.AlwaysTrue{},
+			table.ScanNoLimit,
+			`[1, 2, 3, 4, 5, 7, 8, 10, 11, 12]`,
+		},
 		{"filter", iceberg.NewAnd(iceberg.GreaterThanEqual(ref, "e"),
 			iceberg.LessThan(ref, "k")), table.ScanNoLimit, `[5, 7, 8, 10]`},
 		{"filter and limit", iceberg.NewAnd(iceberg.GreaterThanEqual(ref, "e"),
@@ -429,8 +442,10 @@ func (s *ScannerSuite) TestPartitionedTables() {
 		table     string
 		predicate iceberg.BooleanExpression
 	}{
-		{"test_partitioned_by_identity",
-			iceberg.GreaterThanEqual(iceberg.Reference("ts"), "2023-03-05T00:00:00+00:00")},
+		{
+			"test_partitioned_by_identity",
+			iceberg.GreaterThanEqual(iceberg.Reference("ts"), "2023-03-05T00:00:00+00:00"),
+		},
 		{"test_partitioned_by_years", iceberg.GreaterThanEqual(iceberg.Reference("dt"), "2023-03-05")},
 		{"test_partitioned_by_months", iceberg.GreaterThanEqual(iceberg.Reference("dt"), "2023-03-05")},
 		{"test_partitioned_by_days", iceberg.GreaterThanEqual(iceberg.Reference("ts"), "2023-03-05T00:00:00+00:00")},
@@ -501,9 +516,11 @@ func (s *ScannerSuite) TestIsInFilterTable() {
 	defer results.Release()
 
 	s.EqualValues(3, results.NumRows())
-	s.Equal([]string{"ec33e4b2-a834-4cc3-8c4a-a1d3bfc2f226",
+	s.Equal([]string{
+		"ec33e4b2-a834-4cc3-8c4a-a1d3bfc2f226",
 		"c1b0d8e0-0b0e-4b1e-9b0a-0e0b0d0c0a0b",
-		"923dae77-83d6-47cd-b4b0-d383e64ee57e"}, getStrValues(results.Column(0)))
+		"923dae77-83d6-47cd-b4b0-d383e64ee57e",
+	}, getStrValues(results.Column(0)))
 }
 
 func (s *ScannerSuite) TestUnpartitionedUUIDTable() {
@@ -545,9 +562,11 @@ func (s *ScannerSuite) TestUnpartitionedUUIDTable() {
 	defer neqResults.Release()
 
 	s.EqualValues(3, neqResults.NumRows())
-	s.Equal([]string{"ec33e4b2-a834-4cc3-8c4a-a1d3bfc2f226",
+	s.Equal([]string{
+		"ec33e4b2-a834-4cc3-8c4a-a1d3bfc2f226",
 		"c1b0d8e0-0b0e-4b1e-9b0a-0e0b0d0c0a0b",
-		"923dae77-83d6-47cd-b4b0-d383e64ee57e"}, getStrValues(neqResults.Column(0)))
+		"923dae77-83d6-47cd-b4b0-d383e64ee57e",
+	}, getStrValues(neqResults.Column(0)))
 }
 
 func (s *ScannerSuite) TestUnpartitionedFixedTable() {

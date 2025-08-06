@@ -87,7 +87,7 @@ func (s *SparkIntegrationTestSuite) TestAddFile() {
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, sc)
 	defer bldr.Release()
 
-	tm := time.Date(2023, 03, 13, 13, 22, 0, 0, time.UTC)
+	tm := time.Date(2023, 0o3, 13, 13, 22, 0, 0, time.UTC)
 	ts, _ := arrow.TimestampFromTime(tm, arrow.Microsecond)
 	bldr.Field(0).(*array.Date32Builder).Append(arrow.Date32FromTime(tm))
 	bldr.Field(1).(*array.TimestampBuilder).Append(ts)
