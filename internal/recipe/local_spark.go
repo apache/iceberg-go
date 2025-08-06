@@ -19,12 +19,11 @@ package recipe
 
 import (
 	"bytes"
+	_ "embed"
 	"fmt"
 	"io"
 	"os"
 	"testing"
-
-	_ "embed"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
@@ -72,7 +71,6 @@ func Start(t *testing.T) (*compose.DockerCompose, error) {
 func ExecuteSpark(t *testing.T, scriptPath string, args ...string) (string, error) {
 	cli, err := client.NewClientWithOpts(
 		client.FromEnv,
-		client.WithVersion("1.48"), // Use explicit version to avoid compatibility issues
 	)
 	if err != nil {
 		return "", err
