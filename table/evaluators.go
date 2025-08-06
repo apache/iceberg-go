@@ -997,6 +997,7 @@ func (m *inclusiveMetricsEval) VisitEqual(t iceberg.BoundTerm, lit iceberg.Liter
 			return rowsMightMatch
 		}
 
+		cmp = getCmpLiteral(upperBound)
 		if cmp(upperBound, lit) == -1 {
 			return rowsCannotMatch
 		}
@@ -1456,6 +1457,7 @@ func (m *strictMetricsEval) VisitNotEqual(t iceberg.BoundTerm, lit iceberg.Liter
 			return rowsMightNotMatch
 		}
 
+		cmp = getCmpLiteral(upperBound)
 		if cmp(upperBound, lit) == -1 {
 			return rowsMustMatch
 		}
