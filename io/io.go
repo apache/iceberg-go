@@ -263,6 +263,18 @@ func inferFileIOFromSchema(ctx context.Context, path string, props map[string]st
 		if err != nil {
 			return nil, err
 		}
+		
+		// For Azure, determine the correct bucket name to use for path processing
+		// If the URL contains @ symbol, extract just the container name
+		bucketName := parsed.Host
+		if strings.Contains(parsed.Host, "@") {
+			parts := strings.Split(parsed.Host, "@")
+			if len(parts) >= 1 {
+				bucketName = parts[0] // Use just the container name part
+			}
+		}
+		
+		return createBlobFS(ctx, bucket, bucketName), nil
 	default:
 		return nil, fmt.Errorf("IO for file '%s' not implemented", path)
 	}
