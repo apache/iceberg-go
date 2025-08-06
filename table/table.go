@@ -92,6 +92,19 @@ func (t Table) NewTransaction() *Transaction {
 	}
 }
 
+func (t *Table) Refresh(ctx context.Context) error {
+	fresh, err := t.cat.LoadTable(ctx, t.identifier, nil)
+	if err != nil {
+		return err
+	}
+
+	t.metadata = fresh.metadata
+	t.fsF = fresh.fsF
+	t.metadataLocation = fresh.metadataLocation
+
+	return nil
+}
+
 // AppendTable is a shortcut for NewTransaction().AppendTable() and then committing the transaction
 func (t Table) AppendTable(ctx context.Context, tbl arrow.Table, batchSize int64, snapshotProps iceberg.Properties) (*Table, error) {
 	txn := t.NewTransaction()
