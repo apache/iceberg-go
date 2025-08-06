@@ -4,5 +4,13 @@ services:
     image: apache/hive:3.1.3
     environment:
       SERVICE_NAME: metastore
+      HIVE_METASTORE_AUTH: NOSASL
+      # use embedded derby db without kerberos for tests
+      HIVE_SKIP_METASTORE_DB_INIT: 'false'
     ports:
       - "9083:9083"
+    volumes:
+      - metastore_data:/opt/hive/data
+
+volumes:
+  metastore_data:

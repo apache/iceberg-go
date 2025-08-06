@@ -15,7 +15,7 @@ import (
 // Run with: go test -tags=integration ./catalog/hive -run TestHiveCatalogIntegration
 func TestHiveCatalogIntegration(t *testing.T) {
 	ctx := context.Background()
-	cm, err := compose.NewDockerComposeWith(ctx, compose.WithStackFiles("testdata/docker-compose.yml"))
+	cm, err := compose.NewDockerComposeWith(compose.WithStackFiles("testdata/docker-compose.yml"))
 	if err != nil {
 		t.Skipf("compose not available: %v", err)
 	}
