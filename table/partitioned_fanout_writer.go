@@ -68,11 +68,7 @@ func (p *PartitionedFanoutWriter) Write(ctx context.Context, workers int) iter.S
 	outputDataFilesCh := make(chan iceberg.DataFile, workers)
 
 	fanoutWorkers, ctx := errgroup.WithContext(ctx)
-	if err := p.startRecordFeeder(ctx, fanoutWorkers, inputRecordsCh); err != nil {
-		return func(yield func(iceberg.DataFile, error) bool) {
-			yield(nil, fmt.Errorf("failed to start record feeder: %w", err))
-		}
-	}
+	p.startRecordFeeder(ctx, fanoutWorkers, inputRecordsCh)
 
 	for i := 0; i < workers; i++ {
 		fanoutWorkers.Go(func() error {
@@ -83,7 +79,7 @@ func (p *PartitionedFanoutWriter) Write(ctx context.Context, workers int) iter.S
 	return p.yieldDataFiles(ctx, fanoutWorkers, outputDataFilesCh)
 }
 
-func (p *PartitionedFanoutWriter) startRecordFeeder(ctx context.Context, fanoutWorkers *errgroup.Group, inputRecordsCh chan<- arrow.Record) error {
+func (p *PartitionedFanoutWriter) startRecordFeeder(ctx context.Context, fanoutWorkers *errgroup.Group, inputRecordsCh chan<- arrow.Record) {
 	fanoutWorkers.Go(func() error {
 		defer close(inputRecordsCh)
 
@@ -98,14 +94,14 @@ func (p *PartitionedFanoutWriter) startRecordFeeder(ctx context.Context, fanoutW
 				if err := context.Cause(ctx); err != nil {
 					return err
 				}
+
 				return nil
 			case inputRecordsCh <- record:
 			}
 		}
+
 		return nil
 	})
-
-	return nil
 }
 
 func (p *PartitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-chan arrow.Record, dataFilesChannel chan<- iceberg.DataFile) error {
@@ -115,6 +111,7 @@ func (p *PartitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 			if err := context.Cause(ctx); err != nil {
 				return err
 			}
+
 			return nil
 		case record, ok := <-inputRecordsCh:
 			if !ok {
@@ -133,6 +130,7 @@ func (p *PartitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 					if err := context.Cause(ctx); err != nil {
 						return err
 					}
+
 					return nil
 				default:
 				}
@@ -184,11 +182,13 @@ func (p *PartitionedFanoutWriter) yieldDataFiles(ctx context.Context, fanoutWork
 
 		if waitErr != nil {
 			_ = yield(nil, waitErr)
+
 			return
 		}
 
 		if closeErr != nil {
 			_ = yield(nil, closeErr)
+
 			return
 		}
 
@@ -284,6 +284,7 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int) (iceberg.Literal
 			Val:   val,
 			Scale: int(arr.DataType().(*arrow.Decimal128Type).Scale),
 		}
+
 		return iceberg.NewLiteral(dec), nil
 	default:
 		val := column.GetOneForMarshal(row)

@@ -19,7 +19,6 @@ package table
 
 import (
 	"context"
-	"fmt"
 	"iter"
 	"path/filepath"
 	"reflect"
@@ -62,6 +61,7 @@ func (s *FanoutWriterTestSuite) createCustomTestRecord(arrSchema *arrow.Schema, 
 
 			if val == nil {
 				field.AppendNull()
+
 				continue
 			}
 
@@ -94,7 +94,7 @@ func (s *FanoutWriterTestSuite) testTransformPartition(transform iceberg.Transfo
 			SourceID:  sourceField.ID,
 			FieldID:   1000,
 			Transform: transform,
-			Name:      fmt.Sprintf("test_%s", transformName),
+			Name:      "test_%s" + transformName,
 		},
 	)
 
@@ -111,8 +111,12 @@ func (s *FanoutWriterTestSuite) testTransformPartition(transform iceberg.Transfo
 			testRecord.Retain()
 			yield(testRecord, nil)
 		},
-		fs:        iceio.LocalFS{},
-		writeUUID: func() *uuid.UUID { u := uuid.New(); return &u }(),
+		fs: iceio.LocalFS{},
+		writeUUID: func() *uuid.UUID {
+			u := uuid.New()
+
+			return &u
+		}(),
 		counter: func(yield func(int) bool) {
 			for i := 0; ; i++ {
 				if !yield(i) {

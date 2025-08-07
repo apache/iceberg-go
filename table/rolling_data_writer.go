@@ -85,6 +85,7 @@ func (w *WriterFactory) getOrCreateRollingDataWriter(partition string, partition
 	if !ok {
 		return nil, fmt.Errorf("failed to create rolling data writer: %s", partition)
 	}
+
 	return writer, nil
 }
 
@@ -172,6 +173,7 @@ func (r *RollingDataWriter) close(ctx context.Context, outputDataFilesCh chan<- 
 	}
 
 	r.factory.writers.Delete(r.partitionKey)
+
 	return nil
 }
 
@@ -181,14 +183,17 @@ func (w *WriterFactory) closeAll(ctx context.Context, outputDataFilesCh chan<- i
 		writer, ok := value.(*RollingDataWriter)
 		if !ok {
 			err = fmt.Errorf("invalid writer type for partition %s", key)
+
 			return false
 		}
 		if err = writer.close(ctx, outputDataFilesCh); err != nil {
 			return false
 		}
+
 		return true
 	})
 
 	w.stopCount()
+
 	return err
 }
