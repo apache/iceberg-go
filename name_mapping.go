@@ -136,8 +136,9 @@ func visitMappedFields[S, T any](fields []MappedField, visitor NameMappingVisito
 // and loses all historical field name mappings.
 //
 // For example, when updating a field name:
-//   Original: {FieldID: 1, Names: ["foo"]}
-//   After update: {FieldID: 1, Names: ["foo", "foo_update"]}
+//
+//	Original: {FieldID: 1, Names: ["foo"]}
+//	After update: {FieldID: 1, Names: ["foo", "foo_update"]}
 //
 // This preserves compatibility with existing data files that reference the old field names.
 func UpdateNameMapping(nameMapping NameMapping, updates map[int]NestedField, adds map[int][]NestedField) (NameMapping, error) {
