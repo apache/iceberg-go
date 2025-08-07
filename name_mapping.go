@@ -130,6 +130,16 @@ func visitMappedFields[S, T any](fields []MappedField, visitor NameMappingVisito
 	return visitor.Fields(fields, results)
 }
 
+// UpdateNameMapping performs incremental updates to an existing NameMapping, preserving
+// backward compatibility by maintaining existing field name mappings while adding new ones.
+// This is different from createMappingFromSchema which creates a completely new mapping
+// and loses all historical field name mappings.
+//
+// For example, when updating a field name:
+//   Original: {FieldID: 1, Names: ["foo"]}
+//   After update: {FieldID: 1, Names: ["foo", "foo_update"]}
+//
+// This preserves compatibility with existing data files that reference the old field names.
 func UpdateNameMapping(nameMapping NameMapping, updates map[int]NestedField, adds map[int][]NestedField) (NameMapping, error) {
 	result, err := VisitNameMapping(nameMapping, &updateNameMappingVisitor{updates: updates, adds: adds})
 	if err != nil {
