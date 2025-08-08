@@ -82,15 +82,12 @@ type WriteFileIO interface {
 	WriteFile(name string, p []byte) error
 }
 
-// ListIO is the interface implemented by a file system that
-// provides listing functionality for object stores
-type ListIO interface {
+type WalkIO interface {
 	IO
 
-	// ListObjects lists all objects with the given prefix.
-	// For object stores like S3, this provides proper prefix-based listing.
-	// The callback function is called for each object found.
-	ListObjects(prefix string, fn func(path string, info fs.FileInfo) error) error
+	// Walk the file tree at root, calling fn for each file or
+	// directory in the tree, including root.
+	Walk(root string, fn func(path string, info fs.FileInfo) error) error
 }
 
 // A File provides access to a single file. The File interface is the

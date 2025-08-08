@@ -356,10 +356,16 @@ func TestIsFileOrphan(t *testing.T) {
 			expectOrphan: true,
 		},
 	}
+	normalizedReferencedFiles := make(map[string]string)
+	for refPath := range referencedFiles {
+		normalizedPath := normalizeFilePath(refPath, cfg)
+		normalizedReferencedFiles[normalizedPath] = refPath
+		normalizedPath = normalizeNonURLPath(refPath)
+	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			isOrphan, err := isFileOrphan(tt.file, referencedFiles, cfg)
+			isOrphan, err := isFileOrphan(tt.file, referencedFiles, normalizedReferencedFiles, cfg)
 			require.NoError(t, err)
 			assert.Equal(t, tt.expectOrphan, isOrphan)
 		})
