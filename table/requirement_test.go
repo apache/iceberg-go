@@ -19,8 +19,10 @@ package table_test
 
 import (
 	"encoding/json"
+	"iter"
 	"testing"
 
+	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -144,4 +146,215 @@ func TestParseRequirementList(t *testing.T) {
 		err := json.Unmarshal(jsonData, &actual)
 		assert.Error(t, err)
 	})
+}
+
+// mockMetadata is a correct and complete mock implementation of the
+// table.Metadata interface, used for testing requirement validation.
+type mockMetadata struct {
+	uuid                uuid.UUID
+	currentSchemaID     int
+	defaultSortOrderID  int
+	defaultSpecID       int
+	lastAssignedFieldID int
+	lastPartitionID     int
+	refs                map[string]table.SnapshotRef
+	// Add any other fields you need for testing here
+}
+
+// Ensure the mock fully implements the interface at compile time.
+var _ table.Metadata = (*mockMetadata)(nil)
+
+func (m *mockMetadata) Version() int             { return 2 }
+func (m *mockMetadata) TableUUID() uuid.UUID     { return m.uuid }
+func (m *mockMetadata) Location() string         { return "s3://bucket/location" }
+func (m *mockMetadata) LastUpdatedMillis() int64 { return 1234567890 }
+func (m *mockMetadata) LastColumnID() int        { return m.lastAssignedFieldID }
+func (m *mockMetadata) Schemas() []*iceberg.Schema {
+	return []*iceberg.Schema{{ID: m.currentSchemaID}}
+}
+func (m *mockMetadata) CurrentSchema() *iceberg.Schema {
+	return &iceberg.Schema{ID: m.currentSchemaID}
+}
+func (m *mockMetadata) PartitionSpecs() []iceberg.PartitionSpec { return nil }
+func (m *mockMetadata) PartitionSpec() iceberg.PartitionSpec {
+	return *iceberg.UnpartitionedSpec
+}
+func (m *mockMetadata) DefaultPartitionSpec() int   { return m.defaultSpecID }
+func (m *mockMetadata) LastPartitionSpecID() *int   { return &m.lastPartitionID }
+func (m *mockMetadata) Snapshots() []table.Snapshot { return nil }
+func (m *mockMetadata) SnapshotByID(id int64) *table.Snapshot {
+	for _, ref := range m.refs {
+		if ref.SnapshotID == id {
+			return &table.Snapshot{SnapshotID: id}
+		}
+	}
+	return nil
+}
+func (m *mockMetadata) SnapshotByName(name string) *table.Snapshot {
+	if ref, ok := m.refs[name]; ok {
+		return m.SnapshotByID(ref.SnapshotID)
+	}
+	return nil
+}
+func (m *mockMetadata) CurrentSnapshot() *table.Snapshot {
+	if ref, ok := m.refs["main"]; ok {
+		return m.SnapshotByID(ref.SnapshotID)
+	}
+	return nil
+}
+func (m *mockMetadata) Ref() table.SnapshotRef {
+	if ref, ok := m.refs["main"]; ok {
+		return ref
+	}
+	return table.SnapshotRef{}
+}
+func (m *mockMetadata) Refs() iter.Seq2[string, table.SnapshotRef] {
+	return func(yield func(string, table.SnapshotRef) bool) {
+		for k, v := range m.refs {
+			if !yield(k, v) {
+				return
+			}
+		}
+	}
+}
+func (m *mockMetadata) SnapshotLogs() iter.Seq[table.SnapshotLogEntry]  { return nil }
+func (m *mockMetadata) SortOrder() table.SortOrder                      { return table.UnsortedSortOrder }
+func (m *mockMetadata) SortOrders() []table.SortOrder                   { return nil }
+func (m *mockMetadata) DefaultSortOrder() int                           { return m.defaultSortOrderID }
+func (m *mockMetadata) Properties() iceberg.Properties                  { return iceberg.Properties{} }
+func (m *mockMetadata) PreviousFiles() iter.Seq[table.MetadataLogEntry] { return nil }
+func (m *mockMetadata) Equals(other table.Metadata) bool                { return false }
+func (m *mockMetadata) NameMapping() iceberg.NameMapping                { return nil }
+func (m *mockMetadata) LastSequenceNumber() int64                       { return 0 }
+
+func TestRequirementValidation(t *testing.T) {
+	testUUID := uuid.New()
+	snapshotID := int64(100)
+	mockMeta := &mockMetadata{
+		uuid:                testUUID,
+		currentSchemaID:     1,
+		defaultSortOrderID:  2,
+		defaultSpecID:       3,
+		lastAssignedFieldID: 4,
+		lastPartitionID:     5,
+		refs: map[string]table.SnapshotRef{
+			"main": {SnapshotID: snapshotID, SnapshotRefType: "branch"},
+		},
+	}
+
+	testCases := []struct {
+		name           string
+		requirement    table.Requirement
+		expectedType   string
+		metaToValidate table.Metadata // Use nil for non-existent table
+		expectError    bool
+		errorContains  string
+	}{
+		// --- AssertCreate ---
+		{
+			name:           "AssertCreate - Success (meta is nil)",
+			requirement:    table.AssertCreate(),
+			expectedType:   "assert-create",
+			metaToValidate: nil,
+			expectError:    false,
+		},
+		{
+			name:           "AssertCreate - Failure (meta exists)",
+			requirement:    table.AssertCreate(),
+			expectedType:   "assert-create",
+			metaToValidate: mockMeta,
+			expectError:    true,
+			errorContains:  "Table already exists",
+		},
+		// --- AssertTableUUID ---
+		{
+			name:           "AssertTableUUID - Success",
+			requirement:    table.AssertTableUUID(testUUID),
+			expectedType:   "assert-table-uuid",
+			metaToValidate: mockMeta,
+			expectError:    false,
+		},
+		{
+			name:           "AssertTableUUID - Failure (mismatched UUID)",
+			requirement:    table.AssertTableUUID(uuid.New()),
+			expectedType:   "assert-table-uuid",
+			metaToValidate: mockMeta,
+			expectError:    true,
+			errorContains:  "UUID mismatch",
+		},
+		{
+			name:           "AssertTableUUID - Failure (meta is nil)",
+			requirement:    table.AssertTableUUID(testUUID),
+			expectedType:   "assert-table-uuid",
+			metaToValidate: nil,
+			expectError:    true,
+			errorContains:  "metadata does not exist",
+		},
+		// --- AssertCurrentSchemaID ---
+		{
+			name:           "AssertCurrentSchemaID - Success",
+			requirement:    table.AssertCurrentSchemaID(1),
+			expectedType:   "assert-current-schema-id",
+			metaToValidate: mockMeta,
+			expectError:    false,
+		},
+		{
+			name:           "AssertCurrentSchemaID - Failure (mismatched ID)",
+			requirement:    table.AssertCurrentSchemaID(99),
+			expectedType:   "assert-current-schema-id",
+			metaToValidate: mockMeta,
+			expectError:    true,
+			errorContains:  "current schema id has changed",
+		},
+		// --- AssertRefSnapshotID ---
+		{
+			name:           "AssertRefSnapshotID - Success (ref exists)",
+			requirement:    table.AssertRefSnapshotID("main", &snapshotID),
+			expectedType:   "assert-ref-snapshot-id",
+			metaToValidate: mockMeta,
+			expectError:    false,
+		},
+		{
+			name:           "AssertRefSnapshotID - Success (ref does not exist)",
+			requirement:    table.AssertRefSnapshotID("new-branch", nil),
+			expectedType:   "assert-ref-snapshot-id",
+			metaToValidate: mockMeta,
+			expectError:    false,
+		},
+		{
+			name:           "AssertRefSnapshotID - Failure (mismatched snapshot ID)",
+			requirement:    table.AssertRefSnapshotID("main", func() *int64 { id := int64(99); return &id }()),
+			expectedType:   "assert-ref-snapshot-id",
+			metaToValidate: mockMeta,
+			expectError:    true,
+			errorContains:  "has changed",
+		},
+		{
+			name:           "AssertRefSnapshotID - Failure (ref exists when it shouldn't)",
+			requirement:    table.AssertRefSnapshotID("main", nil),
+			expectedType:   "assert-ref-snapshot-id",
+			metaToValidate: mockMeta,
+			expectError:    true,
+			errorContains:  "was created concurrently",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Test GetType()
+			assert.Equal(t, tc.expectedType, tc.requirement.GetType(), "GetType() mismatch")
+
+			// Test Validate()
+			err := tc.requirement.Validate(tc.metaToValidate)
+
+			if tc.expectError {
+				assert.Error(t, err, "Expected an error but got nil")
+				if tc.errorContains != "" {
+					assert.Contains(t, err.Error(), tc.errorContains, "Error message did not contain expected text")
+				}
+			} else {
+				assert.NoError(t, err, "Expected no error but got one")
+			}
+		})
+	}
 }
