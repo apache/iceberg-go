@@ -410,6 +410,218 @@ func (m *mergeAppendFiles) processManifests(manifests []iceberg.ManifestFile) ([
 	return append(result, unmergedDeleteManifests...), nil
 }
 
+func newDeleteFilesProducer(
+	op Operation,
+	txn *Transaction,
+	fs iceio.WriteFileIO,
+	commitUUID *uuid.UUID,
+	snapshotProps iceberg.Properties,
+) *snapshotProducer {
+	prod := createSnapshotProducer(op, txn, fs, commitUUID, snapshotProps)
+	prod.producerImpl = &deleteFiles{
+		base:            prod,
+		computed:        false,
+		keepManifests:   make([]iceberg.ManifestFile, 0),
+		removedEntries:  make([]iceberg.ManifestEntry, 0),
+		partialRewrites: false,
+	}
+
+	return prod
+}
+
+type deleteFiles struct {
+	base *snapshotProducer
+
+	predicate     iceberg.BooleanExpression
+	caseSensitive bool
+
+	computed        bool
+	keepManifests   []iceberg.ManifestFile
+	removedEntries  []iceberg.ManifestEntry
+	partialRewrites bool
+}
+
+func (df *deleteFiles) buildPartitionProjection(specID int) (iceberg.BooleanExpression, error) {
+	schema := df.base.txn.meta.CurrentSchema()
+	spec := df.base.spec(specID)
+	project := newInclusiveProjection(schema, spec, df.caseSensitive)
+	partitionFilter, err := project(df.predicate)
+	if err != nil {
+		return nil, err
+	}
+	return partitionFilter, nil
+}
+
+func (df *deleteFiles) partitionFilters() *keyDefaultMap[int, iceberg.BooleanExpression] {
+	return newKeyDefaultMapWrapErr(df.buildPartitionProjection)
+}
+
+func (df *deleteFiles) buildManifestEvaluator(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
+	spec := df.base.spec(specID)
+	schema := df.base.txn.meta.CurrentSchema()
+	return newManifestEvaluator(
+		spec,
+		schema,
+		df.partitionFilters().Get(specID),
+		df.caseSensitive)
+}
+
+func (df *deleteFiles) copyWithNewStatus(entry iceberg.ManifestEntry, status iceberg.ManifestEntryStatus) iceberg.ManifestEntry {
+	snapId := df.base.snapshotID
+	if status == iceberg.EntryStatusEXISTING {
+		snapId = entry.SnapshotID()
+	}
+
+	seqNum := entry.SequenceNum()
+
+	return iceberg.NewManifestEntry(
+		status,
+		&snapId,
+		&seqNum,
+		entry.FileSequenceNum(),
+		entry.DataFile(),
+	)
+}
+
+func (df *deleteFiles) computeDeletes(predicate iceberg.BooleanExpression, caseSensitive bool) error {
+	schema := df.base.txn.meta.CurrentSchema()
+	manifestEvaluators := newKeyDefaultMapWrapErr(df.buildManifestEvaluator)
+	strictMetricsEvaluator, err := newStrictMetricsEvaluator(schema, predicate, caseSensitive, false)
+	if err != nil {
+		return err
+	}
+	inclusiveMetricsEvaluator, err := newInclusiveMetricsEvaluator(schema, predicate, caseSensitive, false)
+	if err != nil {
+		return err
+	}
+
+	// table has no snapshot, nothing to compute
+	if df.base.parentSnapshotID <= 0 {
+		return nil
+	}
+
+	snapshot, err := df.base.txn.meta.SnapshotByID(df.base.parentSnapshotID)
+	if err != nil {
+		return err
+	}
+	manifestFiles, err := snapshot.Manifests(df.base.io)
+	if err != nil {
+		return err
+	}
+
+	for _, manifestFile := range manifestFiles {
+		if manifestFile.ManifestContent() == iceberg.ManifestContentData {
+			containMatch, err := manifestEvaluators.Get(int(manifestFile.PartitionSpecID()))(manifestFile)
+			if err != nil {
+				return err
+			}
+
+			if !containMatch {
+				// if manifest file doesn't contain relevant rows matched the predicate,
+				// keep it in the manifest list
+				df.keepManifests = append(df.keepManifests, manifestFile)
+			} else {
+				// else evaluate each manifest entry and the corresponding data file in the manifest file
+				deleteEntries := make([]iceberg.ManifestEntry, 0)
+				keepEntries := make([]iceberg.ManifestEntry, 0)
+				entries, err := manifestFile.FetchEntries(df.base.io, true)
+				if err != nil {
+					return err
+				}
+
+				for _, entry := range entries {
+					ok, err := strictMetricsEvaluator(entry.DataFile())
+					if err != nil {
+						return err
+					}
+					if ok == rowsMustMatch {
+						// based on entry metadata, all rows in the data file matched the predicate
+						deleteEntries = append(deleteEntries, df.copyWithNewStatus(entry, iceberg.EntryStatusDELETED))
+					} else {
+						// can't determine based on entry metadata
+						keepEntries = append(keepEntries, df.copyWithNewStatus(entry, iceberg.EntryStatusEXISTING))
+						ok, err = inclusiveMetricsEvaluator(entry.DataFile())
+						if err != nil {
+							return err
+						}
+						if ok != rowsMightNotMatch {
+							df.partialRewrites = true
+						}
+					}
+				}
+
+				if len(deleteEntries) > 0 {
+					df.removedEntries = append(df.removedEntries, deleteEntries...)
+
+					// rewrite the manifests
+					if len(keepEntries) > 0 {
+						spec := df.base.spec(int(manifestFile.PartitionSpecID()))
+						wr, path, counter, err := df.base.newManifestWriter(spec)
+						if err != nil {
+							return err
+						}
+						for _, entry := range keepEntries {
+							err = wr.Add(entry)
+							if err != nil {
+								return err
+							}
+						}
+						if err = wr.Close(); err != nil {
+							return err
+						}
+						mf, err := wr.ToManifestFile(path, counter.Count)
+						if err != nil {
+							return err
+						}
+						df.keepManifests = append(df.keepManifests, mf)
+					}
+				} else {
+					df.keepManifests = append(df.keepManifests, manifestFile)
+				}
+			}
+		} else {
+			df.keepManifests = append(df.keepManifests, manifestFile)
+		}
+	}
+	df.computed = true
+
+	return nil
+}
+
+func (df *deleteFiles) ensureComputed() error {
+	if !df.computed {
+		err := df.computeDeletes(iceberg.AlwaysFalse{}, true)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (df *deleteFiles) processManifests(manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
+	// no post processing
+	return manifests, nil
+}
+
+func (df *deleteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
+	err := df.ensureComputed()
+	if err != nil {
+		return nil, err
+	}
+
+	return df.keepManifests, nil
+}
+
+func (df *deleteFiles) deletedEntries() ([]iceberg.ManifestEntry, error) {
+	err := df.ensureComputed()
+	if err != nil {
+		return nil, err
+	}
+
+	return df.removedEntries, nil
+}
+
 type snapshotProducer struct {
 	producerImpl
 
