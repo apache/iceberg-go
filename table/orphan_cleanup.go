@@ -20,6 +20,8 @@ package table
 import (
 	"context"
 	"fmt"
+	"gocloud.dev/blob"
+	"golang.org/x/sync/errgroup"
 	stdfs "io/fs"
 	"net/url"
 	"path/filepath"
@@ -280,70 +282,77 @@ func (t Table) scanFiles(fs iceio.IO, location string, cfg *OrphanCleanupConfig)
 }
 
 func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {
-	// Object stores (S3, GCS, etc.) - use ListIO interface for efficient listing
+	// For blob storage
 	if strings.Contains(root, "://") {
-		if listFS, ok := fsys.(iceio.ListIO); ok {
-			return listFS.ListObjects(root, fn)
-		}
-
-		return fmt.Errorf("cannot list directory %s: storage system does not support listing operations", root)
+		return walkBlobStorage(fsys, root, fn)
 	}
 
-	// Local filesystem - use traditional recursive traversal
-	return walkLocalFileSystem(fsys, root, fn)
+	// For local filesystem
+	if walkFS, ok := fsys.(iceio.WalkIO); ok {
+		return walkFS.Walk(root, fn)
+	}
+
+	return fmt.Errorf("filesystem does not support walking: %T", fsys)
 }
 
-func walkLocalFileSystem(fsys iceio.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {
-	f, err := fsys.Open(root)
+func walkBlobStorage(fsys iceio.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {
+	var bucket *blob.Bucket
+	if !fsysAs(fsys, &bucket) {
+		return fmt.Errorf("cannot access blob storage for %s: filesystem does not support blob operations", root)
+	}
+
+	parsed, err := url.Parse(root)
 	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	info, err := f.Stat()
-	if err != nil {
-		return err
+		return fmt.Errorf("invalid URL %s: %w", root, err)
 	}
 
-	if !info.IsDir() {
-		return fn(root, info)
-	}
+	bucketPath := strings.TrimPrefix(parsed.Path, "/")
 
-	dirFile, ok := f.(iceio.ReadDirFile)
-	if !ok {
-		return fmt.Errorf("directory %s does not support ReadDir", root)
-	}
-
-	entries, err := dirFile.ReadDir(-1)
-	if err != nil {
-		return err
-	}
-
-	for _, entry := range entries {
-		entryPath := filepath.Join(root, entry.Name())
-		entryInfo, err := entry.Info()
+	return stdfs.WalkDir(bucket, bucketPath, func(path string, d stdfs.DirEntry, err error) error {
 		if err != nil {
-			continue // Skip entries we can't get info for
+			return err
 		}
-		if entry.IsDir() {
-			if err := walkDirectory(fsys, entryPath, fn); err != nil {
-				return err
-			}
-		} else {
-			if err := fn(entryPath, entryInfo); err != nil {
-				return err
-			}
+
+		if d.IsDir() {
+			return nil
 		}
+
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		fullPath := parsed.Scheme + "://" + parsed.Host + "/" + path
+
+		return fn(fullPath, info)
+	})
+}
+
+// fsysAs is a helper function to extract the underlying blob.Bucket from iceio.IO
+func fsysAs(fsys iceio.IO, target interface{}) bool {
+	type asInterface interface {
+		As(interface{}) bool
 	}
 
-	return nil
+	if asFS, ok := fsys.(asInterface); ok {
+		return asFS.As(target)
+	}
+
+	return false
 }
 
 func identifyOrphanFiles(allFiles []string, referencedFiles map[string]bool, cfg *OrphanCleanupConfig) ([]string, error) {
+	normalizedReferencedFiles := make(map[string]string)
+	for refPath := range referencedFiles {
+		normalizedPath := normalizeFilePath(refPath, cfg)
+		normalizedReferencedFiles[normalizedPath] = refPath
+		// Also include the original path for direct lookup
+		normalizedReferencedFiles[refPath] = refPath
+	}
+
 	var orphans []string
 
 	for _, file := range allFiles {
-		isOrphan, err := isFileOrphan(file, referencedFiles, cfg)
+		isOrphan, err := isFileOrphan(file, referencedFiles, normalizedReferencedFiles, cfg)
 		if err != nil {
 			return nil, fmt.Errorf("failed to determine if file %s is orphan: %w", file, err)
 		}
@@ -356,24 +365,20 @@ func identifyOrphanFiles(allFiles []string, referencedFiles map[string]bool, cfg
 	return orphans, nil
 }
 
-func isFileOrphan(file string, referencedFiles map[string]bool, cfg *OrphanCleanupConfig) (bool, error) {
+func isFileOrphan(file string, referencedFiles map[string]bool, normalizedReferencedFiles map[string]string, cfg *OrphanCleanupConfig) (bool, error) {
 	normalizedFile := normalizeFilePath(file, cfg)
 
 	if referencedFiles[file] || referencedFiles[normalizedFile] {
 		return false, nil
 	}
 
-	for referencedPath := range referencedFiles {
-		normalizedRef := normalizeFilePath(referencedPath, cfg)
-
-		if normalizedRef == normalizedFile {
-			err := checkPrefixMismatch(referencedPath, file, cfg)
-			if err != nil {
-				return false, err
-			}
-
-			return false, nil
+	if originalPath, exists := normalizedReferencedFiles[normalizedFile]; exists {
+		err := checkPrefixMismatch(originalPath, file, cfg)
+		if err != nil {
+			return false, err
 		}
+
+		return false, nil
 	}
 
 	return true, nil
@@ -394,15 +399,13 @@ func deleteFiles(fs iceio.IO, orphanFiles []string, cfg *OrphanCleanupConfig) ([
 func deleteFilesSequential(fs iceio.IO, orphanFiles []string, cfg *OrphanCleanupConfig) ([]string, error) {
 	var deletedFiles []string
 
+	deleteFunc := fs.Remove
+	if cfg.deleteFunc != nil {
+		deleteFunc = cfg.deleteFunc
+	}
+
 	for _, file := range orphanFiles {
-		var err error
-
-		if cfg.deleteFunc != nil {
-			err = cfg.deleteFunc(file)
-		} else {
-			err = fs.Remove(file)
-		}
-
+		err := deleteFunc(file)
 		if err != nil {
 			// Log warning but continue with other files
 			fmt.Printf("Warning: failed to delete orphan file %s: %v\n", file, err)
@@ -417,60 +420,42 @@ func deleteFilesSequential(fs iceio.IO, orphanFiles []string, cfg *OrphanCleanup
 }
 
 func deleteFilesParallel(fs iceio.IO, orphanFiles []string, cfg *OrphanCleanupConfig) ([]string, error) {
-	workChan := make(chan string, len(orphanFiles))
-	resultChan := make(chan deleteResult, len(orphanFiles))
-
-	var wg sync.WaitGroup
-	numWorkers := cfg.maxConcurrency
-	if numWorkers > len(orphanFiles) {
-		numWorkers = len(orphanFiles) // Don't create more workers than files
+	deleteFunc := fs.Remove
+	if cfg.deleteFunc != nil {
+		deleteFunc = cfg.deleteFunc
 	}
-
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go deleteWorker(&wg, workChan, resultChan, fs, cfg)
-	}
-
-	for _, file := range orphanFiles {
-		workChan <- file
-	}
-	close(workChan)
-
-	wg.Wait()
-	close(resultChan)
 
 	var deletedFiles []string
-	for result := range resultChan {
-		if result.err != nil {
-			fmt.Printf("Warning: failed to delete orphan file %s: %v\n", result.file, result.err)
+	var mu sync.Mutex
 
-			continue
-		}
-		deletedFiles = append(deletedFiles, result.file)
+	g := new(errgroup.Group)
+	g.SetLimit(cfg.maxConcurrency)
+
+	for _, file := range orphanFiles {
+		file := file // capture loop variable
+		g.Go(func() error {
+			err := deleteFunc(file)
+			if err != nil {
+				// Log warning but don't fail the entire operation for individual file errors
+				fmt.Printf("Warning: failed to delete orphan file %s: %v\n", file, err)
+
+				return nil // Continue with other files
+			}
+
+			mu.Lock()
+			deletedFiles = append(deletedFiles, file)
+			mu.Unlock()
+
+			return nil
+		})
+	}
+
+	// Wait for all workers to complete
+	if err := g.Wait(); err != nil {
+		return deletedFiles, err
 	}
 
 	return deletedFiles, nil
-}
-
-type deleteResult struct {
-	file string
-	err  error
-}
-
-func deleteWorker(wg *sync.WaitGroup, workChan <-chan string, resultChan chan<- deleteResult, fs iceio.IO, cfg *OrphanCleanupConfig) {
-	defer wg.Done()
-
-	for file := range workChan {
-		var err error
-
-		if cfg.deleteFunc != nil {
-			err = cfg.deleteFunc(file)
-		} else {
-			err = fs.Remove(file)
-		}
-
-		resultChan <- deleteResult{file: file, err: err}
-	}
 }
 
 // normalizeFilePath normalizes file paths for comparison by handling different

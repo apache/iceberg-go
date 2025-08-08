@@ -20,13 +20,11 @@ package io
 import (
 	"context"
 	"errors"
+	"gocloud.dev/blob"
 	"io"
 	"io/fs"
 	"path/filepath"
 	"strings"
-	"time"
-
-	"gocloud.dev/blob"
 )
 
 // blobOpenFile describes a single open blob as a File.
@@ -121,63 +119,15 @@ func (bfs *blobFileIO) WriteFile(name string, content []byte) error {
 	return bfs.Bucket.WriteAll(bfs.ctx, name, content, nil)
 }
 
-// ListObjects implements the ListIO interface for blob-based file systems
-func (bfs *blobFileIO) ListObjects(prefix string, fn func(path string, info fs.FileInfo) error) error {
-	processedPrefix := bfs.preprocess(prefix)
-	if processedPrefix != "" && !strings.HasSuffix(processedPrefix, "/") {
-		processedPrefix += "/"
+func (bfs *blobFileIO) As(target interface{}) bool {
+	if bucket, ok := target.(**blob.Bucket); ok {
+		*bucket = bfs.Bucket
+
+		return true
 	}
 
-	iter := bfs.Bucket.List(&blob.ListOptions{
-		Prefix: processedPrefix,
-		// No delimiter to get all files recursively
-	})
-
-	for {
-		obj, err := iter.Next(bfs.ctx)
-		if err == io.EOF {
-			break // No more objects
-		}
-		if err != nil {
-			return err
-		}
-
-		if obj.IsDir {
-			continue
-		}
-
-		fullPath := obj.Key
-		if bfs.bucketName != "" && bfs.scheme != "" {
-			fullPath = bfs.scheme + "://" + bfs.bucketName + "/" + obj.Key
-		}
-
-		fileInfo := &blobObjectInfo{
-			name:    filepath.Base(obj.Key),
-			size:    obj.Size,
-			modTime: obj.ModTime,
-		}
-
-		// Call the callback function
-		if err := fn(fullPath, fileInfo); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return false
 }
-
-type blobObjectInfo struct {
-	name    string
-	size    int64
-	modTime time.Time
-}
-
-func (info *blobObjectInfo) Name() string       { return info.name }
-func (info *blobObjectInfo) Size() int64        { return info.size }
-func (info *blobObjectInfo) Mode() fs.FileMode  { return fs.ModeIrregular }
-func (info *blobObjectInfo) ModTime() time.Time { return info.modTime }
-func (info *blobObjectInfo) IsDir() bool        { return false }
-func (info *blobObjectInfo) Sys() interface{}   { return nil }
 
 // NewWriter returns a Writer that writes to the blob stored at path.
 // A nil WriterOptions is treated the same as the zero value.
