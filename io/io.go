@@ -82,6 +82,14 @@ type WriteFileIO interface {
 	WriteFile(name string, p []byte) error
 }
 
+type WalkIO interface {
+	IO
+
+	// Walk the file tree at root, calling fn for each file or
+	// directory in the tree, including root.
+	Walk(root string, fn func(path string, info fs.FileInfo) error) error
+}
+
 // A File provides access to a single file. The File interface is the
 // minimum implementation required for Iceberg to interact with a file.
 // Directory files should also implement
@@ -267,7 +275,7 @@ func inferFileIOFromSchema(ctx context.Context, path string, props map[string]st
 		return nil, fmt.Errorf("IO for file '%s' not implemented", path)
 	}
 
-	return createBlobFS(ctx, bucket, parsed.Host), nil
+	return createBlobFS(ctx, bucket, parsed.Host, parsed.Scheme), nil
 }
 
 // LoadFS takes a map of properties and an optional URI location

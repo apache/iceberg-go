@@ -20,12 +20,11 @@ package io
 import (
 	"context"
 	"errors"
+	"gocloud.dev/blob"
 	"io"
 	"io/fs"
 	"path/filepath"
 	"strings"
-
-	"gocloud.dev/blob"
 )
 
 // blobOpenFile describes a single open blob as a File.
@@ -75,6 +74,7 @@ type blobFileIO struct {
 	*blob.Bucket
 
 	bucketName string
+	scheme     string
 	ctx        context.Context
 }
 
@@ -119,6 +119,16 @@ func (bfs *blobFileIO) WriteFile(name string, content []byte) error {
 	return bfs.Bucket.WriteAll(bfs.ctx, name, content, nil)
 }
 
+func (bfs *blobFileIO) As(target interface{}) bool {
+	if bucket, ok := target.(**blob.Bucket); ok {
+		*bucket = bfs.Bucket
+
+		return true
+	}
+
+	return false
+}
+
 // NewWriter returns a Writer that writes to the blob stored at path.
 // A nil WriterOptions is treated the same as the zero value.
 //
@@ -154,8 +164,8 @@ func (io *blobFileIO) NewWriter(ctx context.Context, path string, overwrite bool
 		nil
 }
 
-func createBlobFS(ctx context.Context, bucket *blob.Bucket, bucketName string) IO {
-	return &blobFileIO{Bucket: bucket, bucketName: bucketName, ctx: ctx}
+func createBlobFS(ctx context.Context, bucket *blob.Bucket, bucketName, scheme string) IO {
+	return &blobFileIO{Bucket: bucket, bucketName: bucketName, scheme: scheme, ctx: ctx}
 }
 
 type blobWriteFile struct {
