@@ -31,9 +31,6 @@ const (
 	ObjectStoreEnabledKey                   = "write.object-storage.enabled"
 	ObjectStoreEnabledDefault               = false
 
-	FanoutWriterWorkersKey     = "write.fanout.workers"
-	FanoutWriterWorkersDefault = 0
-
 	DefaultNameMappingKey = "schema.name-mapping.default"
 
 	MetricsModeColumnConfPrefix    = "write.metadata.metrics.column"
