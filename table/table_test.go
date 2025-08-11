@@ -450,11 +450,11 @@ func (t *TableWritingTestSuite) TestAddFilesFailsSchemaMismatch() {
 	err = tx.AddFiles(t.ctx, files, nil, false)
 	t.Error(err)
 	t.EqualError(err, `error encountered during schema visitor: mismatch in fields:
-   | Table Field              | Requested Field         
+   | Table Field              | Requested Field
 ✅ | 1: foo: optional boolean | 1: foo: optional boolean
-✅ | 2: bar: optional string  | 2: bar: optional string 
-❌ | 3: baz: optional int     | 3: baz: optional string 
-✅ | 4: qux: optional date    | 4: qux: optional date   
+✅ | 2: bar: optional string  | 2: bar: optional string
+❌ | 3: baz: optional int     | 3: baz: optional string
+✅ | 4: qux: optional date    | 4: qux: optional date
 `)
 }
 

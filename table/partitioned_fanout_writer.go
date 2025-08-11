@@ -19,12 +19,15 @@ package table
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/extensions"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go"
 	"golang.org/x/sync/errgroup"
 )
@@ -70,7 +73,7 @@ func (p *PartitionedFanoutWriter) Write(ctx context.Context, workers int) iter.S
 	fanoutWorkers, ctx := errgroup.WithContext(ctx)
 	p.startRecordFeeder(ctx, fanoutWorkers, inputRecordsCh)
 
-	for i := 0; i < workers; i++ {
+	for range workers {
 		fanoutWorkers.Go(func() error {
 			return p.fanout(ctx, inputRecordsCh, outputDataFilesCh)
 		})
@@ -91,11 +94,8 @@ func (p *PartitionedFanoutWriter) startRecordFeeder(ctx context.Context, fanoutW
 			select {
 			case <-ctx.Done():
 				record.Release()
-				if err := context.Cause(ctx); err != nil {
-					return err
-				}
+				return context.Cause(ctx)
 
-				return nil
 			case inputRecordsCh <- record:
 			}
 		}
@@ -108,11 +108,8 @@ func (p *PartitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 	for {
 		select {
 		case <-ctx.Done():
-			if err := context.Cause(ctx); err != nil {
-				return err
-			}
+			return context.Cause(ctx)
 
-			return nil
 		case record, ok := <-inputRecordsCh:
 			if !ok {
 				return nil
@@ -127,11 +124,7 @@ func (p *PartitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 			for partition, val := range partitionMap {
 				select {
 				case <-ctx.Done():
-					if err := context.Cause(ctx); err != nil {
-						return err
-					}
-
-					return nil
+					return context.Cause(ctx)
 				default:
 				}
 
@@ -155,78 +148,68 @@ func (p *PartitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 }
 
 func (p *PartitionedFanoutWriter) yieldDataFiles(ctx context.Context, fanoutWorkers *errgroup.Group, outputDataFilesCh chan iceberg.DataFile) iter.Seq2[iceberg.DataFile, error] {
-	return iter.Seq2[iceberg.DataFile, error](func(yield func(iceberg.DataFile, error) bool) {
-		var dataFiles []iceberg.DataFile
+	var err error
+	go func() {
+		defer close(outputDataFilesCh)
+		err = fanoutWorkers.Wait()
+		err = errors.Join(err, p.writers.closeAll(ctx, outputDataFilesCh))
+	}()
 
-		done := make(chan struct{})
-		bufferDone := make(chan struct{})
-
-		var waitErr, closeErr error
-
-		go func() {
-			defer close(bufferDone)
-			for dataFile := range outputDataFilesCh {
-				dataFiles = append(dataFiles, dataFile)
-			}
+	return func(yield func(iceberg.DataFile, error) bool) {
+		defer func() {
+			for range outputDataFilesCh {}
 		}()
 
-		go func() {
-			defer close(done)
-			defer close(outputDataFilesCh)
-			waitErr = fanoutWorkers.Wait()
-			closeErr = p.writers.closeAll(ctx, outputDataFilesCh)
-		}()
-
-		<-done
-		<-bufferDone
-
-		if waitErr != nil {
-			_ = yield(nil, waitErr)
-
-			return
-		}
-
-		if closeErr != nil {
-			_ = yield(nil, closeErr)
-
-			return
-		}
-
-		for _, dataFile := range dataFiles {
-			if !yield(dataFile, nil) {
+		for f := range outputDataFilesCh {
+			if !yield(f, err) {
 				return
 			}
 		}
-	})
+
+		if err != nil {
+			yield(nil, err)
+		}
+	}
 }
 
 func (p *PartitionedFanoutWriter) getPartitionMap(record arrow.Record) (map[string]PartitionInfo, error) {
 	partitionMap := make(map[string]PartitionInfo)
 	partitionFields := p.partitionSpec.PartitionType(p.schema).FieldList
+	partitionRec := make(partitionRecord, len(partitionFields))
+
+	partitionColumns := make([]arrow.Array, len(partitionFields))
+	partitionFieldsInfo := make([]struct {
+		sourceField *iceberg.PartitionField
+		fieldID     int
+	}, len(partitionFields))
+
+	for i := range partitionFields {
+		sourceField := p.partitionSpec.Field(i)
+		colName, _ := p.schema.FindColumnName(sourceField.SourceID)
+		colIdx := record.Schema().FieldIndices(colName)[0]
+		partitionColumns[i] = record.Column(colIdx)
+		partitionFieldsInfo[i] = struct {
+			sourceField *iceberg.PartitionField
+			fieldID     int
+		}{&sourceField, sourceField.FieldID}
+	}
 
 	for row := range record.NumRows() {
-		partitionRec := make(partitionRecord, len(partitionFields))
 		partitionValues := make(map[int]any)
-
 		for i := range partitionFields {
-			sourceField := p.partitionSpec.Field(i)
-			colName, _ := p.schema.FindColumnName(sourceField.SourceID)
-			colIdx := record.Schema().FieldIndices(colName)[0]
-			col := record.Column(colIdx)
+			col := partitionColumns[i]
+			if !col.IsNull(int(row)) {
+				sourceField := partitionFieldsInfo[i].sourceField
+				val, err := getArrowValueAsIcebergLiteral(col, int(row))
+				if err != nil {
+					return nil, fmt.Errorf("failed to get arrow values as iceberg literal: %w", err)
+				}
 
-			val, err := getArrowValueAsIcebergLiteral(col, int(row))
-			if err != nil {
-				return nil, fmt.Errorf("failed to get arrow value as iceberg literal: %w", err)
-			}
-
-			transformedLiteral := sourceField.Transform.Apply(iceberg.Optional[iceberg.Literal]{
-				Valid: val != nil,
-				Val:   val,
-			})
-
-			if transformedLiteral.Valid {
+				transformedLiteral := sourceField.Transform.Apply(iceberg.Optional[iceberg.Literal]{Valid: true, Val: val})
 				partitionRec[i] = transformedLiteral.Val.Any()
 				partitionValues[sourceField.FieldID] = transformedLiteral.Val.Any()
+			} else {
+				partitionRec[i], partitionValues[partitionFieldsInfo[i].fieldID] = nil, nil
 			}
 		}
 		partitionKey := p.partitionPath(partitionRec)
@@ -278,14 +261,29 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int) (iceberg.Literal
 		return iceberg.NewLiteral(iceberg.Time(arr.Value(row))), nil
 	case *array.Timestamp:
 		return iceberg.NewLiteral(iceberg.Timestamp(arr.Value(row))), nil
+	case *array.Decimal32:
+		val := arr.Value(row)
+		dec := iceberg.Decimal{
+			Val:   decimal128.FromU64(uint64(val)),
+			Scale: int(arr.DataType().(*arrow.Decimal32Type).Scale),
+		}
+		return iceberg.NewLiteral(dec), nil
+	case *array.Decimal64:
+		val := arr.Value(row)
+		dec := iceberg.Decimal{
+			Val:   decimal128.FromU64(uint64(val)),
+			Scale: int(arr.DataType().(*arrow.Decimal64Type).Scale),
+		}
+		return iceberg.NewLiteral(dec), nil
 	case *array.Decimal128:
 		val := arr.Value(row)
 		dec := iceberg.Decimal{
 			Val:   val,
 			Scale: int(arr.DataType().(*arrow.Decimal128Type).Scale),
 		}
-
 		return iceberg.NewLiteral(dec), nil
+	case *extensions.UUIDArray:
+		return iceberg.NewLiteral(arr.Value(row)), nil
 	default:
 		val := column.GetOneForMarshal(row)
 		switch v := val.(type) {

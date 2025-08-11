@@ -21,7 +21,6 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,6 +32,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/config"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	tblutils "github.com/apache/iceberg-go/table/internal"
@@ -1317,11 +1317,8 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 		rollingDataWriters.stopCount = stopCount
 
 		partitionWriter.writers = &rollingDataWriters
-		workers := meta.props.GetInt(FanoutWriterWorkersKey, FanoutWriterWorkersDefault)
-		if workers <= 0 {
-			workers = runtime.NumCPU()
-		}
 
+		workers := config.EnvConfig.MaxWorkers
 		return partitionWriter.Write(ctx, workers)
 	}
 }
