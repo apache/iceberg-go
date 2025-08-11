@@ -78,12 +78,17 @@ func (w *writer) writeFile(ctx context.Context, partitionValues map[int]any, tas
 	filePath := w.loc.NewDataLocation(
 		task.GenerateDataFileName("parquet"))
 
+	currentSpec, err := w.meta.CurrentSpec()
+	if err != nil {
+		return nil, err
+	}
+
 	return w.format.WriteDataFile(ctx, w.fs, partitionValues, internal.WriteFileInfo{
 		FileSchema: w.fileSchema,
 		FileName:   filePath,
 		StatsCols:  statsCols,
 		WriteProps: w.props,
-		Spec:       w.meta.CurrentSpec(),
+		Spec:       *currentSpec,
 	}, batches)
 }
 

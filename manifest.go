@@ -1524,79 +1524,103 @@ func avroPartitionData(input map[int]any, logicalTypes map[int]avro.LogicalType,
 	out := make(map[int]any)
 	for k, v := range input {
 		if logical, ok := logicalTypes[k]; ok {
-			switch logical {
-			case avro.Date:
-				if t, ok := v.(time.Time); ok {
-					out[k] = map[string]any{"int.date": int32(t.Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))}
-				} else if d, ok := v.(Date); ok {
-					out[k] = map[string]any{"int.date": int32(d)}
-				} else {
-					out[k] = v
-				}
-			case avro.TimeMicros:
-				if t, ok := v.(Time); ok {
-					out[k] = map[string]any{"long.time-micros": int64(t)}
-				} else if d, ok := v.(time.Duration); ok {
-					out[k] = map[string]any{"long.time-micros": d.Microseconds()}
-				} else {
-					out[k] = v
-				}
-			case avro.TimestampMicros:
-				if t, ok := v.(time.Time); ok {
-					out[k] = map[string]any{"long.timestamp-micros": t.UTC().UnixMicro()}
-				} else if ts, ok := v.(Timestamp); ok {
-					out[k] = map[string]any{"long.timestamp-micros": int64(ts)}
-				} else {
-					out[k] = v
-				}
-			case avro.Decimal:
-				if dec, ok := v.(Decimal); ok {
-					if bytes, err := DecimalLiteral(dec).MarshalBinary(); err == nil {
-						byteSize := 5
-						if size, exists := fixedSizes[k]; exists {
-							byteSize = size
-						}
-
-						fixedBytes := make([]byte, byteSize)
-						if len(bytes) <= byteSize {
-							copy(fixedBytes[byteSize-len(bytes):], bytes)
-						} else {
-							copy(fixedBytes[:], bytes[len(bytes)-byteSize:])
-						}
-
-						out[k] = convertToFixedArray(fixedBytes, byteSize)
-					} else {
-						out[k] = v
-					}
-				} else {
-					out[k] = v
-				}
-			default:
-				out[k] = v
-			}
-
-			continue
-		}
-		if uuidVal, ok := v.(uuid.UUID); ok {
-			out[k] = uuidVal.String()
-		} else if bytes, ok := v.([]byte); ok {
-			if size, isFixed := fixedSizes[k]; isFixed {
-				fixedBytes := make([]byte, size)
-				if len(bytes) <= size {
-					copy(fixedBytes[size-len(bytes):], bytes)
-				} else {
-					copy(fixedBytes[:], bytes[len(bytes)-size:])
-				}
-				out[k] = convertToFixedArray(fixedBytes, size)
-			} else {
-				out[k] = bytes
-			}
+			out[k] = convertLogicalTypeValue(v, logical, fixedSizes[k])
 		} else {
-			out[k] = v
+			out[k] = convertDefaultValue(v, fixedSizes[k])
 		}
 	}
 
 	return out
+}
+
+func convertLogicalTypeValue(v any, logicalType avro.LogicalType, fixedSize int) any {
+	switch logicalType {
+	case avro.Date:
+		return convertDateValue(v)
+	case avro.TimeMicros:
+		return convertTimeMicrosValue(v)
+	case avro.TimestampMicros:
+		return convertTimestampMicrosValue(v)
+	case avro.Decimal:
+		return convertDecimalValue(v, fixedSize)
+	default:
+		return v
+	}
+}
+
+func convertDateValue(v any) any {
+	if t, ok := v.(time.Time); ok {
+		return map[string]any{"int.date": int32(t.Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))}
+	}
+	if d, ok := v.(Date); ok {
+		return map[string]any{"int.date": int32(d)}
+	}
+
+	return v
+}
+
+func convertTimeMicrosValue(v any) any {
+	if t, ok := v.(Time); ok {
+		return map[string]any{"long.time-micros": int64(t)}
+	}
+	if d, ok := v.(time.Duration); ok {
+		return map[string]any{"long.time-micros": d.Microseconds()}
+	}
+
+	return v
+}
+
+func convertTimestampMicrosValue(v any) any {
+	if t, ok := v.(time.Time); ok {
+		return map[string]any{"long.timestamp-micros": t.UTC().UnixMicro()}
+	}
+	if ts, ok := v.(Timestamp); ok {
+		return map[string]any{"long.timestamp-micros": int64(ts)}
+	}
+
+	return v
+}
+
+func convertDecimalValue(v any, fixedSize int) any {
+	dec, ok := v.(Decimal)
+	if !ok {
+		return v
+	}
+
+	bytes, err := DecimalLiteral(dec).MarshalBinary()
+	if err != nil {
+		return v
+	}
+
+	byteSize := 5
+	if fixedSize > 0 {
+		byteSize = fixedSize
+	}
+
+	return convertToFixedArray(padOrTruncateBytes(bytes, byteSize), byteSize)
+}
+
+func convertDefaultValue(v any, fixedSize int) any {
+	if uuidVal, ok := v.(uuid.UUID); ok {
+		return uuidVal.String()
+	}
+
+	if bytes, ok := v.([]byte); ok && fixedSize > 0 {
+		return convertToFixedArray(padOrTruncateBytes(bytes, fixedSize), fixedSize)
+	}
+
+	return v
+}
+
+func padOrTruncateBytes(bytes []byte, size int) []byte {
+	fixedBytes := make([]byte, size)
+	if len(bytes) <= size {
+		copy(fixedBytes[size-len(bytes):], bytes)
+	} else {
+		copy(fixedBytes[:], bytes[len(bytes)-size:])
+	}
+
+	return fixedBytes
 }
 
 func convertToFixedArray(bytes []byte, size int) any {

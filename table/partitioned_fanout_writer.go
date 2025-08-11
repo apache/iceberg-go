@@ -207,8 +207,12 @@ func (p *PartitionedFanoutWriter) getPartitionMap(record arrow.Record) (map[stri
 				}
 
 				transformedLiteral := sourceField.Transform.Apply(iceberg.Optional[iceberg.Literal]{Valid: true, Val: val})
-				partitionRec[i] = transformedLiteral.Val.Any()
-				partitionValues[sourceField.FieldID] = transformedLiteral.Val.Any()
+				if transformedLiteral.Valid {
+					partitionRec[i] = transformedLiteral.Val.Any()
+					partitionValues[sourceField.FieldID] = transformedLiteral.Val.Any()
+				} else {
+					partitionRec[i], partitionValues[sourceField.FieldID] = nil, nil
+				}
 			} else {
 				partitionRec[i], partitionValues[partitionFieldsInfo[i].fieldID] = nil, nil
 			}
