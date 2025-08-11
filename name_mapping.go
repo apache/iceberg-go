@@ -130,6 +130,133 @@ func visitMappedFields[S, T any](fields []MappedField, visitor NameMappingVisito
 	return visitor.Fields(fields, results)
 }
 
+// UpdateNameMapping performs incremental updates to an existing NameMapping, preserving
+// backward compatibility by maintaining existing field name mappings while adding new ones.
+// This is different from createMappingFromSchema which creates a completely new mapping
+// and loses all historical field name mappings.
+//
+// For example, when updating a field name:
+//
+//	Original: {FieldID: 1, Names: ["foo"]}
+//	After update: {FieldID: 1, Names: ["foo", "foo_update"]}
+//
+// This preserves compatibility with existing data files that reference the old field names.
+func UpdateNameMapping(nameMapping NameMapping, updates map[int]NestedField, adds map[int][]NestedField) (NameMapping, error) {
+	result, err := VisitNameMapping(nameMapping, &updateNameMappingVisitor{updates: updates, adds: adds})
+	if err != nil {
+		return nil, err
+	}
+
+	return NameMapping(result), nil
+}
+
+type updateNameMappingVisitor struct {
+	updates map[int]NestedField
+	adds    map[int][]NestedField
+}
+
+func (u *updateNameMappingVisitor) Mapping(nm NameMapping, fieldResults []MappedField) []MappedField {
+	return u.addNewFields(fieldResults, -1)
+}
+
+func (u *updateNameMappingVisitor) Fields(st []MappedField, fieldResults []MappedField) []MappedField {
+	reassignments := make(map[string]int)
+	for _, field := range fieldResults {
+		if field.FieldID != nil {
+			if update, exists := u.updates[*field.FieldID]; exists {
+				reassignments[update.Name] = update.ID
+			}
+		}
+	}
+
+	var result []MappedField
+	for _, field := range fieldResults {
+		updatedField := u.removeReassignedNames(field, reassignments)
+		if updatedField != nil {
+			result = append(result, *updatedField)
+		}
+	}
+
+	return result
+}
+
+func (u *updateNameMappingVisitor) Field(field MappedField, fieldResult []MappedField) MappedField {
+	if field.FieldID == nil {
+		return field
+	}
+
+	fieldNames := field.Names
+	if update, exists := u.updates[*field.FieldID]; exists && !slices.Contains(fieldNames, update.Name) {
+		fieldNames = append(fieldNames, update.Name)
+	}
+
+	return MappedField{
+		FieldID: field.FieldID,
+		Names:   fieldNames,
+		Fields:  u.addNewFields(fieldResult, *field.FieldID),
+	}
+}
+
+func (u *updateNameMappingVisitor) removeReassignedNames(field MappedField, assignments map[string]int) *MappedField {
+	removedNames := make(map[string]struct{})
+	for _, name := range field.Names {
+		if assignedID, exists := assignments[name]; exists && assignedID != *field.FieldID {
+			removedNames[name] = struct{}{}
+		}
+	}
+
+	remainingNames := make([]string, 0, len(field.Names))
+	for _, name := range field.Names {
+		if _, exists := removedNames[name]; !exists {
+			remainingNames = append(remainingNames, name)
+		}
+	}
+
+	if len(remainingNames) == 0 {
+		return nil
+	}
+
+	return &MappedField{
+		Names:   remainingNames,
+		FieldID: field.FieldID,
+		Fields:  field.Fields,
+	}
+}
+
+func (u *updateNameMappingVisitor) addNewFields(mappedFields []MappedField, parentID int) []MappedField {
+	fieldsToAdd, exists := u.adds[parentID]
+	if !exists {
+		return mappedFields
+	}
+
+	newFields := make([]MappedField, 0, len(fieldsToAdd))
+	for _, add := range fieldsToAdd {
+		fields := visitField(add, createMapping{})
+		if len(fields) == 0 {
+			fields = nil
+		}
+
+		newFields = append(newFields, MappedField{
+			FieldID: &add.ID,
+			Names:   []string{add.Name},
+			Fields:  fields,
+		})
+	}
+	reassignments := make(map[string]int)
+	for _, add := range fieldsToAdd {
+		reassignments[add.Name] = add.ID
+	}
+
+	fields := make([]MappedField, 0)
+	for _, field := range mappedFields {
+		if updatedField := u.removeReassignedNames(field, reassignments); updatedField != nil {
+			fields = append(fields, *updatedField)
+		}
+	}
+
+	return append(fields, newFields...)
+}
+
 type NameMappingAccessor struct{}
 
 func (NameMappingAccessor) SchemaPartner(partner *MappedField) *MappedField {

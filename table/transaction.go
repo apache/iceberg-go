@@ -18,6 +18,7 @@
 package table
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -144,6 +145,115 @@ func (t *Transaction) SetProperties(props iceberg.Properties) error {
 
 func (t *Transaction) UpdateSpec(caseSensitive bool) *UpdateSpec {
 	return NewUpdateSpec(t, caseSensitive)
+}
+
+type expireSnapshotsCfg struct {
+	minSnapshotsToKeep *int
+	maxSnapshotAgeMs   *int64
+}
+
+type ExpireSnapshotsOpt func(*expireSnapshotsCfg)
+
+func WithRetainLast(n int) ExpireSnapshotsOpt {
+	return func(cfg *expireSnapshotsCfg) {
+		cfg.minSnapshotsToKeep = &n
+	}
+}
+
+func WithOlderThan(t time.Duration) ExpireSnapshotsOpt {
+	return func(cfg *expireSnapshotsCfg) {
+		n := t.Milliseconds()
+		cfg.maxSnapshotAgeMs = &n
+	}
+}
+
+func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
+	var (
+		cfg         expireSnapshotsCfg
+		updates     []Update
+		snapsToKeep = make(map[int64]struct{})
+		nowMs       = time.Now().UnixMilli()
+	)
+
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	for refName, ref := range t.meta.refs {
+		if refName == MainBranch {
+			snapsToKeep[ref.SnapshotID] = struct{}{}
+		}
+
+		snap, err := t.meta.SnapshotByID(ref.SnapshotID)
+		if err != nil {
+			return err
+		}
+
+		maxRefAgeMs := cmp.Or(ref.MaxRefAgeMs, cfg.maxSnapshotAgeMs)
+		if maxRefAgeMs == nil {
+			return errors.New("cannot find a valid value for maxRefAgeMs")
+		}
+
+		refAge := nowMs - snap.TimestampMs
+		if refAge > *maxRefAgeMs && refName != MainBranch {
+			updates = append(updates, NewRemoveSnapshotRefUpdate(refName))
+
+			continue
+		}
+
+		var (
+			minSnapshotsToKeep = cmp.Or(ref.MinSnapshotsToKeep, cfg.minSnapshotsToKeep)
+			maxSnapshotAgeMs   = cmp.Or(ref.MaxSnapshotAgeMs, cfg.maxSnapshotAgeMs)
+		)
+
+		if minSnapshotsToKeep == nil || maxSnapshotAgeMs == nil {
+			return errors.New("cannot find a valid value for minSnapshotsToKeep and maxSnapshotAgeMs")
+		}
+
+		if ref.SnapshotRefType != BranchRef {
+			snapsToKeep[ref.SnapshotID] = struct{}{}
+
+			continue
+		}
+
+		var (
+			numSnapshots int
+			snapId       = ref.SnapshotID
+		)
+
+		for {
+			snap, err := t.meta.SnapshotByID(snapId)
+			if err != nil {
+				return err
+			}
+
+			snapAge := time.Now().UnixMilli() - snap.TimestampMs
+			if (snapAge > *maxSnapshotAgeMs) && (numSnapshots >= *minSnapshotsToKeep) {
+				break
+			}
+
+			snapsToKeep[snap.SnapshotID] = struct{}{}
+
+			if snap.ParentSnapshotID == nil {
+				break
+			}
+
+			snapId = *snap.ParentSnapshotID
+			numSnapshots++
+		}
+	}
+
+	var snapsToDelete []int64
+
+	for _, snap := range t.meta.snapshotList {
+		if _, found := snapsToKeep[snap.SnapshotID]; !found {
+			snapsToDelete = append(snapsToDelete, snap.SnapshotID)
+		}
+	}
+
+	updates = append(updates, NewRemoveSnapshotsUpdate(snapsToDelete))
+
+	return t.apply(updates, nil)
 }
 
 func (t *Transaction) AppendTable(ctx context.Context, tbl arrow.Table, batchSize int64, snapshotProps iceberg.Properties) error {
@@ -401,8 +511,18 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 
 	if len(t.meta.updates) > 0 {
 		t.reqs = append(t.reqs, AssertTableUUID(t.meta.uuid))
+		tbl, err := t.tbl.doCommit(ctx, t.meta.updates, t.reqs)
+		if err != nil {
+			return tbl, err
+		}
 
-		return t.tbl.doCommit(ctx, t.meta.updates, t.reqs)
+		for _, u := range t.meta.updates {
+			if perr := u.PostCommit(ctx, t.tbl, tbl); perr != nil {
+				err = errors.Join(err, perr)
+			}
+		}
+
+		return tbl, err
 	}
 
 	return t.tbl, nil

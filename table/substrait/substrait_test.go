@@ -25,7 +25,7 @@ import (
 	"github.com/apache/iceberg-go/table/substrait"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/substrait-io/substrait-go/v3/types"
+	"github.com/substrait-io/substrait-go/v4/types"
 )
 
 func TestRefTypes(t *testing.T) {

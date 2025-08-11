@@ -886,6 +886,57 @@ func (t *TableWritingTestSuite) TestReplaceDataFiles() {
 	}, staged.CurrentSnapshot().Summary)
 }
 
+func (t *TableWritingTestSuite) TestExpireSnapshots() {
+	fs := iceio.LocalFS{}
+
+	files := make([]string, 0)
+	for i := range 5 {
+		filePath := fmt.Sprintf("%s/replace_data_files_v%d/data-%d.parquet", t.location, t.formatVersion, i)
+		t.writeParquet(fs, filePath, t.arrTablePromotedTypes)
+		files = append(files, filePath)
+	}
+
+	ident := table.Identifier{"default", "replace_data_files_v" + strconv.Itoa(t.formatVersion)}
+	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, t.location, iceberg.Properties{"format-version": strconv.Itoa(t.formatVersion)})
+	t.Require().NoError(err)
+
+	ctx := context.Background()
+
+	tbl := table.New(
+		ident,
+		meta,
+		t.getMetadataLoc(),
+		func(ctx context.Context) (iceio.IO, error) {
+			return fs, nil
+		},
+		&mockedCatalog{},
+	)
+
+	tblfs, err := tbl.FS(ctx)
+
+	t.Require().NoError(err)
+
+	for i := range 5 {
+		tx := tbl.NewTransaction()
+		t.Require().NoError(tx.AddFiles(ctx, files[i:i+1], nil, false))
+		tbl, err = tx.Commit(ctx)
+		t.Require().NoError(err)
+	}
+
+	mflist, err := tbl.CurrentSnapshot().Manifests(tblfs)
+	t.Require().NoError(err)
+	t.Len(mflist, 5)
+	t.Require().Equal(5, len(tbl.Metadata().Snapshots()))
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.ExpireSnapshots(table.WithOlderThan(0), table.WithRetainLast(2)))
+	tbl, err = tx.Commit(ctx)
+	t.Require().NoError(err)
+	t.Require().Equal(2, len(tbl.Metadata().Snapshots()))
+	t.Require().Equal(2, len(slices.Collect(tbl.Metadata().SnapshotLogs())))
+}
+
 func (t *TableWritingTestSuite) TestWriteSpecialCharacterColumn() {
 	ident := table.Identifier{"default", "write_special_character_column"}
 	colNameWithSpecialChar := "letter/abc"
@@ -1421,4 +1472,49 @@ func (t *TableWritingTestSuite) TestDeleteOldMetadataNoErrorLogsOnFileFound() {
 	logOutput := logBuf.String()
 	t.NotContains(logOutput, "Warning: Failed to delete old metadata file")
 	t.NotContains(logOutput, "no such file or directory")
+}
+
+func (t *TableTestSuite) TestRefresh() {
+	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
+		"uri":          ":memory:",
+		"type":         "sql",
+		sql.DriverKey:  sqliteshim.ShimName,
+		sql.DialectKey: string(sql.SQLite),
+		"warehouse":    "file://" + t.T().TempDir(),
+	})
+	t.Require().NoError(err)
+
+	ident := table.Identifier{"test", "refresh_table"}
+	t.Require().NoError(cat.CreateNamespace(context.Background(), catalog.NamespaceFromIdent(ident), nil))
+
+	tbl, err := cat.CreateTable(context.Background(), ident, t.tbl.Schema(),
+		catalog.WithProperties(iceberg.Properties{"original": "true"}))
+	t.Require().NoError(err)
+	t.Require().NotNil(tbl)
+
+	originalProperties := tbl.Properties()
+	originalIdentifier := tbl.Identifier()
+	originalLocation := tbl.Location()
+	originalSchema := tbl.Schema()
+	originalSpec := tbl.Spec()
+
+	_, _, err = cat.CommitTable(context.Background(), tbl, nil, []table.Update{
+		table.NewSetPropertiesUpdate(iceberg.Properties{
+			"refreshed": "true",
+			"timestamp": strconv.FormatInt(time.Now().Unix(), 10),
+		}),
+	})
+	t.Require().NoError(err)
+
+	err = tbl.Refresh(context.Background())
+	t.Require().NoError(err)
+	t.Require().NotNil(tbl)
+
+	t.Equal("true", tbl.Properties()["refreshed"])
+	t.NotEqual(originalProperties, tbl.Properties())
+
+	t.Equal(originalIdentifier, tbl.Identifier())
+	t.Equal(originalLocation, tbl.Location())
+	t.True(originalSchema.Equals(tbl.Schema()))
+	t.Equal(originalSpec, tbl.Spec())
 }

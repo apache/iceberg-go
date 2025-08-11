@@ -525,9 +525,12 @@ func (sp *snapshotProducer) manifests() ([]iceberg.ManifestFile, error) {
 			defer out.Close()
 
 			counter := &internal.CountingWriter{W: out}
-
+			currentSpec, err := sp.txn.meta.CurrentSpec()
+			if err != nil || currentSpec == nil {
+				return fmt.Errorf("could not get current partition spec: %w", err)
+			}
 			wr, err := iceberg.NewManifestWriter(sp.txn.meta.formatVersion, counter,
-				sp.txn.meta.CurrentSpec(), sp.txn.meta.CurrentSchema(),
+				*currentSpec, sp.txn.meta.CurrentSchema(),
 				sp.snapshotID)
 			if err != nil {
 				return err
@@ -615,9 +618,12 @@ func (sp *snapshotProducer) summary(props iceberg.Properties) (Summary, error) {
 	ssc.setPartitionSummaryLimit(partitionSummaryLimit)
 
 	currentSchema := sp.txn.meta.CurrentSchema()
-	partitionSpec := sp.txn.meta.CurrentSpec()
+	partitionSpec, err := sp.txn.meta.CurrentSpec()
+	if err != nil || partitionSpec == nil {
+		return Summary{}, fmt.Errorf("could not get current partition spec: %w", err)
+	}
 	for _, df := range sp.addedFiles {
-		ssc.addFile(df, currentSchema, partitionSpec)
+		ssc.addFile(df, currentSchema, *partitionSpec)
 	}
 
 	if len(sp.deletedFiles) > 0 {
