@@ -1319,6 +1319,7 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 		partitionWriter.writers = &rollingDataWriters
 
 		workers := config.EnvConfig.MaxWorkers
+
 		return partitionWriter.Write(ctx, workers)
 	}
 }

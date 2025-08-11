@@ -1086,17 +1086,17 @@ func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *S
 	nameToID, idToType, idToSize := getFieldIDMap(fileSchema)
 
 	w := &ManifestWriter{
-		impl:       impl,
-		version:    version,
-		output:     out,
-		spec:       spec,
-		schema:     schema,
+		impl:              impl,
+		version:           version,
+		output:            out,
+		spec:              spec,
+		schema:            schema,
 		partFieldNameToID: nameToID,
 		partFieldIDToType: idToType,
 		partFieldIDToSize: idToSize,
-		snapshotID: snapshotID,
-		minSeqNum:  -1,
-		partitions: make([]map[int]any, 0),
+		snapshotID:        snapshotID,
+		minSeqNum:         -1,
+		partitions:        make([]map[int]any, 0),
 	}
 
 	md, err := w.meta()
@@ -1602,6 +1602,7 @@ func avroPartitionData(input map[int]any, logicalTypes map[int]avro.LogicalType,
 func convertToFixedArray(bytes []byte, size int) any {
 	arr := reflect.New(reflect.ArrayOf(size, reflect.TypeOf(byte(0)))).Elem()
 	reflect.Copy(arr, reflect.ValueOf(bytes))
+
 	return arr.Interface()
 }
 
@@ -1667,6 +1668,7 @@ func (d *dataFile) initializeMapData() {
 			for fieldName, id := range d.fieldNameToID {
 				if id == fieldID {
 					d.PartitionData[fieldName] = convertedValue
+
 					break
 				}
 			}
@@ -1678,7 +1680,7 @@ func (d *dataFile) setFieldNameToIDMap(m map[string]int) { d.fieldNameToID = m }
 func (d *dataFile) setFieldIDToLogicalTypeMap(m map[int]avro.LogicalType) {
 	d.fieldIDToLogicalType = m
 }
-func (d *dataFile) setFieldIDToFixedSizeMap(m map[int]int) { d.fieldIDToFixedSize = m}
+func (d *dataFile) setFieldIDToFixedSizeMap(m map[int]int) { d.fieldIDToFixedSize = m }
 
 func (d *dataFile) ContentType() ManifestEntryContent { return d.Content }
 func (d *dataFile) FilePath() string                  { return d.Path }

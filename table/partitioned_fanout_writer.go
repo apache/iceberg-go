@@ -26,8 +26,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
-	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
+	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/iceberg-go"
 	"golang.org/x/sync/errgroup"
 )
@@ -94,8 +94,8 @@ func (p *PartitionedFanoutWriter) startRecordFeeder(ctx context.Context, fanoutW
 			select {
 			case <-ctx.Done():
 				record.Release()
-				return context.Cause(ctx)
 
+				return context.Cause(ctx)
 			case inputRecordsCh <- record:
 			}
 		}
@@ -157,7 +157,8 @@ func (p *PartitionedFanoutWriter) yieldDataFiles(ctx context.Context, fanoutWork
 
 	return func(yield func(iceberg.DataFile, error) bool) {
 		defer func() {
-			for range outputDataFilesCh {}
+			for range outputDataFilesCh {
+			}
 		}()
 
 		for f := range outputDataFilesCh {
@@ -256,10 +257,13 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int) (iceberg.Literal
 
 	switch arr := column.(type) {
 	case *array.Date32:
+
 		return iceberg.NewLiteral(iceberg.Date(arr.Value(row))), nil
 	case *array.Time64:
+
 		return iceberg.NewLiteral(iceberg.Time(arr.Value(row))), nil
 	case *array.Timestamp:
+
 		return iceberg.NewLiteral(iceberg.Timestamp(arr.Value(row))), nil
 	case *array.Decimal32:
 		val := arr.Value(row)
@@ -267,6 +271,7 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int) (iceberg.Literal
 			Val:   decimal128.FromU64(uint64(val)),
 			Scale: int(arr.DataType().(*arrow.Decimal32Type).Scale),
 		}
+
 		return iceberg.NewLiteral(dec), nil
 	case *array.Decimal64:
 		val := arr.Value(row)
@@ -274,6 +279,7 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int) (iceberg.Literal
 			Val:   decimal128.FromU64(uint64(val)),
 			Scale: int(arr.DataType().(*arrow.Decimal64Type).Scale),
 		}
+
 		return iceberg.NewLiteral(dec), nil
 	case *array.Decimal128:
 		val := arr.Value(row)
@@ -281,8 +287,10 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int) (iceberg.Literal
 			Val:   val,
 			Scale: int(arr.DataType().(*arrow.Decimal128Type).Scale),
 		}
+
 		return iceberg.NewLiteral(dec), nil
 	case *extensions.UUIDArray:
+
 		return iceberg.NewLiteral(arr.Value(row)), nil
 	default:
 		val := column.GetOneForMarshal(row)
