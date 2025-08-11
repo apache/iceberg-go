@@ -22,7 +22,6 @@ import (
 	"iter"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -30,6 +29,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/config"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
@@ -137,10 +137,7 @@ func (s *FanoutWriterTestSuite) testTransformPartition(transform iceberg.Transfo
 	rollingDataWriters.stopCount = stopCount
 
 	partitionWriter.writers = &rollingDataWriters
-	workers := metaBuilder.props.GetInt(FanoutWriterWorkersKey, FanoutWriterWorkersDefault)
-	if workers <= 0 {
-		workers = runtime.NumCPU()
-	}
+	workers := config.EnvConfig.MaxWorkers
 
 	dataFiles := partitionWriter.Write(s.ctx, workers)
 

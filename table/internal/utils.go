@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"math"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -34,6 +35,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go"
+	"github.com/hamba/avro/v2"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -235,6 +237,9 @@ func (d *DataFileStatistics) PartitionValue(field iceberg.PartitionField, sc *ic
 
 func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.PartitionSpec, path string, format iceberg.FileFormat, filesize int64, partitionValues map[int]any) iceberg.DataFile {
 	var fieldIDToPartitionData map[int]any
+	fieldIDToLogicalType := make(map[int]avro.LogicalType)
+	fieldIDToFixedSize := make(map[int]int)
+
 	if !spec.Equals(*iceberg.UnpartitionedSpec) {
 		fieldIDToPartitionData = make(map[int]any)
 		for field := range spec.Fields() {
@@ -249,11 +254,36 @@ func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.Par
 			} else {
 				fieldIDToPartitionData[field.FieldID] = nil
 			}
+
+			if sourceField, ok := schema.FindFieldByID(field.SourceID); ok {
+				resultType := field.Transform.ResultType(sourceField.Type)
+
+				switch resultType.(type) {
+				case iceberg.DateType:
+					fieldIDToLogicalType[field.FieldID] = avro.Date
+				case iceberg.TimeType:
+					fieldIDToLogicalType[field.FieldID] = avro.TimeMicros
+				case iceberg.TimestampType:
+					fieldIDToLogicalType[field.FieldID] = avro.TimestampMicros
+				case iceberg.TimestampTzType:
+					fieldIDToLogicalType[field.FieldID] = avro.TimestampMicros
+				case iceberg.DecimalType:
+					fieldIDToLogicalType[field.FieldID] = avro.Decimal
+					decType := resultType.(iceberg.DecimalType)
+					byteSize := calculateDecimalByteSize(decType.Precision())
+					fieldIDToFixedSize[field.FieldID] = byteSize
+				case iceberg.FixedType:
+					fixedType := resultType.(iceberg.FixedType)
+					fieldIDToFixedSize[field.FieldID] = fixedType.Len()
+				case iceberg.UUIDType:
+					fieldIDToLogicalType[field.FieldID] = avro.UUID
+				}
+			}
 		}
 	}
 
 	bldr, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData,
-		path, format, fieldIDToPartitionData, d.RecordCount, filesize)
+		path, format, fieldIDToPartitionData, fieldIDToLogicalType, fieldIDToFixedSize, d.RecordCount, filesize)
 	if err != nil {
 		panic(err)
 	}
@@ -286,6 +316,19 @@ func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.Par
 	bldr.SplitOffsets(d.SplitOffsets)
 
 	return bldr.Build()
+}
+
+func calculateDecimalByteSize(precision int) int {
+	if precision <= 0 {
+		return 1
+	}
+	bitsNeeded := float64(precision)*math.Log2(10) + 1
+	bytesNeeded := int(math.Ceil(bitsNeeded / 8))
+	if bytesNeeded < 1 {
+		return 1
+	}
+
+	return bytesNeeded
 }
 
 type MetricModeType string
