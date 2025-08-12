@@ -449,6 +449,7 @@ func (df *deleteFiles) buildPartitionProjection(specID int) (iceberg.BooleanExpr
 	if err != nil {
 		return nil, err
 	}
+
 	return partitionFilter, nil
 }
 
@@ -459,6 +460,7 @@ func (df *deleteFiles) partitionFilters() *keyDefaultMap[int, iceberg.BooleanExp
 func (df *deleteFiles) buildManifestEvaluator(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
 	spec := df.base.spec(specID)
 	schema := df.base.txn.meta.CurrentSchema()
+
 	return newManifestEvaluator(
 		spec,
 		schema,
@@ -467,9 +469,9 @@ func (df *deleteFiles) buildManifestEvaluator(specID int) (func(iceberg.Manifest
 }
 
 func (df *deleteFiles) copyWithNewStatus(entry iceberg.ManifestEntry, status iceberg.ManifestEntryStatus) iceberg.ManifestEntry {
-	snapId := df.base.snapshotID
-	if status == iceberg.EntryStatusEXISTING {
-		snapId = entry.SnapshotID()
+	snapId := entry.SnapshotID()
+	if status == iceberg.EntryStatusDELETED {
+		snapId = df.base.snapshotID
 	}
 
 	seqNum := entry.SequenceNum()
@@ -484,6 +486,9 @@ func (df *deleteFiles) copyWithNewStatus(entry iceberg.ManifestEntry, status ice
 }
 
 func (df *deleteFiles) computeDeletes(predicate iceberg.BooleanExpression, caseSensitive bool) error {
+	df.predicate = predicate
+	df.caseSensitive = caseSensitive
+
 	schema := df.base.txn.meta.CurrentSchema()
 	manifestEvaluators := newKeyDefaultMapWrapErr(df.buildManifestEvaluator)
 	strictMetricsEvaluator, err := newStrictMetricsEvaluator(schema, predicate, caseSensitive, false)
@@ -561,7 +566,7 @@ func (df *deleteFiles) computeDeletes(predicate iceberg.BooleanExpression, caseS
 							return err
 						}
 						for _, entry := range keepEntries {
-							err = wr.Add(entry)
+							err = wr.Existing(entry)
 							if err != nil {
 								return err
 							}
@@ -597,6 +602,15 @@ func (df *deleteFiles) ensureComputed() error {
 	}
 
 	return nil
+}
+
+func (df *deleteFiles) rewriteNeeded() (bool, error) {
+	err := df.ensureComputed()
+	if err != nil {
+		return false, err
+	}
+
+	return df.partialRewrites, nil
 }
 
 func (df *deleteFiles) processManifests(manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
