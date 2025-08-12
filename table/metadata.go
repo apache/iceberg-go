@@ -623,7 +623,8 @@ func (b *MetadataBuilder) RemoveSnapshotRef(name string) (*MetadataBuilder, erro
 	}
 
 	if name == MainBranch {
-		return nil, errors.New("cannot remove main branch's snapshot ref")
+		b.currentSnapshotID = nil
+		b.snapshotLog = b.snapshotLog[:0]
 	}
 
 	delete(b.refs, name)
