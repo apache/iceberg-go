@@ -499,6 +499,10 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 	}, nil
 }
 
+func (t *Transaction) UpdateSchema() *UpdateSchema {
+	return NewUpdateSchema(t, t.meta.CurrentSchema(), t.tbl.metadata.LastColumnID())
+}
+
 func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 	t.mx.Lock()
 	defer t.mx.Unlock()
