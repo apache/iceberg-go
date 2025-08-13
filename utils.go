@@ -23,7 +23,6 @@ import (
 	"hash/maphash"
 	"maps"
 	"runtime/debug"
-	"strings"
 )
 
 var version string
@@ -31,12 +30,8 @@ var version string
 func init() {
 	version = "(unknown version)"
 	if info, ok := debug.ReadBuildInfo(); ok {
-		for _, dep := range info.Deps {
-			if strings.HasPrefix(dep.Path, "github.com/apache/iceberg-go") {
-				version = dep.Version
-
-				break
-			}
+		if info.Main.Version != "(devel)" {
+			version = info.Main.Version
 		}
 	}
 }
