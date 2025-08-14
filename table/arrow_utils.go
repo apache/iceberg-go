@@ -32,6 +32,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/config"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	tblutils "github.com/apache/iceberg-go/table/internal"
@@ -1222,7 +1223,7 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 			statistics := format.DataFileStatsFromMeta(rdr.Metadata(), must(computeStatsPlan(currentSchema, meta.props)),
 				must(format.PathToIDMapping(currentSchema)))
 
-			df := statistics.ToDataFile(currentSchema, currentSpec, filePath, iceberg.ParquetFile, rdr.SourceFileSize())
+			df := statistics.ToDataFile(currentSchema, currentSpec, filePath, iceberg.ParquetFile, rdr.SourceFileSize(), nil)
 			if !yield(df, nil) {
 				return
 			}
@@ -1298,6 +1299,7 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 	if err != nil || currentSpec == nil {
 		panic(fmt.Errorf("%w: cannot write files without a current spec", err))
 	}
+
 	nextCount, stopCount := iter.Pull(args.counter)
 	if currentSpec.IsUnpartitioned() {
 		tasks := func(yield func(WriteTask) bool) {
@@ -1317,8 +1319,17 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 			}
 		}
 
-		return writeFiles(ctx, rootLocation, args.fs, meta, tasks)
-	}
+		return writeFiles(ctx, rootLocation, args.fs, meta, nil, tasks)
+	} else {
+		partitionWriter := NewPartitionedFanoutWriter(*currentSpec, meta.CurrentSchema(), args.itr)
+		rollingDataWriters := NewWriterFactory(rootLocation, args, meta, taskSchema, targetFileSize)
+		rollingDataWriters.nextCount = nextCount
+		rollingDataWriters.stopCount = stopCount
 
-	panic(fmt.Errorf("%w: write stream with partitions", iceberg.ErrNotImplemented))
+		partitionWriter.writers = &rollingDataWriters
+
+		workers := config.EnvConfig.MaxWorkers
+
+		return partitionWriter.Write(ctx, workers)
+	}
 }
