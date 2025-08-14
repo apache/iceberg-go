@@ -258,7 +258,7 @@ func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.Par
 			if sourceField, ok := schema.FindFieldByID(field.SourceID); ok {
 				resultType := field.Transform.ResultType(sourceField.Type)
 
-				switch resultType.(type) {
+				switch rt := resultType.(type) {
 				case iceberg.DateType:
 					fieldIDToLogicalType[field.FieldID] = avro.Date
 				case iceberg.TimeType:
@@ -269,12 +269,10 @@ func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.Par
 					fieldIDToLogicalType[field.FieldID] = avro.TimestampMicros
 				case iceberg.DecimalType:
 					fieldIDToLogicalType[field.FieldID] = avro.Decimal
-					decType := resultType.(iceberg.DecimalType)
-					byteSize := calculateDecimalByteSize(decType.Precision())
+					byteSize := calculateDecimalByteSize(rt.Precision())
 					fieldIDToFixedSize[field.FieldID] = byteSize
 				case iceberg.FixedType:
-					fixedType := resultType.(iceberg.FixedType)
-					fieldIDToFixedSize[field.FieldID] = fixedType.Len()
+					fieldIDToFixedSize[field.FieldID] = rt.Len()
 				case iceberg.UUIDType:
 					fieldIDToLogicalType[field.FieldID] = avro.UUID
 				}
