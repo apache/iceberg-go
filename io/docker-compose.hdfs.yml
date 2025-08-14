@@ -1,0 +1,31 @@
+version: "3.8"
+
+services:
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.3.2-java8
+    container_name: hdfs-namenode
+    environment:
+      - CLUSTER_NAME=iceberg
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    volumes:
+      - namenode:/hadoop/dfs/name
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.3.2-java8
+    container_name: hdfs-datanode
+    environment:
+      - SERVICE_PRECONDITION=namenode:9870
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+    depends_on:
+      - namenode
+    ports:
+      - "9864:9864"
+      - "9866:9866"
+    volumes:
+      - datanode:/hadoop/dfs/data
+
+volumes:
+  namenode:
+  datanode:
