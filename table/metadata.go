@@ -1038,6 +1038,10 @@ func (c *commonMetadata) preValidate() {
 		c.CurrentSnapshotID = nil
 	}
 
+	if c.SnapshotRefs == nil {
+		c.SnapshotRefs = map[string]SnapshotRef{}
+	}
+
 	if c.CurrentSnapshotID != nil {
 		if _, ok := c.SnapshotRefs[MainBranch]; !ok {
 			c.SnapshotRefs[MainBranch] = SnapshotRef{
