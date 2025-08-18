@@ -658,20 +658,16 @@ func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) (
 
 	var icebergNamespaces []table.Identifier
 
-	for {
-		databasesResp, err := c.glueSvc.GetDatabases(ctx, params)
+	paginator := glue.NewGetDatabasesPaginator(c.glueSvc, params)
+	for paginator.HasMorePages() {
+		rsp, err := paginator.NextPage(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to list databases: %w", err)
 		}
-
-		icebergNamespaces = append(icebergNamespaces,
-			filterDatabaseListByType(databasesResp.DatabaseList, glueTypeIceberg)...)
-
-		if databasesResp.NextToken == nil {
-			break
+		
+		for _, database := range rsp.DatabaseList {
+			icebergNamespaces = append(icebergNamespaces, DatabaseIdentifier(aws.ToString(database.Name)))
 		}
-
-		params.NextToken = databasesResp.NextToken
 	}
 
 	return icebergNamespaces, nil
@@ -754,19 +750,6 @@ func filterTableListByType(database string, tableList []types.Table, tableType s
 			continue
 		}
 		filtered = append(filtered, TableIdentifier(database, aws.ToString(tbl.Name)))
-	}
-
-	return filtered
-}
-
-func filterDatabaseListByType(databases []types.Database, databaseType string) []table.Identifier {
-	var filtered []table.Identifier
-
-	for _, database := range databases {
-		if database.Parameters[databaseTypePropsKey] != databaseType {
-			continue
-		}
-		filtered = append(filtered, DatabaseIdentifier(aws.ToString(database.Name)))
 	}
 
 	return filtered
