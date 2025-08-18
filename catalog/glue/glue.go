@@ -43,10 +43,9 @@ import (
 const (
 	// Use the same conventions as in the pyiceberg project.
 	// See: https://github.com/apache/iceberg-python/blob/main/pyiceberg/catalog/__init__.py#L82-L96
-	glueTypeIceberg      = "ICEBERG"
-	databaseTypePropsKey = "database_type"
-	tableTypePropsKey    = "table_type"
-	descriptionPropsKey  = "Description"
+	glueTypeIceberg     = "ICEBERG"
+	tableTypePropsKey   = "table_type"
+	descriptionPropsKey = "Description"
 
 	// Database location.
 	locationPropsKey = "Location"
@@ -519,10 +518,7 @@ func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifie
 		return err
 	}
 
-	databaseParameters := map[string]string{
-		databaseTypePropsKey: glueTypeIceberg,
-	}
-
+	databaseParameters := map[string]string{}
 	description := props[descriptionPropsKey]
 	locationURI := props[locationPropsKey]
 
@@ -708,10 +704,6 @@ func (c *Catalog) getDatabase(ctx context.Context, databaseName string) (*types.
 		}
 
 		return nil, fmt.Errorf("failed to get namespace %s: %w", databaseName, err)
-	}
-
-	if database.Database.Parameters[databaseTypePropsKey] != glueTypeIceberg {
-		return nil, fmt.Errorf("namespace %s is not an iceberg namespace", databaseName)
 	}
 
 	return database.Database, nil
