@@ -19,6 +19,8 @@ package table
 
 import (
 	"encoding/json"
+	"os"
+	"path"
 	"slices"
 	"testing"
 
@@ -948,4 +950,17 @@ func TestMetadataV2Validation(t *testing.T) {
 
 	// Test case 3: Verify LastColumnId maintains 0 when explicitly set
 	require.NoError(t, meta3.UnmarshalJSON([]byte(zeroColumnID)))
+}
+
+func getTestTableMetadata(fileName string) (Metadata, error) {
+	fCont, err := os.ReadFile(path.Join("testdata", fileName))
+	if err != nil {
+		return nil, err
+	}
+	meta, err := ParseMetadataBytes(fCont)
+	if err != nil {
+		return nil, err
+	}
+
+	return meta, nil
 }

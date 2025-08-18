@@ -194,3 +194,22 @@ func TestCannotAddDuplicateSnapshotID(t *testing.T) {
 	_, err = builder.AddSnapshot(&snapshot)
 	require.ErrorContains(t, err, "can't add snapshot with id 2, already exists")
 }
+
+func TestRemoveMainSnapshotRef(t *testing.T) {
+	meta, err := getTestTableMetadata("TableMetadataV2Valid.json")
+	require.NoError(t, err)
+	require.NotNil(t, meta)
+	require.NotNil(t, meta.CurrentSnapshot())
+	builder, err := MetadataBuilderFromBase(meta)
+	require.NoError(t, err)
+	require.NotNil(t, builder.currentSnapshotID)
+	if _, ok := builder.refs[MainBranch]; !ok {
+		t.Fatal("expected main branch to exist")
+	}
+	_, err = builder.RemoveSnapshotRef(MainBranch)
+	require.NoError(t, err)
+	require.Nil(t, builder.currentSnapshotID)
+	meta, err = builder.Build()
+	require.NoError(t, err)
+	require.NotNil(t, meta)
+}

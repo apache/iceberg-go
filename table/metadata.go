@@ -623,7 +623,8 @@ func (b *MetadataBuilder) RemoveSnapshotRef(name string) (*MetadataBuilder, erro
 	}
 
 	if name == MainBranch {
-		return nil, errors.New("cannot remove main branch's snapshot ref")
+		b.currentSnapshotID = nil
+		b.snapshotLog = b.snapshotLog[:0]
 	}
 
 	delete(b.refs, name)
@@ -1035,6 +1036,10 @@ func (c *commonMetadata) preValidate() {
 		// treat -1 as the same as nil, clean this up in pre-validation
 		// to make the validation logic simplified later
 		c.CurrentSnapshotID = nil
+	}
+
+	if c.SnapshotRefs == nil {
+		c.SnapshotRefs = map[string]SnapshotRef{}
 	}
 
 	if c.CurrentSnapshotID != nil {
