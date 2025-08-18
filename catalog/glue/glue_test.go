@@ -411,7 +411,7 @@ func TestGlueListNamespaces(t *testing.T) {
 
 	databases, err := glueCatalog.ListNamespaces(context.TODO(), nil)
 	assert.NoError(err)
-	assert.Len(databases, 1)
+	assert.Len(databases, 2)
 	assert.Equal([]string{"test_database"}, databases[0])
 }
 
@@ -449,9 +449,8 @@ func TestGlueCreateNamespace(t *testing.T) {
 		DatabaseInput: &types.DatabaseInput{
 			Name: aws.String("test_namespace"),
 			Parameters: map[string]string{
-				databaseTypePropsKey: glueTypeIceberg,
-				descriptionPropsKey:  "Test Description",
-				locationPropsKey:     "s3://test-location",
+				descriptionPropsKey: "Test Description",
+				locationPropsKey:    "s3://test-location",
 			},
 		},
 	}, mock.Anything).Return(&glue.CreateDatabaseOutput{}, nil).Once()
@@ -651,8 +650,6 @@ func TestGlueUpdateNamespaceProperties(t *testing.T) {
 			assert := require.New(t)
 
 			mockGlueSvc := &mockGlueClient{}
-
-			tt.initial[databaseTypePropsKey] = glueTypeIceberg
 
 			mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
 				Name: aws.String("test_namespace"),
