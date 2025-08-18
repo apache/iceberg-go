@@ -664,7 +664,7 @@ func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) (
 		if err != nil {
 			return nil, fmt.Errorf("failed to list databases: %w", err)
 		}
-		
+
 		for _, database := range rsp.DatabaseList {
 			icebergNamespaces = append(icebergNamespaces, DatabaseIdentifier(aws.ToString(database.Name)))
 		}
