@@ -20,15 +20,16 @@ package table
 import (
 	"context"
 	"fmt"
-	"gocloud.dev/blob"
-	"golang.org/x/sync/errgroup"
 	stdfs "io/fs"
 	"net/url"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	iceio "github.com/apache/iceberg-go/io"
 )
@@ -54,8 +55,8 @@ func (p PrefixMismatchMode) String() string {
 	}
 }
 
-// OrphanCleanupConfig holds configuration for orphan file cleanup operations.
-type OrphanCleanupConfig struct {
+// orphanCleanupConfig holds configuration for orphan file cleanup operations.
+type orphanCleanupConfig struct {
 	location           string
 	olderThan          time.Time
 	dryRun             bool
@@ -66,22 +67,22 @@ type OrphanCleanupConfig struct {
 	equalAuthorities   map[string]string
 }
 
-type OrphanCleanupOption func(*OrphanCleanupConfig)
+type OrphanCleanupOption func(*orphanCleanupConfig)
 
 func WithLocation(location string) OrphanCleanupOption {
-	return func(cfg *OrphanCleanupConfig) {
+	return func(cfg *orphanCleanupConfig) {
 		cfg.location = location
 	}
 }
 
 func WithOlderThan(timestamp time.Time) OrphanCleanupOption {
-	return func(cfg *OrphanCleanupConfig) {
+	return func(cfg *orphanCleanupConfig) {
 		cfg.olderThan = timestamp
 	}
 }
 
 func WithDryRun(enabled bool) OrphanCleanupOption {
-	return func(cfg *OrphanCleanupConfig) {
+	return func(cfg *orphanCleanupConfig) {
 		cfg.dryRun = enabled
 	}
 }
@@ -89,7 +90,7 @@ func WithDryRun(enabled bool) OrphanCleanupOption {
 // WithDeleteFunc sets a custom delete function. If not provided, the table's FileIO
 // delete method will be used.
 func WithDeleteFunc(deleteFunc func(string) error) OrphanCleanupOption {
-	return func(cfg *OrphanCleanupConfig) {
+	return func(cfg *orphanCleanupConfig) {
 		cfg.deleteFunc = deleteFunc
 	}
 }
@@ -98,7 +99,7 @@ func WithDeleteFunc(deleteFunc func(string) error) OrphanCleanupOption {
 // Defaults to a reasonable number based on the system. Only used when deleteFunc is nil or when
 // the FileIO doesn't support bulk operations.
 func WithMaxConcurrency(maxWorkers int) OrphanCleanupOption {
-	return func(cfg *OrphanCleanupConfig) {
+	return func(cfg *orphanCleanupConfig) {
 		if maxWorkers > 0 {
 			cfg.maxConcurrency = maxWorkers
 		}
@@ -108,7 +109,7 @@ func WithMaxConcurrency(maxWorkers int) OrphanCleanupOption {
 // WithPrefixMismatchMode sets how to handle situations when metadata references files
 // that match listed files except for authority/scheme differences.
 func WithPrefixMismatchMode(mode PrefixMismatchMode) OrphanCleanupOption {
-	return func(cfg *OrphanCleanupConfig) {
+	return func(cfg *orphanCleanupConfig) {
 		cfg.prefixMismatchMode = mode
 	}
 }
@@ -117,7 +118,7 @@ func WithPrefixMismatchMode(mode PrefixMismatchMode) OrphanCleanupOption {
 // For example, map["s3,s3a,s3n"] = "s3" treats all S3 scheme variants as equivalent.
 // The key can be a comma-separated list of schemes that map to the value scheme.
 func WithEqualSchemes(schemes map[string]string) OrphanCleanupOption {
-	return func(cfg *OrphanCleanupConfig) {
+	return func(cfg *orphanCleanupConfig) {
 		if cfg.equalSchemes == nil {
 			cfg.equalSchemes = make(map[string]string)
 		}
@@ -131,7 +132,7 @@ func WithEqualSchemes(schemes map[string]string) OrphanCleanupOption {
 // For example, map["endpoint1.s3.amazonaws.com,endpoint2.s3.amazonaws.com"] = "s3.amazonaws.com"
 // treats different S3 endpoints as equivalent. The key can be a comma-separated list.
 func WithEqualAuthorities(authorities map[string]string) OrphanCleanupOption {
-	return func(cfg *OrphanCleanupConfig) {
+	return func(cfg *orphanCleanupConfig) {
 		if cfg.equalAuthorities == nil {
 			cfg.equalAuthorities = make(map[string]string)
 		}
@@ -147,8 +148,8 @@ type OrphanCleanupResult struct {
 	TotalSizeBytes      int64
 }
 
-func (t Table) DeleteOrphanFiles(ctx context.Context, opts ...OrphanCleanupOption) (*OrphanCleanupResult, error) {
-	cfg := &OrphanCleanupConfig{
+func (t Table) DeleteOrphanFiles(ctx context.Context, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
+	cfg := &orphanCleanupConfig{
 		location:           "",                           // empty means use table's data location
 		olderThan:          time.Now().AddDate(0, 0, -3), // 3 days ago
 		dryRun:             false,
@@ -167,10 +168,10 @@ func (t Table) DeleteOrphanFiles(ctx context.Context, opts ...OrphanCleanupOptio
 	return t.executeOrphanCleanup(ctx, cfg)
 }
 
-func (t Table) executeOrphanCleanup(ctx context.Context, cfg *OrphanCleanupConfig) (*OrphanCleanupResult, error) {
+func (t Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConfig) (OrphanCleanupResult, error) {
 	fs, err := t.fsF(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get filesystem: %w", err)
+		return OrphanCleanupResult{}, fmt.Errorf("failed to get filesystem: %w", err)
 	}
 
 	scanLocation := cfg.location
@@ -180,20 +181,20 @@ func (t Table) executeOrphanCleanup(ctx context.Context, cfg *OrphanCleanupConfi
 
 	referencedFiles, err := t.getReferencedFiles(fs)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get referenced files: %w", err)
+		return OrphanCleanupResult{}, fmt.Errorf("failed to get referenced files: %w", err)
 	}
 
 	allFiles, totalSize, err := t.scanFiles(fs, scanLocation, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to scan files: %w", err)
+		return OrphanCleanupResult{}, fmt.Errorf("failed to scan files: %w", err)
 	}
 
 	orphanFiles, err := identifyOrphanFiles(allFiles, referencedFiles, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to identify orphan files: %w", err)
+		return OrphanCleanupResult{}, fmt.Errorf("failed to identify orphan files: %w", err)
 	}
 
-	result := &OrphanCleanupResult{
+	result := OrphanCleanupResult{
 		OrphanFileLocations: orphanFiles,
 		TotalSizeBytes:      totalSize,
 	}
@@ -203,7 +204,7 @@ func (t Table) executeOrphanCleanup(ctx context.Context, cfg *OrphanCleanupConfi
 	}
 	deletedFiles, err := deleteFiles(fs, orphanFiles, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to delete orphan files: %w", err)
+		return OrphanCleanupResult{}, fmt.Errorf("failed to delete orphan files: %w", err)
 	}
 
 	result.DeletedFiles = deletedFiles
@@ -255,7 +256,7 @@ func (t Table) getReferencedFiles(fs iceio.IO) (map[string]bool, error) {
 	return referenced, nil
 }
 
-func (t Table) scanFiles(fs iceio.IO, location string, cfg *OrphanCleanupConfig) ([]string, int64, error) {
+func (t Table) scanFiles(fs iceio.IO, location string, cfg *orphanCleanupConfig) ([]string, int64, error) {
 	var allFiles []string
 	var totalSize int64
 
@@ -281,38 +282,19 @@ func (t Table) scanFiles(fs iceio.IO, location string, cfg *OrphanCleanupConfig)
 	return allFiles, totalSize, nil
 }
 
-func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {
-	// For blob storage
-	if strings.Contains(root, "://") {
-		return walkBlobStorage(fsys, root, fn)
-	}
+// getBucket gets the Bucket field from blob storage - absolute minimal approach
+func getBucket(fsys iceio.IO) stdfs.FS {
+	v := reflect.ValueOf(fsys).Elem() // We know it's a pointer to struct
 
-	// For local filesystem
-	if walkFS, ok := fsys.(iceio.WalkIO); ok {
-		return walkFS.Walk(root, fn)
-	}
-
-	return fmt.Errorf("filesystem does not support walking: %T", fsys)
+	return v.FieldByName("Bucket").Interface().(stdfs.FS)
 }
 
-func walkBlobStorage(fsys iceio.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {
-	var bucket *blob.Bucket
-	if !fsysAs(fsys, &bucket) {
-		return fmt.Errorf("cannot access blob storage for %s: filesystem does not support blob operations", root)
-	}
-
-	parsed, err := url.Parse(root)
-	if err != nil {
-		return fmt.Errorf("invalid URL %s: %w", root, err)
-	}
-
-	bucketPath := strings.TrimPrefix(parsed.Path, "/")
-
-	return stdfs.WalkDir(bucket, bucketPath, func(path string, d stdfs.DirEntry, err error) error {
+// makeFileWalkFunc creates a WalkDirFunc that processes only files with path transformation
+func makeFileWalkFunc(fn func(path string, info stdfs.FileInfo) error, pathTransform func(string) string) stdfs.WalkDirFunc {
+	return func(path string, d stdfs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-
 		if d.IsDir() {
 			return nil
 		}
@@ -321,26 +303,45 @@ func walkBlobStorage(fsys iceio.IO, root string, fn func(path string, info stdfs
 		if err != nil {
 			return err
 		}
-		fullPath := parsed.Scheme + "://" + parsed.Host + "/" + path
 
-		return fn(fullPath, info)
-	})
+		return fn(pathTransform(path), info)
+	}
 }
 
-// fsysAs is a helper function to extract the underlying blob.Bucket from iceio.IO
-func fsysAs(fsys iceio.IO, target interface{}) bool {
-	type asInterface interface {
-		As(interface{}) bool
-	}
+func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {
+	switch v := fsys.(type) {
+	case iceio.LocalFS:
+		cleanRoot := strings.TrimPrefix(root, "file://")
+		if cleanRoot == "" {
+			cleanRoot = "."
+		}
 
-	if asFS, ok := fsys.(asInterface); ok {
-		return asFS.As(target)
-	}
+		return filepath.WalkDir(cleanRoot, makeFileWalkFunc(fn, func(path string) string {
+			return path
+		}))
 
-	return false
+	default:
+		// For blob storage: direct field access since we know the structure
+		bucket := getBucket(v)
+
+		parsed, err := url.Parse(root)
+		if err != nil {
+			return fmt.Errorf("invalid URL %s: %w", root, err)
+		}
+
+		walkPath := strings.TrimPrefix(parsed.Path, "/")
+		if walkPath == "" {
+			walkPath = "."
+		}
+
+		// URL transform - reconstruct full URL path
+		return stdfs.WalkDir(bucket, walkPath, makeFileWalkFunc(fn, func(path string) string {
+			return parsed.Scheme + "://" + parsed.Host + "/" + path
+		}))
+	}
 }
 
-func identifyOrphanFiles(allFiles []string, referencedFiles map[string]bool, cfg *OrphanCleanupConfig) ([]string, error) {
+func identifyOrphanFiles(allFiles []string, referencedFiles map[string]bool, cfg *orphanCleanupConfig) ([]string, error) {
 	normalizedReferencedFiles := make(map[string]string)
 	for refPath := range referencedFiles {
 		normalizedPath := normalizeFilePath(refPath, cfg)
@@ -365,7 +366,7 @@ func identifyOrphanFiles(allFiles []string, referencedFiles map[string]bool, cfg
 	return orphans, nil
 }
 
-func isFileOrphan(file string, referencedFiles map[string]bool, normalizedReferencedFiles map[string]string, cfg *OrphanCleanupConfig) (bool, error) {
+func isFileOrphan(file string, referencedFiles map[string]bool, normalizedReferencedFiles map[string]string, cfg *orphanCleanupConfig) (bool, error) {
 	normalizedFile := normalizeFilePath(file, cfg)
 
 	if referencedFiles[file] || referencedFiles[normalizedFile] {
@@ -384,7 +385,7 @@ func isFileOrphan(file string, referencedFiles map[string]bool, normalizedRefere
 	return true, nil
 }
 
-func deleteFiles(fs iceio.IO, orphanFiles []string, cfg *OrphanCleanupConfig) ([]string, error) {
+func deleteFiles(fs iceio.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
 	if len(orphanFiles) == 0 {
 		return nil, nil
 	}
@@ -396,7 +397,7 @@ func deleteFiles(fs iceio.IO, orphanFiles []string, cfg *OrphanCleanupConfig) ([
 	return deleteFilesParallel(fs, orphanFiles, cfg)
 }
 
-func deleteFilesSequential(fs iceio.IO, orphanFiles []string, cfg *OrphanCleanupConfig) ([]string, error) {
+func deleteFilesSequential(fs iceio.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
 	var deletedFiles []string
 
 	deleteFunc := fs.Remove
@@ -419,7 +420,7 @@ func deleteFilesSequential(fs iceio.IO, orphanFiles []string, cfg *OrphanCleanup
 	return deletedFiles, nil
 }
 
-func deleteFilesParallel(fs iceio.IO, orphanFiles []string, cfg *OrphanCleanupConfig) ([]string, error) {
+func deleteFilesParallel(fs iceio.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
 	deleteFunc := fs.Remove
 	if cfg.deleteFunc != nil {
 		deleteFunc = cfg.deleteFunc
@@ -461,7 +462,7 @@ func deleteFilesParallel(fs iceio.IO, orphanFiles []string, cfg *OrphanCleanupCo
 // normalizeFilePath normalizes file paths for comparison by handling different
 // path representations that might refer to the same file, with support for
 // scheme/authority equivalence as specified in the configuration.
-func normalizeFilePath(path string, cfg *OrphanCleanupConfig) string {
+func normalizeFilePath(path string, cfg *orphanCleanupConfig) string {
 	// Handle URL-based paths (s3://, gs://, etc.)
 	if strings.Contains(path, "://") {
 		return normalizeURLPath(path, cfg)
@@ -471,7 +472,7 @@ func normalizeFilePath(path string, cfg *OrphanCleanupConfig) string {
 }
 
 // normalizeURLPath normalizes URL-based file paths with scheme/authority equivalence
-func normalizeURLPath(path string, cfg *OrphanCleanupConfig) string {
+func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
 	parsedURL, err := url.Parse(path)
 	if err != nil {
 		return normalizeNonURLPath(path)
@@ -542,7 +543,7 @@ func applyAuthorityEquivalence(authority string, equalAuthorities map[string]str
 }
 
 // checkPrefixMismatch detects and handles prefix mismatches between referenced files and filesystem files
-func checkPrefixMismatch(referencedPath, filesystemPath string, cfg *OrphanCleanupConfig) error {
+func checkPrefixMismatch(referencedPath, filesystemPath string, cfg *orphanCleanupConfig) error {
 	// Parse both paths as URLs to compare schemes and authorities
 	refURL, refErr := url.Parse(referencedPath)
 	fsURL, fsErr := url.Parse(filesystemPath)

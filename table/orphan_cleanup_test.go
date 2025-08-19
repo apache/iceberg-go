@@ -44,7 +44,7 @@ func TestPrefixMismatchMode_String(t *testing.T) {
 }
 
 func TestOrphanCleanupOptions(t *testing.T) {
-	cfg := &OrphanCleanupConfig{}
+	cfg := &orphanCleanupConfig{}
 
 	WithLocation("/test/location")(cfg)
 	assert.Equal(t, "/test/location", cfg.location)
@@ -76,7 +76,7 @@ func TestOrphanCleanupOptions(t *testing.T) {
 }
 
 func TestNormalizeFilePath(t *testing.T) {
-	cfg := &OrphanCleanupConfig{
+	cfg := &orphanCleanupConfig{
 		equalSchemes:     map[string]string{"s3,s3a,s3n": "s3"},
 		equalAuthorities: map[string]string{"endpoint1,endpoint2": "canonical"},
 	}
@@ -235,7 +235,7 @@ func TestApplyAuthorityEquivalence(t *testing.T) {
 }
 
 func TestCheckPrefixMismatch(t *testing.T) {
-	cfg := &OrphanCleanupConfig{
+	cfg := &orphanCleanupConfig{
 		prefixMismatchMode: PrefixMismatchError,
 		equalSchemes:       map[string]string{"s3,s3a,s3n": "s3"},
 		equalAuthorities:   map[string]string{"host1,host2": "canonical"},
@@ -314,7 +314,7 @@ func TestCheckPrefixMismatch(t *testing.T) {
 }
 
 func TestIsFileOrphan(t *testing.T) {
-	cfg := &OrphanCleanupConfig{
+	cfg := &orphanCleanupConfig{
 		prefixMismatchMode: PrefixMismatchIgnore,
 		equalSchemes:       map[string]string{"s3,s3a,s3n": "s3"},
 	}
@@ -373,7 +373,7 @@ func TestIsFileOrphan(t *testing.T) {
 }
 
 func TestIdentifyOrphanFiles(t *testing.T) {
-	cfg := &OrphanCleanupConfig{
+	cfg := &orphanCleanupConfig{
 		prefixMismatchMode: PrefixMismatchIgnore,
 	}
 
@@ -401,7 +401,7 @@ func TestIdentifyOrphanFiles(t *testing.T) {
 }
 
 func TestNormalizeURLPath(t *testing.T) {
-	cfg := &OrphanCleanupConfig{
+	cfg := &orphanCleanupConfig{
 		equalSchemes:     map[string]string{"s3,s3a,s3n": "s3"},
 		equalAuthorities: map[string]string{"host1,host2": "canonical"},
 	}
@@ -442,7 +442,7 @@ func TestNormalizeURLPath(t *testing.T) {
 }
 
 func TestNormalizeURLPath_InvalidURL(t *testing.T) {
-	cfg := &OrphanCleanupConfig{}
+	cfg := &orphanCleanupConfig{}
 
 	result := normalizeURLPath("not-a-valid-url", cfg)
 	expected := normalizeNonURLPath("not-a-valid-url")
@@ -451,7 +451,7 @@ func TestNormalizeURLPath_InvalidURL(t *testing.T) {
 
 func TestOrphanCleanup_EdgeCases(t *testing.T) {
 	t.Run("prefix_mismatch_unknown_mode", func(t *testing.T) {
-		cfg := &OrphanCleanupConfig{
+		cfg := &orphanCleanupConfig{
 			prefixMismatchMode: PrefixMismatchMode(999), // Invalid mode
 		}
 

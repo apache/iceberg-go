@@ -82,14 +82,6 @@ type WriteFileIO interface {
 	WriteFile(name string, p []byte) error
 }
 
-type WalkIO interface {
-	IO
-
-	// Walk the file tree at root, calling fn for each file or
-	// directory in the tree, including root.
-	Walk(root string, fn func(path string, info fs.FileInfo) error) error
-}
-
 // A File provides access to a single file. The File interface is the
 // minimum implementation required for Iceberg to interact with a file.
 // Directory files should also implement
