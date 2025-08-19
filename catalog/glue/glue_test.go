@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -106,7 +107,8 @@ func (m *mockGlueClient) UpdateTable(ctx context.Context, params *glue.UpdateTab
 }
 
 var testIcebergGlueTable1 = types.Table{
-	Name: aws.String("test_table"),
+	Name:         aws.String("test_table"),
+	DatabaseName: aws.String("test_database"),
 	Parameters: map[string]string{
 		tableTypePropsKey:        "ICEBERG",
 		metadataLocationPropsKey: "s3://test-bucket/test_table/metadata/abc123-123.metadata.json",
@@ -114,7 +116,8 @@ var testIcebergGlueTable1 = types.Table{
 }
 
 var testIcebergGlueTable2 = types.Table{
-	Name: aws.String("test_table2"),
+	Name:         aws.String("test_table2"),
+	DatabaseName: aws.String("test_database"),
 	Parameters: map[string]string{
 		tableTypePropsKey:        "ICEBERG",
 		metadataLocationPropsKey: "s3://test-bucket/test_table/metadata/abc456-456.metadata.json",
@@ -122,7 +125,8 @@ var testIcebergGlueTable2 = types.Table{
 }
 
 var testIcebergGlueTable3 = types.Table{
-	Name: aws.String("test_table3"),
+	Name:         aws.String("test_table3"),
+	DatabaseName: aws.String("test_database"),
 	Parameters: map[string]string{
 		tableTypePropsKey:        "ICEBERG",
 		metadataLocationPropsKey: "s3://test-bucket/test_table/metadata/abc789-789.metadata.json",
@@ -130,7 +134,8 @@ var testIcebergGlueTable3 = types.Table{
 }
 
 var testIcebergGlueTable4 = types.Table{
-	Name: aws.String("test_table4"),
+	Name:         aws.String("test_table4"),
+	DatabaseName: aws.String("test_database"),
 	Parameters: map[string]string{
 		tableTypePropsKey:        "ICEBERG",
 		metadataLocationPropsKey: "s3://test-bucket/test_table/metadata/abc123-789.metadata.json",
@@ -138,7 +143,8 @@ var testIcebergGlueTable4 = types.Table{
 }
 
 var testIcebergGlueTable5 = types.Table{
-	Name: aws.String("test_table5"),
+	Name:         aws.String("test_table5"),
+	DatabaseName: aws.String("test_database"),
 	Parameters: map[string]string{
 		tableTypePropsKey:        "ICEBERG",
 		metadataLocationPropsKey: "s3://test-bucket/test_table/metadata/abc12345-789.metadata.json",
@@ -146,7 +152,8 @@ var testIcebergGlueTable5 = types.Table{
 }
 
 var testIcebergGlueTable6 = types.Table{
-	Name: aws.String("test_table6"),
+	Name:         aws.String("test_table6"),
+	DatabaseName: aws.String("test_database"),
 	Parameters: map[string]string{
 		tableTypePropsKey:        "iceberg",
 		metadataLocationPropsKey: "s3://test-bucket/test_table/metadata/abc123456-789.metadata.json",
@@ -692,7 +699,8 @@ func TestGlueRenameTable(t *testing.T) {
 		Name:         aws.String("test_table"),
 	}, mock.Anything).Return(&glue.GetTableOutput{
 		Table: &types.Table{
-			Name: aws.String("test_table"),
+			Name:         aws.String("test_table"),
+			DatabaseName: aws.String("test_database"),
 			Parameters: map[string]string{
 				tableTypePropsKey: glueTypeIceberg,
 			},
@@ -707,7 +715,8 @@ func TestGlueRenameTable(t *testing.T) {
 		Name:         aws.String("new_test_table"),
 	}, mock.Anything).Return(&glue.GetTableOutput{
 		Table: &types.Table{
-			Name: aws.String("new_test_table"),
+			Name:         aws.String("new_test_table"),
+			DatabaseName: aws.String("test_database"),
 			Parameters: map[string]string{
 				tableTypePropsKey:        glueTypeIceberg,
 				metadataLocationPropsKey: "s3://test-bucket/new_test_table/metadata/abc123-123.metadata.json",
@@ -1301,4 +1310,112 @@ func cleanupTable(t *testing.T, ctlg catalog.Catalog, tbIdent table.Identifier, 
 			}
 		}
 	}
+}
+
+func TestCommitTableOptimisticLockingIntegration(t *testing.T) {
+	if os.Getenv("TEST_DATABASE_NAME") == "" {
+		t.Skip("Skipping integration test: TEST_DATABASE_NAME not set")
+	}
+	if os.Getenv("TEST_TABLE_LOCATION") == "" {
+		t.Skip("Skipping integration test: TEST_TABLE_LOCATION not set")
+	}
+
+	assert := require.New(t)
+	dbName := os.Getenv("TEST_DATABASE_NAME")
+	metadataLocation := os.Getenv("TEST_TABLE_LOCATION")
+	tbName := fmt.Sprintf("optimistic_lock_test_%d", time.Now().UnixNano())
+	tbIdent := TableIdentifier(dbName, tbName)
+
+	schema := iceberg.NewSchemaWithIdentifiers(0, []int{},
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String})
+
+	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
+	assert.NoError(err)
+
+	ctlg := NewCatalog(WithAwsConfig(awsCfg))
+
+	createOpts := []catalog.CreateTableOpt{
+		catalog.WithLocation(metadataLocation),
+		catalog.WithProperties(iceberg.Properties{
+			"test.created": "true",
+		}),
+	}
+	_, err = ctlg.CreateTable(context.TODO(), tbIdent, schema, createOpts...)
+	assert.NoError(err)
+
+	defer cleanupTable(t, ctlg, tbIdent, awsCfg)
+
+	testTable, err := ctlg.LoadTable(context.TODO(), tbIdent, nil)
+	assert.NoError(err)
+
+	t.Run("successful_commit_with_optimistic_locking", func(t *testing.T) {
+		updateProps := table.NewSetPropertiesUpdate(map[string]string{
+			"test.optimistic.lock": "success",
+			"test.timestamp":       strconv.FormatInt(time.Now().Unix(), 10),
+		})
+
+		metadata, metadataLoc, err := ctlg.CommitTable(
+			context.TODO(),
+			testTable,
+			nil,
+			[]table.Update{updateProps},
+		)
+		assert.NoError(err, "First commit should succeed with optimistic locking")
+		assert.NotNil(metadata, "Metadata should be returned")
+		assert.NotEmpty(metadataLoc, "Metadata location should be returned")
+
+		assert.Equal("success", metadata.Properties()["test.optimistic.lock"])
+	})
+
+	t.Run("concurrent_commit_optimistic_locking", func(t *testing.T) {
+		initialTable, err := ctlg.LoadTable(context.TODO(), tbIdent, nil)
+		assert.NoError(err, "Should load initial table successfully")
+
+		numGoroutines := 3
+		results := make(chan error, numGoroutines)
+
+		for i := range numGoroutines {
+			go func(id int) {
+				update := table.NewSetPropertiesUpdate(map[string]string{
+					fmt.Sprintf("test.concurrent.%d", id): fmt.Sprintf("goroutine_%d", id),
+					"test.timestamp":                      strconv.FormatInt(time.Now().UnixNano(), 10),
+				})
+
+				_, _, err := ctlg.CommitTable(
+					context.TODO(),
+					initialTable, // Using the same initial table state across all goroutines
+					nil,
+					[]table.Update{update},
+				)
+
+				results <- err
+			}(i)
+		}
+
+		successCount := 0
+		failCount := 0
+		var errors []error
+
+		for range numGoroutines {
+			err := <-results
+			if err != nil {
+				failCount++
+				errors = append(errors, err)
+			} else {
+				successCount++
+			}
+		}
+
+		assert.True(successCount == 1, "At least one concurrent commit should succeed")
+
+		if failCount == numGoroutines-1 {
+			t.Logf("✅ Optimistic locking is working: %d commits failed as expected", failCount)
+			for i, err := range errors {
+				t.Logf("  Error %d: %v", i+1, err)
+			}
+		} else {
+			t.Logf("⚠️  All concurrent commits succeeded - this suggests optimistic locking may not be as strict as expected")
+		}
+	})
 }

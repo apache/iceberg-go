@@ -58,6 +58,11 @@ const (
 	// See: https://docs.aws.amazon.com/glue/latest/dg/aws-glue-api-catalog-databases.html
 	CatalogIdKey = "glue.id"
 
+	// Skip archiving old table versions on commits. Recommended for high-frequency
+	// streaming workloads to avoid hitting Glue's archive limits.
+	SkipArchive        = "glue.skip-archive"
+	SkipArchiveDefault = true
+
 	AccessKeyID     = "glue.access-key-id"
 	SecretAccessKey = "glue.secret-access-key"
 	SessionToken    = "glue.session-token"
@@ -208,34 +213,12 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, pr
 		return nil, err
 	}
 
-	if props == nil {
-		props = map[string]string{}
-	}
-
 	glueTable, err := c.getTable(ctx, database, tableName)
 	if err != nil {
 		return nil, err
 	}
 
-	location, ok := glueTable.Parameters[metadataLocationPropsKey]
-	if !ok {
-		return nil, fmt.Errorf("missing metadata location for table %s.%s", database, tableName)
-	}
-
-	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
-
-	icebergTable, err := table.NewFromLocation(
-		ctx,
-		identifier,
-		location,
-		io.LoadFSFunc(props, location),
-		c,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create table from location %s.%s: %w", database, tableName, err)
-	}
-
-	return icebergTable, nil
+	return c.convertGlueToIceberg(ctx, glueTable)
 }
 
 func (c *Catalog) CatalogType() catalog.Type {
@@ -365,13 +348,22 @@ func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, requirement
 	if err != nil {
 		return nil, "", err
 	}
-	current, err := c.LoadTable(ctx, tbl.Identifier(), nil)
+
+	currentGlueTable, err := c.getTable(ctx, database, tableName)
 	if err != nil && !errors.Is(err, catalog.ErrNoSuchTable) {
 		return nil, "", err
 	}
 
+	var current *table.Table
+	if currentGlueTable != nil {
+		current, err = c.convertGlueToIceberg(ctx, currentGlueTable)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+
 	// Create a staging table with the updates applied
-	staged, err := internal.UpdateAndStageTable(ctx, tbl, tbl.Identifier(), requirements, updates, c)
+	staged, err := internal.UpdateAndStageTable(ctx, current, tbl.Identifier(), requirements, updates, c)
 	if err != nil {
 		return nil, "", err
 	}
@@ -382,18 +374,35 @@ func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, requirement
 		return nil, "", err
 	}
 
-	// Build and call Glue update request
 	tableInput, err := buildGlueTableInput(ctx, database, tableName, staged, c)
 	if err != nil {
 		return nil, "", err
 	}
-	_, err = c.glueSvc.UpdateTable(ctx, &glue.UpdateTableInput{
-		CatalogId:    c.catalogId,
-		DatabaseName: aws.String(database),
-		TableInput:   tableInput,
-	})
-	if err != nil {
-		return nil, "", err
+
+	if current != nil {
+		if currentGlueTable.VersionId == nil {
+			return nil, "", fmt.Errorf("cannot commit table %s.%s: because Glue table version id is missing", database, tableName)
+		}
+		_, err = c.glueSvc.UpdateTable(ctx, &glue.UpdateTableInput{
+			CatalogId:    c.catalogId,
+			DatabaseName: aws.String(database),
+			TableInput:   tableInput,
+			// use `VersionId` to implement optimistic locking
+			VersionId:   currentGlueTable.VersionId,
+			SkipArchive: aws.Bool(c.props.GetBool(SkipArchive, SkipArchiveDefault)),
+		})
+		if err != nil {
+			return nil, "", err
+		}
+	} else {
+		_, err = c.glueSvc.CreateTable(ctx, &glue.CreateTableInput{
+			CatalogId:    c.catalogId,
+			DatabaseName: aws.String(database),
+			TableInput:   tableInput,
+		})
+		if err != nil {
+			return nil, "", err
+		}
 	}
 
 	return staged.Metadata(), staged.MetadataLocation(), err
@@ -692,6 +701,49 @@ func (c *Catalog) getTable(ctx context.Context, database, tableName string) (*ty
 	}
 
 	return tblRes.Table, nil
+}
+
+func (c *Catalog) convertGlueToIceberg(ctx context.Context, glueTable *types.Table) (*table.Table, error) {
+	if glueTable == nil {
+		return nil, errors.New("missing table")
+	}
+
+	if glueTable.Name == nil {
+		return nil, errors.New("missing table name")
+	}
+
+	tableName := aws.ToString(glueTable.Name)
+
+	if glueTable.DatabaseName == nil {
+		return nil, fmt.Errorf("missing database name for table %s", tableName)
+	}
+	database := aws.ToString(glueTable.DatabaseName)
+
+	if len(glueTable.Parameters) == 0 {
+		return nil, fmt.Errorf("missing parameters for table %s", tableName)
+	}
+
+	if glueTable.Parameters[tableTypePropsKey] != glueTypeIceberg {
+		return nil, fmt.Errorf("table %s.%s is not an iceberg table", database, tableName)
+	}
+
+	metadataLocation, ok := glueTable.Parameters[metadataLocationPropsKey]
+	if !ok {
+		return nil, fmt.Errorf("missing metadata location for table %s", tableName)
+	}
+
+	icebergTable, err := table.NewFromLocation(
+		utils.WithAwsConfig(ctx, c.awsCfg),
+		TableIdentifier(database, tableName),
+		metadataLocation,
+		io.LoadFSFunc(nil, metadataLocation),
+		c,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create iceberg table from location %s: %w", metadataLocation, err)
+	}
+
+	return icebergTable, nil
 }
 
 // GetDatabase loads a database from the Glue Catalog using the given database name.
