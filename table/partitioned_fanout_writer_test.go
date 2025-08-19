@@ -132,7 +132,7 @@ func (s *FanoutWriterTestSuite) testTransformPartition(transform iceberg.Transfo
 	s.Require().NoError(err)
 
 	nextCount, stopCount := iter.Pull(args.counter)
-	partitionWriter := NewPartitionedFanoutWriter(spec, taskSchema, args.itr)
+	partitionWriter := newPartitionedFanoutWriter(spec, taskSchema, args.itr)
 	rollingDataWriters := NewWriterFactory(loc, args, metaBuilder, icebergSchema, 1024*1024)
 	rollingDataWriters.nextCount = nextCount
 	rollingDataWriters.stopCount = stopCount

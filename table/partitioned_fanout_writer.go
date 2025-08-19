@@ -35,38 +35,38 @@ import (
 // PartitionedFanoutWriter distributes Arrow records across multiple partitions based on
 // a partition specification, writing data to separate files for each partition using
 // a fanout pattern with configurable parallelism.
-type PartitionedFanoutWriter struct {
+type partitionedFanoutWriter struct {
 	partitionSpec iceberg.PartitionSpec
 	schema        *iceberg.Schema
 	itr           iter.Seq2[arrow.Record, error]
-	writers       *WriterFactory
+	writers       *writerFactory
 }
 
 // PartitionInfo holds the row indices and partition values for a specific partition,
 // used during the fanout process to group rows by their partition key.
-type PartitionInfo struct {
+type partitionInfo struct {
 	rows            []int64
 	partitionValues map[int]any
 }
 
 // NewPartitionedFanoutWriter creates a new PartitionedFanoutWriter with the specified
 // partition specification, schema, and record iterator.
-func NewPartitionedFanoutWriter(partitionSpec iceberg.PartitionSpec, schema *iceberg.Schema, itr iter.Seq2[arrow.Record, error]) *PartitionedFanoutWriter {
-	return &PartitionedFanoutWriter{
+func newPartitionedFanoutWriter(partitionSpec iceberg.PartitionSpec, schema *iceberg.Schema, itr iter.Seq2[arrow.Record, error]) *partitionedFanoutWriter {
+	return &partitionedFanoutWriter{
 		partitionSpec: partitionSpec,
 		schema:        schema,
 		itr:           itr,
 	}
 }
 
-func (p *PartitionedFanoutWriter) partitionPath(data partitionRecord) string {
+func (p *partitionedFanoutWriter) partitionPath(data partitionRecord) string {
 	return p.partitionSpec.PartitionToPath(data, p.schema)
 }
 
 // Write writes the Arrow records to the specified location using a fanout pattern with
 // the specified number of workers. The returned iterator yields the data files written
 // by the fanout process.
-func (p *PartitionedFanoutWriter) Write(ctx context.Context, workers int) iter.Seq2[iceberg.DataFile, error] {
+func (p *partitionedFanoutWriter) Write(ctx context.Context, workers int) iter.Seq2[iceberg.DataFile, error] {
 	inputRecordsCh := make(chan arrow.Record, workers)
 	outputDataFilesCh := make(chan iceberg.DataFile, workers)
 
@@ -82,7 +82,7 @@ func (p *PartitionedFanoutWriter) Write(ctx context.Context, workers int) iter.S
 	return p.yieldDataFiles(ctx, fanoutWorkers, outputDataFilesCh)
 }
 
-func (p *PartitionedFanoutWriter) startRecordFeeder(ctx context.Context, fanoutWorkers *errgroup.Group, inputRecordsCh chan<- arrow.Record) {
+func (p *partitionedFanoutWriter) startRecordFeeder(ctx context.Context, fanoutWorkers *errgroup.Group, inputRecordsCh chan<- arrow.Record) {
 	fanoutWorkers.Go(func() error {
 		defer close(inputRecordsCh)
 
@@ -104,7 +104,7 @@ func (p *PartitionedFanoutWriter) startRecordFeeder(ctx context.Context, fanoutW
 	})
 }
 
-func (p *PartitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-chan arrow.Record, dataFilesChannel chan<- iceberg.DataFile) error {
+func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-chan arrow.Record, dataFilesChannel chan<- iceberg.DataFile) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -147,7 +147,7 @@ func (p *PartitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 	}
 }
 
-func (p *PartitionedFanoutWriter) yieldDataFiles(ctx context.Context, fanoutWorkers *errgroup.Group, outputDataFilesCh chan iceberg.DataFile) iter.Seq2[iceberg.DataFile, error] {
+func (p *partitionedFanoutWriter) yieldDataFiles(ctx context.Context, fanoutWorkers *errgroup.Group, outputDataFilesCh chan iceberg.DataFile) iter.Seq2[iceberg.DataFile, error] {
 	var err error
 	go func() {
 		defer close(outputDataFilesCh)
@@ -173,8 +173,8 @@ func (p *PartitionedFanoutWriter) yieldDataFiles(ctx context.Context, fanoutWork
 	}
 }
 
-func (p *PartitionedFanoutWriter) getPartitionMap(record arrow.Record) (map[string]PartitionInfo, error) {
-	partitionMap := make(map[string]PartitionInfo)
+func (p *partitionedFanoutWriter) getPartitionMap(record arrow.Record) (map[string]partitionInfo, error) {
+	partitionMap := make(map[string]partitionInfo)
 	partitionFields := p.partitionSpec.PartitionType(p.schema).FieldList
 	partitionRec := make(partitionRecord, len(partitionFields))
 

@@ -1613,14 +1613,12 @@ func convertDefaultValue(v any, fixedSize int) any {
 }
 
 func padOrTruncateBytes(bytes []byte, size int) []byte {
-	fixedBytes := make([]byte, size)
-	if len(bytes) <= size {
-		copy(fixedBytes[size-len(bytes):], bytes)
-	} else {
-		copy(fixedBytes[:], bytes[len(bytes)-size:])
+	if len(bytes) >= size {
+		return bytes[len(bytes)-size:]
 	}
+	padded := slices.Grow(bytes, size-len(bytes))
 
-	return fixedBytes
+	return append(make([]byte, size-len(bytes)), padded...)
 }
 
 func convertToFixedArray(bytes []byte, size int) any {

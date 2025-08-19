@@ -31,7 +31,7 @@ import (
 // WriterFactory manages the creation and lifecycle of RollingDataWriter instances
 // for different partitions, providing shared configuration and coordination
 // across all writers in a partitioned write operation.
-type WriterFactory struct {
+type writerFactory struct {
 	rootLocation   string
 	args           recordWritingArgs
 	meta           *MetadataBuilder
@@ -45,8 +45,8 @@ type WriterFactory struct {
 
 // NewWriterFactory creates a new WriterFactory with the specified configuration
 // for managing rolling data writers across partitions.
-func NewWriterFactory(rootLocation string, args recordWritingArgs, meta *MetadataBuilder, taskSchema *iceberg.Schema, targetFileSize int64) WriterFactory {
-	return WriterFactory{
+func NewWriterFactory(rootLocation string, args recordWritingArgs, meta *MetadataBuilder, taskSchema *iceberg.Schema, targetFileSize int64) writerFactory {
+	return writerFactory{
 		rootLocation:   rootLocation,
 		args:           args,
 		meta:           meta,
@@ -62,14 +62,14 @@ type RollingDataWriter struct {
 	partitionKey    string
 	data            []arrow.Record
 	currentSize     int64
-	factory         *WriterFactory
+	factory         *writerFactory
 	mu              sync.Mutex
 	partitionValues map[int]any
 }
 
 // NewRollingDataWriter creates a new RollingDataWriter for the specified partition
 // with the given partition values.
-func (w *WriterFactory) NewRollingDataWriter(partition string, partitionValues map[int]any) *RollingDataWriter {
+func (w *writerFactory) NewRollingDataWriter(partition string, partitionValues map[int]any) *RollingDataWriter {
 	return &RollingDataWriter{
 		partitionKey:    partition,
 		data:            make([]arrow.Record, 0),
@@ -79,7 +79,7 @@ func (w *WriterFactory) NewRollingDataWriter(partition string, partitionValues m
 	}
 }
 
-func (w *WriterFactory) getOrCreateRollingDataWriter(partition string, partitionValues map[int]any) (*RollingDataWriter, error) {
+func (w *writerFactory) getOrCreateRollingDataWriter(partition string, partitionValues map[int]any) (*RollingDataWriter, error) {
 	rollingDataWriter, _ := w.writers.LoadOrStore(partition, w.NewRollingDataWriter(partition, partitionValues))
 	writer, ok := rollingDataWriter.(*RollingDataWriter)
 	if !ok {
@@ -177,7 +177,7 @@ func (r *RollingDataWriter) close(ctx context.Context, outputDataFilesCh chan<- 
 	return nil
 }
 
-func (w *WriterFactory) closeAll(ctx context.Context, outputDataFilesCh chan<- iceberg.DataFile) error {
+func (w *writerFactory) closeAll(ctx context.Context, outputDataFilesCh chan<- iceberg.DataFile) error {
 	var err error
 	w.writers.Range(func(key, value any) bool {
 		writer, ok := value.(*RollingDataWriter)
