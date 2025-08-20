@@ -110,8 +110,8 @@ var testIcebergGlueTable1 = types.Table{
 	Name:         aws.String("test_table"),
 	DatabaseName: aws.String("test_database"),
 	Parameters: map[string]string{
-		tableTypePropsKey:        "ICEBERG",
-		metadataLocationPropsKey: "s3://test-bucket/test_table/metadata/abc123-123.metadata.json",
+		tableParamTableType:        "ICEBERG",
+		tableParamMetadataLocation: "s3://test-bucket/test_table/metadata/abc123-123.metadata.json",
 	},
 }
 
@@ -119,8 +119,8 @@ var testIcebergGlueTable2 = types.Table{
 	Name:         aws.String("test_table2"),
 	DatabaseName: aws.String("test_database"),
 	Parameters: map[string]string{
-		tableTypePropsKey:        "ICEBERG",
-		metadataLocationPropsKey: "s3://test-bucket/test_table/metadata/abc456-456.metadata.json",
+		tableParamTableType:        "ICEBERG",
+		tableParamMetadataLocation: "s3://test-bucket/test_table/metadata/abc456-456.metadata.json",
 	},
 }
 
@@ -128,8 +128,8 @@ var testIcebergGlueTable3 = types.Table{
 	Name:         aws.String("test_table3"),
 	DatabaseName: aws.String("test_database"),
 	Parameters: map[string]string{
-		tableTypePropsKey:        "ICEBERG",
-		metadataLocationPropsKey: "s3://test-bucket/test_table/metadata/abc789-789.metadata.json",
+		tableParamTableType:        "ICEBERG",
+		tableParamMetadataLocation: "s3://test-bucket/test_table/metadata/abc789-789.metadata.json",
 	},
 }
 
@@ -137,8 +137,8 @@ var testIcebergGlueTable4 = types.Table{
 	Name:         aws.String("test_table4"),
 	DatabaseName: aws.String("test_database"),
 	Parameters: map[string]string{
-		tableTypePropsKey:        "ICEBERG",
-		metadataLocationPropsKey: "s3://test-bucket/test_table/metadata/abc123-789.metadata.json",
+		tableParamTableType:        "ICEBERG",
+		tableParamMetadataLocation: "s3://test-bucket/test_table/metadata/abc123-789.metadata.json",
 	},
 }
 
@@ -146,8 +146,8 @@ var testIcebergGlueTable5 = types.Table{
 	Name:         aws.String("test_table5"),
 	DatabaseName: aws.String("test_database"),
 	Parameters: map[string]string{
-		tableTypePropsKey:        "ICEBERG",
-		metadataLocationPropsKey: "s3://test-bucket/test_table/metadata/abc12345-789.metadata.json",
+		tableParamTableType:        "ICEBERG",
+		tableParamMetadataLocation: "s3://test-bucket/test_table/metadata/abc12345-789.metadata.json",
 	},
 }
 
@@ -155,15 +155,15 @@ var testIcebergGlueTable6 = types.Table{
 	Name:         aws.String("test_table6"),
 	DatabaseName: aws.String("test_database"),
 	Parameters: map[string]string{
-		tableTypePropsKey:        "iceberg",
-		metadataLocationPropsKey: "s3://test-bucket/test_table/metadata/abc123456-789.metadata.json",
+		tableParamTableType:        "iceberg",
+		tableParamMetadataLocation: "s3://test-bucket/test_table/metadata/abc123456-789.metadata.json",
 	},
 }
 
 var testNonIcebergGlueTable = types.Table{
 	Name: aws.String("other_table"),
 	Parameters: map[string]string{
-		metadataLocationPropsKey: "s3://test-bucket/other_table/",
+		tableParamMetadataLocation: "s3://test-bucket/other_table/",
 	},
 }
 
@@ -201,7 +201,7 @@ func TestGlueGetTable(t *testing.T) {
 
 	tbl, err := glueCatalog.getTable(context.TODO(), "test_database", "test_table")
 	assert.NoError(err)
-	assert.Equal("s3://test-bucket/test_table/metadata/abc123-123.metadata.json", tbl.Parameters[metadataLocationPropsKey])
+	assert.Equal("s3://test-bucket/test_table/metadata/abc123-123.metadata.json", tbl.Parameters[tableParamMetadataLocation])
 }
 
 func TestGlueGetTableCaseInsensitive(t *testing.T) {
@@ -225,8 +225,8 @@ func TestGlueGetTableCaseInsensitive(t *testing.T) {
 			testTable := types.Table{
 				Name: aws.String("test_table"),
 				Parameters: map[string]string{
-					tableTypePropsKey:        tc.tableType,
-					metadataLocationPropsKey: "s3://test-bucket/test_table/metadata/abc123-123.metadata.json",
+					tableParamTableType:        tc.tableType,
+					tableParamMetadataLocation: "s3://test-bucket/test_table/metadata/abc123-123.metadata.json",
 				},
 			}
 
@@ -245,7 +245,7 @@ func TestGlueGetTableCaseInsensitive(t *testing.T) {
 				assert.Contains(err.Error(), "is not an iceberg table")
 			} else {
 				assert.NoError(err)
-				assert.Equal("s3://test-bucket/test_table/metadata/abc123-123.metadata.json", tbl.Parameters[metadataLocationPropsKey])
+				assert.Equal("s3://test-bucket/test_table/metadata/abc123-123.metadata.json", tbl.Parameters[tableParamMetadataLocation])
 			}
 		})
 	}
@@ -454,11 +454,9 @@ func TestGlueCreateNamespace(t *testing.T) {
 
 	mockGlueSvc.On("CreateDatabase", mock.Anything, &glue.CreateDatabaseInput{
 		DatabaseInput: &types.DatabaseInput{
-			Name: aws.String("test_namespace"),
-			Parameters: map[string]string{
-				descriptionPropsKey: "Test Description",
-				locationPropsKey:    "s3://test-location",
-			},
+			Name:        aws.String("test_namespace"),
+			Description: aws.String("Test Description"),
+			LocationUri: aws.String("s3://test-location"),
 		},
 	}, mock.Anything).Return(&glue.CreateDatabaseOutput{}, nil).Once()
 
@@ -467,8 +465,8 @@ func TestGlueCreateNamespace(t *testing.T) {
 	}
 
 	props := map[string]string{
-		descriptionPropsKey: "Test Description",
-		locationPropsKey:    "s3://test-location",
+		PropsKeyDescription: "Test Description",
+		PropsKeyLocation:    "s3://test-location",
 	}
 
 	err := glueCatalog.CreateNamespace(context.TODO(), DatabaseIdentifier("test_namespace"), props)
@@ -702,7 +700,7 @@ func TestGlueRenameTable(t *testing.T) {
 			Name:         aws.String("test_table"),
 			DatabaseName: aws.String("test_database"),
 			Parameters: map[string]string{
-				tableTypePropsKey: glueTypeIceberg,
+				tableParamTableType: glueTypeIceberg,
 			},
 			Owner:             aws.String("owner"),
 			Description:       aws.String("description"),
@@ -718,8 +716,8 @@ func TestGlueRenameTable(t *testing.T) {
 			Name:         aws.String("new_test_table"),
 			DatabaseName: aws.String("test_database"),
 			Parameters: map[string]string{
-				tableTypePropsKey:        glueTypeIceberg,
-				metadataLocationPropsKey: "s3://test-bucket/new_test_table/metadata/abc123-123.metadata.json",
+				tableParamTableType:        glueTypeIceberg,
+				tableParamMetadataLocation: "s3://test-bucket/new_test_table/metadata/abc123-123.metadata.json",
 			},
 			Owner:             aws.String("owner"),
 			Description:       aws.String("description"),
@@ -734,7 +732,7 @@ func TestGlueRenameTable(t *testing.T) {
 			Name:              aws.String("new_test_table"),
 			Owner:             aws.String("owner"),
 			Description:       aws.String("description"),
-			Parameters:        map[string]string{tableTypePropsKey: glueTypeIceberg},
+			Parameters:        map[string]string{tableParamTableType: glueTypeIceberg},
 			StorageDescriptor: &types.StorageDescriptor{},
 		},
 	}, mock.Anything).Return(&glue.CreateTableOutput{}, nil).Once()
@@ -789,7 +787,7 @@ func TestGlueRenameTable_DeleteTableFailureRollback(t *testing.T) {
 		Table: &types.Table{
 			Name: aws.String("test_table"),
 			Parameters: map[string]string{
-				tableTypePropsKey: glueTypeIceberg,
+				tableParamTableType: glueTypeIceberg,
 			},
 			Owner:             aws.String("owner"),
 			Description:       aws.String("description"),
@@ -804,7 +802,7 @@ func TestGlueRenameTable_DeleteTableFailureRollback(t *testing.T) {
 			Name:              aws.String("new_test_table"),
 			Owner:             aws.String("owner"),
 			Description:       aws.String("description"),
-			Parameters:        map[string]string{tableTypePropsKey: glueTypeIceberg},
+			Parameters:        map[string]string{tableParamTableType: glueTypeIceberg},
 			StorageDescriptor: &types.StorageDescriptor{},
 		},
 	}, mock.Anything).Return(&glue.CreateTableOutput{}, nil).Once()
@@ -943,7 +941,7 @@ func TestGlueCreateTableSuccessIntegration(t *testing.T) {
 	})
 	assert.NoError(err)
 	assert.Equal("EXTERNAL_TABLE", aws.ToString(tableResponse.Table.TableType))
-	assert.Equal(glueTypeIceberg, tableResponse.Table.Parameters[tableTypePropsKey])
+	assert.Equal(glueTypeIceberg, tableResponse.Table.Parameters[tableParamTableType])
 }
 
 func TestGlueCreateTableInvalidMetadataRollback(t *testing.T) {
