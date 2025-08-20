@@ -475,7 +475,7 @@ func (c *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Iden
 		if errors.As(err, &noSuch) {
 			return false, nil
 		}
-		return false, err
+		return false, catalog.ErrNamespaceAlreadyExists
 	}
 
 	if dbObj == nil {
