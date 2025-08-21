@@ -555,10 +555,7 @@ func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
 func normalizeNonURLPath(path string) string {
 	normalized := filepath.Clean(path)
 
-	// Use manual replacement to handle Windows paths on all platforms
-	// filepath.ToSlash only converts the current OS separator, but we need
-	// cross-platform normalization to handle paths from different systems
-	return strings.ReplaceAll(normalized, "\\", "/")
+	return filepath.ToSlash(normalized)
 }
 
 // applySchemeEquivalence maps schemes to their equivalent canonical form.
