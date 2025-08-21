@@ -366,7 +366,7 @@ func TestSchemaToGlueColumns(t *testing.T) {
 
 func TestSchemasToGlueColumns(t *testing.T) {
 	schemas := []*iceberg.Schema{
-		iceberg.NewSchema(0, 
+		iceberg.NewSchema(0,
 			iceberg.NestedField{
 				ID:       1,
 				Name:     "id",
@@ -374,19 +374,19 @@ func TestSchemasToGlueColumns(t *testing.T) {
 				Required: true,
 			},
 			iceberg.NestedField{
-				ID: 2,
-				Name: "name",
-				Type: iceberg.StringType{},
+				ID:       2,
+				Name:     "name",
+				Type:     iceberg.StringType{},
 				Required: true,
 			},
 			iceberg.NestedField{
-				ID: 3,
-				Name: "address",
-				Type: iceberg.StringType{},
+				ID:       3,
+				Name:     "address",
+				Type:     iceberg.StringType{},
 				Required: false,
 			},
 		),
-		iceberg.NewSchema(1, 
+		iceberg.NewSchema(1,
 			iceberg.NestedField{
 				ID:       1,
 				Name:     "id",
@@ -394,9 +394,9 @@ func TestSchemasToGlueColumns(t *testing.T) {
 				Required: true,
 			},
 			iceberg.NestedField{
-				ID: 2,
-				Name: "name",
-				Type: iceberg.StringType{},
+				ID:       2,
+				Name:     "name",
+				Type:     iceberg.StringType{},
 				Required: true,
 			},
 		),
@@ -404,18 +404,18 @@ func TestSchemasToGlueColumns(t *testing.T) {
 
 	expectedColumns := []types.Column{
 		{
-			Name: aws.String("id"),
-			Type: aws.String("bigint"),
+			Name:    aws.String("id"),
+			Type:    aws.String("bigint"),
 			Comment: aws.String(""),
 			Parameters: map[string]string{
 				icebergFieldIDKey:       "1",
-				icebergFieldOptionalKey: "flase",
+				icebergFieldOptionalKey: "false",
 				icebergFieldCurrentKey:  "true",
 			},
 		},
 		{
-			Name: aws.String("name"),
-			Type: aws.String("string"),
+			Name:    aws.String("name"),
+			Type:    aws.String("string"),
 			Comment: aws.String(""),
 			Parameters: map[string]string{
 				icebergFieldIDKey:       "2",
@@ -424,8 +424,8 @@ func TestSchemasToGlueColumns(t *testing.T) {
 			},
 		},
 		{
-			Name: aws.String("address"),
-			Type: aws.String("string"),
+			Name:    aws.String("address"),
+			Type:    aws.String("string"),
 			Comment: aws.String(""),
 			Parameters: map[string]string{
 				icebergFieldIDKey:       "3",
@@ -442,10 +442,11 @@ func TestSchemasToGlueColumns(t *testing.T) {
 
 	mb, err = mb.AddSchema(schemas[1])
 	assert.NoError(t, err)
+	mb, err = mb.SetCurrentSchemaID(1)
+	assert.NoError(t, err)
 
 	metadata, err = mb.Build()
 	assert.NoError(t, err)
-
 
 	columns := schemasToGlueColumns(metadata)
 	assert.Equal(t, expectedColumns, columns)

@@ -257,7 +257,7 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	_, err = c.glueSvc.CreateTable(ctx, &glue.CreateTableInput{
 		CatalogId:    c.catalogId,
 		DatabaseName: aws.String(database),
-		TableInput:   constructTableInput(tableName, staged.Metadata(), nil),
+		TableInput:   constructTableInput(tableName, staged.Table, nil),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create table %s.%s: %w", database, tableName, err)
@@ -275,7 +275,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	// Load the metadata file to get table properties
 	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
 	// Read the metadata file
-	metadata, err := table.NewFromLocation(
+	tbl, err := table.NewFromLocation(
 		ctx,
 		[]string{tableName},
 		metadataLocation,
@@ -289,7 +289,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	_, err = c.glueSvc.CreateTable(ctx, &glue.CreateTableInput{
 		CatalogId:    c.catalogId,
 		DatabaseName: aws.String(database),
-		TableInput:   constructTableInput(tableName, metadata.Metadata(), nil),
+		TableInput:   constructTableInput(tableName, tbl, nil),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to register table %s.%s: %w", database, tableName, err)
@@ -337,7 +337,7 @@ func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, requirement
 		_, err = c.glueSvc.UpdateTable(ctx, &glue.UpdateTableInput{
 			CatalogId:    c.catalogId,
 			DatabaseName: aws.String(database),
-			TableInput:   constructTableInput(tableName, staged.Metadata(), currentGlueTable),
+			TableInput:   constructTableInput(tableName, staged.Table, currentGlueTable),
 			// use `VersionId` to implement optimistic locking
 			VersionId:   currentGlueTable.VersionId,
 			SkipArchive: aws.Bool(c.props.GetBool(SkipArchive, SkipArchiveDefault)),
@@ -349,7 +349,7 @@ func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, requirement
 		_, err = c.glueSvc.CreateTable(ctx, &glue.CreateTableInput{
 			CatalogId:    c.catalogId,
 			DatabaseName: aws.String(database),
-			TableInput:   constructTableInput(tableName, staged.Metadata(), nil),
+			TableInput:   constructTableInput(tableName, staged.Table, nil),
 		})
 		if err != nil {
 			return nil, "", err
@@ -397,7 +397,7 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 		return nil, err
 	}
 
-	exists, err := c.CheckNamespaceExists(ctx, to)
+	exists, err := c.CheckNamespaceExists(ctx, DatabaseIdentifier(toDatabase))
 	if err != nil {
 		return nil, err
 	}
@@ -409,10 +409,6 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 	fromGlueTable, err := c.getTable(ctx, fromDatabase, fromTable)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch the table %s.%s: %w", fromDatabase, fromTable, err)
-	}
-
-	if _, err := c.convertGlueToIceberg(ctx, fromGlueTable); err != nil {
-		return nil, fmt.Errorf("failed to convert the table %s.%s to iceberg: %w", fromDatabase, fromTable, err)
 	}
 
 	// Create the new table.
@@ -482,7 +478,7 @@ func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifie
 	}
 
 	_, err = c.glueSvc.CreateDatabase(ctx, &glue.CreateDatabaseInput{
-		CatalogId: c.catalogId, 
+		CatalogId:     c.catalogId,
 		DatabaseInput: constructDatabaseInput(database, props),
 	})
 	if err != nil {
@@ -640,6 +636,10 @@ func (c *Catalog) getTable(ctx context.Context, database, tableName string) (*ty
 		return nil, fmt.Errorf("failed to get table %s.%s: %w", database, tableName, err)
 	}
 
+	if aws.ToString(tblRes.Table.TableType) != glueTableType {
+		return nil, fmt.Errorf("table %s.%s is not an EXTERNAL_TABLE", database, tableName)
+	}
+
 	if !strings.EqualFold(tblRes.Table.Parameters[tableParamTableType], glueTypeIceberg) {
 		return nil, fmt.Errorf("table %s.%s is not an iceberg table", database, tableName)
 	}
@@ -743,7 +743,7 @@ func filterTableListByType(database string, tableList []types.Table, tableType s
 	return filtered
 }
 
-func constructParameters(metadata table.Metadata, previousGlueTable *types.Table) map[string]string {
+func constructParameters(staged *table.Table, previousGlueTable *types.Table) map[string]string {
 	var parameters map[string]string
 	if previousGlueTable != nil {
 		parameters = previousGlueTable.Parameters
@@ -755,25 +755,25 @@ func constructParameters(metadata table.Metadata, previousGlueTable *types.Table
 	}
 
 	parameters[tableParamTableType] = glueTypeIceberg
-	parameters[tableParamMetadataLocation] = metadata.Location()
+	parameters[tableParamMetadataLocation] = staged.MetadataLocation()
 
-	maps.Copy(parameters, metadata.Properties())
+	maps.Copy(parameters, staged.Properties())
 
 	return parameters
 }
 
-func constructTableInput(tableName string, metadata table.Metadata, previousGlueTable *types.Table) *types.TableInput {
+func constructTableInput(tableName string, staged *table.Table, previousGlueTable *types.Table) *types.TableInput {
 	tableInput := &types.TableInput{
 		Name:       aws.String(tableName),
 		TableType:  aws.String(glueTableType),
-		Parameters: constructParameters(metadata, previousGlueTable),
+		Parameters: constructParameters(staged, previousGlueTable),
 		StorageDescriptor: &types.StorageDescriptor{
-			Location: aws.String(metadata.Location()),
-			Columns:  schemasToGlueColumns(metadata),
+			Location: aws.String(staged.Location()),
+			Columns:  schemasToGlueColumns(staged.Metadata()),
 		},
 	}
 
-	if comment, ok := metadata.Properties()[PropsKeyDescription]; ok {
+	if comment, ok := staged.Properties()[PropsKeyDescription]; ok {
 		tableInput.Description = aws.String(comment)
 	}
 
@@ -787,15 +787,17 @@ func constructDatabaseInput(database string, props iceberg.Properties) *types.Da
 
 	parameters := map[string]string{}
 	for k, v := range props {
-		if k == PropsKeyDescription {
+		switch k {
+		case PropsKeyDescription:
 			databaseInput.Description = aws.String(v)
-		} else if k == PropsKeyLocation {
+		case PropsKeyLocation:
 			databaseInput.LocationUri = aws.String(v)
-		} else {
+		default:
 			parameters[k] = v
 		}
 	}
 
 	databaseInput.Parameters = parameters
+
 	return databaseInput
 }
