@@ -261,11 +261,6 @@ func (b *MetadataBuilder) currentSnapshot() *Snapshot {
 }
 
 func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) (*MetadataBuilder, error) {
-	newLastColumnID := schema.HighestFieldID()
-	if newLastColumnID < b.lastColumnId {
-		return nil, fmt.Errorf("%w: newLastColumnID %d, must be >= %d", iceberg.ErrInvalidArgument, newLastColumnID, b.lastColumnId)
-	}
-
 	newSchemaID := b.reuseOrCreateNewSchemaID(schema)
 
 	if _, err := b.GetSchemaByID(newSchemaID); err == nil {
