@@ -778,14 +778,16 @@ func (t *TableWritingTestSuite) TestAddFilesReferencedCurrentSnapshotIgnoreDupli
 	t.Equal([]int32{0, 0, 0}, deleted)
 }
 
-type mockedCatalog struct{}
+type mockedCatalog struct{
+	metadata table.Metadata
+}
 
-func (m *mockedCatalog) LoadTable(ctx context.Context, ident table.Identifier, props iceberg.Properties) (*table.Table, error) {
+func (m *mockedCatalog) LoadTable(ctx context.Context, ident table.Identifier) (*table.Table, error) {
 	return nil, nil
 }
 
-func (m *mockedCatalog) CommitTable(ctx context.Context, tbl *table.Table, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
-	bldr, err := table.MetadataBuilderFromBase(tbl.Metadata())
+func (m *mockedCatalog) CommitTable(ctx context.Context, ident table.Identifier, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
+	bldr, err := table.MetadataBuilderFromBase(m.metadata)
 	if err != nil {
 		return nil, "", err
 	}
@@ -800,6 +802,8 @@ func (m *mockedCatalog) CommitTable(ctx context.Context, tbl *table.Table, reqs 
 	if err != nil {
 		return nil, "", err
 	}
+
+	m.metadata = meta
 
 	return meta, "", nil
 }
@@ -828,7 +832,7 @@ func (t *TableWritingTestSuite) TestReplaceDataFiles() {
 		func(ctx context.Context) (iceio.IO, error) {
 			return fs, nil
 		},
-		&mockedCatalog{},
+		&mockedCatalog{meta},
 	)
 	for i := range 5 {
 		tx := tbl.NewTransaction()
@@ -910,7 +914,7 @@ func (t *TableWritingTestSuite) TestExpireSnapshots() {
 		func(ctx context.Context) (iceio.IO, error) {
 			return fs, nil
 		},
-		&mockedCatalog{},
+		&mockedCatalog{meta},
 	)
 
 	tblfs, err := tbl.FS(ctx)
@@ -1321,19 +1325,21 @@ func TestNullableStructRequiredField(t *testing.T) {
 	require.NotNil(t, stagedTbl)
 }
 
-type DeleteOldMetadataMockedCatalog struct{}
+type DeleteOldMetadataMockedCatalog struct{
+	metadata table.Metadata
+}
 
-func (m *DeleteOldMetadataMockedCatalog) LoadTable(ctx context.Context, ident table.Identifier, props iceberg.Properties) (*table.Table, error) {
+func (m *DeleteOldMetadataMockedCatalog) LoadTable(ctx context.Context, ident table.Identifier) (*table.Table, error) {
 	return nil, nil
 }
 
-func (m *DeleteOldMetadataMockedCatalog) CommitTable(ctx context.Context, tbl *table.Table, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
-	bldr, err := table.MetadataBuilderFromBase(tbl.Metadata())
+func (m *DeleteOldMetadataMockedCatalog) CommitTable(ctx context.Context, ident table.Identifier, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
+	bldr, err := table.MetadataBuilderFromBase(m.metadata)
 	if err != nil {
 		return nil, "", err
 	}
 
-	location := tbl.Metadata().Location()
+	location := m.metadata.Location()
 
 	randid := uuid.New().String()
 	metdatafile := fmt.Sprintf("%s/metadata/%s.metadata.json", location, randid)
@@ -1356,6 +1362,8 @@ func (m *DeleteOldMetadataMockedCatalog) CommitTable(ctx context.Context, tbl *t
 	if err != nil {
 		return nil, "", err
 	}
+
+	m.metadata = meta
 
 	return meta, metdatafile, nil
 }
@@ -1394,7 +1402,7 @@ func (t *TableWritingTestSuite) TestDeleteOldMetadataLogsErrorOnFileNotFound() {
 
 	tbl := table.New(ident, meta, t.getMetadataLoc(), func(ctx context.Context) (iceio.IO, error) {
 		return fs, nil
-	}, &DeleteOldMetadataMockedCatalog{})
+	}, &DeleteOldMetadataMockedCatalog{meta})
 	ctx := context.Background()
 
 	// transaction 1 to create metadata file
@@ -1445,7 +1453,7 @@ func (t *TableWritingTestSuite) TestDeleteOldMetadataNoErrorLogsOnFileFound() {
 		func(ctx context.Context) (iceio.IO, error) {
 			return fs, nil
 		},
-		&DeleteOldMetadataMockedCatalog{},
+		&DeleteOldMetadataMockedCatalog{meta},
 	)
 
 	ctx := context.Background()
@@ -1498,7 +1506,7 @@ func (t *TableTestSuite) TestRefresh() {
 	originalSchema := tbl.Schema()
 	originalSpec := tbl.Spec()
 
-	_, _, err = cat.CommitTable(context.Background(), tbl, nil, []table.Update{
+	_, _, err = cat.CommitTable(context.Background(), tbl.Identifier(), nil, []table.Update{
 		table.NewSetPropertiesUpdate(iceberg.Properties{
 			"refreshed": "true",
 			"timestamp": strconv.FormatInt(time.Now().Unix(), 10),

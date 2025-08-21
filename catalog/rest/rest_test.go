@@ -1173,7 +1173,7 @@ func (r *RestCatalogSuite) TestLoadTable200() {
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	tbl, err := cat.LoadTable(context.Background(), catalog.ToIdentifier("fokko", "table"), nil)
+	tbl, err := cat.LoadTable(context.Background(), catalog.ToIdentifier("fokko", "table"))
 	r.Require().NoError(err)
 
 	r.Equal(catalog.ToIdentifier("fokko", "table"), tbl.Identifier())

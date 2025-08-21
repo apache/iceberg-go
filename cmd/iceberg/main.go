@@ -381,7 +381,7 @@ func describe(ctx context.Context, output Output, cat catalog.Catalog, id string
 	}
 
 	if (entityType == "any" || entityType == "tbl") && len(ident) > 1 {
-		tbl, err := cat.LoadTable(ctx, ident, nil)
+		tbl, err := cat.LoadTable(ctx, ident)
 		if err != nil {
 			if !errors.Is(err, catalog.ErrNoSuchTable) || entityType != "any" {
 				output.Error(err)
@@ -401,7 +401,7 @@ func describe(ctx context.Context, output Output, cat catalog.Catalog, id string
 }
 
 func loadTable(ctx context.Context, output Output, cat catalog.Catalog, id string) *table.Table {
-	tbl, err := cat.LoadTable(ctx, catalog.ToIdentifier(id), nil)
+	tbl, err := cat.LoadTable(ctx, catalog.ToIdentifier(id))
 	if err != nil {
 		output.Error(err)
 		os.Exit(1)
@@ -460,7 +460,7 @@ func properties(ctx context.Context, output Output, cat catalog.Catalog, args pr
 			}
 		case args.table:
 			tbl := loadTable(ctx, output, cat, args.identifier)
-			_, _, err := cat.CommitTable(ctx, tbl, nil,
+			_, _, err := cat.CommitTable(ctx, tbl.Identifier(), nil,
 				[]table.Update{table.NewSetPropertiesUpdate(iceberg.Properties{args.propname: args.value})})
 			if err != nil {
 				output.Error(err)
@@ -481,7 +481,7 @@ func properties(ctx context.Context, output Output, cat catalog.Catalog, args pr
 		case args.table:
 			tbl := loadTable(ctx, output, cat, args.identifier)
 
-			_, _, err := cat.CommitTable(ctx, tbl, nil,
+			_, _, err := cat.CommitTable(ctx, tbl.Identifier(), nil,
 				[]table.Update{table.NewRemovePropertiesUpdate([]string{args.propname})})
 			if err != nil {
 				output.Error(err)

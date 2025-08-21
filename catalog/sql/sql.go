@@ -320,19 +320,19 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		return nil, err
 	}
 
-	return c.LoadTable(ctx, ident, staged.Properties())
+	return c.LoadTable(ctx, ident)
 }
 
-func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
-	ns := catalog.NamespaceFromIdent(tbl.Identifier())
-	tblName := catalog.TableNameFromIdent(tbl.Identifier())
+func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
+	ns := catalog.NamespaceFromIdent(ident)
+	tblName := catalog.TableNameFromIdent(ident)
 
-	current, err := c.LoadTable(ctx, tbl.Identifier(), nil)
+	current, err := c.LoadTable(ctx, ident)
 	if err != nil && !errors.Is(err, catalog.ErrNoSuchTable) {
 		return nil, "", err
 	}
 
-	staged, err := internal.UpdateAndStageTable(ctx, current, tbl.Identifier(), reqs, updates, c)
+	staged, err := internal.UpdateAndStageTable(ctx, current, ident, reqs, updates, c)
 	if err != nil {
 		return nil, "", err
 	}
@@ -394,13 +394,9 @@ func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, reqs []tabl
 	return staged.Metadata(), staged.MetadataLocation(), nil
 }
 
-func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, props iceberg.Properties) (*table.Table, error) {
+func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*table.Table, error) {
 	ns := catalog.NamespaceFromIdent(identifier)
 	tbl := catalog.TableNameFromIdent(identifier)
-
-	if props == nil {
-		props = iceberg.Properties{}
-	}
 
 	result, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) (*sqlIcebergTable, error) {
 		t := new(sqlIcebergTable)
@@ -427,14 +423,11 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, pr
 		return nil, fmt.Errorf("%w: %s, metadata location is missing", catalog.ErrNoSuchTable, identifier)
 	}
 
-	tblProps := maps.Clone(c.props)
-	maps.Copy(props, tblProps)
-
 	return table.NewFromLocation(
 		ctx,
 		identifier,
 		result.MetadataLocation.String,
-		io.LoadFSFunc(tblProps, result.MetadataLocation.String),
+		io.LoadFSFunc(c.props, result.MetadataLocation.String),
 		c,
 	)
 }
@@ -522,11 +515,11 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 		return nil, err
 	}
 
-	return c.LoadTable(ctx, to, nil)
+	return c.LoadTable(ctx, to)
 }
 
 func (c *Catalog) CheckTableExists(ctx context.Context, identifier table.Identifier) (bool, error) {
-	_, err := c.LoadTable(ctx, identifier, nil)
+	_, err := c.LoadTable(ctx, identifier)
 	if err != nil {
 		if errors.Is(err, catalog.ErrNoSuchTable) {
 			return false, nil
