@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	stdfs "io/fs"
 	"net/url"
@@ -29,16 +30,28 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sync/errgroup"
-
 	iceio "github.com/apache/iceberg-go/io"
 )
 
+// PrefixMismatchMode defines how to handle cases where candidate files have different
+// URI schemes or authorities compared to table location during orphan cleanup.
+// This is useful when files may be referenced using different but equivalent schemes
+// (e.g., s3:// vs s3a:// vs s3n://) or when cleaning up files across different locations.
 type PrefixMismatchMode int
 
 const (
+	// PrefixMismatchError causes cleanup to fail with an error when candidate files
+	// have URI schemes/authorities that don't match the table location and are not
+	// covered by configured equivalences. This is the safest default behavior.
 	PrefixMismatchError PrefixMismatchMode = iota // default
+
+	// PrefixMismatchIgnore skips candidate files that have mismatched URI schemes/authorities
+	// without treating it as an error. Files are silently ignored and not considered for deletion.
 	PrefixMismatchIgnore
+
+	// PrefixMismatchDelete treats candidate files with mismatched URI schemes/authorities
+	// as orphans and includes them for deletion. Use with caution as this may delete
+	// files from unexpected locations.
 	PrefixMismatchDelete
 )
 
@@ -55,7 +68,7 @@ func (p PrefixMismatchMode) String() string {
 	}
 }
 
-// orphanCleanupConfig holds configuration for orphan file cleanup operations.
+// OrphanCleanupConfig holds configuration for orphan file cleanup operations.
 type orphanCleanupConfig struct {
 	location           string
 	olderThan          time.Time
@@ -283,7 +296,7 @@ func (t Table) scanFiles(fs iceio.IO, location string, cfg *orphanCleanupConfig)
 }
 
 // getBucket gets the Bucket field from blob storage - absolute minimal approach
-func getBucket(fsys iceio.IO) stdfs.FS {
+func getBucketName(fsys iceio.IO) stdfs.FS {
 	v := reflect.ValueOf(fsys).Elem() // We know it's a pointer to struct
 
 	return v.FieldByName("Bucket").Interface().(stdfs.FS)
@@ -298,7 +311,6 @@ func makeFileWalkFunc(fn func(path string, info stdfs.FileInfo) error, pathTrans
 		if d.IsDir() {
 			return nil
 		}
-
 		info, err := d.Info()
 		if err != nil {
 			return err
@@ -322,7 +334,7 @@ func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.F
 
 	default:
 		// For blob storage: direct field access since we know the structure
-		bucket := getBucket(v)
+		bucket := getBucketName(v)
 
 		parsed, err := url.Parse(root)
 		if err != nil {
@@ -405,19 +417,17 @@ func deleteFilesSequential(fs iceio.IO, orphanFiles []string, cfg *orphanCleanup
 		deleteFunc = cfg.deleteFunc
 	}
 
+	var result error
 	for _, file := range orphanFiles {
-		err := deleteFunc(file)
-		if err != nil {
-			// Log warning but continue with other files
-			fmt.Printf("Warning: failed to delete orphan file %s: %v\n", file, err)
+		if err := deleteFunc(file); err != nil {
+			result = errors.Join(result, fmt.Errorf("failed to delete orphan file %s: %w", file, err))
 
 			continue
 		}
-
 		deletedFiles = append(deletedFiles, file)
 	}
 
-	return deletedFiles, nil
+	return deletedFiles, result
 }
 
 func deleteFilesParallel(fs iceio.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
@@ -426,42 +436,71 @@ func deleteFilesParallel(fs iceio.IO, orphanFiles []string, cfg *orphanCleanupCo
 		deleteFunc = cfg.deleteFunc
 	}
 
-	var deletedFiles []string
-	var mu sync.Mutex
+	in := make(chan string, cfg.maxConcurrency)
+	out := make(chan string, cfg.maxConcurrency)
+	errList := make([][]error, cfg.maxConcurrency)
 
-	g := new(errgroup.Group)
-	g.SetLimit(cfg.maxConcurrency)
+	go func() {
+		defer close(in)
+		for _, file := range orphanFiles {
+			in <- file
+		}
+	}()
 
-	for _, file := range orphanFiles {
-		file := file // capture loop variable
-		g.Go(func() error {
-			err := deleteFunc(file)
-			if err != nil {
-				// Log warning but don't fail the entire operation for individual file errors
-				fmt.Printf("Warning: failed to delete orphan file %s: %v\n", file, err)
-
-				return nil // Continue with other files
+	var wg sync.WaitGroup
+	wg.Add(cfg.maxConcurrency)
+	for i := 0; i < cfg.maxConcurrency; i++ {
+		go func(workerID int) {
+			defer wg.Done()
+			for file := range in {
+				if err := deleteFunc(file); err != nil {
+					errList[workerID] = append(errList[workerID], fmt.Errorf("failed to delete orphan file %s: %w", file, err))
+				} else {
+					out <- file
+				}
 			}
-
-			mu.Lock()
-			deletedFiles = append(deletedFiles, file)
-			mu.Unlock()
-
-			return nil
-		})
+		}(i)
 	}
 
-	// Wait for all workers to complete
-	if err := g.Wait(); err != nil {
-		return deletedFiles, err
+	go func() {
+		wg.Wait()
+		close(out)
+	}()
+
+	deletedFiles := make([]string, 0, len(orphanFiles))
+	for file := range out {
+		deletedFiles = append(deletedFiles, file)
 	}
 
-	return deletedFiles, nil
+	var allErrors []error
+	for _, workerErrors := range errList {
+		allErrors = append(allErrors, workerErrors...)
+	}
+
+	err := errors.Join(allErrors...)
+
+	return deletedFiles, err
 }
 
 // normalizeFilePath normalizes file paths for comparison by handling different
 // path representations that might refer to the same file, with support for
 // scheme/authority equivalence as specified in the configuration.
+//
+// This implementation is based on Apache Iceberg's Java DeleteOrphanFiles action:
+// https://github.com/apache/iceberg/blob/07c088fce9c54369864dcb6da16006e78206048b/spark/v3.5/spark/src/main/java/org/apache/iceberg/spark/actions/DeleteOrphanFilesSparkAction.java#L1
+//
+// The normalization logic specifically follows the ToFileURI.toFileURI() method (lines 542-548):
+// - Line 545: scheme = equalSchemes.getOrDefault(uri.getScheme(), uri.getScheme())
+// - Line 546: authority = equalAuthorities.getOrDefault(uri.getAuthority(), uri.getAuthority())
+//
+// See also: https://iceberg.apache.org/docs/latest/maintenance/#remove-orphan-files
+//
+// Path normalization is essential for orphan cleanup because:
+//  1. Files may be referenced using different but equivalent URI schemes (e.g., s3:// vs s3a:// vs s3n://)
+//  2. Different authorities/endpoints may refer to the same storage (e.g., region-specific S3 endpoints)
+//  3. Path separators and casing may vary across different systems and configurations
+//  4. Without normalization, semantically identical paths would be treated as different,
+//     leading to false positives in orphan detection
 func normalizeFilePath(path string, cfg *orphanCleanupConfig) string {
 	// Handle URL-based paths (s3://, gs://, etc.)
 	if strings.Contains(path, "://") {
@@ -471,7 +510,21 @@ func normalizeFilePath(path string, cfg *orphanCleanupConfig) string {
 	}
 }
 
-// normalizeURLPath normalizes URL-based file paths with scheme/authority equivalence
+// normalizeURLPath normalizes URL-based file paths with scheme/authority equivalence.
+//
+// This function handles the complexities of cloud storage URIs where the same file
+// can be referenced using different but semantically equivalent schemes and authorities.
+//
+// Examples of equivalent schemes (configured via equalSchemes):
+//   - s3://bucket/path, s3a://bucket/path, s3n://bucket/path (all refer to S3)
+//   - abfs://container@account.dfs.core.windows.net/path, abfss://container@account.dfs.core.windows.net/path (Azure)
+//
+// Examples of equivalent authorities (configured via equalAuthorities):
+//   - s3://mybucket.s3.us-west-2.amazonaws.com/path vs s3://s3.us-west-2.amazonaws.com/mybucket/path
+//   - Different regional endpoints that serve the same data
+//
+// Based on Apache Iceberg Java's DeleteOrphanFilesSparkAction.toFileURI() normalization (lines 542-548).
+// https://github.com/apache/iceberg/blob/07c088fce9c54369864dcb6da16006e78206048b/spark/v3.5/spark/src/main/java/org/apache/iceberg/spark/actions/DeleteOrphanFilesSparkAction.java#L1
 func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
 	parsedURL, err := url.Parse(path)
 	if err != nil {
@@ -489,14 +542,34 @@ func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
 	return normalizedURL.String()
 }
 
-// normalizeNonURLPath provides basic path normalization for non-URL paths
+// normalizeNonURLPath provides basic path normalization for non-URL paths.
+//
+// Handles file system paths by:
+// 1. Applying filepath.Clean() to resolve "..", ".", and redundant separators
+// 2. Converting Windows-style backslashes to forward slashes for consistency
+//
+// This ensures that paths like "dir/./file", "dir//file", and "dir\file" (on Windows)
+// all normalize to "dir/file" for consistent comparison.
+//
+// Uses filepath.ToSlash() equivalent logic to match Go's standard library approach.
 func normalizeNonURLPath(path string) string {
 	normalized := filepath.Clean(path)
 
+	// Use manual replacement to handle Windows paths on all platforms
+	// filepath.ToSlash only converts the current OS separator, but we need
+	// cross-platform normalization to handle paths from different systems
 	return strings.ReplaceAll(normalized, "\\", "/")
 }
 
-// applySchemeEquivalence maps schemes to their equivalent canonical form
+// applySchemeEquivalence maps schemes to their equivalent canonical form.
+//
+// Common equivalences include:
+//   - S3: s3://, s3a://, s3n:// → s3://
+//   - Azure: abfs://, abfss:// → abfs://
+//   - HDFS: hdfs://, hdfs+webhdfs:// → hdfs://
+//
+// Based on Apache Iceberg Java's flattenMap() (lines 392-403) and EQUAL_SCHEMES_DEFAULT (line 102).
+// https://github.com/apache/iceberg/blob/07c088fce9c54369864dcb6da16006e78206048b/spark/v3.5/spark/src/main/java/org/apache/iceberg/spark/actions/DeleteOrphanFilesSparkAction.java#L1
 func applySchemeEquivalence(scheme string, equalSchemes map[string]string) string {
 	if equalSchemes == nil {
 		return scheme
@@ -519,7 +592,20 @@ func applySchemeEquivalence(scheme string, equalSchemes map[string]string) strin
 	return scheme
 }
 
-// applyAuthorityEquivalence maps authorities to their equivalent canonical form
+// applyAuthorityEquivalence maps authorities to their equivalent canonical form.
+//
+// Different cloud storage endpoints and authorities may serve the same logical storage,
+// but appear different in URIs. This function normalizes these equivalent authorities
+// to enable proper file matching during orphan cleanup.
+//
+// Common authority equivalences include:
+//   - Regional S3 endpoints: s3.us-west-2.amazonaws.com, s3-us-west-2.amazonaws.com
+//   - S3 path vs virtual-hosted style: bucket.s3.amazonaws.com vs s3.amazonaws.com/bucket
+//   - Azure storage endpoints: account.dfs.core.windows.net, account.blob.core.windows.net
+//   - Custom endpoints: minio.company.com, s3.company.local
+//
+// Based on Apache Iceberg Java's equalAuthorities logic (lines 546, 161-165, 392-403).
+// https://github.com/apache/iceberg/blob/07c088fce9c54369864dcb6da16006e78206048b/spark/v3.5/spark/src/main/java/org/apache/iceberg/spark/actions/DeleteOrphanFilesSparkAction.java#L1
 func applyAuthorityEquivalence(authority string, equalAuthorities map[string]string) string {
 	if equalAuthorities == nil {
 		return authority
