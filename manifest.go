@@ -607,7 +607,7 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 				formatVersion)
 		}
 		// V1 manifests do not contain the 'content' field, but should be interpretted as 'data' files
-		content = ManifestContentData
+		fallthrough
 	case "data":
 		content = ManifestContentData
 	case "deletes":
