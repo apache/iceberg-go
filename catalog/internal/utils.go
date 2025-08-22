@@ -47,9 +47,11 @@ func WriteTableMetadata(metadata table.Metadata, fs io.WriteFileIO, loc string) 
 	if err != nil {
 		return nil
 	}
-	defer out.Close()
 
-	return json.NewEncoder(out).Encode(metadata)
+	return errors.Join(
+		json.NewEncoder(out).Encode(metadata),
+		out.Close(),
+	)
 }
 
 func WriteMetadata(ctx context.Context, metadata table.Metadata, loc string, props iceberg.Properties) error {
@@ -68,9 +70,10 @@ func WriteMetadata(ctx context.Context, metadata table.Metadata, loc string, pro
 		return nil
 	}
 
-	defer out.Close()
-
-	return json.NewEncoder(out).Encode(metadata)
+	return errors.Join(
+		json.NewEncoder(out).Encode(metadata),
+		out.Close(),
+	)
 }
 
 func UpdateTableMetadata(base table.Metadata, updates []table.Update, metadataLoc string) (table.Metadata, error) {

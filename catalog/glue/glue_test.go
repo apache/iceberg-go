@@ -1007,10 +1007,9 @@ func TestGlueCreateTableRollbackOnInvalidMetadata(t *testing.T) {
 		catalog.WithLocation("s3://non-existent-test-bucket"))
 	// Should fail because LoadTable will fail to load the nonexistent metadata
 	assert.Error(err)
-	assert.Contains(err.Error(), "failed to create table")
-	mockGlueSvc.AssertCalled(t, "CreateTable", mock.Anything, mock.Anything, mock.Anything)
-	mockGlueSvc.AssertCalled(t, "DeleteTable", mock.Anything, mock.Anything, mock.Anything)
-	mockGlueSvc.AssertCalled(t, "GetTable", mock.Anything, mock.Anything, mock.Anything)
+	mockGlueSvc.AssertNotCalled(t, "CreateTable", mock.Anything, mock.Anything, mock.Anything)
+	mockGlueSvc.AssertNotCalled(t, "DeleteTable", mock.Anything, mock.Anything, mock.Anything)
+	mockGlueSvc.AssertNotCalled(t, "GetTable", mock.Anything, mock.Anything, mock.Anything)
 }
 
 func TestRegisterTableMetadataNotFound(t *testing.T) {
