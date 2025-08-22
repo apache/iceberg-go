@@ -220,8 +220,8 @@ func (s *OrphanCleanupIntegrationSuite) TestOrphanCleanupDryRun() {
 	s.T().Logf("Scanning location: %s", tbl.Location())
 	result, err := tbl.DeleteOrphanFiles(s.ctx,
 		table.WithDryRun(true),
-		table.WithLocation(tbl.Location()),               // Scan the table root location
-		table.WithOlderThan(time.Now().Add(1*time.Hour)), // Consider all files (including future timestamp)
+		table.WithLocation(tbl.Location()),     // Scan the table root location
+		table.WithFilesOlderThan(-1*time.Hour), // Consider all files (including future timestamp)
 	)
 
 	s.Require().NoError(err)
@@ -268,7 +268,7 @@ func (s *OrphanCleanupIntegrationSuite) TestOrphanCleanupActualDeletion() {
 	// Run actual orphan cleanup
 	result, err := tbl.DeleteOrphanFiles(s.ctx,
 		table.WithDryRun(false),
-		table.WithOlderThan(time.Now().Add(1*time.Hour)), // Consider all files
+		table.WithFilesOlderThan(-1*time.Hour), // Consider all files
 	)
 
 	s.Require().NoError(err)
@@ -311,7 +311,7 @@ func (s *OrphanCleanupIntegrationSuite) TestOrphanCleanupCustomLocation() {
 	// Run orphan cleanup on table root (which includes the custom subdirectory)
 	result, err := tbl.DeleteOrphanFiles(s.ctx,
 		table.WithLocation(tbl.Location()), // Scan table root to find all subdirectories
-		table.WithOlderThan(time.Now().Add(1*time.Hour)),
+		table.WithFilesOlderThan(-1*time.Hour),
 		table.WithDryRun(false),
 	)
 
@@ -360,7 +360,7 @@ func (s *OrphanCleanupIntegrationSuite) TestOrphanCleanupWithConcurrency() {
 			// Run orphan cleanup with specific concurrency
 			result, err := tbl.DeleteOrphanFiles(s.ctx,
 				table.WithMaxConcurrency(tc.concurrency),
-				table.WithOlderThan(time.Now().Add(1*time.Hour)),
+				table.WithFilesOlderThan(-1*time.Hour),
 				table.WithDryRun(false),
 			)
 
@@ -400,7 +400,8 @@ func (s *OrphanCleanupIntegrationSuite) TestOrphanCleanupCustomDeleteFunction() 
 
 	result, err := tbl.DeleteOrphanFiles(s.ctx,
 		table.WithDeleteFunc(customDeleteFunc),
-		table.WithOlderThan(time.Now().Add(1*time.Hour)),
+		table.WithFilesOlderThan(-1*time.Hour),
+		table.WithDryRun(false),
 		table.WithDryRun(false),
 	)
 

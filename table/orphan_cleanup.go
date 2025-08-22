@@ -71,7 +71,7 @@ func (p PrefixMismatchMode) String() string {
 // OrphanCleanupConfig holds configuration for orphan file cleanup operations.
 type orphanCleanupConfig struct {
 	location           string
-	olderThan          time.Time
+	olderThan          time.Duration
 	dryRun             bool
 	deleteFunc         func(string) error
 	maxConcurrency     int
@@ -88,9 +88,9 @@ func WithLocation(location string) OrphanCleanupOption {
 	}
 }
 
-func WithOlderThan(timestamp time.Time) OrphanCleanupOption {
+func WithFilesOlderThan(duration time.Duration) OrphanCleanupOption {
 	return func(cfg *orphanCleanupConfig) {
-		cfg.olderThan = timestamp
+		cfg.olderThan = duration
 	}
 }
 
@@ -163,8 +163,8 @@ type OrphanCleanupResult struct {
 
 func (t Table) DeleteOrphanFiles(ctx context.Context, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := &orphanCleanupConfig{
-		location:           "",                           // empty means use table's data location
-		olderThan:          time.Now().AddDate(0, 0, -3), // 3 days ago
+		location:           "",             // empty means use table's data location
+		olderThan:          72 * time.Hour, // 3 days ago
 		dryRun:             false,
 		deleteFunc:         nil,
 		maxConcurrency:     runtime.GOMAXPROCS(0), // default to number of CPUs
@@ -278,7 +278,8 @@ func (t Table) scanFiles(fs iceio.IO, location string, cfg *orphanCleanupConfig)
 			return nil
 		}
 
-		if !info.ModTime().Before(cfg.olderThan) {
+		cutOffTime := time.Now().Add(-cfg.olderThan)
+		if !info.ModTime().Before(cutOffTime) {
 			return nil // Skip files that are newer than or equal to the threshold
 		}
 
@@ -476,7 +477,6 @@ func deleteFilesParallel(fs iceio.IO, orphanFiles []string, cfg *orphanCleanupCo
 	for _, workerErrors := range errList {
 		allErrors = append(allErrors, workerErrors...)
 	}
-
 	err := errors.Join(allErrors...)
 
 	return deletedFiles, err
@@ -554,8 +554,10 @@ func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
 // Uses filepath.ToSlash() equivalent logic to match Go's standard library approach.
 func normalizeNonURLPath(path string) string {
 	normalized := filepath.Clean(path)
-
-	return filepath.ToSlash(normalized)
+	// We use this because to handle Windows paths
+	// on all platforms.filepath.ToSlash() only convert the current OS separator, and
+	// we need cross-platform support.
+	return strings.ReplaceAll(normalized, "\\", "/")
 }
 
 // applySchemeEquivalence maps schemes to their equivalent canonical form.

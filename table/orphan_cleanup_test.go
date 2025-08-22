@@ -49,9 +49,9 @@ func TestOrphanCleanupOptions(t *testing.T) {
 	WithLocation("/test/location")(cfg)
 	assert.Equal(t, "/test/location", cfg.location)
 
-	testTime := time.Now()
-	WithOlderThan(testTime)(cfg)
-	assert.Equal(t, testTime, cfg.olderThan)
+	testDuration := 24 * time.Hour
+	WithFilesOlderThan(testDuration)(cfg)
+	assert.Equal(t, testDuration, cfg.olderThan)
 
 	WithDryRun(true)(cfg)
 	assert.True(t, cfg.dryRun)
