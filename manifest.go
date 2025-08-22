@@ -601,6 +601,13 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 
 	var content ManifestContent
 	switch contentStr := string(metadata["content"]); contentStr {
+	case "":
+		if formatVersion != 1 {
+			return nil, fmt.Errorf("manifest file's 'content' metadata is missing and 'format-version' is %d, but the field is required for 'format-version' 2 and beyond",
+				formatVersion)
+		}
+		// V1 manifests do not contain the 'content' field, but should be interpretted as 'data' files
+		fallthrough
 	case "data":
 		content = ManifestContentData
 	case "deletes":
