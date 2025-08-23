@@ -125,6 +125,16 @@ func (t Table) Append(ctx context.Context, rdr array.RecordReader, snapshotProps
 	return txn.Commit(ctx)
 }
 
+// Delete is a shortcut for NewTransaction().Delete() and then committing the transaction
+func (t Table) Delete(ctx context.Context, deleteFilter iceberg.BooleanExpression, snapshotProps iceberg.Properties, caseSensitive bool) (*Table, error) {
+	txn := t.NewTransaction()
+	if err := txn.Delete(ctx, deleteFilter, snapshotProps, caseSensitive); err != nil {
+		return nil, err
+	}
+
+	return txn.Commit(ctx)
+}
+
 func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile, error] {
 	fs, err := t.fsF(ctx)
 	if err != nil {

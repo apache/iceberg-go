@@ -778,6 +778,71 @@ func (t *TableWritingTestSuite) TestAddFilesReferencedCurrentSnapshotIgnoreDupli
 	t.Equal([]int32{0, 0, 0}, deleted)
 }
 
+func (t *TableWritingTestSuite) TestDelete() {
+	ident := table.Identifier{"default", "unpartitioned_table_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion,
+		*iceberg.UnpartitionedSpec, t.tableSchema)
+
+	t.NotNil(tbl)
+
+	files := make([]string, 0)
+	for i := range 5 {
+		filePath := fmt.Sprintf("%s/unpartitioned/test-%d.parquet", t.location, i)
+		t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, t.arrTbl)
+		files = append(files, filePath)
+	}
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddFiles(t.ctx, files, nil, false))
+
+	stagedTbl, err := tx.StagedTable()
+	t.Require().NoError(err)
+	t.NotNil(stagedTbl.NameMapping())
+
+	t.Equal(stagedTbl.CurrentSnapshot().Summary,
+		&table.Summary{
+			Operation: table.OpAppend,
+			Properties: iceberg.Properties{
+				"added-data-files":       "5",
+				"added-files-size":       "3600",
+				"added-records":          "5",
+				"total-data-files":       "5",
+				"total-delete-files":     "0",
+				"total-equality-deletes": "0",
+				"total-files-size":       "3600",
+				"total-position-deletes": "0",
+				"total-records":          "5",
+			},
+		})
+
+	scan, err := tx.Scan()
+	t.Require().NoError(err)
+
+	contents, err := scan.ToArrowTable(context.Background())
+	t.Require().NoError(err)
+	defer contents.Release()
+
+	t.EqualValues(5, contents.NumRows())
+	fmt.Printf("%s", contents.String())
+
+	deleteFilter := iceberg.EqualTo(iceberg.Reference("baz"), int32(123))
+	err = tx.Delete(t.ctx, deleteFilter, nil, true)
+	t.Require().NoError(err)
+
+	stagedTbl, err = tx.StagedTable()
+	t.Require().NoError(err)
+
+	scan, err = stagedTbl.NewTransaction().Scan()
+	t.Require().NoError(err)
+
+	contents, err = scan.ToArrowTable(context.Background())
+	t.Require().NoError(err)
+	defer contents.Release()
+
+	t.EqualValues(0, contents.NumRows())
+	fmt.Printf("%s", contents.String())
+}
+
 type mockedCatalog struct{}
 
 func (m *mockedCatalog) LoadTable(ctx context.Context, ident table.Identifier, props iceberg.Properties) (*table.Table, error) {
