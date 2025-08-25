@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"fmt"
 	"iter"
 	"log"
 	"runtime"
@@ -225,6 +226,45 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 	deleteOldMetadata(fs, t.metadata, newMeta)
 
 	return New(t.identifier, newMeta, newLoc, t.fsF, t.cat), nil
+}
+
+// TimeTravel finds the snapshot that was current as of or right before the given timestamp.
+func (t Table) TimeTravel(timestampMs int64, inclusive bool) *Snapshot {
+	entries := slices.Collect(t.metadata.SnapshotLogs())
+	for i := len(entries) - 1; i >= 0; i-- {
+		entry := entries[i]
+		if (inclusive && entry.TimestampMs <= timestampMs) || (!inclusive && entry.TimestampMs < timestampMs) {
+			return t.metadata.SnapshotByID(entry.SnapshotID)
+		}
+	}
+
+	return nil
+}
+
+// TimeTravelScan creates a scan of the table as it existed at the given timestamp.
+// Note: Cannot be combined with WithSnapshotID option - time travel determines the snapshot.
+func (t Table) TimeTravelScan(timestampMs int64, opts ...ScanOption) (*Scan, error) {
+	snapshot := t.TimeTravel(timestampMs, true)
+	if snapshot == nil {
+		return nil, fmt.Errorf("no snapshot found for timestamp %d", timestampMs)
+	}
+
+	for _, opt := range opts {
+		// Create a test scan to see what the option does
+		testScan := &Scan{}
+		opt(testScan)
+		if testScan.snapshotID != nil {
+			return nil, fmt.Errorf("cannot use WithSnapshotID with TimeTravelScan - time travel determines the snapshot (found snapshot ID %d, time travel uses %d)",
+				*testScan.snapshotID, snapshot.SnapshotID)
+		}
+	}
+
+	// Add the snapshot ID to the scan options
+	allOpts := make([]ScanOption, len(opts)+1)
+	allOpts[0] = WithSnapshotID(snapshot.SnapshotID)
+	copy(allOpts[1:], opts)
+
+	return t.Scan(allOpts...), nil
 }
 
 func getFiles(it iter.Seq[MetadataLogEntry]) iter.Seq[string] {

@@ -1,0 +1,297 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+package table
+
+import (
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/apache/iceberg-go"
+)
+
+func TestTimeTravel(t *testing.T) {
+	baseTime := time.Date(2025, 8, 24, 0, 0, 0, 0, time.UTC)
+
+	// Create test snapshots with different timestamps
+	snapshots := []Snapshot{
+		{
+			SnapshotID:     1000,
+			TimestampMs:    baseTime.Add(-3 * time.Hour).UnixMilli(), // 3 hours ago
+			SequenceNumber: 1,
+			ManifestList:   "s3://bucket/table/snap1.avro",
+			Summary:        &Summary{Operation: OpAppend},
+		},
+		{
+			SnapshotID:       2000,
+			ParentSnapshotID: &[]int64{1000}[0],
+			TimestampMs:      baseTime.Add(-2 * time.Hour).UnixMilli(), // 2 hours ago
+			SequenceNumber:   2,
+			ManifestList:     "s3://bucket/table/snap2.avro",
+			Summary:          &Summary{Operation: OpAppend},
+		},
+		{
+			SnapshotID:       3000,
+			ParentSnapshotID: &[]int64{2000}[0],
+			TimestampMs:      baseTime.Add(-1 * time.Hour).UnixMilli(), // 1 hour ago
+			SequenceNumber:   3,
+			ManifestList:     "s3://bucket/table/snap3.avro",
+			Summary:          &Summary{Operation: OpDelete},
+		},
+	}
+
+	snapshotLog := []SnapshotLogEntry{
+		{SnapshotID: 1000, TimestampMs: baseTime.Add(-3 * time.Hour).UnixMilli()},
+		{SnapshotID: 2000, TimestampMs: baseTime.Add(-2 * time.Hour).UnixMilli()},
+		{SnapshotID: 3000, TimestampMs: baseTime.Add(-1 * time.Hour).UnixMilli()},
+	}
+
+	// Create table with metadata from snapshots and log
+	meta, err := createTestMetadata(snapshots, snapshotLog)
+	require.NoError(t, err)
+
+	table := Table{
+		identifier: []string{"db", "table"},
+		metadata:   meta,
+	}
+
+	t.Run("TimeTravel finds exact timestamp match (inclusive)", func(t *testing.T) {
+		timestamp := baseTime.Add(-2 * time.Hour).UnixMilli()
+		snapshot := table.TimeTravel(timestamp, true)
+		require.NotNil(t, snapshot)
+		assert.Equal(t, int64(2000), snapshot.SnapshotID)
+		assert.Equal(t, timestamp, snapshot.TimestampMs)
+	})
+
+	t.Run("TimeTravel finds exact timestamp match (exclusive)", func(t *testing.T) {
+		timestamp := baseTime.Add(-2 * time.Hour).UnixMilli()
+		snapshot := table.TimeTravel(timestamp, false)
+		require.NotNil(t, snapshot)
+		assert.Equal(t, int64(1000), snapshot.SnapshotID) // Should get previous snapshot
+	})
+
+	t.Run("TimeTravel finds snapshot before timestamp", func(t *testing.T) {
+		// Query 90 minutes ago (between snapshots 2 and 3)
+		timestamp := baseTime.Add(-90 * time.Minute).UnixMilli()
+		snapshot := table.TimeTravel(timestamp, true)
+		require.NotNil(t, snapshot)
+		assert.Equal(t, int64(2000), snapshot.SnapshotID) // Should get snapshot 2
+	})
+
+	t.Run("TimeTravel finds most recent snapshot for future timestamp", func(t *testing.T) {
+		// Query future timestamp
+		timestamp := baseTime.Add(1 * time.Hour).UnixMilli()
+		snapshot := table.TimeTravel(timestamp, true)
+		require.NotNil(t, snapshot)
+		assert.Equal(t, int64(3000), snapshot.SnapshotID) // Should get most recent
+	})
+
+	t.Run("TimeTravel returns nil for timestamp before first snapshot", func(t *testing.T) {
+		// Query before first snapshot
+		timestamp := baseTime.Add(-4 * time.Hour).UnixMilli()
+		snapshot := table.TimeTravel(timestamp, true)
+		assert.Nil(t, snapshot)
+	})
+
+	t.Run("TimeTravel returns nil for timestamp equal to first snapshot (exclusive)", func(t *testing.T) {
+		timestamp := baseTime.Add(-3 * time.Hour).UnixMilli()
+		snapshot := table.TimeTravel(timestamp, false)
+		assert.Nil(t, snapshot)
+	})
+
+	t.Run("TimeTravel with inclusive=true (default behavior)", func(t *testing.T) {
+		timestamp := baseTime.Add(-2 * time.Hour).UnixMilli()
+		snapshot := table.TimeTravel(timestamp, true)
+		require.NotNil(t, snapshot)
+		assert.Equal(t, int64(2000), snapshot.SnapshotID)
+	})
+}
+
+func TestTimeTravelScan(t *testing.T) {
+	baseTime := time.Date(2025, 8, 24, 0, 0, 0, 0, time.UTC)
+
+	snapshots := []Snapshot{
+		{
+			SnapshotID:     1000,
+			TimestampMs:    baseTime.Add(-2 * time.Hour).UnixMilli(),
+			SequenceNumber: 1,
+			ManifestList:   "s3://bucket/table/snap1.avro",
+			Summary:        &Summary{Operation: OpAppend},
+		},
+		{
+			SnapshotID:     2000,
+			TimestampMs:    baseTime.Add(-1 * time.Hour).UnixMilli(),
+			SequenceNumber: 2,
+			ManifestList:   "s3://bucket/table/snap2.avro",
+			Summary:        &Summary{Operation: OpAppend},
+		},
+	}
+
+	snapshotLog := []SnapshotLogEntry{
+		{SnapshotID: 1000, TimestampMs: baseTime.Add(-2 * time.Hour).UnixMilli()},
+		{SnapshotID: 2000, TimestampMs: baseTime.Add(-1 * time.Hour).UnixMilli()},
+	}
+
+	meta, err := createTestMetadata(snapshots, snapshotLog)
+	require.NoError(t, err)
+
+	table := Table{
+		identifier: []string{"db", "table"},
+		metadata:   meta,
+	}
+
+	t.Run("TimeTravelScan creates scan with correct snapshot ID", func(t *testing.T) {
+		timestamp := baseTime.Add(-90 * time.Minute).UnixMilli() // Between snapshots
+		scan, err := table.TimeTravelScan(timestamp)
+		require.NoError(t, err)
+		require.NotNil(t, scan)
+
+		// Verify the scan has the correct snapshot ID
+		assert.Equal(t, &[]int64{1000}[0], scan.snapshotID)
+	})
+
+	t.Run("TimeTravelScan with additional options", func(t *testing.T) {
+		timestamp := baseTime.Add(-30 * time.Minute).UnixMilli()
+		scan, err := table.TimeTravelScan(timestamp,
+			WithSelectedFields("col1", "col2"),
+			WithLimit(100),
+		)
+		require.NoError(t, err)
+		require.NotNil(t, scan)
+
+		// Verify snapshot ID and other options are set
+		assert.Equal(t, &[]int64{2000}[0], scan.snapshotID)
+		assert.Equal(t, []string{"col1", "col2"}, scan.selectedFields)
+		assert.Equal(t, int64(100), scan.limit)
+	})
+
+	t.Run("TimeTravelScan returns error for timestamp with no snapshot", func(t *testing.T) {
+		timestamp := baseTime.Add(-3 * time.Hour).UnixMilli() // Before first snapshot
+		scan, err := table.TimeTravelScan(timestamp)
+		require.Error(t, err)
+		assert.Nil(t, scan)
+		assert.Contains(t, err.Error(), "no snapshot found for timestamp")
+	})
+
+	t.Run("TimeTravelScan rejects conflicting WithSnapshotID option", func(t *testing.T) {
+		timestamp := baseTime.Add(-30 * time.Minute).UnixMilli()
+		scan, err := table.TimeTravelScan(timestamp, WithSnapshotID(9999))
+		require.Error(t, err)
+		assert.Nil(t, scan)
+		assert.Contains(t, err.Error(), "cannot use WithSnapshotID with TimeTravelScan")
+		assert.Contains(t, err.Error(), "9999") // Should mention the conflicting ID
+	})
+}
+
+func TestTimeTravelEdgeCases(t *testing.T) {
+	t.Run("Empty snapshot log", func(t *testing.T) {
+		meta, err := createTestMetadata(nil, nil)
+		require.NoError(t, err)
+
+		table := Table{
+			identifier: []string{"db", "table"},
+			metadata:   meta,
+		}
+
+		snapshot := table.TimeTravel(time.Now().UnixMilli(), true)
+		assert.Nil(t, snapshot)
+
+		scan, err := table.TimeTravelScan(time.Now().UnixMilli())
+		require.Error(t, err)
+		assert.Nil(t, scan)
+	})
+
+	t.Run("Single snapshot", func(t *testing.T) {
+		now := time.Now()
+		snapshots := []Snapshot{
+			{
+				SnapshotID:     1000,
+				TimestampMs:    now.UnixMilli(),
+				SequenceNumber: 1,
+				ManifestList:   "s3://bucket/table/snap1.avro",
+			},
+		}
+
+		snapshotLog := []SnapshotLogEntry{
+			{SnapshotID: 1000, TimestampMs: now.UnixMilli()},
+		}
+
+		meta, err := createTestMetadata(snapshots, snapshotLog)
+		require.NoError(t, err)
+
+		table := Table{
+			identifier: []string{"db", "table"},
+			metadata:   meta,
+		}
+
+		// Before snapshot
+		snapshot := table.TimeTravel(now.Add(-1*time.Hour).UnixMilli(), true)
+		assert.Nil(t, snapshot)
+
+		// At snapshot timestamp
+		snapshot = table.TimeTravel(now.UnixMilli(), true)
+		require.NotNil(t, snapshot)
+		assert.Equal(t, int64(1000), snapshot.SnapshotID)
+
+		// After snapshot
+		snapshot = table.TimeTravel(now.Add(1*time.Hour).UnixMilli(), true)
+		require.NotNil(t, snapshot)
+		assert.Equal(t, int64(1000), snapshot.SnapshotID)
+	})
+}
+
+// createTestMetadata creates metadata with custom snapshots and logs for testing
+func createTestMetadata(snapshots []Snapshot, snapshotLog []SnapshotLogEntry) (Metadata, error) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+
+	// Create basic metadata
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder,
+		"s3://bucket/table", iceberg.Properties{})
+	if err != nil {
+		return nil, err
+	}
+
+	// If we have custom snapshots or logs, we need to modify the metadata
+	if len(snapshots) > 0 || len(snapshotLog) > 0 {
+		builder, err := MetadataBuilderFromBase(meta)
+		if err != nil {
+			return nil, err
+		}
+
+		// Add snapshots if provided
+		for _, snapshot := range snapshots {
+			builder, err = builder.AddSnapshot(&snapshot)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		// Manually set snapshot log entries by directly modifying the builder
+		if len(snapshotLog) > 0 {
+			builder.snapshotLog = append(builder.snapshotLog, snapshotLog...)
+		}
+
+		return builder.Build()
+	}
+
+	return meta, nil
+}
