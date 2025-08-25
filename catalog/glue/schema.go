@@ -49,7 +49,16 @@ func schemasToGlueColumns(metadata table.Metadata) []types.Column {
 		}
 	}
 
-	return slices.Collect(maps.Values(results))
+	// Convert map values to slice and sort by icebergFieldIDKey
+	columns := slices.Collect(maps.Values(results))
+	slices.SortFunc(columns, func(a, b types.Column) int {
+		aID, _ := strconv.Atoi(a.Parameters[icebergFieldIDKey])
+		bID, _ := strconv.Atoi(b.Parameters[icebergFieldIDKey])
+
+		return aID - bID
+	})
+
+	return columns
 }
 
 // schemaToGlueColumns converts an Iceberg schema to a list of Glue columns.

@@ -48,7 +48,7 @@ const (
 
 	// property keys
 	PropsKeyLocation    = "location"
-	PropsKeyDescription = "comment"
+	PropsKeyDescription = "Description"
 
 	// glue table parameter keys
 	tableParamTableType                = "table_type"
@@ -744,14 +744,12 @@ func filterTableListByType(database string, tableList []types.Table, tableType s
 }
 
 func constructParameters(staged *table.Table, previousGlueTable *types.Table) map[string]string {
-	var parameters map[string]string
+	parameters := make(map[string]string)
 	if previousGlueTable != nil {
-		parameters = previousGlueTable.Parameters
+		maps.Copy(parameters, previousGlueTable.Parameters)
 		if previousMetadataLocation, ok := parameters[tableParamMetadataLocation]; ok {
 			parameters[tableParamPreviousMetadataLocation] = previousMetadataLocation
 		}
-	} else {
-		parameters = make(map[string]string)
 	}
 
 	parameters[tableParamTableType] = glueTypeIceberg

@@ -233,6 +233,7 @@ func TestGlueGetTableCaseInsensitive(t *testing.T) {
 					tableParamTableType:        tc.tableType,
 					tableParamMetadataLocation: "s3://test-bucket/test_table/metadata/abc123-123.metadata.json",
 				},
+				TableType: aws.String("EXTERNAL_TABLE"),
 			}
 
 			mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
@@ -717,6 +718,7 @@ func TestGlueRenameTable(t *testing.T) {
 				tableParamTableType:        glueTypeIceberg,
 				tableParamMetadataLocation: "s3://test-bucket/test_table/metadata/abc123-123.metadata.json",
 			},
+			TableType:         aws.String("EXTERNAL_TABLE"),
 			Owner:             aws.String("owner"),
 			Description:       aws.String("description"),
 			StorageDescriptor: &types.StorageDescriptor{},
@@ -729,6 +731,7 @@ func TestGlueRenameTable(t *testing.T) {
 		TableInput: &types.TableInput{
 			Name:        aws.String("new_test_table"),
 			Owner:       aws.String("owner"),
+			TableType:   aws.String("EXTERNAL_TABLE"),
 			Description: aws.String("description"),
 			Parameters: map[string]string{
 				tableParamTableType:        glueTypeIceberg,
@@ -755,6 +758,7 @@ func TestGlueRenameTable(t *testing.T) {
 				tableParamTableType:        glueTypeIceberg,
 				tableParamMetadataLocation: "s3://test-bucket/test_table/metadata/abc123-123.metadata.json",
 			},
+			TableType:         aws.String("EXTERNAL_TABLE"),
 			Owner:             aws.String("owner"),
 			Description:       aws.String("description"),
 			StorageDescriptor: &types.StorageDescriptor{},
@@ -793,7 +797,6 @@ func TestGlueRenameTable(t *testing.T) {
 }
 
 func TestGlueRenameTable_DeleteTableFailureRollback(t *testing.T) {
-	fmt.Printf("DEBUG: Test starting\n")
 	assert := require.New(t)
 
 	mockGlueSvc := &mockGlueClient{}
@@ -813,7 +816,8 @@ func TestGlueRenameTable_DeleteTableFailureRollback(t *testing.T) {
 		Name:         aws.String("test_table"),
 	}, mock.Anything).Return(&glue.GetTableOutput{
 		Table: &types.Table{
-			Name: aws.String("test_table"),
+			Name:      aws.String("test_table"),
+			TableType: aws.String("EXTERNAL_TABLE"),
 			Parameters: map[string]string{
 				tableParamTableType:        glueTypeIceberg,
 				tableParamMetadataLocation: "s3://test-bucket/test_table/metadata/abc123-123.metadata.json",
@@ -829,6 +833,7 @@ func TestGlueRenameTable_DeleteTableFailureRollback(t *testing.T) {
 		DatabaseName: aws.String("test_database"),
 		TableInput: &types.TableInput{
 			Name:              aws.String("new_test_table"),
+			TableType:         aws.String("EXTERNAL_TABLE"),
 			Owner:             aws.String("owner"),
 			Description:       aws.String("description"),
 			Parameters:        map[string]string{tableParamTableType: glueTypeIceberg, tableParamMetadataLocation: "s3://test-bucket/test_table/metadata/abc123-123.metadata.json"},
@@ -855,9 +860,10 @@ func TestGlueRenameTable_DeleteTableFailureRollback(t *testing.T) {
 	renamedTable, err := glueCatalog.RenameTable(context.TODO(), TableIdentifier("test_database", "test_table"), TableIdentifier("test_database", "new_test_table"))
 	assert.Error(err)
 	assert.Nil(renamedTable)
-	mockGlueSvc.AssertCalled(t, "DeleteTable", mock.Anything, mock.MatchedBy(func(arg *glue.DeleteTableInput) bool {
-		return arg != nil && aws.ToString(arg.DatabaseName) == "test_database" && aws.ToString(arg.Name) == "new_test_table"
-	}), mock.Anything)
+	mockGlueSvc.AssertCalled(t, "DeleteTable", mock.Anything, &glue.DeleteTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("new_test_table"),
+	}, mock.Anything)
 }
 
 func TestGlueListTablesIntegration(t *testing.T) {
