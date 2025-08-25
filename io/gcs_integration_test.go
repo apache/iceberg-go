@@ -132,9 +132,7 @@ func (s *GCSIOTestSuite) TestGCSWarehouse() {
 	s.Require().NoError(err)
 	s.Require().NotNil(tbl)
 
-	tbl, err = c.LoadTable(s.ctx,
-		catalog.ToIdentifier("iceberg-test-gcs", "test-table-gcs"),
-		properties)
+	tbl, err = c.LoadTable(s.ctx, catalog.ToIdentifier("iceberg-test-gcs", "test-table-gcs"))
 	s.Require().NoError(err)
 	s.Require().NotNil(tbl)
 }

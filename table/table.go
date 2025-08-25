@@ -38,8 +38,8 @@ type FSysF func(ctx context.Context) (io.IO, error)
 type Identifier = []string
 
 type CatalogIO interface {
-	LoadTable(context.Context, Identifier, iceberg.Properties) (*Table, error)
-	CommitTable(context.Context, *Table, []Requirement, []Update) (Metadata, string, error)
+	LoadTable(context.Context, Identifier) (*Table, error)
+	CommitTable(context.Context, Identifier, []Requirement, []Update) (Metadata, string, error)
 }
 
 type Table struct {
@@ -93,7 +93,7 @@ func (t Table) NewTransaction() *Transaction {
 }
 
 func (t *Table) Refresh(ctx context.Context) error {
-	fresh, err := t.cat.LoadTable(ctx, t.identifier, nil)
+	fresh, err := t.cat.LoadTable(ctx, t.identifier)
 	if err != nil {
 		return err
 	}
@@ -214,7 +214,7 @@ func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile,
 }
 
 func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requirement) (*Table, error) {
-	newMeta, newLoc, err := t.cat.CommitTable(ctx, &t, reqs, updates)
+	newMeta, newLoc, err := t.cat.CommitTable(ctx, t.identifier, reqs, updates)
 	if err != nil {
 		return nil, err
 	}

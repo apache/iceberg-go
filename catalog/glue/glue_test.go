@@ -871,7 +871,7 @@ func TestGlueLoadTableIntegration(t *testing.T) {
 
 	ctlg := NewCatalog(WithAwsConfig(awsCfg))
 
-	tbl, err := ctlg.LoadTable(context.TODO(), []string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")}, nil)
+	tbl, err := ctlg.LoadTable(context.TODO(), []string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")})
 	assert.NoError(err)
 	assert.Equal([]string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")}, tbl.Identifier())
 }
@@ -909,7 +909,7 @@ func TestGlueCreateTableSuccessIntegration(t *testing.T) {
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
 	ctlg := NewCatalog(WithAwsConfig(awsCfg))
-	sourceTable, err := ctlg.LoadTable(context.TODO(), []string{dbName, sourceTableName}, nil)
+	sourceTable, err := ctlg.LoadTable(context.TODO(), []string{dbName, sourceTableName})
 	assert.NoError(err)
 	assert.Equal([]string{dbName, sourceTableName}, sourceTable.Identifier())
 	newTableName := fmt.Sprintf("%d_%s", time.Now().UnixNano(), sourceTableName)
@@ -921,7 +921,7 @@ func TestGlueCreateTableSuccessIntegration(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal([]string{dbName, newTableName}, newTable.Identifier())
 
-	tableNewLoaded, err := ctlg.LoadTable(context.TODO(), []string{dbName, newTableName}, nil)
+	tableNewLoaded, err := ctlg.LoadTable(context.TODO(), []string{dbName, newTableName})
 	assert.NoError(err)
 	assert.Equal([]string{dbName, newTableName}, tableNewLoaded.Identifier())
 	assert.Equal(sourceTable.Schema().Fields(), tableNewLoaded.Schema().Fields())
@@ -952,7 +952,7 @@ func TestGlueCreateTableInvalidMetadataRollback(t *testing.T) {
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
 	ctlg := NewCatalog(WithAwsConfig(awsCfg))
-	sourceTable, err := ctlg.LoadTable(context.TODO(), []string{dbName, sourceTableName}, nil)
+	sourceTable, err := ctlg.LoadTable(context.TODO(), []string{dbName, sourceTableName})
 	assert.NoError(err)
 	newTableName := fmt.Sprintf("%d_%s", time.Now().UnixNano(), sourceTableName)
 	createOpts := []catalog.CreateTableOpt{
@@ -960,7 +960,7 @@ func TestGlueCreateTableInvalidMetadataRollback(t *testing.T) {
 	}
 	_, err = ctlg.CreateTable(context.TODO(), TableIdentifier(dbName, newTableName), sourceTable.Schema(), createOpts...)
 	assert.Error(err, "expected error when creating table with invalid metadata location")
-	_, err = ctlg.LoadTable(context.TODO(), []string{dbName, newTableName}, nil)
+	_, err = ctlg.LoadTable(context.TODO(), []string{dbName, newTableName})
 	assert.Error(err, "expected table to not exist after failed creation")
 	assert.True(strings.Contains(err.Error(), "table does not exist"), "expected EntityNotFoundException error")
 	// Verify that the table was not left in the catalog
@@ -1089,7 +1089,7 @@ func TestAlterTableIntegration(t *testing.T) {
 	_, err = ctlg.CreateTable(context.TODO(), tbIdent, schema, createOpts...)
 	assert.NoError(err)
 
-	testTable, err := ctlg.LoadTable(context.TODO(), tbIdent, nil)
+	testTable, err := ctlg.LoadTable(context.TODO(), tbIdent)
 	assert.NoError(err)
 	assert.Equal(testProps, testTable.Properties())
 	assert.True(schema.Equals(testTable.Schema()))
@@ -1104,12 +1104,12 @@ func TestAlterTableIntegration(t *testing.T) {
 	})
 	_, _, err = ctlg.CommitTable(
 		context.TODO(),
-		testTable,
+		testTable.Identifier(),
 		nil,
 		[]table.Update{updateProps},
 	)
 	assert.NoError(err)
-	testTable, err = ctlg.LoadTable(context.TODO(), tbIdent, nil)
+	testTable, err = ctlg.LoadTable(context.TODO(), tbIdent)
 	assert.NoError(err)
 	assert.Equal(iceberg.Properties{
 		"write.parquet.compression-codec": "zstd",
@@ -1121,12 +1121,12 @@ func TestAlterTableIntegration(t *testing.T) {
 	removeProps := table.NewRemovePropertiesUpdate([]string{"key"})
 	_, _, err = ctlg.CommitTable(
 		context.TODO(),
-		testTable,
+		testTable.Identifier(),
 		nil,
 		[]table.Update{removeProps},
 	)
 	assert.NoError(err)
-	testTable, err = ctlg.LoadTable(context.TODO(), tbIdent, nil)
+	testTable, err = ctlg.LoadTable(context.TODO(), tbIdent)
 	assert.NoError(err)
 	assert.Equal(iceberg.Properties{
 		"write.parquet.compression-codec": "zstd",
@@ -1149,12 +1149,12 @@ func TestAlterTableIntegration(t *testing.T) {
 
 	_, _, err = ctlg.CommitTable(
 		context.TODO(),
-		testTable,
+		testTable.Identifier(),
 		nil,
 		[]table.Update{updateColumns, setSchema},
 	)
 	assert.NoError(err)
-	testTable, err = ctlg.LoadTable(context.TODO(), tbIdent, nil)
+	testTable, err = ctlg.LoadTable(context.TODO(), tbIdent)
 	assert.NoError(err)
 	assert.Equal(newFields, testTable.Schema().Fields())
 }
@@ -1183,7 +1183,7 @@ func TestSnapshotManagementIntegration(t *testing.T) {
 	_, err = ctlg.CreateTable(context.TODO(), tbIdent, testSchema, createOpts...)
 	assert.NoError(err)
 
-	testTable, err := ctlg.LoadTable(context.TODO(), tbIdent, nil)
+	testTable, err := ctlg.LoadTable(context.TODO(), tbIdent)
 	assert.NoError(err)
 
 	// Test add new snapshot
@@ -1199,12 +1199,12 @@ func TestSnapshotManagementIntegration(t *testing.T) {
 		},
 	}
 
-	_, _, err = ctlg.CommitTable(context.TODO(), testTable, nil, []table.Update{
+	_, _, err = ctlg.CommitTable(context.TODO(), testTable.Identifier(), nil, []table.Update{
 		table.NewAddSnapshotUpdate(&newSnap),
 	})
 	assert.NoError(err)
 
-	testTable, err = ctlg.LoadTable(context.TODO(), tbIdent, nil)
+	testTable, err = ctlg.LoadTable(context.TODO(), tbIdent)
 	assert.NoError(err)
 
 	actualSnap := testTable.SnapshotByID(25)
@@ -1217,13 +1217,13 @@ func TestSnapshotManagementIntegration(t *testing.T) {
 	assert.Equal(newSnap.Summary.Operation, actualSnap.Summary.Operation)
 
 	// Test update current snapshot
-	_, _, err = ctlg.CommitTable(context.TODO(), testTable, nil, []table.Update{
+	_, _, err = ctlg.CommitTable(context.TODO(), testTable.Identifier(), nil, []table.Update{
 		table.NewSetSnapshotRefUpdate(table.MainBranch, 25, table.BranchRef,
 			-1, -1, -1),
 	})
 	assert.NoError(err)
 
-	testTable, err = ctlg.LoadTable(context.TODO(), tbIdent, nil)
+	testTable, err = ctlg.LoadTable(context.TODO(), tbIdent)
 	assert.NoError(err)
 
 	currSnap := testTable.CurrentSnapshot()
@@ -1273,7 +1273,7 @@ func TestGlueCheckTableNotExists(t *testing.T) {
 func cleanupTable(t *testing.T, ctlg catalog.Catalog, tbIdent table.Identifier, awsCfg aws.Config) {
 	t.Helper()
 
-	testTable, err := ctlg.LoadTable(context.TODO(), tbIdent, nil)
+	testTable, err := ctlg.LoadTable(context.TODO(), tbIdent)
 	if err != nil {
 		t.Logf("Warning: Failed to load table %s: %v", tbIdent, err)
 	}

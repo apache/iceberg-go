@@ -85,9 +85,7 @@ func (s *AzureBlobIOTestSuite) TestAzureBlobWarehouseKey() {
 	s.Require().NoError(err)
 	s.Require().NotNil(tbl)
 
-	tbl, err = c.LoadTable(s.ctx,
-		catalog.ToIdentifier("iceberg-test-azure", "test-table-azure"),
-		properties)
+	tbl, err = c.LoadTable(s.ctx, catalog.ToIdentifier("iceberg-test-azure", "test-table-azure"))
 	s.Require().NoError(err)
 	s.Require().NotNil(tbl)
 }
@@ -120,9 +118,7 @@ func (s *AzureBlobIOTestSuite) TestAzuriteWarehouseConnectionString() {
 	s.Require().NoError(err)
 	s.Require().NotNil(tbl)
 
-	tbl, err = c.LoadTable(s.ctx,
-		catalog.ToIdentifier("iceberg-test-azure", "test-table-azure"),
-		properties)
+	tbl, err = c.LoadTable(s.ctx, catalog.ToIdentifier("iceberg-test-azure", "test-table-azure"))
 	s.Require().NoError(err)
 	s.Require().NotNil(tbl)
 }

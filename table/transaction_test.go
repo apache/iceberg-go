@@ -117,7 +117,7 @@ func (s *SparkIntegrationTestSuite) TestSetProperties() {
 func (s *SparkIntegrationTestSuite) TestAddFile() {
 	const filename = "s3://warehouse/default/test_partitioned_by_days/data/ts_day=2023-03-13/supertest.parquet"
 
-	tbl, err := s.cat.LoadTable(s.ctx, catalog.ToIdentifier("default", "test_partitioned_by_days"), nil)
+	tbl, err := s.cat.LoadTable(s.ctx, catalog.ToIdentifier("default", "test_partitioned_by_days"))
 	s.Require().NoError(err)
 
 	sc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)

@@ -202,14 +202,10 @@ func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) it
 // LoadTable loads a table from the catalog table details.
 //
 // The identifier should contain the Glue database name, then Glue table name.
-func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, props iceberg.Properties) (*table.Table, error) {
+func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*table.Table, error) {
 	database, tableName, err := identifierToGlueTable(identifier)
 	if err != nil {
 		return nil, err
-	}
-
-	if props == nil {
-		props = map[string]string{}
 	}
 
 	glueTable, err := c.getTable(ctx, database, tableName)
@@ -228,7 +224,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, pr
 		ctx,
 		identifier,
 		location,
-		io.LoadFSFunc(props, location),
+		io.LoadFSFunc(nil, location),
 		c,
 	)
 	if err != nil {
@@ -295,7 +291,7 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create table %s.%s: %w", database, tableName, err)
 	}
-	createdTable, err := c.LoadTable(ctx, identifier, nil)
+	createdTable, err := c.LoadTable(ctx, identifier)
 	if err != nil {
 		// Attempt to clean up the table if loading fails
 		_, cleanupErr := c.glueSvc.DeleteTable(ctx, &glue.DeleteTableInput{
@@ -356,22 +352,22 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		return nil, fmt.Errorf("failed to register table %s.%s: %w", database, tableName, err)
 	}
 
-	return c.LoadTable(ctx, identifier, nil)
+	return c.LoadTable(ctx, identifier)
 }
 
-func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
+func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
 	// Load current table
-	database, tableName, err := identifierToGlueTable(tbl.Identifier())
+	database, tableName, err := identifierToGlueTable(identifier)
 	if err != nil {
 		return nil, "", err
 	}
-	current, err := c.LoadTable(ctx, tbl.Identifier(), nil)
+	current, err := c.LoadTable(ctx, identifier)
 	if err != nil && !errors.Is(err, catalog.ErrNoSuchTable) {
 		return nil, "", err
 	}
 
 	// Create a staging table with the updates applied
-	staged, err := internal.UpdateAndStageTable(ctx, tbl, tbl.Identifier(), requirements, updates, c)
+	staged, err := internal.UpdateAndStageTable(ctx, current, identifier, requirements, updates, c)
 	if err != nil {
 		return nil, "", err
 	}
@@ -484,7 +480,7 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 	}
 
 	// Load the new table to return.
-	renamedTable, err := c.LoadTable(ctx, TableIdentifier(toDatabase, toTable), nil)
+	renamedTable, err := c.LoadTable(ctx, TableIdentifier(toDatabase, toTable))
 	if err != nil {
 		return nil, fmt.Errorf("failed to load renamed table %s.%s: %w", toDatabase, toTable, err)
 	}

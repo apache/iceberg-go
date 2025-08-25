@@ -609,11 +609,11 @@ func (s *SqliteCatalogTestSuite) TestLoadTableFromSelfIdentifier() {
 		table, err := tt.cat.CreateTable(context.Background(), tt.tblID, tableSchemaNested)
 		s.Require().NoError(err)
 
-		intermediate, err := tt.cat.LoadTable(context.Background(), tt.tblID, nil)
+		intermediate, err := tt.cat.LoadTable(context.Background(), tt.tblID)
 		s.Require().NoError(err)
 		s.Equal(intermediate.Identifier(), table.Identifier())
 
-		loaded, err := tt.cat.LoadTable(context.Background(), intermediate.Identifier(), nil)
+		loaded, err := tt.cat.LoadTable(context.Background(), intermediate.Identifier())
 		s.Require().NoError(err)
 
 		s.Equal(table.Identifier(), loaded.Identifier())
@@ -639,10 +639,10 @@ func (s *SqliteCatalogTestSuite) TestDropTable() {
 
 		s.Equal(tt.tblID, table.Identifier())
 		s.NoError(tt.cat.DropTable(context.Background(), tt.tblID))
-		_, err = tt.cat.LoadTable(context.Background(), tt.tblID, nil)
+		_, err = tt.cat.LoadTable(context.Background(), tt.tblID)
 		s.ErrorIs(err, catalog.ErrNoSuchTable)
 
-		_, err = tt.cat.LoadTable(context.Background(), table.Identifier(), nil)
+		_, err = tt.cat.LoadTable(context.Background(), table.Identifier())
 		s.ErrorIs(err, catalog.ErrNoSuchTable)
 	}
 }
@@ -651,7 +651,7 @@ func (s *SqliteCatalogTestSuite) TestLoadTableNotExists() {
 	catalogs := []*sqlcat.Catalog{s.getCatalogMemory(), s.getCatalogSqlite()}
 
 	for _, cat := range catalogs {
-		_, err := cat.LoadTable(context.Background(), s.randomTableIdentifier(), nil)
+		_, err := cat.LoadTable(context.Background(), s.randomTableIdentifier())
 		s.ErrorIs(err, catalog.ErrNoSuchTable)
 	}
 }
@@ -664,7 +664,7 @@ func (s *SqliteCatalogTestSuite) TestLoadTableInvalidMetadata() {
 			VALUES ('default', 'default', 'invalid_metadata')`)
 	s.Require().NoError(err)
 
-	_, err = cat.LoadTable(context.Background(), table.Identifier{"default", "invalid_metadata"}, nil)
+	_, err = cat.LoadTable(context.Background(), table.Identifier{"default", "invalid_metadata"})
 	s.ErrorIs(err, catalog.ErrNoSuchTable)
 }
 
@@ -704,7 +704,7 @@ func (s *SqliteCatalogTestSuite) TestRenameTable() {
 		s.Equal(tt.toTable, renamed.Identifier())
 		s.Equal(table.MetadataLocation(), renamed.MetadataLocation())
 
-		_, err = tt.cat.LoadTable(ctx, tt.fromTable, nil)
+		_, err = tt.cat.LoadTable(ctx, tt.fromTable)
 		s.ErrorIs(err, catalog.ErrNoSuchTable)
 	}
 }
