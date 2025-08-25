@@ -32,6 +32,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/config"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	tblutils "github.com/apache/iceberg-go/table/internal"
@@ -1030,11 +1031,19 @@ func (sc *schemaCompatVisitor) isFieldCompat(lhs iceberg.NestedField) bool {
 
 func (sc *schemaCompatVisitor) Schema(s *iceberg.Schema, v func() bool) bool {
 	if !v() {
-		pterm.DisableColor()
-		tbl := pterm.DefaultTable.WithHasHeader(true).WithData(sc.errorData)
-		tbl.Render()
-		txt, _ := tbl.Srender()
-		pterm.EnableColor()
+		var lines []string
+		lines = append(lines, "   | Table Field              | Requested Field")
+
+		for i, row := range sc.errorData {
+			if i == 0 {
+				continue
+			}
+			if len(row) >= 3 {
+				lines = append(lines, fmt.Sprintf("%s | %-24s | %s", row[0], row[1], row[2]))
+			}
+		}
+
+		txt := strings.Join(lines, "\n") + "\n"
 		panic("mismatch in fields:\n" + txt)
 	}
 
@@ -1222,7 +1231,23 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 			statistics := format.DataFileStatsFromMeta(rdr.Metadata(), must(computeStatsPlan(currentSchema, meta.props)),
 				must(format.PathToIDMapping(currentSchema)))
 
-			df := statistics.ToDataFile(currentSchema, currentSpec, filePath, iceberg.ParquetFile, rdr.SourceFileSize())
+			partitionValues := make(map[int]any)
+			if !currentSpec.Equals(*iceberg.UnpartitionedSpec) {
+				for field := range currentSpec.Fields() {
+					if !field.Transform.PreservesOrder() {
+						yield(nil, fmt.Errorf("cannot infer partition value from parquet metadata for a non-linear partition field: %s with transform %s", field.Name, field.Transform))
+
+						return
+					}
+
+					partitionVal := statistics.PartitionValue(field, currentSchema)
+					if partitionVal != nil {
+						partitionValues[field.FieldID] = partitionVal
+					}
+				}
+			}
+
+			df := statistics.ToDataFile(currentSchema, currentSpec, filePath, iceberg.ParquetFile, rdr.SourceFileSize(), partitionValues)
 			if !yield(df, nil) {
 				return
 			}
@@ -1298,6 +1323,7 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 	if err != nil || currentSpec == nil {
 		panic(fmt.Errorf("%w: cannot write files without a current spec", err))
 	}
+
 	nextCount, stopCount := iter.Pull(args.counter)
 	if currentSpec.IsUnpartitioned() {
 		tasks := func(yield func(WriteTask) bool) {
@@ -1317,8 +1343,17 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 			}
 		}
 
-		return writeFiles(ctx, rootLocation, args.fs, meta, tasks)
-	}
+		return writeFiles(ctx, rootLocation, args.fs, meta, nil, tasks)
+	} else {
+		partitionWriter := newPartitionedFanoutWriter(*currentSpec, meta.CurrentSchema(), args.itr)
+		rollingDataWriters := NewWriterFactory(rootLocation, args, meta, taskSchema, targetFileSize)
+		rollingDataWriters.nextCount = nextCount
+		rollingDataWriters.stopCount = stopCount
 
-	panic(fmt.Errorf("%w: write stream with partitions", iceberg.ErrNotImplemented))
+		partitionWriter.writers = &rollingDataWriters
+
+		workers := config.EnvConfig.MaxWorkers
+
+		return partitionWriter.Write(ctx, workers)
+	}
 }
