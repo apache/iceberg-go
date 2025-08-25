@@ -228,8 +228,8 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 	return New(t.identifier, newMeta, newLoc, t.fsF, t.cat), nil
 }
 
-// TimeTravel finds the snapshot that was current as of or right before the given timestamp.
-func (t Table) TimeTravel(timestampMs int64, inclusive bool) *Snapshot {
+// SnapshotAsOf finds the snapshot that was current as of or right before the given timestamp.
+func (t Table) SnapshotAsOf(timestampMs int64, inclusive bool) *Snapshot {
 	entries := slices.Collect(t.metadata.SnapshotLogs())
 	for i := len(entries) - 1; i >= 0; i-- {
 		entry := entries[i]
@@ -241,10 +241,10 @@ func (t Table) TimeTravel(timestampMs int64, inclusive bool) *Snapshot {
 	return nil
 }
 
-// TimeTravelScan creates a scan of the table as it existed at the given timestamp.
+// WithSnapshotAsOf creates a scan of the table as it existed at the given timestamp.
 // Note: Cannot be combined with WithSnapshotID option - time travel determines the snapshot.
-func (t Table) TimeTravelScan(timestampMs int64, opts ...ScanOption) (*Scan, error) {
-	snapshot := t.TimeTravel(timestampMs, true)
+func (t Table) WithSnapshotAsOf(timestampMs int64, opts ...ScanOption) (*Scan, error) {
+	snapshot := t.SnapshotAsOf(timestampMs, true)
 	if snapshot == nil {
 		return nil, fmt.Errorf("no snapshot found for timestamp %d", timestampMs)
 	}
@@ -254,7 +254,7 @@ func (t Table) TimeTravelScan(timestampMs int64, opts ...ScanOption) (*Scan, err
 		testScan := &Scan{}
 		opt(testScan)
 		if testScan.snapshotID != nil {
-			return nil, fmt.Errorf("cannot use WithSnapshotID with TimeTravelScan - time travel determines the snapshot (found snapshot ID %d, time travel uses %d)",
+			return nil, fmt.Errorf("cannot use WithSnapshotID with WithSnapshotAsOf - time travel determines the snapshot (found snapshot ID %d, time travel uses %d)",
 				*testScan.snapshotID, snapshot.SnapshotID)
 		}
 	}

@@ -27,7 +27,7 @@ import (
 	"github.com/apache/iceberg-go"
 )
 
-func TestTimeTravel(t *testing.T) {
+func TestSnapshotAsOf(t *testing.T) {
 	baseTime := time.Date(2025, 8, 24, 0, 0, 0, 0, time.UTC)
 
 	// Create test snapshots with different timestamps
@@ -72,59 +72,59 @@ func TestTimeTravel(t *testing.T) {
 		metadata:   meta,
 	}
 
-	t.Run("TimeTravel finds exact timestamp match (inclusive)", func(t *testing.T) {
+	t.Run("SnapshotAsOf finds exact timestamp match (inclusive)", func(t *testing.T) {
 		timestamp := baseTime.Add(-2 * time.Hour).UnixMilli()
-		snapshot := table.TimeTravel(timestamp, true)
+		snapshot := table.SnapshotAsOf(timestamp, true)
 		require.NotNil(t, snapshot)
 		assert.Equal(t, int64(2000), snapshot.SnapshotID)
 		assert.Equal(t, timestamp, snapshot.TimestampMs)
 	})
 
-	t.Run("TimeTravel finds exact timestamp match (exclusive)", func(t *testing.T) {
+	t.Run("SnapshotAsOf finds exact timestamp match (exclusive)", func(t *testing.T) {
 		timestamp := baseTime.Add(-2 * time.Hour).UnixMilli()
-		snapshot := table.TimeTravel(timestamp, false)
+		snapshot := table.SnapshotAsOf(timestamp, false)
 		require.NotNil(t, snapshot)
 		assert.Equal(t, int64(1000), snapshot.SnapshotID) // Should get previous snapshot
 	})
 
-	t.Run("TimeTravel finds snapshot before timestamp", func(t *testing.T) {
+	t.Run("SnapshotAsOf finds snapshot before timestamp", func(t *testing.T) {
 		// Query 90 minutes ago (between snapshots 2 and 3)
 		timestamp := baseTime.Add(-90 * time.Minute).UnixMilli()
-		snapshot := table.TimeTravel(timestamp, true)
+		snapshot := table.SnapshotAsOf(timestamp, true)
 		require.NotNil(t, snapshot)
 		assert.Equal(t, int64(2000), snapshot.SnapshotID) // Should get snapshot 2
 	})
 
-	t.Run("TimeTravel finds most recent snapshot for future timestamp", func(t *testing.T) {
+	t.Run("SnapshotAsOf finds most recent snapshot for future timestamp", func(t *testing.T) {
 		// Query future timestamp
 		timestamp := baseTime.Add(1 * time.Hour).UnixMilli()
-		snapshot := table.TimeTravel(timestamp, true)
+		snapshot := table.SnapshotAsOf(timestamp, true)
 		require.NotNil(t, snapshot)
 		assert.Equal(t, int64(3000), snapshot.SnapshotID) // Should get most recent
 	})
 
-	t.Run("TimeTravel returns nil for timestamp before first snapshot", func(t *testing.T) {
+	t.Run("SnapshotAsOf returns nil for timestamp before first snapshot", func(t *testing.T) {
 		// Query before first snapshot
 		timestamp := baseTime.Add(-4 * time.Hour).UnixMilli()
-		snapshot := table.TimeTravel(timestamp, true)
+		snapshot := table.SnapshotAsOf(timestamp, true)
 		assert.Nil(t, snapshot)
 	})
 
-	t.Run("TimeTravel returns nil for timestamp equal to first snapshot (exclusive)", func(t *testing.T) {
+	t.Run("SnapshotAsOf returns nil for timestamp equal to first snapshot (exclusive)", func(t *testing.T) {
 		timestamp := baseTime.Add(-3 * time.Hour).UnixMilli()
-		snapshot := table.TimeTravel(timestamp, false)
+		snapshot := table.SnapshotAsOf(timestamp, false)
 		assert.Nil(t, snapshot)
 	})
 
-	t.Run("TimeTravel with inclusive=true (default behavior)", func(t *testing.T) {
+	t.Run("SnapshotAsOf with inclusive=true (default behavior)", func(t *testing.T) {
 		timestamp := baseTime.Add(-2 * time.Hour).UnixMilli()
-		snapshot := table.TimeTravel(timestamp, true)
+		snapshot := table.SnapshotAsOf(timestamp, true)
 		require.NotNil(t, snapshot)
 		assert.Equal(t, int64(2000), snapshot.SnapshotID)
 	})
 }
 
-func TestTimeTravelScan(t *testing.T) {
+func TestTable_WithSnapshotAsOf(t *testing.T) {
 	baseTime := time.Date(2025, 8, 24, 0, 0, 0, 0, time.UTC)
 
 	snapshots := []Snapshot{
@@ -157,9 +157,9 @@ func TestTimeTravelScan(t *testing.T) {
 		metadata:   meta,
 	}
 
-	t.Run("TimeTravelScan creates scan with correct snapshot ID", func(t *testing.T) {
+	t.Run("WithSnapshotAsOf creates scan with correct snapshot ID", func(t *testing.T) {
 		timestamp := baseTime.Add(-90 * time.Minute).UnixMilli() // Between snapshots
-		scan, err := table.TimeTravelScan(timestamp)
+		scan, err := table.WithSnapshotAsOf(timestamp)
 		require.NoError(t, err)
 		require.NotNil(t, scan)
 
@@ -167,9 +167,9 @@ func TestTimeTravelScan(t *testing.T) {
 		assert.Equal(t, &[]int64{1000}[0], scan.snapshotID)
 	})
 
-	t.Run("TimeTravelScan with additional options", func(t *testing.T) {
+	t.Run("WithSnapshotAsOf with additional options", func(t *testing.T) {
 		timestamp := baseTime.Add(-30 * time.Minute).UnixMilli()
-		scan, err := table.TimeTravelScan(timestamp,
+		scan, err := table.WithSnapshotAsOf(timestamp,
 			WithSelectedFields("col1", "col2"),
 			WithLimit(100),
 		)
@@ -182,25 +182,25 @@ func TestTimeTravelScan(t *testing.T) {
 		assert.Equal(t, int64(100), scan.limit)
 	})
 
-	t.Run("TimeTravelScan returns error for timestamp with no snapshot", func(t *testing.T) {
+	t.Run("WithSnapshotAsOf returns error for timestamp with no snapshot", func(t *testing.T) {
 		timestamp := baseTime.Add(-3 * time.Hour).UnixMilli() // Before first snapshot
-		scan, err := table.TimeTravelScan(timestamp)
+		scan, err := table.WithSnapshotAsOf(timestamp)
 		require.Error(t, err)
 		assert.Nil(t, scan)
 		assert.Contains(t, err.Error(), "no snapshot found for timestamp")
 	})
 
-	t.Run("TimeTravelScan rejects conflicting WithSnapshotID option", func(t *testing.T) {
+	t.Run("WithSnapshotAsOf rejects conflicting WithSnapshotID option", func(t *testing.T) {
 		timestamp := baseTime.Add(-30 * time.Minute).UnixMilli()
-		scan, err := table.TimeTravelScan(timestamp, WithSnapshotID(9999))
+		scan, err := table.WithSnapshotAsOf(timestamp, WithSnapshotID(9999))
 		require.Error(t, err)
 		assert.Nil(t, scan)
-		assert.Contains(t, err.Error(), "cannot use WithSnapshotID with TimeTravelScan")
+		assert.Contains(t, err.Error(), "cannot use WithSnapshotID with WithSnapshotAsOf")
 		assert.Contains(t, err.Error(), "9999") // Should mention the conflicting ID
 	})
 }
 
-func TestTimeTravelEdgeCases(t *testing.T) {
+func TestSnapshotAsOfEdgeCases(t *testing.T) {
 	t.Run("Empty snapshot log", func(t *testing.T) {
 		meta, err := createTestMetadata(nil, nil)
 		require.NoError(t, err)
@@ -210,10 +210,10 @@ func TestTimeTravelEdgeCases(t *testing.T) {
 			metadata:   meta,
 		}
 
-		snapshot := table.TimeTravel(time.Now().UnixMilli(), true)
+		snapshot := table.SnapshotAsOf(time.Now().UnixMilli(), true)
 		assert.Nil(t, snapshot)
 
-		scan, err := table.TimeTravelScan(time.Now().UnixMilli())
+		scan, err := table.WithSnapshotAsOf(time.Now().UnixMilli())
 		require.Error(t, err)
 		assert.Nil(t, scan)
 	})
@@ -242,16 +242,16 @@ func TestTimeTravelEdgeCases(t *testing.T) {
 		}
 
 		// Before snapshot
-		snapshot := table.TimeTravel(now.Add(-1*time.Hour).UnixMilli(), true)
+		snapshot := table.SnapshotAsOf(now.Add(-1*time.Hour).UnixMilli(), true)
 		assert.Nil(t, snapshot)
 
 		// At snapshot timestamp
-		snapshot = table.TimeTravel(now.UnixMilli(), true)
+		snapshot = table.SnapshotAsOf(now.UnixMilli(), true)
 		require.NotNil(t, snapshot)
 		assert.Equal(t, int64(1000), snapshot.SnapshotID)
 
 		// After snapshot
-		snapshot = table.TimeTravel(now.Add(1*time.Hour).UnixMilli(), true)
+		snapshot = table.SnapshotAsOf(now.Add(1*time.Hour).UnixMilli(), true)
 		require.NotNil(t, snapshot)
 		assert.Equal(t, int64(1000), snapshot.SnapshotID)
 	})
