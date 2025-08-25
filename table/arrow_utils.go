@@ -1031,11 +1031,19 @@ func (sc *schemaCompatVisitor) isFieldCompat(lhs iceberg.NestedField) bool {
 
 func (sc *schemaCompatVisitor) Schema(s *iceberg.Schema, v func() bool) bool {
 	if !v() {
-		pterm.DisableColor()
-		tbl := pterm.DefaultTable.WithHasHeader(true).WithData(sc.errorData)
-		tbl.Render()
-		txt, _ := tbl.Srender()
-		pterm.EnableColor()
+		var lines []string
+		lines = append(lines, "   | Table Field              | Requested Field")
+
+		for i, row := range sc.errorData {
+			if i == 0 {
+				continue
+			}
+			if len(row) >= 3 {
+				lines = append(lines, fmt.Sprintf("%s | %-24s | %s", row[0], row[1], row[2]))
+			}
+		}
+
+		txt := strings.Join(lines, "\n") + "\n"
 		panic("mismatch in fields:\n" + txt)
 	}
 
@@ -1223,7 +1231,23 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 			statistics := format.DataFileStatsFromMeta(rdr.Metadata(), must(computeStatsPlan(currentSchema, meta.props)),
 				must(format.PathToIDMapping(currentSchema)))
 
-			df := statistics.ToDataFile(currentSchema, currentSpec, filePath, iceberg.ParquetFile, rdr.SourceFileSize(), nil)
+			partitionValues := make(map[int]any)
+			if !currentSpec.Equals(*iceberg.UnpartitionedSpec) {
+				for field := range currentSpec.Fields() {
+					if !field.Transform.PreservesOrder() {
+						yield(nil, fmt.Errorf("cannot infer partition value from parquet metadata for a non-linear partition field: %s with transform %s", field.Name, field.Transform))
+
+						return
+					}
+
+					partitionVal := statistics.PartitionValue(field, currentSchema)
+					if partitionVal != nil {
+						partitionValues[field.FieldID] = partitionVal
+					}
+				}
+			}
+
+			df := statistics.ToDataFile(currentSchema, currentSpec, filePath, iceberg.ParquetFile, rdr.SourceFileSize(), partitionValues)
 			if !yield(df, nil) {
 				return
 			}
