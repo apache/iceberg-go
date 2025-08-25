@@ -77,6 +77,7 @@ Options:
   --uri TEXT         	specify the catalog URI
   --output TYPE      	output type (json/text) [default: text]
   --credential TEXT  	specify credentials for the catalog
+  --token TEXT       	specify OAuth token directly (skip OAuth flow)
   --warehouse TEXT   	specify the warehouse to use
   --scope TEXT       	specify the OAuth scope for authentication [default: catalog]
   --config TEXT      	specify the path to the configuration file
@@ -125,6 +126,7 @@ type Config struct {
 	Output        string `docopt:"--output"`
 	History       bool   `docopt:"--history"`
 	Cred          string `docopt:"--credential"`
+	Token         string `docopt:"--token"`
 	Warehouse     string `docopt:"--warehouse"`
 	Config        string `docopt:"--config"`
 	Scope         string `docopt:"--scope"`
@@ -168,7 +170,9 @@ func main() {
 	switch catalog.Type(cfg.Catalog) {
 	case catalog.REST:
 		opts := []rest.Option{}
-		if len(cfg.Cred) > 0 {
+		if len(cfg.Token) > 0 {
+			opts = append(opts, rest.WithOAuthToken(cfg.Token))
+		} else if len(cfg.Cred) > 0 {
 			opts = append(opts, rest.WithCredential(cfg.Cred))
 		}
 
