@@ -778,7 +778,7 @@ func (t *TableWritingTestSuite) TestAddFilesReferencedCurrentSnapshotIgnoreDupli
 	t.Equal([]int32{0, 0, 0}, deleted)
 }
 
-type mockedCatalog struct{
+type mockedCatalog struct {
 	metadata table.Metadata
 }
 
@@ -1325,7 +1325,7 @@ func TestNullableStructRequiredField(t *testing.T) {
 	require.NotNil(t, stagedTbl)
 }
 
-type DeleteOldMetadataMockedCatalog struct{
+type DeleteOldMetadataMockedCatalog struct {
 	metadata table.Metadata
 }
 
