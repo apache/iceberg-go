@@ -20,9 +20,19 @@ package table
 import (
 	"fmt"
 	"net/url"
+	"path"
+	"strconv"
+	"strings"
 
 	"github.com/apache/iceberg-go"
 	"github.com/google/uuid"
+	"github.com/twmb/murmur3"
+)
+
+const (
+	hashBinaryStringBits = 20
+	entropyDirLength     = 4
+	entropyDirDepth      = 3
 )
 
 type LocationProvider interface {
@@ -94,6 +104,46 @@ type objectStoreLocationProvider struct {
 	*simpleLocationProvider
 
 	includePartitionPaths bool
+}
+
+func computeHash(dataFileName string) string {
+	// Bitwise AND to combat sign-extension; bitwise OR to preserve leading zeroes
+	topMask := 1 << hashBinaryStringBits
+	hashCode := int(murmur3.Sum32([]byte(dataFileName)))&(topMask-1) | topMask
+
+	// Convert to binary string and take the last hashBinaryStringBits
+	binaryStr := strconv.FormatInt(int64(hashCode), 2)
+
+	return dirsFromHash(binaryStr[len(binaryStr)-hashBinaryStringBits:])
+}
+
+func dirsFromHash(fileHash string) string {
+	// Divides hash into directories for optimized orphan removal operation
+	totalEntropyLength := entropyDirDepth * entropyDirLength
+
+	hashWithDirs := make([]string, 0)
+	for i := 0; i < totalEntropyLength; i += entropyDirLength {
+		hashWithDirs = append(hashWithDirs, fileHash[i:i+entropyDirLength])
+	}
+
+	if len(fileHash) > totalEntropyLength {
+		hashWithDirs = append(hashWithDirs, fileHash[totalEntropyLength:])
+	}
+
+	return strings.Join(hashWithDirs, "/")
+}
+
+func (p *objectStoreLocationProvider) NewDataLocation(dataFileName string) string {
+	if path.Dir(dataFileName) != "." {
+		return p.simpleLocationProvider.NewDataLocation(dataFileName)
+	}
+
+	hashedPath := computeHash(dataFileName)
+	if p.includePartitionPaths {
+		return p.simpleLocationProvider.dataPath.JoinPath(hashedPath, dataFileName).String()
+	} else {
+		return p.simpleLocationProvider.dataPath.JoinPath(hashedPath + "-" + dataFileName).String()
+	}
 }
 
 func newObjectStoreLocationProvider(tableLoc *url.URL, tableProps iceberg.Properties) (*objectStoreLocationProvider, error) {
