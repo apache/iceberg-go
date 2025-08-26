@@ -19,7 +19,6 @@ package table
 
 import (
 	"context"
-	"iter"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -131,11 +130,8 @@ func (s *FanoutWriterTestSuite) testTransformPartition(transform iceberg.Transfo
 	taskSchema, err := ArrowSchemaToIceberg(args.sc, false, nameMapping)
 	s.Require().NoError(err)
 
-	nextCount, stopCount := iter.Pull(args.counter)
 	partitionWriter := newPartitionedFanoutWriter(spec, taskSchema, args.itr)
 	rollingDataWriters := NewWriterFactory(loc, args, metaBuilder, icebergSchema, 1024*1024)
-	rollingDataWriters.nextCount = nextCount
-	rollingDataWriters.stopCount = stopCount
 
 	partitionWriter.writers = &rollingDataWriters
 	workers := config.EnvConfig.MaxWorkers
@@ -156,8 +152,6 @@ func (s *FanoutWriterTestSuite) testTransformPartition(transform iceberg.Transfo
 		partitionPath := spec.PartitionToPath(partitionRec, icebergSchema)
 		partitionPaths[partitionPath] += dataFile.Count()
 	}
-
-	stopCount()
 
 	s.Equal(expectedPartitionCount, fileCount, "Expected %d files, got %d", expectedPartitionCount, fileCount)
 	s.Equal(totalRecords, testRecord.NumRows(), "Expected %d records, got %d", testRecord.NumRows(), totalRecords)

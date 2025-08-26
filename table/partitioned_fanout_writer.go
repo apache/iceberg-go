@@ -133,12 +133,12 @@ func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 					return err
 				}
 
-				rollingDataWriter, err := p.writers.getOrCreateRollingDataWriter(partition, val.partitionValues)
+				rollingDataWriter, err := p.writers.getOrCreateRollingDataWriter(ctx, partition, val.partitionValues, dataFilesChannel)
 				if err != nil {
 					return err
 				}
 
-				err = rollingDataWriter.Add(ctx, partitionRecord, dataFilesChannel)
+				err = rollingDataWriter.Add(partitionRecord)
 				if err != nil {
 					return err
 				}
@@ -152,7 +152,7 @@ func (p *partitionedFanoutWriter) yieldDataFiles(ctx context.Context, fanoutWork
 	go func() {
 		defer close(outputDataFilesCh)
 		err = fanoutWorkers.Wait()
-		err = errors.Join(err, p.writers.closeAll(ctx, outputDataFilesCh))
+		err = errors.Join(err, p.writers.closeAll())
 	}()
 
 	return func(yield func(iceberg.DataFile, error) bool) {

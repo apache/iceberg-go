@@ -1347,8 +1347,6 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 	} else {
 		partitionWriter := newPartitionedFanoutWriter(*currentSpec, meta.CurrentSchema(), args.itr)
 		rollingDataWriters := NewWriterFactory(rootLocation, args, meta, taskSchema, targetFileSize)
-		rollingDataWriters.nextCount = nextCount
-		rollingDataWriters.stopCount = stopCount
 
 		partitionWriter.writers = &rollingDataWriters
 
