@@ -19,13 +19,47 @@ package glue
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/glue/types"
 )
+
+func schemasToGlueColumns(metadata table.Metadata) []types.Column {
+	results := make(map[string]types.Column)
+
+	for _, field := range schemaToGlueColumns(metadata.CurrentSchema(), true) {
+		results[aws.ToString(field.Name)] = field
+	}
+
+	for _, schema := range metadata.Schemas() {
+		if schema.ID == metadata.CurrentSchema().ID {
+			continue
+		}
+
+		for _, field := range schemaToGlueColumns(schema, false) {
+			if _, ok := results[aws.ToString(field.Name)]; !ok {
+				results[aws.ToString(field.Name)] = field
+			}
+		}
+	}
+
+	// Convert map values to slice and sort by icebergFieldIDKey
+	columns := slices.Collect(maps.Values(results))
+	slices.SortFunc(columns, func(a, b types.Column) int {
+		aID, _ := strconv.Atoi(a.Parameters[icebergFieldIDKey])
+		bID, _ := strconv.Atoi(b.Parameters[icebergFieldIDKey])
+
+		return aID - bID
+	})
+
+	return columns
+}
 
 // schemaToGlueColumns converts an Iceberg schema to a list of Glue columns.
 func schemaToGlueColumns(schema *iceberg.Schema, isCurrent bool) []types.Column {
