@@ -46,9 +46,8 @@ import (
 type ScannerSuite struct {
 	suite.Suite
 
-	ctx   context.Context
-	cat   catalog.Catalog
-	props iceberg.Properties
+	ctx context.Context
+	cat catalog.Catalog
 }
 
 func (s *ScannerSuite) SetupSuite() {
@@ -59,14 +58,16 @@ func (s *ScannerSuite) SetupSuite() {
 func (s *ScannerSuite) SetupTest() {
 	s.ctx = context.Background()
 
-	cat, err := rest.NewCatalog(s.ctx, "rest", "http://localhost:8181")
+	cat, err := rest.NewCatalog(s.ctx, "rest", "http://localhost:8181", rest.WithAdditionalProps(
+		iceberg.Properties{
+			io.S3Region:          "us-east-1",
+			io.S3AccessKeyID:     "admin",
+			io.S3SecretAccessKey: "password",
+		},
+	))
 	s.Require().NoError(err)
 
 	s.cat = cat
-	s.props = iceberg.Properties{
-		io.S3Region:      "us-east-1",
-		io.S3AccessKeyID: "admin", io.S3SecretAccessKey: "password",
-	}
 }
 
 func (s *ScannerSuite) TestScanner() {
@@ -101,7 +102,7 @@ func (s *ScannerSuite) TestScanner() {
 		s.Run(tt.table+" "+tt.expr.String(), func() {
 			ident := catalog.ToIdentifier("default", tt.table)
 
-			tbl, err := s.cat.LoadTable(s.ctx, ident, s.props)
+			tbl, err := s.cat.LoadTable(s.ctx, ident)
 			s.Require().NoError(err)
 
 			scan := tbl.Scan(table.WithRowFilter(tt.expr))
@@ -116,7 +117,7 @@ func (s *ScannerSuite) TestScanner() {
 func (s *ScannerSuite) TestScannerWithDeletes() {
 	ident := catalog.ToIdentifier("default", "test_positional_mor_deletes")
 
-	tbl, err := s.cat.LoadTable(s.ctx, ident, s.props)
+	tbl, err := s.cat.LoadTable(s.ctx, ident)
 	s.Require().NoError(err)
 
 	scan := tbl.Scan()
@@ -155,7 +156,7 @@ func (s *ScannerSuite) TestArrowNan() {
 	for _, name := range []string{"test_null_nan", "test_null_nan_rewritten"} {
 		s.Run(name, func() {
 			ident := catalog.ToIdentifier("default", name)
-			tbl, err := s.cat.LoadTable(s.ctx, ident, s.props)
+			tbl, err := s.cat.LoadTable(s.ctx, ident)
 			s.Require().NoError(err)
 
 			ctx := compute.WithAllocator(s.ctx, mem)
@@ -178,7 +179,7 @@ func (s *ScannerSuite) TestArrowNotNanCount() {
 	defer mem.AssertSize(s.T(), 0)
 
 	ident := catalog.ToIdentifier("default", "test_null_nan")
-	tbl, err := s.cat.LoadTable(s.ctx, ident, s.props)
+	tbl, err := s.cat.LoadTable(s.ctx, ident)
 	s.Require().NoError(err)
 
 	ctx := compute.WithAllocator(s.ctx, mem)
@@ -196,7 +197,7 @@ func (s *ScannerSuite) TestScanWithLimit() {
 	defer mem.AssertSize(s.T(), 0)
 
 	ident := catalog.ToIdentifier("default", "test_limit")
-	tbl, err := s.cat.LoadTable(s.ctx, ident, s.props)
+	tbl, err := s.cat.LoadTable(s.ctx, ident)
 	s.Require().NoError(err)
 
 	tests := []struct {
@@ -240,7 +241,7 @@ func (s *ScannerSuite) TestScannerRecordsDeletes() {
 	//  (12, 'l')
 	ident := catalog.ToIdentifier("default", "test_positional_mor_deletes")
 
-	tbl, err := s.cat.LoadTable(s.ctx, ident, s.props)
+	tbl, err := s.cat.LoadTable(s.ctx, ident)
 	s.Require().NoError(err)
 
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
@@ -333,7 +334,7 @@ func (s *ScannerSuite) TestScannerRecordsDoubleDeletes() {
 	//  (12, 'l')
 	ident := catalog.ToIdentifier("default", "test_positional_mor_double_deletes")
 
-	tbl, err := s.cat.LoadTable(s.ctx, ident, s.props)
+	tbl, err := s.cat.LoadTable(s.ctx, ident)
 	s.Require().NoError(err)
 
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
@@ -462,7 +463,7 @@ func (s *ScannerSuite) TestPartitionedTables() {
 
 			ident := catalog.ToIdentifier("default", tt.table)
 
-			tbl, err := s.cat.LoadTable(s.ctx, ident, s.props)
+			tbl, err := s.cat.LoadTable(s.ctx, ident)
 			s.Require().NoError(err)
 
 			scan := tbl.Scan(table.WithRowFilter(tt.predicate),
@@ -486,7 +487,7 @@ func (s *ScannerSuite) TestNestedColumns() {
 
 	ident := catalog.ToIdentifier("default", "test_all_types")
 
-	tbl, err := s.cat.LoadTable(s.ctx, ident, s.props)
+	tbl, err := s.cat.LoadTable(s.ctx, ident)
 	s.Require().NoError(err)
 
 	ctx := compute.WithAllocator(s.ctx, mem)
@@ -503,7 +504,7 @@ func (s *ScannerSuite) TestIsInFilterTable() {
 
 	ident := catalog.ToIdentifier("default", "test_uuid_and_fixed_unpartitioned")
 
-	tbl, err := s.cat.LoadTable(s.ctx, ident, s.props)
+	tbl, err := s.cat.LoadTable(s.ctx, ident)
 	s.Require().NoError(err)
 
 	ctx := compute.WithAllocator(s.ctx, mem)
@@ -533,7 +534,7 @@ func (s *ScannerSuite) TestUnpartitionedUUIDTable() {
 
 	ident := catalog.ToIdentifier("default", "test_uuid_and_fixed_unpartitioned")
 
-	tbl, err := s.cat.LoadTable(s.ctx, ident, s.props)
+	tbl, err := s.cat.LoadTable(s.ctx, ident)
 	s.Require().NoError(err)
 
 	ctx := compute.WithAllocator(s.ctx, mem)
@@ -575,7 +576,7 @@ func (s *ScannerSuite) TestUnpartitionedFixedTable() {
 
 	ident := catalog.ToIdentifier("default", "test_uuid_and_fixed_unpartitioned")
 
-	tbl, err := s.cat.LoadTable(s.ctx, ident, s.props)
+	tbl, err := s.cat.LoadTable(s.ctx, ident)
 	s.Require().NoError(err)
 
 	ctx := compute.WithAllocator(s.ctx, mem)
@@ -614,7 +615,7 @@ func (s *ScannerSuite) TestScanTag() {
 
 	ident := catalog.ToIdentifier("default", "test_positional_mor_deletes")
 
-	tbl, err := s.cat.LoadTable(s.ctx, ident, s.props)
+	tbl, err := s.cat.LoadTable(s.ctx, ident)
 	s.Require().NoError(err)
 
 	ctx := compute.WithAllocator(s.ctx, mem)
@@ -635,7 +636,7 @@ func (s *ScannerSuite) TestScanBranch() {
 
 	ident := catalog.ToIdentifier("default", "test_positional_mor_deletes")
 
-	tbl, err := s.cat.LoadTable(s.ctx, ident, s.props)
+	tbl, err := s.cat.LoadTable(s.ctx, ident)
 	s.Require().NoError(err)
 
 	ctx := compute.WithAllocator(s.ctx, mem)
@@ -656,7 +657,7 @@ func (s *ScannerSuite) TestFilterOnNewColumn() {
 
 	ident := catalog.ToIdentifier("default", "test_table_add_column")
 
-	tbl, err := s.cat.LoadTable(s.ctx, ident, s.props)
+	tbl, err := s.cat.LoadTable(s.ctx, ident)
 	s.Require().NoError(err)
 
 	ctx := compute.WithAllocator(s.ctx, mem)

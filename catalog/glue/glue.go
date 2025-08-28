@@ -209,7 +209,7 @@ func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) it
 // LoadTable loads a table from the catalog table details.
 //
 // The identifier should contain the Glue database name, then Glue table name.
-func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, props iceberg.Properties) (*table.Table, error) {
+func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*table.Table, error) {
 	database, tableName, err := identifierToGlueTable(identifier)
 	if err != nil {
 		return nil, err
@@ -263,7 +263,7 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, fmt.Errorf("failed to create table %s.%s: %w", database, tableName, err)
 	}
 
-	return c.LoadTable(ctx, identifier, nil)
+	return c.LoadTable(ctx, identifier)
 }
 
 // RegisterTable registers a new table using existing metadata.
@@ -295,12 +295,12 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		return nil, fmt.Errorf("failed to register table %s.%s: %w", database, tableName, err)
 	}
 
-	return c.LoadTable(ctx, identifier, nil)
+	return c.LoadTable(ctx, identifier)
 }
 
-func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
+func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
 	// Load current table
-	database, tableName, err := identifierToGlueTable(tbl.Identifier())
+	database, tableName, err := identifierToGlueTable(identifier)
 	if err != nil {
 		return nil, "", err
 	}
@@ -319,7 +319,7 @@ func (c *Catalog) CommitTable(ctx context.Context, tbl *table.Table, requirement
 	}
 
 	// Create a staging table with the updates applied
-	staged, err := internal.UpdateAndStageTable(ctx, current, tbl.Identifier(), requirements, updates, c)
+	staged, err := internal.UpdateAndStageTable(ctx, current, identifier, requirements, updates, c)
 	if err != nil {
 		return nil, "", err
 	}
@@ -448,7 +448,7 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 		return nil, fmt.Errorf("failed to rename the table %s.%s: %w", fromDatabase, fromTable, err)
 	}
 
-	return c.LoadTable(ctx, to, nil)
+	return c.LoadTable(ctx, to)
 }
 
 // CheckTableExists returns if an Iceberg table exists in the Glue catalog.

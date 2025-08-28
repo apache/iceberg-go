@@ -780,9 +780,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config)
 }
 
-func (r *Catalog) CommitTable(ctx context.Context, tbl *table.Table, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
-	ident := tbl.Identifier()
-
+func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
 	ns, tblName, err := splitIdentForPath(ident)
 	if err != nil {
 		return nil, "", err
@@ -838,7 +836,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config)
 }
 
-func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, props iceberg.Properties) (*table.Table, error) {
+func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*table.Table, error) {
 	ns, tbl, err := splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
@@ -851,7 +849,6 @@ func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, pr
 	}
 
 	config := maps.Clone(r.props)
-	maps.Copy(config, props)
 	maps.Copy(config, ret.Metadata.Properties())
 	for k, v := range ret.Config {
 		config[k] = v
@@ -937,7 +934,7 @@ func (r *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 		return nil, err
 	}
 
-	return r.LoadTable(ctx, to, nil)
+	return r.LoadTable(ctx, to)
 }
 
 func (r *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error {
