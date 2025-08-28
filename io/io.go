@@ -267,7 +267,7 @@ func inferFileIOFromSchema(ctx context.Context, path string, props map[string]st
 		return nil, fmt.Errorf("IO for file '%s' not implemented", path)
 	}
 
-	return createBlobFS(ctx, bucket, parsed.Host), nil
+	return createBlobFS(ctx, bucket, parsed.Host, parsed.Scheme), nil
 }
 
 // LoadFS takes a map of properties and an optional URI location
