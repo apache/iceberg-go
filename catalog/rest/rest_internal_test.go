@@ -42,6 +42,82 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+func TestTokenAuthenticationPriority(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// Track which authentication method was used
+	var authHeader string
+	var oauthCalled bool
+
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		authHeader = r.Header.Get("Authorization")
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{}, "overrides": map[string]any{},
+		})
+	})
+
+	mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, r *http.Request) {
+		oauthCalled = true
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "oauth_token_response",
+			"token_type":   "Bearer",
+		})
+	})
+
+	t.Run("token takes precedence over credential", func(t *testing.T) {
+		authHeader = ""
+		oauthCalled = false
+
+		// When both token and credential are provided, token should be used directly
+		cat, err := NewCatalog(context.Background(), "rest", srv.URL,
+			WithOAuthToken("direct_token"),
+			WithCredential("client:secret"))
+
+		require.NoError(t, err)
+		assert.NotNil(t, cat)
+
+		// Should use the direct token, not call OAuth endpoint
+		assert.Equal(t, "Bearer direct_token", authHeader)
+		assert.False(t, oauthCalled, "OAuth endpoint should not be called when token is provided")
+	})
+
+	t.Run("credential used when no token provided", func(t *testing.T) {
+		authHeader = ""
+		oauthCalled = false
+
+		// When only credential is provided, should use OAuth flow
+		cat, err := NewCatalog(context.Background(), "rest", srv.URL,
+			WithCredential("client:secret"))
+
+		require.NoError(t, err)
+		assert.NotNil(t, cat)
+
+		// Should call OAuth endpoint and use returned token
+		assert.Equal(t, "Bearer oauth_token_response", authHeader)
+		assert.True(t, oauthCalled, "OAuth endpoint should be called when only credential is provided")
+	})
+
+	t.Run("direct token only", func(t *testing.T) {
+		authHeader = ""
+		oauthCalled = false
+
+		// When only token is provided, should use it directly
+		cat, err := NewCatalog(context.Background(), "rest", srv.URL,
+			WithOAuthToken("only_token"))
+
+		require.NoError(t, err)
+		assert.NotNil(t, cat)
+
+		// Should use the direct token, not call OAuth endpoint
+		assert.Equal(t, "Bearer only_token", authHeader)
+		assert.False(t, oauthCalled, "OAuth endpoint should not be called when only token is provided")
+	})
+}
+
 func TestScope(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
