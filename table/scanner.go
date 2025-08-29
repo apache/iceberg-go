@@ -159,6 +159,7 @@ type Scan struct {
 	selectedFields []string
 	caseSensitive  bool
 	snapshotID     *int64
+	asOfTimestamp  *int64
 	options        iceberg.Properties
 	limit          int64
 
@@ -193,6 +194,16 @@ func (scan *Scan) UseRef(name string) (*Scan, error) {
 func (scan *Scan) Snapshot() *Snapshot {
 	if scan.snapshotID != nil {
 		return scan.metadata.SnapshotByID(*scan.snapshotID)
+	}
+
+	if scan.asOfTimestamp != nil {
+		entries := slices.Collect(scan.metadata.SnapshotLogs())
+		for i := len(entries) - 1; i >= 0; i-- {
+			entry := entries[i]
+			if entry.TimestampMs <= *scan.asOfTimestamp {
+				return scan.metadata.SnapshotByID(entry.SnapshotID)
+			}
+		}
 	}
 
 	return scan.metadata.CurrentSnapshot()
@@ -397,6 +408,23 @@ func (scan *Scan) collectManifestEntries(
 // PlanFiles orchestrates the fetching and filtering of manifests, and then
 // building a list of FileScanTasks that match the current Scan criteria.
 func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
+	if scan.asOfTimestamp != nil {
+		var snapshot *Snapshot
+		entries := slices.Collect(scan.metadata.SnapshotLogs())
+		for i := len(entries) - 1; i >= 0; i-- {
+			entry := entries[i]
+			if entry.TimestampMs <= *scan.asOfTimestamp {
+				snapshot = scan.metadata.SnapshotByID(entry.SnapshotID)
+
+				break
+			}
+		}
+		if snapshot == nil {
+			return nil, fmt.Errorf("no snapshot found for timestamp %d", *scan.asOfTimestamp)
+		}
+		scan.snapshotID = &snapshot.SnapshotID
+		scan.asOfTimestamp = nil
+	}
 	// Step 1: Retrieve filtered manifests based on snapshot and partition specs.
 	manifestList, err := scan.fetchPartitionSpecFilteredManifests(ctx)
 	if err != nil || len(manifestList) == 0 {

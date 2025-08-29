@@ -227,6 +227,19 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 	return New(t.identifier, newMeta, newLoc, t.fsF, t.cat), nil
 }
 
+// SnapshotAsOf finds the snapshot that was current as of or right before the given timestamp.
+func (t Table) SnapshotAsOf(timestampMs int64, inclusive bool) *Snapshot {
+	entries := slices.Collect(t.metadata.SnapshotLogs())
+	for i := len(entries) - 1; i >= 0; i-- {
+		entry := entries[i]
+		if (inclusive && entry.TimestampMs <= timestampMs) || (!inclusive && entry.TimestampMs < timestampMs) {
+			return t.metadata.SnapshotByID(entry.SnapshotID)
+		}
+	}
+
+	return nil
+}
+
 func getFiles(it iter.Seq[MetadataLogEntry]) iter.Seq[string] {
 	return func(yield func(string) bool) {
 		next, stop := iter.Pull(it)
@@ -292,6 +305,14 @@ func WithSnapshotID(n int64) ScanOption {
 
 	return func(scan *Scan) {
 		scan.snapshotID = &n
+		scan.asOfTimestamp = nil
+	}
+}
+
+func WithSnapshotAsOf(timeStampMs int64) ScanOption {
+	return func(scan *Scan) {
+		scan.asOfTimestamp = &timeStampMs
+		scan.snapshotID = nil
 	}
 }
 
