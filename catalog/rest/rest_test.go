@@ -2125,6 +2125,7 @@ func (m *mockTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		method string
 		path   string
 	}{method: r.Method, path: r.URL.Path})
+
 	return http.DefaultTransport.RoundTrip(r)
 }
 
