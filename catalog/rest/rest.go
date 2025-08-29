@@ -194,7 +194,7 @@ type configResponse struct {
 }
 
 type sessionTransport struct {
-	http.Transport
+	http.RoundTripper
 
 	defaultHeaders http.Header
 	signer         v4.HTTPSigner
@@ -244,7 +244,7 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	}
 
-	return s.Transport.RoundTrip(r)
+	return s.RoundTripper.RoundTrip(r)
 }
 
 func do[T any](ctx context.Context, method string, baseURI *url.URL, path []string, cl *http.Client, override map[int]error, allowNoContent bool) (ret T, err error) {
@@ -561,8 +561,12 @@ func (r *Catalog) fetchAccessToken(cl *http.Client, creds string, opts *options)
 
 func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Client, error) {
 	session := &sessionTransport{
-		Transport:      http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: opts.tlsConfig},
 		defaultHeaders: http.Header{},
+	}
+	if opts.transport != nil {
+		session.RoundTripper = opts.transport
+	} else {
+		session.RoundTripper = &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: opts.tlsConfig}
 	}
 	cl := &http.Client{Transport: session}
 

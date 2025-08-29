@@ -19,6 +19,7 @@ package rest
 
 import (
 	"crypto/tls"
+	"net/http"
 	"net/url"
 
 	"github.com/apache/iceberg-go"
@@ -108,6 +109,12 @@ func WithAdditionalProps(props iceberg.Properties) Option {
 	}
 }
 
+func WithCustomTransport(transport http.RoundTripper) Option {
+	return func(o *options) {
+		o.transport = transport
+	}
+}
+
 type options struct {
 	awsConfig         aws.Config
 	awsConfigSet      bool
@@ -122,6 +129,7 @@ type options struct {
 	prefix            string
 	authUri           *url.URL
 	scope             string
+	transport         http.RoundTripper
 
 	additionalProps iceberg.Properties
 }
