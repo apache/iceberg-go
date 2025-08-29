@@ -19,7 +19,6 @@ package table
 
 import (
 	"context"
-	"fmt"
 	"iter"
 	"log"
 	"runtime"
@@ -241,32 +240,6 @@ func (t Table) SnapshotAsOf(timestampMs int64, inclusive bool) *Snapshot {
 	return nil
 }
 
-// WithSnapshotAsOf creates a scan of the table as it existed at the given timestamp.
-// Note: Cannot be combined with WithSnapshotID option - time travel determines the snapshot.
-func (t Table) WithSnapshotAsOf(timestampMs int64, opts ...ScanOption) (*Scan, error) {
-	snapshot := t.SnapshotAsOf(timestampMs, true)
-	if snapshot == nil {
-		return nil, fmt.Errorf("no snapshot found for timestamp %d", timestampMs)
-	}
-
-	for _, opt := range opts {
-		// Create a test scan to see what the option does
-		testScan := &Scan{}
-		opt(testScan)
-		if testScan.snapshotID != nil {
-			return nil, fmt.Errorf("cannot use WithSnapshotID with WithSnapshotAsOf - time travel determines the snapshot (found snapshot ID %d, time travel uses %d)",
-				*testScan.snapshotID, snapshot.SnapshotID)
-		}
-	}
-
-	// Add the snapshot ID to the scan options
-	allOpts := make([]ScanOption, len(opts)+1)
-	allOpts[0] = WithSnapshotID(snapshot.SnapshotID)
-	copy(allOpts[1:], opts)
-
-	return t.Scan(allOpts...), nil
-}
-
 func getFiles(it iter.Seq[MetadataLogEntry]) iter.Seq[string] {
 	return func(yield func(string) bool) {
 		next, stop := iter.Pull(it)
@@ -332,6 +305,14 @@ func WithSnapshotID(n int64) ScanOption {
 
 	return func(scan *Scan) {
 		scan.snapshotID = &n
+		scan.asOfTimestamp = nil
+	}
+}
+
+func WithSnapshotAsOf(timeStampMs int64) ScanOption {
+	return func(scan *Scan) {
+		scan.asOfTimestamp = &timeStampMs
+		scan.snapshotID = nil
 	}
 }
 

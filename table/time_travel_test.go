@@ -18,6 +18,7 @@
 package table
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -159,44 +160,48 @@ func TestTable_WithSnapshotAsOf(t *testing.T) {
 
 	t.Run("WithSnapshotAsOf creates scan with correct snapshot ID", func(t *testing.T) {
 		timestamp := baseTime.Add(-90 * time.Minute).UnixMilli() // Between snapshots
-		scan, err := table.WithSnapshotAsOf(timestamp)
-		require.NoError(t, err)
+		scan := table.Scan(WithSnapshotAsOf(timestamp))
 		require.NotNil(t, scan)
 
-		// Verify the scan has the correct snapshot ID
-		assert.Equal(t, &[]int64{1000}[0], scan.snapshotID)
+		// Verify the scan has the correct timestamp
+		assert.Equal(t, &timestamp, scan.asOfTimestamp)
 	})
 
 	t.Run("WithSnapshotAsOf with additional options", func(t *testing.T) {
 		timestamp := baseTime.Add(-30 * time.Minute).UnixMilli()
-		scan, err := table.WithSnapshotAsOf(timestamp,
+		scan := table.Scan(
+			WithSnapshotAsOf(timestamp),
 			WithSelectedFields("col1", "col2"),
 			WithLimit(100),
 		)
-		require.NoError(t, err)
 		require.NotNil(t, scan)
 
-		// Verify snapshot ID and other options are set
-		assert.Equal(t, &[]int64{2000}[0], scan.snapshotID)
+		// Verify timestamp and other options are set
+		assert.Equal(t, &timestamp, scan.asOfTimestamp)
 		assert.Equal(t, []string{"col1", "col2"}, scan.selectedFields)
 		assert.Equal(t, int64(100), scan.limit)
 	})
 
-	t.Run("WithSnapshotAsOf returns error for timestamp with no snapshot", func(t *testing.T) {
+	t.Run("WithSnapshotAsOf returns error for timestamp with no snapshot during execution", func(t *testing.T) {
 		timestamp := baseTime.Add(-3 * time.Hour).UnixMilli() // Before first snapshot
-		scan, err := table.WithSnapshotAsOf(timestamp)
+		scan := table.Scan(WithSnapshotAsOf(timestamp))
+		require.NotNil(t, scan)
+
+		// Error should occur during scan planning, not creation
+		_, err := scan.PlanFiles(context.Background())
 		require.Error(t, err)
-		assert.Nil(t, scan)
 		assert.Contains(t, err.Error(), "no snapshot found for timestamp")
 	})
 
-	t.Run("WithSnapshotAsOf rejects conflicting WithSnapshotID option", func(t *testing.T) {
+	t.Run("WithSnapshotID clears conflicting WithSnapshotAsOf option", func(t *testing.T) {
 		timestamp := baseTime.Add(-30 * time.Minute).UnixMilli()
-		scan, err := table.WithSnapshotAsOf(timestamp, WithSnapshotID(9999))
-		require.Error(t, err)
-		assert.Nil(t, scan)
-		assert.Contains(t, err.Error(), "cannot use WithSnapshotID with WithSnapshotAsOf")
-		assert.Contains(t, err.Error(), "9999") // Should mention the conflicting ID
+		// WithSnapshotID should clear any previous asOfTimestamp
+		scan := table.Scan(WithSnapshotAsOf(timestamp), WithSnapshotID(9999))
+		require.NotNil(t, scan)
+
+		// Should use snapshot ID, not timestamp
+		assert.Equal(t, &[]int64{9999}[0], scan.snapshotID)
+		assert.Nil(t, scan.asOfTimestamp)
 	})
 }
 
@@ -213,9 +218,12 @@ func TestSnapshotAsOfEdgeCases(t *testing.T) {
 		snapshot := table.SnapshotAsOf(time.Now().UnixMilli(), true)
 		assert.Nil(t, snapshot)
 
-		scan, err := table.WithSnapshotAsOf(time.Now().UnixMilli())
-		require.Error(t, err)
-		assert.Nil(t, scan)
+		scan := table.Scan(WithSnapshotAsOf(time.Now().UnixMilli()))
+		require.NotNil(t, scan)
+
+		// Error should occur during scan planning
+		_, planErr := scan.PlanFiles(context.Background())
+		require.Error(t, planErr)
 	})
 
 	t.Run("Single snapshot", func(t *testing.T) {
