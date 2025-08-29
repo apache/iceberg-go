@@ -194,7 +194,8 @@ type configResponse struct {
 }
 
 type sessionTransport struct {
-	transport      http.RoundTripper
+	http.RoundTripper
+
 	defaultHeaders http.Header
 	signer         v4.HTTPSigner
 	cfg            aws.Config
@@ -243,7 +244,7 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	}
 
-	return s.transport.RoundTrip(r)
+	return s.RoundTripper.RoundTrip(r)
 }
 
 func do[T any](ctx context.Context, method string, baseURI *url.URL, path []string, cl *http.Client, override map[int]error, allowNoContent bool) (ret T, err error) {
@@ -563,9 +564,9 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		defaultHeaders: http.Header{},
 	}
 	if opts.transport != nil {
-		session.transport = opts.transport
+		session.RoundTripper = opts.transport
 	} else {
-		session.transport = &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: opts.tlsConfig}
+		session.RoundTripper = &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: opts.tlsConfig}
 	}
 	cl := &http.Client{Transport: session}
 
