@@ -75,7 +75,7 @@ func (w *writerFactory) NewRollingDataWriter(ctx context.Context, partition stri
 	ctx, cancel := context.WithCancel(ctx)
 	writer := &RollingDataWriter{
 		partitionKey:    partition,
-		recordCh:		  make(chan arrow.Record, 64),
+		recordCh:        make(chan arrow.Record, 64),
 		errorCh:         make(chan error, 1),
 		factory:         w,
 		partitionValues: partitionValues,
@@ -97,6 +97,7 @@ func (w *writerFactory) getOrCreateRollingDataWriter(ctx context.Context, partit
 		if writer, ok := existing.(*RollingDataWriter); ok {
 			return writer, nil
 		}
+
 		return nil, fmt.Errorf("invalid writer type for partition: %s", partition)
 	}
 
@@ -115,9 +116,11 @@ func (r *RollingDataWriter) Add(record arrow.Record) error {
 		return nil
 	case err := <-r.errorCh:
 		record.Release()
+
 		return err
 	case <-r.ctx.Done():
 		record.Release()
+
 		return r.ctx.Err()
 	}
 }
@@ -127,16 +130,8 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 	defer close(r.errorCh)
 
 	recordIter := func(yield func(arrow.Record, error) bool) {
-		for {
-			select {
-			case record, ok := <-r.recordCh:
-				if !ok {
-					return
-				}
-				if !yield(record, nil) {
-					return
-				}
-			case <-r.ctx.Done():
+		for record := range r.recordCh {
+			if !yield(record, nil) {
 				return
 			}
 		}
@@ -149,6 +144,7 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 			case r.errorCh <- err:
 			default:
 			}
+
 			return
 		}
 	}
@@ -199,39 +195,43 @@ func (r *RollingDataWriter) flushToDataFile(batch []arrow.Record, outputDataFile
 func (r *RollingDataWriter) close() {
 	r.cancel()
 	close(r.recordCh)
-	r.wg.Wait()
 }
 
 func (r *RollingDataWriter) closeAndWait() error {
 	r.close()
 	r.factory.writers.Delete(r.partitionKey)
+	r.wg.Wait()
 
 	select {
 	case err := <-r.errorCh:
 		if err != nil {
 			return fmt.Errorf("error in rolling data writer: %w", err)
 		}
+
 		return nil
 	default:
+
 		return nil
 	}
 }
 
 func (w *writerFactory) closeAll() error {
-	var err error
+	var writers []*RollingDataWriter
 	w.writers.Range(func(key, value any) bool {
 		writer, ok := value.(*RollingDataWriter)
-		if !ok {
-			err = fmt.Errorf("invalid writer type for partition %s", key)
-
-			return false
-		}
-		if closeErr := writer.closeAndWait(); closeErr != nil && err == nil {
-			err = closeErr
+		if ok {
+			writers = append(writers, writer)
 		}
 
 		return true
 	})
+
+	var err error
+	for _, writer := range writers {
+		if closeErr := writer.closeAndWait(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}
 
 	return err
 }

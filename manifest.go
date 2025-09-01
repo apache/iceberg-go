@@ -1003,6 +1003,37 @@ func (p *partitionFieldStats[T]) update(value any) (err error) {
 	return nil
 }
 
+func extractBytesFromFixed(fixedBytes interface{}) []byte {
+	switch fb := fixedBytes.(type) {
+	case []interface{}:
+		bytes := make([]byte, len(fb))
+		for i, b := range fb {
+			if byteVal, ok := b.(uint8); ok {
+				bytes[i] = byteVal
+			} else {
+				return nil
+			}
+		}
+
+		return bytes
+	case []uint8:
+
+		return fb
+	default:
+		rv := reflect.ValueOf(fixedBytes)
+		if rv.Kind() == reflect.Array && rv.Type().Elem().Kind() == reflect.Uint8 {
+			bytes := make([]byte, rv.Len())
+			for i := 0; i < rv.Len(); i++ {
+				bytes[i] = uint8(rv.Index(i).Uint())
+			}
+
+			return bytes
+		}
+
+		return nil
+	}
+}
+
 func constructPartitionSummaries(spec PartitionSpec, schema *Schema, partitions []map[int]any) ([]FieldSummary, error) {
 	partType := spec.PartitionType(schema)
 	fieldStats := make([]fieldStats, len(partType.FieldList))
@@ -1021,7 +1052,54 @@ func constructPartitionSummaries(spec PartitionSpec, schema *Schema, partitions 
 
 	for _, part := range partitions {
 		for i, field := range partType.FieldList {
-			fieldStats[i].update(part[field.ID])
+			value := part[field.ID]
+
+			if _, ok := field.Type.(FixedType); ok {
+				if bytes := extractBytesFromFixed(value); bytes != nil {
+					value = bytes
+				}
+			}
+
+			if unionMap, ok := value.(map[string]interface{}); ok {
+				switch field.Type.(type) {
+				case DecimalType:
+					decType := field.Type.(DecimalType)
+					if fixedBytes, ok := unionMap["fixed"]; ok {
+						if bytes := extractBytesFromFixed(fixedBytes); bytes != nil {
+							decLit := DecimalLiteral{Scale: decType.Scale()}
+							if err := decLit.UnmarshalBinary(bytes); err == nil {
+								value = decLit.Value()
+							}
+						}
+					}
+				case TimeType:
+					if longVal, ok := unionMap["long.time-micros"]; ok {
+						if microseconds, ok := longVal.(int64); ok {
+							value = Time(microseconds)
+						}
+					}
+				case TimestampType:
+					if longVal, ok := unionMap["long.timestamp-micros"]; ok {
+						if microseconds, ok := longVal.(int64); ok {
+							value = Timestamp(microseconds)
+						}
+					}
+				case TimestampTzType:
+					if longVal, ok := unionMap["long.timestamp-micros"]; ok {
+						if microseconds, ok := longVal.(int64); ok {
+							value = Timestamp(microseconds)
+						}
+					}
+				case DateType:
+					if intVal, ok := unionMap["int.date"]; ok {
+						if days, ok := intVal.(int32); ok {
+							value = Date(days)
+						}
+					}
+				}
+			}
+
+			fieldStats[i].update(value)
 		}
 	}
 
@@ -1582,6 +1660,10 @@ func convertTimestampMicrosValue(v any) any {
 }
 
 func convertDecimalValue(v any, fixedSize int) any {
+	if v == nil {
+		return map[string]any{"null": nil}
+	}
+
 	dec, ok := v.(Decimal)
 	if !ok {
 		return v
@@ -1591,13 +1673,9 @@ func convertDecimalValue(v any, fixedSize int) any {
 	if err != nil {
 		return v
 	}
+	fixedArray := convertToFixedArray(padOrTruncateBytes(bytes, fixedSize), fixedSize)
 
-	byteSize := 5
-	if fixedSize > 0 {
-		byteSize = fixedSize
-	}
-
-	return convertToFixedArray(padOrTruncateBytes(bytes, byteSize), byteSize)
+	return map[string]any{"fixed": fixedArray}
 }
 
 func convertDefaultValue(v any, fixedSize int) any {
