@@ -480,7 +480,7 @@ func NewCatalog(ctx context.Context, name, uri string, opts ...Option) (*Catalog
 	}
 
 	if ops.tlsConfig != nil && ops.transport != nil {
-		return nil, fmt.Errorf("invalid catalog config with non-nil tlsConfig and transport: tlsConfig will be ignored, it should be added to the provided transport instead")
+		return nil, errors.New("invalid catalog config with non-nil tlsConfig and transport: tlsConfig will be ignored, it should be added to the provided transport instead")
 	}
 
 	r := &Catalog{name: name}
