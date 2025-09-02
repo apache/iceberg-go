@@ -2149,3 +2149,34 @@ func (r *RestCatalogSuite) TestCatalogWithCustomTransport() {
 	r.Equal("GET", transport.calls[1].method)
 	r.Equal("/v1/namespaces/tables/unknown", transport.calls[1].path)
 }
+
+func (r *RestTLSCatalogSuite) TestCatalogWithCustomTransportAndTlsConfig() {
+	tlsConfig := tls.Config{InsecureSkipVerify: true}
+	transport := http.Transport{}
+
+	// expect failure connecting to TLS server without tls.Config
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL)
+	r.Error(err)
+	r.Nil(cat)
+
+	// expect success connecting to TLS server with tls.Config
+	cat, err = rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithTLSConfig(&tlsConfig))
+	r.NoError(err)
+	r.NotNil(cat)
+
+	// expect failure connecting to TLS server with custom transport but no tls.Config
+	cat, err = rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithCustomTransport(&transport))
+	r.Error(err)
+	r.Nil(cat)
+
+	// expect success connecting to TLS server with tls.Config configured on provided transport
+	transport.TLSClientConfig = &tlsConfig
+	cat, err = rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithCustomTransport(&transport))
+	r.NoError(err)
+	r.NotNil(cat)
+
+	// expect failure specifying WithTLSConfig and WithCustomTransport, which would result in shadowing the provided tls.Config
+	cat, err = rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithTLSConfig(&tlsConfig), rest.WithCustomTransport(&transport))
+	r.ErrorContains(err, "invalid catalog config with non-nil tlsConfig and transport")
+	r.Nil(cat)
+}

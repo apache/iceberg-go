@@ -109,6 +109,8 @@ func WithAdditionalProps(props iceberg.Properties) Option {
 	}
 }
 
+// WithCustomTransport replaces the internally configured http.Transport with the provided http.RoundTripper.
+// Certain options such as WithTLSConfig which modify the default http.Transport will no longer work since the entire transport is replaced.
 func WithCustomTransport(transport http.RoundTripper) Option {
 	return func(o *options) {
 		o.transport = transport
