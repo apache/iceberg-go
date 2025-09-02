@@ -780,7 +780,8 @@ func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
 		return nil, err
 	}
 
-	sc, err := avro.ParseBytes(dec.Metadata()["avro.schema"])
+	metadata := dec.Metadata()
+	sc, err := avro.ParseBytes(metadata["avro.schema"])
 	if err != nil {
 		return nil, err
 	}
@@ -1135,14 +1136,16 @@ func (w *ManifestWriter) meta() (map[string][]byte, error) {
 		return nil, err
 	}
 
-	return map[string][]byte{
+	metadata := map[string][]byte{
 		"schema":            schemaJson,
 		"schema-id":         []byte(strconv.Itoa(w.schema.ID)),
 		"partition-spec":    specFieldsJson,
 		"partition-spec-id": []byte(strconv.Itoa(w.spec.ID())),
 		"format-version":    []byte(strconv.Itoa(w.version)),
 		"content":           []byte(w.impl.content().String()),
-	}, nil
+	}
+
+	return metadata, nil
 }
 
 func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
