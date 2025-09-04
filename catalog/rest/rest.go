@@ -335,46 +335,51 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 	return
 }
 
-func handleNon200(rsp *http.Response, override map[int]error) error {
-	var e errorResponse
+func handleNon200(rsp *http.Response, overrides map[int]error) error {
+	baseErr := errFromStatusCode(rsp.StatusCode)
+	if overrides != nil {
+		if override, ok := overrides[rsp.StatusCode]; ok {
+			baseErr = override
+		}
+	}
 
-	dec := json.NewDecoder(rsp.Body)
-	dec.Decode(&struct {
+	var response struct {
 		Error *errorResponse `json:"error"`
-	}{Error: &e})
-
-	if override != nil {
-		if err, ok := override[rsp.StatusCode]; ok {
-			e.wrapping = err
-
-			return e
-		}
 	}
 
-	switch rsp.StatusCode {
+	decErr := json.NewDecoder(rsp.Body).Decode(&response)
+	if decErr != nil {
+		return fmt.Errorf("decoding json response: %w: %w", decErr, baseErr)
+	}
+
+	response.Error.wrapping = baseErr
+
+	return response.Error
+}
+
+func errFromStatusCode(code int) error {
+	switch code {
 	case http.StatusBadRequest:
-		e.wrapping = ErrBadRequest
+		return ErrBadRequest
 	case http.StatusUnauthorized:
-		e.wrapping = ErrUnauthorized
+		return ErrUnauthorized
 	case http.StatusForbidden:
-		e.wrapping = ErrForbidden
+		return ErrForbidden
 	case http.StatusUnprocessableEntity:
-		e.wrapping = ErrRESTError
+		return ErrRESTError
 	case 419:
-		e.wrapping = ErrAuthorizationExpired
+		return ErrAuthorizationExpired
 	case http.StatusNotImplemented:
-		e.wrapping = iceberg.ErrNotImplemented
+		return iceberg.ErrNotImplemented
 	case http.StatusServiceUnavailable:
-		e.wrapping = ErrServiceUnavailable
+		return ErrServiceUnavailable
 	default:
-		if 500 <= rsp.StatusCode && rsp.StatusCode < 600 {
-			e.wrapping = ErrServerError
+		if 500 <= code && code < 600 {
+			return ErrServerError
 		} else {
-			e.wrapping = ErrRESTError
+			return ErrRESTError
 		}
 	}
-
-	return e
 }
 
 func fromProps(props iceberg.Properties, o *options) {
