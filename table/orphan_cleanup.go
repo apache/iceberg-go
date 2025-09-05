@@ -288,7 +288,6 @@ func (t Table) scanFiles(fs iceio.IO, location string, cfg *orphanCleanupConfig)
 
 		return nil
 	})
-
 	if err != nil {
 		return nil, 0, err
 	}
