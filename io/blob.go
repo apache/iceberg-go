@@ -75,6 +75,7 @@ type blobFileIO struct {
 	*blob.Bucket
 
 	bucketName string
+	scheme     string
 	ctx        context.Context
 }
 
@@ -154,8 +155,8 @@ func (io *blobFileIO) NewWriter(ctx context.Context, path string, overwrite bool
 		nil
 }
 
-func createBlobFS(ctx context.Context, bucket *blob.Bucket, bucketName string) IO {
-	return &blobFileIO{Bucket: bucket, bucketName: bucketName, ctx: ctx}
+func createBlobFS(ctx context.Context, bucket *blob.Bucket, bucketName, scheme string) IO {
+	return &blobFileIO{Bucket: bucket, bucketName: bucketName, scheme: scheme, ctx: ctx}
 }
 
 type blobWriteFile struct {
