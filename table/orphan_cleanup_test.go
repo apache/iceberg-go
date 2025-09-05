@@ -360,7 +360,6 @@ func TestIsFileOrphan(t *testing.T) {
 	for refPath := range referencedFiles {
 		normalizedPath := normalizeFilePath(refPath, cfg)
 		normalizedReferencedFiles[normalizedPath] = refPath
-		normalizedPath = normalizeNonURLPath(refPath)
 	}
 
 	for _, tt := range tests {
