@@ -37,19 +37,6 @@ import (
 	"github.com/hamba/avro/v2/ocf"
 )
 
-func init() {
-	avro.Register("fixed", [1]byte{})
-	avro.Register("fixed", [2]byte{})
-	avro.Register("fixed", [3]byte{})
-	avro.Register("fixed", [4]byte{})
-	avro.Register("fixed", [5]byte{})
-	avro.Register("fixed", [6]byte{})
-	avro.Register("fixed", [7]byte{})
-	avro.Register("fixed", [8]byte{})
-	avro.Register("fixed", [16]byte{})
-	avro.Register("uuid", uuid.UUID{})
-}
-
 // ManifestContent indicates the type of data inside of the files
 // described by a manifest. This will indicate whether the data files
 // contain active data or deleted rows.
@@ -1005,17 +992,6 @@ func (p *partitionFieldStats[T]) update(value any) (err error) {
 
 func extractBytesFromFixed(fixedBytes interface{}) []byte {
 	switch fb := fixedBytes.(type) {
-	case []interface{}:
-		bytes := make([]byte, len(fb))
-		for i, b := range fb {
-			if byteVal, ok := b.(uint8); ok {
-				bytes[i] = byteVal
-			} else {
-				return nil
-			}
-		}
-
-		return bytes
 	case []uint8:
 
 		return fb
@@ -1621,6 +1597,8 @@ func convertLogicalTypeValue(v any, logicalType avro.LogicalType, fixedSize int)
 		return convertTimestampMicrosValue(v)
 	case avro.Decimal:
 		return convertDecimalValue(v, fixedSize)
+	case avro.UUID:
+		return convertUUIDValue(v)
 	default:
 		return v
 	}
@@ -1678,11 +1656,23 @@ func convertDecimalValue(v any, fixedSize int) any {
 	return map[string]any{"fixed": fixedArray}
 }
 
-func convertDefaultValue(v any, fixedSize int) any {
-	if uuidVal, ok := v.(uuid.UUID); ok {
-		return uuidVal.String()
+func convertUUIDValue(v any) any {
+	if v == nil {
+		return map[string]any{"null": nil}
 	}
 
+	if uuidVal, ok := v.(uuid.UUID); ok {
+		uuidLiteral := UUIDLiteral(uuidVal)
+		bytes, _ := uuidLiteral.MarshalBinary()
+		fixedArray := convertToFixedArray(padOrTruncateBytes(bytes, 16), 16)
+
+		return map[string]any{"uuid": fixedArray}
+	}
+
+	return v
+}
+
+func convertDefaultValue(v any, fixedSize int) any {
 	if bytes, ok := v.([]byte); ok && fixedSize > 0 {
 		return convertToFixedArray(padOrTruncateBytes(bytes, fixedSize), fixedSize)
 	}
