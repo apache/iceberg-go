@@ -482,8 +482,33 @@ func (b *boundRef[T]) Equals(other BoundTerm) bool {
 }
 
 func (b *boundRef[T]) Ref() BoundReference { return b }
-func (b *boundRef[T]) Field() NestedField  { return b.field }
-func (b *boundRef[T]) Type() Type          { return b.field.Type }
+
+func unwrapLogicalTypeValue(v any) any {
+	if m, ok := v.(map[string]any); ok {
+		if val, exists := m["long.timestamp-micros"]; exists {
+			if microseconds, ok := val.(int64); ok {
+				return Timestamp(microseconds)
+			}
+		}
+
+		if val, exists := m["int.date"]; exists {
+			if days, ok := val.(int32); ok {
+				return days
+			}
+		}
+
+		if val, exists := m["long.time-micros"]; exists {
+			if microseconds, ok := val.(int64); ok {
+				return Time(microseconds)
+			}
+		}
+	}
+
+	return v
+}
+
+func (b *boundRef[T]) Field() NestedField { return b.field }
+func (b *boundRef[T]) Type() Type         { return b.field.Type }
 
 func (b *boundRef[T]) eval(st structLike) Optional[T] {
 	switch v := b.acc.Get(st).(type) {
@@ -492,6 +517,12 @@ func (b *boundRef[T]) eval(st structLike) Optional[T] {
 	case T:
 		return Optional[T]{Valid: true, Val: v}
 	default:
+		if unwrapped := unwrapLogicalTypeValue(v); unwrapped != v {
+			if converted, ok := unwrapped.(T); ok {
+				return Optional[T]{Valid: true, Val: converted}
+			}
+		}
+
 		var z T
 		typ, val := reflect.TypeOf(z), reflect.ValueOf(v)
 		if !val.CanConvert(typ) {
