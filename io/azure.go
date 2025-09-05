@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
@@ -43,6 +44,20 @@ const (
 	// AdlsWriteBlockSize         = "adls.write.block-size-bytes"
 )
 
+// extractStorageAccountFromURI extracts the storage account name from an Azure Data Lake Storage URI
+func extractStorageAccountFromURI(parsed *url.URL) string {
+	hostname := parsed.Hostname()
+
+	if strings.HasSuffix(hostname, ".dfs.core.windows.net") {
+		parts := strings.Split(hostname, ".")
+		if len(parts) > 0 {
+			return parts[0]
+		}
+	}
+
+	return ""
+}
+
 // Construct a Azure bucket from a URL
 func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
 	adlsSasTokens := propertiesWithPrefix(props, AdlsSasTokenPrefix)
@@ -50,6 +65,10 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 
 	// Construct the client
 	accountName := props[AdlsSharedKeyAccountName]
+	if accountName == "" {
+		accountName = extractStorageAccountFromURI(parsed)
+	}
+
 	endpoint := props[AdlsEndpoint]
 	protocol := props[AdlsProtocol]
 
