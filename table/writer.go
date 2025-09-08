@@ -34,7 +34,7 @@ type WriteTask struct {
 	Uuid        uuid.UUID
 	ID          int
 	Schema      *iceberg.Schema
-	Batches     []arrow.Record
+	Batches     []arrow.RecordBatch
 	SortOrderID int
 }
 
@@ -60,7 +60,7 @@ func (w *writer) writeFile(ctx context.Context, partitionValues map[int]any, tas
 		}
 	}()
 
-	batches := make([]arrow.Record, len(task.Batches))
+	batches := make([]arrow.RecordBatch, len(task.Batches))
 	for i, b := range task.Batches {
 		rec, err := ToRequestedSchema(ctx, w.fileSchema,
 			task.Schema, b, false, true, false)

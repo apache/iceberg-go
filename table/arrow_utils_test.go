@@ -482,7 +482,7 @@ var (
 	)
 )
 
-func ArrowRecordWithAllTimestampPrec(mem memory.Allocator) arrow.Record {
+func ArrowRecordWithAllTimestampPrec(mem memory.Allocator) arrow.RecordBatch {
 	batch, _, err := array.RecordFromJSON(mem, ArrowSchemaWithAllTimestampPrec,
 		strings.NewReader(`[
 		{
@@ -573,7 +573,7 @@ func TestToRequestedSchema(t *testing.T) {
 	require.True(t, s.Scan())
 	require.NoError(t, bldr.UnmarshalJSON(s.Bytes()))
 
-	rec := bldr.NewRecord()
+	rec := bldr.NewRecordBatch()
 	defer rec.Release()
 
 	icesc, err := table.ArrowSchemaToIceberg(schema, false, nil)

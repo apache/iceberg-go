@@ -55,7 +55,7 @@ func TestFanoutWriter(t *testing.T) {
 	suite.Run(t, new(FanoutWriterTestSuite))
 }
 
-func (s *FanoutWriterTestSuite) createCustomTestRecord(arrSchema *arrow.Schema, data [][]any) arrow.Record {
+func (s *FanoutWriterTestSuite) createCustomTestRecord(arrSchema *arrow.Schema, data [][]any) arrow.RecordBatch {
 	bldr := array.NewRecordBuilder(s.mem, arrSchema)
 	defer bldr.Release()
 
@@ -83,10 +83,10 @@ func (s *FanoutWriterTestSuite) createCustomTestRecord(arrSchema *arrow.Schema, 
 		}
 	}
 
-	return bldr.NewRecord()
+	return bldr.NewRecordBatch()
 }
 
-func (s *FanoutWriterTestSuite) testTransformPartition(transform iceberg.Transform, sourceFieldName string, transformName string, testRecord arrow.Record, expectedPartitionCount int) {
+func (s *FanoutWriterTestSuite) testTransformPartition(transform iceberg.Transform, sourceFieldName string, transformName string, testRecord arrow.RecordBatch, expectedPartitionCount int) {
 	icebergSchema, err := ArrowSchemaToIcebergWithFreshIDs(testRecord.Schema(), false)
 	s.Require().NoError(err, "Failed to convert Arrow Schema to Iceberg Schema")
 
@@ -111,7 +111,7 @@ func (s *FanoutWriterTestSuite) testTransformPartition(transform iceberg.Transfo
 
 	args := recordWritingArgs{
 		sc: testRecord.Schema(),
-		itr: func(yield func(arrow.Record, error) bool) {
+		itr: func(yield func(arrow.RecordBatch, error) bool) {
 			testRecord.Retain()
 			yield(testRecord, nil)
 		},
@@ -341,7 +341,7 @@ func (s *FanoutWriterTestSuite) TestPartitionedLogicalTypesRequireIntFieldIDCase
 
 	record := s.createComprehensiveTestRecord()
 	defer record.Release()
-	arrowTable := array.NewTableFromRecords(record.Schema(), []arrow.Record{record})
+	arrowTable := array.NewTableFromRecords(record.Schema(), []arrow.RecordBatch{record})
 	defer arrowTable.Release()
 
 	snapshotProps := iceberg.Properties{
@@ -357,7 +357,7 @@ func (s *FanoutWriterTestSuite) TestPartitionedLogicalTypesRequireIntFieldIDCase
 	s.Require().NoError(err, "AppendTable should succeed with all primitive types")
 }
 
-func (s *FanoutWriterTestSuite) createComprehensiveTestRecord() arrow.Record {
+func (s *FanoutWriterTestSuite) createComprehensiveTestRecord() arrow.RecordBatch {
 	pool := s.mem
 
 	fields := []arrow.Field{
@@ -411,7 +411,7 @@ func (s *FanoutWriterTestSuite) createComprehensiveTestRecord() arrow.Record {
 		dateB.NewArray(),
 	}
 
-	record := array.NewRecord(arrSchema, cols, int64(cols[0].Len()))
+	record := array.NewRecordBatch(arrSchema, cols, int64(cols[0].Len()))
 
 	return record
 }

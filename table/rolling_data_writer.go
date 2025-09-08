@@ -60,7 +60,7 @@ func NewWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 // file strategy to manage file sizes.
 type RollingDataWriter struct {
 	partitionKey    string
-	recordCh        chan arrow.Record
+	recordCh        chan arrow.RecordBatch
 	errorCh         chan error
 	factory         *writerFactory
 	partitionValues map[int]any
@@ -75,7 +75,7 @@ func (w *writerFactory) NewRollingDataWriter(ctx context.Context, partition stri
 	ctx, cancel := context.WithCancel(ctx)
 	writer := &RollingDataWriter{
 		partitionKey:    partition,
-		recordCh:        make(chan arrow.Record, 64),
+		recordCh:        make(chan arrow.RecordBatch, 64),
 		errorCh:         make(chan error, 1),
 		factory:         w,
 		partitionValues: partitionValues,
@@ -109,7 +109,7 @@ func (w *writerFactory) getOrCreateRollingDataWriter(ctx context.Context, partit
 
 // Add appends a record to the writer's buffer and flushes to a data file if the
 // target file size is reached.
-func (r *RollingDataWriter) Add(record arrow.Record) error {
+func (r *RollingDataWriter) Add(record arrow.RecordBatch) error {
 	record.Retain()
 	select {
 	case r.recordCh <- record:
@@ -129,7 +129,7 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 	defer r.wg.Done()
 	defer close(r.errorCh)
 
-	recordIter := func(yield func(arrow.Record, error) bool) {
+	recordIter := func(yield func(arrow.RecordBatch, error) bool) {
 		for record := range r.recordCh {
 			if !yield(record, nil) {
 				return
@@ -150,7 +150,7 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 	}
 }
 
-func (r *RollingDataWriter) flushToDataFile(batch []arrow.Record, outputDataFilesCh chan<- iceberg.DataFile) error {
+func (r *RollingDataWriter) flushToDataFile(batch []arrow.RecordBatch, outputDataFilesCh chan<- iceberg.DataFile) error {
 	if len(batch) == 0 {
 		return nil
 	}

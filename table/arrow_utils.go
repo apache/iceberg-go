@@ -912,7 +912,7 @@ func (a *arrowProjectionVisitor) Primitive(_ iceberg.PrimitiveType, arr arrow.Ar
 
 // ToRequestedSchema will construct a new record batch matching the requested iceberg schema
 // casting columns if necessary as appropriate.
-func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schema, batch arrow.Record, downcastTimestamp, includeFieldIDs, useLargeTypes bool) (arrow.Record, error) {
+func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schema, batch arrow.RecordBatch, downcastTimestamp, includeFieldIDs, useLargeTypes bool) (arrow.RecordBatch, error) {
 	st := array.RecordToStructArray(batch)
 	defer st.Release()
 
@@ -1247,7 +1247,7 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 	}
 }
 
-func recordNBytes(rec arrow.Record) (total int64) {
+func recordNBytes(rec arrow.RecordBatch) (total int64) {
 	for _, c := range rec.Columns() {
 		total += int64(c.Data().SizeInBytes())
 	}
@@ -1255,8 +1255,8 @@ func recordNBytes(rec arrow.Record) (total int64) {
 	return total
 }
 
-func binPackRecords(itr iter.Seq2[arrow.Record, error], recordLookback int, targetFileSize int64) iter.Seq[[]arrow.Record] {
-	return internal.PackingIterator(func(yield func(arrow.Record) bool) {
+func binPackRecords(itr iter.Seq2[arrow.RecordBatch, error], recordLookback int, targetFileSize int64) iter.Seq[[]arrow.RecordBatch] {
+	return internal.PackingIterator(func(yield func(arrow.RecordBatch) bool) {
 		for rec, err := range itr {
 			if err != nil {
 				panic(err)
@@ -1272,7 +1272,7 @@ func binPackRecords(itr iter.Seq2[arrow.Record, error], recordLookback int, targ
 
 type recordWritingArgs struct {
 	sc        *arrow.Schema
-	itr       iter.Seq2[arrow.Record, error]
+	itr       iter.Seq2[arrow.RecordBatch, error]
 	fs        iceio.WriteFileIO
 	writeUUID *uuid.UUID
 	counter   iter.Seq[int]

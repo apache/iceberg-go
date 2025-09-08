@@ -1312,10 +1312,10 @@ func TestNullableStructRequiredField(t *testing.T) {
 	bldr.Field(0).AppendNulls(N)
 	bldr.Field(1).AppendNulls(N)
 
-	rec := bldr.NewRecord()
+	rec := bldr.NewRecordBatch()
 	defer rec.Release()
 
-	arrTable := array.NewTableFromRecords(arrowSchema, []arrow.Record{rec})
+	arrTable := array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{rec})
 	defer arrTable.Release()
 
 	tx := tbl.NewTransaction()

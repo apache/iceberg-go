@@ -38,7 +38,7 @@ import (
 type partitionedFanoutWriter struct {
 	partitionSpec iceberg.PartitionSpec
 	schema        *iceberg.Schema
-	itr           iter.Seq2[arrow.Record, error]
+	itr           iter.Seq2[arrow.RecordBatch, error]
 	writers       *writerFactory
 }
 
@@ -51,7 +51,7 @@ type partitionInfo struct {
 
 // NewPartitionedFanoutWriter creates a new PartitionedFanoutWriter with the specified
 // partition specification, schema, and record iterator.
-func newPartitionedFanoutWriter(partitionSpec iceberg.PartitionSpec, schema *iceberg.Schema, itr iter.Seq2[arrow.Record, error]) *partitionedFanoutWriter {
+func newPartitionedFanoutWriter(partitionSpec iceberg.PartitionSpec, schema *iceberg.Schema, itr iter.Seq2[arrow.RecordBatch, error]) *partitionedFanoutWriter {
 	return &partitionedFanoutWriter{
 		partitionSpec: partitionSpec,
 		schema:        schema,
@@ -67,7 +67,7 @@ func (p *partitionedFanoutWriter) partitionPath(data partitionRecord) string {
 // the specified number of workers. The returned iterator yields the data files written
 // by the fanout process.
 func (p *partitionedFanoutWriter) Write(ctx context.Context, workers int) iter.Seq2[iceberg.DataFile, error] {
-	inputRecordsCh := make(chan arrow.Record, workers)
+	inputRecordsCh := make(chan arrow.RecordBatch, workers)
 	outputDataFilesCh := make(chan iceberg.DataFile, workers)
 
 	fanoutWorkers, ctx := errgroup.WithContext(ctx)
@@ -82,7 +82,7 @@ func (p *partitionedFanoutWriter) Write(ctx context.Context, workers int) iter.S
 	return p.yieldDataFiles(fanoutWorkers, outputDataFilesCh)
 }
 
-func (p *partitionedFanoutWriter) startRecordFeeder(ctx context.Context, fanoutWorkers *errgroup.Group, inputRecordsCh chan<- arrow.Record) {
+func (p *partitionedFanoutWriter) startRecordFeeder(ctx context.Context, fanoutWorkers *errgroup.Group, inputRecordsCh chan<- arrow.RecordBatch) {
 	fanoutWorkers.Go(func() error {
 		defer close(inputRecordsCh)
 
@@ -105,7 +105,7 @@ func (p *partitionedFanoutWriter) startRecordFeeder(ctx context.Context, fanoutW
 	})
 }
 
-func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-chan arrow.Record, dataFilesChannel chan<- iceberg.DataFile) error {
+func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-chan arrow.RecordBatch, dataFilesChannel chan<- iceberg.DataFile) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -174,7 +174,7 @@ func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, 
 	}
 }
 
-func (p *partitionedFanoutWriter) getPartitionMap(record arrow.Record) (map[string]partitionInfo, error) {
+func (p *partitionedFanoutWriter) getPartitionMap(record arrow.RecordBatch) (map[string]partitionInfo, error) {
 	partitionMap := make(map[string]partitionInfo)
 	partitionFields := p.partitionSpec.PartitionType(p.schema).FieldList
 	partitionRec := make(partitionRecord, len(partitionFields))
@@ -228,12 +228,12 @@ func (p *partitionedFanoutWriter) getPartitionMap(record arrow.Record) (map[stri
 	return partitionMap, nil
 }
 
-type partitionBatchFn func(arrow.Record, []int64) (arrow.Record, error)
+type partitionBatchFn func(arrow.RecordBatch, []int64) (arrow.RecordBatch, error)
 
 func partitionBatchByKey(ctx context.Context) partitionBatchFn {
 	mem := compute.GetAllocator(ctx)
 
-	return func(record arrow.Record, rowIndices []int64) (arrow.Record, error) {
+	return func(record arrow.RecordBatch, rowIndices []int64) (arrow.RecordBatch, error) {
 		bldr := array.NewInt64Builder(mem)
 		defer bldr.Release()
 
