@@ -482,7 +482,7 @@ var (
 	)
 )
 
-func ArrowRecordWithAllTimestampPrec(mem memory.Allocator) arrow.Record {
+func ArrowRecordWithAllTimestampPrec(mem memory.Allocator) arrow.RecordBatch {
 	batch, _, err := array.RecordFromJSON(mem, ArrowSchemaWithAllTimestampPrec,
 		strings.NewReader(`[
 		{

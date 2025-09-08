@@ -236,7 +236,7 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 		parquet.WithCompressionLevel(compressionLevel))
 }
 
-func (p parquetFormat) WriteDataFile(ctx context.Context, fs iceio.WriteFileIO, info WriteFileInfo, batches []arrow.Record) (iceberg.DataFile, error) {
+func (p parquetFormat) WriteDataFile(ctx context.Context, fs iceio.WriteFileIO, info WriteFileInfo, batches []arrow.RecordBatch) (iceberg.DataFile, error) {
 	fw, err := fs.Create(info.FileName)
 	if err != nil {
 		return nil, err
