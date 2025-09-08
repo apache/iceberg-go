@@ -361,7 +361,7 @@ func (as *arrowScan) processRecords(
 			idx++
 		}
 
-		prev = recRdr.Record()
+		prev = recRdr.RecordBatch()
 		prev.Retain()
 
 		for _, f := range pipeline {
@@ -432,7 +432,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 			return err
 		}
 		out <- enumeratedRecord{Task: task, Record: internal.Enumerated[arrow.RecordBatch]{
-			Value: array.NewRecord(emptySchema, nil, 0), Index: 0, Last: true,
+			Value: array.NewRecordBatch(emptySchema, nil, 0), Index: 0, Last: true,
 		}}
 
 		return
