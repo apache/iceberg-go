@@ -144,7 +144,7 @@ func (s *SparkIntegrationTestSuite) TestAddFile() {
 	}
 	defer fw.Close()
 
-	if err := pqarrow.WriteTable(array.NewTableFromRecords(sc, []arrow.Record{rec}), fw, rec.NumRows(), parquet.NewWriterProperties(), pqarrow.DefaultWriterProps()); err != nil {
+	if err := pqarrow.WriteTable(array.NewTableFromRecords(sc, []arrow.RecordBatch{rec}), fw, rec.NumRows(), parquet.NewWriterProperties(), pqarrow.DefaultWriterProps()); err != nil {
 		panic(err)
 	}
 

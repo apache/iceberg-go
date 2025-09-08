@@ -473,7 +473,7 @@ type FileScanTask struct {
 //
 // The purpose for returning the schema up front is to handle the case where there are no
 // rows returned. The resulting Arrow Schema of the projection will still be known.
-func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[arrow.Record, error], error) {
+func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
 	tasks, err := scan.PlanFiles(ctx)
 	if err != nil {
 		return nil, nil, err
@@ -517,7 +517,7 @@ func (scan *Scan) ToArrowTable(ctx context.Context) (arrow.Table, error) {
 		return nil, err
 	}
 
-	records := make([]arrow.Record, 0)
+	records := make([]arrow.RecordBatch, 0)
 	for rec, err := range itr {
 		if err != nil {
 			return nil, err

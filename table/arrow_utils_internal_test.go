@@ -139,7 +139,7 @@ func constructTestTable(t *testing.T, writeStats []string) (*metadata.FileMetaDa
 	xb.Append(54)
 	yb.AppendNull()
 
-	rec := bldr.NewRecord()
+	rec := bldr.NewRecordBatch()
 	defer rec.Release()
 
 	var opts []parquet.WriterProperty
