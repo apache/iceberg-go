@@ -194,7 +194,7 @@ type configResponse struct {
 }
 
 type sessionTransport struct {
-	http.Transport
+	http.RoundTripper
 
 	defaultHeaders http.Header
 	signer         v4.HTTPSigner
@@ -244,7 +244,7 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	}
 
-	return s.Transport.RoundTrip(r)
+	return s.RoundTripper.RoundTrip(r)
 }
 
 func do[T any](ctx context.Context, method string, baseURI *url.URL, path []string, cl *http.Client, override map[int]error, allowNoContent bool) (ret T, err error) {
@@ -479,6 +479,10 @@ func NewCatalog(ctx context.Context, name, uri string, opts ...Option) (*Catalog
 		o(ops)
 	}
 
+	if ops.tlsConfig != nil && ops.transport != nil {
+		return nil, errors.New("invalid catalog config with non-nil tlsConfig and transport: tlsConfig will be ignored, it should be added to the provided transport instead")
+	}
+
 	r := &Catalog{name: name}
 	if err := r.init(ctx, ops, uri); err != nil {
 		return nil, err
@@ -561,8 +565,12 @@ func (r *Catalog) fetchAccessToken(cl *http.Client, creds string, opts *options)
 
 func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Client, error) {
 	session := &sessionTransport{
-		Transport:      http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: opts.tlsConfig},
 		defaultHeaders: http.Header{},
+	}
+	if opts.transport != nil {
+		session.RoundTripper = opts.transport
+	} else {
+		session.RoundTripper = &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: opts.tlsConfig}
 	}
 	cl := &http.Client{Transport: session}
 
@@ -780,9 +788,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config)
 }
 
-func (r *Catalog) CommitTable(ctx context.Context, tbl *table.Table, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
-	ident := tbl.Identifier()
-
+func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
 	ns, tblName, err := splitIdentForPath(ident)
 	if err != nil {
 		return nil, "", err
@@ -838,7 +844,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config)
 }
 
-func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, props iceberg.Properties) (*table.Table, error) {
+func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*table.Table, error) {
 	ns, tbl, err := splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
@@ -851,7 +857,6 @@ func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier, pr
 	}
 
 	config := maps.Clone(r.props)
-	maps.Copy(config, props)
 	maps.Copy(config, ret.Metadata.Properties())
 	for k, v := range ret.Config {
 		config[k] = v
@@ -937,7 +942,7 @@ func (r *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 		return nil, err
 	}
 
-	return r.LoadTable(ctx, to, nil)
+	return r.LoadTable(ctx, to)
 }
 
 func (r *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error {

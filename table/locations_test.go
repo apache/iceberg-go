@@ -74,3 +74,29 @@ func TestLocationProviderMetadataFileLocationCustomPath(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "s3://table-location/custom/path/00001-30313233-3435-4637-b839-616263646566.metadata.json", loc)
 }
+
+func TestObjectStoreLocationProvider(t *testing.T) {
+	provider, err := table.LoadLocationProvider("table_location",
+		iceberg.Properties{table.ObjectStoreEnabledKey: "true"})
+	require.NoError(t, err)
+
+	assert.Equal(t, "table_location/data/0101/0110/1001/10110010/a", provider.NewDataLocation("a"))
+	assert.Equal(t, "table_location/data/1110/0111/1110/00000011/b", provider.NewDataLocation("b"))
+	assert.Equal(t, "table_location/data/0010/1101/0110/01011111/c", provider.NewDataLocation("c"))
+	assert.Equal(t, "table_location/data/1001/0001/0100/01110011/d", provider.NewDataLocation("d"))
+}
+
+// TestObjectStoreLocationProviderPartitionedPathsDisabled tests that when partitioned paths are disabled,
+// the final "/" is still replaced with "-" even for un-partitioned files. This matches the behavior of
+// the Java implementation.
+func TestObjectStoreLocationProviderPartitionedPathsDisabled(t *testing.T) {
+	provider, err := table.LoadLocationProvider("table_location",
+		iceberg.Properties{table.ObjectStoreEnabledKey: "true", table.WriteObjectStorePartitionedPathsKey: "false"})
+	require.NoError(t, err)
+
+	assert.Equal(t, "table_location/data/0101/0110/1001/10110010-a", provider.NewDataLocation("a"))
+	assert.Equal(t, "table_location/data/1110/0111/1110/00000011-b", provider.NewDataLocation("b"))
+	assert.Equal(t, "table_location/data/0010/1101/0110/01011111-c", provider.NewDataLocation("c"))
+	assert.Equal(t, "table_location/data/1001/0001/0100/01110011-d", provider.NewDataLocation("d"))
+	assert.Equal(t, "table_location/data/0110/1010/0011/11101000-test.parquet", provider.NewDataLocation("test.parquet"))
+}

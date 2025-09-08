@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/glue/types"
 	"github.com/stretchr/testify/assert"
@@ -361,4 +362,92 @@ func TestSchemaToGlueColumns(t *testing.T) {
 	assert.Equal(t, "tags", aws.ToString(columns[3].Name))
 	assert.Equal(t, "array<string>", aws.ToString(columns[3].Type))
 	assert.Equal(t, "User tags", aws.ToString(columns[3].Comment))
+}
+
+func TestSchemasToGlueColumns(t *testing.T) {
+	schemas := []*iceberg.Schema{
+		iceberg.NewSchema(0,
+			iceberg.NestedField{
+				ID:       1,
+				Name:     "id",
+				Type:     iceberg.Int64Type{},
+				Required: true,
+			},
+			iceberg.NestedField{
+				ID:       2,
+				Name:     "name",
+				Type:     iceberg.StringType{},
+				Required: true,
+			},
+			iceberg.NestedField{
+				ID:       3,
+				Name:     "address",
+				Type:     iceberg.StringType{},
+				Required: false,
+			},
+		),
+		iceberg.NewSchema(1,
+			iceberg.NestedField{
+				ID:       1,
+				Name:     "id",
+				Type:     iceberg.Int64Type{},
+				Required: true,
+			},
+			iceberg.NestedField{
+				ID:       2,
+				Name:     "name",
+				Type:     iceberg.StringType{},
+				Required: true,
+			},
+		),
+	}
+
+	expectedColumns := []types.Column{
+		{
+			Name:    aws.String("id"),
+			Type:    aws.String("bigint"),
+			Comment: aws.String(""),
+			Parameters: map[string]string{
+				icebergFieldIDKey:       "1",
+				icebergFieldOptionalKey: "false",
+				icebergFieldCurrentKey:  "true",
+			},
+		},
+		{
+			Name:    aws.String("name"),
+			Type:    aws.String("string"),
+			Comment: aws.String(""),
+			Parameters: map[string]string{
+				icebergFieldIDKey:       "2",
+				icebergFieldOptionalKey: "false",
+				icebergFieldCurrentKey:  "true",
+			},
+		},
+		{
+			Name:    aws.String("address"),
+			Type:    aws.String("string"),
+			Comment: aws.String(""),
+			Parameters: map[string]string{
+				icebergFieldIDKey:       "3",
+				icebergFieldOptionalKey: "true",
+				icebergFieldCurrentKey:  "false",
+			},
+		},
+	}
+	metadata, err := table.NewMetadata(schemas[0], nil, table.SortOrder{}, "s3://example/path", nil)
+	assert.NoError(t, err)
+
+	mb, err := table.MetadataBuilderFromBase(metadata)
+	assert.NoError(t, err)
+
+	mb, err = mb.AddSchema(schemas[1])
+	assert.NoError(t, err)
+	mb, err = mb.SetCurrentSchemaID(1)
+	assert.NoError(t, err)
+
+	metadata, err = mb.Build()
+	assert.NoError(t, err)
+
+	columns := schemasToGlueColumns(metadata)
+	assert.Equal(t, expectedColumns, columns)
 }

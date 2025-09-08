@@ -38,8 +38,8 @@ type FSysF func(ctx context.Context) (io.IO, error)
 type Identifier = []string
 
 type CatalogIO interface {
-	LoadTable(context.Context, Identifier, iceberg.Properties) (*Table, error)
-	CommitTable(context.Context, *Table, []Requirement, []Update) (Metadata, string, error)
+	LoadTable(context.Context, Identifier) (*Table, error)
+	CommitTable(context.Context, Identifier, []Requirement, []Update) (Metadata, string, error)
 }
 
 type Table struct {
@@ -93,7 +93,7 @@ func (t Table) NewTransaction() *Transaction {
 }
 
 func (t *Table) Refresh(ctx context.Context) error {
-	fresh, err := t.cat.LoadTable(ctx, t.identifier, nil)
+	fresh, err := t.cat.LoadTable(ctx, t.identifier)
 	if err != nil {
 		return err
 	}
@@ -214,7 +214,7 @@ func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile,
 }
 
 func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requirement) (*Table, error) {
-	newMeta, newLoc, err := t.cat.CommitTable(ctx, &t, reqs, updates)
+	newMeta, newLoc, err := t.cat.CommitTable(ctx, t.identifier, reqs, updates)
 	if err != nil {
 		return nil, err
 	}
@@ -225,6 +225,19 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 	deleteOldMetadata(fs, t.metadata, newMeta)
 
 	return New(t.identifier, newMeta, newLoc, t.fsF, t.cat), nil
+}
+
+// SnapshotAsOf finds the snapshot that was current as of or right before the given timestamp.
+func (t Table) SnapshotAsOf(timestampMs int64, inclusive bool) *Snapshot {
+	entries := slices.Collect(t.metadata.SnapshotLogs())
+	for i := len(entries) - 1; i >= 0; i-- {
+		entry := entries[i]
+		if (inclusive && entry.TimestampMs <= timestampMs) || (!inclusive && entry.TimestampMs < timestampMs) {
+			return t.metadata.SnapshotByID(entry.SnapshotID)
+		}
+	}
+
+	return nil
 }
 
 func getFiles(it iter.Seq[MetadataLogEntry]) iter.Seq[string] {
@@ -292,6 +305,14 @@ func WithSnapshotID(n int64) ScanOption {
 
 	return func(scan *Scan) {
 		scan.snapshotID = &n
+		scan.asOfTimestamp = nil
+	}
+}
+
+func WithSnapshotAsOf(timeStampMs int64) ScanOption {
+	return func(scan *Scan) {
+		scan.asOfTimestamp = &timeStampMs
+		scan.snapshotID = nil
 	}
 }
 

@@ -77,6 +77,7 @@ Options:
   --uri TEXT         	specify the catalog URI
   --output TYPE      	output type (json/text) [default: text]
   --credential TEXT  	specify credentials for the catalog
+  --token TEXT       	specify OAuth token directly (skip OAuth flow)
   --warehouse TEXT   	specify the warehouse to use
   --scope TEXT       	specify the OAuth scope for authentication [default: catalog]
   --config TEXT      	specify the path to the configuration file
@@ -125,6 +126,7 @@ type Config struct {
 	Output        string `docopt:"--output"`
 	History       bool   `docopt:"--history"`
 	Cred          string `docopt:"--credential"`
+	Token         string `docopt:"--token"`
 	Warehouse     string `docopt:"--warehouse"`
 	Config        string `docopt:"--config"`
 	Scope         string `docopt:"--scope"`
@@ -168,7 +170,9 @@ func main() {
 	switch catalog.Type(cfg.Catalog) {
 	case catalog.REST:
 		opts := []rest.Option{}
-		if len(cfg.Cred) > 0 {
+		if len(cfg.Token) > 0 {
+			opts = append(opts, rest.WithOAuthToken(cfg.Token))
+		} else if len(cfg.Cred) > 0 {
 			opts = append(opts, rest.WithCredential(cfg.Cred))
 		}
 
@@ -381,7 +385,7 @@ func describe(ctx context.Context, output Output, cat catalog.Catalog, id string
 	}
 
 	if (entityType == "any" || entityType == "tbl") && len(ident) > 1 {
-		tbl, err := cat.LoadTable(ctx, ident, nil)
+		tbl, err := cat.LoadTable(ctx, ident)
 		if err != nil {
 			if !errors.Is(err, catalog.ErrNoSuchTable) || entityType != "any" {
 				output.Error(err)
@@ -401,7 +405,7 @@ func describe(ctx context.Context, output Output, cat catalog.Catalog, id string
 }
 
 func loadTable(ctx context.Context, output Output, cat catalog.Catalog, id string) *table.Table {
-	tbl, err := cat.LoadTable(ctx, catalog.ToIdentifier(id), nil)
+	tbl, err := cat.LoadTable(ctx, catalog.ToIdentifier(id))
 	if err != nil {
 		output.Error(err)
 		os.Exit(1)
@@ -460,7 +464,7 @@ func properties(ctx context.Context, output Output, cat catalog.Catalog, args pr
 			}
 		case args.table:
 			tbl := loadTable(ctx, output, cat, args.identifier)
-			_, _, err := cat.CommitTable(ctx, tbl, nil,
+			_, _, err := cat.CommitTable(ctx, tbl.Identifier(), nil,
 				[]table.Update{table.NewSetPropertiesUpdate(iceberg.Properties{args.propname: args.value})})
 			if err != nil {
 				output.Error(err)
@@ -481,7 +485,7 @@ func properties(ctx context.Context, output Output, cat catalog.Catalog, args pr
 		case args.table:
 			tbl := loadTable(ctx, output, cat, args.identifier)
 
-			_, _, err := cat.CommitTable(ctx, tbl, nil,
+			_, _, err := cat.CommitTable(ctx, tbl.Identifier(), nil,
 				[]table.Update{table.NewRemovePropertiesUpdate([]string{args.propname})})
 			if err != nil {
 				output.Error(err)
