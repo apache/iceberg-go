@@ -134,6 +134,8 @@ type Metadata interface {
 	NameMapping() iceberg.NameMapping
 
 	LastSequenceNumber() int64
+
+	FormatVersion() int
 }
 
 type MetadataBuilder struct {
@@ -163,7 +165,8 @@ type MetadataBuilder struct {
 	// >v1 specific
 	lastSequenceNumber *int64
 	// update tracking
-	lastAddedSchemaID *int
+	lastAddedSchemaID    *int
+	lastAddedPartitionID *int
 }
 
 func NewMetadataBuilder() (*MetadataBuilder, error) {
@@ -284,6 +287,21 @@ func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) (*MetadataBuilder, e
 }
 
 func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial bool) (*MetadataBuilder, error) {
+	newSpecID := b.reuseOrCreateNewPartitionSpecID(*spec)
+
+	if err := spec.AssignPartitionFieldIds(b.lastPartitionID); err != nil {
+		return nil, err
+	}
+
+	if _, err := b.GetSpecByID(newSpecID); err == nil {
+		if b.lastAddedPartitionID == nil || *b.lastAddedPartitionID != newSpecID {
+			b.updates = append(b.updates, NewAddPartitionSpecUpdate(spec, initial))
+			b.lastAddedPartitionID = &newSpecID
+		}
+
+		return b, nil
+	}
+	spec.SetID(newSpecID)
 	for _, s := range b.specs {
 		if s.ID() == spec.ID() && !initial {
 			return nil, fmt.Errorf("partition spec with id %d already exists", spec.ID())
@@ -291,8 +309,17 @@ func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial 
 	}
 
 	maxFieldID := 0
+	fieldCount := 0
 	for f := range spec.Fields() {
 		maxFieldID = max(maxFieldID, f.FieldID)
+		if b.formatVersion <= 1 {
+			expectedID := partitionFieldStartID + fieldCount
+			if f.FieldID != expectedID {
+				return nil, fmt.Errorf("v1 constraint: partition field IDs are not sequential: expected %d, got %d", expectedID, f.FieldID)
+			}
+			fieldCount++
+		}
+
 	}
 
 	prev := partitionFieldStartID - 1
@@ -310,6 +337,7 @@ func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial 
 
 	b.specs = specs
 	b.lastPartitionID = &lastPartitionID
+	b.lastAddedPartitionID = &newSpecID
 	b.updates = append(b.updates, NewAddPartitionSpecUpdate(spec, initial))
 
 	return b, nil
@@ -439,13 +467,12 @@ func (b *MetadataBuilder) SetDefaultSortOrderID(defaultSortOrderID int) (*Metada
 }
 
 func (b *MetadataBuilder) SetDefaultSpecID(defaultSpecID int) (*MetadataBuilder, error) {
+	lastUsed := false
 	if defaultSpecID == -1 {
-		defaultSpecID = maxBy(b.specs, func(s iceberg.PartitionSpec) int {
-			return s.ID()
-		})
-		if !slices.ContainsFunc(b.updates, func(u Update) bool {
-			return u.Action() == UpdateAddSpec && u.(*addPartitionSpecUpdate).Spec.ID() == defaultSpecID
-		}) {
+		if b.lastAddedPartitionID != nil {
+			lastUsed = true
+			defaultSpecID = *b.lastAddedPartitionID
+		} else {
 			return nil, errors.New("can't set default spec to last added with no added partition specs")
 		}
 	}
@@ -458,7 +485,11 @@ func (b *MetadataBuilder) SetDefaultSpecID(defaultSpecID int) (*MetadataBuilder,
 		return nil, fmt.Errorf("can't set default spec to spec with id %d: %w", defaultSpecID, err)
 	}
 
-	b.updates = append(b.updates, NewSetDefaultSpecUpdate(defaultSpecID))
+	if lastUsed {
+		b.updates = append(b.updates, NewSetDefaultSpecUpdate(-1))
+	} else {
+		b.updates = append(b.updates, NewSetDefaultSpecUpdate(defaultSpecID))
+	}
 	b.defaultSpecID = defaultSpecID
 
 	return b, nil
@@ -793,6 +824,20 @@ func (b *MetadataBuilder) Build() (Metadata, error) {
 	}
 }
 
+func (b *MetadataBuilder) reuseOrCreateNewPartitionSpecID(newSpec iceberg.PartitionSpec) int {
+	newSpecID := 0
+	for _, spec := range b.specs {
+		if spec.Equals(newSpec) {
+			return spec.ID()
+		}
+		if spec.ID() >= newSpecID {
+			newSpecID = spec.ID() + 1
+		}
+	}
+
+	return newSpecID
+}
+
 func (b *MetadataBuilder) reuseOrCreateNewSchemaID(newSchema *iceberg.Schema) int {
 	newSchemaID := newSchema.ID
 	for _, schema := range b.schemaList {
@@ -805,6 +850,31 @@ func (b *MetadataBuilder) reuseOrCreateNewSchemaID(newSchema *iceberg.Schema) in
 	}
 
 	return newSchemaID
+}
+
+func (b *MetadataBuilder) RemovePartitionSpecs(ints []int) (*MetadataBuilder, error) {
+	if slices.Contains(ints, b.defaultSpecID) {
+		return nil, fmt.Errorf("can't remove default partition spec with id %d", b.defaultSpecID)
+	}
+
+	newSpecs := make([]iceberg.PartitionSpec, 0, len(b.specs)-len(ints))
+	removed := make([]int, len(ints))
+	for _, spec := range b.specs {
+		if slices.Contains(ints, spec.ID()) {
+			removed = append(removed, spec.ID())
+
+			continue
+		}
+		newSpecs = append(newSpecs, spec)
+	}
+
+	b.specs = newSpecs
+
+	if len(removed) != 0 {
+		b.updates = append(b.updates, NewRemoveSpecUpdate(ints))
+	}
+
+	return b, nil
 }
 
 // maxBy returns the maximum value of extract(e) for all e in elems.
@@ -852,9 +922,9 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 	var ret Metadata
 	switch ver.FormatVersion {
 	case 1:
-		ret = &metadataV1{}
+		ret = initMetadataV1Deser()
 	case 2:
-		ret = &metadataV2{}
+		ret = initMetadataV2Deser()
 	default:
 		return nil, ErrInvalidMetadataFormatVersion
 	}
@@ -888,6 +958,29 @@ type commonMetadata struct {
 	SortOrderList      []SortOrder             `json:"sort-orders"`
 	DefaultSortOrderID int                     `json:"default-sort-order-id"`
 	SnapshotRefs       map[string]SnapshotRef  `json:"refs,omitempty"`
+}
+
+func initCommonMetadataForDeserialization() commonMetadata {
+	return commonMetadata{
+		FormatVersion:      0,
+		UUID:               uuid.UUID{},
+		Loc:                "",
+		LastUpdatedMS:      -1,
+		LastColumnId:       -1,
+		SchemaList:         nil,
+		CurrentSchemaID:    -1,
+		Specs:              nil,
+		DefaultSpecID:      -1,
+		LastPartitionID:    nil,
+		Props:              nil,
+		SnapshotList:       nil,
+		CurrentSnapshotID:  nil,
+		SnapshotLog:        nil,
+		MetadataLog:        nil,
+		SortOrderList:      nil,
+		DefaultSortOrderID: 0,
+		SnapshotRefs:       nil,
+	}
 }
 
 func (c *commonMetadata) Ref() SnapshotRef                     { return c.SnapshotRefs[MainBranch] }
@@ -1131,6 +1224,12 @@ func (c *commonMetadata) validate() error {
 	case c.LastColumnId < 0:
 		// last-column-id is required
 		return fmt.Errorf("%w: missing last-column-id", ErrInvalidMetadata)
+	case c.CurrentSchemaID < 0:
+		return fmt.Errorf("%w: no valid schema configuration found in table metadata", ErrInvalidMetadata)
+	case c.LastPartitionID == nil:
+		if c.FormatVersion > 1 {
+			return fmt.Errorf("%w: last-partition-id must be set for FormatVersion > 1", ErrInvalidMetadata)
+		}
 	}
 
 	return nil
@@ -1154,6 +1253,18 @@ type metadataV1 struct {
 	Partition []iceberg.PartitionField `json:"partition-spec,omitempty"`
 
 	commonMetadata
+}
+
+func initMetadataV1Deser() *metadataV1 {
+	return &metadataV1{
+		Schema:         nil,
+		Partition:      nil,
+		commonMetadata: initCommonMetadataForDeserialization(),
+	}
+}
+
+func (m *metadataV1) FormatVersion() int {
+	return 1
 }
 
 func (m *metadataV1) LastSequenceNumber() int64 { return 0 }
@@ -1182,6 +1293,10 @@ func (m *metadataV1) preValidate() {
 			iceberg.NewPartitionSpec(m.Partition...),
 		}
 		m.DefaultSpecID = m.Specs[0].ID()
+	}
+
+	if m.DefaultSpecID == -1 && len(m.Specs) > 0 {
+		m.DefaultSpecID = maxBy(m.Specs, func(s iceberg.PartitionSpec) int { return s.ID() })
 	}
 
 	if m.LastPartitionID == nil {
@@ -1213,6 +1328,16 @@ func (m *metadataV1) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
+	// CurrentSchemaID was optional in v1, it can also be expressed via Schema.
+	if aux.CurrentSchemaID == -1 && aux.Schema != nil {
+		aux.CurrentSchemaID = aux.Schema.ID
+		if !slices.ContainsFunc(aux.SchemaList, func(s *iceberg.Schema) bool {
+			return s.Equals(aux.Schema) && s.ID == aux.CurrentSchemaID
+		}) {
+			aux.SchemaList = append(aux.SchemaList, aux.Schema)
+		}
+	}
+
 	m.preValidate()
 
 	return m.validate()
@@ -1232,6 +1357,17 @@ type metadataV2 struct {
 	LastSeqNum int64 `json:"last-sequence-number"`
 
 	commonMetadata
+}
+
+func initMetadataV2Deser() *metadataV2 {
+	return &metadataV2{
+		LastSeqNum:     -1,
+		commonMetadata: initCommonMetadataForDeserialization(),
+	}
+}
+
+func (m *metadataV2) FormatVersion() int {
+	return 2
 }
 
 func (m *metadataV2) LastSequenceNumber() int64 { return m.LastSeqNum }

@@ -230,15 +230,3 @@ func TestRemoveSchemas(t *testing.T) {
 		}
 	})
 }
-
-func TestRemovePartitionSpecs(t *testing.T) {
-	var builder *MetadataBuilder
-	removeSpecs := removeSpecUpdate{
-		SpecIds: []int64{},
-	}
-	t.Run("remove specs should fail", func(t *testing.T) {
-		if err := removeSpecs.Apply(builder); !errors.Is(err, iceberg.ErrNotImplemented) {
-			t.Fatalf("Expected unimplemented error, got %v", err)
-		}
-	})
-}
