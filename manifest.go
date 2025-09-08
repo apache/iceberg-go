@@ -27,7 +27,6 @@ import (
 	"slices"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
@@ -1277,7 +1276,21 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 		setter.setFieldIDToFixedSizeMap(w.partFieldIDToSize)
 	}
 
-	w.partitions = append(w.partitions, entry.DataFile().Partition())
+	partitionData := avroPartitionData(entry.Data.Partition(), w.partFieldIDToType, w.partFieldIDToSize)
+	w.partitions = append(w.partitions, partitionData)
+	if dataFile, ok := entry.DataFile().(*dataFile); ok {
+		convertedPartitionData := make(map[string]any)
+		for fieldID, convertedValue := range partitionData {
+			for fieldName, id := range w.partFieldNameToID {
+				if id == fieldID {
+					convertedPartitionData[fieldName] = convertedValue
+
+					break
+				}
+			}
+		}
+		dataFile.PartitionData = convertedPartitionData
+	}
 
 	if (entry.Status() == EntryStatusADDED || entry.Status() == EntryStatusEXISTING) &&
 		entry.SequenceNum() > 0 && (w.minSeqNum < 0 || entry.SequenceNum() < w.minSeqNum) {
@@ -1613,9 +1626,10 @@ func convertLogicalTypeValue(v any, logicalType avro.LogicalType, fixedSize int)
 }
 
 func convertDateValue(v any) any {
-	if t, ok := v.(time.Time); ok {
-		return map[string]any{"int.date": int32(t.Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))}
+	if v == nil {
+		return map[string]any{"null": nil}
 	}
+
 	if d, ok := v.(Date); ok {
 		return map[string]any{"int.date": int32(d)}
 	}
@@ -1624,20 +1638,22 @@ func convertDateValue(v any) any {
 }
 
 func convertTimeMicrosValue(v any) any {
+	if v == nil {
+		return map[string]any{"null": nil}
+	}
+
 	if t, ok := v.(Time); ok {
 		return map[string]any{"long.time-micros": int64(t)}
-	}
-	if d, ok := v.(time.Duration); ok {
-		return map[string]any{"long.time-micros": d.Microseconds()}
 	}
 
 	return v
 }
 
 func convertTimestampMicrosValue(v any) any {
-	if t, ok := v.(time.Time); ok {
-		return map[string]any{"long.timestamp-micros": t.UTC().UnixMicro()}
+	if v == nil {
+		return map[string]any{"null": nil}
 	}
+
 	if ts, ok := v.(Timestamp); ok {
 		return map[string]any{"long.timestamp-micros": int64(ts)}
 	}
@@ -1753,17 +1769,6 @@ func (d *dataFile) initializeMapData() {
 			for k, v := range d.PartitionData {
 				if id, ok := d.fieldNameToID[k]; ok {
 					d.fieldIDToPartitionData[id] = v
-				}
-			}
-		}
-		d.fieldIDToPartitionData = avroPartitionData(d.fieldIDToPartitionData, d.fieldIDToLogicalType, d.fieldIDToFixedSize)
-
-		for fieldID, convertedValue := range d.fieldIDToPartitionData {
-			for fieldName, id := range d.fieldNameToID {
-				if id == fieldID {
-					d.PartitionData[fieldName] = convertedValue
-
-					break
 				}
 			}
 		}

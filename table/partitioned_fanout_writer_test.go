@@ -86,7 +86,7 @@ func (s *FanoutWriterTestSuite) createCustomTestRecord(arrSchema *arrow.Schema, 
 	return bldr.NewRecord()
 }
 
-func (s *FanoutWriterTestSuite) testTransformPartition(transform iceberg.Transform, sourceFieldName string, transformName string, testRecord arrow.Record, expectedPartitionCount int, verifyRecordCount bool) {
+func (s *FanoutWriterTestSuite) testTransformPartition(transform iceberg.Transform, sourceFieldName string, transformName string, testRecord arrow.Record, expectedPartitionCount int) {
 	icebergSchema, err := ArrowSchemaToIcebergWithFreshIDs(testRecord.Schema(), false)
 	s.Require().NoError(err, "Failed to convert Arrow Schema to Iceberg Schema")
 
@@ -178,7 +178,7 @@ func (s *FanoutWriterTestSuite) TestIdentityTransform() {
 	})
 	defer testRecord.Release()
 
-	s.testTransformPartition(iceberg.IdentityTransform{}, "name", "identity", testRecord, 3, true)
+	s.testTransformPartition(iceberg.IdentityTransform{}, "name", "identity", testRecord, 3)
 }
 
 func (s *FanoutWriterTestSuite) TestBucketTransform() {
@@ -196,7 +196,7 @@ func (s *FanoutWriterTestSuite) TestBucketTransform() {
 	})
 	defer testRecord.Release()
 
-	s.testTransformPartition(iceberg.BucketTransform{NumBuckets: 3}, "id", "bucket", testRecord, 3, true)
+	s.testTransformPartition(iceberg.BucketTransform{NumBuckets: 3}, "id", "bucket", testRecord, 3)
 }
 
 func (s *FanoutWriterTestSuite) TestTruncateTransform() {
@@ -214,7 +214,7 @@ func (s *FanoutWriterTestSuite) TestTruncateTransform() {
 	})
 	defer testRecord.Release()
 
-	s.testTransformPartition(iceberg.TruncateTransform{Width: 3}, "name", "truncate", testRecord, 3, true)
+	s.testTransformPartition(iceberg.TruncateTransform{Width: 3}, "name", "truncate", testRecord, 3)
 }
 
 func (s *FanoutWriterTestSuite) TestYearTransform() {
@@ -232,7 +232,7 @@ func (s *FanoutWriterTestSuite) TestYearTransform() {
 	})
 	defer testRecord.Release()
 
-	s.testTransformPartition(iceberg.YearTransform{}, "created_date", "year", testRecord, 3, true)
+	s.testTransformPartition(iceberg.YearTransform{}, "created_date", "year", testRecord, 3)
 }
 
 func (s *FanoutWriterTestSuite) TestMonthTransform() {
@@ -250,7 +250,7 @@ func (s *FanoutWriterTestSuite) TestMonthTransform() {
 	})
 	defer testRecord.Release()
 
-	s.testTransformPartition(iceberg.MonthTransform{}, "created_date", "month", testRecord, 3, true)
+	s.testTransformPartition(iceberg.MonthTransform{}, "created_date", "month", testRecord, 3)
 }
 
 func (s *FanoutWriterTestSuite) TestDayTransform() {
@@ -268,7 +268,7 @@ func (s *FanoutWriterTestSuite) TestDayTransform() {
 	})
 	defer testRecord.Release()
 
-	s.testTransformPartition(iceberg.DayTransform{}, "created_date", "day", testRecord, 3, true)
+	s.testTransformPartition(iceberg.DayTransform{}, "created_date", "day", testRecord, 3)
 }
 
 func (s *FanoutWriterTestSuite) TestHourTransform() {
@@ -286,7 +286,7 @@ func (s *FanoutWriterTestSuite) TestHourTransform() {
 	})
 	defer testRecord.Release()
 
-	s.testTransformPartition(iceberg.HourTransform{}, "created_ts", "hour", testRecord, 3, true)
+	s.testTransformPartition(iceberg.HourTransform{}, "created_ts", "hour", testRecord, 3)
 }
 
 func (s *FanoutWriterTestSuite) TestVoidTransform() {
@@ -304,7 +304,7 @@ func (s *FanoutWriterTestSuite) TestVoidTransform() {
 	})
 	defer testRecord.Release()
 
-	s.testTransformPartition(iceberg.VoidTransform{}, "nothing", "void", testRecord, 1, true)
+	s.testTransformPartition(iceberg.VoidTransform{}, "nothing", "void", testRecord, 1)
 }
 
 func (s *FanoutWriterTestSuite) TestPartitionedLogicalTypesRequireIntFieldIDCase() {

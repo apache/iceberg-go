@@ -20,6 +20,7 @@ package iceberg
 import (
 	"fmt"
 	"reflect"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -482,33 +483,8 @@ func (b *boundRef[T]) Equals(other BoundTerm) bool {
 }
 
 func (b *boundRef[T]) Ref() BoundReference { return b }
-
-func unwrapLogicalTypeValue(v any) any {
-	if m, ok := v.(map[string]any); ok {
-		if val, exists := m["long.timestamp-micros"]; exists {
-			if microseconds, ok := val.(int64); ok {
-				return Timestamp(microseconds)
-			}
-		}
-
-		if val, exists := m["int.date"]; exists {
-			if days, ok := val.(int32); ok {
-				return days
-			}
-		}
-
-		if val, exists := m["long.time-micros"]; exists {
-			if microseconds, ok := val.(int64); ok {
-				return Time(microseconds)
-			}
-		}
-	}
-
-	return v
-}
-
-func (b *boundRef[T]) Field() NestedField { return b.field }
-func (b *boundRef[T]) Type() Type         { return b.field.Type }
+func (b *boundRef[T]) Field() NestedField  { return b.field }
+func (b *boundRef[T]) Type() Type          { return b.field.Type }
 
 func (b *boundRef[T]) eval(st structLike) Optional[T] {
 	switch v := b.acc.Get(st).(type) {
@@ -517,9 +493,60 @@ func (b *boundRef[T]) eval(st structLike) Optional[T] {
 	case T:
 		return Optional[T]{Valid: true, Val: v}
 	default:
-		if unwrapped := unwrapLogicalTypeValue(v); unwrapped != v {
-			if converted, ok := unwrapped.(T); ok {
-				return Optional[T]{Valid: true, Val: converted}
+		if t, ok := v.(time.Time); ok {
+			switch b.field.Type.(type) {
+			case DateType:
+				days := int32(t.Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
+				if converted, ok := any(Date(days)).(T); ok {
+					return Optional[T]{Valid: true, Val: converted}
+				}
+			case TimestampType, TimestampTzType:
+				micros := Timestamp(t.UTC().UnixMicro())
+				if converted, ok := any(micros).(T); ok {
+					return Optional[T]{Valid: true, Val: converted}
+				}
+			case Int32Type:
+				days := int32(t.Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
+				if converted, ok := any(days).(T); ok {
+					return Optional[T]{Valid: true, Val: converted}
+				}
+			}
+		}
+
+		if unionMap, ok := v.(map[string]any); ok {
+			switch b.field.Type.(type) {
+			case DecimalType:
+				if fixedVal, exists := unionMap["fixed"]; exists {
+					if fixedArray := reflect.ValueOf(fixedVal); fixedArray.Kind() == reflect.Array {
+						bytes := make([]byte, fixedArray.Len())
+						for i := range bytes {
+							bytes[i] = fixedArray.Index(i).Interface().(byte)
+						}
+
+						var decimal DecimalLiteral
+						if err := decimal.UnmarshalBinary(bytes); err == nil {
+							if decType, ok := b.field.Type.(DecimalType); ok {
+								result := Decimal{Val: decimal.Val, Scale: decType.Scale()}
+								if converted, ok := any(result).(T); ok {
+									return Optional[T]{Valid: true, Val: converted}
+								}
+							}
+						}
+					}
+				}
+			case UUIDType:
+				if uuidVal, exists := unionMap["uuid"]; exists {
+					if uuidArray := reflect.ValueOf(uuidVal); uuidArray.Kind() == reflect.Array && uuidArray.Len() == 16 {
+						var uuidBytes [16]byte
+						for i := 0; i < 16; i++ {
+							uuidBytes[i] = uuidArray.Index(i).Interface().(byte)
+						}
+						result := uuid.UUID(uuidBytes)
+						if converted, ok := any(result).(T); ok {
+							return Optional[T]{Valid: true, Val: converted}
+						}
+					}
+				}
 			}
 		}
 

@@ -79,7 +79,7 @@ func (p *partitionedFanoutWriter) Write(ctx context.Context, workers int) iter.S
 		})
 	}
 
-	return p.yieldDataFiles(ctx, fanoutWorkers, outputDataFilesCh)
+	return p.yieldDataFiles(fanoutWorkers, outputDataFilesCh)
 }
 
 func (p *partitionedFanoutWriter) startRecordFeeder(ctx context.Context, fanoutWorkers *errgroup.Group, inputRecordsCh chan<- arrow.Record) {
@@ -91,6 +91,7 @@ func (p *partitionedFanoutWriter) startRecordFeeder(ctx context.Context, fanoutW
 				return err
 			}
 
+			record.Retain()
 			select {
 			case <-ctx.Done():
 				record.Release()
@@ -147,7 +148,7 @@ func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 	}
 }
 
-func (p *partitionedFanoutWriter) yieldDataFiles(ctx context.Context, fanoutWorkers *errgroup.Group, outputDataFilesCh chan iceberg.DataFile) iter.Seq2[iceberg.DataFile, error] {
+func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, outputDataFilesCh chan iceberg.DataFile) iter.Seq2[iceberg.DataFile, error] {
 	var err error
 	go func() {
 		defer close(outputDataFilesCh)
