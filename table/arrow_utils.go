@@ -1031,19 +1031,11 @@ func (sc *schemaCompatVisitor) isFieldCompat(lhs iceberg.NestedField) bool {
 
 func (sc *schemaCompatVisitor) Schema(s *iceberg.Schema, v func() bool) bool {
 	if !v() {
-		var lines []string
-		lines = append(lines, "   | Table Field              | Requested Field")
-
-		for i, row := range sc.errorData {
-			if i == 0 {
-				continue
-			}
-			if len(row) >= 3 {
-				lines = append(lines, fmt.Sprintf("%s | %-24s | %s", row[0], row[1], row[2]))
-			}
-		}
-
-		txt := strings.Join(lines, "\n") + "\n"
+		pterm.DisableColor()
+		tbl := pterm.DefaultTable.WithHasHeader(true).WithData(sc.errorData)
+		tbl.Render()
+		txt, _ := tbl.Srender()
+		pterm.EnableColor()
 		panic("mismatch in fields:\n" + txt)
 	}
 
