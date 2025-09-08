@@ -426,10 +426,6 @@ func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType, ma
 		switch v := field.Prop("field-id").(type) {
 		case int:
 			fid = v
-		case int32:
-			fid = int(v)
-		case int64:
-			fid = int(v)
 		case float64:
 			fid = int(v)
 		default:
@@ -439,9 +435,8 @@ func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType, ma
 		result[field.Name()] = fid
 		avroTyp := field.Type()
 		if us, ok := avroTyp.(*avro.UnionSchema); ok {
-			for _, t := range us.Types() {
-				avroTyp = t
-			}
+			typeList := us.Types()
+			avroTyp = typeList[len(typeList)-1]
 		}
 		if ps, ok := avroTyp.(*avro.PrimitiveSchema); ok && ps.Logical() != nil {
 			logicalTypes[fid] = ps.Logical().Type()
@@ -1072,6 +1067,12 @@ func constructPartitionSummaries(spec PartitionSpec, schema *Schema, partitions 
 							value = Date(days)
 						}
 					}
+				case UUIDType:
+					if uuidVal, ok := unionMap["uuid"]; ok {
+						if uuid, ok := uuidVal.([16]byte); ok {
+							value = UUIDLiteral(uuid)
+						}
+					}
 				}
 			}
 
@@ -1662,11 +1663,7 @@ func convertUUIDValue(v any) any {
 	}
 
 	if uuidVal, ok := v.(uuid.UUID); ok {
-		uuidLiteral := UUIDLiteral(uuidVal)
-		bytes, _ := uuidLiteral.MarshalBinary()
-		fixedArray := convertToFixedArray(padOrTruncateBytes(bytes, 16), 16)
-
-		return map[string]any{"uuid": fixedArray}
+		return map[string]any{"uuid": [16]byte(uuidVal)}
 	}
 
 	return v

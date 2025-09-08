@@ -19,12 +19,16 @@ package table
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	arrowdecimal "github.com/apache/arrow-go/v18/arrow/decimal"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
@@ -301,4 +305,113 @@ func (s *FanoutWriterTestSuite) TestVoidTransform() {
 	defer testRecord.Release()
 
 	s.testTransformPartition(iceberg.VoidTransform{}, "nothing", "void", testRecord, 1, true)
+}
+
+func (s *FanoutWriterTestSuite) TestPartitionedLogicalTypesRequireIntFieldIDCase() {
+	icebergSchema := iceberg.NewSchemaWithIdentifiers(1, []int{1},
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "decimal_col", Type: iceberg.DecimalTypeOf(10, 6), Required: true},
+		iceberg.NestedField{ID: 3, Name: "time_col", Type: iceberg.PrimitiveTypes.Time, Required: true},
+		iceberg.NestedField{ID: 4, Name: "timestamp_col", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
+		iceberg.NestedField{ID: 5, Name: "timestamptz_col", Type: iceberg.PrimitiveTypes.TimestampTz, Required: true},
+		iceberg.NestedField{ID: 6, Name: "uuid_col", Type: iceberg.PrimitiveTypes.UUID, Required: true},
+		iceberg.NestedField{ID: 7, Name: "date_col", Type: iceberg.PrimitiveTypes.Date, Required: true},
+	)
+
+	spec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{SourceID: 2, FieldID: 4008, Transform: iceberg.IdentityTransform{}, Name: "decimal_col"},
+		iceberg.PartitionField{SourceID: 3, FieldID: 4009, Transform: iceberg.IdentityTransform{}, Name: "time_col"},
+		iceberg.PartitionField{SourceID: 4, FieldID: 4010, Transform: iceberg.IdentityTransform{}, Name: "timestamp_col"},
+		iceberg.PartitionField{SourceID: 5, FieldID: 4011, Transform: iceberg.IdentityTransform{}, Name: "timestamptz_col"},
+		iceberg.PartitionField{SourceID: 6, FieldID: 4014, Transform: iceberg.IdentityTransform{}, Name: "uuid_col"},
+		iceberg.PartitionField{SourceID: 7, FieldID: 4015, Transform: iceberg.IdentityTransform{}, Name: "date_col"},
+	)
+
+	loc := filepath.ToSlash(s.T().TempDir())
+	meta, err := NewMetadata(icebergSchema, &spec, UnsortedSortOrder, loc, iceberg.Properties{})
+	s.Require().NoError(err)
+
+	tbl := New(
+		Identifier{"test", "table"},
+		meta,
+		filepath.Join(loc, "metadata", "v1.metadata.json"),
+		func(ctx context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil },
+		nil,
+	)
+
+	record := s.createComprehensiveTestRecord()
+	defer record.Release()
+	arrowTable := array.NewTableFromRecords(record.Schema(), []arrow.Record{record})
+	defer arrowTable.Release()
+
+	snapshotProps := iceberg.Properties{
+		"operation":  "append",
+		"source":     "iceberg-go-fanout-test",
+		"timestamp":  strconv.FormatInt(time.Now().Unix(), 10),
+		"rows-added": strconv.FormatInt(int64(arrowTable.NumRows()), 10),
+	}
+
+	batchSize := int64(record.NumRows())
+	txn := tbl.NewTransaction()
+	err = txn.AppendTable(s.ctx, arrowTable, batchSize, snapshotProps)
+	s.Require().NoError(err, "AppendTable should succeed with all primitive types")
+}
+
+func (s *FanoutWriterTestSuite) createComprehensiveTestRecord() arrow.Record {
+	pool := s.mem
+
+	fields := []arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "decimal_col", Type: &arrow.Decimal128Type{Precision: 10, Scale: 6}},
+		{Name: "time_col", Type: arrow.FixedWidthTypes.Time64us},
+		{Name: "timestamp_col", Type: &arrow.TimestampType{Unit: arrow.Microsecond}},
+		{Name: "timestamptz_col", Type: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}},
+		{Name: "uuid_col", Type: extensions.NewUUIDType()},
+		{Name: "date_col", Type: arrow.FixedWidthTypes.Date32},
+	}
+	arrSchema := arrow.NewSchema(fields, nil)
+
+	idB := array.NewInt64Builder(pool)
+	decB := array.NewDecimal128Builder(pool, &arrow.Decimal128Type{Precision: 10, Scale: 6})
+	timeB := array.NewTime64Builder(pool, &arrow.Time64Type{Unit: arrow.Microsecond})
+	tsB := array.NewTimestampBuilder(pool, &arrow.TimestampType{Unit: arrow.Microsecond})
+	tstzB := array.NewTimestampBuilder(pool, &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"})
+	uuidB := extensions.NewUUIDBuilder(pool)
+	dateB := array.NewDate32Builder(pool)
+
+	for i := 0; i < 4; i++ {
+		if i%2 == 0 {
+			idB.Append(int64(i))
+			val := fmt.Sprintf("%d.%06d", 123, i)
+			arrowDec, _ := arrowdecimal.Decimal128FromString(val, 10, 6)
+			decB.Append(arrowDec)
+			timeB.Append(arrow.Time64(time.Duration(i * 1_000_000)))
+			tsB.Append(arrow.Timestamp(1_600_000_000_000_000 + int64(i)*1_000_000))
+			tstzB.Append(arrow.Timestamp(1_600_000_000_000_000 + int64(i)*1_000_000))
+			uuidB.Append(uuid.New())
+			dateB.Append(arrow.Date32(20000 + i))
+		} else {
+			idB.Append(int64(i))
+			decB.AppendNull()
+			timeB.AppendNull()
+			tsB.AppendNull()
+			tstzB.AppendNull()
+			uuidB.AppendNull()
+			dateB.AppendNull()
+		}
+	}
+
+	cols := []arrow.Array{
+		idB.NewArray(),
+		decB.NewArray(),
+		timeB.NewArray(),
+		tsB.NewArray(),
+		tstzB.NewArray(),
+		uuidB.NewArray(),
+		dateB.NewArray(),
+	}
+
+	record := array.NewRecord(arrSchema, cols, int64(cols[0].Len()))
+
+	return record
 }
