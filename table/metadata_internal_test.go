@@ -959,7 +959,7 @@ func TestTableMetadataV1PartitionSpecsWithoutDefaultId(t *testing.T) {
 	// Deserialize the JSON - this should succeed by inferring default_spec_id as the max spec ID
 	meta, err := getTestTableMetadata("TableMetadataV1PartitionSpecsWithoutDefaultId.json")
 	require.NoError(t, err)
-	require.Equal(t, meta.(*metadataV1).FormatVersion(), 1)
+	require.Equal(t, meta.Version(), 1)
 	require.Equal(t, meta.TableUUID(), uuid.MustParse("d20125c8-7284-442c-9aea-15fee620737c"))
 	require.Equal(t, meta.DefaultPartitionSpec(), 2)
 	require.Equal(t, len(meta.PartitionSpecs()), 2)

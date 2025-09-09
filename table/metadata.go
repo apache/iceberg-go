@@ -134,8 +134,6 @@ type Metadata interface {
 	NameMapping() iceberg.NameMapping
 
 	LastSequenceNumber() int64
-
-	FormatVersion() int
 }
 
 type MetadataBuilder struct {
@@ -1243,10 +1241,6 @@ func initMetadataV1Deser() *metadataV1 {
 	}
 }
 
-func (m *metadataV1) FormatVersion() int {
-	return 1
-}
-
 func (m *metadataV1) LastSequenceNumber() int64 { return 0 }
 
 func (m *metadataV1) Equals(other Metadata) bool {
@@ -1344,10 +1338,6 @@ func initMetadataV2Deser() *metadataV2 {
 		LastSeqNum:     -1,
 		commonMetadata: initCommonMetadataForDeserialization(),
 	}
-}
-
-func (m *metadataV2) FormatVersion() int {
-	return 2
 }
 
 func (m *metadataV2) LastSequenceNumber() int64 { return m.LastSeqNum }
