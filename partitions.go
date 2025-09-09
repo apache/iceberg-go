@@ -120,7 +120,7 @@ func AddPartitionFieldBySourceID(sourceID int, targetName string, transform Tran
 		if !ok {
 			return fmt.Errorf("cannot find source column with id: %d in schema", sourceID)
 		}
-		err := addSpecFieldInternal(p, targetName, field, transform, fieldID)
+		err := p.addSpecFieldInternal(targetName, field, transform, fieldID)
 		if err != nil {
 			return err
 		}
@@ -129,7 +129,7 @@ func AddPartitionFieldBySourceID(sourceID int, targetName string, transform Tran
 	}
 }
 
-func addSpecFieldInternal(p *PartitionSpec, targetName string, field NestedField, transform Transform, fieldID *int) error {
+func (p *PartitionSpec) addSpecFieldInternal(targetName string, field NestedField, transform Transform, fieldID *int) error {
 	if targetName == "" {
 		return errors.New("cannot use empty partition name")
 	}
