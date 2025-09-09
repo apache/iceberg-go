@@ -34,12 +34,12 @@ func TestCreateAzureBucketDefaultCredentialCalled(t *testing.T) {
 	props := map[string]string{}
 
 	bucket, err := createAzureBucket(ctx, parsedURL, props)
-
 	if err != nil {
 		// If bucket creation fails, it should be with a DefaultAzureCredential error
 		assert.Contains(t, err.Error(), "DefaultAzureCredential",
 			"Expected DefaultAzureCredential error but got: %v", err)
 		t.Logf("DefaultAzureCredential path was taken and failed at creation: %v", err)
+
 		return
 	}
 
