@@ -958,24 +958,10 @@ type commonMetadata struct {
 
 func initCommonMetadataForDeserialization() commonMetadata {
 	return commonMetadata{
-		FormatVersion:      0,
-		UUID:               uuid.UUID{},
-		Loc:                "",
-		LastUpdatedMS:      -1,
-		LastColumnId:       -1,
-		SchemaList:         nil,
-		CurrentSchemaID:    -1,
-		Specs:              nil,
-		DefaultSpecID:      -1,
-		LastPartitionID:    nil,
-		Props:              nil,
-		SnapshotList:       nil,
-		CurrentSnapshotID:  nil,
-		SnapshotLog:        nil,
-		MetadataLog:        nil,
-		SortOrderList:      nil,
-		DefaultSortOrderID: 0,
-		SnapshotRefs:       nil,
+		LastUpdatedMS:   -1,
+		LastColumnId:    -1,
+		CurrentSchemaID: -1,
+		DefaultSpecID:   -1,
 	}
 }
 
@@ -1253,8 +1239,6 @@ type metadataV1 struct {
 
 func initMetadataV1Deser() *metadataV1 {
 	return &metadataV1{
-		Schema:         nil,
-		Partition:      nil,
 		commonMetadata: initCommonMetadataForDeserialization(),
 	}
 }
