@@ -65,10 +65,83 @@ func TestCreateAzureBucketDefaultCredentialEmptyBucketName(t *testing.T) {
 
 	props := map[string]string{}
 
-	// This should fail with "container name is required" error
+	// This should fail with "container name is required" error since no container is specified in User field
 	_, err = createAzureBucket(ctx, parsedURL, props)
 
 	assert.Error(t, err, "Expected error when container name is empty")
 	assert.Contains(t, err.Error(), "container name is required",
 		"Expected container name error but got: %v", err)
+}
+
+func TestCreateAzureBucketSharedKeyMissingAccountKey(t *testing.T) {
+	ctx := context.Background()
+
+	parsedURL, err := url.Parse("abfs://container@testaccount.dfs.core.windows.net/path")
+	assert.NoError(t, err)
+
+	props := map[string]string{
+		"adls.auth.shared-key.account.name": "testaccount",
+		// "adls.auth.shared-key.account.key" is intentionally missing
+	}
+	_, err = createAzureBucket(ctx, parsedURL, props)
+
+	assert.Error(t, err, "Expected error when account key is missing")
+	assert.Contains(t, err.Error(), "shared-key requires both",
+		"Expected shared-key error but got: %v", err)
+}
+
+func TestNewAdlsLocationUriParsing(t *testing.T) {
+	tests := []struct {
+		uri               string
+		expectedAccount   string
+		expectedContainer string
+		expectedPath      string
+		shouldFail        bool
+	}{
+		{
+			uri:               "abfs://container@account.dfs.core.windows.net/file.txt",
+			expectedAccount:   "account",
+			expectedContainer: "container",
+			expectedPath:      "/file.txt",
+			shouldFail:        false,
+		},
+		{
+			uri:               "abfs://container@account.dfs.core.usgovcloudapi.net/file.txt",
+			expectedAccount:   "account",
+			expectedContainer: "container",
+			expectedPath:      "/file.txt",
+			shouldFail:        false,
+		},
+		{
+			uri:               "wasb://container@account.blob.core.windows.net/file.txt",
+			expectedAccount:   "account",
+			expectedContainer: "container",
+			expectedPath:      "/file.txt",
+			shouldFail:        false,
+		},
+		{
+			uri:        "abfs://account.dfs.core.windows.net/path",
+			shouldFail: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.uri, func(t *testing.T) {
+			parsedURL, err := url.Parse(test.uri)
+			assert.NoError(t, err)
+
+			location, err := newAdlsLocation(parsedURL)
+
+			if test.shouldFail {
+				assert.Error(t, err, "Expected error for URI: %s", test.uri)
+				assert.Nil(t, location)
+			} else {
+				assert.NoError(t, err, "Unexpected error for URI: %s", test.uri)
+				assert.NotNil(t, location)
+				assert.Equal(t, test.expectedAccount, location.accountName, "Account name mismatch for URI: %s", test.uri)
+				assert.Equal(t, test.expectedContainer, location.containerName, "Container name mismatch for URI: %s", test.uri)
+				assert.Equal(t, test.expectedPath, location.path, "Path mismatch for URI: %s", test.uri)
+			}
+		})
+	}
 }

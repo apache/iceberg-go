@@ -45,17 +45,71 @@ const (
 	// AdlsWriteBlockSize         = "adls.write.block-size-bytes"
 )
 
-// extractStorageAccountFromURI extracts the storage account name from an Azure Data Lake Storage URI
-func extractStorageAccountFromURI(parsed *url.URL) string {
-	hostname := parsed.Hostname()
+// adlsLocation represents the parsed components of an Azure Data Lake Storage URI
+type adlsLocation struct {
+	accountName   string // Azure storage account name
+	containerName string // Container (bucket) name
+	path          string // Object path within the container
+}
 
-	// remove the storage domain
-	parts := strings.Split(hostname, ".")
-	if len(parts) > 0 {
-		return parts[0]
+// createServiceURL creates an Azure blob service URL with the given parameters
+func createServiceURL(accountName, protocol, endpoint, sasToken string) (string, error) {
+	svcURL, err := azureblob.NewServiceURL(&azureblob.ServiceURLOptions{
+		AccountName:   accountName,
+		SASToken:      sasToken,
+		Protocol:      protocol,
+		StorageDomain: endpoint,
+	})
+	if err != nil {
+		return "", err
 	}
 
-	return ""
+	return string(svcURL), nil
+}
+
+// createContainerURL creates a full container URL by building the service URL and joining with container name
+func createContainerURL(accountName, protocol, endpoint, sasToken, containerName string) (string, error) {
+	serviceURL, err := createServiceURL(accountName, protocol, endpoint, sasToken)
+	if err != nil {
+		return "", err
+	}
+
+	return url.JoinPath(serviceURL, containerName)
+}
+
+// getContainerNameFromURI extracts the container name from a URI
+func getContainerNameFromURI(uri *url.URL) string {
+	return uri.User.Username()
+}
+
+// newAdlsLocation parses an Azure Data Lake Storage URI and extracts location components
+// Supports the pattern: <scheme>://<file_system>@<account_name>.<endpoint>/<path>
+func newAdlsLocation(adlsURI *url.URL) (*adlsLocation, error) {
+	// Extract container name from User field
+	containerName := getContainerNameFromURI(adlsURI)
+	if containerName == "" {
+		return nil, errors.New("container name is required for azure bucket")
+	}
+
+	hostname := adlsURI.Hostname()
+	if hostname == "" {
+		return nil, errors.New("hostname is required for azure bucket")
+	}
+
+	// Extract account name from hostname (ignore the storage domain)
+	parts := strings.Split(hostname, ".")
+	if len(parts) == 0 || parts[0] == "" {
+		return nil, errors.New("account name is required for azure bucket")
+	}
+	accountName := parts[0]
+
+	path := adlsURI.Path
+
+	return &adlsLocation{
+		accountName:   accountName,
+		containerName: containerName,
+		path:          path,
+	}, nil
 }
 
 // Construct a Azure bucket from a URL
@@ -64,34 +118,29 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 	adlsConnectionStrings := propertiesWithPrefix(props, AdlsConnectionStringPrefix)
 
 	// Construct the client
-	accountName := props[AdlsSharedKeyAccountName]
-	if accountName == "" {
-		accountName = extractStorageAccountFromURI(parsed)
+	location, err := newAdlsLocation(parsed)
+	if err != nil {
+		return nil, err
 	}
 
+	sharedKeyAccountName := props[AdlsSharedKeyAccountName]
 	endpoint := props[AdlsEndpoint]
 	protocol := props[AdlsProtocol]
 
 	var client *container.Client
 
-	if accountName == "" {
-		return nil, errors.New("account name is required for azure bucket")
-	}
+	if sharedKeyAccountName != "" {
+		sharedKeyAccountKey, ok := props[AdlsSharedKeyAccountKey]
+		if !ok || sharedKeyAccountKey == "" {
+			return nil, fmt.Errorf("azure authentication: shared-key requires both %s and %s", AdlsSharedKeyAccountName, AdlsSharedKeyAccountKey)
+		}
 
-	if accountKey, ok := props[AdlsSharedKeyAccountKey]; ok {
-		svcURL, err := azureblob.NewServiceURL(&azureblob.ServiceURLOptions{
-			AccountName:   accountName,
-			Protocol:      protocol,
-			StorageDomain: endpoint,
-		})
+		containerURL, err := createContainerURL(location.accountName, protocol, endpoint, "", location.containerName)
 		if err != nil {
 			return nil, err
 		}
-		containerURL, err := url.JoinPath(string(svcURL), parsed.Host)
-		if err != nil {
-			return nil, err
-		}
-		sharedKeyCred, err := azblob.NewSharedKeyCredential(accountName, accountKey)
+
+		sharedKeyCred, err := azblob.NewSharedKeyCredential(sharedKeyAccountName, sharedKeyAccountKey)
 		if err != nil {
 			return nil, fmt.Errorf("failed azblob.NewSharedKeyCredential: %w", err)
 		}
@@ -100,18 +149,8 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 		if err != nil {
 			return nil, fmt.Errorf("failed container.NewClientWithSharedKeyCredential: %w", err)
 		}
-	} else if sasToken, ok := adlsSasTokens[accountName]; ok {
-		svcURL, err := azureblob.NewServiceURL(&azureblob.ServiceURLOptions{
-			AccountName:   accountName,
-			SASToken:      sasToken,
-			Protocol:      protocol,
-			StorageDomain: endpoint,
-		})
-		if err != nil {
-			return nil, err
-		}
-
-		containerURL, err := url.JoinPath(string(svcURL), parsed.Host)
+	} else if sasToken, ok := adlsSasTokens[location.accountName]; ok {
+		containerURL, err := createContainerURL(location.accountName, protocol, endpoint, sasToken, location.containerName)
 		if err != nil {
 			return nil, err
 		}
@@ -120,28 +159,14 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 		if err != nil {
 			return nil, fmt.Errorf("failed container.NewClientWithNoCredential: %w", err)
 		}
-	} else if connectionString, ok := adlsConnectionStrings[accountName]; ok {
+	} else if connectionString, ok := adlsConnectionStrings[location.accountName]; ok {
 		var err error
-		client, err = container.NewClientFromConnectionString(connectionString, parsed.Host, nil)
+		client, err = container.NewClientFromConnectionString(connectionString, location.containerName, nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed container.NewClientFromConnectionString: %w", err)
 		}
 	} else {
-		containerName := parsed.User.Username()
-		if containerName == "" {
-			return nil, errors.New("container name is required for azure bucket")
-		}
-
-		svcURL, err := azureblob.NewServiceURL(&azureblob.ServiceURLOptions{
-			AccountName:   accountName,
-			Protocol:      protocol,
-			StorageDomain: endpoint,
-		})
-		if err != nil {
-			return nil, err
-		}
-
-		containerURL, err := url.JoinPath(string(svcURL), containerName)
+		containerURL, err := createContainerURL(location.accountName, protocol, endpoint, "", location.containerName)
 		if err != nil {
 			return nil, err
 		}
