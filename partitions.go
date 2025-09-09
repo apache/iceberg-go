@@ -189,9 +189,14 @@ func (p *PartitionSpec) addSpecFieldInternal(targetName string, field NestedFiel
 }
 
 func (p *PartitionSpec) checkForRedundantPartitions(sourceID int, transform Transform) error {
-	for _, field := range p.fields {
-		if field.SourceID == sourceID && field.Transform.String() == transform.String() {
-			return fmt.Errorf("cannot add redundant partition with source id %d and transform %s. A partition with the same source id and transform already exists with name: %s", sourceID, transform, field.Name)
+	if fields, ok := p.sourceIdToFields[sourceID]; ok {
+		for _, f := range fields {
+			if f.Transform.Equals(transform) {
+				return fmt.Errorf("cannot add redundant partition with source id %d and transform %s. A partition with the same source id and transform already exists with name: %s",
+					sourceID,
+					transform,
+					f.Name)
+			}
 		}
 	}
 
