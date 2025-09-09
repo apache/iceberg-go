@@ -22,7 +22,9 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"gocloud.dev/blob"
@@ -43,6 +45,19 @@ const (
 	// AdlsWriteBlockSize         = "adls.write.block-size-bytes"
 )
 
+// extractStorageAccountFromURI extracts the storage account name from an Azure Data Lake Storage URI
+func extractStorageAccountFromURI(parsed *url.URL) string {
+	hostname := parsed.Hostname()
+
+	// remove the storage domain
+	parts := strings.Split(hostname, ".")
+	if len(parts) > 0 {
+		return parts[0]
+	}
+
+	return ""
+}
+
 // Construct a Azure bucket from a URL
 func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
 	adlsSasTokens := propertiesWithPrefix(props, AdlsSasTokenPrefix)
@@ -50,6 +65,10 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 
 	// Construct the client
 	accountName := props[AdlsSharedKeyAccountName]
+	if accountName == "" {
+		accountName = extractStorageAccountFromURI(parsed)
+	}
+
 	endpoint := props[AdlsEndpoint]
 	protocol := props[AdlsProtocol]
 
@@ -106,6 +125,35 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 		client, err = container.NewClientFromConnectionString(connectionString, parsed.Host, nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed container.NewClientFromConnectionString: %w", err)
+		}
+	} else {
+		containerName := parsed.User.Username()
+		if containerName == "" {
+			return nil, errors.New("container name is required for azure bucket")
+		}
+
+		svcURL, err := azureblob.NewServiceURL(&azureblob.ServiceURLOptions{
+			AccountName:   accountName,
+			Protocol:      protocol,
+			StorageDomain: endpoint,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		containerURL, err := url.JoinPath(string(svcURL), containerName)
+		if err != nil {
+			return nil, err
+		}
+
+		cred, err := azidentity.NewDefaultAzureCredential(nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed azidentity.NewDefaultAzureCredential: %w", err)
+		}
+
+		client, err = container.NewClient(containerURL, cred, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed container.NewClient: %w", err)
 		}
 	}
 
