@@ -89,6 +89,30 @@ type PartitionSpec struct {
 
 type PartitionOption func(*PartitionSpec) error
 
+// BindToSchema creates a new PartitionSpec by copying the fields from the
+// existing spec verifying compatibility with the schema.
+//
+// If newSpecID is not nil, it will be used as the spec id for the new spec.
+// Otherwise, the existing spec id will be used.
+// If a field in the spec is incompatible with the schema, an error will be returned.
+func (p *PartitionSpec) BindToSchema(schema *Schema, lastPartitionID *int, newSpecID *int) (PartitionSpec, error) {
+	opts := make([]PartitionOption, 0)
+	if newSpecID != nil {
+		opts = append(opts, WithSpecID(*newSpecID))
+	} else {
+		opts = append(opts, WithSpecID(p.id))
+	}
+
+	for field := range p.Fields() {
+		opts = append(opts, AddPartitionFieldBySourceID(field.SourceID, field.Name, field.Transform, schema, &field.FieldID))
+	}
+	opts = append(opts, AssignPartitionFieldIDs(lastPartitionID))
+
+	freshSpec, err := NewPartitionSpecOpts(opts...)
+
+	return freshSpec, err
+}
+
 func NewPartitionSpecOpts(opts ...PartitionOption) (PartitionSpec, error) {
 	spec := PartitionSpec{
 		id: 0,
@@ -101,6 +125,12 @@ func NewPartitionSpecOpts(opts ...PartitionOption) (PartitionSpec, error) {
 	spec.initialize()
 
 	return spec, nil
+}
+
+func AssignPartitionFieldIDs(lastAssignedPartitionID *int) PartitionOption {
+	return func(p *PartitionSpec) error {
+		return p.assignPartitionFieldIds(lastAssignedPartitionID)
+	}
 }
 
 func WithSpecID(id int) PartitionOption {
@@ -168,11 +198,11 @@ func (p *PartitionSpec) checkForRedundantPartitions(sourceID int, transform Tran
 	return nil
 }
 
-func (p *PartitionSpec) SetID(id int) {
-	p.id = id
+func (p *PartitionSpec) Len() int {
+	return len(p.fields)
 }
 
-func (ps *PartitionSpec) AssignPartitionFieldIds(lastAssignedFieldIDPtr *int) error {
+func (ps *PartitionSpec) assignPartitionFieldIds(lastAssignedFieldIDPtr *int) error {
 	// This is set_field_ids from iceberg-rust
 	// Already assigned partition ids. If we see one of these during iteration,
 	// we skip it.

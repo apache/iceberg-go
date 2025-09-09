@@ -76,14 +76,19 @@ func builderWithoutChanges(formatVersion int) MetadataBuilder {
 	if err != nil {
 		panic(err)
 	}
-	_, err = builder.AddPartitionSpec(&partitionSpec, true)
-	if err != nil {
-		panic(err)
-	}
 	_, err = builder.AddSchema(&tableSchema)
 	if err != nil {
 		panic(err)
 	}
+	_, err = builder.SetCurrentSchemaID(-1)
+	if err != nil {
+		panic(err)
+	}
+	_, err = builder.AddPartitionSpec(&partitionSpec, true)
+	if err != nil {
+		panic(err)
+	}
+
 	meta, err := builder.Build()
 	if err != nil {
 		panic(err)
@@ -100,7 +105,10 @@ func TestAddRemovePartitionSpec(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	builderRef := &builder
 	i := 1000
-	addedSpec, err := iceberg.NewPartitionSpecOpts(iceberg.WithSpecID(10), iceberg.AddPartitionFieldBySourceID(2, "y", iceberg.IdentityTransform{}, builder.schemaList[0], &i), iceberg.AddPartitionFieldBySourceID(3, "z", iceberg.IdentityTransform{}, builder.schemaList[0], nil))
+	addedSpec, err := iceberg.NewPartitionSpecOpts(
+		iceberg.WithSpecID(10),
+		iceberg.AddPartitionFieldBySourceID(2, "y", iceberg.IdentityTransform{}, builder.schemaList[0], &i),
+		iceberg.AddPartitionFieldBySourceID(3, "z", iceberg.IdentityTransform{}, builder.schemaList[0], nil))
 	require.NoError(t, err)
 
 	builderRef, err = builderRef.AddPartitionSpec(&addedSpec, false)
@@ -110,7 +118,10 @@ func TestAddRemovePartitionSpec(t *testing.T) {
 	require.NotNil(t, metadata)
 
 	i2 := 1001
-	expectedSpec, err := iceberg.NewPartitionSpecOpts(iceberg.WithSpecID(1), iceberg.AddPartitionFieldBySourceID(2, "y", iceberg.IdentityTransform{}, builder.schemaList[0], &i), iceberg.AddPartitionFieldBySourceID(3, "z", iceberg.IdentityTransform{}, builder.schemaList[0], &i2))
+	expectedSpec, err := iceberg.NewPartitionSpecOpts(
+		iceberg.WithSpecID(1),
+		iceberg.AddPartitionFieldBySourceID(2, "y", iceberg.IdentityTransform{}, builder.schemaList[0], &i),
+		iceberg.AddPartitionFieldBySourceID(3, "z", iceberg.IdentityTransform{}, builder.schemaList[0], &i2))
 	require.NoError(t, err)
 	require.Equal(t, metadata.DefaultPartitionSpec(), 0)
 	require.Equal(t, *metadata.LastPartitionSpecID(), i2)
@@ -159,7 +170,7 @@ func TestSetDefaultPartitionSpec(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, builderRef.HasChanges())
 	require.Equal(t, len(builderRef.updates), 2)
-	require.True(t, builderRef.updates[0].(*addPartitionSpecUpdate).Spec.Equals(addedSpec))
+	require.True(t, builderRef.updates[0].(*addPartitionSpecUpdate).Spec.Equals(expectedSpec))
 	require.Equal(t, -1, builderRef.updates[1].(*setDefaultSpecUpdate).SpecID)
 	metadata, err := builderRef.Build()
 	require.NoError(t, err)
@@ -175,7 +186,13 @@ func TestSetExistingDefaultPartitionSpec(t *testing.T) {
 	curSchema, err := builder.GetSchemaByID(builder.currentSchemaID)
 	require.NoError(t, err)
 
-	addedSpec, err := iceberg.NewPartitionSpecOpts(iceberg.WithSpecID(10), iceberg.AddPartitionFieldBySourceID(1, "y_bucket[2]", iceberg.BucketTransform{NumBuckets: 2}, curSchema, nil))
+	addedSpec, err := iceberg.NewPartitionSpecOpts(
+		iceberg.WithSpecID(10),
+		iceberg.AddPartitionFieldBySourceID(1, "y_bucket[2]", iceberg.BucketTransform{NumBuckets: 2}, curSchema, nil))
+	require.NoError(t, err)
+
+	id := 1001
+	expectedSpec, err := iceberg.NewPartitionSpecOpts(iceberg.WithSpecID(1), iceberg.AddPartitionFieldBySourceID(1, "y_bucket[2]", iceberg.BucketTransform{NumBuckets: 2}, curSchema, &id))
 	require.NoError(t, err)
 
 	builderRef, err := builder.AddPartitionSpec(&addedSpec, false)
@@ -186,7 +203,7 @@ func TestSetExistingDefaultPartitionSpec(t *testing.T) {
 
 	require.True(t, builderRef.HasChanges())
 	require.Len(t, builderRef.updates, 2)
-	require.True(t, builderRef.updates[0].(*addPartitionSpecUpdate).Spec.Equals(addedSpec))
+	require.True(t, builderRef.updates[0].(*addPartitionSpecUpdate).Spec.Equals(expectedSpec))
 	require.Equal(t, -1, builderRef.updates[1].(*setDefaultSpecUpdate).SpecID)
 
 	metadata, err := builderRef.Build()
@@ -194,9 +211,6 @@ func TestSetExistingDefaultPartitionSpec(t *testing.T) {
 	require.NotNil(t, metadata)
 	require.Equal(t, 1, metadata.DefaultPartitionSpec())
 
-	id := 1001
-	expectedSpec, err := iceberg.NewPartitionSpecOpts(iceberg.WithSpecID(1), iceberg.AddPartitionFieldBySourceID(1, "y_bucket[2]", iceberg.BucketTransform{NumBuckets: 2}, curSchema, &id))
-	require.NoError(t, err)
 	require.True(t, expectedSpec.Equals(metadata.PartitionSpec()), "expected partition spec to match added spec")
 
 	newBuilder, err := MetadataBuilderFromBase(metadata)

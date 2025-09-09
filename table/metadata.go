@@ -289,28 +289,24 @@ func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) (*MetadataBuilder, e
 func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial bool) (*MetadataBuilder, error) {
 	newSpecID := b.reuseOrCreateNewPartitionSpecID(*spec)
 
-	if err := spec.AssignPartitionFieldIds(b.lastPartitionID); err != nil {
+	freshSpec, err := spec.BindToSchema(b.CurrentSchema(), b.lastPartitionID, &newSpecID)
+	if err != nil {
 		return nil, err
 	}
 
+	spec = nil
 	if _, err := b.GetSpecByID(newSpecID); err == nil {
 		if b.lastAddedPartitionID == nil || *b.lastAddedPartitionID != newSpecID {
-			b.updates = append(b.updates, NewAddPartitionSpecUpdate(spec, initial))
+			b.updates = append(b.updates, NewAddPartitionSpecUpdate(&freshSpec, initial))
 			b.lastAddedPartitionID = &newSpecID
 		}
 
 		return b, nil
 	}
-	spec.SetID(newSpecID)
-	for _, s := range b.specs {
-		if s.ID() == spec.ID() && !initial {
-			return nil, fmt.Errorf("partition spec with id %d already exists", spec.ID())
-		}
-	}
 
 	maxFieldID := 0
 	fieldCount := 0
-	for f := range spec.Fields() {
+	for f := range freshSpec.Fields() {
 		maxFieldID = max(maxFieldID, f.FieldID)
 		if b.formatVersion <= 1 {
 			expectedID := partitionFieldStartID + fieldCount
@@ -330,15 +326,15 @@ func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial 
 
 	var specs []iceberg.PartitionSpec
 	if initial {
-		specs = []iceberg.PartitionSpec{*spec}
+		specs = []iceberg.PartitionSpec{freshSpec}
 	} else {
-		specs = append(b.specs, *spec)
+		specs = append(b.specs, freshSpec)
 	}
 
 	b.specs = specs
 	b.lastPartitionID = &lastPartitionID
 	b.lastAddedPartitionID = &newSpecID
-	b.updates = append(b.updates, NewAddPartitionSpecUpdate(spec, initial))
+	b.updates = append(b.updates, NewAddPartitionSpecUpdate(&freshSpec, initial))
 
 	return b, nil
 }
