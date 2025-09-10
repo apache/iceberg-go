@@ -2068,7 +2068,7 @@ type DataFile interface {
 	SpecID() int32
 	// FirstRowID returns the first row ID for this data file ( v3+ only )
 	FirstRowID() *int64
-	//ReferencedDataFile returns the location of the data file that deletion vector reference
+	// ReferencedDataFile returns the location of the data file that deletion vector reference
 	ReferencedDataFile() *string
 	// ContentOffset returns the offset in the file where the content starts ( v3+ only )
 	ContentOffset() *int64
