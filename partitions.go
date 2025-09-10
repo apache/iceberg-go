@@ -95,7 +95,7 @@ type PartitionOption func(*PartitionSpec) error
 // If newSpecID is not nil, it will be used as the spec id for the new spec.
 // Otherwise, the existing spec id will be used.
 // If a field in the spec is incompatible with the schema, an error will be returned.
-func (p *PartitionSpec) BindToSchema(schema *Schema, lastPartitionID *int, newSpecID *int) (PartitionSpec, error) {
+func (p *PartitionSpec) BindToSchema(schema *Schema, lastPartitionID *int, newSpecID *int, isUnbound bool) (PartitionSpec, error) {
 	opts := make([]PartitionOption, 0)
 	if newSpecID != nil {
 		opts = append(opts, WithSpecID(*newSpecID))
@@ -106,10 +106,14 @@ func (p *PartitionSpec) BindToSchema(schema *Schema, lastPartitionID *int, newSp
 	for field := range p.Fields() {
 		opts = append(opts, AddPartitionFieldBySourceID(field.SourceID, field.Name, field.Transform, schema, &field.FieldID))
 	}
-	opts = append(opts, AssignPartitionFieldIDs(lastPartitionID))
 
 	freshSpec, err := NewPartitionSpecOpts(opts...)
-
+	if err != nil {
+		return PartitionSpec{}, err
+	}
+	if err = freshSpec.assignPartitionFieldIds(lastPartitionID); err != nil {
+		return PartitionSpec{}, err
+	}
 	return freshSpec, err
 }
 
@@ -127,15 +131,28 @@ func NewPartitionSpecOpts(opts ...PartitionOption) (PartitionSpec, error) {
 	return spec, nil
 }
 
-func AssignPartitionFieldIDs(lastAssignedPartitionID *int) PartitionOption {
-	return func(p *PartitionSpec) error {
-		return p.assignPartitionFieldIds(lastAssignedPartitionID)
-	}
-}
-
 func WithSpecID(id int) PartitionOption {
 	return func(p *PartitionSpec) error {
 		p.id = id
+
+		return nil
+	}
+}
+
+func AddPartitionFieldByName(sourceName string, targetName string, transform Transform, schema *Schema, fieldID *int) PartitionOption {
+	return func(p *PartitionSpec) error {
+		if schema == nil {
+			return errors.New("cannot add partition field with nil schema")
+		}
+		field, ok := schema.FindFieldByName(sourceName)
+
+		if !ok {
+			return fmt.Errorf("cannot find source column with name: %s in schema", sourceName)
+		}
+		err := p.addSpecFieldInternal(targetName, field, transform, fieldID)
+		if err != nil {
+			return err
+		}
 
 		return nil
 	}
@@ -283,6 +300,10 @@ func (ps PartitionSpec) Equals(other PartitionSpec) bool {
 
 // Fields returns a clone of the partition fields in this spec.
 func (ps *PartitionSpec) Fields() iter.Seq[PartitionField] {
+	if ps.fields == nil {
+		return slices.Values([]PartitionField{})
+	}
+
 	return slices.Values(ps.fields)
 }
 
