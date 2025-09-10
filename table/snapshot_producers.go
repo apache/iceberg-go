@@ -682,9 +682,9 @@ func (sp *snapshotProducer) commit() ([]Update, []Requirement, error) {
 		return nil, nil, err
 	}
 	defer out.Close()
-
+	// TODO: Implement v3 here
 	err = iceberg.WriteManifestList(sp.txn.meta.formatVersion, out,
-		sp.snapshotID, parentSnapshot, &nextSequence, newManifests)
+		sp.snapshotID, parentSnapshot, &nextSequence, 0, newManifests)
 	if err != nil {
 		return nil, nil, err
 	}

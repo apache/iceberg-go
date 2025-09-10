@@ -406,9 +406,9 @@ type ManifestTestSuite struct {
 }
 
 func (m *ManifestTestSuite) writeManifestList() {
-	m.Require().NoError(WriteManifestList(1, &m.v1ManifestList, snapshotID, nil, nil, manifestFileRecordsV1))
+	m.Require().NoError(WriteManifestList(1, &m.v1ManifestList, snapshotID, nil, nil, 0, manifestFileRecordsV1))
 	unassignedSequenceNum := int64(-1)
-	m.Require().NoError(WriteManifestList(2, &m.v2ManifestList, snapshotID, nil, &unassignedSequenceNum, manifestFileRecordsV2))
+	m.Require().NoError(WriteManifestList(2, &m.v2ManifestList, snapshotID, nil, &unassignedSequenceNum, 0, manifestFileRecordsV2))
 }
 
 func (m *ManifestTestSuite) writeManifestEntries() {
@@ -659,7 +659,7 @@ func (m *ManifestTestSuite) TestReadManifestListIncompleteSchema() {
 	// any cache. (Note: if working correctly, this will have no such side effect.)
 	var buf bytes.Buffer
 	seqNum := int64(9876)
-	err := WriteManifestList(2, &buf, 1234, nil, &seqNum, []ManifestFile{
+	err := WriteManifestList(2, &buf, 1234, nil, &seqNum, 0, []ManifestFile{
 		NewManifestFile(2, "s3://bucket/namespace/table/metadata/abcd-0123.avro", 99, 0, 1234).Build(),
 	})
 	m.NoError(err)
