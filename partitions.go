@@ -94,7 +94,8 @@ type PartitionOption func(*PartitionSpec) error
 //
 // If newSpecID is not nil, it will be used as the spec id for the new spec.
 // Otherwise, the existing spec id will be used.
-// If a field in the spec is incompatible with the schema, an error will be returned.
+// If a field in the spec is incompatible with the schema, an error will be
+// returned.
 func (p *PartitionSpec) BindToSchema(schema *Schema, lastPartitionID *int, newSpecID *int, isUnbound bool) (PartitionSpec, error) {
 	opts := make([]PartitionOption, 0)
 	if newSpecID != nil {
@@ -114,6 +115,7 @@ func (p *PartitionSpec) BindToSchema(schema *Schema, lastPartitionID *int, newSp
 	if err = freshSpec.assignPartitionFieldIds(lastPartitionID); err != nil {
 		return PartitionSpec{}, err
 	}
+
 	return freshSpec, err
 }
 
@@ -263,10 +265,16 @@ func (ps *PartitionSpec) assignPartitionFieldIds(lastAssignedFieldIDPtr *int) er
 	return nil
 }
 
+// NewPartitionSpec creates a new PartitionSpec with the given fields.
+//
+// The fields are not verified against a schema, use NewPartitionSpecOpts if you have to ensure compatibility.
 func NewPartitionSpec(fields ...PartitionField) PartitionSpec {
 	return NewPartitionSpecID(InitialPartitionSpecID, fields...)
 }
 
+// NewPartitionSpecID creates a new PartitionSpec with the given fields and id.
+//
+// The fields are not verified against a schema, use NewPartitionSpecOpts if you have to ensure compatibility.
 func NewPartitionSpecID(id int, fields ...PartitionField) PartitionSpec {
 	ret := PartitionSpec{id: id, fields: fields}
 	ret.initialize()
@@ -448,37 +456,6 @@ func (ps *PartitionSpec) PartitionToPath(data structLike, sc *Schema) string {
 	}
 
 	return path.Join(segments...)
-}
-
-// AssignFreshPartitionSpecIDs creates a new PartitionSpec by reassigning the field IDs
-// from the old schema to the corresponding fields in the fresh schema, while re-assigning
-// the actual Spec IDs to 1000 + the position of the field in the partition spec.
-func AssignFreshPartitionSpecIDs(spec *PartitionSpec, old, fresh *Schema) (PartitionSpec, error) {
-	if spec == nil {
-		return PartitionSpec{}, nil
-	}
-
-	newFields := make([]PartitionField, 0, len(spec.fields))
-	for pos, field := range spec.fields {
-		origCol, ok := old.FindColumnName(field.SourceID)
-		if !ok {
-			return PartitionSpec{}, fmt.Errorf("could not find field in old schema: %s", field.Name)
-		}
-
-		freshField, ok := fresh.FindFieldByName(origCol)
-		if !ok {
-			return PartitionSpec{}, fmt.Errorf("could not find field in fresh schema: %s", field.Name)
-		}
-
-		newFields = append(newFields, PartitionField{
-			Name:      field.Name,
-			SourceID:  freshField.ID,
-			FieldID:   PartitionDataIDStart + pos,
-			Transform: field.Transform,
-		})
-	}
-
-	return NewPartitionSpec(newFields...), nil
 }
 
 // GeneratePartitionFieldName returns default partition field name based on field transform type
