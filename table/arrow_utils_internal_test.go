@@ -44,6 +44,7 @@ func constructTestTable(t *testing.T, writeStats []string) (*metadata.FileMetaDa
         "last-column-id": 7,
         "current-schema-id": 0,
 		"last-updated-ms": -1,
+		"last-partition-id": 0,
         "schemas": [
             {
                 "type": "struct",

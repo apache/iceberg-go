@@ -163,7 +163,8 @@ type MetadataBuilder struct {
 	// >v1 specific
 	lastSequenceNumber *int64
 	// update tracking
-	lastAddedSchemaID *int
+	lastAddedSchemaID    *int
+	lastAddedPartitionID *int
 }
 
 func NewMetadataBuilder() (*MetadataBuilder, error) {
@@ -284,15 +285,35 @@ func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) (*MetadataBuilder, e
 }
 
 func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial bool) (*MetadataBuilder, error) {
-	for _, s := range b.specs {
-		if s.ID() == spec.ID() && !initial {
-			return nil, fmt.Errorf("partition spec with id %d already exists", spec.ID())
+	newSpecID := b.reuseOrCreateNewPartitionSpecID(*spec)
+
+	freshSpec, err := spec.BindToSchema(b.CurrentSchema(), b.lastPartitionID, &newSpecID, false)
+	if err != nil {
+		return nil, err
+	}
+
+	spec = nil
+	if _, err := b.GetSpecByID(newSpecID); err == nil {
+		if b.lastAddedPartitionID == nil || *b.lastAddedPartitionID != newSpecID {
+			b.updates = append(b.updates, NewAddPartitionSpecUpdate(&freshSpec, initial))
+			b.lastAddedPartitionID = &newSpecID
 		}
+
+		return b, nil
 	}
 
 	maxFieldID := 0
-	for f := range spec.Fields() {
+	fieldCount := 0
+	for f := range freshSpec.Fields() {
 		maxFieldID = max(maxFieldID, f.FieldID)
+		if b.formatVersion <= 1 {
+			expectedID := partitionFieldStartID + fieldCount
+			if f.FieldID != expectedID {
+				return nil, fmt.Errorf("v1 constraint: partition field IDs are not sequential: expected %d, got %d", expectedID, f.FieldID)
+			}
+			fieldCount++
+		}
+
 	}
 
 	prev := partitionFieldStartID - 1
@@ -303,14 +324,15 @@ func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial 
 
 	var specs []iceberg.PartitionSpec
 	if initial {
-		specs = []iceberg.PartitionSpec{*spec}
+		specs = []iceberg.PartitionSpec{freshSpec}
 	} else {
-		specs = append(b.specs, *spec)
+		specs = append(b.specs, freshSpec)
 	}
 
 	b.specs = specs
 	b.lastPartitionID = &lastPartitionID
-	b.updates = append(b.updates, NewAddPartitionSpecUpdate(spec, initial))
+	b.lastAddedPartitionID = &newSpecID
+	b.updates = append(b.updates, NewAddPartitionSpecUpdate(&freshSpec, initial))
 
 	return b, nil
 }
@@ -439,13 +461,12 @@ func (b *MetadataBuilder) SetDefaultSortOrderID(defaultSortOrderID int) (*Metada
 }
 
 func (b *MetadataBuilder) SetDefaultSpecID(defaultSpecID int) (*MetadataBuilder, error) {
+	lastUsed := false
 	if defaultSpecID == -1 {
-		defaultSpecID = maxBy(b.specs, func(s iceberg.PartitionSpec) int {
-			return s.ID()
-		})
-		if !slices.ContainsFunc(b.updates, func(u Update) bool {
-			return u.Action() == UpdateAddSpec && u.(*addPartitionSpecUpdate).Spec.ID() == defaultSpecID
-		}) {
+		if b.lastAddedPartitionID != nil {
+			lastUsed = true
+			defaultSpecID = *b.lastAddedPartitionID
+		} else {
 			return nil, errors.New("can't set default spec to last added with no added partition specs")
 		}
 	}
@@ -458,7 +479,11 @@ func (b *MetadataBuilder) SetDefaultSpecID(defaultSpecID int) (*MetadataBuilder,
 		return nil, fmt.Errorf("can't set default spec to spec with id %d: %w", defaultSpecID, err)
 	}
 
-	b.updates = append(b.updates, NewSetDefaultSpecUpdate(defaultSpecID))
+	if lastUsed {
+		b.updates = append(b.updates, NewSetDefaultSpecUpdate(-1))
+	} else {
+		b.updates = append(b.updates, NewSetDefaultSpecUpdate(defaultSpecID))
+	}
 	b.defaultSpecID = defaultSpecID
 
 	return b, nil
@@ -793,6 +818,20 @@ func (b *MetadataBuilder) Build() (Metadata, error) {
 	}
 }
 
+func (b *MetadataBuilder) reuseOrCreateNewPartitionSpecID(newSpec iceberg.PartitionSpec) int {
+	newSpecID := 0
+	for _, spec := range b.specs {
+		if spec.Equals(newSpec) {
+			return spec.ID()
+		}
+		if spec.ID() >= newSpecID {
+			newSpecID = spec.ID() + 1
+		}
+	}
+
+	return newSpecID
+}
+
 func (b *MetadataBuilder) reuseOrCreateNewSchemaID(newSchema *iceberg.Schema) int {
 	newSchemaID := newSchema.ID
 	for _, schema := range b.schemaList {
@@ -805,6 +844,31 @@ func (b *MetadataBuilder) reuseOrCreateNewSchemaID(newSchema *iceberg.Schema) in
 	}
 
 	return newSchemaID
+}
+
+func (b *MetadataBuilder) RemovePartitionSpecs(ints []int) (*MetadataBuilder, error) {
+	if slices.Contains(ints, b.defaultSpecID) {
+		return nil, fmt.Errorf("can't remove default partition spec with id %d", b.defaultSpecID)
+	}
+
+	newSpecs := make([]iceberg.PartitionSpec, 0, len(b.specs)-len(ints))
+	removed := make([]int, len(ints))
+	for _, spec := range b.specs {
+		if slices.Contains(ints, spec.ID()) {
+			removed = append(removed, spec.ID())
+
+			continue
+		}
+		newSpecs = append(newSpecs, spec)
+	}
+
+	b.specs = newSpecs
+
+	if len(removed) != 0 {
+		b.updates = append(b.updates, NewRemoveSpecUpdate(ints))
+	}
+
+	return b, nil
 }
 
 // maxBy returns the maximum value of extract(e) for all e in elems.
@@ -852,9 +916,9 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 	var ret Metadata
 	switch ver.FormatVersion {
 	case 1:
-		ret = &metadataV1{}
+		ret = initMetadataV1Deser()
 	case 2:
-		ret = &metadataV2{}
+		ret = initMetadataV2Deser()
 	default:
 		return nil, ErrInvalidMetadataFormatVersion
 	}
@@ -888,6 +952,15 @@ type commonMetadata struct {
 	SortOrderList      []SortOrder             `json:"sort-orders"`
 	DefaultSortOrderID int                     `json:"default-sort-order-id"`
 	SnapshotRefs       map[string]SnapshotRef  `json:"refs,omitempty"`
+}
+
+func initCommonMetadataForDeserialization() commonMetadata {
+	return commonMetadata{
+		LastUpdatedMS:   -1,
+		LastColumnId:    -1,
+		CurrentSchemaID: -1,
+		DefaultSpecID:   -1,
+	}
 }
 
 func (c *commonMetadata) Ref() SnapshotRef                     { return c.SnapshotRefs[MainBranch] }
@@ -1131,6 +1204,12 @@ func (c *commonMetadata) validate() error {
 	case c.LastColumnId < 0:
 		// last-column-id is required
 		return fmt.Errorf("%w: missing last-column-id", ErrInvalidMetadata)
+	case c.CurrentSchemaID < 0:
+		return fmt.Errorf("%w: no valid schema configuration found in table metadata", ErrInvalidMetadata)
+	case c.LastPartitionID == nil:
+		if c.FormatVersion > 1 {
+			return fmt.Errorf("%w: last-partition-id must be set for FormatVersion > 1", ErrInvalidMetadata)
+		}
 	}
 
 	return nil
@@ -1154,6 +1233,12 @@ type metadataV1 struct {
 	Partition []iceberg.PartitionField `json:"partition-spec,omitempty"`
 
 	commonMetadata
+}
+
+func initMetadataV1Deser() *metadataV1 {
+	return &metadataV1{
+		commonMetadata: initCommonMetadataForDeserialization(),
+	}
 }
 
 func (m *metadataV1) LastSequenceNumber() int64 { return 0 }
@@ -1182,6 +1267,10 @@ func (m *metadataV1) preValidate() {
 			iceberg.NewPartitionSpec(m.Partition...),
 		}
 		m.DefaultSpecID = m.Specs[0].ID()
+	}
+
+	if m.DefaultSpecID == -1 && len(m.Specs) > 0 {
+		m.DefaultSpecID = maxBy(m.Specs, func(s iceberg.PartitionSpec) int { return s.ID() })
 	}
 
 	if m.LastPartitionID == nil {
@@ -1213,6 +1302,16 @@ func (m *metadataV1) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
+	// CurrentSchemaID was optional in v1, it can also be expressed via Schema.
+	if aux.CurrentSchemaID == -1 && aux.Schema != nil {
+		aux.CurrentSchemaID = aux.Schema.ID
+		if !slices.ContainsFunc(aux.SchemaList, func(s *iceberg.Schema) bool {
+			return s.Equals(aux.Schema) && s.ID == aux.CurrentSchemaID
+		}) {
+			aux.SchemaList = append(aux.SchemaList, aux.Schema)
+		}
+	}
+
 	m.preValidate()
 
 	return m.validate()
@@ -1232,6 +1331,13 @@ type metadataV2 struct {
 	LastSeqNum int64 `json:"last-sequence-number"`
 
 	commonMetadata
+}
+
+func initMetadataV2Deser() *metadataV2 {
+	return &metadataV2{
+		LastSeqNum:     -1,
+		commonMetadata: initCommonMetadataForDeserialization(),
+	}
 }
 
 func (m *metadataV2) LastSequenceNumber() int64 { return m.LastSeqNum }
@@ -1278,25 +1384,10 @@ func NewMetadata(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, sortOrde
 
 // NewMetadataWithUUID is like NewMetadata, but allows the caller to specify the UUID of the table rather than creating a new one.
 func NewMetadataWithUUID(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, sortOrder SortOrder, location string, props iceberg.Properties, tableUuid uuid.UUID) (Metadata, error) {
-	freshSchema, err := iceberg.AssignFreshSchemaIDs(sc, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	freshPartitions, err := iceberg.AssignFreshPartitionSpecIDs(partitions, sc, freshSchema)
-	if err != nil {
-		return nil, err
-	}
-
-	freshSortOrder, err := AssignFreshSortOrderIDs(sortOrder, sc, freshSchema)
-	if err != nil {
-		return nil, err
-	}
-
 	if tableUuid == uuid.Nil {
 		tableUuid = uuid.New()
 	}
-
+	var err error
 	formatVersion := DefaultFormatVersion
 	if props != nil {
 		verStr, ok := props["format-version"]
@@ -1308,33 +1399,102 @@ func NewMetadataWithUUID(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, 
 		}
 	}
 
-	lastPartitionID := freshPartitions.LastAssignedFieldID()
-	common := commonMetadata{
-		LastUpdatedMS:      time.Now().UnixMilli(),
-		LastColumnId:       freshSchema.HighestFieldID(),
-		FormatVersion:      formatVersion,
-		UUID:               tableUuid,
-		Loc:                location,
-		SchemaList:         []*iceberg.Schema{freshSchema},
-		CurrentSchemaID:    freshSchema.ID,
-		Specs:              []iceberg.PartitionSpec{freshPartitions},
-		DefaultSpecID:      freshPartitions.ID(),
-		LastPartitionID:    &lastPartitionID,
-		Props:              props,
-		SortOrderList:      []SortOrder{freshSortOrder},
-		DefaultSortOrderID: freshSortOrder.OrderID,
+	reassignedIds, err := reassignIDs(sc, partitions, sortOrder)
+	if err != nil {
+		return nil, err
 	}
 
-	switch formatVersion {
-	case 1:
-		return &metadataV1{
-			commonMetadata: common,
-			Schema:         freshSchema,
-			Partition:      slices.Collect(freshPartitions.Fields()),
-		}, nil
-	case 2:
-		return &metadataV2{commonMetadata: common}, nil
-	default:
-		return nil, fmt.Errorf("invalid format version: %d", formatVersion)
+	builder, err := NewMetadataBuilder()
+	if err != nil {
+		return nil, err
 	}
+
+	_, err = builder.SetFormatVersion(formatVersion)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = builder.SetUUID(tableUuid)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = builder.AddSortOrder(&reassignedIds.sortOrder, true)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = builder.SetDefaultSortOrderID(-1)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = builder.AddSchema(reassignedIds.schema)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = builder.SetCurrentSchemaID(-1)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = builder.AddPartitionSpec(reassignedIds.partitionSpec, true)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = builder.SetLoc(location)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = builder.SetProperties(props)
+	if err != nil {
+		return nil, err
+	}
+
+	return builder.Build()
+}
+
+type ReassignedIds struct {
+	schema        *iceberg.Schema
+	partitionSpec *iceberg.PartitionSpec
+	sortOrder     SortOrder
+}
+
+func reassignIDs(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, sortOrder SortOrder) (*ReassignedIds, error) {
+	previousMapFn := sc.FindColumnName
+	freshSc, err := iceberg.AssignFreshSchemaIDs(sc, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if partitions == nil {
+		partitions = iceberg.UnpartitionedSpec
+	}
+	opts := make([]iceberg.PartitionOption, 0)
+	for f := range partitions.Fields() {
+		var s string
+		var ok bool
+		if s, ok = previousMapFn(f.SourceID); !ok {
+			return nil, fmt.Errorf("field %d not found in schema", f.FieldID)
+		}
+		opts = append(opts, iceberg.AddPartitionFieldByName(s, f.Name, f.Transform, freshSc, nil))
+	}
+	freshPartitions, err := iceberg.NewPartitionSpecOpts(opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	freshSortOrder, err := AssignFreshSortOrderIDs(sortOrder, sc, freshSc)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ReassignedIds{
+		schema:        freshSc,
+		partitionSpec: &freshPartitions,
+		sortOrder:     freshSortOrder,
+	}, nil
 }

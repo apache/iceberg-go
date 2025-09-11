@@ -189,9 +189,11 @@ func (s *SparkIntegrationTestSuite) TestDifferentDataTypes() {
 		iceberg.NestedField{ID: 14, Name: "small_dec", Type: iceberg.DecimalTypeOf(8, 2)},
 		iceberg.NestedField{ID: 15, Name: "med_dec", Type: iceberg.DecimalTypeOf(16, 2)},
 		iceberg.NestedField{ID: 16, Name: "large_dec", Type: iceberg.DecimalTypeOf(24, 2)},
-		iceberg.NestedField{ID: 17, Name: "list", Type: &iceberg.ListType{
-			ElementID: 18,
-			Element:   iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{
+			ID: 17, Name: "list", Type: &iceberg.ListType{
+				ElementID: 18,
+				Element:   iceberg.PrimitiveTypes.Int32,
+			},
 		},
 	)
 

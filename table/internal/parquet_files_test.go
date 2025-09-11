@@ -68,6 +68,7 @@ func constructTestTablePrimitiveTypes(t *testing.T) (*metadata.FileMetaData, tab
                 ]
             }
         ],
+		"last-partition-id": 0,	
 		"last-updated-ms": -1,
         "default-spec-id": 0,
         "partition-specs": [{"spec-id": 0, "fields": []}],

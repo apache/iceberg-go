@@ -553,12 +553,12 @@ func (u *removeSnapshotRefUpdate) Apply(builder *MetadataBuilder) error {
 
 type removeSpecUpdate struct {
 	baseUpdate
-	SpecIds []int64 `json:"spec-ids"`
+	SpecIds []int `json:"spec-ids"`
 }
 
 // NewRemoveSpecUpdate creates a new Update that removes a list of partition specs
 // from the table metadata.
-func NewRemoveSpecUpdate(specIds []int64) *removeSpecUpdate {
+func NewRemoveSpecUpdate(specIds []int) *removeSpecUpdate {
 	return &removeSpecUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateRemoveSpec},
 		SpecIds:    specIds,
@@ -566,7 +566,9 @@ func NewRemoveSpecUpdate(specIds []int64) *removeSpecUpdate {
 }
 
 func (u *removeSpecUpdate) Apply(builder *MetadataBuilder) error {
-	return fmt.Errorf("%w: %s", iceberg.ErrNotImplemented, UpdateRemoveSpec)
+	_, err := builder.RemovePartitionSpecs(u.SpecIds)
+
+	return err
 }
 
 type removeSchemasUpdate struct {
