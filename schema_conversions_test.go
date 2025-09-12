@@ -18,14 +18,60 @@
 package iceberg
 
 import (
+	"fmt"
 	"testing"
 
+	"github.com/apache/iceberg-go/internal"
 	"github.com/hamba/avro/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestPartitionTypeToAvroSchemaNullable(t *testing.T) {
+func partitionTypeToAvroSchemaNonNullable(t *StructType) (avro.Schema, error) {
+	fields := make([]*avro.Field, len(t.FieldList))
+	for i, f := range t.FieldList {
+		var sc avro.Schema
+		switch typ := f.Type.(type) {
+		case Int32Type:
+			sc = internal.IntSchema
+		case Int64Type:
+			sc = internal.LongSchema
+		case Float32Type:
+			sc = internal.FloatSchema
+		case Float64Type:
+			sc = internal.DoubleSchema
+		case StringType:
+			sc = internal.StringSchema
+		case DateType:
+			sc = internal.DateSchema
+		case TimeType:
+			sc = internal.TimeSchema
+		case TimestampType:
+			sc = internal.TimestampSchema
+		case TimestampTzType:
+			sc = internal.TimestampTzSchema
+		case UUIDType:
+			sc = internal.UUIDSchema
+		case BooleanType:
+			sc = internal.BoolSchema
+		case BinaryType:
+			sc = internal.BinarySchema
+		case FixedType:
+			sc = internal.BinarySchema
+		case DecimalType:
+			decimalSchema := internal.DecimalSchema(typ.precision, typ.scale)
+			sc = decimalSchema
+		default:
+			return nil, fmt.Errorf("unsupported partition type: %s", f.Type.String())
+		}
+
+		fields[i], _ = avro.NewField(f.Name, sc, internal.WithFieldID(f.ID))
+	}
+
+	return avro.NewRecordSchema("r102", "", fields)
+}
+
+func TestPartitionTypeToAvroSchemaNullableAndNonNullable(t *testing.T) {
 	partitionType := &StructType{
 		FieldList: []NestedField{
 			{ID: 1, Name: "int32_col", Type: Int32Type{}, Required: false},
@@ -45,10 +91,6 @@ func TestPartitionTypeToAvroSchemaNullable(t *testing.T) {
 		},
 	}
 
-	schema, err := partitionTypeToAvroSchema(partitionType)
-	require.NoError(t, err)
-	require.NotNil(t, schema)
-
 	partitionData := map[string]any{
 		"int32_col":       nil,
 		"int64_col":       nil,
@@ -66,26 +108,42 @@ func TestPartitionTypeToAvroSchemaNullable(t *testing.T) {
 		"decimal_col":     nil,
 	}
 
-	encoded, err := avro.Marshal(schema, partitionData)
-	require.NoError(t, err)
-	require.NotEmpty(t, encoded)
+	t.Run("nullable schema accepts nil", func(t *testing.T) {
+		schemaNullable, err := partitionTypeToAvroSchema(partitionType)
+		require.NoError(t, err)
+		require.NotNil(t, schemaNullable)
 
-	var decoded map[string]any
-	err = avro.Unmarshal(schema, encoded, &decoded)
-	require.NoError(t, err)
+		encoded, err := avro.Marshal(schemaNullable, partitionData)
+		require.NoError(t, err)
+		require.NotEmpty(t, encoded)
 
-	assert.Nil(t, decoded["int32_col"])
-	assert.Nil(t, decoded["int64_col"])
-	assert.Nil(t, decoded["float32_col"])
-	assert.Nil(t, decoded["float64_col"])
-	assert.Nil(t, decoded["string_col"])
-	assert.Nil(t, decoded["date_col"])
-	assert.Nil(t, decoded["time_col"])
-	assert.Nil(t, decoded["timestamp_col"])
-	assert.Nil(t, decoded["timestamptz_col"])
-	assert.Nil(t, decoded["uuid_col"])
-	assert.Nil(t, decoded["bool_col"])
-	assert.Nil(t, decoded["binary_col"])
-	assert.Nil(t, decoded["fixed_col"])
-	assert.Nil(t, decoded["decimal_col"])
+		var decoded map[string]any
+		err = avro.Unmarshal(schemaNullable, encoded, &decoded)
+		require.NoError(t, err)
+
+		assert.Nil(t, decoded["int32_col"])
+		assert.Nil(t, decoded["int64_col"])
+		assert.Nil(t, decoded["float32_col"])
+		assert.Nil(t, decoded["float64_col"])
+		assert.Nil(t, decoded["string_col"])
+		assert.Nil(t, decoded["date_col"])
+		assert.Nil(t, decoded["time_col"])
+		assert.Nil(t, decoded["timestamp_col"])
+		assert.Nil(t, decoded["timestamptz_col"])
+		assert.Nil(t, decoded["uuid_col"])
+		assert.Nil(t, decoded["bool_col"])
+		assert.Nil(t, decoded["binary_col"])
+		assert.Nil(t, decoded["fixed_col"])
+		assert.Nil(t, decoded["decimal_col"])
+	})
+
+	t.Run("non-nullable schema rejects nil", func(t *testing.T) {
+		schemaNonNullable, err := partitionTypeToAvroSchemaNonNullable(partitionType)
+		require.NoError(t, err)
+		require.NotNil(t, schemaNonNullable)
+
+		encoded, err := avro.Marshal(schemaNonNullable, partitionData)
+		require.Error(t, err, "expected marshal to fail when values are nil for non-nullable schema")
+		assert.Empty(t, encoded)
+	})
 }
