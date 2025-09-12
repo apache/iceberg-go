@@ -992,26 +992,6 @@ func (p *partitionFieldStats[T]) update(value any) (err error) {
 	return nil
 }
 
-func extractBytesFromFixed(fixedBytes interface{}) []byte {
-	switch fb := fixedBytes.(type) {
-	case []uint8:
-
-		return fb
-	default:
-		rv := reflect.ValueOf(fixedBytes)
-		if rv.Kind() == reflect.Array && rv.Type().Elem().Kind() == reflect.Uint8 {
-			bytes := make([]byte, rv.Len())
-			for i := 0; i < rv.Len(); i++ {
-				bytes[i] = uint8(rv.Index(i).Uint())
-			}
-
-			return bytes
-		}
-
-		return nil
-	}
-}
-
 func constructPartitionSummaries(spec PartitionSpec, schema *Schema, partitions []map[int]any) ([]FieldSummary, error) {
 	partType := spec.PartitionType(schema)
 	fieldStats := make([]fieldStats, len(partType.FieldList))
@@ -1030,15 +1010,7 @@ func constructPartitionSummaries(spec PartitionSpec, schema *Schema, partitions 
 
 	for _, part := range partitions {
 		for i, field := range partType.FieldList {
-			value := part[field.ID]
-
-			if _, ok := field.Type.(FixedType); ok {
-				if bytes := extractBytesFromFixed(value); bytes != nil {
-					value = bytes
-				}
-			}
-
-			fieldStats[i].update(value)
+			fieldStats[i].update(part[field.ID])
 		}
 	}
 
