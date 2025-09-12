@@ -27,6 +27,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
@@ -1037,51 +1038,6 @@ func constructPartitionSummaries(spec PartitionSpec, schema *Schema, partitions 
 				}
 			}
 
-			if unionMap, ok := value.(map[string]interface{}); ok {
-				switch field.Type.(type) {
-				case DecimalType:
-					decType := field.Type.(DecimalType)
-					if fixedBytes, ok := unionMap["fixed"]; ok {
-						if bytes := extractBytesFromFixed(fixedBytes); bytes != nil {
-							decLit := DecimalLiteral{Scale: decType.Scale()}
-							if err := decLit.UnmarshalBinary(bytes); err == nil {
-								value = decLit.Value()
-							}
-						}
-					}
-				case TimeType:
-					if longVal, ok := unionMap["long.time-micros"]; ok {
-						if microseconds, ok := longVal.(int64); ok {
-							value = Time(microseconds)
-						}
-					}
-				case TimestampType:
-					if longVal, ok := unionMap["long.timestamp-micros"]; ok {
-						if microseconds, ok := longVal.(int64); ok {
-							value = Timestamp(microseconds)
-						}
-					}
-				case TimestampTzType:
-					if longVal, ok := unionMap["long.timestamp-micros"]; ok {
-						if microseconds, ok := longVal.(int64); ok {
-							value = Timestamp(microseconds)
-						}
-					}
-				case DateType:
-					if intVal, ok := unionMap["int.date"]; ok {
-						if days, ok := intVal.(int32); ok {
-							value = Date(days)
-						}
-					}
-				case UUIDType:
-					if uuidVal, ok := unionMap["uuid"]; ok {
-						if uuid, ok := uuidVal.([16]byte); ok {
-							value = UUIDLiteral(uuid)
-						}
-					}
-				}
-			}
-
 			fieldStats[i].update(value)
 		}
 	}
@@ -1276,8 +1232,9 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 		setter.setFieldIDToFixedSizeMap(w.partFieldIDToSize)
 	}
 
+	w.partitions = append(w.partitions, entry.Data.Partition())
 	partitionData := avroPartitionData(entry.Data.Partition(), w.partFieldIDToType, w.partFieldIDToSize)
-	w.partitions = append(w.partitions, partitionData)
+
 	if dataFile, ok := entry.DataFile().(*dataFile); ok {
 		convertedPartitionData := make(map[string]any)
 		for fieldID, convertedValue := range partitionData {
@@ -1768,11 +1725,32 @@ func (d *dataFile) initializeMapData() {
 			d.fieldIDToPartitionData = make(map[int]any, len(d.PartitionData))
 			for k, v := range d.PartitionData {
 				if id, ok := d.fieldNameToID[k]; ok {
-					d.fieldIDToPartitionData[id] = v
+					convertedValue := d.convertAvroValueToIcebergType(v, id)
+					d.fieldIDToPartitionData[id] = convertedValue
 				}
 			}
 		}
 	})
+}
+
+func (d *dataFile) convertAvroValueToIcebergType(v any, fieldID int) any {
+	if t, ok := v.(time.Time); ok {
+		if logicalType, hasLogical := d.fieldIDToLogicalType[fieldID]; hasLogical {
+			switch logicalType {
+			case avro.Date:
+				days := int32(t.Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
+
+				return Date(days)
+			case avro.TimestampMicros:
+				return Timestamp(t.UTC().UnixMicro())
+			}
+		}
+		days := int32(t.Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
+
+		return days
+	}
+
+	return v
 }
 
 func (d *dataFile) setFieldNameToIDMap(m map[string]int) { d.fieldNameToID = m }

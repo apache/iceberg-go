@@ -20,7 +20,6 @@ package iceberg
 import (
 	"fmt"
 	"reflect"
-	"time"
 
 	"github.com/google/uuid"
 )
@@ -493,63 +492,6 @@ func (b *boundRef[T]) eval(st structLike) Optional[T] {
 	case T:
 		return Optional[T]{Valid: true, Val: v}
 	default:
-		if t, ok := v.(time.Time); ok {
-			switch b.field.Type.(type) {
-			case DateType:
-				days := int32(t.Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
-				if converted, ok := any(Date(days)).(T); ok {
-					return Optional[T]{Valid: true, Val: converted}
-				}
-			case TimestampType, TimestampTzType:
-				micros := Timestamp(t.UTC().UnixMicro())
-				if converted, ok := any(micros).(T); ok {
-					return Optional[T]{Valid: true, Val: converted}
-				}
-			case Int32Type:
-				days := int32(t.Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
-				if converted, ok := any(days).(T); ok {
-					return Optional[T]{Valid: true, Val: converted}
-				}
-			}
-		}
-
-		if unionMap, ok := v.(map[string]any); ok {
-			switch b.field.Type.(type) {
-			case DecimalType:
-				if fixedVal, exists := unionMap["fixed"]; exists {
-					if fixedArray := reflect.ValueOf(fixedVal); fixedArray.Kind() == reflect.Array {
-						bytes := make([]byte, fixedArray.Len())
-						for i := range bytes {
-							bytes[i] = fixedArray.Index(i).Interface().(byte)
-						}
-
-						var decimal DecimalLiteral
-						if err := decimal.UnmarshalBinary(bytes); err == nil {
-							if decType, ok := b.field.Type.(DecimalType); ok {
-								result := Decimal{Val: decimal.Val, Scale: decType.Scale()}
-								if converted, ok := any(result).(T); ok {
-									return Optional[T]{Valid: true, Val: converted}
-								}
-							}
-						}
-					}
-				}
-			case UUIDType:
-				if uuidVal, exists := unionMap["uuid"]; exists {
-					if uuidArray := reflect.ValueOf(uuidVal); uuidArray.Kind() == reflect.Array && uuidArray.Len() == 16 {
-						var uuidBytes [16]byte
-						for i := 0; i < 16; i++ {
-							uuidBytes[i] = uuidArray.Index(i).Interface().(byte)
-						}
-						result := uuid.UUID(uuidBytes)
-						if converted, ok := any(result).(T); ok {
-							return Optional[T]{Valid: true, Val: converted}
-						}
-					}
-				}
-			}
-		}
-
 		var z T
 		typ, val := reflect.TypeOf(z), reflect.ValueOf(v)
 		if !val.CanConvert(typ) {
