@@ -195,7 +195,6 @@ func adlsKeyExtractor() KeyExtractor {
 	return func(path string) (string, error) {
 		matches := adlsURIPattern.FindStringSubmatch(path)
 		if len(matches) < 4 {
-			// If it doesn't match Azure pattern, return path as-is
 			return "", fmt.Errorf("invalid ADLS location: %s", path)
 		}
 
