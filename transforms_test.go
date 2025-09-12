@@ -209,6 +209,7 @@ func TestManifestPartitionVals(t *testing.T) {
 				partitionSpec, iceberg.EntryContentData,
 				"1234.parquet", iceberg.ParquetFile,
 				map[int]any{1000: result.Val.Any()},
+				nil, nil,
 				100, 100_000,
 			)
 			require.NoError(t, err)
