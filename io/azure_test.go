@@ -178,7 +178,12 @@ func TestAdlsKeyExtractor(t *testing.T) {
 		{
 			name:        "URI with no path",
 			input:       "abfs://container@account.dfs.core.windows.net",
-			expectedKey: "",
+			shouldError: true,
+		},
+		{
+			name:        "URI with empty path",
+			input:       "abfs://container@account.dfs.core.windows.net/",
+			shouldError: true,
 		},
 		{
 			name:        "invalid ADLS location - invalid scheme",

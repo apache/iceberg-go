@@ -192,14 +192,19 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 
 // adlsKeyExtractor creates a key extractor for Azure schemes using the adlsURIPattern pattern
 func adlsKeyExtractor() KeyExtractor {
-	return func(path string) (string, error) {
-		matches := adlsURIPattern.FindStringSubmatch(path)
+	return func(location string) (string, error) {
+		matches := adlsURIPattern.FindStringSubmatch(location)
 		if len(matches) < 4 {
-			return "", fmt.Errorf("invalid ADLS location: %s", path)
+			return "", fmt.Errorf("invalid ADLS location: %s", location)
 		}
 
 		uriPath := matches[3]
+		key := strings.TrimPrefix(uriPath, "/")
 
-		return strings.TrimPrefix(uriPath, "/"), nil
+		if key == "" {
+			return "", fmt.Errorf("URI path is empty: %s", location)
+		}
+
+		return key, nil
 	}
 }

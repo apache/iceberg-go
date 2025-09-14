@@ -28,6 +28,7 @@ func TestDefaultKeyExtractor(t *testing.T) {
 		name        string
 		input       string
 		expectedKey string
+		shouldError bool
 	}{
 		{
 			name:        "s3 URI with path",
@@ -57,7 +58,7 @@ func TestDefaultKeyExtractor(t *testing.T) {
 		{
 			name:        "URI with empty path",
 			input:       "s3://my-bucket/",
-			expectedKey: "",
+			shouldError: true,
 		},
 	}
 
@@ -65,8 +66,13 @@ func TestDefaultKeyExtractor(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			key, err := extractor(test.input)
-			assert.NoError(t, err, "Unexpected error for input: %s", test.input)
-			assert.Equal(t, test.expectedKey, key, "Key mismatch for input: %s", test.input)
+
+			if test.shouldError {
+				assert.Error(t, err, "Expected error for input: %s", test.input)
+			} else {
+				assert.NoError(t, err, "Unexpected error for input: %s", test.input)
+				assert.Equal(t, test.expectedKey, key, "Key mismatch for input: %s", test.input)
+			}
 		})
 	}
 }

@@ -20,6 +20,7 @@ package io
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"path/filepath"
@@ -83,7 +84,13 @@ func defaultKeyExtractor(bucketName string) KeyExtractor {
 			location = after
 		}
 
-		return strings.TrimPrefix(location, bucketName+"/"), nil
+		key := strings.TrimPrefix(location, bucketName+"/")
+
+		if key == "" {
+			return "", fmt.Errorf("URI path is empty: %s", location)
+		}
+
+		return key, nil
 	}
 }
 
