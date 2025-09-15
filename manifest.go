@@ -1530,7 +1530,7 @@ func avroPartitionData(input map[int]any, logicalTypes map[int]avro.LogicalType,
 		if logical, ok := logicalTypes[k]; ok {
 			out[k] = convertLogicalTypeValue(v, logical, fixedSizes[k])
 		} else {
-			out[k] = convertDefaultValue(v, fixedSizes[k])
+			out[k] = v
 		}
 	}
 
@@ -1616,14 +1616,6 @@ func convertUUIDValue(v any) any {
 
 	if uuidVal, ok := v.(uuid.UUID); ok {
 		return map[string]any{"uuid": [16]byte(uuidVal)}
-	}
-
-	return v
-}
-
-func convertDefaultValue(v any, fixedSize int) any {
-	if bytes, ok := v.([]byte); ok && fixedSize > 0 {
-		return convertToFixedArray(padOrTruncateBytes(bytes, fixedSize), fixedSize)
 	}
 
 	return v

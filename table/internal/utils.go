@@ -24,7 +24,6 @@ import (
 	"errors"
 	"fmt"
 	"iter"
-	"math"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -35,6 +34,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
 	"github.com/hamba/avro/v2"
 	"golang.org/x/sync/errgroup"
 )
@@ -269,7 +269,7 @@ func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.Par
 					fieldIDToLogicalType[field.FieldID] = avro.TimestampMicros
 				case iceberg.DecimalType:
 					fieldIDToLogicalType[field.FieldID] = avro.Decimal
-					byteSize := calculateDecimalByteSize(rt.Precision())
+					byteSize := internal.DecimalRequiredBytes(rt.Precision())
 					fieldIDToFixedSize[field.FieldID] = byteSize
 				case iceberg.FixedType:
 					fieldIDToFixedSize[field.FieldID] = rt.Len()
@@ -314,19 +314,6 @@ func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.Par
 	bldr.SplitOffsets(d.SplitOffsets)
 
 	return bldr.Build()
-}
-
-func calculateDecimalByteSize(precision int) int {
-	if precision <= 0 {
-		return 1
-	}
-	bitsNeeded := float64(precision)*math.Log2(10) + 1
-	bytesNeeded := int(math.Ceil(bitsNeeded / 8))
-	if bytesNeeded < 1 {
-		return 1
-	}
-
-	return bytesNeeded
 }
 
 type MetricModeType string
