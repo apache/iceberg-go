@@ -145,3 +145,63 @@ func TestNewAdlsLocationUriParsing(t *testing.T) {
 		})
 	}
 }
+
+func TestAdlsKeyExtractor(t *testing.T) {
+	extractor := adlsKeyExtractor()
+
+	tests := []struct {
+		name        string
+		input       string
+		expectedKey string
+		shouldError bool
+	}{
+		{
+			name:        "abfs valid URI",
+			input:       "abfs://container@account.dfs.core.windows.net/path/to/file.parquet",
+			expectedKey: "path/to/file.parquet",
+		},
+		{
+			name:        "abfss valid URI",
+			input:       "abfss://container@account.dfs.core.windows.net/path/to/file.parquet",
+			expectedKey: "path/to/file.parquet",
+		},
+		{
+			name:        "wasb valid URI",
+			input:       "wasb://container@account.blob.core.windows.net/path/to/file.parquet",
+			expectedKey: "path/to/file.parquet",
+		},
+		{
+			name:        "wasbs valid URI",
+			input:       "wasbs://container@account.blob.core.windows.net/path/to/file.parquet",
+			expectedKey: "path/to/file.parquet",
+		},
+		{
+			name:        "URI with no path",
+			input:       "abfs://container@account.dfs.core.windows.net",
+			shouldError: true,
+		},
+		{
+			name:        "URI with empty path",
+			input:       "abfs://container@account.dfs.core.windows.net/",
+			shouldError: true,
+		},
+		{
+			name:        "invalid ADLS location - invalid scheme",
+			input:       "s3://bucket/path/to/file.parquet",
+			shouldError: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			key, err := extractor(test.input)
+
+			if test.shouldError {
+				assert.Error(t, err, "Expected error for input: %s", test.input)
+			} else {
+				assert.NoError(t, err, "Unexpected error for input: %s", test.input)
+				assert.Equal(t, test.expectedKey, key, "Key mismatch for input: %s", test.input)
+			}
+		})
+	}
+}

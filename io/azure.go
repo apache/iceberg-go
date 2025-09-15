@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
@@ -30,6 +31,10 @@ import (
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/azureblob"
 )
+
+// adlsURIPattern is taken from the Java implementation:
+// https://github.com/apache/iceberg/blob/2114bf631e49af532d66e2ce148ee49dd1dd1f1f/azure/src/main/java/org/apache/iceberg/azure/adlsv2/ADLSLocation.java#L47
+var adlsURIPattern = regexp.MustCompile(`^(abfss?|wasbs?)://([^/?#]+)(.*)?$`)
 
 // Constants for Azure configuration options
 const (
@@ -183,4 +188,23 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 	}
 
 	return azureblob.OpenBucket(ctx, client, nil)
+}
+
+// adlsKeyExtractor creates a key extractor for Azure schemes using the adlsURIPattern pattern
+func adlsKeyExtractor() KeyExtractor {
+	return func(location string) (string, error) {
+		matches := adlsURIPattern.FindStringSubmatch(location)
+		if len(matches) < 4 {
+			return "", fmt.Errorf("invalid ADLS location: %s", location)
+		}
+
+		uriPath := matches[3]
+		key := strings.TrimPrefix(uriPath, "/")
+
+		if key == "" {
+			return "", fmt.Errorf("URI path is empty: %s", location)
+		}
+
+		return key, nil
+	}
 }
