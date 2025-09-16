@@ -22,8 +22,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"gocloud.dev/blob"
-	"gocloud.dev/blob/fileblob"
+	"github.com/DataDog/iceberg-go/go-cloud/blob"
+	"github.com/DataDog/iceberg-go/go-cloud/blob/fileblob"
 )
 
 func ExampleOpenBucket() {

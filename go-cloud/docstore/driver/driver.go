@@ -20,7 +20,7 @@ package driver // import "gocloud.dev/docstore/driver"
 import (
 	"context"
 
-	"gocloud.dev/gcerrors"
+	"github.com/DataDog/iceberg-go/go-cloud/gcerrors"
 )
 
 // A Collection is a set of documents.

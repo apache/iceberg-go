@@ -43,10 +43,10 @@ import (
 	"sync"
 	"time"
 
-	"gocloud.dev/blob"
-	"gocloud.dev/gcerrors"
-	"gocloud.dev/runtimevar"
-	"gocloud.dev/runtimevar/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/blob"
+	"github.com/DataDog/iceberg-go/go-cloud/gcerrors"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar/driver"
 )
 
 func init() {

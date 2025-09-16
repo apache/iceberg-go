@@ -23,8 +23,8 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"gocloud.dev/secrets"
-	"gocloud.dev/secrets/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/secrets"
+	"github.com/DataDog/iceberg-go/go-cloud/secrets/driver"
 )
 
 // Harness descibes the functionality test harnesses must provide to run

@@ -48,10 +48,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/smithy-go"
 	"github.com/google/wire"
-	gcaws "gocloud.dev/aws"
-	"gocloud.dev/gcerrors"
-	"gocloud.dev/runtimevar"
-	"gocloud.dev/runtimevar/driver"
+	gcaws "github.com/DataDog/iceberg-go/go-cloud/aws"
+	"github.com/DataDog/iceberg-go/go-cloud/gcerrors"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar/driver"
 )
 
 func init() {

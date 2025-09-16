@@ -28,10 +28,10 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/catalog"
-	sqlcat "github.com/apache/iceberg-go/catalog/sql"
-	"github.com/apache/iceberg-go/io"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/catalog"
+	sqlcat "github.com/DataDog/iceberg-go/catalog/sql"
+	"github.com/DataDog/iceberg-go/io"
 	"github.com/stretchr/testify/suite"
 	"github.com/uptrace/bun/driver/sqliteshim"
 )

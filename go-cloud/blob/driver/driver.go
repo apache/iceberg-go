@@ -24,7 +24,7 @@ import (
 	"strings"
 	"time"
 
-	"gocloud.dev/gcerrors"
+	"github.com/DataDog/iceberg-go/go-cloud/gcerrors"
 )
 
 // ReaderOptions controls Reader behaviors.

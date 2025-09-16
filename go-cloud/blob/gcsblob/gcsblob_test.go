@@ -30,12 +30,12 @@ import (
 
 	"cloud.google.com/go/storage"
 	"github.com/google/go-cmp/cmp"
-	"gocloud.dev/blob"
-	"gocloud.dev/blob/driver"
-	"gocloud.dev/blob/drivertest"
-	"gocloud.dev/gcerrors"
-	"gocloud.dev/gcp"
-	"gocloud.dev/internal/testing/setup"
+	"github.com/DataDog/iceberg-go/go-cloud/blob"
+	"github.com/DataDog/iceberg-go/go-cloud/blob/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/blob/drivertest"
+	"github.com/DataDog/iceberg-go/go-cloud/gcerrors"
+	"github.com/DataDog/iceberg-go/go-cloud/gcp"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/testing/setup"
 	"google.golang.org/api/googleapi"
 )
 

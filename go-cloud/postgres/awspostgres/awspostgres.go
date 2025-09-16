@@ -39,8 +39,8 @@ import (
 
 	"github.com/XSAM/otelsql"
 	"github.com/lib/pq"
-	"gocloud.dev/aws/rds"
-	"gocloud.dev/postgres"
+	"github.com/DataDog/iceberg-go/go-cloud/aws/rds"
+	"github.com/DataDog/iceberg-go/go-cloud/postgres"
 )
 
 // URLOpener opens RDS PostgreSQL URLs

@@ -21,8 +21,8 @@ import (
 	"log"
 	"os"
 
-	"gocloud.dev/runtimevar"
-	"gocloud.dev/runtimevar/constantvar"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar/constantvar"
 )
 
 func ExampleNew() {

@@ -26,13 +26,13 @@ import (
 
 	"github.com/google/subcommands"
 	"github.com/google/uuid"
-	"gocloud.dev/docstore"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore"
 
 	// Import the docstore driver packages we want to be able to open.
-	_ "gocloud.dev/docstore/awsdynamodb"
-	_ "gocloud.dev/docstore/gcpfirestore"
-	_ "gocloud.dev/docstore/memdocstore"
-	_ "gocloud.dev/docstore/mongodocstore"
+	_ "github.com/DataDog/iceberg-go/go-cloud/docstore/awsdynamodb"
+	_ "github.com/DataDog/iceberg-go/go-cloud/docstore/gcpfirestore"
+	_ "github.com/DataDog/iceberg-go/go-cloud/docstore/memdocstore"
+	_ "github.com/DataDog/iceberg-go/go-cloud/docstore/mongodocstore"
 )
 
 const helpSuffix = `

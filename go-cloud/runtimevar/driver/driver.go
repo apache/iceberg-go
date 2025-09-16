@@ -21,7 +21,7 @@ import (
 	"context"
 	"time"
 
-	"gocloud.dev/gcerrors"
+	"github.com/DataDog/iceberg-go/go-cloud/gcerrors"
 )
 
 // DefaultWaitDuration is the default value for WaitDuration.

@@ -24,10 +24,10 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/etcdserver/api/v3rpc/rpctypes"
-	"gocloud.dev/internal/testing/setup"
-	"gocloud.dev/runtimevar"
-	"gocloud.dev/runtimevar/driver"
-	"gocloud.dev/runtimevar/drivertest"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/testing/setup"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar/drivertest"
 )
 
 // To run these tests against a local etcd server, first run ./localetcd.sh.

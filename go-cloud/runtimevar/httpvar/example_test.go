@@ -19,8 +19,8 @@ import (
 	"log"
 	"net/http"
 
-	"gocloud.dev/runtimevar"
-	"gocloud.dev/runtimevar/httpvar"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar/httpvar"
 )
 
 func ExampleOpenVariable() {

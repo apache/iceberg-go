@@ -23,9 +23,9 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"gocloud.dev/docstore"
-	"gocloud.dev/docstore/driver"
-	"gocloud.dev/docstore/drivertest"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore/drivertest"
 )
 
 type harness struct{}

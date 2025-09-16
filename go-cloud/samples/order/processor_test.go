@@ -23,9 +23,9 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"gocloud.dev/blob"
-	"gocloud.dev/pubsub"
-	_ "gocloud.dev/pubsub/mempubsub"
+	"github.com/DataDog/iceberg-go/go-cloud/blob"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub"
+	_ "github.com/DataDog/iceberg-go/go-cloud/pubsub/mempubsub"
 )
 
 func TestHandleRequest(t *testing.T) {

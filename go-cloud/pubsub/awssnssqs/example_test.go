@@ -21,8 +21,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
-	"gocloud.dev/pubsub"
-	"gocloud.dev/pubsub/awssnssqs"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub/awssnssqs"
 )
 
 func ExampleOpenSNSTopic() {

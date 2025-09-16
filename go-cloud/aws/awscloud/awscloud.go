@@ -19,14 +19,14 @@ import (
 	"net/http"
 
 	"github.com/google/wire"
-	"gocloud.dev/aws"
-	"gocloud.dev/aws/rds"
-	"gocloud.dev/blob/s3blob"
-	"gocloud.dev/docstore/awsdynamodb"
-	"gocloud.dev/pubsub/awssnssqs"
-	"gocloud.dev/runtimevar/awsparamstore"
-	"gocloud.dev/secrets/awskms"
-	"gocloud.dev/server/xrayserver"
+	"github.com/DataDog/iceberg-go/go-cloud/aws"
+	"github.com/DataDog/iceberg-go/go-cloud/aws/rds"
+	"github.com/DataDog/iceberg-go/go-cloud/blob/s3blob"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore/awsdynamodb"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub/awssnssqs"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar/awsparamstore"
+	"github.com/DataDog/iceberg-go/go-cloud/secrets/awskms"
+	"github.com/DataDog/iceberg-go/go-cloud/server/xrayserver"
 )
 
 // AWS is a Wire provider set that includes all Amazon Web Services interface

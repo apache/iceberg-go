@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"gocloud.dev/docstore/drivertest"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore/drivertest"
 )
 
 type aStruct struct {

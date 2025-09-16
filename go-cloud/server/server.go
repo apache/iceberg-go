@@ -29,9 +29,9 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
-	"gocloud.dev/server/driver"
-	"gocloud.dev/server/health"
-	"gocloud.dev/server/requestlog"
+	"github.com/DataDog/iceberg-go/go-cloud/server/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/server/health"
+	"github.com/DataDog/iceberg-go/go-cloud/server/requestlog"
 )
 
 // Set is a Wire provider set that produces a *Server given the fields of

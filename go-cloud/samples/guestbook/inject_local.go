@@ -23,12 +23,12 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/google/wire"
-	"gocloud.dev/blob"
-	"gocloud.dev/blob/fileblob"
-	"gocloud.dev/runtimevar"
-	"gocloud.dev/runtimevar/filevar"
-	"gocloud.dev/server"
-	"gocloud.dev/server/requestlog"
+	"github.com/DataDog/iceberg-go/go-cloud/blob"
+	"github.com/DataDog/iceberg-go/go-cloud/blob/fileblob"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar/filevar"
+	"github.com/DataDog/iceberg-go/go-cloud/server"
+	"github.com/DataDog/iceberg-go/go-cloud/server/requestlog"
 )
 
 // This file wires the generic interfaces up to local implementations. It won't

@@ -70,10 +70,10 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	servicebus "github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
 	"github.com/Azure/go-amqp"
-	"gocloud.dev/gcerrors"
-	"gocloud.dev/pubsub"
-	"gocloud.dev/pubsub/batcher"
-	"gocloud.dev/pubsub/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/gcerrors"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub/batcher"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub/driver"
 )
 
 const (

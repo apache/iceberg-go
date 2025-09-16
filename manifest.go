@@ -29,8 +29,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apache/iceberg-go/internal"
-	iceio "github.com/apache/iceberg-go/io"
+	"github.com/DataDog/iceberg-go/internal"
+	iceio "github.com/DataDog/iceberg-go/io"
 	"github.com/google/uuid"
 
 	"github.com/hamba/avro/v2"

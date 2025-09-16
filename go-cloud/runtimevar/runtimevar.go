@@ -45,12 +45,12 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/metric"
-	"gocloud.dev/internal/gcerr"
-	"gocloud.dev/internal/openurl"
-	"gocloud.dev/runtimevar/driver"
-	"gocloud.dev/secrets"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/gcerr"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/openurl"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/secrets"
 
-	gcdkotel "gocloud.dev/internal/otel"
+	gcdkotel "github.com/DataDog/iceberg-go/go-cloud/internal/otel"
 )
 
 // Snapshot contains a snapshot of a variable's value and metadata about it.

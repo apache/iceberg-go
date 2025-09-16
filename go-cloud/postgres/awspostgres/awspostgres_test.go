@@ -19,8 +19,8 @@ import (
 	"fmt"
 	"testing"
 
-	"gocloud.dev/internal/testing/terraform"
-	"gocloud.dev/postgres"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/testing/terraform"
+	"github.com/DataDog/iceberg-go/go-cloud/postgres"
 )
 
 func TestURLOpener(t *testing.T) {

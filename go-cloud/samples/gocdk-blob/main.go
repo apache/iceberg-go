@@ -25,13 +25,13 @@ import (
 	"os"
 
 	"github.com/google/subcommands"
-	"gocloud.dev/blob"
+	"github.com/DataDog/iceberg-go/go-cloud/blob"
 
 	// Import the blob driver packages we want to be able to open.
-	_ "gocloud.dev/blob/azureblob"
-	_ "gocloud.dev/blob/fileblob"
-	_ "gocloud.dev/blob/gcsblob"
-	_ "gocloud.dev/blob/s3blob"
+	_ "github.com/DataDog/iceberg-go/go-cloud/blob/azureblob"
+	_ "github.com/DataDog/iceberg-go/go-cloud/blob/fileblob"
+	_ "github.com/DataDog/iceberg-go/go-cloud/blob/gcsblob"
+	_ "github.com/DataDog/iceberg-go/go-cloud/blob/s3blob"
 )
 
 const helpSuffix = `

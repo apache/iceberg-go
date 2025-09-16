@@ -25,10 +25,10 @@ import (
 	"sync"
 	"time"
 
-	"gocloud.dev/server"
+	"github.com/DataDog/iceberg-go/go-cloud/server"
 
-	"gocloud.dev/server/health"
-	"gocloud.dev/server/requestlog"
+	"github.com/DataDog/iceberg-go/go-cloud/server/health"
+	"github.com/DataDog/iceberg-go/go-cloud/server/requestlog"
 )
 
 func ExampleServer() {

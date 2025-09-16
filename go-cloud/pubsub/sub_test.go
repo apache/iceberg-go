@@ -17,8 +17,8 @@ import (
 	"context"
 	"testing"
 
-	"gocloud.dev/pubsub"
-	"gocloud.dev/pubsub/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub/driver"
 )
 
 // scriptedSub returns batches of messages in a predefined order from

@@ -18,8 +18,8 @@ import (
 	"context"
 	"log"
 
-	"gocloud.dev/secrets"
-	"gocloud.dev/secrets/localsecrets"
+	"github.com/DataDog/iceberg-go/go-cloud/secrets"
+	"github.com/DataDog/iceberg-go/go-cloud/secrets/localsecrets"
 )
 
 func ExampleNewKeeper() {

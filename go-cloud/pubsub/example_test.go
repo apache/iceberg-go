@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"log"
 
-	"gocloud.dev/pubsub"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub"
 
 	pbraw "cloud.google.com/go/pubsub/apiv1"
 	pbapi "cloud.google.com/go/pubsub/apiv1/pubsubpb"

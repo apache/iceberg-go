@@ -21,8 +21,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/table/substrait"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/table/substrait"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/substrait-io/substrait-go/v4/types"

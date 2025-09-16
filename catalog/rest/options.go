@@ -22,7 +22,7 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/apache/iceberg-go"
+	"github.com/DataDog/iceberg-go"
 	"github.com/aws/aws-sdk-go-v2/aws"
 )
 

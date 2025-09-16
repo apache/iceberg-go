@@ -25,14 +25,14 @@ import (
 	"os"
 
 	"github.com/google/subcommands"
-	"gocloud.dev/secrets"
+	"github.com/DataDog/iceberg-go/go-cloud/secrets"
 
 	// Import the secrets driver packages we want to be able to open.
-	_ "gocloud.dev/secrets/awskms"
-	_ "gocloud.dev/secrets/azurekeyvault"
-	_ "gocloud.dev/secrets/gcpkms"
-	_ "gocloud.dev/secrets/hashivault"
-	_ "gocloud.dev/secrets/localsecrets"
+	_ "github.com/DataDog/iceberg-go/go-cloud/secrets/awskms"
+	_ "github.com/DataDog/iceberg-go/go-cloud/secrets/azurekeyvault"
+	_ "github.com/DataDog/iceberg-go/go-cloud/secrets/gcpkms"
+	_ "github.com/DataDog/iceberg-go/go-cloud/secrets/hashivault"
+	_ "github.com/DataDog/iceberg-go/go-cloud/secrets/localsecrets"
 )
 
 const helpSuffix = `

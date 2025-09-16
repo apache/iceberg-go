@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"gocloud.dev/docstore"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore"
 )
 
 func TestOrderForm(t *testing.T) {

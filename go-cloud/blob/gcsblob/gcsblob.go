@@ -80,13 +80,13 @@ import (
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 
-	"gocloud.dev/blob"
-	"gocloud.dev/blob/driver"
-	"gocloud.dev/gcerrors"
-	"gocloud.dev/gcp"
-	"gocloud.dev/internal/escape"
-	"gocloud.dev/internal/gcerr"
-	"gocloud.dev/internal/useragent"
+	"github.com/DataDog/iceberg-go/go-cloud/blob"
+	"github.com/DataDog/iceberg-go/go-cloud/blob/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/gcerrors"
+	"github.com/DataDog/iceberg-go/go-cloud/gcp"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/escape"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/gcerr"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/useragent"
 )
 
 const defaultPageSize = 1000

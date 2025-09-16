@@ -20,8 +20,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
-	"gocloud.dev/runtimevar"
-	"gocloud.dev/runtimevar/awsparamstore"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar/awsparamstore"
 )
 
 func ExampleOpenVariable() {

@@ -25,11 +25,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/config"
-	"github.com/apache/iceberg-go/internal"
-	iceio "github.com/apache/iceberg-go/io"
-	tblutils "github.com/apache/iceberg-go/table/internal"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/config"
+	"github.com/DataDog/iceberg-go/internal"
+	iceio "github.com/DataDog/iceberg-go/io"
+	tblutils "github.com/DataDog/iceberg-go/table/internal"
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 )

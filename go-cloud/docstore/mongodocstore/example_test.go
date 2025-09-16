@@ -18,8 +18,8 @@ import (
 	"context"
 	"log"
 
-	"gocloud.dev/docstore"
-	"gocloud.dev/docstore/mongodocstore"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore/mongodocstore"
 )
 
 func ExampleOpenCollection() {

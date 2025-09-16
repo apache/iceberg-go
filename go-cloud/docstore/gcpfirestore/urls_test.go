@@ -18,8 +18,8 @@ import (
 	"context"
 	"testing"
 
-	"gocloud.dev/docstore"
-	"gocloud.dev/internal/testing/setup"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/testing/setup"
 )
 
 func TestOpenCollectionFromURL(t *testing.T) {

@@ -26,8 +26,8 @@ import (
 	"net/url"
 	"strings"
 
-	"gocloud.dev/blob"
-	"gocloud.dev/blob/memblob"
+	"github.com/DataDog/iceberg-go/go-cloud/blob"
+	"github.com/DataDog/iceberg-go/go-cloud/blob/memblob"
 )
 
 // IO is an interface to a hierarchical file system.

@@ -27,10 +27,10 @@ import (
 	"sync"
 	"time"
 
-	"gocloud.dev/gcp"
-	"gocloud.dev/server"
-	"gocloud.dev/server/health"
-	"gocloud.dev/server/sdserver"
+	"github.com/DataDog/iceberg-go/go-cloud/gcp"
+	"github.com/DataDog/iceberg-go/go-cloud/server"
+	"github.com/DataDog/iceberg-go/go-cloud/server/health"
+	"github.com/DataDog/iceberg-go/go-cloud/server/sdserver"
 )
 
 // GlobalMonitoredResource implements monitoredresource.Interface to provide a

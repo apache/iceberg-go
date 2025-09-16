@@ -24,7 +24,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/apache/iceberg-go"
+	"github.com/DataDog/iceberg-go"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

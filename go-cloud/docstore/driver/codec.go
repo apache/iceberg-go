@@ -23,8 +23,8 @@ import (
 	"reflect"
 	"strconv"
 
-	"gocloud.dev/docstore/internal/fields"
-	"gocloud.dev/internal/gcerr"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore/internal/fields"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/gcerr"
 	"google.golang.org/protobuf/proto"
 )
 

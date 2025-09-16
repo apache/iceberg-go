@@ -33,7 +33,7 @@ import (
 	"crypto/md5"
 	"errors"
 	"fmt"
-	"gocloud.dev/internal/gcerr"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/gcerr"
 	"hash"
 	"io"
 	"net/url"
@@ -42,9 +42,9 @@ import (
 	"sync"
 	"time"
 
-	"gocloud.dev/blob"
-	"gocloud.dev/blob/driver"
-	"gocloud.dev/gcerrors"
+	"github.com/DataDog/iceberg-go/go-cloud/blob"
+	"github.com/DataDog/iceberg-go/go-cloud/blob/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/gcerrors"
 )
 
 const defaultPageSize = 1000

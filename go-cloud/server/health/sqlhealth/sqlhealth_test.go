@@ -22,7 +22,7 @@ import (
 	"sync"
 	"testing"
 
-	"gocloud.dev/server/health"
+	"github.com/DataDog/iceberg-go/go-cloud/server/health"
 )
 
 var _ = health.Checker((*Checker)(nil))

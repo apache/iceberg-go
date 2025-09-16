@@ -49,10 +49,10 @@ import (
 	"sync"
 	"time"
 
-	"gocloud.dev/gcerrors"
-	"gocloud.dev/pubsub"
-	"gocloud.dev/pubsub/batcher"
-	"gocloud.dev/pubsub/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/gcerrors"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub/batcher"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub/driver"
 )
 
 func init() {

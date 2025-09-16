@@ -18,8 +18,8 @@ import (
 	"context"
 	"log"
 
-	"gocloud.dev/blob"
-	"gocloud.dev/blob/azureblob"
+	"github.com/DataDog/iceberg-go/go-cloud/blob"
+	"github.com/DataDog/iceberg-go/go-cloud/blob/azureblob"
 )
 
 func ExampleOpenBucket() {

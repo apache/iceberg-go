@@ -51,9 +51,9 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"gocloud.dev/gcerrors"
-	"gocloud.dev/runtimevar"
-	"gocloud.dev/runtimevar/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/gcerrors"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar/driver"
 )
 
 func init() {

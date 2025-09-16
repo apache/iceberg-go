@@ -70,10 +70,10 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"gocloud.dev/docstore"
-	"gocloud.dev/docstore/driver"
-	"gocloud.dev/gcerrors"
-	"gocloud.dev/internal/gcerr"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/gcerrors"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/gcerr"
 )
 
 // Dial returns a new mongoDB client that is connected to the server URI.

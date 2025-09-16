@@ -30,7 +30,7 @@ import (
 	"sync"
 	"time"
 
-	iceio "github.com/apache/iceberg-go/io"
+	iceio "github.com/DataDog/iceberg-go/io"
 )
 
 // PrefixMismatchMode defines how to handle cases where candidate files have different

@@ -21,8 +21,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/table"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/table"
 )
 
 func parseProperties(propStr string) (iceberg.Properties, error) {

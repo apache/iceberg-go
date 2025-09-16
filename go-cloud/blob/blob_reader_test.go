@@ -21,7 +21,7 @@ import (
 	"testing"
 	"testing/iotest"
 
-	"gocloud.dev/blob/memblob"
+	"github.com/DataDog/iceberg-go/go-cloud/blob/memblob"
 )
 
 // TestReader verifies that blob.Reader implements io package interfaces correctly.

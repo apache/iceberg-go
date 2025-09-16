@@ -23,10 +23,10 @@ import (
 	"iter"
 
 	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/config"
-	"github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/table/internal"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/config"
+	"github.com/DataDog/iceberg-go/io"
+	"github.com/DataDog/iceberg-go/table/internal"
 	"github.com/google/uuid"
 )
 

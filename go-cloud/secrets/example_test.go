@@ -19,9 +19,9 @@ import (
 	"fmt"
 	"log"
 
-	"gocloud.dev/secrets"
-	_ "gocloud.dev/secrets/gcpkms"
-	"gocloud.dev/secrets/localsecrets"
+	"github.com/DataDog/iceberg-go/go-cloud/secrets"
+	_ "github.com/DataDog/iceberg-go/go-cloud/secrets/gcpkms"
+	"github.com/DataDog/iceberg-go/go-cloud/secrets/localsecrets"
 	"google.golang.org/grpc/status"
 )
 

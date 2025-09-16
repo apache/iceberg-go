@@ -28,9 +28,9 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	dyn "github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/expression"
-	"gocloud.dev/docstore/driver"
-	"gocloud.dev/gcerrors"
-	"gocloud.dev/internal/gcerr"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/gcerrors"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/gcerr"
 )
 
 // TODO: support parallel scans (http://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Scan.html#Scan.ParallelScan)

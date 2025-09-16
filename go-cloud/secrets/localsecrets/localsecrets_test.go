@@ -21,9 +21,9 @@ import (
 	"strings"
 	"testing"
 
-	"gocloud.dev/secrets"
-	"gocloud.dev/secrets/driver"
-	"gocloud.dev/secrets/drivertest"
+	"github.com/DataDog/iceberg-go/go-cloud/secrets"
+	"github.com/DataDog/iceberg-go/go-cloud/secrets/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/secrets/drivertest"
 )
 
 type harness struct{}

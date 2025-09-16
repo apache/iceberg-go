@@ -23,8 +23,8 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"gocloud.dev/blob"
-	"gocloud.dev/blob/memblob"
+	"github.com/DataDog/iceberg-go/go-cloud/blob"
+	"github.com/DataDog/iceberg-go/go-cloud/blob/memblob"
 )
 
 // TestWriteReturnValues verifies that blob.Writer returns the correct n

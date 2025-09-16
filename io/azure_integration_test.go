@@ -26,13 +26,13 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/catalog"
-	sqlcat "github.com/apache/iceberg-go/catalog/sql"
-	"github.com/apache/iceberg-go/io"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/catalog"
+	sqlcat "github.com/DataDog/iceberg-go/catalog/sql"
+	"github.com/DataDog/iceberg-go/io"
 	"github.com/stretchr/testify/suite"
 	"github.com/uptrace/bun/driver/sqliteshim"
-	"gocloud.dev/blob/azureblob"
+	"github.com/DataDog/iceberg-go/go-cloud/blob/azureblob"
 )
 
 const (
@@ -95,10 +95,10 @@ func (s *AzureBlobIOTestSuite) TestAzuriteWarehouseConnectionString() {
 	path := "iceberg-test-azure/test-table-azure"
 	containerName := "warehouse"
 	properties := iceberg.Properties{
-		"uri":                       ":memory:",
-		sqlcat.DriverKey:            sqliteshim.ShimName,
-		sqlcat.DialectKey:           string(sqlcat.SQLite),
-		"type":                      "sql",
+		"uri":             ":memory:",
+		sqlcat.DriverKey:  sqliteshim.ShimName,
+		sqlcat.DialectKey: string(sqlcat.SQLite),
+		"type":            "sql",
 		io.AdlsConnectionStringPrefix + accountName: connectionString,
 	}
 

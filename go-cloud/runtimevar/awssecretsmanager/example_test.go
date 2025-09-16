@@ -20,8 +20,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
-	"gocloud.dev/runtimevar"
-	"gocloud.dev/runtimevar/awssecretsmanager"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar/awssecretsmanager"
 )
 
 func ExampleOpenVariable() {
