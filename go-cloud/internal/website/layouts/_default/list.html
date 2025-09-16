@@ -1,0 +1,14 @@
+{{ define "main" -}}
+<h1>{{ .Title }}</h1>
+{{ partial "page-toc.html" . }}
+{{ partial "header-link.html" .Content }}
+{{ with .Data.Pages.GroupBy "Weight" }}
+<div class="PageList">
+{{- range .}}
+{{- range .Pages.ByTitle}}
+  {{.Render "li"}}
+{{- end }}
+{{- end }}
+</div>
+{{end}}
+{{- end }}

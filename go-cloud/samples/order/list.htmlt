@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <title>Orders - Go CDK Image Conversion Sample</title>
+    <link href="https://fonts.googleapis.com/css?family=Roboto:400,400i,700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" type="text/css" href="/style.css">
+  </head>
+  <body>
+    <header id="PageHeader">
+      <a href="/" class="PageTitle-link"><h1 id="PageTitle">Go CDK Image Conversion Sample</h1></a>
+    </header>
+    <main id="PageContent">
+      <h1>Orders</h1>
+      {{if .}}
+        <table id="OrderList">
+          <thead>
+            <tr>
+              <th scope="col" class="OrderList-heading">ID</th>
+              <th scope="col" class="OrderList-heading">Email</th>
+              <th scope="col" class="OrderList-heading">In</th>
+              <th scope="col" class="OrderList-heading">Out</th>
+              <th scope="col" class="OrderList-heading">Created</th>
+              <th scope="col" class="OrderList-heading">Finished</th>
+              <th scope="col" class="OrderList-heading">Note</th>
+            </tr>
+          </thead>
+          <tbody>
+          {{- range .}}
+            <tr>
+              <td class="OrderList-cell">{{.ID}}</td>
+              <td class="OrderList-cell">{{.Email}}</td>
+              <td class="OrderList-cell">{{.InImage}}</td>
+              <td class="OrderList-cell">{{with .OutImage}}<a href="/show/{{.}}">{{.}}</a>{{end}}</td>
+              <td class="OrderList-cell">{{with .CreateTime}}{{.Format "2006-01-02 03:04 AM"}}{{end}}</td>
+              <td class="OrderList-cell">{{with .FinishTime}}{{.Format "2006-01-02 03:04 AM"}}{{end}}</td>
+              <td class="OrderList-cell">{{.Note}}</td>
+            </tr>
+          {{- end}}
+          </tbody>
+        </table>
+      {{else}}
+          <p>No orders.</p>
+      {{end}}
+    </main>
+  </body>
+</html>
