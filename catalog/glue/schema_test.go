@@ -440,9 +440,9 @@ func TestSchemasToGlueColumns(t *testing.T) {
 	mb, err := table.MetadataBuilderFromBase(metadata)
 	assert.NoError(t, err)
 
-	mb, err = mb.AddSchema(schemas[1])
+	err = mb.AddSchema(schemas[1])
 	assert.NoError(t, err)
-	mb, err = mb.SetCurrentSchemaID(1)
+	err = mb.SetCurrentSchemaID(1)
 	assert.NoError(t, err)
 
 	metadata, err = mb.Build()

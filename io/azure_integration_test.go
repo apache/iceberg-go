@@ -95,10 +95,10 @@ func (s *AzureBlobIOTestSuite) TestAzuriteWarehouseConnectionString() {
 	path := "iceberg-test-azure/test-table-azure"
 	containerName := "warehouse"
 	properties := iceberg.Properties{
-		"uri":                       ":memory:",
-		sqlcat.DriverKey:            sqliteshim.ShimName,
-		sqlcat.DialectKey:           string(sqlcat.SQLite),
-		"type":                      "sql",
+		"uri":             ":memory:",
+		sqlcat.DriverKey:  sqliteshim.ShimName,
+		sqlcat.DialectKey: string(sqlcat.SQLite),
+		"type":            "sql",
 		io.AdlsConnectionStringPrefix + accountName: connectionString,
 	}
 
