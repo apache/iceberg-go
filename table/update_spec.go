@@ -115,7 +115,10 @@ func (us *UpdateSpec) BuildUpdates() ([]Update, []Requirement, error) {
 		}
 	}
 
-	newSpec := us.Apply()
+	newSpec, err := us.Apply()
+	if err != nil {
+		return nil, nil, err
+	}
 	updates := make([]Update, 0)
 	requirements := make([]Requirement, 0)
 
@@ -133,7 +136,7 @@ func (us *UpdateSpec) BuildUpdates() ([]Update, []Requirement, error) {
 	return updates, requirements, nil
 }
 
-func (us *UpdateSpec) Apply() iceberg.PartitionSpec {
+func (us *UpdateSpec) Apply() (iceberg.PartitionSpec, error) {
 	partitionFields := make([]iceberg.PartitionField, 0)
 	partitionNames := make(map[string]bool)
 	spec := us.txn.tbl.Metadata().PartitionSpec()
@@ -147,7 +150,7 @@ func (us *UpdateSpec) Apply() iceberg.PartitionSpec {
 				newField, err = us.addNewField(us.txn.tbl.Schema(), field.SourceID, field.FieldID, field.Name, field.Transform, partitionNames)
 			}
 			if err != nil {
-				return iceberg.PartitionSpec{}
+				return iceberg.PartitionSpec{}, err
 			}
 			partitionFields = append(partitionFields, newField)
 		} else if us.txn.tbl.Metadata().Version() == 1 {
@@ -157,15 +160,22 @@ func (us *UpdateSpec) Apply() iceberg.PartitionSpec {
 				newField, err = us.addNewField(us.txn.tbl.Schema(), field.SourceID, field.FieldID, field.Name, iceberg.VoidTransform{}, partitionNames)
 			}
 			if err != nil {
-				return iceberg.PartitionSpec{}
+				return iceberg.PartitionSpec{}, err
 			}
 			partitionFields = append(partitionFields, newField)
 		}
 	}
 
 	partitionFields = append(partitionFields, us.adds...)
+	opts := make([]iceberg.PartitionOption, len(partitionFields))
+	for i, field := range partitionFields {
+		opts[i] = iceberg.AddPartitionFieldBySourceID(field.SourceID, field.Name, field.Transform, us.txn.tbl.Schema(), &field.FieldID)
+	}
 
-	newSpec := iceberg.NewPartitionSpec(partitionFields...)
+	newSpec, err := iceberg.NewPartitionSpecOpts(opts...)
+	if err != nil {
+		return iceberg.PartitionSpec{}, err
+	}
 	newSpecId := iceberg.InitialPartitionSpecID
 	for _, spec = range us.txn.tbl.Metadata().PartitionSpecs() {
 		if newSpec.CompatibleWith(&spec) {
@@ -177,7 +187,7 @@ func (us *UpdateSpec) Apply() iceberg.PartitionSpec {
 		}
 	}
 
-	return iceberg.NewPartitionSpecID(newSpecId, partitionFields...)
+	return iceberg.NewPartitionSpecID(newSpecId, partitionFields...), nil
 }
 
 func (us *UpdateSpec) Commit() error {
