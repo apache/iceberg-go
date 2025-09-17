@@ -321,6 +321,7 @@ type manifestFile struct {
 	DeletedRowsCount   int64           `avro:"deleted_rows_count"`
 	PartitionList      *[]FieldSummary `avro:"partitions"`
 	Key                []byte          `avro:"key_metadata"`
+	FirstRowId         *int64          `avro:"first_row_id"`
 
 	version int `avro:"-"`
 }
@@ -849,6 +850,14 @@ func (v2writerImpl) prepareEntry(entry *manifestEntry, snapshotID int64) (Manife
 	return entry, nil
 }
 
+type v3writerImpl struct{}
+
+func (v3writerImpl) content() ManifestContent { return ManifestContentData }
+func (v3writerImpl) prepareEntry(entry *manifestEntry, snapshotID int64) (ManifestEntry, error) {
+	// TODO : implement this for v3
+	return entry, fmt.Errorf("%w: manifest list writer for v3", ErrNotImplemented)
+}
+
 type fieldStats interface {
 	toSummary() FieldSummary
 	update(value any) error
@@ -1029,6 +1038,8 @@ func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *S
 		impl = v1writerImpl{}
 	case 2:
 		impl = v2writerImpl{}
+	case 3:
+		impl = v3writerImpl{}
 	default:
 		return nil, fmt.Errorf("unsupported manifest version: %d", version)
 	}
@@ -1203,6 +1214,7 @@ type ManifestListWriter struct {
 	commitSnapshotID int64
 	sequenceNumber   int64
 	writer           *ocf.Encoder
+	nextRowID        *int64
 }
 
 func NewManifestListWriterV1(out io.Writer, snapshotID int64, parentSnapshot *int64) (*ManifestListWriter, error) {
@@ -1244,6 +1256,11 @@ func NewManifestListWriterV2(out io.Writer, snapshotID, sequenceNumber int64, pa
 		"sequence-number":    []byte(strconv.Itoa(int(sequenceNumber))),
 		"parent-snapshot-id": []byte(parentSnapshotStr),
 	})
+}
+
+func NewManifestListWriterV3() (*ManifestListWriter, error) {
+	// TODO: Implement v3 writer
+	return nil, fmt.Errorf("%w: manifest list writer for v3", ErrNotImplemented)
 }
 
 func (m *ManifestListWriter) init(meta map[string][]byte) error {
@@ -1295,13 +1312,22 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 			}
 		}
 
-	case 2:
+	case 2, 3:
 		for _, file := range files {
-			if file.Version() != 2 {
-				return fmt.Errorf("%w: ManifestListWriter only supports version 2 manifest files", ErrInvalidArgument)
+			if file.Version() != m.version {
+				return fmt.Errorf("%w: ManifestListWriter only supports version %d manifest files", ErrInvalidArgument, m.version)
 			}
 
 			wrapped := *(file.(*manifestFile))
+			if m.version == 3 {
+				// Ref: https://github.com/apache/iceberg/blob/ea2071568dc66148b483a82eefedcd2992b435f7/core/src/main/java/org/apache/iceberg/ManifestListWriter.java#L157-L168
+				if wrapped.Content == ManifestContentData && wrapped.FirstRowId == nil {
+					if m.nextRowID != nil {
+						wrapped.FirstRowId = m.nextRowID
+						*m.nextRowID += wrapped.ExistingRowsCount + wrapped.AddedRowsCount
+					}
+				}
+			}
 			if wrapped.SeqNumber == -1 {
 				// if the sequence number is being assigned here,
 				// then the manifest must be created by the current
@@ -1335,7 +1361,7 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 }
 
 // WriteManifestList writes a list of manifest files to an avro file.
-func WriteManifestList(version int, out io.Writer, snapshotID int64, parentSnapshotID, sequenceNumber *int64, files []ManifestFile) error {
+func WriteManifestList(version int, out io.Writer, snapshotID int64, parentSnapshotID, sequenceNumber *int64, firstRowId int64, files []ManifestFile) error {
 	var (
 		writer *ManifestListWriter
 		err    error
@@ -1349,6 +1375,13 @@ func WriteManifestList(version int, out io.Writer, snapshotID int64, parentSnaps
 			return errors.New("sequence number is required for V2 tables")
 		}
 		writer, err = NewManifestListWriterV2(out, snapshotID, *sequenceNumber, parentSnapshotID)
+	case 3:
+		if sequenceNumber == nil {
+			return errors.New("sequence number is required for V3 tables")
+		}
+		// TODO
+		return fmt.Errorf("%w: manifest list writer for v3", ErrNotImplemented)
+		// writer, err = NewManifestListWriterV3()
 	default:
 		return fmt.Errorf("unsupported manifest version: %d", version)
 	}
@@ -1496,24 +1529,28 @@ func avroPartitionData(input map[int]any, logicalTypes map[int]avro.LogicalType)
 }
 
 type dataFile struct {
-	Content          ManifestEntryContent   `avro:"content"`
-	Path             string                 `avro:"file_path"`
-	Format           FileFormat             `avro:"file_format"`
-	PartitionData    map[string]any         `avro:"partition"`
-	RecordCount      int64                  `avro:"record_count"`
-	FileSize         int64                  `avro:"file_size_in_bytes"`
-	BlockSizeInBytes int64                  `avro:"block_size_in_bytes"`
-	ColSizes         *[]colMap[int, int64]  `avro:"column_sizes"`
-	ValCounts        *[]colMap[int, int64]  `avro:"value_counts"`
-	NullCounts       *[]colMap[int, int64]  `avro:"null_value_counts"`
-	NaNCounts        *[]colMap[int, int64]  `avro:"nan_value_counts"`
-	DistinctCounts   *[]colMap[int, int64]  `avro:"distinct_counts"`
-	LowerBounds      *[]colMap[int, []byte] `avro:"lower_bounds"`
-	UpperBounds      *[]colMap[int, []byte] `avro:"upper_bounds"`
-	Key              *[]byte                `avro:"key_metadata"`
-	Splits           *[]int64               `avro:"split_offsets"`
-	EqualityIDs      *[]int                 `avro:"equality_ids"`
-	SortOrder        *int                   `avro:"sort_order_id"`
+	Content                 ManifestEntryContent   `avro:"content"`
+	Path                    string                 `avro:"file_path"`
+	Format                  FileFormat             `avro:"file_format"`
+	PartitionData           map[string]any         `avro:"partition"`
+	RecordCount             int64                  `avro:"record_count"`
+	FileSize                int64                  `avro:"file_size_in_bytes"`
+	BlockSizeInBytes        int64                  `avro:"block_size_in_bytes"`
+	ColSizes                *[]colMap[int, int64]  `avro:"column_sizes"`
+	ValCounts               *[]colMap[int, int64]  `avro:"value_counts"`
+	NullCounts              *[]colMap[int, int64]  `avro:"null_value_counts"`
+	NaNCounts               *[]colMap[int, int64]  `avro:"nan_value_counts"`
+	DistinctCounts          *[]colMap[int, int64]  `avro:"distinct_counts"`
+	LowerBounds             *[]colMap[int, []byte] `avro:"lower_bounds"`
+	UpperBounds             *[]colMap[int, []byte] `avro:"upper_bounds"`
+	Key                     *[]byte                `avro:"key_metadata"`
+	Splits                  *[]int64               `avro:"split_offsets"`
+	EqualityIDs             *[]int                 `avro:"equality_ids"`
+	SortOrder               *int                   `avro:"sort_order_id"`
+	FirstRowIDField         *int64                 `avro:"first_row_id_field"`
+	ReferencedDataFileField *string                `avro:"referenced_data_file"`
+	ContentOffsetField      *int64                 `avro:"content_offset"`
+	ContentSizeInBytesField *int64                 `avro:"content_size_in_bytes"`
 
 	colSizeMap     map[int]int64
 	valCntMap      map[int]int64
@@ -1641,6 +1678,11 @@ func (d *dataFile) EqualityFieldIDs() []int {
 }
 
 func (d *dataFile) SortOrderID() *int { return d.SortOrder }
+
+func (d *dataFile) FirstRowID() *int64          { return d.FirstRowIDField }
+func (d *dataFile) ReferencedDataFile() *string { return d.ReferencedDataFileField }
+func (d *dataFile) ContentSizeInBytes() *int64  { return d.ContentSizeInBytesField }
+func (d *dataFile) ContentOffset() *int64       { return d.ContentOffsetField }
 
 type ManifestEntryBuilder struct {
 	m *manifestEntry
@@ -1909,6 +1951,30 @@ func (b *DataFileBuilder) SortOrderID(id int) *DataFileBuilder {
 	return b
 }
 
+func (b *DataFileBuilder) FirstRowID(id int64) *DataFileBuilder {
+	b.d.FirstRowIDField = &id
+
+	return b
+}
+
+func (b *DataFileBuilder) ReferencedDataFile(path string) *DataFileBuilder {
+	b.d.ReferencedDataFileField = &path
+
+	return b
+}
+
+func (b *DataFileBuilder) ContentOffset(offset int64) *DataFileBuilder {
+	b.d.ContentOffsetField = &offset
+
+	return b
+}
+
+func (b *DataFileBuilder) ContentSizeInBytes(size int64) *DataFileBuilder {
+	b.d.ContentSizeInBytesField = &size
+
+	return b
+}
+
 func (b *DataFileBuilder) Build() DataFile {
 	return b.d
 }
@@ -1976,6 +2042,14 @@ type DataFile interface {
 	// SpecID returns the partition spec id for this data file, inherited
 	// from the manifest that the data file was read from
 	SpecID() int32
+	// FirstRowID returns the first row ID for this data file ( v3+ only )
+	FirstRowID() *int64
+	// ReferencedDataFile returns the location of the data file that deletion vector reference
+	ReferencedDataFile() *string
+	// ContentOffset returns the offset in the file where the content starts ( v3+ only )
+	ContentOffset() *int64
+	// ContentSizeInBytes returns the length of referenced contented stored in the file (v3+ only)
+	ContentSizeInBytes() *int64
 }
 
 // ManifestEntry is an interface for both v1 and v2 manifest entries.
