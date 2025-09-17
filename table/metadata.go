@@ -261,7 +261,7 @@ func (b *MetadataBuilder) currentSnapshot() *Snapshot {
 	return s
 }
 
-func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) (*MetadataBuilder, error) {
+func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) error {
 	newSchemaID := b.reuseOrCreateNewSchemaID(schema)
 
 	if _, err := b.GetSchemaByID(newSchemaID); err == nil {
@@ -270,7 +270,7 @@ func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) (*MetadataBuilder, e
 			b.lastAddedSchemaID = &newSchemaID
 		}
 
-		return b, nil
+		return nil
 	}
 
 	b.lastColumnId = max(b.lastColumnId, schema.HighestFieldID())
@@ -281,15 +281,15 @@ func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) (*MetadataBuilder, e
 	b.updates = append(b.updates, NewAddSchemaUpdate(schema))
 	b.lastAddedSchemaID = &newSchemaID
 
-	return b, nil
+	return nil
 }
 
-func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial bool) (*MetadataBuilder, error) {
+func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial bool) error {
 	newSpecID := b.reuseOrCreateNewPartitionSpecID(*spec)
 
 	freshSpec, err := spec.BindToSchema(b.CurrentSchema(), b.lastPartitionID, &newSpecID, false)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	spec = nil
@@ -299,7 +299,7 @@ func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial 
 			b.lastAddedPartitionID = &newSpecID
 		}
 
-		return b, nil
+		return nil
 	}
 
 	maxFieldID := 0
@@ -309,7 +309,7 @@ func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial 
 		if b.formatVersion <= 1 {
 			expectedID := partitionFieldStartID + fieldCount
 			if f.FieldID != expectedID {
-				return nil, fmt.Errorf("v1 constraint: partition field IDs are not sequential: expected %d, got %d", expectedID, f.FieldID)
+				return fmt.Errorf("v1 constraint: partition field IDs are not sequential: expected %d, got %d", expectedID, f.FieldID)
 			}
 			fieldCount++
 		}
@@ -334,25 +334,25 @@ func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial 
 	b.lastAddedPartitionID = &newSpecID
 	b.updates = append(b.updates, NewAddPartitionSpecUpdate(&freshSpec, initial))
 
-	return b, nil
+	return nil
 }
 
-func (b *MetadataBuilder) AddSnapshot(snapshot *Snapshot) (*MetadataBuilder, error) {
+func (b *MetadataBuilder) AddSnapshot(snapshot *Snapshot) error {
 	if snapshot == nil {
-		return nil, nil
+		return nil
 	}
 
 	if len(b.schemaList) == 0 {
-		return nil, errors.New("can't add snapshot with no added schemas")
+		return errors.New("can't add snapshot with no added schemas")
 	} else if len(b.specs) == 0 {
-		return nil, errors.New("can't add snapshot with no added partition specs")
+		return errors.New("can't add snapshot with no added partition specs")
 	} else if s, _ := b.SnapshotByID(snapshot.SnapshotID); s != nil {
-		return nil, fmt.Errorf("can't add snapshot with id %d, already exists", snapshot.SnapshotID)
+		return fmt.Errorf("can't add snapshot with id %d, already exists", snapshot.SnapshotID)
 	} else if b.formatVersion == 2 &&
 		snapshot.SequenceNumber > 0 &&
 		snapshot.ParentSnapshotID != nil &&
 		snapshot.SequenceNumber <= *b.lastSequenceNumber {
-		return nil, fmt.Errorf("can't add snapshot with sequence number %d, must be > than last sequence number %d",
+		return fmt.Errorf("can't add snapshot with sequence number %d, must be > than last sequence number %d",
 			snapshot.SequenceNumber, b.lastSequenceNumber)
 	}
 
@@ -361,12 +361,12 @@ func (b *MetadataBuilder) AddSnapshot(snapshot *Snapshot) (*MetadataBuilder, err
 	b.lastSequenceNumber = &snapshot.SequenceNumber
 	b.snapshotList = append(b.snapshotList, *snapshot)
 
-	return b, nil
+	return nil
 }
 
-func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64) (*MetadataBuilder, error) {
+func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64) error {
 	if slices.Contains(snapshotIds, *b.currentSnapshotID) {
-		return nil, errors.New("current snapshot cannot be removed")
+		return errors.New("current snapshot cannot be removed")
 	}
 
 	b.snapshotList = slices.DeleteFunc(b.snapshotList, func(e Snapshot) bool {
@@ -377,10 +377,10 @@ func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64) (*MetadataBuilder
 	})
 	b.updates = append(b.updates, NewRemoveSnapshotsUpdate(snapshotIds))
 
-	return b, nil
+	return nil
 }
 
-func (b *MetadataBuilder) AddSortOrder(sortOrder *SortOrder, initial bool) (*MetadataBuilder, error) {
+func (b *MetadataBuilder) AddSortOrder(sortOrder *SortOrder, initial bool) error {
 	var sortOrders []SortOrder
 	if !initial {
 		sortOrders = append(sortOrders, b.sortOrderList...)
@@ -388,19 +388,19 @@ func (b *MetadataBuilder) AddSortOrder(sortOrder *SortOrder, initial bool) (*Met
 
 	for _, s := range sortOrders {
 		if s.OrderID == sortOrder.OrderID {
-			return nil, fmt.Errorf("sort order with id %d already exists", sortOrder.OrderID)
+			return fmt.Errorf("sort order with id %d already exists", sortOrder.OrderID)
 		}
 	}
 
 	b.sortOrderList = append(sortOrders, *sortOrder)
 	b.updates = append(b.updates, NewAddSortOrderUpdate(sortOrder, initial))
 
-	return b, nil
+	return nil
 }
 
-func (b *MetadataBuilder) RemoveProperties(keys []string) (*MetadataBuilder, error) {
+func (b *MetadataBuilder) RemoveProperties(keys []string) error {
 	if len(keys) == 0 {
-		return b, nil
+		return nil
 	}
 
 	b.updates = append(b.updates, NewRemovePropertiesUpdate(keys))
@@ -408,33 +408,33 @@ func (b *MetadataBuilder) RemoveProperties(keys []string) (*MetadataBuilder, err
 		delete(b.props, key)
 	}
 
-	return b, nil
+	return nil
 }
 
-func (b *MetadataBuilder) SetCurrentSchemaID(currentSchemaID int) (*MetadataBuilder, error) {
+func (b *MetadataBuilder) SetCurrentSchemaID(currentSchemaID int) error {
 	if currentSchemaID == -1 {
 		if b.lastAddedSchemaID == nil {
-			return nil, errors.New("can't set current schema to last added schema, no schema has been added")
+			return errors.New("can't set current schema to last added schema, no schema has been added")
 		}
 		currentSchemaID = *b.lastAddedSchemaID
 	}
 
 	if currentSchemaID == b.currentSchemaID {
-		return b, nil
+		return nil
 	}
 
 	_, err := b.GetSchemaByID(currentSchemaID)
 	if err != nil {
-		return nil, fmt.Errorf("can't set current schema to schema with id %d: %w", currentSchemaID, err)
+		return fmt.Errorf("can't set current schema to schema with id %d: %w", currentSchemaID, err)
 	}
 
 	b.updates = append(b.updates, NewSetCurrentSchemaUpdate(currentSchemaID))
 	b.currentSchemaID = currentSchemaID
 
-	return b, nil
+	return nil
 }
 
-func (b *MetadataBuilder) SetDefaultSortOrderID(defaultSortOrderID int) (*MetadataBuilder, error) {
+func (b *MetadataBuilder) SetDefaultSortOrderID(defaultSortOrderID int) error {
 	if defaultSortOrderID == -1 {
 		defaultSortOrderID = maxBy(b.sortOrderList, func(s SortOrder) int {
 			return s.OrderID
@@ -442,41 +442,41 @@ func (b *MetadataBuilder) SetDefaultSortOrderID(defaultSortOrderID int) (*Metada
 		if !slices.ContainsFunc(b.updates, func(u Update) bool {
 			return u.Action() == UpdateAddSortOrder && u.(*addSortOrderUpdate).SortOrder.OrderID == defaultSortOrderID
 		}) {
-			return nil, errors.New("can't set default sort order to last added with no added sort orders")
+			return errors.New("can't set default sort order to last added with no added sort orders")
 		}
 	}
 
 	if defaultSortOrderID == b.defaultSortOrderID {
-		return b, nil
+		return nil
 	}
 
 	if _, err := b.GetSortOrderByID(defaultSortOrderID); err != nil {
-		return nil, fmt.Errorf("can't set default sort order to sort order with id %d: %w", defaultSortOrderID, err)
+		return fmt.Errorf("can't set default sort order to sort order with id %d: %w", defaultSortOrderID, err)
 	}
 
 	b.updates = append(b.updates, NewSetDefaultSortOrderUpdate(defaultSortOrderID))
 	b.defaultSortOrderID = defaultSortOrderID
 
-	return b, nil
+	return nil
 }
 
-func (b *MetadataBuilder) SetDefaultSpecID(defaultSpecID int) (*MetadataBuilder, error) {
+func (b *MetadataBuilder) SetDefaultSpecID(defaultSpecID int) error {
 	lastUsed := false
 	if defaultSpecID == -1 {
 		if b.lastAddedPartitionID != nil {
 			lastUsed = true
 			defaultSpecID = *b.lastAddedPartitionID
 		} else {
-			return nil, errors.New("can't set default spec to last added with no added partition specs")
+			return errors.New("can't set default spec to last added with no added partition specs")
 		}
 	}
 
 	if defaultSpecID == b.defaultSpecID {
-		return b, nil
+		return nil
 	}
 
 	if _, err := b.GetSpecByID(defaultSpecID); err != nil {
-		return nil, fmt.Errorf("can't set default spec to spec with id %d: %w", defaultSpecID, err)
+		return fmt.Errorf("can't set default spec to spec with id %d: %w", defaultSpecID, err)
 	}
 
 	if lastUsed {
@@ -486,43 +486,43 @@ func (b *MetadataBuilder) SetDefaultSpecID(defaultSpecID int) (*MetadataBuilder,
 	}
 	b.defaultSpecID = defaultSpecID
 
-	return b, nil
+	return nil
 }
 
-func (b *MetadataBuilder) SetFormatVersion(formatVersion int) (*MetadataBuilder, error) {
+func (b *MetadataBuilder) SetFormatVersion(formatVersion int) error {
 	if formatVersion < b.formatVersion {
-		return nil, fmt.Errorf("downgrading format version from %d to %d is not allowed",
+		return fmt.Errorf("downgrading format version from %d to %d is not allowed",
 			b.formatVersion, formatVersion)
 	}
 
 	if formatVersion > supportedTableFormatVersion {
-		return nil, fmt.Errorf("unsupported format version %d", formatVersion)
+		return fmt.Errorf("unsupported format version %d", formatVersion)
 	}
 
 	if formatVersion == b.formatVersion {
-		return b, nil
+		return nil
 	}
 
 	b.updates = append(b.updates, NewUpgradeFormatVersionUpdate(formatVersion))
 	b.formatVersion = formatVersion
 
-	return b, nil
+	return nil
 }
 
-func (b *MetadataBuilder) SetLoc(loc string) (*MetadataBuilder, error) {
+func (b *MetadataBuilder) SetLoc(loc string) error {
 	if b.loc == loc {
-		return b, nil
+		return nil
 	}
 
 	b.updates = append(b.updates, NewSetLocationUpdate(loc))
 	b.loc = loc
 
-	return b, nil
+	return nil
 }
 
-func (b *MetadataBuilder) SetProperties(props iceberg.Properties) (*MetadataBuilder, error) {
+func (b *MetadataBuilder) SetProperties(props iceberg.Properties) error {
 	if len(props) == 0 {
-		return b, nil
+		return nil
 	}
 
 	b.updates = append(b.updates, NewSetPropertiesUpdate(props))
@@ -532,7 +532,7 @@ func (b *MetadataBuilder) SetProperties(props iceberg.Properties) (*MetadataBuil
 		maps.Copy(b.props, props)
 	}
 
-	return b, nil
+	return nil
 }
 
 type setSnapshotRefOption func(*SnapshotRef) error
@@ -575,14 +575,14 @@ func (b *MetadataBuilder) SetSnapshotRef(
 	snapshotID int64,
 	refType RefType,
 	options ...setSnapshotRefOption,
-) (*MetadataBuilder, error) {
+) error {
 	ref := SnapshotRef{
 		SnapshotID:      snapshotID,
 		SnapshotRefType: refType,
 	}
 	for _, opt := range options {
 		if err := opt(&ref); err != nil {
-			return nil, fmt.Errorf("invalid snapshot ref option: %w", err)
+			return fmt.Errorf("invalid snapshot ref option: %w", err)
 		}
 	}
 
@@ -599,12 +599,12 @@ func (b *MetadataBuilder) SetSnapshotRef(
 	}
 
 	if existingRef, ok := b.refs[name]; ok && existingRef.Equals(ref) {
-		return b, nil
+		return nil
 	}
 
 	snapshot, err := b.SnapshotByID(snapshotID)
 	if err != nil {
-		return nil, fmt.Errorf("can't set snapshot ref %s to unknown snapshot %d: %w", name, snapshotID, err)
+		return fmt.Errorf("can't set snapshot ref %s to unknown snapshot %d: %w", name, snapshotID, err)
 	}
 
 	isAddedSnapshot := slices.ContainsFunc(b.updates, func(u Update) bool {
@@ -634,12 +634,12 @@ func (b *MetadataBuilder) SetSnapshotRef(
 
 	b.refs[name] = ref
 
-	return b, nil
+	return nil
 }
 
-func (b *MetadataBuilder) RemoveSnapshotRef(name string) (*MetadataBuilder, error) {
+func (b *MetadataBuilder) RemoveSnapshotRef(name string) error {
 	if _, found := b.refs[name]; !found {
-		return nil, fmt.Errorf("snapshot ref not found: %s", name)
+		return fmt.Errorf("snapshot ref not found: %s", name)
 	}
 
 	if name == MainBranch {
@@ -650,18 +650,18 @@ func (b *MetadataBuilder) RemoveSnapshotRef(name string) (*MetadataBuilder, erro
 	delete(b.refs, name)
 	b.updates = append(b.updates, NewRemoveSnapshotRefUpdate(name))
 
-	return b, nil
+	return nil
 }
 
-func (b *MetadataBuilder) SetUUID(uuid uuid.UUID) (*MetadataBuilder, error) {
+func (b *MetadataBuilder) SetUUID(uuid uuid.UUID) error {
 	if b.uuid == uuid {
-		return b, nil
+		return nil
 	}
 
 	b.updates = append(b.updates, NewAssignUUIDUpdate(uuid))
 	b.uuid = uuid
 
-	return b, nil
+	return nil
 }
 
 func (b *MetadataBuilder) SetLastUpdatedMS() *MetadataBuilder {
@@ -846,9 +846,9 @@ func (b *MetadataBuilder) reuseOrCreateNewSchemaID(newSchema *iceberg.Schema) in
 	return newSchemaID
 }
 
-func (b *MetadataBuilder) RemovePartitionSpecs(ints []int) (*MetadataBuilder, error) {
+func (b *MetadataBuilder) RemovePartitionSpecs(ints []int) error {
 	if slices.Contains(ints, b.defaultSpecID) {
-		return nil, fmt.Errorf("can't remove default partition spec with id %d", b.defaultSpecID)
+		return fmt.Errorf("can't remove default partition spec with id %d", b.defaultSpecID)
 	}
 
 	newSpecs := make([]iceberg.PartitionSpec, 0, len(b.specs)-len(ints))
@@ -868,7 +868,7 @@ func (b *MetadataBuilder) RemovePartitionSpecs(ints []int) (*MetadataBuilder, er
 		b.updates = append(b.updates, NewRemoveSpecUpdate(ints))
 	}
 
-	return b, nil
+	return nil
 }
 
 // maxBy returns the maximum value of extract(e) for all e in elems.
@@ -1409,48 +1409,39 @@ func NewMetadataWithUUID(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, 
 		return nil, err
 	}
 
-	_, err = builder.SetFormatVersion(formatVersion)
-	if err != nil {
+	if err = builder.SetFormatVersion(formatVersion); err != nil {
 		return nil, err
 	}
 
-	_, err = builder.SetUUID(tableUuid)
-	if err != nil {
+	if err = builder.SetUUID(tableUuid); err != nil {
 		return nil, err
 	}
 
-	_, err = builder.AddSortOrder(&reassignedIds.sortOrder, true)
-	if err != nil {
+	if err = builder.AddSortOrder(&reassignedIds.sortOrder, true); err != nil {
 		return nil, err
 	}
 
-	_, err = builder.SetDefaultSortOrderID(-1)
-	if err != nil {
+	if err = builder.SetDefaultSortOrderID(-1); err != nil {
 		return nil, err
 	}
 
-	_, err = builder.AddSchema(reassignedIds.schema)
-	if err != nil {
+	if err = builder.AddSchema(reassignedIds.schema); err != nil {
 		return nil, err
 	}
 
-	_, err = builder.SetCurrentSchemaID(-1)
-	if err != nil {
+	if err = builder.SetCurrentSchemaID(-1); err != nil {
 		return nil, err
 	}
 
-	_, err = builder.AddPartitionSpec(reassignedIds.partitionSpec, true)
-	if err != nil {
+	if err = builder.AddPartitionSpec(reassignedIds.partitionSpec, true); err != nil {
 		return nil, err
 	}
 
-	_, err = builder.SetLoc(location)
-	if err != nil {
+	if err = builder.SetLoc(location); err != nil {
 		return nil, err
 	}
 
-	_, err = builder.SetProperties(props)
-	if err != nil {
+	if err = builder.SetProperties(props); err != nil {
 		return nil, err
 	}
 
