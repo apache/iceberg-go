@@ -76,6 +76,15 @@ type CreateTableCfg struct {
 	Properties    iceberg.Properties
 }
 
+func NewCreateTableCfg() CreateTableCfg {
+	return CreateTableCfg{
+		Location:      "",
+		PartitionSpec: nil,
+		SortOrder:     table.UnsortedSortOrder,
+		Properties:    nil,
+	}
+}
+
 // Catalog for iceberg table operations like create, drop, load, list and others.
 type Catalog interface {
 	// CatalogType returns the type of the catalog.

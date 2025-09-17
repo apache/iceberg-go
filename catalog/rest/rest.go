@@ -745,9 +745,13 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, err
 	}
 
-	var cfg catalog.CreateTableCfg
+	cfg := catalog.NewCreateTableCfg()
 	for _, o := range opts {
 		o(&cfg)
+	}
+
+	if cfg.SortOrder.Fields == nil && cfg.SortOrder.OrderID == 0 {
+		cfg.SortOrder = table.UnsortedSortOrder
 	}
 
 	payload := createTableRequest{
