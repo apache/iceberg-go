@@ -120,13 +120,12 @@ latest_go_version() {
     options+=("--header" "Authorization: Bearer ${GITHUB_TOKEN}")
   fi
   curl \
-    "${options[@]}" \
-    https://api.github.com/repos/golang/go/git/matching-refs/tags/go |
-    grep -o '"ref": "refs/tags/go.*"' |
-    tail -n 1 |
-    sed \
-      -e 's,^"ref": "refs/tags/go,,g' \
-      -e 's/"$//g'
+   "${options[@]}" \
+   https://api.github.com/repos/golang/go/git/matching-refs/tags/go |
+  jq -r ' .[] | .ref' |
+  sort -V |
+  tail -1 |
+  sed 's,refs/tags/go,,g'
 }
 
 ensure_go() {
