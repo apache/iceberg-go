@@ -855,7 +855,7 @@ type v3writerImpl struct{}
 func (v3writerImpl) content() ManifestContent { return ManifestContentData }
 func (v3writerImpl) prepareEntry(entry *manifestEntry, snapshotID int64) (ManifestEntry, error) {
 	// TODO : implement this for v3
-	return entry, nil
+	return entry, fmt.Errorf("%w: manifest list writer for v3", ErrNotImplemented)
 }
 
 type fieldStats interface {
@@ -1260,7 +1260,7 @@ func NewManifestListWriterV2(out io.Writer, snapshotID, sequenceNumber int64, pa
 
 func NewManifestListWriterV3() (*ManifestListWriter, error) {
 	// TODO: Implement v3 writer
-	return nil, errors.New("not implemented manifest list writer for v3 yet")
+	return nil, fmt.Errorf("%w: manifest list writer for v3", ErrNotImplemented)
 }
 
 func (m *ManifestListWriter) init(meta map[string][]byte) error {
@@ -1312,13 +1312,22 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 			}
 		}
 
-	case 2:
+	case 2, 3:
 		for _, file := range files {
-			if file.Version() != 2 {
-				return fmt.Errorf("%w: ManifestListWriter only supports version 2 manifest files", ErrInvalidArgument)
+			if file.Version() != m.version {
+				return fmt.Errorf("%w: ManifestListWriter only supports version %d manifest files", ErrInvalidArgument, m.version)
 			}
 
 			wrapped := *(file.(*manifestFile))
+			if m.version == 3 {
+				// Ref: https://github.com/apache/iceberg/blob/ea2071568dc66148b483a82eefedcd2992b435f7/core/src/main/java/org/apache/iceberg/ManifestListWriter.java#L157-L168
+				if wrapped.Content == ManifestContentData && wrapped.FirstRowId == nil {
+					if m.nextRowID != nil {
+						wrapped.FirstRowId = m.nextRowID
+						*m.nextRowID += wrapped.ExistingRowsCount + wrapped.AddedRowsCount
+					}
+				}
+			}
 			if wrapped.SeqNumber == -1 {
 				// if the sequence number is being assigned here,
 				// then the manifest must be created by the current
@@ -1338,40 +1347,6 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 				// if the min sequence number is not determined, then there was no assigned sequence number
 				// for any file written to the wrapped manifest. replace the unassigned sequence number with
 				// the one for this commit
-				wrapped.MinSeqNumber = m.sequenceNumber
-			}
-			if err := m.writer.Encode(wrapped); err != nil {
-				return err
-			}
-		}
-	case 3:
-		for _, file := range files {
-			if file.Version() != 3 {
-				return fmt.Errorf("%w: ManifestListWriter only supports version 3 manifest files", ErrInvalidArgument)
-			}
-			wrapped := *(file.(*manifestFile))
-
-			// Ref: https://github.com/apache/iceberg/blob/ea2071568dc66148b483a82eefedcd2992b435f7/core/src/main/java/org/apache/iceberg/ManifestListWriter.java#L157-L168
-			if wrapped.Content == ManifestContentData && wrapped.FirstRowId == nil {
-				if m.nextRowID != nil {
-					wrapped.FirstRowId = m.nextRowID
-					*m.nextRowID += wrapped.ExistingRowsCount + wrapped.AddedRowsCount
-				}
-			}
-
-			// Ref: https://github.com/apache/iceberg/blob/ea2071568dc66148b483a82eefedcd2992b435f7/core/src/main/java/org/apache/iceberg/V3Metadata.java#L98-L122
-			if wrapped.SeqNumber == -1 {
-				if m.commitSnapshotID != wrapped.AddedSnapshotID {
-					return fmt.Errorf("found unassigned sequence number for a manifest from snapshot %d != %d",
-						m.commitSnapshotID, wrapped.AddedSnapshotID)
-				}
-				wrapped.SeqNumber = m.sequenceNumber
-			}
-
-			if wrapped.MinSeqNumber == -1 {
-				if m.commitSnapshotID != wrapped.AddedSnapshotID {
-					return fmt.Errorf("found unassigned sequence number for a manifest from snapshot: %d", wrapped.AddedSnapshotID)
-				}
 				wrapped.MinSeqNumber = m.sequenceNumber
 			}
 			if err := m.writer.Encode(wrapped); err != nil {
@@ -1405,7 +1380,8 @@ func WriteManifestList(version int, out io.Writer, snapshotID int64, parentSnaps
 			return errors.New("sequence number is required for V3 tables")
 		}
 		// TODO
-		writer, err = NewManifestListWriterV3()
+		return fmt.Errorf("%w: manifest list writer for v3", ErrNotImplemented)
+		// writer, err = NewManifestListWriterV3()
 	default:
 		return fmt.Errorf("unsupported manifest version: %d", version)
 	}
