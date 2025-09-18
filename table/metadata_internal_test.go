@@ -755,7 +755,9 @@ func TestMetadataV2Serialize(t *testing.T) {
 func TestMetadataBuilderSetDefaultSpecIDLastPartition(t *testing.T) {
 	builder, err := NewMetadataBuilder()
 	assert.NoError(t, err)
-
+	schema := schema()
+	assert.NoError(t, builder.AddSchema(&schema))
+	assert.NoError(t, builder.SetCurrentSchemaID(-1))
 	partitionSpec := iceberg.NewPartitionSpecID(0)
 	assert.NoError(t, builder.AddPartitionSpec(&partitionSpec, false))
 
@@ -984,6 +986,48 @@ func TestDefaultPartitionSpec(t *testing.T) {
 	meta.(*metadataV2).Specs = append(meta.(*metadataV2).Specs, spec)
 	partitionSpec := meta.PartitionSpec()
 	require.Equal(t, partitionSpec.ID(), defaultSpecID)
+}
+
+func TestTableMetadataV1SchemasWithoutCurrentId(t *testing.T) {
+	meta, err := getTestTableMetadata("TableMetadataV1SchemasWithoutCurrentId.json")
+	require.NoError(t, err)
+	require.Equal(t, meta.(*metadataV1).Version(), 1)
+	require.Equal(t, meta.TableUUID(), uuid.MustParse("d20125c8-7284-442c-9aea-15fee620737c"))
+	schema := meta.CurrentSchema()
+	require.Equal(t, len(schema.Fields()), 3)
+	require.Equal(t, schema.Fields()[0].Name, "x")
+	require.Equal(t, schema.Fields()[1].Name, "y")
+	require.Equal(t, schema.Fields()[2].Name, "z")
+}
+
+func TestTableMetadataV1NoValidSchema(t *testing.T) {
+	meta, err := getTestTableMetadata("TableMetadataV1NoValidSchema.json")
+	require.ErrorContains(t, err, "invalid metadata: current-schema-id -1 can't be found in any schema")
+	require.Nil(t, meta)
+}
+
+func TestTableMetadataV2SchemaNotFound(t *testing.T) {
+	meta, err := getTestTableMetadata("TableMetadataV2CurrentSchemaNotFound.json")
+	require.ErrorContains(t, err, "invalid metadata: current-schema-id 2 can't be found in any schema")
+	require.Nil(t, meta)
+}
+
+func TestTableMetadataV2MissingSchemas(t *testing.T) {
+	meta, err := getTestTableMetadata("TableMetadataV2MissingSchemas.json")
+	require.ErrorContains(t, err, "invalid metadata: current-schema-id -1 can't be found in any schema")
+	require.Nil(t, meta)
+}
+
+// Java: TestTableMetadata.testParseSchemaIdentifierFields
+func TestParseSchemaIdentifierFields(t *testing.T) {
+	meta, err := getTestTableMetadata("TableMetadataV2Valid.json")
+	require.NoError(t, err)
+	// Verify identifier fields
+	schemas := meta.Schemas()
+	require.Len(t, schemas, 2)
+
+	require.Empty(t, schemas[0].IdentifierFieldIDs)
+	require.Equal(t, []int{1, 2}, schemas[1].IdentifierFieldIDs)
 }
 
 func getTestTableMetadata(fileName string) (Metadata, error) {

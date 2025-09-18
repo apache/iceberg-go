@@ -96,7 +96,7 @@ type PartitionOption func(*PartitionSpec) error
 // Otherwise, the existing spec id will be used.
 // If a field in the spec is incompatible with the schema, an error will be
 // returned.
-func (p *PartitionSpec) BindToSchema(schema *Schema, lastPartitionID *int, newSpecID *int, isUnbound bool) (PartitionSpec, error) {
+func (p *PartitionSpec) BindToSchema(schema *Schema, lastPartitionID *int, newSpecID *int) (PartitionSpec, error) {
 	opts := make([]PartitionOption, 0)
 	if newSpecID != nil {
 		opts = append(opts, WithSpecID(*newSpecID))

@@ -541,18 +541,18 @@ func (u *removeSpecUpdate) Apply(builder *MetadataBuilder) error {
 
 type removeSchemasUpdate struct {
 	baseUpdate
-	SchemaIds []int64 `json:"schema-ids"`
+	SchemaIDs []int `json:"schema-i-ds"`
 }
 
 // NewRemoveSchemasUpdate creates a new Update that removes a list of schemas from
 // the table metadata.
-func NewRemoveSchemasUpdate(schemaIds []int64) *removeSchemasUpdate {
+func NewRemoveSchemasUpdate(schemaIds []int) *removeSchemasUpdate {
 	return &removeSchemasUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateRemoveSchemas},
-		SchemaIds:  schemaIds,
+		SchemaIDs:  schemaIds,
 	}
 }
 
 func (u *removeSchemasUpdate) Apply(builder *MetadataBuilder) error {
-	return fmt.Errorf("%w: %s", iceberg.ErrNotImplemented, UpdateRemoveSchemas)
+	return builder.RemoveSchemas(u.SchemaIDs)
 }

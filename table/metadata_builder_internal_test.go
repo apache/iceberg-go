@@ -71,13 +71,16 @@ func builderWithoutChanges(formatVersion int) MetadataBuilder {
 	if err = builder.SetFormatVersion(formatVersion); err != nil {
 		panic(err)
 	}
-	if err = builder.AddSortOrder(&sortOrder, true); err != nil {
-		panic(err)
-	}
 	if err = builder.AddSchema(&tableSchema); err != nil {
 		panic(err)
 	}
 	if err = builder.SetCurrentSchemaID(-1); err != nil {
+		panic(err)
+	}
+	if err = builder.AddSortOrder(&sortOrder, true); err != nil {
+		panic(err)
+	}
+	if err = builder.SetDefaultSortOrderID(-1); err != nil {
 		panic(err)
 	}
 	if err = builder.AddPartitionSpec(&partitionSpec, true); err != nil {
@@ -329,6 +332,91 @@ func TestCannotAddDuplicateSnapshotID(t *testing.T) {
 	}
 	require.NoError(t, builder.AddSnapshot(&snapshot))
 	require.ErrorContains(t, builder.AddSnapshot(&snapshot), "can't add snapshot with id 2, already exists")
+}
+
+func TestAddIncompatibleCurrentSchemaFails(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	addedSchema := iceberg.NewSchema(1)
+	err := builder.AddSchema(addedSchema)
+	require.NoError(t, err)
+	err = builder.SetCurrentSchemaID(1)
+	require.NoError(t, err)
+	_, err = builder.Build()
+	require.ErrorContains(t, err, "with source id 3 not found in schema")
+}
+
+func TestActiveSchemaCannotBeRemoved(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	// Try to remove the current schema
+	require.ErrorContains(t, builder.RemoveSchemas([]int{0}), "can't remove current schema with id 0")
+}
+
+func TestRemoveSchemas(t *testing.T) {
+	meta, err := getTestTableMetadata("TableMetadataV2Valid.json")
+	require.NoError(t, err)
+	require.Len(t, meta.Schemas(), 2, "expected 2 schemas in the metadata")
+	builder, err := MetadataBuilderFromBase(meta)
+	require.NoError(t, err)
+	err = builder.RemoveSchemas([]int{0})
+	require.NoError(t, err, "expected to remove schema with ID 1")
+	newMeta, err := builder.Build()
+	require.NoError(t, err)
+	require.Len(t, newMeta.Schemas(), 1, "expected 1 schema in the metadata after removal")
+	require.Equal(t, 1, newMeta.CurrentSchema().ID, "expected current schema to be 1")
+	require.Equal(t, 1, newMeta.(*metadataV2).CurrentSchemaID)
+	require.Len(t, builder.updates, 1, "expected one update for schema removal")
+	require.Equal(t, builder.updates[0].Action(), UpdateRemoveSchemas)
+	require.Equal(t, builder.updates[0].(*removeSchemasUpdate).SchemaIDs, []int{0}, "expected schema ID 0 to be removed")
+}
+
+// Java: TestTableMetadata.testUpdateSchema
+func TestUpdateSchema(t *testing.T) {
+	// Test schema updates and evolution
+	schema1 := iceberg.NewSchema(
+		0,
+		iceberg.NestedField{ID: 1, Name: "y", Type: iceberg.PrimitiveTypes.Int64, Required: true, Doc: "comment"},
+	)
+
+	meta, err := NewMetadata(
+		schema1,
+		iceberg.UnpartitionedSpec,
+		UnsortedSortOrder,
+		"s3://bucket/test/location",
+		map[string]string{},
+	)
+	require.NoError(t, err)
+
+	require.Equal(t, 0, meta.CurrentSchema().ID)
+	require.Len(t, meta.Schemas(), 1)
+	require.Equal(t, 1, meta.LastColumnID())
+
+	// Update schema by adding a field
+	schema2 := iceberg.NewSchema(
+		1,
+		iceberg.NestedField{ID: 1, Name: "y", Type: iceberg.PrimitiveTypes.Int64, Required: true, Doc: "comment"},
+		iceberg.NestedField{ID: 2, Name: "x", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+
+	builder, err := MetadataBuilderFromBase(meta)
+	require.NoError(t, err)
+
+	err = builder.AddSchema(schema2)
+	require.NoError(t, err)
+
+	err = builder.SetCurrentSchemaID(-1) // Use last added
+	require.NoError(t, err)
+
+	updatedMeta, err := builder.Build()
+	require.NoError(t, err)
+
+	require.Equal(t, 1, updatedMeta.CurrentSchema().ID)
+	require.Len(t, updatedMeta.Schemas(), 2)
+	require.Equal(t, 2, updatedMeta.LastColumnID())
+
+	// Verify both schemas are preserved
+	schemas := updatedMeta.Schemas()
+	require.True(t, schemas[0].Equals(schema1))
+	require.True(t, schemas[1].Equals(schema2))
 }
 
 func TestRemoveMainSnapshotRef(t *testing.T) {

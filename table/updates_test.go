@@ -19,7 +19,6 @@ package table
 
 import (
 	"encoding/json"
-	"errors"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -217,16 +216,4 @@ func TestUnmarshalUpdates(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestRemoveSchemas(t *testing.T) {
-	var builder *MetadataBuilder
-	removeSchemas := removeSchemasUpdate{
-		SchemaIds: []int64{},
-	}
-	t.Run("remove schemas should fail", func(t *testing.T) {
-		if err := removeSchemas.Apply(builder); !errors.Is(err, iceberg.ErrNotImplemented) {
-			t.Fatalf("Expected unimplemented error, got %v", err)
-		}
-	})
 }
