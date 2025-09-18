@@ -541,7 +541,7 @@ func (u *removeSpecUpdate) Apply(builder *MetadataBuilder) error {
 
 type removeSchemasUpdate struct {
 	baseUpdate
-	SchemaIDs []int `json:"schema-i-ds"`
+	SchemaIDs []int `json:"schema-ids"`
 }
 
 // NewRemoveSchemasUpdate creates a new Update that removes a list of schemas from
