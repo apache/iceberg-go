@@ -286,8 +286,12 @@ func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) error {
 
 func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial bool) error {
 	newSpecID := b.reuseOrCreateNewPartitionSpecID(*spec)
+	curSchema := b.CurrentSchema()
+	if curSchema == nil {
+		return errors.New("can't add sort order with no current schema")
+	}
 
-	freshSpec, err := spec.BindToSchema(b.CurrentSchema(), b.lastPartitionID, &newSpecID, false)
+	freshSpec, err := spec.BindToSchema(curSchema, b.lastPartitionID, &newSpecID)
 	if err != nil {
 		return err
 	}
@@ -381,6 +385,15 @@ func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64) error {
 }
 
 func (b *MetadataBuilder) AddSortOrder(sortOrder *SortOrder, initial bool) error {
+	curSchema := b.CurrentSchema()
+	if curSchema == nil {
+		return errors.New("can't add sort order with no current schema")
+	}
+
+	if err := sortOrder.CheckCompatibility(curSchema); err != nil {
+		return fmt.Errorf("sort order %s is not compatible with current schema: %w", sortOrder, err)
+	}
+
 	var sortOrders []SortOrder
 	if !initial {
 		sortOrders = append(sortOrders, b.sortOrderList...)
@@ -412,7 +425,8 @@ func (b *MetadataBuilder) RemoveProperties(keys []string) error {
 }
 
 func (b *MetadataBuilder) SetCurrentSchemaID(currentSchemaID int) error {
-	if currentSchemaID == -1 {
+	takeLast := currentSchemaID == -1
+	if takeLast {
 		if b.lastAddedSchemaID == nil {
 			return errors.New("can't set current schema to last added schema, no schema has been added")
 		}
@@ -428,7 +442,11 @@ func (b *MetadataBuilder) SetCurrentSchemaID(currentSchemaID int) error {
 		return fmt.Errorf("can't set current schema to schema with id %d: %w", currentSchemaID, err)
 	}
 
-	b.updates = append(b.updates, NewSetCurrentSchemaUpdate(currentSchemaID))
+	if takeLast {
+		b.updates = append(b.updates, NewSetCurrentSchemaUpdate(-1))
+	} else {
+		b.updates = append(b.updates, NewSetCurrentSchemaUpdate(currentSchemaID))
+	}
 	b.currentSchemaID = currentSchemaID
 
 	return nil
@@ -774,6 +792,7 @@ func (b *MetadataBuilder) Build() (Metadata, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	if err := common.validate(); err != nil {
 		return nil, err
 	}
@@ -867,6 +886,35 @@ func (b *MetadataBuilder) RemovePartitionSpecs(ints []int) error {
 	if len(removed) != 0 {
 		b.updates = append(b.updates, NewRemoveSpecUpdate(ints))
 	}
+
+	return nil
+}
+
+func (b *MetadataBuilder) RemoveSchemas(ints []int) error {
+	if len(ints) == 0 {
+		return nil
+	}
+
+	if slices.Contains(ints, b.currentSchemaID) {
+		return fmt.Errorf("can't remove current schema with id %d", b.currentSchemaID)
+	}
+
+	newSchemas := make([]*iceberg.Schema, 0, len(b.schemaList)-len(ints))
+	removed := make([]int, len(ints))
+	for _, schema := range b.schemaList {
+		if slices.Contains(ints, schema.ID) {
+			removed = append(removed, schema.ID)
+
+			continue
+		}
+		newSchemas = append(newSchemas, schema)
+	}
+
+	if len(removed) != 0 {
+		b.updates = append(b.updates, NewRemoveSchemasUpdate(ints))
+	}
+
+	b.schemaList = newSchemas
 
 	return nil
 }
@@ -1162,7 +1210,14 @@ func (c *commonMetadata) checkSortOrders() error {
 
 	for _, o := range c.SortOrderList {
 		if o.OrderID == c.DefaultSortOrderID {
+			if err := o.CheckCompatibility(c.CurrentSchema()); err != nil {
+				return fmt.Errorf("default sort order %d is not compatible with current schema: %w", o.OrderID, err)
+			}
+
 			return nil
+		}
+		if o.OrderID == UnsortedSortOrderID && len(o.Fields) != 0 {
+			return fmt.Errorf("sort order ID %d is reserved for unsorted order", UnsortedSortOrderID)
 		}
 	}
 
@@ -1417,14 +1472,6 @@ func NewMetadataWithUUID(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, 
 		return nil, err
 	}
 
-	if err = builder.AddSortOrder(&reassignedIds.sortOrder, true); err != nil {
-		return nil, err
-	}
-
-	if err = builder.SetDefaultSortOrderID(-1); err != nil {
-		return nil, err
-	}
-
 	if err = builder.AddSchema(reassignedIds.schema); err != nil {
 		return nil, err
 	}
@@ -1433,7 +1480,19 @@ func NewMetadataWithUUID(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, 
 		return nil, err
 	}
 
+	if err = builder.AddSortOrder(&reassignedIds.sortOrder, true); err != nil {
+		return nil, err
+	}
+
+	if err = builder.SetDefaultSortOrderID(-1); err != nil {
+		return nil, err
+	}
+
 	if err = builder.AddPartitionSpec(reassignedIds.partitionSpec, true); err != nil {
+		return nil, err
+	}
+
+	if err = builder.SetDefaultSpecID(-1); err != nil {
 		return nil, err
 	}
 

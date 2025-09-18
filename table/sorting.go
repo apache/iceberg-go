@@ -137,6 +137,38 @@ type SortOrder struct {
 	Fields  []SortField `json:"fields"`
 }
 
+func (s *SortOrder) CheckCompatibility(schema *iceberg.Schema) error {
+	if s == nil {
+		return nil
+	}
+
+	for _, field := range s.Fields {
+		f, ok := schema.FindFieldByID(field.SourceID)
+		if !ok {
+			return fmt.Errorf("sort field with source id %d not found in schema", field.SourceID)
+		}
+
+		if _, ok := f.Type.(iceberg.PrimitiveType); !ok {
+			return fmt.Errorf("cannot sort by non-primitive source field: %s", f.Type.Type())
+		}
+		// TODO: rust has fallible ResultType for invalid transforms, are we ok leaving them out?
+		// 	if field_transform.result_type(source_type).is_err() {
+		//      return Err(Error::new(ErrorKind::Unexpected,
+		//                            format!(
+		//                                "Invalid source type {source_type} for transform {field_transform}"
+		//                            ),
+		//                 ));
+		//  }
+		//  ---------
+		//  typ, err :=field.Transform.ResultType(f.Type)
+		//  if err != nil {
+		//  	return fmt.Errorf("invalid source type %s for transform %s: %w", f.Type.Type(), field.Transform, err)
+		//  }
+	}
+
+	return nil
+}
+
 func (s SortOrder) Equals(rhs SortOrder) bool {
 	return s.OrderID == rhs.OrderID &&
 		slices.Equal(s.Fields, rhs.Fields)
