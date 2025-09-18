@@ -152,7 +152,8 @@ func (s *SortOrder) CheckCompatibility(schema *iceberg.Schema) error {
 			return fmt.Errorf("cannot sort by non-primitive source field: %s", f.Type.Type())
 		}
 
-		if !field.Transform.CanTransform(f.Type) {
+		// FIXME: field.Transform should be made required
+		if field.Transform != nil && !field.Transform.CanTransform(f.Type) {
 			return fmt.Errorf("invalid source type %s for transform %s", f.Type.Type(), field.Transform)
 		}
 	}
