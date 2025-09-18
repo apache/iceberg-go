@@ -899,22 +899,20 @@ func (b *MetadataBuilder) RemoveSchemas(ints []int) error {
 		return fmt.Errorf("can't remove current schema with id %d", b.currentSchemaID)
 	}
 
-	newSchemas := make([]*iceberg.Schema, 0, len(b.schemaList)-len(ints))
 	removed := make([]int, len(ints))
-	for _, schema := range b.schemaList {
-		if slices.Contains(ints, schema.ID) {
-			removed = append(removed, schema.ID)
+	b.schemaList = slices.DeleteFunc(b.schemaList, func(s *iceberg.Schema) bool {
+		if slices.Contains(ints, s.ID) {
+			removed = append(removed, s.ID)
 
-			continue
+			return true
 		}
-		newSchemas = append(newSchemas, schema)
-	}
+
+		return false
+	})
 
 	if len(removed) != 0 {
 		b.updates = append(b.updates, NewRemoveSchemasUpdate(ints))
 	}
-
-	b.schemaList = newSchemas
 
 	return nil
 }

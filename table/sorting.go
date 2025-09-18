@@ -151,19 +151,10 @@ func (s *SortOrder) CheckCompatibility(schema *iceberg.Schema) error {
 		if _, ok := f.Type.(iceberg.PrimitiveType); !ok {
 			return fmt.Errorf("cannot sort by non-primitive source field: %s", f.Type.Type())
 		}
-		// TODO: rust has fallible ResultType for invalid transforms, are we ok leaving them out?
-		// 	if field_transform.result_type(source_type).is_err() {
-		//      return Err(Error::new(ErrorKind::Unexpected,
-		//                            format!(
-		//                                "Invalid source type {source_type} for transform {field_transform}"
-		//                            ),
-		//                 ));
-		//  }
-		//  ---------
-		//  typ, err :=field.Transform.ResultType(f.Type)
-		//  if err != nil {
-		//  	return fmt.Errorf("invalid source type %s for transform %s: %w", f.Type.Type(), field.Transform, err)
-		//  }
+
+		if !field.Transform.CanTransform(f.Type) {
+			return fmt.Errorf("invalid source type %s for transform %s", f.Type.Type(), field.Transform)
+		}
 	}
 
 	return nil
