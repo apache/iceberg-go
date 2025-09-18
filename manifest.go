@@ -23,12 +23,14 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/big"
 	"reflect"
 	"slices"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
@@ -1205,7 +1207,7 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 	}
 
 	w.partitions = append(w.partitions, entry.Data.Partition())
-	partitionData := avroPartitionData(entry.Data.Partition(), w.partFieldIDToType, w.partFieldIDToSize)
+	partitionData := avroPartitionData(entry.Data.Partition(), w.partFieldIDToType)
 
 	if dataFile, ok := entry.DataFile().(*dataFile); ok {
 		convertedPartitionData := make(map[string]any)
@@ -1524,11 +1526,11 @@ func mapToAvroColMap[K comparable, V any](m map[K]V) *[]colMap[K, V] {
 	return &out
 }
 
-func avroPartitionData(input map[int]any, logicalTypes map[int]avro.LogicalType, fixedSizes map[int]int) map[int]any {
+func avroPartitionData(input map[int]any, logicalTypes map[int]avro.LogicalType) map[int]any {
 	out := make(map[int]any)
 	for k, v := range input {
 		if logical, ok := logicalTypes[k]; ok {
-			out[k] = convertLogicalTypeValue(v, logical, fixedSizes[k])
+			out[k] = convertLogicalTypeValue(v, logical)
 		} else {
 			out[k] = v
 		}
@@ -1537,7 +1539,7 @@ func avroPartitionData(input map[int]any, logicalTypes map[int]avro.LogicalType,
 	return out
 }
 
-func convertLogicalTypeValue(v any, logicalType avro.LogicalType, fixedSize int) any {
+func convertLogicalTypeValue(v any, logicalType avro.LogicalType) any {
 	switch logicalType {
 	case avro.Date:
 		return convertDateValue(v)
@@ -1546,7 +1548,7 @@ func convertLogicalTypeValue(v any, logicalType avro.LogicalType, fixedSize int)
 	case avro.TimestampMicros:
 		return convertTimestampMicrosValue(v)
 	case avro.Decimal:
-		return convertDecimalValue(v, fixedSize)
+		return convertDecimalValue(v)
 	case avro.UUID:
 		return convertUUIDValue(v)
 	default:
@@ -1590,23 +1592,23 @@ func convertTimestampMicrosValue(v any) any {
 	return v
 }
 
-func convertDecimalValue(v any, fixedSize int) any {
+func convertDecimalValue(v any) any {
 	if v == nil {
 		return map[string]any{"null": nil}
 	}
 
-	dec, ok := v.(Decimal)
-	if !ok {
-		return v
+	if dec, ok := v.(Decimal); ok {
+		fixedSize := internal.DecimalRequiredBytes(len(dec.String()))
+		bytes, err := DecimalLiteral(dec).MarshalBinary()
+		if err != nil {
+			return v
+		}
+		fixedArray := convertToFixedArray(padOrTruncateBytes(bytes, fixedSize), fixedSize)
+
+		return map[string]any{"fixed": fixedArray}
 	}
 
-	bytes, err := DecimalLiteral(dec).MarshalBinary()
-	if err != nil {
-		return v
-	}
-	fixedArray := convertToFixedArray(padOrTruncateBytes(bytes, fixedSize), fixedSize)
-
-	return map[string]any{"fixed": fixedArray}
+	return v
 }
 
 func convertUUIDValue(v any) any {
@@ -1698,16 +1700,67 @@ func (d *dataFile) initializeMapData() {
 }
 
 func (d *dataFile) convertAvroValueToIcebergType(v any, fieldID int) any {
-	if t, ok := v.(time.Time); ok {
-		if logicalType, hasLogical := d.fieldIDToLogicalType[fieldID]; hasLogical {
-			switch logicalType {
-			case avro.Date:
-				days := int32(t.Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
-
-				return Date(days)
-			case avro.TimestampMicros:
-				return Timestamp(t.UTC().UnixMicro())
+	if logicalType, ok := d.fieldIDToLogicalType[fieldID]; ok {
+		switch logicalType {
+		case avro.Date:
+			if val, ok := v.(time.Time); ok {
+				return Date(val.Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
 			}
+
+			return Date(v.(int32))
+		case avro.TimeMillis:
+			if val, ok := v.(time.Duration); ok {
+				return Time(val.Milliseconds())
+			}
+
+			return Time(v.(int64))
+		case avro.TimeMicros:
+			if val, ok := v.(time.Duration); ok {
+				return Time(val.Microseconds())
+			}
+
+			return Time(v.(int64))
+		case avro.TimestampMillis:
+			if val, ok := v.(time.Time); ok {
+				return Timestamp(val.UTC().UnixMilli())
+			}
+
+			return Timestamp(v.(int64))
+		case avro.TimestampMicros:
+			if val, ok := v.(time.Time); ok {
+				return Timestamp(val.UTC().UnixMicro())
+			}
+
+			return Timestamp(v.(int64))
+		case avro.Decimal:
+			if unionMap, ok := v.(map[string]interface{}); ok {
+				if val, ok := unionMap["fixed"]; ok {
+					if bigRatValue, ok := val.(*big.Rat); ok {
+						scale := d.fieldIDToFixedSize[fieldID]
+						scaleFactor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(scale)), nil)
+						unscaled := new(big.Int).Mul(bigRatValue.Num(), scaleFactor)
+						unscaled = unscaled.Div(unscaled, bigRatValue.Denom())
+						decimal128Val := decimal128.FromBigInt(unscaled)
+
+						return DecimalLiteral{
+							Scale: scale,
+							Val:   decimal128Val,
+						}
+					}
+				}
+			}
+
+			return v
+		case avro.UUID:
+			if unionMap, ok := v.(map[string]interface{}); ok {
+				if val, ok := unionMap["uuid"]; ok {
+					if uuidArr, ok := val.([16]byte); ok {
+						return uuid.UUID(uuidArr)
+					}
+				}
+			}
+
+			return v
 		}
 	}
 
