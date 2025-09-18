@@ -1709,9 +1709,6 @@ func (d *dataFile) convertAvroValueToIcebergType(v any, fieldID int) any {
 				return Timestamp(t.UTC().UnixMicro())
 			}
 		}
-		days := int32(t.Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
-
-		return days
 	}
 
 	return v

@@ -82,7 +82,7 @@ var (
 				Content:          EntryContentEqDeletes,
 				Path:             "/home/iceberg/warehouse/nyc/taxis_partitioned/data/VendorID=null/00000-633-d8a4223e-dc97-45a1-86e1-adaba6e8abd7-00001.parquet",
 				Format:           ParquetFile,
-				PartitionData:    map[string]any{"VendorID": int(1), "tpep_pickup_datetime": time.Unix(1925, 0)},
+				PartitionData:    map[string]any{"VendorID": int(1), "tpep_pickup_datetime": time.Unix(1925, 0).UnixMicro()},
 				RecordCount:      19513,
 				FileSize:         388872,
 				BlockSizeInBytes: 67108864,
@@ -201,7 +201,7 @@ var (
 			Data: &dataFile{
 				Path:             "/home/iceberg/warehouse/nyc/taxis_partitioned/data/VendorID=1/00000-633-d8a4223e-dc97-45a1-86e1-adaba6e8abd7-00002.parquet",
 				Format:           ParquetFile,
-				PartitionData:    map[string]any{"VendorID": int(1), "tpep_pickup_datetime": time.Unix(1925, 0)},
+				PartitionData:    map[string]any{"VendorID": int(1), "tpep_pickup_datetime": time.Unix(1925, 0).UnixMicro()},
 				RecordCount:      95050,
 				FileSize:         1265950,
 				BlockSizeInBytes: 67108864,
