@@ -197,6 +197,18 @@ func NewSortOrder(orderID int, fields []SortField) (SortOrder, error) {
 		fields = []SortField{}
 	}
 
+	for idx, field := range fields {
+		if field.Transform == nil {
+			return SortOrder{}, fmt.Errorf("sort field at index %d has no transform", idx)
+		}
+		if field.Direction != SortASC && field.Direction != SortDESC {
+			return SortOrder{}, ErrInvalidSortDirection
+		}
+		if field.NullOrder != NullsFirst && field.NullOrder != NullsLast {
+			return SortOrder{}, ErrInvalidNullOrder
+		}
+	}
+
 	return SortOrder{orderID, fields}, nil
 }
 

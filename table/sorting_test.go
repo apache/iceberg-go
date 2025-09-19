@@ -27,15 +27,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var sortOrder, _ = table.NewSortOrder(
-	22,
-	[]table.SortField{
-		{SourceID: 19, Transform: iceberg.IdentityTransform{}, NullOrder: table.NullsFirst},
-		{SourceID: 25, Transform: iceberg.BucketTransform{NumBuckets: 4}, Direction: table.SortDESC},
-		{SourceID: 22, Transform: iceberg.VoidTransform{}, Direction: table.SortASC},
-	},
-)
-
 func TestSerializeUnsortedSortOrder(t *testing.T) {
 	data, err := json.Marshal(table.UnsortedSortOrder)
 	require.NoError(t, err)
@@ -43,6 +34,15 @@ func TestSerializeUnsortedSortOrder(t *testing.T) {
 }
 
 func TestSerializeSortOrder(t *testing.T) {
+	sortOrder, err := table.NewSortOrder(
+		22,
+		[]table.SortField{
+			{SourceID: 19, Transform: iceberg.IdentityTransform{}, NullOrder: table.NullsFirst, Direction: table.SortASC},
+			{SourceID: 25, Transform: iceberg.BucketTransform{NumBuckets: 4}, NullOrder: table.NullsLast, Direction: table.SortDESC},
+			{SourceID: 22, Transform: iceberg.VoidTransform{}, NullOrder: table.NullsFirst, Direction: table.SortASC},
+		},
+	)
+	require.NoError(t, err)
 	data, err := json.Marshal(sortOrder)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{

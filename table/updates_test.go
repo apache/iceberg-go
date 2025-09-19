@@ -41,9 +41,9 @@ func TestUnmarshalUpdates(t *testing.T) {
 	sortOrder, err := NewSortOrder(
 		22,
 		[]SortField{
-			{SourceID: 19, Transform: iceberg.IdentityTransform{}, NullOrder: NullsFirst},
-			{SourceID: 25, Transform: iceberg.BucketTransform{NumBuckets: 4}, Direction: SortDESC},
-			{SourceID: 22, Transform: iceberg.VoidTransform{}, Direction: SortASC},
+			{SourceID: 19, Transform: iceberg.IdentityTransform{}, NullOrder: NullsFirst, Direction: SortASC},
+			{SourceID: 25, Transform: iceberg.BucketTransform{NumBuckets: 4}, NullOrder: NullsFirst, Direction: SortDESC},
+			{SourceID: 22, Transform: iceberg.VoidTransform{}, NullOrder: NullsFirst, Direction: SortASC},
 		},
 	)
 	require.NoError(t, err)

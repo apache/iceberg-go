@@ -411,7 +411,7 @@ func (s *SqliteCatalogTestSuite) TestCreateTableCustomSortOrder() {
 		s.Require().NoError(tt.cat.CreateNamespace(context.Background(), ns, nil))
 
 		order, err := table.NewSortOrder(0, []table.SortField{
-			{SourceID: 2, Transform: iceberg.IdentityTransform{}, NullOrder: table.NullsFirst},
+			{SourceID: 2, Transform: iceberg.IdentityTransform{}, NullOrder: table.NullsFirst, Direction: table.SortASC},
 		})
 		s.Require().NoError(err)
 		tbl, err := tt.cat.CreateTable(context.Background(), tt.tblID, tableSchemaNested,

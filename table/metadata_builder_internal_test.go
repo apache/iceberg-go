@@ -44,6 +44,7 @@ func sortOrder() SortOrder {
 				SourceID:  3,
 				Direction: SortDESC,
 				NullOrder: NullsFirst,
+				Transform: iceberg.BucketTransform{NumBuckets: 4},
 			},
 		},
 	)
