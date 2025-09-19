@@ -85,3 +85,28 @@ const (
 	MaxRefAgeMsKey     = "max-ref-age-ms"
 	MaxRefAgeMsDefault = math.MaxInt
 )
+
+// Reserved properties
+const (
+	PropertyFormatVersion            = "format-version"
+	PropertyUuid                     = "uuid"
+	PropertySnapshotCount            = "snapshot-count"
+	PropertyCurrentSnapshotId        = "current-snapshot-id"
+	PropertyCurrentSnapshotSummary   = "current-snapshot-summary"
+	PropertyCurrentSnapshotTimestamp = "current-snapshot-timestamp"
+	PropertyCurrentSchema            = "current-schema"
+	PropertyDefaultPartitionSpec     = "default-partition-spec"
+	PropertyDefaultSortOrder         = "default-sort-order"
+)
+
+var ReservedProperties = [9]string{
+	PropertyFormatVersion,
+	PropertyUuid,
+	PropertySnapshotCount,
+	PropertyCurrentSnapshotId,
+	PropertyCurrentSnapshotSummary,
+	PropertyCurrentSnapshotTimestamp,
+	PropertyCurrentSchema,
+	PropertyDefaultPartitionSpec,
+	PropertyDefaultSortOrder,
+}

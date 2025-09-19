@@ -386,7 +386,7 @@ func (s *SqliteCatalogTestSuite) TestCreateV1Table() {
 		ns := catalog.NamespaceFromIdent(tt.tblID)
 		s.Require().NoError(tt.cat.CreateNamespace(context.Background(), ns, nil))
 		tbl, err := tt.cat.CreateTable(context.Background(), tt.tblID, tableSchemaNested,
-			catalog.WithProperties(iceberg.Properties{"format-version": "1"}))
+			catalog.WithProperties(iceberg.Properties{table.PropertyFormatVersion: "1"}))
 		s.Require().NoError(err)
 
 		s.FileExists(strings.TrimPrefix(tbl.MetadataLocation(), "file://"))
@@ -441,7 +441,7 @@ func (s *SqliteCatalogTestSuite) TestCreateDuplicatedTable() {
 		ns := catalog.NamespaceFromIdent(tt.tblID)
 		s.Require().NoError(tt.cat.CreateNamespace(context.Background(), ns, nil))
 		_, err := tt.cat.CreateTable(context.Background(), tt.tblID, tableSchemaNested,
-			catalog.WithProperties(iceberg.Properties{"format-version": "1"}))
+			catalog.WithProperties(iceberg.Properties{table.PropertyFormatVersion: "1"}))
 		s.Require().NoError(err)
 
 		_, err = tt.cat.CreateTable(context.Background(), tt.tblID, tableSchemaNested)
