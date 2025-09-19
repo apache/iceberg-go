@@ -560,7 +560,7 @@ func TestNewMetadataWithExplicitV1Format(t *testing.T) {
 		}},
 	}
 
-	actual, err := NewMetadata(schema, &partitionSpec, sortOrder, "s3://some_v1_location/", iceberg.Properties{"format-version": "1"})
+	actual, err := NewMetadata(schema, &partitionSpec, sortOrder, "s3://some_v1_location/", iceberg.Properties{PropertyFormatVersion: "1"})
 	require.NoError(t, err)
 
 	expectedSchema := iceberg.NewSchemaWithIdentifiers(0, []int{2},

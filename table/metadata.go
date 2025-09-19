@@ -415,7 +415,11 @@ func (b *MetadataBuilder) RemoveProperties(keys []string) error {
 	if len(keys) == 0 {
 		return nil
 	}
-
+	for _, reserved := range ReservedProperties {
+		if slices.Contains(keys, reserved) {
+			return fmt.Errorf("can't remove reserved property %s", reserved)
+		}
+	}
 	b.updates = append(b.updates, NewRemovePropertiesUpdate(keys))
 	for _, key := range keys {
 		delete(b.props, key)
@@ -541,6 +545,12 @@ func (b *MetadataBuilder) SetLoc(loc string) error {
 func (b *MetadataBuilder) SetProperties(props iceberg.Properties) error {
 	if len(props) == 0 {
 		return nil
+	}
+
+	for _, key := range ReservedProperties {
+		if _, ok := props[key]; ok {
+			return fmt.Errorf("can't set reserved property %s", key)
+		}
 	}
 
 	b.updates = append(b.updates, NewSetPropertiesUpdate(props))
@@ -1443,12 +1453,12 @@ func NewMetadataWithUUID(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, 
 	var err error
 	formatVersion := DefaultFormatVersion
 	if props != nil {
-		verStr, ok := props["format-version"]
+		verStr, ok := props[PropertyFormatVersion]
 		if ok {
 			if formatVersion, err = strconv.Atoi(verStr); err != nil {
 				formatVersion = DefaultFormatVersion
 			}
-			delete(props, "format-version")
+			delete(props, PropertyFormatVersion)
 		}
 	}
 
