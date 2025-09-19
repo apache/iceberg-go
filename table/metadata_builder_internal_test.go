@@ -251,7 +251,7 @@ func TestSetSortOrder(t *testing.T) {
 			Transform: iceberg.IdentityTransform{}, Direction: SortASC, NullOrder: NullsFirst,
 		},
 	})
-
+	require.NoError(t, err)
 	require.Len(t, builder.updates, 1)
 	require.Equal(t, maxBy(builder.sortOrderList, func(e SortOrder) int {
 		return e.OrderID()
