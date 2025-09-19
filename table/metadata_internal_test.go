@@ -183,7 +183,7 @@ func TestMetadataV2Parsing(t *testing.T) {
 	assert.EqualValues(t, 3055729675574597004, *data.CurrentSnapshotID)
 	assert.EqualValues(t, 3051729675574597004, data.SnapshotList[0].SnapshotID)
 	assert.Equal(t, int64(1515100955770), data.SnapshotLog[0].TimestampMs)
-	assert.Equal(t, 3, data.SortOrderList[0].OrderID)
+	assert.Equal(t, 3, data.SortOrderList[0].OrderID())
 	assert.Equal(t, 3, data.DefaultSortOrderID)
 
 	assert.Len(t, meta.Snapshots(), 2)
@@ -551,14 +551,12 @@ func TestNewMetadataWithExplicitV1Format(t *testing.T) {
 	partitionSpec := iceberg.NewPartitionSpecID(10,
 		iceberg.PartitionField{SourceID: 22, FieldID: 1022, Transform: iceberg.IdentityTransform{}, Name: "bar"})
 
-	sortOrder := SortOrder{
-		OrderID: 10,
-		Fields: []SortField{{
-			SourceID:  10,
-			Transform: iceberg.IdentityTransform{},
-			Direction: SortASC, NullOrder: NullsLast,
-		}},
-	}
+	sortOrder, err := NewSortOrder(10, []SortField{{
+		SourceID:  10,
+		Transform: iceberg.IdentityTransform{},
+		Direction: SortASC, NullOrder: NullsLast,
+	}})
+	require.NoError(t, err)
 
 	actual, err := NewMetadata(schema, &partitionSpec, sortOrder, "s3://some_v1_location/", iceberg.Properties{"format-version": "1"})
 	require.NoError(t, err)
@@ -571,13 +569,11 @@ func TestNewMetadataWithExplicitV1Format(t *testing.T) {
 	expectedSpec := iceberg.NewPartitionSpec(
 		iceberg.PartitionField{SourceID: 2, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "bar"})
 
-	expectedSortOrder := SortOrder{
-		OrderID: 1,
-		Fields: []SortField{{
-			SourceID: 1, Transform: iceberg.IdentityTransform{},
-			Direction: SortASC, NullOrder: NullsLast,
-		}},
-	}
+	expectedSortOrder, err := NewSortOrder(1, []SortField{{
+		SourceID: 1, Transform: iceberg.IdentityTransform{},
+		Direction: SortASC, NullOrder: NullsLast,
+	}})
+	require.NoError(t, err)
 
 	lastPartitionID := 1000
 	expected := &metadataV1{
@@ -613,14 +609,12 @@ func TestNewMetadataV2Format(t *testing.T) {
 	partitionSpec := iceberg.NewPartitionSpecID(10,
 		iceberg.PartitionField{SourceID: 22, FieldID: 1022, Transform: iceberg.IdentityTransform{}, Name: "bar"})
 
-	sortOrder := SortOrder{
-		OrderID: 10,
-		Fields: []SortField{{
-			SourceID:  10,
-			Transform: iceberg.IdentityTransform{},
-			Direction: SortASC, NullOrder: NullsLast,
-		}},
-	}
+	sortOrder, err := NewSortOrder(10, []SortField{{
+		SourceID:  10,
+		Transform: iceberg.IdentityTransform{},
+		Direction: SortASC, NullOrder: NullsLast,
+	}})
+	require.NoError(t, err)
 
 	tableUUID := uuid.New()
 
@@ -635,13 +629,11 @@ func TestNewMetadataV2Format(t *testing.T) {
 	expectedSpec := iceberg.NewPartitionSpec(
 		iceberg.PartitionField{SourceID: 2, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "bar"})
 
-	expectedSortOrder := SortOrder{
-		OrderID: 1,
-		Fields: []SortField{{
-			SourceID: 1, Transform: iceberg.IdentityTransform{},
-			Direction: SortASC, NullOrder: NullsLast,
-		}},
-	}
+	expectedSortOrder, err := NewSortOrder(1, []SortField{{
+		SourceID: 1, Transform: iceberg.IdentityTransform{},
+		Direction: SortASC, NullOrder: NullsLast,
+	}})
+	require.NoError(t, err)
 
 	lastPartitionID := 1000
 	expected := &metadataV2{
@@ -962,9 +954,8 @@ func TestTableMetadataV1PartitionSpecsWithoutDefaultId(t *testing.T) {
 
 func TestTableMetadataV2MissingPartitionSpecs(t *testing.T) {
 	meta, err := getTestTableMetadata("TableMetadataV2MissingPartitionSpecs.json")
-	require.Error(t, err)
+	require.ErrorContains(t, err, "invalid metadata: default-partition-spec-id must be set for FormatVersion > 1")
 	require.Nil(t, meta)
-	// TODO: check for specific error
 }
 
 func TestTableMetadataV2MissingLastPartitionId(t *testing.T) {
@@ -1002,7 +993,7 @@ func TestTableMetadataV1SchemasWithoutCurrentId(t *testing.T) {
 
 func TestTableMetadataV1NoValidSchema(t *testing.T) {
 	meta, err := getTestTableMetadata("TableMetadataV1NoValidSchema.json")
-	require.ErrorContains(t, err, "invalid metadata: current-schema-id -1 can't be found in any schema")
+	require.ErrorContains(t, err, "invalid metadata: no valid schema configuration found in table metadata")
 	require.Nil(t, meta)
 }
 
@@ -1014,8 +1005,26 @@ func TestTableMetadataV2SchemaNotFound(t *testing.T) {
 
 func TestTableMetadataV2MissingSchemas(t *testing.T) {
 	meta, err := getTestTableMetadata("TableMetadataV2MissingSchemas.json")
-	require.ErrorContains(t, err, "invalid metadata: current-schema-id -1 can't be found in any schema")
+	require.ErrorContains(t, err, "invalid metadata: no valid schema configuration found in table metadata")
 	require.Nil(t, meta)
+}
+
+func TestTableMetadataV2MissingSortOrder(t *testing.T) {
+	meta, err := getTestTableMetadata("TableMetadataV2MissingSortOrder.json")
+	require.ErrorContains(t, err, "invalid metadata: default-sort-order-id must be set for FormatVersion > 1")
+	require.Nil(t, meta)
+}
+
+func TestDefaultSortOrder(t *testing.T) {
+	orderID := 1234
+	meta, err := getTestTableMetadata("TableMetadataV2Valid.json")
+	require.NoError(t, err)
+	meta.(*metadataV2).DefaultSortOrderID = orderID
+	sortOrder, err := NewSortOrder(orderID, nil)
+	require.NoError(t, err)
+
+	meta.(*metadataV2).SortOrderList = append(meta.(*metadataV2).SortOrderList, sortOrder)
+	require.Equal(t, meta.SortOrder().OrderID(), orderID)
 }
 
 // Java: TestTableMetadata.testParseSchemaIdentifierFields

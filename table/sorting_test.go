@@ -27,14 +27,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var sortOrder = table.SortOrder{
-	OrderID: 22,
-	Fields: []table.SortField{
+var sortOrder, _ = table.NewSortOrder(
+	22,
+	[]table.SortField{
 		{SourceID: 19, Transform: iceberg.IdentityTransform{}, NullOrder: table.NullsFirst},
 		{SourceID: 25, Transform: iceberg.BucketTransform{NumBuckets: 4}, Direction: table.SortDESC},
 		{SourceID: 22, Transform: iceberg.VoidTransform{}, Direction: table.SortASC},
 	},
-}
+)
 
 func TestSerializeUnsortedSortOrder(t *testing.T) {
 	data, err := json.Marshal(table.UnsortedSortOrder)
@@ -61,7 +61,7 @@ func TestUnmarshalSortOrderDefaults(t *testing.T) {
 	assert.Equal(t, table.UnsortedSortOrder, order)
 
 	require.NoError(t, json.Unmarshal([]byte(`{"fields": [{"source-id": 19, "transform": "identity", "direction": "asc", "null-order": "nulls-first"}]}`), &order))
-	assert.Equal(t, table.InitialSortOrderID, order.OrderID)
+	assert.Equal(t, table.InitialSortOrderID, order.OrderID())
 }
 
 func TestUnmarshalInvalidSortDirection(t *testing.T) {

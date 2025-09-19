@@ -24,6 +24,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestUnmarshalUpdates(t *testing.T) {
@@ -37,14 +38,15 @@ func TestUnmarshalUpdates(t *testing.T) {
 			Transform: iceberg.BucketTransform{NumBuckets: 25}, Name: "int_bucket",
 		},
 	)
-	sortOrder := SortOrder{
-		OrderID: 22,
-		Fields: []SortField{
+	sortOrder, err := NewSortOrder(
+		22,
+		[]SortField{
 			{SourceID: 19, Transform: iceberg.IdentityTransform{}, NullOrder: NullsFirst},
 			{SourceID: 25, Transform: iceberg.BucketTransform{NumBuckets: 4}, Direction: SortDESC},
 			{SourceID: 22, Transform: iceberg.VoidTransform{}, Direction: SortASC},
 		},
-	}
+	)
+	require.NoError(t, err)
 
 	testCases := []struct {
 		name        string
@@ -161,7 +163,7 @@ func TestUnmarshalUpdates(t *testing.T) {
 				)),
 				NewAddPartitionSpecUpdate(
 					&spec, false),
-				NewAddSortOrderUpdate(&sortOrder, false),
+				NewAddSortOrderUpdate(&sortOrder),
 				NewSetCurrentSchemaUpdate(1),
 			},
 			expectedErr: false,

@@ -750,7 +750,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		o(&cfg)
 	}
 
-	if cfg.SortOrder.Fields == nil && cfg.SortOrder.OrderID == 0 {
+	if cfg.SortOrder.Fields() == nil && cfg.SortOrder.OrderID() == 0 {
 		cfg.SortOrder = table.UnsortedSortOrder
 	}
 

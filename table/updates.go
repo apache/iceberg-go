@@ -258,16 +258,15 @@ type addSortOrderUpdate struct {
 // NewAddSortOrderUpdate creates a new update that adds the given sort order to the table metadata.
 // If the initial flag is set to true, the sort order is considered the initial sort order of the table,
 // and all previously added sort orders in the metadata builder are removed.
-func NewAddSortOrderUpdate(sortOrder *SortOrder, initial bool) *addSortOrderUpdate {
+func NewAddSortOrderUpdate(sortOrder *SortOrder) *addSortOrderUpdate {
 	return &addSortOrderUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateAddSortOrder},
 		SortOrder:  sortOrder,
-		initial:    initial,
 	}
 }
 
 func (u *addSortOrderUpdate) Apply(builder *MetadataBuilder) error {
-	return builder.AddSortOrder(u.SortOrder, u.initial)
+	return builder.AddSortOrder(u.SortOrder)
 }
 
 type setDefaultSortOrderUpdate struct {
