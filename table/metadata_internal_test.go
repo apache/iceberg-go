@@ -320,6 +320,7 @@ func TestCurrentSchemaNotFound(t *testing.T) {
         "partition-specs": [{"spec-id": 0, "fields": [{"name": "x", "transform": "identity", "source-id": 1, "field-id": 1000}]}],
         "last-partition-id": 1000,
         "default-sort-order-id": 0,
+		"sort-orders": [{"order-id": 0, "fields": []}],
         "properties": {},
         "current-snapshot-id": -1,
         "snapshots": []
@@ -903,6 +904,8 @@ func TestMetadataV2Validation(t *testing.T) {
 		"schemas": [{"type":"struct","schema-id":0,"fields":[]}],
 		"partition-specs": [{"spec-id": 0, "fields": []}],
 		"properties": {},
+        "default-sort-order-id": 0,
+		"sort-orders": [{"order-id": 0, "fields": []}],
 		"current-snapshot-id": -1,
 		"snapshots": []
 	}`
@@ -954,17 +957,14 @@ func TestTableMetadataV1PartitionSpecsWithoutDefaultId(t *testing.T) {
 
 func TestTableMetadataV2MissingPartitionSpecs(t *testing.T) {
 	meta, err := getTestTableMetadata("TableMetadataV2MissingPartitionSpecs.json")
-	require.ErrorContains(t, err, "invalid metadata: default-partition-spec-id must be set for FormatVersion > 1")
+	require.ErrorContains(t, err, "invalid metadata: missing partition-specs")
 	require.Nil(t, meta)
 }
 
 func TestTableMetadataV2MissingLastPartitionId(t *testing.T) {
-	// Similarly to above, this should fail but isn't since Go's lack of an Option type means it will just put a 0 for
-	// the missing lastPartitionId.
 	meta, err := getTestTableMetadata("TableMetadataV2MissingLastPartitionId.json")
-	require.Error(t, err)
+	require.ErrorContains(t, err, "invalid metadata: last-partition-id must be set for FormatVersion > 1")
 	require.Nil(t, meta)
-	// TODO: check for specific error
 }
 
 func TestDefaultPartitionSpec(t *testing.T) {
@@ -1011,7 +1011,7 @@ func TestTableMetadataV2MissingSchemas(t *testing.T) {
 
 func TestTableMetadataV2MissingSortOrder(t *testing.T) {
 	meta, err := getTestTableMetadata("TableMetadataV2MissingSortOrder.json")
-	require.ErrorContains(t, err, "invalid metadata: default-sort-order-id must be set for FormatVersion > 1")
+	require.ErrorContains(t, err, "invalid metadata: missing sort-orders")
 	require.Nil(t, meta)
 }
 

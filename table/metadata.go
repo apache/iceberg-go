@@ -1029,10 +1029,13 @@ type commonMetadata struct {
 
 func initCommonMetadataForDeserialization() commonMetadata {
 	return commonMetadata{
-		LastUpdatedMS:   -1,
-		LastColumnId:    -1,
-		CurrentSchemaID: -1,
-		DefaultSpecID:   -1,
+		LastUpdatedMS:      -1,
+		LastColumnId:       -1,
+		CurrentSchemaID:    -1,
+		DefaultSpecID:      -1,
+		DefaultSortOrderID: -1,
+		SortOrderList:      nil,
+		Specs:              nil,
 	}
 }
 
@@ -1272,6 +1275,10 @@ func (c *commonMetadata) validate() error {
 		return fmt.Errorf("%w: missing last-column-id", ErrInvalidMetadata)
 	case c.CurrentSchemaID < 0:
 		return fmt.Errorf("%w: no valid schema configuration found in table metadata", ErrInvalidMetadata)
+	case c.SortOrderList == nil && c.FormatVersion > 1:
+		return fmt.Errorf("%w: missing sort-orders", ErrInvalidMetadata)
+	case c.Specs == nil && c.FormatVersion > 1:
+		return fmt.Errorf("%w: missing partition-specs", ErrInvalidMetadata)
 	case c.DefaultSortOrderID < 0 && c.FormatVersion > 1:
 		return fmt.Errorf("%w: default-sort-order-id must be set for FormatVersion > 1", ErrInvalidMetadata)
 	case c.DefaultPartitionSpec() < 0 && c.FormatVersion > 1:
@@ -1320,9 +1327,11 @@ type metadataV1 struct {
 }
 
 func initMetadataV1Deser() *metadataV1 {
-	return &metadataV1{
+	meta := metadataV1{
 		commonMetadata: initCommonMetadataForDeserialization(),
 	}
+	meta.commonMetadata.DefaultSortOrderID = 0
+	return &meta
 }
 
 func (m *metadataV1) LastSequenceNumber() int64 { return 0 }
@@ -1418,12 +1427,10 @@ type metadataV2 struct {
 }
 
 func initMetadataV2Deser() *metadataV2 {
-	meta := &metadataV2{
+	return &metadataV2{
 		LastSeqNum:     -1,
 		commonMetadata: initCommonMetadataForDeserialization(),
 	}
-	meta.commonMetadata.DefaultSortOrderID = -1
-	return meta
 }
 
 func (m *metadataV2) LastSequenceNumber() int64 { return m.LastSeqNum }
