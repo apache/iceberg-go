@@ -22,9 +22,12 @@ import (
 	"os"
 	"path"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	"github.com/davecgh/go-spew/spew"
+	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1007,6 +1010,438 @@ func TestTableMetadataV2MissingSchemas(t *testing.T) {
 	meta, err := getTestTableMetadata("TableMetadataV2MissingSchemas.json")
 	require.ErrorContains(t, err, "invalid metadata: no valid schema configuration found in table metadata")
 	require.Nil(t, meta)
+}
+
+func TestTableDataV2NoSnapshots(t *testing.T) {
+	data := `{
+            "format-version" : 2,
+            "table-uuid": "fb072c92-a02b-11e9-ae9c-1bb7bc9eca94",
+            "location": "s3://b/wh/data.db/table",
+            "last-sequence-number" : 1,
+            "last-updated-ms": 1515100955770,
+            "last-column-id": 1,
+            "schemas": [
+                {
+                    "schema-id" : 1,
+                    "type" : "struct",
+                    "fields" :[
+                        {
+                            "id": 1,
+                            "name": "struct_name",
+                            "required": true,
+                            "type": "fixed[1]"
+                        }
+                    ]
+                }
+            ],
+            "current-schema-id" : 1,
+            "partition-specs": [
+                {
+                    "spec-id": 0,
+                    "fields": []
+                }
+            ],
+            "refs": {},
+            "default-spec-id": 0,
+            "last-partition-id": 1000,
+            "metadata-log": [
+                {
+                    "metadata-file": "s3://bucket/.../v1.json",
+                    "timestamp-ms": 1515100
+                }
+            ],
+            "sort-orders": [
+                {
+                "order-id": 0,
+                "fields": []
+                }
+            ],
+            "default-sort-order-id": 0
+        }`
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		Type:     iceberg.FixedTypeOf(1),
+		ID:       1,
+		Name:     "struct_name",
+		Required: true,
+	})
+
+	partitionSpec := iceberg.NewPartitionSpecID(0)
+
+	i := 1000
+	expected := metadataV2{
+		LastSeqNum: 1,
+		commonMetadata: commonMetadata{
+			FormatVersion:     2,
+			UUID:              uuid.MustParse("fb072c92-a02b-11e9-ae9c-1bb7bc9eca94"),
+			Loc:               "s3://b/wh/data.db/table",
+			LastUpdatedMS:     1515100955770,
+			LastColumnId:      1,
+			SchemaList:        []*iceberg.Schema{schema},
+			CurrentSchemaID:   1,
+			Specs:             []iceberg.PartitionSpec{partitionSpec},
+			DefaultSpecID:     0,
+			LastPartitionID:   &i,
+			Props:             map[string]string{},
+			SnapshotList:      []Snapshot{},
+			CurrentSnapshotID: nil,
+			SnapshotLog:       []SnapshotLogEntry{},
+			MetadataLog: []MetadataLogEntry{
+				{
+					MetadataFile: "s3://bucket/.../v1.json",
+					TimestampMs:  1515100,
+				},
+			},
+
+			SortOrderList:      []SortOrder{UnsortedSortOrder},
+			DefaultSortOrderID: 0,
+			SnapshotRefs:       nil,
+		},
+	}
+
+	parsed, err := ParseMetadataString(data)
+	require.NoError(t, err)
+	require.Truef(t, expected.Equals(parsed), "%s", cmp.Diff(spew.Sdump(expected), spew.Sdump(parsed)))
+}
+
+func TestCurrentSnapshotIDMustMatchMainBranch(t *testing.T) {
+	data := `{
+            "format-version" : 2,
+            "table-uuid": "fb072c92-a02b-11e9-ae9c-1bb7bc9eca94",
+            "location": "s3://b/wh/data.db/table",
+            "last-sequence-number" : 1,
+            "last-updated-ms": 1515100955770,
+            "last-column-id": 1,
+            "schemas": [
+                {
+                    "schema-id" : 1,
+                    "type" : "struct",
+                    "fields" :[
+                        {
+                            "id": 1,
+                            "name": "struct_name",
+                            "required": true,
+                            "type": "fixed[1]"
+                        },
+                        {
+                            "id": 4,
+                            "name": "ts",
+                            "required": true,
+                            "type": "timestamp"
+                        }
+                    ]
+                }
+            ],
+            "current-schema-id" : 1,
+            "partition-specs": [
+                {
+                    "spec-id": 0,
+                    "fields": [
+                        {
+                            "source-id": 4,
+                            "field-id": 1000,
+                            "name": "ts_day",
+                            "transform": "day"
+                        }
+                    ]
+                }
+            ],
+            "default-spec-id": 0,
+            "last-partition-id": 1000,
+            "properties": {
+                "commit.retry.num-retries": "1"
+            },
+            "metadata-log": [
+                {
+                    "metadata-file": "s3://bucket/.../v1.json",
+                    "timestamp-ms": 1515100
+                }
+            ],
+            "sort-orders": [
+                {
+                "order-id": 0,
+                "fields": []
+                }
+            ],
+            "default-sort-order-id": 0,
+            "current-snapshot-id" : 1,
+            "refs" : {
+              "main" : {
+                "snapshot-id" : 2,
+                "type" : "branch"
+              }
+            },
+            "snapshots" : [ {
+              "snapshot-id" : 1,
+              "timestamp-ms" : 1662532818843,
+              "sequence-number" : 0,
+              "summary" : {
+                "operation" : "append",
+                "spark.app.id" : "local-1662532784305",
+                "added-data-files" : "4",
+                "added-records" : "4",
+                "added-files-size" : "6001"
+              },
+              "manifest-list" : "/home/iceberg/warehouse/nyc/taxis/metadata/snap-638933773299822130-1-7e6760f0-4f6c-4b23-b907-0a5a174e3863.avro",
+              "schema-id" : 0
+            },
+            {
+              "snapshot-id" : 2,
+              "timestamp-ms" : 1662532818844,
+              "sequence-number" : 0,
+              "summary" : {
+                "operation" : "append",
+                "spark.app.id" : "local-1662532784305",
+                "added-data-files" : "4",
+                "added-records" : "4",
+                "added-files-size" : "6001"
+              },
+              "manifest-list" : "/home/iceberg/warehouse/nyc/taxis/metadata/snap-638933773299822130-1-7e6760f0-4f6c-4b23-b907-0a5a174e3863.avro",
+              "schema-id" : 0
+            } ]
+        }`
+	_, err := ParseMetadataString(data)
+	require.Error(t, err, "")
+}
+
+func TestMainWithoutCurrent(t *testing.T) {
+	data := `{
+            "format-version" : 2,
+            "table-uuid": "fb072c92-a02b-11e9-ae9c-1bb7bc9eca94",
+            "location": "s3://b/wh/data.db/table",
+            "last-sequence-number" : 1,
+            "last-updated-ms": 1515100955770,
+            "last-column-id": 1,
+            "schemas": [
+                {
+                    "schema-id" : 1,
+                    "type" : "struct",
+                    "fields" :[
+                        {
+                            "id": 1,
+                            "name": "struct_name",
+                            "required": true,
+                            "type": "fixed[1]"
+                        },
+                        {
+                            "id": 4,
+                            "name": "ts",
+                            "required": true,
+                            "type": "timestamp"
+                        }
+                    ]
+                }
+            ],
+            "current-schema-id" : 1,
+            "partition-specs": [
+                {
+                    "spec-id": 0,
+                    "fields": [
+                        {
+                            "source-id": 4,
+                            "field-id": 1000,
+                            "name": "ts_day",
+                            "transform": "day"
+                        }
+                    ]
+                }
+            ],
+            "default-spec-id": 0,
+            "last-partition-id": 1000,
+            "properties": {
+                "commit.retry.num-retries": "1"
+            },
+            "metadata-log": [
+                {
+                    "metadata-file": "s3://bucket/.../v1.json",
+                    "timestamp-ms": 1515100
+                }
+            ],
+            "sort-orders": [
+                {
+                "order-id": 0,
+                "fields": []
+                }
+            ],
+            "default-sort-order-id": 0,
+            "refs" : {
+              "main" : {
+                "snapshot-id" : 1,
+                "type" : "branch"
+              }
+            },
+            "snapshots" : [ {
+              "snapshot-id" : 1,
+              "timestamp-ms" : 1662532818843,
+              "sequence-number" : 0,
+              "summary" : {
+                "operation" : "append",
+                "spark.app.id" : "local-1662532784305",
+                "added-data-files" : "4",
+                "added-records" : "4",
+                "added-files-size" : "6001"
+              },
+              "manifest-list" : "/home/iceberg/warehouse/nyc/taxis/metadata/snap-638933773299822130-1-7e6760f0-4f6c-4b23-b907-0a5a174e3863.avro",
+              "schema-id" : 0
+            } ]
+        }`
+	_, err := ParseMetadataString(data)
+	require.Error(t, err, "")
+}
+
+func TestBranchSnapshotMissing(t *testing.T) {
+	data := `{
+            "format-version" : 2,
+            "table-uuid": "fb072c92-a02b-11e9-ae9c-1bb7bc9eca94",
+            "location": "s3://b/wh/data.db/table",
+            "last-sequence-number" : 1,
+            "last-updated-ms": 1515100955770,
+            "last-column-id": 1,
+            "schemas": [
+                {
+                    "schema-id" : 1,
+                    "type" : "struct",
+                    "fields" :[
+                        {
+                            "id": 1,
+                            "name": "struct_name",
+                            "required": true,
+                            "type": "fixed[1]"
+                        },
+                        {
+                            "id": 4,
+                            "name": "ts",
+                            "required": true,
+                            "type": "timestamp"
+                        }
+                    ]
+                }
+            ],
+            "current-schema-id" : 1,
+            "partition-specs": [
+                {
+                    "spec-id": 0,
+                    "fields": [
+                        {
+                            "source-id": 4,
+                            "field-id": 1000,
+                            "name": "ts_day",
+                            "transform": "day"
+                        }
+                    ]
+                }
+            ],
+            "default-spec-id": 0,
+            "last-partition-id": 1000,
+            "properties": {
+                "commit.retry.num-retries": "1"
+            },
+            "metadata-log": [
+                {
+                    "metadata-file": "s3://bucket/.../v1.json",
+                    "timestamp-ms": 1515100
+                }
+            ],
+            "sort-orders": [
+                {
+                "order-id": 0,
+                "fields": []
+                }
+            ],
+            "default-sort-order-id": 0,
+            "refs" : {
+              "main" : {
+                "snapshot-id" : 1,
+                "type" : "branch"
+              },
+              "foo" : {
+                "snapshot-id" : 2,
+                "type" : "branch"
+              }
+            },
+			"current-snapshot-id" : 1,
+            "snapshots" : [ {
+              "snapshot-id" : 1,
+              "timestamp-ms" : 1662532818843,
+              "sequence-number" : 0,
+              "summary" : {
+                "operation" : "append",
+                "spark.app.id" : "local-1662532784305",
+                "added-data-files" : "4",
+                "added-records" : "4",
+                "added-files-size" : "6001"
+              },
+              "manifest-list" : "/home/iceberg/warehouse/nyc/taxis/metadata/snap-638933773299822130-1-7e6760f0-4f6c-4b23-b907-0a5a174e3863.avro",
+              "schema-id" : 0
+            }]
+        }`
+	_, err := ParseMetadataString(data)
+	require.ErrorContains(t, err, "invalid metadata: snapshot ref foo with ID 2 does not exist in snapshot list")
+}
+
+func TestV2WrongMaxSnapshotSequenceNumber(t *testing.T) {
+	data := `{"format-version": 2,
+            "table-uuid": "9c12d441-03fe-4693-9a96-a0705ddf69c1",
+            "location": "s3://bucket/test/location",
+            "last-sequence-number": 1,
+            "last-updated-ms": 1602638573590,
+            "last-column-id": 3,
+            "current-schema-id": 0,
+            "schemas": [
+                {
+                    "type": "struct",
+                    "schema-id": 0,
+                    "fields": [
+                        {
+                            "id": 1,
+                            "name": "x",
+                            "required": true,
+                            "type": "long"
+                        }
+                    ]
+                }
+            ],
+            "default-spec-id": 0,
+            "partition-specs": [
+                {
+                    "spec-id": 0,
+                    "fields": []
+                }
+            ],
+            "last-partition-id": 1000,
+            "default-sort-order-id": 0,
+            "sort-orders": [
+                {
+                    "order-id": 0,
+                    "fields": []
+                }
+            ],
+            "properties": {},
+            "current-snapshot-id": 3055729675574597004,
+            "snapshots": [
+                {
+                    "snapshot-id": 3055729675574597004,
+                    "timestamp-ms": 1555100955770,
+                    "sequence-number": 4,
+                    "summary": { "operation": "append" },
+                    "manifest-list": "s3://a/b/2.avro",
+                    "schema-id": 0
+                }
+            ],
+            "statistics": [],
+            "snapshot-log": [],
+            "metadata-log": []}`
+	_, err := ParseMetadataString(data)
+	require.Error(t, err, "")
+	s := strings.ReplaceAll(data, `"last-sequence-number": 1,`, `"last-sequence-number": 4,`)
+
+	meta, err := ParseMetadataString(s)
+	require.NoError(t, err)
+	require.Equal(t, meta.LastSequenceNumber(), int64(4))
+
+	s = strings.ReplaceAll(data, `"last-sequence-number": 1,`, `"last-sequence-number": 5,`)
+	meta, err = ParseMetadataString(s)
+	require.NoError(t, err)
+	require.Equal(t, meta.LastSequenceNumber(), int64(5))
 }
 
 func TestTableMetadataV2MissingSortOrder(t *testing.T) {

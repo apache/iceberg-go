@@ -354,11 +354,10 @@ func (b *MetadataBuilder) AddSnapshot(snapshot *Snapshot) error {
 	} else if s, _ := b.SnapshotByID(snapshot.SnapshotID); s != nil {
 		return fmt.Errorf("can't add snapshot with id %d, already exists", snapshot.SnapshotID)
 	} else if b.formatVersion == 2 &&
-		snapshot.SequenceNumber > 0 &&
 		snapshot.ParentSnapshotID != nil &&
 		snapshot.SequenceNumber <= *b.lastSequenceNumber {
 		return fmt.Errorf("can't add snapshot with sequence number %d, must be > than last sequence number %d",
-			snapshot.SequenceNumber, b.lastSequenceNumber)
+			snapshot.SequenceNumber, *b.lastSequenceNumber)
 	}
 
 	b.updates = append(b.updates, NewAddSnapshotUpdate(snapshot))
@@ -380,6 +379,14 @@ func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64) error {
 	b.snapshotLog = slices.DeleteFunc(b.snapshotLog, func(e SnapshotLogEntry) bool {
 		return slices.Contains(snapshotIds, e.SnapshotID)
 	})
+
+	newRefs := make(map[string]SnapshotRef)
+	for name, ref := range b.refs {
+		if _, err := b.SnapshotByID(ref.SnapshotID); err == nil {
+			newRefs[name] = ref
+		}
+	}
+
 	b.updates = append(b.updates, NewRemoveSnapshotsUpdate(snapshotIds))
 
 	return nil
@@ -713,6 +720,10 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 	}
 	defaultSpecID := b.defaultSpecID
 
+	if err := b.updateSnapshotLog(); err != nil {
+		return nil, err
+	}
+
 	if b.lastUpdatedMS == 0 {
 		b.lastUpdatedMS = time.Now().UnixMilli()
 	}
@@ -737,6 +748,48 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 		DefaultSortOrderID: b.defaultSortOrderID,
 		SnapshotRefs:       b.refs,
 	}, nil
+}
+
+func (b *MetadataBuilder) updateSnapshotLog() error {
+	addedIDs := make(map[int64]struct{}, 2)
+	hasRemoved := false
+	for _, upd := range b.updates {
+		if up, ok := upd.(*addSnapshotUpdate); ok {
+			addedIDs[up.Snapshot.SnapshotID] = struct{}{}
+		}
+		if _, ok := upd.(*removeSnapshotsUpdate); ok {
+			hasRemoved = true
+		}
+	}
+	intermediateIDs := make(map[int64]struct{}, 2)
+	for _, upd := range b.updates {
+		if s, ok := upd.(*setSnapshotRefUpdate); ok {
+			if _, ok := addedIDs[s.SnapshotID]; ok && s.RefName == MainBranch && ((b.currentSnapshotID != nil && s.SnapshotID != *b.currentSnapshotID) || (s.SnapshotID == -1)) {
+				intermediateIDs[s.SnapshotID] = struct{}{}
+			}
+		}
+	}
+	if len(intermediateIDs) != 0 || hasRemoved {
+		newSnapsLog := make([]SnapshotLogEntry, 0, len(b.snapshotLog))
+		for _, s := range b.snapshotLog {
+			if snap, _ := b.SnapshotByID(s.SnapshotID); snap != nil {
+				if _, ok := intermediateIDs[s.SnapshotID]; !ok {
+					newSnapsLog = append(newSnapsLog, s)
+				}
+			} else if hasRemoved {
+				newSnapsLog = make([]SnapshotLogEntry, 0, len(b.snapshotLog)-len(newSnapsLog))
+			}
+		}
+		if b.currentSnapshotID != nil {
+			last := newSnapsLog[len(newSnapsLog)-1]
+			if last.SnapshotID != *b.currentSnapshotID {
+				return errors.New("cannot set invalid snapshot log: latest entry is not the current snapshot")
+			}
+		}
+		b.snapshotLog = newSnapsLog
+	}
+
+	return nil
 }
 
 func (b *MetadataBuilder) GetSchemaByID(id int) (*iceberg.Schema, error) {
@@ -1313,6 +1366,14 @@ func (c *commonMetadata) validate() error {
 
 	c.constructRefs()
 
+	if err := c.checkMainRefMatchesCurrentSnapshot(); err != nil {
+		return err
+	}
+
+	if err := c.checkRefsExist(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -1328,6 +1389,36 @@ func (c *commonMetadata) NameMapping() iceberg.NameMapping {
 }
 
 func (c *commonMetadata) Version() int { return c.FormatVersion }
+
+func (c *commonMetadata) checkMainRefMatchesCurrentSnapshot() error {
+	if c.CurrentSnapshotID != nil {
+		if ref, ok := c.SnapshotRefs[MainBranch]; ok {
+			if ref.SnapshotID != *c.CurrentSnapshotID {
+				return fmt.Errorf("%w: main branch snapshot ID %d does not match current snapshot ID %d",
+					ErrInvalidMetadata, ref.SnapshotID, *c.CurrentSnapshotID)
+			}
+		}
+	} else {
+		if _, ok := c.SnapshotRefs[MainBranch]; ok {
+			return fmt.Errorf("%w: main branch snapshot exists, but current snapshot ID is nil",
+				ErrInvalidMetadata)
+		}
+	}
+
+	return nil
+}
+
+func (c *commonMetadata) checkRefsExist() error {
+	for name, ref := range c.SnapshotRefs {
+		snap := c.SnapshotByID(ref.SnapshotID)
+		if snap == nil {
+			return fmt.Errorf("%w: snapshot ref %s with ID %d does not exist in snapshot list",
+				ErrInvalidMetadata, name, ref.SnapshotID)
+		}
+	}
+
+	return nil
+}
 
 type metadataV1 struct {
 	Schema    *iceberg.Schema          `json:"schema,omitempty"`
@@ -1474,6 +1565,28 @@ func (m *metadataV2) UnmarshalJSON(b []byte) error {
 	m.preValidate()
 
 	return m.validate()
+}
+
+func (m *metadataV2) validate() error {
+	if err := m.checkLastSequenceNumber(); err != nil {
+		return err
+	}
+
+	if err := m.commonMetadata.validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (m *metadataV2) checkLastSequenceNumber() error {
+	for _, snap := range m.SnapshotList {
+		if snap.SequenceNumber > m.LastSequenceNumber() {
+			return fmt.Errorf("%w: snapshot %d has sequence number %d which is greater than last-sequence-number %d",
+				ErrInvalidMetadata, snap.SnapshotID, snap.SequenceNumber, m.LastSequenceNumber())
+		}
+	}
+
+	return nil
 }
 
 const DefaultFormatVersion = 2
