@@ -64,6 +64,11 @@ func TestUnmarshalSortOrderDefaults(t *testing.T) {
 	assert.Equal(t, table.InitialSortOrderID, order.OrderID())
 }
 
+func TestUnmarshalInvalidSortOrderID(t *testing.T) {
+	var order table.SortOrder
+	require.ErrorContains(t, json.Unmarshal([]byte(`{"order-id": 0, "fields": [{"source-id": 19, "transform": "identity", "direction": "asc", "null-order": "nulls-first"}]}`), &order), "invalid sort order ID: sort order ID 0 is reserved for unsorted order")
+}
+
 func TestUnmarshalInvalidSortDirection(t *testing.T) {
 	badJson := `{
 		"order-id": 22,

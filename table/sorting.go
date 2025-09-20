@@ -43,6 +43,8 @@ const (
 )
 
 var (
+	ErrInvalidSortOrderID   = errors.New("invalid sort order ID")
+	ErrInvalidTransform     = errors.New("invalid transform, must be a valid transform string or a transform object")
 	ErrInvalidSortDirection = errors.New("invalid sort direction, must be 'asc' or 'desc'")
 	ErrInvalidNullOrder     = errors.New("invalid null order, must be 'nulls-first' or 'nulls-last'")
 )
@@ -172,40 +174,43 @@ func (s *SortOrder) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
-	s.orderID = aux.OrderID
-	s.fields = aux.Fields
 
-	if len(s.fields) == 0 {
-		s.fields = []SortField{}
-		s.orderID = 0
-
-		return nil
+	if len(aux.Fields) == 0 && aux.OrderID == -1 {
+		aux.Fields = []SortField{}
+		aux.OrderID = 0
 	}
 
-	if s.orderID == -1 {
-		s.orderID = InitialSortOrderID // initialize default sort order id
+	if aux.OrderID == -1 {
+		aux.OrderID = InitialSortOrderID
 	}
+
+	newOrder, err := NewSortOrder(aux.OrderID, aux.Fields)
+	if err != nil {
+		return err
+	}
+
+	*s = newOrder
 
 	return nil
 }
 
 func NewSortOrder(orderID int, fields []SortField) (SortOrder, error) {
-	if orderID == UnsortedSortOrderID && len(fields) == 0 {
-		return SortOrder{}, fmt.Errorf("sort order ID %d is reserved for unsorted order", UnsortedSortOrderID)
+	if orderID == 0 && len(fields) != 0 {
+		return SortOrder{}, fmt.Errorf("%w: sort order ID 0 is reserved for unsorted order", ErrInvalidSortOrderID)
 	}
+
 	if fields == nil {
 		fields = []SortField{}
 	}
-
 	for idx, field := range fields {
 		if field.Transform == nil {
-			return SortOrder{}, fmt.Errorf("sort field at index %d has no transform", idx)
+			return SortOrder{}, fmt.Errorf("%w: sort field at index %d has no transform", ErrInvalidTransform, idx)
 		}
 		if field.Direction != SortASC && field.Direction != SortDESC {
-			return SortOrder{}, ErrInvalidSortDirection
+			return SortOrder{}, fmt.Errorf("%w: sort field at index %d", ErrInvalidSortDirection, idx)
 		}
 		if field.NullOrder != NullsFirst && field.NullOrder != NullsLast {
-			return SortOrder{}, ErrInvalidNullOrder
+			return SortOrder{}, fmt.Errorf("%w: sort field at index %d", ErrInvalidNullOrder, idx)
 		}
 	}
 
