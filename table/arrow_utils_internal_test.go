@@ -88,7 +88,9 @@ func constructTestTable(t *testing.T, writeStats []string) (*metadata.FileMetaDa
         ],
         "default-spec-id": 0,
         "partition-specs": [{"spec-id": 0, "fields": []}],
-        "properties": {}
+        "properties": {},
+		"sort-orders": [{"order-id": 0, "fields": []}],
+		"default-sort-order-id": 0
 	}`)
 	require.NoError(t, err)
 

@@ -23,6 +23,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseProperties(t *testing.T) {
@@ -210,29 +211,32 @@ func TestParseSortOrder(t *testing.T) {
 			}
 			if !tt.isErr {
 				// For an empty string, we expect UnsortedSortOrder with OrderID 0
+				require.NoError(t, err)
 				if tt.input == "" {
-					if got.OrderID != 0 {
-						t.Errorf("parseSortOrder() for empty string should return OrderID 0, got %d", got.OrderID)
+					if got.OrderID() != 0 {
+						t.Errorf("parseSortOrder() for empty string should return OrderID 0, got %d", got.OrderID())
 					}
-				} else if got.OrderID == 0 {
+				} else if got.OrderID() == 0 {
 					t.Errorf("parseSortOrder() returned invalid sort order for valid input")
 				}
 
 				// Validate the number of fields
-				if len(got.Fields) != tt.expectedFieldsCount {
-					t.Errorf("parseSortOrder() returned %d fields, expected %d", len(got.Fields), tt.expectedFieldsCount)
+				if got.Len() != tt.expectedFieldsCount {
+					t.Errorf("parseSortOrder() returned %d fields, expected %d", got.Len(), tt.expectedFieldsCount)
 
 					return
 				}
 
 				// Validate sort directions and null orders
-				for i, field := range got.Fields {
+				i := 0
+				for field := range got.Fields() {
 					if i < len(tt.expectedDirections) && field.Direction != tt.expectedDirections[i] {
 						t.Errorf("parseSortOrder() field %d direction = %v, expected %v", i, field.Direction, tt.expectedDirections[i])
 					}
 					if i < len(tt.expectedNullOrders) && field.NullOrder != tt.expectedNullOrders[i] {
 						t.Errorf("parseSortOrder() field %d null order = %v, expected %v", i, field.NullOrder, tt.expectedNullOrders[i])
 					}
+					i++
 				}
 			}
 		})
