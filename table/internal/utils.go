@@ -269,8 +269,6 @@ func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.Par
 				case iceberg.DecimalType:
 					fieldIDToLogicalType[field.FieldID] = avro.Decimal
 					fieldIDToFixedSize[field.FieldID] = rt.Scale()
-				case iceberg.FixedType:
-					fieldIDToFixedSize[field.FieldID] = rt.Len()
 				case iceberg.UUIDType:
 					fieldIDToLogicalType[field.FieldID] = avro.UUID
 				}

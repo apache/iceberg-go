@@ -442,13 +442,10 @@ func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType, ma
 		}
 		if ps, ok := avroTyp.(*avro.PrimitiveSchema); ok && ps.Logical() != nil {
 			logicalTypes[fid] = ps.Logical().Type()
-		} else if fs, ok := avroTyp.(*avro.FixedSchema); ok {
-			fixedSizes[fid] = fs.Size()
-			if fs.Logical() != nil {
-				logicalTypes[fid] = fs.Logical().Type()
-				if fs.Logical().Type() == avro.UUID {
-					fixedSizes[fid] = 16
-				}
+		} else if fs, ok := avroTyp.(*avro.FixedSchema); ok && fs.Logical() != nil {
+			logicalTypes[int(fid)] = fs.Logical().Type()
+			if decimalLogical, ok := fs.Logical().(*avro.DecimalLogicalSchema); ok {
+				fixedSizes[int(fid)] = decimalLogical.Scale()
 			}
 		}
 	}
@@ -1037,7 +1034,6 @@ type ManifestWriter struct {
 
 	partFieldNameToID map[string]int
 	partFieldIDToType map[int]avro.LogicalType
-	partFieldIDToSize map[int]int
 
 	snapshotID    int64
 	addedFiles    int32
@@ -1074,7 +1070,7 @@ func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *S
 		return nil, err
 	}
 
-	nameToID, idToType, idToSize := getFieldIDMap(fileSchema)
+	nameToID, idToType, _ := getFieldIDMap(fileSchema)
 
 	w := &ManifestWriter{
 		impl:              impl,
@@ -1084,7 +1080,6 @@ func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *S
 		schema:            schema,
 		partFieldNameToID: nameToID,
 		partFieldIDToType: idToType,
-		partFieldIDToSize: idToSize,
 		snapshotID:        snapshotID,
 		minSeqNum:         -1,
 		partitions:        make([]map[int]any, 0),
@@ -1203,7 +1198,6 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 	if setter, ok := entry.DataFile().(hasFieldToIDMap); ok {
 		setter.setFieldNameToIDMap(w.partFieldNameToID)
 		setter.setFieldIDToLogicalTypeMap(w.partFieldIDToType)
-		setter.setFieldIDToFixedSizeMap(w.partFieldIDToSize)
 	}
 
 	w.partitions = append(w.partitions, entry.Data.Partition())
