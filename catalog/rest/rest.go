@@ -745,32 +745,21 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, err
 	}
 
-	var cfg catalog.CreateTableCfg
+	cfg := catalog.NewCreateTableCfg()
 	for _, o := range opts {
 		o(&cfg)
 	}
 
-	freshSchema, err := iceberg.AssignFreshSchemaIDs(schema, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	freshPartitionSpec, err := iceberg.AssignFreshPartitionSpecIDs(cfg.PartitionSpec, schema, freshSchema)
-	if err != nil {
-		return nil, err
-	}
-
-	freshSortOrder, err := table.AssignFreshSortOrderIDs(cfg.SortOrder, schema, freshSchema)
-	if err != nil {
-		return nil, err
+	if cfg.SortOrder.Fields == nil && cfg.SortOrder.OrderID == 0 {
+		cfg.SortOrder = table.UnsortedSortOrder
 	}
 
 	payload := createTableRequest{
 		Name:          tbl,
-		Schema:        freshSchema,
+		Schema:        schema,
 		Location:      cfg.Location,
-		PartitionSpec: &freshPartitionSpec,
-		WriteOrder:    &freshSortOrder,
+		PartitionSpec: cfg.PartitionSpec,
+		WriteOrder:    &cfg.SortOrder,
 		StageCreate:   false,
 		Props:         cfg.Properties,
 	}

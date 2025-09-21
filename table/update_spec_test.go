@@ -75,7 +75,8 @@ func TestUpdateSpecAddField(t *testing.T) {
 		assert.NotNil(t, updates)
 		assert.NotNil(t, reqs)
 
-		newSpec := specUpdate.Apply()
+		newSpec, err := specUpdate.Apply()
+		assert.NoError(t, err)
 		assert.NotNil(t, newSpec)
 		assert.Equal(t, 1, newSpec.ID())
 		assert.Equal(t, 1003, newSpec.LastAssignedFieldID())
@@ -198,7 +199,8 @@ func TestUpdateSpecAddField(t *testing.T) {
 		assert.NotNil(t, updates)
 		assert.NotNil(t, reqs)
 
-		newSpec := specUpdate.Apply()
+		newSpec, err := specUpdate.Apply()
+		assert.NoError(t, err)
 		assert.NotNil(t, newSpec)
 		assert.Equal(t, "street_void_1001", newSpec.FieldsBySourceID(5)[0].Name)
 	})
@@ -218,7 +220,8 @@ func TestUpdateSpecAddIdentityField(t *testing.T) {
 		assert.NotNil(t, updates)
 		assert.NotNil(t, reqs)
 
-		newSpec := specUpdate.Apply()
+		newSpec, err := specUpdate.Apply()
+		assert.NoError(t, err)
 		assert.NotNil(t, newSpec)
 		assert.Equal(t, 1, newSpec.ID())
 		assert.Equal(t, 1003, newSpec.LastAssignedFieldID())
@@ -254,7 +257,8 @@ func TestUpdateSpecRenameField(t *testing.T) {
 		assert.NotNil(t, updates)
 		assert.NotNil(t, reqs)
 
-		newSpec := updateSpec.Apply()
+		newSpec, err := updateSpec.Apply()
+		assert.NoError(t, err)
 		assert.NotNil(t, newSpec)
 		assert.Equal(t, 1, newSpec.ID())
 		assert.Equal(t, "new_id_identity", newSpec.FieldsBySourceID(1)[0].Name)
@@ -318,7 +322,8 @@ func TestUpdateSpecRemoveField(t *testing.T) {
 		assert.NotNil(t, updates)
 		assert.NotNil(t, reqs)
 
-		newSpec := updateSpec.Apply()
+		newSpec, err := updateSpec.Apply()
+		assert.NoError(t, err)
 		assert.NotNil(t, newSpec)
 		assert.Equal(t, 1, newSpec.ID())
 		assert.Equal(t, 999, newSpec.LastAssignedFieldID())

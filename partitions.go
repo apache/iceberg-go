@@ -19,6 +19,7 @@ package iceberg
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"net/url"
@@ -30,6 +31,7 @@ import (
 const (
 	PartitionDataIDStart   = 1000
 	InitialPartitionSpecID = 0
+	unassignedFieldID      = 0
 )
 
 // UnpartitionedSpec is the default unpartitioned spec which can
@@ -85,10 +87,194 @@ type PartitionSpec struct {
 	sourceIdToFields map[int][]PartitionField
 }
 
+type PartitionOption func(*PartitionSpec) error
+
+// BindToSchema creates a new PartitionSpec by copying the fields from the
+// existing spec verifying compatibility with the schema.
+//
+// If newSpecID is not nil, it will be used as the spec id for the new spec.
+// Otherwise, the existing spec id will be used.
+// If a field in the spec is incompatible with the schema, an error will be
+// returned.
+func (p *PartitionSpec) BindToSchema(schema *Schema, lastPartitionID *int, newSpecID *int) (PartitionSpec, error) {
+	opts := make([]PartitionOption, 0)
+	if newSpecID != nil {
+		opts = append(opts, WithSpecID(*newSpecID))
+	} else {
+		opts = append(opts, WithSpecID(p.id))
+	}
+
+	for field := range p.Fields() {
+		opts = append(opts, AddPartitionFieldBySourceID(field.SourceID, field.Name, field.Transform, schema, &field.FieldID))
+	}
+
+	freshSpec, err := NewPartitionSpecOpts(opts...)
+	if err != nil {
+		return PartitionSpec{}, err
+	}
+	if err = freshSpec.assignPartitionFieldIds(lastPartitionID); err != nil {
+		return PartitionSpec{}, err
+	}
+
+	return freshSpec, err
+}
+
+func NewPartitionSpecOpts(opts ...PartitionOption) (PartitionSpec, error) {
+	spec := PartitionSpec{
+		id: 0,
+	}
+	for _, opt := range opts {
+		if err := opt(&spec); err != nil {
+			return PartitionSpec{}, err
+		}
+	}
+	spec.initialize()
+
+	return spec, nil
+}
+
+func WithSpecID(id int) PartitionOption {
+	return func(p *PartitionSpec) error {
+		p.id = id
+
+		return nil
+	}
+}
+
+func AddPartitionFieldByName(sourceName string, targetName string, transform Transform, schema *Schema, fieldID *int) PartitionOption {
+	return func(p *PartitionSpec) error {
+		if schema == nil {
+			return errors.New("cannot add partition field with nil schema")
+		}
+		field, ok := schema.FindFieldByName(sourceName)
+
+		if !ok {
+			return fmt.Errorf("cannot find source column with name: %s in schema", sourceName)
+		}
+		err := p.addSpecFieldInternal(targetName, field, transform, fieldID)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	}
+}
+
+func AddPartitionFieldBySourceID(sourceID int, targetName string, transform Transform, schema *Schema, fieldID *int) PartitionOption {
+	return func(p *PartitionSpec) error {
+		if schema == nil {
+			return errors.New("cannot add partition field with nil schema")
+		}
+		field, ok := schema.FindFieldByID(sourceID)
+		if !ok {
+			return fmt.Errorf("cannot find source column with id: %d in schema", sourceID)
+		}
+		err := p.addSpecFieldInternal(targetName, field, transform, fieldID)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	}
+}
+
+func (p *PartitionSpec) addSpecFieldInternal(targetName string, field NestedField, transform Transform, fieldID *int) error {
+	if targetName == "" {
+		return errors.New("cannot use empty partition name")
+	}
+	for _, existingField := range p.fields {
+		if existingField.Name == targetName {
+			return errors.New("duplicate partition name: " + targetName)
+		}
+	}
+	var fieldIDValue int
+	if fieldID == nil {
+		fieldIDValue = unassignedFieldID
+	} else {
+		fieldIDValue = *fieldID
+	}
+	if err := p.checkForRedundantPartitions(field.ID, transform); err != nil {
+		return err
+	}
+	unboundField := PartitionField{
+		SourceID:  field.ID,
+		FieldID:   fieldIDValue,
+		Name:      targetName,
+		Transform: transform,
+	}
+	p.fields = append(p.fields, unboundField)
+
+	return nil
+}
+
+func (p *PartitionSpec) checkForRedundantPartitions(sourceID int, transform Transform) error {
+	if fields, ok := p.sourceIdToFields[sourceID]; ok {
+		for _, f := range fields {
+			if f.Transform.Equals(transform) {
+				return fmt.Errorf("cannot add redundant partition with source id %d and transform %s. A partition with the same source id and transform already exists with name: %s",
+					sourceID,
+					transform,
+					f.Name)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (p *PartitionSpec) Len() int {
+	return len(p.fields)
+}
+
+func (ps *PartitionSpec) assignPartitionFieldIds(lastAssignedFieldIDPtr *int) error {
+	// This is set_field_ids from iceberg-rust
+	// Already assigned partition ids. If we see one of these during iteration,
+	// we skip it.
+	assignedIds := make(map[int]struct{})
+	for _, field := range ps.fields {
+		if field.FieldID != unassignedFieldID {
+			if _, exists := assignedIds[field.FieldID]; exists {
+				return fmt.Errorf("duplicate field ID provided: %d", field.FieldID)
+			}
+			assignedIds[field.FieldID] = struct{}{}
+		}
+	}
+
+	lastAssignedFieldID := ps.LastAssignedFieldID()
+	if lastAssignedFieldIDPtr != nil {
+		lastAssignedFieldID = *lastAssignedFieldIDPtr
+	}
+	for i := range ps.fields {
+		if ps.fields[i].FieldID == unassignedFieldID {
+			// Find the next available ID by incrementing from the last known good ID.
+			lastAssignedFieldID++
+			for {
+				if _, exists := assignedIds[lastAssignedFieldID]; !exists {
+					break // Found an unused ID.
+				}
+				lastAssignedFieldID++
+			}
+
+			// Assign the new ID and immediately record it as used.
+			ps.fields[i].FieldID = lastAssignedFieldID
+		} else {
+			lastAssignedFieldID = max(lastAssignedFieldID, ps.fields[i].FieldID)
+		}
+	}
+
+	return nil
+}
+
+// NewPartitionSpec creates a new PartitionSpec with the given fields.
+//
+// The fields are not verified against a schema, use NewPartitionSpecOpts if you have to ensure compatibility.
 func NewPartitionSpec(fields ...PartitionField) PartitionSpec {
 	return NewPartitionSpecID(InitialPartitionSpecID, fields...)
 }
 
+// NewPartitionSpecID creates a new PartitionSpec with the given fields and id.
+//
+// The fields are not verified against a schema, use NewPartitionSpecOpts if you have to ensure compatibility.
 func NewPartitionSpecID(id int, fields ...PartitionField) PartitionSpec {
 	ret := PartitionSpec{id: id, fields: fields}
 	ret.initialize()
@@ -122,6 +308,10 @@ func (ps PartitionSpec) Equals(other PartitionSpec) bool {
 
 // Fields returns a clone of the partition fields in this spec.
 func (ps *PartitionSpec) Fields() iter.Seq[PartitionField] {
+	if ps.fields == nil {
+		return slices.Values([]PartitionField{})
+	}
+
 	return slices.Values(ps.fields)
 }
 
@@ -209,6 +399,11 @@ func (ps *PartitionSpec) LastAssignedFieldID() int {
 		}
 	}
 
+	if id == unassignedFieldID {
+		// If no fields have been assigned an ID, return the default starting ID.
+		return PartitionDataIDStart - 1
+	}
+
 	return id
 }
 
@@ -261,37 +456,6 @@ func (ps *PartitionSpec) PartitionToPath(data structLike, sc *Schema) string {
 	}
 
 	return path.Join(segments...)
-}
-
-// AssignFreshPartitionSpecIDs creates a new PartitionSpec by reassigning the field IDs
-// from the old schema to the corresponding fields in the fresh schema, while re-assigning
-// the actual Spec IDs to 1000 + the position of the field in the partition spec.
-func AssignFreshPartitionSpecIDs(spec *PartitionSpec, old, fresh *Schema) (PartitionSpec, error) {
-	if spec == nil {
-		return PartitionSpec{}, nil
-	}
-
-	newFields := make([]PartitionField, 0, len(spec.fields))
-	for pos, field := range spec.fields {
-		origCol, ok := old.FindColumnName(field.SourceID)
-		if !ok {
-			return PartitionSpec{}, fmt.Errorf("could not find field in old schema: %s", field.Name)
-		}
-
-		freshField, ok := fresh.FindFieldByName(origCol)
-		if !ok {
-			return PartitionSpec{}, fmt.Errorf("could not find field in fresh schema: %s", field.Name)
-		}
-
-		newFields = append(newFields, PartitionField{
-			Name:      field.Name,
-			SourceID:  freshField.ID,
-			FieldID:   PartitionDataIDStart + pos,
-			Transform: field.Transform,
-		})
-	}
-
-	return NewPartitionSpec(newFields...), nil
 }
 
 // GeneratePartitionFieldName returns default partition field name based on field transform type

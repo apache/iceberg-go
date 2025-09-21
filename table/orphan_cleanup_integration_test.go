@@ -53,16 +53,17 @@ const (
 	OrphanFilePrefix  = "orphan_"
 )
 
-var (
-	tableSchemaSimple = iceberg.NewSchemaWithIdentifiers(1,
-		[]int{1},
-		iceberg.NestedField{
-			ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{
-			ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: true},
-		iceberg.NestedField{
-			ID: 3, Name: "value", Type: iceberg.PrimitiveTypes.Float64, Required: false},
-	)
+var tableSchemaSimple = iceberg.NewSchemaWithIdentifiers(1,
+	[]int{1},
+	iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
+	},
+	iceberg.NestedField{
+		ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: true,
+	},
+	iceberg.NestedField{
+		ID: 3, Name: "value", Type: iceberg.PrimitiveTypes.Float64, Required: false,
+	},
 )
 
 func (s *OrphanCleanupIntegrationSuite) loadCatalog() *rest.Catalog {

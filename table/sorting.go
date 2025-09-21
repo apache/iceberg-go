@@ -137,6 +137,30 @@ type SortOrder struct {
 	Fields  []SortField `json:"fields"`
 }
 
+func (s *SortOrder) CheckCompatibility(schema *iceberg.Schema) error {
+	if s == nil {
+		return nil
+	}
+
+	for _, field := range s.Fields {
+		f, ok := schema.FindFieldByID(field.SourceID)
+		if !ok {
+			return fmt.Errorf("sort field with source id %d not found in schema", field.SourceID)
+		}
+
+		if _, ok := f.Type.(iceberg.PrimitiveType); !ok {
+			return fmt.Errorf("cannot sort by non-primitive source field: %s", f.Type.Type())
+		}
+
+		// FIXME: field.Transform should be made required
+		if field.Transform != nil && !field.Transform.CanTransform(f.Type) {
+			return fmt.Errorf("invalid source type %s for transform %s", f.Type.Type(), field.Transform)
+		}
+	}
+
+	return nil
+}
+
 func (s SortOrder) Equals(rhs SortOrder) bool {
 	return s.OrderID == rhs.OrderID &&
 		slices.Equal(s.Fields, rhs.Fields)

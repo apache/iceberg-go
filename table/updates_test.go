@@ -19,7 +19,6 @@ package table
 
 import (
 	"encoding/json"
-	"errors"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -61,7 +60,14 @@ func TestUnmarshalUpdates(t *testing.T) {
 				{"action": "upgrade-format-version", "format-version": 2},
 				{"action": "set-location", "location": "s3://bucket/new-location"},
 				{"action": "set-properties", "updates": {"key1": "value1"}},
-				{"action": "remove-properties", "removals": ["key2"]}
+				{"action": "remove-properties", "removals": ["key2"]},
+				{"action": "remove-schemas", "schema-ids": [1,2,3,4]},
+				{"action": "remove-partition-specs", "schema-ids": [1,2,3]},
+				{"action": "remove-snapshots", "snapshot-ids": [1,2]},
+				{"action": "remove-snapshot-ref", "ref-name": "main"},
+				{"action": "set-default-sort-order", "order-id": 1},
+				{"action": "set-default-spec", "spec-id": 1},
+				{"action": "set-snapshot-ref", "ref-name": "main", "type": "branch", "snapshot-id": 1}
 			]`),
 			expected: Updates{
 				NewAssignUUIDUpdate(uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")),
@@ -69,6 +75,13 @@ func TestUnmarshalUpdates(t *testing.T) {
 				NewSetLocationUpdate("s3://bucket/new-location"),
 				NewSetPropertiesUpdate(iceberg.Properties{"key1": "value1"}),
 				NewRemovePropertiesUpdate([]string{"key2"}),
+				NewRemoveSchemasUpdate([]int{1, 2, 3, 4}),
+				NewRemoveSpecUpdate([]int{1, 2, 3}),
+				NewRemoveSnapshotsUpdate([]int64{1, 2}),
+				NewRemoveSnapshotRefUpdate("main"),
+				NewSetDefaultSortOrderUpdate(1),
+				NewSetDefaultSpecUpdate(1),
+				NewSetSnapshotRefUpdate("main", 1, "branch", 0, 0, 0),
 			},
 			expectedErr: false,
 		},
@@ -217,28 +230,4 @@ func TestUnmarshalUpdates(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestRemoveSchemas(t *testing.T) {
-	var builder *MetadataBuilder
-	removeSchemas := removeSchemasUpdate{
-		SchemaIds: []int64{},
-	}
-	t.Run("remove schemas should fail", func(t *testing.T) {
-		if err := removeSchemas.Apply(builder); !errors.Is(err, iceberg.ErrNotImplemented) {
-			t.Fatalf("Expected unimplemented error, got %v", err)
-		}
-	})
-}
-
-func TestRemovePartitionSpecs(t *testing.T) {
-	var builder *MetadataBuilder
-	removeSpecs := removeSpecUpdate{
-		SpecIds: []int64{},
-	}
-	t.Run("remove specs should fail", func(t *testing.T) {
-		if err := removeSpecs.Apply(builder); !errors.Is(err, iceberg.ErrNotImplemented) {
-			t.Fatalf("Expected unimplemented error, got %v", err)
-		}
-	})
 }

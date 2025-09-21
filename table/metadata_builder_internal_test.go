@@ -18,9 +18,11 @@
 package table
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	"github.com/davecgh/go-spew/spew"
 	"github.com/stretchr/testify/require"
 )
 
@@ -66,22 +68,25 @@ func builderWithoutChanges(formatVersion int) MetadataBuilder {
 	if err != nil {
 		panic(err)
 	}
-	_, err = builder.SetFormatVersion(formatVersion)
-	if err != nil {
+	if err = builder.SetFormatVersion(formatVersion); err != nil {
 		panic(err)
 	}
-	_, err = builder.AddSortOrder(&sortOrder, true)
-	if err != nil {
+	if err = builder.AddSchema(&tableSchema); err != nil {
 		panic(err)
 	}
-	_, err = builder.AddPartitionSpec(&partitionSpec, true)
-	if err != nil {
+	if err = builder.SetCurrentSchemaID(-1); err != nil {
 		panic(err)
 	}
-	_, err = builder.AddSchema(&tableSchema)
-	if err != nil {
+	if err = builder.AddSortOrder(&sortOrder, true); err != nil {
 		panic(err)
 	}
+	if err = builder.SetDefaultSortOrderID(-1); err != nil {
+		panic(err)
+	}
+	if err = builder.AddPartitionSpec(&partitionSpec, true); err != nil {
+		panic(err)
+	}
+
 	meta, err := builder.Build()
 	if err != nil {
 		panic(err)
@@ -92,6 +97,131 @@ func builderWithoutChanges(formatVersion int) MetadataBuilder {
 	}
 
 	return *builder
+}
+
+func TestAddRemovePartitionSpec(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	builderRef := &builder
+	i := 1000
+	addedSpec, err := iceberg.NewPartitionSpecOpts(
+		iceberg.WithSpecID(10),
+		iceberg.AddPartitionFieldBySourceID(2, "y", iceberg.IdentityTransform{}, builder.schemaList[0], &i),
+		iceberg.AddPartitionFieldBySourceID(3, "z", iceberg.IdentityTransform{}, builder.schemaList[0], nil))
+	require.NoError(t, err)
+
+	err = builderRef.AddPartitionSpec(&addedSpec, false)
+	require.NoError(t, err)
+	metadata, err := builderRef.Build()
+	require.NoError(t, err)
+	require.NotNil(t, metadata)
+
+	i2 := 1001
+	expectedSpec, err := iceberg.NewPartitionSpecOpts(
+		iceberg.WithSpecID(1),
+		iceberg.AddPartitionFieldBySourceID(2, "y", iceberg.IdentityTransform{}, builder.schemaList[0], &i),
+		iceberg.AddPartitionFieldBySourceID(3, "z", iceberg.IdentityTransform{}, builder.schemaList[0], &i2))
+	require.NoError(t, err)
+	require.Equal(t, metadata.DefaultPartitionSpec(), 0)
+	require.Equal(t, *metadata.LastPartitionSpecID(), i2)
+	found := false
+	for _, part := range metadata.PartitionSpecs() {
+		if part.ID() == 1 {
+			found = true
+			require.True(t, part.Equals(expectedSpec), "expected partition spec to match added spec")
+		}
+	}
+	require.True(t, found, "expected partition spec to be added")
+
+	newBuilder, err := MetadataBuilderFromBase(metadata)
+	require.NoError(t, err)
+	// Remove the spec
+	require.NoError(t, newBuilder.RemovePartitionSpecs([]int{1}))
+	newBuild, err := newBuilder.Build()
+	require.NoError(t, err)
+	require.NotNil(t, newBuild)
+	require.Len(t, newBuilder.updates, 1)
+	require.Len(t, newBuild.PartitionSpecs(), 1)
+	_, err = newBuilder.GetSpecByID(1)
+	require.ErrorContains(t, err, "partition spec with id 1 not found")
+}
+
+func TestSetDefaultPartitionSpec(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	curSchema, err := builder.GetSchemaByID(builder.currentSchemaID)
+	require.NoError(t, err)
+	// Add a partition spec
+	addedSpec, err := iceberg.NewPartitionSpecOpts(
+		iceberg.WithSpecID(10),
+		iceberg.AddPartitionFieldBySourceID(1, "y_bucket[2]", iceberg.BucketTransform{NumBuckets: 2}, curSchema, nil))
+	require.NoError(t, err)
+	require.NoError(t, builder.AddPartitionSpec(&addedSpec, false))
+	require.NoError(t, builder.SetDefaultSpecID(-1))
+
+	id := 1001
+	expectedSpec, err := iceberg.NewPartitionSpecOpts(
+		iceberg.WithSpecID(1),
+		iceberg.AddPartitionFieldBySourceID(1, "y_bucket[2]", iceberg.BucketTransform{NumBuckets: 2}, curSchema, &id))
+	require.NoError(t, err)
+	require.True(t, builder.HasChanges())
+	require.Equal(t, len(builder.updates), 2)
+	require.True(t, builder.updates[0].(*addPartitionSpecUpdate).Spec.Equals(expectedSpec))
+	require.Equal(t, -1, builder.updates[1].(*setDefaultSpecUpdate).SpecID)
+	metadata, err := builder.Build()
+	require.NoError(t, err)
+	require.NotNil(t, metadata)
+
+	require.Equal(t, metadata.DefaultPartitionSpec(), 1)
+	require.True(t, expectedSpec.Equals(metadata.PartitionSpec()), fmt.Sprintf("expected partition spec to match added spec %s, %s", spew.Sdump(expectedSpec), spew.Sdump(metadata.PartitionSpec())))
+	require.Equal(t, *metadata.LastPartitionSpecID(), 1001)
+}
+
+func TestSetExistingDefaultPartitionSpec(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	curSchema, err := builder.GetSchemaByID(builder.currentSchemaID)
+	require.NoError(t, err)
+
+	addedSpec, err := iceberg.NewPartitionSpecOpts(
+		iceberg.WithSpecID(10),
+		iceberg.AddPartitionFieldBySourceID(1, "y_bucket[2]", iceberg.BucketTransform{NumBuckets: 2}, curSchema, nil))
+	require.NoError(t, err)
+
+	id := 1001
+	expectedSpec, err := iceberg.NewPartitionSpecOpts(iceberg.WithSpecID(1), iceberg.AddPartitionFieldBySourceID(1, "y_bucket[2]", iceberg.BucketTransform{NumBuckets: 2}, curSchema, &id))
+	require.NoError(t, err)
+
+	require.NoError(t, builder.AddPartitionSpec(&addedSpec, false))
+
+	require.NoError(t, builder.SetDefaultSpecID(-1))
+
+	require.True(t, builder.HasChanges())
+	require.Len(t, builder.updates, 2)
+	require.True(t, builder.updates[0].(*addPartitionSpecUpdate).Spec.Equals(expectedSpec))
+	require.Equal(t, -1, builder.updates[1].(*setDefaultSpecUpdate).SpecID)
+
+	metadata, err := builder.Build()
+	require.NoError(t, err)
+	require.NotNil(t, metadata)
+	require.Equal(t, 1, metadata.DefaultPartitionSpec())
+
+	require.True(t, expectedSpec.Equals(metadata.PartitionSpec()), "expected partition spec to match added spec")
+
+	newBuilder, err := MetadataBuilderFromBase(metadata)
+	require.NoError(t, err)
+	require.NotNil(t, newBuilder)
+
+	require.NoError(t, newBuilder.SetDefaultSpecID(0))
+
+	require.True(t, newBuilder.HasChanges(), "expected changes after setting default spec")
+	require.Len(t, newBuilder.updates, 1, "expected one update")
+	require.Equal(t, 0, newBuilder.updates[0].(*setDefaultSpecUpdate).SpecID, "expected default partition spec to be set to 0")
+
+	newBuild, err := newBuilder.Build()
+	require.NoError(t, err)
+	require.NotNil(t, newBuild)
+	require.Equal(t, 0, newBuild.DefaultPartitionSpec(), "expected default partition spec to be set to 0")
+
+	newWithoutChanges := builderWithoutChanges(2)
+	require.True(t, newWithoutChanges.specs[0].Equals(newBuild.PartitionSpec()), "expected partition spec to match added spec")
 }
 
 func TestSetRef(t *testing.T) {
@@ -114,12 +244,11 @@ func TestSetRef(t *testing.T) {
 		},
 		SchemaID: &schemaID,
 	}
-	_, err := builder.AddSnapshot(&snapshot)
-	require.NoError(t, err)
-	_, err = builder.SetSnapshotRef(MainBranch, 10, BranchRef, WithMinSnapshotsToKeep(10))
+
+	require.NoError(t, builder.AddSnapshot(&snapshot))
+	err := builder.SetSnapshotRef(MainBranch, 10, BranchRef, WithMinSnapshotsToKeep(10))
 	require.ErrorContains(t, err, "can't set snapshot ref main to unknown snapshot 10: snapshot with id 10 not found")
-	_, err = builder.SetSnapshotRef(MainBranch, 1, BranchRef, WithMinSnapshotsToKeep(10))
-	require.NoError(t, err)
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, BranchRef, WithMinSnapshotsToKeep(10)))
 	require.Len(t, builder.snapshotList, 1)
 	snap, err := builder.SnapshotByID(1)
 	require.NoError(t, err)
@@ -127,6 +256,20 @@ func TestSetRef(t *testing.T) {
 	require.Equal(t, snap.SnapshotID, int64(1))
 	require.True(t, snap.Equals(snapshot), "expected snapshot to match added snapshot")
 	require.Len(t, builder.snapshotLog, 1)
+}
+
+func TestAddPartitionSpecForV1RequiresSequentialIDs(t *testing.T) {
+	builder := builderWithoutChanges(1)
+
+	// Add a partition spec with non-sequential IDs
+	id := 1000
+	id2 := 1002
+	addedSpec, err := iceberg.NewPartitionSpecOpts(iceberg.WithSpecID(10),
+		iceberg.AddPartitionFieldBySourceID(2, "y", iceberg.IdentityTransform{}, builder.CurrentSchema(), &id),
+		iceberg.AddPartitionFieldBySourceID(3, "z", iceberg.IdentityTransform{}, builder.CurrentSchema(), &id2))
+	require.NoError(t, err)
+
+	require.ErrorContains(t, builder.AddPartitionSpec(&addedSpec, false), "v1 constraint: partition field IDs are not sequential: expected 1001, got 1002")
 }
 
 func TestSetBranchSnapshotCreatesBranchIfNotExists(t *testing.T) {
@@ -150,10 +293,8 @@ func TestSetBranchSnapshotCreatesBranchIfNotExists(t *testing.T) {
 		SchemaID: &schemaID,
 	}
 
-	_, err := builder.AddSnapshot(&snapshot)
-	require.NoError(t, err)
-	_, err = builder.SetSnapshotRef("new_branch", 2, BranchRef)
-	require.NoError(t, err)
+	require.NoError(t, builder.AddSnapshot(&snapshot))
+	require.NoError(t, builder.SetSnapshotRef("new_branch", 2, BranchRef))
 
 	meta, err := builder.Build()
 	require.NoError(t, err)
@@ -189,10 +330,93 @@ func TestCannotAddDuplicateSnapshotID(t *testing.T) {
 		},
 		SchemaID: &schemaID,
 	}
-	_, err := builder.AddSnapshot(&snapshot)
+	require.NoError(t, builder.AddSnapshot(&snapshot))
+	require.ErrorContains(t, builder.AddSnapshot(&snapshot), "can't add snapshot with id 2, already exists")
+}
+
+func TestAddIncompatibleCurrentSchemaFails(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	addedSchema := iceberg.NewSchema(1)
+	err := builder.AddSchema(addedSchema)
 	require.NoError(t, err)
-	_, err = builder.AddSnapshot(&snapshot)
-	require.ErrorContains(t, err, "can't add snapshot with id 2, already exists")
+	err = builder.SetCurrentSchemaID(1)
+	require.NoError(t, err)
+	_, err = builder.Build()
+	require.ErrorContains(t, err, "with source id 3 not found in schema")
+}
+
+func TestActiveSchemaCannotBeRemoved(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	// Try to remove the current schema
+	require.ErrorContains(t, builder.RemoveSchemas([]int{0}), "can't remove current schema with id 0")
+}
+
+func TestRemoveSchemas(t *testing.T) {
+	meta, err := getTestTableMetadata("TableMetadataV2Valid.json")
+	require.NoError(t, err)
+	require.Len(t, meta.Schemas(), 2, "expected 2 schemas in the metadata")
+	builder, err := MetadataBuilderFromBase(meta)
+	require.NoError(t, err)
+	err = builder.RemoveSchemas([]int{0})
+	require.NoError(t, err, "expected to remove schema with ID 1")
+	newMeta, err := builder.Build()
+	require.NoError(t, err)
+	require.Len(t, newMeta.Schemas(), 1, "expected 1 schema in the metadata after removal")
+	require.Equal(t, 1, newMeta.CurrentSchema().ID, "expected current schema to be 1")
+	require.Equal(t, 1, newMeta.(*metadataV2).CurrentSchemaID)
+	require.Len(t, builder.updates, 1, "expected one update for schema removal")
+	require.Equal(t, builder.updates[0].Action(), UpdateRemoveSchemas)
+	require.Equal(t, builder.updates[0].(*removeSchemasUpdate).SchemaIDs, []int{0}, "expected schema ID 0 to be removed")
+}
+
+// Java: TestTableMetadata.testUpdateSchema
+func TestUpdateSchema(t *testing.T) {
+	// Test schema updates and evolution
+	schema1 := iceberg.NewSchema(
+		0,
+		iceberg.NestedField{ID: 1, Name: "y", Type: iceberg.PrimitiveTypes.Int64, Required: true, Doc: "comment"},
+	)
+
+	meta, err := NewMetadata(
+		schema1,
+		iceberg.UnpartitionedSpec,
+		UnsortedSortOrder,
+		"s3://bucket/test/location",
+		map[string]string{},
+	)
+	require.NoError(t, err)
+
+	require.Equal(t, 0, meta.CurrentSchema().ID)
+	require.Len(t, meta.Schemas(), 1)
+	require.Equal(t, 1, meta.LastColumnID())
+
+	// Update schema by adding a field
+	schema2 := iceberg.NewSchema(
+		1,
+		iceberg.NestedField{ID: 1, Name: "y", Type: iceberg.PrimitiveTypes.Int64, Required: true, Doc: "comment"},
+		iceberg.NestedField{ID: 2, Name: "x", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+
+	builder, err := MetadataBuilderFromBase(meta)
+	require.NoError(t, err)
+
+	err = builder.AddSchema(schema2)
+	require.NoError(t, err)
+
+	err = builder.SetCurrentSchemaID(-1) // Use last added
+	require.NoError(t, err)
+
+	updatedMeta, err := builder.Build()
+	require.NoError(t, err)
+
+	require.Equal(t, 1, updatedMeta.CurrentSchema().ID)
+	require.Len(t, updatedMeta.Schemas(), 2)
+	require.Equal(t, 2, updatedMeta.LastColumnID())
+
+	// Verify both schemas are preserved
+	schemas := updatedMeta.Schemas()
+	require.True(t, schemas[0].Equals(schema1))
+	require.True(t, schemas[1].Equals(schema2))
 }
 
 func TestRemoveMainSnapshotRef(t *testing.T) {
@@ -206,10 +430,15 @@ func TestRemoveMainSnapshotRef(t *testing.T) {
 	if _, ok := builder.refs[MainBranch]; !ok {
 		t.Fatal("expected main branch to exist")
 	}
-	_, err = builder.RemoveSnapshotRef(MainBranch)
-	require.NoError(t, err)
+	require.NoError(t, builder.RemoveSnapshotRef(MainBranch))
 	require.Nil(t, builder.currentSnapshotID)
 	meta, err = builder.Build()
 	require.NoError(t, err)
 	require.NotNil(t, meta)
+}
+
+func TestDefaultSpecCannotBeRemoved(t *testing.T) {
+	builder := builderWithoutChanges(2)
+
+	require.ErrorContains(t, builder.RemovePartitionSpecs([]int{0}), "can't remove default partition spec with id 0")
 }

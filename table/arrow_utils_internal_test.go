@@ -44,6 +44,7 @@ func constructTestTable(t *testing.T, writeStats []string) (*metadata.FileMetaDa
         "last-column-id": 7,
         "current-schema-id": 0,
 		"last-updated-ms": -1,
+		"last-partition-id": 0,
         "schemas": [
             {
                 "type": "struct",
@@ -183,7 +184,7 @@ func (suite *FileStatsMetricsSuite) getDataFile(meta iceberg.Properties, writeSt
 	if len(meta) > 0 {
 		bldr, err := MetadataBuilderFromBase(tableMeta)
 		suite.Require().NoError(err)
-		_, err = bldr.SetProperties(meta)
+		err = bldr.SetProperties(meta)
 		suite.Require().NoError(err)
 		tableMeta, err = bldr.Build()
 		suite.Require().NoError(err)

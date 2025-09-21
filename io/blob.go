@@ -20,6 +20,7 @@ package io
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"path/filepath"
@@ -71,25 +72,45 @@ func (f *blobOpenFile) Sys() interface{}           { return f.b }
 func (f *blobOpenFile) IsDir() bool                { return false }
 func (f *blobOpenFile) Stat() (fs.FileInfo, error) { return f, nil }
 
+// KeyExtractor extracts the object key from an input path
+type KeyExtractor func(path string) (string, error)
+
+// defaultKeyExtractor extracts the object key by removing the scheme and bucket name from the URI
+// e.g., s3://bucket/path/file -> path/file
+func defaultKeyExtractor(bucketName string) KeyExtractor {
+	return func(location string) (string, error) {
+		_, after, found := strings.Cut(location, "://")
+		if found {
+			location = after
+		}
+
+		key := strings.TrimPrefix(location, bucketName+"/")
+
+		if key == "" {
+			return "", fmt.Errorf("URI path is empty: %s", location)
+		}
+
+		return key, nil
+	}
+}
+
 type blobFileIO struct {
 	*blob.Bucket
 
-	bucketName string
-	scheme     string
-	ctx        context.Context
+	keyExtractor KeyExtractor
+	ctx          context.Context
 }
 
-func (bfs *blobFileIO) preprocess(key string) string {
-	_, after, found := strings.Cut(key, "://")
-	if found {
-		key = after
-	}
-
-	return strings.TrimPrefix(key, bfs.bucketName+"/")
+func (bfs *blobFileIO) preprocess(path string) (string, error) {
+	return bfs.keyExtractor(path)
 }
 
 func (bfs *blobFileIO) Open(path string) (File, error) {
-	path = bfs.preprocess(path)
+	var err error
+	path, err = bfs.preprocess(path)
+	if err != nil {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: err}
+	}
 	if !fs.ValidPath(path) {
 		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrInvalid}
 	}
@@ -105,7 +126,11 @@ func (bfs *blobFileIO) Open(path string) (File, error) {
 }
 
 func (bfs *blobFileIO) Remove(name string) error {
-	name = bfs.preprocess(name)
+	var err error
+	name, err = bfs.preprocess(name)
+	if err != nil {
+		return &fs.PathError{Op: "remove", Path: name, Err: err}
+	}
 
 	return bfs.Bucket.Delete(bfs.ctx, name)
 }
@@ -115,7 +140,11 @@ func (bfs *blobFileIO) Create(name string) (FileWriter, error) {
 }
 
 func (bfs *blobFileIO) WriteFile(name string, content []byte) error {
-	name = bfs.preprocess(name)
+	var err error
+	name, err = bfs.preprocess(name)
+	if err != nil {
+		return &fs.PathError{Op: "write file", Path: name, Err: err}
+	}
 
 	return bfs.Bucket.WriteAll(bfs.ctx, name, content, nil)
 }
@@ -128,14 +157,17 @@ func (bfs *blobFileIO) WriteFile(name string, content []byte) error {
 //
 // The caller must call Close on the returned Writer, even if the write is
 // aborted.
-func (io *blobFileIO) NewWriter(ctx context.Context, path string, overwrite bool, opts *blob.WriterOptions) (w *blobWriteFile, err error) {
-	path = io.preprocess(path)
+func (bfs *blobFileIO) NewWriter(ctx context.Context, path string, overwrite bool, opts *blob.WriterOptions) (w *blobWriteFile, err error) {
+	path, err = bfs.preprocess(path)
+	if err != nil {
+		return nil, &fs.PathError{Op: "new writer", Path: path, Err: err}
+	}
 	if !fs.ValidPath(path) {
 		return nil, &fs.PathError{Op: "new writer", Path: path, Err: fs.ErrInvalid}
 	}
 
 	if !overwrite {
-		if exists, err := io.Bucket.Exists(ctx, path); exists {
+		if exists, err := bfs.Bucket.Exists(ctx, path); exists {
 			if err != nil {
 				return nil, &fs.PathError{Op: "new writer", Path: path, Err: err}
 			}
@@ -143,7 +175,7 @@ func (io *blobFileIO) NewWriter(ctx context.Context, path string, overwrite bool
 			return nil, &fs.PathError{Op: "new writer", Path: path, Err: fs.ErrInvalid}
 		}
 	}
-	bw, err := io.Bucket.NewWriter(ctx, path, opts)
+	bw, err := bfs.Bucket.NewWriter(ctx, path, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -155,8 +187,8 @@ func (io *blobFileIO) NewWriter(ctx context.Context, path string, overwrite bool
 		nil
 }
 
-func createBlobFS(ctx context.Context, bucket *blob.Bucket, bucketName, scheme string) IO {
-	return &blobFileIO{Bucket: bucket, bucketName: bucketName, scheme: scheme, ctx: ctx}
+func createBlobFS(ctx context.Context, bucket *blob.Bucket, keyExtractor KeyExtractor) IO {
+	return &blobFileIO{Bucket: bucket, keyExtractor: keyExtractor, ctx: ctx}
 }
 
 type blobWriteFile struct {

@@ -287,8 +287,7 @@ func createTestMetadata(snapshots []Snapshot, snapshotLog []SnapshotLogEntry) (M
 
 		// Add snapshots if provided
 		for _, snapshot := range snapshots {
-			builder, err = builder.AddSnapshot(&snapshot)
-			if err != nil {
+			if err = builder.AddSnapshot(&snapshot); err != nil {
 				return nil, err
 			}
 		}

@@ -755,13 +755,13 @@ func TestMetadataV2Serialize(t *testing.T) {
 func TestMetadataBuilderSetDefaultSpecIDLastPartition(t *testing.T) {
 	builder, err := NewMetadataBuilder()
 	assert.NoError(t, err)
-
+	schema := schema()
+	assert.NoError(t, builder.AddSchema(&schema))
+	assert.NoError(t, builder.SetCurrentSchemaID(-1))
 	partitionSpec := iceberg.NewPartitionSpecID(0)
-	_, err = builder.AddPartitionSpec(&partitionSpec, false)
-	assert.NoError(t, err)
+	assert.NoError(t, builder.AddPartitionSpec(&partitionSpec, false))
 
-	_, err = builder.SetDefaultSpecID(-1)
-	assert.NoError(t, err)
+	assert.NoError(t, builder.SetDefaultSpecID(-1))
 
 	assert.Equal(t, 0, builder.defaultSpecID)
 }
@@ -769,22 +769,17 @@ func TestMetadataBuilderSetDefaultSpecIDLastPartition(t *testing.T) {
 func TestMetadataBuilderSetLastAddedSchema(t *testing.T) {
 	builder, err := NewMetadataBuilder()
 	assert.NoError(t, err)
-	_, err = builder.SetFormatVersion(2)
-	assert.NoError(t, err)
+	assert.NoError(t, builder.SetFormatVersion(2))
 	schema := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.StringType{}, Required: true},
 	)
-	_, err = builder.AddSchema(schema)
-	assert.NoError(t, err)
-	_, err = builder.SetCurrentSchemaID(-1)
-	assert.NoError(t, err)
+	assert.NoError(t, builder.AddSchema(schema))
+	assert.NoError(t, builder.SetCurrentSchemaID(-1))
 
 	partitionSpec := iceberg.NewPartitionSpecID(0)
-	_, err = builder.AddPartitionSpec(&partitionSpec, false)
-	assert.NoError(t, err)
+	assert.NoError(t, builder.AddPartitionSpec(&partitionSpec, false))
 
-	_, err = builder.SetDefaultSpecID(-1)
-	assert.NoError(t, err)
+	assert.NoError(t, builder.SetDefaultSpecID(-1))
 
 	meta, err := builder.Build()
 	assert.NoError(t, err)
@@ -795,25 +790,21 @@ func TestMetadataBuilderSetLastAddedSchema(t *testing.T) {
 func TestMetadataBuilderSchemaIncreasingNumbering(t *testing.T) {
 	builder, err := NewMetadataBuilder()
 	assert.NoError(t, err)
-	_, err = builder.SetFormatVersion(2)
-	assert.NoError(t, err)
+	assert.NoError(t, builder.SetFormatVersion(2))
 	schema := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.StringType{}, Required: true},
 	)
-	_, err = builder.AddSchema(schema)
-	assert.NoError(t, err)
+	assert.NoError(t, builder.AddSchema(schema))
 
 	schema = iceberg.NewSchema(3,
 		iceberg.NestedField{ID: 3, Name: "foo", Type: iceberg.StringType{}, Required: true},
 	)
-	_, err = builder.AddSchema(schema)
-	assert.NoError(t, err)
+	assert.NoError(t, builder.AddSchema(schema))
 
 	schema = iceberg.NewSchema(2,
 		iceberg.NestedField{ID: 4, Name: "foo", Type: iceberg.StringType{}, Required: true},
 	)
-	_, err = builder.AddSchema(schema)
-	assert.NoError(t, err)
+	assert.NoError(t, builder.AddSchema(schema))
 
 	assert.Equal(t, 1, builder.schemaList[0].ID)
 	assert.Equal(t, 3, builder.schemaList[1].ID)
@@ -826,13 +817,11 @@ func TestMetadataBuilderReuseSchema(t *testing.T) {
 	schema := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.StringType{}, Required: true},
 	)
-	_, err = builder.AddSchema(schema)
-	assert.NoError(t, err)
+	assert.NoError(t, builder.AddSchema(schema))
 	schema2 := iceberg.NewSchema(15,
 		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.StringType{}, Required: true},
 	)
-	_, err = builder.AddSchema(schema2)
-	assert.NoError(t, err)
+	assert.NoError(t, builder.AddSchema(schema2))
 	assert.Equal(t, len(builder.schemaList), 1)
 	assert.Equal(t, *builder.lastAddedSchemaID, 1)
 }
@@ -902,6 +891,7 @@ func TestMetadataV2Validation(t *testing.T) {
 		"last-sequence-number": 34,
 		"current-schema-id": 0,
 		"last-updated-ms": 1602638573590,
+		"last-partition-id": 1000,
 		"schemas": [{"type":"struct","schema-id":0,"fields":[]}],
 		"default-spec-id": 0,
 		"partition-specs": [{"spec-id": 0, "fields": []}],
@@ -917,6 +907,7 @@ func TestMetadataV2Validation(t *testing.T) {
 		"last-updated-ms": 1602638573874,
 		"last-column-id": 5,
 		"current-schema-id": 0,
+		"last-partition-id": 1000,
 		"schemas": [{"type":"struct","schema-id":0,"fields":[]}],
 		"partition-specs": [{"spec-id": 0, "fields": []}],
 		"properties": {},
@@ -933,6 +924,7 @@ func TestMetadataV2Validation(t *testing.T) {
 		"current-schema-id": 0,
 		"last-updated-ms": 1602638573590,
 		"last-column-id": 0,
+		"last-partition-id": 1000,
 		"schemas": [{"type":"struct","schema-id":0,"fields":[]}],
 		"partition-specs": [{"spec-id": 0, "fields": []}],
 		"sort-orders": [],
@@ -950,6 +942,92 @@ func TestMetadataV2Validation(t *testing.T) {
 
 	// Test case 3: Verify LastColumnId maintains 0 when explicitly set
 	require.NoError(t, meta3.UnmarshalJSON([]byte(zeroColumnID)))
+}
+
+func TestTableMetadataV1PartitionSpecsWithoutDefaultId(t *testing.T) {
+	// Deserialize the JSON - this should succeed by inferring default_spec_id as the max spec ID
+	meta, err := getTestTableMetadata("TableMetadataV1PartitionSpecsWithoutDefaultId.json")
+	require.NoError(t, err)
+	require.Equal(t, meta.Version(), 1)
+	require.Equal(t, meta.TableUUID(), uuid.MustParse("d20125c8-7284-442c-9aea-15fee620737c"))
+	require.Equal(t, meta.DefaultPartitionSpec(), 2)
+	require.Equal(t, len(meta.PartitionSpecs()), 2)
+	spec := meta.PartitionSpec()
+	require.Equal(t, spec.ID(), 2)
+	require.Equal(t, spec.NumFields(), 1)
+	require.Equal(t, spec.Field(0).Name, "y")
+	require.Equal(t, spec.Field(0).Transform, iceberg.IdentityTransform{})
+	require.Equal(t, spec.Field(0).SourceID, 2)
+}
+
+func TestTableMetadataV2MissingPartitionSpecs(t *testing.T) {
+	meta, err := getTestTableMetadata("TableMetadataV2MissingPartitionSpecs.json")
+	require.Error(t, err)
+	require.Nil(t, meta)
+	// TODO: check for specific error
+}
+
+func TestTableMetadataV2MissingLastPartitionId(t *testing.T) {
+	// Similarly to above, this should fail but isn't since Go's lack of an Option type means it will just put a 0 for
+	// the missing lastPartitionId.
+	meta, err := getTestTableMetadata("TableMetadataV2MissingLastPartitionId.json")
+	require.Error(t, err)
+	require.Nil(t, meta)
+	// TODO: check for specific error
+}
+
+func TestDefaultPartitionSpec(t *testing.T) {
+	defaultSpecID := 1234
+	meta, err := getTestTableMetadata("TableMetadataV2Valid.json")
+	require.NoError(t, err)
+	spec := iceberg.NewPartitionSpecID(1234)
+
+	meta.(*metadataV2).DefaultSpecID = spec.ID()
+	meta.(*metadataV2).Specs = append(meta.(*metadataV2).Specs, spec)
+	partitionSpec := meta.PartitionSpec()
+	require.Equal(t, partitionSpec.ID(), defaultSpecID)
+}
+
+func TestTableMetadataV1SchemasWithoutCurrentId(t *testing.T) {
+	meta, err := getTestTableMetadata("TableMetadataV1SchemasWithoutCurrentId.json")
+	require.NoError(t, err)
+	require.Equal(t, meta.(*metadataV1).Version(), 1)
+	require.Equal(t, meta.TableUUID(), uuid.MustParse("d20125c8-7284-442c-9aea-15fee620737c"))
+	schema := meta.CurrentSchema()
+	require.Equal(t, len(schema.Fields()), 3)
+	require.Equal(t, schema.Fields()[0].Name, "x")
+	require.Equal(t, schema.Fields()[1].Name, "y")
+	require.Equal(t, schema.Fields()[2].Name, "z")
+}
+
+func TestTableMetadataV1NoValidSchema(t *testing.T) {
+	meta, err := getTestTableMetadata("TableMetadataV1NoValidSchema.json")
+	require.ErrorContains(t, err, "invalid metadata: current-schema-id -1 can't be found in any schema")
+	require.Nil(t, meta)
+}
+
+func TestTableMetadataV2SchemaNotFound(t *testing.T) {
+	meta, err := getTestTableMetadata("TableMetadataV2CurrentSchemaNotFound.json")
+	require.ErrorContains(t, err, "invalid metadata: current-schema-id 2 can't be found in any schema")
+	require.Nil(t, meta)
+}
+
+func TestTableMetadataV2MissingSchemas(t *testing.T) {
+	meta, err := getTestTableMetadata("TableMetadataV2MissingSchemas.json")
+	require.ErrorContains(t, err, "invalid metadata: current-schema-id -1 can't be found in any schema")
+	require.Nil(t, meta)
+}
+
+// Java: TestTableMetadata.testParseSchemaIdentifierFields
+func TestParseSchemaIdentifierFields(t *testing.T) {
+	meta, err := getTestTableMetadata("TableMetadataV2Valid.json")
+	require.NoError(t, err)
+	// Verify identifier fields
+	schemas := meta.Schemas()
+	require.Len(t, schemas, 2)
+
+	require.Empty(t, schemas[0].IdentifierFieldIDs)
+	require.Equal(t, []int{1, 2}, schemas[1].IdentifierFieldIDs)
 }
 
 func getTestTableMetadata(fileName string) (Metadata, error) {
