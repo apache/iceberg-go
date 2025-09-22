@@ -442,3 +442,57 @@ func TestDefaultSpecCannotBeRemoved(t *testing.T) {
 
 	require.ErrorContains(t, builder.RemovePartitionSpecs([]int{0}), "can't remove default partition spec with id 0")
 }
+
+func TestSetReservedPropertiesFails(t *testing.T) {
+	builder := builderWithoutChanges(2)
+
+	// Test that setting non-reserved properties works
+	err := builder.SetProperties(iceberg.Properties{
+		"custom-property":         "value1",
+		"another-custom-property": "value2",
+	})
+	require.NoError(t, err)
+	require.True(t, builder.HasChanges())
+
+	// Test setting each reserved property individually
+	for _, reserved := range ReservedProperties {
+		err := builder.SetProperties(iceberg.Properties{reserved: "some-value"})
+		require.ErrorContains(t, err, "can't set reserved property "+reserved)
+	}
+
+	// Test setting multiple properties where one is reserved
+	err = builder.SetProperties(iceberg.Properties{
+		"custom-property":         "allowed",
+		PropertyCurrentSnapshotId: "12345",
+		"another-custom-property": "also-allowed",
+	})
+	require.ErrorContains(t, err, "can't set reserved property "+PropertyCurrentSnapshotId)
+}
+
+func TestRemoveReservedPropertiesFails(t *testing.T) {
+	builder := builderWithoutChanges(2)
+
+	// Test removing each reserved property individually
+	for _, reserved := range ReservedProperties {
+		err := builder.RemoveProperties([]string{reserved})
+		require.ErrorContains(t, err, "can't remove reserved property "+reserved)
+	}
+
+	// Test removing multiple properties where one is reserved
+	err := builder.RemoveProperties([]string{
+		"custom-property",
+		PropertyUuid,
+		"another-custom-property",
+	})
+	require.ErrorContains(t, err, "can't remove reserved property "+PropertyUuid)
+
+	// Add some custom properties first, then test that removing non-reserved properties works
+	require.NoError(t, builder.SetProperties(iceberg.Properties{
+		"custom-property":         "value1",
+		"another-custom-property": "value2",
+	}))
+
+	err = builder.RemoveProperties([]string{"custom-property"})
+	require.NoError(t, err)
+	require.True(t, builder.HasChanges())
+}
