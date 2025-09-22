@@ -412,6 +412,58 @@ func TestSetBranchSnapshotCreatesBranchIfNotExists(t *testing.T) {
 	require.Equal(t, int64(2), builder.updates[1].(*setSnapshotRefUpdate).SnapshotID)
 }
 
+func TestRemoveSnapshotRemovesBranch(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	schemaID := 0
+	snapshot := Snapshot{
+		SnapshotID:       2,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.lastUpdatedMS + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary: &Summary{
+			Operation: OpAppend,
+			Properties: map[string]string{
+				"spark.app.id":     "local-1662532784305",
+				"added-data-files": "4",
+				"added-records":    "4",
+				"added-files-size": "6001",
+			},
+		},
+		SchemaID: &schemaID,
+	}
+
+	require.NoError(t, builder.AddSnapshot(&snapshot))
+	require.NoError(t, builder.SetSnapshotRef("new_branch", 2, BranchRef))
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.NotNil(t, meta)
+	// Check that the branch was created
+	ref := meta.(*metadataV2).SnapshotRefs["new_branch"]
+	require.Len(t, meta.(*metadataV2).SnapshotRefs, 1)
+	require.Equal(t, int64(2), ref.SnapshotID)
+	require.Equal(t, BranchRef, ref.SnapshotRefType)
+	require.True(t, builder.updates[0].(*addSnapshotUpdate).Snapshot.Equals(snapshot))
+	require.Equal(t, "new_branch", builder.updates[1].(*setSnapshotRefUpdate).RefName)
+	require.Equal(t, BranchRef, builder.updates[1].(*setSnapshotRefUpdate).RefType)
+	require.Equal(t, int64(2), builder.updates[1].(*setSnapshotRefUpdate).SnapshotID)
+
+	newBuilder, err := MetadataBuilderFromBase(meta)
+	require.NoError(t, err)
+	require.NoError(t, newBuilder.RemoveSnapshots([]int64{snapshot.SnapshotID}))
+	newMeta, err := newBuilder.Build()
+	require.NoError(t, err)
+	require.NotNil(t, newMeta)
+	require.Len(t, newMeta.(*metadataV2).SnapshotRefs, 0)
+	require.Len(t, newBuilder.updates, 1)
+	require.Equal(t, newBuilder.updates[0].(*removeSnapshotsUpdate).SnapshotIDs[0], snapshot.SnapshotID)
+	for k, r := range newMeta.Refs() {
+		require.NotEqual(t, r.SnapshotID, snapshot.SnapshotID)
+		require.NotEqual(t, k, "new_branch")
+	}
+}
+
 func TestCannotAddDuplicateSnapshotID(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	schemaID := 0

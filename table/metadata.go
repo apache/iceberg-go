@@ -369,7 +369,7 @@ func (b *MetadataBuilder) AddSnapshot(snapshot *Snapshot) error {
 }
 
 func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64) error {
-	if slices.Contains(snapshotIds, *b.currentSnapshotID) {
+	if b.currentSnapshotID != nil && slices.Contains(snapshotIds, *b.currentSnapshotID) {
 		return errors.New("current snapshot cannot be removed")
 	}
 
@@ -386,6 +386,7 @@ func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64) error {
 			newRefs[name] = ref
 		}
 	}
+	b.refs = newRefs
 
 	b.updates = append(b.updates, NewRemoveSnapshotsUpdate(snapshotIds))
 
