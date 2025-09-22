@@ -194,7 +194,17 @@ func (s *SortOrder) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// NewSortOrder creates a new SortOrder.
+//
+// The orderID must be greater than or equal to 0.
+// If orderID is 0, no fields can be passed, this is equal to UnsortedSortOrder.
+// Fields need to have non-nil Transform, valid Direction and NullOrder values.
 func NewSortOrder(orderID int, fields []SortField) (SortOrder, error) {
+	if orderID < 0 {
+		return SortOrder{}, fmt.Errorf("%w: sort order ID %d must be a non-negative integer",
+			ErrInvalidSortOrderID, orderID)
+	}
+
 	if orderID == 0 && len(fields) != 0 {
 		return SortOrder{}, fmt.Errorf("%w: sort order ID 0 is reserved for unsorted order", ErrInvalidSortOrderID)
 	}
