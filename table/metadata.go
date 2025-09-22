@@ -1575,6 +1575,7 @@ func (m *metadataV2) validate() error {
 	if err := m.commonMetadata.validate(); err != nil {
 		return err
 	}
+
 	return nil
 }
 
