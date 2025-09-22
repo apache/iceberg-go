@@ -457,7 +457,7 @@ func TestSetReservedPropertiesFails(t *testing.T) {
 	// Test setting each reserved property individually
 	for _, reserved := range ReservedProperties {
 		err := builder.SetProperties(iceberg.Properties{reserved: "some-value"})
-		require.ErrorContains(t, err, fmt.Sprintf("can't set reserved property %s", reserved))
+		require.ErrorContains(t, err, "can't set reserved property "+reserved)
 	}
 
 	// Test setting multiple properties where one is reserved
@@ -466,8 +466,7 @@ func TestSetReservedPropertiesFails(t *testing.T) {
 		PropertyCurrentSnapshotId: "12345",
 		"another-custom-property": "also-allowed",
 	})
-	require.ErrorContains(t, err, fmt.Sprintf("can't set reserved property %s", PropertyCurrentSnapshotId))
-
+	require.ErrorContains(t, err, "can't set reserved property "+PropertyCurrentSnapshotId)
 }
 
 func TestRemoveReservedPropertiesFails(t *testing.T) {
@@ -476,7 +475,7 @@ func TestRemoveReservedPropertiesFails(t *testing.T) {
 	// Test removing each reserved property individually
 	for _, reserved := range ReservedProperties {
 		err := builder.RemoveProperties([]string{reserved})
-		require.ErrorContains(t, err, fmt.Sprintf("can't remove reserved property %s", reserved))
+		require.ErrorContains(t, err, "can't remove reserved property "+reserved)
 	}
 
 	// Test removing multiple properties where one is reserved
@@ -485,7 +484,7 @@ func TestRemoveReservedPropertiesFails(t *testing.T) {
 		PropertyUuid,
 		"another-custom-property",
 	})
-	require.ErrorContains(t, err, fmt.Sprintf("can't remove reserved property %s", PropertyUuid))
+	require.ErrorContains(t, err, "can't remove reserved property "+PropertyUuid)
 
 	// Add some custom properties first, then test that removing non-reserved properties works
 	require.NoError(t, builder.SetProperties(iceberg.Properties{
