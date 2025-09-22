@@ -180,15 +180,12 @@ var testSchema = iceberg.NewSchemaWithIdentifiers(0, []int{},
 var testPartitionSpec = iceberg.NewPartitionSpec(
 	iceberg.PartitionField{SourceID: 2, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "bar"})
 
-var testSortOrder = table.SortOrder{
-	OrderID: 1,
-	Fields: []table.SortField{
-		{
-			SourceID: 1, Transform: iceberg.IdentityTransform{},
-			Direction: table.SortASC, NullOrder: table.NullsLast,
-		},
+var testSortOrder, _ = table.NewSortOrder(1, []table.SortField{
+	{
+		SourceID: 1, Transform: iceberg.IdentityTransform{},
+		Direction: table.SortASC, NullOrder: table.NullsLast,
 	},
-}
+})
 
 func TestGlueGetTable(t *testing.T) {
 	assert := require.New(t)

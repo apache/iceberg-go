@@ -138,8 +138,8 @@ func parseSortOrder(sortStr string) (table.SortOrder, error) {
 		return table.UnsortedSortOrder, nil
 	}
 
-	return table.SortOrder{
-		OrderID: table.InitialSortOrderID,
-		Fields:  sortFields,
-	}, nil
+	return table.NewSortOrder(
+		table.InitialSortOrderID,
+		sortFields,
+	)
 }

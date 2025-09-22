@@ -129,13 +129,15 @@ func (t *TableTestSuite) TestPartitionSpec() {
 }
 
 func (t *TableTestSuite) TestSortOrder() {
-	t.Equal(table.SortOrder{
-		OrderID: 3,
-		Fields: []table.SortField{
+	expected, err := table.NewSortOrder(
+		3,
+		[]table.SortField{
 			{SourceID: 2, Transform: iceberg.IdentityTransform{}, Direction: table.SortASC, NullOrder: table.NullsFirst},
 			{SourceID: 3, Transform: iceberg.BucketTransform{NumBuckets: 4}, Direction: table.SortDESC, NullOrder: table.NullsLast},
 		},
-	}, t.tbl.SortOrder())
+	)
+	require.NoError(t.T(), err)
+	t.Equal(expected, t.tbl.SortOrder())
 }
 
 func (t *TableTestSuite) TestLocation() {
