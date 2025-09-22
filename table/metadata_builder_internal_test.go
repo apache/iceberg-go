@@ -488,6 +488,54 @@ func TestCannotAddDuplicateSnapshotID(t *testing.T) {
 	require.ErrorContains(t, builder.AddSnapshot(&snapshot), "can't add snapshot with id 2, already exists")
 }
 
+func TestAddSnapshotRejectsInvalidTimestamp(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	schemaID := 0
+	snapshot := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() - 61000,
+		ManifestList:     "/snap-1.avro",
+		Summary: &Summary{
+			Operation:  OpAppend,
+			Properties: map[string]string{},
+		},
+		SchemaID: &schemaID,
+	}
+	err := builder.AddSnapshot(&snapshot)
+	require.ErrorContains(t, err, "before last updated timestamp")
+
+	snapshot.TimestampMs = builder.base.LastUpdatedMillis() + (60000 * 2)
+
+	err = builder.AddSnapshot(&snapshot)
+	require.NoError(t, err)
+
+	// cause an entry to snapshot log by setting the main branch ref
+	err = builder.SetSnapshotRef(MainBranch, snapshot.SnapshotID, BranchRef, WithMinSnapshotsToKeep(10))
+	require.NoError(t, err)
+
+	snapshot2 := Snapshot{
+		SnapshotID:       2,
+		ParentSnapshotID: nil,
+		SequenceNumber:   1,
+		TimestampMs:      snapshot.TimestampMs - 61000,
+		ManifestList:     "/snap-1.avro",
+		Summary: &Summary{
+			Operation:  OpAppend,
+			Properties: map[string]string{},
+		},
+		SchemaID: &schemaID,
+	}
+
+	err = builder.AddSnapshot(&snapshot2)
+	require.ErrorContains(t, err, "before last snapshot timestamp")
+
+	snapshot2.TimestampMs = snapshot.TimestampMs + (60000 * 2) + 1
+	err = builder.AddSnapshot(&snapshot2)
+	require.NoError(t, err)
+}
+
 func TestConstructDefaultMainBranch(t *testing.T) {
 	// TODO: Not sure what this test is supposed to do Rust: `test_construct_default_main_branch`
 	meta, err := getTestTableMetadata("TableMetadataV2Valid.json")

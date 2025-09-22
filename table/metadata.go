@@ -37,6 +37,7 @@ import (
 const (
 	partitionFieldStartID       = 1000
 	supportedTableFormatVersion = 2
+	oneMinuteInMs               = 60_000
 )
 
 func generateSnapshotID() int64 {
@@ -358,6 +359,19 @@ func (b *MetadataBuilder) AddSnapshot(snapshot *Snapshot) error {
 		snapshot.SequenceNumber <= *b.lastSequenceNumber {
 		return fmt.Errorf("can't add snapshot with sequence number %d, must be > than last sequence number %d",
 			snapshot.SequenceNumber, *b.lastSequenceNumber)
+	}
+
+	if len(b.snapshotLog) > 0 {
+		last := b.snapshotLog[len(b.snapshotLog)-1]
+		if (snapshot.TimestampMs - last.TimestampMs) < -oneMinuteInMs {
+			return fmt.Errorf("invalid snapshot timestamp %d: before last snapshot timestamp %d",
+				snapshot.TimestampMs, last.TimestampMs)
+		}
+	}
+	maxTS := max(b.lastUpdatedMS, b.base.LastUpdatedMillis())
+	if snapshot.TimestampMs-maxTS < -oneMinuteInMs {
+		return fmt.Errorf("invalid snapshot timestamp %d: before last updated timestamp %d",
+			snapshot.TimestampMs, maxTS)
 	}
 
 	b.updates = append(b.updates, NewAddSnapshotUpdate(snapshot))
@@ -1353,6 +1367,14 @@ func (c *commonMetadata) validate() error {
 		}
 	}
 
+	if err := c.validateChronologicalSnapshotLogs(); err != nil {
+		return err
+	}
+
+	if err := c.validateChronologicalMetadataLogs(); err != nil {
+		return err
+	}
+
 	if err := c.checkSchemas(); err != nil {
 		return err
 	}
@@ -1415,6 +1437,38 @@ func (c *commonMetadata) checkRefsExist() error {
 		if snap == nil {
 			return fmt.Errorf("%w: snapshot ref %s with ID %d does not exist in snapshot list",
 				ErrInvalidMetadata, name, ref.SnapshotID)
+		}
+	}
+
+	return nil
+}
+
+func (c *commonMetadata) validateChronologicalSnapshotLogs() error {
+	for i := 1; i < len(c.SnapshotLog); i++ {
+		prev, cur := c.SnapshotLog[i-1], c.SnapshotLog[i]
+		if (cur.TimestampMs - prev.TimestampMs) < -oneMinuteInMs {
+			return fmt.Errorf("%w: expected sorted snapshot log entries", ErrInvalidMetadata)
+		}
+		if i == len(c.SnapshotLog)-1 {
+			if c.LastUpdatedMS-cur.TimestampMs < -oneMinuteInMs {
+				return fmt.Errorf("%w: invalid update timestamp %d: before last snapshot log entry at %d", ErrInvalidMetadata, c.LastUpdatedMS, cur.TimestampMs)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (c *commonMetadata) validateChronologicalMetadataLogs() error {
+	for i := 1; i < len(c.MetadataLog); i++ {
+		prev, cur := c.MetadataLog[i-1], c.MetadataLog[i]
+		if (cur.TimestampMs - prev.TimestampMs) < -oneMinuteInMs {
+			return fmt.Errorf("%w: expected sorted metadata log entries", ErrInvalidMetadata)
+		}
+		if i == len(c.MetadataLog)-1 {
+			if c.LastUpdatedMS-cur.TimestampMs < -oneMinuteInMs {
+				return fmt.Errorf("%w: invalid update timestamp %d: before last metadata log entry at %d", ErrInvalidMetadata, c.LastUpdatedMS, cur.TimestampMs)
+			}
 		}
 	}
 

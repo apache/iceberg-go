@@ -29,13 +29,13 @@ import (
 )
 
 func TestSnapshotAsOf(t *testing.T) {
-	baseTime := time.Date(2025, 8, 24, 0, 0, 0, 0, time.UTC)
+	baseTime := time.Now()
 
 	// Create test snapshots with different timestamps
 	snapshots := []Snapshot{
 		{
 			SnapshotID:     1000,
-			TimestampMs:    baseTime.Add(-3 * time.Hour).UnixMilli(), // 3 hours ago
+			TimestampMs:    baseTime.Add(1 * time.Hour).UnixMilli(), // 3 hours from now
 			SequenceNumber: 1,
 			ManifestList:   "s3://bucket/table/snap1.avro",
 			Summary:        &Summary{Operation: OpAppend},
@@ -43,7 +43,7 @@ func TestSnapshotAsOf(t *testing.T) {
 		{
 			SnapshotID:       2000,
 			ParentSnapshotID: &[]int64{1000}[0],
-			TimestampMs:      baseTime.Add(-2 * time.Hour).UnixMilli(), // 2 hours ago
+			TimestampMs:      baseTime.Add(2 * time.Hour).UnixMilli(), // 2 hours from now
 			SequenceNumber:   2,
 			ManifestList:     "s3://bucket/table/snap2.avro",
 			Summary:          &Summary{Operation: OpAppend},
@@ -51,7 +51,7 @@ func TestSnapshotAsOf(t *testing.T) {
 		{
 			SnapshotID:       3000,
 			ParentSnapshotID: &[]int64{2000}[0],
-			TimestampMs:      baseTime.Add(-1 * time.Hour).UnixMilli(), // 1 hour ago
+			TimestampMs:      baseTime.Add(3 * time.Hour).UnixMilli(), // 1 hour from now
 			SequenceNumber:   3,
 			ManifestList:     "s3://bucket/table/snap3.avro",
 			Summary:          &Summary{Operation: OpDelete},
@@ -59,9 +59,9 @@ func TestSnapshotAsOf(t *testing.T) {
 	}
 
 	snapshotLog := []SnapshotLogEntry{
-		{SnapshotID: 1000, TimestampMs: baseTime.Add(-3 * time.Hour).UnixMilli()},
-		{SnapshotID: 2000, TimestampMs: baseTime.Add(-2 * time.Hour).UnixMilli()},
-		{SnapshotID: 3000, TimestampMs: baseTime.Add(-1 * time.Hour).UnixMilli()},
+		{SnapshotID: 1000, TimestampMs: baseTime.Add(1 * time.Hour).UnixMilli()},
+		{SnapshotID: 2000, TimestampMs: baseTime.Add(2 * time.Hour).UnixMilli()},
+		{SnapshotID: 3000, TimestampMs: baseTime.Add(3 * time.Hour).UnixMilli()},
 	}
 
 	// Create table with metadata from snapshots and log
@@ -74,7 +74,7 @@ func TestSnapshotAsOf(t *testing.T) {
 	}
 
 	t.Run("SnapshotAsOf finds exact timestamp match (inclusive)", func(t *testing.T) {
-		timestamp := baseTime.Add(-2 * time.Hour).UnixMilli()
+		timestamp := baseTime.Add(2 * time.Hour).UnixMilli()
 		snapshot := table.SnapshotAsOf(timestamp, true)
 		require.NotNil(t, snapshot)
 		assert.Equal(t, int64(2000), snapshot.SnapshotID)
@@ -82,7 +82,7 @@ func TestSnapshotAsOf(t *testing.T) {
 	})
 
 	t.Run("SnapshotAsOf finds exact timestamp match (exclusive)", func(t *testing.T) {
-		timestamp := baseTime.Add(-2 * time.Hour).UnixMilli()
+		timestamp := baseTime.Add(2 * time.Hour).UnixMilli()
 		snapshot := table.SnapshotAsOf(timestamp, false)
 		require.NotNil(t, snapshot)
 		assert.Equal(t, int64(1000), snapshot.SnapshotID) // Should get previous snapshot
@@ -90,7 +90,7 @@ func TestSnapshotAsOf(t *testing.T) {
 
 	t.Run("SnapshotAsOf finds snapshot before timestamp", func(t *testing.T) {
 		// Query 90 minutes ago (between snapshots 2 and 3)
-		timestamp := baseTime.Add(-90 * time.Minute).UnixMilli()
+		timestamp := baseTime.Add(150 * time.Minute).UnixMilli()
 		snapshot := table.SnapshotAsOf(timestamp, true)
 		require.NotNil(t, snapshot)
 		assert.Equal(t, int64(2000), snapshot.SnapshotID) // Should get snapshot 2
@@ -98,7 +98,7 @@ func TestSnapshotAsOf(t *testing.T) {
 
 	t.Run("SnapshotAsOf finds most recent snapshot for future timestamp", func(t *testing.T) {
 		// Query future timestamp
-		timestamp := baseTime.Add(1 * time.Hour).UnixMilli()
+		timestamp := baseTime.Add(4 * time.Hour).UnixMilli()
 		snapshot := table.SnapshotAsOf(timestamp, true)
 		require.NotNil(t, snapshot)
 		assert.Equal(t, int64(3000), snapshot.SnapshotID) // Should get most recent
@@ -106,19 +106,19 @@ func TestSnapshotAsOf(t *testing.T) {
 
 	t.Run("SnapshotAsOf returns nil for timestamp before first snapshot", func(t *testing.T) {
 		// Query before first snapshot
-		timestamp := baseTime.Add(-4 * time.Hour).UnixMilli()
+		timestamp := baseTime.Add(-1 * time.Hour).UnixMilli()
 		snapshot := table.SnapshotAsOf(timestamp, true)
 		assert.Nil(t, snapshot)
 	})
 
 	t.Run("SnapshotAsOf returns nil for timestamp equal to first snapshot (exclusive)", func(t *testing.T) {
-		timestamp := baseTime.Add(-3 * time.Hour).UnixMilli()
+		timestamp := baseTime.UnixMilli()
 		snapshot := table.SnapshotAsOf(timestamp, false)
 		assert.Nil(t, snapshot)
 	})
 
 	t.Run("SnapshotAsOf with inclusive=true (default behavior)", func(t *testing.T) {
-		timestamp := baseTime.Add(-2 * time.Hour).UnixMilli()
+		timestamp := baseTime.Add(2 * time.Hour).UnixMilli()
 		snapshot := table.SnapshotAsOf(timestamp, true)
 		require.NotNil(t, snapshot)
 		assert.Equal(t, int64(2000), snapshot.SnapshotID)
@@ -126,19 +126,19 @@ func TestSnapshotAsOf(t *testing.T) {
 }
 
 func TestTable_WithSnapshotAsOf(t *testing.T) {
-	baseTime := time.Date(2025, 8, 24, 0, 0, 0, 0, time.UTC)
+	baseTime := time.Now()
 
 	snapshots := []Snapshot{
 		{
 			SnapshotID:     1000,
-			TimestampMs:    baseTime.Add(-2 * time.Hour).UnixMilli(),
+			TimestampMs:    baseTime.Add(1 * time.Hour).UnixMilli(),
 			SequenceNumber: 1,
 			ManifestList:   "s3://bucket/table/snap1.avro",
 			Summary:        &Summary{Operation: OpAppend},
 		},
 		{
 			SnapshotID:     2000,
-			TimestampMs:    baseTime.Add(-1 * time.Hour).UnixMilli(),
+			TimestampMs:    baseTime.Add(2 * time.Hour).UnixMilli(),
 			SequenceNumber: 2,
 			ManifestList:   "s3://bucket/table/snap2.avro",
 			Summary:        &Summary{Operation: OpAppend},
@@ -146,8 +146,8 @@ func TestTable_WithSnapshotAsOf(t *testing.T) {
 	}
 
 	snapshotLog := []SnapshotLogEntry{
-		{SnapshotID: 1000, TimestampMs: baseTime.Add(-2 * time.Hour).UnixMilli()},
-		{SnapshotID: 2000, TimestampMs: baseTime.Add(-1 * time.Hour).UnixMilli()},
+		{SnapshotID: 1000, TimestampMs: baseTime.Add(1 * time.Hour).UnixMilli()},
+		{SnapshotID: 2000, TimestampMs: baseTime.Add(2 * time.Hour).UnixMilli()},
 	}
 
 	meta, err := createTestMetadata(snapshots, snapshotLog)
@@ -159,7 +159,7 @@ func TestTable_WithSnapshotAsOf(t *testing.T) {
 	}
 
 	t.Run("WithSnapshotAsOf creates scan with correct snapshot ID", func(t *testing.T) {
-		timestamp := baseTime.Add(-90 * time.Minute).UnixMilli() // Between snapshots
+		timestamp := baseTime.Add(90 * time.Minute).UnixMilli() // Between snapshots
 		scan := table.Scan(WithSnapshotAsOf(timestamp))
 		require.NotNil(t, scan)
 
@@ -168,7 +168,7 @@ func TestTable_WithSnapshotAsOf(t *testing.T) {
 	})
 
 	t.Run("WithSnapshotAsOf with additional options", func(t *testing.T) {
-		timestamp := baseTime.Add(-30 * time.Minute).UnixMilli()
+		timestamp := baseTime.Add(30 * time.Minute).UnixMilli()
 		scan := table.Scan(
 			WithSnapshotAsOf(timestamp),
 			WithSelectedFields("col1", "col2"),
@@ -183,7 +183,7 @@ func TestTable_WithSnapshotAsOf(t *testing.T) {
 	})
 
 	t.Run("WithSnapshotAsOf returns error for timestamp with no snapshot during execution", func(t *testing.T) {
-		timestamp := baseTime.Add(-3 * time.Hour).UnixMilli() // Before first snapshot
+		timestamp := baseTime.UnixMilli() // Before first snapshot
 		scan := table.Scan(WithSnapshotAsOf(timestamp))
 		require.NotNil(t, scan)
 
@@ -194,7 +194,7 @@ func TestTable_WithSnapshotAsOf(t *testing.T) {
 	})
 
 	t.Run("WithSnapshotID clears conflicting WithSnapshotAsOf option", func(t *testing.T) {
-		timestamp := baseTime.Add(-30 * time.Minute).UnixMilli()
+		timestamp := baseTime.Add(30 * time.Minute).UnixMilli()
 		// WithSnapshotID should clear any previous asOfTimestamp
 		scan := table.Scan(WithSnapshotAsOf(timestamp), WithSnapshotID(9999))
 		require.NotNil(t, scan)
