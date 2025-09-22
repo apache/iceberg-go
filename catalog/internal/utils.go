@@ -45,7 +45,7 @@ func GetMetadataLoc(location string, newVersion uint) string {
 func WriteTableMetadata(metadata table.Metadata, fs io.WriteFileIO, loc string) error {
 	out, err := fs.Create(loc)
 	if err != nil {
-		return nil
+		return err
 	}
 
 	return errors.Join(
@@ -65,15 +65,7 @@ func WriteMetadata(ctx context.Context, metadata table.Metadata, loc string, pro
 		return errors.New("filesystem IO does not support writing")
 	}
 
-	out, err := wfs.Create(loc)
-	if err != nil {
-		return nil
-	}
-
-	return errors.Join(
-		json.NewEncoder(out).Encode(metadata),
-		out.Close(),
-	)
+	return WriteTableMetadata(metadata, wfs, loc)
 }
 
 func UpdateTableMetadata(base table.Metadata, updates []table.Update, metadataLoc string) (table.Metadata, error) {
