@@ -368,7 +368,7 @@ func (s *SqliteCatalogTestSuite) TestCreateTableDefaultSortOrder() {
 
 		s.FileExists(strings.TrimPrefix(tbl.MetadataLocation(), "file://"))
 
-		s.Equal(0, tbl.SortOrder().OrderID)
+		s.Equal(0, tbl.SortOrder().OrderID())
 		s.NoError(tt.cat.DropTable(context.Background(), tt.tblID))
 	}
 }
@@ -386,11 +386,11 @@ func (s *SqliteCatalogTestSuite) TestCreateV1Table() {
 		ns := catalog.NamespaceFromIdent(tt.tblID)
 		s.Require().NoError(tt.cat.CreateNamespace(context.Background(), ns, nil))
 		tbl, err := tt.cat.CreateTable(context.Background(), tt.tblID, tableSchemaNested,
-			catalog.WithProperties(iceberg.Properties{"format-version": "1"}))
+			catalog.WithProperties(iceberg.Properties{table.PropertyFormatVersion: "1"}))
 		s.Require().NoError(err)
 
 		s.FileExists(strings.TrimPrefix(tbl.MetadataLocation(), "file://"))
-		s.Equal(0, tbl.SortOrder().OrderID)
+		s.Equal(0, tbl.SortOrder().OrderID())
 		s.Equal(1, tbl.Metadata().Version())
 		s.True(tbl.Spec().Equals(*iceberg.UnpartitionedSpec))
 		s.NoError(tt.cat.DropTable(context.Background(), tt.tblID))
@@ -410,20 +410,26 @@ func (s *SqliteCatalogTestSuite) TestCreateTableCustomSortOrder() {
 		ns := catalog.NamespaceFromIdent(tt.tblID)
 		s.Require().NoError(tt.cat.CreateNamespace(context.Background(), ns, nil))
 
-		order := table.SortOrder{Fields: []table.SortField{
-			{SourceID: 2, Transform: iceberg.IdentityTransform{}, NullOrder: table.NullsFirst},
-		}}
-
+		order, err := table.NewSortOrder(1, []table.SortField{
+			{SourceID: 2, Transform: iceberg.IdentityTransform{}, NullOrder: table.NullsFirst, Direction: table.SortASC},
+		})
+		s.Require().NoError(err)
 		tbl, err := tt.cat.CreateTable(context.Background(), tt.tblID, tableSchemaNested,
 			catalog.WithSortOrder(order))
 		s.Require().NoError(err)
 
 		s.FileExists(strings.TrimPrefix(tbl.MetadataLocation(), "file://"))
-		s.Equal(1, tbl.SortOrder().OrderID)
-		s.Len(tbl.SortOrder().Fields, 1)
-		s.Equal(table.SortASC, tbl.SortOrder().Fields[0].Direction)
-		s.Equal(table.NullsFirst, tbl.SortOrder().Fields[0].NullOrder)
-		s.Equal("identity", tbl.SortOrder().Fields[0].Transform.String())
+		s.Equal(1, tbl.SortOrder().OrderID())
+		s.Equal(tbl.SortOrder().Len(), 1)
+
+		for f := range tbl.SortOrder().Fields() {
+			s.Equal(table.SortASC, f.Direction)
+			s.Equal(table.NullsFirst, f.NullOrder)
+			s.Equal("identity", f.Transform.String())
+
+			break
+		}
+
 		s.NoError(tt.cat.DropTable(context.Background(), tt.tblID))
 	}
 }
@@ -441,7 +447,7 @@ func (s *SqliteCatalogTestSuite) TestCreateDuplicatedTable() {
 		ns := catalog.NamespaceFromIdent(tt.tblID)
 		s.Require().NoError(tt.cat.CreateNamespace(context.Background(), ns, nil))
 		_, err := tt.cat.CreateTable(context.Background(), tt.tblID, tableSchemaNested,
-			catalog.WithProperties(iceberg.Properties{"format-version": "1"}))
+			catalog.WithProperties(iceberg.Properties{table.PropertyFormatVersion: "1"}))
 		s.Require().NoError(err)
 
 		_, err = tt.cat.CreateTable(context.Background(), tt.tblID, tableSchemaNested)

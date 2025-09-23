@@ -37,16 +37,22 @@ func schema() iceberg.Schema {
 
 func sortOrder() SortOrder {
 	// TODO: rust has a constructor for SortOrder which checks for compat to schema
-	return SortOrder{
-		OrderID: 1,
-		Fields: []SortField{
+	newSortOrder, err := NewSortOrder(
+		1,
+		[]SortField{
 			{
 				SourceID:  3,
 				Direction: SortDESC,
 				NullOrder: NullsFirst,
+				Transform: iceberg.BucketTransform{NumBuckets: 4},
 			},
 		},
+	)
+	if err != nil {
+		panic(err)
 	}
+
+	return newSortOrder
 }
 
 func partitionSpec() iceberg.PartitionSpec {
@@ -77,13 +83,16 @@ func builderWithoutChanges(formatVersion int) MetadataBuilder {
 	if err = builder.SetCurrentSchemaID(-1); err != nil {
 		panic(err)
 	}
-	if err = builder.AddSortOrder(&sortOrder, true); err != nil {
+	if err = builder.AddSortOrder(&sortOrder); err != nil {
 		panic(err)
 	}
 	if err = builder.SetDefaultSortOrderID(-1); err != nil {
 		panic(err)
 	}
 	if err = builder.AddPartitionSpec(&partitionSpec, true); err != nil {
+		panic(err)
+	}
+	if err = builder.SetDefaultSpecID(-1); err != nil {
 		panic(err)
 	}
 
@@ -222,6 +231,35 @@ func TestSetExistingDefaultPartitionSpec(t *testing.T) {
 
 	newWithoutChanges := builderWithoutChanges(2)
 	require.True(t, newWithoutChanges.specs[0].Equals(newBuild.PartitionSpec()), "expected partition spec to match added spec")
+}
+
+func TestSetSortOrder(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	added, err := NewSortOrder(10, []SortField{
+		{
+			SourceID:  1,
+			Transform: iceberg.IdentityTransform{}, Direction: SortASC, NullOrder: NullsFirst,
+		},
+	})
+	require.NoError(t, err)
+	schema := schema()
+	require.NoError(t, added.CheckCompatibility(&schema))
+	require.NoError(t, builder.AddSortOrder(&added))
+	expected, err := NewSortOrder(2, []SortField{
+		{
+			SourceID:  1,
+			Transform: iceberg.IdentityTransform{}, Direction: SortASC, NullOrder: NullsFirst,
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, builder.updates, 1)
+	require.Equal(t, maxBy(builder.sortOrderList, func(e SortOrder) int {
+		return e.OrderID()
+	}), 2)
+	order, err := builder.GetSortOrderByID(2)
+	require.NoError(t, err)
+	require.True(t, (*order).Equals(expected), "expected sort order to match added sort order")
+	require.True(t, builder.updates[0].(*addSortOrderUpdate).SortOrder.Equals(expected), "expected sort order to match added sort order")
 }
 
 func TestSetRef(t *testing.T) {
@@ -441,4 +479,58 @@ func TestDefaultSpecCannotBeRemoved(t *testing.T) {
 	builder := builderWithoutChanges(2)
 
 	require.ErrorContains(t, builder.RemovePartitionSpecs([]int{0}), "can't remove default partition spec with id 0")
+}
+
+func TestSetReservedPropertiesFails(t *testing.T) {
+	builder := builderWithoutChanges(2)
+
+	// Test that setting non-reserved properties works
+	err := builder.SetProperties(iceberg.Properties{
+		"custom-property":         "value1",
+		"another-custom-property": "value2",
+	})
+	require.NoError(t, err)
+	require.True(t, builder.HasChanges())
+
+	// Test setting each reserved property individually
+	for _, reserved := range ReservedProperties {
+		err := builder.SetProperties(iceberg.Properties{reserved: "some-value"})
+		require.ErrorContains(t, err, "can't set reserved property "+reserved)
+	}
+
+	// Test setting multiple properties where one is reserved
+	err = builder.SetProperties(iceberg.Properties{
+		"custom-property":         "allowed",
+		PropertyCurrentSnapshotId: "12345",
+		"another-custom-property": "also-allowed",
+	})
+	require.ErrorContains(t, err, "can't set reserved property "+PropertyCurrentSnapshotId)
+}
+
+func TestRemoveReservedPropertiesFails(t *testing.T) {
+	builder := builderWithoutChanges(2)
+
+	// Test removing each reserved property individually
+	for _, reserved := range ReservedProperties {
+		err := builder.RemoveProperties([]string{reserved})
+		require.ErrorContains(t, err, "can't remove reserved property "+reserved)
+	}
+
+	// Test removing multiple properties where one is reserved
+	err := builder.RemoveProperties([]string{
+		"custom-property",
+		PropertyUuid,
+		"another-custom-property",
+	})
+	require.ErrorContains(t, err, "can't remove reserved property "+PropertyUuid)
+
+	// Add some custom properties first, then test that removing non-reserved properties works
+	require.NoError(t, builder.SetProperties(iceberg.Properties{
+		"custom-property":         "value1",
+		"another-custom-property": "value2",
+	}))
+
+	err = builder.RemoveProperties([]string{"custom-property"})
+	require.NoError(t, err)
+	require.True(t, builder.HasChanges())
 }

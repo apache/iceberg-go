@@ -129,13 +129,15 @@ func (t *TableTestSuite) TestPartitionSpec() {
 }
 
 func (t *TableTestSuite) TestSortOrder() {
-	t.Equal(table.SortOrder{
-		OrderID: 3,
-		Fields: []table.SortField{
+	expected, err := table.NewSortOrder(
+		3,
+		[]table.SortField{
 			{SourceID: 2, Transform: iceberg.IdentityTransform{}, Direction: table.SortASC, NullOrder: table.NullsFirst},
 			{SourceID: 3, Transform: iceberg.BucketTransform{NumBuckets: 4}, Direction: table.SortDESC, NullOrder: table.NullsLast},
 		},
-	}, t.tbl.SortOrder())
+	)
+	require.NoError(t.T(), err)
+	t.Equal(expected, t.tbl.SortOrder())
 }
 
 func (t *TableTestSuite) TestLocation() {
@@ -318,7 +320,7 @@ func (t *TableWritingTestSuite) writeParquet(fio iceio.WriteFileIO, filePath str
 
 func (t *TableWritingTestSuite) createTable(identifier table.Identifier, formatVersion int, spec iceberg.PartitionSpec, sc *iceberg.Schema) *table.Table {
 	meta, err := table.NewMetadata(sc, &spec, table.UnsortedSortOrder,
-		t.location, iceberg.Properties{"format-version": strconv.Itoa(formatVersion)})
+		t.location, iceberg.Properties{table.PropertyFormatVersion: strconv.Itoa(formatVersion)})
 	t.Require().NoError(err)
 
 	return table.New(
@@ -820,7 +822,7 @@ func (t *TableWritingTestSuite) TestReplaceDataFiles() {
 
 	ident := table.Identifier{"default", "replace_data_files_v" + strconv.Itoa(t.formatVersion)}
 	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec,
-		table.UnsortedSortOrder, t.location, iceberg.Properties{"format-version": strconv.Itoa(t.formatVersion)})
+		table.UnsortedSortOrder, t.location, iceberg.Properties{table.PropertyFormatVersion: strconv.Itoa(t.formatVersion)})
 	t.Require().NoError(err)
 
 	ctx := context.Background()
@@ -902,7 +904,7 @@ func (t *TableWritingTestSuite) TestExpireSnapshots() {
 
 	ident := table.Identifier{"default", "replace_data_files_v" + strconv.Itoa(t.formatVersion)}
 	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec,
-		table.UnsortedSortOrder, t.location, iceberg.Properties{"format-version": strconv.Itoa(t.formatVersion)})
+		table.UnsortedSortOrder, t.location, iceberg.Properties{table.PropertyFormatVersion: strconv.Itoa(t.formatVersion)})
 	t.Require().NoError(err)
 
 	ctx := context.Background()
@@ -1152,7 +1154,7 @@ func (t *TableWritingTestSuite) TestMergeManifests() {
 			table.ParquetCompressionKey:    "snappy",
 			table.ManifestMergeEnabledKey:  "true",
 			table.ManifestMinMergeCountKey: "1",
-			"format-version":               strconv.Itoa(t.formatVersion),
+			table.PropertyFormatVersion:    strconv.Itoa(t.formatVersion),
 		}, tableSchema())
 
 	tblB := t.createTableWithProps(table.Identifier{"default", "merge_manifest_b"},
@@ -1161,14 +1163,14 @@ func (t *TableWritingTestSuite) TestMergeManifests() {
 			table.ManifestMergeEnabledKey:    "true",
 			table.ManifestMinMergeCountKey:   "1",
 			table.ManifestTargetSizeBytesKey: "1",
-			"format-version":                 strconv.Itoa(t.formatVersion),
+			table.PropertyFormatVersion:      strconv.Itoa(t.formatVersion),
 		}, tableSchema())
 
 	tblC := t.createTableWithProps(table.Identifier{"default", "merge_manifest_c"},
 		iceberg.Properties{
 			table.ParquetCompressionKey:    "snappy",
 			table.ManifestMinMergeCountKey: "1",
-			"format-version":               strconv.Itoa(t.formatVersion),
+			table.PropertyFormatVersion:    strconv.Itoa(t.formatVersion),
 		}, tableSchema())
 
 	arrTable := arrowTableWithNull()
@@ -1300,7 +1302,7 @@ func TestNullableStructRequiredField(t *testing.T) {
 
 	require.NoError(t, cat.CreateNamespace(t.Context(), table.Identifier{"testing"}, nil))
 	tbl, err := cat.CreateTable(t.Context(), table.Identifier{"testing", "nullable_struct_required_field"}, sc,
-		catalog.WithProperties(iceberg.Properties{"format-version": "2"}),
+		catalog.WithProperties(iceberg.Properties{table.PropertyFormatVersion: "2"}),
 		catalog.WithLocation("file://"+loc))
 	require.NoError(t, err)
 	require.NotNil(t, tbl)
@@ -1397,7 +1399,7 @@ func (t *TableWritingTestSuite) TestDeleteOldMetadataLogsErrorOnFileNotFound() {
 
 	ident := table.Identifier{"default", "file_v" + strconv.Itoa(t.formatVersion)}
 	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec,
-		table.UnsortedSortOrder, t.location, iceberg.Properties{"format-version": strconv.Itoa(t.formatVersion), "write.metadata.delete-after-commit.enabled": "true"})
+		table.UnsortedSortOrder, t.location, iceberg.Properties{table.PropertyFormatVersion: strconv.Itoa(t.formatVersion), "write.metadata.delete-after-commit.enabled": "true"})
 	t.Require().NoError(err)
 
 	tbl := table.New(ident, meta, t.getMetadataLoc(), func(ctx context.Context) (iceio.IO, error) {
@@ -1443,7 +1445,7 @@ func (t *TableWritingTestSuite) TestDeleteOldMetadataNoErrorLogsOnFileFound() {
 	}
 
 	ident := table.Identifier{"default", "file_v" + strconv.Itoa(t.formatVersion)}
-	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, t.location, iceberg.Properties{"format-version": strconv.Itoa(t.formatVersion), "write.metadata.delete-after-commit.enabled": "true"})
+	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, t.location, iceberg.Properties{table.PropertyFormatVersion: strconv.Itoa(t.formatVersion), "write.metadata.delete-after-commit.enabled": "true"})
 	t.Require().NoError(err)
 
 	tbl := table.New(
