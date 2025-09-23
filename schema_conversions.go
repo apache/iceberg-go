@@ -30,33 +30,37 @@ func partitionTypeToAvroSchema(t *StructType) (avro.Schema, error) {
 		var sc avro.Schema
 		switch typ := f.Type.(type) {
 		case Int32Type:
-			sc = internal.IntSchema
+			sc = internal.NullableSchema(internal.IntSchema)
 		case Int64Type:
-			sc = internal.LongSchema
+			sc = internal.NullableSchema(internal.LongSchema)
 		case Float32Type:
-			sc = internal.FloatSchema
+			sc = internal.NullableSchema(internal.FloatSchema)
 		case Float64Type:
-			sc = internal.DoubleSchema
+			sc = internal.NullableSchema(internal.DoubleSchema)
 		case StringType:
-			sc = internal.StringSchema
+			sc = internal.NullableSchema(internal.StringSchema)
 		case DateType:
-			sc = internal.DateSchema
+			sc = internal.NullableSchema(internal.DateSchema)
 		case TimeType:
-			sc = internal.TimeSchema
+			sc = internal.NullableSchema(internal.TimeSchema)
 		case TimestampType:
-			sc = internal.TimestampSchema
+			sc = internal.NullableSchema(internal.TimestampSchema)
 		case TimestampTzType:
-			sc = internal.TimestampTzSchema
+			sc = internal.NullableSchema(internal.TimestampTzSchema)
 		case UUIDType:
-			sc = internal.UUIDSchema
+			sc = internal.NullableSchema(internal.UUIDSchema)
 		case BooleanType:
-			sc = internal.BoolSchema
+			sc = internal.NullableSchema(internal.BoolSchema)
 		case BinaryType:
-			sc = internal.BinarySchema
+			sc = internal.NullableSchema(internal.BinarySchema)
 		case FixedType:
-			sc = internal.Must(avro.NewFixedSchema("fixed", "", typ.len, nil))
+			// Currently the hamba/avro library couldn't resolve the [n]byte array types for fixed schemas in unions.
+			// https://github.com/hamba/avro/issues/571
+			// TODO: Create the proper Fixed Schema for Avro that can match the use case
+			sc = internal.NullableSchema(internal.BinarySchema)
 		case DecimalType:
-			sc = internal.DecimalSchema(typ.precision, typ.scale)
+			decimalSchema := internal.DecimalSchema(typ.precision, typ.scale)
+			sc = internal.NullableSchema(decimalSchema)
 		default:
 			return nil, fmt.Errorf("unsupported partition type: %s", f.Type.String())
 		}
