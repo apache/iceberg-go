@@ -113,7 +113,7 @@ if [ "${RELEASE_UPLOAD}" -gt 0 ]; then
   echo "Uploading to ASF dist/dev..."
   # rename files to remove -rc${rc} suffix before uploading
   pushd "${id}"
-  for fname in "./*"; do
+  for fname in ./*; do
     mv "${fname}" "${fname//-rc${rc}/}"
   done
   popd
