@@ -310,6 +310,70 @@ func TestAddPartitionSpecForV1RequiresSequentialIDs(t *testing.T) {
 	require.ErrorContains(t, builder.AddPartitionSpec(&addedSpec, false), "v1 constraint: partition field IDs are not sequential: expected 1001, got 1002")
 }
 
+func TestSnapshotLogSkipsIntermediate(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	schemaID := 0
+	snapshot1 := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary: &Summary{
+			Operation: OpAppend,
+			Properties: map[string]string{
+				"spark.app.id":     "local-1662532784305",
+				"added-data-files": "4",
+				"added-records":    "4",
+				"added-files-size": "6001",
+			},
+		},
+		SchemaID: &schemaID,
+	}
+
+	snapshot2 := Snapshot{
+		SnapshotID:       2,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 2,
+		ManifestList:     "/snap-1.avro",
+		Summary: &Summary{
+			Operation: OpAppend,
+			Properties: map[string]string{
+				"spark.app.id":     "local-1662532784305",
+				"added-data-files": "4",
+				"added-records":    "4",
+				"added-files-size": "6001",
+			},
+		},
+		SchemaID: &schemaID,
+	}
+	err := builder.AddSnapshot(&snapshot1)
+	require.NoError(t, err)
+	err = builder.SetSnapshotRef(MainBranch, 1, BranchRef, WithMinSnapshotsToKeep(10))
+	require.NoError(t, err)
+
+	err = builder.AddSnapshot(&snapshot2)
+	require.NoError(t, err)
+	err = builder.SetSnapshotRef(MainBranch, 2, BranchRef, WithMinSnapshotsToKeep(10))
+	require.NoError(t, err)
+
+	require.NoError(t, err)
+
+	res, err := builder.Build()
+	require.NoError(t, err)
+	require.NotNil(t, res)
+
+	require.Len(t, res.(*metadataV2).SnapshotLog, 1)
+	snap := res.(*metadataV2).SnapshotLog[0]
+	require.NotNil(t, snap)
+	require.Equal(t, snap, SnapshotLogEntry{
+		SnapshotID:  2,
+		TimestampMs: snapshot2.TimestampMs,
+	}, "expected snapshot to match added snapshot")
+	require.True(t, res.CurrentSnapshot().Equals(snapshot2))
+}
+
 func TestSetBranchSnapshotCreatesBranchIfNotExists(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	schemaID := 0
@@ -348,6 +412,58 @@ func TestSetBranchSnapshotCreatesBranchIfNotExists(t *testing.T) {
 	require.Equal(t, int64(2), builder.updates[1].(*setSnapshotRefUpdate).SnapshotID)
 }
 
+func TestRemoveSnapshotRemovesBranch(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	schemaID := 0
+	snapshot := Snapshot{
+		SnapshotID:       2,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.lastUpdatedMS + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary: &Summary{
+			Operation: OpAppend,
+			Properties: map[string]string{
+				"spark.app.id":     "local-1662532784305",
+				"added-data-files": "4",
+				"added-records":    "4",
+				"added-files-size": "6001",
+			},
+		},
+		SchemaID: &schemaID,
+	}
+
+	require.NoError(t, builder.AddSnapshot(&snapshot))
+	require.NoError(t, builder.SetSnapshotRef("new_branch", 2, BranchRef))
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.NotNil(t, meta)
+	// Check that the branch was created
+	ref := meta.(*metadataV2).SnapshotRefs["new_branch"]
+	require.Len(t, meta.(*metadataV2).SnapshotRefs, 1)
+	require.Equal(t, int64(2), ref.SnapshotID)
+	require.Equal(t, BranchRef, ref.SnapshotRefType)
+	require.True(t, builder.updates[0].(*addSnapshotUpdate).Snapshot.Equals(snapshot))
+	require.Equal(t, "new_branch", builder.updates[1].(*setSnapshotRefUpdate).RefName)
+	require.Equal(t, BranchRef, builder.updates[1].(*setSnapshotRefUpdate).RefType)
+	require.Equal(t, int64(2), builder.updates[1].(*setSnapshotRefUpdate).SnapshotID)
+
+	newBuilder, err := MetadataBuilderFromBase(meta)
+	require.NoError(t, err)
+	require.NoError(t, newBuilder.RemoveSnapshots([]int64{snapshot.SnapshotID}))
+	newMeta, err := newBuilder.Build()
+	require.NoError(t, err)
+	require.NotNil(t, newMeta)
+	require.Len(t, newMeta.(*metadataV2).SnapshotRefs, 0)
+	require.Len(t, newBuilder.updates, 1)
+	require.Equal(t, newBuilder.updates[0].(*removeSnapshotsUpdate).SnapshotIDs[0], snapshot.SnapshotID)
+	for k, r := range newMeta.Refs() {
+		require.NotEqual(t, r.SnapshotID, snapshot.SnapshotID)
+		require.NotEqual(t, k, "new_branch")
+	}
+}
+
 func TestCannotAddDuplicateSnapshotID(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	schemaID := 0
@@ -372,6 +488,22 @@ func TestCannotAddDuplicateSnapshotID(t *testing.T) {
 	require.ErrorContains(t, builder.AddSnapshot(&snapshot), "can't add snapshot with id 2, already exists")
 }
 
+func TestConstructDefaultMainBranch(t *testing.T) {
+	// TODO: Not sure what this test is supposed to do Rust: `test_construct_default_main_branch`
+	meta, err := getTestTableMetadata("TableMetadataV2Valid.json")
+	require.NoError(t, err)
+	require.NotNil(t, meta)
+
+	builder, err := MetadataBuilderFromBase(meta)
+	require.NoError(t, err)
+
+	meta, err = builder.Build()
+	require.NoError(t, err)
+	require.NotNil(t, meta)
+
+	require.Equal(t, meta.(*metadataV2).SnapshotRefs[MainBranch].SnapshotID, meta.CurrentSnapshot().SnapshotID)
+}
+
 func TestAddIncompatibleCurrentSchemaFails(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	addedSchema := iceberg.NewSchema(1)
@@ -381,6 +513,25 @@ func TestAddIncompatibleCurrentSchemaFails(t *testing.T) {
 	require.NoError(t, err)
 	_, err = builder.Build()
 	require.ErrorContains(t, err, "with source id 3 not found in schema")
+}
+
+func TestRemoveMainSnapshotRef(t *testing.T) {
+	meta, err := getTestTableMetadata("TableMetadataV2Valid.json")
+	require.NoError(t, err)
+	require.NotNil(t, meta)
+	require.NotNil(t, meta.CurrentSnapshot())
+	builder, err := MetadataBuilderFromBase(meta)
+	require.NoError(t, err)
+	require.NotNil(t, builder.currentSnapshotID)
+	if _, ok := builder.refs[MainBranch]; !ok {
+		t.Fatal("expected main branch to exist")
+	}
+	err = builder.RemoveSnapshotRef(MainBranch)
+	require.NoError(t, err)
+	require.Nil(t, builder.currentSnapshotID)
+	meta, err = builder.Build()
+	require.NoError(t, err)
+	require.NotNil(t, meta)
 }
 
 func TestActiveSchemaCannotBeRemoved(t *testing.T) {
@@ -455,24 +606,6 @@ func TestUpdateSchema(t *testing.T) {
 	schemas := updatedMeta.Schemas()
 	require.True(t, schemas[0].Equals(schema1))
 	require.True(t, schemas[1].Equals(schema2))
-}
-
-func TestRemoveMainSnapshotRef(t *testing.T) {
-	meta, err := getTestTableMetadata("TableMetadataV2Valid.json")
-	require.NoError(t, err)
-	require.NotNil(t, meta)
-	require.NotNil(t, meta.CurrentSnapshot())
-	builder, err := MetadataBuilderFromBase(meta)
-	require.NoError(t, err)
-	require.NotNil(t, builder.currentSnapshotID)
-	if _, ok := builder.refs[MainBranch]; !ok {
-		t.Fatal("expected main branch to exist")
-	}
-	require.NoError(t, builder.RemoveSnapshotRef(MainBranch))
-	require.Nil(t, builder.currentSnapshotID)
-	meta, err = builder.Build()
-	require.NoError(t, err)
-	require.NotNil(t, meta)
 }
 
 func TestDefaultSpecCannotBeRemoved(t *testing.T) {
