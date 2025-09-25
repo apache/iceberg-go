@@ -40,6 +40,12 @@ func WithOAuthToken(token string) Option {
 	}
 }
 
+func WithAuthManager(authManager AuthManager) Option {
+	return func(o *options) {
+		o.authManager = authManager
+	}
+}
+
 func WithTLSConfig(config *tls.Config) Option {
 	return func(o *options) {
 		o.tlsConfig = config
@@ -123,6 +129,7 @@ type options struct {
 	tlsConfig         *tls.Config
 	credential        string
 	oauthToken        string
+	authManager       AuthManager
 	warehouseLocation string
 	metadataLocation  string
 	enableSigv4       bool
