@@ -134,6 +134,19 @@ type Metadata interface {
 	NameMapping() iceberg.NameMapping
 
 	LastSequenceNumber() int64
+	// Statistics is an optional list of table statistics.
+	// Table statistics files are valid Puffin files.
+	// Statistics are informational. A reader can choose to ignore statistics information.
+	// Statistics support is not required to read the table correctly.
+	// A table can contain many statistics files associated with different table snapshots.
+	Statistics() []Statistics
+	// PartitionStatistics is an optional list of partition statistics files.
+	// Partition statistics are not required for reading or planning
+	// and readers may ignore them. Each table snapshot may be associated
+	// with at most one partition statistics file. A writer can optionally
+	// write the partition statistics file during each write operation,
+	// or it can also be computed on demand.
+	PartitionStatistics() []PartitionStatistics
 }
 
 type MetadataBuilder struct {
@@ -1035,6 +1048,8 @@ type commonMetadata struct {
 	SortOrderList      []SortOrder             `json:"sort-orders"`
 	DefaultSortOrderID int                     `json:"default-sort-order-id"`
 	SnapshotRefs       map[string]SnapshotRef  `json:"refs,omitempty"`
+	StatisticsList     []Statistics            `json:"statistics,omitempty"`
+	PartitionStatsList []PartitionStatistics   `json:"partition-statistics,omitempty"`
 }
 
 func initCommonMetadataForDeserialization() commonMetadata {
@@ -1179,6 +1194,14 @@ func (c *commonMetadata) DefaultSortOrder() int {
 
 func (c *commonMetadata) Properties() iceberg.Properties {
 	return c.Props
+}
+
+func (c *commonMetadata) Statistics() []Statistics {
+	return c.StatisticsList
+}
+
+func (c *commonMetadata) PartitionStatistics() []PartitionStatistics {
+	return c.PartitionStatsList
 }
 
 // preValidate updates values in the metadata struct with defaults based on
