@@ -22,3 +22,14 @@ type AuthManager interface {
 	// AuthHeader returns the key and value for the authorization header.
 	AuthHeader() (string, string, error)
 }
+
+// OAuthTokenManager is an implementation of the AuthManager interface which
+// simply returns the provided token as a bearer token.
+type OAuthTokenManager struct {
+	Token string
+}
+
+// AuthHeader returns the authorization header with the bearer token.
+func (o *OAuthTokenManager) AuthHeader() (string, string, error) {
+	return "Authorization", "Bearer " + o.Token, nil
+}
