@@ -161,33 +161,7 @@ type createTableRequest struct {
 	Props         iceberg.Properties     `json:"properties,omitempty"`
 }
 
-type oauthTokenResponse struct {
-	AccessToken  string `json:"access_token"`
-	TokenType    string `json:"token_type"`
-	ExpiresIn    int    `json:"expires_in"`
-	Scope        string `json:"scope"`
-	RefreshToken string `json:"refresh_token"`
-}
 
-type oauthErrorResponse struct {
-	Err     string `json:"error"`
-	ErrDesc string `json:"error_description"`
-	ErrURI  string `json:"error_uri"`
-}
-
-func (o oauthErrorResponse) Unwrap() error { return ErrOAuthError }
-func (o oauthErrorResponse) Error() string {
-	msg := o.Err
-	if o.ErrDesc != "" {
-		msg += ": " + o.ErrDesc
-	}
-
-	if o.ErrURI != "" {
-		msg += " (" + o.ErrURI + ")"
-	}
-
-	return msg
-}
 
 type configResponse struct {
 	Defaults  iceberg.Properties `json:"defaults"`
@@ -536,61 +510,8 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 	return nil
 }
 
-func (r *Catalog) fetchAccessToken(cl *http.Client, creds string, opts *options) (string, error) {
-	clientID, clientSecret, hasID := strings.Cut(creds, ":")
-	if !hasID {
-		clientID, clientSecret = "", clientID
-	}
 
-	scope := "catalog"
-	if opts.scope != "" {
-		scope = opts.scope
-	}
-	data := url.Values{
-		"grant_type":    {"client_credentials"},
-		"client_id":     {clientID},
-		"client_secret": {clientSecret},
-		"scope":         {scope},
-	}
 
-	uri := opts.authUri
-	if uri == nil {
-		uri = r.baseURI.JoinPath("oauth/tokens")
-	}
-
-	rsp, err := cl.PostForm(uri.String(), data)
-	if err != nil {
-		return "", err
-	}
-
-	if rsp.StatusCode == http.StatusOK {
-		defer rsp.Body.Close()
-		dec := json.NewDecoder(rsp.Body)
-		var tok oauthTokenResponse
-		if err := dec.Decode(&tok); err != nil {
-			return "", fmt.Errorf("failed to decode oauth token response: %w", err)
-		}
-
-		return tok.AccessToken, nil
-	}
-
-	switch rsp.StatusCode {
-	case http.StatusUnauthorized, http.StatusBadRequest:
-		defer func() {
-			_, _ = io.Copy(io.Discard, rsp.Body)
-			_ = rsp.Body.Close()
-		}()
-		dec := json.NewDecoder(rsp.Body)
-		var oauthErr oauthErrorResponse
-		if err := dec.Decode(&oauthErr); err != nil {
-			return "", fmt.Errorf("failed to decode oauth error: %w", err)
-		}
-
-		return "", oauthErr
-	default:
-		return "", handleNon200(rsp, nil)
-	}
-}
 
 func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Client, error) {
 	session := &sessionTransport{
@@ -605,11 +526,17 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 
 	if opts.credential != "" {
 		if _, ok := opts.authManager.(*Oauth2AuthManager); !ok {
-			token, err := r.fetchAccessToken(cl, opts.credential, opts)
-			if err != nil {
-				return nil, fmt.Errorf("auth error: %w", err)
+			authURI := opts.authUri
+			if authURI == nil {
+				authURI = r.baseURI.JoinPath("oauth/tokens")
 			}
-			opts.authManager = &Oauth2AuthManager{Token: token}
+
+			opts.authManager = &Oauth2AuthManager{
+				Credential: opts.credential,
+				AuthURI:    authURI,
+				Scope:      opts.scope,
+				Client:     cl,
+			}
 		}
 	}
 
