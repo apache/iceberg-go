@@ -23,13 +23,13 @@ type AuthManager interface {
 	AuthHeader() (string, string, error)
 }
 
-// OAuthTokenManager is an implementation of the AuthManager interface which
+// Oauth2AuthManager is an implementation of the AuthManager interface which
 // simply returns the provided token as a bearer token.
-type OAuthTokenManager struct {
+type Oauth2AuthManager struct {
 	Token string
 }
 
 // AuthHeader returns the authorization header with the bearer token.
-func (o *OAuthTokenManager) AuthHeader() (string, string, error) {
+func (o *Oauth2AuthManager) AuthHeader() (string, string, error) {
 	return "Authorization", "Bearer " + o.Token, nil
 }
