@@ -393,8 +393,6 @@ func handleNon200(rsp *http.Response, override map[int]error) error {
 func fromProps(props iceberg.Properties, o *options) {
 	for k, v := range props {
 		switch k {
-		case keyOauthToken:
-			o.oauthToken = v
 		case keyWarehouseLocation:
 			o.warehouseLocation = v
 		case keyMetadataLocation:
@@ -449,7 +447,6 @@ func toProps(o *options) iceberg.Properties {
 	}
 
 	setIf(keyOauthCredential, o.credential)
-	setIf(keyOauthToken, o.oauthToken)
 	setIf(keyWarehouseLocation, o.warehouseLocation)
 	setIf(keyMetadataLocation, o.metadataLocation)
 	if o.enableSigv4 {
@@ -587,16 +584,14 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	}
 	cl := &http.Client{Transport: session}
 
-	token := opts.oauthToken
-	if token == "" && opts.credential != "" {
-		var err error
-		if token, err = r.fetchAccessToken(cl, opts.credential, opts); err != nil {
-			return nil, fmt.Errorf("auth error: %w", err)
+	if opts.credential != "" {
+		if _, ok := opts.authManager.(*OAuthTokenManager); !ok {
+			token, err := r.fetchAccessToken(cl, opts.credential, opts)
+			if err != nil {
+				return nil, fmt.Errorf("auth error: %w", err)
+			}
+			opts.authManager = &OAuthTokenManager{Token: token}
 		}
-	}
-
-	if token != "" {
-		session.defaultHeaders.Set(authorizationHeader, bearerPrefix+" "+token)
 	}
 
 	session.defaultHeaders.Set("X-Client-Version", icebergRestSpecVersion)
