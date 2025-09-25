@@ -35,7 +35,7 @@ func WithCredential(cred string) Option {
 }
 
 func WithOAuthToken(token string) Option {
-	return WithAuthManager(&OAuthTokenManager{Token: token})
+	return WithAuthManager(&Oauth2AuthManager{Token: token})
 }
 
 func WithHeaders(headers map[string]string) Option {

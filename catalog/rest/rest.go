@@ -604,12 +604,12 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	cl := &http.Client{Transport: session}
 
 	if opts.credential != "" {
-		if _, ok := opts.authManager.(*OAuthTokenManager); !ok {
+		if _, ok := opts.authManager.(*Oauth2AuthManager); !ok {
 			token, err := r.fetchAccessToken(cl, opts.credential, opts)
 			if err != nil {
 				return nil, fmt.Errorf("auth error: %w", err)
 			}
-			opts.authManager = &OAuthTokenManager{Token: token}
+			opts.authManager = &Oauth2AuthManager{Token: token}
 		}
 	}
 
