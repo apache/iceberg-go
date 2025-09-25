@@ -1483,7 +1483,8 @@ func TestInvalidSnapshotLogOrder(t *testing.T) {
 	meta.(*metadataV2).SnapshotLog[1].TimestampMs = 0
 
 	ser, err := json.Marshal(meta)
-	meta, err = ParseMetadataBytes(ser)
+	require.NoError(t, err)
+	_, err = ParseMetadataBytes(ser)
 	require.ErrorContains(t, err, "invalid metadata: expected sorted snapshot log entries")
 }
 
@@ -1504,7 +1505,8 @@ func TestInvalidMetadataLogOrder(t *testing.T) {
 	}
 
 	ser, err := json.Marshal(meta)
-	meta, err = ParseMetadataBytes(ser)
+	require.NoError(t, err)
+	_, err = ParseMetadataBytes(ser)
 	require.ErrorContains(t, err, "invalid metadata: expected sorted metadata log entries")
 }
 
