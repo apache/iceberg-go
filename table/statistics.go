@@ -22,6 +22,7 @@ import (
 	"fmt"
 )
 
+// BlobType is the type of blob in a Puffin file
 type BlobType string
 
 const (
@@ -52,7 +53,12 @@ func (bt *BlobType) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-type Statistics struct {
+// StatisticsFile represents a statistics file in the Puffin format, that can be used to read table data more
+// efficiently.
+//
+// Statistics are informational. A reader can choose to ignore statistics information.
+// Statistics support is not required to read the table correctly.
+type StatisticsFile struct {
 	SnapshotID            int64          `json:"snapshot-id"`
 	StatisticsPath        string         `json:"statistics-path"`
 	FileSizeInBytes       int64          `json:"file-size-in-bytes"`
@@ -61,6 +67,7 @@ type Statistics struct {
 	BlobMetadata          []BlobMetadata `json:"blob-metadata"`
 }
 
+// BlobMetadata is the metadata of a statistics or indices blob.
 type BlobMetadata struct {
 	Type           BlobType          `json:"type"`
 	SnapshotID     int64             `json:"snapshot-id"`
@@ -69,7 +76,11 @@ type BlobMetadata struct {
 	Properties     map[string]string `json:"properties"`
 }
 
-type PartitionStatistics struct {
+// PartitionStatisticsFile represents a partition statistics file that can be used to read table data more efficiently.
+//
+// Statistics are informational. A reader can choose to ignore statistics information. Statistics
+// support is not required to read the table correctly.
+type PartitionStatisticsFile struct {
 	SnapshotID      int64  `json:"snapshot-id"`
 	StatisticsPath  string `json:"statistics-path"`
 	FileSizeInBytes int64  `json:"file-size-in-bytes"`

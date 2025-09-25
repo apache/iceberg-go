@@ -673,7 +673,7 @@ func TestMetadataV1Serialize(t *testing.T) {
 			DefaultSpecID:      0,
 			SortOrderList:      []SortOrder{UnsortedSortOrder},
 			DefaultSortOrderID: 0,
-			StatisticsList: []Statistics{
+			StatisticsList: []StatisticsFile{
 				{
 					SnapshotID:            1234567890,
 					StatisticsPath:        "s3://bucket/statistics/stats1.puffin",
@@ -691,7 +691,7 @@ func TestMetadataV1Serialize(t *testing.T) {
 					},
 				},
 			},
-			PartitionStatsList: []PartitionStatistics{
+			PartitionStatsList: []PartitionStatisticsFile{
 				{
 					SnapshotID:      1234567890,
 					StatisticsPath:  "s3://bucket/partition-stats/part1.parquet",
@@ -766,7 +766,7 @@ func TestMetadataV2Serialize(t *testing.T) {
 			DefaultSpecID:      0,
 			SortOrderList:      []SortOrder{UnsortedSortOrder},
 			DefaultSortOrderID: 0,
-			StatisticsList: []Statistics{
+			StatisticsList: []StatisticsFile{
 				{
 					SnapshotID:            9876543210,
 					StatisticsPath:        "s3://bucket/v2/statistics/stats2.puffin",
@@ -783,7 +783,7 @@ func TestMetadataV2Serialize(t *testing.T) {
 					},
 				},
 			},
-			PartitionStatsList: []PartitionStatistics{
+			PartitionStatsList: []PartitionStatisticsFile{
 				{
 					SnapshotID:      9876543210,
 					StatisticsPath:  "s3://bucket/v2/partition-stats/part2.parquet",
