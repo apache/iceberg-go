@@ -676,12 +676,37 @@ func TestMetadataV1Serialize(t *testing.T) {
 			DefaultSpecID:      0,
 			SortOrderList:      []SortOrder{UnsortedSortOrder},
 			DefaultSortOrderID: 0,
+			StatisticsList: []StatisticsFile{
+				{
+					SnapshotID:            1234567890,
+					StatisticsPath:        "s3://bucket/statistics/stats1.puffin",
+					FileSizeInBytes:       1024000,
+					FileFooterSizeInBytes: 512,
+					KeyMetadata:           nil,
+					BlobMetadata: []BlobMetadata{
+						{
+							Type:           BlobTypeApacheDatasketchesThetaV1,
+							SnapshotID:     1234567890,
+							SequenceNumber: 1,
+							Fields:         []int32{1, 2},
+							Properties:     map[string]string{"ndv": "1000"},
+						},
+					},
+				},
+			},
+			PartitionStatsList: []PartitionStatisticsFile{
+				{
+					SnapshotID:      1234567890,
+					StatisticsPath:  "s3://bucket/partition-stats/part1.parquet",
+					FileSizeInBytes: 512000,
+				},
+			},
 		},
 	}
 
 	data, err := json.Marshal(toserialize)
 	require.NoError(t, err)
-	assert.JSONEq(t, `{		
+	assert.JSONEq(t, `{
 		"format-version":1,
 		"table-uuid":"dd93fa46-a1a7-43bb-8748-6cc7eff107a3",
 		"location":"s3a://warehouse/iceberg/iceberg-test-2.db/test-table-2",
@@ -699,7 +724,31 @@ func TestMetadataV1Serialize(t *testing.T) {
 		"partition-specs":[{"spec-id":0,"fields":[]}],
 		"default-spec-id":0,
 		"sort-orders":[{"order-id":0,"fields":[]}],
-		"default-sort-order-id":0
+		"default-sort-order-id":0,
+		"statistics": [
+			{
+				"snapshot-id": 1234567890,
+				"statistics-path": "s3://bucket/statistics/stats1.puffin",
+				"file-size-in-bytes": 1024000,
+				"file-footer-size-in-bytes": 512,
+				"blob-metadata": [
+					{
+						"type": "apache-datasketches-theta-v1",
+						"snapshot-id": 1234567890,
+						"sequence-number": 1,
+						"fields": [1, 2],
+						"properties": {"ndv": "1000"}
+					}
+				]
+			}
+		],
+		"partition-statistics": [
+			{
+				"snapshot-id": 1234567890,
+				"statistics-path": "s3://bucket/partition-stats/part1.parquet",
+				"file-size-in-bytes": 512000
+			}
+		]
 	}`, string(data))
 }
 
@@ -709,7 +758,7 @@ func TestMetadataV2Serialize(t *testing.T) {
 	toserialize := &metadataV2{
 		LastSeqNum: 1,
 		commonMetadata: commonMetadata{
-			FormatVersion:      1,
+			FormatVersion:      2,
 			UUID:               uuid.MustParse("dd93fa46-a1a7-43bb-8748-6cc7eff107a3"),
 			Loc:                "s3a://warehouse/iceberg/iceberg-test-2.db/test-table-2",
 			LastUpdatedMS:      1742412491193,
@@ -720,6 +769,30 @@ func TestMetadataV2Serialize(t *testing.T) {
 			DefaultSpecID:      0,
 			SortOrderList:      []SortOrder{UnsortedSortOrder},
 			DefaultSortOrderID: 0,
+			StatisticsList: []StatisticsFile{
+				{
+					SnapshotID:            9876543210,
+					StatisticsPath:        "s3://bucket/v2/statistics/stats2.puffin",
+					FileSizeInBytes:       2048000,
+					FileFooterSizeInBytes: 1024,
+					BlobMetadata: []BlobMetadata{
+						{
+							Type:           BlobTypeDeletionVectorV1,
+							SnapshotID:     9876543210,
+							SequenceNumber: 5,
+							Fields:         []int32{1},
+							Properties:     map[string]string{"deletion-vector-size": "500"},
+						},
+					},
+				},
+			},
+			PartitionStatsList: []PartitionStatisticsFile{
+				{
+					SnapshotID:      9876543210,
+					StatisticsPath:  "s3://bucket/v2/partition-stats/part2.parquet",
+					FileSizeInBytes: 768000,
+				},
+			},
 		},
 	}
 
@@ -727,7 +800,7 @@ func TestMetadataV2Serialize(t *testing.T) {
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
 		"last-sequence-number": 1,
-		"format-version":1,
+		"format-version": 2,
 		"table-uuid":"dd93fa46-a1a7-43bb-8748-6cc7eff107a3",
 		"location":"s3a://warehouse/iceberg/iceberg-test-2.db/test-table-2",
 		"last-updated-ms":1742412491193,
@@ -744,7 +817,31 @@ func TestMetadataV2Serialize(t *testing.T) {
 		"partition-specs":[{"spec-id":0,"fields":[]}],
 		"default-spec-id":0,
 		"sort-orders":[{"order-id":0,"fields":[]}],
-		"default-sort-order-id":0
+		"default-sort-order-id":0,
+		"statistics": [
+			{
+				"snapshot-id": 9876543210,
+				"statistics-path": "s3://bucket/v2/statistics/stats2.puffin",
+				"file-size-in-bytes": 2048000,
+				"file-footer-size-in-bytes": 1024,
+				"blob-metadata": [
+					{
+						"type": "deletion-vector-v1",
+						"snapshot-id": 9876543210,
+						"sequence-number": 5,
+						"fields": [1],
+						"properties": {"deletion-vector-size": "500"}
+					}
+				]
+			}
+		],
+		"partition-statistics": [
+			{
+				"snapshot-id": 9876543210,
+				"statistics-path": "s3://bucket/v2/partition-stats/part2.parquet",
+				"file-size-in-bytes": 768000
+			}
+		]
 	}`, string(data))
 }
 

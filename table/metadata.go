@@ -136,6 +136,19 @@ type Metadata interface {
 	NameMapping() iceberg.NameMapping
 
 	LastSequenceNumber() int64
+	// Statistics returns an optional list of table statistics.
+	// Table statistics files are valid Puffin files.
+	// StatisticsFile are informational. A reader can choose to ignore statistics information.
+	// StatisticsFile support is not required to read the table correctly.
+	// A table can contain many statistics files associated with different table snapshots.
+	Statistics() iter.Seq[StatisticsFile]
+	// PartitionStatistics returns an optional list of partition statistics files.
+	// Partition statistics are not required for reading or planning
+	// and readers may ignore them. Each table snapshot may be associated
+	// with at most one partition statistics file. A writer can optionally
+	// write the partition statistics file during each write operation,
+	// or it can also be computed on demand.
+	PartitionStatistics() iter.Seq[PartitionStatisticsFile]
 }
 
 type MetadataBuilder struct {
@@ -1086,24 +1099,26 @@ func sliceEqualHelper[T interface{ Equals(T) bool }](s1, s2 []T) bool {
 
 // https://iceberg.apache.org/spec/#iceberg-table-spec
 type commonMetadata struct {
-	FormatVersion      int                     `json:"format-version"`
-	UUID               uuid.UUID               `json:"table-uuid"`
-	Loc                string                  `json:"location"`
-	LastUpdatedMS      int64                   `json:"last-updated-ms"`
-	LastColumnId       int                     `json:"last-column-id"`
-	SchemaList         []*iceberg.Schema       `json:"schemas"`
-	CurrentSchemaID    int                     `json:"current-schema-id"`
-	Specs              []iceberg.PartitionSpec `json:"partition-specs"`
-	DefaultSpecID      int                     `json:"default-spec-id"`
-	LastPartitionID    *int                    `json:"last-partition-id,omitempty"`
-	Props              iceberg.Properties      `json:"properties,omitempty"`
-	SnapshotList       []Snapshot              `json:"snapshots,omitempty"`
-	CurrentSnapshotID  *int64                  `json:"current-snapshot-id,omitempty"`
-	SnapshotLog        []SnapshotLogEntry      `json:"snapshot-log,omitempty"`
-	MetadataLog        []MetadataLogEntry      `json:"metadata-log,omitempty"`
-	SortOrderList      []SortOrder             `json:"sort-orders"`
-	DefaultSortOrderID int                     `json:"default-sort-order-id"`
-	SnapshotRefs       map[string]SnapshotRef  `json:"refs,omitempty"`
+	FormatVersion      int                       `json:"format-version"`
+	UUID               uuid.UUID                 `json:"table-uuid"`
+	Loc                string                    `json:"location"`
+	LastUpdatedMS      int64                     `json:"last-updated-ms"`
+	LastColumnId       int                       `json:"last-column-id"`
+	SchemaList         []*iceberg.Schema         `json:"schemas"`
+	CurrentSchemaID    int                       `json:"current-schema-id"`
+	Specs              []iceberg.PartitionSpec   `json:"partition-specs"`
+	DefaultSpecID      int                       `json:"default-spec-id"`
+	LastPartitionID    *int                      `json:"last-partition-id,omitempty"`
+	Props              iceberg.Properties        `json:"properties,omitempty"`
+	SnapshotList       []Snapshot                `json:"snapshots,omitempty"`
+	CurrentSnapshotID  *int64                    `json:"current-snapshot-id,omitempty"`
+	SnapshotLog        []SnapshotLogEntry        `json:"snapshot-log,omitempty"`
+	MetadataLog        []MetadataLogEntry        `json:"metadata-log,omitempty"`
+	SortOrderList      []SortOrder               `json:"sort-orders"`
+	DefaultSortOrderID int                       `json:"default-sort-order-id"`
+	SnapshotRefs       map[string]SnapshotRef    `json:"refs,omitempty"`
+	StatisticsList     []StatisticsFile          `json:"statistics,omitempty"`
+	PartitionStatsList []PartitionStatisticsFile `json:"partition-statistics,omitempty"`
 }
 
 func initCommonMetadataForDeserialization() commonMetadata {
@@ -1248,6 +1263,14 @@ func (c *commonMetadata) DefaultSortOrder() int {
 
 func (c *commonMetadata) Properties() iceberg.Properties {
 	return c.Props
+}
+
+func (c *commonMetadata) Statistics() iter.Seq[StatisticsFile] {
+	return slices.Values(c.StatisticsList)
+}
+
+func (c *commonMetadata) PartitionStatistics() iter.Seq[PartitionStatisticsFile] {
+	return slices.Values(c.PartitionStatsList)
 }
 
 // preValidate updates values in the metadata struct with defaults based on
