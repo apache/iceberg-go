@@ -159,7 +159,7 @@ func withReadTx[R any](ctx context.Context, db *bun.DB, fn func(context.Context,
 		return err
 	})
 
-	return
+	return result, err
 }
 
 func withWriteTx(ctx context.Context, db *bun.DB, fn func(context.Context, bun.Tx) error) error {

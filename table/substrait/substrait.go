@@ -80,7 +80,7 @@ func ConvertSchema(schema *iceberg.Schema) (res types.NamedStruct, err error) {
 
 	typ, err = iceberg.Visit(schema, convertToSubstrait{})
 	if err != nil {
-		return
+		return res, err
 	}
 
 	val := typ.(*types.StructType)
@@ -91,7 +91,7 @@ func ConvertSchema(schema *iceberg.Schema) (res types.NamedStruct, err error) {
 		res.Names[i] = f.Name
 	}
 
-	return
+	return res, err
 }
 
 type convertToSubstrait struct{}

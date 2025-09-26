@@ -402,7 +402,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 
 	iceSchema, colIndices, rdr, err = as.prepareToRead(ctx, task.Value.File)
 	if err != nil {
-		return
+		return err
 	}
 	defer rdr.Close()
 
@@ -422,7 +422,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 
 	filterFunc, dropFile, err = as.getRecordFilter(ctx, iceSchema)
 	if err != nil {
-		return
+		return err
 	}
 
 	if dropFile {
@@ -435,7 +435,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 			Value: array.NewRecordBatch(emptySchema, nil, 0), Index: 0, Last: true,
 		}}
 
-		return
+		return err
 	}
 
 	if filterFunc != nil {
@@ -450,7 +450,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 
 	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, out)
 
-	return
+	return err
 }
 
 func createIterator(ctx context.Context, numWorkers uint, records <-chan enumeratedRecord, deletesPerFile perFilePosDeletes, cancel context.CancelCauseFunc, rowLimit int64) iter.Seq2[arrow.RecordBatch, error] {

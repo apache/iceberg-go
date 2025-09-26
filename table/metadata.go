@@ -35,9 +35,9 @@ import (
 )
 
 const (
-	partitionFieldStartID       = 1000
-	supportedTableFormatVersion = 2
-	oneMinuteInMs               = 60_000
+	partitionFieldStartID             = 1000
+	supportedTableFormatVersion       = 2
+	oneMinuteInMs               int64 = 60_000
 )
 
 func generateSnapshotID() int64 {
@@ -1444,15 +1444,20 @@ func (c *commonMetadata) checkRefsExist() error {
 }
 
 func (c *commonMetadata) validateChronologicalSnapshotLogs() error {
-	for i := 1; i < len(c.SnapshotLog); i++ {
-		prev, cur := c.SnapshotLog[i-1], c.SnapshotLog[i]
-		if (cur.TimestampMs - prev.TimestampMs) < -oneMinuteInMs {
-			return fmt.Errorf("%w: expected sorted snapshot log entries", ErrInvalidMetadata)
+	if !slices.IsSortedFunc(c.SnapshotLog, func(cur, prev SnapshotLogEntry) int {
+		diff := cur.TimestampMs - prev.TimestampMs
+		if diff > -oneMinuteInMs {
+			return 1
 		}
-		if i == len(c.SnapshotLog)-1 {
-			if c.LastUpdatedMS-cur.TimestampMs < -oneMinuteInMs {
-				return fmt.Errorf("%w: invalid update timestamp %d: before last snapshot log entry at %d", ErrInvalidMetadata, c.LastUpdatedMS, cur.TimestampMs)
-			}
+
+		return -1
+	}) {
+		return fmt.Errorf("%w: expected sorted snapshot log entries", ErrInvalidMetadata)
+	}
+	if len(c.SnapshotLog) > 0 {
+		last := c.SnapshotLog[len(c.SnapshotLog)-1].TimestampMs
+		if c.LastUpdatedMS-last < -oneMinuteInMs {
+			return fmt.Errorf("%w: invalid update timestamp %d: before last snapshot log entry at %d", ErrInvalidMetadata, c.LastUpdatedMS, last)
 		}
 	}
 
@@ -1460,15 +1465,21 @@ func (c *commonMetadata) validateChronologicalSnapshotLogs() error {
 }
 
 func (c *commonMetadata) validateChronologicalMetadataLogs() error {
-	for i := 1; i < len(c.MetadataLog); i++ {
-		prev, cur := c.MetadataLog[i-1], c.MetadataLog[i]
-		if (cur.TimestampMs - prev.TimestampMs) < -oneMinuteInMs {
-			return fmt.Errorf("%w: expected sorted metadata log entries", ErrInvalidMetadata)
+	if !slices.IsSortedFunc(c.MetadataLog, func(cur, prev MetadataLogEntry) int {
+		diff := cur.TimestampMs - prev.TimestampMs
+		if diff > -oneMinuteInMs {
+			return 1
 		}
-		if i == len(c.MetadataLog)-1 {
-			if c.LastUpdatedMS-cur.TimestampMs < -oneMinuteInMs {
-				return fmt.Errorf("%w: invalid update timestamp %d: before last metadata log entry at %d", ErrInvalidMetadata, c.LastUpdatedMS, cur.TimestampMs)
-			}
+
+		return -1
+	}) {
+		return fmt.Errorf("%w: expected sorted metadata log entries", ErrInvalidMetadata)
+	}
+
+	if len(c.MetadataLog) > 0 {
+		last := c.MetadataLog[len(c.MetadataLog)-1].TimestampMs
+		if c.LastUpdatedMS-last < -oneMinuteInMs {
+			return fmt.Errorf("%w: invalid update timestamp %d: before last metadata log entry at %d", ErrInvalidMetadata, c.LastUpdatedMS, last)
 		}
 	}
 

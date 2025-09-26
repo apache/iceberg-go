@@ -107,7 +107,7 @@ func VisitNameMapping[S, T any](obj NameMapping, visitor NameMappingVisitor[S, T
 	if obj == nil {
 		err = fmt.Errorf("%w: cannot visit nil NameMapping", ErrInvalidArgument)
 
-		return
+		return res, err
 	}
 
 	defer internal.RecoverError(&err)

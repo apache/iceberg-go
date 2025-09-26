@@ -475,7 +475,7 @@ func (i Int32Literal) MarshalBinary() (data []byte, err error) {
 	data = make([]byte, 4)
 	binary.LittleEndian.PutUint32(data, uint32(i))
 
-	return
+	return data, err
 }
 
 func (i *Int32Literal) UnmarshalBinary(data []byte) error {
@@ -562,7 +562,7 @@ func (i Int64Literal) MarshalBinary() (data []byte, err error) {
 	data = make([]byte, 8)
 	binary.LittleEndian.PutUint64(data, uint64(i))
 
-	return
+	return data, err
 }
 
 func (i *Int64Literal) UnmarshalBinary(data []byte) error {
@@ -610,7 +610,7 @@ func (f Float32Literal) MarshalBinary() (data []byte, err error) {
 	data = make([]byte, 4)
 	binary.LittleEndian.PutUint32(data, math.Float32bits(float32(f)))
 
-	return
+	return data, err
 }
 
 func (f *Float32Literal) UnmarshalBinary(data []byte) error {
@@ -664,7 +664,7 @@ func (f Float64Literal) MarshalBinary() (data []byte, err error) {
 	data = make([]byte, 8)
 	binary.LittleEndian.PutUint64(data, math.Float64bits(float64(f)))
 
-	return
+	return data, err
 }
 
 func (f *Float64Literal) UnmarshalBinary(data []byte) error {
@@ -711,7 +711,7 @@ func (d DateLiteral) MarshalBinary() (data []byte, err error) {
 	data = make([]byte, 4)
 	binary.LittleEndian.PutUint32(data, uint32(d))
 
-	return
+	return data, err
 }
 
 func (d *DateLiteral) UnmarshalBinary(data []byte) error {
@@ -755,7 +755,7 @@ func (t TimeLiteral) MarshalBinary() (data []byte, err error) {
 	data = make([]byte, 8)
 	binary.LittleEndian.PutUint64(data, uint64(t))
 
-	return
+	return data, err
 }
 
 func (t *TimeLiteral) UnmarshalBinary(data []byte) error {
@@ -806,7 +806,7 @@ func (t TimestampLiteral) MarshalBinary() (data []byte, err error) {
 	data = make([]byte, 8)
 	binary.LittleEndian.PutUint64(data, uint64(t))
 
-	return
+	return data, err
 }
 
 func (t *TimestampLiteral) UnmarshalBinary(data []byte) error {
@@ -950,7 +950,7 @@ func (s StringLiteral) MarshalBinary() (data []byte, err error) {
 	// avoid copying by just returning a slice of the raw bytes
 	data = unsafe.Slice(unsafe.StringData(string(s)), len(s))
 
-	return
+	return data, err
 }
 
 func (s *StringLiteral) UnmarshalBinary(data []byte) error {
@@ -1008,7 +1008,7 @@ func (b BinaryLiteral) MarshalBinary() (data []byte, err error) {
 	// stored directly as is
 	data = b
 
-	return
+	return data, err
 }
 
 func (b *BinaryLiteral) UnmarshalBinary(data []byte) error {
@@ -1063,7 +1063,7 @@ func (f FixedLiteral) MarshalBinary() (data []byte, err error) {
 	// stored directly as is
 	data = f
 
-	return
+	return data, err
 }
 
 func (f *FixedLiteral) UnmarshalBinary(data []byte) error {
@@ -1240,7 +1240,7 @@ func (d DecimalLiteral) MarshalBinary() (data []byte, err error) {
 		data[len(data)-1] += 1
 	}
 
-	return
+	return data, err
 }
 
 func (d *DecimalLiteral) UnmarshalBinary(data []byte) error {

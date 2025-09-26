@@ -462,12 +462,12 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 
 func (t TruncateTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	if !value.Valid {
-		return
+		return out
 	}
 
 	fn, err := t.Transformer(value.Val.Type())
 	if err != nil {
-		return
+		return out
 	}
 
 	out.Valid = true
@@ -484,7 +484,7 @@ func (t TruncateTransform) Apply(value Optional[Literal]) (out Optional[Literal]
 		out.Val = BinaryLiteral(fn([]byte(v)).([]byte))
 	}
 
-	return
+	return out
 }
 
 func (TruncateTransform) ToHumanStr(val any) string {
@@ -641,7 +641,7 @@ func (YearTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 
 func (YearTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	if !value.Valid {
-		return
+		return out
 	}
 
 	switch v := value.Val.(type) {
@@ -653,7 +653,7 @@ func (YearTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 		out.Val = Int32Literal(Timestamp(v).ToTime().Year() - epochTM.Year())
 	}
 
-	return
+	return out
 }
 
 func (YearTransform) ToHumanStr(val any) string {
@@ -725,7 +725,7 @@ func (MonthTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 
 func (MonthTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	if !value.Valid {
-		return
+		return out
 	}
 
 	var tm time.Time
@@ -735,13 +735,13 @@ func (MonthTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	case TimestampLiteral:
 		tm = Timestamp(v).ToTime()
 	default:
-		return
+		return out
 	}
 
 	out.Valid = true
 	out.Val = Int32Literal(int32((tm.Year()-epochTM.Year())*12 + (int(tm.Month()) - int(epochTM.Month()))))
 
-	return
+	return out
 }
 
 func (t MonthTransform) ToHumanStr(val any) string {
@@ -810,7 +810,7 @@ func (DayTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 
 func (DayTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	if !value.Valid {
-		return
+		return out
 	}
 
 	switch v := value.Val.(type) {
@@ -820,7 +820,7 @@ func (DayTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 		out.Valid, out.Val = true, Int32Literal(Timestamp(v).ToDate())
 	}
 
-	return
+	return out
 }
 
 func (DayTransform) ToHumanStr(val any) string {
@@ -887,7 +887,7 @@ func (HourTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 
 func (HourTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	if !value.Valid {
-		return
+		return out
 	}
 
 	switch v := value.Val.(type) {
@@ -896,7 +896,7 @@ func (HourTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 		out.Valid, out.Val = true, Int32Literal(int32(int64(v)/factor))
 	}
 
-	return
+	return out
 }
 
 func (HourTransform) ToHumanStr(val any) string {
