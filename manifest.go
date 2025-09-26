@@ -874,8 +874,16 @@ type v3writerImpl struct{}
 
 func (v3writerImpl) content() ManifestContent { return ManifestContentData }
 func (v3writerImpl) prepareEntry(entry *manifestEntry, snapshotID int64) (ManifestEntry, error) {
-	// TODO : implement this for v3
-	return entry, fmt.Errorf("%w: manifest list writer for v3", ErrNotImplemented)
+	if entry.SeqNum == nil {
+		if entry.Snapshot != nil && *entry.Snapshot != snapshotID {
+			return nil, fmt.Errorf("found unassigned sequence number for entry from snapshot: %d", entry.SnapshotID())
+		}
+		if entry.EntryStatus != EntryStatusADDED {
+			return nil, errors.New("only entries with status ADDED can be missing a sequence number")
+		}
+	}
+
+	return entry, nil
 }
 
 type fieldStats interface {
@@ -1310,9 +1318,26 @@ func NewManifestListWriterV2(out io.Writer, snapshotID, sequenceNumber int64, pa
 	})
 }
 
-func NewManifestListWriterV3() (*ManifestListWriter, error) {
-	// TODO: Implement v3 writer
-	return nil, fmt.Errorf("%w: manifest list writer for v3", ErrNotImplemented)
+func NewManifestListWriterV3(out io.Writer, snapshotId, sequenceNumber, firstRowID int64, parentSnapshot *int64) (*ManifestListWriter, error) {
+	m := &ManifestListWriter{
+		version:          3,
+		out:              out,
+		commitSnapshotID: snapshotId,
+		sequenceNumber:   sequenceNumber,
+		nextRowID:        &firstRowID,
+	}
+	parentSnapshotStr := "null"
+	if parentSnapshot != nil {
+		parentSnapshotStr = strconv.Itoa(int(*parentSnapshot))
+	}
+
+	return m, m.init(map[string][]byte{
+		"format-version":     []byte(strconv.Itoa(m.version)),
+		"snapshot-id":        []byte(strconv.Itoa(int(snapshotId))),
+		"sequence-number":    []byte(strconv.Itoa(int(sequenceNumber))),
+		"first-row-id":       []byte(strconv.Itoa(int(firstRowID))),
+		"parent-snapshot-id": []byte(parentSnapshotStr),
+	})
 }
 
 func (m *ManifestListWriter) init(meta map[string][]byte) error {
@@ -1341,6 +1366,10 @@ func (m *ManifestListWriter) Close() error {
 	}
 
 	return m.writer.Close()
+}
+
+func (m *ManifestListWriter) NextRowID() *int64 {
+	return m.nextRowID
 }
 
 func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
@@ -1431,9 +1460,7 @@ func WriteManifestList(version int, out io.Writer, snapshotID int64, parentSnaps
 		if sequenceNumber == nil {
 			return errors.New("sequence number is required for V3 tables")
 		}
-		// TODO
-		return fmt.Errorf("%w: manifest list writer for v3", ErrNotImplemented)
-		// writer, err = NewManifestListWriterV3()
+		writer, err = NewManifestListWriterV3(out, snapshotID, *sequenceNumber, firstRowId, parentSnapshotID)
 	default:
 		return fmt.Errorf("unsupported manifest version: %d", version)
 	}
@@ -1685,7 +1712,7 @@ type dataFile struct {
 	Splits                  *[]int64               `avro:"split_offsets"`
 	EqualityIDs             *[]int                 `avro:"equality_ids"`
 	SortOrder               *int                   `avro:"sort_order_id"`
-	FirstRowIDField         *int64                 `avro:"first_row_id_field"`
+	FirstRowIDField         *int64                 `avro:"first_row_id"`
 	ReferencedDataFileField *string                `avro:"referenced_data_file"`
 	ContentOffsetField      *int64                 `avro:"content_offset"`
 	ContentSizeInBytesField *int64                 `avro:"content_size_in_bytes"`
