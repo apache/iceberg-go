@@ -69,35 +69,7 @@ func WriteMetadata(ctx context.Context, metadata table.Metadata, loc string, pro
 }
 
 func UpdateTableMetadata(base table.Metadata, updates []table.Update, metadataLoc string) (table.Metadata, error) {
-	bldr, err := table.MetadataBuilderFromBase(base)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, update := range updates {
-		if err := update.Apply(bldr); err != nil {
-			return nil, err
-		}
-	}
-
-	if bldr.HasChanges() {
-		if metadataLoc != "" {
-			maxMetadataLogEntries := max(1,
-				base.Properties().GetInt(
-					table.MetadataPreviousVersionsMaxKey, table.MetadataPreviousVersionsMaxDefault))
-
-			bldr.TrimMetadataLogs(maxMetadataLogEntries + 1).
-				AppendMetadataLog(table.MetadataLogEntry{
-					MetadataFile: metadataLoc,
-					TimestampMs:  base.LastUpdatedMillis(),
-				})
-		}
-		if base.LastUpdatedMillis() == bldr.LastUpdatedMS() {
-			bldr.SetLastUpdatedMS()
-		}
-	}
-
-	return bldr.Build()
+	return table.UpdateTableMetadata(base, updates, metadataLoc)
 }
 
 func CreateStagedTable(ctx context.Context, catprops iceberg.Properties, nspropsFn GetNamespacePropsFn, ident table.Identifier, sc *iceberg.Schema, opts ...catalog.CreateTableOpt) (table.StagedTable, error) {

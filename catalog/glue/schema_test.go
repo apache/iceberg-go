@@ -437,7 +437,7 @@ func TestSchemasToGlueColumns(t *testing.T) {
 	metadata, err := table.NewMetadata(schemas[0], nil, table.SortOrder{}, "s3://example/path", nil)
 	assert.NoError(t, err)
 
-	mb, err := table.MetadataBuilderFromBase(metadata)
+	mb, err := table.MetadataBuilderFromBase(metadata, "")
 	assert.NoError(t, err)
 
 	err = mb.AddSchema(schemas[1])
