@@ -18,6 +18,7 @@
 package table
 
 import (
+	"cmp"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -1445,18 +1446,13 @@ func (c *commonMetadata) checkRefsExist() error {
 
 func (c *commonMetadata) validateChronologicalSnapshotLogs() error {
 	if !slices.IsSortedFunc(c.SnapshotLog, func(cur, prev SnapshotLogEntry) int {
-		diff := cur.TimestampMs - prev.TimestampMs
-		if diff > -oneMinuteInMs {
-			return 1
-		}
-
-		return -1
+		return cmp.Compare(cur.TimestampMs-prev.TimestampMs, -oneMinuteInMs)
 	}) {
 		return fmt.Errorf("%w: expected sorted snapshot log entries", ErrInvalidMetadata)
 	}
 	if len(c.SnapshotLog) > 0 {
 		last := c.SnapshotLog[len(c.SnapshotLog)-1].TimestampMs
-		if c.LastUpdatedMS-last < -oneMinuteInMs {
+		if cmp.Compare(c.LastUpdatedMS-last, -oneMinuteInMs) < 0 {
 			return fmt.Errorf("%w: invalid update timestamp %d: before last snapshot log entry at %d", ErrInvalidMetadata, c.LastUpdatedMS, last)
 		}
 	}
@@ -1466,19 +1462,14 @@ func (c *commonMetadata) validateChronologicalSnapshotLogs() error {
 
 func (c *commonMetadata) validateChronologicalMetadataLogs() error {
 	if !slices.IsSortedFunc(c.MetadataLog, func(cur, prev MetadataLogEntry) int {
-		diff := cur.TimestampMs - prev.TimestampMs
-		if diff > -oneMinuteInMs {
-			return 1
-		}
-
-		return -1
+		return cmp.Compare(cur.TimestampMs-prev.TimestampMs, -oneMinuteInMs)
 	}) {
 		return fmt.Errorf("%w: expected sorted metadata log entries", ErrInvalidMetadata)
 	}
 
 	if len(c.MetadataLog) > 0 {
 		last := c.MetadataLog[len(c.MetadataLog)-1].TimestampMs
-		if c.LastUpdatedMS-last < -oneMinuteInMs {
+		if cmp.Compare(c.LastUpdatedMS-last, -oneMinuteInMs) < 0 {
 			return fmt.Errorf("%w: invalid update timestamp %d: before last metadata log entry at %d", ErrInvalidMetadata, c.LastUpdatedMS, last)
 		}
 	}
