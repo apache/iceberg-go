@@ -620,7 +620,7 @@ func visitParquetManifest[T any](manifest *pqarrow.SchemaManifest, visitor manif
 	if manifest == nil {
 		err = fmt.Errorf("%w: cannot visit nil manifest", iceberg.ErrInvalidArgument)
 
-		return
+		return res, err
 	}
 
 	defer func() {

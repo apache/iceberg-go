@@ -129,7 +129,7 @@ func (t *commitTableResponse) UnmarshalJSON(b []byte) (err error) {
 
 	t.Metadata, err = table.ParseMetadataBytes(t.RawMetadata)
 
-	return
+	return err
 }
 
 type loadTableResponse struct {
@@ -147,7 +147,7 @@ func (t *loadTableResponse) UnmarshalJSON(b []byte) (err error) {
 
 	t.Metadata, err = table.ParseMetadataBytes(t.RawMetadata)
 
-	return
+	return err
 }
 
 type createTableRequest struct {
@@ -255,15 +255,15 @@ func do[T any](ctx context.Context, method string, baseURI *url.URL, path []stri
 
 	uri := baseURI.JoinPath(path...).String()
 	if req, err = http.NewRequestWithContext(ctx, method, uri, nil); err != nil {
-		return
+		return ret, err
 	}
 
 	if rsp, err = cl.Do(req); err != nil {
-		return
+		return ret, err
 	}
 
 	if allowNoContent && rsp.StatusCode == http.StatusNoContent {
-		return
+		return ret, err
 	}
 
 	if rsp.StatusCode != http.StatusOK {
@@ -271,7 +271,7 @@ func do[T any](ctx context.Context, method string, baseURI *url.URL, path []stri
 	}
 
 	if method == http.MethodHead || method == http.MethodDelete {
-		return
+		return ret, err
 	}
 
 	defer rsp.Body.Close()
@@ -279,7 +279,7 @@ func do[T any](ctx context.Context, method string, baseURI *url.URL, path []stri
 		return ret, fmt.Errorf("%w: error decoding json payload: `%s`", ErrRESTError, err.Error())
 	}
 
-	return
+	return ret, err
 }
 
 func doGet[T any](ctx context.Context, baseURI *url.URL, path []string, cl *http.Client, override map[int]error) (ret T, err error) {
@@ -306,17 +306,17 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 	uri := baseURI.JoinPath(path...).String()
 	data, err = json.Marshal(payload)
 	if err != nil {
-		return
+		return ret, err
 	}
 
 	req, err = http.NewRequestWithContext(ctx, http.MethodPost, uri, bytes.NewReader(data))
 	if err != nil {
-		return
+		return ret, err
 	}
 
 	rsp, err = cl.Do(req)
 	if err != nil {
-		return
+		return ret, err
 	}
 
 	if rsp.StatusCode != http.StatusOK {
@@ -324,7 +324,7 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 	}
 
 	if rsp.ContentLength == 0 {
-		return
+		return ret, err
 	}
 
 	defer rsp.Body.Close()
@@ -332,7 +332,7 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 		return ret, fmt.Errorf("%w: error decoding json payload: `%s`", ErrRESTError, err.Error())
 	}
 
-	return
+	return ret, err
 }
 
 func handleNon200(rsp *http.Response, override map[int]error) error {

@@ -215,7 +215,7 @@ func (s *Summary) Equals(other *Summary) bool {
 func (s *Summary) UnmarshalJSON(b []byte) (err error) {
 	alias := map[string]string{}
 	if err = json.Unmarshal(b, &alias); err != nil {
-		return
+		return err
 	}
 
 	op, ok := alias[operationKey]
@@ -224,7 +224,7 @@ func (s *Summary) UnmarshalJSON(b []byte) (err error) {
 	}
 
 	if s.Operation, err = ValidOperation(op); err != nil {
-		return
+		return err
 	}
 
 	delete(alias, operationKey)

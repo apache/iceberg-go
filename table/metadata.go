@@ -18,6 +18,7 @@
 package table
 
 import (
+	"cmp"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -35,8 +36,9 @@ import (
 )
 
 const (
-	partitionFieldStartID       = 1000
-	supportedTableFormatVersion = 2
+	partitionFieldStartID             = 1000
+	supportedTableFormatVersion       = 2
+	oneMinuteInMs               int64 = 60_000
 )
 
 func generateSnapshotID() int64 {
@@ -358,6 +360,19 @@ func (b *MetadataBuilder) AddSnapshot(snapshot *Snapshot) error {
 		snapshot.SequenceNumber <= *b.lastSequenceNumber {
 		return fmt.Errorf("can't add snapshot with sequence number %d, must be > than last sequence number %d",
 			snapshot.SequenceNumber, *b.lastSequenceNumber)
+	}
+
+	if len(b.snapshotLog) > 0 {
+		last := b.snapshotLog[len(b.snapshotLog)-1]
+		if (snapshot.TimestampMs - last.TimestampMs) < -oneMinuteInMs {
+			return fmt.Errorf("invalid snapshot timestamp %d: before last snapshot timestamp %d",
+				snapshot.TimestampMs, last.TimestampMs)
+		}
+	}
+	maxTS := max(b.lastUpdatedMS, b.base.LastUpdatedMillis())
+	if snapshot.TimestampMs-maxTS < -oneMinuteInMs {
+		return fmt.Errorf("invalid snapshot timestamp %d: before last updated timestamp %d",
+			snapshot.TimestampMs, maxTS)
 	}
 
 	b.updates = append(b.updates, NewAddSnapshotUpdate(snapshot))
@@ -1353,6 +1368,14 @@ func (c *commonMetadata) validate() error {
 		}
 	}
 
+	if err := c.validateChronologicalSnapshotLogs(); err != nil {
+		return err
+	}
+
+	if err := c.validateChronologicalMetadataLogs(); err != nil {
+		return err
+	}
+
 	if err := c.checkSchemas(); err != nil {
 		return err
 	}
@@ -1415,6 +1438,39 @@ func (c *commonMetadata) checkRefsExist() error {
 		if snap == nil {
 			return fmt.Errorf("%w: snapshot ref %s with ID %d does not exist in snapshot list",
 				ErrInvalidMetadata, name, ref.SnapshotID)
+		}
+	}
+
+	return nil
+}
+
+func (c *commonMetadata) validateChronologicalSnapshotLogs() error {
+	if !slices.IsSortedFunc(c.SnapshotLog, func(cur, prev SnapshotLogEntry) int {
+		return cmp.Compare(cur.TimestampMs-prev.TimestampMs, -oneMinuteInMs)
+	}) {
+		return fmt.Errorf("%w: expected sorted snapshot log entries", ErrInvalidMetadata)
+	}
+	if len(c.SnapshotLog) > 0 {
+		last := c.SnapshotLog[len(c.SnapshotLog)-1].TimestampMs
+		if cmp.Compare(c.LastUpdatedMS-last, -oneMinuteInMs) < 0 {
+			return fmt.Errorf("%w: invalid update timestamp %d: before last snapshot log entry at %d", ErrInvalidMetadata, c.LastUpdatedMS, last)
+		}
+	}
+
+	return nil
+}
+
+func (c *commonMetadata) validateChronologicalMetadataLogs() error {
+	if !slices.IsSortedFunc(c.MetadataLog, func(cur, prev MetadataLogEntry) int {
+		return cmp.Compare(cur.TimestampMs-prev.TimestampMs, -oneMinuteInMs)
+	}) {
+		return fmt.Errorf("%w: expected sorted metadata log entries", ErrInvalidMetadata)
+	}
+
+	if len(c.MetadataLog) > 0 {
+		last := c.MetadataLog[len(c.MetadataLog)-1].TimestampMs
+		if cmp.Compare(c.LastUpdatedMS-last, -oneMinuteInMs) < 0 {
+			return fmt.Errorf("%w: invalid update timestamp %d: before last metadata log entry at %d", ErrInvalidMetadata, c.LastUpdatedMS, last)
 		}
 	}
 

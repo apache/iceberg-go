@@ -966,7 +966,7 @@ func (p *partitionFieldStats[T]) update(value any) (err error) {
 	if value == nil {
 		p.containsNull = true
 
-		return
+		return err
 	}
 
 	var actualVal T
@@ -982,13 +982,13 @@ func (p *partitionFieldStats[T]) update(value any) (err error) {
 		if math.IsNaN(float64(f)) {
 			p.containsNan = true
 
-			return
+			return err
 		}
 	case float64:
 		if math.IsNaN(f) {
 			p.containsNan = true
 
-			return
+			return err
 		}
 	}
 

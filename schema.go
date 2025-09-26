@@ -486,7 +486,7 @@ func Visit[T any](sc *Schema, visitor SchemaVisitor[T]) (res T, err error) {
 	if sc == nil {
 		err = fmt.Errorf("%w: cannot visit nil schema", ErrInvalidArgument)
 
-		return
+		return res, err
 	}
 
 	defer func() {
@@ -639,7 +639,7 @@ func PreOrderVisit[T any](sc *Schema, visitor PreOrderSchemaVisitor[T]) (res T, 
 	if sc == nil {
 		err = fmt.Errorf("%w: cannot visit nil schema", ErrInvalidArgument)
 
-		return
+		return res, err
 	}
 
 	defer func() {
@@ -1315,13 +1315,13 @@ func VisitSchemaWithPartner[T, P any](sc *Schema, partner P, visitor SchemaWithP
 	if sc == nil {
 		err = fmt.Errorf("%w: cannot visit nil schema", ErrInvalidArgument)
 
-		return
+		return res, err
 	}
 
 	if visitor == nil || accessor == nil {
 		err = fmt.Errorf("%w: cannot visit with nil visitor or accessor", ErrInvalidArgument)
 
-		return
+		return res, err
 	}
 
 	defer func() {

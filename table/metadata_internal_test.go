@@ -1474,6 +1474,42 @@ func TestParseSchemaIdentifierFields(t *testing.T) {
 	require.Equal(t, []int{1, 2}, schemas[1].IdentifierFieldIDs)
 }
 
+func TestInvalidSnapshotLogOrder(t *testing.T) {
+	meta, err := getTestTableMetadata("TableMetadataV2Valid.json")
+	require.NoError(t, err)
+
+	// we reject snapshot logs where latest timestamp is at least 1 minute older than the previous one
+	meta.(*metadataV2).SnapshotLog[0].TimestampMs = 61000
+	meta.(*metadataV2).SnapshotLog[1].TimestampMs = 0
+
+	ser, err := json.Marshal(meta)
+	require.NoError(t, err)
+	_, err = ParseMetadataBytes(ser)
+	require.ErrorContains(t, err, "invalid metadata: expected sorted snapshot log entries")
+}
+
+func TestInvalidMetadataLogOrder(t *testing.T) {
+	meta, err := getTestTableMetadata("TableMetadataV2Valid.json")
+	require.NoError(t, err)
+
+	// we reject snapshot logs where latest timestamp is at least 1 minute older than the previous one
+	meta.(*metadataV2).MetadataLog = []MetadataLogEntry{
+		{
+			MetadataFile: "f1",
+			TimestampMs:  61000,
+		},
+		{
+			MetadataFile: "f2",
+			TimestampMs:  0,
+		},
+	}
+
+	ser, err := json.Marshal(meta)
+	require.NoError(t, err)
+	_, err = ParseMetadataBytes(ser)
+	require.ErrorContains(t, err, "invalid metadata: expected sorted metadata log entries")
+}
+
 func getTestTableMetadata(fileName string) (Metadata, error) {
 	fCont, err := os.ReadFile(path.Join("testdata", fileName))
 	if err != nil {
