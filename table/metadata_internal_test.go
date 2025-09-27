@@ -846,7 +846,7 @@ func TestMetadataV2Serialize(t *testing.T) {
 }
 
 func TestMetadataBuilderSetDefaultSpecIDLastPartition(t *testing.T) {
-	builder, err := NewMetadataBuilder()
+	builder, err := NewMetadataBuilder(0)
 	assert.NoError(t, err)
 	schema := schema()
 	assert.NoError(t, builder.AddSchema(&schema))
@@ -860,9 +860,8 @@ func TestMetadataBuilderSetDefaultSpecIDLastPartition(t *testing.T) {
 }
 
 func TestMetadataBuilderSetLastAddedSchema(t *testing.T) {
-	builder, err := NewMetadataBuilder()
+	builder, err := NewMetadataBuilder(2)
 	assert.NoError(t, err)
-	assert.NoError(t, builder.SetFormatVersion(2))
 	schema := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.StringType{}, Required: true},
 	)
@@ -874,6 +873,10 @@ func TestMetadataBuilderSetLastAddedSchema(t *testing.T) {
 
 	assert.NoError(t, builder.SetDefaultSpecID(-1))
 
+	unsorted := UnsortedSortOrder
+	require.NoError(t, builder.AddSortOrder(&unsorted))
+	require.NoError(t, builder.SetDefaultSortOrderID(-1))
+
 	meta, err := builder.Build()
 	assert.NoError(t, err)
 	assert.Equal(t, schema.ID, meta.CurrentSchema().ID)
@@ -881,7 +884,7 @@ func TestMetadataBuilderSetLastAddedSchema(t *testing.T) {
 }
 
 func TestMetadataBuilderSchemaIncreasingNumbering(t *testing.T) {
-	builder, err := NewMetadataBuilder()
+	builder, err := NewMetadataBuilder(0)
 	assert.NoError(t, err)
 	assert.NoError(t, builder.SetFormatVersion(2))
 	schema := iceberg.NewSchema(1,
@@ -905,7 +908,7 @@ func TestMetadataBuilderSchemaIncreasingNumbering(t *testing.T) {
 }
 
 func TestMetadataBuilderReuseSchema(t *testing.T) {
-	builder, err := NewMetadataBuilder()
+	builder, err := NewMetadataBuilder(0)
 	assert.NoError(t, err)
 	schema := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.StringType{}, Required: true},

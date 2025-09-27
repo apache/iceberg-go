@@ -280,7 +280,7 @@ func createTestMetadata(snapshots []Snapshot, snapshotLog []SnapshotLogEntry) (M
 
 	// If we have custom snapshots or logs, we need to modify the metadata
 	if len(snapshots) > 0 || len(snapshotLog) > 0 {
-		builder, err := MetadataBuilderFromBase(meta)
+		builder, err := MetadataBuilderFromBase(meta, "")
 		if err != nil {
 			return nil, err
 		}

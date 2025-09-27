@@ -106,7 +106,7 @@ func (s *FanoutWriterTestSuite) testTransformPartition(transform iceberg.Transfo
 	meta, err := NewMetadata(icebergSchema, &spec, UnsortedSortOrder, loc, iceberg.Properties{})
 	s.Require().NoError(err)
 
-	metaBuilder, err := MetadataBuilderFromBase(meta)
+	metaBuilder, err := MetadataBuilderFromBase(meta, "")
 	s.Require().NoError(err)
 
 	args := recordWritingArgs{
