@@ -36,7 +36,8 @@ RC="$2"
 
 ICEBERG_DIST_BASE_URL="https://downloads.apache.org/iceberg"
 DOWNLOAD_RC_BASE_URL="https://dist.apache.org/repos/dist/dev/iceberg/apache-iceberg-go-${VERSION}-rc${RC}"
-ARCHIVE_BASE_NAME="apache-iceberg-go-${VERSION}-rc${RC}"
+ARCHIVE_BASE_NAME="apache-iceberg-go-${VERSION}"
+SOURCE_DIR_NAME="apache-iceberg-go-${VERSION}-rc${RC}"
 
 : "${VERIFY_DEFAULT:=1}"
 : "${VERIFY_DOWNLOAD:=${VERIFY_DEFAULT}}"
@@ -193,7 +194,7 @@ import_gpg_keys
 fetch_archive
 ensure_source_directory
 ensure_go
-pushd "${ARCHIVE_BASE_NAME}"
+pushd "${SOURCE_DIR_NAME}"
 test_source_distribution
 popd
 
