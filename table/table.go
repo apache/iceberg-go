@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"fmt"
 	"iter"
 	"log"
 	"runtime"
@@ -390,7 +391,7 @@ func NewFromLocation(
 	metalocation string,
 	fsysF FSysF,
 	cat CatalogIO,
-) (*Table, error) {
+) (_ *Table, err error) {
 	var meta Metadata
 
 	fsys, err := fsysF(ctx)
@@ -411,7 +412,11 @@ func NewFromLocation(
 		if err != nil {
 			return nil, err
 		}
-		defer f.Close()
+		defer func() {
+			if cerr := f.Close(); cerr != nil {
+				err = fmt.Errorf("error closing FileWriter: %w", cerr)
+			}
+		}()
 
 		if meta, err = ParseMetadata(f); err != nil {
 			return nil, err

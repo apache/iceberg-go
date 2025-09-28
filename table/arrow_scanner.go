@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"iter"
 	"strconv"
@@ -98,7 +99,7 @@ func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, 
 	return deletesPerFile, err
 }
 
-func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (map[string]*arrow.Chunked, error) {
+func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_ map[string]*arrow.Chunked, err error) {
 	src, err := internal.GetFile(ctx, fs, dataFile, true)
 	if err != nil {
 		return nil, err
@@ -108,7 +109,11 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (m
 	if err != nil {
 		return nil, err
 	}
-	defer rdr.Close()
+	defer func() {
+		if cerr := rdr.Close(); cerr != nil {
+			err = fmt.Errorf("error closing input FileReader: %w", cerr)
+		}
+	}()
 
 	tbl, err := rdr.ReadTable(ctx)
 	if err != nil {
@@ -404,7 +409,11 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 	if err != nil {
 		return err
 	}
-	defer rdr.Close()
+	defer func() {
+		if cerr := rdr.Close(); cerr != nil {
+			err = fmt.Errorf("error closing input FileReader: %w", cerr)
+		}
+	}()
 
 	pipeline := make([]recProcessFn, 0, 2)
 	if len(positionalDeletes) > 0 {

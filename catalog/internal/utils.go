@@ -344,7 +344,11 @@ func CreateViewMetadata(
 	if err != nil {
 		return "", fmt.Errorf("failed to create view metadata file: %w", err)
 	}
-	defer out.Close()
+	defer func() {
+		if cerr := out.Close(); cerr != nil {
+			err = fmt.Errorf("error closing FileWriter: %w", cerr)
+		}
+	}()
 
 	if _, err := out.Write(viewMetadataBytes); err != nil {
 		return "", fmt.Errorf("failed to write view metadata: %w", err)
@@ -377,7 +381,11 @@ func LoadViewMetadata(ctx context.Context,
 	if err != nil {
 		return viewMetadata, fmt.Errorf("error encountered loading view metadata: %w", err)
 	}
-	defer inputFile.Close()
+	defer func() {
+		if cerr := inputFile.Close(); cerr != nil {
+			err = fmt.Errorf("error closing input File: %w", cerr)
+		}
+	}()
 
 	// Decode the complete metadata
 	var fullViewMetadata map[string]interface{}

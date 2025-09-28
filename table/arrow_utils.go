@@ -1203,6 +1203,7 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 		for filePath := range paths {
 			format := tblutils.FormatFromFileName(filePath)
 			rdr := must(format.Open(ctx, fileIO, filePath))
+			// TODO: take a look at this defer Close() and consider refactoring
 			defer rdr.Close()
 
 			arrSchema := must(rdr.Schema())

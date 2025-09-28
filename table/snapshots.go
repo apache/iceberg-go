@@ -293,13 +293,17 @@ func (s Snapshot) Equals(other Snapshot) bool {
 		s.Summary.Equals(other.Summary)
 }
 
-func (s Snapshot) Manifests(fio iceio.IO) ([]iceberg.ManifestFile, error) {
+func (s Snapshot) Manifests(fio iceio.IO) (_ []iceberg.ManifestFile, err error) {
 	if s.ManifestList != "" {
 		f, err := fio.Open(s.ManifestList)
 		if err != nil {
 			return nil, fmt.Errorf("could not open manifest file: %w", err)
 		}
-		defer f.Close()
+		defer func() {
+			if cerr := f.Close(); cerr != nil {
+				err = fmt.Errorf("error closing input File: %w", cerr)
+			}
+		}()
 
 		return iceberg.ReadManifestList(f)
 	}
