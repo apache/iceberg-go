@@ -346,7 +346,7 @@ func CreateViewMetadata(
 	}
 	defer func() {
 		if cerr := out.Close(); cerr != nil {
-			err = fmt.Errorf("error closing FileWriter: %w", cerr)
+			err = errors.Join(err, fmt.Errorf("error closing FileWriter: %w", cerr))
 		}
 	}()
 
@@ -383,7 +383,7 @@ func LoadViewMetadata(ctx context.Context,
 	}
 	defer func() {
 		if cerr := inputFile.Close(); cerr != nil {
-			err = fmt.Errorf("error closing input File: %w", cerr)
+			err = errors.Join(err, fmt.Errorf("error closing input File: %w", cerr))
 		}
 	}()
 

@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"log"
@@ -414,7 +415,7 @@ func NewFromLocation(
 		}
 		defer func() {
 			if cerr := f.Close(); cerr != nil {
-				err = fmt.Errorf("error closing FileWriter: %w", cerr)
+				err = errors.Join(err, fmt.Errorf("error closing FileWriter: %w", cerr))
 			}
 		}()
 

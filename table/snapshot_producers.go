@@ -18,6 +18,7 @@
 package table
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -492,7 +493,7 @@ func (sp *snapshotProducer) newManifestWriter(spec iceberg.PartitionSpec) (_ *ic
 	if err != nil {
 		defer func() {
 			if cerr := out.Close(); cerr != nil {
-				err = fmt.Errorf("error closing FileWriter: %w", cerr)
+				err = errors.Join(err, fmt.Errorf("error closing FileWriter: %w", cerr))
 			}
 		}()
 
@@ -534,7 +535,7 @@ func (sp *snapshotProducer) manifests() (_ []iceberg.ManifestFile, err error) {
 			}
 			defer func() {
 				if cerr := out.Close(); cerr != nil {
-					err = fmt.Errorf("error closing WriteCloser: %w", cerr)
+					err = errors.Join(err, fmt.Errorf("error closing WriteCloser: %w", cerr))
 				}
 			}()
 

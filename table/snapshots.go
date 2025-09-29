@@ -301,7 +301,7 @@ func (s Snapshot) Manifests(fio iceio.IO) (_ []iceberg.ManifestFile, err error) 
 		}
 		defer func() {
 			if cerr := f.Close(); cerr != nil {
-				err = fmt.Errorf("error closing input File: %w", cerr)
+				err = errors.Join(err, fmt.Errorf("error closing input File: %w", cerr))
 			}
 		}()
 

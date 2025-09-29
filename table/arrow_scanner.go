@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"iter"
@@ -111,7 +112,7 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_
 	}
 	defer func() {
 		if cerr := rdr.Close(); cerr != nil {
-			err = fmt.Errorf("error closing input FileReader: %w", cerr)
+			err = errors.Join(err, fmt.Errorf("error closing input FileReader: %w", cerr))
 		}
 	}()
 
@@ -411,7 +412,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 	}
 	defer func() {
 		if cerr := rdr.Close(); cerr != nil {
-			err = fmt.Errorf("error closing input FileReader: %w", cerr)
+			err = errors.Join(err, fmt.Errorf("error closing input FileReader: %w", cerr))
 		}
 	}()
 

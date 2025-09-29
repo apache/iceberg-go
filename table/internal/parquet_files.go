@@ -244,7 +244,7 @@ func (p parquetFormat) WriteDataFile(ctx context.Context, fs iceio.WriteFileIO, 
 
 	defer func() {
 		if cerr := fw.Close(); cerr != nil {
-			err = fmt.Errorf("error closing fileWriter: %w", cerr)
+			err = errors.Join(err, fmt.Errorf("error closing fileWriter: %w", cerr))
 		}
 	}()
 
