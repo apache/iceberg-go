@@ -63,8 +63,8 @@ jobs:
           echo "RC=${rc}"
       - name: Archive
         run: |
-          id="apache-iceberg-go-${VERSION}-rc${RC}"
-          tar_gz="${id}.tar.gz"
+          id="apache-iceberg-go-${VERSION}"
+          tar_gz="${id}-rc${RC}.tar.gz"
           echo "TAR_GZ=${tar_gz}" >> ${GITHUB_ENV}
           git archive HEAD --prefix "${id}/" --output "${tar_gz}"
           sha512sum "${tar_gz}" > "${tar_gz}.sha512"
