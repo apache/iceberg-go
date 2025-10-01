@@ -185,6 +185,10 @@ type MetadataBuilder struct {
 }
 
 func NewMetadataBuilder(formatVersion int) (*MetadataBuilder, error) {
+	if formatVersion < 1 || formatVersion > supportedTableFormatVersion {
+		return nil, fmt.Errorf("%w: %d", iceberg.ErrInvalidFormatVersion, formatVersion)
+	}
+
 	return &MetadataBuilder{
 		updates:            make([]Update, 0),
 		schemaList:         make([]*iceberg.Schema, 0),
@@ -579,7 +583,7 @@ func (b *MetadataBuilder) SetFormatVersion(formatVersion int) error {
 	}
 
 	if formatVersion > supportedTableFormatVersion {
-		return fmt.Errorf("unsupported format version %d", formatVersion)
+		return fmt.Errorf("%w: %d", iceberg.ErrInvalidFormatVersion, formatVersion)
 	}
 
 	if formatVersion == b.formatVersion {
@@ -777,10 +781,8 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 		maxMetadataLogEntries := max(1,
 			b.base.Properties().GetInt(
 				MetadataPreviousVersionsMaxKey, MetadataPreviousVersionsMaxDefault))
-
 		b.AppendMetadataLog(*b.previousFileEntry)
 		b.TrimMetadataLogs(maxMetadataLogEntries)
-
 	}
 
 	return &commonMetadata{
