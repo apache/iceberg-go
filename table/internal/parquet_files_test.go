@@ -19,11 +19,13 @@ package internal_test
 
 import (
 	"bytes"
+	"context"
 	"math/big"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -32,6 +34,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
+	internal2 "github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
@@ -325,4 +328,48 @@ func TestMetricsPrimitiveTypes(t *testing.T) {
 		Val:   decimal128.FromBigInt(expectedUpper),
 		Scale: 2,
 	})
+}
+
+func TestWriteDataFileErrOnClose(t *testing.T) {
+	ctx := context.Background()
+	fm := internal.GetFileFormat(iceberg.ParquetFile)
+	mockfs := internal2.MockFS{}
+	mockfs.Test(t)
+
+	mockfs.On("Create", "f").Return(&internal2.MockFile{
+		ErrOnClose: true,
+	}, nil)
+
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	schema := arrow.NewSchema([]arrow.Field{
+		{
+			Name: "nested",
+			Type: arrow.ListOfField(arrow.Field{
+				Name: "element", Type: arrow.PrimitiveTypes.Int32, Nullable: false,
+				Metadata: arrow.NewMetadata([]string{table.ArrowParquetFieldIDKey}, []string{"2"}),
+			}),
+			Metadata: arrow.NewMetadata([]string{table.ArrowParquetFieldIDKey}, []string{"1"}),
+		},
+	}, nil)
+
+	bldr := array.NewRecordBuilder(mem, schema)
+	bldr.Field(0).AppendNull()
+	defer bldr.Release()
+
+	rec := bldr.NewRecordBatch()
+	defer rec.Release()
+
+	icesc, err := table.ArrowSchemaToIceberg(schema, false, nil)
+	require.NoError(t, err)
+
+	_, err = fm.WriteDataFile(ctx, &mockfs, nil, internal.WriteFileInfo{
+		FileSchema: icesc,
+		Spec:       iceberg.PartitionSpec{},
+		FileName:   "f",
+		StatsCols:  nil,
+		WriteProps: []parquet.WriterProperty{},
+	}, []arrow.RecordBatch{rec})
+	require.ErrorContains(t, err, "error on close")
 }

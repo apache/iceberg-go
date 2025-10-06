@@ -390,7 +390,7 @@ func NewFromLocation(
 	metalocation string,
 	fsysF FSysF,
 	cat CatalogIO,
-) (*Table, error) {
+) (_ *Table, err error) {
 	var meta Metadata
 
 	fsys, err := fsysF(ctx)
@@ -411,7 +411,7 @@ func NewFromLocation(
 		if err != nil {
 			return nil, err
 		}
-		defer f.Close()
+		defer internal.CheckedClose(f, &err)
 
 		if meta, err = ParseMetadata(f); err != nil {
 			return nil, err

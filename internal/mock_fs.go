@@ -20,6 +20,7 @@ package internal
 import (
 	"bytes"
 	"errors"
+	sio "io"
 	"io/fs"
 
 	"github.com/apache/iceberg-go/io"
@@ -52,6 +53,7 @@ func (m *MockFS) Remove(name string) error {
 
 type MockFSReadFile struct {
 	MockFS
+	ErrOnClose bool
 }
 
 func (m *MockFSReadFile) ReadFile(name string) ([]byte, error) {
@@ -61,7 +63,8 @@ func (m *MockFSReadFile) ReadFile(name string) ([]byte, error) {
 }
 
 type MockFile struct {
-	Contents *bytes.Reader
+	Contents   *bytes.Reader
+	ErrOnClose bool
 
 	closed bool
 }
@@ -74,7 +77,18 @@ func (m *MockFile) Read(p []byte) (int, error) {
 	return m.Contents.Read(p)
 }
 
+func (m *MockFile) ReadFrom(r sio.Reader) (n int64, err error) {
+	return 0, nil
+}
+
+func (m *MockFile) Write(p []byte) (n int, err error) {
+	return len(p), nil
+}
+
 func (m *MockFile) Close() error {
+	if m.ErrOnClose {
+		return errors.New("error on close")
+	}
 	if m.closed {
 		return errors.New("already closed")
 	}

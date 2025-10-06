@@ -28,6 +28,7 @@ import (
 	"strings"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 )
 
@@ -293,13 +294,13 @@ func (s Snapshot) Equals(other Snapshot) bool {
 		s.Summary.Equals(other.Summary)
 }
 
-func (s Snapshot) Manifests(fio iceio.IO) ([]iceberg.ManifestFile, error) {
+func (s Snapshot) Manifests(fio iceio.IO) (_ []iceberg.ManifestFile, err error) {
 	if s.ManifestList != "" {
 		f, err := fio.Open(s.ManifestList)
 		if err != nil {
 			return nil, fmt.Errorf("could not open manifest file: %w", err)
 		}
-		defer f.Close()
+		defer internal.CheckedClose(f, &err)
 
 		return iceberg.ReadManifestList(f)
 	}
