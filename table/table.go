@@ -83,7 +83,7 @@ func (t Table) LocationProvider() (LocationProvider, error) {
 }
 
 func (t Table) NewTransaction() *Transaction {
-	meta, _ := MetadataBuilderFromBase(t.metadata)
+	meta, _ := MetadataBuilderFromBase(t.metadata, t.metadataLocation)
 
 	return &Transaction{
 		tbl:  &t,

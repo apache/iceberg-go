@@ -17,12 +17,16 @@
 
 package iceberg
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 var (
 	ErrInvalidTypeString       = errors.New("invalid type")
 	ErrNotImplemented          = errors.New("not implemented")
 	ErrInvalidArgument         = errors.New("invalid argument")
+	ErrInvalidFormatVersion    = fmt.Errorf("%w: invalid format version", ErrInvalidArgument)
 	ErrInvalidSchema           = errors.New("invalid schema")
 	ErrInvalidTransform        = errors.New("invalid transform syntax")
 	ErrType                    = errors.New("type error")

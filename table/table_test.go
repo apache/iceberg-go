@@ -789,18 +789,7 @@ func (m *mockedCatalog) LoadTable(ctx context.Context, ident table.Identifier) (
 }
 
 func (m *mockedCatalog) CommitTable(ctx context.Context, ident table.Identifier, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
-	bldr, err := table.MetadataBuilderFromBase(m.metadata)
-	if err != nil {
-		return nil, "", err
-	}
-
-	for _, u := range updates {
-		if err := u.Apply(bldr); err != nil {
-			return nil, "", err
-		}
-	}
-
-	meta, err := bldr.Build()
+	meta, err := table.UpdateTableMetadata(m.metadata, updates, "")
 	if err != nil {
 		return nil, "", err
 	}
@@ -1336,7 +1325,7 @@ func (m *DeleteOldMetadataMockedCatalog) LoadTable(ctx context.Context, ident ta
 }
 
 func (m *DeleteOldMetadataMockedCatalog) CommitTable(ctx context.Context, ident table.Identifier, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
-	bldr, err := table.MetadataBuilderFromBase(m.metadata)
+	bldr, err := table.MetadataBuilderFromBase(m.metadata, "")
 	if err != nil {
 		return nil, "", err
 	}
