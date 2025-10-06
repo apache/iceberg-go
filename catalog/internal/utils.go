@@ -359,7 +359,7 @@ func LoadViewMetadata(ctx context.Context,
 	metadataLocation string,
 	viewName string,
 	namespace string,
-) (map[string]interface{}, error) {
+) (_ map[string]interface{}, err error) {
 	// Initial metadata with basic information
 	viewMetadata := map[string]interface{}{
 		"name":              viewName,
