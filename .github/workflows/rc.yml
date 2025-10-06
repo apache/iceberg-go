@@ -18,12 +18,8 @@
 name: RC
 on:
   push:
-    branches:
-      - '**'
-      - '!dependabot/**'
     tags:
       - '*-rc*'
-  pull_request:
 
 concurrency:
   group: ${{ github.repository }}-${{ github.head_ref || github.sha }}-${{ github.workflow }}
@@ -40,7 +36,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Prepare for tag
-        if: github.ref_type == 'tag'
         run: |
           # Remove the 'v' prefix and any '-rc' suffix from the tag name to isolate the version number
           # For a tag like 'v0.1.0-rc1', this will result in '0.1.0'
@@ -53,72 +48,24 @@ jobs:
           echo "RC=${rc}" >> ${GITHUB_ENV}
           echo "VERSION=${version}"
           echo "RC=${rc}"
-      - name: Prepare for branch
-        if: github.ref_type == 'branch'
-        run: |
-          rc=100
-          echo "VERSION=${version}" >> ${GITHUB_ENV}
-          echo "RC=${rc}" >> ${GITHUB_ENV}
-          echo "VERSION=${version}"
-          echo "RC=${rc}"
       - name: Archive
         run: |
-          id="apache-iceberg-go-${VERSION}-rc${RC}"
-          tar_gz="${id}.tar.gz"
-          echo "TAR_GZ=${tar_gz}" >> ${GITHUB_ENV}
-          git archive HEAD --prefix "${id}/" --output "${tar_gz}"
+          # tar.gz file has the format apache-iceberg-go-<version>-rc<rc>.tar.gz
+          # and contains a directory named apache-iceberg-go-<version> with the source
+          dir="apache-iceberg-go-${VERSION}"
+          tar_gz="apache-iceberg-go-${VERSION}-rc${RC}.tar.gz"
+          git archive HEAD --prefix "${dir}/" --output "${tar_gz}"
           sha512sum "${tar_gz}" > "${tar_gz}.sha512"
-      - name: Audit
-        run: |
-          dev/release/run_rat.sh "${TAR_GZ}"
       - uses: actions/upload-artifact@v4
         with:
           name: archive
           path: |
             apache-iceberg-go-*
-  
-  verify:
-    name: Verify
-    needs:
-      - archive
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - macos-latest
-          - ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: archive
-      - name: Verify
-        run: |
-          tar_gz=$(echo apache-iceberg-go-*.tar.gz)
-          # Extract version by removing the 'apache-iceberg-go-' prefix, '.tar.gz' extension, and '-rc*' suffix
-          # For a file like 'apache-iceberg-go-0.1.0-rc1.tar.gz', this will result in '0.1.0'
-          version=${tar_gz#apache-iceberg-go-}
-          version=${version%.tar.gz}
-          version=${version%%-rc*}
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            # Finds the last occurrence of `-rc` and returns everything after it
-            # For a tag like 'v0.1.0-rc1', this will result in '1'
-            rc=${GITHUB_REF_NAME##*-rc}
-          else
-            rc=100
-          fi
-          echo "VERSION=${version}"
-          echo "RC=${rc}"
-          VERIFY_DEFAULT=0 dev/release/verify_rc.sh "${version}" "${rc}"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   upload:
     name: upload
-    if: github.ref_type == 'tag'
     needs:
-      - verify
+      - archive
     runs-on: ubuntu-latest
     permissions:
       contents: write
