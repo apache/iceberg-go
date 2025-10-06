@@ -460,12 +460,12 @@ type hasFieldToIDMap interface {
 	setFieldIDToFixedSizeMap(map[int]int)
 }
 
-func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error) {
+func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) (_ []ManifestEntry, err error) {
 	f, err := fs.Open(m.FilePath())
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer internal.CheckedClose(f, &err)
 
 	return ReadManifest(m, f, discardDeleted)
 }

@@ -491,13 +491,7 @@ func (sp *snapshotProducer) newManifestWriter(spec iceberg.PartitionSpec) (_ *ic
 	wr, err := iceberg.NewManifestWriter(sp.txn.meta.formatVersion, counter, spec,
 		sp.txn.meta.CurrentSchema(), sp.snapshotID)
 	if err != nil {
-		defer func() {
-			if cerr := out.Close(); cerr != nil {
-				err = errors.Join(err, fmt.Errorf("error closing FileWriter: %w", cerr))
-			}
-		}()
-
-		return nil, "", nil, err
+		return nil, "", nil, errors.Join(err, out.Close())
 	}
 
 	return wr, path, counter, nil
@@ -533,11 +527,7 @@ func (sp *snapshotProducer) manifests() (_ []iceberg.ManifestFile, err error) {
 			if err != nil {
 				return err
 			}
-			defer func() {
-				if cerr := out.Close(); cerr != nil {
-					err = errors.Join(err, fmt.Errorf("error closing WriteCloser: %w", cerr))
-				}
-			}()
+			defer internal.CheckedClose(out, &err)
 
 			counter := &internal.CountingWriter{W: out}
 			currentSpec, err := sp.txn.meta.CurrentSpec()
@@ -593,11 +583,7 @@ func (sp *snapshotProducer) manifests() (_ []iceberg.ManifestFile, err error) {
 				if err != nil {
 					return err
 				}
-				defer func() {
-					if cerr := out.Close(); cerr != nil {
-						err = fmt.Errorf("error closing WriteCloser: %w", cerr)
-					}
-				}()
+				defer internal.CheckedClose(out, &err)
 
 				mf, err := iceberg.WriteManifest(path, out, sp.txn.meta.formatVersion,
 					sp.spec(specid), sp.txn.meta.CurrentSchema(), sp.snapshotID, entries)
@@ -704,11 +690,8 @@ func (sp *snapshotProducer) commit() (_ []Update, _ []Requirement, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	defer func() {
-		if cerr := out.Close(); cerr != nil {
-			err = fmt.Errorf("error closing FileWriter: %w", cerr)
-		}
-	}()
+	defer internal.CheckedClose(out, &err)
+
 	// TODO: Implement v3 here
 	err = iceberg.WriteManifestList(sp.txn.meta.formatVersion, out,
 		sp.snapshotID, parentSnapshot, &nextSequence, 0, newManifests)

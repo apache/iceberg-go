@@ -19,8 +19,6 @@ package table
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"iter"
 	"log"
 	"runtime"
@@ -413,11 +411,7 @@ func NewFromLocation(
 		if err != nil {
 			return nil, err
 		}
-		defer func() {
-			if cerr := f.Close(); cerr != nil {
-				err = errors.Join(err, fmt.Errorf("error closing FileWriter: %w", cerr))
-			}
-		}()
+		defer internal.CheckedClose(f, &err)
 
 		if meta, err = ParseMetadata(f); err != nil {
 			return nil, err

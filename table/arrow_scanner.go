@@ -19,8 +19,6 @@ package table
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"io"
 	"iter"
 	"strconv"
@@ -32,6 +30,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
+	iceinternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table/internal"
 	"github.com/apache/iceberg-go/table/substrait"
@@ -110,11 +109,7 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		if cerr := rdr.Close(); cerr != nil {
-			err = errors.Join(err, fmt.Errorf("error closing input FileReader: %w", cerr))
-		}
-	}()
+	defer iceinternal.CheckedClose(rdr, &err)
 
 	tbl, err := rdr.ReadTable(ctx)
 	if err != nil {
@@ -410,11 +405,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if cerr := rdr.Close(); cerr != nil {
-			err = errors.Join(err, fmt.Errorf("error closing input FileReader: %w", cerr))
-		}
-	}()
+	defer iceinternal.CheckedClose(rdr, &err)
 
 	pipeline := make([]recProcessFn, 0, 2)
 	if len(positionalDeletes) > 0 {

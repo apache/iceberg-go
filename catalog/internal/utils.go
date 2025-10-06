@@ -32,6 +32,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
@@ -344,11 +345,7 @@ func CreateViewMetadata(
 	if err != nil {
 		return "", fmt.Errorf("failed to create view metadata file: %w", err)
 	}
-	defer func() {
-		if cerr := out.Close(); cerr != nil {
-			err = errors.Join(err, fmt.Errorf("error closing FileWriter: %w", cerr))
-		}
-	}()
+	defer internal.CheckedClose(out, &err)
 
 	if _, err := out.Write(viewMetadataBytes); err != nil {
 		return "", fmt.Errorf("failed to write view metadata: %w", err)
@@ -381,11 +378,7 @@ func LoadViewMetadata(ctx context.Context,
 	if err != nil {
 		return viewMetadata, fmt.Errorf("error encountered loading view metadata: %w", err)
 	}
-	defer func() {
-		if cerr := inputFile.Close(); cerr != nil {
-			err = errors.Join(err, fmt.Errorf("error closing input File: %w", cerr))
-		}
-	}()
+	defer internal.CheckedClose(inputFile, &err)
 
 	// Decode the complete metadata
 	var fullViewMetadata map[string]interface{}
