@@ -94,7 +94,6 @@ if [ "${RELEASE_SIGN}" -gt 0 ]; then
   echo "Downloading .tar.gz from GitHub Releases"
   gh release download "${rc_tag}" \
     --dir "${id}" \
-    --pattern "${tar_gz}" \
     --repo "${repository}" \
     --skip-existing
 
