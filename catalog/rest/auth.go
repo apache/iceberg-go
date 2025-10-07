@@ -136,7 +136,6 @@ func (o *Oauth2AuthManager) fetchAccessToken() (string, error) {
 
 		return "", oauthErr
 	default:
-		// Simplified error handling to avoid dependency on handleNon200
-		return "", fmt.Errorf("%w: failed to fetch token, status code: %d", ErrRESTError, rsp.StatusCode)
+		return "", handleNon200(rsp, nil)
 	}
 }
