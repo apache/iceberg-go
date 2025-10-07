@@ -1750,15 +1750,15 @@ type metadataV3 struct {
 func initMetadataV3Deser() *metadataV3 {
 	return &metadataV3{
 		LastSeqNum:     -1,
-		NextRowIDValue: 0,
+		NextRowIDValue: -1,
 		commonMetadata: initCommonMetadataForDeserialization(),
 	}
 }
 
 func (m *metadataV3) LastSequenceNumber() int64 { return m.LastSeqNum }
 func (m *metadataV3) NextRowID() int64 {
-	if m.NextRowIDValue == 0 {
-		return 0
+	if m.NextRowIDValue == -1 {
+		return 0 // RFor v1/v2 compatibility when field is missing
 	}
 	return m.NextRowIDValue
 }
@@ -1822,7 +1822,10 @@ func (m *metadataV3) checkLastSequenceNumber() error {
 }
 
 func (m *metadataV3) checkNextRowID() error {
-	if m.NextRowIDValue < 0 {
+	if m.NextRowIDValue == -1 {
+		return fmt.Errorf("%w: next-row-id is required for v3 tables", ErrInvalidMetadata)
+	}
+	if m.NextRowIDValue < -1 {
 		return fmt.Errorf("%w: next-row-id must be non-negative, got %d", ErrInvalidMetadata, m.NextRowIDValue)
 	}
 
