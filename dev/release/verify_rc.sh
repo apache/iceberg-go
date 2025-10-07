@@ -185,6 +185,10 @@ test_source_distribution() {
   # TODO: run integration tests
 }
 
+run_rat_check() {
+  "${TOP_SOURCE_DIR}/dev/release/run_rat.sh" "${VERIFY_TMPDIR}/${ARCHIVE_BASE_NAME}.tar.gz"
+}
+
 setup_tmpdir "iceberg-go-${VERSION}-${RC}"
 echo "Working in sandbox ${VERIFY_TMPDIR}"
 cd "${VERIFY_TMPDIR}"
@@ -192,6 +196,7 @@ cd "${VERIFY_TMPDIR}"
 import_gpg_keys
 fetch_archive
 ensure_source_directory
+run_rat_check
 ensure_go
 pushd "${ARCHIVE_BASE_NAME}"
 test_source_distribution
