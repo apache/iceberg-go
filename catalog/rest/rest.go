@@ -161,8 +161,6 @@ type createTableRequest struct {
 	Props         iceberg.Properties     `json:"properties,omitempty"`
 }
 
-
-
 type configResponse struct {
 	Defaults  iceberg.Properties `json:"defaults"`
 	Overrides iceberg.Properties `json:"overrides"`
@@ -509,9 +507,6 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 
 	return nil
 }
-
-
-
 
 func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Client, error) {
 	session := &sessionTransport{
