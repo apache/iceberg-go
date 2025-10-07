@@ -144,18 +144,26 @@ func (convertToSubstrait) VisitDecimal(d iceberg.DecimalType) types.Type {
 	return &types.DecimalType{Precision: int32(d.Precision()), Scale: int32(d.Scale())}
 }
 
-func (convertToSubstrait) VisitBoolean() types.Type     { return &types.BooleanType{} }
-func (convertToSubstrait) VisitInt32() types.Type       { return &types.Int32Type{} }
-func (convertToSubstrait) VisitInt64() types.Type       { return &types.Int64Type{} }
-func (convertToSubstrait) VisitFloat32() types.Type     { return &types.Float32Type{} }
-func (convertToSubstrait) VisitFloat64() types.Type     { return &types.Float64Type{} }
-func (convertToSubstrait) VisitDate() types.Type        { return &types.DateType{} }
-func (convertToSubstrait) VisitTime() types.Type        { return &types.TimeType{} }
-func (convertToSubstrait) VisitTimestamp() types.Type   { return &types.TimestampType{} }
+func (convertToSubstrait) VisitBoolean() types.Type   { return &types.BooleanType{} }
+func (convertToSubstrait) VisitInt32() types.Type     { return &types.Int32Type{} }
+func (convertToSubstrait) VisitInt64() types.Type     { return &types.Int64Type{} }
+func (convertToSubstrait) VisitFloat32() types.Type   { return &types.Float32Type{} }
+func (convertToSubstrait) VisitFloat64() types.Type   { return &types.Float64Type{} }
+func (convertToSubstrait) VisitDate() types.Type      { return &types.DateType{} }
+func (convertToSubstrait) VisitTime() types.Type      { return &types.TimeType{} }
+func (convertToSubstrait) VisitTimestamp() types.Type { return &types.TimestampType{} }
+func (convertToSubstrait) VisitTimestampNs() types.Type {
+	return &types.PrecisionTimestampType{Precision: types.PrecisionNanoSeconds}
+}
 func (convertToSubstrait) VisitTimestampTz() types.Type { return &types.TimestampTzType{} }
-func (convertToSubstrait) VisitString() types.Type      { return &types.StringType{} }
-func (convertToSubstrait) VisitBinary() types.Type      { return &types.BinaryType{} }
-func (convertToSubstrait) VisitUUID() types.Type        { return &types.UUIDType{} }
+func (convertToSubstrait) VisitTimestampNsTz() types.Type {
+	return &types.PrecisionTimestampTzType{
+		PrecisionTimestampType: types.PrecisionTimestampType{Precision: types.PrecisionNanoSeconds},
+	}
+}
+func (convertToSubstrait) VisitString() types.Type { return &types.StringType{} }
+func (convertToSubstrait) VisitBinary() types.Type { return &types.BinaryType{} }
+func (convertToSubstrait) VisitUUID() types.Type   { return &types.UUIDType{} }
 
 var _ iceberg.SchemaVisitorPerPrimitiveType[types.Type] = (*convertToSubstrait)(nil)
 

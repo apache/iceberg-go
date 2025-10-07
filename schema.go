@@ -115,7 +115,7 @@ func (s *Schema) lazyNameToID() (map[string]int, error) {
 	return idx, nil
 }
 
-func (s *Schema) lazyIDToField() (map[int]NestedField, error) {
+func (s *Schema) LazyIDToField() (map[int]NestedField, error) {
 	index := s.idToField.Load()
 	if index != nil {
 		return *index, nil
@@ -278,7 +278,7 @@ func (s *Schema) FindFieldByNameCaseInsensitive(name string) (NestedField, bool)
 // FindFieldByID is like [*Schema.FindColumnName], but returns the whole
 // field rather than just the field name.
 func (s *Schema) FindFieldByID(id int) (NestedField, bool) {
-	idx, _ := s.lazyIDToField()
+	idx, _ := s.LazyIDToField()
 	f, ok := idx[id]
 
 	return f, ok
@@ -396,7 +396,7 @@ func (s *Schema) Select(caseSensitive bool, names ...string) (*Schema, error) {
 
 func (s *Schema) FieldHasOptionalParent(id int) bool {
 	idToParent, _ := s.lazyIDToParent()
-	idToField, _ := s.lazyIDToField()
+	idToField, _ := s.LazyIDToField()
 
 	f, ok := idToField[id]
 	if !ok {
@@ -475,7 +475,9 @@ type SchemaVisitorPerPrimitiveType[T any] interface {
 	VisitDate() T
 	VisitTime() T
 	VisitTimestamp() T
+	VisitTimestampNs() T
 	VisitTimestampTz() T
+	VisitTimestampNsTz() T
 	VisitString() T
 	VisitBinary() T
 	VisitUUID() T
@@ -607,8 +609,12 @@ func visitField[T any](f NestedField, visitor SchemaVisitor[T]) T {
 				return perPrimitive.VisitTime()
 			case TimestampType:
 				return perPrimitive.VisitTimestamp()
+			case TimestampNsType:
+				return perPrimitive.VisitTimestampNs()
 			case TimestampTzType:
 				return perPrimitive.VisitTimestampTz()
+			case TimestampTzNsType:
+				return perPrimitive.VisitTimestampNsTz()
 			case StringType:
 				return perPrimitive.VisitString()
 			case BinaryType:

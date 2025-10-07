@@ -40,6 +40,8 @@ func TestTypesBasic(t *testing.T) {
 		{"time", iceberg.PrimitiveTypes.Time},
 		{"timestamp", iceberg.PrimitiveTypes.Timestamp},
 		{"timestamptz", iceberg.PrimitiveTypes.TimestampTz},
+		{"timestamp_ns", iceberg.PrimitiveTypes.TimestampNs},
+		{"timestamptz_ns", iceberg.PrimitiveTypes.TimestampTzNs},
 		{"uuid", iceberg.PrimitiveTypes.UUID},
 		{"binary", iceberg.PrimitiveTypes.Binary},
 		{"fixed[5]", iceberg.FixedTypeOf(5)},
@@ -180,6 +182,8 @@ var NonParameterizedTypes = []iceberg.Type{
 	iceberg.PrimitiveTypes.Time,
 	iceberg.PrimitiveTypes.Timestamp,
 	iceberg.PrimitiveTypes.TimestampTz,
+	iceberg.PrimitiveTypes.TimestampNs,
+	iceberg.PrimitiveTypes.TimestampTzNs,
 	iceberg.PrimitiveTypes.String,
 	iceberg.PrimitiveTypes.Binary,
 	iceberg.PrimitiveTypes.UUID,
@@ -211,6 +215,8 @@ func TestTypeStrings(t *testing.T) {
 		{iceberg.PrimitiveTypes.Time, "time"},
 		{iceberg.PrimitiveTypes.Timestamp, "timestamp"},
 		{iceberg.PrimitiveTypes.TimestampTz, "timestamptz"},
+		{iceberg.PrimitiveTypes.TimestampNs, "timestamp_ns"},
+		{iceberg.PrimitiveTypes.TimestampTzNs, "timestamptz_ns"},
 		{iceberg.PrimitiveTypes.String, "string"},
 		{iceberg.PrimitiveTypes.UUID, "uuid"},
 		{iceberg.PrimitiveTypes.Binary, "binary"},
@@ -234,4 +240,42 @@ func TestTypeStrings(t *testing.T) {
 	for _, tt := range tests {
 		assert.Equal(t, tt.str, tt.typ.String())
 	}
+}
+
+func TestTimestampNanoConversions(t *testing.T) {
+	microValue := iceberg.Timestamp(1234567890000000) // microseconds
+	nanoValue := microValue.ToNanos()
+
+	expectedNano := iceberg.TimestampNano(1234567890000000000) // nanoseconds
+	assert.Equal(t, expectedNano, nanoValue, "micro to nano conversion")
+
+	backToMicro := nanoValue.ToMicros()
+	assert.Equal(t, microValue, backToMicro, "nano to micro round-trip")
+
+	microTime := microValue.ToTime()
+	nanoTime := nanoValue.ToTime()
+	assert.Equal(t, microTime, nanoTime, "ToTime() should produce same result")
+}
+
+func TestTimestampNanoLiteralConversions(t *testing.T) {
+	nanoLit := iceberg.TimestampNsLiteral(1234567890123456789)
+
+	microLit, err := nanoLit.To(iceberg.PrimitiveTypes.Timestamp)
+	assert.NoError(t, err)
+	assert.IsType(t, iceberg.TimestampLiteral(0), microLit)
+
+	expectedMicro := iceberg.Timestamp(1234567890123456) // truncates 789
+	microValue, ok := microLit.(iceberg.TimestampLiteral)
+	assert.True(t, ok)
+	assert.Equal(t, expectedMicro, iceberg.Timestamp(microValue))
+
+	backToNano, err := microLit.To(iceberg.PrimitiveTypes.TimestampNs)
+	assert.NoError(t, err)
+	assert.IsType(t, iceberg.TimestampNsLiteral(0), backToNano)
+
+	// round-trip is lossy - last 3 digits become 000
+	expectedRoundTrip := iceberg.TimestampNano(1234567890123456000)
+	nanoValue, ok := backToNano.(iceberg.TimestampNsLiteral)
+	assert.True(t, ok)
+	assert.Equal(t, expectedRoundTrip, iceberg.TimestampNano(nanoValue))
 }

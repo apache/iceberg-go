@@ -119,6 +119,10 @@ func (t *typeIFace) UnmarshalJSON(b []byte) error {
 			t.Type = TimeType{}
 		case "timestamp":
 			t.Type = TimestampType{}
+		case "timestamp_ns":
+			t.Type = TimestampNsType{}
+		case "timestamptz_ns":
+			t.Type = TimestampTzNsType{}
 		case "timestamptz":
 			t.Type = TimestampTzType{}
 		case "string":
@@ -613,6 +617,26 @@ func (t Timestamp) ToDate() Date {
 	return Date(tm.Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
 }
 
+func (t Timestamp) ToNanos() TimestampNano {
+	return TimestampNano(int64(t) * 1000)
+}
+
+type TimestampNano int64
+
+func (t TimestampNano) ToTime() time.Time {
+	return time.Unix(0, int64(t)).UTC()
+}
+
+func (t TimestampNano) ToMicros() Timestamp {
+	return Timestamp(int64(t) / 1000)
+}
+
+func (t TimestampNano) ToDate() Date {
+	tm := time.Unix(0, int64(t)).UTC()
+
+	return Date(tm.Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
+}
+
 // TimestampType represents a number of microseconds since the unix epoch
 // without regard for timezone.
 type TimestampType struct{}
@@ -677,32 +701,77 @@ func (BinaryType) primitive()     {}
 func (BinaryType) Type() string   { return "binary" }
 func (BinaryType) String() string { return "binary" }
 
+// TimestampNsType represents a timestamp stored as nanoseconds since the unix epoch
+// without regard for timezone. Requires format version 3+.
+type TimestampNsType struct{}
+
+func (TimestampNsType) Equals(other Type) bool {
+	_, ok := other.(TimestampNsType)
+
+	return ok
+}
+
+func (TimestampNsType) primitive()     {}
+func (TimestampNsType) Type() string   { return "timestamp_ns" }
+func (TimestampNsType) String() string { return "timestamp_ns" }
+
+// TimestampTzNsType represents a timestamp stored as UTC with nanoseconds since
+// the unix epoch. Requires format version 3+.
+type TimestampTzNsType struct{}
+
+func (TimestampTzNsType) Equals(other Type) bool {
+	_, ok := other.(TimestampTzNsType)
+
+	return ok
+}
+
+func (TimestampTzNsType) primitive()     {}
+func (TimestampTzNsType) Type() string   { return "timestamptz_ns" }
+func (TimestampTzNsType) String() string { return "timestamptz_ns" }
+
 var PrimitiveTypes = struct {
-	Bool        PrimitiveType
-	Int32       PrimitiveType
-	Int64       PrimitiveType
-	Float32     PrimitiveType
-	Float64     PrimitiveType
-	Date        PrimitiveType
-	Time        PrimitiveType
-	Timestamp   PrimitiveType
-	TimestampTz PrimitiveType
-	String      PrimitiveType
-	Binary      PrimitiveType
-	UUID        PrimitiveType
+	Bool          PrimitiveType
+	Int32         PrimitiveType
+	Int64         PrimitiveType
+	Float32       PrimitiveType
+	Float64       PrimitiveType
+	Date          PrimitiveType
+	Time          PrimitiveType
+	Timestamp     PrimitiveType
+	TimestampTz   PrimitiveType
+	TimestampNs   PrimitiveType
+	TimestampTzNs PrimitiveType
+	String        PrimitiveType
+	Binary        PrimitiveType
+	UUID          PrimitiveType
 }{
-	Bool:        BooleanType{},
-	Int32:       Int32Type{},
-	Int64:       Int64Type{},
-	Float32:     Float32Type{},
-	Float64:     Float64Type{},
-	Date:        DateType{},
-	Time:        TimeType{},
-	Timestamp:   TimestampType{},
-	TimestampTz: TimestampTzType{},
-	String:      StringType{},
-	Binary:      BinaryType{},
-	UUID:        UUIDType{},
+	Bool:          BooleanType{},
+	Int32:         Int32Type{},
+	Int64:         Int64Type{},
+	Float32:       Float32Type{},
+	Float64:       Float64Type{},
+	Date:          DateType{},
+	Time:          TimeType{},
+	Timestamp:     TimestampType{},
+	TimestampTz:   TimestampTzType{},
+	TimestampNs:   TimestampNsType{},
+	TimestampTzNs: TimestampTzNsType{},
+	String:        StringType{},
+	Binary:        BinaryType{},
+	UUID:          UUIDType{},
+}
+
+// MinFormatVersionForType returns the minimum table format version required
+// for the given type. Returns 1 for types supported in all versions, or a higher
+// version number for types that require newer format versions.
+func MinFormatVersionForType(t Type) int {
+	switch t.(type) {
+	case TimestampNsType, TimestampTzNsType:
+		return 3
+	default:
+		// All other types supported in v1+
+		return 1
+	}
 }
 
 // PromoteType promotes the type being read from a file to a requested read type.

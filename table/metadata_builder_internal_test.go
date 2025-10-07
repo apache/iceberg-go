@@ -1200,3 +1200,79 @@ func TestFromMetadataGeneratesMetadataLog(t *testing.T) {
 	require.Len(t, newMetadata.(*metadataV2).MetadataLog, 1)
 	require.Equal(t, metadataPath, newMetadata.(*metadataV2).MetadataLog[0].MetadataFile)
 }
+
+func TestUnsupportedTypes(t *testing.T) {
+	TEST_TYPES := []iceberg.Type{
+		iceberg.TimestampNsType{},
+		iceberg.TimestampTzNsType{},
+	}
+	for _, typ := range TEST_TYPES {
+		for unsupportedVersion := 1; unsupportedVersion < iceberg.MinFormatVersionForType(typ); unsupportedVersion++ {
+			t.Run(fmt.Sprintf("Unsupported type %s in version %d", typ.String(), unsupportedVersion), func(t *testing.T) {
+				sc := generateTypeSchema(typ)
+				err := checkSchemaCompatibility(sc, unsupportedVersion)
+				minVersion := iceberg.MinFormatVersionForType(typ)
+				errorString := fmt.Sprintf(
+					`invalid schema for v%d:
+- invalid type for top: %s is not supported until v%d
+- invalid type for arr.element: %s is not supported until v%d
+- invalid type for struct.inner_op: %s is not supported until v%d
+- invalid type for struct.inner_req: %s is not supported until v%d
+- invalid type for struct.struct_arr.deep: %s is not supported until v%d`, unsupportedVersion, typ, minVersion, typ, minVersion, typ, minVersion, typ, minVersion, typ, minVersion)
+				require.ErrorContains(t, err, errorString)
+			})
+		}
+	}
+}
+
+func generateTypeSchema(typ iceberg.Type) *iceberg.Schema {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{
+			Type: iceberg.Int64Type{}, ID: 1, Name: "id", Required: true,
+		},
+		iceberg.NestedField{
+			Type: typ, ID: 2, Name: "top",
+		},
+		iceberg.NestedField{
+			Type: &iceberg.ListType{
+				ElementID: 4, Element: typ, ElementRequired: true,
+			}, ID: 3, Name: "arr",
+		},
+		iceberg.NestedField{
+			Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{
+						Type: typ,
+						ID:   6,
+						Name: "inner_op",
+					},
+					{
+						Type:     typ,
+						ID:       7,
+						Name:     "inner_req",
+						Required: true,
+					},
+					{
+						ID: 8,
+						Type: &iceberg.StructType{
+							FieldList: []iceberg.NestedField{
+								{
+									Type:     typ,
+									ID:       9,
+									Name:     "deep",
+									Required: false,
+								},
+							},
+						},
+						Name: "struct_arr",
+					},
+				},
+			},
+			ID:       5,
+			Name:     "struct",
+			Required: true,
+		},
+	)
+
+	return sc
+}

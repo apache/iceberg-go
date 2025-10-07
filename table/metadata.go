@@ -31,7 +31,6 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
-
 	"github.com/google/uuid"
 )
 
@@ -299,6 +298,10 @@ func (b *MetadataBuilder) currentSnapshot() *Snapshot {
 }
 
 func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) error {
+	if err := checkSchemaCompatibility(schema, b.formatVersion); err != nil {
+		return err
+	}
+
 	newSchemaID := b.reuseOrCreateNewSchemaID(schema)
 
 	if _, err := b.GetSchemaByID(newSchemaID); err == nil {
@@ -317,6 +320,68 @@ func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) error {
 	b.schemaList = append(b.schemaList, schema)
 	b.updates = append(b.updates, NewAddSchemaUpdate(schema))
 	b.lastAddedSchemaID = &newSchemaID
+
+	return nil
+}
+
+// checkSchemaCompatibility checks that the schema is compatible with the table's format version.
+// This validates that the schema does not contain types or features that were released
+// in later format versions.
+// Java: Schema::checkCompatibility
+func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
+	const defaultValuesMinFormatVersion = 3
+	problems := make(map[int]string)
+	fieldIDs := make([]int, 0)
+
+	fields, err := sc.LazyIDToField()
+	if err != nil {
+		return fmt.Errorf("failed to check Schema compatibility: %w", err)
+	}
+
+	for _, field := range fields {
+		problem := false
+		minFormatVersion := iceberg.MinFormatVersionForType(field.Type)
+		colName, found := sc.FindColumnName(field.ID)
+
+		if !found {
+			return errors.New("invalid schema: field with id " + strconv.Itoa(field.ID) + " not found")
+		}
+		if formatVersion < minFormatVersion {
+			problems[field.ID] = fmt.Sprintf(
+				"invalid type for %s: %s is not supported until v%d",
+				colName, field.Type, minFormatVersion)
+			problem = true
+		}
+
+		if field.InitialDefault != nil && formatVersion < defaultValuesMinFormatVersion {
+			problems[field.ID] = fmt.Sprintf(
+				"invalid initial default for %s: non-null default (%v) is not supported until v%d",
+				colName, field.InitialDefault, defaultValuesMinFormatVersion)
+			problem = true
+		}
+
+		if problem {
+			fieldIDs = append(fieldIDs, field.ID)
+		}
+	}
+
+	if len(problems) > 0 {
+		// get sorted field IDs
+		slices.Sort(fieldIDs)
+
+		// build error message
+		var errMsg string
+		for i, id := range fieldIDs {
+			if i > 0 {
+				errMsg += "\n- "
+			} else {
+				errMsg = "- "
+			}
+			errMsg += problems[id]
+		}
+
+		return fmt.Errorf("invalid schema for v%d:\n%s", formatVersion, errMsg)
+	}
 
 	return nil
 }
