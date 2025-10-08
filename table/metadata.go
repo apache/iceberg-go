@@ -331,7 +331,7 @@ func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) error {
 // Java: Schema::checkCompatibility
 func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 	const defaultValuesMinFormatVersion = 3
-	problems := &strings.Builder{}
+	var problems strings.Builder
 
 	fieldsIt, err := sc.FlatFields()
 	if err != nil {
