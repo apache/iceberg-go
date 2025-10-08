@@ -28,6 +28,7 @@ import (
 	"maps"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/apache/iceberg-go"
@@ -330,57 +331,37 @@ func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) error {
 // Java: Schema::checkCompatibility
 func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 	const defaultValuesMinFormatVersion = 3
-	problems := make(map[int]string)
-	fieldIDs := make([]int, 0)
+	problems := &strings.Builder{}
 
-	fields, err := sc.LazyIDToField()
+	fieldsIt, err := sc.FlatFields()
 	if err != nil {
 		return fmt.Errorf("failed to check Schema compatibility: %w", err)
 	}
 
-	for _, field := range fields {
-		problem := false
-		minFormatVersion := iceberg.MinFormatVersionForType(field.Type)
+	for _, field := range slices.SortedFunc(fieldsIt, func(a, b iceberg.NestedField) int {
+		return cmp.Compare(a.ID, b.ID)
+	}) {
 		colName, found := sc.FindColumnName(field.ID)
-
 		if !found {
 			return errors.New("invalid schema: field with id " + strconv.Itoa(field.ID) + " not found")
 		}
+
+		minFormatVersion := iceberg.MinFormatVersionForType(field.Type)
 		if formatVersion < minFormatVersion {
-			problems[field.ID] = fmt.Sprintf(
-				"invalid type for %s: %s is not supported until v%d",
-				colName, field.Type, minFormatVersion)
-			problem = true
+			problems.WriteString(fmt.Sprintf(
+				"\n- invalid type for %s: %s is not supported until v%d",
+				colName, field.Type, minFormatVersion))
 		}
 
 		if field.InitialDefault != nil && formatVersion < defaultValuesMinFormatVersion {
-			problems[field.ID] = fmt.Sprintf(
+			problems.WriteString(fmt.Sprintf(
 				"invalid initial default for %s: non-null default (%v) is not supported until v%d",
-				colName, field.InitialDefault, defaultValuesMinFormatVersion)
-			problem = true
-		}
-
-		if problem {
-			fieldIDs = append(fieldIDs, field.ID)
+				colName, field.InitialDefault, defaultValuesMinFormatVersion))
 		}
 	}
 
-	if len(problems) > 0 {
-		// get sorted field IDs
-		slices.Sort(fieldIDs)
-
-		// build error message
-		var errMsg string
-		for i, id := range fieldIDs {
-			if i > 0 {
-				errMsg += "\n- "
-			} else {
-				errMsg = "- "
-			}
-			errMsg += problems[id]
-		}
-
-		return fmt.Errorf("invalid schema for v%d:\n%s", formatVersion, errMsg)
+	if problems.Len() != 0 {
+		return fmt.Errorf("invalid schema for v%d:%s", formatVersion, problems.String())
 	}
 
 	return nil

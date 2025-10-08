@@ -97,6 +97,8 @@ func NewLiteral[T LiteralType](val T) Literal {
 		return TimeLiteral(v)
 	case Timestamp:
 		return TimestampLiteral(v)
+	case TimestampNano:
+		return TimestampNsLiteral(v)
 	case string:
 		return StringLiteral(v)
 	case []byte:
@@ -526,6 +528,10 @@ func (i Int64Literal) To(t Type) (Literal, error) {
 		return TimestampLiteral(i), nil
 	case TimestampTzType:
 		return TimestampLiteral(i), nil
+	case TimestampNsType:
+		return TimestampNsLiteral(i), nil
+	case TimestampTzNsType:
+		return TimestampNsLiteral(i), nil
 	case DecimalType:
 		unscaled := Decimal{Val: decimal128.FromI64(int64(i)), Scale: 0}
 		if t.scale == 0 {
