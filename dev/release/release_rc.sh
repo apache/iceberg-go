@@ -116,6 +116,11 @@ if [ "${RELEASE_UPLOAD}" -gt 0 ]; then
   for fname in ./*; do
     mv "${fname}" "${fname//-rc${rc}/}"
   done
+
+  # regenerating checksum after rename because the one in gh release refers to the tar.gz file with -rc suffix
+  echo "Generating SHA512 checksum"
+  tar_gz="apache-iceberg-go-${version}.tar.gz"
+  sha512sum "${tar_gz}" > "${tar_gz}.sha512"
   popd
   svn import "${id}" "https://dist.apache.org/repos/dist/dev/iceberg/${id}" -m "Apache Iceberg Go ${version} RC${rc}"
 fi
