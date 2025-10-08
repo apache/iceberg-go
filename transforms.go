@@ -559,7 +559,7 @@ type TimeTransform interface {
 
 func canTransformTime(t TimeTransform, sourceType Type) bool {
 	switch sourceType.(type) {
-	case DateType, TimestampType, TimestampTzType:
+	case DateType, TimestampType, TimestampTzType, TimestampNsType, TimestampTzNsType:
 		return true
 	default:
 		return false
@@ -851,7 +851,7 @@ func (HourTransform) String() string { return "hour" }
 
 func (t HourTransform) CanTransform(sourceType Type) bool {
 	switch sourceType.(type) {
-	case TimestampType, TimestampTzType:
+	case TimestampType, TimestampTzType, TimestampTzNsType, TimestampNsType:
 		return true
 	default:
 		return false
