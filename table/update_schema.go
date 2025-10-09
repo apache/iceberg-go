@@ -124,6 +124,10 @@ func (u *UpdateSchema) init() error {
 }
 
 func (u *UpdateSchema) initIdentifierFieldNames() error {
+	if u.identifierFieldNames != nil {
+		return nil
+	}
+
 	identifierFieldNames := make(map[string]struct{})
 	for _, id := range u.schema.IdentifierFieldIDs {
 		name, ok := u.schema.FindColumnName(id)

@@ -702,6 +702,153 @@ func TestChainedOperations(t *testing.T) {
 	})
 }
 
+func TestSetIdentifierField(t *testing.T) {
+	t.Run("test set identifier field with single top-level field", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		// Test that SetIdentifierField returns the same UpdateSchema instance
+		updateSchema := NewUpdateSchema(txn, true, true)
+		updatedSchema := updateSchema.SetIdentifierField([][]string{{"id"}})
+		assert.Equal(t, updateSchema, updatedSchema) // Should return the same instance
+
+		newSchema, err := updatedSchema.Apply()
+		assert.NoError(t, err)
+		assert.NotNil(t, newSchema)
+
+		// Check that the schema has identifier field IDs set
+		assert.Len(t, newSchema.IdentifierFieldIDs, 1)
+		if len(newSchema.IdentifierFieldIDs) > 0 {
+			assert.Equal(t, 1, newSchema.IdentifierFieldIDs[0]) // id field has ID 1
+		}
+	})
+
+	t.Run("test set identifier field with multiple fields", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).SetIdentifierField([][]string{{"id"}, {"name"}}).Apply()
+		assert.NoError(t, err)
+		assert.NotNil(t, newSchema)
+
+		// Check that the schema has identifier field IDs set
+		assert.Len(t, newSchema.IdentifierFieldIDs, 2)
+		assert.Contains(t, newSchema.IdentifierFieldIDs, 1) // id field
+		assert.Contains(t, newSchema.IdentifierFieldIDs, 2) // name field
+	})
+
+	t.Run("test set identifier field with case sensitive matching", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		_, err := NewUpdateSchema(txn, true, true).SetIdentifierField([][]string{{"ID"}}).Apply()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "identifier field not found: ID")
+	})
+
+	t.Run("test set identifier field with case insensitive matching", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, false, true).SetIdentifierField([][]string{{"ID"}}).Apply()
+		assert.NoError(t, err)
+		assert.NotNil(t, newSchema)
+
+		// Check that the schema has identifier field IDs set
+		assert.Len(t, newSchema.IdentifierFieldIDs, 1)
+		assert.Equal(t, 1, newSchema.IdentifierFieldIDs[0]) // id field (case insensitive match)
+	})
+
+	t.Run("test set identifier field with non-existent field", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		_, err := NewUpdateSchema(txn, true, true).SetIdentifierField([][]string{{"non_existent"}}).Apply()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "identifier field not found: non_existent")
+	})
+
+	t.Run("test set identifier field with empty paths", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).SetIdentifierField([][]string{}).Apply()
+		assert.NoError(t, err)
+		assert.NotNil(t, newSchema)
+
+		// Check that the schema has no identifier field IDs
+		assert.Len(t, newSchema.IdentifierFieldIDs, 0)
+	})
+
+	t.Run("test set identifier field chained with other operations", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).
+			AddColumn([]string{"email"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			SetIdentifierField([][]string{{"id"}, {"email"}}).
+			Apply()
+		assert.NoError(t, err)
+		assert.NotNil(t, newSchema)
+
+		// Check that the schema has identifier field IDs set
+		assert.Len(t, newSchema.IdentifierFieldIDs, 2)
+		assert.Contains(t, newSchema.IdentifierFieldIDs, 1)  // id field
+		assert.Contains(t, newSchema.IdentifierFieldIDs, 12) // email field (newly added)
+	})
+
+	t.Run("test set identifier field with duplicate field paths", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).SetIdentifierField([][]string{{"id"}, {"id"}}).Apply()
+		assert.NoError(t, err)
+		assert.NotNil(t, newSchema)
+
+		// Check that the schema has identifier field IDs set (duplicates should be deduplicated)
+		assert.Len(t, newSchema.IdentifierFieldIDs, 1)
+		assert.Equal(t, 1, newSchema.IdentifierFieldIDs[0]) // id field
+	})
+
+	t.Run("test set identifier field replaces existing identifier fields", func(t *testing.T) {
+		// Create a schema with existing identifier fields
+		schemaWithIdentifiers := iceberg.NewSchemaWithIdentifiers(1, []int{1}, // id is initially an identifier
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, Doc: ""},
+			iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+			iceberg.NestedField{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: false, Doc: ""},
+		)
+		metadata, _ := NewMetadata(schemaWithIdentifiers, nil, UnsortedSortOrder, "", nil)
+		table := New([]string{"id"}, metadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		// Set identifier fields to name instead of id
+		newSchema, err := NewUpdateSchema(txn, true, true).SetIdentifierField([][]string{{"name"}}).Apply()
+		assert.NoError(t, err)
+		assert.NotNil(t, newSchema)
+
+		// Check that only name is now an identifier field
+		assert.Len(t, newSchema.IdentifierFieldIDs, 1)
+		assert.Equal(t, 2, newSchema.IdentifierFieldIDs[0]) // name field has ID 2
+	})
+
+	t.Run("test set identifier field multiple times", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		// Set identifier fields multiple times - last one should win
+		newSchema, err := NewUpdateSchema(txn, true, true).
+			SetIdentifierField([][]string{{"id"}}).
+			SetIdentifierField([][]string{{"name"}}).
+			Apply()
+		assert.NoError(t, err)
+		assert.NotNil(t, newSchema)
+
+		// Check that only the last SetIdentifierField call is applied
+		assert.Len(t, newSchema.IdentifierFieldIDs, 1)
+		assert.Equal(t, 2, newSchema.IdentifierFieldIDs[0]) // name field has ID 2
+	})
+}
+
 func TestErrorHandling(t *testing.T) {
 	t.Run("test incompatible changes without allowIncompatibleChanges", func(t *testing.T) {
 		table := New([]string{"id"}, testMetadata, "", nil, nil)
