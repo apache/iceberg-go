@@ -1494,7 +1494,8 @@ func TestWriteMapType(t *testing.T) {
 	cat.CreateNamespace(ctx, catalog.ToIdentifier("default"), nil)
 	iceSch := iceberg.NewSchema(1,
 		iceberg.NestedField{
-			ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.String, Required: true},
+			ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.String, Required: true,
+		},
 		iceberg.NestedField{
 			ID: 2, Name: "attrs", Required: true, Type: &iceberg.MapType{
 				KeyID:         3,
