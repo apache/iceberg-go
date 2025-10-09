@@ -1474,6 +1474,7 @@ func (t *TableWritingTestSuite) TestDeleteOldMetadataNoErrorLogsOnFileFound() {
 	t.NotContains(logOutput, "no such file or directory")
 }
 
+// testing issue reported in https://github.com/apache/iceberg-go/issues/595
 func TestWriteMapType(t *testing.T) {
 	loc := filepath.ToSlash(t.TempDir())
 
