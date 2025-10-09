@@ -498,7 +498,7 @@ func (b *MetadataBuilder) RemoveProperties(keys []string) error {
 func (b *MetadataBuilder) SetCurrentSchemaID(currentSchemaID int) error {
 	if currentSchemaID == -1 {
 		if b.lastAddedSchemaID == nil {
-			return errors.New("can't set current schema to last added schema, no schema has been added")
+			return fmt.Errorf("%w: can't set current schema to last added schema, no schema has been added", iceberg.ErrInvalidArgument)
 		}
 		currentSchemaID = *b.lastAddedSchemaID
 	}
@@ -509,7 +509,7 @@ func (b *MetadataBuilder) SetCurrentSchemaID(currentSchemaID int) error {
 
 	_, err := b.GetSchemaByID(currentSchemaID)
 	if err != nil {
-		return fmt.Errorf("can't set current schema to schema with id %d: %w", currentSchemaID, err)
+		return fmt.Errorf("%w: can't set current schema to schema with id %d: %w", iceberg.ErrInvalidArgument, currentSchemaID, err)
 	}
 
 	if b.lastAddedSchemaID != nil && currentSchemaID == *b.lastAddedSchemaID {
@@ -525,7 +525,7 @@ func (b *MetadataBuilder) SetCurrentSchemaID(currentSchemaID int) error {
 func (b *MetadataBuilder) SetDefaultSortOrderID(defaultSortOrderID int) error {
 	if defaultSortOrderID == -1 {
 		if b.lastAddedSortOrderID == nil {
-			return errors.New("can't set default sort order to last added with no added sort orders")
+			return fmt.Errorf("%w: can't set default sort order to last added with no added sort orders", iceberg.ErrInvalidArgument)
 		}
 		defaultSortOrderID = *b.lastAddedSortOrderID
 	}
@@ -535,7 +535,7 @@ func (b *MetadataBuilder) SetDefaultSortOrderID(defaultSortOrderID int) error {
 	}
 
 	if _, err := b.GetSortOrderByID(defaultSortOrderID); err != nil {
-		return fmt.Errorf("can't set default sort order to sort order with id %d: %w", defaultSortOrderID, err)
+		return fmt.Errorf("%w: can't set default sort order to sort order with id %d: %w", iceberg.ErrInvalidArgument, defaultSortOrderID, err)
 	}
 
 	if b.lastAddedSortOrderID != nil && defaultSortOrderID == *b.lastAddedSortOrderID {
@@ -554,7 +554,7 @@ func (b *MetadataBuilder) SetDefaultSpecID(defaultSpecID int) error {
 		if b.lastAddedPartitionID != nil {
 			defaultSpecID = *b.lastAddedPartitionID
 		} else {
-			return errors.New("can't set default spec to last added with no added partition specs")
+			return fmt.Errorf("%w: can't set default spec to last added with no added partition specs", iceberg.ErrInvalidArgument)
 		}
 	}
 
@@ -563,7 +563,7 @@ func (b *MetadataBuilder) SetDefaultSpecID(defaultSpecID int) error {
 	}
 
 	if _, err := b.GetSpecByID(defaultSpecID); err != nil {
-		return fmt.Errorf("can't set default spec to spec with id %d: %w", defaultSpecID, err)
+		return fmt.Errorf("%w: can't set default spec to spec with id %d: %w", iceberg.ErrInvalidArgument, defaultSpecID, err)
 	}
 
 	if b.lastAddedPartitionID != nil && defaultSpecID == *b.lastAddedPartitionID {
@@ -578,8 +578,8 @@ func (b *MetadataBuilder) SetDefaultSpecID(defaultSpecID int) error {
 
 func (b *MetadataBuilder) SetFormatVersion(formatVersion int) error {
 	if formatVersion < b.formatVersion {
-		return fmt.Errorf("downgrading format version from %d to %d is not allowed",
-			b.formatVersion, formatVersion)
+		return fmt.Errorf("%w: downgrading format version from %d to %d is not allowed",
+			iceberg.ErrInvalidArgument, b.formatVersion, formatVersion)
 	}
 
 	if formatVersion > supportedTableFormatVersion {
@@ -614,7 +614,7 @@ func (b *MetadataBuilder) SetProperties(props iceberg.Properties) error {
 
 	for _, key := range ReservedProperties {
 		if _, ok := props[key]; ok {
-			return fmt.Errorf("can't set reserved property %s", key)
+			return fmt.Errorf("%w: can't set reserved property %s", iceberg.ErrInvalidArgument, key)
 		}
 	}
 
@@ -675,7 +675,7 @@ func (b *MetadataBuilder) SetSnapshotRef(
 	}
 	for _, opt := range options {
 		if err := opt(&ref); err != nil {
-			return fmt.Errorf("invalid snapshot ref option: %w", err)
+			return fmt.Errorf("%w: invalid snapshot ref option: %w", iceberg.ErrInvalidArgument, err)
 		}
 	}
 
@@ -697,7 +697,7 @@ func (b *MetadataBuilder) SetSnapshotRef(
 
 	snapshot, err := b.SnapshotByID(snapshotID)
 	if err != nil {
-		return fmt.Errorf("can't set snapshot ref %s to unknown snapshot %d: %w", name, snapshotID, err)
+		return fmt.Errorf("%w: can't set snapshot ref %s to unknown snapshot %d: %w", iceberg.ErrInvalidArgument, name, snapshotID, err)
 	}
 
 	isAddedSnapshot := slices.ContainsFunc(b.updates, func(u Update) bool {
@@ -732,7 +732,7 @@ func (b *MetadataBuilder) SetSnapshotRef(
 
 func (b *MetadataBuilder) RemoveSnapshotRef(name string) error {
 	if _, found := b.refs[name]; !found {
-		return fmt.Errorf("snapshot ref not found: %s", name)
+		return fmt.Errorf("%w: snapshot ref not found: %s", iceberg.ErrInvalidArgument, name)
 	}
 
 	if name == MainBranch {
@@ -765,12 +765,12 @@ func (b *MetadataBuilder) SetLastUpdatedMS() *MetadataBuilder {
 
 func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 	if _, err := b.GetSpecByID(b.defaultSpecID); err != nil {
-		return nil, fmt.Errorf("defaultSpecID is invalid: %w", err)
+		return nil, fmt.Errorf("%w: defaultSpecID is invalid: %w", ErrInvalidMetadata, err)
 	}
 	defaultSpecID := b.defaultSpecID
 
 	if err := b.updateSnapshotLog(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 
 	if b.lastUpdatedMS == 0 {
@@ -840,7 +840,7 @@ func (b *MetadataBuilder) updateSnapshotLog() error {
 		if b.currentSnapshotID != nil {
 			last := newSnapsLog[len(newSnapsLog)-1]
 			if last.SnapshotID != *b.currentSnapshotID {
-				return errors.New("cannot set invalid snapshot log: latest entry is not the current snapshot")
+				return fmt.Errorf("%w: cannot set invalid snapshot log: latest entry is not the current snapshot", iceberg.ErrInvalidArgument)
 			}
 		}
 		b.snapshotLog = newSnapsLog
@@ -930,12 +930,12 @@ func (b *MetadataBuilder) Build() (Metadata, error) {
 	case 1:
 		schema, err := b.GetSchemaByID(b.currentSchemaID)
 		if err != nil {
-			return nil, fmt.Errorf("can't build metadata, missing schema for schema ID %d: %w", b.currentSchemaID, err)
+			return nil, fmt.Errorf("%w: can't build metadata, missing schema for schema ID %d: %w", ErrInvalidMetadata, b.currentSchemaID, err)
 		}
 
 		partition, err := b.GetSpecByID(common.DefaultSpecID)
 		if err != nil {
-			return nil, fmt.Errorf("can't build metadata, missing partition spec for spec ID %d: %w", b.defaultSpecID, err)
+			return nil, fmt.Errorf("%w: can't build metadata, missing partition spec for spec ID %d: %w", ErrInvalidMetadata, b.defaultSpecID, err)
 		}
 
 		partitionFields := make([]iceberg.PartitionField, 0)
@@ -962,7 +962,7 @@ func (b *MetadataBuilder) Build() (Metadata, error) {
 		}, nil
 
 	default:
-		return nil, fmt.Errorf("unknown format version %d", b.formatVersion)
+		return nil, fmt.Errorf("%w: unknown format version %d", ErrInvalidMetadata, b.formatVersion)
 	}
 }
 
@@ -1014,7 +1014,7 @@ func (b *MetadataBuilder) reuseOrCreateNewSchemaID(newSchema *iceberg.Schema) in
 
 func (b *MetadataBuilder) RemovePartitionSpecs(ints []int) error {
 	if slices.Contains(ints, b.defaultSpecID) {
-		return fmt.Errorf("can't remove default partition spec with id %d", b.defaultSpecID)
+		return fmt.Errorf("%w: can't remove default partition spec with id %d", iceberg.ErrInvalidArgument, b.defaultSpecID)
 	}
 
 	newSpecs := make([]iceberg.PartitionSpec, 0, len(b.specs)-len(ints))
@@ -1043,7 +1043,7 @@ func (b *MetadataBuilder) RemoveSchemas(ints []int) error {
 	}
 
 	if slices.Contains(ints, b.currentSchemaID) {
-		return fmt.Errorf("can't remove current schema with id %d", b.currentSchemaID)
+		return fmt.Errorf("%w: can't remove current schema with id %d", iceberg.ErrInvalidArgument, b.currentSchemaID)
 	}
 
 	removed := make([]int, len(ints))
@@ -1369,13 +1369,13 @@ func (c *commonMetadata) checkSortOrders() error {
 	for _, o := range c.SortOrderList {
 		if o.OrderID() == c.DefaultSortOrderID {
 			if err := o.CheckCompatibility(c.CurrentSchema()); err != nil {
-				return fmt.Errorf("default sort order %d is not compatible with current schema: %w", o.OrderID(), err)
+				return fmt.Errorf("%w: default sort order %d is not compatible with current schema: %w", ErrInvalidMetadata, o.OrderID(), err)
 			}
 
 			return nil
 		}
 		if o.OrderID() == UnsortedSortOrderID && o.Len() != 0 {
-			return fmt.Errorf("sort order ID %d is reserved for unsorted order", UnsortedSortOrderID)
+			return fmt.Errorf("%w: sort order ID %d is reserved for unsorted order", ErrInvalidMetadata, UnsortedSortOrderID)
 		}
 	}
 
@@ -1795,18 +1795,18 @@ func reassignIDs(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, sortOrde
 		var s string
 		var ok bool
 		if s, ok = previousMapFn(f.SourceID); !ok {
-			return nil, fmt.Errorf("field %d not found in schema", f.FieldID)
+			return nil, fmt.Errorf("%w: field %d not found in schema", ErrInvalidMetadata, f.FieldID)
 		}
 		opts = append(opts, iceberg.AddPartitionFieldByName(s, f.Name, f.Transform, freshSc, nil))
 	}
 	freshPartitions, err := iceberg.NewPartitionSpecOpts(opts...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 
 	freshSortOrder, err := AssignFreshSortOrderIDs(sortOrder, sc, freshSc)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 
 	return &ReassignedIds{
