@@ -343,7 +343,7 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 	}) {
 		colName, found := sc.FindColumnName(field.ID)
 		if !found {
-			return errors.New("invalid schema: field with id " + strconv.Itoa(field.ID) + " not found")
+			panic("invalid schema: field with id " + strconv.Itoa(field.ID) + " not found, this is a bug, please report.")
 		}
 
 		minFormatVersion := minFormatVersionForType(field.Type)
