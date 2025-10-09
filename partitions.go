@@ -125,7 +125,7 @@ func NewPartitionSpecOpts(opts ...PartitionOption) (PartitionSpec, error) {
 	}
 	for _, opt := range opts {
 		if err := opt(&spec); err != nil {
-			return PartitionSpec{}, err
+			return PartitionSpec{}, fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
 		}
 	}
 	spec.initialize()
