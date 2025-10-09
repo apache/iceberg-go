@@ -346,7 +346,7 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 			return errors.New("invalid schema: field with id " + strconv.Itoa(field.ID) + " not found")
 		}
 
-		minFormatVersion := iceberg.MinFormatVersionForType(field.Type)
+		minFormatVersion := minFormatVersionForType(field.Type)
 		if formatVersion < minFormatVersion {
 			problems.WriteString(fmt.Sprintf(
 				"\n- invalid type for %s: %s is not supported until v%d",
@@ -1875,4 +1875,17 @@ func UpdateTableMetadata(base Metadata, updates []Update, metadataLoc string) (M
 	}
 
 	return bldr.Build()
+}
+
+// minFormatVersionForType returns the minimum table format version required
+// for the given type. Returns 1 for types supported in all versions, or a higher
+// version number for types that require newer format versions.
+func minFormatVersionForType(t iceberg.Type) int {
+	switch t.(type) {
+	case iceberg.TimestampNsType, iceberg.TimestampTzNsType:
+		return 3
+	default:
+		// All other types supported in v1+
+		return 1
+	}
 }

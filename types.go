@@ -761,19 +761,6 @@ var PrimitiveTypes = struct {
 	UUID:          UUIDType{},
 }
 
-// MinFormatVersionForType returns the minimum table format version required
-// for the given type. Returns 1 for types supported in all versions, or a higher
-// version number for types that require newer format versions.
-func MinFormatVersionForType(t Type) int {
-	switch t.(type) {
-	case TimestampNsType, TimestampTzNsType:
-		return 3
-	default:
-		// All other types supported in v1+
-		return 1
-	}
-}
-
 // PromoteType promotes the type being read from a file to a requested read type.
 // fileType is the type from the file being read
 // readType is the requested readType

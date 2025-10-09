@@ -1207,11 +1207,11 @@ func TestUnsupportedTypes(t *testing.T) {
 		iceberg.TimestampTzNsType{},
 	}
 	for _, typ := range TEST_TYPES {
-		for unsupportedVersion := 1; unsupportedVersion < iceberg.MinFormatVersionForType(typ); unsupportedVersion++ {
+		for unsupportedVersion := 1; unsupportedVersion < minFormatVersionForType(typ); unsupportedVersion++ {
 			t.Run(fmt.Sprintf("Unsupported type %s in version %d", typ.String(), unsupportedVersion), func(t *testing.T) {
 				sc := generateTypeSchema(typ)
 				err := checkSchemaCompatibility(sc, unsupportedVersion)
-				minVersion := iceberg.MinFormatVersionForType(typ)
+				minVersion := minFormatVersionForType(typ)
 				errorString := fmt.Sprintf(
 					`invalid schema for v%d:
 - invalid type for top: %s is not supported until v%d
