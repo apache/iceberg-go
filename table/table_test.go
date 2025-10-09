@@ -34,6 +34,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
@@ -1471,6 +1472,91 @@ func (t *TableWritingTestSuite) TestDeleteOldMetadataNoErrorLogsOnFileFound() {
 	logOutput := logBuf.String()
 	t.NotContains(logOutput, "Warning: Failed to delete old metadata file")
 	t.NotContains(logOutput, "no such file or directory")
+}
+
+// testing issue reported in https://github.com/apache/iceberg-go/issues/595
+func TestWriteMapType(t *testing.T) {
+	loc := filepath.ToSlash(t.TempDir())
+
+	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
+		"uri":          ":memory:",
+		"type":         "sql",
+		sql.DriverKey:  sqliteshim.ShimName,
+		sql.DialectKey: string(sql.SQLite),
+		"warehouse":    "file://" + loc,
+	})
+	require.NoError(t, err)
+
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	ctx := compute.WithAllocator(context.Background(), mem)
+	cat.CreateNamespace(ctx, catalog.ToIdentifier("default"), nil)
+	iceSch := iceberg.NewSchema(1,
+		iceberg.NestedField{
+			ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.String, Required: true,
+		},
+		iceberg.NestedField{
+			ID: 2, Name: "attrs", Required: true, Type: &iceberg.MapType{
+				KeyID:         3,
+				KeyType:       iceberg.PrimitiveTypes.String,
+				ValueID:       4,
+				ValueType:     iceberg.PrimitiveTypes.String,
+				ValueRequired: false,
+			},
+		})
+
+	ident := catalog.ToIdentifier("default", "repro_map")
+	tbl, err := cat.CreateTable(ctx, ident, iceSch, catalog.WithLocation(loc))
+	require.NoError(t, err)
+
+	arrowSch, err := table.SchemaToArrowSchema(iceSch, nil, true, false)
+	require.NoError(t, err)
+
+	bldr := array.NewRecordBuilder(mem, arrowSch)
+	defer bldr.Release()
+
+	idbldr := bldr.Field(0).(*array.StringBuilder)
+	attrBldr := bldr.Field(1).(*array.MapBuilder)
+	attrKeyBldr := attrBldr.KeyBuilder().(*array.StringBuilder)
+	attrItemBldr := attrBldr.ItemBuilder().(*array.StringBuilder)
+
+	idbldr.Append("row-0")
+	attrBldr.Append(true)
+	attrKeyBldr.Append("a")
+	attrItemBldr.Append("1")
+
+	idbldr.Append("row-1")
+	attrBldr.Append(true)
+	attrKeyBldr.AppendValues([]string{"b", "c"}, nil)
+	attrItemBldr.AppendValues([]string{"2", "3"}, nil)
+
+	rec := bldr.NewRecordBatch()
+	defer rec.Release()
+
+	rr, err := array.NewRecordReader(arrowSch, []arrow.RecordBatch{rec})
+	require.NoError(t, err)
+	defer rr.Release()
+
+	result, err := tbl.Append(ctx, rr, nil)
+	require.NoError(t, err)
+
+	resultTbl, err := result.Scan().ToArrowTable(ctx)
+	require.NoError(t, err)
+	defer resultTbl.Release()
+
+	expectedSchema, err := table.SchemaToArrowSchema(iceSch, nil, false, false)
+	require.NoError(t, err)
+	expected, err := array.TableFromJSON(mem, expectedSchema, []string{
+		`[
+			{"id": "row-0", "attrs": [{"key": "a", "value": "1"}]},
+			{"id": "row-1", "attrs": [{"key": "b", "value": "2"}, {"key": "c", "value": "3"}]}
+		]`,
+	})
+	require.NoError(t, err)
+	defer expected.Release()
+
+	require.True(t, array.TableEqual(expected, resultTbl), "expected:\n %s\ngot:\n %s", expected, resultTbl)
 }
 
 func (t *TableTestSuite) TestRefresh() {
