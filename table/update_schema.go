@@ -117,6 +117,7 @@ func (u *UpdateSchema) initIdentifierFieldNames() error {
 	}
 
 	u.identifierFieldNames = identifierFieldNames
+
 	return nil
 }
 
@@ -127,11 +128,13 @@ func (u *UpdateSchema) initParentID() error {
 	}
 
 	maps.Copy(u.parentID, parents)
+
 	return nil
 }
 
 func (u *UpdateSchema) assignNewColumnID() int {
 	u.lastColumnID++
+
 	return u.lastColumnID
 }
 
@@ -145,6 +148,7 @@ func (u *UpdateSchema) findField(name string) (iceberg.NestedField, bool) {
 
 func (u *UpdateSchema) isDeleted(fieldID int) bool {
 	_, ok := u.deletes[fieldID]
+
 	return ok
 }
 
@@ -153,6 +157,7 @@ func (u *UpdateSchema) findParentID(fieldID int) int {
 	if !ok {
 		return TableRootID
 	}
+
 	return parentID
 }
 
@@ -160,6 +165,7 @@ func (u *UpdateSchema) AddColumn(path []string, fieldType iceberg.Type, doc stri
 	u.ops = append(u.ops, func() error {
 		return u.addColumn(path, fieldType, doc, required, defaultValue)
 	})
+
 	return u
 }
 
@@ -247,6 +253,7 @@ func (u *UpdateSchema) addColumn(path []string, fieldType iceberg.Type, doc stri
 	}
 	u.adds[parentID] = append(u.adds[parentID], sch.Field(0))
 	u.addedNameToID[fullName] = sch.Field(0).ID
+
 	return nil
 }
 
@@ -254,6 +261,7 @@ func (u *UpdateSchema) DeleteColumn(path []string) *UpdateSchema {
 	u.ops = append(u.ops, func() error {
 		return u.deleteColumn(path)
 	})
+
 	return u
 }
 
@@ -275,6 +283,7 @@ func (u *UpdateSchema) deleteColumn(path []string) error {
 	delete(u.identifierFieldNames, fullName)
 
 	u.deletes[field.ID] = struct{}{}
+
 	return nil
 }
 
@@ -290,6 +299,7 @@ func (u *UpdateSchema) UpdateColumn(path []string, update ColumnUpdate) *UpdateS
 	u.ops = append(u.ops, func() error {
 		return u.updateColumn(path, update)
 	})
+
 	return u
 }
 
@@ -414,6 +424,7 @@ func (u *UpdateSchema) RenameColumn(path []string, newName string) *UpdateSchema
 			},
 		})
 	})
+
 	return u
 }
 
@@ -421,6 +432,7 @@ func (u *UpdateSchema) MoveColumn(op MoveOp, path, relativeTo []string) *UpdateS
 	u.ops = append(u.ops, func() error {
 		return u.moveColumn(op, path, relativeTo)
 	})
+
 	return u
 }
 
@@ -428,6 +440,7 @@ func (u *UpdateSchema) MoveFirst(path []string) *UpdateSchema {
 	u.ops = append(u.ops, func() error {
 		return u.moveColumn(MoveOpFirst, path, nil)
 	})
+
 	return u
 }
 
@@ -435,6 +448,7 @@ func (u *UpdateSchema) MoveBefore(path, relativeTo []string) *UpdateSchema {
 	u.ops = append(u.ops, func() error {
 		return u.moveColumn(MoveOpBefore, path, relativeTo)
 	})
+
 	return u
 }
 
@@ -442,6 +456,7 @@ func (u *UpdateSchema) MoveAfter(path, relativeTo []string) *UpdateSchema {
 	u.ops = append(u.ops, func() error {
 		return u.moveColumn(MoveOpAfter, path, relativeTo)
 	})
+
 	return u
 }
 
@@ -451,6 +466,7 @@ func (u *UpdateSchema) findFieldForMove(name string) (int, bool) {
 		return field.ID, true
 	}
 	id, ok := u.addedNameToID[name]
+
 	return id, ok
 }
 
@@ -474,6 +490,7 @@ func (u *UpdateSchema) moveColumn(op MoveOp, path []string, relativeTo []string)
 			RelativeTo: -1,
 			Op:         op,
 		})
+
 		return nil
 	case MoveOpBefore, MoveOpAfter:
 		relativeToFullName := strings.Join(relativeTo, ".")
@@ -494,8 +511,10 @@ func (u *UpdateSchema) moveColumn(op MoveOp, path []string, relativeTo []string)
 			RelativeTo: relativeToFieldID,
 			Op:         op,
 		})
+
 		return nil
 	default:
+
 		return fmt.Errorf("invalid move operation: %s", op)
 	}
 }
@@ -506,6 +525,7 @@ func (u *UpdateSchema) SetIdentifierField(paths [][]string) *UpdateSchema {
 		identifierFieldNames[strings.Join(path, ".")] = struct{}{}
 	}
 	u.identifierFieldNames = identifierFieldNames
+
 	return u
 }
 
@@ -519,6 +539,7 @@ func (u *UpdateSchema) BuildUpdates() ([]Update, []Requirement, error) {
 	for _, schema := range u.txn.meta.schemaList {
 		if newSchema.Equals(schema) {
 			existingSchemaID = schema.ID
+
 			break
 		}
 	}
@@ -648,6 +669,7 @@ func (a *applyChanges) Struct(structType iceberg.StructType, fieldResults []iceb
 	for i, resultType := range fieldResults {
 		if resultType == nil {
 			hasChanges = true
+
 			continue
 		}
 
@@ -783,6 +805,7 @@ func moveFields(fields []iceberg.NestedField, moves []move) []iceberg.NestedFiel
 				fieldToMove = field
 				fieldIndex = i
 				found = true
+
 				break
 			}
 		}
@@ -802,6 +825,7 @@ func moveFields(fields []iceberg.NestedField, moves []move) []iceberg.NestedFiel
 				if field.ID == move.RelativeTo {
 					relativeIndex = i
 					found = true
+
 					break
 				}
 			}
@@ -816,6 +840,7 @@ func moveFields(fields []iceberg.NestedField, moves []move) []iceberg.NestedFiel
 			}
 		}
 	}
+
 	return reordered
 }
 
@@ -833,5 +858,6 @@ func addAndMoveFields(fields []iceberg.NestedField, adds []iceberg.NestedField, 
 	if len(adds) == 0 {
 		return nil
 	}
+
 	return fields
 }

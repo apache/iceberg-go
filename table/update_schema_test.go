@@ -34,7 +34,6 @@ var originalSchema = iceberg.NewSchema(1,
 var testMetadata, _ = NewMetadata(originalSchema, nil, UnsortedSortOrder, "", nil)
 
 func TestNewUpdateSchema(t *testing.T) {
-
 	t.Run("test update schema with add primitive type on top level", func(t *testing.T) {
 		table := New([]string{"id"}, testMetadata, "", nil, nil)
 		txn := table.NewTransaction()
@@ -331,7 +330,6 @@ func TestNewUpdateSchema(t *testing.T) {
 }
 
 func TestApplyChanges(t *testing.T) {
-
 	t.Run("test apply changes on schema", func(t *testing.T) {
 		deletes := map[int]struct{}{
 			2: {},
