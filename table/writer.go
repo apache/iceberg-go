@@ -68,6 +68,7 @@ func (w *writer) writeFile(ctx context.Context, partitionValues map[int]any, tas
 			return nil, err
 		}
 		batches[i] = rec
+		defer rec.Release()
 	}
 
 	statsCols, err := computeStatsPlan(w.fileSchema, w.meta.props)
