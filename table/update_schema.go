@@ -713,7 +713,7 @@ func (a *applyChanges) Struct(structType iceberg.StructType, fieldResults []iceb
 			hasChanges = true
 			newFields = append(newFields, iceberg.NestedField{
 				ID:             field.ID,
-				Name:           field.Name,
+				Name:           name,
 				Type:           resultType,
 				Required:       required,
 				Doc:            doc,

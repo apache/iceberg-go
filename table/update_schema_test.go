@@ -50,7 +50,7 @@ var originalSchema = iceberg.NewSchema(1,
 
 var testMetadata, _ = NewMetadata(originalSchema, nil, UnsortedSortOrder, "", nil)
 
-func TestNewUpdateSchema(t *testing.T) {
+func TestAddColumn(t *testing.T) {
 	t.Run("test update schema with add primitive type on top level", func(t *testing.T) {
 		table := New([]string{"id"}, testMetadata, "", nil, nil)
 		txn := table.NewTransaction()
@@ -426,5 +426,309 @@ func TestApplyChanges(t *testing.T) {
 			{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: false, Doc: ""},
 			{ID: 4, Name: "name", Type: iceberg.PrimitiveTypes.UUID, Required: false, Doc: ""},
 		}, st.(*iceberg.StructType).Fields())
+	})
+}
+
+func TestDeleteColumn(t *testing.T) {
+	t.Run("test delete top level column", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).DeleteColumn([]string{"name"}).Apply()
+		assert.NoError(t, err)
+		assert.NotNil(t, newSchema)
+
+		fields := newSchema.Fields()
+		assert.Len(t, fields, 5)
+
+		fieldNames := make([]string, len(fields))
+		for i, field := range fields {
+			fieldNames[i] = field.Name
+		}
+		assert.Contains(t, fieldNames, "id")
+		assert.Contains(t, fieldNames, "age")
+		assert.Contains(t, fieldNames, "address")
+		assert.NotContains(t, fieldNames, "name")
+	})
+
+	t.Run("test delete nested column", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).DeleteColumn([]string{"address", "city"}).Apply()
+		assert.NoError(t, err)
+		assert.NotNil(t, newSchema)
+
+		addressField, ok := newSchema.FindFieldByName("address")
+		assert.True(t, ok)
+
+		structType, ok := addressField.Type.(*iceberg.StructType)
+		assert.True(t, ok)
+		assert.Len(t, structType.Fields(), 1)
+		assert.Equal(t, "zip", structType.Fields()[0].Name)
+	})
+
+	t.Run("test delete non-existent column", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		_, err := NewUpdateSchema(txn, true, true).DeleteColumn([]string{"non_existent"}).Apply()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "field not found")
+	})
+}
+
+func TestUpdateColumn(t *testing.T) {
+	t.Run("test update column type", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).UpdateColumn([]string{"age"}, ColumnUpdate{
+			FieldType: iceberg.Optional[iceberg.Type]{Valid: true, Val: iceberg.PrimitiveTypes.Int64},
+		}).Apply()
+		assert.NoError(t, err)
+		assert.NotNil(t, newSchema)
+
+		ageField, ok := newSchema.FindFieldByName("age")
+		assert.True(t, ok)
+		assert.Equal(t, iceberg.PrimitiveTypes.Int64, ageField.Type)
+	})
+
+	t.Run("test update column required", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).UpdateColumn([]string{"name"}, ColumnUpdate{
+			Required: iceberg.Optional[bool]{Valid: true, Val: true},
+		}).Apply()
+		assert.NoError(t, err)
+		assert.NotNil(t, newSchema)
+
+		nameField, ok := newSchema.FindFieldByName("name")
+		assert.True(t, ok)
+		assert.True(t, nameField.Required)
+	})
+
+	t.Run("test update column doc", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).UpdateColumn([]string{"age"}, ColumnUpdate{
+			Doc: iceberg.Optional[string]{Valid: true, Val: "User's age in years"},
+		}).Apply()
+		assert.NoError(t, err)
+		assert.NotNil(t, newSchema)
+
+		ageField, ok := newSchema.FindFieldByName("age")
+		assert.True(t, ok)
+		assert.Equal(t, "User's age in years", ageField.Doc)
+	})
+
+	t.Run("test update non-existent column", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		_, err := NewUpdateSchema(txn, true, true).UpdateColumn([]string{"non_existent"}, ColumnUpdate{
+			Doc: iceberg.Optional[string]{Valid: true, Val: "test"},
+		}).Apply()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "field not found")
+	})
+}
+
+func TestRenameColumn(t *testing.T) {
+	t.Run("test rename top level column", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).RenameColumn([]string{"name"}, "full_name").Apply()
+		assert.NoError(t, err)
+		assert.NotNil(t, newSchema)
+
+		_, ok := newSchema.FindFieldByName("name")
+		assert.False(t, ok)
+
+		field, ok := newSchema.FindFieldByName("full_name")
+		assert.True(t, ok)
+		assert.Equal(t, iceberg.PrimitiveTypes.String, field.Type)
+	})
+
+	t.Run("test rename nested column", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).RenameColumn([]string{"address", "city"}, "city_name").Apply()
+		assert.NoError(t, err)
+		assert.NotNil(t, newSchema)
+
+		addressField, ok := newSchema.FindFieldByName("address")
+		assert.True(t, ok)
+
+		structType, ok := addressField.Type.(*iceberg.StructType)
+		assert.True(t, ok)
+
+		fieldNames := make([]string, len(structType.Fields()))
+		for i, field := range structType.Fields() {
+			fieldNames[i] = field.Name
+		}
+		assert.Contains(t, fieldNames, "city_name")
+		assert.NotContains(t, fieldNames, "city")
+	})
+
+	t.Run("test rename to existing name", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		_, err := NewUpdateSchema(txn, true, true).RenameColumn([]string{"name"}, "age").Apply()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "field already exists")
+	})
+}
+
+func TestMoveColumn(t *testing.T) {
+	t.Run("test move column to first", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).MoveFirst([]string{"age"}).Apply()
+		assert.NoError(t, err)
+		assert.NotNil(t, newSchema)
+
+		fields := newSchema.Fields()
+		assert.Equal(t, "age", fields[0].Name)
+		assert.Equal(t, "id", fields[1].Name)
+	})
+
+	t.Run("test move column before", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).MoveBefore([]string{"age"}, []string{"name"}).Apply()
+		assert.NoError(t, err)
+		assert.NotNil(t, newSchema)
+
+		fields := newSchema.Fields()
+		fieldNames := make([]string, len(fields))
+		for i, field := range fields {
+			fieldNames[i] = field.Name
+		}
+
+		ageIndex := -1
+		nameIndex := -1
+		for i, name := range fieldNames {
+			if name == "age" {
+				ageIndex = i
+			}
+			if name == "name" {
+				nameIndex = i
+			}
+		}
+
+		assert.True(t, ageIndex < nameIndex, "age should come before name")
+	})
+
+	t.Run("test move column after", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).MoveAfter([]string{"name"}, []string{"age"}).Apply()
+		assert.NoError(t, err)
+		assert.NotNil(t, newSchema)
+
+		fields := newSchema.Fields()
+		fieldNames := make([]string, len(fields))
+		for i, field := range fields {
+			fieldNames[i] = field.Name
+		}
+
+		ageIndex := -1
+		nameIndex := -1
+		for i, name := range fieldNames {
+			if name == "age" {
+				ageIndex = i
+			}
+			if name == "name" {
+				nameIndex = i
+			}
+		}
+
+		assert.True(t, nameIndex > ageIndex, "name should come after age")
+	})
+
+	t.Run("test move non-existent column", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		_, err := NewUpdateSchema(txn, true, true).MoveFirst([]string{"non_existent"}).Apply()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "field not found")
+	})
+}
+
+func TestChainedOperations(t *testing.T) {
+	t.Run("test multiple operations in chain", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).
+			AddColumn([]string{"email"}, iceberg.PrimitiveTypes.String, "Email address", false, nil).
+			RenameColumn([]string{"name"}, "full_name").
+			UpdateColumn([]string{"age"}, ColumnUpdate{
+				Required: iceberg.Optional[bool]{Valid: true, Val: true},
+			}).
+			MoveFirst([]string{"email"}).
+			DeleteColumn([]string{"tags"}).
+			Apply()
+
+		assert.NoError(t, err)
+		assert.NotNil(t, newSchema)
+
+		fields := newSchema.Fields()
+		assert.Len(t, fields, 6)
+
+		assert.Equal(t, "email", fields[0].Name)
+
+		_, ok := newSchema.FindFieldByName("name")
+		assert.False(t, ok)
+		_, ok = newSchema.FindFieldByName("full_name")
+		assert.True(t, ok)
+
+		ageField, ok := newSchema.FindFieldByName("age")
+		assert.True(t, ok)
+		assert.True(t, ageField.Required)
+
+		_, ok = newSchema.FindFieldByName("tags")
+		assert.False(t, ok)
+	})
+}
+
+func TestErrorHandling(t *testing.T) {
+	t.Run("test incompatible changes without allowIncompatibleChanges", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		_, err := NewUpdateSchema(txn, true, false).UpdateColumn([]string{"name"}, ColumnUpdate{
+			Required: iceberg.Optional[bool]{Valid: true, Val: true},
+		}).Apply()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot change column nullability from optional to required")
+	})
+
+	t.Run("test add required field without default value", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		_, err := NewUpdateSchema(txn, true, false).AddColumn([]string{"required_field"}, iceberg.PrimitiveTypes.String, "", true, nil).Apply()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "required field required_field has no default value")
+	})
+
+	t.Run("test add field with incompatible default value", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		_, err := NewUpdateSchema(txn, true, true).AddColumn([]string{"age_field"}, iceberg.PrimitiveTypes.String, "", false, iceberg.Int32Literal(25)).Apply()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "default value type mismatch")
 	})
 }
