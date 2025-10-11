@@ -1202,24 +1202,57 @@ func TestFromMetadataGeneratesMetadataLog(t *testing.T) {
 }
 
 func TestUnsupportedTypes(t *testing.T) {
-	TEST_TYPES := []iceberg.Type{
+	TestTypes := []iceberg.Type{
 		iceberg.TimestampNsType{},
 		iceberg.TimestampTzNsType{},
 	}
-	for _, typ := range TEST_TYPES {
+	for _, typ := range TestTypes {
 		for unsupportedVersion := 1; unsupportedVersion < minFormatVersionForType(typ); unsupportedVersion++ {
 			t.Run(fmt.Sprintf("Unsupported type %s in version %d", typ.String(), unsupportedVersion), func(t *testing.T) {
 				sc := generateTypeSchema(typ)
 				err := checkSchemaCompatibility(sc, unsupportedVersion)
 				minVersion := minFormatVersionForType(typ)
+				getField := func(id int) iceberg.NestedField {
+					if f, ok := sc.FindFieldByID(id); ok {
+						return f
+					}
+					panic(fmt.Sprintf("Field with ID %d not found in schema", id))
+				}
+				getCol := func(id int) string {
+					if f, ok := sc.FindColumnName(id); ok {
+						return f
+					}
+					panic(fmt.Sprintf("Column with source ID %d not found in schema", id))
+				}
+				getErrField := func(id int) IncompatibleField {
+					return IncompatibleField{
+						field:   getField(id),
+						colName: getCol(id),
+						unsupportedType: &UnsupportedType{
+							minVersion,
+						},
+						invalidDefault: nil,
+					}
+				}
+				require.Equal(t, ErrIncompatibleSchema{
+					fields: []IncompatibleField{
+						getErrField(2),
+						getErrField(4),
+						getErrField(6),
+						getErrField(7),
+						getErrField(9),
+					},
+					formatVersion: unsupportedVersion,
+				}, err)
 				errorString := fmt.Sprintf(
-					`invalid schema for v%d:
+					`invalid schema: for v%d:
 - invalid type for top: %s is not supported until v%d
 - invalid type for arr.element: %s is not supported until v%d
 - invalid type for struct.inner_op: %s is not supported until v%d
 - invalid type for struct.inner_req: %s is not supported until v%d
 - invalid type for struct.struct_arr.deep: %s is not supported until v%d`, unsupportedVersion, typ, minVersion, typ, minVersion, typ, minVersion, typ, minVersion, typ, minVersion)
 				require.ErrorContains(t, err, errorString)
+				require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 			})
 		}
 	}

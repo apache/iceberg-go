@@ -28,7 +28,6 @@ import (
 	"maps"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/apache/iceberg-go"
@@ -321,48 +320,6 @@ func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) error {
 	b.schemaList = append(b.schemaList, schema)
 	b.updates = append(b.updates, NewAddSchemaUpdate(schema))
 	b.lastAddedSchemaID = &newSchemaID
-
-	return nil
-}
-
-// checkSchemaCompatibility checks that the schema is compatible with the table's format version.
-// This validates that the schema does not contain types or features that were released
-// in later format versions.
-// Java: Schema::checkCompatibility
-func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
-	const defaultValuesMinFormatVersion = 3
-	var problems strings.Builder
-
-	fieldsIt, err := sc.FlatFields()
-	if err != nil {
-		return fmt.Errorf("failed to check Schema compatibility: %w", err)
-	}
-
-	for _, field := range slices.SortedFunc(fieldsIt, func(a, b iceberg.NestedField) int {
-		return cmp.Compare(a.ID, b.ID)
-	}) {
-		colName, found := sc.FindColumnName(field.ID)
-		if !found {
-			panic("invalid schema: field with id " + strconv.Itoa(field.ID) + " not found, this is a bug, please report.")
-		}
-
-		minFormatVersion := minFormatVersionForType(field.Type)
-		if formatVersion < minFormatVersion {
-			problems.WriteString(fmt.Sprintf(
-				"\n- invalid type for %s: %s is not supported until v%d",
-				colName, field.Type, minFormatVersion))
-		}
-
-		if field.InitialDefault != nil && formatVersion < defaultValuesMinFormatVersion {
-			problems.WriteString(fmt.Sprintf(
-				"invalid initial default for %s: non-null default (%v) is not supported until v%d",
-				colName, field.InitialDefault, defaultValuesMinFormatVersion))
-		}
-	}
-
-	if problems.Len() != 0 {
-		return fmt.Errorf("invalid schema for v%d:%s", formatVersion, problems.String())
-	}
 
 	return nil
 }
@@ -1875,17 +1832,4 @@ func UpdateTableMetadata(base Metadata, updates []Update, metadataLoc string) (M
 	}
 
 	return bldr.Build()
-}
-
-// minFormatVersionForType returns the minimum table format version required
-// for the given type. Returns 1 for types supported in all versions, or a higher
-// version number for types that require newer format versions.
-func minFormatVersionForType(t iceberg.Type) int {
-	switch t.(type) {
-	case iceberg.TimestampNsType, iceberg.TimestampTzNsType:
-		return 3
-	default:
-		// All other types supported in v1+
-		return 1
-	}
 }
