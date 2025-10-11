@@ -20,6 +20,7 @@ package iceberg
 import (
 	"encoding/json"
 	"fmt"
+	"iter"
 	"maps"
 	"slices"
 	"strings"
@@ -113,6 +114,17 @@ func (s *Schema) lazyNameToID() (map[string]int, error) {
 	s.nameToID.Store(&idx)
 
 	return idx, nil
+}
+
+// FlatFields returns an iterator over the flattened fields in the schema
+// The fields are returned in arbitrary order.
+func (s *Schema) FlatFields() (iter.Seq[NestedField], error) {
+	fields, err := s.lazyIDToField()
+	if err != nil {
+		return nil, err
+	}
+
+	return maps.Values(fields), nil
 }
 
 func (s *Schema) lazyIDToField() (map[int]NestedField, error) {
@@ -475,7 +487,9 @@ type SchemaVisitorPerPrimitiveType[T any] interface {
 	VisitDate() T
 	VisitTime() T
 	VisitTimestamp() T
+	VisitTimestampNs() T
 	VisitTimestampTz() T
+	VisitTimestampNsTz() T
 	VisitString() T
 	VisitBinary() T
 	VisitUUID() T
@@ -607,8 +621,12 @@ func visitField[T any](f NestedField, visitor SchemaVisitor[T]) T {
 				return perPrimitive.VisitTime()
 			case TimestampType:
 				return perPrimitive.VisitTimestamp()
+			case TimestampNsType:
+				return perPrimitive.VisitTimestampNs()
 			case TimestampTzType:
 				return perPrimitive.VisitTimestampTz()
+			case TimestampTzNsType:
+				return perPrimitive.VisitTimestampNsTz()
 			case StringType:
 				return perPrimitive.VisitString()
 			case BinaryType:
