@@ -31,7 +31,6 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
-
 	"github.com/google/uuid"
 )
 
@@ -299,6 +298,10 @@ func (b *MetadataBuilder) currentSnapshot() *Snapshot {
 }
 
 func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) error {
+	if err := checkSchemaCompatibility(schema, b.formatVersion); err != nil {
+		return err
+	}
+
 	newSchemaID := b.reuseOrCreateNewSchemaID(schema)
 
 	if _, err := b.GetSchemaByID(newSchemaID); err == nil {

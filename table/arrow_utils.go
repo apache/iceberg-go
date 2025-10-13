@@ -588,6 +588,14 @@ func (c convertToArrow) VisitTimestamp() arrow.Field {
 	return arrow.Field{Type: &arrow.TimestampType{Unit: arrow.Microsecond}}
 }
 
+func (c convertToArrow) VisitTimestampNs() arrow.Field {
+	return arrow.Field{Type: &arrow.TimestampType{Unit: arrow.Nanosecond}}
+}
+
+func (c convertToArrow) VisitTimestampNsTz() arrow.Field {
+	return arrow.Field{Type: arrow.FixedWidthTypes.Timestamp_ns}
+}
+
 func (c convertToArrow) VisitString() arrow.Field {
 	if c.useLargeTypes {
 		return arrow.Field{Type: arrow.BinaryTypes.LargeString}

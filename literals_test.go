@@ -123,6 +123,116 @@ func TestIntToDateConversion(t *testing.T) {
 	assert.EqualValues(t, lit, tm)
 }
 
+func TestTimestampNanoConversions(t *testing.T) {
+	tests := []struct {
+		name         string
+		microValue   iceberg.Timestamp
+		expectedNano iceberg.TimestampNano
+	}{
+		{
+			name:         "basic conversion",
+			microValue:   iceberg.Timestamp(1234567890000000),
+			expectedNano: iceberg.TimestampNano(1234567890000000000),
+		},
+		{
+			name:         "zero value",
+			microValue:   iceberg.Timestamp(0),
+			expectedNano: iceberg.TimestampNano(0),
+		},
+		{
+			name:         "epoch",
+			microValue:   iceberg.Timestamp(1000000),        // 1 second in microseconds
+			expectedNano: iceberg.TimestampNano(1000000000), // 1 second in nanoseconds
+		},
+		{
+			name:         "negative timestamp",
+			microValue:   iceberg.Timestamp(-1000000),
+			expectedNano: iceberg.TimestampNano(-1000000000),
+		},
+		{
+			name:         "max safe conversion",
+			microValue:   iceberg.Timestamp(9223372036854775), // max microseconds that fit in int64 when multiplied by 1000
+			expectedNano: iceberg.TimestampNano(9223372036854775000),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nanoValue := tt.microValue.ToNanos()
+			assert.Equal(t, tt.expectedNano, nanoValue, "micro to nano conversion")
+
+			backToMicro := nanoValue.ToMicros()
+			assert.Equal(t, tt.microValue, backToMicro, "nano to micro round-trip")
+
+			microTime := tt.microValue.ToTime()
+			nanoTime := nanoValue.ToTime()
+			assert.Equal(t, microTime, nanoTime, "ToTime() should produce same result")
+		})
+	}
+}
+
+func TestTimestampNanoLiteralConversions(t *testing.T) {
+	tests := []struct {
+		name              string
+		nanoLit           iceberg.TimestampNsLiteral
+		expectedMicro     iceberg.Timestamp
+		expectedRoundTrip iceberg.TimestampNano
+	}{
+		{
+			name:              "basic conversion with truncation",
+			nanoLit:           iceberg.TimestampNsLiteral(1234567890123456789),
+			expectedMicro:     iceberg.Timestamp(1234567890123456),        // truncates 789
+			expectedRoundTrip: iceberg.TimestampNano(1234567890123456000), // last 3 digits become 000
+		},
+		{
+			name:              "zero value",
+			nanoLit:           iceberg.TimestampNsLiteral(0),
+			expectedMicro:     iceberg.Timestamp(0),
+			expectedRoundTrip: iceberg.TimestampNano(0),
+		},
+		{
+			name:              "no truncation needed",
+			nanoLit:           iceberg.TimestampNsLiteral(1234567890123456000), // ends in 000
+			expectedMicro:     iceberg.Timestamp(1234567890123456),
+			expectedRoundTrip: iceberg.TimestampNano(1234567890123456000),
+		},
+		{
+			name:              "negative timestamp",
+			nanoLit:           iceberg.TimestampNsLiteral(-1234567890123456789),
+			expectedMicro:     iceberg.Timestamp(-1234567890123456),
+			expectedRoundTrip: iceberg.TimestampNano(-1234567890123456000),
+		},
+		{
+			name:              "maximum precision truncation",
+			nanoLit:           iceberg.TimestampNsLiteral(1234567890123456999), // maximum nanosecond digits
+			expectedMicro:     iceberg.Timestamp(1234567890123456),
+			expectedRoundTrip: iceberg.TimestampNano(1234567890123456000),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Test nano to micro conversion
+			microLit, err := tt.nanoLit.To(iceberg.PrimitiveTypes.Timestamp)
+			require.NoError(t, err)
+			assert.IsType(t, iceberg.TimestampLiteral(0), microLit)
+
+			microValue, ok := microLit.(iceberg.TimestampLiteral)
+			require.True(t, ok)
+			assert.Equal(t, tt.expectedMicro, iceberg.Timestamp(microValue))
+
+			// Test micro back to nano conversion (round-trip)
+			backToNano, err := microLit.To(iceberg.PrimitiveTypes.TimestampNs)
+			require.NoError(t, err)
+			assert.IsType(t, iceberg.TimestampNsLiteral(0), backToNano)
+
+			nanoValue, ok := backToNano.(iceberg.TimestampNsLiteral)
+			require.True(t, ok)
+			assert.Equal(t, tt.expectedRoundTrip, iceberg.TimestampNano(nanoValue))
+		})
+	}
+}
+
 func TestInt64Conversions(t *testing.T) {
 	tests := []struct {
 		from iceberg.Int64Literal
@@ -134,6 +244,9 @@ func TestInt64Conversions(t *testing.T) {
 		{iceberg.Int64Literal(19709), iceberg.NewLiteral(iceberg.Date(19709))},
 		{iceberg.Int64Literal(51661919000), iceberg.NewLiteral(iceberg.Time(51661919000))},
 		{iceberg.Int64Literal(1647305201), iceberg.NewLiteral(iceberg.Timestamp(1647305201))},
+		{
+			iceberg.Int64Literal(1234567890123456789), iceberg.NewLiteral(iceberg.TimestampNano(1234567890123456789)),
+		},
 		{
 			iceberg.Int64Literal(34),
 			iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(34), Scale: 0}),
