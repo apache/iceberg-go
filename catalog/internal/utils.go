@@ -284,12 +284,10 @@ func CreateViewMetadata(
 		"view-uuid":          viewUUID,
 		"format-version":     1,
 		"location":           loc,
-		"schema":             schema,
+		"schemas":            []*iceberg.Schema{schema},
 		"current-version-id": versionId,
-		"versions": map[string]interface{}{
-			"1": viewVersion,
-		},
-		"properties": props,
+		"versions":           []interface{}{viewVersion},
+		"properties":         props,
 		"version-log": []map[string]interface{}{
 			{
 				"timestamp-ms": timestampMs,
