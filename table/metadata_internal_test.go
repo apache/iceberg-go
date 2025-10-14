@@ -320,7 +320,6 @@ func TestMetadataV3Builder(t *testing.T) {
 	builder.SetUUID(uuid.New())
 	builder.SetLoc("s3://test/location")
 	builder.SetLastUpdatedMS()
-	builder.SetNextRowID(1000)
 
 	require.NoError(t, builder.AddSchema(schema))
 
@@ -331,7 +330,7 @@ func TestMetadataV3Builder(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, 3, metadata.Version())
-	assert.Equal(t, int64(1000), metadata.NextRowID())
+	assert.Equal(t, int64(0), metadata.NextRowID())
 }
 
 func TestSnapshotV3FirstRowID(t *testing.T) {

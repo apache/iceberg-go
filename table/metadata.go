@@ -753,11 +753,6 @@ func (b *MetadataBuilder) SetLastUpdatedMS() *MetadataBuilder {
 	return b
 }
 
-func (b *MetadataBuilder) SetNextRowID(nextRowID int64) *MetadataBuilder {
-	b.nextRowID = &nextRowID
-	return b
-}
-
 func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 	if _, err := b.GetSpecByID(b.defaultSpecID); err != nil {
 		return nil, fmt.Errorf("defaultSpecID is invalid: %w", err)
@@ -1689,23 +1684,12 @@ func (m *metadataV2) UnmarshalJSON(b []byte) error {
 }
 
 func (m *metadataV2) validate() error {
-	if err := m.checkLastSequenceNumber(); err != nil {
+	if err := checkLastSequenceNumber(m, m.SnapshotList); err != nil {
 		return err
 	}
 
 	if err := m.commonMetadata.validate(); err != nil {
 		return err
-	}
-
-	return nil
-}
-
-func (m *metadataV2) checkLastSequenceNumber() error {
-	for _, snap := range m.SnapshotList {
-		if snap.SequenceNumber > m.LastSequenceNumber() {
-			return fmt.Errorf("%w: snapshot %d has sequence number %d which is greater than last-sequence-number %d",
-				ErrInvalidMetadata, snap.SnapshotID, snap.SequenceNumber, m.LastSequenceNumber())
-		}
 	}
 
 	return nil
@@ -1730,9 +1714,10 @@ func initMetadataV3Deser() *metadataV3 {
 func (m *metadataV3) LastSequenceNumber() int64 { return m.LastSeqNum }
 func (m *metadataV3) NextRowID() int64 {
 	if m.NextRowIDValue == -1 {
-		return 0 // RFor v1/v2 compatibility when field is missing
+		return 0 // For v1/v2 compatibility when field is missing
 	}
-	return m.NextRowIDValue
+
+	return max(0, m.NextRowIDValue)
 }
 
 func (m *metadataV3) Equals(other Metadata) bool {
@@ -1767,7 +1752,7 @@ func (m *metadataV3) UnmarshalJSON(b []byte) error {
 }
 
 func (m *metadataV3) validate() error {
-	if err := m.checkLastSequenceNumber(); err != nil {
+	if err := checkLastSequenceNumber(m, m.SnapshotList); err != nil {
 		return err
 	}
 
@@ -1782,22 +1767,12 @@ func (m *metadataV3) validate() error {
 	return nil
 }
 
-func (m *metadataV3) checkLastSequenceNumber() error {
-	for _, snap := range m.SnapshotList {
-		if snap.SequenceNumber > m.LastSequenceNumber() {
-			return fmt.Errorf("%w: snapshot %d has sequence number %d which is greater than last-sequence-number %d",
-				ErrInvalidMetadata, snap.SnapshotID, snap.SequenceNumber, m.LastSequenceNumber())
-		}
-	}
-
-	return nil
-}
-
 func (m *metadataV3) checkNextRowID() error {
-	if m.NextRowIDValue == -1 {
-		return fmt.Errorf("%w: next-row-id is required for v3 tables", ErrInvalidMetadata)
-	}
-	if m.NextRowIDValue < -1 {
+	if m.NextRowIDValue < 0 {
+		if m.NextRowIDValue == -1 {
+			return fmt.Errorf("%w: next-row-id is required for v3 tables", ErrInvalidMetadata)
+		}
+
 		return fmt.Errorf("%w: next-row-id must be non-negative, got %d", ErrInvalidMetadata, m.NextRowIDValue)
 	}
 
@@ -1805,6 +1780,23 @@ func (m *metadataV3) checkNextRowID() error {
 		if snap.FirstRowID != nil && *snap.FirstRowID < 0 {
 			return fmt.Errorf("%w: snapshot %d has invalid first-row-id %d",
 				ErrInvalidMetadata, snap.SnapshotID, *snap.FirstRowID)
+		}
+	}
+
+	return nil
+}
+
+// SequenceNumberValidator defines an interface for types that can validate sequence numbers
+type SequenceNumberValidator interface {
+	LastSequenceNumber() int64
+}
+
+// checkLastSequenceNumber validates that all snapshots have sequence numbers <= the last sequence number
+func checkLastSequenceNumber(validator SequenceNumberValidator, snapshotList []Snapshot) error {
+	for _, snap := range snapshotList {
+		if snap.SequenceNumber > validator.LastSequenceNumber() {
+			return fmt.Errorf("%w: snapshot %d has sequence number %d which is greater than last-sequence-number %d",
+				ErrInvalidMetadata, snap.SnapshotID, snap.SequenceNumber, validator.LastSequenceNumber())
 		}
 	}
 
