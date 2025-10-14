@@ -37,7 +37,7 @@ import (
 
 const (
 	partitionFieldStartID             = 1000
-	supportedTableFormatVersion       = 2
+	supportedTableFormatVersion       = 3
 	oneMinuteInMs               int64 = 60_000
 )
 
@@ -136,6 +136,9 @@ type Metadata interface {
 	NameMapping() iceberg.NameMapping
 
 	LastSequenceNumber() int64
+	// NextRowID returns the next available row ID for v3 tables.
+	// Returns 0 for v1/v2 tables or if not set.
+	NextRowID() int64
 	// Statistics returns an optional list of table statistics.
 	// Table statistics files are valid Puffin files.
 	// StatisticsFile are informational. A reader can choose to ignore statistics information.
@@ -178,6 +181,8 @@ type MetadataBuilder struct {
 	previousFileEntry *MetadataLogEntry
 	// >v1 specific
 	lastSequenceNumber *int64
+	// >v2 specific (V3)
+	nextRowID *int64
 	// update tracking
 	lastAddedSchemaID    *int
 	lastAddedPartitionID *int
@@ -233,6 +238,11 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 	if metadata.Version() > 1 {
 		seq := metadata.LastSequenceNumber()
 		b.lastSequenceNumber = &seq
+	}
+
+	if metadata.Version() >= 3 {
+		nextRowID := metadata.NextRowID()
+		b.nextRowID = &nextRowID
 	}
 
 	if metadata.CurrentSnapshot() != nil {
@@ -961,6 +971,24 @@ func (b *MetadataBuilder) Build() (Metadata, error) {
 			commonMetadata: *common,
 		}, nil
 
+	case 3:
+		var lastSequenceNumber int64
+		var nextRowID int64
+
+		if b.lastSequenceNumber != nil {
+			lastSequenceNumber = *b.lastSequenceNumber
+		}
+
+		if b.nextRowID != nil {
+			nextRowID = *b.nextRowID
+		}
+
+		return &metadataV3{
+			LastSeqNum:     lastSequenceNumber,
+			NextRowIDValue: nextRowID,
+			commonMetadata: *common,
+		}, nil
+
 	default:
 		return nil, fmt.Errorf("%w: unknown format version %d", ErrInvalidMetadata, b.formatVersion)
 	}
@@ -1112,6 +1140,8 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 		ret = initMetadataV1Deser()
 	case 2:
 		ret = initMetadataV2Deser()
+	case 3:
+		ret = initMetadataV3Deser()
 	default:
 		return nil, ErrInvalidMetadataFormatVersion
 	}
@@ -1147,6 +1177,10 @@ type commonMetadata struct {
 	SnapshotRefs       map[string]SnapshotRef    `json:"refs,omitempty"`
 	StatisticsList     []StatisticsFile          `json:"statistics,omitempty"`
 	PartitionStatsList []PartitionStatisticsFile `json:"partition-statistics,omitempty"`
+	// V2+ fields
+	LastSequenceNumber *int64 `json:"last-sequence-number,omitempty"`
+	// V3+ fields
+	NextRowID *int64 `json:"next-row-id,omitempty"` // V3: Next available row ID
 }
 
 func initCommonMetadataForDeserialization() commonMetadata {
@@ -1545,6 +1579,7 @@ func initMetadataV1Deser() *metadataV1 {
 }
 
 func (m *metadataV1) LastSequenceNumber() int64 { return 0 }
+func (m *metadataV1) NextRowID() int64          { return 0 } // V1 doesn't support row lineage
 
 func (m *metadataV1) Equals(other Metadata) bool {
 	rhs, ok := other.(*metadataV1)
@@ -1644,6 +1679,7 @@ func initMetadataV2Deser() *metadataV2 {
 }
 
 func (m *metadataV2) LastSequenceNumber() int64 { return m.LastSeqNum }
+func (m *metadataV2) NextRowID() int64          { return 0 } // V2 doesn't support row lineage
 
 func (m *metadataV2) Equals(other Metadata) bool {
 	rhs, ok := other.(*metadataV2)
@@ -1676,7 +1712,7 @@ func (m *metadataV2) UnmarshalJSON(b []byte) error {
 }
 
 func (m *metadataV2) validate() error {
-	if err := m.checkLastSequenceNumber(); err != nil {
+	if err := checkLastSequenceNumber(m, m.SnapshotList); err != nil {
 		return err
 	}
 
@@ -1687,11 +1723,108 @@ func (m *metadataV2) validate() error {
 	return nil
 }
 
-func (m *metadataV2) checkLastSequenceNumber() error {
+// metadataV3 represents table metadata for format version 3
+type metadataV3 struct {
+	LastSeqNum     int64 `json:"last-sequence-number"`
+	NextRowIDValue int64 `json:"next-row-id"`
+
+	commonMetadata
+}
+
+func initMetadataV3Deser() *metadataV3 {
+	return &metadataV3{
+		LastSeqNum:     -1,
+		NextRowIDValue: -1,
+		commonMetadata: initCommonMetadataForDeserialization(),
+	}
+}
+
+func (m *metadataV3) LastSequenceNumber() int64 { return m.LastSeqNum }
+func (m *metadataV3) NextRowID() int64 {
+	if m.NextRowIDValue == -1 {
+		return 0 // For v1/v2 compatibility when field is missing
+	}
+
+	return max(0, m.NextRowIDValue)
+}
+
+func (m *metadataV3) Equals(other Metadata) bool {
+	rhs, ok := other.(*metadataV3)
+	if !ok {
+		return false
+	}
+
+	if m == rhs {
+		return true
+	}
+
+	return m.LastSeqNum == rhs.LastSeqNum &&
+		m.NextRowIDValue == rhs.NextRowIDValue &&
+		m.commonMetadata.Equals(&rhs.commonMetadata)
+}
+
+func (m *metadataV3) UnmarshalJSON(b []byte) error {
+	type Alias metadataV3
+	aux := (*Alias)(m)
+
+	// Set LastColumnId to -1 to indicate that it is not set as LastColumnId = 0 is a valid value for when no schema is present
+	aux.LastColumnId = -1
+
+	if err := json.Unmarshal(b, aux); err != nil {
+		return err
+	}
+
+	m.preValidate()
+
+	return m.validate()
+}
+
+func (m *metadataV3) validate() error {
+	if err := checkLastSequenceNumber(m, m.SnapshotList); err != nil {
+		return err
+	}
+
+	if err := m.checkNextRowID(); err != nil {
+		return err
+	}
+
+	if err := m.commonMetadata.validate(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (m *metadataV3) checkNextRowID() error {
+	if m.NextRowIDValue < 0 {
+		if m.NextRowIDValue == -1 {
+			return fmt.Errorf("%w: next-row-id is required for v3 tables", ErrInvalidMetadata)
+		}
+
+		return fmt.Errorf("%w: next-row-id must be non-negative, got %d", ErrInvalidMetadata, m.NextRowIDValue)
+	}
+
 	for _, snap := range m.SnapshotList {
-		if snap.SequenceNumber > m.LastSequenceNumber() {
+		if snap.FirstRowID != nil && *snap.FirstRowID < 0 {
+			return fmt.Errorf("%w: snapshot %d has invalid first-row-id %d",
+				ErrInvalidMetadata, snap.SnapshotID, *snap.FirstRowID)
+		}
+	}
+
+	return nil
+}
+
+// SequenceNumberValidator defines an interface for types that can validate sequence numbers
+type SequenceNumberValidator interface {
+	LastSequenceNumber() int64
+}
+
+// checkLastSequenceNumber validates that all snapshots have sequence numbers <= the last sequence number
+func checkLastSequenceNumber(validator SequenceNumberValidator, snapshotList []Snapshot) error {
+	for _, snap := range snapshotList {
+		if snap.SequenceNumber > validator.LastSequenceNumber() {
 			return fmt.Errorf("%w: snapshot %d has sequence number %d which is greater than last-sequence-number %d",
-				ErrInvalidMetadata, snap.SnapshotID, snap.SequenceNumber, m.LastSequenceNumber())
+				ErrInvalidMetadata, snap.SnapshotID, snap.SequenceNumber, validator.LastSequenceNumber())
 		}
 	}
 
