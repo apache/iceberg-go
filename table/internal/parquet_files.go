@@ -37,10 +37,11 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
+	"github.com/google/uuid"
+
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
-	"github.com/google/uuid"
 )
 
 const (
@@ -61,6 +62,7 @@ const (
 	ParquetBloomFilterMaxBytesKey            = "write.parquet.bloom-filter-max-bytes"
 	ParquetBloomFilterMaxBytesDefault        = 1024 * 1024
 	ParquetBloomFilterColumnEnabledKeyPrefix = "write.parquet.bloom-filter-enabled.column"
+	ParquetPageIndexEnabledKey               = "write.parquet.page-index-enabled"
 )
 
 type parquetFormat struct{}
@@ -204,6 +206,8 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 			ParquetPageRowLimitDefault))),
 		parquet.WithDictionaryPageSizeLimit(int64(props.GetInt(ParquetDictSizeBytesKey,
 			ParquetDictSizeBytesDefault))),
+		parquet.WithPageIndexEnabled(props.GetBool(ParquetPageIndexEnabledKey,
+			parquet.DefaultPageIndexEnabled)),
 	}
 
 	compression := props.Get(ParquetCompressionKey, ParquetCompressionDefault)
