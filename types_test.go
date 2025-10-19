@@ -44,6 +44,7 @@ func TestTypesBasic(t *testing.T) {
 		{"timestamptz_ns", iceberg.PrimitiveTypes.TimestampTzNs},
 		{"uuid", iceberg.PrimitiveTypes.UUID},
 		{"binary", iceberg.PrimitiveTypes.Binary},
+		{"unknown", iceberg.PrimitiveTypes.Unknown},
 		{"fixed[5]", iceberg.FixedTypeOf(5)},
 		{"decimal(9, 4)", iceberg.DecimalTypeOf(9, 4)},
 	}
@@ -187,6 +188,7 @@ var NonParameterizedTypes = []iceberg.Type{
 	iceberg.PrimitiveTypes.String,
 	iceberg.PrimitiveTypes.Binary,
 	iceberg.PrimitiveTypes.UUID,
+	iceberg.PrimitiveTypes.Unknown,
 }
 
 func TestNonParameterizedTypeEquality(t *testing.T) {
@@ -220,6 +222,7 @@ func TestTypeStrings(t *testing.T) {
 		{iceberg.PrimitiveTypes.String, "string"},
 		{iceberg.PrimitiveTypes.UUID, "uuid"},
 		{iceberg.PrimitiveTypes.Binary, "binary"},
+		{iceberg.PrimitiveTypes.Unknown, "unknown"},
 		{iceberg.FixedTypeOf(22), "fixed[22]"},
 		{iceberg.DecimalTypeOf(19, 25), "decimal(19, 25)"},
 		{&iceberg.StructType{
@@ -240,4 +243,86 @@ func TestTypeStrings(t *testing.T) {
 	for _, tt := range tests {
 		assert.Equal(t, tt.str, tt.typ.String())
 	}
+}
+
+func TestUnknownType(t *testing.T) {
+	ut := iceberg.UnknownType{}
+
+	assert.Equal(t, "unknown", ut.Type())
+	assert.Equal(t, "unknown", ut.String())
+
+	assert.True(t, ut.Equals(iceberg.UnknownType{}))
+	assert.False(t, ut.Equals(iceberg.StringType{}))
+
+	var _ iceberg.PrimitiveType = iceberg.UnknownType{}
+}
+
+func TestUnknownTypeJSONSerialization(t *testing.T) {
+	field := iceberg.NestedField{Type: iceberg.UnknownType{}, ID: 1, Name: "test", Required: false}
+	fieldData, err := json.Marshal(field)
+	require.NoError(t, err)
+
+	assert.Contains(t, string(fieldData), "unknown")
+
+	var unmarshaled iceberg.NestedField
+	err = json.Unmarshal(fieldData, &unmarshaled)
+	require.NoError(t, err)
+	assert.True(t, unmarshaled.Type.Equals(iceberg.UnknownType{}))
+}
+
+func TestUnknownTypePromotion(t *testing.T) {
+	ut := iceberg.UnknownType{}
+
+	testCases := []iceberg.Type{
+		iceberg.StringType{},
+		iceberg.Int32Type{},
+		iceberg.Int64Type{},
+		iceberg.BooleanType{},
+		iceberg.DateType{},
+		iceberg.TimeType{},
+		iceberg.TimestampType{},
+		iceberg.TimestampTzType{},
+		iceberg.BinaryType{},
+		iceberg.UUIDType{},
+		iceberg.DecimalTypeOf(10, 2),
+		iceberg.FixedTypeOf(16),
+	}
+
+	for _, targetType := range testCases {
+		promoted, err := iceberg.PromoteType(ut, targetType)
+		require.NoError(t, err, "Failed to promote unknown to %s", targetType.Type())
+		assert.NotNil(t, promoted, "Promoted type should not be nil for %s", targetType.Type())
+	}
+}
+
+func TestUnknownTypeSchemaValidation(t *testing.T) {
+	validSchema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+		iceberg.NestedField{ID: 2, Name: "unknown_field", Type: iceberg.UnknownType{}, Required: false},
+	)
+
+	assert.NotNil(t, validSchema)
+
+	field, found := validSchema.FindFieldByName("unknown_field")
+	require.True(t, found, "Should find unknown_field in schema")
+	assert.True(t, field.Type.Equals(iceberg.UnknownType{}))
+	assert.False(t, field.Required, "Unknown field should be optional")
+
+	assert.Panics(t, func() {
+		iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "invalid_unknown", Type: iceberg.UnknownType{}, Required: true}, // Invalid: required
+		)
+	}, "Should panic when unknown type is required")
+
+	assert.Panics(t, func() {
+		iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "invalid_unknown", Type: iceberg.UnknownType{}, Required: false, InitialDefault: "invalid"}, // Invalid: non-null default
+		)
+	}, "Should panic when unknown type has non-null initial-default")
+
+	assert.Panics(t, func() {
+		iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "invalid_unknown", Type: iceberg.UnknownType{}, Required: false, WriteDefault: "invalid"}, // Invalid: non-null default
+		)
+	}, "Should panic when unknown type has non-null write-default")
 }

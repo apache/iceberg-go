@@ -80,12 +80,44 @@ func NewSchemaWithIdentifiers(id int, identifierIDs []int, fields ...NestedField
 }
 
 func (s *Schema) init() {
+	// Validate unknown type requirements
+	if err := s.validateUnknownTypes(); err != nil {
+		panic(fmt.Sprintf("Invalid schema: %v", err))
+	}
+
 	s.lazyIDToParent = sync.OnceValues(func() (map[int]int, error) {
 		return IndexParents(s)
 	})
 	s.lazyNameMapping = sync.OnceValue(func() NameMapping {
 		return createMappingFromSchema(s)
 	})
+}
+
+// validateUnknownTypes validates that unknown types follow the v3 specification:
+// - Must be optional (Required: false)
+// - Must have null defaults (InitialDefault: nil, WriteDefault: nil)
+func (s *Schema) validateUnknownTypes() error {
+	for _, field := range s.fields {
+		if err := s.validateFieldUnknownType(field); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Schema) validateFieldUnknownType(field NestedField) error {
+	if _, isUnknown := field.Type.(UnknownType); isUnknown {
+		if field.Required {
+			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked as required", field.Name, field.ID)
+		}
+		if field.InitialDefault != nil {
+			return fmt.Errorf("unknown type field '%s' (id: %d) must have null initial-default, but got: %v", field.Name, field.ID, field.InitialDefault)
+		}
+		if field.WriteDefault != nil {
+			return fmt.Errorf("unknown type field '%s' (id: %d) must have null write-default, but got: %v", field.Name, field.ID, field.WriteDefault)
+		}
+	}
+	return nil
 }
 
 func (s *Schema) String() string {
@@ -493,6 +525,7 @@ type SchemaVisitorPerPrimitiveType[T any] interface {
 	VisitString() T
 	VisitBinary() T
 	VisitUUID() T
+	VisitUnknown() T
 }
 
 // Visit accepts a visitor and performs a post-order traversal of the given schema.
@@ -637,6 +670,8 @@ func visitField[T any](f NestedField, visitor SchemaVisitor[T]) T {
 				return perPrimitive.VisitDecimal(t)
 			case FixedType:
 				return perPrimitive.VisitFixed(t)
+			case UnknownType:
+				return perPrimitive.VisitUnknown()
 			}
 		}
 
