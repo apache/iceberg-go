@@ -312,19 +312,22 @@ func TestMetadataV3Builder(t *testing.T) {
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 	)
 
-	builder, err := NewMetadataBuilder()
+	builder, err := NewMetadataBuilder(3)
 	require.NoError(t, err)
-
-	// Set v3 specific fields
-	builder.SetFormatVersion(3)
 	builder.SetUUID(uuid.New())
 	builder.SetLoc("s3://test/location")
 	builder.SetLastUpdatedMS()
 
 	require.NoError(t, builder.AddSchema(schema))
+	require.NoError(t, builder.SetCurrentSchemaID(0))
 
 	spec := iceberg.NewPartitionSpec()
 	require.NoError(t, builder.AddPartitionSpec(&spec, true))
+	require.NoError(t, builder.SetDefaultSpecID(0))
+
+	sortOrder := UnsortedSortOrder
+	require.NoError(t, builder.AddSortOrder(&sortOrder))
+	require.NoError(t, builder.SetDefaultSortOrderID(0))
 
 	metadata, err := builder.Build()
 	require.NoError(t, err)
