@@ -95,6 +95,71 @@ const ExampleTableMetadataV2 = `{
     "refs": {"test": {"snapshot-id": 3051729675574597004, "type": "tag", "max-ref-age-ms": 10000000}}
 }`
 
+const ExampleTableMetadataV3 = `{
+    "format-version": 3,
+    "table-uuid": "9c12d441-03fe-4693-9a96-a0705ddf69c1",
+    "location": "s3://bucket/test/location",
+    "last-sequence-number": 34,
+    "last-updated-ms": 1602638573590,
+    "last-column-id": 3,
+    "next-row-id": 1000,
+    "current-schema-id": 1,
+    "schemas": [
+        {"type": "struct", "schema-id": 0, "fields": [{"id": 1, "name": "x", "required": true, "type": "long"}]},
+        {
+            "type": "struct",
+            "schema-id": 1,
+            "identifier-field-ids": [1, 2],
+            "fields": [
+                {"id": 1, "name": "x", "required": true, "type": "long"},
+                {"id": 2, "name": "y", "required": true, "type": "long", "doc": "comment"},
+                {"id": 3, "name": "z", "required": true, "type": "long"}
+            ]
+        }
+    ],
+    "default-spec-id": 0,
+    "partition-specs": [{"spec-id": 0, "fields": [{"name": "x", "transform": "identity", "source-id": 1, "field-id": 1000}]}],
+    "last-partition-id": 1000,
+    "default-sort-order-id": 3,
+    "sort-orders": [
+        {
+            "order-id": 3,
+            "fields": [
+                {"transform": "identity", "source-id": 2, "direction": "asc", "null-order": "nulls-first"},
+                {"transform": "bucket[4]", "source-id": 3, "direction": "desc", "null-order": "nulls-last"}
+            ]
+        }
+    ],
+    "properties": {"read.split.target.size": "134217728"},
+    "current-snapshot-id": 3055729675574597004,
+    "snapshots": [
+        {
+            "snapshot-id": 3051729675574597004,
+            "timestamp-ms": 1515100955770,
+            "sequence-number": 0,
+            "summary": {"operation": "append"},
+            "manifest-list": "s3://a/b/1.avro",
+            "first-row-id": 1000
+        },
+        {
+            "snapshot-id": 3055729675574597004,
+            "parent-snapshot-id": 3051729675574597004,
+            "timestamp-ms": 1555100955770,
+            "sequence-number": 1,
+            "summary": {"operation": "append"},
+            "manifest-list": "s3://a/b/2.avro",
+            "schema-id": 1,
+            "first-row-id": 2000
+        }
+    ],
+    "snapshot-log": [
+        {"snapshot-id": 3051729675574597004, "timestamp-ms": 1515100955770},
+        {"snapshot-id": 3055729675574597004, "timestamp-ms": 1555100955770}
+    ],
+    "metadata-log": [{"metadata-file": "s3://bucket/.../v1.json", "timestamp-ms": 1515100}],
+    "refs": {"test": {"snapshot-id": 3051729675574597004, "type": "tag", "max-ref-age-ms": 10000000}}
+}`
+
 const ExampleTableMetadataV1 = `{
 	"format-version": 1,
 	"table-uuid": "d20125c8-7284-442c-9aea-15fee620737c",
@@ -193,6 +258,111 @@ func TestMetadataV2Parsing(t *testing.T) {
 	assert.Equal(t, data.SnapshotList[1], *meta.CurrentSnapshot())
 	assert.Equal(t, data.SnapshotList[0], *meta.SnapshotByName("test"))
 	assert.EqualValues(t, "134217728", meta.Properties()["read.split.target.size"])
+}
+
+func TestMetadataV3Parsing(t *testing.T) {
+	meta, err := ParseMetadataBytes([]byte(ExampleTableMetadataV3))
+	require.NoError(t, err)
+	require.NotNil(t, meta)
+
+	assert.IsType(t, (*metadataV3)(nil), meta)
+	assert.Equal(t, 3, meta.Version())
+
+	data := meta.(*metadataV3)
+	assert.Equal(t, uuid.MustParse("9c12d441-03fe-4693-9a96-a0705ddf69c1"), data.UUID)
+	assert.Equal(t, "s3://bucket/test/location", data.Location())
+	assert.Equal(t, int64(34), data.LastSeqNum)
+	assert.Equal(t, int64(1000), data.NextRowIDValue)
+	assert.Equal(t, int64(1602638573590), data.LastUpdatedMS)
+	assert.Equal(t, 3, data.LastColumnId)
+	assert.Equal(t, 0, data.SchemaList[0].ID)
+	assert.Equal(t, 1, data.CurrentSchemaID)
+	assert.Equal(t, 0, data.Specs[0].ID())
+	assert.Equal(t, 0, data.DefaultSpecID)
+	assert.Equal(t, 1000, *data.LastPartitionID)
+	assert.EqualValues(t, "134217728", data.Props["read.split.target.size"])
+	assert.EqualValues(t, 3055729675574597004, *data.CurrentSnapshotID)
+	assert.EqualValues(t, 3051729675574597004, data.SnapshotList[0].SnapshotID)
+	assert.Equal(t, int64(1515100955770), data.SnapshotLog[0].TimestampMs)
+	assert.Equal(t, 3, data.SortOrderList[0].OrderID())
+	assert.Equal(t, 3, data.DefaultSortOrderID)
+
+	// Test v3 specific fields
+	assert.Equal(t, int64(1000), meta.NextRowID())
+	assert.Equal(t, int64(34), meta.LastSequenceNumber())
+
+	// Test snapshot first-row-id
+	assert.Len(t, meta.Snapshots(), 2)
+	assert.Equal(t, data.SnapshotList[1], *meta.CurrentSnapshot())
+	assert.Equal(t, data.SnapshotList[0], *meta.SnapshotByName("test"))
+	assert.EqualValues(t, "134217728", meta.Properties()["read.split.target.size"])
+
+	firstSnapshot := data.SnapshotList[0]
+	assert.NotNil(t, firstSnapshot.FirstRowID)
+	assert.Equal(t, int64(1000), *firstSnapshot.FirstRowID)
+
+	secondSnapshot := data.SnapshotList[1]
+	assert.NotNil(t, secondSnapshot.FirstRowID)
+	assert.Equal(t, int64(2000), *secondSnapshot.FirstRowID)
+}
+
+func TestMetadataV3Builder(t *testing.T) {
+	// Test creating v3 metadata with builder
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+
+	builder, err := NewMetadataBuilder(3)
+	require.NoError(t, err)
+	builder.SetUUID(uuid.New())
+	builder.SetLoc("s3://test/location")
+	builder.SetLastUpdatedMS()
+
+	require.NoError(t, builder.AddSchema(schema))
+	require.NoError(t, builder.SetCurrentSchemaID(0))
+
+	spec := iceberg.NewPartitionSpec()
+	require.NoError(t, builder.AddPartitionSpec(&spec, true))
+	require.NoError(t, builder.SetDefaultSpecID(0))
+
+	sortOrder := UnsortedSortOrder
+	require.NoError(t, builder.AddSortOrder(&sortOrder))
+	require.NoError(t, builder.SetDefaultSortOrderID(0))
+
+	metadata, err := builder.Build()
+	require.NoError(t, err)
+
+	assert.Equal(t, 3, metadata.Version())
+	assert.Equal(t, int64(0), metadata.NextRowID())
+}
+
+func TestSnapshotV3FirstRowID(t *testing.T) {
+	// Test snapshot with first-row-id
+	firstRowID := int64(1000)
+	snapshot := Snapshot{
+		SnapshotID:     12345,
+		SequenceNumber: 1,
+		TimestampMs:    1602638573590,
+		ManifestList:   "s3://test/manifest-list.avro",
+		FirstRowID:     &firstRowID,
+	}
+
+	// Test equals with first-row-id
+	otherSnapshot := Snapshot{
+		SnapshotID:     12345,
+		SequenceNumber: 1,
+		TimestampMs:    1602638573590,
+		ManifestList:   "s3://test/manifest-list.avro",
+		FirstRowID:     &firstRowID,
+	}
+
+	assert.True(t, snapshot.Equals(otherSnapshot), "Snapshots with same first-row-id should be equal")
+
+	// Test with different first-row-id
+	differentFirstRowID := int64(2000)
+	otherSnapshot.FirstRowID = &differentFirstRowID
+
+	assert.False(t, snapshot.Equals(otherSnapshot), "Snapshots with different first-row-id should not be equal")
 }
 
 func TestParsingCorrectTypes(t *testing.T) {

@@ -254,6 +254,7 @@ type Snapshot struct {
 	ManifestList     string   `json:"manifest-list,omitempty"`
 	Summary          *Summary `json:"summary,omitempty"`
 	SchemaID         *int     `json:"schema-id,omitempty"`
+	FirstRowID       *int64   `json:"first-row-id,omitempty"` // V3: Starting row ID for this snapshot
 }
 
 func (s Snapshot) String() string {
@@ -282,12 +283,17 @@ func (s Snapshot) Equals(other Snapshot) bool {
 	case s.SchemaID == nil && other.SchemaID != nil:
 		fallthrough
 	case s.SchemaID != nil && other.SchemaID == nil:
+		fallthrough
+	case s.FirstRowID == nil && other.FirstRowID != nil:
+		fallthrough
+	case s.FirstRowID != nil && other.FirstRowID == nil:
 		return false
 	}
 
 	return s.SnapshotID == other.SnapshotID &&
 		((s.ParentSnapshotID == other.ParentSnapshotID) || (*s.ParentSnapshotID == *other.ParentSnapshotID)) &&
 		((s.SchemaID == other.SchemaID) || (*s.SchemaID == *other.SchemaID)) &&
+		((s.FirstRowID == other.FirstRowID) || (*s.FirstRowID == *other.FirstRowID)) &&
 		s.SequenceNumber == other.SequenceNumber &&
 		s.TimestampMs == other.TimestampMs &&
 		s.ManifestList == other.ManifestList &&
