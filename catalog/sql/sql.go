@@ -34,6 +34,7 @@ import (
 	"github.com/apache/iceberg-go/catalog/internal"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/view"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/feature"
 	"github.com/uptrace/bun/dialect/mssqldialect"
@@ -846,7 +847,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 		return err
 	}
 
-	metadataLocation, err := internal.CreateViewMetadata(ctx, c.name, nsIdent, schema, viewSQL, loc, props)
+	metadataLocation, err := view.CreateMetadata(ctx, c.name, nsIdent, schema, viewSQL, loc, props)
 	if err != nil {
 		return err
 	}
@@ -1008,11 +1009,11 @@ func (c *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifi
 }
 
 // LoadView loads a view from the catalog.
-func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (map[string]interface{}, error) {
+func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (view.Metadata, error) {
 	ns := strings.Join(catalog.NamespaceFromIdent(identifier), ".")
 	viewName := catalog.TableNameFromIdent(identifier)
 
-	view, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) (*sqlIcebergTable, error) {
+	v, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) (*sqlIcebergTable, error) {
 		v := new(sqlIcebergTable)
 		err := tx.NewSelect().Model(v).
 			Where("catalog_name = ?", c.name).
@@ -1033,11 +1034,11 @@ func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (ma
 		return nil, err
 	}
 
-	if !view.MetadataLocation.Valid {
+	if !v.MetadataLocation.Valid {
 		return nil, fmt.Errorf("%w: %s, metadata location is missing", catalog.ErrNoSuchView, identifier)
 	}
 
-	viewMetadata, err := internal.LoadViewMetadata(ctx, c.props, view.MetadataLocation.String, viewName, ns)
+	viewMetadata, err := view.LoadMetadata(ctx, c.props, v.MetadataLocation.String, viewName, ns)
 	if err != nil {
 		return nil, err
 	}
