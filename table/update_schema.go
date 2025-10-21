@@ -43,6 +43,49 @@ type move struct {
 	Op         MoveOp
 }
 
+// UpdateSchema manages schema evolution operations within a transaction.
+// It supports adding, deleting, renaming, updating, and reordering columns,
+// and ensures all changes are validated before being committed.
+//
+// Operations can be chained together and are applied in the order they are called.
+// Changes are not persisted until Commit() is called.
+//
+// Basic Usage:
+//
+//	txn := table.NewTransaction()
+//	updateSchema := txn.UpdateSchema(true, false)
+//
+//	// Add a new column
+//	updateSchema.AddColumn([]string{"email"}, iceberg.PrimitiveTypes.String, "Email address", false, nil)
+//
+//	// Commit changes
+//	if err := updateSchema.Commit(); err != nil {
+//	    return err
+//	}
+//	if _, err := txn.Commit(ctx); err != nil {
+//	    return err
+//	}
+//
+// Chaining Operations:
+//
+//	updateSchema.
+//	    AddColumn([]string{"age"}, iceberg.PrimitiveTypes.Int, "User age", false, nil).
+//	    RenameColumn([]string{"name"}, "full_name").
+//	    MoveFirst([]string{"id"}).
+//	    Commit()
+//
+// Adding Nested Columns:
+//
+//	// Add a column to a struct field
+//	updateSchema.AddColumn([]string{"address", "country"}, iceberg.PrimitiveTypes.String, "Country code", false, iceberg.StringLiteral("US"))
+//
+//	// Commit the schema update
+//	if err := updateSchema.Commit(); err != nil {
+//	    return err
+//	}
+//	if _, err := txn.Commit(ctx); err != nil {
+//	    return err
+//	}
 type UpdateSchema struct {
 	txn          *Transaction
 	schema       *iceberg.Schema
@@ -63,14 +106,31 @@ type UpdateSchema struct {
 	ops                      []func() error
 }
 
+// UpdateSchemaOption is a functional option for configuring UpdateSchema.
 type UpdateSchemaOption func(*UpdateSchema)
 
+// WithNameMapping configures the UpdateSchema to use the provided name mapping
+// for tracking field name changes and ensuring consistency during schema evolution.
 func WithNameMapping(nameMapping iceberg.NameMapping) UpdateSchemaOption {
 	return func(u *UpdateSchema) {
 		u.nameMapping = nameMapping
 	}
 }
 
+// NewUpdateSchema creates a new UpdateSchema instance for managing schema changes
+// within a transaction.
+//
+// Parameters:
+//   - txn: The transaction that this schema update will be applied to.
+//   - caseSensitive: If true, field name lookups are case-sensitive; if false,
+//     field names are matched case-insensitively.
+//   - allowIncompatibleChanges: If true, allows schema changes that would normally
+//     be rejected for being incompatible (e.g., adding required fields without
+//     default values, changing field types in non-promotable ways, or changing
+//     column nullability from optional to required).
+//   - opts: Optional configuration functions to customize the UpdateSchema behavior.
+//
+// Returns an UpdateSchema instance that can be used to build and apply schema changes.
 func NewUpdateSchema(txn *Transaction, caseSensitive bool, allowIncompatibleChanges bool, opts ...UpdateSchemaOption) *UpdateSchema {
 	u := &UpdateSchema{
 		txn:          txn,

@@ -147,6 +147,19 @@ func (t *Transaction) UpdateSpec(caseSensitive bool) *UpdateSpec {
 	return NewUpdateSpec(t, caseSensitive)
 }
 
+// UpdateSchema creates a new UpdateSchema instance for managing schema changes
+// within this transaction.
+//
+// Parameters:
+//   - caseSensitive: If true, field name lookups are case-sensitive; if false,
+//     field names are matched case-insensitively.
+//   - allowIncompatibleChanges: If true, allows schema changes that would normally
+//     be rejected for being incompatible (e.g., adding required fields without
+//     default values, changing field types in non-promotable ways, or changing
+//     column nullability from optional to required).
+//   - opts: Optional configuration functions to customize the UpdateSchema behavior.
+//
+// Returns an UpdateSchema instance that can be used to build and apply schema changes.
 func (t *Transaction) UpdateSchema(caseSensitive bool, allowIncompatibleChanges bool, opts ...UpdateSchemaOption) *UpdateSchema {
 	return NewUpdateSchema(t, caseSensitive, allowIncompatibleChanges, opts...)
 }
