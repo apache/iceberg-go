@@ -27,13 +27,21 @@ import (
 // Metadata defines the format for view metadata,
 // similar to how Iceberg supports a common table format for tables
 type Metadata interface {
+	// ViewUUID identifies the view, generated when the view is created
 	ViewUUID() string
+	// FormatVersion is the version number for the view format; must be 1
 	FormatVersion() int
+	// Location is the view's base location; used to create metadata file locations
 	Location() string
+	// Schemas is a list of known schemas
 	Schemas() iter.Seq[*iceberg.Schema]
+	// CurrentVersion is the current version of the view
 	CurrentVersion() *Version
+	// Versions is a list of known versions of the view
 	Versions() iter.Seq[Version]
+	// VersionLog is a list of version log entries with the timestamp and version-id for every change to current-version-id
 	VersionLog() iter.Seq[VersionLogEntry]
+	// Properties is a string to string map of view properties
 	Properties() iceberg.Properties
 }
 
