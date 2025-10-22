@@ -413,8 +413,9 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 			}
 
 			val := v.(int32)
+			width := int32(t.Width)
 
-			return val - (val % int32(t.Width))
+			return val - (((val % width) + width) % width)
 		}, nil
 	case Int64Type:
 		return func(v any) any {
@@ -423,8 +424,9 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 			}
 
 			val := v.(int64)
+			width := int64(t.Width)
 
-			return val - (val % int64(t.Width))
+			return val - (((val % width) + width) % width)
 		}, nil
 	case StringType, BinaryType:
 		return func(v any) any {

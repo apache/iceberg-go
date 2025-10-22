@@ -19,12 +19,14 @@ package iceberg_test
 
 import (
 	"bytes"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -353,5 +355,39 @@ func TestCanTransform(t *testing.T) {
 		for _, typ := range tt.notAllowed {
 			assert.False(t, tt.transform.CanTransform(typ), "%s: expected CanTransform(%T) to be false", tt.transform.String(), typ)
 		}
+	}
+}
+
+func TestTruncateTransform(t *testing.T) {
+	tests := []struct {
+		width    int
+		value    iceberg.Literal
+		expected iceberg.Literal
+	}{
+		{10, iceberg.Int32Literal(1), iceberg.Int32Literal(0)},
+		{10, iceberg.Int32Literal(-1), iceberg.Int32Literal(-10)},
+		{10, iceberg.Int64Literal(1), iceberg.Int64Literal(0)},
+		{10, iceberg.Int64Literal(-1), iceberg.Int64Literal(-10)},
+		{50, iceberg.DecimalLiteral{
+			Val:   decimal128.FromI64(1065),
+			Scale: 2,
+		}, iceberg.DecimalLiteral{
+			Val:   decimal128.FromI64(1050),
+			Scale: 2,
+		}},
+		{3, iceberg.StringLiteral("abcdef"), iceberg.StringLiteral("abc")},
+		{
+			3, iceberg.BinaryLiteral([]byte{0x01, 0x02, 0x03, 0x04, 0x05}),
+			iceberg.BinaryLiteral([]byte{0x01, 0x02, 0x03}),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("width=%d value=%v", tt.width, tt.value.Any()), func(t *testing.T) {
+			transform := iceberg.TruncateTransform{Width: tt.width}
+			result := transform.Apply(iceberg.Optional[iceberg.Literal]{Val: tt.value, Valid: true})
+			require.True(t, result.Valid)
+			assert.Equal(t, tt.expected, result.Val)
+		})
 	}
 }
