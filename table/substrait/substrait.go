@@ -34,7 +34,7 @@ var funcsetYAML string
 
 var (
 	collection = extensions.GetDefaultCollectionWithNoError()
-	funcSetURI = "https://github.com/apache/iceberg-go/blob/main/table/substrait/functions_set.yaml"
+	funcSetURI = "extension:apache.iceberg:functions_set"
 )
 
 func init() {
@@ -160,9 +160,9 @@ func (convertToSubstrait) VisitUUID() types.Type        { return &types.UUIDType
 var _ iceberg.SchemaVisitorPerPrimitiveType[types.Type] = (*convertToSubstrait)(nil)
 
 var (
-	boolURI    = extensions.SubstraitDefaultURIPrefix + "functions_boolean.yaml"
-	compareURI = extensions.SubstraitDefaultURIPrefix + "functions_comparison.yaml"
-	stringURI  = extensions.SubstraitDefaultURIPrefix + "functions_string.yaml"
+	boolURI    = extensions.SubstraitDefaultURNPrefix + "functions_boolean"
+	compareURI = extensions.SubstraitDefaultURNPrefix + "functions_comparison"
+	stringURI  = extensions.SubstraitDefaultURNPrefix + "functions_string"
 
 	notID          = extensions.ID{URN: boolURI, Name: "not"}
 	andID          = extensions.ID{URN: boolURI, Name: "and"}
