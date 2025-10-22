@@ -106,6 +106,8 @@ github.com/apache/arrow-go/v18 v18.4.1 h1:q/jVkBWCJOB9reDgaIZIdruLQUb1kbkvOnOFez
 github.com/apache/arrow-go/v18 v18.4.1/go.mod h1:tLyFubsAl17bvFdUAy24bsSvA/6ww95Iqi67fTpGu3E=
 github.com/apache/arrow-go/v18 v18.4.2-0.20251020210845-c8d24781add8 h1:W8VyiYy5ziTLgJy4eMpX9HM2+GpjujRQFHRoG0KwWlw=
 github.com/apache/arrow-go/v18 v18.4.2-0.20251020210845-c8d24781add8/go.mod h1:YfS5yWtFXamxhBvVOKgjrrLQ7YV86vn2RCCgrKdgfbU=
+github.com/apache/arrow-go/v18 v18.4.2-0.20251022172928-a489ef0147d6 h1:kqqktu1fXE+DUjlXntoYe1wATKo/4CoMQ805dDX4Zpo=
+github.com/apache/arrow-go/v18 v18.4.2-0.20251022172928-a489ef0147d6/go.mod h1:YfS5yWtFXamxhBvVOKgjrrLQ7YV86vn2RCCgrKdgfbU=
 github.com/apache/thrift v0.22.0 h1:r7mTJdj51TMDe6RtcmNdQxgn9XcyfGDOzegMDRg47uc=
 github.com/apache/thrift v0.22.0/go.mod h1:1e7J/O1Ae6ZQMTYdy9xa3w9k+XHWPfRvdPyJeynQ+/g=
 github.com/apparentlymart/go-textseg/v15 v15.0.0 h1:uYvfpb3DyLSCGWnctWKGj857c6ew1u1fNQOlOtuGxQY=
