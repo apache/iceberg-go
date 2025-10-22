@@ -17,6 +17,7 @@
 
 %YAML 1.2
 ---
+urn: extension:apache.iceberg:functions_set
 scalar_functions:
   -
     name: "is_in"
