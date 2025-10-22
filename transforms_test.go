@@ -376,8 +376,10 @@ func TestTruncateTransform(t *testing.T) {
 			Scale: 2,
 		}},
 		{3, iceberg.StringLiteral("abcdef"), iceberg.StringLiteral("abc")},
-		{3, iceberg.BinaryLiteral([]byte{0x01, 0x02, 0x03, 0x04, 0x05}),
-			iceberg.BinaryLiteral([]byte{0x01, 0x02, 0x03})},
+		{
+			3, iceberg.BinaryLiteral([]byte{0x01, 0x02, 0x03, 0x04, 0x05}),
+			iceberg.BinaryLiteral([]byte{0x01, 0x02, 0x03}),
+		},
 	}
 
 	for _, tt := range tests {
