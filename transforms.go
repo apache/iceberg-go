@@ -425,6 +425,7 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 
 			val := v.(int64)
 			width := int64(t.Width)
+
 			return val - (((val % width) + width) % width)
 		}, nil
 	case StringType, BinaryType:
