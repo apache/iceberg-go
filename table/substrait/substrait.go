@@ -24,9 +24,9 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/iceberg-go"
-	"github.com/substrait-io/substrait-go/v4/expr"
-	"github.com/substrait-io/substrait-go/v4/extensions"
-	"github.com/substrait-io/substrait-go/v4/types"
+	"github.com/substrait-io/substrait-go/v7/expr"
+	"github.com/substrait-io/substrait-go/v7/extensions"
+	"github.com/substrait-io/substrait-go/v7/types"
 )
 
 //go:embed functions_set.yaml
@@ -164,20 +164,20 @@ var (
 	compareURI = extensions.SubstraitDefaultURIPrefix + "functions_comparison.yaml"
 	stringURI  = extensions.SubstraitDefaultURIPrefix + "functions_string.yaml"
 
-	notID          = extensions.ID{URI: boolURI, Name: "not"}
-	andID          = extensions.ID{URI: boolURI, Name: "and"}
-	orID           = extensions.ID{URI: boolURI, Name: "or"}
-	isNaNID        = extensions.ID{URI: compareURI, Name: "is_nan"}
-	isNullID       = extensions.ID{URI: compareURI, Name: "is_null"}
-	isNotNullID    = extensions.ID{URI: compareURI, Name: "is_not_null"}
-	equalID        = extensions.ID{URI: compareURI, Name: "equal"}
-	notEqualID     = extensions.ID{URI: compareURI, Name: "not_equal"}
-	greaterEqualID = extensions.ID{URI: compareURI, Name: "gte"}
-	greaterID      = extensions.ID{URI: compareURI, Name: "gt"}
-	lessEqualID    = extensions.ID{URI: compareURI, Name: "lte"}
-	lessID         = extensions.ID{URI: compareURI, Name: "lt"}
-	startsWithID   = extensions.ID{URI: stringURI, Name: "starts_with"}
-	isInID         = extensions.ID{URI: funcSetURI, Name: "is_in"}
+	notID          = extensions.ID{URN: boolURI, Name: "not"}
+	andID          = extensions.ID{URN: boolURI, Name: "and"}
+	orID           = extensions.ID{URN: boolURI, Name: "or"}
+	isNaNID        = extensions.ID{URN: compareURI, Name: "is_nan"}
+	isNullID       = extensions.ID{URN: compareURI, Name: "is_null"}
+	isNotNullID    = extensions.ID{URN: compareURI, Name: "is_not_null"}
+	equalID        = extensions.ID{URN: compareURI, Name: "equal"}
+	notEqualID     = extensions.ID{URN: compareURI, Name: "not_equal"}
+	greaterEqualID = extensions.ID{URN: compareURI, Name: "gte"}
+	greaterID      = extensions.ID{URN: compareURI, Name: "gt"}
+	lessEqualID    = extensions.ID{URN: compareURI, Name: "lte"}
+	lessID         = extensions.ID{URN: compareURI, Name: "lt"}
+	startsWithID   = extensions.ID{URN: stringURI, Name: "starts_with"}
+	isInID         = extensions.ID{URN: funcSetURI, Name: "is_in"}
 )
 
 type toSubstraitExpr struct {
