@@ -40,6 +40,7 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/view"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -1153,27 +1154,13 @@ func (r *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifi
 	return true, nil
 }
 
-type viewVersion struct {
-	VersionID       int64             `json:"version-id"`
-	TimestampMs     int64             `json:"timestamp-ms"`
-	SchemaID        int               `json:"schema-id"`
-	Summary         map[string]string `json:"summary"`
-	Representations []struct {
-		Type    string `json:"type"`
-		SQL     string `json:"sql"`
-		Dialect string `json:"dialect"`
-	} `json:"representations"`
-	DefaultCatalog   string   `json:"default-catalog"`
-	DefaultNamespace []string `json:"default-namespace"`
-}
-
 type createViewRequest struct {
 	Name        string             `json:"name"`
 	Schema      *iceberg.Schema    `json:"schema"`
 	Location    string             `json:"location,omitempty"`
 	Props       iceberg.Properties `json:"properties,omitempty"`
 	SQL         string             `json:"sql"`
-	ViewVersion viewVersion        `json:"view-version"`
+	ViewVersion view.Version       `json:"view-version"`
 }
 
 type viewResponse struct {
@@ -1185,7 +1172,7 @@ type viewResponse struct {
 
 // CreateView creates a new view in the catalog.
 func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, sql string, props iceberg.Properties) error {
-	ns, view, err := splitIdentForPath(identifier)
+	ns, v, err := splitIdentForPath(identifier)
 	if err != nil {
 		return err
 	}
@@ -1196,23 +1183,19 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 	}
 
 	payload := createViewRequest{
-		Name:   view,
+		Name:   v,
 		Schema: freshSchema,
 		SQL:    sql,
 		Props:  props,
-		ViewVersion: viewVersion{
+		ViewVersion: view.Version{
 			VersionID:   1,
 			TimestampMs: time.Now().UnixMilli(),
 			SchemaID:    freshSchema.ID,
 			Summary:     map[string]string{"sql": sql},
-			Representations: []struct {
-				Type    string `json:"type"`
-				SQL     string `json:"sql"`
-				Dialect string `json:"dialect"`
-			}{
+			Representations: []view.SQLRepresentation{
 				{Type: "sql", SQL: sql, Dialect: "default"},
 			},
-			DefaultCatalog:   r.name,
+			DefaultCatalog:   &r.name,
 			DefaultNamespace: strings.Split(ns, namespaceSeparator),
 		},
 	}

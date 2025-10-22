@@ -1179,8 +1179,9 @@ func (s *SqliteCatalogTestSuite) TestLoadView() {
 	viewInfo, err := db.LoadView(context.Background(), []string{nsName, viewName})
 	s.Require().NoError(err)
 
-	s.Equal(viewName, viewInfo["name"])
-	s.Equal(nsName, viewInfo["namespace"])
+	s.Equal(1, viewInfo.FormatVersion())
+	s.Contains(viewInfo.Properties(), "comment")
+	s.Equal("Test view", viewInfo.Properties()["comment"])
 
 	_, err = db.LoadView(context.Background(), []string{nsName, "nonexistent"})
 	s.Error(err)
