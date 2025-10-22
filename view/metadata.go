@@ -30,6 +30,9 @@ import (
 	"github.com/google/uuid"
 )
 
+// LoadMetadata reads and parses a view metadata file from the specified location.
+//
+// Returns the loaded Metadata or an error if the file cannot be read or parsed.
 func LoadMetadata(ctx context.Context,
 	props iceberg.Properties,
 	metadataLocation string,
@@ -55,6 +58,12 @@ func LoadMetadata(ctx context.Context,
 	return &m, nil
 }
 
+// CreateMetadata creates a new view metadata file and writes it to storage.
+//
+// Returns the full path to the created metadata file, or an error if creation fails.
+//
+// Note: This function only supports creating new views with format version 1.
+// It does not support updating existing view metadata.
 func CreateMetadata(
 	ctx context.Context,
 	catalogName string,
