@@ -97,6 +97,16 @@ var (
 			},
 			Required: false,
 		},
+		iceberg.NestedField{
+			ID:   21,
+			Name: "tags",
+			Type: &iceberg.ListType{
+				ElementID:       22,
+				Element:         iceberg.PrimitiveTypes.String,
+				ElementRequired: false,
+			},
+			Required: false,
+		},
 	)
 
 	tableSchemaSimple = iceberg.NewSchemaWithIdentifiers(1,
@@ -222,6 +232,8 @@ func TestSchemaIndexByIDVisitor(t *testing.T) {
 		}, Required: false},
 		19: {ID: 19, Name: "key", Type: iceberg.PrimitiveTypes.String, Required: true},
 		20: {ID: 20, Name: "value", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		21: tableSchemaNested.Field(8),
+		22: {ID: 22, Name: "element", Type: iceberg.PrimitiveTypes.String, Required: false},
 	}, index)
 }
 
@@ -252,6 +264,8 @@ func TestSchemaIndexByName(t *testing.T) {
 		"thing":                      18,
 		"thing.key":                  19,
 		"thing.value":                20,
+		"tags":                       21,
+		"tags.element":               22,
 	}, index)
 }
 
@@ -866,6 +880,17 @@ func TestSchemaRoundTrip(t *testing.T) {
 					"value": "int",
 					"value-required": true
 				}
+			},
+			{
+				"id": 21,
+				"name": "tags",
+				"required": false,
+				"type": {
+					"type": "list",
+					"element-id": 22,
+					"element-required": false,
+					"element": "string"
+				}
 			}
 		]
 	}`, string(data))
@@ -878,5 +903,5 @@ func TestSchemaRoundTrip(t *testing.T) {
 
 func TestHighestFieldID(t *testing.T) {
 	id := tableSchemaNested.HighestFieldID()
-	assert.Equal(t, 20, id, "expected highest field ID to be 20, got %d", id)
+	assert.Equal(t, 22, id, "expected highest field ID to be 22, got %d", id)
 }
