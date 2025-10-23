@@ -1089,7 +1089,9 @@ func (findLastFieldID) Field(field NestedField, fieldResult int) int {
 	return max(field.ID, fieldResult)
 }
 
-func (findLastFieldID) List(_ ListType, elemResult int) int { return elemResult }
+func (findLastFieldID) List(field ListType, elemResult int) int {
+	return max(field.ElementID, elemResult)
+}
 
 func (findLastFieldID) Map(field MapType, keyResult, valueResult int) int {
 	return max(field.KeyID, field.ValueID, keyResult, valueResult)
