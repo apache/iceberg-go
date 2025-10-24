@@ -72,6 +72,7 @@ func WriteMetadata(ctx context.Context, metadata table.Metadata, loc string, pro
 	}
 
 	compression := props.Get(table.MetadataCompressionKey, table.MetadataCompressionDefault)
+
 	return WriteTableMetadata(metadata, wfs, loc, compression)
 }
 
