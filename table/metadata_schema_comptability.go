@@ -35,11 +35,11 @@ type ErrIncompatibleSchema struct {
 func (e ErrIncompatibleSchema) Error() string {
 	var problems strings.Builder
 	for _, f := range e.fields {
-		if f.unsupportedType != nil {
-			problems.WriteString(fmt.Sprintf("\n- invalid type for %s: %s is not supported until v%d", f.colName, f.field.Type, f.unsupportedType.minFormatVersion))
+		if f.UnsupportedType != nil {
+			problems.WriteString(fmt.Sprintf("\n- invalid type for %s: %s is not supported until v%d", f.ColName, f.Field.Type, f.UnsupportedType.MinFormatVersion))
 		}
-		if f.invalidDefault != nil {
-			problems.WriteString(fmt.Sprintf("\n- invalid initial default for %s: non-null default (%v) is not supported until v%d", f.colName, f.field.InitialDefault, f.invalidDefault.minFormatVersion))
+		if f.InvalidDefault != nil {
+			problems.WriteString(fmt.Sprintf("\n- invalid initial default for %s: non-null default (%v) is not supported until v%d", f.ColName, f.Field.InitialDefault, f.InvalidDefault.MinFormatVersion))
 		}
 	}
 
@@ -51,19 +51,19 @@ func (e ErrIncompatibleSchema) Unwrap() error {
 }
 
 type IncompatibleField struct {
-	field           iceberg.NestedField
-	colName         string
-	unsupportedType *UnsupportedType
-	invalidDefault  *InvalidDefault
+	Field           iceberg.NestedField
+	ColName         string
+	UnsupportedType *UnsupportedType
+	InvalidDefault  *InvalidDefault
 }
 
 type UnsupportedType struct {
-	minFormatVersion int
+	MinFormatVersion int
 }
 
 type InvalidDefault struct {
-	minFormatVersion int
-	writeDefault     any
+	MinFormatVersion int
+	WriteDefault     any
 }
 
 // checkSchemaCompatibility checks that the schema is compatible with the table's format version.
@@ -90,17 +90,17 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 		minFormatVersion := minFormatVersionForType(field.Type)
 		if formatVersion < minFormatVersion {
 			problems = append(problems, IncompatibleField{
-				field:           field,
-				colName:         colName,
-				unsupportedType: &UnsupportedType{minFormatVersion: minFormatVersion},
+				Field:           field,
+				ColName:         colName,
+				UnsupportedType: &UnsupportedType{MinFormatVersion: minFormatVersion},
 			})
 		}
 
 		if field.InitialDefault != nil && formatVersion < defaultValuesMinFormatVersion {
 			problems = append(problems, IncompatibleField{
-				field:          field,
-				colName:        colName,
-				invalidDefault: &InvalidDefault{minFormatVersion: defaultValuesMinFormatVersion, writeDefault: field.InitialDefault},
+				Field:          field,
+				ColName:        colName,
+				InvalidDefault: &InvalidDefault{MinFormatVersion: defaultValuesMinFormatVersion, WriteDefault: field.InitialDefault},
 			})
 		}
 	}

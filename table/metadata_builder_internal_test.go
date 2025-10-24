@@ -1226,12 +1226,12 @@ func TestUnsupportedTypes(t *testing.T) {
 				}
 				getErrField := func(id int) IncompatibleField {
 					return IncompatibleField{
-						field:   getField(id),
-						colName: getCol(id),
-						unsupportedType: &UnsupportedType{
+						Field:   getField(id),
+						ColName: getCol(id),
+						UnsupportedType: &UnsupportedType{
 							minVersion,
 						},
-						invalidDefault: nil,
+						InvalidDefault: nil,
 					}
 				}
 				require.Equal(t, ErrIncompatibleSchema{
