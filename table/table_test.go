@@ -19,6 +19,7 @@ package table_test
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io/fs"
@@ -113,6 +114,40 @@ func (t *TableTestSuite) TestNewTableFromReadFile() {
 	t.Require().NotNil(tbl2)
 
 	t.True(t.tbl.Equals(*tbl2))
+}
+
+func (t *TableTestSuite) TestNewTableFromReadFileGzipped() {
+	var b bytes.Buffer
+	gzWriter := gzip.NewWriter(&b)
+
+	_, err := gzWriter.Write([]byte(table.ExampleTableMetadataV2))
+	if err != nil {
+		log.Fatalf("Error writing to gzip writer: %v", err)
+	}
+	err = gzWriter.Close()
+	if err != nil {
+		log.Fatalf("Error closing gzip writer: %v", err)
+	}
+
+	var mockfsReadFile internal.MockFSReadFile
+	mockfsReadFile.Test(t.T())
+	mockfsReadFile.On("ReadFile", "s3://bucket/test/location/uuid.gz.metadata.json").
+		Return(b.Bytes(), nil)
+	defer mockfsReadFile.AssertExpectations(t.T())
+
+	tbl2, err := table.NewFromLocation(
+		t.T().Context(),
+		[]string{"foo"},
+		"s3://bucket/test/location/uuid.gz.metadata.json",
+		func(ctx context.Context) (iceio.IO, error) {
+			return &mockfsReadFile, nil
+		},
+		nil,
+	)
+	t.Require().NoError(err)
+	t.Require().NotNil(tbl2)
+
+	t.True(t.tbl.Metadata().Equals(tbl2.Metadata()))
 }
 
 func (t *TableTestSuite) TestSchema() {
