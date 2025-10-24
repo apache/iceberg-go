@@ -18,10 +18,11 @@
 package internal
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"io"
 	"maps"
 	"net/url"
 	"path"
@@ -31,40 +32,47 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
-	"github.com/apache/iceberg-go/io"
+	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 )
 
-func GetMetadataLoc(location string, newVersion uint) string {
-	return fmt.Sprintf("%s/metadata/%05d-%s.metadata.json",
-		location, newVersion, uuid.New().String())
-}
-
-func WriteTableMetadata(metadata table.Metadata, fs io.WriteFileIO, loc string) error {
+func WriteTableMetadata(metadata table.Metadata, fs icebergio.WriteFileIO, loc string, compression string) error {
 	out, err := fs.Create(loc)
 	if err != nil {
 		return err
 	}
 
-	return errors.Join(
-		json.NewEncoder(out).Encode(metadata),
-		out.Close(),
-	)
+	var writer io.Writer = out
+	var gzWriter *gzip.Writer
+	if compression == "gzip" {
+		gzWriter = gzip.NewWriter(out)
+		writer = gzWriter
+	}
+
+	encodeErr := json.NewEncoder(writer).Encode(metadata)
+
+	var closeErr error
+	if gzWriter != nil {
+		closeErr = gzWriter.Close()
+	}
+
+	return errors.Join(encodeErr, closeErr, out.Close())
 }
 
 func WriteMetadata(ctx context.Context, metadata table.Metadata, loc string, props iceberg.Properties) error {
-	fs, err := io.LoadFS(ctx, props, loc)
+	fs, err := icebergio.LoadFS(ctx, props, loc)
 	if err != nil {
 		return err
 	}
 
-	wfs, ok := fs.(io.WriteFileIO)
+	wfs, ok := fs.(icebergio.WriteFileIO)
 	if !ok {
 		return errors.New("filesystem IO does not support writing")
 	}
 
-	return WriteTableMetadata(metadata, wfs, loc)
+	compression := props.Get(table.MetadataCompressionKey, table.MetadataCompressionDefault)
+	return WriteTableMetadata(metadata, wfs, loc, compression)
 }
 
 func UpdateTableMetadata(base table.Metadata, updates []table.Update, metadataLoc string) (table.Metadata, error) {
@@ -109,7 +117,7 @@ func CreateStagedTable(ctx context.Context, catprops iceberg.Properties, nsprops
 			ident,
 			metadata,
 			metadataLoc,
-			io.LoadFSFunc(ioProps, metadataLoc),
+			icebergio.LoadFSFunc(ioProps, metadataLoc),
 			nil,
 		),
 	}, nil
@@ -213,7 +221,7 @@ func UpdateAndStageTable(ctx context.Context, current *table.Table, ident table.
 			ident,
 			updated,
 			newLocation,
-			io.LoadFSFunc(updated.Properties(), newLocation),
+			icebergio.LoadFSFunc(updated.Properties(), newLocation),
 			cat,
 		),
 	}, nil

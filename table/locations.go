@@ -63,7 +63,13 @@ func (slp *simpleLocationProvider) NewTableMetadataFileLocation(newVersion int) 
 		return "", err
 	}
 
-	fname := fmt.Sprintf("%05d-%s.metadata.json", newVersion, newUUID)
+	compression := slp.tableProps.Get(MetadataCompressionKey, MetadataCompressionDefault)
+	ext := ".metadata.json"
+	if compression == "gzip" {
+		ext = ".gz.metadata.json"
+	}
+
+	fname := fmt.Sprintf("%05d-%s%s", newVersion, newUUID, ext)
 
 	return slp.NewMetadataLocation(fname), nil
 }
