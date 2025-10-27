@@ -905,3 +905,20 @@ func TestHighestFieldID(t *testing.T) {
 	id := tableSchemaNested.HighestFieldID()
 	assert.Equal(t, 22, id, "expected highest field ID to be 22, got %d", id)
 }
+
+// TestHighestFieldIDListType tests that HighestFieldID correctly computes
+// the highest field ID in a schema that includes a ListType as the final field.
+func TestHighestFieldIDListType(t *testing.T) {
+	tableSchema := iceberg.NewSchemaWithIdentifiers(1,
+		[]int{1},
+		iceberg.NestedField{
+			ID: 1, Name: "list_field", Type: &iceberg.ListType{
+				ElementID:       2,
+				Element:         iceberg.PrimitiveTypes.String,
+				ElementRequired: true,
+			},
+			Required: true,
+		},
+	)
+	assert.Equal(t, 2, tableSchema.HighestFieldID())
+}
