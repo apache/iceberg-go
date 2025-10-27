@@ -113,3 +113,9 @@ var ReservedProperties = [9]string{
 	PropertyDefaultPartitionSpec,
 	PropertyDefaultSortOrder,
 }
+
+// Metadata compression codecs
+const (
+	MetadataCompressionCodecNone = "none"
+	MetadataCompressionCodecGzip = "gzip"
+)

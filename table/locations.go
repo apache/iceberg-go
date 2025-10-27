@@ -64,9 +64,14 @@ func (slp *simpleLocationProvider) NewTableMetadataFileLocation(newVersion int) 
 	}
 
 	compression := slp.tableProps.Get(MetadataCompressionKey, MetadataCompressionDefault)
-	ext := ".metadata.json"
-	if compression == "gzip" {
+	var ext string
+	switch compression {
+	case MetadataCompressionCodecNone:
+		ext = ".metadata.json"
+	case MetadataCompressionCodecGzip:
 		ext = ".gz.metadata.json"
+	default:
+		return "", fmt.Errorf("unsupported write metadata compression codec: %s", compression)
 	}
 
 	fname := fmt.Sprintf("%05d-%s%s", newVersion, newUUID, ext)

@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"net/url"
@@ -44,20 +45,25 @@ func WriteTableMetadata(metadata table.Metadata, fs icebergio.WriteFileIO, loc s
 	}
 
 	var writer io.Writer = out
-	var gzWriter *gzip.Writer
-	if compression == "gzip" {
-		gzWriter = gzip.NewWriter(out)
-		writer = gzWriter
+	var compressWriter io.WriteCloser
+	switch compression {
+	case table.MetadataCompressionCodecNone:
+		// no compression
+	case table.MetadataCompressionCodecGzip:
+		compressWriter = gzip.NewWriter(out)
+		writer = compressWriter
+	default:
+		return fmt.Errorf("unsupported write metadata compression codec: %s", compression)
 	}
 
 	encodeErr := json.NewEncoder(writer).Encode(metadata)
 
-	var closeErr error
-	if gzWriter != nil {
-		closeErr = gzWriter.Close()
+	var compressionCloseErr error
+	if compressWriter != nil {
+		compressionCloseErr = compressWriter.Close()
 	}
 
-	return errors.Join(encodeErr, closeErr, out.Close())
+	return errors.Join(encodeErr, compressionCloseErr, out.Close())
 }
 
 func WriteMetadata(ctx context.Context, metadata table.Metadata, loc string, props iceberg.Properties) error {
