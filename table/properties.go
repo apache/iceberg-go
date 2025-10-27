@@ -74,7 +74,7 @@ const (
 	MetadataPreviousVersionsMaxDefault = 100
 
 	MetadataCompressionKey     = "write.metadata.compression-codec"
-	MetadataCompressionDefault = ""
+	MetadataCompressionDefault = "none"
 
 	WriteTargetFileSizeBytesKey     = "write.target-file-size-bytes"
 	WriteTargetFileSizeBytesDefault = 512 * 1024 * 1024 // 512 MB
