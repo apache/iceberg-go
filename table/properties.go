@@ -73,6 +73,9 @@ const (
 	MetadataPreviousVersionsMaxKey     = "write.metadata.previous-versions-max"
 	MetadataPreviousVersionsMaxDefault = 100
 
+	MetadataCompressionKey     = "write.metadata.compression-codec"
+	MetadataCompressionDefault = "none"
+
 	WriteTargetFileSizeBytesKey     = "write.target-file-size-bytes"
 	WriteTargetFileSizeBytesDefault = 512 * 1024 * 1024 // 512 MB
 
@@ -110,3 +113,9 @@ var ReservedProperties = [9]string{
 	PropertyDefaultPartitionSpec,
 	PropertyDefaultSortOrder,
 }
+
+// Metadata compression codecs
+const (
+	MetadataCompressionCodecNone = "none"
+	MetadataCompressionCodecGzip = "gzip"
+)

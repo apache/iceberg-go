@@ -21,7 +21,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -1637,4 +1639,67 @@ func (t *TableTestSuite) TestRefresh() {
 	t.Equal(originalLocation, tbl.Location())
 	t.True(originalSchema.Equals(tbl.Schema()))
 	t.Equal(originalSpec, tbl.Spec())
+}
+
+func (t *TableTestSuite) TestMetadataCompressionRoundTrip() {
+	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
+		"uri":          ":memory:",
+		"type":         "sql",
+		sql.DriverKey:  sqliteshim.ShimName,
+		sql.DialectKey: string(sql.SQLite),
+		"warehouse":    "file://" + t.T().TempDir(),
+	})
+	t.Require().NoError(err)
+
+	ident := table.Identifier{"test", "compression_table"}
+	t.Require().NoError(cat.CreateNamespace(context.Background(), catalog.NamespaceFromIdent(ident), nil))
+
+	// Test with gzip compression enabled
+	tbl, err := cat.CreateTable(context.Background(), ident, t.tbl.Schema(),
+		catalog.WithProperties(iceberg.Properties{
+			table.MetadataCompressionKey: "gzip",
+		}))
+	t.Require().NoError(err)
+	t.Require().NotNil(tbl)
+
+	// Verify the metadata location has the correct extension for gzipped files
+	metadataLoc := tbl.MetadataLocation()
+	t.Contains(metadataLoc, ".gz.metadata.json")
+
+	// Test that we can read the gzipped metadata
+	fs, err := tbl.FS(context.Background())
+	t.Require().NoError(err)
+
+	// Read the metadata file and verify it's gzipped
+	file, err := fs.Open(metadataLoc)
+	t.Require().NoError(err)
+	defer file.Close()
+
+	metadataBytes, err := io.ReadAll(file)
+	t.Require().NoError(err)
+
+	// Verify it's gzipped by trying to decompress it
+	gzReader, err := gzip.NewReader(bytes.NewReader(metadataBytes))
+	t.Require().NoError(err)
+	defer gzReader.Close()
+
+	decompressed, err := io.ReadAll(gzReader)
+	t.Require().NoError(err)
+
+	// Verify the decompressed content is valid JSON
+	var metadata map[string]interface{}
+	err = json.Unmarshal(decompressed, &metadata)
+	t.Require().NoError(err)
+
+	// Verify it contains expected Iceberg metadata fields
+	t.Contains(metadata, "format-version")
+	t.Contains(metadata, "table-uuid")
+	t.Contains(metadata, "location")
+
+	// Verify that we can load the table from the metadata location
+	tbl2, err := cat.LoadTable(context.Background(), ident)
+	t.Require().NoError(err)
+	t.Require().NotNil(tbl2)
+
+	t.True(tbl.Equals(*tbl2))
 }
