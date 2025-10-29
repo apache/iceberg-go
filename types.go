@@ -736,6 +736,7 @@ type UnknownType struct{}
 
 func (UnknownType) Equals(other Type) bool {
 	_, ok := other.(UnknownType)
+
 	return ok
 }
 
