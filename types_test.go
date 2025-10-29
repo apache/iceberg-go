@@ -326,3 +326,21 @@ func TestUnknownTypeSchemaValidation(t *testing.T) {
 		)
 	}, "Should panic when unknown type has non-null write-default")
 }
+
+func TestUnknownTypeInNestedStructs(t *testing.T) {
+	validSchema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+		iceberg.NestedField{
+			ID:       2,
+			Name:     "nested",
+			Required: false,
+			Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 20, Name: "int_field", Type: iceberg.Int32Type{}, Required: true},
+					{ID: 21, Name: "unknown_field", Type: iceberg.UnknownType{}, Required: false},
+				},
+			},
+		},
+	)
+	assert.NotNil(t, validSchema)
+}
