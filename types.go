@@ -703,7 +703,6 @@ func (BinaryType) primitive()     {}
 func (BinaryType) Type() string   { return "binary" }
 func (BinaryType) String() string { return "binary" }
 
-<<<<<<< HEAD
 // TimestampNsType represents a timestamp stored as nanoseconds since the unix epoch
 // without regard for timezone. Requires format version 3+.
 type TimestampNsType struct{}
@@ -759,7 +758,7 @@ var PrimitiveTypes = struct {
 	String        PrimitiveType
 	Binary        PrimitiveType
 	UUID          PrimitiveType
-	Unknown		  PrimitiveType
+	Unknown       PrimitiveType
 }{
 	Bool:          BooleanType{},
 	Int32:         Int32Type{},
