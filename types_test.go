@@ -343,4 +343,142 @@ func TestUnknownTypeInNestedStructs(t *testing.T) {
 		},
 	)
 	assert.NotNil(t, validSchema)
+
+	assert.Panics(t, func() {
+		iceberg.NewSchema(1,
+			iceberg.NestedField{
+				ID:       1,
+				Name:     "invalid_unknown",
+				Required: false,
+				Type: &iceberg.StructType{
+					FieldList: []iceberg.NestedField{
+						{ID: 20, Name: "invalid_unknown", Type: iceberg.UnknownType{}, Required: true},
+					},
+				},
+			},
+		)
+	}, "Should panic when unknown type is required")
+
+	assert.Panics(t, func() {
+		iceberg.NewSchema(1,
+			iceberg.NestedField{
+				ID:       1,
+				Name:     "nested",
+				Required: false,
+				Type: &iceberg.StructType{
+					FieldList: []iceberg.NestedField{
+						{ID: 21, Name: "unknown_field", Type: iceberg.UnknownType{}, Required: false, InitialDefault: "invalid"},
+					},
+				},
+			},
+		)
+	}, "Should panic when unknown type has non-null initial-default")
+
+	assert.Panics(t, func() {
+		iceberg.NewSchema(1,
+			iceberg.NestedField{
+				ID:       1,
+				Name:     "nested",
+				Required: false,
+				Type: &iceberg.StructType{
+					FieldList: []iceberg.NestedField{
+						{ID: 21, Name: "unknown_field", Type: iceberg.UnknownType{}, Required: false, WriteDefault: "invalid"},
+					},
+				},
+			},
+		)
+	}, "Should panic when unknown type has non-null write-default")
+}
+
+func TestUnknownTypeInList(t *testing.T) {
+	// Valid: list element is UnknownType and optional
+	validSchema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+		iceberg.NestedField{
+			ID:   2,
+			Name: "unknown_list",
+			Type: &iceberg.ListType{
+				ElementID:       20,
+				Element:         iceberg.UnknownType{},
+				ElementRequired: false,
+			},
+			Required: false,
+		},
+	)
+	assert.NotNil(t, validSchema)
+
+	// Invalid: list element is UnknownType but required
+	assert.Panics(t, func() {
+		iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+			iceberg.NestedField{
+				ID:   2,
+				Name: "invalid_unknown_list",
+				Type: &iceberg.ListType{
+					ElementID:       20,
+					Element:         iceberg.UnknownType{},
+					ElementRequired: true,
+				},
+				Required: false,
+			},
+		)
+	}, "Should panic when unknown list element is required")
+}
+
+func TestUnknownTypeInMap(t *testing.T) {
+	// Valid: map value is UnknownType and optional
+	validSchema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+		iceberg.NestedField{
+			ID:   2,
+			Name: "unknown_map_value",
+			Type: &iceberg.MapType{
+				KeyID:         21,
+				KeyType:       iceberg.StringType{},
+				ValueID:       22,
+				ValueType:     iceberg.UnknownType{},
+				ValueRequired: false,
+			},
+			Required: false,
+		},
+	)
+	assert.NotNil(t, validSchema)
+
+	// Invalid: map key is UnknownType (map keys are always required)
+	assert.Panics(t, func() {
+		iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+			iceberg.NestedField{
+				ID:   2,
+				Name: "invalid_unknown_map_key",
+				Type: &iceberg.MapType{
+					KeyID:         21,
+					KeyType:       iceberg.UnknownType{},
+					ValueID:       22,
+					ValueType:     iceberg.StringType{},
+					ValueRequired: false,
+				},
+				Required: false,
+			},
+		)
+	}, "Should panic when unknown map key is required")
+
+	// Invalid: map value is UnknownType but required
+	assert.Panics(t, func() {
+		iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+			iceberg.NestedField{
+				ID:   2,
+				Name: "invalid_unknown_map_value",
+				Type: &iceberg.MapType{
+					KeyID:         21,
+					KeyType:       iceberg.StringType{},
+					ValueID:       22,
+					ValueType:     iceberg.UnknownType{},
+					ValueRequired: true,
+				},
+				Required: false,
+			},
+		)
+	}, "Should panic when unknown map value is required")
 }
