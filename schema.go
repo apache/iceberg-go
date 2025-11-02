@@ -80,10 +80,6 @@ func NewSchemaWithIdentifiers(id int, identifierIDs []int, fields ...NestedField
 }
 
 func (s *Schema) init() {
-	// Validate unknown type requirements
-	if err := s.validateUnknownTypes(); err != nil {
-		panic(fmt.Sprintf("Invalid schema: %v", err))
-	}
 
 	s.lazyIDToParent = sync.OnceValues(func() (map[int]int, error) {
 		return IndexParents(s)
@@ -93,116 +89,6 @@ func (s *Schema) init() {
 	})
 }
 
-// validateUnknownTypes validates that unknown types follow the v3 specification:
-// - Must be optional (Required: false)
-// - Must have null defaults (InitialDefault: nil, WriteDefault: nil)
-func (s *Schema) validateUnknownTypes() error {
-	validator := &unknownTypeValidator{}
-	result, err := Visit(s, validator)
-	if err != nil {
-		return err
-	}
-
-	return result
-}
-
-type unknownTypeValidator struct{}
-
-func (v *unknownTypeValidator) Schema(_ *Schema, structResult error) error {
-	return structResult
-}
-
-func (v *unknownTypeValidator) Struct(_ StructType, fieldResults []error) error {
-	for _, err := range fieldResults {
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (v *unknownTypeValidator) Field(field NestedField, fieldResult error) error {
-	if fieldResult != nil {
-		return fieldResult
-	}
-	if _, isUnknown := field.Type.(UnknownType); isUnknown {
-		if field.Required {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked as required", field.Name, field.ID)
-		}
-		if field.InitialDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null initial-default, but got: %v", field.Name, field.ID, field.InitialDefault)
-		}
-		if field.WriteDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null write-default, but got: %v", field.Name, field.ID, field.WriteDefault)
-		}
-	}
-
-	return nil
-}
-
-func (v *unknownTypeValidator) List(list ListType, elemResult error) error {
-	if elemResult != nil {
-		return elemResult
-	}
-	elem := list.ElementField()
-
-	if _, isUknown := elem.Type.(UnknownType); isUknown {
-		if elem.Required {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked required", elem.Name, elem.ID)
-		}
-		if elem.InitialDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null-initial-default, but got: %v", elem.Name, elem.ID, elem.InitialDefault)
-		}
-		if elem.WriteDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null write-default but got: %v", elem.Name, elem.ID, elem.WriteDefault)
-		}
-	}
-
-	return nil
-}
-
-func (v *unknownTypeValidator) Map(mapType MapType, keyResult, valueResult error) error {
-	if keyResult != nil {
-		return keyResult
-	}
-
-	if valueResult != nil {
-		return valueResult
-	}
-
-	key := mapType.KeyField()
-
-	if _, isUnknown := key.Type.(UnknownType); isUnknown {
-		if key.Required {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked required", key.Name, key.ID)
-		}
-		if key.InitialDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null-initial-default, but got: %v", key.Name, key.ID, key.InitialDefault)
-		}
-		if key.WriteDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null write-default but got: %v", key.Name, key.ID, key.WriteDefault)
-		}
-	}
-
-	value := mapType.ValueField()
-	if _, isUnknown := value.Type.(UnknownType); isUnknown {
-		if value.Required {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked required", value.Name, value.ID)
-		}
-		if value.InitialDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null-initial-default, but got: %v", value.Name, value.ID, value.InitialDefault)
-		}
-		if value.WriteDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null write-default but got: %v", value.Name, value.ID, value.WriteDefault)
-		}
-	}
-
-	return nil
-}
-func (v *unknownTypeValidator) Primitive(_ PrimitiveType) error {
-	return nil
-}
 func (s *Schema) String() string {
 	var b strings.Builder
 	b.WriteString("table {")

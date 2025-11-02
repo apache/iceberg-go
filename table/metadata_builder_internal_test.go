@@ -1309,3 +1309,106 @@ func generateTypeSchema(typ iceberg.Type) *iceberg.Schema {
 
 	return sc
 }
+
+func TestUnknownTypeValidation(t *testing.T) {
+	t.Run("ValidUnknownTypeInFields", func(t *testing.T) {
+		validSchema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+			iceberg.NestedField{ID: 2, Name: "unknown_field", Type: iceberg.UnknownType{}, Required: false},
+		)
+		err := checkSchemaCompatibility(validSchema, 3)
+		require.NoError(t, err, "Valid unknown type schema should pass validation")
+	})
+	t.Run("InvalidRequiredUnknownType", func(t *testing.T) {
+		invalidSchema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "invalid_unknown", Type: iceberg.UnknownType{}, Required: true},
+		)
+		err := checkSchemaCompatibility(invalidSchema, 3)
+		require.Error(t, err, "should error when unknown type is required")
+		require.ErrorContains(t, err, "must be optional")
+	})
+	t.Run("InvalidInitialDefaultUnknownType", func(t *testing.T) {
+		invalidSchema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "invalid_unknown", Type: iceberg.UnknownType{}, Required: false, InitialDefault: "invalid"},
+		)
+		err := checkSchemaCompatibility(invalidSchema, 3)
+		require.Error(t, err, "should error when unknown type has non-null initial-default")
+		require.ErrorContains(t, err, "must have null initial-default")
+	})
+	t.Run("InvalidWriteDefaultUnknownType", func(t *testing.T) {
+		invalidSchema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "invalid_unknown", Type: iceberg.UnknownType{}, Required: false, WriteDefault: "invalid"},
+		)
+		err := checkSchemaCompatibility(invalidSchema, 3)
+		require.Error(t, err, "should error when unknown type has non-null write-default")
+		require.ErrorContains(t, err, "must have null write-default")
+	})
+
+	t.Run("ValidNestedUnknownType", func(t *testing.T) {
+		validSchema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+			iceberg.NestedField{ID: 2, Name: "nested", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: 3, Name: "unknown_field", Type: iceberg.UnknownType{}, Required: false},
+			}}, Required: false},
+		)
+		err := checkSchemaCompatibility(validSchema, 3)
+		require.NoError(t, err, "Valid nested unknown type schema should pass validation")
+	})
+
+	t.Run("InvalidRequiredNestedUnknownType", func(t *testing.T) {
+		invalidSchema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 2, Name: "nested", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: 3, Name: "unknown_field", Type: iceberg.UnknownType{}, Required: true},
+			}}, Required: false},
+		)
+		err := checkSchemaCompatibility(invalidSchema, 3)
+		require.Error(t, err, "should error when unknown type is required")
+		require.ErrorContains(t, err, "must be optional")
+	})
+
+	t.Run("ValidListWithUnknownType", func(t *testing.T) {
+		validSchema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+			iceberg.NestedField{ID: 2, Name: "list", Type: &iceberg.ListType{ElementID: 3, Element: iceberg.UnknownType{}, ElementRequired: false}, Required: false},
+		)
+		err := checkSchemaCompatibility(validSchema, 3)
+		require.NoError(t, err, "Valid list with unknown type schema should pass validation")
+	})
+
+	t.Run("InvalidRequiredListElement", func(t *testing.T) {
+		invalidSchema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+			iceberg.NestedField{ID: 2, Name: "list", Type: &iceberg.ListType{ElementID: 3, Element: iceberg.UnknownType{}, ElementRequired: true}, Required: false},
+		)
+		err := checkSchemaCompatibility(invalidSchema, 3)
+		require.Error(t, err, "should error when unknown type is required")
+		require.ErrorContains(t, err, "must be optional")
+	})
+
+	t.Run("ValidMapWithUnknownType", func(t *testing.T) {
+		validSchema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+			iceberg.NestedField{ID: 2, Name: "map", Type: &iceberg.MapType{KeyID: 3, KeyType: iceberg.StringType{}, ValueID: 4, ValueType: iceberg.UnknownType{}, ValueRequired: false}, Required: false},
+		)
+		err := checkSchemaCompatibility(validSchema, 3)
+		require.NoError(t, err, "Valid map with unknown type schema should pass validation")
+	})
+
+	t.Run("InvalidUnknownMapKey", func(t *testing.T) {
+		invalidSchema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 2, Name: "invalid_map", Type: &iceberg.MapType{KeyID: 3, KeyType: iceberg.UnknownType{}, ValueID: 4, ValueType: iceberg.StringType{}, ValueRequired: false}, Required: true},
+		)
+		err := checkSchemaCompatibility(invalidSchema, 3)
+		require.Error(t, err, "should error when unknown type is used as map key")
+		require.ErrorContains(t, err, "must be optional")
+	})
+
+	t.Run("InvalidUnknownMapValue", func(t *testing.T) {
+		invalidSchema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 2, Name: "invalid_map", Type: &iceberg.MapType{KeyID: 3, KeyType: iceberg.StringType{}, ValueID: 4, ValueType: iceberg.UnknownType{}, ValueRequired: true}, Required: false},
+		)
+		err := checkSchemaCompatibility(invalidSchema, 3)
+		require.Error(t, err, "should error when unknown type is used as map value")
+		require.ErrorContains(t, err, "must be optional")
+	})
+}
