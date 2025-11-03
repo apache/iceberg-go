@@ -80,7 +80,6 @@ func NewSchemaWithIdentifiers(id int, identifierIDs []int, fields ...NestedField
 }
 
 func (s *Schema) init() {
-
 	s.lazyIDToParent = sync.OnceValues(func() (map[int]int, error) {
 		return IndexParents(s)
 	})

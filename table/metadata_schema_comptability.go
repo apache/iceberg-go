@@ -233,6 +233,7 @@ func (v *unknownTypeValidator) Map(mapType iceberg.MapType, keyResult, valueResu
 
 	return nil
 }
+
 func (v *unknownTypeValidator) Primitive(_ iceberg.PrimitiveType) error {
 	return nil
 }
