@@ -49,8 +49,7 @@ jobs:
         go-version: ${{ matrix.go }}
         cache: true
         cache-dependency-path: go.sum
-    - name: Install staticcheck
-      if: matrix.go == '1.23.6'
+    - name: Install staticcheck      
       run: GOTOOLCHAIN='go1.24.9' go install honnef.co/go/tools/cmd/staticcheck@v0.6.1
     - name: Run golangci-lint
       uses: golangci/golangci-lint-action@1481404843c368bc19ca9406f87d6e0fc97bdcfd # v7
