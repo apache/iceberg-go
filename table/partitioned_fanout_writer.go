@@ -307,6 +307,47 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int) (iceberg.Literal
 	case *extensions.UUIDArray:
 
 		return iceberg.NewLiteral(arr.Value(row)), nil
+
+	case *array.String:
+
+		return iceberg.NewLiteral(arr.Value(row)), nil
+	case *array.Int64:
+
+		return iceberg.NewLiteral(arr.Value(row)), nil
+	case *array.Int32:
+
+		return iceberg.NewLiteral(arr.Value(row)), nil
+	case *array.Int16:
+
+		return iceberg.NewLiteral(int32(arr.Value(row))), nil
+	case *array.Int8:
+
+		return iceberg.NewLiteral(int32(arr.Value(row))), nil
+	case *array.Uint64:
+
+		return iceberg.NewLiteral(int64(arr.Value(row))), nil
+	case *array.Uint32:
+
+		return iceberg.NewLiteral(int32(arr.Value(row))), nil
+	case *array.Uint16:
+
+		return iceberg.NewLiteral(int32(arr.Value(row))), nil
+	case *array.Uint8:
+
+		return iceberg.NewLiteral(int32(arr.Value(row))), nil
+	case *array.Float32:
+
+		return iceberg.NewLiteral(arr.Value(row)), nil
+	case *array.Float64:
+
+		return iceberg.NewLiteral(arr.Value(row)), nil
+	case *array.Boolean:
+
+		return iceberg.NewLiteral(arr.Value(row)), nil
+	case *array.Binary:
+
+		return iceberg.NewLiteral(arr.Value(row)), nil
+
 	default:
 		val := column.GetOneForMarshal(row)
 		switch v := val.(type) {
