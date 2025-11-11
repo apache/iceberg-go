@@ -55,6 +55,15 @@ type PartitionField struct {
 	escapedName string
 }
 
+// EscapedName returns the URL-escaped version of the partition field name.
+func (p *PartitionField) EscapedName() string {
+	if p.escapedName == "" {
+		p.escapedName = url.QueryEscape(p.Name)
+	}
+
+	return p.escapedName
+}
+
 func (p PartitionField) Equals(other PartitionField) bool {
 	return p.SourceID == other.SourceID &&
 		p.FieldID == other.FieldID &&
@@ -362,8 +371,6 @@ func (ps *PartitionSpec) initialize() {
 	ps.partitionTypeCache = make(map[int]*StructType)
 
 	for i := range ps.fields {
-		// Pre-compute URL-escaped field names for performance
-		ps.fields[i].escapedName = url.QueryEscape(ps.fields[i].Name)
 		ps.sourceIdToFields[ps.fields[i].SourceID] = append(ps.sourceIdToFields[ps.fields[i].SourceID], ps.fields[i])
 	}
 }
@@ -490,11 +497,7 @@ func (ps *PartitionSpec) PartitionToPath(data structLike, sc *Schema) string {
 	var sb strings.Builder
 	estimatedSize := 0
 	for i := range partType.Fields() {
-		// Lazily initialize escapedName if needed (for PartitionSpecs created without initialize)
-		if ps.fields[i].escapedName == "" {
-			ps.fields[i].escapedName = url.QueryEscape(ps.fields[i].Name)
-		}
-		estimatedSize += len(ps.fields[i].escapedName) + 20 // name + "=" + avg value + "/"
+		estimatedSize += len(ps.fields[i].EscapedName()) + 20 // name + "=" + avg value + "/"
 	}
 	sb.Grow(estimatedSize)
 
@@ -504,7 +507,7 @@ func (ps *PartitionSpec) PartitionToPath(data structLike, sc *Schema) string {
 		}
 
 		// Use pre-escaped field name (now guaranteed to be initialized)
-		sb.WriteString(ps.fields[i].escapedName)
+		sb.WriteString(ps.fields[i].EscapedName())
 		sb.WriteByte('=')
 
 		// Only escape the value (which changes per row)
