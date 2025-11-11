@@ -81,7 +81,7 @@ func BenchmarkPartitionedWriteThroughput(b *testing.B) {
 		defer uaB.Release()
 
 		baseTime := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
-		hosts := []string{"api.earthscope.org", "data.earthscope.org", "web.earthscope.org"}
+		hosts := []string{"example.com", "foo.test.org", "demo.net"}
 		userAgents := []string{"Mozilla/5.0", "curl/7.68.0", "python-requests/2.25.1"}
 
 		for i := 0; i < numRecords; i++ {
