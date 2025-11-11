@@ -23,7 +23,7 @@ require (
 	cloud.google.com/go/storage v1.57.1
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.13.0
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.6.3
-	github.com/apache/arrow-go/v18 v18.4.2-0.20251022172928-a489ef0147d6
+	github.com/apache/arrow-go/v18 v18.4.2-0.20251108194323-3160eef9c227
 	github.com/aws/aws-sdk-go-v2 v1.39.6
 	github.com/aws/aws-sdk-go-v2/config v1.31.17
 	github.com/aws/aws-sdk-go-v2/credentials v1.18.21
