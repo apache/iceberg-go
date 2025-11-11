@@ -32,8 +32,6 @@ import (
 )
 
 // BenchmarkPartitionedWriteThroughput benchmarks the full table.Append() path
-// including partition path generation, which exercises the optimizations in
-// PartitionToPath (cached PartitionType, pre-escaped names, strings.Builder)
 func BenchmarkPartitionedWriteThroughput(b *testing.B) {
 	ctx := context.Background()
 	mem := memory.NewGoAllocator()
@@ -120,7 +118,7 @@ func BenchmarkPartitionedWriteThroughput(b *testing.B) {
 			// Setup warehouse directory and catalog
 			loc := filepath.ToSlash(b.TempDir())
 
-			// Create in-memory SQL catalog (like sql_test.go examples)
+			// Create in-memory SQL catalog
 			cat, err := catalog.Load(ctx, "benchmark", iceberg.Properties{
 				"type":        "sql",
 				"uri":         ":memory:",
@@ -157,17 +155,11 @@ func BenchmarkPartitionedWriteThroughput(b *testing.B) {
 
 			totalRecords := int64(0)
 			for i := 0; i < b.N; i++ {
-				// Use table.Append() - this triggers getPartitionMap() which calls
-				// PartitionToPath() for EVERY row, exercising our optimizations
 				reader, err := array.NewRecordReader(arrSchema, []arrow.RecordBatch{testBatch})
 				if err != nil {
 					b.Fatalf("Failed to create reader: %v", err)
 				}
 
-				// This is the hot path that benefits from our optimizations:
-				// 1. Calls getPartitionMap() which iterates every row
-				// 2. For each row, calls PartitionToPath() via partitionPath()
-				// 3. PartitionToPath now uses: cached PartitionType, pre-escaped names, strings.Builder
 				newTable, err := tbl.Append(ctx, reader, iceberg.Properties{})
 				if err != nil {
 					reader.Release()
