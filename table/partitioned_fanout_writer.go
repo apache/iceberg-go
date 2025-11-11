@@ -47,6 +47,7 @@ type partitionedFanoutWriter struct {
 type partitionInfo struct {
 	rows            []int64
 	partitionValues map[int]any
+	partitionRec    partitionRecord // The actual partition values for generating the path
 }
 
 // NewPartitionedFanoutWriter creates a new PartitionedFanoutWriter with the specified
@@ -117,12 +118,12 @@ func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 			}
 			defer record.Release()
 
-			partitionMap, err := p.getPartitionMap(record)
+			partitions, err := p.getPartitions(record)
 			if err != nil {
 				return err
 			}
 
-			for partition, val := range partitionMap {
+			for _, val := range partitions {
 				select {
 				case <-ctx.Done():
 					return context.Cause(ctx)
@@ -134,7 +135,8 @@ func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 					return err
 				}
 
-				rollingDataWriter, err := p.writers.getOrCreateRollingDataWriter(ctx, partition, val.partitionValues, dataFilesChannel)
+				partitionPath := p.partitionPath(val.partitionRec)
+				rollingDataWriter, err := p.writers.getOrCreateRollingDataWriter(ctx, partitionPath, val.partitionValues, dataFilesChannel)
 				if err != nil {
 					return err
 				}
@@ -174,8 +176,8 @@ func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, 
 	}
 }
 
-func (p *partitionedFanoutWriter) getPartitionMap(record arrow.RecordBatch) (map[string]*partitionInfo, error) {
-	partitionMap := make(map[string]*partitionInfo)
+func (p *partitionedFanoutWriter) getPartitions(record arrow.RecordBatch) ([]*partitionInfo, error) {
+	partitionMap := newPartitionMapNode()
 	partitionFields := p.partitionSpec.PartitionType(p.schema).FieldList
 	partitionRec := make(partitionRecord, len(partitionFields))
 
@@ -217,25 +219,95 @@ func (p *partitionedFanoutWriter) getPartitionMap(record arrow.RecordBatch) (map
 			}
 		}
 
-		partitionKey := p.partitionPath(partitionRec)
-		partVal := partitionMap[partitionKey]
-		if partVal == nil {
-			// First time seeing this partition - create partitionValues map
-			partitionValues := make(map[int]any, len(partitionFields))
-			for i := range partitionFields {
-				partitionValues[partitionFieldsInfo[i].fieldID] = partitionRec[i]
-			}
-
-			partVal = &partitionInfo{
-				rows:            make([]int64, 0, 128), // modest starting capacity
-				partitionValues: partitionValues,
-			}
-			partitionMap[partitionKey] = partVal
-		}
+		// Get or create partition info for this partition key
+		partVal := partitionMap.getOrCreate(partitionRec, partitionFieldsInfo)
 		partVal.rows = append(partVal.rows, row)
 	}
 
-	return partitionMap, nil
+	return partitionMap.collectPartitions(p.partitionSpec, p.schema), nil
+}
+
+// partitionMapNode represents a simple tree structure for storing partitionInfo.
+//
+// Each key is the partition value at that level of the tree, and the key hierarchy
+// is in the order of the partition spec.
+// The value is either a *partitionMapNode or a *partitionInfo.
+type partitionMapNode struct {
+	children  map[any]any
+	leafCount int
+}
+
+func newPartitionMapNode() *partitionMapNode {
+	return &partitionMapNode{
+		children:  make(map[any]any),
+		leafCount: 0,
+	}
+}
+
+// getOrCreate navigates the tree and returns the partitionInfo for the given partition key,
+// creating nodes along the way if they don't exist
+func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo []struct {
+	sourceField *iceberg.PartitionField
+	fieldID     int
+},
+) *partitionInfo {
+	// Navigate through all but the last partition field
+	node := n
+	i := 0
+	for ; i < len(partitionRec)-1; i++ {
+		val, ok := node.children[partitionRec[i]]
+		if !ok {
+			newNode := newPartitionMapNode()
+			node.children[partitionRec[i]] = newNode
+			node = newNode
+		} else {
+			node = val.(*partitionMapNode)
+		}
+	}
+
+	// Last level stores the actual partitionInfo
+	lastKey := partitionRec[i]
+	partVal, ok := node.children[lastKey].(*partitionInfo)
+	if ok {
+		return partVal
+	}
+
+	// First time seeing this partition - create partitionValues map
+	partitionValues := make(map[int]any, len(partitionRec))
+
+	// Copy partitionRec values so they don't get overwritten
+	partRecCopy := make(partitionRecord, len(partitionRec))
+	for i := range partitionRec {
+		partitionValues[fieldInfo[i].fieldID] = partitionRec[i]
+		partRecCopy[i] = partitionRec[i]
+	}
+
+	partVal = &partitionInfo{
+		rows:            make([]int64, 0, 128), // modest starting capacity
+		partitionValues: partitionValues,
+		partitionRec:    partRecCopy,
+	}
+	node.children[lastKey] = partVal
+	node.leafCount++
+
+	return partVal
+}
+
+// collectPartitions recursively collects all partitionInfo into a slice
+func (n *partitionMapNode) collectPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema) []*partitionInfo {
+	result := make([]*partitionInfo, 0, n.leafCount)
+
+	for _, v := range n.children {
+		switch node := v.(type) {
+		case *partitionInfo:
+			result = append(result, node)
+		case *partitionMapNode:
+			// Recursively collect from child nodes
+			result = append(result, node.collectPartitions(spec, schema)...)
+		}
+	}
+
+	return result
 }
 
 type partitionBatchFn func(arrow.RecordBatch, []int64) (arrow.RecordBatch, error)
