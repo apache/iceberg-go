@@ -174,8 +174,8 @@ func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, 
 	}
 }
 
-func (p *partitionedFanoutWriter) getPartitionMap(record arrow.RecordBatch) (map[string]partitionInfo, error) {
-	partitionMap := make(map[string]partitionInfo)
+func (p *partitionedFanoutWriter) getPartitionMap(record arrow.RecordBatch) (map[string]*partitionInfo, error) {
+	partitionMap := make(map[string]*partitionInfo)
 	partitionFields := p.partitionSpec.PartitionType(p.schema).FieldList
 	partitionRec := make(partitionRecord, len(partitionFields))
 
@@ -197,7 +197,6 @@ func (p *partitionedFanoutWriter) getPartitionMap(record arrow.RecordBatch) (map
 	}
 
 	for row := range record.NumRows() {
-		partitionValues := make(map[int]any)
 		for i := range partitionFields {
 			col := partitionColumns[i]
 			if !col.IsNull(int(row)) {
@@ -210,19 +209,30 @@ func (p *partitionedFanoutWriter) getPartitionMap(record arrow.RecordBatch) (map
 				transformedLiteral := sourceField.Transform.Apply(iceberg.Optional[iceberg.Literal]{Valid: true, Val: val})
 				if transformedLiteral.Valid {
 					partitionRec[i] = transformedLiteral.Val.Any()
-					partitionValues[sourceField.FieldID] = transformedLiteral.Val.Any()
 				} else {
-					partitionRec[i], partitionValues[sourceField.FieldID] = nil, nil
+					partitionRec[i] = nil
 				}
 			} else {
-				partitionRec[i], partitionValues[partitionFieldsInfo[i].fieldID] = nil, nil
+				partitionRec[i] = nil
 			}
 		}
+
 		partitionKey := p.partitionPath(partitionRec)
 		partVal := partitionMap[partitionKey]
-		partVal.rows = append(partitionMap[partitionKey].rows, row)
-		partVal.partitionValues = partitionValues
-		partitionMap[partitionKey] = partVal
+		if partVal == nil {
+			// First time seeing this partition - create partitionValues map
+			partitionValues := make(map[int]any, len(partitionFields))
+			for i := range partitionFields {
+				partitionValues[partitionFieldsInfo[i].fieldID] = partitionRec[i]
+			}
+
+			partVal = &partitionInfo{
+				rows:            make([]int64, 0, 128), // modest starting capacity
+				partitionValues: partitionValues,
+			}
+			partitionMap[partitionKey] = partVal
+		}
+		partVal.rows = append(partVal.rows, row)
 	}
 
 	return partitionMap, nil
