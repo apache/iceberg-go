@@ -1322,7 +1322,7 @@ func (r *RestCatalogSuite) TestDropTable404() {
 }
 
 func (r *RestCatalogSuite) TestRegisterTable200() {
-	r.mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
+	r.mux.HandleFunc("/v1/namespaces/fokko/register", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodPost, req.Method)
 
 		for k, v := range TestHeaders {
@@ -1470,7 +1470,7 @@ func (r *RestCatalogSuite) TestRegisterTable200() {
 }
 
 func (r *RestCatalogSuite) TestRegisterTable404() {
-	r.mux.HandleFunc("/v1/namespaces/nonexistent/tables", func(w http.ResponseWriter, req *http.Request) {
+	r.mux.HandleFunc("/v1/namespaces/nonexistent/register", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodPost, req.Method)
 
 		for k, v := range TestHeaders {
@@ -1503,7 +1503,7 @@ func (r *RestCatalogSuite) TestRegisterTable404() {
 }
 
 func (r *RestCatalogSuite) TestRegisterTable409() {
-	r.mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
+	r.mux.HandleFunc("/v1/namespaces/fokko/register", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodPost, req.Method)
 
 		for k, v := range TestHeaders {
