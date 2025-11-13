@@ -819,7 +819,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		MetadataLoc string `json:"metadata-location"`
 	}
 
-	ret, err := doPost[payload, loadTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables", tbl},
+	ret, err := doPost[payload, loadTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables"},
 		payload{Name: tbl, MetadataLoc: metadataLoc}, r.cl, map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrTableAlreadyExists,
 		})
