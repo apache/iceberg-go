@@ -224,7 +224,7 @@ func (p *partitionedFanoutWriter) getPartitions(record arrow.RecordBatch) ([]*pa
 		partVal.rows = append(partVal.rows, row)
 	}
 
-	return partitionMap.collectPartitions(p.partitionSpec, p.schema), nil
+	return partitionMap.collectPartitions(), nil
 }
 
 // partitionMapNode represents a simple tree structure for storing partitionInfo.
@@ -293,7 +293,7 @@ func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo [
 }
 
 // collectPartitions recursively collects all partitionInfo into a slice
-func (n *partitionMapNode) collectPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema) []*partitionInfo {
+func (n *partitionMapNode) collectPartitions() []*partitionInfo {
 	result := make([]*partitionInfo, 0, n.leafCount)
 
 	for _, v := range n.children {
@@ -302,7 +302,7 @@ func (n *partitionMapNode) collectPartitions(spec iceberg.PartitionSpec, schema 
 			result = append(result, node)
 		case *partitionMapNode:
 			// Recursively collect from child nodes
-			result = append(result, node.collectPartitions(spec, schema)...)
+			result = append(result, node.collectPartitions()...)
 		}
 	}
 
