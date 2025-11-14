@@ -253,12 +253,11 @@ func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo [
 ) *partitionInfo {
 	// Navigate through all but the last partition field
 	node := n
-	i := 0
-	for ; i < len(partitionRec)-1; i++ {
-		val, ok := node.children[partitionRec[i]]
+	for _, part := range partitionRec[:len(partitionRec)-1] {
+		val, ok := node.children[part]
 		if !ok {
 			newNode := newPartitionMapNode()
-			node.children[partitionRec[i]] = newNode
+			node.children[part] = newNode
 			node = newNode
 		} else {
 			node = val.(*partitionMapNode)
@@ -266,7 +265,7 @@ func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo [
 	}
 
 	// Last level stores the actual partitionInfo
-	lastKey := partitionRec[i]
+	lastKey := partitionRec[len(partitionRec)-1]
 	partVal, ok := node.children[lastKey].(*partitionInfo)
 	if ok {
 		return partVal
