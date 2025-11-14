@@ -37,7 +37,7 @@ func TestPartitionSpec(t *testing.T) {
 
 	assert.Zero(t, spec1.ID())
 	assert.Equal(t, 1, spec1.NumFields())
-	assert.Equal(t, idField1, spec1.Field(0))
+	assert.True(t, idField1.Equals(spec1.Field(0)))
 	assert.NotEqual(t, idField1, spec1)
 	assert.False(t, spec1.IsUnpartitioned())
 	assert.True(t, spec1.CompatibleWith(&spec1))
@@ -53,7 +53,7 @@ func TestPartitionSpec(t *testing.T) {
 
 	assert.False(t, spec1.Equals(spec2))
 	assert.True(t, spec1.CompatibleWith(&spec2))
-	assert.Equal(t, []iceberg.PartitionField{idField1}, spec1.FieldsBySourceID(3))
+	assert.True(t, idField1.Equals(spec1.FieldsBySourceID(3)[0]))
 	assert.Empty(t, spec1.FieldsBySourceID(1925))
 
 	spec3 := iceberg.NewPartitionSpec(idField1, idField2)

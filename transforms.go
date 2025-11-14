@@ -127,6 +127,8 @@ func (IdentityTransform) ToHumanStr(val any) string {
 	switch v := val.(type) {
 	case nil:
 		return "null"
+	case string:
+		return v
 	case []byte:
 		return base64.StdEncoding.EncodeToString(v)
 	case bool:

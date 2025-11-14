@@ -47,6 +47,7 @@ type partitionedFanoutWriter struct {
 type partitionInfo struct {
 	rows            []int64
 	partitionValues map[int]any
+	partitionRec    partitionRecord // The actual partition values for generating the path
 }
 
 // NewPartitionedFanoutWriter creates a new PartitionedFanoutWriter with the specified
@@ -117,12 +118,12 @@ func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 			}
 			defer record.Release()
 
-			partitionMap, err := p.getPartitionMap(record)
+			partitions, err := p.getPartitions(record)
 			if err != nil {
 				return err
 			}
 
-			for partition, val := range partitionMap {
+			for _, val := range partitions {
 				select {
 				case <-ctx.Done():
 					return context.Cause(ctx)
@@ -134,7 +135,8 @@ func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 					return err
 				}
 
-				rollingDataWriter, err := p.writers.getOrCreateRollingDataWriter(ctx, partition, val.partitionValues, dataFilesChannel)
+				partitionPath := p.partitionPath(val.partitionRec)
+				rollingDataWriter, err := p.writers.getOrCreateRollingDataWriter(ctx, partitionPath, val.partitionValues, dataFilesChannel)
 				if err != nil {
 					return err
 				}
@@ -174,8 +176,8 @@ func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, 
 	}
 }
 
-func (p *partitionedFanoutWriter) getPartitionMap(record arrow.RecordBatch) (map[string]partitionInfo, error) {
-	partitionMap := make(map[string]partitionInfo)
+func (p *partitionedFanoutWriter) getPartitions(record arrow.RecordBatch) ([]*partitionInfo, error) {
+	partitionMap := newPartitionMapNode()
 	partitionFields := p.partitionSpec.PartitionType(p.schema).FieldList
 	partitionRec := make(partitionRecord, len(partitionFields))
 
@@ -197,7 +199,6 @@ func (p *partitionedFanoutWriter) getPartitionMap(record arrow.RecordBatch) (map
 	}
 
 	for row := range record.NumRows() {
-		partitionValues := make(map[int]any)
 		for i := range partitionFields {
 			col := partitionColumns[i]
 			if !col.IsNull(int(row)) {
@@ -210,22 +211,102 @@ func (p *partitionedFanoutWriter) getPartitionMap(record arrow.RecordBatch) (map
 				transformedLiteral := sourceField.Transform.Apply(iceberg.Optional[iceberg.Literal]{Valid: true, Val: val})
 				if transformedLiteral.Valid {
 					partitionRec[i] = transformedLiteral.Val.Any()
-					partitionValues[sourceField.FieldID] = transformedLiteral.Val.Any()
 				} else {
-					partitionRec[i], partitionValues[sourceField.FieldID] = nil, nil
+					partitionRec[i] = nil
 				}
 			} else {
-				partitionRec[i], partitionValues[partitionFieldsInfo[i].fieldID] = nil, nil
+				partitionRec[i] = nil
 			}
 		}
-		partitionKey := p.partitionPath(partitionRec)
-		partVal := partitionMap[partitionKey]
-		partVal.rows = append(partitionMap[partitionKey].rows, row)
-		partVal.partitionValues = partitionValues
-		partitionMap[partitionKey] = partVal
+
+		// Get or create partition info for this partition key
+		partVal := partitionMap.getOrCreate(partitionRec, partitionFieldsInfo)
+		partVal.rows = append(partVal.rows, row)
 	}
 
-	return partitionMap, nil
+	return partitionMap.collectPartitions(), nil
+}
+
+// partitionMapNode represents a simple tree structure for storing partitionInfo.
+//
+// Each key is the partition value at that level of the tree, and the key hierarchy
+// is in the order of the partition spec.
+// The value is either a *partitionMapNode or a *partitionInfo.
+type partitionMapNode struct {
+	children  map[any]any
+	leafCount int
+}
+
+func newPartitionMapNode() *partitionMapNode {
+	return &partitionMapNode{
+		children:  make(map[any]any),
+		leafCount: 0,
+	}
+}
+
+// getOrCreate navigates the tree and returns the partitionInfo for the given partition key,
+// creating nodes along the way if they don't exist
+func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo []struct {
+	sourceField *iceberg.PartitionField
+	fieldID     int
+},
+) *partitionInfo {
+	// Navigate through all but the last partition field
+	node := n
+	for _, part := range partitionRec[:len(partitionRec)-1] {
+		val, ok := node.children[part]
+		if !ok {
+			newNode := newPartitionMapNode()
+			node.children[part] = newNode
+			node = newNode
+		} else {
+			node = val.(*partitionMapNode)
+		}
+	}
+
+	// Last level stores the actual partitionInfo
+	lastKey := partitionRec[len(partitionRec)-1]
+	partVal, ok := node.children[lastKey].(*partitionInfo)
+	if ok {
+		return partVal
+	}
+
+	// First time seeing this partition - create partitionValues map
+	partitionValues := make(map[int]any, len(partitionRec))
+
+	// Copy partitionRec values so they don't get overwritten
+	partRecCopy := make(partitionRecord, len(partitionRec))
+	for i := range partitionRec {
+		partitionValues[fieldInfo[i].fieldID] = partitionRec[i]
+		partRecCopy[i] = partitionRec[i]
+	}
+
+	partVal = &partitionInfo{
+		rows:            make([]int64, 0, 128), // modest starting capacity
+		partitionValues: partitionValues,
+		partitionRec:    partRecCopy,
+	}
+	node.children[lastKey] = partVal
+	node.leafCount++
+
+	return partVal
+}
+
+// collectPartitions recursively collects all partitionInfo into a slice
+func (n *partitionMapNode) collectPartitions() []*partitionInfo {
+	result := make([]*partitionInfo, 0, n.leafCount)
+
+	for _, v := range n.children {
+		switch node := v.(type) {
+		case *partitionInfo:
+			result = append(result, node)
+		case *partitionMapNode:
+			// Recursively collect from child nodes
+			result = append(result, node.collectPartitions()...)
+		}
+	}
+
+	return result
 }
 
 type partitionBatchFn func(arrow.RecordBatch, []int64) (arrow.RecordBatch, error)
@@ -297,37 +378,50 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int) (iceberg.Literal
 	case *extensions.UUIDArray:
 
 		return iceberg.NewLiteral(arr.Value(row)), nil
+
+	case *array.String:
+
+		return iceberg.NewLiteral(arr.Value(row)), nil
+	case *array.Int64:
+
+		return iceberg.NewLiteral(arr.Value(row)), nil
+	case *array.Int32:
+
+		return iceberg.NewLiteral(arr.Value(row)), nil
+	case *array.Int16:
+
+		return iceberg.NewLiteral(int32(arr.Value(row))), nil
+	case *array.Int8:
+
+		return iceberg.NewLiteral(int32(arr.Value(row))), nil
+	case *array.Uint64:
+
+		return iceberg.NewLiteral(int64(arr.Value(row))), nil
+	case *array.Uint32:
+
+		return iceberg.NewLiteral(int32(arr.Value(row))), nil
+	case *array.Uint16:
+
+		return iceberg.NewLiteral(int32(arr.Value(row))), nil
+	case *array.Uint8:
+
+		return iceberg.NewLiteral(int32(arr.Value(row))), nil
+	case *array.Float32:
+
+		return iceberg.NewLiteral(arr.Value(row)), nil
+	case *array.Float64:
+
+		return iceberg.NewLiteral(arr.Value(row)), nil
+	case *array.Boolean:
+
+		return iceberg.NewLiteral(arr.Value(row)), nil
+	case *array.Binary:
+
+		return iceberg.NewLiteral(arr.Value(row)), nil
+
 	default:
 		val := column.GetOneForMarshal(row)
-		switch v := val.(type) {
-		case bool:
-			return iceberg.NewLiteral(v), nil
-		case int8:
-			return iceberg.NewLiteral(int32(v)), nil
-		case uint8:
-			return iceberg.NewLiteral(int32(v)), nil
-		case int16:
-			return iceberg.NewLiteral(int32(v)), nil
-		case uint16:
-			return iceberg.NewLiteral(int32(v)), nil
-		case int32:
-			return iceberg.NewLiteral(v), nil
-		case uint32:
-			return iceberg.NewLiteral(int32(v)), nil
-		case int64:
-			return iceberg.NewLiteral(v), nil
-		case uint64:
-			return iceberg.NewLiteral(int64(v)), nil
-		case float32:
-			return iceberg.NewLiteral(v), nil
-		case float64:
-			return iceberg.NewLiteral(v), nil
-		case string:
-			return iceberg.NewLiteral(v), nil
-		case []byte:
-			return iceberg.NewLiteral(v), nil
-		default:
-			return nil, fmt.Errorf("unsupported value type: %T", v)
-		}
+
+		return nil, fmt.Errorf("unsupported value type: %T", val)
 	}
 }
