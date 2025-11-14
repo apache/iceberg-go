@@ -421,35 +421,7 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int) (iceberg.Literal
 
 	default:
 		val := column.GetOneForMarshal(row)
-		switch v := val.(type) {
-		case bool:
-			return iceberg.NewLiteral(v), nil
-		case int8:
-			return iceberg.NewLiteral(int32(v)), nil
-		case uint8:
-			return iceberg.NewLiteral(int32(v)), nil
-		case int16:
-			return iceberg.NewLiteral(int32(v)), nil
-		case uint16:
-			return iceberg.NewLiteral(int32(v)), nil
-		case int32:
-			return iceberg.NewLiteral(v), nil
-		case uint32:
-			return iceberg.NewLiteral(int32(v)), nil
-		case int64:
-			return iceberg.NewLiteral(v), nil
-		case uint64:
-			return iceberg.NewLiteral(int64(v)), nil
-		case float32:
-			return iceberg.NewLiteral(v), nil
-		case float64:
-			return iceberg.NewLiteral(v), nil
-		case string:
-			return iceberg.NewLiteral(v), nil
-		case []byte:
-			return iceberg.NewLiteral(v), nil
-		default:
-			return nil, fmt.Errorf("unsupported value type: %T", v)
-		}
+
+		return nil, fmt.Errorf("unsupported value type: %T", val)
 	}
 }
