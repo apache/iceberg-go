@@ -18,41 +18,40 @@
 package view
 
 import (
-	"errors"
-
 	"github.com/apache/iceberg-go"
 )
 
+// MetadataBuilder is a struct used for building and updating Iceberg view metadata.
 type MetadataBuilder struct{}
 
 func (b *MetadataBuilder) AssignUUID(_ string) error {
-	return errors.New("not implemented")
+	return iceberg.ErrNotImplemented
 }
 
 func (b *MetadataBuilder) UpgradeFormatVersion(_ int) error {
-	return errors.New("not implemented")
+	return iceberg.ErrNotImplemented
 }
 
 func (b *MetadataBuilder) AddSchema(_ *iceberg.Schema) error {
-	return errors.New("not implemented")
+	return iceberg.ErrNotImplemented
 }
 
 func (b *MetadataBuilder) SetLocation(_ string) error {
-	return errors.New("not implemented")
+	return iceberg.ErrNotImplemented
 }
 
 func (b *MetadataBuilder) SetProperties(_ map[string]string) error {
-	return errors.New("not implemented")
+	return iceberg.ErrNotImplemented
 }
 
 func (b *MetadataBuilder) RemoveProperties(_ []string) error {
-	return errors.New("not implemented")
+	return iceberg.ErrNotImplemented
 }
 
 func (b *MetadataBuilder) AddVersion(_ *Version) error {
-	return errors.New("not implemented")
+	return iceberg.ErrNotImplemented
 }
 
 func (b *MetadataBuilder) SetCurrentVersionID(_ int64) error {
-	return errors.New("not implemented")
+	return iceberg.ErrNotImplemented
 }

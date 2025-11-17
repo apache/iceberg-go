@@ -153,6 +153,10 @@ type Metadata interface {
 	PartitionStatistics() iter.Seq[PartitionStatisticsFile]
 }
 
+// MetadataBuilder is a struct used for building and updating Iceberg table metadata.
+//
+// It keeps track of applied changes in the `updates` field. This can be used to commit changes made to a table to the
+// catalog.
 type MetadataBuilder struct {
 	base    Metadata
 	updates []Update
