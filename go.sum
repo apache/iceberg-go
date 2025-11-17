@@ -95,8 +95,8 @@ github.com/andybalholm/brotli v1.2.0 h1:ukwgCxwYrmACq68yiUqwIWnGY0cTPox/M94sVwTo
 github.com/andybalholm/brotli v1.2.0/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
 github.com/antlr4-go/antlr/v4 v4.13.1 h1:SqQKkuVZ+zWkMMNkjy5FZe5mr5WURWnlpmOuzYWrPrQ=
 github.com/antlr4-go/antlr/v4 v4.13.1/go.mod h1:GKmUxMtwp6ZgGwZSva4eWPC5mS6vUAmOABFgjdkM7Nw=
-github.com/apache/arrow-go/v18 v18.4.2-0.20251022172928-a489ef0147d6 h1:kqqktu1fXE+DUjlXntoYe1wATKo/4CoMQ805dDX4Zpo=
-github.com/apache/arrow-go/v18 v18.4.2-0.20251022172928-a489ef0147d6/go.mod h1:YfS5yWtFXamxhBvVOKgjrrLQ7YV86vn2RCCgrKdgfbU=
+github.com/apache/arrow-go/v18 v18.4.2-0.20251108194323-3160eef9c227 h1:hiRpYiLRp3c69BsnjgE2dAGdx6sQyfw6Btvto1Z+t1s=
+github.com/apache/arrow-go/v18 v18.4.2-0.20251108194323-3160eef9c227/go.mod h1:YfS5yWtFXamxhBvVOKgjrrLQ7YV86vn2RCCgrKdgfbU=
 github.com/apache/thrift v0.22.0 h1:r7mTJdj51TMDe6RtcmNdQxgn9XcyfGDOzegMDRg47uc=
 github.com/apache/thrift v0.22.0/go.mod h1:1e7J/O1Ae6ZQMTYdy9xa3w9k+XHWPfRvdPyJeynQ+/g=
 github.com/apparentlymart/go-textseg/v15 v15.0.0 h1:uYvfpb3DyLSCGWnctWKGj857c6ew1u1fNQOlOtuGxQY=
