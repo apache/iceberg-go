@@ -113,7 +113,7 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 		case UpdateRemoveSchemas:
 			upd = &removeSchemasUpdate{}
 		default:
-			return fmt.Errorf("unknown update action: %s", base.ActionName)
+			return fmt.Errorf("%w: unknown update action: %s", iceberg.ErrInvalidArgument, base.ActionName)
 		}
 
 		if err := json.Unmarshal(raw, upd); err != nil {
