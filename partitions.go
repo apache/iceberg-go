@@ -104,11 +104,6 @@ type PartitionSpec struct {
 
 	// this is populated by initialize after creation
 	sourceIdToFields map[int][]PartitionField
-
-	// partitionTypeCache caches the result of PartitionType for a given schema ID
-	// Key is schema ID, value is the cached StructType
-	// This avoids rebuilding the partition type on every row during writes
-	partitionTypeCache map[int]*StructType
 }
 
 type PartitionOption func(*PartitionSpec) error
@@ -368,7 +363,6 @@ func (ps *PartitionSpec) UnmarshalJSON(b []byte) error {
 
 func (ps *PartitionSpec) initialize() {
 	ps.sourceIdToFields = make(map[int][]PartitionField)
-	ps.partitionTypeCache = make(map[int]*StructType)
 
 	for i := range ps.fields {
 		ps.sourceIdToFields[ps.fields[i].SourceID] = append(ps.sourceIdToFields[ps.fields[i].SourceID], ps.fields[i])
@@ -445,18 +439,6 @@ func (ps *PartitionSpec) LastAssignedFieldID() int {
 // and only parittion spec that uses a required source column will never be
 // null, but it doesn't seem worth tracking this case.
 func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
-	// Initialize cache if needed (for PartitionSpecs created without NewPartitionSpecOpts)
-	if ps.partitionTypeCache == nil {
-		ps.partitionTypeCache = make(map[int]*StructType)
-	}
-
-	// Check cache first using schema ID as key
-	schemaID := schema.ID
-	if cached, ok := ps.partitionTypeCache[schemaID]; ok {
-		return cached
-	}
-
-	// Build partition type if not cached
 	nestedFields := []NestedField{}
 	for _, field := range ps.fields {
 		sourceType, ok := schema.FindTypeByID(field.SourceID)
@@ -472,10 +454,8 @@ func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
 		})
 	}
 
-	result := &StructType{FieldList: nestedFields}
-	ps.partitionTypeCache[schemaID] = result
+	return &StructType{FieldList: nestedFields}
 
-	return result
 }
 
 // PartitionToPath produces a proper partition path from the data and schema by
