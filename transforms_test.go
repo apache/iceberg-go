@@ -258,6 +258,8 @@ func TestCanTransform(t *testing.T) {
 			},
 			notAllowed: []iceberg.Type{
 				&iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+				iceberg.GeometryType{},
+				iceberg.GeographyType{},
 			},
 		},
 		{
@@ -284,6 +286,8 @@ func TestCanTransform(t *testing.T) {
 			notAllowed: []iceberg.Type{
 				iceberg.PrimitiveTypes.Bool, iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64,
 				&iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
+				iceberg.GeometryType{},
+				iceberg.GeographyType{},
 			},
 		},
 		{
