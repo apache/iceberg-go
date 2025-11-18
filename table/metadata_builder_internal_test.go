@@ -1412,6 +1412,8 @@ func TestUnsupportedTypes(t *testing.T) {
 	TestTypes := []iceberg.Type{
 		iceberg.TimestampNsType{},
 		iceberg.TimestampTzNsType{},
+		iceberg.GeometryType{},
+		iceberg.GeographyType{},
 	}
 	for _, typ := range TestTypes {
 		for unsupportedVersion := 1; unsupportedVersion < minFormatVersionForType(typ); unsupportedVersion++ {
@@ -1876,6 +1878,86 @@ func TestVariantTypeValidation(t *testing.T) {
 		require.Error(t, err, "variant must have null write-default")
 		require.ErrorContains(t, err, "must have null write-default")
 	})
+}
+
+func TestGeometryGeographyNullOnlyDefaults(t *testing.T) {
+	testTypes := []struct {
+		name string
+		typ  iceberg.Type
+	}{
+		{"geometry", iceberg.GeometryType{}},
+		{"geography", iceberg.GeographyType{}},
+	}
+
+	for _, tt := range testTypes {
+		t.Run(tt.name+" with non-null initial default", func(t *testing.T) {
+			defaultValue := "POINT(0 0)"
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:           tt.typ,
+					ID:             1,
+					Name:           "location",
+					Required:       false,
+					InitialDefault: &defaultValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 3)
+			require.Error(t, err)
+			require.ErrorContains(t, err, "columns must default to null")
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		})
+
+		t.Run(tt.name+" with non-null write default", func(t *testing.T) {
+			defaultValue := "POINT(0 0)"
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:         tt.typ,
+					ID:           1,
+					Name:         "location",
+					Required:     false,
+					WriteDefault: &defaultValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 3)
+			require.Error(t, err)
+			require.ErrorContains(t, err, "columns must default to null")
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		})
+
+		t.Run(tt.name+" with null defaults", func(t *testing.T) {
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:     tt.typ,
+					ID:       1,
+					Name:     "location",
+					Required: false,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 3)
+			require.NoError(t, err)
+		})
+
+		t.Run(tt.name+" in v2 with non-null initial default", func(t *testing.T) {
+			defaultValue := "POINT(0 0)"
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:           tt.typ,
+					ID:             1,
+					Name:           "location",
+					Required:       false,
+					InitialDefault: &defaultValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 2)
+			require.Error(t, err)
+			require.ErrorContains(t, err, "is not supported until v3")
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		})
+	}
 }
 
 func TestComplexTypeDefaultValidation(t *testing.T) {
