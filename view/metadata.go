@@ -58,6 +58,35 @@ func LoadMetadata(ctx context.Context,
 	return &m, nil
 }
 
+// NewMetadata returns a view metadata for a given version.
+func NewMetadata(schema *iceberg.Schema,
+	version Version,
+	loc string,
+	props iceberg.Properties,
+) (Metadata, error) {
+	timestampMs := time.Now().UnixMilli()
+
+	if version.SchemaID != schema.ID {
+		return nil, fmt.Errorf("%w: version.SchemaID does not match schema.ID", iceberg.ErrInvalidArgument)
+	}
+
+	return &metadata{
+		UUID:             uuid.NewString(),
+		FmtVersion:       1,
+		Loc:              loc,
+		SchemaList:       []*iceberg.Schema{schema},
+		CurrentVersionId: version.VersionID,
+		VersionList:      []Version{version},
+		VersionLogList: []VersionLogEntry{
+			{
+				TimestampMs: timestampMs,
+				VersionID:   version.VersionID,
+			},
+		},
+		Props: props,
+	}, nil
+}
+
 // CreateMetadata creates a new view metadata file and writes it to storage.
 //
 // Returns the full path to the created metadata file, or an error if creation fails.
@@ -89,22 +118,9 @@ func CreateMetadata(
 	}
 
 	metadataLocation = loc + "/metadata/view-" + uuid.New().String() + ".metadata.json"
-
-	viewUUID := uuid.New().String()
-	viewMetadata := metadata{
-		UUID:             viewUUID,
-		FmtVersion:       1,
-		Loc:              loc,
-		SchemaList:       []*iceberg.Schema{schema},
-		CurrentVersionId: versionId,
-		VersionList:      []Version{viewVersion},
-		VersionLogList: []VersionLogEntry{
-			{
-				TimestampMs: timestampMs,
-				VersionID:   versionId,
-			},
-		},
-		Props: props,
+	viewMetadata, err := NewMetadata(schema, viewVersion, loc, props)
+	if err != nil {
+		return "", fmt.Errorf("failed to create view metadata: %w", err)
 	}
 
 	viewMetadataBytes, err := json.Marshal(viewMetadata)
