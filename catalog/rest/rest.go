@@ -1245,7 +1245,6 @@ func (r *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 	ret, err := doPost[payload, viewResponse](ctx, r.baseURI, []string{"namespaces", ns, "views", viewName},
 		payload{Identifier: restIdentifier, Requirements: requirements, Updates: updates}, r.cl,
 		map[int]error{http.StatusNotFound: catalog.ErrNoSuchView, http.StatusConflict: ErrCommitFailed})
-
 	if err != nil {
 		return nil, err
 	}

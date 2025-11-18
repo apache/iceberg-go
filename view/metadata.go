@@ -328,9 +328,11 @@ func (m *metadata) Schemas() []*iceberg.Schema { return m.SchemaList }
 func (m *metadata) SchemasByID() map[int]*iceberg.Schema {
 	return maps.Clone(m.lazySchemasByID())
 }
+
 func (m *metadata) CurrentVersionID() int64 {
 	return m.CurrentVersionIDValue
 }
+
 func (m *metadata) CurrentVersion() *Version {
 	version, ok := m.lazyVersionsByID()[m.CurrentVersionIDValue]
 	if !ok {
@@ -338,9 +340,11 @@ func (m *metadata) CurrentVersion() *Version {
 	}
 	return version
 }
+
 func (m *metadata) CurrentSchemaID() int {
 	return m.CurrentVersion().SchemaID
 }
+
 func (m *metadata) CurrentSchema() *iceberg.Schema {
 	schema, ok := m.lazySchemasByID()[m.CurrentSchemaID()]
 	if !ok {
@@ -348,6 +352,7 @@ func (m *metadata) CurrentSchema() *iceberg.Schema {
 	}
 	return schema
 }
+
 func (m *metadata) VersionLog() []VersionLogEntry {
 	return m.VersionLogList
 }
