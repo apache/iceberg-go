@@ -617,8 +617,9 @@ func (c convertToArrow) VisitUUID() arrow.Field {
 }
 
 func (c convertToArrow) VisitUnknown() arrow.Field {
-	// UnknownType cannot be converted to Arrow as it has no concrete representation
-	panic("cannot convert UnknownType to Arrow schema")
+	return arrow.Field{
+		Type: extensions.NewOpaqueType(arrow.Null, "unknown", "apache.iceberg"),
+	}
 }
 
 var _ iceberg.SchemaVisitorPerPrimitiveType[arrow.Field] = convertToArrow{}
