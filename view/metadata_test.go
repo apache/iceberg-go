@@ -20,6 +20,7 @@ package view
 import (
 	"testing"
 
+	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,4 +33,72 @@ func TestLoadMetadata(t *testing.T) {
 	require.Equal(t, 1, m.FormatVersion())
 	require.Equal(t, 2, len(m.(*metadata).VersionList))
 	require.Equal(t, "Daily event counts", m.Properties()["comment"])
+}
+
+func TestNewMetadata(t *testing.T) {
+	version := Version{
+		VersionID:   1,
+		SchemaID:    1,
+		TimestampMs: 132,
+		Summary:     nil,
+		Representations: []SQLRepresentation{
+			{
+				Type:    "sql",
+				SQL:     "select * from events",
+				Dialect: "spark",
+			},
+		},
+		DefaultCatalog:   nil,
+		DefaultNamespace: []string{"namespace"},
+	}
+	schema := iceberg.NewSchema(1)
+	props := iceberg.Properties{"comment": "Daily event counts"}
+	meta, err := NewMetadata(schema, version, "s3://location", props)
+	require.NoError(t, err)
+	require.Equal(t, 1, meta.FormatVersion())
+	require.Equal(t, props, meta.Properties())
+	require.Equal(t, "s3://location", meta.Location())
+	require.Equal(t, schema.ID, meta.CurrentVersion().SchemaID)
+	expectedVersion := Version{
+		VersionID:   1,
+		SchemaID:    1,
+		TimestampMs: 132,
+		Summary:     nil,
+		Representations: []SQLRepresentation{
+			{
+				Type:    "sql",
+				SQL:     "select * from events",
+				Dialect: "spark",
+			},
+		},
+		DefaultCatalog:   nil,
+		DefaultNamespace: []string{"namespace"},
+	}
+
+	require.Equal(t, expectedVersion, *meta.CurrentVersion())
+}
+
+func TestNewMetadataRejectsSchemaIDMismatch(t *testing.T) {
+	version := Version{
+		VersionID:   1,
+		SchemaID:    0,
+		TimestampMs: 132,
+		Summary:     nil,
+		Representations: []SQLRepresentation{
+			{
+				Type:    "sql",
+				SQL:     "select * from events",
+				Dialect: "spark",
+			},
+		},
+		DefaultCatalog:   nil,
+		DefaultNamespace: []string{"namespace"},
+	}
+	schema := iceberg.NewSchema(1)
+	props := iceberg.Properties{"comment": "Daily event counts"}
+
+	meta, err := NewMetadata(schema, version, "s3://location", props)
+	require.Nil(t, meta)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.Contains(t, err.Error(), "version.SchemaID does not match schema.ID")
 }

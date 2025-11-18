@@ -63,11 +63,11 @@ func NewMetadata(schema *iceberg.Schema,
 	version Version,
 	loc string,
 	props iceberg.Properties,
-) Metadata {
+) (Metadata, error) {
 	timestampMs := time.Now().UnixMilli()
 
 	if version.SchemaID != schema.ID {
-		version.SchemaID = schema.ID
+		return nil, fmt.Errorf("%w: version.SchemaID does not match schema.ID", iceberg.ErrInvalidArgument)
 	}
 
 	return &metadata{
@@ -84,7 +84,7 @@ func NewMetadata(schema *iceberg.Schema,
 			},
 		},
 		Props: props,
-	}
+	}, nil
 }
 
 // CreateMetadata creates a new view metadata file and writes it to storage.
@@ -118,7 +118,10 @@ func CreateMetadata(
 	}
 
 	metadataLocation = loc + "/metadata/view-" + uuid.New().String() + ".metadata.json"
-	viewMetadata := NewMetadata(schema, viewVersion, loc, props)
+	viewMetadata, err := NewMetadata(schema, viewVersion, loc, props)
+	if err != nil {
+		return "", fmt.Errorf("failed to create view metadata: %w", err)
+	}
 
 	viewMetadataBytes, err := json.Marshal(viewMetadata)
 	if err != nil {
