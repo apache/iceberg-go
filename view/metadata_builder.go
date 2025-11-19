@@ -380,7 +380,7 @@ func (b *MetadataBuilder) buildMetadata(withUpdates bool) (*metadata, error) {
 
 	md := &metadata{
 		FormatVersionValue:    b.formatVersion,
-		UUID:                  uuid_,
+		UUID:                  &uuid_,
 		Loc:                   b.loc,
 		CurrentVersionIDValue: b.currentVersionID,
 		VersionList:           b.versionList,

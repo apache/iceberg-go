@@ -284,7 +284,7 @@ func cloneSlice[T cloner[T]](val []T) []T {
 // https://iceberg.apache.org/view-spec/
 type metadata struct {
 	FormatVersionValue    int                `json:"format-version"`
-	UUID                  uuid.UUID          `json:"view-uuid"`
+	UUID                  *uuid.UUID         `json:"view-uuid"`
 	Loc                   string             `json:"location"`
 	CurrentVersionIDValue int64              `json:"current-version-id"`
 	VersionList           []*Version         `json:"versions"`
@@ -309,7 +309,7 @@ func (m *metadata) Equals(other Metadata) bool {
 		return true
 	}
 
-	return m.UUID == other.ViewUUID() &&
+	return *m.UUID == other.ViewUUID() &&
 		m.Loc == other.Location() &&
 		m.FormatVersionValue == other.FormatVersion() &&
 		iceinternal.SliceEqualHelper(m.Schemas(), other.Schemas()) &&
@@ -321,7 +321,7 @@ func (m *metadata) Equals(other Metadata) bool {
 func (m *metadata) Updates() Updates { return m.updates }
 
 func (m *metadata) FormatVersion() int         { return m.FormatVersionValue }
-func (m *metadata) ViewUUID() uuid.UUID        { return m.UUID }
+func (m *metadata) ViewUUID() uuid.UUID        { return *m.UUID }
 func (m *metadata) Location() string           { return m.Loc }
 func (m *metadata) Versions() []*Version       { return m.VersionList }
 func (m *metadata) Schemas() []*iceberg.Schema { return m.SchemaList }
@@ -366,7 +366,7 @@ func (m *metadata) validate() error {
 		return fmt.Errorf("%w: location is required", ErrInvalidViewMetadata)
 	}
 
-	if m.UUID == uuid.Nil {
+	if m.UUID == nil {
 		return fmt.Errorf("%w: view-uuid is required", ErrInvalidViewMetadata)
 	}
 
