@@ -32,12 +32,13 @@ import (
 
 type clonable struct {
 	foo []int
-	bar int
+	bar int //lint:ignore U1000 false positive
 }
 
 func (c *clonable) Clone() *clonable {
 	cloned := *c
 	cloned.foo = slices.Clone(c.foo)
+
 	return &cloned
 }
 

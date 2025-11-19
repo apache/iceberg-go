@@ -1984,13 +1984,6 @@ type createViewRequest struct {
 	} `json:"view-version"`
 }
 
-type viewResponse struct {
-	MetadataLoc string             `json:"metadata-location"`
-	RawMetadata json.RawMessage    `json:"metadata"`
-	Config      iceberg.Properties `json:"config"`
-	Metadata    view.Metadata      `json:"-"`
-}
-
 var (
 	exampleViewSQL          = "SELECT * FROM table"
 	exampleViewMetadataJSON = fmt.Sprintf(`{

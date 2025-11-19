@@ -33,6 +33,7 @@ import (
 
 func newTestBuilder() *MetadataBuilder {
 	b, _ := NewMetadataBuilder()
+
 	return b
 }
 
@@ -43,6 +44,7 @@ func newTestVersion(versionID int64, schemaID int, opts ...VersionOpt) *Version 
 		Representations{NewRepresentation("select * from table", "sql")},
 		table.Identifier{"defaultns"},
 		opts...)
+
 	return version
 }
 
@@ -53,6 +55,7 @@ func newTestVersionWithSQL(versionID int64, schemaID int, sql string, opts ...Ve
 		Representations{NewRepresentation(sql, "spark")},
 		table.Identifier{"defaultns"},
 		opts...)
+
 	return version
 }
 
@@ -61,6 +64,7 @@ func newTestSchema(schemaID int, optFieldName ...string) *iceberg.Schema {
 	if len(optFieldName) > 0 {
 		fieldName = optFieldName[0]
 	}
+
 	return iceberg.NewSchema(schemaID, iceberg.NestedField{ID: 1, Name: fieldName, Type: iceberg.PrimitiveTypes.Int64})
 }
 
@@ -89,11 +93,11 @@ func TestBuild_NullAndMissingFields(t *testing.T) {
 	assert.ErrorContains(t, err, "at least one version is required")
 
 	// Attempted setting to missing version ID
-	md, err = newTestBuilder().SetLoc("location").SetCurrentVersionID(1).Build()
+	_, err = newTestBuilder().SetLoc("location").SetCurrentVersionID(1).Build()
 	assert.ErrorContains(t, err, "cannot set current version to unknown version with id 1")
 
 	// Invalid UUID
-	md, err = newTestBuilder().SetUUID(uuid.Nil).Build()
+	_, err = newTestBuilder().SetUUID(uuid.Nil).Build()
 	assert.ErrorContains(t, err, "cannot set uuid to null")
 }
 

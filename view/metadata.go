@@ -214,6 +214,7 @@ func (v *Version) Clone() *Version {
 	cloned.Summary = maps.Clone(v.Summary)
 	cloned.Representations = slices.Clone(v.Representations)
 	cloned.DefaultNamespace = slices.Clone(v.DefaultNamespace)
+
 	return &cloned
 }
 
@@ -250,8 +251,8 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 		return nil, err
 	}
 
-	var ret Metadata
-	ret = &metadata{}
+	var ret Metadata = &metadata{}
+
 	return ret, json.Unmarshal(b, ret)
 }
 
@@ -263,6 +264,7 @@ func indexBy[T any, K comparable](s []T, extractKey func(T) K) map[K]T {
 	for _, v := range s {
 		index[extractKey(v)] = v
 	}
+
 	return index
 }
 
@@ -278,6 +280,7 @@ func cloneSlice[T cloner[T]](val []T) []T {
 	for i, elem := range val {
 		cloned[i] = elem.Clone()
 	}
+
 	return cloned
 }
 
@@ -338,6 +341,7 @@ func (m *metadata) CurrentVersion() *Version {
 	if !ok {
 		panic("current version not found")
 	}
+
 	return version
 }
 
@@ -350,6 +354,7 @@ func (m *metadata) CurrentSchema() *iceberg.Schema {
 	if !ok {
 		panic("current schema not found")
 	}
+
 	return schema
 }
 
@@ -494,6 +499,7 @@ func (m *metadata) UnmarshalJSON(b []byte) error {
 	}
 
 	m.init()
+
 	return m.validate()
 }
 

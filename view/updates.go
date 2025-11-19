@@ -155,8 +155,7 @@ func (u *upgradeFormatVersionUpdate) Apply(builder *MetadataBuilder) error {
 
 type addSchemaUpdate struct {
 	baseUpdate
-	Schema  *iceberg.Schema `json:"schema"`
-	initial bool
+	Schema *iceberg.Schema `json:"schema"`
 }
 
 // NewAddSchemaUpdate creates a new update that adds the given schema and updates the lastColumnID based on the schema.
@@ -248,6 +247,7 @@ func NewAddViewVersionUpdate(version *Version) *addViewVersionUpdate {
 
 func (u *addViewVersionUpdate) Apply(builder *MetadataBuilder) error {
 	builder.AddVersion(u.Version)
+
 	return builder.Err()
 }
 

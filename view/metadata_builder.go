@@ -123,6 +123,7 @@ func (b *MetadataBuilder) AddVersion(newVersion *Version) *MetadataBuilder {
 	if b.setErr(err) {
 		return b
 	}
+
 	return b
 }
 
@@ -138,6 +139,7 @@ func (b *MetadataBuilder) addVersion(newVersion *Version) (int64, error) {
 		for _, upd := range b.updates {
 			if vvu, ok := upd.(*addViewVersionUpdate); ok && vvu.Version.VersionID == newVersionID {
 				b.lastAddedVersionID = &newVersionID
+
 				return newVersionID, nil
 			}
 		}
@@ -157,7 +159,7 @@ func (b *MetadataBuilder) addVersion(newVersion *Version) (int64, error) {
 	}
 
 	if len(version.Representations) == 0 {
-		return 0, fmt.Errorf("cannot add version with no representations")
+		return 0, errors.New("cannot add version with no representations")
 	}
 	dialects := make(map[string]struct{})
 	for _, repr := range version.Representations {
@@ -180,6 +182,7 @@ func (b *MetadataBuilder) addVersion(newVersion *Version) (int64, error) {
 	}
 
 	b.lastAddedVersionID = &newVersionID
+
 	return newVersionID, nil
 }
 
@@ -192,6 +195,7 @@ func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) *MetadataBuilder {
 	if b.setErr(err) {
 		return b
 	}
+
 	return b
 }
 
@@ -241,6 +245,7 @@ func (b *MetadataBuilder) SetCurrentVersionID(newVersionID int64) *MetadataBuild
 	if newVersionID == LastAddedID {
 		if b.lastAddedVersionID == nil {
 			b.err = errors.New("cannot set current version to last added, no version has been added")
+
 			return b
 		}
 		newVersionID = *b.lastAddedVersionID
@@ -253,6 +258,7 @@ func (b *MetadataBuilder) SetCurrentVersionID(newVersionID int64) *MetadataBuild
 	_, ok := b.versionsById[newVersionID]
 	if !ok {
 		b.err = fmt.Errorf("cannot set current version to unknown version with id %d", newVersionID)
+
 		return b
 	}
 
@@ -270,6 +276,7 @@ func (b *MetadataBuilder) SetCurrentVersionID(newVersionID int64) *MetadataBuild
 	for _, update := range b.updates {
 		if v, ok := update.(*addViewVersionUpdate); ok && v.Version.VersionID == newVersionID {
 			updateTimestampMS = v.Version.TimestampMS
+
 			break
 		}
 	}
@@ -290,11 +297,13 @@ func (b *MetadataBuilder) SetFormatVersion(formatVersion int) *MetadataBuilder {
 	if formatVersion < b.formatVersion {
 		b.err = fmt.Errorf("downgrading format version from %d to %d is not allowed",
 			b.formatVersion, formatVersion)
+
 		return b
 	}
 
 	if formatVersion > SupportedViewFormatVersion {
 		b.err = fmt.Errorf("unsupported format version %d", formatVersion)
+
 		return b
 	}
 
@@ -349,6 +358,7 @@ func (b *MetadataBuilder) SetUUID(newUUID uuid.UUID) *MetadataBuilder {
 
 	if newUUID == uuid.Nil {
 		b.err = errors.New("cannot set uuid to null")
+
 		return b
 	}
 
@@ -359,6 +369,7 @@ func (b *MetadataBuilder) SetUUID(newUUID uuid.UUID) *MetadataBuilder {
 
 	if b.uuid != uuid.Nil {
 		b.err = errors.New("cannot reassign uuid")
+
 		return b
 	}
 
@@ -451,8 +462,10 @@ func (b *MetadataBuilder) BuildWithoutUpdates() (Metadata, error) {
 func (b *MetadataBuilder) setErr(err error) (buildHasFailed bool) {
 	if err != nil {
 		b.err = err
+
 		return true
 	}
+
 	return false
 }
 

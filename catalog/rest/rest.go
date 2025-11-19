@@ -1202,8 +1202,9 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 
 	// Set default catalog unless set by caller
 	if len(version.DefaultCatalog) == 0 {
-		version = &*version
-		version.DefaultCatalog = r.name
+		newVersion := *version
+		newVersion.DefaultCatalog = r.name
+		version = &newVersion
 	}
 
 	payload := createViewRequest{
