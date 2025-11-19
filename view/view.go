@@ -114,6 +114,96 @@ type Version struct {
 	DefaultNamespace []string            `json:"default-namespace"`
 }
 
+// Copy creates a deep copy of the Version.
+func (v *Version) Copy() *Version {
+	if v == nil {
+		return nil
+	}
+
+	copied := &Version{
+		VersionID:   v.VersionID,
+		SchemaID:    v.SchemaID,
+		TimestampMs: v.TimestampMs,
+	}
+
+	if v.Summary != nil {
+		copied.Summary = make(map[string]string, len(v.Summary))
+		for k, val := range v.Summary {
+			copied.Summary[k] = val
+		}
+	}
+
+	if v.Representations != nil {
+		copied.Representations = make([]SQLRepresentation, len(v.Representations))
+		copy(copied.Representations, v.Representations)
+	}
+
+	if v.DefaultCatalog != nil {
+		catalog := *v.DefaultCatalog
+		copied.DefaultCatalog = &catalog
+	}
+
+	if v.DefaultNamespace != nil {
+		copied.DefaultNamespace = make([]string, len(v.DefaultNamespace))
+		copy(copied.DefaultNamespace, v.DefaultNamespace)
+	}
+
+	return copied
+}
+
+// Equals compares two versions for semantic equivalence.
+// It compares all fields except VersionID and TimestampMs.
+// Returns true if the versions are functionally identical.
+func (v *Version) Equals(other *Version) bool {
+	if v == nil && other == nil {
+		return true
+	}
+	if v == nil || other == nil {
+		return false
+	}
+
+	if v.SchemaID != other.SchemaID {
+		return false
+	}
+
+	if len(v.Summary) != len(other.Summary) {
+		return false
+	}
+	for k, vVal := range v.Summary {
+		if otherVal, ok := other.Summary[k]; !ok || vVal != otherVal {
+			return false
+		}
+	}
+
+	if len(v.Representations) != len(other.Representations) {
+		return false
+	}
+	for i, r := range v.Representations {
+		otherR := other.Representations[i]
+		if r.Type != otherR.Type || r.SQL != otherR.SQL || r.Dialect != otherR.Dialect {
+			return false
+		}
+	}
+
+	if (v.DefaultCatalog == nil) != (other.DefaultCatalog == nil) {
+		return false
+	}
+	if v.DefaultCatalog != nil && *v.DefaultCatalog != *other.DefaultCatalog {
+		return false
+	}
+
+	if len(v.DefaultNamespace) != len(other.DefaultNamespace) {
+		return false
+	}
+	for i, ns := range v.DefaultNamespace {
+		if other.DefaultNamespace[i] != ns {
+			return false
+		}
+	}
+
+	return true
+}
+
 // SQLRepresentation is a view in SQL with a given dialect
 type SQLRepresentation struct {
 	Type    string `json:"type"`
