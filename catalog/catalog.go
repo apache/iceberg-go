@@ -96,7 +96,9 @@ type CreateViewCfg struct {
 
 func NewCreateViewCfg() CreateViewCfg {
 	return CreateViewCfg{
-		commonCreateCfg{},
+		commonCreateCfg{
+			Properties: iceberg.Properties{},
+		},
 	}
 }
 

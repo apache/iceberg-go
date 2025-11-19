@@ -1158,7 +1158,7 @@ type createViewRequest struct {
 	Name        string             `json:"name"`
 	Schema      *iceberg.Schema    `json:"schema"`
 	Location    string             `json:"location,omitempty"`
-	Props       iceberg.Properties `json:"properties,omitempty"`
+	Props       iceberg.Properties `json:"properties"`
 	ViewVersion *view.Version      `json:"view-version"`
 }
 
