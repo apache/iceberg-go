@@ -28,12 +28,13 @@ import (
 	"net/url"
 	"strconv"
 	"testing"
-	"time"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/view"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -1967,7 +1968,6 @@ type errorResponse struct {
 type createViewRequest struct {
 	Name        string             `json:"name"`
 	Schema      *iceberg.Schema    `json:"schema"`
-	SQL         string             `json:"sql"`
 	Props       iceberg.Properties `json:"properties"`
 	ViewVersion struct {
 		VersionID       int               `json:"version-id"`
@@ -1984,40 +1984,89 @@ type createViewRequest struct {
 	} `json:"view-version"`
 }
 
-type viewResponse struct {
-	MetadataLoc string             `json:"metadata-location"`
-	Config      iceberg.Properties `json:"config"`
-}
+var (
+	exampleViewSQL          = "SELECT * FROM table"
+	exampleViewMetadataJSON = fmt.Sprintf(`{
+		"view-uuid": "a1b2c3d4-e5f6-7890-1234-567890abcdef",
+		"format-version": 1,
+		"location": "metadata-location",
+		"current-version-id": 1,
+		"versions": [
+		  {
+			"version-id": 1,
+			"timestamp-ms": 0,
+			"schema-id": 0,
+			"summary": {"engine-name": "iceberg-go"},
+			"representations": [
+			  {
+				"type": "sql",
+				"sql": "%s",
+				"dialect": "default"
+			  }
+			],
+			"default-namespace": ["ns"],
+			"default-catalog": "default-catalog"
+		  }
+		],
+		"version-log": [
+		  {
+			"version-id": 1,
+			"timestamp-ms": 0
+		  }
+		],
+		"schemas": [
+		  {
+			"type": "struct",
+			"fields": [
+			  {
+				"id": 1,
+				"name": "id",
+				"type": "int",
+				"required": true
+			  }
+			],
+			"identifier-field-ids": [1],
+			"schema-id": 0
+		  }
+		],
+		"properties": {}
+	}`, exampleViewSQL)
+
+	createViewRestExample = fmt.Sprintf(`{
+	"metadata-location": "metadata-location",
+	"metadata": %s,
+	"config": {
+        "comment":     "Example view created via REST catalog",
+		"owner":       "admin",
+		"view-format": "iceberg"
+    }
+}`, exampleViewMetadataJSON)
+)
 
 func (r *RestCatalogSuite) TestCreateView200() {
 	ns := "ns"
-	view := "view"
-	identifier := table.Identifier{ns, view}
-	schema := iceberg.NewSchema(0, iceberg.NestedField{
+	viewName := "view"
+	identifier := table.Identifier{ns, viewName}
+	schema := iceberg.NewSchemaWithIdentifiers(0, []int{1}, iceberg.NestedField{
 		ID:       1,
 		Name:     "id",
 		Type:     iceberg.PrimitiveTypes.Int32,
 		Required: true,
 	})
-	sql := "SELECT * FROM table"
-	viewVersionJSON, _ := json.Marshal(map[string]interface{}{
-		"version-id":   1,
-		"timestamp-ms": time.Now().UnixMilli(),
-		"schema-id":    schema.ID,
-		"summary":      map[string]string{"sql": sql},
-		"representations": []map[string]string{
-			{"type": "sql", "sql": sql, "dialect": "default"},
-		},
-		"default-catalog":   "default-catalog",
-		"default-namespace": []string{ns},
-	})
-	props := iceberg.Properties{
-		"comment":      "Example view created via REST catalog",
-		"owner":        "admin",
-		"view-version": string(viewVersionJSON),
-		"view-format":  "iceberg",
-		"view-sql":     sql,
+	config := iceberg.Properties{
+		"comment":     "Example view created via REST catalog",
+		"owner":       "admin",
+		"view-format": "iceberg",
 	}
+	reprs := []view.Representation{view.NewRepresentation(exampleViewSQL, "default")}
+	version, err := view.NewVersion(1, 0, reprs, table.Identifier{ns},
+		view.WithDefaultViewCatalog("default-catalog"),
+		view.WithTimestampMS(0))
+	r.Require().NoError(err)
+	uuidVal, _ := uuid.Parse("a1b2c3d4-e5f6-7890-1234-567890abcdef")
+	expectedViewMD, err := view.NewMetadataWithUUID(version, schema, "metadata-location", iceberg.Properties{}, uuidVal)
+	r.Require().NoError(err)
+
 	r.mux.HandleFunc("/v1/namespaces/"+ns+"/views", func(w http.ResponseWriter, req *http.Request) {
 		r.Equal(http.MethodPost, req.Method)
 		r.Equal("application/json", req.Header.Get("Content-Type"))
@@ -2025,36 +2074,34 @@ func (r *RestCatalogSuite) TestCreateView200() {
 		var payload createViewRequest
 		err := json.NewDecoder(req.Body).Decode(&payload)
 		r.NoError(err)
-		r.Equal(view, payload.Name)
-		r.Equal(sql, payload.SQL)
+		r.Equal(viewName, payload.Name)
 		r.Equal(schema.ID, payload.Schema.ID)
 		r.Equal(1, payload.ViewVersion.VersionID)
 		r.Equal(0, payload.ViewVersion.SchemaID)
 		r.Equal("sql", payload.ViewVersion.Representations[0].Type)
-		r.Equal(sql, payload.ViewVersion.Representations[0].SQL)
+		r.Equal(exampleViewSQL, payload.ViewVersion.Representations[0].SQL)
 		r.Equal("default", payload.ViewVersion.Representations[0].Dialect)
-		r.Equal("rest", payload.ViewVersion.DefaultCatalog)
+		r.Equal("default-catalog", payload.ViewVersion.DefaultCatalog)
 		r.Equal([]string{ns}, payload.ViewVersion.DefaultNamespace)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(viewResponse{
-			MetadataLoc: "metadata-location",
-			Config:      iceberg.Properties{},
-		})
+		w.Write([]byte(createViewRestExample))
 	})
 
 	ctlg, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL)
 	r.NoError(err)
 
-	err = ctlg.CreateView(context.Background(), identifier, schema, sql, props)
+	createdView, err := ctlg.CreateView(context.Background(), identifier, version, schema, catalog.WithViewProperties(config))
 	r.NoError(err)
+	r.Equal("metadata-location", createdView.MetadataLocation())
+	r.True(expectedViewMD.Equals(createdView.Metadata()))
 }
 
 func (r *RestCatalogSuite) TestCreateView409() {
 	ns := "ns"
-	view := "view"
-	identifier := table.Identifier{ns, view}
+	viewName := "view"
+	identifier := table.Identifier{ns, viewName}
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID:       1,
 		Name:     "id",
@@ -2062,6 +2109,9 @@ func (r *RestCatalogSuite) TestCreateView409() {
 		Required: true,
 	})
 	sql := "SELECT * FROM table"
+	reprs := []view.Representation{view.NewRepresentation(sql, "default")}
+	version, err := view.NewVersion(1, 1, reprs, table.Identifier{ns})
+	r.Require().NoError(err)
 
 	r.mux.HandleFunc("/v1/namespaces/"+ns+"/views", func(w http.ResponseWriter, req *http.Request) {
 		r.Equal(http.MethodPost, req.Method)
@@ -2077,15 +2127,15 @@ func (r *RestCatalogSuite) TestCreateView409() {
 	ctlg, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL)
 	r.NoError(err)
 
-	err = ctlg.CreateView(context.Background(), identifier, schema, sql, nil)
+	_, err = ctlg.CreateView(context.Background(), identifier, version, schema)
 	r.Error(err)
 	r.ErrorIs(err, catalog.ErrViewAlreadyExists)
 }
 
 func (r *RestCatalogSuite) TestCreateView404() {
 	ns := "ns"
-	view := "view"
-	identifier := table.Identifier{ns, view}
+	viewName := "view"
+	identifier := table.Identifier{ns, viewName}
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID:       1,
 		Name:     "id",
@@ -2093,6 +2143,11 @@ func (r *RestCatalogSuite) TestCreateView404() {
 		Required: true,
 	})
 	sql := "SELECT * FROM table"
+	reprs := []view.Representation{
+		view.NewRepresentation(sql, "spark"),
+	}
+	version, err := view.NewVersion(1, 1, reprs, table.Identifier{ns})
+	r.Require().NoError(err)
 
 	r.mux.HandleFunc("/v1/namespaces/"+ns+"/views", func(w http.ResponseWriter, req *http.Request) {
 		r.Equal(http.MethodPost, req.Method)
@@ -2108,7 +2163,7 @@ func (r *RestCatalogSuite) TestCreateView404() {
 	ctlg, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL)
 	r.NoError(err)
 
-	err = ctlg.CreateView(context.Background(), identifier, schema, sql, nil)
+	_, err = ctlg.CreateView(context.Background(), identifier, version, schema)
 	r.Error(err)
 	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
 }
