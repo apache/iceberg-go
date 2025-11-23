@@ -155,6 +155,7 @@ func TestViewVersionHistory_MaintainsCorrectTimeline(t *testing.T) {
 	// Build metadata for version V1 as current
 	viewMD, err := newTestBuilder().
 		SetLoc("location").
+		SetProperties(iceberg.Properties{ReplaceDropDialectAllowedProperty: "true"}).
 		AddSchema(newTestSchema(0)).
 		AddVersion(v1).
 		AddVersion(v2).
@@ -226,20 +227,20 @@ func TestViewMetadataAndUpdates(t *testing.T) {
 	assert.Equal(t, s2.ID, md.CurrentSchemaID())
 
 	// Updates
-	require.Len(t, md.Updates(), 9)
+	require.Len(t, md.Changes, 9)
 
-	assert.Equal(t, NewAssignUUIDUpdate(uuid_), md.Updates()[0])
-	assert.Equal(t, NewSetLocationUpdate("location"), md.Updates()[1])
-	assert.Equal(t, NewSetPropertiesUpdate(props), md.Updates()[2])
-	assert.Equal(t, NewAddSchemaUpdate(s1), md.Updates()[3])
-	assert.Equal(t, NewAddSchemaUpdate(s2), md.Updates()[4])
-	assert.Equal(t, NewAddViewVersionUpdate(v1), md.Updates()[5])
-	assert.Equal(t, NewAddViewVersionUpdate(v2), md.Updates()[6])
+	assert.Equal(t, NewAssignUUIDUpdate(uuid_), md.Changes[0])
+	assert.Equal(t, NewSetLocationUpdate("location"), md.Changes[1])
+	assert.Equal(t, NewSetPropertiesUpdate(props), md.Changes[2])
+	assert.Equal(t, NewAddSchemaUpdate(s1), md.Changes[3])
+	assert.Equal(t, NewAddSchemaUpdate(s2), md.Changes[4])
+	assert.Equal(t, NewAddViewVersionUpdate(v1), md.Changes[5])
+	assert.Equal(t, NewAddViewVersionUpdate(v2), md.Changes[6])
 	// We use last added ID (-1) where applicable
 	expectedV3 := v3.Clone()
 	expectedV3.SchemaID = LastAddedID
-	assert.Equal(t, NewAddViewVersionUpdate(expectedV3), md.Updates()[7])
-	assert.Equal(t, NewSetCurrentVersionUpdate(LastAddedID), md.Updates()[8])
+	assert.Equal(t, NewAddViewVersionUpdate(expectedV3), md.Changes[7])
+	assert.Equal(t, NewSetCurrentVersionUpdate(LastAddedID), md.Changes[8])
 }
 
 func TestSetUUID(t *testing.T) {
@@ -260,7 +261,7 @@ func TestSetUUID(t *testing.T) {
 	updatedMD, err := updatedBuilder.Build()
 	require.NoError(t, err)
 	assert.Equal(t, uuid_, updatedMD.ViewUUID())
-	assert.Empty(t, updatedMD.Updates())
+	assert.Empty(t, updatedMD.Changes)
 
 	// Reassignment to same UUID should be a noop with no changes
 	updatedBuilder, err = MetadataBuilderFromBase(md)
@@ -268,7 +269,7 @@ func TestSetUUID(t *testing.T) {
 	updatedMD, err = updatedBuilder.SetUUID(uuid_).Build()
 	require.NoError(t, err)
 	assert.Equal(t, uuid_, updatedMD.ViewUUID())
-	assert.Empty(t, updatedMD.Updates())
+	assert.Empty(t, updatedMD.Changes)
 
 	// Reassignment to different UUID should fail
 	updatedBuilder, err = MetadataBuilderFromBase(md)
@@ -509,4 +510,57 @@ func TestDeduplicationViewVersionByIDAndSchemaID(t *testing.T) {
 	assert.Len(t, md.Versions(), 3)
 	assert.EqualValues(t, md.CurrentVersion().VersionID, 3)
 	assert.Equal(t, md.CurrentSchema().ID, 1)
+}
+
+func TestDroppingDialectFailsByDefault(t *testing.T) {
+	// Build initial metadata with two dialects
+	schema := newTestSchema(0, "x")
+	version, _ := NewVersion(1, 0,
+		Representations{
+			NewRepresentation("select \"nested\".\"field\" from tbl", "trino"),
+			NewRepresentation("select `nested`.`field` from tbl", "spark"),
+		},
+		table.Identifier{"defaultns"},
+	)
+	builder, err := NewMetadataBuilder()
+	require.NoError(t, err)
+	md, err := builder.SetLoc("location").
+		AddSchema(schema).
+		SetCurrentVersion(version, schema).
+		Build()
+	require.NoError(t, err)
+
+	builder, err = MetadataBuilderFromBase(md)
+	require.NoError(t, err)
+	_, err = builder.
+		SetCurrentVersion(newTestVersionWithSQL(1, 0, "select `nested`.`field` from tbl"), schema).
+		Build()
+	assert.ErrorContains(t, err, "dropping dialects is not enabled for this view")
+}
+
+func TestDroppingDialectDoesNotFailWhenAllowed(t *testing.T) {
+	// Build initial metadata with two dialects
+	schema := newTestSchema(0, "x")
+	version, _ := NewVersion(1, 0,
+		Representations{
+			NewRepresentation("select \"nested\".\"field\" from tbl", "trino"),
+			NewRepresentation("select `nested`.`field` from tbl", "spark"),
+		},
+		table.Identifier{"defaultns"},
+	)
+	builder, err := NewMetadataBuilder()
+	require.NoError(t, err)
+	md, err := builder.SetLoc("location").
+		AddSchema(schema).
+		SetCurrentVersion(version, schema).
+		SetProperties(iceberg.Properties{ReplaceDropDialectAllowedProperty: "true"}).
+		Build()
+	require.NoError(t, err)
+
+	builder, err = MetadataBuilderFromBase(md)
+	require.NoError(t, err)
+	_, err = builder.
+		SetCurrentVersion(newTestVersionWithSQL(1, 0, "select `nested`.`field` from tbl"), schema).
+		Build()
+	require.NoError(t, err)
 }

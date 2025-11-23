@@ -76,8 +76,6 @@ func TestNewMetadata(t *testing.T) {
 	md, err := NewMetadata(version, schema, "location", props)
 	require.NoError(t, err)
 
-	// Should not have updates since NewMetadata builds without them
-	assert.Empty(t, md.Updates())
 	expectedVersion := version.Clone()
 	expectedVersion.SchemaID = 0
 	assert.Equal(t, expectedVersion, md.CurrentVersion())

@@ -18,6 +18,7 @@
 package view
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -50,12 +51,25 @@ type MetadataBuilder struct {
 
 	// update tracking
 	versionHistoryEntry *VersionLogEntry
+	previousVersion     *Version
 	lastAddedVersionID  *int64
 	lastAddedSchemaID   *int
 
 	// error tracking for build chaining
 	// if set, subsequent operations become a noop
 	err error
+}
+
+// MetadataBuildResult is returned by a successful Build() command
+// This type contains the resulting view metadata from a build, as
+// well as the logical updates performed to generate it
+type MetadataBuildResult struct {
+	Metadata
+	Changes Updates
+}
+
+func (m *MetadataBuildResult) MarshalJSON() ([]byte, error) {
+	return json.Marshal(m.Metadata)
 }
 
 func NewMetadataBuilder() (*MetadataBuilder, error) {
@@ -88,6 +102,9 @@ func MetadataBuilderFromBase(metadata Metadata) (*MetadataBuilder, error) {
 	// Build lookup maps
 	b.versionsById = indexBy(b.versionList, func(vl *Version) int64 { return vl.VersionID })
 	b.schemasById = indexBy(b.schemaList, func(sm *iceberg.Schema) int { return sm.ID })
+
+	// Version tracking
+	b.previousVersion = metadata.CurrentVersion()
 
 	return b, nil
 }
@@ -383,7 +400,7 @@ func (b *MetadataBuilder) Err() error {
 	return b.err
 }
 
-func (b *MetadataBuilder) buildMetadata(withUpdates bool) (*metadata, error) {
+func (b *MetadataBuilder) buildMetadata() (*metadata, error) {
 	uuid_ := b.uuid
 	if uuid_ == uuid.Nil {
 		uuid_ = uuid.New()
@@ -399,18 +416,13 @@ func (b *MetadataBuilder) buildMetadata(withUpdates bool) (*metadata, error) {
 		SchemaList:            b.schemaList,
 		Props:                 b.props,
 	}
-	if withUpdates {
-		md.updates = b.updates
-	}
 	md.init()
 
 	return md, nil
 }
 
-// build builds the view metadata updates from the builder
-// if withUpdates is set to false, updates will not be included
-// in the returned Metadata, thus its Updates() will return an empty slice
-func (b *MetadataBuilder) build(withUpdates bool) (Metadata, error) {
+// Build builds the view metadata and updates from the builder
+func (b *MetadataBuilder) Build() (*MetadataBuildResult, error) {
 	if b.err != nil {
 		return nil, b.err
 	}
@@ -423,7 +435,17 @@ func (b *MetadataBuilder) build(withUpdates bool) (Metadata, error) {
 		b.versionLog = append(b.versionLog, *b.versionHistoryEntry)
 	}
 
-	md, err := b.buildMetadata(withUpdates)
+	// If we had a previous version, check if we allow dropping dialects and if we did drop one
+	if b.previousVersion != nil &&
+		!b.props.GetBool(ReplaceDropDialectAllowedProperty, ReplaceDropDialectAllowedDefault) {
+		currentVersion := b.versionsById[b.currentVersionID]
+		err := checkIfDialectIsDropped(b.previousVersion, currentVersion)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	md, err := b.buildMetadata()
 	if err != nil {
 		return nil, err
 	}
@@ -432,15 +454,7 @@ func (b *MetadataBuilder) build(withUpdates bool) (Metadata, error) {
 		return nil, err
 	}
 
-	return md, nil
-}
-
-func (b *MetadataBuilder) Build() (Metadata, error) {
-	return b.build(true)
-}
-
-func (b *MetadataBuilder) BuildWithoutUpdates() (Metadata, error) {
-	return b.build(false)
+	return &MetadataBuildResult{Metadata: md, Changes: b.updates}, nil
 }
 
 // setErr is a helper for enforcing build error assignment during operations.
@@ -495,4 +509,20 @@ func (b *MetadataBuilder) reuseOrCreateNewSchemaID(newSchema *iceberg.Schema) in
 	}
 
 	return newSchemaID
+}
+
+func checkIfDialectIsDropped(previous *Version, current *Version) error {
+	prevDialects := previous.sqlDialects()
+	currDialects := current.sqlDialects()
+	for prevDialect := range prevDialects {
+		if _, ok := currDialects[prevDialect]; !ok {
+			return fmt.Errorf(
+				"dropping dialects is not enabled for this view (%s=false):\nprevious dialects:%v\nnew dialects:%v",
+				ReplaceDropDialectAllowedProperty,
+				slices.Collect(maps.Keys(prevDialects)),
+				slices.Collect(maps.Keys(currDialects)))
+		}
+	}
+
+	return nil
 }

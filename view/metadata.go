@@ -44,7 +44,8 @@ var (
 const (
 	// LastAddedID is used in place of ID fields (e.g. schema, version) to indicate that
 	// the last added instance of that type should be used.
-	LastAddedID                = -1
+	LastAddedID = -1
+
 	SupportedViewFormatVersion = 1
 	DefaultViewFormatVersion   = SupportedViewFormatVersion
 )
@@ -87,9 +88,6 @@ type Metadata interface {
 	VersionLog() []VersionLogEntry
 	// Properties is a string to string map of view properties.
 	Properties() iceberg.Properties
-
-	// Updates returns the list of metadata updates used to build this metadata
-	Updates() Updates
 
 	Equals(Metadata) bool
 }
@@ -218,6 +216,18 @@ func (v *Version) Clone() *Version {
 	return &cloned
 }
 
+// sqlDialects returns a "set" of strings representing the SQL dialects supported in this version.
+// Dialects are deduplicated by lowercase comparison
+func (v *Version) sqlDialects() map[string]struct{} {
+	dialects := map[string]struct{}{}
+	for _, repr := range v.Representations {
+		normalizedDialect := strings.ToLower(repr.Dialect)
+		dialects[normalizedDialect] = struct{}{}
+	}
+
+	return dialects
+}
+
 type VersionLogEntry struct {
 	// Timestamp when the view's current-version-id was updated (ms from epoch)
 	TimestampMS int64 `json:"timestamp-ms"`
@@ -295,9 +305,6 @@ type metadata struct {
 	VersionLogList        []VersionLogEntry  `json:"version-log"`
 	Props                 iceberg.Properties `json:"properties,omitempty"`
 
-	// updates from builder if applicable
-	updates Updates
-
 	// cached lookup helpers, must be initialized in init()
 	lazyVersionsByID func() map[int64]*Version
 	lazySchemasByID  func() map[int]*iceberg.Schema
@@ -320,8 +327,6 @@ func (m *metadata) Equals(other Metadata) bool {
 		m.CurrentVersionIDValue == other.CurrentVersionID() &&
 		slices.Equal(m.VersionLogList, other.VersionLog())
 }
-
-func (m *metadata) Updates() Updates { return m.updates }
 
 func (m *metadata) FormatVersion() int         { return m.FormatVersionValue }
 func (m *metadata) ViewUUID() uuid.UUID        { return *m.UUID }
@@ -475,10 +480,6 @@ func (m *metadata) init() {
 		m.Props = iceberg.Properties{}
 	}
 
-	if m.updates == nil {
-		m.updates = Updates{}
-	}
-
 	m.lazyVersionsByID = sync.OnceValue(func() map[int64]*Version {
 		return indexBy(m.VersionList, func(v *Version) int64 { return v.VersionID })
 	})
@@ -542,5 +543,5 @@ func NewMetadataWithUUID(version *Version, sc *iceberg.Schema, location string, 
 		SetLoc(location).
 		SetProperties(props).
 		SetCurrentVersion(version, freshSchema).
-		BuildWithoutUpdates()
+		Build()
 }

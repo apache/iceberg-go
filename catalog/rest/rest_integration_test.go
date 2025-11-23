@@ -279,7 +279,7 @@ func (s *RestIntegrationSuite) TestUpdateView() {
 	updatedView, err := s.cat.UpdateView(s.ctx,
 		viewIdent,
 		view.Requirements{view.AssertViewUUID(createdView.Metadata().ViewUUID())},
-		updatedMD.Updates())
+		updatedMD.Changes)
 	s.Require().NoError(err)
 	s.Equal(viewIdent, updatedView.Identifier())
 	s.Equal(location, updatedView.Location())

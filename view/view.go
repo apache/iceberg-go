@@ -137,7 +137,7 @@ func CreateView(
 			schema,
 		).
 		SetProperties(props).
-		BuildWithoutUpdates()
+		Build()
 	if err != nil {
 		return nil, err
 	}
