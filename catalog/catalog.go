@@ -68,20 +68,37 @@ type PropertiesUpdateSummary struct {
 	Missing []string `json:"missing"`
 }
 
+// commonCreateCfg represents common configuration to create table and view operations
+type commonCreateCfg struct {
+	Location   string
+	Properties iceberg.Properties
+}
+
 // CreateTableCfg represents the configuration used for CreateTable operations
 type CreateTableCfg struct {
-	Location      string
+	commonCreateCfg
 	PartitionSpec *iceberg.PartitionSpec
 	SortOrder     table.SortOrder
-	Properties    iceberg.Properties
 }
 
 func NewCreateTableCfg() CreateTableCfg {
 	return CreateTableCfg{
-		Location:      "",
-		PartitionSpec: nil,
-		SortOrder:     table.UnsortedSortOrder,
-		Properties:    nil,
+		commonCreateCfg: commonCreateCfg{},
+		PartitionSpec:   nil,
+		SortOrder:       table.UnsortedSortOrder,
+	}
+}
+
+// CreateViewCfg represents the configuration used for CreateView operations
+type CreateViewCfg struct {
+	commonCreateCfg
+}
+
+func NewCreateViewCfg() CreateViewCfg {
+	return CreateViewCfg{
+		commonCreateCfg{
+			Properties: iceberg.Properties{},
+		},
 	}
 }
 
@@ -172,6 +189,20 @@ func WithSortOrder(order table.SortOrder) CreateTableOpt {
 func WithProperties(props iceberg.Properties) CreateTableOpt {
 	return func(cfg *CreateTableCfg) {
 		cfg.Properties = props
+	}
+}
+
+type CreateViewOpt func(*CreateViewCfg)
+
+func WithViewLocation(location string) CreateViewOpt {
+	return func(cfg *CreateViewCfg) {
+		cfg.Location = strings.TrimRight(location, "/")
+	}
+}
+
+func WithViewProperties(config iceberg.Properties) CreateViewOpt {
+	return func(cfg *CreateViewCfg) {
+		cfg.Properties = config
 	}
 }
 

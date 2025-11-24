@@ -33,6 +33,7 @@ import (
 	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/view"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
@@ -209,15 +210,83 @@ func (s *RestIntegrationSuite) TestCreateView() {
 	s.True(exists)
 
 	// Create a view
-	viewSQL := fmt.Sprintf("SELECT * FROM  %s.%s", TestNamespaceIdent, "test-table")
+	viewRepr := view.NewRepresentation(fmt.Sprintf("SELECT * FROM  %s.%s", TestNamespaceIdent, "test-table"), "trino")
+	viewVersion, err := view.NewVersion(1, 1, []view.Representation{viewRepr}, table.Identifier{TestNamespaceIdent})
+	s.Require().NoError(err)
 
-	err = s.cat.CreateView(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view"), tableSchemaSimple, viewSQL, iceberg.Properties{"foobar": "baz"})
+	_, err = s.cat.CreateView(s.ctx,
+		catalog.ToIdentifier(TestNamespaceIdent, "test-view"),
+		viewVersion,
+		tableSchemaSimple,
+		catalog.WithViewProperties(iceberg.Properties{"foobar": "baz"}))
 	s.Require().NoError(err)
 
 	exists, err = s.cat.CheckViewExists(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view"))
 	s.Require().NoError(err)
 	s.True(exists)
 
+	s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table")))
+	s.Require().NoError(s.cat.DropView(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view")))
+}
+
+func (s *RestIntegrationSuite) TestUpdateView() {
+	s.ensureNamespace()
+
+	const location = "s3://warehouse/iceberg"
+	testProps := iceberg.Properties{"foobar": "baz"}
+
+	// create a table first
+	tbl, err := s.cat.CreateTable(s.ctx,
+		catalog.ToIdentifier(TestNamespaceIdent, "test-table"),
+		tableSchemaSimple, catalog.WithProperties(iceberg.Properties{"foobar": "baz"}),
+		catalog.WithLocation(location))
+	s.Require().NoError(err)
+	s.Require().NotNil(tbl)
+
+	s.Equal(location, tbl.Location())
+	s.Equal("baz", tbl.Properties()["foobar"])
+
+	exists, err := s.cat.CheckTableExists(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table"))
+	s.Require().NoError(err)
+	s.True(exists)
+
+	// Create a view
+	viewRepr := view.NewRepresentation(fmt.Sprintf("SELECT * FROM  %s.%s", TestNamespaceIdent, "test-table"), "trino")
+	defaultViewNS := catalog.ToIdentifier(location, TestNamespaceIdent)
+	viewVersion, err := view.NewVersion(1, 1, []view.Representation{viewRepr}, defaultViewNS)
+
+	viewIdent := catalog.ToIdentifier(TestNamespaceIdent, "test-view")
+	createdView, err := s.cat.CreateView(s.ctx,
+		viewIdent,
+		viewVersion,
+		tableSchemaSimple,
+		catalog.WithViewLocation(location), catalog.WithViewProperties(testProps))
+	s.Require().NoError(err)
+
+	// Create new builder from created view, and add a new representation
+	builder, err := view.MetadataBuilderFromBase(createdView.Metadata())
+	s.Require().NoError(err)
+
+	// Add new representation and build the updated view metadata
+	newRepr := viewRepr
+	newRepr.Dialect = "spark"
+	updatedVersion := createdView.Metadata().CurrentVersion().Clone()
+	updatedVersion.Representations = append(updatedVersion.Representations, newRepr)
+	updatedMD, err := builder.AddVersion(updatedVersion).SetCurrentVersionID(view.LastAddedID).Build()
+	s.Require().NoError(err)
+
+	// Update the view
+	updatedView, err := s.cat.UpdateView(s.ctx,
+		viewIdent,
+		view.Requirements{view.AssertViewUUID(createdView.Metadata().ViewUUID())},
+		updatedMD.Changes)
+	s.Require().NoError(err)
+	s.Equal(viewIdent, updatedView.Identifier())
+	s.Equal(location, updatedView.Location())
+	s.True(updatedMD.Equals(updatedView.Metadata()))
+	s.Equal(testProps, updatedView.Properties())
+
+	// Cleanup
 	s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table")))
 	s.Require().NoError(s.cat.DropView(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view")))
 }

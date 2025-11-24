@@ -179,3 +179,10 @@ func Counter(start int) iter.Seq[int] {
 func CheckedClose(c io.Closer, err *error) {
 	*err = errors.Join(*err, c.Close())
 }
+
+// SliceEqualHelper compares the equality of two slices whose elements have an Equals method
+func SliceEqualHelper[T interface{ Equals(T) bool }](s1, s2 []T) bool {
+	return slices.EqualFunc(s1, s2, func(t1, t2 T) bool {
+		return t1.Equals(t2)
+	})
+}
