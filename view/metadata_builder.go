@@ -540,14 +540,12 @@ func (b *MetadataBuilder) distinctVersionsInBuild() int {
 func checkIfDialectIsDropped(previous *Version, current *Version) error {
 	prevDialects := previous.sqlDialects()
 	currDialects := current.sqlDialects()
-	for prevDialect := range prevDialects {
-		if _, ok := currDialects[prevDialect]; !ok {
-			return fmt.Errorf(
-				"dropping dialects is not enabled for this view (%s=false):\nprevious dialects:%v\nnew dialects:%v",
-				ReplaceDropDialectAllowedKey,
-				slices.Collect(maps.Keys(prevDialects)),
-				slices.Collect(maps.Keys(currDialects)))
-		}
+	if !prevDialects.IsSubset(currDialects) {
+		return fmt.Errorf(
+			"dropping dialects is not enabled for this view (%s=false):\nprevious dialects:%v\nnew dialects:%v",
+			ReplaceDropDialectAllowedKey,
+			slices.Collect(maps.Keys(prevDialects)),
+			slices.Collect(maps.Keys(currDialects)))
 	}
 
 	return nil

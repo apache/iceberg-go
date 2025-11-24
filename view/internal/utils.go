@@ -42,3 +42,13 @@ func (s *Set[T]) Contains(e T) bool {
 
 	return ok
 }
+
+func (s *Set[T]) IsSubset(other Set[T]) bool {
+	for k := range *s {
+		if !other.Contains(k) {
+			return false
+		}
+	}
+
+	return true
+}

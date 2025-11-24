@@ -32,6 +32,7 @@ import (
 	"github.com/apache/iceberg-go"
 	iceinternal "github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/view/internal"
 
 	"github.com/google/uuid"
 )
@@ -216,16 +217,13 @@ func (v *Version) Clone() *Version {
 	return &cloned
 }
 
-// sqlDialects returns a "set" of strings representing the SQL dialects supported in this version.
+// sqlDialects returns a set of strings representing the SQL dialects supported in this version.
 // Dialects are deduplicated by lowercase comparison
-func (v *Version) sqlDialects() map[string]struct{} {
-	dialects := map[string]struct{}{}
-	for _, repr := range v.Representations {
-		normalizedDialect := strings.ToLower(repr.Dialect)
-		dialects[normalizedDialect] = struct{}{}
-	}
-
-	return dialects
+func (v *Version) sqlDialects() internal.Set[string] {
+	return internal.ToSet(internal.MapSlice(
+		v.Representations,
+		func(r Representation) string { return strings.ToLower(r.Dialect) },
+	))
 }
 
 type VersionLogEntry struct {
