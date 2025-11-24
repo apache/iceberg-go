@@ -26,6 +26,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/view/internal"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -68,17 +69,12 @@ func newTestSchema(schemaID int, optFieldName ...string) *iceberg.Schema {
 	return iceberg.NewSchema(schemaID, iceberg.NestedField{ID: 1, Name: fieldName, Type: iceberg.PrimitiveTypes.Int64})
 }
 
-func mapSlice[T any, V any](s []T, fn func(T) V) []V {
-	mapped := make([]V, len(s))
-	for i, e := range s {
-		mapped[i] = fn(e)
-	}
-
-	return mapped
-}
-
 func stripErr[T any](v T, _ error) T {
 	return v
+}
+
+func extractVersionID(v *Version) int64 {
+	return v.VersionID
 }
 
 func TestBuild_NullAndMissingFields(t *testing.T) {
@@ -155,7 +151,7 @@ func TestViewVersionHistory_MaintainsCorrectTimeline(t *testing.T) {
 	// Build metadata for version V1 as current
 	viewMD, err := newTestBuilder().
 		SetLoc("location").
-		SetProperties(iceberg.Properties{ReplaceDropDialectAllowedProperty: "true"}).
+		SetProperties(iceberg.Properties{ReplaceDropDialectAllowedKey: "true"}).
 		AddSchema(newTestSchema(0)).
 		AddVersion(v1).
 		AddVersion(v2).
@@ -381,7 +377,7 @@ func TestSchemaIDReassignment(t *testing.T) {
 	// All schema IDs should be re-assigned and start at 0
 	assert.Equal(t,
 		[]iceberg.StructType{s1.AsStruct(), s2.AsStruct(), s3.AsStruct()},
-		mapSlice(md.Schemas(), func(s *iceberg.Schema) iceberg.StructType { return s.AsStruct() }),
+		internal.MapSlice(md.Schemas(), func(s *iceberg.Schema) iceberg.StructType { return s.AsStruct() }),
 	)
 	assert.Equal(t, slices.Sorted(maps.Keys(md.SchemasByID())), []int{0, 1, 2})
 }
@@ -417,7 +413,7 @@ func TestSchemaDeduplication(t *testing.T) {
 	// All schema IDs should be re-assigned and start at 0
 	assert.Equal(t,
 		[]iceberg.StructType{s1.AsStruct(), s2.AsStruct(), s3.AsStruct()},
-		mapSlice(md.Schemas(), func(s *iceberg.Schema) iceberg.StructType { return s.AsStruct() }),
+		internal.MapSlice(md.Schemas(), func(s *iceberg.Schema) iceberg.StructType { return s.AsStruct() }),
 	)
 	assert.Equal(t, slices.Sorted(maps.Keys(md.SchemasByID())), []int{0, 1, 2})
 }
@@ -457,7 +453,7 @@ func TestViewVersionAndSchemaIDReassignment(t *testing.T) {
 	// All schema IDs should be re-assigned and start at 0
 	assert.Equal(t,
 		[]iceberg.StructType{s1.AsStruct(), s2.AsStruct(), s3.AsStruct()},
-		mapSlice(md.Schemas(), func(s *iceberg.Schema) iceberg.StructType { return s.AsStruct() }),
+		internal.MapSlice(md.Schemas(), func(s *iceberg.Schema) iceberg.StructType { return s.AsStruct() }),
 	)
 	assert.Equal(t, slices.Sorted(maps.Keys(md.SchemasByID())), []int{0, 1, 2})
 }
@@ -553,7 +549,7 @@ func TestDroppingDialectDoesNotFailWhenAllowed(t *testing.T) {
 	md, err := builder.SetLoc("location").
 		AddSchema(schema).
 		SetCurrentVersion(version, schema).
-		SetProperties(iceberg.Properties{ReplaceDropDialectAllowedProperty: "true"}).
+		SetProperties(iceberg.Properties{ReplaceDropDialectAllowedKey: "true"}).
 		Build()
 	require.NoError(t, err)
 
@@ -563,4 +559,96 @@ func TestDroppingDialectDoesNotFailWhenAllowed(t *testing.T) {
 		SetCurrentVersion(newTestVersionWithSQL(1, 0, "select `nested`.`field` from tbl"), schema).
 		Build()
 	require.NoError(t, err)
+}
+
+func TestCurrentViewVersionIsNeverExpired(t *testing.T) {
+	props := iceberg.Properties{VersionHistorySizeKey: "1"}
+	schema := newTestSchema(0)
+	v1 := newTestVersionWithSQL(1, 0, "select * from ns.tbl")
+	v2 := newTestVersionWithSQL(2, 0, "select count(*) from ns.tbl")
+	v3 := newTestVersionWithSQL(3, 0, "select count(*) as count from ns.tbl")
+	md, err := stripErr(NewMetadataBuilder()).
+		SetLoc("location").
+		SetProperties(props).
+		AddSchema(schema).
+		AddVersion(v1).
+		AddVersion(v2).
+		AddVersion(v3).
+		SetCurrentVersionID(1).
+		Build()
+	require.NoError(t, err)
+
+	// the first build will not expire versions that were added in the builder
+	assert.Len(t, md.Versions(), 3)
+	assert.Len(t, md.VersionLog(), 1)
+	assert.EqualValues(t, 1, md.VersionLog()[0].VersionID)
+
+	// rebuild the metadata to expire older versions
+	updatedMD, err := stripErr(MetadataBuilderFromBase(md)).Build()
+	require.NoError(t, err)
+	assert.Len(t, updatedMD.Versions(), 1)
+
+	// make sure history and current version are retained
+	assert.EqualValues(t, 1, updatedMD.CurrentVersionID())
+	assert.True(t, md.CurrentVersion().Equals(updatedMD.CurrentVersion()))
+	assert.Len(t, updatedMD.VersionLog(), 1)
+	assert.EqualValues(t, 1, updatedMD.VersionLog()[0].VersionID)
+}
+
+func TestViewVersionHistoryIsCorrectlyRetained(t *testing.T) {
+	props := iceberg.Properties{VersionHistorySizeKey: "2"}
+	schema := newTestSchema(0)
+	v1 := newTestVersionWithSQL(1, 0, "select * from ns.tbl")
+	v2 := newTestVersionWithSQL(2, 0, "select count(*) from ns.tbl")
+	v3 := newTestVersionWithSQL(3, 0, "select count(*) as count from ns.tbl")
+	md, err := stripErr(NewMetadataBuilder()).
+		SetLoc("location").
+		SetProperties(props).
+		AddSchema(schema).
+		AddVersion(v1).
+		AddVersion(v2).
+		AddVersion(v3).
+		SetCurrentVersionID(3).
+		Build()
+	require.NoError(t, err)
+
+	// the first build will not expire versions that were added in the builder
+	assert.Len(t, md.Versions(), 3)
+	assert.Len(t, md.VersionLog(), 1)
+	assert.EqualValues(t, 3, md.VersionLog()[0].VersionID)
+
+	// rebuild the metadata to expire older versions
+	updatedMD, err := stripErr(MetadataBuilderFromBase(md)).Build()
+	require.NoError(t, err)
+	assert.Len(t, updatedMD.Versions(), 2)
+	assert.Equal(t, internal.ToSet([]int64{2, 3}), internal.ToSet(internal.MapSlice(updatedMD.Versions(), extractVersionID)))
+
+	// make sure history and current version are retained
+	assert.EqualValues(t, 3, updatedMD.CurrentVersionID())
+	assert.True(t, md.CurrentVersion().Equals(updatedMD.CurrentVersion()))
+	assert.Len(t, updatedMD.VersionLog(), 1)
+	assert.EqualValues(t, 3, updatedMD.VersionLog()[0].VersionID)
+
+	// Rebuild and set version ID to 2
+	updatedMD, err = stripErr(MetadataBuilderFromBase(md)).SetCurrentVersionID(2).Build()
+	require.NoError(t, err)
+	assert.Len(t, updatedMD.Versions(), 2)
+	assert.Equal(t, internal.ToSet([]int64{2, 3}), internal.ToSet(internal.MapSlice(updatedMD.Versions(), extractVersionID)))
+	assert.Len(t, updatedMD.VersionLog(), 2)
+	assert.EqualValues(t, 3, updatedMD.VersionLog()[0].VersionID)
+	assert.EqualValues(t, 2, updatedMD.VersionLog()[1].VersionID)
+
+	// Rebuild and set version ID back to 3
+	updatedMD, err = stripErr(MetadataBuilderFromBase(updatedMD)).SetCurrentVersionID(3).Build()
+	require.NoError(t, err)
+	assert.Len(t, updatedMD.Versions(), 2)
+	assert.Equal(t, internal.ToSet([]int64{2, 3}), internal.ToSet(internal.MapSlice(updatedMD.Versions(), extractVersionID)))
+	assert.Len(t, updatedMD.VersionLog(), 3)
+	assert.EqualValues(t, 3, updatedMD.VersionLog()[0].VersionID)
+	assert.EqualValues(t, 2, updatedMD.VersionLog()[1].VersionID)
+	assert.EqualValues(t, 3, updatedMD.VersionLog()[2].VersionID)
+
+	// This should now fail since we've expired out version 1
+	_, err = stripErr(MetadataBuilderFromBase(updatedMD)).SetCurrentVersionID(1).Build()
+	assert.ErrorContains(t, err, "cannot set current version to unknown version")
 }

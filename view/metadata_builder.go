@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/view/internal"
 
 	"github.com/google/uuid"
 )
@@ -400,7 +401,7 @@ func (b *MetadataBuilder) Err() error {
 	return b.err
 }
 
-func (b *MetadataBuilder) buildMetadata() (*metadata, error) {
+func (b *MetadataBuilder) buildMetadata(retainedVersions []*Version, retainedHistory []VersionLogEntry) (*metadata, error) {
 	uuid_ := b.uuid
 	if uuid_ == uuid.Nil {
 		uuid_ = uuid.New()
@@ -411,14 +412,14 @@ func (b *MetadataBuilder) buildMetadata() (*metadata, error) {
 		UUID:                  &uuid_,
 		Loc:                   b.loc,
 		CurrentVersionIDValue: b.currentVersionID,
-		VersionList:           b.versionList,
-		VersionLogList:        b.versionLog,
+		VersionList:           retainedVersions,
+		VersionLogList:        retainedHistory,
 		SchemaList:            b.schemaList,
 		Props:                 b.props,
 	}
 	md.init()
 
-	return md, nil
+	return md, md.validate()
 }
 
 // Build builds the view metadata and updates from the builder
@@ -437,7 +438,7 @@ func (b *MetadataBuilder) Build() (*MetadataBuildResult, error) {
 
 	// If we had a previous version, check if we allow dropping dialects and if we did drop one
 	if b.previousVersion != nil &&
-		!b.props.GetBool(ReplaceDropDialectAllowedProperty, ReplaceDropDialectAllowedDefault) {
+		!b.props.GetBool(ReplaceDropDialectAllowedKey, ReplaceDropDialectAllowedDefault) {
 		currentVersion := b.versionsById[b.currentVersionID]
 		err := checkIfDialectIsDropped(b.previousVersion, currentVersion)
 		if err != nil {
@@ -445,12 +446,24 @@ func (b *MetadataBuilder) Build() (*MetadataBuildResult, error) {
 		}
 	}
 
-	md, err := b.buildMetadata()
-	if err != nil {
-		return nil, err
+	historySize := b.props.GetInt(VersionHistorySizeKey, VersionHistorySizeDefault)
+	if historySize < 1 {
+		return nil, fmt.Errorf("%s must be positive, found %d", VersionHistorySizeKey, historySize)
+	}
+	versionsToKeep := max(b.distinctVersionsInBuild(), historySize)
+	var retainedVersions []*Version
+	var retainedHistory []VersionLogEntry
+	if len(b.versionList) > versionsToKeep {
+		retainedVersions = expireVersions(b.versionsById, versionsToKeep, b.versionsById[b.currentVersionID])
+		retainedVersionIDs := internal.ToSet(internal.MapSlice(retainedVersions, func(v *Version) int64 { return v.VersionID }))
+		retainedHistory = updateHistory(b.versionLog, retainedVersionIDs)
+	} else {
+		retainedVersions = b.versionList
+		retainedHistory = b.versionLog
 	}
 
-	if err := md.validate(); err != nil {
+	md, err := b.buildMetadata(retainedVersions, retainedHistory)
+	if err != nil {
 		return nil, err
 	}
 
@@ -511,6 +524,19 @@ func (b *MetadataBuilder) reuseOrCreateNewSchemaID(newSchema *iceberg.Schema) in
 	return newSchemaID
 }
 
+// distinctVersionsInBuild returns the number of unique versions added in this builder
+// as well as the current active version.
+func (b *MetadataBuilder) distinctVersionsInBuild() int {
+	versions := map[int64]struct{}{b.currentVersionID: {}}
+	for _, update := range b.updates {
+		if avv, ok := update.(*addViewVersionUpdate); ok {
+			versions[avv.Version.VersionID] = struct{}{}
+		}
+	}
+
+	return len(versions)
+}
+
 func checkIfDialectIsDropped(previous *Version, current *Version) error {
 	prevDialects := previous.sqlDialects()
 	currDialects := current.sqlDialects()
@@ -518,11 +544,47 @@ func checkIfDialectIsDropped(previous *Version, current *Version) error {
 		if _, ok := currDialects[prevDialect]; !ok {
 			return fmt.Errorf(
 				"dropping dialects is not enabled for this view (%s=false):\nprevious dialects:%v\nnew dialects:%v",
-				ReplaceDropDialectAllowedProperty,
+				ReplaceDropDialectAllowedKey,
 				slices.Collect(maps.Keys(prevDialects)),
 				slices.Collect(maps.Keys(currDialects)))
 		}
 	}
 
 	return nil
+}
+
+// expireVersions builds a list of versions, only retaining ones which have not expired out
+// due to retention policy.
+func expireVersions(versionsByID map[int64]*Version, numVersionsToKeep int, currentVersion *Version) []*Version {
+	reverseOrderIDs := slices.SortedFunc(maps.Keys(versionsByID), func(a, b int64) int {
+		return int(b - a)
+	})
+	retainedVersions := make([]*Version, 0, numVersionsToKeep)
+	retainedVersions = append(retainedVersions, currentVersion)
+
+	for _, versionID := range reverseOrderIDs[:numVersionsToKeep] {
+		if len(retainedVersions) == numVersionsToKeep {
+			break
+		}
+
+		if currentVersion.VersionID != versionID {
+			retainedVersions = append(retainedVersions, versionsByID[versionID])
+		}
+	}
+
+	return retainedVersions
+}
+
+func updateHistory(history []VersionLogEntry, retainedIDs internal.Set[int64]) []VersionLogEntry {
+	retainedHistory := make([]VersionLogEntry, 0)
+	for _, entry := range history {
+		if retainedIDs.Contains(entry.VersionID) {
+			retainedHistory = append(retainedHistory, entry)
+		} else {
+			// clear history past any unknown version
+			retainedHistory = retainedHistory[:0]
+		}
+	}
+
+	return retainedHistory
 }

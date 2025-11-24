@@ -15,16 +15,30 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package view
+package internal
 
-const (
-	// ReplaceDropDialectAllowedKey is a view metadata property
-	// indicating whether replacing a version while dropping a dialect is allowed.
-	ReplaceDropDialectAllowedKey     = "replace.drop-dialect.allowed"
-	ReplaceDropDialectAllowedDefault = false
+func MapSlice[T any, V any](s []T, fn func(T) V) []V {
+	mapped := make([]V, len(s))
+	for i, e := range s {
+		mapped[i] = fn(e)
+	}
 
-	// VersionHistorySizeKey is a view metadata property which governs how many
-	// view versions are retained.
-	VersionHistorySizeKey     = "version.history.num-entries"
-	VersionHistorySizeDefault = 10
-)
+	return mapped
+}
+
+type Set[T comparable] map[T]struct{}
+
+func ToSet[T comparable](s []T) Set[T] {
+	set := Set[T]{}
+	for _, v := range s {
+		set[v] = struct{}{}
+	}
+
+	return set
+}
+
+func (s *Set[T]) Contains(e T) bool {
+	_, ok := (*s)[e]
+
+	return ok
+}
