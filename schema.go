@@ -493,6 +493,7 @@ type SchemaVisitorPerPrimitiveType[T any] interface {
 	VisitString() T
 	VisitBinary() T
 	VisitUUID() T
+	VisitUnknown() T
 }
 
 // Visit accepts a visitor and performs a post-order traversal of the given schema.
@@ -637,6 +638,8 @@ func visitField[T any](f NestedField, visitor SchemaVisitor[T]) T {
 				return perPrimitive.VisitDecimal(t)
 			case FixedType:
 				return perPrimitive.VisitFixed(t)
+			case UnknownType:
+				return perPrimitive.VisitUnknown()
 			}
 		}
 

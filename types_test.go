@@ -44,6 +44,7 @@ func TestTypesBasic(t *testing.T) {
 		{"timestamptz_ns", iceberg.PrimitiveTypes.TimestampTzNs},
 		{"uuid", iceberg.PrimitiveTypes.UUID},
 		{"binary", iceberg.PrimitiveTypes.Binary},
+		{"unknown", iceberg.PrimitiveTypes.Unknown},
 		{"fixed[5]", iceberg.FixedTypeOf(5)},
 		{"decimal(9, 4)", iceberg.DecimalTypeOf(9, 4)},
 	}
@@ -187,6 +188,7 @@ var NonParameterizedTypes = []iceberg.Type{
 	iceberg.PrimitiveTypes.String,
 	iceberg.PrimitiveTypes.Binary,
 	iceberg.PrimitiveTypes.UUID,
+	iceberg.PrimitiveTypes.Unknown,
 }
 
 func TestNonParameterizedTypeEquality(t *testing.T) {
@@ -220,6 +222,7 @@ func TestTypeStrings(t *testing.T) {
 		{iceberg.PrimitiveTypes.String, "string"},
 		{iceberg.PrimitiveTypes.UUID, "uuid"},
 		{iceberg.PrimitiveTypes.Binary, "binary"},
+		{iceberg.PrimitiveTypes.Unknown, "unknown"},
 		{iceberg.FixedTypeOf(22), "fixed[22]"},
 		{iceberg.DecimalTypeOf(19, 25), "decimal(19, 25)"},
 		{&iceberg.StructType{
