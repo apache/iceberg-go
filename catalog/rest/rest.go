@@ -298,6 +298,10 @@ func doHead(ctx context.Context, baseURI *url.URL, path []string, cl *http.Clien
 }
 
 func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []string, payload Payload, cl *http.Client, override map[int]error) (ret Result, err error) {
+	return doPostAllowNoContent[Payload, Result](ctx, baseURI, path, payload, cl, override, false)
+}
+
+func doPostAllowNoContent[Payload, Result any](ctx context.Context, baseURI *url.URL, path []string, payload Payload, cl *http.Client, override map[int]error, allowNoContent bool) (ret Result, err error) {
 	var (
 		req  *http.Request
 		rsp  *http.Response
@@ -317,6 +321,10 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 
 	rsp, err = cl.Do(req)
 	if err != nil {
+		return ret, err
+	}
+
+	if allowNoContent && rsp.StatusCode == http.StatusNoContent {
 		return ret, err
 	}
 
@@ -926,8 +934,8 @@ func (r *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 		Name:      catalog.TableNameFromIdent(to),
 	}
 
-	_, err := doPost[payload, any](ctx, r.baseURI, []string{"tables", "rename"}, payload{Source: src, Destination: dst}, r.cl,
-		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable})
+	_, err := doPostAllowNoContent[payload, any](ctx, r.baseURI, []string{"tables", "rename"}, payload{Source: src, Destination: dst}, r.cl,
+		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable}, true)
 	if err != nil {
 		return nil, err
 	}
