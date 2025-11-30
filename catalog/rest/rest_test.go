@@ -1212,7 +1212,7 @@ func (r *RestCatalogSuite) TestLoadTable200() {
 	}))
 }
 
-func (r *RestCatalogSuite) TestRenameTable200() {
+func (r *RestCatalogSuite) TestRenameTable204() {
 	// Mock the rename table endpoint
 	r.mux.HandleFunc("/v1/tables/rename", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodPost, req.Method)
@@ -1237,7 +1237,7 @@ func (r *RestCatalogSuite) TestRenameTable200() {
 		r.Equal([]string{"fokko"}, payload.Destination.Namespace)
 		r.Equal("destination", payload.Destination.Name)
 
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(http.StatusNoContent)
 	})
 
 	// Mock the get table endpoint for loading the renamed table
