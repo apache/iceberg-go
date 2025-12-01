@@ -277,6 +277,7 @@ func TestSigv4ContentSha256Header(t *testing.T) {
 				SecretAccessKey: "test-secret-key",
 			},
 		}
+
 		return nil
 	})
 	require.NoError(t, err)
