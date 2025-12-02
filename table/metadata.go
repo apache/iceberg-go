@@ -796,7 +796,7 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 
 	if b.previousFileEntry != nil && b.HasChanges() {
 		maxMetadataLogEntries := max(1,
-			b.base.Properties().GetInt(
+			b.props.GetInt(
 				MetadataPreviousVersionsMaxKey, MetadataPreviousVersionsMaxDefault))
 		b.AppendMetadataLog(*b.previousFileEntry)
 		b.TrimMetadataLogs(maxMetadataLogEntries)
