@@ -1200,11 +1200,16 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		return nil, err
 	}
 
+	// Shallow copy for overriding certain attrs
+	newVersion := *version
+	version = &newVersion
+
+	// Enforce starting ID of 1
+	version.VersionID = 1
+
 	// Set default catalog unless set by caller
 	if len(version.DefaultCatalog) == 0 {
-		newVersion := *version
-		newVersion.DefaultCatalog = r.name
-		version = &newVersion
+		version.DefaultCatalog = r.name
 	}
 
 	payload := createViewRequest{
