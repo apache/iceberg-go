@@ -1219,3 +1219,33 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 
 	return nil
 }
+
+// loadViewResponse contains the response from loading a view
+type loadViewResponse struct {
+	MetadataLoc string             `json:"metadata-location"`
+	RawMetadata json.RawMessage    `json:"metadata"`
+	Config      iceberg.Properties `json:"config"`
+}
+
+// LoadView loads view metadata from the catalog.
+func (r *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (view.Metadata, error) {
+	ns, v, err := splitIdentForPath(identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	rsp, err := doGet[loadViewResponse](ctx, r.baseURI, []string{"namespaces", ns, "views", v},
+		r.cl, map[int]error{
+			http.StatusNotFound: catalog.ErrNoSuchView,
+		})
+	if err != nil {
+		return nil, err
+	}
+
+	metadata, err := view.ParseMetadataBytes(rsp.RawMetadata)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse view metadata: %w", err)
+	}
+
+	return metadata, nil
+}

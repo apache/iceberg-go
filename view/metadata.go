@@ -58,6 +58,18 @@ func LoadMetadata(ctx context.Context,
 	return &m, nil
 }
 
+// ParseMetadataBytes parses view metadata from raw JSON bytes.
+//
+// Returns the parsed Metadata or an error if parsing fails.
+func ParseMetadataBytes(metadataBytes []byte) (Metadata, error) {
+	var m metadata
+	if err := json.Unmarshal(metadataBytes, &m); err != nil {
+		return nil, fmt.Errorf("error encountered decoding view metadata: %w", err)
+	}
+
+	return &m, nil
+}
+
 // NewMetadata returns a view metadata for a given version.
 func NewMetadata(schema *iceberg.Schema,
 	version Version,
