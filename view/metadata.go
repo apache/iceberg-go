@@ -45,7 +45,8 @@ var (
 const (
 	// LastAddedID is used in place of ID fields (e.g. schema, version) to indicate that
 	// the last added instance of that type should be used.
-	LastAddedID = -1
+	LastAddedID      = -1
+	InitialVersionID = 1
 
 	SupportedViewFormatVersion = 1
 	DefaultViewFormatVersion   = SupportedViewFormatVersion
@@ -528,6 +529,14 @@ func NewMetadataWithUUID(version *Version, sc *iceberg.Schema, location string, 
 			}
 			delete(props, "format-version")
 		}
+	}
+
+	// We assume that this constructor is used for building metadata for a new view.
+	// Thus, we enforce that the VersionID is the initial one defined in the spec.
+	if version.VersionID != InitialVersionID {
+		clonedVersion := *version
+		version = &clonedVersion
+		version.VersionID = InitialVersionID
 	}
 
 	builder, err := NewMetadataBuilder()

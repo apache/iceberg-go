@@ -67,7 +67,8 @@ func TestVersionEquals(t *testing.T) {
 }
 
 func TestNewMetadata(t *testing.T) {
-	version := newTestVersion(1, LastAddedID,
+	// VersionID of 3 should be overridden by the ViewMD ctor
+	version := newTestVersion(3, LastAddedID,
 		WithVersionSummary(VersionSummary{"summary-key": "summary-val"}),
 		WithTimestampMS(1000))
 	schema := newTestSchema(0)
@@ -77,6 +78,8 @@ func TestNewMetadata(t *testing.T) {
 	require.NoError(t, err)
 
 	expectedVersion := version.Clone()
+	// VersionID and SchemaID should be overridden to spec defaults for new View
+	expectedVersion.VersionID = InitialVersionID
 	expectedVersion.SchemaID = 0
 	assert.Equal(t, expectedVersion, md.CurrentVersion())
 	expectedSchema, err := iceberg.AssignFreshSchemaIDs(schema, nil)
