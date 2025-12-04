@@ -237,6 +237,10 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 			return nil, err
 		}
 
+		// Set the x-amz-content-sha256 header before signing.
+		// This header is required for AWS SigV4 signature verification.
+		r.Header.Set("x-amz-content-sha256", payloadHash)
+
 		// modifies the request in place
 		err = s.signer.SignHTTP(r.Context(), creds, r, payloadHash,
 			s.service, s.cfg.Region, time.Now())
