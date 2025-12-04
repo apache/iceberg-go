@@ -848,10 +848,12 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 		return err
 	}
 
-	metadataLocation, err := view.CreateMetadata(ctx, c.name, nsIdent, schema, viewSQL, loc, props)
+	createdView, err := view.CreateView(ctx, c.name, identifier, schema, viewSQL, nsIdent, loc, props)
 	if err != nil {
 		return err
 	}
+	metadataLocation := createdView.MetadataLocation()
+
 	err = withWriteTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
 		_, err := tx.NewInsert().Model(&sqlIcebergTable{
 			CatalogName:      c.name,
@@ -1039,10 +1041,10 @@ func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (vi
 		return nil, fmt.Errorf("%w: %s, metadata location is missing", catalog.ErrNoSuchView, identifier)
 	}
 
-	viewMetadata, err := view.LoadMetadata(ctx, c.props, v.MetadataLocation.String, viewName, ns)
+	loadedView, err := view.NewFromLocation(ctx, identifier, v.MetadataLocation.String, io.LoadFSFunc(c.props, v.MetadataLocation.String))
 	if err != nil {
 		return nil, err
 	}
 
-	return viewMetadata, nil
+	return loadedView.Metadata(), nil
 }

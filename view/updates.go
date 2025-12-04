@@ -6,7 +6,7 @@
 // "License"); you may not use this file except in compliance
 // with the License.  You may obtain a copy of the License at
 //
-//   http://www.apache.org/licenses/LICENSE-2.0
+//	http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing,
 // software distributed under the License is distributed on an
@@ -22,230 +22,251 @@ import (
 	"fmt"
 
 	"github.com/apache/iceberg-go"
+	"github.com/google/uuid"
 )
 
+// These are the various update actions defined in the iceberg spec
 const (
-	UpdateActionAssignUUID            = "assign-uuid"
-	UpdateActionUpgradeFormatVersion  = "upgrade-format-version"
-	UpdateActionAddSchema             = "add-schema"
-	UpdateActionSetLocation           = "set-location"
-	UpdateActionSetProperties         = "set-properties"
-	UpdateActionRemoveProperties      = "remove-properties"
-	UpdateActionAddViewVersion        = "add-view-version"
-	UpdateActionSetCurrentViewVersion = "set-current-view-version"
+	UpdateAddSchema      = "add-schema"
+	UpdateAddViewVersion = "add-view-version"
+
+	UpdateAssignUUID = "assign-uuid"
+
+	UpdateRemoveProperties = "remove-properties"
+
+	UpdateSetCurrentViewVersion = "set-current-view-version"
+	UpdateSetLocation           = "set-location"
+	UpdateSetProperties         = "set-properties"
+
+	UpdateUpgradeFormatVersion = "upgrade-format-version"
 )
 
-// ViewUpdate represents a change to view metadata.
-type ViewUpdate interface {
+// Update represents a change to a view's metadata.
+type Update interface {
 	// Action returns the name of the action that the update represents.
 	Action() string
-	// Apply applies the update to the given metadata builder.
-	Apply(*MetadataBuilder) error
+	// Apply applies the update to the given view metadata builder.
+	Apply(viewBuilder *MetadataBuilder) error
 }
 
-type baseViewUpdate struct {
-	ActionName string `json:"action"`
+type Updates []Update
+
+// updateForAction returns an instance of an update struct corresponding to a given action
+func updateForAction(action string) (Update, error) {
+	var upd Update
+	switch action {
+	case UpdateAssignUUID:
+		upd = &assignUUIDUpdate{}
+	case UpdateUpgradeFormatVersion:
+		upd = &upgradeFormatVersionUpdate{}
+	case UpdateAddSchema:
+		upd = &addSchemaUpdate{}
+	case UpdateSetLocation:
+		upd = &setLocationUpdate{}
+	case UpdateSetProperties:
+		upd = &setPropertiesUpdate{}
+	case UpdateRemoveProperties:
+		upd = &removePropertiesUpdate{}
+	case UpdateAddViewVersion:
+		upd = &addViewVersionUpdate{}
+	case UpdateSetCurrentViewVersion:
+		upd = &setCurrentViewVersionUpdate{}
+	default:
+		return nil, fmt.Errorf("unknown update action: %s", action)
+	}
+
+	return upd, nil
 }
 
-func (u *baseViewUpdate) Action() string {
-	return u.ActionName
-}
-
-// ViewUpdates represents a list of view updates.
-type ViewUpdates []ViewUpdate
-
-func (u *ViewUpdates) UnmarshalJSON(data []byte) error {
+func (u *Updates) UnmarshalJSON(data []byte) error {
 	var rawUpdates []json.RawMessage
 	if err := json.Unmarshal(data, &rawUpdates); err != nil {
 		return err
 	}
 
 	for _, raw := range rawUpdates {
-		var base baseViewUpdate
+		var base baseUpdate
 		if err := json.Unmarshal(raw, &base); err != nil {
 			return err
 		}
 
-		var upd ViewUpdate
-		switch base.ActionName {
-		case UpdateActionAssignUUID:
-			upd = &AssignUUIDUpdate{}
-		case UpdateActionUpgradeFormatVersion:
-			upd = &UpgradeFormatVersionUpdate{}
-		case UpdateActionAddSchema:
-			upd = &AddSchemaUpdate{}
-		case UpdateActionSetLocation:
-			upd = &SetLocationUpdate{}
-		case UpdateActionSetProperties:
-			upd = &SetPropertiesUpdate{}
-		case UpdateActionRemoveProperties:
-			upd = &RemovePropertiesUpdate{}
-		case UpdateActionAddViewVersion:
-			upd = &AddViewVersionUpdate{}
-		case UpdateActionSetCurrentViewVersion:
-			upd = &SetCurrentViewVersionUpdate{}
-		default:
-			return fmt.Errorf("%w: unknown update action: %s", iceberg.ErrInvalidArgument, base.ActionName)
-		}
-
-		if err := json.Unmarshal(raw, upd); err != nil {
+		update, err := updateForAction(base.ActionName)
+		if err != nil {
 			return err
 		}
-		*u = append(*u, upd)
+
+		if err := json.Unmarshal(raw, update); err != nil {
+			return err
+		}
+		*u = append(*u, update)
 	}
 
 	return nil
 }
 
-// AssignUUIDUpdate assigns a UUID to the view MetadataBuilder.
-type AssignUUIDUpdate struct {
-	baseViewUpdate
-	UUID string `json:"uuid"`
+// baseUpdate contains the common fields for all updates. It is used to identify the type
+// of the update.
+type baseUpdate struct {
+	ActionName string `json:"action"`
 }
 
-// Apply assigns the UUID to the view MetadataBuilder.
-func (u *AssignUUIDUpdate) Apply(b *MetadataBuilder) error {
-	return b.AssignUUID(u.UUID)
+func (u *baseUpdate) Action() string {
+	return u.ActionName
 }
 
-// NewAssignUUIDUpdate creates a new update that assigns a UUID to the view MetadataBuilder.
-func NewAssignUUIDUpdate(uuid string) *AssignUUIDUpdate {
-	return &AssignUUIDUpdate{
-		baseViewUpdate: baseViewUpdate{ActionName: UpdateActionAssignUUID},
-		UUID:           uuid,
+type assignUUIDUpdate struct {
+	baseUpdate
+	UUID uuid.UUID `json:"uuid"`
+}
+
+// NewAssignUUIDUpdate creates a new update to assign a UUID to the table metadata.
+func NewAssignUUIDUpdate(uuid uuid.UUID) *assignUUIDUpdate {
+	return &assignUUIDUpdate{
+		baseUpdate: baseUpdate{ActionName: UpdateAssignUUID},
+		UUID:       uuid,
 	}
 }
 
-// UpgradeFormatVersionUpdate upgrades the format version of the view MetadataBuilder to the given version.
-type UpgradeFormatVersionUpdate struct {
-	baseViewUpdate
+func (u *assignUUIDUpdate) Apply(builder *MetadataBuilder) error {
+	builder.SetUUID(u.UUID)
+
+	return builder.Err()
+}
+
+type upgradeFormatVersionUpdate struct {
+	baseUpdate
 	FormatVersion int `json:"format-version"`
 }
 
-// Apply upgrades the format version of the view MetadataBuilder to the given version.
-func (u *UpgradeFormatVersionUpdate) Apply(b *MetadataBuilder) error {
-	return b.UpgradeFormatVersion(u.FormatVersion)
-}
-
-// NewUpgradeFormatVersionUpdate creates a new update that upgrades the format version.
-func NewUpgradeFormatVersionUpdate(version int) *UpgradeFormatVersionUpdate {
-	return &UpgradeFormatVersionUpdate{
-		baseViewUpdate: baseViewUpdate{ActionName: UpdateActionUpgradeFormatVersion},
-		FormatVersion:  version,
+// NewUpgradeFormatVersionUpdate creates a new update that upgrades the format version
+// of the view metadata to the given formatVersion.
+func NewUpgradeFormatVersionUpdate(formatVersion int) *upgradeFormatVersionUpdate {
+	return &upgradeFormatVersionUpdate{
+		baseUpdate:    baseUpdate{ActionName: UpdateUpgradeFormatVersion},
+		FormatVersion: formatVersion,
 	}
 }
 
-// AddSchemaUpdate adds a new schema to the view MetadataBuilder.
-type AddSchemaUpdate struct {
-	baseViewUpdate
-	Schema       *iceberg.Schema `json:"schema"`
-	LastColumnID *int            `json:"last-column-id,omitempty"`
+func (u *upgradeFormatVersionUpdate) Apply(builder *MetadataBuilder) error {
+	builder.SetFormatVersion(u.FormatVersion)
+
+	return builder.Err()
 }
 
-func (u *AddSchemaUpdate) Apply(b *MetadataBuilder) error {
-	return b.AddSchema(u.Schema)
+type addSchemaUpdate struct {
+	baseUpdate
+	Schema *iceberg.Schema `json:"schema"`
 }
 
-// NewAddSchemaUpdate creates a new update that adds a new schema.
-func NewAddSchemaUpdate(schema *iceberg.Schema) *AddSchemaUpdate {
-	return &AddSchemaUpdate{
-		baseViewUpdate: baseViewUpdate{ActionName: UpdateActionAddSchema},
-		Schema:         schema,
+// NewAddSchemaUpdate creates a new update that adds the given schema and updates the lastColumnID based on the schema.
+func NewAddSchemaUpdate(schema *iceberg.Schema) *addSchemaUpdate {
+	return &addSchemaUpdate{
+		baseUpdate: baseUpdate{ActionName: UpdateAddSchema},
+		Schema:     schema,
 	}
 }
 
-// SetLocationUpdate updates the view location in the MetadataBuilder.
-type SetLocationUpdate struct {
-	baseViewUpdate
+func (u *addSchemaUpdate) Apply(builder *MetadataBuilder) error {
+	builder.AddSchema(u.Schema)
+
+	return builder.Err()
+}
+
+type setLocationUpdate struct {
+	baseUpdate
 	Location string `json:"location"`
 }
 
-// Apply updates the view location of the MetadataBuilder.
-func (u *SetLocationUpdate) Apply(b *MetadataBuilder) error {
-	return b.SetLocation(u.Location)
-}
-
-// NewSetLocationUpdate creates a new update that updates the view location in the MetadataBuilder.
-func NewSetLocationUpdate(location string) *SetLocationUpdate {
-	return &SetLocationUpdate{
-		baseViewUpdate: baseViewUpdate{ActionName: UpdateActionSetLocation},
-		Location:       location,
+// NewSetLocationUpdate creates a new update that sets the location of the view metadata.
+func NewSetLocationUpdate(loc string) *setLocationUpdate {
+	return &setLocationUpdate{
+		baseUpdate: baseUpdate{ActionName: UpdateSetLocation},
+		Location:   loc,
 	}
 }
 
-// SetPropertiesUpdate sets view properties.
-type SetPropertiesUpdate struct {
-	baseViewUpdate
-	Updates map[string]string `json:"updates"`
+func (u *setLocationUpdate) Apply(builder *MetadataBuilder) error {
+	builder.SetLoc(u.Location)
+
+	return builder.Err()
 }
 
-// Apply sets view properties in the MetadataBuilder.
-func (u *SetPropertiesUpdate) Apply(b *MetadataBuilder) error {
-	return b.SetProperties(u.Updates)
+type setPropertiesUpdate struct {
+	baseUpdate
+	Updates iceberg.Properties `json:"updates"`
 }
 
-// NewSetPropertiesUpdate creates a new update that sets view properties in the view MetadataBuilder.
-func NewSetPropertiesUpdate(updates map[string]string) *SetPropertiesUpdate {
-	return &SetPropertiesUpdate{
-		baseViewUpdate: baseViewUpdate{ActionName: UpdateActionSetProperties},
-		Updates:        updates,
+// NewSetPropertiesUpdate creates a new update that sets the given properties in the
+// view metadata.
+func NewSetPropertiesUpdate(updates iceberg.Properties) *setPropertiesUpdate {
+	return &setPropertiesUpdate{
+		baseUpdate: baseUpdate{ActionName: UpdateSetProperties},
+		Updates:    updates,
 	}
 }
 
-// RemovePropertiesUpdate removes view properties in the view MetadataBuilder.
-type RemovePropertiesUpdate struct {
-	baseViewUpdate
+func (u *setPropertiesUpdate) Apply(builder *MetadataBuilder) error {
+	builder.SetProperties(u.Updates)
+
+	return builder.Err()
+}
+
+type removePropertiesUpdate struct {
+	baseUpdate
 	Removals []string `json:"removals"`
 }
 
-// Apply removes view properties from the view MetadataBuilder.
-func (u *RemovePropertiesUpdate) Apply(b *MetadataBuilder) error {
-	return b.RemoveProperties(u.Removals)
-}
-
-// NewRemovePropertiesUpdate creates a new update that removes view properties from the view MetadataBuilder.
-func NewRemovePropertiesUpdate(removals []string) *RemovePropertiesUpdate {
-	return &RemovePropertiesUpdate{
-		baseViewUpdate: baseViewUpdate{ActionName: UpdateActionRemoveProperties},
-		Removals:       removals,
+// NewRemovePropertiesUpdate creates a new update that removes properties from the view metadata.
+// The properties are identified by their names, and if a property with the given name does not exist,
+// it is ignored.
+func NewRemovePropertiesUpdate(removals []string) *removePropertiesUpdate {
+	return &removePropertiesUpdate{
+		baseUpdate: baseUpdate{ActionName: UpdateRemoveProperties},
+		Removals:   removals,
 	}
 }
 
-// AddViewVersionUpdate adds a new view version to the view MetadataBuilder.
-type AddViewVersionUpdate struct {
-	baseViewUpdate
-	ViewVersion *Version `json:"view-version"`
+func (u *removePropertiesUpdate) Apply(builder *MetadataBuilder) error {
+	builder.RemoveProperties(u.Removals)
+
+	return builder.Err()
 }
 
-// Apply adds a new view version to the view MetadataBuilder.
-func (u *AddViewVersionUpdate) Apply(b *MetadataBuilder) error {
-	return b.AddVersion(u.ViewVersion)
+type addViewVersionUpdate struct {
+	baseUpdate
+	Version *Version `json:"view-version"`
 }
 
-// NewAddViewVersionUpdate creates a new update that adds a new view version to the view MetadataBuilder.
-func NewAddViewVersionUpdate(version *Version) *AddViewVersionUpdate {
-	return &AddViewVersionUpdate{
-		baseViewUpdate: baseViewUpdate{ActionName: UpdateActionAddViewVersion},
-		ViewVersion:    version,
+// NewAddViewVersionUpdate creates a new ViewUpdate that adds a version to a view
+func NewAddViewVersionUpdate(version *Version) *addViewVersionUpdate {
+	return &addViewVersionUpdate{
+		baseUpdate: baseUpdate{ActionName: UpdateAddViewVersion},
+		Version:    version,
 	}
 }
 
-// SetCurrentViewVersionUpdate sets the current view version of the view MetadataBuilder.
-// VersionID can be -1 to reference the last added version.
-type SetCurrentViewVersionUpdate struct {
-	baseViewUpdate
-	VersionID int64 `json:"version-id"`
+func (u *addViewVersionUpdate) Apply(builder *MetadataBuilder) error {
+	builder.AddVersion(u.Version)
+
+	return builder.Err()
 }
 
-// Apply sets the current view version of the view MetadataBuilder.
-func (u *SetCurrentViewVersionUpdate) Apply(b *MetadataBuilder) error {
-	return b.SetCurrentVersionID(u.VersionID)
+type setCurrentViewVersionUpdate struct {
+	baseUpdate
+	VersionID int64 `json:"view-version-id"`
 }
 
-// NewSetCurrentViewVersionUpdate creates a new update that sets the current view version of the view MetadataBuilder.
-func NewSetCurrentViewVersionUpdate(versionID int64) *SetCurrentViewVersionUpdate {
-	return &SetCurrentViewVersionUpdate{
-		baseViewUpdate: baseViewUpdate{ActionName: UpdateActionSetCurrentViewVersion},
-		VersionID:      versionID,
+// NewSetCurrentVersionUpdate creates a new ViewUpdate that sets the current version of a view
+// to the given version ID.
+func NewSetCurrentVersionUpdate(id int64) *setCurrentViewVersionUpdate {
+	return &setCurrentViewVersionUpdate{
+		baseUpdate: baseUpdate{ActionName: UpdateSetCurrentViewVersion},
+		VersionID:  id,
 	}
+}
+
+func (u *setCurrentViewVersionUpdate) Apply(builder *MetadataBuilder) error {
+	builder.SetCurrentVersionID(u.VersionID)
+
+	return builder.Err()
 }
