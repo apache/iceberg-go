@@ -754,7 +754,6 @@ func (b *MetadataBuilder) RemoveSnapshotRef(name string) error {
 
 	if name == MainBranch {
 		b.currentSnapshotID = nil
-		b.snapshotLog = b.snapshotLog[:0]
 	}
 
 	delete(b.refs, name)
