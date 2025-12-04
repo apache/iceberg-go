@@ -106,7 +106,7 @@ the table, the following tracks the current write support:
 
 
 ### CLI Usage
-Run `go build ./cmd/iceberg` from the root of this repository to build the CLI executable, alternately you can run `go install github.com/apache/iceberg-go/cmd/iceberg` to install it to the `bin` directory of your `GOPATH`.
+Run `go build ./cmd/iceberg` from the root of this repository to build the CLI executable, alternately you can run `go install github.com/apache/iceberg-go/cmd/iceberg@latest` to install it to the `bin` directory of your `GOPATH`.
 
 The `iceberg` CLI usage is very similar to [pyiceberg CLI](https://py.iceberg.apache.org/cli/) \
 You can pass the catalog URI with `--uri` argument.
