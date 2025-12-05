@@ -1102,7 +1102,7 @@ func (r *RestCatalogSuite) TestLoadTable200() {
 			r.Equal(v, req.Header.Values(k))
 		}
 
-		w.Write([]byte(`{			
+		w.Write([]byte(`{
 			"metadata-location": "s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json",
 			"metadata": {
 				"format-version": 1,
@@ -1387,14 +1387,14 @@ func (r *RestCatalogSuite) TestRegisterTable200() {
       }
     ],
     "partition-spec": [
-      
+
     ],
     "default-spec-id": 0,
     "partition-specs": [
       {
         "spec-id": 0,
         "fields": [
-          
+
         ]
       }
     ],
@@ -1404,7 +1404,7 @@ func (r *RestCatalogSuite) TestRegisterTable200() {
       {
         "order-id": 0,
         "fields": [
-          
+
         ]
       }
     ],
@@ -1870,6 +1870,106 @@ func (r *RestCatalogSuite) TestCheckViewExists404() {
 	exists, err := cat.CheckViewExists(context.Background(), catalog.ToIdentifier("fokko", "nonexistent"))
 	r.Require().NoError(err)
 	r.False(exists)
+}
+
+func (r *RestCatalogSuite) TestLoadView200() {
+	r.mux.HandleFunc("/v1/namespaces/fokko/views/myview", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.Write([]byte(`{
+			"metadata-location": "s3://bucket/warehouse/default.db/event_agg/metadata/00001.metadata.json",
+			"metadata": {
+				"view-uuid": "fa6506c3-7681-40c8-86dc-e36561f83385",
+				"format-version": 1,
+				"location": "s3://bucket/warehouse/default.db/event_agg",
+				"current-version-id": 1,
+				"properties": {
+					"comment": "Daily event counts"
+				},
+				"versions": [{
+					"version-id": 1,
+					"timestamp-ms": 1573518431292,
+					"schema-id": 1,
+					"default-catalog": "prod",
+					"default-namespace": ["default"],
+					"summary": {
+						"engine-name": "Spark",
+						"engine-version": "3.3.2"
+					},
+					"representations": [{
+						"type": "sql",
+						"sql": "SELECT COUNT(1), CAST(event_ts AS DATE) FROM events GROUP BY 2",
+						"dialect": "spark"
+					}]
+				}],
+				"schemas": [{
+					"schema-id": 1,
+					"type": "struct",
+					"fields": [
+						{"id": 1, "name": "event_count", "required": false, "type": "int"},
+						{"id": 2, "name": "event_date", "required": false, "type": "date"}
+					]
+				}],
+				"version-log": [{
+					"timestamp-ms": 1573518431292,
+					"version-id": 1
+				}]
+			},
+			"config": {}
+		}`))
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	metadata, err := cat.LoadView(context.Background(), catalog.ToIdentifier("fokko", "myview"))
+	r.Require().NoError(err)
+
+	r.Equal("fa6506c3-7681-40c8-86dc-e36561f83385", metadata.ViewUUID())
+	r.Equal(1, metadata.FormatVersion())
+	r.Equal("s3://bucket/warehouse/default.db/event_agg", metadata.Location())
+	r.Equal("Daily event counts", metadata.Properties()["comment"])
+
+	currentVersion := metadata.CurrentVersion()
+	r.NotNil(currentVersion)
+	r.EqualValues(1, currentVersion.VersionID)
+	r.Equal(1, currentVersion.SchemaID)
+	r.EqualValues(1573518431292, currentVersion.TimestampMs)
+	r.Equal("Spark", currentVersion.Summary["engine-name"])
+	r.Len(currentVersion.Representations, 1)
+	r.Equal("sql", currentVersion.Representations[0].Type)
+	r.Equal("spark", currentVersion.Representations[0].Dialect)
+}
+
+func (r *RestCatalogSuite) TestLoadView404() {
+	r.mux.HandleFunc("/v1/namespaces/fokko/views/nonexistent", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "View does not exist: fokko.nonexistent",
+				"type":    "NoSuchViewException",
+				"code":    404,
+			},
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.LoadView(context.Background(), catalog.ToIdentifier("fokko", "nonexistent"))
+	r.Error(err)
+	r.ErrorIs(err, catalog.ErrNoSuchView)
+	r.ErrorContains(err, "View does not exist: fokko.nonexistent")
 }
 
 type RestTLSCatalogSuite struct {
