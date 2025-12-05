@@ -1929,7 +1929,7 @@ func (r *RestCatalogSuite) TestLoadView200() {
 	metadata, err := cat.LoadView(context.Background(), catalog.ToIdentifier("fokko", "myview"))
 	r.Require().NoError(err)
 
-	r.Equal("fa6506c3-7681-40c8-86dc-e36561f83385", metadata.ViewUUID())
+	r.Equal(uuid.MustParse("fa6506c3-7681-40c8-86dc-e36561f83385"), metadata.ViewUUID())
 	r.Equal(1, metadata.FormatVersion())
 	r.Equal("s3://bucket/warehouse/default.db/event_agg", metadata.Location())
 	r.Equal("Daily event counts", metadata.Properties()["comment"])
