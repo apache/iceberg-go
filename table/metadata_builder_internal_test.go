@@ -656,6 +656,85 @@ func TestExpireMetadataLog(t *testing.T) {
 	require.Len(t, meta.(*metadataV2).MetadataLog, 2)
 }
 
+func TestMetadataLogTrimsWithUpdatedProperty(t *testing.T) {
+	// This test validates that when write.metadata.previous-versions-max is
+	// updated during a metadata build, the trimming logic uses the NEW value
+	// from b.props, not the old value from b.base.Properties()
+
+	// Create initial metadata with default retention (100)
+	builder1 := builderWithoutChanges(2)
+	meta1, err := builder1.Build()
+	require.NoError(t, err)
+	require.Empty(t, meta1.(*metadataV2).MetadataLog)
+
+	// Build metadata #2 - this should create first metadata log entry
+	builder2, err := MetadataBuilderFromBase(meta1, "s3://bucket/test/location/metadata/v2.json")
+	require.NoError(t, err)
+	err = builder2.SetProperties(map[string]string{
+		"test.prop": "value1",
+	})
+	require.NoError(t, err)
+	meta2, err := builder2.Build()
+	require.NoError(t, err)
+	require.Len(t, meta2.(*metadataV2).MetadataLog, 1)
+
+	// Build metadata #3 - this should have 2 entries
+	builder3, err := MetadataBuilderFromBase(meta2, "s3://bucket/test/location/metadata/v3.json")
+	require.NoError(t, err)
+	err = builder3.SetProperties(map[string]string{
+		"test.prop": "value2",
+	})
+	require.NoError(t, err)
+	meta3, err := builder3.Build()
+	require.NoError(t, err)
+	require.Len(t, meta3.(*metadataV2).MetadataLog, 2)
+
+	// Build metadata #4 - this should have 3 entries
+	builder4, err := MetadataBuilderFromBase(meta3, "s3://bucket/test/location/metadata/v4.json")
+	require.NoError(t, err)
+	err = builder4.SetProperties(map[string]string{
+		"test.prop": "value3",
+	})
+	require.NoError(t, err)
+	meta4, err := builder4.Build()
+	require.NoError(t, err)
+	require.Len(t, meta4.(*metadataV2).MetadataLog, 3)
+
+	// Build metadata #5 - NOW set write.metadata.previous-versions-max=2
+	// This is the key test: the trimming should happen immediately using the
+	// NEW value (2), not the old/default value (100)
+	builder5, err := MetadataBuilderFromBase(meta4, "s3://bucket/test/location/metadata/v5.json")
+	require.NoError(t, err)
+	err = builder5.SetProperties(map[string]string{
+		MetadataPreviousVersionsMaxKey: "2",
+		"test.prop":                    "value4",
+	})
+	require.NoError(t, err)
+	meta5, err := builder5.Build()
+	require.NoError(t, err)
+
+	// The bug was that it would keep all 4 entries because it read the property
+	// from base metadata (which didn't have it set). After the fix, it should
+	// correctly trim to 2 entries immediately.
+	require.Len(t, meta5.(*metadataV2).MetadataLog, 2,
+		"metadata log should be trimmed to 2 entries based on updated property value")
+
+	// Verify the property was actually set
+	require.Equal(t, "2", meta5.Properties()[MetadataPreviousVersionsMaxKey])
+
+	// Verify subsequent builds continue to respect the property
+	builder6, err := MetadataBuilderFromBase(meta5, "s3://bucket/test/location/metadata/v6.json")
+	require.NoError(t, err)
+	err = builder6.SetProperties(map[string]string{
+		"test.prop": "value5",
+	})
+	require.NoError(t, err)
+	meta6, err := builder6.Build()
+	require.NoError(t, err)
+	require.Len(t, meta6.(*metadataV2).MetadataLog, 2,
+		"subsequent builds should continue to respect the max versions limit")
+}
+
 func TestV2SequenceNumberCannotDecrease(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	schemaID := 0
