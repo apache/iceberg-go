@@ -202,6 +202,10 @@ func (s *RestIntegrationSuite) TestCreateView() {
 	s.Require().NoError(err)
 	s.Require().NotNil(tbl)
 
+	defer func() {
+		s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table")))
+	}()
+
 	s.Equal(location, tbl.Location())
 	s.Equal("baz", tbl.Properties()["foobar"])
 
@@ -211,22 +215,36 @@ func (s *RestIntegrationSuite) TestCreateView() {
 
 	// Create a view
 	viewRepr := view.NewRepresentation(fmt.Sprintf("SELECT * FROM  %s.%s", TestNamespaceIdent, "test-table"), "trino")
-	viewVersion, err := view.NewVersion(1, 1, []view.Representation{viewRepr}, table.Identifier{TestNamespaceIdent})
+	viewVersion, err := view.NewVersion(1, 0, []view.Representation{viewRepr}, table.Identifier{TestNamespaceIdent}, view.WithDefaultViewCatalog(s.cat.Name()))
 	s.Require().NoError(err)
 
-	_, err = s.cat.CreateView(s.ctx,
+	defer func() {
+		s.Require().NoError(s.cat.DropView(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view")))
+	}()
+
+	createdView, err := s.cat.CreateView(s.ctx,
 		catalog.ToIdentifier(TestNamespaceIdent, "test-view"),
 		viewVersion,
 		tableSchemaSimple,
 		catalog.WithViewProperties(iceberg.Properties{"foobar": "baz"}))
 	s.Require().NoError(err)
+	createdViewMD := createdView.Metadata()
 
+	// Sync the summaries for comparison since the catalog can inject additional properties
+	createdVersionCopy := createdViewMD.CurrentVersion().Clone()
+	createdVersionCopy.Summary = viewVersion.Summary
+	s.Assert().True(createdVersionCopy.Equals(viewVersion))
+
+	// Check existence
 	exists, err = s.cat.CheckViewExists(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view"))
 	s.Require().NoError(err)
 	s.True(exists)
 
-	s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table")))
-	s.Require().NoError(s.cat.DropView(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view")))
+	// Finally test loading our view
+	loadedView, err := s.cat.LoadView(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view"))
+	s.Require().NoError(err)
+	s.Require().NotNil(loadedView)
+	s.Assert().True(createdViewMD.Equals(loadedView.Metadata()))
 }
 
 func (s *RestIntegrationSuite) TestUpdateView() {

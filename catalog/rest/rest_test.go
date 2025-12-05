@@ -2168,6 +2168,50 @@ func (r *RestCatalogSuite) TestCreateView404() {
 	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
+func (r *RestCatalogSuite) TestLoadView200() {
+	ns := "ns"
+	viewName := "view"
+	identifier := table.Identifier{ns, viewName}
+
+	r.mux.HandleFunc("/v1/namespaces/"+ns+"/views/"+viewName, func(w http.ResponseWriter, req *http.Request) {
+		r.Equal(http.MethodGet, req.Method)
+		r.Equal("application/json", req.Header.Get("Content-Type"))
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(createViewRestExample))
+	})
+
+	ctlg, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL)
+	r.NoError(err)
+
+	loadedView, err := ctlg.LoadView(context.Background(), identifier)
+	r.NoError(err)
+	r.Equal("metadata-location", loadedView.MetadataLocation())
+	r.True(loadedView.Metadata().Equals(loadedView.Metadata()))
+}
+
+func (r *RestCatalogSuite) TestLoadView404() {
+	ns := "ns"
+	viewName := "view"
+	identifier := table.Identifier{ns, viewName}
+
+	r.mux.HandleFunc("/v1/namespaces/"+ns+"/views/"+viewName, func(w http.ResponseWriter, req *http.Request) {
+		r.Equal(http.MethodGet, req.Method)
+		r.Equal("application/json", req.Header.Get("Content-Type"))
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	ctlg, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL)
+	r.NoError(err)
+
+	loadedView, err := ctlg.LoadView(context.Background(), identifier)
+	r.Error(err)
+	r.Nil(loadedView)
+}
+
 type mockTransport struct {
 	calls []struct {
 		method, path string
