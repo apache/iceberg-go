@@ -922,3 +922,177 @@ func TestHighestFieldIDListType(t *testing.T) {
 	)
 	assert.Equal(t, 2, tableSchema.HighestFieldID())
 }
+
+func TestSchemaWithGeometryGeographyTypes(t *testing.T) {
+	geom, err := iceberg.GeometryTypeOf("srid:4326")
+	require.NoError(t, err)
+	geog, err := iceberg.GeographyTypeOf("srid:4269", iceberg.EdgeAlgorithmKarney)
+	require.NoError(t, err)
+
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "simple_point", Type: iceberg.GeometryType{}, Required: false},
+		iceberg.NestedField{ID: 3, Name: "location", Type: geom, Required: false},
+		iceberg.NestedField{ID: 4, Name: "service_area", Type: geog, Required: false},
+	)
+
+	data, err := json.Marshal(schema)
+	require.NoError(t, err)
+
+	assert.JSONEq(t, `{
+		"type": "struct",
+		"schema-id": 1,
+		"identifier-field-ids": [],
+		"fields": [
+			{"id": 1, "name": "id", "type": "long", "required": true},
+			{"id": 2, "name": "simple_point", "type": "geometry", "required": false},
+			{"id": 3, "name": "location", "type": "geometry(srid:4326)", "required": false},
+			{"id": 4, "name": "service_area", "type": "geography(srid:4269, karney)", "required": false}
+		]
+	}`, string(data))
+
+	var unmarshaledSchema iceberg.Schema
+	require.NoError(t, json.Unmarshal(data, &unmarshaledSchema))
+	assert.True(t, schema.Equals(&unmarshaledSchema))
+}
+
+func TestNestedFieldToStringGeographyGeometry(t *testing.T) {
+	geom, err := iceberg.GeometryTypeOf("srid:3857")
+	require.NoError(t, err)
+	geog, err := iceberg.GeographyTypeOf("srid:4269", iceberg.EdgeAlgorithmKarney)
+	require.NoError(t, err)
+
+	tests := []struct {
+		field    iceberg.NestedField
+		expected string
+	}{
+		{
+			iceberg.NestedField{ID: 1, Name: "point", Type: iceberg.GeometryType{}, Required: false},
+			"1: point: optional geometry",
+		},
+		{
+			iceberg.NestedField{ID: 2, Name: "location", Type: geom, Required: true},
+			"2: location: required geometry(srid:3857)",
+		},
+		{
+			iceberg.NestedField{ID: 3, Name: "area", Type: iceberg.GeographyType{}, Required: false},
+			"3: area: optional geography",
+		},
+		{
+			iceberg.NestedField{ID: 4, Name: "region", Type: geog, Required: false},
+			"4: region: optional geography(srid:4269, karney)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.field.Name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, tt.field.String())
+		})
+	}
+}
+
+func TestSchemaWithGeometryInNestedStructures(t *testing.T) {
+	geom, err := iceberg.GeometryTypeOf("srid:4326")
+	require.NoError(t, err)
+	geog, err := iceberg.GeographyTypeOf("srid:4269", iceberg.EdgeAlgorithmSpherical)
+	require.NoError(t, err)
+
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{
+			ID:   1,
+			Name: "locations",
+			Type: &iceberg.ListType{
+				ElementID:       2,
+				Element:         geom,
+				ElementRequired: true,
+			},
+			Required: true,
+		},
+		iceberg.NestedField{
+			ID:   3,
+			Name: "region_data",
+			Type: &iceberg.MapType{
+				KeyID:         4,
+				KeyType:       iceberg.PrimitiveTypes.String,
+				ValueID:       5,
+				ValueType:     geog,
+				ValueRequired: false,
+			},
+			Required: false,
+		},
+		iceberg.NestedField{
+			ID:   6,
+			Name: "place",
+			Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 7, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: true},
+					{ID: 8, Name: "coords", Type: iceberg.GeometryType{}, Required: false},
+				},
+			},
+			Required: false,
+		},
+	)
+
+	data, err := json.Marshal(schema)
+	require.NoError(t, err)
+
+	var unmarshaledSchema iceberg.Schema
+	require.NoError(t, json.Unmarshal(data, &unmarshaledSchema))
+	assert.True(t, schema.Equals(&unmarshaledSchema))
+
+	assert.Equal(t, "1: locations: required list<geometry(srid:4326)>", schema.Field(0).String())
+	assert.Equal(t, "3: region_data: optional map<string, geography(srid:4269, spherical)>", schema.Field(1).String())
+}
+
+func TestPruneColumnsWithGeometry(t *testing.T) {
+	geom, err := iceberg.GeometryTypeOf("srid:4326")
+	require.NoError(t, err)
+
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
+		iceberg.NestedField{ID: 3, Name: "location", Type: geom, Required: false},
+	)
+
+	pruned, err := iceberg.PruneColumns(schema, map[int]iceberg.Void{1: {}, 3: {}}, false)
+	require.NoError(t, err)
+
+	expected := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 3, Name: "location", Type: geom, Required: false},
+	)
+
+	assert.True(t, pruned.Equals(expected))
+}
+
+func TestSchemaIndexByIDWithGeography(t *testing.T) {
+	geog, err := iceberg.GeographyTypeOf("srid:4269", iceberg.EdgeAlgorithmKarney)
+	require.NoError(t, err)
+
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "area", Type: geog, Required: false},
+	)
+
+	index, err := iceberg.IndexByID(schema)
+	require.NoError(t, err)
+
+	assert.Len(t, index, 2)
+	assert.Equal(t, geog, index[2].Type)
+	assert.Equal(t, "area", index[2].Name)
+}
+
+func TestSchemaFindColumnNameWithGeometryGeography(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "point", Type: iceberg.GeometryType{}, Required: false},
+		iceberg.NestedField{ID: 2, Name: "region", Type: iceberg.GeographyType{}, Required: false},
+	)
+
+	name, ok := schema.FindColumnName(1)
+	assert.True(t, ok)
+	assert.Equal(t, "point", name)
+
+	name, ok = schema.FindColumnName(2)
+	assert.True(t, ok)
+	assert.Equal(t, "region", name)
+}

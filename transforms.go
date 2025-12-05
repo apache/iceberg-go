@@ -106,9 +106,14 @@ func (t IdentityTransform) MarshalText() ([]byte, error) {
 func (IdentityTransform) String() string { return "identity" }
 
 func (IdentityTransform) CanTransform(t Type) bool {
-	_, ok := t.(PrimitiveType)
+	switch t.(type) {
+	case GeometryType, GeographyType:
+		return false
+	default:
+		_, ok := t.(PrimitiveType)
 
-	return ok
+		return ok
+	}
 }
 func (IdentityTransform) ResultType(t Type) Type { return t }
 func (IdentityTransform) PreservesOrder() bool   { return true }
