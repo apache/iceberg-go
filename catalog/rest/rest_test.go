@@ -1938,7 +1938,7 @@ func (r *RestCatalogSuite) TestLoadView200() {
 	r.NotNil(currentVersion)
 	r.EqualValues(1, currentVersion.VersionID)
 	r.Equal(1, currentVersion.SchemaID)
-	r.EqualValues(1573518431292, currentVersion.TimestampMs)
+	r.EqualValues(1573518431292, currentVersion.TimestampMS)
 	r.Equal("Spark", currentVersion.Summary["engine-name"])
 	r.Len(currentVersion.Representations, 1)
 	r.Equal("sql", currentVersion.Representations[0].Type)
