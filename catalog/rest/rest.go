@@ -1192,6 +1192,22 @@ func (v *viewResponse) UnmarshalJSON(b []byte) (err error) {
 	return
 }
 
+// LoadView loads a view from the catalog
+func (r *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*view.View, error) {
+	ns, viewName, err := splitIdentForPath(identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	ret, err := doGet[viewResponse](ctx, r.baseURI, []string{"namespaces", ns, "views", viewName},
+		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchView})
+	if err != nil {
+		return nil, err
+	}
+
+	return view.New(identifier, ret.Metadata, ret.MetadataLoc), nil
+}
+
 // CreateView creates a new view in the catalog.
 func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, version *view.Version, schema *iceberg.Schema, opts ...catalog.CreateViewOpt) (*view.View, error) {
 	ns, viewName, err := splitIdentForPath(identifier)
