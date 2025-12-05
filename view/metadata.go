@@ -189,25 +189,6 @@ func NewVersion(id int64, schemaID int, representations []Representation, defaul
 	return version, nil
 }
 
-// ParseMetadataBytes parses view metadata from raw JSON bytes.
-//
-// Returns the parsed Metadata or an error if parsing fails.
-func ParseMetadataBytes(metadataBytes []byte) (Metadata, error) {
-	var m metadata
-	if err := json.Unmarshal(metadataBytes, &m); err != nil {
-		return nil, fmt.Errorf("error encountered decoding view metadata: %w", err)
-	}
-
-	return &m, nil
-}
-
-// NewMetadata returns a view metadata for a given version.
-func NewMetadata(schema *iceberg.Schema,
-	version Version,
-	loc string,
-	props iceberg.Properties,
-) (Metadata, error) {
-	timestampMs := time.Now().UnixMilli()
 // NewVersionFromSQL creates a new Version with a single representation
 // using the provided SQL and dialect "default".
 func NewVersionFromSQL(id int64, schemaID int, sql string, defaultNS table.Identifier, opts ...VersionOpt) (*Version, error) {
