@@ -1277,8 +1277,8 @@ type loadViewResponse struct {
 	Config      iceberg.Properties `json:"config"`
 }
 
-// LoadView loads view metadata from the catalog.
-func (r *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (view.Metadata, error) {
+// LoadView loads a view from the catalog.
+func (r *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*view.View, error) {
 	ns, v, err := splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
@@ -1297,5 +1297,5 @@ func (r *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (vi
 		return nil, fmt.Errorf("failed to parse view metadata: %w", err)
 	}
 
-	return metadata, nil
+	return view.New(identifier, metadata, rsp.MetadataLoc), nil
 }

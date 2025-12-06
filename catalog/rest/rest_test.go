@@ -1926,9 +1926,13 @@ func (r *RestCatalogSuite) TestLoadView200() {
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
 	r.Require().NoError(err)
 
-	metadata, err := cat.LoadView(context.Background(), catalog.ToIdentifier("fokko", "myview"))
+	v, err := cat.LoadView(context.Background(), catalog.ToIdentifier("fokko", "myview"))
 	r.Require().NoError(err)
 
+	r.Equal(table.Identifier{"fokko", "myview"}, v.Identifier())
+	r.Equal("s3://bucket/warehouse/default.db/event_agg/metadata/00001.metadata.json", v.MetadataLocation())
+
+	metadata := v.Metadata()
 	r.Equal(uuid.MustParse("fa6506c3-7681-40c8-86dc-e36561f83385"), metadata.ViewUUID())
 	r.Equal(1, metadata.FormatVersion())
 	r.Equal("s3://bucket/warehouse/default.db/event_agg", metadata.Location())
