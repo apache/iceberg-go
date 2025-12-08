@@ -53,7 +53,7 @@ func (s *SnapshotRef) UnmarshalJSON(b []byte) error {
 	aux := (*Alias)(s)
 
 	if err := json.Unmarshal(b, aux); err != nil {
-		return nil
+		return err
 	}
 
 	switch s.SnapshotRefType {
