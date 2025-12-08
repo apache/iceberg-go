@@ -121,7 +121,7 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 // version number for types that require newer format versions.
 func minFormatVersionForType(t iceberg.Type) int {
 	switch t.(type) {
-	case iceberg.TimestampNsType, iceberg.TimestampTzNsType:
+	case iceberg.TimestampNsType, iceberg.TimestampTzNsType, iceberg.UnknownType:
 		return 3
 	default:
 		// All other types supported in v1+
@@ -180,7 +180,7 @@ func (v *unknownTypeValidator) List(list iceberg.ListType, elemResult error) err
 	}
 	elem := list.ElementField()
 
-	if _, isUknown := elem.Type.(iceberg.UnknownType); isUknown {
+	if _, isUnknown := elem.Type.(iceberg.UnknownType); isUnknown {
 		if elem.Required {
 			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked required", elem.Name, elem.ID)
 		}
