@@ -320,6 +320,7 @@ func TestUnknownTypeInNestedStructs(t *testing.T) {
 	for _, f := range structType.FieldList {
 		if f.ID == 6 {
 			innerOp = f
+
 			break
 		}
 	}
@@ -332,6 +333,7 @@ func TestUnknownTypeInNestedStructs(t *testing.T) {
 	for _, f := range structType.FieldList {
 		if f.ID == 7 {
 			innerMap = f
+
 			break
 		}
 	}
@@ -346,6 +348,7 @@ func TestUnknownTypeInNestedStructs(t *testing.T) {
 	for _, f := range structType.FieldList {
 		if f.ID == 10 {
 			structArr = f
+
 			break
 		}
 	}
@@ -356,6 +359,7 @@ func TestUnknownTypeInNestedStructs(t *testing.T) {
 	for _, f := range nestedStruct.FieldList {
 		if f.ID == 11 {
 			deep = f
+
 			break
 		}
 	}
