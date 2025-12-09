@@ -473,7 +473,7 @@ func TestAddVersion_MultipleSQLForSameDialect(t *testing.T) {
 		).
 		SetCurrentVersionID(1).
 		Build()
-	assert.ErrorContains(t, err, "invalid view version: cannot add multiple queries for dialect spark")
+	assert.ErrorContains(t, err, "Invalid view version: Cannot add multiple queries for dialect spark")
 }
 
 func TestSetCurrentVersionID_NoLastAddedSchema(t *testing.T) {
