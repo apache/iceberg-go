@@ -151,11 +151,15 @@ func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 }
 
 func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, outputDataFilesCh chan iceberg.DataFile) iter.Seq2[iceberg.DataFile, error] {
-	var err error
+	// Use a channel to safely communicate the error from the goroutine
+	// to avoid a data race between writing err in the goroutine and reading it in the iterator.
+	errCh := make(chan error, 1)
 	go func() {
 		defer close(outputDataFilesCh)
-		err = fanoutWorkers.Wait()
+		err := fanoutWorkers.Wait()
 		err = errors.Join(err, p.writers.closeAll())
+		errCh <- err
+		close(errCh)
 	}()
 
 	return func(yield func(iceberg.DataFile, error) bool) {
@@ -164,13 +168,15 @@ func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, 
 			}
 		}()
 
+		// Yield data files as they arrive - no error yet since goroutine is still running
 		for f := range outputDataFilesCh {
-			if !yield(f, err) {
+			if !yield(f, nil) {
 				return
 			}
 		}
 
-		if err != nil {
+		// Channel is closed, now safe to read the error
+		if err := <-errCh; err != nil {
 			yield(nil, err)
 		}
 	}
