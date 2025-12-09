@@ -85,6 +85,7 @@ func (o *Oauth2AuthManager) AuthHeader() (string, string, error) {
 		}
 		o.Token = tok
 	}
+
 	return "Authorization", "Bearer " + o.Token, nil
 }
 
