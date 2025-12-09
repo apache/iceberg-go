@@ -519,6 +519,8 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	}
 	cl := &http.Client{Transport: session}
 
+	// This creates an OAuth2Manager if no auth manager is provided.
+	// This goal is to replicate existing behavior.
 	if opts.credential != "" {
 		if _, ok := opts.authManager.(*Oauth2AuthManager); !ok {
 			authURI := opts.authUri
