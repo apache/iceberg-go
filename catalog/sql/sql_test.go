@@ -278,12 +278,12 @@ func (s *SqliteCatalogTestSuite) TestCreationOneTableExists() {
 	s.confirmNoTables(sqldb)
 
 	_, err := sqldb.Exec(`CREATE TABLE "iceberg_tables" (
-		"catalog_name" VARCHAR NOT NULL, 
-		"table_namespace" VARCHAR NOT NULL, 
+		"catalog_name" VARCHAR NOT NULL,
+		"table_namespace" VARCHAR NOT NULL,
 		"table_name" VARCHAR NOT NULL,
 		"iceberg_type" VARCHAR NOT NULL DEFAULT 'TABLE',
-		"metadata_location" VARCHAR, 
-		"previous_metadata_location" VARCHAR, 
+		"metadata_location" VARCHAR,
+		"previous_metadata_location" VARCHAR,
 		PRIMARY KEY ("catalog_name", "table_namespace", "table_name"))`)
 	s.Require().NoError(err)
 
@@ -297,20 +297,20 @@ func (s *SqliteCatalogTestSuite) TestCreationAllTablesExist() {
 	s.confirmNoTables(sqldb)
 
 	_, err := sqldb.Exec(`CREATE TABLE "iceberg_tables" (
-		"catalog_name" VARCHAR NOT NULL, 
-		"table_namespace" VARCHAR NOT NULL, 
+		"catalog_name" VARCHAR NOT NULL,
+		"table_namespace" VARCHAR NOT NULL,
 		"table_name" VARCHAR NOT NULL,
 		"iceberg_type" VARCHAR,
-		"metadata_location" VARCHAR, 
-		"previous_metadata_location" VARCHAR, 
+		"metadata_location" VARCHAR,
+		"previous_metadata_location" VARCHAR,
 		PRIMARY KEY ("catalog_name", "table_namespace", "table_name"))`)
 	s.Require().NoError(err)
 
 	_, err = sqldb.Exec(`CREATE TABLE "iceberg_namespace_properties" (
-		"catalog_name" VARCHAR NOT NULL, 
-		"namespace" VARCHAR NOT NULL, 
-		"property_key" VARCHAR NOT NULL, 
-		"property_value" VARCHAR, 
+		"catalog_name" VARCHAR NOT NULL,
+		"namespace" VARCHAR NOT NULL,
+		"property_key" VARCHAR NOT NULL,
+		"property_value" VARCHAR,
 		PRIMARY KEY ("catalog_name", "namespace", "property_key"))`)
 	s.Require().NoError(err)
 
@@ -1095,6 +1095,38 @@ func (s *SqliteCatalogTestSuite) TestDropView() {
 	err = db.DropView(context.Background(), []string{nsName, "nonexistent"})
 	s.Error(err)
 	s.ErrorIs(err, catalog.ErrNoSuchView)
+}
+
+func (s *SqliteCatalogTestSuite) TestDropViewWithInvalidMetadataLocation() {
+	db := s.getCatalogSqlite()
+	s.Require().NoError(db.CreateSQLTables(context.Background()))
+
+	nsName := databaseName()
+	viewName := tableName()
+	s.Require().NoError(db.CreateNamespace(context.Background(), []string{nsName}, nil))
+
+	viewSQL := "SELECT * FROM test_table"
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, nil))
+
+	// Manually update the metadata location to a URL with an unsupported scheme
+	// This will cause io.LoadFS to fail with "IO for file '...' not implemented"
+	sqldb := s.getDB()
+	defer sqldb.Close()
+
+	_, err := sqldb.Exec(
+		"UPDATE iceberg_tables SET metadata_location = ? WHERE table_namespace = ? AND table_name = ?",
+		"unsupported-scheme://bucket/metadata.json",
+		nsName,
+		viewName,
+	)
+	s.Require().NoError(err)
+
+	// DropView should return an error when io.LoadFS fails
+	err = db.DropView(context.Background(), []string{nsName, viewName})
+	s.Error(err, "DropView should return an error when LoadFS fails for invalid metadata location")
 }
 
 func (s *SqliteCatalogTestSuite) TestCheckViewExists() {

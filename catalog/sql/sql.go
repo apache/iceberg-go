@@ -983,7 +983,7 @@ func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 	if metadataLocation != "" {
 		fs, err := io.LoadFS(ctx, c.props, metadataLocation)
 		if err != nil {
-			return nil
+			return err
 		}
 
 		_ = fs.Remove(metadataLocation)
