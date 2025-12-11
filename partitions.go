@@ -76,9 +76,21 @@ func (p *PartitionField) String() string {
 }
 
 func (p *PartitionField) UnmarshalJSON(b []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return fmt.Errorf("%w: failed to unmarshal partition field", err)
+	}
+
+	if _, ok := raw["source-id"]; ok {
+		if _, ok := raw["source-ids"]; ok {
+			return errors.New("partition field cannot contain both source-id and source-ids")
+		}
+	}
+
 	type Alias PartitionField
 	aux := struct {
 		TransformString string `json:"transform"`
+		SourceIDs       []int  `json:"source-ids,omitempty"`
 		*Alias
 	}{
 		Alias: (*Alias)(p),
@@ -87,6 +99,13 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 	err := json.Unmarshal(b, &aux)
 	if err != nil {
 		return err
+	}
+
+	if len(aux.SourceIDs) > 0 {
+		if len(aux.SourceIDs) != 1 {
+			return errors.New("partition field source-ids must contain exactly one id")
+		}
+		p.SourceID = aux.SourceIDs[0]
 	}
 
 	if p.Transform, err = ParseTransform(aux.TransformString); err != nil {
