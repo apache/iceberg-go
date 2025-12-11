@@ -40,6 +40,12 @@ func WithOAuthToken(token string) Option {
 	}
 }
 
+func WithHeaders(headers map[string]string) Option {
+	return func(o *options) {
+		o.headers = headers
+	}
+}
+
 func WithTLSConfig(config *tls.Config) Option {
 	return func(o *options) {
 		o.tlsConfig = config
@@ -132,6 +138,7 @@ type options struct {
 	authUri           *url.URL
 	scope             string
 	transport         http.RoundTripper
+	headers           map[string]string
 
 	additionalProps iceberg.Properties
 }
