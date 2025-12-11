@@ -235,6 +235,42 @@ func (r *RestCatalogSuite) TestToken401() {
 	r.ErrorContains(err, "invalid_client: credentials for key invalid_key do not match")
 }
 
+func (r *RestCatalogSuite) TestWithHeaders() {
+	namespace := "examples"
+	customHeaders := map[string]string{
+		"X-Custom-Header": "custom-value",
+		"Another-Header":  "another-value",
+	}
+
+	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+
+		// Check for standard headers
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		// Check for custom headers
+		for k, v := range customHeaders {
+			r.Equal(v, req.Header.Get(k))
+		}
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"identifiers": []any{},
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithOAuthToken(TestToken),
+		rest.WithHeaders(customHeaders))
+	r.Require().NoError(err)
+
+	iter := cat.ListTables(context.Background(), catalog.ToIdentifier(namespace))
+	for _, err := range iter {
+		r.Require().NoError(err)
+	}
+}
+
 func (r *RestCatalogSuite) TestListTables200() {
 	namespace := "examples"
 	customPageSize := 100
