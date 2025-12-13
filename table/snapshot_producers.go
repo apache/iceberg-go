@@ -87,7 +87,7 @@ func (fa *fastAppendFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 		}
 
 		for _, m := range manifests {
-			if m.HasAddedFiles() || m.HasExistingFiles() || m.SnapshotID() == fa.base.snapshotID {
+			if m.HasAddedFiles() || m.HasExistingFiles() || m.SnapshotID() == fa.base.parentSnapshotID {
 				existing = append(existing, m)
 			}
 		}
