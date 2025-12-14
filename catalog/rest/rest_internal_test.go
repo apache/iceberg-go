@@ -465,3 +465,82 @@ func TestSigv4ConcurrentSigners(t *testing.T) {
 	require.NoError(t, grp.Wait())
 	t.Logf("issued %d requests", count.Load())
 }
+
+// trackingReadCloser wraps an io.ReadCloser to track if Close() was called
+type trackingReadCloser struct {
+	io.ReadCloser
+	closed bool
+}
+
+func (t *trackingReadCloser) Close() error {
+	t.closed = true
+
+	return t.ReadCloser.Close()
+}
+
+// trackingTransport wraps http.RoundTripper to track response bodies
+type trackingTransport struct {
+	transport http.RoundTripper
+	body      *trackingReadCloser
+}
+
+func (t *trackingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.transport.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+
+	t.body = &trackingReadCloser{ReadCloser: resp.Body}
+	resp.Body = t.body
+
+	return resp, nil
+}
+
+// TestResponseBodyLeak checks if response body is closed properly.
+func TestResponseBodyLeak(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/test", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": errorResponse{
+				Message: "not found",
+				Type:    "NoSuchTableException",
+				Code:    404,
+			},
+		})
+	})
+
+	t.Run("do", func(t *testing.T) {
+		tracker := &trackingTransport{transport: http.DefaultTransport}
+		client := &http.Client{Transport: tracker}
+
+		baseURI, err := url.Parse(srv.URL)
+		require.NoError(t, err)
+
+		_, err = do[struct{}](context.Background(), http.MethodGet, baseURI, []string{"test"}, client, nil, false)
+		require.Error(t, err)
+
+		assert.True(t, tracker.body.closed,
+			"response body should be closed on non-200 status")
+	})
+
+	t.Run("doPostAllowNoContent", func(t *testing.T) {
+		tracker := &trackingTransport{transport: http.DefaultTransport}
+		client := &http.Client{Transport: tracker}
+
+		baseURI, err := url.Parse(srv.URL)
+		require.NoError(t, err)
+
+		_, err = doPostAllowNoContent[map[string]string, struct{}](
+			context.Background(), baseURI, []string{"test"}, map[string]string{"key": "value"}, client, nil, false)
+		require.Error(t, err)
+
+		assert.True(t, tracker.body.closed,
+			"response body should be closed on non-200 status")
+	})
+}

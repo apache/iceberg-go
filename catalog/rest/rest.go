@@ -266,6 +266,10 @@ func do[T any](ctx context.Context, method string, baseURI *url.URL, path []stri
 	if rsp, err = cl.Do(req); err != nil {
 		return ret, err
 	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, rsp.Body)
+		_ = rsp.Body.Close()
+	}()
 
 	if allowNoContent && rsp.StatusCode == http.StatusNoContent {
 		return ret, err
@@ -279,7 +283,6 @@ func do[T any](ctx context.Context, method string, baseURI *url.URL, path []stri
 		return ret, err
 	}
 
-	defer rsp.Body.Close()
 	if err = json.NewDecoder(rsp.Body).Decode(&ret); err != nil {
 		return ret, fmt.Errorf("%w: error decoding json payload: `%s`", ErrRESTError, err.Error())
 	}
@@ -327,6 +330,10 @@ func doPostAllowNoContent[Payload, Result any](ctx context.Context, baseURI *url
 	if err != nil {
 		return ret, err
 	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, rsp.Body)
+		_ = rsp.Body.Close()
+	}()
 
 	if allowNoContent && rsp.StatusCode == http.StatusNoContent {
 		return ret, err
@@ -340,7 +347,6 @@ func doPostAllowNoContent[Payload, Result any](ctx context.Context, baseURI *url
 		return ret, err
 	}
 
-	defer rsp.Body.Close()
 	if err = json.NewDecoder(rsp.Body).Decode(&ret); err != nil {
 		return ret, fmt.Errorf("%w: error decoding json payload: `%s`", ErrRESTError, err.Error())
 	}
