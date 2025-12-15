@@ -86,6 +86,11 @@ func (s *Schema) init() {
 	s.lazyNameMapping = sync.OnceValue(func() NameMapping {
 		return createMappingFromSchema(s)
 	})
+
+	// Validate that the schema does not contain duplicate field IDs.
+	if _, err := IndexNameByID(s); err != nil {
+		panic(err)
+	}
 }
 
 func (s *Schema) String() string {
@@ -812,8 +817,12 @@ type indexByName struct {
 
 func (i *indexByName) ByID() map[int]string {
 	idToName := make(map[int]string)
-	for k, v := range i.index {
-		idToName[v] = k
+	for name, id := range i.index {
+		if existingName, ok := idToName[id]; ok && existingName != name {
+			panic(fmt.Errorf("%w: multiple fields for id %d: %s and %s",
+				ErrInvalidSchema, id, existingName, name))
+		}
+		idToName[id] = name
 	}
 
 	return idToName
