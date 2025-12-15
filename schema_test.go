@@ -19,6 +19,7 @@ package iceberg_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -921,4 +922,104 @@ func TestHighestFieldIDListType(t *testing.T) {
 		},
 	)
 	assert.Equal(t, 2, tableSchema.HighestFieldID())
+}
+
+// TestSchemaDuplicateFieldIDPanics tests that creating a schema with duplicate field IDs
+// panics, matching the Java implementation behavior.
+// This includes the exact scenario from GitHub issue #593.
+func TestSchemaDuplicateFieldIDPanics(t *testing.T) {
+	tests := []struct {
+		name          string
+		setupSchema   func()
+		expectedID    int
+		expectedNames []string
+	}{
+		{
+			name: "nested struct fields with duplicate ID",
+			setupSchema: func() {
+				iceberg.NewSchema(0,
+					iceberg.NestedField{
+						ID:   5,
+						Name: "struct",
+						Type: &iceberg.StructType{
+							FieldList: []iceberg.NestedField{
+								{ID: 6, Name: "inner_op", Type: iceberg.PrimitiveTypes.String},
+								{ID: 6, Name: "inner_req", Type: iceberg.PrimitiveTypes.String, Required: true},
+							},
+						},
+						Required: true,
+					},
+				)
+			},
+			expectedID:    6,
+			expectedNames: []string{"struct.inner_op", "struct.inner_req"},
+		},
+		{
+			name: "top-level fields with duplicate ID",
+			setupSchema: func() {
+				iceberg.NewSchema(0,
+					iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String},
+					iceberg.NestedField{ID: 1, Name: "bar", Type: iceberg.PrimitiveTypes.Int32},
+				)
+			},
+			expectedID:    1,
+			expectedNames: []string{"foo", "bar"},
+		},
+		{
+			name: "duplicate ID from JSON deserialization",
+			setupSchema: func() {
+				testFieldsStr := `[
+					{"id":1,"name":"foo","type":"string","required":false},
+					{"id":1,"name":"bar","type":"int","required":true}
+				]`
+				_, _ = iceberg.NewSchemaFromJsonFields(1, testFieldsStr)
+			},
+			expectedID:    1,
+			expectedNames: []string{"foo", "bar"},
+		},
+		{
+			name: "nested struct with duplicate ID",
+			setupSchema: func() {
+				iceberg.NewSchema(0,
+					iceberg.NestedField{
+						ID:   5,
+						Name: "person",
+						Type: &iceberg.StructType{
+							FieldList: []iceberg.NestedField{
+								{ID: 10, Name: "name", Type: iceberg.PrimitiveTypes.String},
+								{ID: 10, Name: "age", Type: iceberg.PrimitiveTypes.Int32},
+							},
+						},
+					},
+				)
+			},
+			expectedID:    10,
+			expectedNames: []string{"person.name", "person.age"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			panicked := false
+			var panicVal interface{}
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						panicked = true
+						panicVal = r
+					}
+				}()
+				tt.setupSchema()
+			}()
+
+			assert.True(t, panicked, "expected panic but none occurred")
+			err, ok := panicVal.(error)
+			require.True(t, ok, "panic value should be an error")
+			assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.Contains(t, err.Error(), fmt.Sprintf("multiple fields for id %d", tt.expectedID))
+			for _, expectedName := range tt.expectedNames {
+				assert.Contains(t, err.Error(), expectedName)
+			}
+		})
+	}
 }
