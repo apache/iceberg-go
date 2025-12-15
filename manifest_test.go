@@ -463,7 +463,7 @@ var (
 		NestedField{ID: 16, Name: "improvement_surcharge", Type: PrimitiveTypes.Float64, Required: false},
 		NestedField{ID: 17, Name: "total_amount", Type: PrimitiveTypes.Float64, Required: true},
 		NestedField{ID: 18, Name: "congestion_surcharge", Type: PrimitiveTypes.Float64, Required: false},
-		NestedField{ID: 19, Name: "VendorID", Type: PrimitiveTypes.Int32, Required: false},
+		NestedField{ID: 19, Name: "vendor_id_alt", Type: PrimitiveTypes.Int32, Required: false},
 	)
 )
 
