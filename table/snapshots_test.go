@@ -115,3 +115,131 @@ func TestSnapshotString(t *testing.T) {
 	assert.Equal(t, `append, {"foo":"bar"}: id=25, parent_id=19, schema_id=3, sequence_number=200, timestamp_ms=1602638573590, manifest_list=s3:/a/b/c.avro`,
 		snapshot.String())
 }
+
+func TestSerializeSnapshotWithRowLineage(t *testing.T) {
+	parentID := int64(19)
+	manifest, schemaid := "s3:/a/b/c.avro", 3
+	firstRowID := int64(0)
+	addedRows := int64(100)
+
+	snapshot := table.Snapshot{
+		SnapshotID:       25,
+		ParentSnapshotID: &parentID,
+		SequenceNumber:   200,
+		TimestampMs:      1602638573590,
+		ManifestList:     manifest,
+		SchemaID:         &schemaid,
+		FirstRowID:       &firstRowID,
+		AddedRows:        &addedRows,
+		Summary: &table.Summary{
+			Operation: table.OpAppend,
+		},
+	}
+
+	data, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+
+	assert.JSONEq(t, `{
+		"snapshot-id": 25,
+		"parent-snapshot-id": 19,
+		"sequence-number": 200,
+		"timestamp-ms": 1602638573590,
+		"manifest-list": "s3:/a/b/c.avro",
+		"summary": {"operation": "append"},
+		"schema-id": 3,
+		"first-row-id": 0,
+		"added-rows": 100
+	}`, string(data))
+}
+
+func TestDeserializeSnapshotWithRowLineage(t *testing.T) {
+	jsonData := `{
+		"snapshot-id": 25,
+		"parent-snapshot-id": 19,
+		"sequence-number": 200,
+		"timestamp-ms": 1602638573590,
+		"manifest-list": "s3:/a/b/c.avro",
+		"summary": {"operation": "append"},
+		"schema-id": 3,
+		"first-row-id": 0,
+		"added-rows": 100
+	}`
+
+	var snapshot table.Snapshot
+	err := json.Unmarshal([]byte(jsonData), &snapshot)
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(25), snapshot.SnapshotID)
+	require.NotNil(t, snapshot.FirstRowID)
+	assert.Equal(t, int64(0), *snapshot.FirstRowID)
+	require.NotNil(t, snapshot.AddedRows)
+	assert.Equal(t, int64(100), *snapshot.AddedRows)
+}
+
+func TestValidateRowLineage(t *testing.T) {
+	tests := []struct {
+		name       string
+		firstRowID *int64
+		addedRows  *int64
+		wantErr    string
+	}{
+		{
+			name:       "valid: both nil",
+			firstRowID: nil,
+			addedRows:  nil,
+			wantErr:    "",
+		},
+		{
+			name:       "valid: both set",
+			firstRowID: ptr(int64(0)),
+			addedRows:  ptr(int64(100)),
+			wantErr:    "",
+		},
+		{
+			name:       "valid: zero added rows",
+			firstRowID: ptr(int64(30)),
+			addedRows:  ptr(int64(0)),
+			wantErr:    "",
+		},
+		{
+			name:       "invalid: first-row-id set but added-rows nil",
+			firstRowID: ptr(int64(0)),
+			addedRows:  nil,
+			wantErr:    "added-rows is required when first-row-id is set",
+		},
+		{
+			name:       "invalid: negative added-rows",
+			firstRowID: ptr(int64(0)),
+			addedRows:  ptr(int64(-1)),
+			wantErr:    "added-rows cannot be negative: -1",
+		},
+		{
+			name:       "invalid: negative first-row-id",
+			firstRowID: ptr(int64(-1)),
+			addedRows:  ptr(int64(100)),
+			wantErr:    "first-row-id cannot be negative: -1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snapshot := table.Snapshot{
+				SnapshotID: 1,
+				FirstRowID: tt.firstRowID,
+				AddedRows:  tt.addedRows,
+			}
+
+			err := snapshot.ValidateRowLineage()
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorIs(t, err, table.ErrInvalidRowLineage)
+				assert.ErrorContains(t, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func ptr[T any](v T) *T {
+	return &v
+}

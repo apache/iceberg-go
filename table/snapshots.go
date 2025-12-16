@@ -42,8 +42,9 @@ const (
 )
 
 var (
-	ErrInvalidOperation = errors.New("invalid operation value")
-	ErrMissingOperation = errors.New("missing operation key")
+	ErrInvalidOperation  = errors.New("invalid operation value")
+	ErrMissingOperation  = errors.New("missing operation key")
+	ErrInvalidRowLineage = errors.New("invalid row lineage")
 )
 
 // ValidOperation ensures that a given string is one of the valid operation
@@ -255,6 +256,7 @@ type Snapshot struct {
 	Summary          *Summary `json:"summary,omitempty"`
 	SchemaID         *int     `json:"schema-id,omitempty"`
 	FirstRowID       *int64   `json:"first-row-id,omitempty"` // V3: Starting row ID for this snapshot
+	AddedRows        *int64   `json:"added-rows,omitempty"`   // V3: Number of rows added by this snapshot
 }
 
 func (s Snapshot) String() string {
@@ -287,6 +289,10 @@ func (s Snapshot) Equals(other Snapshot) bool {
 	case s.FirstRowID == nil && other.FirstRowID != nil:
 		fallthrough
 	case s.FirstRowID != nil && other.FirstRowID == nil:
+		fallthrough
+	case s.AddedRows == nil && other.AddedRows != nil:
+		fallthrough
+	case s.AddedRows != nil && other.AddedRows == nil:
 		return false
 	}
 
@@ -294,10 +300,25 @@ func (s Snapshot) Equals(other Snapshot) bool {
 		((s.ParentSnapshotID == other.ParentSnapshotID) || (*s.ParentSnapshotID == *other.ParentSnapshotID)) &&
 		((s.SchemaID == other.SchemaID) || (*s.SchemaID == *other.SchemaID)) &&
 		((s.FirstRowID == other.FirstRowID) || (*s.FirstRowID == *other.FirstRowID)) &&
+		((s.AddedRows == other.AddedRows) || (*s.AddedRows == *other.AddedRows)) &&
 		s.SequenceNumber == other.SequenceNumber &&
 		s.TimestampMs == other.TimestampMs &&
 		s.ManifestList == other.ManifestList &&
 		s.Summary.Equals(other.Summary)
+}
+
+func (s Snapshot) ValidateRowLineage() error {
+	if s.FirstRowID != nil && s.AddedRows == nil {
+		return fmt.Errorf("%w: added-rows is required when first-row-id is set", ErrInvalidRowLineage)
+	}
+	if s.AddedRows != nil && *s.AddedRows < 0 {
+		return fmt.Errorf("%w: added-rows cannot be negative: %d", ErrInvalidRowLineage, *s.AddedRows)
+	}
+	if s.FirstRowID != nil && *s.FirstRowID < 0 {
+		return fmt.Errorf("%w: first-row-id cannot be negative: %d", ErrInvalidRowLineage, *s.FirstRowID)
+	}
+
+	return nil
 }
 
 func (s Snapshot) Manifests(fio iceio.IO) (_ []iceberg.ManifestFile, err error) {
