@@ -164,6 +164,11 @@ func (convertToSubstrait) VisitTimestampNsTz() types.Type {
 func (convertToSubstrait) VisitString() types.Type { return &types.StringType{} }
 func (convertToSubstrait) VisitBinary() types.Type { return &types.BinaryType{} }
 func (convertToSubstrait) VisitUUID() types.Type   { return &types.UUIDType{} }
+func (convertToSubstrait) VisitUnknown() types.Type {
+	// Unknown types cannot be stored in data files and have no Substrait equivalent
+	// Returning nil indicates this type cannot be converted to Substrait
+	return nil
+}
 
 var _ iceberg.SchemaVisitorPerPrimitiveType[types.Type] = (*convertToSubstrait)(nil)
 

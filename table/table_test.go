@@ -1327,8 +1327,8 @@ func TestNullableStructRequiredField(t *testing.T) {
 	sc, err := table.ArrowSchemaToIcebergWithFreshIDs(arrowSchema, false)
 	require.NoError(t, err)
 
-	require.NoError(t, cat.CreateNamespace(t.Context(), table.Identifier{"testing"}, nil))
-	tbl, err := cat.CreateTable(t.Context(), table.Identifier{"testing", "nullable_struct_required_field"}, sc,
+	require.NoError(t, cat.CreateNamespace(context.Background(), table.Identifier{"testing"}, nil))
+	tbl, err := cat.CreateTable(context.Background(), table.Identifier{"testing", "nullable_struct_required_field"}, sc,
 		catalog.WithProperties(iceberg.Properties{table.PropertyFormatVersion: "2"}),
 		catalog.WithLocation("file://"+loc))
 	require.NoError(t, err)
