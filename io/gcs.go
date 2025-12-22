@@ -34,8 +34,16 @@ const (
 	GCSEndpoint   = "gcs.endpoint"
 	GCSKeyPath    = "gcs.keypath"
 	GCSJSONKey    = "gcs.jsonkey"
+	GCSCredType   = "gcs.credtype"
 	GCSUseJsonAPI = "gcs.usejsonapi" // set to anything to enable
 )
+
+var allowedGCSCredTypes = map[string]option.CredentialsType{
+	"service_account":              option.ServiceAccount,
+	"authorized_user":              option.AuthorizedUser,
+	"impersonated_service_account": option.ImpersonatedServiceAccount,
+	"external_account":             option.ExternalAccount,
+}
 
 // ParseGCSConfig parses GCS properties and returns a configuration.
 func ParseGCSConfig(props map[string]string) *gcsblob.Options {
@@ -43,11 +51,17 @@ func ParseGCSConfig(props map[string]string) *gcsblob.Options {
 	if url := props[GCSEndpoint]; url != "" {
 		o = append(o, option.WithEndpoint(url))
 	}
+	var credType option.CredentialsType
+	if key := props[GCSCredType]; key != "" {
+		if ct, ok := allowedGCSCredTypes[key]; ok {
+			credType = ct
+		}
+	}
 	if key := props[GCSJSONKey]; key != "" {
-		o = append(o, option.WithCredentialsJSON([]byte(key)))
+		o = append(o, option.WithAuthCredentialsJSON(credType, []byte(key)))
 	}
 	if path := props[GCSKeyPath]; path != "" {
-		o = append(o, option.WithCredentialsFile(path))
+		o = append(o, option.WithAuthCredentialsFile(credType, path))
 	}
 	if _, ok := props[GCSUseJsonAPI]; ok {
 		o = append(o, storage.WithJSONReads())
