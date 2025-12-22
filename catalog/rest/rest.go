@@ -237,6 +237,10 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 			return nil, err
 		}
 
+		// Set the x-amz-content-sha256 header before signing.
+		// This header is required for AWS SigV4 signature verification.
+		r.Header.Set("x-amz-content-sha256", payloadHash)
+
 		// modifies the request in place
 		err = s.signer.SignHTTP(r.Context(), creds, r, payloadHash,
 			s.service, s.cfg.Region, time.Now())
@@ -298,6 +302,10 @@ func doHead(ctx context.Context, baseURI *url.URL, path []string, cl *http.Clien
 }
 
 func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []string, payload Payload, cl *http.Client, override map[int]error) (ret Result, err error) {
+	return doPostAllowNoContent[Payload, Result](ctx, baseURI, path, payload, cl, override, false)
+}
+
+func doPostAllowNoContent[Payload, Result any](ctx context.Context, baseURI *url.URL, path []string, payload Payload, cl *http.Client, override map[int]error, allowNoContent bool) (ret Result, err error) {
 	var (
 		req  *http.Request
 		rsp  *http.Response
@@ -317,6 +325,10 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 
 	rsp, err = cl.Do(req)
 	if err != nil {
+		return ret, err
+	}
+
+	if allowNoContent && rsp.StatusCode == http.StatusNoContent {
 		return ret, err
 	}
 
@@ -819,7 +831,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		MetadataLoc string `json:"metadata-location"`
 	}
 
-	ret, err := doPost[payload, loadTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables", tbl},
+	ret, err := doPost[payload, loadTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "register"},
 		payload{Name: tbl, MetadataLoc: metadataLoc}, r.cl, map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrTableAlreadyExists,
 		})
@@ -926,8 +938,8 @@ func (r *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 		Name:      catalog.TableNameFromIdent(to),
 	}
 
-	_, err := doPost[payload, any](ctx, r.baseURI, []string{"tables", "rename"}, payload{Source: src, Destination: dst}, r.cl,
-		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable})
+	_, err := doPostAllowNoContent[payload, any](ctx, r.baseURI, []string{"tables", "rename"}, payload{Source: src, Destination: dst}, r.cl,
+		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable}, true)
 	if err != nil {
 		return nil, err
 	}
@@ -1158,56 +1170,132 @@ type createViewRequest struct {
 	Name        string             `json:"name"`
 	Schema      *iceberg.Schema    `json:"schema"`
 	Location    string             `json:"location,omitempty"`
-	Props       iceberg.Properties `json:"properties,omitempty"`
-	SQL         string             `json:"sql"`
-	ViewVersion view.Version       `json:"view-version"`
+	Props       iceberg.Properties `json:"properties"`
+	ViewVersion *view.Version      `json:"view-version"`
 }
 
 type viewResponse struct {
 	MetadataLoc string             `json:"metadata-location"`
 	RawMetadata json.RawMessage    `json:"metadata"`
 	Config      iceberg.Properties `json:"config"`
-	Metadata    table.Metadata     `json:"-"`
+	Metadata    view.Metadata      `json:"-"`
+}
+
+func (v *viewResponse) UnmarshalJSON(b []byte) (err error) {
+	type Alias viewResponse
+	if err = json.Unmarshal(b, (*Alias)(v)); err != nil {
+		return err
+	}
+
+	v.Metadata, err = view.ParseMetadataBytes(v.RawMetadata)
+
+	return
 }
 
 // CreateView creates a new view in the catalog.
-func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, sql string, props iceberg.Properties) error {
-	ns, v, err := splitIdentForPath(identifier)
+func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, version *view.Version, schema *iceberg.Schema, opts ...catalog.CreateViewOpt) (*view.View, error) {
+	ns, viewName, err := splitIdentForPath(identifier)
 	if err != nil {
-		return err
+		return nil, err
+	}
+
+	if opts == nil {
+		opts = []catalog.CreateViewOpt{}
+	}
+	cfg := catalog.NewCreateViewCfg()
+	for _, opt := range opts {
+		opt(&cfg)
 	}
 
 	freshSchema, err := iceberg.AssignFreshSchemaIDs(schema, nil)
 	if err != nil {
-		return err
+		return nil, err
+	}
+
+	// Shallow copy for overriding certain attrs
+	newVersion := *version
+	version = &newVersion
+
+	// Enforce starting ID of 1
+	version.VersionID = 1
+
+	// Set default catalog unless set by caller
+	if len(version.DefaultCatalog) == 0 {
+		version.DefaultCatalog = r.name
 	}
 
 	payload := createViewRequest{
-		Name:   v,
-		Schema: freshSchema,
-		SQL:    sql,
-		Props:  props,
-		ViewVersion: view.Version{
-			VersionID:   1,
-			TimestampMs: time.Now().UnixMilli(),
-			SchemaID:    freshSchema.ID,
-			Summary:     map[string]string{"sql": sql},
-			Representations: []view.SQLRepresentation{
-				{Type: "sql", SQL: sql, Dialect: "default"},
-			},
-			DefaultCatalog:   &r.name,
-			DefaultNamespace: strings.Split(ns, namespaceSeparator),
-		},
+		Name:        viewName,
+		Location:    cfg.Location,
+		Schema:      freshSchema,
+		Props:       cfg.Properties,
+		ViewVersion: version,
 	}
 
-	_, err = doPost[createViewRequest, viewResponse](ctx, r.baseURI, []string{"namespaces", ns, "views"}, payload,
+	ret, err := doPost[createViewRequest, viewResponse](ctx, r.baseURI, []string{"namespaces", ns, "views"}, payload,
 		r.cl, map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchNamespace,
 			http.StatusConflict: catalog.ErrViewAlreadyExists,
 		})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return nil
+	return view.New(identifier, ret.Metadata, ret.MetadataLoc), nil
+}
+
+// UpdateView updates a view in the catalog.
+func (r *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requirements []view.Requirement, updates []view.Update) (*view.View, error) {
+	ns, viewName, err := splitIdentForPath(ident)
+	if err != nil {
+		return nil, err
+	}
+
+	restIdentifier := identifier{
+		Namespace: catalog.NamespaceFromIdent(ident),
+		Name:      viewName,
+	}
+	type payload struct {
+		Identifier   identifier         `json:"identifier"`
+		Requirements []view.Requirement `json:"requirements"`
+		Updates      []view.Update      `json:"updates"`
+	}
+	ret, err := doPost[payload, viewResponse](ctx, r.baseURI, []string{"namespaces", ns, "views", viewName},
+		payload{Identifier: restIdentifier, Requirements: requirements, Updates: updates}, r.cl,
+		map[int]error{http.StatusNotFound: catalog.ErrNoSuchView, http.StatusConflict: ErrCommitFailed})
+	if err != nil {
+		return nil, err
+	}
+
+	return view.New(ident, ret.Metadata, ret.MetadataLoc), nil
+}
+
+// loadViewResponse contains the response from loading a view
+type loadViewResponse struct {
+	MetadataLoc string             `json:"metadata-location"`
+	RawMetadata json.RawMessage    `json:"metadata"`
+	Config      iceberg.Properties `json:"config"`
+}
+
+// LoadView loads a view from the catalog.
+func (r *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*view.View, error) {
+	ns, v, err := splitIdentForPath(identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	rsp, err := doGet[loadViewResponse](ctx, r.baseURI, []string{"namespaces", ns, "views", v},
+		r.cl, map[int]error{
+			http.StatusNotFound: catalog.ErrNoSuchView,
+		})
+	if err != nil {
+		return nil, err
+	}
+
+	metadata, err := view.ParseMetadataBytes(rsp.RawMetadata)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse view metadata: %w", err)
+	}
+
+	return view.New(identifier, metadata, rsp.MetadataLoc), nil
 }

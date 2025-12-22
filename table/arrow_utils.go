@@ -616,6 +616,14 @@ func (c convertToArrow) VisitUUID() arrow.Field {
 	return arrow.Field{Type: extensions.NewUUIDType()}
 }
 
+func (c convertToArrow) VisitUnknown() arrow.Field {
+	return arrow.Field{
+		Type: extensions.NewOpaqueType(arrow.Null, "unknown", "apache.iceberg"),
+	}
+}
+
+var _ iceberg.SchemaVisitorPerPrimitiveType[arrow.Field] = convertToArrow{}
+
 // SchemaToArrowSchema converts an Iceberg schema to an Arrow schema. If the metadata parameter
 // is non-nil, it will be included as the top-level metadata in the schema. If includeFieldIDs
 // is true, then each field of the schema will contain a metadata key PARQUET:field_id set to

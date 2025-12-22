@@ -18,103 +18,156 @@
 package view
 
 import (
-	"iter"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"slices"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
+	"github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table"
+	"github.com/google/uuid"
 )
 
-// Metadata defines the format for view metadata,
-// similar to how Iceberg supports a common table format for tables
-type Metadata interface {
-	// ViewUUID identifies the view, generated when the view is created
-	ViewUUID() string
-	// FormatVersion is the version number for the view format; must be 1
-	FormatVersion() int
-	// Location is the view's base location; used to create metadata file locations
-	Location() string
-	// Schemas is a list of known schemas
-	Schemas() iter.Seq[*iceberg.Schema]
-	// CurrentVersion is the current version of the view
-	CurrentVersion() *Version
-	// Versions is a list of known versions of the view
-	Versions() iter.Seq[Version]
-	// VersionLog is a list of version log entries with the timestamp and version-id for every change to current-version-id
-	VersionLog() iter.Seq[VersionLogEntry]
-	// Properties is a string to string map of view properties
-	Properties() iceberg.Properties
+type View struct {
+	identifier       table.Identifier
+	metadata         Metadata
+	metadataLocation string
 }
 
-type metadata struct {
-	UUID             string             `json:"view-uuid"`
-	FmtVersion       int                `json:"format-version"`
-	Loc              string             `json:"location"`
-	SchemaList       []*iceberg.Schema  `json:"schemas"`
-	CurrentVersionId int64              `json:"current-version-id"`
-	VersionList      []Version          `json:"versions"`
-	VersionLogList   []VersionLogEntry  `json:"version-log"`
-	Props            iceberg.Properties `json:"properties"`
+func (t View) Equals(other View) bool {
+	return slices.Equal(t.identifier, other.identifier) &&
+		t.metadataLocation == other.metadataLocation &&
+		t.metadata.Equals(other.metadata)
 }
 
-func (m *metadata) ViewUUID() string {
-	return m.UUID
+func (t View) Identifier() table.Identifier     { return t.identifier }
+func (t View) Metadata() Metadata               { return t.metadata }
+func (t View) MetadataLocation() string         { return t.metadataLocation }
+func (t View) CurrentVersion() *Version         { return t.metadata.CurrentVersion() }
+func (t View) CurrentSchema() *iceberg.Schema   { return t.metadata.CurrentSchema() }
+func (t View) Properties() iceberg.Properties   { return t.metadata.Properties() }
+func (t View) Location() string                 { return t.metadata.Location() }
+func (t View) Versions() []*Version             { return t.metadata.Versions() }
+func (t View) Schemas() map[int]*iceberg.Schema { return t.metadata.SchemasByID() }
+
+func New(ident table.Identifier, meta Metadata, metadataLocation string) *View {
+	return &View{
+		identifier:       ident,
+		metadata:         meta,
+		metadataLocation: metadataLocation,
+	}
 }
 
-func (m *metadata) FormatVersion() int {
-	return m.FmtVersion
-}
+func NewFromLocation(
+	ctx context.Context,
+	ident table.Identifier,
+	metalocation string,
+	fsysF table.FSysF,
+) (*View, error) {
+	var meta Metadata
 
-func (m *metadata) Location() string {
-	return m.Loc
-}
+	fsys, err := fsysF(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if rf, ok := fsys.(io.ReadFileIO); ok {
+		data, err := rf.ReadFile(metalocation)
+		if err != nil {
+			return nil, err
+		}
 
-func (m *metadata) Schemas() iter.Seq[*iceberg.Schema] {
-	return slices.Values(m.SchemaList)
-}
+		if meta, err = ParseMetadataBytes(data); err != nil {
+			return nil, err
+		}
+	} else {
+		f, err := fsys.Open(metalocation)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
 
-func (m *metadata) CurrentVersion() *Version {
-	for i := range m.VersionLogList {
-		if m.VersionList[i].VersionID == m.CurrentVersionId {
-			return &m.VersionList[i]
+		if meta, err = ParseMetadata(f); err != nil {
+			return nil, err
 		}
 	}
 
-	return nil
+	return New(ident, meta, metalocation), nil
 }
 
-func (m *metadata) Versions() iter.Seq[Version] {
-	return slices.Values(m.VersionList)
-}
+// CreateView creates a new view metadata file and writes it to storage.
+//
+// Returns a new View, or an error if creation fails.
+//
+// Note: This function only supports creating new views with format version 1.
+// It does not support updating existing view metadata.
+func CreateView(
+	ctx context.Context,
+	catalogName string,
+	viewIdent table.Identifier,
+	schema *iceberg.Schema,
+	viewSQL string,
+	defaultNS table.Identifier,
+	loc string,
+	props iceberg.Properties,
+) (*View, error) {
+	versionId := int64(1)
 
-func (m *metadata) VersionLog() iter.Seq[VersionLogEntry] {
-	return slices.Values(m.VersionLogList)
-}
+	builder, err := NewMetadataBuilder()
+	if err != nil {
+		return nil, err
+	}
 
-func (m *metadata) Properties() iceberg.Properties {
-	return m.Props
-}
+	viewVersion, err := NewVersionFromSQL(
+		versionId,
+		schema.ID,
+		viewSQL,
+		defaultNS,
+		WithDefaultViewCatalog(catalogName),
+	)
+	if err != nil {
+		return nil, err
+	}
+	viewMD, err := builder.
+		SetLoc(loc).
+		SetCurrentVersion(
+			viewVersion,
+			schema,
+		).
+		SetProperties(props).
+		Build()
+	if err != nil {
+		return nil, err
+	}
 
-// Version represents the view definition at a point in time
-type Version struct {
-	VersionID        int64               `json:"version-id"`
-	SchemaID         int                 `json:"schema-id"`
-	TimestampMs      int64               `json:"timestamp-ms"`
-	Summary          map[string]string   `json:"summary"`
-	Representations  []SQLRepresentation `json:"representations"`
-	DefaultCatalog   *string             `json:"default-catalog"`
-	DefaultNamespace []string            `json:"default-namespace"`
-}
+	metadataLocation := loc + "/metadata/view-" + uuid.New().String() + ".metadata.json"
 
-// SQLRepresentation is a view in SQL with a given dialect
-type SQLRepresentation struct {
-	Type    string `json:"type"`
-	SQL     string `json:"sql"`
-	Dialect string `json:"dialect"`
-}
+	viewMetadataBytes, err := json.Marshal(viewMD)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal view metadata: %w", err)
+	}
 
-// VersionLogEntry contains a change to the view state.
-// At the given timestamp, the current version was set to the given version ID.
-type VersionLogEntry struct {
-	TimestampMs int64 `json:"timestamp-ms"`
-	VersionID   int64 `json:"version-id"`
+	fs, err := io.LoadFS(ctx, props, metadataLocation)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load filesystem for view metadata: %w", err)
+	}
+
+	wfs, ok := fs.(io.WriteFileIO)
+	if !ok {
+		return nil, errors.New("filesystem IO does not support writing")
+	}
+
+	out, err := wfs.Create(metadataLocation)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create view metadata file: %w", err)
+	}
+	defer internal.CheckedClose(out, &err)
+
+	if _, err := out.Write(viewMetadataBytes); err != nil {
+		return nil, fmt.Errorf("failed to write view metadata: %w", err)
+	}
+
+	return New(viewIdent, viewMD, metadataLocation), nil
 }

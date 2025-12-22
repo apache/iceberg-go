@@ -25,6 +25,17 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestInvalidSnapshotRef(t *testing.T) {
+	ref := `{
+		"snapshot-id": "3051729675574597004",
+		"type": "foobar"
+	}`
+
+	var snapRef table.SnapshotRef
+	err := json.Unmarshal([]byte(ref), &snapRef)
+	assert.Error(t, err)
+}
+
 func TestInvalidSnapshotRefType(t *testing.T) {
 	ref := `{
 		"snapshot-id": 3051729675574597004,

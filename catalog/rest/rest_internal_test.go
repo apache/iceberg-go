@@ -267,6 +267,126 @@ func TestSigv4EmptyStringHash(t *testing.T) {
 	require.Equal(t, payloadHash, emptyStringHash)
 }
 
+func TestSigv4ContentSha256Header(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := config.LoadDefaultConfig(context.Background(), func(opts *config.LoadOptions) error {
+		opts.Credentials = credentials.StaticCredentialsProvider{
+			Value: aws.Credentials{
+				AccessKeyID:     "test-access-key",
+				SecretAccessKey: "test-secret-key",
+			},
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	t.Run("header set when sigv4 enabled", func(t *testing.T) {
+		t.Parallel()
+		var capturedHeader string
+		mux := http.NewServeMux()
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(map[string]any{
+				"defaults": map[string]any{}, "overrides": map[string]any{},
+			})
+		})
+
+		mux.HandleFunc("/test", func(w http.ResponseWriter, r *http.Request) {
+			capturedHeader = r.Header.Get("x-amz-content-sha256")
+			w.WriteHeader(http.StatusOK)
+		})
+
+		cat, err := NewCatalog(context.Background(), "rest", srv.URL,
+			WithSigV4(),
+			WithSigV4RegionSvc("us-east-1", "s3"),
+			WithAwsConfig(cfg))
+		require.NoError(t, err)
+
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/test", nil)
+		require.NoError(t, err)
+
+		_, err = cat.cl.Do(req)
+		require.NoError(t, err)
+
+		assert.NotEmpty(t, capturedHeader, "x-amz-content-sha256 header should be set when sigv4 is enabled")
+		assert.Equal(t, emptyStringHash, capturedHeader, "header should contain hash of empty body")
+	})
+
+	t.Run("header not set when sigv4 disabled", func(t *testing.T) {
+		t.Parallel()
+		var capturedHeader string
+		headerPresent := false
+		mux := http.NewServeMux()
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(map[string]any{
+				"defaults": map[string]any{}, "overrides": map[string]any{},
+			})
+		})
+
+		mux.HandleFunc("/test", func(w http.ResponseWriter, r *http.Request) {
+			capturedHeader = r.Header.Get("x-amz-content-sha256")
+			_, headerPresent = r.Header["X-Amz-Content-Sha256"]
+			w.WriteHeader(http.StatusOK)
+		})
+
+		cat, err := NewCatalog(context.Background(), "rest", srv.URL)
+		require.NoError(t, err)
+
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/test", nil)
+		require.NoError(t, err)
+
+		_, err = cat.cl.Do(req)
+		require.NoError(t, err)
+
+		assert.Empty(t, capturedHeader, "x-amz-content-sha256 header should not be set when sigv4 is disabled")
+		assert.False(t, headerPresent, "x-amz-content-sha256 header should not be present when sigv4 is disabled")
+	})
+
+	t.Run("header contains correct hash for request body", func(t *testing.T) {
+		t.Parallel()
+		var capturedHeader string
+		mux := http.NewServeMux()
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(map[string]any{
+				"defaults": map[string]any{}, "overrides": map[string]any{},
+			})
+		})
+
+		mux.HandleFunc("/test", func(w http.ResponseWriter, r *http.Request) {
+			capturedHeader = r.Header.Get("x-amz-content-sha256")
+			w.WriteHeader(http.StatusOK)
+		})
+
+		cat, err := NewCatalog(context.Background(), "rest", srv.URL,
+			WithSigV4(),
+			WithSigV4RegionSvc("us-east-1", "s3"),
+			WithAwsConfig(cfg))
+		require.NoError(t, err)
+
+		body := []byte(`{"test": "data"}`)
+		expectedHash := sha256.Sum256(body)
+		expectedHashStr := hex.EncodeToString(expectedHash[:])
+
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/test", bytes.NewReader(body))
+		require.NoError(t, err)
+
+		_, err = cat.cl.Do(req)
+		require.NoError(t, err)
+
+		assert.Equal(t, expectedHashStr, capturedHeader, "header should contain correct hash of request body")
+	})
+}
+
 func TestSigv4ConcurrentSigners(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()

@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
+	iceinternal "github.com/apache/iceberg-go/internal"
 	"github.com/google/uuid"
 )
 
@@ -153,6 +154,10 @@ type Metadata interface {
 	PartitionStatistics() iter.Seq[PartitionStatisticsFile]
 }
 
+// MetadataBuilder is a struct used for building and updating Iceberg table metadata.
+//
+// It keeps track of applied changes in the `updates` field. This can be used to commit changes made to a table to the
+// catalog.
 type MetadataBuilder struct {
 	base    Metadata
 	updates []Update
@@ -750,7 +755,6 @@ func (b *MetadataBuilder) RemoveSnapshotRef(name string) error {
 
 	if name == MainBranch {
 		b.currentSnapshotID = nil
-		b.snapshotLog = b.snapshotLog[:0]
 	}
 
 	delete(b.refs, name)
@@ -792,7 +796,7 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 
 	if b.previousFileEntry != nil && b.HasChanges() {
 		maxMetadataLogEntries := max(1,
-			b.base.Properties().GetInt(
+			b.props.GetInt(
 				MetadataPreviousVersionsMaxKey, MetadataPreviousVersionsMaxDefault))
 		b.AppendMetadataLog(*b.previousFileEntry)
 		b.TrimMetadataLogs(maxMetadataLogEntries)
@@ -1152,12 +1156,6 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 	return ret, json.Unmarshal(b, ret)
 }
 
-func sliceEqualHelper[T interface{ Equals(T) bool }](s1, s2 []T) bool {
-	return slices.EqualFunc(s1, s2, func(t1, t2 T) bool {
-		return t1.Equals(t2)
-	})
-}
-
 // https://iceberg.apache.org/spec/#iceberg-table-spec
 type commonMetadata struct {
 	FormatVersion      int                       `json:"format-version"`
@@ -1229,11 +1227,11 @@ func (c *commonMetadata) Equals(other *commonMetadata) bool {
 	}
 
 	switch {
-	case !sliceEqualHelper(c.SchemaList, other.SchemaList):
+	case !iceinternal.SliceEqualHelper(c.SchemaList, other.SchemaList):
 		fallthrough
-	case !sliceEqualHelper(c.SnapshotList, other.SnapshotList):
+	case !iceinternal.SliceEqualHelper(c.SnapshotList, other.SnapshotList):
 		fallthrough
-	case !sliceEqualHelper(c.Specs, other.Specs):
+	case !iceinternal.SliceEqualHelper(c.Specs, other.Specs):
 		fallthrough
 	case !maps.Equal(c.Props, other.Props):
 		fallthrough
@@ -1248,7 +1246,7 @@ func (c *commonMetadata) Equals(other *commonMetadata) bool {
 		c.LastColumnId == other.LastColumnId && c.CurrentSchemaID == other.CurrentSchemaID &&
 		c.DefaultSpecID == other.DefaultSpecID && c.DefaultSortOrderID == other.DefaultSortOrderID &&
 		slices.Equal(c.SnapshotLog, other.SnapshotLog) && slices.Equal(c.MetadataLog, other.MetadataLog) &&
-		sliceEqualHelper(c.SortOrderList, other.SortOrderList)
+		iceinternal.SliceEqualHelper(c.SortOrderList, other.SortOrderList)
 }
 
 func (c *commonMetadata) TableUUID() uuid.UUID       { return c.UUID }

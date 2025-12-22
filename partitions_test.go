@@ -37,7 +37,7 @@ func TestPartitionSpec(t *testing.T) {
 
 	assert.Zero(t, spec1.ID())
 	assert.Equal(t, 1, spec1.NumFields())
-	assert.Equal(t, idField1, spec1.Field(0))
+	assert.True(t, idField1.Equals(spec1.Field(0)))
 	assert.NotEqual(t, idField1, spec1)
 	assert.False(t, spec1.IsUnpartitioned())
 	assert.True(t, spec1.CompatibleWith(&spec1))
@@ -53,7 +53,7 @@ func TestPartitionSpec(t *testing.T) {
 
 	assert.False(t, spec1.Equals(spec2))
 	assert.True(t, spec1.CompatibleWith(&spec2))
-	assert.Equal(t, []iceberg.PartitionField{idField1}, spec1.FieldsBySourceID(3))
+	assert.True(t, idField1.Equals(spec1.FieldsBySourceID(3)[0]))
 	assert.Empty(t, spec1.FieldsBySourceID(1925))
 
 	spec3 := iceberg.NewPartitionSpec(idField1, idField2)
@@ -245,4 +245,85 @@ func TestGetPartitionFieldName(t *testing.T) {
 			assert.Equal(t, test.expectedName, name)
 		})
 	}
+}
+
+func TestPartitionFieldUnmarshalJSON(t *testing.T) {
+	t.Run("unmarshal with source-id", func(t *testing.T) {
+		jsonData := `
+		{
+			"source-id": 1,
+			"field-id": 1000,
+			"transform": "truncate[19]",
+			"name": "str_truncate"
+		}`
+		var field iceberg.PartitionField
+		err := json.Unmarshal([]byte(jsonData), &field)
+		require.NoError(t, err)
+		assert.Equal(t, 1, field.SourceID)
+		assert.Equal(t, 1000, field.FieldID)
+		assert.Equal(t, "str_truncate", field.Name)
+		assert.Equal(t, iceberg.TruncateTransform{Width: 19}, field.Transform)
+	})
+
+	t.Run("unmarshal with source-ids", func(t *testing.T) {
+		jsonData := `
+		{
+			"source-ids": [2],
+			"field-id": 1001,
+			"transform": "bucket[25]",
+			"name": "int_bucket"
+		}`
+		var field iceberg.PartitionField
+		err := json.Unmarshal([]byte(jsonData), &field)
+		require.NoError(t, err)
+		assert.Equal(t, 2, field.SourceID)
+		assert.Equal(t, 1001, field.FieldID)
+		assert.Equal(t, "int_bucket", field.Name)
+		assert.Equal(t, iceberg.BucketTransform{NumBuckets: 25}, field.Transform)
+	})
+
+	t.Run("unmarshal with multiple source-ids should fail", func(t *testing.T) {
+		jsonData := `
+		{
+			"source-ids": [2, 3],
+			"field-id": 1001,
+			"transform": "bucket[25]",
+			"name": "int_bucket"
+		}`
+		var field iceberg.PartitionField
+		err := json.Unmarshal([]byte(jsonData), &field)
+		require.Error(t, err)
+		assert.EqualError(t, err, "partition field source-ids must contain exactly one id")
+	})
+
+	t.Run("unmarshal with both source-id and source-ids", func(t *testing.T) {
+		jsonData := `
+		{
+			"source-id": 1,
+			"source-ids": [2],
+			"field-id": 1002,
+			"transform": "identity",
+			"name": "identity"
+		}`
+		var field iceberg.PartitionField
+		err := json.Unmarshal([]byte(jsonData), &field)
+		require.Error(t, err)
+		assert.EqualError(t, err, "partition field cannot contain both source-id and source-ids")
+	})
+
+	t.Run("unmarshal with no source id", func(t *testing.T) {
+		jsonData := `
+		{
+			"field-id": 1003,
+			"transform": "void",
+			"name": "void"
+		}`
+		var field iceberg.PartitionField
+		err := json.Unmarshal([]byte(jsonData), &field)
+		require.NoError(t, err)
+		assert.Zero(t, field.SourceID)
+		assert.Equal(t, 1003, field.FieldID)
+		assert.Equal(t, "void", field.Name)
+		assert.Equal(t, iceberg.VoidTransform{}, field.Transform)
+	})
 }

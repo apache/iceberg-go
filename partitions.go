@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"iter"
 	"net/url"
-	"path"
 	"slices"
 	"strings"
 )
@@ -50,6 +49,26 @@ type PartitionField struct {
 	Name string `json:"name"`
 	// Transform is the transform used to produce the partition value
 	Transform Transform `json:"transform"`
+
+	// escapedName is a cached URL-escaped version of Name for performance
+	// This is populated during initialization and not serialized
+	escapedName string
+}
+
+// EscapedName returns the URL-escaped version of the partition field name.
+func (p *PartitionField) EscapedName() string {
+	if p.escapedName == "" {
+		p.escapedName = url.QueryEscape(p.Name)
+	}
+
+	return p.escapedName
+}
+
+func (p PartitionField) Equals(other PartitionField) bool {
+	return p.SourceID == other.SourceID &&
+		p.FieldID == other.FieldID &&
+		p.Name == other.Name &&
+		p.Transform.Equals(other.Transform)
 }
 
 func (p *PartitionField) String() string {
@@ -57,9 +76,21 @@ func (p *PartitionField) String() string {
 }
 
 func (p *PartitionField) UnmarshalJSON(b []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return fmt.Errorf("%w: failed to unmarshal partition field", err)
+	}
+
+	if _, ok := raw["source-id"]; ok {
+		if _, ok := raw["source-ids"]; ok {
+			return errors.New("partition field cannot contain both source-id and source-ids")
+		}
+	}
+
 	type Alias PartitionField
 	aux := struct {
 		TransformString string `json:"transform"`
+		SourceIDs       []int  `json:"source-ids,omitempty"`
 		*Alias
 	}{
 		Alias: (*Alias)(p),
@@ -68,6 +99,13 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 	err := json.Unmarshal(b, &aux)
 	if err != nil {
 		return err
+	}
+
+	if len(aux.SourceIDs) > 0 {
+		if len(aux.SourceIDs) != 1 {
+			return errors.New("partition field source-ids must contain exactly one id")
+		}
+		p.SourceID = aux.SourceIDs[0]
 	}
 
 	if p.Transform, err = ParseTransform(aux.TransformString); err != nil {
@@ -344,8 +382,9 @@ func (ps *PartitionSpec) UnmarshalJSON(b []byte) error {
 
 func (ps *PartitionSpec) initialize() {
 	ps.sourceIdToFields = make(map[int][]PartitionField)
-	for _, f := range ps.fields {
-		ps.sourceIdToFields[f.SourceID] = append(ps.sourceIdToFields[f.SourceID], f)
+
+	for i := range ps.fields {
+		ps.sourceIdToFields[ps.fields[i].SourceID] = append(ps.sourceIdToFields[ps.fields[i].SourceID], ps.fields[i])
 	}
 }
 
@@ -447,15 +486,34 @@ func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
 func (ps *PartitionSpec) PartitionToPath(data structLike, sc *Schema) string {
 	partType := ps.PartitionType(sc)
 
-	segments := make([]string, 0, len(partType.FieldList))
-	for i := range partType.Fields() {
-		valueStr := ps.fields[i].Transform.ToHumanStr(data.Get(i))
-
-		segments = append(segments, fmt.Sprintf("%s=%s",
-			url.QueryEscape(ps.fields[i].Name), url.QueryEscape(valueStr)))
+	if len(partType.FieldList) == 0 {
+		return ""
 	}
 
-	return path.Join(segments...)
+	// Use strings.Builder for efficient string concatenation
+	// Estimate capacity: escaped_name + "=" + escaped_value + "/" per field
+	var sb strings.Builder
+	estimatedSize := 0
+	for i := range partType.Fields() {
+		estimatedSize += len(ps.fields[i].EscapedName()) + 20 // name + "=" + avg value + "/"
+	}
+	sb.Grow(estimatedSize)
+
+	for i := range partType.Fields() {
+		if i > 0 {
+			sb.WriteByte('/')
+		}
+
+		// Use pre-escaped field name (now guaranteed to be initialized)
+		sb.WriteString(ps.fields[i].EscapedName())
+		sb.WriteByte('=')
+
+		// Only escape the value (which changes per row)
+		valueStr := ps.fields[i].Transform.ToHumanStr(data.Get(i))
+		sb.WriteString(url.QueryEscape(valueStr))
+	}
+
+	return sb.String()
 }
 
 // GeneratePartitionFieldName returns default partition field name based on field transform type

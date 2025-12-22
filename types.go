@@ -131,6 +131,8 @@ func (t *typeIFace) UnmarshalJSON(b []byte) error {
 			t.Type = UUIDType{}
 		case "binary":
 			t.Type = BinaryType{}
+		case "unknown":
+			t.Type = UnknownType{}
 		default:
 			switch {
 			case strings.HasPrefix(typename, "fixed"):
@@ -729,6 +731,18 @@ func (TimestampTzNsType) primitive()     {}
 func (TimestampTzNsType) Type() string   { return "timestamptz_ns" }
 func (TimestampTzNsType) String() string { return "timestamptz_ns" }
 
+type UnknownType struct{}
+
+func (UnknownType) Equals(other Type) bool {
+	_, ok := other.(UnknownType)
+
+	return ok
+}
+
+func (UnknownType) primitive()     {}
+func (UnknownType) Type() string   { return "unknown" }
+func (UnknownType) String() string { return "unknown" }
+
 var PrimitiveTypes = struct {
 	Bool          PrimitiveType
 	Int32         PrimitiveType
@@ -744,6 +758,7 @@ var PrimitiveTypes = struct {
 	String        PrimitiveType
 	Binary        PrimitiveType
 	UUID          PrimitiveType
+	Unknown       PrimitiveType
 }{
 	Bool:          BooleanType{},
 	Int32:         Int32Type{},
@@ -759,6 +774,7 @@ var PrimitiveTypes = struct {
 	String:        StringType{},
 	Binary:        BinaryType{},
 	UUID:          UUIDType{},
+	Unknown:       UnknownType{},
 }
 
 // PromoteType promotes the type being read from a file to a requested read type.
@@ -795,6 +811,8 @@ func PromoteType(fileType, readType Type) (Type, error) {
 		if _, ok := readType.(UUIDType); ok && t.len == 16 {
 			return readType, nil
 		}
+	case UnknownType:
+		return readType, nil
 	default:
 		if fileType.Equals(readType) {
 			return fileType, nil
