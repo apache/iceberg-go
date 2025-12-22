@@ -2232,8 +2232,7 @@ type DataFile interface {
 	// Partition returns a mapping of field id to partition value for
 	// each of the partition spec's fields.
 	Partition() map[int]any
-	// PartitionFieldData returns a mapping of field id to partition value
-	// for each of the partition spec's fields.
+	// Count returns the number of records in this file.
 	Count() int64
 	// FileSizeBytes is the total file size in bytes.
 	FileSizeBytes() int64
