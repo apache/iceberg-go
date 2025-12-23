@@ -1337,6 +1337,210 @@ func TestUnsupportedTypes(t *testing.T) {
 	}
 }
 
+func TestAddSnapshotV3RequiresRowLineage(t *testing.T) {
+	builder := builderWithoutChanges(3)
+	schemaID := 0
+	snapshot := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+	}
+
+	err := builder.AddSnapshot(&snapshot)
+	require.ErrorIs(t, err, ErrInvalidRowLineage)
+	require.ErrorContains(t, err, "first-row-id is required for v3 snapshots")
+}
+
+func TestAddSnapshotV3RejectsFirstRowIDBehindNextRowID(t *testing.T) {
+	builder := builderWithoutChanges(3)
+	schemaID := 0
+	firstRowID := int64(0)
+	addedRows := int64(100)
+
+	snapshot1 := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+		FirstRowID:       &firstRowID,
+		AddedRows:        &addedRows,
+	}
+	require.NoError(t, builder.AddSnapshot(&snapshot1))
+
+	behindFirstRowID := int64(50)
+	snapshot2 := Snapshot{
+		SnapshotID:       2,
+		ParentSnapshotID: nil,
+		SequenceNumber:   1,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 2,
+		ManifestList:     "/snap-2.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+		FirstRowID:       &behindFirstRowID,
+		AddedRows:        &addedRows,
+	}
+
+	err := builder.AddSnapshot(&snapshot2)
+	require.ErrorIs(t, err, ErrInvalidRowLineage)
+	require.ErrorContains(t, err, "first-row-id 50 is behind table next-row-id 100")
+}
+
+func TestAddSnapshotV3UpdatesNextRowID(t *testing.T) {
+	builder := builderWithoutChanges(3)
+	schemaID := 0
+
+	firstRowID1 := int64(0)
+	addedRows1 := int64(30)
+	snapshot1 := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+		FirstRowID:       &firstRowID1,
+		AddedRows:        &addedRows1,
+	}
+	require.NoError(t, builder.AddSnapshot(&snapshot1))
+	require.Equal(t, int64(30), *builder.nextRowID)
+
+	firstRowID2 := int64(30)
+	addedRows2 := int64(28)
+	snapshot2 := Snapshot{
+		SnapshotID:       2,
+		ParentSnapshotID: nil,
+		SequenceNumber:   1,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 2,
+		ManifestList:     "/snap-2.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+		FirstRowID:       &firstRowID2,
+		AddedRows:        &addedRows2,
+	}
+	require.NoError(t, builder.AddSnapshot(&snapshot2))
+	require.Equal(t, int64(58), *builder.nextRowID)
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.Equal(t, int64(58), meta.NextRowID())
+}
+
+func TestAddSnapshotV3ValidatesNegativeFirstRowID(t *testing.T) {
+	builder := builderWithoutChanges(3)
+	schemaID := 0
+	negativeFirstRowID := int64(-1)
+	addedRows := int64(100)
+
+	snapshot := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+		FirstRowID:       &negativeFirstRowID,
+		AddedRows:        &addedRows,
+	}
+
+	err := builder.AddSnapshot(&snapshot)
+	require.ErrorIs(t, err, ErrInvalidRowLineage)
+	require.ErrorContains(t, err, "first-row-id cannot be negative")
+}
+
+func TestAddSnapshotV3ValidatesNegativeAddedRows(t *testing.T) {
+	builder := builderWithoutChanges(3)
+	schemaID := 0
+	firstRowID := int64(0)
+	negativeAddedRows := int64(-1)
+
+	snapshot := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+		FirstRowID:       &firstRowID,
+		AddedRows:        &negativeAddedRows,
+	}
+
+	err := builder.AddSnapshot(&snapshot)
+	require.ErrorIs(t, err, ErrInvalidRowLineage)
+	require.ErrorContains(t, err, "added-rows cannot be negative")
+}
+
+func TestAddSnapshotV3RequiresAddedRowsWhenFirstRowIDSet(t *testing.T) {
+	builder := builderWithoutChanges(3)
+	schemaID := 0
+	firstRowID := int64(0)
+
+	snapshot := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+		FirstRowID:       &firstRowID,
+		AddedRows:        nil,
+	}
+
+	err := builder.AddSnapshot(&snapshot)
+	require.ErrorIs(t, err, ErrInvalidRowLineage)
+	require.ErrorContains(t, err, "added-rows is required when first-row-id is set")
+}
+
+func TestAddSnapshotV2DoesNotRequireRowLineage(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	schemaID := 0
+	snapshot := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+	}
+
+	err := builder.AddSnapshot(&snapshot)
+	require.NoError(t, err)
+}
+
+func TestAddSnapshotV3AcceptsFirstRowIDEqualToNextRowID(t *testing.T) {
+	builder := builderWithoutChanges(3)
+	schemaID := 0
+	firstRowID := int64(0)
+	addedRows := int64(100)
+
+	snapshot := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+		FirstRowID:       &firstRowID,
+		AddedRows:        &addedRows,
+	}
+
+	err := builder.AddSnapshot(&snapshot)
+	require.NoError(t, err)
+	require.Equal(t, int64(100), *builder.nextRowID)
+}
+
 func generateTypeSchema(typ iceberg.Type) *iceberg.Schema {
 	sc := iceberg.NewSchema(0,
 		iceberg.NestedField{

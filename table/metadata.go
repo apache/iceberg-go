@@ -36,9 +36,11 @@ import (
 )
 
 const (
-	partitionFieldStartID             = 1000
-	supportedTableFormatVersion       = 3
-	oneMinuteInMs               int64 = 60_000
+	partitionFieldStartID       = 1000
+	supportedTableFormatVersion = 3
+	minFormatVersionRowLineage  = 3
+	initialRowID                = int64(0)
+	oneMinuteInMs               = int64(60_000)
 )
 
 func generateSnapshotID() int64 {
@@ -427,12 +429,52 @@ func (b *MetadataBuilder) AddSnapshot(snapshot *Snapshot) error {
 			snapshot.TimestampMs, maxTS)
 	}
 
+	if err := b.validateAndUpdateRowLineage(snapshot); err != nil {
+		return err
+	}
+
 	b.updates = append(b.updates, NewAddSnapshotUpdate(snapshot))
 	b.lastUpdatedMS = snapshot.TimestampMs
 	b.lastSequenceNumber = &snapshot.SequenceNumber
 	b.snapshotList = append(b.snapshotList, *snapshot)
 
 	return nil
+}
+
+func (b *MetadataBuilder) validateAndUpdateRowLineage(snapshot *Snapshot) error {
+	if b.formatVersion < minFormatVersionRowLineage {
+		return nil
+	}
+
+	if err := snapshot.ValidateRowLineage(); err != nil {
+		return err
+	}
+
+	if snapshot.FirstRowID == nil {
+		return fmt.Errorf("%w: first-row-id is required for v3 snapshots", ErrInvalidRowLineage)
+	}
+
+	nextRowID := b.currentNextRowID()
+	if *snapshot.FirstRowID < nextRowID {
+		return fmt.Errorf("%w: first-row-id %d is behind table next-row-id %d",
+			ErrInvalidRowLineage, *snapshot.FirstRowID, nextRowID)
+	}
+
+	newNextRowID := nextRowID + *snapshot.AddedRows
+	b.nextRowID = &newNextRowID
+
+	return nil
+}
+
+func (b *MetadataBuilder) currentNextRowID() int64 {
+	if b.nextRowID != nil {
+		return *b.nextRowID
+	}
+	if b.base != nil {
+		return b.base.NextRowID()
+	}
+
+	return initialRowID
 }
 
 func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64) error {
