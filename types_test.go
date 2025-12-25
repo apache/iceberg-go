@@ -261,7 +261,7 @@ func TestUnknownTypeInNestedStructs(t *testing.T) {
 		ValueRequired: false,
 	}
 
-	schema := iceberg.NewSchema(1,
+	schema, err := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
 		iceberg.NestedField{ID: 2, Name: "top", Type: iceberg.UnknownType{}, Required: false},
 		iceberg.NestedField{ID: 3, Name: "arr", Type: listType, Required: false},
@@ -281,6 +281,7 @@ func TestUnknownTypeInNestedStructs(t *testing.T) {
 		}, Required: true},
 		iceberg.NestedField{ID: 14, Name: "standalone_map", Type: standaloneMapType, Required: false},
 	)
+	require.NoError(t, err)
 
 	out, err := json.Marshal(schema)
 	require.NoError(t, err)

@@ -163,10 +163,12 @@ func (p partitionRecord) Get(pos int) any      { return p[pos] }
 func (p partitionRecord) Set(pos int, val any) { p[pos] = val }
 
 func TestPartitionSpecToPath(t *testing.T) {
-	schema := iceberg.NewSchema(0,
+	schema, err := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "str", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 2, Name: "other_str", Type: iceberg.PrimitiveTypes.String},
-		iceberg.NestedField{ID: 3, Name: "int", Type: iceberg.PrimitiveTypes.Int32, Required: true})
+		iceberg.NestedField{ID: 3, Name: "int", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	require.NoError(t, err)
 
 	spec := iceberg.NewPartitionSpecID(3,
 		iceberg.PartitionField{
@@ -191,10 +193,12 @@ func TestPartitionSpecToPath(t *testing.T) {
 }
 
 func TestGetPartitionFieldName(t *testing.T) {
-	schema := iceberg.NewSchema(0,
+	schema, err := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "str", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 2, Name: "int", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 3, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp})
+		iceberg.NestedField{ID: 3, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp},
+	)
+	require.NoError(t, err)
 
 	tests := []struct {
 		field        iceberg.PartitionField

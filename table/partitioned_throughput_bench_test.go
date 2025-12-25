@@ -126,7 +126,7 @@ func BenchmarkPartitionedWriteThroughput_Simple(b *testing.B) {
 	mem := memory.DefaultAllocator
 
 	// Define Iceberg schema with only primitive types
-	icebergSchema := iceberg.NewSchema(0,
+	icebergSchema, err := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "ts", Type: iceberg.PrimitiveTypes.TimestampTz, Required: true},
 		iceberg.NestedField{ID: 3, Name: "host", Type: iceberg.PrimitiveTypes.String, Required: true},
@@ -134,6 +134,9 @@ func BenchmarkPartitionedWriteThroughput_Simple(b *testing.B) {
 		iceberg.NestedField{ID: 5, Name: "bytes_sent", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 6, Name: "user_agent", Type: iceberg.PrimitiveTypes.String, Required: true},
 	)
+	if err != nil {
+		b.Fatalf("failed to create schema: %v", err)
+	}
 
 	// Define Arrow schema (must match Iceberg schema types)
 	arrSchema := arrow.NewSchema([]arrow.Field{
@@ -193,7 +196,7 @@ func BenchmarkPartitionedWriteThroughput_ListPrimitive(b *testing.B) {
 	mem := memory.DefaultAllocator
 
 	// Define Iceberg schema with list<string>
-	icebergSchema := iceberg.NewSchema(0,
+	icebergSchema, err := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "ts", Type: iceberg.PrimitiveTypes.TimestampTz, Required: true},
 		iceberg.NestedField{ID: 3, Name: "host", Type: iceberg.PrimitiveTypes.String, Required: true},
@@ -206,6 +209,9 @@ func BenchmarkPartitionedWriteThroughput_ListPrimitive(b *testing.B) {
 			ElementRequired: true,
 		}, Required: false},
 	)
+	if err != nil {
+		b.Fatalf("failed to create schema: %v", err)
+	}
 
 	// Define Arrow schema
 	arrSchema := arrow.NewSchema([]arrow.Field{
@@ -297,7 +303,7 @@ func BenchmarkPartitionedWriteThroughput_ListStruct(b *testing.B) {
 	}
 
 	// Define Iceberg schema with complex nested types
-	icebergSchema := iceberg.NewSchema(0,
+	icebergSchema, err := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "ts", Type: iceberg.PrimitiveTypes.TimestampTz, Required: true},
 		iceberg.NestedField{ID: 3, Name: "host", Type: iceberg.PrimitiveTypes.String, Required: true},
@@ -306,6 +312,9 @@ func BenchmarkPartitionedWriteThroughput_ListStruct(b *testing.B) {
 		iceberg.NestedField{ID: 6, Name: "user_agent", Type: iceberg.PrimitiveTypes.String, Required: true},
 		iceberg.NestedField{ID: 7, Name: "resources", Type: resourcesListType, Required: false},
 	)
+	if err != nil {
+		b.Fatalf("failed to create schema: %v", err)
+	}
 
 	// Define Arrow schema
 	arrSchema := arrow.NewSchema([]arrow.Field{

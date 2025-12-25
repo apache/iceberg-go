@@ -38,7 +38,10 @@ const (
 // the stats provided in the partitions (UpperBound/LowerBound/ContainsNull/ContainsNaN).
 func newManifestEvaluator(spec iceberg.PartitionSpec, schema *iceberg.Schema, partitionFilter iceberg.BooleanExpression, caseSensitive bool) (func(iceberg.ManifestFile) (bool, error), error) {
 	partType := spec.PartitionType(schema)
-	partSchema := iceberg.NewSchema(0, partType.FieldList...)
+	partSchema, err := iceberg.NewSchema(0, partType.FieldList...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create partition schema: %w", err)
+	}
 	filter, err := iceberg.RewriteNotExpr(partitionFilter)
 	if err != nil {
 		return nil, err

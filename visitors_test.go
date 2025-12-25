@@ -18,6 +18,7 @@
 package iceberg_test
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -287,20 +288,24 @@ func rowOf(vals ...any) rowTester {
 	return rowTester(vals)
 }
 
-var testSchema = iceberg.NewSchema(1,
-	iceberg.NestedField{
-		ID: 13, Name: "x",
-		Type: iceberg.PrimitiveTypes.Int32, Required: true,
-	},
-	iceberg.NestedField{
-		ID: 14, Name: "y",
-		Type: iceberg.PrimitiveTypes.Float64, Required: true,
-	},
-	iceberg.NestedField{
-		ID: 15, Name: "z",
-		Type: iceberg.PrimitiveTypes.Int32,
-	},
-	iceberg.NestedField{
+var testSchema *iceberg.Schema
+
+func init() {
+	var err error
+	testSchema, err = iceberg.NewSchema(1,
+		iceberg.NestedField{
+			ID: 13, Name: "x",
+			Type: iceberg.PrimitiveTypes.Int32, Required: true,
+		},
+		iceberg.NestedField{
+			ID: 14, Name: "y",
+			Type: iceberg.PrimitiveTypes.Float64, Required: true,
+		},
+		iceberg.NestedField{
+			ID: 15, Name: "z",
+			Type: iceberg.PrimitiveTypes.Int32,
+		},
+		iceberg.NestedField{
 		ID: 16, Name: "s1",
 		Type: &iceberg.StructType{
 			FieldList: []iceberg.NestedField{{
@@ -324,7 +329,7 @@ var testSchema = iceberg.NewSchema(1,
 			}},
 		},
 	},
-	iceberg.NestedField{ID: 21, Name: "s5", Type: &iceberg.StructType{
+		iceberg.NestedField{ID: 21, Name: "s5", Type: &iceberg.StructType{
 		FieldList: []iceberg.NestedField{{
 			ID: 22, Name: "s6", Required: true, Type: &iceberg.StructType{
 				FieldList: []iceberg.NestedField{{
@@ -333,7 +338,12 @@ var testSchema = iceberg.NewSchema(1,
 			},
 		}},
 	}},
-	iceberg.NestedField{ID: 24, Name: "s", Type: iceberg.PrimitiveTypes.String})
+		iceberg.NestedField{ID: 24, Name: "s", Type: iceberg.PrimitiveTypes.String},
+	)
+	if err != nil {
+		panic(fmt.Sprintf("failed to create testSchema: %v", err))
+	}
+}
 
 func TestExprEvaluator(t *testing.T) {
 	type testCase struct {
@@ -543,7 +553,7 @@ func TestExprEvaluator(t *testing.T) {
 }
 
 func TestEvaluatorCmpTypes(t *testing.T) {
-	sc := iceberg.NewSchema(1,
+	sc, err := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Bool},
 		iceberg.NestedField{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.Int32},
 		iceberg.NestedField{ID: 3, Name: "c", Type: iceberg.PrimitiveTypes.Int64},
@@ -556,7 +566,9 @@ func TestEvaluatorCmpTypes(t *testing.T) {
 		iceberg.NestedField{ID: 10, Name: "j", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 11, Name: "k", Type: iceberg.PrimitiveTypes.Binary},
 		iceberg.NestedField{ID: 12, Name: "l", Type: iceberg.PrimitiveTypes.UUID},
-		iceberg.NestedField{ID: 13, Name: "m", Type: iceberg.FixedTypeOf(5)})
+		iceberg.NestedField{ID: 13, Name: "m", Type: iceberg.FixedTypeOf(5)},
+	)
+	require.NoError(t, err)
 
 	rowData := rowOf(true,
 		5, 5, float32(5.0), float64(5.0),

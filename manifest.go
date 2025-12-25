@@ -2312,7 +2312,7 @@ type ManifestEntry interface {
 	wrap(status ManifestEntryStatus, snapshotID, seqNum, fileSeqNum *int64, datafile DataFile) ManifestEntry
 }
 
-var PositionalDeleteSchema = NewSchema(0,
+var PositionalDeleteSchema = MustNewSchema(0,
 	NestedField{ID: 2147483546, Type: PrimitiveTypes.String, Name: "file_path", Required: true},
 	NestedField{ID: 2147483545, Type: PrimitiveTypes.Int32, Name: "pos", Required: true},
 )
