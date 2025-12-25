@@ -328,7 +328,11 @@ func (u *UpdateSchema) addColumn(path []string, fieldType iceberg.Type, doc stri
 		field.WriteDefault = defaultValue.Any()
 	}
 
-	sch, err := iceberg.AssignFreshSchemaIDs(iceberg.NewSchema(0, field), u.assignNewColumnID)
+	tempSchema, err := iceberg.NewSchema(0, field)
+	if err != nil {
+		return err
+	}
+	sch, err := iceberg.AssignFreshSchemaIDs(tempSchema, u.assignNewColumnID)
 	if err != nil {
 		return fmt.Errorf("failed to assign field id: %w", err)
 	}
@@ -686,7 +690,10 @@ func (u *UpdateSchema) Apply() (*iceberg.Schema, error) {
 	}
 
 	identifierFieldIDs := make([]int, 0)
-	newSchema := iceberg.NewSchema(0, st.(*iceberg.StructType).FieldList...)
+	newSchema, err := iceberg.NewSchema(0, st.(*iceberg.StructType).FieldList...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating schema: %w", err)
+	}
 	for name := range u.identifierFieldNames {
 		var field iceberg.NestedField
 		var ok bool
@@ -708,7 +715,7 @@ func (u *UpdateSchema) Apply() (*iceberg.Schema, error) {
 		}).ID
 	}
 
-	return iceberg.NewSchemaWithIdentifiers(nextSchemaID, identifierFieldIDs, st.(*iceberg.StructType).FieldList...), nil
+	return iceberg.NewSchemaWithIdentifiers(nextSchemaID, identifierFieldIDs, st.(*iceberg.StructType).FieldList...)
 }
 
 func (u *UpdateSchema) Commit() error {

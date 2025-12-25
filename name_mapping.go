@@ -432,7 +432,7 @@ func ApplyNameMapping(schemaWithoutIDs *Schema, nameMapping NameMapping) (*Schem
 	}
 
 	return NewSchema(schemaWithoutIDs.ID,
-		top.Type.(*StructType).FieldList...), nil
+		top.Type.(*StructType).FieldList...)
 }
 
 type createMapping struct{}

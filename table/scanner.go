@@ -252,7 +252,10 @@ func (scan *Scan) buildManifestEvaluator(specID int) (func(iceberg.ManifestFile)
 func (scan *Scan) buildPartitionEvaluator(specID int) func(iceberg.DataFile) (bool, error) {
 	spec := scan.metadata.PartitionSpecs()[specID]
 	partType := spec.PartitionType(scan.metadata.CurrentSchema())
-	partSchema := iceberg.NewSchema(0, partType.FieldList...)
+	partSchema, err := iceberg.NewSchema(0, partType.FieldList...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create partition schema: %w", err)
+	}
 	partExpr := scan.partitionFilters.Get(specID)
 
 	return func(d iceberg.DataFile) (bool, error) {
