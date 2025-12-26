@@ -324,6 +324,8 @@ func doCmp(st structLike, term BoundTerm, lit Literal) int {
 		return typedCmp[uuid.UUID](st, term, lit)
 	case DecimalType:
 		return typedCmp[Decimal](st, term, lit)
+	case GeometryType, GeographyType:
+		return typedCmp[[]byte](st, term, lit)
 	}
 	panic(ErrType)
 }
@@ -353,6 +355,12 @@ func (e *exprEvaluator) VisitLessEqual(term BoundTerm, lit Literal) bool {
 }
 
 func (e *exprEvaluator) VisitStartsWith(term BoundTerm, lit Literal) bool {
+	// Geometry and Geography types don't support startsWith operation
+	switch term.Type().(type) {
+	case GeometryType, GeographyType:
+		return false
+	}
+
 	var value, prefix string
 
 	switch lit.(type) {

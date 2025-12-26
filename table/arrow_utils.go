@@ -622,6 +622,22 @@ func (c convertToArrow) VisitUnknown() arrow.Field {
 	}
 }
 
+func (c convertToArrow) VisitGeometry(iceberg.GeometryType) arrow.Field {
+	if c.useLargeTypes {
+		return arrow.Field{Type: arrow.BinaryTypes.LargeBinary}
+	}
+
+	return arrow.Field{Type: arrow.BinaryTypes.Binary}
+}
+
+func (c convertToArrow) VisitGeography(iceberg.GeographyType) arrow.Field {
+	if c.useLargeTypes {
+		return arrow.Field{Type: arrow.BinaryTypes.LargeBinary}
+	}
+
+	return arrow.Field{Type: arrow.BinaryTypes.Binary}
+}
+
 var _ iceberg.SchemaVisitorPerPrimitiveType[arrow.Field] = convertToArrow{}
 
 // SchemaToArrowSchema converts an Iceberg schema to an Arrow schema. If the metadata parameter
@@ -777,6 +793,12 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 
 			panic(fmt.Errorf("unsupported schema projection from %s to %s",
 				vals.DataType(), targetType))
+		case iceberg.GeometryType, iceberg.GeographyType:
+			if arrow.TypeEqual(vals.DataType(), arrow.BinaryTypes.Binary) ||
+				arrow.TypeEqual(vals.DataType(), arrow.BinaryTypes.LargeBinary) {
+				vals.Retain()
+				return vals
+			}
 		default:
 			return retOrPanic(compute.CastArray(a.ctx, vals,
 				compute.SafeCastOptions(targetType)))
