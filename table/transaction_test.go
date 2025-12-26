@@ -268,7 +268,7 @@ func TestDynamicPartitionOverwrite_NonIdentityTransform(t *testing.T) {
 	// Should return an error for non-identity transform
 	err = txn.DynamicPartitionOverwrite(context.Background(), tableData, 1000, iceberg.Properties{})
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "dynamic overwrite does not support non-identity-transform fields in partition spec")
+	assert.Contains(t, err.Error(), "dynamic overwrite currently only supports identity-transform fields in partition spec (limitation, not spec requirement)")
 }
 
 func TestDynamicPartitionOverwrite_EmptyTable(t *testing.T) {

@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -354,11 +353,16 @@ func (t *Transaction) DynamicPartitionOverwrite(ctx context.Context, tbl arrow.T
 		return fmt.Errorf("%w: cannot apply dynamic overwrite on an unpartitioned table", ErrInvalidOperation)
 	}
 
-	// Check that all partition fields use identity transforms
+	// TODO: Support non-identity transforms in dynamic partition overwrite.
+	// Currently, this is a limitation of the Go implementation. The Iceberg spec and Java
+	// implementation (BaseReplacePartitions) support any partition spec, but building partition
+	// predicates for non-identity transforms (e.g., day(ts) = X) requires transform-aware
+	// predicate construction which is not yet implemented.
+	// Reference: iceberg/core/src/main/java/org/apache/iceberg/BaseReplacePartitions.java
 	currentSpec := t.meta.CurrentSpec()
 	for field := range currentSpec.Fields() {
 		if _, ok := field.Transform.(iceberg.IdentityTransform); !ok {
-			return fmt.Errorf("%w: dynamic overwrite does not support non-identity-transform fields in partition spec: %s",
+			return fmt.Errorf("%w: dynamic overwrite currently only supports identity-transform fields in partition spec (limitation, not spec requirement): %s",
 				ErrInvalidOperation, field.Name)
 		}
 	}
@@ -382,23 +386,37 @@ func (t *Transaction) DynamicPartitionOverwrite(ctx context.Context, tbl arrow.T
 		writeUUID: &commitUUID,
 	})
 
+	// Collect data files and unique partitions in one pass
 	var allDataFiles []iceberg.DataFile
+	partitionsToOverwrite := make([]map[int]any, 0)
+	partitionSet := make(map[string]struct{})
 	for df, err := range dataFiles {
 		if err != nil {
 			return err
 		}
 		allDataFiles = append(allDataFiles, df)
-	}
 
-	partitionsToOverwrite := make(map[string]struct{})
-	for _, df := range allDataFiles {
-		partitionKey := fmt.Sprintf("%v", df.Partition())
-		partitionsToOverwrite[partitionKey] = struct{}{}
+		// Extract partition if not empty
+		partition := df.Partition()
+		if len(partition) == 0 {
+			continue
+		}
+
+		partitionKey := partitionMapKey(partition)
+		if _, seen := partitionSet[partitionKey]; !seen {
+			partitionSet[partitionKey] = struct{}{}
+			// Make a copy of the partition map
+			partitionCopy := make(map[int]any, len(partition))
+			for k, v := range partition {
+				partitionCopy[k] = v
+			}
+			partitionsToOverwrite = append(partitionsToOverwrite, partitionCopy)
+		}
 	}
 
 	deleteFilter := t.buildPartitionPredicate(partitionsToOverwrite)
 
-	if err := t.deleteFileByFilter(ctx, deleteFilter, snapshotProps); err != nil {
+	if err := t.deleteFileByFilter(ctx, deleteFilter, &commitUUID, snapshotProps); err != nil {
 		return err
 	}
 
@@ -416,13 +434,13 @@ func (t *Transaction) DynamicPartitionOverwrite(ctx context.Context, tbl arrow.T
 }
 
 // deleteFileByFilter performs a delete operation with the given filter and snapshot properties.
-func (t *Transaction) deleteFileByFilter(ctx context.Context, filter iceberg.BooleanExpression, snapshotProps iceberg.Properties) error {
+func (t *Transaction) deleteFileByFilter(ctx context.Context, filter iceberg.BooleanExpression, commitUUID *uuid.UUID, snapshotProps iceberg.Properties) error {
 	fs, err := t.tbl.fsF(ctx)
 	if err != nil {
 		return err
 	}
 
-	deleteProducer := t.updateSnapshot(fs, snapshotProps).mergeOverwrite(nil)
+	deleteProducer := t.updateSnapshot(fs, snapshotProps).mergeOverwrite(commitUUID)
 
 	currentSnapshot := t.meta.currentSnapshot()
 	if currentSnapshot == nil {
@@ -452,43 +470,39 @@ func (t *Transaction) deleteFileByFilter(ctx context.Context, filter iceberg.Boo
 }
 
 // buildPartitionPredicate builds a filter predicate matching any of the input partition records.
-func (t *Transaction) buildPartitionPredicate(partitionRecords map[string]struct{}) iceberg.BooleanExpression {
+// partitionRecords is a slice of partition maps, where each map is keyed by partition field ID.
+func (t *Transaction) buildPartitionPredicate(partitionRecords []map[int]any) iceberg.BooleanExpression {
 	partitionSpec := t.meta.CurrentSpec()
 	schema := t.meta.CurrentSchema()
-
-	var partitionFields []string
-	for field := range partitionSpec.Fields() {
-		if field, ok := schema.FindFieldByID(field.SourceID); ok {
-			partitionFields = append(partitionFields, field.Name)
-		}
-	}
 
 	// Build OR expression for all partitions
 	var expressions []iceberg.BooleanExpression
 
-	for partitionKey := range partitionRecords {
-		partitionValues := parsePartitionKey(partitionKey, partitionFields)
-
+	for _, partitionMap := range partitionRecords {
 		// Build AND expression for this partition
 		var partitionExprs []iceberg.BooleanExpression
-		for i, fieldName := range partitionFields {
-			if i < len(partitionValues) {
-				value := partitionValues[i]
-				if value == nil {
-					partitionExprs = append(partitionExprs, iceberg.IsNull(iceberg.Reference(fieldName)))
-				} else {
-					// Create an expression based on a field type
-					if field, ok := schema.FindFieldByName(fieldName); ok {
-						partitionExprs = append(partitionExprs, createEqualToExpression(iceberg.Reference(fieldName), value, field.Type))
-					}
-				}
+
+		for field := range partitionSpec.Fields() {
+			sourceField, ok := schema.FindFieldByID(field.SourceID)
+			if !ok {
+				continue
+			}
+
+			partitionValue, hasValue := partitionMap[field.FieldID]
+
+			if !hasValue || partitionValue == nil {
+				partitionExprs = append(partitionExprs, iceberg.IsNull(iceberg.Reference(sourceField.Name)))
+			} else {
+				partitionExprs = append(partitionExprs, createEqualToExpression(iceberg.Reference(sourceField.Name), partitionValue))
 			}
 		}
 
 		if len(partitionExprs) > 0 {
-			partitionExpr := partitionExprs[0]
-			for _, expr := range partitionExprs[1:] {
-				partitionExpr = iceberg.NewAnd(partitionExpr, expr)
+			var partitionExpr iceberg.BooleanExpression
+			if len(partitionExprs) == 1 {
+				partitionExpr = partitionExprs[0]
+			} else {
+				partitionExpr = iceberg.NewAnd(partitionExprs[0], partitionExprs[1], partitionExprs[2:]...)
 			}
 			expressions = append(expressions, partitionExpr)
 		}
@@ -498,95 +512,53 @@ func (t *Transaction) buildPartitionPredicate(partitionRecords map[string]struct
 		return iceberg.AlwaysFalse{}
 	}
 
-	result := expressions[0]
-	for _, expr := range expressions[1:] {
-		result = iceberg.NewOr(result, expr)
+	if len(expressions) == 1 {
+		return expressions[0]
 	}
 
-	return result
+	return iceberg.NewOr(expressions[0], expressions[1], expressions[2:]...)
 }
 
-// parsePartitionKey parses a partition key string into individual values.
-func parsePartitionKey(partitionKey string, fieldNames []string) []interface{} {
-	// Simple parsing for demonstration - assumes a format like "field1=value1/field2=value2"
-	parts := strings.Split(partitionKey, "/")
-	values := make([]interface{}, len(fieldNames))
-
-	for i, part := range parts {
-		if i >= len(fieldNames) {
-			break
-		}
-
-		if strings.Contains(part, "=") {
-			kv := strings.SplitN(part, "=", 2)
-			if len(kv) == 2 {
-				values[i] = parsePartitionValue(kv[1])
-			}
-		}
+// partitionMapKey creates a canonical string representation of a partition map for deduplication.
+// This is used to identify unique partitions, but the actual partition map is used for predicate building.
+func partitionMapKey(partition map[int]any) string {
+	// Sort keys for consistent representation
+	keys := make([]int, 0, len(partition))
+	for k := range partition {
+		keys = append(keys, k)
 	}
+	slices.Sort(keys)
 
-	return values
+	var parts []string
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%d=%v", k, partition[k]))
+	}
+	return strings.Join(parts, "/")
 }
 
-// parsePartitionValue converts a string partition value to the appropriate type.
-func parsePartitionValue(valueStr string) interface{} {
-	if valueStr == "null" || valueStr == "" {
-		return nil
-	}
-
-	if i, err := strconv.ParseInt(valueStr, 10, 64); err == nil {
-		return i
-	}
-
-	if f, err := strconv.ParseFloat(valueStr, 64); err == nil {
-		return f
-	}
-
-	if b, err := strconv.ParseBool(valueStr); err == nil {
-		return b
-	}
-
-	return valueStr
-}
-
-// createEqualToExpression creates an EqualTo expression with the correct type
-func createEqualToExpression(term iceberg.UnboundTerm, value interface{}, typ iceberg.Type) iceberg.BooleanExpression {
-	switch t := typ.(type) {
-	case iceberg.PrimitiveType:
-		switch t {
-		case iceberg.PrimitiveTypes.Int32:
-			if v, ok := value.(int32); ok {
-				return iceberg.EqualTo(term, v)
-			}
-		case iceberg.PrimitiveTypes.Int64:
-			if v, ok := value.(int64); ok {
-				return iceberg.EqualTo(term, v)
-			}
-		case iceberg.PrimitiveTypes.Float32:
-			if v, ok := value.(float32); ok {
-				return iceberg.EqualTo(term, v)
-			}
-		case iceberg.PrimitiveTypes.Float64:
-			if v, ok := value.(float64); ok {
-				return iceberg.EqualTo(term, v)
-			}
-		case iceberg.PrimitiveTypes.String:
-			if v, ok := value.(string); ok {
-				return iceberg.EqualTo(term, v)
-			}
-		case iceberg.PrimitiveTypes.Bool:
-			if v, ok := value.(bool); ok {
-				return iceberg.EqualTo(term, v)
-			}
-		}
-	}
-
-	// Fallback to string
-	if v, ok := value.(string); ok {
+// createEqualToExpression creates an EqualTo expression by switching on the value type.
+// Type conversion is handled automatically when the expression is bound to a schema.
+func createEqualToExpression(term iceberg.UnboundTerm, value interface{}) iceberg.BooleanExpression {
+	switch v := value.(type) {
+	case int32:
 		return iceberg.EqualTo(term, v)
+	case int64:
+		return iceberg.EqualTo(term, v)
+	case int:
+		return iceberg.EqualTo(term, int64(v))
+	case float32:
+		return iceberg.EqualTo(term, v)
+	case float64:
+		return iceberg.EqualTo(term, v)
+	case string:
+		return iceberg.EqualTo(term, v)
+	case bool:
+		return iceberg.EqualTo(term, v)
+	case nil:
+		return iceberg.IsNull(term)
+	default:
+		return iceberg.EqualTo(term, fmt.Sprintf("%v", value))
 	}
-
-	return iceberg.EqualTo(term, fmt.Sprintf("%v", value))
 }
 
 func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
