@@ -28,7 +28,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.6
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.6
 	github.com/aws/aws-sdk-go-v2/service/glue v1.135.3
-	github.com/aws/aws-sdk-go-v2/service/s3 v1.94.0
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.95.0
 	github.com/aws/smithy-go v1.24.0
 	github.com/awsdocs/aws-doc-sdk-examples/gov2/testtools v0.0.0-20250407191926-092f3e54b837
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
@@ -39,7 +39,7 @@ require (
 	github.com/hamba/avro/v2 v2.30.0
 	github.com/pterm/pterm v0.12.82
 	github.com/stretchr/testify v1.11.1
-	github.com/substrait-io/substrait-go/v7 v7.2.0
+	github.com/substrait-io/substrait-go/v7 v7.2.2
 	github.com/testcontainers/testcontainers-go/modules/compose v0.40.0
 	github.com/twmb/murmur3 v1.1.8
 	github.com/uptrace/bun v1.2.16
@@ -246,8 +246,8 @@ require (
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/spiffe/go-spiffe/v2 v2.6.0 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
-	github.com/substrait-io/substrait v0.75.0 // indirect
-	github.com/substrait-io/substrait-protobuf/go v0.75.0 // indirect
+	github.com/substrait-io/substrait v0.78.1 // indirect
+	github.com/substrait-io/substrait-protobuf/go v0.78.1 // indirect
 	github.com/testcontainers/testcontainers-go v0.40.0 // indirect
 	github.com/theupdateframework/notary v0.7.0 // indirect
 	github.com/tilt-dev/fsnotify v1.4.8-0.20220602155310-fff9c274a375 // indirect
