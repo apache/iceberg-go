@@ -33,16 +33,18 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/internal"
 	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 )
 
-func WriteTableMetadata(metadata table.Metadata, fs icebergio.WriteFileIO, loc string, compression string) error {
+func WriteTableMetadata(metadata table.Metadata, fs icebergio.WriteFileIO, loc string, compression string) (err error) {
 	out, err := fs.Create(loc)
 	if err != nil {
 		return err
 	}
+	defer internal.CheckedClose(out, &err)
 
 	var writer io.Writer = out
 	var compressWriter io.WriteCloser
@@ -52,18 +54,14 @@ func WriteTableMetadata(metadata table.Metadata, fs icebergio.WriteFileIO, loc s
 	case table.MetadataCompressionCodecGzip:
 		compressWriter = gzip.NewWriter(out)
 		writer = compressWriter
+		defer internal.CheckedClose(compressWriter, &err)
 	default:
 		return fmt.Errorf("unsupported write metadata compression codec: %s", compression)
 	}
 
-	encodeErr := json.NewEncoder(writer).Encode(metadata)
+	err = json.NewEncoder(writer).Encode(metadata)
 
-	var compressionCloseErr error
-	if compressWriter != nil {
-		compressionCloseErr = compressWriter.Close()
-	}
-
-	return errors.Join(encodeErr, compressionCloseErr, out.Close())
+	return
 }
 
 func WriteMetadata(ctx context.Context, metadata table.Metadata, loc string, props iceberg.Properties) error {
