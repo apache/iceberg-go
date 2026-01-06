@@ -40,6 +40,13 @@ import (
 )
 
 func WriteTableMetadata(metadata table.Metadata, fs icebergio.WriteFileIO, loc string, compression string) (err error) {
+	switch compression {
+	case table.MetadataCompressionCodecNone, table.MetadataCompressionCodecGzip:
+		// supported codecs
+	default:
+		return fmt.Errorf("unsupported write metadata compression codec: %s", compression)
+	}
+
 	out, err := fs.Create(loc)
 	if err != nil {
 		return err
@@ -48,15 +55,10 @@ func WriteTableMetadata(metadata table.Metadata, fs icebergio.WriteFileIO, loc s
 
 	var writer io.Writer = out
 	var compressWriter io.WriteCloser
-	switch compression {
-	case table.MetadataCompressionCodecNone:
-		// no compression
-	case table.MetadataCompressionCodecGzip:
+	if compression == table.MetadataCompressionCodecGzip {
 		compressWriter = gzip.NewWriter(out)
 		writer = compressWriter
 		defer internal.CheckedClose(compressWriter, &err)
-	default:
-		return fmt.Errorf("unsupported write metadata compression codec: %s", compression)
 	}
 
 	err = json.NewEncoder(writer).Encode(metadata)
