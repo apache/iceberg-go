@@ -156,6 +156,51 @@ func (r *RestCatalogSuite) TestLoadRegisteredCatalog() {
 	r.Equal(r.configVals.Get("warehouse"), "s3://some-bucket")
 }
 
+func (r *RestCatalogSuite) TestTokenWithHeaders200() {
+	const scope = "myscope"
+	customHeaders := map[string]string{
+		"X-Custom-Header": "custom-value",
+		"Another-Header":  "another-value",
+	}
+
+	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		r.Equal(http.MethodPost, req.Method)
+
+		r.Equal(req.Header.Get("Content-Type"), "application/x-www-form-urlencoded")
+
+		// Check for custom headers
+		for k, v := range customHeaders {
+			r.Equal(v, req.Header.Get(k))
+		}
+
+		r.Require().NoError(req.ParseForm())
+		values := req.PostForm
+		r.Equal(values.Get("grant_type"), "client_credentials")
+		r.Equal(values.Get("client_id"), "client")
+		r.Equal(values.Get("client_secret"), "secret")
+		r.Equal(values.Get("scope"), scope)
+
+		w.WriteHeader(http.StatusOK)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token":      TestToken,
+			"token_type":        "Bearer",
+			"expires_in":        86400,
+			"issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithWarehouseLocation("s3://some-bucket"),
+		rest.WithCredential(TestCreds),
+		rest.WithScope(scope),
+		rest.WithHeaders(customHeaders))
+	r.Require().NoError(err)
+
+	r.NotNil(cat)
+	r.Equal(r.configVals.Get("warehouse"), "s3://some-bucket")
+}
+
 func (r *RestCatalogSuite) TestToken400() {
 	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
 		r.Equal(http.MethodPost, req.Method)
