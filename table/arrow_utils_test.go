@@ -277,7 +277,7 @@ func TestArrowSchemaToIceberg(t *testing.T) {
 func makeID(v int) *int { return &v }
 
 var (
-	icebergSchemaNested = iceberg.NewSchema(0,
+	icebergSchemaNested = iceberg.MustNewSchema(0,
 		iceberg.NestedField{
 			ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: true,
 		},
@@ -334,7 +334,7 @@ var (
 		},
 	)
 
-	icebergSchemaSimple = iceberg.NewSchema(0,
+	icebergSchemaSimple = iceberg.MustNewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool},
@@ -467,7 +467,7 @@ var (
 		{Name: "timestamptz_s_0000", Type: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}, Nullable: true},
 	}, nil)
 
-	TableSchemaWithAllMicrosecondsTimestampPrec = iceberg.NewSchema(0,
+	TableSchemaWithAllMicrosecondsTimestampPrec = iceberg.MustNewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "timestamp_s", Type: iceberg.PrimitiveTypes.Timestamp},
 		iceberg.NestedField{ID: 2, Name: "timestamptz_s", Type: iceberg.PrimitiveTypes.TimestampTz},
 		iceberg.NestedField{ID: 3, Name: "timestamp_ms", Type: iceberg.PrimitiveTypes.Timestamp},

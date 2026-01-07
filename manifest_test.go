@@ -19,6 +19,7 @@ package iceberg
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"testing"
 	"time"
@@ -443,7 +444,12 @@ var (
 		},
 	}
 
-	testSchema = NewSchema(0,
+	testSchema *Schema
+)
+
+func init() {
+	var err error
+	testSchema, err = NewSchema(0,
 		NestedField{ID: 1, Name: "VendorID", Type: PrimitiveTypes.Int32, Required: true},
 		NestedField{ID: 2, Name: "tpep_pickup_datetime", Type: PrimitiveTypes.Timestamp, Required: true},
 		NestedField{ID: 3, Name: "tpep_dropoff_datetime", Type: PrimitiveTypes.Timestamp, Required: true},
@@ -462,9 +468,12 @@ var (
 		NestedField{ID: 16, Name: "improvement_surcharge", Type: PrimitiveTypes.Float64, Required: false},
 		NestedField{ID: 17, Name: "total_amount", Type: PrimitiveTypes.Float64, Required: true},
 		NestedField{ID: 18, Name: "congestion_surcharge", Type: PrimitiveTypes.Float64, Required: false},
-		NestedField{ID: 19, Name: "VendorID", Type: PrimitiveTypes.Int32, Required: false},
+		NestedField{ID: 19, Name: "vendor_id_alt", Type: PrimitiveTypes.Int32, Required: false},
 	)
-)
+	if err != nil {
+		panic(fmt.Sprintf("failed to create testSchema: %v", err))
+	}
+}
 
 type ManifestTestSuite struct {
 	suite.Suite
@@ -943,10 +952,16 @@ func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
 	file, err := WriteManifest(
 		"s3://bucket/namespace/table/metadata/abcd-0123.avro", &buf, 2,
 		partitionSpec,
-		NewSchema(123,
-			NestedField{ID: 1, Name: "id", Type: Int64Type{}},
-			NestedField{ID: 2, Name: "name", Type: StringType{}},
-		),
+		func() *Schema {
+			sch, err := NewSchema(123,
+				NestedField{ID: 1, Name: "id", Type: Int64Type{}},
+				NestedField{ID: 2, Name: "name", Type: StringType{}},
+			)
+			if err != nil {
+				panic(fmt.Sprintf("failed to create schema: %v", err))
+			}
+			return sch
+		}(),
 		snapshotID,
 		[]ManifestEntry{NewManifestEntry(
 			EntryStatusADDED,
@@ -1361,7 +1376,8 @@ func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 }
 
 func (m *ManifestTestSuite) TestManifestWriterMeta() {
-	sch := NewSchema(0, NestedField{ID: 0, Name: "test01", Type: StringType{}})
+	sch, err := NewSchema(0, NestedField{ID: 0, Name: "test01", Type: StringType{}})
+	m.Require().NoError(err)
 	w, err := NewManifestWriter(2, io.Discard, *UnpartitionedSpec, sch, 1)
 	m.Require().NoError(err)
 	md, err := w.meta()

@@ -20,6 +20,7 @@ package table
 import (
 	"bytes"
 	"cmp"
+	"fmt"
 	"math"
 	"slices"
 	"testing"
@@ -358,7 +359,11 @@ func TestFileMetrics(t *testing.T) {
 	suite.Run(t, new(FileStatsMetricsSuite))
 }
 
-var tableSchemaNested = iceberg.NewSchemaWithIdentifiers(1,
+var tableSchemaNested *iceberg.Schema
+
+func init() {
+	var err error
+	tableSchemaNested, err = iceberg.NewSchemaWithIdentifiers(1,
 	[]int{1},
 	iceberg.NestedField{
 		ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: false,
@@ -414,7 +419,11 @@ var tableSchemaNested = iceberg.NewSchemaWithIdentifiers(1,
 		},
 		Required: false,
 	},
-)
+	)
+	if err != nil {
+		panic(fmt.Sprintf("failed to create tableSchemaNested: %v", err))
+	}
+}
 
 func TestStatsTypes(t *testing.T) {
 	statsCols, err := iceberg.PreOrderVisit(tableSchemaNested,

@@ -18,6 +18,7 @@
 package table
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -25,12 +26,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var tableSchemaSimple = iceberg.NewSchemaWithIdentifiers(1,
-	[]int{2},
-	iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String},
-	iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-	iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool},
-)
+var tableSchemaSimple *iceberg.Schema
+
+func init() {
+	var err error
+	tableSchemaSimple, err = iceberg.NewSchemaWithIdentifiers(1,
+		[]int{2},
+		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool},
+	)
+	if err != nil {
+		panic(fmt.Sprintf("failed to create tableSchemaSimple: %v", err))
+	}
+}
 
 func TestSnapshotSummaryCollector(t *testing.T) {
 	var ssc SnapshotSummaryCollector
@@ -53,11 +62,12 @@ func TestSnapshotSummaryCollectorWithPartition(t *testing.T) {
 	var ssc SnapshotSummaryCollector
 
 	assert.Equal(t, iceberg.Properties{}, ssc.build())
-	sc := iceberg.NewSchema(0,
+	sc, err := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "bool_field", Type: iceberg.PrimitiveTypes.Bool},
 		iceberg.NestedField{ID: 2, Name: "string_field", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 3, Name: "int_field", Type: iceberg.PrimitiveTypes.Int32},
 	)
+	require.NoError(t, err)
 	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
 		Name: "int_field", SourceID: 3, FieldID: 1001, Transform: iceberg.IdentityTransform{},
 	})

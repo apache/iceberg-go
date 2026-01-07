@@ -68,18 +68,22 @@ func TestUnaryExpr(t *testing.T) {
 		assert.True(t, n.Equals(exp))
 	})
 
-	sc := iceberg.NewSchema(1, iceberg.NestedField{
+	sc, err := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 2, Name: "a", Type: iceberg.PrimitiveTypes.Int32,
 	})
-	sc2 := iceberg.NewSchema(1, iceberg.NestedField{
+	require.NoError(t, err)
+	sc2, err := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 2, Name: "a", Type: iceberg.PrimitiveTypes.Float64,
 	})
-	sc3 := iceberg.NewSchema(1, iceberg.NestedField{
+	require.NoError(t, err)
+	sc3, err := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 2, Name: "a", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 	})
-	sc4 := iceberg.NewSchema(1, iceberg.NestedField{
+	require.NoError(t, err)
+	sc4, err := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 2, Name: "a", Type: iceberg.PrimitiveTypes.Float32, Required: true,
 	})
+	require.NoError(t, err)
 
 	t.Run("isnull and notnull", func(t *testing.T) {
 		t.Run("bind", func(t *testing.T) {
@@ -202,7 +206,7 @@ func TestRefBindingCaseSensitive(t *testing.T) {
 }
 
 func TestRefTypes(t *testing.T) {
-	sc := iceberg.NewSchema(1,
+	sc, err := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Bool},
 		iceberg.NestedField{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.Int32},
 		iceberg.NestedField{ID: 3, Name: "c", Type: iceberg.PrimitiveTypes.Int64},
@@ -215,7 +219,9 @@ func TestRefTypes(t *testing.T) {
 		iceberg.NestedField{ID: 10, Name: "j", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 11, Name: "k", Type: iceberg.PrimitiveTypes.Binary},
 		iceberg.NestedField{ID: 12, Name: "l", Type: iceberg.PrimitiveTypes.UUID},
-		iceberg.NestedField{ID: 13, Name: "m", Type: iceberg.FixedTypeOf(5)})
+		iceberg.NestedField{ID: 13, Name: "m", Type: iceberg.FixedTypeOf(5)},
+	)
+	require.NoError(t, err)
 
 	t.Run("bind term", func(t *testing.T) {
 		for i := 0; i < sc.NumFields(); i++ {
@@ -635,7 +641,7 @@ func TestBoundReferenceToString(t *testing.T) {
 }
 
 func TestToString(t *testing.T) {
-	schema := iceberg.NewSchema(1,
+	schema, err := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 3, Name: "c", Type: iceberg.PrimitiveTypes.String},
@@ -647,7 +653,9 @@ func TestToString(t *testing.T) {
 		iceberg.NestedField{ID: 9, Name: "i", Type: iceberg.PrimitiveTypes.UUID},
 		iceberg.NestedField{ID: 10, Name: "j", Type: iceberg.PrimitiveTypes.Bool},
 		iceberg.NestedField{ID: 11, Name: "k", Type: iceberg.PrimitiveTypes.Bool},
-		iceberg.NestedField{ID: 12, Name: "l", Type: iceberg.PrimitiveTypes.Binary})
+		iceberg.NestedField{ID: 12, Name: "l", Type: iceberg.PrimitiveTypes.Binary},
+	)
+	require.NoError(t, err)
 
 	null := iceberg.IsNull(iceberg.Reference("a"))
 	nan := iceberg.IsNaN(iceberg.Reference("g"))
@@ -770,10 +778,11 @@ func TestToString(t *testing.T) {
 }
 
 func TestBindAboveBelowIntMax(t *testing.T) {
-	sc := iceberg.NewSchema(1,
+	sc, err := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
 		iceberg.NestedField{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.Float32},
 	)
+	require.NoError(t, err)
 
 	ref, ref2 := iceberg.Reference("a"), iceberg.Reference("b")
 	above, below := int64(math.MaxInt32)+1, int64(math.MinInt32)-1
