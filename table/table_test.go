@@ -50,7 +50,6 @@ import (
 	"github.com/pterm/pterm"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-	"github.com/uptrace/bun/driver/sqliteshim"
 )
 
 type TableTestSuite struct {
@@ -256,7 +255,6 @@ func (t *TableWritingTestSuite) SetupSuite() {
 		{Name: "qux", Type: arrow.PrimitiveTypes.Date32, Nullable: true},
 	}, nil)
 
-	var err error
 	t.arrTbl, err = array.TableFromJSON(mem, t.arrSchema, []string{
 		`[{"foo": true, "bar": "bar_string", "baz": 123, "qux": "2024-03-07"}]`,
 	})
