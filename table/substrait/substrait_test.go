@@ -29,7 +29,7 @@ import (
 )
 
 func TestRefTypes(t *testing.T) {
-	sc := iceberg.NewSchema(1,
+	sc, err := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Bool},
 		iceberg.NestedField{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.Int32},
 		iceberg.NestedField{ID: 3, Name: "c", Type: iceberg.PrimitiveTypes.Int64},
@@ -37,6 +37,8 @@ func TestRefTypes(t *testing.T) {
 		iceberg.NestedField{ID: 5, Name: "e", Type: iceberg.PrimitiveTypes.Float64},
 		iceberg.NestedField{ID: 6, Name: "f", Type: iceberg.PrimitiveTypes.Date},
 		iceberg.NestedField{ID: 7, Name: "g", Type: iceberg.PrimitiveTypes.Time},
+	)
+	require.NoError(t, err)
 		iceberg.NestedField{ID: 8, Name: "h", Type: iceberg.PrimitiveTypes.Timestamp},
 		iceberg.NestedField{ID: 9, Name: "i", Type: iceberg.DecimalTypeOf(9, 2)},
 		iceberg.NestedField{ID: 10, Name: "j", Type: iceberg.PrimitiveTypes.String},
@@ -80,14 +82,14 @@ func TestRefTypes(t *testing.T) {
 }
 
 var (
-	tableSchemaSimple = iceberg.NewSchemaWithIdentifiers(1,
+	tableSchemaSimple = iceberg.MustNewSchemaWithIdentifiers(1,
 		[]int{2},
 		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool},
 	)
 
-	doubleSchema = iceberg.NewSchema(1,
+	doubleSchema = iceberg.MustNewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.Float64})
 )
 

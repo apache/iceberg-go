@@ -92,6 +92,17 @@ func MustNewSchema(id int, fields ...NestedField) *Schema {
 	return s
 }
 
+// MustNewSchemaWithIdentifiers is a helper that panics if NewSchemaWithIdentifiers returns an error.
+// It is intended for use in variable initializations where the schema
+// is known to be valid at compile time.
+func MustNewSchemaWithIdentifiers(id int, identifierIDs []int, fields ...NestedField) *Schema {
+	s, err := NewSchemaWithIdentifiers(id, identifierIDs, fields...)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
 func (s *Schema) init() error {
 	s.lazyIDToParent = sync.OnceValues(func() (map[int]int, error) {
 		return IndexParents(s)

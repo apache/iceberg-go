@@ -1221,13 +1221,14 @@ func (suite *InclusiveMetricsTestSuite) SetupSuite() {
 		},
 	}
 
-	suite.schemaDataFileNan = iceberg.NewSchema(0,
+	suite.schemaDataFileNan, err = iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "all_nan", Type: iceberg.PrimitiveTypes.Float64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "max_nan", Type: iceberg.PrimitiveTypes.Float64, Required: true},
 		iceberg.NestedField{ID: 3, Name: "min_max_nan", Type: iceberg.PrimitiveTypes.Float32},
 		iceberg.NestedField{ID: 4, Name: "all_nan_null_bounds", Type: iceberg.PrimitiveTypes.Float64, Required: true},
 		iceberg.NestedField{ID: 5, Name: "some_nan_correct_bounds", Type: iceberg.PrimitiveTypes.Float32},
 	)
+	suite.Require().NoError(err)
 
 	suite.dataFileNan = &mockDataFile{
 		path:        "file.avro",
@@ -2054,7 +2055,8 @@ type StrictMetricsTestSuite struct {
 }
 
 func (suite *StrictMetricsTestSuite) SetupSuite() {
-	suite.schemaDataFile = iceberg.NewSchema(0,
+	var err error
+	suite.schemaDataFile, err = iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		iceberg.NestedField{ID: 2, Name: "no_stats", Type: iceberg.PrimitiveTypes.Int32, Required: false},
 		iceberg.NestedField{ID: 3, Name: "required", Type: iceberg.PrimitiveTypes.String, Required: true},
@@ -2070,6 +2072,7 @@ func (suite *StrictMetricsTestSuite) SetupSuite() {
 		iceberg.NestedField{ID: 13, Name: "nan_and_null_only", Type: iceberg.PrimitiveTypes.Float64},
 		iceberg.NestedField{ID: 14, Name: "no_nan_stats", Type: iceberg.PrimitiveTypes.Float64},
 	)
+	suite.Require().NoError(err)
 
 	var (
 		IntMin, _   = iceberg.Int32Literal(IntMinValue).MarshalBinary()
@@ -2131,13 +2134,14 @@ func (suite *StrictMetricsTestSuite) SetupSuite() {
 		},
 	}
 
-	suite.schemaDataFileNan = iceberg.NewSchema(0,
+	suite.schemaDataFileNan, err = iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "all_nan", Type: iceberg.PrimitiveTypes.Float64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "max_nan", Type: iceberg.PrimitiveTypes.Float64, Required: true},
 		iceberg.NestedField{ID: 3, Name: "min_max_nan", Type: iceberg.PrimitiveTypes.Float32},
 		iceberg.NestedField{ID: 4, Name: "all_nan_null_bounds", Type: iceberg.PrimitiveTypes.Float64, Required: true},
 		iceberg.NestedField{ID: 5, Name: "some_nan_correct_bounds", Type: iceberg.PrimitiveTypes.Float32},
 	)
+	suite.Require().NoError(err)
 
 	suite.dataFileNan = &mockDataFile{
 		path:        "file.avro",

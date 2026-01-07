@@ -66,7 +66,11 @@ func newTestSchema(schemaID int, optFieldName ...string) *iceberg.Schema {
 		fieldName = optFieldName[0]
 	}
 
-	return iceberg.NewSchema(schemaID, iceberg.NestedField{ID: 1, Name: fieldName, Type: iceberg.PrimitiveTypes.Int64})
+	schema, err := iceberg.NewSchema(schemaID, iceberg.NestedField{ID: 1, Name: fieldName, Type: iceberg.PrimitiveTypes.Int64})
+	if err != nil {
+		return nil
+	}
+	return schema
 }
 
 func stripErr[T any](v T, _ error) T {

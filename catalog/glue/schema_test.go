@@ -349,7 +349,8 @@ func TestSchemaToGlueColumns(t *testing.T) {
 			Doc:      "User tags",
 		},
 	}
-	schema := iceberg.NewSchema(1, fields...)
+	schema, err := iceberg.NewSchema(1, fields...)
+	require.NoError(t, err)
 	columns := schemaToGlueColumns(schema, true)
 	assert.Equal(t, 4, len(columns))
 	assert.Equal(t, "id", aws.ToString(columns[0].Name))
@@ -365,42 +366,43 @@ func TestSchemaToGlueColumns(t *testing.T) {
 }
 
 func TestSchemasToGlueColumns(t *testing.T) {
-	schemas := []*iceberg.Schema{
-		iceberg.NewSchema(0,
-			iceberg.NestedField{
-				ID:       1,
-				Name:     "id",
-				Type:     iceberg.Int64Type{},
-				Required: true,
-			},
-			iceberg.NestedField{
-				ID:       2,
-				Name:     "name",
-				Type:     iceberg.StringType{},
-				Required: true,
-			},
-			iceberg.NestedField{
-				ID:       3,
-				Name:     "address",
-				Type:     iceberg.StringType{},
-				Required: false,
-			},
-		),
-		iceberg.NewSchema(1,
-			iceberg.NestedField{
-				ID:       1,
-				Name:     "id",
-				Type:     iceberg.Int64Type{},
-				Required: true,
-			},
-			iceberg.NestedField{
-				ID:       2,
-				Name:     "name",
-				Type:     iceberg.StringType{},
-				Required: true,
-			},
-		),
-	}
+	schema0, err := iceberg.NewSchema(0,
+		iceberg.NestedField{
+			ID:       1,
+			Name:     "id",
+			Type:     iceberg.Int64Type{},
+			Required: true,
+		},
+		iceberg.NestedField{
+			ID:       2,
+			Name:     "name",
+			Type:     iceberg.StringType{},
+			Required: true,
+		},
+		iceberg.NestedField{
+			ID:       3,
+			Name:     "address",
+			Type:     iceberg.StringType{},
+			Required: false,
+		},
+	)
+	require.NoError(t, err)
+	schema1, err := iceberg.NewSchema(1,
+		iceberg.NestedField{
+			ID:       1,
+			Name:     "id",
+			Type:     iceberg.Int64Type{},
+			Required: true,
+		},
+		iceberg.NestedField{
+			ID:       2,
+			Name:     "name",
+			Type:     iceberg.StringType{},
+			Required: true,
+		},
+	)
+	require.NoError(t, err)
+	schemas := []*iceberg.Schema{schema0, schema1}
 
 	expectedColumns := []types.Column{
 		{
