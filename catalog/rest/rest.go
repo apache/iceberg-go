@@ -497,6 +497,7 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) *Oauth2AuthMa
 		authURI = r.baseURI.JoinPath("oauth/tokens")
 	}
 	return &Oauth2AuthManager{
+		Token:      opts.oauthToken,
 		Credential: opts.credential,
 		AuthURI:    authURI,
 		Scope:      opts.scope,
@@ -534,9 +535,8 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	}
 	cl := &http.Client{Transport: session}
 
-	// If a user sets just a credential, they expect the regular OAuth flow.
-	// credential + authManager should not be set concurrently, but authManager will take precedence.
-	if opts.credential != "" && opts.authManager == nil {
+	// If the user does not set an AuthManager, we can construct an OAuth2AuthManager based off their options.
+	if opts.authManager == nil {
 		opts.authManager = setupOAuthManager(r, cl, opts)
 	}
 
