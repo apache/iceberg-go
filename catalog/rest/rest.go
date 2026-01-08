@@ -496,6 +496,7 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) *Oauth2AuthMa
 	if authURI == nil {
 		authURI = r.baseURI.JoinPath("oauth/tokens")
 	}
+
 	return &Oauth2AuthManager{
 		Token:      opts.oauthToken,
 		Credential: opts.credential,
