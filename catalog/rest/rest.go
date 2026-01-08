@@ -597,6 +597,11 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		session.defaultHeaders.Set(k, v)
 	}
 
+	session.defaultHeaders.Set("X-Client-Version", icebergRestSpecVersion)
+	session.defaultHeaders.Set("Content-Type", "application/json")
+	session.defaultHeaders.Set("User-Agent", "GoIceberg/"+iceberg.Version())
+	session.defaultHeaders.Set("X-Iceberg-Access-Delegation", "vended-credentials")
+
 	token := opts.oauthToken
 	if token == "" && opts.credential != "" {
 		var err error
@@ -608,11 +613,6 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	if token != "" {
 		session.defaultHeaders.Set(authorizationHeader, bearerPrefix+" "+token)
 	}
-
-	session.defaultHeaders.Set("X-Client-Version", icebergRestSpecVersion)
-	session.defaultHeaders.Set("Content-Type", "application/json")
-	session.defaultHeaders.Set("User-Agent", "GoIceberg/"+iceberg.Version())
-	session.defaultHeaders.Set("X-Iceberg-Access-Delegation", "vended-credentials")
 
 	if opts.enableSigv4 {
 		cfg := opts.awsConfig
