@@ -489,6 +489,21 @@ func NewCatalog(ctx context.Context, name, uri string, opts ...Option) (*Catalog
 	return r, nil
 }
 
+// setupOAuthManager creates an Oauth2AuthManager based on the provided options.
+// The allows users to set their token, credential, or just get the defaults if no auth manager is set.
+func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) *Oauth2AuthManager {
+	authURI := opts.authUri
+	if authURI == nil {
+		authURI = r.baseURI.JoinPath("oauth/tokens")
+	}
+	return &Oauth2AuthManager{
+		Credential: opts.credential,
+		AuthURI:    authURI,
+		Scope:      opts.scope,
+		Client:     cl,
+	}
+}
+
 func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 	baseuri, err := url.Parse(uri)
 	if err != nil {
@@ -519,22 +534,10 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	}
 	cl := &http.Client{Transport: session}
 
-	// This creates an OAuth2Manager if no auth manager is provided.
-	// This goal is to replicate existing behavior.
-	if opts.credential != "" {
-		if _, ok := opts.authManager.(*Oauth2AuthManager); !ok {
-			authURI := opts.authUri
-			if authURI == nil {
-				authURI = r.baseURI.JoinPath("oauth/tokens")
-			}
-
-			opts.authManager = &Oauth2AuthManager{
-				Credential: opts.credential,
-				AuthURI:    authURI,
-				Scope:      opts.scope,
-				Client:     cl,
-			}
-		}
+	// If a user sets just a credential, they expect the regular OAuth flow.
+	// credential + authManager should not be set concurrently, but authManager will take precedence.
+	if opts.credential != "" && opts.authManager == nil {
+		opts.authManager = setupOAuthManager(r, cl, opts)
 	}
 
 	session.defaultHeaders.Set("X-Client-Version", icebergRestSpecVersion)

@@ -35,7 +35,9 @@ func WithCredential(cred string) Option {
 }
 
 func WithOAuthToken(token string) Option {
-	return WithAuthManager(&Oauth2AuthManager{Token: token})
+	return func(o *options) {
+		o.oauthToken = token
+	}
 }
 
 func WithHeaders(headers map[string]string) Option {
@@ -131,6 +133,7 @@ type options struct {
 	awsConfig         aws.Config
 	awsConfigSet      bool
 	tlsConfig         *tls.Config
+	oauthToken        string
 	credential        string
 	authManager       AuthManager
 	warehouseLocation string
