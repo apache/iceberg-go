@@ -241,7 +241,9 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		for {
 			snap, err := t.meta.SnapshotByID(snapId)
 			if err != nil {
-				return err
+				// Parent snapshot may have been removed by a previous expiration.
+				// Treat missing parent as end of chain - this is expected behavior.
+				break
 			}
 
 			snapAge := time.Now().UnixMilli() - snap.TimestampMs
