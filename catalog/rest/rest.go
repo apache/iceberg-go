@@ -601,7 +601,7 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	session.defaultHeaders.Set("Content-Type", "application/json")
 	session.defaultHeaders.Set("User-Agent", "GoIceberg/"+iceberg.Version())
 	if session.defaultHeaders.Get("X-Iceberg-Access-Delegation") == "" {
-    	session.defaultHeaders.Set("X-Iceberg-Access-Delegation", "vended-credentials")
+		session.defaultHeaders.Set("X-Iceberg-Access-Delegation", "vended-credentials")
 	}
 
 	token := opts.oauthToken
