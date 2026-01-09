@@ -235,6 +235,28 @@ func (r *RestCatalogSuite) TestToken401() {
 	r.ErrorContains(err, "invalid_client: credentials for key invalid_key do not match")
 }
 
+func (r *RestCatalogSuite) TestTokenContentTypeDuplicated() {
+	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		r.Equal(http.MethodPost, req.Method)
+
+		values := req.Header.Values("Content-Type")
+		r.Equal([]string{"application/x-www-form-urlencoded"}, values)
+
+		w.WriteHeader(http.StatusOK)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token":      TestToken,
+			"token_type":        "Bearer",
+			"expires_in":        86400,
+			"issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithCredential(TestCreds))
+	r.Require().NoError(err)
+	r.NotNil(cat)
+}
+
 func (r *RestCatalogSuite) TestWithHeaders() {
 	namespace := "examples"
 	customHeaders := map[string]string{

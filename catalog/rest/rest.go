@@ -209,6 +209,11 @@ const emptyStringHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991
 
 func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	for k, v := range s.defaultHeaders {
+		// Skip Content-Type if it's already set in the request
+		// to avoid duplicate headers (e.g., when using PostForm)
+		if http.CanonicalHeaderKey(k) == "Content-Type" && r.Header.Get("Content-Type") != "" {
+			continue
+		}
 		for _, hdr := range v {
 			r.Header.Add(k, hdr)
 		}
