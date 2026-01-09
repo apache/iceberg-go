@@ -235,6 +235,110 @@ func (r *RestCatalogSuite) TestToken401() {
 	r.ErrorContains(err, "invalid_client: credentials for key invalid_key do not match")
 }
 
+func (r *RestCatalogSuite) TestWithHeaders() {
+	namespace := "examples"
+	customHeaders := map[string]string{
+		"X-Custom-Header": "custom-value",
+		"Another-Header":  "another-value",
+	}
+
+	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+
+		// Check for standard headers
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		// Check for custom headers
+		for k, v := range customHeaders {
+			r.Equal(v, req.Header.Get(k))
+		}
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"identifiers": []any{},
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithOAuthToken(TestToken),
+		rest.WithHeaders(customHeaders))
+	r.Require().NoError(err)
+
+	iter := cat.ListTables(context.Background(), catalog.ToIdentifier(namespace))
+	for _, err := range iter {
+		r.Require().NoError(err)
+	}
+}
+
+func (r *RestCatalogSuite) TestWithHeadersOnOAuthRoute() {
+	customHeaders := map[string]string{
+		"X-Custom-Header": "custom-value",
+		"Another-Header":  "another-value",
+	}
+
+	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		r.Equal(http.MethodPost, req.Method)
+
+		// Check that custom headers are present on the OAuth token request
+		for k, v := range customHeaders {
+			r.Equal(v, req.Header.Get(k))
+		}
+
+		w.WriteHeader(http.StatusOK)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token":      TestToken,
+			"token_type":        "Bearer",
+			"expires_in":        86400,
+			"issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithCredential(TestCreds),
+		rest.WithHeaders(customHeaders))
+	r.Require().NoError(err)
+
+	r.NotNil(cat)
+}
+
+func (r *RestCatalogSuite) TestWithHeadersOnAuthURLRoute() {
+	customHeaders := map[string]string{
+		"X-Custom-Header": "custom-value",
+		"Another-Header":  "another-value",
+	}
+
+	r.mux.HandleFunc("/custom-auth-url", func(w http.ResponseWriter, req *http.Request) {
+		r.Equal(http.MethodPost, req.Method)
+
+		// Check that custom headers are present on the custom auth URL request
+		for k, v := range customHeaders {
+			r.Equal(v, req.Header.Get(k))
+		}
+
+		w.WriteHeader(http.StatusOK)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token":      TestToken,
+			"token_type":        "Bearer",
+			"expires_in":        86400,
+			"issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+		})
+	})
+
+	authUri, err := url.Parse(r.srv.URL)
+	r.Require().NoError(err)
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithCredential(TestCreds),
+		rest.WithHeaders(customHeaders),
+		rest.WithAuthURI(authUri.JoinPath("custom-auth-url")))
+	r.Require().NoError(err)
+
+	r.NotNil(cat)
+}
+
 func (r *RestCatalogSuite) TestListTables200() {
 	namespace := "examples"
 	customPageSize := 100
