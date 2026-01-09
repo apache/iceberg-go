@@ -99,7 +99,7 @@ the table, the following tracks the current write support:
 | Append Data Files |   X     |
 | Rewrite Files     |         |
 | Rewrite manifests |         |
-| Overwrite Files   |         |
+| Overwrite Files   |   X     |
 | Write Pos Delete  |         |
 | Write Eq Delete   |         |
 | Row Delta         |         |
