@@ -19,6 +19,7 @@ package puffin
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -34,6 +35,7 @@ func writeAll(w io.Writer, data []byte) error {
 	if n != len(data) {
 		return fmt.Errorf("short write: wrote %d of %d bytes", n, len(data))
 	}
+
 	return nil
 }
 
@@ -81,7 +83,7 @@ type BlobMetadataInput struct {
 // The caller is responsible for closing the underlying writer after Finish returns.
 func NewWriter(w io.Writer) (*PuffinWriter, error) {
 	if w == nil {
-		return nil, fmt.Errorf("puffin: writer is nil")
+		return nil, errors.New("puffin: writer is nil")
 	}
 
 	// Write header magic bytes
@@ -101,11 +103,12 @@ func NewWriter(w io.Writer) (*PuffinWriter, error) {
 // written to the footer. Can be called multiple times before Finish.
 func (w *PuffinWriter) SetProperties(props map[string]string) error {
 	if w.done {
-		return fmt.Errorf("puffin: cannot set properties: writer already finalized")
+		return errors.New("puffin: cannot set properties: writer already finalized")
 	}
 	for k, v := range props {
 		w.props[k] = v
 	}
+
 	return nil
 }
 
@@ -113,12 +116,13 @@ func (w *PuffinWriter) SetProperties(props map[string]string) error {
 // The default value is "iceberg-go". Example: "MyApp version 1.2.3".
 func (w *PuffinWriter) SetCreatedBy(createdBy string) error {
 	if w.done {
-		return fmt.Errorf("puffin: cannot set created-by: writer already finalized")
+		return errors.New("puffin: cannot set created-by: writer already finalized")
 	}
 	if createdBy == "" {
-		return fmt.Errorf("puffin: cannot set created-by: value cannot be empty")
+		return errors.New("puffin: cannot set created-by: value cannot be empty")
 	}
 	w.createdBy = createdBy
+
 	return nil
 }
 
@@ -127,10 +131,10 @@ func (w *PuffinWriter) SetCreatedBy(createdBy string) error {
 // The input.Type is required; use constants like ApacheDataSketchesThetaV1.
 func (w *PuffinWriter) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, error) {
 	if w.done {
-		return BlobMetadata{}, fmt.Errorf("puffin: cannot add blob: writer already finalized")
+		return BlobMetadata{}, errors.New("puffin: cannot add blob: writer already finalized")
 	}
 	if input.Type == "" {
-		return BlobMetadata{}, fmt.Errorf("puffin: cannot add blob: type is required")
+		return BlobMetadata{}, errors.New("puffin: cannot add blob: type is required")
 	}
 
 	meta := BlobMetadata{
@@ -158,7 +162,7 @@ func (w *PuffinWriter) AddBlob(input BlobMetadataInput, data []byte) (BlobMetada
 // After Finish returns, no further operations are allowed on the writer.
 func (w *PuffinWriter) Finish() error {
 	if w.done {
-		return fmt.Errorf("puffin: cannot finish: writer already finalized")
+		return errors.New("puffin: cannot finish: writer already finalized")
 	}
 
 	// Build footer
@@ -204,5 +208,6 @@ func (w *PuffinWriter) Finish() error {
 	}
 
 	w.done = true
+
 	return nil
 }

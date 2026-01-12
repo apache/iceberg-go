@@ -20,15 +20,13 @@ package puffin
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
 )
 
-// PuffinReader provides random access to blobs and metadata in a Puffin file.
-//
-// The reader validates magic bytes on construction and caches the footer
-// after the first read. Use ReadBlob or ReadAllBlobs to access blob data.
+// PuffinReader
 //
 // Usage:
 //
@@ -75,10 +73,11 @@ func WithMaxBlobSize(size int64) ReaderOption {
 // The caller is responsible for closing the underlying io.ReaderAt.
 func NewPuffinReader(r io.ReaderAt, size int64, opts ...ReaderOption) (*PuffinReader, error) {
 	if r == nil {
-		return nil, fmt.Errorf("puffin: reader is nil")
+		return nil, errors.New("puffin: reader is nil")
 	}
 
 	// Minimum size: header magic + footer magic + footer trailer
+	// [Magic] + zero for blob + [Magic] + [FooterPayloadSize (assuming ~0)] + [Flags] + [Magic]
 	minSize := int64(MagicSize + MagicSize + footerTrailerSize)
 	if size < minSize {
 		return nil, fmt.Errorf("puffin: file too small (%d bytes, minimum %d)", size, minSize)
@@ -90,7 +89,7 @@ func NewPuffinReader(r io.ReaderAt, size int64, opts ...ReaderOption) (*PuffinRe
 		return nil, fmt.Errorf("puffin: read header magic: %w", err)
 	}
 	if headerMagic != magic {
-		return nil, fmt.Errorf("puffin: invalid header magic")
+		return nil, errors.New("puffin: invalid header magic")
 	}
 
 	// Validate trailing magic (fail fast on corrupt/truncated files)
@@ -99,7 +98,7 @@ func NewPuffinReader(r io.ReaderAt, size int64, opts ...ReaderOption) (*PuffinRe
 		return nil, fmt.Errorf("puffin: read trailing magic: %w", err)
 	}
 	if trailingMagic != magic {
-		return nil, fmt.Errorf("puffin: invalid trailing magic")
+		return nil, errors.New("puffin: invalid trailing magic")
 	}
 
 	pr := &PuffinReader{
@@ -131,7 +130,7 @@ func (r *PuffinReader) ReadFooter() (*Footer, error) {
 	// Validate trailing magic (already checked in constructor, but be defensive)
 	if trailer[8] != magic[0] || trailer[9] != magic[1] ||
 		trailer[10] != magic[2] || trailer[11] != magic[3] {
-		return nil, fmt.Errorf("puffin: invalid trailing magic in footer")
+		return nil, errors.New("puffin: invalid trailing magic in footer")
 	}
 
 	// Extract payload size and flags
@@ -140,7 +139,7 @@ func (r *PuffinReader) ReadFooter() (*Footer, error) {
 
 	// Check for compressed footer (unsupported)
 	if flags&FooterFlagCompressed != 0 {
-		return nil, fmt.Errorf("puffin: compressed footer not supported")
+		return nil, errors.New("puffin: compressed footer not supported")
 	}
 
 	// Check for unknown flags (future-proofing)
@@ -166,7 +165,7 @@ func (r *PuffinReader) ReadFooter() (*Footer, error) {
 		return nil, fmt.Errorf("puffin: read footer start magic: %w", err)
 	}
 	if footerMagic != magic {
-		return nil, fmt.Errorf("puffin: invalid footer start magic")
+		return nil, errors.New("puffin: invalid footer start magic")
 	}
 
 	// Read footer JSON payload
@@ -219,8 +218,9 @@ func (r *PuffinReader) ReadBlob(index int) (*BlobData, error) {
 // The footer must be read first to establish bounds checking.
 func (r *PuffinReader) ReadBlobByMetadata(meta BlobMetadata) ([]byte, error) {
 	if r.footer == nil {
-		return nil, fmt.Errorf("puffin: cannot read blob: footer not read")
+		return nil, errors.New("puffin: cannot read blob: footer not read")
 	}
+
 	return r.readBlobData(meta)
 }
 
@@ -228,7 +228,7 @@ func (r *PuffinReader) ReadBlobByMetadata(meta BlobMetadata) ([]byte, error) {
 func (r *PuffinReader) readBlobData(meta BlobMetadata) ([]byte, error) {
 	// Validate blob type
 	if meta.Type == "" {
-		return nil, fmt.Errorf("puffin: cannot read blob: type is required")
+		return nil, errors.New("puffin: cannot read blob: type is required")
 	}
 
 	// Check for compressed blob (unsupported)
@@ -315,7 +315,7 @@ func (r *PuffinReader) ReadAllBlobs() ([]*BlobData, error) {
 // The footer must be read first to establish bounds checking.
 func (r *PuffinReader) ReadRange(offset, length int64) ([]byte, error) {
 	if r.footer == nil {
-		return nil, fmt.Errorf("puffin: cannot read range: footer not read")
+		return nil, errors.New("puffin: cannot read range: footer not read")
 	}
 
 	// Validate length

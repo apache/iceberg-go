@@ -19,9 +19,10 @@ package puffin
 var magic = [4]byte{'P', 'F', 'A', '1'}
 
 const (
+	//[Magic] [FooterPayload] [FooterPayloadSize] [Flags] [Magic]
 	// MagicSize is the number of bytes in the magic marker.
 	MagicSize = 4
-	// footerTrailerSize accounts for footer length (4), flags (4), and trailing magic (4).
+	// footerTrailerSize accounts for footer length (4)+ flags (4) + trailing magic (4).
 	footerTrailerSize = 12
 	// FooterFlagCompressed indicates a compressed footer; unsupported in this implementation.
 	FooterFlagCompressed = 1 // bit 0
