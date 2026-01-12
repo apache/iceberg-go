@@ -37,7 +37,27 @@ func writeAll(w io.Writer, data []byte) error {
 	return nil
 }
 
-// PuffinWriter writes a Puffin file to an output stream.
+// PuffinWriter writes blobs and metadata to a Puffin file.
+//
+// The Puffin format stores arbitrary blobs (e.g., statistics, deletion vectors)
+// along with JSON metadata in a footer. The writer handles the binary layout:
+// header magic, blob data, and footer structure.
+//
+// Usage:
+//
+//	w, err := puffin.NewWriter(file)
+//	if err != nil {
+//	    return err
+//	}
+//	_, err = w.AddBlob(puffin.BlobMetadataInput{
+//	    Type:       puffin.ApacheDataSketchesThetaV1,
+//	    SnapshotID: 123,
+//	    Fields:     []int32{1},
+//	}, sketchBytes)
+//	if err != nil {
+//	    return err
+//	}
+//	return w.Finish()
 type PuffinWriter struct {
 	w         io.Writer
 	offset    int64
@@ -58,6 +78,7 @@ type BlobMetadataInput struct {
 }
 
 // NewWriter creates a new PuffinWriter and writes the file header magic.
+// The caller is responsible for closing the underlying writer after Finish returns.
 func NewWriter(w io.Writer) (*PuffinWriter, error) {
 	if w == nil {
 		return nil, fmt.Errorf("puffin: writer is nil")
@@ -76,10 +97,11 @@ func NewWriter(w io.Writer) (*PuffinWriter, error) {
 	}, nil
 }
 
-// SetProperties sets file-level properties.
+// SetProperties merges the provided properties into the file-level properties
+// written to the footer. Can be called multiple times before Finish.
 func (w *PuffinWriter) SetProperties(props map[string]string) error {
 	if w.done {
-		return fmt.Errorf("puffin: writer finalized")
+		return fmt.Errorf("puffin: cannot set properties: writer already finalized")
 	}
 	for k, v := range props {
 		w.props[k] = v
@@ -87,26 +109,28 @@ func (w *PuffinWriter) SetProperties(props map[string]string) error {
 	return nil
 }
 
-// SetCreatedBy sets the created-by property in the footer.
+// SetCreatedBy overrides the default "created-by" property written to the footer.
+// The default value is "iceberg-go". Example: "MyApp version 1.2.3".
 func (w *PuffinWriter) SetCreatedBy(createdBy string) error {
 	if w.done {
-		return fmt.Errorf("puffin: writer finalized")
+		return fmt.Errorf("puffin: cannot set created-by: writer already finalized")
 	}
 	if createdBy == "" {
-		return fmt.Errorf("puffin: created-by cannot be empty")
+		return fmt.Errorf("puffin: cannot set created-by: value cannot be empty")
 	}
 	w.createdBy = createdBy
 	return nil
 }
 
-// AddBlob writes a blob to the file and records its metadata.
-// Returns the BlobMetadata with computed Offset and Length.
+// AddBlob writes blob data and records its metadata for the footer.
+// Returns the complete BlobMetadata including the computed Offset and Length.
+// The input.Type is required; use constants like ApacheDataSketchesThetaV1.
 func (w *PuffinWriter) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, error) {
 	if w.done {
-		return BlobMetadata{}, fmt.Errorf("puffin: writer finalized")
+		return BlobMetadata{}, fmt.Errorf("puffin: cannot add blob: writer already finalized")
 	}
 	if input.Type == "" {
-		return BlobMetadata{}, fmt.Errorf("puffin: blob type required")
+		return BlobMetadata{}, fmt.Errorf("puffin: cannot add blob: type is required")
 	}
 
 	meta := BlobMetadata{
@@ -129,11 +153,12 @@ func (w *PuffinWriter) AddBlob(input BlobMetadataInput, data []byte) (BlobMetada
 	return meta, nil
 }
 
-// Finish writes the footer and completes the file.
+// Finish writes the footer and completes the Puffin file structure.
 // Must be called exactly once after all blobs are written.
+// After Finish returns, no further operations are allowed on the writer.
 func (w *PuffinWriter) Finish() error {
 	if w.done {
-		return fmt.Errorf("puffin: writer finalized")
+		return fmt.Errorf("puffin: cannot finish: writer already finalized")
 	}
 
 	// Build footer
