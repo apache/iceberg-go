@@ -587,8 +587,10 @@ func (t *Transaction) classifyFilesForOverwrite(ctx context.Context, fs io.IO, f
 				filesToDelete = append(filesToDelete, df)
 			}
 		}
+
 		return filesToDelete, filesToRewrite, nil
 	}
+
 	return t.classifyFilesForFilteredOverwrite(ctx, fs, filter)
 }
 
