@@ -17,9 +17,25 @@
 package puffin
 
 import (
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 )
+
+// writeAll writes all bytes to w or returns an error.
+// Handles the io.Writer contract where Write can return n < len(data) without error.
+func writeAll(w io.Writer, data []byte) error {
+	n, err := w.Write(data)
+	if err != nil {
+		return err
+	}
+	if n != len(data) {
+		return fmt.Errorf("short write: wrote %d of %d bytes", n, len(data))
+	}
+	return nil
+}
 
 // PuffinWriter writes a Puffin file to an output stream.
 type PuffinWriter struct {
@@ -31,23 +47,137 @@ type PuffinWriter struct {
 	createdBy string
 }
 
-type BlobMetadataInput struct{}
+// BlobMetadataInput contains fields the caller provides when adding a blob.
+// Offset, Length, and CompressionCodec are set by the writer.
+type BlobMetadataInput struct {
+	Type           string
+	SnapshotID     int64
+	SequenceNumber int64
+	Fields         []int32
+	Properties     map[string]string
+}
 
-// NewWriter creates a new PuffinWriter.
+// NewWriter creates a new PuffinWriter and writes the file header magic.
 func NewWriter(w io.Writer) (*PuffinWriter, error) {
 	if w == nil {
 		return nil, fmt.Errorf("puffin: writer is nil")
 	}
+
+	// Write header magic bytes
+	if err := writeAll(w, magic[:]); err != nil {
+		return nil, fmt.Errorf("puffin: write header magic: %w", err)
+	}
+
 	return &PuffinWriter{
 		w:         w,
-		offset:    0,
-		blobs:     make([]BlobMetadata, 0),
+		offset:    MagicSize,
 		props:     make(map[string]string),
-		done:      false,
 		createdBy: "iceberg-go",
 	}, nil
 }
 
-func (w *PuffinWriter) AddBlob() {}
+// SetProperties sets file-level properties.
+func (w *PuffinWriter) SetProperties(props map[string]string) error {
+	if w.done {
+		return fmt.Errorf("puffin: writer finalized")
+	}
+	for k, v := range props {
+		w.props[k] = v
+	}
+	return nil
+}
 
-func (w *PuffinReader) Finish() {}
+// SetCreatedBy sets the created-by property in the footer.
+func (w *PuffinWriter) SetCreatedBy(createdBy string) error {
+	if w.done {
+		return fmt.Errorf("puffin: writer finalized")
+	}
+	if createdBy == "" {
+		return fmt.Errorf("puffin: created-by cannot be empty")
+	}
+	w.createdBy = createdBy
+	return nil
+}
+
+// AddBlob writes a blob to the file and records its metadata.
+// Returns the BlobMetadata with computed Offset and Length.
+func (w *PuffinWriter) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, error) {
+	if w.done {
+		return BlobMetadata{}, fmt.Errorf("puffin: writer finalized")
+	}
+	if input.Type == "" {
+		return BlobMetadata{}, fmt.Errorf("puffin: blob type required")
+	}
+
+	meta := BlobMetadata{
+		Type:           input.Type,
+		SnapshotID:     input.SnapshotID,
+		SequenceNumber: input.SequenceNumber,
+		Fields:         input.Fields,
+		Offset:         w.offset,
+		Length:         int64(len(data)),
+		Properties:     input.Properties,
+	}
+
+	if err := writeAll(w.w, data); err != nil {
+		return BlobMetadata{}, fmt.Errorf("puffin: write blob: %w", err)
+	}
+
+	w.offset += meta.Length
+	w.blobs = append(w.blobs, meta)
+
+	return meta, nil
+}
+
+// Finish writes the footer and completes the file.
+// Must be called exactly once after all blobs are written.
+func (w *PuffinWriter) Finish() error {
+	if w.done {
+		return fmt.Errorf("puffin: writer finalized")
+	}
+
+	// Build footer
+	footer := Footer{
+		Blobs:      w.blobs,
+		Properties: w.props,
+	}
+	if footer.Properties == nil {
+		footer.Properties = make(map[string]string)
+	}
+	if w.createdBy != "" {
+		footer.Properties[CreatedBy] = w.createdBy
+	}
+
+	payload, err := json.Marshal(footer)
+	if err != nil {
+		return fmt.Errorf("puffin: marshal footer: %w", err)
+	}
+
+	// Check footer size fits in int32
+	if len(payload) > math.MaxInt32 {
+		return fmt.Errorf("puffin: footer too large: %d bytes exceeds 2GB limit", len(payload))
+	}
+
+	// Write footer start magic
+	if err := writeAll(w.w, magic[:]); err != nil {
+		return fmt.Errorf("puffin: write footer magic: %w", err)
+	}
+
+	// Write footer payload
+	if err := writeAll(w.w, payload); err != nil {
+		return fmt.Errorf("puffin: write footer payload: %w", err)
+	}
+
+	// Write trailer: PayloadSize(4) + Flags(4) + Magic(4)
+	var trailer [footerTrailerSize]byte
+	binary.LittleEndian.PutUint32(trailer[0:4], uint32(len(payload)))
+	binary.LittleEndian.PutUint32(trailer[4:8], 0) // flags = 0 (uncompressed)
+	copy(trailer[8:12], magic[:])
+
+	if err := writeAll(w.w, trailer[:]); err != nil {
+		return fmt.Errorf("puffin: write footer trailer: %w", err)
+	}
+
+	w.done = true
+	return nil
+}

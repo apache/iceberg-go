@@ -18,6 +18,28 @@ package puffin
 
 var magic = [4]byte{'P', 'F', 'A', '1'}
 
+const (
+	// MagicSize is the number of bytes in the magic marker.
+	MagicSize = 4
+	// footerTrailerSize accounts for footer length (4), flags (4), and trailing magic (4).
+	footerTrailerSize = 12
+	// FooterFlagCompressed indicates a compressed footer; unsupported in this implementation.
+	FooterFlagCompressed = 1 // bit 0
+
+	// DefaultMaxBlobSize is the maximum blob size allowed when reading (256 MB).
+	// This prevents OOM attacks from malicious files with huge blob lengths.
+	// Override with WithMaxBlobSize when creating a reader.
+	DefaultMaxBlobSize = 256 << 20
+	// CreatedBy is a human-readable identification of the application writing the file, along with its version.
+	// Example: "Trino version 381".
+	CreatedBy = "created-by"
+	// ApacheDataSketchesThetaV1 is a serialized compact Theta sketch from Apache DataSketches.
+	ApacheDataSketchesThetaV1 = "apache-datasketches-theta-v1"
+
+	// DeletionVectorV1 is a serialized deletion vector according to the Iceberg spec.
+	DeletionVectorV1 = "deletion-vector-v1"
+)
+
 type BlobMetadata struct {
 	Type             string            `json:"type"`
 	SnapshotID       int64             `json:"snapshot-id"`
