@@ -1029,6 +1029,7 @@ func (t *TableWritingTestSuite) TestExpireSnapshotsWithMissingParent() {
 	for i := range remainingSnapshots {
 		if remainingSnapshots[i].SnapshotID == snapshot4ID {
 			snapshot4 = &remainingSnapshots[i]
+
 			break
 		}
 	}
