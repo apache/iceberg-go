@@ -167,6 +167,7 @@ func (t *Transaction) UpdateSchema(caseSensitive bool, allowIncompatibleChanges 
 type expireSnapshotsCfg struct {
 	minSnapshotsToKeep *int
 	maxSnapshotAgeMs   *int64
+	postCommit         bool
 }
 
 type ExpireSnapshotsOpt func(*expireSnapshotsCfg)
@@ -184,9 +185,15 @@ func WithOlderThan(t time.Duration) ExpireSnapshotsOpt {
 	}
 }
 
+func WithPostCommit(postCommit bool) ExpireSnapshotsOpt {
+	return func(cfg *expireSnapshotsCfg) {
+		cfg.postCommit = postCommit
+	}
+}
+
 func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	var (
-		cfg         expireSnapshotsCfg
+		cfg         = expireSnapshotsCfg{postCommit: true}
 		updates     []Update
 		snapsToKeep = make(map[int64]struct{})
 		nowMs       = time.Now().UnixMilli()
@@ -268,7 +275,9 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		}
 	}
 
-	updates = append(updates, NewRemoveSnapshotsUpdate(snapsToDelete))
+	update := NewRemoveSnapshotsUpdate(snapsToDelete)
+	update.postCommit = cfg.postCommit
+	updates = append(updates, update)
 
 	return t.apply(updates, nil)
 }
