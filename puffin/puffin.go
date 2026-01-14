@@ -14,6 +14,18 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+//
+// Package puffin provides reading and writing of Puffin files.
+//
+// Puffin is a file format designed to store statistics and indexes
+// for Iceberg tables. A Puffin file contains blobs (opaque byte sequences)
+// with associated metadata, such as Apache DataSketches or deletion vectors.
+//
+// File structure:
+//
+//	[Magic] [Blob]* [Magic] [Footer Payload] [Footer Payload Size] [Flags] [Magic]
+//
+// See the specification at https://iceberg.apache.org/puffin-spec/
 package puffin
 
 var magic = [4]byte{'P', 'F', 'A', '1'}
@@ -22,15 +34,18 @@ const (
 	//[Magic] [FooterPayload] [FooterPayloadSize] [Flags] [Magic]
 	// MagicSize is the number of bytes in the magic marker.
 	MagicSize = 4
+
 	// footerTrailerSize accounts for footer length (4)+ flags (4) + trailing magic (4).
 	footerTrailerSize = 12
+
 	// FooterFlagCompressed indicates a compressed footer; unsupported in this implementation.
 	FooterFlagCompressed = 1 // bit 0
 
+	// Prevents OOM
 	// DefaultMaxBlobSize is the maximum blob size allowed when reading (256 MB).
-	// This prevents OOM attacks from malicious files with huge blob lengths.
 	// Override with WithMaxBlobSize when creating a reader.
 	DefaultMaxBlobSize = 256 << 20
+
 	// CreatedBy is a human-readable identification of the application writing the file, along with its version.
 	// Example: "Trino version 381".
 	CreatedBy = "created-by"
@@ -41,7 +56,7 @@ type BlobMetadata struct {
 	SnapshotID       int64             `json:"snapshot-id"`
 	SequenceNumber   int64             `json:"sequence-number"`
 	Fields           []int32           `json:"fields"`
-	Offset           int64             `json:"offset"` // absolute file offset
+	Offset           int64             `json:"offset"`
 	Length           int64             `json:"length"`
 	CompressionCodec *string           `json:"compression-codec,omitempty"`
 	Properties       map[string]string `json:"properties,omitempty"`
@@ -63,5 +78,4 @@ const (
 	// BlobTypeDeletionVector is a serialized deletion vector per the
 	// Iceberg spec. Requires snapshot-id and sequence-number to be -1.
 	BlobTypeDeletionVector BlobType = "deletion-vector-v1"
-
 )

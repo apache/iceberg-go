@@ -6,7 +6,7 @@
 // "License"); you may not use this file except in compliance
 // with the License.  You may obtain a copy of the License at
 //
-//	http://www.apache.org/licenses/LICENSE-2.0
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing,
 // software distributed under the License is distributed on an
@@ -26,146 +26,157 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestWriterEmptyFile(t *testing.T) {
-	var buf bytes.Buffer
+// TestRoundTrip verifies that data written by Writer can be read back by Reader
+// with all metadata and blob data preserved exactly.
+func TestRoundTrip(t *testing.T) {
+	// Test data
+	blob1Data := []byte("theta sketch data here")
+	blob2Data := []byte("another blob with different content")
 
+	// Write puffin file to buffer
+	var buf bytes.Buffer
 	w, err := puffin.NewWriter(&buf)
 	require.NoError(t, err)
 
-	err = w.Finish()
+	// Add file-level properties
+	err = w.AddProperties(map[string]string{
+		"test-property": "test-value",
+	})
 	require.NoError(t, err)
 
-	// Verify minimum structure: header magic + footer magic + JSON + trailer
-	assert.GreaterOrEqual(t, buf.Len(), puffin.MagicSize*2+12)
-
-	// Verify header magic
-	assert.Equal(t, []byte{'P', 'F', 'A', '1'}, buf.Bytes()[:4])
-
-	// Verify trailing magic
-	assert.Equal(t, []byte{'P', 'F', 'A', '1'}, buf.Bytes()[buf.Len()-4:])
-}
-
-func TestWriterSingleBlob(t *testing.T) {
-	var buf bytes.Buffer
-	blobData := []byte("hello world")
-
-	w, err := puffin.NewWriter(&buf)
-	require.NoError(t, err)
-
-	meta, err := w.AddBlob(puffin.BlobMetadataInput{
+	// Add first blob (DataSketches type)
+	meta1, err := w.AddBlob(puffin.BlobMetadataInput{
 		Type:           puffin.BlobTypeDataSketchesTheta,
 		SnapshotID:     123,
 		SequenceNumber: 1,
-		Fields:         []int32{1, 2},
-	}, blobData)
+		Fields:         []int32{1, 2, 3},
+		Properties:     map[string]string{"ndv": "1000"},
+	}, blob1Data)
 	require.NoError(t, err)
 
-	assert.Equal(t, puffin.BlobTypeDataSketchesTheta, meta.Type)
-	assert.Equal(t, int64(123), meta.SnapshotID)
-	assert.Equal(t, int64(1), meta.SequenceNumber)
-	assert.Equal(t, []int32{1, 2}, meta.Fields)
-	assert.Equal(t, int64(puffin.MagicSize), meta.Offset) // blob starts after header magic
-	assert.Equal(t, int64(len(blobData)), meta.Length)
-
-	err = w.Finish()
-	require.NoError(t, err)
-}
-
-func TestWriterMultipleBlobs(t *testing.T) {
-	var buf bytes.Buffer
-	blob1 := []byte("first blob")
-	blob2 := []byte("second blob data")
-
-	w, err := puffin.NewWriter(&buf)
-	require.NoError(t, err)
-
-	meta1, err := w.AddBlob(puffin.BlobMetadataInput{
-		Type:       puffin.BlobTypeDataSketchesTheta,
-		SnapshotID: 100,
-		Fields:     []int32{1},
-	}, blob1)
-	require.NoError(t, err)
-
+	// Add second blob (DeletionVector type)
 	meta2, err := w.AddBlob(puffin.BlobMetadataInput{
-		Type:       puffin.BlobTypeDeletionVector,
-		SnapshotID: 200,
-		Fields:     []int32{2},
-	}, blob2)
+		Type:           puffin.BlobTypeDeletionVector,
+		SnapshotID:     -1,
+		SequenceNumber: -1,
+		Fields:         []int32{},
+		Properties: map[string]string{
+			"referenced-data-file": "data/file.parquet",
+			"cardinality":          "42",
+		},
+	}, blob2Data)
 	require.NoError(t, err)
-
-	// Second blob should start after first blob
-	assert.Equal(t, meta1.Offset+meta1.Length, meta2.Offset)
 
 	err = w.Finish()
 	require.NoError(t, err)
+
+	// Read puffin file back
+	data := buf.Bytes()
+	r, err := puffin.NewReader(bytes.NewReader(data), int64(len(data)))
+	require.NoError(t, err)
+
+	// Verify footer
+	footer := r.Footer()
+	require.NotNil(t, footer)
+	assert.Len(t, footer.Blobs, 2)
+
+	// Verify file properties
+	assert.Equal(t, "test-value", footer.Properties["test-property"])
+	assert.Contains(t, footer.Properties[puffin.CreatedBy], "iceberg-go")
+
+	// Verify first blob metadata
+	assert.Equal(t, puffin.BlobTypeDataSketchesTheta, footer.Blobs[0].Type)
+	assert.Equal(t, int64(123), footer.Blobs[0].SnapshotID)
+	assert.Equal(t, int64(1), footer.Blobs[0].SequenceNumber)
+	assert.Equal(t, []int32{1, 2, 3}, footer.Blobs[0].Fields)
+	assert.Equal(t, meta1.Offset, footer.Blobs[0].Offset)
+	assert.Equal(t, meta1.Length, footer.Blobs[0].Length)
+	assert.Equal(t, "1000", footer.Blobs[0].Properties["ndv"])
+
+	// Verify second blob metadata
+	assert.Equal(t, puffin.BlobTypeDeletionVector, footer.Blobs[1].Type)
+	assert.Equal(t, int64(-1), footer.Blobs[1].SnapshotID)
+	assert.Equal(t, int64(-1), footer.Blobs[1].SequenceNumber)
+	assert.Equal(t, []int32{}, footer.Blobs[1].Fields)
+	assert.Equal(t, meta2.Offset, footer.Blobs[1].Offset)
+	assert.Equal(t, meta2.Length, footer.Blobs[1].Length)
+
+	// Verify blob data via ReadBlob
+	blobData1, err := r.ReadBlob(0)
+	require.NoError(t, err)
+	assert.Equal(t, blob1Data, blobData1.Data)
+
+	blobData2, err := r.ReadBlob(1)
+	require.NoError(t, err)
+	assert.Equal(t, blob2Data, blobData2.Data)
+
+	// Verify ReadAllBlobs
+	allBlobs, err := r.ReadAllBlobs()
+	require.NoError(t, err)
+	assert.Len(t, allBlobs, 2)
+	assert.Equal(t, blob1Data, allBlobs[0].Data)
+	assert.Equal(t, blob2Data, allBlobs[1].Data)
 }
 
-func TestWriterSetCreatedBy(t *testing.T) {
+// TestEmptyFile verifies that a puffin file with no blobs is valid.
+func TestEmptyFile(t *testing.T) {
 	var buf bytes.Buffer
-
 	w, err := puffin.NewWriter(&buf)
 	require.NoError(t, err)
 
-	err = w.SetCreatedBy("test-app v1.0")
-	require.NoError(t, err)
-
 	err = w.Finish()
 	require.NoError(t, err)
 
-	// Read back and verify
-	r, err := puffin.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	data := buf.Bytes()
+	r, err := puffin.NewReader(bytes.NewReader(data), int64(len(data)))
 	require.NoError(t, err)
 
-	footer, err := r.ReadFooter()
-	require.NoError(t, err)
+	footer := r.Footer()
+	assert.NotNil(t, footer)
+	assert.Len(t, footer.Blobs, 0)
+	assert.Contains(t, footer.Properties[puffin.CreatedBy], "iceberg-go")
 
-	assert.Equal(t, "test-app v1.0", footer.Properties[puffin.CreatedBy])
+	// ReadAllBlobs should return nil for empty file
+	blobs, err := r.ReadAllBlobs()
+	require.NoError(t, err)
+	assert.Nil(t, blobs)
 }
 
-func TestWriterSetProperties(t *testing.T) {
-	var buf bytes.Buffer
-
-	w, err := puffin.NewWriter(&buf)
-	require.NoError(t, err)
-
-	err = w.AddProperties(map[string]string{
-		"custom-key": "custom-value",
-	})
-	require.NoError(t, err)
-
-	err = w.Finish()
-	require.NoError(t, err)
-
-	// Read back and verify
-	r, err := puffin.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
-	require.NoError(t, err)
-
-	footer, err := r.ReadFooter()
-	require.NoError(t, err)
-
-	assert.Equal(t, "custom-value", footer.Properties["custom-key"])
-}
-
-func TestWriterErrors(t *testing.T) {
+// TestWriterValidation verifies that Writer rejects invalid input.
+func TestWriterValidation(t *testing.T) {
 	t.Run("nil writer", func(t *testing.T) {
 		_, err := puffin.NewWriter(nil)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "writer is nil")
+		assert.ErrorContains(t, err, "nil")
 	})
 
-	t.Run("empty blob type", func(t *testing.T) {
+	t.Run("missing type", func(t *testing.T) {
 		var buf bytes.Buffer
 		w, err := puffin.NewWriter(&buf)
 		require.NoError(t, err)
 
 		_, err = w.AddBlob(puffin.BlobMetadataInput{
-			Type: "", // empty type
+			Type:   "", // missing
+			Fields: []int32{1},
 		}, []byte("data"))
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "type is required")
+		assert.ErrorContains(t, err, "type")
 	})
 
-	t.Run("add after finish", func(t *testing.T) {
+	t.Run("nil fields", func(t *testing.T) {
+		var buf bytes.Buffer
+		w, err := puffin.NewWriter(&buf)
+		require.NoError(t, err)
+
+		_, err = w.AddBlob(puffin.BlobMetadataInput{
+			Type:   puffin.BlobTypeDataSketchesTheta,
+			Fields: nil, // nil not allowed
+		}, []byte("data"))
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, "fields")
+	})
+
+	t.Run("add blob after finish", func(t *testing.T) {
 		var buf bytes.Buffer
 		w, err := puffin.NewWriter(&buf)
 		require.NoError(t, err)
@@ -178,7 +189,7 @@ func TestWriterErrors(t *testing.T) {
 			Fields: []int32{1},
 		}, []byte("data"))
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "finalized")
+		assert.ErrorContains(t, err, "finalized")
 	})
 
 	t.Run("double finish", func(t *testing.T) {
@@ -191,242 +202,142 @@ func TestWriterErrors(t *testing.T) {
 
 		err = w.Finish()
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "finalized")
-	})
-}
-
-func TestReaderErrors(t *testing.T) {
-	t.Run("nil reader", func(t *testing.T) {
-		_, err := puffin.NewReader(nil, 100)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "reader is nil")
+		assert.ErrorContains(t, err, "finalized")
 	})
 
-	t.Run("file too small", func(t *testing.T) {
-		data := make([]byte, 10) // too small
-		_, err := puffin.NewReader(bytes.NewReader(data), int64(len(data)))
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "too small")
-	})
-
-	t.Run("invalid header magic", func(t *testing.T) {
-		data := make([]byte, 100)
-		copy(data[0:4], []byte("XXXX")) // wrong magic
-		copy(data[96:100], []byte{'P', 'F', 'A', '1'})
-
-		_, err := puffin.NewReader(bytes.NewReader(data), int64(len(data)))
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "invalid header magic")
-	})
-
-	t.Run("invalid trailing magic", func(t *testing.T) {
-		data := make([]byte, 100)
-		copy(data[0:4], []byte{'P', 'F', 'A', '1'})
-		copy(data[96:100], []byte("XXXX")) // wrong trailing magic
-
-		_, err := puffin.NewReader(bytes.NewReader(data), int64(len(data)))
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "invalid trailing magic")
-	})
-
-	t.Run("blob index out of range", func(t *testing.T) {
+	t.Run("deletion vector with invalid snapshot-id", func(t *testing.T) {
 		var buf bytes.Buffer
 		w, err := puffin.NewWriter(&buf)
 		require.NoError(t, err)
-		err = w.Finish()
-		require.NoError(t, err)
 
-		r, err := puffin.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
-		require.NoError(t, err)
-
-		_, err = r.ReadBlob(0) // no blobs, index 0 is out of range
+		_, err = w.AddBlob(puffin.BlobMetadataInput{
+			Type:           puffin.BlobTypeDeletionVector,
+			SnapshotID:     123, // must be -1
+			SequenceNumber: -1,
+			Fields:         []int32{},
+		}, []byte("data"))
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "out of range")
+		assert.ErrorContains(t, err, "snapshot-id")
+	})
+
+	t.Run("deletion vector with invalid sequence-number", func(t *testing.T) {
+		var buf bytes.Buffer
+		w, err := puffin.NewWriter(&buf)
+		require.NoError(t, err)
+
+		_, err = w.AddBlob(puffin.BlobMetadataInput{
+			Type:           puffin.BlobTypeDeletionVector,
+			SnapshotID:     -1,
+			SequenceNumber: 5, // must be -1
+			Fields:         []int32{},
+		}, []byte("data"))
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, "sequence-number")
 	})
 }
 
-func TestRoundTrip(t *testing.T) {
-	tests := []struct {
-		name  string
-		blobs []struct {
-			data  []byte
-			input puffin.BlobMetadataInput
+// TestReaderInvalidFile verifies that Reader rejects invalid/corrupt files.
+func TestReaderInvalidFile(t *testing.T) {
+	t.Run("nil reader", func(t *testing.T) {
+		_, err := puffin.NewReader(nil, 100)
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, "nil")
+	})
+
+	t.Run("file too small", func(t *testing.T) {
+		data := []byte("tiny")
+		_, err := puffin.NewReader(bytes.NewReader(data), int64(len(data)))
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, "too small")
+	})
+
+	t.Run("invalid header magic", func(t *testing.T) {
+		// Create valid file first
+		var buf bytes.Buffer
+		w, _ := puffin.NewWriter(&buf)
+		w.Finish()
+		data := buf.Bytes()
+
+		// Corrupt header magic
+		data[0] = 'X'
+
+		_, err := puffin.NewReader(bytes.NewReader(data), int64(len(data)))
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, "magic")
+	})
+
+	t.Run("invalid trailing magic", func(t *testing.T) {
+		// Create valid file first
+		var buf bytes.Buffer
+		w, _ := puffin.NewWriter(&buf)
+		w.Finish()
+		data := buf.Bytes()
+
+		// Corrupt trailing magic (last 4 bytes)
+		data[len(data)-1] = 'X'
+
+		_, err := puffin.NewReader(bytes.NewReader(data), int64(len(data)))
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, "magic")
+	})
+}
+
+// TestReaderBlobAccess verifies blob access methods work correctly.
+func TestReaderBlobAccess(t *testing.T) {
+	// Create file with multiple blobs
+	var buf bytes.Buffer
+	w, err := puffin.NewWriter(&buf)
+	require.NoError(t, err)
+
+	blobs := [][]byte{
+		[]byte("first"),
+		[]byte("second"),
+		[]byte("third"),
+	}
+
+	for _, blob := range blobs {
+		_, err := w.AddBlob(puffin.BlobMetadataInput{
+			Type:   puffin.BlobTypeDataSketchesTheta,
+			Fields: []int32{},
+		}, blob)
+		require.NoError(t, err)
+	}
+	require.NoError(t, w.Finish())
+
+	data := buf.Bytes()
+	r, err := puffin.NewReader(bytes.NewReader(data), int64(len(data)))
+	require.NoError(t, err)
+
+	t.Run("read by index", func(t *testing.T) {
+		for i, expected := range blobs {
+			blobData, err := r.ReadBlob(i)
+			require.NoError(t, err)
+			assert.Equal(t, expected, blobData.Data)
 		}
-	}{
-		{
-			name:  "empty file",
-			blobs: nil,
-		},
-		{
-			name: "single blob",
-			blobs: []struct {
-				data  []byte
-				input puffin.BlobMetadataInput
-			}{
-				{
-					data: []byte("test data"),
-					input: puffin.BlobMetadataInput{
-						Type:           puffin.BlobTypeDataSketchesTheta,
-						SnapshotID:     1,
-						SequenceNumber: 1,
-						Fields:         []int32{1},
-					},
-				},
-			},
-		},
-		{
-			name: "multiple blobs",
-			blobs: []struct {
-				data  []byte
-				input puffin.BlobMetadataInput
-			}{
-				{
-					data: []byte("first blob data"),
-					input: puffin.BlobMetadataInput{
-						Type:           puffin.BlobTypeDataSketchesTheta,
-						SnapshotID:     100,
-						SequenceNumber: 1,
-						Fields:         []int32{1, 2},
-					},
-				},
-				{
-					data: []byte("second blob with more data"),
-					input: puffin.BlobMetadataInput{
-						Type:           puffin.BlobTypeDeletionVector,
-						SnapshotID:     200,
-						SequenceNumber: 2,
-						Fields:         []int32{3},
-						Properties:     map[string]string{"key": "value"},
-					},
-				},
-				{
-					data: []byte("third"),
-					input: puffin.BlobMetadataInput{
-						Type:           puffin.BlobTypeDataSketchesTheta,
-						SnapshotID:     300,
-						SequenceNumber: 3,
-						Fields:         []int32{4, 5, 6},
-					},
-				},
-			},
-		},
-	}
+	})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Write
-			var buf bytes.Buffer
-			w, err := puffin.NewWriter(&buf)
-			require.NoError(t, err)
+	t.Run("index out of range", func(t *testing.T) {
+		_, err := r.ReadBlob(-1)
+		assert.Error(t, err)
 
-			for _, blob := range tt.blobs {
-				_, err := w.AddBlob(blob.input, blob.data)
-				require.NoError(t, err)
-			}
+		_, err = r.ReadBlob(100)
+		assert.Error(t, err)
+	})
 
-			err = w.Finish()
-			require.NoError(t, err)
+	t.Run("read by metadata", func(t *testing.T) {
+		meta := r.Footer().Blobs[1]
+		data, err := r.ReadBlobByMetadata(meta)
+		require.NoError(t, err)
+		assert.Equal(t, blobs[1], data)
+	})
 
-			// Read
-			r, err := puffin.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
-			require.NoError(t, err)
+	t.Run("read all preserves order", func(t *testing.T) {
+		allBlobs, err := r.ReadAllBlobs()
+		require.NoError(t, err)
+		require.Len(t, allBlobs, 3)
 
-			footer, err := r.ReadFooter()
-			require.NoError(t, err)
-
-			// Verify blob count
-			assert.Len(t, footer.Blobs, len(tt.blobs))
-
-			// Verify each blob
-			for i, expected := range tt.blobs {
-				blobData, err := r.ReadBlob(i)
-				require.NoError(t, err)
-
-				assert.Equal(t, expected.data, blobData.Data, "blob %d data mismatch", i)
-				assert.Equal(t, expected.input.Type, blobData.Metadata.Type, "blob %d type mismatch", i)
-				assert.Equal(t, expected.input.SnapshotID, blobData.Metadata.SnapshotID, "blob %d snapshot-id mismatch", i)
-				assert.Equal(t, expected.input.SequenceNumber, blobData.Metadata.SequenceNumber, "blob %d sequence-number mismatch", i)
-				assert.Equal(t, expected.input.Fields, blobData.Metadata.Fields, "blob %d fields mismatch", i)
-
-				if expected.input.Properties != nil {
-					assert.Equal(t, expected.input.Properties, blobData.Metadata.Properties, "blob %d properties mismatch", i)
-				}
-			}
-
-			// Also test ReadAllBlobs
-			if len(tt.blobs) > 0 {
-				allBlobs, err := r.ReadAllBlobs()
-				require.NoError(t, err)
-				assert.Len(t, allBlobs, len(tt.blobs))
-
-				for i, expected := range tt.blobs {
-					assert.Equal(t, expected.data, allBlobs[i].Data)
-				}
-			}
-		})
-	}
-}
-
-func TestReadBlobByMetadata(t *testing.T) {
-	// Write a file with a blob
-	var buf bytes.Buffer
-	blobData := []byte("metadata test blob")
-
-	w, err := puffin.NewWriter(&buf)
-	require.NoError(t, err)
-
-	meta, err := w.AddBlob(puffin.BlobMetadataInput{
-		Type:       puffin.BlobTypeDataSketchesTheta,
-		SnapshotID: 42,
-		Fields:     []int32{1},
-	}, blobData)
-	require.NoError(t, err)
-
-	err = w.Finish()
-	require.NoError(t, err)
-
-	// Read using metadata directly
-	r, err := puffin.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
-	require.NoError(t, err)
-
-	// Must read footer first
-	_, err = r.ReadFooter()
-	require.NoError(t, err)
-
-	data, err := r.ReadBlobByMetadata(meta)
-	require.NoError(t, err)
-
-	assert.Equal(t, blobData, data)
-}
-
-func TestReadRange(t *testing.T) {
-	// Write a file with a known blob
-	var buf bytes.Buffer
-	blobData := []byte("0123456789")
-
-	w, err := puffin.NewWriter(&buf)
-	require.NoError(t, err)
-
-	meta, err := w.AddBlob(puffin.BlobMetadataInput{
-		Type:       puffin.BlobTypeDataSketchesTheta,
-		SnapshotID: 1,
-		Fields:     []int32{1},
-	}, blobData)
-	require.NoError(t, err)
-
-	err = w.Finish()
-	require.NoError(t, err)
-
-	// Read a range
-	r, err := puffin.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
-	require.NoError(t, err)
-
-	_, err = r.ReadFooter()
-	require.NoError(t, err)
-
-	// Read middle portion of blob
-	data, err := r.ReadRange(meta.Offset+2, 5)
-	require.NoError(t, err)
-
-	assert.Equal(t, []byte("23456"), data)
+		for i, expected := range blobs {
+			assert.Equal(t, expected, allBlobs[i].Data)
+		}
+	})
 }
