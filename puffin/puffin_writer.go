@@ -23,27 +23,11 @@ import (
 	"fmt"
 	"io"
 	"math"
+
+	"github.com/apache/iceberg-go"
 )
 
-// writeAll writes all bytes to w or returns an error.
-// Handles the io.Writer contract where Write can return n < len(data) without error.
-func writeAll(w io.Writer, data []byte) error {
-	n, err := w.Write(data)
-	if err != nil {
-		return err
-	}
-	if n != len(data) {
-		return fmt.Errorf("short write: wrote %d of %d bytes", n, len(data))
-	}
-
-	return nil
-}
-
 // PuffinWriter writes blobs and metadata to a Puffin file.
-//
-// The Puffin format stores arbitrary blobs (e.g., statistics, deletion vectors)
-// along with JSON metadata in a footer. The writer handles the binary layout:
-// header magic, blob data, and footer structure.
 //
 // Usage:
 //
@@ -52,7 +36,7 @@ func writeAll(w io.Writer, data []byte) error {
 //	    return err
 //	}
 //	_, err = w.AddBlob(puffin.BlobMetadataInput{
-//	    Type:       puffin.ApacheDataSketchesThetaV1,
+//	    Type:       puffin.BlobTypeDataSketchesTheta,
 //	    SnapshotID: 123,
 //	    Fields:     []int32{1},
 //	}, sketchBytes)
@@ -60,7 +44,7 @@ func writeAll(w io.Writer, data []byte) error {
 //	    return err
 //	}
 //	return w.Finish()
-type PuffinWriter struct {
+type Writer struct {
 	w         io.Writer
 	offset    int64
 	blobs     []BlobMetadata
@@ -72,7 +56,7 @@ type PuffinWriter struct {
 // BlobMetadataInput contains fields the caller provides when adding a blob.
 // Offset, Length, and CompressionCodec are set by the writer.
 type BlobMetadataInput struct {
-	Type           string
+	Type           BlobType
 	SnapshotID     int64
 	SequenceNumber int64
 	Fields         []int32
@@ -81,7 +65,7 @@ type BlobMetadataInput struct {
 
 // NewWriter creates a new PuffinWriter and writes the file header magic.
 // The caller is responsible for closing the underlying writer after Finish returns.
-func NewWriter(w io.Writer) (*PuffinWriter, error) {
+func NewWriter(w io.Writer) (*Writer, error) {
 	if w == nil {
 		return nil, errors.New("puffin: writer is nil")
 	}
@@ -91,17 +75,17 @@ func NewWriter(w io.Writer) (*PuffinWriter, error) {
 		return nil, fmt.Errorf("puffin: write header magic: %w", err)
 	}
 
-	return &PuffinWriter{
+	return &Writer{
 		w:         w,
 		offset:    MagicSize,
 		props:     make(map[string]string),
-		createdBy: "iceberg-go",
+		createdBy: fmt.Sprintf("iceberg-go %s", iceberg.Version()),
 	}, nil
 }
 
 // SetProperties merges the provided properties into the file-level properties
 // written to the footer. Can be called multiple times before Finish.
-func (w *PuffinWriter) SetProperties(props map[string]string) error {
+func (w *Writer) AddProperties(props map[string]string) error {
 	if w.done {
 		return errors.New("puffin: cannot set properties: writer already finalized")
 	}
@@ -112,9 +96,14 @@ func (w *PuffinWriter) SetProperties(props map[string]string) error {
 	return nil
 }
 
+// clear properties
+func (w *Writer) ClearProperties() {
+	w.props = make(map[string]string)
+}
+
 // SetCreatedBy overrides the default "created-by" property written to the footer.
 // The default value is "iceberg-go". Example: "MyApp version 1.2.3".
-func (w *PuffinWriter) SetCreatedBy(createdBy string) error {
+func (w *Writer) SetCreatedBy(createdBy string) error {
 	if w.done {
 		return errors.New("puffin: cannot set created-by: writer already finalized")
 	}
@@ -129,12 +118,15 @@ func (w *PuffinWriter) SetCreatedBy(createdBy string) error {
 // AddBlob writes blob data and records its metadata for the footer.
 // Returns the complete BlobMetadata including the computed Offset and Length.
 // The input.Type is required; use constants like ApacheDataSketchesThetaV1.
-func (w *PuffinWriter) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, error) {
+func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, error) {
 	if w.done {
 		return BlobMetadata{}, errors.New("puffin: cannot add blob: writer already finalized")
 	}
 	if input.Type == "" {
 		return BlobMetadata{}, errors.New("puffin: cannot add blob: type is required")
+	}
+	if input.Fields == nil {
+		return BlobMetadata{}, errors.New("puffin: cannot add blob: fields is required")
 	}
 
 	meta := BlobMetadata{
@@ -160,7 +152,7 @@ func (w *PuffinWriter) AddBlob(input BlobMetadataInput, data []byte) (BlobMetada
 // Finish writes the footer and completes the Puffin file structure.
 // Must be called exactly once after all blobs are written.
 // After Finish returns, no further operations are allowed on the writer.
-func (w *PuffinWriter) Finish() error {
+func (w *Writer) Finish() error {
 	if w.done {
 		return errors.New("puffin: cannot finish: writer already finalized")
 	}
@@ -208,6 +200,20 @@ func (w *PuffinWriter) Finish() error {
 	}
 
 	w.done = true
+
+	return nil
+}
+
+// writeAll writes all bytes to w or returns an error.
+// Handles the io.Writer contract where Write can return n < len(data) without error.
+func writeAll(w io.Writer, data []byte) error {
+	n, err := w.Write(data)
+	if err != nil {
+		return err
+	}
+	if n != len(data) {
+		return fmt.Errorf("short write: wrote %d of %d bytes", n, len(data))
+	}
 
 	return nil
 }

@@ -34,18 +34,13 @@ const (
 	// CreatedBy is a human-readable identification of the application writing the file, along with its version.
 	// Example: "Trino version 381".
 	CreatedBy = "created-by"
-	// ApacheDataSketchesThetaV1 is a serialized compact Theta sketch from Apache DataSketches.
-	ApacheDataSketchesThetaV1 = "apache-datasketches-theta-v1"
-
-	// DeletionVectorV1 is a serialized deletion vector according to the Iceberg spec.
-	DeletionVectorV1 = "deletion-vector-v1"
 )
 
 type BlobMetadata struct {
-	Type             string            `json:"type"`
+	Type             BlobType          `json:"type"`
 	SnapshotID       int64             `json:"snapshot-id"`
 	SequenceNumber   int64             `json:"sequence-number"`
-	Fields           []int32           `json:"fields,omitempty"`
+	Fields           []int32           `json:"fields"`
 	Offset           int64             `json:"offset"` // absolute file offset
 	Length           int64             `json:"length"`
 	CompressionCodec *string           `json:"compression-codec,omitempty"`
@@ -57,3 +52,16 @@ type Footer struct {
 	Blobs      []BlobMetadata    `json:"blobs"`
 	Properties map[string]string `json:"properties,omitempty"`
 }
+
+type BlobType string
+
+const (
+	// BlobTypeDataSketchesTheta is a serialized compact Theta sketch
+	// produced by the Apache DataSketches library.
+	BlobTypeDataSketchesTheta BlobType = "apache-datasketches-theta-v1"
+
+	// BlobTypeDeletionVector is a serialized deletion vector per the
+	// Iceberg spec. Requires snapshot-id and sequence-number to be -1.
+	BlobTypeDeletionVector BlobType = "deletion-vector-v1"
+
+)
