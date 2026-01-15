@@ -1026,7 +1026,9 @@ func constructPartitionSummaries(spec PartitionSpec, schema *Schema, partitions 
 
 	for _, part := range partitions {
 		for i, field := range partType.FieldList {
-			fieldStats[i].update(part[field.ID])
+			if err := fieldStats[i].update(part[field.ID]); err != nil {
+				return nil, fmt.Errorf("error updating field stats for partition %d: %s: %s", i, field.Name, err)
+			}
 		}
 	}
 

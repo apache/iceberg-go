@@ -199,6 +199,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	var (
 		cfg         = expireSnapshotsCfg{postCommit: true}
 		updates     []Update
+		reqs        []Requirement
 		snapsToKeep = make(map[int64]struct{})
 		nowMs       = time.Now().UnixMilli()
 	)
@@ -208,6 +209,12 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	}
 
 	for refName, ref := range t.meta.refs {
+		// Assert that this ref's snapshot ID hasn't changed concurrently.
+		// This ensures we don't accidentally expire snapshots that are now
+		// referenced by updated refs.
+		snapshotID := ref.SnapshotID
+		reqs = append(reqs, AssertRefSnapshotID(refName, &snapshotID))
+
 		if refName == MainBranch {
 			snapsToKeep[ref.SnapshotID] = struct{}{}
 		}
@@ -283,7 +290,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	update.postCommit = cfg.postCommit
 	updates = append(updates, update)
 
-	return t.apply(updates, nil)
+	return t.apply(updates, reqs)
 }
 
 func (t *Transaction) AppendTable(ctx context.Context, tbl arrow.Table, batchSize int64, snapshotProps iceberg.Properties) error {
