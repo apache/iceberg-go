@@ -147,8 +147,9 @@ func TestHiveIntegrationUpdateNamespaceProperties(t *testing.T) {
 
 	// Create namespace with initial properties
 	initialProps := iceberg.Properties{
-		"key1": "value1",
-		"key2": "value2",
+		"location": fmt.Sprintf("/tmp/iceberg-warehouse/%s", dbName),
+		"key1":     "value1",
+		"key2":     "value2",
 	}
 
 	err := cat.CreateNamespace(context.TODO(), DatabaseIdentifier(dbName), initialProps)
