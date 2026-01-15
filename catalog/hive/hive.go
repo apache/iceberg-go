@@ -351,7 +351,7 @@ func (c *Catalog) CheckTableExists(ctx context.Context, identifier table.Identif
 // ListNamespaces returns a list of namespaces in the catalog.
 func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error) {
 	// Hive doesn't support hierarchical namespaces
-	if parent != nil && len(parent) > 0 {
+	if len(parent) > 0 {
 		return nil, errors.New("hierarchical namespace is not supported")
 	}
 
