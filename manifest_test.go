@@ -19,6 +19,7 @@ package iceberg
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -1446,4 +1447,65 @@ func (m *ManifestTestSuite) TestV3PrepareEntrySequenceNumberValidation() {
 	result, err = v3Writer.prepareEntry(entry4, snapshotID)
 	m.Require().NoError(err)
 	m.Equal(entry4, result)
+}
+
+var errLimitedWrite = errors.New("write limit exceeded")
+
+type limitedWriter struct {
+	limit   int
+	written int
+	err     error
+}
+
+func (w *limitedWriter) Write(p []byte) (int, error) {
+	if w.written+len(p) > w.limit {
+		return 0, w.err
+	}
+	w.written += len(p)
+
+	return len(p), nil
+}
+
+func (m *ManifestTestSuite) TestWriteManifestListClosesWriterOnError() {
+	seqNum := int64(7)
+	var header bytes.Buffer
+	writer, err := NewManifestListWriterV2(&header, snapshotID, seqNum, nil)
+	m.Require().NoError(err)
+	m.Require().NoError(writer.Close())
+
+	out := &limitedWriter{limit: header.Len(), err: errLimitedWrite}
+	err = WriteManifestList(2, out, snapshotID, nil, &seqNum, 0, []ManifestFile{
+		manifestFileRecordsV2[0],
+		manifestFileRecordsV1[0],
+	})
+	m.Require().Error(err)
+	m.Require().ErrorContains(err, "ManifestListWriter only supports version 2 manifest files")
+	m.Require().ErrorIs(err, errLimitedWrite)
+}
+
+func (m *ManifestTestSuite) TestWriteManifestClosesWriterOnEntryError() {
+	partitionSpec := NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceID: 1, Name: "VendorID", Transform: IdentityTransform{}},
+		PartitionField{FieldID: 1001, SourceID: 2, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
+
+	var header bytes.Buffer
+	writer, err := NewManifestWriter(2, &header, partitionSpec, testSchema, entrySnapshotID)
+	m.Require().NoError(err)
+	headerLen := header.Len()
+
+	m.Require().NoError(writer.Add(manifestEntryV2Records[0]))
+	m.Require().NoError(writer.Close())
+
+	badEntry := *manifestEntryV2Records[1]
+	badEntry.EntryStatus = EntryStatusEXISTING
+	badEntry.SeqNum = nil
+
+	out := &limitedWriter{limit: headerLen, err: errLimitedWrite}
+	_, err = WriteManifest("test.avro", out, 2, partitionSpec, testSchema, entrySnapshotID, []ManifestEntry{
+		manifestEntryV2Records[0],
+		&badEntry,
+	})
+	m.Require().Error(err)
+	m.Require().ErrorContains(err, "only entries with status ADDED")
+	m.Require().ErrorIs(err, errLimitedWrite)
 }
