@@ -84,6 +84,7 @@ func NewCatalog(props iceberg.Properties, opts ...Option) (*Catalog, error) {
 func NewCatalogWithClient(client HiveClient, props iceberg.Properties) *Catalog {
 	o := NewHiveOptions()
 	o.ApplyProperties(props)
+
 	return &Catalog{
 		client: client,
 		opts:   o,
@@ -98,6 +99,7 @@ func (c *Catalog) CatalogType() catalog.Type {
 // Close closes the connection to the Hive Metastore.
 func (c *Catalog) Close() error {
 	c.client.Close()
+
 	return nil
 }
 
@@ -107,6 +109,7 @@ func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) it
 		database, err := identifierToDatabase(namespace)
 		if err != nil {
 			yield(nil, err)
+
 			return
 		}
 
@@ -114,6 +117,7 @@ func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) it
 		tableNames, err := c.client.GetTables(ctx, database, "*")
 		if err != nil {
 			yield(nil, fmt.Errorf("failed to list tables in %s: %w", database, err))
+
 			return
 		}
 
@@ -198,6 +202,7 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		if isAlreadyExistsError(err) {
 			return nil, fmt.Errorf("%w: %s.%s", catalog.ErrTableAlreadyExists, database, tableName)
 		}
+
 		return nil, fmt.Errorf("failed to create table %s.%s: %w", database, tableName, err)
 	}
 
@@ -334,6 +339,7 @@ func (c *Catalog) CheckTableExists(ctx context.Context, identifier table.Identif
 		if isNoSuchObjectError(err) {
 			return false, nil
 		}
+
 		return false, err
 	}
 
@@ -389,6 +395,7 @@ func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifie
 		if isAlreadyExistsError(err) {
 			return fmt.Errorf("%w: %s", catalog.ErrNamespaceAlreadyExists, database)
 		}
+
 		return fmt.Errorf("failed to create namespace %s: %w", database, err)
 	}
 
@@ -408,6 +415,7 @@ func (c *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 		if isNoSuchObjectError(err) {
 			return fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, database)
 		}
+
 		return err
 	}
 
@@ -416,6 +424,7 @@ func (c *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 		if isInvalidOperationError(err) {
 			return fmt.Errorf("%w: %s", catalog.ErrNamespaceNotEmpty, database)
 		}
+
 		return fmt.Errorf("failed to drop namespace %s: %w", database, err)
 	}
 
@@ -434,6 +443,7 @@ func (c *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Iden
 		if isNoSuchObjectError(err) {
 			return false, nil
 		}
+
 		return false, err
 	}
 
@@ -452,6 +462,7 @@ func (c *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 		if isNoSuchObjectError(err) {
 			return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, database)
 		}
+
 		return nil, fmt.Errorf("failed to get namespace %s: %w", database, err)
 	}
 
@@ -520,6 +531,7 @@ func (c *Catalog) getIcebergTable(ctx context.Context, database, tableName strin
 		if isNoSuchObjectError(err) {
 			return nil, fmt.Errorf("%w: %s.%s", catalog.ErrNoSuchTable, database, tableName)
 		}
+
 		return nil, fmt.Errorf("failed to get table %s.%s: %w", database, tableName, err)
 	}
 
@@ -534,6 +546,7 @@ func identifierToTableName(identifier table.Identifier) (string, string, error) 
 	if len(identifier) != 2 {
 		return "", "", fmt.Errorf("invalid identifier, expected [database, table]: %v", identifier)
 	}
+
 	return identifier[0], identifier[1], nil
 }
 
@@ -541,6 +554,7 @@ func identifierToDatabase(identifier table.Identifier) (string, error) {
 	if len(identifier) != 1 {
 		return "", fmt.Errorf("invalid identifier, expected [database]: %v", identifier)
 	}
+
 	return identifier[0], nil
 }
 
@@ -560,7 +574,9 @@ func isNoSuchObjectError(err error) bool {
 	if err == nil {
 		return false
 	}
+
 	errStr := err.Error()
+
 	return strings.Contains(errStr, "NoSuchObjectException") ||
 		strings.Contains(errStr, "not found") ||
 		strings.Contains(errStr, "does not exist")
@@ -570,7 +586,9 @@ func isAlreadyExistsError(err error) bool {
 	if err == nil {
 		return false
 	}
+
 	errStr := err.Error()
+
 	return strings.Contains(errStr, "AlreadyExistsException") ||
 		strings.Contains(errStr, "already exists")
 }
@@ -579,7 +597,9 @@ func isInvalidOperationError(err error) bool {
 	if err == nil {
 		return false
 	}
+
 	errStr := err.Error()
+
 	return strings.Contains(errStr, "InvalidOperationException") ||
 		strings.Contains(errStr, "is not empty")
 }

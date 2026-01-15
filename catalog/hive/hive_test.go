@@ -40,26 +40,31 @@ func (m *mockHiveClient) GetDatabase(ctx context.Context, name string) (*hive_me
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
+
 	return args.Get(0).(*hive_metastore.Database), args.Error(1)
 }
 
 func (m *mockHiveClient) GetAllDatabases(ctx context.Context) ([]string, error) {
 	args := m.Called(ctx)
+
 	return args.Get(0).([]string), args.Error(1)
 }
 
 func (m *mockHiveClient) CreateDatabase(ctx context.Context, database *hive_metastore.Database) error {
 	args := m.Called(ctx, database)
+
 	return args.Error(0)
 }
 
 func (m *mockHiveClient) DropDatabase(ctx context.Context, name string, deleteData, cascade bool) error {
 	args := m.Called(ctx, name, deleteData, cascade)
+
 	return args.Error(0)
 }
 
 func (m *mockHiveClient) AlterDatabase(ctx context.Context, name string, database *hive_metastore.Database) error {
 	args := m.Called(ctx, name, database)
+
 	return args.Error(0)
 }
 
@@ -68,26 +73,31 @@ func (m *mockHiveClient) GetTable(ctx context.Context, dbName, tableName string)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
+
 	return args.Get(0).(*hive_metastore.Table), args.Error(1)
 }
 
 func (m *mockHiveClient) GetTables(ctx context.Context, dbName, pattern string) ([]string, error) {
 	args := m.Called(ctx, dbName, pattern)
+
 	return args.Get(0).([]string), args.Error(1)
 }
 
 func (m *mockHiveClient) CreateTable(ctx context.Context, tbl *hive_metastore.Table) error {
 	args := m.Called(ctx, tbl)
+
 	return args.Error(0)
 }
 
 func (m *mockHiveClient) DropTable(ctx context.Context, dbName, tableName string, deleteData bool) error {
 	args := m.Called(ctx, dbName, tableName, deleteData)
+
 	return args.Error(0)
 }
 
 func (m *mockHiveClient) AlterTable(ctx context.Context, dbName, tableName string, newTable *hive_metastore.Table) error {
 	args := m.Called(ctx, dbName, tableName, newTable)
+
 	return args.Error(0)
 }
 
@@ -138,10 +148,11 @@ var testSchema = iceberg.NewSchemaWithIdentifiers(0, []int{},
 	iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool})
 
 // Error helpers for mocking
-
-var errNoSuchObject = errors.New("NoSuchObjectException: object not found")
-var errAlreadyExists = errors.New("AlreadyExistsException: object already exists")
-var errInvalidOperation = errors.New("InvalidOperationException: Database is not empty")
+var (
+	errNoSuchObject     = errors.New("NoSuchObjectException: object not found")
+	errAlreadyExists    = errors.New("AlreadyExistsException: object already exists")
+	errInvalidOperation = errors.New("InvalidOperationException: Database is not empty")
+)
 
 // Tests
 
@@ -170,6 +181,7 @@ func TestHiveListTables(t *testing.T) {
 	for tbl, err := range iter {
 		if err != nil {
 			lastErr = err
+
 			break
 		}
 		tbls = append(tbls, tbl)
@@ -200,6 +212,7 @@ func TestHiveListTablesEmpty(t *testing.T) {
 	for tbl, err := range iter {
 		if err != nil {
 			lastErr = err
+
 			break
 		}
 		tbls = append(tbls, tbl)

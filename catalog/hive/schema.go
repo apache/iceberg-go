@@ -18,6 +18,7 @@
 package hive
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -31,6 +32,7 @@ func schemaToHiveColumns(schema *iceberg.Schema) []*hive_metastore.FieldSchema {
 	for _, field := range schema.Fields() {
 		columns = append(columns, fieldToHiveColumn(field))
 	}
+
 	return columns
 }
 
@@ -83,13 +85,16 @@ func icebergTypeToHiveType(typ iceberg.Type) string {
 			fieldStrings = append(fieldStrings,
 				fmt.Sprintf("%s:%s", field.Name, icebergTypeToHiveType(field.Type)))
 		}
+
 		return fmt.Sprintf("struct<%s>", strings.Join(fieldStrings, ","))
 	case *iceberg.ListType:
 		elementField := t.ElementField()
+
 		return fmt.Sprintf("array<%s>", icebergTypeToHiveType(elementField.Type))
 	case *iceberg.MapType:
 		keyField := t.KeyField()
 		valueField := t.ValueField()
+
 		return fmt.Sprintf("map<%s,%s>",
 			icebergTypeToHiveType(keyField.Type),
 			icebergTypeToHiveType(valueField.Type))
@@ -170,7 +175,7 @@ func isIcebergTable(tbl *hive_metastore.Table) bool {
 // getMetadataLocation returns the metadata location from a Hive table.
 func getMetadataLocation(tbl *hive_metastore.Table) (string, error) {
 	if tbl == nil || tbl.Parameters == nil {
-		return "", fmt.Errorf("table has no parameters")
+		return "", errors.New("table has no parameters")
 	}
 
 	location, ok := tbl.Parameters[MetadataLocationKey]
