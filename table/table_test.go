@@ -975,6 +975,7 @@ func (t *TableWritingTestSuite) TestExpireSnapshotsWithMissingParent() {
 	// After expiring snapshots, remaining snapshots may have parent-snapshot-id
 	// references pointing to snapshots that no longer exist. ExpireSnapshots should
 	// treat missing parents as the end of the chain rather than returning an error.
+
 	fs := iceio.LocalFS{}
 
 	files := make([]string, 0)
@@ -1054,6 +1055,196 @@ func (t *TableWritingTestSuite) TestExpireSnapshotsWithMissingParent() {
 	tbl, err = tx.Commit(ctx)
 	t.Require().NoError(err)
 	t.Require().Equal(2, len(tbl.Metadata().Snapshots()), "should still have 2 snapshots")
+}
+
+// validatingCatalog validates requirements before applying updates,
+// simulating real catalog behavior for concurrent modification tests.
+type validatingCatalog struct {
+	metadata table.Metadata
+}
+
+func (m *validatingCatalog) LoadTable(ctx context.Context, ident table.Identifier) (*table.Table, error) {
+	return nil, nil
+}
+
+func (m *validatingCatalog) CommitTable(ctx context.Context, ident table.Identifier, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
+	// Validate requirements against current metadata (simulates catalog behavior)
+	for _, req := range reqs {
+		if err := req.Validate(m.metadata); err != nil {
+			return nil, "", err
+		}
+	}
+
+	meta, err := table.UpdateTableMetadata(m.metadata, updates, "")
+	if err != nil {
+		return nil, "", err
+	}
+
+	m.metadata = meta
+
+	return meta, "", nil
+}
+
+// TestExpireSnapshotsRejectsOnRefRollback verifies that ExpireSnapshots fails
+// when a ref is rolled back to an ancestor snapshot concurrently.
+//
+// Scenario:
+//   - main -> snapshot 5 (newest), chain: 5 <- 4 <- 3 <- 2 <- 1
+//   - ExpireSnapshots calculates: keep {5, 4, 3}, delete {2, 1}
+//   - Concurrently, client rolls main -> snapshot 2
+//   - Without assertion: would delete snapshots 1, leaving main with only 1 accessible snapshot
+//   - With assertion: commit fails because main's snapshot ID changed
+func (t *TableWritingTestSuite) TestExpireSnapshotsRejectsOnRefRollback() {
+	fs := iceio.LocalFS{}
+
+	files := make([]string, 0)
+	for i := range 5 {
+		filePath := fmt.Sprintf("%s/expire_reject_rollback_v%d/data-%d.parquet", t.location, t.formatVersion, i)
+		t.writeParquet(fs, filePath, t.arrTablePromotedTypes)
+		files = append(files, filePath)
+	}
+
+	ident := table.Identifier{"default", "expire_reject_rollback_v" + strconv.Itoa(t.formatVersion)}
+	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, t.location, iceberg.Properties{table.PropertyFormatVersion: strconv.Itoa(t.formatVersion)})
+	t.Require().NoError(err)
+
+	ctx := context.Background()
+	cat := &validatingCatalog{meta}
+
+	tbl := table.New(
+		ident,
+		meta,
+		t.getMetadataLoc(),
+		func(ctx context.Context) (iceio.IO, error) {
+			return fs, nil
+		},
+		cat,
+	)
+
+	// Create 5 snapshots
+	for i := range 5 {
+		tx := tbl.NewTransaction()
+		t.Require().NoError(tx.AddFiles(ctx, files[i:i+1], nil, false))
+		tbl, err = tx.Commit(ctx)
+		t.Require().NoError(err)
+	}
+
+	t.Require().Equal(5, len(tbl.Metadata().Snapshots()))
+
+	// Get snapshot IDs for later use
+	snapshots := tbl.Metadata().Snapshots()
+	snapshot2 := snapshots[1] // Second snapshot (index 1)
+
+	// Start ExpireSnapshots transaction (will calculate based on current main -> snapshot 5)
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.ExpireSnapshots(table.WithOlderThan(0), table.WithRetainLast(3)))
+
+	// Simulate concurrent rollback: update catalog's metadata to point main -> snapshot 2
+	// This simulates another client rolling back main before ExpireSnapshots commits
+	rollbackUpdates := []table.Update{
+		table.NewSetSnapshotRefUpdate("main", snapshot2.SnapshotID, table.BranchRef, -1, -1, -1),
+	}
+	cat.metadata, _, err = cat.CommitTable(ctx, ident, nil, rollbackUpdates)
+	t.Require().NoError(err)
+
+	// Attempt to commit ExpireSnapshots - should fail due to AssertRefSnapshotID
+	_, err = tx.Commit(ctx)
+	t.Require().Error(err)
+	t.Require().Contains(err.Error(), "requirement failed")
+	t.Require().Contains(err.Error(), "main")
+}
+
+// TestExpireSnapshotsRejectsOnRefUpdate verifies that ExpireSnapshots fails
+// when a ref eligible for deletion is concurrently updated to a newer snapshot.
+//
+// Scenario:
+//   - tag1 -> old snapshot, eligible for deletion (maxRefAgeMs exceeded)
+//   - ExpireSnapshots decides to remove tag1
+//   - Concurrently, client updates tag1 -> newer snapshot (no longer eligible)
+//   - Without assertion: tag1 would be deleted despite being updated
+//   - With assertion: commit fails because tag1's snapshot ID changed
+func (t *TableWritingTestSuite) TestExpireSnapshotsRejectsOnRefUpdate() {
+	fs := iceio.LocalFS{}
+
+	files := make([]string, 0)
+	for i := range 3 {
+		filePath := fmt.Sprintf("%s/expire_reject_update_v%d/data-%d.parquet", t.location, t.formatVersion, i)
+		t.writeParquet(fs, filePath, t.arrTablePromotedTypes)
+		files = append(files, filePath)
+	}
+
+	ident := table.Identifier{"default", "expire_reject_update_v" + strconv.Itoa(t.formatVersion)}
+	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, t.location, iceberg.Properties{table.PropertyFormatVersion: strconv.Itoa(t.formatVersion)})
+	t.Require().NoError(err)
+
+	ctx := context.Background()
+	cat := &validatingCatalog{meta}
+
+	tbl := table.New(
+		ident,
+		meta,
+		t.getMetadataLoc(),
+		func(ctx context.Context) (iceio.IO, error) {
+			return fs, nil
+		},
+		cat,
+	)
+
+	// Create 3 snapshots
+	for i := range 3 {
+		tx := tbl.NewTransaction()
+		t.Require().NoError(tx.AddFiles(ctx, files[i:i+1], nil, false))
+		tbl, err = tx.Commit(ctx)
+		t.Require().NoError(err)
+	}
+	t.Require().Equal(3, len(tbl.Metadata().Snapshots()))
+
+	snapshots := tbl.Metadata().Snapshots()
+	oldSnapshot := snapshots[0]   // Oldest snapshot
+	newerSnapshot := snapshots[2] // Newest snapshot
+
+	// Create a tag pointing to the old snapshot with a short maxRefAgeMs
+	// This tag will be eligible for deletion
+	maxRefAgeMs := int64(1) // 1ms - will definitely be exceeded
+	tagUpdates := []table.Update{
+		table.NewSetSnapshotRefUpdate("expiring-tag", oldSnapshot.SnapshotID, table.TagRef, maxRefAgeMs, -1, -1),
+	}
+	cat.metadata, _, err = cat.CommitTable(ctx, ident, nil, tagUpdates)
+	t.Require().NoError(err)
+
+	// Reload table with updated metadata
+	tbl = table.New(
+		ident,
+		cat.metadata,
+		t.getMetadataLoc(),
+		func(ctx context.Context) (iceio.IO, error) {
+			return fs, nil
+		},
+		cat,
+	)
+
+	// Wait a bit to ensure the tag's ref age exceeds maxRefAgeMs
+	time.Sleep(10 * time.Millisecond)
+
+	// Start ExpireSnapshots transaction (will identify expiring-tag as eligible for deletion)
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.ExpireSnapshots(table.WithOlderThan(time.Hour), table.WithRetainLast(1)))
+
+	// Simulate concurrent update: another client updates the tag to point to a newer snapshot
+	// This makes the tag no longer eligible for deletion
+	updateTagUpdates := []table.Update{
+		table.NewSetSnapshotRefUpdate("expiring-tag", newerSnapshot.SnapshotID, table.TagRef, maxRefAgeMs, -1, -1),
+	}
+	cat.metadata, _, err = cat.CommitTable(ctx, ident, nil, updateTagUpdates)
+	t.Require().NoError(err)
+
+	// Attempt to commit ExpireSnapshots - should fail due to AssertRefSnapshotID
+	_, err = tx.Commit(ctx)
+	t.Require().Error(err)
+	t.Require().Contains(err.Error(), "requirement failed")
+	t.Require().Contains(err.Error(), "expiring-tag")
 }
 
 func (t *TableWritingTestSuite) TestWriteSpecialCharacterColumn() {

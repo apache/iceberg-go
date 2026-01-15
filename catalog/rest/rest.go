@@ -209,6 +209,11 @@ const emptyStringHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991
 
 func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	for k, v := range s.defaultHeaders {
+		// Skip Content-Type if it's already set in the request
+		// to avoid duplicate headers (e.g., when using PostForm)
+		if http.CanonicalHeaderKey(k) == "Content-Type" && r.Header.Get("Content-Type") != "" {
+			continue
+		}
 		for _, hdr := range v {
 			r.Header.Add(k, hdr)
 		}
@@ -357,10 +362,15 @@ func doPostAllowNoContent[Payload, Result any](ctx context.Context, baseURI *url
 func handleNon200(rsp *http.Response, override map[int]error) error {
 	var e errorResponse
 
-	dec := json.NewDecoder(rsp.Body)
-	dec.Decode(&struct {
-		Error *errorResponse `json:"error"`
-	}{Error: &e})
+	// Only try to decode if there's a body (HEAD requests don't have one)
+	if rsp.ContentLength != 0 {
+		decErr := json.NewDecoder(rsp.Body).Decode(&struct {
+			Error *errorResponse `json:"error"`
+		}{Error: &e})
+		if decErr != nil && decErr != io.EOF {
+			return fmt.Errorf("%w: failed to decode error response: %s", ErrRESTError, decErr.Error())
+		}
+	}
 
 	if override != nil {
 		if err, ok := override[rsp.StatusCode]; ok {
@@ -569,7 +579,10 @@ func (r *Catalog) fetchAccessToken(cl *http.Client, creds string, opts *options)
 
 	switch rsp.StatusCode {
 	case http.StatusUnauthorized, http.StatusBadRequest:
-		defer rsp.Request.GetBody()
+		defer func() {
+			_, _ = io.Copy(io.Discard, rsp.Body)
+			_ = rsp.Body.Close()
+		}()
 		dec := json.NewDecoder(rsp.Body)
 		var oauthErr oauthErrorResponse
 		if err := dec.Decode(&oauthErr); err != nil {
@@ -593,6 +606,17 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	}
 	cl := &http.Client{Transport: session}
 
+	for k, v := range opts.headers {
+		session.defaultHeaders.Set(k, v)
+	}
+
+	session.defaultHeaders.Set("X-Client-Version", icebergRestSpecVersion)
+	session.defaultHeaders.Set("Content-Type", "application/json")
+	session.defaultHeaders.Set("User-Agent", "GoIceberg/"+iceberg.Version())
+	if session.defaultHeaders.Get("X-Iceberg-Access-Delegation") == "" {
+		session.defaultHeaders.Set("X-Iceberg-Access-Delegation", "vended-credentials")
+	}
+
 	token := opts.oauthToken
 	if token == "" && opts.credential != "" {
 		var err error
@@ -604,11 +628,6 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	if token != "" {
 		session.defaultHeaders.Set(authorizationHeader, bearerPrefix+" "+token)
 	}
-
-	session.defaultHeaders.Set("X-Client-Version", icebergRestSpecVersion)
-	session.defaultHeaders.Set("Content-Type", "application/json")
-	session.defaultHeaders.Set("User-Agent", "GoIceberg/"+iceberg.Version())
-	session.defaultHeaders.Set("X-Iceberg-Access-Delegation", "vended-credentials")
 
 	if opts.enableSigv4 {
 		cfg := opts.awsConfig
