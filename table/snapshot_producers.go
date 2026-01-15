@@ -169,6 +169,8 @@ func (of *overwriteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 
 		for _, entry := range notDeleted {
 			if err := wr.Existing(entry); err != nil {
+				internal.CheckedClose(wr, &err)
+
 				return existingFiles, err
 			}
 		}
@@ -260,11 +262,12 @@ func (m *manifestMergeManager) groupBySpec(manifests []iceberg.ManifestFile) map
 	return groups
 }
 
-func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.ManifestFile) (iceberg.ManifestFile, error) {
+func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.ManifestFile) (mf iceberg.ManifestFile, err error) {
 	wr, path, counter, err := m.snap.newManifestWriter(m.snap.spec(specID))
 	if err != nil {
 		return nil, err
 	}
+	defer internal.CheckedClose(wr, &err)
 
 	for _, manifest := range bin {
 		entries, err := m.snap.fetchManifestEntry(manifest, false)
@@ -276,19 +279,17 @@ func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.Manifest
 			switch {
 			case entry.Status() == iceberg.EntryStatusDELETED && entry.SnapshotID() == m.snap.snapshotID:
 				// only files deleted by this snapshot should be added to the new manifest
-				if err = wr.Delete(entry); err != nil {
-					return nil, err
-				}
+				err = wr.Delete(entry)
 			case entry.Status() == iceberg.EntryStatusADDED && entry.SnapshotID() == m.snap.snapshotID:
 				// added entries from this snapshot are still added, otherwise they should be existing
-				if err = wr.Add(entry); err != nil {
-					return nil, err
-				}
+				err = wr.Add(entry)
 			case entry.Status() != iceberg.EntryStatusDELETED:
 				// add all non-deleted files from the old manifest as existing files
-				if err = wr.Existing(entry); err != nil {
-					return nil, err
-				}
+				err = wr.Existing(entry)
+			}
+
+			if err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -522,7 +523,7 @@ func (sp *snapshotProducer) manifests() (_ []iceberg.ManifestFile, err error) {
 	results := [...][]iceberg.ManifestFile{nil, nil, nil}
 
 	if len(sp.addedFiles) > 0 {
-		g.Go(func() error {
+		g.Go(func() (err error) {
 			out, path, err := sp.newManifestOutput()
 			if err != nil {
 				return err
@@ -540,6 +541,7 @@ func (sp *snapshotProducer) manifests() (_ []iceberg.ManifestFile, err error) {
 			if err != nil {
 				return err
 			}
+			defer internal.CheckedClose(wr, &err)
 
 			for _, df := range sp.addedFiles {
 				err := wr.Add(iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &sp.snapshotID,

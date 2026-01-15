@@ -19,9 +19,15 @@ version: "2"
 linters:
   default: none
   enable:
+    - errcheck
     - misspell
     - nlreturn
     - perfsprint
+  settings:
+    errcheck:
+      exclude-functions:
+        - (github.com/pterm/pterm.TablePrinter).Render
+        - (github.com/pterm/pterm.TreePrinter).Render
   exclusions:
     generated: lax
     presets:
@@ -29,6 +35,10 @@ linters:
       - common-false-positives
       - legacy
       - std-error-handling
+    rules:
+      - linters:
+          - errcheck
+        path: _test\.go$
     paths:
       - third_party$
       - builtin$

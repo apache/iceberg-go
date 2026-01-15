@@ -1026,7 +1026,9 @@ func constructPartitionSummaries(spec PartitionSpec, schema *Schema, partitions 
 
 	for _, part := range partitions {
 		for i, field := range partType.FieldList {
-			fieldStats[i].update(part[field.ID])
+			if err := fieldStats[i].update(part[field.ID]); err != nil {
+				return nil, fmt.Errorf("error updating field stats for partition %d: %s: %s", i, field.Name, err)
+			}
 		}
 	}
 
@@ -1442,11 +1444,8 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 }
 
 // WriteManifestList writes a list of manifest files to an avro file.
-func WriteManifestList(version int, out io.Writer, snapshotID int64, parentSnapshotID, sequenceNumber *int64, firstRowId int64, files []ManifestFile) error {
-	var (
-		writer *ManifestListWriter
-		err    error
-	)
+func WriteManifestList(version int, out io.Writer, snapshotID int64, parentSnapshotID, sequenceNumber *int64, firstRowId int64, files []ManifestFile) (err error) {
+	var writer *ManifestListWriter
 
 	switch version {
 	case 1:
@@ -1468,12 +1467,9 @@ func WriteManifestList(version int, out io.Writer, snapshotID int64, parentSnaps
 	if err != nil {
 		return err
 	}
+	defer internal.CheckedClose(writer, &err)
 
-	if err = writer.AddManifests(files); err != nil {
-		return err
-	}
-
-	return writer.Close()
+	return writer.AddManifests(files)
 }
 
 func WriteManifest(
@@ -1484,13 +1480,14 @@ func WriteManifest(
 	schema *Schema,
 	snapshotID int64,
 	entries []ManifestEntry,
-) (ManifestFile, error) {
+) (mf ManifestFile, err error) {
 	cnt := &internal.CountingWriter{W: out}
 
 	w, err := NewManifestWriter(version, cnt, spec, schema, snapshotID)
 	if err != nil {
 		return nil, err
 	}
+	defer internal.CheckedClose(w, &err)
 
 	for _, entry := range entries {
 		if err := w.addEntry(entry.(*manifestEntry)); err != nil {
