@@ -288,9 +288,12 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		}
 	}
 
-	update := NewRemoveSnapshotsUpdate(snapsToDelete)
-	update.postCommit = cfg.postCommit
-	updates = append(updates, update)
+	// Only add the update if there are actually snapshots to delete
+	if len(snapsToDelete) > 0 {
+		update := NewRemoveSnapshotsUpdate(snapsToDelete)
+		update.postCommit = cfg.postCommit
+		updates = append(updates, update)
+	}
 
 	return t.apply(updates, reqs)
 }
