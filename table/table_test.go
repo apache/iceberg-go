@@ -970,6 +970,93 @@ func (t *TableWritingTestSuite) TestExpireSnapshots() {
 	t.Require().Equal(2, len(slices.Collect(tbl.Metadata().SnapshotLogs())))
 }
 
+func (t *TableWritingTestSuite) TestExpireSnapshotsWithMissingParent() {
+	// This test validates the fix for handling missing parent snapshots.
+	// After expiring snapshots, remaining snapshots may have parent-snapshot-id
+	// references pointing to snapshots that no longer exist. ExpireSnapshots should
+	// treat missing parents as the end of the chain rather than returning an error.
+
+	fs := iceio.LocalFS{}
+
+	files := make([]string, 0)
+	for i := range 5 {
+		filePath := fmt.Sprintf("%s/expire_with_missing_parent_v%d/data-%d.parquet", t.location, t.formatVersion, i)
+		t.writeParquet(fs, filePath, t.arrTablePromotedTypes)
+		files = append(files, filePath)
+	}
+
+	ident := table.Identifier{"default", "expire_with_missing_parent_v" + strconv.Itoa(t.formatVersion)}
+	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, t.location, iceberg.Properties{table.PropertyFormatVersion: strconv.Itoa(t.formatVersion)})
+	t.Require().NoError(err)
+
+	ctx := context.Background()
+
+	tbl := table.New(
+		ident,
+		meta,
+		t.getMetadataLoc(),
+		func(ctx context.Context) (iceio.IO, error) {
+			return fs, nil
+		},
+		&mockedCatalog{meta},
+	)
+
+	// Create 5 snapshots, each one with a parent pointing to the previous
+	for i := range 5 {
+		tx := tbl.NewTransaction()
+		t.Require().NoError(tx.AddFiles(ctx, files[i:i+1], nil, false))
+		tbl, err = tx.Commit(ctx)
+		t.Require().NoError(err)
+	}
+
+	t.Require().Equal(5, len(tbl.Metadata().Snapshots()))
+
+	// Get the snapshot IDs before expiration
+	snapshotsBeforeExpire := tbl.Metadata().Snapshots()
+	snapshot3ID := snapshotsBeforeExpire[2].SnapshotID
+	snapshot4ID := snapshotsBeforeExpire[3].SnapshotID
+
+	// Expire the first 3 snapshots, keeping only the last 2
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.ExpireSnapshots(table.WithOlderThan(0), table.WithRetainLast(2)))
+	tbl, err = tx.Commit(ctx)
+	t.Require().NoError(err)
+	t.Require().Equal(2, len(tbl.Metadata().Snapshots()))
+
+	// Verify that the 4th snapshot's parent (snapshot 3) is no longer in the metadata
+	remainingSnapshots := tbl.Metadata().Snapshots()
+	var snapshot4 *table.Snapshot
+	for i := range remainingSnapshots {
+		if remainingSnapshots[i].SnapshotID == snapshot4ID {
+			snapshot4 = &remainingSnapshots[i]
+
+			break
+		}
+	}
+	t.Require().NotNil(snapshot4, "snapshot 4 should still exist")
+	t.Require().NotNil(snapshot4.ParentSnapshotID, "snapshot 4 should have a parent ID")
+	t.Require().Equal(snapshot3ID, *snapshot4.ParentSnapshotID, "snapshot 4's parent should be snapshot 3")
+
+	// Verify snapshot 3 is no longer in the metadata
+	t.Nil(tbl.Metadata().SnapshotByID(snapshot3ID), "snapshot 3 should have been removed")
+
+	// At this point, the 4th snapshot has a parent-snapshot-id pointing to
+	// the 3rd snapshot which no longer exists. Try to expire again - this
+	// should not fail even though the parent is missing. Use WithRetainLast(2)
+	// to force walking the full parent chain.
+	tx = tbl.NewTransaction()
+	// This should succeed without error despite the missing parent.
+	// WithRetainLast(2) will cause it to walk back through snapshot 4's parent chain,
+	// encountering the missing snapshot 3.
+	err = tx.ExpireSnapshots(table.WithOlderThan(0), table.WithRetainLast(2))
+	t.Require().NoError(err, "ExpireSnapshots should handle missing parent gracefully")
+
+	tbl, err = tx.Commit(ctx)
+	t.Require().NoError(err)
+	t.Require().Equal(2, len(tbl.Metadata().Snapshots()), "should still have 2 snapshots")
+}
+
 // validatingCatalog validates requirements before applying updates,
 // simulating real catalog behavior for concurrent modification tests.
 type validatingCatalog struct {
@@ -1042,6 +1129,7 @@ func (t *TableWritingTestSuite) TestExpireSnapshotsRejectsOnRefRollback() {
 		tbl, err = tx.Commit(ctx)
 		t.Require().NoError(err)
 	}
+
 	t.Require().Equal(5, len(tbl.Metadata().Snapshots()))
 
 	// Get snapshot IDs for later use
