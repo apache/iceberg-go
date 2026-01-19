@@ -27,7 +27,7 @@ import (
 	"github.com/apache/iceberg-go"
 )
 
-// PuffinWriter writes blobs and metadata to a Puffin file.
+// Writer writes blobs and metadata to a Puffin file.
 //
 // Usage:
 //
@@ -63,7 +63,7 @@ type BlobMetadataInput struct {
 	Properties     map[string]string
 }
 
-// NewWriter creates a new PuffinWriter and writes the file header magic.
+// NewWriter creates a new Writer and writes the file header magic.
 // The caller is responsible for closing the underlying writer after Finish returns.
 func NewWriter(w io.Writer) (*Writer, error) {
 	if w == nil {
@@ -79,7 +79,7 @@ func NewWriter(w io.Writer) (*Writer, error) {
 		w:         w,
 		offset:    MagicSize,
 		props:     make(map[string]string),
-		createdBy: fmt.Sprintf("iceberg-go %s", iceberg.Version()),
+		createdBy: "iceberg-go " + iceberg.Version(),
 	}, nil
 }
 

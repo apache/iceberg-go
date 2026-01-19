@@ -27,11 +27,18 @@ import (
 	"sort"
 )
 
+// ReaderAtSeeker combines io.ReaderAt and io.Seeker for reading Puffin files.
+// This interface is implemented by *os.File, *bytes.Reader, and similar types.
+type ReaderAtSeeker interface {
+	io.ReaderAt
+	io.Seeker
+}
+
 // Reader reads blobs and metadata from a Puffin file.
 //
 // Usage:
 //
-//	r, err := puffin.NewReader(file, fileSize)
+//	r, err := puffin.NewReader(file)
 //	if err != nil {
 //	    return err
 //	}
@@ -40,7 +47,7 @@ import (
 //	    // process blob.Data
 //	}
 type Reader struct {
-	r           io.ReaderAt
+	r           ReaderAtSeeker
 	size        int64
 	footer      *Footer
 	footerStart int64 // cached after ReadFooter
@@ -66,12 +73,18 @@ func WithMaxBlobSize(size int64) ReaderOption {
 }
 
 // NewReader creates a new Puffin file reader.
-// The size parameter must be the total size of the file in bytes.
+// The file size is auto-detected using Seek.
 // It validates magic bytes and reads the footer eagerly.
-// The caller is responsible for closing the underlying io.ReaderAt.
-func NewReader(r io.ReaderAt, size int64, opts ...ReaderOption) (*Reader, error) {
+// The caller is responsible for closing the underlying reader.
+func NewReader(r ReaderAtSeeker, opts ...ReaderOption) (*Reader, error) {
 	if r == nil {
 		return nil, errors.New("puffin: reader is nil")
+	}
+
+	// Auto-detect file size
+	size, err := r.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, fmt.Errorf("puffin: detect file size: %w", err)
 	}
 
 	// Minimum size: header magic + footer magic + footer trailer
@@ -88,15 +101,6 @@ func NewReader(r io.ReaderAt, size int64, opts ...ReaderOption) (*Reader, error)
 	}
 	if !bytes.Equal(headerMagic[:], magic[:]) {
 		return nil, errors.New("puffin: invalid header magic")
-	}
-
-	// Validate trailing magic (fail fast on corrupt/truncated files)
-	var trailingMagic [MagicSize]byte
-	if _, err := r.ReadAt(trailingMagic[:], size-MagicSize); err != nil {
-		return nil, fmt.Errorf("puffin: read trailing magic: %w", err)
-	}
-	if !bytes.Equal(trailingMagic[:], magic[:]) {
-		return nil, errors.New("puffin: invalid trailing magic")
 	}
 
 	pr := &Reader{
@@ -159,7 +163,7 @@ func (r *Reader) readFooter() (*Footer, error) {
 		return nil, errors.New("puffin: compressed footer not supported")
 	}
 
-	// Check for unknown flags (future-proofing)
+	// Check for unknown flags
 	if flags&^uint32(FooterFlagCompressed) != 0 {
 		return nil, fmt.Errorf("puffin: unknown footer flags set: 0x%x", flags)
 	}
@@ -179,18 +183,15 @@ func (r *Reader) readFooter() (*Footer, error) {
 	// Total footer size: magic(4) + payload + trailer(12)
 	totalFooterSize := MagicSize + payloadSize + footerTrailerSize
 
-	var payload []byte
+	// Validate footer start magic
 	if totalFooterSize <= readSize {
-		// We already have the entire footer in buf
+		// We already have the footer magic in buf
 		footerOffset := len(buf) - int(totalFooterSize)
-
-		// Validate footer start magic
 		if !bytes.Equal(buf[footerOffset:footerOffset+MagicSize], magic[:]) {
 			return nil, errors.New("puffin: invalid footer start magic")
 		}
-		payload = buf[footerOffset+MagicSize : len(buf)-footerTrailerSize]
 	} else {
-		// Footer is larger than our initial read, need additional reads
+		// Footer is larger than our initial read, need to read magic separately
 		var footerMagic [MagicSize]byte
 		if _, err := r.r.ReadAt(footerMagic[:], footerStart); err != nil {
 			return nil, fmt.Errorf("puffin: read footer start magic: %w", err)
@@ -198,16 +199,11 @@ func (r *Reader) readFooter() (*Footer, error) {
 		if !bytes.Equal(footerMagic[:], magic[:]) {
 			return nil, errors.New("puffin: invalid footer start magic")
 		}
-
-		payload = make([]byte, payloadSize)
-		if _, err := r.r.ReadAt(payload, footerStart+MagicSize); err != nil {
-			return nil, fmt.Errorf("puffin: read footer payload: %w", err)
-		}
 	}
 
-	// Parse footer JSON
+	payloadReader := io.NewSectionReader(r.r, footerStart+MagicSize, payloadSize)
 	var footer Footer
-	if err := json.NewDecoder(bytes.NewReader(payload)).Decode(&footer); err != nil {
+	if err := json.NewDecoder(payloadReader).Decode(&footer); err != nil {
 		return nil, fmt.Errorf("puffin: decode footer JSON: %w", err)
 	}
 
@@ -309,20 +305,16 @@ func (r *Reader) ReadAllBlobs() ([]*BlobData, error) {
 	return results, nil
 }
 
-// ReadRange reads a raw byte range from the blob data region.
-// This is useful for streaming partial blob content or when the caller
-// has external blob metadata.
-func (r *Reader) ReadRange(offset, length int64) ([]byte, error) {
-	if err := r.validateRange(offset, length); err != nil {
-		return nil, fmt.Errorf("puffin: range: %w", err)
+// ReadAt implements io.ReaderAt, reading from the blob data region.
+// It validates that the read range is within the blob data region
+// This is useful for deletion vector use case.
+// offset/length pointing directly into the Puffin file in manifest.
+func (r *Reader) ReadAt(p []byte, off int64) (n int, err error) {
+	if err := r.validateRange(off, int64(len(p))); err != nil {
+		return 0, fmt.Errorf("puffin: %w", err)
 	}
 
-	buf := make([]byte, length)
-	if _, err := r.r.ReadAt(buf, offset); err != nil {
-		return nil, fmt.Errorf("puffin: read range: %w", err)
-	}
-
-	return buf, nil
+	return r.r.ReadAt(p, off)
 }
 
 // validateRange validates offset and length for reading from the blob data region.
