@@ -78,6 +78,10 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 		return fmt.Errorf("failed to validate unknown types: %w", err)
 	}
 
+	if _, err := iceberg.IndexNameByID(sc); err != nil {
+		return fmt.Errorf("invalid schema: %w", err)
+	}
+
 	fieldsIt, err := sc.FlatFields()
 	if err != nil {
 		return fmt.Errorf("failed to check Schema compatibility: %w", err)
