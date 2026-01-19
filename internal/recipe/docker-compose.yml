@@ -71,7 +71,7 @@ services:
     hostname: azurite
     ports:
       - 11000:11000
-    command: ["azurite-blob", "--loose", "--blobHost", "0.0.0.0" ,"--blobPort", "11000"]
+    command: ["azurite-blob", "--loose", "--blobHost", "0.0.0.0" ,"--blobPort", "11000", "--skipApiVersionCheck"]
   mc:
     depends_on:
       - minio
