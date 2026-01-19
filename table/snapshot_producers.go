@@ -162,7 +162,7 @@ func (of *overwriteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 			return existingFiles, err
 		}
 
-		wr, path, counter, err := of.base.newManifestWriter(*spec)
+		wr, path, counter, fileCloser, err := of.base.newManifestWriter(*spec)
 		if err != nil {
 			return existingFiles, err
 		}
@@ -170,6 +170,7 @@ func (of *overwriteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 		for _, entry := range notDeleted {
 			if err := wr.Existing(entry); err != nil {
 				internal.CheckedClose(wr, &err)
+				internal.CheckedClose(fileCloser, &err)
 
 				return existingFiles, err
 			}
@@ -177,6 +178,13 @@ func (of *overwriteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 
 		// close the writer to force a flush and ensure counter.Count is accurate
 		if err := wr.Close(); err != nil {
+			internal.CheckedClose(fileCloser, &err)
+
+			return existingFiles, err
+		}
+
+		// close the underlying file writer
+		if err := fileCloser.Close(); err != nil {
 			return existingFiles, err
 		}
 
@@ -263,10 +271,11 @@ func (m *manifestMergeManager) groupBySpec(manifests []iceberg.ManifestFile) map
 }
 
 func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.ManifestFile) (mf iceberg.ManifestFile, err error) {
-	wr, path, counter, err := m.snap.newManifestWriter(m.snap.spec(specID))
+	wr, path, counter, fileCloser, err := m.snap.newManifestWriter(m.snap.spec(specID))
 	if err != nil {
 		return nil, err
 	}
+	defer internal.CheckedClose(fileCloser, &err)
 	defer internal.CheckedClose(wr, &err)
 
 	for _, manifest := range bin {
@@ -482,20 +491,20 @@ func (sp *snapshotProducer) deleteDataFile(df iceberg.DataFile) *snapshotProduce
 	return sp
 }
 
-func (sp *snapshotProducer) newManifestWriter(spec iceberg.PartitionSpec) (_ *iceberg.ManifestWriter, _ string, _ *internal.CountingWriter, err error) {
+func (sp *snapshotProducer) newManifestWriter(spec iceberg.PartitionSpec) (_ *iceberg.ManifestWriter, _ string, _ *internal.CountingWriter, _ io.Closer, err error) {
 	out, path, err := sp.newManifestOutput()
 	if err != nil {
-		return nil, "", nil, err
+		return nil, "", nil, nil, err
 	}
 
 	counter := &internal.CountingWriter{W: out}
 	wr, err := iceberg.NewManifestWriter(sp.txn.meta.formatVersion, counter, spec,
 		sp.txn.meta.CurrentSchema(), sp.snapshotID)
 	if err != nil {
-		return nil, "", nil, errors.Join(err, out.Close())
+		return nil, "", nil, nil, errors.Join(err, out.Close())
 	}
 
-	return wr, path, counter, nil
+	return wr, path, counter, out, nil
 }
 
 func (sp *snapshotProducer) newManifestOutput() (io.WriteCloser, string, error) {
