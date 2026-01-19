@@ -970,6 +970,65 @@ func (t *TableWritingTestSuite) TestExpireSnapshots() {
 	t.Require().Equal(2, len(slices.Collect(tbl.Metadata().SnapshotLogs())))
 }
 
+// TestExpireSnapshotsNoOpWhenNothingToExpire verifies that when there are no
+// snapshots to expire, no new metadata file is created. This prevents unnecessary
+// metadata file proliferation when the maintenance job runs but finds nothing to do.
+func (t *TableWritingTestSuite) TestExpireSnapshotsNoOpWhenNothingToExpire() {
+	fs := iceio.LocalFS{}
+
+	files := make([]string, 0)
+	for i := range 3 {
+		filePath := fmt.Sprintf("%s/expire_noop_v%d/data-%d.parquet", t.location, t.formatVersion, i)
+		t.writeParquet(fs, filePath, t.arrTablePromotedTypes)
+		files = append(files, filePath)
+	}
+
+	ident := table.Identifier{"default", "expire_noop_v" + strconv.Itoa(t.formatVersion)}
+	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, t.location, iceberg.Properties{table.PropertyFormatVersion: strconv.Itoa(t.formatVersion)})
+	t.Require().NoError(err)
+
+	ctx := context.Background()
+
+	tbl := table.New(
+		ident,
+		meta,
+		t.getMetadataLoc(),
+		func(ctx context.Context) (iceio.IO, error) {
+			return fs, nil
+		},
+		&mockedCatalog{meta},
+	)
+
+	// Create 3 snapshots
+	for i := range 3 {
+		tx := tbl.NewTransaction()
+		t.Require().NoError(tx.AddFiles(ctx, files[i:i+1], nil, false))
+		tbl, err = tx.Commit(ctx)
+		t.Require().NoError(err)
+	}
+
+	t.Require().Equal(3, len(tbl.Metadata().Snapshots()))
+
+	// Record the metadata location before ExpireSnapshots
+	metadataLocationBefore := tbl.MetadataLocation()
+
+	// Call ExpireSnapshots with parameters that won't expire anything:
+	// - RetainLast(10) keeps more snapshots than we have
+	// - OlderThan(time.Hour) won't expire recent snapshots
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.ExpireSnapshots(table.WithOlderThan(time.Hour), table.WithRetainLast(10)))
+	tbl, err = tx.Commit(ctx)
+	t.Require().NoError(err)
+
+	// Verify no snapshots were removed
+	t.Require().Equal(3, len(tbl.Metadata().Snapshots()))
+
+	// Verify no new metadata file was created (metadata location unchanged)
+	t.Require().Equal(metadataLocationBefore, tbl.MetadataLocation(),
+		"metadata location should not change when there are no snapshots to expire")
+}
+
 func (t *TableWritingTestSuite) TestExpireSnapshotsWithMissingParent() {
 	// This test validates the fix for handling missing parent snapshots.
 	// After expiring snapshots, remaining snapshots may have parent-snapshot-id
