@@ -354,6 +354,13 @@ func (t *trackingIO) GetUnclosedWriters() []string {
 	return unclosed
 }
 
+func (t *trackingIO) GetWriterCount() int {
+	t.writersMu.Lock()
+	defer t.writersMu.Unlock()
+
+	return len(t.writers)
+}
+
 // TestManifestWriterClosesUnderlyingFile tests that when using newManifestWriter,
 // the underlying file writer is properly closed. This test is related to issue #644 and #681
 // where blob.Writer was never closed, causing table corruption.
@@ -454,4 +461,98 @@ func TestOverwriteExistingManifestsClosesUnderlyingFile(t *testing.T) {
 
 	unclosed := trackIO.GetUnclosedWriters()
 	require.Empty(t, unclosed, "all file writers should be closed after existingManifests, but these are still open: %v", unclosed)
+}
+
+// errorOnDeletedEntries is a producerImpl that returns an error from deletedEntries()
+// to test that file writers are properly closed even when deletedEntries fails.
+type errorOnDeletedEntries struct {
+	base                *snapshotProducer
+	err                 error
+	waitForWriter       <-chan struct{} // optional signal before returning error
+	cancelWaitForWriter <-chan struct{} // optional cancel channel
+}
+
+func (e *errorOnDeletedEntries) processManifests(manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
+	return manifests, nil
+}
+
+func (e *errorOnDeletedEntries) existingManifests() ([]iceberg.ManifestFile, error) {
+	return nil, nil
+}
+
+func (e *errorOnDeletedEntries) deletedEntries() ([]iceberg.ManifestEntry, error) {
+	if e.waitForWriter != nil {
+		select {
+		case <-e.waitForWriter:
+		case <-e.cancelWaitForWriter:
+			return nil, e.err
+		}
+	}
+
+	return nil, e.err
+}
+
+// blockingTrackingIO extends trackingIO to signal when a writer is created.
+type blockingTrackingIO struct {
+	*trackingIO
+	writerCreated chan struct{}
+	signalOnce    sync.Once
+}
+
+func newBlockingTrackingIO() *blockingTrackingIO {
+	return &blockingTrackingIO{
+		trackingIO:    newTrackingIO(),
+		writerCreated: make(chan struct{}),
+	}
+}
+
+func (b *blockingTrackingIO) Create(name string) (iceio.FileWriter, error) {
+	writer, err := b.trackingIO.Create(name)
+	b.signalOnce.Do(func() {
+		close(b.writerCreated)
+	})
+
+	return writer, err
+}
+
+// This test verifies that NO writers are created when deletedEntries() fails,
+// because the error should be returned before any goroutines start.
+func TestManifestsClosesWriterWhenDeletedEntriesFails(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	blockingIO := newBlockingTrackingIO()
+	spec := iceberg.NewPartitionSpec()
+	txn := createTestTransaction(t, blockingIO, spec)
+
+	sp := createSnapshotProducer(OpAppend, txn, blockingIO, nil, nil)
+	errDeletedEntries := errors.New("simulated deletedEntries error")
+	sp.producerImpl = &errorOnDeletedEntries{
+		base:                sp,
+		err:                 errDeletedEntries,
+		waitForWriter:       blockingIO.writerCreated,
+		cancelWaitForWriter: ctx.Done(),
+	}
+
+	df := newTestDataFile(t, spec, "file://data-1.parquet", nil)
+	sp.appendDataFile(df)
+
+	done := make(chan struct{})
+	var manifestsErr error
+	go func() {
+		_, manifestsErr = sp.manifests()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		require.ErrorIs(t, manifestsErr, errDeletedEntries)
+		writerCount := blockingIO.GetWriterCount()
+		require.NotZero(t, writerCount, "test setup error: expected writer to be created")
+		require.Fail(t, "goroutine started before deletedEntries() check, creating a writer that could be orphaned")
+
+	case <-time.After(100 * time.Millisecond):
+		writerCount := blockingIO.GetWriterCount()
+		require.Zero(t, writerCount, "expected no writers to be created when deletedEntries is called first")
+	}
 }
