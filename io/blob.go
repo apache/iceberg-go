@@ -42,26 +42,20 @@ type blobOpenFile struct {
 	ctx       context.Context
 }
 
-func (f *blobOpenFile) ReadAt(p []byte, off int64) (int, error) {
-	rdr, err := f.b.Bucket.NewRangeReader(f.ctx, f.key, off, int64(len(p)), nil)
+func (f *blobOpenFile) ReadAt(p []byte, off int64) (n int, err error) {
+	var rdr io.ReadCloser
+	if f.b.newRangeReader != nil {
+		rdr, err = f.b.newRangeReader(f.ctx, f.key, off, int64(len(p)))
+	} else {
+		rdr, err = f.b.Bucket.NewRangeReader(f.ctx, f.key, off, int64(len(p)), nil)
+	}
 	if err != nil {
 		return 0, err
 	}
+	// not using internal.CheckedClose due to import cycle
+	defer func() { err = errors.Join(err, rdr.Close()) }()
 
-	// ensure the buffer is read, or EOF is reached for this read of this "chunk"
-	// given we are using offsets to read this block, it is constrained by size of 'p'
-	size, err := io.ReadFull(rdr, p)
-	if err != nil {
-		if errors.Is(err, io.EOF) {
-			return size, err
-		}
-		// check we are at the end of the underlying file
-		if off+int64(size) > f.Size() {
-			return size, err
-		}
-	}
-
-	return size, rdr.Close()
+	return io.ReadFull(rdr, p)
 }
 
 // Functions to implement the `Stat()` function in the `io/fs.File` interface
@@ -99,6 +93,10 @@ type blobFileIO struct {
 
 	keyExtractor KeyExtractor
 	ctx          context.Context
+
+	// newRangeReader is an optional hook for testing.
+	// It allows injecting a mock reader to verify Close calls.
+	newRangeReader func(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error)
 }
 
 func (bfs *blobFileIO) preprocess(path string) (string, error) {

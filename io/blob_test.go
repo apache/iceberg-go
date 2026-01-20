@@ -18,9 +18,13 @@
 package io
 
 import (
+	"context"
+	"io"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gocloud.dev/blob/memblob"
 )
 
 func TestDefaultKeyExtractor(t *testing.T) {
@@ -73,6 +77,96 @@ func TestDefaultKeyExtractor(t *testing.T) {
 				assert.NoError(t, err, "Unexpected error for input: %s", test.input)
 				assert.Equal(t, test.expectedKey, key, "Key mismatch for input: %s", test.input)
 			}
+		})
+	}
+}
+
+type trackingReadCloser struct {
+	io.ReadCloser
+	closed *bool
+}
+
+func (t *trackingReadCloser) Close() error {
+	*t.closed = true
+
+	return t.ReadCloser.Close()
+}
+
+func TestReadAtResourceCleanup(t *testing.T) {
+	ctx := context.Background()
+
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	content := []byte("short")
+	err := bucket.WriteAll(ctx, "test-file", content, nil)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name    string
+		offset  int64
+		readLen int
+		wantN   int
+		wantErr error
+	}{
+		{
+			name:    "success full read",
+			offset:  0,
+			readLen: len(content),
+			wantN:   len(content),
+			wantErr: nil,
+		},
+		{
+			name:    "partial read /unexpected EOF",
+			offset:  2,
+			readLen: 2 * len(content),
+			wantN:   len(content) - 2,
+			wantErr: io.ErrUnexpectedEOF,
+		},
+		{
+			name:    "EOF read at end of file",
+			offset:  int64(len(content)),
+			readLen: 2 * len(content),
+			wantN:   0,
+			wantErr: io.EOF,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var lastReaderClosed bool
+			bfs := &blobFileIO{
+				Bucket:       bucket,
+				keyExtractor: func(path string) (string, error) { return path, nil },
+				ctx:          ctx,
+				newRangeReader: func(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error) {
+					r, err := bucket.NewRangeReader(ctx, key, offset, length, nil)
+					if err != nil {
+						return nil, err
+					}
+					lastReaderClosed = false
+
+					return &trackingReadCloser{ReadCloser: r, closed: &lastReaderClosed}, nil
+				},
+			}
+
+			file, err := bfs.Open("test-file")
+			require.NoError(t, err)
+			defer file.Close()
+
+			bof := file.(*blobOpenFile)
+
+			buf := make([]byte, tt.readLen)
+			n, err := bof.ReadAt(buf, tt.offset)
+
+			assert.Equal(t, tt.wantN, n, "read byte count mismatch")
+			if tt.wantErr == nil {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorIs(t, err, tt.wantErr)
+			}
+
+			assert.True(t, lastReaderClosed, "resource leak: range reader was not closed")
 		})
 	}
 }
