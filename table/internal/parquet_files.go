@@ -101,59 +101,66 @@ func (parquetFormat) PathToIDMapping(sc *iceberg.Schema) (map[string]int, error)
 }
 
 func (p parquetFormat) createStatsAgg(typ iceberg.PrimitiveType, physicalTypeStr string, truncLen int) (StatsAgg, error) {
-	expectedPhysical := p.PrimitiveTypeToPhysicalType(typ)
-	if physicalTypeStr != expectedPhysical {
-		switch {
-		case physicalTypeStr == "INT32" && expectedPhysical == "INT64":
-		case physicalTypeStr == "FLOAT" && expectedPhysical == "DOUBLE":
-		default:
-			return nil, fmt.Errorf("unexpected physical type %s for %s, expected %s",
-				physicalTypeStr, typ, expectedPhysical)
-		}
-	}
-
-	switch physicalTypeStr {
-	case "BOOLEAN":
+	// Switch on Iceberg logical type first, then handle physical representations.
+	// This matches iceberg-java's approach in ParquetConversions.java.
+	switch typ.(type) {
+	case iceberg.BooleanType:
 		return newStatAgg[bool](typ, truncLen), nil
-	case "INT32":
-		switch typ.(type) {
-		case iceberg.DecimalType:
-			return &decAsIntAgg[int32]{
-				newStatAgg[int32](typ, truncLen).(*statsAggregator[int32]),
-			}, nil
-		}
 
+	case iceberg.Int32Type, iceberg.DateType:
 		return newStatAgg[int32](typ, truncLen), nil
-	case "INT64":
-		switch typ.(type) {
-		case iceberg.DecimalType:
-			return &decAsIntAgg[int64]{
-				newStatAgg[int64](typ, truncLen).(*statsAggregator[int64]),
-			}, nil
+
+	case iceberg.Int64Type, iceberg.TimeType, iceberg.TimestampType, iceberg.TimestampTzType:
+		// Allow INT32 physical for INT64 logical (promotion)
+		if physicalTypeStr == "INT32" {
+			return newStatAgg[int32](typ, truncLen), nil
 		}
 
 		return newStatAgg[int64](typ, truncLen), nil
-	case "FLOAT":
+
+	case iceberg.Float32Type:
 		return newStatAgg[float32](typ, truncLen), nil
-	case "DOUBLE":
-		return newStatAgg[float64](typ, truncLen), nil
-	case "FIXED_LEN_BYTE_ARRAY":
-		switch typ.(type) {
-		case iceberg.UUIDType:
-			return newStatAgg[uuid.UUID](typ, truncLen), nil
-		case iceberg.DecimalType:
-			return newStatAgg[iceberg.Decimal](typ, truncLen), nil
-		default:
-			return newStatAgg[[]byte](typ, truncLen), nil
-		}
-	case "BYTE_ARRAY":
-		if typ.Equals(iceberg.PrimitiveTypes.String) {
-			return newStatAgg[string](typ, truncLen), nil
+
+	case iceberg.Float64Type:
+		// Allow FLOAT physical for DOUBLE logical (promotion)
+		if physicalTypeStr == "FLOAT" {
+			return newStatAgg[float32](typ, truncLen), nil
 		}
 
+		return newStatAgg[float64](typ, truncLen), nil
+
+	case iceberg.StringType:
+		return newStatAgg[string](typ, truncLen), nil
+
+	case iceberg.BinaryType:
 		return newStatAgg[[]byte](typ, truncLen), nil
+
+	case iceberg.UUIDType:
+		return newStatAgg[uuid.UUID](typ, truncLen), nil
+
+	case iceberg.FixedType:
+		return newStatAgg[[]byte](typ, truncLen), nil
+
+	case iceberg.DecimalType:
+		// Decimals can be stored as INT32 (precision <= 9), INT64 (precision <= 18),
+		// FIXED_LEN_BYTE_ARRAY, or BYTE_ARRAY per Parquet spec.
+		switch physicalTypeStr {
+		case "INT32":
+			return &decAsIntAgg[int32]{
+				newStatAgg[int32](typ, truncLen).(*statsAggregator[int32]),
+			}, nil
+		case "INT64":
+			return &decAsIntAgg[int64]{
+				newStatAgg[int64](typ, truncLen).(*statsAggregator[int64]),
+			}, nil
+		case "FIXED_LEN_BYTE_ARRAY", "BYTE_ARRAY":
+			return newStatAgg[iceberg.Decimal](typ, truncLen), nil
+		default:
+			return nil, fmt.Errorf("unsupported physical type %s for decimal", physicalTypeStr)
+		}
+
 	default:
-		return nil, fmt.Errorf("unsupported physical type: %s", physicalTypeStr)
+		return nil, fmt.Errorf("unsupported iceberg type: %s", typ)
 	}
 }
 
@@ -400,6 +407,29 @@ func (w wrappedDecStats) Max() iceberg.Decimal {
 	return iceberg.Decimal{Val: dec, Scale: w.scale}
 }
 
+type wrappedDecByteArrayStats struct {
+	*metadata.ByteArrayStatistics
+	scale int
+}
+
+func (w wrappedDecByteArrayStats) Min() iceberg.Decimal {
+	dec, err := BigEndianToDecimal(w.ByteArrayStatistics.Min())
+	if err != nil {
+		panic(err)
+	}
+
+	return iceberg.Decimal{Val: dec, Scale: w.scale}
+}
+
+func (w wrappedDecByteArrayStats) Max() iceberg.Decimal {
+	dec, err := BigEndianToDecimal(w.ByteArrayStatistics.Max())
+	if err != nil {
+		panic(err)
+	}
+
+	return iceberg.Decimal{Val: dec, Scale: w.scale}
+}
+
 func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]StatisticsCollector, colMapping map[string]int) *DataFileStatistics {
 	pqmeta := meta.(*metadata.FileMetaData)
 	var (
@@ -487,7 +517,16 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 			case iceberg.FixedType:
 				stats = &wrappedFLBAStats{stats.(*metadata.FixedLenByteArrayStatistics)}
 			case iceberg.DecimalType:
-				stats = &wrappedDecStats{stats.(*metadata.FixedLenByteArrayStatistics), t.Scale()}
+				// Decimals can be stored as INT32/INT64 (small precision) or FIXED_LEN_BYTE_ARRAY/BYTE_ARRAY.
+				// Only wrap FIXED_LEN_BYTE_ARRAY and BYTE_ARRAY statistics; INT32/INT64 stats
+				// are used directly by decAsIntAgg.
+				switch s := stats.(type) {
+				case *metadata.FixedLenByteArrayStatistics:
+					stats = &wrappedDecStats{s, t.Scale()}
+				case *metadata.ByteArrayStatistics:
+					stats = &wrappedDecByteArrayStats{s, t.Scale()}
+					// INT32/INT64 statistics are used directly by decAsIntAgg
+				}
 			}
 
 			agg.Update(stats)
