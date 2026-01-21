@@ -524,6 +524,11 @@ func (sp *snapshotProducer) fetchManifestEntry(m iceberg.ManifestFile, discardDe
 }
 
 func (sp *snapshotProducer) manifests() (_ []iceberg.ManifestFile, err error) {
+	deleted, err := sp.deletedEntries()
+	if err != nil {
+		return nil, err
+	}
+
 	var g errgroup.Group
 
 	results := [...][]iceberg.ManifestFile{nil, nil, nil}
@@ -569,11 +574,6 @@ func (sp *snapshotProducer) manifests() (_ []iceberg.ManifestFile, err error) {
 
 			return err
 		})
-	}
-
-	deleted, err := sp.deletedEntries()
-	if err != nil {
-		return nil, err
 	}
 
 	if len(deleted) > 0 {
