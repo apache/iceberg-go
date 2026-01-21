@@ -1103,7 +1103,7 @@ func (findLastFieldID) Schema(_ *Schema, result int) int {
 }
 
 func (findLastFieldID) Struct(_ StructType, fieldResults []int) int {
-	return max(fieldResults...)
+	return slices.Max(fieldResults)
 }
 
 func (findLastFieldID) Field(field NestedField, fieldResult int) int {
