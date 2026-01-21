@@ -1150,8 +1150,8 @@ func (r *RestCatalogSuite) TestCreateTable409() {
 		}
 
 		w.WriteHeader(http.StatusConflict)
-		errorResponse := map[string]interface{}{
-			"error": map[string]interface{}{
+		errorResponse := map[string]any{
+			"error": map[string]any{
 				"message": "Table already exists: fokko.already_exists in warehouse 8bcb0838-50fc-472d-9ddb-8feb89ef5f1e",
 				"type":    "AlreadyExistsException",
 				"code":    409,
@@ -1429,8 +1429,8 @@ func (r *RestCatalogSuite) TestDropTable404() {
 		}
 
 		w.WriteHeader(http.StatusNotFound)
-		errorResponse := map[string]interface{}{
-			"error": map[string]interface{}{
+		errorResponse := map[string]any{
+			"error": map[string]any{
 				"message": "Table does not exist: fokko.table",
 				"type":    "NoSuchTableException",
 				"code":    404,
@@ -1933,8 +1933,8 @@ func (r *RestCatalogSuite) TestDropView404() {
 		}
 
 		w.WriteHeader(http.StatusNotFound)
-		errorResponse := map[string]interface{}{
-			"error": map[string]interface{}{
+		errorResponse := map[string]any{
+			"error": map[string]any{
 				"message": "The given view does not exist",
 				"type":    "NoSuchViewException",
 				"code":    404,

@@ -2023,7 +2023,7 @@ func (t *TableTestSuite) TestMetadataCompressionRoundTrip() {
 	t.Require().NoError(err)
 
 	// Verify the decompressed content is valid JSON
-	var metadata map[string]interface{}
+	var metadata map[string]any
 	err = json.Unmarshal(decompressed, &metadata)
 	t.Require().NoError(err)
 

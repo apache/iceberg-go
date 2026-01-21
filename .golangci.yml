@@ -48,6 +48,12 @@ formatters:
     - gofmt
     - gofumpt
     - goimports
+  settings:
+    gofmt:
+      simplify: true
+      rewrite-rules:
+        - pattern: 'interface{}'
+          replacement: 'any'
   exclusions:
     generated: lax
     paths:

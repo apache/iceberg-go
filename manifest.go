@@ -1788,7 +1788,7 @@ func (d *dataFile) convertAvroValueToIcebergType(v any, fieldID int) any {
 
 			return Timestamp(v.(int64))
 		case avro.Decimal:
-			if unionMap, ok := v.(map[string]interface{}); ok {
+			if unionMap, ok := v.(map[string]any); ok {
 				if val, ok := unionMap["fixed"]; ok {
 					if bigRatValue, ok := val.(*big.Rat); ok {
 						scale := d.fieldIDToFixedSize[fieldID]
@@ -1807,7 +1807,7 @@ func (d *dataFile) convertAvroValueToIcebergType(v any, fieldID int) any {
 
 			return v
 		case avro.UUID:
-			if unionMap, ok := v.(map[string]interface{}); ok {
+			if unionMap, ok := v.(map[string]any); ok {
 				if val, ok := unionMap["uuid"]; ok {
 					if uuidArr, ok := val.([16]byte); ok {
 						return uuid.UUID(uuidArr)
