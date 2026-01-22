@@ -997,23 +997,53 @@ func (r *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 }
 
 func (r *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error) {
+	var allNamespaces []table.Identifier
+	pageSize := r.getPageSize(ctx)
+	var pageToken string
+
+	for {
+		namespaces, nextPageToken, err := r.listNamespacesPage(ctx, parent, pageToken, pageSize)
+		if err != nil {
+			return nil, err
+		}
+		allNamespaces = append(allNamespaces, namespaces...)
+		if nextPageToken == "" {
+			break
+		}
+		pageToken = nextPageToken
+	}
+
+	return allNamespaces, nil
+}
+
+func (r *Catalog) listNamespacesPage(ctx context.Context, parent table.Identifier, pageToken string, pageSize int) ([]table.Identifier, string, error) {
 	uri := r.baseURI.JoinPath("namespaces")
+
+	v := url.Values{}
 	if len(parent) != 0 {
-		v := url.Values{}
 		v.Set("parent", strings.Join(parent, namespaceSeparator))
+	}
+	if pageSize >= 0 {
+		v.Set("pageSize", strconv.Itoa(pageSize))
+	}
+	if pageToken != "" {
+		v.Set("pageToken", pageToken)
+	}
+	if len(v) > 0 {
 		uri.RawQuery = v.Encode()
 	}
 
 	type rsptype struct {
-		Namespaces []table.Identifier `json:"namespaces"`
+		Namespaces    []table.Identifier `json:"namespaces"`
+		NextPageToken string             `json:"next-page-token,omitempty"`
 	}
 
 	rsp, err := doGet[rsptype](ctx, uri, []string{}, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
-	return rsp.Namespaces, nil
+	return rsp.Namespaces, rsp.NextPageToken, nil
 }
 
 func (r *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.Identifier) (iceberg.Properties, error) {
