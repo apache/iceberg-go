@@ -18,7 +18,6 @@
 package iceberg
 
 import (
-	"cmp"
 	"fmt"
 	"hash/maphash"
 	"maps"
@@ -37,21 +36,6 @@ func init() {
 }
 
 func Version() string { return version }
-
-func max[T cmp.Ordered](vals ...T) T {
-	if len(vals) == 0 {
-		panic("can't call max with no arguments")
-	}
-
-	out := vals[0]
-	for _, v := range vals[1:] {
-		if v > out {
-			out = v
-		}
-	}
-
-	return out
-}
 
 // Optional represents a typed value that could be null
 type Optional[T any] struct {
