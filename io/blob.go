@@ -62,7 +62,7 @@ func (f *blobOpenFile) ReadAt(p []byte, off int64) (n int, err error) {
 
 func (f *blobOpenFile) Name() string               { return f.name }
 func (f *blobOpenFile) Mode() fs.FileMode          { return fs.ModeIrregular }
-func (f *blobOpenFile) Sys() interface{}           { return f.b }
+func (f *blobOpenFile) Sys() any                   { return f.b }
 func (f *blobOpenFile) IsDir() bool                { return false }
 func (f *blobOpenFile) Stat() (fs.FileInfo, error) { return f, nil }
 
@@ -196,6 +196,6 @@ type blobWriteFile struct {
 }
 
 func (f *blobWriteFile) Name() string                { return f.name }
-func (f *blobWriteFile) Sys() interface{}            { return f.b }
+func (f *blobWriteFile) Sys() any                    { return f.b }
 func (f *blobWriteFile) Close() error                { return f.Writer.Close() }
 func (f *blobWriteFile) Write(p []byte) (int, error) { return f.Writer.Write(p) }
