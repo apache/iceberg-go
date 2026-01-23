@@ -1,0 +1,102 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+package table
+
+import (
+	"testing"
+
+	"github.com/apache/iceberg-go"
+	"github.com/stretchr/testify/assert"
+)
+
+func newDataManifest(minSeqNum int64) iceberg.ManifestFile {
+	return iceberg.NewManifestFile(2, "/path/to/manifest.avro", 1000, 0, 1).
+		Content(iceberg.ManifestContentData).
+		SequenceNum(minSeqNum, minSeqNum).
+		Build()
+}
+
+func newDeleteManifest(minSeqNum int64) iceberg.ManifestFile {
+	return iceberg.NewManifestFile(2, "/path/to/manifest.avro", 1000, 0, 1).
+		Content(iceberg.ManifestContentDeletes).
+		SequenceNum(minSeqNum, minSeqNum).
+		Build()
+}
+
+func TestMinSequenceNum(t *testing.T) {
+	tests := []struct {
+		name      string
+		manifests []iceberg.ManifestFile
+		expected  int64
+	}{
+		{
+			name:      "empty list returns 0",
+			manifests: []iceberg.ManifestFile{},
+			expected:  0,
+		},
+		{
+			name: "single data manifest returns its sequence number",
+			manifests: []iceberg.ManifestFile{
+				newDataManifest(5),
+			},
+			expected: 5,
+		},
+		{
+			name: "multiple data manifests returns minimum",
+			manifests: []iceberg.ManifestFile{
+				newDataManifest(10),
+				newDataManifest(3),
+				newDataManifest(7),
+			},
+			expected: 3,
+		},
+		{
+			name: "only delete manifests returns 0",
+			manifests: []iceberg.ManifestFile{
+				newDeleteManifest(5),
+				newDeleteManifest(10),
+			},
+			expected: 0,
+		},
+		{
+			name: "mixed manifests only considers data manifests",
+			manifests: []iceberg.ManifestFile{
+				newDeleteManifest(1), // should be ignored
+				newDataManifest(8),
+				newDeleteManifest(2), // should be ignored
+				newDataManifest(5),
+			},
+			expected: 5,
+		},
+		{
+			name: "data manifest with sequence 0 is handled correctly",
+			manifests: []iceberg.ManifestFile{
+				newDataManifest(0),
+				newDataManifest(5),
+			},
+			expected: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := minSequenceNum(tt.manifests)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}

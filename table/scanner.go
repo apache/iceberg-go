@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"math"
 	"slices"
 	"sync"
 
@@ -272,11 +273,14 @@ func (scan *Scan) checkSequenceNumber(minSeqNum int64, manifest iceberg.Manifest
 }
 
 func minSequenceNum(manifests []iceberg.ManifestFile) int64 {
-	n := int64(0)
+	var n int64 = math.MaxInt64
 	for _, m := range manifests {
 		if m.ManifestContent() == iceberg.ManifestContentData {
 			n = min(n, m.MinSequenceNum())
 		}
+	}
+	if n == math.MaxInt64 {
+		return 0
 	}
 
 	return n
