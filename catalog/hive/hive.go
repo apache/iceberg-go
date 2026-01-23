@@ -35,7 +35,6 @@ import (
 )
 
 const (
-	// Property keys for namespace properties
 	locationKey    = "location"
 	commentKey     = "comment"
 	descriptionKey = "description"
@@ -49,13 +48,11 @@ func init() {
 	}))
 }
 
-// Catalog implements the catalog.Catalog interface for Hive Metastore.
 type Catalog struct {
 	client HiveClient
 	opts   *HiveOptions
 }
 
-// NewCatalog creates a new Hive Metastore catalog.
 func NewCatalog(props iceberg.Properties, opts ...Option) (*Catalog, error) {
 	o := NewHiveOptions()
 	o.ApplyProperties(props)
@@ -79,8 +76,6 @@ func NewCatalog(props iceberg.Properties, opts ...Option) (*Catalog, error) {
 	}, nil
 }
 
-// NewCatalogWithClient creates a new Hive Metastore catalog with a custom client.
-// This is useful for testing with mock clients.
 func NewCatalogWithClient(client HiveClient, props iceberg.Properties) *Catalog {
 	o := NewHiveOptions()
 	o.ApplyProperties(props)
@@ -91,12 +86,10 @@ func NewCatalogWithClient(client HiveClient, props iceberg.Properties) *Catalog 
 	}
 }
 
-// CatalogType returns the type of the catalog.
 func (c *Catalog) CatalogType() catalog.Type {
 	return catalog.Hive
 }
 
-// Close closes the connection to the Hive Metastore.
 func (c *Catalog) Close() error {
 	c.client.Close()
 
@@ -113,7 +106,6 @@ func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) it
 			return
 		}
 
-		// Get all table names in the database
 		tableNames, err := c.client.GetTables(ctx, database, "*")
 		if err != nil {
 			yield(nil, fmt.Errorf("failed to list tables in %s: %w", database, err))
@@ -125,11 +117,9 @@ func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) it
 			return
 		}
 
-		// Check each table to see if it's an Iceberg table
 		for _, tableName := range tableNames {
 			tbl, err := c.client.GetTable(ctx, database, tableName)
 			if err != nil {
-				// Skip tables we can't read
 				continue
 			}
 			if isIcebergTable(tbl) {
@@ -141,7 +131,6 @@ func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) it
 	}
 }
 
-// LoadTable loads a table from the catalog.
 func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*table.Table, error) {
 	database, tableName, err := identifierToTableName(identifier)
 	if err != nil {
@@ -167,7 +156,6 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 	)
 }
 
-// CreateTable creates a new table in the catalog.
 func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
 	staged, err := internal.CreateStagedTable(ctx, c.opts.props, c.LoadNamespaceProperties, identifier, schema, opts...)
 	if err != nil {
@@ -179,7 +167,6 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, err
 	}
 
-	// Get the filesystem for writing metadata
 	afs, err := staged.FS(ctx)
 	if err != nil {
 		return nil, err
@@ -189,13 +176,11 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, errors.New("loaded filesystem IO does not support writing")
 	}
 
-	// Write the metadata file
 	compression := staged.Table.Properties().Get(table.MetadataCompressionKey, table.MetadataCompressionDefault)
 	if err := internal.WriteTableMetadata(staged.Metadata(), wfs, staged.MetadataLocation(), compression); err != nil {
 		return nil, err
 	}
 
-	// Create the Hive table
 	hiveTbl := constructHiveTable(database, tableName, staged.Table.Location(), staged.MetadataLocation(), schema, staged.Table.Properties())
 
 	if err := c.client.CreateTable(ctx, hiveTbl); err != nil {
@@ -209,19 +194,16 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	return c.LoadTable(ctx, identifier)
 }
 
-// DropTable drops a table from the catalog.
 func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) error {
 	database, tableName, err := identifierToTableName(identifier)
 	if err != nil {
 		return err
 	}
 
-	// Verify it's an Iceberg table
 	if _, err := c.getIcebergTable(ctx, database, tableName); err != nil {
 		return err
 	}
 
-	// Drop the table (deleteData=false for external tables)
 	if err := c.client.DropTable(ctx, database, tableName, false); err != nil {
 		return fmt.Errorf("failed to drop table %s.%s: %w", database, tableName, err)
 	}
@@ -229,7 +211,6 @@ func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 	return nil
 }
 
-// RenameTable renames a table in the catalog.
 func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error) {
 	fromDB, fromTable, err := identifierToTableName(from)
 	if err != nil {
@@ -241,7 +222,6 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 		return nil, err
 	}
 
-	// Check that target namespace exists
 	exists, err := c.CheckNamespaceExists(ctx, DatabaseIdentifier(toDB))
 	if err != nil {
 		return nil, err
@@ -250,17 +230,14 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, toDB)
 	}
 
-	// Get the existing table
 	hiveTbl, err := c.getIcebergTable(ctx, fromDB, fromTable)
 	if err != nil {
 		return nil, err
 	}
 
-	// Update table name and database
 	hiveTbl.TableName = toTable
 	hiveTbl.DbName = toDB
 
-	// Alter the table to rename it
 	if err := c.client.AlterTable(ctx, fromDB, fromTable, hiveTbl); err != nil {
 		return nil, fmt.Errorf("failed to rename table %s.%s to %s.%s: %w", fromDB, fromTable, toDB, toTable, err)
 	}
@@ -268,14 +245,20 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 	return c.LoadTable(ctx, to)
 }
 
-// CommitTable commits updates to a table.
 func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
 	database, tableName, err := identifierToTableName(identifier)
 	if err != nil {
 		return nil, "", err
 	}
 
-	// Load current table state
+	lock, err := acquireLock(ctx, c.client, database, tableName, c.opts)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to acquire lock for %s.%s: %w", database, tableName, err)
+	}
+	defer func() {
+		_ = lock.Release(ctx)
+	}()
+
 	currentHiveTbl, err := c.client.GetTable(ctx, database, tableName)
 	if err != nil && !isNoSuchObjectError(err) {
 		return nil, "", err
@@ -293,23 +276,19 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 		}
 	}
 
-	// Create staged table with updates
 	staged, err := internal.UpdateAndStageTable(ctx, current, identifier, requirements, updates, c)
 	if err != nil {
 		return nil, "", err
 	}
 
-	// Check if there are actual changes
 	if current != nil && staged.Metadata().Equals(current.Metadata()) {
 		return current.Metadata(), current.MetadataLocation(), nil
 	}
 
-	// Write new metadata
 	if err := internal.WriteMetadata(ctx, staged.Metadata(), staged.MetadataLocation(), staged.Properties()); err != nil {
 		return nil, "", err
 	}
 
-	// Update Hive table
 	if current != nil {
 		updatedHiveTbl := updateHiveTableForCommit(currentHiveTbl, staged.MetadataLocation())
 
@@ -317,7 +296,6 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 			return nil, "", fmt.Errorf("failed to commit table %s.%s: %w", database, tableName, err)
 		}
 	} else {
-		// Create new table
 		hiveTbl := constructHiveTable(database, tableName, staged.Table.Location(), staged.MetadataLocation(), staged.Metadata().CurrentSchema(), staged.Properties())
 		if err := c.client.CreateTable(ctx, hiveTbl); err != nil {
 			return nil, "", fmt.Errorf("failed to create table %s.%s: %w", database, tableName, err)
@@ -346,11 +324,7 @@ func (c *Catalog) CheckTableExists(ctx context.Context, identifier table.Identif
 	return isIcebergTable(hiveTbl), nil
 }
 
-// Namespace operations
-
-// ListNamespaces returns a list of namespaces in the catalog.
 func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error) {
-	// Hive doesn't support hierarchical namespaces
 	if len(parent) > 0 {
 		return nil, errors.New("hierarchical namespace is not supported")
 	}
@@ -409,7 +383,6 @@ func (c *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 		return err
 	}
 
-	// Check if namespace exists
 	_, err = c.client.GetDatabase(ctx, database)
 	if err != nil {
 		if isNoSuchObjectError(err) {
@@ -419,7 +392,6 @@ func (c *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 		return err
 	}
 
-	// Drop database (cascade=false to fail if not empty)
 	if err := c.client.DropDatabase(ctx, database, false, false); err != nil {
 		if isInvalidOperationError(err) {
 			return fmt.Errorf("%w: %s", catalog.ErrNamespaceNotEmpty, database)
@@ -480,8 +452,6 @@ func (c *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 	return props, nil
 }
 
-// avoid circular dependency
-//
 //go:linkname getUpdatedPropsAndUpdateSummary github.com/apache/iceberg-go/catalog.getUpdatedPropsAndUpdateSummary
 func getUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals []string, updates iceberg.Properties) (iceberg.Properties, catalog.PropertiesUpdateSummary, error)
 
@@ -567,8 +537,6 @@ func TableIdentifier(database, tableName string) table.Identifier {
 func DatabaseIdentifier(database string) table.Identifier {
 	return []string{database}
 }
-
-// Error checking helpers for Hive Metastore exceptions
 
 func isNoSuchObjectError(err error) bool {
 	if err == nil {

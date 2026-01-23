@@ -30,7 +30,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// mockHiveClient is a mock implementation of HiveClient for testing.
 type mockHiveClient struct {
 	mock.Mock
 }
@@ -97,6 +96,30 @@ func (m *mockHiveClient) DropTable(ctx context.Context, dbName, tableName string
 
 func (m *mockHiveClient) AlterTable(ctx context.Context, dbName, tableName string, newTable *hive_metastore.Table) error {
 	args := m.Called(ctx, dbName, tableName, newTable)
+
+	return args.Error(0)
+}
+
+func (m *mockHiveClient) Lock(ctx context.Context, request *hive_metastore.LockRequest) (*hive_metastore.LockResponse, error) {
+	args := m.Called(ctx, request)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(*hive_metastore.LockResponse), args.Error(1)
+}
+
+func (m *mockHiveClient) CheckLock(ctx context.Context, lockId int64) (*hive_metastore.LockResponse, error) {
+	args := m.Called(ctx, lockId)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(*hive_metastore.LockResponse), args.Error(1)
+}
+
+func (m *mockHiveClient) Unlock(ctx context.Context, lockId int64) error {
+	args := m.Called(ctx, lockId)
 
 	return args.Error(0)
 }

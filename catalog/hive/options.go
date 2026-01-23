@@ -18,10 +18,12 @@
 package hive
 
 import (
+	"strconv"
+	"time"
+
 	"github.com/apache/iceberg-go"
 )
 
-// Configuration property keys for the Hive catalog.
 const (
 	// URI is the Thrift URI for the Hive Metastore (e.g., "thrift://localhost:9083")
 	URI = "uri"
@@ -38,24 +40,39 @@ const (
 	MetadataLocationKey         = "metadata_location"
 	PreviousMetadataLocationKey = "previous_metadata_location"
 	ExternalKey                 = "EXTERNAL"
+
+	// Lock configuration property keys
+	LockCheckMinWaitTime = "lock-check-min-wait-time"
+	LockCheckMaxWaitTime = "lock-check-max-wait-time"
+	LockCheckRetries     = "lock-check-retries"
+
+	// Default lock configuration values
+	DefaultLockCheckMinWaitTime = 100 * time.Millisecond // 100ms
+	DefaultLockCheckMaxWaitTime = 60 * time.Second       // 1 minute
+	DefaultLockCheckRetries     = 4
 )
 
-// HiveOptions contains configuration options for the Hive Metastore catalog.
 type HiveOptions struct {
 	URI          string
 	Warehouse    string
 	KerberosAuth bool
 	props        iceberg.Properties
+
+	// Lock configuration for atomic commits
+	LockMinWaitTime time.Duration
+	LockMaxWaitTime time.Duration
+	LockRetries     int
 }
 
-// NewHiveOptions creates a new HiveOptions with default values.
 func NewHiveOptions() *HiveOptions {
 	return &HiveOptions{
-		props: iceberg.Properties{},
+		props:           iceberg.Properties{},
+		LockMinWaitTime: DefaultLockCheckMinWaitTime,
+		LockMaxWaitTime: DefaultLockCheckMaxWaitTime,
+		LockRetries:     DefaultLockCheckRetries,
 	}
 }
 
-// ApplyProperties applies properties from an iceberg.Properties map.
 func (o *HiveOptions) ApplyProperties(props iceberg.Properties) {
 	o.props = props
 
@@ -68,9 +85,25 @@ func (o *HiveOptions) ApplyProperties(props iceberg.Properties) {
 	if props.GetBool(KerberosAuth, false) {
 		o.KerberosAuth = true
 	}
+
+	// Parse lock configuration
+	if val, ok := props[LockCheckMinWaitTime]; ok {
+		if d, err := time.ParseDuration(val); err == nil {
+			o.LockMinWaitTime = d
+		}
+	}
+	if val, ok := props[LockCheckMaxWaitTime]; ok {
+		if d, err := time.ParseDuration(val); err == nil {
+			o.LockMaxWaitTime = d
+		}
+	}
+	if val, ok := props[LockCheckRetries]; ok {
+		if i, err := strconv.Atoi(val); err == nil {
+			o.LockRetries = i
+		}
+	}
 }
 
-// Option is a functional option for configuring the Hive catalog.
 type Option func(*HiveOptions)
 
 // WithURI sets the Thrift URI for the Hive Metastore.
@@ -80,21 +113,18 @@ func WithURI(uri string) Option {
 	}
 }
 
-// WithWarehouse sets the default warehouse location.
 func WithWarehouse(warehouse string) Option {
 	return func(o *HiveOptions) {
 		o.Warehouse = warehouse
 	}
 }
 
-// WithKerberosAuth enables Kerberos authentication.
 func WithKerberosAuth(enabled bool) Option {
 	return func(o *HiveOptions) {
 		o.KerberosAuth = enabled
 	}
 }
 
-// WithProperties sets additional properties for the catalog.
 func WithProperties(props iceberg.Properties) Option {
 	return func(o *HiveOptions) {
 		o.props = props

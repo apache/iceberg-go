@@ -27,8 +27,6 @@ import (
 	"github.com/beltran/gohive/hive_metastore"
 )
 
-// HiveClient interface for Hive Metastore operations.
-// This allows for mocking in tests.
 type HiveClient interface {
 	Close()
 
@@ -43,14 +41,16 @@ type HiveClient interface {
 	AlterTable(ctx context.Context, dbName, tableName string, newTbl *hive_metastore.Table) error
 	DropTable(ctx context.Context, dbName, tableName string, deleteData bool) error
 	GetTables(ctx context.Context, dbName, pattern string) ([]string, error)
+
+	Lock(ctx context.Context, request *hive_metastore.LockRequest) (*hive_metastore.LockResponse, error)
+	CheckLock(ctx context.Context, lockId int64) (*hive_metastore.LockResponse, error)
+	Unlock(ctx context.Context, lockId int64) error
 }
 
-// thriftClient wraps the gohive HiveMetastoreClient.
 type thriftClient struct {
 	client *gohive.HiveMetastoreClient
 }
 
-// NewHiveClient creates a new Hive Metastore client using gohive.
 func NewHiveClient(uri string, opts *HiveOptions) (HiveClient, error) {
 	parsed, err := url.Parse(uri)
 	if err != nil {
@@ -128,4 +128,20 @@ func (c *thriftClient) DropTable(ctx context.Context, dbName, tableName string, 
 
 func (c *thriftClient) GetTables(ctx context.Context, dbName, pattern string) ([]string, error) {
 	return c.client.Client.GetTables(ctx, dbName, pattern)
+}
+
+func (c *thriftClient) Lock(ctx context.Context, request *hive_metastore.LockRequest) (*hive_metastore.LockResponse, error) {
+	return c.client.Client.Lock(ctx, request)
+}
+
+func (c *thriftClient) CheckLock(ctx context.Context, lockId int64) (*hive_metastore.LockResponse, error) {
+	return c.client.Client.CheckLock(ctx, &hive_metastore.CheckLockRequest{
+		Lockid: lockId,
+	})
+}
+
+func (c *thriftClient) Unlock(ctx context.Context, lockId int64) error {
+	return c.client.Client.Unlock(ctx, &hive_metastore.UnlockRequest{
+		Lockid: lockId,
+	})
 }

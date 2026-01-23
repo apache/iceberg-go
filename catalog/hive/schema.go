@@ -26,7 +26,6 @@ import (
 	"github.com/beltran/gohive/hive_metastore"
 )
 
-// schemaToHiveColumns converts an Iceberg schema to Hive FieldSchema columns.
 func schemaToHiveColumns(schema *iceberg.Schema) []*hive_metastore.FieldSchema {
 	columns := make([]*hive_metastore.FieldSchema, 0, len(schema.Fields()))
 	for _, field := range schema.Fields() {
@@ -36,7 +35,6 @@ func schemaToHiveColumns(schema *iceberg.Schema) []*hive_metastore.FieldSchema {
 	return columns
 }
 
-// fieldToHiveColumn converts an Iceberg NestedField to a Hive FieldSchema.
 func fieldToHiveColumn(field iceberg.NestedField) *hive_metastore.FieldSchema {
 	return &hive_metastore.FieldSchema{
 		Name:    field.Name,
@@ -103,7 +101,6 @@ func icebergTypeToHiveType(typ iceberg.Type) string {
 	}
 }
 
-// constructHiveTable creates a Hive Table struct for an Iceberg table.
 func constructHiveTable(dbName, tableName, location, metadataLocation string, schema *iceberg.Schema, props map[string]string) *hive_metastore.Table {
 	parameters := make(map[string]string)
 
@@ -137,7 +134,6 @@ func constructHiveTable(dbName, tableName, location, metadataLocation string, sc
 	}
 }
 
-// updateHiveTableForCommit updates a Hive Table struct for a commit operation.
 func updateHiveTableForCommit(existing *hive_metastore.Table, newMetadataLocation string) *hive_metastore.Table {
 	// Copy the existing table
 	updated := *existing
@@ -172,7 +168,6 @@ func isIcebergTable(tbl *hive_metastore.Table) bool {
 	return strings.EqualFold(tableType, TableTypeIceberg)
 }
 
-// getMetadataLocation returns the metadata location from a Hive table.
 func getMetadataLocation(tbl *hive_metastore.Table) (string, error) {
 	if tbl == nil || tbl.Parameters == nil {
 		return "", errors.New("table has no parameters")
