@@ -50,6 +50,7 @@ import (
 	"github.com/pterm/pterm"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
+	"github.com/uptrace/bun/driver/sqliteshim"
 )
 
 type TableTestSuite struct {

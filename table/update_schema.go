@@ -219,6 +219,36 @@ func (u *UpdateSchema) assignNewColumnID() int {
 	return u.lastColumnID
 }
 
+// normalizeTypeForSchemaCreation ensures nested types have temporary non-zero IDs
+// to avoid schema validation conflicts. These IDs will be replaced by AssignFreshSchemaIDs.
+// The field itself uses ID 1, so nested type IDs start from 2 to avoid conflicts.
+func normalizeTypeForSchemaCreation(fieldType iceberg.Type) iceberg.Type {
+	switch t := fieldType.(type) {
+	case *iceberg.ListType:
+		if t.ElementID == 0 {
+			return &iceberg.ListType{
+				ElementID:       2, // temporary ID (field uses 1), will be reassigned
+				Element:         t.Element,
+				ElementRequired: t.ElementRequired,
+			}
+		}
+		return t
+	case *iceberg.MapType:
+		if t.KeyID == 0 || t.ValueID == 0 {
+			return &iceberg.MapType{
+				KeyID:         2, // temporary ID (field uses 1), will be reassigned
+				KeyType:       t.KeyType,
+				ValueID:       3, // temporary ID, will be reassigned
+				ValueType:     t.ValueType,
+				ValueRequired: t.ValueRequired,
+			}
+		}
+		return t
+	default:
+		return t
+	}
+}
+
 func (u *UpdateSchema) findField(name string) (iceberg.NestedField, bool) {
 	if u.caseSensitive {
 		return u.schema.FindFieldByName(name)
@@ -317,9 +347,14 @@ func (u *UpdateSchema) addColumn(path []string, fieldType iceberg.Type, doc stri
 		}
 	}
 
+	// Normalize nested types to have temporary non-zero IDs to avoid schema validation conflicts.
+	// These IDs will be replaced by AssignFreshSchemaIDs.
+	normalizedType := normalizeTypeForSchemaCreation(fieldType)
+
 	field := iceberg.NestedField{
+		ID:       1, // temporary ID to avoid validation conflict with nested type IDs
 		Name:     name,
-		Type:     fieldType,
+		Type:     normalizedType,
 		Required: required,
 		Doc:      doc,
 	}
