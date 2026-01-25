@@ -89,6 +89,7 @@ func MustNewSchema(id int, fields ...NestedField) *Schema {
 	if err != nil {
 		panic(err)
 	}
+
 	return s
 }
 
@@ -100,6 +101,7 @@ func MustNewSchemaWithIdentifiers(id int, identifierIDs []int, fields ...NestedF
 	if err != nil {
 		panic(err)
 	}
+
 	return s
 }
 
