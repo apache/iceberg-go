@@ -28,8 +28,7 @@ import (
 var originalSchema *iceberg.Schema
 
 func init() {
-	var err error
-	originalSchema, err = iceberg.NewSchema(1,
+	originalSchema = iceberg.MustNewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, Doc: ""},
 		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
 		iceberg.NestedField{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: false, Doc: ""},
@@ -52,12 +51,17 @@ func init() {
 			ValueRequired: false,
 		}, Required: false, Doc: ""},
 	)
-	if err != nil {
-		panic(fmt.Sprintf("failed to create originalSchema: %v", err))
-	}
 }
 
-var testMetadata, _ = NewMetadata(originalSchema, nil, UnsortedSortOrder, "", nil)
+var testMetadata Metadata
+
+func init() {
+	var err error
+	testMetadata, err = NewMetadata(originalSchema, nil, UnsortedSortOrder, "", nil)
+	if err != nil {
+		panic(fmt.Sprintf("failed to create testMetadata: %v", err))
+	}
+}
 
 func TestAddColumn(t *testing.T) {
 	t.Run("test update schema with add primitive type on top level", func(t *testing.T) {
