@@ -433,9 +433,17 @@ func ArrowSchemaToIcebergWithFreshIDs(sc *arrow.Schema, downcastNsTimestamp bool
 }
 
 func arrowToSchemaWithoutIDs(sc *arrow.Schema, downcastNsTimestamp bool) (*iceberg.Schema, error) {
+	// Use a counter to assign unique temporary IDs starting from -1
+	// These IDs will be replaced by ApplyNameMapping, but we need unique IDs
+	// to pass schema validation
+	nextTempID := -1
 	withoutIDs, err := VisitArrowSchema(sc, convertToIceberg{
 		downcastTimestamp: downcastNsTimestamp,
-		fieldID:           func(_ arrow.Field) int { return -1 },
+		fieldID: func(_ arrow.Field) int {
+			id := nextTempID
+			nextTempID--
+			return id
+		},
 	})
 	if err != nil {
 		return nil, err

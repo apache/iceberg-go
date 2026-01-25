@@ -267,9 +267,12 @@ func TestSnapshotAsOfEdgeCases(t *testing.T) {
 
 // createTestMetadata creates metadata with custom snapshots and logs for testing
 func createTestMetadata(snapshots []Snapshot, snapshotLog []SnapshotLogEntry) (Metadata, error) {
-	schema := iceberg.NewSchema(1,
+	schema, err := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 	)
+	if err != nil {
+		return nil, err
+	}
 
 	// Create basic metadata
 	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder,

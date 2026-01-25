@@ -126,7 +126,7 @@ func (s *GCSIOTestSuite) TestGCSWarehouse() {
 
 	tbl, err := c.CreateTable(s.ctx,
 		catalog.ToIdentifier("iceberg-test-gcs", "test-table-gcs"),
-		iceberg.NewSchema(0, iceberg.NestedField{
+		iceberg.MustNewSchema(0, iceberg.NestedField{
 			Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, ID: 1,
 		}), catalog.WithLocation(fmt.Sprintf("gs://%s/iceberg/%s", gcsBucketName, path)))
 	s.Require().NoError(err)
