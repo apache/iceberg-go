@@ -1058,9 +1058,10 @@ func (s *SqliteCatalogTestSuite) TestCreateView() {
 	s.Require().NoError(db.CreateNamespace(context.Background(), []string{nsName}, nil))
 
 	viewSQL := "SELECT * FROM test_table"
-	schema := iceberg.NewSchema(1, iceberg.NestedField{
+	schema, err := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 	})
+	s.Require().NoError(err)
 	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, nil))
 
 	exists, err := db.CheckViewExists(context.Background(), []string{nsName, viewName})
@@ -1077,9 +1078,10 @@ func (s *SqliteCatalogTestSuite) TestDropView() {
 	s.Require().NoError(db.CreateNamespace(context.Background(), []string{nsName}, nil))
 
 	viewSQL := "SELECT * FROM test_table"
-	schema := iceberg.NewSchema(1, iceberg.NestedField{
+	schema, err := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 	})
+	s.Require().NoError(err)
 	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, nil))
 
 	exists, err := db.CheckViewExists(context.Background(), []string{nsName, viewName})
@@ -1106,9 +1108,10 @@ func (s *SqliteCatalogTestSuite) TestDropViewWithInvalidMetadataLocation() {
 	s.Require().NoError(db.CreateNamespace(context.Background(), []string{nsName}, nil))
 
 	viewSQL := "SELECT * FROM test_table"
-	schema := iceberg.NewSchema(1, iceberg.NestedField{
+	schema, err := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 	})
+	s.Require().NoError(err)
 	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, nil))
 
 	// Manually update the metadata location to a URL with an unsupported scheme
@@ -1116,7 +1119,7 @@ func (s *SqliteCatalogTestSuite) TestDropViewWithInvalidMetadataLocation() {
 	sqldb := s.getDB()
 	defer sqldb.Close()
 
-	_, err := sqldb.Exec(
+	_, err = sqldb.Exec(
 		"UPDATE iceberg_tables SET metadata_location = ? WHERE table_namespace = ? AND table_name = ?",
 		"unsupported-scheme://bucket/metadata.json",
 		nsName,
@@ -1142,9 +1145,10 @@ func (s *SqliteCatalogTestSuite) TestCheckViewExists() {
 	s.False(exists)
 
 	viewSQL := "SELECT * FROM test_table"
-	schema := iceberg.NewSchema(1, iceberg.NestedField{
+	schema, err := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 	})
+	s.Require().NoError(err)
 	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, nil))
 
 	exists, err = db.CheckViewExists(context.Background(), []string{nsName, viewName})
@@ -1162,9 +1166,10 @@ func (s *SqliteCatalogTestSuite) TestListViews() {
 	viewNames := []string{tableName(), tableName(), tableName()}
 	for _, viewName := range viewNames {
 		viewSQL := "SELECT * FROM test_table"
-		schema := iceberg.NewSchema(1, iceberg.NestedField{
+		schema, err := iceberg.NewSchema(1, iceberg.NestedField{
 			ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 		})
+		s.Require().NoError(err)
 		s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, nil))
 	}
 
@@ -1199,9 +1204,10 @@ func (s *SqliteCatalogTestSuite) TestLoadView() {
 	s.Require().NoError(db.CreateNamespace(context.Background(), []string{nsName}, nil))
 
 	viewSQL := "SELECT * FROM test_table"
-	schema := iceberg.NewSchema(1, iceberg.NestedField{
+	schema, err := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 	})
+	s.Require().NoError(err)
 	props := iceberg.Properties{
 		"comment": "Test view",
 		"owner":   "test-user",

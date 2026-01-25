@@ -51,7 +51,7 @@ const (
 	location           = "s3://warehouse/iceberg"
 )
 
-var tableSchemaSimple = iceberg.NewSchemaWithIdentifiers(1, []int{2},
+var tableSchemaSimple = iceberg.MustNewSchemaWithIdentifiers(1, []int{2},
 	iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.StringType{}, Required: false},
 	iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 	iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool, Required: false},
@@ -92,7 +92,7 @@ func (s *SQLIntegrationSuite) TearDownTest() {
 	}
 }
 
-var tableSchemaNestedTest = iceberg.NewSchemaWithIdentifiers(1,
+var tableSchemaNestedTest = iceberg.MustNewSchemaWithIdentifiers(1,
 	[]int{1},
 	iceberg.NestedField{
 		ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: true,

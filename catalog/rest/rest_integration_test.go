@@ -65,7 +65,7 @@ func (s *RestIntegrationSuite) SetupTest() {
 	s.cat = s.loadCatalog(s.ctx)
 }
 
-var tableSchemaNested = iceberg.NewSchemaWithIdentifiers(1,
+var tableSchemaNested = iceberg.MustNewSchemaWithIdentifiers(1,
 	[]int{1},
 	iceberg.NestedField{
 		ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: true,

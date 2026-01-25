@@ -79,7 +79,7 @@ func (s *AzureBlobIOTestSuite) TestAzureBlobWarehouseKey() {
 
 	tbl, err := c.CreateTable(s.ctx,
 		catalog.ToIdentifier("iceberg-test-azure", "test-table-azure"),
-		iceberg.NewSchema(0, iceberg.NestedField{
+		iceberg.MustNewSchema(0, iceberg.NestedField{
 			Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, ID: 1,
 		}), catalog.WithLocation(fmt.Sprintf("abfs://%s@%s.dfs.core.windows.net/iceberg/%s", containerName, accountName, path)))
 	s.Require().NoError(err)
@@ -111,7 +111,7 @@ func (s *AzureBlobIOTestSuite) TestAzuriteWarehouseConnectionString() {
 
 	tbl, err := c.CreateTable(s.ctx,
 		catalog.ToIdentifier("iceberg-test-azure", "test-table-azure"),
-		iceberg.NewSchema(0, iceberg.NestedField{
+		iceberg.MustNewSchema(0, iceberg.NestedField{
 			Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, ID: 1,
 		}), catalog.WithLocation(fmt.Sprintf("abfs://%s@%s.dfs.core.windows.net/iceberg/%s", containerName, accountName, path)))
 	s.Require().NoError(err)

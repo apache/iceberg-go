@@ -53,7 +53,7 @@ const (
 	OrphanFilePrefix  = "orphan_"
 )
 
-var tableSchemaSimple = iceberg.NewSchemaWithIdentifiers(1,
+var tableSchemaSimple = iceberg.MustNewSchemaWithIdentifiers(1,
 	[]int{1},
 	iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
