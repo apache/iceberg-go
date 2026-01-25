@@ -306,38 +306,38 @@ func init() {
 			Type: iceberg.PrimitiveTypes.Int32,
 		},
 		iceberg.NestedField{
-		ID: 16, Name: "s1",
-		Type: &iceberg.StructType{
+			ID: 16, Name: "s1",
+			Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{{
+					ID: 17, Name: "s2", Required: true,
+					Type: &iceberg.StructType{
+						FieldList: []iceberg.NestedField{{
+							ID: 18, Name: "s3", Required: true,
+							Type: &iceberg.StructType{
+								FieldList: []iceberg.NestedField{{
+									ID: 19, Name: "s4", Required: true,
+									Type: &iceberg.StructType{
+										FieldList: []iceberg.NestedField{{
+											ID: 20, Name: "i", Required: true,
+											Type: iceberg.PrimitiveTypes.Int32,
+										}},
+									},
+								}},
+							},
+						}},
+					},
+				}},
+			},
+		},
+		iceberg.NestedField{ID: 21, Name: "s5", Type: &iceberg.StructType{
 			FieldList: []iceberg.NestedField{{
-				ID: 17, Name: "s2", Required: true,
-				Type: &iceberg.StructType{
+				ID: 22, Name: "s6", Required: true, Type: &iceberg.StructType{
 					FieldList: []iceberg.NestedField{{
-						ID: 18, Name: "s3", Required: true,
-						Type: &iceberg.StructType{
-							FieldList: []iceberg.NestedField{{
-								ID: 19, Name: "s4", Required: true,
-								Type: &iceberg.StructType{
-									FieldList: []iceberg.NestedField{{
-										ID: 20, Name: "i", Required: true,
-										Type: iceberg.PrimitiveTypes.Int32,
-									}},
-								},
-							}},
-						},
+						ID: 23, Name: "f", Required: true, Type: iceberg.PrimitiveTypes.Float32,
 					}},
 				},
 			}},
-		},
-	},
-		iceberg.NestedField{ID: 21, Name: "s5", Type: &iceberg.StructType{
-		FieldList: []iceberg.NestedField{{
-			ID: 22, Name: "s6", Required: true, Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{{
-					ID: 23, Name: "f", Required: true, Type: iceberg.PrimitiveTypes.Float32,
-				}},
-			},
 		}},
-	}},
 		iceberg.NestedField{ID: 24, Name: "s", Type: iceberg.PrimitiveTypes.String},
 	)
 	if err != nil {

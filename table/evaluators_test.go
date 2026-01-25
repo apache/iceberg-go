@@ -37,63 +37,63 @@ var testSchema *iceberg.Schema
 func init() {
 	var err error
 	testSchema, err = iceberg.NewSchema(1,
-			iceberg.NestedField{
-				ID: 1, Name: "id",
-				Type: iceberg.PrimitiveTypes.Int32, Required: true,
-			},
-			iceberg.NestedField{
-				ID: 2, Name: "all_nulls_missing_nan",
-				Type: iceberg.PrimitiveTypes.String, Required: false,
-			},
-			iceberg.NestedField{
-				ID: 3, Name: "some_nulls",
-				Type: iceberg.PrimitiveTypes.String, Required: false,
-			},
-			iceberg.NestedField{
-				ID: 4, Name: "no_nulls",
-				Type: iceberg.PrimitiveTypes.String, Required: false,
-			},
-			iceberg.NestedField{
-				ID: 5, Name: "float",
-				Type: iceberg.PrimitiveTypes.Float32, Required: false,
-			},
-			iceberg.NestedField{
-				ID: 6, Name: "all_nulls_double",
-				Type: iceberg.PrimitiveTypes.Float64, Required: false,
-			},
-			iceberg.NestedField{
-				ID: 7, Name: "all_nulls_no_nans",
-				Type: iceberg.PrimitiveTypes.Float32, Required: false,
-			},
-			iceberg.NestedField{
-				ID: 8, Name: "all_nans",
-				Type: iceberg.PrimitiveTypes.Float64, Required: false,
-			},
-			iceberg.NestedField{
-				ID: 9, Name: "both_nan_and_null",
-				Type: iceberg.PrimitiveTypes.Float32, Required: false,
-			},
-			iceberg.NestedField{
-				ID: 10, Name: "no_nan_or_null",
-				Type: iceberg.PrimitiveTypes.Float64, Required: false,
-			},
-			iceberg.NestedField{
-				ID: 11, Name: "all_nulls_missing_nan_float",
-				Type: iceberg.PrimitiveTypes.Float32, Required: false,
-			},
-			iceberg.NestedField{
-				ID: 12, Name: "all_same_value_or_null",
-				Type: iceberg.PrimitiveTypes.String, Required: false,
-			},
-			iceberg.NestedField{
-				ID: 13, Name: "no_nulls_same_value_a",
-				Type: iceberg.PrimitiveTypes.Binary, Required: false,
-			},
-		)
-		if err != nil {
-			panic(fmt.Sprintf("failed to create testSchema: %v", err))
-		}
+		iceberg.NestedField{
+			ID: 1, Name: "id",
+			Type: iceberg.PrimitiveTypes.Int32, Required: true,
+		},
+		iceberg.NestedField{
+			ID: 2, Name: "all_nulls_missing_nan",
+			Type: iceberg.PrimitiveTypes.String, Required: false,
+		},
+		iceberg.NestedField{
+			ID: 3, Name: "some_nulls",
+			Type: iceberg.PrimitiveTypes.String, Required: false,
+		},
+		iceberg.NestedField{
+			ID: 4, Name: "no_nulls",
+			Type: iceberg.PrimitiveTypes.String, Required: false,
+		},
+		iceberg.NestedField{
+			ID: 5, Name: "float",
+			Type: iceberg.PrimitiveTypes.Float32, Required: false,
+		},
+		iceberg.NestedField{
+			ID: 6, Name: "all_nulls_double",
+			Type: iceberg.PrimitiveTypes.Float64, Required: false,
+		},
+		iceberg.NestedField{
+			ID: 7, Name: "all_nulls_no_nans",
+			Type: iceberg.PrimitiveTypes.Float32, Required: false,
+		},
+		iceberg.NestedField{
+			ID: 8, Name: "all_nans",
+			Type: iceberg.PrimitiveTypes.Float64, Required: false,
+		},
+		iceberg.NestedField{
+			ID: 9, Name: "both_nan_and_null",
+			Type: iceberg.PrimitiveTypes.Float32, Required: false,
+		},
+		iceberg.NestedField{
+			ID: 10, Name: "no_nan_or_null",
+			Type: iceberg.PrimitiveTypes.Float64, Required: false,
+		},
+		iceberg.NestedField{
+			ID: 11, Name: "all_nulls_missing_nan_float",
+			Type: iceberg.PrimitiveTypes.Float32, Required: false,
+		},
+		iceberg.NestedField{
+			ID: 12, Name: "all_same_value_or_null",
+			Type: iceberg.PrimitiveTypes.String, Required: false,
+		},
+		iceberg.NestedField{
+			ID: 13, Name: "no_nulls_same_value_a",
+			Type: iceberg.PrimitiveTypes.Binary, Required: false,
+		},
+	)
+	if err != nil {
+		panic(fmt.Sprintf("failed to create testSchema: %v", err))
 	}
+}
 
 func TestManifestEvaluator(t *testing.T) {
 	var (
