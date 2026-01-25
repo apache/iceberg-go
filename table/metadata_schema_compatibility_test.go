@@ -36,9 +36,10 @@ func TestNewMetadata_DuplicateValues(t *testing.T) {
 			Type: iceberg.PrimitiveTypes.String,
 		}
 	}
-	icebergSchema := iceberg.NewSchema(1, fields...)
+	icebergSchema, err := iceberg.NewSchema(1, fields...)
+	require.NoError(t, err)
 
-	_, err := NewMetadata(
+	_, err = NewMetadata(
 		icebergSchema,
 		&iceberg.PartitionSpec{},
 		UnsortedSortOrder,
