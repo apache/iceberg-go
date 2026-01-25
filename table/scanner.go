@@ -55,6 +55,11 @@ func (k *keyDefaultMap[K, V]) Get(key K) V {
 	k.mx.Lock()
 	defer k.mx.Unlock()
 
+	// race check between RLock and Lock
+	if v, ok := k.data[key]; ok {
+		return v
+	}
+
 	v := k.defaultFactory(key)
 	k.data[key] = v
 
