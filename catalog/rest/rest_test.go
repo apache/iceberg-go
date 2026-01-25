@@ -490,7 +490,8 @@ func (r *RestCatalogSuite) TestListTablesPagination() {
 		r.Equal(strconv.Itoa(defaultPageSize), pageSize)
 
 		var response map[string]any
-		if pageToken == "" {
+		switch pageToken {
+		case "":
 			response = map[string]any{
 				"identifiers": []any{
 					map[string]any{
@@ -504,7 +505,7 @@ func (r *RestCatalogSuite) TestListTablesPagination() {
 				},
 				"next-page-token": "token1",
 			}
-		} else if pageToken == "token1" {
+		case "token1":
 			r.Equal("token1", pageToken)
 			response = map[string]any{
 				"identifiers": []any{
@@ -519,7 +520,7 @@ func (r *RestCatalogSuite) TestListTablesPagination() {
 				},
 				"next-page-token": "token2",
 			}
-		} else {
+		default:
 			r.Equal("token2", pageToken)
 			response = map[string]any{
 				"identifiers": []any{
@@ -1782,7 +1783,8 @@ func (r *RestCatalogSuite) TestListViewsPagination() {
 		r.Equal(strconv.Itoa(defaultPageSize), pageSize)
 
 		var response map[string]any
-		if pageToken == "" {
+		switch pageToken {
+		case "":
 			response = map[string]any{
 				"identifiers": []any{
 					map[string]any{
@@ -1796,7 +1798,7 @@ func (r *RestCatalogSuite) TestListViewsPagination() {
 				},
 				"next-page-token": "token1",
 			}
-		} else if pageToken == "token1" {
+		case "token1":
 			r.Equal("token1", pageToken)
 			response = map[string]any{
 				"identifiers": []any{
@@ -1811,7 +1813,7 @@ func (r *RestCatalogSuite) TestListViewsPagination() {
 				},
 				"next-page-token": "token2",
 			}
-		} else {
+		default:
 			r.Equal("token2", pageToken)
 			response = map[string]any{
 				"identifiers": []any{

@@ -47,7 +47,7 @@ func (f *blobOpenFile) ReadAt(p []byte, off int64) (n int, err error) {
 	if f.b.newRangeReader != nil {
 		rdr, err = f.b.newRangeReader(f.ctx, f.key, off, int64(len(p)))
 	} else {
-		rdr, err = f.b.Bucket.NewRangeReader(f.ctx, f.key, off, int64(len(p)), nil)
+		rdr, err = f.b.NewRangeReader(f.ctx, f.key, off, int64(len(p)), nil)
 	}
 	if err != nil {
 		return 0, err
@@ -130,7 +130,7 @@ func (bfs *blobFileIO) Remove(name string) error {
 		return &fs.PathError{Op: "remove", Path: name, Err: err}
 	}
 
-	return bfs.Bucket.Delete(bfs.ctx, name)
+	return bfs.Delete(bfs.ctx, name)
 }
 
 func (bfs *blobFileIO) Create(name string) (FileWriter, error) {
@@ -144,7 +144,7 @@ func (bfs *blobFileIO) WriteFile(name string, content []byte) error {
 		return &fs.PathError{Op: "write file", Path: name, Err: err}
 	}
 
-	return bfs.Bucket.WriteAll(bfs.ctx, name, content, nil)
+	return bfs.WriteAll(bfs.ctx, name, content, nil)
 }
 
 // NewWriter returns a Writer that writes to the blob stored at path.
@@ -165,7 +165,7 @@ func (bfs *blobFileIO) NewWriter(ctx context.Context, path string, overwrite boo
 	}
 
 	if !overwrite {
-		if exists, err := bfs.Bucket.Exists(ctx, path); exists {
+		if exists, err := bfs.Exists(ctx, path); exists {
 			if err != nil {
 				return nil, &fs.PathError{Op: "new writer", Path: path, Err: err}
 			}

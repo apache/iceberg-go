@@ -76,6 +76,7 @@ func builderWithoutChanges(formatVersion int) MetadataBuilder {
 		panic(err)
 	}
 	if err = builder.SetLoc("s3://bucket/test/location"); err != nil {
+		panic(err)
 	}
 	if err = builder.AddSchema(&tableSchema); err != nil {
 		panic(err)

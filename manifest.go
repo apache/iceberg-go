@@ -181,7 +181,7 @@ type manifestFileV1 struct {
 }
 
 func (m *manifestFileV1) toFile() *manifestFile {
-	m.manifestFile.version = 1
+	m.version = 1
 	m.Content = ManifestContentData
 	m.SeqNumber, m.MinSeqNumber = initialSequenceNumber, initialSequenceNumber
 

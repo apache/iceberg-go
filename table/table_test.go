@@ -334,7 +334,7 @@ func (t *TableWritingTestSuite) SetupSuite() {
 }
 
 func (t *TableWritingTestSuite) SetupTest() {
-	t.location = filepath.ToSlash(strings.Replace(t.T().TempDir(), "#", "", -1))
+	t.location = filepath.ToSlash(strings.ReplaceAll(t.T().TempDir(), "#", ""))
 }
 
 func (t *TableWritingTestSuite) TearDownSuite() {
