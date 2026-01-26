@@ -45,7 +45,7 @@ type RestIntegrationSuite struct {
 	cat *rest.Catalog
 }
 
-const TestNamespaceIdent = "TEST NS"
+const TestNamespaceIdent = "rest-integration-test"
 
 func (s *RestIntegrationSuite) loadCatalog(ctx context.Context) *rest.Catalog {
 	cat, err := catalog.Load(ctx, "local", iceberg.Properties{
@@ -171,16 +171,13 @@ func (s *RestIntegrationSuite) TestUpdateNamespaceProps() {
 func (s *RestIntegrationSuite) TestCreateTable() {
 	s.ensureNamespace()
 
-	const location = "s3://warehouse/iceberg"
-
 	tbl, err := s.cat.CreateTable(s.ctx,
-		catalog.ToIdentifier(TestNamespaceIdent, "test-table"),
-		tableSchemaSimple, catalog.WithProperties(iceberg.Properties{"foobar": "baz"}),
-		catalog.WithLocation(location))
+		catalog.ToIdentifier(TestNamespaceIdent, "test-create-table"),
+		tableSchemaSimple, catalog.WithProperties(iceberg.Properties{"foobar": "baz"}))
 	s.Require().NoError(err)
 	s.Require().NotNil(tbl)
 
-	s.Equal(location, tbl.Location())
+	s.Equal("s3://warehouse/rest-integration-test/test-create-table", tbl.Location())
 	s.Equal("baz", tbl.Properties()["foobar"])
 
 	exists, err := s.cat.CheckTableExists(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table"))
@@ -294,11 +291,11 @@ func (s *RestIntegrationSuite) TestUpdateView() {
 func (s *RestIntegrationSuite) TestWriteCommitTable() {
 	s.ensureNamespace()
 
-	const location = "s3://warehouse/iceberg"
+	const expectedLocation = "s3://warehouse/rest-integration-test/test-write-commit-table"
 
 	tbl, err := s.cat.CreateTable(s.ctx,
 		catalog.ToIdentifier(TestNamespaceIdent, "test-table-2"),
-		tableSchemaNested, catalog.WithLocation(location))
+		tableSchemaNested)
 	s.Require().NoError(err)
 	s.Require().NotNil(tbl)
 
@@ -306,7 +303,7 @@ func (s *RestIntegrationSuite) TestWriteCommitTable() {
 		s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table-2")))
 	}()
 
-	s.Equal(location, tbl.Location())
+	s.Equal(expectedLocation, tbl.Location())
 
 	arrSchema, err := table.SchemaToArrowSchema(tableSchemaNested, nil, false, false)
 	s.Require().NoError(err)
@@ -327,7 +324,7 @@ func (s *RestIntegrationSuite) TestWriteCommitTable() {
 	s.Require().NoError(err)
 	defer table.Release()
 
-	pqfile, err := url.JoinPath(location, "data", "test_commit_table_data", "test.parquet")
+	pqfile, err := url.JoinPath(expectedLocation, "data", "test_commit_table_data", "test.parquet")
 	s.Require().NoError(err)
 
 	fw, err := mustFS(s.T(), tbl).(io.WriteFileIO).Create(pqfile)
