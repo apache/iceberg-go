@@ -409,6 +409,7 @@ func ArrowSchemaToIceberg(sc *arrow.Schema, downcastNsTimestamp bool, nameMappin
 		if err != nil {
 			return nil, err
 		}
+
 		return schema, nil
 	case nameMapping != nil:
 		schemaWithoutIDs, err := arrowToSchemaWithoutIDs(sc, downcastNsTimestamp)
@@ -442,6 +443,7 @@ func arrowToSchemaWithoutIDs(sc *arrow.Schema, downcastNsTimestamp bool) (*icebe
 		fieldID: func(_ arrow.Field) int {
 			id := nextTempID
 			nextTempID--
+
 			return id
 		},
 	})

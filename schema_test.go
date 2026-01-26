@@ -1013,6 +1013,7 @@ func TestSchemaDuplicateFieldIDReturnsError(t *testing.T) {
 					{"id":1,"name":"foo","type":"string","required":false},
 					{"id":1,"name":"bar","type":"int","required":true}
 				]`
+
 				return iceberg.NewSchemaFromJsonFields(1, testFieldsStr)
 			},
 			expectedID:    1,
