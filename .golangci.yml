@@ -23,6 +23,7 @@ linters:
     - misspell
     - nlreturn
     - perfsprint
+    - staticcheck
   settings:
     errcheck:
       exclude-functions:

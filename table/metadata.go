@@ -1616,7 +1616,7 @@ func initMetadataV1Deser() *metadataV1 {
 	meta := metadataV1{
 		commonMetadata: initCommonMetadataForDeserialization(),
 	}
-	meta.commonMetadata.DefaultSortOrderID = 0
+	meta.DefaultSortOrderID = 0
 
 	return &meta
 }
