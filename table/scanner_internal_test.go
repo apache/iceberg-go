@@ -18,6 +18,9 @@
 package table
 
 import (
+	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -99,4 +102,36 @@ func TestMinSequenceNum(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+func TestKeyDefaultMapRaceCondition(t *testing.T) {
+	var factoryCallCount atomic.Int64
+	factory := func(key string) int {
+		factoryCallCount.Add(1)
+		runtime.Gosched() // to widen the race window
+
+		return 42
+	}
+
+	kdm := newKeyDefaultMap(factory)
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	numGoroutines := 1000
+	for range numGoroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = kdm.Get("same-key")
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	callCount := factoryCallCount.Load()
+	assert.Equal(t, int64(1), callCount,
+		"factory should be called exactly once per key, but was called %d times", callCount)
 }
