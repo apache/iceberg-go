@@ -242,21 +242,30 @@ func (scan *Scan) Projection() (*iceberg.Schema, error) {
 }
 
 func (scan *Scan) buildPartitionProjection(specID int) (iceberg.BooleanExpression, error) {
-	project := newInclusiveProjection(scan.metadata.CurrentSchema(),
-		scan.metadata.PartitionSpecs()[specID], true)
+	spec, err := getPartitionSpecByID(scan.metadata.PartitionSpecs(), specID)
+	if err != nil {
+		return nil, err
+	}
+	project := newInclusiveProjection(scan.metadata.CurrentSchema(), *spec, true)
 
 	return project(scan.rowFilter)
 }
 
 func (scan *Scan) buildManifestEvaluator(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
-	spec := scan.metadata.PartitionSpecs()[specID]
+	spec, err := getPartitionSpecByID(scan.metadata.PartitionSpecs(), specID)
+	if err != nil {
+		return nil, err
+	}
 
-	return newManifestEvaluator(spec, scan.metadata.CurrentSchema(),
+	return newManifestEvaluator(*spec, scan.metadata.CurrentSchema(),
 		scan.partitionFilters.Get(specID), scan.caseSensitive)
 }
 
-func (scan *Scan) buildPartitionEvaluator(specID int) func(iceberg.DataFile) (bool, error) {
-	spec := scan.metadata.PartitionSpecs()[specID]
+func (scan *Scan) buildPartitionEvaluator(specID int) (func(iceberg.DataFile) (bool, error), error) {
+	spec, err := getPartitionSpecByID(scan.metadata.PartitionSpecs(), specID)
+	if err != nil {
+		return nil, err
+	}
 	partType := spec.PartitionType(scan.metadata.CurrentSchema())
 	partSchema := iceberg.NewSchema(0, partType.FieldList...)
 	partExpr := scan.partitionFilters.Get(specID)
@@ -268,7 +277,7 @@ func (scan *Scan) buildPartitionEvaluator(specID int) func(iceberg.DataFile) (bo
 		}
 
 		return fn(getPartitionRecord(d, partType))
-	}
+	}, nil
 }
 
 func (scan *Scan) checkSequenceNumber(minSeqNum int64, manifest iceberg.ManifestFile) bool {
@@ -370,7 +379,7 @@ func (scan *Scan) collectManifestEntries(
 	g, _ := errgroup.WithContext(ctx)
 	g.SetLimit(concurrencyLimit)
 
-	partitionEvaluators := newKeyDefaultMap(scan.buildPartitionEvaluator)
+	partitionEvaluators := newKeyDefaultMapWrapErr(scan.buildPartitionEvaluator)
 
 	for _, mf := range manifestList {
 		if !scan.checkSequenceNumber(minSeqNum, mf) {

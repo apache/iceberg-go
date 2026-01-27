@@ -1155,6 +1155,7 @@ func maxBy[S ~[]E, E any](elems S, extract func(e E) int) int {
 var (
 	ErrInvalidMetadataFormatVersion = errors.New("invalid or missing format-version in table metadata")
 	ErrInvalidMetadata              = errors.New("invalid metadata")
+	ErrPartitionSpecNotFound        = errors.New("partition spec not found")
 )
 
 // ParseMetadata parses json metadata provided by the passed in reader,
