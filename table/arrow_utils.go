@@ -1338,13 +1338,17 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 		tasks := func(yield func(WriteTask) bool) {
 			defer stopCount()
 
+			fileCount := 0
 			for batch := range binPackRecords(args.itr, 20, targetFileSize) {
 				cnt, _ := nextCount()
+				fileCount++
 				t := WriteTask{
-					Uuid:    *args.writeUUID,
-					ID:      cnt,
-					Schema:  taskSchema,
-					Batches: batch,
+					Uuid:        *args.writeUUID,
+					ID:          cnt,
+					PartitionID: 0, // unpartitioned tables use 0
+					FileCount:   fileCount,
+					Schema:      taskSchema,
+					Batches:     batch,
 				}
 				if !yield(t) {
 					return

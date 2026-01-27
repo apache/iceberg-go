@@ -33,14 +33,15 @@ import (
 // for different partitions, providing shared configuration and coordination
 // across all writers in a partitioned write operation.
 type writerFactory struct {
-	rootLocation   string
-	args           recordWritingArgs
-	meta           *MetadataBuilder
-	taskSchema     *iceberg.Schema
-	targetFileSize int64
-	writers        sync.Map
-	counter        atomic.Int64
-	mu             sync.Mutex
+	rootLocation       string
+	args               recordWritingArgs
+	meta               *MetadataBuilder
+	taskSchema         *iceberg.Schema
+	targetFileSize     int64
+	writers            sync.Map
+	counter            atomic.Int64
+	partitionIDCounter atomic.Int64 // Added: counter for partition IDs
+	mu                 sync.Mutex
 }
 
 // NewWriterFactory creates a new WriterFactory with the specified configuration
@@ -60,6 +61,8 @@ func NewWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 // file strategy to manage file sizes.
 type RollingDataWriter struct {
 	partitionKey    string
+	partitionID     int          // Added: unique ID for this partition
+	fileCount       atomic.Int64 // Added: counter for files in this partition
 	recordCh        chan arrow.RecordBatch
 	errorCh         chan error
 	factory         *writerFactory
@@ -73,8 +76,10 @@ type RollingDataWriter struct {
 // with the given partition values.
 func (w *writerFactory) NewRollingDataWriter(ctx context.Context, partition string, partitionValues map[int]any, outputDataFilesCh chan<- iceberg.DataFile) *RollingDataWriter {
 	ctx, cancel := context.WithCancel(ctx)
+	partitionID := int(w.partitionIDCounter.Add(1) - 1)
 	writer := &RollingDataWriter{
 		partitionKey:    partition,
+		partitionID:     partitionID,
 		recordCh:        make(chan arrow.RecordBatch, 64),
 		errorCh:         make(chan error, 1),
 		factory:         w,
@@ -157,12 +162,15 @@ func (r *RollingDataWriter) flushToDataFile(batch []arrow.RecordBatch, outputDat
 
 	task := iter.Seq[WriteTask](func(yield func(WriteTask) bool) {
 		cnt := int(r.factory.counter.Add(1) - 1)
+		fileCount := int(r.fileCount.Add(1))
 
 		yield(WriteTask{
-			Uuid:    *r.factory.args.writeUUID,
-			ID:      cnt,
-			Schema:  r.factory.taskSchema,
-			Batches: batch,
+			Uuid:        *r.factory.args.writeUUID,
+			ID:          cnt,
+			PartitionID: r.partitionID,
+			FileCount:   fileCount,
+			Schema:      r.factory.taskSchema,
+			Batches:     batch,
 		})
 	})
 
