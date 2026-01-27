@@ -25,6 +25,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func newDataManifest(minSeqNum int64) iceberg.ManifestFile {
@@ -134,4 +135,99 @@ func TestKeyDefaultMapRaceCondition(t *testing.T) {
 	callCount := factoryCallCount.Load()
 	assert.Equal(t, int64(1), callCount,
 		"factory should be called exactly once per key, but was called %d times", callCount)
+}
+
+func TestBuildPartitionProjectionWithInvalidSpecID(t *testing.T) {
+	schema := iceberg.NewSchema(
+		1,
+		iceberg.NestedField{
+			ID: 1, Name: "id",
+			Type: iceberg.PrimitiveTypes.Int64, Required: true,
+		},
+	)
+
+	metadata, err := NewMetadata(
+		schema,
+		iceberg.UnpartitionedSpec,
+		UnsortedSortOrder,
+		"s3://test-bucket/test_table",
+		iceberg.Properties{},
+	)
+	require.NoError(t, err)
+
+	scan := &Scan{
+		metadata:      metadata,
+		rowFilter:     iceberg.AlwaysTrue{},
+		caseSensitive: true,
+	}
+
+	expr, err := scan.buildPartitionProjection(999)
+	require.Error(t, err)
+	assert.Nil(t, expr)
+	assert.ErrorIs(t, err, ErrPartitionSpecNotFound)
+	assert.ErrorContains(t, err, "id 999")
+}
+
+func TestBuildManifestEvaluatorWithInvalidSpecID(t *testing.T) {
+	schema := iceberg.NewSchema(
+		1,
+		iceberg.NestedField{
+			ID: 1, Name: "id",
+			Type: iceberg.PrimitiveTypes.Int64, Required: true,
+		},
+	)
+
+	metadata, err := NewMetadata(
+		schema,
+		iceberg.UnpartitionedSpec,
+		UnsortedSortOrder,
+		"s3://test-bucket/test_table",
+		iceberg.Properties{},
+	)
+	require.NoError(t, err)
+
+	scan := &Scan{
+		metadata:      metadata,
+		rowFilter:     iceberg.AlwaysTrue{},
+		caseSensitive: true,
+	}
+
+	scan.partitionFilters = newKeyDefaultMapWrapErr(scan.buildPartitionProjection)
+
+	evaluator, err := scan.buildManifestEvaluator(999)
+	require.Error(t, err)
+	assert.Nil(t, evaluator)
+	assert.ErrorIs(t, err, ErrPartitionSpecNotFound)
+	assert.ErrorContains(t, err, "id 999")
+}
+
+func TestBuildPartitionEvaluatorWithInvalidSpecID(t *testing.T) {
+	schema := iceberg.NewSchema(
+		1,
+		iceberg.NestedField{
+			ID: 1, Name: "id",
+			Type: iceberg.PrimitiveTypes.Int64, Required: true,
+		},
+	)
+
+	metadata, err := NewMetadata(
+		schema,
+		iceberg.UnpartitionedSpec,
+		UnsortedSortOrder,
+		"s3://test-bucket/test_table",
+		iceberg.Properties{},
+	)
+	require.NoError(t, err)
+
+	scan := &Scan{
+		metadata:      metadata,
+		rowFilter:     iceberg.AlwaysTrue{},
+		caseSensitive: true,
+	}
+
+	evaluator, err := scan.buildPartitionEvaluator(999)
+	require.Error(t, err)
+	assert.Nil(t, evaluator)
+	assert.ErrorIs(t, err, ErrPartitionSpecNotFound)
+	assert.ErrorContains(t, err, "id 999")
 }
