@@ -270,12 +270,12 @@ func (scan *Scan) buildPartitionEvaluator(specID int) (func(iceberg.DataFile) (b
 	partSchema := iceberg.NewSchema(0, partType.FieldList...)
 	partExpr := scan.partitionFilters.Get(specID)
 
-	return func(d iceberg.DataFile) (bool, error) {
-		fn, err := iceberg.ExpressionEvaluator(partSchema, partExpr, scan.caseSensitive)
-		if err != nil {
-			return false, err
-		}
+	fn, err := iceberg.ExpressionEvaluator(partSchema, partExpr, scan.caseSensitive)
+	if err != nil {
+		return nil, err
+	}
 
+	return func(d iceberg.DataFile) (bool, error) {
 		return fn(getPartitionRecord(d, partType))
 	}, nil
 }
