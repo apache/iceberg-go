@@ -242,9 +242,9 @@ func (scan *Scan) Projection() (*iceberg.Schema, error) {
 }
 
 func (scan *Scan) buildPartitionProjection(specID int) (iceberg.BooleanExpression, error) {
-	spec, err := getPartitionSpecByID(scan.metadata.PartitionSpecs(), specID)
-	if err != nil {
-		return nil, err
+	spec := scan.metadata.PartitionSpecByID(specID)
+	if spec == nil {
+		return nil, fmt.Errorf("%w: id %d", ErrPartitionSpecNotFound, specID)
 	}
 	project := newInclusiveProjection(scan.metadata.CurrentSchema(), *spec, true)
 
@@ -252,9 +252,9 @@ func (scan *Scan) buildPartitionProjection(specID int) (iceberg.BooleanExpressio
 }
 
 func (scan *Scan) buildManifestEvaluator(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
-	spec, err := getPartitionSpecByID(scan.metadata.PartitionSpecs(), specID)
-	if err != nil {
-		return nil, err
+	spec := scan.metadata.PartitionSpecByID(specID)
+	if spec == nil {
+		return nil, fmt.Errorf("%w: id %d", ErrPartitionSpecNotFound, specID)
 	}
 
 	return newManifestEvaluator(*spec, scan.metadata.CurrentSchema(),
@@ -262,9 +262,9 @@ func (scan *Scan) buildManifestEvaluator(specID int) (func(iceberg.ManifestFile)
 }
 
 func (scan *Scan) buildPartitionEvaluator(specID int) (func(iceberg.DataFile) (bool, error), error) {
-	spec, err := getPartitionSpecByID(scan.metadata.PartitionSpecs(), specID)
-	if err != nil {
-		return nil, err
+	spec := scan.metadata.PartitionSpecByID(specID)
+	if spec == nil {
+		return nil, fmt.Errorf("%w: id %d", ErrPartitionSpecNotFound, specID)
 	}
 	partType := spec.PartitionType(scan.metadata.CurrentSchema())
 	partSchema := iceberg.NewSchema(0, partType.FieldList...)

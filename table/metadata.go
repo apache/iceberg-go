@@ -92,6 +92,9 @@ type Metadata interface {
 	PartitionSpecs() []iceberg.PartitionSpec
 	// PartitionSpec returns the current partition spec that the table is using.
 	PartitionSpec() iceberg.PartitionSpec
+	// PartitionSpecByID returns the partition spec with the given ID. Returns
+	// nil if the ID is not found in the list of partition specs.
+	PartitionSpecByID(int) *iceberg.PartitionSpec
 	// DefaultPartitionSpec is the ID of the current spec that writers should
 	// use by default.
 	DefaultPartitionSpec() int
@@ -1322,6 +1325,16 @@ func (c *commonMetadata) PartitionSpec() iceberg.PartitionSpec {
 	}
 
 	return *iceberg.UnpartitionedSpec
+}
+
+func (c *commonMetadata) PartitionSpecByID(id int) *iceberg.PartitionSpec {
+	for _, s := range c.Specs {
+		if s.ID() == id {
+			return &s
+		}
+	}
+
+	return nil
 }
 
 func (c *commonMetadata) LastPartitionSpecID() *int { return c.LastPartitionID }
