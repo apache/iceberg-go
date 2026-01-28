@@ -49,6 +49,7 @@ type writerFactory struct {
 // for managing rolling data writers across partitions.
 func NewWriterFactory(rootLocation string, args recordWritingArgs, meta *MetadataBuilder, taskSchema *iceberg.Schema, targetFileSize int64) writerFactory {
 	nextCount, stopCount := iter.Pull(args.counter)
+
 	return writerFactory{
 		rootLocation:   rootLocation,
 		args:           args,

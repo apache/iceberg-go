@@ -167,6 +167,7 @@ func RecoverError(err *error) {
 func Counter(start int) iter.Seq[int] {
 	var current atomic.Int64
 	current.Store(int64(start))
+
 	return func(yield func(int) bool) {
 		for {
 			if !yield(int(current.Load())) {
