@@ -414,12 +414,12 @@ func (s *SparkIntegrationTestSuite) TestOverwriteBasic() {
 |2       |
 +--------+
 
-+-----+-----------+----+
-|foo  |bar        |baz |
-+-----+-----------+----+
-|false|overwritten|300 |
-|true |new_data   |400 |
-+-----+-----------+----+
++-----+-----------+---+
+|foo  |bar        |baz|
++-----+-----------+---+
+|false|overwritten|300|
+|true |new_data   |400|
++-----+-----------+---+
 `
 
 	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--test", "TestOverwriteBasic")
@@ -478,14 +478,15 @@ func (s *SparkIntegrationTestSuite) TestOverwriteWithFilter() {
 +--------+
 |count(1)|
 +--------+
-|1       |
+|2       |
 +--------+
 
-+-----+---------------+----+
-|foo  |bar            |baz |
-+-----+---------------+----+
-|true |new_replacement|999 |
-+-----+---------------+----+
++-----+---------------+---+
+|foo  |bar            |baz|
++-----+---------------+---+
+|false|should_remain  |200|
+|true |new_replacement|999|
++-----+---------------+---+
 `
 
 	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--test", "TestOverwriteWithFilter")
