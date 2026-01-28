@@ -683,9 +683,9 @@ func (t *Transaction) classifyFilesForFilteredOverwrite(ctx context.Context, fs 
 func (t *Transaction) rewriteFilesWithFilter(ctx context.Context, fs io.IO, updater *snapshotProducer, files []iceberg.DataFile, filter iceberg.BooleanExpression) error {
 	complementFilter := iceberg.NewNot(filter)
 
-	// Use a separate UUID for rewrite operations to avoid filename collisions with new data files
-	rewriteUUID := uuid.New()
 	for _, originalFile := range files {
+		// Use a separate UUID for rewrite operations to avoid filename collisions with new data files
+		rewriteUUID := uuid.New()
 		rewrittenFiles, err := t.rewriteSingleFile(ctx, fs, originalFile, complementFilter, rewriteUUID)
 		if err != nil {
 			return fmt.Errorf("failed to rewrite file %s: %w", originalFile.FilePath(), err)
