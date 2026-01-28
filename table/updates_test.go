@@ -173,6 +173,7 @@ func TestUnmarshalUpdates(t *testing.T) {
 					iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.StringType{}, Required: true},
 				)
 				require.NoError(t, err)
+
 				return Updates{
 					NewAddSchemaUpdate(schema),
 					NewAddPartitionSpecUpdate(
