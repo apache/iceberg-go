@@ -20,6 +20,7 @@ linters:
   default: none
   enable:
     - errcheck
+    - govet
     - misspell
     - nlreturn
     - perfsprint
@@ -29,6 +30,11 @@ linters:
       exclude-functions:
         - (github.com/pterm/pterm.TablePrinter).Render
         - (github.com/pterm/pterm.TreePrinter).Render
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+        - shadow
   exclusions:
     generated: lax
     presets:
