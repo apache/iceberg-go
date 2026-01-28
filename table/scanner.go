@@ -242,33 +242,42 @@ func (scan *Scan) Projection() (*iceberg.Schema, error) {
 }
 
 func (scan *Scan) buildPartitionProjection(specID int) (iceberg.BooleanExpression, error) {
-	project := newInclusiveProjection(scan.metadata.CurrentSchema(),
-		scan.metadata.PartitionSpecs()[specID], true)
+	spec := scan.metadata.PartitionSpecByID(specID)
+	if spec == nil {
+		return nil, fmt.Errorf("%w: id %d", ErrPartitionSpecNotFound, specID)
+	}
+	project := newInclusiveProjection(scan.metadata.CurrentSchema(), *spec, true)
 
 	return project(scan.rowFilter)
 }
 
 func (scan *Scan) buildManifestEvaluator(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
-	spec := scan.metadata.PartitionSpecs()[specID]
+	spec := scan.metadata.PartitionSpecByID(specID)
+	if spec == nil {
+		return nil, fmt.Errorf("%w: id %d", ErrPartitionSpecNotFound, specID)
+	}
 
-	return newManifestEvaluator(spec, scan.metadata.CurrentSchema(),
+	return newManifestEvaluator(*spec, scan.metadata.CurrentSchema(),
 		scan.partitionFilters.Get(specID), scan.caseSensitive)
 }
 
-func (scan *Scan) buildPartitionEvaluator(specID int) func(iceberg.DataFile) (bool, error) {
-	spec := scan.metadata.PartitionSpecs()[specID]
+func (scan *Scan) buildPartitionEvaluator(specID int) (func(iceberg.DataFile) (bool, error), error) {
+	spec := scan.metadata.PartitionSpecByID(specID)
+	if spec == nil {
+		return nil, fmt.Errorf("%w: id %d", ErrPartitionSpecNotFound, specID)
+	}
 	partType := spec.PartitionType(scan.metadata.CurrentSchema())
 	partSchema := iceberg.NewSchema(0, partType.FieldList...)
 	partExpr := scan.partitionFilters.Get(specID)
 
-	return func(d iceberg.DataFile) (bool, error) {
-		fn, err := iceberg.ExpressionEvaluator(partSchema, partExpr, scan.caseSensitive)
-		if err != nil {
-			return false, err
-		}
-
-		return fn(getPartitionRecord(d, partType))
+	fn, err := iceberg.ExpressionEvaluator(partSchema, partExpr, scan.caseSensitive)
+	if err != nil {
+		return nil, err
 	}
+
+	return func(d iceberg.DataFile) (bool, error) {
+		return fn(getPartitionRecord(d, partType))
+	}, nil
 }
 
 func (scan *Scan) checkSequenceNumber(minSeqNum int64, manifest iceberg.ManifestFile) bool {
@@ -370,7 +379,7 @@ func (scan *Scan) collectManifestEntries(
 	g, _ := errgroup.WithContext(ctx)
 	g.SetLimit(concurrencyLimit)
 
-	partitionEvaluators := newKeyDefaultMap(scan.buildPartitionEvaluator)
+	partitionEvaluators := newKeyDefaultMapWrapErr(scan.buildPartitionEvaluator)
 
 	for _, mf := range manifestList {
 		if !scan.checkSequenceNumber(minSeqNum, mf) {
