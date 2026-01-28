@@ -42,7 +42,7 @@ type WriteTask struct {
 
 func (w WriteTask) GenerateDataFileName(extension string) string {
 	// Mimics the behavior in the Java API:
-	// https://github.com/apache/iceberg/blob/main/core/src/main/java/org/apache/iceberg/io/OutputFileFactory.java
+	// https://github.com/apache/iceberg/blob/03ed4ba9af4e47d32bdb22b7e3d033eb2a4b2c83/core/src/main/java/org/apache/iceberg/io/OutputFileFactory.java#L93
 	// Format: {partitionId:05d}-{taskId}-{operationId}-{fileCount:05d}.{extension}
 	return fmt.Sprintf("%05d-%d-%s-%05d.%s", w.PartitionID, w.ID, w.Uuid, w.FileCount, extension)
 }

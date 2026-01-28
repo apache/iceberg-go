@@ -24,6 +24,7 @@ import (
 	"io"
 	"iter"
 	"slices"
+	"sync/atomic"
 )
 
 // Helper function to find the difference between two slices (a - b).
@@ -164,12 +165,14 @@ func RecoverError(err *error) {
 }
 
 func Counter(start int) iter.Seq[int] {
+	var current atomic.Int64
+	current.Store(int64(start))
 	return func(yield func(int) bool) {
 		for {
-			if !yield(start) {
+			if !yield(int(current.Load())) {
 				return
 			}
-			start++
+			current.Add(1)
 		}
 	}
 }

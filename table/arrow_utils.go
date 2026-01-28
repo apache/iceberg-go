@@ -47,6 +47,8 @@ const (
 	// this key to identify the field id of the source Parquet field.
 	// We use this when converting to Iceberg to provide field IDs
 	ArrowParquetFieldIDKey = "PARQUET:field_id"
+
+	defaultBinPackLookback = 20
 )
 
 // ArrowSchemaVisitor is an interface that can be implemented and used to
@@ -1339,13 +1341,13 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 			defer stopCount()
 
 			fileCount := 0
-			for batch := range binPackRecords(args.itr, 20, targetFileSize) {
+			for batch := range binPackRecords(args.itr, defaultBinPackLookback, targetFileSize) {
 				cnt, _ := nextCount()
 				fileCount++
 				t := WriteTask{
 					Uuid:        *args.writeUUID,
 					ID:          cnt,
-					PartitionID: 0, // unpartitioned tables use 0
+					PartitionID: iceberg.UnpartitionedSpec.ID(),
 					FileCount:   fileCount,
 					Schema:      taskSchema,
 					Batches:     batch,

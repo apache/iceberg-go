@@ -27,10 +27,10 @@ import (
 
 func TestGenerateDataFileName(t *testing.T) {
 	tests := []struct {
-		name        string
-		task        WriteTask
-		extension   string
-		wantPattern string // regex pattern to match
+		name      string
+		task      WriteTask
+		extension string
+		want      string
 	}{
 		{
 			name: "unpartitioned table first file",
@@ -40,8 +40,8 @@ func TestGenerateDataFileName(t *testing.T) {
 				PartitionID: 0,
 				FileCount:   1,
 			},
-			extension:   "parquet",
-			wantPattern: "00000-0-12345678-1234-1234-1234-123456789abc-00001.parquet",
+			extension: "parquet",
+			want:      "00000-0-12345678-1234-1234-1234-123456789abc-00001.parquet",
 		},
 		{
 			name: "unpartitioned table multiple files",
@@ -51,8 +51,8 @@ func TestGenerateDataFileName(t *testing.T) {
 				PartitionID: 0,
 				FileCount:   42,
 			},
-			extension:   "parquet",
-			wantPattern: "00000-0-12345678-1234-1234-1234-123456789abc-00042.parquet",
+			extension: "parquet",
+			want:      "00000-0-12345678-1234-1234-1234-123456789abc-00042.parquet",
 		},
 		{
 			name: "partitioned table first partition",
@@ -62,8 +62,8 @@ func TestGenerateDataFileName(t *testing.T) {
 				PartitionID: 0,
 				FileCount:   1,
 			},
-			extension:   "parquet",
-			wantPattern: "00000-1-87654321-4321-4321-4321-cba987654321-00001.parquet",
+			extension: "parquet",
+			want:      "00000-1-87654321-4321-4321-4321-cba987654321-00001.parquet",
 		},
 		{
 			name: "partitioned table second partition",
@@ -73,8 +73,8 @@ func TestGenerateDataFileName(t *testing.T) {
 				PartitionID: 1,
 				FileCount:   1,
 			},
-			extension:   "parquet",
-			wantPattern: "00001-2-87654321-4321-4321-4321-cba987654321-00001.parquet",
+			extension: "parquet",
+			want:      "00001-2-87654321-4321-4321-4321-cba987654321-00001.parquet",
 		},
 		{
 			name: "partitioned table multiple files in partition",
@@ -84,8 +84,8 @@ func TestGenerateDataFileName(t *testing.T) {
 				PartitionID: 2,
 				FileCount:   15,
 			},
-			extension:   "parquet",
-			wantPattern: "00002-3-87654321-4321-4321-4321-cba987654321-00015.parquet",
+			extension: "parquet",
+			want:      "00002-3-87654321-4321-4321-4321-cba987654321-00015.parquet",
 		},
 		{
 			name: "large partition ID",
@@ -95,15 +95,26 @@ func TestGenerateDataFileName(t *testing.T) {
 				PartitionID: 12345,
 				FileCount:   99999,
 			},
-			extension:   "parquet",
-			wantPattern: "12345-100-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee-99999.parquet",
+			extension: "parquet",
+			want:      "12345-100-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee-99999.parquet",
+		},
+		{
+			name: "more than 5 digits",
+			task: WriteTask{
+				Uuid:        uuid.MustParse("ffffffff-ffff-ffff-ffff-ffffffffffff"),
+				ID:          123456,
+				PartitionID: 567890,
+				FileCount:   123456,
+			},
+			extension: "parquet",
+			want:      "567890-123456-ffffffff-ffff-ffff-ffff-ffffffffffff-123456.parquet",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := tt.task.GenerateDataFileName(tt.extension)
-			assert.Equal(t, tt.wantPattern, got)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
