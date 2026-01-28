@@ -196,7 +196,7 @@ func TestManifestPartitionVals(t *testing.T) {
 			require.True(t, result.Valid)
 			assert.Equal(t, tt.expectResult, result.Val)
 
-			schema := iceberg.NewSchema(0, iceberg.NestedField{
+			schema, err := iceberg.NewSchema(0, iceberg.NestedField{
 				Name: "abc",
 				ID:   1,
 				Type: tt.input.Type(),

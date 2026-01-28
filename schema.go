@@ -60,32 +60,65 @@ func NewSchemaFromJsonFields(id int, jsonFieldsStr string) (*Schema, error) {
 		return nil, fmt.Errorf("failed to parse schema JSON: %w", err)
 	}
 
-	return NewSchema(id, fields...), nil
+	return NewSchema(id, fields...)
 }
 
 // NewSchema constructs a new schema with the provided ID
 // and list of fields.
-func NewSchema(id int, fields ...NestedField) *Schema {
+func NewSchema(id int, fields ...NestedField) (*Schema, error) {
 	return NewSchemaWithIdentifiers(id, []int{}, fields...)
 }
 
 // NewSchemaWithIdentifiers constructs a new schema with the provided ID
 // and fields, along with a slice of field IDs to be listed as identifier
 // fields.
-func NewSchemaWithIdentifiers(id int, identifierIDs []int, fields ...NestedField) *Schema {
+func NewSchemaWithIdentifiers(id int, identifierIDs []int, fields ...NestedField) (*Schema, error) {
 	s := &Schema{ID: id, fields: fields, IdentifierFieldIDs: identifierIDs}
-	s.init()
+	if err := s.init(); err != nil {
+		return nil, err
+	}
+
+	return s, nil
+}
+
+// MustNewSchema is a helper that panics if NewSchema returns an error.
+// It is intended for use in variable initializations where the schema
+// is known to be valid at compile time.
+func MustNewSchema(id int, fields ...NestedField) *Schema {
+	s, err := NewSchema(id, fields...)
+	if err != nil {
+		panic(err)
+	}
 
 	return s
 }
 
-func (s *Schema) init() {
+// MustNewSchemaWithIdentifiers is a helper that panics if NewSchemaWithIdentifiers returns an error.
+// It is intended for use in variable initializations where the schema
+// is known to be valid at compile time.
+func MustNewSchemaWithIdentifiers(id int, identifierIDs []int, fields ...NestedField) *Schema {
+	s, err := NewSchemaWithIdentifiers(id, identifierIDs, fields...)
+	if err != nil {
+		panic(err)
+	}
+
+	return s
+}
+
+func (s *Schema) init() error {
 	s.lazyIDToParent = sync.OnceValues(func() (map[int]int, error) {
 		return IndexParents(s)
 	})
 	s.lazyNameMapping = sync.OnceValue(func() NameMapping {
 		return createMappingFromSchema(s)
 	})
+
+	// Validate that the schema does not contain duplicate field IDs.
+	if _, err := IndexNameByID(s); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (s *Schema) String() string {
@@ -223,11 +256,13 @@ func (s *Schema) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	s.init()
-
 	s.fields = aux.Fields
 	if s.IdentifierFieldIDs == nil {
 		s.IdentifierFieldIDs = []int{}
+	}
+
+	if err := s.init(); err != nil {
+		return err
 	}
 
 	return nil
@@ -775,6 +810,7 @@ func IndexByName(schema *Schema) (map[string]int, error) {
 			shortNameId:     make(map[string]int),
 			fieldNames:      make([]string, 0),
 			shortFieldNames: make([]string, 0),
+			idToName:        make(map[int]string),
 		}
 		if _, err := Visit(schema, indexer); err != nil {
 			return nil, err
@@ -794,6 +830,7 @@ func IndexNameByID(schema *Schema) (map[int]string, error) {
 		shortNameId:     make(map[string]int),
 		fieldNames:      make([]string, 0),
 		shortFieldNames: make([]string, 0),
+		idToName:        make(map[int]string),
 	}
 	if _, err := Visit(schema, indexer); err != nil {
 		return nil, err
@@ -808,12 +845,13 @@ type indexByName struct {
 	combinedIndex   map[string]int
 	fieldNames      []string
 	shortFieldNames []string
+	idToName        map[int]string
 }
 
 func (i *indexByName) ByID() map[int]string {
 	idToName := make(map[int]string)
-	for k, v := range i.index {
-		idToName[v] = k
+	for name, id := range i.index {
+		idToName[id] = name
 	}
 
 	return idToName
@@ -838,6 +876,13 @@ func (i *indexByName) addField(name string, fieldID int) {
 			ErrInvalidSchema, fullName, i.index[fullName], fieldID))
 	}
 
+	if existingName, ok := i.idToName[fieldID]; ok && existingName != fullName {
+		panic(fmt.Errorf("%w: Multiple entries with same key: %d=%s and %d=%s",
+			ErrInvalidSchema, fieldID, existingName, fieldID, fullName))
+	}
+
+	// Track the ID -> name mapping
+	i.idToName[fieldID] = fullName
 	i.index[fullName] = fieldID
 	if len(i.shortFieldNames) > 0 {
 		shortName := strings.Join(i.shortFieldNames, ".") + "." + name
@@ -1314,7 +1359,7 @@ func AssignFreshSchemaIDs(sc *Schema, nextID func() int) (*Schema, error) {
 		}
 	}
 
-	return NewSchemaWithIdentifiers(0, newIdentifierIDs, fields...), nil
+	return NewSchemaWithIdentifiers(0, newIdentifierIDs, fields...)
 }
 
 type SchemaWithPartnerVisitor[T, P any] interface {
@@ -1529,7 +1574,7 @@ func SanitizeColumnNames(sc *Schema) (*Schema, error) {
 	}
 
 	return NewSchemaWithIdentifiers(sc.ID, sc.IdentifierFieldIDs,
-		result.Type.(*StructType).FieldList...), nil
+		result.Type.(*StructType).FieldList...)
 }
 
 type sanitizeColumnNameVisitor struct{}

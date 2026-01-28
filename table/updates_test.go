@@ -168,15 +168,20 @@ func TestUnmarshalUpdates(t *testing.T) {
     "schema-id": 1
   }
 ]`),
-			expected: Updates{
-				NewAddSchemaUpdate(iceberg.NewSchema(1,
+			expected: func() Updates {
+				schema, err := iceberg.NewSchema(1,
 					iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.StringType{}, Required: true},
-				)),
-				NewAddPartitionSpecUpdate(
-					&spec, false),
-				NewAddSortOrderUpdate(&sortOrder),
-				NewSetCurrentSchemaUpdate(1),
-			},
+				)
+				require.NoError(t, err)
+
+				return Updates{
+					NewAddSchemaUpdate(schema),
+					NewAddPartitionSpecUpdate(
+						&spec, false),
+					NewAddSortOrderUpdate(&sortOrder),
+					NewSetCurrentSchemaUpdate(1),
+				}
+			}(),
 			expectedErr: false,
 		},
 		{
