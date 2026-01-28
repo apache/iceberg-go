@@ -925,7 +925,7 @@ func (b *MetadataBuilder) GetSpecByID(id int) (*iceberg.PartitionSpec, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("partition spec with id %d not found", id)
+	return nil, fmt.Errorf("%w: id %d", ErrPartitionSpecNotFound, id)
 }
 
 func (b *MetadataBuilder) GetSortOrderByID(id int) (*SortOrder, error) {
