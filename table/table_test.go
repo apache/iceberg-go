@@ -1434,6 +1434,7 @@ func tableSchema() *iceberg.Schema {
 	if err != nil {
 		panic(fmt.Sprintf("failed to create tableSchema: %v", err))
 	}
+
 	return sch
 }
 

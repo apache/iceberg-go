@@ -232,6 +232,7 @@ func normalizeTypeForSchemaCreation(fieldType iceberg.Type) iceberg.Type {
 				ElementRequired: t.ElementRequired,
 			}
 		}
+
 		return t
 	case *iceberg.MapType:
 		if t.KeyID == 0 || t.ValueID == 0 {
@@ -243,6 +244,7 @@ func normalizeTypeForSchemaCreation(fieldType iceberg.Type) iceberg.Type {
 				ValueRequired: t.ValueRequired,
 			}
 		}
+
 		return t
 	default:
 		return t

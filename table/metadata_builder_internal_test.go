@@ -37,6 +37,7 @@ func schema() iceberg.Schema {
 	if err != nil {
 		panic(fmt.Sprintf("failed to create schema: %v", err))
 	}
+
 	return *sch
 }
 

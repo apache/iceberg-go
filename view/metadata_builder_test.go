@@ -70,6 +70,7 @@ func newTestSchema(schemaID int, optFieldName ...string) *iceberg.Schema {
 	if err != nil {
 		return nil
 	}
+
 	return schema
 }
 
