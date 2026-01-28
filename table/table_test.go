@@ -368,7 +368,7 @@ func (t *TableWritingTestSuite) createTable(identifier table.Identifier, formatV
 		func(ctx context.Context) (iceio.IO, error) {
 			return iceio.LocalFS{}, nil
 		},
-		nil,
+		&mockedCatalog{meta},
 	)
 }
 
@@ -1615,6 +1615,50 @@ func (t *TableWritingTestSuite) TestMergeManifests() {
 	t.True(array.TableEqual(resultA, resultC), "expected:\n %s\ngot:\n %s", resultA, resultC)
 	// tblB and tblC should contain the same data
 	t.True(array.TableEqual(resultB, resultC), "expected:\n %s\ngot:\n %s", resultB, resultC)
+}
+
+// TestOverwriteTable verifies that Table.OverwriteTable properly delegates to Transaction.OverwriteTable
+func (t *TableWritingTestSuite) TestOverwriteTable() {
+	ident := table.Identifier{"default", "overwrite_table_wrapper_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+	newTable, err := array.TableFromJSON(memory.DefaultAllocator, t.arrSchema, []string{
+		`[{"foo": false, "bar": "wrapper_test", "baz": 123, "qux": "2024-01-01"}]`,
+	})
+	t.Require().NoError(err)
+	defer newTable.Release()
+	resultTbl, err := tbl.OverwriteTable(t.ctx, newTable, 1, nil, true, nil)
+	t.Require().NoError(err)
+	t.NotNil(resultTbl)
+
+	snapshot := resultTbl.CurrentSnapshot()
+	t.NotNil(snapshot)
+	t.Equal(table.OpAppend, snapshot.Summary.Operation) // Empty table overwrite becomes append
+}
+
+// TestOverwriteRecord verifies that Table.Overwrite properly delegates to Transaction.Overwrite
+func (t *TableWritingTestSuite) TestOverwriteRecord() {
+	ident := table.Identifier{"default", "overwrite_record_wrapper_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	// Create test data as RecordReader
+	testTable, err := array.TableFromJSON(memory.DefaultAllocator, t.arrSchema, []string{
+		`[{"foo": true, "bar": "record_test", "baz": 456, "qux": "2024-01-02"}]`,
+	})
+	t.Require().NoError(err)
+	defer testTable.Release()
+
+	rdr := array.NewTableReader(testTable, 1)
+	defer rdr.Release()
+
+	// Test that Table.Overwrite works (delegates to transaction)
+	resultTbl, err := tbl.Overwrite(t.ctx, rdr, nil, true, nil)
+	t.Require().NoError(err)
+	t.NotNil(resultTbl)
+
+	// Verify the operation worked
+	snapshot := resultTbl.CurrentSnapshot()
+	t.NotNil(snapshot)
+	t.Equal(table.OpAppend, snapshot.Summary.Operation) // Empty table overwrite becomes append
 }
 
 func TestTableWriting(t *testing.T) {

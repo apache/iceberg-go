@@ -129,6 +129,26 @@ func (t Table) Append(ctx context.Context, rdr array.RecordReader, snapshotProps
 	return txn.Commit(ctx)
 }
 
+// OverwriteTable is a shortcut for NewTransaction().OverwriteTable() and then committing the transaction
+func (t Table) OverwriteTable(ctx context.Context, tbl arrow.Table, batchSize int64, filter iceberg.BooleanExpression, caseSensitive bool, snapshotProps iceberg.Properties) (*Table, error) {
+	txn := t.NewTransaction()
+	if err := txn.OverwriteTable(ctx, tbl, batchSize, filter, caseSensitive, snapshotProps); err != nil {
+		return nil, err
+	}
+
+	return txn.Commit(ctx)
+}
+
+// Overwrite is a shortcut for NewTransaction().Overwrite() and then committing the transaction
+func (t Table) Overwrite(ctx context.Context, rdr array.RecordReader, filter iceberg.BooleanExpression, caseSensitive bool, snapshotProps iceberg.Properties) (*Table, error) {
+	txn := t.NewTransaction()
+	if err := txn.Overwrite(ctx, rdr, filter, caseSensitive, snapshotProps); err != nil {
+		return nil, err
+	}
+
+	return txn.Commit(ctx)
+}
+
 func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile, error] {
 	fs, err := t.fsF(ctx)
 	if err != nil {
