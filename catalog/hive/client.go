@@ -19,6 +19,7 @@ package hive
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -67,15 +68,14 @@ func newHiveClient(uri string, opts *HiveOptions) (HiveClient, error) {
 		return nil, fmt.Errorf("invalid port: %w", err)
 	}
 
-	auth := "NOSASL"
 	if opts != nil && opts.KerberosAuth {
-		auth = "KERBEROS"
+		return nil, errors.New("kerberos authentication is not yet supported")
 	}
 
 	config := gohive.NewMetastoreConnectConfiguration()
 	config.TransportMode = "binary"
 
-	client, err := gohive.ConnectToMetastore(host, port, auth, config)
+	client, err := gohive.ConnectToMetastore(host, port, "NOSASL", config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to metastore: %w", err)
 	}
