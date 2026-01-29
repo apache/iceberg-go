@@ -28,7 +28,7 @@ import (
 )
 
 type HiveClient interface {
-	Close()
+	Close() error
 
 	GetDatabase(ctx context.Context, name string) (*hive_metastore.Database, error)
 	CreateDatabase(ctx context.Context, database *hive_metastore.Database) error
@@ -51,7 +51,7 @@ type thriftClient struct {
 	client *gohive.HiveMetastoreClient
 }
 
-func NewHiveClient(uri string, opts *HiveOptions) (HiveClient, error) {
+func newHiveClient(uri string, opts *HiveOptions) (HiveClient, error) {
 	parsed, err := url.Parse(uri)
 	if err != nil {
 		return nil, fmt.Errorf("invalid URI: %w", err)
@@ -67,7 +67,6 @@ func NewHiveClient(uri string, opts *HiveOptions) (HiveClient, error) {
 		return nil, fmt.Errorf("invalid port: %w", err)
 	}
 
-	// Determine authentication mode
 	auth := "NOSASL"
 	if opts != nil && opts.KerberosAuth {
 		auth = "KERBEROS"
@@ -84,10 +83,13 @@ func NewHiveClient(uri string, opts *HiveOptions) (HiveClient, error) {
 	return &thriftClient{client: client}, nil
 }
 
-func (c *thriftClient) Close() {
+func (c *thriftClient) Close() error {
 	if c.client != nil {
 		c.client.Close()
+		c.client = nil
 	}
+
+	return nil
 }
 
 func (c *thriftClient) GetDatabase(ctx context.Context, name string) (*hive_metastore.Database, error) {

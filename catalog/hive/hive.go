@@ -65,7 +65,7 @@ func NewCatalog(props iceberg.Properties, opts ...Option) (*Catalog, error) {
 		return nil, errors.New("hive.uri is required")
 	}
 
-	client, err := NewHiveClient(o.URI, o)
+	client, err := newHiveClient(o.URI, o)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Hive client: %w", err)
 	}
@@ -91,9 +91,7 @@ func (c *Catalog) CatalogType() catalog.Type {
 }
 
 func (c *Catalog) Close() error {
-	c.client.Close()
-
-	return nil
+	return c.client.Close()
 }
 
 // ListTables returns a list of table identifiers in the given namespace.

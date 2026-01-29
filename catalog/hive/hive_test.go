@@ -124,8 +124,10 @@ func (m *mockHiveClient) Unlock(ctx context.Context, lockId int64) error {
 	return args.Error(0)
 }
 
-func (m *mockHiveClient) Close() {
-	m.Called()
+func (m *mockHiveClient) Close() error {
+	args := m.Called()
+
+	return args.Error(0)
 }
 
 // Test data
