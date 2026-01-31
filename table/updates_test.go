@@ -18,6 +18,7 @@
 package table
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -26,6 +27,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRemoveSnapshotsPostCommitSkipped(t *testing.T) {
+	update := NewRemoveSnapshotsUpdate([]int64{1, 2, 3})
+	update.postCommit = false
+
+	// PostCommit should return nil immediately when postCommit is false,
+	// without accessing the table arguments (which are nil here)
+	err := update.PostCommit(context.Background(), nil, nil)
+	assert.NoError(t, err)
+}
 
 func TestUnmarshalUpdates(t *testing.T) {
 	spec := iceberg.NewPartitionSpecID(3,

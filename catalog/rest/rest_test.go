@@ -490,7 +490,8 @@ func (r *RestCatalogSuite) TestListTablesPagination() {
 		r.Equal(strconv.Itoa(defaultPageSize), pageSize)
 
 		var response map[string]any
-		if pageToken == "" {
+		switch pageToken {
+		case "":
 			response = map[string]any{
 				"identifiers": []any{
 					map[string]any{
@@ -504,7 +505,7 @@ func (r *RestCatalogSuite) TestListTablesPagination() {
 				},
 				"next-page-token": "token1",
 			}
-		} else if pageToken == "token1" {
+		case "token1":
 			r.Equal("token1", pageToken)
 			response = map[string]any{
 				"identifiers": []any{
@@ -519,7 +520,7 @@ func (r *RestCatalogSuite) TestListTablesPagination() {
 				},
 				"next-page-token": "token2",
 			}
-		} else {
+		default:
 			r.Equal("token2", pageToken)
 			response = map[string]any{
 				"identifiers": []any{
@@ -745,6 +746,58 @@ func (r *RestCatalogSuite) TestListNamespaces400() {
 	_, err = cat.ListNamespaces(context.Background(), catalog.ToIdentifier("accounting"))
 	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
 	r.ErrorContains(err, "Namespace does not exist: personal in warehouse 8bcb0838-50fc-472d-9ddb-8feb89ef5f1e")
+}
+
+func (r *RestCatalogSuite) TestListNamespacesPagination() {
+	// Track the number of requests and page tokens received
+	requestCount := 0
+
+	r.mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		pageToken := req.URL.Query().Get("pageToken")
+		requestCount++
+
+		switch requestCount {
+		case 1:
+			// First request - no pageToken expected
+			r.Empty(pageToken)
+			json.NewEncoder(w).Encode(map[string]any{
+				"namespaces":      []table.Identifier{{"ns1"}, {"ns2"}},
+				"next-page-token": "token1",
+			})
+		case 2:
+			// Second request - expect token1
+			r.Equal("token1", pageToken)
+			json.NewEncoder(w).Encode(map[string]any{
+				"namespaces":      []table.Identifier{{"ns3"}, {"ns4"}},
+				"next-page-token": "token2",
+			})
+		case 3:
+			// Third request - expect token2, no next token (last page)
+			r.Equal("token2", pageToken)
+			json.NewEncoder(w).Encode(map[string]any{
+				"namespaces": []table.Identifier{{"ns5"}},
+			})
+		default:
+			r.Fail("unexpected request count: %d", requestCount)
+		}
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	results, err := cat.ListNamespaces(context.Background(), nil)
+	r.Require().NoError(err)
+
+	// Verify all namespaces from all pages are returned
+	r.Equal([]table.Identifier{{"ns1"}, {"ns2"}, {"ns3"}, {"ns4"}, {"ns5"}}, results)
+	// Verify 3 requests were made (3 pages)
+	r.Equal(3, requestCount)
 }
 
 func (r *RestCatalogSuite) TestCreateNamespace200() {
@@ -1150,8 +1203,8 @@ func (r *RestCatalogSuite) TestCreateTable409() {
 		}
 
 		w.WriteHeader(http.StatusConflict)
-		errorResponse := map[string]interface{}{
-			"error": map[string]interface{}{
+		errorResponse := map[string]any{
+			"error": map[string]any{
 				"message": "Table already exists: fokko.already_exists in warehouse 8bcb0838-50fc-472d-9ddb-8feb89ef5f1e",
 				"type":    "AlreadyExistsException",
 				"code":    409,
@@ -1429,8 +1482,8 @@ func (r *RestCatalogSuite) TestDropTable404() {
 		}
 
 		w.WriteHeader(http.StatusNotFound)
-		errorResponse := map[string]interface{}{
-			"error": map[string]interface{}{
+		errorResponse := map[string]any{
+			"error": map[string]any{
 				"message": "Table does not exist: fokko.table",
 				"type":    "NoSuchTableException",
 				"code":    404,
@@ -1730,7 +1783,8 @@ func (r *RestCatalogSuite) TestListViewsPagination() {
 		r.Equal(strconv.Itoa(defaultPageSize), pageSize)
 
 		var response map[string]any
-		if pageToken == "" {
+		switch pageToken {
+		case "":
 			response = map[string]any{
 				"identifiers": []any{
 					map[string]any{
@@ -1744,7 +1798,7 @@ func (r *RestCatalogSuite) TestListViewsPagination() {
 				},
 				"next-page-token": "token1",
 			}
-		} else if pageToken == "token1" {
+		case "token1":
 			r.Equal("token1", pageToken)
 			response = map[string]any{
 				"identifiers": []any{
@@ -1759,7 +1813,7 @@ func (r *RestCatalogSuite) TestListViewsPagination() {
 				},
 				"next-page-token": "token2",
 			}
-		} else {
+		default:
 			r.Equal("token2", pageToken)
 			response = map[string]any{
 				"identifiers": []any{
@@ -1933,8 +1987,8 @@ func (r *RestCatalogSuite) TestDropView404() {
 		}
 
 		w.WriteHeader(http.StatusNotFound)
-		errorResponse := map[string]interface{}{
-			"error": map[string]interface{}{
+		errorResponse := map[string]any{
+			"error": map[string]any{
 				"message": "The given view does not exist",
 				"type":    "NoSuchViewException",
 				"code":    404,

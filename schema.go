@@ -1103,7 +1103,7 @@ func (findLastFieldID) Schema(_ *Schema, result int) int {
 }
 
 func (findLastFieldID) Struct(_ StructType, fieldResults []int) int {
-	return max(fieldResults...)
+	return slices.Max(fieldResults)
 }
 
 func (findLastFieldID) Field(field NestedField, fieldResult int) int {
@@ -1292,7 +1292,7 @@ func (s *setFreshIDs) Primitive(p PrimitiveType) Type {
 // it is nil then a simple incrementing counter is used starting at 1.
 func AssignFreshSchemaIDs(sc *Schema, nextID func() int) (*Schema, error) {
 	if nextID == nil {
-		var id int = 0
+		id := 0
 		nextID = func() int {
 			id++
 
@@ -1505,7 +1505,7 @@ func sanitizeName(n string) string {
 	b.Grow(len(n))
 
 	first := n[0]
-	if !(unicode.IsLetter(rune(first)) || first == '_') {
+	if !unicode.IsLetter(rune(first)) && first != '_' {
 		b.WriteString(sanitize(rune(first)))
 	} else {
 		b.WriteByte(first)

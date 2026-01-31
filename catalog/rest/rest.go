@@ -161,34 +161,6 @@ type createTableRequest struct {
 	Props         iceberg.Properties     `json:"properties,omitempty"`
 }
 
-type oauthTokenResponse struct {
-	AccessToken  string `json:"access_token"`
-	TokenType    string `json:"token_type"`
-	ExpiresIn    int    `json:"expires_in"`
-	Scope        string `json:"scope"`
-	RefreshToken string `json:"refresh_token"`
-}
-
-type oauthErrorResponse struct {
-	Err     string `json:"error"`
-	ErrDesc string `json:"error_description"`
-	ErrURI  string `json:"error_uri"`
-}
-
-func (o oauthErrorResponse) Unwrap() error { return ErrOAuthError }
-func (o oauthErrorResponse) Error() string {
-	msg := o.Err
-	if o.ErrDesc != "" {
-		msg += ": " + o.ErrDesc
-	}
-
-	if o.ErrURI != "" {
-		msg += " (" + o.ErrURI + ")"
-	}
-
-	return msg
-}
-
 type configResponse struct {
 	Defaults  iceberg.Properties `json:"defaults"`
 	Overrides iceberg.Properties `json:"overrides"`
@@ -409,8 +381,6 @@ func handleNon200(rsp *http.Response, override map[int]error) error {
 func fromProps(props iceberg.Properties, o *options) {
 	for k, v := range props {
 		switch k {
-		case keyOauthToken:
-			o.oauthToken = v
 		case keyWarehouseLocation:
 			o.warehouseLocation = v
 		case keyMetadataLocation:
@@ -465,7 +435,6 @@ func toProps(o *options) iceberg.Properties {
 	}
 
 	setIf(keyOauthCredential, o.credential)
-	setIf(keyOauthToken, o.oauthToken)
 	setIf(keyWarehouseLocation, o.warehouseLocation)
 	setIf(keyMetadataLocation, o.metadataLocation)
 	if o.enableSigv4 {
@@ -520,6 +489,23 @@ func NewCatalog(ctx context.Context, name, uri string, opts ...Option) (*Catalog
 	return r, nil
 }
 
+// setupOAuthManager creates an Oauth2AuthManager based on the provided options.
+// The allows users to set their token, credential, or just get the defaults if no auth manager is set.
+func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) *Oauth2AuthManager {
+	authURI := opts.authUri
+	if authURI == nil {
+		authURI = r.baseURI.JoinPath("oauth/tokens")
+	}
+
+	return &Oauth2AuthManager{
+		Token:      opts.oauthToken,
+		Credential: opts.credential,
+		AuthURI:    authURI,
+		Scope:      opts.scope,
+		Client:     cl,
+	}
+}
+
 func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 	baseuri, err := url.Parse(uri)
 	if err != nil {
@@ -539,62 +525,6 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 	return nil
 }
 
-func (r *Catalog) fetchAccessToken(cl *http.Client, creds string, opts *options) (string, error) {
-	clientID, clientSecret, hasID := strings.Cut(creds, ":")
-	if !hasID {
-		clientID, clientSecret = "", clientID
-	}
-
-	scope := "catalog"
-	if opts.scope != "" {
-		scope = opts.scope
-	}
-	data := url.Values{
-		"grant_type":    {"client_credentials"},
-		"client_id":     {clientID},
-		"client_secret": {clientSecret},
-		"scope":         {scope},
-	}
-
-	uri := opts.authUri
-	if uri == nil {
-		uri = r.baseURI.JoinPath("oauth/tokens")
-	}
-
-	rsp, err := cl.PostForm(uri.String(), data)
-	if err != nil {
-		return "", err
-	}
-
-	if rsp.StatusCode == http.StatusOK {
-		defer rsp.Body.Close()
-		dec := json.NewDecoder(rsp.Body)
-		var tok oauthTokenResponse
-		if err := dec.Decode(&tok); err != nil {
-			return "", fmt.Errorf("failed to decode oauth token response: %w", err)
-		}
-
-		return tok.AccessToken, nil
-	}
-
-	switch rsp.StatusCode {
-	case http.StatusUnauthorized, http.StatusBadRequest:
-		defer func() {
-			_, _ = io.Copy(io.Discard, rsp.Body)
-			_ = rsp.Body.Close()
-		}()
-		dec := json.NewDecoder(rsp.Body)
-		var oauthErr oauthErrorResponse
-		if err := dec.Decode(&oauthErr); err != nil {
-			return "", fmt.Errorf("failed to decode oauth error: %w", err)
-		}
-
-		return "", oauthErr
-	default:
-		return "", handleNon200(rsp, nil)
-	}
-}
-
 func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Client, error) {
 	session := &sessionTransport{
 		defaultHeaders: http.Header{},
@@ -606,27 +536,26 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	}
 	cl := &http.Client{Transport: session}
 
-	for k, v := range opts.headers {
-		session.defaultHeaders.Set(k, v)
+	// If the user does not set an AuthManager, we can construct an OAuth2AuthManager based off their options.
+	if opts.authManager == nil {
+		opts.authManager = setupOAuthManager(r, cl, opts)
 	}
 
 	session.defaultHeaders.Set("X-Client-Version", icebergRestSpecVersion)
 	session.defaultHeaders.Set("Content-Type", "application/json")
 	session.defaultHeaders.Set("User-Agent", "GoIceberg/"+iceberg.Version())
-	if session.defaultHeaders.Get("X-Iceberg-Access-Delegation") == "" {
-		session.defaultHeaders.Set("X-Iceberg-Access-Delegation", "vended-credentials")
+	session.defaultHeaders.Set("X-Iceberg-Access-Delegation", "vended-credentials")
+
+	for k, v := range opts.headers {
+		session.defaultHeaders.Set(k, v)
 	}
 
-	token := opts.oauthToken
-	if token == "" && opts.credential != "" {
-		var err error
-		if token, err = r.fetchAccessToken(cl, opts.credential, opts); err != nil {
-			return nil, fmt.Errorf("auth error: %w", err)
+	if opts.authManager != nil {
+		k, v, err := opts.authManager.AuthHeader()
+		if err != nil {
+			return nil, err
 		}
-	}
-
-	if token != "" {
-		session.defaultHeaders.Set(authorizationHeader, bearerPrefix+" "+token)
+		session.defaultHeaders.Set(k, v)
 	}
 
 	if opts.enableSigv4 {
@@ -997,23 +926,53 @@ func (r *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 }
 
 func (r *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error) {
+	var allNamespaces []table.Identifier
+	pageSize := r.getPageSize(ctx)
+	var pageToken string
+
+	for {
+		namespaces, nextPageToken, err := r.listNamespacesPage(ctx, parent, pageToken, pageSize)
+		if err != nil {
+			return nil, err
+		}
+		allNamespaces = append(allNamespaces, namespaces...)
+		if nextPageToken == "" {
+			break
+		}
+		pageToken = nextPageToken
+	}
+
+	return allNamespaces, nil
+}
+
+func (r *Catalog) listNamespacesPage(ctx context.Context, parent table.Identifier, pageToken string, pageSize int) ([]table.Identifier, string, error) {
 	uri := r.baseURI.JoinPath("namespaces")
+
+	v := url.Values{}
 	if len(parent) != 0 {
-		v := url.Values{}
 		v.Set("parent", strings.Join(parent, namespaceSeparator))
+	}
+	if pageSize >= 0 {
+		v.Set("pageSize", strconv.Itoa(pageSize))
+	}
+	if pageToken != "" {
+		v.Set("pageToken", pageToken)
+	}
+	if len(v) > 0 {
 		uri.RawQuery = v.Encode()
 	}
 
 	type rsptype struct {
-		Namespaces []table.Identifier `json:"namespaces"`
+		Namespaces    []table.Identifier `json:"namespaces"`
+		NextPageToken string             `json:"next-page-token,omitempty"`
 	}
 
 	rsp, err := doGet[rsptype](ctx, uri, []string{}, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
-	return rsp.Namespaces, nil
+	return rsp.Namespaces, rsp.NextPageToken, nil
 }
 
 func (r *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.Identifier) (iceberg.Properties, error) {

@@ -405,7 +405,7 @@ func (us *UpdateSpec) addNewField(schema *iceberg.Schema, sourceId int, fieldId 
 }
 
 func (us *UpdateSpec) isNewPartitionSpec(newSpecId int) bool {
-	return !slices.ContainsFunc(us.txn.tbl.Metadata().PartitionSpecs(), func(s iceberg.PartitionSpec) bool {
-		return s.ID() == newSpecId
-	})
+	spec := us.txn.tbl.Metadata().PartitionSpecByID(newSpecId)
+
+	return spec == nil
 }

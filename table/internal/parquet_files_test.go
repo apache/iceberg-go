@@ -20,6 +20,7 @@ package internal_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"math/big"
 	"strings"
 	"testing"
@@ -33,6 +34,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
+	"github.com/apache/arrow-go/v18/parquet/schema"
 	"github.com/apache/iceberg-go"
 	internal2 "github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/table"
@@ -328,6 +330,159 @@ func TestMetricsPrimitiveTypes(t *testing.T) {
 		Val:   decimal128.FromBigInt(expectedUpper),
 		Scale: 2,
 	})
+}
+
+// TestDecimalPhysicalTypes tests that decimals stored as INT32/INT64 physical types
+// are correctly handled. This is important because Parquet allows decimals with
+// precision <= 9 to be stored as INT32, and precision <= 18 as INT64.
+func TestDecimalPhysicalTypes(t *testing.T) {
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+
+	tests := []struct {
+		name         string
+		precision    int
+		scale        int
+		physicalType parquet.Type
+		values       []int64 // unscaled values
+		expectedMin  int64
+		expectedMax  int64
+	}{
+		{
+			name:         "decimal_as_int32",
+			precision:    7,
+			scale:        2,
+			physicalType: parquet.Types.Int32,
+			values:       []int64{12345, 67890}, // represents 123.45, 678.90
+			expectedMin:  12345,
+			expectedMax:  67890,
+		},
+		{
+			name:         "decimal_as_int64",
+			precision:    15,
+			scale:        2,
+			physicalType: parquet.Types.Int64,
+			values:       []int64{123456789012345, 987654321098765},
+			expectedMin:  123456789012345,
+			expectedMax:  987654321098765,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create a Parquet file with decimal stored as INT32 or INT64
+			var buf bytes.Buffer
+
+			// Build a custom schema with decimal logical type
+			decType := schema.NewDecimalLogicalType(int32(tt.precision), int32(tt.scale))
+			var node schema.Node
+			var err error
+			if tt.physicalType == parquet.Types.Int32 {
+				node, err = schema.NewPrimitiveNodeLogical("value", parquet.Repetitions.Required,
+					decType, parquet.Types.Int32, 0, 1)
+			} else {
+				node, err = schema.NewPrimitiveNodeLogical("value", parquet.Repetitions.Required,
+					decType, parquet.Types.Int64, 0, 1)
+			}
+			require.NoError(t, err)
+
+			rootNode, err := schema.NewGroupNode("schema", parquet.Repetitions.Required, schema.FieldList{node}, -1)
+			require.NoError(t, err)
+
+			// Write the parquet file
+			writer := file.NewParquetWriter(&buf,
+				rootNode,
+				file.WithWriterProps(parquet.NewWriterProperties(parquet.WithStats(true))))
+
+			rgw := writer.AppendRowGroup()
+			colWriter, err := rgw.NextColumn()
+			require.NoError(t, err)
+
+			if tt.physicalType == parquet.Types.Int32 {
+				int32Writer := colWriter.(*file.Int32ColumnChunkWriter)
+				vals := make([]int32, len(tt.values))
+				for i, v := range tt.values {
+					vals[i] = int32(v)
+				}
+				_, err = int32Writer.WriteBatch(vals, nil, nil)
+			} else {
+				int64Writer := colWriter.(*file.Int64ColumnChunkWriter)
+				_, err = int64Writer.WriteBatch(tt.values, nil, nil)
+			}
+			require.NoError(t, err)
+
+			require.NoError(t, colWriter.Close())
+			require.NoError(t, rgw.Close())
+			require.NoError(t, writer.Close())
+
+			// Read back and get metadata
+			rdr, err := file.NewParquetReader(bytes.NewReader(buf.Bytes()))
+			require.NoError(t, err)
+			defer rdr.Close()
+
+			meta := rdr.MetaData()
+
+			// Create table metadata with decimal type
+			tableMeta, err := table.ParseMetadataString(fmt.Sprintf(`{
+				"format-version": 2,
+				"location": "s3://bucket/test/location",
+				"last-column-id": 1,
+				"current-schema-id": 0,
+				"schemas": [
+					{
+						"type": "struct",
+						"schema-id": 0,
+						"fields": [
+							{"id": 1, "name": "value", "required": true, "type": "decimal(%d, %d)"}
+						]
+					}
+				],
+				"last-partition-id": 0,
+				"last-updated-ms": -1,
+				"default-spec-id": 0,
+				"default-sort-order-id": 0,
+				"sort-orders": [{"order-id": 0, "fields": []}],
+				"partition-specs": [{"spec-id": 0, "fields": []}],
+				"properties": {}
+			}`, tt.precision, tt.scale))
+			require.NoError(t, err)
+
+			mapping, err := format.PathToIDMapping(tableMeta.CurrentSchema())
+			require.NoError(t, err)
+
+			collector := map[int]internal.StatisticsCollector{
+				1: {
+					FieldID:    1,
+					Mode:       internal.MetricsMode{Typ: internal.MetricModeFull},
+					ColName:    "value",
+					IcebergTyp: iceberg.DecimalTypeOf(tt.precision, tt.scale),
+				},
+			}
+
+			// This should not panic - the fix allows INT32/INT64 physical types for decimals
+			stats := format.DataFileStatsFromMeta(internal.Metadata(meta), collector, mapping)
+			require.NotNil(t, stats)
+
+			df := stats.ToDataFile(tableMeta.CurrentSchema(), tableMeta.PartitionSpec(), "test.parquet",
+				iceberg.ParquetFile, meta.GetSourceFileSize(), nil)
+
+			// Verify bounds are correctly extracted
+			require.Contains(t, df.LowerBoundValues(), 1)
+			require.Contains(t, df.UpperBoundValues(), 1)
+
+			// Verify the actual values
+			minLit, err := iceberg.LiteralFromBytes(iceberg.DecimalTypeOf(tt.precision, tt.scale), df.LowerBoundValues()[1])
+			require.NoError(t, err)
+			minDec := minLit.(iceberg.TypedLiteral[iceberg.Decimal]).Value()
+			assert.Equal(t, uint64(tt.expectedMin), minDec.Val.LowBits())
+			assert.Equal(t, tt.scale, minDec.Scale)
+
+			maxLit, err := iceberg.LiteralFromBytes(iceberg.DecimalTypeOf(tt.precision, tt.scale), df.UpperBoundValues()[1])
+			require.NoError(t, err)
+			maxDec := maxLit.(iceberg.TypedLiteral[iceberg.Decimal]).Value()
+			assert.Equal(t, uint64(tt.expectedMax), maxDec.Val.LowBits())
+			assert.Equal(t, tt.scale, maxDec.Scale)
+		})
+	}
 }
 
 func TestWriteDataFileErrOnClose(t *testing.T) {

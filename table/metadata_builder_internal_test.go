@@ -76,6 +76,7 @@ func builderWithoutChanges(formatVersion int) MetadataBuilder {
 		panic(err)
 	}
 	if err = builder.SetLoc("s3://bucket/test/location"); err != nil {
+		panic(err)
 	}
 	if err = builder.AddSchema(&tableSchema); err != nil {
 		panic(err)
@@ -307,7 +308,8 @@ func TestAddRemovePartitionSpec(t *testing.T) {
 	require.Len(t, newBuilder.updates, 1)
 	require.Len(t, newBuild.PartitionSpecs(), 1)
 	_, err = newBuilder.GetSpecByID(1)
-	require.ErrorContains(t, err, "partition spec with id 1 not found")
+	require.ErrorIs(t, err, ErrPartitionSpecNotFound)
+	require.ErrorContains(t, err, "id 1")
 }
 
 func TestSetDefaultPartitionSpec(t *testing.T) {

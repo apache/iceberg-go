@@ -412,6 +412,7 @@ func (u *removePropertiesUpdate) Apply(builder *MetadataBuilder) error {
 type removeSnapshotsUpdate struct {
 	baseUpdate
 	SnapshotIDs []int64 `json:"snapshot-ids"`
+	postCommit  bool
 }
 
 // NewRemoveSnapshotsUpdate creates a new update that removes all snapshots from
@@ -428,6 +429,10 @@ func (u *removeSnapshotsUpdate) Apply(builder *MetadataBuilder) error {
 }
 
 func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table, postTable *Table) error {
+	if !u.postCommit {
+		return nil
+	}
+
 	prefs, err := preTable.FS(ctx)
 	if err != nil {
 		return err

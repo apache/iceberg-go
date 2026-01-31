@@ -723,7 +723,7 @@ func (ul *unboundLiteralPredicate) Bind(schema *Schema, caseSensitive bool) (Boo
 	}
 
 	if (ul.op == OpStartsWith || ul.op == OpNotStartsWith) &&
-		!(bound.Type().Equals(PrimitiveTypes.String) || bound.Type().Equals(PrimitiveTypes.Binary)) {
+		(!bound.Type().Equals(PrimitiveTypes.String) && !bound.Type().Equals(PrimitiveTypes.Binary)) {
 		return nil, fmt.Errorf("%w: StartsWith and NotStartsWith must bind to String type, not %s",
 			ErrType, bound.Type())
 	}
@@ -853,15 +853,17 @@ func SetPredicate(op Operation, t UnboundTerm, lits []Literal) BooleanExpression
 
 	switch len(lits) {
 	case 0:
-		if op == OpIn {
+		switch op {
+		case OpIn:
 			return AlwaysFalse{}
-		} else if op == OpNotIn {
+		case OpNotIn:
 			return AlwaysTrue{}
 		}
 	case 1:
-		if op == OpIn {
+		switch op {
+		case OpIn:
 			return LiteralPredicate(OpEQ, t, lits[0])
-		} else if op == OpNotIn {
+		case OpNotIn:
 			return LiteralPredicate(OpNEQ, t, lits[0])
 		}
 	}
@@ -926,15 +928,17 @@ func createBoundSetPredicate(op Operation, term BoundTerm, lits Set[Literal]) (B
 
 	switch typedSet.Len() {
 	case 0:
-		if op == OpIn {
+		switch op {
+		case OpIn:
 			return AlwaysFalse{}, nil
-		} else if op == OpNotIn {
+		case OpNotIn:
 			return AlwaysTrue{}, nil
 		}
 	case 1:
-		if op == OpIn {
+		switch op {
+		case OpIn:
 			return createBoundLiteralPredicate(OpEQ, term, typedSet.Members()[0])
-		} else if op == OpNotIn {
+		case OpNotIn:
 			return createBoundLiteralPredicate(OpNEQ, term, typedSet.Members()[0])
 		}
 	}

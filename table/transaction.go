@@ -167,6 +167,7 @@ func (t *Transaction) UpdateSchema(caseSensitive bool, allowIncompatibleChanges 
 type expireSnapshotsCfg struct {
 	minSnapshotsToKeep *int
 	maxSnapshotAgeMs   *int64
+	postCommit         bool
 }
 
 type ExpireSnapshotsOpt func(*expireSnapshotsCfg)
@@ -184,9 +185,19 @@ func WithOlderThan(t time.Duration) ExpireSnapshotsOpt {
 	}
 }
 
+// WithPostCommit controls whether orphaned files (manifests, manifest lists,
+// data files) are deleted immediately after expiring snapshots. Defaults to true.
+// Set to false to defer file deletion to a separate maintenance job, avoiding
+// conflicts with in-flight queries that may still reference those files.
+func WithPostCommit(postCommit bool) ExpireSnapshotsOpt {
+	return func(cfg *expireSnapshotsCfg) {
+		cfg.postCommit = postCommit
+	}
+}
+
 func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	var (
-		cfg         expireSnapshotsCfg
+		cfg         = expireSnapshotsCfg{postCommit: true}
 		updates     []Update
 		reqs        []Requirement
 		snapsToKeep = make(map[int64]struct{})
@@ -248,7 +259,9 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		for {
 			snap, err := t.meta.SnapshotByID(snapId)
 			if err != nil {
-				return err
+				// Parent snapshot may have been removed by a previous expiration.
+				// Treat missing parent as end of chain - this is expected behavior.
+				break
 			}
 
 			snapAge := time.Now().UnixMilli() - snap.TimestampMs
@@ -275,7 +288,12 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		}
 	}
 
-	updates = append(updates, NewRemoveSnapshotsUpdate(snapsToDelete))
+	// Only add the update if there are actually snapshots to delete
+	if len(snapsToDelete) > 0 {
+		update := NewRemoveSnapshotsUpdate(snapsToDelete)
+		update.postCommit = cfg.postCommit
+		updates = append(updates, update)
+	}
 
 	return t.apply(updates, reqs)
 }
