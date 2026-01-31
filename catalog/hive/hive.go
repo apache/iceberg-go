@@ -179,7 +179,7 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, err
 	}
 
-	hiveTbl := constructHiveTable(database, tableName, staged.Table.Location(), staged.MetadataLocation(), schema, staged.Table.Properties())
+	hiveTbl := constructHiveTable(database, tableName, staged.Location(), staged.MetadataLocation(), schema, staged.Properties())
 
 	if err := c.client.CreateTable(ctx, hiveTbl); err != nil {
 		if isAlreadyExistsError(err) {
@@ -294,7 +294,7 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 			return nil, "", fmt.Errorf("failed to commit table %s.%s: %w", database, tableName, err)
 		}
 	} else {
-		hiveTbl := constructHiveTable(database, tableName, staged.Table.Location(), staged.MetadataLocation(), staged.Metadata().CurrentSchema(), staged.Properties())
+		hiveTbl := constructHiveTable(database, tableName, staged.Location(), staged.MetadataLocation(), staged.Metadata().CurrentSchema(), staged.Properties())
 		if err := c.client.CreateTable(ctx, hiveTbl); err != nil {
 			return nil, "", fmt.Errorf("failed to create table %s.%s: %w", database, tableName, err)
 		}
