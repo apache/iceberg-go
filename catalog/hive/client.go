@@ -49,7 +49,7 @@ type HiveClient interface {
 }
 
 type thriftClient struct {
-	client *gohive.HiveMetastoreClient
+	*gohive.HiveMetastoreClient
 }
 
 func newHiveClient(uri string, opts *HiveOptions) (HiveClient, error) {
@@ -80,70 +80,70 @@ func newHiveClient(uri string, opts *HiveOptions) (HiveClient, error) {
 		return nil, fmt.Errorf("failed to connect to metastore: %w", err)
 	}
 
-	return &thriftClient{client: client}, nil
+	return &thriftClient{HiveMetastoreClient: client}, nil
 }
 
 func (c *thriftClient) Close() error {
-	if c.client != nil {
-		c.client.Close()
-		c.client = nil
+	if c.HiveMetastoreClient != nil {
+		c.HiveMetastoreClient.Close()
+		c.HiveMetastoreClient = nil
 	}
 
 	return nil
 }
 
 func (c *thriftClient) GetDatabase(ctx context.Context, name string) (*hive_metastore.Database, error) {
-	return c.client.Client.GetDatabase(ctx, name)
+	return c.Client.GetDatabase(ctx, name)
 }
 
 func (c *thriftClient) CreateDatabase(ctx context.Context, database *hive_metastore.Database) error {
-	return c.client.Client.CreateDatabase(ctx, database)
+	return c.Client.CreateDatabase(ctx, database)
 }
 
 func (c *thriftClient) AlterDatabase(ctx context.Context, dbname string, db *hive_metastore.Database) error {
-	return c.client.Client.AlterDatabase(ctx, dbname, db)
+	return c.Client.AlterDatabase(ctx, dbname, db)
 }
 
 func (c *thriftClient) DropDatabase(ctx context.Context, name string, deleteData, cascade bool) error {
-	return c.client.Client.DropDatabase(ctx, name, deleteData, cascade)
+	return c.Client.DropDatabase(ctx, name, deleteData, cascade)
 }
 
 func (c *thriftClient) GetAllDatabases(ctx context.Context) ([]string, error) {
-	return c.client.Client.GetAllDatabases(ctx)
+	return c.Client.GetAllDatabases(ctx)
 }
 
 func (c *thriftClient) GetTable(ctx context.Context, dbName, tableName string) (*hive_metastore.Table, error) {
-	return c.client.Client.GetTable(ctx, dbName, tableName)
+	return c.Client.GetTable(ctx, dbName, tableName)
 }
 
 func (c *thriftClient) CreateTable(ctx context.Context, tbl *hive_metastore.Table) error {
-	return c.client.Client.CreateTable(ctx, tbl)
+	return c.Client.CreateTable(ctx, tbl)
 }
 
 func (c *thriftClient) AlterTable(ctx context.Context, dbName, tableName string, newTbl *hive_metastore.Table) error {
-	return c.client.Client.AlterTable(ctx, dbName, tableName, newTbl)
+	return c.Client.AlterTable(ctx, dbName, tableName, newTbl)
 }
 
 func (c *thriftClient) DropTable(ctx context.Context, dbName, tableName string, deleteData bool) error {
-	return c.client.Client.DropTable(ctx, dbName, tableName, deleteData)
+	return c.Client.DropTable(ctx, dbName, tableName, deleteData)
 }
 
 func (c *thriftClient) GetTables(ctx context.Context, dbName, pattern string) ([]string, error) {
-	return c.client.Client.GetTables(ctx, dbName, pattern)
+	return c.Client.GetTables(ctx, dbName, pattern)
 }
 
 func (c *thriftClient) Lock(ctx context.Context, request *hive_metastore.LockRequest) (*hive_metastore.LockResponse, error) {
-	return c.client.Client.Lock(ctx, request)
+	return c.Client.Lock(ctx, request)
 }
 
 func (c *thriftClient) CheckLock(ctx context.Context, lockId int64) (*hive_metastore.LockResponse, error) {
-	return c.client.Client.CheckLock(ctx, &hive_metastore.CheckLockRequest{
+	return c.Client.CheckLock(ctx, &hive_metastore.CheckLockRequest{
 		Lockid: lockId,
 	})
 }
 
 func (c *thriftClient) Unlock(ctx context.Context, lockId int64) error {
-	return c.client.Client.Unlock(ctx, &hive_metastore.UnlockRequest{
+	return c.Client.Unlock(ctx, &hive_metastore.UnlockRequest{
 		Lockid: lockId,
 	})
 }
