@@ -418,6 +418,7 @@ func TestApplyChanges(t *testing.T) {
 			iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
 			iceberg.NestedField{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: false, Doc: ""},
 		)
+		assert.NoError(t, err)
 		deletes := map[int]struct{}{
 			2: {},
 		}
@@ -830,6 +831,7 @@ func TestSetIdentifierField(t *testing.T) {
 			iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
 			iceberg.NestedField{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: false, Doc: ""},
 		)
+		assert.NoError(t, err)
 		metadata, _ := NewMetadata(schemaWithIdentifiers, nil, UnsortedSortOrder, "", nil)
 		table := New([]string{"id"}, metadata, "", nil, nil)
 		txn := table.NewTransaction()

@@ -188,6 +188,7 @@ func TestReassignIds(t *testing.T) {
 			Type:     iceberg.PrimitiveTypes.Int64,
 			Required: true,
 		})
+	require.NoError(t, err)
 
 	spec, err := iceberg.NewPartitionSpecOpts(iceberg.WithSpecID(20),
 		iceberg.AddPartitionFieldByName("a", "a", iceberg.IdentityTransform{}, schema, nil),
@@ -247,6 +248,7 @@ func TestReassignIds(t *testing.T) {
 			Type:     iceberg.PrimitiveTypes.Int64,
 			Required: true,
 		})
+	require.NoError(t, err)
 	id := 1000
 	fieldID := 1001
 	expectedSpec, err := iceberg.NewPartitionSpecOpts(iceberg.WithSpecID(0),

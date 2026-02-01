@@ -1350,7 +1350,7 @@ func TestTableDataV2NoSnapshots(t *testing.T) {
 		Name:     "struct_name",
 		Required: true,
 	})
-
+	require.NoError(t, err)
 	partitionSpec := iceberg.NewPartitionSpecID(0)
 
 	i := 1000

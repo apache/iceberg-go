@@ -201,6 +201,7 @@ func TestManifestPartitionVals(t *testing.T) {
 				ID:   1,
 				Type: tt.input.Type(),
 			})
+			require.NoError(t, err)
 			partitionSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
 				Name:      "transformed_abc",
 				SourceID:  1,
