@@ -172,7 +172,7 @@ var testNonIcebergGlueTable = types.Table{
 	},
 }
 
-var testSchema = iceberg.NewSchemaWithIdentifiers(0, []int{},
+var testSchema = iceberg.MustNewSchemaWithIdentifiers(0, []int{},
 	iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String},
 	iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 	iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool})
@@ -1005,10 +1005,11 @@ func TestGlueCreateTableInvalidMetadataRollback(t *testing.T) {
 func TestGlueCreateTableRollbackOnInvalidMetadata(t *testing.T) {
 	assert := require.New(t)
 	mockGlueSvc := &mockGlueClient{}
-	schema := iceberg.NewSchemaWithIdentifiers(1, []int{1},
+	schema, err := iceberg.NewSchemaWithIdentifiers(1, []int{1},
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
 		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.StringType{}, Required: true},
 	)
+	assert.NoError(err)
 	mockGlueSvc.On("CreateTable", mock.Anything, mock.Anything, mock.Anything).Return(&glue.CreateTableOutput{}, nil)
 	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
 		DatabaseName: aws.String("test_database"),
@@ -1026,7 +1027,7 @@ func TestGlueCreateTableRollbackOnInvalidMetadata(t *testing.T) {
 		glueSvc: mockGlueSvc,
 		awsCfg:  &aws.Config{},
 	}
-	_, err := glueCatalog.CreateTable(context.TODO(),
+	_, err = glueCatalog.CreateTable(context.TODO(),
 		TableIdentifier("test_database", "test_rollback_table"),
 		schema,
 		catalog.WithLocation("s3://non-existent-test-bucket"))
@@ -1094,10 +1095,11 @@ func TestAlterTableIntegration(t *testing.T) {
 	metadataLocation := os.Getenv("TEST_TABLE_LOCATION")
 	tbName := fmt.Sprintf("table_%d", time.Now().UnixNano())
 	tbIdent := TableIdentifier(dbName, tbName)
-	schema := iceberg.NewSchemaWithIdentifiers(0, []int{},
+	schema, err := iceberg.NewSchemaWithIdentifiers(0, []int{},
 		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32},
 		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool})
+	assert.NoError(err)
 
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
@@ -1169,7 +1171,9 @@ func TestAlterTableIntegration(t *testing.T) {
 	}
 	newFields := append(currentSchema.Fields(), addField) // add column 'new_col'
 	newFields = append(newFields[:1], newFields[2:]...)   // drop column 'bar'
-	updateColumns := table.NewAddSchemaUpdate(iceberg.NewSchemaWithIdentifiers(newSchemaId, currentSchema.IdentifierFieldIDs, newFields...))
+	newSchema, err := iceberg.NewSchemaWithIdentifiers(newSchemaId, currentSchema.IdentifierFieldIDs, newFields...)
+	require.NoError(t, err)
+	updateColumns := table.NewAddSchemaUpdate(newSchema)
 	setSchema := table.NewSetCurrentSchemaUpdate(newSchemaId)
 
 	_, _, err = ctlg.CommitTable(
@@ -1342,9 +1346,10 @@ func TestCommitTableOptimisticLockingIntegration(t *testing.T) {
 	tbName := fmt.Sprintf("optimistic_lock_test_%d", time.Now().UnixNano())
 	tbIdent := TableIdentifier(dbName, tbName)
 
-	schema := iceberg.NewSchemaWithIdentifiers(0, []int{},
+	schema, err := iceberg.NewSchemaWithIdentifiers(0, []int{},
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
 		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String})
+	assert.NoError(err)
 
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)

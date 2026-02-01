@@ -138,7 +138,7 @@ func TestKeyDefaultMapRaceCondition(t *testing.T) {
 }
 
 func TestBuildPartitionProjectionWithInvalidSpecID(t *testing.T) {
-	schema := iceberg.NewSchema(
+	schema := iceberg.MustNewSchema(
 		1,
 		iceberg.NestedField{
 			ID: 1, Name: "id",
@@ -169,7 +169,7 @@ func TestBuildPartitionProjectionWithInvalidSpecID(t *testing.T) {
 }
 
 func TestBuildManifestEvaluatorWithInvalidSpecID(t *testing.T) {
-	schema := iceberg.NewSchema(
+	schema := iceberg.MustNewSchema(
 		1,
 		iceberg.NestedField{
 			ID: 1, Name: "id",
@@ -202,7 +202,7 @@ func TestBuildManifestEvaluatorWithInvalidSpecID(t *testing.T) {
 }
 
 func TestBuildPartitionEvaluatorWithInvalidSpecID(t *testing.T) {
-	schema := iceberg.NewSchema(
+	schema := iceberg.MustNewSchema(
 		1,
 		iceberg.NestedField{
 			ID: 1, Name: "id",

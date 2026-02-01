@@ -308,7 +308,7 @@ func (s *FanoutWriterTestSuite) TestVoidTransform() {
 }
 
 func (s *FanoutWriterTestSuite) TestPartitionedLogicalTypesRequireIntFieldIDCase() {
-	icebergSchema := iceberg.NewSchemaWithIdentifiers(1, []int{1},
+	icebergSchema, err := iceberg.NewSchemaWithIdentifiers(1, []int{1},
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "decimal_col", Type: iceberg.DecimalTypeOf(10, 6), Required: true},
 		iceberg.NestedField{ID: 3, Name: "time_col", Type: iceberg.PrimitiveTypes.Time, Required: true},
@@ -317,6 +317,7 @@ func (s *FanoutWriterTestSuite) TestPartitionedLogicalTypesRequireIntFieldIDCase
 		iceberg.NestedField{ID: 6, Name: "uuid_col", Type: iceberg.PrimitiveTypes.UUID, Required: true},
 		iceberg.NestedField{ID: 7, Name: "date_col", Type: iceberg.PrimitiveTypes.Date, Required: true},
 	)
+	s.Require().NoError(err)
 
 	spec := iceberg.NewPartitionSpec(
 		iceberg.PartitionField{SourceID: 2, FieldID: 4008, Transform: iceberg.IdentityTransform{}, Name: "decimal_col"},

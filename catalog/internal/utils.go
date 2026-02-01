@@ -201,7 +201,11 @@ func UpdateAndStageTable(ctx context.Context, current *table.Table, ident table.
 		metadataLoc = current.MetadataLocation()
 	} else {
 		var err error
-		baseMeta, err = table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, "", nil)
+		emptySchema, err := iceberg.NewSchema(0)
+		if err != nil {
+			return nil, err
+		}
+		baseMeta, err = table.NewMetadata(emptySchema, nil, table.UnsortedSortOrder, "", nil)
 		if err != nil {
 			return nil, err
 		}

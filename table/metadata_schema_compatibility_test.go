@@ -36,17 +36,8 @@ func TestNewMetadata_DuplicateValues(t *testing.T) {
 			Type: iceberg.PrimitiveTypes.String,
 		}
 	}
-	icebergSchema := iceberg.NewSchema(1, fields...)
-
-	_, err := NewMetadata(
-		icebergSchema,
-		&iceberg.PartitionSpec{},
-		UnsortedSortOrder,
-		"",
-		iceberg.Properties{},
-	)
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid schema: error encountered during schema visitor")
+	_, err := iceberg.NewSchema(1, fields...)
+	require.Error(t, err, "NewSchema should reject schemas with duplicate field names")
+	assert.Contains(t, err.Error(), "error encountered during schema visitor")
 	assert.Contains(t, err.Error(), "multiple fields for name foo")
 }

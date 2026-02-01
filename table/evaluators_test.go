@@ -18,6 +18,7 @@
 package table
 
 import (
+	"fmt"
 	"math"
 	"testing"
 
@@ -31,6 +32,69 @@ const (
 	IntMinValue, IntMaxValue int32 = 30, 79
 )
 
+var testSchema *iceberg.Schema
+
+func init() {
+	var err error
+	testSchema, err = iceberg.NewSchema(1,
+		iceberg.NestedField{
+			ID: 1, Name: "id",
+			Type: iceberg.PrimitiveTypes.Int32, Required: true,
+		},
+		iceberg.NestedField{
+			ID: 2, Name: "all_nulls_missing_nan",
+			Type: iceberg.PrimitiveTypes.String, Required: false,
+		},
+		iceberg.NestedField{
+			ID: 3, Name: "some_nulls",
+			Type: iceberg.PrimitiveTypes.String, Required: false,
+		},
+		iceberg.NestedField{
+			ID: 4, Name: "no_nulls",
+			Type: iceberg.PrimitiveTypes.String, Required: false,
+		},
+		iceberg.NestedField{
+			ID: 5, Name: "float",
+			Type: iceberg.PrimitiveTypes.Float32, Required: false,
+		},
+		iceberg.NestedField{
+			ID: 6, Name: "all_nulls_double",
+			Type: iceberg.PrimitiveTypes.Float64, Required: false,
+		},
+		iceberg.NestedField{
+			ID: 7, Name: "all_nulls_no_nans",
+			Type: iceberg.PrimitiveTypes.Float32, Required: false,
+		},
+		iceberg.NestedField{
+			ID: 8, Name: "all_nans",
+			Type: iceberg.PrimitiveTypes.Float64, Required: false,
+		},
+		iceberg.NestedField{
+			ID: 9, Name: "both_nan_and_null",
+			Type: iceberg.PrimitiveTypes.Float32, Required: false,
+		},
+		iceberg.NestedField{
+			ID: 10, Name: "no_nan_or_null",
+			Type: iceberg.PrimitiveTypes.Float64, Required: false,
+		},
+		iceberg.NestedField{
+			ID: 11, Name: "all_nulls_missing_nan_float",
+			Type: iceberg.PrimitiveTypes.Float32, Required: false,
+		},
+		iceberg.NestedField{
+			ID: 12, Name: "all_same_value_or_null",
+			Type: iceberg.PrimitiveTypes.String, Required: false,
+		},
+		iceberg.NestedField{
+			ID: 13, Name: "no_nulls_same_value_a",
+			Type: iceberg.PrimitiveTypes.Binary, Required: false,
+		},
+	)
+	if err != nil {
+		panic(fmt.Sprintf("failed to create testSchema: %v", err))
+	}
+}
+
 func TestManifestEvaluator(t *testing.T) {
 	var (
 		IntMin, IntMax       = []byte{byte(IntMinValue), 0x00, 0x00, 0x00}, []byte{byte(IntMaxValue), 0x00, 0x00, 0x00}
@@ -40,61 +104,6 @@ func TestManifestEvaluator(t *testing.T) {
 		DblMin, _            = iceberg.Float64Literal(0).MarshalBinary()
 		DblMax, _            = iceberg.Float64Literal(20).MarshalBinary()
 		NanTrue, NanFalse    = true, false
-
-		testSchema = iceberg.NewSchema(1,
-			iceberg.NestedField{
-				ID: 1, Name: "id",
-				Type: iceberg.PrimitiveTypes.Int32, Required: true,
-			},
-			iceberg.NestedField{
-				ID: 2, Name: "all_nulls_missing_nan",
-				Type: iceberg.PrimitiveTypes.String, Required: false,
-			},
-			iceberg.NestedField{
-				ID: 3, Name: "some_nulls",
-				Type: iceberg.PrimitiveTypes.String, Required: false,
-			},
-			iceberg.NestedField{
-				ID: 4, Name: "no_nulls",
-				Type: iceberg.PrimitiveTypes.String, Required: false,
-			},
-			iceberg.NestedField{
-				ID: 5, Name: "float",
-				Type: iceberg.PrimitiveTypes.Float32, Required: false,
-			},
-			iceberg.NestedField{
-				ID: 6, Name: "all_nulls_double",
-				Type: iceberg.PrimitiveTypes.Float64, Required: false,
-			},
-			iceberg.NestedField{
-				ID: 7, Name: "all_nulls_no_nans",
-				Type: iceberg.PrimitiveTypes.Float32, Required: false,
-			},
-			iceberg.NestedField{
-				ID: 8, Name: "all_nans",
-				Type: iceberg.PrimitiveTypes.Float64, Required: false,
-			},
-			iceberg.NestedField{
-				ID: 9, Name: "both_nan_and_null",
-				Type: iceberg.PrimitiveTypes.Float32, Required: false,
-			},
-			iceberg.NestedField{
-				ID: 10, Name: "no_nan_or_null",
-				Type: iceberg.PrimitiveTypes.Float64, Required: false,
-			},
-			iceberg.NestedField{
-				ID: 11, Name: "all_nulls_missing_nan_float",
-				Type: iceberg.PrimitiveTypes.Float32, Required: false,
-			},
-			iceberg.NestedField{
-				ID: 12, Name: "all_same_value_or_null",
-				Type: iceberg.PrimitiveTypes.String, Required: false,
-			},
-			iceberg.NestedField{
-				ID: 13, Name: "no_nulls_same_value_a",
-				Type: iceberg.PrimitiveTypes.Binary, Required: false,
-			},
-		)
 	)
 
 	partFields := make([]iceberg.PartitionField, 0, testSchema.NumFields())
@@ -720,12 +729,17 @@ type ProjectionTestSuite struct {
 }
 
 func (*ProjectionTestSuite) schema() *iceberg.Schema {
-	return iceberg.NewSchema(0,
+	sch, err := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
 		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 3, Name: "event_date", Type: iceberg.PrimitiveTypes.Date},
 		iceberg.NestedField{ID: 4, Name: "event_ts", Type: iceberg.PrimitiveTypes.Timestamp},
 	)
+	if err != nil {
+		panic(fmt.Sprintf("failed to create schema: %v", err))
+	}
+
+	return sch
 }
 
 func (*ProjectionTestSuite) emptySpec() iceberg.PartitionSpec {
@@ -1119,7 +1133,8 @@ type InclusiveMetricsTestSuite struct {
 }
 
 func (suite *InclusiveMetricsTestSuite) SetupSuite() {
-	suite.schemaDataFile = iceberg.NewSchema(0,
+	var err error
+	suite.schemaDataFile, err = iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		iceberg.NestedField{ID: 2, Name: "no_stats", Type: iceberg.PrimitiveTypes.Int32, Required: false},
 		iceberg.NestedField{ID: 3, Name: "required", Type: iceberg.PrimitiveTypes.String, Required: true},
@@ -1135,6 +1150,7 @@ func (suite *InclusiveMetricsTestSuite) SetupSuite() {
 		iceberg.NestedField{ID: 13, Name: "no_nan_stats", Type: iceberg.PrimitiveTypes.Float64},
 		iceberg.NestedField{ID: 14, Name: "some_empty", Type: iceberg.PrimitiveTypes.String},
 	)
+	suite.Require().NoError(err)
 
 	var (
 		IntMin, _   = iceberg.Int32Literal(IntMinValue).MarshalBinary()
@@ -1206,13 +1222,14 @@ func (suite *InclusiveMetricsTestSuite) SetupSuite() {
 		},
 	}
 
-	suite.schemaDataFileNan = iceberg.NewSchema(0,
+	suite.schemaDataFileNan, err = iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "all_nan", Type: iceberg.PrimitiveTypes.Float64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "max_nan", Type: iceberg.PrimitiveTypes.Float64, Required: true},
 		iceberg.NestedField{ID: 3, Name: "min_max_nan", Type: iceberg.PrimitiveTypes.Float32},
 		iceberg.NestedField{ID: 4, Name: "all_nan_null_bounds", Type: iceberg.PrimitiveTypes.Float64, Required: true},
 		iceberg.NestedField{ID: 5, Name: "some_nan_correct_bounds", Type: iceberg.PrimitiveTypes.Float32},
 	)
+	suite.Require().NoError(err)
 
 	suite.dataFileNan = &mockDataFile{
 		path:        "file.avro",
@@ -1380,8 +1397,9 @@ func (suite *InclusiveMetricsTestSuite) TestMissingColumn() {
 }
 
 func (suite *InclusiveMetricsTestSuite) TestMissingStats() {
-	noStatsSchema := iceberg.NewSchema(0,
+	noStatsSchema, err := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 2, Name: "no_stats", Type: iceberg.PrimitiveTypes.Float64})
+	suite.Require().NoError(err)
 
 	noStatsFile := &mockDataFile{
 		path:   "file_1.parquet",
@@ -2038,7 +2056,8 @@ type StrictMetricsTestSuite struct {
 }
 
 func (suite *StrictMetricsTestSuite) SetupSuite() {
-	suite.schemaDataFile = iceberg.NewSchema(0,
+	var err error
+	suite.schemaDataFile, err = iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		iceberg.NestedField{ID: 2, Name: "no_stats", Type: iceberg.PrimitiveTypes.Int32, Required: false},
 		iceberg.NestedField{ID: 3, Name: "required", Type: iceberg.PrimitiveTypes.String, Required: true},
@@ -2054,6 +2073,7 @@ func (suite *StrictMetricsTestSuite) SetupSuite() {
 		iceberg.NestedField{ID: 13, Name: "nan_and_null_only", Type: iceberg.PrimitiveTypes.Float64},
 		iceberg.NestedField{ID: 14, Name: "no_nan_stats", Type: iceberg.PrimitiveTypes.Float64},
 	)
+	suite.Require().NoError(err)
 
 	var (
 		IntMin, _   = iceberg.Int32Literal(IntMinValue).MarshalBinary()
@@ -2115,13 +2135,14 @@ func (suite *StrictMetricsTestSuite) SetupSuite() {
 		},
 	}
 
-	suite.schemaDataFileNan = iceberg.NewSchema(0,
+	suite.schemaDataFileNan, err = iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "all_nan", Type: iceberg.PrimitiveTypes.Float64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "max_nan", Type: iceberg.PrimitiveTypes.Float64, Required: true},
 		iceberg.NestedField{ID: 3, Name: "min_max_nan", Type: iceberg.PrimitiveTypes.Float32},
 		iceberg.NestedField{ID: 4, Name: "all_nan_null_bounds", Type: iceberg.PrimitiveTypes.Float64, Required: true},
 		iceberg.NestedField{ID: 5, Name: "some_nan_correct_bounds", Type: iceberg.PrimitiveTypes.Float32},
 	)
+	suite.Require().NoError(err)
 
 	suite.dataFileNan = &mockDataFile{
 		path:        "file.avro",
@@ -2310,8 +2331,9 @@ func (suite *StrictMetricsTestSuite) TestMissingColumn() {
 }
 
 func (suite *StrictMetricsTestSuite) TestMissingStats() {
-	noStatsSchema := iceberg.NewSchema(0,
+	noStatsSchema, err := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 2, Name: "no_stats", Type: iceberg.PrimitiveTypes.Float64})
+	suite.Require().NoError(err)
 
 	noStatsFile := &mockDataFile{
 		path:   "file_1.parquet",
