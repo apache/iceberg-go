@@ -202,6 +202,8 @@ func (f ioFS) Remove(name string) error {
 }
 
 var (
+	ErrIONotFound = errors.New("io scheme not registered")
+
 	errMissingReadDir  = errors.New("fs.File directory missing ReadDir method")
 	errMissingSeek     = errors.New("fs.File missing Seek method")
 	errMissingReadAt   = errors.New("fs.File missing ReadAt")
@@ -260,7 +262,7 @@ func LoadFS(ctx context.Context, props map[string]string, location string) (IO, 
 		location = props["warehouse"]
 	}
 
-	iofs, err := inferFileIOFromSchema(ctx, location, props)
+	iofs, err := inferFileIOFromScheme(ctx, location, props)
 	if err != nil {
 		return nil, err
 	}
