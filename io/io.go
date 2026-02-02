@@ -244,13 +244,17 @@ func (f ioFile) ReadDir(count int) ([]fs.DirEntry, error) {
 }
 
 // LoadFS takes a map of properties and an optional URI location
-// and attempts to infer an IO object from it.
+// and attempts to infer an IO object from it using the registered
+// scheme factories.
 //
-// A schema of "file://" or an empty string will result in a LocalFS
-// implementation. Otherwise this will return an error if the schema
-// does not yet have an implementation here.
+// The scheme is extracted from the location URI and used to look up
+// the appropriate factory from the registry. The local filesystem
+// (file:// or empty scheme) is registered by default.
 //
-// Currently local, S3, GCS, and In-Memory FSs are implemented.
+// Additional schemes can be registered by importing subpackages.
+// For S3, GCS, Azure and in-memory support, import:
+//
+//	import _ "github.com/apache/iceberg-go/io/gocloud"
 func LoadFS(ctx context.Context, props map[string]string, location string) (IO, error) {
 	if location == "" {
 		location = props["warehouse"]
