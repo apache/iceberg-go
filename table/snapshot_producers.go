@@ -424,6 +424,36 @@ func (m *mergeAppendFiles) processManifests(manifests []iceberg.ManifestFile) ([
 	return append(result, unmergedDeleteManifests...), nil
 }
 
+type deleteSnapshotProducer struct {
+	*snapshotProducer
+	existingManifestFiles  []iceberg.ManifestFile
+	deletedManifestEntries []iceberg.ManifestEntry
+}
+
+func (d *deleteSnapshotProducer) processManifests(manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
+	return manifests, nil
+}
+
+func (d *deleteSnapshotProducer) existingManifests() ([]iceberg.ManifestFile, error) {
+	return d.existingManifestFiles, nil
+}
+
+func (d *deleteSnapshotProducer) deletedEntries() ([]iceberg.ManifestEntry, error) {
+	return d.deletedManifestEntries, nil
+}
+
+func newDeleteFilesSnapshotProducer(fs iceio.WriteFileIO, txn *Transaction, props iceberg.Properties) *deleteSnapshotProducer {
+	prod := createSnapshotProducer(OpDelete, txn, fs, nil, props)
+	deleteProducer := deleteSnapshotProducer{
+		snapshotProducer:       prod,
+		deletedManifestEntries: make([]iceberg.ManifestEntry, 0),
+		existingManifestFiles:  make([]iceberg.ManifestFile, 0),
+	}
+	prod.producerImpl = &deleteProducer
+
+	return &deleteProducer
+}
+
 type snapshotProducer struct {
 	producerImpl
 

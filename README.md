@@ -93,16 +93,17 @@ $ cd iceberg-go/cmd/iceberg && go build .
 As long as the FileSystem is supported and the Catalog supports altering
 the table, the following tracks the current write support:
 
-| Operation         |Supported|
-|:-----------------:|:-------:|
-| Append Stream     |   X     |
-| Append Data Files |   X     |
-| Rewrite Files     |         |
-| Rewrite manifests |         |
-| Overwrite Files   |         |
-| Write Pos Delete  |         |
-| Write Eq Delete   |         |
-| Row Delta         |         |
+|      Operation       | Supported |
+|:--------------------:|:---------:|
+|    Append Stream     |     X     |
+|  Append Data Files   |     X     |
+|    Rewrite Files     |           |
+|  Rewrite manifests   |           |
+|   Overwrite Files    |           |
+|   Write Pos Delete   |           |
+| Copy-On-Write Delete |     X     |
+|   Write Eq Delete    |           |
+|      Row Delta       |           |
 
 
 ### CLI Usage

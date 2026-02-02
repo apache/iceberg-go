@@ -87,6 +87,9 @@ const (
 
 	MaxRefAgeMsKey     = "max-ref-age-ms"
 	MaxRefAgeMsDefault = math.MaxInt
+
+	WriteDeleteModeKey     = "write.delete.mode"
+	WriteDeleteModeDefault = WriteModeCopyOnWrite
 )
 
 // Reserved properties
@@ -118,4 +121,10 @@ var ReservedProperties = [9]string{
 const (
 	MetadataCompressionCodecNone = "none"
 	MetadataCompressionCodecGzip = "gzip"
+)
+
+// Write modes
+const (
+	WriteModeCopyOnWrite = "copy-on-write"
+	WriteModeMergeOnRead = "merge-on-read"
 )

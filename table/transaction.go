@@ -23,6 +23,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"iter"
+	"log"
 	"runtime"
 	"slices"
 	"sync"
@@ -56,6 +58,10 @@ func (s snapshotUpdate) mergeOverwrite(commitUUID *uuid.UUID) *snapshotProducer 
 
 func (s snapshotUpdate) mergeAppend() *snapshotProducer {
 	return newMergeAppendFilesProducer(OpAppend, s.txn, s.io, nil, s.snapshotProps)
+}
+
+func (t *Transaction) deleteSnapshotProducer(fs io.WriteFileIO, props iceberg.Properties) *deleteSnapshotProducer {
+	return newDeleteFilesSnapshotProducer(fs, t, props)
 }
 
 type Transaction struct {
@@ -497,6 +503,230 @@ func (t *Transaction) AddFiles(ctx context.Context, files []string, snapshotProp
 	}
 
 	return t.apply(updates, reqs)
+}
+
+type DeleteOption func(deleteOp *deleteOperation)
+
+type deleteOperation struct {
+	caseInsensitive bool
+}
+
+func WithDeleteInsensitive() DeleteOption {
+	return func(deleteOp *deleteOperation) {
+		deleteOp.caseInsensitive = true
+	}
+}
+
+func (t *Transaction) Delete(ctx context.Context, predicate iceberg.BooleanExpression, snapshotProps iceberg.Properties, opts ...DeleteOption) error {
+	deleteOp := deleteOperation{}
+	for _, apply := range opts {
+		apply(&deleteOp)
+	}
+
+	if t.meta.formatVersion > 2 {
+		return fmt.Errorf("cannot perform delete on table with version %d: deletion vectors are unsupported", t.meta.formatVersion)
+	}
+	if t.tbl.Properties().Get(WriteDeleteModeKey, WriteDeleteModeDefault) != WriteModeCopyOnWrite {
+		log.Printf("Warning: %s is not yet supported, falling back to %s", WriteModeMergeOnRead, WriteModeCopyOnWrite)
+	}
+
+	fs, err := t.tbl.fsF(ctx)
+	if err != nil {
+		return err
+	}
+	manifestEvaluator, err := newManifestEvaluator(t.tbl.Spec(), t.meta.CurrentSchema(), predicate, deleteOp.caseInsensitive)
+	if err != nil {
+		return fmt.Errorf("failed to manifest evaluator from predicate '%s': %w", predicate.String(), err)
+	}
+	strictMetricsEval, err := newStrictMetricsEvaluator(t.meta.CurrentSchema(), predicate, deleteOp.caseInsensitive, false)
+	if err != nil {
+		return fmt.Errorf("failed to create strict metrics evaluator from predicate '%s': %w", predicate.String(), err)
+	}
+	inclusiveMetricsEval, err := newInclusiveMetricsEvaluator(t.meta.CurrentSchema(), predicate, deleteOp.caseInsensitive, false)
+	if err != nil {
+		return fmt.Errorf("failed to create inclusive metrics evaluator from predicate '%s': %w", predicate.String(), err)
+	}
+	// TODO: review pyiceberg to see if we need to handle branch/parent snapshot id
+	snapshot := t.meta.currentSnapshot()
+	if snapshot == nil {
+		// TODO: ignore no snapshot or return an error?
+		return nil
+	}
+
+	manifests, err := snapshot.Manifests(fs)
+	if err != nil {
+		return fmt.Errorf("failed to read manifest from snapshot '%d': %w", snapshot.SnapshotID, err)
+	}
+
+	partialRewritesNeeded := false
+	snapshotProducer := t.deleteSnapshotProducer(fs.(io.WriteFileIO), snapshotProps)
+
+	for _, m := range manifests {
+		deletedEntries := make([]iceberg.ManifestEntry, 0)
+		existingEntries := make([]iceberg.ManifestEntry, 0)
+
+		if m.ManifestContent() != iceberg.ManifestContentData {
+			eval, err := manifestEvaluator(m)
+			if err != nil {
+				return fmt.Errorf("failed to run manifest evaluator on manifest file '%s': %w", m.FilePath(), err)
+			}
+			// Preserve manifests that aren't relevant in the list
+			if !eval {
+				snapshotProducer.existingManifestFiles = append(snapshotProducer.existingManifestFiles, m)
+				continue
+			}
+		}
+
+		entries, err := m.FetchEntries(fs, true)
+		if err != nil {
+			return fmt.Errorf("failed to fetch entries from manifest file '%s': %w", m.FilePath(), err)
+		}
+		for _, e := range entries {
+			eval, err := strictMetricsEval(e.DataFile())
+			if err != nil {
+				return fmt.Errorf("failed to run strict evaluate on data file '%s': %w", e.DataFile(), err)
+			}
+			if eval == rowsMustMatch {
+				snapshotProducer.deletedManifestEntries = append(snapshotProducer.deletedManifestEntries,
+					iceberg.NewManifestEntryBuilder(
+						iceberg.EntryStatusDELETED,
+						&snapshot.SnapshotID,
+						e.DataFile(),
+					).Build(),
+				)
+				snapshotProducer.deleteDataFile(e.DataFile())
+			} else {
+				existingEntries = append(existingEntries,
+					iceberg.NewManifestEntryBuilder(
+						iceberg.EntryStatusEXISTING,
+						&snapshot.SnapshotID,
+						e.DataFile(),
+					).Build(),
+				)
+				eval, err := inclusiveMetricsEval(e.DataFile())
+				if err != nil {
+					return fmt.Errorf("failed to run inclusive evaluate on data file '%s': %w", e.DataFile(), err)
+				}
+				if eval == rowsMightNotMatch {
+					partialRewritesNeeded = true
+				}
+			}
+		}
+
+		if len(deletedEntries) > 0 {
+			snapshotProducer.deletedManifestEntries = append(snapshotProducer.deletedManifestEntries, deletedEntries...)
+
+			// Rewrite the manifest
+			if len(existingEntries) > 0 {
+				w, path, counter, closer, err := snapshotProducer.newManifestWriter(t.tbl.Spec())
+				if err != nil {
+					return fmt.Errorf("failed to create manifest writer: %w", err)
+				}
+				for _, e := range existingEntries {
+					err = w.Existing(e)
+					if err != nil {
+						return err
+					}
+				}
+				err = closer.Close()
+				if err != nil {
+					return fmt.Errorf("failed to close manifest writer: %w", err)
+				}
+				manifestFile, err := w.ToManifestFile(path, counter.Count)
+				snapshotProducer.existingManifestFiles = append(snapshotProducer.existingManifestFiles, manifestFile)
+			}
+			continue
+		}
+
+		snapshotProducer.existingManifestFiles = append(snapshotProducer.existingManifestFiles, m)
+	}
+
+	// Implement data file rewrite
+	if partialRewritesNeeded {
+		preserveFilter, err := iceberg.BindExpr(t.meta.CurrentSchema(), predicate.Negate(), deleteOp.caseInsensitive)
+		if err != nil {
+			return err
+		}
+		scan, err := t.Scan(WithRowFilter(preserveFilter), WithCaseSensitive(deleteOp.caseInsensitive))
+		if err != nil {
+			return fmt.Errorf("failed to scan to perform data rewrite: %w", err)
+		}
+		fileTasks, err := scan.PlanFiles(ctx)
+		if err != nil {
+			return err
+		}
+		replacedFiles := make([]iceberg.DataFile, 0, len(fileTasks))
+		for _, ft := range fileTasks {
+			arrowScan := &arrowScan{
+				metadata:        scan.metadata,
+				fs:              fs,
+				projectedSchema: t.meta.CurrentSchema(),
+				boundRowFilter:  scan.rowFilter,
+				caseSensitive:   scan.caseSensitive,
+				rowLimit:        scan.limit,
+				options:         scan.options,
+				concurrency:     scan.concurrency,
+			}
+			_, filteredIt, err := arrowScan.GetRecords(ctx, []FileScanTask{ft})
+			if err != nil {
+				return fmt.Errorf("failed to read records from file '%s': %w", ft.File, err)
+			}
+
+			includesRowsToKeep := false
+			toKeepBatches := make([]arrow.RecordBatch, 0)
+			for toKeep, err := range filteredIt {
+				if err != nil {
+					return fmt.Errorf("failed iterating over records from file '%s': %w", ft.File, err)
+				}
+				if toKeep.NumRows() > 0 {
+					includesRowsToKeep = true
+					toKeepBatches = append(toKeepBatches, toKeep)
+					toKeep.Retain()
+					continue
+				}
+			}
+			if !includesRowsToKeep {
+				replacedFiles = append(replacedFiles, ft.File)
+				continue
+			}
+
+			schema, err := SchemaToArrowSchema(t.meta.CurrentSchema(), nil, false, arrowScan.useLargeTypes)
+			if err != nil {
+				return err
+			}
+			itr := recordsToDataFiles(ctx, t.tbl.Location(), t.meta, recordWritingArgs{
+				sc:        schema,
+				itr:       recordBatchIterator(toKeepBatches),
+				fs:        fs.(io.WriteFileIO),
+				writeUUID: &t.meta.uuid,
+			})
+			for _, b := range toKeepBatches {
+				b.Release()
+			}
+			for df, err := range itr {
+				if err != nil {
+					return fmt.Errorf("failed to rewrite data file from original file '%s': %w", ft.File, err)
+				}
+				snapshotProducer.appendDataFile(df)
+			}
+		}
+	}
+
+	updates, reqs, err := snapshotProducer.commit()
+	if err != nil {
+		return err
+	}
+	return t.apply(updates, reqs)
+}
+
+func recordBatchIterator(batches []arrow.RecordBatch) iter.Seq2[arrow.RecordBatch, error] {
+	return func(yield func(batch arrow.RecordBatch, err error) bool) {
+		for _, b := range batches {
+			if !yield(b, nil) {
+				return
+			}
+		}
+	}
 }
 
 func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {

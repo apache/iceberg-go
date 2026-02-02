@@ -541,6 +541,8 @@ func (scan *Scan) ToArrowTable(ctx context.Context) (arrow.Table, error) {
 			return nil, err
 		}
 
+		// TODO: This seems suspicious. Shouldn't the release of the record batches be
+		// deferred when the arrow table has finished reading from those?
 		defer rec.Release()
 		records = append(records, rec)
 	}
