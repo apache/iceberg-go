@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package io
+package gocloud
 
 import (
 	"context"
@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	icebergio "github.com/apache/iceberg-go/io"
 	"gocloud.dev/blob"
 )
 
@@ -103,7 +104,7 @@ func (bfs *blobFileIO) preprocess(path string) (string, error) {
 	return bfs.keyExtractor(path)
 }
 
-func (bfs *blobFileIO) Open(path string) (File, error) {
+func (bfs *blobFileIO) Open(path string) (icebergio.File, error) {
 	var err error
 	path, err = bfs.preprocess(path)
 	if err != nil {
@@ -133,7 +134,7 @@ func (bfs *blobFileIO) Remove(name string) error {
 	return bfs.Delete(bfs.ctx, name)
 }
 
-func (bfs *blobFileIO) Create(name string) (FileWriter, error) {
+func (bfs *blobFileIO) Create(name string) (icebergio.FileWriter, error) {
 	return bfs.NewWriter(bfs.ctx, name, true, nil)
 }
 
@@ -185,7 +186,7 @@ func (bfs *blobFileIO) NewWriter(ctx context.Context, path string, overwrite boo
 		nil
 }
 
-func createBlobFS(ctx context.Context, bucket *blob.Bucket, keyExtractor KeyExtractor) IO {
+func createBlobFS(ctx context.Context, bucket *blob.Bucket, keyExtractor KeyExtractor) icebergio.IO {
 	return &blobFileIO{Bucket: bucket, keyExtractor: keyExtractor, ctx: ctx}
 }
 
