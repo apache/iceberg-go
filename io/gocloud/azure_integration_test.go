@@ -17,7 +17,7 @@
 
 //go:build integration
 
-package io_test
+package gocloud_test
 
 import (
 	"context"
@@ -29,7 +29,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	sqlcat "github.com/apache/iceberg-go/catalog/sql"
-	"github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/io/gocloud"
 	"github.com/stretchr/testify/suite"
 	"github.com/uptrace/bun/driver/sqliteshim"
 	"gocloud.dev/blob/azureblob"
@@ -64,10 +64,10 @@ func (s *AzureBlobIOTestSuite) TestAzureBlobWarehouseKey() {
 		sqlcat.DriverKey:            sqliteshim.ShimName,
 		sqlcat.DialectKey:           string(sqlcat.SQLite),
 		"type":                      "sql",
-		io.AdlsSharedKeyAccountName: accountName,
-		io.AdlsSharedKeyAccountKey:  accountKey,
-		io.AdlsEndpoint:             endpoint,
-		io.AdlsProtocol:             protocol,
+		gocloud.AdlsSharedKeyAccountName: accountName,
+		gocloud.AdlsSharedKeyAccountKey:  accountKey,
+		gocloud.AdlsEndpoint:             endpoint,
+		gocloud.AdlsProtocol:             protocol,
 	}
 
 	cat, err := catalog.Load(context.Background(), "default", properties)
@@ -99,7 +99,7 @@ func (s *AzureBlobIOTestSuite) TestAzuriteWarehouseConnectionString() {
 		sqlcat.DriverKey:  sqliteshim.ShimName,
 		sqlcat.DialectKey: string(sqlcat.SQLite),
 		"type":            "sql",
-		io.AdlsConnectionStringPrefix + accountName: connectionString,
+		gocloud.AdlsConnectionStringPrefix + accountName: connectionString,
 	}
 
 	cat, err := catalog.Load(context.Background(), "default", properties)

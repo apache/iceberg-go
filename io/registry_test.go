@@ -31,42 +31,67 @@ import (
 func TestIORegistry(t *testing.T) {
 	ctx := context.Background()
 
-	// Check that default schemes are registered
-	schemes := io.GetRegisteredSchemes()
-	assert.Contains(t, schemes, "file")
-	assert.Contains(t, schemes, "")
-	assert.Contains(t, schemes, "s3")
-	assert.Contains(t, schemes, "gs")
-	assert.Contains(t, schemes, "mem")
-	assert.Contains(t, schemes, "abfs")
+	assert.ElementsMatch(t, []string{
+		"file",
+		"",
+		"s3",
+		"s3a",
+		"s3n",
+		"gs",
+		"mem",
+		"abfs",
+		"abfss",
+		"wasb",
+		"wasbs",
+	}, io.GetRegisteredSchemes())
 
-	// Register a custom scheme
 	customFactoryCalled := false
 	io.Register("custom", func(ctx context.Context, parsed *url.URL, props map[string]string) (io.IO, error) {
 		customFactoryCalled = true
 		assert.Equal(t, "custom", parsed.Scheme)
 		assert.Equal(t, "bucket", parsed.Host)
+
 		return io.LocalFS{}, nil
 	})
 
-	schemes = io.GetRegisteredSchemes()
-	assert.Contains(t, schemes, "custom")
+	assert.ElementsMatch(t, []string{
+		"file",
+		"",
+		"s3",
+		"s3a",
+		"s3n",
+		"gs",
+		"mem",
+		"abfs",
+		"abfss",
+		"wasb",
+		"wasbs",
+		"custom",
+	}, io.GetRegisteredSchemes())
 
-	// Test loading with custom scheme
 	customIO, err := io.LoadFS(ctx, map[string]string{}, "custom://bucket/path")
 	assert.NoError(t, err)
 	assert.NotNil(t, customIO)
 	assert.True(t, customFactoryCalled)
 
-	// Unregister custom scheme
 	io.Unregister("custom")
-	schemes = io.GetRegisteredSchemes()
-	assert.NotContains(t, schemes, "custom")
+	assert.ElementsMatch(t, []string{
+		"file",
+		"",
+		"s3",
+		"s3a",
+		"s3n",
+		"gs",
+		"mem",
+		"abfs",
+		"abfss",
+		"wasb",
+		"wasbs",
+	}, io.GetRegisteredSchemes())
 
-	// Verify custom scheme no longer works
 	_, err = io.LoadFS(ctx, map[string]string{}, "custom://bucket/path")
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "IO for scheme 'custom' not implemented")
+	assert.ErrorIs(t, err, io.ErrIONotFound)
 }
 
 func TestRegistryPanic(t *testing.T) {
@@ -82,31 +107,26 @@ func TestLoadFS(t *testing.T) {
 		name        string
 		location    string
 		expectError bool
-		ioType      string
 	}{
 		{
 			name:        "file scheme",
 			location:    "file:///tmp/test",
 			expectError: false,
-			ioType:      "io.LocalFS",
 		},
 		{
 			name:        "empty scheme",
 			location:    "/tmp/test",
 			expectError: false,
-			ioType:      "io.LocalFS",
 		},
 		{
 			name:        "mem scheme",
 			location:    "mem://bucket/path",
 			expectError: false,
-			ioType:      "*gocloud.blobFileIO",
 		},
 		{
 			name:        "s3 scheme",
 			location:    "s3://bucket/path",
 			expectError: false,
-			ioType:      "*gocloud.blobFileIO",
 		},
 		{
 			name:        "unsupported scheme",
@@ -120,6 +140,7 @@ func TestLoadFS(t *testing.T) {
 			iofs, err := io.LoadFS(ctx, map[string]string{}, tt.location)
 			if tt.expectError {
 				assert.Error(t, err)
+				assert.ErrorIs(t, err, io.ErrIONotFound)
 			} else {
 				require.NoError(t, err)
 				assert.NotNil(t, iofs)

@@ -17,7 +17,7 @@
 
 //go:build integration
 
-package io_test
+package gocloud_test
 
 import (
 	"context"
@@ -28,7 +28,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	sqlcat "github.com/apache/iceberg-go/catalog/sql"
-	"github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/io/gocloud"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/driver/sqliteshim"
 )
@@ -43,9 +43,9 @@ func TestMinioWarehouse(t *testing.T) {
 		sqlcat.DialectKey:    string(sqlcat.SQLite),
 		"type":               "sql",
 		"warehouse":          "s3a://warehouse/iceberg/",
-		io.S3Region:          "local",
-		io.S3AccessKeyID:     "admin",
-		io.S3SecretAccessKey: "password",
+		gocloud.S3Region:          "local",
+		gocloud.S3AccessKeyID:     "admin",
+		gocloud.S3SecretAccessKey: "password",
 		// endpoint is passed via AWS_S3_ENDPOINT env var
 	})
 	require.NoError(t, err)
@@ -75,9 +75,9 @@ func TestMinioWarehouseNoLocation(t *testing.T) {
 		sqlcat.DialectKey:    string(sqlcat.SQLite),
 		"type":               "sql",
 		"warehouse":          "s3a://warehouse/iceberg/",
-		io.S3Region:          "local",
-		io.S3AccessKeyID:     "admin",
-		io.S3SecretAccessKey: "password",
+		gocloud.S3Region:          "local",
+		gocloud.S3AccessKeyID:     "admin",
+		gocloud.S3SecretAccessKey: "password",
 		// endpoint is passed via AWS_S3_ENDPOINT env var
 	})
 	require.NoError(t, err)

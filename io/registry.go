@@ -90,7 +90,7 @@ func init() {
 	Register("", localFSFactory)
 }
 
-func inferFileIOFromSchema(ctx context.Context, path string, props map[string]string) (IO, error) {
+func inferFileIOFromScheme(ctx context.Context, path string, props map[string]string) (IO, error) {
 	parsed, err := url.Parse(path)
 	if err != nil {
 		return nil, err
@@ -99,7 +99,7 @@ func inferFileIOFromSchema(ctx context.Context, path string, props map[string]st
 	// Look up the scheme in the registry
 	factory, ok := defaultRegistry.get(parsed.Scheme)
 	if !ok {
-		return nil, fmt.Errorf("IO for scheme '%s' not implemented", parsed.Scheme)
+		return nil, fmt.Errorf("%w: %s", ErrIONotFound, parsed.Scheme)
 	}
 
 	return factory(ctx, parsed, props)
