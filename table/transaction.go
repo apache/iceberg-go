@@ -649,7 +649,7 @@ func (t *Transaction) classifyFilesForFilteredOverwrite(ctx context.Context, fs 
 		allFilesToRewr []iceberg.DataFile
 	)
 
-	g, ctx := errgroup.WithContext(ctx)
+	g, _ := errgroup.WithContext(ctx)
 	g.SetLimit(min(concurrency, len(manifests)))
 
 	for _, manifest := range manifests {

@@ -402,7 +402,7 @@ func (s *SparkIntegrationTestSuite) TestOverwriteBasic() {
 	defer overwriteTable.Release()
 
 	tx = tbl.NewTransaction()
-	err = tx.OverwriteTable(s.ctx, overwriteTable, 2, nil, true, nil)
+	err = tx.OverwriteTable(s.ctx, overwriteTable, 2, nil, true, 0, nil)
 	s.Require().NoError(err)
 	_, err = tx.Commit(s.ctx)
 	s.Require().NoError(err)
@@ -469,7 +469,7 @@ func (s *SparkIntegrationTestSuite) TestOverwriteWithFilter() {
 
 	filter := iceberg.EqualTo(iceberg.Reference("foo"), true)
 	tx = tbl.NewTransaction()
-	err = tx.OverwriteTable(s.ctx, overwriteTable, 1, filter, true, nil)
+	err = tx.OverwriteTable(s.ctx, overwriteTable, 1, filter, true, 0, nil)
 	s.Require().NoError(err)
 	_, err = tx.Commit(s.ctx)
 	s.Require().NoError(err)
