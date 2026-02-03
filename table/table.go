@@ -129,20 +129,23 @@ func (t Table) Append(ctx context.Context, rdr array.RecordReader, snapshotProps
 	return txn.Commit(ctx)
 }
 
-// OverwriteTable is a shortcut for NewTransaction().OverwriteTable() and then committing the transaction
-func (t Table) OverwriteTable(ctx context.Context, tbl arrow.Table, batchSize int64, filter iceberg.BooleanExpression, caseSensitive bool, snapshotProps iceberg.Properties) (*Table, error) {
+// OverwriteTable is a shortcut for NewTransaction().OverwriteTable() and then committing the transaction.
+// The batchSize parameter refers to the batch size for reading the input data, not the batch size for writes.
+// The concurrency parameter controls the level of parallelism. If concurrency <= 0, defaults to runtime.GOMAXPROCS(0).
+func (t Table) OverwriteTable(ctx context.Context, tbl arrow.Table, batchSize int64, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, snapshotProps iceberg.Properties) (*Table, error) {
 	txn := t.NewTransaction()
-	if err := txn.OverwriteTable(ctx, tbl, batchSize, filter, caseSensitive, snapshotProps); err != nil {
+	if err := txn.OverwriteTable(ctx, tbl, batchSize, filter, caseSensitive, concurrency, snapshotProps); err != nil {
 		return nil, err
 	}
 
 	return txn.Commit(ctx)
 }
 
-// Overwrite is a shortcut for NewTransaction().Overwrite() and then committing the transaction
-func (t Table) Overwrite(ctx context.Context, rdr array.RecordReader, filter iceberg.BooleanExpression, caseSensitive bool, snapshotProps iceberg.Properties) (*Table, error) {
+// Overwrite is a shortcut for NewTransaction().Overwrite() and then committing the transaction.
+// The concurrency parameter controls the level of parallelism. If concurrency <= 0, defaults to runtime.GOMAXPROCS(0).
+func (t Table) Overwrite(ctx context.Context, rdr array.RecordReader, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, snapshotProps iceberg.Properties) (*Table, error) {
 	txn := t.NewTransaction()
-	if err := txn.Overwrite(ctx, rdr, filter, caseSensitive, snapshotProps); err != nil {
+	if err := txn.Overwrite(ctx, rdr, filter, caseSensitive, concurrency, snapshotProps); err != nil {
 		return nil, err
 	}
 

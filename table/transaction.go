@@ -33,6 +33,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
 )
 
 type snapshotUpdate struct {
@@ -502,20 +503,29 @@ func (t *Transaction) AddFiles(ctx context.Context, files []string, snapshotProp
 // OverwriteTable overwrites the table data using an Arrow Table, optionally with a filter.
 // If filter is nil or AlwaysTrue, all existing data will be replaced.
 // If filter is provided, only data matching the filter will be replaced.
-func (t *Transaction) OverwriteTable(ctx context.Context, tbl arrow.Table, batchSize int64, filter iceberg.BooleanExpression, caseSensitive bool, snapshotProps iceberg.Properties) error {
+// The concurrency parameter controls the level of parallelism for manifest processing and file rewriting.
+// If concurrency <= 0, defaults to runtime.GOMAXPROCS(0).
+func (t *Transaction) OverwriteTable(ctx context.Context, tbl arrow.Table, batchSize int64, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, snapshotProps iceberg.Properties) error {
 	rdr := array.NewTableReader(tbl, batchSize)
 	defer rdr.Release()
 
-	return t.Overwrite(ctx, rdr, filter, caseSensitive, snapshotProps)
+	return t.Overwrite(ctx, rdr, filter, caseSensitive, concurrency, snapshotProps)
 }
 
 // Overwrite overwrites the table data using a RecordReader, optionally with a filter.
 // If filter is nil or AlwaysTrue, all existing data will be replaced.
 // If filter is provided, only data matching the filter will be replaced.
-func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, filter iceberg.BooleanExpression, caseSensitive bool, snapshotProps iceberg.Properties) error {
+// The concurrency parameter controls the level of parallelism for manifest processing and file rewriting.
+// If concurrency <= 0, defaults to runtime.GOMAXPROCS(0).
+func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, snapshotProps iceberg.Properties) error {
 	fs, err := t.tbl.fsF(ctx)
 	if err != nil {
 		return err
+	}
+
+	// Default concurrency if not specified
+	if concurrency <= 0 {
+		concurrency = runtime.GOMAXPROCS(0)
 	}
 
 	if t.meta.NameMapping() == nil {
@@ -533,7 +543,7 @@ func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, fil
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(fs, snapshotProps).mergeOverwrite(&commitUUID)
 
-	filesToDelete, filesToRewrite, err := t.classifyFilesForOverwrite(ctx, fs, filter)
+	filesToDelete, filesToRewrite, err := t.classifyFilesForOverwrite(ctx, fs, filter, concurrency)
 	if err != nil {
 		return err
 	}
@@ -543,7 +553,7 @@ func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, fil
 	}
 
 	if len(filesToRewrite) > 0 {
-		if err := t.rewriteFilesWithFilter(ctx, fs, updater, filesToRewrite, filter); err != nil {
+		if err := t.rewriteFilesWithFilter(ctx, fs, updater, filesToRewrite, filter, concurrency); err != nil {
 			return err
 		}
 	}
@@ -572,7 +582,7 @@ func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, fil
 
 // classifyFilesForOverwrite classifies existing data files based on the provided filter.
 // Returns files to delete completely, files to rewrite partially, and any error.
-func (t *Transaction) classifyFilesForOverwrite(ctx context.Context, fs io.IO, filter iceberg.BooleanExpression) (filesToDelete, filesToRewrite []iceberg.DataFile, err error) {
+func (t *Transaction) classifyFilesForOverwrite(ctx context.Context, fs io.IO, filter iceberg.BooleanExpression, concurrency int) (filesToDelete, filesToRewrite []iceberg.DataFile, err error) {
 	s := t.meta.currentSnapshot()
 	if s == nil {
 		return nil, nil, nil
@@ -591,12 +601,12 @@ func (t *Transaction) classifyFilesForOverwrite(ctx context.Context, fs io.IO, f
 		return filesToDelete, filesToRewrite, nil
 	}
 
-	return t.classifyFilesForFilteredOverwrite(ctx, fs, filter)
+	return t.classifyFilesForFilteredOverwrite(ctx, fs, filter, concurrency)
 }
 
 // classifyFilesForFilteredOverwrite classifies files for filtered overwrite operations.
 // Returns files to delete completely, files to rewrite partially, and any error.
-func (t *Transaction) classifyFilesForFilteredOverwrite(ctx context.Context, fs io.IO, filter iceberg.BooleanExpression) (filesToDelete, filesToRewrite []iceberg.DataFile, err error) {
+func (t *Transaction) classifyFilesForFilteredOverwrite(ctx context.Context, fs io.IO, filter iceberg.BooleanExpression, concurrency int) (filesToDelete, filesToRewrite []iceberg.DataFile, err error) {
 	schema := t.meta.CurrentSchema()
 
 	inclusiveEvaluator, err := newInclusiveMetricsEvaluator(schema, filter, true, false)
@@ -628,65 +638,98 @@ func (t *Transaction) classifyFilesForFilteredOverwrite(ctx context.Context, fs 
 		return nil, nil, fmt.Errorf("failed to get manifests: %w", err)
 	}
 
-	for _, manifest := range manifests {
-		if manifestEval != nil {
-			match, err := manifestEval(manifest)
-			if err != nil {
-				return nil, nil, fmt.Errorf("failed to evaluate manifest: %w", err)
-			}
-			if !match {
-				continue
-			}
-		}
-
-		entries, err := manifest.FetchEntries(fs, false)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to fetch manifest entries: %w", err)
-		}
-
-		for _, entry := range entries {
-			if entry.Status() == iceberg.EntryStatusDELETED {
-				continue
-			}
-
-			df := entry.DataFile()
-			if df.ContentType() != iceberg.EntryContentData {
-				continue
-			}
-
-			inclusive, err := inclusiveEvaluator(df)
-			if err != nil {
-				return nil, nil, fmt.Errorf("failed to evaluate data file %s with inclusive evaluator: %w", df.FilePath(), err)
-			}
-
-			if !inclusive {
-				continue
-			}
-
-			strict, err := strictEvaluator(df)
-			if err != nil {
-				return nil, nil, fmt.Errorf("failed to evaluate data file %s with strict evaluator: %w", df.FilePath(), err)
-			}
-
-			if strict {
-				filesToDelete = append(filesToDelete, df)
-			} else {
-				filesToRewrite = append(filesToRewrite, df)
-			}
-		}
+	type classifiedFiles struct {
+		toDelete  []iceberg.DataFile
+		toRewrite []iceberg.DataFile
 	}
 
-	return filesToDelete, filesToRewrite, nil
+	var (
+		mu             sync.Mutex
+		allFilesToDel  []iceberg.DataFile
+		allFilesToRewr []iceberg.DataFile
+	)
+
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(min(concurrency, len(manifests)))
+
+	for _, manifest := range manifests {
+		manifest := manifest // capture loop variable
+		g.Go(func() error {
+			if manifestEval != nil {
+				match, err := manifestEval(manifest)
+				if err != nil {
+					return fmt.Errorf("failed to evaluate manifest %s: %w", manifest.FilePath(), err)
+				}
+				if !match {
+					return nil
+				}
+			}
+
+			entries, err := manifest.FetchEntries(fs, false)
+			if err != nil {
+				return fmt.Errorf("failed to fetch manifest entries: %w", err)
+			}
+
+			localDelete := make([]iceberg.DataFile, 0)
+			localRewrite := make([]iceberg.DataFile, 0)
+
+			for _, entry := range entries {
+				if entry.Status() == iceberg.EntryStatusDELETED {
+					continue
+				}
+
+				df := entry.DataFile()
+				if df.ContentType() != iceberg.EntryContentData {
+					continue
+				}
+
+				inclusive, err := inclusiveEvaluator(df)
+				if err != nil {
+					return fmt.Errorf("failed to evaluate data file %s with inclusive evaluator: %w", df.FilePath(), err)
+				}
+
+				if !inclusive {
+					continue
+				}
+
+				strict, err := strictEvaluator(df)
+				if err != nil {
+					return fmt.Errorf("failed to evaluate data file %s with strict evaluator: %w", df.FilePath(), err)
+				}
+
+				if strict {
+					localDelete = append(localDelete, df)
+				} else {
+					localRewrite = append(localRewrite, df)
+				}
+			}
+
+			if len(localDelete) > 0 || len(localRewrite) > 0 {
+				mu.Lock()
+				allFilesToDel = append(allFilesToDel, localDelete...)
+				allFilesToRewr = append(allFilesToRewr, localRewrite...)
+				mu.Unlock()
+			}
+
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return nil, nil, err
+	}
+
+	return allFilesToDel, allFilesToRewr, nil
 }
 
 // rewriteFilesWithFilter rewrites data files by preserving only rows that do NOT match the filter
-func (t *Transaction) rewriteFilesWithFilter(ctx context.Context, fs io.IO, updater *snapshotProducer, files []iceberg.DataFile, filter iceberg.BooleanExpression) error {
+func (t *Transaction) rewriteFilesWithFilter(ctx context.Context, fs io.IO, updater *snapshotProducer, files []iceberg.DataFile, filter iceberg.BooleanExpression, concurrency int) error {
 	complementFilter := iceberg.NewNot(filter)
 
 	for _, originalFile := range files {
 		// Use a separate UUID for rewrite operations to avoid filename collisions with new data files
 		rewriteUUID := uuid.New()
-		rewrittenFiles, err := t.rewriteSingleFile(ctx, fs, originalFile, complementFilter, rewriteUUID)
+		rewrittenFiles, err := t.rewriteSingleFile(ctx, fs, originalFile, complementFilter, rewriteUUID, concurrency)
 		if err != nil {
 			return fmt.Errorf("failed to rewrite file %s: %w", originalFile.FilePath(), err)
 		}
@@ -701,7 +744,7 @@ func (t *Transaction) rewriteFilesWithFilter(ctx context.Context, fs io.IO, upda
 }
 
 // rewriteSingleFile reads a single data file, applies the filter, and writes new files with filtered data
-func (t *Transaction) rewriteSingleFile(ctx context.Context, fs io.IO, originalFile iceberg.DataFile, filter iceberg.BooleanExpression, commitUUID uuid.UUID) ([]iceberg.DataFile, error) {
+func (t *Transaction) rewriteSingleFile(ctx context.Context, fs io.IO, originalFile iceberg.DataFile, filter iceberg.BooleanExpression, commitUUID uuid.UUID, concurrency int) ([]iceberg.DataFile, error) {
 	scanTask := &FileScanTask{
 		File:   originalFile,
 		Start:  0,
@@ -725,7 +768,7 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, fs io.IO, originalF
 		boundRowFilter:  boundFilter,
 		caseSensitive:   true,
 		rowLimit:        -1, // No limit
-		concurrency:     1,
+		concurrency:     concurrency,
 	}
 
 	_, recordIter, err := scanner.GetRecords(ctx, []FileScanTask{*scanTask})
@@ -741,8 +784,8 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, fs io.IO, originalF
 		records = append(records, record)
 	}
 
-	// If no records remain after filtering, don't create any new files
-	// we shouldn't hit this case given that we only run this after determining this is a file to rewrite
+	// If no records remain after filtering, don't create any new files.
+	// This case is rare but possible given that the logic uses the file stats to make a decision
 	if len(records) == 0 {
 		return nil, nil
 	}

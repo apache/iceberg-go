@@ -818,6 +818,8 @@ func (t *TableWritingTestSuite) TestAddFilesReferencedCurrentSnapshotIgnoreDupli
 	t.Equal([]int32{0, 0, 0}, deleted)
 }
 
+// mockedCatalog is necessary for overwrite operations to simulate catalog behavior
+// during transaction commits without requiring a real catalog implementation.
 type mockedCatalog struct {
 	metadata table.Metadata
 }
@@ -1626,7 +1628,7 @@ func (t *TableWritingTestSuite) TestOverwriteTable() {
 	})
 	t.Require().NoError(err)
 	defer newTable.Release()
-	resultTbl, err := tbl.OverwriteTable(t.ctx, newTable, 1, nil, true, nil)
+	resultTbl, err := tbl.OverwriteTable(t.ctx, newTable, 1, nil, true, 0, nil)
 	t.Require().NoError(err)
 	t.NotNil(resultTbl)
 
@@ -1651,7 +1653,7 @@ func (t *TableWritingTestSuite) TestOverwriteRecord() {
 	defer rdr.Release()
 
 	// Test that Table.Overwrite works (delegates to transaction)
-	resultTbl, err := tbl.Overwrite(t.ctx, rdr, nil, true, nil)
+	resultTbl, err := tbl.Overwrite(t.ctx, rdr, nil, true, 0, nil)
 	t.Require().NoError(err)
 	t.NotNil(resultTbl)
 
