@@ -208,6 +208,12 @@ func LiteralFromBytes(typ Type, data []byte) (Literal, error) {
 		err := v.UnmarshalBinary(data)
 
 		return v, err
+	case GeometryType, GeographyType:
+		// Geometry and Geography are stored as WKB (binary format)
+		var v BinaryLiteral
+		err := v.UnmarshalBinary(data)
+
+		return v, err
 	}
 
 	return nil, ErrType
