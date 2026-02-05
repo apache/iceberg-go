@@ -41,7 +41,7 @@ type writerFactory struct {
 	writers            sync.Map
 	nextCount          func() (int, bool)
 	stopCount          func()
-	partitionIDCounter atomic.Int64 // Added: counter for partition IDs
+	partitionIDCounter atomic.Int64 // partitionIDCounter generates unique IDs for partitions
 	mu                 sync.Mutex
 }
 
