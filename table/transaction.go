@@ -501,8 +501,22 @@ func (t *Transaction) AddFiles(ctx context.Context, files []string, snapshotProp
 }
 
 // OverwriteTable overwrites the table data using an Arrow Table, optionally with a filter.
-// If filter is nil or AlwaysTrue, all existing data will be replaced.
-// If filter is provided, only data matching the filter will be replaced.
+//
+// The filter parameter determines which existing data to delete or rewrite:
+//   - If filter is nil or AlwaysTrue, all existing data files are deleted and replaced with new data.
+//   - If a filter is provided, it acts as a row-level predicate on existing data:
+//   - Files where all rows match the filter (strict match) are completely deleted
+//   - Files where some rows match and others don't (partial match) are rewritten to keep only non-matching rows
+//   - Files where no rows match the filter are kept unchanged
+//
+// The filter uses both inclusive and strict metrics evaluators on file statistics to classify files:
+//   - Inclusive evaluator identifies candidate files that may contain matching rows
+//   - Strict evaluator determines if all rows in a file must match the filter
+//   - Files that pass inclusive but not strict evaluation are rewritten with filtered data
+//
+// New data from the provided table is written to the table regardless of the filter.
+//
+// The batchSize parameter refers to the batch size for reading the input data, not the batch size for writes.
 // The concurrency parameter controls the level of parallelism for manifest processing and file rewriting.
 // If concurrency <= 0, defaults to runtime.GOMAXPROCS(0).
 func (t *Transaction) OverwriteTable(ctx context.Context, tbl arrow.Table, batchSize int64, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, snapshotProps iceberg.Properties) error {
@@ -513,8 +527,21 @@ func (t *Transaction) OverwriteTable(ctx context.Context, tbl arrow.Table, batch
 }
 
 // Overwrite overwrites the table data using a RecordReader, optionally with a filter.
-// If filter is nil or AlwaysTrue, all existing data will be replaced.
-// If filter is provided, only data matching the filter will be replaced.
+//
+// The filter parameter determines which existing data to delete or rewrite:
+//   - If filter is nil or AlwaysTrue, all existing data files are deleted and replaced with new data.
+//   - If a filter is provided, it acts as a row-level predicate on existing data:
+//   - Files where all rows match the filter (strict match) are completely deleted
+//   - Files where some rows match and others don't (partial match) are rewritten to keep only non-matching rows
+//   - Files where no rows match the filter are kept unchanged
+//
+// The filter uses both inclusive and strict metrics evaluators on file statistics to classify files:
+//   - Inclusive evaluator identifies candidate files that may contain matching rows
+//   - Strict evaluator determines if all rows in a file must match the filter
+//   - Files that pass inclusive but not strict evaluation are rewritten with filtered data
+//
+// New data from the provided RecordReader is written to the table regardless of the filter.
+//
 // The concurrency parameter controls the level of parallelism for manifest processing and file rewriting.
 // If concurrency <= 0, defaults to runtime.GOMAXPROCS(0).
 func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, snapshotProps iceberg.Properties) error {
@@ -771,39 +798,15 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, fs io.IO, originalF
 		concurrency:     concurrency,
 	}
 
-	_, recordIter, err := scanner.GetRecords(ctx, []FileScanTask{*scanTask})
+	arrowSchema, recordIter, err := scanner.GetRecords(ctx, []FileScanTask{*scanTask})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get records from original file: %w", err)
 	}
 
-	var records []arrow.RecordBatch
-	for record, err := range recordIter {
-		if err != nil {
-			return nil, fmt.Errorf("failed to read record: %w", err)
-		}
-		records = append(records, record)
-	}
-
-	// If no records remain after filtering, don't create any new files.
-	// This case is rare but possible given that the logic uses the file stats to make a decision
-	if len(records) == 0 {
-		return nil, nil
-	}
-
-	arrowSchema, err := SchemaToArrowSchema(t.meta.CurrentSchema(), nil, false, false)
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert schema to arrow: %w", err)
-	}
-	table := array.NewTableFromRecords(arrowSchema, records)
-	defer table.Release()
-
-	rdr := array.NewTableReader(table, table.NumRows())
-	defer rdr.Release()
-
 	var result []iceberg.DataFile
 	itr := recordsToDataFiles(ctx, t.tbl.Location(), t.meta, recordWritingArgs{
-		sc:        rdr.Schema(),
-		itr:       array.IterFromReader(rdr),
+		sc:        arrowSchema,
+		itr:       recordIter,
 		fs:        fs.(io.WriteFileIO),
 		writeUUID: &commitUUID,
 	})
