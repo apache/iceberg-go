@@ -812,7 +812,6 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, fs io.IO, originalF
 			}
 			if !yield(rec, nil) {
 				rec.Release()
-
 				return
 			}
 			rec.Release()
