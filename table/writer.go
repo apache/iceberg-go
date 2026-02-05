@@ -33,6 +33,8 @@ import (
 type WriteTask struct {
 	Uuid        uuid.UUID
 	ID          int
+	PartitionID int // PartitionID is the partition identifier used in data file naming.
+	FileCount   int // FileCount is a sequential counter for files written by this task.
 	Schema      *iceberg.Schema
 	Batches     []arrow.RecordBatch
 	SortOrderID int
@@ -40,8 +42,9 @@ type WriteTask struct {
 
 func (w WriteTask) GenerateDataFileName(extension string) string {
 	// Mimics the behavior in the Java API:
-	// https://github.com/apache/iceberg/blob/a582968975dd30ff4917fbbe999f1be903efac02/core/src/main/java/org/apache/iceberg/io/OutputFileFactory.java#L92-L101
-	return fmt.Sprintf("00000-%d-%s.%s", w.ID, w.Uuid, extension)
+	// https://github.com/apache/iceberg/blob/03ed4ba9af4e47d32bdb22b7e3d033eb2a4b2c83/core/src/main/java/org/apache/iceberg/io/OutputFileFactory.java#L93
+	// Format: {partitionId:05d}-{taskId}-{operationId}-{fileCount:05d}.{extension}
+	return fmt.Sprintf("%05d-%d-%s-%05d.%s", w.PartitionID, w.ID, w.Uuid, w.FileCount, extension)
 }
 
 type writer struct {
