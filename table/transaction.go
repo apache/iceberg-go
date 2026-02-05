@@ -808,10 +808,12 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, fs io.IO, originalF
 		for rec, err := range recordIter {
 			if err != nil {
 				yield(nil, err)
+
 				return
 			}
 			if !yield(rec, nil) {
 				rec.Release()
+
 				return
 			}
 			rec.Release()
