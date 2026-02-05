@@ -66,8 +66,8 @@ func NewWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 // file strategy to manage file sizes.
 type RollingDataWriter struct {
 	partitionKey    string
-	partitionID     int          // Added: unique ID for this partition
-	fileCount       atomic.Int64 // Added: counter for files in this partition
+	partitionID     int          // unique ID for this partition
+	fileCount       atomic.Int64 // counter for files in this partition
 	recordCh        chan arrow.RecordBatch
 	errorCh         chan error
 	factory         *writerFactory

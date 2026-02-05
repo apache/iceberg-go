@@ -166,14 +166,13 @@ func RecoverError(err *error) {
 
 func Counter(start int) iter.Seq[int] {
 	var current atomic.Int64
-	current.Store(int64(start))
+	current.Store(int64(start) - 1)
 
 	return func(yield func(int) bool) {
 		for {
-			if !yield(int(current.Load())) {
+			if !yield(int(current.Add(1))) {
 				return
 			}
-			current.Add(1)
 		}
 	}
 }
