@@ -33,8 +33,8 @@ import (
 type WriteTask struct {
 	Uuid        uuid.UUID
 	ID          int
-	PartitionID int // Added: partition ID for file naming
-	FileCount   int // Added: file counter within this task
+	PartitionID int // PartitionID is the partition identifier used in data file naming.
+	FileCount   int // FileCount is a sequential counter for files written by this task.
 	Schema      *iceberg.Schema
 	Batches     []arrow.RecordBatch
 	SortOrderID int
