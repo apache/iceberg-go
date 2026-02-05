@@ -803,10 +803,26 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, fs io.IO, originalF
 		return nil, fmt.Errorf("failed to get records from original file: %w", err)
 	}
 
+	// Wrap the iterator to release records after consumption
+	releaseIter := func(yield func(arrow.RecordBatch, error) bool) {
+		for rec, err := range recordIter {
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			if !yield(rec, nil) {
+				rec.Release()
+
+				return
+			}
+			rec.Release()
+		}
+	}
+
 	var result []iceberg.DataFile
 	itr := recordsToDataFiles(ctx, t.tbl.Location(), t.meta, recordWritingArgs{
 		sc:        arrowSchema,
-		itr:       recordIter,
+		itr:       releaseIter,
 		fs:        fs.(io.WriteFileIO),
 		writeUUID: &commitUUID,
 	})
