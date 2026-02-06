@@ -100,6 +100,19 @@ func TestRegistryPanic(t *testing.T) {
 	})
 }
 
+func TestRegisterDuplicatePanic(t *testing.T) {
+	dummyFactory := func(ctx context.Context, parsed *url.URL, props map[string]string) (io.IO, error) {
+		return io.LocalFS{}, nil
+	}
+
+	io.Register("test-duplicate", dummyFactory)
+	defer io.Unregister("test-duplicate")
+
+	assert.PanicsWithValue(t, "io: Register called twice for scheme test-duplicate", func() {
+		io.Register("test-duplicate", dummyFactory)
+	}, "Attempting to register the same scheme twice should panic")
+}
+
 func TestLoadFS(t *testing.T) {
 	ctx := context.Background()
 
