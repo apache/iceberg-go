@@ -485,6 +485,19 @@ func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64) error {
 		return errors.New("current snapshot cannot be removed")
 	}
 
+	// Filter out snapshots that are referenced by any branch or tag.
+	// This prevents a race condition where a concurrent commit adds a ref
+	// to a snapshot that is being expired. Without this check, we could
+	// remove a snapshot that was just linked to a new branch/tag, leaving
+	// the metadata in a corrupt state with a dangling reference.
+	snapshotIds = slices.DeleteFunc(snapshotIds, func(id int64) bool {
+		return b.isSnapshotReferenced(id)
+	})
+
+	if len(snapshotIds) == 0 {
+		return nil
+	}
+
 	b.snapshotList = slices.DeleteFunc(b.snapshotList, func(e Snapshot) bool {
 		return slices.Contains(snapshotIds, e.SnapshotID)
 	})
@@ -492,17 +505,20 @@ func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64) error {
 		return slices.Contains(snapshotIds, e.SnapshotID)
 	})
 
-	newRefs := make(map[string]SnapshotRef)
-	for name, ref := range b.refs {
-		if _, err := b.SnapshotByID(ref.SnapshotID); err == nil {
-			newRefs[name] = ref
-		}
-	}
-	b.refs = newRefs
-
 	b.updates = append(b.updates, NewRemoveSnapshotsUpdate(snapshotIds))
 
 	return nil
+}
+
+// isSnapshotReferenced returns true if the given snapshot ID is referenced
+// by any branch or tag in the current metadata state.
+func (b *MetadataBuilder) isSnapshotReferenced(snapshotID int64) bool {
+	for _, ref := range b.refs {
+		if ref.SnapshotID == snapshotID {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *MetadataBuilder) AddSortOrder(sortOrder *SortOrder) error {
