@@ -34,7 +34,7 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/sql"
 	"github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/io/gocloud"
+	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/suite"
 )
@@ -71,9 +71,9 @@ func (s *SQLIntegrationSuite) loadCatalog(ctx context.Context) *sql.Catalog {
 		"uri":                "file:" + dbPath,
 		"sql.dialect":        "sqlite",
 		"sql.driver":         "sqlite",
-		gocloud.S3Region:          "us-east-1",
-		gocloud.S3AccessKeyID:     "admin",
-		gocloud.S3SecretAccessKey: "password",
+		io.S3Region:          "us-east-1",
+		io.S3AccessKeyID:     "admin",
+		io.S3SecretAccessKey: "password",
 		"warehouse":          location,
 	})
 	s.Require().NoError(err)

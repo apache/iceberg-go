@@ -35,7 +35,7 @@ import (
 	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/apache/iceberg-go/internal/recipe"
 	iceio "github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/io/gocloud"
+	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/suite"
 	"github.com/testcontainers/testcontainers-go/modules/compose"
@@ -59,10 +59,10 @@ func (s *SparkIntegrationTestSuite) SetupSuite() {
 func (s *SparkIntegrationTestSuite) SetupTest() {
 	s.ctx = context.Background()
 	s.props = iceberg.Properties{
-		gocloud.S3Region:          "us-east-1",
-		gocloud.S3EndpointURL:     "http://localhost:9000",
-		gocloud.S3AccessKeyID:     "admin",
-		gocloud.S3SecretAccessKey: "password",
+		iceio.S3Region:          "us-east-1",
+		iceio.S3EndpointURL:     "http://localhost:9000",
+		iceio.S3AccessKeyID:     "admin",
+		iceio.S3SecretAccessKey: "password",
 	}
 
 	cat, err := rest.NewCatalog(s.ctx, "rest", "http://localhost:8181", rest.WithAdditionalProps(s.props))

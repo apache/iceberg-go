@@ -34,7 +34,7 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/io/gocloud"
+	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/suite"
 )
@@ -71,9 +71,9 @@ func (s *OrphanCleanupIntegrationSuite) loadCatalog() *rest.Catalog {
 	cat, err := catalog.Load(s.ctx, "local", iceberg.Properties{
 		"type":               "rest",
 		"uri":                "http://localhost:8181",
-		gocloud.S3Region:          "us-east-1",
-		gocloud.S3AccessKeyID:     "admin",
-		gocloud.S3SecretAccessKey: "password",
+		io.S3Region:          "us-east-1",
+		io.S3AccessKeyID:     "admin",
+		io.S3SecretAccessKey: "password",
 	})
 	s.Require().NoError(err)
 	s.Require().IsType(&rest.Catalog{}, cat)

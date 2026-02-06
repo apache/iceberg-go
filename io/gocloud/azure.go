@@ -28,6 +28,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
+	"github.com/apache/iceberg-go/io"
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/azureblob"
 )
@@ -35,20 +36,6 @@ import (
 // adlsURIPattern is taken from the Java implementation:
 // https://github.com/apache/iceberg/blob/2114bf631e49af532d66e2ce148ee49dd1dd1f1f/azure/src/main/java/org/apache/iceberg/azure/adlsv2/ADLSLocation.java#L47
 var adlsURIPattern = regexp.MustCompile(`^(abfss?|wasbs?)://([^/?#]+)(.*)?$`)
-
-// Constants for Azure configuration options
-const (
-	AdlsSasTokenPrefix         = "adls.sas-token."
-	AdlsConnectionStringPrefix = "adls.connection-string."
-	AdlsSharedKeyAccountName   = "adls.auth.shared-key.account.name"
-	AdlsSharedKeyAccountKey    = "adls.auth.shared-key.account.key"
-	AdlsEndpoint               = "adls.endpoint"
-	AdlsProtocol               = "adls.protocol"
-
-	// Not in use yet
-	// AdlsReadBlockSize          = "adls.read.block-size-bytes"
-	// AdlsWriteBlockSize         = "adls.write.block-size-bytes"
-)
 
 // adlsLocation represents the parsed components of an Azure Data Lake Storage URI
 type adlsLocation struct {
@@ -121,8 +108,8 @@ func newAdlsLocation(adlsURI *url.URL) (*adlsLocation, error) {
 
 // Construct a Azure bucket from a URL
 func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
-	adlsSasTokens := propertiesWithPrefix(props, AdlsSasTokenPrefix)
-	adlsConnectionStrings := propertiesWithPrefix(props, AdlsConnectionStringPrefix)
+	adlsSasTokens := propertiesWithPrefix(props, io.AdlsSasTokenPrefix)
+	adlsConnectionStrings := propertiesWithPrefix(props, io.AdlsConnectionStringPrefix)
 
 	// Construct the client
 	location, err := newAdlsLocation(parsed)
@@ -130,16 +117,16 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 		return nil, err
 	}
 
-	sharedKeyAccountName := props[AdlsSharedKeyAccountName]
-	endpoint := props[AdlsEndpoint]
-	protocol := props[AdlsProtocol]
+	sharedKeyAccountName := props[io.AdlsSharedKeyAccountName]
+	endpoint := props[io.AdlsEndpoint]
+	protocol := props[io.AdlsProtocol]
 
 	var client *container.Client
 
 	if sharedKeyAccountName != "" {
-		sharedKeyAccountKey, ok := props[AdlsSharedKeyAccountKey]
+		sharedKeyAccountKey, ok := props[io.AdlsSharedKeyAccountKey]
 		if !ok || sharedKeyAccountKey == "" {
-			return nil, fmt.Errorf("azure authentication: shared-key requires both %s and %s", AdlsSharedKeyAccountName, AdlsSharedKeyAccountKey)
+			return nil, fmt.Errorf("azure authentication: shared-key requires both %s and %s", io.AdlsSharedKeyAccountName, io.AdlsSharedKeyAccountKey)
 		}
 
 		containerURL, err := createContainerURL(location.accountName, protocol, endpoint, "", location.containerName)

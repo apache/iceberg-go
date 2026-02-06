@@ -31,7 +31,8 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	sqlcat "github.com/apache/iceberg-go/catalog/sql"
-	"github.com/apache/iceberg-go/io/gocloud"
+	"github.com/apache/iceberg-go/io"
+	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/stretchr/testify/suite"
 	"github.com/uptrace/bun/driver/sqliteshim"
 )
@@ -113,8 +114,8 @@ func (s *GCSIOTestSuite) TestGCSWarehouse() {
 		sqlcat.DialectKey: string(sqlcat.SQLite),
 		"type":            "sql",
 		"warehouse":       fmt.Sprintf("gs://%s/iceberg/", gcsBucketName),
-		gocloud.GCSEndpoint:    fmt.Sprintf("http://%s/", gcsEndpoint),
-		gocloud.GCSUseJsonAPI:  "true",
+		io.GCSEndpoint:    fmt.Sprintf("http://%s/", gcsEndpoint),
+		io.GCSUseJsonAPI:  "true",
 	}
 
 	cat, err := catalog.Load(context.Background(), "default", properties)
