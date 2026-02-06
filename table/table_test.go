@@ -22,7 +22,6 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -1682,7 +1681,7 @@ func (t *TableWritingTestSuite) TestDelete() {
 			expectedErr: nil,
 		},
 		{
-			name: "abort on merge-on-read",
+			name: "success with merge-on-read",
 			table: t.createTableWithProps(
 				table.Identifier{"default", "overwrite_record_wrapper_v" + strconv.Itoa(t.formatVersion)},
 				map[string]string{
@@ -1691,7 +1690,7 @@ func (t *TableWritingTestSuite) TestDelete() {
 				},
 				t.tableSchema,
 			),
-			expectedErr: errors.New("only 'copy-on-write' is currently supported"),
+			expectedErr: nil,
 		},
 	}
 
