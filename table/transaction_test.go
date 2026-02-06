@@ -363,6 +363,140 @@ func (s *SparkIntegrationTestSuite) TestUpdateSpec() {
 	)
 }
 
+func (s *SparkIntegrationTestSuite) TestOverwriteBasic() {
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.Bool},
+		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Int32},
+	)
+
+	tbl, err := s.cat.CreateTable(s.ctx, catalog.ToIdentifier("default", "go_test_overwrite_basic"), icebergSchema)
+	s.Require().NoError(err)
+
+	// Create initial data
+	arrowSchema, err := table.SchemaToArrowSchema(icebergSchema, nil, true, false)
+	s.Require().NoError(err)
+
+	initialTable, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[
+			{"foo": true, "bar": "initial", "baz": 100},
+			{"foo": false, "bar": "old_data", "baz": 200}
+		]`,
+	})
+	s.Require().NoError(err)
+	defer initialTable.Release()
+
+	tx := tbl.NewTransaction()
+	err = tx.AppendTable(s.ctx, initialTable, 2, nil)
+	s.Require().NoError(err)
+	tbl, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	overwriteTable, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[
+			{"foo": false, "bar": "overwritten", "baz": 300},
+			{"foo": true, "bar": "new_data", "baz": 400}
+		]`,
+	})
+	s.Require().NoError(err)
+	defer overwriteTable.Release()
+
+	tx = tbl.NewTransaction()
+	err = tx.OverwriteTable(s.ctx, overwriteTable, 2, nil, true, 0, nil)
+	s.Require().NoError(err)
+	_, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	expectedOutput := `
++--------+
+|count(1)|
++--------+
+|2       |
++--------+
+
++-----+-----------+---+
+|foo  |bar        |baz|
++-----+-----------+---+
+|false|overwritten|300|
+|true |new_data   |400|
++-----+-----------+---+
+`
+
+	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--test", "TestOverwriteBasic")
+	s.Require().NoError(err)
+	s.Require().True(
+		strings.HasSuffix(strings.TrimSpace(output), strings.TrimSpace(expectedOutput)),
+		"result does not contain expected output: %s", expectedOutput,
+	)
+}
+
+func (s *SparkIntegrationTestSuite) TestOverwriteWithFilter() {
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.Bool},
+		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Int32},
+	)
+
+	tbl, err := s.cat.CreateTable(s.ctx, catalog.ToIdentifier("default", "go_test_overwrite_filter"), icebergSchema)
+	s.Require().NoError(err)
+
+	arrowSchema, err := table.SchemaToArrowSchema(icebergSchema, nil, true, false)
+	s.Require().NoError(err)
+
+	initialTable, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[
+			{"foo": true, "bar": "should_be_replaced", "baz": 100},
+			{"foo": false, "bar": "should_remain", "baz": 200},
+			{"foo": true, "bar": "also_replaced", "baz": 300}
+		]`,
+	})
+	s.Require().NoError(err)
+	defer initialTable.Release()
+
+	tx := tbl.NewTransaction()
+	err = tx.AppendTable(s.ctx, initialTable, 3, nil)
+	s.Require().NoError(err)
+	tbl, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	overwriteTable, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[
+			{"foo": true, "bar": "new_replacement", "baz": 999}
+		]`,
+	})
+	s.Require().NoError(err)
+	defer overwriteTable.Release()
+
+	filter := iceberg.EqualTo(iceberg.Reference("foo"), true)
+	tx = tbl.NewTransaction()
+	err = tx.OverwriteTable(s.ctx, overwriteTable, 1, filter, true, 0, nil)
+	s.Require().NoError(err)
+	_, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	expectedOutput := `
++--------+
+|count(1)|
++--------+
+|2       |
++--------+
+
++-----+---------------+---+
+|foo  |bar            |baz|
++-----+---------------+---+
+|false|should_remain  |200|
+|true |new_replacement|999|
++-----+---------------+---+
+`
+
+	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--test", "TestOverwriteWithFilter")
+	s.Require().NoError(err)
+	s.Require().True(
+		strings.HasSuffix(strings.TrimSpace(output), strings.TrimSpace(expectedOutput)),
+		"result does not contain expected output: %s", expectedOutput,
+	)
+}
+
 func TestSparkIntegration(t *testing.T) {
 	suite.Run(t, new(SparkIntegrationTestSuite))
 }

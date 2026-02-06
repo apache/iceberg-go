@@ -129,6 +129,59 @@ func (t Table) Append(ctx context.Context, rdr array.RecordReader, snapshotProps
 	return txn.Commit(ctx)
 }
 
+// OverwriteTable is a shortcut for NewTransaction().OverwriteTable() and then committing the transaction.
+//
+// The filter parameter determines which existing data to delete or rewrite:
+//   - If filter is nil or AlwaysTrue, all existing data files are deleted and replaced with new data.
+//   - If a filter is provided, it acts as a row-level predicate on existing data:
+//   - Files where all rows match the filter (strict match) are completely deleted
+//   - Files where some rows match and others don't (partial match) are rewritten to keep only non-matching rows
+//   - Files where no rows match the filter are kept unchanged
+//
+// The filter uses both inclusive and strict metrics evaluators on file statistics to classify files:
+//   - Inclusive evaluator identifies candidate files that may contain matching rows
+//   - Strict evaluator determines if all rows in a file must match the filter
+//   - Files that pass inclusive but not strict evaluation are rewritten with filtered data
+//
+// New data from the provided table is written to the table regardless of the filter.
+//
+// The batchSize parameter refers to the batch size for reading the input data, not the batch size for writes.
+// The concurrency parameter controls the level of parallelism. If concurrency <= 0, defaults to runtime.GOMAXPROCS(0).
+func (t Table) OverwriteTable(ctx context.Context, tbl arrow.Table, batchSize int64, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, snapshotProps iceberg.Properties) (*Table, error) {
+	txn := t.NewTransaction()
+	if err := txn.OverwriteTable(ctx, tbl, batchSize, filter, caseSensitive, concurrency, snapshotProps); err != nil {
+		return nil, err
+	}
+
+	return txn.Commit(ctx)
+}
+
+// Overwrite is a shortcut for NewTransaction().Overwrite() and then committing the transaction.
+//
+// The filter parameter determines which existing data to delete or rewrite:
+//   - If filter is nil or AlwaysTrue, all existing data files are deleted and replaced with new data.
+//   - If a filter is provided, it acts as a row-level predicate on existing data:
+//   - Files where all rows match the filter (strict match) are completely deleted
+//   - Files where some rows match and others don't (partial match) are rewritten to keep only non-matching rows
+//   - Files where no rows match the filter are kept unchanged
+//
+// The filter uses both inclusive and strict metrics evaluators on file statistics to classify files:
+//   - Inclusive evaluator identifies candidate files that may contain matching rows
+//   - Strict evaluator determines if all rows in a file must match the filter
+//   - Files that pass inclusive but not strict evaluation are rewritten with filtered data
+//
+// New data from the provided RecordReader is written to the table regardless of the filter.
+//
+// The concurrency parameter controls the level of parallelism. If concurrency <= 0, defaults to runtime.GOMAXPROCS(0).
+func (t Table) Overwrite(ctx context.Context, rdr array.RecordReader, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, snapshotProps iceberg.Properties) (*Table, error) {
+	txn := t.NewTransaction()
+	if err := txn.Overwrite(ctx, rdr, filter, caseSensitive, concurrency, snapshotProps); err != nil {
+		return nil, err
+	}
+
+	return txn.Commit(ctx)
+}
+
 func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile, error] {
 	fs, err := t.fsF(ctx)
 	if err != nil {

@@ -26,16 +26,40 @@ def testSetProperties():
 
 
 def testAddedFile():
-    spark.sql("SELECT COUNT(*) FROM default.test_partitioned_by_days").show(truncate=False)
+    spark.sql("SELECT COUNT(*) FROM default.test_partitioned_by_days").show(
+        truncate=False
+    )
 
 
 def testReadDifferentDataTypes():
-    spark.sql("DESCRIBE TABLE EXTENDED default.go_test_different_data_types").show(truncate=False)
+    spark.sql("DESCRIBE TABLE EXTENDED default.go_test_different_data_types").show(
+        truncate=False
+    )
     spark.sql("SELECT * FROM default.go_test_different_data_types").show(truncate=False)
 
 
 def testReadSpecUpdate():
-    spark.sql("DESCRIBE TABLE EXTENDED default.go_test_update_spec").show(truncate=False)
+    spark.sql("DESCRIBE TABLE EXTENDED default.go_test_update_spec").show(
+        truncate=False
+    )
+
+
+def testOverwriteBasic():
+    spark.sql("SELECT COUNT(*) FROM default.go_test_overwrite_basic").show(
+        truncate=False
+    )
+    spark.sql("SELECT * FROM default.go_test_overwrite_basic ORDER BY baz").show(
+        truncate=False
+    )
+
+
+def testOverwriteWithFilter():
+    spark.sql("SELECT COUNT(*) FROM default.go_test_overwrite_filter").show(
+        truncate=False
+    )
+    spark.sql("SELECT * FROM default.go_test_overwrite_filter ORDER BY baz").show(
+        truncate=False
+    )
 
 
 if __name__ == "__main__":
@@ -54,3 +78,9 @@ if __name__ == "__main__":
 
     if args.test == "TestReadSpecUpdate":
         testReadSpecUpdate()
+
+    if args.test == "TestOverwriteBasic":
+        testOverwriteBasic()
+
+    if args.test == "TestOverwriteWithFilter":
+        testOverwriteWithFilter()
