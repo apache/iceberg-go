@@ -638,7 +638,7 @@ func (u *UpdateSchema) BuildUpdates() ([]Update, []Requirement, error) {
 			)
 		} else {
 			updates = append(updates,
-				NewSetCurrentSchemaUpdate(newSchema.ID),
+				NewSetCurrentSchemaUpdate(existingSchemaID),
 			)
 		}
 
