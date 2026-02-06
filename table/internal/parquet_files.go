@@ -282,7 +282,7 @@ func (p parquetFormat) WriteDataFile(ctx context.Context, fs iceio.WriteFileIO, 
 	}
 
 	return p.DataFileStatsFromMeta(filemeta, info.StatsCols, colMapping).
-		ToDataFile(info.FileSchema, info.Spec, info.FileName, iceberg.ParquetFile, cntWriter.Count, partitionValues), nil
+		ToDataFile(info.FileSchema, info.Spec, info.FileName, iceberg.ParquetFile, info.Content, cntWriter.Count, partitionValues), nil
 }
 
 type decAsIntAgg[T int32 | int64] struct {
