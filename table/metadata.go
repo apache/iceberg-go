@@ -518,6 +518,7 @@ func (b *MetadataBuilder) isSnapshotReferenced(snapshotID int64) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
