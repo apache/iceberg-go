@@ -22,6 +22,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -1663,6 +1664,55 @@ func (t *TableWritingTestSuite) TestOverwriteRecord() {
 	t.Equal(table.OpAppend, snapshot.Summary.Operation) // Empty table overwrite becomes append
 }
 
+// TestDelete verifies that Table.Delete properly delegates to Transaction.Delete
+func (t *TableWritingTestSuite) TestDelete() {
+	testCases := []struct {
+		name        string
+		table       *table.Table
+		expectedErr error
+	}{
+		{
+			name: "success with copy-on-write",
+			table: t.createTable(
+				table.Identifier{"default", "overwrite_record_wrapper_v" + strconv.Itoa(t.formatVersion)},
+				t.formatVersion,
+				*iceberg.UnpartitionedSpec,
+				t.tableSchema,
+			),
+			expectedErr: nil,
+		},
+		{
+			name: "abort on merge-on-read",
+			table: t.createTableWithProps(
+				table.Identifier{"default", "overwrite_record_wrapper_v" + strconv.Itoa(t.formatVersion)},
+				map[string]string{
+					table.PropertyFormatVersion: strconv.Itoa(t.formatVersion),
+					table.WriteDeleteModeKey:    table.WriteModeMergeOnRead,
+				},
+				t.tableSchema,
+			),
+			expectedErr: errors.New("only 'copy-on-write' is currently supported"),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func() {
+			resultTbl, err := tc.table.Delete(t.ctx, iceberg.EqualTo(iceberg.Reference("foo"), "bar"), nil)
+
+			// If an error was expected, check that it's the correct one and abort validating the operation
+			if tc.expectedErr != nil {
+				t.Require().ErrorContains(err, tc.expectedErr.Error())
+
+				return
+			}
+
+			snapshot := resultTbl.CurrentSnapshot()
+			t.NotNil(snapshot)
+			t.Equal(table.OpAppend, snapshot.Summary.Operation) // Empty table overwrite becomes append
+		})
+	}
+}
+
 func TestTableWriting(t *testing.T) {
 	suite.Run(t, &TableWritingTestSuite{formatVersion: 1})
 	suite.Run(t, &TableWritingTestSuite{formatVersion: 2})
@@ -1683,25 +1733,25 @@ func TestNullableStructRequiredField(t *testing.T) {
 	arrowSchema := arrow.NewSchema([]arrow.Field{
 		{
 			Name: "analytic", Type: arrow.StructOf(
-			arrow.Field{Name: "category", Type: arrow.BinaryTypes.String, Nullable: true},
-			arrow.Field{Name: "desc", Type: arrow.BinaryTypes.String, Nullable: true},
-			arrow.Field{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
-			arrow.Field{Name: "related_analytics", Type: arrow.ListOf(
-				arrow.StructOf(
-					arrow.Field{Name: "category", Type: arrow.BinaryTypes.String, Nullable: true},
-					arrow.Field{Name: "desc", Type: arrow.BinaryTypes.String, Nullable: true},
-					arrow.Field{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
-					arrow.Field{Name: "type", Type: arrow.BinaryTypes.String, Nullable: true},
-					arrow.Field{Name: "type_id", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-					arrow.Field{Name: "uid", Type: arrow.BinaryTypes.String, Nullable: true},
-					arrow.Field{Name: "version", Type: arrow.BinaryTypes.String, Nullable: true},
-				),
-			), Nullable: true},
-			arrow.Field{Name: "type", Type: arrow.BinaryTypes.String, Nullable: true},
-			arrow.Field{Name: "type_id", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			arrow.Field{Name: "uid", Type: arrow.BinaryTypes.String, Nullable: true},
-			arrow.Field{Name: "version", Type: arrow.BinaryTypes.String, Nullable: true},
-		), Nullable: true,
+				arrow.Field{Name: "category", Type: arrow.BinaryTypes.String, Nullable: true},
+				arrow.Field{Name: "desc", Type: arrow.BinaryTypes.String, Nullable: true},
+				arrow.Field{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+				arrow.Field{Name: "related_analytics", Type: arrow.ListOf(
+					arrow.StructOf(
+						arrow.Field{Name: "category", Type: arrow.BinaryTypes.String, Nullable: true},
+						arrow.Field{Name: "desc", Type: arrow.BinaryTypes.String, Nullable: true},
+						arrow.Field{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+						arrow.Field{Name: "type", Type: arrow.BinaryTypes.String, Nullable: true},
+						arrow.Field{Name: "type_id", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+						arrow.Field{Name: "uid", Type: arrow.BinaryTypes.String, Nullable: true},
+						arrow.Field{Name: "version", Type: arrow.BinaryTypes.String, Nullable: true},
+					),
+				), Nullable: true},
+				arrow.Field{Name: "type", Type: arrow.BinaryTypes.String, Nullable: true},
+				arrow.Field{Name: "type_id", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+				arrow.Field{Name: "uid", Type: arrow.BinaryTypes.String, Nullable: true},
+				arrow.Field{Name: "version", Type: arrow.BinaryTypes.String, Nullable: true},
+			), Nullable: true,
 		},
 		{Name: "uid", Type: arrow.BinaryTypes.String, Nullable: true},
 	}, nil)
