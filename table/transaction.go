@@ -508,20 +508,41 @@ func (t *Transaction) AddFiles(ctx context.Context, files []string, snapshotProp
 type DeleteOption func(deleteOp *deleteOperation)
 
 type deleteOperation struct {
-	caseInsensitive bool
+	caseSensitive bool
+	metadata      Metadata
+	predicate     iceberg.BooleanExpression
+
+	partitionFilters *keyDefaultMap[int, iceberg.BooleanExpression]
 }
 
 func WithDeleteInsensitive() DeleteOption {
 	return func(deleteOp *deleteOperation) {
-		deleteOp.caseInsensitive = true
+		deleteOp.caseSensitive = false
 	}
 }
 
+func (d *deleteOperation) buildManifestEvaluator(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
+	return buildManifestEvaluator(d.metadata, d.partitionFilters, d.caseSensitive, specID)
+}
+
+func (d *deleteOperation) buildPartitionProjection(specID int) (iceberg.BooleanExpression, error) {
+	return buildPartitionProjection(d.metadata, d.predicate, specID)
+}
+
 func (t *Transaction) Delete(ctx context.Context, predicate iceberg.BooleanExpression, snapshotProps iceberg.Properties, opts ...DeleteOption) error {
-	deleteOp := deleteOperation{}
+	updatedMetadata, err := t.meta.Build()
+	if err != nil {
+		return err
+	}
+	deleteOp := deleteOperation{
+		caseSensitive: true,
+		predicate:     predicate,
+		metadata:      updatedMetadata,
+	}
 	for _, apply := range opts {
 		apply(&deleteOp)
 	}
+	deleteOp.partitionFilters = newKeyDefaultMapWrapErr(deleteOp.buildPartitionProjection)
 
 	if t.meta.formatVersion > 2 {
 		return fmt.Errorf("cannot perform delete on table with version %d: deletion vectors are unsupported", t.meta.formatVersion)
@@ -534,19 +555,15 @@ func (t *Transaction) Delete(ctx context.Context, predicate iceberg.BooleanExpre
 	if err != nil {
 		return err
 	}
-	manifestEvaluator, err := newManifestEvaluator(t.tbl.Spec(), t.meta.CurrentSchema(), predicate, deleteOp.caseInsensitive)
-	if err != nil {
-		return fmt.Errorf("failed to manifest evaluator from predicate '%s': %w", predicate.String(), err)
-	}
-	strictMetricsEval, err := newStrictMetricsEvaluator(t.meta.CurrentSchema(), predicate, deleteOp.caseInsensitive, false)
+	manifestEvaluators := newKeyDefaultMapWrapErr(deleteOp.buildManifestEvaluator)
+	strictMetricsEval, err := newStrictMetricsEvaluator(t.meta.CurrentSchema(), predicate, deleteOp.caseSensitive, false)
 	if err != nil {
 		return fmt.Errorf("failed to create strict metrics evaluator from predicate '%s': %w", predicate.String(), err)
 	}
-	inclusiveMetricsEval, err := newInclusiveMetricsEvaluator(t.meta.CurrentSchema(), predicate, deleteOp.caseInsensitive, false)
+	inclusiveMetricsEval, err := newInclusiveMetricsEvaluator(t.meta.CurrentSchema(), predicate, deleteOp.caseSensitive, false)
 	if err != nil {
 		return fmt.Errorf("failed to create inclusive metrics evaluator from predicate '%s': %w", predicate.String(), err)
 	}
-	// TODO: review pyiceberg to see if we need to handle branch/parent snapshot id
 	snapshot := t.meta.currentSnapshot()
 	if snapshot == nil {
 		// TODO: ignore no snapshot or return an error?
@@ -566,12 +583,13 @@ func (t *Transaction) Delete(ctx context.Context, predicate iceberg.BooleanExpre
 		existingEntries := make([]iceberg.ManifestEntry, 0)
 
 		if m.ManifestContent() != iceberg.ManifestContentData {
-			eval, err := manifestEvaluator(m)
+			eval, err := manifestEvaluators.Get(int(m.PartitionSpecID()))(m)
 			if err != nil {
 				return fmt.Errorf("failed to run manifest evaluator on manifest file '%s': %w", m.FilePath(), err)
 			}
 			// Preserve manifests that aren't relevant in the list
 			if !eval {
+				fmt.Printf("preserving existing manifest: %s\n", m.FilePath())
 				snapshotProducer.existingManifestFiles = append(snapshotProducer.existingManifestFiles, m)
 				continue
 			}
@@ -587,29 +605,31 @@ func (t *Transaction) Delete(ctx context.Context, predicate iceberg.BooleanExpre
 				return fmt.Errorf("failed to run strict evaluate on data file '%s': %w", e.DataFile(), err)
 			}
 			if eval == rowsMustMatch {
-				snapshotProducer.deletedManifestEntries = append(snapshotProducer.deletedManifestEntries,
+				deletedEntries = append(deletedEntries,
 					iceberg.NewManifestEntryBuilder(
 						iceberg.EntryStatusDELETED,
 						&snapshot.SnapshotID,
 						e.DataFile(),
-					).Build(),
+					).SequenceNum(e.SequenceNum()).Build(),
 				)
+				fmt.Printf("deleting data file with all rows matching: %s\n", e.DataFile().FilePath())
 				snapshotProducer.deleteDataFile(e.DataFile())
-			} else {
-				existingEntries = append(existingEntries,
-					iceberg.NewManifestEntryBuilder(
-						iceberg.EntryStatusEXISTING,
-						&snapshot.SnapshotID,
-						e.DataFile(),
-					).Build(),
-				)
-				eval, err := inclusiveMetricsEval(e.DataFile())
-				if err != nil {
-					return fmt.Errorf("failed to run inclusive evaluate on data file '%s': %w", e.DataFile(), err)
-				}
-				if eval == rowsMightNotMatch {
-					partialRewritesNeeded = true
-				}
+				continue
+			}
+			existingEntries = append(existingEntries,
+				iceberg.NewManifestEntryBuilder(
+					iceberg.EntryStatusEXISTING,
+					&snapshot.SnapshotID,
+					e.DataFile(),
+				).SequenceNum(e.SequenceNum()).Build(),
+			)
+			eval, err = inclusiveMetricsEval(e.DataFile())
+			if err != nil {
+				return fmt.Errorf("failed to run inclusive evaluate on data file '%s': %w", e.DataFile(), err)
+			}
+			if eval == rowsMightNotMatch {
+				partialRewritesNeeded = true
+				fmt.Printf("have to rewrite data file: %s\n", e.DataFile().FilePath())
 			}
 		}
 
@@ -618,36 +638,25 @@ func (t *Transaction) Delete(ctx context.Context, predicate iceberg.BooleanExpre
 
 			// Rewrite the manifest
 			if len(existingEntries) > 0 {
-				w, path, counter, closer, err := snapshotProducer.newManifestWriter(t.tbl.Spec())
+				manifestFile, err := snapshotProducer.createManifest(t.tbl.Spec(), existingEntries)
 				if err != nil {
-					return fmt.Errorf("failed to create manifest writer: %w", err)
+					return err
 				}
-				for _, e := range existingEntries {
-					err = w.Existing(e)
-					if err != nil {
-						return err
-					}
-				}
-				err = closer.Close()
-				if err != nil {
-					return fmt.Errorf("failed to close manifest writer: %w", err)
-				}
-				manifestFile, err := w.ToManifestFile(path, counter.Count)
+				fmt.Printf("adding new manifest file: %s\n", manifestFile.FilePath())
 				snapshotProducer.existingManifestFiles = append(snapshotProducer.existingManifestFiles, manifestFile)
 			}
 			continue
 		}
 
-		snapshotProducer.existingManifestFiles = append(snapshotProducer.existingManifestFiles, m)
+		// TODO: Check that the rest of the ported logic is consistent since this IS in the pyiceberg version but causes
+		// a file to both be deleted and be marked as existing
+		//snapshotProducer.existingManifestFiles = append(snapshotProducer.existingManifestFiles, m)
 	}
 
 	// Implement data file rewrite
 	if partialRewritesNeeded {
-		preserveFilter, err := iceberg.BindExpr(t.meta.CurrentSchema(), predicate.Negate(), deleteOp.caseInsensitive)
-		if err != nil {
-			return err
-		}
-		scan, err := t.Scan(WithRowFilter(preserveFilter), WithCaseSensitive(deleteOp.caseInsensitive))
+		preservePredicate := predicate.Negate()
+		scan, err := t.Scan(WithRowFilter(preservePredicate), WithCaseSensitive(deleteOp.caseSensitive))
 		if err != nil {
 			return fmt.Errorf("failed to scan to perform data rewrite: %w", err)
 		}
@@ -655,13 +664,18 @@ func (t *Transaction) Delete(ctx context.Context, predicate iceberg.BooleanExpre
 		if err != nil {
 			return err
 		}
-		replacedFiles := make([]iceberg.DataFile, 0, len(fileTasks))
+		boundExpr, err := iceberg.BindExpr(t.meta.CurrentSchema(), predicate.Negate(), deleteOp.caseSensitive)
+		if err != nil {
+			return err
+		}
+
 		for _, ft := range fileTasks {
+			fmt.Printf("rewriting data file %s\n", ft.File.FilePath())
 			arrowScan := &arrowScan{
 				metadata:        scan.metadata,
 				fs:              fs,
 				projectedSchema: t.meta.CurrentSchema(),
-				boundRowFilter:  scan.rowFilter,
+				boundRowFilter:  boundExpr,
 				caseSensitive:   scan.caseSensitive,
 				rowLimit:        scan.limit,
 				options:         scan.options,
@@ -675,6 +689,7 @@ func (t *Transaction) Delete(ctx context.Context, predicate iceberg.BooleanExpre
 			includesRowsToKeep := false
 			toKeepBatches := make([]arrow.RecordBatch, 0)
 			for toKeep, err := range filteredIt {
+				fmt.Printf("toKeep: %d from file %s\n", toKeep.NumRows(), ft.File.FilePath())
 				if err != nil {
 					return fmt.Errorf("failed iterating over records from file '%s': %w", ft.File, err)
 				}
@@ -686,13 +701,19 @@ func (t *Transaction) Delete(ctx context.Context, predicate iceberg.BooleanExpre
 				}
 			}
 			if !includesRowsToKeep {
-				replacedFiles = append(replacedFiles, ft.File)
+				fmt.Printf("deleting data file [%v]: %s\n", ft.File.Partition(), ft.File.FilePath())
+				snapshotProducer.deleteDataFile(ft.File)
 				continue
 			}
 
 			schema, err := SchemaToArrowSchema(t.meta.CurrentSchema(), nil, false, arrowScan.useLargeTypes)
 			if err != nil {
 				return err
+			}
+			iterator := recordBatchIterator(toKeepBatches)
+			for bla := range iterator {
+				arrowAsJSON, _ := bla.MarshalJSON()
+				fmt.Printf("Data to keep from file %s is: %s\n", ft.File.FilePath(), string(arrowAsJSON))
 			}
 			itr := recordsToDataFiles(ctx, t.tbl.Location(), t.meta, recordWritingArgs{
 				sc:        schema,
@@ -703,18 +724,22 @@ func (t *Transaction) Delete(ctx context.Context, predicate iceberg.BooleanExpre
 			for _, b := range toKeepBatches {
 				b.Release()
 			}
+
 			for df, err := range itr {
 				if err != nil {
 					return fmt.Errorf("failed to rewrite data file from original file '%s': %w", ft.File, err)
 				}
+				fmt.Printf("delete previous version as file %s and add file %s to replace it\n", ft.File.FilePath(), df.FilePath())
+				snapshotProducer.deleteDataFile(ft.File)
 				snapshotProducer.appendDataFile(df)
 			}
 		}
 	}
 
+	// TODO: Make snapshot producer overwrite instead of just adding
 	updates, reqs, err := snapshotProducer.commit()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to commit snapshot producer: %w", err)
 	}
 	return t.apply(updates, reqs)
 }

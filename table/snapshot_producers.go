@@ -431,15 +431,44 @@ type deleteSnapshotProducer struct {
 }
 
 func (d *deleteSnapshotProducer) processManifests(manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
+	fmt.Printf("processed manifest files are: \n")
+	for _, mf := range manifests {
+		fmt.Printf("\t * %s\n", mf.FilePath())
+	}
 	return manifests, nil
 }
 
 func (d *deleteSnapshotProducer) existingManifests() ([]iceberg.ManifestFile, error) {
+	fmt.Printf("existing files are: \n")
+	for _, mf := range d.existingManifestFiles {
+		fmt.Printf("\t [%v] %s\n", mf.PartitionSpecID(), mf.FilePath())
+	}
 	return d.existingManifestFiles, nil
 }
 
 func (d *deleteSnapshotProducer) deletedEntries() ([]iceberg.ManifestEntry, error) {
+	fmt.Printf("deleted files are: \n")
+	for _, mf := range d.deletedManifestEntries {
+		fmt.Printf("\t [%v] %s\n", mf.DataFile().Partition(), mf.DataFile().FilePath())
+	}
 	return d.deletedManifestEntries, nil
+}
+
+func (d *deleteSnapshotProducer) createManifest(spec iceberg.PartitionSpec, entries []iceberg.ManifestEntry) (mf iceberg.ManifestFile, err error) {
+	w, path, counter, closer, err := d.newManifestWriter(spec)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create manifest writer: %w", err)
+	}
+	defer internal.CheckedClose(closer, &err)
+	defer internal.CheckedClose(w, &err)
+
+	for _, e := range entries {
+		err = w.Existing(e)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return w.ToManifestFile(path, counter.Count)
 }
 
 func newDeleteFilesSnapshotProducer(fs iceio.WriteFileIO, txn *Transaction, props iceberg.Properties) *deleteSnapshotProducer {
@@ -585,6 +614,7 @@ func (sp *snapshotProducer) manifests() (_ []iceberg.ManifestFile, err error) {
 			defer internal.CheckedClose(wr, &err)
 
 			for _, df := range sp.addedFiles {
+				fmt.Printf("adding file [%v] %s\n", df.Partition(), df.FilePath())
 				err := wr.Add(iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &sp.snapshotID,
 					nil, nil, df))
 				if err != nil {

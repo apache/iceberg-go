@@ -21,6 +21,7 @@ package table_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -169,6 +170,67 @@ func (s *SparkIntegrationTestSuite) TestAddFile() {
 		strings.HasSuffix(strings.TrimSpace(output), strings.TrimSpace(expectedOutput)),
 		"result does not contain expected output: %s", expectedOutput,
 	)
+}
+
+func (s *SparkIntegrationTestSuite) TestDelete() {
+	const filename = "s3://warehouse/default/test_partitioned_by_days/data/ts_day=2023-03-13/supertest.parquet"
+
+	tbl, err := s.cat.LoadTable(s.ctx, catalog.ToIdentifier("default", "test_partitioned_by_days"))
+	s.Require().NoError(err)
+
+	sc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	if err != nil {
+		panic(err)
+	}
+
+	bldr := array.NewRecordBuilder(memory.DefaultAllocator, sc)
+	defer bldr.Release()
+
+	tm := time.Date(2023, 0o3, 13, 13, 22, 0, 0, time.UTC)
+	ts, _ := arrow.TimestampFromTime(tm, arrow.Microsecond)
+	bldr.Field(0).(*array.Date32Builder).Append(arrow.Date32FromTime(tm))
+	bldr.Field(1).(*array.TimestampBuilder).Append(ts)
+	bldr.Field(2).(*array.Int32Builder).Append(13)
+	bldr.Field(3).(*array.StringBuilder).Append("m")
+
+	rec := bldr.NewRecordBatch()
+	defer rec.Release()
+
+	fw, err := mustFS(s.T(), tbl).(iceio.WriteFileIO).Create(filename)
+	if err != nil {
+		panic(err)
+	}
+	defer func() {
+		s.Require().NoError(fw.Close())
+	}()
+
+	err = pqarrow.WriteTable(array.NewTableFromRecords(sc, []arrow.RecordBatch{rec}), fw, rec.NumRows(), parquet.NewWriterProperties(), pqarrow.DefaultWriterProps())
+	s.Require().NoError(err)
+
+	tx := tbl.NewTransaction()
+	err = tx.AddFiles(s.ctx, []string{filename}, nil, false)
+	s.Require().NoError(err)
+
+	tbl, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--test", "TestAddedFile")
+	s.Require().NoError(err)
+	s.Require().Contains(output, `|13      |`)
+
+	tx = tbl.NewTransaction()
+	err = tx.Delete(s.ctx, iceberg.EqualTo(iceberg.Reference("number"), "10"), nil)
+	s.Require().NoError(err)
+	tbl, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	scan := tbl.Scan()
+	arrowTable, err := scan.ToArrowTable(s.ctx)
+	s.Require().NoError(err)
+	fmt.Printf("content after delete: %s\n", arrowTable.String())
+	output, err = recipe.ExecuteSpark(s.T(), "./validation.py", "--test", "TestAddedFile")
+	s.Require().NoError(err)
+	s.Require().Contains(output, `|12      |`)
 }
 
 func (s *SparkIntegrationTestSuite) TestDifferentDataTypes() {
