@@ -92,8 +92,9 @@ func (s *SparkIntegrationTestSuite) TestSetProperties() {
 	_, err = tx.Commit(s.ctx)
 	s.Require().NoError(err)
 
-	expectedOutput := `
-+----------------------------------+---------------+
+	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--sql", "SHOW TBLPROPERTIES default.go_test_set_properties")
+	s.Require().NoError(err)
+	s.Require().Contains(output, `+----------------------------------+---------------+
 |key                               |value          |
 +----------------------------------+---------------+
 |commit.manifest-merge.enabled     |true           |
@@ -103,15 +104,7 @@ func (s *SparkIntegrationTestSuite) TestSetProperties() {
 |format                            |iceberg/parquet|
 |format-version                    |2              |
 |write.parquet.compression-codec   |snappy         |
-+----------------------------------+---------------+
-`
-
-	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--test", "TestSetProperties")
-	s.Require().NoError(err)
-	s.Require().True(
-		strings.HasSuffix(strings.TrimSpace(output), strings.TrimSpace(expectedOutput)),
-		"result does not contain expected output: %s", expectedOutput,
-	)
++----------------------------------+---------------+`)
 }
 
 func (s *SparkIntegrationTestSuite) TestAddFile() {
@@ -163,7 +156,7 @@ func (s *SparkIntegrationTestSuite) TestAddFile() {
 +--------+
 `
 
-	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--test", "TestAddedFile")
+	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--sql", "SELECT COUNT(*) FROM default.test_partitioned_by_days")
 	s.Require().NoError(err)
 	s.Require().True(
 		strings.HasSuffix(strings.TrimSpace(output), strings.TrimSpace(expectedOutput)),
@@ -274,8 +267,9 @@ func (s *SparkIntegrationTestSuite) TestDifferentDataTypes() {
 	_, err = tx.Commit(s.ctx)
 	s.Require().NoError(err)
 
-	expectedSchema := `
-+------------------+-------------+-------+
+	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--sql", "DESCRIBE TABLE EXTENDED default.go_test_different_data_types")
+	s.Require().NoError(err)
+	s.Require().Contains(output, `+------------------+-------------+-------+
 |col_name          |data_type    |comment|
 +------------------+-------------+-------+
 |bool              |boolean      |NULL   |
@@ -294,29 +288,17 @@ func (s *SparkIntegrationTestSuite) TestDifferentDataTypes() {
 |small_dec         |decimal(8,2) |NULL   |
 |med_dec           |decimal(16,2)|NULL   |
 |large_dec         |decimal(24,2)|NULL   |
-|list              |array<int>   |NULL   |
-`
+|list              |array<int>   |NULL   |`)
 
-	expectedOutput := `
-+-----+------+----------------------+----+----+-----+------+-------------------+-------------------+----------+------------------------------------+------+-------------------------------------------------+---------+-----------------+-------------------------+------------+
+	output, err = recipe.ExecuteSpark(s.T(), "./validation.py", "--sql", "SELECT * FROM default.go_test_different_data_types")
+	s.Require().NoError(err)
+	s.Require().Contains(output, `+-----+------+----------------------+----+----+-----+------+-------------------+-------------------+----------+------------------------------------+------+-------------------------------------------------+---------+-----------------+-------------------------+------------+
 |bool |string|string_long           |int |long|float|double|timestamp          |timestamptz        |date      |uuid                                |binary|fixed                                            |small_dec|med_dec          |large_dec                |list        |
 +-----+------+----------------------+----+----+-----+------+-------------------+-------------------+----------+------------------------------------+------+-------------------------------------------------+---------+-----------------+-------------------------+------------+
 |false|a     |aaaaaaaaaaaaaaaaaaaaaa|1   |1   |0.0  |0.0   |2023-01-01 11:25:00|2023-01-01 19:25:00|2023-01-01|00000000-0000-0000-0000-000000000000|[01]  |[00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00]|123456.78|12345678901234.56|1234567890123456789012.34|[1, 2, 3]   |
 |NULL |NULL  |NULL                  |NULL|NULL|NULL |NULL  |NULL               |NULL               |NULL      |NULL                                |NULL  |NULL                                             |NULL     |NULL             |NULL                     |NULL        |
 |true |z     |zzzzzzzzzzzzzzzzzzzzzz|9   |9   |0.9  |0.9   |2023-03-01 11:25:00|2023-03-01 19:25:00|2023-03-01|11111111-1111-1111-1111-111111111111|[12]  |[11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11]|876543.21|65432109876543.21|4321098765432109876543.21|[-1, -2, -3]|
-+-----+------+----------------------+----+----+-----+------+-------------------+-------------------+----------+------------------------------------+------+-------------------------------------------------+---------+-----------------+-------------------------+------------+
-`
-
-	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--test", "TestReadDifferentDataTypes")
-	s.Require().NoError(err)
-	s.Require().True(
-		strings.Contains(strings.TrimSpace(output), strings.TrimSpace(expectedSchema)),
-		"result does not contain expected output: %s", expectedOutput,
-	)
-	s.Require().True(
-		strings.HasSuffix(strings.TrimSpace(output), strings.TrimSpace(expectedOutput)),
-		"result does not contain expected output: %s", expectedOutput,
-	)
++-----+------+----------------------+----+----+-----+------+-------------------+-------------------+----------+------------------------------------+------+-------------------------------------------------+---------+-----------------+-------------------------+------------+`)
 }
 
 func (s *SparkIntegrationTestSuite) TestUpdateSpec() {
@@ -345,22 +327,12 @@ func (s *SparkIntegrationTestSuite) TestUpdateSpec() {
 	s.Require().NoError(err)
 	_, err = tx.Commit(s.ctx)
 
-	partitionExpectedOutput := `
-|# Partitioning              |                                            |       |
+	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--sql", "DESCRIBE TABLE EXTENDED default.go_test_update_spec")
+	s.Require().NoError(err)
+	s.Require().Contains(output, `|# Partitioning              |                                            |       |
 |Part 0                      |truncate(5, bar)                            |       |
 |Part 1                      |bucket(3, baz)                              |       |
-|                            |                                            |       |
-`
-	metadataPartition := `
-|_partition                  |struct<bar_truncate:string,baz_bucket_3:int>|       |
-`
-
-	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--test", "TestReadSpecUpdate")
-	s.Require().NoError(err)
-	s.Require().True(
-		strings.Contains(strings.TrimSpace(output), strings.TrimSpace(partitionExpectedOutput)),
-		"result does not contain expected output: %s", metadataPartition,
-	)
+|                            |                                            |       |`)
 }
 
 func (s *SparkIntegrationTestSuite) TestOverwriteBasic() {
@@ -407,27 +379,14 @@ func (s *SparkIntegrationTestSuite) TestOverwriteBasic() {
 	_, err = tx.Commit(s.ctx)
 	s.Require().NoError(err)
 
-	expectedOutput := `
-+--------+
-|count(1)|
-+--------+
-|2       |
-+--------+
-
-+-----+-----------+---+
+	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--sql", "SELECT * FROM default.go_test_overwrite_basic ORDER BY baz")
+	s.Require().NoError(err)
+	s.Require().Contains(output, `+-----+-----------+---+
 |foo  |bar        |baz|
 +-----+-----------+---+
 |false|overwritten|300|
 |true |new_data   |400|
-+-----+-----------+---+
-`
-
-	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--test", "TestOverwriteBasic")
-	s.Require().NoError(err)
-	s.Require().True(
-		strings.HasSuffix(strings.TrimSpace(output), strings.TrimSpace(expectedOutput)),
-		"result does not contain expected output: %s", expectedOutput,
-	)
++-----+-----------+---+`)
 }
 
 func (s *SparkIntegrationTestSuite) TestOverwriteWithFilter() {
@@ -474,27 +433,106 @@ func (s *SparkIntegrationTestSuite) TestOverwriteWithFilter() {
 	_, err = tx.Commit(s.ctx)
 	s.Require().NoError(err)
 
-	expectedOutput := `
-+--------+
-|count(1)|
-+--------+
-|2       |
-+--------+
-
-+-----+---------------+---+
+	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--sql", "SELECT * FROM default.go_test_overwrite_filter ORDER BY baz")
+	s.Require().NoError(err)
+	s.Require().Contains(output, `+-----+---------------+---+
 |foo  |bar            |baz|
 +-----+---------------+---+
 |false|should_remain  |200|
 |true |new_replacement|999|
-+-----+---------------+---+
-`
++-----+---------------+---+`)
+}
 
-	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--test", "TestOverwriteWithFilter")
-	s.Require().NoError(err)
-	s.Require().True(
-		strings.HasSuffix(strings.TrimSpace(output), strings.TrimSpace(expectedOutput)),
-		"result does not contain expected output: %s", expectedOutput,
+func (s *SparkIntegrationTestSuite) TestDelete() {
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "first_name", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 2, Name: "last_name", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int32},
 	)
+
+	tbl, err := s.cat.CreateTable(s.ctx, catalog.ToIdentifier("default", "go_test_delete"), icebergSchema)
+	s.Require().NoError(err)
+
+	arrowSchema, err := table.SchemaToArrowSchema(icebergSchema, nil, true, false)
+	s.Require().NoError(err)
+
+	initialTable, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[
+			{"first_name": "alan", "last_name": "gopher", "age": 7},
+			{"first_name": "steve", "last_name": "gopher", "age": 5},
+			{"first_name": "dead", "last_name": "gopher", "age": 97}
+		]`,
+	})
+	s.Require().NoError(err)
+	defer initialTable.Release()
+
+	tx := tbl.NewTransaction()
+	err = tx.AppendTable(s.ctx, initialTable, 3, nil)
+	s.Require().NoError(err)
+	tbl, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	// Delete the dead gopher and confirm that alan and steve are still present
+	filter := iceberg.EqualTo(iceberg.Reference("first_name"), "dead")
+	tx = tbl.NewTransaction()
+	err = tx.Delete(s.ctx, filter, nil)
+	s.Require().NoError(err)
+	_, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--sql", "SELECT * FROM default.go_test_delete ORDER BY age")
+	s.Require().NoError(err)
+	s.Require().Contains(output, `|first_name|last_name|age|
++----------+---------+---+
+|steve     |gopher   |5  |
+|alan      |gopher   |7  |
++----------+---------+---+`)
+}
+
+func (s *SparkIntegrationTestSuite) TestDeleteInsensitive() {
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "first_name", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 2, Name: "last_name", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int32},
+	)
+
+	tbl, err := s.cat.CreateTable(s.ctx, catalog.ToIdentifier("default", "go_test_delete_insensitive"), icebergSchema)
+	s.Require().NoError(err)
+
+	arrowSchema, err := table.SchemaToArrowSchema(icebergSchema, nil, true, false)
+	s.Require().NoError(err)
+
+	initialTable, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[
+			{"first_name": "alan", "last_name": "gopher", "age": 7},
+			{"first_name": "steve", "last_name": "gopher", "age": 5},
+			{"first_name": "dead", "last_name": "gopher", "age": 97}
+		]`,
+	})
+	s.Require().NoError(err)
+	defer initialTable.Release()
+
+	tx := tbl.NewTransaction()
+	err = tx.AppendTable(s.ctx, initialTable, 3, nil)
+	s.Require().NoError(err)
+	tbl, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	// Delete the dead gopher and confirm that alan and steve are still present
+	filter := iceberg.EqualTo(iceberg.Reference("FIRST_NAME"), "dead")
+	tx = tbl.NewTransaction()
+	err = tx.Delete(s.ctx, filter, nil, table.WithDeleteCaseInsensitive())
+	s.Require().NoError(err)
+	_, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--sql", "SELECT * FROM default.go_test_delete_insensitive ORDER BY age")
+	s.Require().NoError(err)
+	s.Require().Contains(output, `|first_name|last_name|age|
++----------+---------+---+
+|steve     |gopher   |5  |
+|alan      |gopher   |7  |
++----------+---------+---+`)
 }
 
 func TestSparkIntegration(t *testing.T) {
