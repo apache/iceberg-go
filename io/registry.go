@@ -68,6 +68,9 @@ func Register(scheme string, factory SchemeFactory) {
 	if factory == nil {
 		panic("io: Register factory is nil")
 	}
+	if _, dup := defaultRegistry.get(scheme); dup {
+		panic("io: Register called twice for scheme " + scheme)
+	}
 	defaultRegistry.set(scheme, factory)
 }
 
