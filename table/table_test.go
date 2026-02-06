@@ -1683,25 +1683,25 @@ func TestNullableStructRequiredField(t *testing.T) {
 	arrowSchema := arrow.NewSchema([]arrow.Field{
 		{
 			Name: "analytic", Type: arrow.StructOf(
-				arrow.Field{Name: "category", Type: arrow.BinaryTypes.String, Nullable: true},
-				arrow.Field{Name: "desc", Type: arrow.BinaryTypes.String, Nullable: true},
-				arrow.Field{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
-				arrow.Field{Name: "related_analytics", Type: arrow.ListOf(
-					arrow.StructOf(
-						arrow.Field{Name: "category", Type: arrow.BinaryTypes.String, Nullable: true},
-						arrow.Field{Name: "desc", Type: arrow.BinaryTypes.String, Nullable: true},
-						arrow.Field{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
-						arrow.Field{Name: "type", Type: arrow.BinaryTypes.String, Nullable: true},
-						arrow.Field{Name: "type_id", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-						arrow.Field{Name: "uid", Type: arrow.BinaryTypes.String, Nullable: true},
-						arrow.Field{Name: "version", Type: arrow.BinaryTypes.String, Nullable: true},
-					),
-				), Nullable: true},
-				arrow.Field{Name: "type", Type: arrow.BinaryTypes.String, Nullable: true},
-				arrow.Field{Name: "type_id", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-				arrow.Field{Name: "uid", Type: arrow.BinaryTypes.String, Nullable: true},
-				arrow.Field{Name: "version", Type: arrow.BinaryTypes.String, Nullable: true},
-			), Nullable: true,
+			arrow.Field{Name: "category", Type: arrow.BinaryTypes.String, Nullable: true},
+			arrow.Field{Name: "desc", Type: arrow.BinaryTypes.String, Nullable: true},
+			arrow.Field{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+			arrow.Field{Name: "related_analytics", Type: arrow.ListOf(
+				arrow.StructOf(
+					arrow.Field{Name: "category", Type: arrow.BinaryTypes.String, Nullable: true},
+					arrow.Field{Name: "desc", Type: arrow.BinaryTypes.String, Nullable: true},
+					arrow.Field{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+					arrow.Field{Name: "type", Type: arrow.BinaryTypes.String, Nullable: true},
+					arrow.Field{Name: "type_id", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+					arrow.Field{Name: "uid", Type: arrow.BinaryTypes.String, Nullable: true},
+					arrow.Field{Name: "version", Type: arrow.BinaryTypes.String, Nullable: true},
+				),
+			), Nullable: true},
+			arrow.Field{Name: "type", Type: arrow.BinaryTypes.String, Nullable: true},
+			arrow.Field{Name: "type_id", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			arrow.Field{Name: "uid", Type: arrow.BinaryTypes.String, Nullable: true},
+			arrow.Field{Name: "version", Type: arrow.BinaryTypes.String, Nullable: true},
+		), Nullable: true,
 		},
 		{Name: "uid", Type: arrow.BinaryTypes.String, Nullable: true},
 	}, nil)
