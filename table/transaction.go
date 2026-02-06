@@ -23,6 +23,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"iter"
+	"path"
 	"runtime"
 	"slices"
 	"sync"
@@ -30,8 +32,11 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table/internal"
+	"github.com/apache/iceberg-go/table/substrait"
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 )
@@ -897,7 +902,7 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(fs, snapshotProps, operation).mergeOverwrite(&commitUUID)
 
-	filesToDelete, filesToRewrite, err := t.classifyFilesForOverwrite(ctx, fs, filter, caseSensitive, concurrency)
+	filesToDelete, filesToRewrite, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
 	if err != nil {
 		return nil, err
 	}
@@ -908,6 +913,45 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 
 	if len(filesToRewrite) > 0 {
 		if err := t.rewriteFilesWithFilter(ctx, fs, updater, filesToRewrite, filter, caseSensitive, concurrency); err != nil {
+			return nil, err
+		}
+	}
+
+	return updater, nil
+}
+
+func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotProps iceberg.Properties, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (*snapshotProducer, error) {
+	fs, err := t.tbl.fsF(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if t.meta.NameMapping() == nil {
+		nameMapping := t.meta.CurrentSchema().NameMapping()
+		mappingJson, err := json.Marshal(nameMapping)
+		if err != nil {
+			return nil, err
+		}
+		err = t.SetProperties(iceberg.Properties{DefaultNameMappingKey: string(mappingJson)})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	commitUUID := uuid.New()
+	updater := t.updateSnapshot(fs, snapshotProps, OpDelete).mergeOverwrite(&commitUUID)
+
+	filesToDelete, withPartialDeletions, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, df := range filesToDelete {
+		updater.deleteDataFile(df)
+	}
+
+	if len(withPartialDeletions) > 0 {
+		if err := t.writePositionDeletesForFiles(ctx, fs, updater, withPartialDeletions, filter, caseSensitive, concurrency); err != nil {
 			return nil, err
 		}
 	}
@@ -958,7 +1002,7 @@ func WithDeleteCaseInsensitive() DeleteOption {
 //
 // The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
 // can be overridden using the WithOverwriteConcurrency option. Defaults to runtime.GOMAXPROCS(0).
-func (t *Transaction) Delete(ctx context.Context, filter iceberg.BooleanExpression, snapshotProps iceberg.Properties, opts ...DeleteOption) error {
+func (t *Transaction) Delete(ctx context.Context, filter iceberg.BooleanExpression, snapshotProps iceberg.Properties, opts ...DeleteOption) (err error) {
 	deleteOp := deleteOperation{
 		concurrency:   runtime.GOMAXPROCS(0),
 		caseSensitive: true,
@@ -967,14 +1011,23 @@ func (t *Transaction) Delete(ctx context.Context, filter iceberg.BooleanExpressi
 		apply(&deleteOp)
 	}
 
+	var updater *snapshotProducer
 	writeDeleteMode := t.meta.props.Get(WriteDeleteModeKey, WriteDeleteModeDefault)
-	if writeDeleteMode != WriteModeCopyOnWrite {
-		return fmt.Errorf("'%s' is set to '%s' but only '%s' is currently supported", WriteDeleteModeKey, writeDeleteMode, WriteModeCopyOnWrite)
+	switch writeDeleteMode {
+	case WriteModeCopyOnWrite:
+		updater, err = t.performCopyOnWriteDeletion(ctx, OpDelete, snapshotProps, filter, deleteOp.caseSensitive, deleteOp.concurrency)
+		if err != nil {
+			return err
+		}
+	case WriteModeMergeOnRead:
+		updater, err = t.performMergeOnReadDeletion(ctx, snapshotProps, filter, deleteOp.caseSensitive, deleteOp.concurrency)
+		if err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported write mode: '%s'", writeDeleteMode)
 	}
-	updater, err := t.performCopyOnWriteDeletion(ctx, OpDelete, snapshotProps, filter, deleteOp.caseSensitive, deleteOp.concurrency)
-	if err != nil {
-		return err
-	}
+
 	updates, reqs, err := updater.commit()
 	if err != nil {
 		return err
@@ -983,9 +1036,9 @@ func (t *Transaction) Delete(ctx context.Context, filter iceberg.BooleanExpressi
 	return t.apply(updates, reqs)
 }
 
-// classifyFilesForOverwrite classifies existing data files based on the provided filter.
+// classifyFilesForDeletions classifies existing data files based on the provided filter.
 // Returns files to delete completely, files to rewrite partially, and any error.
-func (t *Transaction) classifyFilesForOverwrite(ctx context.Context, fs io.IO, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (filesToDelete, filesToRewrite []iceberg.DataFile, err error) {
+func (t *Transaction) classifyFilesForDeletions(ctx context.Context, fs io.IO, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (filesToDelete, filesWithPartialDeletions []iceberg.DataFile, err error) {
 	s := t.meta.currentSnapshot()
 	if s == nil {
 		return nil, nil, nil
@@ -1001,16 +1054,46 @@ func (t *Transaction) classifyFilesForOverwrite(ctx context.Context, fs io.IO, f
 			}
 		}
 
-		return filesToDelete, filesToRewrite, nil
+		return filesToDelete, filesWithPartialDeletions, nil
 	}
 
-	return t.classifyFilesForFilteredOverwrite(ctx, fs, filter, caseSensitive, concurrency)
+	return t.classifyFilesForFilteredDeletions(ctx, fs, filter, caseSensitive, concurrency)
 }
 
-// classifyFilesForFilteredOverwrite classifies files for filtered overwrite operations.
+type fileClassificationTask struct {
+	meta             Metadata
+	partitionFilters *keyDefaultMap[int, iceberg.BooleanExpression]
+	caseSensitive    bool
+	rowFilter        iceberg.BooleanExpression
+}
+
+func newFileClassificationTask(meta Metadata, rowFilter iceberg.BooleanExpression, caseSensitive bool) *fileClassificationTask {
+	classificationTask := &fileClassificationTask{
+		meta:          meta,
+		caseSensitive: caseSensitive,
+		rowFilter:     rowFilter,
+	}
+	classificationTask.partitionFilters = newKeyDefaultMapWrapErr(classificationTask.buildPartitionProjection)
+
+	return classificationTask
+}
+
+func (t *fileClassificationTask) buildManifestEvaluator(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
+	return buildManifestEvaluator(specID, t.meta, t.partitionFilters, t.caseSensitive)
+}
+
+func (t *fileClassificationTask) buildPartitionProjection(specID int) (iceberg.BooleanExpression, error) {
+	return buildPartitionProjection(specID, t.meta, t.rowFilter, t.caseSensitive)
+}
+
+// classifyFilesForFilteredDeletions classifies files for filtered overwrite operations.
 // Returns files to delete completely, files to rewrite partially, and any error.
-func (t *Transaction) classifyFilesForFilteredOverwrite(ctx context.Context, fs io.IO, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (filesToDelete, filesToRewrite []iceberg.DataFile, err error) {
+func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs io.IO, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (filesToDelete, filesWithPartialDeletes []iceberg.DataFile, err error) {
 	schema := t.meta.CurrentSchema()
+	meta, err := t.meta.Build()
+	if err != nil {
+		return nil, nil, err
+	}
 
 	inclusiveEvaluator, err := newInclusiveMetricsEvaluator(schema, filter, caseSensitive, false)
 	if err != nil {
@@ -1022,18 +1105,8 @@ func (t *Transaction) classifyFilesForFilteredOverwrite(ctx context.Context, fs 
 		return nil, nil, fmt.Errorf("failed to create strict metrics evaluator: %w", err)
 	}
 
-	var manifestEval func(iceberg.ManifestFile) (bool, error)
-	meta, err := t.meta.Build()
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to build metadata: %w", err)
-	}
-	spec := meta.PartitionSpec()
-	if !spec.IsUnpartitioned() {
-		manifestEval, err = newManifestEvaluator(spec, schema, filter, caseSensitive)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to create manifest evaluator: %w", err)
-		}
-	}
+	classificationTask := newFileClassificationTask(meta, filter, caseSensitive)
+	manifestEvaluators := newKeyDefaultMapWrapErr(classificationTask.buildManifestEvaluator)
 
 	s := t.meta.currentSnapshot()
 	var manifests []iceberg.ManifestFile
@@ -1044,11 +1117,7 @@ func (t *Transaction) classifyFilesForFilteredOverwrite(ctx context.Context, fs 
 		}
 	}
 
-	var (
-		mu             sync.Mutex
-		allFilesToDel  []iceberg.DataFile
-		allFilesToRewr []iceberg.DataFile
-	)
+	var mu sync.Mutex
 
 	g, _ := errgroup.WithContext(ctx)
 	g.SetLimit(min(concurrency, len(manifests)))
@@ -1056,6 +1125,7 @@ func (t *Transaction) classifyFilesForFilteredOverwrite(ctx context.Context, fs 
 	for _, manifest := range manifests {
 		manifest := manifest // capture loop variable
 		g.Go(func() error {
+			manifestEval := manifestEvaluators.Get(int(manifest.PartitionSpecID()))
 			if manifestEval != nil {
 				match, err := manifestEval(manifest)
 				if err != nil {
@@ -1107,8 +1177,8 @@ func (t *Transaction) classifyFilesForFilteredOverwrite(ctx context.Context, fs 
 
 			if len(localDelete) > 0 || len(localRewrite) > 0 {
 				mu.Lock()
-				allFilesToDel = append(allFilesToDel, localDelete...)
-				allFilesToRewr = append(allFilesToRewr, localRewrite...)
+				filesToDelete = append(filesToDelete, localDelete...)
+				filesWithPartialDeletes = append(filesWithPartialDeletes, localRewrite...)
 				mu.Unlock()
 			}
 
@@ -1120,7 +1190,7 @@ func (t *Transaction) classifyFilesForFilteredOverwrite(ctx context.Context, fs 
 		return nil, nil, err
 	}
 
-	return allFilesToDel, allFilesToRewr, nil
+	return filesToDelete, filesWithPartialDeletes, nil
 }
 
 // rewriteFilesWithFilter rewrites data files by preserving only rows that do NOT match the filter
@@ -1210,6 +1280,116 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, fs io.IO, originalF
 	}
 
 	return result, nil
+}
+
+// writePositionDeletesForFiles rewrites data files by preserving only rows that do NOT match the filter
+func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO, updater *snapshotProducer, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) error {
+	posDeleteRecIter, err := t.makePositionDeleteRecordsForFilter(ctx, fs, files, filter, caseSensitive, concurrency)
+	if err != nil {
+		return err
+	}
+
+	partitionDataPerFile := make(map[string]map[int]any, len(files))
+	for _, df := range files {
+		partitionDataPerFile[path.Dir(df.FilePath())] = df.Partition()
+	}
+
+	posDeleteFiles := positionDeleteRecordsToDataFiles(ctx, t.tbl.Location(), t.meta, partitionDataPerFile, recordWritingArgs{
+		sc:  PositionalDeleteArrowSchema,
+		itr: posDeleteRecIter,
+		fs:  fs.(io.WriteFileIO),
+	})
+
+	for f, err := range posDeleteFiles {
+		if err != nil {
+			return err
+		}
+		updater.appendPositionDeleteFile(f)
+	}
+
+	return nil
+}
+
+func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs io.IO, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (seq2 iter.Seq2[arrow.RecordBatch, error], err error) {
+	tasks := make([]FileScanTask, 0, len(files))
+	for _, f := range files {
+		tasks = append(tasks, FileScanTask{
+			File:   f,
+			Start:  0,
+			Length: f.FileSizeBytes(),
+		})
+	}
+
+	boundFilter, err := iceberg.BindExpr(t.meta.CurrentSchema(), filter, caseSensitive)
+	if err != nil {
+		return nil, fmt.Errorf("failed to bind filter: %w", err)
+	}
+
+	meta, err := t.meta.Build()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build metadata: %w", err)
+	}
+
+	scanner := &arrowScan{
+		metadata:        meta,
+		fs:              fs,
+		projectedSchema: t.meta.CurrentSchema(),
+		boundRowFilter:  boundFilter,
+		caseSensitive:   caseSensitive,
+		rowLimit:        -1, // No limit
+		concurrency:     concurrency,
+	}
+
+	deletesPerFile, err := readAllDeleteFiles(ctx, fs, tasks, concurrency)
+	if err != nil {
+		return nil, err
+	}
+
+	extSet := substrait.NewExtensionSet()
+
+	ctx, cancel := context.WithCancelCause(exprs.WithExtensionIDSet(ctx, extSet))
+	taskChan := make(chan internal.Enumerated[FileScanTask], len(tasks))
+
+	numWorkers := min(concurrency, len(tasks))
+	records := make(chan enumeratedRecord, numWorkers)
+
+	var wg sync.WaitGroup
+	wg.Add(numWorkers)
+	for i := 0; i < numWorkers; i++ {
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case task, ok := <-taskChan:
+					if !ok {
+						return
+					}
+
+					if err := scanner.producePosDeletesFromTask(ctx, task, deletesPerFile[task.Value.File.FilePath()], records); err != nil {
+						cancel(err)
+
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	go func() {
+		for i, t := range tasks {
+			taskChan <- internal.Enumerated[FileScanTask]{
+				Value: t, Index: i, Last: i == len(tasks)-1,
+			}
+		}
+		close(taskChan)
+
+		wg.Wait()
+		close(records)
+	}()
+
+	return createIterator(ctx, uint(numWorkers), records, deletesPerFile, cancel, scanner.rowLimit), nil
 }
 
 func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {

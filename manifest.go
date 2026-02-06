@@ -1136,7 +1136,7 @@ func (w *ManifestWriter) Close() error {
 	return w.writer.Close()
 }
 
-func (w *ManifestWriter) ToManifestFile(location string, length int64) (ManifestFile, error) {
+func (w *ManifestWriter) ToManifestFile(location string, length int64, content ManifestContent) (ManifestFile, error) {
 	if err := w.Close(); err != nil {
 		return nil, err
 	}
@@ -1155,7 +1155,7 @@ func (w *ManifestWriter) ToManifestFile(location string, length int64) (Manifest
 		Path:               location,
 		Len:                length,
 		SpecID:             int32(w.spec.id),
-		Content:            ManifestContentData,
+		Content:            content,
 		SeqNumber:          -1,
 		MinSeqNumber:       w.minSeqNum,
 		AddedSnapshotID:    w.snapshotID,
@@ -1501,7 +1501,7 @@ func WriteManifest(
 		return nil, err
 	}
 
-	return w.ToManifestFile(filename, cnt.Count)
+	return w.ToManifestFile(filename, cnt.Count, ManifestContentData)
 }
 
 // ManifestEntryStatus defines constants for the entry status of
@@ -2315,5 +2315,5 @@ type ManifestEntry interface {
 
 var PositionalDeleteSchema = NewSchema(0,
 	NestedField{ID: 2147483546, Type: PrimitiveTypes.String, Name: "file_path", Required: true},
-	NestedField{ID: 2147483545, Type: PrimitiveTypes.Int32, Name: "pos", Required: true},
+	NestedField{ID: 2147483545, Type: PrimitiveTypes.Int64, Name: "pos", Required: true},
 )

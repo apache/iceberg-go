@@ -261,7 +261,7 @@ func TestMetricsPrimitiveTypes(t *testing.T) {
 
 	stats := format.DataFileStatsFromMeta(internal.Metadata(meta), getCollector(), mapping)
 	df := stats.ToDataFile(tblMeta.CurrentSchema(), tblMeta.PartitionSpec(), "fake-path.parquet",
-		iceberg.ParquetFile, meta.GetSourceFileSize(), nil)
+		iceberg.ParquetFile, iceberg.EntryContentData, meta.GetSourceFileSize(), nil)
 
 	assert.Len(t, df.ValueCounts(), 15)
 	assert.Len(t, df.NullValueCounts(), 15)
@@ -463,7 +463,7 @@ func TestDecimalPhysicalTypes(t *testing.T) {
 			require.NotNil(t, stats)
 
 			df := stats.ToDataFile(tableMeta.CurrentSchema(), tableMeta.PartitionSpec(), "test.parquet",
-				iceberg.ParquetFile, meta.GetSourceFileSize(), nil)
+				iceberg.ParquetFile, iceberg.EntryContentData, meta.GetSourceFileSize(), nil)
 
 			// Verify bounds are correctly extracted
 			require.Contains(t, df.LowerBoundValues(), 1)

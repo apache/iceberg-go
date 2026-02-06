@@ -536,6 +536,120 @@ func (s *SparkIntegrationTestSuite) TestDeleteInsensitive() {
 +----------+---------+---+`)
 }
 
+func (s *SparkIntegrationTestSuite) TestDeleteMergeOnReadUnpartitioned() {
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "first_name", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 2, Name: "last_name", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int32},
+	)
+
+	tbl, err := s.cat.CreateTable(s.ctx, catalog.ToIdentifier("default", "go_test_merge_on_read_delete"), icebergSchema,
+		catalog.WithProperties(
+			map[string]string{
+				table.WriteDeleteModeKey: table.WriteModeMergeOnRead,
+			},
+		),
+	)
+	s.Require().NoError(err)
+
+	arrowSchema, err := table.SchemaToArrowSchema(icebergSchema, nil, true, false)
+	s.Require().NoError(err)
+
+	initialTable, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[
+			{"first_name": "alan", "last_name": "gopher", "age": 7},
+			{"first_name": "steve", "last_name": "gopher", "age": 5},
+			{"first_name": "dead", "last_name": "gopher", "age": 97}
+		]`,
+	})
+	s.Require().NoError(err)
+	defer initialTable.Release()
+
+	tx := tbl.NewTransaction()
+	err = tx.AppendTable(s.ctx, initialTable, 3, nil)
+	s.Require().NoError(err)
+	tbl, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	// Delete the dead gopher and confirm that alan and steve are still present
+	filter := iceberg.EqualTo(iceberg.Reference("first_name"), "dead")
+	tx = tbl.NewTransaction()
+	err = tx.Delete(s.ctx, filter, nil)
+	s.Require().NoError(err)
+	_, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--sql", "SELECT * FROM default.go_test_merge_on_read_delete ORDER BY age")
+	s.Require().NoError(err)
+	s.Require().Contains(output, `|first_name|last_name|age|
++----------+---------+---+
+|steve     |gopher   |5  |
+|alan      |gopher   |7  |
++----------+---------+---+`)
+}
+
+func (s *SparkIntegrationTestSuite) TestDeleteMergeOnReadPartitioned() {
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "first_name", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 2, Name: "last_name", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int32},
+	)
+
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceID: 3,
+		Name:     "age_bucket",
+		Transform: iceberg.BucketTransform{
+			NumBuckets: 2,
+		},
+	})
+	tbl, err := s.cat.CreateTable(s.ctx, catalog.ToIdentifier("default", "go_test_merge_on_read_delete_partitioned"), icebergSchema,
+		catalog.WithProperties(
+			map[string]string{
+				table.WriteDeleteModeKey: table.WriteModeMergeOnRead,
+			},
+		),
+		catalog.WithPartitionSpec(&spec),
+	)
+	s.Require().NoError(err)
+
+	arrowSchema, err := table.SchemaToArrowSchema(icebergSchema, nil, true, false)
+	s.Require().NoError(err)
+
+	initialTable, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[
+			{"first_name": "alan", "last_name": "gopher", "age": 7},
+			{"first_name": "steve", "last_name": "gopher", "age": 5},
+			{"first_name": "dead", "last_name": "gopher", "age": 97}
+			{"first_name": "uncle", "last_name": "gopher", "age": 90}
+		]`,
+	})
+	s.Require().NoError(err)
+	defer initialTable.Release()
+
+	tx := tbl.NewTransaction()
+	err = tx.AppendTable(s.ctx, initialTable, 3, nil)
+	s.Require().NoError(err)
+	tbl, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	// Delete the dead gopher and confirm that alan and steve are still present
+	filter := iceberg.NewAnd(iceberg.GreaterThan(iceberg.Reference("age"), "50"), iceberg.EqualTo(iceberg.Reference("first_name"), "dead"))
+	tx = tbl.NewTransaction()
+	err = tx.Delete(s.ctx, filter, nil)
+	s.Require().NoError(err)
+	_, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--sql", "SELECT * FROM default.go_test_merge_on_read_delete_partitioned ORDER BY age")
+	s.Require().NoError(err)
+	s.Require().Contains(output, `|first_name|last_name|age|
++----------+---------+---+
+|steve     |gopher   |5  |
+|alan      |gopher   |7  |
+|uncle     |gopher   |90 |
++----------+---------+---+`)
+}
+
 func TestSparkIntegration(t *testing.T) {
 	suite.Run(t, new(SparkIntegrationTestSuite))
 }
