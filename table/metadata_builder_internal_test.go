@@ -570,7 +570,7 @@ func TestSetBranchSnapshotCreatesBranchIfNotExists(t *testing.T) {
 	require.Equal(t, int64(2), builder.updates[1].(*setSnapshotRefUpdate).SnapshotID)
 }
 
-func TestRemoveSnapshotRemovesBranch(t *testing.T) {
+func TestRemoveSnapshotSkipsReferencedSnapshot(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	schemaID := 0
 	snapshot := Snapshot{
@@ -607,19 +607,92 @@ func TestRemoveSnapshotRemovesBranch(t *testing.T) {
 	require.Equal(t, BranchRef, builder.updates[1].(*setSnapshotRefUpdate).RefType)
 	require.Equal(t, int64(2), builder.updates[1].(*setSnapshotRefUpdate).SnapshotID)
 
+	// Attempting to remove a snapshot that is referenced by a branch should
+	// be a no-op. The snapshot and its ref must remain intact to prevent
+	// race conditions where a concurrent commit links a ref to a snapshot
+	// being expired by a maintenance job.
 	newBuilder, err := MetadataBuilderFromBase(meta, "")
 	require.NoError(t, err)
 	require.NoError(t, newBuilder.RemoveSnapshots([]int64{snapshot.SnapshotID}))
 	newMeta, err := newBuilder.Build()
 	require.NoError(t, err)
 	require.NotNil(t, newMeta)
-	require.Len(t, newMeta.(*metadataV2).SnapshotRefs, 0)
-	require.Len(t, newBuilder.updates, 1)
-	require.Equal(t, newBuilder.updates[0].(*removeSnapshotsUpdate).SnapshotIDs[0], snapshot.SnapshotID)
-	for k, r := range newMeta.Refs() {
-		require.NotEqual(t, r.SnapshotID, snapshot.SnapshotID)
-		require.NotEqual(t, k, "new_branch")
+	require.Len(t, newMeta.(*metadataV2).SnapshotRefs, 1)
+	require.Equal(t, int64(2), newMeta.(*metadataV2).SnapshotRefs["new_branch"].SnapshotID)
+	require.Len(t, newBuilder.updates, 0)
+	require.NotNil(t, newMeta.SnapshotByID(snapshot.SnapshotID))
+}
+
+// TestRemoveSnapshotsConcurrentRefRace simulates the race condition between
+// snapshot expiration maintenance and a concurrent client commit that adds a
+// branch ref to a snapshot targeted for expiration.
+//
+// Timeline:
+//  1. Table has snap-1, snap-2, snap-3; main → snap-3
+//  2. Client commits: feature-branch → snap-2
+//  3. Maintenance loads fresh metadata (sees feature-branch → snap-2)
+//  4. Maintenance calls RemoveSnapshots([snap-1, snap-2])
+//
+// Expected: snap-1 is removed (unreferenced), snap-2 is skipped (referenced).
+func TestRemoveSnapshotsConcurrentRefRace(t *testing.T) {
+	schemaID := 0
+	newSnapshot := func(id int64, ts int64) Snapshot {
+		return Snapshot{
+			SnapshotID:       id,
+			ParentSnapshotID: nil,
+			SequenceNumber:   0,
+			TimestampMs:      ts,
+			ManifestList:     fmt.Sprintf("/snap-%d.avro", id),
+			Summary: &Summary{
+				Operation:  OpAppend,
+				Properties: map[string]string{},
+			},
+			SchemaID: &schemaID,
+		}
 	}
+
+	// Step 1: Build initial metadata with three snapshots, main → snap-3.
+	builder := builderWithoutChanges(2)
+	snap1 := newSnapshot(1, builder.base.LastUpdatedMillis()+1)
+	snap2 := newSnapshot(2, builder.base.LastUpdatedMillis()+2)
+	snap3 := newSnapshot(3, builder.base.LastUpdatedMillis()+3)
+	require.NoError(t, builder.AddSnapshot(&snap1))
+	require.NoError(t, builder.AddSnapshot(&snap2))
+	require.NoError(t, builder.AddSnapshot(&snap3))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 3, BranchRef))
+	baseMeta, err := builder.Build()
+	require.NoError(t, err)
+
+	// Step 2: Simulate client commit that links feature-branch → snap-2.
+	clientBuilder, err := MetadataBuilderFromBase(baseMeta, "")
+	require.NoError(t, err)
+	require.NoError(t, clientBuilder.SetSnapshotRef("feature-branch", 2, BranchRef))
+	postClientMeta, err := clientBuilder.Build()
+	require.NoError(t, err)
+
+	// Step 3: Maintenance loads fresh metadata (post-client commit) and
+	// tries to expire snap-1 and snap-2.
+	maintBuilder, err := MetadataBuilderFromBase(postClientMeta, "")
+	require.NoError(t, err)
+	require.NoError(t, maintBuilder.RemoveSnapshots([]int64{snap1.SnapshotID, snap2.SnapshotID}))
+	resultMeta, err := maintBuilder.Build()
+	require.NoError(t, err)
+
+	// snap-1 must be removed: it is unreferenced.
+	require.Nil(t, resultMeta.SnapshotByID(snap1.SnapshotID))
+
+	// snap-2 must survive: it is referenced by feature-branch.
+	require.NotNil(t, resultMeta.SnapshotByID(snap2.SnapshotID))
+	ref := resultMeta.(*metadataV2).SnapshotRefs["feature-branch"]
+	require.Equal(t, snap2.SnapshotID, ref.SnapshotID)
+
+	// snap-3 must survive: it is referenced by main.
+	require.NotNil(t, resultMeta.SnapshotByID(snap3.SnapshotID))
+
+	// Only one remove-snapshots update should be emitted, containing only snap-1.
+	require.Len(t, maintBuilder.updates, 1)
+	removeUpd := maintBuilder.updates[0].(*removeSnapshotsUpdate)
+	require.Equal(t, []int64{snap1.SnapshotID}, removeUpd.SnapshotIDs)
 }
 
 func TestExpireMetadataLog(t *testing.T) {
