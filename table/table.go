@@ -131,7 +131,7 @@ func (t Table) Append(ctx context.Context, rdr array.RecordReader, snapshotProps
 
 // OverwriteTable is a shortcut for NewTransaction().OverwriteTable() and then committing the transaction.
 //
-// The filter parameter determines which existing data to delete or rewrite:
+// An optional filter (see WithOverwriteFilter) determines which existing data to delete or rewrite:
 //   - If filter is nil or AlwaysTrue, all existing data files are deleted and replaced with new data.
 //   - If a filter is provided, it acts as a row-level predicate on existing data:
 //   - Files where all rows match the filter (strict match) are completely deleted
@@ -146,10 +146,11 @@ func (t Table) Append(ctx context.Context, rdr array.RecordReader, snapshotProps
 // New data from the provided table is written to the table regardless of the filter.
 //
 // The batchSize parameter refers to the batch size for reading the input data, not the batch size for writes.
-// The concurrency parameter controls the level of parallelism. If concurrency <= 0, defaults to runtime.GOMAXPROCS(0).
-func (t Table) OverwriteTable(ctx context.Context, tbl arrow.Table, batchSize int64, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, snapshotProps iceberg.Properties) (*Table, error) {
+// The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
+// can be overridden using the WithOverwriteConcurrency option. Defaults to runtime.GOMAXPROCS(0).
+func (t Table) OverwriteTable(ctx context.Context, tbl arrow.Table, batchSize int64, snapshotProps iceberg.Properties, opts ...OverwriteOption) (*Table, error) {
 	txn := t.NewTransaction()
-	if err := txn.OverwriteTable(ctx, tbl, batchSize, filter, caseSensitive, concurrency, snapshotProps); err != nil {
+	if err := txn.OverwriteTable(ctx, tbl, batchSize, snapshotProps, opts...); err != nil {
 		return nil, err
 	}
 
@@ -158,7 +159,7 @@ func (t Table) OverwriteTable(ctx context.Context, tbl arrow.Table, batchSize in
 
 // Overwrite is a shortcut for NewTransaction().Overwrite() and then committing the transaction.
 //
-// The filter parameter determines which existing data to delete or rewrite:
+// An optional filter (see WithOverwriteFilter) determines which existing data to delete or rewrite:
 //   - If filter is nil or AlwaysTrue, all existing data files are deleted and replaced with new data.
 //   - If a filter is provided, it acts as a row-level predicate on existing data:
 //   - Files where all rows match the filter (strict match) are completely deleted
@@ -172,10 +173,11 @@ func (t Table) OverwriteTable(ctx context.Context, tbl arrow.Table, batchSize in
 //
 // New data from the provided RecordReader is written to the table regardless of the filter.
 //
-// The concurrency parameter controls the level of parallelism. If concurrency <= 0, defaults to runtime.GOMAXPROCS(0).
-func (t Table) Overwrite(ctx context.Context, rdr array.RecordReader, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, snapshotProps iceberg.Properties) (*Table, error) {
+// The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
+// can be overridden using the WithOverwriteConcurrency option. Defaults to runtime.GOMAXPROCS(0).
+func (t Table) Overwrite(ctx context.Context, rdr array.RecordReader, snapshotProps iceberg.Properties, opts ...OverwriteOption) (*Table, error) {
 	txn := t.NewTransaction()
-	if err := txn.Overwrite(ctx, rdr, filter, caseSensitive, concurrency, snapshotProps); err != nil {
+	if err := txn.Overwrite(ctx, rdr, snapshotProps, opts...); err != nil {
 		return nil, err
 	}
 

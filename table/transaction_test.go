@@ -135,7 +135,7 @@ func (s *SparkIntegrationTestSuite) TestAddFile() {
 	bldr.Field(2).(*array.Int32Builder).Append(13)
 	bldr.Field(3).(*array.StringBuilder).Append("m")
 
-	rec := bldr.NewRecord()
+	rec := bldr.NewRecordBatch()
 	defer rec.Release()
 
 	fw, err := mustFS(s.T(), tbl).(iceio.WriteFileIO).Create(filename)
@@ -402,7 +402,7 @@ func (s *SparkIntegrationTestSuite) TestOverwriteBasic() {
 	defer overwriteTable.Release()
 
 	tx = tbl.NewTransaction()
-	err = tx.OverwriteTable(s.ctx, overwriteTable, 2, nil, true, 0, nil)
+	err = tx.OverwriteTable(s.ctx, overwriteTable, 2, nil)
 	s.Require().NoError(err)
 	_, err = tx.Commit(s.ctx)
 	s.Require().NoError(err)
@@ -469,7 +469,7 @@ func (s *SparkIntegrationTestSuite) TestOverwriteWithFilter() {
 
 	filter := iceberg.EqualTo(iceberg.Reference("foo"), true)
 	tx = tbl.NewTransaction()
-	err = tx.OverwriteTable(s.ctx, overwriteTable, 1, filter, true, 0, nil)
+	err = tx.OverwriteTable(s.ctx, overwriteTable, 1, nil, table.WithOverwriteFilter(filter))
 	s.Require().NoError(err)
 	_, err = tx.Commit(s.ctx)
 	s.Require().NoError(err)
