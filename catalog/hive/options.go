@@ -31,9 +31,6 @@ const (
 	// Warehouse is the default warehouse location for tables
 	Warehouse = "warehouse"
 
-	// KerberosAuth enables Kerberos authentication
-	KerberosAuth = "hive.kerberos-authentication"
-
 	TableTypeKey                = "table_type"
 	TableTypeIceberg            = "ICEBERG"
 	TableTypeExternalTable      = "EXTERNAL_TABLE"
@@ -53,10 +50,9 @@ const (
 )
 
 type HiveOptions struct {
-	URI          string
-	Warehouse    string
-	KerberosAuth bool
-	props        iceberg.Properties
+	URI       string
+	Warehouse string
+	props     iceberg.Properties
 
 	// Lock configuration for atomic commits
 	LockMinWaitTime time.Duration
@@ -81,9 +77,6 @@ func (o *HiveOptions) ApplyProperties(props iceberg.Properties) {
 	}
 	if warehouse, ok := props[Warehouse]; ok {
 		o.Warehouse = warehouse
-	}
-	if props.GetBool(KerberosAuth, false) {
-		o.KerberosAuth = true
 	}
 
 	// Parse lock configuration
@@ -116,12 +109,6 @@ func WithURI(uri string) Option {
 func WithWarehouse(warehouse string) Option {
 	return func(o *HiveOptions) {
 		o.Warehouse = warehouse
-	}
-}
-
-func WithKerberosAuth(enabled bool) Option {
-	return func(o *HiveOptions) {
-		o.KerberosAuth = enabled
 	}
 }
 

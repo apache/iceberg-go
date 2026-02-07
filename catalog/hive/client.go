@@ -19,7 +19,6 @@ package hive
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -66,10 +65,6 @@ func newHiveClient(uri string, opts *HiveOptions) (HiveClient, error) {
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid port: %w", err)
-	}
-
-	if opts != nil && opts.KerberosAuth {
-		return nil, errors.New("kerberos authentication is not yet supported")
 	}
 
 	config := gohive.NewMetastoreConnectConfiguration()
