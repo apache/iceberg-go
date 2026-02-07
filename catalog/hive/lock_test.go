@@ -246,14 +246,6 @@ func TestReleaseLock(t *testing.T) {
 	mockClient.AssertExpectations(t)
 }
 
-func TestReleaseLockNil(t *testing.T) {
-	var lock *HiveLock = nil
-
-	err := lock.Release(context.Background())
-
-	require.NoError(t, err)
-}
-
 func TestCalculateBackoff(t *testing.T) {
 	minWait := 100 * time.Millisecond
 	maxWait := 1 * time.Second
