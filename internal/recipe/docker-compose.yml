@@ -118,5 +118,42 @@ services:
       - 4443:4443
     command: ["-scheme", "http", "-port", "4443", "-backend", "memory", "-public-host", "fake-gcs-server:4443"]
 
+  hive-metastore:
+    image: apache/hive:4.0.0
+    container_name: hive-metastore
+    user: root
+    networks:
+      iceberg_net:
+    ports:
+      - 9083:9083
+    environment:
+      - SERVICE_NAME=metastore
+      - DB_DRIVER=derby
+    volumes:
+      - hive-metastore-data:/opt/hive/data
+      - /tmp/iceberg-warehouse:/tmp/iceberg-warehouse
+
+  hiveserver2:
+    image: apache/hive:4.0.0
+    container_name: hiveserver2
+    user: root
+    networks:
+      iceberg_net:
+    depends_on:
+      - hive-metastore
+    ports:
+      - "10003:10000"  # Adjusted to avoid conflict with spark-iceberg
+      - "10002:10002"  # Web UI
+    environment:
+      - SERVICE_NAME=hiveserver2
+      - SERVICE_OPTS=-Dhive.metastore.uris=thrift://hive-metastore:9083
+      - IS_RESUME=true
+    volumes:
+      - hive-metastore-data:/opt/hive/data
+      - /tmp/iceberg-warehouse:/tmp/iceberg-warehouse
+
 networks:
   iceberg_net:
+
+volumes:
+  hive-metastore-data:
