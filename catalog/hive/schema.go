@@ -47,32 +47,16 @@ func fieldToHiveColumn(field iceberg.NestedField) *hive_metastore.FieldSchema {
 // Reference: https://cwiki.apache.org/confluence/display/hive/languagemanual+types
 func icebergTypeToHiveType(typ iceberg.Type) string {
 	switch t := typ.(type) {
-	case iceberg.BooleanType:
-		return "boolean"
-	case iceberg.Int32Type:
-		return "int"
 	case iceberg.Int64Type:
 		return "bigint"
-	case iceberg.Float32Type:
-		return "float"
-	case iceberg.Float64Type:
-		return "double"
-	case iceberg.DateType:
-		return "date"
 	case iceberg.TimeType:
 		// Hive doesn't have a native time type, use string
 		return "string"
-	case iceberg.TimestampType:
-		return "timestamp"
 	case iceberg.TimestampTzType:
 		return "timestamp"
-	case iceberg.StringType:
-		return "string"
 	case iceberg.UUIDType:
 		// Represent UUID as string
 		return "string"
-	case iceberg.BinaryType:
-		return "binary"
 	case iceberg.DecimalType:
 		return fmt.Sprintf("decimal(%d,%d)", t.Precision(), t.Scale())
 	case iceberg.FixedType:
@@ -83,21 +67,17 @@ func icebergTypeToHiveType(typ iceberg.Type) string {
 			fieldStrings = append(fieldStrings,
 				fmt.Sprintf("%s:%s", field.Name, icebergTypeToHiveType(field.Type)))
 		}
-
 		return fmt.Sprintf("struct<%s>", strings.Join(fieldStrings, ","))
 	case *iceberg.ListType:
-		elementField := t.ElementField()
-
-		return fmt.Sprintf("array<%s>", icebergTypeToHiveType(elementField.Type))
+		return fmt.Sprintf("array<%s>", icebergTypeToHiveType(t.ElementField().Type))
 	case *iceberg.MapType:
 		keyField := t.KeyField()
 		valueField := t.ValueField()
-
 		return fmt.Sprintf("map<%s,%s>",
 			icebergTypeToHiveType(keyField.Type),
 			icebergTypeToHiveType(valueField.Type))
 	default:
-		return "string"
+		return typ.String()
 	}
 }
 
