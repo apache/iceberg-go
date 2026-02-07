@@ -111,7 +111,6 @@ func calculateBackoff(attempt int, minWait, maxWait time.Duration) time.Duration
 }
 
 func (l *HiveLock) Release(ctx context.Context) error {
-
 	return l.client.Unlock(ctx, l.lockId)
 }
 

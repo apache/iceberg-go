@@ -67,12 +67,14 @@ func icebergTypeToHiveType(typ iceberg.Type) string {
 			fieldStrings = append(fieldStrings,
 				fmt.Sprintf("%s:%s", field.Name, icebergTypeToHiveType(field.Type)))
 		}
+
 		return fmt.Sprintf("struct<%s>", strings.Join(fieldStrings, ","))
 	case *iceberg.ListType:
 		return fmt.Sprintf("array<%s>", icebergTypeToHiveType(t.ElementField().Type))
 	case *iceberg.MapType:
 		keyField := t.KeyField()
 		valueField := t.ValueField()
+
 		return fmt.Sprintf("map<%s,%s>",
 			icebergTypeToHiveType(keyField.Type),
 			icebergTypeToHiveType(valueField.Type))
