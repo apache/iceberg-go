@@ -1628,7 +1628,7 @@ func (t *TableWritingTestSuite) TestOverwriteTable() {
 	})
 	t.Require().NoError(err)
 	defer newTable.Release()
-	resultTbl, err := tbl.OverwriteTable(t.ctx, newTable, 1, nil, true, 0, nil)
+	resultTbl, err := tbl.OverwriteTable(t.ctx, newTable, 1, nil)
 	t.Require().NoError(err)
 	t.NotNil(resultTbl)
 
@@ -1653,7 +1653,7 @@ func (t *TableWritingTestSuite) TestOverwriteRecord() {
 	defer rdr.Release()
 
 	// Test that Table.Overwrite works (delegates to transaction)
-	resultTbl, err := tbl.Overwrite(t.ctx, rdr, nil, true, 0, nil)
+	resultTbl, err := tbl.Overwrite(t.ctx, rdr, nil, table.WithOverwriteConcurrency(1))
 	t.Require().NoError(err)
 	t.NotNil(resultTbl)
 
