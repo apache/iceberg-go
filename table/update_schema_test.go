@@ -879,3 +879,37 @@ func TestErrorHandling(t *testing.T) {
 		assert.Contains(t, err.Error(), "default value type mismatch")
 	})
 }
+
+func TestBuildUpdates(t *testing.T) {
+	t.Run("test BuildUpdates sets correct schema ID when existing schema found", func(t *testing.T) {
+		previousSchema := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, Doc: ""},
+		)
+
+		currentSchema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, Doc: ""},
+			iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+		)
+
+		metadata, _ := NewMetadata(previousSchema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "", nil)
+		metadataBuilder, _ := MetadataBuilderFromBase(metadata, "")
+		_ = metadataBuilder.AddSchema(currentSchema)
+		_ = metadataBuilder.SetCurrentSchemaID(1)
+		metadata, _ = metadataBuilder.Build()
+
+		table := New([]string{"table"}, metadata, "", nil, nil)
+		txn := table.NewTransaction()
+		updateSchema := txn.UpdateSchema(true, false).DeleteColumn([]string{"name"})
+
+		updates, requirements, err := updateSchema.BuildUpdates()
+		assert.NoError(t, err)
+		assert.NotNil(t, requirements)
+		assert.Len(t, requirements, 1)
+		assert.IsType(t, &assertCurrentSchemaId{}, requirements[0])
+		assert.Equal(t, 1, requirements[0].(*assertCurrentSchemaId).CurrentSchemaID)
+		assert.NotNil(t, updates)
+		assert.Len(t, updates, 1)
+		assert.IsType(t, &setCurrentSchemaUpdate{}, updates[0])
+		assert.Equal(t, 0, updates[0].(*setCurrentSchemaUpdate).SchemaID)
+	})
+}
