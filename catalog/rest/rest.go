@@ -721,13 +721,15 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		cfg.SortOrder = table.UnsortedSortOrder
 	}
 
+	stagedCreate := len(cfg.StagedUpdates) > 0
+
 	payload := createTableRequest{
 		Name:          tbl,
 		Schema:        schema,
 		Location:      cfg.Location,
 		PartitionSpec: cfg.PartitionSpec,
 		WriteOrder:    &cfg.SortOrder,
-		StageCreate:   false,
+		StageCreate:   stagedCreate,
 		Props:         cfg.Properties,
 	}
 
@@ -737,11 +739,54 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, err
 	}
 
+	if stagedCreate {
+		meta, metaLoc, err := r.commitStagedCreate(ctx, identifier, ret.Metadata, cfg.StagedUpdates)
+		if err != nil {
+			return nil, err
+		}
+		ret.Metadata = meta
+		ret.MetadataLoc = metaLoc
+	}
+
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
 	maps.Copy(config, ret.Config)
 
 	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config)
+}
+
+// commitStagedCreate performs the second phase of a staged table
+// creation by committing the table with an assert-create requirement.
+// Changes are extracted from the phase 1 response metadata (which may
+// have been normalized by the server), matching the Java implementation's
+// createChanges approach. User-provided staged updates are prepended.
+func (r *Catalog) commitStagedCreate(ctx context.Context, identifier table.Identifier, meta table.Metadata, stagedUpdates []table.Update) (table.Metadata, string, error) {
+	spec := meta.PartitionSpec()
+	order := meta.SortOrder()
+
+	// Build updates from server-returned metadata, mirroring Java's
+	// RESTSessionCatalog.createChanges.
+	updates := append(stagedUpdates,
+		table.NewAssignUUIDUpdate(meta.TableUUID()),
+		table.NewUpgradeFormatVersionUpdate(meta.Version()),
+		table.NewAddSchemaUpdate(meta.CurrentSchema()),
+		table.NewSetCurrentSchemaUpdate(-1),
+		table.NewAddPartitionSpecUpdate(&spec, true),
+		table.NewSetDefaultSpecUpdate(-1),
+		table.NewAddSortOrderUpdate(&order),
+		table.NewSetDefaultSortOrderUpdate(-1),
+	)
+
+	if loc := meta.Location(); loc != "" {
+		updates = append(updates, table.NewSetLocationUpdate(loc))
+	}
+	if props := meta.Properties(); len(props) > 0 {
+		updates = append(updates, table.NewSetPropertiesUpdate(props))
+	}
+
+	requirements := []table.Requirement{table.AssertCreate()}
+
+	return r.CommitTable(ctx, identifier, requirements, updates)
 }
 
 func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
@@ -763,13 +808,17 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 
 	ret, err := doPost[payload, commitTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables", tblName},
 		payload{Identifier: restIdentifier, Requirements: requirements, Updates: updates}, r.cl,
-		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable, http.StatusConflict: ErrCommitFailed})
+		map[int]error{
+			http.StatusNotFound:            catalog.ErrNoSuchTable,
+			http.StatusConflict:            ErrCommitFailed,
+			http.StatusInternalServerError: ErrCommitStateUnknown,
+			http.StatusBadGateway:          ErrCommitStateUnknown,
+			http.StatusServiceUnavailable:  ErrCommitStateUnknown,
+			http.StatusGatewayTimeout:      ErrCommitStateUnknown,
+		})
 	if err != nil {
 		return nil, "", err
 	}
-
-	config := maps.Clone(r.props)
-	maps.Copy(config, ret.Metadata.Properties())
 
 	return ret.Metadata, ret.MetadataLoc, nil
 }
@@ -838,7 +887,14 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 	}
 	ret, err := doPost[payload, commitTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables", tbl},
 		payload{Identifier: restIdentifier, Requirements: requirements, Updates: updates}, r.cl,
-		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable, http.StatusConflict: ErrCommitFailed})
+		map[int]error{
+			http.StatusNotFound:            catalog.ErrNoSuchTable,
+			http.StatusConflict:            ErrCommitFailed,
+			http.StatusInternalServerError: ErrCommitStateUnknown,
+			http.StatusBadGateway:          ErrCommitStateUnknown,
+			http.StatusServiceUnavailable:  ErrCommitStateUnknown,
+			http.StatusGatewayTimeout:      ErrCommitStateUnknown,
+		})
 	if err != nil {
 		return nil, err
 	}

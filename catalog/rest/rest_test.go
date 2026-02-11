@@ -2545,3 +2545,287 @@ func (r *RestTLSCatalogSuite) TestCatalogWithCustomTransportAndTlsConfig() {
 	r.ErrorContains(err, "invalid catalog config with non-nil tlsConfig and transport")
 	r.Nil(cat)
 }
+
+// tableMetadataV1JSON returns a minimal valid V1 table metadata JSON
+// suitable for use in test server responses.
+func tableMetadataV1JSON() string {
+	return `{
+		"format-version": 1,
+		"table-uuid": "bf289591-dcc0-4234-ad4f-5c3eed811a29",
+		"location": "s3://warehouse/db/tbl",
+		"last-updated-ms": 1657810967051,
+		"last-column-id": 3,
+		"schema": {
+			"type": "struct",
+			"schema-id": 0,
+			"fields": [
+				{"id": 1, "name": "id", "required": true, "type": "long"},
+				{"id": 2, "name": "data", "required": false, "type": "string"},
+				{"id": 3, "name": "ts", "required": false, "type": "timestamp"}
+			]
+		},
+		"current-schema-id": 0,
+		"schemas": [{
+			"type": "struct",
+			"schema-id": 0,
+			"fields": [
+				{"id": 1, "name": "id", "required": true, "type": "long"},
+				{"id": 2, "name": "data", "required": false, "type": "string"},
+				{"id": 3, "name": "ts", "required": false, "type": "timestamp"}
+			]
+		}],
+		"partition-spec": [],
+		"default-spec-id": 0,
+		"last-partition-id": 999,
+		"default-sort-order-id": 0,
+		"sort-orders": [{"order-id": 0, "fields": []}],
+		"properties": {},
+		"current-snapshot-id": -1,
+		"refs": {},
+		"snapshots": [],
+		"snapshot-log": [],
+		"metadata-log": []
+	}`
+}
+
+func (r *RestCatalogSuite) TestCreateTableStaged() {
+	var createCalled bool
+	var commitCalled bool
+	var lastCreateBody map[string]any
+	var lastCommitBody map[string]any
+
+	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": TestToken, "token_type": "Bearer", "expires_in": 3600,
+		})
+	})
+
+	// Phase 1: staged create POST
+	r.mux.HandleFunc("/v1/namespaces/db/tables", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+
+			return
+		}
+		createCalled = true
+		json.NewDecoder(req.Body).Decode(&lastCreateBody)
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{
+			"metadata-location": "s3://warehouse/db/tbl/metadata/staged.json",
+			"metadata": ` + tableMetadataV1JSON() + `
+		}`))
+	})
+
+	// Phase 2: commit POST
+	r.mux.HandleFunc("/v1/namespaces/db/tables/test_table", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+
+			return
+		}
+		commitCalled = true
+		json.NewDecoder(req.Body).Decode(&lastCommitBody)
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{
+			"metadata-location": "s3://warehouse/db/tbl/metadata/v1.json",
+			"metadata": ` + tableMetadataV1JSON() + `
+		}`))
+	})
+
+	testUUID := uuid.MustParse("12345678-1234-1234-1234-123456789abc")
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithCredential(TestCreds))
+	r.Require().NoError(err)
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+
+	tbl, err := cat.CreateTable(context.Background(),
+		table.Identifier{"db", "test_table"},
+		schema,
+		catalog.WithStagedUpdates(
+			table.NewAssignUUIDUpdate(testUUID),
+		),
+	)
+	r.Require().NoError(err)
+	r.NotNil(tbl)
+
+	// Verify phase 1: create request had stage-create=true
+	r.True(createCalled, "create endpoint should be called")
+	stageCreate, _ := lastCreateBody["stage-create"].(bool)
+	r.True(stageCreate, "stage-create should be true")
+
+	// Verify payload
+	r.Equal("test_table", lastCreateBody["name"])
+	r.NotNil(lastCreateBody["schema"], "staged create should include schema")
+	r.NotNil(lastCreateBody["write-order"], "staged create should include write-order")
+
+	// Verify phase 2: commit request was sent
+	r.True(commitCalled, "commit endpoint should be called")
+
+	// Verify commit has assert-create requirement
+	requirements, ok := lastCommitBody["requirements"].([]any)
+	r.Require().True(ok, "commit should have requirements")
+	r.Require().Len(requirements, 1)
+	req0 := requirements[0].(map[string]any)
+	r.Equal("assert-create", req0["type"])
+
+	// Verify commit has the assign-uuid update plus standard updates
+	updates, ok := lastCommitBody["updates"].([]any)
+	r.Require().True(ok, "commit should have updates")
+
+	// First update should be assign-uuid from our staged update
+	upd0 := updates[0].(map[string]any)
+	r.Equal("assign-uuid", upd0["action"])
+	r.Equal(testUUID.String(), upd0["uuid"])
+
+	// Remaining updates extracted from phase 1 metadata
+	actionNames := make([]string, len(updates))
+	for i, u := range updates {
+		actionNames[i] = u.(map[string]any)["action"].(string)
+	}
+	r.Contains(actionNames, "upgrade-format-version")
+	r.Contains(actionNames, "add-schema")
+	r.Contains(actionNames, "set-current-schema")
+	r.Contains(actionNames, "add-spec")
+	r.Contains(actionNames, "set-default-spec")
+	r.Contains(actionNames, "add-sort-order")
+	r.Contains(actionNames, "set-default-sort-order")
+	r.Contains(actionNames, "set-location")
+}
+
+func (r *RestCatalogSuite) TestCreateTableNotStaged() {
+	var createBody map[string]any
+	var commitCalled bool
+
+	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": TestToken, "token_type": "Bearer", "expires_in": 3600,
+		})
+	})
+
+	r.mux.HandleFunc("/v1/namespaces/db/tables", func(w http.ResponseWriter, req *http.Request) {
+		json.NewDecoder(req.Body).Decode(&createBody)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{
+			"metadata-location": "s3://warehouse/db/tbl/metadata/v1.json",
+			"metadata": ` + tableMetadataV1JSON() + `
+		}`))
+	})
+
+	r.mux.HandleFunc("/v1/namespaces/db/tables/test_table", func(w http.ResponseWriter, req *http.Request) {
+		commitCalled = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithCredential(TestCreds))
+	r.Require().NoError(err)
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+
+	_, err = cat.CreateTable(context.Background(),
+		table.Identifier{"db", "test_table"},
+		schema,
+	)
+	r.Require().NoError(err)
+
+	stageCreate, _ := createBody["stage-create"].(bool)
+	r.False(stageCreate, "stage-create should be false without staged updates")
+	r.False(commitCalled, "commit should not be called for non-staged create")
+}
+
+func (r *RestCatalogSuite) TestCommitTableErrCommitStateUnknown() {
+	var statusCode int
+
+	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": TestToken, "token_type": "Bearer", "expires_in": 3600,
+		})
+	})
+
+	r.mux.HandleFunc("/v1/namespaces/db/tables/tbl", func(w http.ResponseWriter, req *http.Request) {
+		w.WriteHeader(statusCode)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": http.StatusText(statusCode),
+				"type":    "ServerException",
+				"code":    statusCode,
+			},
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithCredential(TestCreds))
+	r.Require().NoError(err)
+
+	for _, code := range []int{
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout,
+	} {
+		statusCode = code
+		r.Run(strconv.Itoa(code), func() {
+			_, _, err := cat.CommitTable(context.Background(),
+				table.Identifier{"db", "tbl"},
+				[]table.Requirement{},
+				[]table.Update{},
+			)
+			r.Require().Error(err)
+			r.ErrorIs(err, rest.ErrCommitStateUnknown,
+				"%d should return ErrCommitStateUnknown, got: %v", code, err)
+		})
+	}
+}
+
+func (r *RestCatalogSuite) TestUpdateTableErrCommitStateUnknown() {
+	var statusCode int
+
+	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": TestToken, "token_type": "Bearer", "expires_in": 3600,
+		})
+	})
+
+	r.mux.HandleFunc("/v1/namespaces/db/tables/tbl", func(w http.ResponseWriter, req *http.Request) {
+		w.WriteHeader(statusCode)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": http.StatusText(statusCode),
+				"type":    "ServerException",
+				"code":    statusCode,
+			},
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithCredential(TestCreds))
+	r.Require().NoError(err)
+
+	for _, code := range []int{
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout,
+	} {
+		statusCode = code
+		r.Run(strconv.Itoa(code), func() {
+			_, err := cat.UpdateTable(context.Background(),
+				table.Identifier{"db", "tbl"},
+				[]table.Requirement{},
+				[]table.Update{},
+			)
+			r.Require().Error(err)
+			r.ErrorIs(err, rest.ErrCommitStateUnknown,
+				"%d should return ErrCommitStateUnknown, got: %v", code, err)
+		})
+	}
+}
