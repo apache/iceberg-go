@@ -560,3 +560,51 @@ func NewRemoveSchemasUpdate(schemaIds []int) *removeSchemasUpdate {
 func (u *removeSchemasUpdate) Apply(builder *MetadataBuilder) error {
 	return builder.RemoveSchemas(u.SchemaIDs)
 }
+
+// FilterReferencedSnapshots removes referenced snapshot IDs from any
+// RemoveSnapshots updates. Snapshots referenced by a branch or tag in
+// the given metadata are excluded, unless the same update batch also
+// removes that ref. Updates with no remaining snapshot IDs are dropped
+// entirely.
+func FilterReferencedSnapshots(updates []Update, meta Metadata) []Update {
+	// Build ref state: ref name → snapshot ID
+	refsByName := make(map[string]int64)
+	for name, ref := range meta.Refs() {
+		refsByName[name] = ref.SnapshotID
+	}
+
+	// Apply ref removals from the same update batch
+	for _, upd := range updates {
+		if rs, ok := upd.(*removeSnapshotRefUpdate); ok {
+			delete(refsByName, rs.RefName)
+		}
+	}
+
+	// Build the effective referenced set after accounting for ref removals
+	referenced := make(map[int64]bool)
+	for _, snapID := range refsByName {
+		referenced[snapID] = true
+	}
+
+	// Filter RemoveSnapshots updates
+	result := make([]Update, 0, len(updates))
+	for _, upd := range updates {
+		rs, ok := upd.(*removeSnapshotsUpdate)
+		if !ok {
+			result = append(result, upd)
+			continue
+		}
+
+		filtered := make([]int64, 0, len(rs.SnapshotIDs))
+		for _, id := range rs.SnapshotIDs {
+			if !referenced[id] {
+				filtered = append(filtered, id)
+			}
+		}
+		if len(filtered) > 0 {
+			result = append(result, NewRemoveSnapshotsUpdate(filtered))
+		}
+	}
+
+	return result
+}

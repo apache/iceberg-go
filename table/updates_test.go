@@ -244,3 +244,112 @@ func TestUnmarshalUpdates(t *testing.T) {
 		})
 	}
 }
+
+// buildMetadataWithSnapshots creates table metadata with the given snapshots
+// and refs for use in FilterReferencedSnapshots tests.
+func buildMetadataWithSnapshots(t *testing.T, snapshots []Snapshot, refs map[string]SnapshotRef) Metadata {
+	t.Helper()
+	builder := builderWithoutChanges(2)
+	baseTs := builder.base.LastUpdatedMillis()
+	for i := range snapshots {
+		snapshots[i].TimestampMs = baseTs + int64(i) + 1
+		require.NoError(t, builder.AddSnapshot(&snapshots[i]))
+	}
+	for name, ref := range refs {
+		require.NoError(t, builder.SetSnapshotRef(name, ref.SnapshotID, ref.SnapshotRefType))
+	}
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	return meta
+}
+
+func TestFilterReferencedSnapshots(t *testing.T) {
+	schemaID := 0
+	snap := func(id int64) Snapshot {
+		return Snapshot{
+			SnapshotID:   id,
+			ManifestList: "/snap.avro",
+			Summary:      &Summary{Operation: OpAppend},
+			SchemaID:     &schemaID,
+		}
+	}
+
+	t.Run("skips referenced snapshots", func(t *testing.T) {
+		// snap-1 referenced by feature-branch, snap-2 unreferenced, snap-3 referenced by main
+		meta := buildMetadataWithSnapshots(t,
+			[]Snapshot{snap(1), snap(2), snap(3)},
+			map[string]SnapshotRef{
+				"feature-branch": {SnapshotID: 1, SnapshotRefType: BranchRef},
+				MainBranch:       {SnapshotID: 3, SnapshotRefType: BranchRef},
+			},
+		)
+
+		updates := []Update{
+			NewRemoveSnapshotsUpdate([]int64{1, 2}),
+		}
+
+		filtered := FilterReferencedSnapshots(updates, meta)
+		require.Len(t, filtered, 1)
+		rs := filtered[0].(*removeSnapshotsUpdate)
+		require.Equal(t, []int64{2}, rs.SnapshotIDs)
+	})
+
+	t.Run("allows removal when ref is also removed in same batch", func(t *testing.T) {
+		// tag-1 → snap-1, main → snap-2
+		meta := buildMetadataWithSnapshots(t,
+			[]Snapshot{snap(1), snap(2)},
+			map[string]SnapshotRef{
+				"tag-1":    {SnapshotID: 1, SnapshotRefType: TagRef},
+				MainBranch: {SnapshotID: 2, SnapshotRefType: BranchRef},
+			},
+		)
+
+		updates := []Update{
+			NewRemoveSnapshotRefUpdate("tag-1"),
+			NewRemoveSnapshotsUpdate([]int64{1}),
+		}
+
+		filtered := FilterReferencedSnapshots(updates, meta)
+		// RemoveSnapshotRef passes through, RemoveSnapshots keeps snap-1
+		require.Len(t, filtered, 2)
+		require.Equal(t, UpdateRemoveSnapshotRef, filtered[0].Action())
+		rs := filtered[1].(*removeSnapshotsUpdate)
+		require.Equal(t, []int64{1}, rs.SnapshotIDs)
+	})
+
+	t.Run("drops update entirely when all snapshots are referenced", func(t *testing.T) {
+		meta := buildMetadataWithSnapshots(t,
+			[]Snapshot{snap(1), snap(2)},
+			map[string]SnapshotRef{
+				"branch-a": {SnapshotID: 1, SnapshotRefType: BranchRef},
+				"branch-b": {SnapshotID: 2, SnapshotRefType: BranchRef},
+			},
+		)
+
+		updates := []Update{
+			NewRemoveSnapshotsUpdate([]int64{1, 2}),
+		}
+
+		filtered := FilterReferencedSnapshots(updates, meta)
+		require.Len(t, filtered, 0)
+	})
+
+	t.Run("passes through non-RemoveSnapshots updates unchanged", func(t *testing.T) {
+		meta := buildMetadataWithSnapshots(t,
+			[]Snapshot{snap(1)},
+			map[string]SnapshotRef{
+				MainBranch: {SnapshotID: 1, SnapshotRefType: BranchRef},
+			},
+		)
+
+		updates := []Update{
+			NewSetPropertiesUpdate(iceberg.Properties{"key": "value"}),
+			NewRemovePropertiesUpdate([]string{"old-key"}),
+		}
+
+		filtered := FilterReferencedSnapshots(updates, meta)
+		require.Len(t, filtered, 2)
+		require.Equal(t, UpdateSetProperties, filtered[0].Action())
+		require.Equal(t, UpdateRemoveProperties, filtered[1].Action())
+	})
+}
