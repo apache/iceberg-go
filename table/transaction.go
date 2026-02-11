@@ -40,6 +40,7 @@ type snapshotUpdate struct {
 	txn           *Transaction
 	io            io.WriteFileIO
 	snapshotProps iceberg.Properties
+	operation     Operation
 }
 
 func (s snapshotUpdate) fastAppend() *snapshotProducer {
@@ -47,8 +48,8 @@ func (s snapshotUpdate) fastAppend() *snapshotProducer {
 }
 
 func (s snapshotUpdate) mergeOverwrite(commitUUID *uuid.UUID) *snapshotProducer {
-	op := OpOverwrite
-	if s.txn.meta.currentSnapshot() == nil {
+	op := s.operation
+	if s.operation == OpOverwrite && s.txn.meta.currentSnapshot() == nil {
 		op = OpAppend
 	}
 
@@ -120,7 +121,7 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 
 func (t *Transaction) appendSnapshotProducer(afs io.IO, props iceberg.Properties) *snapshotProducer {
 	manifestMerge := t.meta.props.GetBool(ManifestMergeEnabledKey, ManifestMergeEnabledDefault)
-	updateSnapshot := t.updateSnapshot(afs, props)
+	updateSnapshot := t.updateSnapshot(afs, props, OpAppend)
 	if manifestMerge {
 		return updateSnapshot.mergeAppend()
 	}
@@ -128,11 +129,12 @@ func (t *Transaction) appendSnapshotProducer(afs io.IO, props iceberg.Properties
 	return updateSnapshot.fastAppend()
 }
 
-func (t *Transaction) updateSnapshot(fs io.IO, props iceberg.Properties) snapshotUpdate {
+func (t *Transaction) updateSnapshot(fs io.IO, props iceberg.Properties, operation Operation) snapshotUpdate {
 	return snapshotUpdate{
 		txn:           t,
 		io:            fs.(io.WriteFileIO),
 		snapshotProps: props,
+		operation:     operation,
 	}
 }
 
@@ -411,7 +413,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps).mergeOverwrite(&commitUUID)
+	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID)
 
 	for _, df := range markedForDeletion {
 		updater.deleteDataFile(df)
@@ -482,7 +484,7 @@ func (t *Transaction) AddFiles(ctx context.Context, files []string, snapshotProp
 		return err
 	}
 
-	updater := t.updateSnapshot(fs, snapshotProps).fastAppend()
+	updater := t.updateSnapshot(fs, snapshotProps, OpAppend).fastAppend()
 
 	dataFiles := filesToDataFiles(ctx, fs, t.meta, slices.Values(files))
 	for df, err := range dataFiles {
@@ -595,7 +597,7 @@ func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, sna
 		apply(&overwrite)
 	}
 
-	updater, err := t.performCopyOnWriteDeletion(ctx, snapshotProps, overwrite.filter, overwrite.caseSensitive, overwrite.concurrency)
+	updater, err := t.performCopyOnWriteDeletion(ctx, OpOverwrite, snapshotProps, overwrite.filter, overwrite.caseSensitive, overwrite.concurrency)
 	if err != nil {
 		return err
 	}
@@ -626,7 +628,7 @@ func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, sna
 	return t.apply(updates, reqs)
 }
 
-func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, snapshotProps iceberg.Properties, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (*snapshotProducer, error) {
+func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation Operation, snapshotProps iceberg.Properties, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (*snapshotProducer, error) {
 	fs, err := t.tbl.fsF(ctx)
 	if err != nil {
 		return nil, err
@@ -645,7 +647,7 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, snapshotPr
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps).mergeOverwrite(&commitUUID)
+	updater := t.updateSnapshot(fs, snapshotProps, operation).mergeOverwrite(&commitUUID)
 
 	filesToDelete, filesToRewrite, err := t.classifyFilesForOverwrite(ctx, fs, filter, caseSensitive, concurrency)
 	if err != nil {
@@ -674,8 +676,8 @@ type deleteOperation struct {
 
 // WithDeleteConcurrency overwrites the default concurrency for delete operations.
 // Default: runtime.GOMAXPROCS(0)
-func WithDeleteConcurrency(concurrency int) OverwriteOption {
-	return func(op *overwriteOperation) {
+func WithDeleteConcurrency(concurrency int) DeleteOption {
+	return func(op *deleteOperation) {
 		if concurrency <= 0 {
 			op.concurrency = runtime.GOMAXPROCS(0)
 
@@ -721,7 +723,7 @@ func (t *Transaction) Delete(ctx context.Context, filter iceberg.BooleanExpressi
 	if writeDeleteMode != WriteModeCopyOnWrite {
 		return fmt.Errorf("'%s' is set to '%s' but only '%s' is currently supported", WriteDeleteModeKey, writeDeleteMode, WriteModeCopyOnWrite)
 	}
-	updater, err := t.performCopyOnWriteDeletion(ctx, snapshotProps, filter, deleteOp.caseSensitive, deleteOp.concurrency)
+	updater, err := t.performCopyOnWriteDeletion(ctx, OpDelete, snapshotProps, filter, deleteOp.caseSensitive, deleteOp.concurrency)
 	if err != nil {
 		return err
 	}

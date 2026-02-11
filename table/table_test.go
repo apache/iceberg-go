@@ -1697,8 +1697,22 @@ func (t *TableWritingTestSuite) TestDelete() {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func() {
-			resultTbl, err := tc.table.Delete(t.ctx, iceberg.EqualTo(iceberg.Reference("foo"), "bar"), nil)
+			// Set up the test table with some data
+			newTable, err := array.TableFromJSON(memory.DefaultAllocator, t.arrSchema, []string{
+				`[{"foo": false, "bar": "wrapper_test", "baz": 123, "qux": "2024-01-01"}]`,
+			})
+			t.Require().NoError(err)
+			defer newTable.Release()
 
+			tbl, err := tc.table.OverwriteTable(t.ctx, newTable, 1, nil)
+			t.Require().NoError(err)
+
+			// Validate the pre-requisite that data is present on the table before we go ahead and delete it
+			arrowTable, err := tbl.Scan().ToArrowTable(t.ctx)
+			t.Require().NoError(err)
+			t.Equal(int64(1), arrowTable.NumRows())
+
+			tbl, err = tbl.Delete(t.ctx, iceberg.EqualTo(iceberg.Reference("bar"), "wrapper_test"), nil)
 			// If an error was expected, check that it's the correct one and abort validating the operation
 			if tc.expectedErr != nil {
 				t.Require().ErrorContains(err, tc.expectedErr.Error())
@@ -1706,9 +1720,14 @@ func (t *TableWritingTestSuite) TestDelete() {
 				return
 			}
 
-			snapshot := resultTbl.CurrentSnapshot()
+			snapshot := tbl.CurrentSnapshot()
 			t.NotNil(snapshot)
-			t.Equal(table.OpAppend, snapshot.Summary.Operation) // Empty table overwrite becomes append
+			t.Equal(table.OpDelete, snapshot.Summary.Operation)
+
+			arrowTable, err = tbl.Scan().ToArrowTable(t.ctx)
+			t.Require().NoError(err)
+
+			t.Equal(int64(0), arrowTable.NumRows())
 		})
 	}
 }
