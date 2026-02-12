@@ -291,7 +291,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 
 	// Only add the update if there are actually snapshots to delete
 	if len(snapsToDelete) > 0 {
-		update := NewRemoveSnapshotsUpdate(snapsToDelete)
+		update := NewRemoveSnapshotsUpdate(snapsToDelete).SetSkipIfReferenced()
 		update.postCommit = cfg.postCommit
 		updates = append(updates, update)
 	}
