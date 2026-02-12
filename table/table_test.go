@@ -71,6 +71,22 @@ func mustFS(t *testing.T, tbl *table.Table) iceio.IO {
 	return r
 }
 
+// mustFileSize returns the file size for a test path and fails the test on error.
+func mustFileSize(t *testing.T, path string) int64 {
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+
+	return info.Size()
+}
+
+// mustDataFile builds a test DataFile and fails the test if construction fails.
+func mustDataFile(t *testing.T, spec iceberg.PartitionSpec, path string, partition map[int]any, count, size int64) iceberg.DataFile {
+	builder, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData, path, iceberg.ParquetFile, partition, nil, nil, count, size)
+	require.NoError(t, err)
+
+	return builder.Build()
+}
+
 func (t *TableTestSuite) SetupSuite() {
 	var mockfs internal.MockFS
 	mockfs.Test(t.T())
@@ -920,6 +936,499 @@ func (t *TableWritingTestSuite) TestReplaceDataFiles() {
 			"total-records":          "10",
 		},
 	}, staged.CurrentSnapshot().Summary)
+}
+
+func (t *TableWritingTestSuite) TestAddDataFiles() {
+	ident := table.Identifier{"default", "add_data_files_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	filePath := fmt.Sprintf("%s/add_data_files_v%d/test.parquet", t.location, t.formatVersion)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, t.arrTbl)
+
+	df := mustDataFile(t.T(), *iceberg.UnpartitionedSpec, filePath, nil, 1, mustFileSize(t.T(), filePath))
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddDataFiles(t.ctx, []iceberg.DataFile{df}, nil))
+
+	staged, err := tx.StagedTable()
+	t.Require().NoError(err)
+	t.Equal(table.OpAppend, staged.CurrentSnapshot().Summary.Operation)
+	t.Equal("1", staged.CurrentSnapshot().Summary.Properties["added-data-files"])
+}
+
+func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFiles() {
+	ident := table.Identifier{"default", "replace_data_files_with_datafiles_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	files := make([]string, 0, 3)
+	for i := range 3 {
+		filePath := fmt.Sprintf("%s/replace_data_files_with_datafiles_v%d/data-%d.parquet", t.location, t.formatVersion, i)
+		t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, t.arrTbl)
+		files = append(files, filePath)
+	}
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddFiles(t.ctx, files, nil, false))
+	tbl, err := tx.Commit(t.ctx)
+	t.Require().NoError(err)
+
+	replacementPath := fmt.Sprintf("%s/replace_data_files_with_datafiles_v%d/replacement.parquet", t.location, t.formatVersion)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), replacementPath, t.arrTbl)
+
+	deleteFiles := []iceberg.DataFile{
+		mustDataFile(t.T(), *iceberg.UnpartitionedSpec, files[0], nil, 1, mustFileSize(t.T(), files[0])),
+		mustDataFile(t.T(), *iceberg.UnpartitionedSpec, files[1], nil, 1, mustFileSize(t.T(), files[1])),
+	}
+	addFile := mustDataFile(t.T(), *iceberg.UnpartitionedSpec, replacementPath, nil, 1, mustFileSize(t.T(), replacementPath))
+
+	tx = tbl.NewTransaction()
+	t.Require().NoError(tx.ReplaceDataFilesWithDataFiles(t.ctx, deleteFiles, []iceberg.DataFile{addFile}, nil))
+
+	staged, err := tx.StagedTable()
+	t.Require().NoError(err)
+	t.Equal(table.OpOverwrite, staged.CurrentSnapshot().Summary.Operation)
+	t.Equal("1", staged.CurrentSnapshot().Summary.Properties["added-data-files"])
+	t.Equal("2", staged.CurrentSnapshot().Summary.Properties["deleted-data-files"])
+}
+
+func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFilesValidatesPartitionSpecID() {
+	ident := table.Identifier{"default", "replace_data_files_with_datafiles_spec_validation_v" + strconv.Itoa(t.formatVersion)}
+	spec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{SourceID: 4, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "baz"},
+	)
+	tbl := t.createTable(ident, t.formatVersion, spec, t.tableSchema)
+
+	existingPath := fmt.Sprintf("%s/replace_data_files_with_datafiles_spec_validation_v%d/existing.parquet", t.location, t.formatVersion)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), existingPath, t.arrTbl)
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddFiles(t.ctx, []string{existingPath}, nil, false))
+	tbl, err := tx.Commit(t.ctx)
+	t.Require().NoError(err)
+
+	invalidSpec := iceberg.NewPartitionSpecID(999,
+		iceberg.PartitionField{SourceID: 4, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "baz"},
+	)
+
+	deleteFile := mustDataFile(t.T(), spec, existingPath, map[int]any{1000: int32(123)}, 1, mustFileSize(t.T(), existingPath))
+	addFile := mustDataFile(t.T(), invalidSpec,
+		fmt.Sprintf("%s/replace_data_files_with_datafiles_spec_validation_v%d/replacement.parquet", t.location, t.formatVersion),
+		map[int]any{1000: int32(123)}, 1, 1)
+
+	tx = tbl.NewTransaction()
+	err = tx.ReplaceDataFilesWithDataFiles(t.ctx, []iceberg.DataFile{deleteFile}, []iceberg.DataFile{addFile}, nil)
+	t.Error(err)
+	t.ErrorContains(err, "invalid partition spec id")
+}
+
+func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFilesValidatesPartitionData() {
+	ident := table.Identifier{"default", "replace_data_files_with_datafiles_partition_validation_v" + strconv.Itoa(t.formatVersion)}
+	spec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{SourceID: 4, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "baz"},
+	)
+	tbl := t.createTable(ident, t.formatVersion, spec, t.tableSchema)
+
+	existingPath := fmt.Sprintf("%s/replace_data_files_with_datafiles_partition_validation_v%d/existing.parquet", t.location, t.formatVersion)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), existingPath, t.arrTbl)
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddFiles(t.ctx, []string{existingPath}, nil, false))
+	tbl, err := tx.Commit(t.ctx)
+	t.Require().NoError(err)
+
+	deleteFile := mustDataFile(t.T(), spec, existingPath, map[int]any{1000: int32(123)}, 1, mustFileSize(t.T(), existingPath))
+	addFile := mustDataFile(t.T(), spec,
+		fmt.Sprintf("%s/replace_data_files_with_datafiles_partition_validation_v%d/replacement.parquet", t.location, t.formatVersion),
+		map[int]any{}, 1, 1)
+
+	tx = tbl.NewTransaction()
+	err = tx.ReplaceDataFilesWithDataFiles(t.ctx, []iceberg.DataFile{deleteFile}, []iceberg.DataFile{addFile}, nil)
+	t.Error(err)
+	t.ErrorContains(err, "missing partition value")
+}
+
+// ============================================================================
+// AddDataFiles Error Path Tests
+// ============================================================================
+
+func (t *TableWritingTestSuite) TestAddDataFilesDuplicateFilePaths() {
+	ident := table.Identifier{"default", "add_data_files_duplicate_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	filePath := fmt.Sprintf("%s/add_data_files_duplicate_v%d/test.parquet", t.location, t.formatVersion)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, t.arrTbl)
+
+	df := mustDataFile(t.T(), *iceberg.UnpartitionedSpec, filePath, nil, 1, mustFileSize(t.T(), filePath))
+
+	tx := tbl.NewTransaction()
+	err := tx.AddDataFiles(t.ctx, []iceberg.DataFile{df, df}, nil)
+	t.Error(err)
+	t.ErrorContains(err, "add data file paths must be unique for AddDataFiles")
+}
+
+func (t *TableWritingTestSuite) TestAddDataFilesAlreadyReferencedByTable() {
+	ident := table.Identifier{"default", "add_data_files_already_referenced_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	filePath := fmt.Sprintf("%s/add_data_files_already_referenced_v%d/test.parquet", t.location, t.formatVersion)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, t.arrTbl)
+
+	df := mustDataFile(t.T(), *iceberg.UnpartitionedSpec, filePath, nil, 1, mustFileSize(t.T(), filePath))
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddDataFiles(t.ctx, []iceberg.DataFile{df}, nil))
+	tbl, err := tx.Commit(t.ctx)
+	t.Require().NoError(err)
+
+	tx = tbl.NewTransaction()
+	err = tx.AddDataFiles(t.ctx, []iceberg.DataFile{df}, nil)
+	t.Error(err)
+	t.ErrorContains(err, "cannot add files that are already referenced by table")
+}
+
+func (t *TableWritingTestSuite) TestAddDataFilesNilDataFile() {
+	ident := table.Identifier{"default", "add_data_files_nil_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	tx := tbl.NewTransaction()
+	err := tx.AddDataFiles(t.ctx, []iceberg.DataFile{nil}, nil)
+	t.Error(err)
+	t.ErrorContains(err, "nil data file at index 0")
+}
+
+func (t *TableWritingTestSuite) TestAddDataFilesInvalidContentType() {
+	ident := table.Identifier{"default", "add_data_files_invalid_content_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	filePath := fmt.Sprintf("%s/add_data_files_invalid_content_v%d/test.parquet", t.location, t.formatVersion)
+
+	builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes, filePath, iceberg.ParquetFile, nil, nil, nil, 1, 100)
+	t.Require().NoError(err)
+	df := builder.Build()
+
+	tx := tbl.NewTransaction()
+	err = tx.AddDataFiles(t.ctx, []iceberg.DataFile{df}, nil)
+	t.Error(err)
+	t.ErrorContains(err, "adding files other than data files is not yet implemented")
+}
+
+func (t *TableWritingTestSuite) TestAddDataFilesEmptySlice() {
+	ident := table.Identifier{"default", "add_data_files_empty_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	tx := tbl.NewTransaction()
+	err := tx.AddDataFiles(t.ctx, []iceberg.DataFile{}, nil)
+	t.NoError(err)
+
+	staged, err := tx.StagedTable()
+	t.Require().NoError(err)
+	t.Nil(staged.CurrentSnapshot())
+}
+
+// ============================================================================
+// ReplaceDataFilesWithDataFiles Error Path Tests
+// ============================================================================
+
+func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFilesDuplicateAddPaths() {
+	ident := table.Identifier{"default", "replace_data_files_dup_add_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	existingPath := fmt.Sprintf("%s/replace_data_files_dup_add_v%d/existing.parquet", t.location, t.formatVersion)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), existingPath, t.arrTbl)
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddFiles(t.ctx, []string{existingPath}, nil, false))
+	tbl, err := tx.Commit(t.ctx)
+	t.Require().NoError(err)
+
+	deleteFile := mustDataFile(t.T(), *iceberg.UnpartitionedSpec, existingPath, nil, 1, mustFileSize(t.T(), existingPath))
+	addFile := mustDataFile(t.T(), *iceberg.UnpartitionedSpec,
+		fmt.Sprintf("%s/replace_data_files_dup_add_v%d/new.parquet", t.location, t.formatVersion), nil, 1, 100)
+
+	tx = tbl.NewTransaction()
+	err = tx.ReplaceDataFilesWithDataFiles(t.ctx, []iceberg.DataFile{deleteFile}, []iceberg.DataFile{addFile, addFile}, nil)
+	t.Error(err)
+	t.ErrorContains(err, "add data file paths must be unique for ReplaceDataFilesWithDataFiles")
+}
+
+func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFilesDuplicateDeletePaths() {
+	ident := table.Identifier{"default", "replace_data_files_dup_del_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	existingPath := fmt.Sprintf("%s/replace_data_files_dup_del_v%d/existing.parquet", t.location, t.formatVersion)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), existingPath, t.arrTbl)
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddFiles(t.ctx, []string{existingPath}, nil, false))
+	tbl, err := tx.Commit(t.ctx)
+	t.Require().NoError(err)
+
+	deleteFile := mustDataFile(t.T(), *iceberg.UnpartitionedSpec, existingPath, nil, 1, mustFileSize(t.T(), existingPath))
+	addFile := mustDataFile(t.T(), *iceberg.UnpartitionedSpec,
+		fmt.Sprintf("%s/replace_data_files_dup_del_v%d/new.parquet", t.location, t.formatVersion), nil, 1, 100)
+
+	tx = tbl.NewTransaction()
+	err = tx.ReplaceDataFilesWithDataFiles(t.ctx, []iceberg.DataFile{deleteFile, deleteFile}, []iceberg.DataFile{addFile}, nil)
+	t.Error(err)
+	t.ErrorContains(err, "delete data file paths must be unique for ReplaceDataFilesWithDataFiles")
+}
+
+func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFilesAddAlreadyReferenced() {
+	ident := table.Identifier{"default", "replace_data_files_add_ref_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	existingPath1 := fmt.Sprintf("%s/replace_data_files_add_ref_v%d/existing1.parquet", t.location, t.formatVersion)
+	existingPath2 := fmt.Sprintf("%s/replace_data_files_add_ref_v%d/existing2.parquet", t.location, t.formatVersion)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), existingPath1, t.arrTbl)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), existingPath2, t.arrTbl)
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddFiles(t.ctx, []string{existingPath1, existingPath2}, nil, false))
+	tbl, err := tx.Commit(t.ctx)
+	t.Require().NoError(err)
+
+	deleteFile := mustDataFile(t.T(), *iceberg.UnpartitionedSpec, existingPath1, nil, 1, mustFileSize(t.T(), existingPath1))
+	addFile := mustDataFile(t.T(), *iceberg.UnpartitionedSpec, existingPath2, nil, 1, mustFileSize(t.T(), existingPath2))
+
+	tx = tbl.NewTransaction()
+	err = tx.ReplaceDataFilesWithDataFiles(t.ctx, []iceberg.DataFile{deleteFile}, []iceberg.DataFile{addFile}, nil)
+	t.Error(err)
+	t.ErrorContains(err, "cannot add files that are already referenced by table")
+}
+
+func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFilesDeleteNotInTable() {
+	ident := table.Identifier{"default", "replace_data_files_del_not_found_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	existingPath := fmt.Sprintf("%s/replace_data_files_del_not_found_v%d/existing.parquet", t.location, t.formatVersion)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), existingPath, t.arrTbl)
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddFiles(t.ctx, []string{existingPath}, nil, false))
+	tbl, err := tx.Commit(t.ctx)
+	t.Require().NoError(err)
+
+	nonExistentFile := mustDataFile(t.T(), *iceberg.UnpartitionedSpec,
+		fmt.Sprintf("%s/replace_data_files_del_not_found_v%d/nonexistent.parquet", t.location, t.formatVersion), nil, 1, 100)
+	addFile := mustDataFile(t.T(), *iceberg.UnpartitionedSpec,
+		fmt.Sprintf("%s/replace_data_files_del_not_found_v%d/new.parquet", t.location, t.formatVersion), nil, 1, 100)
+
+	tx = tbl.NewTransaction()
+	err = tx.ReplaceDataFilesWithDataFiles(t.ctx, []iceberg.DataFile{nonExistentFile}, []iceberg.DataFile{addFile}, nil)
+	t.Error(err)
+	t.ErrorContains(err, "cannot delete files that do not belong to the table")
+}
+
+func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFilesNilDeleteFile() {
+	ident := table.Identifier{"default", "replace_data_files_nil_del_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	existingPath := fmt.Sprintf("%s/replace_data_files_nil_del_v%d/existing.parquet", t.location, t.formatVersion)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), existingPath, t.arrTbl)
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddFiles(t.ctx, []string{existingPath}, nil, false))
+	tbl, err := tx.Commit(t.ctx)
+	t.Require().NoError(err)
+
+	addFile := mustDataFile(t.T(), *iceberg.UnpartitionedSpec,
+		fmt.Sprintf("%s/replace_data_files_nil_del_v%d/new.parquet", t.location, t.formatVersion), nil, 1, 100)
+
+	tx = tbl.NewTransaction()
+	err = tx.ReplaceDataFilesWithDataFiles(t.ctx, []iceberg.DataFile{nil}, []iceberg.DataFile{addFile}, nil)
+	t.Error(err)
+	t.ErrorContains(err, "nil data file at index 0")
+}
+
+func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFilesNilAddFile() {
+	ident := table.Identifier{"default", "replace_data_files_nil_add_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	existingPath := fmt.Sprintf("%s/replace_data_files_nil_add_v%d/existing.parquet", t.location, t.formatVersion)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), existingPath, t.arrTbl)
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddFiles(t.ctx, []string{existingPath}, nil, false))
+	tbl, err := tx.Commit(t.ctx)
+	t.Require().NoError(err)
+
+	deleteFile := mustDataFile(t.T(), *iceberg.UnpartitionedSpec, existingPath, nil, 1, mustFileSize(t.T(), existingPath))
+
+	tx = tbl.NewTransaction()
+	err = tx.ReplaceDataFilesWithDataFiles(t.ctx, []iceberg.DataFile{deleteFile}, []iceberg.DataFile{nil}, nil)
+	t.Error(err)
+	t.ErrorContains(err, "nil data file at index 0")
+}
+
+func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFilesNoSnapshot() {
+	ident := table.Identifier{"default", "replace_data_files_no_snapshot_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	deleteFile := mustDataFile(t.T(), *iceberg.UnpartitionedSpec,
+		fmt.Sprintf("%s/replace_data_files_no_snapshot_v%d/delete.parquet", t.location, t.formatVersion), nil, 1, 100)
+	addFile := mustDataFile(t.T(), *iceberg.UnpartitionedSpec,
+		fmt.Sprintf("%s/replace_data_files_no_snapshot_v%d/add.parquet", t.location, t.formatVersion), nil, 1, 100)
+
+	tx := tbl.NewTransaction()
+	err := tx.ReplaceDataFilesWithDataFiles(t.ctx, []iceberg.DataFile{deleteFile}, []iceberg.DataFile{addFile}, nil)
+	t.Error(err)
+	t.ErrorContains(err, "cannot replace files in a table without an existing snapshot")
+}
+
+func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFilesInvalidAddContentType() {
+	ident := table.Identifier{"default", "replace_data_files_invalid_add_content_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	existingPath := fmt.Sprintf("%s/replace_data_files_invalid_add_content_v%d/existing.parquet", t.location, t.formatVersion)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), existingPath, t.arrTbl)
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddFiles(t.ctx, []string{existingPath}, nil, false))
+	tbl, err := tx.Commit(t.ctx)
+	t.Require().NoError(err)
+
+	deleteFile := mustDataFile(t.T(), *iceberg.UnpartitionedSpec, existingPath, nil, 1, mustFileSize(t.T(), existingPath))
+
+	builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		fmt.Sprintf("%s/replace_data_files_invalid_add_content_v%d/new.parquet", t.location, t.formatVersion),
+		iceberg.ParquetFile, nil, nil, nil, 1, 100)
+	t.Require().NoError(err)
+	invalidAddFile := builder.Build()
+
+	tx = tbl.NewTransaction()
+	err = tx.ReplaceDataFilesWithDataFiles(t.ctx, []iceberg.DataFile{deleteFile}, []iceberg.DataFile{invalidAddFile}, nil)
+	t.Error(err)
+	t.ErrorContains(err, "adding files other than data files is not yet implemented")
+}
+
+func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFilesEmptyBoth() {
+	ident := table.Identifier{"default", "replace_data_files_empty_both_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	tx := tbl.NewTransaction()
+	err := tx.ReplaceDataFilesWithDataFiles(t.ctx, []iceberg.DataFile{}, []iceberg.DataFile{}, nil)
+	t.NoError(err)
+
+	staged, err := tx.StagedTable()
+	t.Require().NoError(err)
+	t.Nil(staged.CurrentSnapshot())
+}
+
+func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFilesDelegatesToAddDataFiles() {
+	ident := table.Identifier{"default", "replace_data_files_delegate_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	filePath := fmt.Sprintf("%s/replace_data_files_delegate_v%d/test.parquet", t.location, t.formatVersion)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, t.arrTbl)
+
+	addFile := mustDataFile(t.T(), *iceberg.UnpartitionedSpec, filePath, nil, 1, mustFileSize(t.T(), filePath))
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.ReplaceDataFilesWithDataFiles(t.ctx, []iceberg.DataFile{}, []iceberg.DataFile{addFile}, nil))
+
+	staged, err := tx.StagedTable()
+	t.Require().NoError(err)
+	t.Equal(table.OpAppend, staged.CurrentSnapshot().Summary.Operation)
+	t.Equal("1", staged.CurrentSnapshot().Summary.Properties["added-data-files"])
+}
+
+// ============================================================================
+// ReplaceDataFiles (string paths) Error Path Tests
+// ============================================================================
+
+func (t *TableWritingTestSuite) TestReplaceDataFilesDuplicateDeletePaths() {
+	ident := table.Identifier{"default", "replace_data_files_dup_del_paths_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	existingPath := fmt.Sprintf("%s/replace_data_files_dup_del_paths_v%d/existing.parquet", t.location, t.formatVersion)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), existingPath, t.arrTbl)
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddFiles(t.ctx, []string{existingPath}, nil, false))
+	tbl, err := tx.Commit(t.ctx)
+	t.Require().NoError(err)
+
+	newPath := fmt.Sprintf("%s/replace_data_files_dup_del_paths_v%d/new.parquet", t.location, t.formatVersion)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), newPath, t.arrTbl)
+
+	tx = tbl.NewTransaction()
+	err = tx.ReplaceDataFiles(t.ctx, []string{existingPath, existingPath}, []string{newPath}, nil)
+	t.Error(err)
+	t.ErrorContains(err, "delete file paths must be unique for ReplaceDataFiles")
+}
+
+func (t *TableWritingTestSuite) TestReplaceDataFilesDuplicateAddPaths() {
+	ident := table.Identifier{"default", "replace_data_files_dup_add_paths_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	existingPath := fmt.Sprintf("%s/replace_data_files_dup_add_paths_v%d/existing.parquet", t.location, t.formatVersion)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), existingPath, t.arrTbl)
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddFiles(t.ctx, []string{existingPath}, nil, false))
+	tbl, err := tx.Commit(t.ctx)
+	t.Require().NoError(err)
+
+	newPath := fmt.Sprintf("%s/replace_data_files_dup_add_paths_v%d/new.parquet", t.location, t.formatVersion)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), newPath, t.arrTbl)
+
+	tx = tbl.NewTransaction()
+	err = tx.ReplaceDataFiles(t.ctx, []string{existingPath}, []string{newPath, newPath}, nil)
+	t.Error(err)
+	t.ErrorContains(err, "add file paths must be unique for ReplaceDataFiles")
+}
+
+func (t *TableWritingTestSuite) TestReplaceDataFilesAddAlreadyReferenced() {
+	ident := table.Identifier{"default", "replace_data_files_add_already_ref_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	existingPath1 := fmt.Sprintf("%s/replace_data_files_add_already_ref_v%d/existing1.parquet", t.location, t.formatVersion)
+	existingPath2 := fmt.Sprintf("%s/replace_data_files_add_already_ref_v%d/existing2.parquet", t.location, t.formatVersion)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), existingPath1, t.arrTbl)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), existingPath2, t.arrTbl)
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddFiles(t.ctx, []string{existingPath1, existingPath2}, nil, false))
+	tbl, err := tx.Commit(t.ctx)
+	t.Require().NoError(err)
+
+	tx = tbl.NewTransaction()
+	err = tx.ReplaceDataFiles(t.ctx, []string{existingPath1}, []string{existingPath2}, nil)
+	t.Error(err)
+	t.ErrorContains(err, "cannot add files that are already referenced by table")
+}
+
+func (t *TableWritingTestSuite) TestReplaceDataFilesDeleteNotInTable() {
+	ident := table.Identifier{"default", "replace_data_files_del_not_in_table_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	existingPath := fmt.Sprintf("%s/replace_data_files_del_not_in_table_v%d/existing.parquet", t.location, t.formatVersion)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), existingPath, t.arrTbl)
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddFiles(t.ctx, []string{existingPath}, nil, false))
+	tbl, err := tx.Commit(t.ctx)
+	t.Require().NoError(err)
+
+	newPath := fmt.Sprintf("%s/replace_data_files_del_not_in_table_v%d/new.parquet", t.location, t.formatVersion)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), newPath, t.arrTbl)
+
+	nonExistentPath := fmt.Sprintf("%s/replace_data_files_del_not_in_table_v%d/nonexistent.parquet", t.location, t.formatVersion)
+
+	tx = tbl.NewTransaction()
+	err = tx.ReplaceDataFiles(t.ctx, []string{nonExistentPath}, []string{newPath}, nil)
+	t.Error(err)
+	t.ErrorContains(err, "cannot delete files that do not belong to the table")
+}
+
+func (t *TableWritingTestSuite) TestReplaceDataFilesNoSnapshot() {
+	ident := table.Identifier{"default", "replace_data_files_no_snapshot_paths_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	tx := tbl.NewTransaction()
+	err := tx.ReplaceDataFiles(t.ctx, []string{"delete.parquet"}, []string{"add.parquet"}, nil)
+	t.Error(err)
+	t.ErrorContains(err, "cannot replace files in a table without an existing snapshot")
 }
 
 func (t *TableWritingTestSuite) TestExpireSnapshots() {
