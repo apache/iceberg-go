@@ -505,6 +505,16 @@ func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64) error {
 	return nil
 }
 
+func (b *MetadataBuilder) isSnapshotReferenced(snapshotID int64) bool {
+	for _, ref := range b.refs {
+		if ref.SnapshotID == snapshotID {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (b *MetadataBuilder) AddSortOrder(sortOrder *SortOrder) error {
 	curSchema := b.CurrentSchema()
 	if curSchema == nil {
