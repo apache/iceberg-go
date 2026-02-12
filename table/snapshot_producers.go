@@ -86,8 +86,14 @@ func (fa *fastAppendFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 			return nil, err
 		}
 
+		// This provides a constant-time (O(1)) search in a loop.
+		previousSnapshotList := make(map[int64]struct{}, len(fa.base.txn.meta.snapshotList))
+		for _, sn := range fa.base.txn.meta.snapshotList {
+			previousSnapshotList[sn.SnapshotID] = struct{}{}
+		}
+
 		for _, m := range manifests {
-			if m.HasAddedFiles() || m.HasExistingFiles() || m.SnapshotID() == fa.base.snapshotID {
+			if _, ok := previousSnapshotList[m.SnapshotID()]; m.HasAddedFiles() || m.HasExistingFiles() || ok {
 				existing = append(existing, m)
 			}
 		}
