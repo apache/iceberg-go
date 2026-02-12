@@ -433,6 +433,108 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	return t.apply(updates, reqs)
 }
 
+// AddDataFiles adds pre-built DataFiles to the table without scanning them from storage.
+// This is useful for clients who have already constructed DataFile objects with metadata,
+// avoiding the need to read files to extract schema and statistics.
+//
+// Unlike AddFiles, this method does not read the files from storage - it trusts the
+// provided DataFile metadata (record count, file size, partition values, etc.).
+func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.DataFile, snapshotProps iceberg.Properties) error {
+	if len(dataFiles) == 0 {
+		return nil
+	}
+
+	fs, err := t.tbl.fsF(ctx)
+	if err != nil {
+		return err
+	}
+
+	if t.meta.NameMapping() == nil {
+		nameMapping := t.meta.CurrentSchema().NameMapping()
+		mappingJson, err := json.Marshal(nameMapping)
+		if err != nil {
+			return err
+		}
+		err = t.SetProperties(iceberg.Properties{DefaultNameMappingKey: string(mappingJson)})
+		if err != nil {
+			return err
+		}
+	}
+
+	appendFiles := t.appendSnapshotProducer(fs, snapshotProps)
+	for _, df := range dataFiles {
+		appendFiles.appendDataFile(df)
+	}
+
+	updates, reqs, err := appendFiles.commit()
+	if err != nil {
+		return err
+	}
+
+	return t.apply(updates, reqs)
+}
+
+// ReplaceDataFilesWithDataFiles replaces files using pre-built DataFile objects.
+// This avoids scanning files to extract schema and statistics - the caller provides
+// DataFile objects directly with all required metadata.
+//
+// For the files to add, use iceberg.NewDataFileBuilder to construct DataFile objects
+// with the appropriate metadata (path, record count, file size, partition values).
+//
+// This is useful when:
+//   - Files are written via a separate I/O path and metadata is already known
+//   - Avoiding file scanning improves performance or reliability
+//   - Working with storage systems where immediate file reads may be unreliable
+func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesToDelete, filesToAdd []iceberg.DataFile, snapshotProps iceberg.Properties) error {
+	if len(filesToDelete) == 0 {
+		if len(filesToAdd) > 0 {
+			return t.AddDataFiles(ctx, filesToAdd, snapshotProps)
+		}
+
+		return nil
+	}
+
+	s := t.meta.currentSnapshot()
+	if s == nil {
+		return fmt.Errorf("%w: cannot replace files in a table without an existing snapshot", ErrInvalidOperation)
+	}
+
+	fs, err := t.tbl.fsF(ctx)
+	if err != nil {
+		return err
+	}
+
+	if t.meta.NameMapping() == nil {
+		nameMapping := t.meta.CurrentSchema().NameMapping()
+		mappingJson, err := json.Marshal(nameMapping)
+		if err != nil {
+			return err
+		}
+		err = t.SetProperties(iceberg.Properties{DefaultNameMappingKey: string(mappingJson)})
+		if err != nil {
+			return err
+		}
+	}
+
+	commitUUID := uuid.New()
+	updater := t.updateSnapshot(fs, snapshotProps).mergeOverwrite(&commitUUID)
+
+	for _, df := range filesToDelete {
+		updater.deleteDataFile(df)
+	}
+
+	for _, df := range filesToAdd {
+		updater.appendDataFile(df)
+	}
+
+	updates, reqs, err := updater.commit()
+	if err != nil {
+		return err
+	}
+
+	return t.apply(updates, reqs)
+}
+
 func (t *Transaction) AddFiles(ctx context.Context, files []string, snapshotProps iceberg.Properties, ignoreDuplicates bool) error {
 	set := make(map[string]string)
 	for _, f := range files {
