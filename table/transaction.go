@@ -490,6 +490,7 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 		if len(filesToAdd) > 0 {
 			return t.AddDataFiles(ctx, filesToAdd, snapshotProps)
 		}
+
 		return nil
 	}
 
