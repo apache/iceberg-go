@@ -29,7 +29,7 @@ import (
 type registry map[string]SchemeFactory
 
 var (
-	regMutex        sync.Mutex
+	regMutex        sync.RWMutex
 	defaultRegistry = registry{}
 )
 
@@ -60,8 +60,8 @@ func Unregister(scheme string) {
 
 // GetRegisteredSchemes returns the list of registered scheme names.
 func GetRegisteredSchemes() []string {
-	regMutex.Lock()
-	defer regMutex.Unlock()
+	regMutex.RLock()
+	defer regMutex.RUnlock()
 
 	return slices.Collect(maps.Keys(defaultRegistry))
 }
@@ -81,12 +81,12 @@ func inferFileIOFromScheme(ctx context.Context, path string, props map[string]st
 		return nil, err
 	}
 
-	regMutex.Lock()
+	regMutex.RLock()
 	factory, ok := defaultRegistry[parsed.Scheme]
-	regMutex.Unlock()
+	regMutex.RUnlock()
 
 	if !ok {
-		return nil, fmt.Errorf("%w: %s", ErrIONotFound, parsed.Scheme)
+		return nil, fmt.Errorf("%w for path %q (scheme: %s)", ErrIOSchemeNotFound, path, parsed.Scheme)
 	}
 
 	return factory(ctx, parsed, props)

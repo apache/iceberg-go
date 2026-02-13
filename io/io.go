@@ -202,7 +202,7 @@ func (f ioFS) Remove(name string) error {
 }
 
 var (
-	ErrIONotFound = errors.New("io scheme not registered")
+	ErrIOSchemeNotFound = errors.New("io scheme not registered")
 
 	errMissingReadDir  = errors.New("fs.File directory missing ReadDir method")
 	errMissingSeek     = errors.New("fs.File missing Seek method")

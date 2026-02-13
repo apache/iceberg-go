@@ -91,7 +91,7 @@ func TestIORegistry(t *testing.T) {
 
 	_, err = io.LoadFS(ctx, map[string]string{}, "custom://bucket/path")
 	assert.Error(t, err)
-	assert.ErrorIs(t, err, io.ErrIONotFound)
+	assert.ErrorIs(t, err, io.ErrIOSchemeNotFound)
 }
 
 func TestRegistryPanic(t *testing.T) {
@@ -153,7 +153,7 @@ func TestLoadFS(t *testing.T) {
 			iofs, err := io.LoadFS(ctx, map[string]string{}, tt.location)
 			if tt.expectError {
 				assert.Error(t, err)
-				assert.ErrorIs(t, err, io.ErrIONotFound)
+				assert.ErrorIs(t, err, io.ErrIOSchemeNotFound)
 			} else {
 				require.NoError(t, err)
 				assert.NotNil(t, iofs)
