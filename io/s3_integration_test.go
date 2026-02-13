@@ -58,7 +58,7 @@ func TestMinioWarehouse(t *testing.T) {
 
 	tbl, err := c.CreateTable(ctx,
 		catalog.ToIdentifier("iceberg-test-2", "test-table-2"),
-		iceberg.NewSchema(0, iceberg.NestedField{
+		iceberg.MustNewSchema(0, iceberg.NestedField{
 			Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, ID: 1,
 		}), catalog.WithLocation("s3a://warehouse/iceberg/iceberg-test-2/test-table-2"))
 	require.NoError(t, err)
@@ -90,7 +90,7 @@ func TestMinioWarehouseNoLocation(t *testing.T) {
 
 	tbl, err := c.CreateTable(ctx,
 		catalog.ToIdentifier("iceberg-test-2", "test-table-2"),
-		iceberg.NewSchema(0, iceberg.NestedField{
+		iceberg.MustNewSchema(0, iceberg.NestedField{
 			Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, ID: 1,
 		}))
 	require.NoError(t, err)

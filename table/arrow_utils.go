@@ -407,7 +407,12 @@ func ArrowSchemaToIceberg(sc *arrow.Schema, downcastNsTimestamp bool, nameMappin
 			return nil, err
 		}
 
-		return iceberg.NewSchema(0, out.Type.(*iceberg.StructType).FieldList...), nil
+		schema, err := iceberg.NewSchema(0, out.Type.(*iceberg.StructType).FieldList...)
+		if err != nil {
+			return nil, err
+		}
+
+		return schema, nil
 	case nameMapping != nil:
 		schemaWithoutIDs, err := arrowToSchemaWithoutIDs(sc, downcastNsTimestamp)
 		if err != nil {
@@ -431,15 +436,27 @@ func ArrowSchemaToIcebergWithFreshIDs(sc *arrow.Schema, downcastNsTimestamp bool
 }
 
 func arrowToSchemaWithoutIDs(sc *arrow.Schema, downcastNsTimestamp bool) (*iceberg.Schema, error) {
+	// Use a counter to assign unique temporary IDs starting from -1
+	// These IDs will be replaced by ApplyNameMapping, but we need unique IDs
+	// to pass schema validation
+	nextTempID := -1
 	withoutIDs, err := VisitArrowSchema(sc, convertToIceberg{
 		downcastTimestamp: downcastNsTimestamp,
-		fieldID:           func(_ arrow.Field) int { return -1 },
+		fieldID: func(_ arrow.Field) int {
+			id := nextTempID
+			nextTempID--
+
+			return id
+		},
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	schemaWithoutIDs := iceberg.NewSchema(0, withoutIDs.Type.(*iceberg.StructType).FieldList...)
+	schemaWithoutIDs, err := iceberg.NewSchema(0, withoutIDs.Type.(*iceberg.StructType).FieldList...)
+	if err != nil {
+		return nil, err
+	}
 
 	return schemaWithoutIDs, nil
 }
@@ -646,7 +663,11 @@ func SchemaToArrowSchema(sc *iceberg.Schema, metadata map[string]string, include
 // For dealing with nested fields (List, Struct, Map) if includeFieldIDs is true, then
 // the child fields will contain a metadata key PARQUET:field_id set to the field id.
 func TypeToArrowType(t iceberg.Type, includeFieldIDs bool, useLargeTypes bool) (arrow.DataType, error) {
-	top, err := iceberg.Visit(iceberg.NewSchema(0, iceberg.NestedField{Type: t}),
+	tempSchema, err := iceberg.NewSchema(0, iceberg.NestedField{Type: t})
+	if err != nil {
+		return nil, err
+	}
+	top, err := iceberg.Visit(tempSchema,
 		convertToArrow{includeFieldIDs: includeFieldIDs, useLargeTypes: useLargeTypes})
 	if err != nil {
 		return nil, err

@@ -18,37 +18,50 @@
 package table
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/assert"
 )
 
-var originalSchema = iceberg.NewSchema(1,
-	iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, Doc: ""},
-	iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-	iceberg.NestedField{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: false, Doc: ""},
-	iceberg.NestedField{ID: 4, Name: "address", Type: &iceberg.StructType{
-		FieldList: []iceberg.NestedField{
-			{ID: 5, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-			{ID: 6, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
-		},
-	}, Required: false, Doc: ""},
-	iceberg.NestedField{ID: 7, Name: "tags", Type: &iceberg.ListType{
-		ElementID:       8,
-		Element:         iceberg.PrimitiveTypes.String,
-		ElementRequired: false,
-	}, Required: false, Doc: ""},
-	iceberg.NestedField{ID: 9, Name: "properties", Type: &iceberg.MapType{
-		KeyID:         10,
-		KeyType:       iceberg.PrimitiveTypes.String,
-		ValueID:       11,
-		ValueType:     iceberg.PrimitiveTypes.String,
-		ValueRequired: false,
-	}, Required: false, Doc: ""},
-)
+var originalSchema *iceberg.Schema
 
-var testMetadata, _ = NewMetadata(originalSchema, nil, UnsortedSortOrder, "", nil)
+func init() {
+	originalSchema = iceberg.MustNewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, Doc: ""},
+		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+		iceberg.NestedField{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: false, Doc: ""},
+		iceberg.NestedField{ID: 4, Name: "address", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 5, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+				{ID: 6, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+			},
+		}, Required: false, Doc: ""},
+		iceberg.NestedField{ID: 7, Name: "tags", Type: &iceberg.ListType{
+			ElementID:       8,
+			Element:         iceberg.PrimitiveTypes.String,
+			ElementRequired: false,
+		}, Required: false, Doc: ""},
+		iceberg.NestedField{ID: 9, Name: "properties", Type: &iceberg.MapType{
+			KeyID:         10,
+			KeyType:       iceberg.PrimitiveTypes.String,
+			ValueID:       11,
+			ValueType:     iceberg.PrimitiveTypes.String,
+			ValueRequired: false,
+		}, Required: false, Doc: ""},
+	)
+}
+
+var testMetadata Metadata
+
+func init() {
+	var err error
+	testMetadata, err = NewMetadata(originalSchema, nil, UnsortedSortOrder, "", nil)
+	if err != nil {
+		panic(fmt.Sprintf("failed to create testMetadata: %v", err))
+	}
+}
 
 func TestAddColumn(t *testing.T) {
 	t.Run("test update schema with add primitive type on top level", func(t *testing.T) {
@@ -400,11 +413,12 @@ func TestApplyChanges(t *testing.T) {
 	})
 
 	t.Run("test apply changes on add field that delete in same time", func(t *testing.T) {
-		originalSchema := iceberg.NewSchema(1,
+		originalSchema, err := iceberg.NewSchema(1,
 			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, Doc: ""},
 			iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
 			iceberg.NestedField{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: false, Doc: ""},
 		)
+		assert.NoError(t, err)
 		deletes := map[int]struct{}{
 			2: {},
 		}
@@ -812,11 +826,12 @@ func TestSetIdentifierField(t *testing.T) {
 
 	t.Run("test set identifier field replaces existing identifier fields", func(t *testing.T) {
 		// Create a schema with existing identifier fields
-		schemaWithIdentifiers := iceberg.NewSchemaWithIdentifiers(1, []int{1}, // id is initially an identifier
+		schemaWithIdentifiers, err := iceberg.NewSchemaWithIdentifiers(1, []int{1}, // id is initially an identifier
 			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, Doc: ""},
 			iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
 			iceberg.NestedField{ID: 3, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: false, Doc: ""},
 		)
+		assert.NoError(t, err)
 		metadata, _ := NewMetadata(schemaWithIdentifiers, nil, UnsortedSortOrder, "", nil)
 		table := New([]string{"id"}, metadata, "", nil, nil)
 		txn := table.NewTransaction()

@@ -27,13 +27,16 @@ import (
 // which uses cached URL-escaped field names and strings.Builder for efficient
 // string concatenation.
 func BenchmarkPartitionToPath(b *testing.B) {
-	schema := iceberg.NewSchema(0,
+	schema, err := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "str", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 2, Name: "other_str", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 3, Name: "int", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		iceberg.NestedField{ID: 4, Name: "date", Type: iceberg.PrimitiveTypes.Date, Required: true},
 		iceberg.NestedField{ID: 5, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
 	)
+	if err != nil {
+		b.Fatalf("failed to create schema: %v", err)
+	}
 
 	// Create a partition spec with fields that need URL escaping
 	spec := iceberg.NewPartitionSpecID(1,
@@ -88,7 +91,10 @@ func BenchmarkPartitionToPathManyFields(b *testing.B) {
 		recordValues = append(recordValues, "value_"+string(rune('a'+i-1)))
 	}
 
-	schema := iceberg.NewSchema(0, fields...)
+	schema, err := iceberg.NewSchema(0, fields...)
+	if err != nil {
+		b.Fatalf("failed to create schema: %v", err)
+	}
 	spec := iceberg.NewPartitionSpecID(1, partitionFields...)
 	record := partitionRecord(recordValues)
 
@@ -103,11 +109,14 @@ func BenchmarkPartitionToPathManyFields(b *testing.B) {
 // The first call should be slower (builds the type), subsequent calls should
 // be faster (uses cache).
 func BenchmarkPartitionType(b *testing.B) {
-	schema := iceberg.NewSchema(0,
+	schema, err := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "str", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 2, Name: "int", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		iceberg.NestedField{ID: 3, Name: "bool", Type: iceberg.PrimitiveTypes.Bool, Required: false},
 	)
+	if err != nil {
+		b.Fatalf("failed to create schema: %v", err)
+	}
 
 	spec := iceberg.NewPartitionSpecID(1,
 		iceberg.PartitionField{
@@ -136,10 +145,14 @@ func BenchmarkPartitionType(b *testing.B) {
 func BenchmarkPartitionTypeMultipleSchemas(b *testing.B) {
 	schemas := make([]*iceberg.Schema, 10)
 	for i := range schemas {
-		schemas[i] = iceberg.NewSchema(i,
+		var err error
+		schemas[i], err = iceberg.NewSchema(i,
 			iceberg.NestedField{ID: 1, Name: "str", Type: iceberg.PrimitiveTypes.String},
 			iceberg.NestedField{ID: 2, Name: "int", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		)
+		if err != nil {
+			b.Fatalf("failed to create schema: %v", err)
+		}
 	}
 
 	spec := iceberg.NewPartitionSpecID(1,
@@ -164,11 +177,17 @@ func BenchmarkPartitionTypeMultipleSchemas(b *testing.B) {
 // BenchmarkPartitionToPathRepeated benchmarks repeated calls to PartitionToPath
 // with the same spec to verify that cached escaped names provide performance benefits.
 func BenchmarkPartitionToPathRepeated(b *testing.B) {
-	schema := iceberg.NewSchema(0,
+	schema, err := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "str", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 2, Name: "other_str", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 3, Name: "int", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 	)
+	if err != nil {
+		b.Fatalf("failed to create schema: %v", err)
+	}
+	if err != nil {
+		b.Fatalf("failed to create schema: %v", err)
+	}
 
 	// Use field names that require URL escaping to maximize the benefit of caching
 	spec := iceberg.NewPartitionSpecID(1,
