@@ -15,6 +15,18 @@
 // specific language governing permissions and limitations
 // under the License.
 
+// Package io provides an interface for IO implementations along with
+// a registry for registering IO implementations for different URI schemes.
+//
+// Subpackages of this package provide implementations for cloud storage providers
+// which will register themselves if imported. For instance, adding the following
+// import:
+//
+//	import _ "github.com/apache/iceberg-go/io/gocloud"
+//
+// Will register cloud storage implementations for S3, GCS, Azure, and in-memory
+// blob storage. The local filesystem (file:// and empty scheme) is registered
+// by default.
 package io
 
 import (
@@ -23,11 +35,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net/url"
 	"strings"
-
-	"gocloud.dev/blob"
-	"gocloud.dev/blob/memblob"
 )
 
 // IO is an interface to a hierarchical file system.
@@ -194,6 +202,8 @@ func (f ioFS) Remove(name string) error {
 }
 
 var (
+	ErrIOSchemeNotFound = errors.New("io scheme not registered")
+
 	errMissingReadDir  = errors.New("fs.File directory missing ReadDir method")
 	errMissingSeek     = errors.New("fs.File missing Seek method")
 	errMissingReadAt   = errors.New("fs.File missing ReadAt")
@@ -235,60 +245,24 @@ func (f ioFile) ReadDir(count int) ([]fs.DirEntry, error) {
 	return d.ReadDir(count)
 }
 
-func inferFileIOFromSchema(ctx context.Context, path string, props map[string]string) (IO, error) {
-	parsed, err := url.Parse(path)
-	if err != nil {
-		return nil, err
-	}
-	var bucket *blob.Bucket
-	var keyExtractor KeyExtractor
-
-	switch parsed.Scheme {
-	case "s3", "s3a", "s3n":
-		bucket, err = createS3Bucket(ctx, parsed, props)
-		if err != nil {
-			return nil, err
-		}
-		keyExtractor = defaultKeyExtractor(parsed.Host)
-	case "gs":
-		bucket, err = createGCSBucket(ctx, parsed, props)
-		if err != nil {
-			return nil, err
-		}
-		keyExtractor = defaultKeyExtractor(parsed.Host)
-	case "mem":
-		// memblob doesn't use the URL host or path
-		bucket = memblob.OpenBucket(nil)
-		keyExtractor = defaultKeyExtractor(parsed.Host)
-	case "file", "":
-		return LocalFS{}, nil
-	case "abfs", "abfss", "wasb", "wasbs":
-		bucket, err = createAzureBucket(ctx, parsed, props)
-		if err != nil {
-			return nil, err
-		}
-		keyExtractor = adlsKeyExtractor()
-	default:
-		return nil, fmt.Errorf("IO for file '%s' not implemented", path)
-	}
-
-	return createBlobFS(ctx, bucket, keyExtractor), nil
-}
-
 // LoadFS takes a map of properties and an optional URI location
-// and attempts to infer an IO object from it.
+// and attempts to infer an IO object from it using the registered
+// scheme factories.
 //
-// A schema of "file://" or an empty string will result in a LocalFS
-// implementation. Otherwise this will return an error if the schema
-// does not yet have an implementation here.
+// The scheme is extracted from the location URI and used to look up
+// the appropriate factory from the registry. The local filesystem
+// (file:// or empty scheme) is registered by default.
 //
-// Currently local, S3, GCS, and In-Memory FSs are implemented.
+// Additional schemes can be registered by importing subpackages.
+// For S3, GCS, Azure and in-memory support, import:
+//
+//	import _ "github.com/apache/iceberg-go/io/gocloud"
 func LoadFS(ctx context.Context, props map[string]string, location string) (IO, error) {
 	if location == "" {
 		location = props["warehouse"]
 	}
 
-	iofs, err := inferFileIOFromSchema(ctx, location, props)
+	iofs, err := inferFileIOFromScheme(ctx, location, props)
 	if err != nil {
 		return nil, err
 	}

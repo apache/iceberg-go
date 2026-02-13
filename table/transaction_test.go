@@ -35,6 +35,7 @@ import (
 	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/apache/iceberg-go/internal/recipe"
 	iceio "github.com/apache/iceberg-go/io"
+	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/suite"
 	"github.com/testcontainers/testcontainers-go/modules/compose"
