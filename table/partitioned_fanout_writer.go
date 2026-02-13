@@ -32,14 +32,15 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// PartitionedFanoutWriter distributes Arrow records across multiple partitions based on
+// partitionedFanoutWriter distributes Arrow records across multiple partitions based on
 // a partition specification, writing data to separate files for each partition using
 // a fanout pattern with configurable parallelism.
 type partitionedFanoutWriter struct {
-	partitionSpec iceberg.PartitionSpec
-	schema        *iceberg.Schema
-	itr           iter.Seq2[arrow.RecordBatch, error]
-	writers       *writerFactory
+	partitionSpec            iceberg.PartitionSpec
+	schema                   *iceberg.Schema
+	itr                      iter.Seq2[arrow.RecordBatch, error]
+	writers                  *writerFactory
+	concurrentDataFileWriter *concurrentDataFileWriter
 }
 
 // PartitionInfo holds the row indices and partition values for a specific partition,
@@ -52,11 +53,12 @@ type partitionInfo struct {
 
 // NewPartitionedFanoutWriter creates a new PartitionedFanoutWriter with the specified
 // partition specification, schema, and record iterator.
-func newPartitionedFanoutWriter(partitionSpec iceberg.PartitionSpec, schema *iceberg.Schema, itr iter.Seq2[arrow.RecordBatch, error]) *partitionedFanoutWriter {
+func newPartitionedFanoutWriter(partitionSpec iceberg.PartitionSpec, concurrentWriter *concurrentDataFileWriter, schema *iceberg.Schema, itr iter.Seq2[arrow.RecordBatch, error]) *partitionedFanoutWriter {
 	return &partitionedFanoutWriter{
-		partitionSpec: partitionSpec,
-		schema:        schema,
-		itr:           itr,
+		partitionSpec:            partitionSpec,
+		schema:                   schema,
+		itr:                      itr,
+		concurrentDataFileWriter: concurrentWriter,
 	}
 }
 
@@ -72,7 +74,7 @@ func (p *partitionedFanoutWriter) Write(ctx context.Context, workers int) iter.S
 	outputDataFilesCh := make(chan iceberg.DataFile, workers)
 
 	fanoutWorkers, ctx := errgroup.WithContext(ctx)
-	p.startRecordFeeder(ctx, fanoutWorkers, inputRecordsCh)
+	startRecordFeeder(ctx, p.itr, fanoutWorkers, inputRecordsCh)
 
 	for range workers {
 		fanoutWorkers.Go(func() error {
@@ -83,11 +85,11 @@ func (p *partitionedFanoutWriter) Write(ctx context.Context, workers int) iter.S
 	return p.yieldDataFiles(fanoutWorkers, outputDataFilesCh)
 }
 
-func (p *partitionedFanoutWriter) startRecordFeeder(ctx context.Context, fanoutWorkers *errgroup.Group, inputRecordsCh chan<- arrow.RecordBatch) {
+func startRecordFeeder(ctx context.Context, itr iter.Seq2[arrow.RecordBatch, error], fanoutWorkers *errgroup.Group, inputRecordsCh chan<- arrow.RecordBatch) {
 	fanoutWorkers.Go(func() error {
 		defer close(inputRecordsCh)
 
-		for record, err := range p.itr {
+		for record, err := range itr {
 			if err != nil {
 				return err
 			}
@@ -136,7 +138,7 @@ func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 				}
 
 				partitionPath := p.partitionPath(val.partitionRec)
-				rollingDataWriter, err := p.writers.getOrCreateRollingDataWriter(ctx, partitionPath, val.partitionValues, dataFilesChannel)
+				rollingDataWriter, err := p.writers.getOrCreateRollingDataWriter(ctx, p.concurrentDataFileWriter, partitionPath, val.partitionValues, dataFilesChannel)
 				if err != nil {
 					return err
 				}
@@ -151,13 +153,17 @@ func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 }
 
 func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, outputDataFilesCh chan iceberg.DataFile) iter.Seq2[iceberg.DataFile, error] {
+	return yieldDataFiles(p.writers, fanoutWorkers, outputDataFilesCh)
+}
+
+func yieldDataFiles(writers *writerFactory, fanoutWorkers *errgroup.Group, outputDataFilesCh chan iceberg.DataFile) iter.Seq2[iceberg.DataFile, error] {
 	// Use a channel to safely communicate the error from the goroutine
 	// to avoid a data race between writing err in the goroutine and reading it in the iterator.
 	errCh := make(chan error, 1)
 	go func() {
 		defer close(outputDataFilesCh)
 		err := fanoutWorkers.Wait()
-		err = errors.Join(err, p.writers.closeAll())
+		err = errors.Join(err, writers.closeAll())
 		errCh <- err
 		close(errCh)
 	}()

@@ -60,29 +60,29 @@ $ cd iceberg-go/cmd/iceberg && go build .
 
 ### Catalog Support
 
-| Operation                   | REST | Hive |  Glue  | SQL  |
-|:----------------------------|:----:| :--: |:------:|:----:|
-| Load Table                  |  X   |      |   X    |  X   |
-| List Tables                 |  X   |      |   X    |  X   |
-| Create Table                |  X   |      |   X    |  X   |
-| Register Table              |  X   |      |   X    |      |
-| Update Current Snapshot     |  X   |      |   X    |  X   |
-| Create New Snapshot         |  X   |      |   X    |  X   |
-| Rename Table                |  X   |      |   X    |  X   |
-| Drop Table                  |  X   |      |   X    |  X   |
-| Alter Table                 |  X   |      |   X    |  X   |
-| Check Table Exists          |  X   |      |   X    |  X   |
-| Set Table Properties        |  X   |      |   X    |  X   |
-| List Namespaces             |  X   |      |   X    |  X   |
-| Create Namespace            |  X   |      |   X    |  X   |
-| Check Namespace Exists      |  X   |      |   X    |  X   |
-| Drop Namespace              |  X   |      |   X    |  X   |
-| Update Namespace Properties |  X   |      |   X    |  X   |
-| Create View                 |  X   |      |        |  X   |
-| Load View                   |      |      |        |  X   |
-| List View                   |  X   |      |        |  X   |
-| Drop View                   |  X   |      |        | X    |
-| Check View Exists           |  X   |      |        |  X   |
+| Operation                   | REST | Hive |  Glue  | SQL |
+|:----------------------------|:----:| :--: |:------:|:---:|
+| Load Table                  |  X   |      |   X    |  X  |
+| List Tables                 |  X   |      |   X    |  X  |
+| Create Table                |  X   |      |   X    |  X  |
+| Register Table              |  X   |      |   X    |     |
+| Update Current Snapshot     |  X   |      |   X    |  X  |
+| Create New Snapshot         |  X   |      |   X    |  X  |
+| Rename Table                |  X   |      |   X    |  X  |
+| Drop Table                  |  X   |      |   X    |  X  |
+| Alter Table                 |  X   |      |   X    |  X  |
+| Check Table Exists          |  X   |      |   X    |  X  |
+| Set Table Properties        |  X   |      |   X    |  X  |
+| List Namespaces             |  X   |      |   X    |  X  |
+| Create Namespace            |  X   |      |   X    |  X  |
+| Check Namespace Exists      |  X   |      |   X    |  X  |
+| Drop Namespace              |  X   |      |   X    |  X  |
+| Update Namespace Properties |  X   |      |   X    |  X  |
+| Create View                 |  X   |      |        |  X  |
+| Load View                   |      |      |        |  X  |
+| List View                   |  X   |      |        |  X  |
+| Drop View                   |  X   |      |        |  X  |
+| Check View Exists           |  X   |      |        |  X  |
 
 ### Read/Write Data Support
 
@@ -93,16 +93,17 @@ $ cd iceberg-go/cmd/iceberg && go build .
 As long as the FileSystem is supported and the Catalog supports altering
 the table, the following tracks the current write support:
 
-| Operation         |Supported|
-|:-----------------:|:-------:|
-| Append Stream     |   X     |
-| Append Data Files |   X     |
-| Rewrite Files     |         |
-| Rewrite manifests |         |
-| Overwrite Files   |   X     |
-| Write Pos Delete  |         |
-| Write Eq Delete   |         |
-| Row Delta         |         |
+|        Operation        | Supported |
+|:-----------------------:|:---------:|
+|      Append Stream      |     X     |
+|    Append Data Files    |     X     |
+|      Rewrite Files      |           |
+|    Rewrite manifests    |           |
+|     Overwrite Files     |     X     |
+|  Copy-On-Write Delete   |     X     |
+|    Write Pos Delete     |     X     |
+|     Write Eq Delete     |           |
+|        Row Delta        |           |
 
 
 ### CLI Usage

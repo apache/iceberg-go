@@ -184,6 +184,29 @@ func (t Table) Overwrite(ctx context.Context, rdr array.RecordReader, snapshotPr
 	return txn.Commit(ctx)
 }
 
+// Delete is a shortcut for NewTransaction().Delete() and then committing the transaction.
+//
+// The provided filter acts as a row-level predicate on existing data:
+//   - Files where all rows match the filter (strict match) are completely deleted
+//   - Files where some rows match and others don't (partial match) are rewritten to keep only non-matching rows
+//   - Files where no rows match the filter are kept unchanged
+//
+// The filter uses both inclusive and strict metrics evaluators on file statistics to classify files:
+//   - Inclusive evaluator identifies candidate files that may contain matching rows
+//   - Strict evaluator determines if all rows in a file must match the filter
+//   - Files that pass inclusive but not strict evaluation are rewritten with filtered data
+//
+// The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
+// can be overridden using the WithOverwriteConcurrency option. Defaults to runtime.GOMAXPROCS(0).
+func (t Table) Delete(ctx context.Context, filter iceberg.BooleanExpression, snapshotProps iceberg.Properties, opts ...DeleteOption) (*Table, error) {
+	txn := t.NewTransaction()
+	if err := txn.Delete(ctx, filter, snapshotProps, opts...); err != nil {
+		return nil, err
+	}
+
+	return txn.Commit(ctx)
+}
+
 func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile, error] {
 	fs, err := t.fsF(ctx)
 	if err != nil {

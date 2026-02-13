@@ -21,66 +21,16 @@ from pyspark.sql import SparkSession
 spark = SparkSession.builder.getOrCreate()
 
 
-def testSetProperties():
-    spark.sql("SHOW TBLPROPERTIES default.go_test_set_properties").show(truncate=False)
-
-
-def testAddedFile():
-    spark.sql("SELECT COUNT(*) FROM default.test_partitioned_by_days").show(
-        truncate=False
-    )
-
-
-def testReadDifferentDataTypes():
-    spark.sql("DESCRIBE TABLE EXTENDED default.go_test_different_data_types").show(
-        truncate=False
-    )
-    spark.sql("SELECT * FROM default.go_test_different_data_types").show(truncate=False)
-
-
-def testReadSpecUpdate():
-    spark.sql("DESCRIBE TABLE EXTENDED default.go_test_update_spec").show(
-        truncate=False
-    )
-
-
-def testOverwriteBasic():
-    spark.sql("SELECT COUNT(*) FROM default.go_test_overwrite_basic").show(
-        truncate=False
-    )
-    spark.sql("SELECT * FROM default.go_test_overwrite_basic ORDER BY baz").show(
-        truncate=False
-    )
-
-
-def testOverwriteWithFilter():
-    spark.sql("SELECT COUNT(*) FROM default.go_test_overwrite_filter").show(
-        truncate=False
-    )
-    spark.sql("SELECT * FROM default.go_test_overwrite_filter ORDER BY baz").show(
+def runSQL(sql):
+    spark.sql(sql).show(
         truncate=False
     )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--test", type=str, required=True, help="Name of the test to run")
+    parser.add_argument("--sql", type=str, required=True, help="Validation SQL statement to execute")
     args = parser.parse_args()
 
-    if args.test == "TestSetProperties":
-        testSetProperties()
-
-    if args.test == "TestAddedFile":
-        testAddedFile()
-
-    if args.test == "TestReadDifferentDataTypes":
-        testReadDifferentDataTypes()
-
-    if args.test == "TestReadSpecUpdate":
-        testReadSpecUpdate()
-
-    if args.test == "TestOverwriteBasic":
-        testOverwriteBasic()
-
-    if args.test == "TestOverwriteWithFilter":
-        testOverwriteWithFilter()
+    if args.sql:
+        runSQL(args.sql)
