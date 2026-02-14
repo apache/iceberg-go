@@ -40,6 +40,7 @@ type snapshotUpdate struct {
 	txn           *Transaction
 	io            io.WriteFileIO
 	snapshotProps iceberg.Properties
+	operation     Operation
 }
 
 func (s snapshotUpdate) fastAppend() *snapshotProducer {
@@ -47,8 +48,8 @@ func (s snapshotUpdate) fastAppend() *snapshotProducer {
 }
 
 func (s snapshotUpdate) mergeOverwrite(commitUUID *uuid.UUID) *snapshotProducer {
-	op := OpOverwrite
-	if s.txn.meta.currentSnapshot() == nil {
+	op := s.operation
+	if s.operation == OpOverwrite && s.txn.meta.currentSnapshot() == nil {
 		op = OpAppend
 	}
 
@@ -120,7 +121,7 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 
 func (t *Transaction) appendSnapshotProducer(afs io.IO, props iceberg.Properties) *snapshotProducer {
 	manifestMerge := t.meta.props.GetBool(ManifestMergeEnabledKey, ManifestMergeEnabledDefault)
-	updateSnapshot := t.updateSnapshot(afs, props)
+	updateSnapshot := t.updateSnapshot(afs, props, OpAppend)
 	if manifestMerge {
 		return updateSnapshot.mergeAppend()
 	}
@@ -128,11 +129,12 @@ func (t *Transaction) appendSnapshotProducer(afs io.IO, props iceberg.Properties
 	return updateSnapshot.fastAppend()
 }
 
-func (t *Transaction) updateSnapshot(fs io.IO, props iceberg.Properties) snapshotUpdate {
+func (t *Transaction) updateSnapshot(fs io.IO, props iceberg.Properties, operation Operation) snapshotUpdate {
 	return snapshotUpdate{
 		txn:           t,
 		io:            fs.(io.WriteFileIO),
 		snapshotProps: props,
+		operation:     operation,
 	}
 }
 
@@ -411,7 +413,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps).mergeOverwrite(&commitUUID)
+	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID)
 
 	for _, df := range markedForDeletion {
 		updater.deleteDataFile(df)
@@ -482,7 +484,7 @@ func (t *Transaction) AddFiles(ctx context.Context, files []string, snapshotProp
 		return err
 	}
 
-	updater := t.updateSnapshot(fs, snapshotProps).fastAppend()
+	updater := t.updateSnapshot(fs, snapshotProps, OpAppend).fastAppend()
 
 	dataFiles := filesToDataFiles(ctx, fs, t.meta, slices.Values(files))
 	for df, err := range dataFiles {
@@ -595,41 +597,15 @@ func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, sna
 		apply(&overwrite)
 	}
 
+	updater, err := t.performCopyOnWriteDeletion(ctx, OpOverwrite, snapshotProps, overwrite.filter, overwrite.caseSensitive, overwrite.concurrency)
+	if err != nil {
+		return err
+	}
+
 	fs, err := t.tbl.fsF(ctx)
 	if err != nil {
 		return err
 	}
-
-	if t.meta.NameMapping() == nil {
-		nameMapping := t.meta.CurrentSchema().NameMapping()
-		mappingJson, err := json.Marshal(nameMapping)
-		if err != nil {
-			return err
-		}
-		err = t.SetProperties(iceberg.Properties{DefaultNameMappingKey: string(mappingJson)})
-		if err != nil {
-			return err
-		}
-	}
-
-	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps).mergeOverwrite(&commitUUID)
-
-	filesToDelete, filesToRewrite, err := t.classifyFilesForOverwrite(ctx, fs, overwrite.filter, overwrite.caseSensitive, overwrite.concurrency)
-	if err != nil {
-		return err
-	}
-
-	for _, df := range filesToDelete {
-		updater.deleteDataFile(df)
-	}
-
-	if len(filesToRewrite) > 0 {
-		if err := t.rewriteFilesWithFilter(ctx, fs, updater, filesToRewrite, overwrite.filter, overwrite.caseSensitive, overwrite.concurrency); err != nil {
-			return err
-		}
-	}
-
 	itr := recordsToDataFiles(ctx, t.tbl.Location(), t.meta, recordWritingArgs{
 		sc:        rdr.Schema(),
 		itr:       array.IterFromReader(rdr),
@@ -644,6 +620,113 @@ func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, sna
 		updater.appendDataFile(df)
 	}
 
+	updates, reqs, err := updater.commit()
+	if err != nil {
+		return err
+	}
+
+	return t.apply(updates, reqs)
+}
+
+func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation Operation, snapshotProps iceberg.Properties, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (*snapshotProducer, error) {
+	fs, err := t.tbl.fsF(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if t.meta.NameMapping() == nil {
+		nameMapping := t.meta.CurrentSchema().NameMapping()
+		mappingJson, err := json.Marshal(nameMapping)
+		if err != nil {
+			return nil, err
+		}
+		err = t.SetProperties(iceberg.Properties{DefaultNameMappingKey: string(mappingJson)})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	commitUUID := uuid.New()
+	updater := t.updateSnapshot(fs, snapshotProps, operation).mergeOverwrite(&commitUUID)
+
+	filesToDelete, filesToRewrite, err := t.classifyFilesForOverwrite(ctx, fs, filter, caseSensitive, concurrency)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, df := range filesToDelete {
+		updater.deleteDataFile(df)
+	}
+
+	if len(filesToRewrite) > 0 {
+		if err := t.rewriteFilesWithFilter(ctx, fs, updater, filesToRewrite, filter, caseSensitive, concurrency); err != nil {
+			return nil, err
+		}
+	}
+
+	return updater, nil
+}
+
+type DeleteOption func(deleteOp *deleteOperation)
+
+type deleteOperation struct {
+	caseSensitive bool
+	concurrency   int
+}
+
+// WithDeleteConcurrency overwrites the default concurrency for delete operations.
+// Default: runtime.GOMAXPROCS(0)
+func WithDeleteConcurrency(concurrency int) DeleteOption {
+	return func(op *deleteOperation) {
+		if concurrency <= 0 {
+			op.concurrency = runtime.GOMAXPROCS(0)
+
+			return
+		}
+		op.concurrency = concurrency
+	}
+}
+
+// WithDeleteCaseInsensitive changes the binding of the filter to be case insensitive instead of the
+// Default: case sensitive
+// Note that the sensitivity only applies to the field name and not the evaluation of the literals on string fields.
+func WithDeleteCaseInsensitive() DeleteOption {
+	return func(deleteOp *deleteOperation) {
+		deleteOp.caseSensitive = false
+	}
+}
+
+// Delete deletes records matching the provided filter.
+//
+// The provided filter acts as a row-level predicate on existing data:
+//   - Files where all rows match the filter (strict match) are completely deleted
+//   - Files where some rows match and others don't (partial match) are rewritten to keep only non-matching rows
+//   - Files where no rows match the filter are kept unchanged
+//
+// The filter uses both inclusive and strict metrics evaluators on file statistics to classify files:
+//   - Inclusive evaluator identifies candidate files that may contain matching rows
+//   - Strict evaluator determines if all rows in a file must match the filter
+//   - Files that pass inclusive but not strict evaluation are rewritten with filtered data
+//
+// The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
+// can be overridden using the WithOverwriteConcurrency option. Defaults to runtime.GOMAXPROCS(0).
+func (t *Transaction) Delete(ctx context.Context, filter iceberg.BooleanExpression, snapshotProps iceberg.Properties, opts ...DeleteOption) error {
+	deleteOp := deleteOperation{
+		concurrency:   runtime.GOMAXPROCS(0),
+		caseSensitive: true,
+	}
+	for _, apply := range opts {
+		apply(&deleteOp)
+	}
+
+	writeDeleteMode := t.meta.props.Get(WriteDeleteModeKey, WriteDeleteModeDefault)
+	if writeDeleteMode != WriteModeCopyOnWrite {
+		return fmt.Errorf("'%s' is set to '%s' but only '%s' is currently supported", WriteDeleteModeKey, writeDeleteMode, WriteModeCopyOnWrite)
+	}
+	updater, err := t.performCopyOnWriteDeletion(ctx, OpDelete, snapshotProps, filter, deleteOp.caseSensitive, deleteOp.concurrency)
+	if err != nil {
+		return err
+	}
 	updates, reqs, err := updater.commit()
 	if err != nil {
 		return err

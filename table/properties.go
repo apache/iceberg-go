@@ -67,6 +67,9 @@ const (
 	WritePartitionSummaryLimitKey     = "write.summary.partition-limit"
 	WritePartitionSummaryLimitDefault = 0
 
+	WriteDeleteModeKey     = "write.delete.mode"
+	WriteDeleteModeDefault = WriteModeCopyOnWrite
+
 	MetadataDeleteAfterCommitEnabledKey     = "write.metadata.delete-after-commit.enabled"
 	MetadataDeleteAfterCommitEnabledDefault = false
 
@@ -118,4 +121,10 @@ var ReservedProperties = [9]string{
 const (
 	MetadataCompressionCodecNone = "none"
 	MetadataCompressionCodecGzip = "gzip"
+)
+
+// Write modes
+const (
+	WriteModeCopyOnWrite = "copy-on-write"
+	WriteModeMergeOnRead = "merge-on-read"
 )
