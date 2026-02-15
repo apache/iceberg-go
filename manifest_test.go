@@ -1401,14 +1401,14 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterRowIDTracking() {
 	// Expected: 5000 + 1500 + 2300 = 8800
 	expectedNextRowID := firstRowID + 1500 + 2300
 	m.EqualValues(expectedNextRowID, *writer.NextRowID())
-	// AddedRows counts only added rows for manifests from this snapshot: 1000 + 2000 = 3000
-	m.EqualValues(3000, writer.AddedRows())
+	// Assigned row-id delta (for snapshot.added-rows) = 1500 + 2300 = 3800
+	m.EqualValues(int64(3800), *writer.NextRowID()-firstRowID)
 	err = writer.Close()
 	m.Require().NoError(err)
 }
 
-func (m *ManifestTestSuite) TestV3ManifestListWriterAddedRowsExcludesOtherSnapshots() {
-	// AddedRows must count only manifests with AddedSnapshotID == commitSnapshotID.
+func (m *ManifestTestSuite) TestV3ManifestListWriterAssignedRowIDDelta() {
+	// Assigned row-id delta = sum of (existing+added) for all data manifests in list.
 	var buf bytes.Buffer
 	commitSnapID := int64(100)
 	otherSnapID := int64(99)
@@ -1423,8 +1423,8 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterAddedRowsExcludesOtherSnapsh
 	}
 	err = writer.AddManifests(manifests)
 	m.Require().NoError(err)
-	// Only current snapshot's added rows: 10 + 20 = 30 (not 100 from carried)
-	m.EqualValues(30, writer.AddedRows())
+	// Delta = 15 + 150 + 20 = 185 (all data manifests get row-id range)
+	m.EqualValues(185, *writer.NextRowID()-firstRowID)
 	m.Require().NoError(writer.Close())
 }
 

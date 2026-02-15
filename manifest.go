@@ -1277,7 +1277,6 @@ type ManifestListWriter struct {
 	sequenceNumber   int64
 	writer           *ocf.Encoder
 	nextRowID        *int64
-	addedRows        int64 // v3: rows added by this snapshot (data manifests with AddedSnapshotID == commitSnapshotID)
 }
 
 func NewManifestListWriterV1(out io.Writer, snapshotID int64, parentSnapshot *int64) (*ManifestListWriter, error) {
@@ -1375,12 +1374,6 @@ func (m *ManifestListWriter) NextRowID() *int64 {
 	return m.nextRowID
 }
 
-// AddedRows returns the number of rows added by this snapshot (v3 only).
-// Only data manifests with AddedSnapshotID == commitSnapshotID are counted.
-func (m *ManifestListWriter) AddedRows() int64 {
-	return m.addedRows
-}
-
 func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 	if len(files) == 0 {
 		return nil
@@ -1416,9 +1409,6 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 						wrapped.FirstRowId = m.nextRowID
 						*m.nextRowID += wrapped.ExistingRowsCount + wrapped.AddedRowsCount
 					}
-				}
-				if wrapped.Content == ManifestContentData && wrapped.AddedSnapshotID == m.commitSnapshotID {
-					m.addedRows += wrapped.AddedRowsCount
 				}
 			}
 			if wrapped.SeqNumber == -1 {
