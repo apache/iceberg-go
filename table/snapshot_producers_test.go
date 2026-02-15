@@ -97,6 +97,21 @@ func (m *memIO) Remove(name string) error {
 	return nil
 }
 
+// createTestTransactionWithMemIO creates a transaction using the io package's mem blob FS
+// so that Create() output is persisted and can be read back (e.g. for sequential commits).
+func createTestTransactionWithMemIO(t *testing.T, spec iceberg.PartitionSpec) (*Transaction, iceio.WriteFileIO) {
+	t.Helper()
+	ctx := context.Background()
+	fs, err := iceio.LoadFS(ctx, nil, "mem://default/table-location")
+	require.NoError(t, err, "LoadFS mem")
+	wfs := fs.(iceio.WriteFileIO)
+	schema := simpleSchema()
+	meta, err := NewMetadata(schema, &spec, UnsortedSortOrder, "mem://default/table-location", nil)
+	require.NoError(t, err, "new metadata")
+	tbl := New(Identifier{"db", "tbl"}, meta, "metadata.json", func(context.Context) (iceio.IO, error) { return fs, nil }, nil)
+	return tbl.NewTransaction(), wfs
+}
+
 func manifestHeaderSize(t *testing.T, version int, spec iceberg.PartitionSpec, schema *iceberg.Schema) int {
 	t.Helper()
 
@@ -193,6 +208,94 @@ func TestCommitV3RowLineage(t *testing.T) {
 	meta, err := txn.meta.Build()
 	require.NoError(t, err, "build metadata")
 	require.Equal(t, int64(expectedAddedRows), meta.NextRowID(), "next-row-id should equal first-row-id + added-rows")
+}
+
+// TestCommitV3RowLineageTwoSequentialCommits runs two commits and asserts monotonic,
+// gap-free first-row-id / next-row-id progression.
+func TestCommitV3RowLineageTwoSequentialCommits(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	ident := Identifier{"db", "tbl"}
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	txn.meta.formatVersion = 3
+
+	// First commit: new table, append one file (1 row).
+	sp1 := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+	sp1.appendDataFile(newTestDataFile(t, spec, "file://data-1.parquet", nil))
+	updates1, reqs1, err := sp1.commit()
+	require.NoError(t, err, "first commit should succeed")
+	addSnap1, ok := updates1[0].(*addSnapshotUpdate)
+	require.True(t, ok)
+	require.Equal(t, int64(0), *addSnap1.Snapshot.FirstRowID, "first snapshot first-row-id")
+	require.Equal(t, int64(1), *addSnap1.Snapshot.AddedRows, "first snapshot added-rows")
+	err = txn.apply(updates1, reqs1)
+	require.NoError(t, err, "first apply should succeed")
+	meta1, err := txn.meta.Build()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), meta1.NextRowID(), "next-row-id after first commit")
+
+	// Second commit: fast append one more file. Carried manifest already has first_row_id, so only new manifest gets row IDs; delta = 1.
+	tbl2 := New(ident, meta1, "metadata.json", func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+	txn2 := tbl2.NewTransaction()
+	txn2.meta.formatVersion = 3
+	sp2 := newFastAppendFilesProducer(OpAppend, txn2, memIO, nil, nil)
+	sp2.appendDataFile(newTestDataFile(t, spec, "file://data-2.parquet", nil))
+	updates2, reqs2, err := sp2.commit()
+	require.NoError(t, err, "second commit should succeed")
+	addSnap2, ok := updates2[0].(*addSnapshotUpdate)
+	require.True(t, ok)
+	require.Equal(t, int64(1), *addSnap2.Snapshot.FirstRowID, "second snapshot first-row-id continues from first next-row-id")
+	require.Equal(t, int64(1), *addSnap2.Snapshot.AddedRows, "only new manifest gets row IDs assigned")
+
+	err = txn2.apply(updates2, reqs2)
+	require.NoError(t, err, "second apply should succeed")
+	meta2, err := txn2.meta.Build()
+	require.NoError(t, err)
+	require.Equal(t, int64(2), meta2.NextRowID(), "next-row-id = 1 + 1 (gap-free)")
+}
+
+// TestCommitV3RowLineageDeltaIncludesExistingRows uses merge append so one manifest
+// has both existing and added rows; verifies assigned delta includes ExistingRowsCount
+// and metadata next-row-id matches.
+func TestCommitV3RowLineageDeltaIncludesExistingRows(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	ident := Identifier{"db", "tbl"}
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	txn.meta.formatVersion = 3
+
+	// First commit: one file (1 row).
+	sp1 := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+	sp1.appendDataFile(newTestDataFile(t, spec, "file://data-1.parquet", nil))
+	updates1, reqs1, err := sp1.commit()
+	require.NoError(t, err, "first commit should succeed")
+	err = txn.apply(updates1, reqs1)
+	require.NoError(t, err)
+	meta1, err := txn.meta.Build()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), meta1.NextRowID())
+
+	// Second commit: merge append so the two data manifests (existing + new) are merged into one with 1 existing + 1 added row.
+	tbl2 := New(ident, meta1, "metadata.json", func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+	txn2 := tbl2.NewTransaction()
+	txn2.meta.formatVersion = 3
+	if txn2.meta.props == nil {
+		txn2.meta.props = make(iceberg.Properties)
+	}
+	txn2.meta.props[ManifestMergeEnabledKey] = "true"
+	txn2.meta.props[ManifestMinMergeCountKey] = "2"
+	sp2 := newMergeAppendFilesProducer(OpAppend, txn2, memIO, nil, nil)
+	sp2.appendDataFile(newTestDataFile(t, spec, "file://data-2.parquet", nil))
+	updates2, reqs2, err := sp2.commit()
+	require.NoError(t, err, "second commit (merge) should succeed")
+	addSnap2, ok := updates2[0].(*addSnapshotUpdate)
+	require.True(t, ok)
+	require.Equal(t, int64(1), *addSnap2.Snapshot.FirstRowID, "first-row-id continues from first commit")
+	require.Equal(t, int64(2), *addSnap2.Snapshot.AddedRows, "assigned delta = existing (1) + added (1) in merged manifest")
+
+	err = txn2.apply(updates2, reqs2)
+	require.NoError(t, err)
+	meta2, err := txn2.meta.Build()
+	require.NoError(t, err)
+	require.Equal(t, int64(3), meta2.NextRowID(), "next-row-id = first-row-id + assigned delta (1+2)")
 }
 
 func TestSnapshotProducerManifestsClosesWriterOnError(t *testing.T) {
