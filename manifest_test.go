@@ -1428,6 +1428,26 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterAssignedRowIDDelta() {
 	m.Require().NoError(writer.Close())
 }
 
+func (m *ManifestTestSuite) TestV3ManifestListWriterDeltaIgnoresNonDataManifests() {
+	// Only data manifests get row-id assignment; delete manifests must not affect delta.
+	var buf bytes.Buffer
+	commitSnapID := int64(1)
+	firstRowID := int64(100)
+	sequenceNum := int64(1)
+	writer, err := NewManifestListWriterV3(&buf, commitSnapID, sequenceNum, firstRowID, nil)
+	m.Require().NoError(err)
+	manifests := []ManifestFile{
+		NewManifestFile(3, "data.avro", 100, 1, commitSnapID).AddedRows(10).ExistingRows(5).Build(),
+		NewManifestFile(3, "deletes.avro", 200, 1, commitSnapID).Content(ManifestContentDeletes).AddedRows(100).Build(),
+		NewManifestFile(3, "data2.avro", 300, 1, commitSnapID).AddedRows(20).Build(),
+	}
+	err = writer.AddManifests(manifests)
+	m.Require().NoError(err)
+	// Delta = 15 + 20 = 35 (only data manifests; delete manifest ignored)
+	m.EqualValues(35, *writer.NextRowID()-firstRowID)
+	m.Require().NoError(writer.Close())
+}
+
 func (m *ManifestTestSuite) TestV3PrepareEntrySequenceNumberValidation() {
 	// Test v3writerImpl.prepareEntry sequence number validation logic
 	v3Writer := v3writerImpl{}
