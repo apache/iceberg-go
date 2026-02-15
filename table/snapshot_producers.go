@@ -708,8 +708,8 @@ func (sp *snapshotProducer) commit() (_ []Update, _ []Requirement, err error) {
 	if sp.txn.meta.formatVersion == 3 {
 		firstRowID = sp.txn.meta.NextRowID()
 		for _, m := range newManifests {
-			if m.ManifestContent() == iceberg.ManifestContentData {
-				addedRows += m.AddedRows() + m.ExistingRows()
+			if m.ManifestContent() == iceberg.ManifestContentData && m.SnapshotID() == sp.snapshotID {
+				addedRows += m.AddedRows()
 			}
 		}
 	}
