@@ -109,6 +109,7 @@ func createTestTransactionWithMemIO(t *testing.T, spec iceberg.PartitionSpec) (*
 	meta, err := NewMetadata(schema, &spec, UnsortedSortOrder, "mem://default/table-location", nil)
 	require.NoError(t, err, "new metadata")
 	tbl := New(Identifier{"db", "tbl"}, meta, "metadata.json", func(context.Context) (iceio.IO, error) { return fs, nil }, nil)
+
 	return tbl.NewTransaction(), wfs
 }
 
