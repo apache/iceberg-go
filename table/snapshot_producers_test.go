@@ -162,25 +162,37 @@ func createTestTransaction(t *testing.T, io iceio.IO, spec iceberg.PartitionSpec
 }
 
 // TestCommitV3RowLineage ensures v3 snapshot commits set FirstRowID and AddedRows
-// on the snapshot for row lineage.
+// on the snapshot for row lineage, and that applying updates advances next-row-id correctly.
 func TestCommitV3RowLineage(t *testing.T) {
 	trackIO := newTrackingIO()
 	spec := iceberg.NewPartitionSpec()
 	txn := createTestTransaction(t, trackIO, spec)
 	txn.meta.formatVersion = 3
 
+	// Single data file with record count 1 (newTestDataFile uses 1, 1 for record count and file size).
+	const expectedAddedRows = 1
 	sp := newFastAppendFilesProducer(OpAppend, txn, trackIO, nil, nil)
 	df := newTestDataFile(t, spec, "file://data.parquet", nil)
 	sp.appendDataFile(df)
 
-	updates, _, err := sp.commit()
+	updates, reqs, err := sp.commit()
 	require.NoError(t, err, "commit should succeed")
 	require.Len(t, updates, 2, "expected AddSnapshot and SetSnapshotRef updates")
 	addSnap, ok := updates[0].(*addSnapshotUpdate)
 	require.True(t, ok, "first update must be AddSnapshot")
+
+	// Exact snapshot lineage: first-row-id 0 for new table, added-rows matches appended file(s).
 	require.NotNil(t, addSnap.Snapshot.FirstRowID, "v3 snapshot must have first-row-id")
 	require.NotNil(t, addSnap.Snapshot.AddedRows, "v3 snapshot must have added-rows")
-	require.GreaterOrEqual(t, *addSnap.Snapshot.AddedRows, int64(0), "added-rows must be non-negative")
+	require.Equal(t, int64(0), *addSnap.Snapshot.FirstRowID, "first-row-id should be table next-row-id at commit")
+	require.Equal(t, int64(expectedAddedRows), *addSnap.Snapshot.AddedRows, "added-rows should match appended data file record count")
+
+	// Apply updates and verify metadata next-row-id advances monotonically.
+	err = txn.apply(updates, reqs)
+	require.NoError(t, err, "apply should succeed")
+	meta, err := txn.meta.Build()
+	require.NoError(t, err, "build metadata")
+	require.Equal(t, int64(expectedAddedRows), meta.NextRowID(), "next-row-id should equal first-row-id + added-rows")
 }
 
 func TestSnapshotProducerManifestsClosesWriterOnError(t *testing.T) {
