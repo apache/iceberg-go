@@ -165,7 +165,7 @@ func (bfs *blobFileIO) NewWriter(ctx context.Context, path string, overwrite boo
 	}
 
 	if !overwrite {
-		if exists, err := bfs.Exists(ctx, path); exists {
+		if exists, err := bfs.Exists(ctx, path); err != nil || exists {
 			if err != nil {
 				return nil, &fs.PathError{Op: "new writer", Path: path, Err: err}
 			}
