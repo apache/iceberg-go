@@ -703,15 +703,25 @@ func (sp *snapshotProducer) commit() (_ []Update, _ []Requirement, err error) {
 		parentSnapshot = &sp.parentSnapshotID
 	}
 
+	firstRowID := int64(0)
+	var addedRows int64
+	if sp.txn.meta.formatVersion == 3 {
+		firstRowID = sp.txn.meta.NextRowID()
+		for _, m := range newManifests {
+			if m.ManifestContent() == iceberg.ManifestContentData {
+				addedRows += m.AddedRows() + m.ExistingRows()
+			}
+		}
+	}
+
 	out, err := sp.io.Create(manifestListFilePath)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer internal.CheckedClose(out, &err)
 
-	// TODO: Implement v3 here
 	err = iceberg.WriteManifestList(sp.txn.meta.formatVersion, out,
-		sp.snapshotID, parentSnapshot, &nextSequence, 0, newManifests)
+		sp.snapshotID, parentSnapshot, &nextSequence, firstRowID, newManifests)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -724,6 +734,10 @@ func (sp *snapshotProducer) commit() (_ []Update, _ []Requirement, err error) {
 		Summary:          &summary,
 		SchemaID:         &sp.txn.meta.currentSchemaID,
 		TimestampMs:      time.Now().UnixMilli(),
+	}
+	if sp.txn.meta.formatVersion == 3 {
+		snapshot.FirstRowID = &firstRowID
+		snapshot.AddedRows = &addedRows
 	}
 
 	return []Update{

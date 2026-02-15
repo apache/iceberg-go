@@ -161,6 +161,28 @@ func createTestTransaction(t *testing.T, io iceio.IO, spec iceberg.PartitionSpec
 	return tbl.NewTransaction()
 }
 
+// TestCommitV3RowLineage ensures v3 snapshot commits set FirstRowID and AddedRows
+// on the snapshot for row lineage.
+func TestCommitV3RowLineage(t *testing.T) {
+	trackIO := newTrackingIO()
+	spec := iceberg.NewPartitionSpec()
+	txn := createTestTransaction(t, trackIO, spec)
+	txn.meta.formatVersion = 3
+
+	sp := newFastAppendFilesProducer(OpAppend, txn, trackIO, nil, nil)
+	df := newTestDataFile(t, spec, "file://data.parquet", nil)
+	sp.appendDataFile(df)
+
+	updates, _, err := sp.commit()
+	require.NoError(t, err, "commit should succeed")
+	require.Len(t, updates, 2, "expected AddSnapshot and SetSnapshotRef updates")
+	addSnap, ok := updates[0].(*addSnapshotUpdate)
+	require.True(t, ok, "first update must be AddSnapshot")
+	require.NotNil(t, addSnap.Snapshot.FirstRowID, "v3 snapshot must have first-row-id")
+	require.NotNil(t, addSnap.Snapshot.AddedRows, "v3 snapshot must have added-rows")
+	require.GreaterOrEqual(t, *addSnap.Snapshot.AddedRows, int64(0), "added-rows must be non-negative")
+}
+
 func TestSnapshotProducerManifestsClosesWriterOnError(t *testing.T) {
 	spec := partitionedSpec()
 	schema := simpleSchema()

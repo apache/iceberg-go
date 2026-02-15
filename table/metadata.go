@@ -480,6 +480,11 @@ func (b *MetadataBuilder) currentNextRowID() int64 {
 	return initialRowID
 }
 
+// NextRowID returns the next available row ID (for v3 row lineage). For v1/v2 returns 0.
+func (b *MetadataBuilder) NextRowID() int64 {
+	return b.currentNextRowID()
+}
+
 func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64) error {
 	if b.currentSnapshotID != nil && slices.Contains(snapshotIds, *b.currentSnapshotID) {
 		return errors.New("current snapshot cannot be removed")
