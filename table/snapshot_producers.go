@@ -705,14 +705,6 @@ func (sp *snapshotProducer) commit() (_ []Update, _ []Requirement, err error) {
 
 	firstRowID := int64(0)
 	var addedRows int64
-	if sp.txn.meta.formatVersion == 3 {
-		firstRowID = sp.txn.meta.NextRowID()
-		for _, m := range newManifests {
-			if m.ManifestContent() == iceberg.ManifestContentData && m.SnapshotID() == sp.snapshotID {
-				addedRows += m.AddedRows()
-			}
-		}
-	}
 
 	out, err := sp.io.Create(manifestListFilePath)
 	if err != nil {
@@ -720,10 +712,23 @@ func (sp *snapshotProducer) commit() (_ []Update, _ []Requirement, err error) {
 	}
 	defer internal.CheckedClose(out, &err)
 
-	err = iceberg.WriteManifestList(sp.txn.meta.formatVersion, out,
-		sp.snapshotID, parentSnapshot, &nextSequence, firstRowID, newManifests)
-	if err != nil {
-		return nil, nil, err
+	if sp.txn.meta.formatVersion == 3 {
+		firstRowID = sp.txn.meta.NextRowID()
+		writer, err := iceberg.NewManifestListWriterV3(out, sp.snapshotID, nextSequence, firstRowID, parentSnapshot)
+		if err != nil {
+			return nil, nil, err
+		}
+		defer internal.CheckedClose(writer, &err)
+		if err = writer.AddManifests(newManifests); err != nil {
+			return nil, nil, err
+		}
+		addedRows = writer.AddedRows()
+	} else {
+		err = iceberg.WriteManifestList(sp.txn.meta.formatVersion, out,
+			sp.snapshotID, parentSnapshot, &nextSequence, firstRowID, newManifests)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	snapshot := Snapshot{

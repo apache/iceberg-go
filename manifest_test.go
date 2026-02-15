@@ -1401,8 +1401,31 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterRowIDTracking() {
 	// Expected: 5000 + 1500 + 2300 = 8800
 	expectedNextRowID := firstRowID + 1500 + 2300
 	m.EqualValues(expectedNextRowID, *writer.NextRowID())
+	// AddedRows counts only added rows for manifests from this snapshot: 1000 + 2000 = 3000
+	m.EqualValues(3000, writer.AddedRows())
 	err = writer.Close()
 	m.Require().NoError(err)
+}
+
+func (m *ManifestTestSuite) TestV3ManifestListWriterAddedRowsExcludesOtherSnapshots() {
+	// AddedRows must count only manifests with AddedSnapshotID == commitSnapshotID.
+	var buf bytes.Buffer
+	commitSnapID := int64(100)
+	otherSnapID := int64(99)
+	firstRowID := int64(0)
+	sequenceNum := int64(1)
+	writer, err := NewManifestListWriterV3(&buf, commitSnapID, sequenceNum, firstRowID, nil)
+	m.Require().NoError(err)
+	manifests := []ManifestFile{
+		NewManifestFile(3, "current.avro", 100, 1, commitSnapID).AddedRows(10).ExistingRows(5).Build(),
+		NewManifestFile(3, "carried.avro", 200, 1, otherSnapID).SequenceNum(0, 0).AddedRows(100).ExistingRows(50).Build(),
+		NewManifestFile(3, "current2.avro", 300, 1, commitSnapID).AddedRows(20).Build(),
+	}
+	err = writer.AddManifests(manifests)
+	m.Require().NoError(err)
+	// Only current snapshot's added rows: 10 + 20 = 30 (not 100 from carried)
+	m.EqualValues(30, writer.AddedRows())
+	m.Require().NoError(writer.Close())
 }
 
 func (m *ManifestTestSuite) TestV3PrepareEntrySequenceNumberValidation() {
