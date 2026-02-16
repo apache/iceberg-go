@@ -53,6 +53,7 @@ golangci-lint run --timeout=10m
 ```
 
 ### Integration tests
+1. Start the docker containers using docker compose.
 
    ```shell
    docker compose -f internal/recipe/docker-compose.yml up -d
@@ -61,6 +62,8 @@ golangci-lint run --timeout=10m
    sleep 10
    ```
 
+2. export the required environment variables.
+
    ```shell
    export AWS_S3_ENDPOINT=http://$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' minio):9000
    export AWS_REGION=us-east-1
@@ -68,7 +71,7 @@ golangci-lint run --timeout=10m
    export DOCKER_API_VER=$(docker version -f '{{.Server.APIVersion}}')
    ```
 
-
+3. Run the tests.
    ```shell
    go test -tags=integration -v -run="^TestScanner" ./table
    go test -tags=integration -v ./io
