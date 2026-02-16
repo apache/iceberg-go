@@ -35,6 +35,8 @@ permissions:
 jobs:
   integration-test:
     runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 15
     steps:
       - uses: actions/checkout@v4
         with:

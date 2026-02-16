@@ -31,6 +31,8 @@ jobs:
   archive:
     name: Archive
     runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 15
     timeout-minutes: 5
     steps:
       - name: Checkout
@@ -67,6 +69,8 @@ jobs:
     needs:
       - archive
     runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 15
     permissions:
       contents: write
     steps:

@@ -21,6 +21,8 @@ on: pull_request
 jobs:
   rat:
     runs-on: ubuntu-22.04
+    strategy:
+      max-parallel: 15
     steps:
     - uses: actions/checkout@v3
     - run: |

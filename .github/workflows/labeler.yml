@@ -25,6 +25,8 @@ permissions:
 jobs:
   triage:
     runs-on: ubuntu-22.04
+    strategy:
+      max-parallel: 15
     steps:
     - uses: actions/labeler@v4
       with:
