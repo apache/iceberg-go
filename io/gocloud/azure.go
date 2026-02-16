@@ -108,8 +108,8 @@ func newAdlsLocation(adlsURI *url.URL) (*adlsLocation, error) {
 
 // Construct a Azure bucket from a URL
 func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
-	adlsSasTokens := propertiesWithPrefix(props, io.AdlsSasTokenPrefix)
-	adlsConnectionStrings := propertiesWithPrefix(props, io.AdlsConnectionStringPrefix)
+	adlsSasTokens := propertiesWithPrefix(props, io.ADLSSasTokenPrefix)
+	adlsConnectionStrings := propertiesWithPrefix(props, io.ADLSConnectionStringPrefix)
 
 	// Construct the client
 	location, err := newAdlsLocation(parsed)
@@ -117,16 +117,16 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 		return nil, err
 	}
 
-	sharedKeyAccountName := props[io.AdlsSharedKeyAccountName]
-	endpoint := props[io.AdlsEndpoint]
-	protocol := props[io.AdlsProtocol]
+	sharedKeyAccountName := props[io.ADLSSharedKeyAccountName]
+	endpoint := props[io.ADLSEndpoint]
+	protocol := props[io.ADLSProtocol]
 
 	var client *container.Client
 
 	if sharedKeyAccountName != "" {
-		sharedKeyAccountKey, ok := props[io.AdlsSharedKeyAccountKey]
+		sharedKeyAccountKey, ok := props[io.ADLSSharedKeyAccountKey]
 		if !ok || sharedKeyAccountKey == "" {
-			return nil, fmt.Errorf("azure authentication: shared-key requires both %s and %s", io.AdlsSharedKeyAccountName, io.AdlsSharedKeyAccountKey)
+			return nil, fmt.Errorf("azure authentication: shared-key requires both %s and %s", io.ADLSSharedKeyAccountName, io.ADLSSharedKeyAccountKey)
 		}
 
 		containerURL, err := createContainerURL(location.accountName, protocol, endpoint, "", location.containerName)

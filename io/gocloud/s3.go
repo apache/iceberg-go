@@ -43,7 +43,7 @@ const S3RemoteSigningEnabled = "s3.remote-signing-enabled"
 
 var unsupportedS3Props = []string{
 	io.S3ConnectTimeout,
-	io.S3SignerUri,
+	io.S3SignerURI,
 }
 
 // ParseAWSConfig parses S3 properties and returns a configuration.

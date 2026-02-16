@@ -26,7 +26,7 @@ const (
 	S3EndpointURL            = "s3.endpoint"
 	S3ProxyURI               = "s3.proxy-uri"
 	S3ConnectTimeout         = "s3.connect-timeout"
-	S3SignerUri              = "s3.signer.uri"
+	S3SignerURI              = "s3.signer.uri"
 	S3ForceVirtualAddressing = "s3.force-virtual-addressing"
 )
 
@@ -36,19 +36,19 @@ const (
 	GCSKeyPath    = "gcs.keypath"
 	GCSJSONKey    = "gcs.jsonkey"
 	GCSCredType   = "gcs.credtype"
-	GCSUseJsonAPI = "gcs.usejsonapi" // set to anything to enable
+	GCSUseJSONAPI = "gcs.usejsonapi" // set to anything to enable
 )
 
 // Constants for Azure configuration options
 const (
-	AdlsSasTokenPrefix         = "adls.sas-token."
-	AdlsConnectionStringPrefix = "adls.connection-string."
-	AdlsSharedKeyAccountName   = "adls.auth.shared-key.account.name"
-	AdlsSharedKeyAccountKey    = "adls.auth.shared-key.account.key"
-	AdlsEndpoint               = "adls.endpoint"
-	AdlsProtocol               = "adls.protocol"
+	ADLSSasTokenPrefix         = "adls.sas-token."
+	ADLSConnectionStringPrefix = "adls.connection-string."
+	ADLSSharedKeyAccountName   = "adls.auth.shared-key.account.name"
+	ADLSSharedKeyAccountKey    = "adls.auth.shared-key.account.key"
+	ADLSEndpoint               = "adls.endpoint"
+	ADLSProtocol               = "adls.protocol"
 
 	// Not in use yet
-	// AdlsReadBlockSize          = "adls.read.block-size-bytes"
-	// AdlsWriteBlockSize         = "adls.write.block-size-bytes"
+	// ADLSReadBlockSize          = "adls.read.block-size-bytes"
+	// ADLSWriteBlockSize         = "adls.write.block-size-bytes"
 )

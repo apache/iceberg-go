@@ -55,7 +55,7 @@ func ParseGCSConfig(props map[string]string) *gcsblob.Options {
 	if path := props[io.GCSKeyPath]; path != "" {
 		o = append(o, option.WithAuthCredentialsFile(credType, path))
 	}
-	if _, ok := props[io.GCSUseJsonAPI]; ok {
+	if _, ok := props[io.GCSUseJSONAPI]; ok {
 		o = append(o, storage.WithJSONReads())
 	}
 

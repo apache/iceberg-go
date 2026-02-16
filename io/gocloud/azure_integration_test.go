@@ -65,10 +65,10 @@ func (s *AzureBlobIOTestSuite) TestAzureBlobWarehouseKey() {
 		sqlcat.DriverKey:            sqliteshim.ShimName,
 		sqlcat.DialectKey:           string(sqlcat.SQLite),
 		"type":                      "sql",
-		io.AdlsSharedKeyAccountName: accountName,
-		io.AdlsSharedKeyAccountKey:  accountKey,
-		io.AdlsEndpoint:             endpoint,
-		io.AdlsProtocol:             protocol,
+		io.ADLSSharedKeyAccountName: accountName,
+		io.ADLSSharedKeyAccountKey:  accountKey,
+		io.ADLSEndpoint:             endpoint,
+		io.ADLSProtocol:             protocol,
 	}
 
 	cat, err := catalog.Load(context.Background(), "default", properties)
@@ -100,7 +100,7 @@ func (s *AzureBlobIOTestSuite) TestAzuriteWarehouseConnectionString() {
 		sqlcat.DriverKey:  sqliteshim.ShimName,
 		sqlcat.DialectKey: string(sqlcat.SQLite),
 		"type":            "sql",
-		io.AdlsConnectionStringPrefix + accountName: connectionString,
+		io.ADLSConnectionStringPrefix + accountName: connectionString,
 	}
 
 	cat, err := catalog.Load(context.Background(), "default", properties)
