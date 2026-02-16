@@ -84,6 +84,7 @@ func TestArrowToIceberg(t *testing.T) {
 		{arrow.BinaryTypes.LargeBinary, iceberg.PrimitiveTypes.Binary, false, ""},
 		{arrow.BinaryTypes.BinaryView, nil, false, "unsupported arrow type for conversion - binary_view"},
 		{extensions.NewUUIDType(), iceberg.PrimitiveTypes.UUID, true, ""},
+		{extensions.NewDefaultVariantType(), iceberg.PrimitiveTypes.Variant, true, ""},
 		{arrow.StructOf(arrow.Field{
 			Name:     "foo",
 			Type:     arrow.BinaryTypes.String,

@@ -133,6 +133,8 @@ func (t *typeIFace) UnmarshalJSON(b []byte) error {
 			t.Type = BinaryType{}
 		case "unknown":
 			t.Type = UnknownType{}
+		case "variant":
+			t.Type = VariantType{}
 		default:
 			switch {
 			case strings.HasPrefix(typename, "fixed"):
@@ -743,6 +745,20 @@ func (UnknownType) primitive()     {}
 func (UnknownType) Type() string   { return "unknown" }
 func (UnknownType) String() string { return "unknown" }
 
+// VariantType represents semi-structured data stored in a binary format.
+// Requires format version 3+.
+type VariantType struct{}
+
+func (VariantType) Equals(other Type) bool {
+	_, ok := other.(VariantType)
+
+	return ok
+}
+
+func (VariantType) primitive()     {}
+func (VariantType) Type() string   { return "variant" }
+func (VariantType) String() string { return "variant" }
+
 var PrimitiveTypes = struct {
 	Bool          PrimitiveType
 	Int32         PrimitiveType
@@ -759,6 +775,7 @@ var PrimitiveTypes = struct {
 	Binary        PrimitiveType
 	UUID          PrimitiveType
 	Unknown       PrimitiveType
+	Variant       PrimitiveType
 }{
 	Bool:          BooleanType{},
 	Int32:         Int32Type{},
@@ -775,6 +792,7 @@ var PrimitiveTypes = struct {
 	Binary:        BinaryType{},
 	UUID:          UUIDType{},
 	Unknown:       UnknownType{},
+	Variant:       VariantType{},
 }
 
 // PromoteType promotes the type being read from a file to a requested read type.
