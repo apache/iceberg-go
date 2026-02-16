@@ -34,6 +34,48 @@ $ git clone https://github.com/apache/iceberg-go.git
 $ cd iceberg-go/cmd/iceberg && go build .
 ```
 
+## Running Tests
+
+### Unit tests
+
+Run all unit tests:
+
+```shell
+go test ./...
+```
+
+### Linting
+
+Run [golangci-lint](https://golangci-lint.run/) (matches CI):
+
+```shell
+golangci-lint run --timeout=10m
+```
+
+### Integration tests
+
+   ```shell
+   docker compose -f internal/recipe/docker-compose.yml up -d
+   sleep 10
+   docker compose -f internal/recipe/docker-compose.yml exec -T spark-iceberg ipython ./provision.py
+   sleep 10
+   ```
+
+   ```shell
+   export AWS_S3_ENDPOINT=http://$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' minio):9000
+   export AWS_REGION=us-east-1
+   export SPARK_CONTAINER_ID=$(docker ps -qf 'name=spark-iceberg')
+   export DOCKER_API_VER=$(docker version -f '{{.Server.APIVersion}}')
+   ```
+
+
+   ```shell
+   go test -tags=integration -v -run="^TestScanner" ./table
+   go test -tags=integration -v ./io
+   go test -tags=integration -v -run="^TestRestIntegration$" ./catalog/rest
+   go test -tags=integration -v -run="^TestSparkIntegration" ./table
+   ```
+
 ## Feature Support / Roadmap
 
 ### FileSystem Support
