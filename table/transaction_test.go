@@ -373,10 +373,12 @@ func (s *SparkIntegrationTestSuite) TestVariantType() {
 		iceberg.NestedField{ID: 2, Name: "variant_col", Type: iceberg.PrimitiveTypes.Variant},
 	)
 
+	// Variant type requires format version 3
 	tbl, err := s.cat.CreateTable(
 		s.ctx,
 		catalog.ToIdentifier("default", "go_test_variant"),
 		icebergSchema,
+		catalog.WithProperties(iceberg.Properties{table.PropertyFormatVersion: "3"}),
 	)
 	s.Require().NoError(err)
 
@@ -409,7 +411,7 @@ func (s *SparkIntegrationTestSuite) TestVariantType() {
 	// Row 4: object value in variant
 	intBldr.Append(4)
 	variantBldr.Append(mustVariant(s.T(), map[string]any{
-		"name": "test",
+		"name":  "test",
 		"value": int64(123),
 	}))
 

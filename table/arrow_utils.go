@@ -634,8 +634,10 @@ func (c convertToArrow) VisitVariant() arrow.Field {
 			arrow.Field{Name: "metadata", Type: arrow.BinaryTypes.LargeBinary, Nullable: false},
 			arrow.Field{Name: "value", Type: arrow.BinaryTypes.LargeBinary, Nullable: false},
 		))
+
 		return arrow.Field{Type: vt}
 	}
+
 	return arrow.Field{Type: extensions.NewDefaultVariantType()}
 }
 
