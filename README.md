@@ -36,33 +36,38 @@ $ cd iceberg-go/cmd/iceberg && go build .
 
 ## Running Tests
 
+Use the [Makefile](Makefile) so commands stay in sync with CI (e.g. golangci-lint version).
+
 ### Unit tests
 
-Run all unit tests:
-
 ```shell
-go test ./...
+make test
 ```
 
 ### Linting
 
-Run [golangci-lint](https://golangci-lint.run/) (matches CI):
+```shell
+make lint
+```
+
+Install the linter first 
 
 ```shell
-golangci-lint run --timeout=10m
+make lint-install
+# or: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v2.8.0
 ```
 
 ### Integration tests
-1. Start the docker containers using docker compose.
+
+**Prerequisites:** Docker, Docker Compose
+
+1. Start the Docker containers using docker compose:
 
    ```shell
-   docker compose -f internal/recipe/docker-compose.yml up -d
-   sleep 10
-   docker compose -f internal/recipe/docker-compose.yml exec -T spark-iceberg ipython ./provision.py
-   sleep 10
+   make integration-setup
    ```
 
-2. export the required environment variables.
+2. Export the required environment variables:
 
    ```shell
    export AWS_S3_ENDPOINT=http://$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' minio):9000
@@ -71,13 +76,13 @@ golangci-lint run --timeout=10m
    export DOCKER_API_VER=$(docker version -f '{{.Server.APIVersion}}')
    ```
 
-3. Run the tests.
+3. Run the integration tests:
+
    ```shell
-   go test -tags=integration -v -run="^TestScanner" ./table
-   go test -tags=integration -v ./io
-   go test -tags=integration -v -run="^TestRestIntegration$" ./catalog/rest
-   go test -tags=integration -v -run="^TestSparkIntegration" ./table
+   make integration-test
    ```
+
+   Or run a single suite: `make integration-scanner`, `make integration-io`, `make integration-rest`, `make integration-spark`.
 
 ## Feature Support / Roadmap
 
