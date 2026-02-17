@@ -469,7 +469,7 @@ func TestOverwriteFilesExistingManifestsClosesWriterOnError(t *testing.T) {
 	require.NoError(t, mem.WriteFile(manifestPath, manifestBuf.Bytes()))
 
 	var listBuf bytes.Buffer
-	err = iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &seqNum, 0, []iceberg.ManifestFile{manifestFile})
+	_, err = iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &seqNum, 0, []iceberg.ManifestFile{manifestFile})
 	require.NoError(t, err, "write manifest list")
 	require.NoError(t, mem.WriteFile(manifestListPath, listBuf.Bytes()))
 
@@ -667,7 +667,7 @@ func TestOverwriteExistingManifestsClosesUnderlyingFile(t *testing.T) {
 	require.NoError(t, trackIO.WriteFile(manifestPath, manifestBuf.Bytes()))
 
 	var listBuf bytes.Buffer
-	err = iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &seqNum, 0, []iceberg.ManifestFile{manifestFile})
+	_, err = iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &seqNum, 0, []iceberg.ManifestFile{manifestFile})
 	require.NoError(t, err, "write manifest list")
 	require.NoError(t, trackIO.WriteFile(manifestListPath, listBuf.Bytes()))
 
