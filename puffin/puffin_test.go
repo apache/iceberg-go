@@ -96,27 +96,28 @@ func TestRoundTrip(t *testing.T) {
 	require.NoError(t, w.Finish())
 
 	r := newReader(t, buf)
-	footer := r.Footer()
+	blobs := r.Blobs()
+	props := r.Properties()
 
-	assert.Len(t, footer.Blobs, 2)
-	assert.Equal(t, "test-value", footer.Properties["test-property"])
-	assert.Contains(t, footer.Properties[puffin.CreatedBy], "iceberg-go")
+	assert.Len(t, blobs, 2)
+	assert.Equal(t, "test-value", props["test-property"])
+	assert.Contains(t, props[puffin.CreatedBy], "iceberg-go")
 
 	// Verify blob 1
-	assert.Equal(t, puffin.BlobTypeDataSketchesTheta, footer.Blobs[0].Type)
-	assert.Equal(t, int64(123), footer.Blobs[0].SnapshotID)
-	assert.Equal(t, int64(1), footer.Blobs[0].SequenceNumber)
-	assert.Equal(t, []int32{1, 2, 3}, footer.Blobs[0].Fields)
-	assert.Equal(t, meta1.Offset, footer.Blobs[0].Offset)
-	assert.Equal(t, meta1.Length, footer.Blobs[0].Length)
-	assert.Equal(t, "1000", footer.Blobs[0].Properties["ndv"])
+	assert.Equal(t, puffin.BlobTypeDataSketchesTheta, blobs[0].Type)
+	assert.Equal(t, int64(123), blobs[0].SnapshotID)
+	assert.Equal(t, int64(1), blobs[0].SequenceNumber)
+	assert.Equal(t, []int32{1, 2, 3}, blobs[0].Fields)
+	assert.Equal(t, meta1.Offset, blobs[0].Offset)
+	assert.Equal(t, meta1.Length, blobs[0].Length)
+	assert.Equal(t, "1000", blobs[0].Properties["ndv"])
 
 	// Verify blob 2
-	assert.Equal(t, puffin.BlobTypeDeletionVector, footer.Blobs[1].Type)
-	assert.Equal(t, int64(-1), footer.Blobs[1].SnapshotID)
-	assert.Equal(t, int64(-1), footer.Blobs[1].SequenceNumber)
-	assert.Equal(t, meta2.Offset, footer.Blobs[1].Offset)
-	assert.Equal(t, meta2.Length, footer.Blobs[1].Length)
+	assert.Equal(t, puffin.BlobTypeDeletionVector, blobs[1].Type)
+	assert.Equal(t, int64(-1), blobs[1].SnapshotID)
+	assert.Equal(t, int64(-1), blobs[1].SequenceNumber)
+	assert.Equal(t, meta2.Offset, blobs[1].Offset)
+	assert.Equal(t, meta2.Length, blobs[1].Length)
 
 	// Verify data
 	blobData1, _ := r.ReadBlob(0)
@@ -138,8 +139,8 @@ func TestEmptyFile(t *testing.T) {
 	require.NoError(t, w.Finish())
 
 	r := newReader(t, buf)
-	assert.Len(t, r.Footer().Blobs, 0)
-	assert.Contains(t, r.Footer().Properties[puffin.CreatedBy], "iceberg-go")
+	assert.Len(t, r.Blobs(), 0)
+	assert.Contains(t, r.Properties()[puffin.CreatedBy], "iceberg-go")
 
 	blobs, err := r.ReadAllBlobs()
 	require.NoError(t, err)
@@ -176,7 +177,7 @@ func TestLargeFooter(t *testing.T) {
 	w.Finish()
 
 	r := newReader(t, buf)
-	assert.Len(t, r.Footer().Blobs, numBlobs)
+	assert.Len(t, r.Blobs(), numBlobs)
 }
 
 // TestWriterValidation verifies that Writer rejects invalid input.
@@ -245,7 +246,7 @@ func TestSetCreatedBy(t *testing.T) {
 		require.NoError(t, w.SetCreatedBy("MyApp 1.0"))
 		w.Finish()
 		r := newReader(t, buf)
-		assert.Equal(t, "MyApp 1.0", r.Footer().Properties[puffin.CreatedBy])
+		assert.Equal(t, "MyApp 1.0", r.Properties()[puffin.CreatedBy])
 	})
 
 	// empty rejected: Empty identifier provides no value and likely indicates a bug.
@@ -271,7 +272,7 @@ func TestClearProperties(t *testing.T) {
 	w.Finish()
 
 	r := newReader(t, buf)
-	_, exists := r.Footer().Properties["key"]
+	_, exists := r.Properties()["key"]
 	assert.False(t, exists)
 }
 
@@ -367,7 +368,7 @@ func TestReaderBlobAccess(t *testing.T) {
 
 	// read by metadata: Allows direct access when caller has metadata from external source.
 	t.Run("read by metadata", func(t *testing.T) {
-		data, _ := r.ReadBlobByMetadata(r.Footer().Blobs[1])
+		data, _ := r.ReadBlobByMetadata(r.Blobs()[1])
 		assert.Equal(t, blobs[1], data)
 	})
 

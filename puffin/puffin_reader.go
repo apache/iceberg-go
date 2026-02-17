@@ -42,14 +42,14 @@ type ReaderAtSeeker interface {
 //	if err != nil {
 //	    return err
 //	}
-//	for i := range r.Footer().Blobs {
+//	for i := range r.Blobs() {
 //	    blob, err := r.ReadBlob(i)
 //	    // process blob.Data
 //	}
 type Reader struct {
 	r           ReaderAtSeeker
 	size        int64
-	footer      *Footer
+	footer      Footer
 	footerStart int64 // cached after ReadFooter
 	maxBlobSize int64
 }
@@ -114,17 +114,21 @@ func NewReader(r ReaderAtSeeker, opts ...ReaderOption) (*Reader, error) {
 	}
 
 	// Read footer
-	if _, err := pr.readFooter(); err != nil {
+	if err := pr.readFooter(); err != nil {
 		return nil, err
 	}
 
 	return pr, nil
 }
 
-// Footer returns the parsed footer metadata.
-// The footer is read during NewReader, so this always returns a valid footer.
-func (r *Reader) Footer() *Footer {
-	return r.footer
+// Blobs returns the blob metadata entries from the footer.
+func (r *Reader) Blobs() []BlobMetadata {
+	return r.footer.Blobs
+}
+
+// Properties returns the file-level properties from the footer.
+func (r *Reader) Properties() map[string]string {
+	return r.footer.Properties
 }
 
 // defaultFooterReadSize is the initial read size when reading the footer.
@@ -133,17 +137,13 @@ func (r *Reader) Footer() *Footer {
 const defaultFooterReadSize = 8 * 1024 // 8 KB
 
 // readFooter reads and parses the footer from the Puffin file.
-func (r *Reader) readFooter() (*Footer, error) {
-	if r.footer != nil {
-		return r.footer, nil
-	}
-
+func (r *Reader) readFooter() error {
 	// Read a larger chunk from the end to minimize round-trips on cloud storage.
 	// This often captures the entire footer in one read.
 	readSize := min(int64(defaultFooterReadSize), r.size)
 	buf := make([]byte, readSize)
 	if _, err := r.r.ReadAt(buf, r.size-readSize); err != nil {
-		return nil, fmt.Errorf("puffin: read footer region: %w", err)
+		return fmt.Errorf("puffin: read footer region: %w", err)
 	}
 
 	// Parse trailer from end of buffer: PayloadSize(4) + Flags(4) + Magic(4)
@@ -151,7 +151,7 @@ func (r *Reader) readFooter() (*Footer, error) {
 
 	// Validate trailing magic
 	if !bytes.Equal(trailer[8:12], magic[:]) {
-		return nil, errors.New("puffin: invalid trailing magic in footer")
+		return errors.New("puffin: invalid trailing magic in footer")
 	}
 
 	// Extract payload size and flags
@@ -160,24 +160,24 @@ func (r *Reader) readFooter() (*Footer, error) {
 
 	// Check for compressed footer (unsupported)
 	if flags&FooterFlagCompressed != 0 {
-		return nil, errors.New("puffin: compressed footer not supported")
+		return errors.New("puffin: compressed footer not supported")
 	}
 
 	// Check for unknown flags
 	if flags&^uint32(FooterFlagCompressed) != 0 {
-		return nil, fmt.Errorf("puffin: unknown footer flags set: 0x%x", flags)
+		return fmt.Errorf("puffin: unknown footer flags set: 0x%x", flags)
 	}
 
 	// Validate payload size
 	if payloadSize < 0 {
-		return nil, fmt.Errorf("puffin: invalid footer payload size %d", payloadSize)
+		return fmt.Errorf("puffin: invalid footer payload size %d", payloadSize)
 	}
 
 	// Calculate footer start position
 	// Layout: [header magic (4)] [blobs...] [footer magic (4)] [JSON (payloadSize)] [trailer (12)]
 	footerStart := r.size - footerTrailerSize - payloadSize - MagicSize
 	if footerStart < MagicSize {
-		return nil, fmt.Errorf("puffin: footer payload size %d exceeds available space", payloadSize)
+		return fmt.Errorf("puffin: footer payload size %d exceeds available space", payloadSize)
 	}
 
 	// Total footer size: magic(4) + payload + trailer(12)
@@ -188,35 +188,34 @@ func (r *Reader) readFooter() (*Footer, error) {
 		// We already have the footer magic in buf
 		footerOffset := len(buf) - int(totalFooterSize)
 		if !bytes.Equal(buf[footerOffset:footerOffset+MagicSize], magic[:]) {
-			return nil, errors.New("puffin: invalid footer start magic")
+			return errors.New("puffin: invalid footer start magic")
 		}
 	} else {
 		// Footer is larger than our initial read, need to read magic separately
 		var footerMagic [MagicSize]byte
 		if _, err := r.r.ReadAt(footerMagic[:], footerStart); err != nil {
-			return nil, fmt.Errorf("puffin: read footer start magic: %w", err)
+			return fmt.Errorf("puffin: read footer start magic: %w", err)
 		}
 		if !bytes.Equal(footerMagic[:], magic[:]) {
-			return nil, errors.New("puffin: invalid footer start magic")
+			return errors.New("puffin: invalid footer start magic")
 		}
 	}
 
 	payloadReader := io.NewSectionReader(r.r, footerStart+MagicSize, payloadSize)
 	var footer Footer
 	if err := json.NewDecoder(payloadReader).Decode(&footer); err != nil {
-		return nil, fmt.Errorf("puffin: decode footer JSON: %w", err)
+		return fmt.Errorf("puffin: decode footer JSON: %w", err)
 	}
 
 	// Validate blob metadata
 	if err := r.validateBlobs(footer.Blobs, footerStart); err != nil {
-		return nil, err
+		return err
 	}
 
-	// Cache footer and footerStart
-	r.footer = &footer
+	r.footer = footer
 	r.footerStart = footerStart
 
-	return r.footer, nil
+	return nil
 }
 
 // ReadBlob reads the content of a specific blob by index.
