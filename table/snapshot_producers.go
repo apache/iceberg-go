@@ -703,17 +703,34 @@ func (sp *snapshotProducer) commit() (_ []Update, _ []Requirement, err error) {
 		parentSnapshot = &sp.parentSnapshotID
 	}
 
+	firstRowID := int64(0)
+	var addedRows int64
+
 	out, err := sp.io.Create(manifestListFilePath)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer internal.CheckedClose(out, &err)
 
-	// TODO: Implement v3 here
-	err = iceberg.WriteManifestList(sp.txn.meta.formatVersion, out,
-		sp.snapshotID, parentSnapshot, &nextSequence, 0, newManifests)
-	if err != nil {
-		return nil, nil, err
+	if sp.txn.meta.formatVersion == 3 {
+		firstRowID = sp.txn.meta.NextRowID()
+		writer, err := iceberg.NewManifestListWriterV3(out, sp.snapshotID, nextSequence, firstRowID, parentSnapshot)
+		if err != nil {
+			return nil, nil, err
+		}
+		defer internal.CheckedClose(writer, &err)
+		if err = writer.AddManifests(newManifests); err != nil {
+			return nil, nil, err
+		}
+		if writer.NextRowID() != nil {
+			addedRows = *writer.NextRowID() - firstRowID
+		}
+	} else {
+		err = iceberg.WriteManifestList(sp.txn.meta.formatVersion, out,
+			sp.snapshotID, parentSnapshot, &nextSequence, firstRowID, newManifests)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	snapshot := Snapshot{
@@ -724,6 +741,10 @@ func (sp *snapshotProducer) commit() (_ []Update, _ []Requirement, err error) {
 		Summary:          &summary,
 		SchemaID:         &sp.txn.meta.currentSchemaID,
 		TimestampMs:      time.Now().UnixMilli(),
+	}
+	if sp.txn.meta.formatVersion == 3 {
+		snapshot.FirstRowID = &firstRowID
+		snapshot.AddedRows = &addedRows
 	}
 
 	return []Update{

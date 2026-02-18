@@ -1401,8 +1401,51 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterRowIDTracking() {
 	// Expected: 5000 + 1500 + 2300 = 8800
 	expectedNextRowID := firstRowID + 1500 + 2300
 	m.EqualValues(expectedNextRowID, *writer.NextRowID())
+	// Assigned row-id delta (for snapshot.added-rows) = 1500 + 2300 = 3800
+	m.EqualValues(int64(3800), *writer.NextRowID()-firstRowID)
 	err = writer.Close()
 	m.Require().NoError(err)
+}
+
+func (m *ManifestTestSuite) TestV3ManifestListWriterAssignedRowIDDelta() {
+	// Assigned row-id delta = sum of (existing+added) for all data manifests in list.
+	var buf bytes.Buffer
+	commitSnapID := int64(100)
+	otherSnapID := int64(99)
+	firstRowID := int64(0)
+	sequenceNum := int64(1)
+	writer, err := NewManifestListWriterV3(&buf, commitSnapID, sequenceNum, firstRowID, nil)
+	m.Require().NoError(err)
+	manifests := []ManifestFile{
+		NewManifestFile(3, "current.avro", 100, 1, commitSnapID).AddedRows(10).ExistingRows(5).Build(),
+		NewManifestFile(3, "carried.avro", 200, 1, otherSnapID).SequenceNum(0, 0).AddedRows(100).ExistingRows(50).Build(),
+		NewManifestFile(3, "current2.avro", 300, 1, commitSnapID).AddedRows(20).Build(),
+	}
+	err = writer.AddManifests(manifests)
+	m.Require().NoError(err)
+	// Delta = 15 + 150 + 20 = 185 (all data manifests get row-id range)
+	m.EqualValues(185, *writer.NextRowID()-firstRowID)
+	m.Require().NoError(writer.Close())
+}
+
+func (m *ManifestTestSuite) TestV3ManifestListWriterDeltaIgnoresNonDataManifests() {
+	// Only data manifests get row-id assignment; delete manifests must not affect delta.
+	var buf bytes.Buffer
+	commitSnapID := int64(1)
+	firstRowID := int64(100)
+	sequenceNum := int64(1)
+	writer, err := NewManifestListWriterV3(&buf, commitSnapID, sequenceNum, firstRowID, nil)
+	m.Require().NoError(err)
+	manifests := []ManifestFile{
+		NewManifestFile(3, "data.avro", 100, 1, commitSnapID).AddedRows(10).ExistingRows(5).Build(),
+		NewManifestFile(3, "deletes.avro", 200, 1, commitSnapID).Content(ManifestContentDeletes).AddedRows(100).Build(),
+		NewManifestFile(3, "data2.avro", 300, 1, commitSnapID).AddedRows(20).Build(),
+	}
+	err = writer.AddManifests(manifests)
+	m.Require().NoError(err)
+	// Delta = 15 + 20 = 35 (only data manifests; delete manifest ignored)
+	m.EqualValues(35, *writer.NextRowID()-firstRowID)
+	m.Require().NoError(writer.Close())
 }
 
 func (m *ManifestTestSuite) TestV3PrepareEntrySequenceNumberValidation() {
