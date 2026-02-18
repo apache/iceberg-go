@@ -1406,7 +1406,8 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 				// Ref: https://github.com/apache/iceberg/blob/ea2071568dc66148b483a82eefedcd2992b435f7/core/src/main/java/org/apache/iceberg/ManifestListWriter.java#L157-L168
 				if wrapped.Content == ManifestContentData && wrapped.FirstRowId == nil {
 					if m.nextRowID != nil {
-						wrapped.FirstRowId = m.nextRowID
+						firstRowID := *m.nextRowID
+						wrapped.FirstRowId = &firstRowID
 						*m.nextRowID += wrapped.ExistingRowsCount + wrapped.AddedRowsCount
 					}
 				}
