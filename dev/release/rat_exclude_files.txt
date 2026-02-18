@@ -22,3 +22,7 @@ go.sum
 build
 rat-results.txt
 operation_string.go
+empty-puffin-uncompressed.bin
+sample-metric-data-uncompressed.bin
+sample-metric-data-compressed-zstd.bin
+puffin/testdata/*

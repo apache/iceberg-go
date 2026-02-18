@@ -53,9 +53,9 @@ const (
 
 type BlobMetadata struct {
 	Type             BlobType          `json:"type"`
+	Fields           []int32           `json:"fields"`
 	SnapshotID       int64             `json:"snapshot-id"`
 	SequenceNumber   int64             `json:"sequence-number"`
-	Fields           []int32           `json:"fields"`
 	Offset           int64             `json:"offset"`
 	Length           int64             `json:"length"`
 	CompressionCodec *string           `json:"compression-codec,omitempty"`

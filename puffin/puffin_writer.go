@@ -168,15 +168,24 @@ func (w *Writer) Finish() error {
 	}
 
 	// Build footer
-	footer := Footer{
-		Blobs:      w.blobs,
-		Properties: w.props,
+	blobs := w.blobs
+	if blobs == nil {
+		blobs = []BlobMetadata{}
 	}
-	if footer.Properties == nil {
-		footer.Properties = make(map[string]string)
-	}
+
+	// Only include properties in the footer if there are any to write.
+	// Add created-by first, then decide whether to include properties.
 	if w.createdBy != "" {
-		footer.Properties[CreatedBy] = w.createdBy
+		w.props[CreatedBy] = w.createdBy
+	}
+	var props map[string]string
+	if len(w.props) > 0 {
+		props = w.props
+	}
+
+	footer := Footer{
+		Blobs:      blobs,
+		Properties: props,
 	}
 
 	payload, err := json.Marshal(footer)
