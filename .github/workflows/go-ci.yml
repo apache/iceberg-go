@@ -37,6 +37,7 @@ jobs:
     name: ${{ matrix.os }} go${{ matrix.go }}
     runs-on: ubuntu-latest
     strategy:
+      max-parallel: 15
       fail-fast: false
       matrix:
         go: [ '1.23.6', '1.24.9' ]

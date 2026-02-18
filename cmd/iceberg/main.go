@@ -28,6 +28,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/glue"
+	"github.com/apache/iceberg-go/catalog/hive"
 	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/apache/iceberg-go/config"
 	"github.com/apache/iceberg-go/table"
@@ -196,6 +197,16 @@ func main() {
 			glue.WithAwsConfig(awscfg),
 		}
 		cat = glue.NewCatalog(opts...)
+	case catalog.Hive:
+		props := iceberg.Properties{
+			hive.URI: cfg.URI,
+		}
+		if len(cfg.Warehouse) > 0 {
+			props[hive.Warehouse] = cfg.Warehouse
+		}
+		if cat, err = hive.NewCatalog(props); err != nil {
+			log.Fatal(err)
+		}
 	default:
 		log.Fatal("unrecognized catalog type")
 	}

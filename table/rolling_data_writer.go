@@ -33,25 +33,31 @@ import (
 // for different partitions, providing shared configuration and coordination
 // across all writers in a partitioned write operation.
 type writerFactory struct {
-	rootLocation   string
-	args           recordWritingArgs
-	meta           *MetadataBuilder
-	taskSchema     *iceberg.Schema
-	targetFileSize int64
-	writers        sync.Map
-	counter        atomic.Int64
-	mu             sync.Mutex
+	rootLocation       string
+	args               recordWritingArgs
+	meta               *MetadataBuilder
+	taskSchema         *iceberg.Schema
+	targetFileSize     int64
+	writers            sync.Map
+	nextCount          func() (int, bool)
+	stopCount          func()
+	partitionIDCounter atomic.Int64 // partitionIDCounter generates unique IDs for partitions
+	mu                 sync.Mutex
 }
 
 // NewWriterFactory creates a new WriterFactory with the specified configuration
 // for managing rolling data writers across partitions.
 func NewWriterFactory(rootLocation string, args recordWritingArgs, meta *MetadataBuilder, taskSchema *iceberg.Schema, targetFileSize int64) writerFactory {
+	nextCount, stopCount := iter.Pull(args.counter)
+
 	return writerFactory{
 		rootLocation:   rootLocation,
 		args:           args,
 		meta:           meta,
 		taskSchema:     taskSchema,
 		targetFileSize: targetFileSize,
+		nextCount:      nextCount,
+		stopCount:      stopCount,
 	}
 }
 
@@ -60,6 +66,8 @@ func NewWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 // file strategy to manage file sizes.
 type RollingDataWriter struct {
 	partitionKey    string
+	partitionID     int          // unique ID for this partition
+	fileCount       atomic.Int64 // counter for files in this partition
 	recordCh        chan arrow.RecordBatch
 	errorCh         chan error
 	factory         *writerFactory
@@ -73,8 +81,10 @@ type RollingDataWriter struct {
 // with the given partition values.
 func (w *writerFactory) NewRollingDataWriter(ctx context.Context, partition string, partitionValues map[int]any, outputDataFilesCh chan<- iceberg.DataFile) *RollingDataWriter {
 	ctx, cancel := context.WithCancel(ctx)
+	partitionID := int(w.partitionIDCounter.Add(1) - 1)
 	writer := &RollingDataWriter{
 		partitionKey:    partition,
+		partitionID:     partitionID,
 		recordCh:        make(chan arrow.RecordBatch, 64),
 		errorCh:         make(chan error, 1),
 		factory:         w,
@@ -137,7 +147,7 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 		}
 	}
 
-	binPackedRecords := binPackRecords(recordIter, 20, r.factory.targetFileSize)
+	binPackedRecords := binPackRecords(recordIter, defaultBinPackLookback, r.factory.targetFileSize)
 	for batch := range binPackedRecords {
 		if err := r.flushToDataFile(batch, outputDataFilesCh); err != nil {
 			select {
@@ -156,13 +166,16 @@ func (r *RollingDataWriter) flushToDataFile(batch []arrow.RecordBatch, outputDat
 	}
 
 	task := iter.Seq[WriteTask](func(yield func(WriteTask) bool) {
-		cnt := int(r.factory.counter.Add(1) - 1)
+		cnt, _ := r.factory.nextCount()
+		fileCount := int(r.fileCount.Add(1))
 
 		yield(WriteTask{
-			Uuid:    *r.factory.args.writeUUID,
-			ID:      cnt,
-			Schema:  r.factory.taskSchema,
-			Batches: batch,
+			Uuid:        *r.factory.args.writeUUID,
+			ID:          cnt,
+			PartitionID: r.partitionID,
+			FileCount:   fileCount,
+			Schema:      r.factory.taskSchema,
+			Batches:     batch,
 		})
 	})
 
@@ -216,6 +229,7 @@ func (r *RollingDataWriter) closeAndWait() error {
 }
 
 func (w *writerFactory) closeAll() error {
+	defer w.stopCount()
 	var writers []*RollingDataWriter
 	w.writers.Range(func(key, value any) bool {
 		writer, ok := value.(*RollingDataWriter)

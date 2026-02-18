@@ -22,6 +22,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -368,7 +369,7 @@ func (t *TableWritingTestSuite) createTable(identifier table.Identifier, formatV
 		func(ctx context.Context) (iceio.IO, error) {
 			return iceio.LocalFS{}, nil
 		},
-		nil,
+		&mockedCatalog{meta},
 	)
 }
 
@@ -818,6 +819,8 @@ func (t *TableWritingTestSuite) TestAddFilesReferencedCurrentSnapshotIgnoreDupli
 	t.Equal([]int32{0, 0, 0}, deleted)
 }
 
+// mockedCatalog is necessary for overwrite operations to simulate catalog behavior
+// during transaction commits without requiring a real catalog implementation.
 type mockedCatalog struct {
 	metadata table.Metadata
 }
@@ -1615,6 +1618,118 @@ func (t *TableWritingTestSuite) TestMergeManifests() {
 	t.True(array.TableEqual(resultA, resultC), "expected:\n %s\ngot:\n %s", resultA, resultC)
 	// tblB and tblC should contain the same data
 	t.True(array.TableEqual(resultB, resultC), "expected:\n %s\ngot:\n %s", resultB, resultC)
+}
+
+// TestOverwriteTable verifies that Table.OverwriteTable properly delegates to Transaction.OverwriteTable
+func (t *TableWritingTestSuite) TestOverwriteTable() {
+	ident := table.Identifier{"default", "overwrite_table_wrapper_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+	newTable, err := array.TableFromJSON(memory.DefaultAllocator, t.arrSchema, []string{
+		`[{"foo": false, "bar": "wrapper_test", "baz": 123, "qux": "2024-01-01"}]`,
+	})
+	t.Require().NoError(err)
+	defer newTable.Release()
+	resultTbl, err := tbl.OverwriteTable(t.ctx, newTable, 1, nil)
+	t.Require().NoError(err)
+	t.NotNil(resultTbl)
+
+	snapshot := resultTbl.CurrentSnapshot()
+	t.NotNil(snapshot)
+	t.Equal(table.OpAppend, snapshot.Summary.Operation) // Empty table overwrite becomes append
+}
+
+// TestOverwriteRecord verifies that Table.Overwrite properly delegates to Transaction.Overwrite
+func (t *TableWritingTestSuite) TestOverwriteRecord() {
+	ident := table.Identifier{"default", "overwrite_record_wrapper_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	// Create test data as RecordReader
+	testTable, err := array.TableFromJSON(memory.DefaultAllocator, t.arrSchema, []string{
+		`[{"foo": true, "bar": "record_test", "baz": 456, "qux": "2024-01-02"}]`,
+	})
+	t.Require().NoError(err)
+	defer testTable.Release()
+
+	rdr := array.NewTableReader(testTable, 1)
+	defer rdr.Release()
+
+	// Test that Table.Overwrite works (delegates to transaction)
+	resultTbl, err := tbl.Overwrite(t.ctx, rdr, nil, table.WithOverwriteConcurrency(1))
+	t.Require().NoError(err)
+	t.NotNil(resultTbl)
+
+	// Verify the operation worked
+	snapshot := resultTbl.CurrentSnapshot()
+	t.NotNil(snapshot)
+	t.Equal(table.OpAppend, snapshot.Summary.Operation) // Empty table overwrite becomes append
+}
+
+// TestDelete verifies that Table.Delete properly delegates to Transaction.Delete
+func (t *TableWritingTestSuite) TestDelete() {
+	testCases := []struct {
+		name        string
+		table       *table.Table
+		expectedErr error
+	}{
+		{
+			name: "success with copy-on-write",
+			table: t.createTable(
+				table.Identifier{"default", "overwrite_record_wrapper_v" + strconv.Itoa(t.formatVersion)},
+				t.formatVersion,
+				*iceberg.UnpartitionedSpec,
+				t.tableSchema,
+			),
+			expectedErr: nil,
+		},
+		{
+			name: "abort on merge-on-read",
+			table: t.createTableWithProps(
+				table.Identifier{"default", "overwrite_record_wrapper_v" + strconv.Itoa(t.formatVersion)},
+				map[string]string{
+					table.PropertyFormatVersion: strconv.Itoa(t.formatVersion),
+					table.WriteDeleteModeKey:    table.WriteModeMergeOnRead,
+				},
+				t.tableSchema,
+			),
+			expectedErr: errors.New("only 'copy-on-write' is currently supported"),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func() {
+			// Set up the test table with some data
+			newTable, err := array.TableFromJSON(memory.DefaultAllocator, t.arrSchema, []string{
+				`[{"foo": false, "bar": "wrapper_test", "baz": 123, "qux": "2024-01-01"}]`,
+			})
+			t.Require().NoError(err)
+			defer newTable.Release()
+
+			tbl, err := tc.table.OverwriteTable(t.ctx, newTable, 1, nil)
+			t.Require().NoError(err)
+
+			// Validate the pre-requisite that data is present on the table before we go ahead and delete it
+			arrowTable, err := tbl.Scan().ToArrowTable(t.ctx)
+			t.Require().NoError(err)
+			t.Equal(int64(1), arrowTable.NumRows())
+
+			tbl, err = tbl.Delete(t.ctx, iceberg.EqualTo(iceberg.Reference("bar"), "wrapper_test"), nil)
+			// If an error was expected, check that it's the correct one and abort validating the operation
+			if tc.expectedErr != nil {
+				t.Require().ErrorContains(err, tc.expectedErr.Error())
+
+				return
+			}
+
+			snapshot := tbl.CurrentSnapshot()
+			t.NotNil(snapshot)
+			t.Equal(table.OpDelete, snapshot.Summary.Operation)
+
+			arrowTable, err = tbl.Scan().ToArrowTable(t.ctx)
+			t.Require().NoError(err)
+
+			t.Equal(int64(0), arrowTable.NumRows())
+		})
+	}
 }
 
 func TestTableWriting(t *testing.T) {

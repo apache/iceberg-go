@@ -855,7 +855,12 @@ func (r *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 		return err
 	}
 
-	_, err = doDelete[struct{}](ctx, r.baseURI, []string{"namespaces", ns, "tables", tbl}, r.cl,
+	uri := r.baseURI.JoinPath("namespaces", ns, "tables", tbl)
+	v := url.Values{}
+	v.Set("purgeRequested", "false")
+	uri.RawQuery = v.Encode()
+
+	_, err = doDelete[struct{}](ctx, uri, []string{}, r.cl,
 		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable})
 
 	return err

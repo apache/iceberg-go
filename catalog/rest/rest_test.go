@@ -1461,6 +1461,9 @@ func (r *RestCatalogSuite) TestDropTable204() {
 			r.Equal(v, req.Header.Values(k))
 		}
 
+		// Verify purgeRequested=false is explicitly sent
+		r.Equal("false", req.URL.Query().Get("purgeRequested"))
+
 		// Return 204 No Content for successful deletion
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -1469,6 +1472,29 @@ func (r *RestCatalogSuite) TestDropTable204() {
 	r.Require().NoError(err)
 
 	err = cat.DropTable(context.Background(), catalog.ToIdentifier("fokko", "table"))
+	r.NoError(err)
+}
+
+func (r *RestCatalogSuite) TestPurgeTable204() {
+	// Mock the purge table endpoint
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables/table", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodDelete, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		// Verify purgeRequested=true is sent for purge
+		r.Equal("true", req.URL.Query().Get("purgeRequested"))
+
+		// Return 204 No Content for successful purge
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	err = cat.PurgeTable(context.Background(), catalog.ToIdentifier("fokko", "table"))
 	r.NoError(err)
 }
 

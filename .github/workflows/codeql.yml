@@ -1,3 +1,4 @@
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -14,23 +15,36 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+#
 
-import argparse
-from pyspark.sql import SparkSession
+name: "CodeQL"
 
-spark = SparkSession.builder.getOrCreate()
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    - cron: '16 4 * * 1'
 
+jobs:
+  analyze:
+    name: Analyze Actions
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      packages: read
 
-def runSQL(sql):
-    spark.sql(sql).show(
-        truncate=False
-    )
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v4
+      with:
+        languages: actions
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--sql", type=str, required=True, help="Validation SQL statement to execute")
-    args = parser.parse_args()
-
-    if args.sql:
-        runSQL(args.sql)
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v4
+      with:
+        category: "/language:actions"
