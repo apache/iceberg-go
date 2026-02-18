@@ -1754,7 +1754,7 @@ func (t *TableWritingTestSuite) TestScanPanicOnMapStringKeyStringListValue() {
 	bldr := array.NewRecordBuilder(mem, schema)
 	// First row with null tags
 	tagBuilder := bldr.Field(0)
-	tagBuilder.AppendEmptyValue()
+	tagBuilder.AppendNull()
 
 	batch := bldr.NewRecordBatch()
 	// Second row with a key but null values
