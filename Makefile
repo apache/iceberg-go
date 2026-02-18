@@ -47,3 +47,6 @@ integration-rest:
 
 integration-spark:
 	go test -tags=integration -v -run="^TestSparkIntegration" ./table
+
+integration-hive:
+	go test -tags=integration -v ./catalog/hive/...
