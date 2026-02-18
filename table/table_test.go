@@ -1732,6 +1732,45 @@ func (t *TableWritingTestSuite) TestDelete() {
 	}
 }
 
+func (t *TableWritingTestSuite) TestScanPanicOnMapStringKeyStringListValue() {
+	schema := arrow.NewSchema([]arrow.Field{
+		{
+			Name:     "tags",
+			Type:     arrow.MapOf(arrow.BinaryTypes.String, arrow.ListOf(arrow.BinaryTypes.String)),
+			Nullable: true,
+		},
+	}, nil)
+	toIceberg, err := table.ArrowSchemaToIcebergWithFreshIDs(schema, false)
+	t.Require().NoError(err)
+
+	tbl := t.createTable(
+		table.Identifier{"default", "map_panic"},
+		t.formatVersion,
+		*iceberg.UnpartitionedSpec,
+		toIceberg,
+	)
+	mem := memory.NewGoAllocator()
+
+	bldr := array.NewRecordBuilder(mem, schema)
+	// First row with null tags
+	tagBuilder := bldr.Field(0)
+	tagBuilder.AppendEmptyValue()
+
+	batch := bldr.NewRecordBatch()
+	// Second row with a key but null values
+	reader, err := array.NewRecordReader(schema, []arrow.RecordBatch{batch})
+	t.Require().NoError(err)
+
+	tbl, err = tbl.Append(t.ctx, reader, nil)
+	t.Require().NoError(err)
+
+	scan := tbl.Scan()
+	arrowTable, err := scan.ToArrowTable(t.ctx)
+	t.Require().NoError(err)
+
+	t.Require().Equal(1, arrowTable.NumRows())
+}
+
 func TestTableWriting(t *testing.T) {
 	suite.Run(t, &TableWritingTestSuite{formatVersion: 1})
 	suite.Run(t, &TableWritingTestSuite{formatVersion: 2})
