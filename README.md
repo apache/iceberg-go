@@ -61,23 +61,23 @@ $ cd iceberg-go/cmd/iceberg && go build .
 ### Catalog Support
 
 | Operation                   | REST | Hive |  Glue  | SQL  |
-|:----------------------------|:----:| :--: |:------:|:----:|
-| Load Table                  |  X   |      |   X    |  X   |
-| List Tables                 |  X   |      |   X    |  X   |
-| Create Table                |  X   |      |   X    |  X   |
+|:----------------------------|:----:|:----:|:------:|:----:|
+| Load Table                  |  X   |  X   |   X    |  X   |
+| List Tables                 |  X   |  X   |   X    |  X   |
+| Create Table                |  X   |  X   |   X    |  X   |
 | Register Table              |  X   |      |   X    |      |
-| Update Current Snapshot     |  X   |      |   X    |  X   |
-| Create New Snapshot         |  X   |      |   X    |  X   |
-| Rename Table                |  X   |      |   X    |  X   |
-| Drop Table                  |  X   |      |   X    |  X   |
-| Alter Table                 |  X   |      |   X    |  X   |
-| Check Table Exists          |  X   |      |   X    |  X   |
-| Set Table Properties        |  X   |      |   X    |  X   |
-| List Namespaces             |  X   |      |   X    |  X   |
-| Create Namespace            |  X   |      |   X    |  X   |
-| Check Namespace Exists      |  X   |      |   X    |  X   |
-| Drop Namespace              |  X   |      |   X    |  X   |
-| Update Namespace Properties |  X   |      |   X    |  X   |
+| Update Current Snapshot     |  X   |  X   |   X    |  X   |
+| Create New Snapshot         |  X   |  X   |   X    |  X   |
+| Rename Table                |  X   |  X   |   X    |  X   |
+| Drop Table                  |  X   |  X   |   X    |  X   |
+| Alter Table                 |  X   |  X   |   X    |  X   |
+| Check Table Exists          |  X   |  X   |   X    |  X   |
+| Set Table Properties        |  X   |  X   |   X    |  X   |
+| List Namespaces             |  X   |  X   |   X    |  X   |
+| Create Namespace            |  X   |  X   |   X    |  X   |
+| Check Namespace Exists      |  X   |  X   |   X    |  X   |
+| Drop Namespace              |  X   |  X   |   X    |  X   |
+| Update Namespace Properties |  X   |  X   |   X    |  X   |
 | Create View                 |  X   |      |        |  X   |
 | Load View                   |      |      |        |  X   |
 | List View                   |  X   |      |        |  X   |
