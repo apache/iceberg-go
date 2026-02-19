@@ -51,12 +51,13 @@ type partitionInfo struct {
 }
 
 // NewPartitionedFanoutWriter creates a new PartitionedFanoutWriter with the specified
-// partition specification, schema, and record iterator.
-func newPartitionedFanoutWriter(partitionSpec iceberg.PartitionSpec, schema *iceberg.Schema, itr iter.Seq2[arrow.RecordBatch, error]) *partitionedFanoutWriter {
+// partition specification, schema, record iterator, and writerFactory.
+func newPartitionedFanoutWriter(partitionSpec iceberg.PartitionSpec, schema *iceberg.Schema, itr iter.Seq2[arrow.RecordBatch, error], writers *writerFactory) *partitionedFanoutWriter {
 	return &partitionedFanoutWriter{
 		partitionSpec: partitionSpec,
 		schema:        schema,
 		itr:           itr,
+		writers:       writers,
 	}
 }
 
