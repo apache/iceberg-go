@@ -34,7 +34,7 @@ integration-setup:
 	docker compose -f internal/recipe/docker-compose.yml exec -T spark-iceberg ipython ./provision.py
 	sleep 10
 
-integration-test: integration-scanner integration-io integration-rest integration-spark
+integration-test: integration-scanner integration-io integration-rest integration-spark integration-hive
 
 integration-scanner:
 	go test -tags=integration -v -run="^TestScanner" ./table

@@ -59,18 +59,10 @@ jobs:
         env:
           AWS_S3_ENDPOINT: "${{ env.AWS_S3_ENDPOINT }}"
           AWS_REGION: "us-east-1"
-        run: |          
-          make integration-io 
-          make integration-rest
-          make integration-spark
-          make integration-hive
-      - name: Run spark integration tests
-        env:
-          AWS_S3_ENDPOINT: "${{ env.AWS_S3_ENDPOINT }}"
-          AWS_REGION: "us-east-1"
           SPARK_CONTAINER_ID: "${{ env.SPARK_CONTAINER_ID }}"
           DOCKER_API_VER: "${{ env.DOCKER_API_VER }}"
-        run: make integration-spark
+        run: |          
+          make integration-test
 
       - name: Show debug logs
         if: ${{ failure() }}
