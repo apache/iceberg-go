@@ -18,6 +18,7 @@
 package io
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -30,17 +31,17 @@ func TestParseAWSConfigRemoteSigningEnabled(t *testing.T) {
 	t.Run("signer uri present with remote signing explicitly enabled", func(t *testing.T) {
 		t.Parallel()
 
-		_, err := ParseAWSConfig(t.Context(), map[string]string{
+		_, err := ParseAWSConfig(context.Background(), map[string]string{
 			S3SignerUri:            "https://signer.example.com",
 			S3RemoteSigningEnabled: "true",
 		})
-		require.ErrorContains(t, err, "remote S3 request signing (s3.remote-signing-enabled=true) is not supported")
+		require.ErrorContains(t, err, "remote S3 request signing is not supported")
 	})
 
 	t.Run("signer uri present with remote signing explicitly disabled", func(t *testing.T) {
 		t.Parallel()
 
-		_, err := ParseAWSConfig(t.Context(), map[string]string{
+		_, err := ParseAWSConfig(context.Background(), map[string]string{
 			S3SignerUri:            "https://signer.example.com",
 			S3RemoteSigningEnabled: "false",
 			S3Region:               "us-east-1",
@@ -51,7 +52,7 @@ func TestParseAWSConfigRemoteSigningEnabled(t *testing.T) {
 	t.Run("signer uri present without remote signing property", func(t *testing.T) {
 		t.Parallel()
 
-		_, err := ParseAWSConfig(t.Context(), map[string]string{
+		_, err := ParseAWSConfig(context.Background(), map[string]string{
 			S3SignerUri: "https://signer.example.com",
 			S3Region:    "us-west-2",
 		})
@@ -61,16 +62,16 @@ func TestParseAWSConfigRemoteSigningEnabled(t *testing.T) {
 	t.Run("remote signing enabled without signer uri", func(t *testing.T) {
 		t.Parallel()
 
-		_, err := ParseAWSConfig(t.Context(), map[string]string{
+		_, err := ParseAWSConfig(context.Background(), map[string]string{
 			S3RemoteSigningEnabled: "true",
 		})
-		require.ErrorContains(t, err, "remote S3 request signing (s3.remote-signing-enabled=true) is not supported")
+		require.ErrorContains(t, err, "remote S3 request signing is not supported")
 	})
 
 	t.Run("no signer properties at all", func(t *testing.T) {
 		t.Parallel()
 
-		cfg, err := ParseAWSConfig(t.Context(), map[string]string{
+		cfg, err := ParseAWSConfig(context.Background(), map[string]string{
 			S3Region: "eu-west-1",
 		})
 		require.NoError(t, err)
@@ -81,7 +82,7 @@ func TestParseAWSConfigRemoteSigningEnabled(t *testing.T) {
 func TestParseAWSConfigUnsupportedProperty(t *testing.T) {
 	t.Parallel()
 
-	_, err := ParseAWSConfig(t.Context(), map[string]string{
+	_, err := ParseAWSConfig(context.Background(), map[string]string{
 		S3ConnectTimeout: "5000",
 	})
 	require.ErrorContains(t, err, "unsupported S3 property")
