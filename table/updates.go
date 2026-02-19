@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/apache/iceberg-go"
 	"github.com/google/uuid"
@@ -411,8 +412,9 @@ func (u *removePropertiesUpdate) Apply(builder *MetadataBuilder) error {
 
 type removeSnapshotsUpdate struct {
 	baseUpdate
-	SnapshotIDs []int64 `json:"snapshot-ids"`
-	postCommit  bool
+	SnapshotIDs      []int64 `json:"snapshot-ids"`
+	SkipIfReferenced bool    `json:"skip-if-referenced,omitempty"`
+	postCommit       bool
 }
 
 // NewRemoveSnapshotsUpdate creates a new update that removes all snapshots from
@@ -424,7 +426,22 @@ func NewRemoveSnapshotsUpdate(ids []int64) *removeSnapshotsUpdate {
 	}
 }
 
+func (u *removeSnapshotsUpdate) SetSkipIfReferenced() *removeSnapshotsUpdate {
+	u.SkipIfReferenced = true
+
+	return u
+}
+
 func (u *removeSnapshotsUpdate) Apply(builder *MetadataBuilder) error {
+	if u.SkipIfReferenced {
+		u.SnapshotIDs = slices.DeleteFunc(u.SnapshotIDs, func(id int64) bool {
+			return builder.isSnapshotReferenced(id)
+		})
+		if len(u.SnapshotIDs) == 0 {
+			return nil
+		}
+	}
+
 	return builder.RemoveSnapshots(u.SnapshotIDs)
 }
 
