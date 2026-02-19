@@ -19,6 +19,7 @@ package io
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -47,12 +48,12 @@ const (
 	S3ProxyURI               = "s3.proxy-uri"
 	S3ConnectTimeout         = "s3.connect-timeout"
 	S3SignerUri              = "s3.signer.uri"
+	S3RemoteSigningEnabled   = "s3.remote-signing-enabled"
 	S3ForceVirtualAddressing = "s3.force-virtual-addressing"
 )
 
 var unsupportedS3Props = []string{
 	S3ConnectTimeout,
-	S3SignerUri,
 }
 
 // ParseAWSConfig parses S3 properties and returns a configuration.
@@ -61,6 +62,13 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 	for k := range props {
 		if slices.Contains(unsupportedS3Props, k) {
 			return nil, fmt.Errorf("unsupported S3 property %q", k)
+		}
+	}
+
+	// Remote S3 request signing is not implemented yet.
+	if v, ok := props[S3RemoteSigningEnabled]; ok {
+		if enabled, err := strconv.ParseBool(v); err == nil && enabled {
+			return nil, errors.New("remote S3 request signing is not supported")
 		}
 	}
 
