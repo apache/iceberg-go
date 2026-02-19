@@ -267,7 +267,10 @@ func (scan *Scan) buildPartitionEvaluator(specID int) (func(iceberg.DataFile) (b
 		return nil, fmt.Errorf("%w: id %d", ErrPartitionSpecNotFound, specID)
 	}
 	partType := spec.PartitionType(scan.metadata.CurrentSchema())
-	partSchema := iceberg.NewSchema(0, partType.FieldList...)
+	partSchema, err := iceberg.NewSchema(0, partType.FieldList...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create partition schema: %w", err)
+	}
 	partExpr := scan.partitionFilters.Get(specID)
 
 	fn, err := iceberg.ExpressionEvaluator(partSchema, partExpr, scan.caseSensitive)

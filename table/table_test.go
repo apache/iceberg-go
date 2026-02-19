@@ -170,11 +170,13 @@ func (t *TableTestSuite) TestNewTableFromReadFileGzipped() {
 }
 
 func (t *TableTestSuite) TestSchema() {
-	t.True(t.tbl.Schema().Equals(iceberg.NewSchemaWithIdentifiers(1, []int{1, 2},
+	expectedSchema, err := iceberg.NewSchemaWithIdentifiers(1, []int{1, 2},
 		iceberg.NestedField{ID: 1, Name: "x", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "y", Type: iceberg.PrimitiveTypes.Int64, Required: true, Doc: "comment"},
 		iceberg.NestedField{ID: 3, Name: "z", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-	)))
+	)
+	t.Require().NoError(err)
+	t.True(t.tbl.Schema().Equals(expectedSchema))
 }
 
 func (t *TableTestSuite) TestPartitionSpec() {
@@ -256,11 +258,13 @@ func (t *TableWritingTestSuite) SetupSuite() {
 	t.ctx = context.Background()
 	mem := memory.DefaultAllocator
 
-	t.tableSchema = iceberg.NewSchema(0,
+	var err error
+	t.tableSchema, err = iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.Bool},
 		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 4, Name: "baz", Type: iceberg.PrimitiveTypes.Int32},
 		iceberg.NestedField{ID: 10, Name: "qux", Type: iceberg.PrimitiveTypes.Date})
+	t.Require().NoError(err)
 
 	t.arrSchema = arrow.NewSchema([]arrow.Field{
 		{Name: "foo", Type: arrow.FixedWidthTypes.Boolean, Nullable: true},
@@ -269,7 +273,6 @@ func (t *TableWritingTestSuite) SetupSuite() {
 		{Name: "qux", Type: arrow.PrimitiveTypes.Date32, Nullable: true},
 	}, nil)
 
-	var err error
 	t.arrTbl, err = array.TableFromJSON(mem, t.arrSchema, []string{
 		`[{"foo": true, "bar": "bar_string", "baz": 123, "qux": "2024-03-07"}]`,
 	})
@@ -311,7 +314,8 @@ func (t *TableWritingTestSuite) SetupSuite() {
 	})
 	t.Require().NoError(err)
 
-	t.tableSchemaPromotedTypes = iceberg.NewSchema(0,
+	var err2 error
+	t.tableSchemaPromotedTypes, err2 = iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "long", Type: iceberg.PrimitiveTypes.Int64},
 		iceberg.NestedField{
 			ID: 2, Name: "list",
@@ -329,6 +333,7 @@ func (t *TableWritingTestSuite) SetupSuite() {
 			Required: true,
 		},
 		iceberg.NestedField{ID: 7, Name: "double", Type: iceberg.PrimitiveTypes.Float64})
+	t.Require().NoError(err2)
 	// arrow-go needs to implement cast_extension for [16]byte -> uuid
 	// iceberg.NestedField{ID: 8, Name: "uuid", Type: iceberg.PrimitiveTypes.UUID})
 
@@ -637,8 +642,9 @@ func (t *TableWritingTestSuite) TestAddFilesToPartitionedTableFailsLowerAndUpper
 
 func (t *TableWritingTestSuite) TestAddFilesWithLargeAndRegular() {
 	ident := table.Identifier{"default", "unpartitioned_with_large_types_v" + strconv.Itoa(t.formatVersion)}
-	ice := iceberg.NewSchema(0,
+	ice, err := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: true})
+	t.Require().NoError(err)
 
 	arrowSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "foo", Type: arrow.BinaryTypes.String},
@@ -1822,7 +1828,7 @@ func (t *TableWritingTestSuite) TestWriteSpecialCharacterColumn() {
 	ident := table.Identifier{"default", "write_special_character_column"}
 	colNameWithSpecialChar := "letter/abc"
 
-	s := iceberg.NewSchema(0,
+	s, err := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: colNameWithSpecialChar, Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
 		iceberg.NestedField{ID: 3, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: true},
@@ -1834,6 +1840,7 @@ func (t *TableWritingTestSuite) TestWriteSpecialCharacterColumn() {
 				{ID: 8, Name: colNameWithSpecialChar, Type: iceberg.PrimitiveTypes.String, Required: true},
 			},
 		}})
+	t.Require().NoError(err)
 
 	arrowSchema := arrow.NewSchema([]arrow.Field{
 		{Name: colNameWithSpecialChar, Type: arrow.BinaryTypes.String, Nullable: true},
@@ -1917,7 +1924,7 @@ func (t *TableWritingTestSuite) createTableWithProps(identifier table.Identifier
 }
 
 func tableSchema() *iceberg.Schema {
-	return iceberg.NewSchema(0,
+	sch, err := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "bool", Type: iceberg.PrimitiveTypes.Bool},
 		iceberg.NestedField{ID: 2, Name: "string", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 3, Name: "string_long", Type: iceberg.PrimitiveTypes.String},
@@ -1936,6 +1943,11 @@ func tableSchema() *iceberg.Schema {
 		iceberg.NestedField{ID: 16, Name: "med_dec", Type: iceberg.DecimalTypeOf(16, 2)},
 		iceberg.NestedField{ID: 17, Name: "large_dec", Type: iceberg.DecimalTypeOf(24, 2)},
 	)
+	if err != nil {
+		panic(fmt.Sprintf("failed to create tableSchema: %v", err))
+	}
+
+	return sch
 }
 
 func arrowTableWithNull() arrow.Table {
@@ -2489,7 +2501,7 @@ func TestWriteMapType(t *testing.T) {
 
 	ctx := compute.WithAllocator(context.Background(), mem)
 	cat.CreateNamespace(ctx, catalog.ToIdentifier("default"), nil)
-	iceSch := iceberg.NewSchema(1,
+	iceSch, err := iceberg.NewSchema(1,
 		iceberg.NestedField{
 			ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.String, Required: true,
 		},
@@ -2502,6 +2514,7 @@ func TestWriteMapType(t *testing.T) {
 				ValueRequired: false,
 			},
 		})
+	require.NoError(t, err)
 
 	ident := catalog.ToIdentifier("default", "repro_map")
 	tbl, err := cat.CreateTable(ctx, ident, iceSch, catalog.WithLocation(loc))

@@ -70,11 +70,12 @@ func (s *SparkIntegrationTestSuite) SetupTest() {
 }
 
 func (s *SparkIntegrationTestSuite) TestSetProperties() {
-	icebergSchema := iceberg.NewSchema(0,
+	icebergSchema, err := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.Bool},
 		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Int32},
 	)
+	s.Require().NoError(err)
 
 	tbl, err := s.cat.CreateTable(s.ctx, catalog.ToIdentifier("default", "go_test_set_properties"), icebergSchema)
 	s.Require().NoError(err)
@@ -165,7 +166,7 @@ func (s *SparkIntegrationTestSuite) TestAddFile() {
 }
 
 func (s *SparkIntegrationTestSuite) TestDifferentDataTypes() {
-	icebergSchema := iceberg.NewSchema(0,
+	icebergSchema, err := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "bool", Type: iceberg.PrimitiveTypes.Bool},
 		iceberg.NestedField{ID: 2, Name: "string", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 3, Name: "string_long", Type: iceberg.PrimitiveTypes.String},
@@ -189,6 +190,7 @@ func (s *SparkIntegrationTestSuite) TestDifferentDataTypes() {
 			},
 		},
 	)
+	s.Require().NoError(err)
 
 	arrowSchema, err := table.SchemaToArrowSchema(icebergSchema, nil, true, false)
 	s.Require().NoError(err)
@@ -302,11 +304,12 @@ func (s *SparkIntegrationTestSuite) TestDifferentDataTypes() {
 }
 
 func (s *SparkIntegrationTestSuite) TestUpdateSpec() {
-	icebergSchema := iceberg.NewSchema(0,
+	icebergSchema, err := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.Bool},
 		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Int32},
 	)
+	s.Require().NoError(err)
 
 	partitionSpec := iceberg.NewPartitionSpec(
 		iceberg.PartitionField{SourceID: 2, FieldID: 1000, Transform: iceberg.TruncateTransform{Width: 5}, Name: "bar_truncate"},

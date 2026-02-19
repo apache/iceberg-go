@@ -159,7 +159,7 @@ func newTestDataFileWithCount(t *testing.T, spec iceberg.PartitionSpec, path str
 }
 
 func simpleSchema() *iceberg.Schema {
-	return iceberg.NewSchema(0, iceberg.NestedField{
+	return iceberg.MustNewSchema(0, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 	})
 }

@@ -194,12 +194,13 @@ func TestMetadataV1Parsing(t *testing.T) {
 	assert.Equal(t, int64(1602638573874), meta.LastUpdatedMillis())
 	assert.Equal(t, 3, meta.LastColumnID())
 
-	expected := iceberg.NewSchema(
+	expected, err := iceberg.NewSchema(
 		0,
 		iceberg.NestedField{ID: 1, Name: "x", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "y", Type: iceberg.PrimitiveTypes.Int64, Required: true, Doc: "comment"},
 		iceberg.NestedField{ID: 3, Name: "z", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 	)
+	require.NoError(t, err)
 
 	assert.True(t, slices.EqualFunc([]*iceberg.Schema{expected}, meta.Schemas(), func(s1, s2 *iceberg.Schema) bool {
 		return s1.Equals(s2)
@@ -308,9 +309,10 @@ func TestMetadataV3Parsing(t *testing.T) {
 
 func TestMetadataV3Builder(t *testing.T) {
 	// Test creating v3 metadata with builder
-	schema := iceberg.NewSchema(0,
+	schema, err := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 	)
+	require.NoError(t, err)
 
 	builder, err := NewMetadataBuilder(3)
 	require.NoError(t, err)
@@ -715,12 +717,13 @@ func TestV1WriteMetadataToV2(t *testing.T) {
 }
 
 func TestNewMetadataWithExplicitV1Format(t *testing.T) {
-	schema := iceberg.NewSchemaWithIdentifiers(10,
+	schema, err := iceberg.NewSchemaWithIdentifiers(10,
 		[]int{22},
 		iceberg.NestedField{ID: 10, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: false},
 		iceberg.NestedField{ID: 22, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		iceberg.NestedField{ID: 33, Name: "baz", Type: iceberg.PrimitiveTypes.Bool, Required: false},
 	)
+	require.NoError(t, err)
 
 	partitionSpec := iceberg.NewPartitionSpecID(10,
 		iceberg.PartitionField{SourceID: 22, FieldID: 1022, Transform: iceberg.IdentityTransform{}, Name: "bar"})
@@ -735,10 +738,12 @@ func TestNewMetadataWithExplicitV1Format(t *testing.T) {
 	actual, err := NewMetadata(schema, &partitionSpec, sortOrder, "s3://some_v1_location/", iceberg.Properties{PropertyFormatVersion: "1"})
 	require.NoError(t, err)
 
-	expectedSchema := iceberg.NewSchemaWithIdentifiers(0, []int{2},
+	expectedSchema, err := iceberg.NewSchemaWithIdentifiers(0, []int{2},
 		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool})
+		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool},
+	)
+	require.NoError(t, err)
 
 	expectedSpec := iceberg.NewPartitionSpec(
 		iceberg.PartitionField{SourceID: 2, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "bar"})
@@ -773,12 +778,13 @@ func TestNewMetadataWithExplicitV1Format(t *testing.T) {
 }
 
 func TestNewMetadataV2Format(t *testing.T) {
-	schema := iceberg.NewSchemaWithIdentifiers(10,
+	schema, err := iceberg.NewSchemaWithIdentifiers(10,
 		[]int{22},
 		iceberg.NestedField{ID: 10, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: false},
 		iceberg.NestedField{ID: 22, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		iceberg.NestedField{ID: 33, Name: "baz", Type: iceberg.PrimitiveTypes.Bool, Required: false},
 	)
+	require.NoError(t, err)
 
 	partitionSpec := iceberg.NewPartitionSpecID(10,
 		iceberg.PartitionField{SourceID: 22, FieldID: 1022, Transform: iceberg.IdentityTransform{}, Name: "bar"})
@@ -795,10 +801,12 @@ func TestNewMetadataV2Format(t *testing.T) {
 	actual, err := NewMetadataWithUUID(schema, &partitionSpec, sortOrder, "s3://some_v1_location/", nil, tableUUID)
 	require.NoError(t, err)
 
-	expectedSchema := iceberg.NewSchemaWithIdentifiers(0, []int{2},
+	expectedSchema, err := iceberg.NewSchemaWithIdentifiers(0, []int{2},
 		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool})
+		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool},
+	)
+	require.NoError(t, err)
 
 	expectedSpec := iceberg.NewPartitionSpec(
 		iceberg.PartitionField{SourceID: 2, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "bar"})
@@ -831,8 +839,9 @@ func TestNewMetadataV2Format(t *testing.T) {
 }
 
 func TestMetadataV1Serialize(t *testing.T) {
-	sc := iceberg.NewSchema(0,
+	sc, err := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "int", Type: iceberg.PrimitiveTypes.Int32})
+	require.NoError(t, err)
 	toserialize := &metadataV1{
 		commonMetadata: commonMetadata{
 			FormatVersion:      1,
@@ -923,8 +932,9 @@ func TestMetadataV1Serialize(t *testing.T) {
 }
 
 func TestMetadataV2Serialize(t *testing.T) {
-	sc := iceberg.NewSchema(0,
+	sc, err := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "int", Type: iceberg.PrimitiveTypes.Int32})
+	require.NoError(t, err)
 	toserialize := &metadataV2{
 		LastSeqNum: 1,
 		commonMetadata: commonMetadata{
@@ -1032,9 +1042,10 @@ func TestMetadataBuilderSetDefaultSpecIDLastPartition(t *testing.T) {
 func TestMetadataBuilderSetLastAddedSchema(t *testing.T) {
 	builder, err := NewMetadataBuilder(2)
 	assert.NoError(t, err)
-	schema := iceberg.NewSchema(1,
+	schema, err := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.StringType{}, Required: true},
 	)
+	require.NoError(t, err)
 	assert.NoError(t, builder.AddSchema(schema))
 	assert.NoError(t, builder.SetCurrentSchemaID(-1))
 
@@ -1057,19 +1068,22 @@ func TestMetadataBuilderSchemaIncreasingNumbering(t *testing.T) {
 	builder, err := NewMetadataBuilder(2)
 	assert.NoError(t, err)
 	assert.NoError(t, builder.SetFormatVersion(2))
-	schema := iceberg.NewSchema(1,
+	schema, err := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.StringType{}, Required: true},
 	)
+	require.NoError(t, err)
 	assert.NoError(t, builder.AddSchema(schema))
 
-	schema = iceberg.NewSchema(3,
+	schema, err = iceberg.NewSchema(3,
 		iceberg.NestedField{ID: 3, Name: "foo", Type: iceberg.StringType{}, Required: true},
 	)
+	require.NoError(t, err)
 	assert.NoError(t, builder.AddSchema(schema))
 
-	schema = iceberg.NewSchema(2,
+	schema, err = iceberg.NewSchema(2,
 		iceberg.NestedField{ID: 4, Name: "foo", Type: iceberg.StringType{}, Required: true},
 	)
+	require.NoError(t, err)
 	assert.NoError(t, builder.AddSchema(schema))
 
 	assert.Equal(t, 1, builder.schemaList[0].ID)
@@ -1080,13 +1094,15 @@ func TestMetadataBuilderSchemaIncreasingNumbering(t *testing.T) {
 func TestMetadataBuilderReuseSchema(t *testing.T) {
 	builder, err := NewMetadataBuilder(2)
 	assert.NoError(t, err)
-	schema := iceberg.NewSchema(1,
+	schema, err := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.StringType{}, Required: true},
 	)
+	require.NoError(t, err)
 	assert.NoError(t, builder.AddSchema(schema))
-	schema2 := iceberg.NewSchema(15,
+	schema2, err := iceberg.NewSchema(15,
 		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.StringType{}, Required: true},
 	)
+	require.NoError(t, err)
 	assert.NoError(t, builder.AddSchema(schema2))
 	assert.Equal(t, len(builder.schemaList), 1)
 	assert.Equal(t, *builder.lastAddedSchemaID, 1)
@@ -1328,13 +1344,13 @@ func TestTableDataV2NoSnapshots(t *testing.T) {
             ],
             "default-sort-order-id": 0
         }`
-	schema := iceberg.NewSchema(1, iceberg.NestedField{
+	schema, err := iceberg.NewSchema(1, iceberg.NestedField{
 		Type:     iceberg.FixedTypeOf(1),
 		ID:       1,
 		Name:     "struct_name",
 		Required: true,
 	})
-
+	require.NoError(t, err)
 	partitionSpec := iceberg.NewPartitionSpecID(0)
 
 	i := 1000

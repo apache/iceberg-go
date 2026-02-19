@@ -1151,7 +1151,7 @@ var (
 	}
 }`, exampleTableMetadataNoSnapshotV1)
 
-	tableSchemaSimple = iceberg.NewSchemaWithIdentifiers(1, []int{2},
+	tableSchemaSimple = iceberg.MustNewSchemaWithIdentifiers(1, []int{2},
 		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.StringType{}, Required: false},
 		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool, Required: false},
@@ -2357,12 +2357,13 @@ func (r *RestCatalogSuite) TestCreateView200() {
 	ns := "ns"
 	viewName := "view"
 	identifier := table.Identifier{ns, viewName}
-	schema := iceberg.NewSchemaWithIdentifiers(0, []int{1}, iceberg.NestedField{
+	schema, err := iceberg.NewSchemaWithIdentifiers(0, []int{1}, iceberg.NestedField{
 		ID:       1,
 		Name:     "id",
 		Type:     iceberg.PrimitiveTypes.Int32,
 		Required: true,
 	})
+	r.Require().NoError(err)
 	config := iceberg.Properties{
 		"comment":     "Example view created via REST catalog",
 		"owner":       "admin",
@@ -2412,12 +2413,13 @@ func (r *RestCatalogSuite) TestCreateView409() {
 	ns := "ns"
 	viewName := "view"
 	identifier := table.Identifier{ns, viewName}
-	schema := iceberg.NewSchema(1, iceberg.NestedField{
+	schema, err := iceberg.NewSchema(1, iceberg.NestedField{
 		ID:       1,
 		Name:     "id",
 		Type:     iceberg.PrimitiveTypes.Int32,
 		Required: true,
 	})
+	r.Require().NoError(err)
 	sql := "SELECT * FROM table"
 	reprs := []view.Representation{view.NewRepresentation(sql, "default")}
 	version, err := view.NewVersion(1, 1, reprs, table.Identifier{ns})
@@ -2446,12 +2448,13 @@ func (r *RestCatalogSuite) TestCreateView404() {
 	ns := "ns"
 	viewName := "view"
 	identifier := table.Identifier{ns, viewName}
-	schema := iceberg.NewSchema(1, iceberg.NestedField{
+	schema, err := iceberg.NewSchema(1, iceberg.NestedField{
 		ID:       1,
 		Name:     "id",
 		Type:     iceberg.PrimitiveTypes.Int32,
 		Required: true,
 	})
+	r.Require().NoError(err)
 	sql := "SELECT * FROM table"
 	reprs := []view.Representation{
 		view.NewRepresentation(sql, "spark"),

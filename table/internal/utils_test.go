@@ -111,11 +111,12 @@ func (m *mockStatsAgg) MinAsBytes() ([]byte, error)                { return nil,
 func (m *mockStatsAgg) MaxAsBytes() ([]byte, error)                { return nil, nil }
 
 func TestPartitionValue_LinearTransforms(t *testing.T) {
-	schema := iceberg.NewSchema(1, iceberg.NestedField{
+	schema, err := iceberg.NewSchema(1, iceberg.NestedField{
 		ID:   1,
 		Name: "ts_col",
 		Type: iceberg.TimestampType{},
 	})
+	require.NoError(t, err)
 
 	cases := []struct {
 		name      string
@@ -164,11 +165,12 @@ func TestPartitionValue_LinearTransforms(t *testing.T) {
 }
 
 func TestPartitionValue_MismatchPanics(t *testing.T) {
-	schema := iceberg.NewSchema(1, iceberg.NestedField{
+	schema, err := iceberg.NewSchema(1, iceberg.NestedField{
 		ID:   1,
 		Name: "ts_col",
 		Type: iceberg.TimestampType{},
 	})
+	require.NoError(t, err)
 	partitionField := iceberg.PartitionField{
 		SourceID:  1,
 		FieldID:   100,
