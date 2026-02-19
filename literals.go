@@ -1307,6 +1307,7 @@ func (d DecimalLiteral) MarshalBinary() (data []byte, err error) {
 			minBytes = 1
 		}
 		data = n.FillBytes(make([]byte, minBytes))
+
 		return data, err
 	}
 
