@@ -1299,15 +1299,55 @@ func (d DecimalLiteral) MarshalBinary() (data []byte, err error) {
 	// stored as unscaled value in two's compliment big-endian values
 	// using the minimum number of bytes for the values
 	n := decimal128.Num(d.Val).BigInt()
-	minBytes := (n.BitLen() + 8) / 8
-	// bytes gives absolute value as big-endian bytes
-	data = n.FillBytes(make([]byte, minBytes))
-	if n.Sign() < 0 {
-		// convert to 2's complement for negative value
-		for i, v := range data {
-			data[i] = ^v
+
+	if n.Sign() >= 0 {
+		// For non-negative values, use standard encoding
+		minBytes := (n.BitLen() + 8) / 8
+		if minBytes == 0 {
+			minBytes = 1
 		}
-		data[len(data)-1] += 1
+		data = n.FillBytes(make([]byte, minBytes))
+		return data, err
+	}
+
+	// For negative values, we need to compute minBytes differently
+	// to handle byte boundaries correctly
+	bitLen := n.BitLen()
+	minBytes := (bitLen + 7) / 8
+
+	// When BitLen is exactly at a byte boundary (multiple of 8),
+	// we need to check if we need an extra byte for the sign bit
+	if bitLen%8 == 0 {
+		absVal := new(big.Int).Abs(n)
+		// If |n| is exactly 2^(bitLen-1), it fits perfectly in bitLen/8 bytes
+		// Examples: -128 (2^7), -32768 (2^15), -8388608 (2^23)
+		powerOf2 := new(big.Int).Lsh(big.NewInt(1), uint(bitLen-1))
+		if absVal.Cmp(powerOf2) == 0 {
+			minBytes = bitLen / 8
+		} else {
+			// BitLen is at boundary but value isn't exactly 2^(bitLen-1)
+			// Examples: -255, -32767
+			// We need an extra byte to ensure the sign bit is set
+			minBytes++
+		}
+	}
+
+	if minBytes == 0 {
+		minBytes = 1
+	}
+
+	// Convert to two's complement using proper carry propagation
+	data = n.FillBytes(make([]byte, minBytes))
+	// Invert all bits
+	for i := range data {
+		data[i] = ^data[i]
+	}
+	// Add 1 with proper carry propagation
+	carry := byte(1)
+	for i := len(data) - 1; i >= 0 && carry > 0; i-- {
+		sum := uint16(data[i]) + uint16(carry)
+		data[i] = byte(sum)
+		carry = byte(sum >> 8)
 	}
 
 	return data, err
@@ -1334,7 +1374,14 @@ func (d *DecimalLiteral) UnmarshalBinary(data []byte) error {
 	for i, b := range data {
 		out[i] = ^b
 	}
-	out[len(out)-1] += 1
+
+	// Add 1 with proper carry propagation
+	carry := byte(1)
+	for i := len(out) - 1; i >= 0 && carry > 0; i-- {
+		sum := uint16(out[i]) + uint16(carry)
+		out[i] = byte(sum)
+		carry = byte(sum >> 8)
+	}
 
 	value := (&big.Int{}).SetBytes(out)
 	d.Val = decimal128.FromBigInt(value.Neg(value))
