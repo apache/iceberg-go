@@ -1448,6 +1448,39 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterDeltaIgnoresNonDataManifests
 	m.Require().NoError(writer.Close())
 }
 
+func (m *ManifestTestSuite) TestV3ManifestListWriterPersistsPerManifestFirstRowIDStart() {
+	// Persisted first_row_id per manifest must be the start of each assigned row-id range.
+	var buf bytes.Buffer
+	commitSnapID := int64(100)
+	firstRowID := int64(5000)
+	sequenceNum := int64(1)
+
+	writer, err := NewManifestListWriterV3(&buf, commitSnapID, sequenceNum, firstRowID, nil)
+	m.Require().NoError(err)
+
+	manifests := []ManifestFile{
+		NewManifestFile(3, "m1.avro", 10, 1, commitSnapID).AddedRows(10).ExistingRows(5).Build(), // delta = 15
+		NewManifestFile(3, "m2.avro", 10, 1, commitSnapID).AddedRows(7).Build(),                  // delta = 7
+	}
+	m.Require().NoError(writer.AddManifests(manifests))
+	m.Require().NoError(writer.Close())
+
+	list, err := ReadManifestList(bytes.NewReader(buf.Bytes()))
+	m.Require().NoError(err)
+	m.Require().Len(list, 2)
+
+	firstManifest, ok := list[0].(*manifestFile)
+	m.Require().True(ok, "expected v3 manifest file type")
+	secondManifest, ok := list[1].(*manifestFile)
+	m.Require().True(ok, "expected v3 manifest file type")
+	m.Require().NotNil(firstManifest.FirstRowId)
+	m.Require().NotNil(secondManifest.FirstRowId)
+
+	m.EqualValues(5000, *firstManifest.FirstRowId) // start of first range
+	m.EqualValues(5015, *secondManifest.FirstRowId)
+	m.EqualValues(5022, *writer.NextRowID())
+}
+
 func (m *ManifestTestSuite) TestV3PrepareEntrySequenceNumberValidation() {
 	// Test v3writerImpl.prepareEntry sequence number validation logic
 	v3Writer := v3writerImpl{}
