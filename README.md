@@ -34,6 +34,56 @@ $ git clone https://github.com/apache/iceberg-go.git
 $ cd iceberg-go/cmd/iceberg && go build .
 ```
 
+## Running Tests
+
+Use the [Makefile](Makefile) so commands stay in sync with CI (e.g. golangci-lint version).
+
+### Unit tests
+
+```shell
+make test
+```
+
+### Linting
+
+```shell
+make lint
+```
+
+Install the linter first 
+
+```shell
+make lint-install
+# or: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v2.8.0
+```
+
+### Integration tests
+
+**Prerequisites:** Docker, Docker Compose
+
+1. Start the Docker containers using docker compose:
+
+   ```shell
+   make integration-setup
+   ```
+
+2. Export the required environment variables:
+
+   ```shell
+   export AWS_S3_ENDPOINT=http://$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' minio):9000
+   export AWS_REGION=us-east-1
+   export SPARK_CONTAINER_ID=$(docker ps -qf 'name=spark-iceberg')
+   export DOCKER_API_VER=$(docker version -f '{{.Server.APIVersion}}')
+   ```
+
+3. Run the integration tests:
+
+   ```shell
+   make integration-test
+   ```
+
+   Or run a single suite: `make integration-scanner`, `make integration-io`, `make integration-rest`, `make integration-spark`.
+
 ## Feature Support / Roadmap
 
 ### FileSystem Support
