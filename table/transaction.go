@@ -60,6 +60,10 @@ func (s snapshotUpdate) mergeAppend() *snapshotProducer {
 	return newMergeAppendFilesProducer(OpAppend, s.txn, s.io, nil, s.snapshotProps)
 }
 
+func (s snapshotUpdate) delete() *snapshotProducer {
+	return newDeleteFilesProducer(OpDelete, s.txn, s.io, nil, s.snapshotProps)
+}
+
 type Transaction struct {
 	tbl  *Table
 	meta *MetadataBuilder
