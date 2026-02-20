@@ -439,9 +439,6 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 // the current partition spec fields by ID without reading file contents.
 func validateDataFilePartitionData(df iceberg.DataFile, spec *iceberg.PartitionSpec) error {
 	partitionData := df.Partition()
-	if partitionData == nil {
-		partitionData = map[int]any{}
-	}
 
 	expectedFieldIDs := make(map[int]string)
 	for field := range spec.Fields() {
@@ -464,8 +461,11 @@ func validateDataFilePartitionData(df iceberg.DataFile, spec *iceberg.PartitionS
 // DataFiles and returns a set of paths that passed validation.
 func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, operation string) (map[string]struct{}, error) {
 	currentSpec, err := t.meta.CurrentSpec()
-	if err != nil || currentSpec == nil {
+	if err != nil {
 		return nil, fmt.Errorf("could not get current partition spec: %w", err)
+	}
+	if currentSpec == nil {
+		return nil, errors.New("could not get current partition spec: no current partition spec found")
 	}
 
 	expectedSpecID := int32(currentSpec.ID())
@@ -546,7 +546,7 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 		}
 
 		if len(referenced) > 0 {
-			return fmt.Errorf("cannot add files that are already referenced by table, files: %s", referenced)
+			return fmt.Errorf("cannot add files that are already referenced by table, files: %v", referenced)
 		}
 	}
 
@@ -710,7 +710,7 @@ func (t *Transaction) AddFiles(ctx context.Context, files []string, snapshotProp
 				}
 			}
 			if len(referenced) > 0 {
-				return fmt.Errorf("cannot add files that are already referenced by table, files: %s", referenced)
+				return fmt.Errorf("cannot add files that are already referenced by table, files: %v", referenced)
 			}
 		}
 	}
