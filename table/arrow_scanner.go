@@ -19,7 +19,6 @@ package table
 
 import (
 	"context"
-	"errors"
 	"io"
 	"iter"
 	"strconv"
@@ -205,11 +204,11 @@ func enrichRecordsWithPosDeleteFields(ctx context.Context, filePath iceberg.Data
 		fieldIdx := schema.NumFields()
 		filePathField, ok := PositionalDeleteArrowSchema.FieldsByName("file_path")
 		if !ok {
-			return nil, errors.New("position delete schema should have required field 'file_path'")
+			panic("position delete schema should have required field 'file_path'")
 		}
 		posField, ok := PositionalDeleteArrowSchema.FieldsByName("pos")
 		if !ok {
-			return nil, errors.New("position delete schema should have required field 'pos'")
+			panic("position delete schema should have required field 'pos'")
 		}
 		schema, err = schema.AddField(fieldIdx, filePathField[0])
 		if err != nil {
