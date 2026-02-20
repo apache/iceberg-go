@@ -46,7 +46,7 @@ type writerFactory struct {
 }
 
 // NewWriterFactory creates a new WriterFactory with the specified configuration
-// for managing rolling data writers across partitions.
+// for managing rolling data writerFactory across partitions.
 func NewWriterFactory(rootLocation string, args recordWritingArgs, meta *MetadataBuilder, taskSchema *iceberg.Schema, targetFileSize int64) writerFactory {
 	nextCount, stopCount := iter.Pull(args.counter)
 
