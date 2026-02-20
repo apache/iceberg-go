@@ -1306,10 +1306,10 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 		if r := recover(); r != nil {
 			var err error
 			switch e := r.(type) {
-			case string:
-				err = fmt.Errorf("error encountered during file writing %s", e)
 			case error:
 				err = fmt.Errorf("error encountered during file writing: %w", e)
+			default:
+				err = fmt.Errorf("error encountered during position delete file writing: %v", e)
 			}
 			ret = func(yield func(iceberg.DataFile, error) bool) {
 				yield(nil, err)
@@ -1328,11 +1328,20 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 	nameMapping := meta.CurrentSchema().NameMapping()
 	taskSchema, err := ArrowSchemaToIceberg(args.sc, false, nameMapping)
 	if err != nil {
-		panic(err)
+		return func(yield func(iceberg.DataFile, error) bool) {
+			yield(nil, err)
+		}
 	}
 	currentSpec, err := meta.CurrentSpec()
-	if err != nil || currentSpec == nil {
-		panic(fmt.Errorf("%w: cannot write files without a current spec", err))
+	if err != nil {
+		return func(yield func(iceberg.DataFile, error) bool) {
+			yield(nil, err)
+		}
+	}
+	if currentSpec == nil {
+		return func(yield func(iceberg.DataFile, error) bool) {
+			yield(nil, fmt.Errorf("cannot write files without a current spec: %w", err))
+		}
 	}
 
 	cw := newConcurrentDataFileWriter(func(rootLocation string, fs iceio.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
@@ -1380,10 +1389,10 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 		if r := recover(); r != nil {
 			var err error
 			switch e := r.(type) {
-			case string:
-				err = fmt.Errorf("error encountered during position delete file writing %s", e)
 			case error:
 				err = fmt.Errorf("error encountered during position delete file writing: %w", e)
+			default:
+				err = fmt.Errorf("error encountered during position delete file writing: %v", e)
 			}
 			ret = func(yield func(iceberg.DataFile, error) bool) {
 				yield(nil, err)
@@ -1400,8 +1409,15 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 		WriteTargetFileSizeBytesDefault))
 
 	currentSpec, err := meta.CurrentSpec()
-	if err != nil || currentSpec == nil {
-		panic(fmt.Errorf("%w: cannot write files without a current spec", err))
+	if err != nil {
+		return func(yield func(iceberg.DataFile, error) bool) {
+			yield(nil, err)
+		}
+	}
+	if currentSpec == nil {
+		return func(yield func(iceberg.DataFile, error) bool) {
+			yield(nil, fmt.Errorf("cannot write files without a current spec: %w", err))
+		}
 	}
 
 	cw := newConcurrentDataFileWriter(func(rootLocation string, fs iceio.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
