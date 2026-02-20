@@ -39,7 +39,7 @@ type partitionedFanoutWriter struct {
 	partitionSpec iceberg.PartitionSpec
 	schema        *iceberg.Schema
 	itr           iter.Seq2[arrow.RecordBatch, error]
-	writers       *writerFactory
+	writerFactory *writerFactory
 }
 
 // PartitionInfo holds the row indices and partition values for a specific partition,
@@ -51,12 +51,13 @@ type partitionInfo struct {
 }
 
 // NewPartitionedFanoutWriter creates a new PartitionedFanoutWriter with the specified
-// partition specification, schema, and record iterator.
-func newPartitionedFanoutWriter(partitionSpec iceberg.PartitionSpec, schema *iceberg.Schema, itr iter.Seq2[arrow.RecordBatch, error]) *partitionedFanoutWriter {
+// partition specification, schema, record iterator, and writerFactory.
+func newPartitionedFanoutWriter(partitionSpec iceberg.PartitionSpec, schema *iceberg.Schema, itr iter.Seq2[arrow.RecordBatch, error], writerFactory *writerFactory) *partitionedFanoutWriter {
 	return &partitionedFanoutWriter{
 		partitionSpec: partitionSpec,
 		schema:        schema,
 		itr:           itr,
+		writerFactory: writerFactory,
 	}
 }
 
@@ -136,7 +137,7 @@ func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 				}
 
 				partitionPath := p.partitionPath(val.partitionRec)
-				rollingDataWriter, err := p.writers.getOrCreateRollingDataWriter(ctx, partitionPath, val.partitionValues, dataFilesChannel)
+				rollingDataWriter, err := p.writerFactory.getOrCreateRollingDataWriter(ctx, partitionPath, val.partitionValues, dataFilesChannel)
 				if err != nil {
 					return err
 				}
@@ -157,7 +158,7 @@ func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, 
 	go func() {
 		defer close(outputDataFilesCh)
 		err := fanoutWorkers.Wait()
-		err = errors.Join(err, p.writers.closeAll())
+		err = errors.Join(err, p.writerFactory.closeAll())
 		errCh <- err
 		close(errCh)
 	}()

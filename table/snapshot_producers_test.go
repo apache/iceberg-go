@@ -606,7 +606,7 @@ func TestManifestWriterClosesUnderlyingFile(t *testing.T) {
 	require.Len(t, manifests, 1, "should have one manifest")
 
 	unclosed := trackIO.GetUnclosedWriters()
-	require.Empty(t, unclosed, "all file writers should be closed, but these are still open: %v", unclosed)
+	require.Empty(t, unclosed, "all file writerFactory should be closed, but these are still open: %v", unclosed)
 }
 
 // TestCreateManifestClosesUnderlyingFile tests that createManifest properly
@@ -636,7 +636,7 @@ func TestCreateManifestClosesUnderlyingFile(t *testing.T) {
 	require.NoError(t, err, "createManifest should succeed")
 
 	unclosed := trackIO.GetUnclosedWriters()
-	require.Empty(t, unclosed, "all file writers should be closed after createManifest, but these are still open: %v", unclosed)
+	require.Empty(t, unclosed, "all file writerFactory should be closed after createManifest, but these are still open: %v", unclosed)
 }
 
 // TestOverwriteExistingManifestsClosesUnderlyingFile tests that existingManifests
@@ -688,11 +688,11 @@ func TestOverwriteExistingManifestsClosesUnderlyingFile(t *testing.T) {
 	require.NoError(t, err, "existingManifests should succeed")
 
 	unclosed := trackIO.GetUnclosedWriters()
-	require.Empty(t, unclosed, "all file writers should be closed after existingManifests, but these are still open: %v", unclosed)
+	require.Empty(t, unclosed, "all file writerFactory should be closed after existingManifests, but these are still open: %v", unclosed)
 }
 
 // errorOnDeletedEntries is a producerImpl that returns an error from deletedEntries()
-// to test that file writers are properly closed even when deletedEntries fails.
+// to test that file writerFactory are properly closed even when deletedEntries fails.
 type errorOnDeletedEntries struct {
 	base                *snapshotProducer
 	err                 error
@@ -743,7 +743,7 @@ func (b *blockingTrackingIO) Create(name string) (iceio.FileWriter, error) {
 	return writer, err
 }
 
-// This test verifies that NO writers are created when deletedEntries() fails,
+// This test verifies that NO writerFactory are created when deletedEntries() fails,
 // because the error should be returned before any goroutines start.
 func TestManifestsClosesWriterWhenDeletedEntriesFails(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -781,6 +781,6 @@ func TestManifestsClosesWriterWhenDeletedEntriesFails(t *testing.T) {
 
 	case <-time.After(100 * time.Millisecond):
 		writerCount := blockingIO.GetWriterCount()
-		require.Zero(t, writerCount, "expected no writers to be created when deletedEntries is called first")
+		require.Zero(t, writerCount, "expected no writerFactory to be created when deletedEntries is called first")
 	}
 }
