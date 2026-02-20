@@ -95,6 +95,7 @@ func TestNewAdlsLocationUriParsing(t *testing.T) {
 		uri               string
 		expectedAccount   string
 		expectedContainer string
+		expectedHostname  string
 		expectedPath      string
 		shouldFail        bool
 	}{
@@ -102,6 +103,7 @@ func TestNewAdlsLocationUriParsing(t *testing.T) {
 			uri:               "abfs://container@account.dfs.core.windows.net/file.txt",
 			expectedAccount:   "account",
 			expectedContainer: "container",
+			expectedHostname:  "account.dfs.core.windows.net",
 			expectedPath:      "/file.txt",
 			shouldFail:        false,
 		},
@@ -109,6 +111,7 @@ func TestNewAdlsLocationUriParsing(t *testing.T) {
 			uri:               "abfs://container@account.dfs.core.usgovcloudapi.net/file.txt",
 			expectedAccount:   "account",
 			expectedContainer: "container",
+			expectedHostname:  "account.dfs.core.usgovcloudapi.net",
 			expectedPath:      "/file.txt",
 			shouldFail:        false,
 		},
@@ -116,6 +119,7 @@ func TestNewAdlsLocationUriParsing(t *testing.T) {
 			uri:               "wasb://container@account.blob.core.windows.net/file.txt",
 			expectedAccount:   "account",
 			expectedContainer: "container",
+			expectedHostname:  "account.blob.core.windows.net",
 			expectedPath:      "/file.txt",
 			shouldFail:        false,
 		},
@@ -140,6 +144,7 @@ func TestNewAdlsLocationUriParsing(t *testing.T) {
 				assert.NotNil(t, location)
 				assert.Equal(t, test.expectedAccount, location.accountName, "Account name mismatch for URI: %s", test.uri)
 				assert.Equal(t, test.expectedContainer, location.containerName, "Container name mismatch for URI: %s", test.uri)
+				assert.Equal(t, test.expectedHostname, location.hostname, "Hostname mismatch for URI: %s", test.uri)
 				assert.Equal(t, test.expectedPath, location.path, "Path mismatch for URI: %s", test.uri)
 			}
 		})
