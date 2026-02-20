@@ -182,7 +182,7 @@ func (of *overwriteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 				return nil, err
 			}
 
-			return wr.ToManifestFile(path, counter.Count, m.ManifestContent())
+			return wr.ToManifestFile(path, counter.Count, iceberg.WithManifestFileContent(m.ManifestContent()))
 		}
 
 		mf, err := rewriteManifest(m, notDeleted)
@@ -305,7 +305,7 @@ func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.Manifest
 		return nil, err
 	}
 
-	return wr.ToManifestFile(path, counter.Count, iceberg.ManifestContentData)
+	return wr.ToManifestFile(path, counter.Count)
 }
 
 func (m *manifestMergeManager) mergeGroup(firstManifest iceberg.ManifestFile, specID int, manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
@@ -642,7 +642,7 @@ func (sp *snapshotProducer) manifestProducer(content iceberg.ManifestContent, fi
 			return err
 		}
 
-		mf, err := wr.ToManifestFile(path, counter.Count, content)
+		mf, err := wr.ToManifestFile(path, counter.Count, iceberg.WithManifestFileContent(content))
 		if err != nil {
 			return err
 		}
