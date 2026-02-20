@@ -18,7 +18,6 @@
 package table
 
 import (
-	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -121,7 +120,8 @@ func mustLoadRecordBatchFromJSON(schema *arrow.Schema, content string) arrow.Rec
 	mem := memory.NewGoAllocator()
 	recordBatch, _, err := array.RecordFromJSON(mem, schema, strings.NewReader(content))
 	if err != nil {
-		panic(fmt.Sprintf("failed to load test data from JSON: %s", err.Error()))
+		panic("failed to load test data from JSON: " + err.Error())
 	}
+	
 	return recordBatch
 }
