@@ -1308,3 +1308,39 @@ func TestDecimalMaxMinRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+func TestDecimalMarshalBinaryIssue731(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    int64
+		expected []byte
+	}{
+		// Issue 1: Lost carry for -256
+		{"lost carry -256", -256, []byte{0xff, 0x00}},
+		// Issue 2: Wrong minBytes for powers of 2
+		{"-128 (-2^7)", -128, []byte{0x80}},
+		{"-32768 (-2^15)", -32768, []byte{0x80, 0x00}},
+		{"-8388608 (-2^23)", -8388608, []byte{0x80, 0x00, 0x00}},
+		// Additional edge cases
+		{"-127 (not power of 2)", -127, []byte{0x81}},
+		{"-255", -255, []byte{0xff, 0x01}},
+		{"-257", -257, []byte{0xfe, 0xff}},
+		{"-32767", -32767, []byte{0x80, 0x01}},
+		{"-1", -1, []byte{0xff}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dec := iceberg.DecimalLiteral{Val: decimal128.FromI64(tt.value), Scale: 0}
+			data, err := dec.MarshalBinary()
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, data, "value: %d", tt.value)
+
+			// Round-trip test
+			var decoded iceberg.DecimalLiteral
+			err = decoded.UnmarshalBinary(data)
+			require.NoError(t, err)
+			assert.True(t, dec.Equals(decoded), "round-trip failed for %d: got %v", tt.value, decoded)
+		})
+	}
+}
