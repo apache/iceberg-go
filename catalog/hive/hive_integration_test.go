@@ -21,6 +21,7 @@ package hive
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -317,4 +318,77 @@ func TestHiveIntegrationDropTable(t *testing.T) {
 	exists, err = cat.CheckTableExists(context.TODO(), TableIdentifier(dbName, tableName))
 	assert.NoError(err)
 	assert.False(exists)
+}
+
+func TestHiveIntegrationCheckViewExists(t *testing.T) {
+	assert := require.New(t)
+
+	cat := createTestCatalog(t)
+	defer cat.Close()
+
+	dbName := fmt.Sprintf("test_db_%d", time.Now().UnixNano())
+
+	err := cat.CreateNamespace(context.TODO(), DatabaseIdentifier(dbName), iceberg.Properties{
+		"location": getTestTableLocation() + "/" + dbName,
+	})
+	assert.NoError(err)
+	defer cat.DropNamespace(context.TODO(), DatabaseIdentifier(dbName))
+
+	// Non-existent view returns false
+	exists, err := cat.CheckViewExists(context.TODO(), TableIdentifier(dbName, "nonexistent_view"))
+	assert.NoError(err)
+	assert.False(exists)
+
+	// Create a table and ensure CheckViewExists returns false for that name (it's a table, not a view)
+	schema := iceberg.NewSchemaWithIdentifiers(0, []int{1},
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	tableLocation := getTestTableLocation() + "/" + dbName + "/some_table"
+	_, err = cat.CreateTable(context.TODO(), TableIdentifier(dbName, "some_table"), schema,
+		catalog.WithLocation(tableLocation),
+	)
+	assert.NoError(err)
+	defer cat.DropTable(context.TODO(), TableIdentifier(dbName, "some_table"))
+
+	exists, err = cat.CheckViewExists(context.TODO(), TableIdentifier(dbName, "some_table"))
+	assert.NoError(err)
+	assert.False(exists)
+}
+
+func TestHiveIntegrationLoadViewNoSuchView(t *testing.T) {
+	assert := require.New(t)
+
+	cat := createTestCatalog(t)
+	defer cat.Close()
+
+	dbName := fmt.Sprintf("test_db_%d", time.Now().UnixNano())
+
+	err := cat.CreateNamespace(context.TODO(), DatabaseIdentifier(dbName), iceberg.Properties{
+		"location": getTestTableLocation() + "/" + dbName,
+	})
+	assert.NoError(err)
+	defer cat.DropNamespace(context.TODO(), DatabaseIdentifier(dbName))
+
+	_, err = cat.LoadView(context.TODO(), TableIdentifier(dbName, "nonexistent_view"))
+	assert.Error(err)
+	assert.True(errors.Is(err, catalog.ErrNoSuchView))
+}
+
+func TestHiveIntegrationDropViewNoSuchView(t *testing.T) {
+	assert := require.New(t)
+
+	cat := createTestCatalog(t)
+	defer cat.Close()
+
+	dbName := fmt.Sprintf("test_db_%d", time.Now().UnixNano())
+
+	err := cat.CreateNamespace(context.TODO(), DatabaseIdentifier(dbName), iceberg.Properties{
+		"location": getTestTableLocation() + "/" + dbName,
+	})
+	assert.NoError(err)
+	defer cat.DropNamespace(context.TODO(), DatabaseIdentifier(dbName))
+
+	err = cat.DropView(context.TODO(), TableIdentifier(dbName, "nonexistent_view"))
+	assert.Error(err)
+	assert.True(errors.Is(err, catalog.ErrNoSuchView))
 }
