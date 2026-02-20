@@ -224,15 +224,34 @@ type arrowScan struct {
 	nameMapping iceberg.NameMapping
 }
 
+// collectLeafIDs recursively collects leaf field IDs from a type
+func collectLeafIDs(typ iceberg.Type, fieldID int, idset set[int]) {
+	switch t := typ.(type) {
+	case *iceberg.MapType:
+		// For maps, collect leaf IDs from both key and value
+		collectLeafIDs(t.KeyType, t.KeyID, idset)
+		collectLeafIDs(t.ValueType, t.ValueID, idset)
+	case *iceberg.ListType:
+		// For lists, collect leaf IDs from the element
+		collectLeafIDs(t.Element, t.ElementID, idset)
+	case *iceberg.StructType:
+		// For structs, collect leaf IDs from all fields
+		for _, field := range t.FieldList {
+			collectLeafIDs(field.Type, field.ID, idset)
+		}
+	default:
+		// Primitive type - this is a leaf
+		idset[fieldID] = struct{}{}
+	}
+}
+
 func (as *arrowScan) projectedFieldIDs() (set[int], error) {
 	idset := set[int]{}
-	for _, id := range as.projectedSchema.FieldIDs() {
-		typ, _ := as.projectedSchema.FindTypeByID(id)
-		switch typ.(type) {
-		case *iceberg.MapType, *iceberg.ListType:
-		default:
-			idset[id] = struct{}{}
-		}
+	// Collect leaf field IDs for column pruning.
+	// For nested types (map, list, struct), we recursively descend to find
+	// the actual leaf primitive fields, not the intermediate container nodes.
+	for _, field := range as.projectedSchema.Fields() {
+		collectLeafIDs(field.Type, field.ID, idset)
 	}
 
 	if as.boundRowFilter != nil {
