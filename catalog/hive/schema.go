@@ -162,3 +162,28 @@ func getMetadataLocation(tbl *hive_metastore.Table) (string, error) {
 
 	return location, nil
 }
+
+// isIcebergView checks if a Hive table is an Iceberg view.
+func isIcebergView(tbl *hive_metastore.Table) bool {
+	if tbl == nil || tbl.Parameters == nil {
+		return false
+	}
+
+	// Ensure the HMS table type is a virtual view
+	if !strings.EqualFold(tbl.TableType, TableTypeVirtualView) {
+		return false
+	}
+
+	tableType, ok := tbl.Parameters[TableTypeKey]
+	if !ok {
+		return false
+	}
+
+	return strings.EqualFold(tableType, TableTypeIcebergView)
+}
+
+// getViewMetadataLocation returns the metadata location for an Iceberg view.
+// Views use the same metadata_location parameter as tables.
+func getViewMetadataLocation(tbl *hive_metastore.Table) (string, error) {
+	return getMetadataLocation(tbl)
+}

@@ -129,10 +129,10 @@ make lint-install
 | Drop Namespace              |  X   |  X   |   X    |  X   |
 | Update Namespace Properties |  X   |  X   |   X    |  X   |
 | Create View                 |  X   |      |        |  X   |
-| Load View                   |      |      |        |  X   |
-| List View                   |  X   |      |        |  X   |
-| Drop View                   |  X   |      |        | X    |
-| Check View Exists           |  X   |      |        |  X   |
+| Load View                   |      |  X   |        |  X   |
+| List View                   |  X   |  X   |        |  X   |
+| Drop View                   |  X   |  X   |        |  X   |
+| Check View Exists           |  X   |  X   |        |  X   |
 
 ### Read/Write Data Support
 

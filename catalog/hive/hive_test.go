@@ -172,6 +172,19 @@ var testSchema = iceberg.NewSchemaWithIdentifiers(0, []int{},
 	iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 	iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool})
 
+var testIcebergHiveView = &hive_metastore.Table{
+	TableName: "test_view",
+	DbName:    "test_database",
+	TableType: TableTypeVirtualView,
+	Parameters: map[string]string{
+		TableTypeKey:        TableTypeIcebergView,
+		MetadataLocationKey: "s3://test-bucket/test_view/metadata/view-1234.metadata.json",
+	},
+	Sd: &hive_metastore.StorageDescriptor{
+		Location: "s3://test-bucket/test_view",
+	},
+}
+
 // Error helpers for mocking
 var (
 	errNoSuchObject     = errors.New("NoSuchObjectException: object not found")
@@ -550,6 +563,125 @@ func TestHiveCatalogType(t *testing.T) {
 	assert.Equal(catalog.Hive, hiveCatalog.CatalogType())
 }
 
+func TestHiveCreateTableConflictsWithView(t *testing.T) {
+	assert := require.New(t)
+
+	mockClient := &mockHiveClient{}
+
+	// A view already exists with the same identifier.
+	mockClient.On("GetTable", mock.Anything, "test_database", "test_table").
+		Return(testIcebergHiveView, nil).Once()
+
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	_, err := hiveCatalog.CreateTable(
+		context.TODO(),
+		TableIdentifier("test_database", "test_table"),
+		testSchema,
+	)
+	assert.Error(err)
+	assert.True(errors.Is(err, catalog.ErrViewAlreadyExists))
+
+	mockClient.AssertExpectations(t)
+}
+
+func TestHiveCheckViewExists(t *testing.T) {
+	assert := require.New(t)
+
+	mockClient := &mockHiveClient{}
+
+	mockClient.On("GetTable", mock.Anything, "test_database", "test_view").
+		Return(testIcebergHiveView, nil).Once()
+
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	exists, err := hiveCatalog.CheckViewExists(context.TODO(), TableIdentifier("test_database", "test_view"))
+	assert.NoError(err)
+	assert.True(exists)
+
+	mockClient.AssertExpectations(t)
+}
+
+func TestHiveCheckViewNotExists(t *testing.T) {
+	assert := require.New(t)
+
+	mockClient := &mockHiveClient{}
+
+	mockClient.On("GetTable", mock.Anything, "test_database", "nonexistent_view").
+		Return(nil, errNoSuchObject).Once()
+
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	exists, err := hiveCatalog.CheckViewExists(context.TODO(), TableIdentifier("test_database", "nonexistent_view"))
+	assert.NoError(err)
+	assert.False(exists)
+
+	mockClient.AssertExpectations(t)
+}
+
+func TestHiveListViews(t *testing.T) {
+	assert := require.New(t)
+
+	mockClient := &mockHiveClient{}
+
+	// One Iceberg view and one non-Iceberg table.
+	mockClient.On("GetTables", mock.Anything, "test_database", "*").
+		Return([]string{"test_view", "other_table"}, nil).Once()
+
+	mockClient.On("GetDatabase", mock.Anything, "test_database").
+		Return(&hive_metastore.Database{Name: "test_database"}, nil).Once()
+
+	mockClient.On("GetTable", mock.Anything, "test_database", "test_view").
+		Return(testIcebergHiveView, nil).Once()
+	mockClient.On("GetTable", mock.Anything, "test_database", "other_table").
+		Return(testNonIcebergHiveTable, nil).Once()
+
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	iter := hiveCatalog.ListViews(context.TODO(), DatabaseIdentifier("test_database"))
+
+	var (
+		lastErr error
+		views   []table.Identifier
+	)
+
+	for v, err := range iter {
+		if err != nil {
+			lastErr = err
+
+			break
+		}
+		views = append(views, v)
+	}
+
+	assert.NoError(lastErr)
+	assert.Len(views, 1)
+	assert.Equal(TableIdentifier("test_database", "test_view"), views[0])
+
+	mockClient.AssertExpectations(t)
+}
+
+func TestHiveLoadView(t *testing.T) {
+	assert := require.New(t)
+
+	mockClient := &mockHiveClient{}
+
+	mockClient.On("GetTable", mock.Anything, "test_database", "test_view").
+		Return(testIcebergHiveView, nil).Once()
+
+	// Metadata location in the fixture is s3://... which we cannot load in unit tests.
+	// We only assert that LoadView returns an error when the metadata is unreachable.
+	props := iceberg.Properties{
+		"warehouse": "file:///tmp",
+	}
+	hiveCatalog := NewCatalogWithClient(mockClient, props)
+
+	_, err := hiveCatalog.LoadView(context.TODO(), TableIdentifier("test_database", "test_view"))
+	assert.Error(err)
+
+	mockClient.AssertExpectations(t)
+}
+
 func TestIsIcebergTable(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -596,6 +728,61 @@ func TestIsIcebergTable(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			assert := require.New(t)
 			assert.Equal(tt.expected, isIcebergTable(tt.table))
+		})
+	}
+}
+
+func TestIsIcebergView(t *testing.T) {
+	tests := []struct {
+		name     string
+		table    *hive_metastore.Table
+		expected bool
+	}{
+		{
+			name:     "iceberg view",
+			table:    testIcebergHiveView,
+			expected: true,
+		},
+		{
+			name: "iceberg view mixed case",
+			table: &hive_metastore.Table{
+				TableName: "test_view_mixed",
+				DbName:    "test_database",
+				TableType: "virtual_view",
+				Parameters: map[string]string{
+					TableTypeKey: "IcEbErG_ViEw",
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "non-virtual-table-type",
+			table: &hive_metastore.Table{
+				TableName: "not_view",
+				DbName:    "test_database",
+				TableType: TableTypeExternalTable,
+				Parameters: map[string]string{
+					TableTypeKey: TableTypeIcebergView,
+				},
+			},
+			expected: false,
+		},
+		{
+			name:     "nil table",
+			table:    nil,
+			expected: false,
+		},
+		{
+			name:     "no parameters",
+			table:    &hive_metastore.Table{TableType: TableTypeVirtualView},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert := require.New(t)
+			assert.Equal(tt.expected, isIcebergView(tt.table))
 		})
 	}
 }
