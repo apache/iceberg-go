@@ -1136,7 +1136,17 @@ func (w *ManifestWriter) Close() error {
 	return w.writer.Close()
 }
 
-func (w *ManifestWriter) ToManifestFile(location string, length int64, content ManifestContent) (ManifestFile, error) {
+type ManifestFileOption func(mf *manifestFile)
+
+// WithManifestFileContent overrides the ManifestContent of a new manifest file with the provided value
+// Default: ManifestContentData
+func WithManifestFileContent(content ManifestContent) ManifestFileOption {
+	return func(mf *manifestFile) {
+		mf.Content = content
+	}
+}
+
+func (w *ManifestWriter) ToManifestFile(location string, length int64, opts ...ManifestFileOption) (ManifestFile, error) {
 	if err := w.Close(); err != nil {
 		return nil, err
 	}
@@ -1150,12 +1160,12 @@ func (w *ManifestWriter) ToManifestFile(location string, length int64, content M
 		return nil, err
 	}
 
-	return &manifestFile{
+	mf := manifestFile{
 		version:            w.version,
 		Path:               location,
 		Len:                length,
 		SpecID:             int32(w.spec.id),
-		Content:            content,
+		Content:            ManifestContentData,
 		SeqNumber:          -1,
 		MinSeqNumber:       w.minSeqNum,
 		AddedSnapshotID:    w.snapshotID,
@@ -1167,7 +1177,12 @@ func (w *ManifestWriter) ToManifestFile(location string, length int64, content M
 		DeletedRowsCount:   w.deletedRows,
 		PartitionList:      &partitions,
 		Key:                nil,
-	}, nil
+	}
+	for _, apply := range opts {
+		apply(&mf)
+	}
+
+	return &mf, nil
 }
 
 func (w *ManifestWriter) meta() (map[string][]byte, error) {
@@ -1501,7 +1516,7 @@ func WriteManifest(
 		return nil, err
 	}
 
-	return w.ToManifestFile(filename, cnt.Count, ManifestContentData)
+	return w.ToManifestFile(filename, cnt.Count)
 }
 
 // ManifestEntryStatus defines constants for the entry status of
