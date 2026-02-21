@@ -65,32 +65,34 @@ func NewWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 // them to data files when the target file size is reached, implementing a rolling
 // file strategy to manage file sizes.
 type RollingDataWriter struct {
-	partitionKey    string
-	partitionID     int          // unique ID for this partition
-	fileCount       atomic.Int64 // counter for files in this partition
-	recordCh        chan arrow.RecordBatch
-	errorCh         chan error
-	factory         *writerFactory
-	partitionValues map[int]any
-	ctx             context.Context
-	cancel          context.CancelFunc
-	wg              sync.WaitGroup
+	partitionKey     string
+	partitionID      int          // unique ID for this partition
+	fileCount        atomic.Int64 // counter for files in this partition
+	recordCh         chan arrow.RecordBatch
+	errorCh          chan error
+	factory          *writerFactory
+	partitionValues  map[int]any
+	ctx              context.Context
+	cancel           context.CancelFunc
+	wg               sync.WaitGroup
+	concurrentWriter *concurrentDataFileWriter
 }
 
 // NewRollingDataWriter creates a new RollingDataWriter for the specified partition
 // with the given partition values.
-func (w *writerFactory) NewRollingDataWriter(ctx context.Context, partition string, partitionValues map[int]any, outputDataFilesCh chan<- iceberg.DataFile) *RollingDataWriter {
+func (w *writerFactory) NewRollingDataWriter(ctx context.Context, concurrentWriter *concurrentDataFileWriter, partition string, partitionValues map[int]any, outputDataFilesCh chan<- iceberg.DataFile) *RollingDataWriter {
 	ctx, cancel := context.WithCancel(ctx)
 	partitionID := int(w.partitionIDCounter.Add(1) - 1)
 	writer := &RollingDataWriter{
-		partitionKey:    partition,
-		partitionID:     partitionID,
-		recordCh:        make(chan arrow.RecordBatch, 64),
-		errorCh:         make(chan error, 1),
-		factory:         w,
-		partitionValues: partitionValues,
-		ctx:             ctx,
-		cancel:          cancel,
+		partitionKey:     partition,
+		partitionID:      partitionID,
+		recordCh:         make(chan arrow.RecordBatch, 64),
+		errorCh:          make(chan error, 1),
+		factory:          w,
+		partitionValues:  partitionValues,
+		ctx:              ctx,
+		concurrentWriter: concurrentWriter,
+		cancel:           cancel,
 	}
 
 	writer.wg.Add(1)
@@ -99,7 +101,7 @@ func (w *writerFactory) NewRollingDataWriter(ctx context.Context, partition stri
 	return writer
 }
 
-func (w *writerFactory) getOrCreateRollingDataWriter(ctx context.Context, partition string, partitionValues map[int]any, outputDataFilesCh chan<- iceberg.DataFile) (*RollingDataWriter, error) {
+func (w *writerFactory) getOrCreateRollingDataWriter(ctx context.Context, concurrentWriter *concurrentDataFileWriter, partition string, partitionValues map[int]any, outputDataFilesCh chan<- iceberg.DataFile) (*RollingDataWriter, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -111,7 +113,7 @@ func (w *writerFactory) getOrCreateRollingDataWriter(ctx context.Context, partit
 		return nil, fmt.Errorf("invalid writer type for partition: %s", partition)
 	}
 
-	writer := w.NewRollingDataWriter(ctx, partition, partitionValues, outputDataFilesCh)
+	writer := w.NewRollingDataWriter(ctx, concurrentWriter, partition, partitionValues, outputDataFilesCh)
 	w.writers.Store(partition, writer)
 
 	return writer, nil
@@ -165,7 +167,7 @@ func (r *RollingDataWriter) flushToDataFile(batch []arrow.RecordBatch, outputDat
 		return nil
 	}
 
-	task := iter.Seq[WriteTask](func(yield func(WriteTask) bool) {
+	tasks := iter.Seq[WriteTask](func(yield func(WriteTask) bool) {
 		cnt, _ := r.factory.nextCount()
 		fileCount := int(r.fileCount.Add(1))
 
@@ -190,7 +192,7 @@ func (r *RollingDataWriter) flushToDataFile(batch []arrow.RecordBatch, outputDat
 	}
 	partitionMeta.props[WriteDataPathKey] = parseDataLoc.JoinPath("data").JoinPath(r.partitionKey).String()
 
-	outputDataFiles := writeFiles(r.ctx, r.factory.rootLocation, r.factory.args.fs, &partitionMeta, r.partitionValues, task)
+	outputDataFiles := r.concurrentWriter.writeFiles(r.ctx, r.factory.rootLocation, r.factory.args.fs, &partitionMeta, partitionMeta.props, r.partitionValues, tasks)
 	for dataFile, err := range outputDataFiles {
 		if err != nil {
 			return err

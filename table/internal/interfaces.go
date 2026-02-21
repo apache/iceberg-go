@@ -105,4 +105,5 @@ type WriteFileInfo struct {
 	FileName   string
 	StatsCols  map[int]StatisticsCollector
 	WriteProps any
+	Content    iceberg.ManifestEntryContent
 }

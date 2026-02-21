@@ -1136,7 +1136,17 @@ func (w *ManifestWriter) Close() error {
 	return w.writer.Close()
 }
 
-func (w *ManifestWriter) ToManifestFile(location string, length int64) (ManifestFile, error) {
+type ManifestFileOption func(mf *manifestFile)
+
+// WithManifestFileContent overrides the ManifestContent of a new manifest file with the provided value
+// Default: ManifestContentData
+func WithManifestFileContent(content ManifestContent) ManifestFileOption {
+	return func(mf *manifestFile) {
+		mf.Content = content
+	}
+}
+
+func (w *ManifestWriter) ToManifestFile(location string, length int64, opts ...ManifestFileOption) (ManifestFile, error) {
 	if err := w.Close(); err != nil {
 		return nil, err
 	}
@@ -1150,7 +1160,7 @@ func (w *ManifestWriter) ToManifestFile(location string, length int64) (Manifest
 		return nil, err
 	}
 
-	return &manifestFile{
+	mf := manifestFile{
 		version:            w.version,
 		Path:               location,
 		Len:                length,
@@ -1167,7 +1177,12 @@ func (w *ManifestWriter) ToManifestFile(location string, length int64) (Manifest
 		DeletedRowsCount:   w.deletedRows,
 		PartitionList:      &partitions,
 		Key:                nil,
-	}, nil
+	}
+	for _, apply := range opts {
+		apply(&mf)
+	}
+
+	return &mf, nil
 }
 
 func (w *ManifestWriter) meta() (map[string][]byte, error) {
@@ -2315,5 +2330,5 @@ type ManifestEntry interface {
 
 var PositionalDeleteSchema = NewSchema(0,
 	NestedField{ID: 2147483546, Type: PrimitiveTypes.String, Name: "file_path", Required: true},
-	NestedField{ID: 2147483545, Type: PrimitiveTypes.Int32, Name: "pos", Required: true},
+	NestedField{ID: 2147483545, Type: PrimitiveTypes.Int64, Name: "pos", Required: true},
 )
