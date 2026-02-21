@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"fmt"
 	"iter"
 	"path"
 
@@ -82,34 +83,48 @@ func (p *positionDeletePartitionedFanoutWriter) fanout(ctx context.Context, inpu
 			if !ok {
 				return nil
 			}
-			defer record.Release()
 
-			select {
-			case <-ctx.Done():
-				return context.Cause(ctx)
-			default:
-			}
-
-			if record.NumRows() == 0 {
-				continue
-			}
-
-			columns := record.Columns()
-			filePaths := columns[0].(*array.String)
-			partitionPath := path.Dir(filePaths.Value(0))
-
-			partitionValues := p.partitionDataByFilePath[partitionPath]
-			rollingDataWriter, err := p.writerFactory.getOrCreateRollingDataWriter(ctx, p.concurrentDataFileWriter, partitionPath, partitionValues, dataFilesChannel)
-			if err != nil {
-				return err
-			}
-
-			err = rollingDataWriter.Add(record)
+			err := p.processBatch(ctx, record, dataFilesChannel)
 			if err != nil {
 				return err
 			}
 		}
 	}
+}
+
+func (p *positionDeletePartitionedFanoutWriter) processBatch(ctx context.Context, batch arrow.RecordBatch, dataFilesChannel chan<- iceberg.DataFile) (err error) {
+	defer batch.Release()
+
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	default:
+	}
+
+	if batch.NumRows() == 0 {
+		return
+	}
+
+	columns := batch.Columns()
+	filePath := columns[0].(*array.String)
+	partitionPath, _ := path.Split(filePath.Value(0))
+
+	partitionValues, ok := p.partitionDataByFilePath[partitionPath]
+	if !ok {
+		return fmt.Errorf("unexpected missing partition values for path %s", partitionPath)
+	}
+
+	rollingDataWriter, err := p.writerFactory.getOrCreateRollingDataWriter(ctx, p.concurrentDataFileWriter, partitionPath, partitionValues, dataFilesChannel)
+	if err != nil {
+		return err
+	}
+
+	err = rollingDataWriter.Add(batch)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (p *positionDeletePartitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, outputDataFilesCh chan iceberg.DataFile) iter.Seq2[iceberg.DataFile, error] {

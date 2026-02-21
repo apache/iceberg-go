@@ -1291,7 +1291,8 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 
 	partitionDataPerFile := make(map[string]map[int]any, len(files))
 	for _, df := range files {
-		partitionDataPerFile[path.Dir(df.FilePath())] = df.Partition()
+		partitionPath, _ := path.Split(df.FilePath())
+		partitionDataPerFile[partitionPath] = df.Partition()
 	}
 
 	posDeleteFiles := positionDeleteRecordsToDataFiles(ctx, t.tbl.Location(), t.meta, partitionDataPerFile, recordWritingArgs{

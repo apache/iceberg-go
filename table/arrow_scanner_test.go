@@ -122,6 +122,6 @@ func mustLoadRecordBatchFromJSON(schema *arrow.Schema, content string) arrow.Rec
 	if err != nil {
 		panic("failed to load test data from JSON: " + err.Error())
 	}
-	
+
 	return recordBatch
 }
