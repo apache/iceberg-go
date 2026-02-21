@@ -61,7 +61,7 @@ jobs:
           AWS_REGION: "us-east-1"
           SPARK_CONTAINER_ID: "${{ env.SPARK_CONTAINER_ID }}"
           DOCKER_API_VER: "${{ env.DOCKER_API_VER }}"
-        run: |          
+        run: |
           make integration-test
 
       - name: Show debug logs

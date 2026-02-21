@@ -15,12 +15,13 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package io
+package gocloud
 
 import (
 	"context"
 	"testing"
 
+	"github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -32,8 +33,8 @@ func TestParseAWSConfigRemoteSigningEnabled(t *testing.T) {
 		t.Parallel()
 
 		_, err := ParseAWSConfig(context.Background(), map[string]string{
-			S3SignerUri:            "https://signer.example.com",
-			S3RemoteSigningEnabled: "true",
+			io.S3SignerURI:            "https://signer.example.com",
+			io.S3RemoteSigningEnabled: "true",
 		})
 		require.ErrorContains(t, err, "remote S3 request signing is not supported")
 	})
@@ -42,9 +43,9 @@ func TestParseAWSConfigRemoteSigningEnabled(t *testing.T) {
 		t.Parallel()
 
 		_, err := ParseAWSConfig(context.Background(), map[string]string{
-			S3SignerUri:            "https://signer.example.com",
-			S3RemoteSigningEnabled: "false",
-			S3Region:               "us-east-1",
+			io.S3SignerURI:            "https://signer.example.com",
+			io.S3RemoteSigningEnabled: "false",
+			io.S3Region:               "us-east-1",
 		})
 		require.NoError(t, err)
 	})
@@ -53,8 +54,8 @@ func TestParseAWSConfigRemoteSigningEnabled(t *testing.T) {
 		t.Parallel()
 
 		_, err := ParseAWSConfig(context.Background(), map[string]string{
-			S3SignerUri: "https://signer.example.com",
-			S3Region:    "us-west-2",
+			io.S3SignerURI: "https://signer.example.com",
+			io.S3Region:    "us-west-2",
 		})
 		require.NoError(t, err)
 	})
@@ -63,7 +64,7 @@ func TestParseAWSConfigRemoteSigningEnabled(t *testing.T) {
 		t.Parallel()
 
 		_, err := ParseAWSConfig(context.Background(), map[string]string{
-			S3RemoteSigningEnabled: "true",
+			io.S3RemoteSigningEnabled: "true",
 		})
 		require.ErrorContains(t, err, "remote S3 request signing is not supported")
 	})
@@ -72,7 +73,7 @@ func TestParseAWSConfigRemoteSigningEnabled(t *testing.T) {
 		t.Parallel()
 
 		cfg, err := ParseAWSConfig(context.Background(), map[string]string{
-			S3Region: "eu-west-1",
+			io.S3Region: "eu-west-1",
 		})
 		require.NoError(t, err)
 		assert.Equal(t, "eu-west-1", cfg.Region)
@@ -83,7 +84,7 @@ func TestParseAWSConfigUnsupportedProperty(t *testing.T) {
 	t.Parallel()
 
 	_, err := ParseAWSConfig(context.Background(), map[string]string{
-		S3ConnectTimeout: "5000",
+		io.S3ConnectTimeout: "5000",
 	})
 	require.ErrorContains(t, err, "unsupported S3 property")
 }
