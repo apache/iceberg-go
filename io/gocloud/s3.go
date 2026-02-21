@@ -39,11 +39,8 @@ import (
 	"gocloud.dev/blob/s3blob"
 )
 
-const S3RemoteSigningEnabled = "s3.remote-signing-enabled"
-
 var unsupportedS3Props = []string{
 	io.S3ConnectTimeout,
-	io.S3SignerURI,
 }
 
 // ParseAWSConfig parses S3 properties and returns a configuration.
@@ -56,7 +53,7 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 	}
 
 	// Remote S3 request signing is not implemented yet.
-	if v, ok := props[S3RemoteSigningEnabled]; ok {
+	if v, ok := props[io.S3RemoteSigningEnabled]; ok {
 		if enabled, err := strconv.ParseBool(v); err == nil && enabled {
 			return nil, errors.New("remote S3 request signing is not supported")
 		}
