@@ -1538,11 +1538,11 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterPersistsPerManifestFirstRowI
 	m.Require().True(ok, "expected v3 manifest file type")
 	secondManifest, ok := list[1].(*manifestFile)
 	m.Require().True(ok, "expected v3 manifest file type")
-	m.Require().NotNil(firstManifest.FirstRowId)
-	m.Require().NotNil(secondManifest.FirstRowId)
+	m.Require().NotNil(firstManifest.FirstRowId(), "first manifest should have first_row_id")
+	m.Require().NotNil(secondManifest.FirstRowId(), "second manifest should have first_row_id")
 
-	m.EqualValues(5000, *firstManifest.FirstRowId) // start of first range
-	m.EqualValues(5015, *secondManifest.FirstRowId)
+	m.EqualValues(5000, *firstManifest.FirstRowId()) // start of first range
+	m.EqualValues(5015, *secondManifest.FirstRowId())
 	m.EqualValues(5022, *writer.NextRowID())
 }
 
