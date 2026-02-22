@@ -1185,6 +1185,10 @@ func (a *arrowStatsCollector) Primitive(dt iceberg.PrimitiveType) []tblutils.Sta
 		metMode = tblutils.MetricsMode{Typ: tblutils.MetricModeCounts}
 	}
 
+	if _, ok := dt.(iceberg.VariantType); ok {
+		metMode = tblutils.MetricsMode{Typ: tblutils.MetricModeCounts}
+	}
+
 	return []tblutils.StatisticsCollector{{
 		FieldID:    a.fieldID,
 		IcebergTyp: dt,
