@@ -772,7 +772,7 @@ func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 			_, err := tx.NewDelete().Model(m).
 				Where("catalog_name = ?", c.name).
 				Where("namespace = ?", nsToUpdate).
-				Where("property_key in (?)", bun.In(removals)).Exec(ctx)
+				Where("property_key in (?)", bun.List(removals)).Exec(ctx)
 			if err != nil {
 				return fmt.Errorf("error deleting properties for '%s': %w", namespace, err)
 			}
@@ -800,7 +800,7 @@ func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 				_, err := tx.NewDelete().Model(m).
 					Where("catalog_name = ?", c.name).
 					Where("namespace = ?", nsToUpdate).
-					Where("property_key in (?)", bun.In(slices.Collect(maps.Keys(updates)))).
+					Where("property_key in (?)", bun.List(slices.Collect(maps.Keys(updates)))).
 					Exec(ctx)
 				if err != nil {
 					return fmt.Errorf("error deleting properties for '%s': %w", namespace, err)
