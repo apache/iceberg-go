@@ -31,9 +31,13 @@ const (
 	// Warehouse is the default warehouse location for tables
 	Warehouse = "warehouse"
 
-	TableTypeKey                = "table_type"
-	TableTypeIceberg            = "ICEBERG"
-	TableTypeExternalTable      = "EXTERNAL_TABLE"
+	TableTypeKey           = "table_type"
+	TableTypeIceberg       = "ICEBERG"
+	TableTypeExternalTable = "EXTERNAL_TABLE"
+	// Ref: https://github.com/apache/hive/blob/7060d94843fdbc548445db6aac84dd60b44641ee/standalone-metastore/metastore-common/src/main/java/org/apache/hadoop/hive/metastore/TableType.java#L27
+	TableTypeVirtualView = "VIRTUAL_VIEW"
+	// Ref: https://github.com/apache/iceberg/blob/2f170322d425a4c6267a9033efa2107c9bfc53db/hive-metastore/src/main/java/org/apache/iceberg/hive/HiveOperationsBase.java#L57
+	TableTypeIcebergView        = "ICEBERG_VIEW"
 	MetadataLocationKey         = "metadata_location"
 	PreviousMetadataLocationKey = "previous_metadata_location"
 	ExternalKey                 = "EXTERNAL"
