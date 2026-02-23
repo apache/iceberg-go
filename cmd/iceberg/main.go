@@ -31,6 +31,7 @@ import (
 	"github.com/apache/iceberg-go/catalog/hive"
 	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/apache/iceberg-go/config"
+	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/apache/iceberg-go/table"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"

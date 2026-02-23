@@ -31,6 +31,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/stretchr/testify/require"
 )
 

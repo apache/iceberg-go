@@ -40,7 +40,7 @@ integration-scanner:
 	go test -tags=integration -v -run="^TestScanner" ./table
 
 integration-io:
-	go test -tags=integration -v ./io
+	go test -tags=integration -v ./io/...
 
 integration-rest:
 	go test -tags=integration -v -run="^TestRestIntegration$$" ./catalog/rest

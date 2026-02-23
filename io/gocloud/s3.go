@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package io
+package gocloud
 
 import (
 	"context"
@@ -27,6 +27,7 @@ import (
 	"slices"
 	"strconv"
 
+	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
@@ -38,22 +39,8 @@ import (
 	"gocloud.dev/blob/s3blob"
 )
 
-// Constants for S3 configuration options
-const (
-	S3Region                 = "s3.region"
-	S3SessionToken           = "s3.session-token"
-	S3SecretAccessKey        = "s3.secret-access-key"
-	S3AccessKeyID            = "s3.access-key-id"
-	S3EndpointURL            = "s3.endpoint"
-	S3ProxyURI               = "s3.proxy-uri"
-	S3ConnectTimeout         = "s3.connect-timeout"
-	S3SignerUri              = "s3.signer.uri"
-	S3RemoteSigningEnabled   = "s3.remote-signing-enabled"
-	S3ForceVirtualAddressing = "s3.force-virtual-addressing"
-)
-
 var unsupportedS3Props = []string{
-	S3ConnectTimeout,
+	io.S3ConnectTimeout,
 }
 
 // ParseAWSConfig parses S3 properties and returns a configuration.
@@ -66,7 +53,7 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 	}
 
 	// Remote S3 request signing is not implemented yet.
-	if v, ok := props[S3RemoteSigningEnabled]; ok {
+	if v, ok := props[io.S3RemoteSigningEnabled]; ok {
 		if enabled, err := strconv.ParseBool(v); err == nil && enabled {
 			return nil, errors.New("remote S3 request signing is not supported")
 		}
@@ -79,20 +66,20 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 			&bearer.StaticTokenProvider{Token: bearer.Token{Value: tok}}))
 	}
 
-	if region, ok := props[S3Region]; ok {
+	if region, ok := props[io.S3Region]; ok {
 		opts = append(opts, config.WithRegion(region))
 	} else if region, ok := props["client.region"]; ok {
 		opts = append(opts, config.WithRegion(region))
 	}
 
-	accessKey, secretAccessKey := props[S3AccessKeyID], props[S3SecretAccessKey]
-	token := props[S3SessionToken]
+	accessKey, secretAccessKey := props[io.S3AccessKeyID], props[io.S3SecretAccessKey]
+	token := props[io.S3SessionToken]
 	if accessKey != "" || secretAccessKey != "" || token != "" {
 		opts = append(opts, config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-			props[S3AccessKeyID], props[S3SecretAccessKey], props[S3SessionToken])))
+			props[io.S3AccessKeyID], props[io.S3SecretAccessKey], props[io.S3SessionToken])))
 	}
 
-	if proxy, ok := props[S3ProxyURI]; ok {
+	if proxy, ok := props[io.S3ProxyURI]; ok {
 		proxyURL, err := url.Parse(proxy)
 		if err != nil {
 			return nil, fmt.Errorf("invalid s3 proxy url '%s'", proxy)
@@ -129,13 +116,13 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 		}
 	}
 
-	endpoint, ok := props[S3EndpointURL]
+	endpoint, ok := props[io.S3EndpointURL]
 	if !ok {
 		endpoint = os.Getenv("AWS_S3_ENDPOINT")
 	}
 
 	usePathStyle := true
-	if forceVirtual, ok := props[S3ForceVirtualAddressing]; ok {
+	if forceVirtual, ok := props[io.S3ForceVirtualAddressing]; ok {
 		if cfgForceVirtual, err := strconv.ParseBool(forceVirtual); err == nil {
 			usePathStyle = !cfgForceVirtual
 		}
