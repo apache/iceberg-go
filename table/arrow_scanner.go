@@ -196,20 +196,20 @@ func processPositionalDeletes(ctx context.Context, deletes set[int64]) recProces
 // preserve the original position of those records.
 func enrichRecordsWithPosDeleteFields(ctx context.Context, filePath iceberg.DataFile) recProcessFn {
 	nextIdx, mem := int64(0), compute.GetAllocator(ctx)
+	filePathField, ok := PositionalDeleteArrowSchema.FieldsByName("file_path")
+	if !ok {
+		panic("position delete schema should have required field 'file_path'")
+	}
+	posField, ok := PositionalDeleteArrowSchema.FieldsByName("pos")
+	if !ok {
+		panic("position delete schema should have required field 'pos'")
+	}
 
 	return func(inData arrow.RecordBatch) (outData arrow.RecordBatch, err error) {
 		defer inData.Release()
 
 		schema := inData.Schema()
 		fieldIdx := schema.NumFields()
-		filePathField, ok := PositionalDeleteArrowSchema.FieldsByName("file_path")
-		if !ok {
-			panic("position delete schema should have required field 'file_path'")
-		}
-		posField, ok := PositionalDeleteArrowSchema.FieldsByName("pos")
-		if !ok {
-			panic("position delete schema should have required field 'pos'")
-		}
 		schema, err = schema.AddField(fieldIdx, filePathField[0])
 		if err != nil {
 			return nil, err
