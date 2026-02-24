@@ -619,7 +619,7 @@ func (s *SparkIntegrationTestSuite) TestDeleteMergeOnReadPartitioned() {
 		`[
 			{"first_name": "alan", "last_name": "gopher", "age": 7},
 			{"first_name": "steve", "last_name": "gopher", "age": 5},
-			{"first_name": "dead", "last_name": "gopher", "age": 97}
+			{"first_name": "dead", "last_name": "gopher", "age": 97},
 			{"first_name": "uncle", "last_name": "gopher", "age": 90}
 		]`,
 	})
