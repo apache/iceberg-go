@@ -34,24 +34,24 @@ import (
 // a partition specification, writing data to separate delete files for each partition using
 // a fanout pattern with configurable parallelism.
 type positionDeletePartitionedFanoutWriter struct {
-	partitionSpec            iceberg.PartitionSpec
-	partitionDataByFilePath  map[string]map[int]any
-	schema                   *iceberg.Schema
-	itr                      iter.Seq2[arrow.RecordBatch, error]
-	writerFactory            *writerFactory
-	concurrentDataFileWriter *concurrentDataFileWriter
+	partitionContextByFilePath map[string]partitionContext
+	metadata                   Metadata
+	schema                     *iceberg.Schema
+	itr                        iter.Seq2[arrow.RecordBatch, error]
+	writerFactory              *writerFactory
+	concurrentDataFileWriter   *concurrentDataFileWriter
 }
 
 // newPositionDeletePartitionedFanoutWriter creates a new PartitionedFanoutWriter with the specified
 // partition specification, schema, and record iterator.
-func newPositionDeletePartitionedFanoutWriter(partitionSpec iceberg.PartitionSpec, concurrentWriter *concurrentDataFileWriter, partitionDataByFilePath map[string]map[int]any, itr iter.Seq2[arrow.RecordBatch, error], writerFactory *writerFactory) *positionDeletePartitionedFanoutWriter {
+func newPositionDeletePartitionedFanoutWriter(metadata Metadata, concurrentWriter *concurrentDataFileWriter, partitionContextByFilePath map[string]partitionContext, itr iter.Seq2[arrow.RecordBatch, error], writerFactory *writerFactory) *positionDeletePartitionedFanoutWriter {
 	return &positionDeletePartitionedFanoutWriter{
-		partitionSpec:            partitionSpec,
-		partitionDataByFilePath:  partitionDataByFilePath,
-		schema:                   iceberg.PositionalDeleteSchema,
-		itr:                      itr,
-		writerFactory:            writerFactory,
-		concurrentDataFileWriter: concurrentWriter,
+		partitionContextByFilePath: partitionContextByFilePath,
+		metadata:                   metadata,
+		schema:                     iceberg.PositionalDeleteSchema,
+		itr:                        itr,
+		writerFactory:              writerFactory,
+		concurrentDataFileWriter:   concurrentWriter,
 	}
 }
 
@@ -109,13 +109,16 @@ func (p *positionDeletePartitionedFanoutWriter) processBatch(ctx context.Context
 	columns := batch.Columns()
 	filePathArray := columns[0].(*array.String)
 	filePath := filePathArray.ValueStr(0)
-	partitionValues, ok := p.partitionDataByFilePath[filePath]
+	partitionContext, ok := p.partitionContextByFilePath[filePath]
 	if !ok {
-		return fmt.Errorf("unexpected missing partition values for path %s", filePath)
+		return fmt.Errorf("unexpected missing partition context for path %s", filePath)
 	}
 
-	partitionPath := p.partitionPath(slices.Collect(maps.Values(partitionValues)))
-	rollingDataWriter, err := p.writerFactory.getOrCreateRollingDataWriter(ctx, p.concurrentDataFileWriter, partitionPath, partitionValues, dataFilesChannel)
+	partitionPath, err := p.partitionPath(partitionContext)
+	if err != nil {
+		return err
+	}
+	rollingDataWriter, err := p.writerFactory.getOrCreateRollingDataWriter(ctx, p.concurrentDataFileWriter, partitionPath, partitionContext.partitionData, dataFilesChannel)
 	if err != nil {
 		return err
 	}
@@ -128,8 +131,14 @@ func (p *positionDeletePartitionedFanoutWriter) processBatch(ctx context.Context
 	return nil
 }
 
-func (p *positionDeletePartitionedFanoutWriter) partitionPath(data partitionRecord) string {
-	return p.partitionSpec.PartitionToPath(data, p.schema)
+func (p *positionDeletePartitionedFanoutWriter) partitionPath(partitionContext partitionContext) (string, error) {
+	data := partitionRecord(slices.Collect(maps.Values(partitionContext.partitionData)))
+	spec := p.metadata.PartitionSpecByID(int(partitionContext.specID))
+	if spec == nil {
+		return "", fmt.Errorf("unexpected missing partition spec in metadata for spec id %d", partitionContext.specID)
+	}
+
+	return spec.PartitionToPath(data, p.schema), nil
 }
 
 func (p *positionDeletePartitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, outputDataFilesCh chan iceberg.DataFile) iter.Seq2[iceberg.DataFile, error] {

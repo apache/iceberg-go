@@ -1380,7 +1380,12 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 	return partitionWriter.Write(ctx, workers)
 }
 
-func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, meta *MetadataBuilder, partitionDataPerFile map[string]map[int]any, args recordWritingArgs) (ret iter.Seq2[iceberg.DataFile, error]) {
+type partitionContext struct {
+	partitionData map[int]any
+	specID        int32
+}
+
+func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, meta *MetadataBuilder, partitionContextByFilePath map[string]partitionContext, args recordWritingArgs) (ret iter.Seq2[iceberg.DataFile, error]) {
 	if args.counter == nil {
 		args.counter = internal.Counter(0)
 	}
@@ -1400,6 +1405,13 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 		}
 	}()
 
+	latestMetadata, err := meta.Build()
+	if err != nil {
+		return func(yield func(iceberg.DataFile, error) bool) {
+			yield(nil, err)
+		}
+	}
+
 	if args.writeUUID == nil {
 		u := uuid.Must(uuid.NewRandom())
 		args.writeUUID = &u
@@ -1408,23 +1420,11 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 	targetFileSize := int64(meta.props.GetInt(WriteTargetFileSizeBytesKey,
 		WriteTargetFileSizeBytesDefault))
 
-	currentSpec, err := meta.CurrentSpec()
-	if err != nil {
-		return func(yield func(iceberg.DataFile, error) bool) {
-			yield(nil, err)
-		}
-	}
-	if currentSpec == nil {
-		return func(yield func(iceberg.DataFile, error) bool) {
-			yield(nil, fmt.Errorf("cannot write files without a current spec: %w", err))
-		}
-	}
-
 	cw := newConcurrentDataFileWriter(func(rootLocation string, fs iceio.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
 		return newPositionDeleteWriter(rootLocation, fs, meta, props, opts...)
 	}, withSchemaSanitization(false))
 	nextCount, stopCount := iter.Pull(args.counter)
-	if currentSpec.IsUnpartitioned() {
+	if latestMetadata.PartitionSpec().IsUnpartitioned() {
 		tasks := func(yield func(WriteTask) bool) {
 			defer stopCount()
 
@@ -1449,7 +1449,7 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 		return cw.writeFiles(ctx, rootLocation, args.fs, meta, meta.props, nil, tasks)
 	}
 	writerFactory := NewWriterFactory(rootLocation, args, meta, iceberg.PositionalDeleteSchema, targetFileSize)
-	partitionWriter := newPositionDeletePartitionedFanoutWriter(*currentSpec, cw, partitionDataPerFile, args.itr, &writerFactory)
+	partitionWriter := newPositionDeletePartitionedFanoutWriter(latestMetadata, cw, partitionContextByFilePath, args.itr, &writerFactory)
 	workers := config.EnvConfig.MaxWorkers
 
 	return partitionWriter.Write(ctx, workers)

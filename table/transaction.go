@@ -1288,12 +1288,12 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 		return err
 	}
 
-	partitionDataPerFile := make(map[string]map[int]any, len(files))
+	partitionContextByFilePath := make(map[string]partitionContext, len(files))
 	for _, df := range files {
-		partitionDataPerFile[df.FilePath()] = df.Partition()
+		partitionContextByFilePath[df.FilePath()] = partitionContext{partitionData: df.Partition(), specID: df.SpecID()}
 	}
 
-	posDeleteFiles := positionDeleteRecordsToDataFiles(ctx, t.tbl.Location(), t.meta, partitionDataPerFile, recordWritingArgs{
+	posDeleteFiles := positionDeleteRecordsToDataFiles(ctx, t.tbl.Location(), t.meta, partitionContextByFilePath, recordWritingArgs{
 		sc:        PositionalDeleteArrowSchema,
 		itr:       posDeleteRecIter,
 		writeUUID: &commitUUID,
