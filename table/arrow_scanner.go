@@ -570,7 +570,7 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task interna
 	// Nothing to delete in a dropped file
 	if dropFile {
 		var emptySchema *arrow.Schema
-		emptySchema, err = SchemaToArrowSchema(as.projectedSchema, nil, false, as.useLargeTypes)
+		emptySchema, err = SchemaToArrowSchema(iceberg.PositionalDeleteSchema, nil, false, as.useLargeTypes)
 		if err != nil {
 			return err
 		}
