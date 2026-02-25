@@ -951,7 +951,7 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 	}
 
 	if len(withPartialDeletions) > 0 {
-		if err := t.writePositionDeletesForFiles(ctx, fs, updater, withPartialDeletions, filter, caseSensitive, concurrency); err != nil {
+		if err := t.writePositionDeletesForFiles(ctx, fs, updater, withPartialDeletions, filter, caseSensitive, concurrency, commitUUID); err != nil {
 			return nil, err
 		}
 	}
@@ -1283,7 +1283,7 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, fs io.IO, originalF
 }
 
 // writePositionDeletesForFiles rewrites data files by preserving only rows that do NOT match the filter
-func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO, updater *snapshotProducer, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) error {
+func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO, updater *snapshotProducer, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, commitUUID uuid.UUID) error {
 	posDeleteRecIter, err := t.makePositionDeleteRecordsForFilter(ctx, fs, files, filter, caseSensitive, concurrency)
 	if err != nil {
 		return err
@@ -1296,9 +1296,10 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 	}
 
 	posDeleteFiles := positionDeleteRecordsToDataFiles(ctx, t.tbl.Location(), t.meta, partitionDataPerFile, recordWritingArgs{
-		sc:  PositionalDeleteArrowSchema,
-		itr: posDeleteRecIter,
-		fs:  fs.(io.WriteFileIO),
+		sc:        PositionalDeleteArrowSchema,
+		itr:       posDeleteRecIter,
+		writeUUID: &commitUUID,
+		fs:        fs.(io.WriteFileIO),
 	})
 
 	for f, err := range posDeleteFiles {
