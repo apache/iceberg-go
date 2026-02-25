@@ -264,7 +264,10 @@ func (s *Schema) FindColumnName(fieldID int) (string, bool) {
 // Note: This search is done in a case sensitive manner. To perform
 // a case insensitive search, use [*Schema.FindFieldByNameCaseInsensitive].
 func (s *Schema) FindFieldByName(name string) (NestedField, bool) {
-	idx, _ := s.lazyNameToID()
+	idx, err := s.lazyNameToID()
+	if err != nil {
+		return NestedField{}, false
+	}
 
 	id, ok := idx[name]
 	if !ok {
@@ -277,7 +280,10 @@ func (s *Schema) FindFieldByName(name string) (NestedField, bool) {
 // FindFieldByNameCaseInsensitive is like [*Schema.FindFieldByName],
 // but performs a case insensitive search.
 func (s *Schema) FindFieldByNameCaseInsensitive(name string) (NestedField, bool) {
-	idx, _ := s.lazyNameToIDLower()
+	idx, err := s.lazyNameToIDLower()
+	if err != nil {
+		return NestedField{}, false
+	}
 
 	id, ok := idx[strings.ToLower(name)]
 	if !ok {
@@ -384,7 +390,11 @@ var void = Void{}
 func (s *Schema) Select(caseSensitive bool, names ...string) (*Schema, error) {
 	ids := make(map[int]Void)
 	if caseSensitive {
-		nameMap, _ := s.lazyNameToID()
+		nameMap, err := s.lazyNameToID()
+		if err != nil {
+			return nil, err
+		}
+
 		for _, n := range names {
 			id, ok := nameMap[n]
 			if !ok {
@@ -393,7 +403,11 @@ func (s *Schema) Select(caseSensitive bool, names ...string) (*Schema, error) {
 			ids[id] = void
 		}
 	} else {
-		nameMap, _ := s.lazyNameToIDLower()
+		nameMap, err := s.lazyNameToIDLower()
+		if err != nil {
+			return nil, err
+		}
+
 		for _, n := range names {
 			id, ok := nameMap[strings.ToLower(n)]
 			if !ok {
@@ -780,6 +794,10 @@ func IndexByName(schema *Schema) (map[string]int, error) {
 			return nil, err
 		}
 
+		if indexer.err != nil {
+			return nil, indexer.err
+		}
+
 		return indexer.ByName(), nil
 	}
 
@@ -799,6 +817,10 @@ func IndexNameByID(schema *Schema) (map[int]string, error) {
 		return nil, err
 	}
 
+	if indexer.err != nil {
+		return nil, indexer.err
+	}
+
 	return indexer.ByID(), nil
 }
 
@@ -808,6 +830,7 @@ type indexByName struct {
 	combinedIndex   map[string]int
 	fieldNames      []string
 	shortFieldNames []string
+	err             error
 }
 
 func (i *indexByName) ByID() map[int]string {
@@ -828,14 +851,20 @@ func (i *indexByName) ByName() map[string]int {
 
 func (i *indexByName) Primitive(PrimitiveType) map[string]int { return i.index }
 func (i *indexByName) addField(name string, fieldID int) {
+	if i.err != nil {
+		return
+	}
+
 	fullName := name
 	if len(i.fieldNames) > 0 {
 		fullName = strings.Join(i.fieldNames, ".") + "." + name
 	}
 
 	if _, ok := i.index[fullName]; ok {
-		panic(fmt.Errorf("%w: multiple fields for name %s: %d and %d",
-			ErrInvalidSchema, fullName, i.index[fullName], fieldID))
+		i.err = fmt.Errorf("%w: multiple fields for name %s: %d and %d",
+			ErrInvalidSchema, fullName, i.index[fullName], fieldID)
+
+		return
 	}
 
 	i.index[fullName] = fieldID
@@ -899,12 +928,18 @@ func (i *indexByName) AfterField(field NestedField) {
 // PruneColumns visits a schema pruning any columns which do not exist in the
 // provided selected set. Parent fields of a selected child will be retained.
 func PruneColumns(schema *Schema, selected map[int]Void, selectFullTypes bool) (*Schema, error) {
-	result, err := Visit(schema, &pruneColVisitor{
+	visitor := &pruneColVisitor{
 		selected:  selected,
 		fullTypes: selectFullTypes,
-	})
+	}
+
+	result, err := Visit(schema, visitor)
 	if err != nil {
 		return nil, err
+	}
+
+	if visitor.err != nil {
+		return nil, visitor.err
 	}
 
 	n, ok := result.(NestedType)
@@ -929,6 +964,7 @@ func PruneColumns(schema *Schema, selected map[int]Void, selectFullTypes bool) (
 type pruneColVisitor struct {
 	selected  map[int]Void
 	fullTypes bool
+	err       error
 }
 
 func (p *pruneColVisitor) Schema(_ *Schema, structResult Type) Type {
@@ -969,6 +1005,10 @@ func (p *pruneColVisitor) Struct(st StructType, fieldResults []Type) Type {
 }
 
 func (p *pruneColVisitor) Field(field NestedField, fieldResult Type) Type {
+	if p.err != nil {
+		return nil
+	}
+
 	_, ok := p.selected[field.ID]
 	if !ok {
 		if fieldResult != nil {
@@ -988,14 +1028,20 @@ func (p *pruneColVisitor) Field(field NestedField, fieldResult Type) Type {
 
 	typ, ok := field.Type.(PrimitiveType)
 	if !ok {
-		panic(fmt.Errorf("%w: cannot explicitly project List or Map types, %d:%s of type %s was selected",
-			ErrInvalidSchema, field.ID, field.Name, field.Type))
+		p.err = fmt.Errorf("%w: cannot explicitly project List or Map types, %d:%s of type %s was selected",
+			ErrInvalidSchema, field.ID, field.Name, field.Type)
+
+		return nil
 	}
 
 	return typ
 }
 
 func (p *pruneColVisitor) List(list ListType, elemResult Type) Type {
+	if p.err != nil {
+		return nil
+	}
+
 	_, ok := p.selected[list.ElementID]
 	if !ok {
 		if elemResult != nil {
@@ -1017,14 +1063,20 @@ func (p *pruneColVisitor) List(list ListType, elemResult Type) Type {
 	}
 
 	if _, ok = list.Element.(PrimitiveType); !ok {
-		panic(fmt.Errorf("%w: cannot explicitly project List or Map types, %d of type %s was selected",
-			ErrInvalidSchema, list.ElementID, list.Element))
+		p.err = fmt.Errorf("%w: cannot explicitly project List or Map types, %d of type %s was selected",
+			ErrInvalidSchema, list.ElementID, list.Element)
+
+		return nil
 	}
 
 	return &list
 }
 
 func (p *pruneColVisitor) Map(mapType MapType, keyResult, valueResult Type) Type {
+	if p.err != nil {
+		return nil
+	}
+
 	_, ok := p.selected[mapType.ValueID]
 	if !ok {
 		if valueResult != nil {
@@ -1050,8 +1102,10 @@ func (p *pruneColVisitor) Map(mapType MapType, keyResult, valueResult Type) Type
 	}
 
 	if _, ok = mapType.ValueType.(PrimitiveType); !ok {
-		panic(fmt.Errorf("%w: cannot explicitly project List or Map types, Map value %d of type %s was selected",
-			ErrInvalidSchema, mapType.ValueID, mapType.ValueType))
+		p.err = fmt.Errorf("%w: cannot explicitly project List or Map types, Map value %d of type %s was selected",
+			ErrInvalidSchema, mapType.ValueID, mapType.ValueType)
+
+		return nil
 	}
 
 	return &mapType
@@ -1059,7 +1113,7 @@ func (p *pruneColVisitor) Map(mapType MapType, keyResult, valueResult Type) Type
 
 func (p *pruneColVisitor) Primitive(_ PrimitiveType) Type { return nil }
 
-func (*pruneColVisitor) projectSelectedStruct(projected Type) *StructType {
+func (p *pruneColVisitor) projectSelectedStruct(projected Type) *StructType {
 	if projected == nil {
 		return &StructType{}
 	}
@@ -1068,7 +1122,9 @@ func (*pruneColVisitor) projectSelectedStruct(projected Type) *StructType {
 		return ty
 	}
 
-	panic("expected a struct")
+	p.err = fmt.Errorf("%w: expected a struct type, got %T", ErrInvalidSchema, projected)
+
+	return nil
 }
 
 func (*pruneColVisitor) projectList(listType *ListType, elementResult Type) *ListType {
@@ -1476,7 +1532,7 @@ func makeCompatibleName(n string) string {
 
 func validAvroName(n string) bool {
 	if len(n) == 0 {
-		panic("cannot validate empty name")
+		return false
 	}
 
 	if !unicode.IsLetter(rune(n[0])) && n[0] != '_' {
@@ -1501,6 +1557,10 @@ func sanitize(r rune) string {
 }
 
 func sanitizeName(n string) string {
+	if len(n) == 0 {
+		return ""
+	}
+
 	var b strings.Builder
 	b.Grow(len(n))
 
@@ -1523,23 +1583,42 @@ func sanitizeName(n string) string {
 }
 
 func SanitizeColumnNames(sc *Schema) (*Schema, error) {
-	result, err := Visit(sc, sanitizeColumnNameVisitor{})
+	visitor := &sanitizeColumnNameVisitor{}
+
+	result, err := Visit(sc, visitor)
 	if err != nil {
 		return nil, err
+	}
+
+	if visitor.err != nil {
+		return nil, visitor.err
 	}
 
 	return NewSchemaWithIdentifiers(sc.ID, sc.IdentifierFieldIDs,
 		result.Type.(*StructType).FieldList...), nil
 }
 
-type sanitizeColumnNameVisitor struct{}
+type sanitizeColumnNameVisitor struct {
+	err error
+}
 
 func (sanitizeColumnNameVisitor) Schema(_ *Schema, structResult NestedField) NestedField {
 	return structResult
 }
 
-func (sanitizeColumnNameVisitor) Field(field NestedField, fieldResult NestedField) NestedField {
+func (s *sanitizeColumnNameVisitor) Field(field NestedField, fieldResult NestedField) NestedField {
+	if s.err != nil {
+		return field
+	}
+
 	field.Type = fieldResult.Type
+
+	if field.Name == "" {
+		s.err = fmt.Errorf("%w: field name cannot be empty", ErrInvalidSchema)
+
+		return field
+	}
+
 	field.Name = makeCompatibleName(field.Name)
 
 	return field

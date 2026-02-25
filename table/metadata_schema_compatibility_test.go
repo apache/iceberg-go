@@ -47,6 +47,6 @@ func TestNewMetadata_DuplicateValues(t *testing.T) {
 	)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid schema: error encountered during schema visitor")
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 	assert.Contains(t, err.Error(), "multiple fields for name foo")
 }

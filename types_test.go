@@ -393,3 +393,33 @@ func TestUnknownTypeEquality(t *testing.T) {
 	assert.Equal(t, "unknown", unknown1.String())
 	assert.Equal(t, "unknown", unknown2.String())
 }
+
+func TestNestedFieldUnmarshalMissingID(t *testing.T) {
+	// "id" key is absent — json.Unmarshal silently leaves ID as zero
+	data := []byte(`{"name":"col","type":"string","required":false}`)
+
+	var f iceberg.NestedField
+	err := json.Unmarshal(data, &f)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "missing required 'id'")
+}
+
+func TestNestedFieldUnmarshalWrongIDKey(t *testing.T) {
+	// "field_id" instead of "id" — silently ignored by json.Unmarshal
+	data := []byte(`{"field_id":1,"name":"col","type":"string","required":false}`)
+
+	var f iceberg.NestedField
+	err := json.Unmarshal(data, &f)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "missing required 'id'")
+}
+
+func TestNestedFieldUnmarshalMissingName(t *testing.T) {
+	// "name" key is absent — json.Unmarshal silently leaves Name as ""
+	data := []byte(`{"id":1,"type":"string","required":false}`)
+
+	var f iceberg.NestedField
+	err := json.Unmarshal(data, &f)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "missing required 'name'")
+}
