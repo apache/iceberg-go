@@ -64,7 +64,7 @@ func TestPositionDeletePartitionedFanoutWriterProcessBatch(t *testing.T) {
 		},
 		{
 			name:                "success",
-			pathToPartitionData: map[string]map[int]any{"file://namespace/age_bucket=1/": {iceberg.PartitionDataIDStart: 1}},
+			pathToPartitionData: map[string]map[int]any{"file://namespace/age_bucket=1/test.parquet": {iceberg.PartitionDataIDStart: 1}},
 			input:               mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema, `[{"file_path": "file://namespace/age_bucket=1/test.parquet", "pos": 100}]`),
 			expectedDataFile:    &mockDataFile{columnSizes: map[int]int64{2147483545: 88, 2147483546: 174}, format: iceberg.ParquetFile, partition: map[int]any{iceberg.PartitionDataIDStart: 1}, count: 1, specid: 0, contentType: iceberg.EntryContentPosDeletes},
 		},
@@ -74,7 +74,7 @@ func TestPositionDeletePartitionedFanoutWriterProcessBatch(t *testing.T) {
 		// file_path value.
 		{
 			name:                "batch with records having different file paths",
-			pathToPartitionData: map[string]map[int]any{"file://namespace/age_bucket=1/": {iceberg.PartitionDataIDStart: 1}},
+			pathToPartitionData: map[string]map[int]any{"file://namespace/age_bucket=1/test.parquet": {iceberg.PartitionDataIDStart: 1}},
 			input:               mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema, `[{"file_path": "file://namespace/age_bucket=1/test.parquet", "pos": 100}, {"file_path": "file://namespace/age_bucket=0/test.parquet", "pos": 10}]`),
 			expectedDataFile:    &mockDataFile{columnSizes: map[int]int64{2147483545: 96, 2147483546: 187}, format: iceberg.ParquetFile, partition: map[int]any{iceberg.PartitionDataIDStart: 1}, count: 2, specid: 0, contentType: iceberg.EntryContentPosDeletes},
 		},

@@ -24,7 +24,6 @@ import (
 	"errors"
 	"fmt"
 	"iter"
-	"path"
 	"runtime"
 	"slices"
 	"sync"
@@ -1291,8 +1290,7 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 
 	partitionDataPerFile := make(map[string]map[int]any, len(files))
 	for _, df := range files {
-		partitionPath, _ := path.Split(df.FilePath())
-		partitionDataPerFile[partitionPath] = df.Partition()
+		partitionDataPerFile[df.FilePath()] = df.Partition()
 	}
 
 	posDeleteFiles := positionDeleteRecordsToDataFiles(ctx, t.tbl.Location(), t.meta, partitionDataPerFile, recordWritingArgs{

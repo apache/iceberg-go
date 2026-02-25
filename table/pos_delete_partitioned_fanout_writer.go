@@ -21,7 +21,8 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"path"
+	"maps"
+	"slices"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -106,14 +107,14 @@ func (p *positionDeletePartitionedFanoutWriter) processBatch(ctx context.Context
 	}
 
 	columns := batch.Columns()
-	filePath := columns[0].(*array.String)
-	partitionPath, _ := path.Split(filePath.Value(0))
-
-	partitionValues, ok := p.partitionDataByFilePath[partitionPath]
+	filePathArray := columns[0].(*array.String)
+	filePath := filePathArray.ValueStr(0)
+	partitionValues, ok := p.partitionDataByFilePath[filePath]
 	if !ok {
-		return fmt.Errorf("unexpected missing partition values for path %s", partitionPath)
+		return fmt.Errorf("unexpected missing partition values for path %s", filePath)
 	}
 
+	partitionPath := p.partitionPath(slices.Collect(maps.Values(partitionValues)))
 	rollingDataWriter, err := p.writerFactory.getOrCreateRollingDataWriter(ctx, p.concurrentDataFileWriter, partitionPath, partitionValues, dataFilesChannel)
 	if err != nil {
 		return err
@@ -125,6 +126,10 @@ func (p *positionDeletePartitionedFanoutWriter) processBatch(ctx context.Context
 	}
 
 	return nil
+}
+
+func (p *positionDeletePartitionedFanoutWriter) partitionPath(data partitionRecord) string {
+	return p.partitionSpec.PartitionToPath(data, p.schema)
 }
 
 func (p *positionDeletePartitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, outputDataFilesCh chan iceberg.DataFile) iter.Seq2[iceberg.DataFile, error] {
