@@ -668,6 +668,11 @@ func (sp *snapshotProducer) summary(props iceberg.Properties) (Summary, error) {
 			return Summary{}, err
 		}
 	}
+	for _, df := range sp.positionDeleteFiles {
+		if err = ssc.addFile(df, currentSchema, *partitionSpec); err != nil {
+			return Summary{}, err
+		}
+	}
 
 	if len(sp.deletedFiles) > 0 {
 		specs := sp.txn.meta.specs

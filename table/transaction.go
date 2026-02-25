@@ -1011,7 +1011,12 @@ func (t *Transaction) Delete(ctx context.Context, filter iceberg.BooleanExpressi
 	}
 
 	var updater *snapshotProducer
-	writeDeleteMode := t.meta.props.Get(WriteDeleteModeKey, WriteDeleteModeDefault)
+	writeDeleteMode := WriteDeleteModeDefault
+	// Only copy on write is supported on v1 so we ignore any override to the write delete mode unless the version is
+	// 2 and up
+	if t.meta.formatVersion > 1 {
+		writeDeleteMode = t.meta.props.Get(WriteDeleteModeKey, WriteDeleteModeDefault)
+	}
 	switch writeDeleteMode {
 	case WriteModeCopyOnWrite:
 		updater, err = t.performCopyOnWriteDeletion(ctx, OpDelete, snapshotProps, filter, deleteOp.caseSensitive, deleteOp.concurrency)

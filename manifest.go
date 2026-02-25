@@ -1431,7 +1431,7 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 				// if the sequence number is being assigned here,
 				// then the manifest must be created by the current
 				// operation.
-				// to validate this, check the snapshot id matches the current commmit
+				// to validate this, check the snapshot id matches the current commit
 				if m.commitSnapshotID != wrapped.AddedSnapshotID {
 					return fmt.Errorf("found unassigned sequence number for a manifest from snapshot %d != %d",
 						m.commitSnapshotID, wrapped.AddedSnapshotID)
