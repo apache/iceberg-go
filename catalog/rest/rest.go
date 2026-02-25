@@ -1266,6 +1266,37 @@ type loadViewResponse struct {
 	Config      iceberg.Properties `json:"config"`
 }
 
+// RegisterView registers an existing view in the catalog using its metadata file location.
+// The metadata file must already be accessible to the catalog. This is the view equivalent
+// of RegisterTable, using the REST endpoint POST /namespaces/{ns}/register-view defined in
+// the Iceberg REST catalog specification.
+func (r *Catalog) RegisterView(ctx context.Context, identifier table.Identifier, metadataLoc string) (*view.View, error) {
+	ns, v, err := splitIdentForPath(identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	type payload struct {
+		Name        string `json:"name"`
+		MetadataLoc string `json:"metadata-location"`
+	}
+
+	rsp, err := doPost[payload, loadViewResponse](ctx, r.baseURI, []string{"namespaces", ns, "register-view"},
+		payload{Name: v, MetadataLoc: metadataLoc}, r.cl, map[int]error{
+			http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrViewAlreadyExists,
+		})
+	if err != nil {
+		return nil, err
+	}
+
+	metadata, err := view.ParseMetadataBytes(rsp.RawMetadata)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse view metadata: %w", err)
+	}
+
+	return view.New(identifier, metadata, rsp.MetadataLoc), nil
+}
+
 // LoadView loads a view from the catalog.
 func (r *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*view.View, error) {
 	ns, v, err := splitIdentForPath(identifier)
