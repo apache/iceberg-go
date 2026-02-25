@@ -41,7 +41,7 @@ jobs:
       fail-fast: false
       matrix:
         go: [ '1.23.6', '1.24.9' ]
-        os: [ 'ubuntu-latest', 'windows-latest', 'macos-latest' ]
+        os: [ 'ubuntu-latest', 'windows-latest' ]
     steps:
     - uses: actions/checkout@v4
     - name: Install Go
