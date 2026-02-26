@@ -244,6 +244,14 @@ func (n *NestedField) UnmarshalJSON(b []byte) error {
 
 	n.Type = aux.Type.Type
 
+	if n.ID == 0 {
+		return fmt.Errorf("%w: field is missing required 'id' key in JSON", ErrInvalidSchema)
+	}
+
+	if n.Name == "" {
+		return fmt.Errorf("%w: field is missing required 'name' key in JSON", ErrInvalidSchema)
+	}
+
 	return nil
 }
 

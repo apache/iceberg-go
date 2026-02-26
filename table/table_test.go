@@ -507,7 +507,7 @@ func (t *TableWritingTestSuite) TestAddFilesFailsSchemaMismatch() {
 	tx := tbl.NewTransaction()
 	err = tx.AddFiles(t.ctx, files, nil, false)
 	t.Error(err)
-	t.EqualError(err, `error encountered during schema visitor: mismatch in fields:
+	t.EqualError(err, `invalid schema: mismatch in fields:
    | Table Field              | Requested Field         
 ✅ | 1: foo: optional boolean | 1: foo: optional boolean
 ✅ | 2: bar: optional string  | 2: bar: optional string 

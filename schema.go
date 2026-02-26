@@ -264,7 +264,10 @@ func (s *Schema) FindColumnName(fieldID int) (string, bool) {
 // Note: This search is done in a case sensitive manner. To perform
 // a case insensitive search, use [*Schema.FindFieldByNameCaseInsensitive].
 func (s *Schema) FindFieldByName(name string) (NestedField, bool) {
-	idx, _ := s.lazyNameToID()
+	idx, err := s.lazyNameToID()
+	if err != nil {
+		return NestedField{}, false
+	}
 
 	id, ok := idx[name]
 	if !ok {
@@ -277,7 +280,10 @@ func (s *Schema) FindFieldByName(name string) (NestedField, bool) {
 // FindFieldByNameCaseInsensitive is like [*Schema.FindFieldByName],
 // but performs a case insensitive search.
 func (s *Schema) FindFieldByNameCaseInsensitive(name string) (NestedField, bool) {
-	idx, _ := s.lazyNameToIDLower()
+	idx, err := s.lazyNameToIDLower()
+	if err != nil {
+		return NestedField{}, false
+	}
 
 	id, ok := idx[strings.ToLower(name)]
 	if !ok {
@@ -384,7 +390,11 @@ var void = Void{}
 func (s *Schema) Select(caseSensitive bool, names ...string) (*Schema, error) {
 	ids := make(map[int]Void)
 	if caseSensitive {
-		nameMap, _ := s.lazyNameToID()
+		nameMap, err := s.lazyNameToID()
+		if err != nil {
+			return nil, err
+		}
+
 		for _, n := range names {
 			id, ok := nameMap[n]
 			if !ok {
@@ -393,7 +403,11 @@ func (s *Schema) Select(caseSensitive bool, names ...string) (*Schema, error) {
 			ids[id] = void
 		}
 	} else {
-		nameMap, _ := s.lazyNameToIDLower()
+		nameMap, err := s.lazyNameToIDLower()
+		if err != nil {
+			return nil, err
+		}
+
 		for _, n := range names {
 			id, ok := nameMap[strings.ToLower(n)]
 			if !ok {
@@ -508,7 +522,7 @@ func Visit[T any](sc *Schema, visitor SchemaVisitor[T]) (res T, err error) {
 		if r := recover(); r != nil {
 			switch e := r.(type) {
 			case string:
-				err = fmt.Errorf("error encountered during schema visitor: %s", e)
+				err = fmt.Errorf("%w: %s", ErrInvalidSchema, e)
 			case error:
 				err = fmt.Errorf("error encountered during schema visitor: %w", e)
 			}
@@ -667,7 +681,7 @@ func PreOrderVisit[T any](sc *Schema, visitor PreOrderSchemaVisitor[T]) (res T, 
 		if r := recover(); r != nil {
 			switch e := r.(type) {
 			case string:
-				err = fmt.Errorf("error encountered during schema visitor: %s", e)
+				err = fmt.Errorf("%w: %s", ErrInvalidSchema, e)
 			case error:
 				err = fmt.Errorf("error encountered during schema visitor: %w", e)
 			}
@@ -1068,7 +1082,7 @@ func (*pruneColVisitor) projectSelectedStruct(projected Type) *StructType {
 		return ty
 	}
 
-	panic("expected a struct")
+	panic(fmt.Errorf("%w: expected a struct type, got %T", ErrInvalidSchema, projected))
 }
 
 func (*pruneColVisitor) projectList(listType *ListType, elementResult Type) *ListType {
@@ -1351,7 +1365,7 @@ func VisitSchemaWithPartner[T, P any](sc *Schema, partner P, visitor SchemaWithP
 		if r := recover(); r != nil {
 			switch e := r.(type) {
 			case string:
-				err = fmt.Errorf("error encountered during schema visitor: %s", e)
+				err = fmt.Errorf("%w: %s", ErrInvalidSchema, e)
 			case error:
 				err = fmt.Errorf("error encountered during schema visitor: %w", e)
 			}
@@ -1476,7 +1490,7 @@ func makeCompatibleName(n string) string {
 
 func validAvroName(n string) bool {
 	if len(n) == 0 {
-		panic("cannot validate empty name")
+		return false
 	}
 
 	if !unicode.IsLetter(rune(n[0])) && n[0] != '_' {
@@ -1501,6 +1515,10 @@ func sanitize(r rune) string {
 }
 
 func sanitizeName(n string) string {
+	if len(n) == 0 {
+		return ""
+	}
+
 	var b strings.Builder
 	b.Grow(len(n))
 
@@ -1540,6 +1558,11 @@ func (sanitizeColumnNameVisitor) Schema(_ *Schema, structResult NestedField) Nes
 
 func (sanitizeColumnNameVisitor) Field(field NestedField, fieldResult NestedField) NestedField {
 	field.Type = fieldResult.Type
+
+	if field.Name == "" {
+		panic(fmt.Errorf("%w: field name cannot be empty", ErrInvalidSchema))
+	}
+
 	field.Name = makeCompatibleName(field.Name)
 
 	return field
