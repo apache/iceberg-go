@@ -759,23 +759,37 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 // creation by committing the table with an assert-create requirement.
 // Changes are extracted from the phase 1 response metadata (which may
 // have been normalized by the server), matching the Java implementation's
-// createChanges approach. User-provided staged updates are prepended.
+// createChanges approach. User-provided staged updates are appended
+// after server-derived changes so that user intent takes precedence.
+//
+// If phase 2 fails, the server is left with an orphaned staged table
+// (no automatic rollback).
 func (r *Catalog) commitStagedCreate(ctx context.Context, identifier table.Identifier, meta table.Metadata, stagedUpdates []table.Update) (table.Metadata, string, error) {
-	spec := meta.PartitionSpec()
-	order := meta.SortOrder()
-
 	// Build updates from server-returned metadata, mirroring Java's
 	// RESTSessionCatalog.createChanges.
-	updates := append(stagedUpdates,
+	updates := make([]table.Update, 0, len(stagedUpdates)+10)
+	updates = append(updates,
 		table.NewAssignUUIDUpdate(meta.TableUUID()),
 		table.NewUpgradeFormatVersionUpdate(meta.Version()),
 		table.NewAddSchemaUpdate(meta.CurrentSchema()),
 		table.NewSetCurrentSchemaUpdate(-1),
-		table.NewAddPartitionSpecUpdate(&spec, true),
-		table.NewSetDefaultSpecUpdate(-1),
-		table.NewAddSortOrderUpdate(&order),
-		table.NewSetDefaultSortOrderUpdate(-1),
 	)
+
+	spec := meta.PartitionSpec()
+	if !spec.IsUnpartitioned() {
+		updates = append(updates, table.NewAddPartitionSpecUpdate(&spec, true))
+	} else {
+		updates = append(updates, table.NewAddPartitionSpecUpdate(iceberg.UnpartitionedSpec, true))
+	}
+	updates = append(updates, table.NewSetDefaultSpecUpdate(-1))
+
+	order := meta.SortOrder()
+	if !order.IsUnsorted() {
+		updates = append(updates, table.NewAddSortOrderUpdate(&order))
+	} else {
+		updates = append(updates, table.NewAddSortOrderUpdate(&table.UnsortedSortOrder))
+	}
+	updates = append(updates, table.NewSetDefaultSortOrderUpdate(-1))
 
 	if loc := meta.Location(); loc != "" {
 		updates = append(updates, table.NewSetLocationUpdate(loc))
@@ -783,6 +797,9 @@ func (r *Catalog) commitStagedCreate(ctx context.Context, identifier table.Ident
 	if props := meta.Properties(); len(props) > 0 {
 		updates = append(updates, table.NewSetPropertiesUpdate(props))
 	}
+
+	// Append user-provided staged updates at the end.
+	updates = append(updates, stagedUpdates...)
 
 	requirements := []table.Requirement{table.AssertCreate()}
 

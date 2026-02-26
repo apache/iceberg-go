@@ -2548,10 +2548,14 @@ func (r *RestTLSCatalogSuite) TestCatalogWithCustomTransportAndTlsConfig() {
 
 // tableMetadataV1JSON returns a minimal valid V1 table metadata JSON
 // suitable for use in test server responses.
-func tableMetadataV1JSON() string {
-	return `{
+func tableMetadataV1JSON(tableUUID string) string {
+	if tableUUID == "" {
+		tableUUID = "bf289591-dcc0-4234-ad4f-5c3eed811a29"
+	}
+
+	return fmt.Sprintf(`{
 		"format-version": 1,
-		"table-uuid": "bf289591-dcc0-4234-ad4f-5c3eed811a29",
+		"table-uuid": "%s",
 		"location": "s3://warehouse/db/tbl",
 		"last-updated-ms": 1657810967051,
 		"last-column-id": 3,
@@ -2585,7 +2589,7 @@ func tableMetadataV1JSON() string {
 		"snapshots": [],
 		"snapshot-log": [],
 		"metadata-log": []
-	}`
+	}`, tableUUID)
 }
 
 func (r *RestCatalogSuite) TestCreateTableStaged() {
@@ -2613,11 +2617,13 @@ func (r *RestCatalogSuite) TestCreateTableStaged() {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{
 			"metadata-location": "s3://warehouse/db/tbl/metadata/staged.json",
-			"metadata": ` + tableMetadataV1JSON() + `
+			"metadata": ` + tableMetadataV1JSON("") + `
 		}`))
 	})
 
-	// Phase 2: commit POST
+	// Phase 2: commit POST — return metadata with the user's UUID
+	// to simulate the server applying the assign-uuid update.
+	testUUID := uuid.MustParse("12345678-1234-1234-1234-123456789abc")
 	r.mux.HandleFunc("/v1/namespaces/db/tables/test_table", func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -2630,11 +2636,9 @@ func (r *RestCatalogSuite) TestCreateTableStaged() {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{
 			"metadata-location": "s3://warehouse/db/tbl/metadata/v1.json",
-			"metadata": ` + tableMetadataV1JSON() + `
+			"metadata": ` + tableMetadataV1JSON(testUUID.String()) + `
 		}`))
 	})
-
-	testUUID := uuid.MustParse("12345678-1234-1234-1234-123456789abc")
 
 	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
 		rest.WithCredential(TestCreds))
@@ -2675,20 +2679,16 @@ func (r *RestCatalogSuite) TestCreateTableStaged() {
 	req0 := requirements[0].(map[string]any)
 	r.Equal("assert-create", req0["type"])
 
-	// Verify commit has the assign-uuid update plus standard updates
+	// Verify commit updates: server-derived first, user staged last.
 	updates, ok := lastCommitBody["updates"].([]any)
 	r.Require().True(ok, "commit should have updates")
 
-	// First update should be assign-uuid from our staged update
-	upd0 := updates[0].(map[string]any)
-	r.Equal("assign-uuid", upd0["action"])
-	r.Equal(testUUID.String(), upd0["uuid"])
-
-	// Remaining updates extracted from phase 1 metadata
 	actionNames := make([]string, len(updates))
 	for i, u := range updates {
 		actionNames[i] = u.(map[string]any)["action"].(string)
 	}
+
+	// Server-derived updates should come first
 	r.Contains(actionNames, "upgrade-format-version")
 	r.Contains(actionNames, "add-schema")
 	r.Contains(actionNames, "set-current-schema")
@@ -2697,6 +2697,25 @@ func (r *RestCatalogSuite) TestCreateTableStaged() {
 	r.Contains(actionNames, "add-sort-order")
 	r.Contains(actionNames, "set-default-sort-order")
 	r.Contains(actionNames, "set-location")
+
+	// User staged update (assign-uuid with our UUID) should be last,
+	// so it takes precedence over the server-derived assign-uuid.
+	lastUpdate := updates[len(updates)-1].(map[string]any)
+	r.Equal("assign-uuid", lastUpdate["action"])
+	r.Equal(testUUID.String(), lastUpdate["uuid"])
+
+	// Verify exactly two assign-uuid entries (server + user) and
+	// user's comes last so it wins.
+	var assignUUIDCount int
+	for _, name := range actionNames {
+		if name == "assign-uuid" {
+			assignUUIDCount++
+		}
+	}
+	r.Equal(2, assignUUIDCount, "should have server and user assign-uuid")
+
+	// Verify the returned table has the user's UUID, not the server's.
+	r.Equal(testUUID, tbl.Metadata().TableUUID())
 }
 
 func (r *RestCatalogSuite) TestCreateTableNotStaged() {
@@ -2714,7 +2733,7 @@ func (r *RestCatalogSuite) TestCreateTableNotStaged() {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{
 			"metadata-location": "s3://warehouse/db/tbl/metadata/v1.json",
-			"metadata": ` + tableMetadataV1JSON() + `
+			"metadata": ` + tableMetadataV1JSON("") + `
 		}`))
 	})
 
