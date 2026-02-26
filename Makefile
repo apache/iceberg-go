@@ -26,7 +26,7 @@ lint:
 	golangci-lint run --timeout=10m
 
 lint-install:
-	go install github.com/golangci/golangci-lint/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 
 integration-setup:
 	docker compose -f internal/recipe/docker-compose.yml up -d
