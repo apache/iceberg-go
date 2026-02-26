@@ -463,7 +463,10 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 				panic(err)
 			}
 
-			fieldID := colMapping[colChunk.PathInSchema().String()]
+			fieldID, ok := colMapping[colChunk.PathInSchema().String()]
+			if !ok {
+				continue
+			}
 			statsCol := statsCols[fieldID]
 			if statsCol.Mode.Typ == MetricModeNone {
 				continue
