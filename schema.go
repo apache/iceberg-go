@@ -524,7 +524,7 @@ func Visit[T any](sc *Schema, visitor SchemaVisitor[T]) (res T, err error) {
 			case string:
 				err = fmt.Errorf("%w: %s", ErrInvalidSchema, e)
 			case error:
-				err = e
+				err = fmt.Errorf("error encountered during schema visitor: %w", e)
 			}
 		}
 	}()
@@ -913,12 +913,10 @@ func (i *indexByName) AfterField(field NestedField) {
 // PruneColumns visits a schema pruning any columns which do not exist in the
 // provided selected set. Parent fields of a selected child will be retained.
 func PruneColumns(schema *Schema, selected map[int]Void, selectFullTypes bool) (*Schema, error) {
-	visitor := &pruneColVisitor{
+	result, err := Visit(schema, &pruneColVisitor{
 		selected:  selected,
 		fullTypes: selectFullTypes,
-	}
-
-	result, err := Visit(schema, visitor)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1369,7 +1367,7 @@ func VisitSchemaWithPartner[T, P any](sc *Schema, partner P, visitor SchemaWithP
 			case string:
 				err = fmt.Errorf("%w: %s", ErrInvalidSchema, e)
 			case error:
-				err = e
+				err = fmt.Errorf("error encountered during schema visitor: %w", e)
 			}
 		}
 	}()
