@@ -395,7 +395,7 @@ func TestUnknownTypeEquality(t *testing.T) {
 }
 
 func TestNestedFieldUnmarshalMissingID(t *testing.T) {
-	// "id" key is absent — json.Unmarshal silently leaves ID as zero
+	// "id" key is absent — json.Unmarshal should error instead of silently leaving the ID zero
 	data := []byte(`{"name":"col","type":"string","required":false}`)
 
 	var f iceberg.NestedField
@@ -405,7 +405,7 @@ func TestNestedFieldUnmarshalMissingID(t *testing.T) {
 }
 
 func TestNestedFieldUnmarshalWrongIDKey(t *testing.T) {
-	// "field_id" instead of "id" — silently ignored by json.Unmarshal
+	// "field_id" instead of "id" — json.Unmarshal should error instead of silently ignore
 	data := []byte(`{"field_id":1,"name":"col","type":"string","required":false}`)
 
 	var f iceberg.NestedField
@@ -415,7 +415,7 @@ func TestNestedFieldUnmarshalWrongIDKey(t *testing.T) {
 }
 
 func TestNestedFieldUnmarshalMissingName(t *testing.T) {
-	// "name" key is absent — json.Unmarshal silently leaves Name as ""
+	// "name" key is absent — json.Unmarshal should error instead of silently leave as ""
 	data := []byte(`{"id":1,"type":"string","required":false}`)
 
 	var f iceberg.NestedField
