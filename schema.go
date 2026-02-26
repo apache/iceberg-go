@@ -683,7 +683,7 @@ func PreOrderVisit[T any](sc *Schema, visitor PreOrderSchemaVisitor[T]) (res T, 
 			case string:
 				err = fmt.Errorf("%w: %s", ErrInvalidSchema, e)
 			case error:
-				err = e
+				err = fmt.Errorf("error encountered during schema visitor: %w", e)
 			}
 		}
 	}()
