@@ -522,9 +522,9 @@ func Visit[T any](sc *Schema, visitor SchemaVisitor[T]) (res T, err error) {
 		if r := recover(); r != nil {
 			switch e := r.(type) {
 			case string:
-				err = fmt.Errorf("error encountered during schema visitor: %s", e)
+				err = fmt.Errorf("%w: %s", ErrInvalidSchema, e)
 			case error:
-				err = fmt.Errorf("error encountered during schema visitor: %w", e)
+				err = e
 			}
 		}
 	}()
@@ -681,9 +681,9 @@ func PreOrderVisit[T any](sc *Schema, visitor PreOrderSchemaVisitor[T]) (res T, 
 		if r := recover(); r != nil {
 			switch e := r.(type) {
 			case string:
-				err = fmt.Errorf("error encountered during schema visitor: %s", e)
+				err = fmt.Errorf("%w: %s", ErrInvalidSchema, e)
 			case error:
-				err = fmt.Errorf("error encountered during schema visitor: %w", e)
+				err = e
 			}
 		}
 	}()
@@ -794,10 +794,6 @@ func IndexByName(schema *Schema) (map[string]int, error) {
 			return nil, err
 		}
 
-		if indexer.err != nil {
-			return nil, indexer.err
-		}
-
 		return indexer.ByName(), nil
 	}
 
@@ -817,10 +813,6 @@ func IndexNameByID(schema *Schema) (map[int]string, error) {
 		return nil, err
 	}
 
-	if indexer.err != nil {
-		return nil, indexer.err
-	}
-
 	return indexer.ByID(), nil
 }
 
@@ -830,7 +822,6 @@ type indexByName struct {
 	combinedIndex   map[string]int
 	fieldNames      []string
 	shortFieldNames []string
-	err             error
 }
 
 func (i *indexByName) ByID() map[int]string {
@@ -851,20 +842,14 @@ func (i *indexByName) ByName() map[string]int {
 
 func (i *indexByName) Primitive(PrimitiveType) map[string]int { return i.index }
 func (i *indexByName) addField(name string, fieldID int) {
-	if i.err != nil {
-		return
-	}
-
 	fullName := name
 	if len(i.fieldNames) > 0 {
 		fullName = strings.Join(i.fieldNames, ".") + "." + name
 	}
 
 	if _, ok := i.index[fullName]; ok {
-		i.err = fmt.Errorf("%w: multiple fields for name %s: %d and %d",
-			ErrInvalidSchema, fullName, i.index[fullName], fieldID)
-
-		return
+		panic(fmt.Errorf("%w: multiple fields for name %s: %d and %d",
+			ErrInvalidSchema, fullName, i.index[fullName], fieldID))
 	}
 
 	i.index[fullName] = fieldID
@@ -938,10 +923,6 @@ func PruneColumns(schema *Schema, selected map[int]Void, selectFullTypes bool) (
 		return nil, err
 	}
 
-	if visitor.err != nil {
-		return nil, visitor.err
-	}
-
 	n, ok := result.(NestedType)
 	if !ok {
 		n = &StructType{}
@@ -964,7 +945,6 @@ func PruneColumns(schema *Schema, selected map[int]Void, selectFullTypes bool) (
 type pruneColVisitor struct {
 	selected  map[int]Void
 	fullTypes bool
-	err       error
 }
 
 func (p *pruneColVisitor) Schema(_ *Schema, structResult Type) Type {
@@ -1005,10 +985,6 @@ func (p *pruneColVisitor) Struct(st StructType, fieldResults []Type) Type {
 }
 
 func (p *pruneColVisitor) Field(field NestedField, fieldResult Type) Type {
-	if p.err != nil {
-		return nil
-	}
-
 	_, ok := p.selected[field.ID]
 	if !ok {
 		if fieldResult != nil {
@@ -1028,20 +1004,14 @@ func (p *pruneColVisitor) Field(field NestedField, fieldResult Type) Type {
 
 	typ, ok := field.Type.(PrimitiveType)
 	if !ok {
-		p.err = fmt.Errorf("%w: cannot explicitly project List or Map types, %d:%s of type %s was selected",
-			ErrInvalidSchema, field.ID, field.Name, field.Type)
-
-		return nil
+		panic(fmt.Errorf("%w: cannot explicitly project List or Map types, %d:%s of type %s was selected",
+			ErrInvalidSchema, field.ID, field.Name, field.Type))
 	}
 
 	return typ
 }
 
 func (p *pruneColVisitor) List(list ListType, elemResult Type) Type {
-	if p.err != nil {
-		return nil
-	}
-
 	_, ok := p.selected[list.ElementID]
 	if !ok {
 		if elemResult != nil {
@@ -1063,20 +1033,14 @@ func (p *pruneColVisitor) List(list ListType, elemResult Type) Type {
 	}
 
 	if _, ok = list.Element.(PrimitiveType); !ok {
-		p.err = fmt.Errorf("%w: cannot explicitly project List or Map types, %d of type %s was selected",
-			ErrInvalidSchema, list.ElementID, list.Element)
-
-		return nil
+		panic(fmt.Errorf("%w: cannot explicitly project List or Map types, %d of type %s was selected",
+			ErrInvalidSchema, list.ElementID, list.Element))
 	}
 
 	return &list
 }
 
 func (p *pruneColVisitor) Map(mapType MapType, keyResult, valueResult Type) Type {
-	if p.err != nil {
-		return nil
-	}
-
 	_, ok := p.selected[mapType.ValueID]
 	if !ok {
 		if valueResult != nil {
@@ -1102,10 +1066,8 @@ func (p *pruneColVisitor) Map(mapType MapType, keyResult, valueResult Type) Type
 	}
 
 	if _, ok = mapType.ValueType.(PrimitiveType); !ok {
-		p.err = fmt.Errorf("%w: cannot explicitly project List or Map types, Map value %d of type %s was selected",
-			ErrInvalidSchema, mapType.ValueID, mapType.ValueType)
-
-		return nil
+		panic(fmt.Errorf("%w: cannot explicitly project List or Map types, Map value %d of type %s was selected",
+			ErrInvalidSchema, mapType.ValueID, mapType.ValueType))
 	}
 
 	return &mapType
@@ -1113,7 +1075,7 @@ func (p *pruneColVisitor) Map(mapType MapType, keyResult, valueResult Type) Type
 
 func (p *pruneColVisitor) Primitive(_ PrimitiveType) Type { return nil }
 
-func (p *pruneColVisitor) projectSelectedStruct(projected Type) *StructType {
+func (*pruneColVisitor) projectSelectedStruct(projected Type) *StructType {
 	if projected == nil {
 		return &StructType{}
 	}
@@ -1122,9 +1084,7 @@ func (p *pruneColVisitor) projectSelectedStruct(projected Type) *StructType {
 		return ty
 	}
 
-	p.err = fmt.Errorf("%w: expected a struct type, got %T", ErrInvalidSchema, projected)
-
-	return nil
+	panic(fmt.Errorf("%w: expected a struct type, got %T", ErrInvalidSchema, projected))
 }
 
 func (*pruneColVisitor) projectList(listType *ListType, elementResult Type) *ListType {
@@ -1407,9 +1367,9 @@ func VisitSchemaWithPartner[T, P any](sc *Schema, partner P, visitor SchemaWithP
 		if r := recover(); r != nil {
 			switch e := r.(type) {
 			case string:
-				err = fmt.Errorf("error encountered during schema visitor: %s", e)
+				err = fmt.Errorf("%w: %s", ErrInvalidSchema, e)
 			case error:
-				err = fmt.Errorf("error encountered during schema visitor: %w", e)
+				err = e
 			}
 		}
 	}()
@@ -1583,40 +1543,26 @@ func sanitizeName(n string) string {
 }
 
 func SanitizeColumnNames(sc *Schema) (*Schema, error) {
-	visitor := &sanitizeColumnNameVisitor{}
-
-	result, err := Visit(sc, visitor)
+	result, err := Visit(sc, sanitizeColumnNameVisitor{})
 	if err != nil {
 		return nil, err
-	}
-
-	if visitor.err != nil {
-		return nil, visitor.err
 	}
 
 	return NewSchemaWithIdentifiers(sc.ID, sc.IdentifierFieldIDs,
 		result.Type.(*StructType).FieldList...), nil
 }
 
-type sanitizeColumnNameVisitor struct {
-	err error
-}
+type sanitizeColumnNameVisitor struct{}
 
 func (sanitizeColumnNameVisitor) Schema(_ *Schema, structResult NestedField) NestedField {
 	return structResult
 }
 
-func (s *sanitizeColumnNameVisitor) Field(field NestedField, fieldResult NestedField) NestedField {
-	if s.err != nil {
-		return field
-	}
-
+func (sanitizeColumnNameVisitor) Field(field NestedField, fieldResult NestedField) NestedField {
 	field.Type = fieldResult.Type
 
 	if field.Name == "" {
-		s.err = fmt.Errorf("%w: field name cannot be empty", ErrInvalidSchema)
-
-		return field
+		panic(fmt.Errorf("%w: field name cannot be empty", ErrInvalidSchema))
 	}
 
 	field.Name = makeCompatibleName(field.Name)

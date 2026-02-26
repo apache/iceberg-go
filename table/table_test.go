@@ -507,13 +507,7 @@ func (t *TableWritingTestSuite) TestAddFilesFailsSchemaMismatch() {
 	tx := tbl.NewTransaction()
 	err = tx.AddFiles(t.ctx, files, nil, false)
 	t.Error(err)
-	t.EqualError(err, `error encountered during schema visitor: mismatch in fields:
-   | Table Field              | Requested Field         
-✅ | 1: foo: optional boolean | 1: foo: optional boolean
-✅ | 2: bar: optional string  | 2: bar: optional string 
-❌ | 3: baz: optional int     | 3: baz: optional string 
-✅ | 4: qux: optional date    | 4: qux: optional date   
-`)
+	t.EqualError(err, "invalid schema: mismatch in fields:\n   | Table Field              | Requested Field         \n✅ | 1: foo: optional boolean | 1: foo: optional boolean\n✅ | 2: bar: optional string  | 2: bar: optional string \n❌ | 3: baz: optional int     | 3: baz: optional string \n✅ | 4: qux: optional date    | 4: qux: optional date   \n")
 }
 
 func (t *TableWritingTestSuite) TestAddFilesPartitionedTable() {
