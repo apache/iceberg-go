@@ -47,8 +47,6 @@ const (
 	// this key to identify the field id of the source Parquet field.
 	// We use this when converting to Iceberg to provide field IDs
 	ArrowParquetFieldIDKey = "PARQUET:field_id"
-
-	defaultBinPackLookback = 20
 )
 
 // ArrowSchemaVisitor is an interface that can be implemented and used to
@@ -1266,29 +1264,6 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 	}
 }
 
-func recordNBytes(rec arrow.RecordBatch) (total int64) {
-	for _, c := range rec.Columns() {
-		total += int64(c.Data().SizeInBytes())
-	}
-
-	return total
-}
-
-func binPackRecords(itr iter.Seq2[arrow.RecordBatch, error], recordLookback int, targetFileSize int64) iter.Seq[[]arrow.RecordBatch] {
-	return internal.PackingIterator(func(yield func(arrow.RecordBatch) bool) {
-		for rec, err := range itr {
-			if err != nil {
-				panic(err)
-			}
-
-			rec.Retain()
-			if !yield(rec) {
-				return
-			}
-		}
-	}, targetFileSize, recordLookback, recordNBytes, false)
-}
-
 type recordWritingArgs struct {
 	sc        *arrow.Schema
 	itr       iter.Seq2[arrow.RecordBatch, error]
@@ -1330,40 +1305,69 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 	if err != nil {
 		panic(err)
 	}
-	currentSpec, err := meta.CurrentSpec()
-	if err != nil || currentSpec == nil {
-		panic(fmt.Errorf("%w: cannot write files without a current spec", err))
+
+	factory, err := newWriterFactory(rootLocation, args, meta, taskSchema, targetFileSize)
+	if err != nil {
+		panic(err)
 	}
 
-	nextCount, stopCount := iter.Pull(args.counter)
-	if currentSpec.IsUnpartitioned() {
-		tasks := func(yield func(WriteTask) bool) {
-			defer stopCount()
+	if factory.currentSpec.IsUnpartitioned() {
+		return unpartitionedWrite(ctx, factory, args.itr)
+	}
 
-			fileCount := 0
-			for batch := range binPackRecords(args.itr, defaultBinPackLookback, targetFileSize) {
-				cnt, _ := nextCount()
-				fileCount++
-				t := WriteTask{
-					Uuid:        *args.writeUUID,
-					ID:          cnt,
-					PartitionID: iceberg.UnpartitionedSpec.ID(),
-					FileCount:   fileCount,
-					Schema:      taskSchema,
-					Batches:     batch,
-				}
-				if !yield(t) {
-					return
-				}
+	partitionWriter := newPartitionedFanoutWriter(factory.currentSpec, meta.CurrentSchema(), args.itr, factory)
+	workers := config.EnvConfig.MaxWorkers
+
+	return partitionWriter.Write(ctx, workers)
+}
+
+func unpartitionedWrite(ctx context.Context, factory *writerFactory, records iter.Seq2[arrow.RecordBatch, error]) iter.Seq2[iceberg.DataFile, error] {
+	outputCh := make(chan iceberg.DataFile, 1)
+	errCh := make(chan error, 1)
+
+	go func() {
+		defer close(outputCh)
+		defer factory.stopCount()
+
+		writer := factory.newRollingDataWriter(ctx, "", nil, outputCh)
+		for rec, err := range records {
+			if err != nil {
+				errCh <- err
+				close(errCh)
+				writer.close()
+				writer.wg.Wait()
+
+				return
+			}
+			if err := writer.Add(rec); err != nil {
+				errCh <- err
+				close(errCh)
+				writer.close()
+				writer.wg.Wait()
+
+				return
 			}
 		}
+		close(writer.recordCh)
+		writer.wg.Wait()
+		if err := <-writer.errorCh; err != nil {
+			errCh <- err
+		}
+		close(errCh)
+	}()
 
-		return writeFiles(ctx, rootLocation, args.fs, meta, nil, tasks)
-	} else {
-		rollingDataWriters := NewWriterFactory(rootLocation, args, meta, taskSchema, targetFileSize)
-		partitionWriter := newPartitionedFanoutWriter(*currentSpec, meta.CurrentSchema(), args.itr, &rollingDataWriters)
-		workers := config.EnvConfig.MaxWorkers
-
-		return partitionWriter.Write(ctx, workers)
+	return func(yield func(iceberg.DataFile, error) bool) {
+		defer func() {
+			for range outputCh {
+			}
+		}()
+		for df := range outputCh {
+			if !yield(df, nil) {
+				return
+			}
+		}
+		if err := <-errCh; err != nil {
+			yield(nil, err)
+		}
 	}
 }

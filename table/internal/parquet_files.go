@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"slices"
 	"strconv"
@@ -243,46 +244,105 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 		parquet.WithCompressionLevel(compressionLevel))
 }
 
-func (p parquetFormat) WriteDataFile(ctx context.Context, fs iceio.WriteFileIO, partitionValues map[int]any, info WriteFileInfo, batches []arrow.RecordBatch) (_ iceberg.DataFile, err error) {
-	fw, err := fs.Create(info.FileName)
-	if err != nil {
-		return nil, err
-	}
-
-	defer internal.CheckedClose(fw, &err)
-
-	cntWriter := internal.CountingWriter{W: fw}
-	mem := compute.GetAllocator(ctx)
-	writerProps := parquet.NewWriterProperties(info.WriteProps.([]parquet.WriterProperty)...)
-	arrProps := pqarrow.NewArrowWriterProperties(pqarrow.WithAllocator(mem), pqarrow.WithStoreSchema())
-
-	writer, err := pqarrow.NewFileWriter(batches[0].Schema(), &cntWriter, writerProps, arrProps)
+func (p parquetFormat) WriteDataFile(ctx context.Context, fs iceio.WriteFileIO, partitionValues map[int]any, info WriteFileInfo, batches []arrow.RecordBatch) (iceberg.DataFile, error) {
+	w, err := p.NewFileWriter(ctx, fs, partitionValues, info, batches[0].Schema())
 	if err != nil {
 		return nil, err
 	}
 
 	for _, batch := range batches {
-		if err := writer.WriteBuffered(batch); err != nil {
+		if err := w.Write(batch); err != nil {
+			w.Close()
+
 			return nil, err
 		}
 	}
 
-	if err := writer.Close(); err != nil {
-		return nil, err
-	}
+	return w.Close()
+}
 
-	filemeta, err := writer.FileMetadata()
+// ParquetFileWriter is an incremental single-file writer with open/write/close
+// lifecycle. It writes Arrow record batches to a Parquet file and tracks bytes
+// written for rolling file decisions.
+type ParquetFileWriter struct {
+	pqWriter   *pqarrow.FileWriter
+	counter    *internal.CountingWriter
+	fileCloser io.Closer
+	format     parquetFormat
+	info       WriteFileInfo
+	partition  map[int]any
+	colMapping map[string]int
+}
+
+// NewFileWriter creates a ParquetFileWriter that writes batches to a single
+// Parquet file. Call Write to append batches, BytesWritten to check actual
+// compressed file size, and Close to finalize and get the resulting DataFile.
+func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
+	partitionValues map[int]any, info WriteFileInfo, arrowSchema *arrow.Schema,
+) (FileWriter, error) {
+	fw, err := fs.Create(info.FileName)
 	if err != nil {
 		return nil, err
 	}
 
 	colMapping, err := p.PathToIDMapping(info.FileSchema)
 	if err != nil {
+		fw.Close()
+
 		return nil, err
 	}
 
-	return p.DataFileStatsFromMeta(filemeta, info.StatsCols, colMapping).
-		ToDataFile(info.FileSchema, info.Spec, info.FileName, iceberg.ParquetFile, cntWriter.Count, partitionValues), nil
+	counter := &internal.CountingWriter{W: fw}
+	mem := compute.GetAllocator(ctx)
+	writerProps := parquet.NewWriterProperties(info.WriteProps.([]parquet.WriterProperty)...)
+	arrProps := pqarrow.NewArrowWriterProperties(pqarrow.WithAllocator(mem), pqarrow.WithStoreSchema())
+
+	writer, err := pqarrow.NewFileWriter(arrowSchema, counter, writerProps, arrProps)
+	if err != nil {
+		fw.Close()
+
+		return nil, err
+	}
+
+	return &ParquetFileWriter{
+		pqWriter:   writer,
+		counter:    counter,
+		fileCloser: fw,
+		format:     p,
+		info:       info,
+		partition:  partitionValues,
+		colMapping: colMapping,
+	}, nil
+}
+
+// Write appends a record batch to the Parquet file.
+func (w *ParquetFileWriter) Write(batch arrow.RecordBatch) error {
+	return w.pqWriter.WriteBuffered(batch)
+}
+
+// BytesWritten returns flushed bytes plus compressed bytes buffered in the
+// current row group — matching the size estimate used by iceberg-java and
+// iceberg-rust to make rolling decisions.
+func (w *ParquetFileWriter) BytesWritten() int64 {
+	return w.counter.Count + w.pqWriter.RowGroupTotalCompressedBytes()
+}
+
+// Close finalizes the Parquet file and returns the resulting DataFile with
+// accurate file statistics and size.
+func (w *ParquetFileWriter) Close() (_ iceberg.DataFile, err error) {
+	defer internal.CheckedClose(w.fileCloser, &err)
+
+	if err = w.pqWriter.Close(); err != nil {
+		return nil, err
+	}
+
+	filemeta, err := w.pqWriter.FileMetadata()
+	if err != nil {
+		return nil, err
+	}
+
+	return w.format.DataFileStatsFromMeta(filemeta, w.info.StatsCols, w.colMapping).
+		ToDataFile(w.info.FileSchema, w.info.Spec, w.info.FileName, iceberg.ParquetFile, w.counter.Count, w.partition), nil
 }
 
 type decAsIntAgg[T int32 | int64] struct {

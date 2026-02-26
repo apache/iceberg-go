@@ -134,8 +134,10 @@ func (s *FanoutWriterTestSuite) testTransformPartition(transform iceberg.Transfo
 	taskSchema, err := ArrowSchemaToIceberg(args.sc, false, nameMapping)
 	s.Require().NoError(err)
 
-	rollingDataWriters := NewWriterFactory(loc, args, metaBuilder, icebergSchema, 1024*1024)
-	partitionWriter := newPartitionedFanoutWriter(spec, taskSchema, args.itr, &rollingDataWriters)
+	rollingDataWriters, err := newWriterFactory(loc, args, metaBuilder, icebergSchema, 1024*1024)
+	s.Require().NoError(err)
+
+	partitionWriter := newPartitionedFanoutWriter(spec, taskSchema, args.itr, rollingDataWriters)
 	workers := config.EnvConfig.MaxWorkers
 
 	dataFiles := partitionWriter.Write(s.ctx, workers)

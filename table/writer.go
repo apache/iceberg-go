@@ -18,26 +18,16 @@
 package table
 
 import (
-	"context"
 	"fmt"
-	"iter"
 
-	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/config"
-	"github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 )
 
 type WriteTask struct {
 	Uuid        uuid.UUID
 	ID          int
-	PartitionID int // PartitionID is the partition identifier used in data file naming.
-	FileCount   int // FileCount is a sequential counter for files written by this task.
-	Schema      *iceberg.Schema
-	Batches     []arrow.RecordBatch
-	SortOrderID int
+	PartitionID int
+	FileCount   int
 }
 
 func (w WriteTask) GenerateDataFileName(extension string) string {
@@ -45,93 +35,4 @@ func (w WriteTask) GenerateDataFileName(extension string) string {
 	// https://github.com/apache/iceberg/blob/03ed4ba9af4e47d32bdb22b7e3d033eb2a4b2c83/core/src/main/java/org/apache/iceberg/io/OutputFileFactory.java#L93
 	// Format: {partitionId:05d}-{taskId}-{operationId}-{fileCount:05d}.{extension}
 	return fmt.Sprintf("%05d-%d-%s-%05d.%s", w.PartitionID, w.ID, w.Uuid, w.FileCount, extension)
-}
-
-type writer struct {
-	loc        LocationProvider
-	fs         io.WriteFileIO
-	fileSchema *iceberg.Schema
-	format     internal.FileFormat
-	props      any
-	meta       *MetadataBuilder
-}
-
-func (w *writer) writeFile(ctx context.Context, partitionValues map[int]any, task WriteTask) (iceberg.DataFile, error) {
-	defer func() {
-		for _, b := range task.Batches {
-			b.Release()
-		}
-	}()
-
-	batches := make([]arrow.RecordBatch, len(task.Batches))
-	for i, b := range task.Batches {
-		rec, err := ToRequestedSchema(ctx, w.fileSchema,
-			task.Schema, b, false, true, false)
-		if err != nil {
-			return nil, err
-		}
-		batches[i] = rec
-		defer rec.Release()
-	}
-
-	statsCols, err := computeStatsPlan(w.fileSchema, w.meta.props)
-	if err != nil {
-		return nil, err
-	}
-
-	filePath := w.loc.NewDataLocation(
-		task.GenerateDataFileName("parquet"))
-
-	currentSpec, err := w.meta.CurrentSpec()
-	if err != nil {
-		return nil, err
-	}
-
-	return w.format.WriteDataFile(ctx, w.fs, partitionValues, internal.WriteFileInfo{
-		FileSchema: w.fileSchema,
-		FileName:   filePath,
-		StatsCols:  statsCols,
-		WriteProps: w.props,
-		Spec:       *currentSpec,
-	}, batches)
-}
-
-func writeFiles(ctx context.Context, rootLocation string, fs io.WriteFileIO, meta *MetadataBuilder, partitionValues map[int]any, tasks iter.Seq[WriteTask]) iter.Seq2[iceberg.DataFile, error] {
-	locProvider, err := LoadLocationProvider(rootLocation, meta.props)
-	if err != nil {
-		return func(yield func(iceberg.DataFile, error) bool) {
-			yield(nil, err)
-		}
-	}
-
-	format := internal.GetFileFormat(iceberg.ParquetFile)
-	fileSchema := meta.CurrentSchema()
-	sanitized, err := iceberg.SanitizeColumnNames(fileSchema)
-	if err != nil {
-		return func(yield func(iceberg.DataFile, error) bool) {
-			yield(nil, err)
-		}
-	}
-
-	// if the schema needs to be transformed, use the transformed schema
-	// and adjust the arrow schema appropriately. otherwise we just
-	// use the original schema.
-	if !sanitized.Equals(fileSchema) {
-		fileSchema = sanitized
-	}
-
-	w := &writer{
-		loc:        locProvider,
-		fs:         fs,
-		fileSchema: fileSchema,
-		format:     format,
-		props:      format.GetWriteProperties(meta.props),
-		meta:       meta,
-	}
-
-	nworkers := config.EnvConfig.MaxWorkers
-
-	return internal.MapExec(nworkers, tasks, func(t WriteTask) (iceberg.DataFile, error) {
-		return w.writeFile(ctx, partitionValues, t)
-	})
 }
