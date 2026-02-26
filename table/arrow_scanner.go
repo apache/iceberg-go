@@ -42,6 +42,8 @@ const (
 	ScanOptionArrowUseLargeTypes = "arrow.use_large_types"
 )
 
+var PositionalDeleteArrowSchema, _ = SchemaToArrowSchema(iceberg.PositionalDeleteSchema, nil, true, false)
+
 type (
 	positionDeletes   = []*arrow.Chunked
 	perFilePosDeletes = map[string]positionDeletes
@@ -186,6 +188,54 @@ func processPositionalDeletes(ctx context.Context, deletes set[int64]) recProces
 		}
 
 		return out.(*compute.RecordDatum).Value, nil
+	}
+}
+
+// enrichRecordsWithPosDeleteFields enriches a RecordBatch with the columns declared in the PositionalDeleteArrowSchema
+// so that during the pipeline filtering stages that sheds filtered out records, we still have a way to
+// preserve the original position of those records.
+func enrichRecordsWithPosDeleteFields(ctx context.Context, filePath iceberg.DataFile) recProcessFn {
+	nextIdx, mem := int64(0), compute.GetAllocator(ctx)
+	filePathField, ok := PositionalDeleteArrowSchema.FieldsByName("file_path")
+	if !ok {
+		panic("position delete schema should have required field 'file_path'")
+	}
+	posField, ok := PositionalDeleteArrowSchema.FieldsByName("pos")
+	if !ok {
+		panic("position delete schema should have required field 'pos'")
+	}
+
+	return func(inData arrow.RecordBatch) (outData arrow.RecordBatch, err error) {
+		defer inData.Release()
+
+		schema := inData.Schema()
+		fieldIdx := schema.NumFields()
+		schema, err = schema.AddField(fieldIdx, filePathField[0])
+		if err != nil {
+			return nil, err
+		}
+		schema, err = schema.AddField(fieldIdx+1, posField[0])
+		if err != nil {
+			return nil, err
+		}
+
+		filePathBuilder := array.NewStringBuilder(mem)
+		defer filePathBuilder.Release()
+		posBuilder := array.NewInt64Builder(mem)
+		defer posBuilder.Release()
+
+		startPos := nextIdx
+		nextIdx += inData.NumRows()
+
+		for i := startPos; i < nextIdx; i++ {
+			filePathBuilder.Append(filePath.FilePath())
+			posBuilder.Append(i)
+		}
+
+		columns := append(inData.Columns(), filePathBuilder.NewArray(), posBuilder.NewArray())
+		outData = array.NewRecordBatch(schema, columns, inData.NumRows())
+
+		return outData, err
 	}
 }
 
@@ -466,6 +516,78 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 		defer r.Release()
 
 		return ToRequestedSchema(ctx, as.projectedSchema, iceSchema, r, false, false, as.useLargeTypes)
+	})
+
+	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, out)
+
+	return err
+}
+
+func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task internal.Enumerated[FileScanTask], positionalDeletes positionDeletes, out chan<- enumeratedRecord) (err error) {
+	defer func() {
+		if err != nil {
+			out <- enumeratedRecord{Task: task, Err: err}
+		}
+	}()
+
+	var (
+		rdr        internal.FileReader
+		iceSchema  *iceberg.Schema
+		colIndices []int
+		filterFunc recProcessFn
+		dropFile   bool
+	)
+
+	iceSchema, colIndices, rdr, err = as.prepareToRead(ctx, task.Value.File)
+	if err != nil {
+		return err
+	}
+	defer iceinternal.CheckedClose(rdr, &err)
+
+	fields := append(iceSchema.Fields(), iceberg.PositionalDeleteSchema.Fields()...)
+	enrichedIcebergSchema := iceberg.NewSchema(iceSchema.ID+1, fields...)
+
+	pipeline := make([]recProcessFn, 0, 2)
+	pipeline = append(pipeline, enrichRecordsWithPosDeleteFields(ctx, task.Value.File))
+	if len(positionalDeletes) > 0 {
+		deletes := set[int64]{}
+		for _, chunk := range positionalDeletes {
+			for _, a := range chunk.Chunks() {
+				for _, v := range a.(*array.Int64).Int64Values() {
+					deletes[v] = struct{}{}
+				}
+			}
+		}
+
+		pipeline = append(pipeline, processPositionalDeletes(ctx, deletes))
+	}
+
+	filterFunc, dropFile, err = as.getRecordFilter(ctx, iceSchema)
+	if err != nil {
+		return err
+	}
+
+	// Nothing to delete in a dropped file
+	if dropFile {
+		var emptySchema *arrow.Schema
+		emptySchema, err = SchemaToArrowSchema(iceberg.PositionalDeleteSchema, nil, false, as.useLargeTypes)
+		if err != nil {
+			return err
+		}
+		out <- enumeratedRecord{Task: task, Record: internal.Enumerated[arrow.RecordBatch]{
+			Value: array.NewRecordBatch(emptySchema, nil, 0), Index: 0, Last: true,
+		}}
+
+		return err
+	}
+
+	if filterFunc != nil {
+		pipeline = append(pipeline, filterFunc)
+	}
+	pipeline = append(pipeline, func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
+		defer r.Release()
+
+		return ToRequestedSchema(ctx, iceberg.PositionalDeleteSchema, enrichedIcebergSchema, r, false, true, as.useLargeTypes)
 	})
 
 	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, out)

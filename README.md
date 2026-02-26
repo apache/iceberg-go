@@ -143,17 +143,17 @@ make lint-install
 As long as the FileSystem is supported and the Catalog supports altering
 the table, the following tracks the current write support:
 
-|        Operation        | Supported |
-|:-----------------------:|:---------:|
-|      Append Stream      |     X     |
-|    Append Data Files    |     X     |
-|      Rewrite Files      |           |
-|    Rewrite manifests    |           |
-|     Overwrite Files     |     X     |
-|  Copy-On-Write Delete   |     X     |
-|    Write Pos Delete     |           |
-|     Write Eq Delete     |           |
-|        Row Delta        |           |
+| Operation            | Supported |
+|:---------------------|:---------:|
+| Append Stream        |     X     |
+| Append Data Files    |     X     |
+| Rewrite Files        |           |
+| Rewrite manifests    |           |
+| Overwrite Files      |     X     |
+| Copy-On-Write Delete |     X     |
+| Write Pos Delete     |     X     |
+| Write Eq Delete      |           |
+| Row Delta            |           |
 
 
 ### CLI Usage
