@@ -18,11 +18,15 @@
 package table
 
 import (
+	"context"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -230,4 +234,60 @@ func TestBuildPartitionEvaluatorWithInvalidSpecID(t *testing.T) {
 	assert.Nil(t, evaluator)
 	assert.ErrorIs(t, err, ErrPartitionSpecNotFound)
 	assert.ErrorContains(t, err, "id 999")
+}
+
+// TestSynthesizeRowLineageColumns verifies that _row_id and _last_updated_sequence_number
+// are filled from task constants when those columns are present and null.
+func TestSynthesizeRowLineageColumns(t *testing.T) {
+	ctx := context.Background()
+	firstRowID := int64(1000)
+	dataSeqNum := int64(5)
+	task := FileScanTask{FirstRowID: &firstRowID, DataSequenceNumber: &dataSeqNum}
+	rowOffset := int64(0)
+
+	// Build a batch with a data column plus _row_id and _last_updated_sequence_number (all nulls).
+	schema := arrow.NewSchema(
+		[]arrow.Field{
+			{Name: "x", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+			{Name: iceberg.RowIDColumnName, Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+			{Name: iceberg.LastUpdatedSequenceNumberColumnName, Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+		},
+		nil,
+	)
+	const nrows = 3
+	xBldr := array.NewInt64Builder(compute.GetAllocator(ctx))
+	defer xBldr.Release()
+	xBldr.AppendValues([]int64{1, 2, 3}, nil)
+	rowIDBldr := array.NewInt64Builder(compute.GetAllocator(ctx))
+	defer rowIDBldr.Release()
+	rowIDBldr.AppendNulls(nrows)
+	seqBldr := array.NewInt64Builder(compute.GetAllocator(ctx))
+	defer seqBldr.Release()
+	seqBldr.AppendNulls(nrows)
+
+	batch := array.NewRecordBatch(schema, []arrow.Array{
+		xBldr.NewArray(),
+		rowIDBldr.NewArray(),
+		seqBldr.NewArray(),
+	}, nrows)
+	defer batch.Release()
+
+	out, err := synthesizeRowLineageColumns(ctx, &rowOffset, task, batch, nil, false)
+	require.NoError(t, err)
+	defer out.Release()
+
+	// _row_id should be 1000, 1001, 1002
+	rowIDCol := out.Column(1).(*array.Int64)
+	require.Equal(t, nrows, rowIDCol.Len())
+	for i := 0; i < nrows; i++ {
+		assert.False(t, rowIDCol.IsNull(i), "row %d", i)
+		assert.EqualValues(t, 1000+int64(i), rowIDCol.Value(i), "row %d", i)
+	}
+	// _last_updated_sequence_number should be 5 for all
+	seqCol := out.Column(2).(*array.Int64)
+	for i := 0; i < nrows; i++ {
+		assert.False(t, seqCol.IsNull(i), "row %d", i)
+		assert.EqualValues(t, 5, seqCol.Value(i), "row %d", i)
+	}
+	assert.EqualValues(t, 3, rowOffset)
 }

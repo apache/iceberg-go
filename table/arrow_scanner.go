@@ -390,6 +390,80 @@ func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Sc
 	return nil, false, nil
 }
 
+// synthesizeRowLineageColumns fills _row_id and _last_updated_sequence_number from task constants
+// when those columns are present in the batch (e.g. from ToRequestedSchema). Per the Iceberg v3
+// row lineage spec: if the value is null in the file, it is inherited (synthesized) from the file's
+// first_row_id and data_sequence_number; otherwise the value from the file is kept.
+// rowOffset is the 0-based row index within the current file and is updated so _row_id stays
+// correct across multiple batches from the same file (first_row_id + row_position).
+func synthesizeRowLineageColumns(
+	ctx context.Context,
+	rowOffset *int64,
+	task FileScanTask,
+	batch arrow.RecordBatch,
+	_ *iceberg.Schema,
+	_ bool,
+) (arrow.RecordBatch, error) {
+	alloc := compute.GetAllocator(ctx)
+	schema := batch.Schema()
+	ncols := int(batch.NumCols())
+	nrows := batch.NumRows()
+	newCols := make([]arrow.Array, ncols)
+
+	// Resolve column indices by name; -1 if not present.
+	rowIDIndices := schema.FieldIndices(iceberg.RowIDColumnName)
+	seqNumIndices := schema.FieldIndices(iceberg.LastUpdatedSequenceNumberColumnName)
+	rowIDColIdx := -1
+	if len(rowIDIndices) > 0 {
+		rowIDColIdx = rowIDIndices[0]
+	}
+	seqNumColIdx := -1
+	if len(seqNumIndices) > 0 {
+		seqNumColIdx = seqNumIndices[0]
+	}
+
+	for i := 0; i < ncols; i++ {
+		if i == rowIDColIdx && task.FirstRowID != nil {
+			// _row_id: inherit first_row_id + row_position when null; else keep value from file.
+			col := batch.Column(i).(*array.Int64)
+			bldr := array.NewInt64Builder(alloc)
+			first := *task.FirstRowID
+			for k := int64(0); k < nrows; k++ {
+				if col.IsNull(int(k)) {
+					bldr.Append(first + *rowOffset + k)
+				} else {
+					bldr.Append(col.Value(int(k)))
+				}
+			}
+			newCols[i] = bldr.NewArray()
+			bldr.Release()
+		} else if i == seqNumColIdx && task.DataSequenceNumber != nil {
+			// _last_updated_sequence_number: inherit file's data_sequence_number when null; else keep value from file.
+			col := batch.Column(i).(*array.Int64)
+			bldr := array.NewInt64Builder(alloc)
+			seq := *task.DataSequenceNumber
+			for k := int64(0); k < nrows; k++ {
+				if col.IsNull(int(k)) {
+					bldr.Append(seq)
+				} else {
+					bldr.Append(col.Value(int(k)))
+				}
+			}
+			newCols[i] = bldr.NewArray()
+			bldr.Release()
+		} else {
+			col := batch.Column(i)
+			col.Retain()
+			newCols[i] = col
+		}
+	}
+
+	// Advance so the next batch from this file uses the correct row position for _row_id.
+	*rowOffset += nrows
+
+	return array.NewRecordBatch(schema, newCols, nrows), nil
+}
+
 func (as *arrowScan) processRecords(
 	ctx context.Context,
 	task internal.Enumerated[FileScanTask],
@@ -517,6 +591,19 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 
 		return ToRequestedSchema(ctx, as.projectedSchema, iceSchema, r, false, false, as.useLargeTypes)
 	})
+
+	// Row lineage (v3): fill _row_id and _last_updated_sequence_number from task constants when in projection.
+	if task.Value.FirstRowID != nil || task.Value.DataSequenceNumber != nil {
+		var rowOffset int64
+		taskVal := task.Value
+		projSchema := as.projectedSchema
+		useLarge := as.useLargeTypes
+		pipeline = append(pipeline, func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
+			defer r.Release()
+
+			return synthesizeRowLineageColumns(ctx, &rowOffset, taskVal, r, projSchema, useLarge)
+		})
+	}
 
 	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, out)
 
