@@ -23,7 +23,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
+
+	"context"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 )
 
 // AuthManager is an interface for providing custom authorization headers.
@@ -143,4 +148,43 @@ func (o *Oauth2AuthManager) fetchAccessToken() (string, error) {
 	default:
 		return "", handleNon200(rsp, nil)
 	}
+}
+
+// GoogleAuthManager is an implementation of the AuthManager interface that
+// authenticates using Google Cloud credentials.
+type GoogleAuthManager struct {
+	CredentialsPath string
+	Scopes          []string
+
+	tokenSource oauth2.TokenSource
+}
+
+func (m *GoogleAuthManager) AuthHeader() (string, string, error) {
+	if m.tokenSource == nil {
+		ctx := context.Background()
+		var creds *google.Credentials
+		var err error
+
+		if m.CredentialsPath != "" {
+			data, err := os.ReadFile(m.CredentialsPath)
+			if err != nil {
+				return "", "", err
+			}
+			creds, err = google.CredentialsFromJSON(ctx, data, m.Scopes...)
+		} else {
+			creds, err = google.FindDefaultCredentials(ctx, m.Scopes...)
+		}
+
+		if err != nil {
+			return "", "", err
+		}
+		m.tokenSource = creds.TokenSource
+	}
+
+	token, err := m.tokenSource.Token()
+	if err != nil {
+		return "", "", err
+	}
+
+	return "Authorization", "Bearer " + token.AccessToken, nil
 }
