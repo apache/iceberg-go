@@ -605,6 +605,9 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		_ = dec.Close()
+	}()
 
 	metadata := dec.Metadata()
 	sc := dec.Schema()
@@ -832,13 +835,11 @@ func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
 }
 
 type writerImpl interface {
-	content() ManifestContent
 	prepareEntry(*manifestEntry, int64) (ManifestEntry, error)
 }
 
 type v1writerImpl struct{}
 
-func (v1writerImpl) content() ManifestContent { return ManifestContentData }
 func (v1writerImpl) prepareEntry(entry *manifestEntry, sn int64) (ManifestEntry, error) {
 	if entry.Snapshot != nil && *entry.Snapshot != sn {
 		if entry.EntryStatus != EntryStatusEXISTING {
@@ -855,7 +856,6 @@ func (v1writerImpl) prepareEntry(entry *manifestEntry, sn int64) (ManifestEntry,
 
 type v2writerImpl struct{}
 
-func (v2writerImpl) content() ManifestContent { return ManifestContentData }
 func (v2writerImpl) prepareEntry(entry *manifestEntry, snapshotID int64) (ManifestEntry, error) {
 	if entry.SeqNum == nil {
 		if entry.Snapshot != nil && *entry.Snapshot != snapshotID {
@@ -872,7 +872,6 @@ func (v2writerImpl) prepareEntry(entry *manifestEntry, snapshotID int64) (Manife
 
 type v3writerImpl struct{}
 
-func (v3writerImpl) content() ManifestContent { return ManifestContentData }
 func (v3writerImpl) prepareEntry(entry *manifestEntry, snapshotID int64) (ManifestEntry, error) {
 	if entry.SeqNum == nil {
 		if entry.Snapshot != nil && *entry.Snapshot != snapshotID {
@@ -1048,8 +1047,9 @@ type ManifestWriter struct {
 	output io.Writer
 	writer *ocf.Encoder
 
-	spec   PartitionSpec
-	schema *Schema
+	spec    PartitionSpec
+	schema  *Schema
+	content ManifestContent
 
 	partFieldNameToID map[string]int
 	partFieldIDToType map[int]avro.LogicalType
@@ -1067,7 +1067,15 @@ type ManifestWriter struct {
 	reusedEntry manifestEntry
 }
 
-func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *Schema, snapshotID int64) (*ManifestWriter, error) {
+type ManifestWriterOption func(w *ManifestWriter)
+
+func WithManifestWriterContent(content ManifestContent) ManifestWriterOption {
+	return func(w *ManifestWriter) {
+		w.content = content
+	}
+}
+
+func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *Schema, snapshotID int64, opts ...ManifestWriterOption) (*ManifestWriter, error) {
 	var impl writerImpl
 
 	switch version {
@@ -1098,12 +1106,20 @@ func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *S
 		version:           version,
 		output:            out,
 		spec:              spec,
+		content:           ManifestContentData,
 		schema:            schema,
 		partFieldNameToID: nameToID,
 		partFieldIDToType: idToType,
 		snapshotID:        snapshotID,
 		minSeqNum:         -1,
 		partitions:        make([]map[int]any, 0),
+	}
+
+	for _, apply := range opts {
+		apply(w)
+	}
+	if version < 2 && w.content != ManifestContentData {
+		return nil, fmt.Errorf("unsupported content '%s' for format version '%d'", w.content, version)
 	}
 
 	md, err := w.meta()
@@ -1136,7 +1152,17 @@ func (w *ManifestWriter) Close() error {
 	return w.writer.Close()
 }
 
-func (w *ManifestWriter) ToManifestFile(location string, length int64) (ManifestFile, error) {
+type ManifestFileOption func(mf *manifestFile)
+
+// WithManifestFileContent overrides the ManifestContent of a new manifest file with the provided value
+// Default: ManifestContentData
+func WithManifestFileContent(content ManifestContent) ManifestFileOption {
+	return func(mf *manifestFile) {
+		mf.Content = content
+	}
+}
+
+func (w *ManifestWriter) ToManifestFile(location string, length int64, opts ...ManifestFileOption) (ManifestFile, error) {
 	if err := w.Close(); err != nil {
 		return nil, err
 	}
@@ -1150,7 +1176,7 @@ func (w *ManifestWriter) ToManifestFile(location string, length int64) (Manifest
 		return nil, err
 	}
 
-	return &manifestFile{
+	mf := manifestFile{
 		version:            w.version,
 		Path:               location,
 		Len:                length,
@@ -1167,7 +1193,12 @@ func (w *ManifestWriter) ToManifestFile(location string, length int64) (Manifest
 		DeletedRowsCount:   w.deletedRows,
 		PartitionList:      &partitions,
 		Key:                nil,
-	}, nil
+	}
+	for _, apply := range opts {
+		apply(&mf)
+	}
+
+	return &mf, nil
 }
 
 func (w *ManifestWriter) meta() (map[string][]byte, error) {
@@ -1193,7 +1224,7 @@ func (w *ManifestWriter) meta() (map[string][]byte, error) {
 		"partition-spec":    specFieldsJson,
 		"partition-spec-id": []byte(strconv.Itoa(w.spec.ID())),
 		"format-version":    []byte(strconv.Itoa(w.version)),
-		"content":           []byte(w.impl.content().String()),
+		"content":           []byte(w.content.String()),
 	}, nil
 }
 
@@ -1416,7 +1447,7 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 				// if the sequence number is being assigned here,
 				// then the manifest must be created by the current
 				// operation.
-				// to validate this, check the snapshot id matches the current commmit
+				// to validate this, check the snapshot id matches the current commit
 				if m.commitSnapshotID != wrapped.AddedSnapshotID {
 					return fmt.Errorf("found unassigned sequence number for a manifest from snapshot %d != %d",
 						m.commitSnapshotID, wrapped.AddedSnapshotID)
@@ -2315,5 +2346,5 @@ type ManifestEntry interface {
 
 var PositionalDeleteSchema = NewSchema(0,
 	NestedField{ID: 2147483546, Type: PrimitiveTypes.String, Name: "file_path", Required: true},
-	NestedField{ID: 2147483545, Type: PrimitiveTypes.Int32, Name: "pos", Required: true},
+	NestedField{ID: 2147483545, Type: PrimitiveTypes.Int64, Name: "pos", Required: true},
 )

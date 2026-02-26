@@ -1071,6 +1071,7 @@ func (p *ProjectionTestSuite) TestPartialProjectedFields() {
 
 type mockDataFile struct {
 	path        string
+	contentType iceberg.ManifestEntryContent
 	format      iceberg.FileFormat
 	partition   map[int]any
 	count       int64
@@ -1085,28 +1086,28 @@ type mockDataFile struct {
 	specid int32
 }
 
-func (*mockDataFile) ContentType() iceberg.ManifestEntryContent { return iceberg.EntryContentData }
-func (m *mockDataFile) FilePath() string                        { return m.path }
-func (m *mockDataFile) FileFormat() iceberg.FileFormat          { return m.format }
-func (m *mockDataFile) Partition() map[int]any                  { return m.partition }
-func (m *mockDataFile) Count() int64                            { return m.count }
-func (m *mockDataFile) FileSizeBytes() int64                    { return m.filesize }
-func (m *mockDataFile) ColumnSizes() map[int]int64              { return m.columnSizes }
-func (m *mockDataFile) ValueCounts() map[int]int64              { return m.valueCounts }
-func (m *mockDataFile) NullValueCounts() map[int]int64          { return m.nullCounts }
-func (m *mockDataFile) NaNValueCounts() map[int]int64           { return m.nanCounts }
-func (*mockDataFile) DistinctValueCounts() map[int]int64        { return nil }
-func (m *mockDataFile) LowerBoundValues() map[int][]byte        { return m.lowerBounds }
-func (m *mockDataFile) UpperBoundValues() map[int][]byte        { return m.upperBounds }
-func (*mockDataFile) KeyMetadata() []byte                       { return nil }
-func (*mockDataFile) SplitOffsets() []int64                     { return nil }
-func (*mockDataFile) EqualityFieldIDs() []int                   { return nil }
-func (*mockDataFile) SortOrderID() *int                         { return nil }
-func (m *mockDataFile) SpecID() int32                           { return m.specid }
-func (*mockDataFile) FirstRowID() *int64                        { return nil }
-func (*mockDataFile) ReferencedDataFile() *string               { return nil }
-func (*mockDataFile) ContentOffset() *int64                     { return nil }
-func (*mockDataFile) ContentSizeInBytes() *int64                { return nil }
+func (m *mockDataFile) ContentType() iceberg.ManifestEntryContent { return m.contentType }
+func (m *mockDataFile) FilePath() string                          { return m.path }
+func (m *mockDataFile) FileFormat() iceberg.FileFormat            { return m.format }
+func (m *mockDataFile) Partition() map[int]any                    { return m.partition }
+func (m *mockDataFile) Count() int64                              { return m.count }
+func (m *mockDataFile) FileSizeBytes() int64                      { return m.filesize }
+func (m *mockDataFile) ColumnSizes() map[int]int64                { return m.columnSizes }
+func (m *mockDataFile) ValueCounts() map[int]int64                { return m.valueCounts }
+func (m *mockDataFile) NullValueCounts() map[int]int64            { return m.nullCounts }
+func (m *mockDataFile) NaNValueCounts() map[int]int64             { return m.nanCounts }
+func (*mockDataFile) DistinctValueCounts() map[int]int64          { return nil }
+func (m *mockDataFile) LowerBoundValues() map[int][]byte          { return m.lowerBounds }
+func (m *mockDataFile) UpperBoundValues() map[int][]byte          { return m.upperBounds }
+func (*mockDataFile) KeyMetadata() []byte                         { return nil }
+func (*mockDataFile) SplitOffsets() []int64                       { return nil }
+func (*mockDataFile) EqualityFieldIDs() []int                     { return nil }
+func (*mockDataFile) SortOrderID() *int                           { return nil }
+func (m *mockDataFile) SpecID() int32                             { return m.specid }
+func (*mockDataFile) FirstRowID() *int64                          { return nil }
+func (*mockDataFile) ReferencedDataFile() *string                 { return nil }
+func (*mockDataFile) ContentOffset() *int64                       { return nil }
+func (*mockDataFile) ContentSizeInBytes() *int64                  { return nil }
 
 type InclusiveMetricsTestSuite struct {
 	suite.Suite

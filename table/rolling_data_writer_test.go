@@ -102,7 +102,7 @@ func (s *RollingDataWriterTestSuite) TestSingleFileUnderTarget() {
 	defer factory.closeAll()
 
 	outputCh := make(chan iceberg.DataFile, 10)
-	writer := factory.newRollingDataWriter(s.ctx, "", nil, outputCh)
+	writer := factory.newRollingDataWriter(s.ctx, nil, "", nil, outputCh)
 
 	record := s.buildRecord(arrSchema, 5)
 	defer record.Release()
@@ -131,7 +131,7 @@ func (s *RollingDataWriterTestSuite) TestRollsMultipleFiles() {
 	defer factory.closeAll()
 
 	outputCh := make(chan iceberg.DataFile, 100)
-	writer := factory.newRollingDataWriter(s.ctx, "", nil, outputCh)
+	writer := factory.newRollingDataWriter(s.ctx, nil, "", nil, outputCh)
 
 	totalRows := int64(0)
 	for range 10 {

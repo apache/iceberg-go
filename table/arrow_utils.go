@@ -47,6 +47,8 @@ const (
 	// this key to identify the field id of the source Parquet field.
 	// We use this when converting to Iceberg to provide field IDs
 	ArrowParquetFieldIDKey = "PARQUET:field_id"
+
+	defaultBinPackLookback = 20
 )
 
 // ArrowSchemaVisitor is an interface that can be implemented and used to
@@ -1256,12 +1258,35 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 				}
 			}
 
-			df := statistics.ToDataFile(currentSchema, currentSpec, filePath, iceberg.ParquetFile, rdr.SourceFileSize(), partitionValues)
+			df := statistics.ToDataFile(currentSchema, currentSpec, filePath, iceberg.ParquetFile, iceberg.EntryContentData, rdr.SourceFileSize(), partitionValues)
 			if !yield(df, nil) {
 				return
 			}
 		}
 	}
+}
+
+func recordNBytes(rec arrow.RecordBatch) (total int64) {
+	for _, c := range rec.Columns() {
+		total += int64(c.Data().SizeInBytes())
+	}
+
+	return total
+}
+
+func binPackRecords(itr iter.Seq2[arrow.RecordBatch, error], recordLookback int, targetFileSize int64) iter.Seq[[]arrow.RecordBatch] {
+	return internal.PackingIterator(func(yield func(arrow.RecordBatch) bool) {
+		for rec, err := range itr {
+			if err != nil {
+				panic(err)
+			}
+
+			rec.Retain()
+			if !yield(rec) {
+				return
+			}
+		}
+	}, targetFileSize, recordLookback, recordNBytes, false)
 }
 
 type recordWritingArgs struct {
@@ -1281,10 +1306,10 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 		if r := recover(); r != nil {
 			var err error
 			switch e := r.(type) {
-			case string:
-				err = fmt.Errorf("error encountered during file writing %s", e)
 			case error:
 				err = fmt.Errorf("error encountered during file writing: %w", e)
+			default:
+				err = fmt.Errorf("error encountered during position delete file writing: %v", e)
 			}
 			ret = func(yield func(iceberg.DataFile, error) bool) {
 				yield(nil, err)
@@ -1303,8 +1328,14 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 	nameMapping := meta.CurrentSchema().NameMapping()
 	taskSchema, err := ArrowSchemaToIceberg(args.sc, false, nameMapping)
 	if err != nil {
-		panic(err)
+		return func(yield func(iceberg.DataFile, error) bool) {
+			yield(nil, err)
+		}
 	}
+
+	cw := newConcurrentDataFileWriter(func(rootLocation string, fs iceio.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
+		return newDataFileWriter(rootLocation, fs, meta, props, opts...)
+	})
 
 	factory, err := newWriterFactory(rootLocation, args, meta, taskSchema, targetFileSize)
 	if err != nil {
@@ -1315,7 +1346,7 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 		return unpartitionedWrite(ctx, factory, args.itr)
 	}
 
-	partitionWriter := newPartitionedFanoutWriter(factory.currentSpec, meta.CurrentSchema(), args.itr, factory)
+	partitionWriter := newPartitionedFanoutWriter(factory.currentSpec, cw, meta.CurrentSchema(), args.itr, factory)
 	workers := config.EnvConfig.MaxWorkers
 
 	return partitionWriter.Write(ctx, workers)
@@ -1329,7 +1360,7 @@ func unpartitionedWrite(ctx context.Context, factory *writerFactory, records ite
 		defer close(outputCh)
 		defer factory.stopCount()
 
-		writer := factory.newRollingDataWriter(ctx, "", nil, outputCh)
+		writer := factory.newRollingDataWriter(ctx, nil, "", nil, outputCh)
 		for rec, err := range records {
 			if err != nil {
 				errCh <- err
@@ -1370,4 +1401,85 @@ func unpartitionedWrite(ctx context.Context, factory *writerFactory, records ite
 			yield(nil, err)
 		}
 	}
+}
+
+type partitionContext struct {
+	partitionData map[int]any
+	specID        int32
+}
+
+func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, meta *MetadataBuilder, partitionContextByFilePath map[string]partitionContext, args recordWritingArgs) (ret iter.Seq2[iceberg.DataFile, error]) {
+	if args.counter == nil {
+		args.counter = internal.Counter(0)
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			var err error
+			switch e := r.(type) {
+			case error:
+				err = fmt.Errorf("error encountered during position delete file writing: %w", e)
+			default:
+				err = fmt.Errorf("error encountered during position delete file writing: %v", e)
+			}
+			ret = func(yield func(iceberg.DataFile, error) bool) {
+				yield(nil, err)
+			}
+		}
+	}()
+
+	latestMetadata, err := meta.Build()
+	if err != nil {
+		return func(yield func(iceberg.DataFile, error) bool) {
+			yield(nil, err)
+		}
+	}
+
+	if args.writeUUID == nil {
+		u := uuid.Must(uuid.NewRandom())
+		args.writeUUID = &u
+	}
+
+	targetFileSize := int64(meta.props.GetInt(WriteTargetFileSizeBytesKey,
+		WriteTargetFileSizeBytesDefault))
+
+	cw := newConcurrentDataFileWriter(func(rootLocation string, fs iceio.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
+		return newPositionDeleteWriter(rootLocation, fs, meta, props, opts...)
+	}, withSchemaSanitization(false))
+	nextCount, stopCount := iter.Pull(args.counter)
+	if latestMetadata.PartitionSpec().IsUnpartitioned() {
+		tasks := func(yield func(WriteTask) bool) {
+			defer stopCount()
+
+			fileCount := 0
+			for batch := range binPackRecords(args.itr, defaultBinPackLookback, targetFileSize) {
+				cnt, _ := nextCount()
+				fileCount++
+				t := WriteTask{
+					Uuid:        *args.writeUUID,
+					ID:          cnt,
+					PartitionID: iceberg.UnpartitionedSpec.ID(),
+					FileCount:   fileCount,
+					Schema:      iceberg.PositionalDeleteSchema,
+					Batches:     batch,
+				}
+				if !yield(t) {
+					return
+				}
+			}
+		}
+
+		return cw.writeFiles(ctx, rootLocation, args.fs, meta, meta.props, nil, tasks)
+	}
+	factory, err := newWriterFactory(rootLocation, args, meta, iceberg.PositionalDeleteSchema, targetFileSize,
+		withContentType(iceberg.EntryContentPosDeletes),
+		withFactoryFileSchema(iceberg.PositionalDeleteSchema))
+	if err != nil {
+		panic(err)
+	}
+
+	partitionWriter := newPositionDeletePartitionedFanoutWriter(latestMetadata, cw, partitionContextByFilePath, args.itr, factory)
+	workers := config.EnvConfig.MaxWorkers
+
+	return partitionWriter.Write(ctx, workers)
 }

@@ -182,7 +182,7 @@ func (of *overwriteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 				return nil, err
 			}
 
-			return wr.ToManifestFile(path, counter.Count)
+			return wr.ToManifestFile(path, counter.Count, iceberg.WithManifestFileContent(m.ManifestContent()))
 		}
 
 		mf, err := rewriteManifest(m, notDeleted)
@@ -427,16 +427,17 @@ func (m *mergeAppendFiles) processManifests(manifests []iceberg.ManifestFile) ([
 type snapshotProducer struct {
 	producerImpl
 
-	commitUuid       uuid.UUID
-	io               iceio.WriteFileIO
-	txn              *Transaction
-	op               Operation
-	snapshotID       int64
-	parentSnapshotID int64
-	addedFiles       []iceberg.DataFile
-	manifestCount    atomic.Int32
-	deletedFiles     map[string]iceberg.DataFile
-	snapshotProps    iceberg.Properties
+	commitUuid          uuid.UUID
+	io                  iceio.WriteFileIO
+	txn                 *Transaction
+	op                  Operation
+	snapshotID          int64
+	parentSnapshotID    int64
+	addedFiles          []iceberg.DataFile
+	positionDeleteFiles []iceberg.DataFile
+	manifestCount       atomic.Int32
+	deletedFiles        map[string]iceberg.DataFile
+	snapshotProps       iceberg.Properties
 }
 
 func createSnapshotProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties) *snapshotProducer {
@@ -478,6 +479,12 @@ func (sp *snapshotProducer) spec(id int) iceberg.PartitionSpec {
 
 func (sp *snapshotProducer) appendDataFile(df iceberg.DataFile) *snapshotProducer {
 	sp.addedFiles = append(sp.addedFiles, df)
+
+	return sp
+}
+
+func (sp *snapshotProducer) appendPositionDeleteFile(df iceberg.DataFile) *snapshotProducer {
+	sp.positionDeleteFiles = append(sp.positionDeleteFiles, df)
 
 	return sp
 }
@@ -531,49 +538,17 @@ func (sp *snapshotProducer) manifests() (_ []iceberg.ManifestFile, err error) {
 
 	var g errgroup.Group
 
-	results := [...][]iceberg.ManifestFile{nil, nil, nil}
+	addedManifests := make([]iceberg.ManifestFile, 0)
+	positionDeleteManifests := make([]iceberg.ManifestFile, 0)
+	var deletedFilesManifests []iceberg.ManifestFile
+	var existingManifests []iceberg.ManifestFile
 
 	if len(sp.addedFiles) > 0 {
-		g.Go(func() (err error) {
-			out, path, err := sp.newManifestOutput()
-			if err != nil {
-				return err
-			}
-			defer internal.CheckedClose(out, &err)
+		g.Go(sp.manifestProducer(iceberg.ManifestContentData, sp.addedFiles, &addedManifests))
+	}
 
-			counter := &internal.CountingWriter{W: out}
-			currentSpec, err := sp.txn.meta.CurrentSpec()
-			if err != nil || currentSpec == nil {
-				return fmt.Errorf("could not get current partition spec: %w", err)
-			}
-			wr, err := iceberg.NewManifestWriter(sp.txn.meta.formatVersion, counter,
-				*currentSpec, sp.txn.meta.CurrentSchema(),
-				sp.snapshotID)
-			if err != nil {
-				return err
-			}
-			defer internal.CheckedClose(wr, &err)
-
-			for _, df := range sp.addedFiles {
-				err := wr.Add(iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &sp.snapshotID,
-					nil, nil, df))
-				if err != nil {
-					return err
-				}
-			}
-
-			// close the writer to force a flush and ensure counter.Count is accurate
-			if err := wr.Close(); err != nil {
-				return err
-			}
-
-			mf, err := wr.ToManifestFile(path, counter.Count)
-			if err == nil {
-				results[0] = append(results[0], mf)
-			}
-
-			return err
-		})
+	if len(sp.positionDeleteFiles) > 0 {
+		g.Go(sp.manifestProducer(iceberg.ManifestContentDeletes, sp.positionDeleteFiles, &positionDeleteManifests))
 	}
 
 	if len(deleted) > 0 {
@@ -607,7 +582,7 @@ func (sp *snapshotProducer) manifests() (_ []iceberg.ManifestFile, err error) {
 				if err != nil {
 					return err
 				}
-				results[1] = append(results[1], mf)
+				deletedFilesManifests = append(deletedFilesManifests, mf)
 			}
 
 			return nil
@@ -619,7 +594,7 @@ func (sp *snapshotProducer) manifests() (_ []iceberg.ManifestFile, err error) {
 		if err != nil {
 			return err
 		}
-		results[2] = m
+		existingManifests = m
 
 		return nil
 	})
@@ -628,9 +603,53 @@ func (sp *snapshotProducer) manifests() (_ []iceberg.ManifestFile, err error) {
 		return nil, err
 	}
 
-	manifests := slices.Concat(results[0], results[1], results[2])
+	manifests := slices.Concat(addedManifests, positionDeleteManifests, deletedFilesManifests, existingManifests)
 
 	return sp.processManifests(manifests)
+}
+
+func (sp *snapshotProducer) manifestProducer(content iceberg.ManifestContent, files []iceberg.DataFile, output *[]iceberg.ManifestFile) func() (err error) {
+	return func() (err error) {
+		out, path, err := sp.newManifestOutput()
+		if err != nil {
+			return err
+		}
+		defer internal.CheckedClose(out, &err)
+
+		counter := &internal.CountingWriter{W: out}
+		currentSpec, err := sp.txn.meta.CurrentSpec()
+		if err != nil || currentSpec == nil {
+			return fmt.Errorf("could not get current partition spec: %w", err)
+		}
+		wr, err := iceberg.NewManifestWriter(sp.txn.meta.formatVersion, counter,
+			*currentSpec, sp.txn.meta.CurrentSchema(),
+			sp.snapshotID, iceberg.WithManifestWriterContent(content))
+		if err != nil {
+			return err
+		}
+		defer internal.CheckedClose(wr, &err)
+
+		for _, df := range files {
+			err := wr.Add(iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &sp.snapshotID,
+				nil, nil, df))
+			if err != nil {
+				return err
+			}
+		}
+
+		// close the writer to force a flush and ensure counter.Count is accurate
+		if err := wr.Close(); err != nil {
+			return err
+		}
+
+		mf, err := wr.ToManifestFile(path, counter.Count, iceberg.WithManifestFileContent(content))
+		if err != nil {
+			return err
+		}
+		*output = []iceberg.ManifestFile{mf}
+
+		return nil
+	}
 }
 
 func (sp *snapshotProducer) summary(props iceberg.Properties) (Summary, error) {
@@ -645,6 +664,11 @@ func (sp *snapshotProducer) summary(props iceberg.Properties) (Summary, error) {
 		return Summary{}, fmt.Errorf("could not get current partition spec: %w", err)
 	}
 	for _, df := range sp.addedFiles {
+		if err = ssc.addFile(df, currentSchema, *partitionSpec); err != nil {
+			return Summary{}, err
+		}
+	}
+	for _, df := range sp.positionDeleteFiles {
 		if err = ssc.addFile(df, currentSchema, *partitionSpec); err != nil {
 			return Summary{}, err
 		}

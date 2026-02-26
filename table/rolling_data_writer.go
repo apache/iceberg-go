@@ -50,6 +50,7 @@ type writerFactory struct {
 	statsCols   map[int]tblutils.StatisticsCollector
 	currentSpec iceberg.PartitionSpec
 	format      tblutils.FileFormat
+	content     iceberg.ManifestEntryContent
 
 	writers               sync.Map
 	partitionLocProviders sync.Map
@@ -60,9 +61,28 @@ type writerFactory struct {
 	mu                    sync.Mutex
 }
 
+type writerFactoryOption func(*writerFactory)
+
+func withContentType(content iceberg.ManifestEntryContent) writerFactoryOption {
+	return func(w *writerFactory) {
+		w.content = content
+	}
+}
+
+func withFactoryFileSchema(schema *iceberg.Schema) writerFactoryOption {
+	return func(w *writerFactory) {
+		w.fileSchema = schema
+		arrowSc, err := SchemaToArrowSchema(schema, nil, true, false)
+		if err != nil {
+			panic(fmt.Sprintf("withFactoryFileSchema: failed to convert schema: %v", err))
+		}
+		w.arrowSchema = arrowSc
+	}
+}
+
 // newWriterFactory creates a writerFactory with precomputed, invariant write
 // configuration derived from the table metadata.
-func newWriterFactory(rootLocation string, args recordWritingArgs, meta *MetadataBuilder, taskSchema *iceberg.Schema, targetFileSize int64) (*writerFactory, error) {
+func newWriterFactory(rootLocation string, args recordWritingArgs, meta *MetadataBuilder, taskSchema *iceberg.Schema, targetFileSize int64, opts ...writerFactoryOption) (*writerFactory, error) {
 	nextCount, stopCount := iter.Pull(args.counter)
 
 	rootURL, err := url.Parse(rootLocation)
@@ -113,7 +133,7 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		return nil, fmt.Errorf("%w: cannot write files without a current spec", err)
 	}
 
-	return &writerFactory{
+	f := &writerFactory{
 		rootLocation:   rootLocation,
 		rootURL:        rootURL,
 		fs:             args.fs,
@@ -129,7 +149,12 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		format:         format,
 		nextCount:      nextCount,
 		stopCount:      stopCount,
-	}, nil
+	}
+	for _, apply := range opts {
+		apply(f)
+	}
+
+	return f, nil
 }
 
 func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string,
@@ -163,6 +188,7 @@ func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string
 		StatsCols:  w.statsCols,
 		WriteProps: w.writeProps,
 		Spec:       w.currentSpec,
+		Content:    w.content,
 	}, w.arrowSchema)
 }
 
@@ -186,30 +212,32 @@ func (w *writerFactory) partitionLocProvider(partitionPath string) (LocationProv
 // RollingDataWriter writes Arrow records for a specific partition, rolling to
 // new data files when the actual compressed file size reaches the target.
 type RollingDataWriter struct {
-	partitionKey    string
-	partitionID     int
-	fileCount       atomic.Int64
-	recordCh        chan arrow.RecordBatch
-	errorCh         chan error
-	factory         *writerFactory
-	partitionValues map[int]any
-	ctx             context.Context
-	cancel          context.CancelFunc
-	wg              sync.WaitGroup
+	partitionKey     string
+	partitionID      int
+	fileCount        atomic.Int64
+	recordCh         chan arrow.RecordBatch
+	errorCh          chan error
+	factory          *writerFactory
+	partitionValues  map[int]any
+	ctx              context.Context
+	cancel           context.CancelFunc
+	wg               sync.WaitGroup
+	concurrentWriter *concurrentDataFileWriter
 }
 
-func (w *writerFactory) newRollingDataWriter(ctx context.Context, partition string, partitionValues map[int]any, outputDataFilesCh chan<- iceberg.DataFile) *RollingDataWriter {
+func (w *writerFactory) newRollingDataWriter(ctx context.Context, concurrentWriter *concurrentDataFileWriter, partition string, partitionValues map[int]any, outputDataFilesCh chan<- iceberg.DataFile) *RollingDataWriter {
 	ctx, cancel := context.WithCancel(ctx)
 	partitionID := int(w.partitionIDCounter.Add(1) - 1)
 	writer := &RollingDataWriter{
-		partitionKey:    partition,
-		partitionID:     partitionID,
-		recordCh:        make(chan arrow.RecordBatch, 64),
-		errorCh:         make(chan error, 1),
-		factory:         w,
-		partitionValues: partitionValues,
-		ctx:             ctx,
-		cancel:          cancel,
+		partitionKey:     partition,
+		partitionID:      partitionID,
+		recordCh:         make(chan arrow.RecordBatch, 64),
+		errorCh:          make(chan error, 1),
+		factory:          w,
+		partitionValues:  partitionValues,
+		ctx:              ctx,
+		concurrentWriter: concurrentWriter,
+		cancel:           cancel,
 	}
 
 	writer.wg.Add(1)
@@ -218,7 +246,7 @@ func (w *writerFactory) newRollingDataWriter(ctx context.Context, partition stri
 	return writer
 }
 
-func (w *writerFactory) getOrCreateRollingDataWriter(ctx context.Context, partition string, partitionValues map[int]any, outputDataFilesCh chan<- iceberg.DataFile) (*RollingDataWriter, error) {
+func (w *writerFactory) getOrCreateRollingDataWriter(ctx context.Context, concurrentWriter *concurrentDataFileWriter, partition string, partitionValues map[int]any, outputDataFilesCh chan<- iceberg.DataFile) (*RollingDataWriter, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -230,7 +258,7 @@ func (w *writerFactory) getOrCreateRollingDataWriter(ctx context.Context, partit
 		return nil, fmt.Errorf("invalid writer type for partition: %s", partition)
 	}
 
-	writer := w.newRollingDataWriter(ctx, partition, partitionValues, outputDataFilesCh)
+	writer := w.newRollingDataWriter(ctx, concurrentWriter, partition, partitionValues, outputDataFilesCh)
 	w.writers.Store(partition, writer)
 
 	return writer, nil

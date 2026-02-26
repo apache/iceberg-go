@@ -22,13 +22,14 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -2176,9 +2177,11 @@ func (t *TableWritingTestSuite) TestOverwriteRecord() {
 // TestDelete verifies that Table.Delete properly delegates to Transaction.Delete
 func (t *TableWritingTestSuite) TestDelete() {
 	testCases := []struct {
-		name        string
-		table       *table.Table
-		expectedErr error
+		name                     string
+		table                    *table.Table
+		formatVersionRequirement int
+		expectedSnapshotSummary  *table.Summary
+		expectedErr              error
 	}{
 		{
 			name: "success with copy-on-write",
@@ -2188,10 +2191,25 @@ func (t *TableWritingTestSuite) TestDelete() {
 				*iceberg.UnpartitionedSpec,
 				t.tableSchema,
 			),
+			expectedSnapshotSummary: &table.Summary{
+				Operation: table.OpDelete,
+				Properties: map[string]string{
+					"added-data-files":       "1",
+					"added-records":          "1",
+					"deleted-data-files":     "1",
+					"deleted-records":        "2",
+					"total-data-files":       "1",
+					"total-delete-files":     "0",
+					"total-equality-deletes": "0",
+					"total-position-deletes": "0",
+					"total-records":          "1",
+				},
+			},
 			expectedErr: nil,
 		},
 		{
-			name: "abort on merge-on-read",
+			name:                     "fallback to copy-on-write when on v1 format",
+			formatVersionRequirement: 1,
 			table: t.createTableWithProps(
 				table.Identifier{"default", "overwrite_record_wrapper_v" + strconv.Itoa(t.formatVersion)},
 				map[string]string{
@@ -2200,15 +2218,64 @@ func (t *TableWritingTestSuite) TestDelete() {
 				},
 				t.tableSchema,
 			),
-			expectedErr: errors.New("only 'copy-on-write' is currently supported"),
+			expectedSnapshotSummary: &table.Summary{
+				Operation: table.OpDelete,
+				Properties: map[string]string{
+					"added-data-files":       "1",
+					"added-records":          "1",
+					"deleted-data-files":     "1",
+					"deleted-records":        "2",
+					"total-data-files":       "1",
+					"total-delete-files":     "0",
+					"total-equality-deletes": "0",
+					"total-position-deletes": "0",
+					"total-records":          "1",
+				},
+			},
+			expectedErr: nil,
+		},
+		{
+			name: "success with merge-on-read on v2 format",
+			table: t.createTableWithProps(
+				table.Identifier{"default", "overwrite_record_wrapper_v" + strconv.Itoa(t.formatVersion)},
+				map[string]string{
+					table.PropertyFormatVersion: strconv.Itoa(t.formatVersion),
+					table.WriteDeleteModeKey:    table.WriteModeMergeOnRead,
+				},
+				t.tableSchema,
+			),
+			// Position deletes are only
+			formatVersionRequirement: 2,
+			expectedSnapshotSummary: &table.Summary{
+				Operation: table.OpDelete,
+				Properties: map[string]string{
+					"added-delete-files":          "1",
+					"added-position-delete-files": "1",
+					"added-position-deletes":      "1",
+					"total-data-files":            "1",
+					"total-delete-files":          "1",
+					"total-equality-deletes":      "0",
+					"total-position-deletes":      "1",
+					"total-records":               "2",
+				},
+			},
+			expectedErr: nil,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func() {
-			// Set up the test table with some data
+			// Skip this test case execution if the format version isn't the one the test case is limited to. This
+			// is because some test cases don't have the same expected behavior or don't apply because of format
+			// specific features
+			if tc.formatVersionRequirement > 0 && tc.formatVersionRequirement != t.formatVersion {
+				return
+			}
+			// Set up the test table with some data. Include more than just one row so that the delete operation
+			// is not a straight file deletion
 			newTable, err := array.TableFromJSON(memory.DefaultAllocator, t.arrSchema, []string{
-				`[{"foo": false, "bar": "wrapper_test", "baz": 123, "qux": "2024-01-01"}]`,
+				`[{"foo": false, "bar": "wrapper_test", "baz": 123, "qux": "2024-01-01"},
+                  {"foo": true, "bar": "keep_this", "baz": 456, "qux": "2024-01-02"}]`,
 			})
 			t.Require().NoError(err)
 			defer newTable.Release()
@@ -2219,7 +2286,7 @@ func (t *TableWritingTestSuite) TestDelete() {
 			// Validate the pre-requisite that data is present on the table before we go ahead and delete it
 			arrowTable, err := tbl.Scan().ToArrowTable(t.ctx)
 			t.Require().NoError(err)
-			t.Equal(int64(1), arrowTable.NumRows())
+			t.Equal(int64(2), arrowTable.NumRows())
 
 			tbl, err = tbl.Delete(t.ctx, iceberg.EqualTo(iceberg.Reference("bar"), "wrapper_test"), nil)
 			// If an error was expected, check that it's the correct one and abort validating the operation
@@ -2231,12 +2298,12 @@ func (t *TableWritingTestSuite) TestDelete() {
 
 			snapshot := tbl.CurrentSnapshot()
 			t.NotNil(snapshot)
-			t.Equal(table.OpDelete, snapshot.Summary.Operation)
+			t.NoError(equalSnapshotSummary(tc.expectedSnapshotSummary, snapshot.Summary))
 
 			arrowTable, err = tbl.Scan().ToArrowTable(t.ctx)
 			t.Require().NoError(err)
 
-			t.Equal(int64(0), arrowTable.NumRows())
+			t.Equal(int64(1), arrowTable.NumRows())
 		})
 	}
 }
@@ -2370,13 +2437,13 @@ func (m *DeleteOldMetadataMockedCatalog) CommitTable(ctx context.Context, ident 
 	location := m.metadata.Location()
 
 	randid := uuid.New().String()
-	metdatafile := fmt.Sprintf("%s/metadata/%s.metadata.json", location, randid)
+	metadatafile := fmt.Sprintf("%s/metadata/%s.metadata.json", location, randid)
 
 	// removing old metadata files
 	bldr.TrimMetadataLogs(0)
 
 	bldr.AppendMetadataLog(table.MetadataLogEntry{
-		MetadataFile: metdatafile,
+		MetadataFile: metadatafile,
 		TimestampMs:  time.Now().UnixMilli(),
 	})
 
@@ -2393,7 +2460,7 @@ func (m *DeleteOldMetadataMockedCatalog) CommitTable(ctx context.Context, ident 
 
 	m.metadata = meta
 
-	return meta, metdatafile, nil
+	return meta, metadatafile, nil
 }
 
 func createMetadataFile(metadatadir, metadataFile string) error {
@@ -2701,4 +2768,60 @@ func (t *TableTestSuite) TestMetadataCompressionRoundTrip() {
 	t.Require().NotNil(tbl2)
 
 	t.True(tbl.Equals(*tbl2))
+}
+
+type snapshotSummaryMatcher struct{}
+
+func (m *snapshotSummaryMatcher) Matches(expected *table.Summary, actual *table.Summary) bool {
+	if expected == nil && actual == nil {
+		return true
+	}
+	if expected == nil {
+		return false
+	}
+	if actual == nil {
+		return false
+	}
+	// Filter properties to validate by deleting all the ones that aren't in the expected summary properties. This is
+	// to allow ignoring the properties that vary per environment/test execution like file sizes
+	filtered := cloneSummaryAndFilterProperties(expected, actual)
+
+	return reflect.DeepEqual(expected, filtered)
+}
+
+// cloneSummaryAndFilterProperties clones a summary and filters out any summary properties that aren't part of the
+// expected summary. This is useful to ignore properties that we don't wish to validate
+func cloneSummaryAndFilterProperties(expected *table.Summary, actual *table.Summary) *table.Summary {
+	actualPropertiesFiltered := maps.Clone(actual.Properties)
+	maps.DeleteFunc(actualPropertiesFiltered, func(k string, v string) bool {
+		_, ok := expected.Properties[k]
+
+		return !ok
+	})
+	filtered := *actual
+	filtered.Properties = actualPropertiesFiltered
+
+	return &filtered
+}
+
+func (m *snapshotSummaryMatcher) Format(val *table.Summary) string {
+	if val == nil {
+		return "nil"
+	}
+
+	return fmt.Sprintf("{Operation: %s, Properties: %#v}", val.Operation, val.Properties)
+}
+
+// equalSnapshotSummary invokes a snapshotSummaryMatcher to compare two snapshot summary values.
+// Its return value is nil if both values are equal and an error with a meaningful formatted message to help
+// show the mismatch in case they are not. This is meant to be used with testify like:
+//
+//	assert.NoError(t, equalSnapshotSummary(expected, actual))
+func equalSnapshotSummary(expected *table.Summary, actual *table.Summary) (err error) {
+	matcher := &snapshotSummaryMatcher{}
+	if !matcher.Matches(expected, actual) {
+		return fmt.Errorf("Expected: %s\nActual:   %s", matcher.Format(expected), matcher.Format(actual))
+	}
+
+	return nil
 }
