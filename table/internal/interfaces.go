@@ -73,12 +73,22 @@ type FileReader interface {
 	ReadTable(context.Context) (arrow.Table, error)
 }
 
+// FileWriter is an incremental single-file writer with open/write/close
+// lifecycle. It writes Arrow record batches and tracks bytes written for
+// rolling file decisions.
+type FileWriter interface {
+	Write(arrow.RecordBatch) error
+	BytesWritten() int64
+	Close() (iceberg.DataFile, error)
+}
+
 type FileFormat interface {
 	Open(context.Context, iceio.IO, string) (FileReader, error)
 	PathToIDMapping(*iceberg.Schema) (map[string]int, error)
 	DataFileStatsFromMeta(rdr Metadata, statsCols map[int]StatisticsCollector, colMapping map[string]int) *DataFileStatistics
 	GetWriteProperties(iceberg.Properties) any
 	WriteDataFile(ctx context.Context, fs iceio.WriteFileIO, partitionValues map[int]any, info WriteFileInfo, batches []arrow.RecordBatch) (iceberg.DataFile, error)
+	NewFileWriter(ctx context.Context, fs iceio.WriteFileIO, partitionValues map[int]any, info WriteFileInfo, arrowSchema *arrow.Schema) (FileWriter, error)
 }
 
 func GetFileFormat(format iceberg.FileFormat) FileFormat {
