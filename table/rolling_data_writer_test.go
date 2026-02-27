@@ -61,8 +61,8 @@ func (s *RollingDataWriterTestSuite) createWriterFactory(loc string, arrSchema *
 
 	writeUUID := uuid.New()
 	args := recordWritingArgs{
-		sc: arrSchema,
-		fs: iceio.LocalFS{},
+		sc:        arrSchema,
+		fs:        iceio.LocalFS{},
 		writeUUID: &writeUUID,
 		counter: func(yield func(int) bool) {
 			for i := 0; ; i++ {
