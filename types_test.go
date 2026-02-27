@@ -423,3 +423,14 @@ func TestNestedFieldUnmarshalMissingName(t *testing.T) {
 	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 	assert.ErrorContains(t, err, "missing required 'name'")
 }
+
+func TestNestedFieldUnmarshalZeroIDIsValid(t *testing.T) {
+	// id:0 is a valid field ID — should NOT be treated as a missing key
+	data := []byte(`{"id":0,"name":"col","type":"string","required":false}`)
+
+	var f iceberg.NestedField
+	err := json.Unmarshal(data, &f)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, f.ID)
+	assert.Equal(t, "col", f.Name)
+}

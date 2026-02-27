@@ -232,6 +232,7 @@ func (n NestedField) MarshalJSON() ([]byte, error) {
 func (n *NestedField) UnmarshalJSON(b []byte) error {
 	type Alias NestedField
 	aux := struct {
+		ID   *int      `json:"id"`
 		Type typeIFace `json:"type"`
 		*Alias
 	}{
@@ -244,9 +245,10 @@ func (n *NestedField) UnmarshalJSON(b []byte) error {
 
 	n.Type = aux.Type.Type
 
-	if n.ID == 0 {
+	if aux.ID == nil {
 		return fmt.Errorf("%w: field is missing required 'id' key in JSON", ErrInvalidSchema)
 	}
+	n.ID = *aux.ID
 
 	if n.Name == "" {
 		return fmt.Errorf("%w: field is missing required 'name' key in JSON", ErrInvalidSchema)
