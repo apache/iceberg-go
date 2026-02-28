@@ -84,6 +84,8 @@ func TestArrowToIceberg(t *testing.T) {
 		{arrow.BinaryTypes.LargeBinary, iceberg.PrimitiveTypes.Binary, false, ""},
 		{arrow.BinaryTypes.BinaryView, nil, false, "unsupported arrow type for conversion - binary_view"},
 		{extensions.NewUUIDType(), iceberg.PrimitiveTypes.UUID, true, ""},
+		// Note: Arrow binary types map to Iceberg BinaryType, not Geometry/Geography
+		// Geometry/Geography must be explicitly specified in Iceberg schema
 		{arrow.StructOf(arrow.Field{
 			Name:     "foo",
 			Type:     arrow.BinaryTypes.String,
@@ -342,9 +344,16 @@ var (
 )
 
 func TestArrowSchemaRoundTripConversion(t *testing.T) {
+	schemaWithGeo := iceberg.NewSchema(3,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "location", Type: iceberg.GeometryTypeOf("srid:3857"), Required: false},
+		iceberg.NestedField{ID: 3, Name: "gps", Type: iceberg.GeographyTypeOf("srid:4326", iceberg.EdgeAlgorithmKarney), Required: false},
+	)
+
 	schemas := []*iceberg.Schema{
 		icebergSchemaSimple,
 		icebergSchemaNested,
+		schemaWithGeo,
 	}
 
 	for _, tt := range schemas {
@@ -354,7 +363,14 @@ func TestArrowSchemaRoundTripConversion(t *testing.T) {
 		ice, err := table.ArrowSchemaToIceberg(sc, false, nil)
 		require.NoError(t, err)
 
-		assert.True(t, tt.Equals(ice), tt.String(), ice.String())
+		if tt == schemaWithGeo {
+			geomField := sc.Field(1)
+			assert.Equal(t, arrow.BinaryTypes.Binary, geomField.Type)
+			geogField := sc.Field(2)
+			assert.Equal(t, arrow.BinaryTypes.Binary, geogField.Type)
+		} else {
+			assert.True(t, tt.Equals(ice), tt.String(), ice.String())
+		}
 	}
 }
 
@@ -584,4 +600,100 @@ func TestToRequestedSchema(t *testing.T) {
 	defer rec2.Release()
 
 	assert.True(t, array.RecordEqual(rec, rec2))
+}
+
+func TestToRequestedSchemaGeometryGeography(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	// File schema (from Parquet) has BinaryType for geometry/geography
+	// This simulates what we get when reading from a Parquet file
+	fileSchema := arrow.NewSchema([]arrow.Field{
+		{
+			Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: false,
+			Metadata: fieldIDMeta("1"),
+		},
+		{
+			Name: "location", Type: arrow.BinaryTypes.Binary, Nullable: true,
+			Metadata: fieldIDMeta("2"),
+		},
+		{
+			Name: "gps", Type: arrow.BinaryTypes.Binary, Nullable: true,
+			Metadata: fieldIDMeta("3"),
+		},
+	}, nil)
+
+	// Requested schema has GeometryType/GeographyType
+	requestedSchema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "location", Type: iceberg.GeometryTypeOf("srid:3857"), Required: false},
+		iceberg.NestedField{ID: 3, Name: "gps", Type: iceberg.GeographyTypeOf("srid:4326", iceberg.EdgeAlgorithmKarney), Required: false},
+	)
+
+	// Create Arrow record with binary data (simulating WKB format)
+	// For testing, we'll use simple binary data
+	bldr := array.NewRecordBuilder(mem, fileSchema)
+	defer bldr.Release()
+
+	idBldr := bldr.Field(0).(*array.Int32Builder)
+	locationBldr := bldr.Field(1).(*array.BinaryBuilder)
+	gpsBldr := bldr.Field(2).(*array.BinaryBuilder)
+
+	// First row: non-null values
+	idBldr.Append(1)
+	locationBldr.Append([]byte{0x01, 0x02, 0x03, 0x04}) // Simulated WKB
+	gpsBldr.Append([]byte{0x05, 0x06, 0x07, 0x08})      // Simulated WKB
+
+	// Second row: null values
+	idBldr.Append(2)
+	locationBldr.AppendNull()
+	gpsBldr.AppendNull()
+
+	// Third row: more non-null values
+	idBldr.Append(3)
+	locationBldr.Append([]byte{0x09, 0x0A, 0x0B, 0x0C})
+	gpsBldr.Append([]byte{0x0D, 0x0E, 0x0F, 0x10})
+
+	rec := bldr.NewRecordBatch()
+	defer rec.Release()
+
+	// Convert file schema to Iceberg schema
+	fileIcebergSchema, err := table.ArrowSchemaToIceberg(fileSchema, false, nil)
+	require.NoError(t, err)
+
+	// Convert requested schema to Arrow schema
+	requestedArrowSchema, err := table.SchemaToArrowSchema(requestedSchema, nil, true, false)
+	require.NoError(t, err)
+
+	// Project to requested schema
+	projectedRec, err := table.ToRequestedSchema(context.Background(), requestedSchema, fileIcebergSchema, rec, true, true, false)
+	require.NoError(t, err, "ToRequestedSchema should succeed for BinaryType -> GeometryType/GeographyType")
+	defer projectedRec.Release()
+
+	// Verify the projected record has the correct schema
+	assert.Equal(t, requestedArrowSchema, projectedRec.Schema())
+
+	// Verify the data is preserved
+	assert.Equal(t, rec.NumRows(), projectedRec.NumRows())
+	assert.Equal(t, rec.NumCols(), projectedRec.NumCols())
+
+	// Verify binary data is preserved
+	projectedLocation := projectedRec.Column(1).(*array.Binary)
+	projectedGps := projectedRec.Column(2).(*array.Binary)
+
+	// Check first row
+	assert.False(t, projectedLocation.IsNull(0))
+	assert.False(t, projectedGps.IsNull(0))
+	assert.Equal(t, []byte{0x01, 0x02, 0x03, 0x04}, projectedLocation.Value(0))
+	assert.Equal(t, []byte{0x05, 0x06, 0x07, 0x08}, projectedGps.Value(0))
+
+	// Check second row (nulls)
+	assert.True(t, projectedLocation.IsNull(1))
+	assert.True(t, projectedGps.IsNull(1))
+
+	// Check third row
+	assert.False(t, projectedLocation.IsNull(2))
+	assert.False(t, projectedGps.IsNull(2))
+	assert.Equal(t, []byte{0x09, 0x0A, 0x0B, 0x0C}, projectedLocation.Value(2))
+	assert.Equal(t, []byte{0x0D, 0x0E, 0x0F, 0x10}, projectedGps.Value(2))
 }
