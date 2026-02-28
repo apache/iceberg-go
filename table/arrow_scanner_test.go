@@ -24,6 +24,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -85,19 +86,19 @@ func TestEnrichRecordsWithPosDeleteFields(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			ctx := compute.WithAllocator(t.Context(), mem)
+
 			defer func() {
 				for _, b := range tc.inputBatches {
 					b.Release()
 				}
 			}()
 
-			enrichFn := enrichRecordsWithPosDeleteFields(t.Context(), &mockDataFile{path: "file://test_path.parquet"})
+			enrichFn := enrichRecordsWithPosDeleteFields(ctx, &mockDataFile{path: "file://test_path.parquet"})
 			for i, b := range tc.inputBatches {
 				out, err := enrichFn(b)
 				require.NoError(t, err)
-				defer func() {
-					out.Release()
-				}()
 
 				assert.Equal(t, schemaWithPosDelete, out.Schema())
 				assert.Equal(t, out.NumRows(), b.NumRows())
@@ -109,7 +110,10 @@ func TestEnrichRecordsWithPosDeleteFields(t *testing.T) {
 				require.NoError(t, err)
 
 				assert.Equal(t, string(expectedOutputJSON), string(outAsJSON))
+				out.Release()
 			}
+
+			mem.AssertSize(t, 0)
 		})
 	}
 }

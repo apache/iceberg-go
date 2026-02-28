@@ -232,7 +232,12 @@ func enrichRecordsWithPosDeleteFields(ctx context.Context, filePath iceberg.Data
 			posBuilder.Append(i)
 		}
 
-		columns := append(inData.Columns(), filePathBuilder.NewArray(), posBuilder.NewArray())
+		filePathArr := filePathBuilder.NewArray()
+		defer filePathArr.Release()
+		posArr := posBuilder.NewArray()
+		defer posArr.Release()
+
+		columns := append(inData.Columns(), filePathArr, posArr)
 		outData = array.NewRecordBatch(schema, columns, inData.NumRows())
 
 		return outData, err
