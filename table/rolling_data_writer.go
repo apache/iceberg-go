@@ -119,13 +119,6 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		return nil, err
 	}
 
-	statsCols, err := computeStatsPlan(fileSchema, meta.props)
-	if err != nil {
-		stopCount()
-
-		return nil, err
-	}
-
 	currentSpec, err := meta.CurrentSpec()
 	if err != nil || currentSpec == nil {
 		stopCount()
@@ -144,7 +137,6 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		fileSchema:     fileSchema,
 		arrowSchema:    arrowSchema,
 		writeProps:     format.GetWriteProperties(meta.props),
-		statsCols:      statsCols,
 		currentSpec:    *currentSpec,
 		format:         format,
 		nextCount:      nextCount,
@@ -152,6 +144,13 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 	}
 	for _, apply := range opts {
 		apply(f)
+	}
+
+	f.statsCols, err = computeStatsPlan(f.fileSchema, meta.props)
+	if err != nil {
+		stopCount()
+
+		return nil, err
 	}
 
 	return f, nil
