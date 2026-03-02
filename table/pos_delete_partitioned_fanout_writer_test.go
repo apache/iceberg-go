@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -156,6 +157,90 @@ func TestPositionDeletePartitionedFanoutWriterProcessBatch(t *testing.T) {
 			assert.NoError(t, equalsDataFile(tc.expectedDataFile, actualDataFile, defaultPositionDeleteMatching...))
 		})
 	}
+}
+
+func TestPositionDeletePartitionedFanoutWriterPartitionPathIsDeterministic(t *testing.T) {
+	t.Parallel()
+
+	partitionSpec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{
+			FieldID:   1000,
+			SourceID:  2147483546, // file_path
+			Name:      "file_path",
+			Transform: iceberg.IdentityTransform{},
+		},
+		iceberg.PartitionField{
+			FieldID:   1001,
+			SourceID:  2147483545, // pos
+			Name:      "pos",
+			Transform: iceberg.IdentityTransform{},
+		},
+		iceberg.PartitionField{
+			FieldID:  1002,
+			SourceID: 2147483545, // pos
+			Name:     "pos_bucket",
+			Transform: iceberg.BucketTransform{
+				NumBuckets: 128,
+			},
+		},
+	)
+
+	metadataBuilder, err := NewMetadataBuilder(2)
+	require.NoError(t, err)
+	err = metadataBuilder.AddSchema(iceberg.PositionalDeleteSchema)
+	require.NoError(t, err)
+	err = metadataBuilder.SetCurrentSchemaID(0)
+	require.NoError(t, err)
+	err = metadataBuilder.AddPartitionSpec(&partitionSpec, true)
+	require.NoError(t, err)
+	err = metadataBuilder.SetDefaultSpecID(0)
+	require.NoError(t, err)
+	sortOrder, err := NewSortOrder(1, []SortField{{
+		SourceID:  2147483546,
+		Direction: SortASC,
+		Transform: iceberg.IdentityTransform{},
+		NullOrder: NullsFirst,
+	}})
+	require.NoError(t, err)
+	err = metadataBuilder.AddSortOrder(&sortOrder)
+	require.NoError(t, err)
+	err = metadataBuilder.SetDefaultSortOrderID(1)
+	require.NoError(t, err)
+
+	latestMeta, err := metadataBuilder.Build()
+	require.NoError(t, err)
+
+	writer := &positionDeletePartitionedFanoutWriter{
+		metadata: latestMeta,
+		schema:   iceberg.PositionalDeleteSchema,
+	}
+
+	ctx := partitionContext{
+		specID: 0,
+		partitionData: map[int]any{
+			1000: "file://ns/data-file.parquet",
+			1001: int64(42),
+			1002: int32(7),
+		},
+	}
+
+	expectedPath := partitionSpec.PartitionToPath(partitionRecord{
+		ctx.partitionData[1000],
+		ctx.partitionData[1001],
+		ctx.partitionData[1002],
+	}, iceberg.PositionalDeleteSchema)
+
+	// run multiple times to ensure it consistently
+	// produces the same output for the same input context
+	seen := make(map[string]struct{})
+	for range 1024 {
+		path, err := writer.partitionPath(ctx)
+		require.NoError(t, err)
+		seen[path] = struct{}{}
+	}
+
+	require.Lenf(t, seen, 1, "partition path must be stable for the same input map, got paths: %v", slices.Collect(maps.Keys(seen)))
+	require.Contains(t, seen, expectedPath)
 }
 
 func onlyContext(ctx context.Context, _ func()) context.Context {
