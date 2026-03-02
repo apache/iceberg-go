@@ -29,18 +29,18 @@ const (
 
 // Row lineage metadata column names (v3+).
 const (
-	RowIDColumnName                         = "_row_id"
-	LastUpdatedSequenceNumberColumnName     = "_last_updated_sequence_number"
+	RowIDColumnName                     = "_row_id"
+	LastUpdatedSequenceNumberColumnName = "_last_updated_sequence_number"
 )
 
 // RowID returns a NestedField for _row_id (optional long) for use in schemas that include row lineage.
 func RowID() NestedField {
 	return NestedField{
-		ID:        RowIDFieldID,
-		Name:      RowIDColumnName,
-		Required:  false,
-		Doc:       "Implicit row ID that is automatically assigned",
-		Type:      Int64Type{},
+		ID:       RowIDFieldID,
+		Name:     RowIDColumnName,
+		Required: false,
+		Doc:      "Implicit row ID that is automatically assigned",
+		Type:     Int64Type{},
 	}
 }
 
