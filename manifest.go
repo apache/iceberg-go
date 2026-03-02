@@ -605,9 +605,6 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		_ = dec.Close()
-	}()
 
 	metadata := dec.Metadata()
 	sc := dec.Schema()
@@ -667,6 +664,11 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 		fieldIDToType: fieldIDToType,
 		fieldIDToSize: fieldIDToSize,
 	}, nil
+}
+
+// Close releases decoder resources associated with this manifest reader.
+func (c *ManifestReader) Close() error {
+	return c.dec.Close()
 }
 
 // Version returns the file's format version.
@@ -779,6 +781,10 @@ func ReadManifest(m ManifestFile, f io.Reader, discardDeleted bool) ([]ManifestE
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		_ = manifestReader.Close()
+	}()
+
 	var results []ManifestEntry
 	for {
 		entry, err := manifestReader.ReadEntry()

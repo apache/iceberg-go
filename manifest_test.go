@@ -1274,6 +1274,62 @@ func (m *ManifestTestSuite) TestManifestEntriesV3() {
 	m.Zero(*datafile.SortOrderID())
 }
 
+func (m *ManifestTestSuite) TestNewManifestReaderZstdManifestEntriesV2() {
+	manifest := manifestFile{
+		version: 2,
+		SpecID:  1,
+		Path:    manifestFileRecordsV2[0].FilePath(),
+	}
+
+	partitionSpec := NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceID: 1, Name: "VendorID", Transform: IdentityTransform{}},
+		PartitionField{FieldID: 1001, SourceID: 2, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
+
+	partitionSchema, err := partitionTypeToAvroSchema(partitionSpec.PartitionType(testSchema))
+	m.Require().NoError(err)
+
+	entrySchema, err := internal.NewManifestEntrySchema(partitionSchema, 2)
+	m.Require().NoError(err)
+
+	mw := ManifestWriter{
+		version: 2,
+		spec:    partitionSpec,
+		schema:  testSchema,
+		content: ManifestContentData,
+	}
+	md, err := mw.meta()
+	m.Require().NoError(err)
+
+	var buf bytes.Buffer
+	enc, err := ocf.NewEncoderWithSchema(entrySchema, &buf,
+		ocf.WithSchemaMarshaler(ocf.FullSchemaMarshaler),
+		ocf.WithEncoderSchemaCache(&avro.SchemaCache{}),
+		ocf.WithMetadata(md),
+		ocf.WithCodec(ocf.ZStandard))
+	m.Require().NoError(err)
+
+	m.Require().NoError(enc.Encode(manifestEntryV2Records[0]))
+	m.Require().NoError(enc.Encode(manifestEntryV2Records[1]))
+	m.Require().NoError(enc.Close())
+
+	manifestReader, err := NewManifestReader(&manifest, bytes.NewReader(buf.Bytes()))
+	m.Require().NoError(err)
+	defer func() {
+		m.Require().NoError(manifestReader.Close())
+	}()
+
+	entry1, err := manifestReader.ReadEntry()
+	m.Require().NoError(err)
+	m.Equal(manifestEntryV2Records[0].DataFile().FilePath(), entry1.DataFile().FilePath())
+
+	entry2, err := manifestReader.ReadEntry()
+	m.Require().NoError(err)
+	m.Equal(manifestEntryV2Records[1].DataFile().FilePath(), entry2.DataFile().FilePath())
+
+	_, err = manifestReader.ReadEntry()
+	m.Require().ErrorIs(err, io.EOF)
+}
+
 func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 	dataFileBuilder, err := NewDataFileBuilder(
 		NewPartitionSpec(),
