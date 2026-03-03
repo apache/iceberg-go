@@ -541,7 +541,7 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 		return nil, err
 	}
 
-	// Step 3: Sort positional deletes and match them to data files.
+		// Step 3: Sort positional deletes and match them to data files.
 	slices.SortFunc(entries.positionalDeleteEntries, func(a, b iceberg.ManifestEntry) int {
 		return cmp.Compare(a.SequenceNum(), b.SequenceNum())
 	})
@@ -555,7 +555,7 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	}
 
 	results := make([]FileScanTask, 0, len(entries.dataEntries))
-	for _, e := range entries.dataEntries {
+		for _, e := range entries.dataEntries {
 		deleteFiles, err := matchDeletesToData(e, entries.positionalDeleteEntries)
 		if err != nil {
 			return nil, err
@@ -573,9 +573,8 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 		// Row lineage constants for v3: readers use these to synthesize _row_id and _last_updated_sequence_number.
 		if scan.metadata.Version() >= 3 {
 			task.FirstRowID = e.DataFile().FirstRowID()
-			seq := e.SequenceNum()
-			if seq >= 0 {
-				task.DataSequenceNumber = &seq
+			if fseq := e.FileSequenceNum(); fseq != nil {
+				task.DataSequenceNumber = fseq
 			}
 		}
 		results = append(results, task)
