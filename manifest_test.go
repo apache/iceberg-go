@@ -481,14 +481,14 @@ type ManifestTestSuite struct {
 }
 
 func (m *ManifestTestSuite) writeManifestList() {
-	_, err := WriteManifestList(1, &m.v1ManifestList, snapshotID, nil, nil, 0, manifestFileRecordsV1)
+	err := WriteManifestList(1, &m.v1ManifestList, snapshotID, nil, nil, 0, manifestFileRecordsV1)
 	m.Require().NoError(err)
 	unassignedSequenceNum := int64(-1)
-	_, err = WriteManifestList(2, &m.v2ManifestList, snapshotID, nil, &unassignedSequenceNum, 0, manifestFileRecordsV2)
+	err = WriteManifestList(2, &m.v2ManifestList, snapshotID, nil, &unassignedSequenceNum, 0, manifestFileRecordsV2)
 	m.Require().NoError(err)
 	v3SequenceNum := int64(5)
 	firstRowID := int64(1000)
-	_, err = WriteManifestList(3, &m.v3ManifestList, snapshotID, nil, &v3SequenceNum, firstRowID, manifestFileRecordsV3)
+	err = WriteManifestList(3, &m.v3ManifestList, snapshotID, nil, &v3SequenceNum, firstRowID, manifestFileRecordsV3)
 	m.Require().NoError(err)
 }
 
@@ -764,8 +764,8 @@ func (m *ManifestTestSuite) TestReadManifestListV3() {
 	m.Zero(list[0].PartitionSpecID())
 
 	// V3 manifest list assigns first_row_id to data manifests
-	m.Require().NotNil(list[0].FirstRowId(), "v3 data manifest should have first_row_id")
-	m.EqualValues(1000, *list[0].FirstRowId())
+	m.Require().NotNil(list[0].FirstRowID(), "v3 data manifest should have first_row_id")
+	m.EqualValues(1000, *list[0].FirstRowID())
 
 	part := list[0].Partitions()[0]
 	m.True(part.ContainsNull)
@@ -856,7 +856,7 @@ func (m *ManifestTestSuite) TestV3DataManifestFirstRowIDInheritance() {
 		version:    3,
 		Path:       "/manifest.avro",
 		Content:    ManifestContentData,
-		FirstRowID: &manifestFirstRowID,
+		FirstRowIDValue: &manifestFirstRowID,
 	}
 	entries, err := ReadManifest(file, bytes.NewReader(manifestBuf.Bytes()), false)
 	m.Require().NoError(err)
@@ -882,7 +882,7 @@ func (m *ManifestTestSuite) TestReadManifestListIncompleteSchema() {
 	// any cache. (Note: if working correctly, this will have no such side effect.)
 	var buf bytes.Buffer
 	seqNum := int64(9876)
-	_, err := WriteManifestList(2, &buf, 1234, nil, &seqNum, 0, []ManifestFile{
+	err := WriteManifestList(2, &buf, 1234, nil, &seqNum, 0, []ManifestFile{
 		NewManifestFile(2, "s3://bucket/namespace/table/metadata/abcd-0123.avro", 99, 0, 1234).Build(),
 	})
 	m.NoError(err)
@@ -1632,11 +1632,11 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterPersistsPerManifestFirstRowI
 	m.Require().True(ok, "expected v3 manifest file type")
 	secondManifest, ok := list[1].(*manifestFile)
 	m.Require().True(ok, "expected v3 manifest file type")
-	m.Require().NotNil(firstManifest.FirstRowId(), "first manifest should have first_row_id")
-	m.Require().NotNil(secondManifest.FirstRowId(), "second manifest should have first_row_id")
+	m.Require().NotNil(firstManifest.FirstRowID(), "first manifest should have first_row_id")
+	m.Require().NotNil(secondManifest.FirstRowID(), "second manifest should have first_row_id")
 
-	m.EqualValues(5000, *firstManifest.FirstRowId()) // start of first range
-	m.EqualValues(5015, *secondManifest.FirstRowId())
+	m.EqualValues(5000, *firstManifest.FirstRowID()) // start of first range
+	m.EqualValues(5015, *secondManifest.FirstRowID())
 	m.EqualValues(5022, *writer.NextRowID())
 }
 
@@ -1709,7 +1709,7 @@ func (m *ManifestTestSuite) TestWriteManifestListClosesWriterOnError() {
 	m.Require().NoError(writer.Close())
 
 	out := &limitedWriter{limit: header.Len(), err: errLimitedWrite}
-	_, err = WriteManifestList(2, out, snapshotID, nil, &seqNum, 0, []ManifestFile{
+	err = WriteManifestList(2, out, snapshotID, nil, &seqNum, 0, []ManifestFile{
 		manifestFileRecordsV2[0],
 		manifestFileRecordsV1[0],
 	})

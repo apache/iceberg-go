@@ -272,7 +272,7 @@ func TestSynthesizeRowLineageColumns(t *testing.T) {
 	}, nrows)
 	defer batch.Release()
 
-	out, err := synthesizeRowLineageColumns(ctx, &rowOffset, task, batch, nil, false)
+	out, err := synthesizeRowLineageColumns(ctx, &rowOffset, task, batch)
 	require.NoError(t, err)
 	defer out.Release()
 
