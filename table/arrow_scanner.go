@@ -430,6 +430,7 @@ func synthesizeRowLineageColumns(
 				}
 				newCols[i] = bldr.NewArray()
 				bldr.Release()
+
 				continue
 			}
 		}
@@ -448,6 +449,7 @@ func synthesizeRowLineageColumns(
 				}
 				newCols[i] = bldr.NewArray()
 				bldr.Release()
+
 				continue
 			}
 		}
