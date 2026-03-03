@@ -304,7 +304,7 @@ func (m *manifestFileV1) Partitions() []FieldSummary {
 	return *m.PartitionList
 }
 
-func (*manifestFileV1) FirstRowId() *int64 { return nil }
+func (*manifestFileV1) FirstRowID() *int64 { return nil }
 
 func (m *manifestFileV1) FetchEntries(fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error) {
 	return fetchManifestEntries(m, fs, discardDeleted)
@@ -326,7 +326,7 @@ type manifestFile struct {
 	DeletedRowsCount   int64           `avro:"deleted_rows_count"`
 	PartitionList      *[]FieldSummary `avro:"partitions"`
 	Key                []byte          `avro:"key_metadata"`
-	FirstRowID         *int64          `avro:"first_row_id"`
+	FirstRowIDValue    *int64          `avro:"first_row_id"`
 
 	version int `avro:"-"`
 }
@@ -403,7 +403,7 @@ func (m *manifestFile) Partitions() []FieldSummary {
 	return *m.PartitionList
 }
 
-func (m *manifestFile) FirstRowId() *int64 { return m.FirstRowID }
+func (m *manifestFile) FirstRowID() *int64 { return m.FirstRowIDValue }
 
 func (m *manifestFile) HasAddedFiles() bool    { return m.AddedFilesCount != 0 }
 func (m *manifestFile) HasExistingFiles() bool { return m.ExistingFilesCount != 0 }
@@ -525,9 +525,9 @@ type ManifestFile interface {
 	// field in the spec. Each field in the list corresponds to a field in
 	// the manifest file's partition spec.
 	Partitions() []FieldSummary
-	// FirstRowId returns the first _row_id assigned to rows in this manifest (v3+ data manifests only).
+	// FirstRowID returns the first _row_id assigned to rows in this manifest (v3+ data manifests only).
 	// Returns nil for v1/v2 or for delete manifests.
-	FirstRowId() *int64
+	FirstRowID() *int64
 
 	// HasAddedFiles returns true if AddedDataFiles > 0 or if it was null.
 	HasAddedFiles() bool
@@ -604,10 +604,13 @@ type ManifestReader struct {
 	partitionSpec       PartitionSpec
 	partitionSpecLoaded bool
 
+	// inheritRowIDs controls whether this reader should apply First Row ID inheritance
+	// for v3 data manifests (spec: First Row ID Inheritance).
+	inheritRowIDs bool
 	// nextFirstRowID tracks the next first_row_id to assign when reading v3 data
 	// manifests; used for First Row ID inheritance (null data file first_row_id
-	// gets manifest's first_row_id + sum of preceding null-first_row_id files' record_count).
-	nextFirstRowID *int64
+	// gets manifest's first_row_id + sum of preceding files' record_count).
+	nextFirstRowID int64
 }
 
 // NewManifestReader returns a value that can read the contents of an avro manifest
@@ -667,15 +670,25 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 	}
 	fieldNameToID, fieldIDToType, fieldIDToSize := getFieldIDMap(sc)
 
+	inheritRowIDs := formatVersion >= 3 &&
+		content == ManifestContentData &&
+		file.FirstRowID() != nil
+	var nextFirstRowID int64
+	if inheritRowIDs {
+		nextFirstRowID = *file.FirstRowID()
+	}
+
 	return &ManifestReader{
-		dec:           dec,
-		file:          file,
-		formatVersion: formatVersion,
-		isFallback:    isFallback,
-		content:       content,
-		fieldNameToID: fieldNameToID,
-		fieldIDToType: fieldIDToType,
-		fieldIDToSize: fieldIDToSize,
+		dec:            dec,
+		file:           file,
+		formatVersion:  formatVersion,
+		isFallback:     isFallback,
+		content:        content,
+		fieldNameToID:  fieldNameToID,
+		fieldIDToType:  fieldIDToType,
+		fieldIDToSize:  fieldIDToSize,
+		inheritRowIDs:  inheritRowIDs,
+		nextFirstRowID: nextFirstRowID,
 	}, nil
 }
 
@@ -778,16 +791,14 @@ func (c *ManifestReader) ReadEntry() (ManifestEntry, error) {
 	}
 	tmp.inherit(c.file)
 	// Apply first_row_id inheritance for v3 data manifests (spec: First Row ID Inheritance).
-	if c.content == ManifestContentData && c.file.FirstRowId() != nil {
-		if df, ok := tmp.DataFile().(*dataFile); ok && df.FirstRowIDField == nil {
-			if c.nextFirstRowID == nil {
-				c.nextFirstRowID = new(int64)
-				*c.nextFirstRowID = *c.file.FirstRowId()
+	if c.inheritRowIDs {
+		if df, ok := tmp.DataFile().(*dataFile); ok {
+			if df.FirstRowIDField == nil {
+				id := c.nextFirstRowID
+				df.FirstRowIDField = &id
 			}
-			id := new(int64)
-			*id = *c.nextFirstRowID
-			df.FirstRowIDField = id
-			*c.nextFirstRowID += df.Count()
+			// Advance for every data file, null or explicit, to match Java semantics.
+			c.nextFirstRowID += df.Count()
 		}
 	}
 	if fieldToIDMap, ok := tmp.DataFile().(hasFieldToIDMap); ok {
@@ -1474,10 +1485,10 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 			wrapped := *(file.(*manifestFile))
 			if m.version == 3 {
 				// Ref: https://github.com/apache/iceberg/blob/ea2071568dc66148b483a82eefedcd2992b435f7/core/src/main/java/org/apache/iceberg/ManifestListWriter.java#L157-L168
-				if wrapped.Content == ManifestContentData && wrapped.FirstRowID == nil {
+				if wrapped.Content == ManifestContentData && wrapped.FirstRowIDValue == nil {
 					if m.nextRowID != nil {
 						firstRowID := *m.nextRowID
-						wrapped.FirstRowID = &firstRowID
+						wrapped.FirstRowIDValue = &firstRowID
 						*m.nextRowID += wrapped.ExistingRowsCount + wrapped.AddedRowsCount
 					}
 				}
@@ -1515,8 +1526,7 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 }
 
 // WriteManifestList writes a list of manifest files to an avro file.
-// For v3 tables, it returns the next row ID after assigning first_row_id to data manifests; otherwise 0.
-func WriteManifestList(version int, out io.Writer, snapshotID int64, parentSnapshotID, sequenceNumber *int64, firstRowId int64, files []ManifestFile) (nextRowIDAfter int64, err error) {
+func WriteManifestList(version int, out io.Writer, snapshotID int64, parentSnapshotID, sequenceNumber *int64, firstRowId int64, files []ManifestFile) (err error) {
 	var writer *ManifestListWriter
 
 	switch version {
@@ -1524,31 +1534,24 @@ func WriteManifestList(version int, out io.Writer, snapshotID int64, parentSnaps
 		writer, err = NewManifestListWriterV1(out, snapshotID, parentSnapshotID)
 	case 2:
 		if sequenceNumber == nil {
-			return 0, errors.New("sequence number is required for V2 tables")
+			return errors.New("sequence number is required for V2 tables")
 		}
 		writer, err = NewManifestListWriterV2(out, snapshotID, *sequenceNumber, parentSnapshotID)
 	case 3:
 		if sequenceNumber == nil {
-			return 0, errors.New("sequence number is required for V3 tables")
+			return errors.New("sequence number is required for V3 tables")
 		}
 		writer, err = NewManifestListWriterV3(out, snapshotID, *sequenceNumber, firstRowId, parentSnapshotID)
 	default:
-		return 0, fmt.Errorf("unsupported manifest version: %d", version)
+		return fmt.Errorf("unsupported manifest version: %d", version)
 	}
 
 	if err != nil {
-		return 0, err
+		return err
 	}
 	defer internal.CheckedClose(writer, &err)
 
-	if err = writer.AddManifests(files); err != nil {
-		return 0, err
-	}
-	if version == 3 && writer.NextRowID() != nil {
-		nextRowIDAfter = *writer.NextRowID()
-	}
-
-	return nextRowIDAfter, nil
+	return writer.AddManifests(files)
 }
 
 func WriteManifest(

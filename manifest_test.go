@@ -853,9 +853,9 @@ func (m *ManifestTestSuite) TestV3DataManifestFirstRowIDInheritance() {
 
 	manifestFirstRowID := int64(1000)
 	file := &manifestFile{
-		version:    3,
-		Path:       "/manifest.avro",
-		Content:    ManifestContentData,
+		version:         3,
+		Path:            "/manifest.avro",
+		Content:         ManifestContentData,
 		FirstRowIDValue: &manifestFirstRowID,
 	}
 	entries, err := ReadManifest(file, bytes.NewReader(manifestBuf.Bytes()), false)
