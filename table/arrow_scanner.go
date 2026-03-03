@@ -205,6 +205,8 @@ func enrichRecordsWithPosDeleteFields(ctx context.Context, filePath iceberg.Data
 		panic("position delete schema should have required field 'pos'")
 	}
 
+	newColsSchema := arrow.NewSchema([]arrow.Field{filePathField[0], posField[0]}, nil)
+
 	return func(inData arrow.RecordBatch) (outData arrow.RecordBatch, err error) {
 		defer inData.Release()
 
@@ -219,25 +221,21 @@ func enrichRecordsWithPosDeleteFields(ctx context.Context, filePath iceberg.Data
 			return nil, err
 		}
 
-		filePathBuilder := array.NewStringBuilder(mem)
-		defer filePathBuilder.Release()
-		posBuilder := array.NewInt64Builder(mem)
-		defer posBuilder.Release()
+		rb := array.NewRecordBuilder(mem, newColsSchema)
+		defer rb.Release()
 
 		startPos := nextIdx
 		nextIdx += inData.NumRows()
 
 		for i := startPos; i < nextIdx; i++ {
-			filePathBuilder.Append(filePath.FilePath())
-			posBuilder.Append(i)
+			rb.Field(0).(*array.StringBuilder).Append(filePath.FilePath())
+			rb.Field(1).(*array.Int64Builder).Append(i)
 		}
 
-		filePathArr := filePathBuilder.NewArray()
-		defer filePathArr.Release()
-		posArr := posBuilder.NewArray()
-		defer posArr.Release()
+		newCols := rb.NewRecordBatch()
+		defer newCols.Release()
 
-		columns := append(inData.Columns(), filePathArr, posArr)
+		columns := append(inData.Columns(), newCols.Column(0), newCols.Column(1))
 		outData = array.NewRecordBatch(schema, columns, inData.NumRows())
 
 		return outData, err
