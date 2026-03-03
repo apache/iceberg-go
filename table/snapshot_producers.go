@@ -750,7 +750,7 @@ func (sp *snapshotProducer) commit() (_ []Update, _ []Requirement, err error) {
 			addedRows = *writer.NextRowID() - firstRowID
 		}
 	} else {
-		_, err = iceberg.WriteManifestList(sp.txn.meta.formatVersion, out,
+		err = iceberg.WriteManifestList(sp.txn.meta.formatVersion, out,
 			sp.snapshotID, parentSnapshot, &nextSequence, firstRowID, newManifests)
 		if err != nil {
 			return nil, nil, err

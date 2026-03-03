@@ -396,8 +396,6 @@ func synthesizeRowLineageColumns(
 	rowOffset *int64,
 	task FileScanTask,
 	batch arrow.RecordBatch,
-	_ *iceberg.Schema,
-	_ bool,
 ) (arrow.RecordBatch, error) {
 	alloc := compute.GetAllocator(ctx)
 	schema := batch.Schema()
@@ -420,37 +418,43 @@ func synthesizeRowLineageColumns(
 	for i := 0; i < ncols; i++ {
 		if i == rowIDColIdx && task.FirstRowID != nil {
 			// _row_id: inherit first_row_id + row_position when null; else keep value from file.
-			col := batch.Column(i).(*array.Int64)
-			bldr := array.NewInt64Builder(alloc)
-			first := *task.FirstRowID
-			for k := int64(0); k < nrows; k++ {
-				if col.IsNull(int(k)) {
-					bldr.Append(first + *rowOffset + k)
-				} else {
-					bldr.Append(col.Value(int(k)))
+			if col, ok := batch.Column(i).(*array.Int64); ok {
+				bldr := array.NewInt64Builder(alloc)
+				first := *task.FirstRowID
+				for k := int64(0); k < nrows; k++ {
+					if col.IsNull(int(k)) {
+						bldr.Append(first + *rowOffset + k)
+					} else {
+						bldr.Append(col.Value(int(k)))
+					}
 				}
+				newCols[i] = bldr.NewArray()
+				bldr.Release()
+				continue
 			}
-			newCols[i] = bldr.NewArray()
-			bldr.Release()
-		} else if i == seqNumColIdx && task.DataSequenceNumber != nil {
-			// _last_updated_sequence_number: inherit file's data_sequence_number when null; else keep value from file.
-			col := batch.Column(i).(*array.Int64)
-			bldr := array.NewInt64Builder(alloc)
-			seq := *task.DataSequenceNumber
-			for k := int64(0); k < nrows; k++ {
-				if col.IsNull(int(k)) {
-					bldr.Append(seq)
-				} else {
-					bldr.Append(col.Value(int(k)))
-				}
-			}
-			newCols[i] = bldr.NewArray()
-			bldr.Release()
-		} else {
-			col := batch.Column(i)
-			col.Retain()
-			newCols[i] = col
 		}
+
+		if i == seqNumColIdx && task.DataSequenceNumber != nil {
+			// _last_updated_sequence_number: inherit file's data_sequence_number when null; else keep value from file.
+			if col, ok := batch.Column(i).(*array.Int64); ok {
+				bldr := array.NewInt64Builder(alloc)
+				seq := *task.DataSequenceNumber
+				for k := int64(0); k < nrows; k++ {
+					if col.IsNull(int(k)) {
+						bldr.Append(seq)
+					} else {
+						bldr.Append(col.Value(int(k)))
+					}
+				}
+				newCols[i] = bldr.NewArray()
+				bldr.Release()
+				continue
+			}
+		}
+
+		col := batch.Column(i)
+		col.Retain()
+		newCols[i] = col
 	}
 
 	// Advance so the next batch from this file uses the correct row position for _row_id.
@@ -591,12 +595,10 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 	if task.Value.FirstRowID != nil || task.Value.DataSequenceNumber != nil {
 		var rowOffset int64
 		taskVal := task.Value
-		projSchema := as.projectedSchema
-		useLarge := as.useLargeTypes
 		pipeline = append(pipeline, func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
 			defer r.Release()
 
-			return synthesizeRowLineageColumns(ctx, &rowOffset, taskVal, r, projSchema, useLarge)
+			return synthesizeRowLineageColumns(ctx, &rowOffset, taskVal, r)
 		})
 	}
 
