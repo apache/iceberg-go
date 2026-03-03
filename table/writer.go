@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/iceberg-go"
@@ -51,6 +52,7 @@ type defaultDataFileWriter struct {
 	loc        LocationProvider
 	fs         io.WriteFileIO
 	fileSchema *iceberg.Schema
+	fileFormat iceberg.FileFormat
 	format     internal.FileFormat
 	props      iceberg.Properties
 	content    iceberg.ManifestEntryContent
@@ -82,11 +84,19 @@ func newDataFileWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBui
 	if err != nil {
 		return nil, err
 	}
+
+	fileFormat, err := iceberg.FileFormatFromString(
+		props.Get(WriteFormatDefaultKey, WriteFormatDefaultDefault))
+	if err != nil {
+		return nil, err
+	}
+
 	w := defaultDataFileWriter{
 		loc:        locProvider,
 		fs:         fs,
 		fileSchema: meta.CurrentSchema(),
-		format:     internal.GetFileFormat(iceberg.ParquetFile),
+		fileFormat: fileFormat,
+		format:     internal.GetFileFormat(fileFormat),
 		content:    iceberg.EntryContentData,
 		props:      props,
 		meta:       meta,
@@ -122,7 +132,7 @@ func (w *defaultDataFileWriter) writeFile(ctx context.Context, partitionValues m
 	}
 
 	filePath := w.loc.NewDataLocation(
-		task.GenerateDataFileName("parquet"))
+		task.GenerateDataFileName(strings.ToLower(string(w.fileFormat))))
 
 	currentSpec, err := w.meta.CurrentSpec()
 	if err != nil {

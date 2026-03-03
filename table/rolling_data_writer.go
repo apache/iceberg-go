@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"iter"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -49,6 +50,7 @@ type writerFactory struct {
 	writeProps  any
 	statsCols   map[int]tblutils.StatisticsCollector
 	currentSpec iceberg.PartitionSpec
+	fileFormat  iceberg.FileFormat
 	format      tblutils.FileFormat
 	content     iceberg.ManifestEntryContent
 
@@ -110,7 +112,15 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		fileSchema = sanitized
 	}
 
-	format := tblutils.GetFileFormat(iceberg.ParquetFile)
+	fileFormat, err := iceberg.FileFormatFromString(
+		iceberg.Properties(meta.props).Get(WriteFormatDefaultKey, WriteFormatDefaultDefault))
+	if err != nil {
+		stopCount()
+
+		return nil, err
+	}
+
+	format := tblutils.GetFileFormat(fileFormat)
 
 	arrowSchema, err := SchemaToArrowSchema(fileSchema, nil, true, false)
 	if err != nil {
@@ -138,6 +148,7 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		arrowSchema:    arrowSchema,
 		writeProps:     format.GetWriteProperties(meta.props),
 		currentSpec:    *currentSpec,
+		fileFormat:     fileFormat,
 		format:         format,
 		nextCount:      nextCount,
 		stopCount:      stopCount,
@@ -168,7 +179,7 @@ func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string
 		ID:          cnt,
 		PartitionID: partitionID,
 		FileCount:   fileCount,
-	}.GenerateDataFileName("parquet")
+	}.GenerateDataFileName(strings.ToLower(string(w.fileFormat)))
 
 	var filePath string
 	if partitionPath != "" {

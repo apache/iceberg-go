@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -156,6 +157,63 @@ func (s *RollingDataWriterTestSuite) TestRollsMultipleFiles() {
 		actualRows += df.Count()
 	}
 	s.Equal(totalRows, actualRows)
+}
+
+func (s *RollingDataWriterTestSuite) TestBytesWrittenNoDoubleCountAcrossRowGroups() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	loc := filepath.ToSlash(s.T().TempDir())
+
+	icebergSchema, err := ArrowSchemaToIcebergWithFreshIDs(arrSchema, false)
+	s.Require().NoError(err)
+
+	spec := iceberg.NewPartitionSpec()
+	format := tblutils.GetFileFormat(iceberg.ParquetFile)
+	writeProps := format.GetWriteProperties(iceberg.Properties{
+		tblutils.ParquetRowGroupLimitKey: "10",
+	})
+
+	statsCols, err := computeStatsPlan(icebergSchema, iceberg.Properties{})
+	s.Require().NoError(err)
+
+	filePath := filepath.Join(loc, "test-no-double-count.parquet")
+	fw, err := format.NewFileWriter(s.ctx, iceio.LocalFS{}, nil, tblutils.WriteFileInfo{
+		FileSchema: icebergSchema,
+		FileName:   filePath,
+		StatsCols:  statsCols,
+		WriteProps: writeProps,
+		Spec:       spec,
+	}, arrSchema)
+	s.Require().NoError(err)
+
+	var prevBytes int64
+	for batch := range 5 {
+		record := s.buildRecord(arrSchema, 100)
+		s.Require().NoError(fw.Write(record))
+		record.Release()
+
+		bytesWritten := fw.BytesWritten()
+		s.Greater(bytesWritten, prevBytes,
+			"BytesWritten must monotonically increase after batch %d", batch)
+		prevBytes = bytesWritten
+	}
+
+	bytesBeforeClose := fw.BytesWritten()
+
+	df, err := fw.Close()
+	s.Require().NoError(err)
+	s.Equal(int64(500), df.Count())
+
+	s.GreaterOrEqual(df.FileSizeBytes(), bytesBeforeClose,
+		"final file size should be >= BytesWritten before close (close flushes the last row group)")
+
+	stat, err := os.Stat(filePath)
+	s.Require().NoError(err)
+	s.Equal(df.FileSizeBytes(), stat.Size(),
+		"DataFile.FileSizeBytes should match actual file size on disk")
 }
 
 func (s *RollingDataWriterTestSuite) TestBytesWrittenReflectsCompressedSize() {
