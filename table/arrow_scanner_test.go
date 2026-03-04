@@ -88,7 +88,7 @@ func TestEnrichRecordsWithPosDeleteFields(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 			ctx := compute.WithAllocator(t.Context(), mem)
-
+			defer mem.AssertSize(t, 0)
 			defer func() {
 				for _, b := range tc.inputBatches {
 					b.Release()
@@ -112,8 +112,6 @@ func TestEnrichRecordsWithPosDeleteFields(t *testing.T) {
 				assert.Equal(t, string(expectedOutputJSON), string(outAsJSON))
 				out.Release()
 			}
-
-			mem.AssertSize(t, 0)
 		})
 	}
 }

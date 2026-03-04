@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"iter"
 	"strconv"
@@ -227,9 +228,17 @@ func enrichRecordsWithPosDeleteFields(ctx context.Context, filePath iceberg.Data
 		startPos := nextIdx
 		nextIdx += inData.NumRows()
 
+		filePathBuilder, ok := rb.Field(0).(*array.StringBuilder)
+		if !ok {
+			return nil, fmt.Errorf("file path field is not a string")
+		}
+		posBuilder, ok := rb.Field(1).(*array.Int64Builder)
+		if !ok {
+			return nil, fmt.Errorf("pos field is not a int64")
+		}
 		for i := startPos; i < nextIdx; i++ {
-			rb.Field(0).(*array.StringBuilder).Append(filePath.FilePath())
-			rb.Field(1).(*array.Int64Builder).Append(i)
+			filePathBuilder.Append(filePath.FilePath())
+			posBuilder.Append(i)
 		}
 
 		newCols := rb.NewRecordBatch()
