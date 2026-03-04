@@ -19,7 +19,6 @@ package table
 
 import (
 	"context"
-	"errors"
 	"io"
 	"iter"
 	"strconv"
@@ -197,48 +196,32 @@ func processPositionalDeletes(ctx context.Context, deletes set[int64]) recProces
 // preserve the original position of those records.
 func enrichRecordsWithPosDeleteFields(ctx context.Context, filePath iceberg.DataFile) recProcessFn {
 	nextIdx, mem := int64(0), compute.GetAllocator(ctx)
-	filePathField, ok := PositionalDeleteArrowSchema.FieldsByName("file_path")
-	if !ok {
-		panic("position delete schema should have required field 'file_path'")
-	}
-	posField, ok := PositionalDeleteArrowSchema.FieldsByName("pos")
-	if !ok {
-		panic("position delete schema should have required field 'pos'")
-	}
-
-	newColsSchema := arrow.NewSchema([]arrow.Field{filePathField[0], posField[0]}, nil)
 
 	return func(inData arrow.RecordBatch) (outData arrow.RecordBatch, err error) {
 		defer inData.Release()
 
 		schema := inData.Schema()
 		fieldIdx := schema.NumFields()
-		schema, err = schema.AddField(fieldIdx, filePathField[0])
+		schema, err = schema.AddField(fieldIdx, PositionalDeleteArrowSchema.Field(0))
 		if err != nil {
 			return nil, err
 		}
-		schema, err = schema.AddField(fieldIdx+1, posField[0])
+		schema, err = schema.AddField(fieldIdx+1, PositionalDeleteArrowSchema.Field(1))
 		if err != nil {
 			return nil, err
 		}
 
-		rb := array.NewRecordBuilder(mem, newColsSchema)
+		rb := array.NewRecordBuilder(mem, PositionalDeleteArrowSchema)
 		defer rb.Release()
+
+		filePathBldr, posBldr := rb.Field(0).(*array.StringBuilder), rb.Field(1).(*array.Int64Builder)
 
 		startPos := nextIdx
 		nextIdx += inData.NumRows()
 
-		filePathBuilder, ok := rb.Field(0).(*array.StringBuilder)
-		if !ok {
-			return nil, errors.New("file path field is not a string")
-		}
-		posBuilder, ok := rb.Field(1).(*array.Int64Builder)
-		if !ok {
-			return nil, errors.New("pos field is not a int64")
-		}
 		for i := startPos; i < nextIdx; i++ {
-			filePathBuilder.Append(filePath.FilePath())
-			posBuilder.Append(i)
+			filePathBldr.Append(filePath.FilePath())
+			posBldr.Append(i)
 		}
 
 		newCols := rb.NewRecordBatch()
