@@ -320,11 +320,9 @@ func (w *ParquetFileWriter) Write(batch arrow.RecordBatch) error {
 	return w.pqWriter.WriteBuffered(batch)
 }
 
-// BytesWritten returns flushed bytes plus compressed bytes buffered in the
-// current row group — matching the size estimate used by iceberg-java and
-// iceberg-rust to make rolling decisions.
+// BytesWritten returns the number of bytes flushed to the output so far.
 func (w *ParquetFileWriter) BytesWritten() int64 {
-	return w.counter.Count + w.pqWriter.RowGroupTotalCompressedBytes()
+	return w.counter.Count
 }
 
 // Close finalizes the Parquet file and returns the resulting DataFile with
