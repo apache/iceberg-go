@@ -2478,6 +2478,110 @@ func (r *RestCatalogSuite) TestCreateView404() {
 	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
+func (r *RestCatalogSuite) TestRegisterView200() {
+	const (
+		ns          = "fokko"
+		viewName    = "myview"
+		metadataLoc = "s3://bucket/warehouse/fokko.db/myview/metadata/00001.metadata.json"
+	)
+	identifier := table.Identifier{ns, viewName}
+
+	r.mux.HandleFunc("/v1/namespaces/"+ns+"/register-view", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		var payload struct {
+			Name        string `json:"name"`
+			MetadataLoc string `json:"metadata-location"`
+		}
+		r.NoError(json.NewDecoder(req.Body).Decode(&payload))
+		r.Equal(viewName, payload.Name)
+		r.Equal(metadataLoc, payload.MetadataLoc)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"metadata-location": %q, "metadata": %s, "config": {}}`,
+			metadataLoc, exampleViewMetadataJSON)
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	v, err := cat.RegisterView(context.Background(), identifier, metadataLoc)
+	r.Require().NoError(err)
+
+	r.Equal(identifier, v.Identifier())
+	r.Equal(metadataLoc, v.MetadataLocation())
+	r.Equal(uuid.MustParse("a1b2c3d4-e5f6-7890-1234-567890abcdef"), v.Metadata().ViewUUID())
+	r.EqualValues(1, v.Metadata().CurrentVersionID())
+	r.Equal(exampleViewSQL, v.Metadata().CurrentVersion().Representations[0].Sql)
+}
+
+func (r *RestCatalogSuite) TestRegisterView404() {
+	const (
+		ns          = "nonexistent"
+		viewName    = "myview"
+		metadataLoc = "s3://bucket/warehouse/nonexistent.db/myview/metadata/00001.metadata.json"
+	)
+
+	r.mux.HandleFunc("/v1/namespaces/"+ns+"/register-view", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]any{"error": errorResponse{
+			Message: "The given namespace does not exist",
+			Type:    "NoSuchNamespaceException",
+			Code:    404,
+		}})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.RegisterView(context.Background(), catalog.ToIdentifier(ns, viewName), metadataLoc)
+	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	r.ErrorContains(err, "The given namespace does not exist")
+}
+
+func (r *RestCatalogSuite) TestRegisterView409() {
+	const (
+		ns          = "fokko"
+		viewName    = "alreadyexists"
+		metadataLoc = "s3://bucket/warehouse/fokko.db/alreadyexists/metadata/00001.metadata.json"
+	)
+
+	r.mux.HandleFunc("/v1/namespaces/"+ns+"/register-view", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]any{"error": errorResponse{
+			Message: "The given view already exists",
+			Type:    "AlreadyExistsException",
+			Code:    409,
+		}})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.RegisterView(context.Background(), catalog.ToIdentifier(ns, viewName), metadataLoc)
+	r.ErrorIs(err, catalog.ErrViewAlreadyExists)
+	r.ErrorContains(err, "The given view already exists")
+}
+
 type mockTransport struct {
 	calls []struct {
 		method, path string
