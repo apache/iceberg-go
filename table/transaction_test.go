@@ -27,9 +27,12 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
+	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/rest"
@@ -37,6 +40,7 @@ import (
 	iceio "github.com/apache/iceberg-go/io"
 	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/apache/iceberg-go/table"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"github.com/testcontainers/testcontainers-go/modules/compose"
 )
@@ -648,6 +652,127 @@ func (s *SparkIntegrationTestSuite) TestDeleteMergeOnReadPartitioned() {
 |alan      |gopher   |7  |
 |uncle     |gopher   |90 |
 +----------+---------+---+`)
+}
+
+func (s *SparkIntegrationTestSuite) TestVariantType() {
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "variant_col", Type: iceberg.PrimitiveTypes.Variant},
+	)
+
+	// Variant type requires format version 3
+	tbl, err := s.cat.CreateTable(
+		s.ctx,
+		catalog.ToIdentifier("default", "go_test_variant"),
+		icebergSchema,
+		catalog.WithProperties(iceberg.Properties{table.PropertyFormatVersion: "3"}),
+	)
+	s.Require().NoError(err)
+
+	arrowSchema, err := table.SchemaToArrowSchema(icebergSchema, nil, true, false)
+	s.Require().NoError(err)
+
+	// Build Arrow table with Variant data using the variant extension type
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(s.T(), 0)
+
+	// Create builders
+	intBldr := array.NewInt32Builder(mem)
+	defer intBldr.Release()
+
+	variantBldr := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
+	defer variantBldr.Release()
+
+	// Row 1: integer value in variant
+	intBldr.Append(1)
+	variantBldr.Append(mustVariant(s.T(), int32(42)))
+
+	// Row 2: string value in variant
+	intBldr.Append(2)
+	variantBldr.Append(mustVariant(s.T(), "hello"))
+
+	// Row 3: null variant
+	intBldr.Append(3)
+	variantBldr.AppendNull()
+
+	// Row 4: object value in variant
+	intBldr.Append(4)
+	variantBldr.Append(mustVariant(s.T(), map[string]any{
+		"name":  "test",
+		"value": int64(123),
+	}))
+
+	// Build arrays
+	idArr := intBldr.NewInt32Array()
+	defer idArr.Release()
+	variantArr := variantBldr.NewArray().(*extensions.VariantArray)
+	defer variantArr.Release()
+
+	// Create record batch
+	rec := array.NewRecord(arrowSchema, []arrow.Array{idArr, variantArr}, int64(idArr.Len()))
+	defer rec.Release()
+
+	// Convert to Arrow Table
+	arrTable := array.NewTableFromRecords(arrowSchema, []arrow.Record{rec})
+	s.Require().NotNil(arrTable)
+	defer arrTable.Release()
+
+	// Write data to Iceberg table
+	tx := tbl.NewTransaction()
+	s.Require().NoError(tx.AppendTable(s.ctx, arrTable, 1000, nil))
+	_, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	// Read back and verify the data
+	ctx := compute.WithAllocator(s.ctx, mem)
+	results, err := tbl.Scan().ToArrowTable(ctx)
+	s.Require().NoError(err)
+	defer results.Release()
+
+	s.EqualValues(4, results.NumRows())
+	s.EqualValues(2, results.NumCols())
+
+	// Verify schema
+	s.True(arrowSchema.Equal(results.Schema()),
+		"expected: %s\ngot: %s\n", arrowSchema, results.Schema())
+
+	// Verify ID column
+	idCol := results.Column(0).Data().Chunk(0).(*array.Int32)
+	s.EqualValues(1, idCol.Value(0))
+	s.EqualValues(2, idCol.Value(1))
+	s.EqualValues(3, idCol.Value(2))
+	s.EqualValues(4, idCol.Value(3))
+
+	// Verify Variant column
+	variantCol := results.Column(1).Data().Chunk(0).(*extensions.VariantArray)
+	s.False(variantCol.IsNull(0))
+	s.False(variantCol.IsNull(1))
+	s.True(variantCol.IsNull(2))
+	s.False(variantCol.IsNull(3))
+
+	// Verify variant values
+	val0, err := variantCol.Value(0)
+	s.Require().NoError(err)
+	s.EqualValues(int32(42), val0.Value())
+
+	val1, err := variantCol.Value(1)
+	s.Require().NoError(err)
+	s.EqualValues("hello", val1.Value())
+
+	val3, err := variantCol.Value(3)
+	s.Require().NoError(err)
+	objVal, ok := val3.Value().(variant.ObjectValue)
+	s.True(ok, "expected ObjectValue, got %T", val3.Value())
+	s.EqualValues(2, objVal.NumElements())
+}
+
+// mustVariant is a helper to create variant values from any supported type
+func mustVariant(t *testing.T, v any) variant.Value {
+	var b variant.Builder
+	require.NoError(t, b.Append(v))
+	val, err := b.Build()
+	require.NoError(t, err)
+	return val
 }
 
 func TestSparkIntegration(t *testing.T) {

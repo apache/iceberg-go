@@ -351,9 +351,12 @@ func (c convertToIceberg) Primitive(dt arrow.DataType) (result iceberg.NestedFie
 	case *arrow.FixedSizeBinaryType:
 		result.Type = iceberg.FixedTypeOf(dt.ByteWidth)
 	case arrow.ExtensionType:
-		if dt.ExtensionName() == "arrow.uuid" {
+		switch dt.ExtensionName() {
+		case "arrow.uuid":
 			result.Type = iceberg.PrimitiveTypes.UUID
-		} else {
+		case "parquet.variant":
+			result.Type = iceberg.PrimitiveTypes.Variant
+		default:
 			panic(fmt.Errorf("%w: unsupported arrow type for conversion - %s", iceberg.ErrInvalidSchema, dt))
 		}
 	default:
@@ -622,6 +625,22 @@ func (c convertToArrow) VisitUnknown() arrow.Field {
 	return arrow.Field{
 		Type: extensions.NewOpaqueType(arrow.Null, "unknown", "apache.iceberg"),
 	}
+}
+
+func (c convertToArrow) VisitVariant() arrow.Field {
+	// Use the Arrow Variant extension type (available since arrow-go v18.4.0)
+	// per the Parquet Variant specification.
+	// See: https://pkg.go.dev/github.com/apache/arrow-go/v18/arrow/extensions#VariantType
+	if c.useLargeTypes {
+		vt, _ := extensions.NewVariantType(arrow.StructOf(
+			arrow.Field{Name: "metadata", Type: arrow.BinaryTypes.LargeBinary, Nullable: false},
+			arrow.Field{Name: "value", Type: arrow.BinaryTypes.LargeBinary, Nullable: false},
+		))
+
+		return arrow.Field{Type: vt}
+	}
+
+	return arrow.Field{Type: extensions.NewDefaultVariantType()}
 }
 
 var _ iceberg.SchemaVisitorPerPrimitiveType[arrow.Field] = convertToArrow{}
@@ -1165,6 +1184,10 @@ func (a *arrowStatsCollector) Primitive(dt iceberg.PrimitiveType) []tblutils.Sta
 
 	isNested := strings.Contains(colName, ".")
 	if isNested && (metMode.Typ == tblutils.MetricModeTruncate || metMode.Typ == tblutils.MetricModeFull) {
+		metMode = tblutils.MetricsMode{Typ: tblutils.MetricModeCounts}
+	}
+
+	if _, ok := dt.(iceberg.VariantType); ok {
 		metMode = tblutils.MetricsMode{Typ: tblutils.MetricModeCounts}
 	}
 
