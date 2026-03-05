@@ -27,6 +27,7 @@ import (
 	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -1583,6 +1584,20 @@ const (
 	OrcFile     FileFormat = "ORC"
 	ParquetFile FileFormat = "PARQUET"
 )
+
+// FileFormatFromString parses a file format string (case-insensitive).
+func FileFormatFromString(s string) (FileFormat, error) {
+	switch strings.ToUpper(s) {
+	case string(ParquetFile):
+		return ParquetFile, nil
+	case string(OrcFile):
+		return OrcFile, nil
+	case string(AvroFile):
+		return AvroFile, nil
+	default:
+		return "", fmt.Errorf("unknown file format: %s", s)
+	}
+}
 
 type colMap[K, V any] struct {
 	Key   K `avro:"key"`

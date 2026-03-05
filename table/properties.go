@@ -79,6 +79,9 @@ const (
 	MetadataCompressionKey     = "write.metadata.compression-codec"
 	MetadataCompressionDefault = "none"
 
+	WriteFormatDefaultKey     = "write.format.default"
+	WriteFormatDefaultDefault = "parquet"
+
 	WriteTargetFileSizeBytesKey     = "write.target-file-size-bytes"
 	WriteTargetFileSizeBytesDefault = 512 * 1024 * 1024 // 512 MB
 
