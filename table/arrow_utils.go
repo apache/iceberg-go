@@ -1244,7 +1244,7 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 
 			partitionValues := make(map[int]any)
 			if !currentSpec.Equals(*iceberg.UnpartitionedSpec) {
-				for field := range currentSpec.Fields() {
+				for _, field := range currentSpec.Fields() {
 					if !field.Transform.PreservesOrder() {
 						yield(nil, fmt.Errorf("cannot infer partition value from parquet metadata for a non-linear partition field: %s with transform %s", field.Name, field.Transform))
 

@@ -445,7 +445,7 @@ func validateDataFilePartitionData(df iceberg.DataFile, spec *iceberg.PartitionS
 	partitionData := df.Partition()
 
 	expectedFieldIDs := make(map[int]string)
-	for field := range spec.Fields() {
+	for _, field := range spec.Fields() {
 		expectedFieldIDs[field.FieldID] = field.Name
 		if _, ok := partitionData[field.FieldID]; !ok {
 			return fmt.Errorf("missing partition value for field id %d (%s)", field.FieldID, field.Name)

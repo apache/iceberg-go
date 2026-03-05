@@ -144,8 +144,8 @@ func (s SortOrder) OrderID() int {
 	return s.orderID
 }
 
-func (s SortOrder) Fields() iter.Seq[SortField] {
-	return slices.Values(s.fields)
+func (s SortOrder) Fields() iter.Seq2[int, SortField] {
+	return slices.All(s.fields)
 }
 
 func (s SortOrder) Len() int {

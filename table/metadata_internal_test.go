@@ -750,6 +750,11 @@ func TestNewMetadataWithExplicitV1Format(t *testing.T) {
 	require.NoError(t, err)
 
 	lastPartitionID := 1000
+	partitionFields := make([]iceberg.PartitionField, 0)
+	for _, field := range expectedSpec.Fields() {
+		partitionFields = append(partitionFields, field)
+	}
+
 	expected := &metadataV1{
 		commonMetadata: commonMetadata{
 			Loc:                "s3://some_v1_location/",
@@ -766,7 +771,7 @@ func TestNewMetadataWithExplicitV1Format(t *testing.T) {
 			FormatVersion:      1,
 		},
 		Schema:    expectedSchema,
-		Partition: slices.Collect(expectedSpec.Fields()),
+		Partition: partitionFields,
 	}
 
 	assert.Truef(t, expected.Equals(actual), "expected: %s\ngot: %s", expected, actual)
