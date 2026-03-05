@@ -20,7 +20,6 @@ package table
 import (
 	"errors"
 	"fmt"
-	"slices"
 
 	"github.com/apache/iceberg-go"
 )
@@ -58,7 +57,7 @@ func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 	transformToField := make(map[transformKey]iceberg.PartitionField)
 	nameToField := make(map[string]iceberg.PartitionField)
 	partitionSpec := t.tbl.Metadata().PartitionSpec()
-	for partitionField := range partitionSpec.Fields() {
+	for _, partitionField := range partitionSpec.Fields() {
 		transformToField[transformKey{
 			SourceId:  partitionField.SourceID,
 			Transform: partitionField.Transform.String(),
@@ -140,7 +139,7 @@ func (us *UpdateSpec) Apply() (iceberg.PartitionSpec, error) {
 	partitionFields := make([]iceberg.PartitionField, 0)
 	partitionNames := make(map[string]bool)
 	spec := us.txn.tbl.Metadata().PartitionSpec()
-	for field := range spec.Fields() {
+	for _, field := range spec.Fields() {
 		var newField iceberg.PartitionField
 		var err error
 		if _, deleted := us.deletes[field.FieldID]; !deleted {
@@ -326,7 +325,9 @@ func (us *UpdateSpec) partitionField(key transformKey, name string) (iceberg.Par
 		sourceId, transform := key.SourceId, key.Transform
 		historicalFields := make([]iceberg.PartitionField, 0)
 		for _, spec := range us.txn.tbl.Metadata().PartitionSpecs() {
-			historicalFields = slices.AppendSeq(historicalFields, spec.Fields())
+			for _, field := range spec.Fields() {
+				historicalFields = append(historicalFields, field)
+			}
 		}
 		for _, field := range historicalFields {
 			if field.SourceID == sourceId && field.Transform.String() == transform {

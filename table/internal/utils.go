@@ -241,7 +241,7 @@ func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.Par
 
 	if !spec.Equals(*iceberg.UnpartitionedSpec) {
 		fieldIDToPartitionData = make(map[int]any)
-		for field := range spec.Fields() {
+		for _, field := range spec.Fields() {
 			partitionVal := partitionValues[field.FieldID]
 			if partitionVal != nil {
 				val := d.PartitionValue(field, schema)

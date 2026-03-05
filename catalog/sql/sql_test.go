@@ -423,7 +423,7 @@ func (s *SqliteCatalogTestSuite) TestCreateTableCustomSortOrder() {
 		s.Equal(1, tbl.SortOrder().OrderID())
 		s.Equal(tbl.SortOrder().Len(), 1)
 
-		for f := range tbl.SortOrder().Fields() {
+		for _, f := range tbl.SortOrder().Fields() {
 			s.Equal(table.SortASC, f.Direction)
 			s.Equal(table.NullsFirst, f.NullOrder)
 			s.Equal("identity", f.Transform.String())

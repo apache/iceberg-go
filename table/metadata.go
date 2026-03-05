@@ -368,7 +368,7 @@ func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial 
 
 	maxFieldID := 0
 	fieldCount := 0
-	for f := range freshSpec.Fields() {
+	for _, f := range freshSpec.Fields() {
 		maxFieldID = max(maxFieldID, f.FieldID)
 		if b.formatVersion <= 1 {
 			expectedID := partitionFieldStartID + fieldCount
@@ -1006,7 +1006,7 @@ func (b *MetadataBuilder) Build() (Metadata, error) {
 		}
 
 		partitionFields := make([]iceberg.PartitionField, 0)
-		for f := range partition.Fields() {
+		for _, f := range partition.Fields() {
 			partitionFields = append(partitionFields, f)
 		}
 
@@ -1986,7 +1986,7 @@ func reassignIDs(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, sortOrde
 		partitions = iceberg.UnpartitionedSpec
 	}
 	opts := make([]iceberg.PartitionOption, 0)
-	for f := range partitions.Fields() {
+	for _, f := range partitions.Fields() {
 		var s string
 		var ok bool
 		if s, ok = previousMapFn(f.SourceID); !ok {
