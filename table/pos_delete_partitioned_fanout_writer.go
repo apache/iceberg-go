@@ -21,8 +21,6 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"maps"
-	"slices"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -132,10 +130,18 @@ func (p *positionDeletePartitionedFanoutWriter) processBatch(ctx context.Context
 }
 
 func (p *positionDeletePartitionedFanoutWriter) partitionPath(partitionContext partitionContext) (string, error) {
-	data := partitionRecord(slices.Collect(maps.Values(partitionContext.partitionData)))
 	spec := p.metadata.PartitionSpecByID(int(partitionContext.specID))
 	if spec == nil {
 		return "", fmt.Errorf("unexpected missing partition spec in metadata for spec id %d", partitionContext.specID)
+	}
+
+	data := make(partitionRecord, spec.NumFields())
+	for i, field := range spec.Fields() {
+		val, ok := partitionContext.partitionData[field.FieldID]
+		if !ok {
+			return "", fmt.Errorf("unexpected missing partition value for field id %d in spec id %d", field.FieldID, partitionContext.specID)
+		}
+		data[i] = val
 	}
 
 	return spec.PartitionToPath(data, p.schema), nil
