@@ -481,12 +481,15 @@ type ManifestTestSuite struct {
 }
 
 func (m *ManifestTestSuite) writeManifestList() {
-	m.Require().NoError(WriteManifestList(1, &m.v1ManifestList, snapshotID, nil, nil, 0, manifestFileRecordsV1))
+	err := WriteManifestList(1, &m.v1ManifestList, snapshotID, nil, nil, 0, manifestFileRecordsV1)
+	m.Require().NoError(err)
 	unassignedSequenceNum := int64(-1)
-	m.Require().NoError(WriteManifestList(2, &m.v2ManifestList, snapshotID, nil, &unassignedSequenceNum, 0, manifestFileRecordsV2))
+	err = WriteManifestList(2, &m.v2ManifestList, snapshotID, nil, &unassignedSequenceNum, 0, manifestFileRecordsV2)
+	m.Require().NoError(err)
 	v3SequenceNum := int64(5)
 	firstRowID := int64(1000)
-	m.Require().NoError(WriteManifestList(3, &m.v3ManifestList, snapshotID, nil, &v3SequenceNum, firstRowID, manifestFileRecordsV3))
+	err = WriteManifestList(3, &m.v3ManifestList, snapshotID, nil, &v3SequenceNum, firstRowID, manifestFileRecordsV3)
+	m.Require().NoError(err)
 }
 
 func (m *ManifestTestSuite) writeManifestEntries() {
@@ -760,11 +763,73 @@ func (m *ManifestTestSuite) TestReadManifestListV3() {
 	m.Nil(list[0].KeyMetadata())
 	m.Zero(list[0].PartitionSpecID())
 
+	// V3 manifest list assigns first_row_id to data manifests
+	m.Require().NotNil(list[0].FirstRowID(), "v3 data manifest should have first_row_id")
+	m.EqualValues(1000, *list[0].FirstRowID())
+
 	part := list[0].Partitions()[0]
 	m.True(part.ContainsNull)
 	m.False(*part.ContainsNaN)
 	m.Equal([]byte{0x01, 0x00, 0x00, 0x00}, *part.LowerBound)
 	m.Equal([]byte{0x02, 0x00, 0x00, 0x00}, *part.UpperBound)
+}
+
+func (m *ManifestTestSuite) TestV3DataManifestFirstRowIDInheritance() {
+	// Build a v3 data manifest with two entries that have null first_row_id.
+	partitionSpec := NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceID: 1, Name: "x", Transform: IdentityTransform{}})
+	firstCount, secondCount := int64(10), int64(20)
+	entriesWithNullFirstRowID := []ManifestEntry{
+		&manifestEntry{
+			EntryStatus: EntryStatusADDED,
+			Snapshot:    &entrySnapshotID,
+			Data: &dataFile{
+				Content:          EntryContentData,
+				Path:             "/data/file1.parquet",
+				Format:           ParquetFile,
+				PartitionData:    map[string]any{"x": int(1)},
+				RecordCount:      firstCount,
+				FileSize:         1000,
+				BlockSizeInBytes: 64 * 1024,
+				FirstRowIDField:  nil, // null so reader will inherit
+			},
+		},
+		&manifestEntry{
+			EntryStatus: EntryStatusADDED,
+			Snapshot:    &entrySnapshotID,
+			Data: &dataFile{
+				Content:          EntryContentData,
+				Path:             "/data/file2.parquet",
+				Format:           ParquetFile,
+				PartitionData:    map[string]any{"x": int(2)},
+				RecordCount:      secondCount,
+				FileSize:         2000,
+				BlockSizeInBytes: 64 * 1024,
+				FirstRowIDField:  nil,
+			},
+		},
+	}
+	var manifestBuf bytes.Buffer
+	_, err := WriteManifest("/manifest.avro", &manifestBuf, 3, partitionSpec, testSchema, entrySnapshotID, entriesWithNullFirstRowID)
+	m.Require().NoError(err)
+
+	manifestFirstRowID := int64(1000)
+	file := &manifestFile{
+		version:         3,
+		Path:            "/manifest.avro",
+		Content:         ManifestContentData,
+		FirstRowIDValue: &manifestFirstRowID,
+	}
+	entries, err := ReadManifest(file, bytes.NewReader(manifestBuf.Bytes()), false)
+	m.Require().NoError(err)
+	m.Require().Len(entries, 2)
+
+	// First entry gets manifest's first_row_id
+	m.Require().NotNil(entries[0].DataFile().FirstRowID())
+	m.EqualValues(1000, *entries[0].DataFile().FirstRowID())
+	// Second entry gets previous + previous file's record_count
+	m.Require().NotNil(entries[1].DataFile().FirstRowID())
+	m.EqualValues(1000+firstCount, *entries[1].DataFile().FirstRowID())
 }
 
 func (m *ManifestTestSuite) TestReadManifestListIncompleteSchema() {
@@ -1529,11 +1594,11 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterPersistsPerManifestFirstRowI
 	m.Require().True(ok, "expected v3 manifest file type")
 	secondManifest, ok := list[1].(*manifestFile)
 	m.Require().True(ok, "expected v3 manifest file type")
-	m.Require().NotNil(firstManifest.FirstRowId)
-	m.Require().NotNil(secondManifest.FirstRowId)
+	m.Require().NotNil(firstManifest.FirstRowID(), "first manifest should have first_row_id")
+	m.Require().NotNil(secondManifest.FirstRowID(), "second manifest should have first_row_id")
 
-	m.EqualValues(5000, *firstManifest.FirstRowId) // start of first range
-	m.EqualValues(5015, *secondManifest.FirstRowId)
+	m.EqualValues(5000, *firstManifest.FirstRowID()) // start of first range
+	m.EqualValues(5015, *secondManifest.FirstRowID())
 	m.EqualValues(5022, *writer.NextRowID())
 }
 
