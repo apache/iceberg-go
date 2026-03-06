@@ -463,7 +463,12 @@ func synthesizeRowLineageColumns(
 	// Advance so the next batch from this file uses the correct row position for _row_id.
 	*rowOffset += nrows
 
-	return array.NewRecordBatch(schema, newCols, nrows), nil
+	rec := array.NewRecordBatch(schema, newCols, nrows)
+	for _, c := range newCols {
+		c.Release()
+	}
+
+	return rec, nil
 }
 
 func (as *arrowScan) processRecords(
