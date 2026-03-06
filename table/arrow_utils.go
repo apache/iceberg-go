@@ -1373,6 +1373,7 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 		return cw.writeFiles(ctx, rootLocation, args.fs, meta, meta.props, nil, tasks)
 	}
 
+	stopCount()
 	factory := NewWriterFactory(rootLocation, args, meta, taskSchema, targetFileSize)
 	partitionWriter := newPartitionedFanoutWriter(*currentSpec, cw, meta.CurrentSchema(), args.itr, &factory)
 	workers := config.EnvConfig.MaxWorkers
@@ -1448,6 +1449,7 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 
 		return cw.writeFiles(ctx, rootLocation, args.fs, meta, meta.props, nil, tasks)
 	}
+	stopCount()
 	writerFactory := NewWriterFactory(rootLocation, args, meta, iceberg.PositionalDeleteSchema, targetFileSize)
 	partitionWriter := newPositionDeletePartitionedFanoutWriter(latestMetadata, cw, partitionContextByFilePath, args.itr, &writerFactory)
 	workers := config.EnvConfig.MaxWorkers
