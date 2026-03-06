@@ -18,7 +18,6 @@
 package table
 
 import (
-	"context"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -27,6 +26,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -239,7 +239,9 @@ func TestBuildPartitionEvaluatorWithInvalidSpecID(t *testing.T) {
 // TestSynthesizeRowLineageColumns verifies that _row_id and _last_updated_sequence_number
 // are filled from task constants when those columns are present and null.
 func TestSynthesizeRowLineageColumns(t *testing.T) {
-	ctx := context.Background()
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	ctx := compute.WithAllocator(t.Context(), mem)
+	defer mem.AssertSize(t, 0)
 	firstRowID := int64(1000)
 	dataSeqNum := int64(5)
 	task := FileScanTask{FirstRowID: &firstRowID, DataSequenceNumber: &dataSeqNum}
@@ -255,21 +257,23 @@ func TestSynthesizeRowLineageColumns(t *testing.T) {
 		nil,
 	)
 	const nrows = 3
-	xBldr := array.NewInt64Builder(compute.GetAllocator(ctx))
+	xBldr := array.NewInt64Builder(mem)
 	defer xBldr.Release()
 	xBldr.AppendValues([]int64{1, 2, 3}, nil)
-	rowIDBldr := array.NewInt64Builder(compute.GetAllocator(ctx))
+	rowIDBldr := array.NewInt64Builder(mem)
 	defer rowIDBldr.Release()
 	rowIDBldr.AppendNulls(nrows)
-	seqBldr := array.NewInt64Builder(compute.GetAllocator(ctx))
+	seqBldr := array.NewInt64Builder(mem)
 	defer seqBldr.Release()
 	seqBldr.AppendNulls(nrows)
 
-	batch := array.NewRecordBatch(schema, []arrow.Array{
-		xBldr.NewArray(),
-		rowIDBldr.NewArray(),
-		seqBldr.NewArray(),
-	}, nrows)
+	xArr := xBldr.NewArray()
+	rowIDArr := rowIDBldr.NewArray()
+	seqArr := seqBldr.NewArray()
+	batch := array.NewRecordBatch(schema, []arrow.Array{xArr, rowIDArr, seqArr}, nrows)
+	xArr.Release()
+	rowIDArr.Release()
+	seqArr.Release()
 	defer batch.Release()
 
 	out, err := synthesizeRowLineageColumns(ctx, &rowOffset, task, batch)
