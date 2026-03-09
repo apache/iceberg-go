@@ -304,6 +304,8 @@ func (m *manifestFileV1) Partitions() []FieldSummary {
 	return *m.PartitionList
 }
 
+func (*manifestFileV1) FirstRowID() *int64 { return nil }
+
 func (m *manifestFileV1) FetchEntries(fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error) {
 	return fetchManifestEntries(m, fs, discardDeleted)
 }
@@ -324,7 +326,7 @@ type manifestFile struct {
 	DeletedRowsCount   int64           `avro:"deleted_rows_count"`
 	PartitionList      *[]FieldSummary `avro:"partitions"`
 	Key                []byte          `avro:"key_metadata"`
-	FirstRowId         *int64          `avro:"first_row_id"`
+	FirstRowIDValue    *int64          `avro:"first_row_id"`
 
 	version int `avro:"-"`
 }
@@ -400,6 +402,8 @@ func (m *manifestFile) Partitions() []FieldSummary {
 
 	return *m.PartitionList
 }
+
+func (m *manifestFile) FirstRowID() *int64 { return m.FirstRowIDValue }
 
 func (m *manifestFile) HasAddedFiles() bool    { return m.AddedFilesCount != 0 }
 func (m *manifestFile) HasExistingFiles() bool { return m.ExistingFilesCount != 0 }
@@ -521,6 +525,9 @@ type ManifestFile interface {
 	// field in the spec. Each field in the list corresponds to a field in
 	// the manifest file's partition spec.
 	Partitions() []FieldSummary
+	// FirstRowID returns the first _row_id assigned to rows in this manifest (v3+ data manifests only).
+	// Returns nil for v1/v2 or for delete manifests.
+	FirstRowID() *int64
 
 	// HasAddedFiles returns true if AddedDataFiles > 0 or if it was null.
 	HasAddedFiles() bool
@@ -596,6 +603,14 @@ type ManifestReader struct {
 	schemaLoaded        bool
 	partitionSpec       PartitionSpec
 	partitionSpecLoaded bool
+
+	// inheritRowIDs controls whether this reader should apply First Row ID inheritance
+	// for v3 data manifests (spec: First Row ID Inheritance).
+	inheritRowIDs bool
+	// nextFirstRowID tracks the next first_row_id to assign when reading v3 data
+	// manifests; used for First Row ID inheritance (null data file first_row_id
+	// gets manifest's first_row_id + sum of preceding files' record_count).
+	nextFirstRowID int64
 }
 
 // NewManifestReader returns a value that can read the contents of an avro manifest
@@ -655,15 +670,25 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 	}
 	fieldNameToID, fieldIDToType, fieldIDToSize := getFieldIDMap(sc)
 
+	inheritRowIDs := formatVersion >= 3 &&
+		content == ManifestContentData &&
+		file.FirstRowID() != nil
+	var nextFirstRowID int64
+	if inheritRowIDs {
+		nextFirstRowID = *file.FirstRowID()
+	}
+
 	return &ManifestReader{
-		dec:           dec,
-		file:          file,
-		formatVersion: formatVersion,
-		isFallback:    isFallback,
-		content:       content,
-		fieldNameToID: fieldNameToID,
-		fieldIDToType: fieldIDToType,
-		fieldIDToSize: fieldIDToSize,
+		dec:            dec,
+		file:           file,
+		formatVersion:  formatVersion,
+		isFallback:     isFallback,
+		content:        content,
+		fieldNameToID:  fieldNameToID,
+		fieldIDToType:  fieldIDToType,
+		fieldIDToSize:  fieldIDToSize,
+		inheritRowIDs:  inheritRowIDs,
+		nextFirstRowID: nextFirstRowID,
 	}, nil
 }
 
@@ -765,6 +790,17 @@ func (c *ManifestReader) ReadEntry() (ManifestEntry, error) {
 		tmp = tmp.(*fallbackManifestEntry).toEntry()
 	}
 	tmp.inherit(c.file)
+	// Apply first_row_id inheritance for v3 data manifests (spec: First Row ID Inheritance).
+	if c.inheritRowIDs {
+		if df, ok := tmp.DataFile().(*dataFile); ok {
+			if df.FirstRowIDField == nil {
+				id := c.nextFirstRowID
+				df.FirstRowIDField = &id
+			}
+			// Advance for every data file, null or explicit, to match Java semantics.
+			c.nextFirstRowID += df.Count()
+		}
+	}
 	if fieldToIDMap, ok := tmp.DataFile().(hasFieldToIDMap); ok {
 		fieldToIDMap.setFieldNameToIDMap(c.fieldNameToID)
 		fieldToIDMap.setFieldIDToLogicalTypeMap(c.fieldIDToType)
@@ -1442,10 +1478,10 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 			wrapped := *(file.(*manifestFile))
 			if m.version == 3 {
 				// Ref: https://github.com/apache/iceberg/blob/ea2071568dc66148b483a82eefedcd2992b435f7/core/src/main/java/org/apache/iceberg/ManifestListWriter.java#L157-L168
-				if wrapped.Content == ManifestContentData && wrapped.FirstRowId == nil {
+				if wrapped.Content == ManifestContentData && wrapped.FirstRowIDValue == nil {
 					if m.nextRowID != nil {
 						firstRowID := *m.nextRowID
-						wrapped.FirstRowId = &firstRowID
+						wrapped.FirstRowIDValue = &firstRowID
 						*m.nextRowID += wrapped.ExistingRowsCount + wrapped.AddedRowsCount
 					}
 				}
