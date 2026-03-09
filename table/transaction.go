@@ -36,28 +36,60 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// WriteOpt is an option for write operations (Append, AppendTable, AddFiles, etc.).
+type WriteOpt interface {
+	applyWriteOpt(*writeOpts)
+}
+
+type writeOpts struct {
+	branch string
+}
+
+func (o *writeOpts) applyWriteOpt(target *writeOpts) {
+	if o.branch != "" {
+		target.branch = o.branch
+	}
+}
+
+// WithBranch sets the target branch for the write. Default is main.
+func WithBranch(branch string) WriteOpt {
+	return &writeOpts{branch: branch}
+}
+
+func resolveBranch(opts []WriteOpt) string {
+	var o writeOpts
+	for _, opt := range opts {
+		opt.applyWriteOpt(&o)
+	}
+	if o.branch == "" {
+		return MainBranch
+	}
+	return o.branch
+}
+
 type snapshotUpdate struct {
 	txn           *Transaction
 	io            io.WriteFileIO
 	snapshotProps iceberg.Properties
 	operation     Operation
+	branch        string
 }
 
 func (s snapshotUpdate) fastAppend() *snapshotProducer {
-	return newFastAppendFilesProducer(OpAppend, s.txn, s.io, nil, s.snapshotProps)
+	return newFastAppendFilesProducer(OpAppend, s.txn, s.io, nil, s.snapshotProps, s.branch)
 }
 
 func (s snapshotUpdate) mergeOverwrite(commitUUID *uuid.UUID) *snapshotProducer {
 	op := s.operation
-	if s.operation == OpOverwrite && s.txn.meta.currentSnapshot() == nil {
+	if s.operation == OpOverwrite && s.txn.meta.SnapshotIDForRef(s.branch) == nil {
 		op = OpAppend
 	}
 
-	return newOverwriteFilesProducer(op, s.txn, s.io, commitUUID, s.snapshotProps)
+	return newOverwriteFilesProducer(op, s.txn, s.io, commitUUID, s.snapshotProps, s.branch)
 }
 
 func (s snapshotUpdate) mergeAppend() *snapshotProducer {
-	return newMergeAppendFilesProducer(OpAppend, s.txn, s.io, nil, s.snapshotProps)
+	return newMergeAppendFilesProducer(OpAppend, s.txn, s.io, nil, s.snapshotProps, s.branch)
 }
 
 type Transaction struct {
@@ -119,9 +151,9 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 	return nil
 }
 
-func (t *Transaction) appendSnapshotProducer(afs io.IO, props iceberg.Properties) *snapshotProducer {
+func (t *Transaction) appendSnapshotProducer(afs io.IO, props iceberg.Properties, branch string) *snapshotProducer {
 	manifestMerge := t.meta.props.GetBool(ManifestMergeEnabledKey, ManifestMergeEnabledDefault)
-	updateSnapshot := t.updateSnapshot(afs, props, OpAppend)
+	updateSnapshot := t.updateSnapshot(afs, props, OpAppend, branch)
 	if manifestMerge {
 		return updateSnapshot.mergeAppend()
 	}
@@ -129,12 +161,16 @@ func (t *Transaction) appendSnapshotProducer(afs io.IO, props iceberg.Properties
 	return updateSnapshot.fastAppend()
 }
 
-func (t *Transaction) updateSnapshot(fs io.IO, props iceberg.Properties, operation Operation) snapshotUpdate {
+func (t *Transaction) updateSnapshot(fs io.IO, props iceberg.Properties, operation Operation, branch string) snapshotUpdate {
+	if branch == "" {
+		branch = MainBranch
+	}
 	return snapshotUpdate{
 		txn:           t,
 		io:            fs.(io.WriteFileIO),
 		snapshotProps: props,
 		operation:     operation,
+		branch:        branch,
 	}
 }
 
@@ -301,19 +337,20 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	return t.apply(updates, reqs)
 }
 
-func (t *Transaction) AppendTable(ctx context.Context, tbl arrow.Table, batchSize int64, snapshotProps iceberg.Properties) error {
+func (t *Transaction) AppendTable(ctx context.Context, tbl arrow.Table, batchSize int64, snapshotProps iceberg.Properties, opts ...WriteOpt) error {
 	rdr := array.NewTableReader(tbl, batchSize)
 	defer rdr.Release()
 
-	return t.Append(ctx, rdr, snapshotProps)
+	return t.Append(ctx, rdr, snapshotProps, opts...)
 }
 
-func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapshotProps iceberg.Properties) error {
+func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapshotProps iceberg.Properties, opts ...WriteOpt) error {
 	fs, err := t.tbl.fsF(ctx)
 	if err != nil {
 		return err
 	}
-	appendFiles := t.appendSnapshotProducer(fs, snapshotProps)
+	branch := resolveBranch(opts)
+	appendFiles := t.appendSnapshotProducer(fs, snapshotProps, branch)
 	itr := recordsToDataFiles(ctx, t.tbl.Location(), t.meta, recordWritingArgs{
 		sc:        rdr.Schema(),
 		itr:       array.IterFromReader(rdr),
@@ -344,10 +381,10 @@ func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapsh
 // operation is only valid if the data is exactly the same as the previous snapshot.
 //
 // For now, we'll keep using an overwrite operation.
-func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, filesToAdd []string, snapshotProps iceberg.Properties) error {
+func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, filesToAdd []string, snapshotProps iceberg.Properties, opts ...WriteOpt) error {
 	if len(filesToDelete) == 0 {
 		if len(filesToAdd) > 0 {
-			return t.AddFiles(ctx, filesToAdd, snapshotProps, false)
+			return t.AddFiles(ctx, filesToAdd, snapshotProps, false, opts...)
 		}
 	}
 
@@ -372,7 +409,11 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 		return errors.New("add file paths must be unique for ReplaceDataFiles")
 	}
 
-	s := t.meta.currentSnapshot()
+	branch := resolveBranch(opts)
+	var s *Snapshot
+	if sid := t.meta.SnapshotIDForRef(branch); sid != nil {
+		s, _ = t.meta.SnapshotByID(*sid)
+	}
 	if s == nil {
 		return fmt.Errorf("%w: cannot replace files in a table without an existing snapshot", ErrInvalidOperation)
 	}
@@ -413,7 +454,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID)
+	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite, branch).mergeOverwrite(&commitUUID)
 
 	for _, df := range markedForDeletion {
 		updater.deleteDataFile(df)
@@ -435,7 +476,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	return t.apply(updates, reqs)
 }
 
-func (t *Transaction) AddFiles(ctx context.Context, files []string, snapshotProps iceberg.Properties, ignoreDuplicates bool) error {
+func (t *Transaction) AddFiles(ctx context.Context, files []string, snapshotProps iceberg.Properties, ignoreDuplicates bool, opts ...WriteOpt) error {
 	set := make(map[string]string)
 	for _, f := range files {
 		set[f] = f
@@ -484,7 +525,8 @@ func (t *Transaction) AddFiles(ctx context.Context, files []string, snapshotProp
 		return err
 	}
 
-	updater := t.updateSnapshot(fs, snapshotProps, OpAppend).fastAppend()
+	branch := resolveBranch(opts)
+	updater := t.updateSnapshot(fs, snapshotProps, OpAppend, branch).fastAppend()
 
 	dataFiles := filesToDataFiles(ctx, fs, t.meta, slices.Values(files))
 	for df, err := range dataFiles {
@@ -533,6 +575,7 @@ type overwriteOperation struct {
 	concurrency   int
 	filter        iceberg.BooleanExpression
 	caseSensitive bool
+	branch        string
 }
 
 // OverwriteOption applies options to overwrite operations
@@ -568,6 +611,13 @@ func WithOverwriteCaseInsensitive() OverwriteOption {
 	}
 }
 
+// WithOverwriteBranch sets the target branch for the overwrite. Default is main.
+func WithOverwriteBranch(branch string) OverwriteOption {
+	return func(op *overwriteOperation) {
+		op.branch = branch
+	}
+}
+
 // Overwrite overwrites the table data using a RecordReader.
 //
 // An optional filter (see WithOverwriteFilter) determines which existing data to delete or rewrite:
@@ -592,12 +642,16 @@ func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, sna
 		concurrency:   runtime.GOMAXPROCS(0),
 		filter:        iceberg.AlwaysTrue{},
 		caseSensitive: true,
+		branch:        MainBranch,
 	}
 	for _, apply := range opts {
 		apply(&overwrite)
 	}
+	if overwrite.branch == "" {
+		overwrite.branch = MainBranch
+	}
 
-	updater, err := t.performCopyOnWriteDeletion(ctx, OpOverwrite, snapshotProps, overwrite.filter, overwrite.caseSensitive, overwrite.concurrency)
+	updater, err := t.performCopyOnWriteDeletion(ctx, OpOverwrite, snapshotProps, overwrite.filter, overwrite.caseSensitive, overwrite.concurrency, overwrite.branch)
 	if err != nil {
 		return err
 	}
@@ -628,7 +682,7 @@ func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, sna
 	return t.apply(updates, reqs)
 }
 
-func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation Operation, snapshotProps iceberg.Properties, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (*snapshotProducer, error) {
+func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation Operation, snapshotProps iceberg.Properties, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, branch string) (*snapshotProducer, error) {
 	fs, err := t.tbl.fsF(ctx)
 	if err != nil {
 		return nil, err
@@ -646,8 +700,11 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 		}
 	}
 
+	if branch == "" {
+		branch = MainBranch
+	}
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, operation).mergeOverwrite(&commitUUID)
+	updater := t.updateSnapshot(fs, snapshotProps, operation, branch).mergeOverwrite(&commitUUID)
 
 	filesToDelete, filesToRewrite, err := t.classifyFilesForOverwrite(ctx, fs, filter, caseSensitive, concurrency)
 	if err != nil {
@@ -723,7 +780,7 @@ func (t *Transaction) Delete(ctx context.Context, filter iceberg.BooleanExpressi
 	if writeDeleteMode != WriteModeCopyOnWrite {
 		return fmt.Errorf("'%s' is set to '%s' but only '%s' is currently supported", WriteDeleteModeKey, writeDeleteMode, WriteModeCopyOnWrite)
 	}
-	updater, err := t.performCopyOnWriteDeletion(ctx, OpDelete, snapshotProps, filter, deleteOp.caseSensitive, deleteOp.concurrency)
+	updater, err := t.performCopyOnWriteDeletion(ctx, OpDelete, snapshotProps, filter, deleteOp.caseSensitive, deleteOp.concurrency, MainBranch)
 	if err != nil {
 		return err
 	}

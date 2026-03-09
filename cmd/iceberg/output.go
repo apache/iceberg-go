@@ -106,6 +106,23 @@ func (t textOutput) DescribeTable(tbl *table.Table) {
 		WithData(pterm.TableData{
 			{"Current Snapshot", snap},
 		}).Render()
+
+	refsData := pterm.TableData{{"Name", "Type", "Snapshot ID"}}
+	for name, ref := range tbl.Metadata().Refs() {
+		refsData = append(refsData, []string{
+			name,
+			string(ref.SnapshotRefType),
+			strconv.FormatInt(ref.SnapshotID, 10),
+		})
+	}
+	if len(refsData) > 1 {
+		pterm.Println("Refs")
+		pterm.DefaultTable.
+			WithHasHeader(true).
+			WithHeaderRowSeparator("-").
+			WithData(refsData).Render()
+	}
+
 	pterm.DefaultTree.WithRoot(snapshotTreeNode).Render()
 	pterm.Println("Properties")
 	propTable.Render()
@@ -241,12 +258,18 @@ func (j jsonOutput) Identifiers(idList []table.Identifier) {
 
 func (j jsonOutput) DescribeTable(tbl *table.Table) {
 	type dataType struct {
-		Metadata         table.Metadata        `json:"metadata,omitempty"`
-		MetadataLocation string                `json:"metadata-location,omitempty"`
-		SortOrder        table.SortOrder       `json:"sort-order,omitempty"`
-		CurrentSnapshot  *table.Snapshot       `json:"current-snapshot,omitempty"`
-		Spec             iceberg.PartitionSpec `json:"spec,omitempty"`
-		Schema           *iceberg.Schema       `json:"schema,omitempty"`
+		Metadata         table.Metadata               `json:"metadata,omitempty"`
+		MetadataLocation string                       `json:"metadata-location,omitempty"`
+		SortOrder        table.SortOrder              `json:"sort-order,omitempty"`
+		CurrentSnapshot  *table.Snapshot              `json:"current-snapshot,omitempty"`
+		Spec             iceberg.PartitionSpec        `json:"spec,omitempty"`
+		Schema           *iceberg.Schema              `json:"schema,omitempty"`
+		Refs             map[string]table.SnapshotRef `json:"refs,omitempty"`
+	}
+
+	refs := make(map[string]table.SnapshotRef)
+	for name, ref := range tbl.Metadata().Refs() {
+		refs[name] = ref
 	}
 
 	data := dataType{
@@ -256,6 +279,7 @@ func (j jsonOutput) DescribeTable(tbl *table.Table) {
 		CurrentSnapshot:  tbl.CurrentSnapshot(),
 		Spec:             tbl.Spec(),
 		Schema:           tbl.Schema(),
+		Refs:             refs,
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(data); err != nil {
 		j.Error(err)

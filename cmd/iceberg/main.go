@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/apache/iceberg-go"
@@ -46,6 +47,7 @@ Usage:
   iceberg create [options] (namespace | table) IDENTIFIER
   iceberg drop [options] (namespace | table) IDENTIFIER
   iceberg files [options] TABLE_ID [--history]
+  iceberg add-files [options] TABLE_ID FILES... [--branch TEXT] [--ignore-duplicates]
   iceberg rename [options] <from> <to>
   iceberg properties [options] get (namespace | table) IDENTIFIER [PROPNAME]
   iceberg properties [options] set (namespace | table) IDENTIFIER PROPNAME VALUE
@@ -62,6 +64,7 @@ Commands:
   location    Return the location of the table.
   drop        Operations to drop a namespace or table.
   files       List all the files of the table.
+  add-files   Add existing data files to a table.
   rename      Rename a table.
   properties  Properties on tables/namespaces.
 
@@ -69,6 +72,7 @@ Arguments:
   PARENT         Catalog parent namespace
   IDENTIFIER     fully qualified namespace or table
   TABLE_ID       full path to a table
+  FILES          one or more data file paths to add (for add-files)
   PROPNAME       name of a property
   VALUE          value to set
 
@@ -91,7 +95,9 @@ Options:
   --partition-spec TEXT specify partition spec as comma-separated field names(for create table use only)
 						Ex:"field1,field2"
   --sort-order TEXT 	specify sort order as field:direction[:null-order] format(for create table use only)
-						Ex:"field1:asc,field2:desc:nulls-first,field3:asc:nulls-last"`
+						Ex:"field1:asc,field2:desc:nulls-first,field3:asc:nulls-last"
+  --branch TEXT        target branch for add-files [default: main]
+  --ignore-duplicates  allow adding files already referenced by the table`
 
 type Config struct {
 	List     bool `docopt:"list"`
@@ -104,6 +110,7 @@ type Config struct {
 	Create   bool `docopt:"create"`
 	Drop     bool `docopt:"drop"`
 	Files    bool `docopt:"files"`
+	AddFiles bool `docopt:"add-files"`
 	Rename   bool `docopt:"rename"`
 
 	Get    bool `docopt:"get"`
@@ -116,27 +123,30 @@ type Config struct {
 	RenameFrom string `docopt:"<from>"`
 	RenameTo   string `docopt:"<to>"`
 
-	Parent   string `docopt:"PARENT"`
-	Ident    string `docopt:"IDENTIFIER"`
-	TableID  string `docopt:"TABLE_ID"`
-	PropName string `docopt:"PROPNAME"`
-	Value    string `docopt:"VALUE"`
+	Parent     string   `docopt:"PARENT"`
+	Ident      string   `docopt:"IDENTIFIER"`
+	TableID    string   `docopt:"TABLE_ID"`
+	FilesToAdd []string `docopt:"FILES"`
+	PropName   string   `docopt:"PROPNAME"`
+	Value      string   `docopt:"VALUE"`
 
-	Catalog       string `docopt:"--catalog"`
-	URI           string `docopt:"--uri"`
-	Output        string `docopt:"--output"`
-	History       bool   `docopt:"--history"`
-	Cred          string `docopt:"--credential"`
-	Token         string `docopt:"--token"`
-	Warehouse     string `docopt:"--warehouse"`
-	Config        string `docopt:"--config"`
-	Scope         string `docopt:"--scope"`
-	Description   string `docopt:"--description"`
-	LocationURI   string `docopt:"--location-uri"`
-	SchemaStr     string `docopt:"--schema"`
-	TableProps    string `docopt:"--properties"`
-	PartitionSpec string `docopt:"--partition-spec"`
-	SortOrder     string `docopt:"--sort-order"`
+	Catalog          string `docopt:"--catalog"`
+	URI              string `docopt:"--uri"`
+	Output           string `docopt:"--output"`
+	History          bool   `docopt:"--history"`
+	Cred             string `docopt:"--credential"`
+	Token            string `docopt:"--token"`
+	Warehouse        string `docopt:"--warehouse"`
+	Config           string `docopt:"--config"`
+	Scope            string `docopt:"--scope"`
+	Description      string `docopt:"--description"`
+	LocationURI      string `docopt:"--location-uri"`
+	SchemaStr        string `docopt:"--schema"`
+	TableProps       string `docopt:"--properties"`
+	PartitionSpec    string `docopt:"--partition-spec"`
+	SortOrder        string `docopt:"--sort-order"`
+	Branch           string `docopt:"--branch"`
+	IgnoreDuplicates bool   `docopt:"--ignore-duplicates"`
 }
 
 func main() {
@@ -342,6 +352,24 @@ func main() {
 	case cfg.Files:
 		tbl := loadTable(ctx, output, cat, cfg.TableID)
 		output.Files(tbl, cfg.History)
+	case cfg.AddFiles:
+		tbl := loadTable(ctx, output, cat, cfg.TableID)
+		txn := tbl.NewTransaction()
+		var opts []table.WriteOpt
+		if cfg.Branch != "" {
+			opts = append(opts, table.WithBranch(cfg.Branch))
+		}
+		err := txn.AddFiles(ctx, cfg.FilesToAdd, nil, cfg.IgnoreDuplicates, opts...)
+		if err != nil {
+			output.Error(err)
+			os.Exit(1)
+		}
+		_, err = txn.Commit(ctx)
+		if err != nil {
+			output.Error(err)
+			os.Exit(1)
+		}
+		output.Text("Added " + strconv.Itoa(len(cfg.FilesToAdd)) + " file(s) to " + cfg.TableID)
 	}
 }
 

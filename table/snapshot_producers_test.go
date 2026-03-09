@@ -167,7 +167,7 @@ func TestSnapshotProducerManifestsClosesWriterOnError(t *testing.T) {
 	mem := newMemIO(manifestHeaderSize(t, 2, spec, schema), errLimitedWrite)
 	txn := createTestTransaction(t, mem, spec)
 
-	sp := newFastAppendFilesProducer(OpAppend, txn, mem, nil, nil)
+	sp := newFastAppendFilesProducer(OpAppend, txn, mem, nil, nil, MainBranch)
 	validPartition := map[int]any{1000: int32(1)}
 	sp.appendDataFile(newTestDataFile(t, spec, "file://data-1.parquet", validPartition))
 	sp.appendDataFile(newTestDataFile(t, spec, "file://data-2.parquet", nil))
@@ -182,7 +182,7 @@ func TestManifestMergeManagerClosesWriterOnError(t *testing.T) {
 	mem := newMemIO(manifestHeaderSize(t, 2, spec, schema), errLimitedWrite)
 	txn := createTestTransaction(t, mem, spec)
 
-	sp := newFastAppendFilesProducer(OpAppend, txn, mem, nil, nil)
+	sp := newFastAppendFilesProducer(OpAppend, txn, mem, nil, nil, MainBranch)
 	df := newTestDataFile(t, spec, "file://data-1.parquet", nil)
 	entries := []iceberg.ManifestEntry{
 		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &sp.snapshotID, nil, nil, df),
@@ -254,7 +254,7 @@ func TestOverwriteFilesExistingManifestsClosesWriterOnError(t *testing.T) {
 	txn.meta.snapshotList = []Snapshot{snap}
 	txn.meta.currentSnapshotID = &snapshotID
 
-	sp := newOverwriteFilesProducer(OpOverwrite, txn, mem, nil, nil)
+	sp := newOverwriteFilesProducer(OpOverwrite, txn, mem, nil, nil, MainBranch)
 	sp.deleteDataFile(deletedFile)
 
 	_, err = sp.existingManifests()
@@ -369,7 +369,7 @@ func TestManifestWriterClosesUnderlyingFile(t *testing.T) {
 	spec := iceberg.NewPartitionSpec()
 	txn := createTestTransaction(t, trackIO, spec)
 
-	sp := newFastAppendFilesProducer(OpAppend, txn, trackIO, nil, nil)
+	sp := newFastAppendFilesProducer(OpAppend, txn, trackIO, nil, nil, MainBranch)
 	df := newTestDataFile(t, spec, "file://data-1.parquet", nil)
 	sp.appendDataFile(df)
 
@@ -389,7 +389,7 @@ func TestCreateManifestClosesUnderlyingFile(t *testing.T) {
 	txn := createTestTransaction(t, trackIO, spec)
 	schema := simpleSchema()
 
-	sp := newFastAppendFilesProducer(OpAppend, txn, trackIO, nil, nil)
+	sp := newFastAppendFilesProducer(OpAppend, txn, trackIO, nil, nil, MainBranch)
 	df := newTestDataFile(t, spec, "file://data-1.parquet", nil)
 	entries := []iceberg.ManifestEntry{
 		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &sp.snapshotID, nil, nil, df),
@@ -451,7 +451,7 @@ func TestOverwriteExistingManifestsClosesUnderlyingFile(t *testing.T) {
 	txn.meta.snapshotList = []Snapshot{snap}
 	txn.meta.currentSnapshotID = &snapshotID
 
-	sp := newOverwriteFilesProducer(OpOverwrite, txn, trackIO, nil, nil)
+	sp := newOverwriteFilesProducer(OpOverwrite, txn, trackIO, nil, nil, MainBranch)
 	sp.deleteDataFile(deletedFile)
 
 	trackIO.writers = make(map[string]*trackingWriteCloser)
@@ -525,7 +525,7 @@ func TestManifestsClosesWriterWhenDeletedEntriesFails(t *testing.T) {
 	spec := iceberg.NewPartitionSpec()
 	txn := createTestTransaction(t, blockingIO, spec)
 
-	sp := createSnapshotProducer(OpAppend, txn, blockingIO, nil, nil)
+	sp := createSnapshotProducer(OpAppend, txn, blockingIO, nil, nil, MainBranch)
 	errDeletedEntries := errors.New("simulated deletedEntries error")
 	sp.producerImpl = &errorOnDeletedEntries{
 		base:                sp,
@@ -555,4 +555,37 @@ func TestManifestsClosesWriterWhenDeletedEntriesFails(t *testing.T) {
 		writerCount := blockingIO.GetWriterCount()
 		require.Zero(t, writerCount, "expected no writers to be created when deletedEntries is called first")
 	}
+}
+
+// TestCreateSnapshotProducerUsesBranch verifies that createSnapshotProducer sets
+// branch and resolves parentSnapshotID from SnapshotIDForRef(branch).
+func TestCreateSnapshotProducerUsesBranch(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	schemaID := 0
+	const snapID int64 = 42
+	snapshot := Snapshot{
+		SnapshotID:       snapID,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis(),
+		ManifestList:     "table-location/metadata/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+	}
+	require.NoError(t, builder.AddSnapshot(&snapshot))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, snapID, BranchRef))
+	require.NoError(t, builder.SetSnapshotRef("feature", snapID, BranchRef))
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+
+	mem := newMemIO(0, nil)
+	tbl := New(Identifier{"db", "tbl"}, meta, "metadata.json", func(context.Context) (iceio.IO, error) {
+		return mem, nil
+	}, nil)
+	txn := tbl.NewTransaction()
+
+	sp := createSnapshotProducer(OpAppend, txn, mem, nil, nil, "feature")
+	require.Equal(t, "feature", sp.branch)
+	require.Equal(t, snapID, sp.parentSnapshotID)
 }
