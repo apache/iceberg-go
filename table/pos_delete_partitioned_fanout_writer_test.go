@@ -129,14 +129,16 @@ func TestPositionDeletePartitionedFanoutWriterProcessBatch(t *testing.T) {
 			cw := newConcurrentDataFileWriter(func(rootLocation string, fs io.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
 				return newPositionDeleteWriter(rootLocation, fs, meta, props, opts...)
 			})
-			writerFactory := NewWriterFactory(t.TempDir(), recordWritingArgs{
+			factory, err := newWriterFactory(t.TempDir(), recordWritingArgs{
 				fs:        &io.LocalFS{},
 				sc:        PositionalDeleteArrowSchema,
 				writeUUID: &writeUUID,
 				counter:   internal.Counter(0),
-			}, metadataBuilder, iceberg.PositionalDeleteSchema, 1024*1024)
-			writer := newPositionDeletePartitionedFanoutWriter(latestMeta, cw, tc.pathToPartitionContext, nil, &writerFactory)
+			}, metadataBuilder, iceberg.PositionalDeleteSchema, 1024*1024,
+				withContentType(iceberg.EntryContentPosDeletes),
+				withFactoryFileSchema(iceberg.PositionalDeleteSchema))
 			require.NoError(t, err)
+			writer := newPositionDeletePartitionedFanoutWriter(latestMeta, cw, tc.pathToPartitionContext, nil, factory)
 
 			dataFileCh := make(chan iceberg.DataFile, 10)
 			err = writer.processBatch(ctx, tc.input, dataFileCh)
@@ -147,7 +149,7 @@ func TestPositionDeletePartitionedFanoutWriterProcessBatch(t *testing.T) {
 			}
 			require.NoError(t, err)
 
-			err = writerFactory.closeAll()
+			err = factory.closeAll()
 			require.NoError(t, err)
 
 			close(dataFileCh)
