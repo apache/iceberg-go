@@ -193,7 +193,7 @@ func TestCommitV3RowLineage(t *testing.T) {
 
 	// Single data file with record count 1 (newTestDataFile uses 1, 1 for record count and file size).
 	const expectedAddedRows = 1
-	sp := newFastAppendFilesProducer(OpAppend, txn, trackIO, nil, nil)
+	sp := newFastAppendFilesProducer(OpAppend, txn, trackIO, nil, nil, MainBranch)
 	df := newTestDataFile(t, spec, "file://data.parquet", nil)
 	sp.appendDataFile(df)
 
@@ -226,7 +226,7 @@ func TestCommitV3RowLineageTwoSequentialCommits(t *testing.T) {
 	txn.meta.formatVersion = 3
 
 	// First commit: new table, append one file (1 row).
-	sp1 := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+	sp1 := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil, MainBranch)
 	sp1.appendDataFile(newTestDataFile(t, spec, "file://data-1.parquet", nil))
 	updates1, reqs1, err := sp1.commit()
 	require.NoError(t, err, "first commit should succeed")
@@ -244,7 +244,7 @@ func TestCommitV3RowLineageTwoSequentialCommits(t *testing.T) {
 	tbl2 := New(ident, meta1, "metadata.json", func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
 	txn2 := tbl2.NewTransaction()
 	txn2.meta.formatVersion = 3
-	sp2 := newFastAppendFilesProducer(OpAppend, txn2, memIO, nil, nil)
+	sp2 := newFastAppendFilesProducer(OpAppend, txn2, memIO, nil, nil, MainBranch)
 	sp2.appendDataFile(newTestDataFile(t, spec, "file://data-2.parquet", nil))
 	updates2, reqs2, err := sp2.commit()
 	require.NoError(t, err, "second commit should succeed")
@@ -270,7 +270,7 @@ func TestCommitV3RowLineageDeltaIncludesExistingRows(t *testing.T) {
 	txn.meta.formatVersion = 3
 
 	// First commit: one file (1 row).
-	sp1 := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+	sp1 := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil, MainBranch)
 	sp1.appendDataFile(newTestDataFile(t, spec, "file://data-1.parquet", nil))
 	updates1, reqs1, err := sp1.commit()
 	require.NoError(t, err, "first commit should succeed")
@@ -289,7 +289,7 @@ func TestCommitV3RowLineageDeltaIncludesExistingRows(t *testing.T) {
 	}
 	txn2.meta.props[ManifestMergeEnabledKey] = "true"
 	txn2.meta.props[ManifestMinMergeCountKey] = "2"
-	sp2 := newMergeAppendFilesProducer(OpAppend, txn2, memIO, nil, nil)
+	sp2 := newMergeAppendFilesProducer(OpAppend, txn2, memIO, nil, nil, MainBranch)
 	sp2.appendDataFile(newTestDataFile(t, spec, "file://data-2.parquet", nil))
 	updates2, reqs2, err := sp2.commit()
 	require.NoError(t, err, "second commit (merge) should succeed")
@@ -354,7 +354,7 @@ func TestCommitV3RowLineagePersistsManifestFirstRowID(t *testing.T) {
 	txn.meta.formatVersion = 3
 
 	// Use multi-row files to make row-range starts obvious.
-	sp1 := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+	sp1 := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil, MainBranch)
 	sp1.appendDataFile(newTestDataFileWithCount(t, spec, "file://data-1.parquet", nil, 3))
 	updates1, reqs1, err := sp1.commit()
 	require.NoError(t, err, "first commit should succeed")
@@ -376,7 +376,7 @@ func TestCommitV3RowLineagePersistsManifestFirstRowID(t *testing.T) {
 	tbl2 := New(ident, meta1, "metadata.json", func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
 	txn2 := tbl2.NewTransaction()
 	txn2.meta.formatVersion = 3
-	sp2 := newFastAppendFilesProducer(OpAppend, txn2, memIO, nil, nil)
+	sp2 := newFastAppendFilesProducer(OpAppend, txn2, memIO, nil, nil, MainBranch)
 	sp2.appendDataFile(newTestDataFileWithCount(t, spec, "file://data-2.parquet", nil, 5))
 	updates2, _, err := sp2.commit()
 	require.NoError(t, err, "second commit should succeed")
