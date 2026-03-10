@@ -229,7 +229,7 @@ func TestParseSortOrder(t *testing.T) {
 
 				// Validate sort directions and null orders
 				i := 0
-				for field := range got.Fields() {
+				for _, field := range got.Fields() {
 					if i < len(tt.expectedDirections) && field.Direction != tt.expectedDirections[i] {
 						t.Errorf("parseSortOrder() field %d direction = %v, expected %v", i, field.Direction, tt.expectedDirections[i])
 					}

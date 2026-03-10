@@ -1274,6 +1274,62 @@ func (m *ManifestTestSuite) TestManifestEntriesV3() {
 	m.Zero(*datafile.SortOrderID())
 }
 
+func (m *ManifestTestSuite) TestNewManifestReaderZstdManifestEntriesV2() {
+	manifest := manifestFile{
+		version: 2,
+		SpecID:  1,
+		Path:    manifestFileRecordsV2[0].FilePath(),
+	}
+
+	partitionSpec := NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceID: 1, Name: "VendorID", Transform: IdentityTransform{}},
+		PartitionField{FieldID: 1001, SourceID: 2, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
+
+	partitionSchema, err := partitionTypeToAvroSchema(partitionSpec.PartitionType(testSchema))
+	m.Require().NoError(err)
+
+	entrySchema, err := internal.NewManifestEntrySchema(partitionSchema, 2)
+	m.Require().NoError(err)
+
+	mw := ManifestWriter{
+		version: 2,
+		spec:    partitionSpec,
+		schema:  testSchema,
+		content: ManifestContentData,
+	}
+	md, err := mw.meta()
+	m.Require().NoError(err)
+
+	var buf bytes.Buffer
+	enc, err := ocf.NewEncoderWithSchema(entrySchema, &buf,
+		ocf.WithSchemaMarshaler(ocf.FullSchemaMarshaler),
+		ocf.WithEncoderSchemaCache(&avro.SchemaCache{}),
+		ocf.WithMetadata(md),
+		ocf.WithCodec(ocf.ZStandard))
+	m.Require().NoError(err)
+
+	m.Require().NoError(enc.Encode(manifestEntryV2Records[0]))
+	m.Require().NoError(enc.Encode(manifestEntryV2Records[1]))
+	m.Require().NoError(enc.Close())
+
+	manifestReader, err := NewManifestReader(&manifest, bytes.NewReader(buf.Bytes()))
+	m.Require().NoError(err)
+	defer func() {
+		m.Require().NoError(manifestReader.Close())
+	}()
+
+	entry1, err := manifestReader.ReadEntry()
+	m.Require().NoError(err)
+	m.Equal(manifestEntryV2Records[0].DataFile().FilePath(), entry1.DataFile().FilePath())
+
+	entry2, err := manifestReader.ReadEntry()
+	m.Require().NoError(err)
+	m.Equal(manifestEntryV2Records[1].DataFile().FilePath(), entry2.DataFile().FilePath())
+
+	_, err = manifestReader.ReadEntry()
+	m.Require().ErrorIs(err, io.EOF)
+}
+
 func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 	dataFileBuilder, err := NewDataFileBuilder(
 		NewPartitionSpec(),
@@ -1401,8 +1457,84 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterRowIDTracking() {
 	// Expected: 5000 + 1500 + 2300 = 8800
 	expectedNextRowID := firstRowID + 1500 + 2300
 	m.EqualValues(expectedNextRowID, *writer.NextRowID())
+	// Assigned row-id delta (for snapshot.added-rows) = 1500 + 2300 = 3800
+	m.EqualValues(int64(3800), *writer.NextRowID()-firstRowID)
 	err = writer.Close()
 	m.Require().NoError(err)
+}
+
+func (m *ManifestTestSuite) TestV3ManifestListWriterAssignedRowIDDelta() {
+	// Assigned row-id delta = sum of (existing+added) for all data manifests in list.
+	var buf bytes.Buffer
+	commitSnapID := int64(100)
+	otherSnapID := int64(99)
+	firstRowID := int64(0)
+	sequenceNum := int64(1)
+	writer, err := NewManifestListWriterV3(&buf, commitSnapID, sequenceNum, firstRowID, nil)
+	m.Require().NoError(err)
+	manifests := []ManifestFile{
+		NewManifestFile(3, "current.avro", 100, 1, commitSnapID).AddedRows(10).ExistingRows(5).Build(),
+		NewManifestFile(3, "carried.avro", 200, 1, otherSnapID).SequenceNum(0, 0).AddedRows(100).ExistingRows(50).Build(),
+		NewManifestFile(3, "current2.avro", 300, 1, commitSnapID).AddedRows(20).Build(),
+	}
+	err = writer.AddManifests(manifests)
+	m.Require().NoError(err)
+	// Delta = 15 + 150 + 20 = 185 (all data manifests get row-id range)
+	m.EqualValues(185, *writer.NextRowID()-firstRowID)
+	m.Require().NoError(writer.Close())
+}
+
+func (m *ManifestTestSuite) TestV3ManifestListWriterDeltaIgnoresNonDataManifests() {
+	// Only data manifests get row-id assignment; delete manifests must not affect delta.
+	var buf bytes.Buffer
+	commitSnapID := int64(1)
+	firstRowID := int64(100)
+	sequenceNum := int64(1)
+	writer, err := NewManifestListWriterV3(&buf, commitSnapID, sequenceNum, firstRowID, nil)
+	m.Require().NoError(err)
+	manifests := []ManifestFile{
+		NewManifestFile(3, "data.avro", 100, 1, commitSnapID).AddedRows(10).ExistingRows(5).Build(),
+		NewManifestFile(3, "deletes.avro", 200, 1, commitSnapID).Content(ManifestContentDeletes).AddedRows(100).Build(),
+		NewManifestFile(3, "data2.avro", 300, 1, commitSnapID).AddedRows(20).Build(),
+	}
+	err = writer.AddManifests(manifests)
+	m.Require().NoError(err)
+	// Delta = 15 + 20 = 35 (only data manifests; delete manifest ignored)
+	m.EqualValues(35, *writer.NextRowID()-firstRowID)
+	m.Require().NoError(writer.Close())
+}
+
+func (m *ManifestTestSuite) TestV3ManifestListWriterPersistsPerManifestFirstRowIDStart() {
+	// Persisted first_row_id per manifest must be the start of each assigned row-id range.
+	var buf bytes.Buffer
+	commitSnapID := int64(100)
+	firstRowID := int64(5000)
+	sequenceNum := int64(1)
+
+	writer, err := NewManifestListWriterV3(&buf, commitSnapID, sequenceNum, firstRowID, nil)
+	m.Require().NoError(err)
+
+	manifests := []ManifestFile{
+		NewManifestFile(3, "m1.avro", 10, 1, commitSnapID).AddedRows(10).ExistingRows(5).Build(), // delta = 15
+		NewManifestFile(3, "m2.avro", 10, 1, commitSnapID).AddedRows(7).Build(),                  // delta = 7
+	}
+	m.Require().NoError(writer.AddManifests(manifests))
+	m.Require().NoError(writer.Close())
+
+	list, err := ReadManifestList(bytes.NewReader(buf.Bytes()))
+	m.Require().NoError(err)
+	m.Require().Len(list, 2)
+
+	firstManifest, ok := list[0].(*manifestFile)
+	m.Require().True(ok, "expected v3 manifest file type")
+	secondManifest, ok := list[1].(*manifestFile)
+	m.Require().True(ok, "expected v3 manifest file type")
+	m.Require().NotNil(firstManifest.FirstRowId)
+	m.Require().NotNil(secondManifest.FirstRowId)
+
+	m.EqualValues(5000, *firstManifest.FirstRowId) // start of first range
+	m.EqualValues(5015, *secondManifest.FirstRowId)
+	m.EqualValues(5022, *writer.NextRowID())
 }
 
 func (m *ManifestTestSuite) TestV3PrepareEntrySequenceNumberValidation() {

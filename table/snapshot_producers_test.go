@@ -20,6 +20,7 @@ package table
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"io/fs"
@@ -30,6 +31,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/stretchr/testify/require"
 )
 
@@ -97,6 +99,22 @@ func (m *memIO) Remove(name string) error {
 	return nil
 }
 
+// createTestTransactionWithMemIO creates a transaction using the io package's mem blob FS
+// so that Create() output is persisted and can be read back (e.g. for sequential commits).
+func createTestTransactionWithMemIO(t *testing.T, spec iceberg.PartitionSpec) (*Transaction, iceio.WriteFileIO) {
+	t.Helper()
+	ctx := context.Background()
+	fs, err := iceio.LoadFS(ctx, nil, "mem://default/table-location")
+	require.NoError(t, err, "LoadFS mem")
+	wfs := fs.(iceio.WriteFileIO)
+	schema := simpleSchema()
+	meta, err := NewMetadata(schema, &spec, UnsortedSortOrder, "mem://default/table-location", nil)
+	require.NoError(t, err, "new metadata")
+	tbl := New(Identifier{"db", "tbl"}, meta, "metadata.json", func(context.Context) (iceio.IO, error) { return fs, nil }, nil)
+
+	return tbl.NewTransaction(), wfs
+}
+
 func manifestHeaderSize(t *testing.T, version int, spec iceberg.PartitionSpec, schema *iceberg.Schema) int {
 	t.Helper()
 
@@ -119,6 +137,10 @@ func manifestSize(t *testing.T, version int, spec iceberg.PartitionSpec, schema 
 }
 
 func newTestDataFile(t *testing.T, spec iceberg.PartitionSpec, path string, partition map[int]any) iceberg.DataFile {
+	return newTestDataFileWithCount(t, spec, path, partition, 1)
+}
+
+func newTestDataFileWithCount(t *testing.T, spec iceberg.PartitionSpec, path string, partition map[int]any, count int64) iceberg.DataFile {
 	t.Helper()
 
 	builder, err := iceberg.NewDataFileBuilder(
@@ -129,8 +151,8 @@ func newTestDataFile(t *testing.T, spec iceberg.PartitionSpec, path string, part
 		partition,
 		nil,
 		nil,
-		1,
-		1,
+		count,
+		count,
 	)
 	require.NoError(t, err, "new data file builder")
 
@@ -159,6 +181,213 @@ func createTestTransaction(t *testing.T, io iceio.IO, spec iceberg.PartitionSpec
 	}, nil)
 
 	return tbl.NewTransaction()
+}
+
+// TestCommitV3RowLineage ensures v3 snapshot commits set FirstRowID and AddedRows
+// on the snapshot for row lineage, and that applying updates advances next-row-id correctly.
+func TestCommitV3RowLineage(t *testing.T) {
+	trackIO := newTrackingIO()
+	spec := iceberg.NewPartitionSpec()
+	txn := createTestTransaction(t, trackIO, spec)
+	txn.meta.formatVersion = 3
+
+	// Single data file with record count 1 (newTestDataFile uses 1, 1 for record count and file size).
+	const expectedAddedRows = 1
+	sp := newFastAppendFilesProducer(OpAppend, txn, trackIO, nil, nil)
+	df := newTestDataFile(t, spec, "file://data.parquet", nil)
+	sp.appendDataFile(df)
+
+	updates, reqs, err := sp.commit()
+	require.NoError(t, err, "commit should succeed")
+	require.Len(t, updates, 2, "expected AddSnapshot and SetSnapshotRef updates")
+	addSnap, ok := updates[0].(*addSnapshotUpdate)
+	require.True(t, ok, "first update must be AddSnapshot")
+
+	// Exact snapshot lineage: first-row-id 0 for new table, added-rows matches appended file(s).
+	require.NotNil(t, addSnap.Snapshot.FirstRowID, "v3 snapshot must have first-row-id")
+	require.NotNil(t, addSnap.Snapshot.AddedRows, "v3 snapshot must have added-rows")
+	require.Equal(t, int64(0), *addSnap.Snapshot.FirstRowID, "first-row-id should be table next-row-id at commit")
+	require.Equal(t, int64(expectedAddedRows), *addSnap.Snapshot.AddedRows, "added-rows should match appended data file record count")
+
+	// Apply updates and verify metadata next-row-id advances monotonically.
+	err = txn.apply(updates, reqs)
+	require.NoError(t, err, "apply should succeed")
+	meta, err := txn.meta.Build()
+	require.NoError(t, err, "build metadata")
+	require.Equal(t, int64(expectedAddedRows), meta.NextRowID(), "next-row-id should equal first-row-id + added-rows")
+}
+
+// TestCommitV3RowLineageTwoSequentialCommits runs two commits and asserts monotonic,
+// gap-free first-row-id / next-row-id progression.
+func TestCommitV3RowLineageTwoSequentialCommits(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	ident := Identifier{"db", "tbl"}
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	txn.meta.formatVersion = 3
+
+	// First commit: new table, append one file (1 row).
+	sp1 := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+	sp1.appendDataFile(newTestDataFile(t, spec, "file://data-1.parquet", nil))
+	updates1, reqs1, err := sp1.commit()
+	require.NoError(t, err, "first commit should succeed")
+	addSnap1, ok := updates1[0].(*addSnapshotUpdate)
+	require.True(t, ok)
+	require.Equal(t, int64(0), *addSnap1.Snapshot.FirstRowID, "first snapshot first-row-id")
+	require.Equal(t, int64(1), *addSnap1.Snapshot.AddedRows, "first snapshot added-rows")
+	err = txn.apply(updates1, reqs1)
+	require.NoError(t, err, "first apply should succeed")
+	meta1, err := txn.meta.Build()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), meta1.NextRowID(), "next-row-id after first commit")
+
+	// Second commit: fast append one more file. Carried manifest already has first_row_id, so only new manifest gets row IDs; delta = 1.
+	tbl2 := New(ident, meta1, "metadata.json", func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+	txn2 := tbl2.NewTransaction()
+	txn2.meta.formatVersion = 3
+	sp2 := newFastAppendFilesProducer(OpAppend, txn2, memIO, nil, nil)
+	sp2.appendDataFile(newTestDataFile(t, spec, "file://data-2.parquet", nil))
+	updates2, reqs2, err := sp2.commit()
+	require.NoError(t, err, "second commit should succeed")
+	addSnap2, ok := updates2[0].(*addSnapshotUpdate)
+	require.True(t, ok)
+	require.Equal(t, int64(1), *addSnap2.Snapshot.FirstRowID, "second snapshot first-row-id continues from first next-row-id")
+	require.Equal(t, int64(1), *addSnap2.Snapshot.AddedRows, "only new manifest gets row IDs assigned")
+
+	err = txn2.apply(updates2, reqs2)
+	require.NoError(t, err, "second apply should succeed")
+	meta2, err := txn2.meta.Build()
+	require.NoError(t, err)
+	require.Equal(t, int64(2), meta2.NextRowID(), "next-row-id = 1 + 1 (gap-free)")
+}
+
+// TestCommitV3RowLineageDeltaIncludesExistingRows uses merge append so one manifest
+// has both existing and added rows; verifies assigned delta includes ExistingRowsCount
+// and metadata next-row-id matches.
+func TestCommitV3RowLineageDeltaIncludesExistingRows(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	ident := Identifier{"db", "tbl"}
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	txn.meta.formatVersion = 3
+
+	// First commit: one file (1 row).
+	sp1 := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+	sp1.appendDataFile(newTestDataFile(t, spec, "file://data-1.parquet", nil))
+	updates1, reqs1, err := sp1.commit()
+	require.NoError(t, err, "first commit should succeed")
+	err = txn.apply(updates1, reqs1)
+	require.NoError(t, err)
+	meta1, err := txn.meta.Build()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), meta1.NextRowID())
+
+	// Second commit: merge append so the two data manifests (existing + new) are merged into one with 1 existing + 1 added row.
+	tbl2 := New(ident, meta1, "metadata.json", func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+	txn2 := tbl2.NewTransaction()
+	txn2.meta.formatVersion = 3
+	if txn2.meta.props == nil {
+		txn2.meta.props = make(iceberg.Properties)
+	}
+	txn2.meta.props[ManifestMergeEnabledKey] = "true"
+	txn2.meta.props[ManifestMinMergeCountKey] = "2"
+	sp2 := newMergeAppendFilesProducer(OpAppend, txn2, memIO, nil, nil)
+	sp2.appendDataFile(newTestDataFile(t, spec, "file://data-2.parquet", nil))
+	updates2, reqs2, err := sp2.commit()
+	require.NoError(t, err, "second commit (merge) should succeed")
+	addSnap2, ok := updates2[0].(*addSnapshotUpdate)
+	require.True(t, ok)
+	require.Equal(t, int64(1), *addSnap2.Snapshot.FirstRowID, "first-row-id continues from first commit")
+	require.Equal(t, int64(2), *addSnap2.Snapshot.AddedRows, "assigned delta = existing (1) + added (1) in merged manifest")
+
+	err = txn2.apply(updates2, reqs2)
+	require.NoError(t, err)
+	meta2, err := txn2.meta.Build()
+	require.NoError(t, err)
+	require.Equal(t, int64(3), meta2.NextRowID(), "next-row-id = first-row-id + assigned delta (1+2)")
+}
+
+func readManifestListFromPath(t *testing.T, fs iceio.IO, path string) []iceberg.ManifestFile {
+	t.Helper()
+
+	f, err := fs.Open(path)
+	require.NoError(t, err, "open manifest list: %s", path)
+	defer f.Close()
+
+	list, err := iceberg.ReadManifestList(f)
+	require.NoError(t, err, "read manifest list: %s", path)
+
+	return list
+}
+
+func manifestFirstRowIDForSnapshot(t *testing.T, manifests []iceberg.ManifestFile, snapshotID int64) int64 {
+	t.Helper()
+
+	type manifestRowLineage struct {
+		AddedSnapshotID int64  `json:"AddedSnapshotID"`
+		FirstRowID      *int64 `json:"FirstRowId"`
+	}
+
+	for _, manifest := range manifests {
+		raw, err := json.Marshal(manifest)
+		require.NoError(t, err, "marshal manifest")
+
+		var decoded manifestRowLineage
+		require.NoError(t, json.Unmarshal(raw, &decoded), "unmarshal manifest row-lineage fields")
+
+		if decoded.AddedSnapshotID == snapshotID {
+			require.NotNil(t, decoded.FirstRowID, "first_row_id must be persisted for v3 data manifests")
+
+			return *decoded.FirstRowID
+		}
+	}
+
+	require.Failf(t, "missing manifest for snapshot", "snapshot-id=%d", snapshotID)
+
+	return 0
+}
+
+// TestCommitV3RowLineagePersistsManifestFirstRowID verifies that snapshot producer
+// writes first_row_id to manifest list entries using the snapshot's start row-id.
+func TestCommitV3RowLineagePersistsManifestFirstRowID(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	ident := Identifier{"db", "tbl"}
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	txn.meta.formatVersion = 3
+
+	// Use multi-row files to make row-range starts obvious.
+	sp1 := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+	sp1.appendDataFile(newTestDataFileWithCount(t, spec, "file://data-1.parquet", nil, 3))
+	updates1, reqs1, err := sp1.commit()
+	require.NoError(t, err, "first commit should succeed")
+	addSnap1, ok := updates1[0].(*addSnapshotUpdate)
+	require.True(t, ok, "first update must be AddSnapshot")
+	require.Equal(t, int64(0), *addSnap1.Snapshot.FirstRowID, "snapshot first-row-id for commit 1")
+
+	manifests1 := readManifestListFromPath(t, memIO, addSnap1.Snapshot.ManifestList)
+	currentManifestFirstRowID1 := manifestFirstRowIDForSnapshot(t, manifests1, addSnap1.Snapshot.SnapshotID)
+	require.Equal(t, *addSnap1.Snapshot.FirstRowID, currentManifestFirstRowID1,
+		"persisted manifest first_row_id must match snapshot first-row-id for current commit")
+
+	err = txn.apply(updates1, reqs1)
+	require.NoError(t, err, "first apply should succeed")
+	meta1, err := txn.meta.Build()
+	require.NoError(t, err)
+	require.Equal(t, int64(3), meta1.NextRowID())
+
+	tbl2 := New(ident, meta1, "metadata.json", func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+	txn2 := tbl2.NewTransaction()
+	txn2.meta.formatVersion = 3
+	sp2 := newFastAppendFilesProducer(OpAppend, txn2, memIO, nil, nil)
+	sp2.appendDataFile(newTestDataFileWithCount(t, spec, "file://data-2.parquet", nil, 5))
+	updates2, _, err := sp2.commit()
+	require.NoError(t, err, "second commit should succeed")
+	addSnap2, ok := updates2[0].(*addSnapshotUpdate)
+	require.True(t, ok, "first update must be AddSnapshot")
+	require.Equal(t, int64(3), *addSnap2.Snapshot.FirstRowID, "snapshot first-row-id for commit 2")
+
+	manifests2 := readManifestListFromPath(t, memIO, addSnap2.Snapshot.ManifestList)
+	currentManifestFirstRowID2 := manifestFirstRowIDForSnapshot(t, manifests2, addSnap2.Snapshot.SnapshotID)
+	require.Equal(t, *addSnap2.Snapshot.FirstRowID, currentManifestFirstRowID2,
+		"persisted manifest first_row_id must match snapshot first-row-id for current commit")
 }
 
 func TestSnapshotProducerManifestsClosesWriterOnError(t *testing.T) {
@@ -378,7 +607,7 @@ func TestManifestWriterClosesUnderlyingFile(t *testing.T) {
 	require.Len(t, manifests, 1, "should have one manifest")
 
 	unclosed := trackIO.GetUnclosedWriters()
-	require.Empty(t, unclosed, "all file writers should be closed, but these are still open: %v", unclosed)
+	require.Empty(t, unclosed, "all file writerFactory should be closed, but these are still open: %v", unclosed)
 }
 
 // TestCreateManifestClosesUnderlyingFile tests that createManifest properly
@@ -408,7 +637,7 @@ func TestCreateManifestClosesUnderlyingFile(t *testing.T) {
 	require.NoError(t, err, "createManifest should succeed")
 
 	unclosed := trackIO.GetUnclosedWriters()
-	require.Empty(t, unclosed, "all file writers should be closed after createManifest, but these are still open: %v", unclosed)
+	require.Empty(t, unclosed, "all file writerFactory should be closed after createManifest, but these are still open: %v", unclosed)
 }
 
 // TestOverwriteExistingManifestsClosesUnderlyingFile tests that existingManifests
@@ -460,11 +689,11 @@ func TestOverwriteExistingManifestsClosesUnderlyingFile(t *testing.T) {
 	require.NoError(t, err, "existingManifests should succeed")
 
 	unclosed := trackIO.GetUnclosedWriters()
-	require.Empty(t, unclosed, "all file writers should be closed after existingManifests, but these are still open: %v", unclosed)
+	require.Empty(t, unclosed, "all file writerFactory should be closed after existingManifests, but these are still open: %v", unclosed)
 }
 
 // errorOnDeletedEntries is a producerImpl that returns an error from deletedEntries()
-// to test that file writers are properly closed even when deletedEntries fails.
+// to test that file writerFactory are properly closed even when deletedEntries fails.
 type errorOnDeletedEntries struct {
 	base                *snapshotProducer
 	err                 error
@@ -515,7 +744,7 @@ func (b *blockingTrackingIO) Create(name string) (iceio.FileWriter, error) {
 	return writer, err
 }
 
-// This test verifies that NO writers are created when deletedEntries() fails,
+// This test verifies that NO writerFactory are created when deletedEntries() fails,
 // because the error should be returned before any goroutines start.
 func TestManifestsClosesWriterWhenDeletedEntriesFails(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -553,7 +782,7 @@ func TestManifestsClosesWriterWhenDeletedEntriesFails(t *testing.T) {
 
 	case <-time.After(100 * time.Millisecond):
 		writerCount := blockingIO.GetWriterCount()
-		require.Zero(t, writerCount, "expected no writers to be created when deletedEntries is called first")
+		require.Zero(t, writerCount, "expected no writerFactory to be created when deletedEntries is called first")
 	}
 }
 

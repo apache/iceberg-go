@@ -36,6 +36,7 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/internal"
 	sqlcat "github.com/apache/iceberg-go/catalog/sql"
+	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
@@ -422,7 +423,7 @@ func (s *SqliteCatalogTestSuite) TestCreateTableCustomSortOrder() {
 		s.Equal(1, tbl.SortOrder().OrderID())
 		s.Equal(tbl.SortOrder().Len(), 1)
 
-		for f := range tbl.SortOrder().Fields() {
+		for _, f := range tbl.SortOrder().Fields() {
 			s.Equal(table.SortASC, f.Direction)
 			s.Equal(table.NullsFirst, f.NullOrder)
 			s.Equal("identity", f.Transform.String())

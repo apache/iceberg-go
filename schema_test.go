@@ -922,3 +922,24 @@ func TestHighestFieldIDListType(t *testing.T) {
 	)
 	assert.Equal(t, 2, tableSchema.HighestFieldID())
 }
+
+func TestIndexByNameDuplicateFieldNames(t *testing.T) {
+	sc := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.String, Required: false},
+		iceberg.NestedField{ID: 2, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+	)
+
+	_, err := iceberg.IndexByName(sc)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "multiple fields for name col")
+}
+
+func TestSanitizeColumnNamesEmptyFieldName(t *testing.T) {
+	sc := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+
+	_, err := iceberg.SanitizeColumnNames(sc)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "field name cannot be empty")
+}

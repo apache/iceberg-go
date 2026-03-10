@@ -31,6 +31,7 @@ import (
 	"github.com/apache/iceberg-go/catalog/internal"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/view"
 	"github.com/beltran/gohive/hive_metastore"
 )
 
@@ -155,12 +156,21 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 }
 
 func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
-	staged, err := internal.CreateStagedTable(ctx, c.opts.props, c.LoadNamespaceProperties, identifier, schema, opts...)
+	database, tableName, err := identifierToTableName(identifier)
 	if err != nil {
 		return nil, err
 	}
 
-	database, tableName, err := identifierToTableName(identifier)
+	// Ensure there is no view with the same identifier.
+	viewExists, err := c.CheckViewExists(ctx, identifier)
+	if err != nil {
+		return nil, err
+	}
+	if viewExists {
+		return nil, fmt.Errorf("%w: %s.%s", catalog.ErrViewAlreadyExists, database, tableName)
+	}
+
+	staged, err := internal.CreateStagedTable(ctx, c.opts.props, c.LoadNamespaceProperties, identifier, schema, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -320,6 +330,148 @@ func (c *Catalog) CheckTableExists(ctx context.Context, identifier table.Identif
 	}
 
 	return isIcebergTable(hiveTbl), nil
+}
+
+// ListViews returns a list of view identifiers in the given namespace.
+func (c *Catalog) ListViews(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
+	return func(yield func(table.Identifier, error) bool) {
+		database, err := identifierToDatabase(namespace)
+		if err != nil {
+			yield(nil, err)
+
+			return
+		}
+
+		exists, err := c.CheckNamespaceExists(ctx, DatabaseIdentifier(database))
+		if err != nil {
+			yield(nil, err)
+
+			return
+		}
+		if !exists {
+			yield(nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, database))
+
+			return
+		}
+
+		viewNames, err := c.client.GetTables(ctx, database, "*")
+		if err != nil {
+			yield(nil, fmt.Errorf("failed to list views in %s: %w", database, err))
+
+			return
+		}
+
+		if len(viewNames) == 0 {
+			return
+		}
+
+		for _, viewName := range viewNames {
+			tbl, err := c.client.GetTable(ctx, database, viewName)
+			if err != nil {
+				// Skip tables we fail to load, mirroring table listing behavior.
+				continue
+			}
+			if isIcebergView(tbl) {
+				if !yield(TableIdentifier(database, viewName), nil) {
+					return
+				}
+			}
+		}
+	}
+}
+
+// LoadView loads a view from the catalog.
+func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*view.View, error) {
+	database, viewName, err := identifierToTableName(identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	hiveTbl, err := c.client.GetTable(ctx, database, viewName)
+	if err != nil {
+		if isNoSuchObjectError(err) {
+			return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchView, identifier)
+		}
+
+		return nil, fmt.Errorf("failed to get view %s.%s: %w", database, viewName, err)
+	}
+
+	// If the object is an Iceberg table, do not treat it as a view.
+	if isIcebergTable(hiveTbl) || !isIcebergView(hiveTbl) {
+		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchView, identifier)
+	}
+
+	metadataLocation, err := getViewMetadataLocation(hiveTbl)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s, metadata location is missing", catalog.ErrNoSuchView, identifier)
+	}
+
+	return view.NewFromLocation(
+		ctx,
+		identifier,
+		metadataLocation,
+		io.LoadFSFunc(c.opts.props, metadataLocation),
+	)
+}
+
+// DropView drops a view from the catalog.
+func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) error {
+	database, viewName, err := identifierToTableName(identifier)
+	if err != nil {
+		return err
+	}
+
+	hiveTbl, err := c.client.GetTable(ctx, database, viewName)
+	if err != nil {
+		if isNoSuchObjectError(err) {
+			return fmt.Errorf("%w: %s", catalog.ErrNoSuchView, identifier)
+		}
+
+		return fmt.Errorf("failed to get view %s.%s: %w", database, viewName, err)
+	}
+
+	if !isIcebergView(hiveTbl) {
+		return fmt.Errorf("%w: %s", catalog.ErrNoSuchView, identifier)
+	}
+
+	metadataLocation, err := getViewMetadataLocation(hiveTbl)
+	if err != nil {
+		return err
+	}
+
+	if err := c.client.DropTable(ctx, database, viewName, false); err != nil {
+		return fmt.Errorf("failed to drop view %s.%s: %w", database, viewName, err)
+	}
+
+	fs, err := io.LoadFS(ctx, c.opts.props, metadataLocation)
+	if err != nil {
+		return fmt.Errorf("failed to load filesystem for view metadata: %w", err)
+	}
+
+	if err := fs.Remove(metadataLocation); err != nil {
+		return fmt.Errorf("failed to remove view metadata file at %s: %w", metadataLocation, err)
+	}
+
+	return nil
+}
+
+// CheckViewExists checks if a view exists in the catalog.
+func (c *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifier) (bool, error) {
+	database, viewName, err := identifierToTableName(identifier)
+	if err != nil {
+		return false, err
+	}
+
+	hiveTbl, err := c.client.GetTable(ctx, database, viewName)
+	if err != nil {
+		if isNoSuchObjectError(err) {
+			return false, nil
+		}
+
+		return false, err
+	}
+
+	return isIcebergView(hiveTbl), nil
 }
 
 func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error) {

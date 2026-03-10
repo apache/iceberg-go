@@ -234,14 +234,14 @@ func (d *DataFileStatistics) PartitionValue(field iceberg.PartitionField, sc *ic
 	return lowerT.Val.Any()
 }
 
-func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.PartitionSpec, path string, format iceberg.FileFormat, filesize int64, partitionValues map[int]any) iceberg.DataFile {
+func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.PartitionSpec, path string, format iceberg.FileFormat, content iceberg.ManifestEntryContent, filesize int64, partitionValues map[int]any) iceberg.DataFile {
 	var fieldIDToPartitionData map[int]any
 	fieldIDToLogicalType := make(map[int]avro.LogicalType)
 	fieldIDToFixedSize := make(map[int]int)
 
 	if !spec.Equals(*iceberg.UnpartitionedSpec) {
 		fieldIDToPartitionData = make(map[int]any)
-		for field := range spec.Fields() {
+		for _, field := range spec.Fields() {
 			partitionVal := partitionValues[field.FieldID]
 			if partitionVal != nil {
 				val := d.PartitionValue(field, schema)
@@ -276,7 +276,7 @@ func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.Par
 		}
 	}
 
-	bldr, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData,
+	bldr, err := iceberg.NewDataFileBuilder(spec, content,
 		path, format, fieldIDToPartitionData, fieldIDToLogicalType, fieldIDToFixedSize, d.RecordCount, filesize)
 	if err != nil {
 		panic(err)

@@ -393,3 +393,75 @@ func TestUnknownTypeEquality(t *testing.T) {
 	assert.Equal(t, "unknown", unknown1.String())
 	assert.Equal(t, "unknown", unknown2.String())
 }
+
+func TestNestedFieldUnmarshalMissingID(t *testing.T) {
+	// "id" key is absent — json.Unmarshal should error instead of silently leaving the ID zero
+	data := []byte(`{"name":"col","type":"string","required":false}`)
+
+	var f iceberg.NestedField
+	err := json.Unmarshal(data, &f)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "missing required 'id'")
+}
+
+func TestNestedFieldUnmarshalWrongIDKey(t *testing.T) {
+	// "field_id" instead of "id" — json.Unmarshal should error instead of silently ignore
+	data := []byte(`{"field_id":1,"name":"col","type":"string","required":false}`)
+
+	var f iceberg.NestedField
+	err := json.Unmarshal(data, &f)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "missing required 'id'")
+}
+
+func TestNestedFieldUnmarshalMissingName(t *testing.T) {
+	// "name" key is absent — json.Unmarshal should error instead of silently leave as ""
+	data := []byte(`{"id":1,"type":"string","required":false}`)
+
+	var f iceberg.NestedField
+	err := json.Unmarshal(data, &f)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "missing required 'name'")
+}
+
+func TestNestedFieldUnmarshalZeroIDIsValid(t *testing.T) {
+	// id:0 is a valid field ID — should NOT be treated as a missing key
+	data := []byte(`{"id":0,"name":"col","type":"string","required":false}`)
+
+	var f iceberg.NestedField
+	err := json.Unmarshal(data, &f)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, f.ID)
+	assert.Equal(t, "col", f.Name)
+}
+
+func TestNestedFieldUnmarshalMissingType(t *testing.T) {
+	// "type" key is absent — json.Unmarshal should return ErrInvalidSchema
+	// instead of leaving field.Type nil, which would panic in MarshalJSON.
+	data := []byte(`{"id":1,"name":"col","required":false}`)
+
+	var f iceberg.NestedField
+	err := json.Unmarshal(data, &f)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "missing required 'type'")
+}
+
+func TestNestedFieldUnmarshalWrongTypeKey(t *testing.T) {
+	// "field_type" instead of "type" — same nil-type outcome, same error.
+	data := []byte(`{"id":1,"name":"col","field_type":"long","required":false}`)
+
+	var f iceberg.NestedField
+	err := json.Unmarshal(data, &f)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "missing required 'type'")
+}
+
+func TestTypeIFaceMarshalJSONNilType(t *testing.T) {
+	// A NestedField with a nil Type must not panic during JSON marshalling.
+	// Prior to this fix, typeIFace.MarshalJSON called t.Type.Type() on a nil
+	// interface, causing an unrecovered panic.
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "col", Type: nil})
+	_, err := json.Marshal(schema)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+}

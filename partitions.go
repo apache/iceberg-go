@@ -142,7 +142,7 @@ func (p *PartitionSpec) BindToSchema(schema *Schema, lastPartitionID *int, newSp
 		opts = append(opts, WithSpecID(p.id))
 	}
 
-	for field := range p.Fields() {
+	for _, field := range p.Fields() {
 		opts = append(opts, AddPartitionFieldBySourceID(field.SourceID, field.Name, field.Transform, schema, &field.FieldID))
 	}
 
@@ -344,13 +344,9 @@ func (ps PartitionSpec) Equals(other PartitionSpec) bool {
 	return ps.id == other.id && slices.Equal(ps.fields, other.fields)
 }
 
-// Fields returns a clone of the partition fields in this spec.
-func (ps *PartitionSpec) Fields() iter.Seq[PartitionField] {
-	if ps.fields == nil {
-		return slices.Values([]PartitionField{})
-	}
-
-	return slices.Values(ps.fields)
+// Fields returns an iterator over the partition fields in this spec.
+func (ps *PartitionSpec) Fields() iter.Seq2[int, PartitionField] {
+	return slices.All(ps.fields)
 }
 
 func (ps PartitionSpec) MarshalJSON() ([]byte, error) {

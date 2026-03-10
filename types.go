@@ -91,6 +91,9 @@ type typeIFace struct {
 }
 
 func (t *typeIFace) MarshalJSON() ([]byte, error) {
+	if t.Type == nil {
+		return nil, fmt.Errorf("%w: field type is nil; use the \"type\" JSON key with a valid Iceberg type such as \"long\", \"string\", or \"boolean\"", ErrInvalidSchema)
+	}
 	if nested, ok := t.Type.(NestedType); ok {
 		return json.Marshal(nested)
 	}
@@ -232,6 +235,7 @@ func (n NestedField) MarshalJSON() ([]byte, error) {
 func (n *NestedField) UnmarshalJSON(b []byte) error {
 	type Alias NestedField
 	aux := struct {
+		ID   *int      `json:"id"`
 		Type typeIFace `json:"type"`
 		*Alias
 	}{
@@ -243,6 +247,19 @@ func (n *NestedField) UnmarshalJSON(b []byte) error {
 	}
 
 	n.Type = aux.Type.Type
+
+	if aux.ID == nil {
+		return fmt.Errorf("%w: field is missing required 'id' key in JSON", ErrInvalidSchema)
+	}
+	n.ID = *aux.ID
+
+	if n.Name == "" {
+		return fmt.Errorf("%w: field is missing required 'name' key in JSON", ErrInvalidSchema)
+	}
+
+	if n.Type == nil {
+		return fmt.Errorf("%w: field %q is missing required 'type' key in JSON", ErrInvalidSchema, n.Name)
+	}
 
 	return nil
 }

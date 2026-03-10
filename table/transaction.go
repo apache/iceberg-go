@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"iter"
 	"runtime"
 	"slices"
 	"sync"
@@ -30,8 +31,11 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table/internal"
+	"github.com/apache/iceberg-go/table/substrait"
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 )
@@ -476,6 +480,254 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	return t.apply(updates, reqs)
 }
 
+// validateDataFilePartitionData verifies that DataFile partition values match
+// the current partition spec fields by ID without reading file contents.
+func validateDataFilePartitionData(df iceberg.DataFile, spec *iceberg.PartitionSpec) error {
+	partitionData := df.Partition()
+
+	expectedFieldIDs := make(map[int]string)
+	for _, field := range spec.Fields() {
+		expectedFieldIDs[field.FieldID] = field.Name
+		if _, ok := partitionData[field.FieldID]; !ok {
+			return fmt.Errorf("missing partition value for field id %d (%s)", field.FieldID, field.Name)
+		}
+	}
+
+	for fieldID := range partitionData {
+		if _, ok := expectedFieldIDs[fieldID]; !ok {
+			return fmt.Errorf("unknown partition field id %d for spec id %d", fieldID, spec.ID())
+		}
+	}
+
+	return nil
+}
+
+// validateDataFilesToAdd performs metadata-only validation for caller-provided
+// DataFiles and returns a set of paths that passed validation.
+func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, operation string) (map[string]struct{}, error) {
+	currentSpec, err := t.meta.CurrentSpec()
+	if err != nil {
+		return nil, fmt.Errorf("could not get current partition spec: %w", err)
+	}
+	if currentSpec == nil {
+		return nil, errors.New("could not get current partition spec: no current partition spec found")
+	}
+
+	expectedSpecID := int32(currentSpec.ID())
+	setToAdd := make(map[string]struct{}, len(dataFiles))
+
+	for i, df := range dataFiles {
+		if df == nil {
+			return nil, fmt.Errorf("nil data file at index %d for %s", i, operation)
+		}
+
+		path := df.FilePath()
+		if path == "" {
+			return nil, fmt.Errorf("data file path cannot be empty for %s", operation)
+		}
+
+		if _, ok := setToAdd[path]; ok {
+			return nil, fmt.Errorf("add data file paths must be unique for %s", operation)
+		}
+		setToAdd[path] = struct{}{}
+
+		if df.ContentType() != iceberg.EntryContentData {
+			return nil, fmt.Errorf("adding files other than data files is not yet implemented: file %s has content type %s for %s", path, df.ContentType(), operation)
+		}
+
+		switch df.FileFormat() {
+		case iceberg.ParquetFile, iceberg.OrcFile, iceberg.AvroFile:
+		default:
+			return nil, fmt.Errorf("data file %s has invalid file format %s for %s", path, df.FileFormat(), operation)
+		}
+
+		if df.SpecID() != expectedSpecID {
+			return nil, fmt.Errorf("data file %s has invalid partition spec id %d for %s: expected %d",
+				path, df.SpecID(), operation, expectedSpecID)
+		}
+
+		if err := validateDataFilePartitionData(df, currentSpec); err != nil {
+			return nil, fmt.Errorf("data file %s has invalid partition data for %s: %w", path, operation, err)
+		}
+	}
+
+	return setToAdd, nil
+}
+
+// AddDataFiles adds pre-built DataFiles to the table without scanning them from storage.
+// This is useful for clients who have already constructed DataFile objects with metadata,
+// avoiding the need to read files to extract schema and statistics.
+//
+// Unlike AddFiles, this method does not read files from storage. It validates only metadata
+// that can be checked without opening files (for example spec-id and partition field IDs).
+//
+// Callers are responsible for ensuring each DataFile is valid and consistent with the table.
+// Supplying incorrect DataFile metadata can produce an invalid snapshot and break reads.
+func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.DataFile, snapshotProps iceberg.Properties) error {
+	if len(dataFiles) == 0 {
+		return nil
+	}
+
+	setToAdd, err := t.validateDataFilesToAdd(dataFiles, "AddDataFiles")
+	if err != nil {
+		return err
+	}
+
+	fs, err := t.tbl.fsF(ctx)
+	if err != nil {
+		return err
+	}
+
+	if s := t.meta.currentSnapshot(); s != nil {
+		referenced := make([]string, 0)
+		for df, err := range s.dataFiles(fs, nil) {
+			if err != nil {
+				return err
+			}
+
+			if _, ok := setToAdd[df.FilePath()]; ok {
+				referenced = append(referenced, df.FilePath())
+			}
+		}
+
+		if len(referenced) > 0 {
+			return fmt.Errorf("cannot add files that are already referenced by table, files: %v", referenced)
+		}
+	}
+
+	if t.meta.NameMapping() == nil {
+		nameMapping := t.meta.CurrentSchema().NameMapping()
+		mappingJson, err := json.Marshal(nameMapping)
+		if err != nil {
+			return err
+		}
+		err = t.SetProperties(iceberg.Properties{DefaultNameMappingKey: string(mappingJson)})
+		if err != nil {
+			return err
+		}
+	}
+
+	appendFiles := t.appendSnapshotProducer(fs, snapshotProps)
+	for _, df := range dataFiles {
+		appendFiles.appendDataFile(df)
+	}
+
+	updates, reqs, err := appendFiles.commit()
+	if err != nil {
+		return err
+	}
+
+	return t.apply(updates, reqs)
+}
+
+// ReplaceDataFilesWithDataFiles replaces files using pre-built DataFile objects.
+// This avoids scanning files to extract schema and statistics - the caller provides
+// DataFile objects directly with all required metadata.
+//
+// For the files to add, use iceberg.NewDataFileBuilder to construct DataFile objects
+// with the appropriate metadata (path, record count, file size, partition values).
+//
+// This method does not open files. It validates only metadata that can be checked
+// without reading file contents.
+//
+// Callers are responsible for ensuring each DataFile is valid and consistent with the table.
+// Supplying incorrect DataFile metadata can produce an invalid snapshot and break reads.
+//
+// This is useful when:
+//   - Files are written via a separate I/O path and metadata is already known
+//   - Avoiding file scanning improves performance or reliability
+//   - Working with storage systems where immediate file reads may be unreliable
+func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesToDelete, filesToAdd []iceberg.DataFile, snapshotProps iceberg.Properties) error {
+	if len(filesToDelete) == 0 {
+		if len(filesToAdd) > 0 {
+			return t.AddDataFiles(ctx, filesToAdd, snapshotProps)
+		}
+
+		return nil
+	}
+
+	setToAdd, err := t.validateDataFilesToAdd(filesToAdd, "ReplaceDataFilesWithDataFiles")
+	if err != nil {
+		return err
+	}
+
+	setToDelete := make(map[string]struct{}, len(filesToDelete))
+	for i, df := range filesToDelete {
+		if df == nil {
+			return fmt.Errorf("nil data file at index %d for ReplaceDataFilesWithDataFiles", i)
+		}
+
+		path := df.FilePath()
+		if path == "" {
+			return errors.New("delete data file paths must be non-empty for ReplaceDataFilesWithDataFiles")
+		}
+
+		if _, ok := setToDelete[path]; ok {
+			return errors.New("delete data file paths must be unique for ReplaceDataFilesWithDataFiles")
+		}
+		setToDelete[path] = struct{}{}
+	}
+
+	s := t.meta.currentSnapshot()
+	if s == nil {
+		return fmt.Errorf("%w: cannot replace files in a table without an existing snapshot", ErrInvalidOperation)
+	}
+
+	fs, err := t.tbl.fsF(ctx)
+	if err != nil {
+		return err
+	}
+
+	markedForDeletion := make([]iceberg.DataFile, 0, len(setToDelete))
+	for df, err := range s.dataFiles(fs, nil) {
+		if err != nil {
+			return err
+		}
+
+		if _, ok := setToDelete[df.FilePath()]; ok {
+			markedForDeletion = append(markedForDeletion, df)
+		}
+
+		if _, ok := setToAdd[df.FilePath()]; ok {
+			return fmt.Errorf("cannot add files that are already referenced by table, files: %s", df.FilePath())
+		}
+	}
+
+	if len(markedForDeletion) != len(setToDelete) {
+		return errors.New("cannot delete files that do not belong to the table")
+	}
+
+	if t.meta.NameMapping() == nil {
+		nameMapping := t.meta.CurrentSchema().NameMapping()
+		mappingJson, err := json.Marshal(nameMapping)
+		if err != nil {
+			return err
+		}
+		err = t.SetProperties(iceberg.Properties{DefaultNameMappingKey: string(mappingJson)})
+		if err != nil {
+			return err
+		}
+	}
+
+	commitUUID := uuid.New()
+	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID)
+
+	for _, df := range markedForDeletion {
+		updater.deleteDataFile(df)
+	}
+
+	for _, df := range filesToAdd {
+		updater.appendDataFile(df)
+	}
+
+	updates, reqs, err := updater.commit()
+	if err != nil {
+		return err
+	}
+
+	return t.apply(updates, reqs)
+}
+
 func (t *Transaction) AddFiles(ctx context.Context, files []string, snapshotProps iceberg.Properties, ignoreDuplicates bool, opts ...WriteOpt) error {
 	set := make(map[string]string)
 	for _, f := range files {
@@ -724,6 +976,45 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 	return updater, nil
 }
 
+func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotProps iceberg.Properties, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (*snapshotProducer, error) {
+	fs, err := t.tbl.fsF(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if t.meta.NameMapping() == nil {
+		nameMapping := t.meta.CurrentSchema().NameMapping()
+		mappingJson, err := json.Marshal(nameMapping)
+		if err != nil {
+			return nil, err
+		}
+		err = t.SetProperties(iceberg.Properties{DefaultNameMappingKey: string(mappingJson)})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	commitUUID := uuid.New()
+	updater := t.updateSnapshot(fs, snapshotProps, OpDelete).mergeOverwrite(&commitUUID)
+
+	filesToDelete, withPartialDeletions, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, df := range filesToDelete {
+		updater.deleteDataFile(df)
+	}
+
+	if len(withPartialDeletions) > 0 {
+		if err := t.writePositionDeletesForFiles(ctx, fs, updater, withPartialDeletions, filter, caseSensitive, concurrency, commitUUID); err != nil {
+			return nil, err
+		}
+	}
+
+	return updater, nil
+}
+
 type DeleteOption func(deleteOp *deleteOperation)
 
 type deleteOperation struct {
@@ -767,7 +1058,7 @@ func WithDeleteCaseInsensitive() DeleteOption {
 //
 // The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
 // can be overridden using the WithOverwriteConcurrency option. Defaults to runtime.GOMAXPROCS(0).
-func (t *Transaction) Delete(ctx context.Context, filter iceberg.BooleanExpression, snapshotProps iceberg.Properties, opts ...DeleteOption) error {
+func (t *Transaction) Delete(ctx context.Context, filter iceberg.BooleanExpression, snapshotProps iceberg.Properties, opts ...DeleteOption) (err error) {
 	deleteOp := deleteOperation{
 		concurrency:   runtime.GOMAXPROCS(0),
 		caseSensitive: true,
@@ -776,14 +1067,28 @@ func (t *Transaction) Delete(ctx context.Context, filter iceberg.BooleanExpressi
 		apply(&deleteOp)
 	}
 
-	writeDeleteMode := t.meta.props.Get(WriteDeleteModeKey, WriteDeleteModeDefault)
-	if writeDeleteMode != WriteModeCopyOnWrite {
-		return fmt.Errorf("'%s' is set to '%s' but only '%s' is currently supported", WriteDeleteModeKey, writeDeleteMode, WriteModeCopyOnWrite)
+	var updater *snapshotProducer
+	writeDeleteMode := WriteDeleteModeDefault
+	// Only copy on write is supported on v1 so we ignore any override to the write delete mode unless the version is
+	// 2 and up
+	if t.meta.formatVersion > 1 {
+		writeDeleteMode = t.meta.props.Get(WriteDeleteModeKey, WriteDeleteModeDefault)
 	}
-	updater, err := t.performCopyOnWriteDeletion(ctx, OpDelete, snapshotProps, filter, deleteOp.caseSensitive, deleteOp.concurrency, MainBranch)
-	if err != nil {
-		return err
+	switch writeDeleteMode {
+	case WriteModeCopyOnWrite:
+		updater, err = t.performCopyOnWriteDeletion(ctx, OpDelete, snapshotProps, filter, deleteOp.caseSensitive, deleteOp.concurrency, MainBranch)
+		if err != nil {
+			return err
+		}
+	case WriteModeMergeOnRead:
+		updater, err = t.performMergeOnReadDeletion(ctx, snapshotProps, filter, deleteOp.caseSensitive, deleteOp.concurrency)
+		if err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported write mode: '%s'", writeDeleteMode)
 	}
+
 	updates, reqs, err := updater.commit()
 	if err != nil {
 		return err
@@ -792,9 +1097,9 @@ func (t *Transaction) Delete(ctx context.Context, filter iceberg.BooleanExpressi
 	return t.apply(updates, reqs)
 }
 
-// classifyFilesForOverwrite classifies existing data files based on the provided filter.
+// classifyFilesForDeletions classifies existing data files based on the provided filter.
 // Returns files to delete completely, files to rewrite partially, and any error.
-func (t *Transaction) classifyFilesForOverwrite(ctx context.Context, fs io.IO, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (filesToDelete, filesToRewrite []iceberg.DataFile, err error) {
+func (t *Transaction) classifyFilesForDeletions(ctx context.Context, fs io.IO, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (filesToDelete, filesWithPartialDeletions []iceberg.DataFile, err error) {
 	s := t.meta.currentSnapshot()
 	if s == nil {
 		return nil, nil, nil
@@ -810,16 +1115,46 @@ func (t *Transaction) classifyFilesForOverwrite(ctx context.Context, fs io.IO, f
 			}
 		}
 
-		return filesToDelete, filesToRewrite, nil
+		return filesToDelete, filesWithPartialDeletions, nil
 	}
 
-	return t.classifyFilesForFilteredOverwrite(ctx, fs, filter, caseSensitive, concurrency)
+	return t.classifyFilesForFilteredDeletions(ctx, fs, filter, caseSensitive, concurrency)
 }
 
-// classifyFilesForFilteredOverwrite classifies files for filtered overwrite operations.
+type fileClassificationTask struct {
+	meta             Metadata
+	partitionFilters *keyDefaultMap[int, iceberg.BooleanExpression]
+	caseSensitive    bool
+	rowFilter        iceberg.BooleanExpression
+}
+
+func newFileClassificationTask(meta Metadata, rowFilter iceberg.BooleanExpression, caseSensitive bool) *fileClassificationTask {
+	classificationTask := &fileClassificationTask{
+		meta:          meta,
+		caseSensitive: caseSensitive,
+		rowFilter:     rowFilter,
+	}
+	classificationTask.partitionFilters = newKeyDefaultMapWrapErr(classificationTask.buildPartitionProjection)
+
+	return classificationTask
+}
+
+func (t *fileClassificationTask) buildManifestEvaluator(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
+	return buildManifestEvaluator(specID, t.meta, t.partitionFilters, t.caseSensitive)
+}
+
+func (t *fileClassificationTask) buildPartitionProjection(specID int) (iceberg.BooleanExpression, error) {
+	return buildPartitionProjection(specID, t.meta, t.rowFilter, t.caseSensitive)
+}
+
+// classifyFilesForFilteredDeletions classifies files for filtered overwrite operations.
 // Returns files to delete completely, files to rewrite partially, and any error.
-func (t *Transaction) classifyFilesForFilteredOverwrite(ctx context.Context, fs io.IO, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (filesToDelete, filesToRewrite []iceberg.DataFile, err error) {
+func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs io.IO, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (filesToDelete, filesWithPartialDeletes []iceberg.DataFile, err error) {
 	schema := t.meta.CurrentSchema()
+	meta, err := t.meta.Build()
+	if err != nil {
+		return nil, nil, err
+	}
 
 	inclusiveEvaluator, err := newInclusiveMetricsEvaluator(schema, filter, caseSensitive, false)
 	if err != nil {
@@ -831,18 +1166,8 @@ func (t *Transaction) classifyFilesForFilteredOverwrite(ctx context.Context, fs 
 		return nil, nil, fmt.Errorf("failed to create strict metrics evaluator: %w", err)
 	}
 
-	var manifestEval func(iceberg.ManifestFile) (bool, error)
-	meta, err := t.meta.Build()
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to build metadata: %w", err)
-	}
-	spec := meta.PartitionSpec()
-	if !spec.IsUnpartitioned() {
-		manifestEval, err = newManifestEvaluator(spec, schema, filter, caseSensitive)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to create manifest evaluator: %w", err)
-		}
-	}
+	classificationTask := newFileClassificationTask(meta, filter, caseSensitive)
+	manifestEvaluators := newKeyDefaultMapWrapErr(classificationTask.buildManifestEvaluator)
 
 	s := t.meta.currentSnapshot()
 	var manifests []iceberg.ManifestFile
@@ -853,11 +1178,7 @@ func (t *Transaction) classifyFilesForFilteredOverwrite(ctx context.Context, fs 
 		}
 	}
 
-	var (
-		mu             sync.Mutex
-		allFilesToDel  []iceberg.DataFile
-		allFilesToRewr []iceberg.DataFile
-	)
+	var mu sync.Mutex
 
 	g, _ := errgroup.WithContext(ctx)
 	g.SetLimit(min(concurrency, len(manifests)))
@@ -865,6 +1186,7 @@ func (t *Transaction) classifyFilesForFilteredOverwrite(ctx context.Context, fs 
 	for _, manifest := range manifests {
 		manifest := manifest // capture loop variable
 		g.Go(func() error {
+			manifestEval := manifestEvaluators.Get(int(manifest.PartitionSpecID()))
 			if manifestEval != nil {
 				match, err := manifestEval(manifest)
 				if err != nil {
@@ -916,8 +1238,8 @@ func (t *Transaction) classifyFilesForFilteredOverwrite(ctx context.Context, fs 
 
 			if len(localDelete) > 0 || len(localRewrite) > 0 {
 				mu.Lock()
-				allFilesToDel = append(allFilesToDel, localDelete...)
-				allFilesToRewr = append(allFilesToRewr, localRewrite...)
+				filesToDelete = append(filesToDelete, localDelete...)
+				filesWithPartialDeletes = append(filesWithPartialDeletes, localRewrite...)
 				mu.Unlock()
 			}
 
@@ -929,7 +1251,7 @@ func (t *Transaction) classifyFilesForFilteredOverwrite(ctx context.Context, fs 
 		return nil, nil, err
 	}
 
-	return allFilesToDel, allFilesToRewr, nil
+	return filesToDelete, filesWithPartialDeletes, nil
 }
 
 // rewriteFilesWithFilter rewrites data files by preserving only rows that do NOT match the filter
@@ -1019,6 +1341,117 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, fs io.IO, originalF
 	}
 
 	return result, nil
+}
+
+// writePositionDeletesForFiles rewrites data files by preserving only rows that do NOT match the filter
+func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO, updater *snapshotProducer, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, commitUUID uuid.UUID) error {
+	posDeleteRecIter, err := t.makePositionDeleteRecordsForFilter(ctx, fs, files, filter, caseSensitive, concurrency)
+	if err != nil {
+		return err
+	}
+
+	partitionContextByFilePath := make(map[string]partitionContext, len(files))
+	for _, df := range files {
+		partitionContextByFilePath[df.FilePath()] = partitionContext{partitionData: df.Partition(), specID: df.SpecID()}
+	}
+
+	posDeleteFiles := positionDeleteRecordsToDataFiles(ctx, t.tbl.Location(), t.meta, partitionContextByFilePath, recordWritingArgs{
+		sc:        PositionalDeleteArrowSchema,
+		itr:       posDeleteRecIter,
+		writeUUID: &commitUUID,
+		fs:        fs.(io.WriteFileIO),
+	})
+
+	for f, err := range posDeleteFiles {
+		if err != nil {
+			return err
+		}
+		updater.appendPositionDeleteFile(f)
+	}
+
+	return nil
+}
+
+func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs io.IO, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (seq2 iter.Seq2[arrow.RecordBatch, error], err error) {
+	tasks := make([]FileScanTask, 0, len(files))
+	for _, f := range files {
+		tasks = append(tasks, FileScanTask{
+			File:   f,
+			Start:  0,
+			Length: f.FileSizeBytes(),
+		})
+	}
+
+	boundFilter, err := iceberg.BindExpr(t.meta.CurrentSchema(), filter, caseSensitive)
+	if err != nil {
+		return nil, fmt.Errorf("failed to bind filter: %w", err)
+	}
+
+	meta, err := t.meta.Build()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build metadata: %w", err)
+	}
+
+	scanner := &arrowScan{
+		metadata:        meta,
+		fs:              fs,
+		projectedSchema: t.meta.CurrentSchema(),
+		boundRowFilter:  boundFilter,
+		caseSensitive:   caseSensitive,
+		rowLimit:        -1, // No limit
+		concurrency:     concurrency,
+	}
+
+	deletesPerFile, err := readAllDeleteFiles(ctx, fs, tasks, concurrency)
+	if err != nil {
+		return nil, err
+	}
+
+	extSet := substrait.NewExtensionSet()
+
+	ctx, cancel := context.WithCancelCause(exprs.WithExtensionIDSet(ctx, extSet))
+	taskChan := make(chan internal.Enumerated[FileScanTask], len(tasks))
+
+	numWorkers := min(concurrency, len(tasks))
+	records := make(chan enumeratedRecord, numWorkers)
+
+	var wg sync.WaitGroup
+	wg.Add(numWorkers)
+	for i := 0; i < numWorkers; i++ {
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case task, ok := <-taskChan:
+					if !ok {
+						return
+					}
+
+					if err := scanner.producePosDeletesFromTask(ctx, task, deletesPerFile[task.Value.File.FilePath()], records); err != nil {
+						cancel(err)
+
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	go func() {
+		for i, t := range tasks {
+			taskChan <- internal.Enumerated[FileScanTask]{
+				Value: t, Index: i, Last: i == len(tasks)-1,
+			}
+		}
+		close(taskChan)
+
+		wg.Wait()
+		close(records)
+	}()
+
+	return createIterator(ctx, uint(numWorkers), records, deletesPerFile, cancel, scanner.rowLimit), nil
 }
 
 func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {

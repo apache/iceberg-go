@@ -42,6 +42,8 @@ const (
 	ScanOptionArrowUseLargeTypes = "arrow.use_large_types"
 )
 
+var PositionalDeleteArrowSchema, _ = SchemaToArrowSchema(iceberg.PositionalDeleteSchema, nil, true, false)
+
 type (
 	positionDeletes   = []*arrow.Chunked
 	perFilePosDeletes = map[string]positionDeletes
@@ -189,6 +191,49 @@ func processPositionalDeletes(ctx context.Context, deletes set[int64]) recProces
 	}
 }
 
+// enrichRecordsWithPosDeleteFields enriches a RecordBatch with the columns declared in the PositionalDeleteArrowSchema
+// so that during the pipeline filtering stages that sheds filtered out records, we still have a way to
+// preserve the original position of those records.
+func enrichRecordsWithPosDeleteFields(ctx context.Context, filePath iceberg.DataFile) recProcessFn {
+	nextIdx, mem := int64(0), compute.GetAllocator(ctx)
+
+	return func(inData arrow.RecordBatch) (outData arrow.RecordBatch, err error) {
+		defer inData.Release()
+
+		schema := inData.Schema()
+		fieldIdx := schema.NumFields()
+		schema, err = schema.AddField(fieldIdx, PositionalDeleteArrowSchema.Field(0))
+		if err != nil {
+			return nil, err
+		}
+		schema, err = schema.AddField(fieldIdx+1, PositionalDeleteArrowSchema.Field(1))
+		if err != nil {
+			return nil, err
+		}
+
+		rb := array.NewRecordBuilder(mem, PositionalDeleteArrowSchema)
+		defer rb.Release()
+
+		filePathBldr, posBldr := rb.Field(0).(*array.StringBuilder), rb.Field(1).(*array.Int64Builder)
+
+		startPos := nextIdx
+		nextIdx += inData.NumRows()
+
+		for i := startPos; i < nextIdx; i++ {
+			filePathBldr.Append(filePath.FilePath())
+			posBldr.Append(i)
+		}
+
+		newCols := rb.NewRecordBatch()
+		defer newCols.Release()
+
+		columns := append(inData.Columns(), newCols.Column(0), newCols.Column(1))
+		outData = array.NewRecordBatch(schema, columns, inData.NumRows())
+
+		return outData, err
+	}
+}
+
 func filterRecords(ctx context.Context, recordFilter expr.Expression) recProcessFn {
 	return func(rec arrow.RecordBatch) (arrow.RecordBatch, error) {
 		defer rec.Release()
@@ -224,15 +269,34 @@ type arrowScan struct {
 	nameMapping iceberg.NameMapping
 }
 
+// collectLeafIDs recursively collects leaf field IDs from a type
+func collectLeafIDs(typ iceberg.Type, fieldID int, idset set[int]) {
+	switch t := typ.(type) {
+	case *iceberg.MapType:
+		// For maps, collect leaf IDs from both key and value
+		collectLeafIDs(t.KeyType, t.KeyID, idset)
+		collectLeafIDs(t.ValueType, t.ValueID, idset)
+	case *iceberg.ListType:
+		// For lists, collect leaf IDs from the element
+		collectLeafIDs(t.Element, t.ElementID, idset)
+	case *iceberg.StructType:
+		// For structs, collect leaf IDs from all fields
+		for _, field := range t.FieldList {
+			collectLeafIDs(field.Type, field.ID, idset)
+		}
+	default:
+		// Primitive type - this is a leaf
+		idset[fieldID] = struct{}{}
+	}
+}
+
 func (as *arrowScan) projectedFieldIDs() (set[int], error) {
 	idset := set[int]{}
-	for _, id := range as.projectedSchema.FieldIDs() {
-		typ, _ := as.projectedSchema.FindTypeByID(id)
-		switch typ.(type) {
-		case *iceberg.MapType, *iceberg.ListType:
-		default:
-			idset[id] = struct{}{}
-		}
+	// Collect leaf field IDs for column pruning.
+	// For nested types (map, list, struct), we recursively descend to find
+	// the actual leaf primitive fields, not the intermediate container nodes.
+	for _, field := range as.projectedSchema.Fields() {
+		collectLeafIDs(field.Type, field.ID, idset)
 	}
 
 	if as.boundRowFilter != nil {
@@ -447,6 +511,78 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 		defer r.Release()
 
 		return ToRequestedSchema(ctx, as.projectedSchema, iceSchema, r, false, false, as.useLargeTypes)
+	})
+
+	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, out)
+
+	return err
+}
+
+func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task internal.Enumerated[FileScanTask], positionalDeletes positionDeletes, out chan<- enumeratedRecord) (err error) {
+	defer func() {
+		if err != nil {
+			out <- enumeratedRecord{Task: task, Err: err}
+		}
+	}()
+
+	var (
+		rdr        internal.FileReader
+		iceSchema  *iceberg.Schema
+		colIndices []int
+		filterFunc recProcessFn
+		dropFile   bool
+	)
+
+	iceSchema, colIndices, rdr, err = as.prepareToRead(ctx, task.Value.File)
+	if err != nil {
+		return err
+	}
+	defer iceinternal.CheckedClose(rdr, &err)
+
+	fields := append(iceSchema.Fields(), iceberg.PositionalDeleteSchema.Fields()...)
+	enrichedIcebergSchema := iceberg.NewSchema(iceSchema.ID+1, fields...)
+
+	pipeline := make([]recProcessFn, 0, 2)
+	pipeline = append(pipeline, enrichRecordsWithPosDeleteFields(ctx, task.Value.File))
+	if len(positionalDeletes) > 0 {
+		deletes := set[int64]{}
+		for _, chunk := range positionalDeletes {
+			for _, a := range chunk.Chunks() {
+				for _, v := range a.(*array.Int64).Int64Values() {
+					deletes[v] = struct{}{}
+				}
+			}
+		}
+
+		pipeline = append(pipeline, processPositionalDeletes(ctx, deletes))
+	}
+
+	filterFunc, dropFile, err = as.getRecordFilter(ctx, iceSchema)
+	if err != nil {
+		return err
+	}
+
+	// Nothing to delete in a dropped file
+	if dropFile {
+		var emptySchema *arrow.Schema
+		emptySchema, err = SchemaToArrowSchema(iceberg.PositionalDeleteSchema, nil, false, as.useLargeTypes)
+		if err != nil {
+			return err
+		}
+		out <- enumeratedRecord{Task: task, Record: internal.Enumerated[arrow.RecordBatch]{
+			Value: array.NewRecordBatch(emptySchema, nil, 0), Index: 0, Last: true,
+		}}
+
+		return err
+	}
+
+	if filterFunc != nil {
+		pipeline = append(pipeline, filterFunc)
+	}
+	pipeline = append(pipeline, func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
+		defer r.Release()
+
+		return ToRequestedSchema(ctx, iceberg.PositionalDeleteSchema, enrichedIcebergSchema, r, false, true, as.useLargeTypes)
 	})
 
 	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, out)

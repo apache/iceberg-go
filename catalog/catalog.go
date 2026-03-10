@@ -79,6 +79,12 @@ type CreateTableCfg struct {
 	commonCreateCfg
 	PartitionSpec *iceberg.PartitionSpec
 	SortOrder     table.SortOrder
+	// StagedUpdates holds additional table.Update operations that cause
+	// the REST catalog to use a two-phase staged creation. Phase 1
+	// sends a minimal create with stage-create=true; phase 2 commits
+	// with an assert-create requirement and all updates atomically.
+	// Non-REST catalogs ignore this field.
+	StagedUpdates []table.Update
 }
 
 func NewCreateTableCfg() CreateTableCfg {
@@ -189,6 +195,18 @@ func WithSortOrder(order table.SortOrder) CreateTableOpt {
 func WithProperties(props iceberg.Properties) CreateTableOpt {
 	return func(cfg *CreateTableCfg) {
 		cfg.Properties = props
+	}
+}
+
+// WithStagedUpdates provides additional table.Update operations that
+// cause the REST catalog to use two-phase staged creation. This is
+// useful for atomically creating a table with a custom UUID, initial
+// snapshots, or snapshot references. Use constructors from the table
+// package (e.g. table.NewAssignUUIDUpdate, table.NewAddSnapshotUpdate,
+// table.NewSetSnapshotRefUpdate).
+func WithStagedUpdates(updates ...table.Update) CreateTableOpt {
+	return func(cfg *CreateTableCfg) {
+		cfg.StagedUpdates = append(cfg.StagedUpdates, updates...)
 	}
 }
 

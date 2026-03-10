@@ -72,7 +72,7 @@ type Metadata interface {
 	// table is created. Implementations must throw an exception if a table's
 	// UUID does not match the expected UUID after refreshing metadata.
 	TableUUID() uuid.UUID
-	// Location is the table's base location. This is used by writers to determine
+	// Location is the table's base location. This is used by writerFactory to determine
 	// where to store data files, manifest files, and table metadata files.
 	Location() string
 	// LastUpdatedMillis is the timestamp in milliseconds from the unix epoch when
@@ -95,7 +95,7 @@ type Metadata interface {
 	// PartitionSpecByID returns the partition spec with the given ID. Returns
 	// nil if the ID is not found in the list of partition specs.
 	PartitionSpecByID(int) *iceberg.PartitionSpec
-	// DefaultPartitionSpec is the ID of the current spec that writers should
+	// DefaultPartitionSpec is the ID of the current spec that writerFactory should
 	// use by default.
 	DefaultPartitionSpec() int
 	// LastPartitionSpecID is the highest assigned partition field ID across
@@ -126,7 +126,7 @@ type Metadata interface {
 	SortOrder() SortOrder
 	// SortOrders returns the list of sort orders in the table.
 	SortOrders() []SortOrder
-	// DefaultSortOrder returns the ID of the current sort order that writers
+	// DefaultSortOrder returns the ID of the current sort order that writerFactory
 	// should use by default.
 	DefaultSortOrder() int
 	// Properties is a string to string map of table properties. This is used
@@ -382,7 +382,7 @@ func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial 
 
 	maxFieldID := 0
 	fieldCount := 0
-	for f := range freshSpec.Fields() {
+	for _, f := range freshSpec.Fields() {
 		maxFieldID = max(maxFieldID, f.FieldID)
 		if b.formatVersion <= 1 {
 			expectedID := partitionFieldStartID + fieldCount
@@ -492,6 +492,11 @@ func (b *MetadataBuilder) currentNextRowID() int64 {
 	}
 
 	return initialRowID
+}
+
+// NextRowID returns the next available row ID (for v3 row lineage). For v1/v2 returns 0.
+func (b *MetadataBuilder) NextRowID() int64 {
+	return b.currentNextRowID()
 }
 
 func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64) error {
@@ -1015,7 +1020,7 @@ func (b *MetadataBuilder) Build() (Metadata, error) {
 		}
 
 		partitionFields := make([]iceberg.PartitionField, 0)
-		for f := range partition.Fields() {
+		for _, f := range partition.Fields() {
 			partitionFields = append(partitionFields, f)
 		}
 
@@ -1995,7 +2000,7 @@ func reassignIDs(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, sortOrde
 		partitions = iceberg.UnpartitionedSpec
 	}
 	opts := make([]iceberg.PartitionOption, 0)
-	for f := range partitions.Fields() {
+	for _, f := range partitions.Fields() {
 		var s string
 		var ok bool
 		if s, ok = previousMapFn(f.SourceID); !ok {
