@@ -473,9 +473,36 @@ func (t *TableWritingTestSuite) TestAddFilesUnpartitionedHasFieldIDs() {
 	}
 
 	tx := tbl.NewTransaction()
-	err := tx.AddFiles(t.ctx, files, nil, false)
-	t.Error(err)
-	t.ErrorIs(err, iceberg.ErrNotImplemented)
+	t.Require().NoError(tx.AddFiles(t.ctx, files, nil, false))
+
+	stagedTbl, err := tx.StagedTable()
+	t.Require().NoError(err)
+	t.NotNil(stagedTbl.NameMapping())
+
+	t.Equal(stagedTbl.CurrentSnapshot().Summary,
+		&table.Summary{
+			Operation: table.OpAppend,
+			Properties: iceberg.Properties{
+				"added-data-files":       "5",
+				"added-files-size":       "3520",
+				"added-records":          "5",
+				"total-data-files":       "5",
+				"total-delete-files":     "0",
+				"total-equality-deletes": "0",
+				"total-files-size":       "3520",
+				"total-position-deletes": "0",
+				"total-records":          "5",
+			},
+		})
+
+	scan, err := tx.Scan()
+	t.Require().NoError(err)
+
+	contents, err := scan.ToArrowTable(context.Background())
+	t.Require().NoError(err)
+	defer contents.Release()
+
+	t.EqualValues(5, contents.NumRows())
 }
 
 func (t *TableWritingTestSuite) TestAddFilesFailsSchemaMismatch() {
