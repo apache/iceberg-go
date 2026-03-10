@@ -607,7 +607,7 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 		}
 	}
 
-	appendFiles := t.appendSnapshotProducer(fs, snapshotProps)
+	appendFiles := t.appendSnapshotProducer(fs, snapshotProps, MainBranch)
 	for _, df := range dataFiles {
 		appendFiles.appendDataFile(df)
 	}
@@ -710,7 +710,7 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID)
+	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite, MainBranch).mergeOverwrite(&commitUUID)
 
 	for _, df := range markedForDeletion {
 		updater.deleteDataFile(df)
@@ -958,7 +958,7 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(fs, snapshotProps, operation, branch).mergeOverwrite(&commitUUID)
 
-	filesToDelete, filesToRewrite, err := t.classifyFilesForOverwrite(ctx, fs, filter, caseSensitive, concurrency)
+	filesToDelete, filesToRewrite, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
 	if err != nil {
 		return nil, err
 	}
@@ -995,7 +995,7 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, OpDelete).mergeOverwrite(&commitUUID)
+	updater := t.updateSnapshot(fs, snapshotProps, OpDelete, MainBranch).mergeOverwrite(&commitUUID)
 
 	filesToDelete, withPartialDeletions, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
 	if err != nil {

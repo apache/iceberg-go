@@ -444,7 +444,7 @@ type snapshotProducer struct {
 	branch              string
 }
 
-func createSnapshotProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties) *snapshotProducer {
+func createSnapshotProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties, branch string) *snapshotProducer {
 	var (
 		commit         uuid.UUID
 		parentSnapshot int64 = -1
