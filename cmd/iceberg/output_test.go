@@ -124,8 +124,8 @@ Current Snapshot | append, {}: id=3055729675574597004, parent_id=305172967557459
 Refs
 Name | Type   | Snapshot ID        
 -----------------------------------
-test | tag    | 3051729675574597004
 main | branch | 3055729675574597004
+test | tag    | 3051729675574597004
 
 Snapshots
 ├──Snapshot 3051729675574597004, schema 1: s3://a/b/1.avro

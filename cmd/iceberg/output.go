@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -108,11 +109,20 @@ func (t textOutput) DescribeTable(tbl *table.Table) {
 		}).Render()
 
 	refsData := pterm.TableData{{"Name", "Type", "Snapshot ID"}}
+	type refRow struct {
+		name string
+		ref  table.SnapshotRef
+	}
+	var refRows []refRow
 	for name, ref := range tbl.Metadata().Refs() {
+		refRows = append(refRows, refRow{name, ref})
+	}
+	sort.Slice(refRows, func(i, j int) bool { return refRows[i].name < refRows[j].name })
+	for _, r := range refRows {
 		refsData = append(refsData, []string{
-			name,
-			string(ref.SnapshotRefType),
-			strconv.FormatInt(ref.SnapshotID, 10),
+			r.name,
+			string(r.ref.SnapshotRefType),
+			strconv.FormatInt(r.ref.SnapshotID, 10),
 		})
 	}
 	if len(refsData) > 1 {
