@@ -326,8 +326,10 @@ func (b *MetadataBuilder) SnapshotIDForRef(refName string) *int64 {
 	}
 	if ref, ok := b.refs[refName]; ok {
 		id := ref.SnapshotID
+
 		return &id
 	}
+
 	return nil
 }
 

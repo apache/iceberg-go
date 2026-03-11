@@ -68,6 +68,7 @@ func resolveBranch(opts []WriteOpt) string {
 	if o.branch == "" {
 		return MainBranch
 	}
+
 	return o.branch
 }
 
@@ -169,6 +170,7 @@ func (t *Transaction) updateSnapshot(fs io.IO, props iceberg.Properties, operati
 	if branch == "" {
 		branch = MainBranch
 	}
+
 	return snapshotUpdate{
 		txn:           t,
 		io:            fs.(io.WriteFileIO),

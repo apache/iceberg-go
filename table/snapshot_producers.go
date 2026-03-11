@@ -786,6 +786,7 @@ func (sp *snapshotProducer) commit() (_ []Update, _ []Requirement, err error) {
 	} else {
 		assertReq = AssertRefSnapshotID(sp.branch, nil)
 	}
+
 	return []Update{
 			NewAddSnapshotUpdate(&snapshot),
 			NewSetSnapshotRefUpdate(sp.branch, sp.snapshotID, BranchRef, -1, -1, -1),
