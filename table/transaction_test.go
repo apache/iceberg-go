@@ -650,6 +650,94 @@ func (s *SparkIntegrationTestSuite) TestDeleteMergeOnReadPartitioned() {
 +----------+---------+---+`)
 }
 
+// TestBranchWrites verifies that WithBranch writes to the given branch: main stays
+// unchanged when appending to a branch, and scanning by ref returns the correct data.
+func (s *SparkIntegrationTestSuite) TestBranchWrites() {
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "value", Type: iceberg.PrimitiveTypes.String},
+	)
+
+	tbl, err := s.cat.CreateTable(s.ctx, catalog.ToIdentifier("default", "go_test_branch_writes"), icebergSchema)
+	s.Require().NoError(err)
+
+	arrowSchema, err := table.SchemaToArrowSchema(icebergSchema, nil, true, false)
+	s.Require().NoError(err)
+
+	// 1) Append to main (default), commit
+	mainTable, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[{"id": 1, "value": "main-a"}, {"id": 2, "value": "main-b"}]`,
+	})
+	s.Require().NoError(err)
+	defer mainTable.Release()
+
+	tx := tbl.NewTransaction()
+	err = tx.AppendTable(s.ctx, mainTable, 2, nil)
+	s.Require().NoError(err)
+	tbl, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	mainSnapID := tbl.CurrentSnapshot().SnapshotID
+	mainRows, err := tbl.Scan().ToArrowTable(s.ctx)
+	s.Require().NoError(err)
+	defer mainRows.Release()
+	s.Require().Equal(int64(2), mainRows.NumRows(), "main should have 2 rows")
+
+	// 2) Append to branch "test-branch", commit
+	branchTable, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[{"id": 10, "value": "branch-x"}, {"id": 11, "value": "branch-y"}]`,
+	})
+	s.Require().NoError(err)
+	defer branchTable.Release()
+
+	tx = tbl.NewTransaction()
+	err = tx.AppendTable(s.ctx, branchTable, 2, nil, table.WithBranch("test-branch"))
+	s.Require().NoError(err)
+	tbl, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	// 3) Main unchanged: same snapshot and row count
+	s.Require().Equal(mainSnapID, tbl.CurrentSnapshot().SnapshotID, "main ref should still point to first snapshot")
+	mainAfter, err := tbl.Scan().ToArrowTable(s.ctx)
+	s.Require().NoError(err)
+	defer mainAfter.Release()
+	s.Require().Equal(int64(2), mainAfter.NumRows(), "main should still have 2 rows after branch write")
+
+	// 4) Branch has its own snapshot and the branch-only rows
+	branchScan, err := tbl.Scan().UseRef("test-branch")
+	s.Require().NoError(err)
+	branchRows, err := branchScan.ToArrowTable(s.ctx)
+	s.Require().NoError(err)
+	defer branchRows.Release()
+	s.Require().Equal(int64(2), branchRows.NumRows(), "test-branch should have 2 rows")
+
+	// 5) Optional: append again to main; branch ref unchanged
+	moreMain, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[{"id": 3, "value": "main-c"}]`,
+	})
+	s.Require().NoError(err)
+	defer moreMain.Release()
+
+	tx = tbl.NewTransaction()
+	err = tx.AppendTable(s.ctx, moreMain, 1, nil)
+	s.Require().NoError(err)
+	tbl, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	s.Require().NotEqual(mainSnapID, tbl.CurrentSnapshot().SnapshotID, "main should advance to new snapshot")
+	mainFinal, err := tbl.Scan().ToArrowTable(s.ctx)
+	s.Require().NoError(err)
+	defer mainFinal.Release()
+	s.Require().Equal(int64(3), mainFinal.NumRows(), "main should have 3 rows")
+
+	branchAgain, err := tbl.Scan().UseRef("test-branch")
+	s.Require().NoError(err)
+	branchFinal, err := branchAgain.ToArrowTable(s.ctx)
+	s.Require().NoError(err)
+	defer branchFinal.Release()
+	s.Require().Equal(int64(2), branchFinal.NumRows(), "test-branch should still have 2 rows (isolation)")
+}
+
 func TestSparkIntegration(t *testing.T) {
 	suite.Run(t, new(SparkIntegrationTestSuite))
 }
