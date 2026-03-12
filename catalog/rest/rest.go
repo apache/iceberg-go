@@ -673,7 +673,7 @@ func (r *Catalog) listTablesPage(ctx context.Context, namespace table.Identifier
 	uri := r.baseURI.JoinPath("namespaces", ns, "tables")
 
 	v := url.Values{}
-	if pageSize >= 0 {
+	if pageSize > 0 {
 		v.Set("pageSize", strconv.Itoa(pageSize))
 	}
 	if pageToken != "" {
@@ -1030,7 +1030,7 @@ func (r *Catalog) listNamespacesPage(ctx context.Context, parent table.Identifie
 	if len(parent) != 0 {
 		v.Set("parent", strings.Join(parent, namespaceSeparator))
 	}
-	if pageSize >= 0 {
+	if pageSize > 0 {
 		v.Set("pageSize", strconv.Itoa(pageSize))
 	}
 	if pageToken != "" {
@@ -1159,7 +1159,7 @@ func (r *Catalog) listViewsPage(ctx context.Context, namespace table.Identifier,
 	uri := r.baseURI.JoinPath("namespaces", ns, "views")
 
 	v := url.Values{}
-	if pageSize >= 0 {
+	if pageSize > 0 {
 		v.Set("pageSize", strconv.Itoa(pageSize))
 	}
 	if pageToken != "" {
