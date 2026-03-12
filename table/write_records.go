@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"strconv"
@@ -53,6 +54,16 @@ func WithWriteUUID(id uuid.UUID) WriteRecordOption {
 
 // WriteRecords writes Arrow record batches to Parquet data files for the given
 // table, returning an iterator of the resulting DataFile objects.
+//
+// The provided Arrow schema must be compatible with the table's current Iceberg
+// schema: each field in the Arrow schema is matched to the table schema by
+// field ID (or by name via the table's name mapping if field IDs are absent).
+// The Arrow schema may be a subset of the table schema (projection), but every
+// field present must have a type that is promotable to the corresponding table
+// field type.
+//
+// WriteRecords retains each RecordBatch it consumes, so callers keep ownership
+// of the batches yielded through records and may release them freely.
 func WriteRecords(ctx context.Context, tbl *Table,
 	schema *arrow.Schema,
 	records iter.Seq2[arrow.RecordBatch, error],
@@ -73,7 +84,10 @@ func WriteRecords(ctx context.Context, tbl *Table,
 		return singleErrorIter(fmt.Errorf("%w: filesystem does not support writing", iceberg.ErrNotImplemented))
 	}
 
-	meta, _ := MetadataBuilderFromBase(tbl.metadata, tbl.metadataLocation)
+	meta, err := MetadataBuilderFromBase(tbl.metadata, tbl.metadataLocation)
+	if err != nil {
+		return singleErrorIter(fmt.Errorf("failed to build metadata: %w", err))
+	}
 
 	if cfg.targetFileSize > 0 {
 		if meta.props == nil {
@@ -89,11 +103,21 @@ func WriteRecords(ctx context.Context, tbl *Table,
 		writeUUID: cfg.writeUUID,
 	}
 
-	return recordsToDataFiles(ctx, tbl.Location(), meta, args)
+	inner := recordsToDataFiles(ctx, tbl.Location(), meta, args)
+	return func(yield func(iceberg.DataFile, error) bool) {
+		for df, err := range inner {
+			if err != nil && (errors.Is(err, iceberg.ErrInvalidSchema) || errors.Is(err, iceberg.ErrResolve)) {
+				err = fmt.Errorf("arrow schema is not compatible with the table schema: %w", err)
+			}
+			if !yield(df, err) {
+				return
+			}
+		}
+	}
 }
 
 func singleErrorIter(err error) iter.Seq2[iceberg.DataFile, error] {
 	return func(yield func(iceberg.DataFile, error) bool) {
-		yield(nil, err)
+		_ = yield(nil, err)
 	}
 }
