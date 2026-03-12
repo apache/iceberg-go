@@ -31,6 +31,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/config"
 	"github.com/apache/iceberg-go/internal"
@@ -715,6 +716,45 @@ func retOrPanic[T any](v T, err error) T {
 	return v
 }
 
+// writeDefaultToScalar converts an Iceberg write-default value to an Arrow scalar.
+func writeDefaultToScalar(v any, t iceberg.Type, dt arrow.DataType) scalar.Scalar {
+	switch t.(type) {
+	case iceberg.DateType:
+		return scalar.NewDate32Scalar(arrow.Date32(v.(iceberg.Date)))
+	case iceberg.TimeType:
+		return scalar.NewTime64Scalar(arrow.Time64(v.(iceberg.Time)), dt)
+	case iceberg.TimestampType, iceberg.TimestampTzType:
+		return scalar.NewTimestampScalar(arrow.Timestamp(v.(iceberg.Timestamp)), dt)
+	case iceberg.TimestampNsType, iceberg.TimestampTzNsType:
+		return scalar.NewTimestampScalar(arrow.Timestamp(v.(iceberg.TimestampNano)), dt)
+	case iceberg.UUIDType:
+		u := v.(uuid.UUID)
+
+		return retOrPanic(scalar.MakeScalarParam(u[:], &arrow.FixedSizeBinaryType{ByteWidth: 16}))
+	case iceberg.DecimalType:
+		d := v.(iceberg.Decimal)
+
+		return scalar.NewDecimal128Scalar(d.Val, dt)
+	default:
+		return retOrPanic(scalar.MakeScalarParam(v, dt))
+	}
+}
+
+// writeDefaultToArray creates an Arrow array of length n filled with the write-default value v.
+func writeDefaultToArray(v any, t iceberg.Type, dt arrow.DataType, n int, alloc memory.Allocator) arrow.Array {
+	out := retOrPanic(scalar.MakeArrayFromScalar(writeDefaultToScalar(v, t, dt), n, alloc))
+	if _, ok := dt.(arrow.ExtensionType); ok {
+		defer out.Release()
+
+		data := array.NewData(dt, out.Len(), out.Data().Buffers(), nil, out.NullN(), 0)
+		defer data.Release()
+
+		return array.MakeFromData(data)
+	}
+
+	return out
+}
+
 type arrowProjectionVisitor struct {
 	ctx                 context.Context
 	fileSchema          *iceberg.Schema
@@ -832,7 +872,12 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 		} else if !field.Required {
 			dt := retOrPanic(TypeToArrowType(field.Type, false, a.useLargeTypes))
 
-			arr = array.MakeArrayOfNull(compute.GetAllocator(a.ctx), dt, structArr.Len())
+			if field.WriteDefault != nil {
+				arr = writeDefaultToArray(field.WriteDefault, field.Type, dt, structArr.Len(), compute.GetAllocator(a.ctx))
+			} else {
+				arr = array.MakeArrayOfNull(compute.GetAllocator(a.ctx), dt, structArr.Len())
+			}
+
 			defer arr.Release()
 			fieldArrs[i] = arr
 			fields[i] = a.constructField(field, arr.DataType())
