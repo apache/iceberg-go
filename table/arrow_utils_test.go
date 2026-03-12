@@ -26,10 +26,12 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -584,4 +586,183 @@ func TestToRequestedSchema(t *testing.T) {
 	defer rec2.Release()
 
 	assert.True(t, array.RecordEqual(rec, rec2))
+}
+
+func TestToRequestedSchemaWriteDefaults(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	fileIceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+
+	requestedIceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "event_date", Type: iceberg.PrimitiveTypes.Date, Required: false, WriteDefault: iceberg.Date(1234)},
+	)
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{
+			Name:     "id",
+			Type:     arrow.PrimitiveTypes.Int32,
+			Nullable: false,
+			Metadata: arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: "1"}),
+		},
+	}, nil)
+	bldr := array.NewRecordBuilder(mem, arrowSchema)
+	defer bldr.Release()
+	bldr.Field(0).(*array.Int32Builder).AppendValues([]int32{1, 2, 3}, nil)
+	rec := bldr.NewRecordBatch()
+	defer rec.Release()
+
+	result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, false, false, false)
+	require.NoError(t, err)
+	defer result.Release()
+
+	require.EqualValues(t, 2, result.NumCols())
+	dateCol := result.Column(1)
+	require.Equal(t, arrow.DATE32, dateCol.DataType().ID(), "expected date32 column, got %s", dateCol.DataType())
+	require.Equal(t, 3, dateCol.Len())
+	dateArr := dateCol.(*array.Date32)
+	for i := 0; i < dateArr.Len(); i++ {
+		assert.Equal(t, arrow.Date32(1234), dateArr.Value(i), "row %d should have write-default value", i)
+	}
+}
+
+func TestToRequestedSchemaWriteDefaultsTypes(t *testing.T) {
+	ctx := context.Background()
+
+	buildBaseRecord := func(mem memory.Allocator) arrow.RecordBatch {
+		arrowSchema := arrow.NewSchema([]arrow.Field{
+			{
+				Name:     "id",
+				Type:     arrow.PrimitiveTypes.Int32,
+				Nullable: false,
+				Metadata: arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: "1"}),
+			},
+		}, nil)
+		bldr := array.NewRecordBuilder(mem, arrowSchema)
+		defer bldr.Release()
+		bldr.Field(0).(*array.Int32Builder).AppendValues([]int32{1, 2, 3}, nil)
+
+		return bldr.NewRecordBatch()
+	}
+
+	fileIceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+
+	tests := []struct {
+		name  string
+		field iceberg.NestedField
+		check func(t *testing.T, col arrow.Array)
+	}{
+		{
+			name: "time write-default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "ts", Type: iceberg.PrimitiveTypes.Time,
+				Required: false, WriteDefault: iceberg.Time(5000000),
+			},
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.TIME64, col.DataType().ID())
+				timeArr := col.(*array.Time64)
+				for i := 0; i < timeArr.Len(); i++ {
+					assert.Equal(t, arrow.Time64(5000000), timeArr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name: "timestamp write-default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp,
+				Required: false, WriteDefault: iceberg.Timestamp(1700000000000000),
+			},
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.TIMESTAMP, col.DataType().ID())
+				tsArr := col.(*array.Timestamp)
+				for i := 0; i < tsArr.Len(); i++ {
+					assert.Equal(t, arrow.Timestamp(1700000000000000), tsArr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name: "uuid write-default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "uid", Type: iceberg.UUIDType{},
+				Required: false, WriteDefault: uuid.MustParse("f79c3e09-677c-4bbd-a479-512f87f77acf"),
+			},
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.EXTENSION, col.DataType().ID())
+				uuidArr := col.(*extensions.UUIDArray)
+				expected := uuid.MustParse("f79c3e09-677c-4bbd-a479-512f87f77acf")
+				for i := 0; i < uuidArr.Len(); i++ {
+					assert.Equal(t, expected, uuidArr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name: "decimal write-default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "price", Type: iceberg.DecimalTypeOf(10, 2),
+				Required: false, WriteDefault: iceberg.Decimal{Val: decimal128.New(0, 12345), Scale: 2},
+			},
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.DECIMAL128, col.DataType().ID())
+				decArr := col.(*array.Decimal128)
+				for i := 0; i < decArr.Len(); i++ {
+					assert.Equal(t, decimal128.New(0, 12345), decArr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name: "bool write-default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "flag", Type: iceberg.PrimitiveTypes.Bool,
+				Required: false, WriteDefault: true,
+			},
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.BOOL, col.DataType().ID())
+				boolArr := col.(*array.Boolean)
+				for i := 0; i < boolArr.Len(); i++ {
+					assert.True(t, boolArr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name: "string write-default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "label", Type: iceberg.PrimitiveTypes.String,
+				Required: false, WriteDefault: "hello",
+			},
+			check: func(t *testing.T, col arrow.Array) {
+				strArr := col.(*array.String)
+				for i := 0; i < strArr.Len(); i++ {
+					assert.Equal(t, "hello", strArr.Value(i), "row %d", i)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+			defer mem.AssertSize(t, 0)
+
+			requestedIceSchema := iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+				tt.field,
+			)
+
+			rec := buildBaseRecord(mem)
+			defer rec.Release()
+
+			result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, false, false, false)
+			require.NoError(t, err)
+			defer result.Release()
+
+			require.EqualValues(t, 2, result.NumCols())
+			tt.check(t, result.Column(1))
+		})
+	}
 }
