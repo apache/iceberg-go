@@ -1878,6 +1878,55 @@ func (r *RestCatalogSuite) TestListViewsPagination() {
 	r.Require().NoError(lastErr)
 }
 
+func (r *RestCatalogSuite) TestListTablesZeroPageSizeNotSent() {
+	namespace := "examples"
+	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+		r.Equal("", req.URL.Query().Get("pageSize"), "pageSize must not be sent when set to 0")
+		json.NewEncoder(w).Encode(map[string]any{"identifiers": []any{}})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	ctx := cat.SetPageSize(context.Background(), 0)
+	for _, err := range cat.ListTables(ctx, catalog.ToIdentifier(namespace)) {
+		r.Require().NoError(err)
+	}
+}
+
+func (r *RestCatalogSuite) TestListNamespacesZeroPageSizeNotSent() {
+	r.mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+		r.Equal("", req.URL.Query().Get("pageSize"), "pageSize must not be sent when set to 0")
+		json.NewEncoder(w).Encode(map[string]any{"namespaces": []any{}})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	ctx := cat.SetPageSize(context.Background(), 0)
+	_, err = cat.ListNamespaces(ctx, nil)
+	r.Require().NoError(err)
+}
+
+func (r *RestCatalogSuite) TestListViewsZeroPageSizeNotSent() {
+	namespace := "accounting"
+	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/views", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+		r.Equal("", req.URL.Query().Get("pageSize"), "pageSize must not be sent when set to 0")
+		json.NewEncoder(w).Encode(map[string]any{"identifiers": []any{}})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	ctx := cat.SetPageSize(context.Background(), 0)
+	for _, err := range cat.ListViews(ctx, catalog.ToIdentifier(namespace)) {
+		r.Require().NoError(err)
+	}
+}
+
 func (r *RestCatalogSuite) TestListViewsPaginationErrorOnSubsequentPage() {
 	namespace := "accounting"
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/views", func(w http.ResponseWriter, req *http.Request) {
