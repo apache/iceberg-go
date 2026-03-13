@@ -395,6 +395,9 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int) (iceberg.Literal
 	case *array.String:
 
 		return iceberg.NewLiteral(arr.Value(row)), nil
+	case *array.LargeString:
+
+		return iceberg.NewLiteral(arr.Value(row)), nil
 	case *array.Int64:
 
 		return iceberg.NewLiteral(arr.Value(row)), nil

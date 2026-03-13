@@ -166,54 +166,60 @@ func (s *FanoutWriterTestSuite) TestIdentityTransform() {
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
 		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "large_name", Type: arrow.BinaryTypes.LargeString, Nullable: true},
 	}, nil)
 
 	testRecord := s.createCustomTestRecord(arrSchema, [][]any{
-		{int32(1), "partition_a"},
-		{int32(2), "partition_b"},
-		{int32(3), "partition_a"},
-		{int32(4), "partition_b"},
-		{nil, nil},
+		{int32(1), "partition_a", "partition_a"},
+		{int32(2), "partition_b", "partition_b"},
+		{int32(3), "partition_a", "partition_c"},
+		{int32(4), "partition_b", "partition_d"},
+		{nil, nil, nil},
 	})
 	defer testRecord.Release()
 
 	s.testTransformPartition(iceberg.IdentityTransform{}, "name", "identity", testRecord, 3)
+	s.testTransformPartition(iceberg.IdentityTransform{}, "large_name", "identity_large_string", testRecord, 5)
 }
 
 func (s *FanoutWriterTestSuite) TestBucketTransform() {
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
 		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "large_name", Type: arrow.BinaryTypes.LargeString, Nullable: true},
 	}, nil)
 
 	testRecord := s.createCustomTestRecord(arrSchema, [][]any{
-		{int32(1), "partition_a"},
-		{int32(2), "partition_b"},
-		{int32(3), "partition_a"},
-		{int32(4), "partition_b"},
-		{nil, nil},
+		{int32(1), "partition_a", "partition_a"},
+		{int32(2), "partition_b", "partition_b"},
+		{int32(3), "partition_a", "partition_c"},
+		{int32(4), "partition_b", "partition_d"},
+		{nil, nil, nil},
 	})
 	defer testRecord.Release()
 
 	s.testTransformPartition(iceberg.BucketTransform{NumBuckets: 3}, "id", "bucket", testRecord, 3)
+	s.testTransformPartition(iceberg.BucketTransform{NumBuckets: 3}, "large_name", "bucket_large_string", testRecord, 3)
 }
 
 func (s *FanoutWriterTestSuite) TestTruncateTransform() {
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
 		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "large_name", Type: arrow.BinaryTypes.LargeString, Nullable: true},
 	}, nil)
 
 	testRecord := s.createCustomTestRecord(arrSchema, [][]any{
-		{int32(1), "abcdef"},
-		{int32(2), "abcxyz"},
-		{int32(3), "abcuvw"},
-		{int32(4), "defghi"},
-		{nil, nil},
+		{int32(1), "abcdef", "abcdef"},
+		{int32(2), "abcxyz", "abcxyz"},
+		{int32(3), "abcuvw", "bcduvw"},
+		{int32(4), "defghi", "defghi"},
+		{nil, nil, nil},
 	})
 	defer testRecord.Release()
 
 	s.testTransformPartition(iceberg.TruncateTransform{Width: 3}, "name", "truncate", testRecord, 3)
+	s.testTransformPartition(iceberg.TruncateTransform{Width: 3}, "large_name", "truncate_large_string", testRecord, 4)
 }
 
 func (s *FanoutWriterTestSuite) TestYearTransform() {
