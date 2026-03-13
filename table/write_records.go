@@ -104,6 +104,7 @@ func WriteRecords(ctx context.Context, tbl *Table,
 	}
 
 	inner := recordsToDataFiles(ctx, tbl.Location(), meta, args)
+
 	return func(yield func(iceberg.DataFile, error) bool) {
 		for df, err := range inner {
 			if err != nil && (errors.Is(err, iceberg.ErrInvalidSchema) || errors.Is(err, iceberg.ErrResolve)) {
