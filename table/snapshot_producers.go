@@ -185,7 +185,7 @@ func (of *overwriteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 				return nil, err
 			}
 
-			return wr.ToManifestFile(path, counter.Count)
+			return wr.ToManifestFile(path, counter.Count, iceberg.WithManifestFileContent(m.ManifestContent()))
 		}
 
 		mf, err := rewriteManifest(m, notDeleted)
