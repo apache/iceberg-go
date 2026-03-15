@@ -417,15 +417,16 @@ type removeSnapshotsUpdate struct {
 
 // NewRemoveSnapshotsUpdate creates a new update that removes all snapshots from
 // the table metadata with the given snapshot IDs.
-func NewRemoveSnapshotsUpdate(ids []int64) *removeSnapshotsUpdate {
+func NewRemoveSnapshotsUpdate(ids []int64, postCommit bool) *removeSnapshotsUpdate {
 	return &removeSnapshotsUpdate{
 		baseUpdate:  baseUpdate{ActionName: UpdateRemoveSnapshots},
 		SnapshotIDs: ids,
+		postCommit:  postCommit,
 	}
 }
 
 func (u *removeSnapshotsUpdate) Apply(builder *MetadataBuilder) error {
-	return builder.RemoveSnapshots(u.SnapshotIDs)
+	return builder.RemoveSnapshots(u.SnapshotIDs, u.postCommit)
 }
 
 func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table, postTable *Table) error {

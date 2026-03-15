@@ -29,8 +29,7 @@ import (
 )
 
 func TestRemoveSnapshotsPostCommitSkipped(t *testing.T) {
-	update := NewRemoveSnapshotsUpdate([]int64{1, 2, 3})
-	update.postCommit = false
+	update := NewRemoveSnapshotsUpdate([]int64{1, 2, 3}, false)
 
 	// PostCommit should return nil immediately when postCommit is false,
 	// without accessing the table arguments (which are nil here)
@@ -90,7 +89,7 @@ func TestUnmarshalUpdates(t *testing.T) {
 				NewRemovePropertiesUpdate([]string{"key2"}),
 				NewRemoveSchemasUpdate([]int{1, 2, 3, 4}),
 				NewRemoveSpecUpdate([]int{1, 2, 3}),
-				NewRemoveSnapshotsUpdate([]int64{1, 2}),
+				NewRemoveSnapshotsUpdate([]int64{1, 2}, false),
 				NewRemoveSnapshotRefUpdate("main"),
 				NewSetDefaultSortOrderUpdate(1),
 				NewSetDefaultSpecUpdate(1),
