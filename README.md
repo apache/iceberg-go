@@ -128,7 +128,7 @@ make lint-install
 | Check Namespace Exists      |  X   |  X   |   X    |  X   |
 | Drop Namespace              |  X   |  X   |   X    |  X   |
 | Update Namespace Properties |  X   |  X   |   X    |  X   |
-| Create View                 |  X   |      |        |  X   |
+| Create View                 |  X   |  X   |        |  X   |
 | Load View                   |      |  X   |        |  X   |
 | List View                   |  X   |  X   |        |  X   |
 | Drop View                   |  X   |  X   |        |  X   |

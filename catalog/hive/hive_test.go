@@ -20,11 +20,13 @@ package hive
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/view"
 	"github.com/beltran/gohive/hive_metastore"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -942,4 +944,125 @@ func TestIdentifierValidation(t *testing.T) {
 		_, err := identifierToDatabase([]string{"a", "b"})
 		assert.Error(err)
 	})
+}
+
+func TestCreateView_NamespaceNotFound(t *testing.T) {
+	assert := require.New(t)
+
+	mockClient := &mockHiveClient{}
+	mockClient.On("GetDatabase", mock.Anything, "missing_db").
+		Return(nil, errNoSuchObject).Once()
+
+	cat := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	ver, _ := view.NewVersionFromSQL(1, 0, "SELECT 1", table.Identifier{"missing_db"})
+	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
+
+	_, err := cat.CreateView(context.Background(), TableIdentifier("missing_db", "v1"), ver, schema, catalog.WithViewLocation("file:///tmp/loc"))
+	assert.Error(err)
+	assert.True(errors.Is(err, catalog.ErrNoSuchNamespace))
+
+	mockClient.AssertExpectations(t)
+}
+
+func TestCreateView_ViewAlreadyExists(t *testing.T) {
+	assert := require.New(t)
+
+	mockClient := &mockHiveClient{}
+	mockClient.On("GetDatabase", mock.Anything, "test_database").Return(&hive_metastore.Database{Name: "test_database"}, nil).Once()
+	mockClient.On("GetTable", mock.Anything, "test_database", "test_view").Return(testIcebergHiveView, nil).Once()
+
+	cat := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	ver, _ := view.NewVersionFromSQL(1, 0, "SELECT 1", table.Identifier{"test_database"})
+	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
+
+	_, err := cat.CreateView(context.Background(), TableIdentifier("test_database", "test_view"), ver, schema, catalog.WithViewLocation("file:///tmp/loc"))
+	assert.Error(err)
+	assert.True(errors.Is(err, catalog.ErrViewAlreadyExists))
+
+	mockClient.AssertExpectations(t)
+}
+
+func TestCreateView_TableAlreadyExists(t *testing.T) {
+	assert := require.New(t)
+
+	mockClient := &mockHiveClient{}
+	mockClient.On("GetDatabase", mock.Anything, "test_database").Return(&hive_metastore.Database{Name: "test_database"}, nil).Once()
+	mockClient.On("GetTable", mock.Anything, "test_database", "test_table").Return(testIcebergHiveTable1, nil).Once()
+
+	cat := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	ver, _ := view.NewVersionFromSQL(1, 0, "SELECT 1", table.Identifier{"test_database"})
+	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
+
+	_, err := cat.CreateView(context.Background(), TableIdentifier("test_database", "test_table"), ver, schema, catalog.WithViewLocation("file:///tmp/loc"))
+	assert.Error(err)
+	assert.True(errors.Is(err, catalog.ErrTableAlreadyExists))
+
+	mockClient.AssertExpectations(t)
+}
+
+func TestCreateView_InvalidIdentifier(t *testing.T) {
+	assert := require.New(t)
+
+	cat := NewCatalogWithClient(&mockHiveClient{}, iceberg.Properties{})
+
+	ver, _ := view.NewVersionFromSQL(1, 0, "SELECT 1", table.Identifier{"db"})
+	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
+
+	_, err := cat.CreateView(context.Background(), table.Identifier{"only_db"}, ver, schema)
+	assert.Error(err)
+}
+
+func TestCreateView_Success(t *testing.T) {
+	assert := require.New(t)
+
+	dir := t.TempDir()
+	loc := "file://" + filepath.ToSlash(dir) + "/view_loc"
+
+	mockClient := &mockHiveClient{}
+	mockClient.On("GetDatabase", mock.Anything, "test_database").Return(&hive_metastore.Database{Name: "test_database"}, nil).Once()
+	mockClient.On("GetTable", mock.Anything, "test_database", "new_view").Return(nil, errNoSuchObject).Twice() // CheckViewExists and CheckTableExists
+	mockClient.On("CreateTable", mock.Anything, mock.MatchedBy(func(tbl *hive_metastore.Table) bool {
+		return tbl != nil && tbl.TableType == TableTypeVirtualView &&
+			tbl.Parameters != nil && tbl.Parameters[TableTypeKey] == TableTypeIcebergView &&
+			tbl.Parameters[MetadataLocationKey] != "" &&
+			tbl.ViewOriginalText == "SELECT 1 AS col" && tbl.ViewExpandedText == "SELECT 1 AS col"
+	})).Return(nil).Once()
+
+	cat := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	ver, err := view.NewVersionFromSQL(1, 0, "SELECT 1 AS col", table.Identifier{"test_database"})
+	assert.NoError(err)
+	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
+
+	v, err := cat.CreateView(context.Background(), TableIdentifier("test_database", "new_view"), ver, schema, catalog.WithViewLocation(loc))
+	assert.NoError(err)
+	assert.NotNil(v)
+	assert.Equal(table.Identifier{"test_database", "new_view"}, v.Identifier())
+
+	mockClient.AssertExpectations(t)
+}
+
+func TestCreateView_VersionNoSQLRepresentation(t *testing.T) {
+	assert := require.New(t)
+
+	mockClient := &mockHiveClient{}
+	mockClient.On("GetDatabase", mock.Anything, "test_database").Return(&hive_metastore.Database{Name: "test_database"}, nil).Once()
+	mockClient.On("GetTable", mock.Anything, "test_database", "v1").Return(nil, errNoSuchObject).Twice()
+
+	cat := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	ver, err := view.NewVersionFromSQL(1, 0, "SELECT 1", table.Identifier{"test_database"})
+	assert.NoError(err)
+	ver.Representations = nil // no SQL representation
+
+	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
+
+	_, err = cat.CreateView(context.Background(), TableIdentifier("test_database", "v1"), ver, schema, catalog.WithViewLocation("file:///tmp/loc"))
+	assert.Error(err)
+	assert.Contains(err.Error(), "no SQL representation")
+
+	mockClient.AssertExpectations(t)
 }
