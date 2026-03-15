@@ -60,6 +60,8 @@ var (
 	ErrNamespaceNotEmpty      = errors.New("namespace is not empty")
 	ErrNoSuchView             = errors.New("view does not exist")
 	ErrViewAlreadyExists      = errors.New("view already exists")
+	ErrEmptyCommitList        = errors.New("commit list must not be empty")
+	ErrMissingIdentifier      = errors.New("every table commit must have a valid identifier")
 )
 
 type PropertiesUpdateSummary struct {
@@ -146,6 +148,22 @@ type Catalog interface {
 	// UpdateNamespaceProperties allows removing, adding, and/or updating properties of a namespace
 	UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier,
 		removals []string, updates iceberg.Properties) (PropertiesUpdateSummary, error)
+}
+
+// TransactionalCatalog is an optional interface implemented by catalogs
+// that support atomic multi-table commits. Callers should check for this
+// capability via a type assertion:
+//
+//	if tc, ok := cat.(catalog.TransactionalCatalog); ok {
+//	    err := tc.CommitTransaction(ctx, commits)
+//	}
+//
+// The endpoint is all-or-nothing: either all table changes are applied
+// atomically, or none are. On success the method returns nil; the caller
+// must LoadTable individually to obtain updated metadata because the
+// server returns 204 No Content.
+type TransactionalCatalog interface {
+	CommitTransaction(ctx context.Context, commits []table.TableCommit) error
 }
 
 func ToIdentifier(ident ...string) table.Identifier {
