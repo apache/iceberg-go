@@ -744,6 +744,21 @@ func TestToRequestedSchemaWriteDefaultsTypes(t *testing.T) {
 				}
 			},
 		},
+		{
+			// initial-default is set but must be ignored on the write path
+			name: "ignores initial-default when write-default is set",
+			field: iceberg.NestedField{
+				ID: 2, Name: "dt", Type: iceberg.PrimitiveTypes.Date,
+				Required: false, InitialDefault: iceberg.Date(100), WriteDefault: iceberg.Date(999),
+			},
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.DATE32, col.DataType().ID())
+				arr := col.(*array.Date32)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, arrow.Date32(999), arr.Value(i), "row %d: should use write-default (999), not initial-default (100)", i)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {

@@ -730,8 +730,8 @@ func numericDefault[T ~int32 | ~int64 | ~float32 | ~float64](v any) T {
 	panic(fmt.Errorf("unsupported write-default value type %T for numeric iceberg type", v))
 }
 
-// writeDefaultToScalar converts an Iceberg default value to an Arrow scalar.
-func writeDefaultToScalar(v any, t iceberg.Type, dt arrow.DataType) scalar.Scalar {
+// defaultToScalar converts an Iceberg default value to an Arrow scalar.
+func defaultToScalar(v any, t iceberg.Type, dt arrow.DataType) scalar.Scalar {
 	switch typ := t.(type) {
 	case iceberg.Float32Type:
 		s, err := scalar.MakeScalarParam(numericDefault[float32](v), dt)
@@ -817,9 +817,9 @@ func writeDefaultToScalar(v any, t iceberg.Type, dt arrow.DataType) scalar.Scala
 	}
 }
 
-// writeDefaultToArray creates an Arrow array of length n filled with the write-default value v.
-func writeDefaultToArray(v any, t iceberg.Type, dt arrow.DataType, n int, alloc memory.Allocator) arrow.Array {
-	sc := writeDefaultToScalar(v, t, dt)
+// defaultToArray creates an Arrow array of length n filled with the given default value v.
+func defaultToArray(v any, t iceberg.Type, dt arrow.DataType, n int, alloc memory.Allocator) arrow.Array {
+	sc := defaultToScalar(v, t, dt)
 	out, err := scalar.MakeArrayFromScalar(sc, n, alloc)
 	if err != nil {
 		panic(fmt.Errorf("write-default (iceberg type %s, value %v %T): failed to create array: %w", t, v, v, err))
@@ -955,9 +955,9 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 			dt := retOrPanic(TypeToArrowType(field.Type, false, a.useLargeTypes))
 
 			if field.WriteDefault != nil && a.useWriteDefault {
-				arr = writeDefaultToArray(field.WriteDefault, field.Type, dt, structArr.Len(), compute.GetAllocator(a.ctx))
+				arr = defaultToArray(field.WriteDefault, field.Type, dt, structArr.Len(), compute.GetAllocator(a.ctx))
 			} else if field.InitialDefault != nil && !a.useWriteDefault {
-				arr = writeDefaultToArray(field.InitialDefault, field.Type, dt, structArr.Len(), compute.GetAllocator(a.ctx))
+				arr = defaultToArray(field.InitialDefault, field.Type, dt, structArr.Len(), compute.GetAllocator(a.ctx))
 			} else {
 				arr = array.MakeArrayOfNull(compute.GetAllocator(a.ctx), dt, structArr.Len())
 			}
