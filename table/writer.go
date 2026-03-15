@@ -118,7 +118,7 @@ func (w *defaultDataFileWriter) writeFile(ctx context.Context, partitionValues m
 	batches := make([]arrow.RecordBatch, len(task.Batches))
 	for i, b := range task.Batches {
 		rec, err := ToRequestedSchema(ctx, w.fileSchema,
-			task.Schema, b, false, true, false)
+			task.Schema, b, false, true, false, true)
 		if err != nil {
 			return nil, err
 		}

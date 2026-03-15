@@ -20,6 +20,8 @@ package table_test
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -531,7 +533,7 @@ func TestToRequestedSchemaTimestamps(t *testing.T) {
 	requestedSchema := TableSchemaWithAllMicrosecondsTimestampPrec
 	fileSchema := requestedSchema
 
-	converted, err := table.ToRequestedSchema(ctx, requestedSchema, fileSchema, batch, true, false, false)
+	converted, err := table.ToRequestedSchema(ctx, requestedSchema, fileSchema, batch, true, false, false, false)
 	require.NoError(t, err)
 	defer converted.Release()
 
@@ -581,7 +583,7 @@ func TestToRequestedSchema(t *testing.T) {
 	icesc, err := table.ArrowSchemaToIceberg(schema, false, nil)
 	require.NoError(t, err)
 
-	rec2, err := table.ToRequestedSchema(context.Background(), icesc, icesc, rec, true, true, false)
+	rec2, err := table.ToRequestedSchema(context.Background(), icesc, icesc, rec, true, true, false, false)
 	require.NoError(t, err)
 	defer rec2.Release()
 
@@ -616,7 +618,7 @@ func TestToRequestedSchemaWriteDefaults(t *testing.T) {
 	rec := bldr.NewRecordBatch()
 	defer rec.Release()
 
-	result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, false, false, false)
+	result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, false, false, false, true)
 	require.NoError(t, err)
 	defer result.Release()
 
@@ -757,7 +759,778 @@ func TestToRequestedSchemaWriteDefaultsTypes(t *testing.T) {
 			rec := buildBaseRecord(mem)
 			defer rec.Release()
 
-			result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, false, false, false)
+			result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, false, false, false, true)
+			require.NoError(t, err)
+			defer result.Release()
+
+			require.EqualValues(t, 2, result.NumCols())
+			tt.check(t, result.Column(1))
+		})
+	}
+}
+
+// TestToRequestedSchemaInitialDefaults is the read-path equivalent of
+// TestToRequestedSchemaWriteDefaults: a missing column is filled using
+// InitialDefault (useWriteDefault=false).
+func TestToRequestedSchemaInitialDefaults(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	fileIceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+
+	requestedIceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "event_date", Type: iceberg.PrimitiveTypes.Date, Required: false, InitialDefault: iceberg.Date(1234)},
+	)
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{
+			Name:     "id",
+			Type:     arrow.PrimitiveTypes.Int32,
+			Nullable: false,
+			Metadata: arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: "1"}),
+		},
+	}, nil)
+	bldr := array.NewRecordBuilder(mem, arrowSchema)
+	defer bldr.Release()
+	bldr.Field(0).(*array.Int32Builder).AppendValues([]int32{1, 2, 3}, nil)
+	rec := bldr.NewRecordBatch()
+	defer rec.Release()
+
+	result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, false, false, false, false)
+	require.NoError(t, err)
+	defer result.Release()
+
+	require.EqualValues(t, 2, result.NumCols())
+	dateCol := result.Column(1)
+	require.Equal(t, arrow.DATE32, dateCol.DataType().ID(), "expected date32 column, got %s", dateCol.DataType())
+	require.Equal(t, 3, dateCol.Len())
+	dateArr := dateCol.(*array.Date32)
+	for i := 0; i < dateArr.Len(); i++ {
+		assert.Equal(t, arrow.Date32(1234), dateArr.Value(i), "row %d should have initial-default value", i)
+	}
+}
+
+// TestToRequestedSchemaInitialDefaultTypes is the read-path equivalent of
+// TestToRequestedSchemaWriteDefaultsTypes: covers all Iceberg types using
+// programmatically constructed NestedFields with InitialDefault set.
+func TestToRequestedSchemaInitialDefaultTypes(t *testing.T) {
+	ctx := context.Background()
+
+	buildBaseRecord := func(mem memory.Allocator) arrow.RecordBatch {
+		arrowSchema := arrow.NewSchema([]arrow.Field{
+			{
+				Name:     "id",
+				Type:     arrow.PrimitiveTypes.Int32,
+				Nullable: false,
+				Metadata: arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: "1"}),
+			},
+		}, nil)
+		bldr := array.NewRecordBuilder(mem, arrowSchema)
+		defer bldr.Release()
+		bldr.Field(0).(*array.Int32Builder).AppendValues([]int32{1, 2, 3}, nil)
+
+		return bldr.NewRecordBatch()
+	}
+
+	fileIceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+
+	tests := []struct {
+		name  string
+		field iceberg.NestedField
+		check func(t *testing.T, col arrow.Array)
+	}{
+		{
+			name: "date initial-default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "dt", Type: iceberg.PrimitiveTypes.Date,
+				Required: false, InitialDefault: iceberg.Date(1234),
+			},
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.DATE32, col.DataType().ID())
+				arr := col.(*array.Date32)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, arrow.Date32(1234), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name: "time initial-default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "ts", Type: iceberg.PrimitiveTypes.Time,
+				Required: false, InitialDefault: iceberg.Time(5000000),
+			},
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.TIME64, col.DataType().ID())
+				arr := col.(*array.Time64)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, arrow.Time64(5000000), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name: "timestamp initial-default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp,
+				Required: false, InitialDefault: iceberg.Timestamp(1700000000000000),
+			},
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.TIMESTAMP, col.DataType().ID())
+				arr := col.(*array.Timestamp)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, arrow.Timestamp(1700000000000000), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name: "uuid initial-default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "uid", Type: iceberg.UUIDType{},
+				Required: false, InitialDefault: uuid.MustParse("f79c3e09-677c-4bbd-a479-512f87f77acf"),
+			},
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.EXTENSION, col.DataType().ID())
+				arr := col.(*extensions.UUIDArray)
+				expected := uuid.MustParse("f79c3e09-677c-4bbd-a479-512f87f77acf")
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, expected, arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name: "decimal initial-default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "price", Type: iceberg.DecimalTypeOf(10, 2),
+				Required: false, InitialDefault: iceberg.Decimal{Val: decimal128.New(0, 12345), Scale: 2},
+			},
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.DECIMAL128, col.DataType().ID())
+				arr := col.(*array.Decimal128)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, decimal128.New(0, 12345), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name: "bool initial-default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "flag", Type: iceberg.PrimitiveTypes.Bool,
+				Required: false, InitialDefault: true,
+			},
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.BOOL, col.DataType().ID())
+				arr := col.(*array.Boolean)
+				for i := 0; i < arr.Len(); i++ {
+					assert.True(t, arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name: "string initial-default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "label", Type: iceberg.PrimitiveTypes.String,
+				Required: false, InitialDefault: "hello",
+			},
+			check: func(t *testing.T, col arrow.Array) {
+				arr := col.(*array.String)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, "hello", arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name: "binary initial-default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.Binary,
+				Required: false, InitialDefault: []byte("hello"),
+			},
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.BINARY, col.DataType().ID())
+				arr := col.(*array.Binary)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, []byte("hello"), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name: "int32 initial-default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "n", Type: iceberg.PrimitiveTypes.Int32,
+				Required: false, InitialDefault: int32(42),
+			},
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.INT32, col.DataType().ID())
+				arr := col.(*array.Int32)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, int32(42), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name: "int64 initial-default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "n", Type: iceberg.PrimitiveTypes.Int64,
+				Required: false, InitialDefault: int64(9999),
+			},
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.INT64, col.DataType().ID())
+				arr := col.(*array.Int64)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, int64(9999), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			// write-default is set but must be ignored on the read path
+			name: "ignores write-default when initial-default is set",
+			field: iceberg.NestedField{
+				ID: 2, Name: "dt", Type: iceberg.PrimitiveTypes.Date,
+				Required: false, InitialDefault: iceberg.Date(100), WriteDefault: iceberg.Date(999),
+			},
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.DATE32, col.DataType().ID())
+				arr := col.(*array.Date32)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, arrow.Date32(100), arr.Value(i), "row %d: should use initial-default (100), not write-default (999)", i)
+				}
+			},
+		},
+		{
+			// no default set at all — column must be null
+			name: "falls back to null when no initial-default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "dt", Type: iceberg.PrimitiveTypes.Date,
+				Required: false,
+			},
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.DATE32, col.DataType().ID())
+				for i := 0; i < col.Len(); i++ {
+					assert.True(t, col.IsNull(i), "row %d should be null", i)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+			defer mem.AssertSize(t, 0)
+
+			requestedIceSchema := iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+				tt.field,
+			)
+
+			rec := buildBaseRecord(mem)
+			defer rec.Release()
+
+			result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, false, false, false, false)
+			require.NoError(t, err)
+			defer result.Release()
+
+			require.EqualValues(t, 2, result.NumCols())
+			tt.check(t, result.Column(1))
+		})
+	}
+}
+
+// TestToRequestedSchemaInitialDefaultJSONRoundTrip is the read-path equivalent
+// of TestToRequestedSchemaWriteDefaultJSONRoundTrip. It unmarshals NestedFields
+// from JSON (as they arrive from a REST catalog or metadata file) and verifies
+// that initial-default values are projected correctly with useWriteDefault=false.
+func TestToRequestedSchemaInitialDefaultJSONRoundTrip(t *testing.T) {
+	ctx := context.Background()
+
+	fileIceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+
+	buildBaseRecord := func(mem memory.Allocator) arrow.RecordBatch {
+		arrowSchema := arrow.NewSchema([]arrow.Field{
+			{
+				Name:     "id",
+				Type:     arrow.PrimitiveTypes.Int32,
+				Nullable: false,
+				Metadata: arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: "1"}),
+			},
+		}, nil)
+		bldr := array.NewRecordBuilder(mem, arrowSchema)
+		defer bldr.Release()
+		bldr.Field(0).(*array.Int32Builder).AppendValues([]int32{1, 2, 3}, nil)
+
+		return bldr.NewRecordBatch()
+	}
+
+	unmarshalField := func(t *testing.T, fieldJSON string) iceberg.NestedField {
+		t.Helper()
+		var field iceberg.NestedField
+		require.NoError(t, json.Unmarshal([]byte(fieldJSON), &field))
+
+		return field
+	}
+
+	tests := []struct {
+		name      string
+		fieldJSON string
+		check     func(t *testing.T, col arrow.Array)
+	}{
+		{
+			name:      "date as float64",
+			fieldJSON: `{"id":2,"name":"dt","type":"date","required":false,"initial-default":1234}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.DATE32, col.DataType().ID())
+				arr := col.(*array.Date32)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, arrow.Date32(1234), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "time as float64",
+			fieldJSON: `{"id":2,"name":"t","type":"time","required":false,"initial-default":5000000}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.TIME64, col.DataType().ID())
+				arr := col.(*array.Time64)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, arrow.Time64(5000000), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "timestamp as float64",
+			fieldJSON: `{"id":2,"name":"ts","type":"timestamp","required":false,"initial-default":1700000000000000}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.TIMESTAMP, col.DataType().ID())
+				arr := col.(*array.Timestamp)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, arrow.Timestamp(1700000000000000), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "timestamptz as float64",
+			fieldJSON: `{"id":2,"name":"ts","type":"timestamptz","required":false,"initial-default":1700000000000000}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.TIMESTAMP, col.DataType().ID())
+				arr := col.(*array.Timestamp)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, arrow.Timestamp(1700000000000000), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "timestamp_ns as float64",
+			fieldJSON: `{"id":2,"name":"ts","type":"timestamp_ns","required":false,"initial-default":1700000000000000000}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.TIMESTAMP, col.DataType().ID())
+				arr := col.(*array.Timestamp)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, arrow.Timestamp(1700000000000000000), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "timestamptz_ns as float64",
+			fieldJSON: `{"id":2,"name":"ts","type":"timestamptz_ns","required":false,"initial-default":1700000000000000000}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.TIMESTAMP, col.DataType().ID())
+				arr := col.(*array.Timestamp)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, arrow.Timestamp(1700000000000000000), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "uuid as string",
+			fieldJSON: `{"id":2,"name":"uid","type":"uuid","required":false,"initial-default":"f79c3e09-677c-4bbd-a479-512f87f77acf"}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.EXTENSION, col.DataType().ID())
+				arr := col.(*extensions.UUIDArray)
+				expected := uuid.MustParse("f79c3e09-677c-4bbd-a479-512f87f77acf")
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, expected, arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "decimal as string",
+			fieldJSON: `{"id":2,"name":"price","type":"decimal(10, 2)","required":false,"initial-default":"123.45"}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.DECIMAL128, col.DataType().ID())
+				arr := col.(*array.Decimal128)
+				expected := decimal128.FromI64(12345)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, expected, arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "binary as base64 string",
+			fieldJSON: `{"id":2,"name":"data","type":"binary","required":false,"initial-default":"` + base64.StdEncoding.EncodeToString([]byte("hello")) + `"}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.BINARY, col.DataType().ID())
+				arr := col.(*array.Binary)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, []byte("hello"), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "fixed as base64 string",
+			fieldJSON: `{"id":2,"name":"data","type":"fixed[5]","required":false,"initial-default":"` + base64.StdEncoding.EncodeToString([]byte("hello")) + `"}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.FIXED_SIZE_BINARY, col.DataType().ID())
+				arr := col.(*array.FixedSizeBinary)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, []byte("hello"), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "bool",
+			fieldJSON: `{"id":2,"name":"flag","type":"boolean","required":false,"initial-default":true}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.BOOL, col.DataType().ID())
+				arr := col.(*array.Boolean)
+				for i := 0; i < arr.Len(); i++ {
+					assert.True(t, arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "int as float64",
+			fieldJSON: `{"id":2,"name":"n","type":"int","required":false,"initial-default":42}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.INT32, col.DataType().ID())
+				arr := col.(*array.Int32)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, int32(42), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "long as float64",
+			fieldJSON: `{"id":2,"name":"n","type":"long","required":false,"initial-default":42}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.INT64, col.DataType().ID())
+				arr := col.(*array.Int64)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, int64(42), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "float as float64",
+			fieldJSON: `{"id":2,"name":"n","type":"float","required":false,"initial-default":3.14}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.FLOAT32, col.DataType().ID())
+				arr := col.(*array.Float32)
+				for i := 0; i < arr.Len(); i++ {
+					assert.InDelta(t, float32(3.14), arr.Value(i), 0.001, "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "double as float64",
+			fieldJSON: `{"id":2,"name":"n","type":"double","required":false,"initial-default":3.14}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.FLOAT64, col.DataType().ID())
+				arr := col.(*array.Float64)
+				for i := 0; i < arr.Len(); i++ {
+					assert.InDelta(t, float64(3.14), arr.Value(i), 0.0001, "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "string",
+			fieldJSON: `{"id":2,"name":"s","type":"string","required":false,"initial-default":"hello"}`,
+			check: func(t *testing.T, col arrow.Array) {
+				arr := col.(*array.String)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, "hello", arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			// both defaults present — read path must use initial-default
+			name:      "prefers initial-default over write-default on read path",
+			fieldJSON: `{"id":2,"name":"dt","type":"date","required":false,"initial-default":100,"write-default":999}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.DATE32, col.DataType().ID())
+				arr := col.(*array.Date32)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, arrow.Date32(100), arr.Value(i), "row %d: should use initial-default (100), not write-default (999)", i)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+			defer mem.AssertSize(t, 0)
+
+			field := unmarshalField(t, tt.fieldJSON)
+
+			requestedIceSchema := iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+				field,
+			)
+
+			rec := buildBaseRecord(mem)
+			defer rec.Release()
+
+			result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, false, false, false, false)
+			require.NoError(t, err)
+			defer result.Release()
+
+			require.EqualValues(t, 2, result.NumCols())
+			tt.check(t, result.Column(1))
+		})
+	}
+}
+
+// TestToRequestedSchemaWriteDefaultJSONRoundTrip verifies that write-default
+// values arriving from a REST catalog or metadata file (where encoding/json
+// decodes numbers as float64 and strings as string) are handled correctly
+// without panicking. Each sub-test unmarshals a NestedField from a raw JSON
+// snippet and projects it through ToRequestedSchema.
+func TestToRequestedSchemaWriteDefaultJSONRoundTrip(t *testing.T) {
+	ctx := context.Background()
+
+	fileIceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+
+	buildBaseRecord := func(mem memory.Allocator) arrow.RecordBatch {
+		arrowSchema := arrow.NewSchema([]arrow.Field{
+			{
+				Name:     "id",
+				Type:     arrow.PrimitiveTypes.Int32,
+				Nullable: false,
+				Metadata: arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: "1"}),
+			},
+		}, nil)
+		bldr := array.NewRecordBuilder(mem, arrowSchema)
+		defer bldr.Release()
+		bldr.Field(0).(*array.Int32Builder).AppendValues([]int32{1, 2, 3}, nil)
+
+		return bldr.NewRecordBatch()
+	}
+
+	unmarshalField := func(t *testing.T, fieldJSON string) iceberg.NestedField {
+		t.Helper()
+		var field iceberg.NestedField
+		require.NoError(t, json.Unmarshal([]byte(fieldJSON), &field))
+
+		return field
+	}
+
+	tests := []struct {
+		name      string
+		fieldJSON string
+		check     func(t *testing.T, col arrow.Array)
+	}{
+		{
+			name:      "date as float64",
+			fieldJSON: `{"id":2,"name":"dt","type":"date","required":false,"write-default":1234}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.DATE32, col.DataType().ID())
+				arr := col.(*array.Date32)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, arrow.Date32(1234), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "time as float64",
+			fieldJSON: `{"id":2,"name":"t","type":"time","required":false,"write-default":5000000}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.TIME64, col.DataType().ID())
+				arr := col.(*array.Time64)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, arrow.Time64(5000000), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "timestamp as float64",
+			fieldJSON: `{"id":2,"name":"ts","type":"timestamp","required":false,"write-default":1700000000000000}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.TIMESTAMP, col.DataType().ID())
+				arr := col.(*array.Timestamp)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, arrow.Timestamp(1700000000000000), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "timestamptz as float64",
+			fieldJSON: `{"id":2,"name":"ts","type":"timestamptz","required":false,"write-default":1700000000000000}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.TIMESTAMP, col.DataType().ID())
+				arr := col.(*array.Timestamp)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, arrow.Timestamp(1700000000000000), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "timestamp_ns as float64",
+			fieldJSON: `{"id":2,"name":"ts","type":"timestamp_ns","required":false,"write-default":1700000000000000000}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.TIMESTAMP, col.DataType().ID())
+				arr := col.(*array.Timestamp)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, arrow.Timestamp(1700000000000000000), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "uuid as string",
+			fieldJSON: `{"id":2,"name":"uid","type":"uuid","required":false,"write-default":"f79c3e09-677c-4bbd-a479-512f87f77acf"}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.EXTENSION, col.DataType().ID())
+				arr := col.(*extensions.UUIDArray)
+				expected := uuid.MustParse("f79c3e09-677c-4bbd-a479-512f87f77acf")
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, expected, arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "decimal as string",
+			fieldJSON: `{"id":2,"name":"price","type":"decimal(10, 2)","required":false,"write-default":"123.45"}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.DECIMAL128, col.DataType().ID())
+				arr := col.(*array.Decimal128)
+				expected := decimal128.FromI64(12345)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, expected, arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "binary as base64 string",
+			fieldJSON: `{"id":2,"name":"data","type":"binary","required":false,"write-default":"` + base64.StdEncoding.EncodeToString([]byte("hello")) + `"}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.BINARY, col.DataType().ID())
+				arr := col.(*array.Binary)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, []byte("hello"), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "fixed as base64 string",
+			fieldJSON: `{"id":2,"name":"data","type":"fixed[5]","required":false,"write-default":"` + base64.StdEncoding.EncodeToString([]byte("hello")) + `"}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.FIXED_SIZE_BINARY, col.DataType().ID())
+				arr := col.(*array.FixedSizeBinary)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, []byte("hello"), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "timestamptz_ns as float64",
+			fieldJSON: `{"id":2,"name":"ts","type":"timestamptz_ns","required":false,"write-default":1700000000000000000}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.TIMESTAMP, col.DataType().ID())
+				arr := col.(*array.Timestamp)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, arrow.Timestamp(1700000000000000000), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "bool",
+			fieldJSON: `{"id":2,"name":"flag","type":"boolean","required":false,"write-default":true}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.BOOL, col.DataType().ID())
+				arr := col.(*array.Boolean)
+				for i := 0; i < arr.Len(); i++ {
+					assert.True(t, arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "int as float64",
+			fieldJSON: `{"id":2,"name":"n","type":"int","required":false,"write-default":42}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.INT32, col.DataType().ID())
+				arr := col.(*array.Int32)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, int32(42), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "long as float64",
+			fieldJSON: `{"id":2,"name":"n","type":"long","required":false,"write-default":42}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.INT64, col.DataType().ID())
+				arr := col.(*array.Int64)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, int64(42), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "float as float64",
+			fieldJSON: `{"id":2,"name":"n","type":"float","required":false,"write-default":3.14}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.FLOAT32, col.DataType().ID())
+				arr := col.(*array.Float32)
+				for i := 0; i < arr.Len(); i++ {
+					assert.InDelta(t, float32(3.14), arr.Value(i), 0.001, "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "double as float64",
+			fieldJSON: `{"id":2,"name":"n","type":"double","required":false,"write-default":3.14}`,
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.FLOAT64, col.DataType().ID())
+				arr := col.(*array.Float64)
+				for i := 0; i < arr.Len(); i++ {
+					assert.InDelta(t, float64(3.14), arr.Value(i), 0.0001, "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "string",
+			fieldJSON: `{"id":2,"name":"s","type":"string","required":false,"write-default":"hello"}`,
+			check: func(t *testing.T, col arrow.Array) {
+				arr := col.(*array.String)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, "hello", arr.Value(i), "row %d", i)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+			defer mem.AssertSize(t, 0)
+
+			field := unmarshalField(t, tt.fieldJSON)
+
+			requestedIceSchema := iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+				field,
+			)
+
+			rec := buildBaseRecord(mem)
+			defer rec.Release()
+
+			result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, false, false, false, true)
 			require.NoError(t, err)
 			defer result.Release()
 
