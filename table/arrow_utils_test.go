@@ -533,7 +533,7 @@ func TestToRequestedSchemaTimestamps(t *testing.T) {
 	requestedSchema := TableSchemaWithAllMicrosecondsTimestampPrec
 	fileSchema := requestedSchema
 
-	converted, err := table.ToRequestedSchema(ctx, requestedSchema, fileSchema, batch, true, false, false, false)
+	converted, err := table.ToRequestedSchema(ctx, requestedSchema, fileSchema, batch, table.SchemaOptions{DowncastTimestamp: true})
 	require.NoError(t, err)
 	defer converted.Release()
 
@@ -583,7 +583,7 @@ func TestToRequestedSchema(t *testing.T) {
 	icesc, err := table.ArrowSchemaToIceberg(schema, false, nil)
 	require.NoError(t, err)
 
-	rec2, err := table.ToRequestedSchema(context.Background(), icesc, icesc, rec, true, true, false, false)
+	rec2, err := table.ToRequestedSchema(context.Background(), icesc, icesc, rec, table.SchemaOptions{DowncastTimestamp: true, IncludeFieldIDs: true})
 	require.NoError(t, err)
 	defer rec2.Release()
 
@@ -618,7 +618,7 @@ func TestToRequestedSchemaWriteDefaults(t *testing.T) {
 	rec := bldr.NewRecordBatch()
 	defer rec.Release()
 
-	result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, false, false, false, true)
+	result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, table.SchemaOptions{UseWriteDefault: true})
 	require.NoError(t, err)
 	defer result.Release()
 
@@ -759,6 +759,21 @@ func TestToRequestedSchemaWriteDefaultsTypes(t *testing.T) {
 				}
 			},
 		},
+		{
+			// json.Number is produced when metadata is decoded via json.Decoder.UseNumber()
+			name: "date write-default as json.Number",
+			field: iceberg.NestedField{
+				ID: 2, Name: "dt", Type: iceberg.PrimitiveTypes.Date,
+				Required: false, WriteDefault: json.Number("1234"),
+			},
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.DATE32, col.DataType().ID())
+				arr := col.(*array.Date32)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, arrow.Date32(1234), arr.Value(i), "row %d", i)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -774,7 +789,7 @@ func TestToRequestedSchemaWriteDefaultsTypes(t *testing.T) {
 			rec := buildBaseRecord(mem)
 			defer rec.Release()
 
-			result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, false, false, false, true)
+			result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, table.SchemaOptions{UseWriteDefault: true})
 			require.NoError(t, err)
 			defer result.Release()
 
@@ -815,7 +830,7 @@ func TestToRequestedSchemaInitialDefaults(t *testing.T) {
 	rec := bldr.NewRecordBatch()
 	defer rec.Release()
 
-	result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, false, false, false, false)
+	result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, table.SchemaOptions{})
 	require.NoError(t, err)
 	defer result.Release()
 
@@ -1016,6 +1031,21 @@ func TestToRequestedSchemaInitialDefaultTypes(t *testing.T) {
 			},
 		},
 		{
+			// json.Number is produced when metadata is decoded via json.Decoder.UseNumber()
+			name: "date initial-default as json.Number",
+			field: iceberg.NestedField{
+				ID: 2, Name: "dt", Type: iceberg.PrimitiveTypes.Date,
+				Required: false, InitialDefault: json.Number("1234"),
+			},
+			check: func(t *testing.T, col arrow.Array) {
+				require.Equal(t, arrow.DATE32, col.DataType().ID())
+				arr := col.(*array.Date32)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, arrow.Date32(1234), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
 			// no default set at all — column must be null
 			name: "falls back to null when no initial-default",
 			field: iceberg.NestedField{
@@ -1044,7 +1074,7 @@ func TestToRequestedSchemaInitialDefaultTypes(t *testing.T) {
 			rec := buildBaseRecord(mem)
 			defer rec.Release()
 
-			result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, false, false, false, false)
+			result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, table.SchemaOptions{})
 			require.NoError(t, err)
 			defer result.Release()
 
@@ -1300,7 +1330,7 @@ func TestToRequestedSchemaInitialDefaultJSONRoundTrip(t *testing.T) {
 			rec := buildBaseRecord(mem)
 			defer rec.Release()
 
-			result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, false, false, false, false)
+			result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, table.SchemaOptions{})
 			require.NoError(t, err)
 			defer result.Release()
 
@@ -1545,7 +1575,7 @@ func TestToRequestedSchemaWriteDefaultJSONRoundTrip(t *testing.T) {
 			rec := buildBaseRecord(mem)
 			defer rec.Release()
 
-			result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, false, false, false, true)
+			result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, table.SchemaOptions{UseWriteDefault: true})
 			require.NoError(t, err)
 			defer result.Release()
 

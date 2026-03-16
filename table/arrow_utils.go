@@ -20,6 +20,7 @@ package table
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"iter"
 	"slices"
@@ -718,14 +719,21 @@ func retOrPanic[T any](v T, err error) T {
 	return v
 }
 
-// numericDefault converts v to T, accepting either the typed iceberg form or
-// the float64 that encoding/json produces when deserializing into any.
+// numericDefault converts v to T, accepting the typed iceberg form, the
+// float64 that encoding/json produces when deserializing into any, or the
+// json.Number that a decoder configured with UseNumber() produces.
 func numericDefault[T ~int32 | ~int64 | ~float32 | ~float64](v any) T {
 	switch val := v.(type) {
 	case T:
 		return val
 	case float64:
 		return T(val)
+	case json.Number:
+		f, err := val.Float64()
+		if err != nil {
+			panic(fmt.Errorf("unsupported json.Number %q for numeric iceberg type: %w", val, err))
+		}
+		return T(f)
 	}
 	panic(fmt.Errorf("unsupported write-default value type %T for numeric iceberg type", v))
 }
@@ -1057,9 +1065,17 @@ func (a *arrowProjectionVisitor) Primitive(_ iceberg.PrimitiveType, arr arrow.Ar
 	return arr
 }
 
+// SchemaOptions controls the behaviour of ToRequestedSchema.
+type SchemaOptions struct {
+	DowncastTimestamp bool
+	IncludeFieldIDs   bool
+	UseLargeTypes     bool
+	UseWriteDefault   bool
+}
+
 // ToRequestedSchema will construct a new record batch matching the requested iceberg schema
 // casting columns if necessary as appropriate.
-func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schema, batch arrow.RecordBatch, downcastTimestamp, includeFieldIDs, useLargeTypes bool, useWriteDefault bool) (arrow.RecordBatch, error) {
+func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schema, batch arrow.RecordBatch, opts SchemaOptions) (arrow.RecordBatch, error) {
 	st := array.RecordToStructArray(batch)
 	defer st.Release()
 
@@ -1067,10 +1083,10 @@ func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schem
 		&arrowProjectionVisitor{
 			ctx:                 ctx,
 			fileSchema:          fileSchema,
-			includeFieldIDs:     includeFieldIDs,
-			downcastNsTimestamp: downcastTimestamp,
-			useLargeTypes:       useLargeTypes,
-			useWriteDefault:     useWriteDefault,
+			includeFieldIDs:     opts.IncludeFieldIDs,
+			downcastNsTimestamp: opts.DowncastTimestamp,
+			useLargeTypes:       opts.UseLargeTypes,
+			useWriteDefault:     opts.UseWriteDefault,
 		}, arrowAccessor{fileSchema: fileSchema})
 	if err != nil {
 		return nil, err
