@@ -733,6 +733,7 @@ func numericDefault[T ~int32 | ~int64 | ~float32 | ~float64](v any) T {
 		if err != nil {
 			panic(fmt.Errorf("unsupported json.Number %q for numeric iceberg type: %w", val, err))
 		}
+
 		return T(f)
 	}
 	panic(fmt.Errorf("unsupported write-default value type %T for numeric iceberg type", v))
