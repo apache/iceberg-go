@@ -989,7 +989,8 @@ func TestCreateView_TableAlreadyExists(t *testing.T) {
 
 	mockClient := &mockHiveClient{}
 	mockClient.On("GetDatabase", mock.Anything, "test_database").Return(&hive_metastore.Database{Name: "test_database"}, nil).Once()
-	mockClient.On("GetTable", mock.Anything, "test_database", "test_table").Return(testIcebergHiveTable1, nil).Once()
+	// Called twice: once for CheckViewExists and once for CheckTableExists.
+	mockClient.On("GetTable", mock.Anything, "test_database", "test_table").Return(testIcebergHiveTable1, nil).Twice()
 
 	cat := NewCatalogWithClient(mockClient, iceberg.Properties{})
 
@@ -1062,7 +1063,7 @@ func TestCreateView_VersionNoSQLRepresentation(t *testing.T) {
 
 	_, err = cat.CreateView(context.Background(), TableIdentifier("test_database", "v1"), ver, schema, catalog.WithViewLocation("file:///tmp/loc"))
 	assert.Error(err)
-	assert.Contains(err.Error(), "no SQL representation")
+	assert.Contains(err.Error(), "no representations")
 
 	mockClient.AssertExpectations(t)
 }
