@@ -434,6 +434,9 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int) (iceberg.Literal
 	case *array.Binary:
 
 		return iceberg.NewLiteral(arr.Value(row)), nil
+	case *array.LargeBinary:
+
+		return iceberg.NewLiteral(arr.Value(row)), nil
 
 	default:
 		val := column.GetOneForMarshal(row)
