@@ -424,6 +424,18 @@ func TestSerializeSchema(t *testing.T) {
 		"schema-id": 1,
 		"identifier-field-ids": [2]
 	}`, string(data))
+
+	// Test schema with geometry and geography
+	schemaWithGeo := iceberg.NewSchema(2,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "location", Type: iceberg.GeometryTypeOf("srid:3857"), Required: false},
+		iceberg.NestedField{ID: 3, Name: "gps", Type: iceberg.GeographyTypeOf("srid:4326", iceberg.EdgeAlgorithmKarney), Required: false},
+	)
+	data2, err := json.Marshal(schemaWithGeo)
+	require.NoError(t, err)
+	var schemaFromJSON iceberg.Schema
+	require.NoError(t, json.Unmarshal(data2, &schemaFromJSON))
+	assert.True(t, schemaWithGeo.Equals(&schemaFromJSON))
 }
 
 func TestUnmarshalSchema(t *testing.T) {

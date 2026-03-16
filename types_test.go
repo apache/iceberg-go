@@ -47,6 +47,8 @@ func TestTypesBasic(t *testing.T) {
 		{"unknown", iceberg.PrimitiveTypes.Unknown},
 		{"fixed[5]", iceberg.FixedTypeOf(5)},
 		{"decimal(9, 4)", iceberg.DecimalTypeOf(9, 4)},
+		{"geometry", iceberg.PrimitiveTypes.Geometry},
+		{"geography", iceberg.PrimitiveTypes.Geography},
 	}
 
 	for _, tt := range tests {
@@ -223,6 +225,10 @@ func TestTypeStrings(t *testing.T) {
 		{iceberg.PrimitiveTypes.UUID, "uuid"},
 		{iceberg.PrimitiveTypes.Binary, "binary"},
 		{iceberg.PrimitiveTypes.Unknown, "unknown"},
+		{iceberg.PrimitiveTypes.Geometry, "geometry"},
+		{iceberg.PrimitiveTypes.Geography, "geography"},
+		{iceberg.GeometryTypeOf("srid:3857"), "geometry(srid:3857)"},
+		{iceberg.GeographyTypeOf("srid:4326", iceberg.EdgeAlgorithmKarney), "geography(srid:4326, karney)"},
 		{iceberg.FixedTypeOf(22), "fixed[22]"},
 		{iceberg.DecimalTypeOf(19, 25), "decimal(19, 25)"},
 		{&iceberg.StructType{
@@ -392,6 +398,157 @@ func TestUnknownTypeEquality(t *testing.T) {
 	assert.True(t, unknown2.Equals(unknown1))
 	assert.Equal(t, "unknown", unknown1.String())
 	assert.Equal(t, "unknown", unknown2.String())
+	// Test default CRS
+	geomDefault := iceberg.GeometryTypeCRS84()
+	assert.Equal(t, "geometry", geomDefault.String())
+	assert.Equal(t, "OGC:CRS84", geomDefault.CRS())
+	assert.True(t, geomDefault.Equals(iceberg.PrimitiveTypes.Geometry))
+
+	// Test custom CRS
+	geomCustom := iceberg.GeometryTypeOf("srid:3857")
+	assert.Equal(t, "geometry(srid:3857)", geomCustom.String())
+	assert.Equal(t, "srid:3857", geomCustom.CRS())
+	assert.True(t, geomCustom.Equals(iceberg.GeometryTypeOf("srid:3857")))
+	assert.False(t, geomCustom.Equals(geomDefault))
+
+	// Test with default CRS explicitly
+	geomDefault2 := iceberg.GeometryTypeOf("OGC:CRS84")
+	assert.True(t, geomDefault2.Equals(geomDefault))
+	assert.Equal(t, "geometry", geomDefault2.String())
+
+	// Test JSON serialization
+	data, err := json.Marshal(geomDefault)
+	require.NoError(t, err)
+	assert.Equal(t, `"geometry"`, string(data))
+
+	data2, err := json.Marshal(geomCustom)
+	require.NoError(t, err)
+	assert.Equal(t, `"geometry(srid:3857)"`, string(data2))
+
+	// Test JSON deserialization
+	var geomFromJSON iceberg.GeometryType
+	err = json.Unmarshal([]byte(`"geometry"`), &geomFromJSON)
+	require.NoError(t, err)
+	assert.True(t, geomFromJSON.Equals(geomDefault))
+
+	err = json.Unmarshal([]byte(`"geometry(srid:4326)"`), &geomFromJSON)
+	require.NoError(t, err)
+	assert.Equal(t, "srid:4326", geomFromJSON.CRS())
+}
+
+func TestGeographyType(t *testing.T) {
+	// Test default CRS and algorithm
+	geogDefault := iceberg.GeographyTypeCRS84()
+	assert.Equal(t, "geography", geogDefault.String())
+	assert.Equal(t, "OGC:CRS84", geogDefault.CRS())
+	assert.Equal(t, iceberg.EdgeAlgorithmSpherical, geogDefault.Algorithm())
+	assert.True(t, geogDefault.Equals(iceberg.PrimitiveTypes.Geography))
+
+	// Test custom CRS only
+	geogCRS := iceberg.GeographyTypeOf("srid:4326", iceberg.EdgeAlgorithmSpherical)
+	assert.Equal(t, "geography(srid:4326)", geogCRS.String())
+	assert.Equal(t, "srid:4326", geogCRS.CRS())
+	assert.Equal(t, iceberg.EdgeAlgorithmSpherical, geogCRS.Algorithm())
+
+	// Test custom CRS and algorithm
+	geogCustom := iceberg.GeographyTypeOf("srid:4269", iceberg.EdgeAlgorithmKarney)
+	assert.Equal(t, "geography(srid:4269, karney)", geogCustom.String())
+	assert.Equal(t, "srid:4269", geogCustom.CRS())
+	assert.Equal(t, iceberg.EdgeAlgorithmKarney, geogCustom.Algorithm())
+	assert.True(t, geogCustom.Equals(iceberg.GeographyTypeOf("srid:4269", iceberg.EdgeAlgorithmKarney)))
+	assert.False(t, geogCustom.Equals(geogDefault))
+
+	// Test JSON serialization
+	data, err := json.Marshal(geogDefault)
+	require.NoError(t, err)
+	assert.Equal(t, `"geography"`, string(data))
+
+	data2, err := json.Marshal(geogCustom)
+	require.NoError(t, err)
+	assert.Equal(t, `"geography(srid:4269, karney)"`, string(data2))
+
+	// Test JSON deserialization
+	var geogFromJSON iceberg.GeographyType
+	err = json.Unmarshal([]byte(`"geography"`), &geogFromJSON)
+	require.NoError(t, err)
+	assert.True(t, geogFromJSON.Equals(geogDefault))
+
+	err = json.Unmarshal([]byte(`"geography(srid:4326, vincenty)"`), &geogFromJSON)
+	require.NoError(t, err)
+	assert.Equal(t, "srid:4326", geogFromJSON.CRS())
+	assert.Equal(t, iceberg.EdgeAlgorithmVincenty, geogFromJSON.Algorithm())
+}
+
+func TestEdgeAlgorithm(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected iceberg.EdgeAlgorithm
+		wantErr  bool
+	}{
+		{"spherical", "spherical", iceberg.EdgeAlgorithmSpherical, false},
+		{"SPHERICAL", "SPHERICAL", iceberg.EdgeAlgorithmSpherical, false},
+		{"Spherical", "Spherical", iceberg.EdgeAlgorithmSpherical, false},
+		{"vincenty", "vincenty", iceberg.EdgeAlgorithmVincenty, false},
+		{"thomas", "thomas", iceberg.EdgeAlgorithmThomas, false},
+		{"andoyer", "andoyer", iceberg.EdgeAlgorithmAndoyer, false},
+		{"karney", "karney", iceberg.EdgeAlgorithmKarney, false},
+		{"empty", "", iceberg.EdgeAlgorithmSpherical, false},
+		{"invalid", "invalid", iceberg.EdgeAlgorithmSpherical, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := iceberg.EdgeAlgorithmFromName(tt.input)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expected, result)
+			}
+		})
+	}
+}
+
+func TestPromoteTypeGeometryGeography(t *testing.T) {
+	tests := []struct {
+		name     string
+		fileType iceberg.Type
+		readType iceberg.Type
+		wantErr  bool
+	}{
+		// BinaryType -> GeometryType should succeed
+		{"BinaryToGeometry", iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.Geometry, false},
+		{"BinaryToGeometryWithCRS", iceberg.PrimitiveTypes.Binary, iceberg.GeometryTypeOf("srid:3857"), false},
+		// BinaryType -> GeographyType should succeed
+		{"BinaryToGeography", iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.Geography, false},
+		{"BinaryToGeographyWithCRS", iceberg.PrimitiveTypes.Binary, iceberg.GeographyTypeOf("srid:4326", iceberg.EdgeAlgorithmKarney), false},
+		// GeometryType -> BinaryType should fail (one-way only)
+		{"GeometryToBinary", iceberg.PrimitiveTypes.Geometry, iceberg.PrimitiveTypes.Binary, true},
+		// GeographyType -> BinaryType should fail (one-way only)
+		{"GeographyToBinary", iceberg.PrimitiveTypes.Geography, iceberg.PrimitiveTypes.Binary, true},
+		// GeometryType -> GeographyType should fail (not compatible)
+		{"GeometryToGeography", iceberg.PrimitiveTypes.Geometry, iceberg.PrimitiveTypes.Geography, true},
+		// GeographyType -> GeometryType should fail (not compatible)
+		{"GeographyToGeometry", iceberg.PrimitiveTypes.Geography, iceberg.PrimitiveTypes.Geometry, true},
+		// Same types should succeed
+		{"GeometryToGeometry", iceberg.PrimitiveTypes.Geometry, iceberg.PrimitiveTypes.Geometry, false},
+		{"GeographyToGeography", iceberg.PrimitiveTypes.Geography, iceberg.PrimitiveTypes.Geography, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := iceberg.PromoteType(tt.fileType, tt.readType)
+			if tt.wantErr {
+				assert.Error(t, err, "expected error promoting %s to %s", tt.fileType, tt.readType)
+				assert.Nil(t, result)
+			} else {
+				assert.NoError(t, err, "unexpected error promoting %s to %s", tt.fileType, tt.readType)
+				assert.NotNil(t, result)
+				assert.True(t, result.Equals(tt.readType), "promoted type should equal read type")
+			}
+		})
+	}
 }
 
 func TestNestedFieldUnmarshalMissingID(t *testing.T) {
