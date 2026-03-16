@@ -609,7 +609,7 @@ func TestRemoveSnapshotRemovesBranch(t *testing.T) {
 
 	newBuilder, err := MetadataBuilderFromBase(meta, "")
 	require.NoError(t, err)
-	require.NoError(t, newBuilder.RemoveSnapshots([]int64{snapshot.SnapshotID}))
+	require.NoError(t, newBuilder.RemoveSnapshots([]int64{snapshot.SnapshotID}, false))
 	newMeta, err := newBuilder.Build()
 	require.NoError(t, err)
 	require.NotNil(t, newMeta)
