@@ -151,7 +151,7 @@ func (s *FanoutWriterTestSuite) testTransformPartition(transform iceberg.Transfo
 		fileCount++
 		totalRecords += dataFile.Count()
 
-		partitionRec := getPartitionRecord(dataFile, spec.PartitionType(icebergSchema))
+		partitionRec := GetPartitionRecord(dataFile, spec.PartitionType(icebergSchema))
 		partitionPath := spec.PartitionToPath(partitionRec, icebergSchema)
 		partitionPaths[partitionPath] += dataFile.Count()
 	}

@@ -87,11 +87,13 @@ func newKeyDefaultMapWrapErr[K comparable, V any](factory func(K) (V, error)) *k
 	}
 }
 
-type partitionRecord []any
+// PartitionRecord is a positional row built from a DataFile's partition map,
+// ordered to match the fields of a partition spec.
+type PartitionRecord []any
 
-func (p partitionRecord) Size() int            { return len(p) }
-func (p partitionRecord) Get(pos int) any      { return p[pos] }
-func (p partitionRecord) Set(pos int, val any) { p[pos] = val }
+func (p PartitionRecord) Size() int            { return len(p) }
+func (p PartitionRecord) Get(pos int) any      { return p[pos] }
+func (p PartitionRecord) Set(pos int, val any) { p[pos] = val }
 
 // manifestEntries holds the data and positional delete entries read from manifests.
 type manifestEntries struct {
@@ -119,15 +121,19 @@ func (m *manifestEntries) addPositionalDeleteEntry(e iceberg.ManifestEntry) {
 	m.positionalDeleteEntries = append(m.positionalDeleteEntries, e)
 }
 
-func getPartitionRecord(dataFile iceberg.DataFile, partitionType *iceberg.StructType) partitionRecord {
-	partitionData := dataFile.Partition()
-
-	out := make(partitionRecord, len(partitionType.FieldList))
+func newPartitionRecord(partitionData map[int]any, partitionType *iceberg.StructType) PartitionRecord {
+	out := make(PartitionRecord, len(partitionType.FieldList))
 	for i, f := range partitionType.FieldList {
 		out[i] = partitionData[f.ID]
 	}
 
 	return out
+}
+
+// GetPartitionRecord converts a DataFile's partition map into a positional
+// PartitionRecord ordered by the fields of the given partition struct type.
+func GetPartitionRecord(dataFile iceberg.DataFile, partitionType *iceberg.StructType) PartitionRecord {
+	return newPartitionRecord(dataFile.Partition(), partitionType)
 }
 
 func openManifest(io io.IO, manifest iceberg.ManifestFile,
@@ -284,7 +290,7 @@ func (scan *Scan) buildPartitionEvaluator(specID int) (func(iceberg.DataFile) (b
 	}
 
 	return func(d iceberg.DataFile) (bool, error) {
-		return fn(getPartitionRecord(d, partType))
+		return fn(GetPartitionRecord(d, partType))
 	}, nil
 }
 

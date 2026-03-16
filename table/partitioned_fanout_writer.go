@@ -48,7 +48,7 @@ type partitionedFanoutWriter struct {
 type partitionInfo struct {
 	rows            []int64
 	partitionValues map[int]any
-	partitionRec    partitionRecord // The actual partition values for generating the path
+	partitionRec    PartitionRecord // The actual partition values for generating the path
 }
 
 // NewPartitionedFanoutWriter creates a new PartitionedFanoutWriter with the specified
@@ -63,7 +63,7 @@ func newPartitionedFanoutWriter(partitionSpec iceberg.PartitionSpec, concurrentW
 	}
 }
 
-func (p *partitionedFanoutWriter) partitionPath(data partitionRecord) string {
+func (p *partitionedFanoutWriter) partitionPath(data PartitionRecord) string {
 	return p.partitionSpec.PartitionToPath(data, p.schema)
 }
 
@@ -133,7 +133,7 @@ func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 				default:
 				}
 
-				partitionRecord, err := partitionBatchByKey(ctx)(record, val.rows)
+				partRec, err := partitionBatchByKey(ctx)(record, val.rows)
 				if err != nil {
 					return err
 				}
@@ -144,7 +144,7 @@ func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 					return err
 				}
 
-				err = rollingDataWriter.Add(partitionRecord)
+				err = rollingDataWriter.Add(partRec)
 				if err != nil {
 					return err
 				}
@@ -192,7 +192,7 @@ func yieldDataFiles(writerFactory *writerFactory, fanoutWorkers *errgroup.Group,
 func (p *partitionedFanoutWriter) getPartitions(record arrow.RecordBatch) ([]*partitionInfo, error) {
 	partitionMap := newPartitionMapNode()
 	partitionFields := p.partitionSpec.PartitionType(p.schema).FieldList
-	partitionRec := make(partitionRecord, len(partitionFields))
+	partitionRec := make(PartitionRecord, len(partitionFields))
 
 	partitionColumns := make([]arrow.Array, len(partitionFields))
 	partitionFieldsInfo := make([]struct {
@@ -259,7 +259,7 @@ func newPartitionMapNode() *partitionMapNode {
 
 // getOrCreate navigates the tree and returns the partitionInfo for the given partition key,
 // creating nodes along the way if they don't exist
-func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo []struct {
+func (n *partitionMapNode) getOrCreate(partitionRec PartitionRecord, fieldInfo []struct {
 	sourceField *iceberg.PartitionField
 	fieldID     int
 },
@@ -288,7 +288,7 @@ func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo [
 	partitionValues := make(map[int]any, len(partitionRec))
 
 	// Copy partitionRec values so they don't get overwritten
-	partRecCopy := make(partitionRecord, len(partitionRec))
+	partRecCopy := make(PartitionRecord, len(partitionRec))
 	for i := range partitionRec {
 		partitionValues[fieldInfo[i].fieldID] = partitionRec[i]
 		partRecCopy[i] = partitionRec[i]
