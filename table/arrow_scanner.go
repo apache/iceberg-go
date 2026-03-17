@@ -41,6 +41,7 @@ import (
 
 const (
 	ScanOptionArrowUseLargeTypes = "arrow.use_large_types"
+	ScanOptionRowLineageEnabled  = "row_lineage.enabled"
 )
 
 var PositionalDeleteArrowSchema, _ = SchemaToArrowSchema(iceberg.PositionalDeleteSchema, nil, true, false)
@@ -400,9 +401,11 @@ func synthesizeRowLineageColumns(
 ) (arrow.RecordBatch, error) {
 	alloc := compute.GetAllocator(ctx)
 	schema := batch.Schema()
-	ncols := int(batch.NumCols())
 	nrows := batch.NumRows()
-	newCols := make([]arrow.Array, ncols)
+
+	// Start from the existing columns; we'll replace the row lineage columns in-place
+	// when we need to synthesize values.
+	newCols := append([]arrow.Array(nil), batch.Columns()...)
 
 	// Resolve column indices by name; -1 if not present.
 	rowIDIndices := schema.FieldIndices(iceberg.RowIDColumnName)
@@ -416,55 +419,57 @@ func synthesizeRowLineageColumns(
 		seqNumColIdx = seqNumIndices[0]
 	}
 
-	for i := 0; i < ncols; i++ {
-		if i == rowIDColIdx && task.FirstRowID != nil {
-			// _row_id: inherit first_row_id + row_position when null; else keep value from file.
-			if col, ok := batch.Column(i).(*array.Int64); ok {
-				bldr := array.NewInt64Builder(alloc)
-				first := *task.FirstRowID
-				for k := int64(0); k < nrows; k++ {
-					if col.IsNull(int(k)) {
-						bldr.Append(first + *rowOffset + k)
-					} else {
-						bldr.Append(col.Value(int(k)))
-					}
+	var toRelease []arrow.Array
+
+	// _row_id: inherit first_row_id + row_position when null; else keep value from file.
+	if rowIDColIdx >= 0 && task.FirstRowID != nil {
+		if col, ok := newCols[rowIDColIdx].(*array.Int64); ok {
+			bldr := array.NewInt64Builder(alloc)
+			defer bldr.Release()
+
+			bldr.Reserve(int(nrows))
+			first := *task.FirstRowID
+			for k := int64(0); k < nrows; k++ {
+				if col.IsNull(int(k)) {
+					bldr.Append(first + *rowOffset + k)
+				} else {
+					bldr.Append(col.Value(int(k)))
 				}
-				newCols[i] = bldr.NewArray()
-				bldr.Release()
-
-				continue
 			}
-		}
 
-		if i == seqNumColIdx && task.DataSequenceNumber != nil {
-			// _last_updated_sequence_number: inherit file's data_sequence_number when null; else keep value from file.
-			if col, ok := batch.Column(i).(*array.Int64); ok {
-				bldr := array.NewInt64Builder(alloc)
-				seq := *task.DataSequenceNumber
-				for k := int64(0); k < nrows; k++ {
-					if col.IsNull(int(k)) {
-						bldr.Append(seq)
-					} else {
-						bldr.Append(col.Value(int(k)))
-					}
+			arr := bldr.NewArray()
+			newCols[rowIDColIdx] = arr
+			toRelease = append(toRelease, arr)
+		}
+	}
+
+	// _last_updated_sequence_number: inherit file's data_sequence_number when null; else keep value from file.
+	if seqNumColIdx >= 0 && task.DataSequenceNumber != nil {
+		if col, ok := newCols[seqNumColIdx].(*array.Int64); ok {
+			bldr := array.NewInt64Builder(alloc)
+			defer bldr.Release()
+
+			bldr.Reserve(int(nrows))
+			seq := *task.DataSequenceNumber
+			for k := int64(0); k < nrows; k++ {
+				if col.IsNull(int(k)) {
+					bldr.Append(seq)
+				} else {
+					bldr.Append(col.Value(int(k)))
 				}
-				newCols[i] = bldr.NewArray()
-				bldr.Release()
-
-				continue
 			}
-		}
 
-		col := batch.Column(i)
-		col.Retain()
-		newCols[i] = col
+			arr := bldr.NewArray()
+			newCols[seqNumColIdx] = arr
+			toRelease = append(toRelease, arr)
+		}
 	}
 
 	// Advance so the next batch from this file uses the correct row position for _row_id.
 	*rowOffset += nrows
 
 	rec := array.NewRecordBatch(schema, newCols, nrows)
-	for _, c := range newCols {
+	for _, c := range toRelease {
 		c.Release()
 	}
 
@@ -608,8 +613,13 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 		return ToRequestedSchema(ctx, as.projectedSchema, iceSchema, r, SchemaOptions{UseLargeTypes: as.useLargeTypes})
 	})
 
-	// Row lineage (v3): fill _row_id and _last_updated_sequence_number from task constants when in projection.
-	if task.Value.FirstRowID != nil || task.Value.DataSequenceNumber != nil {
+	// Row lineage: optionally fill _row_id and _last_updated_sequence_number from task
+	// constants when in projection.
+	rowLineageEnabled, err := strconv.ParseBool(as.options.Get(ScanOptionRowLineageEnabled, "true"))
+	if err != nil {
+		rowLineageEnabled = true
+	}
+	if rowLineageEnabled && (task.Value.FirstRowID != nil || task.Value.DataSequenceNumber != nil) {
 		var rowOffset int64
 		taskVal := task.Value
 		pipeline = append(pipeline, func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
