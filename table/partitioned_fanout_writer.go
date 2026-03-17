@@ -133,7 +133,7 @@ func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 				default:
 				}
 
-				partRec, err := partitionBatchByKey(ctx)(record, val.rows)
+				partitionRecord, err := partitionBatchByKey(ctx)(record, val.rows)
 				if err != nil {
 					return err
 				}
@@ -144,7 +144,7 @@ func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 					return err
 				}
 
-				err = rollingDataWriter.Add(partRec)
+				err = rollingDataWriter.Add(partitionRecord)
 				if err != nil {
 					return err
 				}
