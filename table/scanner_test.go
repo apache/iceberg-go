@@ -319,6 +319,86 @@ func (s *ScannerSuite) TestScannerRecordsDeletes() {
 	}
 }
 
+func (s *ScannerSuite) TestReadTasks() {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(s.T(), 0)
+
+	ident := catalog.ToIdentifier("default", "test_positional_mor_deletes")
+
+	tbl, err := s.cat.LoadTable(s.ctx, ident)
+	s.Require().NoError(err)
+
+	expectedSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "number", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+	}, nil)
+
+	ref := iceberg.Reference("letter")
+
+	tests := []struct {
+		name     string
+		filter   iceberg.BooleanExpression
+		rowLimit int64
+		expected string
+	}{
+		{
+			"all",
+			iceberg.AlwaysTrue{},
+			table.ScanNoLimit,
+			`[1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12]`,
+		},
+		{"filter", iceberg.NewAnd(iceberg.GreaterThanEqual(ref, "e"),
+			iceberg.LessThan(ref, "k")), table.ScanNoLimit, `[5, 6, 7, 8, 10]`},
+		{"filter and limit", iceberg.NewAnd(iceberg.GreaterThanEqual(ref, "e"),
+			iceberg.LessThan(ref, "k")), 1, `[5]`},
+		{"limit", nil, 3, `[1, 2, 3]`},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			scopedMem := memory.NewCheckedAllocatorScope(mem)
+			defer scopedMem.CheckSize(s.T())
+
+			ctx := compute.WithAllocator(s.ctx, mem)
+
+			scan := tbl.Scan(table.WithRowFilter(tt.filter),
+				table.WithSelectedFields("number"))
+			tasks, err := scan.PlanFiles(ctx)
+			s.Require().NoError(err)
+
+			s.Len(tasks, 1)
+			s.Len(tasks[0].DeleteFiles, 1)
+
+			_, itr, err := scan.UseRowLimit(tt.rowLimit).ReadTasks(ctx, tasks)
+			s.Require().NoError(err)
+
+			next, stop := iter.Pull2(itr)
+			defer stop()
+
+			rec, err, valid := next()
+			s.Require().True(valid)
+			s.Require().NoError(err)
+			defer rec.Release()
+
+			s.True(expectedSchema.Equal(rec.Schema()), "expected: %s\ngot: %s\n",
+				expectedSchema, rec.Schema())
+
+			arr, _, err := array.FromJSON(mem, arrow.PrimitiveTypes.Int32,
+				strings.NewReader(tt.expected))
+			s.Require().NoError(err)
+			defer arr.Release()
+
+			expectedResult := array.NewRecord(expectedSchema, []arrow.Array{arr}, int64(arr.Len()))
+			defer expectedResult.Release()
+
+			s.True(array.RecordEqual(expectedResult, rec), "expected: %s\ngot: %s\n", expectedResult, rec)
+
+			_, err, valid = next()
+			s.Require().NoError(err)
+			s.Require().False(valid)
+		})
+	}
+}
+
 func (s *ScannerSuite) TestScannerRecordsDoubleDeletes() {
 	// number, letter
 	//  (1, 'a'),
