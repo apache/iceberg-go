@@ -545,12 +545,11 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 			Start:               0,
 			Length:              e.DataFile().FileSizeBytes(),
 		}
-		// Row lineage constants for v3: readers use these to synthesize _row_id and _last_updated_sequence_number.
-		if scan.metadata.Version() >= 3 {
-			task.FirstRowID = e.DataFile().FirstRowID()
-			if fseq := e.FileSequenceNum(); fseq != nil {
-				task.DataSequenceNumber = fseq
-			}
+		// Row lineage constants: readers use these to synthesize _row_id and
+		// _last_updated_sequence_number when requested.
+		task.FirstRowID = e.DataFile().FirstRowID()
+		if fseq := e.FileSequenceNum(); fseq != nil {
+			task.DataSequenceNumber = fseq
 		}
 		results = append(results, task)
 	}
