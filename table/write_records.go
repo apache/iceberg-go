@@ -19,7 +19,6 @@ package table
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"iter"
 	"strconv"
@@ -86,6 +85,11 @@ func WriteRecords(ctx context.Context, tbl *Table,
 		return internal.SingleErrorIter[iceberg.DataFile](fmt.Errorf("%w: filesystem does not support writing", iceberg.ErrNotImplemented))
 	}
 
+	if err := checkArrowSchemaCompat(tbl.Schema(), schema, false); err != nil {
+		return internal.SingleErrorIter[iceberg.DataFile](
+			fmt.Errorf("arrow schema is not compatible with the table schema: %w", err))
+	}
+
 	meta, err := MetadataBuilderFromBase(tbl.metadata, tbl.metadataLocation)
 	if err != nil {
 		return internal.SingleErrorIter[iceberg.DataFile](fmt.Errorf("failed to build metadata: %w", err))
@@ -121,16 +125,5 @@ func WriteRecords(ctx context.Context, tbl *Table,
 		writeUUID: cfg.writeUUID,
 	}
 
-	inner := recordsToDataFiles(ctx, tbl.Location(), meta, args)
-
-	return func(yield func(iceberg.DataFile, error) bool) {
-		for df, err := range inner {
-			if err != nil && (errors.Is(err, iceberg.ErrInvalidSchema) || errors.Is(err, iceberg.ErrResolve)) {
-				err = fmt.Errorf("arrow schema is not compatible with the table schema: %w", err)
-			}
-			if !yield(df, err) {
-				return
-			}
-		}
-	}
+	return recordsToDataFiles(ctx, tbl.Location(), meta, args)
 }
