@@ -226,7 +226,7 @@ func TestPositionDeletePartitionedFanoutWriterPartitionPathIsDeterministic(t *te
 		},
 	}
 
-	expectedPath := partitionSpec.PartitionToPath(PartitionRecord{
+	expectedPath := partitionSpec.PartitionToPath(partitionRecord{
 		ctx.partitionData[1000],
 		ctx.partitionData[1001],
 		ctx.partitionData[1002],

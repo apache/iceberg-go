@@ -43,8 +43,8 @@ type Optional[T any] struct {
 	Valid bool
 }
 
-// represents a single row in a record
-type structLike interface {
+// StructLike represents a single row in a record.
+type StructLike interface {
 	// Size returns the number of columns in this row
 	Size() int
 	// Get returns the value in the requested column,
@@ -64,11 +64,11 @@ func (a *accessor) String() string {
 	return fmt.Sprintf("Accessor(position=%d, inner=%s)", a.pos, a.inner)
 }
 
-func (a *accessor) Get(s structLike) any {
+func (a *accessor) Get(s StructLike) any {
 	val, inner := s.Get(a.pos), a
 	for val != nil && inner.inner != nil {
 		inner = inner.inner
-		val = val.(structLike).Get(inner.pos)
+		val = val.(StructLike).Get(inner.pos)
 	}
 
 	return val

@@ -48,7 +48,7 @@ type partitionedFanoutWriter struct {
 type partitionInfo struct {
 	rows            []int64
 	partitionValues map[int]any
-	partitionRec    PartitionRecord // The actual partition values for generating the path
+	partitionRec    partitionRecord // The actual partition values for generating the path
 }
 
 // NewPartitionedFanoutWriter creates a new PartitionedFanoutWriter with the specified
@@ -63,7 +63,7 @@ func newPartitionedFanoutWriter(partitionSpec iceberg.PartitionSpec, concurrentW
 	}
 }
 
-func (p *partitionedFanoutWriter) partitionPath(data PartitionRecord) string {
+func (p *partitionedFanoutWriter) partitionPath(data partitionRecord) string {
 	return p.partitionSpec.PartitionToPath(data, p.schema)
 }
 
@@ -192,7 +192,7 @@ func yieldDataFiles(writerFactory *writerFactory, fanoutWorkers *errgroup.Group,
 func (p *partitionedFanoutWriter) getPartitions(record arrow.RecordBatch) ([]*partitionInfo, error) {
 	partitionMap := newPartitionMapNode()
 	partitionFields := p.partitionSpec.PartitionType(p.schema).FieldList
-	partitionRec := make(PartitionRecord, len(partitionFields))
+	partitionRec := make(partitionRecord, len(partitionFields))
 
 	partitionColumns := make([]arrow.Array, len(partitionFields))
 	partitionFieldsInfo := make([]struct {
@@ -259,7 +259,7 @@ func newPartitionMapNode() *partitionMapNode {
 
 // getOrCreate navigates the tree and returns the partitionInfo for the given partition key,
 // creating nodes along the way if they don't exist
-func (n *partitionMapNode) getOrCreate(partitionRec PartitionRecord, fieldInfo []struct {
+func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo []struct {
 	sourceField *iceberg.PartitionField
 	fieldID     int
 },
@@ -288,7 +288,7 @@ func (n *partitionMapNode) getOrCreate(partitionRec PartitionRecord, fieldInfo [
 	partitionValues := make(map[int]any, len(partitionRec))
 
 	// Copy partitionRec values so they don't get overwritten
-	partRecCopy := make(PartitionRecord, len(partitionRec))
+	partRecCopy := make(partitionRecord, len(partitionRec))
 	for i := range partitionRec {
 		partitionValues[fieldInfo[i].fieldID] = partitionRec[i]
 		partRecCopy[i] = partitionRec[i]
