@@ -62,8 +62,9 @@ func WithWriteUUID(id uuid.UUID) WriteRecordOption {
 // field present must have a type that is promotable to the corresponding table
 // field type.
 //
-// WriteRecords retains each RecordBatch it consumes, so callers keep ownership
-// of the batches yielded through records and may release them freely.
+// WriteRecords releases each RecordBatch it consumes. If the caller needs a
+// batch to remain valid after it has been yielded, it must call Retain before
+// yielding and is then responsible for the corresponding Release.
 func WriteRecords(ctx context.Context, tbl *Table,
 	schema *arrow.Schema,
 	records iter.Seq2[arrow.RecordBatch, error],
@@ -96,9 +97,25 @@ func WriteRecords(ctx context.Context, tbl *Table,
 		meta.props[WriteTargetFileSizeBytesKey] = strconv.FormatInt(cfg.targetFileSize, 10)
 	}
 
+	releasing := func(yield func(arrow.RecordBatch, error) bool) {
+		for rec, err := range records {
+			if err != nil {
+				yield(nil, err)
+
+				return
+			}
+			if !yield(rec, nil) {
+				rec.Release()
+
+				return
+			}
+			rec.Release()
+		}
+	}
+
 	args := recordWritingArgs{
 		sc:        schema,
-		itr:       records,
+		itr:       releasing,
 		fs:        writeFS,
 		writeUUID: cfg.writeUUID,
 	}

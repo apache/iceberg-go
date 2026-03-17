@@ -98,7 +98,6 @@ func (s *WriteRecordsTestSuite) TestBasicWrite() {
 	records := func(yield func(arrow.RecordBatch, error) bool) {
 		rec := s.buildRecords(schema, 10)
 		yield(rec, nil)
-		rec.Release()
 	}
 
 	var dataFiles []iceberg.DataFile
@@ -123,11 +122,8 @@ func (s *WriteRecordsTestSuite) TestSmallTargetFileSizeProducesMultipleFiles() {
 		for range 10 {
 			rec := s.buildRecords(schema, 100)
 			if !yield(rec, nil) {
-				rec.Release()
-
 				return
 			}
-			rec.Release()
 		}
 	}
 
@@ -152,7 +148,6 @@ func (s *WriteRecordsTestSuite) TestWithWriteUUID() {
 	records := func(yield func(arrow.RecordBatch, error) bool) {
 		rec := s.buildRecords(schema, 5)
 		yield(rec, nil)
-		rec.Release()
 	}
 
 	for df, err := range table.WriteRecords(s.ctx, tbl, schema, records, table.WithWriteUUID(writeID)) {
