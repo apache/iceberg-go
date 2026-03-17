@@ -164,6 +164,13 @@ func RecoverError(err *error) {
 	}
 }
 
+func SingleErrorIter[T any](err error) iter.Seq2[T, error] {
+	var z T
+	return func(yield func(T, error) bool) {
+		_ = yield(z, err)
+	}
+}
+
 func Counter(start int) iter.Seq[int] {
 	var current atomic.Int64
 	current.Store(int64(start) - 1)

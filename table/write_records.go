@@ -26,6 +26,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
 )
@@ -77,17 +78,17 @@ func WriteRecords(ctx context.Context, tbl *Table,
 
 	fs, err := tbl.fsF(ctx)
 	if err != nil {
-		return singleErrorIter(err)
+		return internal.SingleErrorIter[iceberg.DataFile](err)
 	}
 
 	writeFS, ok := fs.(iceio.WriteFileIO)
 	if !ok {
-		return singleErrorIter(fmt.Errorf("%w: filesystem does not support writing", iceberg.ErrNotImplemented))
+		return internal.SingleErrorIter[iceberg.DataFile](fmt.Errorf("%w: filesystem does not support writing", iceberg.ErrNotImplemented))
 	}
 
 	meta, err := MetadataBuilderFromBase(tbl.metadata, tbl.metadataLocation)
 	if err != nil {
-		return singleErrorIter(fmt.Errorf("failed to build metadata: %w", err))
+		return internal.SingleErrorIter[iceberg.DataFile](fmt.Errorf("failed to build metadata: %w", err))
 	}
 
 	if cfg.targetFileSize > 0 {
@@ -131,11 +132,5 @@ func WriteRecords(ctx context.Context, tbl *Table,
 				return
 			}
 		}
-	}
-}
-
-func singleErrorIter(err error) iter.Seq2[iceberg.DataFile, error] {
-	return func(yield func(iceberg.DataFile, error) bool) {
-		_ = yield(nil, err)
 	}
 }
