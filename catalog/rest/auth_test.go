@@ -18,35 +18,31 @@
 package rest
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/clientcredentials"
 )
 
 func TestOauth2AuthManager_AuthHeader_StaticToken(t *testing.T) {
 	manager := &Oauth2AuthManager{
-		Token: "static_token",
+		tokenSource: oauth2.StaticTokenSource(&oauth2.Token{
+			AccessToken: "static_token",
+			TokenType:   "Bearer",
+		}),
 	}
 
 	key, value, err := manager.AuthHeader()
 	require.NoError(t, err)
 	assert.Equal(t, "Authorization", key)
 	assert.Equal(t, "Bearer static_token", value)
-}
-
-func TestOauth2AuthManager_AuthHeader_MissingClient(t *testing.T) {
-	manager := &Oauth2AuthManager{
-		Credential: "client:secret",
-	}
-
-	_, _, err := manager.AuthHeader()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cannot fetch token without http client")
 }
 
 func TestOauth2AuthManager_AuthHeader_FetchToken_Success(t *testing.T) {
@@ -61,28 +57,32 @@ func TestOauth2AuthManager_AuthHeader_FetchToken_Success(t *testing.T) {
 		assert.Equal(t, "secret", r.FormValue("client_secret"))
 		assert.Equal(t, "catalog", r.FormValue("scope"))
 
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(oauthTokenResponse{
-			AccessToken: "fetched_token",
-			TokenType:   "Bearer",
-			ExpiresIn:   3600,
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "fetched_token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
 		})
 	})
 
-	authURL, err := url.Parse(server.URL + "/oauth/token")
-	require.NoError(t, err)
+	cfg := &clientcredentials.Config{
+		ClientID:     "client",
+		ClientSecret: "secret",
+		TokenURL:     server.URL + "/oauth/token",
+		Scopes:       []string{"catalog"},
+		AuthStyle:    oauth2.AuthStyleInParams,
+	}
 
+	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, server.Client())
 	manager := &Oauth2AuthManager{
-		Credential: "client:secret",
-		AuthURI:    authURL,
-		Client:     server.Client(),
+		tokenSource: cfg.TokenSource(ctx),
 	}
 
 	key, value, err := manager.AuthHeader()
 	require.NoError(t, err)
 	assert.Equal(t, "Authorization", key)
 	assert.Equal(t, "Bearer fetched_token", value)
-	assert.Equal(t, "fetched_token", manager.Token)
 }
 
 func TestOauth2AuthManager_AuthHeader_FetchToken_ErrorResponse(t *testing.T) {
@@ -91,23 +91,29 @@ func TestOauth2AuthManager_AuthHeader_FetchToken_ErrorResponse(t *testing.T) {
 	defer server.Close()
 
 	mux.HandleFunc("/oauth/token", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(oauthErrorResponse{
-			Err:     "invalid_client",
-			ErrDesc: "Invalid client credentials",
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":             "invalid_client",
+			"error_description": "Invalid client credentials",
 		})
 	})
 
-	authURL, err := url.Parse(server.URL + "/oauth/token")
-	require.NoError(t, err)
-
-	manager := &Oauth2AuthManager{
-		Credential: "client:secret",
-		AuthURI:    authURL,
-		Client:     server.Client(),
+	cfg := &clientcredentials.Config{
+		ClientID:     "client",
+		ClientSecret: "secret",
+		TokenURL:     server.URL + "/oauth/token",
+		AuthStyle:    oauth2.AuthStyleInParams,
 	}
 
-	_, _, err = manager.AuthHeader()
+	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, server.Client())
+	manager := &Oauth2AuthManager{
+		tokenSource: cfg.TokenSource(ctx),
+	}
+
+	_, _, err := manager.AuthHeader()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid_client: Invalid client credentials")
+	assert.True(t, errors.Is(err, ErrOAuthError), "error should wrap ErrOAuthError")
+	assert.Contains(t, err.Error(), "invalid_client")
+	assert.Contains(t, err.Error(), "Invalid client credentials")
 }

@@ -26,6 +26,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -61,7 +62,7 @@ func TestTokenAuthenticationPriority(t *testing.T) {
 
 	mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, r *http.Request) {
 		oauthCalled = true
-		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token": "oauth_token_response",
 			"token_type":   "Bearer",
@@ -136,12 +137,11 @@ func TestScope(t *testing.T) {
 
 		require.NoError(t, req.ParseForm())
 		values := req.PostForm
-		assert.Equal(t, values.Get("grant_type"), "client_credentials")
-		assert.Equal(t, values.Get("client_secret"), "secret")
-		assert.Equal(t, values.Get("scope"), "my_scope")
+		assert.Equal(t, "client_credentials", values.Get("grant_type"))
+		assert.Equal(t, "secret", values.Get("client_secret"))
+		assert.Equal(t, "my_scope", values.Get("scope"))
 
-		w.WriteHeader(http.StatusOK)
-
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token":      "some_jwt_token",
 			"token_type":        "Bearer",
@@ -179,13 +179,12 @@ func TestAuthHeader(t *testing.T) {
 
 		require.NoError(t, req.ParseForm())
 		values := req.PostForm
-		assert.Equal(t, values.Get("grant_type"), "client_credentials")
-		assert.Equal(t, values.Get("client_id"), "client")
-		assert.Equal(t, values.Get("client_secret"), "secret")
-		assert.Equal(t, values.Get("scope"), "catalog")
+		assert.Equal(t, "client_credentials", values.Get("grant_type"))
+		assert.Equal(t, "client", values.Get("client_id"))
+		assert.Equal(t, "secret", values.Get("client_secret"))
+		assert.Equal(t, "catalog", values.Get("scope"))
 
-		w.WriteHeader(http.StatusOK)
-
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token":      "some_jwt_token",
 			"token_type":        "Bearer",
@@ -194,19 +193,30 @@ func TestAuthHeader(t *testing.T) {
 		})
 	})
 
+	var capturedAuthHeader string
+	mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, r *http.Request) {
+		capturedAuthHeader = r.Header.Get("Authorization")
+		json.NewEncoder(w).Encode(map[string]any{"namespaces": [][]string{}})
+	})
+
 	cat, err := NewCatalog(context.Background(), "rest", srv.URL,
 		WithCredential("client:secret"))
 	require.NoError(t, err)
 	assert.NotNil(t, cat)
 
+	// Verify default headers (excluding Authorization, which is now set per-request).
 	require.IsType(t, (*sessionTransport)(nil), cat.cl.Transport)
 	assert.Equal(t, http.Header{
-		"Authorization":               {"Bearer some_jwt_token"},
 		"Content-Type":                {"application/json"},
 		"User-Agent":                  {"GoIceberg/(unknown version)"},
 		"X-Client-Version":            {icebergRestSpecVersion},
 		"X-Iceberg-Access-Delegation": {"vended-credentials"},
 	}, cat.cl.Transport.(*sessionTransport).defaultHeaders)
+
+	// Verify Authorization is set on actual requests.
+	_, err = cat.ListNamespaces(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer some_jwt_token", capturedAuthHeader)
 }
 
 func TestAuthUriHeader(t *testing.T) {
@@ -227,19 +237,24 @@ func TestAuthUriHeader(t *testing.T) {
 
 		require.NoError(t, req.ParseForm())
 		values := req.PostForm
-		assert.Equal(t, values.Get("grant_type"), "client_credentials")
-		assert.Equal(t, values.Get("client_id"), "client")
-		assert.Equal(t, values.Get("client_secret"), "secret")
-		assert.Equal(t, values.Get("scope"), "catalog")
+		assert.Equal(t, "client_credentials", values.Get("grant_type"))
+		assert.Equal(t, "client", values.Get("client_id"))
+		assert.Equal(t, "secret", values.Get("client_secret"))
+		assert.Equal(t, "catalog", values.Get("scope"))
 
-		w.WriteHeader(http.StatusOK)
-
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token":      "some_jwt_token",
 			"token_type":        "Bearer",
 			"expires_in":        86400,
 			"issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
 		})
+	})
+
+	var capturedAuthHeader string
+	mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, r *http.Request) {
+		capturedAuthHeader = r.Header.Get("Authorization")
+		json.NewEncoder(w).Encode(map[string]any{"namespaces": [][]string{}})
 	})
 
 	authUri, err := url.Parse(srv.URL)
@@ -251,12 +266,15 @@ func TestAuthUriHeader(t *testing.T) {
 
 	require.IsType(t, (*sessionTransport)(nil), cat.cl.Transport)
 	assert.Equal(t, http.Header{
-		"Authorization":               {"Bearer some_jwt_token"},
 		"Content-Type":                {"application/json"},
 		"User-Agent":                  {"GoIceberg/(unknown version)"},
 		"X-Client-Version":            {icebergRestSpecVersion},
 		"X-Iceberg-Access-Delegation": {"vended-credentials"},
 	}, cat.cl.Transport.(*sessionTransport).defaultHeaders)
+
+	_, err = cat.ListNamespaces(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer some_jwt_token", capturedAuthHeader)
 }
 
 func TestSigv4EmptyStringHash(t *testing.T) {
@@ -464,6 +482,81 @@ func TestSigv4ConcurrentSigners(t *testing.T) {
 	cancel()
 	require.NoError(t, grp.Wait())
 	t.Logf("issued %d requests", count.Load())
+}
+
+func TestCredentialRefreshOnExpiry(t *testing.T) {
+	t.Parallel()
+
+	var tokenVersion atomic.Int64
+	var oauthCallCount atomic.Int64
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{}, "overrides": map[string]any{},
+		})
+	})
+
+	mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, r *http.Request) {
+		n := oauthCallCount.Add(1)
+		tokenVersion.Store(n)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": fmt.Sprintf("token_v%d", n),
+			"token_type":   "Bearer",
+			"expires_in":   1, // expires in 1 second
+		})
+	})
+
+	mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		currentVersion := tokenVersion.Load()
+		expectedToken := fmt.Sprintf("Bearer token_v%d", currentVersion)
+
+		if auth != expectedToken {
+			// Simulate server rejecting an expired/stale token.
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{
+					"message": "Token expired",
+					"type":    "NotAuthorizedException",
+					"code":    401,
+				},
+			})
+
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"namespaces": [][]string{{"ns1"}},
+		})
+	})
+
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL,
+		WithCredential("client:secret"))
+	require.NoError(t, err)
+
+	// First call should succeed - the token was just fetched during session creation.
+	namespaces, err := cat.ListNamespaces(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Len(t, namespaces, 1)
+
+	// Wait for the token to "expire" and bump the server's expected version
+	// so the old token is rejected.
+	time.Sleep(2 * time.Second)
+	tokenVersion.Add(1)
+
+	// The catalog should automatically refresh its credential and retry,
+	// so this call should succeed transparently.
+	namespaces, err = cat.ListNamespaces(context.Background(), nil)
+	require.NoError(t, err, "catalog should refresh expired credentials automatically")
+	assert.Len(t, namespaces, 1)
+
+	// The OAuth endpoint should have been called a second time to get a fresh token.
+	assert.GreaterOrEqual(t, oauthCallCount.Load(), int64(2),
+		"OAuth endpoint should be called again to refresh the expired token")
 }
 
 // trackingReadCloser wraps an io.ReadCloser to track if Close() was called
