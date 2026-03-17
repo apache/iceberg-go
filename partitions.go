@@ -479,7 +479,7 @@ func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
 //
 // This does not apply the transforms to the data, it is assumed the provided data
 // has already been transformed appropriately.
-func (ps *PartitionSpec) PartitionToPath(data structLike, sc *Schema) string {
+func (ps *PartitionSpec) PartitionToPath(data StructLike, sc *Schema) string {
 	partType := ps.PartitionType(sc)
 
 	if len(partType.FieldList) == 0 {

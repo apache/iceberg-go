@@ -135,14 +135,7 @@ func (p *positionDeletePartitionedFanoutWriter) partitionPath(partitionContext p
 		return "", fmt.Errorf("unexpected missing partition spec in metadata for spec id %d", partitionContext.specID)
 	}
 
-	data := make(partitionRecord, spec.NumFields())
-	for i, field := range spec.Fields() {
-		val, ok := partitionContext.partitionData[field.FieldID]
-		if !ok {
-			return "", fmt.Errorf("unexpected missing partition value for field id %d in spec id %d", field.FieldID, partitionContext.specID)
-		}
-		data[i] = val
-	}
+	data := newPartitionRecord(partitionContext.partitionData, spec.PartitionType(p.schema))
 
 	return spec.PartitionToPath(data, p.schema), nil
 }

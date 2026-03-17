@@ -119,15 +119,19 @@ func (m *manifestEntries) addPositionalDeleteEntry(e iceberg.ManifestEntry) {
 	m.positionalDeleteEntries = append(m.positionalDeleteEntries, e)
 }
 
-func getPartitionRecord(dataFile iceberg.DataFile, partitionType *iceberg.StructType) partitionRecord {
-	partitionData := dataFile.Partition()
-
+func newPartitionRecord(partitionData map[int]any, partitionType *iceberg.StructType) partitionRecord {
 	out := make(partitionRecord, len(partitionType.FieldList))
 	for i, f := range partitionType.FieldList {
 		out[i] = partitionData[f.ID]
 	}
 
 	return out
+}
+
+// GetPartitionRecord converts a DataFile's partition map into a positional
+// record ordered by the fields of the given partition struct type.
+func GetPartitionRecord(dataFile iceberg.DataFile, partitionType *iceberg.StructType) iceberg.StructLike {
+	return newPartitionRecord(dataFile.Partition(), partitionType)
 }
 
 func openManifest(io io.IO, manifest iceberg.ManifestFile,
@@ -284,7 +288,7 @@ func (scan *Scan) buildPartitionEvaluator(specID int) (func(iceberg.DataFile) (b
 	}
 
 	return func(d iceberg.DataFile) (bool, error) {
-		return fn(getPartitionRecord(d, partType))
+		return fn(GetPartitionRecord(d, partType))
 	}, nil
 }
 

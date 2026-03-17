@@ -338,8 +338,8 @@ type BoundTerm interface {
 	Ref() BoundReference
 	Type() Type
 
-	evalToLiteral(structLike) Optional[Literal]
-	evalIsNull(structLike) bool
+	evalToLiteral(StructLike) Optional[Literal]
+	evalIsNull(StructLike) bool
 }
 
 // unbound is a generic interface representing something that is not yet bound
@@ -485,7 +485,7 @@ func (b *boundRef[T]) Ref() BoundReference { return b }
 func (b *boundRef[T]) Field() NestedField  { return b.field }
 func (b *boundRef[T]) Type() Type          { return b.field.Type }
 
-func (b *boundRef[T]) eval(st structLike) Optional[T] {
+func (b *boundRef[T]) eval(st StructLike) Optional[T] {
 	switch v := b.acc.Get(st).(type) {
 	case nil:
 		return Optional[T]{}
@@ -506,7 +506,7 @@ func (b *boundRef[T]) eval(st structLike) Optional[T] {
 	}
 }
 
-func (b *boundRef[T]) evalToLiteral(st structLike) Optional[Literal] {
+func (b *boundRef[T]) evalToLiteral(st StructLike) Optional[Literal] {
 	v := b.eval(st)
 	if !v.Valid {
 		return Optional[Literal]{}
@@ -520,7 +520,7 @@ func (b *boundRef[T]) evalToLiteral(st structLike) Optional[Literal] {
 	return Optional[Literal]{Val: lit, Valid: true}
 }
 
-func (b *boundRef[T]) evalIsNull(st structLike) bool {
+func (b *boundRef[T]) evalIsNull(st StructLike) bool {
 	v := b.eval(st)
 
 	return !v.Valid
@@ -605,7 +605,7 @@ type BoundUnaryPredicate interface {
 type bound[T LiteralType] interface {
 	BoundTerm
 
-	eval(structLike) Optional[T]
+	eval(StructLike) Optional[T]
 }
 
 func newBoundUnaryPred[T LiteralType](op Operation, term BoundTerm) BoundUnaryPredicate {
@@ -1048,10 +1048,10 @@ func (b *BoundTransform) Equals(other BoundTerm) bool {
 	return b.transform.Equals(rhs.transform) && b.term.Equals(rhs.term)
 }
 
-func (b *BoundTransform) evalToLiteral(st structLike) Optional[Literal] {
+func (b *BoundTransform) evalToLiteral(st StructLike) Optional[Literal] {
 	return b.transform.Apply(b.term.evalToLiteral(st))
 }
 
-func (b *BoundTransform) evalIsNull(st structLike) bool {
+func (b *BoundTransform) evalIsNull(st StructLike) bool {
 	return !b.evalToLiteral(st).Valid
 }

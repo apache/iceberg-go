@@ -186,7 +186,7 @@ func (*bindVisitor) VisitBound(pred BoundPredicate) BooleanExpression {
 // ExpressionEvaluator returns a function which can be used to evaluate a given expression
 // as long as a structlike value is passed which operates like and matches the passed in
 // schema.
-func ExpressionEvaluator(s *Schema, unbound BooleanExpression, caseSensitive bool) (func(structLike) (bool, error), error) {
+func ExpressionEvaluator(s *Schema, unbound BooleanExpression, caseSensitive bool) (func(StructLike) (bool, error), error) {
 	bound, err := BindExpr(s, unbound, caseSensitive)
 	if err != nil {
 		return nil, err
@@ -197,10 +197,10 @@ func ExpressionEvaluator(s *Schema, unbound BooleanExpression, caseSensitive boo
 
 type exprEvaluator struct {
 	bound BooleanExpression
-	st    structLike
+	st    StructLike
 }
 
-func (e *exprEvaluator) Eval(st structLike) (bool, error) {
+func (e *exprEvaluator) Eval(st StructLike) (bool, error) {
 	e.st = st
 
 	return VisitExpr(e.bound, e)
@@ -283,7 +283,7 @@ func nullsFirstCmp[T LiteralType](cmp Comparator[T], v1, v2 Optional[T]) int {
 	return cmp(v1.Val, v2.Val)
 }
 
-func typedCmp[T LiteralType](st structLike, term BoundTerm, lit Literal) int {
+func typedCmp[T LiteralType](st StructLike, term BoundTerm, lit Literal) int {
 	v := term.(bound[T]).eval(st)
 	var l Optional[T]
 
@@ -296,7 +296,7 @@ func typedCmp[T LiteralType](st structLike, term BoundTerm, lit Literal) int {
 	return nullsFirstCmp(rhs.Comparator(), v, l)
 }
 
-func doCmp(st structLike, term BoundTerm, lit Literal) int {
+func doCmp(st StructLike, term BoundTerm, lit Literal) int {
 	// we already properly casted and converted everything during binding
 	// so we can type assert based on the term type
 	switch term.Type().(type) {
