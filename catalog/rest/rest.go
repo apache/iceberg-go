@@ -38,7 +38,6 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
-	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -46,6 +45,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
+	"golang.org/x/sync/semaphore"
 )
 
 var _ catalog.Catalog = (*Catalog)(nil)
@@ -675,14 +675,43 @@ func checkValidNamespace(ident table.Identifier) error {
 	return nil
 }
 
-func (r *Catalog) tableFromResponse(ctx context.Context, identifier []string, metadata table.Metadata, loc string, config iceberg.Properties) (*table.Table, error) {
+func (r *Catalog) tableFromResponse(_ context.Context, identifier []string, metadata table.Metadata, loc string, config iceberg.Properties) (*table.Table, error) {
+	refresher := &vendedCredentialRefresher{
+		mu:          semaphore.NewWeighted(1),
+		identifier:  identifier,
+		location:    loc,
+		props:       config,
+		fetchConfig: r.fetchTableConfig,
+	}
+
 	return table.New(
 		identifier,
 		metadata,
 		loc,
-		iceio.LoadFSFunc(config, loc),
+		refresher.loadFS,
 		r,
 	), nil
+}
+
+func (r *Catalog) fetchTableConfig(ctx context.Context, ident []string) (iceberg.Properties, error) {
+	ns, tbl, err := splitIdentForPath(ident)
+	if err != nil {
+		return nil, err
+	}
+
+	ret, err := doGet[loadTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables", tbl},
+		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable})
+	if err != nil {
+		return nil, err
+	}
+
+	config := maps.Clone(r.props)
+	maps.Copy(config, ret.Metadata.Properties())
+	for k, v := range ret.Config {
+		config[k] = v
+	}
+
+	return config, nil
 }
 
 func (r *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
