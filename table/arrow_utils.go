@@ -19,6 +19,8 @@ package table
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"iter"
 	"slices"
@@ -29,8 +31,10 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/bitutil"
 	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/config"
 	"github.com/apache/iceberg-go/internal"
@@ -715,12 +719,139 @@ func retOrPanic[T any](v T, err error) T {
 	return v
 }
 
+// numericDefault converts v to T, accepting the typed iceberg form, the
+// float64 that encoding/json produces when deserializing into any, or the
+// json.Number that a decoder configured with UseNumber() produces.
+func numericDefault[T ~int32 | ~int64 | ~float32 | ~float64](v any) T {
+	switch val := v.(type) {
+	case T:
+		return val
+	case float64:
+		return T(val)
+	case json.Number:
+		f, err := val.Float64()
+		if err != nil {
+			panic(fmt.Errorf("unsupported json.Number %q for numeric iceberg type: %w", val, err))
+		}
+
+		return T(f)
+	}
+	panic(fmt.Errorf("unsupported write-default value type %T for numeric iceberg type", v))
+}
+
+// defaultToScalar converts an Iceberg default value to an Arrow scalar.
+func defaultToScalar(v any, t iceberg.Type, dt arrow.DataType) scalar.Scalar {
+	switch typ := t.(type) {
+	case iceberg.Float32Type:
+		s, err := scalar.MakeScalarParam(numericDefault[float32](v), dt)
+		if err != nil {
+			panic(fmt.Errorf("write-default float32 (iceberg type %s, value %v %T): %w", t, v, v, err))
+		}
+
+		return s
+	case iceberg.DateType:
+		return scalar.NewDate32Scalar(arrow.Date32(numericDefault[iceberg.Date](v)))
+	case iceberg.TimeType:
+		return scalar.NewTime64Scalar(arrow.Time64(numericDefault[iceberg.Time](v)), dt)
+	case iceberg.TimestampType, iceberg.TimestampTzType:
+		return scalar.NewTimestampScalar(arrow.Timestamp(numericDefault[iceberg.Timestamp](v)), dt)
+	case iceberg.TimestampNsType, iceberg.TimestampTzNsType:
+		return scalar.NewTimestampScalar(arrow.Timestamp(numericDefault[iceberg.TimestampNano](v)), dt)
+	case iceberg.UUIDType:
+		switch val := v.(type) {
+		case uuid.UUID:
+			s, err := scalar.MakeScalarParam(val[:], &arrow.FixedSizeBinaryType{ByteWidth: 16})
+			if err != nil {
+				panic(fmt.Errorf("write-default uuid (value %v): %w", val, err))
+			}
+
+			return s
+		case string:
+			u, err := uuid.Parse(val)
+			if err != nil {
+				panic(fmt.Errorf("write-default uuid: cannot parse string %q: %w", val, err))
+			}
+			s, err := scalar.MakeScalarParam(u[:], &arrow.FixedSizeBinaryType{ByteWidth: 16})
+			if err != nil {
+				panic(fmt.Errorf("write-default uuid (value %v): %w", val, err))
+			}
+
+			return s
+		}
+		panic(fmt.Errorf("write-default uuid: unsupported value type %T (%v)", v, v))
+	case iceberg.DecimalType:
+		switch val := v.(type) {
+		case iceberg.Decimal:
+			return scalar.NewDecimal128Scalar(val.Val, dt)
+		case string:
+			n, err := decimal128.FromString(val, int32(typ.Precision()), int32(typ.Scale()))
+			if err != nil {
+				panic(fmt.Errorf("write-default decimal(p=%d, s=%d): cannot parse string %q: %w", typ.Precision(), typ.Scale(), val, err))
+			}
+
+			return scalar.NewDecimal128Scalar(n, dt)
+		}
+		panic(fmt.Errorf("write-default decimal: unsupported value type %T (%v)", v, v))
+	case iceberg.BinaryType, iceberg.FixedType:
+		switch val := v.(type) {
+		case []byte:
+			s, err := scalar.MakeScalarParam(val, dt)
+			if err != nil {
+				panic(fmt.Errorf("write-default binary/fixed (iceberg type %s, value %v): %w", t, val, err))
+			}
+
+			return s
+		case string:
+			b, err := base64.StdEncoding.DecodeString(val)
+			if err != nil {
+				panic(fmt.Errorf("write-default binary/fixed (iceberg type %s): cannot base64-decode string %q: %w", t, val, err))
+			}
+			s, err := scalar.MakeScalarParam(b, dt)
+			if err != nil {
+				panic(fmt.Errorf("write-default binary/fixed (iceberg type %s, value %v): %w", t, b, err))
+			}
+
+			return s
+		}
+		panic(fmt.Errorf("write-default binary/fixed: unsupported value type %T (%v)", v, v))
+	// Float64, Bool, and String cast normally.
+	// Int32 and Int64 arrive as float64 from JSON and are handled by MakeScalarParam.
+	default:
+		s, err := scalar.MakeScalarParam(v, dt)
+		if err != nil {
+			panic(fmt.Errorf("write-default (iceberg type %s, value %v %T): %w", t, v, v, err))
+		}
+
+		return s
+	}
+}
+
+// defaultToArray creates an Arrow array of length n filled with the given default value v.
+func defaultToArray(v any, t iceberg.Type, dt arrow.DataType, n int, alloc memory.Allocator) arrow.Array {
+	sc := defaultToScalar(v, t, dt)
+	out, err := scalar.MakeArrayFromScalar(sc, n, alloc)
+	if err != nil {
+		panic(fmt.Errorf("write-default (iceberg type %s, value %v %T): failed to create array: %w", t, v, v, err))
+	}
+	if _, ok := dt.(*extensions.UUIDType); ok {
+		defer out.Release()
+
+		data := array.NewData(dt, out.Len(), out.Data().Buffers(), nil, out.NullN(), 0)
+		defer data.Release()
+
+		return array.MakeFromData(data)
+	}
+
+	return out
+}
+
 type arrowProjectionVisitor struct {
 	ctx                 context.Context
 	fileSchema          *iceberg.Schema
 	includeFieldIDs     bool
 	downcastNsTimestamp bool
 	useLargeTypes       bool
+	useWriteDefault     bool
 }
 
 func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals arrow.Array) arrow.Array {
@@ -832,7 +963,14 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 		} else if !field.Required {
 			dt := retOrPanic(TypeToArrowType(field.Type, false, a.useLargeTypes))
 
-			arr = array.MakeArrayOfNull(compute.GetAllocator(a.ctx), dt, structArr.Len())
+			if field.WriteDefault != nil && a.useWriteDefault {
+				arr = defaultToArray(field.WriteDefault, field.Type, dt, structArr.Len(), compute.GetAllocator(a.ctx))
+			} else if field.InitialDefault != nil && !a.useWriteDefault {
+				arr = defaultToArray(field.InitialDefault, field.Type, dt, structArr.Len(), compute.GetAllocator(a.ctx))
+			} else {
+				arr = array.MakeArrayOfNull(compute.GetAllocator(a.ctx), dt, structArr.Len())
+			}
+
 			defer arr.Release()
 			fieldArrs[i] = arr
 			fields[i] = a.constructField(field, arr.DataType())
@@ -928,9 +1066,17 @@ func (a *arrowProjectionVisitor) Primitive(_ iceberg.PrimitiveType, arr arrow.Ar
 	return arr
 }
 
+// SchemaOptions controls the behaviour of ToRequestedSchema.
+type SchemaOptions struct {
+	DowncastTimestamp bool
+	IncludeFieldIDs   bool
+	UseLargeTypes     bool
+	UseWriteDefault   bool
+}
+
 // ToRequestedSchema will construct a new record batch matching the requested iceberg schema
 // casting columns if necessary as appropriate.
-func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schema, batch arrow.RecordBatch, downcastTimestamp, includeFieldIDs, useLargeTypes bool) (arrow.RecordBatch, error) {
+func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schema, batch arrow.RecordBatch, opts SchemaOptions) (arrow.RecordBatch, error) {
 	st := array.RecordToStructArray(batch)
 	defer st.Release()
 
@@ -938,9 +1084,10 @@ func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schem
 		&arrowProjectionVisitor{
 			ctx:                 ctx,
 			fileSchema:          fileSchema,
-			includeFieldIDs:     includeFieldIDs,
-			downcastNsTimestamp: downcastTimestamp,
-			useLargeTypes:       useLargeTypes,
+			includeFieldIDs:     opts.IncludeFieldIDs,
+			downcastNsTimestamp: opts.DowncastTimestamp,
+			useLargeTypes:       opts.UseLargeTypes,
+			useWriteDefault:     opts.UseWriteDefault,
 		}, arrowAccessor{fileSchema: fileSchema})
 	if err != nil {
 		return nil, err
