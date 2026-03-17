@@ -317,6 +317,22 @@ func (b *MetadataBuilder) currentSnapshot() *Snapshot {
 	return s
 }
 
+// SnapshotIDForRef returns the snapshot ID for the given ref (branch or tag name).
+// For MainBranch it returns currentSnapshotID; for other refs it looks up b.refs.
+// Returns nil if the ref does not exist (e.g. a new branch not yet created).
+func (b *MetadataBuilder) SnapshotIDForRef(refName string) *int64 {
+	if refName == MainBranch {
+		return b.currentSnapshotID
+	}
+	if ref, ok := b.refs[refName]; ok {
+		id := ref.SnapshotID
+
+		return &id
+	}
+
+	return nil
+}
+
 func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) error {
 	if err := checkSchemaCompatibility(schema, b.formatVersion); err != nil {
 		return err

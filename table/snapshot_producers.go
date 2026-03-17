@@ -58,8 +58,8 @@ func newManifestListFileName(snapshotID int64, attempt int, commit uuid.UUID) st
 	return fmt.Sprintf("snap-%d-%d-%s.avro", snapshotID, attempt, commit)
 }
 
-func newFastAppendFilesProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties) *snapshotProducer {
-	prod := createSnapshotProducer(op, txn, fs, commitUUID, snapshotProps)
+func newFastAppendFilesProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties, branch string) *snapshotProducer {
+	prod := createSnapshotProducer(op, txn, fs, commitUUID, snapshotProps, branch)
 	prod.producerImpl = &fastAppendFiles{base: prod}
 
 	return prod
@@ -105,8 +105,8 @@ type overwriteFiles struct {
 	base *snapshotProducer
 }
 
-func newOverwriteFilesProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties) *snapshotProducer {
-	prod := createSnapshotProducer(op, txn, fs, commitUUID, snapshotProps)
+func newOverwriteFilesProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties, branch string) *snapshotProducer {
+	prod := createSnapshotProducer(op, txn, fs, commitUUID, snapshotProps, branch)
 	prod.producerImpl = &overwriteFiles{base: prod}
 
 	return prod
@@ -121,8 +121,11 @@ func (of *overwriteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 	// determine if there are any existing manifest files
 	existingFiles := make([]iceberg.ManifestFile, 0)
 
-	snap := of.base.txn.meta.currentSnapshot()
-	if snap == nil {
+	if of.base.parentSnapshotID <= 0 {
+		return existingFiles, nil
+	}
+	snap, err := of.base.txn.meta.SnapshotByID(of.base.parentSnapshotID)
+	if err != nil || snap == nil {
 		return existingFiles, nil
 	}
 
@@ -387,8 +390,8 @@ type mergeAppendFiles struct {
 	mergeEnabled    bool
 }
 
-func newMergeAppendFilesProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties) *snapshotProducer {
-	prod := createSnapshotProducer(op, txn, fs, commitUUID, snapshotProps)
+func newMergeAppendFilesProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties, branch string) *snapshotProducer {
+	prod := createSnapshotProducer(op, txn, fs, commitUUID, snapshotProps, branch)
 	prod.producerImpl = &mergeAppendFiles{
 		fastAppendFiles: fastAppendFiles{base: prod},
 		targetSizeBytes: txn.meta.props.GetInt(ManifestTargetSizeBytesKey, ManifestTargetSizeBytesDefault),
@@ -438,9 +441,10 @@ type snapshotProducer struct {
 	manifestCount       atomic.Int32
 	deletedFiles        map[string]iceberg.DataFile
 	snapshotProps       iceberg.Properties
+	branch              string
 }
 
-func createSnapshotProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties) *snapshotProducer {
+func createSnapshotProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties, branch string) *snapshotProducer {
 	var (
 		commit         uuid.UUID
 		parentSnapshot int64 = -1
@@ -452,8 +456,11 @@ func createSnapshotProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO
 		commit = *commitUUID
 	}
 
-	if snap := txn.meta.currentSnapshot(); snap != nil {
-		parentSnapshot = snap.SnapshotID
+	if branch == "" {
+		branch = MainBranch
+	}
+	if sid := txn.meta.SnapshotIDForRef(branch); sid != nil && *sid > 0 {
+		parentSnapshot = *sid
 	}
 
 	return &snapshotProducer{
@@ -466,6 +473,7 @@ func createSnapshotProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO
 		addedFiles:       []iceberg.DataFile{},
 		deletedFiles:     make(map[string]iceberg.DataFile),
 		snapshotProps:    snapshotProps,
+		branch:           branch,
 	}
 }
 
@@ -771,10 +779,18 @@ func (sp *snapshotProducer) commit() (_ []Update, _ []Requirement, err error) {
 		snapshot.AddedRows = &addedRows
 	}
 
+	var assertReq Requirement
+	if sp.parentSnapshotID > 0 {
+		parentID := sp.parentSnapshotID
+		assertReq = AssertRefSnapshotID(sp.branch, &parentID)
+	} else {
+		assertReq = AssertRefSnapshotID(sp.branch, nil)
+	}
+
 	return []Update{
 			NewAddSnapshotUpdate(&snapshot),
-			NewSetSnapshotRefUpdate("main", sp.snapshotID, BranchRef, -1, -1, -1),
+			NewSetSnapshotRefUpdate(sp.branch, sp.snapshotID, BranchRef, -1, -1, -1),
 		}, []Requirement{
-			AssertRefSnapshotID("main", sp.txn.meta.currentSnapshotID),
+			assertReq,
 		}, nil
 }

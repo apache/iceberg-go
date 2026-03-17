@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -106,6 +107,32 @@ func (t textOutput) DescribeTable(tbl *table.Table) {
 		WithData(pterm.TableData{
 			{"Current Snapshot", snap},
 		}).Render()
+
+	refsData := pterm.TableData{{"Name", "Type", "Snapshot ID"}}
+	type refRow struct {
+		name string
+		ref  table.SnapshotRef
+	}
+	var refRows []refRow
+	for name, ref := range tbl.Metadata().Refs() {
+		refRows = append(refRows, refRow{name, ref})
+	}
+	sort.Slice(refRows, func(i, j int) bool { return refRows[i].name < refRows[j].name })
+	for _, r := range refRows {
+		refsData = append(refsData, []string{
+			r.name,
+			string(r.ref.SnapshotRefType),
+			strconv.FormatInt(r.ref.SnapshotID, 10),
+		})
+	}
+	if len(refsData) > 1 {
+		pterm.Println("Refs")
+		pterm.DefaultTable.
+			WithHasHeader(true).
+			WithHeaderRowSeparator("-").
+			WithData(refsData).Render()
+	}
+
 	pterm.DefaultTree.WithRoot(snapshotTreeNode).Render()
 	pterm.Println("Properties")
 	propTable.Render()
@@ -241,12 +268,18 @@ func (j jsonOutput) Identifiers(idList []table.Identifier) {
 
 func (j jsonOutput) DescribeTable(tbl *table.Table) {
 	type dataType struct {
-		Metadata         table.Metadata        `json:"metadata,omitempty"`
-		MetadataLocation string                `json:"metadata-location,omitempty"`
-		SortOrder        table.SortOrder       `json:"sort-order,omitempty"`
-		CurrentSnapshot  *table.Snapshot       `json:"current-snapshot,omitempty"`
-		Spec             iceberg.PartitionSpec `json:"spec,omitempty"`
-		Schema           *iceberg.Schema       `json:"schema,omitempty"`
+		Metadata         table.Metadata               `json:"metadata,omitempty"`
+		MetadataLocation string                       `json:"metadata-location,omitempty"`
+		SortOrder        table.SortOrder              `json:"sort-order,omitempty"`
+		CurrentSnapshot  *table.Snapshot              `json:"current-snapshot,omitempty"`
+		Spec             iceberg.PartitionSpec        `json:"spec,omitempty"`
+		Schema           *iceberg.Schema              `json:"schema,omitempty"`
+		Refs             map[string]table.SnapshotRef `json:"refs,omitempty"`
+	}
+
+	refs := make(map[string]table.SnapshotRef)
+	for name, ref := range tbl.Metadata().Refs() {
+		refs[name] = ref
 	}
 
 	data := dataType{
@@ -256,6 +289,7 @@ func (j jsonOutput) DescribeTable(tbl *table.Table) {
 		CurrentSnapshot:  tbl.CurrentSnapshot(),
 		Spec:             tbl.Spec(),
 		Schema:           tbl.Schema(),
+		Refs:             refs,
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(data); err != nil {
 		j.Error(err)

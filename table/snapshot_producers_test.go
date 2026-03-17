@@ -193,7 +193,7 @@ func TestCommitV3RowLineage(t *testing.T) {
 
 	// Single data file with record count 1 (newTestDataFile uses 1, 1 for record count and file size).
 	const expectedAddedRows = 1
-	sp := newFastAppendFilesProducer(OpAppend, txn, trackIO, nil, nil)
+	sp := newFastAppendFilesProducer(OpAppend, txn, trackIO, nil, nil, MainBranch)
 	df := newTestDataFile(t, spec, "file://data.parquet", nil)
 	sp.appendDataFile(df)
 
@@ -226,7 +226,7 @@ func TestCommitV3RowLineageTwoSequentialCommits(t *testing.T) {
 	txn.meta.formatVersion = 3
 
 	// First commit: new table, append one file (1 row).
-	sp1 := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+	sp1 := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil, MainBranch)
 	sp1.appendDataFile(newTestDataFile(t, spec, "file://data-1.parquet", nil))
 	updates1, reqs1, err := sp1.commit()
 	require.NoError(t, err, "first commit should succeed")
@@ -244,7 +244,7 @@ func TestCommitV3RowLineageTwoSequentialCommits(t *testing.T) {
 	tbl2 := New(ident, meta1, "metadata.json", func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
 	txn2 := tbl2.NewTransaction()
 	txn2.meta.formatVersion = 3
-	sp2 := newFastAppendFilesProducer(OpAppend, txn2, memIO, nil, nil)
+	sp2 := newFastAppendFilesProducer(OpAppend, txn2, memIO, nil, nil, MainBranch)
 	sp2.appendDataFile(newTestDataFile(t, spec, "file://data-2.parquet", nil))
 	updates2, reqs2, err := sp2.commit()
 	require.NoError(t, err, "second commit should succeed")
@@ -270,7 +270,7 @@ func TestCommitV3RowLineageDeltaIncludesExistingRows(t *testing.T) {
 	txn.meta.formatVersion = 3
 
 	// First commit: one file (1 row).
-	sp1 := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+	sp1 := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil, MainBranch)
 	sp1.appendDataFile(newTestDataFile(t, spec, "file://data-1.parquet", nil))
 	updates1, reqs1, err := sp1.commit()
 	require.NoError(t, err, "first commit should succeed")
@@ -289,7 +289,7 @@ func TestCommitV3RowLineageDeltaIncludesExistingRows(t *testing.T) {
 	}
 	txn2.meta.props[ManifestMergeEnabledKey] = "true"
 	txn2.meta.props[ManifestMinMergeCountKey] = "2"
-	sp2 := newMergeAppendFilesProducer(OpAppend, txn2, memIO, nil, nil)
+	sp2 := newMergeAppendFilesProducer(OpAppend, txn2, memIO, nil, nil, MainBranch)
 	sp2.appendDataFile(newTestDataFile(t, spec, "file://data-2.parquet", nil))
 	updates2, reqs2, err := sp2.commit()
 	require.NoError(t, err, "second commit (merge) should succeed")
@@ -354,7 +354,7 @@ func TestCommitV3RowLineagePersistsManifestFirstRowID(t *testing.T) {
 	txn.meta.formatVersion = 3
 
 	// Use multi-row files to make row-range starts obvious.
-	sp1 := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+	sp1 := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil, MainBranch)
 	sp1.appendDataFile(newTestDataFileWithCount(t, spec, "file://data-1.parquet", nil, 3))
 	updates1, reqs1, err := sp1.commit()
 	require.NoError(t, err, "first commit should succeed")
@@ -376,7 +376,7 @@ func TestCommitV3RowLineagePersistsManifestFirstRowID(t *testing.T) {
 	tbl2 := New(ident, meta1, "metadata.json", func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
 	txn2 := tbl2.NewTransaction()
 	txn2.meta.formatVersion = 3
-	sp2 := newFastAppendFilesProducer(OpAppend, txn2, memIO, nil, nil)
+	sp2 := newFastAppendFilesProducer(OpAppend, txn2, memIO, nil, nil, MainBranch)
 	sp2.appendDataFile(newTestDataFileWithCount(t, spec, "file://data-2.parquet", nil, 5))
 	updates2, _, err := sp2.commit()
 	require.NoError(t, err, "second commit should succeed")
@@ -396,7 +396,7 @@ func TestSnapshotProducerManifestsClosesWriterOnError(t *testing.T) {
 	mem := newMemIO(manifestHeaderSize(t, 2, spec, schema), errLimitedWrite)
 	txn := createTestTransaction(t, mem, spec)
 
-	sp := newFastAppendFilesProducer(OpAppend, txn, mem, nil, nil)
+	sp := newFastAppendFilesProducer(OpAppend, txn, mem, nil, nil, MainBranch)
 	validPartition := map[int]any{1000: int32(1)}
 	sp.appendDataFile(newTestDataFile(t, spec, "file://data-1.parquet", validPartition))
 	sp.appendDataFile(newTestDataFile(t, spec, "file://data-2.parquet", nil))
@@ -411,7 +411,7 @@ func TestManifestMergeManagerClosesWriterOnError(t *testing.T) {
 	mem := newMemIO(manifestHeaderSize(t, 2, spec, schema), errLimitedWrite)
 	txn := createTestTransaction(t, mem, spec)
 
-	sp := newFastAppendFilesProducer(OpAppend, txn, mem, nil, nil)
+	sp := newFastAppendFilesProducer(OpAppend, txn, mem, nil, nil, MainBranch)
 	df := newTestDataFile(t, spec, "file://data-1.parquet", nil)
 	entries := []iceberg.ManifestEntry{
 		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &sp.snapshotID, nil, nil, df),
@@ -483,7 +483,7 @@ func TestOverwriteFilesExistingManifestsClosesWriterOnError(t *testing.T) {
 	txn.meta.snapshotList = []Snapshot{snap}
 	txn.meta.currentSnapshotID = &snapshotID
 
-	sp := newOverwriteFilesProducer(OpOverwrite, txn, mem, nil, nil)
+	sp := newOverwriteFilesProducer(OpOverwrite, txn, mem, nil, nil, MainBranch)
 	sp.deleteDataFile(deletedFile)
 
 	_, err = sp.existingManifests()
@@ -598,7 +598,7 @@ func TestManifestWriterClosesUnderlyingFile(t *testing.T) {
 	spec := iceberg.NewPartitionSpec()
 	txn := createTestTransaction(t, trackIO, spec)
 
-	sp := newFastAppendFilesProducer(OpAppend, txn, trackIO, nil, nil)
+	sp := newFastAppendFilesProducer(OpAppend, txn, trackIO, nil, nil, MainBranch)
 	df := newTestDataFile(t, spec, "file://data-1.parquet", nil)
 	sp.appendDataFile(df)
 
@@ -618,7 +618,7 @@ func TestCreateManifestClosesUnderlyingFile(t *testing.T) {
 	txn := createTestTransaction(t, trackIO, spec)
 	schema := simpleSchema()
 
-	sp := newFastAppendFilesProducer(OpAppend, txn, trackIO, nil, nil)
+	sp := newFastAppendFilesProducer(OpAppend, txn, trackIO, nil, nil, MainBranch)
 	df := newTestDataFile(t, spec, "file://data-1.parquet", nil)
 	entries := []iceberg.ManifestEntry{
 		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &sp.snapshotID, nil, nil, df),
@@ -680,7 +680,7 @@ func TestOverwriteExistingManifestsClosesUnderlyingFile(t *testing.T) {
 	txn.meta.snapshotList = []Snapshot{snap}
 	txn.meta.currentSnapshotID = &snapshotID
 
-	sp := newOverwriteFilesProducer(OpOverwrite, txn, trackIO, nil, nil)
+	sp := newOverwriteFilesProducer(OpOverwrite, txn, trackIO, nil, nil, MainBranch)
 	sp.deleteDataFile(deletedFile)
 
 	trackIO.writers = make(map[string]*trackingWriteCloser)
@@ -754,7 +754,7 @@ func TestManifestsClosesWriterWhenDeletedEntriesFails(t *testing.T) {
 	spec := iceberg.NewPartitionSpec()
 	txn := createTestTransaction(t, blockingIO, spec)
 
-	sp := createSnapshotProducer(OpAppend, txn, blockingIO, nil, nil)
+	sp := createSnapshotProducer(OpAppend, txn, blockingIO, nil, nil, MainBranch)
 	errDeletedEntries := errors.New("simulated deletedEntries error")
 	sp.producerImpl = &errorOnDeletedEntries{
 		base:                sp,
@@ -784,4 +784,37 @@ func TestManifestsClosesWriterWhenDeletedEntriesFails(t *testing.T) {
 		writerCount := blockingIO.GetWriterCount()
 		require.Zero(t, writerCount, "expected no writerFactory to be created when deletedEntries is called first")
 	}
+}
+
+// TestCreateSnapshotProducerUsesBranch verifies that createSnapshotProducer sets
+// branch and resolves parentSnapshotID from SnapshotIDForRef(branch).
+func TestCreateSnapshotProducerUsesBranch(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	schemaID := 0
+	const snapID int64 = 42
+	snapshot := Snapshot{
+		SnapshotID:       snapID,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis(),
+		ManifestList:     "table-location/metadata/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+	}
+	require.NoError(t, builder.AddSnapshot(&snapshot))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, snapID, BranchRef))
+	require.NoError(t, builder.SetSnapshotRef("feature", snapID, BranchRef))
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+
+	mem := newMemIO(0, nil)
+	tbl := New(Identifier{"db", "tbl"}, meta, "metadata.json", func(context.Context) (iceio.IO, error) {
+		return mem, nil
+	}, nil)
+	txn := tbl.NewTransaction()
+
+	sp := createSnapshotProducer(OpAppend, txn, mem, nil, nil, "feature")
+	require.Equal(t, "feature", sp.branch)
+	require.Equal(t, snapID, sp.parentSnapshotID)
 }

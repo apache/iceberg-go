@@ -570,6 +570,36 @@ func TestSetBranchSnapshotCreatesBranchIfNotExists(t *testing.T) {
 	require.Equal(t, int64(2), builder.updates[1].(*setSnapshotRefUpdate).SnapshotID)
 }
 
+func TestSnapshotIDForRef(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	schemaID := 0
+	snapshot := Snapshot{
+		SnapshotID:       2,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis(),
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+	}
+	require.NoError(t, builder.AddSnapshot(&snapshot))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 2, BranchRef))
+	require.NoError(t, builder.SetSnapshotRef("feature", 2, BranchRef))
+
+	// MainBranch returns currentSnapshotID
+	mainID := builder.SnapshotIDForRef(MainBranch)
+	require.NotNil(t, mainID)
+	require.Equal(t, int64(2), *mainID)
+
+	// Other ref returns ref's snapshot ID
+	featureID := builder.SnapshotIDForRef("feature")
+	require.NotNil(t, featureID)
+	require.Equal(t, int64(2), *featureID)
+
+	// Unknown ref returns nil
+	require.Nil(t, builder.SnapshotIDForRef("nonexistent"))
+}
+
 func TestRemoveSnapshotRemovesBranch(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	schemaID := 0
