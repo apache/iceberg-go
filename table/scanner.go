@@ -505,7 +505,18 @@ func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[
 		return nil, nil, err
 	}
 
-	var boundFilter iceberg.BooleanExpression
+	return scan.ReadTasks(ctx, tasks)
+}
+
+// ReadTasks reads Arrow records from a specific set of FileScanTasks, applying the
+// scan's projection, row filters, and positional delete handling. This is useful when
+// the caller has already planned or selected specific tasks to read.
+func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
+	var (
+		boundFilter iceberg.BooleanExpression
+		err         error
+	)
+
 	if scan.rowFilter != nil {
 		boundFilter, err = iceberg.BindExpr(scan.metadata.CurrentSchema(), scan.rowFilter, scan.caseSensitive)
 		if err != nil {
