@@ -136,11 +136,21 @@ func (t *commitTableResponse) UnmarshalJSON(b []byte) (err error) {
 	return err
 }
 
+type storageCredential struct {
+	Prefix string             `json:"prefix"`
+	Config iceberg.Properties `json:"config"`
+}
+
 type loadTableResponse struct {
-	MetadataLoc string             `json:"metadata-location"`
-	RawMetadata json.RawMessage    `json:"metadata"`
-	Config      iceberg.Properties `json:"config"`
-	Metadata    table.Metadata     `json:"-"`
+	MetadataLoc        string              `json:"metadata-location"`
+	RawMetadata        json.RawMessage     `json:"metadata"`
+	Config             iceberg.Properties  `json:"config"`
+	StorageCredentials []storageCredential `json:"storage-credentials"`
+	Metadata           table.Metadata      `json:"-"`
+}
+
+type loadCredentialsResponse struct {
+	StorageCredentials []storageCredential `json:"storage-credentials"`
 }
 
 func (t *loadTableResponse) UnmarshalJSON(b []byte) (err error) {
@@ -677,11 +687,13 @@ func checkValidNamespace(ident table.Identifier) error {
 
 func (r *Catalog) tableFromResponse(_ context.Context, identifier []string, metadata table.Metadata, loc string, config iceberg.Properties) (*table.Table, error) {
 	refresher := &vendedCredentialRefresher{
-		mu:          semaphore.NewWeighted(1),
-		identifier:  identifier,
-		location:    loc,
-		props:       config,
-		fetchConfig: r.fetchTableConfig,
+		mu:         semaphore.NewWeighted(1),
+		identifier: identifier,
+		location:   loc,
+		props:      config,
+		fetchCreds: func(ctx context.Context, ident []string) (iceberg.Properties, error) {
+			return r.fetchTableCreds(ctx, ident, loc)
+		},
 	}
 
 	return table.New(
@@ -693,25 +705,19 @@ func (r *Catalog) tableFromResponse(_ context.Context, identifier []string, meta
 	), nil
 }
 
-func (r *Catalog) fetchTableConfig(ctx context.Context, ident []string) (iceberg.Properties, error) {
+func (r *Catalog) fetchTableCreds(ctx context.Context, ident []string, location string) (iceberg.Properties, error) {
 	ns, tbl, err := splitIdentForPath(ident)
 	if err != nil {
 		return nil, err
 	}
 
-	ret, err := doGet[loadTableResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables", tbl},
+	ret, err := doGet[loadCredentialsResponse](ctx, r.baseURI, []string{"namespaces", ns, "tables", tbl, "credentials"},
 		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable})
 	if err != nil {
 		return nil, err
 	}
 
-	config := maps.Clone(r.props)
-	maps.Copy(config, ret.Metadata.Properties())
-	for k, v := range ret.Config {
-		config[k] = v
-	}
-
-	return config, nil
+	return resolveStorageCredentials(ret.StorageCredentials, location), nil
 }
 
 func (r *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
@@ -825,6 +831,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
 	maps.Copy(config, ret.Config)
+	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
 	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config)
 }
@@ -936,6 +943,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
 	maps.Copy(config, ret.Config)
+	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
 	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config)
 }
@@ -954,9 +962,8 @@ func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
-	for k, v := range ret.Config {
-		config[k] = v
-	}
+	maps.Copy(config, ret.Config)
+	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
 	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config)
 }

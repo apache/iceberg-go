@@ -21,6 +21,7 @@ import (
 	"context"
 	"maps"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/apache/iceberg-go"
@@ -36,6 +37,25 @@ const (
 
 	defaultVendedCredentialsTTL = 60 * time.Minute
 )
+
+// resolveStorageCredentials finds the best-matching credential for the given
+// location using longest-prefix match, mirroring the Java and Python implementations.
+func resolveStorageCredentials(creds []storageCredential, location string) iceberg.Properties {
+	var best *storageCredential
+	for i := range creds {
+		c := &creds[i]
+		if strings.HasPrefix(location, c.Prefix) {
+			if best == nil || len(c.Prefix) > len(best.Prefix) {
+				best = c
+			}
+		}
+	}
+	if best == nil {
+		return nil
+	}
+
+	return best.Config
+}
 
 var credentialExpiryKeys = []string{
 	keyS3TokenExpiresAtMs,
@@ -58,6 +78,9 @@ func parseCredentialExpiry(config iceberg.Properties) (time.Time, bool) {
 }
 
 type vendedCredentialRefresher struct {
+	// Use a weighted semaphore with a single unit to use as an exclusive lock
+	// but cancellation (via context) is supported. This is important as we do IO
+	// while holding this lock and we want to allow others to cancel during acquisition.
 	mu        *semaphore.Weighted
 	cachedIO  iceio.IO
 	expiresAt time.Time
@@ -66,7 +89,7 @@ type vendedCredentialRefresher struct {
 	location   string
 	props      iceberg.Properties
 
-	fetchConfig func(ctx context.Context, ident []string) (iceberg.Properties, error)
+	fetchCreds func(ctx context.Context, ident []string) (iceberg.Properties, error)
 
 	nowFunc func() time.Time // for testing
 }
@@ -93,14 +116,13 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 	if v.cachedIO == nil {
 		config = v.props
 	} else {
-		freshConfig, err := v.fetchConfig(ctx, v.identifier)
+		freshCreds, err := v.fetchCreds(ctx, v.identifier)
 		if err != nil {
 			return v.cachedIO, nil
 		}
 
-		config = make(iceberg.Properties, len(v.props)+len(freshConfig))
-		maps.Copy(config, v.props)
-		maps.Copy(config, freshConfig)
+		config = maps.Clone(v.props)
+		maps.Copy(config, freshCreds)
 	}
 
 	newIO, err := iceio.LoadFS(ctx, config, v.location)

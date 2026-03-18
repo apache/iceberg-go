@@ -33,13 +33,13 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
-func newTestRefresher(fetchConfig func(ctx context.Context, ident []string) (iceberg.Properties, error)) *vendedCredentialRefresher {
+func newTestRefresher(fetchCreds func(ctx context.Context, ident []string) (iceberg.Properties, error)) *vendedCredentialRefresher {
 	return &vendedCredentialRefresher{
-		mu:          semaphore.NewWeighted(1),
-		identifier:  []string{"db", "tbl"},
-		location:    "file:///tmp/test",
-		props:       iceberg.Properties{},
-		fetchConfig: fetchConfig,
+		mu:         semaphore.NewWeighted(1),
+		identifier: []string{"db", "tbl"},
+		location:   "file:///tmp/test",
+		props:      iceberg.Properties{},
+		fetchCreds: fetchCreds,
 	}
 }
 
@@ -320,4 +320,67 @@ func TestVendedCredsServerExpiryUsedOnRefresh(t *testing.T) {
 
 	// expiresAt should be the server-provided value, not now+default.
 	assert.Equal(t, serverExpiry.UnixMilli(), r.expiresAt.UnixMilli())
+}
+
+func TestResolveStorageCredentials(t *testing.T) {
+	t.Parallel()
+
+	s3Creds := iceberg.Properties{"s3.access-key-id": "AKID", "s3.secret-access-key": "secret"}
+	specificCreds := iceberg.Properties{"s3.access-key-id": "SPECIFIC"}
+
+	tests := []struct {
+		name     string
+		creds    []storageCredential
+		location string
+		want     iceberg.Properties
+	}{
+		{
+			name:     "empty credentials",
+			creds:    nil,
+			location: "s3://bucket/path",
+			want:     nil,
+		},
+		{
+			name: "matching prefix",
+			creds: []storageCredential{
+				{Prefix: "s3://bucket/", Config: s3Creds},
+			},
+			location: "s3://bucket/path/to/file",
+			want:     s3Creds,
+		},
+		{
+			name: "no matching prefix",
+			creds: []storageCredential{
+				{Prefix: "s3://other-bucket/", Config: s3Creds},
+			},
+			location: "s3://bucket/path",
+			want:     nil,
+		},
+		{
+			name: "longest prefix wins",
+			creds: []storageCredential{
+				{Prefix: "s3://bucket/", Config: s3Creds},
+				{Prefix: "s3://bucket/specific/", Config: specificCreds},
+			},
+			location: "s3://bucket/specific/path",
+			want:     specificCreds,
+		},
+		{
+			name: "longest prefix wins regardless of order",
+			creds: []storageCredential{
+				{Prefix: "s3://bucket/specific/", Config: specificCreds},
+				{Prefix: "s3://bucket/", Config: s3Creds},
+			},
+			location: "s3://bucket/specific/path",
+			want:     specificCreds,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := resolveStorageCredentials(tt.creds, tt.location)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
