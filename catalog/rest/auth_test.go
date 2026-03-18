@@ -654,9 +654,9 @@ func TestOauth2AuthManager_RefreshToken(t *testing.T) {
 	assert.Equal(t, "Bearer access_2", v)
 	assert.Equal(t, []string{
 		grantClientCredentials,
-		grantTokenExchange,     // exchange (no Basic) — fails
-		grantTokenExchange,     // exchange (Basic auth) — fails
-		grantRefreshToken,      // refresh token — succeeds
+		grantTokenExchange, // exchange (no Basic) — fails
+		grantTokenExchange, // exchange (Basic auth) — fails
+		grantRefreshToken,  // refresh token — succeeds
 	}, grantTypes)
 }
 

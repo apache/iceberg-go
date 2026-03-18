@@ -183,11 +183,13 @@ func (o *Oauth2AuthManager) AuthHeaderCtx(ctx context.Context) (string, string, 
 	o.mu.RLock()
 	if o.Token != "" && o.accessToken == "" {
 		o.mu.RUnlock()
+
 		return "Authorization", "Bearer " + o.Token, nil
 	}
 	if o.accessToken != "" && time.Now().Before(o.expiry) {
 		tok := o.accessToken
 		o.mu.RUnlock()
+
 		return "Authorization", "Bearer " + tok, nil
 	}
 	o.mu.RUnlock()
@@ -231,6 +233,7 @@ func (o *Oauth2AuthManager) RefreshAuth(ctx context.Context) error {
 
 	// Token is cleared, so treat as expired.
 	_, err := o.refreshExpiredTokenLocked(ctx)
+
 	return err
 }
 
