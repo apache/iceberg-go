@@ -42,6 +42,7 @@ import (
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 	"github.com/pterm/pterm"
+	"golang.org/x/sync/errgroup"
 )
 
 // constants to look for as Keys in Arrow field metadata
@@ -1343,72 +1344,84 @@ func computeStatsPlan(sc *iceberg.Schema, props iceberg.Properties) (map[int]tbl
 	return result, nil
 }
 
-func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilder, paths iter.Seq[string]) iter.Seq2[iceberg.DataFile, error] {
-	return func(yield func(iceberg.DataFile, error) bool) {
-		defer func() {
-			if r := recover(); r != nil {
-				switch e := r.(type) {
-				case string:
-					yield(nil, fmt.Errorf("error encountered during file conversion: %s", e))
-				case error:
-					yield(nil, fmt.Errorf("error encountered during file conversion: %w", e))
-				}
-			}
-		}()
+func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilder, filePaths []string, concurrency int) (_ []iceberg.DataFile, err error) {
+	partitionSpec, err := meta.CurrentSpec()
+	if err != nil || partitionSpec == nil {
+		return nil, fmt.Errorf("%w: cannot add files without a current spec", err)
+	}
 
-		partitionSpec, err := meta.CurrentSpec()
-		if err != nil || partitionSpec == nil {
-			yield(nil, fmt.Errorf("%w: cannot add files without a current spec", err))
+	currentSchema, currentSpec := meta.CurrentSchema(), *partitionSpec
 
-			return
-		}
-
-		currentSchema, currentSpec := meta.CurrentSchema(), *partitionSpec
-
-		for filePath := range paths {
-			format := tblutils.FormatFromFileName(filePath)
-			rdr := must(format.Open(ctx, fileIO, filePath))
-			// TODO: take a look at this defer Close() and consider refactoring
-			defer rdr.Close()
-
-			arrSchema := must(rdr.Schema())
-
-			if err := checkArrowSchemaCompat(currentSchema, arrSchema, false); err != nil {
-				yield(nil, err)
-
-				return
-			}
-
-			pathToIDSchema := currentSchema
-			if fileHasIDs := must(VisitArrowSchema(arrSchema, hasIDs{})); fileHasIDs {
-				pathToIDSchema = must(ArrowSchemaToIceberg(arrSchema, false, nil))
-			}
-
-			statistics := format.DataFileStatsFromMeta(rdr.Metadata(), must(computeStatsPlan(currentSchema, meta.props)),
-				must(format.PathToIDMapping(pathToIDSchema)))
-
-			partitionValues := make(map[int]any)
-			if !currentSpec.Equals(*iceberg.UnpartitionedSpec) {
-				for _, field := range currentSpec.Fields() {
-					if !field.Transform.PreservesOrder() {
-						yield(nil, fmt.Errorf("cannot infer partition value from parquet metadata for a non-linear partition field: %s with transform %s", field.Name, field.Transform))
-
-						return
-					}
-
-					partitionVal := statistics.PartitionValue(field, currentSchema)
-					if partitionVal != nil {
-						partitionValues[field.FieldID] = partitionVal
+	dataFiles := make([]iceberg.DataFile, len(filePaths))
+	eg, ctx := errgroup.WithContext(ctx)
+	eg.SetLimit(concurrency)
+	for i, filePath := range filePaths {
+		eg.Go(func() (err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					switch e := r.(type) {
+					case string:
+						err = fmt.Errorf("error encountered during file conversion: %s", e)
+					case error:
+						err = fmt.Errorf("error encountered during file conversion: %w", e)
 					}
 				}
+			}()
+
+			dataFile, err := fileToDataFile(ctx, fileIO, filePath, currentSchema, currentSpec, meta.props)
+			if err != nil {
+				return err
+			}
+			dataFiles[i] = dataFile
+
+			return nil
+		})
+	}
+
+	if err := eg.Wait(); err != nil {
+		return nil, err
+	}
+
+	return dataFiles, nil
+}
+
+func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, currentSchema *iceberg.Schema, currentSpec iceberg.PartitionSpec, props iceberg.Properties) (iceberg.DataFile, error) {
+	format := tblutils.FormatFromFileName(filePath)
+	rdr := must(format.Open(ctx, fileIO, filePath))
+	defer rdr.Close()
+
+	arrSchema := must(rdr.Schema())
+	if err := checkArrowSchemaCompat(currentSchema, arrSchema, false); err != nil {
+		return nil, err
+	}
+
+	pathToIDSchema := currentSchema
+	if fileHasIDs := must(VisitArrowSchema(arrSchema, hasIDs{})); fileHasIDs {
+		pathToIDSchema = must(ArrowSchemaToIceberg(arrSchema, false, nil))
+	}
+	statistics := format.DataFileStatsFromMeta(
+		rdr.Metadata(),
+		must(computeStatsPlan(currentSchema, props)),
+		must(format.PathToIDMapping(pathToIDSchema)),
+	)
+
+	partitionValues := make(map[int]any)
+	if !currentSpec.Equals(*iceberg.UnpartitionedSpec) {
+		for _, field := range currentSpec.Fields() {
+			if !field.Transform.PreservesOrder() {
+				return nil, fmt.Errorf("cannot infer partition value from parquet metadata for a non-linear partition field: %s with transform %s", field.Name, field.Transform)
 			}
 
-			df := statistics.ToDataFile(currentSchema, currentSpec, filePath, iceberg.ParquetFile, iceberg.EntryContentData, rdr.SourceFileSize(), partitionValues)
-			if !yield(df, nil) {
-				return
+			partitionVal := statistics.PartitionValue(field, currentSchema)
+			if partitionVal != nil {
+				partitionValues[field.FieldID] = partitionVal
 			}
 		}
 	}
+
+	dataFile := statistics.ToDataFile(currentSchema, currentSpec, filePath, iceberg.ParquetFile, iceberg.EntryContentData, rdr.SourceFileSize(), partitionValues)
+
+	return dataFile, nil
 }
 
 func recordNBytes(rec arrow.RecordBatch) (total int64) {
