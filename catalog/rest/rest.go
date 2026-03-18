@@ -285,7 +285,7 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 				}
 
 				// Mark this request as a retry so we don't loop.
-				// RoundTrip re-applies headers and re-signs via applyHeaders.
+				// Recursive RoundTrip re-applies auth and re-signs.
 				retryCtx := context.WithValue(r.Context(), authRetryKey, true)
 				resp, err = s.RoundTrip(r.WithContext(retryCtx))
 			}

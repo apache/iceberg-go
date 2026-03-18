@@ -128,10 +128,12 @@ func isAuthFailure(code int) bool {
 		code == statusAuthorizationExpired
 }
 
-// Oauth2AuthManager is an implementation of the AuthManager interface which
-// simply returns the provided token as a bearer token. If a credential
-// is provided instead of a static token, it will fetch and refresh the
-// token as needed.
+// Oauth2AuthManager implements AuthManager with OAuth2 token management.
+// With a static Token it acts as a simple bearer token provider. When a
+// Credential is set, it fetches tokens via client_credentials and
+// refreshes them proactively before expiry using a fallback chain:
+// token exchange → exchange with Basic auth → refresh_token →
+// client_credentials.
 type Oauth2AuthManager struct {
 	Token      string
 	Credential string
@@ -162,8 +164,8 @@ func (o *Oauth2AuthManager) basicAuth() string {
 }
 
 // AuthHeader returns the authorization header with the bearer token.
-// When only Credential is set, tokens are fetched, cached, and refreshed
-// automatically via token exchange (RFC 8693).
+// When Credential is set, tokens are fetched, cached, and refreshed
+// automatically using the OAuth2 fallback chain.
 func (o *Oauth2AuthManager) AuthHeader() (string, string, error) {
 	return o.AuthHeaderCtx(context.Background())
 }
@@ -200,7 +202,7 @@ func (o *Oauth2AuthManager) AuthHeaderCtx(ctx context.Context) (string, string, 
 		return "Authorization", "Bearer " + o.accessToken, nil
 	}
 
-	// Refresh the current token (exchange -> fallback to credentials).
+	// Refresh the token using the OAuth2 fallback chain.
 	tok, err := o.refreshCurrentTokenLocked(ctx)
 	if err != nil {
 		return "", "", err
@@ -210,8 +212,7 @@ func (o *Oauth2AuthManager) AuthHeaderCtx(ctx context.Context) (string, string, 
 }
 
 // RefreshAuth forces a credential refresh, discarding any cached
-// tokens. It uses token exchange with Basic auth for expired tokens,
-// falling back to client_credentials.
+// tokens and falling back through the refresh chain.
 func (o *Oauth2AuthManager) RefreshAuth(ctx context.Context) error {
 	// Static token path -- nothing to refresh.
 	if o.Credential == "" {
