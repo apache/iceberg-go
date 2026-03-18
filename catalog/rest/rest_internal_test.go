@@ -122,6 +122,7 @@ func TestScope(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
+	defer srv.Close()
 
 	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
@@ -161,10 +162,11 @@ func TestScope(t *testing.T) {
 	assert.NotNil(t, cat)
 }
 
-func TestAuthHeader(t *testing.T) {
+func TestApplyHeaders(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
+	defer srv.Close()
 
 	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
@@ -197,22 +199,27 @@ func TestAuthHeader(t *testing.T) {
 	cat, err := NewCatalog(context.Background(), "rest", srv.URL,
 		WithCredential("client:secret"))
 	require.NoError(t, err)
-	assert.NotNil(t, cat)
 
-	require.IsType(t, (*sessionTransport)(nil), cat.cl.Transport)
+	st := cat.cl.Transport.(*sessionTransport)
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/test", nil)
+	require.NoError(t, err)
+
+	require.NoError(t, st.applyHeaders(req))
+
 	assert.Equal(t, http.Header{
 		"Authorization":               {"Bearer some_jwt_token"},
 		"Content-Type":                {"application/json"},
 		"User-Agent":                  {"GoIceberg/(unknown version)"},
 		"X-Client-Version":            {icebergRestSpecVersion},
 		"X-Iceberg-Access-Delegation": {"vended-credentials"},
-	}, cat.cl.Transport.(*sessionTransport).defaultHeaders)
+	}, req.Header)
 }
 
-func TestAuthUriHeader(t *testing.T) {
+func TestApplyHeaders_CustomAuthURI(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
+	defer srv.Close()
 
 	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
@@ -247,16 +254,20 @@ func TestAuthUriHeader(t *testing.T) {
 	cat, err := NewCatalog(context.Background(), "rest", srv.URL,
 		WithCredential("client:secret"), WithAuthURI(authUri.JoinPath("auth-token-url")))
 	require.NoError(t, err)
-	assert.NotNil(t, cat)
 
-	require.IsType(t, (*sessionTransport)(nil), cat.cl.Transport)
+	st := cat.cl.Transport.(*sessionTransport)
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/test", nil)
+	require.NoError(t, err)
+
+	require.NoError(t, st.applyHeaders(req))
+
 	assert.Equal(t, http.Header{
 		"Authorization":               {"Bearer some_jwt_token"},
 		"Content-Type":                {"application/json"},
 		"User-Agent":                  {"GoIceberg/(unknown version)"},
 		"X-Client-Version":            {icebergRestSpecVersion},
 		"X-Iceberg-Access-Delegation": {"vended-credentials"},
-	}, cat.cl.Transport.(*sessionTransport).defaultHeaders)
+	}, req.Header)
 }
 
 func TestSigv4EmptyStringHash(t *testing.T) {

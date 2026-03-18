@@ -115,6 +115,18 @@ func WithScope(scope string) Option {
 	}
 }
 
+func WithAudience(audience string) Option {
+	return func(o *options) {
+		o.audience = audience
+	}
+}
+
+func WithResource(resource string) Option {
+	return func(o *options) {
+		o.resource = resource
+	}
+}
+
 func WithAdditionalProps(props iceberg.Properties) Option {
 	return func(o *options) {
 		o.additionalProps = props
@@ -144,6 +156,8 @@ type options struct {
 	prefix            string
 	authUri           *url.URL
 	scope             string
+	audience          string
+	resource          string
 	transport         http.RoundTripper
 	headers           map[string]string
 
