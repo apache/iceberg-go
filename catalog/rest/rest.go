@@ -44,12 +44,15 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/clientcredentials"
 )
 
 var _ catalog.Catalog = (*Catalog)(nil)
 
 const (
 	pageSizeKey contextKey = "page_size"
+	skipOAuth   contextKey = "skip_oauth"
 
 	defaultPageSize = 20
 
@@ -169,6 +172,7 @@ type configResponse struct {
 type sessionTransport struct {
 	http.RoundTripper
 
+	authManager    AuthManager
 	defaultHeaders http.Header
 	signer         v4.HTTPSigner
 	cfg            aws.Config
@@ -189,6 +193,14 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		for _, hdr := range v {
 			r.Header.Add(k, hdr)
 		}
+	}
+
+	if s.authManager != nil && r.Context().Value(skipOAuth) == nil {
+		k, v, err := s.authManager.AuthHeader()
+		if err != nil {
+			return nil, err
+		}
+		r.Header.Set(k, v)
 	}
 
 	if s.signer != nil {
@@ -490,19 +502,53 @@ func NewCatalog(ctx context.Context, name, uri string, opts ...Option) (*Catalog
 }
 
 // setupOAuthManager creates an Oauth2AuthManager based on the provided options.
-// The allows users to set their token, credential, or just get the defaults if no auth manager is set.
-func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) *Oauth2AuthManager {
-	authURI := opts.authUri
-	if authURI == nil {
-		authURI = r.baseURI.JoinPath("oauth/tokens")
+// It uses golang.org/x/oauth2 for token management, caching, and thread-safe refresh.
+func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) AuthManager {
+	// If a static token is provided, use it directly.
+	if opts.oauthToken != "" {
+		return &Oauth2AuthManager{
+			tokenSource: oauth2.StaticTokenSource(&oauth2.Token{
+				AccessToken: opts.oauthToken,
+				TokenType:   "Bearer",
+			}),
+		}
 	}
 
+	// If no credential, no auth needed.
+	if opts.credential == "" {
+		return nil
+	}
+
+	authURL := opts.authUri
+	if authURL == nil {
+		authURL = r.baseURI.JoinPath("oauth/tokens")
+	}
+
+	clientID, clientSecret, found := strings.Cut(opts.credential, ":")
+	if !found {
+		clientID = ""
+		clientSecret = opts.credential
+	}
+
+	cfg := &clientcredentials.Config{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		TokenURL:     authURL.String(),
+		AuthStyle:    oauth2.AuthStyleInParams,
+	}
+
+	scope := "catalog"
+	if opts.scope != "" {
+		scope = opts.scope
+	}
+	cfg.Scopes = []string{scope}
+
+	// Add skip oauth so we don't get in cycles trying to refresh the token
+	ctx := context.WithValue(context.Background(), skipOAuth, true)
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, cl)
+
 	return &Oauth2AuthManager{
-		Token:      opts.oauthToken,
-		Credential: opts.credential,
-		AuthURI:    authURI,
-		Scope:      opts.scope,
-		Client:     cl,
+		tokenSource: cfg.TokenSource(ctx),
 	}
 }
 
@@ -526,13 +572,16 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 }
 
 func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Client, error) {
-	session := &sessionTransport{
-		defaultHeaders: http.Header{},
-	}
+	var baseTransport http.RoundTripper
 	if opts.transport != nil {
-		session.RoundTripper = opts.transport
+		baseTransport = opts.transport
 	} else {
-		session.RoundTripper = &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: opts.tlsConfig}
+		baseTransport = &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: opts.tlsConfig}
+	}
+
+	session := &sessionTransport{
+		RoundTripper:   baseTransport,
+		defaultHeaders: http.Header{},
 	}
 	cl := &http.Client{Transport: session}
 
@@ -551,11 +600,7 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	}
 
 	if opts.authManager != nil {
-		k, v, err := opts.authManager.AuthHeader()
-		if err != nil {
-			return nil, err
-		}
-		session.defaultHeaders.Set(k, v)
+		session.authManager = opts.authManager
 	}
 
 	if opts.enableSigv4 {

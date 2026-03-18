@@ -101,8 +101,7 @@ func (r *RestCatalogSuite) TestToken200() {
 		r.Equal(values.Get("client_secret"), "secret")
 		r.Equal(values.Get("scope"), scope)
 
-		w.WriteHeader(http.StatusOK)
-
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token":      TestToken,
 			"token_type":        "Bearer",
@@ -135,8 +134,7 @@ func (r *RestCatalogSuite) TestLoadRegisteredCatalog() {
 		r.Equal(values.Get("client_secret"), "secret")
 		r.Equal(values.Get("scope"), "catalog")
 
-		w.WriteHeader(http.StatusOK)
-
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token":      TestToken,
 			"token_type":        "Bearer",
@@ -162,6 +160,7 @@ func (r *RestCatalogSuite) TestToken400() {
 
 		r.Equal(req.Header.Get("Content-Type"), "application/x-www-form-urlencoded")
 
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 
 		json.NewEncoder(w).Encode(map[string]any{
@@ -191,8 +190,7 @@ func (r *RestCatalogSuite) TestToken200AuthUrl() {
 		r.Equal(values.Get("client_secret"), "secret")
 		r.Equal(values.Get("scope"), "catalog")
 
-		w.WriteHeader(http.StatusOK)
-
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token":      TestToken,
 			"token_type":        "Bearer",
@@ -219,6 +217,7 @@ func (r *RestCatalogSuite) TestToken401() {
 
 		r.Equal(req.Header.Get("Content-Type"), "application/x-www-form-urlencoded")
 
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 
 		json.NewEncoder(w).Encode(map[string]any{
@@ -242,8 +241,7 @@ func (r *RestCatalogSuite) TestTokenContentTypeDuplicated() {
 		values := req.Header.Values("Content-Type")
 		r.Equal([]string{"application/x-www-form-urlencoded"}, values)
 
-		w.WriteHeader(http.StatusOK)
-
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token":      TestToken,
 			"token_type":        "Bearer",
@@ -307,8 +305,7 @@ func (r *RestCatalogSuite) TestWithHeadersOnOAuthRoute() {
 			r.Equal(v, req.Header.Get(k))
 		}
 
-		w.WriteHeader(http.StatusOK)
-
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token":      TestToken,
 			"token_type":        "Bearer",
@@ -339,8 +336,7 @@ func (r *RestCatalogSuite) TestWithHeadersOnAuthURLRoute() {
 			r.Equal(v, req.Header.Get(k))
 		}
 
-		w.WriteHeader(http.StatusOK)
-
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token":      TestToken,
 			"token_type":        "Bearer",
@@ -418,8 +414,7 @@ func (r *RestCatalogSuite) TestListTablesPrefixed200() {
 		r.Equal(values.Get("client_secret"), "secret")
 		r.Equal(values.Get("scope"), "catalog")
 
-		w.WriteHeader(http.StatusOK)
-
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token":      TestToken,
 			"token_type":        "Bearer",
@@ -2752,6 +2747,7 @@ func (r *RestCatalogSuite) TestCreateTableStaged() {
 	var lastCommitBody map[string]any
 
 	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token": TestToken, "token_type": "Bearer", "expires_in": 3600,
 		})
@@ -2876,6 +2872,7 @@ func (r *RestCatalogSuite) TestCreateTableNotStaged() {
 	var commitCalled bool
 
 	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token": TestToken, "token_type": "Bearer", "expires_in": 3600,
 		})
@@ -2918,6 +2915,7 @@ func (r *RestCatalogSuite) TestCommitTableErrCommitStateUnknown() {
 	var statusCode int
 
 	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token": TestToken, "token_type": "Bearer", "expires_in": 3600,
 		})
@@ -2962,6 +2960,7 @@ func (r *RestCatalogSuite) TestUpdateTableErrCommitStateUnknown() {
 	var statusCode int
 
 	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token": TestToken, "token_type": "Bearer", "expires_in": 3600,
 		})
