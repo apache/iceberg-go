@@ -957,6 +957,80 @@ func (t *TableWritingTestSuite) TestAddDataFiles() {
 	t.Equal("1", staged.CurrentSnapshot().Summary.Properties["added-data-files"])
 }
 
+func (t *TableWritingTestSuite) TestAddDataFilesAutoNameMapping() {
+	for _, tc := range []struct {
+		name      string
+		opts      []table.WriteOption
+		expectSet bool
+	}{
+		{"default", nil, true},
+		{"disabled", []table.WriteOption{table.WithoutAutoNameMapping()}, false},
+	} {
+		t.Run(tc.name, func() {
+			ident := table.Identifier{"default", fmt.Sprintf("add_data_files_name_mapping_%s_v%d", tc.name, t.formatVersion)}
+			tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+			_, hasMapping := tbl.Properties()[table.DefaultNameMappingKey]
+			t.False(hasMapping, "freshly created table should have no name mapping")
+
+			filePath := fmt.Sprintf("%s/%s/test.parquet", t.location, ident[1])
+			t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, t.arrTbl)
+			df := mustDataFile(t.T(), *iceberg.UnpartitionedSpec, filePath, nil, 1, mustFileSize(t.T(), filePath))
+
+			tx := tbl.NewTransaction()
+			t.Require().NoError(tx.AddDataFiles(t.ctx, []iceberg.DataFile{df}, nil, tc.opts...))
+
+			staged, err := tx.StagedTable()
+			t.Require().NoError(err)
+			_, hasMapping = staged.Properties()[table.DefaultNameMappingKey]
+			t.Equal(tc.expectSet, hasMapping)
+		})
+	}
+}
+
+func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFilesAutoNameMapping() {
+	for _, tc := range []struct {
+		name      string
+		opts      []table.WriteOption
+		expectSet bool
+	}{
+		{"default", nil, true},
+		{"disabled", []table.WriteOption{table.WithoutAutoNameMapping()}, false},
+	} {
+		t.Run(tc.name, func() {
+			ident := table.Identifier{"default", fmt.Sprintf("replace_data_files_name_mapping_%s_v%d", tc.name, t.formatVersion)}
+			tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+			filePath := fmt.Sprintf("%s/%s/data.parquet", t.location, ident[1])
+			t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, t.arrTbl)
+			df := mustDataFile(t.T(), *iceberg.UnpartitionedSpec, filePath, nil, 1, mustFileSize(t.T(), filePath))
+
+			// Seed the table without setting a name mapping.
+			tx := tbl.NewTransaction()
+			t.Require().NoError(tx.AddDataFiles(t.ctx, []iceberg.DataFile{df}, nil, table.WithoutAutoNameMapping()))
+			tbl, err := tx.Commit(t.ctx)
+			t.Require().NoError(err)
+
+			_, hasMapping := tbl.Properties()[table.DefaultNameMappingKey]
+			t.False(hasMapping, "setup: table should have no name mapping")
+
+			replacementPath := fmt.Sprintf("%s/%s/replacement.parquet", t.location, ident[1])
+			t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), replacementPath, t.arrTbl)
+
+			deleteFile := mustDataFile(t.T(), *iceberg.UnpartitionedSpec, filePath, nil, 1, mustFileSize(t.T(), filePath))
+			addFile := mustDataFile(t.T(), *iceberg.UnpartitionedSpec, replacementPath, nil, 1, mustFileSize(t.T(), replacementPath))
+
+			tx = tbl.NewTransaction()
+			t.Require().NoError(tx.ReplaceDataFilesWithDataFiles(t.ctx, []iceberg.DataFile{deleteFile}, []iceberg.DataFile{addFile}, nil, tc.opts...))
+
+			staged, err := tx.StagedTable()
+			t.Require().NoError(err)
+			_, hasMapping = staged.Properties()[table.DefaultNameMappingKey]
+			t.Equal(tc.expectSet, hasMapping)
+		})
+	}
+}
+
 func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFiles() {
 	ident := table.Identifier{"default", "replace_data_files_with_datafiles_v" + strconv.Itoa(t.formatVersion)}
 	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
