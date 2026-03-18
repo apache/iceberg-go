@@ -70,6 +70,11 @@ func WriteRecords(ctx context.Context, tbl *Table,
 	records iter.Seq2[arrow.RecordBatch, error],
 	opts ...WriteRecordOption,
 ) iter.Seq2[iceberg.DataFile, error] {
+	if err := checkArrowSchemaCompat(tbl.Schema(), schema, false); err != nil {
+		return internal.SingleErrorIter[iceberg.DataFile](
+			fmt.Errorf("arrow schema is not compatible with the table schema: %w", err))
+	}
+
 	cfg := writeRecordConfig{}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -83,11 +88,6 @@ func WriteRecords(ctx context.Context, tbl *Table,
 	writeFS, ok := fs.(iceio.WriteFileIO)
 	if !ok {
 		return internal.SingleErrorIter[iceberg.DataFile](fmt.Errorf("%w: filesystem does not support writing", iceberg.ErrNotImplemented))
-	}
-
-	if err := checkArrowSchemaCompat(tbl.Schema(), schema, false); err != nil {
-		return internal.SingleErrorIter[iceberg.DataFile](
-			fmt.Errorf("arrow schema is not compatible with the table schema: %w", err))
 	}
 
 	meta, err := MetadataBuilderFromBase(tbl.metadata, tbl.metadataLocation)
