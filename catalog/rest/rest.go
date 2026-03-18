@@ -49,7 +49,8 @@ import (
 var _ catalog.Catalog = (*Catalog)(nil)
 
 const (
-	pageSizeKey contextKey = "page_size"
+	pageSizeKey  contextKey = "page_size"
+	authRetryKey contextKey = "auth_retry"
 
 	defaultPageSize = 20
 
@@ -58,6 +59,8 @@ const (
 	keyMetadataLocation  = "metadata_location"
 	keyOauthCredential   = "credential"
 	keyScope             = "scope"
+	keyAudience          = "audience"
+	keyResource          = "resource"
 
 	authorizationHeader = "Authorization"
 	bearerPrefix        = "Bearer"
@@ -170,6 +173,7 @@ type sessionTransport struct {
 	http.RoundTripper
 
 	defaultHeaders http.Header
+	authManager    AuthManager
 	signer         v4.HTTPSigner
 	cfg            aws.Config
 	service        string
@@ -179,16 +183,40 @@ type sessionTransport struct {
 // from https://pkg.go.dev/github.com/aws/aws-sdk-go-v2/aws/signer/v4#Signer.SignHTTP
 const emptyStringHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
-func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+// applyHeaders sets the default headers and auth header on the request.
+// It is called at the start of every RoundTrip (including retries).
+func (s *sessionTransport) applyHeaders(r *http.Request) error {
 	for k, v := range s.defaultHeaders {
 		// Skip Content-Type if it's already set in the request
 		// to avoid duplicate headers (e.g., when using PostForm)
 		if http.CanonicalHeaderKey(k) == "Content-Type" && r.Header.Get("Content-Type") != "" {
 			continue
 		}
-		for _, hdr := range v {
+		// Use Set+Add instead of just Add so that retries overwrite
+		// headers from the previous attempt rather than appending
+		// duplicates. Header values always have at least one element.
+		r.Header.Set(k, v[0])
+		for _, hdr := range v[1:] {
 			r.Header.Add(k, hdr)
 		}
+	}
+
+	// Set auth header per-request so expired tokens are refreshed
+	// proactively rather than after a failed request.
+	if s.authManager != nil {
+		k, v, err := authHeader(s.authManager, r.Context())
+		if err != nil {
+			return err
+		}
+		r.Header.Set(k, v)
+	}
+
+	return nil
+}
+
+func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if err := s.applyHeaders(r); err != nil {
+		return nil, err
 	}
 
 	if s.signer != nil {
@@ -226,7 +254,55 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	}
 
-	return s.RoundTripper.RoundTrip(r)
+	resp, err := s.RoundTripper.RoundTrip(r)
+	if err != nil {
+		return resp, err
+	}
+
+	// If we got an auth failure and the auth manager supports refresh,
+	// force a refresh and retry the request once. We call RoundTrip
+	// (which re-applies auth headers and re-signs for SigV4) rather
+	// than calling the inner transport directly. The context value
+	// prevents infinite retries and is safe for concurrent use.
+	if r.Context().Value(authRetryKey) == nil && isAuthFailure(resp.StatusCode) {
+		if refresher, ok := s.authManager.(AuthRefresher); ok {
+			// If the request had a body, verify we can replay it
+			// before committing to the retry. Without GetBody the
+			// consumed body can't be rewound, so we'd silently send
+			// an empty body on retry.
+			if r.Body != nil && r.GetBody == nil {
+				return resp, err
+			}
+
+			if refreshErr := refresher.RefreshAuth(r.Context()); refreshErr == nil {
+				// Drain and close the original response.
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+
+				// Reset the request body for retry.
+				if r.GetBody != nil {
+					r.Body, _ = r.GetBody()
+				}
+
+				// Mark this request as a retry so we don't loop.
+				// Recursive RoundTrip re-applies auth and re-signs.
+				retryCtx := context.WithValue(r.Context(), authRetryKey, true)
+				resp, err = s.RoundTrip(r.WithContext(retryCtx))
+			}
+		}
+	}
+
+	return resp, err
+}
+
+// authHeader calls AuthHeaderCtx if the manager supports it, falling
+// back to the context-less AuthHeader otherwise.
+func authHeader(m AuthManager, ctx context.Context) (string, string, error) {
+	if ctxAuth, ok := m.(AuthHeaderContext); ok {
+		return ctxAuth.AuthHeaderCtx(ctx)
+	}
+
+	return m.AuthHeader()
 }
 
 func do[T any](ctx context.Context, method string, baseURI *url.URL, path []string, cl *http.Client, override map[int]error, allowNoContent bool) (ret T, err error) {
@@ -401,6 +477,10 @@ func fromProps(props iceberg.Properties, o *options) {
 			o.credential = v
 		case keyScope:
 			o.scope = v
+		case keyAudience:
+			o.audience = v
+		case keyResource:
+			o.resource = v
 		case keyPrefix:
 			o.prefix = v
 		case keyTlsSkipVerify:
@@ -491,10 +571,20 @@ func NewCatalog(ctx context.Context, name, uri string, opts ...Option) (*Catalog
 
 // setupOAuthManager creates an Oauth2AuthManager based on the provided options.
 // The allows users to set their token, credential, or just get the defaults if no auth manager is set.
-func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) *Oauth2AuthManager {
+// It receives the base transport (not the session transport) so that token
+// requests don't loop back through the auth header injection in RoundTrip.
+func setupOAuthManager(r *Catalog, baseTransport http.RoundTripper, opts *options) *Oauth2AuthManager {
 	authURI := opts.authUri
 	if authURI == nil {
 		authURI = r.baseURI.JoinPath("oauth/tokens")
+	}
+
+	var headers http.Header
+	if len(opts.headers) > 0 {
+		headers = http.Header{}
+		for k, v := range opts.headers {
+			headers.Set(k, v)
+		}
 	}
 
 	return &Oauth2AuthManager{
@@ -502,7 +592,10 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) *Oauth2AuthMa
 		Credential: opts.credential,
 		AuthURI:    authURI,
 		Scope:      opts.scope,
-		Client:     cl,
+		Audience:   opts.audience,
+		Resource:   opts.resource,
+		Headers:    headers,
+		Client:     &http.Client{Transport: baseTransport},
 	}
 }
 
@@ -538,7 +631,7 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 
 	// If the user does not set an AuthManager, we can construct an OAuth2AuthManager based off their options.
 	if opts.authManager == nil {
-		opts.authManager = setupOAuthManager(r, cl, opts)
+		opts.authManager = setupOAuthManager(r, session.RoundTripper, opts)
 	}
 
 	session.defaultHeaders.Set("X-Client-Version", icebergRestSpecVersion)
@@ -550,13 +643,8 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		session.defaultHeaders.Set(k, v)
 	}
 
-	if opts.authManager != nil {
-		k, v, err := opts.authManager.AuthHeader()
-		if err != nil {
-			return nil, err
-		}
-		session.defaultHeaders.Set(k, v)
-	}
+	// Store the auth manager so it can refresh tokens on expiry.
+	session.authManager = opts.authManager
 
 	if opts.enableSigv4 {
 		cfg := opts.awsConfig
