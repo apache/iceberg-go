@@ -511,6 +511,41 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 	return setToAdd, nil
 }
 
+// WriteOption is an option for methods that operate on pre-built DataFile objects.
+type WriteOption func(*dataFileCfg)
+
+type dataFileCfg struct {
+	skipAutoNameMapping bool
+}
+
+// WithoutAutoNameMapping disables the automatic setting of the schema name
+// mapping in table properties. By default, methods like [Transaction.AddDataFiles]
+// and [Transaction.ReplaceDataFilesWithDataFiles] will set the name mapping if
+// one does not already exist. This option is useful when working with catalogs
+// (such as Databricks Unity Catalog) that reject the name mapping property.
+func WithoutAutoNameMapping() WriteOption {
+	return func(cfg *dataFileCfg) {
+		cfg.skipAutoNameMapping = true
+	}
+}
+
+// ensureNameMapping sets the schema name mapping in table properties if one
+// does not already exist. This is extracted as a helper so it can be called
+// from any method that accepts WriteOption.
+func (t *Transaction) ensureNameMapping() error {
+	if t.meta.NameMapping() == nil {
+		nameMapping := t.meta.CurrentSchema().NameMapping()
+		mappingJson, err := json.Marshal(nameMapping)
+		if err != nil {
+			return err
+		}
+
+		return t.SetProperties(iceberg.Properties{DefaultNameMappingKey: string(mappingJson)})
+	}
+
+	return nil
+}
+
 // AddDataFiles adds pre-built DataFiles to the table without scanning them from storage.
 // This is useful for clients who have already constructed DataFile objects with metadata,
 // avoiding the need to read files to extract schema and statistics.
@@ -518,16 +553,32 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 // Unlike AddFiles, this method does not read files from storage. It validates only metadata
 // that can be checked without opening files (for example spec-id and partition field IDs).
 //
+// By default this method automatically sets the schema name mapping in table
+// properties if one does not already exist. Pass [WithoutAutoNameMapping] to
+// disable this behavior, for example when working with catalogs that reject
+// the name mapping property.
+//
 // Callers are responsible for ensuring each DataFile is valid and consistent with the table.
 // Supplying incorrect DataFile metadata can produce an invalid snapshot and break reads.
-func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.DataFile, snapshotProps iceberg.Properties) error {
+func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption) error {
 	if len(dataFiles) == 0 {
 		return nil
+	}
+
+	var cfg dataFileCfg
+	for _, o := range opts {
+		o(&cfg)
 	}
 
 	setToAdd, err := t.validateDataFilesToAdd(dataFiles, "AddDataFiles")
 	if err != nil {
 		return err
+	}
+
+	if !cfg.skipAutoNameMapping {
+		if err := t.ensureNameMapping(); err != nil {
+			return err
+		}
 	}
 
 	fs, err := t.tbl.fsF(ctx)
@@ -549,18 +600,6 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 
 		if len(referenced) > 0 {
 			return fmt.Errorf("cannot add files that are already referenced by table, files: %v", referenced)
-		}
-	}
-
-	if t.meta.NameMapping() == nil {
-		nameMapping := t.meta.CurrentSchema().NameMapping()
-		mappingJson, err := json.Marshal(nameMapping)
-		if err != nil {
-			return err
-		}
-		err = t.SetProperties(iceberg.Properties{DefaultNameMappingKey: string(mappingJson)})
-		if err != nil {
-			return err
 		}
 	}
 
@@ -587,6 +626,11 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 // This method does not open files. It validates only metadata that can be checked
 // without reading file contents.
 //
+// By default this method automatically sets the schema name mapping in table
+// properties if one does not already exist. Pass [WithoutAutoNameMapping] to
+// disable this behavior, for example when working with catalogs that reject
+// the name mapping property.
+//
 // Callers are responsible for ensuring each DataFile is valid and consistent with the table.
 // Supplying incorrect DataFile metadata can produce an invalid snapshot and break reads.
 //
@@ -594,13 +638,18 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 //   - Files are written via a separate I/O path and metadata is already known
 //   - Avoiding file scanning improves performance or reliability
 //   - Working with storage systems where immediate file reads may be unreliable
-func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesToDelete, filesToAdd []iceberg.DataFile, snapshotProps iceberg.Properties) error {
+func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesToDelete, filesToAdd []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption) error {
 	if len(filesToDelete) == 0 {
 		if len(filesToAdd) > 0 {
-			return t.AddDataFiles(ctx, filesToAdd, snapshotProps)
+			return t.AddDataFiles(ctx, filesToAdd, snapshotProps, opts...)
 		}
 
 		return nil
+	}
+
+	var cfg dataFileCfg
+	for _, o := range opts {
+		o(&cfg)
 	}
 
 	setToAdd, err := t.validateDataFilesToAdd(filesToAdd, "ReplaceDataFilesWithDataFiles")
@@ -654,14 +703,8 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 		return errors.New("cannot delete files that do not belong to the table")
 	}
 
-	if t.meta.NameMapping() == nil {
-		nameMapping := t.meta.CurrentSchema().NameMapping()
-		mappingJson, err := json.Marshal(nameMapping)
-		if err != nil {
-			return err
-		}
-		err = t.SetProperties(iceberg.Properties{DefaultNameMappingKey: string(mappingJson)})
-		if err != nil {
+	if !cfg.skipAutoNameMapping {
+		if err := t.ensureNameMapping(); err != nil {
 			return err
 		}
 	}
