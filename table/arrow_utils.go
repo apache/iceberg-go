@@ -1232,8 +1232,13 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 				return
 			}
 
+			pathToIDSchema := currentSchema
+			if fileHasIDs := must(VisitArrowSchema(arrSchema, hasIDs{})); fileHasIDs {
+				pathToIDSchema = must(ArrowSchemaToIceberg(arrSchema, false, nil))
+			}
+
 			statistics := format.DataFileStatsFromMeta(rdr.Metadata(), must(computeStatsPlan(currentSchema, meta.props)),
-				must(format.PathToIDMapping(currentSchema)))
+				must(format.PathToIDMapping(pathToIDSchema)))
 
 			partitionValues := make(map[int]any)
 			if !currentSpec.Equals(*iceberg.UnpartitionedSpec) {
