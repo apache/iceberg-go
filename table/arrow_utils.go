@@ -1373,21 +1373,19 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 
 			arrSchema := must(rdr.Schema())
 
-			if hasIDs := must(VisitArrowSchema(arrSchema, hasIDs{})); hasIDs {
-				yield(nil, fmt.Errorf("%w: cannot add file %s because it has field-ids. add-files only supports the addition of files without field_ids",
-					iceberg.ErrNotImplemented, filePath))
-
-				return
-			}
-
 			if err := checkArrowSchemaCompat(currentSchema, arrSchema, false); err != nil {
 				yield(nil, err)
 
 				return
 			}
 
+			pathToIDSchema := currentSchema
+			if fileHasIDs := must(VisitArrowSchema(arrSchema, hasIDs{})); fileHasIDs {
+				pathToIDSchema = must(ArrowSchemaToIceberg(arrSchema, false, nil))
+			}
+
 			statistics := format.DataFileStatsFromMeta(rdr.Metadata(), must(computeStatsPlan(currentSchema, meta.props)),
-				must(format.PathToIDMapping(currentSchema)))
+				must(format.PathToIDMapping(pathToIDSchema)))
 
 			partitionValues := make(map[int]any)
 			if !currentSpec.Equals(*iceberg.UnpartitionedSpec) {

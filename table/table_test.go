@@ -374,6 +374,14 @@ func (t *TableWritingTestSuite) writeParquet(fio iceio.WriteFileIO, filePath str
 		nil, pqarrow.DefaultWriterProps()))
 }
 
+func (t *TableWritingTestSuite) writeParquetWithStoredSchema(fio iceio.WriteFileIO, filePath string, arrTbl arrow.Table) {
+	fo, err := fio.Create(filePath)
+	t.Require().NoError(err)
+
+	t.Require().NoError(pqarrow.WriteTable(arrTbl, fo, arrTbl.NumRows(),
+		nil, pqarrow.NewArrowWriterProperties(pqarrow.WithStoreSchema())))
+}
+
 func (t *TableWritingTestSuite) createTable(identifier table.Identifier, formatVersion int, spec iceberg.PartitionSpec, sc *iceberg.Schema) *table.Table {
 	meta, err := table.NewMetadata(sc, &spec, table.UnsortedSortOrder,
 		t.location, iceberg.Properties{table.PropertyFormatVersion: strconv.Itoa(formatVersion)})
@@ -462,8 +470,7 @@ func (t *TableWritingTestSuite) TestAddFilesUnpartitionedHasFieldIDs() {
 	ident := table.Identifier{"default", "unpartitioned_table_with_ids_v" + strconv.Itoa(t.formatVersion)}
 	tbl := t.createTable(ident, t.formatVersion,
 		*iceberg.UnpartitionedSpec, t.tableSchema)
-
-	t.NotNil(tbl)
+	t.Require().NotNil(tbl)
 
 	files := make([]string, 0)
 	for i := range 5 {
@@ -473,9 +480,91 @@ func (t *TableWritingTestSuite) TestAddFilesUnpartitionedHasFieldIDs() {
 	}
 
 	tx := tbl.NewTransaction()
-	err := tx.AddFiles(t.ctx, files, nil, false)
-	t.Error(err)
-	t.ErrorIs(err, iceberg.ErrNotImplemented)
+	t.Require().NoError(tx.AddFiles(t.ctx, files, nil, false))
+
+	stagedTbl, err := tx.StagedTable()
+	t.Require().NoError(err)
+	t.NotNil(stagedTbl.NameMapping())
+
+	scan, err := tx.Scan()
+	t.Require().NoError(err)
+
+	contents, err := scan.ToArrowTable(context.Background())
+	t.Require().NoError(err)
+	defer contents.Release()
+
+	t.EqualValues(5, contents.NumRows())
+}
+
+func (t *TableWritingTestSuite) TestAddFilesFieldIDsWithDifferentNames() {
+	ident := table.Identifier{"default", "unpartitioned_table_ids_diff_names_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion,
+		*iceberg.UnpartitionedSpec, t.tableSchema)
+	t.Require().NotNil(tbl)
+
+	renamedSchema := arrow.NewSchema([]arrow.Field{
+		{
+			Name: "alpha", Type: arrow.FixedWidthTypes.Boolean,
+			Metadata: arrow.MetadataFrom(map[string]string{"PARQUET:field_id": "1"}),
+		},
+		{
+			Name: "beta", Type: arrow.BinaryTypes.String,
+			Metadata: arrow.MetadataFrom(map[string]string{"PARQUET:field_id": "2"}),
+		},
+		{
+			Name: "gamma", Type: arrow.PrimitiveTypes.Int32,
+			Metadata: arrow.MetadataFrom(map[string]string{"PARQUET:field_id": "3"}),
+		},
+		{
+			Name: "delta", Type: arrow.PrimitiveTypes.Date32,
+			Metadata: arrow.MetadataFrom(map[string]string{"PARQUET:field_id": "4"}),
+		},
+	}, nil)
+
+	renamedTbl, err := array.TableFromJSON(memory.DefaultAllocator, renamedSchema, []string{
+		`[{"alpha": true, "beta": "bar_string", "gamma": 123, "delta": "2024-03-07"}]`,
+	})
+	t.Require().NoError(err)
+	defer renamedTbl.Release()
+
+	files := make([]string, 0, 5)
+	for i := range 5 {
+		filePath := fmt.Sprintf("%s/unpartitioned_ids_diff_names/test-%d.parquet", t.location, i)
+		t.writeParquetWithStoredSchema(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, renamedTbl)
+		files = append(files, filePath)
+	}
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddFiles(t.ctx, files, nil, false))
+
+	stagedTbl, err := tx.StagedTable()
+	t.Require().NoError(err)
+	t.NotNil(stagedTbl.NameMapping())
+
+	scan, err := tx.Scan()
+	t.Require().NoError(err)
+
+	contents, err := scan.ToArrowTable(context.Background())
+	t.Require().NoError(err)
+	defer contents.Release()
+
+	t.EqualValues(5, contents.NumRows())
+
+	expectedSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "foo", Type: arrow.FixedWidthTypes.Boolean, Nullable: true},
+		{Name: "bar", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "baz", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "qux", Type: arrow.PrimitiveTypes.Date32, Nullable: true},
+	}, nil)
+	t.Truef(expectedSchema.Equal(contents.Schema()),
+		"expected table schema names, got: %s", contents.Schema())
+
+	for i := range 5 {
+		t.Equal(true, contents.Column(0).Data().Chunk(i).(*array.Boolean).Value(0))
+		t.Equal("bar_string", contents.Column(1).Data().Chunk(i).(*array.String).Value(0))
+		t.Equal(int32(123), contents.Column(2).Data().Chunk(i).(*array.Int32).Value(0))
+		t.Equal(arrow.Date32(19789), contents.Column(3).Data().Chunk(i).(*array.Date32).Value(0))
+	}
 }
 
 func (t *TableWritingTestSuite) TestAddFilesFailsSchemaMismatch() {
