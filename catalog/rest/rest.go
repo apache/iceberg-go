@@ -38,6 +38,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -685,22 +686,28 @@ func checkValidNamespace(ident table.Identifier) error {
 	return nil
 }
 
-func (r *Catalog) tableFromResponse(_ context.Context, identifier []string, metadata table.Metadata, loc string, config iceberg.Properties) (*table.Table, error) {
-	refresher := &vendedCredentialRefresher{
-		mu:         semaphore.NewWeighted(1),
-		identifier: identifier,
-		location:   loc,
-		props:      config,
-		fetchCreds: func(ctx context.Context, ident []string) (iceberg.Properties, error) {
-			return r.fetchTableCreds(ctx, ident, loc)
-		},
+func (r *Catalog) tableFromResponse(_ context.Context, identifier []string, metadata table.Metadata, loc string, config iceberg.Properties, credsVended bool) (*table.Table, error) {
+	var fsF func(context.Context) (iceio.IO, error)
+	if credsVended {
+		refresher := &vendedCredentialRefresher{
+			mu:         semaphore.NewWeighted(1),
+			identifier: identifier,
+			location:   loc,
+			props:      config,
+			fetchCreds: func(ctx context.Context, ident []string) (iceberg.Properties, error) {
+				return r.fetchTableCreds(ctx, ident, loc)
+			},
+		}
+		fsF = refresher.loadFS
+	} else {
+		fsF = iceio.LoadFSFunc(config, loc)
 	}
 
 	return table.New(
 		identifier,
 		metadata,
 		loc,
-		refresher.loadFS,
+		fsF,
 		r,
 	), nil
 }
@@ -831,9 +838,10 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
 	maps.Copy(config, ret.Config)
+	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, credsVended)
 }
 
 // commitStagedCreate performs the second phase of a staged table
@@ -943,9 +951,10 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
 	maps.Copy(config, ret.Config)
+	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, credsVended)
 }
 
 func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*table.Table, error) {
@@ -963,9 +972,10 @@ func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
 	maps.Copy(config, ret.Config)
+	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, credsVended)
 }
 
 func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
@@ -1000,7 +1010,7 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
 
-	return r.tableFromResponse(ctx, ident, ret.Metadata, ret.MetadataLoc, config)
+	return r.tableFromResponse(ctx, ident, ret.Metadata, ret.MetadataLoc, config, false)
 }
 
 func (r *Catalog) DropTable(ctx context.Context, identifier table.Identifier) error {
