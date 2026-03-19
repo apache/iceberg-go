@@ -48,7 +48,10 @@ import (
 	"golang.org/x/oauth2/clientcredentials"
 )
 
-var _ catalog.Catalog = (*Catalog)(nil)
+var (
+	_ catalog.Catalog              = (*Catalog)(nil)
+	_ catalog.TransactionalCatalog = (*Catalog)(nil)
+)
 
 const (
 	pageSizeKey contextKey = "page_size"
@@ -883,6 +886,69 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 	}
 
 	return ret.Metadata, ret.MetadataLoc, nil
+}
+
+// CommitTransaction atomically commits changes to multiple tables in a
+// single request. It implements [catalog.TransactionalCatalog].
+//
+// The server applies all changes or none (all-or-nothing). On success
+// (204 No Content) the method returns nil. Callers must LoadTable
+// individually to obtain updated metadata.
+func (r *Catalog) CommitTransaction(ctx context.Context, commits []table.TableCommit) error {
+	if len(commits) == 0 {
+		return catalog.ErrEmptyCommitList
+	}
+
+	type tableChange struct {
+		Identifier   identifier          `json:"identifier"`
+		Requirements []table.Requirement `json:"requirements"`
+		Updates      []table.Update      `json:"updates"`
+	}
+
+	type payload struct {
+		TableChanges []tableChange `json:"table-changes"`
+	}
+
+	changes := make([]tableChange, len(commits))
+	for i, c := range commits {
+		if len(c.Identifier) == 0 {
+			return catalog.ErrMissingIdentifier
+		}
+
+		reqs := c.Requirements
+		if reqs == nil {
+			reqs = []table.Requirement{}
+		}
+		updates := c.Updates
+		if updates == nil {
+			updates = []table.Update{}
+		}
+
+		changes[i] = tableChange{
+			Identifier: identifier{
+				Namespace: catalog.NamespaceFromIdent(c.Identifier),
+				Name:      catalog.TableNameFromIdent(c.Identifier),
+			},
+			Requirements: reqs,
+			Updates:      updates,
+		}
+	}
+
+	_, err := doPostAllowNoContent[payload, struct{}](
+		ctx, r.baseURI, []string{"transactions", "commit"},
+		payload{TableChanges: changes}, r.cl,
+		map[int]error{
+			http.StatusNotFound:            catalog.ErrNoSuchTable,
+			http.StatusConflict:            ErrCommitFailed,
+			http.StatusInternalServerError: ErrCommitStateUnknown,
+			http.StatusBadGateway:          ErrCommitStateUnknown,
+			http.StatusServiceUnavailable:  ErrCommitStateUnknown,
+			http.StatusGatewayTimeout:      ErrCommitStateUnknown,
+		},
+		true,
+	)
+
+	return err
 }
 
 func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier, metadataLoc string) (*table.Table, error) {

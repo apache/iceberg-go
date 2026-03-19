@@ -3000,3 +3000,155 @@ func (r *RestCatalogSuite) TestUpdateTableErrCommitStateUnknown() {
 		})
 	}
 }
+
+func (r *RestCatalogSuite) TestCommitTransactionSuccess() {
+	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": TestToken, "token_type": "Bearer", "expires_in": 3600,
+		})
+	})
+
+	var receivedBody map[string]any
+	r.mux.HandleFunc("/v1/transactions/commit", func(w http.ResponseWriter, req *http.Request) {
+		r.Equal(http.MethodPost, req.Method)
+		r.NoError(json.NewDecoder(req.Body).Decode(&receivedBody))
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithCredential(TestCreds))
+	r.Require().NoError(err)
+
+	// Verify the interface is satisfied when accessed through catalog.Catalog.
+	var catIface catalog.Catalog = cat
+	_, ok := catIface.(catalog.TransactionalCatalog)
+	r.Require().True(ok, "REST catalog must implement TransactionalCatalog")
+
+	err = cat.CommitTransaction(context.Background(), []table.TableCommit{
+		{
+			Identifier:   table.Identifier{"db", "t1"},
+			Requirements: []table.Requirement{},
+			Updates:      []table.Update{},
+		},
+		{
+			Identifier:   table.Identifier{"db", "t2"},
+			Requirements: []table.Requirement{},
+			Updates:      []table.Update{},
+		},
+	})
+	r.Require().NoError(err)
+
+	// Verify request body structure
+	r.Contains(receivedBody, "table-changes")
+	changes, ok := receivedBody["table-changes"].([]any)
+	r.True(ok)
+	r.Len(changes, 2)
+
+	first := changes[0].(map[string]any)
+	ident := first["identifier"].(map[string]any)
+	r.Equal("t1", ident["name"])
+
+	ns := ident["namespace"].([]any)
+	r.Len(ns, 1)
+	r.Equal("db", ns[0])
+}
+
+func (r *RestCatalogSuite) TestCommitTransactionEmptyList() {
+	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": TestToken, "token_type": "Bearer", "expires_in": 3600,
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithCredential(TestCreds))
+	r.Require().NoError(err)
+
+	err = cat.CommitTransaction(context.Background(), []table.TableCommit{})
+	r.ErrorIs(err, catalog.ErrEmptyCommitList)
+}
+
+func (r *RestCatalogSuite) TestCommitTransactionMissingIdentifier() {
+	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": TestToken, "token_type": "Bearer", "expires_in": 3600,
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithCredential(TestCreds))
+	r.Require().NoError(err)
+
+	err = cat.CommitTransaction(context.Background(), []table.TableCommit{
+		{Identifier: nil, Requirements: []table.Requirement{}, Updates: []table.Update{}},
+	})
+	r.ErrorIs(err, catalog.ErrMissingIdentifier)
+}
+
+func (r *RestCatalogSuite) TestCommitTransactionConflict() {
+	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": TestToken, "token_type": "Bearer", "expires_in": 3600,
+		})
+	})
+
+	r.mux.HandleFunc("/v1/transactions/commit", func(w http.ResponseWriter, req *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "Conflict", "type": "CommitFailedException", "code": 409,
+			},
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithCredential(TestCreds))
+	r.Require().NoError(err)
+
+	err = cat.CommitTransaction(context.Background(), []table.TableCommit{
+		{Identifier: table.Identifier{"db", "t1"}, Requirements: []table.Requirement{}, Updates: []table.Update{}},
+	})
+	r.ErrorIs(err, rest.ErrCommitFailed)
+}
+
+func (r *RestCatalogSuite) TestCommitTransactionErrCommitStateUnknown() {
+	var statusCode int
+
+	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": TestToken, "token_type": "Bearer", "expires_in": 3600,
+		})
+	})
+
+	r.mux.HandleFunc("/v1/transactions/commit", func(w http.ResponseWriter, req *http.Request) {
+		w.WriteHeader(statusCode)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": http.StatusText(statusCode),
+				"type":    "ServerException",
+				"code":    statusCode,
+			},
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithCredential(TestCreds))
+	r.Require().NoError(err)
+
+	for _, code := range []int{
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout,
+	} {
+		statusCode = code
+		r.Run(strconv.Itoa(code), func() {
+			err := cat.CommitTransaction(context.Background(), []table.TableCommit{
+				{Identifier: table.Identifier{"db", "t1"}, Requirements: []table.Requirement{}, Updates: []table.Update{}},
+			})
+			r.Require().Error(err)
+			r.ErrorIs(err, rest.ErrCommitStateUnknown,
+				"%d should return ErrCommitStateUnknown, got: %v", code, err)
+		})
+	}
+}
