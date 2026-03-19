@@ -25,6 +25,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
@@ -45,8 +46,8 @@ func TestWriteRecords(t *testing.T) {
 }
 
 func (s *WriteRecordsTestSuite) SetupTest() {
-	s.ctx = context.Background()
-	s.mem = memory.NewCheckedAllocator(memory.NewGoAllocator())
+	s.mem = memory.NewCheckedAllocator(memory.DefaultAllocator)
+	s.ctx = compute.WithAllocator(context.Background(), s.mem)
 }
 
 func (s *WriteRecordsTestSuite) TearDownTest() {
