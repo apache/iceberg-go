@@ -83,6 +83,51 @@ func icebergTypeToHiveType(typ iceberg.Type) string {
 	}
 }
 
+// Generic Hive SerDe and input/output format used for Iceberg views (not Iceberg table storage handler).
+// See HiveOperationsBase.storageDescriptor(..., false) in Java.
+const (
+	hiveViewInputFormat  = "org.apache.hadoop.mapred.FileInputFormat"
+	hiveViewOutputFormat = "org.apache.hadoop.mapred.FileOutputFormat"
+	hiveViewSerDe        = "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe"
+)
+
+// constructHiveViewTable builds an HMS Table for an Iceberg view. The table type is VIRTUAL_VIEW,
+// parameters include table_type=ICEBERG_VIEW and metadata_location; StorageDescriptor uses
+// generic Hive SerDe (not the Iceberg storage handler). ViewOriginalText and ViewExpandedText
+// are set to viewSQL.
+func constructHiveViewTable(dbName, viewName, location, metadataLocation string, schema *iceberg.Schema, viewSQL string, props map[string]string) *hive_metastore.Table {
+	parameters := make(map[string]string)
+	parameters[TableTypeKey] = TableTypeIcebergView
+	parameters[MetadataLocationKey] = metadataLocation
+	parameters[ExternalKey] = "TRUE"
+	for k, v := range props {
+		if v != "" {
+			parameters[k] = v
+		}
+	}
+
+	// Ref: https://github.com/apache/iceberg/blob/11dbe2f091edd4ac492f210c878d22386ec9d605/hive-metastore/src/main/java/org/apache/iceberg/hive/HiveOperationsBase.java#L174-L178
+	tbl := &hive_metastore.Table{
+		TableName:        viewName,
+		DbName:           dbName,
+		TableType:        TableTypeVirtualView,
+		ViewOriginalText: viewSQL,
+		ViewExpandedText: viewSQL,
+		Parameters:       parameters,
+		Sd: &hive_metastore.StorageDescriptor{
+			Cols:         schemaToHiveColumns(schema),
+			Location:     location,
+			InputFormat:  hiveViewInputFormat,
+			OutputFormat: hiveViewOutputFormat,
+			SerdeInfo: &hive_metastore.SerDeInfo{
+				SerializationLib: hiveViewSerDe,
+			},
+		},
+	}
+
+	return tbl
+}
+
 func constructHiveTable(dbName, tableName, location, metadataLocation string, schema *iceberg.Schema, props map[string]string) *hive_metastore.Table {
 	parameters := make(map[string]string)
 
