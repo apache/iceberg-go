@@ -27,9 +27,12 @@ package table_test
 // Only AddFiles() was missing the call.
 //
 // Fix: change line 780 in transaction.go from:
-//   updater := t.updateSnapshot(fs, snapshotProps, OpAppend).fastAppend()
+//
+//	updater := t.updateSnapshot(fs, snapshotProps, OpAppend).fastAppend()
+//
 // to:
-//   updater := t.appendSnapshotProducer(fs, snapshotProps)
+//
+//	updater := t.appendSnapshotProducer(fs, snapshotProps)
 
 import (
 	"context"
@@ -62,7 +65,9 @@ func (c *mergeCatalog) CommitTable(_ context.Context, _ table.Identifier, _ []ta
 	if err != nil {
 		return nil, "", err
 	}
+
 	c.meta = meta
+
 	return meta, "", nil
 }
 
@@ -88,17 +93,20 @@ func TestAddFilesRespectsMergeEnabled(t *testing.T) {
 	writeParquet := func(path string) {
 		bldr := array.NewInt32Builder(memory.DefaultAllocator)
 		defer bldr.Release()
+
 		bldr.AppendValues([]int32{1}, nil)
 		col := bldr.NewArray()
 		defer col.Release()
 
-		rec := array.NewRecord(arrowSchema, []arrow.Array{col}, 1)
+		rec := array.NewRecordBatch(arrowSchema, []arrow.Array{col}, 1)
 		defer rec.Release()
-		arrTbl := array.NewTableFromRecords(arrowSchema, []arrow.Record{rec})
+
+		arrTbl := array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{rec})
 		defer arrTbl.Release()
 
 		fo, err := fs.Create(path)
 		require.NoError(t, err)
+
 		require.NoError(t, pqarrow.WriteTable(arrTbl, fo, arrTbl.NumRows(),
 			nil, pqarrow.DefaultWriterProps()))
 	}
@@ -133,6 +141,7 @@ func TestAddFilesRespectsMergeEnabled(t *testing.T) {
 		txn := tbl.NewTransaction()
 		require.NoError(t, txn.AddFiles(ctx, []string{filePath}, nil, false),
 			"AddFiles commit %d failed", i+1)
+
 		tbl, err = txn.Commit(ctx)
 		require.NoError(t, err, "Commit %d failed", i+1)
 	}
