@@ -777,7 +777,7 @@ func (t *Transaction) AddFiles(ctx context.Context, files []string, snapshotProp
 		return err
 	}
 
-	updater := t.updateSnapshot(fs, snapshotProps, OpAppend).fastAppend()
+	updater := t.appendSnapshotProducer(fs, snapshotProps)
 
 	dataFiles := filesToDataFiles(ctx, fs, t.meta, slices.Values(files))
 	for df, err := range dataFiles {
