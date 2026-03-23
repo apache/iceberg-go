@@ -202,6 +202,123 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	return c.LoadTable(ctx, identifier)
 }
 
+// CreateView creates a new view in the catalog. It uses the same signature as the REST catalog:
+// identifier, version (with SQL representations), schema, and optional CreateViewOpt for location and properties.
+// Returns the created *view.View, or an error if the namespace is missing, a view/table already exists, or creation fails.
+func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, version *view.Version, schema *iceberg.Schema, opts ...catalog.CreateViewOpt) (*view.View, error) {
+	database, viewName, err := identifierToTableName(identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	cfg := catalog.NewCreateViewCfg()
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	exists, err := c.CheckNamespaceExists(ctx, DatabaseIdentifier(database))
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, database)
+	}
+
+	viewExists, err := c.CheckViewExists(ctx, identifier)
+	if err != nil {
+		return nil, err
+	}
+	if viewExists {
+		return nil, fmt.Errorf("%w: %s.%s", catalog.ErrViewAlreadyExists, database, viewName)
+	}
+
+	tableExists, err := c.CheckTableExists(ctx, identifier)
+	if err != nil {
+		return nil, err
+	}
+	if tableExists {
+		return nil, fmt.Errorf("%w: %s.%s", catalog.ErrTableAlreadyExists, database, viewName)
+	}
+
+	loc := strings.TrimSuffix(cfg.Location, "/")
+	if loc == "" {
+		var err error
+		loc, err = internal.ResolveTableLocation(ctx, "", database, viewName, c.opts.props, c.LoadNamespaceProperties)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	freshSchema, err := iceberg.AssignFreshSchemaIDs(schema, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	viewSQL, err := sqlFromVersion(version)
+	if err != nil {
+		return nil, err
+	}
+
+	defaultNS := catalog.NamespaceFromIdent(identifier)
+	catalogName := "hive"
+
+	// Merge catalog props with view props so io.LoadFS can resolve and view metadata gets user properties.
+	props := make(iceberg.Properties)
+	if c.opts.props != nil {
+		maps.Copy(props, c.opts.props)
+	}
+	if cfg.Properties != nil {
+		maps.Copy(props, cfg.Properties)
+	}
+
+	createdView, err := view.CreateView(ctx, catalogName, identifier, freshSchema, viewSQL, defaultNS, loc, props)
+	if err != nil {
+		return nil, err
+	}
+
+	viewProps := make(map[string]string)
+	if cfg.Properties != nil {
+		for k, v := range cfg.Properties {
+			viewProps[k] = v
+		}
+	}
+
+	hiveTbl := constructHiveViewTable(database, viewName, loc, createdView.MetadataLocation(), freshSchema, viewSQL, viewProps)
+	if err := c.client.CreateTable(ctx, hiveTbl); err != nil {
+		if isAlreadyExistsError(err) {
+			return nil, fmt.Errorf("%w: %s.%s", catalog.ErrViewAlreadyExists, database, viewName)
+		}
+
+		return nil, fmt.Errorf("failed to create view %s.%s: %w", database, viewName, err)
+	}
+
+	return createdView, nil
+}
+
+// sqlFromVersion returns the SQL from the first SQL representation in version, preferring dialect "hive".
+func sqlFromVersion(v *view.Version) (string, error) {
+	if v == nil || len(v.Representations) == 0 {
+		return "", errors.New("view version has no representations")
+	}
+	var fallback string
+	for _, r := range v.Representations {
+		if r.Type != "sql" {
+			continue
+		}
+		if strings.EqualFold(r.Dialect, "hive") {
+			return r.Sql, nil
+		}
+		if fallback == "" {
+			fallback = r.Sql
+		}
+	}
+	if fallback != "" {
+		return fallback, nil
+	}
+
+	return "", errors.New("view version has no SQL representation")
+}
+
 func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) error {
 	database, tableName, err := identifierToTableName(identifier)
 	if err != nil {

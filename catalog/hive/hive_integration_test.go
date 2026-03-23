@@ -29,6 +29,8 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/view"
 	"github.com/stretchr/testify/require"
 )
 
@@ -391,4 +393,149 @@ func TestHiveIntegrationDropViewNoSuchView(t *testing.T) {
 	err = cat.DropView(context.TODO(), TableIdentifier(dbName, "nonexistent_view"))
 	assert.Error(err)
 	assert.True(errors.Is(err, catalog.ErrNoSuchView))
+}
+
+func TestHiveIntegrationCreateView(t *testing.T) {
+	assert := require.New(t)
+
+	cat := createTestCatalog(t)
+	defer cat.Close()
+
+	dbName := fmt.Sprintf("test_db_%d", time.Now().UnixNano())
+	viewName := "test_view"
+
+	err := cat.CreateNamespace(context.TODO(), DatabaseIdentifier(dbName), iceberg.Properties{
+		"location": getTestTableLocation() + "/" + dbName,
+	})
+	assert.NoError(err)
+	defer cat.DropNamespace(context.TODO(), DatabaseIdentifier(dbName))
+
+	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
+	viewSQL := "SELECT 1 AS col"
+	ver, err := view.NewVersionFromSQL(1, 0, viewSQL, table.Identifier{dbName})
+	assert.NoError(err)
+
+	viewLocation := getTestTableLocation() + "/" + dbName + "/" + viewName
+	v, err := cat.CreateView(context.TODO(), TableIdentifier(dbName, viewName), ver, schema,
+		catalog.WithViewLocation(viewLocation),
+	)
+	assert.NoError(err)
+	assert.NotNil(v)
+	defer cat.DropView(context.TODO(), TableIdentifier(dbName, viewName))
+
+	exists, err := cat.CheckViewExists(context.TODO(), TableIdentifier(dbName, viewName))
+	assert.NoError(err)
+	assert.True(exists)
+
+	loaded, err := cat.LoadView(context.TODO(), TableIdentifier(dbName, viewName))
+	assert.NoError(err)
+	assert.NotNil(loaded)
+	assert.True(schema.Equals(loaded.CurrentSchema()))
+	assert.Len(loaded.CurrentVersion().Representations, 1)
+	assert.Equal("sql", loaded.CurrentVersion().Representations[0].Type)
+	assert.Equal(viewSQL, loaded.CurrentVersion().Representations[0].Sql)
+}
+
+func TestHiveIntegrationCreateViewThenDrop(t *testing.T) {
+	assert := require.New(t)
+
+	cat := createTestCatalog(t)
+	defer cat.Close()
+
+	dbName := fmt.Sprintf("test_db_%d", time.Now().UnixNano())
+	viewName := "view_to_drop"
+
+	err := cat.CreateNamespace(context.TODO(), DatabaseIdentifier(dbName), iceberg.Properties{
+		"location": getTestTableLocation() + "/" + dbName,
+	})
+	assert.NoError(err)
+	defer cat.DropNamespace(context.TODO(), DatabaseIdentifier(dbName))
+
+	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true})
+	ver, _ := view.NewVersionFromSQL(1, 0, "SELECT 1 AS id", table.Identifier{dbName})
+
+	viewLocation := getTestTableLocation() + "/" + dbName + "/" + viewName
+	_, err = cat.CreateView(context.TODO(), TableIdentifier(dbName, viewName), ver, schema,
+		catalog.WithViewLocation(viewLocation),
+	)
+	assert.NoError(err)
+
+	exists, err := cat.CheckViewExists(context.TODO(), TableIdentifier(dbName, viewName))
+	assert.NoError(err)
+	assert.True(exists)
+
+	err = cat.DropView(context.TODO(), TableIdentifier(dbName, viewName))
+	assert.NoError(err)
+
+	exists, err = cat.CheckViewExists(context.TODO(), TableIdentifier(dbName, viewName))
+	assert.NoError(err)
+	assert.False(exists)
+
+	_, err = cat.LoadView(context.TODO(), TableIdentifier(dbName, viewName))
+	assert.Error(err)
+	assert.True(errors.Is(err, catalog.ErrNoSuchView))
+}
+
+func TestHiveIntegrationCreateView_TableConflict(t *testing.T) {
+	assert := require.New(t)
+
+	cat := createTestCatalog(t)
+	defer cat.Close()
+
+	dbName := fmt.Sprintf("test_db_%d", time.Now().UnixNano())
+	tableName := "t1"
+
+	err := cat.CreateNamespace(context.TODO(), DatabaseIdentifier(dbName), iceberg.Properties{
+		"location": getTestTableLocation() + "/" + dbName,
+	})
+	assert.NoError(err)
+	defer cat.DropNamespace(context.TODO(), DatabaseIdentifier(dbName))
+
+	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true})
+	tableLocation := getTestTableLocation() + "/" + dbName + "/" + tableName
+	_, err = cat.CreateTable(context.TODO(), TableIdentifier(dbName, tableName), schema,
+		catalog.WithLocation(tableLocation),
+	)
+	assert.NoError(err)
+	defer cat.DropTable(context.TODO(), TableIdentifier(dbName, tableName))
+
+	ver, _ := view.NewVersionFromSQL(1, 0, "SELECT * FROM t1", table.Identifier{dbName})
+	viewLocation := getTestTableLocation() + "/" + dbName + "/" + tableName + "_view"
+	_, err = cat.CreateView(context.TODO(), TableIdentifier(dbName, tableName), ver, schema,
+		catalog.WithViewLocation(viewLocation),
+	)
+	assert.Error(err)
+	assert.True(errors.Is(err, catalog.ErrTableAlreadyExists))
+}
+
+func TestHiveIntegrationCreateView_ViewConflict(t *testing.T) {
+	assert := require.New(t)
+
+	cat := createTestCatalog(t)
+	defer cat.Close()
+
+	dbName := fmt.Sprintf("test_db_%d", time.Now().UnixNano())
+	viewName := "v1"
+
+	err := cat.CreateNamespace(context.TODO(), DatabaseIdentifier(dbName), iceberg.Properties{
+		"location": getTestTableLocation() + "/" + dbName,
+	})
+	assert.NoError(err)
+	defer cat.DropNamespace(context.TODO(), DatabaseIdentifier(dbName))
+
+	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
+	ver, _ := view.NewVersionFromSQL(1, 0, "SELECT 1 AS col", table.Identifier{dbName})
+	viewLocation := getTestTableLocation() + "/" + dbName + "/" + viewName
+
+	_, err = cat.CreateView(context.TODO(), TableIdentifier(dbName, viewName), ver, schema,
+		catalog.WithViewLocation(viewLocation),
+	)
+	assert.NoError(err)
+	defer cat.DropView(context.TODO(), TableIdentifier(dbName, viewName))
+
+	_, err = cat.CreateView(context.TODO(), TableIdentifier(dbName, viewName), ver, schema,
+		catalog.WithViewLocation(viewLocation+"/second"),
+	)
+	assert.Error(err)
+	assert.True(errors.Is(err, catalog.ErrViewAlreadyExists))
 }
