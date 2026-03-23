@@ -427,17 +427,17 @@ func (m *mergeAppendFiles) processManifests(manifests []iceberg.ManifestFile) ([
 type snapshotProducer struct {
 	producerImpl
 
-	commitUuid          uuid.UUID
-	io                  iceio.WriteFileIO
-	txn                 *Transaction
-	op                  Operation
-	snapshotID          int64
-	parentSnapshotID    int64
-	addedFiles          []iceberg.DataFile
-	positionDeleteFiles []iceberg.DataFile
-	manifestCount       atomic.Int32
-	deletedFiles        map[string]iceberg.DataFile
-	snapshotProps       iceberg.Properties
+	commitUuid       uuid.UUID
+	io               iceio.WriteFileIO
+	txn              *Transaction
+	op               Operation
+	snapshotID       int64
+	parentSnapshotID int64
+	addedFiles       []iceberg.DataFile
+	addedDeleteFiles []iceberg.DataFile
+	manifestCount    atomic.Int32
+	deletedFiles     map[string]iceberg.DataFile
+	snapshotProps    iceberg.Properties
 }
 
 func createSnapshotProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties) *snapshotProducer {
@@ -483,8 +483,8 @@ func (sp *snapshotProducer) appendDataFile(df iceberg.DataFile) *snapshotProduce
 	return sp
 }
 
-func (sp *snapshotProducer) appendPositionDeleteFile(df iceberg.DataFile) *snapshotProducer {
-	sp.positionDeleteFiles = append(sp.positionDeleteFiles, df)
+func (sp *snapshotProducer) appendDeleteFile(df iceberg.DataFile) *snapshotProducer {
+	sp.addedDeleteFiles = append(sp.addedDeleteFiles, df)
 
 	return sp
 }
@@ -547,8 +547,8 @@ func (sp *snapshotProducer) manifests() (_ []iceberg.ManifestFile, err error) {
 		g.Go(sp.manifestProducer(iceberg.ManifestContentData, sp.addedFiles, &addedManifests))
 	}
 
-	if len(sp.positionDeleteFiles) > 0 {
-		g.Go(sp.manifestProducer(iceberg.ManifestContentDeletes, sp.positionDeleteFiles, &positionDeleteManifests))
+	if len(sp.addedDeleteFiles) > 0 {
+		g.Go(sp.manifestProducer(iceberg.ManifestContentDeletes, sp.addedDeleteFiles, &positionDeleteManifests))
 	}
 
 	if len(deleted) > 0 {
@@ -668,7 +668,7 @@ func (sp *snapshotProducer) summary(props iceberg.Properties) (Summary, error) {
 			return Summary{}, err
 		}
 	}
-	for _, df := range sp.positionDeleteFiles {
+	for _, df := range sp.addedDeleteFiles {
 		if err = ssc.addFile(df, currentSchema, *partitionSpec); err != nil {
 			return Summary{}, err
 		}
