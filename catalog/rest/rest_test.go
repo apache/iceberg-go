@@ -2955,6 +2955,7 @@ func (r *RestCatalogSuite) TestUpdateTableErrCommitStateUnknown() {
 
 func (r *RestCatalogSuite) TestCommitTransactionSuccess() {
 	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token": TestToken, "token_type": "Bearer", "expires_in": 3600,
 		})
@@ -3007,6 +3008,7 @@ func (r *RestCatalogSuite) TestCommitTransactionSuccess() {
 
 func (r *RestCatalogSuite) TestCommitTransactionEmptyList() {
 	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token": TestToken, "token_type": "Bearer", "expires_in": 3600,
 		})
@@ -3022,6 +3024,7 @@ func (r *RestCatalogSuite) TestCommitTransactionEmptyList() {
 
 func (r *RestCatalogSuite) TestCommitTransactionMissingIdentifier() {
 	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token": TestToken, "token_type": "Bearer", "expires_in": 3600,
 		})
@@ -3039,6 +3042,7 @@ func (r *RestCatalogSuite) TestCommitTransactionMissingIdentifier() {
 
 func (r *RestCatalogSuite) TestCommitTransactionConflict() {
 	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token": TestToken, "token_type": "Bearer", "expires_in": 3600,
 		})
@@ -3067,6 +3071,7 @@ func (r *RestCatalogSuite) TestCommitTransactionErrCommitStateUnknown() {
 	var statusCode int
 
 	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token": TestToken, "token_type": "Bearer", "expires_in": 3600,
 		})
