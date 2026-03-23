@@ -1309,7 +1309,7 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 		if err != nil {
 			return err
 		}
-		updater.appendPositionDeleteFile(f)
+		updater.appendDeleteFile(f)
 	}
 
 	return nil

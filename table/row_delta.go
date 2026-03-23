@@ -149,12 +149,8 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 		producer.appendDataFile(f)
 	}
 
-	// Both equality and position delete files are added via
-	// appendPositionDeleteFile — they share ManifestContentDeletes
-	// in manifests. The DataFile's ContentType() and EqualityFieldIDs()
-	// distinguish them at the manifest entry level.
 	for _, f := range rd.delFiles {
-		producer.appendPositionDeleteFile(f)
+		producer.appendDeleteFile(f)
 	}
 
 	updates, reqs, err := producer.commit()
