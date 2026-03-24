@@ -358,6 +358,101 @@ func (s *RestIntegrationSuite) TestWriteCommitTable() {
 	s.Equal(pqfile, entries[0].DataFile().FilePath())
 }
 
+func (s *RestIntegrationSuite) writeParquetFile(tbl *table.Table, schema *iceberg.Schema, subpath string) string {
+	s.T().Helper()
+
+	arrSchema, err := table.SchemaToArrowSchema(schema, nil, false, false)
+	s.Require().NoError(err)
+
+	arrowTbl, err := array.TableFromJSON(memory.DefaultAllocator, arrSchema,
+		[]string{`[
+		{"foo": "hello", "bar": 1, "baz": true},
+		{"foo": "world", "bar": 2, "baz": false}
+	]`})
+	s.Require().NoError(err)
+	defer arrowTbl.Release()
+
+	pqfile, err := url.JoinPath(tbl.Location(), "data", subpath, "test.parquet")
+	s.Require().NoError(err)
+
+	fw, err := mustFS(s.T(), tbl).(io.WriteFileIO).Create(pqfile)
+	s.Require().NoError(err)
+	s.Require().NoError(pqarrow.WriteTable(arrowTbl, fw, arrowTbl.NumRows(),
+		nil, pqarrow.DefaultWriterProps()))
+
+	return pqfile
+}
+
+func (s *RestIntegrationSuite) TestMultiTableCommit() {
+	s.ensureNamespace()
+
+	const location = "s3://warehouse/iceberg"
+	tbl1Ident := catalog.ToIdentifier(TestNamespaceIdent, "multi-txn-table-1")
+	tbl2Ident := catalog.ToIdentifier(TestNamespaceIdent, "multi-txn-table-2")
+
+	tbl1, err := s.cat.CreateTable(s.ctx, tbl1Ident, tableSchemaSimple,
+		catalog.WithLocation(location+"/multi-txn-1"))
+	s.Require().NoError(err)
+	s.Require().NotNil(tbl1)
+	defer func() {
+		s.Require().NoError(s.cat.DropTable(s.ctx, tbl1Ident))
+	}()
+
+	tbl2, err := s.cat.CreateTable(s.ctx, tbl2Ident, tableSchemaSimple,
+		catalog.WithLocation(location+"/multi-txn-2"))
+	s.Require().NoError(err)
+	s.Require().NotNil(tbl2)
+	defer func() {
+		s.Require().NoError(s.cat.DropTable(s.ctx, tbl2Ident))
+	}()
+
+	// Write a parquet data file for each table.
+	pq1 := s.writeParquetFile(tbl1, tableSchemaSimple, "multi-txn-1")
+	defer mustFS(s.T(), tbl1).Remove(pq1)
+
+	pq2 := s.writeParquetFile(tbl2, tableSchemaSimple, "multi-txn-2")
+	defer mustFS(s.T(), tbl2).Remove(pq2)
+
+	// Build transactions that add data files to each table.
+	tx1 := tbl1.NewTransaction()
+	s.Require().NoError(tx1.AddFiles(s.ctx, []string{pq1}, nil, false))
+
+	tx2 := tbl2.NewTransaction()
+	s.Require().NoError(tx2.AddFiles(s.ctx, []string{pq2}, nil, false))
+
+	// Commit both atomically via MultiTableTransaction.
+	mtx, err := catalog.NewMultiTableTransaction(s.cat)
+	s.Require().NoError(err)
+	s.Require().NoError(mtx.AddTransaction(tx1))
+	s.Require().NoError(mtx.AddTransaction(tx2))
+	s.Require().NoError(mtx.Commit(s.ctx))
+
+	// Reload tables and verify each has one snapshot with the data file.
+	loaded1, err := s.cat.LoadTable(s.ctx, tbl1Ident)
+	s.Require().NoError(err)
+	s.Require().NotNil(loaded1.CurrentSnapshot())
+
+	mf1 := []iceberg.ManifestFile{}
+	for m, err := range loaded1.AllManifests(s.ctx) {
+		s.Require().NoError(err)
+		mf1 = append(mf1, m)
+	}
+	s.Len(mf1, 1)
+	s.EqualValues(1, mf1[0].AddedDataFiles())
+
+	loaded2, err := s.cat.LoadTable(s.ctx, tbl2Ident)
+	s.Require().NoError(err)
+	s.Require().NotNil(loaded2.CurrentSnapshot())
+
+	mf2 := []iceberg.ManifestFile{}
+	for m, err := range loaded2.AllManifests(s.ctx) {
+		s.Require().NoError(err)
+		mf2 = append(mf2, m)
+	}
+	s.Len(mf2, 1)
+	s.EqualValues(1, mf2[0].AddedDataFiles())
+}
+
 func mustFS(t *testing.T, tbl *table.Table) io.IO {
 	r, err := tbl.FS(context.Background())
 	require.NoError(t, err)
