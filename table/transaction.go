@@ -25,7 +25,6 @@ import (
 	"fmt"
 	"iter"
 	"runtime"
-	"slices"
 	"sync"
 	"time"
 
@@ -421,12 +420,12 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 		updater.deleteDataFile(df)
 	}
 
-	dataFiles := filesToDataFiles(ctx, fs, t.meta, slices.Values(filesToAdd))
-	for df, err := range dataFiles {
-		if err != nil {
-			return err
-		}
-		updater.appendDataFile(df)
+	dataFiles, err := filesToDataFiles(ctx, fs, t.meta, filesToAdd, 1)
+	if err != nil {
+		return err
+	}
+	for _, dataFile := range dataFiles {
+		updater.appendDataFile(dataFile)
 	}
 
 	updates, reqs, err := updater.commit()
@@ -728,14 +727,36 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 	return t.apply(updates, reqs)
 }
 
-func (t *Transaction) AddFiles(ctx context.Context, files []string, snapshotProps iceberg.Properties, ignoreDuplicates bool) error {
-	set := make(map[string]string)
-	for _, f := range files {
-		set[f] = f
+type AddFilesOption func(addFilesOp *addFilesOperation)
+
+type addFilesOperation struct {
+	concurrency int
+}
+
+// WithAddFilesConcurrency overwrites the default concurrency for add files operation.
+// Default: runtime.GOMAXPROCS(0)
+func WithAddFilesConcurrency(concurrency int) AddFilesOption {
+	return func(op *addFilesOperation) {
+		if concurrency > 0 {
+			op.concurrency = concurrency
+		}
+	}
+}
+
+func (t *Transaction) AddFiles(ctx context.Context, filePaths []string, snapshotProps iceberg.Properties, ignoreDuplicates bool, opts ...AddFilesOption) error {
+	addFilesOp := addFilesOperation{
+		concurrency: runtime.GOMAXPROCS(0),
+	}
+	for _, apply := range opts {
+		apply(&addFilesOp)
 	}
 
-	if len(set) != len(files) {
-		return errors.New("file paths must be unique for AddFiles")
+	set := make(map[string]struct{}, len(filePaths))
+	for _, filePath := range filePaths {
+		if _, ok := set[filePath]; ok {
+			return errors.New("file paths must be unique for AddFiles")
+		}
+		set[filePath] = struct{}{}
 	}
 
 	if !ignoreDuplicates {
@@ -779,12 +800,12 @@ func (t *Transaction) AddFiles(ctx context.Context, files []string, snapshotProp
 
 	updater := t.updateSnapshot(fs, snapshotProps, OpAppend).fastAppend()
 
-	dataFiles := filesToDataFiles(ctx, fs, t.meta, slices.Values(files))
-	for df, err := range dataFiles {
-		if err != nil {
-			return err
-		}
-		updater.appendDataFile(df)
+	dataFiles, err := filesToDataFiles(ctx, fs, t.meta, filePaths, addFilesOp.concurrency)
+	if err != nil {
+		return err
+	}
+	for _, dataFile := range dataFiles {
+		updater.appendDataFile(dataFile)
 	}
 
 	updates, reqs, err := updater.commit()
