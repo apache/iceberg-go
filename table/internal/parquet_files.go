@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"slices"
 	"strconv"
@@ -237,7 +238,7 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 	case "lzo":
 		codec = compress.Codecs.Lzo
 	default:
-		// warn
+		slog.Warn("unrecognized compression codec, falling back to uncompressed", "codec", compression)
 	}
 
 	return append(writerProps, parquet.WithCompression(codec),
