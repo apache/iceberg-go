@@ -20,6 +20,7 @@ package internal
 import (
 	"bytes"
 	"container/heap"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -525,7 +526,7 @@ func MapExec[T, S any](nWorkers int, slice iter.Seq[T], fn func(T) (S, error)) i
 		nWorkers = runtime.GOMAXPROCS(0)
 	}
 
-	var g errgroup.Group
+	g, ctx := errgroup.WithContext(context.Background())
 	ch := make(chan T, nWorkers)
 	out := make(chan S, nWorkers)
 
@@ -536,7 +537,11 @@ func MapExec[T, S any](nWorkers int, slice iter.Seq[T], fn func(T) (S, error)) i
 				if err != nil {
 					return err
 				}
-				out <- result
+				select {
+				case out <- result:
+				case <-ctx.Done():
+					return context.Cause(ctx)
+				}
 			}
 
 			return nil
@@ -547,7 +552,13 @@ func MapExec[T, S any](nWorkers int, slice iter.Seq[T], fn func(T) (S, error)) i
 	go func() {
 		defer close(out)
 		for v := range slice {
-			ch <- v
+			select {
+			case ch <- v:
+			case <-ctx.Done():
+				close(ch)
+				err = g.Wait()
+				return
+			}
 		}
 		close(ch)
 		err = g.Wait()
