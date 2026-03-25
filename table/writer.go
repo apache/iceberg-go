@@ -49,14 +49,15 @@ func (w WriteTask) GenerateDataFileName(extension string) string {
 }
 
 type defaultDataFileWriter struct {
-	loc        LocationProvider
-	fs         io.WriteFileIO
-	fileSchema *iceberg.Schema
-	fileFormat iceberg.FileFormat
-	format     internal.FileFormat
-	props      iceberg.Properties
-	content    iceberg.ManifestEntryContent
-	meta       *MetadataBuilder
+	loc              LocationProvider
+	fs               io.WriteFileIO
+	fileSchema       *iceberg.Schema
+	fileFormat       iceberg.FileFormat
+	format           internal.FileFormat
+	props            iceberg.Properties
+	content          iceberg.ManifestEntryContent
+	meta             *MetadataBuilder
+	equalityFieldIDs []int
 }
 
 type dataFileWriterOption func(writer *defaultDataFileWriter)
@@ -76,6 +77,12 @@ func withFileSchema(schema *iceberg.Schema) dataFileWriterOption {
 func withContent(content iceberg.ManifestEntryContent) dataFileWriterOption {
 	return func(writer *defaultDataFileWriter) {
 		writer.content = content
+	}
+}
+
+func withEqualityFieldIDs(ids []int) dataFileWriterOption {
+	return func(writer *defaultDataFileWriter) {
+		writer.equalityFieldIDs = ids
 	}
 }
 
@@ -140,12 +147,13 @@ func (w *defaultDataFileWriter) writeFile(ctx context.Context, partitionValues m
 	}
 
 	return w.format.WriteDataFile(ctx, w.fs, partitionValues, internal.WriteFileInfo{
-		FileSchema: w.fileSchema,
-		Content:    w.content,
-		FileName:   filePath,
-		StatsCols:  statsCols,
-		WriteProps: w.format.GetWriteProperties(w.props),
-		Spec:       *currentSpec,
+		FileSchema:       w.fileSchema,
+		Content:          w.content,
+		FileName:         filePath,
+		StatsCols:        statsCols,
+		WriteProps:       w.format.GetWriteProperties(w.props),
+		Spec:             *currentSpec,
+		EqualityFieldIDs: w.equalityFieldIDs,
 	}, batches)
 }
 
@@ -156,6 +164,14 @@ type dataFileWriter interface {
 func newPositionDeleteWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (*defaultDataFileWriter, error) {
 	// Always enforce the file schema to be the Positional Delete Schema by appending the option at the very end
 	return newDataFileWriter(rootLocation, fs, meta, props, append(opts, withFileSchema(iceberg.PositionalDeleteSchema), withContent(iceberg.EntryContentPosDeletes))...)
+}
+
+func newEqualityDeleteWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, deleteSchema *iceberg.Schema, equalityFieldIDs []int, opts ...dataFileWriterOption) (*defaultDataFileWriter, error) {
+	return newDataFileWriter(rootLocation, fs, meta, props,
+		append(opts,
+			withFileSchema(deleteSchema),
+			withContent(iceberg.EntryContentEqDeletes),
+			withEqualityFieldIDs(equalityFieldIDs))...)
 }
 
 type dataFileWriterMaker func(rootLocation string, fs io.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error)

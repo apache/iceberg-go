@@ -197,13 +197,14 @@ type StatsAgg interface {
 }
 
 type DataFileStatistics struct {
-	RecordCount     int64
-	ColSizes        map[int]int64
-	ValueCounts     map[int]int64
-	NullValueCounts map[int]int64
-	NanValueCounts  map[int]int64
-	ColAggs         map[int]StatsAgg
-	SplitOffsets    []int64
+	RecordCount      int64
+	ColSizes         map[int]int64
+	ValueCounts      map[int]int64
+	NullValueCounts  map[int]int64
+	NanValueCounts   map[int]int64
+	ColAggs          map[int]StatsAgg
+	SplitOffsets     []int64
+	EqualityFieldIDs []int
 }
 
 func (d *DataFileStatistics) PartitionValue(field iceberg.PartitionField, sc *iceberg.Schema) any {
@@ -308,6 +309,10 @@ func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.Par
 	bldr.NullValueCounts(d.NullValueCounts)
 	bldr.NaNValueCounts(d.NanValueCounts)
 	bldr.SplitOffsets(d.SplitOffsets)
+
+	if len(d.EqualityFieldIDs) > 0 {
+		bldr.EqualityFieldIDs(d.EqualityFieldIDs)
+	}
 
 	return bldr.Build()
 }
