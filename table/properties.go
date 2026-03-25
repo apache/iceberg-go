@@ -47,6 +47,8 @@ const (
 	ParquetPageRowLimitDefault               = internal.ParquetPageRowLimitDefault
 	ParquetDictSizeBytesKey                  = internal.ParquetDictSizeBytesKey
 	ParquetDictSizeBytesDefault              = internal.ParquetDictSizeBytesDefault
+	ParquetPageVersionKey                    = internal.ParquetPageVersionKey
+	ParquetPageVersionDefault                = internal.ParquetPageVersionDefault
 	ParquetCompressionKey                    = internal.ParquetCompressionKey
 	ParquetCompressionDefault                = internal.ParquetCompressionDefault
 	ParquetCompressionLevelKey               = internal.ParquetCompressionLevelKey

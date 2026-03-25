@@ -528,3 +528,71 @@ func TestWriteDataFileErrOnClose(t *testing.T) {
 	}, []arrow.RecordBatch{rec})
 	require.ErrorContains(t, err, "error on close")
 }
+
+func TestGetWritePropertiesPageVersion(t *testing.T) {
+	tests := []struct {
+		name             string
+		props            iceberg.Properties
+		expectedPageType file.PageType
+	}{
+		{
+			name:             "default is v2",
+			props:            iceberg.Properties{},
+			expectedPageType: file.PageTypeDataPageV2,
+		},
+		{
+			name:             "explicit v2",
+			props:            iceberg.Properties{internal.ParquetPageVersionKey: "2"},
+			expectedPageType: file.PageTypeDataPageV2,
+		},
+		{
+			name:             "explicit v1",
+			props:            iceberg.Properties{internal.ParquetPageVersionKey: "1"},
+			expectedPageType: file.PageTypeDataPage,
+		},
+		{
+			name:             "invalid falls back to v2",
+			props:            iceberg.Properties{internal.ParquetPageVersionKey: "invalid"},
+			expectedPageType: file.PageTypeDataPageV2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			defer mem.AssertSize(t, 0)
+
+			format := internal.GetFileFormat(iceberg.ParquetFile)
+			writeProps := format.GetWriteProperties(tt.props).([]parquet.WriterProperty)
+
+			root, err := schema.NewGroupNode("schema", parquet.Repetitions.Required, schema.FieldList{
+				schema.NewInt32Node("col", parquet.Repetitions.Required, -1),
+			}, -1)
+			require.NoError(t, err)
+
+			var buf bytes.Buffer
+			pw := file.NewParquetWriter(&buf, root, file.WithWriterProps(
+				parquet.NewWriterProperties(writeProps...),
+			))
+
+			rgw := pw.AppendRowGroup()
+			cw, _ := rgw.NextColumn()
+			cw.(*file.Int32ColumnChunkWriter).WriteBatch(
+				[]int32{1, 2, 3}, nil, nil,
+			)
+			cw.Close()
+			rgw.Close()
+			pw.Close()
+
+			rdr, err := file.NewParquetReader(bytes.NewReader(buf.Bytes()))
+			require.NoError(t, err)
+			defer rdr.Close()
+
+			pageRdr, err := rdr.RowGroup(0).GetColumnPageReader(0)
+			require.NoError(t, err)
+
+			require.True(t, pageRdr.Next())
+			assert.Equal(t, tt.expectedPageType, pageRdr.Page().Type())
+		})
+	}
+}
