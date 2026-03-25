@@ -557,6 +557,7 @@ func MapExec[T, S any](nWorkers int, slice iter.Seq[T], fn func(T) (S, error)) i
 			case <-ctx.Done():
 				close(ch)
 				err = g.Wait()
+
 				return
 			}
 		}
