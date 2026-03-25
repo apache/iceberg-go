@@ -798,7 +798,7 @@ func (t *Transaction) AddFiles(ctx context.Context, filePaths []string, snapshot
 		return err
 	}
 
-	updater := t.updateSnapshot(fs, snapshotProps, OpAppend).fastAppend()
+	updater := t.appendSnapshotProducer(fs, snapshotProps)
 
 	dataFiles, err := filesToDataFiles(ctx, fs, t.meta, filePaths, addFilesOp.concurrency)
 	if err != nil {
