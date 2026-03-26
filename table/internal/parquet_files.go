@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"slices"
 	"strconv"
@@ -55,6 +56,8 @@ const (
 	ParquetPageRowLimitDefault               = 20000
 	ParquetDictSizeBytesKey                  = "write.parquet.dict-size-bytes"
 	ParquetDictSizeBytesDefault              = 2 * 1024 * 1024 // 2 MB
+	ParquetPageVersionKey                    = "write.parquet.page-version"
+	ParquetPageVersionDefault                = "2"
 	ParquetCompressionKey                    = "write.parquet.compression-codec"
 	ParquetCompressionDefault                = "zstd"
 	ParquetCompressionLevelKey               = "write.parquet.compression-level"
@@ -201,13 +204,26 @@ func (parquetFormat) PrimitiveTypeToPhysicalType(typ iceberg.PrimitiveType) stri
 }
 
 func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
+	pageVersion := props.Get(ParquetPageVersionKey, ParquetPageVersionDefault)
+
+	var dpVersion parquet.DataPageVersion
+	switch pageVersion {
+	case "1":
+		dpVersion = parquet.DataPageV1
+	case "2":
+		dpVersion = parquet.DataPageV2
+	default:
+		slog.Warn("unrecognized data page version, falling back to v2", "version", pageVersion)
+		dpVersion = parquet.DataPageV2
+	}
+
 	writerProps := []parquet.WriterProperty{
 		parquet.WithDictionaryDefault(false),
 		parquet.WithMaxRowGroupLength(int64(props.GetInt(ParquetRowGroupLimitKey,
 			ParquetRowGroupLimitDefault))),
 		parquet.WithDataPageSize(int64(props.GetInt(ParquetPageSizeBytesKey,
 			ParquetPageSizeBytesDefault))),
-		parquet.WithDataPageVersion(parquet.DataPageV2),
+		parquet.WithDataPageVersion(dpVersion),
 		parquet.WithBatchSize(int64(props.GetInt(ParquetPageRowLimitKey,
 			ParquetPageRowLimitDefault))),
 		parquet.WithDictionaryPageSizeLimit(int64(props.GetInt(ParquetDictSizeBytesKey,
