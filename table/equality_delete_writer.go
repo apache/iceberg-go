@@ -30,22 +30,22 @@ import (
 	"github.com/google/uuid"
 )
 
-// EqualityDeleteSchema projects a table schema to only the fields specified
+var ErrEmptyEqualityFieldIDs = errors.New("equality field IDs must not be empty")
+
+// equalityDeleteSchema projects a table schema to only the fields specified
 // by the given field IDs. The resulting schema is suitable for writing
 // equality delete files — it contains only the columns that form the
 // delete key.
-//
-// Returns an error if any of the field IDs are not found in the table schema.
-func EqualityDeleteSchema(tableSchema *iceberg.Schema, fieldIDs []int) (*iceberg.Schema, error) {
+func equalityDeleteSchema(tableSchema *iceberg.Schema, fieldIDs []int) (*iceberg.Schema, error) {
 	if len(fieldIDs) == 0 {
-		return nil, errors.New("equality field IDs must not be empty")
+		return nil, ErrEmptyEqualityFieldIDs
 	}
 
 	fields := make([]iceberg.NestedField, 0, len(fieldIDs))
 	for _, id := range fieldIDs {
 		f, ok := tableSchema.FindFieldByID(id)
 		if !ok {
-			return nil, fmt.Errorf("field ID %d not found in table schema", id)
+			return nil, fmt.Errorf("%w: field ID %d not found in table schema", iceberg.ErrInvalidSchema, id)
 		}
 
 		fields = append(fields, f)
@@ -79,7 +79,7 @@ func (t *Transaction) WriteEqualityDeletes(ctx context.Context, equalityFieldIDs
 			t.meta.formatVersion)
 	}
 
-	deleteSchema, err := EqualityDeleteSchema(t.meta.CurrentSchema(), equalityFieldIDs)
+	deleteSchema, err := equalityDeleteSchema(t.meta.CurrentSchema(), equalityFieldIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +99,11 @@ func (t *Transaction) WriteEqualityDeletes(ctx context.Context, equalityFieldIDs
 		return nil, err
 	}
 
-	writeUUID := uuid.Must(uuid.NewRandom())
+	writeUUID, err := uuid.NewRandom()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate write UUID: %w", err)
+	}
+
 	args := recordWritingArgs{
 		sc:        arrowSc,
 		itr:       records,
@@ -142,7 +146,10 @@ func equalityDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 	}()
 
 	if args.writeUUID == nil {
-		u := uuid.Must(uuid.NewRandom())
+		u, err := uuid.NewRandom()
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate write UUID: %w", err)
+		}
 		args.writeUUID = &u
 	}
 

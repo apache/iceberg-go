@@ -35,62 +35,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestEqualityDeleteSchemaBasic(t *testing.T) {
-	schema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
-		iceberg.NestedField{ID: 3, Name: "ts", Type: iceberg.PrimitiveTypes.TimestampTz, Required: false},
-	)
-
-	delSchema, err := table.EqualityDeleteSchema(schema, []int{1})
-	require.NoError(t, err)
-
-	assert.Equal(t, 1, delSchema.NumFields())
-	f, ok := delSchema.FindFieldByID(1)
-	assert.True(t, ok)
-	assert.Equal(t, "id", f.Name)
-}
-
-func TestEqualityDeleteSchemaMultipleFields(t *testing.T) {
-	schema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
-		iceberg.NestedField{ID: 3, Name: "ts", Type: iceberg.PrimitiveTypes.TimestampTz, Required: false},
-	)
-
-	delSchema, err := table.EqualityDeleteSchema(schema, []int{1, 3})
-	require.NoError(t, err)
-
-	assert.Equal(t, 2, delSchema.NumFields())
-	f1, ok := delSchema.FindFieldByID(1)
-	assert.True(t, ok)
-	assert.Equal(t, "id", f1.Name)
-
-	f3, ok := delSchema.FindFieldByID(3)
-	assert.True(t, ok)
-	assert.Equal(t, "ts", f3.Name)
-}
-
-func TestEqualityDeleteSchemaInvalidFieldID(t *testing.T) {
-	schema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-	)
-
-	_, err := table.EqualityDeleteSchema(schema, []int{999})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "field ID 999 not found")
-}
-
-func TestEqualityDeleteSchemaEmptyFieldIDs(t *testing.T) {
-	schema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-	)
-
-	_, err := table.EqualityDeleteSchema(schema, nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "must not be empty")
-}
-
 func newEqDeleteTestTable(t *testing.T, formatVersion string) *table.Table {
 	t.Helper()
 
@@ -116,14 +60,8 @@ func newEqDeleteTestTable(t *testing.T, formatVersion string) *table.Table {
 	)
 }
 
-func makeEqDeleteRecords(t *testing.T, iceSchema *iceberg.Schema, fieldIDs []int, jsonData string) (func(yield func(arrow.RecordBatch, error) bool), func()) {
+func makeEqDeleteRecords(t *testing.T, arrowSc *arrow.Schema, jsonData string) (func(yield func(arrow.RecordBatch, error) bool), func()) {
 	t.Helper()
-
-	delSchema, err := table.EqualityDeleteSchema(iceSchema, fieldIDs)
-	require.NoError(t, err)
-
-	arrowSc, err := table.SchemaToArrowSchema(delSchema, nil, true, false)
-	require.NoError(t, err)
 
 	rec, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSc, strings.NewReader(jsonData))
 	require.NoError(t, err)
@@ -138,8 +76,13 @@ func makeEqDeleteRecords(t *testing.T, iceSchema *iceberg.Schema, fieldIDs []int
 func TestWriteEqualityDeleteFiles(t *testing.T) {
 	tbl := newEqDeleteTestTable(t, "2")
 
-	records, release := makeEqDeleteRecords(t,
-		tbl.Metadata().CurrentSchema(), []int{1}, `[{"id": 2}, {"id": 4}]`)
+	// Build Arrow schema with just the delete key column
+	delArrowSc, err := table.SchemaToArrowSchema(
+		iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true}),
+		nil, true, false)
+	require.NoError(t, err)
+
+	records, release := makeEqDeleteRecords(t, delArrowSc, `[{"id": 2}, {"id": 4}]`)
 	defer release()
 
 	tx := tbl.NewTransaction()
@@ -162,8 +105,12 @@ func TestWriteEqualityDeleteFiles(t *testing.T) {
 func TestWriteEqualityDeleteFilesParquetContent(t *testing.T) {
 	tbl := newEqDeleteTestTable(t, "2")
 
-	records, release := makeEqDeleteRecords(t,
-		tbl.Metadata().CurrentSchema(), []int{1}, `[{"id": 10}, {"id": 20}, {"id": 30}]`)
+	delArrowSc, err := table.SchemaToArrowSchema(
+		iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true}),
+		nil, true, false)
+	require.NoError(t, err)
+
+	records, release := makeEqDeleteRecords(t, delArrowSc, `[{"id": 10}, {"id": 20}, {"id": 30}]`)
 	defer release()
 
 	tx := tbl.NewTransaction()
@@ -225,7 +172,14 @@ func TestWriteEqualityDeleteFilesMultiColumnKey(t *testing.T) {
 		&rowDeltaCatalog{metadata: meta},
 	)
 
-	records, release := makeEqDeleteRecords(t, iceSchema, []int{1, 2},
+	delArrowSc, err := table.SchemaToArrowSchema(
+		iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+			iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: true},
+		), nil, true, false)
+	require.NoError(t, err)
+
+	records, release := makeEqDeleteRecords(t, delArrowSc,
 		`[{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]`)
 	defer release()
 
@@ -249,6 +203,26 @@ func TestWriteEqualityDeleteFilesRejectsV1Table(t *testing.T) {
 	_, err := tx.WriteEqualityDeletes(t.Context(), []int{1}, records)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "format version >= 2")
+}
+
+func TestWriteEqualityDeleteFilesRejectsEmptyFieldIDs(t *testing.T) {
+	tbl := newEqDeleteTestTable(t, "2")
+
+	records := func(yield func(arrow.RecordBatch, error) bool) {}
+
+	tx := tbl.NewTransaction()
+	_, err := tx.WriteEqualityDeletes(t.Context(), nil, records)
+	require.ErrorIs(t, err, table.ErrEmptyEqualityFieldIDs)
+}
+
+func TestWriteEqualityDeleteFilesRejectsInvalidFieldID(t *testing.T) {
+	tbl := newEqDeleteTestTable(t, "2")
+
+	records := func(yield func(arrow.RecordBatch, error) bool) {}
+
+	tx := tbl.NewTransaction()
+	_, err := tx.WriteEqualityDeletes(t.Context(), []int{999}, records)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 }
 
 func TestWriteEqualityDeleteFilesRejectsPartitionedTable(t *testing.T) {
@@ -277,8 +251,12 @@ func TestWriteEqualityDeleteFilesRejectsPartitionedTable(t *testing.T) {
 		&rowDeltaCatalog{metadata: meta},
 	)
 
-	records, release := makeEqDeleteRecords(t, iceSchema, []int{1},
-		`[{"id": 1}]`)
+	delArrowSc, err := table.SchemaToArrowSchema(
+		iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true}),
+		nil, true, false)
+	require.NoError(t, err)
+
+	records, release := makeEqDeleteRecords(t, delArrowSc, `[{"id": 1}]`)
 	defer release()
 
 	tx := tbl.NewTransaction()
@@ -308,8 +286,12 @@ func TestWriteEqualityDeleteFilesCommitViaRowDelta(t *testing.T) {
 	assertRowCount(t, tbl, 3)
 
 	// Step 2: Write equality delete files and commit via RowDelta
-	records, release := makeEqDeleteRecords(t,
-		tbl.Metadata().CurrentSchema(), []int{1}, `[{"id": 2}]`)
+	delArrowSc, err := table.SchemaToArrowSchema(
+		iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true}),
+		nil, true, false)
+	require.NoError(t, err)
+
+	records, release := makeEqDeleteRecords(t, delArrowSc, `[{"id": 2}]`)
 	defer release()
 
 	tx2 := tbl.NewTransaction()
