@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"log/slog"
 	"slices"
 	"strconv"
 	"strings"
@@ -343,7 +344,7 @@ func (c convertToIceberg) Primitive(dt arrow.DataType) (result iceberg.NestedFie
 			if !c.downcastTimestamp {
 				panic(fmt.Errorf("%w: 'ns' timestamp precision not supported", iceberg.ErrType))
 			}
-			// TODO: log something
+			slog.Warn("downcasting nanosecond timestamp to microsecond, precision loss may occur")
 		}
 
 		if slices.Contains(utcAliases, dt.TimeZone) {
