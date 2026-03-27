@@ -521,12 +521,12 @@ func TruncateUpperBoundBinary(val []byte, trunc int) []byte {
 	return nil
 }
 
-func MapExec[T, S any](nWorkers int, slice iter.Seq[T], fn func(T) (S, error)) iter.Seq2[S, error] {
+func MapExec[T, S any](ctx context.Context, nWorkers int, slice iter.Seq[T], fn func(T) (S, error)) iter.Seq2[S, error] {
 	if nWorkers <= 0 {
 		nWorkers = runtime.GOMAXPROCS(0)
 	}
 
-	g, ctx := errgroup.WithContext(context.Background())
+	g, ctx := errgroup.WithContext(ctx)
 	ch := make(chan T, nWorkers)
 	out := make(chan S, nWorkers)
 
@@ -550,19 +550,19 @@ func MapExec[T, S any](nWorkers int, slice iter.Seq[T], fn func(T) (S, error)) i
 
 	var err error
 	go func() {
-		defer close(out)
+		defer func() {
+			close(ch)
+			err = g.Wait()
+			close(out)
+		}()
+
 		for v := range slice {
 			select {
 			case ch <- v:
 			case <-ctx.Done():
-				close(ch)
-				err = g.Wait()
-
 				return
 			}
 		}
-		close(ch)
-		err = g.Wait()
 	}()
 
 	return func(yield func(S, error) bool) {
