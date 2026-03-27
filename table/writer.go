@@ -210,7 +210,7 @@ func (w *concurrentDataFileWriter) writeFiles(ctx context.Context, rootLocation 
 		}
 	}
 
-	return internal.MapExec(config.EnvConfig.MaxWorkers, tasks, func(t WriteTask) (iceberg.DataFile, error) {
+	return internal.MapExec(ctx, config.EnvConfig.MaxWorkers, tasks, func(t WriteTask) (iceberg.DataFile, error) {
 		return fw.writeFile(ctx, partitionValues, t)
 	})
 }

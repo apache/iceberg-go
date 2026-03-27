@@ -20,6 +20,7 @@ package internal
 import (
 	"bytes"
 	"container/heap"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -520,12 +521,12 @@ func TruncateUpperBoundBinary(val []byte, trunc int) []byte {
 	return nil
 }
 
-func MapExec[T, S any](nWorkers int, slice iter.Seq[T], fn func(T) (S, error)) iter.Seq2[S, error] {
+func MapExec[T, S any](ctx context.Context, nWorkers int, slice iter.Seq[T], fn func(T) (S, error)) iter.Seq2[S, error] {
 	if nWorkers <= 0 {
 		nWorkers = runtime.GOMAXPROCS(0)
 	}
 
-	var g errgroup.Group
+	g, ctx := errgroup.WithContext(ctx)
 	ch := make(chan T, nWorkers)
 	out := make(chan S, nWorkers)
 
@@ -536,7 +537,11 @@ func MapExec[T, S any](nWorkers int, slice iter.Seq[T], fn func(T) (S, error)) i
 				if err != nil {
 					return err
 				}
-				out <- result
+				select {
+				case out <- result:
+				case <-ctx.Done():
+					return context.Cause(ctx)
+				}
 			}
 
 			return nil
@@ -545,12 +550,19 @@ func MapExec[T, S any](nWorkers int, slice iter.Seq[T], fn func(T) (S, error)) i
 
 	var err error
 	go func() {
-		defer close(out)
+		defer func() {
+			close(ch)
+			err = g.Wait()
+			close(out)
+		}()
+
 		for v := range slice {
-			ch <- v
+			select {
+			case ch <- v:
+			case <-ctx.Done():
+				return
+			}
 		}
-		close(ch)
-		err = g.Wait()
 	}()
 
 	return func(yield func(S, error) bool) {

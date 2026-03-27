@@ -18,6 +18,8 @@
 package internal_test
 
 import (
+	"context"
+	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -72,6 +74,26 @@ func TestTruncateUpperBoundBinary(t *testing.T) {
 	assert.Nil(t, internal.TruncateUpperBoundBinary([]byte{0xff, 0xff, 0x00}, 2))
 }
 
+func TestMapExecAllWorkersError(t *testing.T) {
+	errFail := errors.New("worker failed")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for _, err := range internal.MapExec(context.Background(), 2, slices.Values([]int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}), func(i int) (int, error) {
+			return 0, errFail
+		}) {
+			_ = err
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("MapExec deadlocked when all workers returned errors")
+	}
+}
+
 func TestMapExecFinish(t *testing.T) {
 	var (
 		ch = make(chan struct{}, 1)
@@ -82,7 +104,7 @@ func TestMapExecFinish(t *testing.T) {
 
 	go func() {
 		defer close(ch)
-		for _, err := range internal.MapExec(3, slices.Values([]int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}), f) {
+		for _, err := range internal.MapExec(context.Background(), 3, slices.Values([]int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}), f) {
 			assert.NoError(t, err)
 		}
 	}()
