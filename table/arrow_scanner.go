@@ -450,7 +450,7 @@ func (as *arrowScan) processRecords(
 	return err
 }
 
-func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerated[FileScanTask], out chan<- enumeratedRecord, positionalDeletes positionDeletes) (err error) {
+func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerated[FileScanTask], out chan<- enumeratedRecord, positionalDeletes positionDeletes, eqDeleteSets []*equalityDeleteSet) (err error) {
 	defer func() {
 		if err != nil {
 			out <- enumeratedRecord{Task: task, Err: err}
@@ -483,6 +483,15 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 		}
 
 		pipeline = append(pipeline, processPositionalDeletes(ctx, deletes))
+	}
+
+	if len(eqDeleteSets) > 0 {
+		eqFn, eqErr := processEqualityDeletes(ctx, eqDeleteSets)
+		if eqErr != nil {
+			return eqErr
+		}
+
+		pipeline = append(pipeline, eqFn)
 	}
 
 	filterFunc, dropFile, err = as.getRecordFilter(ctx, iceSchema)
@@ -690,7 +699,7 @@ func createIterator(ctx context.Context, numWorkers uint, records <-chan enumera
 	}
 }
 
-func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks []FileScanTask, deletesPerFile perFilePosDeletes) iter.Seq2[arrow.RecordBatch, error] {
+func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks []FileScanTask, deletesPerFile perFilePosDeletes, eqDeleteSets map[int][]*equalityDeleteSet) iter.Seq2[arrow.RecordBatch, error] {
 	extSet := substrait.NewExtensionSet()
 	as.nameMapping = as.metadata.NameMapping()
 
@@ -716,7 +725,8 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 					}
 
 					if err := as.recordsFromTask(ctx, task, records,
-						deletesPerFile[task.Value.File.FilePath()]); err != nil {
+						deletesPerFile[task.Value.File.FilePath()],
+						eqDeleteSets[task.Index]); err != nil {
 						cancel(err)
 
 						return
@@ -763,5 +773,11 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 		return nil, nil, err
 	}
 
-	return resultSchema, as.recordBatchesFromTasksAndDeletes(ctx, tasks, deletesPerFile), nil
+	eqDeleteSets, err := readAllEqualityDeleteFiles(ctx, as.fs,
+		as.metadata.CurrentSchema(), tasks, as.concurrency)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return resultSchema, as.recordBatchesFromTasksAndDeletes(ctx, tasks, deletesPerFile, eqDeleteSets), nil
 }
