@@ -232,6 +232,48 @@ func TestHiveIntegrationCreateAndListTables(t *testing.T) {
 	assert.True(schema.Equals(loadedTable.Schema()))
 }
 
+func TestHiveIntegrationRegisterTable(t *testing.T) {
+	assert := require.New(t)
+
+	cat := createTestCatalog(t)
+	defer cat.Close()
+
+	dbName := fmt.Sprintf("test_db_%d", time.Now().UnixNano())
+	origName := "orig_table"
+	regName := "registered_table"
+
+	err := cat.CreateNamespace(context.TODO(), DatabaseIdentifier(dbName), iceberg.Properties{
+		"location": getTestTableLocation() + "/" + dbName,
+	})
+	assert.NoError(err)
+	defer cat.DropNamespace(context.TODO(), DatabaseIdentifier(dbName))
+
+	schema := iceberg.NewSchemaWithIdentifiers(0, []int{1},
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
+	)
+
+	tableLocation := getTestTableLocation() + "/" + dbName + "/" + origName
+	origTbl, err := cat.CreateTable(context.TODO(), TableIdentifier(dbName, origName), schema,
+		catalog.WithLocation(tableLocation),
+	)
+	assert.NoError(err)
+	metadataLocation := origTbl.MetadataLocation()
+
+	err = cat.DropTable(context.TODO(), TableIdentifier(dbName, origName))
+	assert.NoError(err)
+
+	regTbl, err := cat.RegisterTable(context.TODO(), TableIdentifier(dbName, regName), metadataLocation)
+	assert.NoError(err)
+	assert.NotNil(regTbl)
+	assert.Equal(metadataLocation, regTbl.MetadataLocation())
+	assert.True(schema.Equals(regTbl.Schema()))
+
+	defer func() {
+		assert.NoError(cat.DropTable(context.TODO(), TableIdentifier(dbName, regName)))
+	}()
+}
+
 func TestHiveIntegrationRenameTable(t *testing.T) {
 	assert := require.New(t)
 
