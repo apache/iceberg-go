@@ -119,46 +119,113 @@ func TestTokenAuthenticationPriority(t *testing.T) {
 	})
 }
 
-func TestScope(t *testing.T) {
+func TestOAuthTokenRequestParams(t *testing.T) {
 	t.Parallel()
-	mux := http.NewServeMux()
-	srv := httptest.NewServer(mux)
 
-	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
-			"defaults": map[string]any{}, "overrides": map[string]any{},
+	tests := []struct {
+		name   string
+		opts   []Option
+		expect map[string]string
+		absent []string
+	}{
+		{
+			name: "default scope",
+			expect: map[string]string{
+				"scope": "catalog",
+			},
+			absent: []string{"audience", "resource"},
+		},
+		{
+			name: "custom scope",
+			opts: []Option{WithScope("my_scope")},
+			expect: map[string]string{
+				"scope": "my_scope",
+			},
+			absent: []string{"audience", "resource"},
+		},
+		{
+			name: "audience only",
+			opts: []Option{WithAudience("my-aud")},
+			expect: map[string]string{
+				"scope":    "catalog",
+				"audience": "my-aud",
+			},
+			absent: []string{"resource"},
+		},
+		{
+			name: "resource only",
+			opts: []Option{WithResource("my-res")},
+			expect: map[string]string{
+				"scope":    "catalog",
+				"resource": "my-res",
+			},
+			absent: []string{"audience"},
+		},
+		{
+			name: "audience and resource",
+			opts: []Option{WithAudience("my-aud"), WithResource("my-res")},
+			expect: map[string]string{
+				"scope":    "catalog",
+				"audience": "my-aud",
+				"resource": "my-res",
+			},
+		},
+		{
+			name: "scope, audience and resource",
+			opts: []Option{WithScope("s"), WithAudience("a"), WithResource("r")},
+			expect: map[string]string{
+				"scope":    "s",
+				"audience": "a",
+				"resource": "r",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mux := http.NewServeMux()
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+				err := json.NewEncoder(w).Encode(map[string]any{
+					"defaults": map[string]any{}, "overrides": map[string]any{},
+				})
+				assert.NoError(t, err)
+			})
+
+			mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+				assert.Equal(t, http.MethodPost, req.Method)
+				assert.Equal(t, "application/x-www-form-urlencoded", req.Header.Get("Content-Type"))
+
+				require.NoError(t, req.ParseForm())
+				values := req.PostForm
+				assert.Equal(t, "client_credentials", values.Get("grant_type"))
+				assert.Equal(t, "secret", values.Get("client_secret"))
+
+				for k, v := range tt.expect {
+					assert.Equal(t, v, values.Get(k), "form param %s", k)
+				}
+				for _, k := range tt.absent {
+					assert.Empty(t, values.Get(k), "form param %s should be absent", k)
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				err := json.NewEncoder(w).Encode(map[string]any{
+					"access_token": "tok",
+					"token_type":   "Bearer",
+					"expires_in":   86400,
+				})
+				assert.NoError(t, err)
+			})
+
+			opts := append([]Option{WithCredential("secret")}, tt.opts...)
+			cat, err := NewCatalog(context.Background(), "rest", srv.URL, opts...)
+			require.NoError(t, err)
+			assert.NotNil(t, cat)
 		})
-	})
-
-	mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
-		assert.Equal(t, http.MethodPost, req.Method)
-
-		assert.Equal(t, req.Header.Get("Content-Type"), "application/x-www-form-urlencoded")
-
-		require.NoError(t, req.ParseForm())
-		values := req.PostForm
-		assert.Equal(t, "client_credentials", values.Get("grant_type"))
-		assert.Equal(t, "secret", values.Get("client_secret"))
-		assert.Equal(t, "my_scope", values.Get("scope"))
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"access_token":      "some_jwt_token",
-			"token_type":        "Bearer",
-			"expires_in":        86400,
-			"issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
-		})
-	})
-
-	cat, err := NewCatalog(
-		context.Background(),
-		"rest",
-		srv.URL,
-		WithCredential("secret"),
-		WithScope("my_scope"),
-	)
-	require.NoError(t, err)
-	assert.NotNil(t, cat)
+	}
 }
 
 func TestAuthHeader(t *testing.T) {

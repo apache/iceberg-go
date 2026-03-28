@@ -65,6 +65,8 @@ const (
 	keyMetadataLocation  = "metadata_location"
 	keyOauthCredential   = "credential"
 	keyScope             = "scope"
+	keyAudience          = "audience"
+	keyResource          = "resource"
 
 	authorizationHeader = "Authorization"
 	bearerPrefix        = "Bearer"
@@ -427,6 +429,10 @@ func fromProps(props iceberg.Properties, o *options) {
 			o.credential = v
 		case keyScope:
 			o.scope = v
+		case keyAudience:
+			o.audience = v
+		case keyResource:
+			o.resource = v
 		case keyPrefix:
 			o.prefix = v
 		case keyTlsSkipVerify:
@@ -556,6 +562,16 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) AuthManager {
 		scope = opts.scope
 	}
 	cfg.Scopes = []string{scope}
+
+	if opts.audience != "" || opts.resource != "" {
+		cfg.EndpointParams = url.Values{}
+		if opts.audience != "" {
+			cfg.EndpointParams.Set("audience", opts.audience)
+		}
+		if opts.resource != "" {
+			cfg.EndpointParams.Set("resource", opts.resource)
+		}
+	}
 
 	// Add skip oauth so we don't get in cycles trying to refresh the token
 	ctx := context.WithValue(context.Background(), skipOAuth, true)
