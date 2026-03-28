@@ -20,7 +20,6 @@ package table
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"iter"
 	"math"
@@ -93,10 +92,12 @@ func (p partitionRecord) Size() int            { return len(p) }
 func (p partitionRecord) Get(pos int) any      { return p[pos] }
 func (p partitionRecord) Set(pos int, val any) { p[pos] = val }
 
-// manifestEntries holds the data and positional delete entries read from manifests.
+// manifestEntries holds the data, positional delete, and equality delete
+// entries read from manifests.
 type manifestEntries struct {
 	dataEntries             []iceberg.ManifestEntry
 	positionalDeleteEntries []iceberg.ManifestEntry
+	equalityDeleteEntries   []iceberg.ManifestEntry
 	mu                      sync.Mutex
 }
 
@@ -104,6 +105,7 @@ func newManifestEntries() *manifestEntries {
 	return &manifestEntries{
 		dataEntries:             make([]iceberg.ManifestEntry, 0),
 		positionalDeleteEntries: make([]iceberg.ManifestEntry, 0),
+		equalityDeleteEntries:   make([]iceberg.ManifestEntry, 0),
 	}
 }
 
@@ -117,6 +119,12 @@ func (m *manifestEntries) addPositionalDeleteEntry(e iceberg.ManifestEntry) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.positionalDeleteEntries = append(m.positionalDeleteEntries, e)
+}
+
+func (m *manifestEntries) addEqualityDeleteEntry(e iceberg.ManifestEntry) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.equalityDeleteEntries = append(m.equalityDeleteEntries, e)
 }
 
 func newPartitionRecord(partitionData map[int]any, partitionType *iceberg.StructType) partitionRecord {
@@ -338,6 +346,56 @@ func matchDeletesToData(entry iceberg.ManifestEntry, positionalDeletes []iceberg
 	return out, nil
 }
 
+// matchEqualityDeletesToData returns the equality delete files that apply to
+// the given data entry. An equality delete applies when:
+//   - it has a strictly greater sequence number than the data file
+//   - it shares the same partition (for partitioned tables)
+//
+// The "strictly greater" rule ensures that data files committed in the same
+// snapshot as the equality deletes are not affected — this is how RowDelta
+// atomically adds new rows alongside deletes for old rows.
+func matchEqualityDeletesToData(dataEntry iceberg.ManifestEntry, eqDeleteEntries []iceberg.ManifestEntry) []iceberg.DataFile {
+	dataSeqNum := dataEntry.SequenceNum()
+	dataPartition := dataEntry.DataFile().Partition()
+
+	out := make([]iceberg.DataFile, 0)
+	for _, del := range eqDeleteEntries {
+		// Equality deletes only apply to data files with a strictly lower
+		// sequence number.
+		if del.SequenceNum() <= dataSeqNum {
+			continue
+		}
+
+		// For partitioned tables, equality deletes must share the same
+		// partition as the data file. Unpartitioned deletes (nil/empty
+		// partition) apply globally.
+		delPartition := del.DataFile().Partition()
+		if len(delPartition) > 0 && len(dataPartition) > 0 {
+			if !partitionsMatch(dataPartition, delPartition) {
+				continue
+			}
+		}
+
+		out = append(out, del.DataFile())
+	}
+
+	return out
+}
+
+func partitionsMatch(a, b map[int]any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+
+	return true
+}
+
 // fetchPartitionSpecFilteredManifests retrieves the table's current snapshot,
 // fetches its manifest files, and applies partition-spec filters to remove irrelevant manifests.
 func (scan *Scan) fetchPartitionSpecFilteredManifests(ctx context.Context) ([]iceberg.ManifestFile, error) {
@@ -417,7 +475,7 @@ func (scan *Scan) collectManifestEntries(
 				case iceberg.EntryContentPosDeletes:
 					entries.addPositionalDeleteEntry(e)
 				case iceberg.EntryContentEqDeletes:
-					return errors.New("iceberg-go does not yet support equality deletes")
+					entries.addEqualityDeleteEntry(e)
 				default:
 					return fmt.Errorf("%w: unknown DataFileContent type (%s): %s",
 						ErrInvalidMetadata, df.ContentType(), e)
@@ -478,11 +536,15 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 		if err != nil {
 			return nil, err
 		}
+
+		eqDeleteFiles := matchEqualityDeletesToData(e, entries.equalityDeleteEntries)
+
 		results = append(results, FileScanTask{
-			File:        e.DataFile(),
-			DeleteFiles: deleteFiles,
-			Start:       0,
-			Length:      e.DataFile().FileSizeBytes(),
+			File:                e.DataFile(),
+			DeleteFiles:         deleteFiles,
+			EqualityDeleteFiles: eqDeleteFiles,
+			Start:               0,
+			Length:               e.DataFile().FileSizeBytes(),
 		})
 	}
 
@@ -490,9 +552,10 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 }
 
 type FileScanTask struct {
-	File          iceberg.DataFile
-	DeleteFiles   []iceberg.DataFile
-	Start, Length int64
+	File                iceberg.DataFile
+	DeleteFiles         []iceberg.DataFile // positional delete files
+	EqualityDeleteFiles []iceberg.DataFile // equality delete files
+	Start, Length       int64
 }
 
 // ToArrowRecords returns the arrow schema of the expected records and an interator
