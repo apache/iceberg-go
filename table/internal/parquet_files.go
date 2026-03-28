@@ -114,7 +114,8 @@ func (p parquetFormat) createStatsAgg(typ iceberg.PrimitiveType, physicalTypeStr
 	case iceberg.Int32Type, iceberg.DateType:
 		return newStatAgg[int32](typ, truncLen), nil
 
-	case iceberg.Int64Type, iceberg.TimeType, iceberg.TimestampType, iceberg.TimestampTzType:
+	case iceberg.Int64Type, iceberg.TimeType, iceberg.TimestampType, iceberg.TimestampTzType,
+		iceberg.TimestampNsType, iceberg.TimestampTzNsType:
 		// Allow INT32 physical for INT64 logical (promotion)
 		if physicalTypeStr == "INT32" {
 			return newStatAgg[int32](typ, truncLen), nil
@@ -184,9 +185,8 @@ func (parquetFormat) PrimitiveTypeToPhysicalType(typ iceberg.PrimitiveType) stri
 		return "INT32"
 	case iceberg.TimeType:
 		return "INT64"
-	case iceberg.TimestampType:
-		return "INT64"
-	case iceberg.TimestampTzType:
+	case iceberg.TimestampType, iceberg.TimestampTzType,
+		iceberg.TimestampNsType, iceberg.TimestampTzNsType:
 		return "INT64"
 	case iceberg.StringType:
 		return "BYTE_ARRAY"
