@@ -332,6 +332,100 @@ func TestMetricsPrimitiveTypes(t *testing.T) {
 	})
 }
 
+// TestNanosecondTimestampMetrics tests that nanosecond timestamp types (v3)
+// are correctly handled for Parquet stats collection and physical type mapping.
+func TestNanosecondTimestampMetrics(t *testing.T) {
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+
+	tableMeta, err := table.ParseMetadataString(`{
+		"format-version": 3,
+		"location": "s3://bucket/test/location",
+		"last-column-id": 2,
+		"current-schema-id": 0,
+		"next-row-id": 0,
+		"schemas": [
+			{
+				"type": "struct",
+				"schema-id": 0,
+				"fields": [
+					{"id": 1, "name": "ts_ns", "required": false, "type": "timestamp_ns"},
+					{"id": 2, "name": "tstz_ns", "required": false, "type": "timestamptz_ns"}
+				]
+			}
+		],
+		"last-partition-id": 0,
+		"last-updated-ms": -1,
+		"default-spec-id": 0,
+		"default-sort-order-id": 0,
+		"sort-orders": [{"order-id": 0, "fields": []}],
+		"partition-specs": [{"spec-id": 0, "fields": []}],
+		"properties": {}
+	}`)
+	require.NoError(t, err)
+
+	arrowSchema, err := table.SchemaToArrowSchema(tableMeta.Schemas()[0], nil, true, false)
+	require.NoError(t, err)
+
+	// Build records manually using Arrow builders since JSON parsing for
+	// nanosecond timestamps needs explicit int64 values (nanoseconds since epoch).
+	mem := memory.DefaultAllocator
+	bldr := array.NewRecordBuilder(mem, arrowSchema)
+	defer bldr.Release()
+
+	// 2022-01-02T17:30:34.399000000 in nanoseconds since epoch
+	ts1 := time.Date(2022, time.January, 2, 17, 30, 34, 399000000, time.UTC).UnixNano()
+	// 2023-02-04T13:21:04.354000000 in nanoseconds since epoch
+	ts2 := time.Date(2023, time.February, 4, 13, 21, 4, 354000000, time.UTC).UnixNano()
+
+	bldr.Field(0).(*array.TimestampBuilder).Append(arrow.Timestamp(ts1))
+	bldr.Field(1).(*array.TimestampBuilder).Append(arrow.Timestamp(ts1))
+
+	bldr.Field(0).(*array.TimestampBuilder).Append(arrow.Timestamp(ts2))
+	bldr.Field(1).(*array.TimestampBuilder).Append(arrow.Timestamp(ts2))
+
+	rec := bldr.NewRecordBatch()
+	defer rec.Release()
+
+	var buf bytes.Buffer
+	wr, err := pqarrow.NewFileWriter(arrowSchema, &buf,
+		parquet.NewWriterProperties(parquet.WithStats(true)),
+		pqarrow.DefaultWriterProps())
+	require.NoError(t, err)
+
+	require.NoError(t, wr.Write(rec))
+	require.NoError(t, wr.Close())
+
+	rdr, err := file.NewParquetReader(bytes.NewReader(buf.Bytes()))
+	require.NoError(t, err)
+	defer rdr.Close()
+
+	meta := rdr.MetaData()
+
+	mapping, err := format.PathToIDMapping(tableMeta.CurrentSchema())
+	require.NoError(t, err)
+
+	modeFull := internal.MetricsMode{Typ: internal.MetricModeFull}
+	collector := map[int]internal.StatisticsCollector{
+		1: {FieldID: 1, Mode: modeFull, ColName: "ts_ns", IcebergTyp: iceberg.PrimitiveTypes.TimestampNs},
+		2: {FieldID: 2, Mode: modeFull, ColName: "tstz_ns", IcebergTyp: iceberg.PrimitiveTypes.TimestampTzNs},
+	}
+
+	stats := format.DataFileStatsFromMeta(internal.Metadata(meta), collector, mapping)
+	df := stats.ToDataFile(tableMeta.CurrentSchema(), tableMeta.PartitionSpec(), "fake-path.parquet",
+		iceberg.ParquetFile, iceberg.EntryContentData, meta.GetSourceFileSize(), nil)
+
+	assert.Len(t, df.ValueCounts(), 2)
+	assert.Len(t, df.NullValueCounts(), 2)
+
+	assert.Len(t, df.LowerBoundValues(), 2)
+	assertBounds(t, df.LowerBoundValues()[1], iceberg.PrimitiveTypes.TimestampNs, iceberg.TimestampNano(ts1))
+	assertBounds(t, df.LowerBoundValues()[2], iceberg.PrimitiveTypes.TimestampTzNs, iceberg.TimestampNano(ts1))
+
+	assert.Len(t, df.UpperBoundValues(), 2)
+	assertBounds(t, df.UpperBoundValues()[1], iceberg.PrimitiveTypes.TimestampNs, iceberg.TimestampNano(ts2))
+	assertBounds(t, df.UpperBoundValues()[2], iceberg.PrimitiveTypes.TimestampTzNs, iceberg.TimestampNano(ts2))
+}
+
 // TestDecimalPhysicalTypes tests that decimals stored as INT32/INT64 physical types
 // are correctly handled. This is important because Parquet allows decimals with
 // precision <= 9 to be stored as INT32, and precision <= 18 as INT64.
