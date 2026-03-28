@@ -49,8 +49,10 @@ import (
 //	err = mtx.Commit(ctx)
 type MultiTableTransaction struct {
 	cat       TransactionalCatalog
+	loader    Catalog
 	txns      []*table.Transaction
 	idents    []string
+	tableIDs  []table.Identifier
 	committed bool
 }
 
@@ -63,7 +65,7 @@ func NewMultiTableTransaction(cat Catalog) (*MultiTableTransaction, error) {
 		return nil, errors.New("catalog does not support multi-table transactions")
 	}
 
-	return &MultiTableTransaction{cat: tc}, nil
+	return &MultiTableTransaction{cat: tc, loader: cat}, nil
 }
 
 // AddTransaction adds a table transaction to be committed atomically
@@ -91,6 +93,7 @@ func (m *MultiTableTransaction) AddTransaction(tx *table.Transaction) error {
 
 	m.txns = append(m.txns, tx)
 	m.idents = append(m.idents, key)
+	m.tableIDs = append(m.tableIDs, tc.Identifier)
 
 	return nil
 }
@@ -123,7 +126,8 @@ func (m *MultiTableTransaction) Commit(ctx context.Context) error {
 	}
 
 	if err := m.cat.CommitTransaction(ctx, commits); err != nil {
-		return err
+		return fmt.Errorf("commit transaction for tables [%s]: %w",
+			strings.Join(m.idents, ", "), err)
 	}
 
 	m.committed = true
@@ -134,4 +138,32 @@ func (m *MultiTableTransaction) Commit(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// CommitAndReload commits the multi-table transaction atomically and
+// then reloads all affected tables from the catalog. This is a
+// convenience method that combines [MultiTableTransaction.Commit] with
+// individual LoadTable calls, since the multi-table commit endpoint
+// returns 204 No Content and does not include updated metadata.
+//
+// On commit failure, no tables are reloaded and the error is returned.
+// On partial reload failure (commit succeeded but a LoadTable fails),
+// the successfully loaded tables are still returned alongside the error.
+func (m *MultiTableTransaction) CommitAndReload(ctx context.Context) ([]*table.Table, error) {
+	if err := m.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	tables := make([]*table.Table, 0, len(m.tableIDs))
+	for _, ident := range m.tableIDs {
+		tbl, err := m.loader.LoadTable(ctx, ident)
+		if err != nil {
+			return tables, fmt.Errorf("reload table %s after commit: %w",
+				strings.Join(ident, "."), err)
+		}
+
+		tables = append(tables, tbl)
+	}
+
+	return tables, nil
 }
