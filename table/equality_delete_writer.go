@@ -33,25 +33,23 @@ import (
 var ErrEmptyEqualityFieldIDs = errors.New("equality field IDs must not be empty")
 
 // equalityDeleteSchema projects a table schema to only the fields specified
-// by the given field IDs. The resulting schema is suitable for writing
-// equality delete files — it contains only the columns that form the
-// delete key.
+// by the given field IDs, using Schema.Select for proper nested field handling.
 func equalityDeleteSchema(tableSchema *iceberg.Schema, fieldIDs []int) (*iceberg.Schema, error) {
 	if len(fieldIDs) == 0 {
 		return nil, ErrEmptyEqualityFieldIDs
 	}
 
-	fields := make([]iceberg.NestedField, 0, len(fieldIDs))
+	names := make([]string, 0, len(fieldIDs))
 	for _, id := range fieldIDs {
-		f, ok := tableSchema.FindFieldByID(id)
+		name, ok := tableSchema.FindColumnName(id)
 		if !ok {
 			return nil, fmt.Errorf("%w: field ID %d not found in table schema", iceberg.ErrInvalidSchema, id)
 		}
 
-		fields = append(fields, f)
+		names = append(names, name)
 	}
 
-	return iceberg.NewSchema(0, fields...), nil
+	return tableSchema.Select(true, names...)
 }
 
 // WriteEqualityDeletes writes Arrow record batches as equality delete
