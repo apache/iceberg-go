@@ -19,6 +19,7 @@ package catalog_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 
@@ -44,7 +45,7 @@ func (c *exampleCatalog) LoadTable(_ context.Context, id table.Identifier) (*tab
 		return t, nil
 	}
 
-	return nil, fmt.Errorf("table not found")
+	return nil, errors.New("table not found")
 }
 
 func (c *exampleCatalog) ListTables(context.Context, table.Identifier) iter.Seq2[table.Identifier, error] {
