@@ -110,10 +110,11 @@ func FormatFromFileName(fileName string) FileFormat {
 }
 
 type WriteFileInfo struct {
-	FileSchema *iceberg.Schema
-	Spec       iceberg.PartitionSpec
-	FileName   string
-	StatsCols  map[int]StatisticsCollector
-	WriteProps any
-	Content    iceberg.ManifestEntryContent
+	FileSchema       *iceberg.Schema
+	Spec             iceberg.PartitionSpec
+	FileName         string
+	StatsCols        map[int]StatisticsCollector
+	WriteProps       any
+	Content          iceberg.ManifestEntryContent
+	EqualityFieldIDs []int
 }
