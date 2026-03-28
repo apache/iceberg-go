@@ -3115,6 +3115,35 @@ func (r *RestCatalogSuite) TestCommitTransactionConflict() {
 	r.ErrorIs(err, rest.ErrCommitFailed)
 }
 
+func (r *RestCatalogSuite) TestCommitTransactionNotFound() {
+	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": TestToken, "token_type": "Bearer", "expires_in": 3600,
+		})
+	})
+
+	r.mux.HandleFunc("/v1/transactions/commit", func(w http.ResponseWriter, req *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "Table does not exist: db.missing",
+				"type":    "NoSuchTableException",
+				"code":    404,
+			},
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithCredential(TestCreds))
+	r.Require().NoError(err)
+
+	err = cat.CommitTransaction(context.Background(), []table.TableCommit{
+		{Identifier: table.Identifier{"db", "missing"}, Requirements: []table.Requirement{}, Updates: []table.Update{}},
+	})
+	r.ErrorIs(err, catalog.ErrNoSuchTable)
+}
+
 func (r *RestCatalogSuite) TestCommitTransactionErrCommitStateUnknown() {
 	var statusCode int
 
