@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -583,6 +584,140 @@ func TestHiveCreateTableConflictsWithView(t *testing.T) {
 	)
 	assert.Error(err)
 	assert.True(errors.Is(err, catalog.ErrViewAlreadyExists))
+
+	mockClient.AssertExpectations(t)
+}
+
+func TestHiveRegisterTableNoSuchNamespace(t *testing.T) {
+	assert := require.New(t)
+
+	mockClient := &mockHiveClient{}
+	mockClient.On("GetDatabase", mock.Anything, "missing_db").
+		Return(nil, errNoSuchObject).Once()
+
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	_, err := hiveCatalog.RegisterTable(context.TODO(),
+		TableIdentifier("missing_db", "t"),
+		"s3://bucket/metadata/v1.metadata.json",
+	)
+	assert.Error(err)
+	assert.True(errors.Is(err, catalog.ErrNoSuchNamespace))
+
+	mockClient.AssertExpectations(t)
+}
+
+func TestHiveRegisterTableConflictsWithView(t *testing.T) {
+	assert := require.New(t)
+
+	mockClient := &mockHiveClient{}
+	mockClient.On("GetDatabase", mock.Anything, "test_database").
+		Return(&hive_metastore.Database{Name: "test_database"}, nil).Once()
+	mockClient.On("GetTable", mock.Anything, "test_database", "test_table").
+		Return(testIcebergHiveView, nil).Once()
+
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	_, err := hiveCatalog.RegisterTable(context.TODO(),
+		TableIdentifier("test_database", "test_table"),
+		"s3://bucket/metadata/v1.metadata.json",
+	)
+	assert.Error(err)
+	assert.True(errors.Is(err, catalog.ErrViewAlreadyExists))
+
+	mockClient.AssertExpectations(t)
+}
+
+func TestHiveRegisterTableAlreadyExists(t *testing.T) {
+	assert := require.New(t)
+
+	mockClient := &mockHiveClient{}
+	mockClient.On("GetDatabase", mock.Anything, "test_database").
+		Return(&hive_metastore.Database{Name: "test_database"}, nil).Once()
+	mockClient.On("GetTable", mock.Anything, "test_database", "test_table").
+		Return(nil, errNoSuchObject).Once()
+	mockClient.On("GetTable", mock.Anything, "test_database", "test_table").
+		Return(testIcebergHiveTable1, nil).Once()
+
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	_, err := hiveCatalog.RegisterTable(context.TODO(),
+		TableIdentifier("test_database", "test_table"),
+		"s3://bucket/metadata/v1.metadata.json",
+	)
+	assert.Error(err)
+	assert.True(errors.Is(err, catalog.ErrTableAlreadyExists))
+
+	mockClient.AssertExpectations(t)
+}
+
+func TestHiveRegisterTableMetadataNotFound(t *testing.T) {
+	assert := require.New(t)
+
+	mockClient := &mockHiveClient{}
+	mockClient.On("GetDatabase", mock.Anything, "test_database").
+		Return(&hive_metastore.Database{Name: "test_database"}, nil).Once()
+	mockClient.On("GetTable", mock.Anything, "test_database", "new_table").
+		Return(nil, errNoSuchObject).Times(2)
+
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	_, err := hiveCatalog.RegisterTable(context.TODO(),
+		TableIdentifier("test_database", "new_table"),
+		"s3://nonexistent-bucket/metadata/metadata.json",
+	)
+	assert.Error(err)
+	assert.Contains(err.Error(), "failed to read table metadata from s3://nonexistent-bucket/metadata/metadata.json")
+
+	mockClient.AssertNotCalled(t, "CreateTable", mock.Anything, mock.Anything)
+	mockClient.AssertExpectations(t)
+}
+
+func TestHiveRegisterTableSuccess(t *testing.T) {
+	assert := require.New(t)
+
+	metaPath, err := filepath.Abs(filepath.Join("..", "..", "table", "testdata", "TableMetadataV2Valid.json"))
+	assert.NoError(err)
+
+	mockClient := &mockHiveClient{}
+	mockClient.On("GetDatabase", mock.Anything, "test_database").
+		Return(&hive_metastore.Database{Name: "test_database"}, nil).Once()
+	mockClient.On("GetTable", mock.Anything, "test_database", "reg_table").
+		Return(nil, errNoSuchObject).Times(2)
+
+	mockClient.On("CreateTable", mock.Anything, mock.MatchedBy(func(ht *hive_metastore.Table) bool {
+		return ht.DbName == "test_database" && ht.TableName == "reg_table" &&
+			ht.Parameters[MetadataLocationKey] == metaPath &&
+			strings.EqualFold(ht.Parameters[TableTypeKey], TableTypeIceberg)
+	})).Return(nil).Once()
+
+	hiveTblForLoad := &hive_metastore.Table{
+		TableName: "reg_table",
+		DbName:    "test_database",
+		TableType: TableTypeExternalTable,
+		Parameters: map[string]string{
+			TableTypeKey:        TableTypeIceberg,
+			MetadataLocationKey: metaPath,
+		},
+		Sd: &hive_metastore.StorageDescriptor{
+			Location: "s3://bucket/test/location",
+		},
+	}
+
+	mockClient.On("GetTable", mock.Anything, "test_database", "reg_table").
+		Return(hiveTblForLoad, nil).Once()
+
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	// TODO: should we drop table here
+
+	tbl, err := hiveCatalog.RegisterTable(context.TODO(),
+		TableIdentifier("test_database", "reg_table"),
+		metaPath,
+	)
+	assert.NoError(err)
+	assert.NotNil(tbl)
+	assert.Equal(metaPath, tbl.MetadataLocation())
 
 	mockClient.AssertExpectations(t)
 }

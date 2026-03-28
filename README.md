@@ -115,7 +115,7 @@ make lint-install
 | Load Table                  |  X   |  X   |   X    |  X   |
 | List Tables                 |  X   |  X   |   X    |  X   |
 | Create Table                |  X   |  X   |   X    |  X   |
-| Register Table              |  X   |      |   X    |      |
+| Register Table              |  X   |  X   |   X    |      |
 | Update Current Snapshot     |  X   |  X   |   X    |  X   |
 | Create New Snapshot         |  X   |  X   |   X    |  X   |
 | Rename Table                |  X   |  X   |   X    |  X   |

@@ -202,6 +202,61 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	return c.LoadTable(ctx, identifier)
 }
 
+// RegisterTable adds an existing Iceberg table to the Hive metastore
+func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier, metadataLocation string) (*table.Table, error) {
+	database, tableName, err := identifierToTableName(identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	exists, err := c.CheckNamespaceExists(ctx, DatabaseIdentifier(database))
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, database)
+	}
+
+	viewExists, err := c.CheckViewExists(ctx, identifier)
+	if err != nil {
+		return nil, err
+	}
+	if viewExists {
+		return nil, fmt.Errorf("%w: %s.%s", catalog.ErrViewAlreadyExists, database, tableName)
+	}
+
+	tableExists, err := c.CheckTableExists(ctx, identifier)
+	if err != nil {
+		return nil, err
+	}
+	if tableExists {
+		return nil, fmt.Errorf("%w: %s.%s", catalog.ErrTableAlreadyExists, database, tableName)
+	}
+
+	tbl, err := table.NewFromLocation(
+		ctx,
+		identifier,
+		metadataLocation,
+		io.LoadFSFunc(c.opts.props, metadataLocation),
+		c,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read table metadata from %s: %s", metadataLocation, err)
+	}
+
+	hiveTbl := constructHiveTable(database, tableName, tbl.Location(), metadataLocation, tbl.Metadata().CurrentSchema(), maps.Clone(tbl.Metadata().Properties()))
+
+	if err := c.client.CreateTable(ctx, hiveTbl); err != nil {
+		if isAlreadyExistsError(err) {
+			return nil, fmt.Errorf("%w: %s.%s", catalog.ErrTableAlreadyExists, database, tableName)
+		}
+
+		return nil, fmt.Errorf("failed to register table %s.%s: %s", database, tableName, err)
+	}
+
+	return c.LoadTable(ctx, identifier)
+}
+
 // CreateView creates a new view in the catalog. It uses the same signature as the REST catalog:
 // identifier, version (with SQL representations), schema, and optional CreateViewOpt for location and properties.
 // Returns the created *view.View, or an error if the namespace is missing, a view/table already exists, or creation fails.
