@@ -632,6 +632,126 @@ func TestToRequestedSchemaWriteDefaults(t *testing.T) {
 	}
 }
 
+func TestToRequestedSchemaRequiredFieldWithWriteDefault(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	fileIceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+
+	// Required field with write-default: should be filled with the default value
+	requestedIceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.Int64, Required: true, WriteDefault: int64(42)},
+	)
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{
+			Name:     "id",
+			Type:     arrow.PrimitiveTypes.Int32,
+			Nullable: false,
+			Metadata: arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: "1"}),
+		},
+	}, nil)
+	bldr := array.NewRecordBuilder(mem, arrowSchema)
+	defer bldr.Release()
+	bldr.Field(0).(*array.Int32Builder).AppendValues([]int32{1, 2, 3}, nil)
+	rec := bldr.NewRecordBatch()
+	defer rec.Release()
+
+	result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, table.SchemaOptions{UseWriteDefault: true})
+	require.NoError(t, err)
+	defer result.Release()
+
+	require.EqualValues(t, 2, result.NumCols())
+	catCol := result.Column(1)
+	require.Equal(t, arrow.INT64, catCol.DataType().ID())
+	require.Equal(t, 3, catCol.Len())
+	int64Arr := catCol.(*array.Int64)
+	for i := 0; i < int64Arr.Len(); i++ {
+		assert.Equal(t, int64(42), int64Arr.Value(i), "row %d should have write-default value", i)
+	}
+}
+
+func TestToRequestedSchemaRequiredFieldMissingNoDefault(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	fileIceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+
+	// Required field without write-default: should return error
+	requestedIceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{
+			Name:     "id",
+			Type:     arrow.PrimitiveTypes.Int32,
+			Nullable: false,
+			Metadata: arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: "1"}),
+		},
+	}, nil)
+	bldr := array.NewRecordBuilder(mem, arrowSchema)
+	defer bldr.Release()
+	bldr.Field(0).(*array.Int32Builder).AppendValues([]int32{1, 2, 3}, nil)
+	rec := bldr.NewRecordBatch()
+	defer rec.Release()
+
+	_, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, table.SchemaOptions{UseWriteDefault: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "required field is missing and has no default value")
+}
+
+func TestToRequestedSchemaRequiredFieldWithInitialDefault(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	fileIceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+
+	// Required field with initial-default: should be filled on read path (useWriteDefault=false)
+	requestedIceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.Int64, Required: true, InitialDefault: int64(99)},
+	)
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{
+			Name:     "id",
+			Type:     arrow.PrimitiveTypes.Int32,
+			Nullable: false,
+			Metadata: arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: "1"}),
+		},
+	}, nil)
+	bldr := array.NewRecordBuilder(mem, arrowSchema)
+	defer bldr.Release()
+	bldr.Field(0).(*array.Int32Builder).AppendValues([]int32{1, 2, 3}, nil)
+	rec := bldr.NewRecordBatch()
+	defer rec.Release()
+
+	result, err := table.ToRequestedSchema(ctx, requestedIceSchema, fileIceSchema, rec, table.SchemaOptions{UseWriteDefault: false})
+	require.NoError(t, err)
+	defer result.Release()
+
+	require.EqualValues(t, 2, result.NumCols())
+	catCol := result.Column(1)
+	require.Equal(t, arrow.INT64, catCol.DataType().ID())
+	require.Equal(t, 3, catCol.Len())
+	int64Arr := catCol.(*array.Int64)
+	for i := 0; i < int64Arr.Len(); i++ {
+		assert.Equal(t, int64(99), int64Arr.Value(i), "row %d should have initial-default value", i)
+	}
+}
+
 func TestToRequestedSchemaWriteDefaultsTypes(t *testing.T) {
 	ctx := context.Background()
 
