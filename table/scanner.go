@@ -544,7 +544,7 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 			DeleteFiles:         deleteFiles,
 			EqualityDeleteFiles: eqDeleteFiles,
 			Start:               0,
-			Length:               e.DataFile().FileSizeBytes(),
+			Length:              e.DataFile().FileSizeBytes(),
 		})
 	}
 
