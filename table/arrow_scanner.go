@@ -418,19 +418,17 @@ func synthesizeRowLineageColumns(
 		seqNumColIdx = seqNumIndices[0]
 	}
 
-	var toRelease []arrow.Array
+	bldr := array.NewInt64Builder(alloc)
+	defer bldr.Release()
 
 	// _row_id: inherit first_row_id + row_position when null; else keep value from file.
 	if rowIDColIdx >= 0 && task.FirstRowID != nil {
 		if col, ok := newCols[rowIDColIdx].(*array.Int64); ok {
-			bldr := array.NewInt64Builder(alloc)
-			defer bldr.Release()
-
 			bldr.Reserve(int(nrows))
 			first := *task.FirstRowID
-			for k := int64(0); k < nrows; k++ {
+			for k := range nrows {
 				if col.IsNull(int(k)) {
-					bldr.Append(first + *rowOffset + k)
+					bldr.Append(first + *rowOffset + int64(k))
 				} else {
 					bldr.Append(col.Value(int(k)))
 				}
@@ -438,19 +436,16 @@ func synthesizeRowLineageColumns(
 
 			arr := bldr.NewArray()
 			newCols[rowIDColIdx] = arr
-			toRelease = append(toRelease, arr)
+			defer arr.Release()
 		}
 	}
 
 	// _last_updated_sequence_number: inherit file's data_sequence_number when null; else keep value from file.
 	if seqNumColIdx >= 0 && task.DataSequenceNumber != nil {
 		if col, ok := newCols[seqNumColIdx].(*array.Int64); ok {
-			bldr := array.NewInt64Builder(alloc)
-			defer bldr.Release()
-
 			bldr.Reserve(int(nrows))
 			seq := *task.DataSequenceNumber
-			for k := int64(0); k < nrows; k++ {
+			for k := range nrows {
 				if col.IsNull(int(k)) {
 					bldr.Append(seq)
 				} else {
@@ -460,7 +455,7 @@ func synthesizeRowLineageColumns(
 
 			arr := bldr.NewArray()
 			newCols[seqNumColIdx] = arr
-			toRelease = append(toRelease, arr)
+			defer arr.Release()
 		}
 	}
 
@@ -468,9 +463,6 @@ func synthesizeRowLineageColumns(
 	*rowOffset += nrows
 
 	rec := array.NewRecordBatch(schema, newCols, nrows)
-	for _, c := range toRelease {
-		c.Release()
-	}
 
 	return rec, nil
 }
