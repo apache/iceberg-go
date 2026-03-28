@@ -42,8 +42,8 @@ func (s *stubCatalog) CommitTransaction(_ context.Context, commits []table.Table
 // fullStubCatalog implements both Catalog and TransactionalCatalog
 // for testing CommitAndReload.
 type fullStubCatalog struct {
-	commits [][]table.TableCommit
-	tables  map[string]*table.Table
+	commits   [][]table.TableCommit
+	tables    map[string]*table.Table
 	commitErr error
 }
 
@@ -79,28 +79,37 @@ func (s *fullStubCatalog) CommitTable(context.Context, table.Identifier, []table
 }
 
 func (s *fullStubCatalog) DropTable(context.Context, table.Identifier) error { return nil }
+
 func (s *fullStubCatalog) RenameTable(context.Context, table.Identifier, table.Identifier) (*table.Table, error) {
 	return nil, nil
 }
+
 func (s *fullStubCatalog) CheckTableExists(context.Context, table.Identifier) (bool, error) {
 	return false, nil
 }
+
 func (s *fullStubCatalog) ListNamespaces(context.Context, table.Identifier) ([]table.Identifier, error) {
 	return nil, nil
 }
+
 func (s *fullStubCatalog) CreateNamespace(context.Context, table.Identifier, iceberg.Properties) error {
 	return nil
 }
+
 func (s *fullStubCatalog) DropNamespace(context.Context, table.Identifier) error { return nil }
+
 func (s *fullStubCatalog) CheckNamespaceExists(context.Context, table.Identifier) (bool, error) {
 	return false, nil
 }
+
 func (s *fullStubCatalog) LoadNamespaceProperties(context.Context, table.Identifier) (iceberg.Properties, error) {
 	return nil, nil
 }
+
 func (s *fullStubCatalog) UpdateNamespaceProperties(context.Context, table.Identifier, []string, iceberg.Properties) (PropertiesUpdateSummary, error) {
 	return PropertiesUpdateSummary{}, nil
 }
+
 func (s *fullStubCatalog) CatalogType() Type { return REST }
 
 func mtxTestTable(t *testing.T, ns, name string) *table.Table {
