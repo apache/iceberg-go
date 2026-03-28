@@ -154,9 +154,8 @@ func equalityDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 	targetFileSize := int64(meta.props.GetInt(WriteTargetFileSizeBytesKey,
 		WriteTargetFileSizeBytesDefault))
 
-	cw := newConcurrentDataFileWriter(func(rootLocation string, fs iceio.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
-		return newEqualityDeleteWriter(rootLocation, fs, meta, props, deleteSchema, equalityFieldIDs, opts...)
-	}, withSchemaSanitization(false))
+	cw := newConcurrentDataFileWriter(newEqualityDeleteWriterMaker(deleteSchema, equalityFieldIDs),
+		withSchemaSanitization(false))
 
 	latestMetadata, err := meta.Build()
 	if err != nil {
