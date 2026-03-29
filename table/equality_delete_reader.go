@@ -22,7 +22,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"os"
 	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -36,8 +35,6 @@ import (
 	"github.com/apache/iceberg-go/table/internal"
 	"golang.org/x/sync/errgroup"
 )
-
-var useComputeEqDeletes = os.Getenv("ICEBERG_EQ_DELETE_COMPUTE") == "1"
 
 // equalityDeleteSet holds the set of delete keys and the column names
 // used to look them up in data records. Each set corresponds to one
@@ -354,11 +351,7 @@ func encodeArrowValue(buf *bytes.Buffer, arr arrow.Array, idx int) {
 // rows whose equality key columns match any entry in the delete sets.
 // Each set is applied independently (they may have different field IDs).
 func processEqualityDeletes(ctx context.Context, eqDeleteSets []*equalityDeleteSet) (recProcessFn, error) {
-	if useComputeEqDeletes {
-		return processEqualityDeletesCompute(ctx, eqDeleteSets)
-	}
-
-	return processEqualityDeletesHash(ctx, eqDeleteSets)
+	return processEqualityDeletesColumnar(ctx, eqDeleteSets)
 }
 
 func processEqualityDeletesHash(ctx context.Context, eqDeleteSets []*equalityDeleteSet) (recProcessFn, error) {
@@ -428,168 +421,155 @@ func processEqualityDeletesHash(ctx context.Context, eqDeleteSets []*equalityDel
 	}, nil
 }
 
-// encodeToBinaryArray encodes rows from the record batch into a Binary array
-// by writing keys contiguously into a single data buffer. This avoids per-row
-// allocations from BinaryBuilder.Append.
-func encodeToBinaryArray(mem memory.Allocator, r arrow.RecordBatch, colIndices []int, numRows int) *array.Binary {
-	// Offsets buffer: (numRows+1) int32 values.
-	offsetsBuf := memory.NewResizableBuffer(mem)
-	offsetsBuf.Resize(arrow.Int32SizeBytes * (numRows + 1))
-	offsets := arrow.Int32Traits.CastFromBytes(offsetsBuf.Bytes())
+// colEncoder writes the value at row idx to buf. Resolved once per column
+// to avoid per-row type switches.
+type colEncoder func(buf *bytes.Buffer, row int)
 
-	// Data buffer: encode all keys into a single contiguous buffer.
-	var keyBuf bytes.Buffer
-	dataBuf := memory.NewResizableBuffer(mem)
+// makeColEncoder returns a colEncoder for the given Arrow array that writes
+// values directly from the raw typed backing slice when possible.
+func makeColEncoder(arr arrow.Array) colEncoder {
+	switch a := arr.(type) {
+	case *array.Int8:
+		vals := a.Int8Values()
 
-	var dataLen int32
-
-	for row := 0; row < numRows; row++ {
-		offsets[row] = dataLen
-		keyBuf.Reset()
-
-		for _, colIdx := range colIndices {
-			encodeArrowValue(&keyBuf, r.Column(colIdx), row)
+		return func(buf *bytes.Buffer, row int) {
+			buf.WriteByte(1)
+			buf.WriteByte(byte(vals[row]))
 		}
+	case *array.Int16:
+		vals := a.Int16Values()
 
-		keyLen := int32(keyBuf.Len())
-		newLen := dataLen + keyLen
-
-		if int(newLen) > dataBuf.Len() {
-			dataBuf.Resize(int(newLen) * 2)
+		return func(buf *bytes.Buffer, row int) {
+			buf.WriteByte(1)
+			bufPutUint16(buf, uint16(vals[row]))
 		}
+	case *array.Int32:
+		vals := a.Int32Values()
 
-		copy(dataBuf.Bytes()[dataLen:], keyBuf.Bytes())
-		dataLen = newLen
+		return func(buf *bytes.Buffer, row int) {
+			buf.WriteByte(1)
+			bufPutUint32(buf, uint32(vals[row]))
+		}
+	case *array.Int64:
+		vals := a.Int64Values()
+
+		return func(buf *bytes.Buffer, row int) {
+			buf.WriteByte(1)
+			bufPutUint64(buf, uint64(vals[row]))
+		}
+	case *array.Float32:
+		vals := a.Float32Values()
+
+		return func(buf *bytes.Buffer, row int) {
+			buf.WriteByte(1)
+			bufPutUint32(buf, math.Float32bits(vals[row]))
+		}
+	case *array.Float64:
+		vals := a.Float64Values()
+
+		return func(buf *bytes.Buffer, row int) {
+			buf.WriteByte(1)
+			bufPutUint64(buf, math.Float64bits(vals[row]))
+		}
+	case *array.Date32:
+		vals := a.Date32Values()
+
+		return func(buf *bytes.Buffer, row int) {
+			buf.WriteByte(1)
+			bufPutUint32(buf, uint32(vals[row]))
+		}
+	case *array.Date64:
+		vals := a.Date64Values()
+
+		return func(buf *bytes.Buffer, row int) {
+			buf.WriteByte(1)
+			bufPutUint64(buf, uint64(vals[row]))
+		}
+	case *array.Time32:
+		vals := a.Time32Values()
+
+		return func(buf *bytes.Buffer, row int) {
+			buf.WriteByte(1)
+			bufPutUint32(buf, uint32(vals[row]))
+		}
+	case *array.Time64:
+		vals := a.Time64Values()
+
+		return func(buf *bytes.Buffer, row int) {
+			buf.WriteByte(1)
+			bufPutUint64(buf, uint64(vals[row]))
+		}
+	case *array.Timestamp:
+		vals := a.TimestampValues()
+
+		return func(buf *bytes.Buffer, row int) {
+			buf.WriteByte(1)
+			bufPutUint64(buf, uint64(vals[row]))
+		}
+	default:
+		// Fallback for string, binary, boolean, etc.
+		return func(buf *bytes.Buffer, row int) {
+			encodeArrowValue(buf, arr, row)
+		}
 	}
-
-	offsets[numRows] = dataLen
-	dataBuf.Resize(int(dataLen))
-
-	data := array.NewData(arrow.BinaryTypes.Binary, numRows,
-		[]*memory.Buffer{nil, offsetsBuf, dataBuf}, nil, 0, 0)
-	offsetsBuf.Release()
-	dataBuf.Release()
-
-	return array.NewBinaryData(data)
 }
 
-// encodeDeleteKeysToBinaryArray builds a Binary array from the delete set keys
-// without per-key allocation.
-func encodeDeleteKeysToBinaryArray(mem memory.Allocator, keys set[string]) *array.Binary {
-	n := len(keys)
-	offsetsBuf := memory.NewResizableBuffer(mem)
-	offsetsBuf.Resize(arrow.Int32SizeBytes * (n + 1))
-	offsets := arrow.Int32Traits.CastFromBytes(offsetsBuf.Bytes())
-
-	// Calculate total data size.
-	var totalLen int
-
-	for k := range keys {
-		totalLen += len(k)
-	}
-
-	dataBuf := memory.NewResizableBuffer(mem)
-	dataBuf.Resize(totalLen)
-	dataBytes := dataBuf.Bytes()
-
-	var (
-		i      int
-		offset int32
-	)
-
-	for k := range keys {
-		offsets[i] = offset
-		copy(dataBytes[offset:], k)
-		offset += int32(len(k))
-		i++
-	}
-
-	offsets[n] = offset
-
-	data := array.NewData(arrow.BinaryTypes.Binary, n,
-		[]*memory.Buffer{nil, offsetsBuf, dataBuf}, nil, 0, 0)
-	offsetsBuf.Release()
-	dataBuf.Release()
-
-	return array.NewBinaryData(data)
-}
-
-// processEqualityDeletesCompute uses Arrow compute (is_in) for vectorized
-// set-membership filtering. Encodes equality columns into binary keys for
-// both data rows and delete entries, then uses is_in + not as the filter mask.
-func processEqualityDeletesCompute(ctx context.Context, eqDeleteSets []*equalityDeleteSet) (recProcessFn, error) {
+// processEqualityDeletesColumnar resolves typed column encoders once per
+// batch, then iterates rows without per-row type switches.
+func processEqualityDeletesColumnar(ctx context.Context, eqDeleteSets []*equalityDeleteSet) (recProcessFn, error) {
 	return func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
 		defer r.Release()
 
 		mem := compute.GetAllocator(ctx)
 		numRows := int(r.NumRows())
 
-		var keepMask arrow.Array
+		maskBuf := memory.NewResizableBuffer(mem)
+		defer maskBuf.Release()
+		maskBuf.Resize(int(bitutil.BytesForBits(int64(numRows))))
+		maskBytes := maskBuf.Bytes()
+
+		for i := range maskBytes {
+			maskBytes[i] = 0xFF
+		}
+
+		var keyBuf bytes.Buffer
 
 		for _, eqDel := range eqDeleteSets {
-			colIndices := make([]int, len(eqDel.colNames))
+			encoders := make([]colEncoder, len(eqDel.colNames))
 			for i, name := range eqDel.colNames {
 				indices := r.Schema().FieldIndices(name)
 				if len(indices) == 0 {
 					return nil, fmt.Errorf("equality delete column %q not found in data record", name)
 				}
 
-				colIndices[i] = indices[0]
+				encoders[i] = makeColEncoder(r.Column(indices[0]))
 			}
 
-			dataKeys := encodeToBinaryArray(mem, r, colIndices, numRows)
-			defer dataKeys.Release()
-
-			deleteKeys := encodeDeleteKeysToBinaryArray(mem, eqDel.keys)
-			defer deleteKeys.Release()
-
-			matchResult, err := compute.IsIn(ctx,
-				compute.SetOptions{ValueSet: compute.NewDatumWithoutOwning(deleteKeys)},
-				compute.NewDatumWithoutOwning(dataKeys))
-			if err != nil {
-				return nil, fmt.Errorf("is_in: %w", err)
-			}
-
-			matchArr := matchResult.(*compute.ArrayDatum).MakeArray()
-			defer matchArr.Release()
-
-			notResult, err := compute.CallFunction(ctx, "not", nil,
-				compute.NewDatumWithoutOwning(matchArr))
-			if err != nil {
-				return nil, fmt.Errorf("not: %w", err)
-			}
-
-			notArr := notResult.(*compute.ArrayDatum).MakeArray()
-
-			if keepMask == nil {
-				keepMask = notArr
-			} else {
-				andResult, err := compute.CallFunction(ctx, "and_kleene", nil,
-					compute.NewDatumWithoutOwning(keepMask),
-					compute.NewDatumWithoutOwning(notArr))
-				if err != nil {
-					notArr.Release()
-
-					return nil, fmt.Errorf("and: %w", err)
+			for row := 0; row < numRows; row++ {
+				if !bitutil.BitIsSet(maskBytes, row) {
+					continue
 				}
 
-				keepMask.Release()
-				notArr.Release()
-				keepMask = andResult.(*compute.ArrayDatum).MakeArray()
+				keyBuf.Reset()
+
+				for _, enc := range encoders {
+					enc(&keyBuf, row)
+				}
+
+				if _, deleted := eqDel.keys[bufString(&keyBuf)]; deleted {
+					bitutil.ClearBit(maskBytes, row)
+				}
 			}
 		}
 
-		if keepMask == nil {
-			r.Retain()
-
-			return r, nil
-		}
-
-		defer keepMask.Release()
+		mask := array.NewBooleanData(array.NewData(
+			arrow.FixedWidthTypes.Boolean, numRows,
+			[]*memory.Buffer{nil, maskBuf}, nil, 0, 0))
+		defer mask.Release()
 
 		filtered, err := compute.Filter(ctx,
 			compute.NewDatumWithoutOwning(r),
-			compute.NewDatumWithoutOwning(keepMask),
+			compute.NewDatumWithoutOwning(mask),
 			*compute.DefaultFilterOptions())
 		if err != nil {
 			return nil, err

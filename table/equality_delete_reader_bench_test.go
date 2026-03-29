@@ -73,8 +73,8 @@ func buildBenchDeleteSet(numDeletes int) *equalityDeleteSet {
 func benchProcessFn(b *testing.B, name string, newFn func(context.Context, []*equalityDeleteSet) (recProcessFn, error)) {
 	b.Helper()
 
-	dataRows := []int{1_000, 10_000, 100_000, 1_000_000}
-	deleteRows := []int{10, 100, 1_000, 10_000}
+	dataRows := []int{1_000, 100_000, 1_000_000}
+	deleteRows := []int{10, 100, 10_000}
 
 	for _, nData := range dataRows {
 		for _, nDel := range deleteRows {
@@ -113,5 +113,5 @@ func benchProcessFn(b *testing.B, name string, newFn func(context.Context, []*eq
 
 func BenchmarkProcessEqualityDeletes(b *testing.B) {
 	benchProcessFn(b, "hash", processEqualityDeletesHash)
-	benchProcessFn(b, "compute", processEqualityDeletesCompute)
+	benchProcessFn(b, "columnar", processEqualityDeletesColumnar)
 }
