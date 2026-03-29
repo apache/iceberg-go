@@ -20,13 +20,15 @@ package table
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"fmt"
 	"math"
+	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/bitutil"
 	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	iceinternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
@@ -222,26 +224,27 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 	keys := make(set[string])
 	numRows := int(tbl.NumRows())
 
+	var keyBuf bytes.Buffer
+
 	for row := 0; row < numRows; row++ {
-		key := encodeDeleteKey(tbl, colIndices, row)
-		keys[key] = struct{}{}
+		keyBuf.Reset()
+		encodeDeleteKeyTo(&keyBuf, tbl, colIndices, row)
+		keys[keyBuf.String()] = struct{}{}
 	}
 
 	return keys, colNames, nil
 }
 
-// encodeDeleteKey encodes the values at the given row from the specified
-// columns into a single string key for hash-based lookup.
-func encodeDeleteKey(tbl arrow.Table, colIndices []int, row int) string {
-	var buf bytes.Buffer
-
+// encodeDeleteKeyTo encodes the values at the given row from the specified
+// columns into the provided buffer for hash-based lookup.
+func encodeDeleteKeyTo(buf *bytes.Buffer, tbl arrow.Table, colIndices []int, row int) {
 	for _, colIdx := range colIndices {
 		col := tbl.Column(colIdx).Data()
 		chunkRow := row
 
 		for _, chunk := range col.Chunks() {
 			if chunkRow < chunk.Len() {
-				encodeArrowValue(&buf, chunk, chunkRow)
+				encodeArrowValue(buf, chunk, chunkRow)
 
 				break
 			}
@@ -249,8 +252,32 @@ func encodeDeleteKey(tbl arrow.Table, colIndices []int, row int) string {
 			chunkRow -= chunk.Len()
 		}
 	}
+}
 
-	return buf.String()
+// bufPutUint16 writes a uint16 in big-endian without allocating.
+func bufPutUint16(buf *bytes.Buffer, v uint16) {
+	buf.Write([]byte{byte(v >> 8), byte(v)})
+}
+
+// bufPutUint32 writes a uint32 in big-endian without allocating.
+func bufPutUint32(buf *bytes.Buffer, v uint32) {
+	buf.Write([]byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)})
+}
+
+// bufPutUint64 writes a uint64 in big-endian without allocating.
+func bufPutUint64(buf *bytes.Buffer, v uint64) {
+	buf.Write([]byte{
+		byte(v >> 56), byte(v >> 48), byte(v >> 40), byte(v >> 32),
+		byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v),
+	})
+}
+
+// bufString returns the buffer contents as a string without copying.
+// The returned string is only valid until the next buffer modification.
+func bufString(buf *bytes.Buffer) string {
+	b := buf.Bytes()
+
+	return unsafe.String(unsafe.SliceData(b), len(b))
 }
 
 // encodeArrowValue writes a single Arrow value to the buffer for key
@@ -269,30 +296,30 @@ func encodeArrowValue(buf *bytes.Buffer, arr arrow.Array, idx int) {
 	case *array.Int8:
 		buf.WriteByte(byte(a.Value(idx)))
 	case *array.Int16:
-		_ = binary.Write(buf, binary.BigEndian, a.Value(idx))
+		bufPutUint16(buf, uint16(a.Value(idx)))
 	case *array.Int32:
-		_ = binary.Write(buf, binary.BigEndian, a.Value(idx))
+		bufPutUint32(buf, uint32(a.Value(idx)))
 	case *array.Int64:
-		_ = binary.Write(buf, binary.BigEndian, a.Value(idx))
+		bufPutUint64(buf, uint64(a.Value(idx)))
 	case *array.Float32:
-		_ = binary.Write(buf, binary.BigEndian, math.Float32bits(a.Value(idx)))
+		bufPutUint32(buf, math.Float32bits(a.Value(idx)))
 	case *array.Float64:
-		_ = binary.Write(buf, binary.BigEndian, math.Float64bits(a.Value(idx)))
+		bufPutUint64(buf, math.Float64bits(a.Value(idx)))
 	case *array.String:
 		s := a.Value(idx)
-		_ = binary.Write(buf, binary.BigEndian, int32(len(s)))
+		bufPutUint32(buf, uint32(len(s)))
 		buf.WriteString(s)
 	case *array.LargeString:
 		s := a.Value(idx)
-		_ = binary.Write(buf, binary.BigEndian, int32(len(s)))
+		bufPutUint32(buf, uint32(len(s)))
 		buf.WriteString(s)
 	case *array.Binary:
 		b := a.Value(idx)
-		_ = binary.Write(buf, binary.BigEndian, int32(len(b)))
+		bufPutUint32(buf, uint32(len(b)))
 		buf.Write(b)
 	case *array.LargeBinary:
 		b := a.Value(idx)
-		_ = binary.Write(buf, binary.BigEndian, int32(len(b)))
+		bufPutUint32(buf, uint32(len(b)))
 		buf.Write(b)
 	case *array.FixedSizeBinary:
 		buf.Write(a.Value(idx))
@@ -303,19 +330,19 @@ func encodeArrowValue(buf *bytes.Buffer, arr arrow.Array, idx int) {
 			buf.WriteByte(0)
 		}
 	case *array.Date32:
-		_ = binary.Write(buf, binary.BigEndian, a.Value(idx))
+		bufPutUint32(buf, uint32(a.Value(idx)))
 	case *array.Date64:
-		_ = binary.Write(buf, binary.BigEndian, a.Value(idx))
+		bufPutUint64(buf, uint64(a.Value(idx)))
 	case *array.Time32:
-		_ = binary.Write(buf, binary.BigEndian, a.Value(idx))
+		bufPutUint32(buf, uint32(a.Value(idx)))
 	case *array.Time64:
-		_ = binary.Write(buf, binary.BigEndian, a.Value(idx))
+		bufPutUint64(buf, uint64(a.Value(idx)))
 	case *array.Timestamp:
-		_ = binary.Write(buf, binary.BigEndian, a.Value(idx))
+		bufPutUint64(buf, uint64(a.Value(idx)))
 	default:
 		// Fallback: length-prefixed string representation.
 		s := a.ValueStr(idx)
-		_ = binary.Write(buf, binary.BigEndian, int32(len(s)))
+		bufPutUint32(buf, uint32(len(s)))
 		buf.WriteString(s)
 	}
 }
@@ -332,11 +359,18 @@ func processEqualityDeletes(ctx context.Context, eqDeleteSets []*equalityDeleteS
 		mem := compute.GetAllocator(ctx)
 		numRows := int(r.NumRows())
 
-		// Start with all rows kept.
-		keep := make([]bool, numRows)
-		for i := range keep {
-			keep[i] = true
+		// Build a bitmap where 1 = keep, 0 = deleted.
+		maskBuf := memory.NewResizableBuffer(mem)
+		defer maskBuf.Release()
+		maskBuf.Resize(int(bitutil.BytesForBits(int64(numRows))))
+		maskBytes := maskBuf.Bytes()
+
+		// Start with all bits set (keep all rows).
+		for i := range maskBytes {
+			maskBytes[i] = 0xFF
 		}
+
+		var keyBuf bytes.Buffer
 
 		for _, eqDel := range eqDeleteSets {
 			colIndices := make([]int, len(eqDel.colNames))
@@ -349,10 +383,8 @@ func processEqualityDeletes(ctx context.Context, eqDeleteSets []*equalityDeleteS
 				colIndices[i] = indices[0]
 			}
 
-			var keyBuf bytes.Buffer
-
 			for row := 0; row < numRows; row++ {
-				if !keep[row] {
+				if !bitutil.BitIsSet(maskBytes, row) {
 					continue // already deleted by a previous set
 				}
 
@@ -362,20 +394,15 @@ func processEqualityDeletes(ctx context.Context, eqDeleteSets []*equalityDeleteS
 					encodeArrowValue(&keyBuf, r.Column(colIdx), row)
 				}
 
-				if _, deleted := eqDel.keys[keyBuf.String()]; deleted {
-					keep[row] = false
+				if _, deleted := eqDel.keys[bufString(&keyBuf)]; deleted {
+					bitutil.ClearBit(maskBytes, row)
 				}
 			}
 		}
 
-		bldr := array.NewBooleanBuilder(mem)
-		defer bldr.Release()
-
-		for _, k := range keep {
-			bldr.Append(k)
-		}
-
-		mask := bldr.NewArray()
+		mask := array.NewBooleanData(array.NewData(
+			arrow.FixedWidthTypes.Boolean, numRows,
+			[]*memory.Buffer{nil, maskBuf}, nil, 0, 0))
 		defer mask.Release()
 
 		filtered, err := compute.Filter(ctx,
