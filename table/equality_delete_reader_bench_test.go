@@ -30,7 +30,48 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 )
 
-func buildBenchRecord(mem memory.Allocator, numRows int) arrow.RecordBatch {
+func benchEqDeletes(b *testing.B, buildRec func(memory.Allocator, int) arrow.RecordBatch, buildDel func(int) *equalityDeleteSet) {
+	b.Helper()
+
+	dataRows := []int{1_000, 100_000, 1_000_000}
+	deleteRows := []int{10, 100, 10_000}
+
+	for _, nData := range dataRows {
+		for _, nDel := range deleteRows {
+			if nDel > nData {
+				continue
+			}
+
+			b.Run(fmt.Sprintf("rows=%d/deletes=%d", nData, nDel), func(b *testing.B) {
+				mem := memory.NewGoAllocator()
+				ctx := compute.WithAllocator(context.Background(), mem)
+				rec := buildRec(mem, nData)
+				defer rec.Release()
+
+				delSet := buildDel(nDel)
+				filterFn, err := processEqualityDeletes(ctx, []*equalityDeleteSet{delSet})
+				if err != nil {
+					b.Fatal(err)
+				}
+
+				b.ResetTimer()
+				b.ReportAllocs()
+
+				for i := 0; i < b.N; i++ {
+					rec.Retain()
+					result, err := filterFn(rec)
+					if err != nil {
+						b.Fatal(err)
+					}
+
+					result.Release()
+				}
+			})
+		}
+	}
+}
+
+func buildBenchRecordInt(mem memory.Allocator, numRows int) arrow.RecordBatch {
 	schema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
 		{Name: "category", Type: arrow.PrimitiveTypes.Int64},
@@ -50,7 +91,7 @@ func buildBenchRecord(mem memory.Allocator, numRows int) arrow.RecordBatch {
 	return bldr.NewRecordBatch()
 }
 
-func buildBenchDeleteSet(numDeletes int) *equalityDeleteSet {
+func buildBenchDeleteSetInt(numDeletes int) *equalityDeleteSet {
 	keys := make(set[string])
 	var buf bytes.Buffer
 
@@ -67,47 +108,6 @@ func buildBenchDeleteSet(numDeletes int) *equalityDeleteSet {
 		keys:     keys,
 		fieldIDs: []int{1, 2},
 		colNames: []string{"id", "category"},
-	}
-}
-
-func benchProcessFn(b *testing.B, name string, newFn func(context.Context, []*equalityDeleteSet) (recProcessFn, error)) {
-	b.Helper()
-
-	dataRows := []int{1_000, 100_000, 1_000_000}
-	deleteRows := []int{10, 100, 10_000}
-
-	for _, nData := range dataRows {
-		for _, nDel := range deleteRows {
-			if nDel > nData {
-				continue
-			}
-
-			b.Run(fmt.Sprintf("%s/rows=%d/deletes=%d", name, nData, nDel), func(b *testing.B) {
-				mem := memory.NewGoAllocator()
-				ctx := compute.WithAllocator(context.Background(), mem)
-				rec := buildBenchRecord(mem, nData)
-				defer rec.Release()
-
-				delSet := buildBenchDeleteSet(nDel)
-				filterFn, err := newFn(ctx, []*equalityDeleteSet{delSet})
-				if err != nil {
-					b.Fatal(err)
-				}
-
-				b.ResetTimer()
-				b.ReportAllocs()
-
-				for i := 0; i < b.N; i++ {
-					rec.Retain()
-					result, err := filterFn(rec)
-					if err != nil {
-						b.Fatal(err)
-					}
-
-					result.Release()
-				}
-			})
-		}
 	}
 }
 
@@ -153,53 +153,10 @@ func buildBenchDeleteSetString(numDeletes int) *equalityDeleteSet {
 	}
 }
 
-func BenchmarkProcessEqualityDeletes(b *testing.B) {
-	benchProcessFn(b, "hash", processEqualityDeletesHash)
-	benchProcessFn(b, "columnar", processEqualityDeletesColumnar)
+func BenchmarkProcessEqualityDeletesInt(b *testing.B) {
+	benchEqDeletes(b, buildBenchRecordInt, buildBenchDeleteSetInt)
 }
 
 func BenchmarkProcessEqualityDeletesString(b *testing.B) {
-	impls := map[string]func(context.Context, []*equalityDeleteSet) (recProcessFn, error){
-		"hash":     processEqualityDeletesHash,
-		"columnar": processEqualityDeletesColumnar,
-	}
-
-	dataRows := []int{1_000, 100_000, 1_000_000}
-	deleteRows := []int{10, 100, 10_000}
-
-	for implName, newFn := range impls {
-		for _, nData := range dataRows {
-			for _, nDel := range deleteRows {
-				if nDel > nData {
-					continue
-				}
-
-				b.Run(fmt.Sprintf("%s/rows=%d/deletes=%d", implName, nData, nDel), func(b *testing.B) {
-					mem := memory.NewGoAllocator()
-					ctx := compute.WithAllocator(context.Background(), mem)
-					rec := buildBenchRecordString(mem, nData)
-					defer rec.Release()
-
-					delSet := buildBenchDeleteSetString(nDel)
-					filterFn, err := newFn(ctx, []*equalityDeleteSet{delSet})
-					if err != nil {
-						b.Fatal(err)
-					}
-
-					b.ResetTimer()
-					b.ReportAllocs()
-
-					for i := 0; i < b.N; i++ {
-						rec.Retain()
-						result, err := filterFn(rec)
-						if err != nil {
-							b.Fatal(err)
-						}
-
-						result.Release()
-					}
-				})
-			}
-		}
-	}
+	benchEqDeletes(b, buildBenchRecordString, buildBenchDeleteSetString)
 }
