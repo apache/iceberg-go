@@ -962,23 +962,25 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 			defer arr.Release()
 			fieldArrs[i] = arr
 			fields[i] = a.constructField(field, arr.DataType())
-		} else if !field.Required {
+		} else {
 			dt := retOrPanic(TypeToArrowType(field.Type, false, a.useLargeTypes))
+			alloc := compute.GetAllocator(a.ctx)
 
-			if field.WriteDefault != nil && a.useWriteDefault {
-				arr = defaultToArray(field.WriteDefault, field.Type, dt, structArr.Len(), compute.GetAllocator(a.ctx))
-			} else if field.InitialDefault != nil && !a.useWriteDefault {
-				arr = defaultToArray(field.InitialDefault, field.Type, dt, structArr.Len(), compute.GetAllocator(a.ctx))
-			} else {
-				arr = array.MakeArrayOfNull(compute.GetAllocator(a.ctx), dt, structArr.Len())
+			switch {
+			case field.WriteDefault != nil && a.useWriteDefault:
+				arr = defaultToArray(field.WriteDefault, field.Type, dt, structArr.Len(), alloc)
+			case field.InitialDefault != nil && !a.useWriteDefault:
+				arr = defaultToArray(field.InitialDefault, field.Type, dt, structArr.Len(), alloc)
+			case !field.Required:
+				arr = array.MakeArrayOfNull(alloc, dt, structArr.Len())
+			default:
+				panic(fmt.Errorf("%w: required field is missing and has no default value: %s",
+					iceberg.ErrInvalidSchema, field))
 			}
 
 			defer arr.Release()
 			fieldArrs[i] = arr
 			fields[i] = a.constructField(field, arr.DataType())
-		} else {
-			panic(fmt.Errorf("%w: field is required, but could not be found in file: %s",
-				iceberg.ErrInvalidSchema, field))
 		}
 	}
 
@@ -1131,7 +1133,7 @@ func checkArrowSchemaCompat(requested *iceberg.Schema, provided *arrow.Schema, d
 func (sc *schemaCompatVisitor) isFieldCompat(lhs iceberg.NestedField) bool {
 	rhs, ok := sc.provided.FindFieldByID(lhs.ID)
 	if !ok {
-		if lhs.Required {
+		if lhs.Required && lhs.WriteDefault == nil && lhs.InitialDefault == nil {
 			sc.errorData = append(sc.errorData,
 				[]string{"❌", lhs.String(), "missing"})
 
