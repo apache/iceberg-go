@@ -70,7 +70,9 @@ func buildBenchDeleteSet(numDeletes int) *equalityDeleteSet {
 	}
 }
 
-func BenchmarkProcessEqualityDeletes(b *testing.B) {
+func benchProcessFn(b *testing.B, name string, newFn func(context.Context, []*equalityDeleteSet) (recProcessFn, error)) {
+	b.Helper()
+
 	dataRows := []int{1_000, 10_000, 100_000, 1_000_000}
 	deleteRows := []int{10, 100, 1_000, 10_000}
 
@@ -80,14 +82,14 @@ func BenchmarkProcessEqualityDeletes(b *testing.B) {
 				continue
 			}
 
-			b.Run(fmt.Sprintf("rows=%d/deletes=%d", nData, nDel), func(b *testing.B) {
+			b.Run(fmt.Sprintf("%s/rows=%d/deletes=%d", name, nData, nDel), func(b *testing.B) {
 				mem := memory.NewGoAllocator()
 				ctx := compute.WithAllocator(context.Background(), mem)
 				rec := buildBenchRecord(mem, nData)
 				defer rec.Release()
 
 				delSet := buildBenchDeleteSet(nDel)
-				filterFn, err := processEqualityDeletes(ctx, []*equalityDeleteSet{delSet})
+				filterFn, err := newFn(ctx, []*equalityDeleteSet{delSet})
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -107,4 +109,9 @@ func BenchmarkProcessEqualityDeletes(b *testing.B) {
 			})
 		}
 	}
+}
+
+func BenchmarkProcessEqualityDeletes(b *testing.B) {
+	benchProcessFn(b, "hash", processEqualityDeletesHash)
+	benchProcessFn(b, "compute", processEqualityDeletesCompute)
 }

@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -35,6 +36,8 @@ import (
 	"github.com/apache/iceberg-go/table/internal"
 	"golang.org/x/sync/errgroup"
 )
+
+var useComputeEqDeletes = os.Getenv("ICEBERG_EQ_DELETE_COMPUTE") == "1"
 
 // equalityDeleteSet holds the set of delete keys and the column names
 // used to look them up in data records. Each set corresponds to one
@@ -351,6 +354,14 @@ func encodeArrowValue(buf *bytes.Buffer, arr arrow.Array, idx int) {
 // rows whose equality key columns match any entry in the delete sets.
 // Each set is applied independently (they may have different field IDs).
 func processEqualityDeletes(ctx context.Context, eqDeleteSets []*equalityDeleteSet) (recProcessFn, error) {
+	if useComputeEqDeletes {
+		return processEqualityDeletesCompute(ctx, eqDeleteSets)
+	}
+
+	return processEqualityDeletesHash(ctx, eqDeleteSets)
+}
+
+func processEqualityDeletesHash(ctx context.Context, eqDeleteSets []*equalityDeleteSet) (recProcessFn, error) {
 	// Pre-resolve column names for each set — these will be looked up
 	// once per record batch below.
 	return func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
@@ -408,6 +419,177 @@ func processEqualityDeletes(ctx context.Context, eqDeleteSets []*equalityDeleteS
 		filtered, err := compute.Filter(ctx,
 			compute.NewDatumWithoutOwning(r),
 			compute.NewDatumWithoutOwning(mask),
+			*compute.DefaultFilterOptions())
+		if err != nil {
+			return nil, err
+		}
+
+		return filtered.(*compute.RecordDatum).Value, nil
+	}, nil
+}
+
+// encodeToBinaryArray encodes rows from the record batch into a Binary array
+// by writing keys contiguously into a single data buffer. This avoids per-row
+// allocations from BinaryBuilder.Append.
+func encodeToBinaryArray(mem memory.Allocator, r arrow.RecordBatch, colIndices []int, numRows int) *array.Binary {
+	// Offsets buffer: (numRows+1) int32 values.
+	offsetsBuf := memory.NewResizableBuffer(mem)
+	offsetsBuf.Resize(arrow.Int32SizeBytes * (numRows + 1))
+	offsets := arrow.Int32Traits.CastFromBytes(offsetsBuf.Bytes())
+
+	// Data buffer: encode all keys into a single contiguous buffer.
+	var keyBuf bytes.Buffer
+	dataBuf := memory.NewResizableBuffer(mem)
+
+	var dataLen int32
+
+	for row := 0; row < numRows; row++ {
+		offsets[row] = dataLen
+		keyBuf.Reset()
+
+		for _, colIdx := range colIndices {
+			encodeArrowValue(&keyBuf, r.Column(colIdx), row)
+		}
+
+		keyLen := int32(keyBuf.Len())
+		newLen := dataLen + keyLen
+
+		if int(newLen) > dataBuf.Len() {
+			dataBuf.Resize(int(newLen) * 2)
+		}
+
+		copy(dataBuf.Bytes()[dataLen:], keyBuf.Bytes())
+		dataLen = newLen
+	}
+
+	offsets[numRows] = dataLen
+	dataBuf.Resize(int(dataLen))
+
+	data := array.NewData(arrow.BinaryTypes.Binary, numRows,
+		[]*memory.Buffer{nil, offsetsBuf, dataBuf}, nil, 0, 0)
+	offsetsBuf.Release()
+	dataBuf.Release()
+
+	return array.NewBinaryData(data)
+}
+
+// encodeDeleteKeysToBinaryArray builds a Binary array from the delete set keys
+// without per-key allocation.
+func encodeDeleteKeysToBinaryArray(mem memory.Allocator, keys set[string]) *array.Binary {
+	n := len(keys)
+	offsetsBuf := memory.NewResizableBuffer(mem)
+	offsetsBuf.Resize(arrow.Int32SizeBytes * (n + 1))
+	offsets := arrow.Int32Traits.CastFromBytes(offsetsBuf.Bytes())
+
+	// Calculate total data size.
+	var totalLen int
+
+	for k := range keys {
+		totalLen += len(k)
+	}
+
+	dataBuf := memory.NewResizableBuffer(mem)
+	dataBuf.Resize(totalLen)
+	dataBytes := dataBuf.Bytes()
+
+	var (
+		i      int
+		offset int32
+	)
+
+	for k := range keys {
+		offsets[i] = offset
+		copy(dataBytes[offset:], k)
+		offset += int32(len(k))
+		i++
+	}
+
+	offsets[n] = offset
+
+	data := array.NewData(arrow.BinaryTypes.Binary, n,
+		[]*memory.Buffer{nil, offsetsBuf, dataBuf}, nil, 0, 0)
+	offsetsBuf.Release()
+	dataBuf.Release()
+
+	return array.NewBinaryData(data)
+}
+
+// processEqualityDeletesCompute uses Arrow compute (is_in) for vectorized
+// set-membership filtering. Encodes equality columns into binary keys for
+// both data rows and delete entries, then uses is_in + not as the filter mask.
+func processEqualityDeletesCompute(ctx context.Context, eqDeleteSets []*equalityDeleteSet) (recProcessFn, error) {
+	return func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
+		defer r.Release()
+
+		mem := compute.GetAllocator(ctx)
+		numRows := int(r.NumRows())
+
+		var keepMask arrow.Array
+
+		for _, eqDel := range eqDeleteSets {
+			colIndices := make([]int, len(eqDel.colNames))
+			for i, name := range eqDel.colNames {
+				indices := r.Schema().FieldIndices(name)
+				if len(indices) == 0 {
+					return nil, fmt.Errorf("equality delete column %q not found in data record", name)
+				}
+
+				colIndices[i] = indices[0]
+			}
+
+			dataKeys := encodeToBinaryArray(mem, r, colIndices, numRows)
+			defer dataKeys.Release()
+
+			deleteKeys := encodeDeleteKeysToBinaryArray(mem, eqDel.keys)
+			defer deleteKeys.Release()
+
+			matchResult, err := compute.IsIn(ctx,
+				compute.SetOptions{ValueSet: compute.NewDatumWithoutOwning(deleteKeys)},
+				compute.NewDatumWithoutOwning(dataKeys))
+			if err != nil {
+				return nil, fmt.Errorf("is_in: %w", err)
+			}
+
+			matchArr := matchResult.(*compute.ArrayDatum).MakeArray()
+			defer matchArr.Release()
+
+			notResult, err := compute.CallFunction(ctx, "not", nil,
+				compute.NewDatumWithoutOwning(matchArr))
+			if err != nil {
+				return nil, fmt.Errorf("not: %w", err)
+			}
+
+			notArr := notResult.(*compute.ArrayDatum).MakeArray()
+
+			if keepMask == nil {
+				keepMask = notArr
+			} else {
+				andResult, err := compute.CallFunction(ctx, "and_kleene", nil,
+					compute.NewDatumWithoutOwning(keepMask),
+					compute.NewDatumWithoutOwning(notArr))
+				if err != nil {
+					notArr.Release()
+
+					return nil, fmt.Errorf("and: %w", err)
+				}
+
+				keepMask.Release()
+				notArr.Release()
+				keepMask = andResult.(*compute.ArrayDatum).MakeArray()
+			}
+		}
+
+		if keepMask == nil {
+			r.Retain()
+
+			return r, nil
+		}
+
+		defer keepMask.Release()
+
+		filtered, err := compute.Filter(ctx,
+			compute.NewDatumWithoutOwning(r),
+			compute.NewDatumWithoutOwning(keepMask),
 			*compute.DefaultFilterOptions())
 		if err != nil {
 			return nil, err
