@@ -962,37 +962,25 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 			defer arr.Release()
 			fieldArrs[i] = arr
 			fields[i] = a.constructField(field, arr.DataType())
-		} else if !field.Required {
+		} else {
 			dt := retOrPanic(TypeToArrowType(field.Type, false, a.useLargeTypes))
+			alloc := compute.GetAllocator(a.ctx)
 
-			if field.WriteDefault != nil && a.useWriteDefault {
-				arr = defaultToArray(field.WriteDefault, field.Type, dt, structArr.Len(), compute.GetAllocator(a.ctx))
-			} else if field.InitialDefault != nil && !a.useWriteDefault {
-				arr = defaultToArray(field.InitialDefault, field.Type, dt, structArr.Len(), compute.GetAllocator(a.ctx))
-			} else {
-				arr = array.MakeArrayOfNull(compute.GetAllocator(a.ctx), dt, structArr.Len())
+			switch {
+			case field.WriteDefault != nil && a.useWriteDefault:
+				arr = defaultToArray(field.WriteDefault, field.Type, dt, structArr.Len(), alloc)
+			case field.InitialDefault != nil && !a.useWriteDefault:
+				arr = defaultToArray(field.InitialDefault, field.Type, dt, structArr.Len(), alloc)
+			case !field.Required:
+				arr = array.MakeArrayOfNull(alloc, dt, structArr.Len())
+			default:
+				panic(fmt.Errorf("%w: required field is missing and has no default value: %s",
+					iceberg.ErrInvalidSchema, field))
 			}
 
 			defer arr.Release()
 			fieldArrs[i] = arr
 			fields[i] = a.constructField(field, arr.DataType())
-		} else if field.WriteDefault != nil && a.useWriteDefault {
-			// required field is missing but has a write-default: fill with default value (write path)
-			dt := retOrPanic(TypeToArrowType(field.Type, false, a.useLargeTypes))
-			arr = defaultToArray(field.WriteDefault, field.Type, dt, structArr.Len(), compute.GetAllocator(a.ctx))
-			defer arr.Release()
-			fieldArrs[i] = arr
-			fields[i] = a.constructField(field, arr.DataType())
-		} else if field.InitialDefault != nil && !a.useWriteDefault {
-			// required field is missing but has an initial-default: fill with default value (read path)
-			dt := retOrPanic(TypeToArrowType(field.Type, false, a.useLargeTypes))
-			arr = defaultToArray(field.InitialDefault, field.Type, dt, structArr.Len(), compute.GetAllocator(a.ctx))
-			defer arr.Release()
-			fieldArrs[i] = arr
-			fields[i] = a.constructField(field, arr.DataType())
-		} else {
-			panic(fmt.Errorf("%w: required field is missing and has no default value: %s",
-				iceberg.ErrInvalidSchema, field))
 		}
 	}
 
