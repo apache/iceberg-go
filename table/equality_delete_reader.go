@@ -506,8 +506,98 @@ func makeColEncoder(arr arrow.Array) colEncoder {
 			buf.WriteByte(1)
 			bufPutUint64(buf, uint64(vals[row]))
 		}
+	case *array.String:
+		offsets := a.ValueOffsets()
+
+		rawBytes := a.ValueBytes()
+
+		return func(buf *bytes.Buffer, row int) {
+			if a.IsNull(row) {
+				buf.WriteByte(0)
+
+				return
+			}
+
+			buf.WriteByte(1)
+			start, end := offsets[row], offsets[row+1]
+			bufPutUint32(buf, uint32(end-start))
+			buf.Write(rawBytes[start:end])
+		}
+	case *array.LargeString:
+		offsets := a.ValueOffsets()
+		rawBytes := a.ValueBytes()
+
+		return func(buf *bytes.Buffer, row int) {
+			if a.IsNull(row) {
+				buf.WriteByte(0)
+
+				return
+			}
+
+			buf.WriteByte(1)
+			start, end := offsets[row], offsets[row+1]
+			bufPutUint32(buf, uint32(end-start))
+			buf.Write(rawBytes[start:end])
+		}
+	case *array.Binary:
+		offsets := a.ValueOffsets()
+		rawBytes := a.ValueBytes()
+
+		return func(buf *bytes.Buffer, row int) {
+			if a.IsNull(row) {
+				buf.WriteByte(0)
+
+				return
+			}
+
+			buf.WriteByte(1)
+			start, end := offsets[row], offsets[row+1]
+			bufPutUint32(buf, uint32(end-start))
+			buf.Write(rawBytes[start:end])
+		}
+	case *array.LargeBinary:
+		offsets := a.ValueOffsets()
+		rawBytes := a.ValueBytes()
+
+		return func(buf *bytes.Buffer, row int) {
+			if a.IsNull(row) {
+				buf.WriteByte(0)
+
+				return
+			}
+
+			buf.WriteByte(1)
+			start, end := offsets[row], offsets[row+1]
+			bufPutUint32(buf, uint32(end-start))
+			buf.Write(rawBytes[start:end])
+		}
+	case *array.Boolean:
+		return func(buf *bytes.Buffer, row int) {
+			if a.IsNull(row) {
+				buf.WriteByte(0)
+
+				return
+			}
+
+			buf.WriteByte(1)
+			if a.Value(row) {
+				buf.WriteByte(1)
+			} else {
+				buf.WriteByte(0)
+			}
+		}
+	case *array.FixedSizeBinary:
+		return func(buf *bytes.Buffer, row int) {
+			if a.IsNull(row) {
+				buf.WriteByte(0)
+
+				return
+			}
+
+			buf.WriteByte(1)
+			buf.Write(a.Value(row))
+		}
 	default:
-		// Fallback for string, binary, boolean, etc.
 		return func(buf *bytes.Buffer, row int) {
 			encodeArrowValue(buf, arr, row)
 		}

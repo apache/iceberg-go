@@ -111,7 +111,95 @@ func benchProcessFn(b *testing.B, name string, newFn func(context.Context, []*eq
 	}
 }
 
+func buildBenchRecordString(mem memory.Allocator, numRows int) arrow.RecordBatch {
+	schema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "name", Type: arrow.BinaryTypes.String},
+	}, nil)
+
+	bldr := array.NewRecordBuilder(mem, schema)
+	defer bldr.Release()
+
+	idBldr := bldr.Field(0).(*array.Int64Builder)
+	nameBldr := bldr.Field(1).(*array.StringBuilder)
+
+	for i := 0; i < numRows; i++ {
+		idBldr.Append(int64(i))
+		nameBldr.Append(fmt.Sprintf("user-%08d", i))
+	}
+
+	return bldr.NewRecordBatch()
+}
+
+func buildBenchDeleteSetString(numDeletes int) *equalityDeleteSet {
+	keys := make(set[string])
+	var buf bytes.Buffer
+
+	for i := 0; i < numDeletes; i++ {
+		buf.Reset()
+		buf.WriteByte(1)
+		binary.Write(&buf, binary.BigEndian, int64(i*3))
+		buf.WriteByte(1)
+		s := fmt.Sprintf("user-%08d", i*3)
+		binary.Write(&buf, binary.BigEndian, int32(len(s)))
+		buf.WriteString(s)
+		keys[buf.String()] = struct{}{}
+	}
+
+	return &equalityDeleteSet{
+		keys:     keys,
+		fieldIDs: []int{1, 2},
+		colNames: []string{"id", "name"},
+	}
+}
+
 func BenchmarkProcessEqualityDeletes(b *testing.B) {
 	benchProcessFn(b, "hash", processEqualityDeletesHash)
 	benchProcessFn(b, "columnar", processEqualityDeletesColumnar)
+}
+
+func BenchmarkProcessEqualityDeletesString(b *testing.B) {
+	impls := map[string]func(context.Context, []*equalityDeleteSet) (recProcessFn, error){
+		"hash":     processEqualityDeletesHash,
+		"columnar": processEqualityDeletesColumnar,
+	}
+
+	dataRows := []int{1_000, 100_000, 1_000_000}
+	deleteRows := []int{10, 100, 10_000}
+
+	for implName, newFn := range impls {
+		for _, nData := range dataRows {
+			for _, nDel := range deleteRows {
+				if nDel > nData {
+					continue
+				}
+
+				b.Run(fmt.Sprintf("%s/rows=%d/deletes=%d", implName, nData, nDel), func(b *testing.B) {
+					mem := memory.NewGoAllocator()
+					ctx := compute.WithAllocator(context.Background(), mem)
+					rec := buildBenchRecordString(mem, nData)
+					defer rec.Release()
+
+					delSet := buildBenchDeleteSetString(nDel)
+					filterFn, err := newFn(ctx, []*equalityDeleteSet{delSet})
+					if err != nil {
+						b.Fatal(err)
+					}
+
+					b.ResetTimer()
+					b.ReportAllocs()
+
+					for i := 0; i < b.N; i++ {
+						rec.Retain()
+						result, err := filterFn(rec)
+						if err != nil {
+							b.Fatal(err)
+						}
+
+						result.Release()
+					}
+				})
+			}
+		}
+	}
 }
