@@ -220,38 +220,33 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 		colIndices[i] = indices[0]
 	}
 
-	// Build the set of encoded delete keys.
+	// Build the set of encoded delete keys by iterating aligned batches.
 	keys := make(set[string])
-	numRows := int(tbl.NumRows())
 
 	var keyBuf bytes.Buffer
 
-	for row := 0; row < numRows; row++ {
-		keyBuf.Reset()
-		encodeDeleteKeyTo(&keyBuf, tbl, colIndices, row)
-		keys[keyBuf.String()] = struct{}{}
+	tr := array.NewTableReader(tbl, tbl.NumRows())
+	defer tr.Release()
+
+	for tr.Next() {
+		rec := tr.Record()
+		encoders := make([]colEncoder, len(colIndices))
+		for i, idx := range colIndices {
+			encoders[i] = makeColEncoder(rec.Column(idx))
+		}
+
+		numRows := int(rec.NumRows())
+		for row := 0; row < numRows; row++ {
+			keyBuf.Reset()
+			for _, enc := range encoders {
+				enc(&keyBuf, row)
+			}
+
+			keys[keyBuf.String()] = struct{}{}
+		}
 	}
 
 	return keys, colNames, nil
-}
-
-// encodeDeleteKeyTo encodes the values at the given row from the specified
-// columns into the provided buffer for hash-based lookup.
-func encodeDeleteKeyTo(buf *bytes.Buffer, tbl arrow.Table, colIndices []int, row int) {
-	for _, colIdx := range colIndices {
-		col := tbl.Column(colIdx).Data()
-		chunkRow := row
-
-		for _, chunk := range col.Chunks() {
-			if chunkRow < chunk.Len() {
-				encodeArrowValue(buf, chunk, chunkRow)
-
-				break
-			}
-
-			chunkRow -= chunk.Len()
-		}
-	}
 }
 
 // bufPutUint16 writes a uint16 in big-endian without allocating.
