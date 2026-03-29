@@ -229,7 +229,7 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 	defer tr.Release()
 
 	for tr.Next() {
-		rec := tr.Record()
+		rec := tr.RecordBatch()
 		encoders := make([]colEncoder, len(colIndices))
 		for i, idx := range colIndices {
 			encoders[i] = makeColEncoder(rec.Column(idx))
