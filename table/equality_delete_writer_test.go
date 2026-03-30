@@ -19,6 +19,7 @@ package table_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -225,7 +226,9 @@ func TestWriteEqualityDeleteFilesRejectsInvalidFieldID(t *testing.T) {
 	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 }
 
-func TestWriteEqualityDeleteFilesRejectsPartitionedTable(t *testing.T) {
+func newPartitionedEqDeleteTestTable(t *testing.T) *table.Table {
+	t.Helper()
+
 	location := filepath.ToSlash(t.TempDir())
 
 	iceSchema := iceberg.NewSchema(0,
@@ -242,27 +245,84 @@ func TestWriteEqualityDeleteFilesRejectsPartitionedTable(t *testing.T) {
 		iceberg.Properties{table.PropertyFormatVersion: "2"})
 	require.NoError(t, err)
 
-	tbl := table.New(
-		table.Identifier{"db", "partitioned_test"},
+	return table.New(
+		table.Identifier{"db", "partitioned_eq_del_test"},
 		meta, location+"/metadata/v1.metadata.json",
 		func(ctx context.Context) (iceio.IO, error) {
 			return iceio.LocalFS{}, nil
 		},
 		&rowDeltaCatalog{metadata: meta},
 	)
+}
 
-	delArrowSc, err := table.SchemaToArrowSchema(
-		iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true}),
-		nil, true, false)
+func TestWriteEqualityDeleteFilesPartitionedTable(t *testing.T) {
+	tbl := newPartitionedEqDeleteTestTable(t)
+
+	// Delete records must include both the equality key (id) and partition source (category)
+	delSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+	delArrowSc, err := table.SchemaToArrowSchema(delSchema, nil, true, false)
 	require.NoError(t, err)
 
-	records, release := makeEqDeleteRecords(t, delArrowSc, `[{"id": 1}]`)
+	// 2 books + 1 music = should produce 2 partitioned files
+	records, release := makeEqDeleteRecords(t, delArrowSc,
+		`[{"id": 10, "category": "books"}, {"id": 20, "category": "music"}, {"id": 30, "category": "books"}]`)
 	defer release()
 
 	tx := tbl.NewTransaction()
-	_, err = tx.WriteEqualityDeletes(t.Context(), []int{1}, records)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "partitioned tables is not yet supported")
+	files, err := tx.WriteEqualityDeletes(t.Context(), []int{1}, records)
+	require.NoError(t, err)
+	require.Len(t, files, 2, "should produce one file per partition")
+
+	for _, df := range files {
+		assert.Equal(t, iceberg.EntryContentEqDeletes, df.ContentType())
+		assert.Equal(t, []int{1}, df.EqualityFieldIDs())
+		assert.True(t, df.Count() > 0)
+	}
+
+	// Verify Parquet file content: files should contain only the equality key column (id), not category
+	for _, df := range files {
+		func() {
+			f, err := os.Open(df.FilePath())
+			require.NoError(t, err)
+			defer f.Close()
+
+			rdr, err := file.NewParquetReader(f)
+			require.NoError(t, err)
+			defer rdr.Close()
+
+			pqSchema := rdr.MetaData().Schema
+			assert.Equal(t, 1, pqSchema.NumColumns(), "parquet file should contain only the equality key column")
+			assert.Equal(t, "id", pqSchema.Column(0).Name())
+		}()
+	}
+}
+
+func TestWriteEqualityDeleteFilesPartitionedKeyOverlapsPartition(t *testing.T) {
+	tbl := newPartitionedEqDeleteTestTable(t)
+
+	// When the equality key IS the partition column, no extra columns needed
+	delSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+	delArrowSc, err := table.SchemaToArrowSchema(delSchema, nil, true, false)
+	require.NoError(t, err)
+
+	records, release := makeEqDeleteRecords(t, delArrowSc,
+		`[{"category": "books"}, {"category": "music"}]`)
+	defer release()
+
+	tx := tbl.NewTransaction()
+	files, err := tx.WriteEqualityDeletes(t.Context(), []int{2}, records)
+	require.NoError(t, err)
+	require.NotEmpty(t, files)
+
+	for _, df := range files {
+		assert.Equal(t, iceberg.EntryContentEqDeletes, df.ContentType())
+		assert.Equal(t, []int{2}, df.EqualityFieldIDs())
+	}
 }
 
 func TestWriteEqualityDeleteFilesCommitViaRowDelta(t *testing.T) {
