@@ -51,8 +51,13 @@ var (
 
 // SortField describes a field used in a sort order definition.
 type SortField struct {
-	// SourceID is the source column id from the table's schema
+	// SourceID is the source column id from the table's schema.
+	// For multi-argument transforms, this is the first source column;
+	// use SourceIDs to get all source columns.
 	SourceID int `json:"source-id"`
+	// SourceIDs contains all source column ids for multi-argument transforms.
+	// For single-argument transforms this is nil and SourceID should be used.
+	SourceIDs []int `json:"-"`
 	// Transform is the tranformation used to produce values to be
 	// sorted on from the source column.
 	Transform iceberg.Transform `json:"transform"`
@@ -63,9 +68,25 @@ type SortField struct {
 	NullOrder NullOrder `json:"null-order"`
 }
 
+func (s SortField) Equals(other SortField) bool {
+	return s.SourceID == other.SourceID &&
+		s.Transform.Equals(other.Transform) &&
+		s.Direction == other.Direction &&
+		s.NullOrder == other.NullOrder &&
+		slices.Equal(s.SourceIDs, other.SourceIDs)
+}
+
 func (s *SortField) String() string {
 	if _, ok := s.Transform.(iceberg.IdentityTransform); ok {
+		if len(s.SourceIDs) > 1 {
+			return fmt.Sprintf("%v %s %s", s.SourceIDs, s.Direction, s.NullOrder)
+		}
+
 		return fmt.Sprintf("%d %s %s", s.SourceID, s.Direction, s.NullOrder)
+	}
+
+	if len(s.SourceIDs) > 1 {
+		return fmt.Sprintf("%s(%v) %s %s", s.Transform, s.SourceIDs, s.Direction, s.NullOrder)
 	}
 
 	return fmt.Sprintf("%s(%d) %s %s", s.Transform, s.SourceID, s.Direction, s.NullOrder)
@@ -84,15 +105,36 @@ func (s *SortField) MarshalJSON() ([]byte, error) {
 		}
 	}
 
+	if len(s.SourceIDs) > 1 {
+		return json.Marshal(struct {
+			SourceIDs []int             `json:"source-ids"`
+			Transform iceberg.Transform `json:"transform"`
+			Direction SortDirection     `json:"direction"`
+			NullOrder NullOrder         `json:"null-order"`
+		}{s.SourceIDs, s.Transform, s.Direction, s.NullOrder})
+	}
+
 	type Alias SortField
 
 	return json.Marshal((*Alias)(s))
 }
 
 func (s *SortField) UnmarshalJSON(b []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return fmt.Errorf("%w: failed to unmarshal sort field", err)
+	}
+
+	if _, ok := raw["source-id"]; ok {
+		if _, ok := raw["source-ids"]; ok {
+			return errors.New("sort field cannot contain both source-id and source-ids")
+		}
+	}
+
 	type Alias SortField
 	aux := struct {
 		TransformString string `json:"transform"`
+		SourceIDs       []int  `json:"source-ids,omitempty"`
 		*Alias
 	}{
 		Alias: (*Alias)(s),
@@ -101,6 +143,13 @@ func (s *SortField) UnmarshalJSON(b []byte) error {
 	err := json.Unmarshal(b, &aux)
 	if err != nil {
 		return err
+	}
+
+	if len(aux.SourceIDs) > 0 {
+		s.SourceID = aux.SourceIDs[0]
+		if len(aux.SourceIDs) > 1 {
+			s.SourceIDs = aux.SourceIDs
+		}
 	}
 
 	if s.Transform, err = iceberg.ParseTransform(aux.TransformString); err != nil {
@@ -257,7 +306,9 @@ func (s *SortOrder) CheckCompatibility(schema *iceberg.Schema) error {
 
 func (s SortOrder) Equals(rhs SortOrder) bool {
 	return s.orderID == rhs.orderID &&
-		slices.Equal(s.fields, rhs.fields)
+		slices.EqualFunc(s.fields, rhs.fields, func(a, b SortField) bool {
+			return a.Equals(b)
+		})
 }
 
 func (s SortOrder) String() string {

@@ -113,3 +113,55 @@ func TestUnmarshalInvalidSortTransform(t *testing.T) {
 	err := json.Unmarshal([]byte(badJson), &order)
 	assert.ErrorIs(t, err, iceberg.ErrInvalidTransform)
 }
+
+func TestSortFieldMultiArgSourceIDs(t *testing.T) {
+	t.Run("unmarshal with source-ids", func(t *testing.T) {
+		jsonData := `{"source-ids": [2, 3], "transform": "identity", "direction": "asc", "null-order": "nulls-first"}`
+		var field table.SortField
+		err := json.Unmarshal([]byte(jsonData), &field)
+		require.NoError(t, err)
+		assert.Equal(t, 2, field.SourceID)
+		assert.Equal(t, []int{2, 3}, field.SourceIDs)
+	})
+
+	t.Run("unmarshal with both source-id and source-ids errors", func(t *testing.T) {
+		jsonData := `{"source-id": 1, "source-ids": [2], "transform": "identity", "direction": "asc", "null-order": "nulls-first"}`
+		var field table.SortField
+		err := json.Unmarshal([]byte(jsonData), &field)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot contain both source-id and source-ids")
+	})
+
+	t.Run("marshal multi-arg round-trip", func(t *testing.T) {
+		field := table.SortField{
+			SourceID:  2,
+			SourceIDs: []int{2, 3},
+			Transform: iceberg.IdentityTransform{},
+			Direction: table.SortASC,
+			NullOrder: table.NullsFirst,
+		}
+		data, err := json.Marshal(&field)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), `"source-ids"`)
+		assert.NotContains(t, string(data), `"source-id"`)
+
+		var decoded table.SortField
+		err = json.Unmarshal(data, &decoded)
+		require.NoError(t, err)
+		assert.Equal(t, 2, decoded.SourceID)
+		assert.Equal(t, []int{2, 3}, decoded.SourceIDs)
+	})
+
+	t.Run("marshal single-arg uses source-id", func(t *testing.T) {
+		field := table.SortField{
+			SourceID:  1,
+			Transform: iceberg.IdentityTransform{},
+			Direction: table.SortASC,
+			NullOrder: table.NullsFirst,
+		}
+		data, err := json.Marshal(&field)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), `"source-id"`)
+		assert.NotContains(t, string(data), `"source-ids"`)
+	})
+}

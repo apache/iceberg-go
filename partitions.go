@@ -41,8 +41,13 @@ var UnpartitionedSpec = &PartitionSpec{id: 0}
 // PartitionField represents how one partition value is derived from the
 // source column by transformation.
 type PartitionField struct {
-	// SourceID is the source column id of the table's schema
+	// SourceID is the source column id of the table's schema.
+	// For multi-argument transforms, this is the first source column;
+	// use SourceIDs to get all source columns.
 	SourceID int `json:"source-id"`
+	// SourceIDs contains all source column ids for multi-argument transforms.
+	// For single-argument transforms this is nil and SourceID should be used.
+	SourceIDs []int `json:"-"`
 	// FieldID is the partition field id across all the table partition specs
 	FieldID int `json:"field-id"`
 	// Name is the name of the partition field itself
@@ -64,14 +69,39 @@ func (p *PartitionField) EscapedName() string {
 	return p.escapedName
 }
 
+func (p PartitionField) MarshalJSON() ([]byte, error) {
+	if len(p.SourceIDs) > 1 {
+		// Multi-argument transform: write source-ids instead of source-id
+		return json.Marshal(struct {
+			SourceIDs []int     `json:"source-ids"`
+			FieldID   int       `json:"field-id"`
+			Name      string    `json:"name"`
+			Transform Transform `json:"transform"`
+		}{p.SourceIDs, p.FieldID, p.Name, p.Transform})
+	}
+
+	// Single-argument transform: write source-id
+	return json.Marshal(struct {
+		SourceID  int       `json:"source-id"`
+		FieldID   int       `json:"field-id"`
+		Name      string    `json:"name"`
+		Transform Transform `json:"transform"`
+	}{p.SourceID, p.FieldID, p.Name, p.Transform})
+}
+
 func (p PartitionField) Equals(other PartitionField) bool {
 	return p.SourceID == other.SourceID &&
 		p.FieldID == other.FieldID &&
 		p.Name == other.Name &&
-		p.Transform.Equals(other.Transform)
+		p.Transform.Equals(other.Transform) &&
+		slices.Equal(p.SourceIDs, other.SourceIDs)
 }
 
 func (p *PartitionField) String() string {
+	if len(p.SourceIDs) > 1 {
+		return fmt.Sprintf("%d: %s: %s(%v)", p.FieldID, p.Name, p.Transform, p.SourceIDs)
+	}
+
 	return fmt.Sprintf("%d: %s: %s(%d)", p.FieldID, p.Name, p.Transform, p.SourceID)
 }
 
@@ -102,10 +132,10 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 	}
 
 	if len(aux.SourceIDs) > 0 {
-		if len(aux.SourceIDs) != 1 {
-			return errors.New("partition field source-ids must contain exactly one id")
-		}
 		p.SourceID = aux.SourceIDs[0]
+		if len(aux.SourceIDs) > 1 {
+			p.SourceIDs = aux.SourceIDs
+		}
 	}
 
 	if p.Transform, err = ParseTransform(aux.TransformString); err != nil {
@@ -341,7 +371,9 @@ func (ps *PartitionSpec) CompatibleWith(other *PartitionSpec) bool {
 // Equals returns true iff the field lists are the same AND the spec id
 // is the same between this partition spec and the provided one.
 func (ps PartitionSpec) Equals(other PartitionSpec) bool {
-	return ps.id == other.id && slices.Equal(ps.fields, other.fields)
+	return ps.id == other.id && slices.EqualFunc(ps.fields, other.fields, func(a, b PartitionField) bool {
+		return a.Equals(b)
+	})
 }
 
 // Fields returns an iterator over the partition fields in this spec.

@@ -282,7 +282,7 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		assert.Equal(t, iceberg.BucketTransform{NumBuckets: 25}, field.Transform)
 	})
 
-	t.Run("unmarshal with multiple source-ids should fail", func(t *testing.T) {
+	t.Run("unmarshal with multiple source-ids", func(t *testing.T) {
 		jsonData := `
 		{
 			"source-ids": [2, 3],
@@ -292,8 +292,44 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		}`
 		var field iceberg.PartitionField
 		err := json.Unmarshal([]byte(jsonData), &field)
-		require.Error(t, err)
-		assert.EqualError(t, err, "partition field source-ids must contain exactly one id")
+		require.NoError(t, err)
+		assert.Equal(t, 2, field.SourceID, "SourceID should be first element")
+		assert.Equal(t, []int{2, 3}, field.SourceIDs, "SourceIDs should contain all elements")
+		assert.Equal(t, 1001, field.FieldID)
+		assert.Equal(t, "int_bucket", field.Name)
+	})
+
+	t.Run("marshal multi-arg round-trip", func(t *testing.T) {
+		field := iceberg.PartitionField{
+			SourceID:  2,
+			SourceIDs: []int{2, 3},
+			FieldID:   1001,
+			Name:      "multi_arg",
+			Transform: iceberg.BucketTransform{NumBuckets: 25},
+		}
+		data, err := json.Marshal(field)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), `"source-ids"`)
+		assert.NotContains(t, string(data), `"source-id"`)
+
+		var decoded iceberg.PartitionField
+		err = json.Unmarshal(data, &decoded)
+		require.NoError(t, err)
+		assert.Equal(t, 2, decoded.SourceID)
+		assert.Equal(t, []int{2, 3}, decoded.SourceIDs)
+	})
+
+	t.Run("marshal single-arg uses source-id", func(t *testing.T) {
+		field := iceberg.PartitionField{
+			SourceID:  1,
+			FieldID:   1000,
+			Name:      "single_arg",
+			Transform: iceberg.IdentityTransform{},
+		}
+		data, err := json.Marshal(field)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), `"source-id"`)
+		assert.NotContains(t, string(data), `"source-ids"`)
 	})
 
 	t.Run("unmarshal with both source-id and source-ids", func(t *testing.T) {
