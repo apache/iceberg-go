@@ -115,12 +115,16 @@ func WithScope(scope string) Option {
 	}
 }
 
+// WithAudience sets the audience parameter sent in OAuth token requests.
+// See RFC 8693 for details on token exchange audiences.
 func WithAudience(audience string) Option {
 	return func(o *options) {
 		o.audience = audience
 	}
 }
 
+// WithResource sets the resource parameter sent in OAuth token requests.
+// See RFC 8707 for details on resource indicators.
 func WithResource(resource string) Option {
 	return func(o *options) {
 		o.resource = resource
