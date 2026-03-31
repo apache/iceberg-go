@@ -25,6 +25,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/config"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
@@ -62,8 +63,11 @@ func equalityDeleteSchema(tableSchema *iceberg.Schema, fieldIDs []int) (*iceberg
 //
 // The table must use format version 2 or higher.
 //
-// Note: partitioned tables are not yet supported for equality delete
-// writing. See https://github.com/apache/iceberg-go/issues/808
+// For partitioned tables, the provided records must include the partition
+// source columns in addition to the equality key columns so that records
+// can be routed to the correct partition directories. If the partition
+// source columns overlap with the equality key columns, no extra columns
+// are needed.
 //
 // Usage:
 //
@@ -162,14 +166,28 @@ func equalityDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 		return nil, err
 	}
 
-	// TODO(#808): support partitioned tables for equality delete writing.
-	// The partitioned fanout writer assumes partition source columns are
-	// present in the record, but equality delete records only contain the
-	// delete key columns. Needs either explicit partition values from the
-	// caller (Java pattern) or automatic partition column inclusion.
-	// See https://github.com/apache/iceberg-go/issues/808
 	if !latestMetadata.PartitionSpec().IsUnpartitioned() {
-		return nil, errors.New("equality delete writing for partitioned tables is not yet supported")
+		tableSchema := meta.CurrentSchema()
+		partitionSpec := latestMetadata.PartitionSpec()
+
+		writeSchema, err := equalityDeleteWriteSchema(tableSchema, equalityFieldIDs, partitionSpec)
+		if err != nil {
+			return nil, err
+		}
+
+		factory, err := newWriterFactory(rootLocation, args, meta, writeSchema, targetFileSize,
+			withContentType(iceberg.EntryContentEqDeletes),
+			withFactoryFileSchema(deleteSchema),
+			withFactoryEqualityFieldIDs(equalityFieldIDs))
+		if err != nil {
+			return nil, err
+		}
+
+		partitionWriter := newPartitionedFanoutWriter(
+			partitionSpec, cw, writeSchema, args.itr, factory)
+		workers := config.EnvConfig.MaxWorkers
+
+		return partitionWriter.Write(ctx, workers), nil
 	}
 
 	nextCount, stopCount := iter.Pull(args.counter)
@@ -195,4 +213,38 @@ func equalityDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 	}
 
 	return cw.writeFiles(ctx, rootLocation, args.fs, meta, meta.props, nil, tasks), nil
+}
+
+// equalityDeleteWriteSchema returns a schema containing the union of equality
+// key columns and partition source columns. This allows the partitioned fanout
+// writer to extract partition values from the records while keeping the delete
+// key as the equality identifier.
+func equalityDeleteWriteSchema(tableSchema *iceberg.Schema, equalityFieldIDs []int, spec iceberg.PartitionSpec) (*iceberg.Schema, error) {
+	seen := make(map[int]struct{}, len(equalityFieldIDs))
+	names := make([]string, 0, len(equalityFieldIDs))
+
+	// Equality key columns first (deterministic order).
+	for _, id := range equalityFieldIDs {
+		name, ok := tableSchema.FindColumnName(id)
+		if !ok {
+			return nil, fmt.Errorf("%w: field ID %d not found in table schema", iceberg.ErrInvalidSchema, id)
+		}
+		seen[id] = struct{}{}
+		names = append(names, name)
+	}
+
+	// Partition source columns not already in the equality key.
+	for _, f := range spec.Fields() {
+		if _, ok := seen[f.SourceID]; ok {
+			continue
+		}
+		name, ok := tableSchema.FindColumnName(f.SourceID)
+		if !ok {
+			return nil, fmt.Errorf("%w: partition source field ID %d not found in table schema", iceberg.ErrInvalidSchema, f.SourceID)
+		}
+		seen[f.SourceID] = struct{}{}
+		names = append(names, name)
+	}
+
+	return tableSchema.Select(true, names...)
 }
