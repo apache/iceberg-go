@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -243,6 +244,77 @@ func TestPositionDeletePartitionedFanoutWriterPartitionPathIsDeterministic(t *te
 
 	require.Lenf(t, seen, 1, "partition path must be stable for the same input map, got paths: %v", slices.Collect(maps.Keys(seen)))
 	require.Contains(t, seen, expectedPath)
+}
+
+func TestPositionDeletePartitionedNoGoroutineLeak(t *testing.T) {
+	t.Parallel()
+
+	partitionSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceID: 2,
+		Name:     "age_bucket",
+		Transform: iceberg.BucketTransform{
+			NumBuckets: 2,
+		},
+	})
+
+	metadataBuilder, err := NewMetadataBuilder(2)
+	require.NoError(t, err)
+	err = metadataBuilder.AddSchema(iceberg.NewSchema(0, append(iceberg.PositionalDeleteSchema.Fields(), iceberg.NestedField{Name: "age", ID: 2, Type: iceberg.Int64Type{}})...))
+	require.NoError(t, err)
+	err = metadataBuilder.SetCurrentSchemaID(0)
+	require.NoError(t, err)
+	err = metadataBuilder.AddPartitionSpec(&partitionSpec, true)
+	require.NoError(t, err)
+	err = metadataBuilder.SetDefaultSpecID(0)
+	require.NoError(t, err)
+	sortOrder, err := NewSortOrder(1, []SortField{{
+		SourceID:  2,
+		Direction: SortASC,
+		Transform: iceberg.IdentityTransform{},
+		NullOrder: NullsFirst,
+	}})
+	require.NoError(t, err)
+	err = metadataBuilder.AddSortOrder(&sortOrder)
+	require.NoError(t, err)
+	err = metadataBuilder.SetDefaultSortOrderID(1)
+	require.NoError(t, err)
+
+	tmpDir := t.TempDir()
+
+	// Allow goroutines from prior tests to settle.
+	runtime.GC()
+	time.Sleep(50 * time.Millisecond)
+	before := runtime.NumGoroutine()
+
+	iterations := 50
+	for range iterations {
+		writeUUID := uuid.New()
+		emptyItr := func(yield func(arrow.RecordBatch, error) bool) {}
+
+		itr := positionDeleteRecordsToDataFiles(t.Context(), tmpDir, metadataBuilder,
+			map[string]partitionContext{}, recordWritingArgs{
+				sc:        PositionalDeleteArrowSchema,
+				itr:       emptyItr,
+				fs:        &io.LocalFS{},
+				writeUUID: &writeUUID,
+				counter:   internal.Counter(0),
+			})
+
+		for range itr {
+		}
+	}
+
+	// Allow leaked goroutines to appear.
+	runtime.GC()
+	time.Sleep(50 * time.Millisecond)
+	after := runtime.NumGoroutine()
+
+	// Before the fix, each iteration leaked a goroutine from iter.Pull(args.counter)
+	// being called unconditionally but stopCount never invoked in the partitioned path.
+	// Allow a small margin for background runtime goroutines.
+	assert.LessOrEqual(t, after, before+5,
+		"expected no goroutine growth after %d iterations, got %d -> %d (delta: %d)",
+		iterations, before, after, after-before)
 }
 
 func onlyContext(ctx context.Context, _ func()) context.Context {
