@@ -767,6 +767,44 @@ func (m *ManifestTestSuite) TestReadManifestListV3() {
 	m.Equal([]byte{0x02, 0x00, 0x00, 0x00}, *part.UpperBound)
 }
 
+// writeManifestListNoFormatVersion writes a valid v2 manifest list Avro file that
+// omits the "format-version" metadata key, simulating a file produced by a
+// non-Java Iceberg implementation that strictly follows the spec.
+func writeManifestListNoFormatVersion(t *testing.T, version int) bytes.Buffer {
+	t.Helper()
+
+	fileSchema, err := internal.NewManifestFileSchema(version)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	enc, err := ocf.NewEncoderWithSchema(fileSchema, &buf,
+		ocf.WithSchemaMarshaler(ocf.FullSchemaMarshaler),
+		ocf.WithEncoderSchemaCache(&avro.SchemaCache{}),
+		ocf.WithMetadata(map[string][]byte{
+			"snapshot-id":     []byte("1234"),
+			"sequence-number": []byte("0"),
+		}),
+		ocf.WithCodec(ocf.Deflate))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	return buf
+}
+
+func (m *ManifestTestSuite) TestReadManifestListMissingFormatVersion() {
+	// A manifest list without "format-version" should succeed, defaulting to v1.
+	buf := writeManifestListNoFormatVersion(m.T(), 1)
+	files, err := ReadManifestList(&buf)
+	m.NoError(err)
+	m.Empty(files) // the file has no entries, just headers
+}
+
 func (m *ManifestTestSuite) TestReadManifestListIncompleteSchema() {
 	// This prevents a regression that could be caused by using a schema cache
 	// across multiple read/write operations of an avro file. While it may sound
