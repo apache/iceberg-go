@@ -149,6 +149,12 @@ func (t *Transaction) SetProperties(props iceberg.Properties) error {
 	return nil
 }
 
+// UpgradeFormatVersion upgrades the table to the given format version. Downgrading
+// is not allowed. If the table is already at the given version, this is a no-op.
+func (t *Transaction) UpgradeFormatVersion(version int) error {
+	return t.apply([]Update{NewUpgradeFormatVersionUpdate(version)}, nil)
+}
+
 func (t *Transaction) UpdateSpec(caseSensitive bool) *UpdateSpec {
 	return NewUpdateSpec(t, caseSensitive)
 }
