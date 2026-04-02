@@ -126,6 +126,68 @@ func TestTableCommitReturnsCopies(t *testing.T) {
 	assert.NotEmpty(t, tc2.Requirements)
 }
 
+func newV1CommitTestTable(t *testing.T) *table.Table {
+	t.Helper()
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+
+	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, "s3://bucket/test",
+		iceberg.Properties{table.PropertyFormatVersion: "1"})
+	require.NoError(t, err)
+
+	return table.New(
+		table.Identifier{"db", "test_table"},
+		meta, "s3://bucket/test/metadata/v1.metadata.json",
+		nil, nil,
+	)
+}
+
+func TestUpgradeFormatVersionV1ToV2(t *testing.T) {
+	tbl := newV1CommitTestTable(t)
+	assert.Equal(t, 1, tbl.Metadata().Version())
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.UpgradeFormatVersion(2))
+
+	tc, err := tx.TableCommit()
+	require.NoError(t, err)
+
+	var found bool
+	for _, u := range tc.Updates {
+		if u.Action() == "upgrade-format-version" {
+			found = true
+
+			break
+		}
+	}
+	assert.True(t, found, "expected upgrade-format-version update")
+}
+
+func TestUpgradeFormatVersionNoOpWhenSameVersion(t *testing.T) {
+	tbl := newCommitTestTable(t) // v2 table
+	tx := tbl.NewTransaction()
+
+	require.NoError(t, tx.UpgradeFormatVersion(2))
+
+	tc, err := tx.TableCommit()
+	require.NoError(t, err)
+
+	// No updates should be staged — it's a no-op
+	assert.Empty(t, tc.Updates)
+}
+
+func TestUpgradeFormatVersionDowngradeErrors(t *testing.T) {
+	tbl := newCommitTestTable(t) // v2 table
+	tx := tbl.NewTransaction()
+
+	err := tx.UpgradeFormatVersion(1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "downgrading")
+}
+
 func TestMarkCommittedPreventsCommit(t *testing.T) {
 	tbl := newCommitTestTable(t)
 	tx := tbl.NewTransaction()
