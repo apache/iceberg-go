@@ -46,7 +46,7 @@ type producerImpl interface {
 	// manifests that should be included in the snapshot
 	existingManifests() ([]iceberg.ManifestFile, error)
 	// return the deleted entries for writing delete file manifests
-	deletedEntries() ([]iceberg.ManifestEntry, error)
+	deletedEntries(ctx context.Context) ([]iceberg.ManifestEntry, error)
 }
 
 func newManifestFileName(num int, commit uuid.UUID) string {
@@ -97,7 +97,7 @@ func (fa *fastAppendFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 	return existing, nil
 }
 
-func (fa *fastAppendFiles) deletedEntries() ([]iceberg.ManifestEntry, error) {
+func (fa *fastAppendFiles) deletedEntries(_ context.Context) ([]iceberg.ManifestEntry, error) {
 	// for fast appends, there are no deleted entries
 	return nil, nil
 }
@@ -197,7 +197,7 @@ func (of *overwriteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 	return existingFiles, nil
 }
 
-func (of *overwriteFiles) deletedEntries() ([]iceberg.ManifestEntry, error) {
+func (of *overwriteFiles) deletedEntries(ctx context.Context) ([]iceberg.ManifestEntry, error) {
 	// determine if we need to record any deleted entries
 	//
 	// with a full overwrite all the entries are considered deleted
@@ -240,7 +240,7 @@ func (of *overwriteFiles) deletedEntries() ([]iceberg.ManifestEntry, error) {
 
 	nWorkers := config.EnvConfig.MaxWorkers
 	finalResult := make([]iceberg.ManifestEntry, 0, len(previousManifests))
-	for entries, err := range tblutils.MapExec(context.TODO(), nWorkers, slices.Values(previousManifests), getEntries) {
+	for entries, err := range tblutils.MapExec(ctx, nWorkers, slices.Values(previousManifests), getEntries) {
 		if err != nil {
 			return nil, err
 		}
@@ -531,8 +531,8 @@ func (sp *snapshotProducer) fetchManifestEntry(m iceberg.ManifestFile, discardDe
 	return m.FetchEntries(sp.io, discardDeleted)
 }
 
-func (sp *snapshotProducer) manifests() (_ []iceberg.ManifestFile, err error) {
-	deleted, err := sp.deletedEntries()
+func (sp *snapshotProducer) manifests(ctx context.Context) (_ []iceberg.ManifestFile, err error) {
+	deleted, err := sp.deletedEntries(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -703,8 +703,8 @@ func (sp *snapshotProducer) summary(props iceberg.Properties) (Summary, error) {
 	}, previousSummary)
 }
 
-func (sp *snapshotProducer) commit() (_ []Update, _ []Requirement, err error) {
-	newManifests, err := sp.manifests()
+func (sp *snapshotProducer) commit(ctx context.Context) (_ []Update, _ []Requirement, err error) {
+	newManifests, err := sp.manifests(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
