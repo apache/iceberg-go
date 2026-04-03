@@ -237,7 +237,7 @@ func newPartitionedEqDeleteTestTable(t *testing.T) *table.Table {
 	)
 
 	partSpec := iceberg.NewPartitionSpec(
-		iceberg.PartitionField{SourceID: 2, FieldID: 1000, Name: "category", Transform: iceberg.IdentityTransform{}},
+		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1000, Name: "category", Transform: iceberg.IdentityTransform{}},
 	)
 
 	meta, err := table.NewMetadata(iceSchema, &partSpec,

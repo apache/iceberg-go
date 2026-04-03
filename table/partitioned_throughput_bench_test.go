@@ -48,8 +48,8 @@ func runBenchmark(b *testing.B, icebergSchema *iceberg.Schema, arrSchema *arrow.
 
 	// Define partition spec (partitioned by day(ts) and host)
 	spec := iceberg.NewPartitionSpecID(1,
-		iceberg.PartitionField{SourceID: 2, FieldID: 1000, Transform: iceberg.DayTransform{}, Name: "ts_day"},
-		iceberg.PartitionField{SourceID: 3, FieldID: 1001, Transform: iceberg.IdentityTransform{}, Name: "host"},
+		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1000, Transform: iceberg.DayTransform{}, Name: "ts_day"},
+		iceberg.PartitionField{SourceIDs: []int{3}, FieldID: 1001, Transform: iceberg.IdentityTransform{}, Name: "host"},
 	)
 
 	for _, bs := range benchSizes {
@@ -507,7 +507,7 @@ func BenchmarkPartitionedWriteThroughput_PartitionCount(b *testing.B) {
 
 	// Partition spec - only by partition_key
 	spec := iceberg.NewPartitionSpecID(1,
-		iceberg.PartitionField{SourceID: 3, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "partition_key"},
+		iceberg.PartitionField{SourceIDs: []int{3}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "partition_key"},
 	)
 
 	numRecords := 100_000

@@ -203,7 +203,7 @@ func TestManifestPartitionVals(t *testing.T) {
 			})
 			partitionSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
 				Name:      "transformed_abc",
-				SourceID:  1,
+				SourceIDs: []int{1},
 				FieldID:   1000,
 				Transform: tt.transform,
 			})

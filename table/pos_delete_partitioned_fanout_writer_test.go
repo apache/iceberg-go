@@ -96,8 +96,8 @@ func TestPositionDeletePartitionedFanoutWriterProcessBatch(t *testing.T) {
 			}
 
 			partitionSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
-				SourceID: 2,
-				Name:     "age_bucket",
+				SourceIDs: []int{2},
+				Name:      "age_bucket",
 				Transform: iceberg.BucketTransform{
 					NumBuckets: 2,
 				},
@@ -114,7 +114,7 @@ func TestPositionDeletePartitionedFanoutWriterProcessBatch(t *testing.T) {
 			err = metadataBuilder.SetDefaultSpecID(0)
 			require.NoError(t, err)
 			sortOrder, err := NewSortOrder(1, []SortField{{
-				SourceID:  2,
+				SourceIDs: []int{2},
 				Direction: SortASC,
 				Transform: iceberg.IdentityTransform{},
 				NullOrder: NullsFirst,
@@ -168,20 +168,20 @@ func TestPositionDeletePartitionedFanoutWriterPartitionPathIsDeterministic(t *te
 	partitionSpec := iceberg.NewPartitionSpec(
 		iceberg.PartitionField{
 			FieldID:   1000,
-			SourceID:  2147483546, // file_path
+			SourceIDs: []int{2147483546}, // file_path
 			Name:      "file_path",
 			Transform: iceberg.IdentityTransform{},
 		},
 		iceberg.PartitionField{
 			FieldID:   1001,
-			SourceID:  2147483545, // pos
+			SourceIDs: []int{2147483545}, // pos
 			Name:      "pos",
 			Transform: iceberg.IdentityTransform{},
 		},
 		iceberg.PartitionField{
-			FieldID:  1002,
-			SourceID: 2147483545, // pos
-			Name:     "pos_bucket",
+			FieldID:   1002,
+			SourceIDs: []int{2147483545}, // pos
+			Name:      "pos_bucket",
 			Transform: iceberg.BucketTransform{
 				NumBuckets: 128,
 			},
@@ -199,7 +199,7 @@ func TestPositionDeletePartitionedFanoutWriterPartitionPathIsDeterministic(t *te
 	err = metadataBuilder.SetDefaultSpecID(0)
 	require.NoError(t, err)
 	sortOrder, err := NewSortOrder(1, []SortField{{
-		SourceID:  2147483546,
+		SourceIDs: []int{2147483546},
 		Direction: SortASC,
 		Transform: iceberg.IdentityTransform{},
 		NullOrder: NullsFirst,
@@ -250,8 +250,8 @@ func TestPositionDeletePartitionedNoGoroutineLeak(t *testing.T) {
 	t.Parallel()
 
 	partitionSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
-		SourceID: 2,
-		Name:     "age_bucket",
+		SourceIDs: []int{2},
+		Name:      "age_bucket",
 		Transform: iceberg.BucketTransform{
 			NumBuckets: 2,
 		},
@@ -268,7 +268,7 @@ func TestPositionDeletePartitionedNoGoroutineLeak(t *testing.T) {
 	err = metadataBuilder.SetDefaultSpecID(0)
 	require.NoError(t, err)
 	sortOrder, err := NewSortOrder(1, []SortField{{
-		SourceID:  2,
+		SourceIDs: []int{2},
 		Direction: SortASC,
 		Transform: iceberg.IdentityTransform{},
 		NullOrder: NullsFirst,

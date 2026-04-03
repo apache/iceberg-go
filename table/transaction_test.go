@@ -310,7 +310,7 @@ func (s *SparkIntegrationTestSuite) TestUpdateSpec() {
 	)
 
 	partitionSpec := iceberg.NewPartitionSpec(
-		iceberg.PartitionField{SourceID: 2, FieldID: 1000, Transform: iceberg.TruncateTransform{Width: 5}, Name: "bar_truncate"},
+		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1000, Transform: iceberg.TruncateTransform{Width: 5}, Name: "bar_truncate"},
 	)
 
 	tbl, err := s.cat.CreateTable(
@@ -596,8 +596,8 @@ func (s *SparkIntegrationTestSuite) TestDeleteMergeOnReadPartitioned() {
 	)
 
 	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
-		SourceID: 3,
-		Name:     "age_bucket",
+		SourceIDs: []int{3},
+		Name:      "age_bucket",
 		Transform: iceberg.BucketTransform{
 			NumBuckets: 2,
 		},

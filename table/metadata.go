@@ -1058,7 +1058,7 @@ func (b *MetadataBuilder) reuseOrCreateNewSortOrderID(newOrder *SortOrder) int {
 
 	newOrderID := UnsortedSortOrderID + 1
 	for _, order := range b.sortOrderList {
-		if slices.Equal(order.fields, newOrder.fields) {
+		if slices.EqualFunc(order.fields, newOrder.fields, func(a, b SortField) bool { return a.Equals(b) }) {
 			return order.OrderID()
 		}
 		if order.OrderID() >= newOrderID {
@@ -1653,8 +1653,9 @@ func (m *metadataV1) Equals(other Metadata) bool {
 		return true
 	}
 
-	return m.Schema.Equals(rhs.Schema) && slices.Equal(m.Partition, rhs.Partition) &&
-		m.commonMetadata.Equals(&rhs.commonMetadata)
+	return m.Schema.Equals(rhs.Schema) && slices.EqualFunc(m.Partition, rhs.Partition, func(a, b iceberg.PartitionField) bool {
+		return a.Equals(b)
+	}) && m.commonMetadata.Equals(&rhs.commonMetadata)
 }
 
 func (m *metadataV1) preValidate() {
@@ -1989,7 +1990,7 @@ func reassignIDs(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, sortOrde
 	for _, f := range partitions.Fields() {
 		var s string
 		var ok bool
-		if s, ok = previousMapFn(f.SourceID); !ok {
+		if s, ok = previousMapFn(f.SourceID()); !ok {
 			return nil, fmt.Errorf("%w: field %d not found in schema", ErrInvalidMetadata, f.FieldID)
 		}
 		opts = append(opts, iceberg.AddPartitionFieldByName(s, f.Name, f.Transform, freshSc, nil))

@@ -31,7 +31,7 @@ func TestPartitionSpec(t *testing.T) {
 
 	bucket := iceberg.BucketTransform{NumBuckets: 4}
 	idField1 := iceberg.PartitionField{
-		SourceID: 3, FieldID: 1001, Name: "id", Transform: bucket,
+		SourceIDs: []int{3}, FieldID: 1001, Name: "id", Transform: bucket,
 	}
 	spec1 := iceberg.NewPartitionSpec(idField1)
 
@@ -47,7 +47,7 @@ func TestPartitionSpec(t *testing.T) {
 
 	// only differs by PartitionField FieldID
 	idField2 := iceberg.PartitionField{
-		SourceID: 3, FieldID: 1002, Name: "id", Transform: bucket,
+		SourceIDs: []int{3}, FieldID: 1002, Name: "id", Transform: bucket,
 	}
 	spec2 := iceberg.NewPartitionSpec(idField2)
 
@@ -63,15 +63,15 @@ func TestPartitionSpec(t *testing.T) {
 
 func TestUnpartitionedWithVoidField(t *testing.T) {
 	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
-		SourceID: 3, FieldID: 1001, Name: "void", Transform: iceberg.VoidTransform{},
+		SourceIDs: []int{3}, FieldID: 1001, Name: "void", Transform: iceberg.VoidTransform{},
 	})
 
 	assert.True(t, spec.IsUnpartitioned())
 
 	spec2 := iceberg.NewPartitionSpec(iceberg.PartitionField{
-		SourceID: 3, FieldID: 1001, Name: "void", Transform: iceberg.VoidTransform{},
+		SourceIDs: []int{3}, FieldID: 1001, Name: "void", Transform: iceberg.VoidTransform{},
 	}, iceberg.PartitionField{
-		SourceID: 3, FieldID: 1002, Name: "bucket", Transform: iceberg.BucketTransform{NumBuckets: 2},
+		SourceIDs: []int{3}, FieldID: 1002, Name: "bucket", Transform: iceberg.BucketTransform{NumBuckets: 2},
 	})
 
 	assert.False(t, spec2.IsUnpartitioned())
@@ -88,11 +88,11 @@ func TestSerializeUnpartitionedSpec(t *testing.T) {
 func TestSerializePartitionSpec(t *testing.T) {
 	spec := iceberg.NewPartitionSpecID(3,
 		iceberg.PartitionField{
-			SourceID: 1, FieldID: 1000,
+			SourceIDs: []int{1}, FieldID: 1000,
 			Transform: iceberg.TruncateTransform{Width: 19}, Name: "str_truncate",
 		},
 		iceberg.PartitionField{
-			SourceID: 2, FieldID: 1001,
+			SourceIDs: []int{2}, FieldID: 1001,
 			Transform: iceberg.BucketTransform{NumBuckets: 25}, Name: "int_bucket",
 		},
 	)
@@ -127,19 +127,19 @@ func TestSerializePartitionSpec(t *testing.T) {
 func TestPartitionType(t *testing.T) {
 	spec := iceberg.NewPartitionSpecID(3,
 		iceberg.PartitionField{
-			SourceID: 1, FieldID: 1000,
+			SourceIDs: []int{1}, FieldID: 1000,
 			Transform: iceberg.TruncateTransform{Width: 19}, Name: "str_truncate",
 		},
 		iceberg.PartitionField{
-			SourceID: 2, FieldID: 1001,
+			SourceIDs: []int{2}, FieldID: 1001,
 			Transform: iceberg.BucketTransform{NumBuckets: 25}, Name: "int_bucket",
 		},
 		iceberg.PartitionField{
-			SourceID: 3, FieldID: 1002,
+			SourceIDs: []int{3}, FieldID: 1002,
 			Transform: iceberg.IdentityTransform{}, Name: "bool_identity",
 		},
 		iceberg.PartitionField{
-			SourceID: 1, FieldID: 1003,
+			SourceIDs: []int{1}, FieldID: 1003,
 			Transform: iceberg.VoidTransform{}, Name: "str_void",
 		},
 	)
@@ -170,15 +170,15 @@ func TestPartitionSpecToPath(t *testing.T) {
 
 	spec := iceberg.NewPartitionSpecID(3,
 		iceberg.PartitionField{
-			SourceID: 1, FieldID: 1000,
+			SourceIDs: []int{1}, FieldID: 1000,
 			Transform: iceberg.TruncateTransform{Width: 19}, Name: "my#str%bucket",
 		},
 		iceberg.PartitionField{
-			SourceID: 2, FieldID: 1001,
+			SourceIDs: []int{2}, FieldID: 1001,
 			Transform: iceberg.IdentityTransform{}, Name: "other str+bucket",
 		},
 		iceberg.PartitionField{
-			SourceID: 3, FieldID: 1002,
+			SourceIDs: []int{3}, FieldID: 1002,
 			Transform: iceberg.BucketTransform{NumBuckets: 25}, Name: "my!int:bucket",
 		})
 
@@ -201,39 +201,39 @@ func TestGetPartitionFieldName(t *testing.T) {
 		expectedName string
 	}{
 		{
-			field:        iceberg.PartitionField{SourceID: 1, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "foo"},
+			field:        iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "foo"},
 			expectedName: "foo",
 		},
 		{
-			field:        iceberg.PartitionField{SourceID: 1, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: ""},
+			field:        iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: ""},
 			expectedName: "str",
 		},
 		{
-			field:        iceberg.PartitionField{SourceID: 2, FieldID: 1001, Transform: iceberg.BucketTransform{NumBuckets: 7}, Name: ""},
+			field:        iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1001, Transform: iceberg.BucketTransform{NumBuckets: 7}, Name: ""},
 			expectedName: "int_bucket_7",
 		},
 		{
-			field:        iceberg.PartitionField{SourceID: 2, FieldID: 1002, Transform: iceberg.TruncateTransform{Width: 19}, Name: ""},
+			field:        iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1002, Transform: iceberg.TruncateTransform{Width: 19}, Name: ""},
 			expectedName: "int_trunc_19",
 		},
 		{
-			field:        iceberg.PartitionField{SourceID: 3, FieldID: 1003, Transform: iceberg.VoidTransform{}, Name: ""},
+			field:        iceberg.PartitionField{SourceIDs: []int{3}, FieldID: 1003, Transform: iceberg.VoidTransform{}, Name: ""},
 			expectedName: "ts_null",
 		},
 		{
-			field:        iceberg.PartitionField{SourceID: 3, FieldID: 1004, Transform: iceberg.YearTransform{}, Name: ""},
+			field:        iceberg.PartitionField{SourceIDs: []int{3}, FieldID: 1004, Transform: iceberg.YearTransform{}, Name: ""},
 			expectedName: "ts_year",
 		},
 		{
-			field:        iceberg.PartitionField{SourceID: 3, FieldID: 1004, Transform: iceberg.MonthTransform{}, Name: ""},
+			field:        iceberg.PartitionField{SourceIDs: []int{3}, FieldID: 1004, Transform: iceberg.MonthTransform{}, Name: ""},
 			expectedName: "ts_month",
 		},
 		{
-			field:        iceberg.PartitionField{SourceID: 3, FieldID: 1004, Transform: iceberg.DayTransform{}, Name: ""},
+			field:        iceberg.PartitionField{SourceIDs: []int{3}, FieldID: 1004, Transform: iceberg.DayTransform{}, Name: ""},
 			expectedName: "ts_day",
 		},
 		{
-			field:        iceberg.PartitionField{SourceID: 3, FieldID: 1004, Transform: iceberg.HourTransform{}, Name: ""},
+			field:        iceberg.PartitionField{SourceIDs: []int{3}, FieldID: 1004, Transform: iceberg.HourTransform{}, Name: ""},
 			expectedName: "ts_hour",
 		},
 	}
@@ -259,7 +259,7 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		var field iceberg.PartitionField
 		err := json.Unmarshal([]byte(jsonData), &field)
 		require.NoError(t, err)
-		assert.Equal(t, 1, field.SourceID)
+		assert.Equal(t, 1, field.SourceID())
 		assert.Equal(t, 1000, field.FieldID)
 		assert.Equal(t, "str_truncate", field.Name)
 		assert.Equal(t, iceberg.TruncateTransform{Width: 19}, field.Transform)
@@ -276,13 +276,13 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		var field iceberg.PartitionField
 		err := json.Unmarshal([]byte(jsonData), &field)
 		require.NoError(t, err)
-		assert.Equal(t, 2, field.SourceID)
+		assert.Equal(t, 2, field.SourceID())
 		assert.Equal(t, 1001, field.FieldID)
 		assert.Equal(t, "int_bucket", field.Name)
 		assert.Equal(t, iceberg.BucketTransform{NumBuckets: 25}, field.Transform)
 	})
 
-	t.Run("unmarshal with multiple source-ids should fail", func(t *testing.T) {
+	t.Run("unmarshal with multiple source-ids", func(t *testing.T) {
 		jsonData := `
 		{
 			"source-ids": [2, 3],
@@ -292,8 +292,43 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		}`
 		var field iceberg.PartitionField
 		err := json.Unmarshal([]byte(jsonData), &field)
-		require.Error(t, err)
-		assert.EqualError(t, err, "partition field source-ids must contain exactly one id")
+		require.NoError(t, err)
+		assert.Equal(t, 2, field.SourceID(), "SourceID should be first element")
+		assert.Equal(t, []int{2, 3}, field.SourceIDs, "SourceIDs should contain all elements")
+		assert.Equal(t, 1001, field.FieldID)
+		assert.Equal(t, "int_bucket", field.Name)
+	})
+
+	t.Run("marshal multi-arg round-trip", func(t *testing.T) {
+		field := iceberg.PartitionField{
+			SourceIDs: []int{2, 3},
+			FieldID:   1001,
+			Name:      "multi_arg",
+			Transform: iceberg.BucketTransform{NumBuckets: 25},
+		}
+		data, err := json.Marshal(field)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), `"source-ids"`)
+		assert.NotContains(t, string(data), `"source-id"`)
+
+		var decoded iceberg.PartitionField
+		err = json.Unmarshal(data, &decoded)
+		require.NoError(t, err)
+		assert.Equal(t, 2, decoded.SourceID())
+		assert.Equal(t, []int{2, 3}, decoded.SourceIDs)
+	})
+
+	t.Run("marshal single-arg uses source-id", func(t *testing.T) {
+		field := iceberg.PartitionField{
+			SourceIDs: []int{1},
+			FieldID:   1000,
+			Name:      "single_arg",
+			Transform: iceberg.IdentityTransform{},
+		}
+		data, err := json.Marshal(field)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), `"source-id"`)
+		assert.NotContains(t, string(data), `"source-ids"`)
 	})
 
 	t.Run("unmarshal with both source-id and source-ids", func(t *testing.T) {
@@ -321,7 +356,7 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		var field iceberg.PartitionField
 		err := json.Unmarshal([]byte(jsonData), &field)
 		require.NoError(t, err)
-		assert.Zero(t, field.SourceID)
+		assert.Zero(t, field.SourceID())
 		assert.Equal(t, 1003, field.FieldID)
 		assert.Equal(t, "void", field.Name)
 		assert.Equal(t, iceberg.VoidTransform{}, field.Transform)

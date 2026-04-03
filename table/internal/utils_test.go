@@ -165,7 +165,7 @@ func TestPartitionValue_LinearTransforms(t *testing.T) {
 			maxLit := iceberg.NewLiteral(iceberg.Timestamp(tc.max.UnixMicro()))
 
 			partitionField := iceberg.PartitionField{
-				SourceID:  1,
+				SourceIDs: []int{1},
 				FieldID:   100,
 				Name:      tc.name + "_part",
 				Transform: tc.transform,
@@ -192,7 +192,7 @@ func TestPartitionValue_MismatchPanics(t *testing.T) {
 		Type: iceberg.TimestampType{},
 	})
 	partitionField := iceberg.PartitionField{
-		SourceID:  1,
+		SourceIDs: []int{1},
 		FieldID:   100,
 		Name:      "date_part",
 		Transform: iceberg.DayTransform{},

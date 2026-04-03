@@ -101,7 +101,7 @@ func TestManifestEvaluator(t *testing.T) {
 	for _, f := range testSchema.Fields() {
 		partFields = append(partFields, iceberg.PartitionField{
 			Name:      f.Name,
-			SourceID:  f.ID,
+			SourceIDs: []int{f.ID},
 			FieldID:   f.ID,
 			Transform: iceberg.IdentityTransform{},
 		})
@@ -735,7 +735,7 @@ func (*ProjectionTestSuite) emptySpec() iceberg.PartitionSpec {
 func (*ProjectionTestSuite) idSpec() iceberg.PartitionSpec {
 	return iceberg.NewPartitionSpec(
 		iceberg.PartitionField{
-			SourceID: 1, FieldID: 1000,
+			SourceIDs: []int{1}, FieldID: 1000,
 			Transform: iceberg.IdentityTransform{}, Name: "id_part",
 		},
 	)
@@ -744,7 +744,7 @@ func (*ProjectionTestSuite) idSpec() iceberg.PartitionSpec {
 func (*ProjectionTestSuite) bucketSpec() iceberg.PartitionSpec {
 	return iceberg.NewPartitionSpec(
 		iceberg.PartitionField{
-			SourceID: 2, FieldID: 1000,
+			SourceIDs: []int{2}, FieldID: 1000,
 			Transform: iceberg.BucketTransform{NumBuckets: 16}, Name: "data_bucket",
 		},
 	)
@@ -753,11 +753,11 @@ func (*ProjectionTestSuite) bucketSpec() iceberg.PartitionSpec {
 func (*ProjectionTestSuite) daySpec() iceberg.PartitionSpec {
 	return iceberg.NewPartitionSpec(
 		iceberg.PartitionField{
-			SourceID: 4, FieldID: 1000,
+			SourceIDs: []int{4}, FieldID: 1000,
 			Transform: iceberg.DayTransform{}, Name: "date",
 		},
 		iceberg.PartitionField{
-			SourceID: 3, FieldID: 1001,
+			SourceIDs: []int{3}, FieldID: 1001,
 			Transform: iceberg.DayTransform{}, Name: "ddate",
 		},
 	)
@@ -766,7 +766,7 @@ func (*ProjectionTestSuite) daySpec() iceberg.PartitionSpec {
 func (*ProjectionTestSuite) hourSpec() iceberg.PartitionSpec {
 	return iceberg.NewPartitionSpec(
 		iceberg.PartitionField{
-			SourceID: 4, FieldID: 1000,
+			SourceIDs: []int{4}, FieldID: 1000,
 			Transform: iceberg.HourTransform{}, Name: "hour",
 		},
 	)
@@ -775,7 +775,7 @@ func (*ProjectionTestSuite) hourSpec() iceberg.PartitionSpec {
 func (*ProjectionTestSuite) truncateStrSpec() iceberg.PartitionSpec {
 	return iceberg.NewPartitionSpec(
 		iceberg.PartitionField{
-			SourceID: 2, FieldID: 1000,
+			SourceIDs: []int{2}, FieldID: 1000,
 			Transform: iceberg.TruncateTransform{Width: 2}, Name: "data_trunc",
 		},
 	)
@@ -784,7 +784,7 @@ func (*ProjectionTestSuite) truncateStrSpec() iceberg.PartitionSpec {
 func (*ProjectionTestSuite) truncateIntSpec() iceberg.PartitionSpec {
 	return iceberg.NewPartitionSpec(
 		iceberg.PartitionField{
-			SourceID: 1, FieldID: 1000,
+			SourceIDs: []int{1}, FieldID: 1000,
 			Transform: iceberg.TruncateTransform{Width: 10}, Name: "id_trunc",
 		},
 	)
@@ -793,11 +793,11 @@ func (*ProjectionTestSuite) truncateIntSpec() iceberg.PartitionSpec {
 func (*ProjectionTestSuite) idAndBucketSpec() iceberg.PartitionSpec {
 	return iceberg.NewPartitionSpec(
 		iceberg.PartitionField{
-			SourceID: 1, FieldID: 1000,
+			SourceIDs: []int{1}, FieldID: 1000,
 			Transform: iceberg.IdentityTransform{}, Name: "id_part",
 		},
 		iceberg.PartitionField{
-			SourceID: 2, FieldID: 1001,
+			SourceIDs: []int{2}, FieldID: 1001,
 			Transform: iceberg.BucketTransform{NumBuckets: 16}, Name: "data_bucket",
 		},
 	)

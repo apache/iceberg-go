@@ -95,7 +95,7 @@ func (s *FanoutWriterTestSuite) testTransformPartition(transform iceberg.Transfo
 
 	spec := iceberg.NewPartitionSpec(
 		iceberg.PartitionField{
-			SourceID:  sourceField.ID,
+			SourceIDs: []int{sourceField.ID},
 			FieldID:   1000,
 			Transform: transform,
 			Name:      "test_%s" + transformName,
@@ -324,12 +324,12 @@ func (s *FanoutWriterTestSuite) TestPartitionedLogicalTypesRequireIntFieldIDCase
 	)
 
 	spec := iceberg.NewPartitionSpec(
-		iceberg.PartitionField{SourceID: 2, FieldID: 4008, Transform: iceberg.IdentityTransform{}, Name: "decimal_col"},
-		iceberg.PartitionField{SourceID: 3, FieldID: 4009, Transform: iceberg.IdentityTransform{}, Name: "time_col"},
-		iceberg.PartitionField{SourceID: 4, FieldID: 4010, Transform: iceberg.IdentityTransform{}, Name: "timestamp_col"},
-		iceberg.PartitionField{SourceID: 5, FieldID: 4011, Transform: iceberg.IdentityTransform{}, Name: "timestamptz_col"},
-		iceberg.PartitionField{SourceID: 6, FieldID: 4014, Transform: iceberg.IdentityTransform{}, Name: "uuid_col"},
-		iceberg.PartitionField{SourceID: 7, FieldID: 4015, Transform: iceberg.IdentityTransform{}, Name: "date_col"},
+		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 4008, Transform: iceberg.IdentityTransform{}, Name: "decimal_col"},
+		iceberg.PartitionField{SourceIDs: []int{3}, FieldID: 4009, Transform: iceberg.IdentityTransform{}, Name: "time_col"},
+		iceberg.PartitionField{SourceIDs: []int{4}, FieldID: 4010, Transform: iceberg.IdentityTransform{}, Name: "timestamp_col"},
+		iceberg.PartitionField{SourceIDs: []int{5}, FieldID: 4011, Transform: iceberg.IdentityTransform{}, Name: "timestamptz_col"},
+		iceberg.PartitionField{SourceIDs: []int{6}, FieldID: 4014, Transform: iceberg.IdentityTransform{}, Name: "uuid_col"},
+		iceberg.PartitionField{SourceIDs: []int{7}, FieldID: 4015, Transform: iceberg.IdentityTransform{}, Name: "date_col"},
 	)
 
 	loc := filepath.ToSlash(s.T().TempDir())

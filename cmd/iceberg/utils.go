@@ -63,7 +63,7 @@ func parsePartitionSpec(specStr string) (*iceberg.PartitionSpec, error) {
 		}
 
 		partitionFields = append(partitionFields, iceberg.PartitionField{
-			SourceID:  i + 1,
+			SourceIDs: []int{i + 1},
 			FieldID:   i + iceberg.PartitionDataIDStart,
 			Name:      field,
 			Transform: iceberg.IdentityTransform{},
@@ -128,7 +128,7 @@ func parseSortOrder(sortStr string) (table.SortOrder, error) {
 			}
 		}
 		sortFields = append(sortFields, table.SortField{
-			SourceID:  i + 1,
+			SourceIDs: []int{i + 1},
 			Transform: iceberg.IdentityTransform{},
 			Direction: sortDirection,
 			NullOrder: nullOrder,

@@ -59,7 +59,7 @@ func TestSnapshotSummaryCollectorWithPartition(t *testing.T) {
 		iceberg.NestedField{ID: 3, Name: "int_field", Type: iceberg.PrimitiveTypes.Int32},
 	)
 	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
-		Name: "int_field", SourceID: 3, FieldID: 1001, Transform: iceberg.IdentityTransform{},
+		Name: "int_field", SourceIDs: []int{3}, FieldID: 1001, Transform: iceberg.IdentityTransform{},
 	})
 
 	dataFile1 := must(iceberg.NewDataFileBuilder(

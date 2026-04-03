@@ -41,8 +41,10 @@ var UnpartitionedSpec = &PartitionSpec{id: 0}
 // PartitionField represents how one partition value is derived from the
 // source column by transformation.
 type PartitionField struct {
-	// SourceID is the source column id of the table's schema
-	SourceID int `json:"source-id"`
+	// SourceIDs contains the source column ids from the table's schema.
+	// For single-argument transforms this will have exactly one element.
+	// For multi-argument transforms this will have multiple elements.
+	SourceIDs []int `json:"-"`
 	// FieldID is the partition field id across all the table partition specs
 	FieldID int `json:"field-id"`
 	// Name is the name of the partition field itself
@@ -55,6 +57,17 @@ type PartitionField struct {
 	escapedName string
 }
 
+// SourceID returns the first source column id. For single-argument transforms
+// this is the only source column. For multi-argument transforms this is the
+// first source column.
+func (p PartitionField) SourceID() int {
+	if len(p.SourceIDs) == 0 {
+		return 0
+	}
+
+	return p.SourceIDs[0]
+}
+
 // EscapedName returns the URL-escaped version of the partition field name.
 func (p *PartitionField) EscapedName() string {
 	if p.escapedName == "" {
@@ -64,15 +77,37 @@ func (p *PartitionField) EscapedName() string {
 	return p.escapedName
 }
 
+func (p PartitionField) MarshalJSON() ([]byte, error) {
+	if len(p.SourceIDs) > 1 {
+		return json.Marshal(struct {
+			SourceIDs []int     `json:"source-ids"`
+			FieldID   int       `json:"field-id"`
+			Name      string    `json:"name"`
+			Transform Transform `json:"transform"`
+		}{p.SourceIDs, p.FieldID, p.Name, p.Transform})
+	}
+
+	return json.Marshal(struct {
+		SourceID  int       `json:"source-id"`
+		FieldID   int       `json:"field-id"`
+		Name      string    `json:"name"`
+		Transform Transform `json:"transform"`
+	}{p.SourceID(), p.FieldID, p.Name, p.Transform})
+}
+
 func (p PartitionField) Equals(other PartitionField) bool {
-	return p.SourceID == other.SourceID &&
+	return slices.Equal(p.SourceIDs, other.SourceIDs) &&
 		p.FieldID == other.FieldID &&
 		p.Name == other.Name &&
 		p.Transform.Equals(other.Transform)
 }
 
 func (p *PartitionField) String() string {
-	return fmt.Sprintf("%d: %s: %s(%d)", p.FieldID, p.Name, p.Transform, p.SourceID)
+	if len(p.SourceIDs) > 1 {
+		return fmt.Sprintf("%d: %s: %s(%v)", p.FieldID, p.Name, p.Transform, p.SourceIDs)
+	}
+
+	return fmt.Sprintf("%d: %s: %s(%d)", p.FieldID, p.Name, p.Transform, p.SourceID())
 }
 
 func (p *PartitionField) UnmarshalJSON(b []byte) error {
@@ -87,27 +122,28 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 		}
 	}
 
-	type Alias PartitionField
 	aux := struct {
-		TransformString string `json:"transform"`
+		SourceID        int    `json:"source-id"`
 		SourceIDs       []int  `json:"source-ids,omitempty"`
-		*Alias
-	}{
-		Alias: (*Alias)(p),
-	}
+		FieldID         int    `json:"field-id"`
+		Name            string `json:"name"`
+		TransformString string `json:"transform"`
+	}{}
 
-	err := json.Unmarshal(b, &aux)
-	if err != nil {
+	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
 
+	p.FieldID = aux.FieldID
+	p.Name = aux.Name
+
 	if len(aux.SourceIDs) > 0 {
-		if len(aux.SourceIDs) != 1 {
-			return errors.New("partition field source-ids must contain exactly one id")
-		}
-		p.SourceID = aux.SourceIDs[0]
+		p.SourceIDs = aux.SourceIDs
+	} else {
+		p.SourceIDs = []int{aux.SourceID}
 	}
 
+	var err error
 	if p.Transform, err = ParseTransform(aux.TransformString); err != nil {
 		return err
 	}
@@ -143,7 +179,7 @@ func (p *PartitionSpec) BindToSchema(schema *Schema, lastPartitionID *int, newSp
 	}
 
 	for _, field := range p.Fields() {
-		opts = append(opts, AddPartitionFieldBySourceID(field.SourceID, field.Name, field.Transform, schema, &field.FieldID))
+		opts = append(opts, AddPartitionFieldBySourceID(field.SourceID(), field.Name, field.Transform, schema, &field.FieldID))
 	}
 
 	freshSpec, err := NewPartitionSpecOpts(opts...)
@@ -235,7 +271,7 @@ func (p *PartitionSpec) addSpecFieldInternal(targetName string, field NestedFiel
 		return err
 	}
 	unboundField := PartitionField{
-		SourceID:  field.ID,
+		SourceIDs: []int{field.ID},
 		FieldID:   fieldIDValue,
 		Name:      targetName,
 		Transform: transform,
@@ -333,7 +369,7 @@ func (ps *PartitionSpec) CompatibleWith(other *PartitionSpec) bool {
 	}
 
 	return slices.EqualFunc(ps.fields, other.fields, func(left, right PartitionField) bool {
-		return left.SourceID == right.SourceID && left.Name == right.Name &&
+		return slices.Equal(left.SourceIDs, right.SourceIDs) && left.Name == right.Name &&
 			left.Transform == right.Transform
 	})
 }
@@ -341,7 +377,9 @@ func (ps *PartitionSpec) CompatibleWith(other *PartitionSpec) bool {
 // Equals returns true iff the field lists are the same AND the spec id
 // is the same between this partition spec and the provided one.
 func (ps PartitionSpec) Equals(other PartitionSpec) bool {
-	return ps.id == other.id && slices.Equal(ps.fields, other.fields)
+	return ps.id == other.id && slices.EqualFunc(ps.fields, other.fields, func(a, b PartitionField) bool {
+		return a.Equals(b)
+	})
 }
 
 // Fields returns an iterator over the partition fields in this spec.
@@ -380,7 +418,7 @@ func (ps *PartitionSpec) initialize() {
 	ps.sourceIdToFields = make(map[int][]PartitionField)
 
 	for i := range ps.fields {
-		ps.sourceIdToFields[ps.fields[i].SourceID] = append(ps.sourceIdToFields[ps.fields[i].SourceID], ps.fields[i])
+		ps.sourceIdToFields[ps.fields[i].SourceID()] = append(ps.sourceIdToFields[ps.fields[i].SourceID()], ps.fields[i])
 	}
 }
 
@@ -456,7 +494,7 @@ func (ps *PartitionSpec) LastAssignedFieldID() int {
 func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
 	nestedFields := []NestedField{}
 	for _, field := range ps.fields {
-		sourceType, ok := schema.FindTypeByID(field.SourceID)
+		sourceType, ok := schema.FindTypeByID(field.SourceID())
 		if !ok {
 			continue
 		}
@@ -521,9 +559,9 @@ func GeneratePartitionFieldName(schema *Schema, field PartitionField) (string, e
 		return field.Name, nil
 	}
 
-	sourceName, exists := schema.FindColumnName(field.SourceID)
+	sourceName, exists := schema.FindColumnName(field.SourceID())
 	if !exists {
-		return "", fmt.Errorf("could not find field with id %d", field.SourceID)
+		return "", fmt.Errorf("could not find field with id %d", field.SourceID())
 	}
 
 	transform := field.Transform

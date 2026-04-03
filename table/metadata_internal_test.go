@@ -208,12 +208,12 @@ func TestMetadataV1Parsing(t *testing.T) {
 	assert.True(t, meta.CurrentSchema().Equals(expected))
 	assert.Equal(t, []iceberg.PartitionSpec{
 		iceberg.NewPartitionSpec(iceberg.PartitionField{
-			SourceID: 1, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "x",
+			SourceIDs: []int{1}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "x",
 		}),
 	}, meta.PartitionSpecs())
 
 	assert.Equal(t, iceberg.NewPartitionSpec(iceberg.PartitionField{
-		SourceID: 1, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "x",
+		SourceIDs: []int{1}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "x",
 	}), meta.PartitionSpec())
 
 	assert.Equal(t, 0, meta.DefaultPartitionSpec())
@@ -723,10 +723,10 @@ func TestNewMetadataWithExplicitV1Format(t *testing.T) {
 	)
 
 	partitionSpec := iceberg.NewPartitionSpecID(10,
-		iceberg.PartitionField{SourceID: 22, FieldID: 1022, Transform: iceberg.IdentityTransform{}, Name: "bar"})
+		iceberg.PartitionField{SourceIDs: []int{22}, FieldID: 1022, Transform: iceberg.IdentityTransform{}, Name: "bar"})
 
 	sortOrder, err := NewSortOrder(10, []SortField{{
-		SourceID:  10,
+		SourceIDs: []int{10},
 		Transform: iceberg.IdentityTransform{},
 		Direction: SortASC, NullOrder: NullsLast,
 	}})
@@ -741,10 +741,10 @@ func TestNewMetadataWithExplicitV1Format(t *testing.T) {
 		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool})
 
 	expectedSpec := iceberg.NewPartitionSpec(
-		iceberg.PartitionField{SourceID: 2, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "bar"})
+		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "bar"})
 
 	expectedSortOrder, err := NewSortOrder(1, []SortField{{
-		SourceID: 1, Transform: iceberg.IdentityTransform{},
+		SourceIDs: []int{1}, Transform: iceberg.IdentityTransform{},
 		Direction: SortASC, NullOrder: NullsLast,
 	}})
 	require.NoError(t, err)
@@ -786,10 +786,10 @@ func TestNewMetadataV2Format(t *testing.T) {
 	)
 
 	partitionSpec := iceberg.NewPartitionSpecID(10,
-		iceberg.PartitionField{SourceID: 22, FieldID: 1022, Transform: iceberg.IdentityTransform{}, Name: "bar"})
+		iceberg.PartitionField{SourceIDs: []int{22}, FieldID: 1022, Transform: iceberg.IdentityTransform{}, Name: "bar"})
 
 	sortOrder, err := NewSortOrder(10, []SortField{{
-		SourceID:  10,
+		SourceIDs: []int{10},
 		Transform: iceberg.IdentityTransform{},
 		Direction: SortASC, NullOrder: NullsLast,
 	}})
@@ -806,10 +806,10 @@ func TestNewMetadataV2Format(t *testing.T) {
 		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool})
 
 	expectedSpec := iceberg.NewPartitionSpec(
-		iceberg.PartitionField{SourceID: 2, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "bar"})
+		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "bar"})
 
 	expectedSortOrder, err := NewSortOrder(1, []SortField{{
-		SourceID: 1, Transform: iceberg.IdentityTransform{},
+		SourceIDs: []int{1}, Transform: iceberg.IdentityTransform{},
 		Direction: SortASC, NullOrder: NullsLast,
 	}})
 	require.NoError(t, err)
@@ -1230,7 +1230,7 @@ func TestTableMetadataV1PartitionSpecsWithoutDefaultId(t *testing.T) {
 	require.Equal(t, spec.NumFields(), 1)
 	require.Equal(t, spec.Field(0).Name, "y")
 	require.Equal(t, spec.Field(0).Transform, iceberg.IdentityTransform{})
-	require.Equal(t, spec.Field(0).SourceID, 2)
+	require.Equal(t, spec.Field(0).SourceID(), 2)
 }
 
 func TestTableMetadataV2MissingPartitionSpecs(t *testing.T) {
