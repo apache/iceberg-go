@@ -225,7 +225,9 @@ func (t Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConfi
 	return result, nil
 }
 
-// getReferencedFiles collects all files referenced by current snapshots
+// getReferencedFiles collects all files referenced by table metadata: previous metadata
+// files, statistics and partition-statistics paths (Puffin, etc.), and all paths reachable
+// from current snapshots (manifest lists, manifests, data files).
 func (t Table) getReferencedFiles(fs iceio.IO) (map[string]bool, error) {
 	referenced := make(map[string]bool)
 	metadata := t.metadata
@@ -240,7 +242,16 @@ func (t Table) getReferencedFiles(fs iceio.IO) (map[string]bool, error) {
 	versionHintPath := filepath.Join(metadata.Location(), "metadata", "version-hint.text")
 	referenced[versionHintPath] = true
 
-	// TODO: Add statistics files support once iceberg-go exposes statisticsFiles()
+	for sf := range metadata.Statistics() {
+		if sf.StatisticsPath != "" {
+			referenced[sf.StatisticsPath] = true
+		}
+	}
+	for psf := range metadata.PartitionStatistics() {
+		if psf.StatisticsPath != "" {
+			referenced[psf.StatisticsPath] = true
+		}
+	}
 
 	for _, snapshot := range metadata.Snapshots() {
 		if snapshot.ManifestList != "" {
