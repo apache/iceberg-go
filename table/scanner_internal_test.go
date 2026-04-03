@@ -231,3 +231,98 @@ func TestBuildPartitionEvaluatorWithInvalidSpecID(t *testing.T) {
 	assert.ErrorIs(t, err, ErrPartitionSpecNotFound)
 	assert.ErrorContains(t, err, "id 999")
 }
+
+func TestMatchDeletesToDataPuffinNilRef(t *testing.T) {
+	snapshotID := int64(1)
+	seqNum := int64(10)
+
+	dataEntry := iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil,
+		&mockDataFile{
+			contentType: iceberg.EntryContentData,
+			path:        "s3://bucket/data/file1.parquet",
+			format:      iceberg.ParquetFile,
+			count:       100,
+			filesize:    1024,
+		},
+	)
+
+	deleteSeqNum := int64(11)
+	puffinDelete := iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED, &snapshotID, &deleteSeqNum, nil,
+		&mockDataFile{
+			contentType: iceberg.EntryContentPosDeletes,
+			path:        "s3://bucket/data/dv.puffin",
+			format:      "PUFFIN",
+			count:       5,
+			filesize:    200,
+		},
+	)
+
+	_, err := matchDeletesToData(dataEntry, []iceberg.ManifestEntry{puffinDelete})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "referenced_data_file")
+}
+
+type mockDVDataFile struct {
+	mockDataFile
+	referencedDataFile *string
+	contentOffset      *int64
+	contentSizeInBytes *int64
+}
+
+func (m *mockDVDataFile) ReferencedDataFile() *string { return m.referencedDataFile }
+func (m *mockDVDataFile) ContentOffset() *int64       { return m.contentOffset }
+func (m *mockDVDataFile) ContentSizeInBytes() *int64  { return m.contentSizeInBytes }
+
+func TestMatchDeletesToDataPuffinMatch(t *testing.T) {
+	snapshotID := int64(1)
+	seqNum := int64(10)
+	dataPath := "s3://bucket/data/file1.parquet"
+
+	dataEntry := iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil,
+		&mockDataFile{
+			contentType: iceberg.EntryContentData,
+			path:        dataPath,
+			format:      iceberg.ParquetFile,
+			count:       100,
+			filesize:    1024,
+		},
+	)
+
+	deleteSeqNum := int64(11)
+	puffinDelete := iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED, &snapshotID, &deleteSeqNum, nil,
+		&mockDVDataFile{
+			mockDataFile: mockDataFile{
+				contentType: iceberg.EntryContentPosDeletes,
+				path:        "s3://bucket/data/dv.puffin",
+				format:      "PUFFIN",
+				count:       5,
+				filesize:    200,
+			},
+			referencedDataFile: &dataPath,
+		},
+	)
+
+	otherPath := "s3://bucket/data/other.parquet"
+	nonMatchingDelete := iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED, &snapshotID, &deleteSeqNum, nil,
+		&mockDVDataFile{
+			mockDataFile: mockDataFile{
+				contentType: iceberg.EntryContentPosDeletes,
+				path:        "s3://bucket/data/dv2.puffin",
+				format:      "PUFFIN",
+				count:       3,
+				filesize:    150,
+			},
+			referencedDataFile: &otherPath,
+		},
+	)
+
+	deletes, err := matchDeletesToData(dataEntry, []iceberg.ManifestEntry{puffinDelete, nonMatchingDelete})
+	require.NoError(t, err)
+	require.Len(t, deletes, 1)
+	assert.Equal(t, "s3://bucket/data/dv.puffin", deletes[0].FilePath())
+}

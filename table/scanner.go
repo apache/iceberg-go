@@ -323,9 +323,24 @@ func matchDeletesToData(entry iceberg.ManifestEntry, positionalDeletes []iceberg
 		return nil, err
 	}
 
+	dataFilePath := entry.DataFile().FilePath()
 	out := make([]iceberg.DataFile, 0)
 	for _, relevant := range positionalDeletes[idx:] {
 		df := relevant.DataFile()
+
+		// DVs (Puffin format) match by referenced_data_file
+		if df.FileFormat() == "PUFFIN" {
+			ref := df.ReferencedDataFile()
+			if ref == nil {
+				return nil, fmt.Errorf("deletion vector %s missing required referenced_data_file", df.FilePath())
+			}
+			if *ref == dataFilePath {
+				out = append(out, df)
+			}
+			continue
+		}
+
+		// Parquet positional deletes match by file_path metrics
 		ok, err := evaluator(df)
 		if err != nil {
 			return nil, err
