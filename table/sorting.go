@@ -51,12 +51,9 @@ var (
 
 // SortField describes a field used in a sort order definition.
 type SortField struct {
-	// SourceID is the source column id from the table's schema.
-	// For multi-argument transforms, this is the first source column;
-	// use SourceIDs to get all source columns.
-	SourceID int `json:"source-id"`
-	// SourceIDs contains all source column ids for multi-argument transforms.
-	// For single-argument transforms this is nil and SourceID should be used.
+	// SourceIDs contains the source column ids from the table's schema.
+	// For single-argument transforms this will have exactly one element.
+	// For multi-argument transforms this will have multiple elements.
 	SourceIDs []int `json:"-"`
 	// Transform is the tranformation used to produce values to be
 	// sorted on from the source column.
@@ -68,12 +65,20 @@ type SortField struct {
 	NullOrder NullOrder `json:"null-order"`
 }
 
+// SourceID returns the first source column id.
+func (s SortField) SourceID() int {
+	if len(s.SourceIDs) == 0 {
+		return 0
+	}
+
+	return s.SourceIDs[0]
+}
+
 func (s SortField) Equals(other SortField) bool {
-	return s.SourceID == other.SourceID &&
+	return slices.Equal(s.SourceIDs, other.SourceIDs) &&
 		s.Transform.Equals(other.Transform) &&
 		s.Direction == other.Direction &&
-		s.NullOrder == other.NullOrder &&
-		slices.Equal(s.SourceIDs, other.SourceIDs)
+		s.NullOrder == other.NullOrder
 }
 
 func (s *SortField) String() string {
@@ -82,14 +87,14 @@ func (s *SortField) String() string {
 			return fmt.Sprintf("%v %s %s", s.SourceIDs, s.Direction, s.NullOrder)
 		}
 
-		return fmt.Sprintf("%d %s %s", s.SourceID, s.Direction, s.NullOrder)
+		return fmt.Sprintf("%d %s %s", s.SourceID(), s.Direction, s.NullOrder)
 	}
 
 	if len(s.SourceIDs) > 1 {
 		return fmt.Sprintf("%s(%v) %s %s", s.Transform, s.SourceIDs, s.Direction, s.NullOrder)
 	}
 
-	return fmt.Sprintf("%s(%d) %s %s", s.Transform, s.SourceID, s.Direction, s.NullOrder)
+	return fmt.Sprintf("%s(%d) %s %s", s.Transform, s.SourceID(), s.Direction, s.NullOrder)
 }
 
 func (s *SortField) MarshalJSON() ([]byte, error) {
@@ -114,9 +119,12 @@ func (s *SortField) MarshalJSON() ([]byte, error) {
 		}{s.SourceIDs, s.Transform, s.Direction, s.NullOrder})
 	}
 
-	type Alias SortField
-
-	return json.Marshal((*Alias)(s))
+	return json.Marshal(struct {
+		SourceID  int               `json:"source-id"`
+		Transform iceberg.Transform `json:"transform"`
+		Direction SortDirection     `json:"direction"`
+		NullOrder NullOrder         `json:"null-order"`
+	}{s.SourceID(), s.Transform, s.Direction, s.NullOrder})
 }
 
 func (s *SortField) UnmarshalJSON(b []byte) error {
@@ -131,27 +139,28 @@ func (s *SortField) UnmarshalJSON(b []byte) error {
 		}
 	}
 
-	type Alias SortField
 	aux := struct {
-		TransformString string `json:"transform"`
-		SourceIDs       []int  `json:"source-ids,omitempty"`
-		*Alias
-	}{
-		Alias: (*Alias)(s),
-	}
+		SourceID        int           `json:"source-id"`
+		SourceIDs       []int         `json:"source-ids,omitempty"`
+		TransformString string        `json:"transform"`
+		Direction       SortDirection `json:"direction"`
+		NullOrder       NullOrder     `json:"null-order"`
+	}{}
 
-	err := json.Unmarshal(b, &aux)
-	if err != nil {
+	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
 
+	s.Direction = aux.Direction
+	s.NullOrder = aux.NullOrder
+
 	if len(aux.SourceIDs) > 0 {
-		s.SourceID = aux.SourceIDs[0]
-		if len(aux.SourceIDs) > 1 {
-			s.SourceIDs = aux.SourceIDs
-		}
+		s.SourceIDs = aux.SourceIDs
+	} else {
+		s.SourceIDs = []int{aux.SourceID}
 	}
 
+	var err error
 	if s.Transform, err = iceberg.ParseTransform(aux.TransformString); err != nil {
 		return err
 	}
@@ -286,9 +295,9 @@ func (s *SortOrder) CheckCompatibility(schema *iceberg.Schema) error {
 	}
 
 	for _, field := range s.fields {
-		f, ok := schema.FindFieldByID(field.SourceID)
+		f, ok := schema.FindFieldByID(field.SourceID())
 		if !ok {
-			return fmt.Errorf("sort field with source id %d not found in schema", field.SourceID)
+			return fmt.Errorf("sort field with source id %d not found in schema", field.SourceID())
 		}
 
 		if _, ok := f.Type.(iceberg.PrimitiveType); !ok {
@@ -343,7 +352,7 @@ func AssignFreshSortOrderIDsWithID(sortOrder SortOrder, old, fresh *iceberg.Sche
 
 	fields := make([]SortField, 0, len(sortOrder.fields))
 	for _, field := range sortOrder.fields {
-		originalField, ok := old.FindColumnName(field.SourceID)
+		originalField, ok := old.FindColumnName(field.SourceID())
 		if !ok {
 			return SortOrder{}, fmt.Errorf("cannot find source column id %s in old schema", field.String())
 		}
@@ -353,7 +362,7 @@ func AssignFreshSortOrderIDsWithID(sortOrder SortOrder, old, fresh *iceberg.Sche
 		}
 
 		fields = append(fields, SortField{
-			SourceID:  freshField.ID,
+			SourceIDs: []int{freshField.ID},
 			Transform: field.Transform,
 			Direction: field.Direction,
 			NullOrder: field.NullOrder,

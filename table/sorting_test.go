@@ -37,9 +37,9 @@ func TestSerializeSortOrder(t *testing.T) {
 	sortOrder, err := table.NewSortOrder(
 		22,
 		[]table.SortField{
-			{SourceID: 19, Transform: iceberg.IdentityTransform{}, NullOrder: table.NullsFirst, Direction: table.SortASC},
-			{SourceID: 25, Transform: iceberg.BucketTransform{NumBuckets: 4}, NullOrder: table.NullsLast, Direction: table.SortDESC},
-			{SourceID: 22, Transform: iceberg.VoidTransform{}, NullOrder: table.NullsFirst, Direction: table.SortASC},
+			{SourceIDs: []int{19}, Transform: iceberg.IdentityTransform{}, NullOrder: table.NullsFirst, Direction: table.SortASC},
+			{SourceIDs: []int{25}, Transform: iceberg.BucketTransform{NumBuckets: 4}, NullOrder: table.NullsLast, Direction: table.SortDESC},
+			{SourceIDs: []int{22}, Transform: iceberg.VoidTransform{}, NullOrder: table.NullsFirst, Direction: table.SortASC},
 		},
 	)
 	require.NoError(t, err)
@@ -120,7 +120,7 @@ func TestSortFieldMultiArgSourceIDs(t *testing.T) {
 		var field table.SortField
 		err := json.Unmarshal([]byte(jsonData), &field)
 		require.NoError(t, err)
-		assert.Equal(t, 2, field.SourceID)
+		assert.Equal(t, 2, field.SourceID())
 		assert.Equal(t, []int{2, 3}, field.SourceIDs)
 	})
 
@@ -134,7 +134,6 @@ func TestSortFieldMultiArgSourceIDs(t *testing.T) {
 
 	t.Run("marshal multi-arg round-trip", func(t *testing.T) {
 		field := table.SortField{
-			SourceID:  2,
 			SourceIDs: []int{2, 3},
 			Transform: iceberg.IdentityTransform{},
 			Direction: table.SortASC,
@@ -148,13 +147,13 @@ func TestSortFieldMultiArgSourceIDs(t *testing.T) {
 		var decoded table.SortField
 		err = json.Unmarshal(data, &decoded)
 		require.NoError(t, err)
-		assert.Equal(t, 2, decoded.SourceID)
+		assert.Equal(t, 2, decoded.SourceID())
 		assert.Equal(t, []int{2, 3}, decoded.SourceIDs)
 	})
 
 	t.Run("marshal single-arg uses source-id", func(t *testing.T) {
 		field := table.SortField{
-			SourceID:  1,
+			SourceIDs: []int{1},
 			Transform: iceberg.IdentityTransform{},
 			Direction: table.SortASC,
 			NullOrder: table.NullsFirst,

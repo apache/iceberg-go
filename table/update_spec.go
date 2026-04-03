@@ -59,7 +59,7 @@ func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 	partitionSpec := t.tbl.Metadata().PartitionSpec()
 	for _, partitionField := range partitionSpec.Fields() {
 		transformToField[transformKey{
-			SourceId:  partitionField.SourceID,
+			SourceId:  partitionField.SourceID(),
 			Transform: partitionField.Transform.String(),
 		}] = partitionField
 		nameToField[partitionField.Name] = partitionField
@@ -144,9 +144,9 @@ func (us *UpdateSpec) Apply() (iceberg.PartitionSpec, error) {
 		var err error
 		if _, deleted := us.deletes[field.FieldID]; !deleted {
 			if rename, renamed := us.renames[field.Name]; renamed {
-				newField, err = us.addNewField(us.txn.tbl.Schema(), field.SourceID, field.FieldID, rename, field.Transform, partitionNames)
+				newField, err = us.addNewField(us.txn.tbl.Schema(), field.SourceID(), field.FieldID, rename, field.Transform, partitionNames)
 			} else {
-				newField, err = us.addNewField(us.txn.tbl.Schema(), field.SourceID, field.FieldID, field.Name, field.Transform, partitionNames)
+				newField, err = us.addNewField(us.txn.tbl.Schema(), field.SourceID(), field.FieldID, field.Name, field.Transform, partitionNames)
 			}
 			if err != nil {
 				return iceberg.PartitionSpec{}, err
@@ -154,9 +154,9 @@ func (us *UpdateSpec) Apply() (iceberg.PartitionSpec, error) {
 			partitionFields = append(partitionFields, newField)
 		} else if us.txn.tbl.Metadata().Version() == 1 {
 			if rename, renamed := us.renames[field.Name]; renamed {
-				newField, err = us.addNewField(us.txn.tbl.Schema(), field.SourceID, field.FieldID, rename, iceberg.VoidTransform{}, partitionNames)
+				newField, err = us.addNewField(us.txn.tbl.Schema(), field.SourceID(), field.FieldID, rename, iceberg.VoidTransform{}, partitionNames)
 			} else {
-				newField, err = us.addNewField(us.txn.tbl.Schema(), field.SourceID, field.FieldID, field.Name, iceberg.VoidTransform{}, partitionNames)
+				newField, err = us.addNewField(us.txn.tbl.Schema(), field.SourceID(), field.FieldID, field.Name, iceberg.VoidTransform{}, partitionNames)
 			}
 			if err != nil {
 				return iceberg.PartitionSpec{}, err
@@ -168,7 +168,7 @@ func (us *UpdateSpec) Apply() (iceberg.PartitionSpec, error) {
 	partitionFields = append(partitionFields, us.adds...)
 	opts := make([]iceberg.PartitionOption, len(partitionFields))
 	for i, field := range partitionFields {
-		opts[i] = iceberg.AddPartitionFieldBySourceID(field.SourceID, field.Name, field.Transform, us.txn.tbl.Schema(), &field.FieldID)
+		opts[i] = iceberg.AddPartitionFieldBySourceID(field.SourceID(), field.Name, field.Transform, us.txn.tbl.Schema(), &field.FieldID)
 	}
 
 	newSpec, err := iceberg.NewPartitionSpecOpts(opts...)
@@ -245,10 +245,10 @@ func (us *UpdateSpec) addField(sourceColName string, transform iceberg.Transform
 
 		// Handle special case for time transforms
 		if _, isTimeTransform := newField.Transform.(iceberg.TimeTransform); isTimeTransform {
-			if existingTimeField, exists := us.addedTimeFields[newField.SourceID]; exists {
+			if existingTimeField, exists := us.addedTimeFields[newField.SourceID()]; exists {
 				return fmt.Errorf("cannot add time partition field: %s conflicts with %s", newField.Name, existingTimeField.Name)
 			}
-			us.addedTimeFields[newField.SourceID] = newField
+			us.addedTimeFields[newField.SourceID()] = newField
 		}
 		us.transformToAddedField[key] = newField
 
@@ -330,10 +330,10 @@ func (us *UpdateSpec) partitionField(key transformKey, name string) (iceberg.Par
 			}
 		}
 		for _, field := range historicalFields {
-			if field.SourceID == sourceId && field.Transform.String() == transform {
+			if field.SourceID() == sourceId && field.Transform.String() == transform {
 				if len(name) > 0 && field.Name == name {
 					return iceberg.PartitionField{
-						SourceID:  sourceId,
+						SourceIDs: []int{sourceId},
 						FieldID:   field.FieldID,
 						Name:      name,
 						Transform: field.Transform,
@@ -346,7 +346,7 @@ func (us *UpdateSpec) partitionField(key transformKey, name string) (iceberg.Par
 	transform, _ := iceberg.ParseTransform(key.Transform)
 	if name == "" {
 		tmpField := iceberg.PartitionField{
-			SourceID:  key.SourceId,
+			SourceIDs: []int{key.SourceId},
 			FieldID:   newFieldId,
 			Name:      "",
 			Transform: transform,
@@ -359,7 +359,7 @@ func (us *UpdateSpec) partitionField(key transformKey, name string) (iceberg.Par
 	}
 
 	return iceberg.PartitionField{
-		SourceID:  key.SourceId,
+		SourceIDs: []int{key.SourceId},
 		FieldID:   newFieldId,
 		Name:      name,
 		Transform: transform,
@@ -398,7 +398,7 @@ func (us *UpdateSpec) addNewField(schema *iceberg.Schema, sourceId int, fieldId 
 	}
 
 	return iceberg.PartitionField{
-		SourceID:  sourceId,
+		SourceIDs: []int{sourceId},
 		FieldID:   fieldId,
 		Name:      name,
 		Transform: transform,

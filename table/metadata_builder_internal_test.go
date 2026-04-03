@@ -42,7 +42,7 @@ func sortOrder() SortOrder {
 		1,
 		[]SortField{
 			{
-				SourceID:  3,
+				SourceIDs: []int{3},
 				Direction: SortDESC,
 				NullOrder: NullsFirst,
 				Transform: iceberg.BucketTransform{NumBuckets: 4},
@@ -59,7 +59,7 @@ func sortOrder() SortOrder {
 func partitionSpec() iceberg.PartitionSpec {
 	return iceberg.NewPartitionSpecID(0,
 		iceberg.PartitionField{
-			SourceID:  2,
+			SourceIDs: []int{2},
 			Name:      "y",
 			Transform: iceberg.IdentityTransform{},
 		},
@@ -192,7 +192,7 @@ func TestReassignIds(t *testing.T) {
 
 	sortOrder, err := NewSortOrder(10, []SortField{
 		{
-			SourceID:  11,
+			SourceIDs: []int{11},
 			Transform: iceberg.IdentityTransform{},
 			Direction: SortASC,
 			NullOrder: NullsFirst,
@@ -252,7 +252,7 @@ func TestReassignIds(t *testing.T) {
 
 	expectedSortOrder, err := NewSortOrder(1, []SortField{
 		{
-			SourceID:  1,
+			SourceIDs: []int{1},
 			Transform: iceberg.IdentityTransform{},
 			Direction: SortASC,
 			NullOrder: NullsFirst,
@@ -395,7 +395,7 @@ func TestSetSortOrder(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	added, err := NewSortOrder(10, []SortField{
 		{
-			SourceID:  1,
+			SourceIDs: []int{1},
 			Transform: iceberg.IdentityTransform{}, Direction: SortASC, NullOrder: NullsFirst,
 		},
 	})
@@ -405,7 +405,7 @@ func TestSetSortOrder(t *testing.T) {
 	require.NoError(t, builder.AddSortOrder(&added))
 	expected, err := NewSortOrder(2, []SortField{
 		{
-			SourceID:  1,
+			SourceIDs: []int{1},
 			Transform: iceberg.IdentityTransform{}, Direction: SortASC, NullOrder: NullsFirst,
 		},
 	})

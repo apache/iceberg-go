@@ -506,8 +506,8 @@ func (m *ManifestTestSuite) writeManifestEntries() {
 	}
 
 	partitionSpec := NewPartitionSpecID(1,
-		PartitionField{FieldID: 1000, SourceID: 1, Name: "VendorID", Transform: IdentityTransform{}},
-		PartitionField{FieldID: 1001, SourceID: 2, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "VendorID", Transform: IdentityTransform{}},
+		PartitionField{FieldID: 1001, SourceIDs: []int{2}, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
 
 	mf, err := WriteManifest("/home/iceberg/warehouse/nyc/taxis_partitioned/metadata/0125c686-8aa6-4502-bdcc-b6d17ca41a3b-m0.avro",
 		&m.v1ManifestEntries, 1, partitionSpec, testSchema, entrySnapshotID, manifestEntryV1Recs)
@@ -1083,8 +1083,8 @@ func (m *ManifestTestSuite) TestManifestEntriesV2() {
 	}
 
 	partitionSpec := NewPartitionSpecID(1,
-		PartitionField{FieldID: 1000, SourceID: 1, Name: "VendorID", Transform: IdentityTransform{}},
-		PartitionField{FieldID: 1001, SourceID: 2, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "VendorID", Transform: IdentityTransform{}},
+		PartitionField{FieldID: 1001, SourceIDs: []int{2}, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
 
 	mockedFile := &internal.MockFile{
 		Contents: bytes.NewReader(m.v2ManifestEntries.Bytes()),
@@ -1239,8 +1239,8 @@ func (m *ManifestTestSuite) TestManifestEntriesV3() {
 		Path:    manifestFileRecordsV3[0].FilePath(),
 	}
 	partitionSpec := NewPartitionSpecID(1,
-		PartitionField{FieldID: 1000, SourceID: 1, Name: "VendorID", Transform: IdentityTransform{}},
-		PartitionField{FieldID: 1001, SourceID: 2, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "VendorID", Transform: IdentityTransform{}},
+		PartitionField{FieldID: 1001, SourceIDs: []int{2}, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
 	mockedFile := &internal.MockFile{
 		Contents: bytes.NewReader(m.v3ManifestEntries.Bytes()),
 	}
@@ -1320,8 +1320,8 @@ func (m *ManifestTestSuite) TestNewManifestReaderZstdManifestEntriesV2() {
 	}
 
 	partitionSpec := NewPartitionSpecID(1,
-		PartitionField{FieldID: 1000, SourceID: 1, Name: "VendorID", Transform: IdentityTransform{}},
-		PartitionField{FieldID: 1001, SourceID: 2, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "VendorID", Transform: IdentityTransform{}},
+		PartitionField{FieldID: 1001, SourceIDs: []int{2}, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
 
 	partitionSchema, err := partitionTypeToAvroSchema(partitionSpec.PartitionType(testSchema))
 	m.Require().NoError(err)
@@ -1655,8 +1655,8 @@ func (m *ManifestTestSuite) TestWriteManifestListClosesWriterOnError() {
 
 func (m *ManifestTestSuite) TestWriteManifestClosesWriterOnEntryError() {
 	partitionSpec := NewPartitionSpecID(1,
-		PartitionField{FieldID: 1000, SourceID: 1, Name: "VendorID", Transform: IdentityTransform{}},
-		PartitionField{FieldID: 1001, SourceID: 2, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "VendorID", Transform: IdentityTransform{}},
+		PartitionField{FieldID: 1001, SourceIDs: []int{2}, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
 
 	var header bytes.Buffer
 	writer, err := NewManifestWriter(2, &header, partitionSpec, testSchema, entrySnapshotID)

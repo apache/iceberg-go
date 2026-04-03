@@ -202,7 +202,7 @@ func (p *partitionedFanoutWriter) getPartitions(record arrow.RecordBatch) ([]*pa
 
 	for i := range partitionFields {
 		sourceField := p.partitionSpec.Field(i)
-		colName, _ := p.schema.FindColumnName(sourceField.SourceID)
+		colName, _ := p.schema.FindColumnName(sourceField.SourceID())
 		colIdx := record.Schema().FieldIndices(colName)[0]
 		partitionColumns[i] = record.Column(colIdx)
 		partitionFieldsInfo[i] = struct {

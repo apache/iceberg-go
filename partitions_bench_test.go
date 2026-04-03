@@ -38,23 +38,23 @@ func BenchmarkPartitionToPath(b *testing.B) {
 	// Create a partition spec with fields that need URL escaping
 	spec := iceberg.NewPartitionSpecID(1,
 		iceberg.PartitionField{
-			SourceID: 1, FieldID: 1000,
+			SourceIDs: []int{1}, FieldID: 1000,
 			Transform: iceberg.TruncateTransform{Width: 19}, Name: "my#str%bucket",
 		},
 		iceberg.PartitionField{
-			SourceID: 2, FieldID: 1001,
+			SourceIDs: []int{2}, FieldID: 1001,
 			Transform: iceberg.IdentityTransform{}, Name: "other str+bucket",
 		},
 		iceberg.PartitionField{
-			SourceID: 3, FieldID: 1002,
+			SourceIDs: []int{3}, FieldID: 1002,
 			Transform: iceberg.BucketTransform{NumBuckets: 25}, Name: "my!int:bucket",
 		},
 		iceberg.PartitionField{
-			SourceID: 4, FieldID: 1003,
+			SourceIDs: []int{4}, FieldID: 1003,
 			Transform: iceberg.DayTransform{}, Name: "date/day",
 		},
 		iceberg.PartitionField{
-			SourceID: 5, FieldID: 1004,
+			SourceIDs: []int{5}, FieldID: 1004,
 			Transform: iceberg.HourTransform{}, Name: "ts/hour",
 		},
 	)
@@ -82,7 +82,7 @@ func BenchmarkPartitionToPathManyFields(b *testing.B) {
 			Type: iceberg.PrimitiveTypes.String, Required: false,
 		})
 		partitionFields = append(partitionFields, iceberg.PartitionField{
-			SourceID: i, FieldID: 1000 + i,
+			SourceIDs: []int{i}, FieldID: 1000 + i,
 			Transform: iceberg.IdentityTransform{}, Name: "part_field_" + string(rune('a'+i-1)),
 		})
 		recordValues = append(recordValues, "value_"+string(rune('a'+i-1)))
@@ -111,15 +111,15 @@ func BenchmarkPartitionType(b *testing.B) {
 
 	spec := iceberg.NewPartitionSpecID(1,
 		iceberg.PartitionField{
-			SourceID: 1, FieldID: 1000,
+			SourceIDs: []int{1}, FieldID: 1000,
 			Transform: iceberg.TruncateTransform{Width: 19}, Name: "str_truncate",
 		},
 		iceberg.PartitionField{
-			SourceID: 2, FieldID: 1001,
+			SourceIDs: []int{2}, FieldID: 1001,
 			Transform: iceberg.BucketTransform{NumBuckets: 25}, Name: "int_bucket",
 		},
 		iceberg.PartitionField{
-			SourceID: 3, FieldID: 1002,
+			SourceIDs: []int{3}, FieldID: 1002,
 			Transform: iceberg.IdentityTransform{}, Name: "bool_identity",
 		},
 	)
@@ -144,11 +144,11 @@ func BenchmarkPartitionTypeMultipleSchemas(b *testing.B) {
 
 	spec := iceberg.NewPartitionSpecID(1,
 		iceberg.PartitionField{
-			SourceID: 1, FieldID: 1000,
+			SourceIDs: []int{1}, FieldID: 1000,
 			Transform: iceberg.IdentityTransform{}, Name: "str_identity",
 		},
 		iceberg.PartitionField{
-			SourceID: 2, FieldID: 1001,
+			SourceIDs: []int{2}, FieldID: 1001,
 			Transform: iceberg.BucketTransform{NumBuckets: 10}, Name: "int_bucket",
 		},
 	)
@@ -173,15 +173,15 @@ func BenchmarkPartitionToPathRepeated(b *testing.B) {
 	// Use field names that require URL escaping to maximize the benefit of caching
 	spec := iceberg.NewPartitionSpecID(1,
 		iceberg.PartitionField{
-			SourceID: 1, FieldID: 1000,
+			SourceIDs: []int{1}, FieldID: 1000,
 			Transform: iceberg.TruncateTransform{Width: 19}, Name: "my#str%bucket",
 		},
 		iceberg.PartitionField{
-			SourceID: 2, FieldID: 1001,
+			SourceIDs: []int{2}, FieldID: 1001,
 			Transform: iceberg.IdentityTransform{}, Name: "other str+bucket",
 		},
 		iceberg.PartitionField{
-			SourceID: 3, FieldID: 1002,
+			SourceIDs: []int{3}, FieldID: 1002,
 			Transform: iceberg.BucketTransform{NumBuckets: 25}, Name: "my!int:bucket",
 		},
 	)
@@ -209,7 +209,7 @@ func BenchmarkPartitionSpecInitialize(b *testing.B) {
 	fields := make([]iceberg.PartitionField, 10)
 	for i := range fields {
 		fields[i] = iceberg.PartitionField{
-			SourceID: i + 1, FieldID: 1000 + i,
+			SourceIDs: []int{i + 1}, FieldID: 1000 + i,
 			Transform: iceberg.IdentityTransform{}, Name: "field#with%special&chars=" + string(rune('a'+i)),
 		}
 	}

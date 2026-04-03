@@ -167,7 +167,7 @@ func simpleSchema() *iceberg.Schema {
 
 func partitionedSpec() iceberg.PartitionSpec {
 	return iceberg.NewPartitionSpec(iceberg.PartitionField{
-		SourceID: 1, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
 	})
 }
 

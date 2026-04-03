@@ -180,7 +180,7 @@ func (t *TableTestSuite) TestSchema() {
 
 func (t *TableTestSuite) TestPartitionSpec() {
 	t.Equal(iceberg.NewPartitionSpec(
-		iceberg.PartitionField{SourceID: 1, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "x"},
+		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "x"},
 	), t.tbl.Spec())
 }
 
@@ -188,8 +188,8 @@ func (t *TableTestSuite) TestSortOrder() {
 	expected, err := table.NewSortOrder(
 		3,
 		[]table.SortField{
-			{SourceID: 2, Transform: iceberg.IdentityTransform{}, Direction: table.SortASC, NullOrder: table.NullsFirst},
-			{SourceID: 3, Transform: iceberg.BucketTransform{NumBuckets: 4}, Direction: table.SortDESC, NullOrder: table.NullsLast},
+			{SourceIDs: []int{2}, Transform: iceberg.IdentityTransform{}, Direction: table.SortASC, NullOrder: table.NullsFirst},
+			{SourceIDs: []int{3}, Transform: iceberg.BucketTransform{NumBuckets: 4}, Direction: table.SortDESC, NullOrder: table.NullsLast},
 		},
 	)
 	require.NoError(t.T(), err)
@@ -608,8 +608,8 @@ func (t *TableWritingTestSuite) TestAddFilesFailsSchemaMismatch() {
 func (t *TableWritingTestSuite) TestAddFilesPartitionedTable() {
 	ident := table.Identifier{"default", "partitioned_table_v" + strconv.Itoa(t.formatVersion)}
 	spec := iceberg.NewPartitionSpec(
-		iceberg.PartitionField{SourceID: 4, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "baz"},
-		iceberg.PartitionField{SourceID: 10, FieldID: 1001, Transform: iceberg.MonthTransform{}, Name: "qux_month"})
+		iceberg.PartitionField{SourceIDs: []int{4}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "baz"},
+		iceberg.PartitionField{SourceIDs: []int{10}, FieldID: 1001, Transform: iceberg.MonthTransform{}, Name: "qux_month"})
 
 	tbl := t.createTable(ident, t.formatVersion,
 		spec, t.tableSchema)
@@ -675,7 +675,7 @@ func (t *TableWritingTestSuite) TestAddFilesPartitionedTable() {
 func (t *TableWritingTestSuite) TestAddFilesToBucketPartitionedTableFails() {
 	ident := table.Identifier{"default", "partitioned_table_bucket_fails_v" + strconv.Itoa(t.formatVersion)}
 	spec := iceberg.NewPartitionSpec(
-		iceberg.PartitionField{SourceID: 4, FieldID: 1000, Transform: iceberg.BucketTransform{NumBuckets: 3}, Name: "baz_bucket_3"})
+		iceberg.PartitionField{SourceIDs: []int{4}, FieldID: 1000, Transform: iceberg.BucketTransform{NumBuckets: 3}, Name: "baz_bucket_3"})
 
 	tbl := t.createTable(ident, t.formatVersion, spec, t.tableSchema)
 	files := make([]string, 0)
@@ -700,7 +700,7 @@ func (t *TableWritingTestSuite) TestAddFilesToBucketPartitionedTableFails() {
 func (t *TableWritingTestSuite) TestAddFilesToPartitionedTableFailsLowerAndUpperMismatch() {
 	ident := table.Identifier{"default", "partitioned_table_bucket_fails_v" + strconv.Itoa(t.formatVersion)}
 	spec := iceberg.NewPartitionSpec(
-		iceberg.PartitionField{SourceID: 4, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "baz"})
+		iceberg.PartitionField{SourceIDs: []int{4}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "baz"})
 
 	tbl := t.createTable(ident, t.formatVersion, spec, t.tableSchema)
 	files := make([]string, 0)
@@ -1158,7 +1158,7 @@ func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFiles() {
 func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFilesValidatesPartitionSpecID() {
 	ident := table.Identifier{"default", "replace_data_files_with_datafiles_spec_validation_v" + strconv.Itoa(t.formatVersion)}
 	spec := iceberg.NewPartitionSpec(
-		iceberg.PartitionField{SourceID: 4, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "baz"},
+		iceberg.PartitionField{SourceIDs: []int{4}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "baz"},
 	)
 	tbl := t.createTable(ident, t.formatVersion, spec, t.tableSchema)
 
@@ -1171,7 +1171,7 @@ func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFilesValidatesPartit
 	t.Require().NoError(err)
 
 	invalidSpec := iceberg.NewPartitionSpecID(999,
-		iceberg.PartitionField{SourceID: 4, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "baz"},
+		iceberg.PartitionField{SourceIDs: []int{4}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "baz"},
 	)
 
 	deleteFile := mustDataFile(t.T(), spec, existingPath, map[int]any{1000: int32(123)}, 1, mustFileSize(t.T(), existingPath))
@@ -1188,7 +1188,7 @@ func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFilesValidatesPartit
 func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFilesValidatesPartitionData() {
 	ident := table.Identifier{"default", "replace_data_files_with_datafiles_partition_validation_v" + strconv.Itoa(t.formatVersion)}
 	spec := iceberg.NewPartitionSpec(
-		iceberg.PartitionField{SourceID: 4, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "baz"},
+		iceberg.PartitionField{SourceIDs: []int{4}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "baz"},
 	)
 	tbl := t.createTable(ident, t.formatVersion, spec, t.tableSchema)
 

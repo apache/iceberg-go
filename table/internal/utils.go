@@ -159,7 +159,7 @@ func PartitionRecordValue(field iceberg.PartitionField, val iceberg.Literal, sch
 		return ret, nil
 	}
 
-	f, ok := schema.FindFieldByID(field.SourceID)
+	f, ok := schema.FindFieldByID(field.SourceID())
 	if !ok {
 		return ret, fmt.Errorf("%w: could not find source field in schema for %s",
 			iceberg.ErrInvalidSchema, field.String())
@@ -209,7 +209,7 @@ type DataFileStatistics struct {
 }
 
 func (d *DataFileStatistics) PartitionValue(field iceberg.PartitionField, sc *iceberg.Schema) any {
-	agg, ok := d.ColAggs[field.SourceID]
+	agg, ok := d.ColAggs[field.SourceID()]
 	if !ok {
 		return nil
 	}
@@ -256,7 +256,7 @@ func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.Par
 				fieldIDToPartitionData[field.FieldID] = nil
 			}
 
-			if sourceField, ok := schema.FindFieldByID(field.SourceID); ok {
+			if sourceField, ok := schema.FindFieldByID(field.SourceID()); ok {
 				resultType := field.Transform.ResultType(sourceField.Type)
 
 				switch rt := resultType.(type) {

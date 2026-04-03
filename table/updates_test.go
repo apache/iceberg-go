@@ -40,20 +40,20 @@ func TestRemoveSnapshotsPostCommitSkipped(t *testing.T) {
 func TestUnmarshalUpdates(t *testing.T) {
 	spec := iceberg.NewPartitionSpecID(3,
 		iceberg.PartitionField{
-			SourceID: 1, FieldID: 1000,
+			SourceIDs: []int{1}, FieldID: 1000,
 			Transform: iceberg.TruncateTransform{Width: 19}, Name: "str_truncate",
 		},
 		iceberg.PartitionField{
-			SourceID: 2, FieldID: 1001,
+			SourceIDs: []int{2}, FieldID: 1001,
 			Transform: iceberg.BucketTransform{NumBuckets: 25}, Name: "int_bucket",
 		},
 	)
 	sortOrder, err := NewSortOrder(
 		22,
 		[]SortField{
-			{SourceID: 19, Transform: iceberg.IdentityTransform{}, NullOrder: NullsFirst, Direction: SortASC},
-			{SourceID: 25, Transform: iceberg.BucketTransform{NumBuckets: 4}, NullOrder: NullsFirst, Direction: SortDESC},
-			{SourceID: 22, Transform: iceberg.VoidTransform{}, NullOrder: NullsFirst, Direction: SortASC},
+			{SourceIDs: []int{19}, Transform: iceberg.IdentityTransform{}, NullOrder: NullsFirst, Direction: SortASC},
+			{SourceIDs: []int{25}, Transform: iceberg.BucketTransform{NumBuckets: 4}, NullOrder: NullsFirst, Direction: SortDESC},
+			{SourceIDs: []int{22}, Transform: iceberg.VoidTransform{}, NullOrder: NullsFirst, Direction: SortASC},
 		},
 	)
 	require.NoError(t, err)
