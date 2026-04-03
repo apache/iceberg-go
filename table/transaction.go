@@ -335,7 +335,7 @@ func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapsh
 		appendFiles.appendDataFile(df)
 	}
 
-	updates, reqs, err := appendFiles.commit()
+	updates, reqs, err := appendFiles.commit(ctx)
 	if err != nil {
 		return err
 	}
@@ -434,7 +434,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 		updater.appendDataFile(dataFile)
 	}
 
-	updates, reqs, err := updater.commit()
+	updates, reqs, err := updater.commit(ctx)
 	if err != nil {
 		return err
 	}
@@ -613,7 +613,7 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 		appendFiles.appendDataFile(df)
 	}
 
-	updates, reqs, err := appendFiles.commit()
+	updates, reqs, err := appendFiles.commit(ctx)
 	if err != nil {
 		return err
 	}
@@ -725,7 +725,7 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 		updater.appendDataFile(df)
 	}
 
-	updates, reqs, err := updater.commit()
+	updates, reqs, err := updater.commit(ctx)
 	if err != nil {
 		return err
 	}
@@ -814,7 +814,7 @@ func (t *Transaction) AddFiles(ctx context.Context, filePaths []string, snapshot
 		updater.appendDataFile(dataFile)
 	}
 
-	updates, reqs, err := updater.commit()
+	updates, reqs, err := updater.commit(ctx)
 	if err != nil {
 		return err
 	}
@@ -940,7 +940,7 @@ func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, sna
 		updater.appendDataFile(df)
 	}
 
-	updates, reqs, err := updater.commit()
+	updates, reqs, err := updater.commit(ctx)
 	if err != nil {
 		return err
 	}
@@ -1100,7 +1100,7 @@ func (t *Transaction) Delete(ctx context.Context, filter iceberg.BooleanExpressi
 		return fmt.Errorf("unsupported write mode: '%s'", writeDeleteMode)
 	}
 
-	updates, reqs, err := updater.commit()
+	updates, reqs, err := updater.commit(ctx)
 	if err != nil {
 		return err
 	}

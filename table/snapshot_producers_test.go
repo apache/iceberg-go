@@ -197,7 +197,7 @@ func TestCommitV3RowLineage(t *testing.T) {
 	df := newTestDataFile(t, spec, "file://data.parquet", nil)
 	sp.appendDataFile(df)
 
-	updates, reqs, err := sp.commit()
+	updates, reqs, err := sp.commit(context.Background())
 	require.NoError(t, err, "commit should succeed")
 	require.Len(t, updates, 2, "expected AddSnapshot and SetSnapshotRef updates")
 	addSnap, ok := updates[0].(*addSnapshotUpdate)
@@ -228,7 +228,7 @@ func TestCommitV3RowLineageTwoSequentialCommits(t *testing.T) {
 	// First commit: new table, append one file (1 row).
 	sp1 := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
 	sp1.appendDataFile(newTestDataFile(t, spec, "file://data-1.parquet", nil))
-	updates1, reqs1, err := sp1.commit()
+	updates1, reqs1, err := sp1.commit(context.Background())
 	require.NoError(t, err, "first commit should succeed")
 	addSnap1, ok := updates1[0].(*addSnapshotUpdate)
 	require.True(t, ok)
@@ -246,7 +246,7 @@ func TestCommitV3RowLineageTwoSequentialCommits(t *testing.T) {
 	txn2.meta.formatVersion = 3
 	sp2 := newFastAppendFilesProducer(OpAppend, txn2, memIO, nil, nil)
 	sp2.appendDataFile(newTestDataFile(t, spec, "file://data-2.parquet", nil))
-	updates2, reqs2, err := sp2.commit()
+	updates2, reqs2, err := sp2.commit(context.Background())
 	require.NoError(t, err, "second commit should succeed")
 	addSnap2, ok := updates2[0].(*addSnapshotUpdate)
 	require.True(t, ok)
@@ -272,7 +272,7 @@ func TestCommitV3RowLineageDeltaIncludesExistingRows(t *testing.T) {
 	// First commit: one file (1 row).
 	sp1 := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
 	sp1.appendDataFile(newTestDataFile(t, spec, "file://data-1.parquet", nil))
-	updates1, reqs1, err := sp1.commit()
+	updates1, reqs1, err := sp1.commit(context.Background())
 	require.NoError(t, err, "first commit should succeed")
 	err = txn.apply(updates1, reqs1)
 	require.NoError(t, err)
@@ -291,7 +291,7 @@ func TestCommitV3RowLineageDeltaIncludesExistingRows(t *testing.T) {
 	txn2.meta.props[ManifestMinMergeCountKey] = "2"
 	sp2 := newMergeAppendFilesProducer(OpAppend, txn2, memIO, nil, nil)
 	sp2.appendDataFile(newTestDataFile(t, spec, "file://data-2.parquet", nil))
-	updates2, reqs2, err := sp2.commit()
+	updates2, reqs2, err := sp2.commit(context.Background())
 	require.NoError(t, err, "second commit (merge) should succeed")
 	addSnap2, ok := updates2[0].(*addSnapshotUpdate)
 	require.True(t, ok)
@@ -356,7 +356,7 @@ func TestCommitV3RowLineagePersistsManifestFirstRowID(t *testing.T) {
 	// Use multi-row files to make row-range starts obvious.
 	sp1 := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
 	sp1.appendDataFile(newTestDataFileWithCount(t, spec, "file://data-1.parquet", nil, 3))
-	updates1, reqs1, err := sp1.commit()
+	updates1, reqs1, err := sp1.commit(context.Background())
 	require.NoError(t, err, "first commit should succeed")
 	addSnap1, ok := updates1[0].(*addSnapshotUpdate)
 	require.True(t, ok, "first update must be AddSnapshot")
@@ -378,7 +378,7 @@ func TestCommitV3RowLineagePersistsManifestFirstRowID(t *testing.T) {
 	txn2.meta.formatVersion = 3
 	sp2 := newFastAppendFilesProducer(OpAppend, txn2, memIO, nil, nil)
 	sp2.appendDataFile(newTestDataFileWithCount(t, spec, "file://data-2.parquet", nil, 5))
-	updates2, _, err := sp2.commit()
+	updates2, _, err := sp2.commit(context.Background())
 	require.NoError(t, err, "second commit should succeed")
 	addSnap2, ok := updates2[0].(*addSnapshotUpdate)
 	require.True(t, ok, "first update must be AddSnapshot")
@@ -401,7 +401,7 @@ func TestSnapshotProducerManifestsClosesWriterOnError(t *testing.T) {
 	sp.appendDataFile(newTestDataFile(t, spec, "file://data-1.parquet", validPartition))
 	sp.appendDataFile(newTestDataFile(t, spec, "file://data-2.parquet", nil))
 
-	_, err := sp.manifests()
+	_, err := sp.manifests(context.Background())
 	require.ErrorIs(t, err, errLimitedWrite)
 }
 
@@ -602,7 +602,7 @@ func TestManifestWriterClosesUnderlyingFile(t *testing.T) {
 	df := newTestDataFile(t, spec, "file://data-1.parquet", nil)
 	sp.appendDataFile(df)
 
-	manifests, err := sp.manifests()
+	manifests, err := sp.manifests(context.Background())
 	require.NoError(t, err, "manifests should succeed")
 	require.Len(t, manifests, 1, "should have one manifest")
 
@@ -709,7 +709,7 @@ func (e *errorOnDeletedEntries) existingManifests() ([]iceberg.ManifestFile, err
 	return nil, nil
 }
 
-func (e *errorOnDeletedEntries) deletedEntries() ([]iceberg.ManifestEntry, error) {
+func (e *errorOnDeletedEntries) deletedEntries(_ context.Context) ([]iceberg.ManifestEntry, error) {
 	if e.waitForWriter != nil {
 		select {
 		case <-e.waitForWriter:
@@ -769,7 +769,7 @@ func TestManifestsClosesWriterWhenDeletedEntriesFails(t *testing.T) {
 	done := make(chan struct{})
 	var manifestsErr error
 	go func() {
-		_, manifestsErr = sp.manifests()
+		_, manifestsErr = sp.manifests(context.Background())
 		close(done)
 	}()
 

@@ -153,7 +153,7 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 		producer.appendDeleteFile(f)
 	}
 
-	updates, reqs, err := producer.commit()
+	updates, reqs, err := producer.commit(ctx)
 	if err != nil {
 		return err
 	}
