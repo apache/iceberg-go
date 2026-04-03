@@ -37,9 +37,6 @@ const (
 	dvMagicSize  = 4 // magic field
 	dvCRCSize    = 4 // CRC-32 checksum
 	dvMinSize    = dvLengthSize + dvMagicSize + dvCRCSize
-
-	dvPropertyReferencedDataFile = "referenced-data-file"
-	dvPropertyCardinality        = "cardinality"
 )
 
 // --- Low-level serialization (bytes ↔ bitmap) ---
@@ -117,7 +114,9 @@ func ReadDV(fs iceio.IO, dvFile iceberg.DataFile) (*RoaringPositionBitmap, error
 	var blobData []byte
 
 	if dvFile.ContentOffset() != nil && dvFile.ContentSizeInBytes() != nil {
-		// Fast path: read blob directly at known offset (skip puffin footer parsing)
+		// Fast path: read blob directly at known offset (skip puffin footer parsing).
+		// Note: this assumes uncompressed blobs. The Iceberg spec requires DV blobs
+		// to be uncompressed, and the puffin reader does not support compression either.
 		offset := *dvFile.ContentOffset()
 		size := *dvFile.ContentSizeInBytes()
 		blobData = make([]byte, size)
