@@ -1407,7 +1407,7 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 		concurrency:     concurrency,
 	}
 
-	deletesPerFile, err := readAllDeleteFiles(ctx, fs, tasks, concurrency)
+	deletesPerFile, dvDeletesPerFile, err := readAllDeleteFiles(ctx, fs, tasks, concurrency)
 	if err != nil {
 		return nil, err
 	}
@@ -1456,7 +1456,7 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 		close(records)
 	}()
 
-	return createIterator(ctx, uint(numWorkers), records, deletesPerFile, cancel, scanner.rowLimit), nil
+	return createIterator(ctx, uint(numWorkers), records, deletesPerFile, dvDeletesPerFile, cancel, scanner.rowLimit), nil
 }
 
 func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
