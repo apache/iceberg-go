@@ -118,3 +118,18 @@ type WriteFileInfo struct {
 	Content          iceberg.ManifestEntryContent
 	EqualityFieldIDs []int
 }
+
+type tablePropertiesContextKey struct{}
+
+// WithTableProperties returns a new context with the given table properties attached.
+// These properties are used by readers to configure read behavior (e.g. batch size).
+func WithTableProperties(ctx context.Context, props iceberg.Properties) context.Context {
+	return context.WithValue(ctx, tablePropertiesContextKey{}, props)
+}
+
+// TablePropertiesFromContext retrieves table properties from context.
+// Returns nil if not set.
+func TablePropertiesFromContext(ctx context.Context) iceberg.Properties {
+	props, _ := ctx.Value(tablePropertiesContextKey{}).(iceberg.Properties)
+	return props
+}

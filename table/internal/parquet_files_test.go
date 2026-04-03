@@ -690,3 +690,26 @@ func TestGetWritePropertiesPageVersion(t *testing.T) {
 		})
 	}
 }
+
+func TestParquetBatchSizeFromTableProperties(t *testing.T) {
+	t.Run("default batch size when no properties in context", func(t *testing.T) {
+		ctx := context.Background()
+		props := internal.TablePropertiesFromContext(ctx)
+		assert.Equal(t, internal.ParquetBatchSizeDefault, props.GetInt(internal.ParquetBatchSizeKey, internal.ParquetBatchSizeDefault))
+	})
+
+	t.Run("custom batch size from context properties", func(t *testing.T) {
+		customBatchSize := 1024
+		props := iceberg.Properties{internal.ParquetBatchSizeKey: "1024"}
+		ctx := internal.WithTableProperties(context.Background(), props)
+		got := internal.TablePropertiesFromContext(ctx)
+		assert.Equal(t, customBatchSize, got.GetInt(internal.ParquetBatchSizeKey, internal.ParquetBatchSizeDefault))
+	})
+
+	t.Run("invalid value falls back to default", func(t *testing.T) {
+		props := iceberg.Properties{internal.ParquetBatchSizeKey: "not-a-number"}
+		ctx := internal.WithTableProperties(context.Background(), props)
+		got := internal.TablePropertiesFromContext(ctx)
+		assert.Equal(t, internal.ParquetBatchSizeDefault, got.GetInt(internal.ParquetBatchSizeKey, internal.ParquetBatchSizeDefault))
+	})
+}
