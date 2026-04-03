@@ -326,3 +326,62 @@ func TestMatchDeletesToDataPuffinMatch(t *testing.T) {
 	require.Len(t, deletes, 1)
 	assert.Equal(t, "s3://bucket/data/dv.puffin", deletes[0].FilePath())
 }
+
+func TestMatchDeletesToDataMixedFormats(t *testing.T) {
+	snapshotID := int64(1)
+	seqNum := int64(10)
+	dataPath := "s3://bucket/data/file1.parquet"
+
+	dataEntry := iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil,
+		&mockDataFile{
+			contentType: iceberg.EntryContentData,
+			path:        dataPath,
+			format:      iceberg.ParquetFile,
+			count:       100,
+			filesize:    1024,
+		},
+	)
+
+	deleteSeqNum := int64(11)
+
+	// Parquet positional delete — must have file_path bounds that include dataPath
+	parquetDelete := iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED, &snapshotID, &deleteSeqNum, nil,
+		&mockDataFile{
+			contentType: iceberg.EntryContentPosDeletes,
+			path:        "s3://bucket/data/pos-delete.parquet",
+			format:      iceberg.ParquetFile,
+			count:       10,
+			filesize:    500,
+			lowerBounds: map[int][]byte{2147483546: []byte(dataPath)},
+			upperBounds: map[int][]byte{2147483546: []byte(dataPath)},
+		},
+	)
+
+	// PUFFIN DV — matches via referenced_data_file
+	puffinDelete := iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED, &snapshotID, &deleteSeqNum, nil,
+		&mockDVDataFile{
+			mockDataFile: mockDataFile{
+				contentType: iceberg.EntryContentPosDeletes,
+				path:        "s3://bucket/data/dv.puffin",
+				format:      "PUFFIN",
+				count:       5,
+				filesize:    200,
+			},
+			referencedDataFile: &dataPath,
+		},
+	)
+
+	deletes, err := matchDeletesToData(dataEntry, []iceberg.ManifestEntry{parquetDelete, puffinDelete})
+	require.NoError(t, err)
+	require.Len(t, deletes, 2)
+
+	formats := make(map[iceberg.FileFormat]bool)
+	for _, d := range deletes {
+		formats[d.FileFormat()] = true
+	}
+	assert.True(t, formats[iceberg.ParquetFile], "should include parquet delete")
+	assert.True(t, formats["PUFFIN"], "should include puffin DV")
+}
