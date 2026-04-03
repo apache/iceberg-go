@@ -468,3 +468,57 @@ func TestOrphanCleanup_EdgeCases(t *testing.T) {
 		assert.Equal(t, "host", result)
 	})
 }
+
+func TestGetReferencedFiles_IncludesStatisticsFiles(t *testing.T) {
+	const metaJSON = `{
+  "format-version": 2,
+  "table-uuid": "9c12d441-03fe-4693-9a96-a0705ddf69c1",
+  "location": "s3://bucket/test/location",
+  "last-sequence-number": 0,
+  "last-updated-ms": 1602638573590,
+  "last-column-id": 1,
+  "current-schema-id": 0,
+  "schemas": [
+    {"type": "struct", "schema-id": 0, "fields": [{"id": 1, "name": "x", "required": true, "type": "long"}]}
+  ],
+  "default-spec-id": 0,
+  "partition-specs": [{"spec-id": 0, "fields": []}],
+  "last-partition-id": 0,
+  "default-sort-order-id": 0,
+  "sort-orders": [{"order-id": 0, "fields": []}],
+  "metadata-log": [],
+  "snapshot-log": [],
+  "statistics": [
+    {
+      "snapshot-id": 1,
+      "statistics-path": "s3://bucket/stats/table-stats.puffin",
+      "file-size-in-bytes": 1024,
+      "file-footer-size-in-bytes": 512,
+      "blob-metadata": []
+    }
+  ],
+  "partition-statistics": [
+    {
+      "snapshot-id": 1,
+      "statistics-path": "s3://bucket/stats/part-stats.puffin",
+      "file-size-in-bytes": 512
+    }
+  ]
+}`
+
+	meta, err := ParseMetadataString(metaJSON)
+	require.NoError(t, err)
+
+	tbl := Table{
+		metadata:         meta,
+		metadataLocation: "s3://bucket/test/location/metadata/v1.metadata.json",
+	}
+
+	// No snapshots: FileIO is not used; statistics paths must still be referenced.
+	refs, err := tbl.getReferencedFiles(nil)
+	require.NoError(t, err)
+
+	assert.True(t, refs["s3://bucket/stats/table-stats.puffin"])
+	assert.True(t, refs["s3://bucket/stats/part-stats.puffin"])
+	assert.True(t, refs[tbl.metadataLocation])
+}
