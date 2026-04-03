@@ -401,7 +401,7 @@ func TestSnapshotProducerManifestsClosesWriterOnError(t *testing.T) {
 	sp.appendDataFile(newTestDataFile(t, spec, "file://data-1.parquet", validPartition))
 	sp.appendDataFile(newTestDataFile(t, spec, "file://data-2.parquet", nil))
 
-	_, err := sp.manifests()
+	_, err := sp.manifests(context.Background())
 	require.ErrorIs(t, err, errLimitedWrite)
 }
 
@@ -602,7 +602,7 @@ func TestManifestWriterClosesUnderlyingFile(t *testing.T) {
 	df := newTestDataFile(t, spec, "file://data-1.parquet", nil)
 	sp.appendDataFile(df)
 
-	manifests, err := sp.manifests()
+	manifests, err := sp.manifests(context.Background())
 	require.NoError(t, err, "manifests should succeed")
 	require.Len(t, manifests, 1, "should have one manifest")
 
@@ -769,7 +769,7 @@ func TestManifestsClosesWriterWhenDeletedEntriesFails(t *testing.T) {
 	done := make(chan struct{})
 	var manifestsErr error
 	go func() {
-		_, manifestsErr = sp.manifests()
+		_, manifestsErr = sp.manifests(context.Background())
 		close(done)
 	}()
 
