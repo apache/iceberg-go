@@ -141,7 +141,14 @@ func (of *overwriteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 		foundDeleted := make([]iceberg.ManifestEntry, 0)
 		notDeleted := make([]iceberg.ManifestEntry, 0, len(entries))
 		for _, entry := range entries {
-			if _, ok := of.base.deletedFiles[entry.DataFile().FilePath()]; ok {
+			path := entry.DataFile().FilePath()
+			content := entry.DataFile().ContentType()
+			_, isDeletedData := of.base.deletedFiles[path]
+			_, isDeletedDelete := of.base.deletedDeleteFiles[path]
+
+			isData := content == iceberg.EntryContentData
+			matched := (isDeletedData && isData) || (isDeletedDelete && !isData)
+			if matched {
 				foundDeleted = append(foundDeleted, entry)
 			} else {
 				notDeleted = append(notDeleted, entry)
@@ -165,7 +172,7 @@ func (of *overwriteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 				return nil, err
 			}
 
-			wr, path, counter, fileCloser, err := of.base.newManifestWriter(*spec)
+			wr, path, counter, fileCloser, err := of.base.newManifestWriter(*spec, iceberg.WithManifestWriterContent(m.ManifestContent()))
 			if err != nil {
 				return nil, err
 			}
@@ -225,8 +232,14 @@ func (of *overwriteFiles) deletedEntries(ctx context.Context) ([]iceberg.Manifes
 
 		result := make([]iceberg.ManifestEntry, 0, len(entries))
 		for _, entry := range entries {
-			_, ok := of.base.deletedFiles[entry.DataFile().FilePath()]
-			if ok && entry.DataFile().ContentType() == iceberg.EntryContentData {
+			path := entry.DataFile().FilePath()
+			content := entry.DataFile().ContentType()
+
+			_, isDeletedData := of.base.deletedFiles[path]
+			_, isDeletedDelete := of.base.deletedDeleteFiles[path]
+
+			if (isDeletedData && content == iceberg.EntryContentData) ||
+				(isDeletedDelete && content != iceberg.EntryContentData) {
 				seqNum := entry.SequenceNum()
 				result = append(result,
 					iceberg.NewManifestEntry(iceberg.EntryStatusDELETED,
@@ -428,17 +441,18 @@ func (m *mergeAppendFiles) processManifests(manifests []iceberg.ManifestFile) ([
 type snapshotProducer struct {
 	producerImpl
 
-	commitUuid       uuid.UUID
-	io               iceio.WriteFileIO
-	txn              *Transaction
-	op               Operation
-	snapshotID       int64
-	parentSnapshotID int64
-	addedFiles       []iceberg.DataFile
-	addedDeleteFiles []iceberg.DataFile
-	manifestCount    atomic.Int32
-	deletedFiles     map[string]iceberg.DataFile
-	snapshotProps    iceberg.Properties
+	commitUuid         uuid.UUID
+	io                 iceio.WriteFileIO
+	txn                *Transaction
+	op                 Operation
+	snapshotID         int64
+	parentSnapshotID   int64
+	addedFiles         []iceberg.DataFile
+	addedDeleteFiles   []iceberg.DataFile
+	manifestCount      atomic.Int32
+	deletedFiles       map[string]iceberg.DataFile
+	deletedDeleteFiles map[string]iceberg.DataFile
+	snapshotProps      iceberg.Properties
 }
 
 func createSnapshotProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties) *snapshotProducer {
@@ -458,15 +472,16 @@ func createSnapshotProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO
 	}
 
 	return &snapshotProducer{
-		commitUuid:       commit,
-		io:               fs,
-		txn:              txn,
-		op:               op,
-		snapshotID:       txn.meta.newSnapshotID(),
-		parentSnapshotID: parentSnapshot,
-		addedFiles:       []iceberg.DataFile{},
-		deletedFiles:     make(map[string]iceberg.DataFile),
-		snapshotProps:    snapshotProps,
+		commitUuid:         commit,
+		io:                 fs,
+		txn:                txn,
+		op:                 op,
+		snapshotID:         txn.meta.newSnapshotID(),
+		parentSnapshotID:   parentSnapshot,
+		addedFiles:         []iceberg.DataFile{},
+		deletedFiles:       make(map[string]iceberg.DataFile),
+		deletedDeleteFiles: make(map[string]iceberg.DataFile),
+		snapshotProps:      snapshotProps,
 	}
 }
 
@@ -496,7 +511,13 @@ func (sp *snapshotProducer) deleteDataFile(df iceberg.DataFile) *snapshotProduce
 	return sp
 }
 
-func (sp *snapshotProducer) newManifestWriter(spec iceberg.PartitionSpec) (_ *iceberg.ManifestWriter, _ string, _ *internal.CountingWriter, _ io.Closer, err error) {
+func (sp *snapshotProducer) removeDeleteFile(df iceberg.DataFile) *snapshotProducer {
+	sp.deletedDeleteFiles[df.FilePath()] = df
+
+	return sp
+}
+
+func (sp *snapshotProducer) newManifestWriter(spec iceberg.PartitionSpec, opts ...iceberg.ManifestWriterOption) (_ *iceberg.ManifestWriter, _ string, _ *internal.CountingWriter, _ io.Closer, err error) {
 	out, path, err := sp.newManifestOutput()
 	if err != nil {
 		return nil, "", nil, nil, err
@@ -504,7 +525,7 @@ func (sp *snapshotProducer) newManifestWriter(spec iceberg.PartitionSpec) (_ *ic
 
 	counter := &internal.CountingWriter{W: out}
 	wr, err := iceberg.NewManifestWriter(sp.txn.meta.formatVersion, counter, spec,
-		sp.txn.meta.CurrentSchema(), sp.snapshotID)
+		sp.txn.meta.CurrentSchema(), sp.snapshotID, opts...)
 	if err != nil {
 		return nil, "", nil, nil, errors.Join(err, out.Close())
 	}
@@ -554,32 +575,54 @@ func (sp *snapshotProducer) manifests(ctx context.Context) (_ []iceberg.Manifest
 
 	if len(deleted) > 0 {
 		g.Go(func() error {
-			partitionGroups := map[int][]iceberg.ManifestEntry{}
+			// Group deleted entries by (specID, contentType) to ensure data and
+			// delete file entries are written to separate manifests with the
+			// correct ManifestContent.
+			type groupKey struct {
+				specID  int
+				content iceberg.ManifestContent
+			}
+			groups := map[groupKey][]iceberg.ManifestEntry{}
 			for _, entry := range deleted {
-				specid := int(entry.DataFile().SpecID())
-
-				group := partitionGroups[specid]
-				partitionGroups[specid] = append(group, entry)
+				content := iceberg.ManifestContentData
+				if entry.DataFile().ContentType() != iceberg.EntryContentData {
+					content = iceberg.ManifestContentDeletes
+				}
+				key := groupKey{specID: int(entry.DataFile().SpecID()), content: content}
+				groups[key] = append(groups[key], entry)
 			}
 
-			writeGroup := func(specid int, entries []iceberg.ManifestEntry) (_ iceberg.ManifestFile, retErr error) {
+			writeGroup := func(key groupKey, entries []iceberg.ManifestEntry) (_ iceberg.ManifestFile, retErr error) {
 				out, path, err := sp.newManifestOutput()
 				if err != nil {
 					return nil, err
 				}
 				defer internal.CheckedClose(out, &retErr)
 
-				mf, err := iceberg.WriteManifest(path, out, sp.txn.meta.formatVersion,
-					sp.spec(specid), sp.txn.meta.CurrentSchema(), sp.snapshotID, entries)
+				counter := &internal.CountingWriter{W: out}
+				wr, err := iceberg.NewManifestWriter(sp.txn.meta.formatVersion, counter,
+					sp.spec(key.specID), sp.txn.meta.CurrentSchema(),
+					sp.snapshotID, iceberg.WithManifestWriterContent(key.content))
 				if err != nil {
 					return nil, err
 				}
+				defer internal.CheckedClose(wr, &retErr)
 
-				return mf, nil
+				for _, entry := range entries {
+					if err := wr.Delete(entry); err != nil {
+						return nil, err
+					}
+				}
+
+				if err := wr.Close(); err != nil {
+					return nil, err
+				}
+
+				return wr.ToManifestFile(path, counter.Count, iceberg.WithManifestFileContent(key.content))
 			}
 
-			for specid, entries := range partitionGroups {
-				mf, err := writeGroup(specid, entries)
+			for key, entries := range groups {
+				mf, err := writeGroup(key, entries)
 				if err != nil {
 					return err
 				}
@@ -678,6 +721,15 @@ func (sp *snapshotProducer) summary(props iceberg.Properties) (Summary, error) {
 	if len(sp.deletedFiles) > 0 {
 		specs := sp.txn.meta.specs
 		for _, df := range sp.deletedFiles {
+			if err = ssc.removeFile(df, currentSchema, specs[df.SpecID()]); err != nil {
+				return Summary{}, err
+			}
+		}
+	}
+
+	if len(sp.deletedDeleteFiles) > 0 {
+		specs := sp.txn.meta.specs
+		for _, df := range sp.deletedDeleteFiles {
 			if err = ssc.removeFile(df, currentSchema, specs[df.SpecID()]); err != nil {
 				return Summary{}, err
 			}
