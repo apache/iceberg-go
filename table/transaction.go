@@ -733,6 +733,121 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 	return t.apply(updates, reqs)
 }
 
+// ReplaceFiles atomically replaces data files and removes associated delete files
+// in a single snapshot. This is the commit primitive for compaction: old data files
+// are replaced with new (compacted) data files, and delete files that are fully
+// applied are removed.
+func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption) error {
+	// Delegate data file replacement to existing logic.
+	if len(deleteFilesToRemove) == 0 {
+		return t.ReplaceDataFilesWithDataFiles(ctx, dataFilesToDelete, dataFilesToAdd, snapshotProps, opts...)
+	}
+
+	var cfg dataFileCfg
+	for _, o := range opts {
+		o(&cfg)
+	}
+
+	setToAdd, err := t.validateDataFilesToAdd(dataFilesToAdd, "ReplaceFiles")
+	if err != nil {
+		return err
+	}
+
+	setToDelete := make(map[string]struct{}, len(dataFilesToDelete))
+	for i, df := range dataFilesToDelete {
+		if df == nil {
+			return fmt.Errorf("nil data file at index %d for ReplaceFiles", i)
+		}
+		path := df.FilePath()
+		if path == "" {
+			return errors.New("delete data file paths must be non-empty for ReplaceFiles")
+		}
+		if _, ok := setToDelete[path]; ok {
+			return errors.New("delete data file paths must be unique for ReplaceFiles")
+		}
+		setToDelete[path] = struct{}{}
+	}
+
+	setDeleteFilesToRemove := make(map[string]struct{}, len(deleteFilesToRemove))
+	for i, df := range deleteFilesToRemove {
+		if df == nil {
+			return fmt.Errorf("nil delete file at index %d for ReplaceFiles", i)
+		}
+		path := df.FilePath()
+		if path == "" {
+			return errors.New("delete file paths must be non-empty for ReplaceFiles")
+		}
+		if _, ok := setDeleteFilesToRemove[path]; ok {
+			return errors.New("delete file paths must be unique for ReplaceFiles")
+		}
+		setDeleteFilesToRemove[path] = struct{}{}
+	}
+
+	s := t.meta.currentSnapshot()
+	if s == nil {
+		return fmt.Errorf("%w: cannot replace files in a table without an existing snapshot", ErrInvalidOperation)
+	}
+
+	fs, err := t.tbl.fsF(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Scan all entries (data + delete files) in a single pass to validate
+	// that all files to delete/remove actually exist in the table.
+	markedDataForDeletion := make([]iceberg.DataFile, 0, len(setToDelete))
+	markedDeleteForRemoval := make([]iceberg.DataFile, 0, len(setDeleteFilesToRemove))
+	for df, err := range s.dataFiles(fs, nil) {
+		if err != nil {
+			return err
+		}
+		path := df.FilePath()
+		isData := df.ContentType() == iceberg.EntryContentData
+		if _, ok := setToDelete[path]; ok && isData {
+			markedDataForDeletion = append(markedDataForDeletion, df)
+		}
+		if _, ok := setDeleteFilesToRemove[path]; ok && !isData {
+			markedDeleteForRemoval = append(markedDeleteForRemoval, df)
+		}
+		if _, ok := setToAdd[path]; ok {
+			return fmt.Errorf("cannot add files that are already referenced by table, files: %s", path)
+		}
+	}
+
+	if len(markedDataForDeletion) != len(setToDelete) {
+		return errors.New("cannot delete data files that do not belong to the table")
+	}
+	if len(markedDeleteForRemoval) != len(setDeleteFilesToRemove) {
+		return errors.New("cannot remove delete files that do not belong to the table")
+	}
+
+	if !cfg.skipAutoNameMapping {
+		if err := t.ensureNameMapping(); err != nil {
+			return err
+		}
+	}
+
+	commitUUID := uuid.New()
+	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID)
+
+	for _, df := range markedDataForDeletion {
+		updater.deleteDataFile(df)
+	}
+	for _, df := range dataFilesToAdd {
+		updater.appendDataFile(df)
+	}
+	for _, df := range markedDeleteForRemoval {
+		updater.removeDeleteFile(df)
+	}
+
+	updates, reqs, err := updater.commit(ctx)
+	if err != nil {
+		return err
+	}
+
+	return t.apply(updates, reqs)
+}
+
 type AddFilesOption func(addFilesOp *addFilesOperation)
 
 type addFilesOperation struct {
