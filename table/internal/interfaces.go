@@ -131,5 +131,6 @@ func WithTableProperties(ctx context.Context, props iceberg.Properties) context.
 // Returns nil if not set.
 func TablePropertiesFromContext(ctx context.Context) iceberg.Properties {
 	props, _ := ctx.Value(tablePropertiesContextKey{}).(iceberg.Properties)
+
 	return props
 }
