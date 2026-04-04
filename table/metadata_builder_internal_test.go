@@ -1688,6 +1688,22 @@ func TestUnknownTypeValidation(t *testing.T) {
 		require.ErrorContains(t, err, "must be optional")
 	})
 
+	t.Run("ReservedFieldIDRowID", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: iceberg.RowIDFieldID, Name: "bad_field", Type: iceberg.PrimitiveTypes.Int64},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "reserved metadata column ID")
+	})
+	t.Run("ReservedFieldIDLastUpdatedSeqNum", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: iceberg.LastUpdatedSequenceNumberFieldID, Name: "bad_field", Type: iceberg.PrimitiveTypes.Int64},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "reserved metadata column ID")
+	})
 	t.Run("InvalidUnknownMapValue", func(t *testing.T) {
 		invalidSchema := iceberg.NewSchema(1,
 			iceberg.NestedField{ID: 2, Name: "invalid_map", Type: &iceberg.MapType{KeyID: 3, KeyType: iceberg.StringType{}, ValueID: 4, ValueType: iceberg.UnknownType{}, ValueRequired: true}, Required: false},
