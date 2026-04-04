@@ -465,7 +465,7 @@ func (s *SnapshotSummaryCollector) build() iceberg.Properties {
 
 func updateSnapshotSummaries(sum Summary, previous iceberg.Properties) (Summary, error) {
 	switch sum.Operation {
-	case OpAppend, OpOverwrite, OpDelete:
+	case OpAppend, OpOverwrite, OpDelete, OpReplace:
 	default:
 		return sum, fmt.Errorf("%w: operation: %s", iceberg.ErrNotImplemented, sum.Operation)
 	}

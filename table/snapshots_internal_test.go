@@ -142,6 +142,68 @@ func TestMergeSnapshotSummaries(t *testing.T) {
 				"total-equality-deletes": "3",
 			}},
 		},
+		{
+			Summary{Operation: OpReplace},
+			nil, false,
+			Summary{Operation: OpReplace, Properties: iceberg.Properties{
+				"total-data-files":       "0",
+				"total-delete-files":     "0",
+				"total-records":          "0",
+				"total-files-size":       "0",
+				"total-position-deletes": "0",
+				"total-equality-deletes": "0",
+			}},
+		},
+		{
+			Summary{Operation: OpReplace, Properties: iceberg.Properties{
+				"added-data-files":       "1",
+				"added-delete-files":     "2",
+				"added-equality-deletes": "3",
+				"added-files-size":       "4",
+				"added-position-deletes": "5",
+				"added-records":          "6",
+			}},
+			nil, false,
+			Summary{Operation: OpReplace, Properties: iceberg.Properties{
+				"added-data-files":       "1",
+				"added-delete-files":     "2",
+				"added-equality-deletes": "3",
+				"added-files-size":       "4",
+				"added-position-deletes": "5",
+				"added-records":          "6",
+				"total-data-files":       "1",
+				"total-delete-files":     "2",
+				"total-records":          "6",
+				"total-files-size":       "4",
+				"total-position-deletes": "5",
+				"total-equality-deletes": "3",
+			}},
+		},
+		{
+			Summary{Operation: OpReplace, Properties: iceberg.Properties{
+				"added-data-files":   "1",
+				"deleted-data-files": "1",
+			}},
+			iceberg.Properties{
+				"total-data-files":       "10",
+				"total-delete-files":     "0",
+				"total-records":          "0",
+				"total-files-size":       "0",
+				"total-position-deletes": "0",
+				"total-equality-deletes": "0",
+			},
+			false,
+			Summary{Operation: OpReplace, Properties: iceberg.Properties{
+				"added-data-files":       "1",
+				"deleted-data-files":     "1",
+				"total-data-files":       "10",
+				"total-delete-files":     "0",
+				"total-records":          "0",
+				"total-files-size":       "0",
+				"total-position-deletes": "0",
+				"total-equality-deletes": "0",
+			}},
+		},
 	}
 
 	for _, tt := range tests {
@@ -151,7 +213,7 @@ func TestMergeSnapshotSummaries(t *testing.T) {
 	}
 }
 
-func TestInvalidOperation(t *testing.T) {
-	_, err := updateSnapshotSummaries(Summary{Operation: OpReplace}, nil)
+func TestUpdateSnapshotSummariesUnsupportedOperation(t *testing.T) {
+	_, err := updateSnapshotSummaries(Summary{Operation: Operation("scan")}, nil)
 	assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
 }
