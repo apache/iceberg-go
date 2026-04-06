@@ -98,6 +98,7 @@ type manifestEntries struct {
 	dataEntries             []iceberg.ManifestEntry
 	positionalDeleteEntries []iceberg.ManifestEntry
 	equalityDeleteEntries   []iceberg.ManifestEntry
+	dvEntries               []iceberg.ManifestEntry
 	mu                      sync.Mutex
 }
 
@@ -106,6 +107,7 @@ func newManifestEntries() *manifestEntries {
 		dataEntries:             make([]iceberg.ManifestEntry, 0),
 		positionalDeleteEntries: make([]iceberg.ManifestEntry, 0),
 		equalityDeleteEntries:   make([]iceberg.ManifestEntry, 0),
+		dvEntries:               make([]iceberg.ManifestEntry, 0),
 	}
 }
 
@@ -125,6 +127,12 @@ func (m *manifestEntries) addEqualityDeleteEntry(e iceberg.ManifestEntry) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.equalityDeleteEntries = append(m.equalityDeleteEntries, e)
+}
+
+func (m *manifestEntries) addDVEntry(e iceberg.ManifestEntry) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.dvEntries = append(m.dvEntries, e)
 }
 
 func newPartitionRecord(partitionData map[int]any, partitionType *iceberg.StructType) partitionRecord {
@@ -168,6 +176,10 @@ func openManifest(io io.IO, manifest iceberg.ManifestFile,
 	}
 
 	return out, nil
+}
+
+func isDeletionVector(df iceberg.DataFile) bool {
+	return df.ReferencedDataFile() != nil
 }
 
 type Scan struct {
@@ -473,7 +485,11 @@ func (scan *Scan) collectManifestEntries(
 				case iceberg.EntryContentData:
 					entries.addDataEntry(e)
 				case iceberg.EntryContentPosDeletes:
-					entries.addPositionalDeleteEntry(e)
+					if isDeletionVector(e.DataFile()) {
+						entries.addDVEntry(e)
+					} else {
+						entries.addPositionalDeleteEntry(e)
+					}
 				case iceberg.EntryContentEqDeletes:
 					entries.addEqualityDeleteEntry(e)
 				default:
@@ -530,6 +546,15 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 		return cmp.Compare(a.SequenceNum(), b.SequenceNum())
 	})
 
+	// Index DVs by referenced data file path for O(1) lookup.
+	dvIndex := make(map[string][]iceberg.DataFile, len(entries.dvEntries))
+	for _, del := range entries.dvEntries {
+		ref := del.DataFile().ReferencedDataFile()
+		if ref != nil {
+			dvIndex[*ref] = append(dvIndex[*ref], del.DataFile())
+		}
+	}
+
 	results := make([]FileScanTask, 0, len(entries.dataEntries))
 	for _, e := range entries.dataEntries {
 		deleteFiles, err := matchDeletesToData(e, entries.positionalDeleteEntries)
@@ -543,6 +568,7 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 			File:                e.DataFile(),
 			DeleteFiles:         deleteFiles,
 			EqualityDeleteFiles: eqDeleteFiles,
+			DeletionVectorFiles: dvIndex[e.DataFile().FilePath()],
 			Start:               0,
 			Length:              e.DataFile().FileSizeBytes(),
 		})
@@ -555,6 +581,7 @@ type FileScanTask struct {
 	File                iceberg.DataFile
 	DeleteFiles         []iceberg.DataFile // positional delete files
 	EqualityDeleteFiles []iceberg.DataFile // equality delete files
+	DeletionVectorFiles []iceberg.DataFile // deletion vectors (puffin files)
 	Start, Length       int64
 }
 
