@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM tabulario/spark-iceberg
+FROM tabulario/spark-iceberg:3.5.5_1.8.1
 
 RUN pip3 install -q ipython
 RUN pip3 install pyiceberg[s3fs,hive]
