@@ -549,8 +549,7 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	// Index DVs by referenced data file path for O(1) lookup.
 	dvIndex := make(map[string][]iceberg.DataFile, len(entries.dvEntries))
 	for _, del := range entries.dvEntries {
-		ref := del.DataFile().ReferencedDataFile()
-		if ref != nil {
+		if ref := del.DataFile().ReferencedDataFile(); ref != nil {
 			dvIndex[*ref] = append(dvIndex[*ref], del.DataFile())
 		}
 	}

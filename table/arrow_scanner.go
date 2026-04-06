@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"iter"
 	"strconv"
@@ -753,6 +754,14 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 }
 
 func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
+	for _, t := range tasks {
+		if len(t.DeletionVectorFiles) > 0 {
+			return nil, nil, fmt.Errorf(
+				"%w: deletion vector read is not yet implemented, data file: %s has %d deletion vector(s)",
+				iceberg.ErrNotImplemented, t.File.FilePath(), len(t.DeletionVectorFiles))
+		}
+	}
+
 	var err error
 	as.useLargeTypes, err = strconv.ParseBool(as.options.Get(ScanOptionArrowUseLargeTypes, "false"))
 	if err != nil {
