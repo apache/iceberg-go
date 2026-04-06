@@ -55,6 +55,43 @@ func TestSerializeSortOrder(t *testing.T) {
 	}`, string(data))
 }
 
+func TestNewSortOrderRejectsNilTransform(t *testing.T) {
+	_, err := table.NewSortOrder(1, []table.SortField{{
+		SourceIDs: []int{19},
+		NullOrder: table.NullsFirst,
+		Direction: table.SortASC,
+	}})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrInvalidTransform)
+	assert.Contains(t, err.Error(), "has no transform")
+}
+
+func TestNewSortOrderAcceptsValidTransform(t *testing.T) {
+	sortOrder, err := table.NewSortOrder(1, []table.SortField{{
+		SourceIDs: []int{19},
+		Transform: iceberg.IdentityTransform{},
+		NullOrder: table.NullsFirst,
+		Direction: table.SortASC,
+	}})
+	require.NoError(t, err)
+	assert.Equal(t, 1, sortOrder.OrderID())
+	assert.Equal(t, 1, sortOrder.Len())
+}
+
+func TestSortOrderCheckCompatibilityWithValidTransform(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 19, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	sortOrder, err := table.NewSortOrder(1, []table.SortField{{
+		SourceIDs: []int{19},
+		Transform: iceberg.IdentityTransform{},
+		NullOrder: table.NullsFirst,
+		Direction: table.SortASC,
+	}})
+	require.NoError(t, err)
+	require.NoError(t, sortOrder.CheckCompatibility(schema))
+}
+
 func TestUnmarshalSortOrderDefaults(t *testing.T) {
 	var order table.SortOrder
 	require.NoError(t, json.Unmarshal([]byte(`{"fields": []}`), &order))
