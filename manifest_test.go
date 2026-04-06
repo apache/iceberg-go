@@ -815,7 +815,7 @@ func (m *ManifestTestSuite) TestReadManifestListMissingFormatVersion() {
 func (m *ManifestTestSuite) TestV3DataManifestFirstRowIDInheritance() {
 	// Build a v3 data manifest with two entries that have null first_row_id.
 	partitionSpec := NewPartitionSpecID(1,
-		PartitionField{FieldID: 1000, SourceID: 1, Name: "x", Transform: IdentityTransform{}})
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "x", Transform: IdentityTransform{}})
 	firstCount, secondCount := int64(10), int64(20)
 	entriesWithNullFirstRowID := []ManifestEntry{
 		&manifestEntry{
