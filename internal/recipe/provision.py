@@ -137,7 +137,12 @@ for catalog_name, catalog in catalogs.items():
 
     spark.sql(f"ALTER TABLE default.test_positional_mor_deletes CREATE BRANCH without_5")
 
-    spark.sql(f"DELETE FROM default.test_positional_mor_deletes.branch_without_5 WHERE number = 5")
+    # WAP must be enabled for spark.wap.branch to scope DML to the branch
+    spark.sql(f"ALTER TABLE default.test_positional_mor_deletes SET TBLPROPERTIES ('write.wap.enabled'='true')")
+    spark.conf.set("spark.wap.branch", "without_5")
+    spark.sql(f"DELETE FROM default.test_positional_mor_deletes WHERE number = 5")
+    spark.conf.unset("spark.wap.branch")
+    spark.sql(f"ALTER TABLE default.test_positional_mor_deletes SET TBLPROPERTIES ('write.wap.enabled'='false')")
 
     spark.sql(f"DELETE FROM default.test_positional_mor_deletes WHERE number = 9")
 
