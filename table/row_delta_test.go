@@ -422,7 +422,7 @@ func TestRowDeltaMultipleCommitsOnSameTransaction(t *testing.T) {
 }
 
 // writeParquetFile writes Arrow records to a Parquet file on local disk.
-func writeParquetFile(t *testing.T, path string, sc *arrow.Schema, jsonData string) {
+func writeParquetFile(t testing.TB, path string, sc *arrow.Schema, jsonData string) {
 	t.Helper()
 
 	rec, _, err := array.RecordFromJSON(memory.DefaultAllocator, sc, strings.NewReader(jsonData))
