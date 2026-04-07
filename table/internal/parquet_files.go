@@ -65,6 +65,9 @@ const (
 	ParquetBloomFilterMaxBytesKey            = "write.parquet.bloom-filter-max-bytes"
 	ParquetBloomFilterMaxBytesDefault        = 1024 * 1024
 	ParquetBloomFilterColumnEnabledKeyPrefix = "write.parquet.bloom-filter-enabled.column"
+
+	ParquetBatchSizeKey     = "read.parquet.batch-size"
+	ParquetBatchSizeDefault = 1 << 17 // 131072 rows
 )
 
 type parquetFormat struct{}
@@ -704,10 +707,10 @@ func (pfs *ParquetFileSource) GetReader(ctx context.Context) (FileReader, error)
 		return nil, err
 	}
 
-	// TODO: grab these from the context
+	props := TablePropertiesFromContext(ctx)
 	arrProps := pqarrow.ArrowReadProperties{
 		Parallel:  true,
-		BatchSize: 1 << 17,
+		BatchSize: int64(props.GetInt(ParquetBatchSizeKey, ParquetBatchSizeDefault)),
 	}
 
 	if pfs.file.ContentType() == iceberg.EntryContentPosDeletes {

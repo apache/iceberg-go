@@ -57,6 +57,9 @@ const (
 	ParquetBloomFilterMaxBytesDefault        = internal.ParquetBloomFilterMaxBytesDefault
 	ParquetBloomFilterColumnEnabledKeyPrefix = internal.ParquetBloomFilterColumnEnabledKeyPrefix
 
+	ParquetBatchSizeKey     = internal.ParquetBatchSizeKey
+	ParquetBatchSizeDefault = internal.ParquetBatchSizeDefault
+
 	ManifestMergeEnabledKey     = "commit.manifest-merge.enabled"
 	ManifestMergeEnabledDefault = false
 

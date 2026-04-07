@@ -759,6 +759,8 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 		as.useLargeTypes = false
 	}
 
+	ctx = internal.WithTableProperties(ctx, as.metadata.Properties())
+
 	resultSchema, err := SchemaToArrowSchema(as.projectedSchema, nil, false, as.useLargeTypes)
 	if err != nil {
 		return nil, nil, err
