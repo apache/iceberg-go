@@ -243,11 +243,13 @@ func (t Table) getReferencedFiles(fs iceio.IO) (map[string]bool, error) {
 	referenced[versionHintPath] = true
 
 	for sf := range metadata.Statistics() {
+		// Guard against malformed metadata; statistics-path is required per spec.
 		if sf.StatisticsPath != "" {
 			referenced[sf.StatisticsPath] = true
 		}
 	}
 	for psf := range metadata.PartitionStatistics() {
+		// Guard against malformed metadata; statistics-path is required per spec.
 		if psf.StatisticsPath != "" {
 			referenced[psf.StatisticsPath] = true
 		}

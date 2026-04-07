@@ -495,6 +495,13 @@ func TestGetReferencedFiles_IncludesStatisticsFiles(t *testing.T) {
       "file-size-in-bytes": 1024,
       "file-footer-size-in-bytes": 512,
       "blob-metadata": []
+    },
+    {
+      "snapshot-id": 2,
+      "statistics-path": "",
+      "file-size-in-bytes": 0,
+      "file-footer-size-in-bytes": 0,
+      "blob-metadata": []
     }
   ],
   "partition-statistics": [
@@ -521,4 +528,6 @@ func TestGetReferencedFiles_IncludesStatisticsFiles(t *testing.T) {
 	assert.True(t, refs["s3://bucket/stats/table-stats.puffin"])
 	assert.True(t, refs["s3://bucket/stats/part-stats.puffin"])
 	assert.True(t, refs[tbl.metadataLocation])
+	assert.False(t, refs["s3://bucket/stats/not-referenced.puffin"])
+	assert.False(t, refs[""])
 }
