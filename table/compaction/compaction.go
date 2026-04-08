@@ -50,6 +50,11 @@ type Config struct {
 	// a data file to force it into compaction regardless of file size.
 	// Default: 5.
 	DeleteFileThreshold int
+
+	// PackingLookback controls how many open bins the packer considers
+	// before evicting. Higher values produce better packing at the cost
+	// of memory. Default: 128.
+	PackingLookback int
 }
 
 // DefaultConfig returns a Config with production defaults.
@@ -62,6 +67,7 @@ func DefaultConfig() Config {
 		MaxFileSizeBytes:    target * 9 / 5, // 180%
 		MinInputFiles:       5,
 		DeleteFileThreshold: 5,
+		PackingLookback:     128,
 	}
 }
 
@@ -89,6 +95,9 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.DeleteFileThreshold < 1 {
 		return fmt.Errorf("delete file threshold must be >= 1, got %d", cfg.DeleteFileThreshold)
+	}
+	if cfg.PackingLookback < 1 {
+		return fmt.Errorf("packing lookback must be >= 1, got %d", cfg.PackingLookback)
 	}
 
 	return nil
@@ -178,12 +187,9 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 	}
 
 	// Bin-pack candidates per partition.
-	// Lookback controls how many open bins the packer considers before evicting.
-	// A higher value produces better packing at the cost of memory.
-	const packingLookback = 128
 	packer := internal.SlicePacker[table.FileScanTask]{
 		TargetWeight:    cfg.TargetFileSizeBytes,
-		Lookback:        packingLookback,
+		Lookback:        cfg.PackingLookback,
 		LargestBinFirst: false,
 	}
 

@@ -207,6 +207,7 @@ func TestPlanCompaction_SmallFiles(t *testing.T) {
 		MaxFileSizeBytes:    180 * 1024 * 1024,
 		MinInputFiles:       2,
 		DeleteFileThreshold: 5,
+		PackingLookback:     128,
 	}
 
 	var tasks []table.FileScanTask
@@ -238,6 +239,7 @@ func TestPlanCompaction_DeleteFilesForcesCompaction(t *testing.T) {
 		MaxFileSizeBytes:    3000 * 1024 * 1024,
 		MinInputFiles:       2,
 		DeleteFileThreshold: 3,
+		PackingLookback:     128,
 	}
 
 	var tasks []table.FileScanTask
@@ -271,6 +273,7 @@ func TestPlanCompaction_OversizedFilesSkipped(t *testing.T) {
 		MaxFileSizeBytes:    180 * 1024 * 1024,
 		MinInputFiles:       2,
 		DeleteFileThreshold: 5,
+		PackingLookback:     128,
 	}
 
 	var tasks []table.FileScanTask
@@ -307,6 +310,7 @@ func TestPlanCompaction_OversizedWithDeletesCompacted(t *testing.T) {
 		MaxFileSizeBytes:    600 * 1024 * 1024,
 		MinInputFiles:       1,
 		DeleteFileThreshold: 3,
+		PackingLookback:     128,
 	}
 
 	var tasks []table.FileScanTask
@@ -327,6 +331,7 @@ func TestPlanCompaction_MultiplePartitions(t *testing.T) {
 		MaxFileSizeBytes:    180 * 1024 * 1024,
 		MinInputFiles:       2,
 		DeleteFileThreshold: 5,
+		PackingLookback:     128,
 	}
 
 	var tasks []table.FileScanTask
@@ -364,6 +369,7 @@ func TestPlanCompaction_MultiFieldPartition(t *testing.T) {
 		MaxFileSizeBytes:    180 * 1024 * 1024,
 		MinInputFiles:       2,
 		DeleteFileThreshold: 5,
+		PackingLookback:     128,
 	}
 
 	partition := map[int]any{1000: "2024-01-15", 1001: int32(42)}
@@ -393,6 +399,7 @@ func TestPlanCompaction_BelowMinInputFiles(t *testing.T) {
 		MaxFileSizeBytes:    180 * 1024 * 1024,
 		MinInputFiles:       5,
 		DeleteFileThreshold: 5,
+		PackingLookback:     128,
 	}
 
 	var tasks []table.FileScanTask
@@ -417,6 +424,7 @@ func TestPlanCompaction_UnpartitionedTable(t *testing.T) {
 		MaxFileSizeBytes:    180 * 1024 * 1024,
 		MinInputFiles:       2,
 		DeleteFileThreshold: 5,
+		PackingLookback:     128,
 	}
 
 	var tasks []table.FileScanTask
@@ -443,6 +451,7 @@ func TestPlanCompaction_MixedOptimalAndCandidates(t *testing.T) {
 		MaxFileSizeBytes:    180 * 1024 * 1024,
 		MinInputFiles:       2,
 		DeleteFileThreshold: 5,
+		PackingLookback:     128,
 	}
 
 	var tasks []table.FileScanTask
@@ -480,6 +489,7 @@ func TestPlanCompaction_EstOutputFiles(t *testing.T) {
 		MaxFileSizeBytes:    180 * 1024 * 1024,
 		MinInputFiles:       2,
 		DeleteFileThreshold: 5,
+		PackingLookback:     128,
 	}
 
 	var tasks []table.FileScanTask
