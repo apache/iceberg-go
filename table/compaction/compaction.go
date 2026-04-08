@@ -20,7 +20,6 @@ package compaction
 
 import (
 	"fmt"
-	"slices"
 
 	"github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/table"
@@ -196,8 +195,7 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 			continue
 		}
 
-		// Clone to avoid PackEnd mutating bucket.candidates via slices.Reverse.
-		bins := packer.PackEnd(slices.Clone(bucket.candidates), func(t table.FileScanTask) int64 {
+		bins := packer.PackEnd(bucket.candidates, func(t table.FileScanTask) int64 {
 			return t.File.FileSizeBytes()
 		})
 
