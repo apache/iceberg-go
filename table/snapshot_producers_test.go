@@ -323,7 +323,7 @@ func manifestFirstRowIDForSnapshot(t *testing.T, manifests []iceberg.ManifestFil
 
 	type manifestRowLineage struct {
 		AddedSnapshotID int64  `json:"AddedSnapshotID"`
-		FirstRowID      *int64 `json:"FirstRowId"`
+		FirstRowID      *int64 `json:"FirstRowIDValue"`
 	}
 
 	for _, manifest := range manifests {

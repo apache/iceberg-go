@@ -560,17 +560,23 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 		if err != nil {
 			return nil, err
 		}
-
 		eqDeleteFiles := matchEqualityDeletesToData(e, entries.equalityDeleteEntries)
 
-		results = append(results, FileScanTask{
+		task := FileScanTask{
 			File:                e.DataFile(),
 			DeleteFiles:         deleteFiles,
 			EqualityDeleteFiles: eqDeleteFiles,
 			DeletionVectorFiles: dvIndex[e.DataFile().FilePath()],
 			Start:               0,
 			Length:              e.DataFile().FileSizeBytes(),
-		})
+		}
+		// Row lineage constants: readers use these to synthesize _row_id and
+		// _last_updated_sequence_number when requested.
+		task.FirstRowID = e.DataFile().FirstRowID()
+		if fseq := e.FileSequenceNum(); fseq != nil {
+			task.DataSequenceNumber = fseq
+		}
+		results = append(results, task)
 	}
 
 	return results, nil
@@ -582,6 +588,12 @@ type FileScanTask struct {
 	EqualityDeleteFiles []iceberg.DataFile // equality delete files
 	DeletionVectorFiles []iceberg.DataFile // deletion vectors (puffin files)
 	Start, Length       int64
+
+	// Row lineage (v3): constants used when reading to synthesize _row_id and _last_updated_sequence_number.
+	// FirstRowID is the effective first_row_id for this file (from manifest entry, after inheritance).
+	// DataSequenceNumber is the data sequence number of the file's manifest entry.
+	FirstRowID         *int64
+	DataSequenceNumber *int64
 }
 
 // ToArrowRecords returns the arrow schema of the expected records and an interator
