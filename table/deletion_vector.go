@@ -101,7 +101,7 @@ func DeserializeDV(data []byte, expectedCardinality int64) (*RoaringPositionBitm
 // It uses ContentOffset/ContentSizeInBytes for a direct read when available,
 // otherwise falls back to parsing the puffin footer.
 func ReadDV(fs iceio.IO, dvFile iceberg.DataFile) (*RoaringPositionBitmap, error) {
-	if dvFile.FileFormat() != "PUFFIN" {
+	if dvFile.FileFormat() != iceberg.PuffinFile {
 		return nil, fmt.Errorf("expected PUFFIN format for deletion vector, got %s", dvFile.FileFormat())
 	}
 

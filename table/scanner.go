@@ -324,18 +324,18 @@ func matchDeletesToData(entry iceberg.ManifestEntry, positionalDeletes []iceberg
 	}
 
 	dataFilePath := entry.DataFile().FilePath()
-	out := make([]iceberg.DataFile, 0)
+	var dvDeletes, parquetDeletes []iceberg.DataFile
 	for _, relevant := range positionalDeletes[idx:] {
 		df := relevant.DataFile()
 
 		// DVs (Puffin format) match by referenced_data_file
-		if df.FileFormat() == "PUFFIN" {
+		if df.FileFormat() == iceberg.PuffinFile {
 			ref := df.ReferencedDataFile()
 			if ref == nil {
 				return nil, fmt.Errorf("deletion vector %s missing required referenced_data_file", df.FilePath())
 			}
 			if *ref == dataFilePath {
-				out = append(out, df)
+				dvDeletes = append(dvDeletes, df)
 			}
 			continue
 		}
@@ -346,11 +346,17 @@ func matchDeletesToData(entry iceberg.ManifestEntry, positionalDeletes []iceberg
 			return nil, err
 		}
 		if ok {
-			out = append(out, df)
+			parquetDeletes = append(parquetDeletes, df)
 		}
 	}
 
-	return out, nil
+	// Per the v3 spec: if a DV exists for this data file, it already contains
+	// all positions from existing positional delete files. Skip parquet deletes.
+	if len(dvDeletes) > 0 {
+		return dvDeletes, nil
+	}
+
+	return parquetDeletes, nil
 }
 
 // fetchPartitionSpecFilteredManifests retrieves the table's current snapshot,

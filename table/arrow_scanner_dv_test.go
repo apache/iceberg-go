@@ -74,7 +74,7 @@ func TestReadAllDeleteFilesDV(t *testing.T) {
 		mockDataFile: mockDataFile{
 			contentType: iceberg.EntryContentPosDeletes,
 			path:        puffinPath,
-			format:      "PUFFIN",
+			format:      iceberg.PuffinFile,
 			count:       3,
 			filesize:    int64(puffinBuf.Len()),
 		},

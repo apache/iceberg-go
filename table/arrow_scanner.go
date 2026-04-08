@@ -64,7 +64,7 @@ func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, 
 				continue
 			}
 
-			if d.FileFormat() == "PUFFIN" {
+			if d.FileFormat() == iceberg.PuffinFile {
 				// DVs: key by referenced data file + puffin path to dedup
 				ref := ""
 				if r := d.ReferencedDataFile(); r != nil {
