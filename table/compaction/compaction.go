@@ -43,8 +43,8 @@ type Config struct {
 
 	// MinInputFiles is the minimum number of files in a group to justify rewriting.
 	// Groups with fewer files are dropped from the plan.
-	// Default: 5.
-	MinInputFiles int
+	// Default: DefaultMinInputFiles.
+	MinInputFiles uint
 
 	// DeleteFileThreshold is the minimum number of delete files associated with
 	// a data file to force it into compaction regardless of file size.
@@ -53,9 +53,17 @@ type Config struct {
 
 	// PackingLookback controls how many open bins the packer considers
 	// before evicting. Higher values produce better packing at the cost
-	// of memory. Default: 128.
-	PackingLookback int
+	// of memory. Default: DefaultPackingLookback.
+	PackingLookback uint
 }
+
+const (
+	// DefaultMinInputFiles is the default minimum number of files per group.
+	DefaultMinInputFiles uint = 5
+
+	// DefaultPackingLookback is the default packing lookback.
+	DefaultPackingLookback uint = 128
+)
 
 // DefaultConfig returns a Config with production defaults.
 func DefaultConfig() Config {
@@ -65,9 +73,9 @@ func DefaultConfig() Config {
 		TargetFileSizeBytes: target,
 		MinFileSizeBytes:    target * 3 / 4, // 75%
 		MaxFileSizeBytes:    target * 9 / 5, // 180%
-		MinInputFiles:       5,
+		MinInputFiles:       DefaultMinInputFiles,
 		DeleteFileThreshold: 5,
-		PackingLookback:     128,
+		PackingLookback:     DefaultPackingLookback,
 	}
 }
 
@@ -90,14 +98,8 @@ func (cfg Config) Validate() error {
 		return fmt.Errorf("target file size (%d) must be between min (%d) and max (%d)",
 			cfg.TargetFileSizeBytes, cfg.MinFileSizeBytes, cfg.MaxFileSizeBytes)
 	}
-	if cfg.MinInputFiles < 1 {
-		return fmt.Errorf("min input files must be >= 1, got %d", cfg.MinInputFiles)
-	}
 	if cfg.DeleteFileThreshold < 1 {
 		return fmt.Errorf("delete file threshold must be >= 1, got %d", cfg.DeleteFileThreshold)
-	}
-	if cfg.PackingLookback < 1 {
-		return fmt.Errorf("packing lookback must be >= 1, got %d", cfg.PackingLookback)
 	}
 
 	return nil
@@ -189,13 +191,13 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 	// Bin-pack candidates per partition.
 	packer := internal.SlicePacker[table.FileScanTask]{
 		TargetWeight:    cfg.TargetFileSizeBytes,
-		Lookback:        cfg.PackingLookback,
+		Lookback:        int(cfg.PackingLookback),
 		LargestBinFirst: false,
 	}
 
 	for _, key := range partitionOrder {
 		bucket := partitions[key]
-		if len(bucket.candidates) < cfg.MinInputFiles {
+		if len(bucket.candidates) < int(cfg.MinInputFiles) {
 			plan.SkippedFiles += len(bucket.candidates)
 
 			continue
@@ -206,7 +208,7 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 		})
 
 		for _, bin := range bins {
-			if len(bin) < cfg.MinInputFiles {
+			if len(bin) < int(cfg.MinInputFiles) {
 				plan.SkippedFiles += len(bin)
 
 				continue

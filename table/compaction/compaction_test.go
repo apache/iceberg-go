@@ -111,7 +111,7 @@ func TestDefaultConfig(t *testing.T) {
 	assert.Equal(t, int64(table.WriteTargetFileSizeBytesDefault), cfg.TargetFileSizeBytes)
 	assert.Equal(t, cfg.TargetFileSizeBytes*3/4, cfg.MinFileSizeBytes)
 	assert.Equal(t, cfg.TargetFileSizeBytes*9/5, cfg.MaxFileSizeBytes)
-	assert.Equal(t, 5, cfg.MinInputFiles)
+	assert.Equal(t, compaction.DefaultMinInputFiles, cfg.MinInputFiles)
 	assert.Equal(t, 5, cfg.DeleteFileThreshold)
 	assert.NoError(t, cfg.Validate())
 }
@@ -141,11 +141,6 @@ func TestConfig_Validate(t *testing.T) {
 			name: "target above max",
 			cfg:  compaction.Config{TargetFileSizeBytes: 500, MinFileSizeBytes: 10, MaxFileSizeBytes: 200, MinInputFiles: 1, DeleteFileThreshold: 1},
 			err:  "target file size (500) must be between min (10) and max (200)",
-		},
-		{
-			name: "zero min input files",
-			cfg:  compaction.Config{TargetFileSizeBytes: 100, MinFileSizeBytes: 10, MaxFileSizeBytes: 200, MinInputFiles: 0, DeleteFileThreshold: 1},
-			err:  "min input files must be >= 1",
 		},
 		{
 			name: "zero delete threshold",
@@ -207,7 +202,7 @@ func TestPlanCompaction_SmallFiles(t *testing.T) {
 		MaxFileSizeBytes:    180 * 1024 * 1024,
 		MinInputFiles:       2,
 		DeleteFileThreshold: 5,
-		PackingLookback:     128,
+		PackingLookback:     compaction.DefaultPackingLookback,
 	}
 
 	var tasks []table.FileScanTask
@@ -227,7 +222,7 @@ func TestPlanCompaction_SmallFiles(t *testing.T) {
 	totalTasksInGroups := 0
 	for _, g := range plan.Groups {
 		totalTasksInGroups += len(g.Tasks)
-		assert.GreaterOrEqual(t, len(g.Tasks), cfg.MinInputFiles)
+		assert.GreaterOrEqual(t, len(g.Tasks), int(cfg.MinInputFiles))
 	}
 	assert.Equal(t, 10, totalTasksInGroups)
 }
@@ -239,7 +234,7 @@ func TestPlanCompaction_DeleteFilesForcesCompaction(t *testing.T) {
 		MaxFileSizeBytes:    3000 * 1024 * 1024,
 		MinInputFiles:       2,
 		DeleteFileThreshold: 3,
-		PackingLookback:     128,
+		PackingLookback:     compaction.DefaultPackingLookback,
 	}
 
 	var tasks []table.FileScanTask
@@ -273,7 +268,7 @@ func TestPlanCompaction_OversizedFilesSkipped(t *testing.T) {
 		MaxFileSizeBytes:    180 * 1024 * 1024,
 		MinInputFiles:       2,
 		DeleteFileThreshold: 5,
-		PackingLookback:     128,
+		PackingLookback:     compaction.DefaultPackingLookback,
 	}
 
 	var tasks []table.FileScanTask
@@ -310,7 +305,7 @@ func TestPlanCompaction_OversizedWithDeletesCompacted(t *testing.T) {
 		MaxFileSizeBytes:    600 * 1024 * 1024,
 		MinInputFiles:       1,
 		DeleteFileThreshold: 3,
-		PackingLookback:     128,
+		PackingLookback:     compaction.DefaultPackingLookback,
 	}
 
 	var tasks []table.FileScanTask
@@ -331,7 +326,7 @@ func TestPlanCompaction_MultiplePartitions(t *testing.T) {
 		MaxFileSizeBytes:    180 * 1024 * 1024,
 		MinInputFiles:       2,
 		DeleteFileThreshold: 5,
-		PackingLookback:     128,
+		PackingLookback:     compaction.DefaultPackingLookback,
 	}
 
 	var tasks []table.FileScanTask
@@ -369,7 +364,7 @@ func TestPlanCompaction_MultiFieldPartition(t *testing.T) {
 		MaxFileSizeBytes:    180 * 1024 * 1024,
 		MinInputFiles:       2,
 		DeleteFileThreshold: 5,
-		PackingLookback:     128,
+		PackingLookback:     compaction.DefaultPackingLookback,
 	}
 
 	partition := map[int]any{1000: "2024-01-15", 1001: int32(42)}
@@ -399,7 +394,7 @@ func TestPlanCompaction_BelowMinInputFiles(t *testing.T) {
 		MaxFileSizeBytes:    180 * 1024 * 1024,
 		MinInputFiles:       5,
 		DeleteFileThreshold: 5,
-		PackingLookback:     128,
+		PackingLookback:     compaction.DefaultPackingLookback,
 	}
 
 	var tasks []table.FileScanTask
@@ -424,7 +419,7 @@ func TestPlanCompaction_UnpartitionedTable(t *testing.T) {
 		MaxFileSizeBytes:    180 * 1024 * 1024,
 		MinInputFiles:       2,
 		DeleteFileThreshold: 5,
-		PackingLookback:     128,
+		PackingLookback:     compaction.DefaultPackingLookback,
 	}
 
 	var tasks []table.FileScanTask
@@ -451,7 +446,7 @@ func TestPlanCompaction_MixedOptimalAndCandidates(t *testing.T) {
 		MaxFileSizeBytes:    180 * 1024 * 1024,
 		MinInputFiles:       2,
 		DeleteFileThreshold: 5,
-		PackingLookback:     128,
+		PackingLookback:     compaction.DefaultPackingLookback,
 	}
 
 	var tasks []table.FileScanTask
@@ -489,7 +484,7 @@ func TestPlanCompaction_EstOutputFiles(t *testing.T) {
 		MaxFileSizeBytes:    180 * 1024 * 1024,
 		MinInputFiles:       2,
 		DeleteFileThreshold: 5,
-		PackingLookback:     128,
+		PackingLookback:     compaction.DefaultPackingLookback,
 	}
 
 	var tasks []table.FileScanTask
