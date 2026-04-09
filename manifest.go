@@ -1646,6 +1646,7 @@ const (
 	AvroFile    FileFormat = "AVRO"
 	OrcFile     FileFormat = "ORC"
 	ParquetFile FileFormat = "PARQUET"
+	PuffinFile  FileFormat = "PUFFIN"
 )
 
 // FileFormatFromString parses a file format string (case-insensitive).
@@ -1657,6 +1658,8 @@ func FileFormatFromString(s string) (FileFormat, error) {
 		return OrcFile, nil
 	case string(AvroFile):
 		return AvroFile, nil
+	case string(PuffinFile):
+		return PuffinFile, nil
 	default:
 		return "", fmt.Errorf("unknown file format: %s", s)
 	}
@@ -2152,10 +2155,10 @@ func NewDataFileBuilder(
 		return nil, fmt.Errorf("%w: path cannot be empty", ErrInvalidArgument)
 	}
 
-	if format != AvroFile && format != OrcFile && format != ParquetFile {
+	if format != AvroFile && format != OrcFile && format != ParquetFile && format != PuffinFile {
 		return nil, fmt.Errorf(
-			"%w: format must be one of %s, %s, or %s",
-			ErrInvalidArgument, AvroFile, OrcFile, ParquetFile,
+			"%w: format must be one of %s, %s, %s, or %s",
+			ErrInvalidArgument, AvroFile, OrcFile, ParquetFile, PuffinFile,
 		)
 	}
 
