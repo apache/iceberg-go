@@ -345,12 +345,6 @@ func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapsh
 
 // ReplaceFiles is actually just an overwrite operation with multiple
 // files deleted and added.
-//
-// TODO: technically, this could be a REPLACE operation but we aren't performing
-// any validation here that there are no changes to the underlying data. A REPLACE
-// operation is only valid if the data is exactly the same as the previous snapshot.
-//
-// For now, we'll keep using an overwrite operation.
 func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, filesToAdd []string, snapshotProps iceberg.Properties) error {
 	if len(filesToDelete) == 0 {
 		if len(filesToAdd) > 0 {
@@ -420,7 +414,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID)
+	updater := t.updateSnapshot(fs, snapshotProps, OpReplace).mergeOverwrite(&commitUUID)
 
 	for _, df := range markedForDeletion {
 		updater.deleteDataFile(df)
@@ -715,7 +709,7 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID)
+	updater := t.updateSnapshot(fs, snapshotProps, OpReplace).mergeOverwrite(&commitUUID)
 
 	for _, df := range markedForDeletion {
 		updater.deleteDataFile(df)
@@ -828,7 +822,7 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID)
+	updater := t.updateSnapshot(fs, snapshotProps, OpReplace).mergeOverwrite(&commitUUID)
 
 	for _, df := range markedDataForDeletion {
 		updater.deleteDataFile(df)
