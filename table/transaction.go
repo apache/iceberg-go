@@ -345,7 +345,6 @@ func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapsh
 
 // ReplaceFiles is actually just an overwrite operation with multiple
 // files deleted and added.
-//
 func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, filesToAdd []string, snapshotProps iceberg.Properties) error {
 	if len(filesToDelete) == 0 {
 		if len(filesToAdd) > 0 {
