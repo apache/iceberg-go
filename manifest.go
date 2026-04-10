@@ -424,6 +424,7 @@ func getFieldIDMap(sc *avro.Schema) (map[string]int, map[int]string, map[int]int
 				return &fields[i]
 			}
 		}
+
 		return nil
 	}
 
@@ -458,6 +459,7 @@ func getFieldIDMap(sc *avro.Schema) (map[string]int, map[int]string, map[int]int
 			for _, branch := range typeNode.Branches {
 				if branch.Type != "null" {
 					typeNode = branch
+
 					break
 				}
 			}
@@ -673,6 +675,7 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 				if f.Type.Type != "union" {
 					isFallback = true
 				}
+				
 				break
 			}
 		}
@@ -850,6 +853,7 @@ func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
 				if f.Type.Type == "union" {
 					return decodeManifestsWithFallback[*fallbackManifestFileV1](reader)
 				}
+
 				break
 			}
 		}

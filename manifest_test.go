@@ -25,9 +25,9 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go/internal"
+	"github.com/stretchr/testify/suite"
 	"github.com/twmb/avro"
 	"github.com/twmb/avro/ocf"
-	"github.com/stretchr/testify/suite"
 )
 
 var (

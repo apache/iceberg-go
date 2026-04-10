@@ -88,7 +88,6 @@ const fieldSummaryJSON = `{
 	]
 }`
 
-
 func init() {
 	avroSchemas["field_summary"] = Must(avro.Parse(fieldSummaryJSON))
 
@@ -302,6 +301,7 @@ func newDataFileSchema(partitionType *avro.Schema, version int) (*avro.Schema, e
 
 	// Use a fresh cache so named types from the base schema are re-parsed cleanly.
 	var cache avro.SchemaCache
+
 	return cache.Parse(string(newJSON))
 }
 
@@ -362,5 +362,6 @@ func NewManifestEntrySchema(partitionType *avro.Schema, version int) (*avro.Sche
 
 	// Use a fresh cache so named types are re-parsed cleanly.
 	var cache avro.SchemaCache
+
 	return cache.Parse(string(newJSON))
 }
