@@ -72,6 +72,7 @@ func partitionFieldTypeJSON(typ Type, definedNames map[string]bool) (string, err
 	case UUIDType:
 		if !definedNames["uuid"] {
 			definedNames["uuid"] = true
+
 			return `["null",{"type":"fixed","name":"uuid","size":16,"logicalType":"uuid"}]`, nil
 		}
 
@@ -84,6 +85,7 @@ func partitionFieldTypeJSON(typ Type, definedNames map[string]bool) (string, err
 		fixedName := fmt.Sprintf("fixed_%d", t.len)
 		if !definedNames[fixedName] {
 			definedNames[fixedName] = true
+
 			return fmt.Sprintf(`["null",{"type":"fixed","name":"%s","size":%d}]`, fixedName, t.len), nil
 		}
 
@@ -93,6 +95,7 @@ func partitionFieldTypeJSON(typ Type, definedNames map[string]bool) (string, err
 		decName := fmt.Sprintf("fixed_%d_%d", t.precision, t.scale)
 		if !definedNames[decName] {
 			definedNames[decName] = true
+
 			return fmt.Sprintf(`["null",{"type":"fixed","name":"%s","size":%d,"logicalType":"decimal","precision":%d,"scale":%d}]`,
 				decName, size, t.precision, t.scale), nil
 		}
