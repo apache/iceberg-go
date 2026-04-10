@@ -75,26 +75,16 @@ func (fa *fastAppendFiles) processManifests(manifests []iceberg.ManifestFile) ([
 }
 
 func (fa *fastAppendFiles) existingManifests() ([]iceberg.ManifestFile, error) {
-	existing := make([]iceberg.ManifestFile, 0)
-	if fa.base.parentSnapshotID > 0 {
-		previous, err := fa.base.txn.meta.SnapshotByID(fa.base.parentSnapshotID)
-		if err != nil {
-			return nil, fmt.Errorf("could not find parent snapshot %d", fa.base.parentSnapshotID)
-		}
-
-		manifests, err := previous.Manifests(fa.base.io)
-		if err != nil {
-			return nil, err
-		}
-
-		for _, m := range manifests {
-			if m.HasAddedFiles() || m.HasExistingFiles() || m.SnapshotID() == fa.base.snapshotID {
-				existing = append(existing, m)
-			}
-		}
+	if fa.base.parentSnapshotID <= 0 {
+		return nil, nil
 	}
 
-	return existing, nil
+	previous, err := fa.base.txn.meta.SnapshotByID(fa.base.parentSnapshotID)
+	if err != nil {
+		return nil, fmt.Errorf("could not find parent snapshot %d: %w", fa.base.parentSnapshotID, err)
+	}
+
+	return previous.Manifests(fa.base.io)
 }
 
 func (fa *fastAppendFiles) deletedEntries(_ context.Context) ([]iceberg.ManifestEntry, error) {
