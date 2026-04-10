@@ -78,6 +78,7 @@ func nonNullablePartitionFieldTypeJSON(typ Type, definedNames map[string]bool) (
 			definedNames["uuid"] = true
 			return `{"type":"fixed","name":"uuid","size":16,"logicalType":"uuid"}`, nil
 		}
+
 		return `"uuid"`, nil
 	case BooleanType:
 		return `"boolean"`, nil
@@ -89,6 +90,7 @@ func nonNullablePartitionFieldTypeJSON(typ Type, definedNames map[string]bool) (
 			definedNames[fixedName] = true
 			return fmt.Sprintf(`{"type":"fixed","name":"%s","size":%d}`, fixedName, t.len), nil
 		}
+
 		return fmt.Sprintf(`"%s"`, fixedName), nil
 	case DecimalType:
 		size := internal.DecimalRequiredBytes(t.precision)
@@ -98,6 +100,7 @@ func nonNullablePartitionFieldTypeJSON(typ Type, definedNames map[string]bool) (
 			return fmt.Sprintf(`{"type":"fixed","name":"%s","size":%d,"logicalType":"decimal","precision":%d,"scale":%d}`,
 				decName, size, t.precision, t.scale), nil
 		}
+
 		return fmt.Sprintf(`"%s"`, decName), nil
 	default:
 		return "", fmt.Errorf("unsupported partition type: %s", typ.String())

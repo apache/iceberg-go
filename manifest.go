@@ -573,6 +573,7 @@ func decodeManifestsWithFallback[P fallbackManifest[T], T any](reader *ocf.Reade
 			if errors.Is(err, io.EOF) {
 				break
 			}
+
 			return nil, err
 		}
 
@@ -593,6 +594,7 @@ func decodeManifests[I interface {
 			if errors.Is(err, io.EOF) {
 				break
 			}
+
 			return nil, err
 		}
 
@@ -675,7 +677,7 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 				if f.Type.Type != "union" {
 					isFallback = true
 				}
-				
+
 				break
 			}
 		}
