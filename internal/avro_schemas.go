@@ -18,15 +18,15 @@
 package internal
 
 import (
+	"encoding/json"
 	"fmt"
 
-	"github.com/hamba/avro/v2"
+	"github.com/twmb/avro"
 )
 
-func NullableSchema(schema avro.Schema) avro.Schema {
-	return Must(avro.NewUnionSchema([]avro.Schema{
-		NullSchema, schema,
-	}))
+// NullableSchema wraps schema in a nullable union ["null", schema].
+func NullableSchema(schema *avro.Schema) *avro.Schema {
+	return Must(avro.Parse(`["null",` + schema.String() + `]`))
 }
 
 var requiredLength = [...]int{
@@ -46,495 +46,268 @@ func DecimalRequiredBytes(precision int) int {
 	return requiredLength[precision]
 }
 
-func DecimalSchema(precision, scale int) avro.Schema {
-	return Must(avro.NewFixedSchema("fixed", "",
-		DecimalRequiredBytes(precision), avro.NewDecimalLogicalSchema(precision, scale)))
+// DecimalSchema returns an Avro fixed schema for a decimal with the given precision and scale.
+func DecimalSchema(precision, scale int) *avro.Schema {
+	return Must(avro.Parse(fmt.Sprintf(
+		`{"type":"fixed","name":"fixed","size":%d,"logicalType":"decimal","precision":%d,"scale":%d}`,
+		DecimalRequiredBytes(precision), precision, scale)))
 }
 
 var (
-	NullSchema           = avro.NewNullSchema()
-	BoolSchema           = avro.NewPrimitiveSchema(avro.Boolean, nil)
+	NullSchema           = Must(avro.Parse(`"null"`))
+	BoolSchema           = Must(avro.Parse(`"boolean"`))
 	NullableBoolSchema   = NullableSchema(BoolSchema)
-	BinarySchema         = avro.NewPrimitiveSchema(avro.Bytes, nil)
+	BinarySchema         = Must(avro.Parse(`"bytes"`))
 	NullableBinarySchema = NullableSchema(BinarySchema)
-	StringSchema         = avro.NewPrimitiveSchema(avro.String, nil)
-	IntSchema            = avro.NewPrimitiveSchema(avro.Int, nil)
+	StringSchema         = Must(avro.Parse(`"string"`))
+	IntSchema            = Must(avro.Parse(`"int"`))
 	NullableIntSchema    = NullableSchema(IntSchema)
-	LongSchema           = avro.NewPrimitiveSchema(avro.Long, nil)
+	LongSchema           = Must(avro.Parse(`"long"`))
 	NullableLongSchema   = NullableSchema(LongSchema)
-	FloatSchema          = avro.NewPrimitiveSchema(avro.Float, nil)
-	DoubleSchema         = avro.NewPrimitiveSchema(avro.Double, nil)
-	DateSchema           = avro.NewPrimitiveSchema(avro.Int, avro.NewPrimitiveLogicalSchema(avro.Date))
-	TimeSchema           = avro.NewPrimitiveSchema(avro.Long, avro.NewPrimitiveLogicalSchema(avro.TimeMicros))
-	TimestampSchema      = avro.NewPrimitiveSchema(avro.Long, avro.NewPrimitiveLogicalSchema(avro.TimestampMicros),
-		avro.WithProps(map[string]any{"adjust-to-utc": false}))
-	TimestampTzSchema = avro.NewPrimitiveSchema(avro.Long, avro.NewPrimitiveLogicalSchema(avro.TimestampMicros),
-		avro.WithProps(map[string]any{"adjust-to-utc": true}))
-	UUIDSchema = Must(avro.NewFixedSchema("uuid", "", 16, avro.NewPrimitiveLogicalSchema(avro.UUID)))
-
-	AvroSchemaCache avro.SchemaCache
+	FloatSchema          = Must(avro.Parse(`"float"`))
+	DoubleSchema         = Must(avro.Parse(`"double"`))
+	DateSchema           = Must(avro.Parse(`{"type":"int","logicalType":"date"}`))
+	TimeSchema           = Must(avro.Parse(`{"type":"long","logicalType":"time-micros"}`))
+	TimestampSchema      = Must(avro.Parse(`{"type":"long","logicalType":"timestamp-micros","adjust-to-utc":false}`))
+	TimestampTzSchema    = Must(avro.Parse(`{"type":"long","logicalType":"timestamp-micros","adjust-to-utc":true}`))
+	UUIDSchema           = Must(avro.Parse(`{"type":"fixed","name":"uuid","size":16,"logicalType":"uuid"}`))
 )
 
-func newMapSchema(name string, keySchema, valueSchema avro.Schema, keyFieldID, valueFieldID int) avro.Schema {
-	return avro.NewArraySchema(
-		Must(avro.NewRecordSchema(name, "", []*avro.Field{
-			Must(avro.NewField("key", keySchema, WithFieldID(keyFieldID))),
-			Must(avro.NewField("value", valueSchema, WithFieldID(valueFieldID))),
-		})), avro.WithProps(map[string]any{"logicalType": "map"}))
-}
+// avroSchemas stores pre-built Avro schemas by name for reuse in dynamic schema construction.
+var avroSchemas = make(map[string]*avro.Schema)
 
-func WithFieldID(id int) avro.SchemaOption {
-	return avro.WithProps(map[string]any{"field-id": id})
-}
+const fieldSummaryJSON = `{
+	"type": "record",
+	"name": "r508",
+	"field-id": 508,
+	"fields": [
+		{"name": "contains_null", "type": "boolean", "doc": "true if the field contains null values", "field-id": 509},
+		{"name": "contains_nan", "type": ["null", "boolean"], "doc": "true if the field contains NaN values", "field-id": 518},
+		{"name": "lower_bound", "type": ["null", "bytes"], "doc": "serialized lower bound", "field-id": 510},
+		{"name": "upper_bound", "type": ["null", "bytes"], "doc": "serialized upper bound", "field-id": 511}
+	]
+}`
 
-func WithElementID(id int) avro.SchemaOption {
-	return avro.WithProps(map[string]any{"element-id": id})
-}
 
 func init() {
-	AvroSchemaCache.Add("field_summary", Must(avro.NewRecordSchema("r508", "", []*avro.Field{
-		Must(avro.NewField("contains_null",
-			BoolSchema,
-			avro.WithDoc("true if the field contains null values"),
-			WithFieldID(509))),
-		Must(avro.NewField("contains_nan",
-			NullableBoolSchema,
-			avro.WithDoc("true if the field contains NaN values"),
-			WithFieldID(518))),
-		Must(avro.NewField("lower_bound", NullableBinarySchema,
-			avro.WithDoc("serialized lower bound"),
-			WithFieldID(510))),
-		Must(avro.NewField("upper_bound", NullableBinarySchema,
-			avro.WithDoc("serialized upper bound"),
-			WithFieldID(511))),
-	}, WithFieldID(508))))
+	avroSchemas["field_summary"] = Must(avro.Parse(fieldSummaryJSON))
 
-	AvroSchemaCache.Add("manifest_list_file_v1", Must(avro.NewRecordSchema("manifest_file", "", []*avro.Field{
-		Must(avro.NewField("manifest_path",
-			StringSchema,
-			avro.WithDoc("Location URI with FS scheme"),
-			WithFieldID(500))),
-		Must(avro.NewField("manifest_length",
-			LongSchema,
-			avro.WithDoc("Total file size in bytes"),
-			WithFieldID(501))),
-		Must(avro.NewField("partition_spec_id",
-			IntSchema,
-			avro.WithDoc("Spec ID used to write"),
-			WithFieldID(502))),
-		Must(avro.NewField("added_snapshot_id",
-			LongSchema,
-			avro.WithDoc("Snapshot ID that added the manifest"),
-			WithFieldID(503))),
-		Must(avro.NewField("added_files_count",
-			NullableIntSchema,
-			avro.WithDoc("Added entry count"),
-			WithFieldID(504))),
-		Must(avro.NewField("existing_files_count",
-			NullableIntSchema,
-			avro.WithDoc("Existing entry count"),
-			WithFieldID(505))),
-		Must(avro.NewField("deleted_files_count",
-			NullableIntSchema,
-			avro.WithDoc("Deleted entry count"),
-			WithFieldID(506))),
-		Must(avro.NewField("partitions",
-			NullableSchema(
-				avro.NewArraySchema(AvroSchemaCache.Get("field_summary"),
-					WithElementID(508))),
-			avro.WithDoc("Partition field summaries"),
-			WithFieldID(507))),
-		Must(avro.NewField("added_rows_count",
-			NullableLongSchema,
-			avro.WithDoc("Added row count"),
-			WithFieldID(512))),
-		Must(avro.NewField("existing_rows_count",
-			NullableLongSchema,
-			avro.WithDoc("Existing row count"),
-			WithFieldID(513))),
-		Must(avro.NewField("deleted_rows_count",
-			NullableLongSchema,
-			avro.WithDoc("Deleted row count"),
-			WithFieldID(514))),
-		Must(avro.NewField("key_metadata", NullableBinarySchema,
-			avro.WithDoc("Key metadata"),
-			WithFieldID(519))),
-	})))
+	avroSchemas["manifest_list_file_v1"] = Must(avro.Parse(`{
+		"type": "record",
+		"name": "manifest_file",
+		"fields": [
+			{"name": "manifest_path", "type": "string", "doc": "Location URI with FS scheme", "field-id": 500},
+			{"name": "manifest_length", "type": "long", "doc": "Total file size in bytes", "field-id": 501},
+			{"name": "partition_spec_id", "type": "int", "doc": "Spec ID used to write", "field-id": 502},
+			{"name": "added_snapshot_id", "type": "long", "doc": "Snapshot ID that added the manifest", "field-id": 503},
+			{"name": "added_files_count", "type": ["null", "int"], "doc": "Added entry count", "field-id": 504},
+			{"name": "existing_files_count", "type": ["null", "int"], "doc": "Existing entry count", "field-id": 505},
+			{"name": "deleted_files_count", "type": ["null", "int"], "doc": "Deleted entry count", "field-id": 506},
+			{"name": "partitions", "type": ["null", {"type": "array", "items": {"type": "record", "name": "r508", "field-id": 508, "fields": [{"name": "contains_null", "type": "boolean", "doc": "true if the field contains null values", "field-id": 509}, {"name": "contains_nan", "type": ["null", "boolean"], "doc": "true if the field contains NaN values", "field-id": 518}, {"name": "lower_bound", "type": ["null", "bytes"], "doc": "serialized lower bound", "field-id": 510}, {"name": "upper_bound", "type": ["null", "bytes"], "doc": "serialized upper bound", "field-id": 511}]}, "element-id": 508}], "doc": "Partition field summaries", "field-id": 507},
+			{"name": "added_rows_count", "type": ["null", "long"], "doc": "Added row count", "field-id": 512},
+			{"name": "existing_rows_count", "type": ["null", "long"], "doc": "Existing row count", "field-id": 513},
+			{"name": "deleted_rows_count", "type": ["null", "long"], "doc": "Deleted row count", "field-id": 514},
+			{"name": "key_metadata", "type": ["null", "bytes"], "doc": "Key metadata", "field-id": 519}
+		]
+	}`))
 
-	AvroSchemaCache.Add("manifest_list_file_v2", Must(avro.NewRecordSchema("manifest_file", "", []*avro.Field{
-		Must(avro.NewField("manifest_path",
-			StringSchema,
-			avro.WithDoc("Location URI with FS scheme"),
-			WithFieldID(500))),
-		Must(avro.NewField("manifest_length",
-			LongSchema,
-			avro.WithDoc("Total file size in bytes"),
-			WithFieldID(501))),
-		Must(avro.NewField("partition_spec_id",
-			IntSchema,
-			avro.WithDoc("Spec ID used to write"),
-			WithFieldID(502))),
-		Must(avro.NewField("content", IntSchema,
-			avro.WithDoc("Content type"),
-			avro.WithDefault(0),
-			WithFieldID(517))),
-		Must(avro.NewField("sequence_number", LongSchema,
-			avro.WithDoc("Sequence number"),
-			avro.WithDefault(int64(0)),
-			WithFieldID(515))),
-		Must(avro.NewField("min_sequence_number", LongSchema,
-			avro.WithDoc("Minimum sequence number"),
-			avro.WithDefault(int64(0)),
-			WithFieldID(516))),
-		Must(avro.NewField("added_snapshot_id",
-			LongSchema,
-			avro.WithDoc("Snapshot ID that added the manifest"),
-			WithFieldID(503))),
-		Must(avro.NewField("added_files_count",
-			IntSchema,
-			avro.WithDoc("Added entry count"),
-			WithFieldID(504))),
-		Must(avro.NewField("existing_files_count",
-			IntSchema,
-			avro.WithDoc("Existing entry count"),
-			WithFieldID(505))),
-		Must(avro.NewField("deleted_files_count",
-			IntSchema,
-			avro.WithDoc("Deleted entry count"),
-			WithFieldID(506))),
-		Must(avro.NewField("partitions",
-			NullableSchema(
-				avro.NewArraySchema(AvroSchemaCache.Get("field_summary"),
-					WithElementID(508))),
-			avro.WithDoc("Partition field summaries"),
-			WithFieldID(507))),
-		Must(avro.NewField("added_rows_count",
-			LongSchema,
-			avro.WithDoc("Added row count"),
-			WithFieldID(512))),
-		Must(avro.NewField("existing_rows_count",
-			LongSchema,
-			avro.WithDoc("Existing row count"),
-			WithFieldID(513))),
-		Must(avro.NewField("deleted_rows_count",
-			LongSchema,
-			avro.WithDoc("Deleted row count"),
-			WithFieldID(514))),
-		Must(avro.NewField("key_metadata", NullableBinarySchema,
-			avro.WithDoc("Key metadata"),
-			WithFieldID(519))),
-	})))
+	avroSchemas["manifest_list_file_v2"] = Must(avro.Parse(`{
+		"type": "record",
+		"name": "manifest_file",
+		"fields": [
+			{"name": "manifest_path", "type": "string", "doc": "Location URI with FS scheme", "field-id": 500},
+			{"name": "manifest_length", "type": "long", "doc": "Total file size in bytes", "field-id": 501},
+			{"name": "partition_spec_id", "type": "int", "doc": "Spec ID used to write", "field-id": 502},
+			{"name": "content", "type": "int", "doc": "Content type", "default": 0, "field-id": 517},
+			{"name": "sequence_number", "type": "long", "doc": "Sequence number", "default": 0, "field-id": 515},
+			{"name": "min_sequence_number", "type": "long", "doc": "Minimum sequence number", "default": 0, "field-id": 516},
+			{"name": "added_snapshot_id", "type": "long", "doc": "Snapshot ID that added the manifest", "field-id": 503},
+			{"name": "added_files_count", "type": "int", "doc": "Added entry count", "field-id": 504},
+			{"name": "existing_files_count", "type": "int", "doc": "Existing entry count", "field-id": 505},
+			{"name": "deleted_files_count", "type": "int", "doc": "Deleted entry count", "field-id": 506},
+			{"name": "partitions", "type": ["null", {"type": "array", "items": {"type": "record", "name": "r508", "field-id": 508, "fields": [{"name": "contains_null", "type": "boolean", "doc": "true if the field contains null values", "field-id": 509}, {"name": "contains_nan", "type": ["null", "boolean"], "doc": "true if the field contains NaN values", "field-id": 518}, {"name": "lower_bound", "type": ["null", "bytes"], "doc": "serialized lower bound", "field-id": 510}, {"name": "upper_bound", "type": ["null", "bytes"], "doc": "serialized upper bound", "field-id": 511}]}, "element-id": 508}], "doc": "Partition field summaries", "field-id": 507},
+			{"name": "added_rows_count", "type": "long", "doc": "Added row count", "field-id": 512},
+			{"name": "existing_rows_count", "type": "long", "doc": "Existing row count", "field-id": 513},
+			{"name": "deleted_rows_count", "type": "long", "doc": "Deleted row count", "field-id": 514},
+			{"name": "key_metadata", "type": ["null", "bytes"], "doc": "Key metadata", "field-id": 519}
+		]
+	}`))
 
-	AvroSchemaCache.Add("data_file_v1", Must(avro.NewRecordSchema("r2", "", []*avro.Field{
-		Must(avro.NewField("file_path",
-			StringSchema,
-			avro.WithDoc("Location URI with FS scheme"),
-			WithFieldID(100))),
-		Must(avro.NewField("file_format",
-			StringSchema,
-			avro.WithDoc("File format name: avro, orc, parquet"),
-			WithFieldID(101))),
-		// skip partition field, we'll add that dynamically as needed
-		Must(avro.NewField("record_count",
-			LongSchema,
-			avro.WithDoc("Number of records in the file"),
-			WithFieldID(103))),
-		Must(avro.NewField("file_size_in_bytes",
-			LongSchema,
-			avro.WithDoc("Size of the file in bytes"),
-			WithFieldID(104))),
-		Must(avro.NewField("block_size_in_bytes",
-			LongSchema,
-			avro.WithDoc("Deprecated. Always write default in v1. Do not write in v2."),
-			avro.WithDefault(int64(64*1024*1024)),
-			WithFieldID(105))),
-		Must(avro.NewField("column_sizes",
-			NullableSchema(newMapSchema("k117_v118", IntSchema, LongSchema, 117, 118)),
-			avro.WithDoc("map of column id to total size on disk"),
-			WithFieldID(108))),
-		Must(avro.NewField("value_counts",
-			NullableSchema(newMapSchema("k119_v120", IntSchema, LongSchema, 119, 120)),
-			avro.WithDoc("map of value to count"),
-			WithFieldID(109))),
-		Must(avro.NewField("null_value_counts",
-			NullableSchema(newMapSchema("k121_v122", IntSchema, LongSchema, 121, 122)),
-			avro.WithDoc("map of value to count"),
-			WithFieldID(110))),
-		Must(avro.NewField("nan_value_counts",
-			NullableSchema(newMapSchema("k138_v139", IntSchema, LongSchema, 138, 139)),
-			avro.WithDoc("map of value to count"),
-			WithFieldID(137))),
-		Must(avro.NewField("lower_bounds",
-			NullableSchema(newMapSchema("k126_v127", IntSchema, BinarySchema, 126, 127)),
-			avro.WithDoc("map of column id to lower bound"),
-			WithFieldID(125))),
-		Must(avro.NewField("upper_bounds",
-			NullableSchema(newMapSchema("k129_v130", IntSchema, BinarySchema, 129, 130)),
-			avro.WithDoc("map of column id to upper bound"),
-			WithFieldID(128))),
-		Must(avro.NewField("key_metadata", NullableBinarySchema,
-			avro.WithDoc("Encryption Key Metadata Blob"),
-			WithFieldID(131))),
-		Must(avro.NewField("split_offsets",
-			NullableSchema(avro.NewArraySchema(LongSchema,
-				WithElementID(133))),
-			avro.WithDoc("splitable offsets"),
-			WithFieldID(132))),
-		Must(avro.NewField("sort_order_id",
-			NullableIntSchema,
-			avro.WithDoc("Sort order ID"),
-			WithFieldID(140))),
-	})))
+	avroSchemas["data_file_v1"] = Must(avro.Parse(`{
+		"type": "record",
+		"name": "r2",
+		"fields": [
+			{"name": "file_path", "type": "string", "doc": "Location URI with FS scheme", "field-id": 100},
+			{"name": "file_format", "type": "string", "doc": "File format name: avro, orc, parquet", "field-id": 101},
+			{"name": "record_count", "type": "long", "doc": "Number of records in the file", "field-id": 103},
+			{"name": "file_size_in_bytes", "type": "long", "doc": "Size of the file in bytes", "field-id": 104},
+			{"name": "block_size_in_bytes", "type": "long", "doc": "Deprecated. Always write default in v1. Do not write in v2.", "default": 67108864, "field-id": 105},
+			{"name": "column_sizes", "type": ["null", {"type": "array", "items": {"type": "record", "name": "k117_v118", "fields": [{"name": "key", "type": "int", "field-id": 117}, {"name": "value", "type": "long", "field-id": 118}]}, "logicalType": "map"}], "doc": "map of column id to total size on disk", "field-id": 108},
+			{"name": "value_counts", "type": ["null", {"type": "array", "items": {"type": "record", "name": "k119_v120", "fields": [{"name": "key", "type": "int", "field-id": 119}, {"name": "value", "type": "long", "field-id": 120}]}, "logicalType": "map"}], "doc": "map of value to count", "field-id": 109},
+			{"name": "null_value_counts", "type": ["null", {"type": "array", "items": {"type": "record", "name": "k121_v122", "fields": [{"name": "key", "type": "int", "field-id": 121}, {"name": "value", "type": "long", "field-id": 122}]}, "logicalType": "map"}], "doc": "map of value to count", "field-id": 110},
+			{"name": "nan_value_counts", "type": ["null", {"type": "array", "items": {"type": "record", "name": "k138_v139", "fields": [{"name": "key", "type": "int", "field-id": 138}, {"name": "value", "type": "long", "field-id": 139}]}, "logicalType": "map"}], "doc": "map of value to count", "field-id": 137},
+			{"name": "lower_bounds", "type": ["null", {"type": "array", "items": {"type": "record", "name": "k126_v127", "fields": [{"name": "key", "type": "int", "field-id": 126}, {"name": "value", "type": "bytes", "field-id": 127}]}, "logicalType": "map"}], "doc": "map of column id to lower bound", "field-id": 125},
+			{"name": "upper_bounds", "type": ["null", {"type": "array", "items": {"type": "record", "name": "k129_v130", "fields": [{"name": "key", "type": "int", "field-id": 129}, {"name": "value", "type": "bytes", "field-id": 130}]}, "logicalType": "map"}], "doc": "map of column id to upper bound", "field-id": 128},
+			{"name": "key_metadata", "type": ["null", "bytes"], "doc": "Encryption Key Metadata Blob", "field-id": 131},
+			{"name": "split_offsets", "type": ["null", {"type": "array", "items": "long", "element-id": 133}], "doc": "splitable offsets", "field-id": 132},
+			{"name": "sort_order_id", "type": ["null", "int"], "doc": "Sort order ID", "field-id": 140}
+		]
+	}`))
 
-	AvroSchemaCache.Add("data_file_v2", Must(avro.NewRecordSchema("r2", "", []*avro.Field{
-		Must(avro.NewField("content", IntSchema,
-			avro.WithDoc("Content type"),
-			avro.WithDefault(0),
-			WithFieldID(134))),
-		Must(avro.NewField("file_path",
-			StringSchema,
-			avro.WithDoc("Location URI with FS scheme"),
-			WithFieldID(100))),
-		Must(avro.NewField("file_format",
-			StringSchema,
-			avro.WithDoc("File format name: avro, orc, parquet"),
-			WithFieldID(101))),
-		// skip partition field, we'll add that dynamically as needed
-		Must(avro.NewField("record_count",
-			LongSchema,
-			avro.WithDoc("Number of records in the file"),
-			WithFieldID(103))),
-		Must(avro.NewField("file_size_in_bytes",
-			LongSchema,
-			avro.WithDoc("Size of the file in bytes"),
-			WithFieldID(104))),
-		Must(avro.NewField("column_sizes",
-			NullableSchema(newMapSchema("k117_v118", IntSchema, LongSchema, 117, 118)),
-			avro.WithDoc("map of column id to total size on disk"),
-			WithFieldID(108))),
-		Must(avro.NewField("value_counts",
-			NullableSchema(newMapSchema("k119_v120", IntSchema, LongSchema, 119, 120)),
-			avro.WithDoc("map of value to count"),
-			WithFieldID(109))),
-		Must(avro.NewField("null_value_counts",
-			NullableSchema(newMapSchema("k121_v122", IntSchema, LongSchema, 121, 122)),
-			avro.WithDoc("map of value to count"),
-			WithFieldID(110))),
-		Must(avro.NewField("nan_value_counts",
-			NullableSchema(newMapSchema("k138_v139", IntSchema, LongSchema, 138, 139)),
-			avro.WithDoc("map of value to count"),
-			WithFieldID(137))),
-		Must(avro.NewField("lower_bounds",
-			NullableSchema(newMapSchema("k126_v127", IntSchema, BinarySchema, 126, 127)),
-			avro.WithDoc("map of column id to lower bound"),
-			WithFieldID(125))),
-		Must(avro.NewField("upper_bounds",
-			NullableSchema(newMapSchema("k129_v130", IntSchema, BinarySchema, 129, 130)),
-			avro.WithDoc("map of column id to upper bound"),
-			WithFieldID(128))),
-		Must(avro.NewField("key_metadata", NullableBinarySchema,
-			avro.WithDoc("Encryption Key Metadata Blob"),
-			WithFieldID(131))),
-		Must(avro.NewField("split_offsets",
-			NullableSchema(avro.NewArraySchema(LongSchema,
-				WithElementID(133))),
-			avro.WithDoc("splitable offsets"),
-			WithFieldID(132))),
-		Must(avro.NewField("equality_ids",
-			NullableSchema(avro.NewArraySchema(LongSchema,
-				WithElementID(136))),
-			avro.WithDoc("field ids used to determine row equality in equality delete files"),
-			WithFieldID(135))),
-		Must(avro.NewField("sort_order_id",
-			NullableIntSchema,
-			avro.WithDoc("Sort order ID"),
-			WithFieldID(140))),
-	})))
+	avroSchemas["data_file_v2"] = Must(avro.Parse(`{
+		"type": "record",
+		"name": "r2",
+		"fields": [
+			{"name": "content", "type": "int", "doc": "Content type", "default": 0, "field-id": 134},
+			{"name": "file_path", "type": "string", "doc": "Location URI with FS scheme", "field-id": 100},
+			{"name": "file_format", "type": "string", "doc": "File format name: avro, orc, parquet", "field-id": 101},
+			{"name": "record_count", "type": "long", "doc": "Number of records in the file", "field-id": 103},
+			{"name": "file_size_in_bytes", "type": "long", "doc": "Size of the file in bytes", "field-id": 104},
+			{"name": "column_sizes", "type": ["null", {"type": "array", "items": {"type": "record", "name": "k117_v118", "fields": [{"name": "key", "type": "int", "field-id": 117}, {"name": "value", "type": "long", "field-id": 118}]}, "logicalType": "map"}], "doc": "map of column id to total size on disk", "field-id": 108},
+			{"name": "value_counts", "type": ["null", {"type": "array", "items": {"type": "record", "name": "k119_v120", "fields": [{"name": "key", "type": "int", "field-id": 119}, {"name": "value", "type": "long", "field-id": 120}]}, "logicalType": "map"}], "doc": "map of value to count", "field-id": 109},
+			{"name": "null_value_counts", "type": ["null", {"type": "array", "items": {"type": "record", "name": "k121_v122", "fields": [{"name": "key", "type": "int", "field-id": 121}, {"name": "value", "type": "long", "field-id": 122}]}, "logicalType": "map"}], "doc": "map of value to count", "field-id": 110},
+			{"name": "nan_value_counts", "type": ["null", {"type": "array", "items": {"type": "record", "name": "k138_v139", "fields": [{"name": "key", "type": "int", "field-id": 138}, {"name": "value", "type": "long", "field-id": 139}]}, "logicalType": "map"}], "doc": "map of value to count", "field-id": 137},
+			{"name": "lower_bounds", "type": ["null", {"type": "array", "items": {"type": "record", "name": "k126_v127", "fields": [{"name": "key", "type": "int", "field-id": 126}, {"name": "value", "type": "bytes", "field-id": 127}]}, "logicalType": "map"}], "doc": "map of column id to lower bound", "field-id": 125},
+			{"name": "upper_bounds", "type": ["null", {"type": "array", "items": {"type": "record", "name": "k129_v130", "fields": [{"name": "key", "type": "int", "field-id": 129}, {"name": "value", "type": "bytes", "field-id": 130}]}, "logicalType": "map"}], "doc": "map of column id to upper bound", "field-id": 128},
+			{"name": "key_metadata", "type": ["null", "bytes"], "doc": "Encryption Key Metadata Blob", "field-id": 131},
+			{"name": "split_offsets", "type": ["null", {"type": "array", "items": "long", "element-id": 133}], "doc": "splitable offsets", "field-id": 132},
+			{"name": "equality_ids", "type": ["null", {"type": "array", "items": "long", "element-id": 136}], "doc": "field ids used to determine row equality in equality delete files", "field-id": 135},
+			{"name": "sort_order_id", "type": ["null", "int"], "doc": "Sort order ID", "field-id": 140}
+		]
+	}`))
 
-	AvroSchemaCache.Add("manifest_entry_v1", Must(avro.NewRecordSchema("manifest_entry", "", []*avro.Field{
-		Must(avro.NewField("status", IntSchema, WithFieldID(0))),
-		Must(avro.NewField("snapshot_id", LongSchema, WithFieldID(1))),
-		// leave data_file for dyanmic generation
-	})))
+	avroSchemas["manifest_entry_v1"] = Must(avro.Parse(`{
+		"type": "record",
+		"name": "manifest_entry",
+		"fields": [
+			{"name": "status", "type": "int", "field-id": 0},
+			{"name": "snapshot_id", "type": "long", "field-id": 1}
+		]
+	}`))
 
-	AvroSchemaCache.Add("manifest_entry_v2", Must(avro.NewRecordSchema("manifest_entry", "", []*avro.Field{
-		Must(avro.NewField("status", IntSchema, WithFieldID(0))),
-		Must(avro.NewField("snapshot_id", NullableLongSchema, WithFieldID(1))),
-		Must(avro.NewField("sequence_number", NullableLongSchema, WithFieldID(3))),
-		Must(avro.NewField("file_sequence_number", NullableLongSchema, WithFieldID(4))),
-		// leave data_file for dynamic generation
-	})))
+	avroSchemas["manifest_entry_v2"] = Must(avro.Parse(`{
+		"type": "record",
+		"name": "manifest_entry",
+		"fields": [
+			{"name": "status", "type": "int", "field-id": 0},
+			{"name": "snapshot_id", "type": ["null", "long"], "field-id": 1},
+			{"name": "sequence_number", "type": ["null", "long"], "field-id": 3},
+			{"name": "file_sequence_number", "type": ["null", "long"], "field-id": 4}
+		]
+	}`))
 
-	AvroSchemaCache.Add("manifest_list_file_v3", Must(avro.NewRecordSchema("manifest_file", "", []*avro.Field{
-		Must(avro.NewField("manifest_path",
-			StringSchema,
-			avro.WithDoc("Location URI with FS scheme"),
-			WithFieldID(500))),
-		Must(avro.NewField("manifest_length",
-			LongSchema,
-			avro.WithDoc("Total file size in bytes"),
-			WithFieldID(501))),
-		Must(avro.NewField("partition_spec_id",
-			IntSchema,
-			avro.WithDoc("Spec ID used to write"),
-			WithFieldID(502))),
-		Must(avro.NewField("content", IntSchema,
-			avro.WithDoc("Content type"),
-			avro.WithDefault(0),
-			WithFieldID(517))),
-		Must(avro.NewField("sequence_number", LongSchema,
-			avro.WithDoc("Sequence number"),
-			avro.WithDefault(int64(0)),
-			WithFieldID(515))),
-		Must(avro.NewField("min_sequence_number", LongSchema,
-			avro.WithDoc("Minimum sequence number"),
-			avro.WithDefault(int64(0)),
-			WithFieldID(516))),
-		Must(avro.NewField("added_snapshot_id",
-			LongSchema,
-			avro.WithDoc("Snapshot ID that added the manifest"),
-			WithFieldID(503))),
-		Must(avro.NewField("added_files_count",
-			IntSchema,
-			avro.WithDoc("Added entry count"),
-			WithFieldID(504))),
-		Must(avro.NewField("existing_files_count",
-			IntSchema,
-			avro.WithDoc("Existing entry count"),
-			WithFieldID(505))),
-		Must(avro.NewField("deleted_files_count",
-			IntSchema,
-			avro.WithDoc("Deleted entry count"),
-			WithFieldID(506))),
-		Must(avro.NewField("partitions",
-			NullableSchema(
-				avro.NewArraySchema(AvroSchemaCache.Get("field_summary"),
-					WithElementID(508))),
-			avro.WithDoc("Partition field summaries"),
-			WithFieldID(507))),
-		Must(avro.NewField("added_rows_count",
-			LongSchema,
-			avro.WithDoc("Added row count"),
-			WithFieldID(512))),
-		Must(avro.NewField("existing_rows_count",
-			LongSchema,
-			avro.WithDoc("Existing row count"),
-			WithFieldID(513))),
-		Must(avro.NewField("deleted_rows_count",
-			LongSchema,
-			avro.WithDoc("Deleted row count"),
-			WithFieldID(514))),
-		Must(avro.NewField("key_metadata", NullableBinarySchema,
-			avro.WithDoc("Key metadata"),
-			WithFieldID(519))),
-		Must(avro.NewField("first_row_id", NullableLongSchema,
-			avro.WithDoc("First row ID"),
-			WithFieldID(520))),
-	})))
-	AvroSchemaCache.Add("data_file_v3", Must(avro.NewRecordSchema("r2", "", []*avro.Field{
-		Must(avro.NewField("content", IntSchema,
-			avro.WithDoc("Content type"),
-			avro.WithDefault(0),
-			WithFieldID(134))),
-		Must(avro.NewField("file_path",
-			StringSchema,
-			avro.WithDoc("Location URI with FS scheme"),
-			WithFieldID(100))),
-		Must(avro.NewField("file_format",
-			StringSchema,
-			avro.WithDoc("File format name: avro, orc, parquet"),
-			WithFieldID(101))),
-		// skip partition field, we'll add that dynamically as needed
-		Must(avro.NewField("record_count",
-			LongSchema,
-			avro.WithDoc("Number of records in the file"),
-			WithFieldID(103))),
-		Must(avro.NewField("file_size_in_bytes",
-			LongSchema,
-			avro.WithDoc("Size of the file in bytes"),
-			WithFieldID(104))),
-		Must(avro.NewField("column_sizes",
-			NullableSchema(newMapSchema("k117_v118", IntSchema, LongSchema, 117, 118)),
-			avro.WithDoc("map of column id to total size on disk"),
-			WithFieldID(108))),
-		Must(avro.NewField("value_counts",
-			NullableSchema(newMapSchema("k119_v120", IntSchema, LongSchema, 119, 120)),
-			avro.WithDoc("map of value to count"),
-			WithFieldID(109))),
-		Must(avro.NewField("null_value_counts",
-			NullableSchema(newMapSchema("k121_v122", IntSchema, LongSchema, 121, 122)),
-			avro.WithDoc("map of value to count"),
-			WithFieldID(110))),
-		Must(avro.NewField("nan_value_counts",
-			NullableSchema(newMapSchema("k138_v139", IntSchema, LongSchema, 138, 139)),
-			avro.WithDoc("map of value to count"),
-			WithFieldID(137))),
-		Must(avro.NewField("lower_bounds",
-			NullableSchema(newMapSchema("k126_v127", IntSchema, BinarySchema, 126, 127)),
-			avro.WithDoc("map of column id to lower bound"),
-			WithFieldID(125))),
-		Must(avro.NewField("upper_bounds",
-			NullableSchema(newMapSchema("k129_v130", IntSchema, BinarySchema, 129, 130)),
-			avro.WithDoc("map of column id to upper bound"),
-			WithFieldID(128))),
-		Must(avro.NewField("key_metadata", NullableBinarySchema,
-			avro.WithDoc("Encryption Key Metadata Blob"),
-			WithFieldID(131))),
-		Must(avro.NewField("split_offsets",
-			NullableSchema(avro.NewArraySchema(LongSchema,
-				WithElementID(133))),
-			avro.WithDoc("splitable offsets"),
-			WithFieldID(132))),
-		Must(avro.NewField("equality_ids",
-			NullableSchema(avro.NewArraySchema(LongSchema,
-				WithElementID(136))),
-			avro.WithDoc("field ids used to determine row equality in equality delete files"),
-			WithFieldID(135))),
-		Must(avro.NewField("sort_order_id",
-			NullableIntSchema,
-			avro.WithDoc("Sort order ID"),
-			WithFieldID(140))),
-		Must(avro.NewField("first_row_id",
-			NullableLongSchema,
-			avro.WithDoc("The _row_id for the first row in the data file"),
-			WithFieldID(142))),
-		Must(avro.NewField("referenced_data_file",
-			NullableSchema(StringSchema),
-			avro.WithDoc("Fully qualified location of a data file that all deletes reference"),
-			WithFieldID(143))),
-		Must(avro.NewField("content_offset",
-			NullableLongSchema,
-			avro.WithDoc("The offset in the file where the content starts"),
-			WithFieldID(144))),
-		Must(avro.NewField("content_size_in_bytes",
-			NullableLongSchema,
-			avro.WithDoc("The length of the referenced content stored in the file"),
-			WithFieldID(145))),
-	})))
-	AvroSchemaCache.Add("manifest_entry_v3", Must(avro.NewRecordSchema("manifest_entry", "", []*avro.Field{
-		Must(avro.NewField("status", IntSchema, WithFieldID(0))),
-		Must(avro.NewField("snapshot_id", NullableLongSchema, WithFieldID(1))),
-		Must(avro.NewField("sequence_number", NullableLongSchema, WithFieldID(3))),
-		Must(avro.NewField("file_sequence_number", NullableLongSchema, WithFieldID(4))),
-		// leave data_file for dynamic generation
-	})))
+	avroSchemas["manifest_list_file_v3"] = Must(avro.Parse(`{
+		"type": "record",
+		"name": "manifest_file",
+		"fields": [
+			{"name": "manifest_path", "type": "string", "doc": "Location URI with FS scheme", "field-id": 500},
+			{"name": "manifest_length", "type": "long", "doc": "Total file size in bytes", "field-id": 501},
+			{"name": "partition_spec_id", "type": "int", "doc": "Spec ID used to write", "field-id": 502},
+			{"name": "content", "type": "int", "doc": "Content type", "default": 0, "field-id": 517},
+			{"name": "sequence_number", "type": "long", "doc": "Sequence number", "default": 0, "field-id": 515},
+			{"name": "min_sequence_number", "type": "long", "doc": "Minimum sequence number", "default": 0, "field-id": 516},
+			{"name": "added_snapshot_id", "type": "long", "doc": "Snapshot ID that added the manifest", "field-id": 503},
+			{"name": "added_files_count", "type": "int", "doc": "Added entry count", "field-id": 504},
+			{"name": "existing_files_count", "type": "int", "doc": "Existing entry count", "field-id": 505},
+			{"name": "deleted_files_count", "type": "int", "doc": "Deleted entry count", "field-id": 506},
+			{"name": "partitions", "type": ["null", {"type": "array", "items": {"type": "record", "name": "r508", "field-id": 508, "fields": [{"name": "contains_null", "type": "boolean", "doc": "true if the field contains null values", "field-id": 509}, {"name": "contains_nan", "type": ["null", "boolean"], "doc": "true if the field contains NaN values", "field-id": 518}, {"name": "lower_bound", "type": ["null", "bytes"], "doc": "serialized lower bound", "field-id": 510}, {"name": "upper_bound", "type": ["null", "bytes"], "doc": "serialized upper bound", "field-id": 511}]}, "element-id": 508}], "doc": "Partition field summaries", "field-id": 507},
+			{"name": "added_rows_count", "type": "long", "doc": "Added row count", "field-id": 512},
+			{"name": "existing_rows_count", "type": "long", "doc": "Existing row count", "field-id": 513},
+			{"name": "deleted_rows_count", "type": "long", "doc": "Deleted row count", "field-id": 514},
+			{"name": "key_metadata", "type": ["null", "bytes"], "doc": "Key metadata", "field-id": 519},
+			{"name": "first_row_id", "type": ["null", "long"], "doc": "First row ID", "field-id": 520}
+		]
+	}`))
+
+	avroSchemas["data_file_v3"] = Must(avro.Parse(`{
+		"type": "record",
+		"name": "r2",
+		"fields": [
+			{"name": "content", "type": "int", "doc": "Content type", "default": 0, "field-id": 134},
+			{"name": "file_path", "type": "string", "doc": "Location URI with FS scheme", "field-id": 100},
+			{"name": "file_format", "type": "string", "doc": "File format name: avro, orc, parquet", "field-id": 101},
+			{"name": "record_count", "type": "long", "doc": "Number of records in the file", "field-id": 103},
+			{"name": "file_size_in_bytes", "type": "long", "doc": "Size of the file in bytes", "field-id": 104},
+			{"name": "column_sizes", "type": ["null", {"type": "array", "items": {"type": "record", "name": "k117_v118", "fields": [{"name": "key", "type": "int", "field-id": 117}, {"name": "value", "type": "long", "field-id": 118}]}, "logicalType": "map"}], "doc": "map of column id to total size on disk", "field-id": 108},
+			{"name": "value_counts", "type": ["null", {"type": "array", "items": {"type": "record", "name": "k119_v120", "fields": [{"name": "key", "type": "int", "field-id": 119}, {"name": "value", "type": "long", "field-id": 120}]}, "logicalType": "map"}], "doc": "map of value to count", "field-id": 109},
+			{"name": "null_value_counts", "type": ["null", {"type": "array", "items": {"type": "record", "name": "k121_v122", "fields": [{"name": "key", "type": "int", "field-id": 121}, {"name": "value", "type": "long", "field-id": 122}]}, "logicalType": "map"}], "doc": "map of value to count", "field-id": 110},
+			{"name": "nan_value_counts", "type": ["null", {"type": "array", "items": {"type": "record", "name": "k138_v139", "fields": [{"name": "key", "type": "int", "field-id": 138}, {"name": "value", "type": "long", "field-id": 139}]}, "logicalType": "map"}], "doc": "map of value to count", "field-id": 137},
+			{"name": "lower_bounds", "type": ["null", {"type": "array", "items": {"type": "record", "name": "k126_v127", "fields": [{"name": "key", "type": "int", "field-id": 126}, {"name": "value", "type": "bytes", "field-id": 127}]}, "logicalType": "map"}], "doc": "map of column id to lower bound", "field-id": 125},
+			{"name": "upper_bounds", "type": ["null", {"type": "array", "items": {"type": "record", "name": "k129_v130", "fields": [{"name": "key", "type": "int", "field-id": 129}, {"name": "value", "type": "bytes", "field-id": 130}]}, "logicalType": "map"}], "doc": "map of column id to upper bound", "field-id": 128},
+			{"name": "key_metadata", "type": ["null", "bytes"], "doc": "Encryption Key Metadata Blob", "field-id": 131},
+			{"name": "split_offsets", "type": ["null", {"type": "array", "items": "long", "element-id": 133}], "doc": "splitable offsets", "field-id": 132},
+			{"name": "equality_ids", "type": ["null", {"type": "array", "items": "long", "element-id": 136}], "doc": "field ids used to determine row equality in equality delete files", "field-id": 135},
+			{"name": "sort_order_id", "type": ["null", "int"], "doc": "Sort order ID", "field-id": 140},
+			{"name": "first_row_id", "type": ["null", "long"], "doc": "The _row_id for the first row in the data file", "field-id": 142},
+			{"name": "referenced_data_file", "type": ["null", "string"], "doc": "Fully qualified location of a data file that all deletes reference", "field-id": 143},
+			{"name": "content_offset", "type": ["null", "long"], "doc": "The offset in the file where the content starts", "field-id": 144},
+			{"name": "content_size_in_bytes", "type": ["null", "long"], "doc": "The length of the referenced content stored in the file", "field-id": 145}
+		]
+	}`))
+
+	avroSchemas["manifest_entry_v3"] = Must(avro.Parse(`{
+		"type": "record",
+		"name": "manifest_entry",
+		"fields": [
+			{"name": "status", "type": "int", "field-id": 0},
+			{"name": "snapshot_id", "type": ["null", "long"], "field-id": 1},
+			{"name": "sequence_number", "type": ["null", "long"], "field-id": 3},
+			{"name": "file_sequence_number", "type": ["null", "long"], "field-id": 4}
+		]
+	}`))
 }
 
-func newDataFileSchema(partitionType avro.Schema, version int) (avro.Schema, error) {
+// newDataFileSchema builds the full data file Avro schema by inserting a partition field
+// into the base data file schema for the given spec version.
+func newDataFileSchema(partitionType *avro.Schema, version int) (*avro.Schema, error) {
 	key := fmt.Sprintf("data_file_v%d", version)
-	schema := AvroSchemaCache.Get(key)
-
-	partField, err := avro.NewField("partition",
-		partitionType, WithFieldID(102))
-	if err != nil {
-		return nil, err
+	baseSchema, ok := avroSchemas[key]
+	if !ok {
+		return nil, fmt.Errorf("no data file schema for version %d", version)
 	}
 
-	return avro.NewRecordSchema("r2", "",
-		append(schema.(*avro.RecordSchema).Fields(), partField))
+	// Unmarshal the base schema JSON and inject the partition field.
+	var base map[string]any
+	if err := json.Unmarshal([]byte(baseSchema.String()), &base); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal base data file schema: %w", err)
+	}
+
+	var partType any
+	if err := json.Unmarshal([]byte(partitionType.String()), &partType); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal partition type schema: %w", err)
+	}
+
+	partitionField := map[string]any{
+		"name":     "partition",
+		"type":     partType,
+		"field-id": 102,
+	}
+
+	fields := base["fields"].([]any)
+	// Insert partition field after file_format (index 1 in v1, index 2 in v2/v3).
+	insertAt := 2
+	if version == 1 {
+		insertAt = 2
+	}
+	newFields := make([]any, 0, len(fields)+1)
+	newFields = append(newFields, fields[:insertAt]...)
+	newFields = append(newFields, partitionField)
+	newFields = append(newFields, fields[insertAt:]...)
+	base["fields"] = newFields
+
+	newJSON, err := json.Marshal(base)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal data file schema with partition: %w", err)
+	}
+
+	// Use a fresh cache so named types from the base schema are re-parsed cleanly.
+	var cache avro.SchemaCache
+	return cache.Parse(string(newJSON))
 }
 
-func NewManifestFileSchema(version int) (avro.Schema, error) {
+// NewManifestFileSchema returns the Avro schema for a manifest list file entry
+// for the given Iceberg spec version (1, 2, or 3).
+func NewManifestFileSchema(version int) (*avro.Schema, error) {
 	switch version {
 	case 1, 2, 3:
 	default:
@@ -543,29 +316,51 @@ func NewManifestFileSchema(version int) (avro.Schema, error) {
 
 	key := fmt.Sprintf("manifest_list_file_v%d", version)
 
-	return AvroSchemaCache.Get(key), nil
+	return avroSchemas[key], nil
 }
 
-func NewManifestEntrySchema(partitionType avro.Schema, version int) (avro.Schema, error) {
+// NewManifestEntrySchema returns the full Avro schema for a manifest entry,
+// including the data file sub-schema with the given partition type.
+func NewManifestEntrySchema(partitionType *avro.Schema, version int) (*avro.Schema, error) {
 	switch version {
 	case 1, 2, 3:
 	default:
 		return nil, fmt.Errorf("unsupported iceberg spec version: %d", version)
 	}
 
-	dfschema, err := newDataFileSchema(partitionType, version)
+	dfSchema, err := newDataFileSchema(partitionType, version)
 	if err != nil {
 		return nil, err
 	}
 
-	dfField, err := avro.NewField("data_file", dfschema, WithFieldID(2))
-	if err != nil {
-		return nil, err
-	}
-
+	// Unmarshal the base manifest entry schema and append the data_file field.
 	key := fmt.Sprintf("manifest_entry_v%d", version)
-	schema := AvroSchemaCache.Get(key)
+	baseSchema := avroSchemas[key]
 
-	return avro.NewRecordSchema("manifest_entry", "",
-		append(schema.(*avro.RecordSchema).Fields(), dfField))
+	var base map[string]any
+	if err := json.Unmarshal([]byte(baseSchema.String()), &base); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal manifest entry schema: %w", err)
+	}
+
+	var dfType any
+	if err := json.Unmarshal([]byte(dfSchema.String()), &dfType); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal data file schema: %w", err)
+	}
+
+	dfField := map[string]any{
+		"name":     "data_file",
+		"type":     dfType,
+		"field-id": 2,
+	}
+
+	base["fields"] = append(base["fields"].([]any), dfField)
+
+	newJSON, err := json.Marshal(base)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal manifest entry schema: %w", err)
+	}
+
+	// Use a fresh cache so named types are re-parsed cleanly.
+	var cache avro.SchemaCache
+	return cache.Parse(string(newJSON))
 }

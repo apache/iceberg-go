@@ -19,56 +19,89 @@ package iceberg
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/apache/iceberg-go/internal"
-	"github.com/hamba/avro/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/twmb/avro"
 )
 
-func partitionTypeToAvroSchemaNonNullable(t *StructType) (avro.Schema, error) {
-	fields := make([]*avro.Field, len(t.FieldList))
-	for i, f := range t.FieldList {
-		var sc avro.Schema
-		switch typ := f.Type.(type) {
-		case Int32Type:
-			sc = internal.IntSchema
-		case Int64Type:
-			sc = internal.LongSchema
-		case Float32Type:
-			sc = internal.FloatSchema
-		case Float64Type:
-			sc = internal.DoubleSchema
-		case StringType:
-			sc = internal.StringSchema
-		case DateType:
-			sc = internal.DateSchema
-		case TimeType:
-			sc = internal.TimeSchema
-		case TimestampType:
-			sc = internal.TimestampSchema
-		case TimestampTzType:
-			sc = internal.TimestampTzSchema
-		case UUIDType:
-			sc = internal.UUIDSchema
-		case BooleanType:
-			sc = internal.BoolSchema
-		case BinaryType:
-			sc = internal.BinarySchema
-		case FixedType:
-			sc = internal.BinarySchema
-		case DecimalType:
-			decimalSchema := internal.DecimalSchema(typ.precision, typ.scale)
-			sc = decimalSchema
-		default:
-			return nil, fmt.Errorf("unsupported partition type: %s", f.Type.String())
-		}
-
-		fields[i], _ = avro.NewField(f.Name, sc, internal.WithFieldID(f.ID))
+// partitionTypeToAvroSchemaNonNullable builds a partition schema where fields are NOT wrapped
+// in a nullable union. Used in tests to verify that nil values cause encoding failures.
+func partitionTypeToAvroSchemaNonNullable(t *StructType) (*avro.Schema, error) {
+	if len(t.FieldList) == 0 {
+		return avro.Parse(`{"type":"record","name":"r102","fields":[]}`)
 	}
 
-	return avro.NewRecordSchema("r102", "", fields)
+	definedNames := make(map[string]bool)
+
+	fieldJSONs := make([]string, 0, len(t.FieldList))
+	for _, f := range t.FieldList {
+		typeJSON, err := nonNullablePartitionFieldTypeJSON(f.Type, definedNames)
+		if err != nil {
+			return nil, err
+		}
+		fieldJSONs = append(fieldJSONs, fmt.Sprintf(`{"name":%q,"type":%s,"field-id":%d}`,
+			f.Name, typeJSON, f.ID))
+	}
+
+	schemaJSON := fmt.Sprintf(`{"type":"record","name":"r102","fields":[%s]}`,
+		strings.Join(fieldJSONs, ","))
+
+	return avro.Parse(schemaJSON)
+}
+
+func nonNullablePartitionFieldTypeJSON(typ Type, definedNames map[string]bool) (string, error) {
+	switch t := typ.(type) {
+	case Int32Type:
+		return `"int"`, nil
+	case Int64Type:
+		return `"long"`, nil
+	case Float32Type:
+		return `"float"`, nil
+	case Float64Type:
+		return `"double"`, nil
+	case StringType:
+		return `"string"`, nil
+	case DateType:
+		return `{"type":"int","logicalType":"date"}`, nil
+	case TimeType:
+		return `{"type":"long","logicalType":"time-micros"}`, nil
+	case TimestampType:
+		return `{"type":"long","logicalType":"timestamp-micros","adjust-to-utc":false}`, nil
+	case TimestampTzType:
+		return `{"type":"long","logicalType":"timestamp-micros","adjust-to-utc":true}`, nil
+	case UUIDType:
+		if !definedNames["uuid"] {
+			definedNames["uuid"] = true
+			return `{"type":"fixed","name":"uuid","size":16,"logicalType":"uuid"}`, nil
+		}
+		return `"uuid"`, nil
+	case BooleanType:
+		return `"boolean"`, nil
+	case BinaryType:
+		return `"bytes"`, nil
+	case FixedType:
+		fixedName := fmt.Sprintf("fixed_%d", t.len)
+		if !definedNames[fixedName] {
+			definedNames[fixedName] = true
+			return fmt.Sprintf(`{"type":"fixed","name":"%s","size":%d}`, fixedName, t.len), nil
+		}
+		return fmt.Sprintf(`"%s"`, fixedName), nil
+	case DecimalType:
+		size := internal.DecimalRequiredBytes(t.precision)
+		decName := fmt.Sprintf("fixed_%d_%d", t.precision, t.scale)
+		if !definedNames[decName] {
+			definedNames[decName] = true
+			return fmt.Sprintf(`{"type":"fixed","name":"%s","size":%d,"logicalType":"decimal","precision":%d,"scale":%d}`,
+				decName, size, t.precision, t.scale), nil
+		}
+		return fmt.Sprintf(`"%s"`, decName), nil
+	default:
+		return "", fmt.Errorf("unsupported partition type: %s", typ.String())
+	}
 }
 
 func TestPartitionTypeToAvroSchemaNullableAndNonNullable(t *testing.T) {
@@ -113,12 +146,12 @@ func TestPartitionTypeToAvroSchemaNullableAndNonNullable(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, schemaNullable)
 
-		encoded, err := avro.Marshal(schemaNullable, partitionData)
+		encoded, err := schemaNullable.Encode(partitionData)
 		require.NoError(t, err)
 		require.NotEmpty(t, encoded)
 
 		var decoded map[string]any
-		err = avro.Unmarshal(schemaNullable, encoded, &decoded)
+		_, err = schemaNullable.Decode(encoded, &decoded)
 		require.NoError(t, err)
 
 		assert.Nil(t, decoded["int32_col"])
@@ -142,7 +175,7 @@ func TestPartitionTypeToAvroSchemaNullableAndNonNullable(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, schemaNonNullable)
 
-		encoded, err := avro.Marshal(schemaNonNullable, partitionData)
+		encoded, err := schemaNonNullable.Encode(partitionData)
 		require.Error(t, err, "expected marshal to fail when values are nil for non-nullable schema")
 		assert.Empty(t, encoded)
 	})
