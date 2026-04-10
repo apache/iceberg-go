@@ -785,3 +785,96 @@ func TestManifestsClosesWriterWhenDeletedEntriesFails(t *testing.T) {
 		require.Zero(t, writerCount, "expected no writerFactory to be created when deletedEntries is called first")
 	}
 }
+
+// TestFastAppendInheritsZeroCountManifests verifies that fastAppendFiles.existingManifests
+// includes manifests with added_files_count=0 and existing_files_count=0. This is the
+// standard Iceberg v2 "inherited manifest" representation written by Athena and other
+// external writers. The previous filter (HasAddedFiles || HasExistingFiles) silently
+// dropped these manifests, causing data written by Athena to disappear after any
+// iceberg-go fast-append.
+func TestFastAppendInheritsZeroCountManifests(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+
+	// Use the mem blob FS so that files written via Create() can be read back.
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+
+	// Snapshot 1: a snapshot whose manifest list contains two manifest entries
+	// with added_files_count=0 and existing_files_count=0, simulating what
+	// Athena (and other Iceberg v2 writers) produce.
+	snap1ID := int64(1001)
+	seqNum1 := int64(1)
+
+	// These paths must be under the table location so the mem FS can locate them.
+	athenaManifest1 := iceberg.NewManifestFile(2,
+		"mem://default/table-location/metadata/athena-m0.avro", 512, 0, snap1ID).Build()
+	athenaManifest2 := iceberg.NewManifestFile(2,
+		"mem://default/table-location/metadata/athena-m1.avro", 256, 0, snap1ID).Build()
+
+	// Sanity check: both manifests have zero counts, so the old filter would drop them.
+	require.False(t, athenaManifest1.HasAddedFiles(), "test setup: manifest1 must have zero added count")
+	require.False(t, athenaManifest1.HasExistingFiles(), "test setup: manifest1 must have zero existing count")
+	require.False(t, athenaManifest2.HasAddedFiles(), "test setup: manifest2 must have zero added count")
+	require.False(t, athenaManifest2.HasExistingFiles(), "test setup: manifest2 must have zero existing count")
+
+	snap1ListPath := "mem://default/table-location/metadata/snap-1001.avro"
+
+	var listBuf bytes.Buffer
+	err := iceberg.WriteManifestList(2, &listBuf, snap1ID, nil, &seqNum1, 0,
+		[]iceberg.ManifestFile{athenaManifest1, athenaManifest2})
+	require.NoError(t, err, "write manifest list for snap1")
+	require.NoError(t, wfs.WriteFile(snap1ListPath, listBuf.Bytes()))
+
+	// Inject snap1 as the current snapshot in the transaction metadata.
+	txn.meta.snapshotList = []Snapshot{
+		{
+			SnapshotID:     snap1ID,
+			SequenceNumber: seqNum1,
+			TimestampMs:    time.Now().UnixMilli(),
+			ManifestList:   snap1ListPath,
+			Summary:        &Summary{Operation: OpAppend},
+		},
+	}
+	txn.meta.currentSnapshotID = &snap1ID
+
+	// Snapshot 2: fast-append one new data file on top of snap1.
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+	df := newTestDataFile(t, spec, "file://new-data.parquet", nil)
+	sp.appendDataFile(df)
+
+	updates, reqs, err := sp.commit(context.Background())
+	require.NoError(t, err, "fast-append commit must succeed")
+	require.NotEmpty(t, updates, "must produce updates")
+	require.NotEmpty(t, reqs, "must produce requirements")
+
+	addSnap, ok := updates[0].(*addSnapshotUpdate)
+	require.True(t, ok, "first update must be AddSnapshot")
+
+	// Read back the new manifest list and verify it contains all three manifests:
+	// the two Athena-written zero-count manifests plus the new one.
+	snap2Manifests := readManifestListFromPath(t, wfs, addSnap.Snapshot.ManifestList)
+
+	// Collect the manifest paths in the new snapshot.
+	paths := make([]string, 0, len(snap2Manifests))
+	for _, m := range snap2Manifests {
+		paths = append(paths, m.FilePath())
+	}
+
+	require.Contains(t, paths, athenaManifest1.FilePath(),
+		"new snapshot must carry forward the first Athena manifest (zero added_files_count)")
+	require.Contains(t, paths, athenaManifest2.FilePath(),
+		"new snapshot must carry forward the second Athena manifest (zero existing_files_count)")
+	require.Len(t, snap2Manifests, 3,
+		"new snapshot must have exactly 3 manifests: 2 inherited + 1 newly written")
+
+	// Verify the newly written manifest belongs to snap2.
+	snap2ID := addSnap.Snapshot.SnapshotID
+	var newManifestFound bool
+	for _, m := range snap2Manifests {
+		if m.SnapshotID() == snap2ID {
+			newManifestFound = true
+
+			break
+		}
+	}
+	require.True(t, newManifestFound, "new snapshot must include a manifest written by snap2")
+}
