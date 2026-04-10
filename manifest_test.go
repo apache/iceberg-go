@@ -19,8 +19,10 @@ package iceberg
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
+	"strconv"
 	"testing"
 	"time"
 
@@ -803,6 +805,61 @@ func (m *ManifestTestSuite) TestReadManifestListMissingFormatVersion() {
 	files, err := ReadManifestList(&buf)
 	m.NoError(err)
 	m.Empty(files) // the file has no entries, just headers
+}
+
+// writeManifestNoFormatVersion writes a valid v1 manifest entry Avro file that
+// omits the "format-version" metadata key, simulating files produced by the Java
+// Iceberg library (format-version is optional for v1 per the Iceberg spec).
+func writeManifestNoFormatVersion(t *testing.T) bytes.Buffer {
+	t.Helper()
+
+	partitionSpec := NewPartitionSpec()
+	partitionSchema, err := partitionTypeToAvroSchema(partitionSpec.PartitionType(testSchema))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entrySchema, err := internal.NewManifestEntrySchema(partitionSchema, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	schemaJSON, err := json.Marshal(testSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	enc, err := ocf.NewEncoderWithSchema(entrySchema, &buf,
+		ocf.WithSchemaMarshaler(ocf.FullSchemaMarshaler),
+		ocf.WithEncoderSchemaCache(&avro.SchemaCache{}),
+		ocf.WithMetadata(map[string][]byte{
+			// intentionally omit "format-version" to simulate Java Iceberg v1 files
+			"schema":            schemaJSON,
+			"schema-id":         []byte(strconv.Itoa(testSchema.ID)),
+			"partition-spec":    []byte("[]"),
+			"partition-spec-id": []byte("0"),
+			"content":           []byte("data"),
+		}),
+		ocf.WithCodec(ocf.Deflate))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	return buf
+}
+
+func (m *ManifestTestSuite) TestNewManifestReaderMissingFormatVersion() {
+	// A v1 manifest file without "format-version" should succeed, defaulting to the
+	// version from the manifest list entry (matching the Java Iceberg behavior).
+	buf := writeManifestNoFormatVersion(m.T())
+	manifest := manifestFile{version: 1}
+	reader, err := NewManifestReader(&manifest, &buf)
+	m.Require().NoError(err)
+	m.Equal(1, reader.Version())
+	m.NoError(reader.Close())
 }
 
 func (m *ManifestTestSuite) TestReadManifestListIncompleteSchema() {

@@ -610,9 +610,13 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 	metadata := dec.Metadata()
 	sc := dec.Schema()
 
-	formatVersion, err := strconv.Atoi(string(metadata["format-version"]))
-	if err != nil {
-		return nil, fmt.Errorf("manifest file's 'format-version' metadata is invalid: %w", err)
+	formatVersion := 1
+	// format-version is optional for v1 manifest files, so default to v1
+	if raw := metadata["format-version"]; len(raw) > 0 {
+		formatVersion, err = strconv.Atoi(string(raw))
+		if err != nil {
+			return nil, fmt.Errorf("manifest file's 'format-version' metadata is invalid: %w", err)
+		}
 	}
 	if formatVersion != file.Version() {
 		return nil, fmt.Errorf("manifest file's 'format-version' metadata indicates version %d, but entry from manifest list indicates version %d",
