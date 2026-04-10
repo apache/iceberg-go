@@ -17,7 +17,7 @@
 
 module github.com/apache/iceberg-go
 
-go 1.25.5
+go 1.26
 
 require (
 	cloud.google.com/go/storage v1.61.3
@@ -37,11 +37,11 @@ require (
 	github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815
 	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
-	github.com/hamba/avro/v2 v2.31.0
 	github.com/pterm/pterm v0.12.83
 	github.com/stretchr/testify v1.11.1
 	github.com/substrait-io/substrait-go/v7 v7.6.0
 	github.com/testcontainers/testcontainers-go/modules/compose v0.41.0
+	github.com/twmb/avro v1.3.4
 	github.com/twmb/murmur3 v1.1.8
 	github.com/uptrace/bun v1.2.18
 	github.com/uptrace/bun/dialect/mssqldialect v1.2.18
@@ -168,7 +168,6 @@ require (
 	github.com/inhies/go-bytesize v0.0.0-20220417184213-4913239db9cf // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jonboulle/clockwork v0.5.0 // indirect
-	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/asmfmt v1.3.2 // indirect
 	github.com/klauspost/compress v1.18.4 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
@@ -199,8 +198,6 @@ require (
 	github.com/moby/sys/user v0.4.0 // indirect
 	github.com/moby/sys/userns v0.1.0 // indirect
 	github.com/moby/term v0.5.2 // indirect
-	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
-	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect
 	github.com/morikuni/aec v1.1.0 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect

@@ -25,9 +25,9 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go/internal"
-	"github.com/hamba/avro/v2"
-	"github.com/hamba/avro/v2/ocf"
 	"github.com/stretchr/testify/suite"
+	"github.com/twmb/avro"
+	"github.com/twmb/avro/ocf"
 )
 
 var (
@@ -779,14 +779,13 @@ func writeManifestListNoFormatVersion(t *testing.T, version int) bytes.Buffer {
 	}
 
 	var buf bytes.Buffer
-	enc, err := ocf.NewEncoderWithSchema(fileSchema, &buf,
-		ocf.WithSchemaMarshaler(ocf.FullSchemaMarshaler),
-		ocf.WithEncoderSchemaCache(&avro.SchemaCache{}),
+	enc, err := ocf.NewWriter(&buf, fileSchema,
+		ocf.WithSchema(fileSchema.String()),
 		ocf.WithMetadata(map[string][]byte{
 			"snapshot-id":     []byte("1234"),
 			"sequence-number": []byte("0"),
 		}),
-		ocf.WithCodec(ocf.Deflate))
+		ocf.WithCodec(ocf.DeflateCodec(0)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -928,14 +927,10 @@ func (m *ManifestTestSuite) TestReadManifestListIncompleteSchema() {
 	}`
 
 	// We'll generate a file that is missing part of its schema
-	cache := &avro.SchemaCache{}
 	sch, err := internal.NewManifestFileSchema(2)
 	m.NoError(err)
-	enc, err := ocf.NewEncoderWithSchema(sch, &buf,
-		ocf.WithEncoderSchemaCache(cache),
-		ocf.WithSchemaMarshaler(func(schema avro.Schema) ([]byte, error) {
-			return []byte(incompleteSchema), nil
-		}),
+	enc, err := ocf.NewWriter(&buf, sch,
+		ocf.WithSchema(incompleteSchema),
 		ocf.WithMetadata(map[string][]byte{
 			"format-version":     {'2'},
 			"snapshot-id":        []byte("1234"),
@@ -947,10 +942,11 @@ func (m *ManifestTestSuite) TestReadManifestListIncompleteSchema() {
 	for _, file := range files {
 		m.NoError(enc.Encode(file))
 	}
+	m.NoError(enc.Close())
 
 	// This should fail because the file's schema is incomplete.
 	_, err = ReadManifestList(&buf)
-	m.ErrorContains(err, "unknown type: field_summary")
+	m.ErrorContains(err, "field_summary")
 }
 
 func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
@@ -973,7 +969,7 @@ func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
 		"s3://bucket/namespace/table/data/abcd-0123.parquet",
 		ParquetFile,
 		map[int]any{},
-		map[int]avro.LogicalType{},
+		map[int]string{},
 		map[int]int{},
 		100,
 		100*1000*1000,
@@ -1049,16 +1045,11 @@ func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
 	}`
 
 	// We'll generate a file that is missing part of its schema
-	cache := &avro.SchemaCache{}
-	partitionSchema, err := avro.NewRecordSchema("r102", "", nil) // empty struct
-	m.NoError(err)
+	partitionSchema := avro.MustParse(`{"type":"record","name":"r102","fields":[]}`)
 	sch, err := internal.NewManifestEntrySchema(partitionSchema, 2)
 	m.NoError(err)
-	enc, err := ocf.NewEncoderWithSchema(sch, &buf,
-		ocf.WithEncoderSchemaCache(cache),
-		ocf.WithSchemaMarshaler(func(schema avro.Schema) ([]byte, error) {
-			return []byte(incompleteSchema), nil
-		}),
+	enc, err := ocf.NewWriter(&buf, sch,
+		ocf.WithSchema(incompleteSchema),
 		ocf.WithMetadata(map[string][]byte{
 			"format-version": {'2'},
 			// TODO: spec says other things are required, like schema and partition-spec info,
@@ -1069,10 +1060,11 @@ func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
 	for _, entry := range entries {
 		m.NoError(enc.Encode(entry))
 	}
+	m.NoError(enc.Close())
 
 	// This should fail because the file's schema is incomplete.
 	_, err = ReadManifest(file, &buf, false)
-	m.ErrorContains(err, "unknown type: r2")
+	m.ErrorContains(err, "r2")
 }
 
 func (m *ManifestTestSuite) TestManifestEntriesV2() {
@@ -1339,11 +1331,10 @@ func (m *ManifestTestSuite) TestNewManifestReaderZstdManifestEntriesV2() {
 	m.Require().NoError(err)
 
 	var buf bytes.Buffer
-	enc, err := ocf.NewEncoderWithSchema(entrySchema, &buf,
-		ocf.WithSchemaMarshaler(ocf.FullSchemaMarshaler),
-		ocf.WithEncoderSchemaCache(&avro.SchemaCache{}),
+	enc, err := ocf.NewWriter(&buf, entrySchema,
+		ocf.WithSchema(entrySchema.String()),
 		ocf.WithMetadata(md),
-		ocf.WithCodec(ocf.ZStandard))
+		ocf.WithCodec(ocf.MustZstdCodec(nil, nil)))
 	m.Require().NoError(err)
 
 	m.Require().NoError(enc.Encode(manifestEntryV2Records[0]))
@@ -1375,7 +1366,7 @@ func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 		"sample.parquet",
 		ParquetFile,
 		map[int]any{1001: int(1), 1002: time.Unix(1925, 0).UnixMicro()},
-		map[int]avro.LogicalType{},
+		map[int]string{},
 		map[int]int{},
 		1,
 		2,
