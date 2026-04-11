@@ -1982,6 +1982,102 @@ func (t *TableWritingTestSuite) TestExpireSnapshotsRejectsOnRefUpdate() {
 	t.Require().Contains(err.Error(), "expiring-tag")
 }
 
+// TestExpireSnapshotsTablePropertiesDriveExpiry verifies that when no caller
+// options are given, min-snapshots-to-keep and max-snapshot-age-ms table
+// properties are used as the retention policy (matching Java behavior).
+func (t *TableWritingTestSuite) TestExpireSnapshotsTablePropertiesDriveExpiry() {
+	fs := iceio.LocalFS{}
+	ctx := context.Background()
+
+	files := make([]string, 5)
+	for i := range 5 {
+		filePath := fmt.Sprintf("%s/expire_table_props_v%d/data-%d.parquet", t.location, t.formatVersion, i)
+		t.writeParquet(fs, filePath, t.arrTablePromotedTypes)
+		files[i] = filePath
+	}
+
+	ident := table.Identifier{"default", "expire_table_props_v" + strconv.Itoa(t.formatVersion)}
+	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, t.location, iceberg.Properties{
+			table.PropertyFormatVersion: strconv.Itoa(t.formatVersion),
+			table.MinSnapshotsToKeepKey: "2",
+			table.MaxSnapshotAgeMsKey:   "1",
+		})
+	t.Require().NoError(err)
+
+	cat := &mockedCatalog{meta}
+	tbl := table.New(ident, meta, t.getMetadataLoc(),
+		func(ctx context.Context) (iceio.IO, error) { return fs, nil }, cat)
+
+	for _, f := range files {
+		tx := tbl.NewTransaction()
+		t.Require().NoError(tx.AddFiles(ctx, []string{f}, nil, false))
+		tbl, err = tx.Commit(ctx)
+		t.Require().NoError(err)
+	}
+
+	time.Sleep(5 * time.Millisecond)
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.ExpireSnapshots(table.WithPostCommit(false)))
+	newTbl, err := tx.Commit(ctx)
+	t.Require().NoError(err)
+	t.Require().Equal(2, len(newTbl.Metadata().Snapshots()))
+}
+
+// TestExpireSnapshotsMaxRefAgeTablePropertyRemovesTag verifies that the
+// max-ref-age-ms table property removes a tag ref when no per-ref setting
+// and no caller options are provided.
+func (t *TableWritingTestSuite) TestExpireSnapshotsMaxRefAgeTablePropertyRemovesTag() {
+	fs := iceio.LocalFS{}
+	ctx := context.Background()
+
+	files := make([]string, 2)
+	for i := range 2 {
+		filePath := fmt.Sprintf("%s/expire_ref_age_v%d/data-%d.parquet", t.location, t.formatVersion, i)
+		t.writeParquet(fs, filePath, t.arrTablePromotedTypes)
+		files[i] = filePath
+	}
+
+	ident := table.Identifier{"default", "expire_ref_age_v" + strconv.Itoa(t.formatVersion)}
+	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, t.location, iceberg.Properties{
+			table.PropertyFormatVersion: strconv.Itoa(t.formatVersion),
+			table.MaxRefAgeMsKey:        "1",
+		})
+	t.Require().NoError(err)
+
+	cat := &mockedCatalog{meta}
+	tbl := table.New(ident, meta, t.getMetadataLoc(),
+		func(ctx context.Context) (iceio.IO, error) { return fs, nil }, cat)
+
+	for _, f := range files {
+		tx := tbl.NewTransaction()
+		t.Require().NoError(tx.AddFiles(ctx, []string{f}, nil, false))
+		tbl, err = tx.Commit(ctx)
+		t.Require().NoError(err)
+	}
+
+	tagSnapshotID := tbl.Metadata().Snapshots()[0].SnapshotID
+	cat.metadata, _, err = cat.CommitTable(ctx, ident, nil, []table.Update{
+		table.NewSetSnapshotRefUpdate("old-tag", tagSnapshotID, table.TagRef, -1, -1, -1),
+	})
+	t.Require().NoError(err)
+	tbl = table.New(ident, cat.metadata, t.getMetadataLoc(),
+		func(ctx context.Context) (iceio.IO, error) { return fs, nil }, cat)
+
+	time.Sleep(5 * time.Millisecond)
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.ExpireSnapshots(table.WithPostCommit(false)))
+	newTbl, err := tx.Commit(ctx)
+	t.Require().NoError(err)
+
+	for name := range newTbl.Metadata().Refs() {
+		t.Require().NotEqual("old-tag", name, "tag should be removed by max-ref-age-ms table property")
+	}
+}
+
 func (t *TableWritingTestSuite) TestWriteSpecialCharacterColumn() {
 	ident := table.Identifier{"default", "write_special_character_column"}
 	colNameWithSpecialChar := "letter/abc"
