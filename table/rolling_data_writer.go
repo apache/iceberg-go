@@ -62,6 +62,7 @@ type writerFactory struct {
 	countMu               sync.Mutex
 	partitionIDCounter    atomic.Int64
 	mu                    sync.Mutex
+	sortOrderID           int
 }
 
 type writerFactoryOption func(*writerFactory)
@@ -159,6 +160,7 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		format:         format,
 		nextCount:      nextCount,
 		stopCount:      stopCount,
+		sortOrderID:    meta.defaultSortOrderID,
 	}
 	for _, apply := range opts {
 		apply(f)
@@ -207,6 +209,7 @@ func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string
 		Spec:             w.currentSpec,
 		Content:          w.content,
 		EqualityFieldIDs: w.equalityFieldIDs,
+		SortOrderID:      w.sortOrderID,
 	}, w.arrowSchema)
 }
 

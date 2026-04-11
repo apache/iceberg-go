@@ -206,6 +206,7 @@ type DataFileStatistics struct {
 	ColAggs          map[int]StatsAgg
 	SplitOffsets     []int64
 	EqualityFieldIDs []int
+	SortOrderID      int
 }
 
 func (d *DataFileStatistics) PartitionValue(field iceberg.PartitionField, sc *iceberg.Schema) any {
@@ -313,6 +314,10 @@ func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.Par
 
 	if len(d.EqualityFieldIDs) > 0 {
 		bldr.EqualityFieldIDs(d.EqualityFieldIDs)
+	}
+
+	if d.SortOrderID >= 0 {
+		bldr.SortOrderID(d.SortOrderID)
 	}
 
 	return bldr.Build()

@@ -1371,7 +1371,7 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 				}
 			}()
 
-			dataFiles[i] = fileToDataFile(ctx, fileIO, filePath, currentSchema, currentSpec, meta.props)
+			dataFiles[i] = fileToDataFile(ctx, fileIO, filePath, currentSchema, currentSpec, meta.props, meta.defaultSortOrderID)
 
 			return nil
 		})
@@ -1384,7 +1384,7 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 	return dataFiles, nil
 }
 
-func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, currentSchema *iceberg.Schema, currentSpec iceberg.PartitionSpec, props iceberg.Properties) iceberg.DataFile {
+func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, currentSchema *iceberg.Schema, currentSpec iceberg.PartitionSpec, props iceberg.Properties, sortOrderID int) iceberg.DataFile {
 	format := tblutils.FormatFromFileName(filePath)
 	rdr := must(format.Open(ctx, fileIO, filePath))
 	defer rdr.Close()
@@ -1403,6 +1403,7 @@ func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, curre
 		must(computeStatsPlan(currentSchema, props)),
 		must(format.PathToIDMapping(pathToIDSchema)),
 	)
+	statistics.SortOrderID = sortOrderID
 
 	partitionValues := make(map[int]any)
 	if !currentSpec.Equals(*iceberg.UnpartitionedSpec) {
