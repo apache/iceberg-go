@@ -22,53 +22,65 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go/internal"
-	"github.com/hamba/avro/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/twmb/avro"
+	"github.com/twmb/avro/atype"
 )
 
-func partitionTypeToAvroSchemaNonNullable(t *StructType) (avro.Schema, error) {
-	fields := make([]*avro.Field, len(t.FieldList))
+func partitionTypeToAvroSchemaNonNullable(t *StructType) (*avro.Schema, error) {
+	fields := make([]avro.SchemaField, len(t.FieldList))
 	for i, f := range t.FieldList {
-		var sc avro.Schema
+		var node avro.SchemaNode
 		switch typ := f.Type.(type) {
 		case Int32Type:
-			sc = internal.IntSchema
+			node = internal.IntNode
 		case Int64Type:
-			sc = internal.LongSchema
+			node = internal.LongNode
 		case Float32Type:
-			sc = internal.FloatSchema
+			node = internal.FloatNode
 		case Float64Type:
-			sc = internal.DoubleSchema
+			node = internal.DoubleNode
 		case StringType:
-			sc = internal.StringSchema
+			node = internal.StringNode
 		case DateType:
-			sc = internal.DateSchema
+			node = internal.DateNode
 		case TimeType:
-			sc = internal.TimeSchema
+			node = internal.TimeNode
 		case TimestampType:
-			sc = internal.TimestampSchema
+			node = internal.TimestampNode
 		case TimestampTzType:
-			sc = internal.TimestampTzSchema
+			node = internal.TimestampTzNode
 		case UUIDType:
-			sc = internal.UUIDSchema
+			node = internal.UUIDNode
 		case BooleanType:
-			sc = internal.BoolSchema
+			node = internal.BoolNode
 		case BinaryType:
-			sc = internal.BinarySchema
+			node = internal.BytesNode
 		case FixedType:
-			sc = internal.BinarySchema
+			node = avro.SchemaNode{
+				Type: atype.Fixed, Name: fmt.Sprintf("fixed_%d", typ.Len()), Size: typ.Len(),
+			}
 		case DecimalType:
-			decimalSchema := internal.DecimalSchema(typ.precision, typ.scale)
-			sc = decimalSchema
+			node = internal.DecimalNode(typ.precision, typ.scale)
 		default:
 			return nil, fmt.Errorf("unsupported partition type: %s", f.Type.String())
 		}
 
-		fields[i], _ = avro.NewField(f.Name, sc, internal.WithFieldID(f.ID))
+		fields[i] = avro.SchemaField{
+			Name:  f.Name,
+			Type:  node,
+			Props: internal.WithFieldID(f.ID),
+		}
 	}
 
-	return avro.NewRecordSchema("r102", "", fields)
+	node := avro.SchemaNode{
+		Type:   "record",
+		Name:   "r102",
+		Fields: fields,
+	}
+
+	return node.Schema()
 }
 
 func TestPartitionTypeToAvroSchemaNullableAndNonNullable(t *testing.T) {
@@ -113,12 +125,12 @@ func TestPartitionTypeToAvroSchemaNullableAndNonNullable(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, schemaNullable)
 
-		encoded, err := avro.Marshal(schemaNullable, partitionData)
+		encoded, err := schemaNullable.Encode(partitionData)
 		require.NoError(t, err)
 		require.NotEmpty(t, encoded)
 
 		var decoded map[string]any
-		err = avro.Unmarshal(schemaNullable, encoded, &decoded)
+		_, err = schemaNullable.Decode(encoded, &decoded)
 		require.NoError(t, err)
 
 		assert.Nil(t, decoded["int32_col"])
@@ -142,8 +154,48 @@ func TestPartitionTypeToAvroSchemaNullableAndNonNullable(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, schemaNonNullable)
 
-		encoded, err := avro.Marshal(schemaNonNullable, partitionData)
+		encoded, err := schemaNonNullable.Encode(partitionData)
 		require.Error(t, err, "expected marshal to fail when values are nil for non-nullable schema")
 		assert.Empty(t, encoded)
 	})
+}
+
+// TestPartitionTypeToAvroSchemaDuplicateNamedTypes verifies that a
+// partition spec containing multiple fields of the same named Avro type
+// (UUID, Fixed, Decimal) compiles without "duplicate named type" errors.
+// Relies on twmb/avro v1.4.0's automatic named type deduplication.
+func TestPartitionTypeToAvroSchemaDuplicateNamedTypes(t *testing.T) {
+	cases := []struct {
+		name string
+		ptyp *StructType
+	}{
+		{
+			"two uuid fields",
+			&StructType{FieldList: []NestedField{
+				{ID: 1, Name: "a", Type: UUIDType{}, Required: false},
+				{ID: 2, Name: "b", Type: UUIDType{}, Required: false},
+			}},
+		},
+		{
+			"two fixed fields same size",
+			&StructType{FieldList: []NestedField{
+				{ID: 1, Name: "a", Type: FixedType{len: 8}, Required: false},
+				{ID: 2, Name: "b", Type: FixedType{len: 8}, Required: false},
+			}},
+		},
+		{
+			"two decimal fields same precision/scale",
+			&StructType{FieldList: []NestedField{
+				{ID: 1, Name: "a", Type: DecimalType{precision: 10, scale: 2}, Required: false},
+				{ID: 2, Name: "b", Type: DecimalType{precision: 10, scale: 2}, Required: false},
+			}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := partitionTypeToAvroSchema(tc.ptyp)
+			require.NoError(t, err)
+			require.NotNil(t, s)
+		})
+	}
 }
