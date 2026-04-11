@@ -128,6 +128,7 @@ func (s *SlicePacker[T]) Pack(items []T, weightFunc func(T) int64) [][]T {
 }
 
 func (s *SlicePacker[T]) PackEnd(items []T, weightFunc func(T) int64) [][]T {
+	items = slices.Clone(items)
 	slices.Reverse(items)
 	packed := s.Pack(items, weightFunc)
 	slices.Reverse(packed)
