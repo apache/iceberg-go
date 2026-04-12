@@ -450,6 +450,23 @@ func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table,
 		filesToDelete[snap.ManifestList] = struct{}{}
 	}
 
+	expiredIDs := make(map[int64]struct{}, len(u.SnapshotIDs))
+	for _, id := range u.SnapshotIDs {
+		expiredIDs[id] = struct{}{}
+	}
+
+	for sf := range preTable.Metadata().Statistics() {
+		if _, ok := expiredIDs[sf.SnapshotID]; ok && sf.StatisticsPath != "" {
+			filesToDelete[sf.StatisticsPath] = struct{}{}
+		}
+	}
+
+	for psf := range preTable.Metadata().PartitionStatistics() {
+		if _, ok := expiredIDs[psf.SnapshotID]; ok && psf.StatisticsPath != "" {
+			filesToDelete[psf.StatisticsPath] = struct{}{}
+		}
+	}
+
 	for _, snapId := range u.SnapshotIDs {
 		snap := preTable.SnapshotByID(snapId)
 		if snap == nil {
@@ -495,6 +512,14 @@ func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table,
 				}
 			}
 		}
+	}
+
+	for sf := range postTable.Metadata().Statistics() {
+		delete(filesToDelete, sf.StatisticsPath)
+	}
+
+	for psf := range postTable.Metadata().PartitionStatistics() {
+		delete(filesToDelete, psf.StatisticsPath)
 	}
 
 	var res error
