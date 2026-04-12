@@ -192,6 +192,9 @@ type MetadataBuilder struct {
 	lastSequenceNumber *int64
 	// >v2 specific (V3)
 	nextRowID *int64
+	// statistics
+	statisticsList     []StatisticsFile
+	partitionStatsList []PartitionStatisticsFile
 	// update tracking
 	lastAddedSchemaID    *int
 	lastAddedPartitionID *int
@@ -261,6 +264,8 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 	b.refs = maps.Collect(metadata.Refs())
 	b.snapshotLog = slices.Collect(metadata.SnapshotLogs())
 	b.metadataLog = slices.Collect(metadata.PreviousFiles())
+	b.statisticsList = slices.Collect(metadata.Statistics())
+	b.partitionStatsList = slices.Collect(metadata.PartitionStatistics())
 
 	if currentFileLocation != "" {
 		b.previousFileEntry = &MetadataLogEntry{
@@ -495,6 +500,20 @@ func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64, postCommit bool) 
 	})
 	b.snapshotLog = slices.DeleteFunc(b.snapshotLog, func(e SnapshotLogEntry) bool {
 		return slices.Contains(snapshotIds, e.SnapshotID)
+	})
+
+	removedSet := make(map[int64]struct{}, len(snapshotIds))
+	for _, id := range snapshotIds {
+		removedSet[id] = struct{}{}
+	}
+
+	b.statisticsList = slices.DeleteFunc(b.statisticsList, func(sf StatisticsFile) bool {
+		_, ok := removedSet[sf.SnapshotID]
+		return ok
+	})
+	b.partitionStatsList = slices.DeleteFunc(b.partitionStatsList, func(psf PartitionStatisticsFile) bool {
+		_, ok := removedSet[psf.SnapshotID]
+		return ok
 	})
 
 	newRefs := make(map[string]SnapshotRef)
@@ -871,6 +890,8 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 		SortOrderList:      b.sortOrderList,
 		DefaultSortOrderID: b.defaultSortOrderID,
 		SnapshotRefs:       b.refs,
+		StatisticsList:     b.statisticsList,
+		PartitionStatsList: b.partitionStatsList,
 	}, nil
 }
 

@@ -622,6 +622,113 @@ func TestRemoveSnapshotRemovesBranch(t *testing.T) {
 	}
 }
 
+func TestMetadataBuilderFromBaseCarriesStatistics(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	meta, err := builder.Build()
+	require.NoError(t, err)
+
+	// Inject statistics directly into the built metadata to simulate a table
+	// that already has statistics stored in its metadata JSON.
+	meta.(*metadataV2).StatisticsList = []StatisticsFile{
+		{SnapshotID: 10, StatisticsPath: "s3://bucket/stats/snap10.puffin", FileSizeInBytes: 100, FileFooterSizeInBytes: 10, BlobMetadata: []BlobMetadata{}},
+	}
+	meta.(*metadataV2).PartitionStatsList = []PartitionStatisticsFile{
+		{SnapshotID: 10, StatisticsPath: "s3://bucket/stats/snap10-part.puffin", FileSizeInBytes: 50},
+	}
+
+	newBuilder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+
+	require.Len(t, newBuilder.statisticsList, 1)
+	require.Equal(t, int64(10), newBuilder.statisticsList[0].SnapshotID)
+	require.Len(t, newBuilder.partitionStatsList, 1)
+	require.Equal(t, int64(10), newBuilder.partitionStatsList[0].SnapshotID)
+}
+
+func TestRemoveSnapshotsPrunesStatistics(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	schemaID := 0
+	snapshot := Snapshot{
+		SnapshotID:     42,
+		SequenceNumber: 1,
+		TimestampMs:    builder.base.LastUpdatedMillis() + 1,
+		ManifestList:   "/snap-42.avro",
+		Summary:        &Summary{Operation: OpAppend},
+		SchemaID:       &schemaID,
+	}
+	require.NoError(t, builder.AddSnapshot(&snapshot))
+	meta, err := builder.Build()
+	require.NoError(t, err)
+
+	meta.(*metadataV2).StatisticsList = []StatisticsFile{
+		{SnapshotID: 42, StatisticsPath: "s3://bucket/stats/snap42.puffin", FileSizeInBytes: 100, FileFooterSizeInBytes: 10, BlobMetadata: []BlobMetadata{}},
+	}
+	meta.(*metadataV2).PartitionStatsList = []PartitionStatisticsFile{
+		{SnapshotID: 42, StatisticsPath: "s3://bucket/stats/snap42-part.puffin", FileSizeInBytes: 50},
+	}
+
+	newBuilder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	require.NoError(t, newBuilder.RemoveSnapshots([]int64{42}, false))
+
+	newMeta, err := newBuilder.Build()
+	require.NoError(t, err)
+
+	require.Len(t, newBuilder.statisticsList, 0)
+	require.Len(t, newBuilder.partitionStatsList, 0)
+	require.Len(t, newMeta.(*metadataV2).StatisticsList, 0)
+	require.Len(t, newMeta.(*metadataV2).PartitionStatsList, 0)
+}
+
+func TestRemoveSnapshotsPreservesUnrelatedStatistics(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	schemaID := 0
+	snap1 := Snapshot{
+		SnapshotID:     1,
+		SequenceNumber: 1,
+		TimestampMs:    builder.base.LastUpdatedMillis() + 1,
+		ManifestList:   "/snap-1.avro",
+		Summary:        &Summary{Operation: OpAppend},
+		SchemaID:       &schemaID,
+	}
+	snap2 := Snapshot{
+		SnapshotID:       2,
+		ParentSnapshotID: &snap1.SnapshotID,
+		SequenceNumber:   2,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 2,
+		ManifestList:     "/snap-2.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+	}
+	require.NoError(t, builder.AddSnapshot(&snap1))
+	require.NoError(t, builder.AddSnapshot(&snap2))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, snap2.SnapshotID, BranchRef))
+	meta, err := builder.Build()
+	require.NoError(t, err)
+
+	meta.(*metadataV2).StatisticsList = []StatisticsFile{
+		{SnapshotID: 1, StatisticsPath: "s3://bucket/stats/snap1.puffin", FileSizeInBytes: 100, FileFooterSizeInBytes: 10, BlobMetadata: []BlobMetadata{}},
+		{SnapshotID: 2, StatisticsPath: "s3://bucket/stats/snap2.puffin", FileSizeInBytes: 100, FileFooterSizeInBytes: 10, BlobMetadata: []BlobMetadata{}},
+	}
+	meta.(*metadataV2).PartitionStatsList = []PartitionStatisticsFile{
+		{SnapshotID: 1, StatisticsPath: "s3://bucket/stats/snap1-part.puffin", FileSizeInBytes: 50},
+		{SnapshotID: 2, StatisticsPath: "s3://bucket/stats/snap2-part.puffin", FileSizeInBytes: 50},
+	}
+
+	newBuilder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	require.NoError(t, newBuilder.RemoveSnapshots([]int64{1}, false))
+
+	newMeta, err := newBuilder.Build()
+	require.NoError(t, err)
+
+	// snapshot 1's stats are pruned; snapshot 2's stats survive
+	require.Len(t, newMeta.(*metadataV2).StatisticsList, 1)
+	require.Equal(t, int64(2), newMeta.(*metadataV2).StatisticsList[0].SnapshotID)
+	require.Len(t, newMeta.(*metadataV2).PartitionStatsList, 1)
+	require.Equal(t, int64(2), newMeta.(*metadataV2).PartitionStatsList[0].SnapshotID)
+}
+
 func TestExpireMetadataLog(t *testing.T) {
 	builder1 := builderWithoutChanges(2)
 	meta, err := builder1.Build()
