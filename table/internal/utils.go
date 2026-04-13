@@ -236,17 +236,32 @@ func (d *DataFileStatistics) PartitionValue(field iceberg.PartitionField, sc *ic
 	return lowerT.Val.Any()
 }
 
-func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.PartitionSpec, path string, format iceberg.FileFormat, content iceberg.ManifestEntryContent, filesize int64, partitionValues map[int]any, sortOrderID int) iceberg.DataFile {
+// DataFileOpts groups the fields needed to finalize a DataFile from
+// DataFileStatistics. Collapsing the former positional arguments into a
+// struct keeps call sites readable and makes future additions source-
+// compatible.
+type DataFileOpts struct {
+	Schema          *iceberg.Schema
+	Spec            iceberg.PartitionSpec
+	Path            string
+	Format          iceberg.FileFormat
+	Content         iceberg.ManifestEntryContent
+	FileSize        int64
+	PartitionValues map[int]any
+	SortOrderID     int
+}
+
+func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 	var fieldIDToPartitionData map[int]any
 	fieldIDToLogicalType := make(map[int]avro.LogicalType)
 	fieldIDToFixedSize := make(map[int]int)
 
-	if !spec.Equals(*iceberg.UnpartitionedSpec) {
+	if !opts.Spec.Equals(*iceberg.UnpartitionedSpec) {
 		fieldIDToPartitionData = make(map[int]any)
-		for _, field := range spec.Fields() {
-			partitionVal := partitionValues[field.FieldID]
+		for _, field := range opts.Spec.Fields() {
+			partitionVal := opts.PartitionValues[field.FieldID]
 			if partitionVal != nil {
-				val := d.PartitionValue(field, schema)
+				val := d.PartitionValue(field, opts.Schema)
 				if val != nil {
 					fieldIDToPartitionData[field.FieldID] = val
 				} else {
@@ -256,7 +271,7 @@ func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.Par
 				fieldIDToPartitionData[field.FieldID] = nil
 			}
 
-			if sourceField, ok := schema.FindFieldByID(field.SourceID()); ok {
+			if sourceField, ok := opts.Schema.FindFieldByID(field.SourceID()); ok {
 				resultType := field.Transform.ResultType(sourceField.Type)
 
 				switch rt := resultType.(type) {
@@ -278,8 +293,8 @@ func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.Par
 		}
 	}
 
-	bldr, err := iceberg.NewDataFileBuilder(spec, content,
-		path, format, fieldIDToPartitionData, fieldIDToLogicalType, fieldIDToFixedSize, d.RecordCount, filesize)
+	bldr, err := iceberg.NewDataFileBuilder(opts.Spec, opts.Content,
+		opts.Path, opts.Format, fieldIDToPartitionData, fieldIDToLogicalType, fieldIDToFixedSize, d.RecordCount, opts.FileSize)
 	if err != nil {
 		panic(err)
 	}
@@ -315,7 +330,7 @@ func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.Par
 		bldr.EqualityFieldIDs(d.EqualityFieldIDs)
 	}
 
-	bldr.SortOrderID(sortOrderID)
+	bldr.SortOrderID(opts.SortOrderID)
 
 	return bldr.Build()
 }

@@ -261,8 +261,15 @@ func TestMetricsPrimitiveTypes(t *testing.T) {
 
 	stats := format.DataFileStatsFromMeta(internal.Metadata(meta), getCollector(), mapping)
 	const sortOrderID = 7
-	df := stats.ToDataFile(tblMeta.CurrentSchema(), tblMeta.PartitionSpec(), "fake-path.parquet",
-		iceberg.ParquetFile, iceberg.EntryContentData, meta.GetSourceFileSize(), nil, sortOrderID)
+	df := stats.ToDataFile(internal.DataFileOpts{
+		Schema:      tblMeta.CurrentSchema(),
+		Spec:        tblMeta.PartitionSpec(),
+		Path:        "fake-path.parquet",
+		Format:      iceberg.ParquetFile,
+		Content:     iceberg.EntryContentData,
+		FileSize:    meta.GetSourceFileSize(),
+		SortOrderID: sortOrderID,
+	})
 
 	require.NotNil(t, df.SortOrderID())
 	assert.Equal(t, sortOrderID, *df.SortOrderID())
@@ -415,8 +422,14 @@ func TestNanosecondTimestampMetrics(t *testing.T) {
 	}
 
 	stats := format.DataFileStatsFromMeta(internal.Metadata(meta), collector, mapping)
-	df := stats.ToDataFile(tableMeta.CurrentSchema(), tableMeta.PartitionSpec(), "fake-path.parquet",
-		iceberg.ParquetFile, iceberg.EntryContentData, meta.GetSourceFileSize(), nil, 0)
+	df := stats.ToDataFile(internal.DataFileOpts{
+		Schema:   tableMeta.CurrentSchema(),
+		Spec:     tableMeta.PartitionSpec(),
+		Path:     "fake-path.parquet",
+		Format:   iceberg.ParquetFile,
+		Content:  iceberg.EntryContentData,
+		FileSize: meta.GetSourceFileSize(),
+	})
 
 	assert.Len(t, df.ValueCounts(), 2)
 	assert.Len(t, df.NullValueCounts(), 2)
@@ -560,8 +573,14 @@ func TestDecimalPhysicalTypes(t *testing.T) {
 			stats := format.DataFileStatsFromMeta(internal.Metadata(meta), collector, mapping)
 			require.NotNil(t, stats)
 
-			df := stats.ToDataFile(tableMeta.CurrentSchema(), tableMeta.PartitionSpec(), "test.parquet",
-				iceberg.ParquetFile, iceberg.EntryContentData, meta.GetSourceFileSize(), nil, 0)
+			df := stats.ToDataFile(internal.DataFileOpts{
+				Schema:   tableMeta.CurrentSchema(),
+				Spec:     tableMeta.PartitionSpec(),
+				Path:     "test.parquet",
+				Format:   iceberg.ParquetFile,
+				Content:  iceberg.EntryContentData,
+				FileSize: meta.GetSourceFileSize(),
+			})
 
 			// Verify bounds are correctly extracted
 			require.Contains(t, df.LowerBoundValues(), 1)

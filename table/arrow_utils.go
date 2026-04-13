@@ -1418,7 +1418,16 @@ func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, curre
 		}
 	}
 
-	return statistics.ToDataFile(currentSchema, currentSpec, filePath, iceberg.ParquetFile, iceberg.EntryContentData, rdr.SourceFileSize(), partitionValues, sortOrderID)
+	return statistics.ToDataFile(tblutils.DataFileOpts{
+		Schema:          currentSchema,
+		Spec:            currentSpec,
+		Path:            filePath,
+		Format:          iceberg.ParquetFile,
+		Content:         iceberg.EntryContentData,
+		FileSize:        rdr.SourceFileSize(),
+		PartitionValues: partitionValues,
+		SortOrderID:     sortOrderID,
+	})
 }
 
 func recordNBytes(rec arrow.RecordBatch) (total int64) {
