@@ -21,50 +21,59 @@ import (
 	"fmt"
 
 	"github.com/apache/iceberg-go/internal"
-	"github.com/hamba/avro/v2"
+	"github.com/twmb/avro"
+	"github.com/twmb/avro/atype"
 )
 
-func partitionTypeToAvroSchema(t *StructType) (avro.Schema, error) {
-	fields := make([]*avro.Field, len(t.FieldList))
+func partitionTypeToAvroSchema(t *StructType) (*avro.Schema, error) {
+	fields := make([]avro.SchemaField, len(t.FieldList))
 	for i, f := range t.FieldList {
-		var sc avro.Schema
+		var node avro.SchemaNode
 		switch typ := f.Type.(type) {
 		case Int32Type:
-			sc = internal.NullableSchema(internal.IntSchema)
+			node = internal.NullableNode(internal.IntNode)
 		case Int64Type:
-			sc = internal.NullableSchema(internal.LongSchema)
+			node = internal.NullableNode(internal.LongNode)
 		case Float32Type:
-			sc = internal.NullableSchema(internal.FloatSchema)
+			node = internal.NullableNode(internal.FloatNode)
 		case Float64Type:
-			sc = internal.NullableSchema(internal.DoubleSchema)
+			node = internal.NullableNode(internal.DoubleNode)
 		case StringType:
-			sc = internal.NullableSchema(internal.StringSchema)
+			node = internal.NullableNode(internal.StringNode)
 		case DateType:
-			sc = internal.NullableSchema(internal.DateSchema)
+			node = internal.NullableNode(internal.DateNode)
 		case TimeType:
-			sc = internal.NullableSchema(internal.TimeSchema)
+			node = internal.NullableNode(internal.TimeNode)
 		case TimestampType:
-			sc = internal.NullableSchema(internal.TimestampSchema)
+			node = internal.NullableNode(internal.TimestampNode)
 		case TimestampTzType:
-			sc = internal.NullableSchema(internal.TimestampTzSchema)
+			node = internal.NullableNode(internal.TimestampTzNode)
 		case UUIDType:
-			sc = internal.NullableSchema(internal.UUIDSchema)
+			node = internal.NullableNode(internal.UUIDNode)
 		case BooleanType:
-			sc = internal.NullableSchema(internal.BoolSchema)
+			node = internal.NullableNode(internal.BoolNode)
 		case BinaryType:
-			sc = internal.NullableSchema(internal.BinarySchema)
+			node = internal.NullableNode(internal.BytesNode)
 		case FixedType:
-			fixedSchema := internal.FixedSchema(typ.Len())
-			sc = internal.NullableSchema(fixedSchema)
+			node = internal.NullableNode(internal.FixedNode(typ.Len()))
 		case DecimalType:
-			decimalSchema := internal.DecimalSchema(typ.precision, typ.scale)
-			sc = internal.NullableSchema(decimalSchema)
+			node = internal.NullableNode(internal.DecimalNode(typ.precision, typ.scale))
 		default:
 			return nil, fmt.Errorf("unsupported partition type: %s", f.Type.String())
 		}
 
-		fields[i], _ = avro.NewField(f.Name, sc, internal.WithFieldID(f.ID))
+		fields[i] = avro.SchemaField{
+			Name:  f.Name,
+			Type:  node,
+			Props: internal.WithFieldID(f.ID),
+		}
 	}
 
-	return avro.NewRecordSchema("r102", "", fields)
+	node := avro.SchemaNode{
+		Type:   atype.Record,
+		Name:   "r102",
+		Fields: fields,
+	}
+
+	return node.Schema()
 }

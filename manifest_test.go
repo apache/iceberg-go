@@ -19,6 +19,7 @@ package iceberg
 
 import (
 	"bytes"
+	"compress/flate"
 	"encoding/json"
 	"errors"
 	"io"
@@ -27,9 +28,9 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go/internal"
-	"github.com/hamba/avro/v2"
-	"github.com/hamba/avro/v2/ocf"
 	"github.com/stretchr/testify/suite"
+	"github.com/twmb/avro"
+	"github.com/twmb/avro/ocf"
 )
 
 var (
@@ -784,18 +785,17 @@ func writeManifestListNoFormatVersion(t *testing.T, version int) bytes.Buffer {
 	}
 
 	var buf bytes.Buffer
-	enc, err := ocf.NewEncoderWithSchema(fileSchema, &buf,
-		ocf.WithSchemaMarshaler(ocf.FullSchemaMarshaler),
-		ocf.WithEncoderSchemaCache(&avro.SchemaCache{}),
+	wr, err := ocf.NewWriter(&buf, fileSchema,
+		ocf.WithSchema(fileSchema.String()),
 		ocf.WithMetadata(map[string][]byte{
 			"snapshot-id":     []byte("1234"),
 			"sequence-number": []byte("0"),
 		}),
-		ocf.WithCodec(ocf.Deflate))
+		ocf.WithCodec(ocf.DeflateCodec(-1)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := enc.Close(); err != nil {
+	if err := wr.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -832,9 +832,7 @@ func writeManifestNoFormatVersion(t *testing.T) bytes.Buffer {
 	}
 
 	var buf bytes.Buffer
-	enc, err := ocf.NewEncoderWithSchema(entrySchema, &buf,
-		ocf.WithSchemaMarshaler(ocf.FullSchemaMarshaler),
-		ocf.WithEncoderSchemaCache(&avro.SchemaCache{}),
+	w, err := ocf.NewWriter(&buf, entrySchema,
 		ocf.WithMetadata(map[string][]byte{
 			// intentionally omit "format-version" to simulate Java Iceberg v1 files
 			"schema":            schemaJSON,
@@ -843,11 +841,11 @@ func writeManifestNoFormatVersion(t *testing.T) bytes.Buffer {
 			"partition-spec-id": []byte("0"),
 			"content":           []byte("data"),
 		}),
-		ocf.WithCodec(ocf.Deflate))
+		ocf.WithCodec(ocf.DeflateCodec(flate.DefaultCompression)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := enc.Close(); err != nil {
+	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -866,15 +864,10 @@ func (m *ManifestTestSuite) TestNewManifestReaderMissingFormatVersion() {
 }
 
 func (m *ManifestTestSuite) TestReadManifestListIncompleteSchema() {
-	// This prevents a regression that could be caused by using a schema cache
-	// across multiple read/write operations of an avro file. While it may sound
-	// like a reasonable idea (caches speed things up, right?), it isn't that
-	// sort of cache: it's really a resolver to allow files with incomplete
-	// schemas, which we don't want.
-
-	// If a schema cache *were* in use, this would populate it with a definition for
-	// the missing record type in the incomplete schema. So we'll first "warm up"
-	// any cache. (Note: if working correctly, this will have no such side effect.)
+	// Verify that reading a manifest list whose embedded schema references
+	// an undefined named type ("field_summary" without its definition)
+	// fails. A stray cache or cross-file resolver could mask this by
+	// reusing a definition from a previously-read file.
 	var buf bytes.Buffer
 	seqNum := int64(9876)
 	err := WriteManifestList(2, &buf, 1234, nil, &seqNum, 0, []ManifestFile{
@@ -988,14 +981,10 @@ func (m *ManifestTestSuite) TestReadManifestListIncompleteSchema() {
 	}`
 
 	// We'll generate a file that is missing part of its schema
-	cache := &avro.SchemaCache{}
 	sch, err := internal.NewManifestFileSchema(2)
 	m.NoError(err)
-	enc, err := ocf.NewEncoderWithSchema(sch, &buf,
-		ocf.WithEncoderSchemaCache(cache),
-		ocf.WithSchemaMarshaler(func(schema avro.Schema) ([]byte, error) {
-			return []byte(incompleteSchema), nil
-		}),
+	wr, err := ocf.NewWriter(&buf, sch,
+		ocf.WithSchema(incompleteSchema),
 		ocf.WithMetadata(map[string][]byte{
 			"format-version":     {'2'},
 			"snapshot-id":        []byte("1234"),
@@ -1005,24 +994,19 @@ func (m *ManifestTestSuite) TestReadManifestListIncompleteSchema() {
 	)
 	m.NoError(err)
 	for _, file := range files {
-		m.NoError(enc.Encode(file))
+		m.NoError(wr.Encode(file))
 	}
 
 	// This should fail because the file's schema is incomplete.
 	_, err = ReadManifestList(&buf)
-	m.ErrorContains(err, "unknown type: field_summary")
+	m.Error(err)
 }
 
 func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
-	// This prevents a regression that could be caused by using a schema cache
-	// across multiple read/write operations of an avro file. While it may sound
-	// like a reasonable idea (caches speed things up, right?), it isn't that
-	// sort of cache: it's really a resolver to allow files with incomplete
-	// schemas, which we don't want.
-
-	// If a schema cache *were* in use, this would populate it with a definition for
-	// the missing record type in the incomplete schema. So we'll first "warm up"
-	// any cache. (Note: if working correctly, this will have no such side effect.)
+	// Verify that reading a manifest entry whose embedded schema references
+	// an undefined named type ("r2" without its definition) fails. A stray
+	// cache or cross-file resolver could mask this by reusing a definition
+	// from a previously-read file.
 	var buf bytes.Buffer
 	partitionSpec := NewPartitionSpecID(1)
 	snapshotID := int64(12345678)
@@ -1033,7 +1017,7 @@ func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
 		"s3://bucket/namespace/table/data/abcd-0123.parquet",
 		ParquetFile,
 		map[int]any{},
-		map[int]avro.LogicalType{},
+		map[int]string{},
 		map[int]int{},
 		100,
 		100*1000*1000,
@@ -1109,16 +1093,15 @@ func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
 	}`
 
 	// We'll generate a file that is missing part of its schema
-	cache := &avro.SchemaCache{}
-	partitionSchema, err := avro.NewRecordSchema("r102", "", nil) // empty struct
+	partNode := avro.SchemaNode{
+		Type: "record", Name: "r102", Fields: nil,
+	}
+	partitionSchema, err := partNode.Schema()
 	m.NoError(err)
 	sch, err := internal.NewManifestEntrySchema(partitionSchema, 2)
 	m.NoError(err)
-	enc, err := ocf.NewEncoderWithSchema(sch, &buf,
-		ocf.WithEncoderSchemaCache(cache),
-		ocf.WithSchemaMarshaler(func(schema avro.Schema) ([]byte, error) {
-			return []byte(incompleteSchema), nil
-		}),
+	wr, err := ocf.NewWriter(&buf, sch,
+		ocf.WithSchema(incompleteSchema),
 		ocf.WithMetadata(map[string][]byte{
 			"format-version": {'2'},
 			// TODO: spec says other things are required, like schema and partition-spec info,
@@ -1127,12 +1110,12 @@ func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
 	)
 	m.NoError(err)
 	for _, entry := range entries {
-		m.NoError(enc.Encode(entry))
+		m.NoError(wr.Encode(entry))
 	}
 
 	// This should fail because the file's schema is incomplete.
 	_, err = ReadManifest(file, &buf, false)
-	m.ErrorContains(err, "unknown type: r2")
+	m.Error(err)
 }
 
 func (m *ManifestTestSuite) TestManifestEntriesV2() {
@@ -1291,7 +1274,7 @@ func (m *ManifestTestSuite) TestManifestEntriesV2() {
 	m.Equal(testEqualityIDs, datafile.EqualityFieldIDs())
 	m.Zero(*datafile.SortOrderID())
 
-	m.equalityIDsSchemaIsInt(manifestReader.dec.Schema())
+	m.equalityIDsSchemaIsInt(manifestReader.rd.Schema())
 }
 
 func (m *ManifestTestSuite) TestManifestEntriesV3() {
@@ -1373,7 +1356,7 @@ func (m *ManifestTestSuite) TestManifestEntriesV3() {
 	m.Equal(testEqualityIDs, datafile.EqualityFieldIDs())
 	m.Zero(*datafile.SortOrderID())
 
-	m.equalityIDsSchemaIsInt(manifestReader.dec.Schema())
+	m.equalityIDsSchemaIsInt(manifestReader.rd.Schema())
 }
 
 func (m *ManifestTestSuite) TestNewManifestReaderZstdManifestEntriesV2() {
@@ -1403,16 +1386,15 @@ func (m *ManifestTestSuite) TestNewManifestReaderZstdManifestEntriesV2() {
 	m.Require().NoError(err)
 
 	var buf bytes.Buffer
-	enc, err := ocf.NewEncoderWithSchema(entrySchema, &buf,
-		ocf.WithSchemaMarshaler(ocf.FullSchemaMarshaler),
-		ocf.WithEncoderSchemaCache(&avro.SchemaCache{}),
+	wr, err := ocf.NewWriter(&buf, entrySchema,
+		ocf.WithSchema(entrySchema.String()),
 		ocf.WithMetadata(md),
-		ocf.WithCodec(ocf.ZStandard))
+		ocf.WithCodec(ocf.MustZstdCodec(nil, nil)))
 	m.Require().NoError(err)
 
-	m.Require().NoError(enc.Encode(manifestEntryV2Records[0]))
-	m.Require().NoError(enc.Encode(manifestEntryV2Records[1]))
-	m.Require().NoError(enc.Close())
+	m.Require().NoError(wr.Encode(manifestEntryV2Records[0]))
+	m.Require().NoError(wr.Encode(manifestEntryV2Records[1]))
+	m.Require().NoError(wr.Close())
 
 	manifestReader, err := NewManifestReader(&manifest, bytes.NewReader(buf.Bytes()))
 	m.Require().NoError(err)
@@ -1439,7 +1421,7 @@ func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 		"sample.parquet",
 		ParquetFile,
 		map[int]any{1001: int(1), 1002: time.Unix(1925, 0).UnixMicro()},
-		map[int]avro.LogicalType{},
+		map[int]string{},
 		map[int]int{},
 		1,
 		2,
@@ -1520,42 +1502,43 @@ func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 }
 
 // equalityIDsSchemaIsInt asserts equality_ids uses Avro "int", not "long".
-func (m *ManifestTestSuite) equalityIDsSchemaIsInt(sc avro.Schema) {
+func (m *ManifestTestSuite) equalityIDsSchemaIsInt(sc *avro.Schema) {
 	m.T().Helper()
 
-	entrySchema := sc.(*avro.RecordSchema)
-	var dataFileSchema *avro.RecordSchema
-	for _, f := range entrySchema.Fields() {
-		if f.Name() == "data_file" {
-			dataFileSchema = f.Type().(*avro.RecordSchema)
+	root := sc.Root()
+	var dataFileField *avro.SchemaField
+	for i := range root.Fields {
+		if root.Fields[i].Name == "data_file" {
+			dataFileField = &root.Fields[i]
 
 			break
 		}
 	}
-	m.Require().NotNil(dataFileSchema, "data_file field not found in manifest_entry schema")
+	m.Require().NotNil(dataFileField, "data_file field not found in manifest_entry schema")
 
-	var eqIDsField *avro.Field
-	for _, f := range dataFileSchema.Fields() {
-		if f.Name() == "equality_ids" {
-			eqIDsField = f
+	dfType := dataFileField.Type
+	var eqIDsField *avro.SchemaField
+	for i := range dfType.Fields {
+		if dfType.Fields[i].Name == "equality_ids" {
+			eqIDsField = &dfType.Fields[i]
 
 			break
 		}
 	}
 	m.Require().NotNil(eqIDsField, "equality_ids field not found in data_file schema")
 
-	unionSchema := eqIDsField.Type().(*avro.UnionSchema)
-	var arraySchema *avro.ArraySchema
-	for _, ts := range unionSchema.Types() {
-		if ts.Type() == avro.Array {
-			arraySchema = ts.(*avro.ArraySchema)
+	// equality_ids is ["null", {"type":"array","items":"int"}]
+	m.Require().Equal("union", eqIDsField.Type.Type)
+	var arrayBranch *avro.SchemaNode
+	for i := range eqIDsField.Type.Branches {
+		if eqIDsField.Type.Branches[i].Type == "array" {
+			arrayBranch = &eqIDsField.Type.Branches[i]
 
 			break
 		}
 	}
-	m.Require().NotNil(arraySchema, "equality_ids union should contain an array schema")
-
-	m.Equal(avro.Int, arraySchema.Items().Type(),
+	m.Require().NotNil(arrayBranch, "equality_ids union should contain an array schema")
+	m.Equal("int", arrayBranch.Items.Type,
 		"equality_ids array elements must be Avro int (not long) per the Iceberg spec")
 }
 
@@ -1774,7 +1757,7 @@ func (m *ManifestTestSuite) TestManifestRoundTripSortOrderID() {
 		"s3://bucket/ns/table/data/round-trip.parquet",
 		ParquetFile,
 		map[int]any{},
-		map[int]avro.LogicalType{},
+		map[int]string{},
 		map[int]int{},
 		10,
 		10*1000,

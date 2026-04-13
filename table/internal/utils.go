@@ -35,7 +35,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go"
-	"github.com/hamba/avro/v2"
+	"github.com/twmb/avro/atype"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -253,7 +253,7 @@ type DataFileOpts struct {
 
 func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 	var fieldIDToPartitionData map[int]any
-	fieldIDToLogicalType := make(map[int]avro.LogicalType)
+	fieldIDToLogicalType := make(map[int]string)
 	fieldIDToFixedSize := make(map[int]int)
 
 	if !opts.Spec.Equals(*iceberg.UnpartitionedSpec) {
@@ -276,18 +276,18 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 
 				switch rt := resultType.(type) {
 				case iceberg.DateType:
-					fieldIDToLogicalType[field.FieldID] = avro.Date
+					fieldIDToLogicalType[field.FieldID] = atype.Date
 				case iceberg.TimeType:
-					fieldIDToLogicalType[field.FieldID] = avro.TimeMicros
+					fieldIDToLogicalType[field.FieldID] = atype.TimeMicros
 				case iceberg.TimestampType:
-					fieldIDToLogicalType[field.FieldID] = avro.TimestampMicros
+					fieldIDToLogicalType[field.FieldID] = atype.TimestampMicros
 				case iceberg.TimestampTzType:
-					fieldIDToLogicalType[field.FieldID] = avro.TimestampMicros
+					fieldIDToLogicalType[field.FieldID] = atype.TimestampMicros
 				case iceberg.DecimalType:
-					fieldIDToLogicalType[field.FieldID] = avro.Decimal
+					fieldIDToLogicalType[field.FieldID] = atype.Decimal
 					fieldIDToFixedSize[field.FieldID] = rt.Scale()
 				case iceberg.UUIDType:
-					fieldIDToLogicalType[field.FieldID] = avro.UUID
+					fieldIDToLogicalType[field.FieldID] = atype.UUID
 				}
 			}
 		}
