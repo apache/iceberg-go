@@ -715,6 +715,7 @@ func TestGetWritePropertiesBloomFilter(t *testing.T) {
 		wp := parquet.NewWriterProperties(format.GetWriteProperties(props).([]parquet.WriterProperty)...)
 		assert.True(t, wp.BloomFilterEnabledFor("id"))
 		assert.False(t, wp.BloomFilterEnabledFor("name"))
+		assert.False(t, wp.BloomFilterEnabledFor("unmentioned_col"), "columns absent from properties must default to no bloom filter")
 	})
 }
 

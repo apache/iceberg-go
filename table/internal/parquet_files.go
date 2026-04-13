@@ -275,6 +275,9 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 		if !ok || colName == "" {
 			continue
 		}
+		// EqualFold matches Java's Boolean.parseBoolean: only "true"
+		// (case-insensitive) is true; anything else, including "1" or
+		// "yes", is false. strconv.ParseBool behaves differently ("1" → true).
 		enabled := strings.EqualFold(val, "true")
 		writerProps = append(writerProps, parquet.WithBloomFilterEnabledFor(colName, enabled))
 	}
