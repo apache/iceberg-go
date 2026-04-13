@@ -934,6 +934,42 @@ func TestIndexByNameDuplicateFieldNames(t *testing.T) {
 	assert.ErrorContains(t, err, "multiple fields for name col")
 }
 
+func TestNewSchemaPanicsOnDuplicateFieldIDs(t *testing.T) {
+	typ := iceberg.PrimitiveTypes.Int32
+
+	// Duplicate at the top level.
+	assert.PanicsWithError(t,
+		"invalid schema: multiple fields for id 1: foo and bar",
+		func() {
+			iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "foo", Type: typ},
+				iceberg.NestedField{ID: 1, Name: "bar", Type: typ},
+			)
+		},
+	)
+
+	// Duplicate inside a nested struct — the case from the bug report.
+	assert.PanicsWithError(t,
+		"invalid schema: multiple fields for id 6: inner_op and inner_req",
+		func() {
+			iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+				iceberg.NestedField{
+					ID:   5,
+					Name: "struct",
+					Type: &iceberg.StructType{
+						FieldList: []iceberg.NestedField{
+							{ID: 6, Name: "inner_op", Type: typ},
+							{ID: 6, Name: "inner_req", Type: typ, Required: true},
+						},
+					},
+					Required: true,
+				},
+			)
+		},
+	)
+}
+
 func TestSanitizeColumnNamesEmptyFieldName(t *testing.T) {
 	sc := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "", Type: iceberg.PrimitiveTypes.String, Required: false},
