@@ -1726,7 +1726,8 @@ func (t *TableWritingTestSuite) TestExpireSnapshotsUsesTableProperties() {
 			table.PropertyFormatVersion: strconv.Itoa(t.formatVersion),
 			table.MinSnapshotsToKeepKey: "2",
 			table.MaxSnapshotAgeMsKey:   "0", // expire everything older than "now"
-			table.MaxRefAgeMsKey:        strconv.FormatInt(int64(table.MaxRefAgeMsDefault), 10),
+			// max-ref-age-ms is intentionally absent to prove that a missing
+			// property correctly falls back to the math.MaxInt default.
 		})
 	t.Require().NoError(err)
 
