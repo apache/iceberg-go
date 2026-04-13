@@ -1653,6 +1653,55 @@ func (m *ManifestTestSuite) TestWriteManifestListClosesWriterOnError() {
 	m.Require().ErrorIs(err, errLimitedWrite)
 }
 
+// TestManifestRoundTripSortOrderID verifies that a sort_order_id written onto
+// a data file survives an avro manifest round-trip (write → read). This
+// backs the end-to-end guarantee that callers of WriteTask/WriteFileInfo see
+// the value they set on disk.
+func (m *ManifestTestSuite) TestManifestRoundTripSortOrderID() {
+	var buf bytes.Buffer
+	partitionSpec := NewPartitionSpecID(0)
+	snapshotID := int64(12345678)
+	seqNum := int64(9876)
+	const expectedSortOrderID = 3
+
+	dataFileBuilder, err := NewDataFileBuilder(
+		partitionSpec,
+		EntryContentData,
+		"s3://bucket/ns/table/data/round-trip.parquet",
+		ParquetFile,
+		map[int]any{},
+		map[int]avro.LogicalType{},
+		map[int]int{},
+		10,
+		10*1000,
+	)
+	m.Require().NoError(err)
+	dataFileBuilder.SortOrderID(expectedSortOrderID)
+
+	file, err := WriteManifest(
+		"s3://bucket/ns/table/metadata/round-trip.avro", &buf, 2,
+		partitionSpec,
+		NewSchema(0,
+			NestedField{ID: 1, Name: "id", Type: Int64Type{}},
+		),
+		snapshotID,
+		[]ManifestEntry{NewManifestEntry(
+			EntryStatusADDED,
+			&snapshotID,
+			&seqNum, &seqNum,
+			dataFileBuilder.Build(),
+		)},
+	)
+	m.Require().NoError(err)
+
+	entries, err := ReadManifest(file, &buf, false)
+	m.Require().NoError(err)
+	m.Require().Len(entries, 1)
+	got := entries[0].DataFile().SortOrderID()
+	m.Require().NotNil(got, "SortOrderID must round-trip to a non-nil value")
+	m.Equal(expectedSortOrderID, *got)
+}
+
 func (m *ManifestTestSuite) TestWriteManifestClosesWriterOnEntryError() {
 	partitionSpec := NewPartitionSpecID(1,
 		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "VendorID", Transform: IdentityTransform{}},

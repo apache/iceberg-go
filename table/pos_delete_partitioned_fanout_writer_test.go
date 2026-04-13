@@ -507,6 +507,122 @@ var defaultPositionDeleteMatching = []dataFileMatcherOption{withContentTypeMatch
 
 func intPtr(i int) *int { return &i }
 
+// TestPositionDeleteUnpartitionedSortOrderID covers the unpartitioned branch
+// of positionDeleteRecordsToDataFiles: the resulting DataFiles must carry
+// the table's default sort order id exactly like the partitioned branch does.
+func TestPositionDeleteUnpartitionedSortOrderID(t *testing.T) {
+	t.Parallel()
+
+	metadataBuilder, err := NewMetadataBuilder(2)
+	require.NoError(t, err)
+	require.NoError(t, metadataBuilder.AddSchema(iceberg.PositionalDeleteSchema))
+	require.NoError(t, metadataBuilder.SetCurrentSchemaID(0))
+	unpartitioned := *iceberg.UnpartitionedSpec
+	require.NoError(t, metadataBuilder.AddPartitionSpec(&unpartitioned, true))
+	require.NoError(t, metadataBuilder.SetDefaultSpecID(0))
+	sortOrder, err := NewSortOrder(1, []SortField{{
+		SourceIDs: []int{2147483546}, // file_path
+		Direction: SortASC,
+		Transform: iceberg.IdentityTransform{},
+		NullOrder: NullsFirst,
+	}})
+	require.NoError(t, err)
+	require.NoError(t, metadataBuilder.AddSortOrder(&sortOrder))
+	require.NoError(t, metadataBuilder.SetDefaultSortOrderID(-1))
+
+	built, err := metadataBuilder.Build()
+	require.NoError(t, err)
+	expectedID := built.DefaultSortOrder()
+	require.NotZero(t, expectedID, "sanity: sort order id should be non-zero")
+
+	writeUUID := uuid.New()
+	rb := mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema, `[{"file_path": "file://unpartitioned/test.parquet", "pos": 0}]`)
+	itr := func(yield func(arrow.RecordBatch, error) bool) {
+		rb.Retain()
+		yield(rb, nil)
+	}
+	seq := positionDeleteRecordsToDataFiles(t.Context(), t.TempDir(), metadataBuilder, nil, recordWritingArgs{
+		sc:        PositionalDeleteArrowSchema,
+		itr:       itr,
+		fs:        &io.LocalFS{},
+		writeUUID: &writeUUID,
+		counter:   internal.Counter(0),
+	})
+
+	var files []iceberg.DataFile
+	for df, err := range seq {
+		require.NoError(t, err)
+		files = append(files, df)
+	}
+	require.NotEmpty(t, files, "expected at least one data file")
+	for _, df := range files {
+		require.NotNil(t, df.SortOrderID(), "unpartitioned pos-delete DataFile must carry sort order id")
+		assert.Equal(t, expectedID, *df.SortOrderID())
+	}
+}
+
+// TestEqualityDeleteUnpartitionedSortOrderID covers the unpartitioned branch
+// of equalityDeleteRecordsToDataFiles: the resulting DataFiles must carry
+// the table's default sort order id.
+func TestEqualityDeleteUnpartitionedSortOrderID(t *testing.T) {
+	t.Parallel()
+
+	delSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+
+	metadataBuilder, err := NewMetadataBuilder(2)
+	require.NoError(t, err)
+	require.NoError(t, metadataBuilder.AddSchema(delSchema))
+	require.NoError(t, metadataBuilder.SetCurrentSchemaID(0))
+	unpartitioned := *iceberg.UnpartitionedSpec
+	require.NoError(t, metadataBuilder.AddPartitionSpec(&unpartitioned, true))
+	require.NoError(t, metadataBuilder.SetDefaultSpecID(0))
+	sortOrder, err := NewSortOrder(1, []SortField{{
+		SourceIDs: []int{1},
+		Direction: SortASC,
+		Transform: iceberg.IdentityTransform{},
+		NullOrder: NullsFirst,
+	}})
+	require.NoError(t, err)
+	require.NoError(t, metadataBuilder.AddSortOrder(&sortOrder))
+	require.NoError(t, metadataBuilder.SetDefaultSortOrderID(-1))
+
+	built, err := metadataBuilder.Build()
+	require.NoError(t, err)
+	expectedID := built.DefaultSortOrder()
+	require.NotZero(t, expectedID, "sanity: sort order id should be non-zero")
+
+	delArrowSc, err := SchemaToArrowSchema(delSchema, nil, true, false)
+	require.NoError(t, err)
+
+	writeUUID := uuid.New()
+	rb := mustLoadRecordBatchFromJSON(delArrowSc, `[{"id": 2}, {"id": 4}]`)
+	itr := func(yield func(arrow.RecordBatch, error) bool) {
+		rb.Retain()
+		yield(rb, nil)
+	}
+	seq, err := equalityDeleteRecordsToDataFiles(t.Context(), t.TempDir(), metadataBuilder, delSchema, []int{1}, recordWritingArgs{
+		sc:        delArrowSc,
+		itr:       itr,
+		fs:        &io.LocalFS{},
+		writeUUID: &writeUUID,
+		counter:   internal.Counter(0),
+	})
+	require.NoError(t, err)
+
+	var files []iceberg.DataFile
+	for df, err := range seq {
+		require.NoError(t, err)
+		files = append(files, df)
+	}
+	require.NotEmpty(t, files, "expected at least one data file")
+	for _, df := range files {
+		require.NotNil(t, df.SortOrderID(), "unpartitioned eq-delete DataFile must carry sort order id")
+		assert.Equal(t, expectedID, *df.SortOrderID())
+	}
+}
+
 // equalsDataFile invokes a dataFileMatcher with the specified matching options and compares two DataFile values.
 // Its return value is nil if both values are equal and an error with a meaningful formatted message to help
 // show the mismatch in case they are not. This is meant to be used with testify like:
