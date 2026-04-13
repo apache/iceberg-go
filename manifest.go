@@ -444,10 +444,14 @@ func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType, ma
 		}
 		if ps, ok := avroTyp.(*avro.PrimitiveSchema); ok && ps.Logical() != nil {
 			logicalTypes[fid] = ps.Logical().Type()
-		} else if fs, ok := avroTyp.(*avro.FixedSchema); ok && fs.Logical() != nil {
-			logicalTypes[int(fid)] = fs.Logical().Type()
-			if decimalLogical, ok := fs.Logical().(*avro.DecimalLogicalSchema); ok {
-				fixedSizes[int(fid)] = decimalLogical.Scale()
+		} else if fs, ok := avroTyp.(*avro.FixedSchema); ok {
+			if fs.Logical() != nil {
+				logicalTypes[int(fid)] = fs.Logical().Type()
+				if decimalLogical, ok := fs.Logical().(*avro.DecimalLogicalSchema); ok {
+					fixedSizes[int(fid)] = decimalLogical.Scale()
+				}
+			} else {
+				fixedSizes[int(fid)] = fs.Size()
 			}
 		}
 	}
@@ -1069,8 +1073,9 @@ type ManifestWriter struct {
 	schema  *Schema
 	content ManifestContent
 
-	partFieldNameToID map[string]int
-	partFieldIDToType map[int]avro.LogicalType
+	partFieldNameToID    map[string]int
+	partFieldIDToType    map[int]avro.LogicalType
+	partFieldIDToFixSize map[int]int
 
 	snapshotID    int64
 	addedFiles    int32
@@ -1117,20 +1122,21 @@ func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *S
 		return nil, err
 	}
 
-	nameToID, idToType, _ := getFieldIDMap(fileSchema)
+	nameToID, idToType, idToFixSize := getFieldIDMap(fileSchema)
 
 	w := &ManifestWriter{
-		impl:              impl,
-		version:           version,
-		output:            out,
-		spec:              spec,
-		content:           ManifestContentData,
-		schema:            schema,
-		partFieldNameToID: nameToID,
-		partFieldIDToType: idToType,
-		snapshotID:        snapshotID,
-		minSeqNum:         -1,
-		partitions:        make([]map[int]any, 0),
+		impl:                 impl,
+		version:              version,
+		output:               out,
+		spec:                 spec,
+		content:              ManifestContentData,
+		schema:               schema,
+		partFieldNameToID:    nameToID,
+		partFieldIDToType:    idToType,
+		partFieldIDToFixSize: idToFixSize,
+		snapshotID:           snapshotID,
+		minSeqNum:            -1,
+		partitions:           make([]map[int]any, 0),
 	}
 
 	for _, apply := range opts {
@@ -1268,10 +1274,11 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 	if setter, ok := entry.DataFile().(hasFieldToIDMap); ok {
 		setter.setFieldNameToIDMap(w.partFieldNameToID)
 		setter.setFieldIDToLogicalTypeMap(w.partFieldIDToType)
+		setter.setFieldIDToFixedSizeMap(w.partFieldIDToFixSize)
 	}
 
 	w.partitions = append(w.partitions, entry.Data.Partition())
-	partitionData := avroPartitionData(entry.Data.Partition(), w.partFieldIDToType)
+	partitionData := avroPartitionData(entry.Data.Partition(), w.partFieldIDToType, w.partFieldIDToFixSize)
 
 	if dataFile, ok := entry.DataFile().(*dataFile); ok {
 		convertedPartitionData := make(map[string]any)
@@ -1641,17 +1648,33 @@ func mapToAvroColMap[K comparable, V any](m map[K]V) *[]colMap[K, V] {
 	return &out
 }
 
-func avroPartitionData(input map[int]any, logicalTypes map[int]avro.LogicalType) map[int]any {
+func avroPartitionData(input map[int]any, logicalTypes map[int]avro.LogicalType, fixedSizes map[int]int) map[int]any {
 	out := make(map[int]any)
 	for k, v := range input {
 		if logical, ok := logicalTypes[k]; ok {
 			out[k] = convertLogicalTypeValue(v, logical)
+		} else if size, ok := fixedSizes[k]; ok {
+			out[k] = convertFixedValue(v, size)
 		} else {
 			out[k] = v
 		}
 	}
 
 	return out
+}
+
+func convertFixedValue(v any, size int) any {
+	if v == nil {
+		return map[string]any{"null": nil}
+	}
+
+	if bytes, ok := v.([]byte); ok {
+		fixedArray := convertToFixedArray(padOrTruncateBytes(bytes, size), size)
+
+		return map[string]any{fmt.Sprintf("fixed_%d", size): fixedArray}
+	}
+
+	return v
 }
 
 func convertLogicalTypeValue(v any, logicalType avro.LogicalType) any {
@@ -1880,6 +1903,18 @@ func (d *dataFile) convertAvroValueToIcebergType(v any, fieldID int) any {
 			}
 
 			return v
+		}
+	}
+
+	if size, ok := d.fieldIDToFixedSize[fieldID]; ok {
+		if unionMap, ok := v.(map[string]any); ok {
+			key := fmt.Sprintf("fixed_%d", size)
+			if val, ok := unionMap[key]; ok {
+				rv := reflect.ValueOf(val)
+				if rv.Kind() == reflect.Array {
+					return rv.Slice(0, rv.Len()).Bytes()
+				}
+			}
 		}
 	}
 
