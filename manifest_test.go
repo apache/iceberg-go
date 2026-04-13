@@ -1653,6 +1653,112 @@ func (m *ManifestTestSuite) TestWriteManifestListClosesWriterOnError() {
 	m.Require().ErrorIs(err, errLimitedWrite)
 }
 
+// TestFixedTypePartitionManifestRoundTrip exercises the actual manifest
+// read/write path for a FixedType partition column — the end-to-end
+// complement of TestFixedPartitionColumnAvroSchema which only tests raw
+// avro marshal/unmarshal.
+//
+// Flow: table schema + FixedType partition spec → WriteManifest → ReadManifest
+//
+//	→ assert partition value survives byte-for-byte.
+func (m *ManifestTestSuite) TestFixedTypePartitionManifestRoundTrip() {
+	const fixedLen = 8
+	fixedValue := []byte("abcdefgh") // exactly fixedLen bytes
+
+	schema := NewSchema(0,
+		NestedField{ID: 1, Name: "id", Type: PrimitiveTypes.Int64, Required: true},
+		NestedField{ID: 2, Name: "key", Type: FixedTypeOf(fixedLen), Required: false},
+	)
+	spec := NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceIDs: []int{2}, Name: "key", Transform: IdentityTransform{}},
+	)
+
+	snapshotID := int64(1)
+	seqNum := int64(1)
+	df, err := NewDataFileBuilder(spec, EntryContentData, "s3://bucket/data/fixed-part.parquet", ParquetFile,
+		map[int]any{1000: fixedValue}, map[int]avro.LogicalType{}, map[int]int{}, 10, 10_000)
+	m.Require().NoError(err)
+	entry := NewManifestEntry(EntryStatusADDED, &snapshotID, &seqNum, &seqNum, df.Build())
+
+	var buf bytes.Buffer
+	mf, err := WriteManifest("s3://bucket/meta/fixed-part.avro", &buf, 2, spec, schema, snapshotID, []ManifestEntry{entry})
+	m.Require().NoError(err)
+
+	entries, err := ReadManifest(mf, &buf, false)
+	m.Require().NoError(err)
+	m.Require().Len(entries, 1)
+
+	partitionMap := entries[0].DataFile().Partition()
+	got, ok := partitionMap[1000].([]byte)
+	m.Require().True(ok, "partition value should round-trip as []byte, got %T", partitionMap[1000])
+	m.Equal(fixedValue, got)
+}
+
+// TestFixedTypePartitionBackwardCompatibility checks that manifests written
+// by old code — where a FixedType partition column was encoded as Avro
+// "bytes" instead of "fixed_N" — are still decoded correctly by the new
+// code. The old encoding is simulated by constructing the Avro payload
+// directly with a bytes-typed partition field.
+func (m *ManifestTestSuite) TestFixedTypePartitionBackwardCompatibility() {
+	const fixedLen = 8
+	fixedValue := []byte("abcdefgh")
+
+	schema := NewSchema(0,
+		NestedField{ID: 1, Name: "id", Type: PrimitiveTypes.Int64, Required: true},
+		NestedField{ID: 2, Name: "key", Type: FixedTypeOf(fixedLen), Required: false},
+	)
+	spec := NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceIDs: []int{2}, Name: "key", Transform: IdentityTransform{}},
+	)
+
+	// Construct the Avro entry schema using the old "bytes" partition type
+	// rather than the new "fixed_N". This simulates what old code wrote.
+	bytesUnion, err := avro.NewUnionSchema([]avro.Schema{avro.NewNullSchema(), avro.NewPrimitiveSchema(avro.Bytes, nil)})
+	m.Require().NoError(err)
+	keyField, err := avro.NewField("key", bytesUnion, internal.WithFieldID(1000))
+	m.Require().NoError(err)
+	oldPartSchema, err := avro.NewRecordSchema("r102", "", []*avro.Field{keyField})
+	m.Require().NoError(err)
+	entrySchema, err := internal.NewManifestEntrySchema(oldPartSchema, 2)
+	m.Require().NoError(err)
+
+	mw := ManifestWriter{version: 2, spec: spec, schema: schema, content: ManifestContentData}
+	md, err := mw.meta()
+	m.Require().NoError(err)
+
+	snapshotID := int64(1)
+	seqNum := int64(1)
+	df, err := NewDataFileBuilder(spec, EntryContentData, "s3://bucket/data/old.parquet", ParquetFile,
+		map[int]any{1000: fixedValue}, map[int]avro.LogicalType{}, map[int]int{}, 5, 5_000)
+	m.Require().NoError(err)
+	entry := NewManifestEntry(EntryStatusADDED, &snapshotID, &seqNum, &seqNum, df.Build())
+
+	var buf bytes.Buffer
+	enc, err := ocf.NewEncoderWithSchema(entrySchema, &buf,
+		ocf.WithSchemaMarshaler(ocf.FullSchemaMarshaler),
+		ocf.WithEncoderSchemaCache(&avro.SchemaCache{}),
+		ocf.WithMetadata(md),
+		ocf.WithCodec(ocf.Deflate),
+	)
+	m.Require().NoError(err)
+	m.Require().NoError(enc.Encode(entry))
+	m.Require().NoError(enc.Close())
+
+	// Wrap in a minimal ManifestFile so ReadManifest can verify version/content.
+	mf := NewManifestFile(2, "s3://bucket/meta/old.avro", int64(buf.Len()), 1, snapshotID).Build()
+
+	entries, err := ReadManifest(mf, &buf, false)
+	m.Require().NoError(err)
+	m.Require().Len(entries, 1)
+
+	// Old-code manifests carry a bytes-typed partition; the reader must hand
+	// the value back as []byte without panicking or corrupting the value.
+	partitionMap := entries[0].DataFile().Partition()
+	got, ok := partitionMap[1000].([]byte)
+	m.Require().True(ok, "old bytes-encoded fixed partition should decode as []byte, got %T", partitionMap[1000])
+	m.Equal(fixedValue, got)
+}
+
 func (m *ManifestTestSuite) TestWriteManifestClosesWriterOnEntryError() {
 	partitionSpec := NewPartitionSpecID(1,
 		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "VendorID", Transform: IdentityTransform{}},
