@@ -1705,6 +1705,62 @@ func (t *TableWritingTestSuite) TestExpireSnapshotsNoOpWhenNothingToExpire() {
 		"metadata location should not change when there are no snapshots to expire")
 }
 
+// TestExpireSnapshotsUsesTableProperties verifies that ExpireSnapshots reads
+// min-snapshots-to-keep and max-snapshot-age-ms from table properties when
+// no explicit options are provided by the caller (mirrors Java behaviour).
+func (t *TableWritingTestSuite) TestExpireSnapshotsUsesTableProperties() {
+	fs := iceio.LocalFS{}
+
+	files := make([]string, 0)
+	for i := range 5 {
+		filePath := fmt.Sprintf("%s/expire_props_v%d/data-%d.parquet", t.location, t.formatVersion, i)
+		t.writeParquet(fs, filePath, t.arrTablePromotedTypes)
+		files = append(files, filePath)
+	}
+
+	ident := table.Identifier{"default", "expire_props_v" + strconv.Itoa(t.formatVersion)}
+	// Set table-level retention properties — no caller options will be passed to
+	// ExpireSnapshots, so these must be picked up automatically.
+	meta, err := table.NewMetadata(t.tableSchemaPromotedTypes, iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, t.location, iceberg.Properties{
+			table.PropertyFormatVersion: strconv.Itoa(t.formatVersion),
+			table.MinSnapshotsToKeepKey: "2",
+			table.MaxSnapshotAgeMsKey:   "0", // expire everything older than "now"
+			table.MaxRefAgeMsKey:        strconv.FormatInt(int64(table.MaxRefAgeMsDefault), 10),
+		})
+	t.Require().NoError(err)
+
+	ctx := context.Background()
+
+	tbl := table.New(
+		ident,
+		meta,
+		t.getMetadataLoc(),
+		func(ctx context.Context) (iceio.IO, error) {
+			return fs, nil
+		},
+		&mockedCatalog{meta},
+	)
+
+	for i := range 5 {
+		tx := tbl.NewTransaction()
+		t.Require().NoError(tx.AddFiles(ctx, files[i:i+1], nil, false))
+		tbl, err = tx.Commit(ctx)
+		t.Require().NoError(err)
+	}
+
+	t.Require().Equal(5, len(tbl.Metadata().Snapshots()))
+
+	// Call ExpireSnapshots with NO options — must rely entirely on table properties.
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.ExpireSnapshots())
+	tbl, err = tx.Commit(ctx)
+	t.Require().NoError(err)
+
+	// min-snapshots-to-keep=2, so exactly 2 snapshots should survive.
+	t.Require().Equal(2, len(tbl.Metadata().Snapshots()))
+}
+
 func (t *TableWritingTestSuite) TestExpireSnapshotsWithMissingParent() {
 	// This test validates the fix for handling missing parent snapshots.
 	// After expiring snapshots, remaining snapshots may have parent-snapshot-id
