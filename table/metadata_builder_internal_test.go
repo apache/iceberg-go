@@ -19,11 +19,13 @@ package table
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/apache/iceberg-go"
 	"github.com/davecgh/go-spew/spew"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -620,6 +622,76 @@ func TestRemoveSnapshotRemovesBranch(t *testing.T) {
 		require.NotEqual(t, r.SnapshotID, snapshot.SnapshotID)
 		require.NotEqual(t, k, "new_branch")
 	}
+}
+
+// TestRemoveSnapshotsPrunesStatistics verifies that RemoveSnapshots also
+// prunes StatisticsList and PartitionStatsList entries whose SnapshotID
+// matches a removed snapshot. See iceberg-go#836.
+func TestRemoveSnapshotsPrunesStatistics(t *testing.T) {
+	const (
+		removedID = int64(100)
+		keptID    = int64(200)
+	)
+
+	// Build minimal metadata directly so we can seed statistics and
+	// snapshots without going through AddSnapshot's timestamp checks.
+	currentID := int64(300)
+	lastPartitionID := 999
+	commonMeta := commonMetadata{
+		FormatVersion:   2,
+		UUID:            uuid.New(),
+		Loc:             "s3://test/table",
+		LastUpdatedMS:   1000,
+		LastColumnId:    1,
+		SchemaList:      []*iceberg.Schema{iceberg.NewSchema(0)},
+		CurrentSchemaID: 0,
+		Specs:           []iceberg.PartitionSpec{*iceberg.UnpartitionedSpec},
+		DefaultSpecID:   0,
+		LastPartitionID: &lastPartitionID,
+		Props:           iceberg.Properties{},
+		SnapshotList: []Snapshot{
+			{SnapshotID: removedID, TimestampMs: 1001, ManifestList: "/snap-100.avro"},
+			{SnapshotID: keptID, TimestampMs: 1002, ManifestList: "/snap-200.avro"},
+			{SnapshotID: currentID, TimestampMs: 1003, ManifestList: "/snap-300.avro"},
+		},
+		CurrentSnapshotID:  &currentID,
+		SnapshotLog:        []SnapshotLogEntry{{SnapshotID: currentID, TimestampMs: 1003}},
+		SortOrderList:      []SortOrder{UnsortedSortOrder},
+		DefaultSortOrderID: 0,
+		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: currentID, SnapshotRefType: BranchRef}},
+		StatisticsList: []StatisticsFile{
+			{SnapshotID: removedID, StatisticsPath: "s3://stats/removed.puffin"},
+			{SnapshotID: keptID, StatisticsPath: "s3://stats/kept.puffin"},
+		},
+		PartitionStatsList: []PartitionStatisticsFile{
+			{SnapshotID: removedID, StatisticsPath: "s3://partstats/removed.parquet"},
+			{SnapshotID: keptID, StatisticsPath: "s3://partstats/kept.parquet"},
+		},
+	}
+	meta := &metadataV2{LastSeqNum: 0, commonMetadata: commonMeta}
+
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+
+	// Sanity: MetadataBuilderFromBase must load statistics from the base.
+	require.Len(t, builder.statisticsList, 2,
+		"MetadataBuilderFromBase should load StatisticsList from the base metadata")
+	require.Len(t, builder.partitionStatsList, 2,
+		"MetadataBuilderFromBase should load PartitionStatsList from the base metadata")
+
+	require.NoError(t, builder.RemoveSnapshots([]int64{removedID}, false))
+
+	require.Len(t, builder.statisticsList, 1, "statistics for removed snapshot should be pruned")
+	require.Equal(t, keptID, builder.statisticsList[0].SnapshotID)
+
+	require.Len(t, builder.partitionStatsList, 1, "partition statistics for removed snapshot should be pruned")
+	require.Equal(t, keptID, builder.partitionStatsList[0].SnapshotID)
+
+	// And the kept entries survive a Build round trip.
+	rebuilt, err := builder.Build()
+	require.NoError(t, err)
+	require.Len(t, slices.Collect(rebuilt.Statistics()), 1)
+	require.Len(t, slices.Collect(rebuilt.PartitionStatistics()), 1)
 }
 
 func TestExpireMetadataLog(t *testing.T) {

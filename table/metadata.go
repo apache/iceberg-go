@@ -186,6 +186,8 @@ type MetadataBuilder struct {
 	sortOrderList      []SortOrder
 	defaultSortOrderID int
 	refs               map[string]SnapshotRef
+	statisticsList     []StatisticsFile
+	partitionStatsList []PartitionStatisticsFile
 
 	previousFileEntry *MetadataLogEntry
 	// >v1 specific
@@ -261,6 +263,8 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 	b.refs = maps.Collect(metadata.Refs())
 	b.snapshotLog = slices.Collect(metadata.SnapshotLogs())
 	b.metadataLog = slices.Collect(metadata.PreviousFiles())
+	b.statisticsList = slices.Collect(metadata.Statistics())
+	b.partitionStatsList = slices.Collect(metadata.PartitionStatistics())
 
 	if currentFileLocation != "" {
 		b.previousFileEntry = &MetadataLogEntry{
@@ -504,6 +508,15 @@ func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64, postCommit bool) 
 		}
 	}
 	b.refs = newRefs
+
+	// Prune statistics entries whose snapshot was removed so that table
+	// metadata does not retain stale statistics references.
+	b.statisticsList = slices.DeleteFunc(b.statisticsList, func(e StatisticsFile) bool {
+		return slices.Contains(snapshotIds, e.SnapshotID)
+	})
+	b.partitionStatsList = slices.DeleteFunc(b.partitionStatsList, func(e PartitionStatisticsFile) bool {
+		return slices.Contains(snapshotIds, e.SnapshotID)
+	})
 
 	b.updates = append(b.updates, NewRemoveSnapshotsUpdate(snapshotIds, postCommit))
 
@@ -871,6 +884,8 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 		SortOrderList:      b.sortOrderList,
 		DefaultSortOrderID: b.defaultSortOrderID,
 		SnapshotRefs:       b.refs,
+		StatisticsList:     b.statisticsList,
+		PartitionStatsList: b.partitionStatsList,
 	}, nil
 }
 
