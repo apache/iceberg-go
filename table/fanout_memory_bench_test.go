@@ -62,6 +62,7 @@ func (r *gatedReader) Next() bool {
 		return false
 	}
 	r.cur = batch
+
 	return true
 }
 
