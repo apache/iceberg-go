@@ -1673,25 +1673,36 @@ func avroPartitionData(input map[int]any, logicalTypes map[int]avro.LogicalType,
 // accept the explicit {"<fixed-name>": [N]byte} form used elsewhere for
 // UUID and decimal fixed branches. Nil (the other union arm) is passed
 // through untouched.
+//
+// The caller must supply a []byte whose length equals size exactly. A
+// wrong-length slice is a data-corruption risk (the value would land in the
+// wrong partition) so we panic rather than silently truncating or padding.
 func convertFixedValue(v any, size int) any {
 	if v == nil {
 		return map[string]any{"null": nil}
 	}
 
-	switch b := v.(type) {
-	case []byte:
-		return map[string]any{fixedSchemaName(size): convertToFixedArray(padOrTruncateBytes(b, size), size)}
-	case FixedLiteral:
-		return map[string]any{fixedSchemaName(size): convertToFixedArray(padOrTruncateBytes([]byte(b), size), size)}
+	b, ok := v.([]byte)
+	if !ok {
+		return v
+	}
+	if len(b) != size {
+		panic(fmt.Sprintf(
+			"FixedType partition value has length %d, expected %d; wrong-length value would corrupt partition assignment",
+			len(b), size))
 	}
 
-	return v
+	return map[string]any{fixedSchemaName(size): convertToFixedArray(b, size)}
 }
 
 // unwrapFixedValue reverses [convertFixedValue]: hamba/avro surfaces a
 // nullable fixed branch as map[string]any{"<fixed-name>": [N]byte}. We
 // flatten that back into the []byte slice shape Iceberg partition data
 // uses everywhere else.
+//
+// Note: hamba/avro decodes a fixed union branch as a Go [N]byte array (not a
+// []byte slice). reflect is the only portable way to copy out of an array
+// whose element count is not known at compile time.
 func unwrapFixedValue(v any, size int) any {
 	if unionMap, ok := v.(map[string]any); ok {
 		if inner, ok := unionMap[fixedSchemaName(size)]; ok {
