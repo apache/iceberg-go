@@ -260,8 +260,12 @@ func TestMetricsPrimitiveTypes(t *testing.T) {
 	require.NoError(t, err)
 
 	stats := format.DataFileStatsFromMeta(internal.Metadata(meta), getCollector(), mapping)
+	const sortOrderID = 7
 	df := stats.ToDataFile(tblMeta.CurrentSchema(), tblMeta.PartitionSpec(), "fake-path.parquet",
-		iceberg.ParquetFile, iceberg.EntryContentData, meta.GetSourceFileSize(), nil, 0)
+		iceberg.ParquetFile, iceberg.EntryContentData, meta.GetSourceFileSize(), nil, sortOrderID)
+
+	require.NotNil(t, df.SortOrderID())
+	assert.Equal(t, sortOrderID, *df.SortOrderID())
 
 	assert.Len(t, df.ValueCounts(), 15)
 	assert.Len(t, df.NullValueCounts(), 15)
