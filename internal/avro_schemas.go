@@ -51,6 +51,10 @@ func DecimalSchema(precision, scale int) avro.Schema {
 		DecimalRequiredBytes(precision), avro.NewDecimalLogicalSchema(precision, scale)))
 }
 
+func FixedSchema(size int) avro.Schema {
+	return Must(avro.NewFixedSchema(fmt.Sprintf("fixed_%d", size), "", size, nil))
+}
+
 var (
 	NullSchema           = avro.NewNullSchema()
 	BoolSchema           = avro.NewPrimitiveSchema(avro.Boolean, nil)

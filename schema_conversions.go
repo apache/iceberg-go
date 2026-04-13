@@ -54,10 +54,8 @@ func partitionTypeToAvroSchema(t *StructType) (avro.Schema, error) {
 		case BinaryType:
 			sc = internal.NullableSchema(internal.BinarySchema)
 		case FixedType:
-			// Currently the hamba/avro library couldn't resolve the [n]byte array types for fixed schemas in unions.
-			// https://github.com/hamba/avro/issues/571
-			// TODO: Create the proper Fixed Schema for Avro that can match the use case
-			sc = internal.NullableSchema(internal.BinarySchema)
+			fixedSchema := internal.FixedSchema(typ.Len())
+			sc = internal.NullableSchema(fixedSchema)
 		case DecimalType:
 			decimalSchema := internal.DecimalSchema(typ.precision, typ.scale)
 			sc = internal.NullableSchema(decimalSchema)

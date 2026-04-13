@@ -57,7 +57,8 @@ func partitionTypeToAvroSchemaNonNullable(t *StructType) (avro.Schema, error) {
 		case BinaryType:
 			sc = internal.BinarySchema
 		case FixedType:
-			sc = internal.BinarySchema
+			fixedSchema := internal.FixedSchema(typ.Len())
+			sc = fixedSchema
 		case DecimalType:
 			decimalSchema := internal.DecimalSchema(typ.precision, typ.scale)
 			sc = decimalSchema
@@ -69,6 +70,73 @@ func partitionTypeToAvroSchemaNonNullable(t *StructType) (avro.Schema, error) {
 	}
 
 	return avro.NewRecordSchema("r102", "", fields)
+}
+
+func TestPartitionTypeToAvroSchemaFixedType(t *testing.T) {
+	partitionType := &StructType{
+		FieldList: []NestedField{
+			{ID: 1, Name: "fixed4_col", Type: FixedType{len: 4}, Required: false},
+			{ID: 2, Name: "fixed16_col", Type: FixedType{len: 16}, Required: false},
+		},
+	}
+
+	schema, err := partitionTypeToAvroSchema(partitionType)
+	require.NoError(t, err)
+	require.NotNil(t, schema)
+
+	rec := schema.(*avro.RecordSchema)
+	require.Len(t, rec.Fields(), 2)
+
+	for _, f := range rec.Fields() {
+		union, ok := f.Type().(*avro.UnionSchema)
+		require.True(t, ok, "field %s should be a union schema", f.Name())
+		require.Len(t, union.Types(), 2)
+
+		fixed, ok := union.Types()[1].(*avro.FixedSchema)
+		require.True(t, ok, "non-null branch of field %s should be avro.FixedSchema, got %T", f.Name(), union.Types()[1])
+
+		switch f.Name() {
+		case "fixed4_col":
+			assert.Equal(t, 4, fixed.Size())
+		case "fixed16_col":
+			assert.Equal(t, 16, fixed.Size())
+		}
+	}
+
+	t.Run("round-trip non-nil fixed data", func(t *testing.T) {
+		data := map[string]any{
+			"fixed4_col":  map[string]any{"fixed_4": [4]byte{0x01, 0x02, 0x03, 0x04}},
+			"fixed16_col": map[string]any{"fixed_16": [16]byte{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f}},
+		}
+
+		encoded, err := avro.Marshal(schema, data)
+		require.NoError(t, err)
+		require.NotEmpty(t, encoded)
+
+		var decoded map[string]any
+		err = avro.Unmarshal(schema, encoded, &decoded)
+		require.NoError(t, err)
+
+		assert.Equal(t, data["fixed4_col"], decoded["fixed4_col"])
+		assert.Equal(t, data["fixed16_col"], decoded["fixed16_col"])
+	})
+
+	t.Run("round-trip nil fixed data", func(t *testing.T) {
+		data := map[string]any{
+			"fixed4_col":  nil,
+			"fixed16_col": nil,
+		}
+
+		encoded, err := avro.Marshal(schema, data)
+		require.NoError(t, err)
+
+		var decoded map[string]any
+		err = avro.Unmarshal(schema, encoded, &decoded)
+		require.NoError(t, err)
+
+		assert.Nil(t, decoded["fixed4_col"])
+		assert.Nil(t, decoded["fixed16_col"])
+	})
 }
 
 func TestPartitionTypeToAvroSchemaNullableAndNonNullable(t *testing.T) {
