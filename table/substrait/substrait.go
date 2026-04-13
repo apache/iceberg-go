@@ -299,20 +299,7 @@ func toSubstraitLiteralSet(typ iceberg.Type, lits []iceberg.Literal) expr.ListLi
 
 	out := make([]expr.Literal, len(lits))
 	for i, l := range lits {
-		// UUID literals must be represented as FixedBinary[16] rather than the
-		// UUID extension type when building the isIn values set. Arrow's isIn
-		// kernel constructs a BinaryMemoTable from the values array; when the
-		// array element type is a UUID extension type the memo table ends up in
-		// an inconsistent state (populated hash-table slots pointing into a
-		// released BinaryBuilder buffer), causing a slice-bounds panic at
-		// lookup time. Using raw FixedBinary[16] instead causes execIsIn to
-		// cast the UUID column to FixedBinary[16] before the membership check,
-		// which is equivalent and avoids the extension-type code path entirely.
-		if u, ok := l.(iceberg.UUIDLiteral); ok {
-			out[i] = toFixedLiteral(iceberg.FixedLiteral(u[:]))
-		} else {
-			out[i] = toSubstraitLiteral(typ, l)
-		}
+		out[i] = toSubstraitLiteral(typ, l)
 	}
 
 	return out
