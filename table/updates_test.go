@@ -37,6 +37,163 @@ func TestRemoveSnapshotsPostCommitSkipped(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestRemoveSnapshotsPostCommitDeletesStatisticsFiles(t *testing.T) {
+	// preTable has snapshot 1 with associated statistics and partition statistics files.
+	// postTable has no snapshots and no statistics (snapshot 1 has been expired).
+	// PostCommit must delete the statistics paths that belonged to the expired snapshot.
+	const preMeta = `{
+	  "format-version": 2,
+	  "table-uuid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+	  "location": "s3://bucket/table",
+	  "last-sequence-number": 1,
+	  "last-updated-ms": 1000,
+	  "last-column-id": 1,
+	  "current-schema-id": 0,
+	  "schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"x","required":true,"type":"long"}]}],
+	  "default-spec-id": 0,
+	  "partition-specs": [{"spec-id":0,"fields":[]}],
+	  "last-partition-id": 0,
+	  "default-sort-order-id": 0,
+	  "sort-orders": [{"order-id":0,"fields":[]}],
+	  "current-snapshot-id": 1,
+	  "snapshots": [{"snapshot-id":1,"timestamp-ms":1000,"sequence-number":1,"schema-id":0}],
+	  "snapshot-log": [],
+	  "metadata-log": [],
+	  "statistics": [{"snapshot-id":1,"statistics-path":"s3://bucket/stats/snap1.puffin","file-size-in-bytes":100,"file-footer-size-in-bytes":10,"blob-metadata":[]}],
+	  "partition-statistics": [{"snapshot-id":1,"statistics-path":"s3://bucket/stats/snap1-part.puffin","file-size-in-bytes":50}]
+	}`
+	const postMeta = `{
+	  "format-version": 2,
+	  "table-uuid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+	  "location": "s3://bucket/table",
+	  "last-sequence-number": 1,
+	  "last-updated-ms": 2000,
+	  "last-column-id": 1,
+	  "current-schema-id": 0,
+	  "schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"x","required":true,"type":"long"}]}],
+	  "default-spec-id": 0,
+	  "partition-specs": [{"spec-id":0,"fields":[]}],
+	  "last-partition-id": 0,
+	  "default-sort-order-id": 0,
+	  "sort-orders": [{"order-id":0,"fields":[]}],
+	  "snapshot-log": [],
+	  "metadata-log": []
+	}`
+
+	pre, err := ParseMetadataString(preMeta)
+	require.NoError(t, err)
+	post, err := ParseMetadataString(postMeta)
+	require.NoError(t, err)
+
+	// Pass *trackingIO to createTestTransaction — Go converts it to iceio.IO implicitly,
+	tio := newTrackingIO()
+	tio.files["s3://bucket/stats/snap1.puffin"] = []byte("puffin")
+	tio.files["s3://bucket/stats/snap1-part.puffin"] = []byte("puffin")
+
+	txn := createTestTransaction(t, tio, iceberg.NewPartitionSpec())
+	fsF := txn.tbl.fsF
+	preTable := New(Identifier{"ns", "tbl"}, pre, "metadata.json", fsF, nil)
+	postTable := New(Identifier{"ns", "tbl"}, post, "metadata.json", fsF, nil)
+
+	update := NewRemoveSnapshotsUpdate([]int64{1}, true)
+	err = update.PostCommit(context.Background(), preTable, postTable)
+	require.NoError(t, err)
+
+	assert.NotContains(t, tio.files, "s3://bucket/stats/snap1.puffin")
+	assert.NotContains(t, tio.files, "s3://bucket/stats/snap1-part.puffin")
+}
+
+func TestRemoveSnapshotsPostCommitPreservesStatisticsOfSurvivingSnapshots(t *testing.T) {
+	// pre:  snapshots 1 and 2, statistics for both.
+	// post: snapshot 1 expired, snapshot 2 kept with its statistics still present.
+	// PostCommit must delete only snap1's statistics files; snap2's must survive.
+	const preMeta = `{
+	  "format-version": 2,
+	  "table-uuid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+	  "location": "s3://bucket/table",
+	  "last-sequence-number": 2,
+	  "last-updated-ms": 1000,
+	  "last-column-id": 1,
+	  "current-schema-id": 0,
+	  "schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"x","required":true,"type":"long"}]}],
+	  "default-spec-id": 0,
+	  "partition-specs": [{"spec-id":0,"fields":[]}],
+	  "last-partition-id": 0,
+	  "default-sort-order-id": 0,
+	  "sort-orders": [{"order-id":0,"fields":[]}],
+	  "current-snapshot-id": 2,
+	  "snapshots": [
+	    {"snapshot-id":1,"timestamp-ms":1000,"sequence-number":1,"schema-id":0},
+	    {"snapshot-id":2,"timestamp-ms":2000,"sequence-number":2,"schema-id":0}
+	  ],
+	  "snapshot-log": [],
+	  "metadata-log": [],
+	  "statistics": [
+	    {"snapshot-id":1,"statistics-path":"s3://bucket/stats/snap1.puffin","file-size-in-bytes":100,"file-footer-size-in-bytes":10,"blob-metadata":[]},
+	    {"snapshot-id":2,"statistics-path":"s3://bucket/stats/snap2.puffin","file-size-in-bytes":100,"file-footer-size-in-bytes":10,"blob-metadata":[]}
+	  ],
+	  "partition-statistics": [
+	    {"snapshot-id":1,"statistics-path":"s3://bucket/stats/snap1-part.puffin","file-size-in-bytes":50},
+	    {"snapshot-id":2,"statistics-path":"s3://bucket/stats/snap2-part.puffin","file-size-in-bytes":50}
+	  ]
+	}`
+	const postMeta = `{
+	  "format-version": 2,
+	  "table-uuid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+	  "location": "s3://bucket/table",
+	  "last-sequence-number": 2,
+	  "last-updated-ms": 3000,
+	  "last-column-id": 1,
+	  "current-schema-id": 0,
+	  "schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"x","required":true,"type":"long"}]}],
+	  "default-spec-id": 0,
+	  "partition-specs": [{"spec-id":0,"fields":[]}],
+	  "last-partition-id": 0,
+	  "default-sort-order-id": 0,
+	  "sort-orders": [{"order-id":0,"fields":[]}],
+	  "current-snapshot-id": 2,
+	  "snapshots": [
+	    {"snapshot-id":2,"timestamp-ms":2000,"sequence-number":2,"schema-id":0}
+	  ],
+	  "snapshot-log": [],
+	  "metadata-log": [],
+	  "statistics": [
+	    {"snapshot-id":2,"statistics-path":"s3://bucket/stats/snap2.puffin","file-size-in-bytes":100,"file-footer-size-in-bytes":10,"blob-metadata":[]}
+	  ],
+	  "partition-statistics": [
+	    {"snapshot-id":2,"statistics-path":"s3://bucket/stats/snap2-part.puffin","file-size-in-bytes":50}
+	  ]
+	}`
+
+	pre, err := ParseMetadataString(preMeta)
+	require.NoError(t, err)
+	post, err := ParseMetadataString(postMeta)
+	require.NoError(t, err)
+
+	tio := newTrackingIO()
+	tio.files["s3://bucket/stats/snap1.puffin"] = []byte("puffin")
+	tio.files["s3://bucket/stats/snap1-part.puffin"] = []byte("puffin")
+	tio.files["s3://bucket/stats/snap2.puffin"] = []byte("puffin")
+	tio.files["s3://bucket/stats/snap2-part.puffin"] = []byte("puffin")
+
+	txn := createTestTransaction(t, tio, iceberg.NewPartitionSpec())
+	fsF := txn.tbl.fsF
+	preTable := New(Identifier{"ns", "tbl"}, pre, "metadata.json", fsF, nil)
+	postTable := New(Identifier{"ns", "tbl"}, post, "metadata.json", fsF, nil)
+
+	update := NewRemoveSnapshotsUpdate([]int64{1}, true)
+	err = update.PostCommit(context.Background(), preTable, postTable)
+	require.NoError(t, err)
+
+	// snap1's statistics must be deleted
+	assert.NotContains(t, tio.files, "s3://bucket/stats/snap1.puffin")
+	assert.NotContains(t, tio.files, "s3://bucket/stats/snap1-part.puffin")
+
+	// snap2's statistics must survive
+	assert.Contains(t, tio.files, "s3://bucket/stats/snap2.puffin")
+	assert.Contains(t, tio.files, "s3://bucket/stats/snap2-part.puffin")
+}
+
 func TestUnmarshalUpdates(t *testing.T) {
 	spec := iceberg.NewPartitionSpecID(3,
 		iceberg.PartitionField{
