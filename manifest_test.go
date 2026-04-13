@@ -1471,6 +1471,7 @@ func (m *ManifestTestSuite) equalityIDsSchemaIsInt(sc avro.Schema) {
 	for _, f := range entrySchema.Fields() {
 		if f.Name() == "data_file" {
 			dataFileSchema = f.Type().(*avro.RecordSchema)
+
 			break
 		}
 	}
@@ -1480,6 +1481,7 @@ func (m *ManifestTestSuite) equalityIDsSchemaIsInt(sc avro.Schema) {
 	for _, f := range dataFileSchema.Fields() {
 		if f.Name() == "equality_ids" {
 			eqIDsField = f
+
 			break
 		}
 	}
@@ -1490,6 +1492,7 @@ func (m *ManifestTestSuite) equalityIDsSchemaIsInt(sc avro.Schema) {
 	for _, ts := range unionSchema.Types() {
 		if ts.Type() == avro.Array {
 			arraySchema = ts.(*avro.ArraySchema)
+
 			break
 		}
 	}
