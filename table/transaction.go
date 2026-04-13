@@ -220,6 +220,15 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		opt(&cfg)
 	}
 
+	// Read table-level retention properties as the last-resort defaults,
+	// mirroring the Java implementation. When neither the ref nor the
+	// caller provides a value, fall back to the table property; when the
+	// table property is also absent use the constant default (math.MaxInt,
+	// meaning "keep everything").
+	propMaxRefAgeMs := int64(t.meta.props.GetInt(MaxRefAgeMsKey, MaxRefAgeMsDefault))
+	propMinSnapshotsToKeep := t.meta.props.GetInt(MinSnapshotsToKeepKey, MinSnapshotsToKeepDefault)
+	propMaxSnapshotAgeMs := int64(t.meta.props.GetInt(MaxSnapshotAgeMsKey, MaxSnapshotAgeMsDefault))
+
 	for refName, ref := range t.meta.refs {
 		// Assert that this ref's snapshot ID hasn't changed concurrently.
 		// This ensures we don't accidentally expire snapshots that are now
@@ -236,10 +245,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 			return err
 		}
 
-		maxRefAgeMs := cmp.Or(ref.MaxRefAgeMs, cfg.maxSnapshotAgeMs)
-		if maxRefAgeMs == nil {
-			return errors.New("cannot find a valid value for maxRefAgeMs")
-		}
+		maxRefAgeMs := cmp.Or(ref.MaxRefAgeMs, cfg.maxSnapshotAgeMs, &propMaxRefAgeMs)
 
 		refAge := nowMs - snap.TimestampMs
 		if refAge > *maxRefAgeMs && refName != MainBranch {
@@ -249,13 +255,9 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		}
 
 		var (
-			minSnapshotsToKeep = cmp.Or(ref.MinSnapshotsToKeep, cfg.minSnapshotsToKeep)
-			maxSnapshotAgeMs   = cmp.Or(ref.MaxSnapshotAgeMs, cfg.maxSnapshotAgeMs)
+			minSnapshotsToKeep = cmp.Or(ref.MinSnapshotsToKeep, cfg.minSnapshotsToKeep, &propMinSnapshotsToKeep)
+			maxSnapshotAgeMs   = cmp.Or(ref.MaxSnapshotAgeMs, cfg.maxSnapshotAgeMs, &propMaxSnapshotAgeMs)
 		)
-
-		if minSnapshotsToKeep == nil || maxSnapshotAgeMs == nil {
-			return errors.New("cannot find a valid value for minSnapshotsToKeep and maxSnapshotAgeMs")
-		}
 
 		if ref.SnapshotRefType != BranchRef {
 			snapsToKeep[ref.SnapshotID] = struct{}{}
