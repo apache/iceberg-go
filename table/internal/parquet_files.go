@@ -383,7 +383,7 @@ func (w *ParquetFileWriter) Close() (_ iceberg.DataFile, err error) {
 	stats := w.format.DataFileStatsFromMeta(filemeta, w.info.StatsCols, w.colMapping)
 	stats.EqualityFieldIDs = w.info.EqualityFieldIDs
 
-	return stats.ToDataFile(w.info.FileSchema, w.info.Spec, w.info.FileName, iceberg.ParquetFile, w.info.Content, w.counter.Count, w.partition), nil
+	return stats.ToDataFile(w.info.FileSchema, w.info.Spec, w.info.FileName, iceberg.ParquetFile, w.info.Content, w.counter.Count, w.partition, w.info.SortOrderID), nil
 }
 
 type decAsIntAgg[T int32 | int64] struct {

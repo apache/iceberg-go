@@ -205,6 +205,7 @@ func equalityDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 				FileCount:   fileCount,
 				Schema:      deleteSchema,
 				Batches:     batch,
+				SortOrderID: meta.defaultSortOrderID,
 			}
 			if !yield(t) {
 				return

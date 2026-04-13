@@ -1083,7 +1083,8 @@ type mockDataFile struct {
 	lowerBounds map[int][]byte
 	upperBounds map[int][]byte
 
-	specid int32
+	specid      int32
+	sortOrderID *int
 }
 
 func (m *mockDataFile) ContentType() iceberg.ManifestEntryContent { return m.contentType }
@@ -1102,7 +1103,7 @@ func (m *mockDataFile) UpperBoundValues() map[int][]byte          { return m.upp
 func (*mockDataFile) KeyMetadata() []byte                         { return nil }
 func (*mockDataFile) SplitOffsets() []int64                       { return nil }
 func (*mockDataFile) EqualityFieldIDs() []int                     { return nil }
-func (*mockDataFile) SortOrderID() *int                           { return nil }
+func (m *mockDataFile) SortOrderID() *int                         { return m.sortOrderID }
 func (m *mockDataFile) SpecID() int32                             { return m.specid }
 func (*mockDataFile) FirstRowID() *int64                          { return nil }
 func (*mockDataFile) ReferencedDataFile() *string                 { return nil }

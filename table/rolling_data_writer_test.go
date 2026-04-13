@@ -216,6 +216,80 @@ func (s *RollingDataWriterTestSuite) TestBytesWrittenNoDoubleCountAcrossRowGroup
 		"DataFile.FileSizeBytes should match actual file size on disk")
 }
 
+// TestWriterFactoryPropagatesSortOrderID covers the standard data write path:
+// the rolling data writer must stamp each emitted DataFile with the table's
+// default sort order id, mirroring how the partitioned fanout writer uses
+// writerFactory under the hood.
+func (s *RollingDataWriterTestSuite) TestWriterFactoryPropagatesSortOrderID() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	icebergSchema, err := ArrowSchemaToIcebergWithFreshIDs(arrSchema, false)
+	s.Require().NoError(err)
+
+	spec := iceberg.NewPartitionSpec()
+	sortOrder, err := NewSortOrder(1, []SortField{{
+		SourceIDs: []int{icebergSchema.Fields()[0].ID},
+		Direction: SortASC,
+		Transform: iceberg.IdentityTransform{},
+		NullOrder: NullsFirst,
+	}})
+	s.Require().NoError(err)
+
+	loc := filepath.ToSlash(s.T().TempDir())
+	meta, err := NewMetadata(icebergSchema, &spec, UnsortedSortOrder, loc, iceberg.Properties{})
+	s.Require().NoError(err)
+	metaBuilder, err := MetadataBuilderFromBase(meta, "")
+	s.Require().NoError(err)
+	s.Require().NoError(metaBuilder.AddSortOrder(&sortOrder))
+	// -1 means "use the sort order that was just added". AddSortOrder
+	// re-maps the caller-supplied ID, so we can't refer to it by literal.
+	s.Require().NoError(metaBuilder.SetDefaultSortOrderID(-1))
+	builtMeta, err := metaBuilder.Build()
+	s.Require().NoError(err)
+	expectedSortOrderID := builtMeta.DefaultSortOrder()
+	s.Require().NotEqual(UnsortedSortOrderID, expectedSortOrderID, "sanity: sort order id should be non-zero")
+
+	writeUUID := uuid.New()
+	args := recordWritingArgs{
+		sc:        arrSchema,
+		fs:        iceio.LocalFS{},
+		writeUUID: &writeUUID,
+		counter: func(yield func(int) bool) {
+			for i := 0; ; i++ {
+				if !yield(i) {
+					break
+				}
+			}
+		},
+	}
+
+	factory, err := newWriterFactory(loc, args, metaBuilder, icebergSchema, 1024*1024)
+	s.Require().NoError(err)
+	defer factory.closeAll()
+
+	outputCh := make(chan iceberg.DataFile, 10)
+	writer := factory.newRollingDataWriter(s.ctx, nil, "", nil, outputCh)
+
+	record := s.buildRecord(arrSchema, 5)
+	defer record.Release()
+
+	s.Require().NoError(writer.Add(record))
+	s.Require().NoError(writer.closeAndWait())
+	close(outputCh)
+
+	var dataFiles []iceberg.DataFile
+	for df := range outputCh {
+		dataFiles = append(dataFiles, df)
+	}
+
+	s.Require().Len(dataFiles, 1)
+	s.Require().NotNil(dataFiles[0].SortOrderID(), "SortOrderID must be set on the emitted DataFile")
+	s.Equal(expectedSortOrderID, *dataFiles[0].SortOrderID())
+}
+
 func (s *RollingDataWriterTestSuite) TestBytesWrittenReflectsCompressedSize() {
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},

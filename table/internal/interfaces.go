@@ -117,6 +117,7 @@ type WriteFileInfo struct {
 	WriteProps       any
 	Content          iceberg.ManifestEntryContent
 	EqualityFieldIDs []int
+	SortOrderID      int
 }
 
 type tablePropertiesContextKey struct{}

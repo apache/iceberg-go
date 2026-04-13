@@ -236,7 +236,7 @@ func (d *DataFileStatistics) PartitionValue(field iceberg.PartitionField, sc *ic
 	return lowerT.Val.Any()
 }
 
-func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.PartitionSpec, path string, format iceberg.FileFormat, content iceberg.ManifestEntryContent, filesize int64, partitionValues map[int]any) iceberg.DataFile {
+func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.PartitionSpec, path string, format iceberg.FileFormat, content iceberg.ManifestEntryContent, filesize int64, partitionValues map[int]any, sortOrderID int) iceberg.DataFile {
 	var fieldIDToPartitionData map[int]any
 	fieldIDToLogicalType := make(map[int]avro.LogicalType)
 	fieldIDToFixedSize := make(map[int]int)
@@ -314,6 +314,8 @@ func (d *DataFileStatistics) ToDataFile(schema *iceberg.Schema, spec iceberg.Par
 	if len(d.EqualityFieldIDs) > 0 {
 		bldr.EqualityFieldIDs(d.EqualityFieldIDs)
 	}
+
+	bldr.SortOrderID(sortOrderID)
 
 	return bldr.Build()
 }

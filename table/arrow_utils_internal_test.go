@@ -200,7 +200,7 @@ func (suite *FileStatsMetricsSuite) getDataFile(meta iceberg.Properties, writeSt
 	stats := format.DataFileStatsFromMeta(fileMeta, collector, mapping)
 
 	return stats.ToDataFile(tableMeta.CurrentSchema(), tableMeta.PartitionSpec(), "fake-path.parquet",
-		iceberg.ParquetFile, iceberg.EntryContentData, fileMeta.GetSourceFileSize(), nil)
+		iceberg.ParquetFile, iceberg.EntryContentData, fileMeta.GetSourceFileSize(), nil, tableMeta.SortOrder().OrderID())
 }
 
 func (suite *FileStatsMetricsSuite) TestRecordCount() {
