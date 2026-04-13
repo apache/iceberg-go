@@ -1371,7 +1371,7 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 				}
 			}()
 
-			dataFiles[i] = fileToDataFile(ctx, fileIO, filePath, currentSchema, currentSpec, meta.props)
+			dataFiles[i] = fileToDataFile(ctx, fileIO, filePath, currentSchema, currentSpec, meta.defaultSortOrderID, meta.props)
 
 			return nil
 		})
@@ -1384,7 +1384,7 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 	return dataFiles, nil
 }
 
-func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, currentSchema *iceberg.Schema, currentSpec iceberg.PartitionSpec, props iceberg.Properties) iceberg.DataFile {
+func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, currentSchema *iceberg.Schema, currentSpec iceberg.PartitionSpec, sortOrderID int, props iceberg.Properties) iceberg.DataFile {
 	format := tblutils.FormatFromFileName(filePath)
 	rdr := must(format.Open(ctx, fileIO, filePath))
 	defer rdr.Close()
@@ -1418,7 +1418,7 @@ func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, curre
 		}
 	}
 
-	return statistics.ToDataFile(currentSchema, currentSpec, filePath, iceberg.ParquetFile, iceberg.EntryContentData, rdr.SourceFileSize(), partitionValues)
+	return statistics.ToDataFile(currentSchema, currentSpec, filePath, iceberg.ParquetFile, iceberg.EntryContentData, rdr.SourceFileSize(), partitionValues, sortOrderID)
 }
 
 func recordNBytes(rec arrow.RecordBatch) (total int64) {
@@ -1617,6 +1617,7 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 					FileCount:   fileCount,
 					Schema:      iceberg.PositionalDeleteSchema,
 					Batches:     batch,
+					SortOrderID: meta.defaultSortOrderID,
 				}
 				if !yield(t) {
 					return

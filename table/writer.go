@@ -154,6 +154,7 @@ func (w *defaultDataFileWriter) writeFile(ctx context.Context, partitionValues m
 		WriteProps:       w.format.GetWriteProperties(w.props),
 		Spec:             *currentSpec,
 		EqualityFieldIDs: w.equalityFieldIDs,
+		SortOrderID:      task.SortOrderID,
 	}, batches)
 }
 

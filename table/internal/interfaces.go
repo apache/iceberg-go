@@ -117,6 +117,10 @@ type WriteFileInfo struct {
 	WriteProps       any
 	Content          iceberg.ManifestEntryContent
 	EqualityFieldIDs []int
+	// SortOrderID is the sort order id used when writing the data file.
+	// Used to populate the manifest entry's sort_order_id. Defaults to
+	// table.UnsortedSortOrderID (0) for unsorted writes.
+	SortOrderID int
 }
 
 type tablePropertiesContextKey struct{}

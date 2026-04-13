@@ -54,6 +54,7 @@ type writerFactory struct {
 	format           tblutils.FileFormat
 	content          iceberg.ManifestEntryContent
 	equalityFieldIDs []int
+	sortOrderID      int
 
 	writers               sync.Map
 	partitionLocProviders sync.Map
@@ -159,6 +160,7 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		format:         format,
 		nextCount:      nextCount,
 		stopCount:      stopCount,
+		sortOrderID:    meta.defaultSortOrderID,
 	}
 	for _, apply := range opts {
 		apply(f)
@@ -207,6 +209,7 @@ func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string
 		Spec:             w.currentSpec,
 		Content:          w.content,
 		EqualityFieldIDs: w.equalityFieldIDs,
+		SortOrderID:      w.sortOrderID,
 	}, w.arrowSchema)
 }
 
