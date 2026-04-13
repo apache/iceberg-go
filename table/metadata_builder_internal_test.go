@@ -694,6 +694,58 @@ func TestRemoveSnapshotsPrunesStatistics(t *testing.T) {
 	require.Len(t, slices.Collect(rebuilt.PartitionStatistics()), 1)
 }
 
+// TestBuildPreservesStatistics pins the buildCommonMetadata fix: a plain
+// MetadataBuilderFromBase → Build() round-trip must preserve StatisticsList
+// and PartitionStatsList without any RemoveSnapshots call.  Before the fix,
+// Build() silently dropped all statistics on every builder operation.
+func TestBuildPreservesStatistics(t *testing.T) {
+	const snapID = int64(42)
+	currentID := snapID
+	lastPartitionID := 0
+	commonMeta := commonMetadata{
+		FormatVersion:   2,
+		UUID:            uuid.New(),
+		Loc:             "s3://test/table",
+		LastUpdatedMS:   1000,
+		LastColumnId:    1,
+		SchemaList:      []*iceberg.Schema{iceberg.NewSchema(0)},
+		CurrentSchemaID: 0,
+		Specs:           []iceberg.PartitionSpec{*iceberg.UnpartitionedSpec},
+		DefaultSpecID:   0,
+		LastPartitionID: &lastPartitionID,
+		Props:           iceberg.Properties{},
+		SnapshotList: []Snapshot{
+			{SnapshotID: snapID, TimestampMs: 1001, ManifestList: "/snap.avro"},
+		},
+		CurrentSnapshotID:  &currentID,
+		SnapshotLog:        []SnapshotLogEntry{{SnapshotID: snapID, TimestampMs: 1001}},
+		SortOrderList:      []SortOrder{UnsortedSortOrder},
+		DefaultSortOrderID: 0,
+		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: snapID, SnapshotRefType: BranchRef}},
+		StatisticsList: []StatisticsFile{
+			{SnapshotID: snapID, StatisticsPath: "s3://stats/snap.puffin"},
+		},
+		PartitionStatsList: []PartitionStatisticsFile{
+			{SnapshotID: snapID, StatisticsPath: "s3://partstats/snap.parquet"},
+		},
+	}
+	meta := &metadataV2{commonMetadata: commonMeta}
+
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+
+	// No mutations — just rebuild.
+	rebuilt, err := builder.Build()
+	require.NoError(t, err)
+
+	require.Len(t, slices.Collect(rebuilt.Statistics()), 1,
+		"Build() must not silently drop StatisticsList")
+	require.Len(t, slices.Collect(rebuilt.PartitionStatistics()), 1,
+		"Build() must not silently drop PartitionStatsList")
+	require.Equal(t, snapID, slices.Collect(rebuilt.Statistics())[0].SnapshotID)
+	require.Equal(t, snapID, slices.Collect(rebuilt.PartitionStatistics())[0].SnapshotID)
+}
+
 func TestExpireMetadataLog(t *testing.T) {
 	builder1 := builderWithoutChanges(2)
 	meta, err := builder1.Build()
