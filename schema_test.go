@@ -934,6 +934,98 @@ func TestIndexByNameDuplicateFieldNames(t *testing.T) {
 	assert.ErrorContains(t, err, "multiple fields for name col")
 }
 
+func TestNewSchemaPanicsOnDuplicateFieldIDs(t *testing.T) {
+	typ := iceberg.PrimitiveTypes.Int32
+
+	// Duplicate at the top level.
+	assert.PanicsWithError(t,
+		"invalid schema: multiple fields for id 1: foo and bar",
+		func() {
+			iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "foo", Type: typ},
+				iceberg.NestedField{ID: 1, Name: "bar", Type: typ},
+			)
+		},
+	)
+
+	// Duplicate inside a nested struct — the case from the bug report.
+	assert.PanicsWithError(t,
+		"invalid schema: multiple fields for id 6: inner_op and inner_req",
+		func() {
+			iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+				iceberg.NestedField{
+					ID:   5,
+					Name: "struct",
+					Type: &iceberg.StructType{
+						FieldList: []iceberg.NestedField{
+							{ID: 6, Name: "inner_op", Type: typ},
+							{ID: 6, Name: "inner_req", Type: typ, Required: true},
+						},
+					},
+					Required: true,
+				},
+			)
+		},
+	)
+
+	// List element ID collides with a top-level field ID.
+	assert.PanicsWithError(t,
+		"invalid schema: multiple fields for id 2: data and element",
+		func() {
+			iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+				iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String},
+				iceberg.NestedField{
+					ID:   3,
+					Name: "items",
+					Type: &iceberg.ListType{ElementID: 2, Element: iceberg.PrimitiveTypes.Int32, ElementRequired: false},
+				},
+			)
+		},
+	)
+
+	// Map key or value ID collides with an existing field ID.
+	assert.PanicsWithError(t,
+		"invalid schema: multiple fields for id 1: id and key",
+		func() {
+			iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+				iceberg.NestedField{
+					ID:   2,
+					Name: "m",
+					Type: &iceberg.MapType{KeyID: 1, ValueID: 3, KeyType: iceberg.PrimitiveTypes.String, ValueType: iceberg.PrimitiveTypes.Int32},
+				},
+			)
+		},
+	)
+
+	// Deeply nested: struct inside a list inside a map, duplicate at depth.
+	assert.PanicsWithError(t,
+		"invalid schema: multiple fields for id 1: id and deep",
+		func() {
+			innerStruct := &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 1, Name: "deep", Type: iceberg.PrimitiveTypes.String},
+				},
+			}
+			iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+				iceberg.NestedField{
+					ID:   2,
+					Name: "m",
+					Type: &iceberg.MapType{
+						KeyID:     3,
+						ValueID:   4,
+						KeyType:   iceberg.PrimitiveTypes.String,
+						ValueType: &iceberg.ListType{ElementID: 5, Element: innerStruct, ElementRequired: false},
+					},
+				},
+			)
+		},
+	)
+}
+
 func TestSanitizeColumnNamesEmptyFieldName(t *testing.T) {
 	sc := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "", Type: iceberg.PrimitiveTypes.String, Required: false},
