@@ -475,6 +475,35 @@ func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table,
 		}
 	}
 
+	// Collect statistics files belonging to the removed snapshots so they
+	// can be deleted from object storage. Without this, statistics files
+	// for expired snapshots remain in storage forever, leaking space.
+	removedSnapshotIDs := make(map[int64]struct{}, len(u.SnapshotIDs))
+	for _, id := range u.SnapshotIDs {
+		removedSnapshotIDs[id] = struct{}{}
+	}
+
+	for stat := range preTable.Metadata().Statistics() {
+		if _, ok := removedSnapshotIDs[stat.SnapshotID]; ok {
+			filesToDelete[stat.StatisticsPath] = struct{}{}
+		}
+	}
+
+	for stat := range preTable.Metadata().PartitionStatistics() {
+		if _, ok := removedSnapshotIDs[stat.SnapshotID]; ok {
+			filesToDelete[stat.StatisticsPath] = struct{}{}
+		}
+	}
+
+	// Statistics that still exist in postTable (e.g. because of overlap)
+	// must not be deleted.
+	for stat := range postTable.Metadata().Statistics() {
+		delete(filesToDelete, stat.StatisticsPath)
+	}
+	for stat := range postTable.Metadata().PartitionStatistics() {
+		delete(filesToDelete, stat.StatisticsPath)
+	}
+
 	for _, snap := range postTable.Metadata().Snapshots() {
 		mans, err := snap.Manifests(prefs)
 		if err != nil {
