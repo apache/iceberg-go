@@ -57,7 +57,11 @@ func partitionTypeToAvroSchemaNonNullable(t *StructType) (avro.Schema, error) {
 		case BinaryType:
 			sc = internal.BinarySchema
 		case FixedType:
-			sc = internal.BinarySchema
+			fixedSchema, err := avro.NewFixedSchema(fixedSchemaName(typ.len), "", typ.len, nil)
+			if err != nil {
+				return nil, fmt.Errorf("fixed partition column %q: %w", f.Name, err)
+			}
+			sc = fixedSchema
 		case DecimalType:
 			decimalSchema := internal.DecimalSchema(typ.precision, typ.scale)
 			sc = decimalSchema
@@ -146,4 +150,53 @@ func TestPartitionTypeToAvroSchemaNullableAndNonNullable(t *testing.T) {
 		require.Error(t, err, "expected marshal to fail when values are nil for non-nullable schema")
 		assert.Empty(t, encoded)
 	})
+}
+
+// TestFixedPartitionColumnAvroSchema exercises the full encode/decode path
+// for a FixedType partition column. Before #845 was fixed the partition
+// schema emitted Avro "bytes" (a spec violation); the round-trip here
+// pins the behaviour to a true Avro "fixed" branch.
+func TestFixedPartitionColumnAvroSchema(t *testing.T) {
+	partitionType := &StructType{
+		FieldList: []NestedField{
+			{ID: 1, Name: "fixed_col", Type: FixedType{len: 8}, Required: false},
+		},
+	}
+
+	sc, err := partitionTypeToAvroSchema(partitionType)
+	require.NoError(t, err)
+
+	// The partition schema must describe the column as Avro "fixed", not
+	// "bytes" — that is the entire point of #845. Introspect the union
+	// branch and verify both the type and the size.
+	recSchema, ok := sc.(*avro.RecordSchema)
+	require.True(t, ok)
+	require.Len(t, recSchema.Fields(), 1)
+	union, ok := recSchema.Fields()[0].Type().(*avro.UnionSchema)
+	require.True(t, ok, "fixed partition column must be a nullable union")
+	var fixedSchema *avro.FixedSchema
+	for _, branch := range union.Types() {
+		if fs, ok := branch.(*avro.FixedSchema); ok {
+			fixedSchema = fs
+
+			break
+		}
+	}
+	require.NotNil(t, fixedSchema, "expected a fixed branch in the nullable union")
+	assert.Equal(t, 8, fixedSchema.Size())
+	assert.Equal(t, fixedSchemaName(8), fixedSchema.Name())
+
+	payload := []byte("abcdefgh")
+	encoded, err := avro.Marshal(sc, map[string]any{
+		"fixed_col": convertFixedValue(payload, 8),
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, encoded)
+
+	var decoded map[string]any
+	require.NoError(t, avro.Unmarshal(sc, encoded, &decoded))
+	unwrapped := unwrapFixedValue(decoded["fixed_col"], 8)
+	got, ok := unwrapped.([]byte)
+	require.True(t, ok, "unwrapped fixed partition value should be []byte, got %T", unwrapped)
+	assert.Equal(t, payload, got)
 }

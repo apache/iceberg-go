@@ -407,7 +407,7 @@ func (m *manifestFile) FetchEntries(fs iceio.IO, discardDeleted bool) ([]Manifes
 	return fetchManifestEntries(m, fs, discardDeleted)
 }
 
-func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType, map[int]int) {
+func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType, map[int]int, map[int]int) {
 	getField := func(rs *avro.RecordSchema, name string) *avro.Field {
 		for _, f := range rs.Fields() {
 			if f.Name() == name {
@@ -421,6 +421,7 @@ func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType, ma
 	result := make(map[string]int)
 	logicalTypes := make(map[int]avro.LogicalType)
 	fixedSizes := make(map[int]int)
+	fixedPartSizes := make(map[int]int)
 
 	entryField := getField(sc.(*avro.RecordSchema), "data_file")
 	partitionField := getField(entryField.Type().(*avro.RecordSchema), "partition")
@@ -444,21 +445,29 @@ func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType, ma
 		}
 		if ps, ok := avroTyp.(*avro.PrimitiveSchema); ok && ps.Logical() != nil {
 			logicalTypes[fid] = ps.Logical().Type()
-		} else if fs, ok := avroTyp.(*avro.FixedSchema); ok && fs.Logical() != nil {
-			logicalTypes[int(fid)] = fs.Logical().Type()
-			if decimalLogical, ok := fs.Logical().(*avro.DecimalLogicalSchema); ok {
-				fixedSizes[int(fid)] = decimalLogical.Scale()
+		} else if fs, ok := avroTyp.(*avro.FixedSchema); ok {
+			if fs.Logical() != nil {
+				logicalTypes[int(fid)] = fs.Logical().Type()
+				if decimalLogical, ok := fs.Logical().(*avro.DecimalLogicalSchema); ok {
+					fixedSizes[int(fid)] = decimalLogical.Scale()
+				}
+			} else {
+				// FixedType partition column (no logical type): record its
+				// byte length so encode/decode can wrap/unwrap the union
+				// branch correctly.
+				fixedPartSizes[int(fid)] = fs.Size()
 			}
 		}
 	}
 
-	return result, logicalTypes, fixedSizes
+	return result, logicalTypes, fixedSizes, fixedPartSizes
 }
 
 type hasFieldToIDMap interface {
 	setFieldNameToIDMap(map[string]int)
 	setFieldIDToLogicalTypeMap(map[int]avro.LogicalType)
 	setFieldIDToFixedSizeMap(map[int]int)
+	setFieldIDToFixedPartSizeMap(map[int]int)
 }
 
 func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) (_ []ManifestEntry, err error) {
@@ -586,9 +595,10 @@ type ManifestReader struct {
 	formatVersion int
 	isFallback    bool
 	content       ManifestContent
-	fieldNameToID map[string]int
-	fieldIDToType map[int]avro.LogicalType
-	fieldIDToSize map[int]int
+	fieldNameToID          map[string]int
+	fieldIDToType          map[int]avro.LogicalType
+	fieldIDToSize          map[int]int
+	fieldIDToFixedPartSize map[int]int
 
 	// The rest are lazily populated, on demand. Most readers
 	// will likely only try to load the entries.
@@ -653,17 +663,18 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 			}
 		}
 	}
-	fieldNameToID, fieldIDToType, fieldIDToSize := getFieldIDMap(sc)
+	fieldNameToID, fieldIDToType, fieldIDToSize, fieldIDToFixedPartSize := getFieldIDMap(sc)
 
 	return &ManifestReader{
-		dec:           dec,
-		file:          file,
-		formatVersion: formatVersion,
-		isFallback:    isFallback,
-		content:       content,
-		fieldNameToID: fieldNameToID,
-		fieldIDToType: fieldIDToType,
-		fieldIDToSize: fieldIDToSize,
+		dec:                     dec,
+		file:                    file,
+		formatVersion:           formatVersion,
+		isFallback:              isFallback,
+		content:                 content,
+		fieldNameToID:           fieldNameToID,
+		fieldIDToType:           fieldIDToType,
+		fieldIDToSize:           fieldIDToSize,
+		fieldIDToFixedPartSize:  fieldIDToFixedPartSize,
 	}, nil
 }
 
@@ -769,6 +780,7 @@ func (c *ManifestReader) ReadEntry() (ManifestEntry, error) {
 		fieldToIDMap.setFieldNameToIDMap(c.fieldNameToID)
 		fieldToIDMap.setFieldIDToLogicalTypeMap(c.fieldIDToType)
 		fieldToIDMap.setFieldIDToFixedSizeMap(c.fieldIDToSize)
+		fieldToIDMap.setFieldIDToFixedPartSizeMap(c.fieldIDToFixedPartSize)
 	}
 
 	return tmp, nil
@@ -1065,8 +1077,9 @@ type ManifestWriter struct {
 	schema  *Schema
 	content ManifestContent
 
-	partFieldNameToID map[string]int
-	partFieldIDToType map[int]avro.LogicalType
+	partFieldNameToID          map[string]int
+	partFieldIDToType          map[int]avro.LogicalType
+	partFieldIDToFixedPartSize map[int]int
 
 	snapshotID    int64
 	addedFiles    int32
@@ -1113,20 +1126,21 @@ func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *S
 		return nil, err
 	}
 
-	nameToID, idToType, _ := getFieldIDMap(fileSchema)
+	nameToID, idToType, _, idToFixedPartSize := getFieldIDMap(fileSchema)
 
 	w := &ManifestWriter{
-		impl:              impl,
-		version:           version,
-		output:            out,
-		spec:              spec,
-		content:           ManifestContentData,
-		schema:            schema,
-		partFieldNameToID: nameToID,
-		partFieldIDToType: idToType,
-		snapshotID:        snapshotID,
-		minSeqNum:         -1,
-		partitions:        make([]map[int]any, 0),
+		impl:                       impl,
+		version:                    version,
+		output:                     out,
+		spec:                       spec,
+		content:                    ManifestContentData,
+		schema:                     schema,
+		partFieldNameToID:          nameToID,
+		partFieldIDToType:          idToType,
+		partFieldIDToFixedPartSize: idToFixedPartSize,
+		snapshotID:                 snapshotID,
+		minSeqNum:                  -1,
+		partitions:                 make([]map[int]any, 0),
 	}
 
 	for _, apply := range opts {
@@ -1264,10 +1278,11 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 	if setter, ok := entry.DataFile().(hasFieldToIDMap); ok {
 		setter.setFieldNameToIDMap(w.partFieldNameToID)
 		setter.setFieldIDToLogicalTypeMap(w.partFieldIDToType)
+		setter.setFieldIDToFixedPartSizeMap(w.partFieldIDToFixedPartSize)
 	}
 
 	w.partitions = append(w.partitions, entry.Data.Partition())
-	partitionData := avroPartitionData(entry.Data.Partition(), w.partFieldIDToType)
+	partitionData := avroPartitionData(entry.Data.Partition(), w.partFieldIDToType, w.partFieldIDToFixedPartSize)
 
 	if dataFile, ok := entry.DataFile().(*dataFile); ok {
 		convertedPartitionData := make(map[string]any)
@@ -1637,17 +1652,61 @@ func mapToAvroColMap[K comparable, V any](m map[K]V) *[]colMap[K, V] {
 	return &out
 }
 
-func avroPartitionData(input map[int]any, logicalTypes map[int]avro.LogicalType) map[int]any {
+func avroPartitionData(input map[int]any, logicalTypes map[int]avro.LogicalType, fixedPartSizes map[int]int) map[int]any {
 	out := make(map[int]any)
 	for k, v := range input {
 		if logical, ok := logicalTypes[k]; ok {
 			out[k] = convertLogicalTypeValue(v, logical)
+		} else if size, ok := fixedPartSizes[k]; ok {
+			out[k] = convertFixedValue(v, size)
 		} else {
 			out[k] = v
 		}
 	}
 
 	return out
+}
+
+// convertFixedValue wraps a FixedType partition value for hamba/avro's
+// union encoder. The encoder cannot dispatch a bare [N]byte array inside
+// a union (see https://github.com/hamba/avro/issues/571), but it does
+// accept the explicit {"<fixed-name>": [N]byte} form used elsewhere for
+// UUID and decimal fixed branches. Nil (the other union arm) is passed
+// through untouched.
+func convertFixedValue(v any, size int) any {
+	if v == nil {
+		return map[string]any{"null": nil}
+	}
+
+	switch b := v.(type) {
+	case []byte:
+		return map[string]any{fixedSchemaName(size): convertToFixedArray(padOrTruncateBytes(b, size), size)}
+	case FixedLiteral:
+		return map[string]any{fixedSchemaName(size): convertToFixedArray(padOrTruncateBytes([]byte(b), size), size)}
+	}
+
+	return v
+}
+
+// unwrapFixedValue reverses [convertFixedValue]: hamba/avro surfaces a
+// nullable fixed branch as map[string]any{"<fixed-name>": [N]byte}. We
+// flatten that back into the []byte slice shape Iceberg partition data
+// uses everywhere else.
+func unwrapFixedValue(v any, size int) any {
+	if unionMap, ok := v.(map[string]any); ok {
+		if inner, ok := unionMap[fixedSchemaName(size)]; ok {
+			v = inner
+		}
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Array && rv.Type().Elem().Kind() == reflect.Uint8 {
+		out := make([]byte, rv.Len())
+		reflect.Copy(reflect.ValueOf(out), rv)
+
+		return out
+	}
+
+	return v
 }
 
 func convertLogicalTypeValue(v any, logicalType avro.LogicalType) any {
@@ -1783,10 +1842,11 @@ type dataFile struct {
 	upperBoundMap  map[int][]byte
 
 	// used for partition retrieval
-	fieldNameToID          map[string]int
-	fieldIDToLogicalType   map[int]avro.LogicalType
-	fieldIDToPartitionData map[int]any
-	fieldIDToFixedSize     map[int]int
+	fieldNameToID           map[string]int
+	fieldIDToLogicalType    map[int]avro.LogicalType
+	fieldIDToPartitionData  map[int]any
+	fieldIDToFixedSize      map[int]int
+	fieldIDToFixedPartSize  map[int]int
 
 	specID   int32
 	initMaps sync.Once
@@ -1815,6 +1875,9 @@ func (d *dataFile) initializeMapData() {
 }
 
 func (d *dataFile) convertAvroValueToIcebergType(v any, fieldID int) any {
+	if size, ok := d.fieldIDToFixedPartSize[fieldID]; ok {
+		return unwrapFixedValue(v, size)
+	}
 	if logicalType, ok := d.fieldIDToLogicalType[fieldID]; ok {
 		switch logicalType {
 		case avro.Date:
@@ -1886,7 +1949,8 @@ func (d *dataFile) setFieldNameToIDMap(m map[string]int) { d.fieldNameToID = m }
 func (d *dataFile) setFieldIDToLogicalTypeMap(m map[int]avro.LogicalType) {
 	d.fieldIDToLogicalType = m
 }
-func (d *dataFile) setFieldIDToFixedSizeMap(m map[int]int) { d.fieldIDToFixedSize = m }
+func (d *dataFile) setFieldIDToFixedSizeMap(m map[int]int)     { d.fieldIDToFixedSize = m }
+func (d *dataFile) setFieldIDToFixedPartSizeMap(m map[int]int) { d.fieldIDToFixedPartSize = m }
 
 func (d *dataFile) ContentType() ManifestEntryContent { return d.Content }
 func (d *dataFile) FilePath() string                  { return d.Path }

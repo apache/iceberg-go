@@ -24,6 +24,15 @@ import (
 	"github.com/hamba/avro/v2"
 )
 
+// fixedSchemaName returns the deterministic Avro named-type used for
+// Iceberg FixedType partition columns of the given byte length. Using a
+// stable, length-qualified name makes the union encoding self-describing
+// (hamba/avro encodes fixed branches in a union as {"<name>": [N]byte})
+// and keeps the schema spec-compliant.
+func fixedSchemaName(size int) string {
+	return fmt.Sprintf("fixed_%d", size)
+}
+
 func partitionTypeToAvroSchema(t *StructType) (avro.Schema, error) {
 	fields := make([]*avro.Field, len(t.FieldList))
 	for i, f := range t.FieldList {
@@ -54,10 +63,11 @@ func partitionTypeToAvroSchema(t *StructType) (avro.Schema, error) {
 		case BinaryType:
 			sc = internal.NullableSchema(internal.BinarySchema)
 		case FixedType:
-			// Currently the hamba/avro library couldn't resolve the [n]byte array types for fixed schemas in unions.
-			// https://github.com/hamba/avro/issues/571
-			// TODO: Create the proper Fixed Schema for Avro that can match the use case
-			sc = internal.NullableSchema(internal.BinarySchema)
+			fixedSchema, err := avro.NewFixedSchema(fixedSchemaName(typ.len), "", typ.len, nil)
+			if err != nil {
+				return nil, fmt.Errorf("fixed partition column %q: %w", f.Name, err)
+			}
+			sc = internal.NullableSchema(fixedSchema)
 		case DecimalType:
 			decimalSchema := internal.DecimalSchema(typ.precision, typ.scale)
 			sc = internal.NullableSchema(decimalSchema)
