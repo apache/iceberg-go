@@ -80,8 +80,7 @@ func NewSchemaWithIdentifiers(id int, identifierIDs []int, fields ...NestedField
 	// We use a lightweight walker that only inspects IDs and does not
 	// dereference field types, so schemas with nil types (used in some
 	// tests) are not affected.
-	seen := make(map[int]string)
-	if err := checkDuplicateFieldIDs(seen, fields); err != nil {
+	if err := checkDuplicateFieldIDs(nil, fields); err != nil {
 		panic(err)
 	}
 
@@ -89,8 +88,13 @@ func NewSchemaWithIdentifiers(id int, identifierIDs []int, fields ...NestedField
 }
 
 // checkDuplicateFieldIDs recursively walks a list of fields and returns an
-// error if any field ID appears more than once anywhere in the tree.
+// error if any field ID appears more than once anywhere in the tree. The
+// seen map is lazily created on the first call so the top-level caller can
+// pass nil.
 func checkDuplicateFieldIDs(seen map[int]string, fields []NestedField) error {
+	if seen == nil {
+		seen = make(map[int]string)
+	}
 	for _, f := range fields {
 		// Negative IDs (e.g. -1) are used as unassigned placeholders during
 		// schema construction; only positive IDs must be unique per the spec.
