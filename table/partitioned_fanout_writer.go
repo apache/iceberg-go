@@ -119,38 +119,49 @@ func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 			if !ok {
 				return nil
 			}
-			defer record.Release()
 
-			partitions, err := p.getPartitions(record)
-			if err != nil {
+			if err := p.processRecord(ctx, record, dataFilesChannel); err != nil {
 				return err
-			}
-
-			for _, val := range partitions {
-				select {
-				case <-ctx.Done():
-					return context.Cause(ctx)
-				default:
-				}
-
-				partitionRecord, err := partitionBatchByKey(ctx)(record, val.rows)
-				if err != nil {
-					return err
-				}
-
-				partitionPath := p.partitionPath(val.partitionRec)
-				rollingDataWriter, err := p.writerFactory.getOrCreateRollingDataWriter(ctx, p.concurrentDataFileWriter, partitionPath, val.partitionValues, dataFilesChannel)
-				if err != nil {
-					return err
-				}
-
-				err = rollingDataWriter.Add(partitionRecord)
-				if err != nil {
-					return err
-				}
 			}
 		}
 	}
+}
+
+// processRecord partitions a single record batch and writes sub-batches to
+// the appropriate rolling data writers. The record is released when this
+// function returns, bounding Arrow memory to one batch per fanout worker.
+func (p *partitionedFanoutWriter) processRecord(ctx context.Context, record arrow.RecordBatch, dataFilesChannel chan<- iceberg.DataFile) error {
+	defer record.Release()
+
+	partitions, err := p.getPartitions(record)
+	if err != nil {
+		return err
+	}
+
+	for _, val := range partitions {
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		default:
+		}
+
+		partitionRecord, err := partitionBatchByKey(ctx)(record, val.rows)
+		if err != nil {
+			return err
+		}
+
+		partitionPath := p.partitionPath(val.partitionRec)
+		rollingDataWriter, err := p.writerFactory.getOrCreateRollingDataWriter(ctx, p.concurrentDataFileWriter, partitionPath, val.partitionValues, dataFilesChannel)
+		if err != nil {
+			return err
+		}
+
+		if err = rollingDataWriter.Add(partitionRecord); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, outputDataFilesCh chan iceberg.DataFile) iter.Seq2[iceberg.DataFile, error] {
