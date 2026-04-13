@@ -407,7 +407,18 @@ func (m *manifestFile) FetchEntries(fs iceio.IO, discardDeleted bool) ([]Manifes
 	return fetchManifestEntries(m, fs, discardDeleted)
 }
 
-func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType, map[int]int, map[int]int) {
+// partitionFieldIDMap groups the four per-field mappings derived from a
+// manifest entry Avro schema. Using a struct rather than four bare return
+// values avoids confusion between the two map[int]int members, which carry
+// completely different semantics (decimal scale vs FixedType byte length).
+type partitionFieldIDMap struct {
+	nameToID       map[string]int
+	logicalTypes   map[int]avro.LogicalType
+	decimalScales  map[int]int // field id → decimal scale (for Decimal partition columns)
+	fixedByteSizes map[int]int // field id → byte length (for FixedType partition columns)
+}
+
+func getFieldIDMap(sc avro.Schema) partitionFieldIDMap {
 	getField := func(rs *avro.RecordSchema, name string) *avro.Field {
 		for _, f := range rs.Fields() {
 			if f.Name() == name {
@@ -418,10 +429,12 @@ func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType, ma
 		return nil
 	}
 
-	result := make(map[string]int)
-	logicalTypes := make(map[int]avro.LogicalType)
-	fixedSizes := make(map[int]int)
-	fixedPartSizes := make(map[int]int)
+	m := partitionFieldIDMap{
+		nameToID:       make(map[string]int),
+		logicalTypes:   make(map[int]avro.LogicalType),
+		decimalScales:  make(map[int]int),
+		fixedByteSizes: make(map[int]int),
+	}
 
 	entryField := getField(sc.(*avro.RecordSchema), "data_file")
 	partitionField := getField(entryField.Type().(*avro.RecordSchema), "partition")
@@ -437,30 +450,30 @@ func getFieldIDMap(sc avro.Schema) (map[string]int, map[int]avro.LogicalType, ma
 			continue
 		}
 
-		result[field.Name()] = fid
+		m.nameToID[field.Name()] = fid
 		avroTyp := field.Type()
 		if us, ok := avroTyp.(*avro.UnionSchema); ok {
 			typeList := us.Types()
 			avroTyp = typeList[len(typeList)-1]
 		}
 		if ps, ok := avroTyp.(*avro.PrimitiveSchema); ok && ps.Logical() != nil {
-			logicalTypes[fid] = ps.Logical().Type()
+			m.logicalTypes[fid] = ps.Logical().Type()
 		} else if fs, ok := avroTyp.(*avro.FixedSchema); ok {
 			if fs.Logical() != nil {
-				logicalTypes[int(fid)] = fs.Logical().Type()
+				m.logicalTypes[fid] = fs.Logical().Type()
 				if decimalLogical, ok := fs.Logical().(*avro.DecimalLogicalSchema); ok {
-					fixedSizes[int(fid)] = decimalLogical.Scale()
+					m.decimalScales[fid] = decimalLogical.Scale()
 				}
 			} else {
 				// FixedType partition column (no logical type): record its
 				// byte length so encode/decode can wrap/unwrap the union
 				// branch correctly.
-				fixedPartSizes[int(fid)] = fs.Size()
+				m.fixedByteSizes[fid] = fs.Size()
 			}
 		}
 	}
 
-	return result, logicalTypes, fixedSizes, fixedPartSizes
+	return m
 }
 
 type hasFieldToIDMap interface {
@@ -663,7 +676,7 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 			}
 		}
 	}
-	fieldNameToID, fieldIDToType, fieldIDToSize, fieldIDToFixedPartSize := getFieldIDMap(sc)
+	fim := getFieldIDMap(sc)
 
 	return &ManifestReader{
 		dec:                    dec,
@@ -671,10 +684,10 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 		formatVersion:          formatVersion,
 		isFallback:             isFallback,
 		content:                content,
-		fieldNameToID:          fieldNameToID,
-		fieldIDToType:          fieldIDToType,
-		fieldIDToSize:          fieldIDToSize,
-		fieldIDToFixedPartSize: fieldIDToFixedPartSize,
+		fieldNameToID:          fim.nameToID,
+		fieldIDToType:          fim.logicalTypes,
+		fieldIDToSize:          fim.decimalScales,
+		fieldIDToFixedPartSize: fim.fixedByteSizes,
 	}, nil
 }
 
@@ -1126,7 +1139,7 @@ func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *S
 		return nil, err
 	}
 
-	nameToID, idToType, _, idToFixedPartSize := getFieldIDMap(fileSchema)
+	fim := getFieldIDMap(fileSchema)
 
 	w := &ManifestWriter{
 		impl:                       impl,
@@ -1135,9 +1148,9 @@ func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *S
 		spec:                       spec,
 		content:                    ManifestContentData,
 		schema:                     schema,
-		partFieldNameToID:          nameToID,
-		partFieldIDToType:          idToType,
-		partFieldIDToFixedPartSize: idToFixedPartSize,
+		partFieldNameToID:          fim.nameToID,
+		partFieldIDToType:          fim.logicalTypes,
+		partFieldIDToFixedPartSize: fim.fixedByteSizes,
 		snapshotID:                 snapshotID,
 		minSeqNum:                  -1,
 		partitions:                 make([]map[int]any, 0),
