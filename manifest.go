@@ -173,12 +173,15 @@ func (f *fallbackManifestFileV1) toFile() *manifestFile {
 
 type manifestFileV1 struct {
 	manifestFile
-	AddedFilesCount    *int32 `avro:"added_files_count"`
-	ExistingFilesCount *int32 `avro:"existing_files_count"`
-	DeletedFilesCount  *int32 `avro:"deleted_files_count"`
-	AddedRowsCount     *int64 `avro:"added_rows_count"`
-	ExistingRowsCount  *int64 `avro:"existing_rows_count"`
-	DeletedRowsCount   *int64 `avro:"deleted_rows_count"`
+	AddedFilesCount        *int32 `avro:"added_files_count"`
+	AddedDataFilesCount    *int32 `avro:"added_data_files_count"` // pre-1.4 Java legacy name
+	ExistingFilesCount     *int32 `avro:"existing_files_count"`
+	ExistingDataFilesCount *int32 `avro:"existing_data_files_count"` // pre-1.4 Java legacy name
+	DeletedFilesCount      *int32 `avro:"deleted_files_count"`
+	DeletedDataFilesCount  *int32 `avro:"deleted_data_files_count"` // pre-1.4 Java legacy name
+	AddedRowsCount         *int64 `avro:"added_rows_count"`
+	ExistingRowsCount      *int64 `avro:"existing_rows_count"`
+	DeletedRowsCount       *int64 `avro:"deleted_rows_count"`
 }
 
 func (m *manifestFileV1) toFile() *manifestFile {
@@ -186,20 +189,35 @@ func (m *manifestFileV1) toFile() *manifestFile {
 	m.Content = ManifestContentData
 	m.SeqNumber, m.MinSeqNumber = initialSequenceNumber, initialSequenceNumber
 
-	if m.AddedFilesCount != nil {
-		m.manifestFile.AddedFilesCount = *m.AddedFilesCount
+	addedCount := m.AddedFilesCount
+	if addedCount == nil {
+		addedCount = m.AddedDataFilesCount
+	}
+
+	if addedCount != nil {
+		m.manifestFile.AddedFilesCount = *addedCount
 	} else {
 		m.manifestFile.AddedFilesCount = -1
 	}
 
-	if m.ExistingFilesCount != nil {
-		m.manifestFile.ExistingFilesCount = *m.ExistingFilesCount
+	existingCount := m.ExistingFilesCount
+	if existingCount == nil {
+		existingCount = m.ExistingDataFilesCount
+	}
+
+	if existingCount != nil {
+		m.manifestFile.ExistingFilesCount = *existingCount
 	} else {
 		m.manifestFile.ExistingFilesCount = -1
 	}
 
-	if m.DeletedFilesCount != nil {
-		m.manifestFile.DeletedFilesCount = *m.DeletedFilesCount
+	deletedCount := m.DeletedFilesCount
+	if deletedCount == nil {
+		deletedCount = m.DeletedDataFilesCount
+	}
+
+	if deletedCount != nil {
+		m.manifestFile.DeletedFilesCount = *deletedCount
 	} else {
 		m.manifestFile.DeletedFilesCount = -1
 	}
@@ -238,27 +256,39 @@ func (m *manifestFileV1) SnapshotID() int64 {
 }
 
 func (m *manifestFileV1) AddedDataFiles() int32 {
-	if m.AddedFilesCount == nil {
-		return 0
+	if m.AddedFilesCount != nil {
+		return *m.AddedFilesCount
 	}
 
-	return *m.AddedFilesCount
+	if m.AddedDataFilesCount != nil {
+		return *m.AddedDataFilesCount
+	}
+
+	return 0
 }
 
 func (m *manifestFileV1) ExistingDataFiles() int32 {
-	if m.ExistingFilesCount == nil {
-		return 0
+	if m.ExistingFilesCount != nil {
+		return *m.ExistingFilesCount
 	}
 
-	return *m.ExistingFilesCount
+	if m.ExistingDataFilesCount != nil {
+		return *m.ExistingDataFilesCount
+	}
+
+	return 0
 }
 
 func (m *manifestFileV1) DeletedDataFiles() int32 {
-	if m.DeletedFilesCount == nil {
-		return 0
+	if m.DeletedFilesCount != nil {
+		return *m.DeletedFilesCount
 	}
 
-	return *m.DeletedFilesCount
+	if m.DeletedDataFilesCount != nil {
+		return *m.DeletedDataFilesCount
+	}
+
+	return 0
 }
 
 func (m *manifestFileV1) AddedRows() int64 {
@@ -286,11 +316,27 @@ func (m *manifestFileV1) DeletedRows() int64 {
 }
 
 func (m *manifestFileV1) HasAddedFiles() bool {
-	return m.AddedFilesCount == nil || *m.AddedFilesCount > 0
+	if m.AddedFilesCount != nil {
+		return *m.AddedFilesCount > 0
+	}
+
+	if m.AddedDataFilesCount != nil {
+		return *m.AddedDataFilesCount > 0
+	}
+
+	return true
 }
 
 func (m *manifestFileV1) HasExistingFiles() bool {
-	return m.ExistingFilesCount == nil || *m.ExistingFilesCount > 0
+	if m.ExistingFilesCount != nil {
+		return *m.ExistingFilesCount > 0
+	}
+
+	if m.ExistingDataFilesCount != nil {
+		return *m.ExistingDataFilesCount > 0
+	}
+
+	return true
 }
 
 func (m *manifestFileV1) SequenceNum() int64    { return 0 }
@@ -311,22 +357,25 @@ func (m *manifestFileV1) FetchEntries(fs iceio.IO, discardDeleted bool) ([]Manif
 }
 
 type manifestFile struct {
-	Path               string          `avro:"manifest_path"`
-	Len                int64           `avro:"manifest_length"`
-	SpecID             int32           `avro:"partition_spec_id"`
-	Content            ManifestContent `avro:"content"`
-	SeqNumber          int64           `avro:"sequence_number"`
-	MinSeqNumber       int64           `avro:"min_sequence_number"`
-	AddedSnapshotID    int64           `avro:"added_snapshot_id"`
-	AddedFilesCount    int32           `avro:"added_files_count"`
-	ExistingFilesCount int32           `avro:"existing_files_count"`
-	DeletedFilesCount  int32           `avro:"deleted_files_count"`
-	AddedRowsCount     int64           `avro:"added_rows_count"`
-	ExistingRowsCount  int64           `avro:"existing_rows_count"`
-	DeletedRowsCount   int64           `avro:"deleted_rows_count"`
-	PartitionList      *[]FieldSummary `avro:"partitions"`
-	Key                []byte          `avro:"key_metadata"`
-	FirstRowIDValue    *int64          `avro:"first_row_id"`
+	Path                   string          `avro:"manifest_path"`
+	Len                    int64           `avro:"manifest_length"`
+	SpecID                 int32           `avro:"partition_spec_id"`
+	Content                ManifestContent `avro:"content"`
+	SeqNumber              int64           `avro:"sequence_number"`
+	MinSeqNumber           int64           `avro:"min_sequence_number"`
+	AddedSnapshotID        int64           `avro:"added_snapshot_id"`
+	AddedFilesCount        int32           `avro:"added_files_count"`
+	AddedDataFilesCount    int32           `avro:"added_data_files_count"` // pre-1.4 Java legacy name
+	ExistingFilesCount     int32           `avro:"existing_files_count"`
+	ExistingDataFilesCount int32           `avro:"existing_data_files_count"` // pre-1.4 Java legacy name
+	DeletedFilesCount      int32           `avro:"deleted_files_count"`
+	DeletedDataFilesCount  int32           `avro:"deleted_data_files_count"` // pre-1.4 Java legacy name
+	AddedRowsCount         int64           `avro:"added_rows_count"`
+	ExistingRowsCount      int64           `avro:"existing_rows_count"`
+	DeletedRowsCount       int64           `avro:"deleted_rows_count"`
+	PartitionList          *[]FieldSummary `avro:"partitions"`
+	Key                    []byte          `avro:"key_metadata"`
+	FirstRowIDValue        *int64          `avro:"first_row_id"`
 
 	version int `avro:"-"`
 }
@@ -386,15 +435,35 @@ func (m *manifestFile) Length() int64                    { return m.Len }
 func (m *manifestFile) PartitionSpecID() int32           { return m.SpecID }
 func (m *manifestFile) ManifestContent() ManifestContent { return m.Content }
 func (m *manifestFile) SnapshotID() int64                { return m.AddedSnapshotID }
-func (m *manifestFile) AddedDataFiles() int32            { return m.AddedFilesCount }
-func (m *manifestFile) ExistingDataFiles() int32         { return m.ExistingFilesCount }
-func (m *manifestFile) DeletedDataFiles() int32          { return m.DeletedFilesCount }
-func (m *manifestFile) AddedRows() int64                 { return m.AddedRowsCount }
-func (m *manifestFile) ExistingRows() int64              { return m.ExistingRowsCount }
-func (m *manifestFile) DeletedRows() int64               { return m.DeletedRowsCount }
-func (m *manifestFile) SequenceNum() int64               { return m.SeqNumber }
-func (m *manifestFile) MinSequenceNum() int64            { return m.MinSeqNumber }
-func (m *manifestFile) KeyMetadata() []byte              { return m.Key }
+func (m *manifestFile) AddedDataFiles() int32 {
+	if m.AddedFilesCount != 0 {
+		return m.AddedFilesCount
+	}
+
+	return m.AddedDataFilesCount
+}
+
+func (m *manifestFile) ExistingDataFiles() int32 {
+	if m.ExistingFilesCount != 0 {
+		return m.ExistingFilesCount
+	}
+
+	return m.ExistingDataFilesCount
+}
+
+func (m *manifestFile) DeletedDataFiles() int32 {
+	if m.DeletedFilesCount != 0 {
+		return m.DeletedFilesCount
+	}
+
+	return m.DeletedDataFilesCount
+}
+func (m *manifestFile) AddedRows() int64      { return m.AddedRowsCount }
+func (m *manifestFile) ExistingRows() int64   { return m.ExistingRowsCount }
+func (m *manifestFile) DeletedRows() int64    { return m.DeletedRowsCount }
+func (m *manifestFile) SequenceNum() int64    { return m.SeqNumber }
+func (m *manifestFile) MinSequenceNum() int64 { return m.MinSeqNumber }
+func (m *manifestFile) KeyMetadata() []byte   { return m.Key }
 func (m *manifestFile) Partitions() []FieldSummary {
 	if m.PartitionList == nil {
 		return nil
@@ -405,8 +474,14 @@ func (m *manifestFile) Partitions() []FieldSummary {
 
 func (m *manifestFile) FirstRowID() *int64 { return m.FirstRowIDValue }
 
-func (m *manifestFile) HasAddedFiles() bool    { return m.AddedFilesCount != 0 }
-func (m *manifestFile) HasExistingFiles() bool { return m.ExistingFilesCount != 0 }
+func (m *manifestFile) HasAddedFiles() bool {
+	return m.AddedFilesCount != 0 || m.AddedDataFilesCount != 0
+}
+
+func (m *manifestFile) HasExistingFiles() bool {
+	return m.ExistingFilesCount != 0 || m.ExistingDataFilesCount != 0
+}
+
 func (m *manifestFile) FetchEntries(fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error) {
 	return fetchManifestEntries(m, fs, discardDeleted)
 }
