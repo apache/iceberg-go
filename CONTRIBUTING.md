@@ -36,7 +36,7 @@ If two PRs land for the same issue, we will generally keep the one from the cont
 
 - Reference the issue number in your PR description (e.g., "Fixes #123").
 - Keep PRs focused — one issue per PR.
-- Run `go test ./...` and `gofmt` before pushing.
+- Run `go test ./...`, `gofmt`, and `golangci-lint run` before pushing. The linter runs in CI — catching issues locally saves a round-trip.
 - All commits must have a `Signed-off-by` line ([DCO](https://developercertificate.org/)).
 
 ## Code Review
