@@ -32,6 +32,7 @@ import (
 
 var (
 	falseBool                   = false
+	testEqualityIDs             = []int{1, 2}
 	snapshotID            int64 = 9182715666859759686
 	addedRows             int64 = 237993
 	manifestFileRecordsV1       = []ManifestFile{
@@ -368,6 +369,7 @@ var (
 				UpperBounds:      dataRecord0.UpperBounds,
 				Splits:           dataRecord0.Splits,
 				SortOrder:        dataRecord0.SortOrder,
+				EqualityIDs:      &testEqualityIDs,
 			},
 		},
 		{
@@ -412,6 +414,7 @@ var (
 				UpperBounds:             dataRecord0.UpperBounds,
 				Splits:                  dataRecord0.Splits,
 				SortOrder:               dataRecord0.SortOrder,
+				EqualityIDs:             &testEqualityIDs,
 				FirstRowIDField:         &testFirstRowID,
 				ReferencedDataFileField: nil,
 				ContentOffsetField:      nil,
@@ -1228,8 +1231,10 @@ func (m *ManifestTestSuite) TestManifestEntriesV2() {
 
 	m.Nil(datafile.KeyMetadata())
 	m.Equal([]int64{4}, datafile.SplitOffsets())
-	m.Nil(datafile.EqualityFieldIDs())
+	m.Equal(testEqualityIDs, datafile.EqualityFieldIDs())
 	m.Zero(*datafile.SortOrderID())
+
+	m.equalityIDsSchemaIsInt(manifestReader.dec.Schema())
 }
 
 func (m *ManifestTestSuite) TestManifestEntriesV3() {
@@ -1308,8 +1313,10 @@ func (m *ManifestTestSuite) TestManifestEntriesV3() {
 	}, datafile.ColumnSizes())
 	m.Nil(datafile.KeyMetadata())
 	m.Equal([]int64{4}, datafile.SplitOffsets())
-	m.Nil(datafile.EqualityFieldIDs())
+	m.Equal(testEqualityIDs, datafile.EqualityFieldIDs())
 	m.Zero(*datafile.SortOrderID())
+
+	m.equalityIDsSchemaIsInt(manifestReader.dec.Schema())
 }
 
 func (m *ManifestTestSuite) TestNewManifestReaderZstdManifestEntriesV2() {
@@ -1453,6 +1460,43 @@ func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 	m.Assert().Equal([]int64{4}, data.SplitOffsets())
 	m.Assert().Equal([]int{1, 1}, data.EqualityFieldIDs())
 	m.Assert().Equal(0, *data.SortOrderID())
+}
+
+// equalityIDsSchemaIsInt asserts equality_ids uses Avro "int", not "long".
+func (m *ManifestTestSuite) equalityIDsSchemaIsInt(sc avro.Schema) {
+	m.T().Helper()
+
+	entrySchema := sc.(*avro.RecordSchema)
+	var dataFileSchema *avro.RecordSchema
+	for _, f := range entrySchema.Fields() {
+		if f.Name() == "data_file" {
+			dataFileSchema = f.Type().(*avro.RecordSchema)
+			break
+		}
+	}
+	m.Require().NotNil(dataFileSchema, "data_file field not found in manifest_entry schema")
+
+	var eqIDsField *avro.Field
+	for _, f := range dataFileSchema.Fields() {
+		if f.Name() == "equality_ids" {
+			eqIDsField = f
+			break
+		}
+	}
+	m.Require().NotNil(eqIDsField, "equality_ids field not found in data_file schema")
+
+	unionSchema := eqIDsField.Type().(*avro.UnionSchema)
+	var arraySchema *avro.ArraySchema
+	for _, ts := range unionSchema.Types() {
+		if ts.Type() == avro.Array {
+			arraySchema = ts.(*avro.ArraySchema)
+			break
+		}
+	}
+	m.Require().NotNil(arraySchema, "equality_ids union should contain an array schema")
+
+	m.Equal(avro.Int, arraySchema.Items().Type(),
+		"equality_ids array elements must be Avro int (not long) per the Iceberg spec")
 }
 
 func (m *ManifestTestSuite) TestManifestWriterMeta() {
