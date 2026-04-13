@@ -590,11 +590,11 @@ func decodeManifests[I interface {
 // This type is not thread-safe; its methods should not be called from
 // multiple goroutines.
 type ManifestReader struct {
-	dec           *ocf.Decoder
-	file          ManifestFile
-	formatVersion int
-	isFallback    bool
-	content       ManifestContent
+	dec                    *ocf.Decoder
+	file                   ManifestFile
+	formatVersion          int
+	isFallback             bool
+	content                ManifestContent
 	fieldNameToID          map[string]int
 	fieldIDToType          map[int]avro.LogicalType
 	fieldIDToSize          map[int]int
@@ -666,15 +666,15 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 	fieldNameToID, fieldIDToType, fieldIDToSize, fieldIDToFixedPartSize := getFieldIDMap(sc)
 
 	return &ManifestReader{
-		dec:                     dec,
-		file:                    file,
-		formatVersion:           formatVersion,
-		isFallback:              isFallback,
-		content:                 content,
-		fieldNameToID:           fieldNameToID,
-		fieldIDToType:           fieldIDToType,
-		fieldIDToSize:           fieldIDToSize,
-		fieldIDToFixedPartSize:  fieldIDToFixedPartSize,
+		dec:                    dec,
+		file:                   file,
+		formatVersion:          formatVersion,
+		isFallback:             isFallback,
+		content:                content,
+		fieldNameToID:          fieldNameToID,
+		fieldIDToType:          fieldIDToType,
+		fieldIDToSize:          fieldIDToSize,
+		fieldIDToFixedPartSize: fieldIDToFixedPartSize,
 	}, nil
 }
 
@@ -1842,11 +1842,11 @@ type dataFile struct {
 	upperBoundMap  map[int][]byte
 
 	// used for partition retrieval
-	fieldNameToID           map[string]int
-	fieldIDToLogicalType    map[int]avro.LogicalType
-	fieldIDToPartitionData  map[int]any
-	fieldIDToFixedSize      map[int]int
-	fieldIDToFixedPartSize  map[int]int
+	fieldNameToID          map[string]int
+	fieldIDToLogicalType   map[int]avro.LogicalType
+	fieldIDToPartitionData map[int]any
+	fieldIDToFixedSize     map[int]int
+	fieldIDToFixedPartSize map[int]int
 
 	specID   int32
 	initMaps sync.Once
