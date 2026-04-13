@@ -691,6 +691,34 @@ func TestGetWritePropertiesPageVersion(t *testing.T) {
 	}
 }
 
+func TestGetWritePropertiesBloomFilter(t *testing.T) {
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+
+	t.Run("default max bloom filter bytes", func(t *testing.T) {
+		wp := parquet.NewWriterProperties(format.GetWriteProperties(iceberg.Properties{}).([]parquet.WriterProperty)...)
+		assert.Equal(t, int64(internal.ParquetBloomFilterMaxBytesDefault), wp.MaxBloomFilterBytes())
+	})
+
+	t.Run("custom max bloom filter bytes", func(t *testing.T) {
+		props := iceberg.Properties{
+			internal.ParquetBloomFilterMaxBytesKey: "2097152",
+		}
+		wp := parquet.NewWriterProperties(format.GetWriteProperties(props).([]parquet.WriterProperty)...)
+		assert.Equal(t, int64(2097152), wp.MaxBloomFilterBytes())
+	})
+
+	t.Run("per-column bloom filter enabled", func(t *testing.T) {
+		props := iceberg.Properties{
+			internal.ParquetBloomFilterColumnEnabledKeyPrefix + ".id":   "true",
+			internal.ParquetBloomFilterColumnEnabledKeyPrefix + ".name": "false",
+		}
+		wp := parquet.NewWriterProperties(format.GetWriteProperties(props).([]parquet.WriterProperty)...)
+		assert.True(t, wp.BloomFilterEnabledFor("id"))
+		assert.False(t, wp.BloomFilterEnabledFor("name"))
+		assert.False(t, wp.BloomFilterEnabledFor("unmentioned_col"), "columns absent from properties must default to no bloom filter")
+	})
+}
+
 func TestParquetBatchSizeFromTableProperties(t *testing.T) {
 	t.Run("default batch size when no properties in context", func(t *testing.T) {
 		ctx := context.Background()

@@ -259,8 +259,30 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 		slog.Warn("unrecognized compression codec, falling back to uncompressed", "codec", compression)
 	}
 
-	return append(writerProps, parquet.WithCompression(codec),
+	writerProps = append(writerProps, parquet.WithCompression(codec),
 		parquet.WithCompressionLevel(compressionLevel))
+
+	// Bloom filter properties.
+	// write.parquet.bloom-filter-max-bytes caps the per-column bloom filter size.
+	bloomMaxBytes := props.GetInt(ParquetBloomFilterMaxBytesKey, ParquetBloomFilterMaxBytesDefault)
+	writerProps = append(writerProps, parquet.WithMaxBloomFilterBytes(int64(bloomMaxBytes)))
+
+	// write.parquet.bloom-filter-enabled.column.<col-name> enables bloom filters
+	// for individual columns. Scan all properties for the prefix.
+	prefix := ParquetBloomFilterColumnEnabledKeyPrefix + "."
+	for key, val := range props {
+		colName, ok := strings.CutPrefix(key, prefix)
+		if !ok || colName == "" {
+			continue
+		}
+		// EqualFold matches Java's Boolean.parseBoolean: only "true"
+		// (case-insensitive) is true; anything else, including "1" or
+		// "yes", is false. strconv.ParseBool behaves differently ("1" → true).
+		enabled := strings.EqualFold(val, "true")
+		writerProps = append(writerProps, parquet.WithBloomFilterEnabledFor(colName, enabled))
+	}
+
+	return writerProps
 }
 
 func (p parquetFormat) WriteDataFile(ctx context.Context, fs iceio.WriteFileIO, partitionValues map[int]any, info WriteFileInfo, batches []arrow.RecordBatch) (iceberg.DataFile, error) {
