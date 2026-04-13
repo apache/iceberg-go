@@ -21,3 +21,44 @@
 
 - [Iceberg community](https://iceberg.apache.org/community/)
 - [Iceberg-Go Slack](https://apache-iceberg.slack.com/archives/C05J3MJ42BD)
+
+## Picking Up Issues
+
+Before starting work on an issue:
+
+1. **Check for existing PRs.** Search the [open pull requests](https://github.com/apache/iceberg-go/pulls) to make sure nobody is already working on it.
+2. **Claim the issue.** Leave a comment on the issue (e.g., "I'd like to work on this") and wait for a maintainer to acknowledge before writing code.
+3. **One at a time for new contributors.** If you haven't had a PR merged into iceberg-go yet, please work on one issue at a time. Get it reviewed, address feedback, get it merged — then pick up the next one. This helps us give your work the attention it deserves and avoids wasted effort from overlapping contributions.
+
+If two PRs land for the same issue, we will generally keep the one from the contributor who claimed it first.
+
+## Submitting a Pull Request
+
+- Reference the issue number in your PR description (e.g., "Fixes #123").
+- Keep PRs focused — one issue per PR.
+- Run `go test ./...` and `gofmt` before pushing.
+- All commits must have a `Signed-off-by` line ([DCO](https://developercertificate.org/)).
+
+## Code Review
+
+- Maintainers may request changes. This is normal — it doesn't mean the PR is bad, it means we want to get it right.
+- Respond to review comments by pushing new commits (don't force-push over reviewed code).
+- If your PR has been waiting for review for more than a few days, ping on [Slack](https://apache-iceberg.slack.com/archives/C05J3MJ42BD).
+
+## Development Setup
+
+```bash
+git clone https://github.com/apache/iceberg-go.git
+cd iceberg-go
+go build ./...
+go test ./...
+```
+
+### Integration Tests
+
+Integration tests require Docker and are gated behind a build tag:
+
+```bash
+docker compose -f internal/recipe/docker-compose.yml up -d rest minio mc --wait
+go test -tags integration ./...
+```
