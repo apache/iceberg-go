@@ -666,7 +666,7 @@ func (t *TableWritingTestSuite) TestAddFilesPartitionedTable() {
 
 		for _, e := range entries {
 			t.Equal(map[int]any{
-				1000: 123, 1001: 650,
+				1000: int32(123), 1001: int32(650),
 			}, e.DataFile().Partition())
 		}
 	}
