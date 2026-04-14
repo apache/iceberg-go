@@ -87,12 +87,19 @@ func (t Table) LocationProvider() (LocationProvider, error) {
 }
 
 func (t Table) NewTransaction() *Transaction {
+	return t.NewTransactionOnBranch(MainBranch)
+}
+
+// NewTransactionOnBranch creates a new transaction that commits to the named
+// branch. Use [NewTransaction] to commit to the default "main" branch.
+func (t Table) NewTransactionOnBranch(branch string) *Transaction {
 	meta, _ := MetadataBuilderFromBase(t.metadata, t.metadataLocation)
 
 	return &Transaction{
-		tbl:  &t,
-		meta: meta,
-		reqs: []Requirement{},
+		tbl:    &t,
+		meta:   meta,
+		branch: branch,
+		reqs:   []Requirement{},
 	}
 }
 

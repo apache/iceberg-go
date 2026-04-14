@@ -64,8 +64,9 @@ func (s snapshotUpdate) mergeAppend() *snapshotProducer {
 }
 
 type Transaction struct {
-	tbl  *Table
-	meta *MetadataBuilder
+	tbl    *Table
+	meta   *MetadataBuilder
+	branch string
 
 	reqs []Requirement
 

@@ -814,10 +814,15 @@ func (sp *snapshotProducer) commit(ctx context.Context) (_ []Update, _ []Require
 		snapshot.AddedRows = &addedRows
 	}
 
+	branch := sp.txn.branch
+	if branch == "" {
+		branch = MainBranch
+	}
+
 	return []Update{
 			NewAddSnapshotUpdate(&snapshot),
-			NewSetSnapshotRefUpdate("main", sp.snapshotID, BranchRef, -1, -1, -1),
+			NewSetSnapshotRefUpdate(branch, sp.snapshotID, BranchRef, -1, -1, -1),
 		}, []Requirement{
-			AssertRefSnapshotID("main", sp.txn.meta.currentSnapshotID),
+			AssertRefSnapshotID(branch, sp.txn.meta.currentSnapshotID),
 		}, nil
 }
