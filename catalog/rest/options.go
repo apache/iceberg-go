@@ -58,6 +58,19 @@ func WithTLSConfig(config *tls.Config) Option {
 	}
 }
 
+// WithOAuthTLSConfig sets a separate TLS configuration for the HTTP client
+// used to communicate with the OAuth2 server. This is useful when the OAuth2
+// server (oauth2-server-uri) is a different host than the catalog and requires
+// different TLS settings (e.g. a different CA or client certificate).
+//
+// If not set, the OAuth2 client reuses the catalog's HTTP client (and its TLS
+// configuration).
+func WithOAuthTLSConfig(config *tls.Config) Option {
+	return func(o *options) {
+		o.oauthTLSConfig = config
+	}
+}
+
 func WithWarehouseLocation(loc string) Option {
 	return func(o *options) {
 		o.warehouseLocation = loc
@@ -164,6 +177,8 @@ type options struct {
 	resource          string
 	transport         http.RoundTripper
 	headers           map[string]string
+
+	oauthTLSConfig *tls.Config
 
 	additionalProps iceberg.Properties
 }
