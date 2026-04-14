@@ -404,13 +404,13 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 				return
 			}
 
-			if err := writeRecord(record); err != nil {
-				record.Release()
+			err := writeRecord(record)
+			record.Release()
+			if err != nil {
 				r.sendError(err)
 
 				return
 			}
-			record.Release()
 
 			// Reset idle timer only when a file is open.
 			if idleTimer != nil && currentWriter != nil {
@@ -435,28 +435,29 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 
 		case <-r.ctx.Done():
 			// Drain any buffered records before finalizing.
+		drain:
 			for {
 				select {
 				case record, ok := <-r.recordCh:
 					if !ok {
-						break
+						break drain
 					}
-					if err := writeRecord(record); err != nil {
-						record.Release()
+					err := writeRecord(record)
+					record.Release()
+					if err != nil {
 						r.sendError(err)
 
 						return
 					}
-					record.Release()
-					continue
 				default:
+					break drain
 				}
-				if err := closeWriter(); err != nil {
-					r.sendError(err)
-				}
-
-				return
 			}
+			if err := closeWriter(); err != nil {
+				r.sendError(err)
+			}
+
+			return
 		}
 	}
 }
@@ -491,7 +492,7 @@ func (r *RollingDataWriter) closeAndWait() error {
 }
 
 // reapIdleWriters periodically scans all writers and tears down any whose
-// goroutine has been idle (no record writes) for longer than idleTimeout.
+// goroutine has been idle (no record writes) for longer than reaperTimeout.
 // This prevents long-lived partitions (e.g. hour=2024010100) from
 // accumulating goroutines that will never receive data again.
 func (w *writerFactory) reapIdleWriters(ctx context.Context) {
@@ -518,9 +519,8 @@ func (w *writerFactory) reapIdleWriters(ctx context.Context) {
 					return true
 				}
 
-				// Remove from map first so no new callers get this writer.
-				w.writers.Delete(key)
-				// Cancel + wait for the goroutine to drain and exit.
+				// closeAndWait cancels the goroutine, waits for it to
+				// drain, and removes the writer from the map.
 				writer.closeAndWait()
 
 				return true
