@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package dv
 
 import (
 	"bytes"
@@ -104,6 +104,11 @@ func ReadDV(fs iceio.IO, dvFile iceberg.DataFile) (*RoaringPositionBitmap, error
 		return nil, fmt.Errorf("DV file %s missing ContentOffset/ContentSizeInBytes", dvFile.FilePath())
 	}
 
+	size := *dvFile.ContentSizeInBytes()
+	if size < 0 || size > int64(puffin.DefaultMaxBlobSize) {
+		return nil, fmt.Errorf("DV blob size %d out of valid range [0, %d]", size, puffin.DefaultMaxBlobSize)
+	}
+
 	f, err := fs.Open(dvFile.FilePath())
 	if err != nil {
 		return nil, fmt.Errorf("open DV file %s: %w", dvFile.FilePath(), err)
@@ -116,11 +121,13 @@ func ReadDV(fs iceio.IO, dvFile iceberg.DataFile) (*RoaringPositionBitmap, error
 	}
 
 	offset := *dvFile.ContentOffset()
-	size := *dvFile.ContentSizeInBytes()
 	blobData := make([]byte, size)
 	if _, err := reader.ReadAt(blobData, offset); err != nil {
 		return nil, fmt.Errorf("read DV blob at offset %d: %w", offset, err)
 	}
 
-	return DeserializeDV(blobData, dvFile.Count())
+	// Pass -1 to skip cardinality validation during deserialization.
+	// dvFile.Count() defaults to 0 when unset, which would incorrectly
+	// reject valid DVs. Callers can validate cardinality separately.
+	return DeserializeDV(blobData, -1)
 }

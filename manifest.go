@@ -2133,6 +2133,13 @@ func NewDataFileBuilder(
 		)
 	}
 
+	if format == PuffinFile && content != EntryContentPosDeletes {
+		return nil, fmt.Errorf(
+			"%w: %s format is only valid for %s content",
+			ErrInvalidArgument, PuffinFile, EntryContentPosDeletes,
+		)
+	}
+
 	if recordCount <= 0 {
 		return nil, fmt.Errorf("%w: record count must be greater than 0", ErrInvalidArgument)
 	}
