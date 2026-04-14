@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"log/slog"
 	"runtime"
 	"sync"
 	"time"
@@ -1055,6 +1056,24 @@ func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, sna
 			return err
 		}
 		updater.appendDataFile(df)
+	}
+
+	// Diagnostic: warn when an overwrite writes fewer rows than it deletes.
+	// This is not always a bug (the caller may intentionally reduce data),
+	// but it surfaces silent row loss from broken RecordReader adapters
+	// or iterator issues that would otherwise go unnoticed (#860).
+	var addedRows, deletedRows int64
+	for _, df := range updater.addedFiles {
+		addedRows += df.Count()
+	}
+	for _, df := range updater.deletedFiles {
+		deletedRows += df.Count()
+	}
+	if deletedRows > 0 && addedRows < deletedRows {
+		slog.Warn("Overwrite produced fewer rows than deleted",
+			"added_rows", addedRows,
+			"deleted_rows", deletedRows,
+			"delta", addedRows-deletedRows)
 	}
 
 	updates, reqs, err := updater.commit(ctx)
