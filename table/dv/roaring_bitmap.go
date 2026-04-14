@@ -50,7 +50,8 @@ func NewRoaringPositionBitmap() *RoaringPositionBitmap {
 	}
 }
 
-// Set marks a position in the bitmap. Positions must be non-negative.
+// Set marks a position in the bitmap.
+// Position must be non-negative.
 func (b *RoaringPositionBitmap) Set(pos int64) {
 	if pos < 0 {
 		return
@@ -125,6 +126,7 @@ func (b *RoaringPositionBitmap) Serialize(w io.Writer) error {
 }
 
 // DeserializeRoaringPositionBitmap reads a bitmap from the Iceberg portable format.
+// Format: [count] { [key][bitmap] } .....{[key_n][bitmap_n]}
 func DeserializeRoaringPositionBitmap(r io.Reader) (*RoaringPositionBitmap, error) {
 	var count int64
 	if err := binary.Read(r, binary.LittleEndian, &count); err != nil {
