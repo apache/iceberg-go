@@ -15,32 +15,22 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package dv
 
 import (
 	"bytes"
 	"encoding/binary"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func readBitmapTestData(t *testing.T, name string) []byte {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join("testdata", "deletes", name))
-	require.NoError(t, err)
-
-	return data
-}
-
 // Why: this type owns compatibility with Iceberg's Java roaring bitmap format, including the empty case.
 // Condition: deserialize a Java-produced bitmap with zero stored positions.
 // Assertion: no error, bitmap is empty, and cardinality is 0.
 func TestDeserializeRoaringBitmapJavaEmpty(t *testing.T) {
-	data := readBitmapTestData(t, "64mapempty.bin")
+	data := readDVTestData(t, "64mapempty.bin")
 
 	bm, err := DeserializeRoaringPositionBitmap(bytes.NewReader(data))
 	require.NoError(t, err)
@@ -53,7 +43,7 @@ func TestDeserializeRoaringBitmapJavaEmpty(t *testing.T) {
 // Condition: deserialize a Java-produced bitmap with keys 0..9 and low values 0..9.
 // Assertion: no error, cardinality is 100, representative positions across keys exist, and a position beyond the stored range is absent.
 func TestDeserializeRoaringBitmapJavaSpreadValues(t *testing.T) {
-	data := readBitmapTestData(t, "64mapspreadvals.bin")
+	data := readDVTestData(t, "64mapspreadvals.bin")
 
 	bm, err := DeserializeRoaringPositionBitmap(bytes.NewReader(data))
 	require.NoError(t, err)
@@ -63,6 +53,22 @@ func TestDeserializeRoaringBitmapJavaSpreadValues(t *testing.T) {
 	assert.True(t, bm.Contains((int64(3)<<32)|7))
 	assert.True(t, bm.Contains((int64(9)<<32)|9))
 	assert.False(t, bm.Contains(int64(10)<<32))
+}
+
+// Why: validates cross-impl compatibility for a simple 32-bit-only bitmap.
+// Condition: deserialize a Java-produced bitmap with positions [0..9] in a single key.
+// Assertion: no error, cardinality is 10, all expected positions present.
+func TestDeserializeRoaringBitmapJava32BitValues(t *testing.T) {
+	data := readDVTestData(t, "64map32bitvals.bin")
+
+	bm, err := DeserializeRoaringPositionBitmap(bytes.NewReader(data))
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(10), bm.Cardinality())
+	for i := int64(0); i < 10; i++ {
+		assert.True(t, bm.Contains(i), "expected position %d to be set", i)
+	}
+	assert.False(t, bm.Contains(10))
 }
 
 // Why: the deserializer must fail cleanly when the outer bitmap count cannot be read.
@@ -82,6 +88,17 @@ func TestDeserializeRoaringBitmapNegativeCount(t *testing.T) {
 
 	_, err := DeserializeRoaringPositionBitmap(bytes.NewReader(buf.Bytes()))
 	assert.ErrorContains(t, err, "invalid bitmap count")
+}
+
+// Why: absurdly large counts should be rejected to prevent CPU/memory exhaustion.
+// Condition: count field set to maxBitmapCount + 1.
+// Assertion: returns an error containing "exceeds maximum".
+func TestDeserializeRoaringBitmapExcessiveCount(t *testing.T) {
+	var buf bytes.Buffer
+	require.NoError(t, binary.Write(&buf, binary.LittleEndian, maxBitmapCount+1))
+
+	_, err := DeserializeRoaringPositionBitmap(bytes.NewReader(buf.Bytes()))
+	assert.ErrorContains(t, err, "exceeds maximum")
 }
 
 // Why: each bitmap entry must start with a key; premature EOF before that key is a distinct decode failure.
@@ -150,6 +167,19 @@ func TestRoaringBitmapSetContainsAndCardinality(t *testing.T) {
 	assert.False(t, bm.Contains((int64(1)<<32)|6))
 	assert.False(t, bm.Contains((int64(2)<<32)|1))
 	assert.False(t, bm.Contains(int64(100)<<32))
+}
+
+// Why: negative positions should be silently ignored by Set and return false from Contains.
+// Condition: Set a negative position and query it.
+// Assertion: bitmap remains empty, Contains returns false.
+func TestRoaringBitmapNegativePosition(t *testing.T) {
+	bm := NewRoaringPositionBitmap()
+	bm.Set(-1)
+	bm.Set(-100)
+
+	assert.True(t, bm.IsEmpty())
+	assert.False(t, bm.Contains(-1))
+	assert.False(t, bm.Contains(-100))
 }
 
 // Why: Serialize and DeserializeRoaringPositionBitmap together define the Go encoding contract for non-empty bitmaps.
