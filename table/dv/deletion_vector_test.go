@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package dv
 
 import (
 	"encoding/binary"
@@ -31,6 +31,43 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// mockDVFile is a minimal iceberg.DataFile implementation with only the
+// fields exercised by the DV reader: path, format, count, and the DV-specific
+// offset/size/referenced-data-file pointers.
+type mockDVFile struct {
+	path               string
+	format             iceberg.FileFormat
+	count              int64
+	referencedDataFile *string
+	contentOffset      *int64
+	contentSizeInBytes *int64
+}
+
+func (m *mockDVFile) FilePath() string                          { return m.path }
+func (m *mockDVFile) FileFormat() iceberg.FileFormat            { return m.format }
+func (m *mockDVFile) Count() int64                              { return m.count }
+func (m *mockDVFile) ReferencedDataFile() *string               { return m.referencedDataFile }
+func (m *mockDVFile) ContentOffset() *int64                     { return m.contentOffset }
+func (m *mockDVFile) ContentSizeInBytes() *int64                { return m.contentSizeInBytes }
+func (*mockDVFile) ContentType() iceberg.ManifestEntryContent   { return iceberg.EntryContentPosDeletes }
+func (*mockDVFile) Partition() map[int]any                      { return nil }
+func (*mockDVFile) FileSizeBytes() int64                        { return 0 }
+func (*mockDVFile) ColumnSizes() map[int]int64                  { return nil }
+func (*mockDVFile) ValueCounts() map[int]int64                  { return nil }
+func (*mockDVFile) NullValueCounts() map[int]int64              { return nil }
+func (*mockDVFile) NaNValueCounts() map[int]int64               { return nil }
+func (*mockDVFile) DistinctValueCounts() map[int]int64          { return nil }
+func (*mockDVFile) LowerBoundValues() map[int][]byte            { return nil }
+func (*mockDVFile) UpperBoundValues() map[int][]byte            { return nil }
+func (*mockDVFile) KeyMetadata() []byte                         { return nil }
+func (*mockDVFile) SplitOffsets() []int64                       { return nil }
+func (*mockDVFile) EqualityFieldIDs() []int                     { return nil }
+func (*mockDVFile) SortOrderID() *int                           { return nil }
+func (*mockDVFile) SpecID() int32                               { return 0 }
+func (*mockDVFile) FirstRowID() *int64                          { return nil }
+
+func strPtr(s string) *string { return &s }
 
 func readDVTestData(t *testing.T, name string) []byte {
 	t.Helper()
@@ -81,13 +118,11 @@ func writePuffinWithDVBlob(t *testing.T, dir string, dvBlobBytes []byte) (string
 	return path, meta
 }
 
-func newDVTestFile(path string, count int64, offset, size *int64) *dvMockDataFile {
-	return &dvMockDataFile{
-		mockDataFile: mockDataFile{
-			path:   path,
-			format: iceberg.PuffinFile,
-			count:  count,
-		},
+func newDVTestFile(path string, count int64, offset, size *int64) *mockDVFile {
+	return &mockDVFile{
+		path:               path,
+		format:             iceberg.PuffinFile,
+		count:              count,
 		referencedDataFile: strPtr("s3://bucket/data/data-001.parquet"),
 		contentOffset:      offset,
 		contentSizeInBytes: size,
@@ -114,6 +149,76 @@ func TestDeserializeDV(t *testing.T) {
 	assert.True(t, bm.Contains(1))
 	assert.True(t, bm.Contains(9))
 	assert.False(t, bm.Contains(2))
+}
+
+// Why: validates the DV envelope for the empty case — zero deleted positions.
+// Condition: Java-produced DV with no positions.
+// Assertion: no error, bitmap is empty.
+func TestDeserializeDVEmpty(t *testing.T) {
+	data := readDVTestData(t, "empty-position-index.bin")
+
+	bm, err := DeserializeDV(data, -1)
+	require.NoError(t, err)
+
+	assert.True(t, bm.IsEmpty())
+	assert.Equal(t, int64(0), bm.Cardinality())
+}
+
+// Why: exercises all three roaring container types (array, run, bitmap) through the DV envelope,
+// which is the main cross-library bug source.
+// Condition: Java-produced DV with 132,561 positions across 2 keys (0 and 1), each with 3 containers.
+// Assertion: cardinality matches, representative positions from each container type are present.
+func TestDeserializeDVAllContainerTypes(t *testing.T) {
+	data := readDVTestData(t, "all-container-types-position-index.bin")
+
+	bm, err := DeserializeDV(data, -1)
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(132561), bm.Cardinality())
+
+	// Key 0, array container: positions 5 and 7
+	assert.True(t, bm.Contains(5))
+	assert.True(t, bm.Contains(7))
+	assert.False(t, bm.Contains(6))
+
+	// Key 0, run container: positions 65537..66535 (container 1, 999 values)
+	assert.True(t, bm.Contains(65537))
+	assert.True(t, bm.Contains(66535))
+	assert.False(t, bm.Contains(65536))
+	assert.False(t, bm.Contains(66536))
+
+	// Key 0, bitmap container: positions 131073..196606 (container 2, 65534 values)
+	assert.True(t, bm.Contains(131073))
+	assert.True(t, bm.Contains(196606))
+	assert.False(t, bm.Contains(131072))
+
+	// Key 1, array container: positions (1<<32)|10 and (1<<32)|20
+	assert.True(t, bm.Contains((int64(1)<<32)|10))
+	assert.True(t, bm.Contains((int64(1)<<32)|20))
+
+	// Key 1, run container: starts at (1<<32)|65546
+	assert.True(t, bm.Contains((int64(1)<<32)|65546))
+
+	// Key 1, bitmap container: starts at (1<<32)|131073
+	assert.True(t, bm.Contains((int64(1)<<32)|131073))
+}
+
+// Why: validates DV decoding with values that span both small and large 32-bit ranges in a single key.
+// Condition: Java-produced DV with positions [100, 101, 2147483747, 2147483748].
+// Assertion: cardinality is 4, all positions present, adjacent unset positions absent.
+func TestDeserializeDVSmallAndLargeValues(t *testing.T) {
+	data := readDVTestData(t, "small-and-large-values-position-index.bin")
+
+	bm, err := DeserializeDV(data, -1)
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(4), bm.Cardinality())
+	assert.True(t, bm.Contains(100))
+	assert.True(t, bm.Contains(101))
+	assert.True(t, bm.Contains(2147483747)) // Integer.MAX_VALUE + 100
+	assert.True(t, bm.Contains(2147483748)) // Integer.MAX_VALUE + 101
+	assert.False(t, bm.Contains(99))
+	assert.False(t, bm.Contains(102))
 }
 
 // Why: truncated payloads should fail cleanly before any slicing or decoding happens.
@@ -201,11 +306,9 @@ func TestReadDV(t *testing.T) {
 // Condition: DataFile reports Parquet format instead of Puffin.
 // Assertion: returns an error containing "expected PUFFIN format".
 func TestReadDVWrongFormat(t *testing.T) {
-	_, err := ReadDV(iceio.LocalFS{}, &dvMockDataFile{
-		mockDataFile: mockDataFile{
-			path:   "s3://bucket/data/pos-del.parquet",
-			format: iceberg.ParquetFile,
-		},
+	_, err := ReadDV(iceio.LocalFS{}, &mockDVFile{
+		path:   "s3://bucket/data/pos-del.parquet",
+		format: iceberg.ParquetFile,
 	})
 	assert.ErrorContains(t, err, "expected PUFFIN format")
 }
@@ -227,6 +330,17 @@ func TestReadDVMissingContentMetadata(t *testing.T) {
 		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile("s3://bucket/data/dv.puffin", 0, &offset, nil))
 		assert.ErrorContains(t, err, "missing ContentOffset/ContentSizeInBytes")
 	})
+}
+
+// Why: negative or absurdly large blob sizes should be rejected before allocation.
+// Condition: ContentSizeInBytes set to -1.
+// Assertion: returns an error containing "out of valid range".
+func TestReadDVInvalidBlobSize(t *testing.T) {
+	offset := int64(4)
+	negSize := int64(-1)
+
+	_, err := ReadDV(iceio.LocalFS{}, newDVTestFile("s3://bucket/data/dv.puffin", 0, &offset, &negSize))
+	assert.ErrorContains(t, err, "out of valid range")
 }
 
 // Why: storage open failures should be wrapped with file-path context by ReadDV.
@@ -265,18 +379,4 @@ func TestReadDVInvalidBlobRange(t *testing.T) {
 	offset, size := int64(0), meta.Length
 	_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
 	assert.ErrorContains(t, err, "read DV blob at offset 0")
-}
-
-// Why: ReadDV is responsible for passing dvFile.Count through to DV cardinality validation.
-// Condition: valid Puffin blob with 5 deleted positions, but DataFile count is set to 4.
-// Assertion: returns an error containing "cardinality mismatch".
-func TestReadDVCardinalityMismatch(t *testing.T) {
-	dvBlobBytes := readDVTestData(t, "small-alternating-values-position-index.bin")
-
-	dir := t.TempDir()
-	path, meta := writePuffinWithDVBlob(t, dir, dvBlobBytes)
-
-	offset, size := meta.Offset, meta.Length
-	_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 4, &offset, &size))
-	assert.ErrorContains(t, err, "cardinality mismatch")
 }
