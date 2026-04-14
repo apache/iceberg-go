@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"iter"
 	"strconv"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/iceberg-go"
@@ -36,12 +37,25 @@ type WriteRecordOption func(*writeRecordConfig)
 type writeRecordConfig struct {
 	targetFileSize int64
 	writeUUID      *uuid.UUID
+	idleTimeout    time.Duration
 }
 
 // WithTargetFileSize overrides the table's default target file size.
 func WithTargetFileSize(size int64) WriteRecordOption {
 	return func(c *writeRecordConfig) {
 		c.targetFileSize = size
+	}
+}
+
+// WithIdleTimeout configures the writer to flush the current data file
+// when no records have been written for the specified duration. This is
+// useful for long-running writers with time-based partitions where
+// low-volume partitions may not reach the target file size. After an
+// idle flush, the writer remains open and will start a new file when
+// the next record arrives.
+func WithIdleTimeout(d time.Duration) WriteRecordOption {
+	return func(c *writeRecordConfig) {
+		c.idleTimeout = d
 	}
 }
 
@@ -119,10 +133,11 @@ func WriteRecords(ctx context.Context, tbl *Table,
 	}
 
 	args := recordWritingArgs{
-		sc:        schema,
-		itr:       releasing,
-		fs:        writeFS,
-		writeUUID: cfg.writeUUID,
+		sc:          schema,
+		itr:         releasing,
+		fs:          writeFS,
+		writeUUID:   cfg.writeUUID,
+		idleTimeout: cfg.idleTimeout,
 	}
 
 	return recordsToDataFiles(ctx, tbl.Location(), meta, args)

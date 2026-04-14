@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/iceberg-go"
@@ -43,6 +44,7 @@ type writerFactory struct {
 	writeUUID      *uuid.UUID
 	taskSchema     *iceberg.Schema
 	targetFileSize int64
+	idleTimeout    time.Duration
 
 	locProvider      LocationProvider
 	fileSchema       *iceberg.Schema
@@ -161,6 +163,7 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		nextCount:      nextCount,
 		stopCount:      stopCount,
 		sortOrderID:    meta.defaultSortOrderID,
+		idleTimeout:    args.idleTimeout,
 	}
 	for _, apply := range opts {
 		apply(f)
@@ -327,7 +330,7 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 		return nil
 	}
 
-	for record := range r.recordCh {
+	writeRecord := func(record arrow.RecordBatch) error {
 		if currentWriter == nil {
 			fileCount := int(r.fileCount.Add(1))
 			var err error
@@ -335,42 +338,103 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 				r.ctx, r.partitionKey, r.partitionValues,
 				r.partitionID, fileCount)
 			if err != nil {
-				record.Release()
-				r.sendError(err)
-
-				return
+				return err
 			}
 		}
 
 		converted, err := ToRequestedSchema(r.ctx, r.factory.fileSchema,
 			r.factory.taskSchema, record, SchemaOptions{IncludeFieldIDs: true, UseWriteDefault: true})
 		if err != nil {
-			record.Release()
-			r.sendError(err)
-
-			return
+			return err
 		}
 
 		err = currentWriter.Write(converted)
 		converted.Release()
-		record.Release()
 		if err != nil {
-			r.sendError(err)
-
-			return
+			return err
 		}
 
 		if currentWriter.BytesWritten() >= r.factory.targetFileSize {
+			return closeWriter()
+		}
+
+		return nil
+	}
+
+	idleTimeout := r.factory.idleTimeout
+	if idleTimeout <= 0 {
+		// No idle timeout configured: use the original simple loop.
+		for record := range r.recordCh {
+			if err := writeRecord(record); err != nil {
+				record.Release()
+				r.sendError(err)
+
+				return
+			}
+			record.Release()
+		}
+
+		if err := closeWriter(); err != nil {
+			r.sendError(err)
+		}
+
+		return
+	}
+
+	// Idle timeout enabled: use a select loop with a timer.
+	idleTimer := time.NewTimer(idleTimeout)
+	idleTimer.Stop()
+	defer idleTimer.Stop()
+
+	for {
+		select {
+		case record, ok := <-r.recordCh:
+			if !ok {
+				// Channel closed, finalize the last file.
+				idleTimer.Stop()
+				if err := closeWriter(); err != nil {
+					r.sendError(err)
+				}
+
+				return
+			}
+
+			if err := writeRecord(record); err != nil {
+				record.Release()
+				r.sendError(err)
+
+				return
+			}
+			record.Release()
+
+			// Reset idle timer only when a file is open.
+			if currentWriter != nil {
+				if !idleTimer.Stop() {
+					select {
+					case <-idleTimer.C:
+					default:
+					}
+				}
+				idleTimer.Reset(idleTimeout)
+			}
+
+		case <-idleTimer.C:
+			// No records arrived for idleTimeout; flush the current file.
 			if err := closeWriter(); err != nil {
 				r.sendError(err)
 
 				return
 			}
-		}
-	}
 
-	if err := closeWriter(); err != nil {
-		r.sendError(err)
+		case <-r.ctx.Done():
+			// Context cancelled (e.g. via closeAndWait). Finalize any open
+			// file so buffered data is not lost.
+			if err := closeWriter(); err != nil {
+				r.sendError(err)
+			}
+
+			return
+		}
 	}
 }
 

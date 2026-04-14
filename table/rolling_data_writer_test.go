@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -50,6 +51,10 @@ func TestRollingDataWriter(t *testing.T) {
 }
 
 func (s *RollingDataWriterTestSuite) createWriterFactory(loc string, arrSchema *arrow.Schema, targetFileSize int64) (*writerFactory, *iceberg.Schema) {
+	return s.createWriterFactoryWithIdleTimeout(loc, arrSchema, targetFileSize, 0)
+}
+
+func (s *RollingDataWriterTestSuite) createWriterFactoryWithIdleTimeout(loc string, arrSchema *arrow.Schema, targetFileSize int64, idleTimeout time.Duration) (*writerFactory, *iceberg.Schema) {
 	icebergSchema, err := ArrowSchemaToIcebergWithFreshIDs(arrSchema, false)
 	s.Require().NoError(err)
 
@@ -62,9 +67,10 @@ func (s *RollingDataWriterTestSuite) createWriterFactory(loc string, arrSchema *
 
 	writeUUID := uuid.New()
 	args := recordWritingArgs{
-		sc:        arrSchema,
-		fs:        iceio.LocalFS{},
-		writeUUID: &writeUUID,
+		sc:          arrSchema,
+		fs:          iceio.LocalFS{},
+		writeUUID:   &writeUUID,
+		idleTimeout: idleTimeout,
 		counter: func(yield func(int) bool) {
 			for i := 0; ; i++ {
 				if !yield(i) {
@@ -332,4 +338,112 @@ func (s *RollingDataWriterTestSuite) TestBytesWrittenReflectsCompressedSize() {
 	df, err := fw.Close()
 	s.Require().NoError(err)
 	s.Equal(int64(100), df.Count())
+}
+
+func (s *RollingDataWriterTestSuite) TestIdleTimeoutFlushesFile() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	loc := filepath.ToSlash(s.T().TempDir())
+	factory, _ := s.createWriterFactoryWithIdleTimeout(loc, arrSchema, 1024*1024, 100*time.Millisecond)
+	defer factory.closeAll()
+
+	outputCh := make(chan iceberg.DataFile, 10)
+	writer := factory.newRollingDataWriter(s.ctx, nil, "", nil, outputCh)
+
+	record := s.buildRecord(arrSchema, 5)
+	defer record.Release()
+
+	s.Require().NoError(writer.Add(record))
+
+	// Wait for the idle timer to fire and flush the file.
+	select {
+	case df := <-outputCh:
+		s.Equal(int64(5), df.Count())
+	case <-time.After(2 * time.Second):
+		s.Fail("timed out waiting for idle flush")
+	}
+}
+
+func (s *RollingDataWriterTestSuite) TestIdleTimerResetsOnActivity() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	loc := filepath.ToSlash(s.T().TempDir())
+	factory, _ := s.createWriterFactoryWithIdleTimeout(loc, arrSchema, 1024*1024, 200*time.Millisecond)
+	defer factory.closeAll()
+
+	outputCh := make(chan iceberg.DataFile, 10)
+	writer := factory.newRollingDataWriter(s.ctx, nil, "", nil, outputCh)
+
+	// Send records at intervals shorter than the idle timeout so the timer
+	// keeps resetting and does not flush prematurely.
+	for range 5 {
+		record := s.buildRecord(arrSchema, 3)
+		s.Require().NoError(writer.Add(record))
+		record.Release()
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// No file should have been flushed yet (all 15 rows still in one file).
+	select {
+	case <-outputCh:
+		s.Fail("idle flush should not have fired while records were being added")
+	default:
+	}
+
+	// Now wait for the idle timeout to fire.
+	select {
+	case df := <-outputCh:
+		s.Equal(int64(15), df.Count())
+	case <-time.After(2 * time.Second):
+		s.Fail("timed out waiting for idle flush after activity stopped")
+	}
+}
+
+func (s *RollingDataWriterTestSuite) TestWriterReopensAfterIdleFlush() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	loc := filepath.ToSlash(s.T().TempDir())
+	factory, _ := s.createWriterFactoryWithIdleTimeout(loc, arrSchema, 1024*1024, 100*time.Millisecond)
+	defer factory.closeAll()
+
+	outputCh := make(chan iceberg.DataFile, 10)
+	writer := factory.newRollingDataWriter(s.ctx, nil, "", nil, outputCh)
+
+	// First batch: write and let idle flush.
+	record1 := s.buildRecord(arrSchema, 5)
+	s.Require().NoError(writer.Add(record1))
+	record1.Release()
+
+	select {
+	case df := <-outputCh:
+		s.Equal(int64(5), df.Count())
+	case <-time.After(2 * time.Second):
+		s.Fail("timed out waiting for first idle flush")
+	}
+
+	// Second batch: writer should reopen a new file.
+	record2 := s.buildRecord(arrSchema, 7)
+	s.Require().NoError(writer.Add(record2))
+	record2.Release()
+
+	// Close the writer to finalize the second file.
+	s.Require().NoError(writer.closeAndWait())
+	close(outputCh)
+
+	var dataFiles []iceberg.DataFile
+	for df := range outputCh {
+		dataFiles = append(dataFiles, df)
+	}
+
+	s.Require().Len(dataFiles, 1)
+	s.Equal(int64(7), dataFiles[0].Count())
 }
