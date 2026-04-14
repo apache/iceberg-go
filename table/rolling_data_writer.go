@@ -521,7 +521,7 @@ func (w *writerFactory) reapIdleWriters(ctx context.Context) {
 
 				// closeAndWait cancels the goroutine, waits for it to
 				// drain, and removes the writer from the map.
-				writer.closeAndWait()
+				_ = writer.closeAndWait()
 
 				return true
 			})

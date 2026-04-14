@@ -526,6 +526,7 @@ func TestReaperCleansUpIdleWriters(t *testing.T) {
 	// Wait for the reaper to sweep.
 	assert.Eventually(t, func() bool {
 		_, ok := factory.writers.Load("part=a")
+
 		return !ok
 	}, 5*time.Second, 50*time.Millisecond, "reaper should have removed the idle writer from the map")
 }
