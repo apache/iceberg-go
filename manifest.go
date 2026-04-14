@@ -1472,11 +1472,6 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 			}
 
 			wrapped := *(file.(*manifestFile))
-			// Mirror counts into the legacy field names so Athena readers
-			// (which expect added_data_files_count) also see correct values.
-			wrapped.LegacyAddedFilesCount = wrapped.AddedFilesCount
-			wrapped.LegacyExistingFilesCount = wrapped.ExistingFilesCount
-			wrapped.LegacyDeletedFilesCount = wrapped.DeletedFilesCount
 			if m.version == 3 {
 				// Ref: https://github.com/apache/iceberg/blob/ea2071568dc66148b483a82eefedcd2992b435f7/core/src/main/java/org/apache/iceberg/ManifestListWriter.java#L157-L168
 				if wrapped.Content == ManifestContentData && wrapped.FirstRowId == nil {
