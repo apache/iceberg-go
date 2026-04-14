@@ -309,28 +309,49 @@ func (m *manifestFileV1) FetchEntries(fs iceio.IO, discardDeleted bool) ([]Manif
 }
 
 type manifestFile struct {
-	Path               string          `avro:"manifest_path"`
-	Len                int64           `avro:"manifest_length"`
-	SpecID             int32           `avro:"partition_spec_id"`
-	Content            ManifestContent `avro:"content"`
-	SeqNumber          int64           `avro:"sequence_number"`
-	MinSeqNumber       int64           `avro:"min_sequence_number"`
-	AddedSnapshotID    int64           `avro:"added_snapshot_id"`
-	AddedFilesCount    int32           `avro:"added_files_count"`
-	ExistingFilesCount int32           `avro:"existing_files_count"`
-	DeletedFilesCount  int32           `avro:"deleted_files_count"`
-	AddedRowsCount     int64           `avro:"added_rows_count"`
-	ExistingRowsCount  int64           `avro:"existing_rows_count"`
-	DeletedRowsCount   int64           `avro:"deleted_rows_count"`
-	PartitionList      *[]FieldSummary `avro:"partitions"`
-	Key                []byte          `avro:"key_metadata"`
-	FirstRowId         *int64          `avro:"first_row_id"`
+	Path            string          `avro:"manifest_path"`
+	Len             int64           `avro:"manifest_length"`
+	SpecID          int32           `avro:"partition_spec_id"`
+	Content         ManifestContent `avro:"content"`
+	SeqNumber       int64           `avro:"sequence_number"`
+	MinSeqNumber    int64           `avro:"min_sequence_number"`
+	AddedSnapshotID int64           `avro:"added_snapshot_id"`
+	// Canonical count fields (spec / Spark / Trino names).
+	AddedFilesCount    int32 `avro:"added_files_count"`
+	ExistingFilesCount int32 `avro:"existing_files_count"`
+	DeletedFilesCount  int32 `avro:"deleted_files_count"`
+	// Legacy count fields used by pre-1.4 Java Iceberg and Athena.
+	// Populated by the OCF decoder when the writer schema uses these names;
+	// normalizeLegacyCounts() promotes them into the canonical fields above.
+	LegacyAddedFilesCount    int32           `avro:"added_data_files_count"`
+	LegacyExistingFilesCount int32           `avro:"existing_data_files_count"`
+	LegacyDeletedFilesCount  int32           `avro:"deleted_data_files_count"`
+	AddedRowsCount           int64           `avro:"added_rows_count"`
+	ExistingRowsCount        int64           `avro:"existing_rows_count"`
+	DeletedRowsCount         int64           `avro:"deleted_rows_count"`
+	PartitionList            *[]FieldSummary `avro:"partitions"`
+	Key                      []byte          `avro:"key_metadata"`
+	FirstRowId               *int64          `avro:"first_row_id"`
 
 	version int `avro:"-"`
 }
 
 func (m *manifestFile) setVersion(v int) {
 	m.version = v
+}
+
+// normalizeLegacyCounts promotes pre-1.4 Java Iceberg field values (Athena names)
+// into the canonical count fields. Must be called once immediately after Avro decode.
+func (m *manifestFile) normalizeLegacyCounts() {
+	if m.AddedFilesCount <= 0 && m.LegacyAddedFilesCount > 0 {
+		m.AddedFilesCount = m.LegacyAddedFilesCount
+	}
+	if m.ExistingFilesCount <= 0 && m.LegacyExistingFilesCount > 0 {
+		m.ExistingFilesCount = m.LegacyExistingFilesCount
+	}
+	if m.DeletedFilesCount <= 0 && m.LegacyDeletedFilesCount > 0 {
+		m.DeletedFilesCount = m.LegacyDeletedFilesCount
+	}
 }
 
 func (m *manifestFile) toV1(v1file *manifestFileV1) {
@@ -535,6 +556,7 @@ type ManifestFile interface {
 	// WriteEntries(out io.Writer, entries []ManifestEntry) error
 
 	setVersion(int)
+	normalizeLegacyCounts()
 }
 
 type fallbackManifest[T any] interface {
@@ -555,7 +577,9 @@ func decodeManifestsWithFallback[P fallbackManifest[T], T any](rd *ocf.Reader) (
 			return nil, err
 		}
 
-		results = append(results, tmp.toFile())
+		result := tmp.toFile()
+		result.normalizeLegacyCounts()
+		results = append(results, result)
 	}
 }
 
@@ -575,6 +599,7 @@ func decodeManifests[I interface {
 		}
 
 		tmp.setVersion(version)
+		tmp.normalizeLegacyCounts()
 		results = append(results, tmp)
 	}
 }
@@ -1447,6 +1472,11 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 			}
 
 			wrapped := *(file.(*manifestFile))
+			// Mirror counts into the legacy field names so Athena readers
+			// (which expect added_data_files_count) also see correct values.
+			wrapped.LegacyAddedFilesCount = wrapped.AddedFilesCount
+			wrapped.LegacyExistingFilesCount = wrapped.ExistingFilesCount
+			wrapped.LegacyDeletedFilesCount = wrapped.DeletedFilesCount
 			if m.version == 3 {
 				// Ref: https://github.com/apache/iceberg/blob/ea2071568dc66148b483a82eefedcd2992b435f7/core/src/main/java/org/apache/iceberg/ManifestListWriter.java#L157-L168
 				if wrapped.Content == ManifestContentData && wrapped.FirstRowId == nil {

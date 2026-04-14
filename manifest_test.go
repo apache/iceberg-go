@@ -1815,3 +1815,79 @@ func (m *ManifestTestSuite) TestWriteManifestClosesWriterOnEntryError() {
 	m.Require().ErrorContains(err, "only entries with status ADDED")
 	m.Require().ErrorIs(err, errLimitedWrite)
 }
+
+// TestReadManifestListAthenaFieldNames verifies that manifest list entries written
+// with pre-1.4 Java Iceberg / Athena field names (added_data_files_count, etc.) are
+// decoded correctly via post-decode normalization into the canonical count fields.
+func (m *ManifestTestSuite) TestReadManifestListAthenaFieldNames() {
+	// Athena writes added_data_files_count / existing_data_files_count /
+	// deleted_data_files_count instead of the spec names. Simulate that by
+	// encoding an OCF file whose embedded schema uses the Athena names.
+	athenaSchema, err := avro.Parse(`{
+		"type": "record",
+		"name": "manifest_file",
+		"fields": [
+			{"name": "manifest_path",              "type": "string"},
+			{"name": "manifest_length",             "type": "long"},
+			{"name": "partition_spec_id",           "type": "int"},
+			{"name": "content",                     "type": "int", "default": 0},
+			{"name": "sequence_number",             "type": "long", "default": 0},
+			{"name": "min_sequence_number",         "type": "long", "default": 0},
+			{"name": "added_snapshot_id",           "type": "long"},
+			{"name": "added_data_files_count",      "type": "int"},
+			{"name": "existing_data_files_count",   "type": "int"},
+			{"name": "deleted_data_files_count",    "type": "int"},
+			{"name": "added_rows_count",            "type": "long"},
+			{"name": "existing_rows_count",         "type": "long"},
+			{"name": "deleted_rows_count",          "type": "long"},
+			{"name": "key_metadata",                "type": ["null","bytes"], "default": null}
+		]
+	}`)
+	m.Require().NoError(err)
+
+	type athenaRecord struct {
+		Path              string `avro:"manifest_path"`
+		Len               int64  `avro:"manifest_length"`
+		SpecID            int32  `avro:"partition_spec_id"`
+		Content           int32  `avro:"content"`
+		SeqNumber         int64  `avro:"sequence_number"`
+		MinSeqNumber      int64  `avro:"min_sequence_number"`
+		AddedSnapshotID   int64  `avro:"added_snapshot_id"`
+		AddedDataFiles    int32  `avro:"added_data_files_count"`
+		ExistingDataFiles int32  `avro:"existing_data_files_count"`
+		DeletedDataFiles  int32  `avro:"deleted_data_files_count"`
+		AddedRows         int64  `avro:"added_rows_count"`
+		ExistingRows      int64  `avro:"existing_rows_count"`
+		DeletedRows       int64  `avro:"deleted_rows_count"`
+		Key               []byte `avro:"key_metadata"`
+	}
+
+	record := athenaRecord{
+		Path:              "s3://bucket/metadata/athena-m0.avro",
+		Len:               1024,
+		AddedSnapshotID:   42,
+		AddedDataFiles:    7,
+		ExistingDataFiles: 3,
+		AddedRows:         100,
+	}
+
+	var buf bytes.Buffer
+	wr, err := ocf.NewWriter(&buf, athenaSchema,
+		ocf.WithSchema(athenaSchema.String()),
+		ocf.WithMetadata(map[string][]byte{
+			"format-version": {'2'},
+		}))
+	m.Require().NoError(err)
+	m.Require().NoError(wr.Encode(record))
+	m.Require().NoError(wr.Close())
+
+	files, err := ReadManifestList(&buf)
+	m.Require().NoError(err)
+	m.Require().Len(files, 1)
+
+	f := files[0]
+	m.Equal("s3://bucket/metadata/athena-m0.avro", f.FilePath())
+	m.EqualValues(7, f.AddedDataFiles(), "legacy field should be normalized into canonical")
+	m.EqualValues(3, f.ExistingDataFiles(), "legacy field should be normalized into canonical")
+	m.True(f.HasAddedFiles(), "HasAddedFiles must be true after normalization")
+}

@@ -202,9 +202,14 @@ func init() {
 			fieldNode("manifest_length", LongNode, 501, withDoc("Total file size in bytes")),
 			fieldNode("partition_spec_id", IntNode, 502, withDoc("Spec ID used to write")),
 			fieldNode("added_snapshot_id", LongNode, 503, withDoc("Snapshot ID that added the manifest")),
+			// Spec names (Spark/Trino/post-1.4 Java).
 			fieldNode("added_files_count", NullableNode(IntNode), 504, withDoc("Added entry count")),
 			fieldNode("existing_files_count", NullableNode(IntNode), 505, withDoc("Existing entry count")),
 			fieldNode("deleted_files_count", NullableNode(IntNode), 506, withDoc("Deleted entry count")),
+			// Legacy names used by pre-1.4 Java Iceberg and Athena; written for compatibility.
+			fieldNode("added_data_files_count", NullableNode(IntNode), 504, withDoc("Added entry count (pre-1.4 name)")),
+			fieldNode("existing_data_files_count", NullableNode(IntNode), 505, withDoc("Existing entry count (pre-1.4 name)")),
+			fieldNode("deleted_data_files_count", NullableNode(IntNode), 506, withDoc("Deleted entry count (pre-1.4 name)")),
 			fieldNode("partitions", partitionsNode, 507, withDoc("Partition field summaries")),
 			fieldNode("added_rows_count", NullableNode(LongNode), 512, withDoc("Added row count")),
 			fieldNode("existing_rows_count", NullableNode(LongNode), 513, withDoc("Existing row count")),
@@ -224,9 +229,14 @@ func init() {
 			fieldNode("sequence_number", LongNode, 515, withDoc("Sequence number"), withDefault(int64(0))),
 			fieldNode("min_sequence_number", LongNode, 516, withDoc("Minimum sequence number"), withDefault(int64(0))),
 			fieldNode("added_snapshot_id", LongNode, 503, withDoc("Snapshot ID that added the manifest")),
+			// Spec names (Spark/Trino/post-1.4 Java).
 			fieldNode("added_files_count", IntNode, 504, withDoc("Added entry count")),
 			fieldNode("existing_files_count", IntNode, 505, withDoc("Existing entry count")),
 			fieldNode("deleted_files_count", IntNode, 506, withDoc("Deleted entry count")),
+			// Legacy names used by pre-1.4 Java Iceberg and Athena; written for compatibility.
+			fieldNode("added_data_files_count", IntNode, 504, withDoc("Added entry count (pre-1.4 name)"), withDefault(int32(0))),
+			fieldNode("existing_data_files_count", IntNode, 505, withDoc("Existing entry count (pre-1.4 name)"), withDefault(int32(0))),
+			fieldNode("deleted_data_files_count", IntNode, 506, withDoc("Deleted entry count (pre-1.4 name)"), withDefault(int32(0))),
 			fieldNode("partitions", partitionsNode, 507, withDoc("Partition field summaries")),
 			fieldNode("added_rows_count", LongNode, 512, withDoc("Added row count")),
 			fieldNode("existing_rows_count", LongNode, 513, withDoc("Existing row count")),
@@ -345,9 +355,14 @@ func init() {
 			fieldNode("sequence_number", LongNode, 515, withDoc("Sequence number"), withDefault(int64(0))),
 			fieldNode("min_sequence_number", LongNode, 516, withDoc("Minimum sequence number"), withDefault(int64(0))),
 			fieldNode("added_snapshot_id", LongNode, 503, withDoc("Snapshot ID that added the manifest")),
+			// Spec names (Spark/Trino/post-1.4 Java).
 			fieldNode("added_files_count", IntNode, 504, withDoc("Added entry count")),
 			fieldNode("existing_files_count", IntNode, 505, withDoc("Existing entry count")),
 			fieldNode("deleted_files_count", IntNode, 506, withDoc("Deleted entry count")),
+			// Legacy names used by pre-1.4 Java Iceberg and Athena; written for compatibility.
+			fieldNode("added_data_files_count", IntNode, 504, withDoc("Added entry count (pre-1.4 name)"), withDefault(int32(0))),
+			fieldNode("existing_data_files_count", IntNode, 505, withDoc("Existing entry count (pre-1.4 name)"), withDefault(int32(0))),
+			fieldNode("deleted_data_files_count", IntNode, 506, withDoc("Deleted entry count (pre-1.4 name)"), withDefault(int32(0))),
 			fieldNode("partitions", partitionsNode, 507, withDoc("Partition field summaries")),
 			fieldNode("added_rows_count", LongNode, 512, withDoc("Added row count")),
 			fieldNode("existing_rows_count", LongNode, 513, withDoc("Existing row count")),
