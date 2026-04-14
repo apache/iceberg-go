@@ -153,9 +153,21 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// Determine which flags were explicitly supplied on the command line so
+	// that mergeConf can apply file-config values only for flags that were
+	// not explicitly provided (i.e. still at their docopt default).
+	explicitFlags := make(map[string]bool)
+	for _, arg := range os.Args[1:] {
+		if strings.HasPrefix(arg, "--") {
+			// --flag=value or --flag (bare boolean)
+			name := strings.SplitN(strings.TrimPrefix(arg, "--"), "=", 2)[0]
+			explicitFlags[name] = true
+		}
+	}
+
 	fileCfg := config.ParseConfig(config.LoadConfig(cfg.Config), "default")
 	if fileCfg != nil {
-		mergeConf(fileCfg, &cfg)
+		mergeConf(fileCfg, &cfg, explicitFlags)
 	}
 
 	var output Output
@@ -508,20 +520,24 @@ func properties(ctx context.Context, output Output, cat catalog.Catalog, args pr
 	}
 }
 
-func mergeConf(fileConf *config.CatalogConfig, resConfig *Config) {
-	if len(resConfig.Catalog) == 0 {
+// mergeConf applies values from the file config into resConfig for any option
+// that was not explicitly provided on the command line. explicitFlags is a set
+// of flag names (without the "--" prefix) that appeared in os.Args so that
+// CLI-provided values always take precedence over the file config.
+func mergeConf(fileConf *config.CatalogConfig, resConfig *Config, explicitFlags map[string]bool) {
+	if !explicitFlags["catalog"] && len(fileConf.CatalogType) > 0 {
 		resConfig.Catalog = fileConf.CatalogType
 	}
-	if len(resConfig.URI) == 0 {
+	if !explicitFlags["uri"] && len(fileConf.URI) > 0 {
 		resConfig.URI = fileConf.URI
 	}
-	if len(resConfig.Output) == 0 {
+	if !explicitFlags["output"] && len(fileConf.Output) > 0 {
 		resConfig.Output = fileConf.Output
 	}
-	if len(resConfig.Cred) == 0 {
+	if !explicitFlags["credential"] && len(fileConf.Credential) > 0 {
 		resConfig.Cred = fileConf.Credential
 	}
-	if len(resConfig.Warehouse) == 0 {
+	if !explicitFlags["warehouse"] && len(fileConf.Warehouse) > 0 {
 		resConfig.Warehouse = fileConf.Warehouse
 	}
 }
