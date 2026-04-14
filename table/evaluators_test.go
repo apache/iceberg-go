@@ -2732,43 +2732,43 @@ func TestEvaluators(t *testing.T) {
 
 func TestLiteralToPhysBytes(t *testing.T) {
 	t.Run("int32", func(t *testing.T) {
-		b, ok := literalToPhysBytes(iceberg.PrimitiveTypes.Int32, iceberg.Int32Literal(1))
+		b, ok := literalToPhysBytes(iceberg.Int32Literal(1))
 		require.True(t, ok)
 		assert.Equal(t, []byte{0x01, 0x00, 0x00, 0x00}, b)
 	})
 
 	t.Run("int64", func(t *testing.T) {
-		b, ok := literalToPhysBytes(iceberg.PrimitiveTypes.Int64, iceberg.Int64Literal(1))
+		b, ok := literalToPhysBytes(iceberg.Int64Literal(1))
 		require.True(t, ok)
 		assert.Equal(t, []byte{0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, b)
 	})
 
 	t.Run("float32", func(t *testing.T) {
-		b, ok := literalToPhysBytes(iceberg.PrimitiveTypes.Float32, iceberg.Float32Literal(1.0))
+		b, ok := literalToPhysBytes(iceberg.Float32Literal(1.0))
 		require.True(t, ok)
 		assert.Equal(t, 4, len(b))
 	})
 
 	t.Run("float64", func(t *testing.T) {
-		b, ok := literalToPhysBytes(iceberg.PrimitiveTypes.Float64, iceberg.Float64Literal(1.0))
+		b, ok := literalToPhysBytes(iceberg.Float64Literal(1.0))
 		require.True(t, ok)
 		assert.Equal(t, 8, len(b))
 	})
 
 	t.Run("string", func(t *testing.T) {
-		b, ok := literalToPhysBytes(iceberg.PrimitiveTypes.String, iceberg.StringLiteral("hello"))
+		b, ok := literalToPhysBytes(iceberg.StringLiteral("hello"))
 		require.True(t, ok)
 		assert.Equal(t, []byte("hello"), b)
 	})
 
 	t.Run("binary", func(t *testing.T) {
-		b, ok := literalToPhysBytes(iceberg.PrimitiveTypes.Binary, iceberg.BinaryLiteral([]byte{0xDE, 0xAD}))
+		b, ok := literalToPhysBytes(iceberg.BinaryLiteral([]byte{0xDE, 0xAD}))
 		require.True(t, ok)
 		assert.Equal(t, []byte{0xDE, 0xAD}, b)
 	})
 
 	t.Run("boolean_unsupported", func(t *testing.T) {
-		_, ok := literalToPhysBytes(iceberg.PrimitiveTypes.Bool, iceberg.BoolLiteral(true))
+		_, ok := literalToPhysBytes(iceberg.BoolLiteral(true))
 		assert.False(t, ok)
 	})
 }

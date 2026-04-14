@@ -720,7 +720,7 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 	}
 
 	var rgList []int
-	if rowGroupTester != nil && rowGroupTester.StatsFn != nil {
+	if rowGroupTester != nil && (rowGroupTester.StatsFn != nil || len(rowGroupTester.BloomPreds) > 0) {
 		fileMeta := w.ParquetReader().MetaData()
 		numRg := w.ParquetReader().NumRowGroups()
 
@@ -736,10 +736,16 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 
 		rgList = make([]int, 0)
 		for rg := 0; rg < numRg; rg++ {
-			rgMeta := fileMeta.RowGroup(rg)
-			use, err := rowGroupTester.StatsFn(rgMeta, cols)
-			if err != nil {
-				return nil, err
+			use := true
+
+			if rowGroupTester.StatsFn != nil {
+				rgMeta := fileMeta.RowGroup(rg)
+
+				var err error
+				use, err = rowGroupTester.StatsFn(rgMeta, cols)
+				if err != nil {
+					return nil, err
+				}
 			}
 
 			if !use {
@@ -747,6 +753,7 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 			}
 
 			if bfReader != nil {
+				var err error
 				use, err = checkRowGroupBloomFilters(bfReader, rg, fieldIDToColIdx, rowGroupTester.BloomPreds)
 				if err != nil {
 					return nil, err
@@ -788,7 +795,11 @@ func checkRowGroupBloomFilters(
 	preds []RowGroupBloomPred,
 ) (bool, error) {
 	rgBFReader, err := bfReader.RowGroup(rg)
-	if err != nil || rgBFReader == nil {
+	if err != nil {
+		return false, err
+	}
+
+	if rgBFReader == nil {
 		return true, nil
 	}
 

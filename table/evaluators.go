@@ -18,7 +18,6 @@
 package table
 
 import (
-	"encoding/binary"
 	"fmt"
 	"math"
 	"slices"
@@ -1567,90 +1566,67 @@ func (m *strictMetricsEval) canContainNans(fieldID int) bool {
 }
 
 // literalToPhysBytes converts an Iceberg literal to the physical byte
-// representation that the Parquet bloom filter writer hashes. The encoding
-// must match Arrow's internal getBytes[T] (little-endian for numerics, raw
-// bytes for byte-array types).
-func literalToPhysBytes(typ iceberg.PrimitiveType, lit iceberg.Literal) ([]byte, bool) {
-	switch typ.(type) {
-	case iceberg.Int32Type:
-		v := lit.(iceberg.TypedLiteral[int32]).Value()
-		b := make([]byte, 4)
-		binary.LittleEndian.PutUint32(b, uint32(v))
+// representation that the Parquet bloom filter writer hashes, using the
+// literal's MarshalBinary encoding. Float types are normalized before
+// encoding (-0.0 → 0.0, NaN → canonical NaN) to match Parquet/Java writer
+// behavior and avoid false-negative bloom filter results.
+func literalToPhysBytes(lit iceberg.Literal) ([]byte, bool) {
+	switch v := lit.(type) {
+	case iceberg.Float32Literal:
+		// Normalize: -0.0 and 0.0 have different bit patterns, so without this
+		// a query for 0.0 won't match a row group where -0.0 was written.
+		f := float32(v)
+		if f == 0 {
+			f = 0
+		} else if math.IsNaN(float64(f)) {
+			f = float32(math.NaN())
+		}
 
-		return b, true
+		lit = iceberg.Float32Literal(f)
 
-	case iceberg.DateType:
-		v := lit.(iceberg.TypedLiteral[iceberg.Date]).Value()
-		b := make([]byte, 4)
-		binary.LittleEndian.PutUint32(b, uint32(v))
+	case iceberg.Float64Literal:
+		f := float64(v)
+		if f == 0 {
+			f = 0
+		} else if math.IsNaN(f) {
+			f = math.NaN()
+		}
 
-		return b, true
+		lit = iceberg.Float64Literal(f)
 
-	case iceberg.Int64Type:
-		v := lit.(iceberg.TypedLiteral[int64]).Value()
-		b := make([]byte, 8)
-		binary.LittleEndian.PutUint64(b, uint64(v))
+	case iceberg.BoolLiteral:
+		// Low cardinality; bloom filters not useful.
+		return nil, false
 
-		return b, true
+	case iceberg.DecimalLiteral:
+		// Physical representation depends on precision (INT32/INT64/FIXED_LEN_BYTE_ARRAY).
+		// TODO: add decimal bloom filter support once schema-level precision lookup is wired in.
+		_ = v
 
-	case iceberg.TimeType:
-		v := lit.(iceberg.TypedLiteral[iceberg.Time]).Value()
-		b := make([]byte, 8)
-		binary.LittleEndian.PutUint64(b, uint64(v))
+		return nil, false
 
-		return b, true
+	case iceberg.TimestampNsLiteral:
+		// Not yet handled by all expression machinery; skip for safety.
+		_ = v
 
-	case iceberg.TimestampType, iceberg.TimestampTzType:
-		v := lit.(iceberg.TypedLiteral[iceberg.Timestamp]).Value()
-		b := make([]byte, 8)
-		binary.LittleEndian.PutUint64(b, uint64(v))
-
-		return b, true
-
-	case iceberg.Float32Type:
-		v := lit.(iceberg.TypedLiteral[float32]).Value()
-		b := make([]byte, 4)
-		binary.LittleEndian.PutUint32(b, math.Float32bits(v))
-
-		return b, true
-
-	case iceberg.Float64Type:
-		v := lit.(iceberg.TypedLiteral[float64]).Value()
-		b := make([]byte, 8)
-		binary.LittleEndian.PutUint64(b, math.Float64bits(v))
-
-		return b, true
-
-	case iceberg.StringType:
-		v := lit.(iceberg.TypedLiteral[string]).Value()
-
-		return []byte(v), true
-
-	case iceberg.BinaryType:
-		v := lit.(iceberg.TypedLiteral[[]byte]).Value()
-
-		return v, true
-
-	case iceberg.UUIDType:
-		v := lit.(iceberg.TypedLiteral[uuid.UUID]).Value()
-
-		return v[:], true
-
-	case iceberg.FixedType:
-		v := lit.(iceberg.TypedLiteral[[]byte]).Value()
-
-		return v, true
-
-	default:
-		// BooleanType: low cardinality, bloom filters not effective.
-		// DecimalType: physical representation depends on precision
-		//   (INT32 for p≤9, INT64 for p≤18, FIXED_LEN_BYTE_ARRAY otherwise).
-		//   TODO: add decimal bloom filter support once schema-level precision
-		//   lookup is wired in.
-		// TimestampNsType / TimestampTzNsType: literal type is TimestampNano
-		//   which is not yet handled by all expression machinery; skip for safety.
 		return nil, false
 	}
+
+	type binaryMarshaler interface {
+		MarshalBinary() ([]byte, error)
+	}
+
+	m, ok := lit.(binaryMarshaler)
+	if !ok {
+		return nil, false
+	}
+
+	b, err := m.MarshalBinary()
+	if err != nil {
+		return nil, false
+	}
+
+	return b, true
 }
 
 // bloomPredicateCollector walks a bound expression and collects EqualTo/In
@@ -1683,12 +1659,11 @@ func (c *bloomPredicateCollector) VisitBound(pred iceberg.BoundPredicate) []inte
 
 func (c *bloomPredicateCollector) VisitEqual(t iceberg.BoundTerm, lit iceberg.Literal) []internal.RowGroupBloomPred {
 	field := t.Ref().Field()
-	typ, ok := field.Type.(iceberg.PrimitiveType)
-	if !ok {
+	if _, ok := field.Type.(iceberg.PrimitiveType); !ok {
 		return nil
 	}
 
-	b, ok := literalToPhysBytes(typ, lit)
+	b, ok := literalToPhysBytes(lit)
 	if !ok {
 		return nil
 	}
@@ -1702,14 +1677,13 @@ func (c *bloomPredicateCollector) VisitIn(t iceberg.BoundTerm, s iceberg.Set[ice
 	}
 
 	field := t.Ref().Field()
-	typ, ok := field.Type.(iceberg.PrimitiveType)
-	if !ok {
+	if _, ok := field.Type.(iceberg.PrimitiveType); !ok {
 		return nil
 	}
 
 	physBytes := make([][]byte, 0, s.Len())
 	for _, lit := range s.Members() {
-		b, ok := literalToPhysBytes(typ, lit)
+		b, ok := literalToPhysBytes(lit)
 		if !ok {
 			return nil
 		}
