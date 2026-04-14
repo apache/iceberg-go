@@ -20,6 +20,7 @@ package internal_test
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"math/big"
 	"strings"
@@ -762,5 +763,187 @@ func TestParquetBatchSizeFromTableProperties(t *testing.T) {
 		ctx := internal.WithTableProperties(context.Background(), props)
 		got := internal.TablePropertiesFromContext(ctx)
 		assert.Equal(t, internal.ParquetBatchSizeDefault, got.GetInt(internal.ParquetBatchSizeKey, internal.ParquetBatchSizeDefault))
+	})
+}
+
+// buildBloomTestParquet writes a Parquet file with two row groups into buf.
+// The single required INT32 column "id" has Iceberg field_id=1 and bloom
+// filters enabled. RG0 holds values [1..rgSize], RG1 holds [rgSize+1..2*rgSize].
+func buildBloomTestParquet(t *testing.T, rgSize int) []byte {
+	t.Helper()
+
+	idNode := schema.NewInt32Node("id", parquet.Repetitions.Required, 1)
+
+	rootNode, err := schema.NewGroupNode("schema", parquet.Repetitions.Required,
+		schema.FieldList{idNode}, -1)
+	require.NoError(t, err)
+
+	writerProps := parquet.NewWriterProperties(
+		parquet.WithStats(true),
+		parquet.WithBloomFilterEnabledFor("id", true),
+	)
+
+	var buf bytes.Buffer
+	pw := file.NewParquetWriter(&buf, rootNode, file.WithWriterProps(writerProps))
+
+	writeRG := func(start, end int) {
+		rgw := pw.AppendRowGroup()
+		cw, werr := rgw.NextColumn()
+		require.NoError(t, werr)
+
+		vals := make([]int32, end-start+1)
+		for i := range vals {
+			vals[i] = int32(start + i)
+		}
+
+		_, werr = cw.(*file.Int32ColumnChunkWriter).WriteBatch(vals, nil, nil)
+		require.NoError(t, werr)
+		require.NoError(t, cw.Close())
+		require.NoError(t, rgw.Close())
+	}
+
+	writeRG(1, rgSize)          // RG0
+	writeRG(rgSize+1, 2*rgSize) // RG1
+
+	require.NoError(t, pw.Close())
+
+	return buf.Bytes()
+}
+
+// openBloomTestReader creates a fresh FileReader from raw Parquet bytes for
+// each subtest call, so row-group state is not shared between subtests.
+func openBloomTestReader(t *testing.T, data []byte) internal.FileReader {
+	t.Helper()
+
+	pqRdr, err := file.NewParquetReader(bytes.NewReader(data))
+	require.NoError(t, err)
+
+	arrRdr, err := pqarrow.NewFileReader(pqRdr, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	require.NoError(t, err)
+
+	return internal.WrapParquetFileReader(arrRdr)
+}
+
+func int32PhysBytes(v int32) []byte {
+	b := make([]byte, 4)
+	binary.LittleEndian.PutUint32(b, uint32(v))
+
+	return b
+}
+
+func countRecords(t *testing.T, rr array.RecordReader) int64 {
+	t.Helper()
+	defer rr.Release()
+
+	var n int64
+	for rr.Next() {
+		n += rr.RecordBatch().NumRows()
+	}
+
+	return n
+}
+
+// TestBloomFilterRowGroupPruning verifies that ParquetRowGroupTester's bloom
+// filter pass correctly skips row groups that definitively do not contain a
+// queried value, while keeping row groups where the value is present.
+func TestBloomFilterRowGroupPruning(t *testing.T) {
+	const rgSize = 100 // 100 rows per row group
+
+	data := buildBloomTestParquet(t, rgSize)
+
+	// Stats function that always keeps the row group (isolates bloom logic).
+	alwaysKeep := func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) {
+		return true, nil
+	}
+
+	ctx := context.Background()
+	cols := []int{0}
+
+	t.Run("value in RG0 prunes RG1", func(t *testing.T) {
+		rdr := openBloomTestReader(t, data)
+		tester := &internal.ParquetRowGroupTester{
+			StatsFn: alwaysKeep,
+			BloomPreds: []internal.RowGroupBloomPred{
+				{FieldID: 1, PhysBytes: [][]byte{int32PhysBytes(50)}}, // 50 is in RG0
+			},
+		}
+		rr, err := rdr.GetRecords(ctx, cols, tester)
+		require.NoError(t, err)
+
+		assert.Equal(t, int64(rgSize), countRecords(t, rr), "only RG0 rows expected")
+	})
+
+	t.Run("value in RG1 prunes RG0", func(t *testing.T) {
+		rdr := openBloomTestReader(t, data)
+		tester := &internal.ParquetRowGroupTester{
+			StatsFn: alwaysKeep,
+			BloomPreds: []internal.RowGroupBloomPred{
+				{FieldID: 1, PhysBytes: [][]byte{int32PhysBytes(150)}}, // 150 is in RG1
+			},
+		}
+		rr, err := rdr.GetRecords(ctx, cols, tester)
+		require.NoError(t, err)
+
+		assert.Equal(t, int64(rgSize), countRecords(t, rr), "only RG1 rows expected")
+	})
+
+	t.Run("value absent from all row groups skips all", func(t *testing.T) {
+		rdr := openBloomTestReader(t, data)
+		tester := &internal.ParquetRowGroupTester{
+			StatsFn: alwaysKeep,
+			BloomPreds: []internal.RowGroupBloomPred{
+				{FieldID: 1, PhysBytes: [][]byte{int32PhysBytes(999)}}, // 999 not in either RG
+			},
+		}
+		rr, err := rdr.GetRecords(ctx, cols, tester)
+		require.NoError(t, err)
+
+		assert.Equal(t, int64(0), countRecords(t, rr), "no rows expected when value absent")
+	})
+
+	t.Run("In predicate with a value in each RG keeps both", func(t *testing.T) {
+		rdr := openBloomTestReader(t, data)
+		tester := &internal.ParquetRowGroupTester{
+			StatsFn: alwaysKeep,
+			BloomPreds: []internal.RowGroupBloomPred{
+				{
+					FieldID: 1,
+					PhysBytes: [][]byte{
+						int32PhysBytes(50),  // in RG0
+						int32PhysBytes(150), // in RG1
+					},
+				},
+			},
+		}
+		rr, err := rdr.GetRecords(ctx, cols, tester)
+		require.NoError(t, err)
+
+		assert.Equal(t, int64(2*rgSize), countRecords(t, rr), "both row groups expected")
+	})
+
+	t.Run("nil bloom preds reads all row groups", func(t *testing.T) {
+		rdr := openBloomTestReader(t, data)
+		tester := &internal.ParquetRowGroupTester{
+			StatsFn:    alwaysKeep,
+			BloomPreds: nil,
+		}
+		rr, err := rdr.GetRecords(ctx, cols, tester)
+		require.NoError(t, err)
+
+		assert.Equal(t, int64(2*rgSize), countRecords(t, rr), "all rows expected without bloom preds")
+	})
+
+	t.Run("unknown field ID is ignored and row group kept", func(t *testing.T) {
+		rdr := openBloomTestReader(t, data)
+		tester := &internal.ParquetRowGroupTester{
+			StatsFn: alwaysKeep,
+			BloomPreds: []internal.RowGroupBloomPred{
+				{FieldID: 999, PhysBytes: [][]byte{int32PhysBytes(50)}}, // field 999 does not exist
+			},
+		}
+		rr, err := rdr.GetRecords(ctx, cols, tester)
+		require.NoError(t, err)
+
+		assert.Equal(t, int64(2*rgSize), countRecords(t, rr), "all rows expected when field ID unknown")
 	})
 }

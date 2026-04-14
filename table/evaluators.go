@@ -18,12 +18,14 @@
 package table
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math"
 	"slices"
 
 	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 )
 
@@ -1562,4 +1564,213 @@ func (m *strictMetricsEval) canContainNans(fieldID int) bool {
 	cnt, exists := m.nanCounts[fieldID]
 
 	return exists && cnt > 0
+}
+
+// literalToPhysBytes converts an Iceberg literal to the physical byte
+// representation that the Parquet bloom filter writer hashes. The encoding
+// must match Arrow's internal getBytes[T] (little-endian for numerics, raw
+// bytes for byte-array types).
+func literalToPhysBytes(typ iceberg.PrimitiveType, lit iceberg.Literal) ([]byte, bool) {
+	switch typ.(type) {
+	case iceberg.Int32Type:
+		v := lit.(iceberg.TypedLiteral[int32]).Value()
+		b := make([]byte, 4)
+		binary.LittleEndian.PutUint32(b, uint32(v))
+
+		return b, true
+
+	case iceberg.DateType:
+		v := lit.(iceberg.TypedLiteral[iceberg.Date]).Value()
+		b := make([]byte, 4)
+		binary.LittleEndian.PutUint32(b, uint32(v))
+
+		return b, true
+
+	case iceberg.Int64Type:
+		v := lit.(iceberg.TypedLiteral[int64]).Value()
+		b := make([]byte, 8)
+		binary.LittleEndian.PutUint64(b, uint64(v))
+
+		return b, true
+
+	case iceberg.TimeType:
+		v := lit.(iceberg.TypedLiteral[iceberg.Time]).Value()
+		b := make([]byte, 8)
+		binary.LittleEndian.PutUint64(b, uint64(v))
+
+		return b, true
+
+	case iceberg.TimestampType, iceberg.TimestampTzType:
+		v := lit.(iceberg.TypedLiteral[iceberg.Timestamp]).Value()
+		b := make([]byte, 8)
+		binary.LittleEndian.PutUint64(b, uint64(v))
+
+		return b, true
+
+	case iceberg.Float32Type:
+		v := lit.(iceberg.TypedLiteral[float32]).Value()
+		b := make([]byte, 4)
+		binary.LittleEndian.PutUint32(b, math.Float32bits(v))
+
+		return b, true
+
+	case iceberg.Float64Type:
+		v := lit.(iceberg.TypedLiteral[float64]).Value()
+		b := make([]byte, 8)
+		binary.LittleEndian.PutUint64(b, math.Float64bits(v))
+
+		return b, true
+
+	case iceberg.StringType:
+		v := lit.(iceberg.TypedLiteral[string]).Value()
+
+		return []byte(v), true
+
+	case iceberg.BinaryType:
+		v := lit.(iceberg.TypedLiteral[[]byte]).Value()
+
+		return v, true
+
+	case iceberg.UUIDType:
+		v := lit.(iceberg.TypedLiteral[uuid.UUID]).Value()
+
+		return v[:], true
+
+	case iceberg.FixedType:
+		v := lit.(iceberg.TypedLiteral[[]byte]).Value()
+
+		return v, true
+
+	default:
+		// BooleanType: low cardinality, bloom filters not effective.
+		// DecimalType: physical representation depends on precision
+		//   (INT32 for p≤9, INT64 for p≤18, FIXED_LEN_BYTE_ARRAY otherwise).
+		//   TODO: add decimal bloom filter support once schema-level precision
+		//   lookup is wired in.
+		// TimestampNsType / TimestampTzNsType: literal type is TimestampNano
+		//   which is not yet handled by all expression machinery; skip for safety.
+		return nil, false
+	}
+}
+
+// bloomPredicateCollector walks a bound expression and collects EqualTo/In
+// predicates as RowGroupBloomPred values. Only conjuncts (And chains) are
+// collected; Or suppresses collection because a row group can only be skipped
+// when ALL disjuncts are absent — which we do not evaluate here.
+type bloomPredicateCollector struct{}
+
+func (c *bloomPredicateCollector) VisitTrue() []internal.RowGroupBloomPred  { return nil }
+func (c *bloomPredicateCollector) VisitFalse() []internal.RowGroupBloomPred { return nil }
+func (c *bloomPredicateCollector) VisitNot(_ []internal.RowGroupBloomPred) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitAnd(left, right []internal.RowGroupBloomPred) []internal.RowGroupBloomPred {
+	return append(left, right...)
+}
+
+func (c *bloomPredicateCollector) VisitOr(_, _ []internal.RowGroupBloomPred) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitUnbound(_ iceberg.UnboundPredicate) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitBound(pred iceberg.BoundPredicate) []internal.RowGroupBloomPred {
+	return iceberg.VisitBoundPredicate(pred, c)
+}
+
+func (c *bloomPredicateCollector) VisitEqual(t iceberg.BoundTerm, lit iceberg.Literal) []internal.RowGroupBloomPred {
+	field := t.Ref().Field()
+	typ, ok := field.Type.(iceberg.PrimitiveType)
+	if !ok {
+		return nil
+	}
+
+	b, ok := literalToPhysBytes(typ, lit)
+	if !ok {
+		return nil
+	}
+
+	return []internal.RowGroupBloomPred{{FieldID: field.ID, PhysBytes: [][]byte{b}}}
+}
+
+func (c *bloomPredicateCollector) VisitIn(t iceberg.BoundTerm, s iceberg.Set[iceberg.Literal]) []internal.RowGroupBloomPred {
+	if s.Len() > inPredicateLimit {
+		return nil
+	}
+
+	field := t.Ref().Field()
+	typ, ok := field.Type.(iceberg.PrimitiveType)
+	if !ok {
+		return nil
+	}
+
+	physBytes := make([][]byte, 0, s.Len())
+	for _, lit := range s.Members() {
+		b, ok := literalToPhysBytes(typ, lit)
+		if !ok {
+			return nil
+		}
+
+		physBytes = append(physBytes, b)
+	}
+
+	return []internal.RowGroupBloomPred{{FieldID: field.ID, PhysBytes: physBytes}}
+}
+
+func (c *bloomPredicateCollector) VisitNotIn(_ iceberg.BoundTerm, _ iceberg.Set[iceberg.Literal]) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitIsNan(_ iceberg.BoundTerm) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitNotNan(_ iceberg.BoundTerm) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitIsNull(_ iceberg.BoundTerm) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitNotNull(_ iceberg.BoundTerm) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitNotEqual(_ iceberg.BoundTerm, _ iceberg.Literal) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitGreaterEqual(_ iceberg.BoundTerm, _ iceberg.Literal) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitGreater(_ iceberg.BoundTerm, _ iceberg.Literal) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitLessEqual(_ iceberg.BoundTerm, _ iceberg.Literal) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitLess(_ iceberg.BoundTerm, _ iceberg.Literal) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitStartsWith(_ iceberg.BoundTerm, _ iceberg.Literal) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitNotStartsWith(_ iceberg.BoundTerm, _ iceberg.Literal) []internal.RowGroupBloomPred {
+	return nil
+}
+
+// newBloomFilterPredicates walks expr and returns bloom-filter-checkable
+// predicates for row group pruning. Returns nil (no predicates) for
+// AlwaysTrue or any expression with no EqualTo/In conjuncts.
+func newBloomFilterPredicates(expr iceberg.BooleanExpression) ([]internal.RowGroupBloomPred, error) {
+	return iceberg.VisitExpr(expr, &bloomPredicateCollector{})
 }
