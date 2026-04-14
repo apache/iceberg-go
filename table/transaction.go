@@ -524,6 +524,7 @@ type WriteOption func(*dataFileCfg)
 
 type dataFileCfg struct {
 	skipAutoNameMapping bool
+	skipDuplicateCheck  bool
 }
 
 // WithoutAutoNameMapping disables the automatic setting of the schema name
@@ -534,6 +535,18 @@ type dataFileCfg struct {
 func WithoutAutoNameMapping() WriteOption {
 	return func(cfg *dataFileCfg) {
 		cfg.skipAutoNameMapping = true
+	}
+}
+
+// WithoutDuplicateCheck disables the duplicate file path check against
+// existing data files in the current snapshot. By default, [Transaction.AddDataFiles]
+// scans all manifests to ensure no file being added already exists in the
+// table. For tables with many manifests this scan can be expensive because
+// each manifest must be read from storage. Use this option when the caller
+// can guarantee that the files being added are not already in the table.
+func WithoutDuplicateCheck() WriteOption {
+	return func(cfg *dataFileCfg) {
+		cfg.skipDuplicateCheck = true
 	}
 }
 
@@ -594,20 +607,22 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 		return err
 	}
 
-	if s := t.meta.currentSnapshot(); s != nil {
-		referenced := make([]string, 0)
-		for df, err := range s.dataFiles(fs, nil) {
-			if err != nil {
-				return err
+	if !cfg.skipDuplicateCheck {
+		if s := t.meta.currentSnapshot(); s != nil {
+			referenced := make([]string, 0)
+			for df, err := range s.dataFiles(fs, nil) {
+				if err != nil {
+					return err
+				}
+
+				if _, ok := setToAdd[df.FilePath()]; ok {
+					referenced = append(referenced, df.FilePath())
+				}
 			}
 
-			if _, ok := setToAdd[df.FilePath()]; ok {
-				referenced = append(referenced, df.FilePath())
+			if len(referenced) > 0 {
+				return fmt.Errorf("cannot add files that are already referenced by table, files: %v", referenced)
 			}
-		}
-
-		if len(referenced) > 0 {
-			return fmt.Errorf("cannot add files that are already referenced by table, files: %v", referenced)
 		}
 	}
 
