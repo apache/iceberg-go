@@ -44,28 +44,28 @@ type mockDVFile struct {
 	contentSizeInBytes *int64
 }
 
-func (m *mockDVFile) FilePath() string                          { return m.path }
-func (m *mockDVFile) FileFormat() iceberg.FileFormat            { return m.format }
-func (m *mockDVFile) Count() int64                              { return m.count }
-func (m *mockDVFile) ReferencedDataFile() *string               { return m.referencedDataFile }
-func (m *mockDVFile) ContentOffset() *int64                     { return m.contentOffset }
-func (m *mockDVFile) ContentSizeInBytes() *int64                { return m.contentSizeInBytes }
-func (*mockDVFile) ContentType() iceberg.ManifestEntryContent   { return iceberg.EntryContentPosDeletes }
-func (*mockDVFile) Partition() map[int]any                      { return nil }
-func (*mockDVFile) FileSizeBytes() int64                        { return 0 }
-func (*mockDVFile) ColumnSizes() map[int]int64                  { return nil }
-func (*mockDVFile) ValueCounts() map[int]int64                  { return nil }
-func (*mockDVFile) NullValueCounts() map[int]int64              { return nil }
-func (*mockDVFile) NaNValueCounts() map[int]int64               { return nil }
-func (*mockDVFile) DistinctValueCounts() map[int]int64          { return nil }
-func (*mockDVFile) LowerBoundValues() map[int][]byte            { return nil }
-func (*mockDVFile) UpperBoundValues() map[int][]byte            { return nil }
-func (*mockDVFile) KeyMetadata() []byte                         { return nil }
-func (*mockDVFile) SplitOffsets() []int64                       { return nil }
-func (*mockDVFile) EqualityFieldIDs() []int                     { return nil }
-func (*mockDVFile) SortOrderID() *int                           { return nil }
-func (*mockDVFile) SpecID() int32                               { return 0 }
-func (*mockDVFile) FirstRowID() *int64                          { return nil }
+func (m *mockDVFile) FilePath() string                        { return m.path }
+func (m *mockDVFile) FileFormat() iceberg.FileFormat          { return m.format }
+func (m *mockDVFile) Count() int64                            { return m.count }
+func (m *mockDVFile) ReferencedDataFile() *string             { return m.referencedDataFile }
+func (m *mockDVFile) ContentOffset() *int64                   { return m.contentOffset }
+func (m *mockDVFile) ContentSizeInBytes() *int64              { return m.contentSizeInBytes }
+func (*mockDVFile) ContentType() iceberg.ManifestEntryContent { return iceberg.EntryContentPosDeletes }
+func (*mockDVFile) Partition() map[int]any                    { return nil }
+func (*mockDVFile) FileSizeBytes() int64                      { return 0 }
+func (*mockDVFile) ColumnSizes() map[int]int64                { return nil }
+func (*mockDVFile) ValueCounts() map[int]int64                { return nil }
+func (*mockDVFile) NullValueCounts() map[int]int64            { return nil }
+func (*mockDVFile) NaNValueCounts() map[int]int64             { return nil }
+func (*mockDVFile) DistinctValueCounts() map[int]int64        { return nil }
+func (*mockDVFile) LowerBoundValues() map[int][]byte          { return nil }
+func (*mockDVFile) UpperBoundValues() map[int][]byte          { return nil }
+func (*mockDVFile) KeyMetadata() []byte                       { return nil }
+func (*mockDVFile) SplitOffsets() []int64                     { return nil }
+func (*mockDVFile) EqualityFieldIDs() []int                   { return nil }
+func (*mockDVFile) SortOrderID() *int                         { return nil }
+func (*mockDVFile) SpecID() int32                             { return 0 }
+func (*mockDVFile) FirstRowID() *int64                        { return nil }
 
 func strPtr(s string) *string { return &s }
 
