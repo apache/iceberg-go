@@ -28,3 +28,5 @@ updates:
       gomod_updates:
         applies-to: version-updates
         dependency-type: production
+    cooldown:
+      default-days: 7
