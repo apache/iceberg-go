@@ -18,6 +18,7 @@
 package table
 
 import (
+	"encoding"
 	"fmt"
 	"math"
 	"slices"
@@ -1612,11 +1613,7 @@ func literalToPhysBytes(lit iceberg.Literal) ([]byte, bool) {
 		return nil, false
 	}
 
-	type binaryMarshaler interface {
-		MarshalBinary() ([]byte, error)
-	}
-
-	m, ok := lit.(binaryMarshaler)
+	m, ok := lit.(encoding.BinaryMarshaler)
 	if !ok {
 		return nil, false
 	}
