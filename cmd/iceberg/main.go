@@ -51,6 +51,7 @@ Usage:
   iceberg properties [options] get (namespace | table) IDENTIFIER [PROPNAME]
   iceberg properties [options] set (namespace | table) IDENTIFIER PROPNAME VALUE
   iceberg properties [options] remove (namespace | table) IDENTIFIER PROPNAME
+  iceberg compact [options] (analyze | run) TABLE_ID [--target-file-size BYTES] [--partial-progress]
   iceberg -h | --help | --version
 
 Commands:
@@ -65,6 +66,7 @@ Commands:
   files       List all the files of the table.
   rename      Rename a table.
   properties  Properties on tables/namespaces.
+  compact     Analyze or run bin-pack compaction on a table.
 
 Arguments:
   PARENT         Catalog parent namespace
@@ -92,7 +94,9 @@ Options:
   --partition-spec TEXT specify partition spec as comma-separated field names(for create table use only)
 						Ex:"field1,field2"
   --sort-order TEXT 	specify sort order as field:direction[:null-order] format(for create table use only)
-						Ex:"field1:asc,field2:desc:nulls-first,field3:asc:nulls-last"`
+						Ex:"field1:asc,field2:desc:nulls-first,field3:asc:nulls-last"
+  --target-file-size BYTES  target output file size in bytes for compaction [default: 0]
+  --partial-progress        stage each compaction group as a separate snapshot update`
 
 type Config struct {
 	List     bool `docopt:"list"`
@@ -106,10 +110,13 @@ type Config struct {
 	Drop     bool `docopt:"drop"`
 	Files    bool `docopt:"files"`
 	Rename   bool `docopt:"rename"`
+	Compact  bool `docopt:"compact"`
 
-	Get    bool `docopt:"get"`
-	Set    bool `docopt:"set"`
-	Remove bool `docopt:"remove"`
+	Get     bool `docopt:"get"`
+	Set     bool `docopt:"set"`
+	Remove  bool `docopt:"remove"`
+	Analyze bool `docopt:"analyze"`
+	Run     bool `docopt:"run"`
 
 	Namespace bool `docopt:"namespace"`
 	Table     bool `docopt:"table"`
@@ -123,21 +130,23 @@ type Config struct {
 	PropName string `docopt:"PROPNAME"`
 	Value    string `docopt:"VALUE"`
 
-	Catalog       string `docopt:"--catalog"`
-	URI           string `docopt:"--uri"`
-	Output        string `docopt:"--output"`
-	History       bool   `docopt:"--history"`
-	Cred          string `docopt:"--credential"`
-	Token         string `docopt:"--token"`
-	Warehouse     string `docopt:"--warehouse"`
-	Config        string `docopt:"--config"`
-	Scope         string `docopt:"--scope"`
-	Description   string `docopt:"--description"`
-	LocationURI   string `docopt:"--location-uri"`
-	SchemaStr     string `docopt:"--schema"`
-	TableProps    string `docopt:"--properties"`
-	PartitionSpec string `docopt:"--partition-spec"`
-	SortOrder     string `docopt:"--sort-order"`
+	Catalog         string `docopt:"--catalog"`
+	URI             string `docopt:"--uri"`
+	Output          string `docopt:"--output"`
+	History         bool   `docopt:"--history"`
+	Cred            string `docopt:"--credential"`
+	Token           string `docopt:"--token"`
+	Warehouse       string `docopt:"--warehouse"`
+	Config          string `docopt:"--config"`
+	Scope           string `docopt:"--scope"`
+	Description     string `docopt:"--description"`
+	LocationURI     string `docopt:"--location-uri"`
+	SchemaStr       string `docopt:"--schema"`
+	TableProps      string `docopt:"--properties"`
+	PartitionSpec   string `docopt:"--partition-spec"`
+	SortOrder       string `docopt:"--sort-order"`
+	TargetFileSize  int64  `docopt:"--target-file-size"`
+	PartialProgress bool   `docopt:"--partial-progress"`
 }
 
 func main() {
@@ -355,6 +364,8 @@ func main() {
 	case cfg.Files:
 		tbl := loadTable(ctx, output, cat, cfg.TableID)
 		output.Files(tbl, cfg.History)
+	case cfg.Compact:
+		compact(ctx, output, cat, cfg)
 	}
 }
 
