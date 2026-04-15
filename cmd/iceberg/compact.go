@@ -52,9 +52,9 @@ func compact(ctx context.Context, output Output, cat catalog.Catalog, cfg Config
 		return
 	}
 
-	if cfg.Analyze {
-		printCompactionPlan(output, plan)
+	printCompactionPlan(output, plan)
 
+	if cfg.Analyze {
 		return
 	}
 
