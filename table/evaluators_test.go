@@ -2729,3 +2729,113 @@ func TestEvaluators(t *testing.T) {
 	suite.Run(t, &InclusiveMetricsTestSuite{})
 	suite.Run(t, &StrictMetricsTestSuite{})
 }
+
+func TestLiteralToPhysBytes(t *testing.T) {
+	t.Run("int32", func(t *testing.T) {
+		b, ok := literalToPhysBytes(iceberg.Int32Literal(1))
+		require.True(t, ok)
+		assert.Equal(t, []byte{0x01, 0x00, 0x00, 0x00}, b)
+	})
+
+	t.Run("int64", func(t *testing.T) {
+		b, ok := literalToPhysBytes(iceberg.Int64Literal(1))
+		require.True(t, ok)
+		assert.Equal(t, []byte{0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, b)
+	})
+
+	t.Run("float32", func(t *testing.T) {
+		b, ok := literalToPhysBytes(iceberg.Float32Literal(1.0))
+		require.True(t, ok)
+		assert.Equal(t, 4, len(b))
+	})
+
+	t.Run("float64", func(t *testing.T) {
+		b, ok := literalToPhysBytes(iceberg.Float64Literal(1.0))
+		require.True(t, ok)
+		assert.Equal(t, 8, len(b))
+	})
+
+	t.Run("string", func(t *testing.T) {
+		b, ok := literalToPhysBytes(iceberg.StringLiteral("hello"))
+		require.True(t, ok)
+		assert.Equal(t, []byte("hello"), b)
+	})
+
+	t.Run("binary", func(t *testing.T) {
+		b, ok := literalToPhysBytes(iceberg.BinaryLiteral([]byte{0xDE, 0xAD}))
+		require.True(t, ok)
+		assert.Equal(t, []byte{0xDE, 0xAD}, b)
+	})
+
+	t.Run("boolean_unsupported", func(t *testing.T) {
+		_, ok := literalToPhysBytes(iceberg.BoolLiteral(true))
+		assert.False(t, ok)
+	})
+}
+
+func TestBloomPredicateCollector(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+
+	bind := func(expr iceberg.BooleanExpression) iceberg.BooleanExpression {
+		rewritten, err := iceberg.RewriteNotExpr(expr)
+		require.NoError(t, err)
+		bound, err := iceberg.BindExpr(sc, rewritten, true)
+		require.NoError(t, err)
+
+		return bound
+	}
+
+	t.Run("EqualTo produces one predicate with one hash entry", func(t *testing.T) {
+		expr := bind(iceberg.EqualTo(iceberg.Reference("id"), int64(42)))
+		preds, err := newBloomFilterPredicates(expr)
+		require.NoError(t, err)
+		require.Len(t, preds, 1)
+		assert.Equal(t, 1, preds[0].FieldID)
+		assert.Len(t, preds[0].PhysBytes, 1)
+	})
+
+	t.Run("In produces one predicate with multiple hash entries", func(t *testing.T) {
+		expr := bind(iceberg.IsIn(iceberg.Reference("id"), int64(1), int64(2), int64(3)))
+		preds, err := newBloomFilterPredicates(expr)
+		require.NoError(t, err)
+		require.Len(t, preds, 1)
+		assert.Equal(t, 1, preds[0].FieldID)
+		assert.Len(t, preds[0].PhysBytes, 3)
+	})
+
+	t.Run("And merges predicates from both sides", func(t *testing.T) {
+		expr := bind(iceberg.NewAnd(
+			iceberg.EqualTo(iceberg.Reference("id"), int64(1)),
+			iceberg.EqualTo(iceberg.Reference("name"), "alice"),
+		))
+		preds, err := newBloomFilterPredicates(expr)
+		require.NoError(t, err)
+		assert.Len(t, preds, 2)
+	})
+
+	t.Run("Or returns nil — cannot prune on disjunction", func(t *testing.T) {
+		expr := bind(iceberg.NewOr(
+			iceberg.EqualTo(iceberg.Reference("id"), int64(1)),
+			iceberg.EqualTo(iceberg.Reference("name"), "alice"),
+		))
+		preds, err := newBloomFilterPredicates(expr)
+		require.NoError(t, err)
+		assert.Empty(t, preds)
+	})
+
+	t.Run("AlwaysTrue returns nil", func(t *testing.T) {
+		preds, err := newBloomFilterPredicates(iceberg.AlwaysTrue{})
+		require.NoError(t, err)
+		assert.Empty(t, preds)
+	})
+
+	t.Run("range predicate returns nil", func(t *testing.T) {
+		expr := bind(iceberg.GreaterThan(iceberg.Reference("id"), int64(5)))
+		preds, err := newBloomFilterPredicates(expr)
+		require.NoError(t, err)
+		assert.Empty(t, preds)
+	})
+}

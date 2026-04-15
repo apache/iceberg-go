@@ -402,9 +402,19 @@ func (as *arrowScan) processRecords(
 
 	switch task.Value.File.FileFormat() {
 	case iceberg.ParquetFile:
-		testRowGroups, err = newParquetRowGroupStatsEvaluator(fileSchema, as.boundRowFilter, false)
+		statsFn, err := newParquetRowGroupStatsEvaluator(fileSchema, as.boundRowFilter, false)
 		if err != nil {
 			return err
+		}
+
+		bloomPreds, err := newBloomFilterPredicates(as.boundRowFilter)
+		if err != nil {
+			return err
+		}
+
+		testRowGroups = &internal.ParquetRowGroupTester{
+			StatsFn:    statsFn,
+			BloomPreds: bloomPreds,
 		}
 	}
 
