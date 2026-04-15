@@ -686,14 +686,14 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 	}
 
 	return &ManifestReader{
-		rd:            rd,
-		file:          file,
-		formatVersion: formatVersion,
-		isFallback:    isFallback,
-		content:       content,
-		fieldNameToID: fieldNameToID,
-		fieldIDToType: fieldIDToType,
-		fieldIDToSize: fieldIDToSize,
+		rd:             rd,
+		file:           file,
+		formatVersion:  formatVersion,
+		isFallback:     isFallback,
+		content:        content,
+		fieldNameToID:  fieldNameToID,
+		fieldIDToType:  fieldIDToType,
+		fieldIDToSize:  fieldIDToSize,
 		inheritRowIDs:  inheritRowIDs,
 		nextFirstRowID: nextFirstRowID,
 	}, nil
