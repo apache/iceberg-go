@@ -192,7 +192,7 @@ func (m *manifestFileV1) toFile() *manifestFile {
 		SeqNumber:       initialSequenceNumber,
 		MinSeqNumber:    initialSequenceNumber,
 		AddedSnapshotID: snapshotID,
-		PartitionList: m.PartitionList,
+		PartitionList:   m.PartitionList,
 	}
 
 	if m.Key != nil {
@@ -314,24 +314,15 @@ func (m *manifestFile) Length() int64                    { return m.Len }
 func (m *manifestFile) PartitionSpecID() int32           { return m.SpecID }
 func (m *manifestFile) ManifestContent() ManifestContent { return m.Content }
 func (m *manifestFile) SnapshotID() int64                { return m.AddedSnapshotID }
-func (m *manifestFile) AddedDataFiles() int32 {
-	return m.AddedFilesCount
-}
-
-func (m *manifestFile) ExistingDataFiles() int32 {
-	return m.ExistingFilesCount
-}
-
-func (m *manifestFile) DeletedDataFiles() int32 {
-	return m.DeletedFilesCount
-}
-func (m *manifestFile) AddedRows() int64      { return m.AddedRowsCount }
-func (m *manifestFile) ExistingRows() int64   { return m.ExistingRowsCount }
-func (m *manifestFile) DeletedRows() int64    { return m.DeletedRowsCount }
-func (m *manifestFile) SequenceNum() int64    { return m.SeqNumber }
-func (m *manifestFile) MinSequenceNum() int64 { return m.MinSeqNumber }
-func (m *manifestFile) KeyMetadata() []byte   { return m.Key }
-
+func (m *manifestFile) AddedDataFiles() int32            { return m.AddedFilesCount }
+func (m *manifestFile) ExistingDataFiles() int32         { return m.ExistingFilesCount }
+func (m *manifestFile) DeletedDataFiles() int32          { return m.DeletedFilesCount }
+func (m *manifestFile) AddedRows() int64                 { return m.AddedRowsCount }
+func (m *manifestFile) ExistingRows() int64              { return m.ExistingRowsCount }
+func (m *manifestFile) DeletedRows() int64               { return m.DeletedRowsCount }
+func (m *manifestFile) SequenceNum() int64               { return m.SeqNumber }
+func (m *manifestFile) MinSequenceNum() int64            { return m.MinSeqNumber }
+func (m *manifestFile) KeyMetadata() []byte              { return m.Key }
 func (m *manifestFile) Partitions() []FieldSummary {
 	if m.PartitionList == nil {
 		return nil
@@ -342,14 +333,8 @@ func (m *manifestFile) Partitions() []FieldSummary {
 
 func (m *manifestFile) FirstRowID() *int64 { return m.FirstRowIDValue }
 
-func (m *manifestFile) HasAddedFiles() bool {
-	return m.AddedFilesCount != 0
-}
-
-func (m *manifestFile) HasExistingFiles() bool {
-	return m.ExistingFilesCount != 0
-}
-
+func (m *manifestFile) HasAddedFiles() bool    { return m.AddedFilesCount != 0 }
+func (m *manifestFile) HasExistingFiles() bool { return m.ExistingFilesCount != 0 }
 func (m *manifestFile) FetchEntries(fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error) {
 	return fetchManifestEntries(m, fs, discardDeleted)
 }
@@ -500,6 +485,22 @@ var manifestFileV1Reader = avro.MustSchemaFor[manifestFileV1](
 var manifestFileReader = avro.MustSchemaFor[manifestFile](
 	avro.WithName("manifest_file"),
 )
+
+func decodeV1Manifests(rd *ocf.Reader) ([]ManifestFile, error) {
+	results := make([]ManifestFile, 0)
+	for {
+		tmp := new(manifestFileV1)
+		if err := rd.Decode(tmp); err != nil {
+			if errors.Is(err, io.EOF) {
+				return results, nil
+			}
+
+			return nil, err
+		}
+
+		results = append(results, tmp.toFile())
+	}
+}
 
 func decodeManifests[I interface {
 	ManifestFile
@@ -806,19 +807,7 @@ func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
 	}
 
 	if version == 1 {
-		results := make([]ManifestFile, 0)
-		for {
-			tmp := new(manifestFileV1)
-			if err := rd.Decode(tmp); err != nil {
-				if errors.Is(err, io.EOF) {
-					return results, nil
-				}
-
-				return nil, err
-			}
-
-			results = append(results, tmp.toFile())
-		}
+		return decodeV1Manifests(rd)
 	}
 
 	return decodeManifests[*manifestFile](rd, version)
