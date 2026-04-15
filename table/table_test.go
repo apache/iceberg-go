@@ -1250,6 +1250,36 @@ func (t *TableWritingTestSuite) TestAddDataFilesAlreadyReferencedByTable() {
 	t.ErrorContains(err, "cannot add files that are already referenced by table")
 }
 
+func (t *TableWritingTestSuite) TestAddDataFilesWithoutDuplicateCheck() {
+	ident := table.Identifier{"default", "add_data_files_skip_dup_check_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	filePath := fmt.Sprintf("%s/add_data_files_skip_dup_check_v%d/test.parquet", t.location, t.formatVersion)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, t.arrTbl)
+
+	df := mustDataFile(t.T(), *iceberg.UnpartitionedSpec, filePath, nil, 1, mustFileSize(t.T(), filePath))
+
+	// Seed the table with an initial file.
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddDataFiles(t.ctx, []iceberg.DataFile{df}, nil))
+	tbl, err := tx.Commit(t.ctx)
+	t.Require().NoError(err)
+
+	// Adding the same file again without the option should fail.
+	tx = tbl.NewTransaction()
+	err = tx.AddDataFiles(t.ctx, []iceberg.DataFile{df}, nil)
+	t.Error(err)
+	t.ErrorContains(err, "cannot add files that are already referenced by table")
+
+	// Adding the same file again with WithoutDuplicateCheck should succeed.
+	tx = tbl.NewTransaction()
+	t.Require().NoError(tx.AddDataFiles(t.ctx, []iceberg.DataFile{df}, nil, table.WithoutDuplicateCheck()))
+
+	staged, err := tx.StagedTable()
+	t.Require().NoError(err)
+	t.Equal(table.OpAppend, staged.CurrentSnapshot().Summary.Operation)
+}
+
 func (t *TableWritingTestSuite) TestAddDataFilesNilDataFile() {
 	ident := table.Identifier{"default", "add_data_files_nil_v" + strconv.Itoa(t.formatVersion)}
 	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)

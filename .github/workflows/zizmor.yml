@@ -1,3 +1,4 @@
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -14,19 +15,30 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+#
 
-name: "Run License Check"
-on: pull_request
+name: GitHub Actions Security Analysis with zizmor 🌈
 
-permissions:
-  contents: read
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["**"]
+
+permissions: {}
 
 jobs:
-  rat:
-    runs-on: ubuntu-22.04
+  zizmor:
+    name: Run zizmor 🌈
+    runs-on: ubuntu-latest
+    permissions: {}
     steps:
-    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      with:
-        persist-credentials: false
-    - run: |
-        dev/check-license
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run zizmor 🌈
+        uses: zizmorcore/zizmor-action@71321a20a9ded102f6e9ce5718a2fcec2c4f70d8 # v0.5.2
+        with:
+          advanced-security: false

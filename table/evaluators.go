@@ -18,12 +18,14 @@
 package table
 
 import (
+	"encoding"
 	"fmt"
 	"math"
 	"slices"
 
 	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 )
 
@@ -1562,4 +1564,184 @@ func (m *strictMetricsEval) canContainNans(fieldID int) bool {
 	cnt, exists := m.nanCounts[fieldID]
 
 	return exists && cnt > 0
+}
+
+// literalToPhysBytes converts an Iceberg literal to the physical byte
+// representation that the Parquet bloom filter writer hashes, using the
+// literal's MarshalBinary encoding. Float types are normalized before
+// encoding (-0.0 → 0.0, NaN → canonical NaN) to match Parquet/Java writer
+// behavior and avoid false-negative bloom filter results.
+func literalToPhysBytes(lit iceberg.Literal) ([]byte, bool) {
+	switch v := lit.(type) {
+	case iceberg.Float32Literal:
+		// Normalize: -0.0 and 0.0 have different bit patterns, so without this
+		// a query for 0.0 won't match a row group where -0.0 was written.
+		f := float32(v)
+		if f == 0 {
+			f = 0
+		} else if math.IsNaN(float64(f)) {
+			f = float32(math.NaN())
+		}
+
+		lit = iceberg.Float32Literal(f)
+
+	case iceberg.Float64Literal:
+		f := float64(v)
+		if f == 0 {
+			f = 0
+		} else if math.IsNaN(f) {
+			f = math.NaN()
+		}
+
+		lit = iceberg.Float64Literal(f)
+
+	case iceberg.BoolLiteral:
+		// Low cardinality; bloom filters not useful.
+		return nil, false
+
+	case iceberg.DecimalLiteral:
+		// Physical representation depends on precision (INT32/INT64/FIXED_LEN_BYTE_ARRAY).
+		// TODO: add decimal bloom filter support once schema-level precision lookup is wired in.
+		_ = v
+
+		return nil, false
+
+	case iceberg.TimestampNsLiteral:
+		// Not yet handled by all expression machinery; skip for safety.
+		_ = v
+
+		return nil, false
+	}
+
+	m, ok := lit.(encoding.BinaryMarshaler)
+	if !ok {
+		return nil, false
+	}
+
+	b, err := m.MarshalBinary()
+	if err != nil {
+		return nil, false
+	}
+
+	return b, true
+}
+
+// bloomPredicateCollector walks a bound expression and collects EqualTo/In
+// predicates as RowGroupBloomPred values. Only conjuncts (And chains) are
+// collected; Or suppresses collection because a row group can only be skipped
+// when ALL disjuncts are absent — which we do not evaluate here.
+type bloomPredicateCollector struct{}
+
+func (c *bloomPredicateCollector) VisitTrue() []internal.RowGroupBloomPred  { return nil }
+func (c *bloomPredicateCollector) VisitFalse() []internal.RowGroupBloomPred { return nil }
+func (c *bloomPredicateCollector) VisitNot(_ []internal.RowGroupBloomPred) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitAnd(left, right []internal.RowGroupBloomPred) []internal.RowGroupBloomPred {
+	return append(left, right...)
+}
+
+func (c *bloomPredicateCollector) VisitOr(_, _ []internal.RowGroupBloomPred) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitUnbound(_ iceberg.UnboundPredicate) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitBound(pred iceberg.BoundPredicate) []internal.RowGroupBloomPred {
+	return iceberg.VisitBoundPredicate(pred, c)
+}
+
+func (c *bloomPredicateCollector) VisitEqual(t iceberg.BoundTerm, lit iceberg.Literal) []internal.RowGroupBloomPred {
+	field := t.Ref().Field()
+	if _, ok := field.Type.(iceberg.PrimitiveType); !ok {
+		return nil
+	}
+
+	b, ok := literalToPhysBytes(lit)
+	if !ok {
+		return nil
+	}
+
+	return []internal.RowGroupBloomPred{{FieldID: field.ID, PhysBytes: [][]byte{b}}}
+}
+
+func (c *bloomPredicateCollector) VisitIn(t iceberg.BoundTerm, s iceberg.Set[iceberg.Literal]) []internal.RowGroupBloomPred {
+	if s.Len() > inPredicateLimit {
+		return nil
+	}
+
+	field := t.Ref().Field()
+	if _, ok := field.Type.(iceberg.PrimitiveType); !ok {
+		return nil
+	}
+
+	physBytes := make([][]byte, 0, s.Len())
+	for _, lit := range s.Members() {
+		b, ok := literalToPhysBytes(lit)
+		if !ok {
+			return nil
+		}
+
+		physBytes = append(physBytes, b)
+	}
+
+	return []internal.RowGroupBloomPred{{FieldID: field.ID, PhysBytes: physBytes}}
+}
+
+func (c *bloomPredicateCollector) VisitNotIn(_ iceberg.BoundTerm, _ iceberg.Set[iceberg.Literal]) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitIsNan(_ iceberg.BoundTerm) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitNotNan(_ iceberg.BoundTerm) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitIsNull(_ iceberg.BoundTerm) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitNotNull(_ iceberg.BoundTerm) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitNotEqual(_ iceberg.BoundTerm, _ iceberg.Literal) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitGreaterEqual(_ iceberg.BoundTerm, _ iceberg.Literal) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitGreater(_ iceberg.BoundTerm, _ iceberg.Literal) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitLessEqual(_ iceberg.BoundTerm, _ iceberg.Literal) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitLess(_ iceberg.BoundTerm, _ iceberg.Literal) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitStartsWith(_ iceberg.BoundTerm, _ iceberg.Literal) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitNotStartsWith(_ iceberg.BoundTerm, _ iceberg.Literal) []internal.RowGroupBloomPred {
+	return nil
+}
+
+// newBloomFilterPredicates walks expr and returns bloom-filter-checkable
+// predicates for row group pruning. Returns nil (no predicates) for
+// AlwaysTrue or any expression with no EqualTo/In conjuncts.
+func newBloomFilterPredicates(expr iceberg.BooleanExpression) ([]internal.RowGroupBloomPred, error) {
+	return iceberg.VisitExpr(expr, &bloomPredicateCollector{})
 }
