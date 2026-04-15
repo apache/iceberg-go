@@ -30,3 +30,12 @@ updates:
         dependency-type: production
     cooldown:
       default-days: 7
+
+  # Maintain dependencies for GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+    cooldown:
+      default-days: 7
