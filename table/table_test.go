@@ -26,6 +26,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
@@ -2392,6 +2393,47 @@ func (t *TableWritingTestSuite) TestOverwriteRecord() {
 	snapshot := resultTbl.CurrentSnapshot()
 	t.NotNil(snapshot)
 	t.Equal(table.OpAppend, snapshot.Summary.Operation) // Empty table overwrite becomes append
+}
+
+// TestOverwriteRowCountWarning verifies that Transaction.Overwrite emits a
+// slog.Warn when the written data files contain fewer rows than deleted.
+func (t *TableWritingTestSuite) TestOverwriteRowCountWarning() {
+	ident := table.Identifier{"default", "overwrite_row_warn_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	// Append two rows so there is data to overwrite.
+	initialData, err := array.TableFromJSON(memory.DefaultAllocator, t.arrSchema, []string{
+		`[{"foo": true, "bar": "row1", "baz": 1, "qux": "2024-01-01"},
+		  {"foo": false, "bar": "row2", "baz": 2, "qux": "2024-01-02"}]`,
+	})
+	t.Require().NoError(err)
+	defer initialData.Release()
+
+	tbl, err = tbl.Append(t.ctx, array.NewTableReader(initialData, -1), nil)
+	t.Require().NoError(err)
+
+	// Capture slog output by installing a temporary handler on the default logger.
+	var buf bytes.Buffer
+	origLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(origLogger)
+
+	// Overwrite with only one row — fewer than the two rows deleted.
+	oneRow, err := array.TableFromJSON(memory.DefaultAllocator, t.arrSchema, []string{
+		`[{"foo": true, "bar": "row1", "baz": 1, "qux": "2024-01-01"}]`,
+	})
+	t.Require().NoError(err)
+	defer oneRow.Release()
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.Overwrite(t.ctx, array.NewTableReader(oneRow, -1), nil))
+	_, err = tx.Commit(t.ctx)
+	t.Require().NoError(err)
+
+	logged := buf.String()
+	t.Contains(logged, "Overwrite produced fewer rows than deleted")
+	t.Contains(logged, "added_rows=1")
+	t.Contains(logged, "deleted_rows=2")
 }
 
 // TestDelete verifies that Table.Delete properly delegates to Transaction.Delete
