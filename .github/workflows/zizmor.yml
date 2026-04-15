@@ -17,40 +17,28 @@
 # under the License.
 #
 
-name: "CodeQL"
+name: GitHub Actions Security Analysis with zizmor 🌈
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
-  schedule:
-    - cron: '16 4 * * 1'
+    branches: ["**"]
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
-  analyze:
-    name: Analyze Actions
-    runs-on: ubuntu-slim
-    permissions:
-      contents: read
-      security-events: write
-      packages: read
-
+  zizmor:
+    name: Run zizmor 🌈
+    runs-on: ubuntu-latest
+    permissions: {}
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      with:
-        persist-credentials: false
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
-    - name: Initialize CodeQL
-      uses: github/codeql-action/init@c10b8064de6f491fea524254123dbe5e09572f13 # v4.35.1
-      with:
-        languages: actions
-
-    - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@c10b8064de6f491fea524254123dbe5e09572f13 # v4.35.1
-      with:
-        category: "/language:actions"
+      - name: Run zizmor 🌈
+        uses: zizmorcore/zizmor-action@71321a20a9ded102f6e9ce5718a2fcec2c4f70d8 # v0.5.2
+        with:
+          advanced-security: false
