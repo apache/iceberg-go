@@ -149,7 +149,7 @@ func (b *ManifestBuilder) Partitions(p []FieldSummary) *ManifestBuilder {
 }
 
 func (b *ManifestBuilder) KeyMetadata(km []byte) *ManifestBuilder {
-	b.m.Key = km
+	b.m.Key = &km
 
 	return b
 }
@@ -193,10 +193,7 @@ func (m *manifestFileV1) toFile() *manifestFile {
 		MinSeqNumber:    initialSequenceNumber,
 		AddedSnapshotID: snapshotID,
 		PartitionList:   m.PartitionList,
-	}
-
-	if m.Key != nil {
-		f.Key = *m.Key
+		Key:             m.Key,
 	}
 
 	if m.AddedFilesCount != nil {
@@ -253,7 +250,7 @@ type manifestFile struct {
 	ExistingRowsCount  int64           `avro:"existing_rows_count"`
 	DeletedRowsCount   int64           `avro:"deleted_rows_count"`
 	PartitionList      *[]FieldSummary `avro:"partitions,type-alias=r508"`
-	Key                []byte          `avro:"key_metadata"`
+	Key                *[]byte         `avro:"key_metadata"`
 	FirstRowIDValue    *int64          `avro:"first_row_id"`
 
 	version int `avro:"-"`
@@ -269,7 +266,7 @@ func (m *manifestFile) toV1(v1file *manifestFileV1) {
 	v1file.SpecID = m.SpecID
 	v1file.AddedSnapshotID = &m.AddedSnapshotID
 	v1file.PartitionList = m.PartitionList
-	v1file.Key = &m.Key
+	v1file.Key = m.Key
 
 	if m.AddedFilesCount >= 0 {
 		v1file.AddedFilesCount = &m.AddedFilesCount
@@ -322,7 +319,14 @@ func (m *manifestFile) ExistingRows() int64              { return m.ExistingRows
 func (m *manifestFile) DeletedRows() int64               { return m.DeletedRowsCount }
 func (m *manifestFile) SequenceNum() int64               { return m.SeqNumber }
 func (m *manifestFile) MinSequenceNum() int64            { return m.MinSeqNumber }
-func (m *manifestFile) KeyMetadata() []byte              { return m.Key }
+func (m *manifestFile) KeyMetadata() []byte {
+	if m.Key == nil {
+		return nil
+	}
+
+	return *m.Key
+}
+
 func (m *manifestFile) Partitions() []FieldSummary {
 	if m.PartitionList == nil {
 		return nil
