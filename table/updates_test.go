@@ -400,3 +400,206 @@ func TestUnmarshalUpdates(t *testing.T) {
 		})
 	}
 }
+
+// baseMetaJSON is a minimal valid V2 metadata document used by the Apply tests below.
+const baseMetaJSON = `{
+  "format-version": 2,
+  "table-uuid": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+  "location": "s3://bucket/table",
+  "last-sequence-number": 1,
+  "last-updated-ms": 1000,
+  "last-column-id": 1,
+  "current-schema-id": 0,
+  "schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"x","required":true,"type":"long"}]}],
+  "default-spec-id": 0,
+  "partition-specs": [{"spec-id":0,"fields":[]}],
+  "last-partition-id": 0,
+  "default-sort-order-id": 0,
+  "sort-orders": [{"order-id":0,"fields":[]}],
+  "snapshot-log": [],
+  "metadata-log": []
+}`
+
+func buildFromBase(t *testing.T) *MetadataBuilder {
+	t.Helper()
+	meta, err := ParseMetadataString(baseMetaJSON)
+	require.NoError(t, err)
+	b, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+
+	return b
+}
+
+func TestSetStatisticsUpdate_Unmarshal(t *testing.T) {
+	data := []byte(`[{
+		"action": "set-statistics",
+		"snapshot-id": 42,
+		"statistics": {
+			"snapshot-id": 42,
+			"statistics-path": "s3://bucket/stats.puffin",
+			"file-size-in-bytes": 100,
+			"file-footer-size-in-bytes": 10,
+			"blob-metadata": [{"type":"apache-datasketches-theta-v1","snapshot-id":42,"sequence-number":1,"fields":[1]}]
+		}
+	}]`)
+
+	var updates Updates
+	require.NoError(t, json.Unmarshal(data, &updates))
+	require.Len(t, updates, 1)
+
+	u, ok := updates[0].(*setStatisticsUpdate)
+	require.True(t, ok)
+	assert.Equal(t, int64(42), u.SnapshotID)
+	assert.Equal(t, "s3://bucket/stats.puffin", u.Statistics.StatisticsPath)
+}
+
+func TestSetStatisticsUpdate_Apply(t *testing.T) {
+	b := buildFromBase(t)
+	stats := StatisticsFile{
+		SnapshotID:            1,
+		StatisticsPath:        "s3://bucket/stats.puffin",
+		FileSizeInBytes:       200,
+		FileFooterSizeInBytes: 20,
+		BlobMetadata:          []BlobMetadata{},
+	}
+
+	upd := NewSetStatisticsUpdate(stats)
+	require.NoError(t, upd.Apply(b))
+
+	meta, err := b.Build()
+	require.NoError(t, err)
+
+	var found *StatisticsFile
+	for s := range meta.Statistics() {
+		sc := s
+		found = &sc
+	}
+	require.NotNil(t, found)
+	assert.Equal(t, stats.StatisticsPath, found.StatisticsPath)
+}
+
+func TestSetStatisticsUpdate_Apply_Replaces(t *testing.T) {
+	// Applying set-statistics twice for the same snapshot ID should replace, not append.
+	b := buildFromBase(t)
+	first := StatisticsFile{SnapshotID: 5, StatisticsPath: "s3://first.puffin", FileSizeInBytes: 10, BlobMetadata: []BlobMetadata{}}
+	second := StatisticsFile{SnapshotID: 5, StatisticsPath: "s3://second.puffin", FileSizeInBytes: 20, BlobMetadata: []BlobMetadata{}}
+
+	require.NoError(t, NewSetStatisticsUpdate(first).Apply(b))
+	require.NoError(t, NewSetStatisticsUpdate(second).Apply(b))
+
+	meta, err := b.Build()
+	require.NoError(t, err)
+
+	count := 0
+	var got StatisticsFile
+	for s := range meta.Statistics() {
+		count++
+		got = s
+	}
+	assert.Equal(t, 1, count)
+	assert.Equal(t, "s3://second.puffin", got.StatisticsPath)
+}
+
+func TestRemoveStatisticsUpdate_Unmarshal(t *testing.T) {
+	data := []byte(`[{"action":"remove-statistics","snapshot-id":7}]`)
+
+	var updates Updates
+	require.NoError(t, json.Unmarshal(data, &updates))
+	require.Len(t, updates, 1)
+
+	u, ok := updates[0].(*removeStatisticsUpdate)
+	require.True(t, ok)
+	assert.Equal(t, int64(7), u.SnapshotID)
+}
+
+func TestRemoveStatisticsUpdate_Apply(t *testing.T) {
+	b := buildFromBase(t)
+	stats := StatisticsFile{SnapshotID: 3, StatisticsPath: "s3://bucket/stats.puffin", BlobMetadata: []BlobMetadata{}}
+	require.NoError(t, NewSetStatisticsUpdate(stats).Apply(b))
+
+	require.NoError(t, NewRemoveStatisticsUpdate(3).Apply(b))
+
+	meta, err := b.Build()
+	require.NoError(t, err)
+
+	count := 0
+	for range meta.Statistics() {
+		count++
+	}
+	assert.Equal(t, 0, count)
+}
+
+func TestRemoveStatisticsUpdate_Apply_NoOp(t *testing.T) {
+	// Removing a statistics file that does not exist should not error.
+	b := buildFromBase(t)
+	require.NoError(t, NewRemoveStatisticsUpdate(999).Apply(b))
+}
+
+func TestAddEncryptionKeyUpdate_Unmarshal(t *testing.T) {
+	data := []byte(`[{
+		"action": "add-encryption-key",
+		"encryption-key": {"key-id": "key-1", "key-metadata": "c2VjcmV0"}
+	}]`)
+
+	var updates Updates
+	require.NoError(t, json.Unmarshal(data, &updates))
+	require.Len(t, updates, 1)
+
+	u, ok := updates[0].(*addEncryptionKeyUpdate)
+	require.True(t, ok)
+	assert.Equal(t, "key-1", u.EncryptionKey.KeyID)
+	require.NotNil(t, u.EncryptionKey.KeyMetadata)
+	assert.Equal(t, "c2VjcmV0", *u.EncryptionKey.KeyMetadata)
+}
+
+func TestAddEncryptionKeyUpdate_Apply(t *testing.T) {
+	b := buildFromBase(t)
+	key := EncryptionKey{KeyID: "my-key", KeyMetadata: nil}
+
+	require.NoError(t, NewAddEncryptionKeyUpdate(key).Apply(b))
+
+	meta, err := b.Build()
+	require.NoError(t, err)
+
+	found := false
+	for id, k := range meta.EncryptionKeys() {
+		if id == "my-key" {
+			found = true
+			assert.Equal(t, key, k)
+		}
+	}
+	assert.True(t, found)
+}
+
+func TestRemoveEncryptionKeyUpdate_Unmarshal(t *testing.T) {
+	data := []byte(`[{"action":"remove-encryption-key","key-id":"key-42"}]`)
+
+	var updates Updates
+	require.NoError(t, json.Unmarshal(data, &updates))
+	require.Len(t, updates, 1)
+
+	u, ok := updates[0].(*removeEncryptionKeyUpdate)
+	require.True(t, ok)
+	assert.Equal(t, "key-42", u.KeyID)
+}
+
+func TestRemoveEncryptionKeyUpdate_Apply(t *testing.T) {
+	b := buildFromBase(t)
+	key := EncryptionKey{KeyID: "key-to-remove"}
+	require.NoError(t, NewAddEncryptionKeyUpdate(key).Apply(b))
+
+	require.NoError(t, NewRemoveEncryptionKeyUpdate("key-to-remove").Apply(b))
+
+	meta, err := b.Build()
+	require.NoError(t, err)
+
+	for id := range meta.EncryptionKeys() {
+		assert.NotEqual(t, "key-to-remove", id)
+	}
+}
+
+func TestRemoveEncryptionKeyUpdate_Apply_NoOp(t *testing.T) {
+	// Removing a key that doesn't exist should not error.
+	b := buildFromBase(t)
+	require.NoError(t, NewRemoveEncryptionKeyUpdate("nonexistent").Apply(b))
+}
