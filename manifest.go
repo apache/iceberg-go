@@ -487,8 +487,6 @@ type ManifestFile interface {
 	setVersion(int)
 }
 
-// fieldSummarySchemaNode is the FieldSummary Avro schema with "r508" as an
-// alias. The alias lets avro.Resolve match the record name used by the
 // manifestFileV1Reader is the Avro reader schema for V1 manifest list entries.
 // It handles both spec-correct field names and pre-1.4 Java Iceberg legacy
 // names (added_data_files_count etc.) via the alias tags on manifestFileV1,
