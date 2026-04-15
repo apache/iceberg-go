@@ -173,7 +173,7 @@ type manifestFileV1 struct {
 	AddedRowsCount     *int64          `avro:"added_rows_count"`
 	ExistingRowsCount  *int64          `avro:"existing_rows_count"`
 	DeletedRowsCount   *int64          `avro:"deleted_rows_count"`
-	PartitionList      *[]FieldSummary `avro:"partitions"`
+	PartitionList      *[]FieldSummary `avro:"partitions,type-alias=r508"`
 	Key                *[]byte         `avro:"key_metadata"`
 }
 
@@ -252,7 +252,7 @@ type manifestFile struct {
 	AddedRowsCount     int64           `avro:"added_rows_count"`
 	ExistingRowsCount  int64           `avro:"existing_rows_count"`
 	DeletedRowsCount   int64           `avro:"deleted_rows_count"`
-	PartitionList      *[]FieldSummary `avro:"partitions"`
+	PartitionList      *[]FieldSummary `avro:"partitions,type-alias=r508"`
 	Key                []byte          `avro:"key_metadata"`
 	FirstRowIDValue    *int64          `avro:"first_row_id"`
 
@@ -489,34 +489,18 @@ type ManifestFile interface {
 
 // fieldSummarySchemaNode is the FieldSummary Avro schema with "r508" as an
 // alias. The alias lets avro.Resolve match the record name used by the
-// internal manifest list schemas.
-var fieldSummarySchemaNode = func() avro.SchemaNode {
-	n := avro.MustSchemaFor[FieldSummary]().Root()
-	n.Aliases = []string{"r508"}
-
-	return n
-}()
-
 // manifestFileV1Reader is the Avro reader schema for V1 manifest list entries.
 // It handles both spec-correct field names and pre-1.4 Java Iceberg legacy
 // names (added_data_files_count etc.) via the alias tags on manifestFileV1,
 // and both nullable and non-nullable added_snapshot_id via *int64.
 var manifestFileV1Reader = avro.MustSchemaFor[manifestFileV1](
 	avro.WithName("manifest_file"),
-	avro.CustomType{
-		GoType: reflect.TypeOf(FieldSummary{}),
-		Schema: &fieldSummarySchemaNode,
-	},
 )
 
 // manifestFileReader is the Avro reader schema for V2+ manifest list entries.
 // Alias tags on manifestFile handle pre-1.4 Java Iceberg legacy field names.
 var manifestFileReader = avro.MustSchemaFor[manifestFile](
 	avro.WithName("manifest_file"),
-	avro.CustomType{
-		GoType: reflect.TypeOf(FieldSummary{}),
-		Schema: &fieldSummarySchemaNode,
-	},
 )
 
 func decodeManifests[I interface {
