@@ -95,6 +95,11 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 			panic("invalid schema: field with id " + strconv.Itoa(field.ID) + " not found, this is a bug, please report.")
 		}
 
+		if iceberg.IsMetadataColumn(field.ID) {
+			return fmt.Errorf("%w: field '%s' uses reserved metadata column ID %d",
+				iceberg.ErrInvalidSchema, colName, field.ID)
+		}
+
 		minFormatVersion := minFormatVersionForType(field.Type)
 		if formatVersion < minFormatVersion {
 			problems = append(problems, IncompatibleField{
