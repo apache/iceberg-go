@@ -821,8 +821,7 @@ func writeLegacyManifestListV1(t *testing.T) bytes.Buffer {
 	}
 
 	var buf bytes.Buffer
-	enc, err := ocf.NewEncoderWithSchema(sc, &buf,
-		ocf.WithEncoderSchemaCache(&avro.SchemaCache{}))
+	enc, err := ocf.NewWriter(&buf, sc, ocf.WithSchema(schemaJSON))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -899,8 +898,8 @@ func writeLegacyManifestListV2(t *testing.T) bytes.Buffer {
 	}
 
 	var buf bytes.Buffer
-	enc, err := ocf.NewEncoderWithSchema(sc, &buf,
-		ocf.WithEncoderSchemaCache(&avro.SchemaCache{}),
+	enc, err := ocf.NewWriter(&buf, sc,
+		ocf.WithSchema(schemaJSON),
 		ocf.WithMetadata(map[string][]byte{"format-version": []byte("2")}))
 	if err != nil {
 		t.Fatal(err)
