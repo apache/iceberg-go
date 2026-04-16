@@ -98,6 +98,33 @@ const (
 
 	MaxRefAgeMsKey     = "max-ref-age-ms"
 	MaxRefAgeMsDefault = math.MaxInt
+
+	// CommitNumRetriesKey is the number of commit retry attempts before
+	// giving up on ErrCommitFailed from the catalog.
+	//
+	// The default is 0 (no retries) until refresh-and-replay lands; a
+	// retry loop that reuses the original updates/requirements will
+	// fail deterministically on genuine OCC conflicts and only slow
+	// down the final error. Callers that observe transient catalog
+	// flakiness (dropped connections, brief 409 during leader
+	// election) can raise this to recover.
+	CommitNumRetriesKey     = "commit.retry.num-retries"
+	CommitNumRetriesDefault = 0
+
+	// CommitMinRetryWaitMsKey is the initial wait time in milliseconds
+	// for exponential backoff between commit retry attempts. Default: 100ms.
+	CommitMinRetryWaitMsKey     = "commit.retry.min-wait-ms"
+	CommitMinRetryWaitMsDefault = 100
+
+	// CommitMaxRetryWaitMsKey is the maximum wait time in milliseconds
+	// between commit retry attempts. Default: 60s.
+	CommitMaxRetryWaitMsKey     = "commit.retry.max-wait-ms"
+	CommitMaxRetryWaitMsDefault = 60 * 1000
+
+	// CommitTotalRetryTimeoutMsKey bounds the total time spent across all
+	// retry attempts. Default: 30 minutes.
+	CommitTotalRetryTimeoutMsKey     = "commit.retry.total-timeout-ms"
+	CommitTotalRetryTimeoutMsDefault = 30 * 60 * 1000
 )
 
 // Reserved properties

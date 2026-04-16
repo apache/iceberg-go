@@ -21,12 +21,15 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"io"
 	"iter"
 	"log"
+	"math/rand/v2"
 	"runtime"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -36,6 +39,26 @@ import (
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"golang.org/x/sync/errgroup"
 )
+
+// ErrCommitFailed is the sentinel error returned by catalogs when a
+// commit fails due to a concurrent modification (e.g. HTTP 409 Conflict
+// from the REST catalog). Catalog implementations should wrap this
+// error so that callers using errors.Is(err, table.ErrCommitFailed)
+// can detect retryable commit conflicts.
+//
+// Currently only catalog/rest wraps this sentinel; Glue, SQL, and Hive
+// catalogs return their conflict errors raw and will not trigger
+// retries until follow-up work wires them through (tracked under
+// issue #830).
+//
+// The retry loop in doCommit re-issues the original updates and
+// requirements unchanged. This recovers only from transient catalog
+// errors (dropped connections, brief 409 during leader election); it
+// does not yet refresh the table metadata between attempts, so a
+// contended commit whose AssertRefSnapshotID requirement has been
+// invalidated by a peer will fail deterministically on every retry.
+// Refresh-and-replay is tracked separately (issue #830).
+var ErrCommitFailed = errors.New("commit failed, refresh and try again")
 
 type FSysF func(ctx context.Context) (icebergio.IO, error)
 
@@ -303,10 +326,55 @@ func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile,
 }
 
 func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requirement) (*Table, error) {
-	newMeta, newLoc, err := t.cat.CommitTable(ctx, t.identifier, reqs, updates)
+	cfg := readRetryConfig(t.metadata.Properties())
+
+	// Bound total retry time with a derived context so both the wait loop
+	// and the CommitTable call itself respect the deadline uniformly.
+	retryCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.totalTimeoutMs)*time.Millisecond)
+	defer cancel()
+
+	var (
+		newMeta Metadata
+		newLoc  string
+		err     error
+	)
+
+	for attempt := 0; attempt <= cfg.numRetries; attempt++ {
+		if retryCtx.Err() != nil {
+			return nil, context.Cause(retryCtx)
+		}
+
+		newMeta, newLoc, err = t.cat.CommitTable(retryCtx, t.identifier, reqs, updates)
+		if err == nil {
+			break
+		}
+
+		// Only retry on retryable commit conflicts. Unknown-state errors
+		// (5xx, gateway timeouts) must NOT be retried because the commit
+		// may have actually succeeded — retrying could duplicate work.
+		if !errors.Is(err, ErrCommitFailed) {
+			return nil, err
+		}
+
+		if attempt == cfg.numRetries {
+			break
+		}
+
+		wait := backoffDuration(attempt, cfg.minWaitMs, cfg.maxWaitMs)
+		timer := time.NewTimer(wait)
+		select {
+		case <-retryCtx.Done():
+			timer.Stop()
+
+			return nil, context.Cause(retryCtx)
+		case <-timer.C:
+		}
+	}
+
 	if err != nil {
 		return nil, err
 	}
+
 	fs, err := t.fsF(ctx)
 	if err != nil {
 		return nil, err
@@ -314,6 +382,68 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 	deleteOldMetadata(fs, t.metadata, newMeta)
 
 	return New(t.identifier, newMeta, newLoc, t.fsF, t.cat), nil
+}
+
+type retryConfig struct {
+	numRetries     int
+	minWaitMs      int
+	maxWaitMs      int
+	totalTimeoutMs int
+}
+
+func readRetryConfig(props iceberg.Properties) retryConfig {
+	cfg := retryConfig{
+		numRetries:     props.GetInt(CommitNumRetriesKey, CommitNumRetriesDefault),
+		minWaitMs:      props.GetInt(CommitMinRetryWaitMsKey, CommitMinRetryWaitMsDefault),
+		maxWaitMs:      props.GetInt(CommitMaxRetryWaitMsKey, CommitMaxRetryWaitMsDefault),
+		totalTimeoutMs: props.GetInt(CommitTotalRetryTimeoutMsKey, CommitTotalRetryTimeoutMsDefault),
+	}
+	if cfg.numRetries < 0 {
+		cfg.numRetries = 0
+	}
+
+	return cfg
+}
+
+// backoffDuration computes wait time for the given 0-based retry attempt
+// using exponential backoff (minMs << attempt) clamped to maxMs, with
+// jitter in [minMs, ceiling] to avoid retry stampedes while keeping a
+// non-zero floor between attempts. Java Iceberg uses a deterministic
+// exponential backoff here; we add jitter to reduce stampede risk on
+// concurrent Go writers. Backoff is client-local, so this does not
+// affect cross-client interop.
+func backoffDuration(attempt, minMs, maxMs int) time.Duration {
+	if minMs <= 0 {
+		minMs = CommitMinRetryWaitMsDefault
+	}
+	if maxMs <= 0 {
+		maxMs = CommitMaxRetryWaitMsDefault
+	}
+	if minMs > maxMs {
+		minMs = maxMs
+	}
+	// Guard the shift count: negative shifts panic, and shifts at or
+	// beyond the operand width overflow the signed int64 to 0 or a
+	// negative value which we'd then clamp anyway. Clamping here keeps
+	// the math obvious at the call site below.
+	if attempt < 0 {
+		attempt = 0
+	}
+	if attempt > 62 {
+		attempt = 62
+	}
+
+	ceiling := int64(minMs) << attempt
+	if ceiling <= 0 || ceiling > int64(maxMs) {
+		ceiling = int64(maxMs)
+	}
+
+	// Jitter in [minMs, ceiling]: keeps a non-zero floor so concurrent
+	// writers don't all sample 0 and retry in lockstep.
+	//nolint:gosec // non-security randomness, jitter for retry spread
+	wait := int64(minMs) + rand.Int64N(ceiling-int64(minMs)+1)
+
+	return time.Duration(wait) * time.Millisecond
 }
 
 // SnapshotAsOf finds the snapshot that was current as of or right before the given timestamp.

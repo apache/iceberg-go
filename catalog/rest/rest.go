@@ -90,9 +90,12 @@ var (
 	ErrAuthorizationExpired = fmt.Errorf("%w: authorization expired", ErrRESTError)
 	ErrServiceUnavailable   = fmt.Errorf("%w: service unavailable", ErrRESTError)
 	ErrServerError          = fmt.Errorf("%w: server error", ErrRESTError)
-	ErrCommitFailed         = fmt.Errorf("%w: commit failed, refresh and try again", ErrRESTError)
-	ErrCommitStateUnknown   = fmt.Errorf("%w: commit failed due to unknown reason", ErrRESTError)
-	ErrOAuthError           = fmt.Errorf("%w: oauth error", ErrRESTError)
+	// ErrCommitFailed wraps both ErrRESTError and table.ErrCommitFailed
+	// so that callers can detect retryable commit conflicts via
+	// errors.Is(err, table.ErrCommitFailed).
+	ErrCommitFailed       = fmt.Errorf("%w: %w", ErrRESTError, table.ErrCommitFailed)
+	ErrCommitStateUnknown = fmt.Errorf("%w: commit failed due to unknown reason", ErrRESTError)
+	ErrOAuthError         = fmt.Errorf("%w: oauth error", ErrRESTError)
 )
 
 func init() {
