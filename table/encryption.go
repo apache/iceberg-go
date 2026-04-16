@@ -36,15 +36,15 @@ func (e EncryptionKey) Equals(other EncryptionKey) bool {
 		return false
 	}
 
-        if e.EncryptedByID != other.EncryptedByID { // skip the whole thing if both are nil
-                if e.EncryptedByID == nil || other.EncryptedByID == nil { 
-                        // if either is nil, the other is not due to previous if
-                        return false
-                } else if *e.EncryptedByID != *other.EncryptedByID { 
-                        // if neither is nil, we can dereference them both safely
-                        return false
-                }
-        }
+	if e.EncryptedByID != other.EncryptedByID { // skip the whole thing if both are nil
+		if e.EncryptedByID == nil || other.EncryptedByID == nil {
+			// if either is nil, the other is not due to previous if
+			return false
+		} else if *e.EncryptedByID != *other.EncryptedByID {
+			// if neither is nil, we can dereference them both safely
+			return false
+		}
+	}
 
 	return maps.Equal(e.Properties, other.Properties)
 }
