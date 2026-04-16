@@ -575,7 +575,21 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) AuthManager {
 
 	// Add skip oauth so we don't get in cycles trying to refresh the token
 	ctx := context.WithValue(context.Background(), skipOAuth, true)
-	ctx = context.WithValue(ctx, oauth2.HTTPClient, cl)
+
+	// If a separate TLS config is provided for the OAuth2 server, create a
+	// dedicated HTTP client for token requests instead of reusing the catalog
+	// client. This is needed when the OAuth2 server is a different host with
+	// different TLS requirements.
+	oauthClient := cl
+	if opts.oauthTLSConfig != nil {
+		oauthClient = &http.Client{
+			Transport: &http.Transport{
+				Proxy:           http.ProxyFromEnvironment,
+				TLSClientConfig: opts.oauthTLSConfig,
+			},
+		}
+	}
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, oauthClient)
 
 	return &Oauth2AuthManager{
 		tokenSource: cfg.TokenSource(ctx),
