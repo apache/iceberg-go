@@ -24,7 +24,7 @@ In this quickstart, we’ll glean insights from code segments and learn how to:
 ## Requirements
 
 <div class="warning">
-Go 1.23 or later is required to build.
+Go 1.25 or later is required to build.
 </div>
 
 ## Installation
