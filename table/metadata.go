@@ -157,6 +157,9 @@ type Metadata interface {
 	// write the partition statistics file during each write operation,
 	// or it can also be computed on demand.
 	PartitionStatistics() iter.Seq[PartitionStatisticsFile]
+	// EncryptionKeys returns the list of encryption keys stored in table metadata (V3+).
+	// Returns an empty sequence for V1/V2 tables.
+	EncryptionKeys() iter.Seq[EncryptionKey]
 }
 
 // MetadataBuilder is a struct used for building and updating Iceberg table metadata.
@@ -188,6 +191,7 @@ type MetadataBuilder struct {
 	refs               map[string]SnapshotRef
 	statisticsList     []StatisticsFile
 	partitionStatsList []PartitionStatisticsFile
+	encryptionKeyList  []EncryptionKey
 
 	previousFileEntry *MetadataLogEntry
 	// >v1 specific
@@ -215,6 +219,7 @@ func NewMetadataBuilder(formatVersion int) (*MetadataBuilder, error) {
 		metadataLog:        make([]MetadataLogEntry, 0),
 		sortOrderList:      make([]SortOrder, 0),
 		refs:               make(map[string]SnapshotRef),
+		encryptionKeyList:  make([]EncryptionKey, 0),
 		currentSchemaID:    -1,
 		defaultSortOrderID: -1,
 		defaultSpecID:      -1,
@@ -265,6 +270,7 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 	b.metadataLog = slices.Collect(metadata.PreviousFiles())
 	b.statisticsList = slices.Collect(metadata.Statistics())
 	b.partitionStatsList = slices.Collect(metadata.PartitionStatistics())
+	b.encryptionKeyList = slices.Collect(metadata.EncryptionKeys())
 
 	if currentFileLocation != "" {
 		b.previousFileEntry = &MetadataLogEntry{
@@ -886,6 +892,7 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 		SnapshotRefs:       b.refs,
 		StatisticsList:     b.statisticsList,
 		PartitionStatsList: b.partitionStatsList,
+		EncryptionKeyList:  b.encryptionKeyList,
 	}, nil
 }
 
@@ -1164,6 +1171,77 @@ func (b *MetadataBuilder) RemoveSchemas(ints []int) error {
 	return nil
 }
 
+// SetStatistics adds or replaces a statistics file for the given snapshot. If a statistics
+// file with the same snapshot ID already exists it is replaced, otherwise the file is appended.
+func (b *MetadataBuilder) SetStatistics(stats StatisticsFile) error {
+	replaced := false
+	for i, s := range b.statisticsList {
+		if s.SnapshotID == stats.SnapshotID {
+			b.statisticsList[i] = stats
+			replaced = true
+
+			break
+		}
+	}
+
+	if !replaced {
+		b.statisticsList = append(b.statisticsList, stats)
+	}
+
+	b.updates = append(b.updates, NewSetStatisticsUpdate(stats))
+
+	return nil
+}
+
+// RemoveStatistics removes the statistics file associated with the given snapshot ID.
+// It is not an error if no such file exists.
+func (b *MetadataBuilder) RemoveStatistics(snapshotID int64) error {
+	b.statisticsList = slices.DeleteFunc(b.statisticsList, func(s StatisticsFile) bool {
+		return s.SnapshotID == snapshotID
+	})
+	b.updates = append(b.updates, NewRemoveStatisticsUpdate(snapshotID))
+
+	return nil
+}
+
+// AddEncryptionKey adds or replaces an encryption key indexed by its key-id.
+// Encryption keys are only supported for format version 3 and above.
+func (b *MetadataBuilder) AddEncryptionKey(key EncryptionKey) error {
+	if b.formatVersion < 3 {
+		return fmt.Errorf("%w: encryption keys are only supported for format version 3 or higher, current version: %d",
+			iceberg.ErrInvalidArgument, b.formatVersion)
+	}
+
+	replaced := false
+	for i, k := range b.encryptionKeyList {
+		if k.KeyID == key.KeyID {
+			b.encryptionKeyList[i] = key
+			replaced = true
+
+			break
+		}
+	}
+
+	if !replaced {
+		b.encryptionKeyList = append(b.encryptionKeyList, key)
+	}
+
+	b.updates = append(b.updates, NewAddEncryptionKeyUpdate(key))
+
+	return nil
+}
+
+// RemoveEncryptionKey removes the encryption key with the given key-id.
+// It is not an error if no such key exists.
+func (b *MetadataBuilder) RemoveEncryptionKey(keyID string) error {
+	b.encryptionKeyList = slices.DeleteFunc(b.encryptionKeyList, func(k EncryptionKey) bool {
+		return k.KeyID == keyID
+	})
+	b.updates = append(b.updates, NewRemoveEncryptionKeyUpdate(keyID))
+
+	return nil
+}
+
 // maxBy returns the maximum value of extract(e) for all e in elems.
 // If elems is empty, returns 0.
 func maxBy[S ~[]E, E any](elems S, extract func(e E) int) int {
@@ -1244,6 +1322,7 @@ type commonMetadata struct {
 	SnapshotRefs       map[string]SnapshotRef    `json:"refs,omitempty"`
 	StatisticsList     []StatisticsFile          `json:"statistics,omitempty"`
 	PartitionStatsList []PartitionStatisticsFile `json:"partition-statistics,omitempty"`
+	EncryptionKeyList  []EncryptionKey           `json:"encryption-keys,omitempty"`
 	// V2+ fields
 	LastSequenceNumber *int64 `json:"last-sequence-number,omitempty"`
 	// V3+ fields
@@ -1312,7 +1391,8 @@ func (c *commonMetadata) Equals(other *commonMetadata) bool {
 		c.LastColumnId == other.LastColumnId && c.CurrentSchemaID == other.CurrentSchemaID &&
 		c.DefaultSpecID == other.DefaultSpecID && c.DefaultSortOrderID == other.DefaultSortOrderID &&
 		slices.Equal(c.SnapshotLog, other.SnapshotLog) && slices.Equal(c.MetadataLog, other.MetadataLog) &&
-		iceinternal.SliceEqualHelper(c.SortOrderList, other.SortOrderList)
+		iceinternal.SliceEqualHelper(c.SortOrderList, other.SortOrderList) &&
+		iceinternal.SliceEqualHelper(c.EncryptionKeyList, other.EncryptionKeyList)
 }
 
 func (c *commonMetadata) TableUUID() uuid.UUID       { return c.UUID }
@@ -1410,6 +1490,10 @@ func (c *commonMetadata) Statistics() iter.Seq[StatisticsFile] {
 
 func (c *commonMetadata) PartitionStatistics() iter.Seq[PartitionStatisticsFile] {
 	return slices.Values(c.PartitionStatsList)
+}
+
+func (c *commonMetadata) EncryptionKeys() iter.Seq[EncryptionKey] {
+	return slices.Values(c.EncryptionKeyList)
 }
 
 // preValidate updates values in the metadata struct with defaults based on

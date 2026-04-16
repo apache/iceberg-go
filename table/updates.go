@@ -36,11 +36,14 @@ const (
 
 	UpdateAssignUUID = "assign-uuid"
 
-	UpdateRemoveProperties  = "remove-properties"
-	UpdateRemoveSchemas     = "remove-schemas"
-	UpdateRemoveSnapshots   = "remove-snapshots"
-	UpdateRemoveSnapshotRef = "remove-snapshot-ref"
-	UpdateRemoveSpec        = "remove-partition-specs"
+	UpdateAddEncryptionKey    = "add-encryption-key"
+	UpdateRemoveEncryptionKey = "remove-encryption-key"
+	UpdateRemoveProperties    = "remove-properties"
+	UpdateRemoveSchemas       = "remove-schemas"
+	UpdateRemoveSnapshots     = "remove-snapshots"
+	UpdateRemoveSnapshotRef   = "remove-snapshot-ref"
+	UpdateRemoveSpec          = "remove-partition-specs"
+	UpdateRemoveStatistics    = "remove-statistics"
 
 	UpdateSetCurrentSchema    = "set-current-schema"
 	UpdateSetDefaultSortOrder = "set-default-sort-order"
@@ -48,6 +51,7 @@ const (
 	UpdateSetLocation         = "set-location"
 	UpdateSetProperties       = "set-properties"
 	UpdateSetSnapshotRef      = "set-snapshot-ref"
+	UpdateSetStatistics       = "set-statistics"
 
 	UpdateUpgradeFormatVersion = "upgrade-format-version"
 )
@@ -112,6 +116,14 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 			upd = &removeSpecUpdate{}
 		case UpdateRemoveSchemas:
 			upd = &removeSchemasUpdate{}
+		case UpdateSetStatistics:
+			upd = &setStatisticsUpdate{}
+		case UpdateRemoveStatistics:
+			upd = &removeStatisticsUpdate{}
+		case UpdateAddEncryptionKey:
+			upd = &addEncryptionKeyUpdate{}
+		case UpdateRemoveEncryptionKey:
+			upd = &removeEncryptionKeyUpdate{}
 		default:
 			return fmt.Errorf("%w: unknown update action: %s", iceberg.ErrInvalidArgument, base.ActionName)
 		}
@@ -585,4 +597,78 @@ func NewRemoveSchemasUpdate(schemaIds []int) *removeSchemasUpdate {
 
 func (u *removeSchemasUpdate) Apply(builder *MetadataBuilder) error {
 	return builder.RemoveSchemas(u.SchemaIDs)
+}
+
+type setStatisticsUpdate struct {
+	baseUpdate
+	SnapshotID int64          `json:"snapshot-id"`
+	Statistics StatisticsFile `json:"statistics"`
+}
+
+// NewSetStatisticsUpdate creates a new Update that adds or replaces the statistics file
+// for the given snapshot ID in the table metadata.
+func NewSetStatisticsUpdate(stats StatisticsFile) *setStatisticsUpdate {
+	return &setStatisticsUpdate{
+		baseUpdate: baseUpdate{ActionName: UpdateSetStatistics},
+		SnapshotID: stats.SnapshotID,
+		Statistics: stats,
+	}
+}
+
+func (u *setStatisticsUpdate) Apply(builder *MetadataBuilder) error {
+	return builder.SetStatistics(u.Statistics)
+}
+
+type removeStatisticsUpdate struct {
+	baseUpdate
+	SnapshotID int64 `json:"snapshot-id"`
+}
+
+// NewRemoveStatisticsUpdate creates a new Update that removes the statistics file
+// for the given snapshot ID from the table metadata.
+func NewRemoveStatisticsUpdate(snapshotID int64) *removeStatisticsUpdate {
+	return &removeStatisticsUpdate{
+		baseUpdate: baseUpdate{ActionName: UpdateRemoveStatistics},
+		SnapshotID: snapshotID,
+	}
+}
+
+func (u *removeStatisticsUpdate) Apply(builder *MetadataBuilder) error {
+	return builder.RemoveStatistics(u.SnapshotID)
+}
+
+type addEncryptionKeyUpdate struct {
+	baseUpdate
+	EncryptionKey EncryptionKey `json:"encryption-key"`
+}
+
+// NewAddEncryptionKeyUpdate creates a new Update that adds or replaces an encryption key
+// (indexed by its key-id) in the table metadata.
+func NewAddEncryptionKeyUpdate(key EncryptionKey) *addEncryptionKeyUpdate {
+	return &addEncryptionKeyUpdate{
+		baseUpdate:    baseUpdate{ActionName: UpdateAddEncryptionKey},
+		EncryptionKey: key,
+	}
+}
+
+func (u *addEncryptionKeyUpdate) Apply(builder *MetadataBuilder) error {
+	return builder.AddEncryptionKey(u.EncryptionKey)
+}
+
+type removeEncryptionKeyUpdate struct {
+	baseUpdate
+	KeyID string `json:"key-id"`
+}
+
+// NewRemoveEncryptionKeyUpdate creates a new Update that removes the encryption key
+// with the given key-id from the table metadata.
+func NewRemoveEncryptionKeyUpdate(keyID string) *removeEncryptionKeyUpdate {
+	return &removeEncryptionKeyUpdate{
+		baseUpdate: baseUpdate{ActionName: UpdateRemoveEncryptionKey},
+		KeyID:      keyID,
+	}
+}
+
+func (u *removeEncryptionKeyUpdate) Apply(builder *MetadataBuilder) error {
+	return builder.RemoveEncryptionKey(u.KeyID)
 }
