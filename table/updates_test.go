@@ -538,7 +538,7 @@ func TestRemoveStatisticsUpdate_Apply_NoOp(t *testing.T) {
 func TestAddEncryptionKeyUpdate_Unmarshal(t *testing.T) {
 	data := []byte(`[{
 		"action": "add-encryption-key",
-		"encryption-key": {"key-id": "key-1", "key-metadata": "c2VjcmV0"}
+		"encryption-key": {"key-id": "key-1", "encrypted-key-metadata": "c2VjcmV0"}
 	}]`)
 
 	var updates Updates
@@ -548,13 +548,42 @@ func TestAddEncryptionKeyUpdate_Unmarshal(t *testing.T) {
 	u, ok := updates[0].(*addEncryptionKeyUpdate)
 	require.True(t, ok)
 	assert.Equal(t, "key-1", u.EncryptionKey.KeyID)
-	require.NotNil(t, u.EncryptionKey.KeyMetadata)
-	assert.Equal(t, "c2VjcmV0", *u.EncryptionKey.KeyMetadata)
+	assert.Equal(t, "c2VjcmV0", u.EncryptionKey.EncryptedKeyMetadata)
+}
+
+// baseMetaV3JSON is a minimal valid V3 metadata document used by encryption key tests.
+const baseMetaV3JSON = `{
+  "format-version": 3,
+  "table-uuid": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+  "location": "s3://bucket/table",
+  "last-sequence-number": 1,
+  "last-updated-ms": 1000,
+  "last-column-id": 1,
+  "current-schema-id": 0,
+  "schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"x","required":true,"type":"long"}]}],
+  "default-spec-id": 0,
+  "partition-specs": [{"spec-id":0,"fields":[]}],
+  "last-partition-id": 0,
+  "default-sort-order-id": 0,
+  "sort-orders": [{"order-id":0,"fields":[]}],
+  "snapshot-log": [],
+  "metadata-log": [],
+  "next-row-id": 0
+}`
+
+func buildFromBaseV3(t *testing.T) *MetadataBuilder {
+	t.Helper()
+	meta, err := ParseMetadataString(baseMetaV3JSON)
+	require.NoError(t, err)
+	b, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+
+	return b
 }
 
 func TestAddEncryptionKeyUpdate_Apply(t *testing.T) {
-	b := buildFromBase(t)
-	key := EncryptionKey{KeyID: "my-key", KeyMetadata: nil}
+	b := buildFromBaseV3(t)
+	key := EncryptionKey{KeyID: "my-key", EncryptedKeyMetadata: "dGVzdA=="}
 
 	require.NoError(t, NewAddEncryptionKeyUpdate(key).Apply(b))
 
@@ -562,13 +591,22 @@ func TestAddEncryptionKeyUpdate_Apply(t *testing.T) {
 	require.NoError(t, err)
 
 	found := false
-	for id, k := range meta.EncryptionKeys() {
-		if id == "my-key" {
+	for k := range meta.EncryptionKeys() {
+		if k.KeyID == "my-key" {
 			found = true
-			assert.Equal(t, key, k)
+			assert.True(t, key.Equals(k))
 		}
 	}
 	assert.True(t, found)
+}
+
+func TestAddEncryptionKeyUpdate_Apply_RejectsV2(t *testing.T) {
+	b := buildFromBase(t) // V2 base
+	key := EncryptionKey{KeyID: "my-key", EncryptedKeyMetadata: "dGVzdA=="}
+
+	err := NewAddEncryptionKeyUpdate(key).Apply(b)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "format version 3")
 }
 
 func TestRemoveEncryptionKeyUpdate_Unmarshal(t *testing.T) {
@@ -584,8 +622,8 @@ func TestRemoveEncryptionKeyUpdate_Unmarshal(t *testing.T) {
 }
 
 func TestRemoveEncryptionKeyUpdate_Apply(t *testing.T) {
-	b := buildFromBase(t)
-	key := EncryptionKey{KeyID: "key-to-remove"}
+	b := buildFromBaseV3(t)
+	key := EncryptionKey{KeyID: "key-to-remove", EncryptedKeyMetadata: "dGVzdA=="}
 	require.NoError(t, NewAddEncryptionKeyUpdate(key).Apply(b))
 
 	require.NoError(t, NewRemoveEncryptionKeyUpdate("key-to-remove").Apply(b))
@@ -593,8 +631,8 @@ func TestRemoveEncryptionKeyUpdate_Apply(t *testing.T) {
 	meta, err := b.Build()
 	require.NoError(t, err)
 
-	for id := range meta.EncryptionKeys() {
-		assert.NotEqual(t, "key-to-remove", id)
+	for k := range meta.EncryptionKeys() {
+		assert.NotEqual(t, "key-to-remove", k.KeyID)
 	}
 }
 

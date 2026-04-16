@@ -17,10 +17,35 @@
 
 package table
 
+import "maps"
+
 // EncryptionKey represents an encryption key stored in table metadata (V3+).
-// Keys are indexed by KeyID in the metadata encryption-keys map.
 type EncryptionKey struct {
-	KeyID        string  `json:"key-id"`
-	KeyMetadata  *string `json:"key-metadata,omitempty"`
-	KeyAlgorithm *string `json:"key-algorithm,omitempty"`
+	KeyID                string            `json:"key-id"`
+	EncryptedKeyMetadata string            `json:"encrypted-key-metadata"`
+	EncryptedByID        *string           `json:"encrypted-by-id,omitempty"`
+	Properties           map[string]string `json:"properties,omitempty"`
+}
+
+func (e EncryptionKey) Equals(other EncryptionKey) bool {
+	if e.KeyID != other.KeyID {
+		return false
+	}
+
+	if e.EncryptedKeyMetadata != other.EncryptedKeyMetadata {
+		return false
+	}
+
+	switch {
+	case e.EncryptedByID == nil && other.EncryptedByID != nil:
+		return false
+	case e.EncryptedByID != nil && other.EncryptedByID == nil:
+		return false
+	case e.EncryptedByID != nil && other.EncryptedByID != nil:
+		if *e.EncryptedByID != *other.EncryptedByID {
+			return false
+		}
+	}
+
+	return maps.Equal(e.Properties, other.Properties)
 }
