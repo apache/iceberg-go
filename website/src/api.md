@@ -24,7 +24,7 @@
 * Create and list namespaces.
 * Create, load, and drop tables
 
-Currently, only the REST catalog has been implemented, and other catalogs are under active development. Here is an 
+Multiple catalog implementations are available: REST, Hive, Glue, and SQL. Here is an
 example of how to create a `RestCatalog`:
 
 ```go
@@ -308,6 +308,246 @@ tbl, err := cat.CreateTable(
     catalog.WithPartitionSpec(&partitionSpec),
     catalog.WithLocation("s3://my-bucket/tables/partitioned_table"),
 )
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+# Scanning (Reading Data)
+
+The `Scan` API reads data from Iceberg tables as Apache Arrow record batches. It supports
+column projection, row filtering, snapshot selection, and time travel.
+
+## Basic Scan
+
+```go
+import (
+    "context"
+    "fmt"
+
+    "github.com/apache/iceberg-go/table"
+)
+
+// Scan all data from a table
+scan := tbl.Scan()
+arrowSchema, records, err := scan.ToArrowRecords(context.Background())
+if err != nil {
+    log.Fatal(err)
+}
+
+fmt.Printf("Schema: %s\n", arrowSchema)
+for batch, err := range records {
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("Batch with %d rows\n", batch.NumRows())
+    batch.Release()
+}
+```
+
+## Column Selection and Row Filtering
+
+```go
+import "github.com/apache/iceberg-go"
+
+// Select specific columns and filter rows
+scan := tbl.Scan(
+    table.WithSelectedFields("id", "name", "date"),
+    table.WithRowFilter(
+        iceberg.GreaterThanEqual(iceberg.Reference("id"), int32(100)),
+    ),
+    table.WithCaseSensitive(true),
+    table.WithLimit(1000),
+)
+
+arrowSchema, records, err := scan.ToArrowRecords(context.Background())
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+## Time Travel
+
+```go
+// Read a specific snapshot by ID
+scan := tbl.Scan(
+    table.WithSnapshotID(snapshotID),
+)
+
+// Read data as of a specific timestamp (milliseconds since epoch)
+scan = tbl.Scan(
+    table.WithSnapshotAsOf(timestampMs),
+)
+
+// Read from a named branch or tag
+scan = tbl.Scan()
+scan, err := scan.UseRef("audit-branch")
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+## Reading as an Arrow Table
+
+```go
+// Load all results into a single Arrow Table (in-memory)
+arrowTable, err := tbl.Scan().ToArrowTable(context.Background())
+if err != nil {
+    log.Fatal(err)
+}
+defer arrowTable.Release()
+
+fmt.Printf("Total rows: %d\n", arrowTable.NumRows())
+fmt.Printf("Total columns: %d\n", arrowTable.NumCols())
+```
+
+# Writing Data
+
+The write API uses Apache Arrow as the input format. Data can be written using
+`arrow.Table` or `array.RecordReader` (streaming).
+
+## Append Data
+
+```go
+import (
+    "context"
+
+    "github.com/apache/arrow-go/v18/arrow"
+    "github.com/apache/arrow-go/v18/arrow/array"
+    "github.com/apache/arrow-go/v18/arrow/memory"
+)
+
+// Append using a RecordReader (streaming)
+// The RecordReader's schema must be compatible with the table schema.
+newTable, err := tbl.Append(context.Background(), recordReader, nil)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Append using an Arrow Table with a batch size
+newTable, err = tbl.AppendTable(context.Background(), arrowTable, 1024, nil)
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+## Overwrite Data
+
+Overwrite replaces existing data. An optional filter controls which rows are replaced.
+
+```go
+import "github.com/apache/iceberg-go"
+
+// Overwrite all existing data with new data
+newTable, err := tbl.Overwrite(context.Background(), recordReader, nil)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Overwrite only rows matching a filter
+newTable, err = tbl.Overwrite(context.Background(), recordReader, nil,
+    table.WithOverwriteFilter(
+        iceberg.EqualTo(iceberg.Reference("date"), "2024-01-01"),
+    ),
+)
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+## Delete Data
+
+Delete removes rows matching a filter expression.
+
+```go
+import "github.com/apache/iceberg-go"
+
+// Delete rows matching a filter
+newTable, err := tbl.Delete(context.Background(),
+    iceberg.LessThan(iceberg.Reference("id"), int32(100)),
+    nil, // snapshot properties
+)
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+# Transactions
+
+Transactions group multiple operations into a single atomic commit. Use transactions
+when you need to perform multiple writes or metadata changes together.
+
+## Basic Transaction
+
+```go
+import (
+    "context"
+
+    "github.com/apache/iceberg-go"
+)
+
+txn := tbl.NewTransaction()
+
+// Append new data
+err := txn.Append(context.Background(), recordReader, nil)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Set table properties
+err = txn.SetProperties(iceberg.Properties{
+    "commit.user": "data-pipeline",
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+// Commit all changes atomically
+newTable, err := txn.Commit(context.Background())
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+## Multi-Operation Transaction
+
+```go
+txn := tbl.NewTransaction()
+
+// Delete old data
+err := txn.Delete(context.Background(),
+    iceberg.LessThan(iceberg.Reference("date"), "2023-01-01"),
+    nil,
+)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Append replacement data
+err = txn.Append(context.Background(), recordReader, nil)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Commit both operations as one atomic snapshot
+newTable, err := txn.Commit(context.Background())
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+## Branch Transactions
+
+```go
+// Create a transaction that commits to a specific branch
+txn := tbl.NewTransactionOnBranch("staging")
+
+err := txn.Append(context.Background(), recordReader, nil)
+if err != nil {
+    log.Fatal(err)
+}
+
+newTable, err := txn.Commit(context.Background())
 if err != nil {
     log.Fatal(err)
 }
