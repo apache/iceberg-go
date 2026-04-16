@@ -28,6 +28,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
 	arrowdecimal "github.com/apache/arrow-go/v18/arrow/decimal"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -42,13 +43,17 @@ import (
 type FanoutWriterTestSuite struct {
 	suite.Suite
 
-	mem memory.Allocator
+	mem *memory.CheckedAllocator
 	ctx context.Context
 }
 
 func (s *FanoutWriterTestSuite) SetupTest() {
-	s.ctx = context.Background()
 	s.mem = memory.NewCheckedAllocator(memory.NewGoAllocator())
+	s.ctx = compute.WithAllocator(context.Background(), s.mem)
+}
+
+func (s *FanoutWriterTestSuite) TearDownTest() {
+	s.mem.AssertSize(s.T(), 0)
 }
 
 func TestFanoutWriter(t *testing.T) {
@@ -114,6 +119,7 @@ func (s *FanoutWriterTestSuite) testTransformPartition(transform iceberg.Transfo
 		itr: func(yield func(arrow.RecordBatch, error) bool) {
 			testRecord.Retain()
 			yield(testRecord, nil)
+			testRecord.Release()
 		},
 		fs: iceio.LocalFS{},
 		writeUUID: func() *uuid.UUID {
@@ -377,12 +383,19 @@ func (s *FanoutWriterTestSuite) createComprehensiveTestRecord() arrow.RecordBatc
 	arrSchema := arrow.NewSchema(fields, nil)
 
 	idB := array.NewInt64Builder(pool)
+	defer idB.Release()
 	decB := array.NewDecimal128Builder(pool, &arrow.Decimal128Type{Precision: 10, Scale: 6})
+	defer decB.Release()
 	timeB := array.NewTime64Builder(pool, &arrow.Time64Type{Unit: arrow.Microsecond})
+	defer timeB.Release()
 	tsB := array.NewTimestampBuilder(pool, &arrow.TimestampType{Unit: arrow.Microsecond})
+	defer tsB.Release()
 	tstzB := array.NewTimestampBuilder(pool, &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"})
+	defer tstzB.Release()
 	uuidB := extensions.NewUUIDBuilder(pool)
+	defer uuidB.Release()
 	dateB := array.NewDate32Builder(pool)
+	defer dateB.Release()
 
 	for i := 0; i < 4; i++ {
 		if i%2 == 0 {
@@ -415,8 +428,11 @@ func (s *FanoutWriterTestSuite) createComprehensiveTestRecord() arrow.RecordBatc
 		uuidB.NewArray(),
 		dateB.NewArray(),
 	}
+	defer func() {
+		for _, c := range cols {
+			c.Release()
+		}
+	}()
 
-	record := array.NewRecordBatch(arrSchema, cols, int64(cols[0].Len()))
-
-	return record
+	return array.NewRecordBatch(arrSchema, cols, int64(cols[0].Len()))
 }

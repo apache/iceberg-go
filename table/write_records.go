@@ -34,8 +34,10 @@ import (
 type WriteRecordOption func(*writeRecordConfig)
 
 type writeRecordConfig struct {
-	targetFileSize int64
-	writeUUID      *uuid.UUID
+	targetFileSize  int64
+	writeUUID       *uuid.UUID
+	maxWriteWorkers int
+	clustered       bool
 }
 
 // WithTargetFileSize overrides the table's default target file size.
@@ -49,6 +51,37 @@ func WithTargetFileSize(size int64) WriteRecordOption {
 func WithWriteUUID(id uuid.UUID) WriteRecordOption {
 	return func(c *writeRecordConfig) {
 		c.writeUUID = &id
+	}
+}
+
+// WithMaxWriteWorkers overrides the default number of fanout workers
+// used for partitioned writes. Each worker processes record batches,
+// partitions them, and writes to the appropriate partition files.
+// Fewer workers means fewer concurrent parquet writers compressing
+// pages simultaneously, which reduces peak memory. A value of 0
+// (the default) uses [config.EnvConfig.MaxWorkers].
+//
+// This option is ignored when [WithClusteredWrite] is set.
+func WithMaxWriteWorkers(n int) WriteRecordOption {
+	return func(c *writeRecordConfig) {
+		c.maxWriteWorkers = n
+	}
+}
+
+// WithClusteredWrite enables the memory-efficient clustered write
+// path for partitioned tables. It keeps at most one partition writer
+// open at a time: when a record arrives for a new partition, the
+// current writer is flushed and closed before a new one is opened.
+//
+// The input must be strictly clustered by partition: once a
+// partition's writer has been closed, encountering further records
+// for that partition returns an error. This is the natural order for
+// compaction, where each source data file typically belongs to a
+// single partition. If the input is not clustered, use the fanout
+// writer (the default) instead.
+func WithClusteredWrite() WriteRecordOption {
+	return func(c *writeRecordConfig) {
+		c.clustered = true
 	}
 }
 
@@ -119,10 +152,12 @@ func WriteRecords(ctx context.Context, tbl *Table,
 	}
 
 	args := recordWritingArgs{
-		sc:        schema,
-		itr:       releasing,
-		fs:        writeFS,
-		writeUUID: cfg.writeUUID,
+		sc:              schema,
+		itr:             releasing,
+		fs:              writeFS,
+		writeUUID:       cfg.writeUUID,
+		maxWriteWorkers: cfg.maxWriteWorkers,
+		clustered:       cfg.clustered,
 	}
 
 	return recordsToDataFiles(ctx, tbl.Location(), meta, args)

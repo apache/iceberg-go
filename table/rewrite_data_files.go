@@ -111,9 +111,10 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 			return result, fmt.Errorf("read tasks for compaction group %q: %w", group.PartitionKey, err)
 		}
 
-		// Write new data files.
+		// Each compaction group is single-partition by construction, so the
+		// read stream is trivially clustered and we can use the clustered writer.
 		var newFiles []iceberg.DataFile
-		for df, err := range WriteRecords(ctx, t.tbl, arrowSchema, records) {
+		for df, err := range WriteRecords(ctx, t.tbl, arrowSchema, records, WithClusteredWrite()) {
 			if err != nil {
 				return result, fmt.Errorf("write compacted files for group %q: %w", group.PartitionKey, err)
 			}

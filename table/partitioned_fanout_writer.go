@@ -18,10 +18,12 @@
 package table
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"iter"
+	"slices"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -153,11 +155,15 @@ func (p *partitionedFanoutWriter) processRecord(ctx context.Context, record arro
 		partitionPath := p.partitionPath(val.partitionRec)
 		rollingDataWriter, err := p.writerFactory.getOrCreateRollingDataWriter(ctx, p.concurrentDataFileWriter, partitionPath, val.partitionValues, dataFilesChannel)
 		if err != nil {
+			partitionRecord.Release()
+
 			return err
 		}
 
-		if err = rollingDataWriter.Add(partitionRecord); err != nil {
-			return err
+		addErr := rollingDataWriter.Add(partitionRecord)
+		partitionRecord.Release()
+		if addErr != nil {
+			return addErr
 		}
 	}
 
@@ -201,8 +207,12 @@ func yieldDataFiles(writerFactory *writerFactory, fanoutWorkers *errgroup.Group,
 }
 
 func (p *partitionedFanoutWriter) getPartitions(record arrow.RecordBatch) ([]*partitionInfo, error) {
+	return getRecordPartitions(p.partitionSpec, p.schema, record)
+}
+
+func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, record arrow.RecordBatch) ([]*partitionInfo, error) {
 	partitionMap := newPartitionMapNode()
-	partitionFields := p.partitionSpec.PartitionType(p.schema).FieldList
+	partitionFields := spec.PartitionType(schema).FieldList
 	partitionRec := make(partitionRecord, len(partitionFields))
 
 	partitionColumns := make([]arrow.Array, len(partitionFields))
@@ -212,8 +222,8 @@ func (p *partitionedFanoutWriter) getPartitions(record arrow.RecordBatch) ([]*pa
 	}, len(partitionFields))
 
 	for i := range partitionFields {
-		sourceField := p.partitionSpec.Field(i)
-		colName, _ := p.schema.FindColumnName(sourceField.SourceID())
+		sourceField := spec.Field(i)
+		colName, _ := schema.FindColumnName(sourceField.SourceID())
 		colIdx := record.Schema().FieldIndices(colName)[0]
 		partitionColumns[i] = record.Column(colIdx)
 		partitionFieldsInfo[i] = struct {
@@ -316,17 +326,28 @@ func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo [
 	return partVal
 }
 
-// collectPartitions recursively collects all partitionInfo into a slice
+// collectPartitions returns every partitionInfo in the tree, ordered by the
+// row at which each partition first appeared in the batch. The ordering makes
+// the clustered writer's revisit check deterministic; without it, Go's
+// randomized map iteration would let unclustered input slip past the check
+// intermittently.
 func (n *partitionMapNode) collectPartitions() []*partitionInfo {
-	result := make([]*partitionInfo, 0, n.leafCount)
+	result := n.flatten()
+	slices.SortFunc(result, func(a, b *partitionInfo) int {
+		return cmp.Compare(a.rows[0], b.rows[0])
+	})
 
+	return result
+}
+
+func (n *partitionMapNode) flatten() []*partitionInfo {
+	result := make([]*partitionInfo, 0, n.leafCount)
 	for _, v := range n.children {
 		switch node := v.(type) {
 		case *partitionInfo:
 			result = append(result, node)
 		case *partitionMapNode:
-			// Recursively collect from child nodes
-			result = append(result, node.collectPartitions()...)
+			result = append(result, node.flatten()...)
 		}
 	}
 
