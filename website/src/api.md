@@ -320,6 +320,8 @@ column projection, row filtering, snapshot selection, and time travel.
 
 ## Basic Scan
 
+### Streaming Record Batches
+
 ```go
 import (
     "context"
@@ -328,7 +330,8 @@ import (
     "github.com/apache/iceberg-go/table"
 )
 
-// Scan all data from a table
+// Stream record batches one at a time — only one batch
+// is in memory at any point.
 scan := tbl.Scan()
 arrowSchema, records, err := scan.ToArrowRecords(context.Background())
 if err != nil {
@@ -343,6 +346,21 @@ for batch, err := range records {
     fmt.Printf("Batch with %d rows\n", batch.NumRows())
     batch.Release()
 }
+```
+
+### Materializing as an Arrow Table
+
+```go
+// Materialize all record batches into a single Arrow Table.
+scan := tbl.Scan()
+arrowTable, err := scan.ToArrowTable(context.Background())
+if err != nil {
+    log.Fatal(err)
+}
+defer arrowTable.Release()
+
+fmt.Printf("Read %d rows in %d columns\n",
+    arrowTable.NumRows(), arrowTable.NumCols())
 ```
 
 ## Column Selection and Row Filtering
