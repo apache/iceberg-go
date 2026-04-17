@@ -25,6 +25,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	icebergio "github.com/apache/iceberg-go/io"
+
 	"gocloud.dev/blob/memblob"
 )
 
@@ -189,4 +192,191 @@ func TestReadAtResourceCleanup(t *testing.T) {
 			assert.True(t, lastReaderClosed, "resource leak: range reader was not closed")
 		})
 	}
+}
+
+func TestBlobFileIOWalkDir(t *testing.T) {
+	ctx := context.Background()
+
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	files := []string{
+		"data/file1.parquet",
+		"data/file2.parquet",
+		"metadata/snap-123.avro",
+	}
+	for _, f := range files {
+		require.NoError(t, bucket.WriteAll(ctx, f, []byte("content"), nil))
+	}
+
+	bfs := &blobFileIO{
+		Bucket:       bucket,
+		keyExtractor: defaultKeyExtractor("test-bucket"),
+		ctx:          ctx,
+	}
+
+	var walked []string
+	err := bfs.WalkDir("s3://test-bucket/", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if !d.IsDir() {
+			walked = append(walked, path)
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	expected := []string{
+		"s3://test-bucket/data/file1.parquet",
+		"s3://test-bucket/data/file2.parquet",
+		"s3://test-bucket/metadata/snap-123.avro",
+	}
+	assert.ElementsMatch(t, expected, walked)
+}
+
+func TestBlobFileIOWalkDirSubPath(t *testing.T) {
+	ctx := context.Background()
+
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	require.NoError(t, bucket.WriteAll(ctx, "data/file1.parquet", []byte("a"), nil))
+	require.NoError(t, bucket.WriteAll(ctx, "data/file2.parquet", []byte("b"), nil))
+	require.NoError(t, bucket.WriteAll(ctx, "metadata/v1.json", []byte("c"), nil))
+
+	bfs := &blobFileIO{
+		Bucket:       bucket,
+		keyExtractor: defaultKeyExtractor("mybucket"),
+		ctx:          ctx,
+	}
+
+	var walked []string
+	err := bfs.WalkDir("s3://mybucket/data", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if !d.IsDir() {
+			walked = append(walked, path)
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	expected := []string{
+		"s3://mybucket/data/file1.parquet",
+		"s3://mybucket/data/file2.parquet",
+	}
+	assert.ElementsMatch(t, expected, walked)
+}
+
+func TestBlobFileIOWalkDirAzureURI(t *testing.T) {
+	ctx := context.Background()
+
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	require.NoError(t, bucket.WriteAll(ctx, "path/to/file.parquet", []byte("data"), nil))
+
+	bfs := &blobFileIO{
+		Bucket:       bucket,
+		keyExtractor: defaultKeyExtractor("container@account.dfs.core.windows.net"),
+		ctx:          ctx,
+	}
+
+	var walked []string
+	err := bfs.WalkDir("abfs://container@account.dfs.core.windows.net/path", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if !d.IsDir() {
+			walked = append(walked, path)
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	expected := []string{
+		"abfs://container@account.dfs.core.windows.net/path/to/file.parquet",
+	}
+	assert.Equal(t, expected, walked)
+}
+
+func TestBlobFileIOImplementsBulkRemovableIO(t *testing.T) {
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	bfs := createBlobFS(context.Background(), bucket, defaultKeyExtractor("test-bucket"))
+
+	_, ok := bfs.(icebergio.BulkRemovableIO)
+	assert.True(t, ok, "blobFileIO should implement BulkRemovableIO")
+}
+
+func TestBlobFileIODeleteFiles(t *testing.T) {
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	// Write test files.
+	require.NoError(t, bucket.WriteAll(ctx, "data/file1.parquet", []byte("data1"), nil))
+	require.NoError(t, bucket.WriteAll(ctx, "data/file2.parquet", []byte("data2"), nil))
+	require.NoError(t, bucket.WriteAll(ctx, "data/file3.parquet", []byte("data3"), nil))
+
+	bfs := createBlobFS(ctx, bucket, defaultKeyExtractor("test-bucket"))
+	bulk := bfs.(icebergio.BulkRemovableIO)
+
+	deleted, err := bulk.DeleteFiles(ctx, []string{
+		"s3://test-bucket/data/file1.parquet",
+		"s3://test-bucket/data/file2.parquet",
+	})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{
+		"s3://test-bucket/data/file1.parquet",
+		"s3://test-bucket/data/file2.parquet",
+	}, deleted)
+
+	// file3 should still exist.
+	exists, err := bucket.Exists(ctx, "data/file3.parquet")
+	require.NoError(t, err)
+	assert.True(t, exists)
+
+	// file1 should be gone.
+	exists, err = bucket.Exists(ctx, "data/file1.parquet")
+	require.NoError(t, err)
+	assert.False(t, exists)
+}
+
+func TestBlobFileIODeleteFilesMissingFilesAreNotErrors(t *testing.T) {
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	bfs := createBlobFS(ctx, bucket, defaultKeyExtractor("test-bucket"))
+	bulk := bfs.(icebergio.BulkRemovableIO)
+
+	// Deleting non-existent files should succeed.
+	deleted, err := bulk.DeleteFiles(ctx, []string{
+		"s3://test-bucket/data/nonexistent.parquet",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"s3://test-bucket/data/nonexistent.parquet"}, deleted)
+}
+
+func TestBlobFileIODeleteFilesEmpty(t *testing.T) {
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	bfs := createBlobFS(ctx, bucket, defaultKeyExtractor("test-bucket"))
+	bulk := bfs.(icebergio.BulkRemovableIO)
+
+	deleted, err := bulk.DeleteFiles(ctx, nil)
+	require.NoError(t, err)
+	assert.Nil(t, deleted)
 }

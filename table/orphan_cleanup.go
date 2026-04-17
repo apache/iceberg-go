@@ -215,7 +215,7 @@ func (t Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConfi
 	if cfg.dryRun {
 		return result, nil
 	}
-	deletedFiles, err := deleteFiles(fs, orphanFiles, cfg)
+	deletedFiles, err := deleteFiles(ctx, fs, orphanFiles, cfg)
 	if err != nil {
 		return OrphanCleanupResult{}, fmt.Errorf("failed to delete orphan files: %w", err)
 	}
@@ -308,62 +308,65 @@ func (t Table) scanFiles(fs iceio.IO, location string, cfg *orphanCleanupConfig)
 	return allFiles, totalSize, nil
 }
 
-// getBucket gets the Bucket field from blob storage - absolute minimal approach
-func getBucketName(fsys iceio.IO) stdfs.FS {
-	v := reflect.ValueOf(fsys).Elem() // We know it's a pointer to struct
+func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {
+	if listable, ok := fsys.(iceio.ListableIO); ok {
+		return listable.WalkDir(root, func(path string, d stdfs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
 
-	return v.FieldByName("Bucket").Interface().(stdfs.FS)
-}
+			if d.IsDir() {
+				return nil
+			}
 
-// makeFileWalkFunc creates a WalkDirFunc that processes only files with path transformation
-func makeFileWalkFunc(fn func(path string, info stdfs.FileInfo) error, pathTransform func(string) string) stdfs.WalkDirFunc {
-	return func(path string, d stdfs.DirEntry, err error) error {
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+
+			return fn(path, info)
+		})
+	}
+
+	// Fallback: reflect-based access for IO implementations that don't
+	// yet implement ListableIO (e.g. blob storage).
+	bucket := getBucket(fsys)
+
+	parsed, err := url.Parse(root)
+	if err != nil {
+		return fmt.Errorf("invalid URL %s: %w", root, err)
+	}
+
+	walkPath := strings.TrimPrefix(parsed.Path, "/")
+	if walkPath == "" {
+		walkPath = "."
+	}
+
+	return stdfs.WalkDir(bucket, walkPath, func(path string, d stdfs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
+
 		if d.IsDir() {
 			return nil
 		}
+
 		info, err := d.Info()
 		if err != nil {
 			return err
 		}
 
-		return fn(pathTransform(path), info)
-	}
+		return fn(parsed.Scheme+"://"+parsed.Host+"/"+path, info)
+	})
 }
 
-func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {
-	switch v := fsys.(type) {
-	case iceio.LocalFS:
-		cleanRoot := strings.TrimPrefix(root, "file://")
-		if cleanRoot == "" {
-			cleanRoot = "."
-		}
+// getBucket extracts the Bucket field from blob storage IO implementations
+// via reflect. This is a temporary fallback until all IO implementations
+// implement ListableIO.
+func getBucket(fsys iceio.IO) stdfs.FS {
+	v := reflect.ValueOf(fsys).Elem()
 
-		return filepath.WalkDir(cleanRoot, makeFileWalkFunc(fn, func(path string) string {
-			return path
-		}))
-
-	default:
-		// For blob storage: direct field access since we know the structure
-		bucket := getBucketName(v)
-
-		parsed, err := url.Parse(root)
-		if err != nil {
-			return fmt.Errorf("invalid URL %s: %w", root, err)
-		}
-
-		walkPath := strings.TrimPrefix(parsed.Path, "/")
-		if walkPath == "" {
-			walkPath = "."
-		}
-
-		// URL transform - reconstruct full URL path
-		return stdfs.WalkDir(bucket, walkPath, makeFileWalkFunc(fn, func(path string) string {
-			return parsed.Scheme + "://" + parsed.Host + "/" + path
-		}))
-	}
+	return v.FieldByName("Bucket").Interface().(stdfs.FS)
 }
 
 func identifyOrphanFiles(allFiles []string, referencedFiles map[string]bool, cfg *orphanCleanupConfig) ([]string, error) {
@@ -410,9 +413,16 @@ func isFileOrphan(file string, referencedFiles map[string]bool, normalizedRefere
 	return true, nil
 }
 
-func deleteFiles(fs iceio.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
+func deleteFiles(ctx context.Context, fs iceio.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
 	if len(orphanFiles) == 0 {
 		return nil, nil
+	}
+
+	// Use bulk delete when available and no custom deleteFunc is set.
+	if cfg.deleteFunc == nil {
+		if bulk, ok := fs.(iceio.BulkRemovableIO); ok {
+			return bulk.DeleteFiles(ctx, orphanFiles)
+		}
 	}
 
 	if cfg.maxConcurrency == 1 {

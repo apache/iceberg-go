@@ -23,11 +23,13 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"path/filepath"
 	"strings"
 
 	icebergio "github.com/apache/iceberg-go/io"
 	"gocloud.dev/blob"
+	"gocloud.dev/gcerrors"
 )
 
 // blobOpenFile describes a single open blob as a File.
@@ -188,6 +190,60 @@ func (bfs *blobFileIO) NewWriter(ctx context.Context, path string, overwrite boo
 
 func createBlobFS(ctx context.Context, bucket *blob.Bucket, keyExtractor KeyExtractor) icebergio.IO {
 	return &blobFileIO{Bucket: bucket, keyExtractor: keyExtractor, ctx: ctx}
+}
+
+func (bfs *blobFileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
+	parsed, err := url.Parse(root)
+	if err != nil {
+		return fmt.Errorf("invalid URL %s: %w", root, err)
+	}
+
+	walkPath := strings.TrimPrefix(parsed.Path, "/")
+	if walkPath == "" {
+		walkPath = "."
+	}
+
+	parsed.Path = ""
+
+	return fs.WalkDir(bfs.Bucket, walkPath, func(path string, d fs.DirEntry, err error) error {
+		return fn(parsed.JoinPath(path).String(), d, err)
+	})
+}
+
+func (bfs *blobFileIO) DeleteFiles(ctx context.Context, paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+
+	deleted := make([]string, 0, len(paths))
+
+	var errs error
+
+	for _, p := range paths {
+		key, err := bfs.preprocess(p)
+		if err != nil {
+			errs = errors.Join(errs, fmt.Errorf("failed to delete %s: %w", p, err))
+
+			continue
+		}
+
+		if err := bfs.Delete(ctx, key); err != nil {
+			// Missing files are not errors per the interface contract.
+			if gcerrors.Code(err) == gcerrors.NotFound {
+				deleted = append(deleted, p)
+
+				continue
+			}
+
+			errs = errors.Join(errs, fmt.Errorf("failed to delete %s: %w", p, err))
+
+			continue
+		}
+
+		deleted = append(deleted, p)
+	}
+
+	return deleted, errs
 }
 
 type blobWriteFile struct {
