@@ -780,6 +780,184 @@ func (m *ManifestTestSuite) TestReadManifestListV3() {
 	m.Equal([]byte{0x02, 0x00, 0x00, 0x00}, *part.UpperBound)
 }
 
+// writeLegacyManifestListV1 creates a V1 manifest list OCF using the pre-1.4 Java
+// Iceberg field names (added_data_files_count etc.) as writer schema field names.
+func writeLegacyManifestListV1(t *testing.T) bytes.Buffer {
+	t.Helper()
+
+	const schemaJSON = `{
+		"type": "record",
+		"name": "manifest_file",
+		"fields": [
+			{"name": "manifest_path", "type": "string", "field-id": 500},
+			{"name": "manifest_length", "type": "long", "field-id": 501},
+			{"name": "partition_spec_id", "type": "int", "field-id": 502},
+			{"name": "added_snapshot_id", "type": "long", "field-id": 503},
+			{"name": "added_data_files_count", "type": ["null", "int"], "default": null, "field-id": 504},
+			{"name": "existing_data_files_count", "type": ["null", "int"], "default": null, "field-id": 505},
+			{"name": "deleted_data_files_count", "type": ["null", "int"], "default": null, "field-id": 506},
+			{"name": "added_rows_count", "type": ["null", "long"], "default": null, "field-id": 512},
+			{"name": "existing_rows_count", "type": ["null", "long"], "default": null, "field-id": 513},
+			{"name": "deleted_rows_count", "type": ["null", "long"], "default": null, "field-id": 514}
+		]
+	}`
+
+	type legacyRecord struct {
+		Path                   string `avro:"manifest_path"`
+		Len                    int64  `avro:"manifest_length"`
+		SpecID                 int32  `avro:"partition_spec_id"`
+		AddedSnapshotID        int64  `avro:"added_snapshot_id"`
+		AddedDataFilesCount    *int32 `avro:"added_data_files_count"`
+		ExistingDataFilesCount *int32 `avro:"existing_data_files_count"`
+		DeletedDataFilesCount  *int32 `avro:"deleted_data_files_count"`
+		AddedRowsCount         *int64 `avro:"added_rows_count"`
+		ExistingRowsCount      *int64 `avro:"existing_rows_count"`
+		DeletedRowsCount       *int64 `avro:"deleted_rows_count"`
+	}
+
+	sc, err := avro.Parse(schemaJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	enc, err := ocf.NewWriter(&buf, sc, ocf.WithSchema(schemaJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	added := int32(3)
+	existing := int32(1)
+	deleted := int32(2)
+	addedR := int64(100)
+
+	if err := enc.Encode(legacyRecord{
+		Path:                   "/path/to/manifest.avro",
+		Len:                    1234,
+		SpecID:                 0,
+		AddedSnapshotID:        snapshotID,
+		AddedDataFilesCount:    &added,
+		ExistingDataFilesCount: &existing,
+		DeletedDataFilesCount:  &deleted,
+		AddedRowsCount:         &addedR,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := enc.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	return buf
+}
+
+// writeLegacyManifestListV2 creates a V2 manifest list OCF using the pre-1.4 Java
+// Iceberg field names (added_data_files_count etc.) as writer schema field names.
+func writeLegacyManifestListV2(t *testing.T) bytes.Buffer {
+	t.Helper()
+
+	const schemaJSON = `{
+		"type": "record",
+		"name": "manifest_file",
+		"fields": [
+			{"name": "manifest_path", "type": "string", "field-id": 500},
+			{"name": "manifest_length", "type": "long", "field-id": 501},
+			{"name": "partition_spec_id", "type": "int", "field-id": 502},
+			{"name": "content", "type": "int", "field-id": 517},
+			{"name": "sequence_number", "type": "long", "field-id": 515},
+			{"name": "min_sequence_number", "type": "long", "field-id": 516},
+			{"name": "added_snapshot_id", "type": "long", "field-id": 503},
+			{"name": "added_data_files_count", "type": "int", "field-id": 504},
+			{"name": "existing_data_files_count", "type": "int", "field-id": 505},
+			{"name": "deleted_data_files_count", "type": "int", "field-id": 506},
+			{"name": "added_rows_count", "type": "long", "field-id": 512},
+			{"name": "existing_rows_count", "type": "long", "field-id": 513},
+			{"name": "deleted_rows_count", "type": "long", "field-id": 514}
+		]
+	}`
+
+	type legacyRecord struct {
+		Path                   string `avro:"manifest_path"`
+		Len                    int64  `avro:"manifest_length"`
+		SpecID                 int32  `avro:"partition_spec_id"`
+		Content                int32  `avro:"content"`
+		SeqNumber              int64  `avro:"sequence_number"`
+		MinSeqNumber           int64  `avro:"min_sequence_number"`
+		AddedSnapshotID        int64  `avro:"added_snapshot_id"`
+		AddedDataFilesCount    int32  `avro:"added_data_files_count"`
+		ExistingDataFilesCount int32  `avro:"existing_data_files_count"`
+		DeletedDataFilesCount  int32  `avro:"deleted_data_files_count"`
+		AddedRowsCount         int64  `avro:"added_rows_count"`
+		ExistingRowsCount      int64  `avro:"existing_rows_count"`
+		DeletedRowsCount       int64  `avro:"deleted_rows_count"`
+	}
+
+	sc, err := avro.Parse(schemaJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	enc, err := ocf.NewWriter(&buf, sc,
+		ocf.WithSchema(schemaJSON),
+		ocf.WithMetadata(map[string][]byte{"format-version": []byte("2")}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := enc.Encode(legacyRecord{
+		Path:                   "/path/to/manifest.avro",
+		Len:                    1234,
+		SpecID:                 0,
+		Content:                0,
+		SeqNumber:              3,
+		MinSeqNumber:           3,
+		AddedSnapshotID:        snapshotID,
+		AddedDataFilesCount:    3,
+		ExistingDataFilesCount: 1,
+		DeletedDataFilesCount:  2,
+		AddedRowsCount:         100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := enc.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	return buf
+}
+
+// TestReadManifestListLegacyFieldNamesV1 verifies that V1 manifest lists written
+// by pre-1.4 Java Iceberg (with added_data_files_count etc.) are decoded correctly.
+func (m *ManifestTestSuite) TestReadManifestListLegacyFieldNamesV1() {
+	buf := writeLegacyManifestListV1(m.T())
+	list, err := ReadManifestList(&buf)
+	m.Require().NoError(err)
+	m.Len(list, 1)
+	m.Equal(1, list[0].Version())
+	m.EqualValues(3, list[0].AddedDataFiles())
+	m.True(list[0].HasAddedFiles())
+	m.EqualValues(1, list[0].ExistingDataFiles())
+	m.True(list[0].HasExistingFiles())
+	m.EqualValues(2, list[0].DeletedDataFiles())
+}
+
+// TestReadManifestListLegacyFieldNamesV2 verifies that V2 manifest lists written
+// by pre-1.4 Java Iceberg (with added_data_files_count etc.) are decoded correctly.
+func (m *ManifestTestSuite) TestReadManifestListLegacyFieldNamesV2() {
+	buf := writeLegacyManifestListV2(m.T())
+	list, err := ReadManifestList(&buf)
+	m.Require().NoError(err)
+	m.Len(list, 1)
+	m.Equal(2, list[0].Version())
+	m.EqualValues(3, list[0].AddedDataFiles())
+	m.True(list[0].HasAddedFiles())
+	m.EqualValues(1, list[0].ExistingDataFiles())
+	m.True(list[0].HasExistingFiles())
+	m.EqualValues(2, list[0].DeletedDataFiles())
+}
+
 // writeManifestListNoFormatVersion writes a valid v2 manifest list Avro file that
 // omits the "format-version" metadata key, simulating a file produced by a
 // non-Java Iceberg implementation that strictly follows the spec.

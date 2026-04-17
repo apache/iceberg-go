@@ -149,7 +149,7 @@ func (b *ManifestBuilder) Partitions(p []FieldSummary) *ManifestBuilder {
 }
 
 func (b *ManifestBuilder) KeyMetadata(km []byte) *ManifestBuilder {
-	b.m.Key = km
+	b.m.Key = &km
 
 	return b
 }
@@ -158,156 +158,81 @@ func (b *ManifestBuilder) Build() ManifestFile {
 	return b.m
 }
 
-type fallbackManifestFileV1 struct {
-	manifestFileV1
-	AddedSnapshotID *int64 `avro:"added_snapshot_id"`
-}
-
-func (f *fallbackManifestFileV1) toFile() *manifestFile {
-	if f.AddedSnapshotID == nil {
-		f.manifestFileV1.AddedSnapshotID = -1
-	}
-
-	return f.manifestFileV1.toFile()
-}
-
+// manifestFileV1 is a read/write struct for V1 manifest list entries.
+// Pointer fields handle nullable Avro types (["null", T] unions).
+// The three count fields carry aliases for pre-1.4 Java Iceberg legacy names
+// (apache/iceberg#5338) so that avro.Resolve maps them transparently.
 type manifestFileV1 struct {
-	manifestFile
-	AddedFilesCount    *int32 `avro:"added_files_count"`
-	ExistingFilesCount *int32 `avro:"existing_files_count"`
-	DeletedFilesCount  *int32 `avro:"deleted_files_count"`
-	AddedRowsCount     *int64 `avro:"added_rows_count"`
-	ExistingRowsCount  *int64 `avro:"existing_rows_count"`
-	DeletedRowsCount   *int64 `avro:"deleted_rows_count"`
+	Path               string          `avro:"manifest_path"`
+	Len                int64           `avro:"manifest_length"`
+	SpecID             int32           `avro:"partition_spec_id"`
+	AddedSnapshotID    *int64          `avro:"added_snapshot_id"`
+	AddedFilesCount    *int32          `avro:"added_files_count,alias=added_data_files_count"`
+	ExistingFilesCount *int32          `avro:"existing_files_count,alias=existing_data_files_count"`
+	DeletedFilesCount  *int32          `avro:"deleted_files_count,alias=deleted_data_files_count"`
+	AddedRowsCount     *int64          `avro:"added_rows_count"`
+	ExistingRowsCount  *int64          `avro:"existing_rows_count"`
+	DeletedRowsCount   *int64          `avro:"deleted_rows_count"`
+	PartitionList      *[]FieldSummary `avro:"partitions,type-alias=r508"`
+	Key                *[]byte         `avro:"key_metadata"`
 }
 
 func (m *manifestFileV1) toFile() *manifestFile {
-	m.version = 1
-	m.Content = ManifestContentData
-	m.SeqNumber, m.MinSeqNumber = initialSequenceNumber, initialSequenceNumber
+	snapshotID := int64(-1)
+	if m.AddedSnapshotID != nil {
+		snapshotID = *m.AddedSnapshotID
+	}
+
+	f := &manifestFile{
+		version:         1,
+		Path:            m.Path,
+		Len:             m.Len,
+		SpecID:          m.SpecID,
+		Content:         ManifestContentData,
+		SeqNumber:       initialSequenceNumber,
+		MinSeqNumber:    initialSequenceNumber,
+		AddedSnapshotID: snapshotID,
+		PartitionList:   m.PartitionList,
+		Key:             m.Key,
+	}
 
 	if m.AddedFilesCount != nil {
-		m.manifestFile.AddedFilesCount = *m.AddedFilesCount
+		f.AddedFilesCount = *m.AddedFilesCount
 	} else {
-		m.manifestFile.AddedFilesCount = -1
+		f.AddedFilesCount = -1
 	}
 
 	if m.ExistingFilesCount != nil {
-		m.manifestFile.ExistingFilesCount = *m.ExistingFilesCount
+		f.ExistingFilesCount = *m.ExistingFilesCount
 	} else {
-		m.manifestFile.ExistingFilesCount = -1
+		f.ExistingFilesCount = -1
 	}
 
 	if m.DeletedFilesCount != nil {
-		m.manifestFile.DeletedFilesCount = *m.DeletedFilesCount
+		f.DeletedFilesCount = *m.DeletedFilesCount
 	} else {
-		m.manifestFile.DeletedFilesCount = -1
+		f.DeletedFilesCount = -1
 	}
 
 	if m.AddedRowsCount != nil {
-		m.manifestFile.AddedRowsCount = *m.AddedRowsCount
+		f.AddedRowsCount = *m.AddedRowsCount
 	} else {
-		m.manifestFile.AddedRowsCount = -1
+		f.AddedRowsCount = -1
 	}
 
 	if m.ExistingRowsCount != nil {
-		m.manifestFile.ExistingRowsCount = *m.ExistingRowsCount
+		f.ExistingRowsCount = *m.ExistingRowsCount
 	} else {
-		m.manifestFile.ExistingRowsCount = -1
+		f.ExistingRowsCount = -1
 	}
 
 	if m.DeletedRowsCount != nil {
-		m.manifestFile.DeletedRowsCount = *m.DeletedRowsCount
+		f.DeletedRowsCount = *m.DeletedRowsCount
 	} else {
-		m.manifestFile.DeletedRowsCount = -1
+		f.DeletedRowsCount = -1
 	}
 
-	return &m.manifestFile
-}
-
-func (*manifestFileV1) Version() int             { return 1 }
-func (m *manifestFileV1) FilePath() string       { return m.Path }
-func (m *manifestFileV1) Length() int64          { return m.Len }
-func (m *manifestFileV1) PartitionSpecID() int32 { return m.SpecID }
-func (m *manifestFileV1) ManifestContent() ManifestContent {
-	return ManifestContentData
-}
-
-func (m *manifestFileV1) SnapshotID() int64 {
-	return m.AddedSnapshotID
-}
-
-func (m *manifestFileV1) AddedDataFiles() int32 {
-	if m.AddedFilesCount == nil {
-		return 0
-	}
-
-	return *m.AddedFilesCount
-}
-
-func (m *manifestFileV1) ExistingDataFiles() int32 {
-	if m.ExistingFilesCount == nil {
-		return 0
-	}
-
-	return *m.ExistingFilesCount
-}
-
-func (m *manifestFileV1) DeletedDataFiles() int32 {
-	if m.DeletedFilesCount == nil {
-		return 0
-	}
-
-	return *m.DeletedFilesCount
-}
-
-func (m *manifestFileV1) AddedRows() int64 {
-	if m.AddedRowsCount == nil {
-		return 0
-	}
-
-	return *m.AddedRowsCount
-}
-
-func (m *manifestFileV1) ExistingRows() int64 {
-	if m.ExistingRowsCount == nil {
-		return 0
-	}
-
-	return *m.ExistingRowsCount
-}
-
-func (m *manifestFileV1) DeletedRows() int64 {
-	if m.DeletedRowsCount == nil {
-		return 0
-	}
-
-	return *m.DeletedRowsCount
-}
-
-func (m *manifestFileV1) HasAddedFiles() bool {
-	return m.AddedFilesCount == nil || *m.AddedFilesCount > 0
-}
-
-func (m *manifestFileV1) HasExistingFiles() bool {
-	return m.ExistingFilesCount == nil || *m.ExistingFilesCount > 0
-}
-
-func (m *manifestFileV1) SequenceNum() int64    { return 0 }
-func (m *manifestFileV1) MinSequenceNum() int64 { return 0 }
-func (m *manifestFileV1) KeyMetadata() []byte   { return m.Key }
-func (m *manifestFileV1) Partitions() []FieldSummary {
-	if m.PartitionList == nil {
-		return nil
-	}
-
-	return *m.PartitionList
-}
-
-func (*manifestFileV1) FirstRowID() *int64 { return nil }
-
-func (m *manifestFileV1) FetchEntries(fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error) {
-	return fetchManifestEntries(m, fs, discardDeleted)
+	return f
 }
 
 type manifestFile struct {
@@ -318,14 +243,14 @@ type manifestFile struct {
 	SeqNumber          int64           `avro:"sequence_number"`
 	MinSeqNumber       int64           `avro:"min_sequence_number"`
 	AddedSnapshotID    int64           `avro:"added_snapshot_id"`
-	AddedFilesCount    int32           `avro:"added_files_count"`
-	ExistingFilesCount int32           `avro:"existing_files_count"`
-	DeletedFilesCount  int32           `avro:"deleted_files_count"`
+	AddedFilesCount    int32           `avro:"added_files_count,alias=added_data_files_count"`
+	ExistingFilesCount int32           `avro:"existing_files_count,alias=existing_data_files_count"`
+	DeletedFilesCount  int32           `avro:"deleted_files_count,alias=deleted_data_files_count"`
 	AddedRowsCount     int64           `avro:"added_rows_count"`
 	ExistingRowsCount  int64           `avro:"existing_rows_count"`
 	DeletedRowsCount   int64           `avro:"deleted_rows_count"`
-	PartitionList      *[]FieldSummary `avro:"partitions"`
-	Key                []byte          `avro:"key_metadata"`
+	PartitionList      *[]FieldSummary `avro:"partitions,type-alias=r508"`
+	Key                *[]byte         `avro:"key_metadata"`
 	FirstRowIDValue    *int64          `avro:"first_row_id"`
 
 	version int `avro:"-"`
@@ -339,7 +264,7 @@ func (m *manifestFile) toV1(v1file *manifestFileV1) {
 	v1file.Path = m.Path
 	v1file.Len = m.Len
 	v1file.SpecID = m.SpecID
-	v1file.AddedSnapshotID = m.AddedSnapshotID
+	v1file.AddedSnapshotID = &m.AddedSnapshotID
 	v1file.PartitionList = m.PartitionList
 	v1file.Key = m.Key
 
@@ -394,7 +319,14 @@ func (m *manifestFile) ExistingRows() int64              { return m.ExistingRows
 func (m *manifestFile) DeletedRows() int64               { return m.DeletedRowsCount }
 func (m *manifestFile) SequenceNum() int64               { return m.SeqNumber }
 func (m *manifestFile) MinSequenceNum() int64            { return m.MinSeqNumber }
-func (m *manifestFile) KeyMetadata() []byte              { return m.Key }
+func (m *manifestFile) KeyMetadata() []byte {
+	if m.Key == nil {
+		return nil
+	}
+
+	return *m.Key
+}
+
 func (m *manifestFile) Partitions() []FieldSummary {
 	if m.PartitionList == nil {
 		return nil
@@ -544,16 +476,24 @@ type ManifestFile interface {
 	setVersion(int)
 }
 
-type fallbackManifest[T any] interface {
-	ManifestFile
-	toFile() *manifestFile
-	*T
-}
+// manifestFileV1Reader is the Avro reader schema for V1 manifest list entries.
+// It handles both spec-correct field names and pre-1.4 Java Iceberg legacy
+// names (added_data_files_count etc.) via the alias tags on manifestFileV1,
+// and both nullable and non-nullable added_snapshot_id via *int64.
+var manifestFileV1Reader = avro.MustSchemaFor[manifestFileV1](
+	avro.WithName("manifest_file"),
+)
 
-func decodeManifestsWithFallback[P fallbackManifest[T], T any](rd *ocf.Reader) ([]ManifestFile, error) {
+// manifestFileReader is the Avro reader schema for V2+ manifest list entries.
+// Alias tags on manifestFile handle pre-1.4 Java Iceberg legacy field names.
+var manifestFileReader = avro.MustSchemaFor[manifestFile](
+	avro.WithName("manifest_file"),
+)
+
+func decodeV1Manifests(rd *ocf.Reader) ([]ManifestFile, error) {
 	results := make([]ManifestFile, 0)
 	for {
-		tmp := P(new(T))
+		tmp := new(manifestFileV1)
 		if err := rd.Decode(tmp); err != nil {
 			if errors.Is(err, io.EOF) {
 				return results, nil
@@ -847,43 +787,34 @@ func ReadManifest(m ManifestFile, f io.Reader, discardDeleted bool) ([]ManifestE
 // "format-version" metadata key (only manifest files are). When the key is
 // absent, version 1 is assumed.
 func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
-	rd, err := ocf.NewReader(in)
-	if err != nil {
-		return nil, err
-	}
+	var version int
 
-	sc, err := avro.Parse(string(rd.Metadata()["avro.schema"]))
-	if err != nil {
-		return nil, err
-	}
+	rd, err := ocf.NewReader(in, ocf.WithReaderSchemaFunc(func(rd *ocf.Reader) (*avro.Schema, error) {
+		version = 1
+		if raw := rd.Metadata()["format-version"]; len(raw) > 0 {
+			v, err := strconv.Atoi(string(raw))
+			if err != nil {
+				return nil, fmt.Errorf("invalid format-version: %w", err)
+			}
 
-	version := 1
-	if raw := rd.Metadata()["format-version"]; len(raw) > 0 {
-		version, err = strconv.Atoi(string(raw))
-		if err != nil {
-			return nil, fmt.Errorf("invalid format-version: %w", err)
+			version = v
 		}
+
+		if version == 1 {
+			return manifestFileV1Reader, nil
+		}
+
+		return manifestFileReader, nil
+	}))
+	if err != nil {
+		return nil, err
 	}
 
 	if version == 1 {
-		root := sc.Root()
-		for _, f := range root.Fields {
-			if f.Name == "added_snapshot_id" {
-				if f.Type.Type == "union" {
-					return decodeManifestsWithFallback[*fallbackManifestFileV1](rd)
-				}
-
-				break
-			}
-		}
+		return decodeV1Manifests(rd)
 	}
 
-	switch version {
-	case 1:
-		return decodeManifestsWithFallback[*manifestFileV1](rd)
-	default:
-		return decodeManifests[*manifestFile](rd, version)
-	}
+	return decodeManifests[*manifestFile](rd, version)
 }
 
 type writerImpl interface {
