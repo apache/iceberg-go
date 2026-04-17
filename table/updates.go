@@ -24,7 +24,6 @@ import (
 	"fmt"
 
 	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
 )
 
@@ -533,15 +532,6 @@ func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table,
 
 	for psf := range postTable.Metadata().PartitionStatistics() {
 		delete(filesToDelete, psf.StatisticsPath)
-	}
-
-	if bulk, ok := prefs.(io.BulkRemovableIO); ok {
-		paths := make([]string, 0, len(filesToDelete))
-		for f := range filesToDelete {
-			paths = append(paths, f)
-		}
-
-		return bulk.RemoveAll(paths)
 	}
 
 	var res error

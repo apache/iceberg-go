@@ -24,6 +24,7 @@ import (
 	stdfs "io/fs"
 	"net/url"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -307,6 +308,28 @@ func (t Table) scanFiles(fs io.IO, location string, cfg *orphanCleanupConfig) ([
 	return allFiles, totalSize, nil
 }
 
+// getBucketFS extracts the underlying Bucket (fs.FS) from blob-backed IO
+// implementations via reflection. This is a temporary fallback until all
+// cloud backends implement ListableIO (#917).
+func getBucketFS(fsys io.IO) (stdfs.FS, error) {
+	v := reflect.ValueOf(fsys)
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+
+	f := v.FieldByName("Bucket")
+	if !f.IsValid() {
+		return nil, fmt.Errorf("no bucket field found on %T", fsys)
+	}
+
+	bucket, ok := f.Interface().(stdfs.FS)
+	if !ok {
+		return nil, fmt.Errorf("bucket field on %T is not an fs.FS", fsys)
+	}
+
+	return bucket, nil
+}
+
 // makeFileWalkFunc creates a WalkDirFunc that processes only files with path transformation.
 func makeFileWalkFunc(fn func(path string, info stdfs.FileInfo) error, pathTransform func(string) string) stdfs.WalkDirFunc {
 	return func(path string, d stdfs.DirEntry, err error) error {
@@ -326,13 +349,32 @@ func makeFileWalkFunc(fn func(path string, info stdfs.FileInfo) error, pathTrans
 }
 
 func walkDirectory(fsys io.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {
-	listable, ok := fsys.(io.ListableIO)
-	if !ok {
-		return fmt.Errorf("IO implementation %T does not support directory listing (ListableIO)", fsys)
+	// Prefer ListableIO when available (LocalFS, and cloud backends after #917).
+	if listable, ok := fsys.(io.ListableIO); ok {
+		return listable.WalkDir(root, makeFileWalkFunc(fn, func(path string) string {
+			return path
+		}))
 	}
 
-	return listable.WalkDir(root, makeFileWalkFunc(fn, func(path string) string {
-		return path
+	// Fallback: cloud blob storage that doesn't yet implement ListableIO.
+	// Use reflect to access the underlying Bucket (fs.FS) field.
+	bucket, err := getBucketFS(fsys)
+	if err != nil {
+		return fmt.Errorf("IO implementation %T does not support directory listing (ListableIO) and has no Bucket fallback: %w", fsys, err)
+	}
+
+	parsed, err := url.Parse(root)
+	if err != nil {
+		return fmt.Errorf("invalid URL %s: %w", root, err)
+	}
+
+	walkPath := strings.TrimPrefix(parsed.Path, "/")
+	if walkPath == "" {
+		walkPath = "."
+	}
+
+	return stdfs.WalkDir(bucket, walkPath, makeFileWalkFunc(fn, func(path string) string {
+		return parsed.Scheme + "://" + parsed.Host + "/" + path
 	}))
 }
 
@@ -385,18 +427,6 @@ func deleteFiles(fs io.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]st
 		return nil, nil
 	}
 
-	// Use bulk delete when available and no custom deleteFunc is set.
-	if cfg.deleteFunc == nil {
-		if bulk, ok := fs.(io.BulkRemovableIO); ok {
-			if err := bulk.RemoveAll(orphanFiles); err != nil {
-				return nil, fmt.Errorf("failed to delete orphan files: %w", err)
-			}
-
-			return orphanFiles, nil
-		}
-	}
-
-	// Existing behavior: sequential or parallel single-file deletion.
 	if cfg.maxConcurrency == 1 {
 		return deleteFilesSequential(fs, orphanFiles, cfg)
 	}

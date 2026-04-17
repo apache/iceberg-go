@@ -97,10 +97,16 @@ type WriteFileIO interface {
 type BulkRemovableIO interface {
 	IO
 
-	// RemoveAll deletes all named files. Implementations should make a
-	// best-effort attempt to delete as many files as possible and return
-	// a joined error for any individual failures.
-	RemoveAll(paths []string) error
+	// DeleteFiles deletes all named files. Implementations should make a
+	// best-effort attempt to delete as many files as possible, returning
+	// the list of successfully deleted paths and a joined error
+	// (via [errors.Join]) for any individual failures.
+	//
+	// Missing files are not considered errors — if a path does not exist,
+	// it should be treated as a successful deletion.
+	//
+	// An empty paths slice is a no-op and must not error.
+	DeleteFiles(ctx context.Context, paths []string) (deleted []string, err error)
 }
 
 // ListableIO is an optional interface for IO implementations that

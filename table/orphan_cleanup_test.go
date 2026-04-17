@@ -534,59 +534,6 @@ func TestGetReferencedFiles_IncludesStatisticsFiles(t *testing.T) {
 	assert.False(t, refs[""])
 }
 
-// mockBulkRemovableIO is a test double that implements BulkRemovableIO.
-type mockBulkRemovableIO struct {
-	bulkCalled bool
-	bulkPaths  []string
-}
-
-func (m *mockBulkRemovableIO) Open(string) (io.File, error) {
-	return nil, errors.New("not implemented")
-}
-
-func (m *mockBulkRemovableIO) Remove(string) error {
-	return errors.New("Remove should not be called when BulkRemovableIO is available")
-}
-
-func (m *mockBulkRemovableIO) RemoveAll(paths []string) error {
-	m.bulkCalled = true
-	m.bulkPaths = paths
-
-	return nil
-}
-
-func TestDeleteFilesUsesBulkRemovableIO(t *testing.T) {
-	mock := &mockBulkRemovableIO{}
-	orphans := []string{"s3://bucket/data/orphan1.parquet", "s3://bucket/data/orphan2.parquet"}
-	cfg := &orphanCleanupConfig{}
-
-	deleted, err := deleteFiles(mock, orphans, cfg)
-	require.NoError(t, err)
-	assert.True(t, mock.bulkCalled)
-	assert.Equal(t, orphans, mock.bulkPaths)
-	assert.Equal(t, orphans, deleted)
-}
-
-func TestDeleteFilesWithCustomDeleteFunc(t *testing.T) {
-	mock := &mockBulkRemovableIO{}
-	var customDeleted []string
-	cfg := &orphanCleanupConfig{
-		deleteFunc: func(path string) error {
-			customDeleted = append(customDeleted, path)
-
-			return nil
-		},
-		maxConcurrency: 1,
-	}
-	orphans := []string{"s3://bucket/data/orphan1.parquet"}
-
-	deleted, err := deleteFiles(mock, orphans, cfg)
-	require.NoError(t, err)
-	assert.False(t, mock.bulkCalled, "BulkRemovableIO should not be used when deleteFunc is set")
-	assert.Equal(t, orphans, customDeleted)
-	assert.Equal(t, orphans, deleted)
-}
-
 func TestDeleteFilesEmpty(t *testing.T) {
 	deleted, err := deleteFiles(nil, nil, &orphanCleanupConfig{})
 	require.NoError(t, err)
