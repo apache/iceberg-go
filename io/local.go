@@ -18,6 +18,7 @@
 package io
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,4 +47,13 @@ func (LocalFS) WriteFile(name string, content []byte) error {
 
 func (LocalFS) Remove(name string) error {
 	return os.Remove(strings.TrimPrefix(name, "file://"))
+}
+
+func (LocalFS) WalkDir(root string, fn fs.WalkDirFunc) error {
+	cleanRoot := strings.TrimPrefix(root, "file://")
+	if cleanRoot == "" {
+		cleanRoot = "."
+	}
+
+	return filepath.WalkDir(cleanRoot, fn)
 }

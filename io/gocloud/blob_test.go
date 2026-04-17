@@ -190,3 +190,83 @@ func TestReadAtResourceCleanup(t *testing.T) {
 		})
 	}
 }
+
+func TestBlobFileIOWalkDir(t *testing.T) {
+	ctx := context.Background()
+
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	files := []string{
+		"data/file1.parquet",
+		"data/file2.parquet",
+		"metadata/snap-123.avro",
+	}
+	for _, f := range files {
+		require.NoError(t, bucket.WriteAll(ctx, f, []byte("content"), nil))
+	}
+
+	bfs := &blobFileIO{
+		Bucket:       bucket,
+		keyExtractor: defaultKeyExtractor("test-bucket"),
+		ctx:          ctx,
+	}
+
+	var walked []string
+	err := bfs.WalkDir("s3://test-bucket/", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if !d.IsDir() {
+			walked = append(walked, path)
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	expected := []string{
+		"s3://test-bucket/data/file1.parquet",
+		"s3://test-bucket/data/file2.parquet",
+		"s3://test-bucket/metadata/snap-123.avro",
+	}
+	assert.ElementsMatch(t, expected, walked)
+}
+
+func TestBlobFileIOWalkDirSubPath(t *testing.T) {
+	ctx := context.Background()
+
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	require.NoError(t, bucket.WriteAll(ctx, "data/file1.parquet", []byte("a"), nil))
+	require.NoError(t, bucket.WriteAll(ctx, "data/file2.parquet", []byte("b"), nil))
+	require.NoError(t, bucket.WriteAll(ctx, "metadata/v1.json", []byte("c"), nil))
+
+	bfs := &blobFileIO{
+		Bucket:       bucket,
+		keyExtractor: defaultKeyExtractor("mybucket"),
+		ctx:          ctx,
+	}
+
+	var walked []string
+	err := bfs.WalkDir("s3://mybucket/data", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if !d.IsDir() {
+			walked = append(walked, path)
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	expected := []string{
+		"s3://mybucket/data/file1.parquet",
+		"s3://mybucket/data/file2.parquet",
+	}
+	assert.ElementsMatch(t, expected, walked)
+}

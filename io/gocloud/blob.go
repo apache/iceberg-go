@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"path/filepath"
 	"strings"
 
@@ -188,6 +189,24 @@ func (bfs *blobFileIO) NewWriter(ctx context.Context, path string, overwrite boo
 
 func createBlobFS(ctx context.Context, bucket *blob.Bucket, keyExtractor KeyExtractor) icebergio.IO {
 	return &blobFileIO{Bucket: bucket, keyExtractor: keyExtractor, ctx: ctx}
+}
+
+func (bfs *blobFileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
+	parsed, err := url.Parse(root)
+	if err != nil {
+		return fmt.Errorf("invalid URL %s: %w", root, err)
+	}
+
+	walkPath := strings.TrimPrefix(parsed.Path, "/")
+	if walkPath == "" {
+		walkPath = "."
+	}
+
+	prefix := parsed.Scheme + "://" + parsed.Host + "/"
+
+	return fs.WalkDir(bfs.Bucket, walkPath, func(path string, d fs.DirEntry, err error) error {
+		return fn(prefix+path, d, err)
+	})
 }
 
 type blobWriteFile struct {
