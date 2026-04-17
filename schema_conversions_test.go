@@ -20,6 +20,7 @@ package iceberg
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/apache/iceberg-go/internal"
 	"github.com/stretchr/testify/assert"
@@ -195,4 +196,74 @@ func TestPartitionTypeToAvroSchemaDuplicateNamedTypes(t *testing.T) {
 			require.NotNil(t, s)
 		})
 	}
+}
+
+// TestDayTransformPartitionAvroDateEncoding verifies that a day(ts) partition
+// field is encoded with the Avro "date" logical type, not as a plain integer.
+// This is required for interoperability with Trino, Spark, and other Iceberg
+// engines that reject manifests where day-partition columns lack the date type.
+//
+// The fix lives in PartitionSpec.PartitionType: it overrides DayTransform's
+// ResultType (Int32) to DateType so the existing DateType branch in
+// partitionTypeToAvroSchema emits DateNode automatically.
+func TestDayTransformPartitionAvroDateEncoding(t *testing.T) {
+	schema := NewSchema(0,
+		NestedField{ID: 1, Name: "ts", Type: TimestampTzType{}, Required: true},
+	)
+	spec := NewPartitionSpecID(0,
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "ts_day", Transform: DayTransform{}},
+	)
+
+	// PartitionType now returns DateType for day-transform fields.
+	partitionType := spec.PartitionType(schema)
+	require.Equal(t, PrimitiveTypes.Date, partitionType.FieldList[0].Type,
+		"PartitionType must map DayTransform result to DateType")
+
+	avroSchema, err := partitionTypeToAvroSchema(partitionType)
+	require.NoError(t, err)
+
+	// Encode a day value: 19000 days since epoch = 2022-01-08.
+	encoded, err := avroSchema.Encode(map[string]any{"ts_day": int32(19000)})
+	require.NoError(t, err)
+
+	// twmb/avro decodes an Avro "date" field as time.Time, not int32.
+	// This confirms the date logical type is present — a plain int field
+	// decodes as int32 (verified in TestNonDayInt32PartitionAvroIntEncoding).
+	var decoded map[string]any
+	_, err = avroSchema.Decode(encoded, &decoded)
+	require.NoError(t, err)
+
+	got, ok := decoded["ts_day"]
+	require.True(t, ok)
+	_, isTime := got.(time.Time)
+	assert.True(t, isTime, "day-partition field must decode as time.Time (date logical type), got %T", got)
+	assert.Equal(t, time.Date(2022, time.January, 8, 0, 0, 0, 0, time.UTC), got)
+}
+
+// TestNonDayInt32PartitionAvroIntEncoding verifies that an Int32 partition
+// field not produced by DayTransform keeps the plain int Avro encoding and
+// decodes as int32, not time.Time.
+func TestNonDayInt32PartitionAvroIntEncoding(t *testing.T) {
+	schema := NewSchema(0,
+		NestedField{ID: 1, Name: "bucket_id", Type: Int32Type{}, Required: true},
+	)
+	spec := NewPartitionSpecID(0,
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "bucket_id_identity", Transform: IdentityTransform{}},
+	)
+
+	partitionType := spec.PartitionType(schema)
+	avroSchema, err := partitionTypeToAvroSchema(partitionType)
+	require.NoError(t, err)
+
+	encoded, err := avroSchema.Encode(map[string]any{"bucket_id_identity": int32(42)})
+	require.NoError(t, err)
+
+	var decoded map[string]any
+	_, err = avroSchema.Decode(encoded, &decoded)
+	require.NoError(t, err)
+
+	got, ok := decoded["bucket_id_identity"]
+	require.True(t, ok)
+	assert.IsType(t, int32(0), got, "plain Int32 partition must decode as int32, not time.Time")
+	assert.Equal(t, int32(42), got)
 }
