@@ -47,8 +47,8 @@ Iceberg Go is a go-native implementation for accessing iceberg tables.
 | Get Partition Specs      |     X     |
 | Get Manifests            |     X     |
 | Create New Manifests     |     X     |
-| Plan Scan                |     x     |
-| Plan Scan for Snapshot   |     x     |
+| Plan Scan                |     X     |
+| Plan Scan for Snapshot   |     X     |
 
 ### Catalog Support
 
