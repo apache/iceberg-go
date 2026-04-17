@@ -30,7 +30,7 @@ import (
 	"sync"
 	"time"
 
-	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/io"
 )
 
 // PrefixMismatchMode defines how to handle cases where candidate files have different
@@ -228,7 +228,7 @@ func (t Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConfi
 // getReferencedFiles collects all files referenced by table metadata: previous metadata
 // files, statistics and partition-statistics paths (Puffin, etc.), and all paths reachable
 // from current snapshots (manifest lists, manifests, data files).
-func (t Table) getReferencedFiles(fs iceio.IO) (map[string]bool, error) {
+func (t Table) getReferencedFiles(fs io.IO) (map[string]bool, error) {
 	referenced := make(map[string]bool)
 	metadata := t.metadata
 
@@ -282,7 +282,7 @@ func (t Table) getReferencedFiles(fs iceio.IO) (map[string]bool, error) {
 	return referenced, nil
 }
 
-func (t Table) scanFiles(fs iceio.IO, location string, cfg *orphanCleanupConfig) ([]string, int64, error) {
+func (t Table) scanFiles(fs io.IO, location string, cfg *orphanCleanupConfig) ([]string, int64, error) {
 	var allFiles []string
 	var totalSize int64
 
@@ -308,14 +308,29 @@ func (t Table) scanFiles(fs iceio.IO, location string, cfg *orphanCleanupConfig)
 	return allFiles, totalSize, nil
 }
 
-// getBucket gets the Bucket field from blob storage - absolute minimal approach
-func getBucketName(fsys iceio.IO) stdfs.FS {
-	v := reflect.ValueOf(fsys).Elem() // We know it's a pointer to struct
+// getBucketFS extracts the underlying Bucket (fs.FS) from blob-backed IO
+// implementations via reflection. This is a temporary fallback until all
+// cloud backends implement ListableIO (#917).
+func getBucketFS(fsys io.IO) (stdfs.FS, error) {
+	v := reflect.ValueOf(fsys)
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
 
-	return v.FieldByName("Bucket").Interface().(stdfs.FS)
+	f := v.FieldByName("Bucket")
+	if !f.IsValid() {
+		return nil, fmt.Errorf("no bucket field found on %T", fsys)
+	}
+
+	bucket, ok := f.Interface().(stdfs.FS)
+	if !ok {
+		return nil, fmt.Errorf("bucket field on %T is not an fs.FS", fsys)
+	}
+
+	return bucket, nil
 }
 
-// makeFileWalkFunc creates a WalkDirFunc that processes only files with path transformation
+// makeFileWalkFunc creates a WalkDirFunc that processes only files with path transformation.
 func makeFileWalkFunc(fn func(path string, info stdfs.FileInfo) error, pathTransform func(string) string) stdfs.WalkDirFunc {
 	return func(path string, d stdfs.DirEntry, err error) error {
 		if err != nil {
@@ -333,37 +348,34 @@ func makeFileWalkFunc(fn func(path string, info stdfs.FileInfo) error, pathTrans
 	}
 }
 
-func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {
-	switch v := fsys.(type) {
-	case iceio.LocalFS:
-		cleanRoot := strings.TrimPrefix(root, "file://")
-		if cleanRoot == "" {
-			cleanRoot = "."
-		}
-
-		return filepath.WalkDir(cleanRoot, makeFileWalkFunc(fn, func(path string) string {
+func walkDirectory(fsys io.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {
+	// Prefer ListableIO when available (LocalFS, and cloud backends after #917).
+	if listable, ok := fsys.(io.ListableIO); ok {
+		return listable.WalkDir(root, makeFileWalkFunc(fn, func(path string) string {
 			return path
 		}))
-
-	default:
-		// For blob storage: direct field access since we know the structure
-		bucket := getBucketName(v)
-
-		parsed, err := url.Parse(root)
-		if err != nil {
-			return fmt.Errorf("invalid URL %s: %w", root, err)
-		}
-
-		walkPath := strings.TrimPrefix(parsed.Path, "/")
-		if walkPath == "" {
-			walkPath = "."
-		}
-
-		// URL transform - reconstruct full URL path
-		return stdfs.WalkDir(bucket, walkPath, makeFileWalkFunc(fn, func(path string) string {
-			return parsed.Scheme + "://" + parsed.Host + "/" + path
-		}))
 	}
+
+	// Fallback: cloud blob storage that doesn't yet implement ListableIO.
+	// Use reflect to access the underlying Bucket (fs.FS) field.
+	bucket, err := getBucketFS(fsys)
+	if err != nil {
+		return fmt.Errorf("IO implementation %T does not support directory listing (ListableIO) and has no Bucket fallback: %w", fsys, err)
+	}
+
+	parsed, err := url.Parse(root)
+	if err != nil {
+		return fmt.Errorf("invalid URL %s: %w", root, err)
+	}
+
+	walkPath := strings.TrimPrefix(parsed.Path, "/")
+	if walkPath == "" {
+		walkPath = "."
+	}
+
+	return stdfs.WalkDir(bucket, walkPath, makeFileWalkFunc(fn, func(path string) string {
+		return parsed.Scheme + "://" + parsed.Host + "/" + path
+	}))
 }
 
 func identifyOrphanFiles(allFiles []string, referencedFiles map[string]bool, cfg *orphanCleanupConfig) ([]string, error) {
@@ -410,7 +422,7 @@ func isFileOrphan(file string, referencedFiles map[string]bool, normalizedRefere
 	return true, nil
 }
 
-func deleteFiles(fs iceio.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
+func deleteFiles(fs io.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
 	if len(orphanFiles) == 0 {
 		return nil, nil
 	}
@@ -422,7 +434,7 @@ func deleteFiles(fs iceio.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([
 	return deleteFilesParallel(fs, orphanFiles, cfg)
 }
 
-func deleteFilesSequential(fs iceio.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
+func deleteFilesSequential(fs io.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
 	var deletedFiles []string
 
 	deleteFunc := fs.Remove
@@ -443,7 +455,7 @@ func deleteFilesSequential(fs iceio.IO, orphanFiles []string, cfg *orphanCleanup
 	return deletedFiles, result
 }
 
-func deleteFilesParallel(fs iceio.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
+func deleteFilesParallel(fs io.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
 	deleteFunc := fs.Remove
 	if cfg.deleteFunc != nil {
 		deleteFunc = cfg.deleteFunc

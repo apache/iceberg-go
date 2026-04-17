@@ -90,6 +90,37 @@ type WriteFileIO interface {
 	WriteFile(name string, p []byte) error
 }
 
+// BulkRemovableIO is an optional interface for IO implementations that
+// support deleting multiple files in a single batch operation.
+// Cloud object stores (S3 DeleteObjects, GCS batch, Azure batch) can
+// implement this for significantly better throughput than single-file Remove.
+type BulkRemovableIO interface {
+	IO
+
+	// DeleteFiles deletes all named files. Implementations should make a
+	// best-effort attempt to delete as many files as possible, returning
+	// the list of successfully deleted paths and a joined error
+	// (via [errors.Join]) for any individual failures.
+	//
+	// Missing files are not considered errors — if a path does not exist,
+	// it should be treated as a successful deletion.
+	//
+	// An empty paths slice is a no-op and must not error.
+	DeleteFiles(ctx context.Context, paths []string) (deleted []string, err error)
+}
+
+// ListableIO is an optional interface for IO implementations that
+// support directory listing/walking.
+type ListableIO interface {
+	IO
+
+	// WalkDir walks the file tree rooted at root, calling fn for each
+	// file or directory. Semantics match [io/fs.WalkDirFunc].
+	// Paths passed to fn must be fully-qualified: scheme-prefixed for
+	// remote stores (e.g. s3://bucket/key), absolute for local FS.
+	WalkDir(root string, fn fs.WalkDirFunc) error
+}
+
 // A File provides access to a single file. The File interface is the
 // minimum implementation required for Iceberg to interact with a file.
 // Directory files should also implement

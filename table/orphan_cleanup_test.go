@@ -18,9 +18,11 @@
 package table
 
 import (
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -530,4 +532,36 @@ func TestGetReferencedFiles_IncludesStatisticsFiles(t *testing.T) {
 	assert.True(t, refs[tbl.metadataLocation])
 	assert.False(t, refs["s3://bucket/stats/not-referenced.puffin"])
 	assert.False(t, refs[""])
+}
+
+func TestDeleteFilesEmpty(t *testing.T) {
+	deleted, err := deleteFiles(nil, nil, &orphanCleanupConfig{})
+	require.NoError(t, err)
+	assert.Nil(t, deleted)
+}
+
+// mockPlainIO implements only IO (no BulkRemovableIO) to verify fallback behavior.
+type mockPlainIO struct {
+	removed []string
+}
+
+func (m *mockPlainIO) Open(string) (io.File, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (m *mockPlainIO) Remove(name string) error {
+	m.removed = append(m.removed, name)
+
+	return nil
+}
+
+func TestDeleteFilesFallsBackToExistingBehavior(t *testing.T) {
+	mock := &mockPlainIO{}
+	orphans := []string{"s3://bucket/data/orphan1.parquet", "s3://bucket/data/orphan2.parquet"}
+	cfg := &orphanCleanupConfig{maxConcurrency: 1}
+
+	deleted, err := deleteFiles(mock, orphans, cfg)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, orphans, mock.removed)
+	assert.ElementsMatch(t, orphans, deleted)
 }
