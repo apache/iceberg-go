@@ -238,7 +238,7 @@
 <li>Create and list namespaces.</li>
 <li>Create, load, and drop tables</li>
 </ul>
-<p>Currently, only the REST catalog has been implemented, and other catalogs are under active development. Here is an 
+<p>Multiple catalog implementations are available: REST, Hive, Glue, and SQL. Here is an
 example of how to create a <code>RestCatalog</code>:</p>
 <pre><code class="language-go">import (
     &quot;context&quot;
@@ -482,6 +482,222 @@ tbl, err := cat.CreateTable(
     catalog.WithPartitionSpec(&amp;partitionSpec),
     catalog.WithLocation(&quot;s3://my-bucket/tables/partitioned_table&quot;),
 )
+if err != nil {
+    log.Fatal(err)
+}
+</code></pre>
+<h1 id="scanning-reading-data"><a class="header" href="#scanning-reading-data">Scanning (Reading Data)</a></h1>
+<p>The <code>Scan</code> API reads data from Iceberg tables as Apache Arrow record batches. It supports
+column projection, row filtering, snapshot selection, and time travel.</p>
+<h2 id="basic-scan"><a class="header" href="#basic-scan">Basic Scan</a></h2>
+<h3 id="streaming-record-batches"><a class="header" href="#streaming-record-batches">Streaming Record Batches</a></h3>
+<pre><code class="language-go">import (
+    &quot;context&quot;
+    &quot;fmt&quot;
+
+    &quot;github.com/apache/iceberg-go/table&quot;
+)
+
+// Stream record batches one at a time — only one batch
+// is in memory at any point.
+scan := tbl.Scan()
+arrowSchema, records, err := scan.ToArrowRecords(context.Background())
+if err != nil {
+    log.Fatal(err)
+}
+
+fmt.Printf(&quot;Schema: %s\n&quot;, arrowSchema)
+for batch, err := range records {
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf(&quot;Batch with %d rows\n&quot;, batch.NumRows())
+    batch.Release()
+}
+</code></pre>
+<h3 id="materializing-as-an-arrow-table"><a class="header" href="#materializing-as-an-arrow-table">Materializing as an Arrow Table</a></h3>
+<pre><code class="language-go">// Materialize all record batches into a single Arrow Table.
+scan := tbl.Scan()
+arrowTable, err := scan.ToArrowTable(context.Background())
+if err != nil {
+    log.Fatal(err)
+}
+defer arrowTable.Release()
+
+fmt.Printf(&quot;Read %d rows in %d columns\n&quot;,
+    arrowTable.NumRows(), arrowTable.NumCols())
+</code></pre>
+<h2 id="column-selection-and-row-filtering"><a class="header" href="#column-selection-and-row-filtering">Column Selection and Row Filtering</a></h2>
+<pre><code class="language-go">import &quot;github.com/apache/iceberg-go&quot;
+
+// Select specific columns and filter rows
+scan := tbl.Scan(
+    table.WithSelectedFields(&quot;id&quot;, &quot;name&quot;, &quot;date&quot;),
+    table.WithRowFilter(
+        iceberg.GreaterThanEqual(iceberg.Reference(&quot;id&quot;), int32(100)),
+    ),
+    table.WithCaseSensitive(true),
+    table.WithLimit(1000),
+)
+
+arrowSchema, records, err := scan.ToArrowRecords(context.Background())
+if err != nil {
+    log.Fatal(err)
+}
+</code></pre>
+<h2 id="time-travel"><a class="header" href="#time-travel">Time Travel</a></h2>
+<pre><code class="language-go">// Read a specific snapshot by ID
+scan := tbl.Scan(
+    table.WithSnapshotID(snapshotID),
+)
+
+// Read data as of a specific timestamp (milliseconds since epoch)
+scan = tbl.Scan(
+    table.WithSnapshotAsOf(timestampMs),
+)
+
+// Read from a named branch or tag
+scan = tbl.Scan()
+scan, err := scan.UseRef(&quot;audit-branch&quot;)
+if err != nil {
+    log.Fatal(err)
+}
+</code></pre>
+<h2 id="reading-as-an-arrow-table"><a class="header" href="#reading-as-an-arrow-table">Reading as an Arrow Table</a></h2>
+<pre><code class="language-go">// Load all results into a single Arrow Table (in-memory)
+arrowTable, err := tbl.Scan().ToArrowTable(context.Background())
+if err != nil {
+    log.Fatal(err)
+}
+defer arrowTable.Release()
+
+fmt.Printf(&quot;Total rows: %d\n&quot;, arrowTable.NumRows())
+fmt.Printf(&quot;Total columns: %d\n&quot;, arrowTable.NumCols())
+</code></pre>
+<h1 id="writing-data"><a class="header" href="#writing-data">Writing Data</a></h1>
+<p>The write API uses Apache Arrow as the input format. Data can be written using
+<code>arrow.Table</code> or <code>array.RecordReader</code> (streaming).</p>
+<h2 id="append-data"><a class="header" href="#append-data">Append Data</a></h2>
+<pre><code class="language-go">import (
+    &quot;context&quot;
+
+    &quot;github.com/apache/arrow-go/v18/arrow&quot;
+    &quot;github.com/apache/arrow-go/v18/arrow/array&quot;
+    &quot;github.com/apache/arrow-go/v18/arrow/memory&quot;
+)
+
+// Append using a RecordReader (streaming)
+// The RecordReader's schema must be compatible with the table schema.
+newTable, err := tbl.Append(context.Background(), recordReader, nil)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Append using an Arrow Table with a batch size
+newTable, err = tbl.AppendTable(context.Background(), arrowTable, 1024, nil)
+if err != nil {
+    log.Fatal(err)
+}
+</code></pre>
+<h2 id="overwrite-data"><a class="header" href="#overwrite-data">Overwrite Data</a></h2>
+<p>Overwrite replaces existing data. An optional filter controls which rows are replaced.</p>
+<pre><code class="language-go">import &quot;github.com/apache/iceberg-go&quot;
+
+// Overwrite all existing data with new data
+newTable, err := tbl.Overwrite(context.Background(), recordReader, nil)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Overwrite only rows matching a filter
+newTable, err = tbl.Overwrite(context.Background(), recordReader, nil,
+    table.WithOverwriteFilter(
+        iceberg.EqualTo(iceberg.Reference(&quot;date&quot;), &quot;2024-01-01&quot;),
+    ),
+)
+if err != nil {
+    log.Fatal(err)
+}
+</code></pre>
+<h2 id="delete-data"><a class="header" href="#delete-data">Delete Data</a></h2>
+<p>Delete removes rows matching a filter expression.</p>
+<pre><code class="language-go">import &quot;github.com/apache/iceberg-go&quot;
+
+// Delete rows matching a filter
+newTable, err := tbl.Delete(context.Background(),
+    iceberg.LessThan(iceberg.Reference(&quot;id&quot;), int32(100)),
+    nil, // snapshot properties
+)
+if err != nil {
+    log.Fatal(err)
+}
+</code></pre>
+<h1 id="transactions"><a class="header" href="#transactions">Transactions</a></h1>
+<p>Transactions group multiple operations into a single atomic commit. Use transactions
+when you need to perform multiple writes or metadata changes together.</p>
+<h2 id="basic-transaction"><a class="header" href="#basic-transaction">Basic Transaction</a></h2>
+<pre><code class="language-go">import (
+    &quot;context&quot;
+
+    &quot;github.com/apache/iceberg-go&quot;
+)
+
+txn := tbl.NewTransaction()
+
+// Append new data
+err := txn.Append(context.Background(), recordReader, nil)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Set table properties
+err = txn.SetProperties(iceberg.Properties{
+    &quot;commit.user&quot;: &quot;data-pipeline&quot;,
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+// Commit all changes atomically
+newTable, err := txn.Commit(context.Background())
+if err != nil {
+    log.Fatal(err)
+}
+</code></pre>
+<h2 id="multi-operation-transaction"><a class="header" href="#multi-operation-transaction">Multi-Operation Transaction</a></h2>
+<pre><code class="language-go">txn := tbl.NewTransaction()
+
+// Delete old data
+err := txn.Delete(context.Background(),
+    iceberg.LessThan(iceberg.Reference(&quot;date&quot;), &quot;2023-01-01&quot;),
+    nil,
+)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Append replacement data
+err = txn.Append(context.Background(), recordReader, nil)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Commit both operations as one atomic snapshot
+newTable, err := txn.Commit(context.Background())
+if err != nil {
+    log.Fatal(err)
+}
+</code></pre>
+<h2 id="branch-transactions"><a class="header" href="#branch-transactions">Branch Transactions</a></h2>
+<pre><code class="language-go">// Create a transaction that commits to a specific branch
+txn := tbl.NewTransactionOnBranch(&quot;staging&quot;)
+
+err := txn.Append(context.Background(), recordReader, nil)
+if err != nil {
+    log.Fatal(err)
+}
+
+newTable, err := txn.Commit(context.Background())
 if err != nil {
     log.Fatal(err)
 }
