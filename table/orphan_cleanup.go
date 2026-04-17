@@ -310,7 +310,7 @@ func (t Table) scanFiles(fs iceio.IO, location string, cfg *orphanCleanupConfig)
 func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {
 	listable, ok := fsys.(iceio.ListableIO)
 	if !ok {
-		return fmt.Errorf("IO implementation %T does not support directory listing (does not implement ListableIO)", fsys)
+		return fmt.Errorf("IO implementation %T does not support directory listing for %s (does not implement ListableIO)", fsys, root)
 	}
 
 	return listable.WalkDir(root, func(path string, d stdfs.DirEntry, err error) error {

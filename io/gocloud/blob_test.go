@@ -270,3 +270,37 @@ func TestBlobFileIOWalkDirSubPath(t *testing.T) {
 	}
 	assert.ElementsMatch(t, expected, walked)
 }
+
+func TestBlobFileIOWalkDirAzureURI(t *testing.T) {
+	ctx := context.Background()
+
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	require.NoError(t, bucket.WriteAll(ctx, "path/to/file.parquet", []byte("data"), nil))
+
+	bfs := &blobFileIO{
+		Bucket:       bucket,
+		keyExtractor: defaultKeyExtractor("container@account.dfs.core.windows.net"),
+		ctx:          ctx,
+	}
+
+	var walked []string
+	err := bfs.WalkDir("abfs://container@account.dfs.core.windows.net/path", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if !d.IsDir() {
+			walked = append(walked, path)
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	expected := []string{
+		"abfs://container@account.dfs.core.windows.net/path/to/file.parquet",
+	}
+	assert.Equal(t, expected, walked)
+}

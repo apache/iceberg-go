@@ -202,7 +202,11 @@ func (bfs *blobFileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
 		walkPath = "."
 	}
 
-	prefix := parsed.Scheme + "://" + parsed.Host + "/"
+	prefix := parsed.Scheme + "://"
+	if parsed.User != nil {
+		prefix += parsed.User.String() + "@"
+	}
+	prefix += parsed.Host + "/"
 
 	return fs.WalkDir(bfs.Bucket, walkPath, func(path string, d fs.DirEntry, err error) error {
 		return fn(prefix+path, d, err)
