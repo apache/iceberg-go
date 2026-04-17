@@ -214,7 +214,7 @@ func (t Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConfi
 	if cfg.dryRun {
 		return result, nil
 	}
-	deletedFiles, err := deleteFiles(fs, orphanFiles, cfg)
+	deletedFiles, err := deleteFiles(ctx, fs, orphanFiles, cfg)
 	if err != nil {
 		return OrphanCleanupResult{}, fmt.Errorf("failed to delete orphan files: %w", err)
 	}
@@ -375,9 +375,16 @@ func isFileOrphan(file string, referencedFiles map[string]bool, normalizedRefere
 	return true, nil
 }
 
-func deleteFiles(fs iceio.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
+func deleteFiles(ctx context.Context, fs iceio.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
 	if len(orphanFiles) == 0 {
 		return nil, nil
+	}
+
+	// Use bulk delete when available and no custom deleteFunc is set.
+	if cfg.deleteFunc == nil {
+		if bulk, ok := fs.(iceio.BulkRemovableIO); ok {
+			return bulk.DeleteFiles(ctx, orphanFiles)
+		}
 	}
 
 	if cfg.maxConcurrency == 1 {
