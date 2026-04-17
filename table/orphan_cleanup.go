@@ -24,6 +24,7 @@ import (
 	stdfs "io/fs"
 	"net/url"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -308,12 +309,40 @@ func (t Table) scanFiles(fs iceio.IO, location string, cfg *orphanCleanupConfig)
 }
 
 func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {
-	listable, ok := fsys.(iceio.ListableIO)
-	if !ok {
-		return fmt.Errorf("IO implementation %T does not support directory listing for %s (does not implement ListableIO)", fsys, root)
+	if listable, ok := fsys.(iceio.ListableIO); ok {
+		return listable.WalkDir(root, func(path string, d stdfs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+
+			if d.IsDir() {
+				return nil
+			}
+
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+
+			return fn(path, info)
+		})
 	}
 
-	return listable.WalkDir(root, func(path string, d stdfs.DirEntry, err error) error {
+	// Fallback: reflect-based access for IO implementations that don't
+	// yet implement ListableIO (e.g. blob storage).
+	bucket := getBucket(fsys)
+
+	parsed, err := url.Parse(root)
+	if err != nil {
+		return fmt.Errorf("invalid URL %s: %w", root, err)
+	}
+
+	walkPath := strings.TrimPrefix(parsed.Path, "/")
+	if walkPath == "" {
+		walkPath = "."
+	}
+
+	return stdfs.WalkDir(bucket, walkPath, func(path string, d stdfs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -327,8 +356,17 @@ func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.F
 			return err
 		}
 
-		return fn(path, info)
+		return fn(parsed.Scheme+"://"+parsed.Host+"/"+path, info)
 	})
+}
+
+// getBucket extracts the Bucket field from blob storage IO implementations
+// via reflect. This is a temporary fallback until all IO implementations
+// implement ListableIO.
+func getBucket(fsys iceio.IO) stdfs.FS {
+	v := reflect.ValueOf(fsys).Elem()
+
+	return v.FieldByName("Bucket").Interface().(stdfs.FS)
 }
 
 func identifyOrphanFiles(allFiles []string, referencedFiles map[string]bool, cfg *orphanCleanupConfig) ([]string, error) {

@@ -50,10 +50,5 @@ func (LocalFS) Remove(name string) error {
 }
 
 func (LocalFS) WalkDir(root string, fn fs.WalkDirFunc) error {
-	cleanRoot := strings.TrimPrefix(root, "file://")
-	if cleanRoot == "" {
-		cleanRoot = "."
-	}
-
-	return filepath.WalkDir(cleanRoot, fn)
+	return filepath.WalkDir(strings.TrimPrefix(root, "file://"), fn)
 }
