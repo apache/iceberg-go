@@ -24,7 +24,8 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// dvMockDataFile extends mockDataFile with DV fields.
+// dvMockDataFile extends mockDataFile with the DV-specific fields
+// (referenced data file, content offset/size) needed by scan planning tests.
 type dvMockDataFile struct {
 	mockDataFile
 	referencedDataFile *string
