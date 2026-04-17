@@ -246,7 +246,8 @@ func TestBackoffDuration_HandlesZeroOrNegativeInputs(t *testing.T) {
 	d = backoffDuration(0, -1, -1)
 	assert.Equal(t, time.Duration(CommitMinRetryWaitMsDefault)*time.Millisecond, d)
 
-	// Negative attempt must not panic on shift.
-	d = backoffDuration(-5, 100, 60000)
-	assert.Equal(t, 100*time.Millisecond, d)
+	// Very large attempt counts must not panic on shift; clamps to maxMs.
+	d = backoffDuration(100, 100, 60000)
+	assert.GreaterOrEqual(t, d, 100*time.Millisecond)
+	assert.LessOrEqual(t, d, 60000*time.Millisecond)
 }

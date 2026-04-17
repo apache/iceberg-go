@@ -337,9 +337,29 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		newMeta Metadata
 		newLoc  string
 		err     error
+		timer   *time.Timer
 	)
 
-	for attempt := 0; attempt <= cfg.numRetries; attempt++ {
+	// numRetries counts retries; total attempts = 1 initial + numRetries.
+	totalAttempts := cfg.numRetries + 1
+
+	for attempt := range totalAttempts {
+		if attempt != 0 {
+			wait := backoffDuration(uint(attempt-1), cfg.minWaitMs, cfg.maxWaitMs)
+			if timer == nil {
+				timer = time.NewTimer(wait)
+			} else {
+				timer.Reset(wait)
+			}
+			select {
+			case <-retryCtx.Done():
+				timer.Stop()
+
+				return nil, context.Cause(retryCtx)
+			case <-timer.C:
+			}
+		}
+
 		if retryCtx.Err() != nil {
 			return nil, context.Cause(retryCtx)
 		}
@@ -354,20 +374,6 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		// may have actually succeeded — retrying could duplicate work.
 		if !errors.Is(err, ErrCommitFailed) {
 			return nil, err
-		}
-
-		if attempt == cfg.numRetries {
-			break
-		}
-
-		wait := backoffDuration(attempt, cfg.minWaitMs, cfg.maxWaitMs)
-		timer := time.NewTimer(wait)
-		select {
-		case <-retryCtx.Done():
-			timer.Stop()
-
-			return nil, context.Cause(retryCtx)
-		case <-timer.C:
 		}
 	}
 
@@ -412,7 +418,7 @@ func readRetryConfig(props iceberg.Properties) retryConfig {
 // exponential backoff here; we add jitter to reduce stampede risk on
 // concurrent Go writers. Backoff is client-local, so this does not
 // affect cross-client interop.
-func backoffDuration(attempt, minMs, maxMs int) time.Duration {
+func backoffDuration(attempt uint, minMs, maxMs int) time.Duration {
 	if minMs <= 0 {
 		minMs = CommitMinRetryWaitMsDefault
 	}
@@ -422,13 +428,9 @@ func backoffDuration(attempt, minMs, maxMs int) time.Duration {
 	if minMs > maxMs {
 		minMs = maxMs
 	}
-	// Guard the shift count: negative shifts panic, and shifts at or
-	// beyond the operand width overflow the signed int64 to 0 or a
-	// negative value which we'd then clamp anyway. Clamping here keeps
-	// the math obvious at the call site below.
-	if attempt < 0 {
-		attempt = 0
-	}
+	// Cap the shift count so the signed int64 below does not overflow
+	// past its operand width; overflow would just be clamped to maxMs
+	// anyway, so keep the math obvious instead.
 	if attempt > 62 {
 		attempt = 62
 	}
