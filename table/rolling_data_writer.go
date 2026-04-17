@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/iceberg-go"
@@ -43,6 +44,10 @@ type writerFactory struct {
 	writeUUID      *uuid.UUID
 	taskSchema     *iceberg.Schema
 	targetFileSize int64
+	idleTimeout    time.Duration
+	reaperTimeout  time.Duration
+	reaperCancel   context.CancelFunc
+	reaperDone     chan struct{}
 
 	locProvider      LocationProvider
 	fileSchema       *iceberg.Schema
@@ -161,6 +166,8 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		nextCount:      nextCount,
 		stopCount:      stopCount,
 		sortOrderID:    meta.defaultSortOrderID,
+		idleTimeout:    args.idleTimeout,
+		reaperTimeout:  args.reaperTimeout,
 	}
 	for _, apply := range opts {
 		apply(f)
@@ -171,6 +178,16 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		stopCount()
 
 		return nil, err
+	}
+
+	if f.idleTimeout > 0 && f.reaperTimeout >= 0 {
+		if f.reaperTimeout == 0 {
+			f.reaperTimeout = 10 * f.idleTimeout
+		}
+		reaperCtx, reaperCancel := context.WithCancel(context.Background())
+		f.reaperCancel = reaperCancel
+		f.reaperDone = make(chan struct{})
+		go f.reapIdleWriters(reaperCtx)
 	}
 
 	return f, nil
@@ -236,6 +253,7 @@ type RollingDataWriter struct {
 	partitionKey     string
 	partitionID      int
 	fileCount        atomic.Int64
+	lastWriteTime    atomic.Int64 // unix nanos; updated on each record write
 	recordCh         chan arrow.RecordBatch
 	errorCh          chan error
 	factory          *writerFactory
@@ -327,7 +345,7 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 		return nil
 	}
 
-	for record := range r.recordCh {
+	writeRecord := func(record arrow.RecordBatch) error {
 		if currentWriter == nil {
 			fileCount := int(r.fileCount.Add(1))
 			var err error
@@ -335,42 +353,112 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 				r.ctx, r.partitionKey, r.partitionValues,
 				r.partitionID, fileCount)
 			if err != nil {
-				record.Release()
-				r.sendError(err)
-
-				return
+				return err
 			}
 		}
 
 		converted, err := ToRequestedSchema(r.ctx, r.factory.fileSchema,
 			r.factory.taskSchema, record, SchemaOptions{IncludeFieldIDs: true, UseWriteDefault: true})
 		if err != nil {
-			record.Release()
-			r.sendError(err)
-
-			return
+			return err
 		}
 
 		err = currentWriter.Write(converted)
 		converted.Release()
-		record.Release()
 		if err != nil {
-			r.sendError(err)
-
-			return
+			return err
 		}
 
+		r.lastWriteTime.Store(time.Now().UnixNano())
+
 		if currentWriter.BytesWritten() >= r.factory.targetFileSize {
+			return closeWriter()
+		}
+
+		return nil
+	}
+
+	// Both the idle-timeout and non-idle-timeout paths use a select loop
+	// so the goroutine can be stopped via context cancellation (used by
+	// the reaper and closeAndWait) without closing recordCh.
+	idleTimeout := r.factory.idleTimeout
+
+	var idleTimerC <-chan time.Time
+	var idleTimer *time.Timer
+	if idleTimeout > 0 {
+		idleTimer = time.NewTimer(idleTimeout)
+		idleTimer.Stop()
+		defer idleTimer.Stop()
+		idleTimerC = idleTimer.C
+	}
+
+	for {
+		select {
+		case record, ok := <-r.recordCh:
+			if !ok {
+				// Channel closed; finalize any open file.
+				if err := closeWriter(); err != nil {
+					r.sendError(err)
+				}
+
+				return
+			}
+
+			err := writeRecord(record)
+			record.Release()
+			if err != nil {
+				r.sendError(err)
+
+				return
+			}
+
+			// Reset idle timer only when a file is open.
+			if idleTimer != nil && currentWriter != nil {
+				if !idleTimer.Stop() {
+					select {
+					case <-idleTimerC:
+					default:
+					}
+				}
+				idleTimer.Reset(idleTimeout)
+			}
+
+		case <-idleTimerC:
+			// No records arrived for idleTimeout; flush the current
+			// file. The goroutine stays alive — same as a size-based
+			// roll — and will open a new file on the next record.
 			if err := closeWriter(); err != nil {
 				r.sendError(err)
 
 				return
 			}
-		}
-	}
 
-	if err := closeWriter(); err != nil {
-		r.sendError(err)
+		case <-r.ctx.Done():
+			// Drain any buffered records before finalizing.
+		drain:
+			for {
+				select {
+				case record, ok := <-r.recordCh:
+					if !ok {
+						break drain
+					}
+					err := writeRecord(record)
+					record.Release()
+					if err != nil {
+						r.sendError(err)
+
+						return
+					}
+				default:
+					break drain
+				}
+			}
+			if err := closeWriter(); err != nil {
+				r.sendError(err)
+			}
+
+			return
+		}
 	}
 }
 
@@ -383,7 +471,6 @@ func (r *RollingDataWriter) sendError(err error) {
 
 func (r *RollingDataWriter) close() {
 	r.cancel()
-	close(r.recordCh)
 }
 
 func (r *RollingDataWriter) closeAndWait() error {
@@ -404,8 +491,51 @@ func (r *RollingDataWriter) closeAndWait() error {
 	}
 }
 
+// reapIdleWriters periodically scans all writers and tears down any whose
+// goroutine has been idle (no record writes) for longer than reaperTimeout.
+// This prevents long-lived partitions (e.g. hour=2024010100) from
+// accumulating goroutines that will never receive data again.
+func (w *writerFactory) reapIdleWriters(ctx context.Context) {
+	defer close(w.reaperDone)
+	ticker := time.NewTicker(w.reaperTimeout)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			now := time.Now().UnixNano()
+			threshold := w.reaperTimeout.Nanoseconds()
+
+			w.writers.Range(func(key, value any) bool {
+				writer, ok := value.(*RollingDataWriter)
+				if !ok {
+					return true
+				}
+
+				lastWrite := writer.lastWriteTime.Load()
+				if lastWrite == 0 || (now-lastWrite) < threshold {
+					return true
+				}
+
+				// closeAndWait cancels the goroutine, waits for it to
+				// drain, and removes the writer from the map.
+				_ = writer.closeAndWait()
+
+				return true
+			})
+		}
+	}
+}
+
 func (w *writerFactory) closeAll() error {
 	defer w.stopCount()
+	if w.reaperCancel != nil {
+		w.reaperCancel()
+		<-w.reaperDone
+	}
+
 	var writers []*RollingDataWriter
 	w.writers.Range(func(key, value any) bool {
 		writer, ok := value.(*RollingDataWriter)

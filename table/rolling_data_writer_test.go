@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -30,6 +31,8 @@ import (
 	iceio "github.com/apache/iceberg-go/io"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -50,6 +53,10 @@ func TestRollingDataWriter(t *testing.T) {
 }
 
 func (s *RollingDataWriterTestSuite) createWriterFactory(loc string, arrSchema *arrow.Schema, targetFileSize int64) (*writerFactory, *iceberg.Schema) {
+	return s.createWriterFactoryWithIdleTimeout(loc, arrSchema, targetFileSize, 0)
+}
+
+func (s *RollingDataWriterTestSuite) createWriterFactoryWithIdleTimeout(loc string, arrSchema *arrow.Schema, targetFileSize int64, idleTimeout time.Duration, reaperTimeout ...time.Duration) (*writerFactory, *iceberg.Schema) {
 	icebergSchema, err := ArrowSchemaToIcebergWithFreshIDs(arrSchema, false)
 	s.Require().NoError(err)
 
@@ -62,9 +69,10 @@ func (s *RollingDataWriterTestSuite) createWriterFactory(loc string, arrSchema *
 
 	writeUUID := uuid.New()
 	args := recordWritingArgs{
-		sc:        arrSchema,
-		fs:        iceio.LocalFS{},
-		writeUUID: &writeUUID,
+		sc:          arrSchema,
+		fs:          iceio.LocalFS{},
+		writeUUID:   &writeUUID,
+		idleTimeout: idleTimeout,
 		counter: func(yield func(int) bool) {
 			for i := 0; ; i++ {
 				if !yield(i) {
@@ -72,6 +80,9 @@ func (s *RollingDataWriterTestSuite) createWriterFactory(loc string, arrSchema *
 				}
 			}
 		},
+	}
+	if len(reaperTimeout) > 0 {
+		args.reaperTimeout = reaperTimeout[0]
 	}
 
 	factory, err := newWriterFactory(loc, args, metaBuilder, icebergSchema, targetFileSize)
@@ -332,4 +343,190 @@ func (s *RollingDataWriterTestSuite) TestBytesWrittenReflectsCompressedSize() {
 	df, err := fw.Close()
 	s.Require().NoError(err)
 	s.Equal(int64(100), df.Count())
+}
+
+// newTestWriterFactory creates a writerFactory with the given idle and reaper
+// timeouts for use in standalone (non-suite) tests.
+func newTestWriterFactory(t *testing.T, loc string, arrSchema *arrow.Schema, targetFileSize int64, idleTimeout, reaperTimeout time.Duration) *writerFactory {
+	t.Helper()
+
+	icebergSchema, err := ArrowSchemaToIcebergWithFreshIDs(arrSchema, false)
+	require.NoError(t, err)
+
+	spec := iceberg.NewPartitionSpec()
+	meta, err := NewMetadata(icebergSchema, &spec, UnsortedSortOrder, loc, iceberg.Properties{})
+	require.NoError(t, err)
+
+	metaBuilder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+
+	writeUUID := uuid.New()
+	args := recordWritingArgs{
+		sc:            arrSchema,
+		fs:            iceio.LocalFS{},
+		writeUUID:     &writeUUID,
+		idleTimeout:   idleTimeout,
+		reaperTimeout: reaperTimeout,
+		counter: func(yield func(int) bool) {
+			for i := 0; ; i++ {
+				if !yield(i) {
+					break
+				}
+			}
+		},
+	}
+
+	factory, err := newWriterFactory(loc, args, metaBuilder, icebergSchema, targetFileSize)
+	require.NoError(t, err)
+
+	return factory
+}
+
+func buildTestRecord(t *testing.T, mem memory.Allocator, arrSchema *arrow.Schema, numRows int) arrow.RecordBatch {
+	t.Helper()
+
+	bldr := array.NewRecordBuilder(mem, arrSchema)
+	defer bldr.Release()
+
+	for i := range numRows {
+		bldr.Field(0).(*array.Int32Builder).Append(int32(i))
+		bldr.Field(1).(*array.StringBuilder).Append("value")
+	}
+
+	return bldr.NewRecordBatch()
+}
+
+var testSchema = arrow.NewSchema([]arrow.Field{
+	{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+	{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+}, nil)
+
+func TestIdleTimeoutFlushesFile(t *testing.T) {
+	mem := memory.NewGoAllocator()
+	loc := filepath.ToSlash(t.TempDir())
+	// reaperTimeout=-1 disables the reaper for this test.
+	factory := newTestWriterFactory(t, loc, testSchema, 1024*1024, 200*time.Millisecond, -1)
+	defer factory.closeAll()
+
+	outputCh := make(chan iceberg.DataFile, 10)
+	writer := factory.newRollingDataWriter(context.Background(), nil, "", nil, outputCh)
+
+	record := buildTestRecord(t, mem, testSchema, 5)
+	require.NoError(t, writer.Add(record))
+	record.Release()
+
+	select {
+	case df := <-outputCh:
+		assert.Equal(t, int64(5), df.Count())
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for idle flush")
+	}
+}
+
+func TestIdleTimerResetsOnActivity(t *testing.T) {
+	mem := memory.NewGoAllocator()
+	loc := filepath.ToSlash(t.TempDir())
+	factory := newTestWriterFactory(t, loc, testSchema, 1024*1024, 300*time.Millisecond, -1)
+	defer factory.closeAll()
+
+	outputCh := make(chan iceberg.DataFile, 10)
+	writer := factory.newRollingDataWriter(context.Background(), nil, "", nil, outputCh)
+
+	// Send records at intervals shorter than the idle timeout so
+	// the timer keeps resetting and does not flush prematurely.
+	for range 5 {
+		record := buildTestRecord(t, mem, testSchema, 3)
+		require.NoError(t, writer.Add(record))
+		record.Release()
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// No file should have been flushed yet (all 15 rows in one file).
+	select {
+	case <-outputCh:
+		t.Fatal("idle flush should not have fired while records were being added")
+	default:
+	}
+
+	// Now wait for the idle timeout to fire.
+	select {
+	case df := <-outputCh:
+		assert.Equal(t, int64(15), df.Count())
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for idle flush")
+	}
+}
+
+func TestWriterReopensAfterIdleFlush(t *testing.T) {
+	mem := memory.NewGoAllocator()
+	loc := filepath.ToSlash(t.TempDir())
+	factory := newTestWriterFactory(t, loc, testSchema, 1024*1024, 200*time.Millisecond, -1)
+	defer factory.closeAll()
+
+	outputCh := make(chan iceberg.DataFile, 10)
+	writer := factory.newRollingDataWriter(context.Background(), nil, "", nil, outputCh)
+
+	// First batch: write and let idle flush close the file.
+	record1 := buildTestRecord(t, mem, testSchema, 5)
+	require.NoError(t, writer.Add(record1))
+	record1.Release()
+
+	select {
+	case df := <-outputCh:
+		assert.Equal(t, int64(5), df.Count())
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first idle flush")
+	}
+
+	// Second batch: same writer reopens a new file automatically.
+	record2 := buildTestRecord(t, mem, testSchema, 7)
+	require.NoError(t, writer.Add(record2))
+	record2.Release()
+
+	require.NoError(t, writer.closeAndWait())
+	close(outputCh)
+
+	var dataFiles []iceberg.DataFile
+	for df := range outputCh {
+		dataFiles = append(dataFiles, df)
+	}
+
+	require.Len(t, dataFiles, 1)
+	assert.Equal(t, int64(7), dataFiles[0].Count())
+}
+
+func TestReaperCleansUpIdleWriters(t *testing.T) {
+	mem := memory.NewGoAllocator()
+	loc := filepath.ToSlash(t.TempDir())
+	factory := newTestWriterFactory(t, loc, testSchema, 1024*1024, 200*time.Millisecond, 500*time.Millisecond)
+	defer factory.closeAll()
+
+	ctx := context.Background()
+	outputCh := make(chan iceberg.DataFile, 10)
+
+	writer, err := factory.getOrCreateRollingDataWriter(ctx, nil, "part=a", nil, outputCh)
+	require.NoError(t, err)
+
+	record := buildTestRecord(t, mem, testSchema, 5)
+	require.NoError(t, writer.Add(record))
+	record.Release()
+
+	// Wait for the idle timer to flush the file.
+	select {
+	case df := <-outputCh:
+		assert.Equal(t, int64(5), df.Count())
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for idle flush")
+	}
+
+	// Writer should still be in the map right after flush.
+	_, ok := factory.writers.Load("part=a")
+	assert.True(t, ok, "writer should still be in map right after idle flush")
+
+	// Wait for the reaper to sweep.
+	assert.Eventually(t, func() bool {
+		_, ok := factory.writers.Load("part=a")
+
+		return !ok
+	}, 5*time.Second, 50*time.Millisecond, "reaper should have removed the idle writer from the map")
 }
