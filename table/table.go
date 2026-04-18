@@ -399,23 +399,11 @@ type retryConfig struct {
 
 func readRetryConfig(props iceberg.Properties) retryConfig {
 	return retryConfig{
-		numRetries:     positiveIntProp(props, CommitNumRetriesKey, CommitNumRetriesDefault),
-		minWaitMs:      positiveIntProp(props, CommitMinRetryWaitMsKey, CommitMinRetryWaitMsDefault),
-		maxWaitMs:      positiveIntProp(props, CommitMaxRetryWaitMsKey, CommitMaxRetryWaitMsDefault),
-		totalTimeoutMs: positiveIntProp(props, CommitTotalRetryTimeoutMsKey, CommitTotalRetryTimeoutMsDefault),
+		numRetries:     iceberg.PropUint(props, CommitNumRetriesKey, CommitNumRetriesDefault),
+		minWaitMs:      iceberg.PropUint(props, CommitMinRetryWaitMsKey, CommitMinRetryWaitMsDefault),
+		maxWaitMs:      iceberg.PropUint(props, CommitMaxRetryWaitMsKey, CommitMaxRetryWaitMsDefault),
+		totalTimeoutMs: iceberg.PropUint(props, CommitTotalRetryTimeoutMsKey, CommitTotalRetryTimeoutMsDefault),
 	}
-}
-
-// positiveIntProp reads an int property and returns it as uint, falling
-// back to the default when the configured value is negative. The default
-// is also non-negative, so the result is always safe to use as uint.
-func positiveIntProp(props iceberg.Properties, key string, fallback int) uint {
-	v := props.GetInt(key, fallback)
-	if v < 0 {
-		v = fallback
-	}
-
-	return uint(v)
 }
 
 // backoffDuration computes wait time for the given 0-based retry attempt

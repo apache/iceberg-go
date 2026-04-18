@@ -465,3 +465,17 @@ func TestTypeIFaceMarshalJSONNilType(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 }
+
+func TestPropUint(t *testing.T) {
+	props := iceberg.Properties{
+		"n":       "42",
+		"neg":     "-7",
+		"garbage": "not-a-number",
+	}
+
+	assert.Equal(t, uint(42), iceberg.PropUint(props, "n", 0))
+	assert.Equal(t, uint(99), iceberg.PropUint(props, "neg", 99),
+		"negative string must fall back, not wrap to a huge positive")
+	assert.Equal(t, uint(77), iceberg.PropUint(props, "garbage", 77), "falls back on parse error")
+	assert.Equal(t, uint(5), iceberg.PropUint(props, "missing", 5), "falls back on missing key")
+}
