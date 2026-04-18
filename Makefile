@@ -17,10 +17,13 @@
 # golangci-lint version (keep in sync with CI and README)
 GOLANGCI_LINT_VERSION := v2.8.0
 
-.PHONY: test lint lint-install integration-setup integration-test integration-scanner integration-io integration-rest integration-spark
+.PHONY: test lint lint-install integration-setup integration-test integration-scanner integration-io integration-rest integration-spark docs-gen
 
 test:
 	go test -v ./...
+
+docs-gen:
+	go run ./website/gen
 
 lint:
 	golangci-lint run --timeout=10m
