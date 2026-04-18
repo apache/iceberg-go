@@ -399,10 +399,10 @@ type retryConfig struct {
 
 func readRetryConfig(props iceberg.Properties) retryConfig {
 	return retryConfig{
-		numRetries:     iceberg.PropUint(props, CommitNumRetriesKey, CommitNumRetriesDefault),
-		minWaitMs:      iceberg.PropUint(props, CommitMinRetryWaitMsKey, CommitMinRetryWaitMsDefault),
-		maxWaitMs:      iceberg.PropUint(props, CommitMaxRetryWaitMsKey, CommitMaxRetryWaitMsDefault),
-		totalTimeoutMs: iceberg.PropUint(props, CommitTotalRetryTimeoutMsKey, CommitTotalRetryTimeoutMsDefault),
+		numRetries:     iceberg.PropUInt(props, CommitNumRetriesKey, CommitNumRetriesDefault),
+		minWaitMs:      iceberg.PropUInt(props, CommitMinRetryWaitMsKey, CommitMinRetryWaitMsDefault),
+		maxWaitMs:      iceberg.PropUInt(props, CommitMaxRetryWaitMsKey, CommitMaxRetryWaitMsDefault),
+		totalTimeoutMs: iceberg.PropUInt(props, CommitTotalRetryTimeoutMsKey, CommitTotalRetryTimeoutMsDefault),
 	}
 }
 

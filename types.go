@@ -71,11 +71,11 @@ func (p Properties) GetInt(key string, defVal int) int {
 	return defVal
 }
 
-// PropUint reads an unsigned-integer property by key. A missing key,
-// an unparseable value, or a negative value returns defVal — PropUint
+// PropUInt reads an unsigned-integer property by key. A missing key,
+// an unparseable value, or a negative value returns defVal — PropUInt
 // uses strconv.ParseUint, which rejects negatives rather than silently
 // wrapping them to a large positive number.
-func PropUint(p Properties, key string, defVal uint) uint {
+func PropUInt(p Properties, key string, defVal uint) uint {
 	v, ok := p[key]
 	if !ok {
 		return defVal
