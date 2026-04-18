@@ -238,16 +238,27 @@ func TestBackoffDuration_ExponentialWithJitter(t *testing.T) {
 	}
 }
 
-func TestBackoffDuration_HandlesZeroOrNegativeInputs(t *testing.T) {
-	// Should fall back to defaults rather than panic or return garbage.
+func TestBackoffDuration_HandlesZeroInputs(t *testing.T) {
+	// Zero min/max should fall back to defaults rather than return garbage.
 	d := backoffDuration(0, 0, 0)
-	assert.Equal(t, time.Duration(CommitMinRetryWaitMsDefault)*time.Millisecond, d)
-
-	d = backoffDuration(0, -1, -1)
 	assert.Equal(t, time.Duration(CommitMinRetryWaitMsDefault)*time.Millisecond, d)
 
 	// Very large attempt counts must not panic on shift; clamps to maxMs.
 	d = backoffDuration(100, 100, 60000)
 	assert.GreaterOrEqual(t, d, 100*time.Millisecond)
 	assert.LessOrEqual(t, d, 60000*time.Millisecond)
+}
+
+func TestReadRetryConfig_ClampsNegativeProperties(t *testing.T) {
+	// Negative values in properties should be replaced with defaults.
+	cfg := readRetryConfig(iceberg.Properties{
+		CommitNumRetriesKey:          "-1",
+		CommitMinRetryWaitMsKey:      "-100",
+		CommitMaxRetryWaitMsKey:      "-1000",
+		CommitTotalRetryTimeoutMsKey: "-5",
+	})
+	assert.Equal(t, uint(CommitNumRetriesDefault), cfg.numRetries)
+	assert.Equal(t, uint(CommitMinRetryWaitMsDefault), cfg.minWaitMs)
+	assert.Equal(t, uint(CommitMaxRetryWaitMsDefault), cfg.maxWaitMs)
+	assert.Equal(t, uint(CommitTotalRetryTimeoutMsDefault), cfg.totalTimeoutMs)
 }

@@ -345,7 +345,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 
 	for attempt := range totalAttempts {
 		if attempt != 0 {
-			wait := backoffDuration(uint(attempt-1), cfg.minWaitMs, cfg.maxWaitMs)
+			wait := backoffDuration(attempt-1, cfg.minWaitMs, cfg.maxWaitMs)
 			if timer == nil {
 				timer = time.NewTimer(wait)
 			} else {
@@ -391,24 +391,31 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 }
 
 type retryConfig struct {
-	numRetries     int
-	minWaitMs      int
-	maxWaitMs      int
-	totalTimeoutMs int
+	numRetries     uint
+	minWaitMs      uint
+	maxWaitMs      uint
+	totalTimeoutMs uint
 }
 
 func readRetryConfig(props iceberg.Properties) retryConfig {
-	cfg := retryConfig{
-		numRetries:     props.GetInt(CommitNumRetriesKey, CommitNumRetriesDefault),
-		minWaitMs:      props.GetInt(CommitMinRetryWaitMsKey, CommitMinRetryWaitMsDefault),
-		maxWaitMs:      props.GetInt(CommitMaxRetryWaitMsKey, CommitMaxRetryWaitMsDefault),
-		totalTimeoutMs: props.GetInt(CommitTotalRetryTimeoutMsKey, CommitTotalRetryTimeoutMsDefault),
+	return retryConfig{
+		numRetries:     positiveIntProp(props, CommitNumRetriesKey, CommitNumRetriesDefault),
+		minWaitMs:      positiveIntProp(props, CommitMinRetryWaitMsKey, CommitMinRetryWaitMsDefault),
+		maxWaitMs:      positiveIntProp(props, CommitMaxRetryWaitMsKey, CommitMaxRetryWaitMsDefault),
+		totalTimeoutMs: positiveIntProp(props, CommitTotalRetryTimeoutMsKey, CommitTotalRetryTimeoutMsDefault),
 	}
-	if cfg.numRetries < 0 {
-		cfg.numRetries = 0
+}
+
+// positiveIntProp reads an int property and returns it as uint, falling
+// back to the default when the configured value is negative. The default
+// is also non-negative, so the result is always safe to use as uint.
+func positiveIntProp(props iceberg.Properties, key string, fallback int) uint {
+	v := props.GetInt(key, fallback)
+	if v < 0 {
+		v = fallback
 	}
 
-	return cfg
+	return uint(v)
 }
 
 // backoffDuration computes wait time for the given 0-based retry attempt
@@ -418,11 +425,14 @@ func readRetryConfig(props iceberg.Properties) retryConfig {
 // exponential backoff here; we add jitter to reduce stampede risk on
 // concurrent Go writers. Backoff is client-local, so this does not
 // affect cross-client interop.
-func backoffDuration(attempt uint, minMs, maxMs int) time.Duration {
-	if minMs <= 0 {
+//
+// Inputs are trusted: readRetryConfig is responsible for normalizing
+// user-supplied properties (negatives, zero, min > max).
+func backoffDuration(attempt, minMs, maxMs uint) time.Duration {
+	if minMs == 0 {
 		minMs = CommitMinRetryWaitMsDefault
 	}
-	if maxMs <= 0 {
+	if maxMs == 0 {
 		maxMs = CommitMaxRetryWaitMsDefault
 	}
 	if minMs > maxMs {
