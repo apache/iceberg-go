@@ -47,6 +47,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"go/parser"
 	"go/token"
@@ -88,6 +89,7 @@ func main() {
 
 	if len(concepts) == 0 {
 		fmt.Fprintf(os.Stderr, "gen: no example_*_test.go files with %q header — nothing to do\n", marker)
+
 		return
 	}
 
@@ -98,6 +100,7 @@ func main() {
 		if concepts[i].Order != concepts[j].Order {
 			return concepts[i].Order < concepts[j].Order
 		}
+
 		return concepts[i].Title < concepts[j].Title
 	})
 
@@ -137,6 +140,7 @@ func sectionRank(all []concept, section string) int {
 			min = c.Order
 		}
 	}
+
 	return min
 }
 
@@ -184,6 +188,7 @@ func parseFile(root, path string) (concept, bool, error) {
 		txt := cg.Text()
 		if strings.HasPrefix(strings.TrimSpace(txt), marker) {
 			block = txt
+
 			break
 		}
 	}
@@ -205,6 +210,7 @@ func parseFile(root, path string) (concept, bool, error) {
 		line := lines[i]
 		if strings.TrimSpace(line) == "" {
 			i++
+
 			break
 		}
 		k, v, ok := strings.Cut(line, ":")
@@ -222,10 +228,10 @@ func parseFile(root, path string) (concept, bool, error) {
 		Prose:   prose,
 	}
 	if c.Title == "" {
-		return concept{}, false, fmt.Errorf("missing title")
+		return concept{}, false, errors.New("missing title")
 	}
 	if c.Section == "" {
-		return concept{}, false, fmt.Errorf("missing section")
+		return concept{}, false, errors.New("missing section")
 	}
 	if o := meta["order"]; o != "" {
 		n, err := strconv.Atoi(o)
@@ -251,7 +257,7 @@ func parseFile(root, path string) (concept, bool, error) {
 	}
 	c.Anchors = extractAnchors(raw)
 	if len(c.Anchors) == 0 {
-		return concept{}, false, fmt.Errorf("no ANCHOR markers found")
+		return concept{}, false, errors.New("no ANCHOR markers found")
 	}
 
 	return c, true, nil
@@ -404,7 +410,7 @@ func findRepoRoot() (string, error) {
 		}
 		parent := filepath.Dir(wd)
 		if parent == wd {
-			return "", fmt.Errorf("go.mod not found in any parent directory")
+			return "", errors.New("go.mod not found in any parent directory")
 		}
 		wd = parent
 	}
