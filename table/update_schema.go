@@ -633,7 +633,7 @@ func (u *UpdateSchema) BuildUpdates() ([]Update, []Requirement, error) {
 		if existingSchemaID == -1 {
 			updates = append(
 				updates,
-				NewAddSchemaUpdate(newSchema),
+				NewAddSchemaUpdate(newSchema, u.lastColumnID),
 				NewSetCurrentSchemaUpdate(newSchema.ID),
 			)
 		} else {

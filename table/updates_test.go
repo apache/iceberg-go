@@ -430,6 +430,27 @@ func buildFromBase(t *testing.T) *MetadataBuilder {
 	return b
 }
 
+func TestAddSchemaUpdate_LastColumnId(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "x", Type: iceberg.PrimitiveTypes.Int64},
+	)
+
+	// Without lastColumnID — field should be absent from JSON.
+	uNoID := NewAddSchemaUpdate(schema)
+	assert.Nil(t, uNoID.LastColumnId)
+	data, err := json.Marshal(uNoID)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "last-column-id")
+
+	// With lastColumnID — field must appear in JSON.
+	uWithID := NewAddSchemaUpdate(schema, 42)
+	require.NotNil(t, uWithID.LastColumnId)
+	assert.Equal(t, 42, *uWithID.LastColumnId)
+	data, err = json.Marshal(uWithID)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"last-column-id":42`)
+}
+
 func TestSetStatisticsUpdate_Unmarshal(t *testing.T) {
 	data := []byte(`[{
 		"action": "set-statistics",
