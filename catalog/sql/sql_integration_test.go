@@ -320,6 +320,60 @@ func (s *SQLIntegrationSuite) TestWriteCommitTable() {
 	s.Equal(pqfile, entries[0].DataFile().FilePath())
 }
 
+func (s *SQLIntegrationSuite) TestMultiTableTransaction() {
+	s.ensureNamespace()
+
+	// Create two tables.
+	tbl1, err := s.cat.CreateTable(s.ctx,
+		catalog.ToIdentifier(TestNamespaceIdent, "mtx-table-1"),
+		tableSchemaSimple, catalog.WithLocation(location))
+	s.Require().NoError(err)
+	s.Require().NotNil(tbl1)
+
+	tbl2, err := s.cat.CreateTable(s.ctx,
+		catalog.ToIdentifier(TestNamespaceIdent, "mtx-table-2"),
+		tableSchemaSimple, catalog.WithLocation(location))
+	s.Require().NoError(err)
+	s.Require().NotNil(tbl2)
+
+	defer func() {
+		s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "mtx-table-1")))
+		s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "mtx-table-2")))
+	}()
+
+	// Build a multi-table transaction using the high-level API.
+	mtx, err := catalog.NewMultiTableTransaction(s.cat)
+	s.Require().NoError(err)
+
+	tx1 := tbl1.NewTransaction()
+	s.Require().NoError(tx1.SetProperties(map[string]string{"pipeline": "v2", "owner": "team-a"}))
+	s.Require().NoError(mtx.AddTransaction(tx1))
+
+	tx2 := tbl2.NewTransaction()
+	s.Require().NoError(tx2.SetProperties(map[string]string{"pipeline": "v2", "owner": "team-b"}))
+	s.Require().NoError(mtx.AddTransaction(tx2))
+
+	// CommitAndReload commits atomically and reloads both tables.
+	tables, err := mtx.CommitAndReload(s.ctx)
+	s.Require().NoError(err)
+	s.Require().Len(tables, 2)
+
+	// Verify both tables have the new properties.
+	s.Equal("v2", tables[0].Properties()["pipeline"])
+	s.Equal("team-a", tables[0].Properties()["owner"])
+	s.Equal("v2", tables[1].Properties()["pipeline"])
+	s.Equal("team-b", tables[1].Properties()["owner"])
+
+	// Also verify via independent LoadTable calls.
+	loaded1, err := s.cat.LoadTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "mtx-table-1"))
+	s.Require().NoError(err)
+	s.Equal("v2", loaded1.Properties()["pipeline"])
+
+	loaded2, err := s.cat.LoadTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "mtx-table-2"))
+	s.Require().NoError(err)
+	s.Equal("v2", loaded2.Properties()["pipeline"])
+}
+
 func TestSQLIntegration(t *testing.T) {
 	suite.Run(t, new(SQLIntegrationSuite))
 }
