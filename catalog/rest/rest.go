@@ -632,6 +632,12 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		session.defaultHeaders.Set(k, v)
 	}
 
+	for k, v := range opts.additionalProps {
+		if headerKey, found := strings.CutPrefix(k, "header."); found {
+			session.defaultHeaders.Set(headerKey, v)
+		}
+	}
+
 	if opts.authManager != nil {
 		session.authManager = opts.authManager
 	}

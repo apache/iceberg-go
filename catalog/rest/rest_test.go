@@ -291,6 +291,32 @@ func (r *RestCatalogSuite) TestWithHeaders() {
 	}
 }
 
+func (r *RestCatalogSuite) TestAdditionalPropsHeaderPrefix() {
+	// Properties prefixed with "header." should be applied as HTTP headers on
+	// every request, including the initial /v1/config call (needed for e.g.
+	// Google BigLake which requires x-goog-user-project on the config call).
+	namespace := "examples"
+	customHeaderValue := "my-project"
+
+	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+		r.Equal(customHeaderValue, req.Header.Get("x-goog-user-project"))
+		json.NewEncoder(w).Encode(map[string]any{"identifiers": []any{}})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithOAuthToken(TestToken),
+		rest.WithAdditionalProps(iceberg.Properties{
+			"header.x-goog-user-project": customHeaderValue,
+		}))
+	r.Require().NoError(err)
+
+	iter := cat.ListTables(context.Background(), catalog.ToIdentifier(namespace))
+	for _, err := range iter {
+		r.Require().NoError(err)
+	}
+}
+
 func (r *RestCatalogSuite) TestWithHeadersOnOAuthRoute() {
 	customHeaders := map[string]string{
 		"X-Custom-Header": "custom-value",
