@@ -71,6 +71,23 @@ func (p Properties) GetInt(key string, defVal int) int {
 	return defVal
 }
 
+// PropUInt reads an unsigned-integer property by key. A missing key,
+// an unparseable value, or a negative value returns defVal — PropUInt
+// uses strconv.ParseUint, which rejects negatives rather than silently
+// wrapping them to a large positive number.
+func PropUInt(p Properties, key string, defVal uint) uint {
+	v, ok := p[key]
+	if !ok {
+		return defVal
+	}
+	n, err := strconv.ParseUint(v, 10, 64)
+	if err != nil {
+		return defVal
+	}
+
+	return uint(n)
+}
+
 // Type is an interface representing any of the available iceberg types,
 // such as primitives (int32/int64/etc.) or nested types (list/struct/map).
 type Type interface {
