@@ -365,6 +365,57 @@ func TestCanTransform(t *testing.T) {
 	}
 }
 
+func TestHourTransformPreEpoch(t *testing.T) {
+	const microsecondsPerHour = int64(time.Hour / time.Microsecond)
+
+	tests := []struct {
+		name     string
+		micros   int64
+		expected int32
+	}{
+		// post-epoch sanity checks
+		{"epoch", 0, 0},
+		{"1us after epoch", 1, 0},
+		{"exactly 1 hour", microsecondsPerHour, 1},
+		{"1.5 hours", microsecondsPerHour + microsecondsPerHour/2, 1},
+
+		// pre-epoch: the bug produced 0 for all of these
+		{"1us before epoch", -1, -1},
+		{"half hour before epoch", -microsecondsPerHour / 2, -1},
+		{"exactly 1 hour before epoch", -microsecondsPerHour, -1},
+		{"1us more than 1 hour before epoch", -microsecondsPerHour - 1, -2},
+		{"exactly 2 hours before epoch", -2 * microsecondsPerHour, -2},
+	}
+
+	transform := iceberg.HourTransform{}
+
+	t.Run("Transformer", func(t *testing.T) {
+		fn, err := transform.Transformer(iceberg.PrimitiveTypes.Timestamp)
+		require.NoError(t, err)
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				result := fn(iceberg.Timestamp(tt.micros))
+				require.True(t, result.Valid)
+				assert.Equal(t, tt.expected, result.Val)
+			})
+		}
+	})
+
+	t.Run("Apply", func(t *testing.T) {
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				result := transform.Apply(iceberg.Optional[iceberg.Literal]{
+					Valid: true,
+					Val:   iceberg.TimestampLiteral(tt.micros),
+				})
+				require.True(t, result.Valid)
+				assert.Equal(t, iceberg.Int32Literal(tt.expected), result.Val)
+			})
+		}
+	})
+}
+
 func TestTruncateTransform(t *testing.T) {
 	tests := []struct {
 		width    int
