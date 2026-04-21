@@ -215,7 +215,7 @@ func (t Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConfi
 	if cfg.dryRun {
 		return result, nil
 	}
-	deletedFiles, err := deleteFiles(ctx, fs, orphanFiles, cfg)
+	deletedFiles, err := deleteFiles(fs, orphanFiles, cfg)
 	if err != nil {
 		return OrphanCleanupResult{}, fmt.Errorf("failed to delete orphan files: %w", err)
 	}
@@ -309,6 +309,7 @@ func (t Table) scanFiles(fs iceio.IO, location string, cfg *orphanCleanupConfig)
 }
 
 func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {
+	// Prefer ListableIO when available.
 	if listable, ok := fsys.(iceio.ListableIO); ok {
 		return listable.WalkDir(root, func(path string, d stdfs.DirEntry, err error) error {
 			if err != nil {
@@ -328,21 +329,49 @@ func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.F
 		})
 	}
 
-	// Fallback: reflect-based access for IO implementations that don't
-	// yet implement ListableIO (e.g. blob storage).
-	bucket := getBucket(fsys)
+	// Fallback to original implementation for IO types that don't
+	// implement ListableIO yet.
+	switch v := fsys.(type) {
+	case iceio.LocalFS:
+		cleanRoot := strings.TrimPrefix(root, "file://")
+		if cleanRoot == "" {
+			cleanRoot = "."
+		}
 
-	parsed, err := url.Parse(root)
-	if err != nil {
-		return fmt.Errorf("invalid URL %s: %w", root, err)
+		return filepath.WalkDir(cleanRoot, makeFileWalkFunc(fn, func(path string) string {
+			return path
+		}))
+
+	default:
+		// For blob storage: direct field access since we know the structure.
+		bucket := getBucketName(v)
+
+		parsed, err := url.Parse(root)
+		if err != nil {
+			return fmt.Errorf("invalid URL %s: %w", root, err)
+		}
+
+		walkPath := strings.TrimPrefix(parsed.Path, "/")
+		if walkPath == "" {
+			walkPath = "."
+		}
+
+		return stdfs.WalkDir(bucket, walkPath, makeFileWalkFunc(fn, func(path string) string {
+			return parsed.Scheme + "://" + parsed.Host + "/" + path
+		}))
 	}
+}
 
-	walkPath := strings.TrimPrefix(parsed.Path, "/")
-	if walkPath == "" {
-		walkPath = "."
-	}
+// getBucketName gets the Bucket field from blob storage - absolute minimal approach.
+func getBucketName(fsys iceio.IO) stdfs.FS {
+	v := reflect.ValueOf(fsys).Elem()
 
-	return stdfs.WalkDir(bucket, walkPath, func(path string, d stdfs.DirEntry, err error) error {
+	return v.FieldByName("Bucket").Interface().(stdfs.FS)
+}
+
+// makeFileWalkFunc creates a WalkDirFunc that processes only files with path transformation.
+func makeFileWalkFunc(fn func(path string, info stdfs.FileInfo) error, pathTransform func(string) string) stdfs.WalkDirFunc {
+	return func(path string, d stdfs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -356,17 +385,8 @@ func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.F
 			return err
 		}
 
-		return fn(parsed.Scheme+"://"+parsed.Host+"/"+path, info)
-	})
-}
-
-// getBucket extracts the Bucket field from blob storage IO implementations
-// via reflect. This is a temporary fallback until all IO implementations
-// implement ListableIO.
-func getBucket(fsys iceio.IO) stdfs.FS {
-	v := reflect.ValueOf(fsys).Elem()
-
-	return v.FieldByName("Bucket").Interface().(stdfs.FS)
+		return fn(pathTransform(path), info)
+	}
 }
 
 func identifyOrphanFiles(allFiles []string, referencedFiles map[string]bool, cfg *orphanCleanupConfig) ([]string, error) {
@@ -413,16 +433,9 @@ func isFileOrphan(file string, referencedFiles map[string]bool, normalizedRefere
 	return true, nil
 }
 
-func deleteFiles(ctx context.Context, fs iceio.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
+func deleteFiles(fs iceio.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
 	if len(orphanFiles) == 0 {
 		return nil, nil
-	}
-
-	// Use bulk delete when available and no custom deleteFunc is set.
-	if cfg.deleteFunc == nil {
-		if bulk, ok := fs.(iceio.BulkRemovableIO); ok {
-			return bulk.DeleteFiles(ctx, orphanFiles)
-		}
 	}
 
 	if cfg.maxConcurrency == 1 {

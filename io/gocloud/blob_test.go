@@ -26,8 +26,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	icebergio "github.com/apache/iceberg-go/io"
-
 	"gocloud.dev/blob/memblob"
 )
 
@@ -306,77 +304,4 @@ func TestBlobFileIOWalkDirAzureURI(t *testing.T) {
 		"abfs://container@account.dfs.core.windows.net/path/to/file.parquet",
 	}
 	assert.Equal(t, expected, walked)
-}
-
-func TestBlobFileIOImplementsBulkRemovableIO(t *testing.T) {
-	bucket := memblob.OpenBucket(nil)
-	defer bucket.Close()
-
-	bfs := createBlobFS(context.Background(), bucket, defaultKeyExtractor("test-bucket"))
-
-	_, ok := bfs.(icebergio.BulkRemovableIO)
-	assert.True(t, ok, "blobFileIO should implement BulkRemovableIO")
-}
-
-func TestBlobFileIODeleteFiles(t *testing.T) {
-	ctx := context.Background()
-	bucket := memblob.OpenBucket(nil)
-	defer bucket.Close()
-
-	// Write test files.
-	require.NoError(t, bucket.WriteAll(ctx, "data/file1.parquet", []byte("data1"), nil))
-	require.NoError(t, bucket.WriteAll(ctx, "data/file2.parquet", []byte("data2"), nil))
-	require.NoError(t, bucket.WriteAll(ctx, "data/file3.parquet", []byte("data3"), nil))
-
-	bfs := createBlobFS(ctx, bucket, defaultKeyExtractor("test-bucket"))
-	bulk := bfs.(icebergio.BulkRemovableIO)
-
-	deleted, err := bulk.DeleteFiles(ctx, []string{
-		"s3://test-bucket/data/file1.parquet",
-		"s3://test-bucket/data/file2.parquet",
-	})
-	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{
-		"s3://test-bucket/data/file1.parquet",
-		"s3://test-bucket/data/file2.parquet",
-	}, deleted)
-
-	// file3 should still exist.
-	exists, err := bucket.Exists(ctx, "data/file3.parquet")
-	require.NoError(t, err)
-	assert.True(t, exists)
-
-	// file1 should be gone.
-	exists, err = bucket.Exists(ctx, "data/file1.parquet")
-	require.NoError(t, err)
-	assert.False(t, exists)
-}
-
-func TestBlobFileIODeleteFilesMissingFilesAreNotErrors(t *testing.T) {
-	ctx := context.Background()
-	bucket := memblob.OpenBucket(nil)
-	defer bucket.Close()
-
-	bfs := createBlobFS(ctx, bucket, defaultKeyExtractor("test-bucket"))
-	bulk := bfs.(icebergio.BulkRemovableIO)
-
-	// Deleting non-existent files should succeed.
-	deleted, err := bulk.DeleteFiles(ctx, []string{
-		"s3://test-bucket/data/nonexistent.parquet",
-	})
-	require.NoError(t, err)
-	assert.Equal(t, []string{"s3://test-bucket/data/nonexistent.parquet"}, deleted)
-}
-
-func TestBlobFileIODeleteFilesEmpty(t *testing.T) {
-	ctx := context.Background()
-	bucket := memblob.OpenBucket(nil)
-	defer bucket.Close()
-
-	bfs := createBlobFS(ctx, bucket, defaultKeyExtractor("test-bucket"))
-	bulk := bfs.(icebergio.BulkRemovableIO)
-
-	deleted, err := bulk.DeleteFiles(ctx, nil)
-	require.NoError(t, err)
-	assert.Nil(t, deleted)
 }

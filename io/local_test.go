@@ -90,9 +90,3 @@ func TestLocalFSWalkDirWithFileScheme(t *testing.T) {
 func TestLocalFSImplementsListableIO(t *testing.T) {
 	var _ ListableIO = LocalFS{}
 }
-
-func TestLocalFSDoesNotImplementBulkRemovableIO(t *testing.T) {
-	var fs IO = LocalFS{}
-	_, ok := fs.(BulkRemovableIO)
-	assert.False(t, ok, "LocalFS should not implement BulkRemovableIO")
-}
