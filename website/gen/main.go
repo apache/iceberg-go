@@ -278,6 +278,7 @@ func extractAnchors(src []byte) []string {
 			out = append(out, name)
 		}
 	}
+
 	return out
 }
 
@@ -296,6 +297,7 @@ func slugify(s string) string {
 			}
 		}
 	}
+
 	return strings.TrimRight(b.String(), "-")
 }
 
@@ -326,6 +328,7 @@ func renderPage(c concept) string {
 	}
 
 	fmt.Fprintf(&b, "[View source on GitHub](%s%s)\n", githubBase, c.SrcRel)
+
 	return b.String()
 }
 
@@ -337,6 +340,7 @@ func titleCase(anchor string) string {
 		}
 		parts[i] = strings.ToUpper(p[:1]) + p[1:]
 	}
+
 	return strings.Join(parts, " ")
 }
 
@@ -359,6 +363,7 @@ func pruneStale(dir string, keep map[string]bool) error {
 			}
 		}
 	}
+
 	return nil
 }
 
