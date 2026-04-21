@@ -93,7 +93,7 @@ Options:
   --location-uri TEXT  	specify a location URI for the namespace
   --schema JSON        	specify table schema in json (for create table use only)
                        	Ex: [{"name":"id","type":"int","required":false,"doc":"unique id"}]
-  --schema-from-file FILE  infer table schema from a local data file (for create table use only)
+  --infer-schema FILE  infer table schema from a local data file (for create table use only)
                        	Supported formats: parquet
   --properties TEXT 	specify table properties in key=value format (for create table use only)
 						Ex:"format-version=2,write.format.default=parquet"
@@ -148,7 +148,7 @@ type Config struct {
 	Description     string `docopt:"--description"`
 	LocationURI     string `docopt:"--location-uri"`
 	SchemaStr       string `docopt:"--schema"`
-	SchemaFromFile  string `docopt:"--schema-from-file"`
+	InferSchema  string `docopt:"--infer-schema"`
 	TableProps      string `docopt:"--properties"`
 	PartitionSpec   string `docopt:"--partition-spec"`
 	SortOrder       string `docopt:"--sort-order"`
@@ -316,8 +316,8 @@ func main() {
 			}
 			output.Text("Namespace " + cfg.Ident + " created successfully")
 		case cfg.Table:
-			if cfg.SchemaStr != "" && cfg.SchemaFromFile != "" {
-				output.Error(errors.New("--schema and --schema-from-file are mutually exclusive"))
+			if cfg.SchemaStr != "" && cfg.InferSchema != "" {
+				output.Error(errors.New("--schema and --infer-schema are mutually exclusive"))
 				os.Exit(1)
 			}
 
@@ -332,19 +332,19 @@ func main() {
 					output.Error(err)
 					os.Exit(1)
 				}
-			case cfg.SchemaFromFile != "":
+			case cfg.InferSchema != "":
 				var err error
 
-				schema, err = schemaFromFile(cfg.SchemaFromFile)
+				schema, err = schemaFromFile(cfg.InferSchema)
 				if err != nil {
 					output.Error(err)
 					os.Exit(1)
 				}
 
-				output.Text("Inferred schema from " + cfg.SchemaFromFile + ":")
+				output.Text("Inferred schema from " + cfg.InferSchema + ":")
 				output.Schema(schema)
 			default:
-				output.Error(errors.New("missing --schema or --schema-from-file for table creation"))
+				output.Error(errors.New("missing --schema or --infer-schema for table creation"))
 				os.Exit(1)
 			}
 
