@@ -23,8 +23,12 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/file"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/glue"
@@ -89,6 +93,8 @@ Options:
   --location-uri TEXT  	specify a location URI for the namespace
   --schema JSON        	specify table schema in json (for create table use only)
                        	Ex: [{"name":"id","type":"int","required":false,"doc":"unique id"}]
+  --schema-from-file FILE  infer table schema from a local data file (for create table use only)
+                       	Supported formats: parquet
   --properties TEXT 	specify table properties in key=value format (for create table use only)
 						Ex:"format-version=2,write.format.default=parquet"
   --partition-spec TEXT specify partition spec as comma-separated field names(for create table use only)
@@ -142,6 +148,7 @@ type Config struct {
 	Description     string `docopt:"--description"`
 	LocationURI     string `docopt:"--location-uri"`
 	SchemaStr       string `docopt:"--schema"`
+	SchemaFromFile  string `docopt:"--schema-from-file"`
 	TableProps      string `docopt:"--properties"`
 	PartitionSpec   string `docopt:"--partition-spec"`
 	SortOrder       string `docopt:"--sort-order"`
@@ -309,14 +316,35 @@ func main() {
 			}
 			output.Text("Namespace " + cfg.Ident + " created successfully")
 		case cfg.Table:
-			if cfg.SchemaStr == "" {
-				output.Error(errors.New("missing --schema for table creation"))
+			if cfg.SchemaStr != "" && cfg.SchemaFromFile != "" {
+				output.Error(errors.New("--schema and --schema-from-file are mutually exclusive"))
 				os.Exit(1)
 			}
 
-			schema, err := iceberg.NewSchemaFromJsonFields(0, cfg.SchemaStr)
-			if err != nil {
-				output.Error(err)
+			var schema *iceberg.Schema
+
+			switch {
+			case cfg.SchemaStr != "":
+				var err error
+
+				schema, err = iceberg.NewSchemaFromJsonFields(0, cfg.SchemaStr)
+				if err != nil {
+					output.Error(err)
+					os.Exit(1)
+				}
+			case cfg.SchemaFromFile != "":
+				var err error
+
+				schema, err = schemaFromFile(cfg.SchemaFromFile)
+				if err != nil {
+					output.Error(err)
+					os.Exit(1)
+				}
+
+				output.Text("Inferred schema from " + cfg.SchemaFromFile + ":")
+				output.Schema(schema)
+			default:
+				output.Error(errors.New("missing --schema or --schema-from-file for table creation"))
 				os.Exit(1)
 			}
 
@@ -551,4 +579,54 @@ func mergeConf(fileConf *config.CatalogConfig, resConfig *Config, explicitFlags 
 	if !explicitFlags["warehouse"] && len(fileConf.Warehouse) > 0 {
 		resConfig.Warehouse = fileConf.Warehouse
 	}
+}
+
+func schemaFromFile(path string) (*iceberg.Schema, error) {
+	ext := strings.ToLower(filepath.Ext(path))
+
+	switch ext {
+	case ".parquet", ".parq":
+		return schemaFromParquetFile(path)
+	default:
+		return nil, fmt.Errorf("unsupported file format %q for %q: only .parquet files are currently supported", ext, path)
+	}
+}
+
+func schemaFromParquetFile(path string) (*iceberg.Schema, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file: %w", err)
+	}
+
+	pqReader, err := file.NewParquetReader(f)
+	if err != nil {
+		f.Close()
+
+		return nil, fmt.Errorf("failed to read parquet file: %w", err)
+	}
+	defer pqReader.Close() // also closes underlying file
+
+	arrowReader, err := pqarrow.NewFileReader(pqReader, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read parquet schema: %w", err)
+	}
+
+	arrowSchema, err := arrowReader.Schema()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get arrow schema: %w", err)
+	}
+
+	// Prefer existing field IDs from the Parquet file (written by Iceberg-aware
+	// tools like Spark or PyIceberg). Fall back to fresh sequential IDs only
+	// when the error is specifically about missing field IDs.
+	schema, err := table.ArrowSchemaToIceberg(arrowSchema, true, nil)
+	if err != nil {
+		if errors.Is(err, iceberg.ErrInvalidSchema) && strings.Contains(err.Error(), "field-id") {
+			return table.ArrowSchemaToIcebergWithFreshIDs(arrowSchema, true)
+		}
+
+		return nil, fmt.Errorf("failed to convert parquet schema to iceberg: %w", err)
+	}
+
+	return schema, nil
 }
