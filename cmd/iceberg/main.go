@@ -148,7 +148,7 @@ type Config struct {
 	Description     string `docopt:"--description"`
 	LocationURI     string `docopt:"--location-uri"`
 	SchemaStr       string `docopt:"--schema"`
-	InferSchema  string `docopt:"--infer-schema"`
+	InferSchema     string `docopt:"--infer-schema"`
 	TableProps      string `docopt:"--properties"`
 	PartitionSpec   string `docopt:"--partition-spec"`
 	SortOrder       string `docopt:"--sort-order"`
