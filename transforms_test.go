@@ -416,6 +416,163 @@ func TestHourTransformPreEpoch(t *testing.T) {
 	})
 }
 
+func TestDayTransformPreEpoch(t *testing.T) {
+	const microsecondsPerDay = int64((time.Hour * 24) / time.Microsecond)
+
+	tests := []struct {
+		name     string
+		micros   int64
+		expected int32
+	}{
+		// post-epoch sanity checks
+		{"epoch", 0, 0},
+		{"1us after epoch", 1, 0},
+		{"exactly 1 day", microsecondsPerDay, 1},
+		{"1.5 days", microsecondsPerDay + microsecondsPerDay/2, 1},
+
+		// pre-epoch: truncated division would produce 0 for these
+		{"1us before epoch", -1, -1},
+		{"half day before epoch", -microsecondsPerDay / 2, -1},
+		{"exactly 1 day before epoch", -microsecondsPerDay, -1},
+		{"1us more than 1 day before epoch", -microsecondsPerDay - 1, -2},
+		{"exactly 2 days before epoch", -2 * microsecondsPerDay, -2},
+	}
+
+	transform := iceberg.DayTransform{}
+
+	t.Run("Transformer", func(t *testing.T) {
+		fn, err := transform.Transformer(iceberg.PrimitiveTypes.Timestamp)
+		require.NoError(t, err)
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				result := fn(iceberg.Timestamp(tt.micros))
+				require.True(t, result.Valid)
+				assert.Equal(t, tt.expected, result.Val)
+			})
+		}
+	})
+
+	t.Run("Apply", func(t *testing.T) {
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				result := transform.Apply(iceberg.Optional[iceberg.Literal]{
+					Valid: true,
+					Val:   iceberg.TimestampLiteral(tt.micros),
+				})
+				require.True(t, result.Valid)
+				assert.Equal(t, iceberg.Int32Literal(tt.expected), result.Val)
+			})
+		}
+	})
+}
+
+func TestHourTransformNanoseconds(t *testing.T) {
+	const nanosecondsPerHour = int64(time.Hour)
+
+	tests := []struct {
+		name     string
+		nanos    int64
+		expected int32
+	}{
+		{"epoch", 0, 0},
+		{"1ns after epoch", 1, 0},
+		{"exactly 1 hour", nanosecondsPerHour, 1},
+		{"1.5 hours", nanosecondsPerHour + nanosecondsPerHour/2, 1},
+		{"1ns before epoch", -1, -1},
+		{"half hour before epoch", -nanosecondsPerHour / 2, -1},
+		{"exactly 1 hour before epoch", -nanosecondsPerHour, -1},
+		{"1ns more than 1 hour before epoch", -nanosecondsPerHour - 1, -2},
+		{"exactly 2 hours before epoch", -2 * nanosecondsPerHour, -2},
+	}
+
+	transform := iceberg.HourTransform{}
+
+	for _, srcType := range []iceberg.Type{
+		iceberg.PrimitiveTypes.TimestampNs,
+		iceberg.PrimitiveTypes.TimestampTzNs,
+	} {
+		t.Run("Transformer/"+srcType.String(), func(t *testing.T) {
+			fn, err := transform.Transformer(srcType)
+			require.NoError(t, err)
+
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					result := fn(iceberg.TimestampNano(tt.nanos))
+					require.True(t, result.Valid)
+					assert.Equal(t, tt.expected, result.Val)
+				})
+			}
+		})
+	}
+
+	t.Run("Apply", func(t *testing.T) {
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				result := transform.Apply(iceberg.Optional[iceberg.Literal]{
+					Valid: true,
+					Val:   iceberg.TimestampNsLiteral(tt.nanos),
+				})
+				require.True(t, result.Valid)
+				assert.Equal(t, iceberg.Int32Literal(tt.expected), result.Val)
+			})
+		}
+	})
+}
+
+func TestDayTransformNanoseconds(t *testing.T) {
+	const nanosecondsPerDay = int64(time.Hour * 24)
+
+	tests := []struct {
+		name     string
+		nanos    int64
+		expected int32
+	}{
+		{"epoch", 0, 0},
+		{"1ns after epoch", 1, 0},
+		{"exactly 1 day", nanosecondsPerDay, 1},
+		{"1.5 days", nanosecondsPerDay + nanosecondsPerDay/2, 1},
+		{"1ns before epoch", -1, -1},
+		{"half day before epoch", -nanosecondsPerDay / 2, -1},
+		{"exactly 1 day before epoch", -nanosecondsPerDay, -1},
+		{"1ns more than 1 day before epoch", -nanosecondsPerDay - 1, -2},
+		{"exactly 2 days before epoch", -2 * nanosecondsPerDay, -2},
+	}
+
+	transform := iceberg.DayTransform{}
+
+	for _, srcType := range []iceberg.Type{
+		iceberg.PrimitiveTypes.TimestampNs,
+		iceberg.PrimitiveTypes.TimestampTzNs,
+	} {
+		t.Run("Transformer/"+srcType.String(), func(t *testing.T) {
+			fn, err := transform.Transformer(srcType)
+			require.NoError(t, err)
+
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					result := fn(iceberg.TimestampNano(tt.nanos))
+					require.True(t, result.Valid)
+					assert.Equal(t, tt.expected, result.Val)
+				})
+			}
+		})
+	}
+
+	t.Run("Apply", func(t *testing.T) {
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				result := transform.Apply(iceberg.Optional[iceberg.Literal]{
+					Valid: true,
+					Val:   iceberg.TimestampNsLiteral(tt.nanos),
+				})
+				require.True(t, result.Valid)
+				assert.Equal(t, iceberg.Int32Literal(tt.expected), result.Val)
+			})
+		}
+	})
+}
+
 func TestTruncateTransform(t *testing.T) {
 	tests := []struct {
 		width    int
