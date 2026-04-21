@@ -157,6 +157,7 @@ func discover(root string) ([]concept, error) {
 			if name == "vendor" || name == "node_modules" || name == ".git" || name == "book" {
 				return filepath.SkipDir
 			}
+
 			return nil
 		}
 		if !strings.HasPrefix(d.Name(), "example_") || !strings.HasSuffix(d.Name(), "_test.go") {
@@ -169,8 +170,10 @@ func discover(root string) ([]concept, error) {
 		if ok {
 			out = append(out, c)
 		}
+
 		return nil
 	})
+
 	return out, err
 }
 
