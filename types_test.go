@@ -45,6 +45,7 @@ func TestTypesBasic(t *testing.T) {
 		{"uuid", iceberg.PrimitiveTypes.UUID},
 		{"binary", iceberg.PrimitiveTypes.Binary},
 		{"unknown", iceberg.PrimitiveTypes.Unknown},
+		{"variant", iceberg.PrimitiveTypes.Variant},
 		{"fixed[5]", iceberg.FixedTypeOf(5)},
 		{"decimal(9, 4)", iceberg.DecimalTypeOf(9, 4)},
 	}
@@ -189,6 +190,7 @@ var NonParameterizedTypes = []iceberg.Type{
 	iceberg.PrimitiveTypes.Binary,
 	iceberg.PrimitiveTypes.UUID,
 	iceberg.PrimitiveTypes.Unknown,
+	iceberg.PrimitiveTypes.Variant,
 }
 
 func TestNonParameterizedTypeEquality(t *testing.T) {
@@ -223,6 +225,7 @@ func TestTypeStrings(t *testing.T) {
 		{iceberg.PrimitiveTypes.UUID, "uuid"},
 		{iceberg.PrimitiveTypes.Binary, "binary"},
 		{iceberg.PrimitiveTypes.Unknown, "unknown"},
+		{iceberg.PrimitiveTypes.Variant, "variant"},
 		{iceberg.FixedTypeOf(22), "fixed[22]"},
 		{iceberg.DecimalTypeOf(19, 25), "decimal(19, 25)"},
 		{&iceberg.StructType{
@@ -392,6 +395,40 @@ func TestUnknownTypeEquality(t *testing.T) {
 	assert.True(t, unknown2.Equals(unknown1))
 	assert.Equal(t, "unknown", unknown1.String())
 	assert.Equal(t, "unknown", unknown2.String())
+}
+
+func TestVariantTypeEquality(t *testing.T) {
+	v1 := iceberg.VariantType{}
+	v2 := iceberg.VariantType{}
+
+	assert.True(t, v1.Equals(v2))
+	assert.True(t, v2.Equals(v1))
+	assert.False(t, v1.Equals(iceberg.BinaryType{}))
+	assert.False(t, v1.Equals(iceberg.UnknownType{}))
+}
+
+func TestVariantTypeJSONRoundTrip(t *testing.T) {
+	field := iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.VariantType{}, Required: false}
+	data, err := json.Marshal(field)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"type":"variant"`)
+
+	var out iceberg.NestedField
+	require.NoError(t, json.Unmarshal(data, &out))
+	assert.True(t, out.Type.Equals(iceberg.VariantType{}))
+}
+
+func TestVariantInSchema(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.PrimitiveTypes.Variant, Required: false},
+	)
+	data, err := json.Marshal(sc)
+	require.NoError(t, err)
+
+	var out iceberg.Schema
+	require.NoError(t, json.Unmarshal(data, &out))
+	assert.True(t, out.Field(1).Type.Equals(iceberg.VariantType{}))
 }
 
 func TestNestedFieldUnmarshalMissingID(t *testing.T) {

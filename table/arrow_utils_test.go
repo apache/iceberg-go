@@ -88,6 +88,7 @@ func TestArrowToIceberg(t *testing.T) {
 		{arrow.BinaryTypes.LargeBinary, iceberg.PrimitiveTypes.Binary, false, ""},
 		{arrow.BinaryTypes.BinaryView, nil, false, "unsupported arrow type for conversion - binary_view"},
 		{extensions.NewUUIDType(), iceberg.PrimitiveTypes.UUID, true, ""},
+		{extensions.NewDefaultVariantType(), iceberg.PrimitiveTypes.Variant, true, ""},
 		{arrow.StructOf(arrow.Field{
 			Name:     "foo",
 			Type:     arrow.BinaryTypes.String,
@@ -360,6 +361,46 @@ func TestArrowSchemaRoundTripConversion(t *testing.T) {
 
 		assert.True(t, tt.Equals(ice), tt.String(), ice.String())
 	}
+}
+
+func TestVariantArrowConversion(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.Variant},
+	)
+
+	t.Run("round trip with field ids", func(t *testing.T) {
+		arrowSc, err := table.SchemaToArrowSchema(sc, nil, true, false)
+		require.NoError(t, err)
+
+		assert.Equal(t, 2, arrowSc.NumFields())
+
+		dataField := arrowSc.Field(1)
+		ext, ok := dataField.Type.(arrow.ExtensionType)
+		require.True(t, ok, "expected extension type, got %T", dataField.Type)
+		assert.Equal(t, "parquet.variant", ext.ExtensionName())
+
+		ice, err := table.ArrowSchemaToIceberg(arrowSc, false, nil)
+		require.NoError(t, err)
+		assert.True(t, ice.Field(1).Type.Equals(iceberg.PrimitiveTypes.Variant))
+		assert.True(t, ice.Field(0).Type.Equals(iceberg.PrimitiveTypes.Timestamp))
+	})
+
+	t.Run("large binary storage", func(t *testing.T) {
+		arrowSc, err := table.SchemaToArrowSchema(sc, nil, true, true)
+		require.NoError(t, err)
+
+		dataField := arrowSc.Field(1)
+		ext, ok := dataField.Type.(arrow.ExtensionType)
+		require.True(t, ok)
+
+		st, ok := ext.StorageType().(*arrow.StructType)
+		require.True(t, ok, "expected struct storage type, got %T", ext.StorageType())
+		assert.Equal(t, "metadata", st.Field(0).Name)
+		assert.Equal(t, "value", st.Field(1).Name)
+		assert.Equal(t, arrow.BinaryTypes.LargeBinary, st.Field(0).Type)
+		assert.Equal(t, arrow.BinaryTypes.LargeBinary, st.Field(1).Type)
+	})
 }
 
 func TestArrowSchemaWithNameMapping(t *testing.T) {

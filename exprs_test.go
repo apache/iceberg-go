@@ -215,7 +215,8 @@ func TestRefTypes(t *testing.T) {
 		iceberg.NestedField{ID: 10, Name: "j", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 11, Name: "k", Type: iceberg.PrimitiveTypes.Binary},
 		iceberg.NestedField{ID: 12, Name: "l", Type: iceberg.PrimitiveTypes.UUID},
-		iceberg.NestedField{ID: 13, Name: "m", Type: iceberg.FixedTypeOf(5)})
+		iceberg.NestedField{ID: 13, Name: "m", Type: iceberg.FixedTypeOf(5)},
+		iceberg.NestedField{ID: 14, Name: "n", Type: iceberg.PrimitiveTypes.Variant})
 
 	t.Run("bind term", func(t *testing.T) {
 		for i := 0; i < sc.NumFields(); i++ {
@@ -442,6 +443,15 @@ func TestLiteralPredicateErrors(t *testing.T) {
 		func() { iceberg.LiteralPredicate(iceberg.OpLT, nil, iceberg.NewLiteral("hello")) })
 	assert.PanicsWithError(t, "invalid argument: cannot create literal predicate with nil literal",
 		func() { iceberg.LiteralPredicate(iceberg.OpLT, iceberg.Reference("foo"), nil) })
+}
+
+func TestVariantOrderedPredicateRejected(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.PrimitiveTypes.Variant, Required: false},
+	)
+
+	_, err := iceberg.BindExpr(sc, iceberg.EqualTo(iceberg.Reference("payload"), []byte{0x01}), true)
+	assert.Error(t, err)
 }
 
 func TestNegations(t *testing.T) {

@@ -450,6 +450,8 @@ func createBoundRef(field NestedField, acc accessor) BoundReference {
 		return &boundRef[Decimal]{field: field, acc: acc}
 	case UUIDType:
 		return &boundRef[uuid.UUID]{field: field, acc: acc}
+	case VariantType:
+		return &boundRef[[]byte]{field: field, acc: acc}
 	}
 	panic("unhandled bound reference type: " + field.Type.String())
 }
@@ -638,6 +640,8 @@ func createBoundUnaryPredicate(op Operation, term BoundTerm) BoundUnaryPredicate
 		return newBoundUnaryPred[Decimal](op, term)
 	case UUIDType:
 		return newBoundUnaryPred[uuid.UUID](op, term)
+	case VariantType:
+		return newBoundUnaryPred[[]byte](op, term)
 	}
 	panic("unhandled bound reference type: " + term.Type().String())
 }

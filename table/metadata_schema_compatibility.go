@@ -130,7 +130,7 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 // version number for types that require newer format versions.
 func minFormatVersionForType(t iceberg.Type) int {
 	switch t.(type) {
-	case iceberg.TimestampNsType, iceberg.TimestampTzNsType, iceberg.UnknownType:
+	case iceberg.TimestampNsType, iceberg.TimestampTzNsType, iceberg.UnknownType, iceberg.VariantType:
 		return 3
 	default:
 		// All other types supported in v1+
@@ -168,7 +168,9 @@ func (v *unknownTypeValidator) Field(field iceberg.NestedField, fieldResult erro
 	if fieldResult != nil {
 		return fieldResult
 	}
-	if _, isUnknown := field.Type.(iceberg.UnknownType); isUnknown {
+	_, isUnknown := field.Type.(iceberg.UnknownType)
+	_, isVariant := field.Type.(iceberg.VariantType)
+	if isUnknown || isVariant {
 		if field.Required {
 			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked as required", field.Name, field.ID)
 		}
@@ -189,7 +191,9 @@ func (v *unknownTypeValidator) List(list iceberg.ListType, elemResult error) err
 	}
 	elem := list.ElementField()
 
-	if _, isUnknown := elem.Type.(iceberg.UnknownType); isUnknown {
+	_, isUnknown := elem.Type.(iceberg.UnknownType)
+	_, isVariant := elem.Type.(iceberg.VariantType)
+	if isUnknown || isVariant {
 		if elem.Required {
 			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked required", elem.Name, elem.ID)
 		}
@@ -215,7 +219,9 @@ func (v *unknownTypeValidator) Map(mapType iceberg.MapType, keyResult, valueResu
 
 	key := mapType.KeyField()
 
-	if _, isUnknown := key.Type.(iceberg.UnknownType); isUnknown {
+	_, isKeyUnknown := key.Type.(iceberg.UnknownType)
+	_, isKeyVariant := key.Type.(iceberg.VariantType)
+	if isKeyUnknown || isKeyVariant {
 		if key.Required {
 			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked required", key.Name, key.ID)
 		}
@@ -228,7 +234,10 @@ func (v *unknownTypeValidator) Map(mapType iceberg.MapType, keyResult, valueResu
 	}
 
 	value := mapType.ValueField()
-	if _, isUnknown := value.Type.(iceberg.UnknownType); isUnknown {
+
+	_, isValueUnknown := value.Type.(iceberg.UnknownType)
+	_, isValueVariant := value.Type.(iceberg.VariantType)
+	if isValueUnknown || isValueVariant {
 		if value.Required {
 			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked required", value.Name, value.ID)
 		}

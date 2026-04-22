@@ -201,6 +201,8 @@ func (parquetFormat) PrimitiveTypeToPhysicalType(typ iceberg.PrimitiveType) stri
 		return "BYTE_ARRAY"
 	case iceberg.DecimalType:
 		return "FIXED_LEN_BYTE_ARRAY"
+	case iceberg.VariantType:
+		panic(errors.New("variant type has no primitive physical type representation"))
 	default:
 		panic(fmt.Errorf("expected primitive type, got: %s", typ))
 	}
@@ -573,7 +575,10 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 				panic(err)
 			}
 
-			fieldID := colMapping[colChunk.PathInSchema().String()]
+			fieldID, ok := colMapping[colChunk.PathInSchema().String()]
+			if !ok {
+				continue
+			}
 			statsCol := statsCols[fieldID]
 			if statsCol.Mode.Typ == MetricModeNone {
 				continue
@@ -1075,6 +1080,14 @@ func (p *pruneParquetSchema) Field(field pqarrow.SchemaField, result arrow.Field
 		return result
 	}
 
+	// Variant is an extension type wrapping a struct (metadata + value).
+	// Select the entire field including all children.
+	if ext, ok := field.Field.Type.(arrow.ExtensionType); ok && ext.ExtensionName() == "parquet.variant" {
+		p.collectLeafIndices(field)
+
+		return *field.Field
+	}
+
 	if !field.IsLeaf() {
 		panic(errors.New("cannot explicitly project list or map types"))
 	}
@@ -1179,6 +1192,18 @@ func (p *pruneParquetSchema) projectSelectedStruct(projected arrow.DataType) *ar
 	}
 
 	panic("expected a struct")
+}
+
+func (p *pruneParquetSchema) collectLeafIndices(field pqarrow.SchemaField) {
+	if field.IsLeaf() {
+		p.indices = append(p.indices, field.ColIndex)
+
+		return
+	}
+
+	for _, child := range field.Children {
+		p.collectLeafIndices(child)
+	}
 }
 
 func (p *pruneParquetSchema) projectList(listType arrow.ListLikeType, elemResult arrow.DataType) arrow.ListLikeType {

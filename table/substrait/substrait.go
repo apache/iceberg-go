@@ -170,6 +170,11 @@ func (convertToSubstrait) VisitUnknown() types.Type {
 	return nil
 }
 
+func (convertToSubstrait) VisitVariant() types.Type {
+	// Variant has no Substrait equivalent
+	return nil
+}
+
 var _ iceberg.SchemaVisitorPerPrimitiveType[types.Type] = (*convertToSubstrait)(nil)
 
 var (
