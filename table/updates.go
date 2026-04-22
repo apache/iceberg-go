@@ -22,6 +22,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
@@ -539,10 +541,7 @@ func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table,
 		return nil
 	}
 
-	paths := make([]string, 0, len(filesToDelete))
-	for f := range filesToDelete {
-		paths = append(paths, f)
-	}
+	paths := slices.Collect(maps.Keys(filesToDelete))
 
 	// Try bulk delete first; on failure fall through to per-file delete.
 	if bulk, ok := prefs.(io.BulkRemovableIO); ok {
@@ -558,14 +557,11 @@ func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table,
 			deletedSet[d] = struct{}{}
 		}
 
-		remaining := paths[:0]
-		for _, p := range paths {
-			if _, ok := deletedSet[p]; !ok {
-				remaining = append(remaining, p)
-			}
-		}
+		paths = slices.DeleteFunc(paths, func(s string) bool {
+			_, ok := deletedSet[s]
 
-		paths = remaining
+			return ok
+		})
 	}
 
 	var res error
