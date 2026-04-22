@@ -588,7 +588,7 @@ func schemaFromFile(path string) (*iceberg.Schema, error) {
 	case ".parquet", ".parq":
 		return schemaFromParquetFile(path)
 	default:
-		return nil, fmt.Errorf("unsupported file format %q for %q: only .parquet files are currently supported", ext, path)
+		return nil, fmt.Errorf("unsupported file format %s for %s: only .parquet and .parq files are supported", ext, path)
 	}
 }
 
