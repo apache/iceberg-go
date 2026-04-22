@@ -38,12 +38,18 @@ package table
 // assumption about the branch head still holds, and if it does not
 // the retry loop re-fetches metadata; these validators then check
 // whether the semantic invariants still hold against the new head.
+//
+// The validators themselves are unexported: they are producer-facing
+// plumbing, not a library API. The only user-visible surface is
+// IsolationLevel, the isolation property keys, and the conflict
+// error sentinels — mirroring Java's split where validators are
+// `protected` on MergingSnapshotProducer and only the inputs and
+// outputs are public.
 
 import (
 	"errors"
 	"fmt"
 	"sort"
-	"sync"
 
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
@@ -89,10 +95,10 @@ const (
 	WriteUpdateIsolationLevelDefault = IsolationSerializable
 )
 
-// ReadIsolationLevel returns the isolation level for the given
+// readIsolationLevel returns the isolation level for the given
 // property key, falling back to defVal for a missing or unrecognized
 // value.
-func ReadIsolationLevel(props iceberg.Properties, key string, defVal IsolationLevel) IsolationLevel {
+func readIsolationLevel(props iceberg.Properties, key string, defVal IsolationLevel) IsolationLevel {
 	v, ok := props[key]
 	if !ok {
 		return defVal
@@ -136,9 +142,9 @@ var (
 	ErrDataFilesMissing = fmt.Errorf("%w: referenced data files missing", ErrCommitFailed)
 )
 
-// ConflictContext carries the inputs every validator needs: the
+// conflictContext carries the inputs every validator needs: the
 // latest catalog state (current) and the filesystem used to read
-// manifest content on demand. Build it with NewConflictContext.
+// manifest content on demand. Build it with newConflictContext.
 //
 // A validator inspects snapshots committed on the committer's branch
 // between the writer's base and the current head. When both metadata
@@ -146,12 +152,12 @@ var (
 // concurrent commits and validators return nil without reading
 // manifests.
 //
-// ConflictContext is immutable once constructed — do NOT reuse the
+// conflictContext is immutable once constructed — do NOT reuse the
 // same context across retry attempts that re-fetch catalog state,
 // because the cached concurrent-snapshot walk becomes stale. There
 // is deliberately no Refresh or mutator method; a refresh must flow
-// as a fresh call to NewConflictContext(newBase, newCurrent, ...).
-type ConflictContext struct {
+// as a fresh call to newConflictContext(newBase, newCurrent, ...).
+type conflictContext struct {
 	current       Metadata
 	branch        string
 	fs            iceio.IO
@@ -161,7 +167,7 @@ type ConflictContext struct {
 	concurrent []Snapshot
 }
 
-// NewConflictContext builds a validation context for the given
+// newConflictContext builds a validation context for the given
 // branch. It walks the ancestry of the branch's current head back to
 // the writer's base snapshot to enumerate concurrent commits.
 //
@@ -172,10 +178,10 @@ type ConflictContext struct {
 // When base and current point at the same snapshot on the branch, the
 // returned context has no concurrent snapshots and validators
 // short-circuit to nil. When the base snapshot is no longer on the
-// branch (divergent commit, expired base), NewConflictContext returns
+// branch (divergent commit, expired base), newConflictContext returns
 // ErrCommitDiverged; the commit cannot be safely revalidated without
 // a refresh-and-rebuild.
-func NewConflictContext(base, current Metadata, branch string, fs iceio.IO, caseSensitive bool) (*ConflictContext, error) {
+func newConflictContext(base, current Metadata, branch string, fs iceio.IO, caseSensitive bool) (*conflictContext, error) {
 	currentHead := current.SnapshotByName(branch)
 	if currentHead == nil {
 		// Branch does not exist on the current side — either it was
@@ -189,7 +195,7 @@ func NewConflictContext(base, current Metadata, branch string, fs iceio.IO, case
 		// Writer has no view of this branch yet (e.g. creating it) —
 		// by definition there are no concurrent commits to validate
 		// against.
-		return &ConflictContext{current: current, branch: branch, fs: fs, caseSensitive: caseSensitive}, nil
+		return &conflictContext{current: current, branch: branch, fs: fs, caseSensitive: caseSensitive}, nil
 	}
 
 	concurrent, baseFound := AncestorsBetween(currentHead.SnapshotID, baseHead.SnapshotID, current.SnapshotByID)
@@ -198,7 +204,7 @@ func NewConflictContext(base, current Metadata, branch string, fs iceio.IO, case
 			ErrCommitDiverged, baseHead.SnapshotID, branch, currentHead.SnapshotID)
 	}
 
-	return &ConflictContext{
+	return &conflictContext{
 		current:       current,
 		branch:        branch,
 		fs:            fs,
@@ -214,37 +220,27 @@ func NewConflictContext(base, current Metadata, branch string, fs iceio.IO, case
 // happens to carry it today — a manifest-rewrite (e.g. the merging
 // append producer) can carry ADDED entries from a prior snapshot
 // into a newer manifest whose added-snapshot-id is the committing
-// one, so per-manifest filtering alone would miss or
-// mis-attribute entries. Filtering on entry.SnapshotID() is the
-// only attribution that survives manifest rewrites.
+// one, so per-manifest filtering alone would miss or mis-attribute
+// entries. Filtering on entry.SnapshotID() is the only attribution
+// that survives manifest rewrites.
 //
 // The visitor returns early if the callback returns a non-nil error.
-func (c *ConflictContext) forEachAddedEntry(content iceberg.ManifestContent, visit func(Snapshot, iceberg.ManifestEntry) error) error {
+func (c *conflictContext) forEachAddedEntry(content iceberg.ManifestContent, visit func(Snapshot, iceberg.ManifestEntry) error) error {
 	for _, snap := range c.concurrent {
-		manifests, err := snap.Manifests(c.fs)
-		if err != nil {
-			return fmt.Errorf("loading manifests for concurrent snapshot %d: %w", snap.SnapshotID, err)
-		}
-		for _, mf := range manifests {
-			if mf.ManifestContent() != content {
+		for entry, err := range snap.entries(c.fs, content) {
+			if err != nil {
+				return fmt.Errorf("loading entries for concurrent snapshot %d: %w", snap.SnapshotID, err)
+			}
+			if entry.Status() != iceberg.EntryStatusADDED {
 				continue
 			}
-			entries, err := mf.FetchEntries(c.fs, false)
-			if err != nil {
-				return fmt.Errorf("reading entries from manifest %s: %w", mf.FilePath(), err)
+			if entry.SnapshotID() != snap.SnapshotID {
+				// Entry was inherited from a prior snapshot and is
+				// not attributable to this concurrent commit.
+				continue
 			}
-			for _, e := range entries {
-				if e.Status() != iceberg.EntryStatusADDED {
-					continue
-				}
-				if e.SnapshotID() != snap.SnapshotID {
-					// Entry was inherited from a prior snapshot and
-					// is not attributable to this concurrent commit.
-					continue
-				}
-				if err := visit(snap, e); err != nil {
-					return err
-				}
+			if err := visit(snap, entry); err != nil {
+				return err
 			}
 		}
 	}
@@ -252,7 +248,7 @@ func (c *ConflictContext) forEachAddedEntry(content iceberg.ManifestContent, vis
 	return nil
 }
 
-// ValidateDataFilesExist verifies that every file path in
+// validateDataFilesExist verifies that every file path in
 // referencedPaths is still reachable from the current branch head.
 // This is the check a position-delete commit performs to prove the
 // files it references have not been removed by a concurrent commit
@@ -267,7 +263,7 @@ func (c *ConflictContext) forEachAddedEntry(content iceberg.ManifestContent, vis
 // Cost is O(all data manifests × all entries) regardless of
 // len(referencedPaths); callers MUST batch referenced paths into a
 // single call rather than calling once per path.
-func ValidateDataFilesExist(ctx *ConflictContext, referencedPaths []string) error {
+func validateDataFilesExist(ctx *conflictContext, referencedPaths []string) error {
 	if len(referencedPaths) == 0 {
 		return nil
 	}
@@ -281,25 +277,14 @@ func ValidateDataFilesExist(ctx *ConflictContext, referencedPaths []string) erro
 		return fmt.Errorf("%w: branch %q missing on current metadata", ErrCommitDiverged, ctx.branch)
 	}
 
-	manifests, err := head.Manifests(ctx.fs)
-	if err != nil {
-		return fmt.Errorf("loading manifests for current head %d: %w", head.SnapshotID, err)
-	}
-	for _, mf := range manifests {
-		if mf.ManifestContent() != iceberg.ManifestContentData {
-			continue
-		}
-		entries, err := mf.FetchEntries(ctx.fs, true) // discardDeleted=true: reachable entries only
+	for df, err := range head.dataFiles(ctx.fs, nil) {
 		if err != nil {
-			return fmt.Errorf("reading entries from manifest %s: %w", mf.FilePath(), err)
+			return fmt.Errorf("iterating data files for current head %d: %w", head.SnapshotID, err)
 		}
-		for _, e := range entries {
-			path := e.DataFile().FilePath()
-			if _, ok := needed[path]; ok {
-				delete(needed, path)
-				if len(needed) == 0 {
-					return nil
-				}
+		if _, ok := needed[df.FilePath()]; ok {
+			delete(needed, df.FilePath())
+			if len(needed) == 0 {
+				return nil
 			}
 		}
 	}
@@ -321,7 +306,7 @@ func ValidateDataFilesExist(ctx *ConflictContext, referencedPaths []string) erro
 	return fmt.Errorf("%w: %d files missing, e.g. %v", ErrDataFilesMissing, len(missing), sample)
 }
 
-// ValidateAddedDataFilesMatchingFilter returns an error if any
+// validateAddedDataFilesMatchingFilter returns an error if any
 // concurrent snapshot added a data file whose partition satisfies the
 // given filter. Overwrite and delete operations that declare a
 // predicate call this so that a concurrent append into the same
@@ -339,7 +324,7 @@ func ValidateDataFilesExist(ctx *ConflictContext, referencedPaths []string) erro
 // Per-file metric evaluation (a third pass in Java that refines
 // beyond partition for columns not in the spec) is TODO and tracked
 // under issue #830 follow-ups.
-func ValidateAddedDataFilesMatchingFilter(ctx *ConflictContext, filter iceberg.BooleanExpression) error {
+func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.BooleanExpression) error {
 	if len(ctx.concurrent) == 0 {
 		return nil
 	}
@@ -347,43 +332,21 @@ func ValidateAddedDataFilesMatchingFilter(ctx *ConflictContext, filter iceberg.B
 		filter = iceberg.AlwaysTrue{}
 	}
 
-	schema := ctx.current.CurrentSchema()
-	filters := newPerSpecFilterCache(filter)
-
-	manifestEvals := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
-		projected, err := filters.projectFor(specID, ctx.current, schema, ctx.caseSensitive)
-		if err != nil {
-			return nil, err
-		}
-		spec := ctx.current.PartitionSpecByID(specID)
-		if spec == nil {
-			return nil, fmt.Errorf("%w: partition spec %d not found on current metadata",
-				iceberg.ErrInvalidArgument, specID)
-		}
-
-		return newManifestEvaluator(*spec, schema, projected, ctx.caseSensitive)
+	// Per-spec projected filter, memoized per spec id. Concurrent
+	// snapshots may have been written against different spec ids
+	// after a spec evolution, so each needs its own projection.
+	// Reuses the same projection/evaluator helpers the scanner uses
+	// (buildPartitionProjection, buildManifestEvaluator,
+	// buildPartitionEvaluator) so there is one code path that pruning
+	// semantics flow through.
+	partitionFilters := newKeyDefaultMapWrapErr(func(specID int) (iceberg.BooleanExpression, error) {
+		return buildPartitionProjection(specID, ctx.current, filter, ctx.caseSensitive)
 	})
-
+	manifestEvals := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
+		return buildManifestEvaluator(specID, ctx.current, partitionFilters, ctx.caseSensitive)
+	})
 	partitionEvals := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.DataFile) (bool, error), error) {
-		projected, err := filters.projectFor(specID, ctx.current, schema, ctx.caseSensitive)
-		if err != nil {
-			return nil, err
-		}
-		spec := ctx.current.PartitionSpecByID(specID)
-		if spec == nil {
-			return nil, fmt.Errorf("%w: partition spec %d not found on current metadata",
-				iceberg.ErrInvalidArgument, specID)
-		}
-		partType := spec.PartitionType(schema)
-		partSchema := iceberg.NewSchema(0, partType.FieldList...)
-		eval, err := iceberg.ExpressionEvaluator(partSchema, projected, ctx.caseSensitive)
-		if err != nil {
-			return nil, err
-		}
-
-		return func(d iceberg.DataFile) (bool, error) {
-			return eval(GetPartitionRecord(d, partType))
-		}, nil
+		return buildPartitionEvaluator(specID, ctx.current, partitionFilters, ctx.caseSensitive)
 	})
 
 	for _, snap := range ctx.concurrent {
@@ -431,7 +394,7 @@ func ValidateAddedDataFilesMatchingFilter(ctx *ConflictContext, filter iceberg.B
 	return nil
 }
 
-// ValidateNoConflictingDataFiles is the serializable-isolation check
+// validateNoConflictingDataFiles is the serializable-isolation check
 // used by RowDelta and other delete operations. It rejects the commit
 // if any concurrent snapshot added data files into the partition(s)
 // the committer is modifying.
@@ -439,15 +402,15 @@ func ValidateAddedDataFilesMatchingFilter(ctx *ConflictContext, filter iceberg.B
 // Under IsolationSnapshot this validator is a no-op: concurrent
 // appends are allowed and will simply land in the same partition
 // alongside the new deletes.
-func ValidateNoConflictingDataFiles(ctx *ConflictContext, filter iceberg.BooleanExpression, level IsolationLevel) error {
+func validateNoConflictingDataFiles(ctx *conflictContext, filter iceberg.BooleanExpression, level IsolationLevel) error {
 	if level != IsolationSerializable {
 		return nil
 	}
 
-	return ValidateAddedDataFilesMatchingFilter(ctx, filter)
+	return validateAddedDataFilesMatchingFilter(ctx, filter)
 }
 
-// ValidateNoNewDeletesForRewrittenFiles rejects the commit if any
+// validateNoNewDeletesForRewrittenFiles rejects the commit if any
 // concurrent snapshot added delete files that would be lost when the
 // committer's rewrite replaces a data file.
 //
@@ -465,7 +428,7 @@ func ValidateNoConflictingDataFiles(ctx *ConflictContext, filter iceberg.Boolean
 //     which matches Java's approach for RewriteFiles and avoids
 //     silently losing deletes. A follow-up PR will accept optional
 //     partition-overlap hints and narrow this check.
-func ValidateNoNewDeletesForRewrittenFiles(ctx *ConflictContext, rewrittenPaths []string) error {
+func validateNoNewDeletesForRewrittenFiles(ctx *conflictContext, rewrittenPaths []string) error {
 	if len(rewrittenPaths) == 0 || len(ctx.concurrent) == 0 {
 		return nil
 	}
@@ -498,44 +461,4 @@ func ValidateNoNewDeletesForRewrittenFiles(ctx *ConflictContext, rewrittenPaths 
 
 		return nil
 	})
-}
-
-// perSpecFilterCache memoizes inclusive partition-level projections
-// of the conflict filter onto each partition spec the table has seen.
-// Different concurrent snapshots may have been written against
-// different spec ids after a spec evolution, so each needs its own
-// projection.
-//
-// Access is guarded by a mutex to keep the cache safe when a future
-// caller evaluates validators across multiple goroutines.
-type perSpecFilterCache struct {
-	orig iceberg.BooleanExpression
-
-	mu   sync.Mutex
-	memo map[int]iceberg.BooleanExpression
-}
-
-func newPerSpecFilterCache(filter iceberg.BooleanExpression) *perSpecFilterCache {
-	return &perSpecFilterCache{orig: filter, memo: map[int]iceberg.BooleanExpression{}}
-}
-
-func (p *perSpecFilterCache) projectFor(specID int, meta Metadata, schema *iceberg.Schema, caseSensitive bool) (iceberg.BooleanExpression, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if cached, ok := p.memo[specID]; ok {
-		return cached, nil
-	}
-	spec := meta.PartitionSpecByID(specID)
-	if spec == nil {
-		return nil, fmt.Errorf("%w: partition spec %d not found on current metadata",
-			iceberg.ErrInvalidArgument, specID)
-	}
-	projected, err := newInclusiveProjection(schema, *spec, caseSensitive)(p.orig)
-	if err != nil {
-		return nil, err
-	}
-	p.memo[specID] = projected
-
-	return projected, nil
 }

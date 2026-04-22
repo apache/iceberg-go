@@ -73,7 +73,7 @@ func TestReadIsolationLevel(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ReadIsolationLevel(tt.props, tt.key, tt.defVal)
+			got := readIsolationLevel(tt.props, tt.key, tt.defVal)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -139,7 +139,7 @@ func TestNewConflictContext_NoConcurrentCommits(t *testing.T) {
 	head := int64(42)
 	meta := newConflictTestMetadata(t, &head)
 
-	ctx, err := NewConflictContext(meta, meta, MainBranch, nil, true)
+	ctx, err := newConflictContext(meta, meta, MainBranch, nil, true)
 	require.NoError(t, err)
 	assert.Empty(t, ctx.concurrent)
 }
@@ -151,7 +151,7 @@ func TestNewConflictContext_WriterHasNoBranchView(t *testing.T) {
 	head := int64(7)
 	current := newConflictTestMetadata(t, &head)
 
-	ctx, err := NewConflictContext(base, current, MainBranch, nil, true)
+	ctx, err := newConflictContext(base, current, MainBranch, nil, true)
 	require.NoError(t, err)
 	assert.Empty(t, ctx.concurrent)
 }
@@ -163,7 +163,7 @@ func TestNewConflictContext_MissingCurrentBranch(t *testing.T) {
 	base := newConflictTestMetadata(t, &head)
 	current := newConflictTestMetadata(t, nil)
 
-	_, err := NewConflictContext(base, current, MainBranch, nil, true)
+	_, err := newConflictContext(base, current, MainBranch, nil, true)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrCommitDiverged)
 	assert.False(t, errors.Is(err, ErrCommitFailed),
@@ -179,7 +179,7 @@ func TestNewConflictContext_BaseNotInCurrentAncestry(t *testing.T) {
 	base := newConflictTestMetadata(t, &baseHead)
 	current := newConflictTestMetadata(t, &currentHead)
 
-	_, err := NewConflictContext(base, current, MainBranch, nil, true)
+	_, err := newConflictContext(base, current, MainBranch, nil, true)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrCommitDiverged)
 	assert.False(t, errors.Is(err, ErrCommitFailed),
@@ -192,11 +192,11 @@ func TestValidateDataFilesExist_EmptyInput(t *testing.T) {
 	// touching metadata or the filesystem.
 	head := int64(1)
 	meta := newConflictTestMetadata(t, &head)
-	ctx, err := NewConflictContext(meta, meta, MainBranch, nil, true)
+	ctx, err := newConflictContext(meta, meta, MainBranch, nil, true)
 	require.NoError(t, err)
 
-	require.NoError(t, ValidateDataFilesExist(ctx, nil))
-	require.NoError(t, ValidateDataFilesExist(ctx, []string{}))
+	require.NoError(t, validateDataFilesExist(ctx, nil))
+	require.NoError(t, validateDataFilesExist(ctx, []string{}))
 }
 
 func TestValidateNoNewDeletesForRewrittenFiles_EmptyInputs(t *testing.T) {
@@ -204,15 +204,15 @@ func TestValidateNoNewDeletesForRewrittenFiles_EmptyInputs(t *testing.T) {
 	// short-circuit to nil.
 	head := int64(1)
 	meta := newConflictTestMetadata(t, &head)
-	ctx, err := NewConflictContext(meta, meta, MainBranch, nil, true)
+	ctx, err := newConflictContext(meta, meta, MainBranch, nil, true)
 	require.NoError(t, err)
 
 	// Empty rewrittenPaths.
-	require.NoError(t, ValidateNoNewDeletesForRewrittenFiles(ctx, nil))
-	require.NoError(t, ValidateNoNewDeletesForRewrittenFiles(ctx, []string{}))
+	require.NoError(t, validateNoNewDeletesForRewrittenFiles(ctx, nil))
+	require.NoError(t, validateNoNewDeletesForRewrittenFiles(ctx, []string{}))
 
 	// Non-empty rewrittenPaths but no concurrent snapshots.
-	require.NoError(t, ValidateNoNewDeletesForRewrittenFiles(ctx, []string{"a.parquet"}))
+	require.NoError(t, validateNoNewDeletesForRewrittenFiles(ctx, []string{"a.parquet"}))
 }
 
 func TestValidateAddedDataFilesMatchingFilter_NoConcurrent(t *testing.T) {
@@ -220,11 +220,11 @@ func TestValidateAddedDataFilesMatchingFilter_NoConcurrent(t *testing.T) {
 	// regardless of filter.
 	head := int64(1)
 	meta := newConflictTestMetadata(t, &head)
-	ctx, err := NewConflictContext(meta, meta, MainBranch, nil, true)
+	ctx, err := newConflictContext(meta, meta, MainBranch, nil, true)
 	require.NoError(t, err)
 
-	require.NoError(t, ValidateAddedDataFilesMatchingFilter(ctx, iceberg.AlwaysTrue{}))
-	require.NoError(t, ValidateAddedDataFilesMatchingFilter(ctx, nil))
+	require.NoError(t, validateAddedDataFilesMatchingFilter(ctx, iceberg.AlwaysTrue{}))
+	require.NoError(t, validateAddedDataFilesMatchingFilter(ctx, nil))
 }
 
 func TestValidateNoConflictingDataFiles_SnapshotIsolationIsNoOp(t *testing.T) {
@@ -232,42 +232,8 @@ func TestValidateNoConflictingDataFiles_SnapshotIsolationIsNoOp(t *testing.T) {
 	// even attempt to enumerate concurrent snapshots.
 	head := int64(1)
 	meta := newConflictTestMetadata(t, &head)
-	ctx, err := NewConflictContext(meta, meta, MainBranch, nil, true)
+	ctx, err := newConflictContext(meta, meta, MainBranch, nil, true)
 	require.NoError(t, err)
 
-	require.NoError(t, ValidateNoConflictingDataFiles(ctx, iceberg.AlwaysTrue{}, IsolationSnapshot))
-}
-
-func TestPerSpecFilterCache_ProjectForReusesPerSpec(t *testing.T) {
-	// projectFor must memoize on spec id and look specs up by id
-	// rather than slice index.
-	head := int64(1)
-	meta := newConflictTestMetadata(t, &head)
-
-	cache := newPerSpecFilterCache(iceberg.AlwaysTrue{})
-
-	first, err := cache.projectFor(meta.DefaultPartitionSpec(), meta, meta.CurrentSchema(), true)
-	require.NoError(t, err)
-	require.NotNil(t, first)
-
-	second, err := cache.projectFor(meta.DefaultPartitionSpec(), meta, meta.CurrentSchema(), true)
-	require.NoError(t, err)
-	assert.True(t, first.Equals(second), "second call should return a projection equal to the first")
-
-	// Direct memo inspection to lock the caching invariant beyond
-	// Equals semantics (which could hide a re-projection that
-	// happens to produce an equal expression).
-	assert.Len(t, cache.memo, 1, "projectFor should memoize a single entry per spec id")
-}
-
-func TestPerSpecFilterCache_UnknownSpecReturnsError(t *testing.T) {
-	// Asking for a spec id that does not exist must return a
-	// descriptive error, not panic or return a wrong spec.
-	head := int64(1)
-	meta := newConflictTestMetadata(t, &head)
-
-	cache := newPerSpecFilterCache(iceberg.AlwaysTrue{})
-	_, err := cache.projectFor(999, meta, meta.CurrentSchema(), true)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.NoError(t, validateNoConflictingDataFiles(ctx, iceberg.AlwaysTrue{}, IsolationSnapshot))
 }
