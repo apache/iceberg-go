@@ -142,24 +142,60 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 		result.BytesBefore += group.TotalSizeBytes
 		result.BytesAfter += bytesAfter
 
+		// Always accumulate across groups; partial-progress mode also
+		// stages each group via ReplaceFiles so work survives a
+		// mid-loop write failure, but the final catalog commit is
+		// always one atomic doCommit at Transaction.Commit() time.
+		allOldData = append(allOldData, oldDataFiles...)
+		allNewData = append(allNewData, newFiles...)
+		allOldDeletes = append(allOldDeletes, safeDeletes...)
+
 		if partialProgress {
-			if err := t.ReplaceFiles(ctx, oldDataFiles, newFiles, safeDeletes, snapshotProps); err != nil {
+			if err := t.ReplaceFiles(ctx, oldDataFiles, newFiles, safeDeletes, snapshotProps, withRewriteSemantics()); err != nil {
 				return result, fmt.Errorf("commit compaction group %q: %w", group.PartitionKey, err)
 			}
-		} else {
-			allOldData = append(allOldData, oldDataFiles...)
-			allNewData = append(allNewData, newFiles...)
-			allOldDeletes = append(allOldDeletes, safeDeletes...)
 		}
 	}
 
 	if !partialProgress {
-		if err := t.ReplaceFiles(ctx, allOldData, allNewData, allOldDeletes, snapshotProps); err != nil {
+		if err := t.ReplaceFiles(ctx, allOldData, allNewData, allOldDeletes, snapshotProps, withRewriteSemantics()); err != nil {
 			return result, fmt.Errorf("commit compaction: %w", err)
 		}
 	}
 
+	// Register a single rewrite-specific conflict validator covering
+	// every rewritten data file across every group. t.ReplaceFiles
+	// only stages updates on the transaction (no per-group catalog
+	// commit); the validator list is drained once at
+	// Transaction.Commit() → doCommit, so one registration with the
+	// union of rewritten paths is what actually fires. This runs
+	// alongside the overwrite producer's suppressed validator (via
+	// withRewriteSemantics) so concurrent pos/eq-deletes targeting a
+	// rewritten file are caught pre-flight.
+	if len(allOldData) > 0 {
+		rewritten := make([]string, 0, len(allOldData))
+		for _, f := range allOldData {
+			rewritten = append(rewritten, f.FilePath())
+		}
+		t.validators = append(t.validators, rewriteValidator(rewritten))
+	}
+
 	return result, nil
+}
+
+// rewriteValidator builds a conflictValidatorFunc that rejects the
+// commit if a concurrent snapshot added delete files pointing at any
+// of the rewritten data-file paths (or eq-deletes during the rewrite,
+// conservatively). Always runs — no isolation gating, because rewrite
+// is a structural operation, not a user-facing isolation choice.
+func rewriteValidator(rewrittenPaths []string) conflictValidatorFunc {
+	return func(cc *conflictContext) error {
+		if cc == nil {
+			return nil
+		}
+
+		return validateNoNewDeletesForRewrittenFiles(cc, rewrittenPaths)
+	}
 }
 
 // collectSafePositionDeletes returns position delete files from the given

@@ -71,6 +71,15 @@ type Transaction struct {
 
 	reqs []Requirement
 
+	// validators collects per-producer conflict checks registered
+	// during this transaction's lifetime. doCommit runs them against
+	// the current catalog state before sending CommitTable so
+	// producers can reject commits whose semantics are violated by
+	// concurrent peers (partition-filter overlap, referenced-file
+	// removal). Fast/merge-append producers do not register a
+	// validator (they are safe under any isolation).
+	validators []conflictValidatorFunc
+
 	mx        sync.Mutex
 	committed bool
 }
@@ -526,6 +535,20 @@ type WriteOption func(*dataFileCfg)
 type dataFileCfg struct {
 	skipAutoNameMapping bool
 	skipDuplicateCheck  bool
+	rewriteSemantics    bool
+}
+
+// withRewriteSemantics marks an overwrite/replace operation as a
+// rewrite (compaction) rather than a user-facing overwrite. The
+// overwrite producer's default pre-commit conflict validator is
+// bypassed; the caller registers a rewrite-specific validator on the
+// transaction separately via validateNoNewDeletesForRewrittenFiles.
+// Unexported: only RewriteDataFiles passes this; there is no public
+// surface for user code to bypass overwrite isolation.
+func withRewriteSemantics() WriteOption {
+	return func(cfg *dataFileCfg) {
+		cfg.rewriteSemantics = true
+	}
 }
 
 // WithoutAutoNameMapping disables the automatic setting of the schema name
@@ -735,6 +758,10 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID)
+	if cfg.rewriteSemantics {
+		// mergeOverwrite guarantees an *overwriteFiles producerImpl.
+		updater.producerImpl.(*overwriteFiles).skipDefaultValidator = true
+	}
 
 	for _, df := range markedForDeletion {
 		updater.deleteDataFile(df)
@@ -848,6 +875,10 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID)
+	if cfg.rewriteSemantics {
+		// mergeOverwrite guarantees an *overwriteFiles producerImpl.
+		updater.producerImpl.(*overwriteFiles).skipDefaultValidator = true
+	}
 
 	for _, df := range markedDataForDeletion {
 		updater.deleteDataFile(df)
@@ -1120,6 +1151,10 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(fs, snapshotProps, operation).mergeOverwrite(&commitUUID)
+	// mergeOverwrite guarantees an *overwriteFiles producerImpl; a type
+	// change there should fail loudly rather than silently drop the
+	// filter.
+	updater.producerImpl.(*overwriteFiles).filter = filter
 
 	filesToDelete, filesToRewrite, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
 	if err != nil {
@@ -1159,6 +1194,10 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(fs, snapshotProps, OpDelete).mergeOverwrite(&commitUUID)
+	// mergeOverwrite guarantees an *overwriteFiles producerImpl; a type
+	// change there should fail loudly rather than silently drop the
+	// filter.
+	updater.producerImpl.(*overwriteFiles).filter = filter
 
 	filesToDelete, withPartialDeletions, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
 	if err != nil {
@@ -1671,7 +1710,14 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 
 	if len(t.meta.updates) > 0 {
 		t.reqs = append(t.reqs, AssertTableUUID(t.meta.uuid))
-		tbl, err := t.tbl.doCommit(ctx, t.meta.updates, t.reqs)
+		branch := t.branch
+		if branch == "" {
+			branch = MainBranch
+		}
+		tbl, err := t.tbl.doCommit(ctx, t.meta.updates, t.reqs,
+			withCommitBranch(branch),
+			withCommitValidators(t.validators...),
+		)
 		if err != nil {
 			return tbl, err
 		}
