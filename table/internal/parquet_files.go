@@ -221,7 +221,6 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 	}
 
 	writerProps := []parquet.WriterProperty{
-		parquet.WithDictionaryDefault(false),
 		parquet.WithMaxRowGroupLength(int64(props.GetInt(ParquetRowGroupLimitKey,
 			ParquetRowGroupLimitDefault))),
 		parquet.WithDataPageSize(int64(props.GetInt(ParquetPageSizeBytesKey,

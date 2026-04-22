@@ -709,8 +709,20 @@ func TestGetWritePropertiesPageVersion(t *testing.T) {
 			pageRdr, err := rdr.RowGroup(0).GetColumnPageReader(0)
 			require.NoError(t, err)
 
-			require.True(t, pageRdr.Next())
-			assert.Equal(t, tt.expectedPageType, pageRdr.Page().Type())
+			var dataPageType file.PageType
+			var foundDataPage bool
+			for pageRdr.Next() {
+				pt := pageRdr.Page().Type()
+				if pt == file.PageTypeDictionaryPage {
+					continue
+				}
+				dataPageType = pt
+				foundDataPage = true
+
+				break
+			}
+			require.True(t, foundDataPage, "expected a data page in row group")
+			assert.Equal(t, tt.expectedPageType, dataPageType)
 		})
 	}
 }

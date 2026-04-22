@@ -74,7 +74,7 @@ func TestPositionDeletePartitionedFanoutWriterProcessBatch(t *testing.T) {
 			name:                   "success",
 			pathToPartitionContext: map[string]partitionContext{"file://namespace/age_bucket=1/test.parquet": {partitionData: map[int]any{iceberg.PartitionDataIDStart: 1}, specID: 0}},
 			input:                  mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema, `[{"file_path": "file://namespace/age_bucket=1/test.parquet", "pos": 100}]`),
-			expectedDataFile:       &mockDataFile{columnSizes: map[int]int64{2147483545: 88, 2147483546: 174}, format: iceberg.ParquetFile, partition: map[int]any{iceberg.PartitionDataIDStart: 1}, count: 1, specid: 0, contentType: iceberg.EntryContentPosDeletes, sortOrderID: ptr(1)},
+			expectedDataFile:       &mockDataFile{columnSizes: map[int]int64{2147483545: 118, 2147483546: 204}, format: iceberg.ParquetFile, partition: map[int]any{iceberg.PartitionDataIDStart: 1}, count: 1, specid: 0, contentType: iceberg.EntryContentPosDeletes, sortOrderID: ptr(1)},
 		},
 		// This test case illustrates how the positionDeletePartitionedFanoutWriter does not validate that all records
 		// in a batch have the same file path. Doing so would be prohibitive in the current implementation and
@@ -84,7 +84,7 @@ func TestPositionDeletePartitionedFanoutWriterProcessBatch(t *testing.T) {
 			name:                   "batch with records having different file paths",
 			pathToPartitionContext: map[string]partitionContext{"file://namespace/age_bucket=1/test.parquet": {partitionData: map[int]any{iceberg.PartitionDataIDStart: 1}, specID: 0}},
 			input:                  mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema, `[{"file_path": "file://namespace/age_bucket=1/test.parquet", "pos": 100}, {"file_path": "file://namespace/age_bucket=0/test.parquet", "pos": 10}]`),
-			expectedDataFile:       &mockDataFile{columnSizes: map[int]int64{2147483545: 96, 2147483546: 187}, format: iceberg.ParquetFile, partition: map[int]any{iceberg.PartitionDataIDStart: 1}, count: 2, specid: 0, contentType: iceberg.EntryContentPosDeletes, sortOrderID: ptr(1)},
+			expectedDataFile:       &mockDataFile{columnSizes: map[int]int64{2147483545: 126, 2147483546: 217}, format: iceberg.ParquetFile, partition: map[int]any{iceberg.PartitionDataIDStart: 1}, count: 2, specid: 0, contentType: iceberg.EntryContentPosDeletes, sortOrderID: ptr(1)},
 		},
 	}
 
