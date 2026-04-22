@@ -90,6 +90,23 @@ type WriteFileIO interface {
 	WriteFile(name string, p []byte) error
 }
 
+// ListableIO is the interface implemented by a file system that
+// supports directory walking. This replaces the need for reflect-based
+// access to internal file system structures (e.g., blob storage buckets).
+//
+// The root parameter is a full URI (e.g., "s3://bucket/path" or
+// "/local/path") as used throughout the iceberg-go codebase.
+// The fn callback receives full URI paths consistent with the root's
+// scheme and authority.
+type ListableIO interface {
+	IO
+
+	// WalkDir walks the file tree rooted at root, calling fn for each
+	// file or directory in the tree, including root. Paths passed to fn
+	// are full URIs consistent with the root's scheme and authority.
+	WalkDir(root string, fn fs.WalkDirFunc) error
+}
+
 // A File provides access to a single file. The File interface is the
 // minimum implementation required for Iceberg to interact with a file.
 // Directory files should also implement

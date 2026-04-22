@@ -308,32 +308,29 @@ func (t Table) scanFiles(fs iceio.IO, location string, cfg *orphanCleanupConfig)
 	return allFiles, totalSize, nil
 }
 
-// getBucket gets the Bucket field from blob storage - absolute minimal approach
-func getBucketName(fsys iceio.IO) stdfs.FS {
-	v := reflect.ValueOf(fsys).Elem() // We know it's a pointer to struct
-
-	return v.FieldByName("Bucket").Interface().(stdfs.FS)
-}
-
-// makeFileWalkFunc creates a WalkDirFunc that processes only files with path transformation
-func makeFileWalkFunc(fn func(path string, info stdfs.FileInfo) error, pathTransform func(string) string) stdfs.WalkDirFunc {
-	return func(path string, d stdfs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-
-		return fn(pathTransform(path), info)
-	}
-}
-
 func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {
+	// Prefer ListableIO when available.
+	if listable, ok := fsys.(iceio.ListableIO); ok {
+		return listable.WalkDir(root, func(path string, d stdfs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+
+			if d.IsDir() {
+				return nil
+			}
+
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+
+			return fn(path, info)
+		})
+	}
+
+	// Fallback to original implementation for IO types that don't
+	// implement ListableIO yet.
 	switch v := fsys.(type) {
 	case iceio.LocalFS:
 		cleanRoot := strings.TrimPrefix(root, "file://")
@@ -346,7 +343,7 @@ func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.F
 		}))
 
 	default:
-		// For blob storage: direct field access since we know the structure
+		// For blob storage: direct field access since we know the structure.
 		bucket := getBucketName(v)
 
 		parsed, err := url.Parse(root)
@@ -359,10 +356,36 @@ func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.F
 			walkPath = "."
 		}
 
-		// URL transform - reconstruct full URL path
 		return stdfs.WalkDir(bucket, walkPath, makeFileWalkFunc(fn, func(path string) string {
 			return parsed.Scheme + "://" + parsed.Host + "/" + path
 		}))
+	}
+}
+
+// getBucketName gets the Bucket field from blob storage - absolute minimal approach.
+func getBucketName(fsys iceio.IO) stdfs.FS {
+	v := reflect.ValueOf(fsys).Elem()
+
+	return v.FieldByName("Bucket").Interface().(stdfs.FS)
+}
+
+// makeFileWalkFunc creates a WalkDirFunc that processes only files with path transformation.
+func makeFileWalkFunc(fn func(path string, info stdfs.FileInfo) error, pathTransform func(string) string) stdfs.WalkDirFunc {
+	return func(path string, d stdfs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if d.IsDir() {
+			return nil
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+
+		return fn(pathTransform(path), info)
 	}
 }
 
