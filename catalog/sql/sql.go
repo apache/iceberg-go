@@ -1106,7 +1106,7 @@ func (c *Catalog) CommitTransaction(ctx context.Context, commits []table.TableCo
 		tblName := catalog.TableNameFromIdent(commit.Identifier)
 
 		current, err := c.LoadTable(ctx, commit.Identifier)
-		if err != nil && !errors.Is(err, catalog.ErrNoSuchTable) {
+		if err != nil {
 			return err
 		}
 
