@@ -18,6 +18,7 @@
 package sql
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
@@ -1055,10 +1056,17 @@ func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (vi
 // CommitTransaction atomically commits changes to multiple tables in a
 // single database transaction. It implements [catalog.TransactionalCatalog].
 //
-// All table changes are applied within one DB transaction, guaranteeing
-// all-or-nothing semantics. Metadata files are written before the DB
-// commit; if the transaction rolls back, orphaned metadata files may
-// remain (consistent with single-table CommitTable behavior).
+// This method provides "commit-point atomicity". To avoid long-running DB
+// transactions involving I/O (like uploading metadata files), table state
+// is loaded and metadata files are written outside the write transaction.
+// Atomicity is guaranteed at the commit point within the database; concurrent
+// updates are detected using per-row optimistic concurrency control (OCC)
+// based on the metadata_location.
+//
+// If any table update fails due to an OCC conflict or database error, the
+// entire transaction is rolled back, ensuring all-or-nothing database updates.
+// Note that metadata files written during the preparation phase may remain
+// as orphaned files if the transaction is rolled back.
 //
 // On success the method returns nil. Callers must LoadTable individually
 // to obtain updated metadata.
@@ -1067,10 +1075,18 @@ func (c *Catalog) CommitTransaction(ctx context.Context, commits []table.TableCo
 		return catalog.ErrEmptyCommitList
 	}
 
+	seen := make(map[string]struct{})
+
 	for _, commit := range commits {
 		if len(commit.Identifier) == 0 {
 			return catalog.ErrMissingIdentifier
 		}
+
+		key := strings.Join(commit.Identifier, ".")
+		if _, ok := seen[key]; ok {
+			return fmt.Errorf("duplicate table in commit list: %s", key)
+		}
+		seen[key] = struct{}{}
 	}
 
 	// Phase 1: Load current state and stage all table updates.
@@ -1122,43 +1138,37 @@ func (c *Catalog) CommitTransaction(ctx context.Context, commits []table.TableCo
 		return nil // all tables had no changes
 	}
 
+	// Sort stagedCommits by identifier to prevent deadlocks in databases with
+	// row-level locking (e.g., Postgres, MySQL) when multiple transactions
+	// commit the same tables in different orders.
+	slices.SortFunc(stagedCommits, func(a, b stagedCommit) int {
+		return cmp.Compare(strings.Join(a.ident, "."), strings.Join(b.ident, "."))
+	})
+
 	// Phase 2: Apply all DB changes atomically in a single transaction.
 	return withWriteTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
 		for _, sc := range stagedCommits {
-			if sc.current != nil {
-				res, err := tx.NewUpdate().Model(&sqlIcebergTable{
-					CatalogName:              c.name,
-					TableNamespace:           sc.ns,
-					TableName:                sc.tblName,
-					IcebergType:              TableType,
-					MetadataLocation:         sql.NullString{Valid: true, String: sc.staged.MetadataLocation()},
-					PreviousMetadataLocation: sql.NullString{Valid: true, String: sc.current.MetadataLocation()},
-				}).WherePK().Where("metadata_location = ?", sc.current.MetadataLocation()).
-					Where("iceberg_type = ?", TableType).
-					Exec(ctx)
-				if err != nil {
-					return fmt.Errorf("error updating table information: %w", err)
-				}
+			res, err := tx.NewUpdate().Model(&sqlIcebergTable{
+				CatalogName:              c.name,
+				TableNamespace:           sc.ns,
+				TableName:                sc.tblName,
+				IcebergType:              TableType,
+				MetadataLocation:         sql.NullString{Valid: true, String: sc.staged.MetadataLocation()},
+				PreviousMetadataLocation: sql.NullString{Valid: true, String: sc.current.MetadataLocation()},
+			}).WherePK().Where("metadata_location = ?", sc.current.MetadataLocation()).
+				Where("iceberg_type = ?", TableType).
+				Exec(ctx)
+			if err != nil {
+				return fmt.Errorf("%w: error updating table information: %v", catalog.ErrCommitFailed, err)
+			}
 
-				n, err := res.RowsAffected()
-				if err != nil {
-					return fmt.Errorf("error updating table information: %w", err)
-				}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("%w: error updating table information: %v", catalog.ErrCommitFailed, err)
+			}
 
-				if n == 0 {
-					return fmt.Errorf("table has been updated by another process: %s.%s", sc.ns, sc.tblName)
-				}
-			} else {
-				_, err := tx.NewInsert().Model(&sqlIcebergTable{
-					CatalogName:      c.name,
-					TableNamespace:   sc.ns,
-					TableName:        sc.tblName,
-					IcebergType:      TableType,
-					MetadataLocation: sql.NullString{Valid: true, String: sc.staged.MetadataLocation()},
-				}).Exec(ctx)
-				if err != nil {
-					return fmt.Errorf("failed to create table: %w", err)
-				}
+			if n == 0 {
+				return fmt.Errorf("%w: table has been updated by another process: %s.%s", catalog.ErrCommitFailed, sc.ns, sc.tblName)
 			}
 		}
 

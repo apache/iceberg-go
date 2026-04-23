@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"maps"
 	"math/rand/v2"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -36,6 +37,7 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/internal"
 	sqlcat "github.com/apache/iceberg-go/catalog/sql"
+	"github.com/apache/iceberg-go/io"
 	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
@@ -1374,6 +1376,119 @@ func (s *SqliteCatalogTestSuite) TestMultiTableTransactionViaSQLCatalog() {
 
 	s.Equal("prod", tables[0].Properties()["env"])
 	s.Equal("prod", tables[1].Properties()["env"])
+}
+
+type mockConflictFS struct {
+	io.LocalFS
+	onWrite func(string)
+}
+
+func (m *mockConflictFS) strip(name string) string {
+	return strings.TrimPrefix(name, "mock://")
+}
+
+func (m *mockConflictFS) Create(name string) (io.FileWriter, error) {
+	if m.onWrite != nil {
+		m.onWrite(name)
+	}
+
+	return m.LocalFS.Create(m.strip(name))
+}
+
+func (m *mockConflictFS) WriteFile(name string, p []byte) error {
+	if m.onWrite != nil {
+		m.onWrite(name)
+	}
+
+	return m.LocalFS.WriteFile(m.strip(name), p)
+}
+
+func (m *mockConflictFS) Open(name string) (io.File, error) {
+	return m.LocalFS.Open(m.strip(name))
+}
+
+func (m *mockConflictFS) Remove(name string) error {
+	return m.LocalFS.Remove(m.strip(name))
+}
+
+func (s *SqliteCatalogTestSuite) TestCommitTransactionDeterministicRollback() {
+	ctx := context.Background()
+
+	// 1. Register mock protocol
+	conflictFS := &mockConflictFS{LocalFS: io.LocalFS{}}
+	io.Register("mock", func(ctx context.Context, u *url.URL, p map[string]string) (io.IO, error) {
+		return conflictFS, nil
+	})
+
+	// 2. Create a catalog with mock:// warehouse
+	cat, err := catalog.Load(ctx, "mock_cat", iceberg.Properties{
+		"uri":             s.catalogUri(),
+		sqlcat.DriverKey:  sqliteshim.ShimName,
+		sqlcat.DialectKey: string(sqlcat.SQLite),
+		"type":            "sql",
+		"warehouse":       "mock://" + s.warehouse,
+	})
+	s.Require().NoError(err)
+	sqlCat := cat.(*sqlcat.Catalog)
+	s.Require().NoError(sqlCat.CreateSQLTables(ctx))
+
+	identA := s.randomTableIdentifier()
+	identB := s.randomTableIdentifier()
+
+	// Ensure A is committed before B by sorting identifiers
+	if strings.Join(identA, ".") > strings.Join(identB, ".") {
+		identA, identB = identB, identA
+	}
+
+	s.Require().NoError(sqlCat.CreateNamespace(ctx, catalog.NamespaceFromIdent(identA), nil))
+	s.Require().NoError(sqlCat.CreateNamespace(ctx, catalog.NamespaceFromIdent(identB), nil))
+
+	tblA, _ := sqlCat.CreateTable(ctx, identA, tableSchemaNested)
+	tblB, _ := sqlCat.CreateTable(ctx, identB, tableSchemaNested)
+
+	// Prepare commits
+	txA := tblA.NewTransaction()
+	s.Require().NoError(txA.SetProperties(map[string]string{"tx": "success_initially"}))
+	tcA, _ := txA.TableCommit()
+
+	txB := tblB.NewTransaction()
+	s.Require().NoError(txB.SetProperties(map[string]string{"tx": "should_fail"}))
+	tcB, _ := txB.TableCommit()
+
+	// 3. Setup the "backstab":
+	// When any table writes its metadata during Phase 1, we check if it's Table B.
+	// If so, we mutate Table B's record in the DB to cause Phase 2 OCC failure.
+	hookFired := false
+	conflictFS.onWrite = func(path string) {
+		// Only fire if the path belongs to Table B.
+		// This ensures Table B has already been Loaded and Staged in Phase 1.
+		if strings.Contains(path, catalog.TableNameFromIdent(identB)) {
+			sqldb := s.getDB()
+			defer sqldb.Close()
+
+			// Mutate Table B's record so its metadata_location no longer matches sc.current.MetadataLocation()
+			res, err := sqldb.Exec("UPDATE iceberg_tables SET metadata_location = 'corrupted' WHERE table_namespace = ? AND table_name = ?",
+				strings.Join(catalog.NamespaceFromIdent(identB), "."), catalog.TableNameFromIdent(identB))
+			s.Require().NoError(err)
+			affected, _ := res.RowsAffected()
+			if affected == 1 {
+				hookFired = true
+			}
+		}
+	}
+
+	// 4. Execute Transaction: A should succeed in DB, then B should fail in DB.
+	err = sqlCat.CommitTransaction(ctx, []table.TableCommit{tcA, tcB})
+	s.Require().Error(err)
+	s.True(hookFired, "The hook should have fired during Phase 1 for Table B")
+	s.ErrorIs(err, catalog.ErrCommitFailed)
+	s.Contains(err.Error(), catalog.TableNameFromIdent(identB))
+
+	// 5. VERIFY ATOMICITY:
+	// Table A must have been rolled back despite its UPDATE statement having executed successfully.
+	loadedA, _ := sqlCat.LoadTable(ctx, identA)
+	_, hasProp := loadedA.Properties()["tx"]
+	s.False(hasProp, "Table A should have rolled back its property update!")
 }
 
 func TestSqlCatalog(t *testing.T) {

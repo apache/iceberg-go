@@ -374,6 +374,53 @@ func (s *SQLIntegrationSuite) TestMultiTableTransaction() {
 	s.Equal("v2", loaded2.Properties()["pipeline"])
 }
 
+func (s *SQLIntegrationSuite) TestMultiTableTransactionWriteData() {
+	s.ensureNamespace()
+
+	ident1 := catalog.ToIdentifier(TestNamespaceIdent, "mtx-write-1")
+	ident2 := catalog.ToIdentifier(TestNamespaceIdent, "mtx-write-2")
+
+	tbl1, err := s.cat.CreateTable(s.ctx, ident1, tableSchemaSimple, catalog.WithLocation(location))
+	s.Require().NoError(err)
+	tbl2, err := s.cat.CreateTable(s.ctx, ident2, tableSchemaSimple, catalog.WithLocation(location))
+	s.Require().NoError(err)
+
+	defer func() {
+		_ = s.cat.DropTable(s.ctx, ident1)
+		_ = s.cat.DropTable(s.ctx, ident2)
+	}()
+
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(s.T(), 0)
+
+	arrSchema, err := table.SchemaToArrowSchema(tbl1.Schema(), nil, false, false)
+	s.Require().NoError(err)
+
+	tblData, err := array.TableFromJSON(mem, arrSchema, []string{`[{"foo": "data", "bar": 42, "baz": true}]`})
+	s.Require().NoError(err)
+	defer tblData.Release()
+
+	mtx, err := catalog.NewMultiTableTransaction(s.cat)
+	s.Require().NoError(err)
+
+	tx1 := tbl1.NewTransaction()
+	s.Require().NoError(tx1.AppendTable(s.ctx, tblData, 100, nil))
+	s.Require().NoError(mtx.AddTransaction(tx1))
+
+	tx2 := tbl2.NewTransaction()
+	s.Require().NoError(tx2.SetProperties(map[string]string{"status": "linked"}))
+	s.Require().NoError(mtx.AddTransaction(tx2))
+
+	s.Require().NoError(mtx.Commit(s.ctx))
+
+	loaded1, _ := s.cat.LoadTable(s.ctx, ident1)
+	s.NotNil(loaded1.CurrentSnapshot())
+	s.Equal("1", loaded1.CurrentSnapshot().Summary.Properties["total-records"])
+
+	loaded2, _ := s.cat.LoadTable(s.ctx, ident2)
+	s.Equal("linked", loaded2.Properties()["status"])
+}
+
 func TestSQLIntegration(t *testing.T) {
 	suite.Run(t, new(SQLIntegrationSuite))
 }
