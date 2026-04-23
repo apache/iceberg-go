@@ -133,9 +133,14 @@ func WithNameMapping(nameMapping iceberg.NameMapping) UpdateSchemaOption {
 // Returns an UpdateSchema instance that can be used to build and apply schema changes.
 func NewUpdateSchema(txn *Transaction, caseSensitive bool, allowIncompatibleChanges bool, opts ...UpdateSchemaOption) *UpdateSchema {
 	u := &UpdateSchema{
-		txn:          txn,
-		schema:       nil,
-		lastColumnID: txn.meta.CurrentSchema().HighestFieldID(),
+		txn:    txn,
+		schema: nil,
+		// Seed from metadata's last-column-id rather than the current schema's
+		// highest field id. Per the Iceberg spec, last-column-id is a monotonic
+		// counter that preserves ids across schema evolution (including
+		// deletions) so that newly-allocated ids never collide with ids still
+		// referenced by historical schemas.
+		lastColumnID: txn.meta.LastColumnID(),
 
 		deletes: make(map[int]struct{}),
 		updates: make(map[int]map[int]iceberg.NestedField),

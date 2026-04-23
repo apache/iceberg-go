@@ -913,3 +913,51 @@ func TestBuildUpdates(t *testing.T) {
 		assert.Equal(t, 0, updates[0].(*setCurrentSchemaUpdate).SchemaID)
 	})
 }
+
+// TestAddColumnMonotonicFieldIDs exercises the case where the table's
+// last-column-id is greater than the current schema's highest field id — for
+// example because a previous schema was added that introduced higher ids, or
+// because the highest-id columns were later dropped. The Iceberg spec requires
+// new field ids to be allocated above last-column-id (never to be reused), so
+// AddColumn must seed its id counter from metadata.LastColumnID() rather than
+// the current schema's HighestFieldID().
+func TestAddColumnMonotonicFieldIDs(t *testing.T) {
+	// Start from originalSchema (field ids 1..11, schema id 1).
+	baseMeta, err := NewMetadata(originalSchema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "", nil)
+	assert.NoError(t, err)
+
+	// Add a second schema that introduces higher field ids. This bumps the
+	// metadata's last-column-id to 13 while the current schema is still the
+	// original (highest field id 11).
+	expanded := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 12, Name: "extra_a", Type: iceberg.PrimitiveTypes.String, Required: false},
+		iceberg.NestedField{ID: 13, Name: "extra_b", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+
+	builder, err := MetadataBuilderFromBase(baseMeta, "")
+	assert.NoError(t, err)
+	assert.NoError(t, builder.AddSchema(expanded))
+
+	meta, err := builder.Build()
+	assert.NoError(t, err)
+
+	assert.Equal(t, 11, meta.CurrentSchema().HighestFieldID(),
+		"precondition: current schema should still be the original with highest id 11")
+	assert.Equal(t, 13, meta.LastColumnID(),
+		"precondition: last-column-id should have been bumped by the expanded schema")
+
+	tbl := New([]string{"id"}, meta, "", nil, nil)
+	txn := tbl.NewTransaction()
+
+	newSchema, err := NewUpdateSchema(txn, true, true).
+		AddColumn([]string{"fresh"}, iceberg.PrimitiveTypes.String, "", false, nil).
+		Apply()
+	assert.NoError(t, err)
+	assert.NotNil(t, newSchema)
+
+	fresh, ok := newSchema.FindFieldByName("fresh")
+	assert.True(t, ok, "new field should be present in the resulting schema")
+	assert.Equal(t, 14, fresh.ID,
+		"new field id must be allocated above metadata.LastColumnID() (13), not reused from the current schema's highest id (11)")
+}
