@@ -78,6 +78,7 @@ Arguments:
 Options:
   -h --help          	show this help messages and exit
   --catalog TEXT     	specify the catalog type [default: rest]
+  --catalog-name TEXT   specify the catalog name to use from the config [default: default]
   --uri TEXT         	specify the catalog URI
   --output TYPE      	output type (json/text) [default: text]
   --credential TEXT  	specify credentials for the catalog
@@ -131,6 +132,7 @@ type Config struct {
 	Value    string `docopt:"VALUE"`
 
 	Catalog         string `docopt:"--catalog"`
+	CatalogName     string `docopt:"--catalog-name"`
 	URI             string `docopt:"--uri"`
 	Output          string `docopt:"--output"`
 	History         bool   `docopt:"--history"`
@@ -147,6 +149,8 @@ type Config struct {
 	SortOrder       string `docopt:"--sort-order"`
 	TargetFileSize  int64  `docopt:"--target-file-size"`
 	PartialProgress bool   `docopt:"--partial-progress"`
+
+	RestOptions *config.RestOptions `docopt:"-"`
 }
 
 func main() {
@@ -174,7 +178,7 @@ func main() {
 		}
 	}
 
-	fileCfg := config.ParseConfig(config.LoadConfig(cfg.Config), "default")
+	fileCfg := config.ParseConfig(config.LoadConfig(cfg.Config), cfg.CatalogName)
 	if fileCfg != nil {
 		mergeConf(fileCfg, &cfg, explicitFlags)
 	}
@@ -205,6 +209,15 @@ func main() {
 
 		if len(cfg.Scope) > 0 {
 			opts = append(opts, rest.WithScope(cfg.Scope))
+		}
+
+		if cfg.RestOptions != nil {
+			if cfg.RestOptions.SigV4Enabled {
+				opts = append(opts, rest.WithSigV4())
+			}
+			if cfg.RestOptions.SigningName != "" || cfg.RestOptions.SigningRegion != "" {
+				opts = append(opts, rest.WithSigV4RegionSvc(cfg.RestOptions.SigningRegion, cfg.RestOptions.SigningName))
+			}
 		}
 
 		if cat, err = rest.NewCatalog(ctx, "rest", cfg.URI, opts...); err != nil {
@@ -550,5 +563,9 @@ func mergeConf(fileConf *config.CatalogConfig, resConfig *Config, explicitFlags 
 	}
 	if !explicitFlags["warehouse"] && len(fileConf.Warehouse) > 0 {
 		resConfig.Warehouse = fileConf.Warehouse
+	}
+
+	if fileConf.RestOptions != nil {
+		resConfig.RestOptions = fileConf.RestOptions
 	}
 }
