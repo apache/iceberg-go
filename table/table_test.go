@@ -1011,7 +1011,7 @@ func (t *TableWritingTestSuite) TestReplaceDataFiles() {
 	t.Require().NoError(err)
 
 	t.Equal(&table.Summary{
-		Operation: table.OpOverwrite,
+		Operation: table.OpReplace,
 		Properties: iceberg.Properties{
 			"added-data-files":       "1",
 			"added-files-size":       "1068",
@@ -1151,7 +1151,7 @@ func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFiles() {
 
 	staged, err := tx.StagedTable()
 	t.Require().NoError(err)
-	t.Equal(table.OpOverwrite, staged.CurrentSnapshot().Summary.Operation)
+	t.Equal(table.OpReplace, staged.CurrentSnapshot().Summary.Operation)
 	t.Equal("1", staged.CurrentSnapshot().Summary.Properties["added-data-files"])
 	t.Equal("2", staged.CurrentSnapshot().Summary.Properties["deleted-data-files"])
 }

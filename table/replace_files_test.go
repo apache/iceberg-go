@@ -136,7 +136,7 @@ func TestReplaceFiles_DataAndDeleteFiles(t *testing.T) {
 
 	snap := tbl.CurrentSnapshot()
 	require.NotNil(t, snap)
-	assert.Equal(t, table.OpOverwrite, snap.Summary.Operation)
+	assert.Equal(t, table.OpReplace, snap.Summary.Operation)
 }
 
 func TestReplaceFiles_DelegatesToReplaceDataFilesWhenNoDeleteFiles(t *testing.T) {
