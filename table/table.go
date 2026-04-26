@@ -349,7 +349,15 @@ type commitOpts struct {
 
 type commitOption func(*commitOpts)
 
+// withCommitBranch sets the target branch for the pre-flight
+// conflict-validation walk. An empty branch is treated as the main
+// branch — Transaction.branch is empty when the caller never picked
+// one explicitly, and the implicit default is main.
 func withCommitBranch(branch string) commitOption {
+	if branch == "" {
+		branch = MainBranch
+	}
+
 	return func(o *commitOpts) { o.branch = branch }
 }
 

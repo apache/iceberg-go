@@ -51,13 +51,22 @@ func (s snapshotUpdate) fastAppend() *snapshotProducer {
 	return newFastAppendFilesProducer(OpAppend, s.txn, s.io, nil, s.snapshotProps)
 }
 
-func (s snapshotUpdate) mergeOverwrite(commitUUID *uuid.UUID) *snapshotProducer {
+// mergeOverwrite builds an overwrite producer. filter is the
+// row-level predicate the caller declared (typically the same one
+// used to plan the deletion); pass nil for a full-table overwrite.
+// validate() reads it to decide between filter-bounded and full
+// checks.
+func (s snapshotUpdate) mergeOverwrite(commitUUID *uuid.UUID, filter iceberg.BooleanExpression) *snapshotProducer {
 	op := s.operation
 	if s.operation == OpOverwrite && s.txn.meta.currentSnapshot() == nil {
 		op = OpAppend
 	}
+	prod := newOverwriteFilesProducer(op, s.txn, s.io, commitUUID, s.snapshotProps)
+	if filter != nil {
+		prod.producerImpl.(*overwriteFiles).filter = filter
+	}
 
-	return newOverwriteFilesProducer(op, s.txn, s.io, commitUUID, s.snapshotProps)
+	return prod
 }
 
 func (s snapshotUpdate) mergeAppend() *snapshotProducer {
@@ -433,7 +442,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID)
+	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID, nil)
 
 	for _, df := range markedForDeletion {
 		updater.deleteDataFile(df)
@@ -757,7 +766,7 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID)
+	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID, nil)
 	if cfg.rewriteSemantics {
 		// mergeOverwrite guarantees an *overwriteFiles producerImpl.
 		updater.producerImpl.(*overwriteFiles).skipDefaultValidator = true
@@ -874,7 +883,7 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID)
+	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID, nil)
 	if cfg.rewriteSemantics {
 		// mergeOverwrite guarantees an *overwriteFiles producerImpl.
 		updater.producerImpl.(*overwriteFiles).skipDefaultValidator = true
@@ -1150,11 +1159,7 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, operation).mergeOverwrite(&commitUUID)
-	// mergeOverwrite guarantees an *overwriteFiles producerImpl; a type
-	// change there should fail loudly rather than silently drop the
-	// filter.
-	updater.producerImpl.(*overwriteFiles).filter = filter
+	updater := t.updateSnapshot(fs, snapshotProps, operation).mergeOverwrite(&commitUUID, filter)
 
 	filesToDelete, filesToRewrite, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
 	if err != nil {
@@ -1193,11 +1198,7 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, OpDelete).mergeOverwrite(&commitUUID)
-	// mergeOverwrite guarantees an *overwriteFiles producerImpl; a type
-	// change there should fail loudly rather than silently drop the
-	// filter.
-	updater.producerImpl.(*overwriteFiles).filter = filter
+	updater := t.updateSnapshot(fs, snapshotProps, OpDelete).mergeOverwrite(&commitUUID, filter)
 
 	filesToDelete, withPartialDeletions, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
 	if err != nil {
@@ -1710,12 +1711,8 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 
 	if len(t.meta.updates) > 0 {
 		t.reqs = append(t.reqs, AssertTableUUID(t.meta.uuid))
-		branch := t.branch
-		if branch == "" {
-			branch = MainBranch
-		}
 		tbl, err := t.tbl.doCommit(ctx, t.meta.updates, t.reqs,
-			withCommitBranch(branch),
+			withCommitBranch(t.branch),
 			withCommitValidators(t.validators...),
 		)
 		if err != nil {

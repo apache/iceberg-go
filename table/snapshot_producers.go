@@ -99,9 +99,14 @@ func (fa *fastAppendFiles) deletedEntries(_ context.Context) ([]iceberg.Manifest
 	return nil, nil
 }
 
-// validate is a no-op for fastAppendFiles: appends are safe under any
-// isolation level. A concurrent append into the same partition can
-// coexist with this append, so there is nothing to reject.
+// validate is a no-op for fastAppendFiles: appends are commutative
+// per the Iceberg spec, and Java's BaseFastAppend / SnapshotProducer
+// likewise skip pre-commit validation for the append path. Two
+// concurrent fast-appends of distinct files merge cleanly into the
+// resulting manifest list. Two concurrent fast-appends adding the
+// same file path is a writer-side error (paths are expected to be
+// unique, normally via UUID-stamped filenames); detecting it here
+// is out of Java parity scope.
 func (fa *fastAppendFiles) validate(_ *conflictContext) error {
 	return nil
 }
