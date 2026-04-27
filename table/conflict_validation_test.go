@@ -103,10 +103,22 @@ func TestErrCommitDiverged_IsTerminal(t *testing.T) {
 
 func newConflictTestMetadata(t *testing.T, branchHead *int64) Metadata {
 	t.Helper()
+
+	return newConflictTestMetadataWithProps(t, branchHead, nil)
+}
+
+// newConflictTestMetadataWithProps mirrors newConflictTestMetadata but
+// merges extraProps over the default property set. Used by tests that
+// need to drive doCommit's retry budget knobs.
+func newConflictTestMetadataWithProps(t *testing.T, branchHead *int64, extraProps iceberg.Properties) Metadata {
+	t.Helper()
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 	)
 	props := iceberg.Properties{PropertyFormatVersion: "2"}
+	for k, v := range extraProps {
+		props[k] = v
+	}
 	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "file:///tmp/conflict-test", props)
 	require.NoError(t, err)
 
