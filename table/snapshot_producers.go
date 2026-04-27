@@ -47,6 +47,13 @@ type producerImpl interface {
 	existingManifests() ([]iceberg.ManifestFile, error)
 	// return the deleted entries for writing delete file manifests
 	deletedEntries(ctx context.Context) ([]iceberg.ManifestEntry, error)
+	// validate runs producer-specific conflict checks against the
+	// current catalog state. Implementations should return a wrapped
+	// ErrCommit* sentinel on conflict, ErrCommitDiverged on terminal
+	// divergence, or nil on success. A no-op default is fine for
+	// producers that are safe against concurrent appends (fast-append
+	// and merge-append).
+	validate(cc *conflictContext) error
 }
 
 func newManifestFileName(num int, commit uuid.UUID) string {
@@ -92,8 +99,35 @@ func (fa *fastAppendFiles) deletedEntries(_ context.Context) ([]iceberg.Manifest
 	return nil, nil
 }
 
+// validate is a no-op for fastAppendFiles: appends are commutative
+// per the Iceberg spec, and Java's BaseFastAppend / SnapshotProducer
+// likewise skip pre-commit validation for the append path. Two
+// concurrent fast-appends of distinct files merge cleanly into the
+// resulting manifest list. Two concurrent fast-appends adding the
+// same file path is a writer-side error (paths are expected to be
+// unique, normally via UUID-stamped filenames); detecting it here
+// is out of Java parity scope.
+func (fa *fastAppendFiles) validate(_ *conflictContext) error {
+	return nil
+}
+
 type overwriteFiles struct {
 	base *snapshotProducer
+
+	// filter is the row-level predicate the caller declared for this
+	// overwrite (e.g. WithOverwriteFilter). Nil or AlwaysTrue means
+	// "overwrite everything" — any concurrent added data file is a
+	// conflict under serializable isolation. validate() reads this to
+	// decide whether to run filter-bounded or full-table checks.
+	filter iceberg.BooleanExpression
+
+	// skipDefaultValidator disables the overwrite's pre-commit
+	// conflict check when the producer is driven by a higher-level
+	// operation that registers its own validator (e.g. compaction via
+	// RewriteDataFiles). Without this flag a compaction would falsely
+	// reject a concurrent append into the same partition, which is
+	// semantically compatible with a rewrite.
+	skipDefaultValidator bool
 }
 
 func newOverwriteFilesProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties) *snapshotProducer {
@@ -192,6 +226,42 @@ func (of *overwriteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 	}
 
 	return existingFiles, nil
+}
+
+// validate rejects the overwrite if a concurrent commit added data
+// files that fall inside the committer's filter region.
+//
+// Isolation level is read per-operation: write.delete.isolation-level
+// for OpDelete (mirroring Java's BaseDeleteFiles), write.update.iso-
+// lation-level otherwise. SNAPSHOT returns nil — concurrent appends
+// are allowed. SERIALIZABLE runs validateAddedDataFilesMatchingFilter
+// against the committer's filter (AlwaysTrue when no filter is set).
+func (of *overwriteFiles) validate(cc *conflictContext) error {
+	if cc == nil || of.skipDefaultValidator {
+		return nil
+	}
+
+	// Delete operations (copy-on-write / merge-on-read deletes that
+	// run through overwriteFiles) must read write.delete.isolation-
+	// level, not write.update.isolation-level. Java's BaseDeleteFiles
+	// makes the same split. Any other op (Overwrite, Replace) reads
+	// the update key.
+	key, defVal := WriteUpdateIsolationLevelKey, WriteUpdateIsolationLevelDefault
+	if of.base.op == OpDelete {
+		key, defVal = WriteDeleteIsolationLevelKey, WriteDeleteIsolationLevelDefault
+	}
+	if readIsolationLevel(of.base.txn.meta.props, key, defVal) != IsolationSerializable {
+		// SNAPSHOT isolation allows concurrent appends into the
+		// filter region. No further checks on this path.
+		return nil
+	}
+
+	filter := of.filter
+	if filter == nil {
+		filter = iceberg.AlwaysTrue{}
+	}
+
+	return validateAddedDataFilesMatchingFilter(cc, filter)
 }
 
 func (of *overwriteFiles) deletedEntries(ctx context.Context) ([]iceberg.ManifestEntry, error) {
@@ -817,6 +887,20 @@ func (sp *snapshotProducer) commit(ctx context.Context) (_ []Update, _ []Require
 	branch := sp.txn.branch
 	if branch == "" {
 		branch = MainBranch
+	}
+
+	// Register this producer's client-side conflict validator on the
+	// transaction. doCommit runs it against the current catalog state
+	// before cat.CommitTable so conflicts the catalog can't see
+	// (partition-filter overlap, referenced-file removal) are caught
+	// pre-flight. Fast/merge-append producers return nil here and
+	// pay only the no-op-closure cost. Nil producerImpl is possible
+	// only in unit tests that exercise commit() directly on a bare
+	// snapshotProducer; guard to keep those tests green.
+	if impl := sp.producerImpl; impl != nil {
+		sp.txn.validators = append(sp.txn.validators, func(cc *conflictContext) error {
+			return impl.validate(cc)
+		})
 	}
 
 	return []Update{

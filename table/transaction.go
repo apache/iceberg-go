@@ -51,13 +51,22 @@ func (s snapshotUpdate) fastAppend() *snapshotProducer {
 	return newFastAppendFilesProducer(OpAppend, s.txn, s.io, nil, s.snapshotProps)
 }
 
-func (s snapshotUpdate) mergeOverwrite(commitUUID *uuid.UUID) *snapshotProducer {
+// mergeOverwrite builds an overwrite producer. filter is the
+// row-level predicate the caller declared (typically the same one
+// used to plan the deletion); pass nil for a full-table overwrite.
+// validate() reads it to decide between filter-bounded and full
+// checks.
+func (s snapshotUpdate) mergeOverwrite(commitUUID *uuid.UUID, filter iceberg.BooleanExpression) *snapshotProducer {
 	op := s.operation
 	if s.operation == OpOverwrite && s.txn.meta.currentSnapshot() == nil {
 		op = OpAppend
 	}
+	prod := newOverwriteFilesProducer(op, s.txn, s.io, commitUUID, s.snapshotProps)
+	if filter != nil {
+		prod.producerImpl.(*overwriteFiles).filter = filter
+	}
 
-	return newOverwriteFilesProducer(op, s.txn, s.io, commitUUID, s.snapshotProps)
+	return prod
 }
 
 func (s snapshotUpdate) mergeAppend() *snapshotProducer {
@@ -70,6 +79,15 @@ type Transaction struct {
 	branch string
 
 	reqs []Requirement
+
+	// validators collects per-producer conflict checks registered
+	// during this transaction's lifetime. doCommit runs them against
+	// the current catalog state before sending CommitTable so
+	// producers can reject commits whose semantics are violated by
+	// concurrent peers (partition-filter overlap, referenced-file
+	// removal). Fast/merge-append producers do not register a
+	// validator (they are safe under any isolation).
+	validators []conflictValidatorFunc
 
 	mx        sync.Mutex
 	committed bool
@@ -424,7 +442,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID)
+	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID, nil)
 
 	for _, df := range markedForDeletion {
 		updater.deleteDataFile(df)
@@ -526,6 +544,20 @@ type WriteOption func(*dataFileCfg)
 type dataFileCfg struct {
 	skipAutoNameMapping bool
 	skipDuplicateCheck  bool
+	rewriteSemantics    bool
+}
+
+// withRewriteSemantics marks an overwrite/replace operation as a
+// rewrite (compaction) rather than a user-facing overwrite. The
+// overwrite producer's default pre-commit conflict validator is
+// bypassed; the caller registers a rewrite-specific validator on the
+// transaction separately via validateNoNewDeletesForRewrittenFiles.
+// Unexported: only RewriteDataFiles passes this; there is no public
+// surface for user code to bypass overwrite isolation.
+func withRewriteSemantics() WriteOption {
+	return func(cfg *dataFileCfg) {
+		cfg.rewriteSemantics = true
+	}
 }
 
 // WithoutAutoNameMapping disables the automatic setting of the schema name
@@ -734,7 +766,11 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID)
+	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID, nil)
+	if cfg.rewriteSemantics {
+		// mergeOverwrite guarantees an *overwriteFiles producerImpl.
+		updater.producerImpl.(*overwriteFiles).skipDefaultValidator = true
+	}
 
 	for _, df := range markedForDeletion {
 		updater.deleteDataFile(df)
@@ -847,7 +883,11 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID)
+	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID, nil)
+	if cfg.rewriteSemantics {
+		// mergeOverwrite guarantees an *overwriteFiles producerImpl.
+		updater.producerImpl.(*overwriteFiles).skipDefaultValidator = true
+	}
 
 	for _, df := range markedDataForDeletion {
 		updater.deleteDataFile(df)
@@ -1119,7 +1159,7 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, operation).mergeOverwrite(&commitUUID)
+	updater := t.updateSnapshot(fs, snapshotProps, operation).mergeOverwrite(&commitUUID, filter)
 
 	filesToDelete, filesToRewrite, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
 	if err != nil {
@@ -1158,7 +1198,7 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, OpDelete).mergeOverwrite(&commitUUID)
+	updater := t.updateSnapshot(fs, snapshotProps, OpDelete).mergeOverwrite(&commitUUID, filter)
 
 	filesToDelete, withPartialDeletions, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
 	if err != nil {
@@ -1671,7 +1711,10 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 
 	if len(t.meta.updates) > 0 {
 		t.reqs = append(t.reqs, AssertTableUUID(t.meta.uuid))
-		tbl, err := t.tbl.doCommit(ctx, t.meta.updates, t.reqs)
+		tbl, err := t.tbl.doCommit(ctx, t.meta.updates, t.reqs,
+			withCommitBranch(t.branch),
+			withCommitValidators(t.validators...),
+		)
 		if err != nil {
 			return tbl, err
 		}
