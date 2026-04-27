@@ -344,6 +344,15 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 			SkipArchive: aws.Bool(c.props.GetBool(SkipArchive, SkipArchiveDefault)),
 		})
 		if err != nil {
+			// Glue's optimistic locking surfaces a VersionId mismatch
+			// as ConcurrentModificationException. Wrap with
+			// table.ErrCommitFailed so the retry loop in
+			// Table.doCommit treats it as a retryable conflict.
+			var concurrentModErr *types.ConcurrentModificationException
+			if errors.As(err, &concurrentModErr) {
+				return nil, "", fmt.Errorf("%w: %w", table.ErrCommitFailed, err)
+			}
+
 			return nil, "", err
 		}
 	} else {

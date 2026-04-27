@@ -433,7 +433,11 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 
 	lock, err := acquireLock(ctx, c.client, database, tableName, c.opts)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to acquire lock for %s.%s: %w", database, tableName, err)
+		// Lock contention is Hive's primary concurrent-writer signal.
+		// Wrap with table.ErrCommitFailed so the retry loop in
+		// Table.doCommit treats it as a retryable conflict.
+		return nil, "", fmt.Errorf("%w: failed to acquire lock for %s.%s: %w",
+			table.ErrCommitFailed, database, tableName, err)
 	}
 	defer func() {
 		_ = lock.Release(ctx)
