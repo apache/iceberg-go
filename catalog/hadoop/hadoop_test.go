@@ -710,3 +710,195 @@ func (s *HadoopCatalogTestSuite) TestIsTableDirFalseNonMatchingFiles() {
 
 	s.False(isTableDir(tableDir))
 }
+
+// Helper to create a fake table directory with a metadata file.
+func (s *HadoopCatalogTestSuite) createFakeTable(ident table.Identifier) {
+	metaDir := filepath.Join(s.cat.tableToPath(ident), "metadata")
+	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
+	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "v1.metadata.json"), []byte("{}"), 0o644))
+}
+
+// ListTables tests
+
+func (s *HadoopCatalogTestSuite) TestListTablesEmpty() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	var tables []table.Identifier
+	for ident, err := range s.cat.ListTables(ctx, []string{"ns"}) {
+		s.Require().NoError(err)
+		tables = append(tables, ident)
+	}
+
+	s.Empty(tables)
+}
+
+func (s *HadoopCatalogTestSuite) TestListTablesWithTables() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	s.createFakeTable([]string{"ns", "tbl1"})
+	s.createFakeTable([]string{"ns", "tbl2"})
+
+	var tables []table.Identifier
+	for ident, err := range s.cat.ListTables(ctx, []string{"ns"}) {
+		s.Require().NoError(err)
+		tables = append(tables, ident)
+	}
+
+	s.Len(tables, 2)
+	s.Contains(tables, table.Identifier{"ns", "tbl1"})
+	s.Contains(tables, table.Identifier{"ns", "tbl2"})
+}
+
+func (s *HadoopCatalogTestSuite) TestListTablesNoNamespace() {
+	ctx := context.Background()
+
+	for _, err := range s.cat.ListTables(ctx, []string{"nope"}) {
+		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+
+		break
+	}
+}
+
+func (s *HadoopCatalogTestSuite) TestListTablesEmptyIdentifier() {
+	ctx := context.Background()
+
+	for _, err := range s.cat.ListTables(ctx, []string{}) {
+		s.Require().Error(err)
+		s.Contains(err.Error(), "must not be empty")
+
+		break
+	}
+}
+
+func (s *HadoopCatalogTestSuite) TestListTablesMixedContent() {
+	// Namespace with tables, child namespaces, and regular files.
+	// Only table dirs should be returned.
+	ctx := context.Background()
+	nsDir := filepath.Join(s.warehouse, "ns")
+	s.Require().NoError(os.Mkdir(nsDir, 0o755))
+
+	s.createFakeTable([]string{"ns", "tbl1"})
+	s.Require().NoError(os.Mkdir(filepath.Join(nsDir, "child_ns"), 0o755))
+	s.Require().NoError(os.WriteFile(filepath.Join(nsDir, "stray_file.txt"), nil, 0o644))
+
+	var tables []table.Identifier
+	for ident, err := range s.cat.ListTables(ctx, []string{"ns"}) {
+		s.Require().NoError(err)
+		tables = append(tables, ident)
+	}
+
+	s.Len(tables, 1)
+	s.Equal(table.Identifier{"ns", "tbl1"}, tables[0])
+}
+
+func (s *HadoopCatalogTestSuite) TestListTablesNestedNamespace() {
+	ctx := context.Background()
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.warehouse, "a", "b"), 0o755))
+
+	s.createFakeTable([]string{"a", "b", "tbl1"})
+
+	var tables []table.Identifier
+	for ident, err := range s.cat.ListTables(ctx, []string{"a", "b"}) {
+		s.Require().NoError(err)
+		tables = append(tables, ident)
+	}
+
+	s.Len(tables, 1)
+	s.Equal(table.Identifier{"a", "b", "tbl1"}, tables[0])
+}
+
+// DropTable tests
+
+func (s *HadoopCatalogTestSuite) TestDropTable() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+	s.createFakeTable([]string{"ns", "tbl"})
+
+	err := s.cat.DropTable(ctx, []string{"ns", "tbl"})
+	s.Require().NoError(err)
+
+	// Verify the table directory is completely removed.
+	_, statErr := os.Stat(filepath.Join(s.warehouse, "ns", "tbl"))
+	s.True(os.IsNotExist(statErr))
+}
+
+func (s *HadoopCatalogTestSuite) TestDropTableNotExists() {
+	err := s.cat.DropTable(context.Background(), []string{"ns", "tbl"})
+	s.ErrorIs(err, catalog.ErrNoSuchTable)
+}
+
+func (s *HadoopCatalogTestSuite) TestDropTableVerifyCleanup() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+	s.createFakeTable([]string{"ns", "tbl"})
+
+	// Add a data file to confirm everything is purged.
+	dataDir := filepath.Join(s.warehouse, "ns", "tbl", "data")
+	s.Require().NoError(os.MkdirAll(dataDir, 0o755))
+	s.Require().NoError(os.WriteFile(filepath.Join(dataDir, "00000-0-0-00000.parquet"), []byte("data"), 0o644))
+
+	err := s.cat.DropTable(ctx, []string{"ns", "tbl"})
+	s.Require().NoError(err)
+
+	_, statErr := os.Stat(filepath.Join(s.warehouse, "ns", "tbl"))
+	s.True(os.IsNotExist(statErr))
+}
+
+func (s *HadoopCatalogTestSuite) TestDropTableShortIdentifier() {
+	err := s.cat.DropTable(context.Background(), []string{"tbl"})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "at least a namespace and table name")
+}
+
+func (s *HadoopCatalogTestSuite) TestDropTableNamespacePreserved() {
+	// Dropping a table should not affect the parent namespace directory.
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+	s.createFakeTable([]string{"ns", "tbl"})
+
+	s.Require().NoError(s.cat.DropTable(ctx, []string{"ns", "tbl"}))
+
+	// Namespace dir should still exist.
+	info, err := os.Stat(filepath.Join(s.warehouse, "ns"))
+	s.Require().NoError(err)
+	s.True(info.IsDir())
+}
+
+// RenameTable tests
+
+func (s *HadoopCatalogTestSuite) TestRenameTableUnsupported() {
+	_, err := s.cat.RenameTable(context.Background(), []string{"ns", "old"}, []string{"ns", "new"})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "not supported")
+}
+
+func (s *HadoopCatalogTestSuite) TestListTablesNamespaceIsFile() {
+	ctx := context.Background()
+	s.Require().NoError(os.WriteFile(filepath.Join(s.warehouse, "not_a_ns"), nil, 0o644))
+
+	for _, err := range s.cat.ListTables(ctx, []string{"not_a_ns"}) {
+		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+
+		break
+	}
+}
+
+func (s *HadoopCatalogTestSuite) TestListTablesIdentifierIsolation() {
+	// Verify that yielded identifiers don't alias the namespace slice.
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+	s.createFakeTable([]string{"ns", "tbl1"})
+	s.createFakeTable([]string{"ns", "tbl2"})
+
+	var tables []table.Identifier
+	for ident, err := range s.cat.ListTables(ctx, []string{"ns"}) {
+		s.Require().NoError(err)
+		tables = append(tables, ident)
+	}
+
+	s.Len(tables, 2)
+	// Each identifier should be independent — no aliasing.
+	s.NotEqual(tables[0][len(tables[0])-1], tables[1][len(tables[1])-1])
+}
