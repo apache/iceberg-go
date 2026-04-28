@@ -386,3 +386,244 @@ func (s *HadoopCatalogTestSuite) TestFindVersionMixedGzipAndPlain() {
 	s.Require().NoError(err)
 	s.Equal(3, ver)
 }
+
+// CreateNamespace tests
+
+func (s *HadoopCatalogTestSuite) TestCreateNamespace() {
+	err := s.cat.CreateNamespace(context.Background(), []string{"ns"}, nil)
+	s.Require().NoError(err)
+
+	info, err := os.Stat(filepath.Join(s.warehouse, "ns"))
+	s.Require().NoError(err)
+	s.True(info.IsDir())
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateNamespaceAlreadyExists() {
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	err := s.cat.CreateNamespace(context.Background(), []string{"ns"}, nil)
+	s.ErrorIs(err, catalog.ErrNamespaceAlreadyExists)
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateNamespaceNested() {
+	err := s.cat.CreateNamespace(context.Background(), []string{"a", "b", "c"}, nil)
+	s.Require().NoError(err)
+
+	// Verify leaf and intermediate directories exist
+	for _, p := range []string{
+		filepath.Join(s.warehouse, "a"),
+		filepath.Join(s.warehouse, "a", "b"),
+		filepath.Join(s.warehouse, "a", "b", "c"),
+	} {
+		info, err := os.Stat(p)
+		s.Require().NoError(err)
+		s.True(info.IsDir())
+	}
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateNamespaceWithProperties() {
+	err := s.cat.CreateNamespace(context.Background(), []string{"ns"}, iceberg.Properties{"key": "val"})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "properties are not supported")
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateNamespaceNilProperties() {
+	err := s.cat.CreateNamespace(context.Background(), []string{"ns"}, nil)
+	s.Require().NoError(err)
+
+	info, err := os.Stat(filepath.Join(s.warehouse, "ns"))
+	s.Require().NoError(err)
+	s.True(info.IsDir())
+}
+
+// DropNamespace tests
+
+func (s *HadoopCatalogTestSuite) TestDropNamespace() {
+	nsDir := filepath.Join(s.warehouse, "ns")
+	s.Require().NoError(os.Mkdir(nsDir, 0o755))
+
+	err := s.cat.DropNamespace(context.Background(), []string{"ns"})
+	s.Require().NoError(err)
+
+	_, err = os.Stat(nsDir)
+	s.True(os.IsNotExist(err))
+}
+
+func (s *HadoopCatalogTestSuite) TestDropNamespaceNotExists() {
+	err := s.cat.DropNamespace(context.Background(), []string{"nope"})
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+}
+
+func (s *HadoopCatalogTestSuite) TestDropNamespaceNotEmptyWithTable() {
+	nsDir := filepath.Join(s.warehouse, "ns")
+	metaDir := filepath.Join(nsDir, "tbl", "metadata")
+	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
+	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "v1.metadata.json"), nil, 0o644))
+
+	err := s.cat.DropNamespace(context.Background(), []string{"ns"})
+	s.ErrorIs(err, catalog.ErrNamespaceNotEmpty)
+}
+
+func (s *HadoopCatalogTestSuite) TestDropNamespaceNotEmptyWithChildNamespace() {
+	nsDir := filepath.Join(s.warehouse, "ns")
+	s.Require().NoError(os.MkdirAll(filepath.Join(nsDir, "child_ns"), 0o755))
+
+	err := s.cat.DropNamespace(context.Background(), []string{"ns"})
+	s.ErrorIs(err, catalog.ErrNamespaceNotEmpty)
+}
+
+// CheckNamespaceExists tests
+
+func (s *HadoopCatalogTestSuite) TestCheckNamespaceExistsTrue() {
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	exists, err := s.cat.CheckNamespaceExists(context.Background(), []string{"ns"})
+	s.Require().NoError(err)
+	s.True(exists)
+}
+
+func (s *HadoopCatalogTestSuite) TestCheckNamespaceExistsFalse() {
+	exists, err := s.cat.CheckNamespaceExists(context.Background(), []string{"nope"})
+	s.Require().NoError(err)
+	s.False(exists)
+}
+
+// ListNamespaces tests
+
+func (s *HadoopCatalogTestSuite) TestListNamespacesRoot() {
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns1"), 0o755))
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns2"), 0o755))
+
+	namespaces, err := s.cat.ListNamespaces(context.Background(), nil)
+	s.Require().NoError(err)
+	s.Len(namespaces, 2)
+	s.Contains(namespaces, table.Identifier{"ns1"})
+	s.Contains(namespaces, table.Identifier{"ns2"})
+}
+
+func (s *HadoopCatalogTestSuite) TestListNamespacesEmpty() {
+	namespaces, err := s.cat.ListNamespaces(context.Background(), nil)
+	s.Require().NoError(err)
+	s.Empty(namespaces)
+	s.NotNil(namespaces)
+}
+
+func (s *HadoopCatalogTestSuite) TestListNamespacesNested() {
+	parentDir := filepath.Join(s.warehouse, "a")
+	s.Require().NoError(os.MkdirAll(filepath.Join(parentDir, "child1"), 0o755))
+	s.Require().NoError(os.MkdirAll(filepath.Join(parentDir, "child2"), 0o755))
+
+	namespaces, err := s.cat.ListNamespaces(context.Background(), []string{"a"})
+	s.Require().NoError(err)
+	s.Len(namespaces, 2)
+	s.Contains(namespaces, table.Identifier{"child1"})
+	s.Contains(namespaces, table.Identifier{"child2"})
+}
+
+func (s *HadoopCatalogTestSuite) TestListNamespacesParentNotExists() {
+	_, err := s.cat.ListNamespaces(context.Background(), []string{"nope"})
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+}
+
+func (s *HadoopCatalogTestSuite) TestListNamespacesParentIsFile() {
+	filePath := filepath.Join(s.warehouse, "a_file")
+	s.Require().NoError(os.WriteFile(filePath, nil, 0o644))
+
+	_, err := s.cat.ListNamespaces(context.Background(), []string{"a_file"})
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+}
+
+// LoadNamespaceProperties tests
+
+func (s *HadoopCatalogTestSuite) TestLoadNamespaceProperties() {
+	nsDir := filepath.Join(s.warehouse, "ns")
+	s.Require().NoError(os.Mkdir(nsDir, 0o755))
+
+	props, err := s.cat.LoadNamespaceProperties(context.Background(), []string{"ns"})
+	s.Require().NoError(err)
+	s.Equal(iceberg.Properties{"location": nsDir}, props)
+}
+
+func (s *HadoopCatalogTestSuite) TestLoadNamespacePropertiesNotExists() {
+	_, err := s.cat.LoadNamespaceProperties(context.Background(), []string{"nope"})
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+}
+
+func (s *HadoopCatalogTestSuite) TestLoadNamespacePropertiesFileNotDir() {
+	filePath := filepath.Join(s.warehouse, "not_a_ns")
+	s.Require().NoError(os.WriteFile(filePath, nil, 0o644))
+
+	_, err := s.cat.LoadNamespaceProperties(context.Background(), []string{"not_a_ns"})
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+}
+
+// UpdateNamespaceProperties test
+
+func (s *HadoopCatalogTestSuite) TestUpdateNamespacePropertiesUnsupported() {
+	_, err := s.cat.UpdateNamespaceProperties(context.Background(), []string{"ns"}, nil, nil)
+	s.Require().Error(err)
+	s.Contains(err.Error(), "properties are not supported")
+}
+
+func (s *HadoopCatalogTestSuite) TestDropNamespaceWithRegularFilesOnly() {
+	// A namespace dir containing only regular files (no subdirectories)
+	// should still return ErrNamespaceNotEmpty.
+	nsDir := filepath.Join(s.warehouse, "ns")
+	s.Require().NoError(os.Mkdir(nsDir, 0o755))
+	s.Require().NoError(os.WriteFile(filepath.Join(nsDir, "stray_file.txt"), nil, 0o644))
+
+	err := s.cat.DropNamespace(context.Background(), []string{"ns"})
+	s.ErrorIs(err, catalog.ErrNamespaceNotEmpty)
+}
+
+func (s *HadoopCatalogTestSuite) TestCheckNamespaceExistsFileNotDir() {
+	// A file at the namespace path should return false (not a directory).
+	filePath := filepath.Join(s.warehouse, "not_a_dir")
+	s.Require().NoError(os.WriteFile(filePath, nil, 0o644))
+
+	exists, err := s.cat.CheckNamespaceExists(context.Background(), []string{"not_a_dir"})
+	s.Require().NoError(err)
+	s.False(exists)
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateNamespaceEmptyIdentifier() {
+	err := s.cat.CreateNamespace(context.Background(), []string{}, nil)
+	s.Require().Error(err)
+	s.Contains(err.Error(), "must not be empty")
+}
+
+func (s *HadoopCatalogTestSuite) TestDropNamespaceEmptyIdentifier() {
+	err := s.cat.DropNamespace(context.Background(), []string{})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "must not be empty")
+}
+
+func (s *HadoopCatalogTestSuite) TestLoadNamespacePropertiesNested() {
+	// Verify nested namespace returns the correct absolute path.
+	nsDir := filepath.Join(s.warehouse, "a", "b", "c")
+	s.Require().NoError(os.MkdirAll(nsDir, 0o755))
+
+	props, err := s.cat.LoadNamespaceProperties(context.Background(), []string{"a", "b", "c"})
+	s.Require().NoError(err)
+	s.Equal(nsDir, props["location"])
+}
+
+func (s *HadoopCatalogTestSuite) TestListNamespacesMixedContent() {
+	// Directory with tables, namespaces, and regular files.
+	// Only non-table directories should appear.
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "child_ns"), 0o755))
+
+	// Create a table dir
+	tableDir := filepath.Join(s.warehouse, "my_table")
+	metaDir := filepath.Join(tableDir, "metadata")
+	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
+	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "v1.metadata.json"), nil, 0o644))
+
+	// Regular file
+	s.Require().NoError(os.WriteFile(filepath.Join(s.warehouse, "README.txt"), nil, 0o644))
+
+	namespaces, err := s.cat.ListNamespaces(context.Background(), nil)
+	s.Require().NoError(err)
+	s.Len(namespaces, 1)
+	s.Equal(table.Identifier{"child_ns"}, namespaces[0])
+}
