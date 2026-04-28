@@ -18,7 +18,6 @@
 package dv
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
@@ -42,7 +41,7 @@ const (
 // DeserializeDV parses a deletion vector blob and returns a bitmap of deleted positions.
 //
 // The DV binary format is:
-//   - Length (4 bytes, big-endian): size of magic + bitmap data
+//   - Length (4 bytes, big-endian): size of magic + bitmap data, excluding CRC-32
 //   - Magic  (4 bytes, little-endian): must be 0x6439D3D1
 //   - Bitmap (variable): roaring bitmap in Iceberg portable format
 //   - CRC-32 (4 bytes, big-endian): checksum over magic + bitmap
@@ -77,7 +76,7 @@ func DeserializeDV(data []byte, expectedCardinality int64) (*RoaringPositionBitm
 
 	// 4. Deserialize roaring bitmap from the inner bytes (after length + magic, before CRC)
 	roaringStart := dvLengthSize + dvMagicSize
-	bitmap, err := DeserializeRoaringPositionBitmap(bytes.NewReader(data[roaringStart:bitmapDataEnd]))
+	bitmap, err := DeserializeRoaringPositionBitmap(data[roaringStart:bitmapDataEnd])
 	if err != nil {
 		return nil, fmt.Errorf("deserialize deletion vector bitmap: %w", err)
 	}

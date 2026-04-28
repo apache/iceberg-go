@@ -193,14 +193,14 @@ func TestDeserializeDVAllContainerTypes(t *testing.T) {
 	assert.False(t, bm.Contains(131072))
 
 	// Key 1, array container: positions (1<<32)|10 and (1<<32)|20
-	assert.True(t, bm.Contains((int64(1)<<32)|10))
-	assert.True(t, bm.Contains((int64(1)<<32)|20))
+	assert.True(t, bm.Contains((uint64(1)<<32)|10))
+	assert.True(t, bm.Contains((uint64(1)<<32)|20))
 
 	// Key 1, run container: starts at (1<<32)|65546
-	assert.True(t, bm.Contains((int64(1)<<32)|65546))
+	assert.True(t, bm.Contains((uint64(1)<<32)|65546))
 
 	// Key 1, bitmap container: starts at (1<<32)|131073
-	assert.True(t, bm.Contains((int64(1)<<32)|131073))
+	assert.True(t, bm.Contains((uint64(1)<<32)|131073))
 }
 
 // Why: validates DV decoding with values that span both small and large 32-bit ranges in a single key.

@@ -32,7 +32,7 @@ import (
 func TestDeserializeRoaringBitmapJavaEmpty(t *testing.T) {
 	data := readDVTestData(t, "64mapempty.bin")
 
-	bm, err := DeserializeRoaringPositionBitmap(bytes.NewReader(data))
+	bm, err := DeserializeRoaringPositionBitmap(data)
 	require.NoError(t, err)
 
 	assert.True(t, bm.IsEmpty())
@@ -45,14 +45,14 @@ func TestDeserializeRoaringBitmapJavaEmpty(t *testing.T) {
 func TestDeserializeRoaringBitmapJavaSpreadValues(t *testing.T) {
 	data := readDVTestData(t, "64mapspreadvals.bin")
 
-	bm, err := DeserializeRoaringPositionBitmap(bytes.NewReader(data))
+	bm, err := DeserializeRoaringPositionBitmap(data)
 	require.NoError(t, err)
 
 	assert.Equal(t, int64(100), bm.Cardinality())
 	assert.True(t, bm.Contains(0))
-	assert.True(t, bm.Contains((int64(3)<<32)|7))
-	assert.True(t, bm.Contains((int64(9)<<32)|9))
-	assert.False(t, bm.Contains(int64(10)<<32))
+	assert.True(t, bm.Contains((uint64(3)<<32)|7))
+	assert.True(t, bm.Contains((uint64(9)<<32)|9))
+	assert.False(t, bm.Contains(uint64(10)<<32))
 }
 
 // Why: validates cross-impl compatibility for a simple 32-bit-only bitmap.
@@ -61,11 +61,11 @@ func TestDeserializeRoaringBitmapJavaSpreadValues(t *testing.T) {
 func TestDeserializeRoaringBitmapJava32BitValues(t *testing.T) {
 	data := readDVTestData(t, "64map32bitvals.bin")
 
-	bm, err := DeserializeRoaringPositionBitmap(bytes.NewReader(data))
+	bm, err := DeserializeRoaringPositionBitmap(data)
 	require.NoError(t, err)
 
 	assert.Equal(t, int64(10), bm.Cardinality())
-	for i := int64(0); i < 10; i++ {
+	for i := uint64(0); i < 10; i++ {
 		assert.True(t, bm.Contains(i), "expected position %d to be set", i)
 	}
 	assert.False(t, bm.Contains(10))
@@ -75,7 +75,7 @@ func TestDeserializeRoaringBitmapJava32BitValues(t *testing.T) {
 // Condition: empty input stream.
 // Assertion: returns an error containing "read bitmap count".
 func TestDeserializeRoaringBitmapTruncatedInput(t *testing.T) {
-	_, err := DeserializeRoaringPositionBitmap(bytes.NewReader(nil))
+	_, err := DeserializeRoaringPositionBitmap(nil)
 	assert.ErrorContains(t, err, "read bitmap count")
 }
 
@@ -86,7 +86,7 @@ func TestDeserializeRoaringBitmapNegativeCount(t *testing.T) {
 	var buf bytes.Buffer
 	require.NoError(t, binary.Write(&buf, binary.LittleEndian, int64(-1)))
 
-	_, err := DeserializeRoaringPositionBitmap(bytes.NewReader(buf.Bytes()))
+	_, err := DeserializeRoaringPositionBitmap(buf.Bytes())
 	assert.ErrorContains(t, err, "invalid bitmap count")
 }
 
@@ -97,7 +97,7 @@ func TestDeserializeRoaringBitmapExcessiveCount(t *testing.T) {
 	var buf bytes.Buffer
 	require.NoError(t, binary.Write(&buf, binary.LittleEndian, maxBitmapCount+1))
 
-	_, err := DeserializeRoaringPositionBitmap(bytes.NewReader(buf.Bytes()))
+	_, err := DeserializeRoaringPositionBitmap(buf.Bytes())
 	assert.ErrorContains(t, err, "exceeds maximum")
 }
 
@@ -108,7 +108,7 @@ func TestDeserializeRoaringBitmapTruncatedBeforeKey(t *testing.T) {
 	var buf bytes.Buffer
 	require.NoError(t, binary.Write(&buf, binary.LittleEndian, int64(1)))
 
-	_, err := DeserializeRoaringPositionBitmap(bytes.NewReader(buf.Bytes()))
+	_, err := DeserializeRoaringPositionBitmap(buf.Bytes())
 	assert.ErrorContains(t, err, "read key 0")
 }
 
@@ -117,8 +117,8 @@ func TestDeserializeRoaringBitmapTruncatedBeforeKey(t *testing.T) {
 // Assertion: returns an error containing "keys must be ascending".
 func TestDeserializeRoaringBitmapNonAscendingKeys(t *testing.T) {
 	bm := NewRoaringPositionBitmap()
-	bm.Set((int64(5) << 32) | 1)
-	bm.Set((int64(3) << 32) | 1)
+	bm.Set((uint64(5) << 32) | 1)
+	bm.Set((uint64(3) << 32) | 1)
 
 	var buf bytes.Buffer
 	require.NoError(t, binary.Write(&buf, binary.LittleEndian, int64(2)))
@@ -129,7 +129,7 @@ func TestDeserializeRoaringBitmapNonAscendingKeys(t *testing.T) {
 	_, err = bm.bitmaps[3].WriteTo(&buf)
 	require.NoError(t, err)
 
-	_, err = DeserializeRoaringPositionBitmap(bytes.NewReader(buf.Bytes()))
+	_, err = DeserializeRoaringPositionBitmap(buf.Bytes())
 	assert.ErrorContains(t, err, "keys must be ascending")
 }
 
@@ -141,7 +141,7 @@ func TestDeserializeRoaringBitmapTruncatedAfterKey(t *testing.T) {
 	require.NoError(t, binary.Write(&buf, binary.LittleEndian, int64(1)))
 	require.NoError(t, binary.Write(&buf, binary.LittleEndian, uint32(0)))
 
-	_, err := DeserializeRoaringPositionBitmap(bytes.NewReader(buf.Bytes()))
+	_, err := DeserializeRoaringPositionBitmap(buf.Bytes())
 	assert.ErrorContains(t, err, "read bitmap for key 0")
 }
 
@@ -154,32 +154,19 @@ func TestRoaringBitmapSetContainsAndCardinality(t *testing.T) {
 	bm.Set(0)
 	bm.Set(42)
 	bm.Set(1000)
-	bm.Set((int64(1) << 32) | 5)
-	bm.Set((int64(1) << 32) | 999)
-	bm.Set((int64(3) << 32) | 1)
+	bm.Set((uint64(1) << 32) | 5)
+	bm.Set((uint64(1) << 32) | 999)
+	bm.Set((uint64(3) << 32) | 1)
 
 	assert.False(t, bm.IsEmpty())
 	assert.Equal(t, int64(6), bm.Cardinality())
 	assert.True(t, bm.Contains(0))
-	assert.True(t, bm.Contains((int64(1)<<32)|999))
-	assert.True(t, bm.Contains((int64(3)<<32)|1))
+	assert.True(t, bm.Contains((uint64(1)<<32)|999))
+	assert.True(t, bm.Contains((uint64(3)<<32)|1))
 	assert.False(t, bm.Contains(1))
-	assert.False(t, bm.Contains((int64(1)<<32)|6))
-	assert.False(t, bm.Contains((int64(2)<<32)|1))
-	assert.False(t, bm.Contains(int64(100)<<32))
-}
-
-// Why: negative positions should be silently ignored by Set and return false from Contains.
-// Condition: Set a negative position and query it.
-// Assertion: bitmap remains empty, Contains returns false.
-func TestRoaringBitmapNegativePosition(t *testing.T) {
-	bm := NewRoaringPositionBitmap()
-	bm.Set(-1)
-	bm.Set(-100)
-
-	assert.True(t, bm.IsEmpty())
-	assert.False(t, bm.Contains(-1))
-	assert.False(t, bm.Contains(-100))
+	assert.False(t, bm.Contains((uint64(1)<<32)|6))
+	assert.False(t, bm.Contains((uint64(2)<<32)|1))
+	assert.False(t, bm.Contains(uint64(100)<<32))
 }
 
 // Why: Serialize and DeserializeRoaringPositionBitmap together define the Go encoding contract for non-empty bitmaps.
@@ -187,15 +174,15 @@ func TestRoaringBitmapNegativePosition(t *testing.T) {
 // Assertion: serialization succeeds, deserialization succeeds, cardinality is preserved, and all original positions remain present.
 func TestRoaringBitmapSerializeRoundTrip(t *testing.T) {
 	bm := NewRoaringPositionBitmap()
-	positions := []int64{
+	positions := []uint64{
 		0,
 		1,
 		100,
 		65535,
-		(int64(1) << 32) | 42,
-		(int64(1) << 32) | 9999,
-		int64(5) << 32,
-		(int64(5) << 32) | 1,
+		(uint64(1) << 32) | 42,
+		(uint64(1) << 32) | 9999,
+		uint64(5) << 32,
+		(uint64(5) << 32) | 1,
 	}
 	for _, pos := range positions {
 		bm.Set(pos)
@@ -204,7 +191,7 @@ func TestRoaringBitmapSerializeRoundTrip(t *testing.T) {
 	var buf bytes.Buffer
 	require.NoError(t, bm.Serialize(&buf))
 
-	got, err := DeserializeRoaringPositionBitmap(bytes.NewReader(buf.Bytes()))
+	got, err := DeserializeRoaringPositionBitmap(buf.Bytes())
 	require.NoError(t, err)
 
 	assert.Equal(t, bm.Cardinality(), got.Cardinality())
@@ -222,7 +209,7 @@ func TestRoaringBitmapEmptyRoundTrip(t *testing.T) {
 	var buf bytes.Buffer
 	require.NoError(t, bm.Serialize(&buf))
 
-	got, err := DeserializeRoaringPositionBitmap(bytes.NewReader(buf.Bytes()))
+	got, err := DeserializeRoaringPositionBitmap(buf.Bytes())
 	require.NoError(t, err)
 
 	assert.True(t, got.IsEmpty())

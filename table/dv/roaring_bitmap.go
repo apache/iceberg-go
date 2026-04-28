@@ -18,9 +18,11 @@
 package dv
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"sort"
 
@@ -52,10 +54,8 @@ func NewRoaringPositionBitmap() *RoaringPositionBitmap {
 
 // Set marks a position in the bitmap.
 // Position must be non-negative.
-func (b *RoaringPositionBitmap) Set(pos int64) {
-	if pos < 0 {
-		return
-	}
+func (b *RoaringPositionBitmap) Set(pos uint64) {
+
 	key := uint32(pos >> 32)
 	low := uint32(pos)
 	bm, ok := b.bitmaps[key]
@@ -67,10 +67,7 @@ func (b *RoaringPositionBitmap) Set(pos int64) {
 }
 
 // Contains checks if a position is set.
-func (b *RoaringPositionBitmap) Contains(pos int64) bool {
-	if pos < 0 {
-		return false
-	}
+func (b *RoaringPositionBitmap) Contains(pos uint64) bool {
 	key := uint32(pos >> 32)
 	low := uint32(pos)
 	bm, ok := b.bitmaps[key]
@@ -127,7 +124,9 @@ func (b *RoaringPositionBitmap) Serialize(w io.Writer) error {
 
 // DeserializeRoaringPositionBitmap reads a bitmap from the Iceberg portable format.
 // Format: [count] { [key][bitmap] } .....{[key_n][bitmap_n]}
-func DeserializeRoaringPositionBitmap(r io.Reader) (*RoaringPositionBitmap, error) {
+func DeserializeRoaringPositionBitmap(data []byte) (*RoaringPositionBitmap, error) {
+	r := bytes.NewReader(data)
+
 	var count int64
 	if err := binary.Read(r, binary.LittleEndian, &count); err != nil {
 		return nil, fmt.Errorf("read bitmap count: %w", err)
@@ -145,7 +144,7 @@ func DeserializeRoaringPositionBitmap(r io.Reader) (*RoaringPositionBitmap, erro
 	var lastKey uint32
 	hasLastKey := false
 
-	for i := int64(0); i < count; i++ {
+	for i := range count {
 		var key uint32
 		if err := binary.Read(r, binary.LittleEndian, &key); err != nil {
 			return nil, fmt.Errorf("read key %d: %w", i, err)
@@ -168,11 +167,5 @@ func DeserializeRoaringPositionBitmap(r io.Reader) (*RoaringPositionBitmap, erro
 
 // sortedKeys returns the bitmap keys in ascending order.
 func (b *RoaringPositionBitmap) sortedKeys() []uint32 {
-	keys := make([]uint32, 0, len(b.bitmaps))
-	for k := range b.bitmaps {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-
-	return keys
+	return slices.Sorted(maps.Keys(b.bitmaps))
 }
