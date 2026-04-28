@@ -33,6 +33,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/glue"
+	"github.com/apache/iceberg-go/catalog/hadoop"
 	"github.com/apache/iceberg-go/catalog/hive"
 	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/apache/iceberg-go/config"
@@ -343,6 +344,12 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 		}
 
 		if cat, err = hive.NewCatalog(props); err != nil {
+			log.Fatal(err)
+		}
+	case catalog.Hadoop:
+		if cat, err = hadoop.NewCatalog("hadoop", cfg.Warehouse, iceberg.Properties{
+			"warehouse": cfg.Warehouse,
+		}); err != nil {
 			log.Fatal(err)
 		}
 	default:
