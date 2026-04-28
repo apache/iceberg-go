@@ -854,57 +854,6 @@ func (s *HadoopCatalogTestSuite) TestDropTableShortIdentifier() {
 	s.Contains(err.Error(), "at least a namespace and table name")
 }
 
-func (s *HadoopCatalogTestSuite) TestDropTableNamespacePreserved() {
-	// Dropping a table should not affect the parent namespace directory.
-	ctx := context.Background()
-	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
-	s.createFakeTable([]string{"ns", "tbl"})
-
-	s.Require().NoError(s.cat.DropTable(ctx, []string{"ns", "tbl"}))
-
-	// Namespace dir should still exist.
-	info, err := os.Stat(filepath.Join(s.warehouse, "ns"))
-	s.Require().NoError(err)
-	s.True(info.IsDir())
-}
-
-// RenameTable tests
-
-func (s *HadoopCatalogTestSuite) TestRenameTableUnsupported() {
-	_, err := s.cat.RenameTable(context.Background(), []string{"ns", "old"}, []string{"ns", "new"})
-	s.Require().Error(err)
-	s.Contains(err.Error(), "not supported")
-}
-
-func (s *HadoopCatalogTestSuite) TestListTablesNamespaceIsFile() {
-	ctx := context.Background()
-	s.Require().NoError(os.WriteFile(filepath.Join(s.warehouse, "not_a_ns"), nil, 0o644))
-
-	for _, err := range s.cat.ListTables(ctx, []string{"not_a_ns"}) {
-		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
-
-		break
-	}
-}
-
-func (s *HadoopCatalogTestSuite) TestListTablesIdentifierIsolation() {
-	// Verify that yielded identifiers don't alias the namespace slice.
-	ctx := context.Background()
-	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
-	s.createFakeTable([]string{"ns", "tbl1"})
-	s.createFakeTable([]string{"ns", "tbl2"})
-
-	var tables []table.Identifier
-	for ident, err := range s.cat.ListTables(ctx, []string{"ns"}) {
-		s.Require().NoError(err)
-		tables = append(tables, ident)
-	}
-
-	s.Len(tables, 2)
-	// Each identifier should be independent — no aliasing.
-	s.NotEqual(tables[0][len(tables[0])-1], tables[1][len(tables[1])-1])
-}
-
 // CreateTable tests
 
 func (s *HadoopCatalogTestSuite) testSchema() *iceberg.Schema {
@@ -1051,6 +1000,57 @@ func (s *HadoopCatalogTestSuite) TestCreateTableShortIdentifier() {
 	_, err := s.cat.CreateTable(ctx, []string{"tbl"}, s.testSchema())
 	s.Require().Error(err)
 	s.Contains(err.Error(), "at least a namespace and table name")
+}
+
+func (s *HadoopCatalogTestSuite) TestDropTableNamespacePreserved() {
+	// Dropping a table should not affect the parent namespace directory.
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+	s.createFakeTable([]string{"ns", "tbl"})
+
+	s.Require().NoError(s.cat.DropTable(ctx, []string{"ns", "tbl"}))
+
+	// Namespace dir should still exist.
+	info, err := os.Stat(filepath.Join(s.warehouse, "ns"))
+	s.Require().NoError(err)
+	s.True(info.IsDir())
+}
+
+// RenameTable tests
+
+func (s *HadoopCatalogTestSuite) TestRenameTableUnsupported() {
+	_, err := s.cat.RenameTable(context.Background(), []string{"ns", "old"}, []string{"ns", "new"})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "not supported")
+}
+
+func (s *HadoopCatalogTestSuite) TestListTablesNamespaceIsFile() {
+	ctx := context.Background()
+	s.Require().NoError(os.WriteFile(filepath.Join(s.warehouse, "not_a_ns"), nil, 0o644))
+
+	for _, err := range s.cat.ListTables(ctx, []string{"not_a_ns"}) {
+		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+
+		break
+	}
+}
+
+func (s *HadoopCatalogTestSuite) TestListTablesIdentifierIsolation() {
+	// Verify that yielded identifiers don't alias the namespace slice.
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+	s.createFakeTable([]string{"ns", "tbl1"})
+	s.createFakeTable([]string{"ns", "tbl2"})
+
+	var tables []table.Identifier
+	for ident, err := range s.cat.ListTables(ctx, []string{"ns"}) {
+		s.Require().NoError(err)
+		tables = append(tables, ident)
+	}
+
+	s.Len(tables, 2)
+	// Each identifier should be independent — no aliasing.
+	s.NotEqual(tables[0][len(tables[0])-1], tables[1][len(tables[1])-1])
 }
 
 // LoadTable tests
