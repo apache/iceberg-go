@@ -201,9 +201,13 @@ type exprEvaluator struct {
 }
 
 func (e *exprEvaluator) Eval(st StructLike) (bool, error) {
-	e.st = st
+	// Use a per-call evaluator so concurrent callers (e.g. parallel
+	// manifest scans in table.Scan.collectManifestEntries) do not race
+	// on the shared `st` field. Mirrors the fix in inclusiveMetricsEval
+	// from #445.
+	ev := exprEvaluator{bound: e.bound, st: st}
 
-	return VisitExpr(e.bound, e)
+	return VisitExpr(ev.bound, &ev)
 }
 
 func (e *exprEvaluator) VisitUnbound(UnboundPredicate) bool {
