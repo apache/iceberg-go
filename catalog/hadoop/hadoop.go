@@ -22,15 +22,18 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"
+	"github.com/google/uuid"
 )
 
 func init() {
@@ -135,6 +138,90 @@ func isTableDir(path string) bool {
 	}
 
 	return false
+}
+
+func (c *Catalog) readVersionHint(ident table.Identifier) int {
+	data, err := os.ReadFile(c.versionHintPath(ident))
+	if err != nil {
+		return 0
+	}
+
+	ver, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || ver <= 0 {
+		return 0
+	}
+
+	return ver
+}
+
+func (c *Catalog) writeVersionHint(ident table.Identifier, version int) {
+	dir := c.metadataDir(ident)
+	tempPath := filepath.Join(dir, uuid.New().String()+"-version-hint.temp")
+	hintPath := c.versionHintPath(ident)
+
+	content := []byte(strconv.Itoa(version))
+	if err := os.WriteFile(tempPath, content, 0o644); err != nil {
+		log.Printf("hadoop catalog: failed to write version hint temp file: %v", err)
+
+		return
+	}
+
+	if err := os.Rename(tempPath, hintPath); err != nil {
+		log.Printf("hadoop catalog: failed to rename version hint: %v", err)
+		os.Remove(tempPath)
+	}
+}
+
+func (c *Catalog) scanForward(ident table.Identifier, start int) int {
+	ver := start
+	for {
+		if _, err := os.Stat(c.metadataFilePath(ident, ver+1)); err != nil {
+			break
+		}
+
+		ver++
+	}
+
+	return ver
+}
+
+func (c *Catalog) findVersion(ident table.Identifier) (int, error) {
+	hint := c.readVersionHint(ident)
+	if hint > 0 {
+		if _, err := os.Stat(c.metadataFilePath(ident, hint)); err == nil {
+			return c.scanForward(ident, hint), nil
+		}
+	}
+
+	dir := c.metadataDir(ident)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, fmt.Errorf("hadoop catalog: cannot read metadata directory for %s: %w",
+			strings.Join(ident, "."), catalog.ErrNoSuchTable)
+	}
+
+	maxVer := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+
+		matches := versionPattern.FindStringSubmatch(e.Name())
+		if len(matches) == 2 {
+			v, _ := strconv.Atoi(matches[1])
+			if v > maxVer {
+				maxVer = v
+			}
+		}
+	}
+
+	if maxVer == 0 {
+		return 0, fmt.Errorf("hadoop catalog: no metadata files found for table %s: %w",
+			strings.Join(ident, "."), catalog.ErrNoSuchTable)
+	}
+
+	return c.scanForward(ident, maxVer), nil
 }
 
 func (c *Catalog) CreateTable(_ context.Context, _ table.Identifier, _ *iceberg.Schema, _ ...catalog.CreateTableOpt) (*table.Table, error) {
