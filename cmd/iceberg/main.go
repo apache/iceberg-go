@@ -55,7 +55,7 @@ Usage:
   iceberg properties [options] get (namespace | table) IDENTIFIER [PROPNAME]
   iceberg properties [options] set (namespace | table) IDENTIFIER PROPNAME VALUE
   iceberg properties [options] remove (namespace | table) IDENTIFIER PROPNAME
-  iceberg compact [options] (analyze | run) TABLE_ID [--target-file-size BYTES] [--partial-progress]
+  iceberg compact [options] (analyze | run) TABLE_ID [--target-file-size BYTES] [--partial-progress] [--preserve-dead-equality-deletes]
   iceberg -h | --help | --version
 
 Commands:
@@ -103,7 +103,10 @@ Options:
   --sort-order TEXT 	specify sort order as field:direction[:null-order] format(for create table use only)
 						Ex:"field1:asc,field2:desc:nulls-first,field3:asc:nulls-last"
   --target-file-size BYTES  target output file size in bytes for compaction [default: 0]
-  --partial-progress        stage each compaction group as a separate snapshot update`
+  --partial-progress        stage each compaction group as a separate snapshot update
+  --preserve-dead-equality-deletes
+                            keep equality-delete files that are provably dead after the rewrite
+                            (default: drop them — recommended for sustained CDC workloads)`
 
 type Config struct {
 	List     bool `docopt:"list"`
@@ -137,25 +140,26 @@ type Config struct {
 	PropName string `docopt:"PROPNAME"`
 	Value    string `docopt:"VALUE"`
 
-	Catalog         string `docopt:"--catalog"`
-	CatalogName     string `docopt:"--catalog-name"`
-	URI             string `docopt:"--uri"`
-	Output          string `docopt:"--output"`
-	History         bool   `docopt:"--history"`
-	Cred            string `docopt:"--credential"`
-	Token           string `docopt:"--token"`
-	Warehouse       string `docopt:"--warehouse"`
-	Config          string `docopt:"--config"`
-	Scope           string `docopt:"--scope"`
-	Description     string `docopt:"--description"`
-	LocationURI     string `docopt:"--location-uri"`
-	SchemaStr       string `docopt:"--schema"`
-	InferSchema     string `docopt:"--infer-schema"`
-	TableProps      string `docopt:"--properties"`
-	PartitionSpec   string `docopt:"--partition-spec"`
-	SortOrder       string `docopt:"--sort-order"`
-	TargetFileSize  int64  `docopt:"--target-file-size"`
-	PartialProgress bool   `docopt:"--partial-progress"`
+	Catalog                     string `docopt:"--catalog"`
+	CatalogName                 string `docopt:"--catalog-name"`
+	URI                         string `docopt:"--uri"`
+	Output                      string `docopt:"--output"`
+	History                     bool   `docopt:"--history"`
+	Cred                        string `docopt:"--credential"`
+	Token                       string `docopt:"--token"`
+	Warehouse                   string `docopt:"--warehouse"`
+	Config                      string `docopt:"--config"`
+	Scope                       string `docopt:"--scope"`
+	Description                 string `docopt:"--description"`
+	LocationURI                 string `docopt:"--location-uri"`
+	SchemaStr                   string `docopt:"--schema"`
+	InferSchema                 string `docopt:"--infer-schema"`
+	TableProps                  string `docopt:"--properties"`
+	PartitionSpec               string `docopt:"--partition-spec"`
+	SortOrder                   string `docopt:"--sort-order"`
+	TargetFileSize              int64  `docopt:"--target-file-size"`
+	PartialProgress             bool   `docopt:"--partial-progress"`
+	PreserveDeadEqualityDeletes bool   `docopt:"--preserve-dead-equality-deletes"`
 
 	RestOptions *config.RestOptions `docopt:"-"`
 }
