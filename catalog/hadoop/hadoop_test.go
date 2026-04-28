@@ -19,6 +19,7 @@ package hadoop
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -26,6 +27,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -1130,4 +1132,243 @@ func (s *HadoopCatalogTestSuite) TestCreateTableMetadataFormatVersion() {
 
 	// Default format version should be V2
 	s.Equal(2, tbl.Metadata().Version())
+}
+
+// CommitTable tests
+
+func (s *HadoopCatalogTestSuite) createTestTable(ns, name string) *table.Table {
+	ctx := context.Background()
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.warehouse, ns), 0o755))
+
+	tbl, err := s.cat.CreateTable(ctx, []string{ns, name}, s.testSchema())
+	s.Require().NoError(err)
+
+	return tbl
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableSingleUpdate() {
+	ctx := context.Background()
+	tbl := s.createTestTable("ns", "tbl")
+
+	meta, metaLoc, err := s.cat.CommitTable(ctx, []string{"ns", "tbl"},
+		[]table.Requirement{
+			table.AssertTableUUID(tbl.Metadata().TableUUID()),
+		},
+		[]table.Update{
+			table.NewSetPropertiesUpdate(iceberg.Properties{"test.key": "test.value"}),
+		},
+	)
+	s.Require().NoError(err)
+
+	// Version should have incremented to 2.
+	s.Contains(metaLoc, "v2.metadata.json")
+	s.Equal("test.value", meta.Properties()["test.key"])
+
+	// File should exist on disk.
+	s.FileExists(metaLoc)
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableMultipleSequential() {
+	ctx := context.Background()
+	tbl := s.createTestTable("ns", "tbl")
+	ident := []string{"ns", "tbl"}
+
+	for i := 0; i < 3; i++ {
+		loaded, err := s.cat.LoadTable(ctx, ident)
+		s.Require().NoError(err)
+
+		_, metaLoc, err := s.cat.CommitTable(ctx, ident,
+			[]table.Requirement{
+				table.AssertTableUUID(loaded.Metadata().TableUUID()),
+			},
+			[]table.Update{
+				table.NewSetPropertiesUpdate(iceberg.Properties{
+					fmt.Sprintf("iter.%d", i): "val",
+				}),
+			},
+		)
+		s.Require().NoError(err)
+		s.Contains(metaLoc, fmt.Sprintf("v%d.metadata.json", i+2))
+	}
+
+	// Final load should have all properties.
+	final, err := s.cat.LoadTable(ctx, ident)
+	s.Require().NoError(err)
+	s.Equal("val", final.Properties()["iter.0"])
+	s.Equal("val", final.Properties()["iter.1"])
+	s.Equal("val", final.Properties()["iter.2"])
+
+	// Version hint should reflect the latest version.
+	_ = tbl // suppress unused
+	s.Equal(4, s.cat.readVersionHint(ident))
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableNoChanges() {
+	ctx := context.Background()
+	tbl := s.createTestTable("ns", "tbl")
+
+	meta, metaLoc, err := s.cat.CommitTable(ctx, []string{"ns", "tbl"},
+		[]table.Requirement{
+			table.AssertTableUUID(tbl.Metadata().TableUUID()),
+		},
+		nil, // no updates
+	)
+	s.Require().NoError(err)
+
+	// Even with no updates, UpdateTableMetadata produces a new metadata
+	// object (different timestamp), so a new version is written.
+	s.Contains(metaLoc, "v2.metadata.json")
+	s.Equal(tbl.Metadata().TableUUID(), meta.TableUUID())
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableConflictDetection() {
+	// Conflict detection relies on os.Stat checking whether the target
+	// v{N+1}.metadata.json already exists before the atomic rename.
+	// In a single-threaded test we cannot trigger the TOCTOU race
+	// between findVersion and os.Stat. Instead, we verify that after
+	// multiple sequential commits, the version sequence is contiguous
+	// and no versions are skipped or duplicated.
+	ctx := context.Background()
+	s.createTestTable("ns", "tbl")
+	ident := []string{"ns", "tbl"}
+
+	for i := 2; i <= 5; i++ {
+		_, metaLoc, err := s.cat.CommitTable(ctx, ident,
+			nil,
+			[]table.Update{
+				table.NewSetPropertiesUpdate(iceberg.Properties{
+					fmt.Sprintf("v%d", i): "committed",
+				}),
+			},
+		)
+		s.Require().NoError(err)
+		s.Contains(metaLoc, fmt.Sprintf("v%d.metadata.json", i))
+		s.FileExists(s.cat.metadataFilePath(ident, i))
+	}
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableRequirementFailure() {
+	ctx := context.Background()
+	s.createTestTable("ns", "tbl")
+
+	wrongUUID := uuid.New()
+	_, _, err := s.cat.CommitTable(ctx, []string{"ns", "tbl"},
+		[]table.Requirement{
+			table.AssertTableUUID(wrongUUID),
+		},
+		[]table.Update{
+			table.NewSetPropertiesUpdate(iceberg.Properties{"k": "v"}),
+		},
+	)
+	s.Require().Error(err)
+	s.Contains(err.Error(), "UUID")
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableLocationChange() {
+	ctx := context.Background()
+	s.createTestTable("ns", "tbl")
+
+	_, _, err := s.cat.CommitTable(ctx, []string{"ns", "tbl"},
+		nil,
+		[]table.Update{
+			table.NewSetLocationUpdate("/some/other/location"),
+		},
+	)
+	s.Require().Error(err)
+	s.Contains(err.Error(), "location cannot be changed")
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableWriteMetadataLocation() {
+	ctx := context.Background()
+	s.createTestTable("ns", "tbl")
+
+	_, _, err := s.cat.CommitTable(ctx, []string{"ns", "tbl"},
+		nil,
+		[]table.Update{
+			table.NewSetPropertiesUpdate(iceberg.Properties{
+				"write.metadata.location": "/custom/metadata/path",
+			}),
+		},
+	)
+	s.Require().Error(err)
+	s.Contains(err.Error(), "write.metadata.location")
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableNoOrphanedTempFiles() {
+	ctx := context.Background()
+	s.createTestTable("ns", "tbl")
+	ident := []string{"ns", "tbl"}
+
+	// Do several commits and verify no temp files are left behind.
+	for i := 0; i < 3; i++ {
+		_, _, err := s.cat.CommitTable(ctx, ident,
+			nil,
+			[]table.Update{
+				table.NewSetPropertiesUpdate(iceberg.Properties{
+					fmt.Sprintf("iter.%d", i): "val",
+				}),
+			},
+		)
+		s.Require().NoError(err)
+	}
+
+	metaDir := s.cat.metadataDir(ident)
+	entries, err := os.ReadDir(metaDir)
+	s.Require().NoError(err)
+
+	for _, e := range entries {
+		if !e.IsDir() && !versionPattern.MatchString(e.Name()) && e.Name() != "version-hint.text" {
+			s.Failf("orphaned temp file", "found orphaned file: %s", e.Name())
+		}
+	}
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableVersionHintUpdated() {
+	ctx := context.Background()
+	s.createTestTable("ns", "tbl")
+	ident := []string{"ns", "tbl"}
+
+	_, _, err := s.cat.CommitTable(ctx, ident,
+		nil,
+		[]table.Update{
+			table.NewSetPropertiesUpdate(iceberg.Properties{"k": "v"}),
+		},
+	)
+	s.Require().NoError(err)
+
+	s.Equal(2, s.cat.readVersionHint(ident))
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableCreateViaCommit() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+	ident := []string{"ns", "tbl"}
+
+	loc := s.cat.defaultTableLocation(ident)
+	meta, metaLoc, err := s.cat.CommitTable(ctx, ident,
+		[]table.Requirement{
+			table.AssertCreate(),
+		},
+		[]table.Update{
+			table.NewAssignUUIDUpdate(uuid.New()),
+			table.NewUpgradeFormatVersionUpdate(2),
+			table.NewAddSchemaUpdate(s.testSchema()),
+			table.NewSetCurrentSchemaUpdate(-1),
+			table.NewSetLocationUpdate(loc),
+		},
+	)
+	s.Require().NoError(err)
+	s.Contains(metaLoc, "v1.metadata.json")
+	s.Equal(loc, meta.Location())
+
+	// Should be loadable.
+	loaded, err := s.cat.LoadTable(ctx, ident)
+	s.Require().NoError(err)
+	s.Equal(meta.TableUUID(), loaded.Metadata().TableUUID())
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableShortIdentifier() {
+	_, _, err := s.cat.CommitTable(context.Background(), []string{"tbl"}, nil, nil)
+	s.Require().Error(err)
+	s.Contains(err.Error(), "at least a namespace and table name")
 }

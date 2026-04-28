@@ -398,8 +398,108 @@ func (c *Catalog) CheckTableExists(_ context.Context, ident table.Identifier) (b
 	return isTableDir(c.tableToPath(ident)), nil
 }
 
-func (c *Catalog) CommitTable(_ context.Context, _ table.Identifier, _ []table.Requirement, _ []table.Update) (table.Metadata, string, error) {
-	return nil, "", errors.New("hadoop catalog: CommitTable not yet implemented")
+// writeMetadataLocationKey is the Java Iceberg property that allows relocating
+// metadata to a custom path. The Hadoop catalog forbids this because it derives
+// metadata paths from the table identifier.
+const writeMetadataLocationKey = "write.metadata.location"
+
+func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
+	if len(ident) < 2 {
+		return nil, "", errors.New("hadoop catalog: table identifier must have at least a namespace and table name")
+	}
+
+	// Step 1: Load current table (nil for create-via-commit).
+	current, err := c.LoadTable(ctx, ident)
+	if err != nil && !errors.Is(err, catalog.ErrNoSuchTable) {
+		return nil, "", err
+	}
+
+	// Step 2: Validate requirements against current metadata.
+	if current != nil {
+		for _, r := range reqs {
+			if err := r.Validate(current.Metadata()); err != nil {
+				return nil, "", err
+			}
+		}
+	}
+
+	// Step 3: Apply updates to produce new metadata.
+	var baseMeta table.Metadata
+	var currentMetadataLoc string
+
+	if current != nil {
+		baseMeta = current.Metadata()
+		currentMetadataLoc = current.MetadataLocation()
+	} else {
+		baseMeta, err = table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, "", nil)
+		if err != nil {
+			return nil, "", fmt.Errorf("hadoop catalog: failed to create base metadata: %w", err)
+		}
+	}
+
+	updated, err := internal.UpdateTableMetadata(baseMeta, updates, currentMetadataLoc)
+	if err != nil {
+		return nil, "", fmt.Errorf("hadoop catalog: failed to apply updates: %w", err)
+	}
+
+	// Step 4: Validate table location has not changed.
+	if current != nil && updated.Location() != current.Location() {
+		return nil, "", errors.New("hadoop catalog: table location cannot be changed")
+	}
+
+	// Step 5: Reject write.metadata.location property.
+	if v := updated.Properties().Get(writeMetadataLocationKey, ""); v != "" {
+		return nil, "", fmt.Errorf("hadoop catalog: %s property is not supported", writeMetadataLocationKey)
+	}
+
+	// Step 6: Determine next version number.
+	var currentVersion int
+
+	if current != nil {
+		currentVersion, err = c.findVersion(ident)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+
+	newVersion := currentVersion + 1
+
+	// Step 7: Create metadata directory if needed (create-via-commit).
+	metaDir := c.metadataDir(ident)
+	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+		return nil, "", fmt.Errorf("hadoop catalog: failed to create metadata directory: %w", err)
+	}
+
+	newMetaPath := c.metadataFilePath(ident, newVersion)
+	tempPath := filepath.Join(metaDir, uuid.New().String()+".metadata.json")
+
+	compression := updated.Properties().Get(table.MetadataCompressionKey, table.MetadataCompressionDefault)
+
+	if err := internal.WriteTableMetadata(updated, icebergio.LocalFS{}, tempPath, compression); err != nil {
+		os.Remove(tempPath)
+
+		return nil, "", fmt.Errorf("hadoop catalog: failed to write table metadata: %w", err)
+	}
+
+	// Conflict detection: target file must not already exist.
+	if _, err := os.Stat(newMetaPath); err == nil {
+		os.Remove(tempPath)
+
+		return nil, "", fmt.Errorf("hadoop catalog: version %d already exists for table %s",
+			newVersion, strings.Join(ident, "."))
+	}
+
+	// Atomic commit via rename.
+	if err := os.Rename(tempPath, newMetaPath); err != nil {
+		os.Remove(tempPath)
+
+		return nil, "", fmt.Errorf("hadoop catalog: failed to commit metadata file: %w", err)
+	}
+
+	// Step 8: Best-effort version hint update.
+	c.writeVersionHint(ident, newVersion)
+
+	return updated, newMetaPath, nil
 }
 
 func (c *Catalog) ListTables(_ context.Context, ns table.Identifier) iter.Seq2[table.Identifier, error] {
