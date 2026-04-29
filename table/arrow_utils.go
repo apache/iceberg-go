@@ -1096,7 +1096,6 @@ func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schem
 	if err != nil {
 		return nil, err
 	}
-	st.Release()
 	out := array.RecordFromStructArray(result.(*array.Struct), nil)
 	result.Release()
 
