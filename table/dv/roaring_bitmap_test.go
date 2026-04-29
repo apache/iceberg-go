@@ -79,15 +79,17 @@ func TestDeserializeRoaringBitmapTruncatedInput(t *testing.T) {
 	assert.ErrorContains(t, err, "read bitmap count")
 }
 
-// Why: negative bitmap counts are invalid and should be rejected before any further decoding.
-// Condition: count field encoded as -1.
-// Assertion: returns an error containing "invalid bitmap count".
-func TestDeserializeRoaringBitmapNegativeCount(t *testing.T) {
+// Why: counts with the high bit set (e.g. an int64 -1 written to disk) decode
+// as a huge uint64 and must be rejected by the upper-bound check, not silently
+// accepted as a small value or panicked on by make(map, hugeHint).
+// Condition: count field encoded as int64(-1) (= 0xFFFF_FFFF_FFFF_FFFF on disk).
+// Assertion: returns an error containing "exceeds maximum".
+func TestDeserializeRoaringBitmapHighBitCount(t *testing.T) {
 	var buf bytes.Buffer
 	require.NoError(t, binary.Write(&buf, binary.LittleEndian, int64(-1)))
 
 	_, err := DeserializeRoaringPositionBitmap(buf.Bytes())
-	assert.ErrorContains(t, err, "invalid bitmap count")
+	assert.ErrorContains(t, err, "exceeds maximum")
 }
 
 // Why: absurdly large counts should be rejected to prevent CPU/memory exhaustion.

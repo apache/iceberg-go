@@ -34,7 +34,7 @@ import (
 // deserialization. This prevents CPU/memory exhaustion from absurd counts
 // in malformed input. Derived from puffin.DefaultMaxBlobSize / 8 (minimum
 // per-bitmap overhead: 4-byte key + at least 4 bytes of roaring data).
-var maxBitmapCount = int64(puffin.DefaultMaxBlobSize / 8)
+var maxBitmapCount = uint64(puffin.DefaultMaxBlobSize / 8)
 
 // RoaringPositionBitmap supports 64-bit positions using a sparse map of
 // 32-bit Roaring bitmaps. Positions are split into a 32-bit key
@@ -53,9 +53,7 @@ func NewRoaringPositionBitmap() *RoaringPositionBitmap {
 }
 
 // Set marks a position in the bitmap.
-// Position must be non-negative.
 func (b *RoaringPositionBitmap) Set(pos uint64) {
-
 	key := uint32(pos >> 32)
 	low := uint32(pos)
 	bm, ok := b.bitmaps[key]
@@ -127,12 +125,9 @@ func (b *RoaringPositionBitmap) Serialize(w io.Writer) error {
 func DeserializeRoaringPositionBitmap(data []byte) (*RoaringPositionBitmap, error) {
 	r := bytes.NewReader(data)
 
-	var count int64
+	var count uint64
 	if err := binary.Read(r, binary.LittleEndian, &count); err != nil {
 		return nil, fmt.Errorf("read bitmap count: %w", err)
-	}
-	if count < 0 {
-		return nil, fmt.Errorf("invalid bitmap count: %d", count)
 	}
 	if count > maxBitmapCount {
 		return nil, fmt.Errorf("bitmap count %d exceeds maximum allowed %d", count, maxBitmapCount)
