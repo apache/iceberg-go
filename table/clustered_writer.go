@@ -53,7 +53,7 @@ func clusteredPartitionedWrite(
 ) iter.Seq2[iceberg.DataFile, error] {
 	ctx, cancel := context.WithCancel(ctx)
 
-	outputCh := make(chan iceberg.DataFile, 1)
+	outputCh := make(chan iceberg.DataFile, 16)
 	errCh := make(chan error, 1)
 
 	go func() {
@@ -64,7 +64,7 @@ func clusteredPartitionedWrite(
 		var (
 			currentRec          partitionRecord
 			currentWriter       *RollingDataWriter
-			completedPartitions = &closedPartitionSet{}
+			completedPartitions = make(closedPartitionSet)
 		)
 
 		closeCurrentWriter := func() error {
@@ -106,14 +106,40 @@ func clusteredPartitionedWrite(
 
 		takeFn := partitionBatchByKey(ctx)
 
+		processPart := func(rec arrow.RecordBatch, part *partitionInfo) error {
+			subBatch, err := takeFn(rec, part.rows)
+			if err != nil {
+				return err
+			}
+			defer subBatch.Release()
+
+			if currentWriter == nil || !slices.Equal(currentRec, part.partitionRec) {
+				if err := closeCurrentWriter(); err != nil {
+					return err
+				}
+				if completedPartitions.contains(part.partitionRec) {
+					partitionPath := spec.PartitionToPath(part.partitionRec, schema)
+
+					return fmt.Errorf("clustered write: incoming records violate the clustering assumption; "+
+						"partition %q has records arriving after its writer was already closed", partitionPath)
+				}
+				partitionPath := spec.PartitionToPath(part.partitionRec, schema)
+				currentWriter = factory.newRollingDataWriter(
+					ctx, nil, partitionPath, part.partitionValues, outputCh)
+				currentRec = part.partitionRec
+			}
+
+			return currentWriter.Add(subBatch)
+		}
+
 		for rec, err := range records {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				fail(context.Cause(ctx))
+			if err != nil {
+				fail(err)
 
 				return
 			}
-			if err != nil {
-				fail(err)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				fail(context.Cause(ctx))
 
 				return
 			}
@@ -141,38 +167,8 @@ func clusteredPartitionedWrite(
 				default:
 				}
 
-				subBatch, err := takeFn(rec, part.rows)
-				if err != nil {
+				if err := processPart(rec, part); err != nil {
 					fail(err)
-
-					return
-				}
-
-				if currentWriter == nil || !slices.Equal(currentRec, part.partitionRec) {
-					if err := closeCurrentWriter(); err != nil {
-						subBatch.Release()
-						sendErr(err)
-
-						return
-					}
-					if completedPartitions.contains(part.partitionRec) {
-						partitionPath := spec.PartitionToPath(part.partitionRec, schema)
-						subBatch.Release()
-						fail(fmt.Errorf("clustered write: incoming records violate the clustering assumption; "+
-							"partition %q has records arriving after its writer was already closed", partitionPath))
-
-						return
-					}
-					partitionPath := spec.PartitionToPath(part.partitionRec, schema)
-					currentWriter = factory.newRollingDataWriter(
-						ctx, nil, partitionPath, part.partitionValues, outputCh)
-					currentRec = part.partitionRec
-				}
-
-				addErr := currentWriter.Add(subBatch)
-				subBatch.Release()
-				if addErr != nil {
-					fail(addErr)
 
 					return
 				}
@@ -211,31 +207,25 @@ func clusteredPartitionedWrite(
 // tree keyed on each partition field's value, mirroring the layout of
 // partitionMapNode. Go's any-equality at each level distinguishes SQL
 // NULL from the literal string "null" — the same property that
-// PartitionToPath drops via Transform.ToHumanStr — so this is the
-// structural key the revisit check needs.
-type closedPartitionSet struct {
-	children map[any]*closedPartitionSet
-}
+// PartitionToPath drops via Transform.ToHumanStr.
+type closedPartitionSet map[any]closedPartitionSet
 
-func (s *closedPartitionSet) add(rec partitionRecord) {
+func (s closedPartitionSet) add(rec partitionRecord) {
 	node := s
 	for _, part := range rec {
-		next, ok := node.children[part]
+		next, ok := node[part]
 		if !ok {
-			next = &closedPartitionSet{}
-			if node.children == nil {
-				node.children = map[any]*closedPartitionSet{}
-			}
-			node.children[part] = next
+			next = make(closedPartitionSet)
+			node[part] = next
 		}
 		node = next
 	}
 }
 
-func (s *closedPartitionSet) contains(rec partitionRecord) bool {
+func (s closedPartitionSet) contains(rec partitionRecord) bool {
 	node := s
 	for _, part := range rec {
-		next, ok := node.children[part]
+		next, ok := node[part]
 		if !ok {
 			return false
 		}

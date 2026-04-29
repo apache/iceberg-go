@@ -382,57 +382,26 @@ func (s *FanoutWriterTestSuite) createComprehensiveTestRecord() arrow.RecordBatc
 	}
 	arrSchema := arrow.NewSchema(fields, nil)
 
-	idB := array.NewInt64Builder(pool)
-	defer idB.Release()
-	decB := array.NewDecimal128Builder(pool, &arrow.Decimal128Type{Precision: 10, Scale: 6})
-	defer decB.Release()
-	timeB := array.NewTime64Builder(pool, &arrow.Time64Type{Unit: arrow.Microsecond})
-	defer timeB.Release()
-	tsB := array.NewTimestampBuilder(pool, &arrow.TimestampType{Unit: arrow.Microsecond})
-	defer tsB.Release()
-	tstzB := array.NewTimestampBuilder(pool, &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"})
-	defer tstzB.Release()
-	uuidB := extensions.NewUUIDBuilder(pool)
-	defer uuidB.Release()
-	dateB := array.NewDate32Builder(pool)
-	defer dateB.Release()
+	bldr := array.NewRecordBuilder(pool, arrSchema)
+	defer bldr.Release()
 
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
+		bldr.Field(0).(*array.Int64Builder).Append(int64(i))
 		if i%2 == 0 {
-			idB.Append(int64(i))
 			val := fmt.Sprintf("%d.%06d", 123, i)
 			arrowDec, _ := arrowdecimal.Decimal128FromString(val, 10, 6)
-			decB.Append(arrowDec)
-			timeB.Append(arrow.Time64(time.Duration(i * 1_000_000)))
-			tsB.Append(arrow.Timestamp(1_600_000_000_000_000 + int64(i)*1_000_000))
-			tstzB.Append(arrow.Timestamp(1_600_000_000_000_000 + int64(i)*1_000_000))
-			uuidB.Append(uuid.New())
-			dateB.Append(arrow.Date32(20000 + i))
+			bldr.Field(1).(*array.Decimal128Builder).Append(arrowDec)
+			bldr.Field(2).(*array.Time64Builder).Append(arrow.Time64(time.Duration(i * 1_000_000)))
+			bldr.Field(3).(*array.TimestampBuilder).Append(arrow.Timestamp(1_600_000_000_000_000 + int64(i)*1_000_000))
+			bldr.Field(4).(*array.TimestampBuilder).Append(arrow.Timestamp(1_600_000_000_000_000 + int64(i)*1_000_000))
+			bldr.Field(5).(*extensions.UUIDBuilder).Append(uuid.New())
+			bldr.Field(6).(*array.Date32Builder).Append(arrow.Date32(20000 + i))
 		} else {
-			idB.Append(int64(i))
-			decB.AppendNull()
-			timeB.AppendNull()
-			tsB.AppendNull()
-			tstzB.AppendNull()
-			uuidB.AppendNull()
-			dateB.AppendNull()
+			for j := 1; j <= 6; j++ {
+				bldr.Field(j).AppendNull()
+			}
 		}
 	}
 
-	cols := []arrow.Array{
-		idB.NewArray(),
-		decB.NewArray(),
-		timeB.NewArray(),
-		tsB.NewArray(),
-		tstzB.NewArray(),
-		uuidB.NewArray(),
-		dateB.NewArray(),
-	}
-	defer func() {
-		for _, c := range cols {
-			c.Release()
-		}
-	}()
-
-	return array.NewRecordBatch(arrSchema, cols, int64(cols[0].Len()))
+	return bldr.NewRecordBatch()
 }
