@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -65,8 +66,21 @@ func NewCatalog(name, warehouse string, props iceberg.Properties) (*Catalog, err
 		return nil, errors.New("hadoop catalog requires a warehouse path")
 	}
 
-	warehouse = strings.TrimPrefix(warehouse, "file://")
-	warehouse = strings.TrimPrefix(warehouse, "file:")
+	u, err := url.Parse(warehouse)
+	if err != nil {
+		return nil, fmt.Errorf("hadoop catalog: invalid warehouse path: %w", err)
+	}
+
+	if u.Scheme != "" && u.Scheme != "file" {
+		return nil, fmt.Errorf("hadoop catalog: unsupported warehouse scheme %q, must be file:// or a local path", u.Scheme)
+	}
+
+	if u.Opaque != "" {
+		warehouse = u.Opaque
+	} else {
+		warehouse = u.Path
+	}
+
 	warehouse = strings.TrimRight(warehouse, "/")
 
 	return &Catalog{
