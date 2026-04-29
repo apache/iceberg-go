@@ -61,7 +61,9 @@ func WithWriteUUID(id uuid.UUID) WriteRecordOption {
 // pages simultaneously, which reduces peak memory. A value of 0
 // (the default) uses [config.EnvConfig.MaxWorkers].
 //
-// This option is ignored when [WithClusteredWrite] is set.
+// Combining this option with [WithClusteredWrite] is rejected by
+// [WriteRecords]: the clustered write path is single-threaded by
+// design, so the two options have no meaningful interaction.
 func WithMaxWriteWorkers(n int) WriteRecordOption {
 	return func(c *writeRecordConfig) {
 		c.maxWriteWorkers = n
@@ -73,12 +75,18 @@ func WithMaxWriteWorkers(n int) WriteRecordOption {
 // open at a time: when a record arrives for a new partition, the
 // current writer is flushed and closed before a new one is opened.
 //
-// The input must be strictly clustered by partition: once a
+// The input must be clustered by partition across batches: once a
 // partition's writer has been closed, encountering further records
-// for that partition returns an error. This is the natural order for
-// compaction, where each source data file typically belongs to a
-// single partition. If the input is not clustered, use the fanout
-// writer (the default) instead.
+// for that partition returns an error. Within a single batch the
+// writer reclusters rows by partition, so interleaved values like
+// [a,b,a,b] are accepted; the strict check fires only across batch
+// boundaries. This is the natural order for compaction, where each
+// source data file typically belongs to a single partition. If the
+// input is not clustered across batches, use the fanout writer (the
+// default) instead.
+//
+// Combining this option with [WithMaxWriteWorkers] is rejected by
+// [WriteRecords]: the clustered path is single-threaded by design.
 func WithClusteredWrite() WriteRecordOption {
 	return func(c *writeRecordConfig) {
 		c.clustered = true
@@ -111,6 +119,11 @@ func WriteRecords(ctx context.Context, tbl *Table,
 	cfg := writeRecordConfig{}
 	for _, opt := range opts {
 		opt(&cfg)
+	}
+
+	if cfg.clustered && cfg.maxWriteWorkers > 0 {
+		return internal.SingleErrorIter[iceberg.DataFile](
+			fmt.Errorf("WithClusteredWrite and WithMaxWriteWorkers are incompatible: the clustered write path is single-threaded"))
 	}
 
 	fs, err := tbl.fsF(ctx)

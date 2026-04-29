@@ -93,6 +93,22 @@ func (s *ClusteredWriterTestSuite) buildMixedBatch(schema *arrow.Schema, partiti
 	return bldr.NewRecordBatch()
 }
 
+func (s *ClusteredWriterTestSuite) buildNullableBatch(schema *arrow.Schema, partitions []*string) arrow.RecordBatch {
+	bldr := array.NewRecordBuilder(s.mem, schema)
+	defer bldr.Release()
+
+	for i, p := range partitions {
+		bldr.Field(0).(*array.Int64Builder).Append(int64(i))
+		if p == nil {
+			bldr.Field(1).(*array.StringBuilder).AppendNull()
+		} else {
+			bldr.Field(1).(*array.StringBuilder).Append(*p)
+		}
+	}
+
+	return bldr.NewRecordBatch()
+}
+
 func (s *ClusteredWriterTestSuite) setupFactory(loc string, arrSchema *arrow.Schema, targetFileSize int64) (*writerFactory, iceberg.PartitionSpec, *iceberg.Schema) {
 	icebergSchema, err := ArrowSchemaToIcebergWithFreshIDs(arrSchema, false)
 	s.Require().NoError(err)
@@ -274,6 +290,67 @@ func (s *ClusteredWriterTestSuite) TestPartitionRevisitReturnsError() {
 	s.Len(dataFiles, 2, "part_a and part_b should have been flushed before the revisit was rejected")
 }
 
+func (s *ClusteredWriterTestSuite) TestNullVsLiteralStringWithinBatch() {
+	arrSchema := s.schema()
+	loc := filepath.ToSlash(s.T().TempDir())
+	factory, spec, icebergSchema := s.setupFactory(loc, arrSchema, 1024*1024)
+
+	literalNull := "null"
+	batch := s.buildNullableBatch(arrSchema, []*string{nil, &literalNull, nil})
+	defer batch.Release()
+
+	dataFiles := s.writeAndCollect(spec, icebergSchema, factory, s.batchItr(batch))
+
+	s.Require().Len(dataFiles, 2, "SQL NULL and literal string \"null\" must produce two distinct files")
+
+	partType := spec.PartitionType(icebergSchema)
+	rowsByLiteralPartition := map[string]int64{}
+	nilRows := int64(0)
+	for _, df := range dataFiles {
+		rec := GetPartitionRecord(df, partType)
+		val := rec.Get(0)
+		if val == nil {
+			nilRows += df.Count()
+		} else {
+			rowsByLiteralPartition[fmt.Sprintf("%v", val)] += df.Count()
+		}
+	}
+
+	s.Equal(int64(2), nilRows, "SQL NULL partition should contain rows 0 and 2")
+	s.Equal(int64(1), rowsByLiteralPartition["null"], "literal \"null\" partition should contain row 1")
+}
+
+func (s *ClusteredWriterTestSuite) TestNullVsLiteralStringAcrossBatches() {
+	arrSchema := s.schema()
+	loc := filepath.ToSlash(s.T().TempDir())
+	factory, spec, icebergSchema := s.setupFactory(loc, arrSchema, 1024*1024)
+
+	literalNull := "null"
+	batchNil1 := s.buildNullableBatch(arrSchema, []*string{nil})
+	defer batchNil1.Release()
+	batchLiteral := s.buildNullableBatch(arrSchema, []*string{&literalNull})
+	defer batchLiteral.Release()
+	batchNil2 := s.buildNullableBatch(arrSchema, []*string{nil})
+	defer batchNil2.Release()
+
+	var (
+		dataFiles []iceberg.DataFile
+		writeErr  error
+	)
+	for df, err := range clusteredPartitionedWrite(s.ctx, spec, icebergSchema, factory, s.batchItr(batchNil1, batchLiteral, batchNil2)) {
+		if err != nil {
+			writeErr = err
+
+			break
+		}
+		dataFiles = append(dataFiles, df)
+	}
+
+	s.Require().Error(writeErr)
+	s.Contains(writeErr.Error(), "partition_col=null")
+	s.Len(dataFiles, 2, "the SQL NULL and literal-\"null\" partitions should both have flushed before the revisit was rejected")
+}
+
 func (s *ClusteredWriterTestSuite) TestMixedBatchFollowedBySinglePartition() {
 	arrSchema := s.schema()
 	loc := filepath.ToSlash(s.T().TempDir())
@@ -303,6 +380,103 @@ func (s *ClusteredWriterTestSuite) TestMixedBatchFollowedBySinglePartition() {
 	s.Len(partitionRows, 2)
 	s.Equal(int64(25), partitionRows["partition_col=part_a"])
 	s.Equal(int64(55), partitionRows["partition_col=part_b"])
+}
+
+func (s *ClusteredWriterTestSuite) TestWithinBatchInterleaveIsRecluster() {
+	arrSchema := s.schema()
+	loc := filepath.ToSlash(s.T().TempDir())
+	factory, spec, icebergSchema := s.setupFactory(loc, arrSchema, 1024*1024)
+
+	// A single batch with rows interleaved [a, b, a, b, a, b]. The
+	// clustered writer's contract is batch-granular: within a batch
+	// the rows are reclustered into one writer per partition, so this
+	// is accepted even though the row order is not contiguous.
+	bldr := array.NewRecordBuilder(s.mem, arrSchema)
+	parts := []string{"part_a", "part_b", "part_a", "part_b", "part_a", "part_b"}
+	for i, p := range parts {
+		bldr.Field(0).(*array.Int64Builder).Append(int64(i))
+		bldr.Field(1).(*array.StringBuilder).Append(p)
+	}
+	batch := bldr.NewRecordBatch()
+	bldr.Release()
+	defer batch.Release()
+
+	dataFiles := s.writeAndCollect(spec, icebergSchema, factory, s.batchItr(batch))
+
+	partitionRows := make(map[string]int64)
+	for _, df := range dataFiles {
+		rec := GetPartitionRecord(df, spec.PartitionType(icebergSchema))
+		path := spec.PartitionToPath(rec, icebergSchema)
+		partitionRows[path] += df.Count()
+	}
+
+	s.Len(dataFiles, 2, "interleaved rows within a batch should produce one file per partition")
+	s.Equal(int64(3), partitionRows["partition_col=part_a"])
+	s.Equal(int64(3), partitionRows["partition_col=part_b"])
+}
+
+func (s *ClusteredWriterTestSuite) TestEarlyExitDoesNotDeadlock() {
+	arrSchema := s.schema()
+	loc := filepath.ToSlash(s.T().TempDir())
+	factory, spec, icebergSchema := s.setupFactory(loc, arrSchema, 1024*1024)
+
+	parts := []string{"part_a", "part_b", "part_c", "part_d"}
+	batches := make([]arrow.RecordBatch, len(parts))
+	for i, p := range parts {
+		batches[i] = s.buildBatch(arrSchema, p, 100)
+	}
+	defer func() {
+		for _, b := range batches {
+			b.Release()
+		}
+	}()
+
+	var dataFiles []iceberg.DataFile
+	for df, err := range clusteredPartitionedWrite(s.ctx, spec, icebergSchema, factory, s.batchItr(batches...)) {
+		s.Require().NoError(err)
+		dataFiles = append(dataFiles, df)
+		if len(dataFiles) >= 1 {
+			break
+		}
+	}
+
+	s.GreaterOrEqual(len(dataFiles), 1)
+}
+
+func (s *ClusteredWriterTestSuite) TestPanickyIteratorSurfacesAsError() {
+	arrSchema := s.schema()
+	loc := filepath.ToSlash(s.T().TempDir())
+	factory, spec, icebergSchema := s.setupFactory(loc, arrSchema, 1024*1024)
+
+	batchA := s.buildBatch(arrSchema, "part_a", 50)
+	defer batchA.Release()
+
+	panickyItr := func(yield func(arrow.RecordBatch, error) bool) {
+		batchA.Retain()
+		if !yield(batchA, nil) {
+			batchA.Release()
+
+			return
+		}
+		batchA.Release()
+		panic("test panic from iterator")
+	}
+
+	var (
+		dataFiles []iceberg.DataFile
+		writeErr  error
+	)
+	for df, err := range clusteredPartitionedWrite(s.ctx, spec, icebergSchema, factory, panickyItr) {
+		if err != nil {
+			writeErr = err
+
+			break
+		}
+		dataFiles = append(dataFiles, df)
+	}
+
+	s.Require().Error(writeErr)
+	s.Contains(writeErr.Error(), "panic")
 }
 
 // -- Peak memory and goroutine comparison --

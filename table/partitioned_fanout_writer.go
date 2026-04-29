@@ -18,12 +18,10 @@
 package table
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"iter"
-	"slices"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -326,28 +324,18 @@ func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo [
 	return partVal
 }
 
-// collectPartitions returns every partitionInfo in the tree, ordered by the
-// row at which each partition first appeared in the batch. The ordering makes
-// the clustered writer's revisit check deterministic; without it, Go's
-// randomized map iteration would let unclustered input slip past the check
-// intermittently.
+// collectPartitions returns every partitionInfo in the tree in
+// arbitrary order. Callers that need a deterministic order (such as
+// the clustered writer, whose revisit check would otherwise depend on
+// Go's randomized map iteration) must sort the result themselves.
 func (n *partitionMapNode) collectPartitions() []*partitionInfo {
-	result := n.flatten()
-	slices.SortFunc(result, func(a, b *partitionInfo) int {
-		return cmp.Compare(a.rows[0], b.rows[0])
-	})
-
-	return result
-}
-
-func (n *partitionMapNode) flatten() []*partitionInfo {
 	result := make([]*partitionInfo, 0, n.leafCount)
 	for _, v := range n.children {
 		switch node := v.(type) {
 		case *partitionInfo:
 			result = append(result, node)
 		case *partitionMapNode:
-			result = append(result, node.flatten()...)
+			result = append(result, node.collectPartitions()...)
 		}
 	}
 

@@ -18,10 +18,12 @@
 package table
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"iter"
+	"slices"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/iceberg-go"
@@ -34,11 +36,14 @@ import (
 // input (e.g. compaction reads where each source file belongs to a
 // single partition).
 //
-// The input must be strictly clustered by partition: once a partition's
-// writer has been closed, encountering further records for that
-// partition is treated as a violation of the clustering assumption and
-// returns an error. Use the fanout writer if the input is not
-// clustered.
+// The input must be clustered by partition across batches: once a
+// partition's writer has been closed, encountering further records
+// for that partition returns an error. Within a single batch the
+// writer reclusters rows by partition. Use the fanout writer if the
+// input is not clustered across batches.
+//
+// Breaking out of the returned iterator early cancels the producer
+// so it stops opening new writers; in-flight writers finish cleanly.
 func clusteredPartitionedWrite(
 	ctx context.Context,
 	spec iceberg.PartitionSpec,
@@ -46,17 +51,20 @@ func clusteredPartitionedWrite(
 	factory *writerFactory,
 	records iter.Seq2[arrow.RecordBatch, error],
 ) iter.Seq2[iceberg.DataFile, error] {
+	ctx, cancel := context.WithCancel(ctx)
+
 	outputCh := make(chan iceberg.DataFile, 1)
 	errCh := make(chan error, 1)
 
 	go func() {
 		defer close(outputCh)
+		defer close(errCh)
 		defer factory.stopCount()
 
 		var (
-			currentKey          string
+			currentRec          partitionRecord
 			currentWriter       *RollingDataWriter
-			completedPartitions = make(map[string]struct{})
+			completedPartitions = &closedPartitionSet{}
 		)
 
 		closeCurrentWriter := func() error {
@@ -65,7 +73,7 @@ func clusteredPartitionedWrite(
 			}
 			w := currentWriter
 			currentWriter = nil
-			completedPartitions[currentKey] = struct{}{}
+			completedPartitions.add(currentRec)
 			close(w.recordCh)
 			w.wg.Wait()
 
@@ -76,14 +84,34 @@ func clusteredPartitionedWrite(
 			return <-w.errorCh
 		}
 
-		fail := func(err error) {
-			errCh <- errors.Join(err, closeCurrentWriter())
-			close(errCh)
+		sendErr := func(err error) {
+			select {
+			case errCh <- err:
+			default:
+			}
 		}
+
+		fail := func(err error) {
+			sendErr(errors.Join(err, closeCurrentWriter()))
+		}
+
+		// Recover any panic so the consumer is not left blocking on
+		// errCh forever. Declared last so it runs first on goroutine
+		// exit, before the close(errCh) and close(outputCh) defers.
+		defer func() {
+			if r := recover(); r != nil {
+				fail(fmt.Errorf("clustered write panic: %v", r))
+			}
+		}()
 
 		takeFn := partitionBatchByKey(ctx)
 
 		for rec, err := range records {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				fail(context.Cause(ctx))
+
+				return
+			}
 			if err != nil {
 				fail(err)
 
@@ -96,6 +124,13 @@ func clusteredPartitionedWrite(
 
 				return
 			}
+
+			// Process partitions in input row order so the revisit
+			// check is deterministic; getRecordPartitions returns
+			// them in arbitrary (Go map iteration) order.
+			slices.SortFunc(partitions, func(a, b *partitionInfo) int {
+				return cmp.Compare(a.rows[0], b.rows[0])
+			})
 
 			for _, part := range partitions {
 				select {
@@ -113,25 +148,25 @@ func clusteredPartitionedWrite(
 					return
 				}
 
-				partitionPath := spec.PartitionToPath(part.partitionRec, schema)
-				if currentWriter == nil || partitionPath != currentKey {
+				if currentWriter == nil || !slices.Equal(currentRec, part.partitionRec) {
 					if err := closeCurrentWriter(); err != nil {
 						subBatch.Release()
-						errCh <- err
-						close(errCh)
+						sendErr(err)
 
 						return
 					}
-					if _, seen := completedPartitions[partitionPath]; seen {
+					if completedPartitions.contains(part.partitionRec) {
+						partitionPath := spec.PartitionToPath(part.partitionRec, schema)
 						subBatch.Release()
 						fail(fmt.Errorf("clustered write: incoming records violate the clustering assumption; "+
 							"partition %q has records arriving after its writer was already closed", partitionPath))
 
 						return
 					}
+					partitionPath := spec.PartitionToPath(part.partitionRec, schema)
 					currentWriter = factory.newRollingDataWriter(
 						ctx, nil, partitionPath, part.partitionValues, outputCh)
-					currentKey = partitionPath
+					currentRec = part.partitionRec
 				}
 
 				addErr := currentWriter.Add(subBatch)
@@ -145,16 +180,20 @@ func clusteredPartitionedWrite(
 		}
 
 		if err := closeCurrentWriter(); err != nil {
-			errCh <- err
+			sendErr(err)
 		}
-		close(errCh)
 	}()
 
 	return func(yield func(iceberg.DataFile, error) bool) {
+		// LIFO defer order matters: cancel signals the producer first
+		// (synchronous, instant), then the drain pulls outputCh so
+		// any in-flight stream send can complete and the producer's
+		// closeCurrentWriter / wg.Wait paths unblock.
 		defer func() {
 			for range outputCh {
 			}
 		}()
+		defer cancel()
 
 		for df := range outputCh {
 			if !yield(df, nil) {
@@ -166,4 +205,42 @@ func clusteredPartitionedWrite(
 			yield(nil, err)
 		}
 	}
+}
+
+// closedPartitionSet tracks already-closed partitions by walking a
+// tree keyed on each partition field's value, mirroring the layout of
+// partitionMapNode. Go's any-equality at each level distinguishes SQL
+// NULL from the literal string "null" — the same property that
+// PartitionToPath drops via Transform.ToHumanStr — so this is the
+// structural key the revisit check needs.
+type closedPartitionSet struct {
+	children map[any]*closedPartitionSet
+}
+
+func (s *closedPartitionSet) add(rec partitionRecord) {
+	node := s
+	for _, part := range rec {
+		next, ok := node.children[part]
+		if !ok {
+			next = &closedPartitionSet{}
+			if node.children == nil {
+				node.children = map[any]*closedPartitionSet{}
+			}
+			node.children[part] = next
+		}
+		node = next
+	}
+}
+
+func (s *closedPartitionSet) contains(rec partitionRecord) bool {
+	node := s
+	for _, part := range rec {
+		next, ok := node.children[part]
+		if !ok {
+			return false
+		}
+		node = next
+	}
+
+	return true
 }
