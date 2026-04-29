@@ -60,13 +60,21 @@ type manifestEvalVisitor struct {
 }
 
 func (m *manifestEvalVisitor) Eval(manifest iceberg.ManifestFile) (bool, error) {
-	if parts := manifest.Partitions(); len(parts) > 0 {
-		m.partitionFields = parts
-
-		return iceberg.VisitExpr(m.partitionFilter, m)
+	parts := manifest.Partitions()
+	if len(parts) == 0 {
+		return rowsMightMatch, nil
 	}
 
-	return rowsMightMatch, nil
+	// Use a per-call visitor so concurrent callers of the same cached Eval
+	// closure (e.g. the errgroup in classifyFilesForFilteredDeletions and
+	// the parallel manifest scans in scanner.collectManifestEntries) do
+	// not race on partitionFields. Mirrors the exprEvaluator fix above.
+	ev := manifestEvalVisitor{
+		partitionFields: parts,
+		partitionFilter: m.partitionFilter,
+	}
+
+	return iceberg.VisitExpr(ev.partitionFilter, &ev)
 }
 
 func removeBoundCmp[T iceberg.LiteralType](bound iceberg.Literal, vals []iceberg.Literal, cmpToDelete int) []iceberg.Literal {
