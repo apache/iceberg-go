@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"strconv"
@@ -123,7 +124,7 @@ func WriteRecords(ctx context.Context, tbl *Table,
 
 	if cfg.clustered && cfg.maxWriteWorkers > 0 {
 		return internal.SingleErrorIter[iceberg.DataFile](
-			fmt.Errorf("WithClusteredWrite and WithMaxWriteWorkers are incompatible: the clustered write path is single-threaded"))
+			errors.New("WithClusteredWrite and WithMaxWriteWorkers are incompatible: the clustered write path is single-threaded"))
 	}
 
 	fs, err := tbl.fsF(ctx)
