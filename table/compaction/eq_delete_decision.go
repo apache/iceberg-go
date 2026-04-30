@@ -19,6 +19,7 @@ package compaction
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 
@@ -27,7 +28,7 @@ import (
 
 // SurvivorSurvey describes the surviving data files in a snapshot
 // AFTER a planned rewrite has logically removed its rewrite set. It
-// is the input to DecideDeadEqualityDeletes.
+// is the input to [DecideDeadEqualityDeletes].
 //
 // EmptyPartMinSeq is the smallest sequence number among unpartitioned
 // surviving data files. Per the Iceberg v2 reader predicate (see
@@ -76,16 +77,15 @@ func (s *SurvivorSurvey) AddSurvivor(partition map[int]any, seq int64) {
 		seq = 0
 	}
 	if len(partition) == 0 {
-		if seq < s.EmptyPartMinSeq {
-			s.EmptyPartMinSeq = seq
-		}
+		s.EmptyPartMinSeq = min(seq, s.EmptyPartMinSeq)
 
 		return
 	}
 	key := partitionMatchKey(partition)
-	if cur, ok := s.PartMinSeq[key]; !ok || seq < cur {
-		s.PartMinSeq[key] = seq
+	if cur, ok := s.PartMinSeq[key]; ok {
+		seq = min(seq, cur)
 	}
+	s.PartMinSeq[key] = seq
 }
 
 // applicableMinSeq returns the smallest surviving-D seq number that
@@ -95,21 +95,17 @@ func (s *SurvivorSurvey) AddSurvivor(partition map[int]any, seq int64) {
 // applies to every surviving D (so we min across every PartMinSeq).
 func (s *SurvivorSurvey) applicableMinSeq(eqPartition map[int]any) int64 {
 	if len(eqPartition) == 0 {
-		min := s.EmptyPartMinSeq
-		for _, v := range s.PartMinSeq {
-			if v < min {
-				min = v
-			}
+		if len(s.PartMinSeq) == 0 {
+			return s.EmptyPartMinSeq
 		}
 
-		return min
+		return min(s.EmptyPartMinSeq, slices.Min(slices.Collect(maps.Values(s.PartMinSeq))))
 	}
-	min := s.EmptyPartMinSeq
-	if v, ok := s.PartMinSeq[partitionMatchKey(eqPartition)]; ok && v < min {
-		min = v
+	if v, ok := s.PartMinSeq[partitionMatchKey(eqPartition)]; ok {
+		return min(s.EmptyPartMinSeq, v)
 	}
 
-	return min
+	return s.EmptyPartMinSeq
 }
 
 // DecideDeadEqualityDeletes is the pure spec-correctness predicate for
@@ -142,10 +138,7 @@ func (s *SurvivorSurvey) applicableMinSeq(eqPartition map[int]any) int64 {
 // Dedup by file path: the same eq-delete file may appear in multiple
 // manifest entries after manifest merging.
 func DecideDeadEqualityDeletes(survey *SurvivorSurvey, candidates []iceberg.ManifestEntry) []iceberg.DataFile {
-	if survey == nil {
-		return nil
-	}
-	if len(candidates) == 0 {
+	if survey == nil || len(candidates) == 0 {
 		return nil
 	}
 

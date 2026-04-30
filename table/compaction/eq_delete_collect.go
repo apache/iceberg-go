@@ -31,7 +31,7 @@ import (
 //
 // "Dead" means: no surviving data file in the snapshot (excluding
 // rewrittenPaths) could ever apply to the eq-delete per the v2 reader
-// predicate (see DecideDeadEqualityDeletes for the exact rule).
+// predicate (see [DecideDeadEqualityDeletes] for the exact rule).
 //
 // rewrittenPaths is the union of every old data file path being
 // replaced by a planned rewrite (across all groups). The caller
@@ -71,14 +71,11 @@ func CollectDeadEqualityDeletes(
 		if m.ManifestContent() != iceberg.ManifestContentDeletes {
 			continue
 		}
-		entries, err := m.FetchEntries(fs, false)
+		entries, err := m.FetchEntries(fs, true)
 		if err != nil {
 			return nil, err
 		}
 		for _, e := range entries {
-			if e.Status() == iceberg.EntryStatusDELETED {
-				continue
-			}
 			if e.DataFile().ContentType() != iceberg.EntryContentEqDeletes {
 				continue
 			}
@@ -98,14 +95,11 @@ func CollectDeadEqualityDeletes(
 		if m.ManifestContent() != iceberg.ManifestContentData {
 			continue
 		}
-		entries, err := m.FetchEntries(fs, false)
+		entries, err := m.FetchEntries(fs, true)
 		if err != nil {
 			return nil, err
 		}
 		for _, e := range entries {
-			if e.Status() == iceberg.EntryStatusDELETED {
-				continue
-			}
 			df := e.DataFile()
 			if df.ContentType() != iceberg.EntryContentData {
 				continue

@@ -40,10 +40,9 @@ type RewriteResult struct {
 	RemovedPositionDeleteFiles int
 
 	// RemovedEqualityDeleteFiles is the count of equality delete files
-	// removed via RewriteDataFilesOptions.ExtraDeleteFilesToRemove. The
-	// caller computes which eq-deletes are dead — typically via
-	// table/compaction.CollectDeadEqualityDeletes — and passes the list
-	// in.
+	// removed via [RewriteDataFilesOptions.ExtraDeleteFilesToRemove].
+	// The caller computes which eq-deletes are dead — typically via
+	// [compaction.CollectDeadEqualityDeletes] — and passes the list in.
 	RemovedEqualityDeleteFiles int
 
 	// BytesBefore is the total size of input data files (from the compaction plan).
@@ -58,8 +57,8 @@ type RewriteResult struct {
 // (table/compaction package) and the executor, avoiding a circular
 // import between table and table/compaction.
 //
-// Use compaction.Config.PlanCompaction() to produce groups, then convert
-// compaction.Group → CompactionTaskGroup to call RewriteDataFiles.
+// Use [compaction.Config.PlanCompaction] to produce groups, then convert
+// [compaction.Group] → [CompactionTaskGroup] to call [Transaction.RewriteDataFiles].
 type CompactionTaskGroup struct {
 	// PartitionKey is an opaque grouping key for display/logging.
 	PartitionKey string
@@ -94,10 +93,10 @@ type RewriteDataFilesOptions struct {
 	// passes them through to ReplaceFiles unchanged. Honored only
 	// when PartialProgress is false.
 	//
-	// Use table/compaction.CollectDeadEqualityDeletes to compute this
-	// list from the current snapshot. Position delete files that are
-	// fully applied are removed automatically and do NOT need to be
-	// passed in here.
+	// Use [compaction.CollectDeadEqualityDeletes] to compute this list
+	// from the current snapshot. Position delete files that are fully
+	// applied are removed automatically and do NOT need to be passed
+	// in here.
 	ExtraDeleteFilesToRemove []iceberg.DataFile
 }
 
@@ -108,15 +107,15 @@ type RewriteDataFilesOptions struct {
 // removed automatically.
 //
 // Equality-delete cleanup is the caller's responsibility: compute the
-// dead set with table/compaction.CollectDeadEqualityDeletes (against
-// the same snapshot the rewrite is staged on) and pass it via
-// opts.ExtraDeleteFilesToRemove. The executor only orchestrates the
-// commit; it does not impose a cleanup policy. This split keeps the
-// pure spec predicate in table/compaction and the unexported snapshot
-// machinery in table.
+// dead set with [compaction.CollectDeadEqualityDeletes] (against the
+// same snapshot the rewrite is staged on) and pass it via
+// [RewriteDataFilesOptions.ExtraDeleteFilesToRemove]. The executor
+// only orchestrates the commit; it does not impose a cleanup policy.
+// This split keeps the pure spec predicate in table/compaction and
+// the unexported snapshot machinery in table.
 //
-// Use table/compaction.Config.PlanCompaction() to produce the groups,
-// then convert compaction.Group → CompactionTaskGroup and pass them
+// Use [compaction.Config.PlanCompaction] to produce the groups, then
+// convert [compaction.Group] → [CompactionTaskGroup] and pass them
 // here.
 func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (*RewriteResult, error) {
 	if len(groups) == 0 {
@@ -211,7 +210,7 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 
 	if !opts.PartialProgress {
 		// Caller-supplied dead eq-deletes (typically from
-		// compaction.CollectDeadEqualityDeletes). The caller is
+		// [compaction.CollectDeadEqualityDeletes]). The caller is
 		// responsible for computing these against the same snapshot
 		// this transaction is staged on.
 		if len(opts.ExtraDeleteFilesToRemove) > 0 {
@@ -251,7 +250,7 @@ func rewriteValidator(rewrittenPaths []string) conflictValidatorFunc {
 // the new output files will not contain the deleted rows.
 //
 // Only position deletes (EntryContentPosDeletes) are considered.
-// Equality deletes are decided by table/compaction.DecideDeadEqualityDeletes
+// Equality deletes are decided by [compaction.DecideDeadEqualityDeletes]
 // (which needs partition-wide visibility, not just the task scope).
 // Deletion vectors will be handled when DV read support lands.
 func collectSafePositionDeletes(tasks []FileScanTask) []iceberg.DataFile {
