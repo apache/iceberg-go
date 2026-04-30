@@ -41,8 +41,12 @@ type flakyCatalog struct {
 	attempts         atomic.Int32
 }
 
-func (c *flakyCatalog) LoadTable(ctx context.Context, ident Identifier) (*Table, error) {
-	return nil, nil
+func (c *flakyCatalog) LoadTable(_ context.Context, ident Identifier) (*Table, error) {
+	if c.metadata == nil {
+		return nil, nil
+	}
+
+	return New(ident, c.metadata, "", func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, c), nil
 }
 
 func (c *flakyCatalog) CommitTable(ctx context.Context, ident Identifier, reqs []Requirement, updates []Update) (Metadata, string, error) {
