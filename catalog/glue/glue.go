@@ -347,9 +347,11 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 			// Glue's optimistic locking surfaces a VersionId mismatch
 			// as ConcurrentModificationException. Wrap with
 			// table.ErrCommitFailed so the retry loop in
-			// Table.doCommit treats it as a retryable conflict.
-			var concurrentModErr *types.ConcurrentModificationException
-			if errors.As(err, &concurrentModErr) {
+			// Table.doCommit treats it as a retryable conflict. The
+			// SDK type has no Is(error) bool, so errors.Is doesn't
+			// help here — errors.As with a throwaway target is the
+			// idiomatic type-only check.
+			if errors.As(err, new(*types.ConcurrentModificationException)) {
 				return nil, "", fmt.Errorf("%w: %w", table.ErrCommitFailed, err)
 			}
 
