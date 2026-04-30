@@ -347,11 +347,8 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 			// Glue's optimistic locking surfaces a VersionId mismatch
 			// as ConcurrentModificationException. Wrap with
 			// table.ErrCommitFailed so the retry loop in
-			// Table.doCommit treats it as a retryable conflict. The
-			// SDK type has no Is(error) bool, so errors.Is doesn't
-			// help here — errors.As with a throwaway target is the
-			// idiomatic type-only check.
-			if errors.As(err, new(*types.ConcurrentModificationException)) {
+			// Table.doCommit treats it as a retryable conflict.
+			if isConcurrentModificationException(err) {
 				return nil, "", fmt.Errorf("%w: %w", table.ErrCommitFailed, err)
 			}
 
@@ -810,4 +807,14 @@ func constructDatabaseInput(database string, props iceberg.Properties) *types.Da
 	databaseInput.Parameters = parameters
 
 	return databaseInput
+}
+
+// isConcurrentModificationException reports whether err is or wraps
+// Glue's optimistic-locking conflict signal. The SDK type has no
+// Is(error) bool, so errors.Is would do interface-value equality
+// against a fresh empty struct and never match — errors.As with a
+// throwaway target is the idiomatic type-only check, and we cannot
+// add an Is method to a type from another package.
+func isConcurrentModificationException(err error) bool {
+	return errors.As(err, new(*types.ConcurrentModificationException))
 }
