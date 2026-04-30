@@ -566,7 +566,7 @@ func (s *HadoopCatalogTestSuite) TestLoadNamespacePropertiesFileNotDir() {
 func (s *HadoopCatalogTestSuite) TestUpdateNamespacePropertiesUnsupported() {
 	_, err := s.cat.UpdateNamespaceProperties(context.Background(), []string{"ns"}, nil, nil)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "not supported")
+	s.Contains(err.Error(), "not yet implemented")
 }
 
 func (s *HadoopCatalogTestSuite) TestDropNamespaceWithRegularFilesOnly() {
