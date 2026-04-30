@@ -395,6 +395,10 @@ func (w *ParquetFileWriter) Close() (_ iceberg.DataFile, err error) {
 	}), nil
 }
 
+func (w *ParquetFileWriter) Abort() error {
+	return w.fileCloser.Close()
+}
+
 type decAsIntAgg[T int32 | int64] struct {
 	*statsAggregator[T]
 }
