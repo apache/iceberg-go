@@ -75,6 +75,20 @@ func init() {
 	Register("", localFSFactory)
 }
 
+func schemeRegistrationHint(scheme string) string {
+	switch scheme {
+	case "s3", "s3a", "s3n", "gs", "abfs", "abfss", "wasb", "wasbs", "mem":
+		{
+			return `hint: import the matching IO module for side-effect registration: _ "github.com/apache/iceberg-go/io/gocloud"  // for s3/gcs/azblob/file`
+		}
+
+	default:
+		{
+			return ""
+		}
+	}
+}
+
 func inferFileIOFromScheme(ctx context.Context, path string, props map[string]string) (IO, error) {
 	parsed, err := url.Parse(path)
 	if err != nil {
@@ -86,6 +100,11 @@ func inferFileIOFromScheme(ctx context.Context, path string, props map[string]st
 	regMutex.RUnlock()
 
 	if !ok {
+		hint := schemeRegistrationHint(parsed.Scheme)
+		if hint != "" {
+			return nil, fmt.Errorf("%w for path %q (scheme: %s)\n%s", ErrIOSchemeNotFound, path, parsed.Scheme, hint)
+		}
+
 		return nil, fmt.Errorf("%w for path %q (scheme: %s)", ErrIOSchemeNotFound, path, parsed.Scheme)
 	}
 
