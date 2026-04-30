@@ -29,12 +29,20 @@ import (
 	"github.com/pterm/pterm"
 )
 
-func compact(ctx context.Context, output Output, cat catalog.Catalog, cfg Config) {
-	tbl := loadTable(ctx, output, cat, cfg.TableID)
+type compactConfig struct {
+	tableID                     string
+	targetFileSize              int64
+	analyzeOnly                 bool
+	partialProgress             bool
+	preserveDeadEqualityDeletes bool
+}
+
+func compact(ctx context.Context, output Output, cat catalog.Catalog, cfg compactConfig) {
+	tbl := loadTable(ctx, output, cat, cfg.tableID)
 
 	compCfg := compaction.DefaultConfig()
-	if cfg.TargetFileSize > 0 {
-		compCfg.TargetFileSizeBytes = cfg.TargetFileSize
+	if cfg.targetFileSize > 0 {
+		compCfg.TargetFileSizeBytes = cfg.targetFileSize
 		// Derive min/max using the same ratios as DefaultConfig (75%/180%).
 		compCfg.MinFileSizeBytes = compCfg.TargetFileSizeBytes * 3 / 4
 		compCfg.MaxFileSizeBytes = compCfg.TargetFileSizeBytes * 9 / 5
@@ -54,7 +62,7 @@ func compact(ctx context.Context, output Output, cat catalog.Catalog, cfg Config
 
 	printCompactionPlan(output, plan)
 
-	if cfg.Analyze {
+	if cfg.analyzeOnly {
 		return
 	}
 
@@ -101,7 +109,7 @@ func printCompactionPlan(output Output, plan compaction.Plan) {
 	}
 }
 
-func compactRun(ctx context.Context, output Output, tbl *table.Table, plan compaction.Plan, cfg Config) {
+func compactRun(ctx context.Context, output Output, tbl *table.Table, plan compaction.Plan, cfg compactConfig) {
 	candidateFiles := plan.TotalInputFiles - plan.SkippedFiles
 	output.Text(fmt.Sprintf("Compacting %d groups (%d files)...",
 		len(plan.Groups), candidateFiles))
@@ -117,14 +125,14 @@ func compactRun(ctx context.Context, output Output, tbl *table.Table, plan compa
 
 	tx := tbl.NewTransaction()
 	rewriteOpts := table.RewriteDataFilesOptions{
-		PartialProgress: cfg.PartialProgress,
+		PartialProgress: cfg.partialProgress,
 	}
 
 	// Cleanup of dead equality-delete files. The executor only
 	// orchestrates the commit; the policy + walk live in
 	// table/compaction. Skipped in partial-progress mode (per-group
 	// cleanup is a follow-up) and when the caller opts out.
-	if !cfg.PartialProgress && !cfg.PreserveDeadEqualityDeletes {
+	if !cfg.partialProgress && !cfg.preserveDeadEqualityDeletes {
 		snap := tbl.CurrentSnapshot()
 		if snap != nil {
 			fs, err := tbl.FS(ctx)
