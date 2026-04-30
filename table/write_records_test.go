@@ -157,6 +157,33 @@ func (s *WriteRecordsTestSuite) TestWithWriteUUID() {
 	}
 }
 
+func (s *WriteRecordsTestSuite) TestClusteredWithMaxWriteWorkersIsRejected() {
+	loc := filepath.ToSlash(s.T().TempDir())
+	tbl := s.newTable(loc)
+	schema := s.arrowSchema()
+
+	records := func(yield func(arrow.RecordBatch, error) bool) {}
+
+	var (
+		dataFiles []iceberg.DataFile
+		writeErr  error
+	)
+	for df, err := range table.WriteRecords(s.ctx, tbl, schema, records,
+		table.WithClusteredWrite(), table.WithMaxWriteWorkers(4)) {
+		if err != nil {
+			writeErr = err
+
+			break
+		}
+		dataFiles = append(dataFiles, df)
+	}
+
+	s.Require().Error(writeErr)
+	s.Contains(writeErr.Error(), "WithClusteredWrite")
+	s.Contains(writeErr.Error(), "WithMaxWriteWorkers")
+	s.Empty(dataFiles)
+}
+
 func (s *WriteRecordsTestSuite) TestFSNotWritable() {
 	iceSch := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},

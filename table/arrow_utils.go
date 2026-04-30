@@ -1453,11 +1453,13 @@ func binPackRecords(itr iter.Seq2[arrow.RecordBatch, error], recordLookback int,
 }
 
 type recordWritingArgs struct {
-	sc        *arrow.Schema
-	itr       iter.Seq2[arrow.RecordBatch, error]
-	fs        iceio.WriteFileIO
-	writeUUID *uuid.UUID
-	counter   iter.Seq[int]
+	sc              *arrow.Schema
+	itr             iter.Seq2[arrow.RecordBatch, error]
+	fs              iceio.WriteFileIO
+	writeUUID       *uuid.UUID
+	counter         iter.Seq[int]
+	maxWriteWorkers int
+	clustered       bool
 }
 
 func recordsToDataFiles(ctx context.Context, rootLocation string, meta *MetadataBuilder, args recordWritingArgs) (ret iter.Seq2[iceberg.DataFile, error]) {
@@ -1496,10 +1498,6 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 		}
 	}
 
-	cw := newConcurrentDataFileWriter(func(rootLocation string, fs iceio.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
-		return newDataFileWriter(rootLocation, fs, meta, props, opts...)
-	})
-
 	factory, err := newWriterFactory(rootLocation, args, meta, taskSchema, targetFileSize)
 	if err != nil {
 		panic(err)
@@ -1509,8 +1507,19 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 		return unpartitionedWrite(ctx, factory, args.itr)
 	}
 
+	if args.clustered {
+		return clusteredPartitionedWrite(ctx, factory.currentSpec, meta.CurrentSchema(), factory, args.itr)
+	}
+
+	cw := newConcurrentDataFileWriter(func(rootLocation string, fs iceio.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
+		return newDataFileWriter(rootLocation, fs, meta, props, opts...)
+	})
+
 	partitionWriter := newPartitionedFanoutWriter(factory.currentSpec, cw, meta.CurrentSchema(), args.itr, factory)
 	workers := config.EnvConfig.MaxWorkers
+	if args.maxWriteWorkers > 0 {
+		workers = args.maxWriteWorkers
+	}
 
 	return partitionWriter.Write(ctx, workers)
 }
