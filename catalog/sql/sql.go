@@ -370,7 +370,11 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 			}
 
 			if n == 0 {
-				return fmt.Errorf("table has been updated by another process: %s.%s", strings.Join(ns, "."), tblName)
+				// Wrap with table.ErrCommitFailed so the retry loop in
+				// Table.doCommit treats this as a retryable conflict
+				// (matches catalog/rest's HTTP 409 mapping).
+				return fmt.Errorf("%w: table %s.%s metadata-location moved underneath us",
+					table.ErrCommitFailed, strings.Join(ns, "."), tblName)
 			}
 
 			return nil

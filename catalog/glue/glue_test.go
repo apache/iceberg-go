@@ -1436,3 +1436,14 @@ func TestCommitTableOptimisticLockingIntegration(t *testing.T) {
 		}
 	})
 }
+
+func TestIsConcurrentModificationException(t *testing.T) {
+	sdkErr := &types.ConcurrentModificationException{Message: aws.String("oops")}
+	require.True(t, isConcurrentModificationException(sdkErr))
+
+	wrapped := fmt.Errorf("during update: %w", sdkErr)
+	require.True(t, isConcurrentModificationException(wrapped), "must walk the wrap chain")
+
+	require.False(t, isConcurrentModificationException(errors.New("network timeout")))
+	require.False(t, isConcurrentModificationException(nil))
+}
