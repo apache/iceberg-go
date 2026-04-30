@@ -962,7 +962,7 @@ func TestAddColumnMonotonicFieldIDs(t *testing.T) {
 		"new field id must be allocated above metadata.LastColumnID() (13), not reused from the current schema's highest id (11)")
 }
 
-// TestAddColumnAfterDropHighestID is a regression test for #538 / #936.
+// TestAddColumnAfterDropHighestID is a regression test for #942.
 // It reproduces the exact scenario from the original bug: a column is added
 // (bumping last-column-id) then dropped (lowering the current schema's
 // HighestFieldID back down). A subsequent AddColumn must allocate an id above
@@ -1026,6 +1026,23 @@ func TestAddColumnAfterDropHighestID(t *testing.T) {
 		"precondition: current schema's highest id should be 11 after dropping id-12 column")
 	assert.Equal(t, 12, afterDropMeta.LastColumnID(),
 		"precondition: last-column-id must still be 12 — ids are never reclaimed")
+
+	// Verify schema history still contains the dropped temp_col with id 12.
+	// A partial fix that strips dropped fields from historical schemas could
+	// still pass the id-monotonicity check above but break interop with
+	// Java/PyIceberg/Glue which expect historical schemas to be intact.
+	var foundInHistory bool
+	for _, s := range afterDropMeta.Schemas() {
+		if col, ok := s.FindFieldByID(12); ok {
+			assert.Equal(t, "temp_col", col.Name,
+				"historical schema must retain temp_col at id 12")
+			foundInHistory = true
+
+			break
+		}
+	}
+	assert.True(t, foundInHistory,
+		"dropped column (id 12) must still appear in at least one historical schema")
 
 	// Step 3: Add a new column. Its id must be 13 (last-column-id + 1), not
 	// 12 (HighestFieldID + 1). Using HighestFieldID would re-assign id 12,
