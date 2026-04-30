@@ -356,18 +356,33 @@ func (s *HadoopCatalogTestSuite) TestFindVersionIgnoresTempFiles() {
 }
 
 func (s *HadoopCatalogTestSuite) TestFindVersionGzipOnlyWithHint() {
-	// Table has only gzip metadata. Hint exists but metadataFilePath
-	// generates non-gzip paths, so hint validation fails. Should fall
-	// through to dir listing which handles gzip filenames correctly.
+	// Table has only gzip metadata. Hint validation and scanForward
+	// should recognize gzip-compressed metadata files.
 	ident := []string{"ns", "tbl"}
 	dir := s.cat.metadataDir(ident)
 	s.Require().NoError(os.MkdirAll(dir, 0o755))
 	s.Require().NoError(os.WriteFile(filepath.Join(dir, "v1.gz.metadata.json"), nil, 0o644))
 	s.Require().NoError(os.WriteFile(filepath.Join(dir, "v2.gz.metadata.json"), nil, 0o644))
-	s.cat.writeVersionHint(ident, 2)
+	s.cat.writeVersionHint(ident, 1)
 
 	ver, err := s.cat.findVersion(ident)
 	s.Require().NoError(err)
-	// Dir listing finds max=2, scanForward checks v3.metadata.json (doesn't exist) → returns 2
+	// Hint=1 validated via gzip path, scanForward finds v2.gz → returns 2
 	s.Equal(2, ver)
+}
+
+func (s *HadoopCatalogTestSuite) TestFindVersionMixedGzipAndPlain() {
+	// v1 and v2 are plain, v3 is gzip-compressed. scanForward must
+	// check both formats to avoid returning a stale version.
+	ident := []string{"ns", "tbl"}
+	dir := s.cat.metadataDir(ident)
+	s.Require().NoError(os.MkdirAll(dir, 0o755))
+	s.createMetadataFile(ident, 1)
+	s.createMetadataFile(ident, 2)
+	s.Require().NoError(os.WriteFile(filepath.Join(dir, "v3.gz.metadata.json"), nil, 0o644))
+	s.cat.writeVersionHint(ident, 1)
+
+	ver, err := s.cat.findVersion(ident)
+	s.Require().NoError(err)
+	s.Equal(3, ver)
 }

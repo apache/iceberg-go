@@ -172,13 +172,26 @@ func (c *Catalog) writeVersionHint(ident table.Identifier, version int) {
 	}
 }
 
+// metadataVersionExists checks whether a metadata file for the given version
+// exists in either plain or gzip-compressed form.
+func (c *Catalog) metadataVersionExists(ident table.Identifier, version int) bool {
+	dir := c.metadataDir(ident)
+	plain := filepath.Join(dir, fmt.Sprintf("v%d.metadata.json", version))
+
+	if _, err := os.Stat(plain); err == nil {
+		return true
+	}
+
+	gz := filepath.Join(dir, fmt.Sprintf("v%d.gz.metadata.json", version))
+
+	_, err := os.Stat(gz)
+
+	return err == nil
+}
+
 func (c *Catalog) scanForward(ident table.Identifier, start int) int {
 	ver := start
-	for {
-		if _, err := os.Stat(c.metadataFilePath(ident, ver+1)); err != nil {
-			break
-		}
-
+	for c.metadataVersionExists(ident, ver+1) {
 		ver++
 	}
 
@@ -187,10 +200,8 @@ func (c *Catalog) scanForward(ident table.Identifier, start int) int {
 
 func (c *Catalog) findVersion(ident table.Identifier) (int, error) {
 	hint := c.readVersionHint(ident)
-	if hint > 0 {
-		if _, err := os.Stat(c.metadataFilePath(ident, hint)); err == nil {
-			return c.scanForward(ident, hint), nil
-		}
+	if hint > 0 && c.metadataVersionExists(ident, hint) {
+		return c.scanForward(ident, hint), nil
 	}
 
 	dir := c.metadataDir(ident)
