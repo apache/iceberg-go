@@ -55,6 +55,28 @@ type Config struct {
 	// before evicting. Higher values produce better packing at the cost
 	// of memory. Default: DefaultPackingLookback.
 	PackingLookback uint
+
+	// PreserveDeadEqualityDeletes, when true, retains equality delete
+	// files that are provably dead after the rewrite. The cleanup
+	// predicate matches the v2 reader (see scanner.go
+	// matchEqualityDeletesToData and DecideDeadEqualityDeletes): an
+	// eq-delete is dead iff no surviving applicable data file has
+	// seq < eq-delete.seq, where "applicable" means same partition
+	// tuple OR either side has empty partition. SpecID is NOT part of
+	// the predicate.
+	//
+	// Zero value (false) is the recommended default: dead eq-deletes are
+	// expunged during the rewrite commit, which keeps manifest fanout
+	// bounded under sustained CDC workloads where eq-deletes accumulate
+	// one-per-snapshot. Set to true only if a downstream consumer
+	// depends on the historical eq-delete files surviving in the live
+	// snapshot's manifests (rare).
+	//
+	// Honored only in atomic mode (RewriteDataFilesOptions.PartialProgress=false).
+	// The CLI / library caller is responsible for translating this flag
+	// into the snapshot walk + RewriteDataFilesOptions.ExtraDeleteFilesToRemove
+	// — see CollectDeadEqualityDeletes.
+	PreserveDeadEqualityDeletes bool
 }
 
 const (
@@ -171,7 +193,7 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 	var partitionOrder []string
 
 	for _, t := range tasks {
-		key := fmt.Sprintf("%d:%v", t.File.SpecID(), t.File.Partition())
+		key := partitionBucketKey(t.File.SpecID(), t.File.Partition())
 		bucket, ok := partitions[key]
 		if !ok {
 			bucket = partitionBucket{key: key}
