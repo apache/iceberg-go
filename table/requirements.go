@@ -180,14 +180,14 @@ func (a *assertRefSnapshotID) Validate(meta Metadata) error {
 
 	if r != nil {
 		if a.SnapshotID == nil {
-			return fmt.Errorf("requirement failed: ref \"%s\" was created concurrently, found %d", a.Ref, r.SnapshotID)
+			return fmt.Errorf("requirement failed: %s %q was created concurrently", r.SnapshotRefType, a.Ref)
 		}
 
 		if r.SnapshotID != *a.SnapshotID {
-			return fmt.Errorf("requirement failed: ref \"%s\" expected snapshot %d, found %d", a.Ref, *a.SnapshotID, r.SnapshotID)
+			return fmt.Errorf("requirement failed: %s %q has changed: expected id %d, found %d", r.SnapshotRefType, a.Ref, *a.SnapshotID, r.SnapshotID)
 		}
 	} else if a.SnapshotID != nil {
-		return fmt.Errorf("requirement failed: ref \"%s\" expected snapshot %d, ref is missing", a.Ref, *a.SnapshotID)
+		return fmt.Errorf("requirement failed: branch or tag %q is missing, expected %d", a.Ref, *a.SnapshotID)
 	}
 
 	return nil

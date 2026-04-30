@@ -160,25 +160,27 @@ func TestAssertRefSnapshotIDValidate(t *testing.T) {
 		req := table.AssertRefSnapshotID("test", ptr(int64(1)))
 		err := req.Validate(meta)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), `ref "test"`)
-		assert.Contains(t, err.Error(), "expected snapshot 1")
+		assert.Contains(t, err.Error(), `"test"`)
+		assert.Contains(t, err.Error(), "expected id 1")
 		assert.Contains(t, err.Error(), "found 3051729675574597004")
+		assert.Contains(t, err.Error(), "has changed")
 	})
 
 	t.Run("nil expected but ref exists includes found snapshot", func(t *testing.T) {
 		req := table.AssertRefSnapshotID("test", nil)
 		err := req.Validate(meta)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), `ref "test"`)
-		assert.Contains(t, err.Error(), "found 3051729675574597004")
+		assert.Contains(t, err.Error(), `"test"`)
+		assert.Contains(t, err.Error(), "was created concurrently")
 	})
 
 	t.Run("ref missing but expected includes expected snapshot", func(t *testing.T) {
 		req := table.AssertRefSnapshotID("nonexistent", ptr(int64(42)))
 		err := req.Validate(meta)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), `ref "nonexistent"`)
-		assert.Contains(t, err.Error(), "expected snapshot 42")
+		assert.Contains(t, err.Error(), `"nonexistent"`)
+		assert.Contains(t, err.Error(), "is missing")
+		assert.Contains(t, err.Error(), "expected 42")
 	})
 
 	t.Run("nil metadata returns error", func(t *testing.T) {
