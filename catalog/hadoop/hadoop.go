@@ -265,24 +265,111 @@ func (c *Catalog) CheckTableExists(_ context.Context, _ table.Identifier) (bool,
 	return false, errors.New("hadoop catalog: CheckTableExists not yet implemented")
 }
 
-func (c *Catalog) ListNamespaces(_ context.Context, _ table.Identifier) ([]table.Identifier, error) {
-	return nil, errors.New("hadoop catalog: ListNamespaces not yet implemented")
+func (c *Catalog) CreateNamespace(_ context.Context, ns table.Identifier, props iceberg.Properties) error {
+	if len(ns) == 0 {
+		return errors.New("hadoop catalog: namespace identifier must not be empty")
+	}
+
+	if len(props) > 0 {
+		return errors.New("hadoop catalog: namespace properties are not supported")
+	}
+
+	path := c.namespaceToPath(ns)
+
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("%w: %s", catalog.ErrNamespaceAlreadyExists, strings.Join(ns, "."))
+	}
+
+	return os.MkdirAll(path, 0o755)
 }
 
-func (c *Catalog) CreateNamespace(_ context.Context, _ table.Identifier, _ iceberg.Properties) error {
-	return errors.New("hadoop catalog: CreateNamespace not yet implemented")
+func (c *Catalog) DropNamespace(_ context.Context, ns table.Identifier) error {
+	if len(ns) == 0 {
+		return errors.New("hadoop catalog: namespace identifier must not be empty")
+	}
+
+	path := c.namespaceToPath(ns)
+
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(ns, "."))
+	}
+
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return fmt.Errorf("hadoop catalog: failed to read namespace directory: %w", err)
+	}
+
+	if len(entries) > 0 {
+		return fmt.Errorf("%w: %s", catalog.ErrNamespaceNotEmpty, strings.Join(ns, "."))
+	}
+
+	return os.Remove(path)
 }
 
-func (c *Catalog) DropNamespace(_ context.Context, _ table.Identifier) error {
-	return errors.New("hadoop catalog: DropNamespace not yet implemented")
+func (c *Catalog) CheckNamespaceExists(_ context.Context, ns table.Identifier) (bool, error) {
+	path := c.namespaceToPath(ns)
+
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+
+	if err != nil {
+		return false, err
+	}
+
+	return info.IsDir(), nil
 }
 
-func (c *Catalog) CheckNamespaceExists(_ context.Context, _ table.Identifier) (bool, error) {
-	return false, errors.New("hadoop catalog: CheckNamespaceExists not yet implemented")
+func (c *Catalog) ListNamespaces(_ context.Context, parent table.Identifier) ([]table.Identifier, error) {
+	var path string
+
+	if len(parent) == 0 {
+		path = c.warehouse
+	} else {
+		path = c.namespaceToPath(parent)
+
+		info, err := os.Stat(path)
+		if os.IsNotExist(err) || (err == nil && !info.IsDir()) {
+			return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(parent, "."))
+		}
+	}
+
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, fmt.Errorf("hadoop catalog: failed to read directory: %w", err)
+	}
+
+	result := []table.Identifier{}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+
+		child := filepath.Join(path, e.Name())
+		if isTableDir(child) {
+			continue
+		}
+
+		result = append(result, table.Identifier{e.Name()})
+	}
+
+	return result, nil
 }
 
-func (c *Catalog) LoadNamespaceProperties(_ context.Context, _ table.Identifier) (iceberg.Properties, error) {
-	return nil, errors.New("hadoop catalog: LoadNamespaceProperties not yet implemented")
+func (c *Catalog) LoadNamespaceProperties(_ context.Context, ns table.Identifier) (iceberg.Properties, error) {
+	path := c.namespaceToPath(ns)
+
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) || (err == nil && !info.IsDir()) {
+		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(ns, "."))
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("hadoop catalog: failed to stat namespace: %w", err)
+	}
+
+	return iceberg.Properties{"location": path}, nil
 }
 
 func (c *Catalog) UpdateNamespaceProperties(_ context.Context, _ table.Identifier, _ []string, _ iceberg.Properties) (catalog.PropertiesUpdateSummary, error) {
