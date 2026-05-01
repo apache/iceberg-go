@@ -25,6 +25,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -219,4 +220,169 @@ func (s *HadoopCatalogTestSuite) TestIsTableDirWithGzipMetadata() {
 
 func (s *HadoopCatalogTestSuite) TestIsTableDirNonExistentPath() {
 	s.False(isTableDir(filepath.Join(s.warehouse, "does", "not", "exist")))
+}
+
+func (s *HadoopCatalogTestSuite) createMetadataFile(ident table.Identifier, version int) {
+	path := s.cat.metadataFilePath(ident, version)
+	s.Require().NoError(os.MkdirAll(filepath.Dir(path), 0o755))
+	s.Require().NoError(os.WriteFile(path, nil, 0o644))
+}
+
+func (s *HadoopCatalogTestSuite) TestReadWriteVersionHint() {
+	ident := []string{"ns", "tbl"}
+	s.Require().NoError(os.MkdirAll(s.cat.metadataDir(ident), 0o755))
+	s.cat.writeVersionHint(ident, 42)
+	s.Equal(42, s.cat.readVersionHint(ident))
+}
+
+func (s *HadoopCatalogTestSuite) TestReadVersionHintMissing() {
+	s.Equal(0, s.cat.readVersionHint([]string{"ns", "tbl"}))
+}
+
+func (s *HadoopCatalogTestSuite) TestReadVersionHintCorrupt() {
+	ident := []string{"ns", "tbl"}
+	dir := s.cat.metadataDir(ident)
+	s.Require().NoError(os.MkdirAll(dir, 0o755))
+	s.Require().NoError(os.WriteFile(s.cat.versionHintPath(ident), []byte("garbage"), 0o644))
+	s.Equal(0, s.cat.readVersionHint(ident))
+}
+
+func (s *HadoopCatalogTestSuite) TestWriteVersionHintCreatesFile() {
+	ident := []string{"ns", "tbl"}
+	s.Require().NoError(os.MkdirAll(s.cat.metadataDir(ident), 0o755))
+	s.cat.writeVersionHint(ident, 7)
+	data, err := os.ReadFile(s.cat.versionHintPath(ident))
+	s.Require().NoError(err)
+	s.Equal("7", string(data))
+}
+
+func (s *HadoopCatalogTestSuite) TestFindVersionFromHint() {
+	ident := []string{"ns", "tbl"}
+	s.createMetadataFile(ident, 1)
+	s.cat.writeVersionHint(ident, 1)
+	ver, err := s.cat.findVersion(ident)
+	s.Require().NoError(err)
+	s.Equal(1, ver)
+}
+
+func (s *HadoopCatalogTestSuite) TestFindVersionNoHint() {
+	ident := []string{"ns", "tbl"}
+	for i := 1; i <= 3; i++ {
+		s.createMetadataFile(ident, i)
+	}
+
+	ver, err := s.cat.findVersion(ident)
+	s.Require().NoError(err)
+	s.Equal(3, ver)
+}
+
+func (s *HadoopCatalogTestSuite) TestFindVersionNoMetadata() {
+	ident := []string{"ns", "tbl"}
+	s.Require().NoError(os.MkdirAll(s.cat.metadataDir(ident), 0o755))
+	_, err := s.cat.findVersion(ident)
+	s.Require().Error(err)
+	s.ErrorIs(err, catalog.ErrNoSuchTable)
+}
+
+func (s *HadoopCatalogTestSuite) TestFindVersionScanForward() {
+	ident := []string{"ns", "tbl"}
+	for i := 1; i <= 5; i++ {
+		s.createMetadataFile(ident, i)
+	}
+
+	s.cat.writeVersionHint(ident, 2)
+	ver, err := s.cat.findVersion(ident)
+	s.Require().NoError(err)
+	s.Equal(5, ver)
+}
+
+func (s *HadoopCatalogTestSuite) TestFindVersionNoMetadataDir() {
+	_, err := s.cat.findVersion([]string{"ns", "tbl"})
+	s.Require().Error(err)
+	s.ErrorIs(err, catalog.ErrNoSuchTable)
+}
+
+func (s *HadoopCatalogTestSuite) TestFindVersionStaleHintPointsToDeletedVersion() {
+	// hint=5, but only v1-v3 exist. Hint file points to a version whose
+	// metadata was deleted. Should fall through to dir listing and find v3.
+	ident := []string{"ns", "tbl"}
+	for i := 1; i <= 3; i++ {
+		s.createMetadataFile(ident, i)
+	}
+
+	s.cat.writeVersionHint(ident, 5)
+	ver, err := s.cat.findVersion(ident)
+	s.Require().NoError(err)
+	s.Equal(3, ver)
+}
+
+func (s *HadoopCatalogTestSuite) TestReadVersionHintZeroValue() {
+	ident := []string{"ns", "tbl"}
+	s.Require().NoError(os.MkdirAll(s.cat.metadataDir(ident), 0o755))
+	s.Require().NoError(os.WriteFile(s.cat.versionHintPath(ident), []byte("0"), 0o644))
+	s.Equal(0, s.cat.readVersionHint(ident))
+}
+
+func (s *HadoopCatalogTestSuite) TestReadVersionHintWithWhitespace() {
+	ident := []string{"ns", "tbl"}
+	s.Require().NoError(os.MkdirAll(s.cat.metadataDir(ident), 0o755))
+	s.Require().NoError(os.WriteFile(s.cat.versionHintPath(ident), []byte("  42\n"), 0o644))
+	s.Equal(42, s.cat.readVersionHint(ident))
+}
+
+func (s *HadoopCatalogTestSuite) TestWriteVersionHintNoMetadataDir() {
+	// metadata dir doesn't exist — writeVersionHint should not panic,
+	// just log a warning silently.
+	ident := []string{"nonexistent", "tbl"}
+	s.NotPanics(func() {
+		s.cat.writeVersionHint(ident, 1)
+	})
+}
+
+func (s *HadoopCatalogTestSuite) TestFindVersionIgnoresTempFiles() {
+	// metadata dir has both valid metadata files and orphaned temp files
+	// from crashed commits. findVersion should ignore temp files.
+	ident := []string{"ns", "tbl"}
+	dir := s.cat.metadataDir(ident)
+	s.Require().NoError(os.MkdirAll(dir, 0o755))
+	s.createMetadataFile(ident, 1)
+	s.createMetadataFile(ident, 2)
+	s.Require().NoError(os.WriteFile(filepath.Join(dir, "abc123-def456.metadata.json"), nil, 0o644))
+	s.Require().NoError(os.WriteFile(filepath.Join(dir, "abc123-version-hint.temp"), nil, 0o644))
+
+	ver, err := s.cat.findVersion(ident)
+	s.Require().NoError(err)
+	s.Equal(2, ver)
+}
+
+func (s *HadoopCatalogTestSuite) TestFindVersionGzipOnlyWithHint() {
+	// Table has only gzip metadata. Hint validation and scanForward
+	// should recognize gzip-compressed metadata files.
+	ident := []string{"ns", "tbl"}
+	dir := s.cat.metadataDir(ident)
+	s.Require().NoError(os.MkdirAll(dir, 0o755))
+	s.Require().NoError(os.WriteFile(filepath.Join(dir, "v1.gz.metadata.json"), nil, 0o644))
+	s.Require().NoError(os.WriteFile(filepath.Join(dir, "v2.gz.metadata.json"), nil, 0o644))
+	s.cat.writeVersionHint(ident, 1)
+
+	ver, err := s.cat.findVersion(ident)
+	s.Require().NoError(err)
+	// Hint=1 validated via gzip path, scanForward finds v2.gz → returns 2
+	s.Equal(2, ver)
+}
+
+func (s *HadoopCatalogTestSuite) TestFindVersionMixedGzipAndPlain() {
+	// v1 and v2 are plain, v3 is gzip-compressed. scanForward must
+	// check both formats to avoid returning a stale version.
+	ident := []string{"ns", "tbl"}
+	dir := s.cat.metadataDir(ident)
+	s.Require().NoError(os.MkdirAll(dir, 0o755))
+	s.createMetadataFile(ident, 1)
+	s.createMetadataFile(ident, 2)
+	s.Require().NoError(os.WriteFile(filepath.Join(dir, "v3.gz.metadata.json"), nil, 0o644))
+	s.cat.writeVersionHint(ident, 1)
+
+	ver, err := s.cat.findVersion(ident)
+	s.Require().NoError(err)
+	s.Equal(3, ver)
 }
