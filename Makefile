@@ -17,7 +17,7 @@
 # golangci-lint version (keep in sync with CI and README)
 GOLANGCI_LINT_VERSION := v2.8.0
 
-.PHONY: test lint lint-install integration-setup integration-test integration-scanner integration-io integration-rest integration-spark docs-gen
+.PHONY: test lint lint-install integration-setup integration-test integration-scanner integration-io integration-rest integration-spark integration-hadoop docs-gen
 
 test:
 	go test -v ./...
@@ -37,7 +37,7 @@ integration-setup:
 	docker compose -f internal/recipe/docker-compose.yml exec -T spark-iceberg ipython ./provision.py
 	sleep 10
 
-integration-test: integration-scanner integration-io integration-rest integration-spark integration-hive
+integration-test: integration-scanner integration-io integration-rest integration-spark integration-hive integration-hadoop
 
 integration-scanner:
 	go test -tags=integration -v -run="^TestScanner" ./table
@@ -53,3 +53,6 @@ integration-spark:
 
 integration-hive:
 	go test -tags=integration -v ./catalog/hive/...
+
+integration-hadoop:
+	go test -tags=integration -v -run="^TestHadoopIntegration" ./catalog/hadoop/...
