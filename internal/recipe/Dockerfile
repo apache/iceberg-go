@@ -21,6 +21,7 @@ RUN pip3 install pyarrow
 
 COPY provision.py .
 COPY validation.py .
+COPY hadoop_validation.py .
 
 ENTRYPOINT ["./entrypoint.sh"]
 CMD ["notebook"]
