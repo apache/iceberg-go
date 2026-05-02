@@ -386,3 +386,473 @@ func (s *HadoopCatalogTestSuite) TestFindVersionMixedGzipAndPlain() {
 	s.Require().NoError(err)
 	s.Equal(3, ver)
 }
+
+// CreateNamespace tests
+
+func (s *HadoopCatalogTestSuite) TestCreateNamespace() {
+	err := s.cat.CreateNamespace(context.Background(), []string{"ns"}, nil)
+	s.Require().NoError(err)
+
+	info, err := os.Stat(filepath.Join(s.warehouse, "ns"))
+	s.Require().NoError(err)
+	s.True(info.IsDir())
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateNamespaceAlreadyExists() {
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	err := s.cat.CreateNamespace(context.Background(), []string{"ns"}, nil)
+	s.ErrorIs(err, catalog.ErrNamespaceAlreadyExists)
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateNamespaceNested() {
+	err := s.cat.CreateNamespace(context.Background(), []string{"a", "b", "c"}, nil)
+	s.Require().NoError(err)
+
+	// Verify leaf and intermediate directories exist
+	for _, p := range []string{
+		filepath.Join(s.warehouse, "a"),
+		filepath.Join(s.warehouse, "a", "b"),
+		filepath.Join(s.warehouse, "a", "b", "c"),
+	} {
+		info, err := os.Stat(p)
+		s.Require().NoError(err)
+		s.True(info.IsDir())
+	}
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateNamespaceWithProperties() {
+	err := s.cat.CreateNamespace(context.Background(), []string{"ns"}, iceberg.Properties{"key": "val"})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "properties are not supported")
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateNamespaceNilProperties() {
+	err := s.cat.CreateNamespace(context.Background(), []string{"ns"}, nil)
+	s.Require().NoError(err)
+
+	info, err := os.Stat(filepath.Join(s.warehouse, "ns"))
+	s.Require().NoError(err)
+	s.True(info.IsDir())
+}
+
+// DropNamespace tests
+
+func (s *HadoopCatalogTestSuite) TestDropNamespace() {
+	nsDir := filepath.Join(s.warehouse, "ns")
+	s.Require().NoError(os.Mkdir(nsDir, 0o755))
+
+	err := s.cat.DropNamespace(context.Background(), []string{"ns"})
+	s.Require().NoError(err)
+
+	_, err = os.Stat(nsDir)
+	s.True(os.IsNotExist(err))
+}
+
+func (s *HadoopCatalogTestSuite) TestDropNamespaceNotExists() {
+	err := s.cat.DropNamespace(context.Background(), []string{"nope"})
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+}
+
+func (s *HadoopCatalogTestSuite) TestDropNamespaceNotEmptyWithTable() {
+	nsDir := filepath.Join(s.warehouse, "ns")
+	metaDir := filepath.Join(nsDir, "tbl", "metadata")
+	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
+	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "v1.metadata.json"), nil, 0o644))
+
+	err := s.cat.DropNamespace(context.Background(), []string{"ns"})
+	s.ErrorIs(err, catalog.ErrNamespaceNotEmpty)
+}
+
+func (s *HadoopCatalogTestSuite) TestDropNamespaceNotEmptyWithChildNamespace() {
+	nsDir := filepath.Join(s.warehouse, "ns")
+	s.Require().NoError(os.MkdirAll(filepath.Join(nsDir, "child_ns"), 0o755))
+
+	err := s.cat.DropNamespace(context.Background(), []string{"ns"})
+	s.ErrorIs(err, catalog.ErrNamespaceNotEmpty)
+}
+
+// CheckNamespaceExists tests
+
+func (s *HadoopCatalogTestSuite) TestCheckNamespaceExistsTrue() {
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	exists, err := s.cat.CheckNamespaceExists(context.Background(), []string{"ns"})
+	s.Require().NoError(err)
+	s.True(exists)
+}
+
+func (s *HadoopCatalogTestSuite) TestCheckNamespaceExistsFalse() {
+	exists, err := s.cat.CheckNamespaceExists(context.Background(), []string{"nope"})
+	s.Require().NoError(err)
+	s.False(exists)
+}
+
+// ListNamespaces tests
+
+func (s *HadoopCatalogTestSuite) TestListNamespacesRoot() {
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns1"), 0o755))
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns2"), 0o755))
+
+	namespaces, err := s.cat.ListNamespaces(context.Background(), nil)
+	s.Require().NoError(err)
+	s.Len(namespaces, 2)
+	s.Contains(namespaces, table.Identifier{"ns1"})
+	s.Contains(namespaces, table.Identifier{"ns2"})
+}
+
+func (s *HadoopCatalogTestSuite) TestListNamespacesEmpty() {
+	namespaces, err := s.cat.ListNamespaces(context.Background(), nil)
+	s.Require().NoError(err)
+	s.Empty(namespaces)
+	s.NotNil(namespaces)
+}
+
+func (s *HadoopCatalogTestSuite) TestListNamespacesNested() {
+	parentDir := filepath.Join(s.warehouse, "a")
+	s.Require().NoError(os.MkdirAll(filepath.Join(parentDir, "child1"), 0o755))
+	s.Require().NoError(os.MkdirAll(filepath.Join(parentDir, "child2"), 0o755))
+
+	namespaces, err := s.cat.ListNamespaces(context.Background(), []string{"a"})
+	s.Require().NoError(err)
+	s.Len(namespaces, 2)
+	s.Contains(namespaces, table.Identifier{"child1"})
+	s.Contains(namespaces, table.Identifier{"child2"})
+}
+
+func (s *HadoopCatalogTestSuite) TestListNamespacesParentNotExists() {
+	_, err := s.cat.ListNamespaces(context.Background(), []string{"nope"})
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+}
+
+func (s *HadoopCatalogTestSuite) TestListNamespacesParentIsFile() {
+	filePath := filepath.Join(s.warehouse, "a_file")
+	s.Require().NoError(os.WriteFile(filePath, nil, 0o644))
+
+	_, err := s.cat.ListNamespaces(context.Background(), []string{"a_file"})
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+}
+
+// LoadNamespaceProperties tests
+
+func (s *HadoopCatalogTestSuite) TestLoadNamespaceProperties() {
+	nsDir := filepath.Join(s.warehouse, "ns")
+	s.Require().NoError(os.Mkdir(nsDir, 0o755))
+
+	props, err := s.cat.LoadNamespaceProperties(context.Background(), []string{"ns"})
+	s.Require().NoError(err)
+	s.Equal(iceberg.Properties{"location": nsDir}, props)
+}
+
+func (s *HadoopCatalogTestSuite) TestLoadNamespacePropertiesNotExists() {
+	_, err := s.cat.LoadNamespaceProperties(context.Background(), []string{"nope"})
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+}
+
+func (s *HadoopCatalogTestSuite) TestLoadNamespacePropertiesFileNotDir() {
+	filePath := filepath.Join(s.warehouse, "not_a_ns")
+	s.Require().NoError(os.WriteFile(filePath, nil, 0o644))
+
+	_, err := s.cat.LoadNamespaceProperties(context.Background(), []string{"not_a_ns"})
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+}
+
+// UpdateNamespaceProperties test
+
+func (s *HadoopCatalogTestSuite) TestUpdateNamespacePropertiesUnsupported() {
+	_, err := s.cat.UpdateNamespaceProperties(context.Background(), []string{"ns"}, nil, nil)
+	s.Require().Error(err)
+	s.Contains(err.Error(), "not yet implemented")
+}
+
+func (s *HadoopCatalogTestSuite) TestDropNamespaceWithRegularFilesOnly() {
+	// A namespace dir containing only regular files (no subdirectories)
+	// should still return ErrNamespaceNotEmpty.
+	nsDir := filepath.Join(s.warehouse, "ns")
+	s.Require().NoError(os.Mkdir(nsDir, 0o755))
+	s.Require().NoError(os.WriteFile(filepath.Join(nsDir, "stray_file.txt"), nil, 0o644))
+
+	err := s.cat.DropNamespace(context.Background(), []string{"ns"})
+	s.ErrorIs(err, catalog.ErrNamespaceNotEmpty)
+}
+
+func (s *HadoopCatalogTestSuite) TestCheckNamespaceExistsFileNotDir() {
+	// A file at the namespace path should return false (not a directory).
+	filePath := filepath.Join(s.warehouse, "not_a_dir")
+	s.Require().NoError(os.WriteFile(filePath, nil, 0o644))
+
+	exists, err := s.cat.CheckNamespaceExists(context.Background(), []string{"not_a_dir"})
+	s.Require().NoError(err)
+	s.False(exists)
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateNamespaceEmptyIdentifier() {
+	err := s.cat.CreateNamespace(context.Background(), []string{}, nil)
+	s.Require().Error(err)
+	s.Contains(err.Error(), "must not be empty")
+}
+
+func (s *HadoopCatalogTestSuite) TestDropNamespaceEmptyIdentifier() {
+	err := s.cat.DropNamespace(context.Background(), []string{})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "must not be empty")
+}
+
+func (s *HadoopCatalogTestSuite) TestLoadNamespacePropertiesNested() {
+	// Verify nested namespace returns the correct absolute path.
+	nsDir := filepath.Join(s.warehouse, "a", "b", "c")
+	s.Require().NoError(os.MkdirAll(nsDir, 0o755))
+
+	props, err := s.cat.LoadNamespaceProperties(context.Background(), []string{"a", "b", "c"})
+	s.Require().NoError(err)
+	s.Equal(nsDir, props["location"])
+}
+
+func (s *HadoopCatalogTestSuite) TestListNamespacesMixedContent() {
+	// Directory with tables, namespaces, and regular files.
+	// Only non-table directories should appear.
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "child_ns"), 0o755))
+
+	// Create a table dir
+	tableDir := filepath.Join(s.warehouse, "my_table")
+	metaDir := filepath.Join(tableDir, "metadata")
+	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
+	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "v1.metadata.json"), nil, 0o644))
+
+	// Regular file
+	s.Require().NoError(os.WriteFile(filepath.Join(s.warehouse, "README.txt"), nil, 0o644))
+
+	namespaces, err := s.cat.ListNamespaces(context.Background(), nil)
+	s.Require().NoError(err)
+	s.Len(namespaces, 1)
+	s.Equal(table.Identifier{"child_ns"}, namespaces[0])
+}
+
+// CreateTable tests
+
+func (s *HadoopCatalogTestSuite) testSchema() *iceberg.Schema {
+	return iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTable() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	tbl, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema())
+	s.Require().NoError(err)
+	s.NotNil(tbl)
+
+	// Verify metadata directory and files exist
+	metaDir := filepath.Join(s.warehouse, "ns", "tbl", "metadata")
+	s.DirExists(metaDir)
+	s.FileExists(filepath.Join(metaDir, "v1.metadata.json"))
+
+	// Verify version hint
+	data, err := os.ReadFile(filepath.Join(metaDir, "version-hint.text"))
+	s.Require().NoError(err)
+	s.Equal("1", string(data))
+
+	// Verify metadata
+	s.Equal(filepath.Join(metaDir, "v1.metadata.json"), tbl.MetadataLocation())
+	s.Equal(filepath.Join(s.warehouse, "ns", "tbl"), tbl.Location())
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTableAndLoad() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	schema := s.testSchema()
+	created, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, schema)
+	s.Require().NoError(err)
+
+	loaded, err := s.cat.LoadTable(ctx, []string{"ns", "tbl"})
+	s.Require().NoError(err)
+
+	s.Equal(created.Metadata().TableUUID(), loaded.Metadata().TableUUID())
+	s.Equal(created.Location(), loaded.Location())
+	s.Equal(len(created.Schema().Fields()), len(loaded.Schema().Fields()))
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTableCustomLocation() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	_, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema(),
+		catalog.WithLocation("/some/other/path"))
+	s.Require().Error(err)
+	s.Contains(err.Error(), "custom table locations are not supported")
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTableSameLocationAllowed() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	loc := filepath.Join(s.warehouse, "ns", "tbl")
+	tbl, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema(),
+		catalog.WithLocation(loc))
+	s.Require().NoError(err)
+	s.Equal(loc, tbl.Location())
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTableNoNamespace() {
+	ctx := context.Background()
+
+	_, err := s.cat.CreateTable(ctx, []string{"nonexistent", "tbl"}, s.testSchema())
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTableAlreadyExists() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	_, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema())
+	s.Require().NoError(err)
+
+	_, err = s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema())
+	s.ErrorIs(err, catalog.ErrTableAlreadyExists)
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTableWithPartitionSpec() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	spec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{
+			SourceIDs: []int{1},
+			FieldID:   1000,
+			Name:      "id_bucket",
+			Transform: iceberg.BucketTransform{NumBuckets: 16},
+		},
+	)
+
+	tbl, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema(),
+		catalog.WithPartitionSpec(&spec))
+	s.Require().NoError(err)
+	s.False(tbl.Spec().IsUnpartitioned())
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTableWithSortOrder() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	sortOrder, err := table.NewSortOrder(1, []table.SortField{
+		{
+			SourceIDs: []int{1},
+			Transform: iceberg.IdentityTransform{},
+			Direction: table.SortASC,
+			NullOrder: table.NullsFirst,
+		},
+	})
+	s.Require().NoError(err)
+
+	tbl, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema(),
+		catalog.WithSortOrder(sortOrder))
+	s.Require().NoError(err)
+	s.Greater(tbl.SortOrder().Len(), 0)
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTableWithProperties() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	props := iceberg.Properties{
+		"custom.key": "custom.value",
+	}
+
+	tbl, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema(),
+		catalog.WithProperties(props))
+	s.Require().NoError(err)
+	s.Equal("custom.value", tbl.Properties()["custom.key"])
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTableShortIdentifier() {
+	ctx := context.Background()
+
+	_, err := s.cat.CreateTable(ctx, []string{"tbl"}, s.testSchema())
+	s.Require().Error(err)
+	s.Contains(err.Error(), "at least a namespace and table name")
+}
+
+// LoadTable tests
+
+func (s *HadoopCatalogTestSuite) TestLoadTableNotExists() {
+	ctx := context.Background()
+
+	_, err := s.cat.LoadTable(ctx, []string{"ns", "tbl"})
+	s.Require().Error(err)
+	s.ErrorIs(err, catalog.ErrNoSuchTable)
+}
+
+func (s *HadoopCatalogTestSuite) TestLoadTableStaleHint() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	// Create table (version 1)
+	_, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema())
+	s.Require().NoError(err)
+
+	// Manually set the hint to a stale value
+	ident := []string{"ns", "tbl"}
+	s.cat.writeVersionHint(ident, 99)
+
+	// LoadTable should still succeed by falling back to dir listing
+	tbl, err := s.cat.LoadTable(ctx, ident)
+	s.Require().NoError(err)
+	s.NotNil(tbl)
+}
+
+func (s *HadoopCatalogTestSuite) TestLoadTableShortIdentifier() {
+	ctx := context.Background()
+
+	_, err := s.cat.LoadTable(ctx, []string{"tbl"})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "at least a namespace and table name")
+}
+
+// CheckTableExists tests
+
+func (s *HadoopCatalogTestSuite) TestCheckTableExistsTrue() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	_, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema())
+	s.Require().NoError(err)
+
+	exists, err := s.cat.CheckTableExists(ctx, []string{"ns", "tbl"})
+	s.Require().NoError(err)
+	s.True(exists)
+}
+
+func (s *HadoopCatalogTestSuite) TestCheckTableExistsFalse() {
+	exists, err := s.cat.CheckTableExists(context.Background(), []string{"ns", "tbl"})
+	s.Require().NoError(err)
+	s.False(exists)
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTableNestedNamespace() {
+	ctx := context.Background()
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.warehouse, "a", "b"), 0o755))
+
+	tbl, err := s.cat.CreateTable(ctx, []string{"a", "b", "tbl"}, s.testSchema())
+	s.Require().NoError(err)
+	s.Equal(filepath.Join(s.warehouse, "a", "b", "tbl"), tbl.Location())
+
+	// Verify round-trip
+	loaded, err := s.cat.LoadTable(ctx, []string{"a", "b", "tbl"})
+	s.Require().NoError(err)
+	s.Equal(tbl.Metadata().TableUUID(), loaded.Metadata().TableUUID())
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTableMetadataFormatVersion() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	tbl, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema())
+	s.Require().NoError(err)
+
+	// Default format version should be V2
+	s.Equal(2, tbl.Metadata().Version())
+}
