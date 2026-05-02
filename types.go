@@ -780,7 +780,7 @@ func (UnknownType) Type() string   { return "unknown" }
 func (UnknownType) String() string { return "unknown" }
 
 // VariantType represents semi-structured data stored using the Parquet Variant
-// binary encoding. Requires format version 3+.
+// binary encoding. Requires Iceberg format version 3+.
 type VariantType struct{}
 
 func (VariantType) Equals(other Type) bool {
@@ -789,7 +789,6 @@ func (VariantType) Equals(other Type) bool {
 	return ok
 }
 
-func (VariantType) primitive()     {}
 func (VariantType) Type() string   { return "variant" }
 func (VariantType) String() string { return "variant" }
 
@@ -809,7 +808,6 @@ var PrimitiveTypes = struct {
 	Binary        PrimitiveType
 	UUID          PrimitiveType
 	Unknown       PrimitiveType
-	Variant       PrimitiveType
 }{
 	Bool:          BooleanType{},
 	Int32:         Int32Type{},
@@ -826,7 +824,6 @@ var PrimitiveTypes = struct {
 	Binary:        BinaryType{},
 	UUID:          UUIDType{},
 	Unknown:       UnknownType{},
-	Variant:       VariantType{},
 }
 
 // PromoteType promotes the type being read from a file to a requested read type.

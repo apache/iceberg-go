@@ -135,6 +135,7 @@ func (c convertToSubstrait) Map(m iceberg.MapType, keyResult, valResult types.Ty
 }
 
 func (convertToSubstrait) Primitive(iceberg.PrimitiveType) types.Type { panic("should not be called") }
+func (convertToSubstrait) Variant(iceberg.VariantType) types.Type     { panic("should not be called") }
 
 func (convertToSubstrait) VisitFixed(f iceberg.FixedType) types.Type {
 	return &types.FixedBinaryType{Length: int32(f.Len())}

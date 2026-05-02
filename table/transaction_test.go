@@ -343,7 +343,7 @@ func (s *SparkIntegrationTestSuite) TestVariantWriteAndScan() {
 	icebergSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "event", Type: iceberg.PrimitiveTypes.String},
-		iceberg.NestedField{ID: 3, Name: "payload", Type: iceberg.PrimitiveTypes.Variant},
+		iceberg.NestedField{ID: 3, Name: "payload", Type: iceberg.VariantType{}},
 	)
 
 	tbl, err := s.cat.CreateTable(

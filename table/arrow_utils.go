@@ -361,7 +361,7 @@ func (c convertToIceberg) Primitive(dt arrow.DataType) (result iceberg.NestedFie
 		case "arrow.uuid":
 			result.Type = iceberg.PrimitiveTypes.UUID
 		case "parquet.variant":
-			result.Type = iceberg.PrimitiveTypes.Variant
+			result.Type = iceberg.VariantType{}
 		default:
 			panic(fmt.Errorf("%w: unsupported arrow type for conversion - %s", iceberg.ErrInvalidSchema, dt))
 		}
@@ -552,6 +552,7 @@ func (c convertToArrow) Map(m iceberg.MapType, keyResult, valResult arrow.Field)
 }
 
 func (c convertToArrow) Primitive(iceberg.PrimitiveType) arrow.Field { panic("shouldn't be called") }
+func (c convertToArrow) Variant(iceberg.VariantType) arrow.Field     { panic("shouldn't be called") }
 
 func (c convertToArrow) VisitFixed(f iceberg.FixedType) arrow.Field {
 	return arrow.Field{Type: &arrow.FixedSizeBinaryType{ByteWidth: f.Len()}}
@@ -1086,6 +1087,10 @@ func (a *arrowProjectionVisitor) Primitive(_ iceberg.PrimitiveType, arr arrow.Ar
 	return arr
 }
 
+func (a *arrowProjectionVisitor) Variant(_ iceberg.VariantType, arr arrow.Array) arrow.Array {
+	return arr
+}
+
 // SchemaOptions controls the behaviour of ToRequestedSchema.
 type SchemaOptions struct {
 	DowncastTimestamp bool
@@ -1252,6 +1257,10 @@ func (sc *schemaCompatVisitor) Primitive(p iceberg.PrimitiveType) bool {
 	return true
 }
 
+func (sc *schemaCompatVisitor) Variant(v iceberg.VariantType) bool {
+	return true
+}
+
 func must[T any](v T, err error) T {
 	if err != nil {
 		panic(err)
@@ -1330,10 +1339,6 @@ func (a *arrowStatsCollector) Primitive(dt iceberg.PrimitiveType) []tblutils.Sta
 		}
 	}
 
-	if _, ok := dt.(iceberg.VariantType); ok {
-		metMode = tblutils.MetricsMode{Typ: tblutils.MetricModeCounts}
-	}
-
 	isNested := strings.Contains(colName, ".")
 	if isNested && (metMode.Typ == tblutils.MetricModeTruncate || metMode.Typ == tblutils.MetricModeFull) {
 		metMode = tblutils.MetricsMode{Typ: tblutils.MetricModeCounts}
@@ -1344,6 +1349,20 @@ func (a *arrowStatsCollector) Primitive(dt iceberg.PrimitiveType) []tblutils.Sta
 		IcebergTyp: dt,
 		ColName:    colName,
 		Mode:       metMode,
+	}}
+}
+
+func (a *arrowStatsCollector) Variant(_ iceberg.VariantType) []tblutils.StatisticsCollector {
+	colName, ok := a.schema.FindColumnName(a.fieldID)
+	if !ok {
+		return []tblutils.StatisticsCollector{}
+	}
+
+	return []tblutils.StatisticsCollector{{
+		FieldID:    a.fieldID,
+		IcebergTyp: iceberg.VariantType{},
+		ColName:    colName,
+		Mode:       tblutils.MetricsMode{Typ: tblutils.MetricModeCounts},
 	}}
 }
 

@@ -164,21 +164,33 @@ func (v *unknownTypeValidator) Struct(_ iceberg.StructType, fieldResults []error
 	return nil
 }
 
+func typeRequiresNullDefaults(t iceberg.Type) bool {
+	switch t.(type) {
+	case iceberg.UnknownType, iceberg.VariantType:
+		return true
+	default:
+		return false
+	}
+}
+
 func (v *unknownTypeValidator) Field(field iceberg.NestedField, fieldResult error) error {
 	if fieldResult != nil {
 		return fieldResult
 	}
-	_, isUnknown := field.Type.(iceberg.UnknownType)
-	_, isVariant := field.Type.(iceberg.VariantType)
-	if isUnknown || isVariant {
+	if _, isUnknown := field.Type.(iceberg.UnknownType); isUnknown {
 		if field.Required {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked as required", field.Name, field.ID)
+			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked as required",
+				field.Name, field.ID)
 		}
+	}
+	if typeRequiresNullDefaults(field.Type) {
 		if field.InitialDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null initial-default, but got: %v", field.Name, field.ID, field.InitialDefault)
+			return fmt.Errorf("%s type field '%s' (id: %d) must have null initial-default, but got: %v",
+				field.Type, field.Name, field.ID, field.InitialDefault)
 		}
 		if field.WriteDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null write-default, but got: %v", field.Name, field.ID, field.WriteDefault)
+			return fmt.Errorf("%s type field '%s' (id: %d) must have null write-default, but got: %v",
+				field.Type, field.Name, field.ID, field.WriteDefault)
 		}
 	}
 
@@ -191,17 +203,20 @@ func (v *unknownTypeValidator) List(list iceberg.ListType, elemResult error) err
 	}
 	elem := list.ElementField()
 
-	_, isUnknown := elem.Type.(iceberg.UnknownType)
-	_, isVariant := elem.Type.(iceberg.VariantType)
-	if isUnknown || isVariant {
+	if _, isUnknown := elem.Type.(iceberg.UnknownType); isUnknown {
 		if elem.Required {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked required", elem.Name, elem.ID)
+			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked required",
+				elem.Name, elem.ID)
 		}
+	}
+	if typeRequiresNullDefaults(elem.Type) {
 		if elem.InitialDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null-initial-default, but got: %v", elem.Name, elem.ID, elem.InitialDefault)
+			return fmt.Errorf("%s type field '%s' (id: %d) must have null initial-default, but got: %v",
+				elem.Type, elem.Name, elem.ID, elem.InitialDefault)
 		}
 		if elem.WriteDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null write-default but got: %v", elem.Name, elem.ID, elem.WriteDefault)
+			return fmt.Errorf("%s type field '%s' (id: %d) must have null write-default, but got: %v",
+				elem.Type, elem.Name, elem.ID, elem.WriteDefault)
 		}
 	}
 
@@ -219,33 +234,39 @@ func (v *unknownTypeValidator) Map(mapType iceberg.MapType, keyResult, valueResu
 
 	key := mapType.KeyField()
 
-	_, isKeyUnknown := key.Type.(iceberg.UnknownType)
-	_, isKeyVariant := key.Type.(iceberg.VariantType)
-	if isKeyUnknown || isKeyVariant {
+	if _, isKeyUnknown := key.Type.(iceberg.UnknownType); isKeyUnknown {
 		if key.Required {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked required", key.Name, key.ID)
+			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked required",
+				key.Name, key.ID)
 		}
+	}
+	if typeRequiresNullDefaults(key.Type) {
 		if key.InitialDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null-initial-default, but got: %v", key.Name, key.ID, key.InitialDefault)
+			return fmt.Errorf("%s type field '%s' (id: %d) must have null initial-default, but got: %v",
+				key.Type, key.Name, key.ID, key.InitialDefault)
 		}
 		if key.WriteDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null write-default but got: %v", key.Name, key.ID, key.WriteDefault)
+			return fmt.Errorf("%s type field '%s' (id: %d) must have null write-default, but got: %v",
+				key.Type, key.Name, key.ID, key.WriteDefault)
 		}
 	}
 
 	value := mapType.ValueField()
 
-	_, isValueUnknown := value.Type.(iceberg.UnknownType)
-	_, isValueVariant := value.Type.(iceberg.VariantType)
-	if isValueUnknown || isValueVariant {
+	if _, isValueUnknown := value.Type.(iceberg.UnknownType); isValueUnknown {
 		if value.Required {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked required", value.Name, value.ID)
+			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked required",
+				value.Name, value.ID)
 		}
+	}
+	if typeRequiresNullDefaults(value.Type) {
 		if value.InitialDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null-initial-default, but got: %v", value.Name, value.ID, value.InitialDefault)
+			return fmt.Errorf("%s type field '%s' (id: %d) must have null initial-default, but got: %v",
+				value.Type, value.Name, value.ID, value.InitialDefault)
 		}
 		if value.WriteDefault != nil {
-			return fmt.Errorf("unknown type field '%s' (id: %d) must have null write-default but got: %v", value.Name, value.ID, value.WriteDefault)
+			return fmt.Errorf("%s type field '%s' (id: %d) must have null write-default, but got: %v",
+				value.Type, value.Name, value.ID, value.WriteDefault)
 		}
 	}
 
@@ -253,5 +274,9 @@ func (v *unknownTypeValidator) Map(mapType iceberg.MapType, keyResult, valueResu
 }
 
 func (v *unknownTypeValidator) Primitive(_ iceberg.PrimitiveType) error {
+	return nil
+}
+
+func (v *unknownTypeValidator) Variant(_ iceberg.VariantType) error {
 	return nil
 }

@@ -88,7 +88,7 @@ func TestArrowToIceberg(t *testing.T) {
 		{arrow.BinaryTypes.LargeBinary, iceberg.PrimitiveTypes.Binary, false, ""},
 		{arrow.BinaryTypes.BinaryView, nil, false, "unsupported arrow type for conversion - binary_view"},
 		{extensions.NewUUIDType(), iceberg.PrimitiveTypes.UUID, true, ""},
-		{extensions.NewDefaultVariantType(), iceberg.PrimitiveTypes.Variant, true, ""},
+		{extensions.NewDefaultVariantType(), iceberg.VariantType{}, true, ""},
 		{arrow.StructOf(arrow.Field{
 			Name:     "foo",
 			Type:     arrow.BinaryTypes.String,
@@ -366,7 +366,7 @@ func TestArrowSchemaRoundTripConversion(t *testing.T) {
 func TestVariantArrowConversion(t *testing.T) {
 	sc := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
-		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.Variant},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.VariantType{}},
 	)
 
 	t.Run("round trip with field ids", func(t *testing.T) {
@@ -382,7 +382,7 @@ func TestVariantArrowConversion(t *testing.T) {
 
 		ice, err := table.ArrowSchemaToIceberg(arrowSc, false, nil)
 		require.NoError(t, err)
-		assert.True(t, ice.Field(1).Type.Equals(iceberg.PrimitiveTypes.Variant))
+		assert.True(t, ice.Field(1).Type.Equals(iceberg.VariantType{}))
 		assert.True(t, ice.Field(0).Type.Equals(iceberg.PrimitiveTypes.Timestamp))
 	})
 
@@ -401,6 +401,46 @@ func TestVariantArrowConversion(t *testing.T) {
 		assert.Equal(t, arrow.BinaryTypes.LargeBinary, st.Field(0).Type)
 		assert.Equal(t, arrow.BinaryTypes.LargeBinary, st.Field(1).Type)
 	})
+
+	t.Run("multiple variant columns", func(t *testing.T) {
+		multiSc := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+			iceberg.NestedField{ID: 2, Name: "v1", Type: iceberg.VariantType{}},
+			iceberg.NestedField{ID: 3, Name: "v2", Type: iceberg.VariantType{}},
+		)
+
+		arrowSc, err := table.SchemaToArrowSchema(multiSc, nil, true, false)
+		require.NoError(t, err)
+		assert.Equal(t, 3, arrowSc.NumFields())
+
+		for _, idx := range []int{1, 2} {
+			ext, ok := arrowSc.Field(idx).Type.(arrow.ExtensionType)
+			require.True(t, ok, "field %d should be extension type", idx)
+			assert.Equal(t, "parquet.variant", ext.ExtensionName())
+		}
+
+		ice, err := table.ArrowSchemaToIceberg(arrowSc, false, nil)
+		require.NoError(t, err)
+		assert.True(t, ice.Field(1).Type.Equals(iceberg.VariantType{}))
+		assert.True(t, ice.Field(2).Type.Equals(iceberg.VariantType{}))
+	})
+}
+
+func TestVariantProjectionExclusion(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+
+	projected, err := iceberg.PruneColumns(sc, map[int]iceberg.Void{1: {}}, false)
+	require.NoError(t, err)
+	assert.Equal(t, 1, projected.NumFields())
+	assert.Equal(t, "id", projected.Field(0).Name)
+
+	arrowSc, err := table.SchemaToArrowSchema(projected, nil, true, false)
+	require.NoError(t, err)
+	assert.Equal(t, 1, arrowSc.NumFields())
+	assert.Equal(t, "id", arrowSc.Field(0).Name)
 }
 
 func TestArrowSchemaWithNameMapping(t *testing.T) {

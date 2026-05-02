@@ -216,7 +216,7 @@ func TestRefTypes(t *testing.T) {
 		iceberg.NestedField{ID: 11, Name: "k", Type: iceberg.PrimitiveTypes.Binary},
 		iceberg.NestedField{ID: 12, Name: "l", Type: iceberg.PrimitiveTypes.UUID},
 		iceberg.NestedField{ID: 13, Name: "m", Type: iceberg.FixedTypeOf(5)},
-		iceberg.NestedField{ID: 14, Name: "n", Type: iceberg.PrimitiveTypes.Variant})
+		iceberg.NestedField{ID: 14, Name: "n", Type: iceberg.VariantType{}})
 
 	t.Run("bind term", func(t *testing.T) {
 		for i := 0; i < sc.NumFields(); i++ {
@@ -447,11 +447,25 @@ func TestLiteralPredicateErrors(t *testing.T) {
 
 func TestVariantOrderedPredicateRejected(t *testing.T) {
 	sc := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.PrimitiveTypes.Variant, Required: false},
+		iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.VariantType{}, Required: false},
 	)
 
 	_, err := iceberg.BindExpr(sc, iceberg.EqualTo(iceberg.Reference("payload"), []byte{0x01}), true)
 	assert.Error(t, err)
+}
+
+func TestVariantUnaryPredicates(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.VariantType{}, Required: false},
+	)
+
+	bound, err := iceberg.BindExpr(sc, iceberg.IsNull(iceberg.Reference("payload")), true)
+	require.NoError(t, err)
+	assert.NotNil(t, bound)
+
+	bound, err = iceberg.BindExpr(sc, iceberg.NotNull(iceberg.Reference("payload")), true)
+	require.NoError(t, err)
+	assert.NotNil(t, bound)
 }
 
 func TestNegations(t *testing.T) {
