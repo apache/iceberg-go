@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"maps"
 	"math/rand/v2"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -36,8 +37,10 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/internal"
 	sqlcat "github.com/apache/iceberg-go/catalog/sql"
+	"github.com/apache/iceberg-go/io"
 	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/apache/iceberg-go/table"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	"github.com/uptrace/bun/driver/sqliteshim"
@@ -1219,6 +1222,273 @@ func (s *SqliteCatalogTestSuite) TestLoadView() {
 	_, err = db.LoadView(context.Background(), []string{nsName, "nonexistent"})
 	s.Error(err)
 	s.ErrorIs(err, catalog.ErrNoSuchView)
+}
+
+func (s *SqliteCatalogTestSuite) TestCommitTransactionInterface() {
+	cat := s.getCatalogMemory()
+	_, ok := any(cat).(catalog.TransactionalCatalog)
+	s.True(ok, "sql.Catalog must implement catalog.TransactionalCatalog")
+}
+
+func (s *SqliteCatalogTestSuite) TestCommitTransactionEmptyList() {
+	cat := s.getCatalogMemory()
+	err := cat.CommitTransaction(context.Background(), nil)
+	s.ErrorIs(err, catalog.ErrEmptyCommitList)
+
+	err = cat.CommitTransaction(context.Background(), []table.TableCommit{})
+	s.ErrorIs(err, catalog.ErrEmptyCommitList)
+}
+
+func (s *SqliteCatalogTestSuite) TestCommitTransactionMissingIdentifier() {
+	cat := s.getCatalogMemory()
+	err := cat.CommitTransaction(context.Background(), []table.TableCommit{
+		{Identifier: table.Identifier{}},
+	})
+	s.ErrorIs(err, catalog.ErrMissingIdentifier)
+}
+
+func (s *SqliteCatalogTestSuite) TestCommitTransactionSetProperties() {
+	catalogs := []*sqlcat.Catalog{s.getCatalogMemory(), s.getCatalogSqlite()}
+
+	ctx := context.Background()
+	for _, cat := range catalogs {
+		tbl1ID := s.randomTableIdentifier()
+		tbl2ID := s.randomTableIdentifier()
+		ns1 := catalog.NamespaceFromIdent(tbl1ID)
+		ns2 := catalog.NamespaceFromIdent(tbl2ID)
+		s.Require().NoError(cat.CreateNamespace(ctx, ns1, nil))
+		if strings.Join(ns1, ".") != strings.Join(ns2, ".") {
+			s.Require().NoError(cat.CreateNamespace(ctx, ns2, nil))
+		}
+
+		tbl1, err := cat.CreateTable(ctx, tbl1ID, tableSchemaNested)
+		s.Require().NoError(err)
+		tbl2, err := cat.CreateTable(ctx, tbl2ID, tableSchemaNested)
+		s.Require().NoError(err)
+
+		// Build transactions on each table.
+		tx1 := tbl1.NewTransaction()
+		s.Require().NoError(tx1.SetProperties(map[string]string{"pipeline": "v2"}))
+		tc1, err := tx1.TableCommit()
+		s.Require().NoError(err)
+
+		tx2 := tbl2.NewTransaction()
+		s.Require().NoError(tx2.SetProperties(map[string]string{"pipeline": "v2"}))
+		tc2, err := tx2.TableCommit()
+		s.Require().NoError(err)
+
+		// Commit atomically.
+		s.Require().NoError(cat.CommitTransaction(ctx, []table.TableCommit{tc1, tc2}))
+
+		// Verify both tables have updated properties.
+		loaded1, err := cat.LoadTable(ctx, tbl1ID)
+		s.Require().NoError(err)
+		s.Equal("v2", loaded1.Properties()["pipeline"])
+
+		loaded2, err := cat.LoadTable(ctx, tbl2ID)
+		s.Require().NoError(err)
+		s.Equal("v2", loaded2.Properties()["pipeline"])
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestCommitTransactionPartialRollback() {
+	// Test that when a requirement validation fails for one table,
+	// no changes are applied to any table. We use a bogus
+	// AssertTableUUID requirement for the second table to force
+	// the validation failure during staging.
+	cat := s.getCatalogMemory()
+	ctx := context.Background()
+
+	tbl1ID := s.randomTableIdentifier()
+	tbl2ID := s.randomTableIdentifier()
+	ns1 := catalog.NamespaceFromIdent(tbl1ID)
+	ns2 := catalog.NamespaceFromIdent(tbl2ID)
+	s.Require().NoError(cat.CreateNamespace(ctx, ns1, nil))
+	if strings.Join(ns1, ".") != strings.Join(ns2, ".") {
+		s.Require().NoError(cat.CreateNamespace(ctx, ns2, nil))
+	}
+
+	tbl1, err := cat.CreateTable(ctx, tbl1ID, tableSchemaNested)
+	s.Require().NoError(err)
+	_, err = cat.CreateTable(ctx, tbl2ID, tableSchemaNested)
+	s.Require().NoError(err)
+
+	// Build a valid TableCommit for tbl1.
+	tx1 := tbl1.NewTransaction()
+	s.Require().NoError(tx1.SetProperties(map[string]string{"key1": "val1"}))
+	tc1, err := tx1.TableCommit()
+	s.Require().NoError(err)
+
+	// Build a TableCommit for tbl2 with a wrong UUID requirement.
+	// This will cause UpdateAndStageTable to fail during requirement validation.
+	bogusUUID := uuid.New()
+	tc2 := table.TableCommit{
+		Identifier:   tbl2ID,
+		Requirements: []table.Requirement{table.AssertTableUUID(bogusUUID)},
+		Updates:      []table.Update{table.NewSetPropertiesUpdate(map[string]string{"key2": "val2"})},
+	}
+
+	// The commit should fail because of the bogus UUID requirement on tbl2.
+	err = cat.CommitTransaction(ctx, []table.TableCommit{tc1, tc2})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "UUID")
+
+	// tbl1 should remain unchanged — no DB changes were applied.
+	loaded1, err := cat.LoadTable(ctx, tbl1ID)
+	s.Require().NoError(err)
+	_, hasKey := loaded1.Properties()["key1"]
+	s.False(hasKey, "tbl1 should not have been updated because tbl2 failed validation")
+}
+
+func (s *SqliteCatalogTestSuite) TestMultiTableTransactionViaSQLCatalog() {
+	cat := s.getCatalogMemory()
+	ctx := context.Background()
+
+	tbl1ID := s.randomTableIdentifier()
+	tbl2ID := s.randomTableIdentifier()
+	ns1 := catalog.NamespaceFromIdent(tbl1ID)
+	ns2 := catalog.NamespaceFromIdent(tbl2ID)
+	s.Require().NoError(cat.CreateNamespace(ctx, ns1, nil))
+	if strings.Join(ns1, ".") != strings.Join(ns2, ".") {
+		s.Require().NoError(cat.CreateNamespace(ctx, ns2, nil))
+	}
+
+	tbl1, err := cat.CreateTable(ctx, tbl1ID, tableSchemaNested)
+	s.Require().NoError(err)
+	tbl2, err := cat.CreateTable(ctx, tbl2ID, tableSchemaNested)
+	s.Require().NoError(err)
+
+	// Use the high-level MultiTableTransaction API.
+	mtx, err := catalog.NewMultiTableTransaction(cat)
+	s.Require().NoError(err)
+
+	tx1 := tbl1.NewTransaction()
+	s.Require().NoError(tx1.SetProperties(map[string]string{"env": "prod"}))
+	s.Require().NoError(mtx.AddTransaction(tx1))
+
+	tx2 := tbl2.NewTransaction()
+	s.Require().NoError(tx2.SetProperties(map[string]string{"env": "prod"}))
+	s.Require().NoError(mtx.AddTransaction(tx2))
+
+	tables, err := mtx.CommitAndReload(ctx)
+	s.Require().NoError(err)
+	s.Require().Len(tables, 2)
+
+	s.Equal("prod", tables[0].Properties()["env"])
+	s.Equal("prod", tables[1].Properties()["env"])
+}
+
+type mockConflictFS struct {
+	io.LocalFS
+	onWrite func(string)
+}
+
+func (m *mockConflictFS) strip(name string) string {
+	return strings.TrimPrefix(name, "mock://")
+}
+
+func (m *mockConflictFS) Create(name string) (io.FileWriter, error) {
+	if m.onWrite != nil {
+		m.onWrite(name)
+	}
+
+	return m.LocalFS.Create(m.strip(name))
+}
+
+func (m *mockConflictFS) WriteFile(name string, p []byte) error {
+	if m.onWrite != nil {
+		m.onWrite(name)
+	}
+
+	return m.LocalFS.WriteFile(m.strip(name), p)
+}
+
+func (m *mockConflictFS) Open(name string) (io.File, error) {
+	return m.LocalFS.Open(m.strip(name))
+}
+
+func (m *mockConflictFS) Remove(name string) error {
+	return m.LocalFS.Remove(m.strip(name))
+}
+
+func (s *SqliteCatalogTestSuite) TestCommitTransactionDeterministicRollback() {
+	ctx := context.Background()
+
+	// 1. Register mock protocol
+	conflictFS := &mockConflictFS{LocalFS: io.LocalFS{}}
+	io.Register("mock", func(ctx context.Context, u *url.URL, p map[string]string) (io.IO, error) {
+		return conflictFS, nil
+	})
+
+	// 2. Create a catalog with mock:// warehouse
+	cat, err := catalog.Load(ctx, "mock_cat", iceberg.Properties{
+		"uri":             s.catalogUri(),
+		sqlcat.DriverKey:  sqliteshim.ShimName,
+		sqlcat.DialectKey: string(sqlcat.SQLite),
+		"type":            "sql",
+		"warehouse":       "mock://" + s.warehouse,
+	})
+	s.Require().NoError(err)
+	sqlCat := cat.(*sqlcat.Catalog)
+	s.Require().NoError(sqlCat.CreateSQLTables(ctx))
+
+	identA := s.randomTableIdentifier()
+	identB := s.randomTableIdentifier()
+
+	// Ensure A is committed before B by sorting identifiers
+	if strings.Join(identA, ".") > strings.Join(identB, ".") {
+		identA, identB = identB, identA
+	}
+
+	s.Require().NoError(sqlCat.CreateNamespace(ctx, catalog.NamespaceFromIdent(identA), nil))
+	s.Require().NoError(sqlCat.CreateNamespace(ctx, catalog.NamespaceFromIdent(identB), nil))
+
+	tblA, _ := sqlCat.CreateTable(ctx, identA, tableSchemaNested)
+	tblB, _ := sqlCat.CreateTable(ctx, identB, tableSchemaNested)
+
+	// Prepare commits
+	txA := tblA.NewTransaction()
+	s.Require().NoError(txA.SetProperties(map[string]string{"tx": "success_initially"}))
+	tcA, _ := txA.TableCommit()
+
+	txB := tblB.NewTransaction()
+	s.Require().NoError(txB.SetProperties(map[string]string{"tx": "should_fail"}))
+	tcB, _ := txB.TableCommit()
+
+	// 3. Setup the "backstab":
+	// When any table writes its metadata during Phase 1, we check if it's Table B.
+	// If so, we mutate Table B's record in the DB to cause Phase 2 OCC failure.
+	hookFired := false
+	conflictFS.onWrite = func(path string) {
+		// Only fire if the path belongs to Table B.
+		// This ensures Table B has already been Loaded and Staged in Phase 1.
+		if strings.Contains(path, catalog.TableNameFromIdent(identB)) {
+			sqldb := s.getDB()
+			defer sqldb.Close()
+
+			// Mutate Table B's record so its metadata_location no longer matches sc.current.MetadataLocation()
+			res, err := sqldb.Exec("UPDATE iceberg_tables SET metadata_location = 'corrupted' WHERE table_namespace = ? AND table_name = ?",
+				strings.Join(catalog.NamespaceFromIdent(identB), "."), catalog.TableNameFromIdent(identB))
+			s.Require().NoError(err)
+			affected, _ := res.RowsAffected()
+			if affected == 1 {
+				hookFired = true
+			}
+		}
+	}
+
+	// 4. Execute Transaction: A should succeed in DB, then B should fail in DB.
+	err = sqlCat.CommitTransaction(ctx, []table.TableCommit{tcA, tcB})
+	s.Require().Error(err)
+	s.True(hookFired, "The hook should have fired during Phase 1 for Table B")
+	s.ErrorIs(err, catalog.ErrCommitFailed)
+	s.Contains(err.Error(), catalog.TableNameFromIdent(identB))
+
+	// 5. VERIFY ATOMICITY:
+	// Table A must have been rolled back despite its UPDATE statement having executed successfully.
+	loadedA, _ := sqlCat.LoadTable(ctx, identA)
+	_, hasProp := loadedA.Properties()["tx"]
+	s.False(hasProp, "Table A should have rolled back its property update!")
 }
 
 func TestSqlCatalog(t *testing.T) {
