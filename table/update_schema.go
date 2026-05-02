@@ -876,6 +876,10 @@ func (a *applyChanges) Primitive(primitive iceberg.PrimitiveType) iceberg.Type {
 	return primitive
 }
 
+func (a *applyChanges) Variant(variant iceberg.VariantType) iceberg.Type {
+	return variant
+}
+
 func addFields(fields []iceberg.NestedField, adds []iceberg.NestedField) []iceberg.NestedField {
 	return append(fields, adds...)
 }

@@ -577,7 +577,23 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 				panic(err)
 			}
 
-			fieldID := colMapping[colChunk.PathInSchema().String()]
+			fieldID, ok := colMapping[colChunk.PathInSchema().String()]
+			if !ok {
+				// Variant sub-columns (metadata, value) have no Iceberg field ID
+				// (spec: "must not be assigned field IDs"). Skip them only if the
+				// parent column is a variant field.
+				path := colChunk.PathInSchema()
+				if len(path) >= 2 {
+					parentPath := strings.Join(path[:len(path)-1], ".")
+					if parentID, hasParent := colMapping[parentPath]; hasParent {
+						if _, isVariant := statsCols[parentID].IcebergTyp.(iceberg.VariantType); isVariant {
+							continue
+						}
+					}
+				}
+
+				panic(fmt.Errorf("column chunk %q not found in column mapping", colChunk.PathInSchema()))
+			}
 			statsCol := statsCols[fieldID]
 			if statsCol.Mode.Typ == MetricModeNone {
 				continue
@@ -613,7 +629,7 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 
 			agg, ok := colAggs[fieldID]
 			if !ok {
-				agg, err = p.createStatsAgg(statsCol.IcebergTyp, stats.Type().String(), statsCol.Mode.Len)
+				agg, err = p.createStatsAgg(statsCol.IcebergTyp.(iceberg.PrimitiveType), stats.Type().String(), statsCol.Mode.Len)
 				if err != nil {
 					panic(err)
 				}
@@ -1079,6 +1095,12 @@ func (p *pruneParquetSchema) Field(field pqarrow.SchemaField, result arrow.Field
 		return result
 	}
 
+	// Variant is an extension type wrapping a struct (metadata + value).
+	// Select the entire field including all children.
+	if ext, ok := field.Field.Type.(arrow.ExtensionType); ok && ext.ExtensionName() == "parquet.variant" {
+		return p.projectVariant(field)
+	}
+
 	if !field.IsLeaf() {
 		panic(errors.New("cannot explicitly project list or map types"))
 	}
@@ -1185,6 +1207,24 @@ func (p *pruneParquetSchema) projectSelectedStruct(projected arrow.DataType) *ar
 	panic("expected a struct")
 }
 
+func (p *pruneParquetSchema) collectLeafIndices(field pqarrow.SchemaField) {
+	if field.IsLeaf() {
+		p.indices = append(p.indices, field.ColIndex)
+
+		return
+	}
+
+	for _, child := range field.Children {
+		p.collectLeafIndices(child)
+	}
+}
+
+func (p *pruneParquetSchema) projectVariant(field pqarrow.SchemaField) arrow.Field {
+	p.collectLeafIndices(field)
+
+	return *field.Field
+}
+
 func (p *pruneParquetSchema) projectList(listType arrow.ListLikeType, elemResult arrow.DataType) arrow.ListLikeType {
 	if arrow.TypeEqual(listType.Elem(), elemResult) {
 		return listType
@@ -1271,5 +1311,9 @@ func (v *id2ParquetPathVisitor) Map(m iceberg.MapType, keyResult func() []id2Par
 }
 
 func (v *id2ParquetPathVisitor) Primitive(iceberg.PrimitiveType) []id2ParquetPath {
+	return []id2ParquetPath{{fieldID: v.fieldID, path: strings.Join(v.path, ".")}}
+}
+
+func (v *id2ParquetPathVisitor) Variant(iceberg.VariantType) []id2ParquetPath {
 	return []id2ParquetPath{{fieldID: v.fieldID, path: strings.Join(v.path, ".")}}
 }

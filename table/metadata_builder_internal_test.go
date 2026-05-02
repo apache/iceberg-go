@@ -1837,3 +1837,41 @@ func TestUnknownTypeValidation(t *testing.T) {
 		require.ErrorContains(t, err, "must be optional")
 	})
 }
+
+func TestVariantTypeValidation(t *testing.T) {
+	t.Run("ValidRequiredVariant", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+			iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}, Required: true},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.NoError(t, err, "variant can be required per spec")
+	})
+
+	t.Run("ValidOptionalVariant", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+			iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}, Required: false},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.NoError(t, err, "variant can be optional")
+	})
+
+	t.Run("InvalidVariantInitialDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.VariantType{}, Required: false, InitialDefault: "invalid"},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err, "variant must have null initial-default")
+		require.ErrorContains(t, err, "must have null initial-default")
+	})
+
+	t.Run("InvalidVariantWriteDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.VariantType{}, Required: false, WriteDefault: "invalid"},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err, "variant must have null write-default")
+		require.ErrorContains(t, err, "must have null write-default")
+	})
+}

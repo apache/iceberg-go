@@ -513,6 +513,7 @@ type SchemaVisitor[T any] interface {
 	List(list ListType, elemResult T) T
 	Map(mapType MapType, keyResult, valueResult T) T
 	Primitive(p PrimitiveType) T
+	Variant(v VariantType) T
 }
 
 type BeforeFieldVisitor interface {
@@ -567,6 +568,7 @@ type SchemaVisitorPerPrimitiveType[T any] interface {
 	VisitBinary() T
 	VisitUUID() T
 	VisitUnknown() T
+	VisitVariant() T
 }
 
 // Visit accepts a visitor and performs a post-order traversal of the given schema.
@@ -676,6 +678,12 @@ func visitField[T any](f NestedField, visitor SchemaVisitor[T]) T {
 		return visitList(*typ, visitor)
 	case *MapType:
 		return visitMap(*typ, visitor)
+	case VariantType:
+		if perPrimitive, ok := visitor.(SchemaVisitorPerPrimitiveType[T]); ok {
+			return perPrimitive.VisitVariant()
+		}
+
+		return visitor.Variant(typ)
 	default: // primitive
 		if perPrimitive, ok := visitor.(SchemaVisitorPerPrimitiveType[T]); ok {
 			switch t := typ.(type) {
@@ -727,6 +735,7 @@ type PreOrderSchemaVisitor[T any] interface {
 	List(ListType, func() T) T
 	Map(MapType, func() T, func() T) T
 	Primitive(PrimitiveType) T
+	Variant(VariantType) T
 }
 
 func PreOrderVisit[T any](sc *Schema, visitor PreOrderSchemaVisitor[T]) (res T, err error) {
@@ -787,6 +796,8 @@ func visitFieldPreOrder[T any](f NestedField, visitor PreOrderSchemaVisitor[T]) 
 		fn = func() T { return visitListPreOrder(*typ, visitor) }
 	case *MapType:
 		fn = func() T { return visitMapPreOrder(*typ, visitor) }
+	case VariantType:
+		fn = func() T { return visitor.Variant(typ) }
 	default:
 		fn = func() T { return visitor.Primitive(typ.(PrimitiveType)) }
 	}
@@ -832,6 +843,10 @@ func (i *indexByID) Map(mapType MapType, _, _ map[int]NestedField) map[int]Neste
 }
 
 func (i *indexByID) Primitive(PrimitiveType) map[int]NestedField {
+	return i.index
+}
+
+func (i *indexByID) Variant(VariantType) map[int]NestedField {
 	return i.index
 }
 
@@ -900,6 +915,7 @@ func (i *indexByName) ByName() map[string]int {
 }
 
 func (i *indexByName) Primitive(PrimitiveType) map[string]int { return i.index }
+func (i *indexByName) Variant(VariantType) map[string]int     { return i.index }
 func (i *indexByName) addField(name string, fieldID int) {
 	fullName := name
 	if len(i.fieldNames) > 0 {
@@ -1059,6 +1075,10 @@ func (p *pruneColVisitor) Field(field NestedField, fieldResult Type) Type {
 		return p.projectSelectedStruct(fieldResult)
 	}
 
+	if _, ok := field.Type.(VariantType); ok {
+		return field.Type
+	}
+
 	typ, ok := field.Type.(PrimitiveType)
 	if !ok {
 		panic(fmt.Errorf("%w: cannot explicitly project List or Map types, %d:%s of type %s was selected",
@@ -1131,6 +1151,7 @@ func (p *pruneColVisitor) Map(mapType MapType, keyResult, valueResult Type) Type
 }
 
 func (p *pruneColVisitor) Primitive(_ PrimitiveType) Type { return nil }
+func (p *pruneColVisitor) Variant(_ VariantType) Type     { return nil }
 
 func (*pruneColVisitor) projectSelectedStruct(projected Type) *StructType {
 	if projected == nil {
@@ -1192,6 +1213,7 @@ func (findLastFieldID) Map(field MapType, keyResult, valueResult int) int {
 }
 
 func (findLastFieldID) Primitive(PrimitiveType) int { return 0 }
+func (findLastFieldID) Variant(VariantType) int     { return 0 }
 
 // IndexParents generates an index of field IDs to their parent field
 // IDs. Root fields are not indexed
@@ -1256,6 +1278,10 @@ func (i *indexParents) Primitive(PrimitiveType) map[int]int {
 	return i.idToParent
 }
 
+func (i *indexParents) Variant(VariantType) map[int]int {
+	return i.idToParent
+}
+
 type buildPosAccessors struct{}
 
 func (buildPosAccessors) Schema(_ *Schema, structResult map[int]accessor) map[int]accessor {
@@ -1291,6 +1317,10 @@ func (buildPosAccessors) Map(_ MapType, _, _ map[int]accessor) map[int]accessor 
 }
 
 func (buildPosAccessors) Primitive(PrimitiveType) map[int]accessor {
+	return map[int]accessor{}
+}
+
+func (buildPosAccessors) Variant(VariantType) map[int]accessor {
 	return map[int]accessor{}
 }
 
@@ -1360,6 +1390,10 @@ func (s *setFreshIDs) Primitive(p PrimitiveType) Type {
 	return p
 }
 
+func (s *setFreshIDs) Variant(v VariantType) Type {
+	return v
+}
+
 // AssignFreshSchemaIDs creates a new schema with fresh field IDs for all of the
 // fields in it. The nextID function is used to iteratively generate the ids, if
 // it is nil then a simple incrementing counter is used starting at 1.
@@ -1397,6 +1431,7 @@ type SchemaWithPartnerVisitor[T, P any] interface {
 	List(l ListType, listPartner P, elemResult T) T
 	Map(m MapType, mapPartner P, keyResult, valResult T) T
 	Primitive(p PrimitiveType, primitivePartner P) T
+	Variant(v VariantType, variantPartner P) T
 }
 
 type PartnerAccessor[P any] interface {
@@ -1534,6 +1569,8 @@ func visitTypeWithPartner[T, P any](t Type, fieldPartner P, visitor SchemaWithPa
 		return visitStructWithPartner(*t, fieldPartner, visitor, accessor)
 	case *MapType:
 		return visitMapWithPartner(*t, fieldPartner, visitor, accessor)
+	case VariantType:
+		return visitor.Variant(t, fieldPartner)
 	default:
 		return visitor.Primitive(t.(PrimitiveType), fieldPartner)
 	}
@@ -1646,4 +1683,8 @@ func (sanitizeColumnNameVisitor) Map(mapType MapType, keyResult, valueResult Nes
 
 func (sanitizeColumnNameVisitor) Primitive(p PrimitiveType) NestedField {
 	return NestedField{Type: p}
+}
+
+func (sanitizeColumnNameVisitor) Variant(v VariantType) NestedField {
+	return NestedField{Type: v}
 }
