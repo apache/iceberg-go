@@ -92,6 +92,31 @@ func (s *RollingDataWriterTestSuite) buildRecord(arrSchema *arrow.Schema, numRow
 	return bldr.NewRecordBatch()
 }
 
+func (s *RollingDataWriterTestSuite) createFileWriter(loc string, arrSchema *arrow.Schema, fileName string) tblutils.FileWriter {
+	s.T().Helper()
+
+	icebergSchema, err := ArrowSchemaToIcebergWithFreshIDs(arrSchema, false)
+	s.Require().NoError(err)
+
+	spec := iceberg.NewPartitionSpec()
+	format := tblutils.GetFileFormat(iceberg.ParquetFile)
+	writeProps := format.GetWriteProperties(iceberg.Properties{})
+
+	statsCols, err := computeStatsPlan(icebergSchema, iceberg.Properties{})
+	s.Require().NoError(err)
+
+	fw, err := format.NewFileWriter(s.ctx, iceio.LocalFS{}, nil, tblutils.WriteFileInfo{
+		FileSchema: icebergSchema,
+		FileName:   filepath.Join(loc, fileName),
+		StatsCols:  statsCols,
+		WriteProps: writeProps,
+		Spec:       spec,
+	}, arrSchema)
+	s.Require().NoError(err)
+
+	return fw
+}
+
 func (s *RollingDataWriterTestSuite) TestSingleFileUnderTarget() {
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
@@ -288,6 +313,48 @@ func (s *RollingDataWriterTestSuite) TestWriterFactoryPropagatesSortOrderID() {
 	s.Require().Len(dataFiles, 1)
 	s.Require().NotNil(dataFiles[0].SortOrderID(), "SortOrderID must be set on the emitted DataFile")
 	s.Equal(expectedSortOrderID, *dataFiles[0].SortOrderID())
+}
+
+func (s *RollingDataWriterTestSuite) TestAbortWithZeroRowsWritten() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	loc := filepath.ToSlash(s.T().TempDir())
+	fw := s.createFileWriter(loc, arrSchema, "test-abort-zero-rows.parquet")
+
+	// Abort without writing any rows must not panic.
+	s.Require().NoError(fw.Abort())
+}
+
+func (s *RollingDataWriterTestSuite) TestStreamErrorPathUsesAbort() {
+	writerSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	loc := filepath.ToSlash(s.T().TempDir())
+	factory, _ := s.createWriterFactory(loc, writerSchema, 1024*1024)
+	defer factory.closeAll()
+
+	outputCh := make(chan iceberg.DataFile, 10)
+	writer := factory.newRollingDataWriter(s.ctx, nil, "", nil, outputCh)
+
+	// Send a record with an incompatible schema to trigger a
+	// ToRequestedSchema error, exercising the deferred Abort() path.
+	badSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "x", Type: arrow.PrimitiveTypes.Float64, Nullable: true},
+	}, nil)
+
+	bldr := array.NewRecordBuilder(s.mem, badSchema)
+	bldr.Field(0).(*array.Float64Builder).Append(1.0)
+	badRecord := bldr.NewRecordBatch()
+	bldr.Release()
+	defer badRecord.Release()
+
+	s.Require().NoError(writer.Add(badRecord))
+	s.Require().Error(writer.closeAndWait())
 }
 
 func (s *RollingDataWriterTestSuite) TestBytesWrittenReflectsCompressedSize() {

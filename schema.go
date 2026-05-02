@@ -289,17 +289,21 @@ func (s *Schema) UnmarshalJSON(b []byte) error {
 }
 
 func (s *Schema) MarshalJSON() ([]byte, error) {
-	if s.IdentifierFieldIDs == nil {
-		s.IdentifierFieldIDs = []int{}
+	ids := s.IdentifierFieldIDs
+	if ids == nil {
+		ids = []int{}
 	}
 
 	type Alias Schema
+
+	aliasCopy := *(*Alias)(s)
+	aliasCopy.IdentifierFieldIDs = ids
 
 	return json.Marshal(struct {
 		Type   string        `json:"type"`
 		Fields []NestedField `json:"fields"`
 		*Alias
-	}{Type: "struct", Fields: s.fields, Alias: (*Alias)(s)})
+	}{Type: "struct", Fields: s.fields, Alias: &aliasCopy})
 }
 
 // FindColumnName returns the name of the column identified by the

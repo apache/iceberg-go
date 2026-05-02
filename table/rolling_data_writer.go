@@ -309,7 +309,7 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 	var currentWriter tblutils.FileWriter
 	defer func() {
 		if currentWriter != nil {
-			currentWriter.Close()
+			_ = currentWriter.Abort()
 		}
 	}()
 
@@ -391,17 +391,11 @@ func (r *RollingDataWriter) closeAndWait() error {
 	r.factory.writers.Delete(r.partitionKey)
 	r.wg.Wait()
 
-	select {
-	case err := <-r.errorCh:
-		if err != nil {
-			return fmt.Errorf("error in rolling data writer: %w", err)
-		}
-
-		return nil
-	default:
-
-		return nil
+	if err := <-r.errorCh; err != nil {
+		return fmt.Errorf("error in rolling data writer: %w", err)
 	}
+
+	return nil
 }
 
 func (w *writerFactory) closeAll() error {

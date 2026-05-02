@@ -116,7 +116,38 @@ func compactRun(ctx context.Context, output Output, tbl *table.Table, plan compa
 	}
 
 	tx := tbl.NewTransaction()
-	result, err := tx.RewriteDataFiles(ctx, groups, cfg.PartialProgress, nil)
+	rewriteOpts := table.RewriteDataFilesOptions{
+		PartialProgress: cfg.PartialProgress,
+	}
+
+	// Cleanup of dead equality-delete files. The executor only
+	// orchestrates the commit; the policy + walk live in
+	// table/compaction. Skipped in partial-progress mode (per-group
+	// cleanup is a follow-up) and when the caller opts out.
+	if !cfg.PartialProgress && !cfg.PreserveDeadEqualityDeletes {
+		snap := tbl.CurrentSnapshot()
+		if snap != nil {
+			fs, err := tbl.FS(ctx)
+			if err != nil {
+				output.Error(fmt.Errorf("open fs for eq-delete cleanup: %w", err))
+				os.Exit(1)
+			}
+			rewrittenSet := make(map[string]struct{})
+			for _, g := range plan.Groups {
+				for _, task := range g.Tasks {
+					rewrittenSet[task.File.FilePath()] = struct{}{}
+				}
+			}
+			deadEqDeletes, err := compaction.CollectDeadEqualityDeletes(ctx, fs, snap, rewrittenSet)
+			if err != nil {
+				output.Error(fmt.Errorf("collect dead equality deletes: %w", err))
+				os.Exit(1)
+			}
+			rewriteOpts.ExtraDeleteFilesToRemove = deadEqDeletes
+		}
+	}
+
+	result, err := tx.RewriteDataFiles(ctx, groups, rewriteOpts)
 	if err != nil {
 		if result != nil && result.RewrittenGroups > 0 {
 			output.Text(fmt.Sprintf("  (partial: %d groups committed before failure)", result.RewrittenGroups))
@@ -130,8 +161,10 @@ func compactRun(ctx context.Context, output Output, tbl *table.Table, plan compa
 		os.Exit(1)
 	}
 
-	output.Text(fmt.Sprintf("Done. Rewrote %d -> %d files. Removed %d delete files.",
-		result.RemovedDataFiles, result.AddedDataFiles, result.RemovedDeleteFiles))
+	totalRemovedDeletes := result.RemovedPositionDeleteFiles + result.RemovedEqualityDeleteFiles
+	output.Text(fmt.Sprintf("Done. Rewrote %d -> %d files. Removed %d delete files (%d position, %d equality).",
+		result.RemovedDataFiles, result.AddedDataFiles,
+		totalRemovedDeletes, result.RemovedPositionDeleteFiles, result.RemovedEqualityDeleteFiles))
 	output.Text(fmt.Sprintf("  Size: %s -> %s",
 		formatBytes(result.BytesBefore), formatBytes(result.BytesAfter)))
 }

@@ -650,9 +650,9 @@ func (t Timestamp) ToTime() time.Time {
 }
 
 func (t Timestamp) ToDate() Date {
-	tm := time.UnixMicro(int64(t)).UTC()
+	const microsecondsPerDay = int64((time.Hour * 24) / time.Microsecond)
 
-	return Date(tm.Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
+	return Date(int32(floorDiv(int64(t), microsecondsPerDay)))
 }
 
 func (t Timestamp) ToNanos() TimestampNano {
@@ -670,9 +670,9 @@ func (t TimestampNano) ToMicros() Timestamp {
 }
 
 func (t TimestampNano) ToDate() Date {
-	tm := time.Unix(0, int64(t)).UTC()
+	const nanosecondsPerDay = int64(time.Hour * 24)
 
-	return Date(tm.Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
+	return Date(int32(floorDiv(int64(t), nanosecondsPerDay)))
 }
 
 // TimestampType represents a number of microseconds since the unix epoch

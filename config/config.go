@@ -35,12 +35,19 @@ type Config struct {
 	MaxWorkers     int                      `yaml:"max-workers"`
 }
 
+type RestOptions struct {
+	SigV4Enabled  bool   `yaml:"sigv4-enabled"`
+	SigningName   string `yaml:"signing-name"`
+	SigningRegion string `yaml:"signing-region"`
+}
+
 type CatalogConfig struct {
-	CatalogType string `yaml:"type"`
-	URI         string `yaml:"uri"`
-	Output      string `yaml:"output"`
-	Credential  string `yaml:"credential"`
-	Warehouse   string `yaml:"warehouse"`
+	CatalogType string       `yaml:"type"`
+	URI         string       `yaml:"uri"`
+	Output      string       `yaml:"output"`
+	Credential  string       `yaml:"credential"`
+	Warehouse   string       `yaml:"warehouse"`
+	RestOptions *RestOptions `yaml:"rest,omitempty"`
 }
 
 func LoadConfig(configPath string) []byte {

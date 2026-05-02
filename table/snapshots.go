@@ -366,6 +366,45 @@ func (s Snapshot) dataFiles(fio iceio.IO, fileFilter set[iceberg.ManifestEntryCo
 	}
 }
 
+// entries iterates every manifest entry in the snapshot, filtered by
+// manifest content (data or deletes). It is the entry-level analog
+// of dataFiles and exposes the underlying ManifestEntry so callers
+// can inspect Status / SnapshotID / DataFile — needed by conflict
+// validation where attribution of an entry to a specific snapshot
+// matters.
+//
+// manifestContent < 0 yields entries across both data and delete
+// manifests.
+func (s Snapshot) entries(fio iceio.IO, manifestContent iceberg.ManifestContent) iter.Seq2[iceberg.ManifestEntry, error] {
+	return func(yield func(iceberg.ManifestEntry, error) bool) {
+		manifests, err := s.Manifests(fio)
+		if err != nil {
+			yield(nil, err)
+
+			return
+		}
+
+		for _, m := range manifests {
+			if manifestContent >= 0 && m.ManifestContent() != manifestContent {
+				continue
+			}
+
+			entries, err := m.FetchEntries(fio, false)
+			if err != nil {
+				yield(nil, err)
+
+				return
+			}
+
+			for _, e := range entries {
+				if !yield(e, nil) {
+					return
+				}
+			}
+		}
+	}
+}
+
 type MetadataLogEntry struct {
 	MetadataFile string `json:"metadata-file"`
 	TimestampMs  int64  `json:"timestamp-ms"`

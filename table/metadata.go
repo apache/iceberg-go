@@ -296,6 +296,10 @@ func (b *MetadataBuilder) CurrentSchema() *iceberg.Schema {
 
 func (b *MetadataBuilder) LastUpdatedMS() int64 { return b.lastUpdatedMS }
 
+// LastColumnID returns the highest field id ever assigned in this table's
+// lifetime, as tracked by the Iceberg spec's last-column-id counter.
+func (b *MetadataBuilder) LastColumnID() int { return b.lastColumnId }
+
 func (b *MetadataBuilder) nextSequenceNumber() int64 {
 	if b.formatVersion > 1 {
 		if b.lastSequenceNumber == nil {

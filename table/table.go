@@ -22,6 +22,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"iter"
 	"log"
@@ -325,7 +326,52 @@ func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile,
 	}
 }
 
-func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requirement) (*Table, error) {
+// conflictValidatorFunc runs a single producer's client-side conflict
+// check against a pre-built conflictContext. Validators return a wrapped
+// ErrCommit* sentinel on retryable conflict, ErrCommitDiverged on
+// terminal divergence, or nil on success.
+type conflictValidatorFunc func(cc *conflictContext) error
+
+// commitOpts controls optional behavior of doCommit beyond the core
+// updates/requirements loop. All fields are zero-valued by default and
+// callers opt in via the commitOption functional options passed to
+// doCommit.
+type commitOpts struct {
+	// branch is the ref the commit targets. When empty, pre-flight
+	// conflict validation is skipped because no conflictContext can
+	// be built. Direct doCommit callers (unit tests, low-level utils)
+	// may leave this empty; Transaction.Commit always sets it.
+	branch string
+
+	// validators runs once before cat.CommitTable on the first attempt
+	// only. Refresh-and-replay across retries is deferred to PR 2.5.
+	validators []conflictValidatorFunc
+}
+
+type commitOption func(*commitOpts)
+
+// withCommitBranch sets the target branch for the pre-flight
+// conflict-validation walk. An empty branch is treated as the main
+// branch — Transaction.branch is empty when the caller never picked
+// one explicitly, and the implicit default is main.
+func withCommitBranch(branch string) commitOption {
+	if branch == "" {
+		branch = MainBranch
+	}
+
+	return func(o *commitOpts) { o.branch = branch }
+}
+
+func withCommitValidators(vs ...conflictValidatorFunc) commitOption {
+	return func(o *commitOpts) { o.validators = append(o.validators, vs...) }
+}
+
+func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requirement, opts ...commitOption) (*Table, error) {
+	var co commitOpts
+	for _, apply := range opts {
+		apply(&co)
+	}
+
 	cfg := readRetryConfig(t.metadata.Properties())
 
 	// Bound total retry time with a derived context so both the wait loop
@@ -333,12 +379,22 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 	retryCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.totalTimeoutMs)*time.Millisecond)
 	defer cancel()
 
+	fs, err := t.fsF(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	var (
 		newMeta Metadata
 		newLoc  string
-		err     error
 		timer   *time.Timer
 	)
+
+	// current tracks the catalog state between retries. On attempt 0 it
+	// equals t.metadata (so the conflict context's concurrent-snapshot
+	// walk is empty and validators short-circuit). On subsequent
+	// attempts it is the freshly-loaded post-conflict state.
+	current := t.metadata
 
 	// numRetries counts retries; total attempts = 1 initial + numRetries.
 	totalAttempts := cfg.numRetries + 1
@@ -357,6 +413,52 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 
 				return nil, context.Cause(retryCtx)
 			case <-timer.C:
+			}
+
+			// Refresh-and-replay: reload the catalog's current state,
+			// run the producers' validators against the fresh
+			// (base=t.metadata, current=fresh) conflict context, and
+			// rewrite any AssertRefSnapshotID requirements to target
+			// the new branch head so re-submission is not rejected
+			// just because a peer advanced the head with a
+			// non-conflicting commit.
+			fresh, refreshErr := t.cat.LoadTable(retryCtx, t.identifier)
+			if refreshErr != nil {
+				return nil, fmt.Errorf("refresh table for retry: %w", refreshErr)
+			}
+			current = fresh.metadata
+			reqs = rewriteRefSnapshotRequirements(reqs, co.branch, current)
+		}
+
+		// Pre-flight client-side conflict validation. Producers can
+		// reject commits whose semantics are violated by concurrent
+		// peers (partition-filter overlap, referenced-file removal)
+		// even when the catalog-side AssertRefSnapshotID would accept
+		// them. On attempt 0 base == current → no concurrent
+		// snapshots → validators short-circuit. Real divergence
+		// detection fires on attempts > 0 once `current` is the
+		// post-conflict state.
+		//
+		// Skipped when the branch does not exist on `current` — that
+		// always means "the committer is creating this branch" (e.g.
+		// first commit on a fresh table). There are no concurrent
+		// snapshots on a branch that does not yet exist, and
+		// newConflictContext would otherwise return ErrCommitDiverged.
+		if co.branch != "" && len(co.validators) > 0 && current.SnapshotByName(co.branch) != nil {
+			// caseSensitive is hardcoded to true here: transaction-
+			// level case-sensitivity is not yet threaded through the
+			// Commit path, and true is the scan default throughout the
+			// codebase.
+			cc, ccErr := newConflictContext(t.metadata, current, co.branch, fs, true)
+			if ccErr != nil {
+				// ErrCommitDiverged — terminal, do not retry. The
+				// sentinel deliberately does not wrap ErrCommitFailed.
+				return nil, ccErr
+			}
+			for _, v := range co.validators {
+				if vErr := v(cc); vErr != nil {
+					return nil, vErr
+				}
 			}
 		}
 
@@ -381,13 +483,47 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		return nil, err
 	}
 
-	fs, err := t.fsF(ctx)
-	if err != nil {
-		return nil, err
-	}
 	deleteOldMetadata(fs, t.metadata, newMeta)
 
 	return New(t.identifier, newMeta, newLoc, t.fsF, t.cat), nil
+}
+
+// rewriteRefSnapshotRequirements returns a copy of reqs with every
+// AssertRefSnapshotID targeting `branch` rewritten to point at the
+// branch head on `fresh`. Other requirements pass through untouched.
+//
+// Producers register AssertRefSnapshotID at commit-build time with the
+// committer's base snapshot id. After a peer advances the branch head
+// with a non-conflicting commit, that assertion no longer matches the
+// catalog. Without rewriting the retry would burn the budget on the
+// same stale requirement; with it, validators get to decide if the
+// commit is still safe to replay against the new head.
+//
+// Java's SnapshotProducer rewrites the same way between retries. If
+// the branch is empty or the new head cannot be resolved (branch
+// deleted underneath us), reqs is returned unchanged — newConflict-
+// Context will surface the divergence on the next pre-flight pass.
+func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Metadata) []Requirement {
+	if branch == "" || fresh == nil {
+		return reqs
+	}
+	head := fresh.SnapshotByName(branch)
+	if head == nil {
+		return reqs
+	}
+
+	out := make([]Requirement, len(reqs))
+	for i, r := range reqs {
+		if a, ok := r.(*assertRefSnapshotID); ok && a.Ref == branch {
+			newID := head.SnapshotID
+			out[i] = AssertRefSnapshotID(branch, &newID)
+
+			continue
+		}
+		out[i] = r
+	}
+
+	return out
 }
 
 type retryConfig struct {

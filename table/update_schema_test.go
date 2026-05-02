@@ -913,3 +913,152 @@ func TestBuildUpdates(t *testing.T) {
 		assert.Equal(t, 0, updates[0].(*setCurrentSchemaUpdate).SchemaID)
 	})
 }
+
+// TestAddColumnMonotonicFieldIDs exercises the case where the table's
+// last-column-id is greater than the current schema's highest field id — for
+// example because a previous schema was added that introduced higher ids, or
+// because the highest-id columns were later dropped. The Iceberg spec requires
+// new field ids to be allocated above last-column-id (never to be reused), so
+// AddColumn must seed its id counter from metadata.LastColumnID() rather than
+// the current schema's HighestFieldID().
+func TestAddColumnMonotonicFieldIDs(t *testing.T) {
+	// Start from originalSchema (field ids 1..11, schema id 1).
+	baseMeta, err := NewMetadata(originalSchema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "", nil)
+	assert.NoError(t, err)
+
+	// Add a second schema that introduces higher field ids. This bumps the
+	// metadata's last-column-id to 13 while the current schema is still the
+	// original (highest field id 11).
+	expanded := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 12, Name: "extra_a", Type: iceberg.PrimitiveTypes.String, Required: false},
+		iceberg.NestedField{ID: 13, Name: "extra_b", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+
+	builder, err := MetadataBuilderFromBase(baseMeta, "")
+	assert.NoError(t, err)
+	assert.NoError(t, builder.AddSchema(expanded))
+
+	meta, err := builder.Build()
+	assert.NoError(t, err)
+
+	assert.Equal(t, 11, meta.CurrentSchema().HighestFieldID(),
+		"precondition: current schema should still be the original with highest id 11")
+	assert.Equal(t, 13, meta.LastColumnID(),
+		"precondition: last-column-id should have been bumped by the expanded schema")
+
+	tbl := New([]string{"id"}, meta, "", nil, nil)
+	txn := tbl.NewTransaction()
+
+	newSchema, err := NewUpdateSchema(txn, true, true).
+		AddColumn([]string{"fresh"}, iceberg.PrimitiveTypes.String, "", false, nil).
+		Apply()
+	assert.NoError(t, err)
+	assert.NotNil(t, newSchema)
+
+	fresh, ok := newSchema.FindFieldByName("fresh")
+	assert.True(t, ok, "new field should be present in the resulting schema")
+	assert.Equal(t, 14, fresh.ID,
+		"new field id must be allocated above metadata.LastColumnID() (13), not reused from the current schema's highest id (11)")
+}
+
+// TestAddColumnAfterDropHighestID is a regression test for #942.
+// It reproduces the exact scenario from the original bug: a column is added
+// (bumping last-column-id) then dropped (lowering the current schema's
+// HighestFieldID back down). A subsequent AddColumn must allocate an id above
+// last-column-id, not above HighestFieldID. Reverting #936 (i.e. seeding from
+// HighestFieldID instead of LastColumnID) causes the new column to reuse a
+// previously assigned id, which violates the Iceberg spec's monotonic id
+// invariant.
+func TestAddColumnAfterDropHighestID(t *testing.T) {
+	// originalSchema has field ids 1..11.
+	baseMeta, err := NewMetadata(originalSchema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "", nil)
+	assert.NoError(t, err)
+	assert.Equal(t, 11, baseMeta.LastColumnID())
+
+	// Step 1: Add a column via UpdateSchema. This allocates id 12 and bumps
+	// last-column-id to 12.
+	tbl := New([]string{"id"}, baseMeta, "", nil, nil)
+	txn := tbl.NewTransaction()
+
+	withExtra, err := NewUpdateSchema(txn, true, true).
+		AddColumn([]string{"temp_col"}, iceberg.PrimitiveTypes.String, "", false, nil).
+		Apply()
+	assert.NoError(t, err)
+
+	tempCol, ok := withExtra.FindFieldByName("temp_col")
+	assert.True(t, ok)
+	assert.Equal(t, 12, tempCol.ID, "added column should get id 12")
+
+	// Persist the expanded schema into metadata so last-column-id is 12.
+	builder1, err := MetadataBuilderFromBase(baseMeta, "")
+	assert.NoError(t, err)
+	assert.NoError(t, builder1.AddSchema(withExtra))
+	assert.NoError(t, builder1.SetCurrentSchemaID(-1))
+
+	afterAdd, err := builder1.Build()
+	assert.NoError(t, err)
+	assert.Equal(t, 12, afterAdd.LastColumnID())
+	assert.Equal(t, 12, afterAdd.CurrentSchema().HighestFieldID())
+
+	// Step 2: Drop the highest-id column. The new current schema's
+	// HighestFieldID drops back to 11 while last-column-id stays at 12.
+	tbl2 := New([]string{"id"}, afterAdd, "", nil, nil)
+	txn2 := tbl2.NewTransaction()
+
+	afterDrop, err := NewUpdateSchema(txn2, true, true).
+		DeleteColumn([]string{"temp_col"}).
+		Apply()
+	assert.NoError(t, err)
+
+	_, found := afterDrop.FindFieldByName("temp_col")
+	assert.False(t, found, "temp_col should be gone after drop")
+
+	builder2, err := MetadataBuilderFromBase(afterAdd, "")
+	assert.NoError(t, err)
+	assert.NoError(t, builder2.AddSchema(afterDrop))
+	assert.NoError(t, builder2.SetCurrentSchemaID(-1))
+
+	afterDropMeta, err := builder2.Build()
+	assert.NoError(t, err)
+
+	assert.Equal(t, 11, afterDropMeta.CurrentSchema().HighestFieldID(),
+		"precondition: current schema's highest id should be 11 after dropping id-12 column")
+	assert.Equal(t, 12, afterDropMeta.LastColumnID(),
+		"precondition: last-column-id must still be 12 — ids are never reclaimed")
+
+	// Verify schema history still contains the dropped temp_col with id 12.
+	// A partial fix that strips dropped fields from historical schemas could
+	// still pass the id-monotonicity check above but break interop with
+	// Java/PyIceberg/Glue which expect historical schemas to be intact.
+	var foundInHistory bool
+	for _, s := range afterDropMeta.Schemas() {
+		if col, ok := s.FindFieldByID(12); ok {
+			assert.Equal(t, "temp_col", col.Name,
+				"historical schema must retain temp_col at id 12")
+			foundInHistory = true
+
+			break
+		}
+	}
+	assert.True(t, foundInHistory,
+		"dropped column (id 12) must still appear in at least one historical schema")
+
+	// Step 3: Add a new column. Its id must be 13 (last-column-id + 1), not
+	// 12 (HighestFieldID + 1). Using HighestFieldID would re-assign id 12,
+	// colliding with the dropped column still referenced by historical schemas.
+	tbl3 := New([]string{"id"}, afterDropMeta, "", nil, nil)
+	txn3 := tbl3.NewTransaction()
+
+	finalSchema, err := NewUpdateSchema(txn3, true, true).
+		AddColumn([]string{"new_col"}, iceberg.PrimitiveTypes.Int64, "", false, nil).
+		Apply()
+	assert.NoError(t, err)
+	assert.NotNil(t, finalSchema)
+
+	newCol, ok := finalSchema.FindFieldByName("new_col")
+	assert.True(t, ok, "new_col should be present in the final schema")
+	assert.Equal(t, 13, newCol.ID,
+		"new column id must be last-column-id+1 (13), not HighestFieldID+1 (12) — "+
+			"reusing 12 would collide with the dropped column still in historical schemas")
+}

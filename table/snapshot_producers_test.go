@@ -721,6 +721,10 @@ func (e *errorOnDeletedEntries) deletedEntries(_ context.Context) ([]iceberg.Man
 	return nil, e.err
 }
 
+func (e *errorOnDeletedEntries) validate(_ *conflictContext) error {
+	return nil
+}
+
 // blockingTrackingIO extends trackingIO to signal when a writer is created.
 type blockingTrackingIO struct {
 	*trackingIO

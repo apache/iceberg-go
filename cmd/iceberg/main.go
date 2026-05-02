@@ -23,8 +23,12 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/file"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/glue"
@@ -51,7 +55,7 @@ Usage:
   iceberg properties [options] get (namespace | table) IDENTIFIER [PROPNAME]
   iceberg properties [options] set (namespace | table) IDENTIFIER PROPNAME VALUE
   iceberg properties [options] remove (namespace | table) IDENTIFIER PROPNAME
-  iceberg compact [options] (analyze | run) TABLE_ID [--target-file-size BYTES] [--partial-progress]
+  iceberg compact [options] (analyze | run) TABLE_ID [--target-file-size BYTES] [--partial-progress] [--preserve-dead-equality-deletes]
   iceberg -h | --help | --version
 
 Commands:
@@ -78,6 +82,7 @@ Arguments:
 Options:
   -h --help          	show this help messages and exit
   --catalog TEXT     	specify the catalog type [default: rest]
+  --catalog-name TEXT   specify the catalog name to use from the config [default: default]
   --uri TEXT         	specify the catalog URI
   --output TYPE      	output type (json/text) [default: text]
   --credential TEXT  	specify credentials for the catalog
@@ -89,6 +94,8 @@ Options:
   --location-uri TEXT  	specify a location URI for the namespace
   --schema JSON        	specify table schema in json (for create table use only)
                        	Ex: [{"name":"id","type":"int","required":false,"doc":"unique id"}]
+  --infer-schema FILE  infer table schema from a local data file (for create table use only)
+                       	Supported formats: parquet
   --properties TEXT 	specify table properties in key=value format (for create table use only)
 						Ex:"format-version=2,write.format.default=parquet"
   --partition-spec TEXT specify partition spec as comma-separated field names(for create table use only)
@@ -96,7 +103,10 @@ Options:
   --sort-order TEXT 	specify sort order as field:direction[:null-order] format(for create table use only)
 						Ex:"field1:asc,field2:desc:nulls-first,field3:asc:nulls-last"
   --target-file-size BYTES  target output file size in bytes for compaction [default: 0]
-  --partial-progress        stage each compaction group as a separate snapshot update`
+  --partial-progress        stage each compaction group as a separate snapshot update
+  --preserve-dead-equality-deletes
+                            keep equality-delete files that are provably dead after the rewrite
+                            (default: drop them — recommended for sustained CDC workloads)`
 
 type Config struct {
 	List     bool `docopt:"list"`
@@ -130,23 +140,28 @@ type Config struct {
 	PropName string `docopt:"PROPNAME"`
 	Value    string `docopt:"VALUE"`
 
-	Catalog         string `docopt:"--catalog"`
-	URI             string `docopt:"--uri"`
-	Output          string `docopt:"--output"`
-	History         bool   `docopt:"--history"`
-	Cred            string `docopt:"--credential"`
-	Token           string `docopt:"--token"`
-	Warehouse       string `docopt:"--warehouse"`
-	Config          string `docopt:"--config"`
-	Scope           string `docopt:"--scope"`
-	Description     string `docopt:"--description"`
-	LocationURI     string `docopt:"--location-uri"`
-	SchemaStr       string `docopt:"--schema"`
-	TableProps      string `docopt:"--properties"`
-	PartitionSpec   string `docopt:"--partition-spec"`
-	SortOrder       string `docopt:"--sort-order"`
-	TargetFileSize  int64  `docopt:"--target-file-size"`
-	PartialProgress bool   `docopt:"--partial-progress"`
+	Catalog                     string `docopt:"--catalog"`
+	CatalogName                 string `docopt:"--catalog-name"`
+	URI                         string `docopt:"--uri"`
+	Output                      string `docopt:"--output"`
+	History                     bool   `docopt:"--history"`
+	Cred                        string `docopt:"--credential"`
+	Token                       string `docopt:"--token"`
+	Warehouse                   string `docopt:"--warehouse"`
+	Config                      string `docopt:"--config"`
+	Scope                       string `docopt:"--scope"`
+	Description                 string `docopt:"--description"`
+	LocationURI                 string `docopt:"--location-uri"`
+	SchemaStr                   string `docopt:"--schema"`
+	InferSchema                 string `docopt:"--infer-schema"`
+	TableProps                  string `docopt:"--properties"`
+	PartitionSpec               string `docopt:"--partition-spec"`
+	SortOrder                   string `docopt:"--sort-order"`
+	TargetFileSize              int64  `docopt:"--target-file-size"`
+	PartialProgress             bool   `docopt:"--partial-progress"`
+	PreserveDeadEqualityDeletes bool   `docopt:"--preserve-dead-equality-deletes"`
+
+	RestOptions *config.RestOptions `docopt:"-"`
 }
 
 func main() {
@@ -174,7 +189,7 @@ func main() {
 		}
 	}
 
-	fileCfg := config.ParseConfig(config.LoadConfig(cfg.Config), "default")
+	fileCfg := config.ParseConfig(config.LoadConfig(cfg.Config), cfg.CatalogName)
 	if fileCfg != nil {
 		mergeConf(fileCfg, &cfg, explicitFlags)
 	}
@@ -205,6 +220,15 @@ func main() {
 
 		if len(cfg.Scope) > 0 {
 			opts = append(opts, rest.WithScope(cfg.Scope))
+		}
+
+		if cfg.RestOptions != nil {
+			if cfg.RestOptions.SigV4Enabled {
+				opts = append(opts, rest.WithSigV4())
+			}
+			if cfg.RestOptions.SigningName != "" || cfg.RestOptions.SigningRegion != "" {
+				opts = append(opts, rest.WithSigV4RegionSvc(cfg.RestOptions.SigningRegion, cfg.RestOptions.SigningName))
+			}
 		}
 
 		if cat, err = rest.NewCatalog(ctx, "rest", cfg.URI, opts...); err != nil {
@@ -309,14 +333,35 @@ func main() {
 			}
 			output.Text("Namespace " + cfg.Ident + " created successfully")
 		case cfg.Table:
-			if cfg.SchemaStr == "" {
-				output.Error(errors.New("missing --schema for table creation"))
+			if cfg.SchemaStr != "" && cfg.InferSchema != "" {
+				output.Error(errors.New("--schema and --infer-schema are mutually exclusive"))
 				os.Exit(1)
 			}
 
-			schema, err := iceberg.NewSchemaFromJsonFields(0, cfg.SchemaStr)
-			if err != nil {
-				output.Error(err)
+			var schema *iceberg.Schema
+
+			switch {
+			case cfg.SchemaStr != "":
+				var err error
+
+				schema, err = iceberg.NewSchemaFromJsonFields(0, cfg.SchemaStr)
+				if err != nil {
+					output.Error(err)
+					os.Exit(1)
+				}
+			case cfg.InferSchema != "":
+				var err error
+
+				schema, err = schemaFromFile(cfg.InferSchema)
+				if err != nil {
+					output.Error(err)
+					os.Exit(1)
+				}
+
+				output.Text("Inferred schema from " + cfg.InferSchema + ":")
+				output.Schema(schema)
+			default:
+				output.Error(errors.New("missing --schema or --infer-schema for table creation"))
 				os.Exit(1)
 			}
 
@@ -551,4 +596,58 @@ func mergeConf(fileConf *config.CatalogConfig, resConfig *Config, explicitFlags 
 	if !explicitFlags["warehouse"] && len(fileConf.Warehouse) > 0 {
 		resConfig.Warehouse = fileConf.Warehouse
 	}
+
+	if fileConf.RestOptions != nil {
+		resConfig.RestOptions = fileConf.RestOptions
+	}
+}
+
+func schemaFromFile(path string) (*iceberg.Schema, error) {
+	ext := strings.ToLower(filepath.Ext(path))
+
+	switch ext {
+	case ".parquet", ".parq":
+		return schemaFromParquetFile(path)
+	default:
+		return nil, fmt.Errorf("unsupported file format %s for %s: only .parquet and .parq files are supported", ext, path)
+	}
+}
+
+func schemaFromParquetFile(path string) (*iceberg.Schema, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file: %w", err)
+	}
+
+	pqReader, err := file.NewParquetReader(f)
+	if err != nil {
+		f.Close()
+
+		return nil, fmt.Errorf("failed to read parquet file: %w", err)
+	}
+	defer pqReader.Close() // also closes underlying file
+
+	arrowReader, err := pqarrow.NewFileReader(pqReader, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read parquet schema: %w", err)
+	}
+
+	arrowSchema, err := arrowReader.Schema()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get arrow schema: %w", err)
+	}
+
+	// Prefer existing field IDs from the Parquet file (written by Iceberg-aware
+	// tools like Spark or PyIceberg). Fall back to fresh sequential IDs only
+	// when the error is specifically about missing field IDs.
+	schema, err := table.ArrowSchemaToIceberg(arrowSchema, true, nil)
+	if err != nil {
+		if errors.Is(err, iceberg.ErrInvalidSchema) && strings.Contains(err.Error(), "field-id") {
+			return table.ArrowSchemaToIcebergWithFreshIDs(arrowSchema, true)
+		}
+
+		return nil, fmt.Errorf("failed to convert parquet schema to iceberg: %w", err)
+	}
+
+	return schema, nil
 }

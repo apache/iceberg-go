@@ -24,6 +24,7 @@ import (
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseRequirementBytes(t *testing.T) {
@@ -143,5 +144,52 @@ func TestParseRequirementList(t *testing.T) {
 		var actual table.Requirements
 		err := json.Unmarshal(jsonData, &actual)
 		assert.Error(t, err)
+	})
+}
+
+func TestAssertRefSnapshotIDValidate(t *testing.T) {
+	meta, err := table.ParseMetadataBytes([]byte(table.ExampleTableMetadataV2))
+	require.NoError(t, err)
+
+	t.Run("matching ref passes", func(t *testing.T) {
+		req := table.AssertRefSnapshotID("test", ptr(int64(3051729675574597004)))
+		assert.NoError(t, req.Validate(meta))
+	})
+
+	t.Run("mismatched snapshot id includes expected and found", func(t *testing.T) {
+		req := table.AssertRefSnapshotID("test", ptr(int64(1)))
+		err := req.Validate(meta)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `"test"`)
+		assert.Contains(t, err.Error(), "expected id 1")
+		assert.Contains(t, err.Error(), "found 3051729675574597004")
+		assert.Contains(t, err.Error(), "has changed")
+	})
+
+	t.Run("nil expected but ref exists includes found snapshot", func(t *testing.T) {
+		req := table.AssertRefSnapshotID("test", nil)
+		err := req.Validate(meta)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `"test"`)
+		assert.Contains(t, err.Error(), "was created concurrently")
+	})
+
+	t.Run("ref missing but expected includes expected snapshot", func(t *testing.T) {
+		req := table.AssertRefSnapshotID("nonexistent", ptr(int64(42)))
+		err := req.Validate(meta)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `"nonexistent"`)
+		assert.Contains(t, err.Error(), "is missing")
+		assert.Contains(t, err.Error(), "expected 42")
+	})
+
+	t.Run("nil metadata returns error", func(t *testing.T) {
+		req := table.AssertRefSnapshotID("main", ptr(int64(1)))
+		assert.Error(t, req.Validate(nil))
+	})
+
+	t.Run("nil expected and ref missing passes", func(t *testing.T) {
+		req := table.AssertRefSnapshotID("nonexistent", nil)
+		assert.NoError(t, req.Validate(meta))
 	})
 }

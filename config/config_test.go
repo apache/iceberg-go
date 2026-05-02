@@ -78,6 +78,30 @@ catalog:
 			Warehouse:   "catalog_name",
 		},
 	},
+	// include rest options
+	{
+		[]byte(`
+catalog:
+  default:
+    type: rest
+    warehouse: "arn:aws:s3tables:us-east-1:account-id:bucket/bucketname"
+    uri: "https://s3tables.us-east-1.amazonaws.com/iceberg"
+    rest:
+      sigv4-enabled: true
+      signing-name: "s3tables"
+      signing-region: "us-east-1"
+`), "default",
+		&CatalogConfig{
+			CatalogType: "rest",
+			URI:         "https://s3tables.us-east-1.amazonaws.com/iceberg",
+			Warehouse:   "arn:aws:s3tables:us-east-1:account-id:bucket/bucketname",
+			RestOptions: &RestOptions{
+				SigV4Enabled:  true,
+				SigningName:   "s3tables",
+				SigningRegion: "us-east-1",
+			},
+		},
+	},
 }
 
 func TestParseConfig(t *testing.T) {

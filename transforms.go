@@ -32,6 +32,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/google/uuid"
 	"github.com/twmb/murmur3"
+	"golang.org/x/exp/constraints"
 )
 
 // ParseTransform takes the string representation of a transform as
@@ -561,6 +562,19 @@ type TimeTransform interface {
 	Transformer(Type) (func(any) Optional[int32], error)
 }
 
+// floorDiv performs floored integer division, rounding toward negative infinity.
+// Unlike Go's truncated division (which rounds toward zero), this correctly
+// handles negative dividends — e.g., floorDiv(-1, 3600000000) = -1, not 0.
+// This matches the behavior of Java's Math.floorDiv.
+func floorDiv[T constraints.Integer](a, b T) T {
+	d := a / b
+	if (a^b) < 0 && d*b != a {
+		d--
+	}
+
+	return d
+}
+
 func canTransformTime(t TimeTransform, sourceType Type) bool {
 	switch sourceType.(type) {
 	case DateType, TimestampType, TimestampTzType, TimestampNsType, TimestampTzNsType:
@@ -808,6 +822,17 @@ func (DayTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 				Val:   int32(v.(Timestamp).ToDate()),
 			}
 		}, nil
+	case TimestampNsType, TimestampTzNsType:
+		return func(v any) Optional[int32] {
+			if v == nil {
+				return Optional[int32]{}
+			}
+
+			return Optional[int32]{
+				Valid: true,
+				Val:   int32(v.(TimestampNano).ToDate()),
+			}
+		}, nil
 	}
 
 	return nil, fmt.Errorf("%w: cannot apply day transform for type %s",
@@ -824,6 +849,8 @@ func (DayTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 		out.Valid, out.Val = true, Int32Literal(v)
 	case TimestampLiteral:
 		out.Valid, out.Val = true, Int32Literal(Timestamp(v).ToDate())
+	case TimestampNsLiteral:
+		out.Valid, out.Val = true, Int32Literal(TimestampNano(v).ToDate())
 	}
 
 	return out
@@ -882,7 +909,20 @@ func (HourTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 
 			return Optional[int32]{
 				Valid: true,
-				Val:   int32(int64(v.(Timestamp)) / factor),
+				Val:   int32(floorDiv(int64(v.(Timestamp)), factor)),
+			}
+		}, nil
+	case TimestampNsType, TimestampTzNsType:
+		const factor = int64(time.Hour)
+
+		return func(v any) Optional[int32] {
+			if v == nil {
+				return Optional[int32]{}
+			}
+
+			return Optional[int32]{
+				Valid: true,
+				Val:   int32(floorDiv(int64(v.(TimestampNano)), factor)),
 			}
 		}, nil
 	}
@@ -899,7 +939,10 @@ func (HourTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	switch v := value.Val.(type) {
 	case TimestampLiteral:
 		const factor = int64(time.Hour / time.Microsecond)
-		out.Valid, out.Val = true, Int32Literal(int32(int64(v)/factor))
+		out.Valid, out.Val = true, Int32Literal(int32(floorDiv(int64(v), factor)))
+	case TimestampNsLiteral:
+		const factor = int64(time.Hour)
+		out.Valid, out.Val = true, Int32Literal(int32(floorDiv(int64(v), factor)))
 	}
 
 	return out

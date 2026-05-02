@@ -294,15 +294,18 @@ func buildManifestEvaluator(specID int, metadata Metadata, partitionFilters *key
 }
 
 func (scan *Scan) buildPartitionEvaluator(specID int) (func(iceberg.DataFile) (bool, error), error) {
-	spec := scan.metadata.PartitionSpecByID(specID)
+	return buildPartitionEvaluator(specID, scan.metadata, scan.partitionFilters, scan.caseSensitive)
+}
+
+func buildPartitionEvaluator(specID int, metadata Metadata, partitionFilters *keyDefaultMap[int, iceberg.BooleanExpression], caseSensitive bool) (func(iceberg.DataFile) (bool, error), error) {
+	spec := metadata.PartitionSpecByID(specID)
 	if spec == nil {
 		return nil, fmt.Errorf("%w: id %d", ErrPartitionSpecNotFound, specID)
 	}
-	partType := spec.PartitionType(scan.metadata.CurrentSchema())
+	partType := spec.PartitionType(metadata.CurrentSchema())
 	partSchema := iceberg.NewSchema(0, partType.FieldList...)
-	partExpr := scan.partitionFilters.Get(specID)
 
-	fn, err := iceberg.ExpressionEvaluator(partSchema, partExpr, scan.caseSensitive)
+	fn, err := iceberg.ExpressionEvaluator(partSchema, partitionFilters.Get(specID), caseSensitive)
 	if err != nil {
 		return nil, err
 	}
