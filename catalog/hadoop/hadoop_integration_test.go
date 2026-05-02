@@ -51,6 +51,12 @@ func repoRoot() string {
 }
 
 func (s *HadoopIntegrationSuite) SetupSuite() {
+	// Create the warehouse directory before Docker starts so it is owned
+	// by the runner user. If Docker creates it first via the volume mount,
+	// it will be root-owned and Go won't be able to write into it.
+	s.warehouse = filepath.Join(repoRoot(), "internal", "recipe", "hadoop-warehouse")
+	s.Require().NoError(os.MkdirAll(s.warehouse, 0o755))
+
 	var err error
 	s.stack, err = recipe.Start(s.T())
 	s.Require().NoError(err)
@@ -58,8 +64,6 @@ func (s *HadoopIntegrationSuite) SetupSuite() {
 
 func (s *HadoopIntegrationSuite) SetupTest() {
 	s.ctx = context.Background()
-	s.warehouse = filepath.Join(repoRoot(), "internal", "recipe", "hadoop-warehouse")
-	s.Require().NoError(os.MkdirAll(s.warehouse, 0o755))
 
 	cat, err := hadoop.NewCatalog("hadoop_test", s.warehouse, nil)
 	s.Require().NoError(err)
@@ -80,6 +84,19 @@ func (s *HadoopIntegrationSuite) sparkSQL(sql string) string {
 	s.Require().NoError(err)
 
 	return output
+}
+
+// createFakeTable creates a minimal table directory structure owned by
+// the runner process. This avoids root-ownership issues that arise when
+// Spark creates tables via Docker (root in container).
+func (s *HadoopIntegrationSuite) createFakeTable(ident table.Identifier) {
+	s.T().Helper()
+
+	tablePath := filepath.Join(append([]string{s.warehouse}, ident...)...)
+	metaDir := filepath.Join(tablePath, "metadata")
+	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
+	s.Require().NoError(os.WriteFile(
+		filepath.Join(metaDir, "v1.metadata.json"), []byte("{}"), 0o644))
 }
 
 // TestListTablesSparkCreated creates tables in Spark and verifies that
@@ -130,14 +147,16 @@ func (s *HadoopIntegrationSuite) TestListTablesNoSuchNamespace() {
 	}
 }
 
-// TestDropTableGoThenVerifySpark creates a table via Spark, drops it
-// with the Go catalog, then verifies the directory is gone.
-func (s *HadoopIntegrationSuite) TestDropTableGoThenVerifySpark() {
-	s.sparkSQL("CREATE NAMESPACE IF NOT EXISTS hadoop_test.drop_ns")
-	s.sparkSQL("CREATE TABLE hadoop_test.drop_ns.to_drop (id INT) USING iceberg")
+// TestDropTableExisting creates a table from Go (to avoid root-ownership
+// issues with Spark-created dirs), drops it, and verifies removal.
+func (s *HadoopIntegrationSuite) TestDropTableExisting() {
+	err := s.cat.CreateNamespace(s.ctx, []string{"drop_ns"}, nil)
+	s.Require().NoError(err)
+
+	s.createFakeTable([]string{"drop_ns", "to_drop"})
 
 	tablePath := filepath.Join(s.warehouse, "drop_ns", "to_drop")
-	_, err := os.Stat(tablePath)
+	_, err = os.Stat(tablePath)
 	s.Require().NoError(err, "table directory should exist before drop")
 
 	err = s.cat.DropTable(s.ctx, []string{"drop_ns", "to_drop"})
@@ -157,10 +176,12 @@ func (s *HadoopIntegrationSuite) TestDropTableNotExists() {
 // TestDropTableNamespacePreserved verifies that dropping a table does
 // not remove the parent namespace directory.
 func (s *HadoopIntegrationSuite) TestDropTableNamespacePreserved() {
-	s.sparkSQL("CREATE NAMESPACE IF NOT EXISTS hadoop_test.preserve_ns")
-	s.sparkSQL("CREATE TABLE hadoop_test.preserve_ns.tbl (id INT) USING iceberg")
+	err := s.cat.CreateNamespace(s.ctx, []string{"preserve_ns"}, nil)
+	s.Require().NoError(err)
 
-	err := s.cat.DropTable(s.ctx, []string{"preserve_ns", "tbl"})
+	s.createFakeTable([]string{"preserve_ns", "tbl"})
+
+	err = s.cat.DropTable(s.ctx, []string{"preserve_ns", "tbl"})
 	s.Require().NoError(err)
 
 	info, err := os.Stat(filepath.Join(s.warehouse, "preserve_ns"))
@@ -175,8 +196,8 @@ func (s *HadoopIntegrationSuite) TestRenameTableUnsupported() {
 	s.True(strings.Contains(err.Error(), "not supported"))
 }
 
-// TestNamespaceRoundTrip creates a namespace in Go, verifies it shows up
-// in Spark, creates a table in Spark under it, then lists from Go.
+// TestNamespaceRoundTrip creates a namespace in Go, creates a table in
+// Spark under it, then lists from Go.
 func (s *HadoopIntegrationSuite) TestNamespaceRoundTrip() {
 	err := s.cat.CreateNamespace(s.ctx, []string{"round_trip"}, nil)
 	s.Require().NoError(err)
@@ -196,11 +217,13 @@ func (s *HadoopIntegrationSuite) TestNamespaceRoundTrip() {
 // TestDropTableThenListReflects verifies that after dropping, the table
 // no longer appears in ListTables.
 func (s *HadoopIntegrationSuite) TestDropTableThenListReflects() {
-	s.sparkSQL("CREATE NAMESPACE IF NOT EXISTS hadoop_test.droplist_ns")
-	s.sparkSQL("CREATE TABLE hadoop_test.droplist_ns.keep (id INT) USING iceberg")
-	s.sparkSQL("CREATE TABLE hadoop_test.droplist_ns.remove (id INT) USING iceberg")
+	err := s.cat.CreateNamespace(s.ctx, []string{"droplist_ns"}, nil)
+	s.Require().NoError(err)
 
-	err := s.cat.DropTable(s.ctx, []string{"droplist_ns", "remove"})
+	s.createFakeTable([]string{"droplist_ns", "keep"})
+	s.createFakeTable([]string{"droplist_ns", "remove"})
+
+	err = s.cat.DropTable(s.ctx, []string{"droplist_ns", "remove"})
 	s.Require().NoError(err)
 
 	var tables []table.Identifier

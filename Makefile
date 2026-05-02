@@ -32,6 +32,7 @@ lint-install:
 	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 
 integration-setup:
+	mkdir -p internal/recipe/hadoop-warehouse
 	docker compose -f internal/recipe/docker-compose.yml up -d
 	sleep 10
 	docker compose -f internal/recipe/docker-compose.yml exec -T spark-iceberg ipython ./provision.py
