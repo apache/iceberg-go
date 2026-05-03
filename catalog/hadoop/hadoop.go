@@ -52,6 +52,31 @@ var _ catalog.Catalog = (*Catalog)(nil)
 // v1.metadata.json, v42.metadata.json, v1.gz.metadata.json, etc.
 var versionPattern = regexp.MustCompile(`^v([0-9]+)(?:\.gz)?\.metadata\.json$`)
 
+// uuidMetadataPattern matches UUID-style metadata filenames produced by
+// Java/PyIceberg catalogs: 00000-<uuid>.metadata.json, etc.
+var uuidMetadataPattern = regexp.MustCompile(`^[0-9]+-[0-9a-fA-F-]+\.metadata\.json$`)
+
+// validateIdentifier checks that each component of an identifier is safe for
+// use as a path segment. It rejects empty parts, path traversal sequences,
+// and components containing path separators.
+func validateIdentifier(ident table.Identifier) error {
+	for _, part := range ident {
+		if part == "" {
+			return errors.New("hadoop catalog: identifier component must not be empty")
+		}
+
+		if part == "." || part == ".." {
+			return fmt.Errorf("hadoop catalog: invalid identifier component %q", part)
+		}
+
+		if strings.ContainsAny(part, "/\\") {
+			return fmt.Errorf("hadoop catalog: identifier component must not contain path separators: %q", part)
+		}
+	}
+
+	return nil
+}
+
 // Catalog is a filesystem-based Iceberg catalog that requires no external
 // metastore. All state lives on disk as directories and versioned JSON
 // metadata files.
@@ -122,7 +147,10 @@ func (c *Catalog) defaultTableLocation(ident table.Identifier) string {
 }
 
 // isTableDir reports whether path is a table directory by checking for
-// v*.metadata.json files in its metadata/ subdirectory.
+// metadata files in its metadata/ subdirectory. It recognizes:
+//   - v*.metadata.json (Hadoop catalog format)
+//   - <seq>-<uuid>.metadata.json (Java/PyIceberg format)
+//   - version-hint.text
 func isTableDir(path string) bool {
 	metaDir := filepath.Join(path, "metadata")
 
@@ -132,7 +160,14 @@ func isTableDir(path string) bool {
 	}
 
 	for _, e := range entries {
-		if !e.IsDir() && versionPattern.MatchString(e.Name()) {
+		if e.IsDir() {
+			continue
+		}
+
+		name := e.Name()
+		if versionPattern.MatchString(name) ||
+			uuidMetadataPattern.MatchString(name) ||
+			name == "version-hint.text" {
 			return true
 		}
 	}
@@ -270,22 +305,34 @@ func (c *Catalog) CreateNamespace(_ context.Context, ns table.Identifier, props 
 		return errors.New("hadoop catalog: namespace identifier must not be empty")
 	}
 
+	if err := validateIdentifier(ns); err != nil {
+		return err
+	}
+
 	if len(props) > 0 {
 		return errors.New("hadoop catalog: namespace properties are not supported")
 	}
 
 	path := c.namespaceToPath(ns)
 
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("%w: %s", catalog.ErrNamespaceAlreadyExists, strings.Join(ns, "."))
+	if err := os.Mkdir(path, 0o755); err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("%w: %s", catalog.ErrNamespaceAlreadyExists, strings.Join(ns, "."))
+		}
+
+		return fmt.Errorf("hadoop catalog: failed to create namespace: %w", err)
 	}
 
-	return os.MkdirAll(path, 0o755)
+	return nil
 }
 
 func (c *Catalog) DropNamespace(_ context.Context, ns table.Identifier) error {
 	if len(ns) == 0 {
 		return errors.New("hadoop catalog: namespace identifier must not be empty")
+	}
+
+	if err := validateIdentifier(ns); err != nil {
+		return err
 	}
 
 	path := c.namespaceToPath(ns)
@@ -307,6 +354,10 @@ func (c *Catalog) DropNamespace(_ context.Context, ns table.Identifier) error {
 }
 
 func (c *Catalog) CheckNamespaceExists(_ context.Context, ns table.Identifier) (bool, error) {
+	if err := validateIdentifier(ns); err != nil {
+		return false, err
+	}
+
 	path := c.namespaceToPath(ns)
 
 	info, err := os.Stat(path)
@@ -322,6 +373,12 @@ func (c *Catalog) CheckNamespaceExists(_ context.Context, ns table.Identifier) (
 }
 
 func (c *Catalog) ListNamespaces(_ context.Context, parent table.Identifier) ([]table.Identifier, error) {
+	if len(parent) > 0 {
+		if err := validateIdentifier(parent); err != nil {
+			return nil, err
+		}
+	}
+
 	var path string
 
 	if len(parent) == 0 {
@@ -358,6 +415,10 @@ func (c *Catalog) ListNamespaces(_ context.Context, parent table.Identifier) ([]
 }
 
 func (c *Catalog) LoadNamespaceProperties(_ context.Context, ns table.Identifier) (iceberg.Properties, error) {
+	if err := validateIdentifier(ns); err != nil {
+		return nil, err
+	}
+
 	path := c.namespaceToPath(ns)
 
 	info, err := os.Stat(path)
@@ -369,9 +430,9 @@ func (c *Catalog) LoadNamespaceProperties(_ context.Context, ns table.Identifier
 		return nil, fmt.Errorf("hadoop catalog: failed to stat namespace: %w", err)
 	}
 
-	return iceberg.Properties{"location": path}, nil
+	return iceberg.Properties{"location": "file://" + path}, nil
 }
 
 func (c *Catalog) UpdateNamespaceProperties(_ context.Context, _ table.Identifier, _ []string, _ iceberg.Properties) (catalog.PropertiesUpdateSummary, error) {
-	return catalog.PropertiesUpdateSummary{}, errors.New("hadoop catalog: UpdateNamespaceProperties not yet implemented")
+	return catalog.PropertiesUpdateSummary{}, errors.New("hadoop catalog: namespace properties are not supported")
 }
