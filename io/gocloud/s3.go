@@ -121,7 +121,10 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 		endpoint = os.Getenv("AWS_S3_ENDPOINT")
 	}
 
-	usePathStyle := true
+	// Default to virtual-hosted style for standard AWS S3 and path-style
+	// for custom endpoints (e.g. MinIO). The s3.force-virtual-addressing
+	// property can override either default.
+	usePathStyle := endpoint != ""
 	if forceVirtual, ok := props[io.S3ForceVirtualAddressing]; ok {
 		if cfgForceVirtual, err := strconv.ParseBool(forceVirtual); err == nil {
 			usePathStyle = !cfgForceVirtual

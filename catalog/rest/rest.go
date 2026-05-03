@@ -506,6 +506,15 @@ func toProps(o *options) iceberg.Properties {
 		setIf(keyAuthUrl, o.authUri.String())
 	}
 
+	// Propagate the SigV4 signing region as a fallback client region so
+	// that S3 I/O can determine the correct regional endpoint when
+	// s3.region is not explicitly set (e.g. S3 Table Buckets).
+	if o.enableSigv4 && o.sigv4Region != "" {
+		if _, ok := props["client.region"]; !ok {
+			props["client.region"] = o.sigv4Region
+		}
+	}
+
 	return props
 }
 
