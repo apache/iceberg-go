@@ -28,8 +28,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.16
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.15
 	github.com/aws/aws-sdk-go-v2/service/glue v1.139.3
-	github.com/aws/aws-sdk-go-v2/service/s3 v1.99.1
-	github.com/aws/smithy-go v1.25.0
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.100.0
+	github.com/aws/smithy-go v1.25.1
 	github.com/awsdocs/aws-doc-sdk-examples/gov2/testtools v0.0.0-20250407191926-092f3e54b837
 	github.com/beltran/gohive v1.8.1
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
@@ -41,7 +41,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/substrait-io/substrait-go/v8 v8.1.0
 	github.com/testcontainers/testcontainers-go/modules/compose v0.42.0
-	github.com/twmb/avro v1.7.0
+	github.com/twmb/avro v1.7.1
 	github.com/twmb/murmur3 v1.1.8
 	github.com/uptrace/bun v1.2.18
 	github.com/uptrace/bun/dialect/mssqldialect v1.2.18
