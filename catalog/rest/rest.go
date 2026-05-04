@@ -120,7 +120,18 @@ type contextKey string
 
 func (e errorResponse) Unwrap() error { return e.wrapping }
 func (e errorResponse) Error() string {
-	return e.Type + ": " + e.Message
+	switch {
+	case e.Type != "" && e.Message != "":
+		return e.Type + ": " + e.Message
+	case e.Message != "":
+		return e.Message
+	case e.Type != "":
+		return e.Type
+	case e.wrapping != nil:
+		return e.wrapping.Error()
+	default:
+		return "unknown REST error"
+	}
 }
 
 type identifier struct {
@@ -367,11 +378,23 @@ func handleNon200(rsp *http.Response, override map[int]error) error {
 
 	// Only try to decode if there's a body (HEAD requests don't have one)
 	if rsp.ContentLength != 0 {
-		decErr := json.NewDecoder(rsp.Body).Decode(&struct {
-			Error *errorResponse `json:"error"`
-		}{Error: &e})
+
+		payload := struct {
+			Error   *errorResponse `json:"error"`
+			Message string         `json:"message"`
+			Type    string         `json:"type"`
+		}{
+			Error: &e,
+		}
+
+		decErr := json.NewDecoder(rsp.Body).Decode(&payload)
 		if decErr != nil && decErr != io.EOF {
 			return fmt.Errorf("%w: failed to decode error response: %s", ErrRESTError, decErr.Error())
+		}
+
+		if e.Message == "" && e.Type == "" {
+			e.Message = payload.Message
+			e.Type = payload.Type
 		}
 	}
 
