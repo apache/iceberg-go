@@ -17,17 +17,17 @@
 services:
   spark-iceberg:
     image: pyiceberg-spark
-    container_name: spark-iceberg    
+    container_name: spark-iceberg
     build: .
     networks:
       iceberg_net:
-    depends_on:      
+    depends_on:
       - rest
       - minio
     volumes:
       - ./warehouse:/home/iceberg/warehouse
       - ./notebooks:/home/iceberg/notebooks/notebooks
-      - ./hadoop-warehouse:/home/iceberg/hadoop-warehouse
+      - /tmp/iceberg-hadoop-warehouse:/tmp/iceberg-hadoop-warehouse
     environment:
       - AWS_ACCESS_KEY_ID=admin
       - AWS_SECRET_ACCESS_KEY=password
@@ -37,6 +37,12 @@ services:
       - 8080:8080
       - 10000:10000
       - 10001:10001
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
   rest:
     image: apache/iceberg-rest-fixture:1.10.1
     container_name: iceberg-rest
