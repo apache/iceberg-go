@@ -49,8 +49,8 @@ type ListCmd struct {
 }
 
 type DescribeCmd struct {
-	Type       string `arg:"positional,required" help:"'namespace', 'table', or a fully qualified identifier"`
-	Identifier string `arg:"positional" help:"fully qualified namespace or table (when type is 'namespace' or 'table')"`
+	Identifier string `arg:"positional,required" help:"fully qualified identifier, or 'namespace'/'table' followed by an identifier"`
+	Target     string `arg:"positional" help:"fully qualified namespace or table (when first arg is 'namespace' or 'table')"`
 }
 
 type SchemaCmd struct {
@@ -155,7 +155,7 @@ type CompactRunCmd struct {
 	TableID                     string `arg:"positional,required" help:"full path to a table"`
 	TargetFileSize              int64  `arg:"--target-file-size" default:"0" help:"target output file size in bytes"`
 	PartialProgress             bool   `arg:"--partial-progress" help:"stage each group as a separate snapshot"`
-	PreserveDeadEqualityDeletes bool   `arg:"--preserve-dead-equality-deletes" help:"keep dead equality-delete files"`
+	PreserveDeadEqualityDeletes bool   `arg:"--preserve-dead-equality-deletes" help:"keep equality-delete files that are provably dead after the rewrite (default: drop them — recommended for sustained CDC workloads)"`
 }
 
 type CompactCmd struct {
@@ -230,16 +230,16 @@ func main() {
 	// Validate nested subcommands before catalog init.
 	switch {
 	case args.Create != nil && args.Create.Namespace == nil && args.Create.Table == nil:
-		parser.WriteHelp(os.Stderr)
+		_ = parser.WriteHelpForSubcommand(os.Stderr, "create")
 		os.Exit(1)
 	case args.Drop != nil && args.Drop.Namespace == nil && args.Drop.Table == nil:
-		parser.WriteHelp(os.Stderr)
+		_ = parser.WriteHelpForSubcommand(os.Stderr, "drop")
 		os.Exit(1)
 	case args.Properties != nil && args.Properties.Get == nil && args.Properties.Set == nil && args.Properties.Remove == nil:
-		parser.WriteHelp(os.Stderr)
+		_ = parser.WriteHelpForSubcommand(os.Stderr, "properties")
 		os.Exit(1)
 	case args.Compact != nil && args.Compact.Analyze == nil && args.Compact.Run == nil:
-		parser.WriteHelp(os.Stderr)
+		_ = parser.WriteHelpForSubcommand(os.Stderr, "compact")
 		os.Exit(1)
 	}
 
@@ -357,19 +357,19 @@ func runDescribe(ctx context.Context, output Output, cat catalog.Catalog, cmd *D
 	//   iceberg describe namespace my.ns
 	//   iceberg describe my.ns.table
 	entityType := "any"
-	ident := cmd.Type
+	ident := cmd.Identifier
 
-	switch cmd.Type {
+	switch cmd.Identifier {
 	case "namespace":
 		entityType = "ns"
-		ident = cmd.Identifier
+		ident = cmd.Target
 
 		if ident == "" {
 			log.Fatal("missing IDENTIFIER for describe namespace")
 		}
 	case "table":
 		entityType = "tbl"
-		ident = cmd.Identifier
+		ident = cmd.Target
 
 		if ident == "" {
 			log.Fatal("missing IDENTIFIER for describe table")
