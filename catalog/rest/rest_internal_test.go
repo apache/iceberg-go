@@ -903,3 +903,82 @@ func TestErrorResponse_ErrorFormattingEmpty(t *testing.T) {
 	err := errorResponse{}
 	require.Equal(t, "unknown REST error", err.Error())
 }
+
+func TestToPropsSigv4RegionFallback(t *testing.T) {
+	t.Parallel()
+
+	t.Run("sigv4 region propagated as client.region for s3tables", func(t *testing.T) {
+		t.Parallel()
+
+		opts := &options{
+			enableSigv4:  true,
+			sigv4Region:  "us-east-1",
+			sigv4Service: "s3tables",
+		}
+		props := toProps(opts)
+		assert.Equal(t, "us-east-1", props["client.region"])
+	})
+
+	t.Run("sigv4 region propagated as client.region for s3", func(t *testing.T) {
+		t.Parallel()
+
+		opts := &options{
+			enableSigv4:  true,
+			sigv4Region:  "us-west-2",
+			sigv4Service: "s3",
+		}
+		props := toProps(opts)
+		assert.Equal(t, "us-west-2", props["client.region"])
+	})
+
+	t.Run("sigv4 region not propagated for non-s3 service", func(t *testing.T) {
+		t.Parallel()
+
+		opts := &options{
+			enableSigv4:  true,
+			sigv4Region:  "us-east-1",
+			sigv4Service: "execute-api",
+		}
+		props := toProps(opts)
+		_, ok := props["client.region"]
+		assert.False(t, ok)
+	})
+
+	t.Run("sigv4 region does not overwrite existing client.region", func(t *testing.T) {
+		t.Parallel()
+
+		opts := &options{
+			enableSigv4:  true,
+			sigv4Region:  "us-east-1",
+			sigv4Service: "s3tables",
+			additionalProps: map[string]string{
+				"client.region": "eu-west-1",
+			},
+		}
+		props := toProps(opts)
+		assert.Equal(t, "eu-west-1", props["client.region"])
+	})
+
+	t.Run("no client.region when sigv4 disabled", func(t *testing.T) {
+		t.Parallel()
+
+		opts := &options{
+			sigv4Region: "us-east-1",
+		}
+		props := toProps(opts)
+		_, ok := props["client.region"]
+		assert.False(t, ok)
+	})
+
+	t.Run("no client.region when sigv4 region empty", func(t *testing.T) {
+		t.Parallel()
+
+		opts := &options{
+			enableSigv4:  true,
+			sigv4Service: "s3tables",
+		}
+		props := toProps(opts)
+		_, ok := props["client.region"]
+		assert.False(t, ok)
+	})
+}

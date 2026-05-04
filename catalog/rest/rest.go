@@ -499,6 +499,17 @@ func toProps(o *options) iceberg.Properties {
 		props[keyRestSigV4] = "true"
 		setIf(keyRestSigV4Region, o.sigv4Region)
 		setIf(keyRestSigV4Service, o.sigv4Service)
+
+		// Best-effort fallback: propagate the SigV4 signing region as
+		// a client region hint so that S3 I/O can determine the correct
+		// regional endpoint when s3.region is not explicitly set.
+		// Only applied for S3/S3Tables services where the signing region
+		// is likely to match the bucket region.
+		if o.sigv4Region != "" && (o.sigv4Service == "s3" || o.sigv4Service == "s3tables") {
+			if _, ok := props[iceio.S3ClientRegion]; !ok {
+				props[iceio.S3ClientRegion] = o.sigv4Region
+			}
+		}
 	}
 
 	setIf(keyPrefix, o.prefix)
