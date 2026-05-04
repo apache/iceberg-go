@@ -19,7 +19,7 @@ package table
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"testing"
 
 	iceio "github.com/apache/iceberg-go/io"
@@ -38,6 +38,7 @@ func rebuildUpdate(snap *Snapshot, newManifestList string, gotParent **Snapshot)
 			*gotParent = freshParent
 			rebuilt := *snap
 			rebuilt.ManifestList = newManifestList
+
 			return &rebuilt, nil
 		},
 	}
@@ -169,7 +170,7 @@ func TestRebuildSnapshotUpdates_PropagatesClosureError(t *testing.T) {
 		ManifestList:     "s3://bucket/old.avro",
 		Summary:          &Summary{Operation: OpAppend},
 	}
-	wantErr := fmt.Errorf("simulated S3 write failure")
+	wantErr := errors.New("simulated S3 write failure")
 	upd := &addSnapshotUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateAddSnapshot},
 		Snapshot:   snap,

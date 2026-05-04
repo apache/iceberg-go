@@ -857,6 +857,7 @@ func (sp *snapshotProducer) computeOwnManifests(allManifests []iceberg.ManifestF
 			own = append(own, m)
 		}
 	}
+
 	return own
 }
 
@@ -1035,6 +1036,7 @@ func (sp *snapshotProducer) commit(ctx context.Context) (_ []Update, _ []Require
 		rebuilt.ManifestList = manifestListPath
 		rebuilt.ParentSnapshotID = parentID
 		rebuilt.SequenceNumber = newSeq
+
 		return &rebuilt, nil
 	}
 
