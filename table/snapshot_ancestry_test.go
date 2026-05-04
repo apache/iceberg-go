@@ -101,6 +101,45 @@ func TestAncestorsOf_CycleDefense(t *testing.T) {
 	assert.Equal(t, []int64{1, 2}, snapshotIDs(got))
 }
 
+func TestAncestorsOfChecked_LinearChain(t *testing.T) {
+	got, complete := AncestorsOfChecked(5, buildChain(5))
+
+	assert.True(t, complete, "walk reached the root")
+	assert.Equal(t, []int64{5, 4, 3, 2, 1}, snapshotIDs(got))
+}
+
+func TestAncestorsOfChecked_Unknown(t *testing.T) {
+	got, complete := AncestorsOfChecked(99, buildChain(3))
+
+	assert.False(t, complete, "unresolvable starting snapshot is not a complete walk")
+	assert.Empty(t, got)
+}
+
+func TestAncestorsOfChecked_BrokenChain(t *testing.T) {
+	// Chain 1 ← 2 ← 3 with snapshot 2 missing — the walk stops at 3 and
+	// the missing parent must be reported as truncation.
+	chain := buildChain(3)
+	lookup := func(id int64) *Snapshot {
+		if id == 2 {
+			return nil
+		}
+
+		return chain(id)
+	}
+
+	got, complete := AncestorsOfChecked(3, lookup)
+
+	assert.False(t, complete, "missing intermediate must surface as truncation")
+	assert.Equal(t, []int64{3}, snapshotIDs(got))
+}
+
+func TestAncestorsOfChecked_CycleDefense(t *testing.T) {
+	got, complete := AncestorsOfChecked(1, buildCycle())
+
+	assert.False(t, complete, "cycle must surface as truncation")
+	assert.Equal(t, []int64{1, 2}, snapshotIDs(got))
+}
+
 func TestAncestorsBetween_LinearChain(t *testing.T) {
 	lookup := buildChain(5)
 
