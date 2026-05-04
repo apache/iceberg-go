@@ -88,3 +88,76 @@ func TestParseAWSConfigUnsupportedProperty(t *testing.T) {
 	})
 	require.ErrorContains(t, err, "unsupported S3 property")
 }
+
+func TestResolveUsePathStyle(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		endpoint string
+		props    map[string]string
+		want     bool
+	}{
+		{
+			name:     "no endpoint defaults to virtual-hosted style",
+			endpoint: "",
+			props:    nil,
+			want:     false,
+		},
+		{
+			name:     "custom endpoint defaults to path-style",
+			endpoint: "http://localhost:9000",
+			props:    nil,
+			want:     true,
+		},
+		{
+			name:     "force virtual-addressing overrides custom endpoint",
+			endpoint: "http://localhost:9000",
+			props: map[string]string{
+				io.S3ForceVirtualAddressing: "true",
+			},
+			want: false,
+		},
+		{
+			name:     "force virtual-addressing=false with no endpoint",
+			endpoint: "",
+			props: map[string]string{
+				io.S3ForceVirtualAddressing: "false",
+			},
+			want: true,
+		},
+		{
+			name:     "force virtual-addressing=true with no endpoint",
+			endpoint: "",
+			props: map[string]string{
+				io.S3ForceVirtualAddressing: "true",
+			},
+			want: false,
+		},
+		{
+			name:     "invalid force-virtual-addressing value ignored, custom endpoint",
+			endpoint: "http://localhost:9000",
+			props: map[string]string{
+				io.S3ForceVirtualAddressing: "not-a-bool",
+			},
+			want: true,
+		},
+		{
+			name:     "invalid force-virtual-addressing value ignored, no endpoint",
+			endpoint: "",
+			props: map[string]string{
+				io.S3ForceVirtualAddressing: "not-a-bool",
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := resolveUsePathStyle(tt.endpoint, tt.props)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

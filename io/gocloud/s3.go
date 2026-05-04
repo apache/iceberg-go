@@ -68,7 +68,7 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 
 	if region, ok := props[io.S3Region]; ok {
 		opts = append(opts, config.WithRegion(region))
-	} else if region, ok := props["client.region"]; ok {
+	} else if region, ok := props[io.S3ClientRegion]; ok {
 		opts = append(opts, config.WithRegion(region))
 	}
 
@@ -102,6 +102,21 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 	return awscfg, nil
 }
 
+// resolveUsePathStyle determines whether the S3 client should use
+// path-style addressing. It defaults to virtual-hosted style for
+// standard AWS S3 and path-style for custom endpoints (e.g. MinIO).
+// The s3.force-virtual-addressing property can override either default.
+func resolveUsePathStyle(endpoint string, props map[string]string) bool {
+	usePathStyle := endpoint != ""
+	if forceVirtual, ok := props[io.S3ForceVirtualAddressing]; ok {
+		if cfgForceVirtual, err := strconv.ParseBool(forceVirtual); err == nil {
+			usePathStyle = !cfgForceVirtual
+		}
+	}
+
+	return usePathStyle
+}
+
 func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
 	var (
 		awscfg *aws.Config
@@ -121,21 +136,11 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 		endpoint = os.Getenv("AWS_S3_ENDPOINT")
 	}
 
-	// Default to virtual-hosted style for standard AWS S3 and path-style
-	// for custom endpoints (e.g. MinIO). The s3.force-virtual-addressing
-	// property can override either default.
-	usePathStyle := endpoint != ""
-	if forceVirtual, ok := props[io.S3ForceVirtualAddressing]; ok {
-		if cfgForceVirtual, err := strconv.ParseBool(forceVirtual); err == nil {
-			usePathStyle = !cfgForceVirtual
-		}
-	}
-
 	client := s3.NewFromConfig(*awscfg, func(o *s3.Options) {
 		if endpoint != "" {
 			o.BaseEndpoint = aws.String(endpoint)
 		}
-		o.UsePathStyle = usePathStyle
+		o.UsePathStyle = resolveUsePathStyle(endpoint, props)
 		o.DisableLogOutputChecksumValidationSkipped = true
 	})
 
