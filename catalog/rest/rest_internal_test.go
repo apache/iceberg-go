@@ -866,7 +866,6 @@ func TestHandleNon200_DecodeCanonicalErrorRendersExpectedMessage(t *testing.T) {
 }
 
 func TestHandleNon200_EmptyBodyFallback(t *testing.T) {
-
 	rsp := &http.Response{
 		StatusCode:    http.StatusBadRequest,
 		ContentLength: 0,
