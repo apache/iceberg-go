@@ -826,11 +826,50 @@ func (sp *snapshotProducer) summary(props iceberg.Properties) (Summary, error) {
 	}, previousSummary)
 }
 
+// computeOwnManifests returns the subset of allManifests that were written
+// by this producer (i.e. not inherited from the parent snapshot). These are
+// preserved across OCC retry attempts when the manifest list is rebuilt
+// against a fresh parent.
+func (sp *snapshotProducer) computeOwnManifests(allManifests []iceberg.ManifestFile) []iceberg.ManifestFile {
+	if sp.parentSnapshotID <= 0 {
+		// No parent means all manifests are new — nothing to exclude.
+		return allManifests
+	}
+
+	parent, err := sp.txn.meta.SnapshotByID(sp.parentSnapshotID)
+	if err != nil || parent == nil {
+		return allManifests
+	}
+
+	parentManifests, err := parent.Manifests(sp.io)
+	if err != nil {
+		return allManifests
+	}
+
+	inherited := make(map[string]bool, len(parentManifests))
+	for _, m := range parentManifests {
+		inherited[m.FilePath()] = true
+	}
+
+	own := make([]iceberg.ManifestFile, 0, len(allManifests))
+	for _, m := range allManifests {
+		if !inherited[m.FilePath()] {
+			own = append(own, m)
+		}
+	}
+	return own
+}
+
 func (sp *snapshotProducer) commit(ctx context.Context) (_ []Update, _ []Requirement, err error) {
 	newManifests, err := sp.manifests(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
+
+	// Separate "own" manifests (those written by this producer) from
+	// manifests inherited from the stale parent. The own manifests are
+	// preserved when the manifest list is rebuilt during OCC retries.
+	ownManifests := sp.computeOwnManifests(newManifests)
 
 	nextSequence := sp.txn.meta.nextSequenceNumber()
 	summary, err := sp.summary(sp.snapshotProps)
@@ -914,9 +953,102 @@ func (sp *snapshotProducer) commit(ctx context.Context) (_ []Update, _ []Require
 		})
 	}
 
+	// Build the manifest-list rebuild closure. It is called by doCommit
+	// on each OCC retry to regenerate the manifest list so it correctly
+	// inherits all data files committed by concurrent writers since the
+	// original snapshot was built.
+	formatVersion := sp.txn.meta.formatVersion
+	snapshotID := sp.snapshotID
+	commitUUID := sp.commitUuid
+	capturedSnapshot := snapshot // copy the value so the closure is self-contained
+	processManifestsFn := func(m []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
+		return sp.processManifests(m)
+	}
+
+	rebuildFn := func(_ context.Context, freshParent *Snapshot, fio iceio.WriteFileIO, attempt int) (_ *Snapshot, retErr error) {
+		// Load inherited manifests from the fresh parent.
+		var inherited []iceberg.ManifestFile
+		if freshParent != nil {
+			inherited, retErr = freshParent.Manifests(fio)
+			if retErr != nil {
+				return nil, fmt.Errorf("rebuild manifest list: load parent manifests: %w", retErr)
+			}
+		}
+
+		// Combine own manifests with inherited ones, applying any
+		// producer-specific processing (no-op for fast/merge-append).
+		combined, procErr := processManifestsFn(slices.Concat(ownManifests, inherited))
+		if procErr != nil {
+			return nil, fmt.Errorf("rebuild manifest list: process manifests: %w", procErr)
+		}
+
+		// Derive the sequence number. When there is a fresh parent, use its
+		// sequence number + 1 so the rebuilt snapshot is strictly greater than
+		// any committed peer. When there is no fresh parent (first snapshot in
+		// the table or unknown parent), preserve the original sequence number
+		// from the initial build.
+		var newSeq int64
+		if freshParent != nil && formatVersion >= 2 {
+			newSeq = freshParent.SequenceNumber + 1
+		} else {
+			newSeq = capturedSnapshot.SequenceNumber
+		}
+
+		// Write the rebuilt manifest list to a path unique to this retry
+		// attempt. Each retry uses a different attempt counter in the filename
+		// (snap-{id}-{attempt}-{uuid}.avro) so that S3 conditional-write
+		// semantics (if-none-match) do not reject the overwrite. Orphaned files
+		// from superseded retry attempts are removed by doCommit after the
+		// commit succeeds.
+		fname := newManifestListFileName(snapshotID, attempt, commitUUID)
+		manifestListPath := locProvider.NewMetadataLocation(fname)
+
+		out, createErr := fio.Create(manifestListPath)
+		if createErr != nil {
+			return nil, fmt.Errorf("rebuild manifest list: create file: %w", createErr)
+		}
+		defer internal.CheckedClose(out, &retErr)
+
+		var parentID *int64
+		if freshParent != nil {
+			id := freshParent.SnapshotID
+			parentID = &id
+		}
+
+		firstRowID := int64(0)
+		if formatVersion == 3 {
+			writer, wrErr := iceberg.NewManifestListWriterV3(out, snapshotID, newSeq, firstRowID, parentID)
+			if wrErr != nil {
+				return nil, fmt.Errorf("rebuild manifest list: create v3 writer: %w", wrErr)
+			}
+			defer internal.CheckedClose(writer, &retErr)
+			if addErr := writer.AddManifests(combined); addErr != nil {
+				return nil, fmt.Errorf("rebuild manifest list: add manifests: %w", addErr)
+			}
+		} else {
+			if wErr := iceberg.WriteManifestList(formatVersion, out, snapshotID, parentID, &newSeq, firstRowID, combined); wErr != nil {
+				return nil, fmt.Errorf("rebuild manifest list: write: %w", wErr)
+			}
+		}
+
+		rebuilt := capturedSnapshot
+		rebuilt.ManifestList = manifestListPath
+		rebuilt.ParentSnapshotID = parentID
+		rebuilt.SequenceNumber = newSeq
+		return &rebuilt, nil
+	}
+
+	addSnap := NewAddSnapshotUpdate(&snapshot)
+	addSnap.ownManifests = ownManifests
+	addSnap.rebuildManifestList = rebuildFn
+
 	return []Update{
-			NewAddSnapshotUpdate(&snapshot),
-			NewSetSnapshotRefUpdate(branch, sp.snapshotID, BranchRef, -1, -1, -1),
+			addSnap,
+			// Use 0 (not -1) for the optional fields so they are omitted by
+			// `omitempty` in JSON marshalling. -1 is a sentinel meaning
+			// "no limit" internally, but strict catalogs such as AWS S3 Tables
+			// reject a payload that explicitly contains negative values.
+			NewSetSnapshotRefUpdate(branch, sp.snapshotID, BranchRef, 0, 0, 0),
 		}, []Requirement{
 			AssertRefSnapshotID(branch, sp.txn.meta.currentSnapshotID),
 		}, nil
