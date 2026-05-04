@@ -33,34 +33,51 @@ type SnapshotLookup func(id int64) *Snapshot
 // The returned slice may be truncated if an intermediate snapshot is
 // missing from the lookup (e.g. expired) or if a cycle is encountered.
 // Callers that need to distinguish a complete walk from a truncated one
-// should use IsAncestorOf against the expected oldest ancestor.
+// should use AncestorsOfChecked instead.
 func AncestorsOf(snapshotID int64, lookup SnapshotLookup) []Snapshot {
+	ancestors, _ := AncestorsOfChecked(snapshotID, lookup)
+
+	return ancestors
+}
+
+// AncestorsOfChecked is AncestorsOf with completeness tracking. The
+// second return value is true when the walk terminated at a snapshot
+// with no parent (a clean root). It is false when the walk was
+// truncated by an unresolvable starting snapshot, a missing intermediate
+// snapshot, or a cycle in malformed metadata.
+//
+// Callers performing conflict detection (where a truncated ancestry
+// equates to under-counting concurrent snapshots) MUST treat
+// complete=false as divergent and refuse the commit, mirroring
+// AncestorsBetween's baseFound=false contract. When complete is false
+// the returned slice is the partial walk before truncation —
+// diagnostic context only, NOT an enumerable ancestry.
+//
+// Snapshots are returned by value in reverse-chronological order.
+// Returns an empty slice and false when snapshotID cannot be resolved.
+func AncestorsOfChecked(snapshotID int64, lookup SnapshotLookup) ([]Snapshot, bool) {
 	var ancestors []Snapshot
 	visited := make(map[int64]struct{})
 
 	id := snapshotID
 	for {
 		if _, seen := visited[id]; seen {
-			// Cycle detection — stop walking. A well-formed metadata will
-			// never hit this, but defensive guard avoids infinite loops.
-			break
+			return ancestors, false
 		}
 		visited[id] = struct{}{}
 
 		snap := lookup(id)
 		if snap == nil {
-			break
+			return ancestors, false
 		}
 
 		ancestors = append(ancestors, *snap)
 
 		if snap.ParentSnapshotID == nil {
-			break
+			return ancestors, true
 		}
 		id = *snap.ParentSnapshotID
 	}
-
-	return ancestors
 }
 
 // AncestorsBetween returns the snapshots from latestID (inclusive) down

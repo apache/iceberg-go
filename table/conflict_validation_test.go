@@ -145,6 +145,43 @@ func newConflictTestMetadataWithProps(t *testing.T, branchHead *int64, extraProp
 	return out
 }
 
+// newConflictTestMetadataWithChain builds metadata whose branch head
+// reaches back through ids[0]→ids[1]→...→ids[n-1] via ParentSnapshotID.
+// ids[len-1] becomes the branch head; ids[0] is the chain root.
+func newConflictTestMetadataWithChain(t *testing.T, ids []int64) Metadata {
+	t.Helper()
+	require.NotEmpty(t, ids)
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	props := iceberg.Properties{PropertyFormatVersion: "2"}
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "file:///tmp/conflict-test", props)
+	require.NoError(t, err)
+
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+
+	for i, id := range ids {
+		snap := Snapshot{
+			SnapshotID:     id,
+			SequenceNumber: int64(i + 1),
+			TimestampMs:    meta.LastUpdatedMillis() + int64(i+1),
+			Summary:        &Summary{Operation: OpAppend},
+		}
+		if i > 0 {
+			parent := ids[i-1]
+			snap.ParentSnapshotID = &parent
+		}
+		require.NoError(t, builder.AddSnapshot(&snap))
+	}
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, ids[len(ids)-1], BranchRef))
+	out, err := builder.Build()
+	require.NoError(t, err)
+
+	return out
+}
+
 func TestNewConflictContext_NoConcurrentCommits(t *testing.T) {
 	// base and current point at the same snapshot → zero concurrent
 	// snapshots, no error.
@@ -157,15 +194,35 @@ func TestNewConflictContext_NoConcurrentCommits(t *testing.T) {
 }
 
 func TestNewConflictContext_WriterHasNoBranchView(t *testing.T) {
-	// Writer is creating the branch for the first time (base has no
-	// ref yet) — there is nothing concurrent to validate against.
+	// Writer loaded the table before any snapshot was committed on
+	// the branch (empty base). A snapshot then appeared on the
+	// branch — it must be reported as concurrent so validators that
+	// care about concurrent writes (e.g. RowDelta under
+	// SERIALIZABLE) can inspect its data files.
 	base := newConflictTestMetadata(t, nil)
 	head := int64(7)
 	current := newConflictTestMetadata(t, &head)
 
 	ctx, err := newConflictContext(base, current, MainBranch, nil, true)
 	require.NoError(t, err)
-	assert.Empty(t, ctx.concurrent)
+	require.Len(t, ctx.concurrent, 1)
+	assert.Equal(t, int64(7), ctx.concurrent[0].SnapshotID)
+}
+
+func TestNewConflictContext_EmptyBaseEnumeratesFullAncestry(t *testing.T) {
+	// Empty base, current branch head reaches back through a chain of
+	// three snapshots — all three must surface as concurrent in
+	// reverse-chronological order so validators see the full set the
+	// writer never observed.
+	base := newConflictTestMetadata(t, nil)
+	current := newConflictTestMetadataWithChain(t, []int64{10, 11, 12})
+
+	ctx, err := newConflictContext(base, current, MainBranch, nil, true)
+	require.NoError(t, err)
+	require.Len(t, ctx.concurrent, 3)
+	assert.Equal(t, int64(12), ctx.concurrent[0].SnapshotID)
+	assert.Equal(t, int64(11), ctx.concurrent[1].SnapshotID)
+	assert.Equal(t, int64(10), ctx.concurrent[2].SnapshotID)
 }
 
 func TestNewConflictContext_MissingCurrentBranch(t *testing.T) {
