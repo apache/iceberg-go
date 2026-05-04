@@ -116,6 +116,7 @@ func TestRebuildSnapshotUpdates_SkipsWhenParentUnchanged(t *testing.T) {
 		Snapshot:   snap,
 		rebuildManifestList: func(_ context.Context, _ *Snapshot, _ iceio.WriteFileIO, _ int) (*Snapshot, error) {
 			called = true
+
 			return snap, nil
 		},
 	}
