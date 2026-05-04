@@ -378,11 +378,13 @@ func handleNon200(rsp *http.Response, override map[int]error) error {
 
 	// Only try to decode if there's a body (HEAD requests don't have one)
 	if rsp.ContentLength != 0 {
-		var payload struct {
+
+		payload := struct {
 			Error   *errorResponse `json:"error"`
 			Message string         `json:"message"`
 			Type    string         `json:"type"`
-			Code    int            `json:"code"`
+		}{
+			Error: &e,
 		}
 
 		decErr := json.NewDecoder(rsp.Body).Decode(&payload)
@@ -390,12 +392,9 @@ func handleNon200(rsp *http.Response, override map[int]error) error {
 			return fmt.Errorf("%w: failed to decode error response: %s", ErrRESTError, decErr.Error())
 		}
 
-		if payload.Error != nil {
-			e = *payload.Error
-		} else {
+		if e.Message == "" && e.Type == "" {
 			e.Message = payload.Message
 			e.Type = payload.Type
-			e.Code = payload.Code
 		}
 	}
 
