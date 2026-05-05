@@ -1245,4 +1245,3 @@ func TestSchemaFindColumnNameWithGeometryGeography(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, "region", name)
 }
-
