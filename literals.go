@@ -33,6 +33,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
+	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/google/uuid"
 )
 
@@ -40,7 +41,7 @@ import (
 // for literal values. This represents the actual primitive types that exist in Iceberg
 type LiteralType interface {
 	bool | int32 | int64 | float32 | float64 | Date |
-		Time | Timestamp | TimestampNano | string | []byte | uuid.UUID | Decimal
+		Time | Timestamp | TimestampNano | string | []byte | uuid.UUID | Decimal | variant.Value
 }
 
 // Comparator is a comparison function for specific literal types:
@@ -107,6 +108,8 @@ func NewLiteral[T LiteralType](val T) Literal {
 		return UUIDLiteral(v)
 	case Decimal:
 		return DecimalLiteral(v)
+	case variant.Value:
+		return VariantLiteral{val: v}
 	}
 	panic("can't happen due to literal type constraint")
 }
@@ -210,7 +213,7 @@ func LiteralFromBytes(typ Type, data []byte) (Literal, error) {
 		return v, err
 	}
 
-	return nil, ErrType
+	return nil, fmt.Errorf("%w: unsupported type %s", ErrType, typ)
 }
 
 // convenience to avoid repreating this pattern for primitive types
@@ -1388,4 +1391,40 @@ func (d *DecimalLiteral) UnmarshalBinary(data []byte) error {
 	d.Val = decimal128.FromBigInt(value.Neg(value))
 
 	return nil
+}
+
+type VariantLiteral struct {
+	val variant.Value
+}
+
+func (VariantLiteral) Comparator() Comparator[variant.Value] {
+	return func(v1, v2 variant.Value) int {
+		panic("variant values are not comparable")
+	}
+}
+
+func (VariantLiteral) Type() Type             { return VariantType{} }
+func (v VariantLiteral) Value() variant.Value { return v.val }
+func (v VariantLiteral) Any() any             { return v.val }
+func (v VariantLiteral) String() string       { return "variant(...)" }
+
+func (v VariantLiteral) MarshalBinary() ([]byte, error) {
+	return v.val.Bytes(), nil
+}
+
+func (v VariantLiteral) To(typ Type) (Literal, error) {
+	if _, ok := typ.(VariantType); ok {
+		return v, nil
+	}
+
+	return nil, fmt.Errorf("%w: VariantLiteral to %s", ErrBadCast, typ)
+}
+
+func (v VariantLiteral) Equals(other Literal) bool {
+	rhs, ok := other.(VariantLiteral)
+	if !ok {
+		return false
+	}
+
+	return bytes.Equal(v.val.Bytes(), rhs.val.Bytes())
 }

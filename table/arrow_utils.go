@@ -1352,17 +1352,7 @@ func (a *arrowStatsCollector) Primitive(dt iceberg.PrimitiveType) []tblutils.Sta
 }
 
 func (a *arrowStatsCollector) Variant(_ iceberg.VariantType) []tblutils.StatisticsCollector {
-	colName, ok := a.schema.FindColumnName(a.fieldID)
-	if !ok {
-		return []tblutils.StatisticsCollector{}
-	}
-
-	return []tblutils.StatisticsCollector{{
-		FieldID:    a.fieldID,
-		IcebergTyp: iceberg.VariantType{},
-		ColName:    colName,
-		Mode:       tblutils.MetricsMode{Typ: tblutils.MetricModeCounts},
-	}}
+	return []tblutils.StatisticsCollector{}
 }
 
 func computeStatsPlan(sc *iceberg.Schema, props iceberg.Properties) (map[int]tblutils.StatisticsCollector, error) {

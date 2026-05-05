@@ -328,6 +328,8 @@ func doCmp(st StructLike, term BoundTerm, lit Literal) int {
 		return typedCmp[uuid.UUID](st, term, lit)
 	case DecimalType:
 		return typedCmp[Decimal](st, term, lit)
+	case VariantType:
+		panic("variant values are not comparable")
 	}
 	panic(ErrType)
 }

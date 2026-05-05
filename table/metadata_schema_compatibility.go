@@ -177,6 +177,8 @@ func (v *unknownTypeValidator) Field(field iceberg.NestedField, fieldResult erro
 	if fieldResult != nil {
 		return fieldResult
 	}
+	// Optionality: unknown must be optional per spec; variant has no such constraint.
+	// Both require null defaults (enforced below via typeRequiresNullDefaults).
 	if _, isUnknown := field.Type.(iceberg.UnknownType); isUnknown {
 		if field.Required {
 			return fmt.Errorf("unknown type field '%s' (id: %d) must be optional, but was marked as required",

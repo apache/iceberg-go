@@ -586,7 +586,7 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 				if len(path) >= 2 {
 					parentPath := strings.Join(path[:len(path)-1], ".")
 					if parentID, hasParent := colMapping[parentPath]; hasParent {
-						if _, isVariant := statsCols[parentID].IcebergTyp.(iceberg.VariantType); isVariant {
+						if _, hasStats := statsCols[parentID]; !hasStats {
 							continue
 						}
 					}
@@ -629,7 +629,7 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 
 			agg, ok := colAggs[fieldID]
 			if !ok {
-				agg, err = p.createStatsAgg(statsCol.IcebergTyp.(iceberg.PrimitiveType), stats.Type().String(), statsCol.Mode.Len)
+				agg, err = p.createStatsAgg(statsCol.IcebergTyp, stats.Type().String(), statsCol.Mode.Len)
 				if err != nil {
 					panic(err)
 				}

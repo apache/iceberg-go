@@ -385,7 +385,7 @@ func MatchMetricsMode(mode string) (MetricsMode, error) {
 
 type StatisticsCollector struct {
 	FieldID    int
-	IcebergTyp iceberg.Type
+	IcebergTyp iceberg.PrimitiveType
 	Mode       MetricsMode
 	ColName    string
 }

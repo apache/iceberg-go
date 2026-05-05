@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/google/uuid"
 )
 
@@ -451,7 +452,7 @@ func createBoundRef(field NestedField, acc accessor) BoundReference {
 	case UUIDType:
 		return &boundRef[uuid.UUID]{field: field, acc: acc}
 	case VariantType:
-		return &boundVariantRef{field: field, acc: acc}
+		return &boundRef[variant.Value]{field: field, acc: acc}
 	}
 	panic("unhandled bound reference type: " + field.Type.String())
 }
@@ -526,49 +527,6 @@ func (b *boundRef[T]) evalIsNull(st StructLike) bool {
 	v := b.eval(st)
 
 	return !v.Valid
-}
-
-type boundVariantRef struct {
-	field NestedField
-	acc   accessor
-}
-
-func (*boundVariantRef) isTerm()               {}
-func (b *boundVariantRef) Ref() BoundReference { return b }
-func (b *boundVariantRef) Field() NestedField  { return b.field }
-func (b *boundVariantRef) Type() Type          { return b.field.Type }
-func (b *boundVariantRef) Pos() int            { return b.acc.pos }
-func (b *boundVariantRef) Equals(other BoundTerm) bool {
-	rhs, ok := other.(*boundVariantRef)
-	if !ok {
-		return false
-	}
-
-	return b.field.Equals(rhs.field)
-}
-
-func (b *boundVariantRef) PosPath() []int {
-	out, inner := []int{b.acc.pos}, &b.acc
-	for inner.inner != nil {
-		inner = inner.inner
-		out = append(out, inner.pos)
-	}
-
-	return out
-}
-
-func (b *boundVariantRef) String() string {
-	return fmt.Sprintf("BoundReference(field=%s, accessor=%s)", b.field, &b.acc)
-}
-
-func (b *boundVariantRef) evalToLiteral(StructLike) Optional[Literal] {
-	return Optional[Literal]{}
-}
-
-func (b *boundVariantRef) evalIsNull(st StructLike) bool {
-	val := b.acc.Get(st)
-
-	return val == nil
 }
 
 // UnaryPredicate creates and returns an unbound predicate for the provided unary operation.
@@ -684,7 +642,7 @@ func createBoundUnaryPredicate(op Operation, term BoundTerm) BoundUnaryPredicate
 	case UUIDType:
 		return newBoundUnaryPred[uuid.UUID](op, term)
 	case VariantType:
-		return &boundVariantUnaryPred{op: op, term: term}
+		return newBoundUnaryPred[variant.Value](op, term)
 	}
 	panic("unhandled bound reference type: " + term.Type().String())
 }
@@ -715,35 +673,6 @@ func (bp *boundUnaryPredicate[T]) Negate() BooleanExpression {
 func (bp *boundUnaryPredicate[T]) Term() BoundTerm     { return bp.term }
 func (bp *boundUnaryPredicate[T]) Ref() BoundReference { return bp.term.Ref() }
 func (bp *boundUnaryPredicate[T]) String() string {
-	return fmt.Sprintf("Bound%s(term=%s)", bp.op, bp.term)
-}
-
-type boundVariantUnaryPred struct {
-	op   Operation
-	term BoundTerm
-}
-
-func (bp *boundVariantUnaryPred) AsUnbound(r Reference) UnboundPredicate {
-	return &unboundUnaryPredicate{op: bp.op, term: r}
-}
-
-func (bp *boundVariantUnaryPred) Equals(other BooleanExpression) bool {
-	rhs, ok := other.(*boundVariantUnaryPred)
-	if !ok {
-		return false
-	}
-
-	return bp.op == rhs.op && bp.term.Equals(rhs.term)
-}
-
-func (bp *boundVariantUnaryPred) Op() Operation { return bp.op }
-func (bp *boundVariantUnaryPred) Negate() BooleanExpression {
-	return &boundVariantUnaryPred{op: bp.op.Negate(), term: bp.term}
-}
-
-func (bp *boundVariantUnaryPred) Term() BoundTerm     { return bp.term }
-func (bp *boundVariantUnaryPred) Ref() BoundReference { return bp.term.Ref() }
-func (bp *boundVariantUnaryPred) String() string {
 	return fmt.Sprintf("Bound%s(term=%s)", bp.op, bp.term)
 }
 
