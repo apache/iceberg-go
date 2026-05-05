@@ -1837,3 +1837,147 @@ func TestUnknownTypeValidation(t *testing.T) {
 		require.ErrorContains(t, err, "must be optional")
 	})
 }
+
+func TestComplexTypeDefaultValidation(t *testing.T) {
+	t.Run("InvalidStructInitialDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "s", Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 2, Name: "x", Type: iceberg.Int32Type{}, Required: false},
+				},
+			}, Required: false, InitialDefault: "not a struct"},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "struct type field 's' (id: 1) must have null or JSON object initial-default")
+	})
+
+	t.Run("InvalidStructWriteDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "s", Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 2, Name: "x", Type: iceberg.Int32Type{}, Required: false},
+				},
+			}, Required: false, WriteDefault: float64(42)},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "struct type field 's' (id: 1) must have null or JSON object write-default")
+	})
+
+	t.Run("ValidStructNullDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "s", Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 2, Name: "x", Type: iceberg.Int32Type{}, Required: false},
+				},
+			}, Required: false},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.NoError(t, err)
+	})
+
+	t.Run("ValidStructObjectDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "s", Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 2, Name: "x", Type: iceberg.Int32Type{}, Required: false},
+				},
+			}, Required: false, InitialDefault: map[string]any{"x": float64(1)}},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.NoError(t, err)
+	})
+
+	t.Run("InvalidListInitialDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "l", Type: &iceberg.ListType{
+				ElementID: 2, Element: iceberg.StringType{}, ElementRequired: false,
+			}, Required: false, InitialDefault: "not a list"},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "list type field 'l' (id: 1) must have null or JSON array initial-default")
+	})
+
+	t.Run("InvalidListWriteDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "l", Type: &iceberg.ListType{
+				ElementID: 2, Element: iceberg.StringType{}, ElementRequired: false,
+			}, Required: false, WriteDefault: map[string]any{"a": "b"}},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "list type field 'l' (id: 1) must have null or JSON array write-default")
+	})
+
+	t.Run("ValidListNullDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "l", Type: &iceberg.ListType{
+				ElementID: 2, Element: iceberg.StringType{}, ElementRequired: false,
+			}, Required: false},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.NoError(t, err)
+	})
+
+	t.Run("ValidListArrayDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "l", Type: &iceberg.ListType{
+				ElementID: 2, Element: iceberg.StringType{}, ElementRequired: false,
+			}, Required: false, InitialDefault: []any{"a", "b"}},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.NoError(t, err)
+	})
+
+	t.Run("InvalidMapInitialDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
+				KeyID: 2, KeyType: iceberg.StringType{}, ValueID: 3, ValueType: iceberg.Int32Type{}, ValueRequired: false,
+			}, Required: false, InitialDefault: []any{"not", "a", "map"}},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "map type field 'm' (id: 1) must have null or JSON object initial-default")
+	})
+
+	t.Run("InvalidMapWriteDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
+				KeyID: 2, KeyType: iceberg.StringType{}, ValueID: 3, ValueType: iceberg.Int32Type{}, ValueRequired: false,
+			}, Required: false, WriteDefault: "not a map"},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "map type field 'm' (id: 1) must have null or JSON object write-default")
+	})
+
+	t.Run("ValidMapNullDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
+				KeyID: 2, KeyType: iceberg.StringType{}, ValueID: 3, ValueType: iceberg.Int32Type{}, ValueRequired: false,
+			}, Required: false},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.NoError(t, err)
+	})
+
+	t.Run("ValidMapObjectDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
+				KeyID: 2, KeyType: iceberg.StringType{}, ValueID: 3, ValueType: iceberg.Int32Type{}, ValueRequired: false,
+			}, Required: false, InitialDefault: map[string]any{"keys": []any{"a"}, "values": []any{float64(1)}}},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.NoError(t, err)
+	})
+
+	t.Run("PrimitiveDefaultPassesThrough", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "n", Type: iceberg.Int64Type{}, Required: false, InitialDefault: float64(42)},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.NoError(t, err)
+	})
+}
