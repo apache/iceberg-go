@@ -1208,6 +1208,40 @@ func (b *MetadataBuilder) RemoveStatistics(snapshotID int64) error {
 	return nil
 }
 
+// SetPartitionStatistics adds or replaces a partition statistics file for the given snapshot.
+// If a partition statistics file with the same snapshot ID already exists it is replaced,
+// otherwise the file is appended.
+func (b *MetadataBuilder) SetPartitionStatistics(stats PartitionStatisticsFile) error {
+	replaced := false
+	for i, s := range b.partitionStatsList {
+		if s.SnapshotID == stats.SnapshotID {
+			b.partitionStatsList[i] = stats
+			replaced = true
+
+			break
+		}
+	}
+
+	if !replaced {
+		b.partitionStatsList = append(b.partitionStatsList, stats)
+	}
+
+	b.updates = append(b.updates, NewSetPartitionStatisticsUpdate(stats))
+
+	return nil
+}
+
+// RemovePartitionStatistics removes the partition statistics file associated with the given
+// snapshot ID. It is not an error if no such file exists.
+func (b *MetadataBuilder) RemovePartitionStatistics(snapshotID int64) error {
+	b.partitionStatsList = slices.DeleteFunc(b.partitionStatsList, func(s PartitionStatisticsFile) bool {
+		return s.SnapshotID == snapshotID
+	})
+	b.updates = append(b.updates, NewRemovePartitionStatisticsUpdate(snapshotID))
+
+	return nil
+}
+
 // AddEncryptionKey adds or replaces an encryption key indexed by its key-id.
 // Encryption keys are only supported for format version 3 and above.
 func (b *MetadataBuilder) AddEncryptionKey(key EncryptionKey) error {

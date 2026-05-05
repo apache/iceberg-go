@@ -535,6 +535,105 @@ func TestRemoveStatisticsUpdate_Apply_NoOp(t *testing.T) {
 	require.NoError(t, NewRemoveStatisticsUpdate(999).Apply(b))
 }
 
+func TestSetPartitionStatisticsUpdate_Unmarshal(t *testing.T) {
+	data := []byte(`[{
+		"action": "set-partition-statistics",
+		"partition-statistics": {
+			"snapshot-id": 42,
+			"statistics-path": "s3://bucket/partition-stats.parquet",
+			"file-size-in-bytes": 100
+		}
+	}]`)
+
+	var updates Updates
+	require.NoError(t, json.Unmarshal(data, &updates))
+	require.Len(t, updates, 1)
+
+	u, ok := updates[0].(*setPartitionStatisticsUpdate)
+	require.True(t, ok)
+	assert.Equal(t, int64(42), u.PartitionStatistics.SnapshotID)
+	assert.Equal(t, "s3://bucket/partition-stats.parquet", u.PartitionStatistics.StatisticsPath)
+}
+
+func TestSetPartitionStatisticsUpdate_Apply(t *testing.T) {
+	b := buildFromBase(t)
+	stats := PartitionStatisticsFile{
+		SnapshotID:      1,
+		StatisticsPath:  "s3://bucket/partition-stats.parquet",
+		FileSizeInBytes: 200,
+	}
+
+	upd := NewSetPartitionStatisticsUpdate(stats)
+	require.NoError(t, upd.Apply(b))
+
+	meta, err := b.Build()
+	require.NoError(t, err)
+
+	var found *PartitionStatisticsFile
+	for s := range meta.PartitionStatistics() {
+		sc := s
+		found = &sc
+	}
+	require.NotNil(t, found)
+	assert.Equal(t, stats.StatisticsPath, found.StatisticsPath)
+}
+
+func TestSetPartitionStatisticsUpdate_Apply_Replaces(t *testing.T) {
+	b := buildFromBase(t)
+	first := PartitionStatisticsFile{SnapshotID: 5, StatisticsPath: "s3://first.parquet", FileSizeInBytes: 10}
+	second := PartitionStatisticsFile{SnapshotID: 5, StatisticsPath: "s3://second.parquet", FileSizeInBytes: 20}
+
+	require.NoError(t, NewSetPartitionStatisticsUpdate(first).Apply(b))
+	require.NoError(t, NewSetPartitionStatisticsUpdate(second).Apply(b))
+
+	meta, err := b.Build()
+	require.NoError(t, err)
+
+	count := 0
+	var got PartitionStatisticsFile
+	for s := range meta.PartitionStatistics() {
+		count++
+		got = s
+	}
+	assert.Equal(t, 1, count)
+	assert.Equal(t, "s3://second.parquet", got.StatisticsPath)
+}
+
+func TestRemovePartitionStatisticsUpdate_Unmarshal(t *testing.T) {
+	data := []byte(`[{"action":"remove-partition-statistics","snapshot-id":7}]`)
+
+	var updates Updates
+	require.NoError(t, json.Unmarshal(data, &updates))
+	require.Len(t, updates, 1)
+
+	u, ok := updates[0].(*removePartitionStatisticsUpdate)
+	require.True(t, ok)
+	assert.Equal(t, int64(7), u.SnapshotID)
+}
+
+func TestRemovePartitionStatisticsUpdate_Apply(t *testing.T) {
+	b := buildFromBase(t)
+	stats := PartitionStatisticsFile{SnapshotID: 3, StatisticsPath: "s3://bucket/partition-stats.parquet", FileSizeInBytes: 50}
+	require.NoError(t, NewSetPartitionStatisticsUpdate(stats).Apply(b))
+
+	require.NoError(t, NewRemovePartitionStatisticsUpdate(3).Apply(b))
+
+	meta, err := b.Build()
+	require.NoError(t, err)
+
+	count := 0
+	for range meta.PartitionStatistics() {
+		count++
+	}
+	assert.Equal(t, 0, count)
+}
+
+func TestRemovePartitionStatisticsUpdate_Apply_NoOp(t *testing.T) {
+	// Removing a partition statistics file that does not exist should not error.
+	b := buildFromBase(t)
+	require.NoError(t, NewRemovePartitionStatisticsUpdate(999).Apply(b))
+}
+
 func TestAddEncryptionKeyUpdate_Unmarshal(t *testing.T) {
 	data := []byte(`[{
 		"action": "add-encryption-key",

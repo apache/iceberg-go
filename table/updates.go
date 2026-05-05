@@ -39,22 +39,24 @@ const (
 
 	UpdateAssignUUID = "assign-uuid"
 
-	UpdateAddEncryptionKey    = "add-encryption-key"
-	UpdateRemoveEncryptionKey = "remove-encryption-key"
-	UpdateRemoveProperties    = "remove-properties"
-	UpdateRemoveSchemas       = "remove-schemas"
-	UpdateRemoveSnapshots     = "remove-snapshots"
-	UpdateRemoveSnapshotRef   = "remove-snapshot-ref"
-	UpdateRemoveSpec          = "remove-partition-specs"
-	UpdateRemoveStatistics    = "remove-statistics"
+	UpdateAddEncryptionKey          = "add-encryption-key"
+	UpdateRemoveEncryptionKey       = "remove-encryption-key"
+	UpdateRemovePartitionStatistics = "remove-partition-statistics"
+	UpdateRemoveProperties          = "remove-properties"
+	UpdateRemoveSchemas             = "remove-schemas"
+	UpdateRemoveSnapshots           = "remove-snapshots"
+	UpdateRemoveSnapshotRef         = "remove-snapshot-ref"
+	UpdateRemoveSpec                = "remove-partition-specs"
+	UpdateRemoveStatistics          = "remove-statistics"
 
-	UpdateSetCurrentSchema    = "set-current-schema"
-	UpdateSetDefaultSortOrder = "set-default-sort-order"
-	UpdateSetDefaultSpec      = "set-default-spec"
-	UpdateSetLocation         = "set-location"
-	UpdateSetProperties       = "set-properties"
-	UpdateSetSnapshotRef      = "set-snapshot-ref"
-	UpdateSetStatistics       = "set-statistics"
+	UpdateSetCurrentSchema       = "set-current-schema"
+	UpdateSetDefaultSortOrder    = "set-default-sort-order"
+	UpdateSetDefaultSpec         = "set-default-spec"
+	UpdateSetLocation            = "set-location"
+	UpdateSetPartitionStatistics = "set-partition-statistics"
+	UpdateSetProperties          = "set-properties"
+	UpdateSetSnapshotRef         = "set-snapshot-ref"
+	UpdateSetStatistics          = "set-statistics"
 
 	UpdateUpgradeFormatVersion = "upgrade-format-version"
 )
@@ -123,6 +125,10 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 			upd = &setStatisticsUpdate{}
 		case UpdateRemoveStatistics:
 			upd = &removeStatisticsUpdate{}
+		case UpdateSetPartitionStatistics:
+			upd = &setPartitionStatisticsUpdate{}
+		case UpdateRemovePartitionStatistics:
+			upd = &removePartitionStatisticsUpdate{}
 		case UpdateAddEncryptionKey:
 			upd = &addEncryptionKeyUpdate{}
 		case UpdateRemoveEncryptionKey:
@@ -665,6 +671,42 @@ func NewRemoveStatisticsUpdate(snapshotID int64) *removeStatisticsUpdate {
 
 func (u *removeStatisticsUpdate) Apply(builder *MetadataBuilder) error {
 	return builder.RemoveStatistics(u.SnapshotID)
+}
+
+type setPartitionStatisticsUpdate struct {
+	baseUpdate
+	PartitionStatistics PartitionStatisticsFile `json:"partition-statistics"`
+}
+
+// NewSetPartitionStatisticsUpdate creates a new Update that adds or replaces the partition
+// statistics file for the given snapshot ID in the table metadata.
+func NewSetPartitionStatisticsUpdate(stats PartitionStatisticsFile) *setPartitionStatisticsUpdate {
+	return &setPartitionStatisticsUpdate{
+		baseUpdate:          baseUpdate{ActionName: UpdateSetPartitionStatistics},
+		PartitionStatistics: stats,
+	}
+}
+
+func (u *setPartitionStatisticsUpdate) Apply(builder *MetadataBuilder) error {
+	return builder.SetPartitionStatistics(u.PartitionStatistics)
+}
+
+type removePartitionStatisticsUpdate struct {
+	baseUpdate
+	SnapshotID int64 `json:"snapshot-id"`
+}
+
+// NewRemovePartitionStatisticsUpdate creates a new Update that removes the partition statistics
+// file for the given snapshot ID from the table metadata.
+func NewRemovePartitionStatisticsUpdate(snapshotID int64) *removePartitionStatisticsUpdate {
+	return &removePartitionStatisticsUpdate{
+		baseUpdate: baseUpdate{ActionName: UpdateRemovePartitionStatistics},
+		SnapshotID: snapshotID,
+	}
+}
+
+func (u *removePartitionStatisticsUpdate) Apply(builder *MetadataBuilder) error {
+	return builder.RemovePartitionStatistics(u.SnapshotID)
 }
 
 type addEncryptionKeyUpdate struct {
