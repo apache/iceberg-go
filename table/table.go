@@ -38,6 +38,7 @@ import (
 	"github.com/apache/iceberg-go/internal"
 	icebergio "github.com/apache/iceberg-go/io"
 	tblutils "github.com/apache/iceberg-go/table/internal"
+	"github.com/klauspost/compress/zstd"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -768,6 +769,16 @@ func NewFromLocation(
 			if err != nil {
 				return nil, err
 			}
+		} else if isZstdMetadataJson(metalocation) {
+			dec, err := zstd.NewReader(bytes.NewReader(data))
+			if err != nil {
+				return nil, err
+			}
+			defer dec.Close()
+			data, err = io.ReadAll(dec)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		if meta, err = ParseMetadataBytes(data); err != nil {
@@ -788,6 +799,13 @@ func NewFromLocation(
 			}
 			defer gz.Close()
 			r = gz
+		} else if isZstdMetadataJson(metalocation) {
+			dec, err := zstd.NewReader(f)
+			if err != nil {
+				return nil, err
+			}
+			defer dec.Close()
+			r = dec
 		}
 
 		if meta, err = ParseMetadata(r); err != nil {
@@ -800,4 +818,8 @@ func NewFromLocation(
 
 func isGzippedMetadataJson(location string) bool {
 	return strings.HasSuffix(location, ".gz.metadata.json") || strings.HasSuffix(location, "metadata.json.gz")
+}
+
+func isZstdMetadataJson(location string) bool {
+	return strings.HasSuffix(location, ".zstd.metadata.json") || strings.HasSuffix(location, "metadata.json.zstd")
 }

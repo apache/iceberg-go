@@ -37,11 +37,12 @@ import (
 	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
+	"github.com/klauspost/compress/zstd"
 )
 
 func WriteTableMetadata(metadata table.Metadata, fs icebergio.WriteFileIO, loc string, compression string) (err error) {
 	switch compression {
-	case table.MetadataCompressionCodecNone, table.MetadataCompressionCodecGzip:
+	case table.MetadataCompressionCodecNone, table.MetadataCompressionCodecGzip, table.MetadataCompressionCodecZstd:
 		// supported codecs
 	default:
 		return fmt.Errorf("unsupported write metadata compression codec: %s", compression)
@@ -55,8 +56,17 @@ func WriteTableMetadata(metadata table.Metadata, fs icebergio.WriteFileIO, loc s
 
 	var writer io.Writer = out
 	var compressWriter io.WriteCloser
-	if compression == table.MetadataCompressionCodecGzip {
+	switch compression {
+	case table.MetadataCompressionCodecGzip:
 		compressWriter = gzip.NewWriter(out)
+		writer = compressWriter
+		defer internal.CheckedClose(compressWriter, &err)
+	case table.MetadataCompressionCodecZstd:
+		enc, zErr := zstd.NewWriter(out)
+		if zErr != nil {
+			return zErr
+		}
+		compressWriter = enc
 		writer = compressWriter
 		defer internal.CheckedClose(compressWriter, &err)
 	}

@@ -156,6 +156,7 @@ var ReservedProperties = [9]string{
 const (
 	MetadataCompressionCodecNone = "none"
 	MetadataCompressionCodecGzip = "gzip"
+	MetadataCompressionCodecZstd = "zstd"
 )
 
 // Write modes
