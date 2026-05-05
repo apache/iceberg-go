@@ -58,7 +58,8 @@ type RewriteResult struct {
 // import between table and table/compaction.
 //
 // Use [compaction.Config.PlanCompaction] to produce groups, then convert
-// [compaction.Group] → [CompactionTaskGroup] to call [Transaction.RewriteDataFiles].
+// [compaction.Group] → [CompactionTaskGroup] to call
+// [Transaction.RewriteDataFiles] or [ExecuteCompactionGroup].
 type CompactionTaskGroup struct {
 	// PartitionKey is an opaque grouping key for display/logging.
 	PartitionKey string
@@ -70,16 +71,55 @@ type CompactionTaskGroup struct {
 	TotalSizeBytes int64
 }
 
+// CompactionGroupResult is the per-group output of a compaction
+// worker: the new files written, the old files being replaced, and
+// the position delete files safe to expunge in the rewrite snapshot.
+//
+// A distributed coordinator aggregates results from N workers and
+// applies them to a [RewriteFiles] builder via [RewriteFiles.Apply]
+// to commit a single atomic snapshot. Each field is plain data
+// ([]iceberg.DataFile values plus scalars) — callers serialize the
+// contained DataFiles across process boundaries themselves; the
+// typical pattern is to have the worker write a manifest containing
+// the new files and ship the manifest path to the coordinator, which
+// re-reads it.
+type CompactionGroupResult struct {
+	// PartitionKey mirrors [CompactionTaskGroup.PartitionKey] for
+	// display/logging on the coordinator.
+	PartitionKey string
+
+	// OldDataFiles are the data files this group replaces.
+	OldDataFiles []iceberg.DataFile
+
+	// NewDataFiles are the consolidated outputs the worker wrote.
+	NewDataFiles []iceberg.DataFile
+
+	// SafePosDeletes are position-delete files referenced by tasks in
+	// this group whose target data file is being rewritten, computed
+	// via [CollectSafePositionDeletes]. They are safe to expunge in
+	// the rewrite snapshot.
+	SafePosDeletes []iceberg.DataFile
+
+	// BytesBefore is [CompactionTaskGroup.TotalSizeBytes] passed
+	// through, recorded so the coordinator can roll up metrics
+	// without re-reading the plan.
+	BytesBefore int64
+
+	// BytesAfter is the sum of [iceberg.DataFile.FileSizeBytes] across
+	// NewDataFiles.
+	BytesAfter int64
+}
+
 // RewriteDataFilesOptions bundles the per-rewrite knobs for
-// Transaction.RewriteDataFiles.
+// [Transaction.RewriteDataFiles].
 type RewriteDataFilesOptions struct {
-	// PartialProgress, when true, stages each group via ReplaceFiles
-	// inside the loop so work survives a mid-loop write failure. When
-	// false (the default), all groups are committed in a single atomic
-	// snapshot.
+	// PartialProgress, when true, stages each group via its own
+	// rewrite snapshot inside the loop so work survives a mid-loop
+	// write failure. When false (the default), all groups are
+	// committed in a single atomic rewrite snapshot.
 	//
 	// In both modes the final catalog commit happens once at
-	// Transaction.Commit() time. True per-group durability (matching
+	// [Transaction.Commit] time. True per-group durability (matching
 	// Java's behavior) requires committing separate transactions per
 	// group, which is left to the caller.
 	PartialProgress bool
@@ -89,9 +129,8 @@ type RewriteDataFilesOptions struct {
 
 	// ExtraDeleteFilesToRemove are delete files (typically equality
 	// deletes that are dead after the rewrite) that the caller wants
-	// expunged in the same snapshot as the rewrite. The executor
-	// passes them through to ReplaceFiles unchanged. Honored only
-	// when PartialProgress is false.
+	// expunged in the same snapshot as the rewrite. Honored only when
+	// PartialProgress is false.
 	//
 	// Use [compaction.CollectDeadEqualityDeletes] to compute this list
 	// from the current snapshot. Position delete files that are fully
@@ -116,22 +155,20 @@ type RewriteDataFilesOptions struct {
 //
 // Use [compaction.Config.PlanCompaction] to produce the groups, then
 // convert [compaction.Group] → [CompactionTaskGroup] and pass them
-// here.
+// here. Distributed coordinators stage worker results via
+// [ExecuteCompactionGroup] and commit them via [Transaction.NewRewrite]
+// + [RewriteFiles.Apply] + [RewriteFiles.Commit] instead.
 func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (*RewriteResult, error) {
 	if len(groups) == 0 {
 		return &RewriteResult{}, nil
 	}
 
-	// Use an unfiltered scan to read all surviving rows. Compaction must
-	// preserve every non-deleted row in the data files being rewritten.
-	scan := t.tbl.Scan()
-	result := &RewriteResult{}
+	if opts.PartialProgress {
+		return t.rewriteDataFilesPartial(ctx, groups, opts)
+	}
 
-	var (
-		allOldData    []iceberg.DataFile
-		allNewData    []iceberg.DataFile
-		allOldDeletes []iceberg.DataFile
-	)
+	result := &RewriteResult{}
+	rewrite := t.NewRewrite(opts.SnapshotProps)
 
 	for _, group := range groups {
 		if err := ctx.Err(); err != nil {
@@ -142,89 +179,131 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 			continue
 		}
 
-		// Read with deletes applied.
-		arrowSchema, records, err := scan.ReadTasks(ctx, group.Tasks)
+		gr, err := ExecuteCompactionGroup(ctx, t.tbl, group)
 		if err != nil {
-			return result, fmt.Errorf("read tasks for compaction group %q: %w", group.PartitionKey, err)
+			return result, err
 		}
 
-		// Each compaction group is single-partition by construction, so the
-		// read stream is trivially clustered and we can use the clustered writer.
-		var newFiles []iceberg.DataFile
-		for df, err := range WriteRecords(ctx, t.tbl, arrowSchema, records, WithClusteredWrite()) {
-			if err != nil {
-				return result, fmt.Errorf("write compacted files for group %q: %w", group.PartitionKey, err)
-			}
-			newFiles = append(newFiles, df)
+		if len(gr.OldDataFiles) == 0 && len(gr.NewDataFiles) == 0 {
+			continue
 		}
 
-		// Collect old data files.
-		oldDataFiles := make([]iceberg.DataFile, 0, len(group.Tasks))
-		for _, task := range group.Tasks {
-			oldDataFiles = append(oldDataFiles, task.File)
-		}
-
-		// Collect position delete files safe to remove.
-		safeDeletes := collectSafePositionDeletes(group.Tasks)
-
-		// Update result metrics.
-		var bytesAfter int64
-		for _, df := range newFiles {
-			bytesAfter += df.FileSizeBytes()
-		}
-
-		result.RewrittenGroups++
-		result.AddedDataFiles += len(newFiles)
-		result.RemovedDataFiles += len(oldDataFiles)
-		result.RemovedPositionDeleteFiles += len(safeDeletes)
-		result.BytesBefore += group.TotalSizeBytes
-		result.BytesAfter += bytesAfter
-
-		// Always accumulate across groups; partial-progress mode also
-		// stages each group via ReplaceFiles so work survives a
-		// mid-loop write failure, but the final catalog commit is
-		// always one atomic doCommit at Transaction.Commit() time.
-		allOldData = append(allOldData, oldDataFiles...)
-		allNewData = append(allNewData, newFiles...)
-		allOldDeletes = append(allOldDeletes, safeDeletes...)
-
-		if opts.PartialProgress {
-			if err := t.ReplaceFiles(ctx, oldDataFiles, newFiles, safeDeletes, opts.SnapshotProps, withRewriteSemantics()); err != nil {
-				return result, fmt.Errorf("commit compaction group %q: %w", group.PartitionKey, err)
-			}
-		}
+		rewrite.Apply(gr.OldDataFiles, gr.NewDataFiles, gr.SafePosDeletes)
+		accumulateGroupMetrics(result, gr)
 	}
 
-	// Register the rewrite-specific conflict validator covering every
-	// rewritten data file across every group. The validator list is
-	// drained at Transaction.Commit() → doCommit. Runs alongside the
-	// overwrite producer's suppressed validator (via
-	// withRewriteSemantics) so concurrent pos/eq-deletes targeting a
-	// rewritten file are caught pre-flight.
-	if len(allOldData) > 0 {
-		rewritten := make([]string, 0, len(allOldData))
-		for _, f := range allOldData {
-			rewritten = append(rewritten, f.FilePath())
-		}
-		t.validators = append(t.validators, rewriteValidator(rewritten))
+	if result.RewrittenGroups == 0 {
+		return result, nil
 	}
 
-	if !opts.PartialProgress {
-		// Caller-supplied dead eq-deletes (typically from
-		// [compaction.CollectDeadEqualityDeletes]). The caller is
-		// responsible for computing these against the same snapshot
-		// this transaction is staged on.
-		if len(opts.ExtraDeleteFilesToRemove) > 0 {
-			allOldDeletes = append(allOldDeletes, opts.ExtraDeleteFilesToRemove...)
-			result.RemovedEqualityDeleteFiles += len(opts.ExtraDeleteFilesToRemove)
-		}
+	for _, df := range opts.ExtraDeleteFilesToRemove {
+		rewrite.DeleteFile(df)
+		result.RemovedEqualityDeleteFiles++
+	}
 
-		if err := t.ReplaceFiles(ctx, allOldData, allNewData, allOldDeletes, opts.SnapshotProps, withRewriteSemantics()); err != nil {
-			return result, fmt.Errorf("commit compaction: %w", err)
-		}
+	if err := rewrite.Commit(ctx); err != nil {
+		return result, fmt.Errorf("commit compaction: %w", err)
 	}
 
 	return result, nil
+}
+
+// ExecuteCompactionGroup reads a compaction group's tasks (with
+// deletes applied), writes consolidated output files via
+// [WriteRecords], and computes the position-delete files safe to
+// expunge in the rewrite snapshot. It does not commit — the caller
+// hands the result to a coordinator that uses [Transaction.NewRewrite]
+// + [RewriteFiles.Apply] + [RewriteFiles.Commit] to stage the
+// atomic commit.
+//
+// Empty groups return a zero [CompactionGroupResult] without doing
+// any I/O.
+//
+// In-process callers should prefer [Transaction.RewriteDataFiles],
+// which drives this and the commit step in one call.
+func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTaskGroup) (CompactionGroupResult, error) {
+	if len(group.Tasks) == 0 {
+		return CompactionGroupResult{PartitionKey: group.PartitionKey}, nil
+	}
+
+	scan := tbl.Scan()
+	arrowSchema, records, err := scan.ReadTasks(ctx, group.Tasks)
+	if err != nil {
+		return CompactionGroupResult{}, fmt.Errorf("read tasks for compaction group %q: %w", group.PartitionKey, err)
+	}
+
+	// Each compaction group is single-partition by construction, so the
+	// read stream is trivially clustered and we can use the clustered writer.
+	var (
+		newFiles   []iceberg.DataFile
+		bytesAfter int64
+	)
+	for df, err := range WriteRecords(ctx, tbl, arrowSchema, records, WithClusteredWrite()) {
+		if err != nil {
+			return CompactionGroupResult{}, fmt.Errorf("write compacted files for group %q: %w", group.PartitionKey, err)
+		}
+		newFiles = append(newFiles, df)
+		bytesAfter += df.FileSizeBytes()
+	}
+
+	oldFiles := make([]iceberg.DataFile, 0, len(group.Tasks))
+	for _, task := range group.Tasks {
+		oldFiles = append(oldFiles, task.File)
+	}
+
+	return CompactionGroupResult{
+		PartitionKey:   group.PartitionKey,
+		OldDataFiles:   oldFiles,
+		NewDataFiles:   newFiles,
+		SafePosDeletes: CollectSafePositionDeletes(group.Tasks),
+		BytesBefore:    group.TotalSizeBytes,
+		BytesAfter:     bytesAfter,
+	}, nil
+}
+
+// rewriteDataFilesPartial stages each group as its own rewrite
+// snapshot via a fresh [RewriteFiles] builder. Each builder commits
+// independently inside the loop, so a mid-loop write failure leaves
+// already-staged groups in the transaction and the catalog still
+// receives them at [Transaction.Commit] time.
+func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (*RewriteResult, error) {
+	result := &RewriteResult{}
+
+	for _, group := range groups {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+
+		if len(group.Tasks) == 0 {
+			continue
+		}
+
+		gr, err := ExecuteCompactionGroup(ctx, t.tbl, group)
+		if err != nil {
+			return result, err
+		}
+
+		if len(gr.OldDataFiles) == 0 && len(gr.NewDataFiles) == 0 {
+			continue
+		}
+
+		if err := t.NewRewrite(opts.SnapshotProps).Apply(gr.OldDataFiles, gr.NewDataFiles, gr.SafePosDeletes).Commit(ctx); err != nil {
+			return result, fmt.Errorf("commit compaction group %q: %w", group.PartitionKey, err)
+		}
+
+		accumulateGroupMetrics(result, gr)
+	}
+
+	return result, nil
+}
+
+func accumulateGroupMetrics(r *RewriteResult, gr CompactionGroupResult) {
+	r.RewrittenGroups++
+	r.AddedDataFiles += len(gr.NewDataFiles)
+	r.RemovedDataFiles += len(gr.OldDataFiles)
+	r.RemovedPositionDeleteFiles += len(gr.SafePosDeletes)
+	r.BytesBefore += gr.BytesBefore
+	r.BytesAfter += gr.BytesAfter
 }
 
 // rewriteValidator builds a conflictValidatorFunc that rejects the
@@ -242,19 +321,24 @@ func rewriteValidator(rewrittenPaths []string) conflictValidatorFunc {
 	}
 }
 
-// collectSafePositionDeletes returns position delete files from the given
-// tasks that are safe to remove during compaction.
+// CollectSafePositionDeletes returns position delete files from the
+// given tasks that are safe to remove during compaction.
 //
-// A position delete file is safe to remove when it was matched to a data
-// file (via scan planning) and that data file is being rewritten in this
-// compaction group. Since ReadTasks applies the deletes during reading,
-// the new output files will not contain the deleted rows.
+// A position delete file is safe to remove when it was matched to a
+// data file (via scan planning) and that data file is being rewritten
+// in this compaction group. Since ReadTasks applies the deletes during
+// reading, the new output files will not contain the deleted rows.
 //
 // Only position deletes (EntryContentPosDeletes) are considered.
 // Equality deletes are decided by [compaction.DecideDeadEqualityDeletes]
 // (which needs partition-wide visibility, not just the task scope).
 // Deletion vectors will be handled when DV read support lands.
-func collectSafePositionDeletes(tasks []FileScanTask) []iceberg.DataFile {
+//
+// [ExecuteCompactionGroup] calls this internally to populate
+// [CompactionGroupResult.SafePosDeletes]. It is kept exported for
+// custom workers that want the spec-shaped predicate without taking
+// the rest of [ExecuteCompactionGroup]'s read+write pipeline.
+func CollectSafePositionDeletes(tasks []FileScanTask) []iceberg.DataFile {
 	seen := make(map[string]bool)
 	var safe []iceberg.DataFile
 
