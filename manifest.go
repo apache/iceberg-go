@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"math"
 	"math/big"
 	"reflect"
@@ -339,8 +340,35 @@ func (m *manifestFile) FirstRowID() *int64 { return m.FirstRowIDValue }
 
 func (m *manifestFile) HasAddedFiles() bool    { return m.AddedFilesCount != 0 }
 func (m *manifestFile) HasExistingFiles() bool { return m.ExistingFilesCount != 0 }
-func (m *manifestFile) FetchEntries(fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error) {
-	return fetchManifestEntries(m, fs, discardDeleted)
+
+func (m *manifestFile) Entries(fs iceio.IO, discardDeleted bool) iter.Seq2[ManifestEntry, error] {
+	return func(yield func(ManifestEntry, error) bool) {
+		f, err := fs.Open(m.FilePath())
+		if err != nil {
+			yield(nil, err)
+
+			return
+		}
+		defer func() {
+			_ = f.Close()
+		}()
+
+		for entry, err := range IterManifest(m, f, discardDeleted) {
+			if !yield(entry, err) {
+				return
+			}
+		}
+	}
+}
+
+func (m *manifestFile) FetchEntries(fs iceio.IO, discardDeleted bool) (_ []ManifestEntry, err error) {
+	f, openErr := fs.Open(m.FilePath())
+	if openErr != nil {
+		return nil, openErr
+	}
+	defer internal.CheckedClose(f, &err)
+
+	return ReadManifest(m, f, discardDeleted)
 }
 
 func getFieldIDMap(sc *avro.Schema) (map[string]int, map[int]string, map[int]int) {
@@ -393,16 +421,6 @@ type hasFieldToIDMap interface {
 	setFieldNameToIDMap(map[string]int)
 	setFieldIDToLogicalTypeMap(map[int]string)
 	setFieldIDToFixedSizeMap(map[int]int)
-}
-
-func fetchManifestEntries(m ManifestFile, fs iceio.IO, discardDeleted bool) (_ []ManifestEntry, err error) {
-	f, err := fs.Open(m.FilePath())
-	if err != nil {
-		return nil, err
-	}
-	defer internal.CheckedClose(f, &err)
-
-	return ReadManifest(m, f, discardDeleted)
 }
 
 // ManifestFile is the interface which covers both V1 and V2 manifest files.
@@ -463,6 +481,13 @@ type ManifestFile interface {
 	HasAddedFiles() bool
 	// HasExistingFiles returns true if ExistingDataFiles > 0 or if it was null.
 	HasExistingFiles() bool
+	// Entries streams the manifest entries from the manifest file using
+	// the provided file system IO interface. Entries that have been
+	// marked as deleted are skipped if discardDeleted is true.
+	//
+	// Prefer Entries over FetchEntries when walking large manifests
+	// since it avoids loading every entry into memory at once.
+	Entries(fs iceio.IO, discardDeleted bool) iter.Seq2[ManifestEntry, error]
 	// FetchEntries reads the manifest list file to fetch the list of
 	// manifest entries using the provided file system IO interface.
 	// If discardDeleted is true, entries for files containing deleted rows
@@ -751,33 +776,54 @@ func (c *ManifestReader) ReadEntry() (ManifestEntry, error) {
 	return tmp, nil
 }
 
+// IterManifest returns an iterator that streams manifest entries from
+// the provided reader without buffering them. If discardDeleted is true,
+// entries whose status is "deleted" are skipped.
+func IterManifest(m ManifestFile, f io.Reader, discardDeleted bool) iter.Seq2[ManifestEntry, error] {
+	return func(yield func(ManifestEntry, error) bool) {
+		manifestReader, err := NewManifestReader(m, f)
+		if err != nil {
+			yield(nil, err)
+
+			return
+		}
+		defer func() {
+			_ = manifestReader.Close()
+		}()
+
+		for {
+			entry, err := manifestReader.ReadEntry()
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					return
+				}
+				yield(nil, err)
+
+				return
+			}
+			if discardDeleted && entry.Status() == EntryStatusDELETED {
+				continue
+			}
+			if !yield(entry, nil) {
+				return
+			}
+		}
+	}
+}
+
 // ReadManifest reads in an avro list file and returns a slice
 // of manifest entries or an error if one is encountered. If discardDeleted
 // is true, the returned slice omits entries whose status is "deleted".
 func ReadManifest(m ManifestFile, f io.Reader, discardDeleted bool) ([]ManifestEntry, error) {
-	manifestReader, err := NewManifestReader(m, f)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_ = manifestReader.Close()
-	}()
-
 	var results []ManifestEntry
-	for {
-		entry, err := manifestReader.ReadEntry()
+	for entry, err := range IterManifest(m, f, discardDeleted) {
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return results, nil
-			}
-
 			return results, err
-		}
-		if discardDeleted && entry.Status() == EntryStatusDELETED {
-			continue
 		}
 		results = append(results, entry)
 	}
+
+	return results, nil
 }
 
 // ReadManifestList reads in an avro manifest list file and returns a slice

@@ -150,12 +150,11 @@ func (t textOutput) Files(tbl *table.Table, history bool) {
 			snapshotTree = append(snapshotTree, pterm.LeveledListItem{
 				Level: 1, Text: "Manifest: " + m.FilePath(),
 			})
-			datafiles, err := m.FetchEntries(afs, false)
-			if err != nil {
-				t.Error(err)
-				os.Exit(1)
-			}
-			for _, e := range datafiles {
+			for e, err := range m.Entries(afs, false) {
+				if err != nil {
+					t.Error(err)
+					os.Exit(1)
+				}
 				snapshotTree = append(snapshotTree, pterm.LeveledListItem{
 					Level: 2, Text: "Datafile: " + e.DataFile().FilePath(),
 				})
