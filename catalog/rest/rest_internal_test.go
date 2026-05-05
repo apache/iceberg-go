@@ -28,6 +28,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -835,5 +836,149 @@ func TestResponseBodyLeak(t *testing.T) {
 
 		assert.True(t, tracker.body.closed,
 			"response body should be closed on non-200 status")
+	})
+}
+
+func TestHandleNon200_DecodeFlatMessagePreservesSentinel(t *testing.T) {
+	rsp := &http.Response{
+		StatusCode:    http.StatusBadRequest,
+		ContentLength: int64(len(`{"message":"flat error"}`)),
+		Body:          io.NopCloser(bytes.NewBufferString(`{"message":"flat error"}`)),
+	}
+
+	err := handleNon200(rsp, nil)
+	require.Error(t, err)
+	require.Equal(t, "flat error", err.Error())
+	require.True(t, errors.Is(err, ErrBadRequest))
+}
+
+func TestHandleNon200_DecodeCanonicalErrorRendersExpectedMessage(t *testing.T) {
+	rsp := &http.Response{
+		StatusCode:    http.StatusForbidden,
+		ContentLength: int64(len(`{"error":{"message":"nested error","type":"ValidationException"}}`)),
+		Body:          io.NopCloser(bytes.NewBufferString(`{"error":{"message":"nested error","type":"ValidationException"}}`)),
+	}
+
+	err := handleNon200(rsp, nil)
+	require.Error(t, err)
+	require.Equal(t, "ValidationException: nested error", err.Error())
+	require.True(t, errors.Is(err, ErrForbidden))
+}
+
+func TestHandleNon200_EmptyBodyFallback(t *testing.T) {
+	rsp := &http.Response{
+		StatusCode:    http.StatusBadRequest,
+		ContentLength: 0,
+		Body:          http.NoBody,
+	}
+
+	err := handleNon200(rsp, nil)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrBadRequest))
+	require.Equal(t, ErrBadRequest.Error(), err.Error())
+	require.NotEqual(t, ": ", err.Error())
+}
+
+func TestErrorResponse_ErrorFormattingTypeAndMessage(t *testing.T) {
+	err := errorResponse{Type: "ValidationException", Message: "bad request"}
+	require.Equal(t, "ValidationException: bad request", err.Error())
+}
+
+func TestErrorResponse_ErrorFormattingMessageOnly(t *testing.T) {
+	err := errorResponse{Message: "bad request"}
+	require.Equal(t, "bad request", err.Error())
+}
+
+func TestErrorResponse_ErrorFormattingTypeOnly(t *testing.T) {
+	err := errorResponse{Type: "ValidationException"}
+	require.Equal(t, "ValidationException", err.Error())
+}
+
+func TestErrorResponse_ErrorFormattingWrappingOnly(t *testing.T) {
+	err := errorResponse{wrapping: ErrServerError}
+	require.Equal(t, ErrServerError.Error(), err.Error())
+}
+
+func TestErrorResponse_ErrorFormattingEmpty(t *testing.T) {
+	err := errorResponse{}
+	require.Equal(t, "unknown REST error", err.Error())
+}
+
+func TestToPropsSigv4RegionFallback(t *testing.T) {
+	t.Parallel()
+
+	t.Run("sigv4 region propagated as client.region for s3tables", func(t *testing.T) {
+		t.Parallel()
+
+		opts := &options{
+			enableSigv4:  true,
+			sigv4Region:  "us-east-1",
+			sigv4Service: "s3tables",
+		}
+		props := toProps(opts)
+		assert.Equal(t, "us-east-1", props["client.region"])
+	})
+
+	t.Run("sigv4 region propagated as client.region for s3", func(t *testing.T) {
+		t.Parallel()
+
+		opts := &options{
+			enableSigv4:  true,
+			sigv4Region:  "us-west-2",
+			sigv4Service: "s3",
+		}
+		props := toProps(opts)
+		assert.Equal(t, "us-west-2", props["client.region"])
+	})
+
+	t.Run("sigv4 region not propagated for non-s3 service", func(t *testing.T) {
+		t.Parallel()
+
+		opts := &options{
+			enableSigv4:  true,
+			sigv4Region:  "us-east-1",
+			sigv4Service: "execute-api",
+		}
+		props := toProps(opts)
+		_, ok := props["client.region"]
+		assert.False(t, ok)
+	})
+
+	t.Run("sigv4 region does not overwrite existing client.region", func(t *testing.T) {
+		t.Parallel()
+
+		opts := &options{
+			enableSigv4:  true,
+			sigv4Region:  "us-east-1",
+			sigv4Service: "s3tables",
+			additionalProps: map[string]string{
+				"client.region": "eu-west-1",
+			},
+		}
+		props := toProps(opts)
+		assert.Equal(t, "eu-west-1", props["client.region"])
+	})
+
+	t.Run("no client.region when sigv4 disabled", func(t *testing.T) {
+		t.Parallel()
+
+		opts := &options{
+			sigv4Region: "us-east-1",
+		}
+		props := toProps(opts)
+		_, ok := props["client.region"]
+		assert.False(t, ok)
+	})
+
+	t.Run("no client.region when sigv4 region empty", func(t *testing.T) {
+		t.Parallel()
+
+		opts := &options{
+			enableSigv4:  true,
+			sigv4Service: "s3tables",
+		}
+		props := toProps(opts)
+		_, ok := props["client.region"]
+		assert.False(t, ok)
 	})
 }

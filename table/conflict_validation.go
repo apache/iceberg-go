@@ -192,10 +192,26 @@ func newConflictContext(base, current Metadata, branch string, fs iceio.IO, case
 
 	baseHead := base.SnapshotByName(branch)
 	if baseHead == nil {
-		// Writer has no view of this branch yet (e.g. creating it) —
-		// by definition there are no concurrent commits to validate
-		// against.
-		return &conflictContext{current: current, branch: branch, fs: fs, caseSensitive: caseSensitive}, nil
+		// Writer's base has no view of this branch (empty table or
+		// branch created concurrently). Every snapshot now reachable
+		// from the branch head is concurrent relative to base.
+		// Truncation (missing intermediate, cycle) is treated as
+		// divergent for the same reason AncestorsBetween's
+		// baseFound=false is: an under-counted concurrent list silently
+		// hides conflicts.
+		concurrent, complete := AncestorsOfChecked(currentHead.SnapshotID, current.SnapshotByID)
+		if !complete {
+			return nil, fmt.Errorf("%w: ancestry walk from %d on %s truncated; no base snapshot to bound against",
+				ErrCommitDiverged, currentHead.SnapshotID, branch)
+		}
+
+		return &conflictContext{
+			current:       current,
+			branch:        branch,
+			fs:            fs,
+			caseSensitive: caseSensitive,
+			concurrent:    concurrent,
+		}, nil
 	}
 
 	concurrent, baseFound := AncestorsBetween(currentHead.SnapshotID, baseHead.SnapshotID, current.SnapshotByID)

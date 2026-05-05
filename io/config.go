@@ -29,6 +29,7 @@ const (
 	S3SignerURI              = "s3.signer.uri"
 	S3RemoteSigningEnabled   = "s3.remote-signing-enabled"
 	S3ForceVirtualAddressing = "s3.force-virtual-addressing"
+	S3ClientRegion           = "client.region"
 )
 
 // Constants for GCS configuration options
