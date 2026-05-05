@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"iter"
 	"log"
 	"net/url"
@@ -53,24 +54,36 @@ var _ catalog.Catalog = (*Catalog)(nil)
 var versionPattern = regexp.MustCompile(`^v([0-9]+)(?:\.gz)?\.metadata\.json$`)
 
 // uuidMetadataPattern matches UUID-style metadata filenames produced by
-// Java/PyIceberg catalogs: 00000-<uuid>.metadata.json, etc.
-var uuidMetadataPattern = regexp.MustCompile(`^[0-9]+-[0-9a-fA-F-]+\.metadata\.json$`)
+// Java/PyIceberg catalogs: 00000-<uuid>.metadata.json or
+// 00000-<uuid>.gz.metadata.json. The sequence is a 5-digit zero-padded
+// number and the UUID is in canonical 8-4-4-4-12 hex format.
+var uuidMetadataPattern = regexp.MustCompile(
+	`^[0-9]{5}-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?:\.gz)?\.metadata\.json$`,
+)
 
-// validateIdentifier checks that each component of an identifier is safe for
-// use as a path segment. It rejects empty parts, path traversal sequences,
-// and components containing path separators.
+// validateIdentifier checks that an identifier is non-empty and that each
+// component is safe for use as a path segment. It rejects nil/empty
+// identifiers, empty parts, path traversal sequences, and components
+// containing path separators.
+//
+// Note: this is POSIX-best-effort validation — it does not catch NUL bytes
+// or Windows reserved names (NUL, CON, COM1, etc.).
 func validateIdentifier(ident table.Identifier) error {
+	if len(ident) == 0 {
+		return fmt.Errorf("%w: namespace identifier must not be empty", catalog.ErrNoSuchNamespace)
+	}
+
 	for _, part := range ident {
 		if part == "" {
-			return errors.New("hadoop catalog: identifier component must not be empty")
+			return fmt.Errorf("%w: identifier component must not be empty", catalog.ErrNoSuchNamespace)
 		}
 
 		if part == "." || part == ".." {
-			return fmt.Errorf("hadoop catalog: invalid identifier component %q", part)
+			return fmt.Errorf("%w: invalid identifier component %q", catalog.ErrNoSuchNamespace, part)
 		}
 
 		if strings.ContainsAny(part, "/\\") {
-			return fmt.Errorf("hadoop catalog: identifier component must not contain path separators: %q", part)
+			return fmt.Errorf("%w: identifier component must not contain path separators: %q", catalog.ErrNoSuchNamespace, part)
 		}
 	}
 
@@ -109,7 +122,20 @@ func NewCatalog(name, warehouse string, props iceberg.Properties) (*Catalog, err
 		warehouse = u.Path
 	}
 
+	if warehouse == "" || warehouse == "/" {
+		return nil, errors.New("hadoop catalog requires a non-root warehouse path")
+	}
+
 	warehouse = strings.TrimRight(warehouse, "/")
+
+	// Normalize to absolute path so the synthetic "location" property
+	// always produces a valid file:// URI.
+	absWarehouse, err := filepath.Abs(warehouse)
+	if err != nil {
+		return nil, fmt.Errorf("hadoop catalog: failed to resolve absolute warehouse path: %w", err)
+	}
+
+	warehouse = absWarehouse
 
 	return &Catalog{
 		name:      name,
@@ -301,10 +327,6 @@ func (c *Catalog) CheckTableExists(_ context.Context, _ table.Identifier) (bool,
 }
 
 func (c *Catalog) CreateNamespace(_ context.Context, ns table.Identifier, props iceberg.Properties) error {
-	if len(ns) == 0 {
-		return errors.New("hadoop catalog: namespace identifier must not be empty")
-	}
-
 	if err := validateIdentifier(ns); err != nil {
 		return err
 	}
@@ -316,8 +338,13 @@ func (c *Catalog) CreateNamespace(_ context.Context, ns table.Identifier, props 
 	path := c.namespaceToPath(ns)
 
 	if err := os.Mkdir(path, 0o755); err != nil {
-		if os.IsExist(err) {
+		if errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("%w: %s", catalog.ErrNamespaceAlreadyExists, strings.Join(ns, "."))
+		}
+
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%w: parent namespace does not exist for %s",
+				catalog.ErrNoSuchNamespace, strings.Join(ns, "."))
 		}
 
 		return fmt.Errorf("hadoop catalog: failed to create namespace: %w", err)
@@ -327,22 +354,18 @@ func (c *Catalog) CreateNamespace(_ context.Context, ns table.Identifier, props 
 }
 
 func (c *Catalog) DropNamespace(_ context.Context, ns table.Identifier) error {
-	if len(ns) == 0 {
-		return errors.New("hadoop catalog: namespace identifier must not be empty")
-	}
-
 	if err := validateIdentifier(ns); err != nil {
 		return err
 	}
 
 	path := c.namespaceToPath(ns)
 
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(ns, "."))
-	}
-
 	entries, err := os.ReadDir(path)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(ns, "."))
+		}
+
 		return fmt.Errorf("hadoop catalog: failed to read namespace directory: %w", err)
 	}
 
@@ -361,7 +384,7 @@ func (c *Catalog) CheckNamespaceExists(_ context.Context, ns table.Identifier) (
 	path := c.namespaceToPath(ns)
 
 	info, err := os.Stat(path)
-	if os.IsNotExist(err) {
+	if errors.Is(err, fs.ErrNotExist) {
 		return false, nil
 	}
 
@@ -387,7 +410,7 @@ func (c *Catalog) ListNamespaces(_ context.Context, parent table.Identifier) ([]
 		path = c.namespaceToPath(parent)
 
 		info, err := os.Stat(path)
-		if os.IsNotExist(err) || (err == nil && !info.IsDir()) {
+		if errors.Is(err, fs.ErrNotExist) || (err == nil && !info.IsDir()) {
 			return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(parent, "."))
 		}
 	}
@@ -414,6 +437,9 @@ func (c *Catalog) ListNamespaces(_ context.Context, parent table.Identifier) ([]
 	return result, nil
 }
 
+// LoadNamespaceProperties returns a synthetic "location" property for the
+// namespace. This is a Go-only convenience — the Hadoop catalog does not
+// persist user-defined namespace properties.
 func (c *Catalog) LoadNamespaceProperties(_ context.Context, ns table.Identifier) (iceberg.Properties, error) {
 	if err := validateIdentifier(ns); err != nil {
 		return nil, err
@@ -422,7 +448,7 @@ func (c *Catalog) LoadNamespaceProperties(_ context.Context, ns table.Identifier
 	path := c.namespaceToPath(ns)
 
 	info, err := os.Stat(path)
-	if os.IsNotExist(err) || (err == nil && !info.IsDir()) {
+	if errors.Is(err, fs.ErrNotExist) || (err == nil && !info.IsDir()) {
 		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(ns, "."))
 	}
 
@@ -430,7 +456,9 @@ func (c *Catalog) LoadNamespaceProperties(_ context.Context, ns table.Identifier
 		return nil, fmt.Errorf("hadoop catalog: failed to stat namespace: %w", err)
 	}
 
-	return iceberg.Properties{"location": "file://" + path}, nil
+	loc := (&url.URL{Scheme: "file", Path: path}).String()
+
+	return iceberg.Properties{"location": loc}, nil
 }
 
 func (c *Catalog) UpdateNamespaceProperties(_ context.Context, _ table.Identifier, _ []string, _ iceberg.Properties) (catalog.PropertiesUpdateSummary, error) {

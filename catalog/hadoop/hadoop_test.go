@@ -204,7 +204,7 @@ func (s *HadoopCatalogTestSuite) TestIsTableDirTrueUUIDMetadata() {
 	tableDir := filepath.Join(s.warehouse, "ns", "tbl")
 	metaDir := filepath.Join(tableDir, "metadata")
 	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
-	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "00001-a1b2c3d4.metadata.json"), nil, 0o644))
+	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "00001-a1b2c3d4-e5f6-7890-abcd-ef1234567890.metadata.json"), nil, 0o644))
 
 	s.True(isTableDir(tableDir))
 }
@@ -422,7 +422,7 @@ func (s *HadoopCatalogTestSuite) TestCreateNamespaceNestedParentMissing() {
 	// Creating a nested namespace without parent should fail.
 	err := s.cat.CreateNamespace(context.Background(), []string{"a", "b", "c"}, nil)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "failed to create namespace")
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
 func (s *HadoopCatalogTestSuite) TestCreateNamespaceWithProperties() {
@@ -593,13 +593,13 @@ func (s *HadoopCatalogTestSuite) TestCheckNamespaceExistsFileNotDir() {
 func (s *HadoopCatalogTestSuite) TestCreateNamespaceEmptyIdentifier() {
 	err := s.cat.CreateNamespace(context.Background(), []string{}, nil)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "must not be empty")
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
 func (s *HadoopCatalogTestSuite) TestDropNamespaceEmptyIdentifier() {
 	err := s.cat.DropNamespace(context.Background(), []string{})
 	s.Require().Error(err)
-	s.Contains(err.Error(), "must not be empty")
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
 func (s *HadoopCatalogTestSuite) TestLoadNamespacePropertiesNested() {
@@ -637,49 +637,49 @@ func (s *HadoopCatalogTestSuite) TestListNamespacesMixedContent() {
 func (s *HadoopCatalogTestSuite) TestCreateNamespaceRejectsDotDot() {
 	err := s.cat.CreateNamespace(context.Background(), []string{"a", ".."}, nil)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "invalid identifier component")
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
 func (s *HadoopCatalogTestSuite) TestCreateNamespaceRejectsDot() {
 	err := s.cat.CreateNamespace(context.Background(), []string{"."}, nil)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "invalid identifier component")
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
 func (s *HadoopCatalogTestSuite) TestCreateNamespaceRejectsEmptyComponent() {
 	err := s.cat.CreateNamespace(context.Background(), []string{"a", "", "b"}, nil)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "must not be empty")
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
 func (s *HadoopCatalogTestSuite) TestCreateNamespaceRejectsPathSeparator() {
 	err := s.cat.CreateNamespace(context.Background(), []string{"a/b"}, nil)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "path separators")
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
 func (s *HadoopCatalogTestSuite) TestDropNamespaceRejectsDotDot() {
 	err := s.cat.DropNamespace(context.Background(), []string{".."})
 	s.Require().Error(err)
-	s.Contains(err.Error(), "invalid identifier component")
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
 func (s *HadoopCatalogTestSuite) TestListNamespacesRejectsInvalidParent() {
 	_, err := s.cat.ListNamespaces(context.Background(), []string{"a", ".."})
 	s.Require().Error(err)
-	s.Contains(err.Error(), "invalid identifier component")
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
 func (s *HadoopCatalogTestSuite) TestLoadNamespacePropertiesRejectsInvalid() {
 	_, err := s.cat.LoadNamespaceProperties(context.Background(), []string{".."})
 	s.Require().Error(err)
-	s.Contains(err.Error(), "invalid identifier component")
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
 func (s *HadoopCatalogTestSuite) TestCheckNamespaceExistsRejectsInvalid() {
 	_, err := s.cat.CheckNamespaceExists(context.Background(), []string{"a/b"})
 	s.Require().Error(err)
-	s.Contains(err.Error(), "path separators")
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
 // isTableDir interop tests
@@ -689,6 +689,15 @@ func (s *HadoopCatalogTestSuite) TestIsTableDirTrueVersionHintText() {
 	metaDir := filepath.Join(tableDir, "metadata")
 	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
 	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "version-hint.text"), []byte("1"), 0o644))
+
+	s.True(isTableDir(tableDir))
+}
+
+func (s *HadoopCatalogTestSuite) TestIsTableDirTrueUUIDMetadataGzip() {
+	tableDir := filepath.Join(s.warehouse, "ns", "tbl")
+	metaDir := filepath.Join(tableDir, "metadata")
+	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
+	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "00001-a1b2c3d4-e5f6-7890-abcd-ef1234567890.gz.metadata.json"), nil, 0o644))
 
 	s.True(isTableDir(tableDir))
 }
