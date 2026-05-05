@@ -751,7 +751,10 @@ func (sp *snapshotProducer) manifestProducer(content iceberg.ManifestContent, fi
 
 		for _, df := range files {
 			if assignRowIDs {
-				iceberg.SetDataFileFirstRowID(df, nextRowID)
+				if !iceberg.SetDataFileFirstRowID(df, nextRowID) {
+					return fmt.Errorf("failed to assign first_row_id to data file %s: unsupported DataFile implementation", df.FilePath())
+				}
+
 				nextRowID += df.Count()
 			}
 
