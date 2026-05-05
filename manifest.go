@@ -349,12 +349,17 @@ func (m *manifestFile) Entries(fs iceio.IO, discardDeleted bool) iter.Seq2[Manif
 
 			return
 		}
+		aborted := false
 		defer func() {
-			_ = f.Close()
+			if cerr := f.Close(); cerr != nil && !aborted {
+				yield(nil, cerr)
+			}
 		}()
 
 		for entry, err := range iterManifest(m, f, discardDeleted) {
 			if !yield(entry, err) {
+				aborted = true
+
 				return
 			}
 		}
@@ -790,8 +795,11 @@ func iterManifest(m ManifestFile, f io.Reader, discardDeleted bool) iter.Seq2[Ma
 
 			return
 		}
+		aborted := false
 		defer func() {
-			_ = manifestReader.Close()
+			if cerr := manifestReader.Close(); cerr != nil && !aborted {
+				yield(nil, cerr)
+			}
 		}()
 
 		for {
@@ -800,7 +808,9 @@ func iterManifest(m ManifestFile, f io.Reader, discardDeleted bool) iter.Seq2[Ma
 				if errors.Is(err, io.EOF) {
 					return
 				}
-				yield(nil, err)
+				if !yield(nil, err) {
+					aborted = true
+				}
 
 				return
 			}
@@ -808,6 +818,8 @@ func iterManifest(m ManifestFile, f io.Reader, discardDeleted bool) iter.Seq2[Ma
 				continue
 			}
 			if !yield(entry, nil) {
+				aborted = true
+
 				return
 			}
 		}
