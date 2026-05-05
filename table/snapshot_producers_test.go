@@ -414,6 +414,127 @@ func TestCommitV3RowLineagePersistsManifestFirstRowID(t *testing.T) {
 		"persisted manifest first_row_id must match snapshot first-row-id for current commit")
 }
 
+// TestCommitV3RowLineageAssignsPerFileFirstRowID verifies that the snapshot producer
+// assigns contiguous first_row_id to each individual data file within a manifest.
+func TestCommitV3RowLineageAssignsPerFileFirstRowID(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	ident := Identifier{"db", "tbl"}
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	txn.meta.formatVersion = 3
+
+	// Append multiple files with different row counts.
+	sp := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+	sp.appendDataFile(newTestDataFileWithCount(t, spec, "file://data-1.parquet", nil, 10))
+	sp.appendDataFile(newTestDataFileWithCount(t, spec, "file://data-2.parquet", nil, 20))
+	sp.appendDataFile(newTestDataFileWithCount(t, spec, "file://data-3.parquet", nil, 5))
+
+	updates, reqs, err := sp.commit(context.Background())
+	require.NoError(t, err, "commit should succeed")
+	addSnap, ok := updates[0].(*addSnapshotUpdate)
+	require.True(t, ok)
+	require.Equal(t, int64(0), *addSnap.Snapshot.FirstRowID)
+	require.Equal(t, int64(35), *addSnap.Snapshot.AddedRows)
+
+	// Read the manifest entries and verify per-file first_row_id.
+	manifests := readManifestListFromPath(t, memIO, addSnap.Snapshot.ManifestList)
+	require.NotEmpty(t, manifests)
+
+	var dataManifest iceberg.ManifestFile
+	for _, m := range manifests {
+		if m.ManifestContent() == iceberg.ManifestContentData && m.SnapshotID() == addSnap.Snapshot.SnapshotID {
+			dataManifest = m
+
+			break
+		}
+	}
+	require.NotNil(t, dataManifest, "must find data manifest for this snapshot")
+
+	entries, err := dataManifest.FetchEntries(memIO, false)
+	require.NoError(t, err, "fetch manifest entries")
+	require.Len(t, entries, 3)
+
+	// Files should have contiguous first_row_id: 0, 10, 30
+	require.NotNil(t, entries[0].DataFile().FirstRowID(), "file 1 must have first_row_id")
+	require.EqualValues(t, 0, *entries[0].DataFile().FirstRowID(), "file 1 first_row_id")
+	require.NotNil(t, entries[1].DataFile().FirstRowID(), "file 2 must have first_row_id")
+	require.EqualValues(t, 10, *entries[1].DataFile().FirstRowID(), "file 2 first_row_id")
+	require.NotNil(t, entries[2].DataFile().FirstRowID(), "file 3 must have first_row_id")
+	require.EqualValues(t, 30, *entries[2].DataFile().FirstRowID(), "file 3 first_row_id")
+
+	// Verify metadata advances correctly.
+	err = txn.apply(updates, reqs)
+	require.NoError(t, err)
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+	require.Equal(t, int64(35), meta.NextRowID())
+
+	// Second commit continues from next-row-id=35.
+	tbl2 := New(ident, meta, "metadata.json", func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+	txn2 := tbl2.NewTransaction()
+	txn2.meta.formatVersion = 3
+	sp2 := newFastAppendFilesProducer(OpAppend, txn2, memIO, nil, nil)
+	sp2.appendDataFile(newTestDataFileWithCount(t, spec, "file://data-4.parquet", nil, 7))
+	updates2, _, err := sp2.commit(context.Background())
+	require.NoError(t, err)
+	addSnap2, ok := updates2[0].(*addSnapshotUpdate)
+	require.True(t, ok)
+
+	manifests2 := readManifestListFromPath(t, memIO, addSnap2.Snapshot.ManifestList)
+	var dataManifest2 iceberg.ManifestFile
+	for _, m := range manifests2 {
+		if m.ManifestContent() == iceberg.ManifestContentData && m.SnapshotID() == addSnap2.Snapshot.SnapshotID {
+			dataManifest2 = m
+
+			break
+		}
+	}
+	require.NotNil(t, dataManifest2)
+	entries2, err := dataManifest2.FetchEntries(memIO, false)
+	require.NoError(t, err)
+	require.Len(t, entries2, 1)
+	require.NotNil(t, entries2[0].DataFile().FirstRowID())
+	require.EqualValues(t, 35, *entries2[0].DataFile().FirstRowID(), "second commit file starts at next-row-id=35")
+}
+
+// TestCommitV3RowLineageDeleteFilesNoRowID verifies that delete files do NOT get
+// first_row_id assigned (row lineage applies only to data files).
+func TestCommitV3RowLineageDeleteFilesNoRowID(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	txn.meta.formatVersion = 3
+
+	// Append a delete file.
+	builder, err := iceberg.NewDataFileBuilder(
+		spec, iceberg.EntryContentPosDeletes,
+		"file://delete-1.parquet", iceberg.ParquetFile,
+		nil, nil, nil, 5, 100,
+	)
+	require.NoError(t, err)
+	deleteFile := builder.Build()
+
+	sp := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+	sp.appendDeleteFile(deleteFile)
+	// Also append a data file to ensure delete manifest is separate.
+	sp.appendDataFile(newTestDataFileWithCount(t, spec, "file://data-1.parquet", nil, 10))
+
+	updates, _, err := sp.commit(context.Background())
+	require.NoError(t, err)
+	addSnap, ok := updates[0].(*addSnapshotUpdate)
+	require.True(t, ok)
+
+	manifests := readManifestListFromPath(t, memIO, addSnap.Snapshot.ManifestList)
+	for _, m := range manifests {
+		if m.ManifestContent() == iceberg.ManifestContentDeletes {
+			entries, err := m.FetchEntries(memIO, false)
+			require.NoError(t, err)
+			for _, e := range entries {
+				require.Nil(t, e.DataFile().FirstRowID(),
+					"delete file must NOT have first_row_id assigned")
+			}
+		}
+	}
+}
+
 func TestSnapshotProducerManifestsClosesWriterOnError(t *testing.T) {
 	spec := partitionedSpec()
 	schema := simpleSchema()

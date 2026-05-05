@@ -2282,6 +2282,19 @@ func (b *DataFileBuilder) FirstRowID(id int64) *DataFileBuilder {
 	return b
 }
 
+// SetDataFileFirstRowID sets the first_row_id on an existing DataFile.
+// This is used by the snapshot producer to assign row IDs at write time for v3 tables.
+// Returns false if the DataFile implementation does not support mutation.
+func SetDataFileFirstRowID(df DataFile, id int64) bool {
+	if d, ok := df.(*dataFile); ok {
+		d.FirstRowIDField = &id
+
+		return true
+	}
+
+	return false
+}
+
 func (b *DataFileBuilder) ReferencedDataFile(path string) *DataFileBuilder {
 	b.d.ReferencedDataFileField = &path
 

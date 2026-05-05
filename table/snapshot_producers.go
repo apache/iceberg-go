@@ -744,7 +744,17 @@ func (sp *snapshotProducer) manifestProducer(content iceberg.ManifestContent, fi
 		}
 		defer internal.CheckedClose(wr, &err)
 
+		// For v3 data manifests, assign first_row_id to each data file.
+		// Each file claims a contiguous range of row IDs starting from NextRowID.
+		assignRowIDs := sp.txn.meta.formatVersion >= 3 && content == iceberg.ManifestContentData
+		nextRowID := sp.txn.meta.NextRowID()
+
 		for _, df := range files {
+			if assignRowIDs {
+				iceberg.SetDataFileFirstRowID(df, nextRowID)
+				nextRowID += df.Count()
+			}
+
 			err := wr.Add(iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &sp.snapshotID,
 				nil, nil, df))
 			if err != nil {
