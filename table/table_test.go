@@ -232,6 +232,66 @@ func (t *TableTestSuite) TestNewTableFromReadFileZstdAlternateSuffix() {
 	t.True(t.tbl.Metadata().Equals(tbl2.Metadata()))
 }
 
+func (t *TableTestSuite) TestNewTableFromOpenZstd() {
+	var b bytes.Buffer
+	enc, err := zstd.NewWriter(&b)
+	t.Require().NoError(err)
+
+	_, err = enc.Write([]byte(table.ExampleTableMetadataV2))
+	t.Require().NoError(err)
+	t.Require().NoError(enc.Close())
+
+	var mockfs internal.MockFS
+	mockfs.Test(t.T())
+	mockfs.On("Open", "s3://bucket/test/location/uuid.zstd.metadata.json").
+		Return(&internal.MockFile{Contents: bytes.NewReader(b.Bytes())}, nil)
+	defer mockfs.AssertExpectations(t.T())
+
+	tbl2, err := table.NewFromLocation(
+		t.T().Context(),
+		[]string{"foo"},
+		"s3://bucket/test/location/uuid.zstd.metadata.json",
+		func(ctx context.Context) (iceio.IO, error) {
+			return &mockfs, nil
+		},
+		nil,
+	)
+	t.Require().NoError(err)
+	t.Require().NotNil(tbl2)
+
+	t.True(t.tbl.Metadata().Equals(tbl2.Metadata()))
+}
+
+func (t *TableTestSuite) TestNewTableFromOpenZstdAlternateSuffix() {
+	var b bytes.Buffer
+	enc, err := zstd.NewWriter(&b)
+	t.Require().NoError(err)
+
+	_, err = enc.Write([]byte(table.ExampleTableMetadataV2))
+	t.Require().NoError(err)
+	t.Require().NoError(enc.Close())
+
+	var mockfs internal.MockFS
+	mockfs.Test(t.T())
+	mockfs.On("Open", "s3://bucket/test/location/uuid.metadata.json.zstd").
+		Return(&internal.MockFile{Contents: bytes.NewReader(b.Bytes())}, nil)
+	defer mockfs.AssertExpectations(t.T())
+
+	tbl2, err := table.NewFromLocation(
+		t.T().Context(),
+		[]string{"foo"},
+		"s3://bucket/test/location/uuid.metadata.json.zstd",
+		func(ctx context.Context) (iceio.IO, error) {
+			return &mockfs, nil
+		},
+		nil,
+	)
+	t.Require().NoError(err)
+	t.Require().NotNil(tbl2)
+
+	t.True(t.tbl.Metadata().Equals(tbl2.Metadata()))
+}
+
 func (t *TableTestSuite) TestSchema() {
 	t.True(t.tbl.Schema().Equals(iceberg.NewSchemaWithIdentifiers(1, []int{1, 2},
 		iceberg.NestedField{ID: 1, Name: "x", Type: iceberg.PrimitiveTypes.Int64, Required: true},
