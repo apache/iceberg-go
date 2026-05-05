@@ -39,7 +39,17 @@ func (e ErrIncompatibleSchema) Error() string {
 			fmt.Fprintf(&problems, "\n- invalid type for %s: %s is not supported until v%d", f.ColName, f.Field.Type, f.UnsupportedType.MinFormatVersion)
 		}
 		if f.InvalidDefault != nil {
-			fmt.Fprintf(&problems, "\n- invalid initial default for %s: non-null default (%v) is not supported until v%d", f.ColName, f.Field.InitialDefault, f.InvalidDefault.MinFormatVersion)
+			switch f.Field.Type.(type) {
+			case iceberg.GeometryType, iceberg.GeographyType:
+				if f.Field.InitialDefault != nil {
+					fmt.Fprintf(&problems, "\n- invalid initial default for %s: %s columns must default to null", f.ColName, f.Field.Type)
+				}
+				if f.Field.WriteDefault != nil {
+					fmt.Fprintf(&problems, "\n- invalid write default for %s: %s columns must default to null", f.ColName, f.Field.Type)
+				}
+			default:
+				fmt.Fprintf(&problems, "\n- invalid initial default for %s: non-null default (%v) is not supported until v%d", f.ColName, f.Field.InitialDefault, f.InvalidDefault.MinFormatVersion)
+			}
 		}
 	}
 
@@ -113,12 +123,30 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 			})
 		}
 
-		if field.InitialDefault != nil && formatVersion < defaultValuesMinFormatVersion {
-			problems = append(problems, IncompatibleField{
-				Field:          field,
-				ColName:        colName,
-				InvalidDefault: &InvalidDefault{MinFormatVersion: defaultValuesMinFormatVersion, WriteDefault: field.InitialDefault},
-			})
+		switch field.Type.(type) {
+		case iceberg.GeometryType, iceberg.GeographyType:
+			if field.InitialDefault != nil {
+				problems = append(problems, IncompatibleField{
+					Field:          field,
+					ColName:        colName,
+					InvalidDefault: &InvalidDefault{MinFormatVersion: formatVersion, WriteDefault: field.InitialDefault},
+				})
+			}
+			if field.WriteDefault != nil {
+				problems = append(problems, IncompatibleField{
+					Field:          field,
+					ColName:        colName,
+					InvalidDefault: &InvalidDefault{MinFormatVersion: formatVersion, WriteDefault: field.WriteDefault},
+				})
+			}
+		default:
+			if field.InitialDefault != nil && formatVersion < defaultValuesMinFormatVersion {
+				problems = append(problems, IncompatibleField{
+					Field:          field,
+					ColName:        colName,
+					InvalidDefault: &InvalidDefault{MinFormatVersion: defaultValuesMinFormatVersion, WriteDefault: field.InitialDefault},
+				})
+			}
 		}
 	}
 
@@ -134,7 +162,7 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 // version number for types that require newer format versions.
 func minFormatVersionForType(t iceberg.Type) int {
 	switch t.(type) {
-	case iceberg.TimestampNsType, iceberg.TimestampTzNsType, iceberg.UnknownType:
+	case iceberg.TimestampNsType, iceberg.TimestampTzNsType, iceberg.UnknownType, iceberg.GeometryType, iceberg.GeographyType:
 		return 3
 	default:
 		// All other types supported in v1+
