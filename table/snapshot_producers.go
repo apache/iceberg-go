@@ -609,7 +609,20 @@ func (sp *snapshotProducer) newManifestOutput() (io.WriteCloser, string, error) 
 }
 
 func (sp *snapshotProducer) fetchManifestEntry(m iceberg.ManifestFile, discardDeleted bool) ([]iceberg.ManifestEntry, error) {
-	return m.FetchEntries(sp.io, discardDeleted)
+	capacity := int(m.AddedDataFiles()) + int(m.ExistingDataFiles())
+	if !discardDeleted {
+		capacity += int(m.DeletedDataFiles())
+	}
+	// Counts may be -1 (unset) on V1 manifests, so clamp before allocating.
+	entries := make([]iceberg.ManifestEntry, 0, max(0, capacity))
+	for entry, err := range m.Entries(sp.io, discardDeleted) {
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+
+	return entries, nil
 }
 
 func (sp *snapshotProducer) iterManifestEntries(m iceberg.ManifestFile, discardDeleted bool) iter.Seq2[iceberg.ManifestEntry, error] {

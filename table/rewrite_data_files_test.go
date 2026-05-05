@@ -569,9 +569,8 @@ func snapshotContainsDeleteFile(t *testing.T, tbl *table.Table, path string) boo
 		if m.ManifestContent() != iceberg.ManifestContentDeletes {
 			continue
 		}
-		entries, err := m.FetchEntries(fs, false)
-		require.NoError(t, err)
-		for _, e := range entries {
+		for e, err := range m.Entries(fs, false) {
+			require.NoError(t, err)
 			if e.Status() == iceberg.EntryStatusDELETED {
 				continue
 			}
@@ -656,9 +655,8 @@ func readKeySeqNums(t *testing.T, tbl *table.Table) (eqDelete, smallMin, preserv
 
 	smallMin = int64(1<<62 - 1)
 	for _, m := range manifests {
-		entries, err := m.FetchEntries(fs, false)
-		require.NoError(t, err)
-		for _, e := range entries {
+		for e, err := range m.Entries(fs, false) {
+			require.NoError(t, err)
 			if e.Status() == iceberg.EntryStatusDELETED {
 				continue
 			}

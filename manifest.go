@@ -353,7 +353,7 @@ func (m *manifestFile) Entries(fs iceio.IO, discardDeleted bool) iter.Seq2[Manif
 			_ = f.Close()
 		}()
 
-		for entry, err := range IterManifest(m, f, discardDeleted) {
+		for entry, err := range iterManifest(m, f, discardDeleted) {
 			if !yield(entry, err) {
 				return
 			}
@@ -492,6 +492,9 @@ type ManifestFile interface {
 	// manifest entries using the provided file system IO interface.
 	// If discardDeleted is true, entries for files containing deleted rows
 	// will be skipped.
+	//
+	// Deprecated: Use Entries instead, which streams manifest entries via an
+	// iterator and avoids loading every entry into memory at once.
 	FetchEntries(fs iceio.IO, discardDeleted bool) ([]ManifestEntry, error)
 	// // WriteEntries writes a list of manifest entries to a provided
 	// // io.Writer. The version of the manifest file is used to determine the
@@ -776,10 +779,10 @@ func (c *ManifestReader) ReadEntry() (ManifestEntry, error) {
 	return tmp, nil
 }
 
-// IterManifest returns an iterator that streams manifest entries from
+// iterManifest returns an iterator that streams manifest entries from
 // the provided reader without buffering them. If discardDeleted is true,
 // entries whose status is "deleted" are skipped.
-func IterManifest(m ManifestFile, f io.Reader, discardDeleted bool) iter.Seq2[ManifestEntry, error] {
+func iterManifest(m ManifestFile, f io.Reader, discardDeleted bool) iter.Seq2[ManifestEntry, error] {
 	return func(yield func(ManifestEntry, error) bool) {
 		manifestReader, err := NewManifestReader(m, f)
 		if err != nil {
@@ -816,7 +819,7 @@ func IterManifest(m ManifestFile, f io.Reader, discardDeleted bool) iter.Seq2[Ma
 // is true, the returned slice omits entries whose status is "deleted".
 func ReadManifest(m ManifestFile, f io.Reader, discardDeleted bool) ([]ManifestEntry, error) {
 	var results []ManifestEntry
-	for entry, err := range IterManifest(m, f, discardDeleted) {
+	for entry, err := range iterManifest(m, f, discardDeleted) {
 		if err != nil {
 			return results, err
 		}
