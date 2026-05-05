@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/alexflint/go-arg"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
@@ -39,163 +40,211 @@ import (
 	"github.com/apache/iceberg-go/table"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/docopt/docopt-go"
 )
 
-const usage = `iceberg.
+// Subcommand structs
 
-Usage:
-  iceberg list [options] [PARENT]
-  iceberg describe [options] [namespace | table] IDENTIFIER
-  iceberg (schema | spec | uuid | location) [options] TABLE_ID
-  iceberg create [options] (namespace | table) IDENTIFIER
-  iceberg drop [options] (namespace | table) IDENTIFIER
-  iceberg files [options] TABLE_ID [--history]
-  iceberg rename [options] <from> <to>
-  iceberg properties [options] get (namespace | table) IDENTIFIER [PROPNAME]
-  iceberg properties [options] set (namespace | table) IDENTIFIER PROPNAME VALUE
-  iceberg properties [options] remove (namespace | table) IDENTIFIER PROPNAME
-  iceberg compact [options] (analyze | run) TABLE_ID [--target-file-size BYTES] [--partial-progress] [--preserve-dead-equality-deletes]
-  iceberg -h | --help | --version
+type ListCmd struct {
+	Parent string `arg:"positional" help:"catalog parent namespace"`
+}
 
-Commands:
-  describe    Describe a namespace or a table.
-  list        List tables or namespaces.
-  schema      Get the schema of the table.
-  create      Create a namespace or a table.
-  spec        Return the partition spec of the table.
-  uuid        Return the UUID of the table.
-  location    Return the location of the table.
-  drop        Operations to drop a namespace or table.
-  files       List all the files of the table.
-  rename      Rename a table.
-  properties  Properties on tables/namespaces.
-  compact     Analyze or run bin-pack compaction on a table.
+type DescribeCmd struct {
+	Identifier string `arg:"positional,required" help:"fully qualified identifier, or 'namespace'/'table' followed by an identifier"`
+	Target     string `arg:"positional" help:"fully qualified namespace or table (when first arg is 'namespace' or 'table')"`
+}
 
-Arguments:
-  PARENT         Catalog parent namespace
-  IDENTIFIER     fully qualified namespace or table
-  TABLE_ID       full path to a table
-  PROPNAME       name of a property
-  VALUE          value to set
+type SchemaCmd struct {
+	TableID string `arg:"positional,required" help:"full path to a table"`
+}
 
-Options:
-  -h --help          	show this help messages and exit
-  --catalog TEXT     	specify the catalog type [default: rest]
-  --catalog-name TEXT   specify the catalog name to use from the config [default: default]
-  --uri TEXT         	specify the catalog URI
-  --output TYPE      	output type (json/text) [default: text]
-  --credential TEXT  	specify credentials for the catalog
-  --token TEXT       	specify OAuth token directly (skip OAuth flow)
-  --warehouse TEXT   	specify the warehouse to use
-  --scope TEXT       	specify the OAuth scope for authentication [default: catalog]
-  --config TEXT      	specify the path to the configuration file
-  --description TEXT 	specify a description for the namespace
-  --location-uri TEXT  	specify a location URI for the namespace
-  --schema JSON        	specify table schema in json (for create table use only)
-                       	Ex: [{"name":"id","type":"int","required":false,"doc":"unique id"}]
-  --infer-schema FILE  infer table schema from a local data file (for create table use only)
-                       	Supported formats: parquet
-  --properties TEXT 	specify table properties in key=value format (for create table use only)
-						Ex:"format-version=2,write.format.default=parquet"
-  --partition-spec TEXT specify partition spec as comma-separated field names(for create table use only)
-						Ex:"field1,field2"
-  --sort-order TEXT 	specify sort order as field:direction[:null-order] format(for create table use only)
-						Ex:"field1:asc,field2:desc:nulls-first,field3:asc:nulls-last"
-  --target-file-size BYTES  target output file size in bytes for compaction [default: 0]
-  --partial-progress        stage each compaction group as a separate snapshot update
-  --preserve-dead-equality-deletes
-                            keep equality-delete files that are provably dead after the rewrite
-                            (default: drop them — recommended for sustained CDC workloads)`
+type SpecCmd struct {
+	TableID string `arg:"positional,required" help:"full path to a table"`
+}
 
-type Config struct {
-	List     bool `docopt:"list"`
-	Describe bool `docopt:"describe"`
-	Schema   bool `docopt:"schema"`
-	Spec     bool `docopt:"spec"`
-	Uuid     bool `docopt:"uuid"`
-	Location bool `docopt:"location"`
-	Props    bool `docopt:"properties"`
-	Create   bool `docopt:"create"`
-	Drop     bool `docopt:"drop"`
-	Files    bool `docopt:"files"`
-	Rename   bool `docopt:"rename"`
-	Compact  bool `docopt:"compact"`
+type UuidCmd struct {
+	TableID string `arg:"positional,required" help:"full path to a table"`
+}
 
-	Get     bool `docopt:"get"`
-	Set     bool `docopt:"set"`
-	Remove  bool `docopt:"remove"`
-	Analyze bool `docopt:"analyze"`
-	Run     bool `docopt:"run"`
+type LocationCmd struct {
+	TableID string `arg:"positional,required" help:"full path to a table"`
+}
 
-	Namespace bool `docopt:"namespace"`
-	Table     bool `docopt:"table"`
+type FilesCmd struct {
+	TableID string `arg:"positional,required" help:"full path to a table"`
+	History bool   `arg:"--history" help:"show all snapshots"`
+}
 
-	RenameFrom string `docopt:"<from>"`
-	RenameTo   string `docopt:"<to>"`
+type RenameCmd struct {
+	From string `arg:"positional,required" help:"source table identifier"`
+	To   string `arg:"positional,required" help:"destination table identifier"`
+}
 
-	Parent   string `docopt:"PARENT"`
-	Ident    string `docopt:"IDENTIFIER"`
-	TableID  string `docopt:"TABLE_ID"`
-	PropName string `docopt:"PROPNAME"`
-	Value    string `docopt:"VALUE"`
+// Create subcommands
 
-	Catalog                     string `docopt:"--catalog"`
-	CatalogName                 string `docopt:"--catalog-name"`
-	URI                         string `docopt:"--uri"`
-	Output                      string `docopt:"--output"`
-	History                     bool   `docopt:"--history"`
-	Cred                        string `docopt:"--credential"`
-	Token                       string `docopt:"--token"`
-	Warehouse                   string `docopt:"--warehouse"`
-	Config                      string `docopt:"--config"`
-	Scope                       string `docopt:"--scope"`
-	Description                 string `docopt:"--description"`
-	LocationURI                 string `docopt:"--location-uri"`
-	SchemaStr                   string `docopt:"--schema"`
-	InferSchema                 string `docopt:"--infer-schema"`
-	TableProps                  string `docopt:"--properties"`
-	PartitionSpec               string `docopt:"--partition-spec"`
-	SortOrder                   string `docopt:"--sort-order"`
-	TargetFileSize              int64  `docopt:"--target-file-size"`
-	PartialProgress             bool   `docopt:"--partial-progress"`
-	PreserveDeadEqualityDeletes bool   `docopt:"--preserve-dead-equality-deletes"`
+type CreateNamespaceCmd struct {
+	Identifier  string `arg:"positional,required" help:"fully qualified namespace"`
+	Description string `arg:"--description" help:"description for the namespace"`
+	LocationURI string `arg:"--location-uri" help:"location URI for the namespace"`
+}
 
-	RestOptions *config.RestOptions `docopt:"-"`
+type CreateTableCmd struct {
+	Identifier    string `arg:"positional,required" help:"fully qualified table"`
+	Schema        string `arg:"--schema" help:"table schema in JSON"`
+	InferSchema   string `arg:"--infer-schema" help:"infer schema from a local data file (parquet)"`
+	Properties    string `arg:"--properties" help:"table properties as key=value pairs"`
+	PartitionSpec string `arg:"--partition-spec" help:"partition spec as comma-separated field names"`
+	SortOrder     string `arg:"--sort-order" help:"sort order as field:direction[:null-order]"`
+	LocationURI   string `arg:"--location-uri" help:"location URI for the table"`
+}
+
+type CreateCmd struct {
+	Namespace *CreateNamespaceCmd `arg:"subcommand:namespace" help:"create a namespace"`
+	Table     *CreateTableCmd     `arg:"subcommand:table" help:"create a table"`
+}
+
+// Drop subcommands
+
+type DropNamespaceCmd struct {
+	Identifier string `arg:"positional,required" help:"fully qualified namespace"`
+}
+
+type DropTableCmd struct {
+	Identifier string `arg:"positional,required" help:"fully qualified table"`
+}
+
+type DropCmd struct {
+	Namespace *DropNamespaceCmd `arg:"subcommand:namespace" help:"drop a namespace"`
+	Table     *DropTableCmd     `arg:"subcommand:table" help:"drop a table"`
+}
+
+// Properties subcommands
+
+type PropsGetCmd struct {
+	Type       string `arg:"positional,required" help:"'namespace' or 'table'"`
+	Identifier string `arg:"positional,required" help:"fully qualified identifier"`
+	PropName   string `arg:"positional" help:"property name (omit to list all)"`
+}
+
+type PropsSetCmd struct {
+	Type       string `arg:"positional,required" help:"'namespace' or 'table'"`
+	Identifier string `arg:"positional,required" help:"fully qualified identifier"`
+	PropName   string `arg:"positional,required" help:"property name"`
+	Value      string `arg:"positional,required" help:"property value"`
+}
+
+type PropsRemoveCmd struct {
+	Type       string `arg:"positional,required" help:"'namespace' or 'table'"`
+	Identifier string `arg:"positional,required" help:"fully qualified identifier"`
+	PropName   string `arg:"positional,required" help:"property name"`
+}
+
+type PropertiesCmd struct {
+	Get    *PropsGetCmd    `arg:"subcommand:get" help:"get properties"`
+	Set    *PropsSetCmd    `arg:"subcommand:set" help:"set a property"`
+	Remove *PropsRemoveCmd `arg:"subcommand:remove" help:"remove a property"`
+}
+
+// Compact subcommands
+
+type CompactAnalyzeCmd struct {
+	TableID        string `arg:"positional,required" help:"full path to a table"`
+	TargetFileSize int64  `arg:"--target-file-size" default:"0" help:"target output file size in bytes"`
+}
+
+type CompactRunCmd struct {
+	TableID                     string `arg:"positional,required" help:"full path to a table"`
+	TargetFileSize              int64  `arg:"--target-file-size" default:"0" help:"target output file size in bytes"`
+	PartialProgress             bool   `arg:"--partial-progress" help:"stage each group as a separate snapshot"`
+	PreserveDeadEqualityDeletes bool   `arg:"--preserve-dead-equality-deletes" help:"keep equality-delete files that are provably dead after the rewrite (default: drop them — recommended for sustained CDC workloads)"`
+}
+
+type CompactCmd struct {
+	Analyze *CompactAnalyzeCmd `arg:"subcommand:analyze" help:"analyze compaction plan"`
+	Run     *CompactRunCmd     `arg:"subcommand:run" help:"run bin-pack compaction"`
+}
+
+// Top-level args
+
+type Args struct {
+	List       *ListCmd       `arg:"subcommand:list" help:"list tables or namespaces"`
+	Describe   *DescribeCmd   `arg:"subcommand:describe" help:"describe a namespace or table"`
+	Schema     *SchemaCmd     `arg:"subcommand:schema" help:"get the schema of a table"`
+	Spec       *SpecCmd       `arg:"subcommand:spec" help:"return the partition spec of a table"`
+	Uuid       *UuidCmd       `arg:"subcommand:uuid" help:"return the UUID of a table"`
+	Location   *LocationCmd   `arg:"subcommand:location" help:"return the location of a table"`
+	Create     *CreateCmd     `arg:"subcommand:create" help:"create a namespace or table"`
+	Drop       *DropCmd       `arg:"subcommand:drop" help:"drop a namespace or table"`
+	Files      *FilesCmd      `arg:"subcommand:files" help:"list all files of a table"`
+	Rename     *RenameCmd     `arg:"subcommand:rename" help:"rename a table"`
+	Properties *PropertiesCmd `arg:"subcommand:properties" help:"manage properties on tables/namespaces"`
+	Compact    *CompactCmd    `arg:"subcommand:compact" help:"analyze or run bin-pack compaction"`
+
+	Catalog     string `arg:"--catalog" default:"rest" help:"catalog type"`
+	CatalogName string `arg:"--catalog-name" default:"default" help:"catalog name from config"`
+	URI         string `arg:"--uri" help:"catalog URI"`
+	Output      string `arg:"--output" default:"text" help:"output type (json/text)"`
+	Credential  string `arg:"--credential" help:"credentials for the catalog"`
+	Token       string `arg:"--token" help:"OAuth token (skip OAuth flow)"`
+	Warehouse   string `arg:"--warehouse" help:"warehouse to use"`
+	Scope       string `arg:"--scope" default:"catalog" help:"OAuth scope"`
+	Config      string `arg:"--config" help:"path to configuration file"`
+
+	RestOptions *config.RestOptions `arg:"-"`
+}
+
+func (Args) Description() string {
+	return "Apache Iceberg CLI"
+}
+
+func (Args) Version() string {
+	return "iceberg " + iceberg.Version()
 }
 
 func main() {
 	ctx := context.Background()
-	args, err := docopt.ParseArgs(usage, os.Args[1:], iceberg.Version())
-	if err != nil {
-		log.Fatal(err)
-	}
 
-	cfg := Config{}
+	var args Args
+	parser := arg.MustParse(&args)
 
-	if err := args.Bind(&cfg); err != nil {
-		log.Fatal(err)
+	if parser.Subcommand() == nil {
+		parser.WriteHelp(os.Stderr)
+		os.Exit(1)
 	}
 
 	// Determine which flags were explicitly supplied on the command line so
 	// that mergeConf can apply file-config values only for flags that were
-	// not explicitly provided (i.e. still at their docopt default).
+	// not explicitly provided (i.e. still at their default).
 	explicitFlags := make(map[string]bool)
-	for _, arg := range os.Args[1:] {
-		if strings.HasPrefix(arg, "--") {
-			// --flag=value or --flag (bare boolean)
-			name := strings.SplitN(strings.TrimPrefix(arg, "--"), "=", 2)[0]
+	for _, a := range os.Args[1:] {
+		if strings.HasPrefix(a, "--") {
+			name := strings.SplitN(strings.TrimPrefix(a, "--"), "=", 2)[0]
 			explicitFlags[name] = true
 		}
 	}
 
-	fileCfg := config.ParseConfig(config.LoadConfig(cfg.Config), cfg.CatalogName)
+	fileCfg := config.ParseConfig(config.LoadConfig(args.Config), args.CatalogName)
 	if fileCfg != nil {
-		mergeConf(fileCfg, &cfg, explicitFlags)
+		mergeConf(fileCfg, &args, explicitFlags)
+	}
+
+	// Validate nested subcommands before catalog init.
+	switch {
+	case args.Create != nil && args.Create.Namespace == nil && args.Create.Table == nil:
+		_ = parser.WriteHelpForSubcommand(os.Stderr, "create")
+		os.Exit(1)
+	case args.Drop != nil && args.Drop.Namespace == nil && args.Drop.Table == nil:
+		_ = parser.WriteHelpForSubcommand(os.Stderr, "drop")
+		os.Exit(1)
+	case args.Properties != nil && args.Properties.Get == nil && args.Properties.Set == nil && args.Properties.Remove == nil:
+		_ = parser.WriteHelpForSubcommand(os.Stderr, "properties")
+		os.Exit(1)
+	case args.Compact != nil && args.Compact.Analyze == nil && args.Compact.Run == nil:
+		_ = parser.WriteHelpForSubcommand(os.Stderr, "compact")
+		os.Exit(1)
 	}
 
 	var output Output
-	switch strings.ToLower(cfg.Output) {
+	switch strings.ToLower(args.Output) {
 	case "text":
 		output = textOutput{}
 	case "json":
@@ -204,34 +253,75 @@ func main() {
 		log.Fatal("unimplemented output type")
 	}
 
-	var cat catalog.Catalog
-	switch catalog.Type(cfg.Catalog) {
+	cat := initCatalog(ctx, args)
+
+	switch {
+	case args.List != nil:
+		list(ctx, output, cat, args.List.Parent)
+	case args.Describe != nil:
+		runDescribe(ctx, output, cat, args.Describe)
+	case args.Schema != nil:
+		tbl := loadTable(ctx, output, cat, args.Schema.TableID)
+		output.Schema(tbl.Schema())
+	case args.Spec != nil:
+		tbl := loadTable(ctx, output, cat, args.Spec.TableID)
+		output.Spec(tbl.Spec())
+	case args.Location != nil:
+		tbl := loadTable(ctx, output, cat, args.Location.TableID)
+		output.Text(tbl.Location())
+	case args.Uuid != nil:
+		tbl := loadTable(ctx, output, cat, args.Uuid.TableID)
+		output.Uuid(tbl.Metadata().TableUUID())
+	case args.Create != nil:
+		runCreate(ctx, output, cat, args.Create)
+	case args.Drop != nil:
+		runDrop(ctx, output, cat, args.Drop)
+	case args.Files != nil:
+		tbl := loadTable(ctx, output, cat, args.Files.TableID)
+		output.Files(tbl, args.Files.History)
+	case args.Rename != nil:
+		runRename(ctx, output, cat, args.Rename)
+	case args.Properties != nil:
+		runProperties(ctx, output, cat, args.Properties)
+	case args.Compact != nil:
+		runCompact(ctx, output, cat, args.Compact)
+	}
+}
+
+func initCatalog(ctx context.Context, args Args) catalog.Catalog {
+	var (
+		cat catalog.Catalog
+		err error
+	)
+
+	switch catalog.Type(args.Catalog) {
 	case catalog.REST:
 		opts := []rest.Option{}
-		if len(cfg.Token) > 0 {
-			opts = append(opts, rest.WithOAuthToken(cfg.Token))
-		} else if len(cfg.Cred) > 0 {
-			opts = append(opts, rest.WithCredential(cfg.Cred))
+		if len(args.Token) > 0 {
+			opts = append(opts, rest.WithOAuthToken(args.Token))
+		} else if len(args.Credential) > 0 {
+			opts = append(opts, rest.WithCredential(args.Credential))
 		}
 
-		if len(cfg.Warehouse) > 0 {
-			opts = append(opts, rest.WithWarehouseLocation(cfg.Warehouse))
+		if len(args.Warehouse) > 0 {
+			opts = append(opts, rest.WithWarehouseLocation(args.Warehouse))
 		}
 
-		if len(cfg.Scope) > 0 {
-			opts = append(opts, rest.WithScope(cfg.Scope))
+		if len(args.Scope) > 0 {
+			opts = append(opts, rest.WithScope(args.Scope))
 		}
 
-		if cfg.RestOptions != nil {
-			if cfg.RestOptions.SigV4Enabled {
+		if args.RestOptions != nil {
+			if args.RestOptions.SigV4Enabled {
 				opts = append(opts, rest.WithSigV4())
 			}
-			if cfg.RestOptions.SigningName != "" || cfg.RestOptions.SigningRegion != "" {
-				opts = append(opts, rest.WithSigV4RegionSvc(cfg.RestOptions.SigningRegion, cfg.RestOptions.SigningName))
+
+			if args.RestOptions.SigningName != "" || args.RestOptions.SigningRegion != "" {
+				opts = append(opts, rest.WithSigV4RegionSvc(args.RestOptions.SigningRegion, args.RestOptions.SigningName))
 			}
 		}
 
-		if cat, err = rest.NewCatalog(ctx, "rest", cfg.URI, opts...); err != nil {
+		if cat, err = rest.NewCatalog(ctx, "rest", args.URI, opts...); err != nil {
 			log.Fatal(err)
 		}
 	case catalog.Glue:
@@ -239,17 +329,19 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+
 		opts := []glue.Option{
 			glue.WithAwsConfig(awscfg),
 		}
 		cat = glue.NewCatalog(opts...)
 	case catalog.Hive:
 		props := iceberg.Properties{
-			hive.URI: cfg.URI,
+			hive.URI: args.URI,
 		}
-		if len(cfg.Warehouse) > 0 {
-			props[hive.Warehouse] = cfg.Warehouse
+		if len(args.Warehouse) > 0 {
+			props[hive.Warehouse] = args.Warehouse
 		}
+
 		if cat, err = hive.NewCatalog(props); err != nil {
 			log.Fatal(err)
 		}
@@ -257,160 +349,275 @@ func main() {
 		log.Fatal("unrecognized catalog type")
 	}
 
+	return cat
+}
+
+func runDescribe(ctx context.Context, output Output, cat catalog.Catalog, cmd *DescribeCmd) {
+	// Support both:
+	//   iceberg describe namespace my.ns
+	//   iceberg describe my.ns.table
+	entityType := "any"
+	ident := cmd.Identifier
+
+	switch cmd.Identifier {
+	case "namespace":
+		entityType = "ns"
+		ident = cmd.Target
+
+		if ident == "" {
+			log.Fatal("missing IDENTIFIER for describe namespace")
+		}
+	case "table":
+		entityType = "tbl"
+		ident = cmd.Target
+
+		if ident == "" {
+			log.Fatal("missing IDENTIFIER for describe table")
+		}
+	}
+
+	describe(ctx, output, cat, ident, entityType)
+}
+
+func runCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *CreateCmd) {
 	switch {
-	case cfg.List:
-		list(ctx, output, cat, cfg.Parent)
-	case cfg.Describe:
-		entityType := "any"
-		if cfg.Namespace {
-			entityType = "ns"
-		} else if cfg.Table {
-			entityType = "tbl"
+	case cmd.Namespace != nil:
+		ns := cmd.Namespace
+		props := iceberg.Properties{}
+		if ns.Description != "" {
+			props["Description"] = ns.Description
 		}
 
-		describe(ctx, output, cat, cfg.Ident, entityType)
-	case cfg.Schema:
-		tbl := loadTable(ctx, output, cat, cfg.TableID)
-		output.Schema(tbl.Schema())
-	case cfg.Spec:
-		tbl := loadTable(ctx, output, cat, cfg.TableID)
-		output.Spec(tbl.Spec())
-	case cfg.Location:
-		tbl := loadTable(ctx, output, cat, cfg.TableID)
-		output.Text(tbl.Location())
-	case cfg.Uuid:
-		tbl := loadTable(ctx, output, cat, cfg.TableID)
-		output.Uuid(tbl.Metadata().TableUUID())
-	case cfg.Props:
-		properties(ctx, output, cat, propCmd{
-			get: cfg.Get, set: cfg.Set, remove: cfg.Remove,
-			namespace: cfg.Namespace, table: cfg.Table,
-			identifier: cfg.Ident,
-			propname:   cfg.PropName,
-			value:      cfg.Value,
-		})
-	case cfg.Rename:
-		_, err := cat.RenameTable(ctx,
-			catalog.ToIdentifier(cfg.RenameFrom), catalog.ToIdentifier(cfg.RenameTo))
+		if ns.LocationURI != "" {
+			props["Location"] = ns.LocationURI
+		}
+
+		err := cat.CreateNamespace(ctx, catalog.ToIdentifier(ns.Identifier), props)
 		if err != nil {
 			output.Error(err)
 			os.Exit(1)
 		}
 
-		output.Text("Renamed table from " + cfg.RenameFrom + " to " + cfg.RenameTo)
-	case cfg.Drop:
-		switch {
-		case cfg.Namespace:
-			err := cat.DropNamespace(ctx, catalog.ToIdentifier(cfg.Ident))
-			if err != nil {
-				output.Error(err)
-				os.Exit(1)
-			}
-		case cfg.Table:
-			err := cat.DropTable(ctx, catalog.ToIdentifier(cfg.Ident))
-			if err != nil {
-				output.Error(err)
-				os.Exit(1)
-			}
-		}
-
-	case cfg.Create:
-		switch {
-		case cfg.Namespace:
-			props := iceberg.Properties{}
-			if cfg.Description != "" {
-				props["Description"] = cfg.Description
-			}
-
-			if cfg.LocationURI != "" {
-				props["Location"] = cfg.LocationURI
-			}
-
-			err := cat.CreateNamespace(ctx, catalog.ToIdentifier(cfg.Ident), props)
-			if err != nil {
-				output.Error(err)
-				os.Exit(1)
-			}
-			output.Text("Namespace " + cfg.Ident + " created successfully")
-		case cfg.Table:
-			if cfg.SchemaStr != "" && cfg.InferSchema != "" {
-				output.Error(errors.New("--schema and --infer-schema are mutually exclusive"))
-				os.Exit(1)
-			}
-
-			var schema *iceberg.Schema
-
-			switch {
-			case cfg.SchemaStr != "":
-				var err error
-
-				schema, err = iceberg.NewSchemaFromJsonFields(0, cfg.SchemaStr)
-				if err != nil {
-					output.Error(err)
-					os.Exit(1)
-				}
-			case cfg.InferSchema != "":
-				var err error
-
-				schema, err = schemaFromFile(cfg.InferSchema)
-				if err != nil {
-					output.Error(err)
-					os.Exit(1)
-				}
-
-				output.Text("Inferred schema from " + cfg.InferSchema + ":")
-				output.Schema(schema)
-			default:
-				output.Error(errors.New("missing --schema or --infer-schema for table creation"))
-				os.Exit(1)
-			}
-
-			var opts []catalog.CreateTableOpt
-			if cfg.LocationURI != "" {
-				opts = append(opts, catalog.WithLocation(cfg.LocationURI))
-			}
-			if cfg.TableProps != "" {
-				props, err := parseProperties(cfg.TableProps)
-				if err != nil {
-					output.Error(fmt.Errorf("failed to parse properties: %w", err))
-					os.Exit(1)
-				}
-				opts = append(opts, catalog.WithProperties(props))
-			}
-			if cfg.PartitionSpec != "" {
-				spec, err := parsePartitionSpec(cfg.PartitionSpec)
-				if err != nil {
-					output.Error(fmt.Errorf("failed to parse partition spec: %w", err))
-					os.Exit(1)
-				}
-				opts = append(opts, catalog.WithPartitionSpec(spec))
-			}
-
-			if cfg.SortOrder != "" {
-				sortOrder, err := parseSortOrder(cfg.SortOrder)
-				if err != nil {
-					output.Error(fmt.Errorf("failed to parse sort order: %w", err))
-					os.Exit(1)
-				}
-				opts = append(opts, catalog.WithSortOrder(sortOrder))
-			}
-
-			ident := catalog.ToIdentifier(cfg.Ident)
-			_, err = cat.CreateTable(ctx, ident, schema, opts...)
-			if err != nil {
-				output.Error(fmt.Errorf("failed to create table: %w", err))
-				os.Exit(1)
-			}
-			output.Text("Table " + cfg.Ident + " created successfully")
-		default:
-			output.Error(errors.New("not implemented"))
+		output.Text("Namespace " + ns.Identifier + " created successfully")
+	case cmd.Table != nil:
+		tbl := cmd.Table
+		if tbl.Schema != "" && tbl.InferSchema != "" {
+			output.Error(errors.New("--schema and --infer-schema are mutually exclusive"))
 			os.Exit(1)
 		}
-	case cfg.Files:
-		tbl := loadTable(ctx, output, cat, cfg.TableID)
-		output.Files(tbl, cfg.History)
-	case cfg.Compact:
-		compact(ctx, output, cat, cfg)
+
+		var schema *iceberg.Schema
+
+		switch {
+		case tbl.Schema != "":
+			var err error
+
+			schema, err = iceberg.NewSchemaFromJsonFields(0, tbl.Schema)
+			if err != nil {
+				output.Error(err)
+				os.Exit(1)
+			}
+		case tbl.InferSchema != "":
+			var err error
+
+			schema, err = schemaFromFile(tbl.InferSchema)
+			if err != nil {
+				output.Error(err)
+				os.Exit(1)
+			}
+
+			output.Text("Inferred schema from " + tbl.InferSchema + ":")
+			output.Schema(schema)
+		default:
+			output.Error(errors.New("missing --schema or --infer-schema for table creation"))
+			os.Exit(1)
+		}
+
+		var opts []catalog.CreateTableOpt
+		if tbl.LocationURI != "" {
+			opts = append(opts, catalog.WithLocation(tbl.LocationURI))
+		}
+
+		if tbl.Properties != "" {
+			props, err := parseProperties(tbl.Properties)
+			if err != nil {
+				output.Error(fmt.Errorf("failed to parse properties: %w", err))
+				os.Exit(1)
+			}
+
+			opts = append(opts, catalog.WithProperties(props))
+		}
+
+		if tbl.PartitionSpec != "" {
+			spec, err := parsePartitionSpec(tbl.PartitionSpec)
+			if err != nil {
+				output.Error(fmt.Errorf("failed to parse partition spec: %w", err))
+				os.Exit(1)
+			}
+
+			opts = append(opts, catalog.WithPartitionSpec(spec))
+		}
+
+		if tbl.SortOrder != "" {
+			sortOrder, err := parseSortOrder(tbl.SortOrder)
+			if err != nil {
+				output.Error(fmt.Errorf("failed to parse sort order: %w", err))
+				os.Exit(1)
+			}
+
+			opts = append(opts, catalog.WithSortOrder(sortOrder))
+		}
+
+		ident := catalog.ToIdentifier(tbl.Identifier)
+		_, err := cat.CreateTable(ctx, ident, schema, opts...)
+		if err != nil {
+			output.Error(fmt.Errorf("failed to create table: %w", err))
+			os.Exit(1)
+		}
+
+		output.Text("Table " + tbl.Identifier + " created successfully")
+	}
+}
+
+func runDrop(ctx context.Context, output Output, cat catalog.Catalog, cmd *DropCmd) {
+	switch {
+	case cmd.Namespace != nil:
+		err := cat.DropNamespace(ctx, catalog.ToIdentifier(cmd.Namespace.Identifier))
+		if err != nil {
+			output.Error(err)
+			os.Exit(1)
+		}
+	case cmd.Table != nil:
+		err := cat.DropTable(ctx, catalog.ToIdentifier(cmd.Table.Identifier))
+		if err != nil {
+			output.Error(err)
+			os.Exit(1)
+		}
+	}
+}
+
+func runRename(ctx context.Context, output Output, cat catalog.Catalog, cmd *RenameCmd) {
+	_, err := cat.RenameTable(ctx,
+		catalog.ToIdentifier(cmd.From), catalog.ToIdentifier(cmd.To))
+	if err != nil {
+		output.Error(err)
+		os.Exit(1)
+	}
+
+	output.Text("Renamed table from " + cmd.From + " to " + cmd.To)
+}
+
+func validateEntityType(t string) {
+	if t != "namespace" && t != "table" {
+		log.Fatalf("expected 'namespace' or 'table', got %q", t)
+	}
+}
+
+func runProperties(ctx context.Context, output Output, cat catalog.Catalog, cmd *PropertiesCmd) {
+	switch {
+	case cmd.Get != nil:
+		get := cmd.Get
+		validateEntityType(get.Type)
+
+		isNs := get.Type == "namespace"
+		ident := catalog.ToIdentifier(get.Identifier)
+
+		var props iceberg.Properties
+		if isNs {
+			var err error
+
+			props, err = cat.LoadNamespaceProperties(ctx, ident)
+			if err != nil {
+				output.Error(err)
+				os.Exit(1)
+			}
+		} else {
+			tbl := loadTable(ctx, output, cat, get.Identifier)
+			props = tbl.Metadata().Properties()
+		}
+
+		if get.PropName == "" {
+			output.DescribeProperties(props)
+
+			return
+		}
+
+		if val, ok := props[get.PropName]; ok {
+			output.Text(val)
+		} else {
+			output.Error(errors.New("could not find property " + get.PropName + " on namespace " + get.Identifier))
+			os.Exit(1)
+		}
+	case cmd.Set != nil:
+		set := cmd.Set
+		validateEntityType(set.Type)
+
+		isNs := set.Type == "namespace"
+		ident := catalog.ToIdentifier(set.Identifier)
+
+		output.Text("Setting " + set.PropName + "=" + set.Value + " on " + set.Identifier)
+		if isNs {
+			_, err := cat.UpdateNamespaceProperties(ctx, ident,
+				nil, iceberg.Properties{set.PropName: set.Value})
+			if err != nil {
+				output.Error(err)
+				os.Exit(1)
+			}
+		} else {
+			tbl := loadTable(ctx, output, cat, set.Identifier)
+			_, _, err := cat.CommitTable(ctx, tbl.Identifier(), nil,
+				[]table.Update{table.NewSetPropertiesUpdate(iceberg.Properties{set.PropName: set.Value})})
+			if err != nil {
+				output.Error(err)
+				os.Exit(1)
+			}
+		}
+
+		output.Text("Updated " + set.PropName + " on " + set.Identifier)
+	case cmd.Remove != nil:
+		rm := cmd.Remove
+		validateEntityType(rm.Type)
+
+		isNs := rm.Type == "namespace"
+		ident := catalog.ToIdentifier(rm.Identifier)
+
+		output.Text("Removing " + rm.PropName + " on " + rm.Identifier)
+		if isNs {
+			_, err := cat.UpdateNamespaceProperties(ctx, ident,
+				[]string{rm.PropName}, nil)
+			if err != nil {
+				output.Error(err)
+				os.Exit(1)
+			}
+		} else {
+			tbl := loadTable(ctx, output, cat, rm.Identifier)
+			_, _, err := cat.CommitTable(ctx, tbl.Identifier(), nil,
+				[]table.Update{table.NewRemovePropertiesUpdate([]string{rm.PropName})})
+			if err != nil {
+				output.Error(err)
+				os.Exit(1)
+			}
+		}
+
+		output.Text("Removed " + rm.PropName + " from " + rm.Identifier)
+	}
+}
+
+func runCompact(ctx context.Context, output Output, cat catalog.Catalog, cmd *CompactCmd) {
+	switch {
+	case cmd.Analyze != nil:
+		compact(ctx, output, cat, compactConfig{
+			tableID:        cmd.Analyze.TableID,
+			targetFileSize: cmd.Analyze.TargetFileSize,
+			analyzeOnly:    true,
+		})
+	case cmd.Run != nil:
+		compact(ctx, output, cat, compactConfig{
+			tableID:                     cmd.Run.TableID,
+			targetFileSize:              cmd.Run.TargetFileSize,
+			partialProgress:             cmd.Run.PartialProgress,
+			preserveDeadEqualityDeletes: cmd.Run.PreserveDeadEqualityDeletes,
+		})
 	}
 }
 
@@ -426,6 +633,7 @@ func list(ctx context.Context, output Output, cat catalog.Catalog, parent string
 				output.Error(err)
 				os.Exit(1)
 			}
+
 			ids = append(ids, id)
 		}
 	}
@@ -436,6 +644,7 @@ func list(ctx context.Context, output Output, cat catalog.Catalog, parent string
 			output.Error(err)
 			os.Exit(1)
 		}
+
 		ids = ns
 	}
 
@@ -494,111 +703,33 @@ func loadTable(ctx context.Context, output Output, cat catalog.Catalog, id strin
 	return tbl
 }
 
-type propCmd struct {
-	get, set, remove bool
-	namespace, table bool
-
-	identifier, propname, value string
-}
-
-func properties(ctx context.Context, output Output, cat catalog.Catalog, args propCmd) {
-	ident := catalog.ToIdentifier(args.identifier)
-
-	switch {
-	case args.get:
-		var props iceberg.Properties
-		switch {
-		case args.namespace:
-			var err error
-			props, err = cat.LoadNamespaceProperties(ctx, ident)
-			if err != nil {
-				output.Error(err)
-				os.Exit(1)
-			}
-		case args.table:
-			tbl := loadTable(ctx, output, cat, args.identifier)
-			props = tbl.Metadata().Properties()
-		}
-
-		if args.propname == "" {
-			output.DescribeProperties(props)
-
-			return
-		}
-
-		if val, ok := props[args.propname]; ok {
-			output.Text(val)
-		} else {
-			output.Error(errors.New("could not find property " + args.propname + " on namespace " + args.identifier))
-			os.Exit(1)
-		}
-	case args.set:
-		output.Text("Setting " + args.propname + "=" + args.value + " on " + args.identifier)
-		switch {
-		case args.namespace:
-			_, err := cat.UpdateNamespaceProperties(ctx, ident,
-				nil, iceberg.Properties{args.propname: args.value})
-			if err != nil {
-				output.Error(err)
-				os.Exit(1)
-			}
-		case args.table:
-			tbl := loadTable(ctx, output, cat, args.identifier)
-			_, _, err := cat.CommitTable(ctx, tbl.Identifier(), nil,
-				[]table.Update{table.NewSetPropertiesUpdate(iceberg.Properties{args.propname: args.value})})
-			if err != nil {
-				output.Error(err)
-				os.Exit(1)
-			}
-		}
-		output.Text("Updated " + args.propname + " on " + args.identifier)
-	case args.remove:
-		output.Text("Removing " + args.propname + " on " + args.identifier)
-		switch {
-		case args.namespace:
-			_, err := cat.UpdateNamespaceProperties(ctx, ident,
-				[]string{args.propname}, nil)
-			if err != nil {
-				output.Error(err)
-				os.Exit(1)
-			}
-		case args.table:
-			tbl := loadTable(ctx, output, cat, args.identifier)
-
-			_, _, err := cat.CommitTable(ctx, tbl.Identifier(), nil,
-				[]table.Update{table.NewRemovePropertiesUpdate([]string{args.propname})})
-			if err != nil {
-				output.Error(err)
-				os.Exit(1)
-			}
-		}
-		output.Text("Removed " + args.propname + " from " + args.identifier)
-	}
-}
-
-// mergeConf applies values from the file config into resConfig for any option
+// mergeConf applies values from the file config into args for any option
 // that was not explicitly provided on the command line. explicitFlags is a set
 // of flag names (without the "--" prefix) that appeared in os.Args so that
 // CLI-provided values always take precedence over the file config.
-func mergeConf(fileConf *config.CatalogConfig, resConfig *Config, explicitFlags map[string]bool) {
+func mergeConf(fileConf *config.CatalogConfig, args *Args, explicitFlags map[string]bool) {
 	if !explicitFlags["catalog"] && len(fileConf.CatalogType) > 0 {
-		resConfig.Catalog = fileConf.CatalogType
+		args.Catalog = fileConf.CatalogType
 	}
+
 	if !explicitFlags["uri"] && len(fileConf.URI) > 0 {
-		resConfig.URI = fileConf.URI
+		args.URI = fileConf.URI
 	}
+
 	if !explicitFlags["output"] && len(fileConf.Output) > 0 {
-		resConfig.Output = fileConf.Output
+		args.Output = fileConf.Output
 	}
+
 	if !explicitFlags["credential"] && len(fileConf.Credential) > 0 {
-		resConfig.Cred = fileConf.Credential
+		args.Credential = fileConf.Credential
 	}
+
 	if !explicitFlags["warehouse"] && len(fileConf.Warehouse) > 0 {
-		resConfig.Warehouse = fileConf.Warehouse
+		args.Warehouse = fileConf.Warehouse
 	}
 
 	if fileConf.RestOptions != nil {
-		resConfig.RestOptions = fileConf.RestOptions
+		args.RestOptions = fileConf.RestOptions
 	}
 }
 
