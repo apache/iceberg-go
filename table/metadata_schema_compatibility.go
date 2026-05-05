@@ -285,16 +285,28 @@ func (v *complexTypeDefaultValidator) Field(field iceberg.NestedField, fieldResu
 	return validateComplexDefault(field)
 }
 
-func (v *complexTypeDefaultValidator) List(_ iceberg.ListType, elemResult error) error {
-	return elemResult
+func (v *complexTypeDefaultValidator) List(list iceberg.ListType, elemResult error) error {
+	if elemResult != nil {
+		return elemResult
+	}
+
+	return validateComplexDefault(list.ElementField())
 }
 
-func (v *complexTypeDefaultValidator) Map(_ iceberg.MapType, keyResult, valueResult error) error {
+func (v *complexTypeDefaultValidator) Map(mapType iceberg.MapType, keyResult, valueResult error) error {
 	if keyResult != nil {
 		return keyResult
 	}
 
-	return valueResult
+	if valueResult != nil {
+		return valueResult
+	}
+
+	if err := validateComplexDefault(mapType.KeyField()); err != nil {
+		return err
+	}
+
+	return validateComplexDefault(mapType.ValueField())
 }
 
 func (v *complexTypeDefaultValidator) Primitive(_ iceberg.PrimitiveType) error {

@@ -1980,4 +1980,19 @@ func TestComplexTypeDefaultValidation(t *testing.T) {
 		err := checkSchemaCompatibility(schema, 3)
 		require.NoError(t, err)
 	})
+
+	t.Run("InvalidNestedStructDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "outer", Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 2, Name: "inner", Type: &iceberg.ListType{
+						ElementID: 3, Element: iceberg.StringType{}, ElementRequired: false,
+					}, Required: false, InitialDefault: "not a list"},
+				},
+			}, Required: false},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "list type field 'inner' (id: 2) must have null or JSON array initial-default")
+	})
 }
