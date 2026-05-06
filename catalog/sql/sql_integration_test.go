@@ -313,8 +313,11 @@ func (s *SQLIntegrationSuite) TestWriteCommitTable() {
 	updatedFS, err := updated.FS(s.ctx)
 	s.Require().NoError(err)
 
-	entries, err := mf[0].FetchEntries(updatedFS, false)
-	s.Require().NoError(err)
+	entries := make([]iceberg.ManifestEntry, 0, 1)
+	for entry, err := range mf[0].Entries(updatedFS, false) {
+		s.Require().NoError(err)
+		entries = append(entries, entry)
+	}
 
 	s.Len(entries, 1)
 	s.Equal(pqfile, entries[0].DataFile().FilePath())

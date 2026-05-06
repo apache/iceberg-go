@@ -71,11 +71,10 @@ func CollectDeadEqualityDeletes(
 		if m.ManifestContent() != iceberg.ManifestContentDeletes {
 			continue
 		}
-		entries, err := m.FetchEntries(fs, true)
-		if err != nil {
-			return nil, err
-		}
-		for _, e := range entries {
+		for e, err := range m.Entries(fs, true) {
+			if err != nil {
+				return nil, err
+			}
 			if e.DataFile().ContentType() != iceberg.EntryContentEqDeletes {
 				continue
 			}
@@ -95,11 +94,10 @@ func CollectDeadEqualityDeletes(
 		if m.ManifestContent() != iceberg.ManifestContentData {
 			continue
 		}
-		entries, err := m.FetchEntries(fs, true)
-		if err != nil {
-			return nil, err
-		}
-		for _, e := range entries {
+		for e, err := range m.Entries(fs, true) {
+			if err != nil {
+				return nil, err
+			}
 			df := e.DataFile()
 			if df.ContentType() != iceberg.EntryContentData {
 				continue

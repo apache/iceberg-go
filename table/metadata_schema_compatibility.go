@@ -78,6 +78,10 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 		return fmt.Errorf("failed to validate unknown types: %w", err)
 	}
 
+	if err := validateComplexTypeDefaults(sc); err != nil {
+		return fmt.Errorf("failed to validate complex type defaults: %w", err)
+	}
+
 	if _, err := iceberg.IndexNameByID(sc); err != nil {
 		return fmt.Errorf("invalid schema: %w", err)
 	}
@@ -280,5 +284,111 @@ func (v *unknownTypeValidator) Primitive(_ iceberg.PrimitiveType) error {
 }
 
 func (v *unknownTypeValidator) Variant(_ iceberg.VariantType) error {
+	return nil
+}
+
+func validateComplexTypeDefaults(sc *iceberg.Schema) error {
+	validator := &complexTypeDefaultValidator{}
+	result, err := iceberg.Visit(sc, validator)
+	if err != nil {
+		return err
+	}
+
+	return result
+}
+
+type complexTypeDefaultValidator struct{}
+
+func (v *complexTypeDefaultValidator) Schema(_ *iceberg.Schema, structResult error) error {
+	return structResult
+}
+
+func (v *complexTypeDefaultValidator) Struct(_ iceberg.StructType, fieldResults []error) error {
+	for _, err := range fieldResults {
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (v *complexTypeDefaultValidator) Field(field iceberg.NestedField, fieldResult error) error {
+	if fieldResult != nil {
+		return fieldResult
+	}
+
+	return validateComplexDefault(field)
+}
+
+func (v *complexTypeDefaultValidator) List(list iceberg.ListType, elemResult error) error {
+	if elemResult != nil {
+		return elemResult
+	}
+
+	return validateComplexDefault(list.ElementField())
+}
+
+func (v *complexTypeDefaultValidator) Map(mapType iceberg.MapType, keyResult, valueResult error) error {
+	if keyResult != nil {
+		return keyResult
+	}
+
+	if valueResult != nil {
+		return valueResult
+	}
+
+	if err := validateComplexDefault(mapType.KeyField()); err != nil {
+		return err
+	}
+
+	return validateComplexDefault(mapType.ValueField())
+}
+
+func (v *complexTypeDefaultValidator) Primitive(_ iceberg.PrimitiveType) error {
+	return nil
+}
+
+func (v *complexTypeDefaultValidator) Variant(_ iceberg.VariantType) error {
+	return nil
+}
+
+func validateComplexDefault(field iceberg.NestedField) error {
+	switch field.Type.(type) {
+	case *iceberg.StructType:
+		if field.InitialDefault != nil {
+			if _, ok := field.InitialDefault.(map[string]any); !ok {
+				return fmt.Errorf("struct type field '%s' (id: %d) must have null or JSON object initial-default, but got: %v", field.Name, field.ID, field.InitialDefault)
+			}
+		}
+		if field.WriteDefault != nil {
+			if _, ok := field.WriteDefault.(map[string]any); !ok {
+				return fmt.Errorf("struct type field '%s' (id: %d) must have null or JSON object write-default, but got: %v", field.Name, field.ID, field.WriteDefault)
+			}
+		}
+	case *iceberg.ListType:
+		if field.InitialDefault != nil {
+			if _, ok := field.InitialDefault.([]any); !ok {
+				return fmt.Errorf("list type field '%s' (id: %d) must have null or JSON array initial-default, but got: %v", field.Name, field.ID, field.InitialDefault)
+			}
+		}
+		if field.WriteDefault != nil {
+			if _, ok := field.WriteDefault.([]any); !ok {
+				return fmt.Errorf("list type field '%s' (id: %d) must have null or JSON array write-default, but got: %v", field.Name, field.ID, field.WriteDefault)
+			}
+		}
+	case *iceberg.MapType:
+		if field.InitialDefault != nil {
+			if _, ok := field.InitialDefault.(map[string]any); !ok {
+				return fmt.Errorf("map type field '%s' (id: %d) must have null or JSON object initial-default, but got: %v", field.Name, field.ID, field.InitialDefault)
+			}
+		}
+		if field.WriteDefault != nil {
+			if _, ok := field.WriteDefault.(map[string]any); !ok {
+				return fmt.Errorf("map type field '%s' (id: %d) must have null or JSON object write-default, but got: %v", field.Name, field.ID, field.WriteDefault)
+			}
+		}
+	}
+
 	return nil
 }

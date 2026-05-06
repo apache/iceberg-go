@@ -44,11 +44,13 @@ import (
 //   - Position deletes: referenced data files must still be reachable
 //     from the current branch head (validateDataFilesExist).
 //   - Equality deletes under write.delete.isolation-level=serializable
-//     (the default): any concurrent commit that added data files is
-//     rejected. This is conservative — the filter derived from the
-//     eq-delete predicate is not yet threaded in, so the current
-//     check uses AlwaysTrue and may reject concurrent appends that
-//     could not actually match the predicate. Opt out by setting
+//     (the default): concurrent data files in the same partition(s) as
+//     the equality deletes are rejected. For partitioned tables an
+//     OR-of-equalities filter is built from the eq-delete files'
+//     partition tuples and routed through validateAddedDataFilesMatchingFilter
+//     (spec-evolution safe, manifest-summary pruning, type-aware evaluation).
+//     For unpartitioned tables the check is conservative (AlwaysTrue —
+//     any concurrent append is a conflict). Opt out by setting
 //     write.delete.isolation-level=snapshot.
 //
 // Refresh-and-replay between retries is deferred to a follow-up PR;
@@ -189,10 +191,14 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 //
 //   - When any equality-delete is included and isolation is
 //     SERIALIZABLE, reject the commit if a concurrent snapshot added
-//     data files (under any partition, using AlwaysTrue as the
-//     conservative filter). Java refines this with the derived
-//     eq-delete filter; a follow-up can do the same once RowDelta
-//     carries the bound predicate.
+//     conflicting data files. For unpartitioned tables the check is
+//     conservative (AlwaysTrue — any concurrent append is a conflict).
+//     For partitioned tables, an OR-of-equalities filter is built from
+//     the eq-delete files' partition tuples and routed through
+//     validateAddedDataFilesMatchingFilter, which performs per-spec
+//     projection (spec-evolution safe), manifest-summary pruning, and
+//     type-aware partition evaluation — so only concurrent data files
+//     in the same partitions as the equality deletes are rejected.
 //
 // Fast appends alongside a RowDelta see no validators from RowDelta:
 // data-only commits are as safe as a fastAppend.
@@ -209,7 +215,7 @@ func (rd *RowDelta) validate(cc *conflictContext) error {
 	// matching Java's behavior when the referenced-file column is
 	// unset.
 	var referenced []string
-	var hasEqDeletes bool
+	var eqDeleteFiles []iceberg.DataFile
 	for _, f := range rd.delFiles {
 		switch f.ContentType() {
 		case iceberg.EntryContentPosDeletes:
@@ -217,7 +223,7 @@ func (rd *RowDelta) validate(cc *conflictContext) error {
 				referenced = append(referenced, *ref)
 			}
 		case iceberg.EntryContentEqDeletes:
-			hasEqDeletes = true
+			eqDeleteFiles = append(eqDeleteFiles, f)
 		}
 	}
 
@@ -227,16 +233,28 @@ func (rd *RowDelta) validate(cc *conflictContext) error {
 		}
 	}
 
-	if hasEqDeletes {
+	if len(eqDeleteFiles) > 0 {
 		level := readIsolationLevel(rd.txn.meta.props,
 			WriteDeleteIsolationLevelKey, WriteDeleteIsolationLevelDefault)
-		// Conservative: eq-deletes apply by predicate, and RowDelta
-		// does not yet surface the bound predicate. AlwaysTrue is the
-		// safest over-approximation and matches PR 2.3's contract on
-		// validateNoConflictingDataFiles under SERIALIZABLE. Follow-up:
-		// narrow with the actual eq-delete filter once it is carried
-		// on the RowDelta.
-		if err := validateNoConflictingDataFiles(cc, iceberg.AlwaysTrue{}, level); err != nil {
+		// Route through the existing validateNoConflictingDataFiles path,
+		// which calls validateAddedDataFilesMatchingFilter internally.
+		// For unpartitioned tables, use AlwaysTrue conservatively — an
+		// equality delete can affect any row. For partitioned tables,
+		// build an OR-of-equalities filter from the eq-delete files'
+		// partition tuples so that concurrent appends to different
+		// partitions are not falsely rejected.
+		currentSpec, specErr := rd.txn.meta.CurrentSpec()
+		if specErr != nil {
+			return fmt.Errorf("reading current partition spec: %w", specErr)
+		}
+
+		var err error
+		if currentSpec == nil || currentSpec.NumFields() == 0 {
+			err = validateNoConflictingDataFiles(cc, iceberg.AlwaysTrue{}, level)
+		} else {
+			err = validateNoConflictingDataFilesInPartitions(cc, eqDeleteFiles, level)
+		}
+		if err != nil {
 			return err
 		}
 	}

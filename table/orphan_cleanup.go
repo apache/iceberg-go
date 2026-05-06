@@ -268,12 +268,10 @@ func (t Table) getReferencedFiles(fs iceio.IO) (map[string]bool, error) {
 		for _, manifest := range manifestFiles {
 			referenced[manifest.FilePath()] = true
 
-			entries, err := manifest.FetchEntries(fs, false)
-			if err != nil {
-				return nil, fmt.Errorf("failed to read manifest entries: %w", err)
-			}
-
-			for _, entry := range entries {
+			for entry, err := range manifest.Entries(fs, false) {
+				if err != nil {
+					return nil, fmt.Errorf("failed to read manifest entries: %w", err)
+				}
 				referenced[entry.DataFile().FilePath()] = true
 			}
 		}
