@@ -516,12 +516,14 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 			if pf, ok := partFieldByID[fid]; ok {
 				if _, isIdentity := pf.Transform.(iceberg.IdentityTransform); !isIdentity {
 					identityOnly = false
+
 					break
 				}
 			}
 		}
 		if !identityOnly {
 			terms = append(terms, iceberg.AlwaysTrue{})
+
 			continue
 		}
 
