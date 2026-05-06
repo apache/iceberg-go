@@ -635,6 +635,7 @@ func (c convertToArrow) VisitGeometry(iceberg.GeometryType) arrow.Field {
 	if c.useLargeTypes {
 		return arrow.Field{Type: arrow.BinaryTypes.LargeBinary}
 	}
+
 	return arrow.Field{Type: arrow.BinaryTypes.Binary}
 }
 
@@ -643,6 +644,7 @@ func (c convertToArrow) VisitGeography(iceberg.GeographyType) arrow.Field {
 	if c.useLargeTypes {
 		return arrow.Field{Type: arrow.BinaryTypes.LargeBinary}
 	}
+
 	return arrow.Field{Type: arrow.BinaryTypes.Binary}
 }
 
