@@ -153,13 +153,13 @@ func GetPartitionRecord(dataFile iceberg.DataFile, partitionType *iceberg.Struct
 func openManifest(io io.IO, manifest iceberg.ManifestFile,
 	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error),
 ) ([]iceberg.ManifestEntry, error) {
-	entries, err := manifest.FetchEntries(io, true)
-	if err != nil {
-		return nil, err
-	}
+	// Counts may be -1 (unset) on V1 manifests, so clamp before allocating.
+	out := make([]iceberg.ManifestEntry, 0, max(0, int(manifest.AddedDataFiles())+int(manifest.ExistingDataFiles())))
+	for entry, err := range manifest.Entries(io, true) {
+		if err != nil {
+			return nil, err
+		}
 
-	out := make([]iceberg.ManifestEntry, 0, len(entries))
-	for _, entry := range entries {
 		p, err := partitionFilter(entry.DataFile())
 		if err != nil {
 			return nil, err

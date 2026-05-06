@@ -1400,15 +1400,13 @@ func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs 
 				}
 			}
 
-			entries, err := manifest.FetchEntries(fs, false)
-			if err != nil {
-				return fmt.Errorf("failed to fetch manifest entries: %w", err)
-			}
-
 			localDelete := make([]iceberg.DataFile, 0)
 			localRewrite := make([]iceberg.DataFile, 0)
 
-			for _, entry := range entries {
+			for entry, err := range manifest.Entries(fs, false) {
+				if err != nil {
+					return fmt.Errorf("failed to fetch manifest entries: %w", err)
+				}
 				if entry.Status() == iceberg.EntryStatusDELETED {
 					continue
 				}

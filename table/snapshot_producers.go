@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"maps"
 	"slices"
 	"sync/atomic"
@@ -161,14 +162,14 @@ func (of *overwriteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 	}
 
 	for _, m := range manifestList {
-		entries, err := of.base.fetchManifestEntry(m, true)
-		if err != nil {
-			return existingFiles, err
-		}
-
-		foundDeleted := make([]iceberg.ManifestEntry, 0)
-		notDeleted := make([]iceberg.ManifestEntry, 0, len(entries))
-		for _, entry := range entries {
+		// Counts may be -1 (unset) on V1 manifests, so clamp before allocating.
+		capacity := int(m.AddedDataFiles()) + int(m.ExistingDataFiles())
+		notDeleted := make([]iceberg.ManifestEntry, 0, max(0, capacity))
+		foundDeletedCount := 0
+		for entry, err := range of.base.iterManifestEntries(m, true) {
+			if err != nil {
+				return existingFiles, err
+			}
 			path := entry.DataFile().FilePath()
 			content := entry.DataFile().ContentType()
 			_, isDeletedData := of.base.deletedFiles[path]
@@ -177,13 +178,13 @@ func (of *overwriteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 			isData := content == iceberg.EntryContentData
 			matched := (isDeletedData && isData) || (isDeletedDelete && !isData)
 			if matched {
-				foundDeleted = append(foundDeleted, entry)
+				foundDeletedCount++
 			} else {
 				notDeleted = append(notDeleted, entry)
 			}
 		}
 
-		if len(foundDeleted) == 0 {
+		if foundDeletedCount == 0 {
 			existingFiles = append(existingFiles, m)
 
 			continue
@@ -289,13 +290,13 @@ func (of *overwriteFiles) deletedEntries(ctx context.Context) ([]iceberg.Manifes
 	}
 
 	getEntries := func(m iceberg.ManifestFile) ([]iceberg.ManifestEntry, error) {
-		entries, err := of.base.fetchManifestEntry(m, true)
-		if err != nil {
-			return nil, err
-		}
-
-		result := make([]iceberg.ManifestEntry, 0, len(entries))
-		for _, entry := range entries {
+		// Counts may be -1 (unset) on V1 manifests, so clamp before allocating.
+		capacity := int(m.AddedDataFiles()) + int(m.ExistingDataFiles())
+		result := make([]iceberg.ManifestEntry, 0, max(0, capacity))
+		for entry, err := range of.base.iterManifestEntries(m, true) {
+			if err != nil {
+				return nil, err
+			}
 			path := entry.DataFile().FilePath()
 			content := entry.DataFile().ContentType()
 
@@ -356,12 +357,11 @@ func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.Manifest
 	defer internal.CheckedClose(wr, &err)
 
 	for _, manifest := range bin {
-		entries, err := m.snap.fetchManifestEntry(manifest, false)
-		if err != nil {
-			return nil, err
-		}
+		for entry, err := range m.snap.iterManifestEntries(manifest, false) {
+			if err != nil {
+				return nil, err
+			}
 
-		for _, entry := range entries {
 			switch {
 			case entry.Status() == iceberg.EntryStatusDELETED && entry.SnapshotID() == m.snap.snapshotID:
 				// only files deleted by this snapshot should be added to the new manifest
@@ -614,8 +614,8 @@ func (sp *snapshotProducer) newManifestOutput() (io.WriteCloser, string, error) 
 	return f, filepath, nil
 }
 
-func (sp *snapshotProducer) fetchManifestEntry(m iceberg.ManifestFile, discardDeleted bool) ([]iceberg.ManifestEntry, error) {
-	return m.FetchEntries(sp.io, discardDeleted)
+func (sp *snapshotProducer) iterManifestEntries(m iceberg.ManifestFile, discardDeleted bool) iter.Seq2[iceberg.ManifestEntry, error] {
+	return m.Entries(sp.io, discardDeleted)
 }
 
 func (sp *snapshotProducer) manifests(ctx context.Context) (_ []iceberg.ManifestFile, err error) {
