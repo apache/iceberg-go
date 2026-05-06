@@ -569,6 +569,8 @@ type SchemaVisitorPerPrimitiveType[T any] interface {
 	VisitUUID() T
 	VisitUnknown() T
 	VisitVariant() T
+	VisitGeometry(GeometryType) T
+	VisitGeography(GeographyType) T
 }
 
 // Visit accepts a visitor and performs a post-order traversal of the given schema.

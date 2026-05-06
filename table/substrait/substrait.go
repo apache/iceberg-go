@@ -170,6 +170,10 @@ func (convertToSubstrait) VisitUnknown() types.Type {
 	// Returning nil indicates this type cannot be converted to Substrait
 	return nil
 }
+func (convertToSubstrait) VisitGeometry(iceberg.GeometryType) types.Type { return &types.BinaryType{} }
+func (convertToSubstrait) VisitGeography(iceberg.GeographyType) types.Type {
+	return &types.BinaryType{}
+}
 
 func (convertToSubstrait) VisitVariant() types.Type {
 	// Variant has no Substrait equivalent today. We return BinaryType as a

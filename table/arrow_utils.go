@@ -656,6 +656,22 @@ func (c convertToArrow) VisitVariant() arrow.Field {
 	return arrow.Field{Type: extensions.NewDefaultVariantType()}
 }
 
+func (c convertToArrow) VisitGeometry(iceberg.GeometryType) arrow.Field {
+	// Passthrough binary for now, adding geoarrow-go support later
+	if c.useLargeTypes {
+		return arrow.Field{Type: arrow.BinaryTypes.LargeBinary}
+	}
+	return arrow.Field{Type: arrow.BinaryTypes.Binary}
+}
+
+func (c convertToArrow) VisitGeography(iceberg.GeographyType) arrow.Field {
+	// Passthrough binary for now, adding geoarrow-go support later
+	if c.useLargeTypes {
+		return arrow.Field{Type: arrow.BinaryTypes.LargeBinary}
+	}
+	return arrow.Field{Type: arrow.BinaryTypes.Binary}
+}
+
 var _ iceberg.SchemaVisitorPerPrimitiveType[arrow.Field] = convertToArrow{}
 
 // SchemaToArrowSchema converts an Iceberg schema to an Arrow schema. If the metadata parameter
