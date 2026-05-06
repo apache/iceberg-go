@@ -492,6 +492,24 @@ type ManifestFile interface {
 	//
 	// Prefer Entries over FetchEntries when walking large manifests
 	// since it avoids loading every entry into memory at once.
+	//
+	// Iteration contract:
+	//
+	//   - On the first error encountered while opening the manifest, decoding
+	//     a record, or applying inheritance, the iterator yields (nil, err)
+	//     and then stops. Callers must treat any non-nil error as terminal and
+	//     break or return without consuming further values.
+	//   - When iteration ends without an error from the read path, the
+	//     iterator may yield a final (nil, closeErr) pair if closing the
+	//     underlying file or manifest reader returns an error. This terminal
+	//     close error is reported only when the consumer ranged through every
+	//     value; an early break suppresses it (see below).
+	//   - Breaking out of the range loop (or any other early termination of
+	//     the yield function) is safe: the iterator releases the underlying
+	//     file handle and reader before returning, and no close error from
+	//     that path is yielded — the caller has already signalled it is no
+	//     longer interested in further values, so an extra synthetic
+	//     (nil, closeErr) tail would be discarded anyway.
 	Entries(fs iceio.IO, discardDeleted bool) iter.Seq2[ManifestEntry, error]
 	// FetchEntries reads the manifest list file to fetch the list of
 	// manifest entries using the provided file system IO interface.
