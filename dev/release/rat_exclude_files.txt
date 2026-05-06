@@ -19,6 +19,9 @@
 LICENSE
 NOTICE
 go.sum
+go.work.sum
+io/gocloud/go.sum
+cmd/iceberg/go.sum
 build
 rat-results.txt
 operation_string.go
