@@ -554,8 +554,11 @@ func (m *ManifestTestSuite) TestManifestEntriesV1() {
 		Contents: bytes.NewReader(m.v1ManifestEntries.Bytes()),
 	}, nil)
 	defer mockfs.AssertExpectations(m.T())
-	entries, err := manifest.FetchEntries(&mockfs, false)
-	m.Require().NoError(err)
+	entries := make([]ManifestEntry, 0, 2)
+	for entry, err := range manifest.Entries(&mockfs, false) {
+		m.Require().NoError(err)
+		entries = append(entries, entry)
+	}
 	m.Len(entries, 2)
 	m.Zero(manifest.PartitionSpecID())
 	m.Zero(manifest.SnapshotID())

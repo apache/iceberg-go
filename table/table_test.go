@@ -662,10 +662,8 @@ func (t *TableWritingTestSuite) TestAddFilesPartitionedTable() {
 	t.Require().NoError(err)
 
 	for _, manifest := range m {
-		entries, err := manifest.FetchEntries(mustFS(t.T(), tbl), false)
-		t.Require().NoError(err)
-
-		for _, e := range entries {
+		for e, err := range manifest.Entries(mustFS(t.T(), tbl), false) {
+			t.Require().NoError(err)
 			t.Equal(map[int]any{
 				1000: int32(123), 1001: int32(650),
 			}, e.DataFile().Partition())
@@ -2333,8 +2331,11 @@ func (t *TableWritingTestSuite) TestMergeManifests() {
 	t.Len(manifestList, 1)
 	t.validateManifestFileLength(mustFS(t.T(), tblA), manifestList[0])
 
-	entries, err := manifestList[0].FetchEntries(mustFS(t.T(), tblA), false)
-	t.Require().NoError(err)
+	entries := make([]iceberg.ManifestEntry, 0, 3)
+	for entry, err := range manifestList[0].Entries(mustFS(t.T(), tblA), false) {
+		t.Require().NoError(err)
+		entries = append(entries, entry)
+	}
 	t.Len(entries, 3)
 
 	// entries should match the snapshot ID they were added in

@@ -385,11 +385,10 @@ func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.B
 			}
 
 			pEval := partitionEvals.Get(int(mf.PartitionSpecID()))
-			entries, err := mf.FetchEntries(ctx.fs, false)
-			if err != nil {
-				return fmt.Errorf("reading entries from manifest %s: %w", mf.FilePath(), err)
-			}
-			for _, e := range entries {
+			for e, err := range mf.Entries(ctx.fs, false) {
+				if err != nil {
+					return fmt.Errorf("reading entries from manifest %s: %w", mf.FilePath(), err)
+				}
 				if e.Status() != iceberg.EntryStatusADDED || e.SnapshotID() != snap.SnapshotID {
 					continue
 				}

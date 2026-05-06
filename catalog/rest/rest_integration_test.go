@@ -351,8 +351,11 @@ func (s *RestIntegrationSuite) TestWriteCommitTable() {
 
 	s.Len(mf, 1)
 	s.EqualValues(1, mf[0].AddedDataFiles())
-	entries, err := mf[0].FetchEntries(mustFS(s.T(), updated), false)
-	s.Require().NoError(err)
+	entries := make([]iceberg.ManifestEntry, 0, 1)
+	for entry, err := range mf[0].Entries(mustFS(s.T(), updated), false) {
+		s.Require().NoError(err)
+		entries = append(entries, entry)
+	}
 
 	s.Len(entries, 1)
 	s.Equal(pqfile, entries[0].DataFile().FilePath())

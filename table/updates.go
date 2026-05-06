@@ -496,12 +496,10 @@ func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table,
 		for _, man := range mans {
 			filesToDelete[man.FilePath()] = struct{}{}
 
-			entries, err := man.FetchEntries(prefs, false)
-			if err != nil {
-				return err
-			}
-
-			for _, entry := range entries {
+			for entry, err := range man.Entries(prefs, false) {
+				if err != nil {
+					return err
+				}
 				filesToDelete[entry.DataFile().FilePath()] = struct{}{}
 			}
 		}
@@ -516,12 +514,10 @@ func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table,
 		for _, man := range mans {
 			delete(filesToDelete, man.FilePath())
 
-			entries, err := man.FetchEntries(prefs, false)
-			if err != nil {
-				return err
-			}
-
-			for _, entry := range entries {
+			for entry, err := range man.Entries(prefs, false) {
+				if err != nil {
+					return err
+				}
 				if entry.Status() != iceberg.EntryStatusDELETED {
 					delete(filesToDelete, entry.DataFile().FilePath())
 				}

@@ -381,10 +381,8 @@ func TestRowDeltaManifestContents(t *testing.T) {
 
 	// Verify manifest entries have correct content types
 	for _, m := range manifests {
-		entries, err := m.FetchEntries(fs, true)
-		require.NoError(t, err)
-
-		for _, e := range entries {
+		for e, err := range m.Entries(fs, true) {
+			require.NoError(t, err)
 			if m.ManifestContent() == iceberg.ManifestContentData {
 				assert.Equal(t, iceberg.EntryContentData, e.DataFile().ContentType())
 			} else {
