@@ -54,6 +54,8 @@ type producerImpl interface {
 	// producers that are safe against concurrent appends (fast-append
 	// and merge-append).
 	validate(cc *conflictContext) error
+
+	needsValidation() bool
 }
 
 func newManifestFileName(num int, commit uuid.UUID) string {
@@ -110,6 +112,8 @@ func (fa *fastAppendFiles) deletedEntries(_ context.Context) ([]iceberg.Manifest
 func (fa *fastAppendFiles) validate(_ *conflictContext) error {
 	return nil
 }
+
+func (fa *fastAppendFiles) needsValidation() bool { return false }
 
 type overwriteFiles struct {
 	base *snapshotProducer
@@ -322,6 +326,8 @@ func (of *overwriteFiles) deletedEntries(ctx context.Context) ([]iceberg.Manifes
 
 	return finalResult, nil
 }
+
+func (of *overwriteFiles) needsValidation() bool { return true }
 
 type manifestMergeManager struct {
 	targetSizeBytes int
@@ -897,7 +903,7 @@ func (sp *snapshotProducer) commit(ctx context.Context) (_ []Update, _ []Require
 	// pay only the no-op-closure cost. Nil producerImpl is possible
 	// only in unit tests that exercise commit() directly on a bare
 	// snapshotProducer; guard to keep those tests green.
-	if impl := sp.producerImpl; impl != nil {
+	if impl := sp.producerImpl; impl != nil && impl.needsValidation() {
 		sp.txn.validators = append(sp.txn.validators, func(cc *conflictContext) error {
 			return impl.validate(cc)
 		})
