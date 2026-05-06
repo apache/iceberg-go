@@ -505,6 +505,26 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 		}
 		sort.Ints(fieldIDs)
 
+		// Non-identity transforms (bucket, day, hour, truncate, year, month) store
+		// post-transform values in DataFile.Partition(). Building a row-space predicate
+		// with those values would cause validateAddedDataFilesMatchingFilter to
+		// re-apply the transform, producing wrong matches (double-transformation).
+		// Fall back to AlwaysTrue (conservative: treat the eq-delete as table-wide)
+		// until a full PartitionSet-style partition-space approach is added.
+		identityOnly := true
+		for _, fid := range fieldIDs {
+			if pf, ok := partFieldByID[fid]; ok {
+				if _, isIdentity := pf.Transform.(iceberg.IdentityTransform); !isIdentity {
+					identityOnly = false
+					break
+				}
+			}
+		}
+		if !identityOnly {
+			terms = append(terms, iceberg.AlwaysTrue{})
+			continue
+		}
+
 		conjuncts := make([]iceberg.BooleanExpression, 0, len(p))
 		for _, partFieldID := range fieldIDs {
 			pf, ok := partFieldByID[partFieldID]

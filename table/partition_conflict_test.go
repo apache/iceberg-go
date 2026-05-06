@@ -560,3 +560,138 @@ func TestRowDeltaValidate_SpecEvolutionConflictDetected(t *testing.T) {
 	require.Error(t, err, "cross-spec same-partition conflict must be detected after spec evolution")
 	assert.ErrorIs(t, err, ErrConflictingDataFiles)
 }
+
+// ---------------------------------------------------------------------------
+// Non-identity transforms: bucket and day fall back to AlwaysTrue
+// ---------------------------------------------------------------------------
+
+// TestRowDeltaValidate_BucketTransformFallsBackToAlwaysTrue verifies that a
+// bucket[N]-partitioned eq-delete triggers the AlwaysTrue conservative fallback.
+// Bucket partition values stored in DataFile.Partition() are post-transform
+// (bucket indices); building a row-space predicate from them would cause
+// double-transformation downstream. The safe path is to treat the eq-delete as
+// table-wide (AlwaysTrue), which rejects any concurrent data file.
+func TestRowDeltaValidate_BucketTransformFallsBackToAlwaysTrue(t *testing.T) {
+	dir := filepath.ToSlash(t.TempDir())
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "user_id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+
+	partSpec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{
+			FieldID:   1000,
+			SourceIDs: []int{2},
+			Name:      "user_id_bucket",
+			Transform: iceberg.BucketTransform{NumBuckets: 16},
+		},
+	)
+	props := iceberg.Properties{PropertyFormatVersion: "2"}
+	meta, err := NewMetadata(schema, &partSpec, UnsortedSortOrder, "file:///tmp/bucket-test", props)
+	require.NoError(t, err)
+
+	writerBaseID := int64(600)
+	b, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	require.NoError(t, b.AddSnapshot(&Snapshot{
+		SnapshotID: writerBaseID, SequenceNumber: 1,
+		TimestampMs: meta.LastUpdatedMillis() + 1,
+		Summary:     &Summary{Operation: OpAppend},
+	}))
+	require.NoError(t, b.SetSnapshotRef(MainBranch, writerBaseID, BranchRef))
+	baseMeta, err := b.Build()
+	require.NoError(t, err)
+
+	spec := baseMeta.PartitionSpec()
+	var bucketFieldID int
+	for _, pf := range spec.Fields() {
+		bucketFieldID = pf.FieldID
+	}
+
+	// Concurrent commit: data file in bucket 1.
+	concSnapshotID := int64(601)
+	mf := writeTestManifest(t, dir, spec, schema, concSnapshotID,
+		map[int]any{bucketFieldID: int32(1)}, dir+"/bucket1-data.parquet")
+	listPath := writeTestManifestList(t, dir, concSnapshotID, []iceberg.ManifestFile{mf})
+	ctx := buildPartitionedContext(t, baseMeta, listPath, writerBaseID, concSnapshotID)
+	require.Len(t, ctx.concurrent, 1)
+
+	// Eq-delete in bucket 1 — same bucket, but non-identity transform forces
+	// AlwaysTrue fallback; concurrent file must still be rejected.
+	eqDf, err := iceberg.NewDataFileBuilder(
+		spec, iceberg.EntryContentEqDeletes,
+		dir+"/bucket1-eq-del.parquet", iceberg.ParquetFile,
+		map[int]any{bucketFieldID: int32(1)}, nil, nil, 1, 1024,
+	)
+	require.NoError(t, err)
+
+	err = validateNoConflictingDataFilesInPartitions(ctx, []iceberg.DataFile{eqDf.Build()}, IsolationSerializable)
+	require.Error(t, err, "bucket-partitioned eq-delete must trigger conservative AlwaysTrue fallback")
+	assert.ErrorIs(t, err, ErrConflictingDataFiles)
+}
+
+// TestRowDeltaValidate_DayTransformFallsBackToAlwaysTrue verifies that a
+// day(ts)-partitioned eq-delete also triggers the AlwaysTrue fallback — even
+// when the concurrent data file is in a different day. The code cannot safely
+// reverse a day transform to obtain a row-space bound, so it must be conservative.
+func TestRowDeltaValidate_DayTransformFallsBackToAlwaysTrue(t *testing.T) {
+	dir := filepath.ToSlash(t.TempDir())
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "event_ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
+	)
+
+	partSpec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{
+			FieldID:   1000,
+			SourceIDs: []int{2},
+			Name:      "event_day",
+			Transform: iceberg.DayTransform{},
+		},
+	)
+	props := iceberg.Properties{PropertyFormatVersion: "2"}
+	meta, err := NewMetadata(schema, &partSpec, UnsortedSortOrder, "file:///tmp/day-test", props)
+	require.NoError(t, err)
+
+	writerBaseID := int64(700)
+	b, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	require.NoError(t, b.AddSnapshot(&Snapshot{
+		SnapshotID: writerBaseID, SequenceNumber: 1,
+		TimestampMs: meta.LastUpdatedMillis() + 1,
+		Summary:     &Summary{Operation: OpAppend},
+	}))
+	require.NoError(t, b.SetSnapshotRef(MainBranch, writerBaseID, BranchRef))
+	baseMeta, err := b.Build()
+	require.NoError(t, err)
+
+	spec := baseMeta.PartitionSpec()
+	var dayFieldID int
+	for _, pf := range spec.Fields() {
+		dayFieldID = pf.FieldID
+	}
+
+	// Concurrent commit: data file in day 100 (days since epoch).
+	concSnapshotID := int64(701)
+	mf := writeTestManifest(t, dir, spec, schema, concSnapshotID,
+		map[int]any{dayFieldID: int32(100)}, dir+"/day100-data.parquet")
+	listPath := writeTestManifestList(t, dir, concSnapshotID, []iceberg.ManifestFile{mf})
+	ctx := buildPartitionedContext(t, baseMeta, listPath, writerBaseID, concSnapshotID)
+	require.Len(t, ctx.concurrent, 1)
+
+	// Eq-delete in day 200 — a different day, but non-identity transform means
+	// the code falls back to AlwaysTrue and cannot distinguish the days;
+	// concurrent file must still be rejected (conservative correctness).
+	eqDf, err := iceberg.NewDataFileBuilder(
+		spec, iceberg.EntryContentEqDeletes,
+		dir+"/day200-eq-del.parquet", iceberg.ParquetFile,
+		map[int]any{dayFieldID: int32(200)}, nil, nil, 1, 1024,
+	)
+	require.NoError(t, err)
+
+	err = validateNoConflictingDataFilesInPartitions(ctx, []iceberg.DataFile{eqDf.Build()}, IsolationSerializable)
+	require.Error(t, err, "day-partitioned eq-delete must trigger conservative AlwaysTrue fallback even for a different day")
+	assert.ErrorIs(t, err, ErrConflictingDataFiles)
+}
