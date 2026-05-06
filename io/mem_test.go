@@ -15,15 +15,15 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package gocloud_test
+package io_test
 
 import (
 	"context"
 	"io"
+	"io/fs"
 	"testing"
 
 	icebergio "github.com/apache/iceberg-go/io"
-	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -130,4 +130,32 @@ func TestMemIO_MultipleFiles(t *testing.T) {
 	file3, err := memIO.Open("file3.txt")
 	require.NoError(t, err)
 	file3.Close()
+}
+
+func TestMemIO_WalkDir(t *testing.T) {
+	ctx := context.Background()
+
+	memIO, err := icebergio.LoadFS(ctx, map[string]string{}, "mem://walkdir-bucket/")
+	require.NoError(t, err)
+
+	listable, ok := memIO.(icebergio.ListableIO)
+	require.True(t, ok, "mem IO should implement ListableIO")
+
+	writeIO := memIO.(icebergio.WriteFileIO)
+	require.NoError(t, writeIO.WriteFile("mem://walkdir-bucket/a/1.txt", []byte("1")))
+	require.NoError(t, writeIO.WriteFile("mem://walkdir-bucket/a/2.txt", []byte("2")))
+	require.NoError(t, writeIO.WriteFile("mem://walkdir-bucket/b/3.txt", []byte("3")))
+
+	var walked []string
+	err = listable.WalkDir("mem://walkdir-bucket/a", func(path string, _ fs.DirEntry, err error) error {
+		require.NoError(t, err)
+		walked = append(walked, path)
+
+		return nil
+	})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{
+		"mem://walkdir-bucket/a/1.txt",
+		"mem://walkdir-bucket/a/2.txt",
+	}, walked)
 }
