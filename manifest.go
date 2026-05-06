@@ -1851,6 +1851,12 @@ func (d *dataFile) convertAvroValueToIcebergType(v any, fieldID int) any {
 			}
 
 			return Timestamp(v.(int64))
+		case atype.TimestampNanos:
+			if val, ok := v.(time.Time); ok {
+				return TimestampNano(val.UTC().UnixNano())
+			}
+
+			return TimestampNano(v.(int64))
 		case atype.Decimal:
 			if r, ok := v.(*big.Rat); ok {
 				scale := d.fieldIDToFixedSize[fieldID]
