@@ -23,11 +23,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/apache/iceberg-go/internal"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/suite"
 	"github.com/twmb/avro"
 	"github.com/twmb/avro/ocf"
@@ -2060,4 +2062,150 @@ func (m *ManifestTestSuite) TestWriteManifestClosesWriterOnEntryError() {
 	m.Require().Error(err)
 	m.Require().ErrorContains(err, "only entries with status ADDED")
 	m.Require().ErrorIs(err, errLimitedWrite)
+}
+
+type trackCloseFile struct {
+	contents   *bytes.Reader
+	closeCount int
+	closeErr   error
+	readLimit  int
+	readErr    error
+	nRead      int
+}
+
+var _ iceio.File = (*trackCloseFile)(nil)
+
+func newTrackCloseFile(data []byte) *trackCloseFile {
+	return &trackCloseFile{contents: bytes.NewReader(data)}
+}
+
+func (f *trackCloseFile) Stat() (fs.FileInfo, error) { return nil, nil }
+
+func (f *trackCloseFile) Read(p []byte) (int, error) {
+	if f.readErr != nil && f.nRead >= f.readLimit {
+		return 0, f.readErr
+	}
+	if f.readErr != nil && f.nRead+len(p) > f.readLimit {
+		p = p[:f.readLimit-f.nRead]
+	}
+	n, err := f.contents.Read(p)
+	f.nRead += n
+
+	return n, err
+}
+
+func (f *trackCloseFile) Close() error {
+	f.closeCount++
+
+	return f.closeErr
+}
+
+func (f *trackCloseFile) Seek(offset int64, whence int) (int64, error) {
+	return f.contents.Seek(offset, whence)
+}
+
+func (f *trackCloseFile) ReadAt(p []byte, off int64) (int, error) {
+	return f.contents.ReadAt(p, off)
+}
+
+var (
+	errMidStreamRead  = errors.New("simulated mid-stream read error")
+	errCloseFinalPair = errors.New("simulated close error")
+)
+
+func (m *ManifestTestSuite) TestEntriesEarlyBreakClosesFile() {
+	var mockfs internal.MockFS
+	manifest := manifestFile{
+		version: 2,
+		SpecID:  1,
+		Path:    manifestFileRecordsV2[0].FilePath(),
+	}
+
+	file := newTrackCloseFile(m.v2ManifestEntries.Bytes())
+	mockfs.Test(m.T())
+	mockfs.On("Open", manifest.FilePath()).Return(file, nil)
+	defer mockfs.AssertExpectations(m.T())
+
+	yielded := 0
+	for entry, err := range manifest.Entries(&mockfs, false) {
+		m.Require().NoError(err, "no error expected on a healthy manifest before break")
+		m.Require().NotNil(entry)
+		yielded++
+		if yielded == 1 {
+			break
+		}
+	}
+	m.Equal(1, yielded, "iteration must stop after the first entry on early break")
+	m.Equal(1, file.closeCount, "file must be closed exactly once on early break")
+}
+
+func (m *ManifestTestSuite) TestEntriesMidStreamErrorYieldsAndStops() {
+	var mockfs internal.MockFS
+	manifest := manifestFile{
+		version: 2,
+		SpecID:  1,
+		Path:    manifestFileRecordsV2[0].FilePath(),
+	}
+
+	data := m.v2ManifestEntries.Bytes()
+	file := newTrackCloseFile(data)
+	file.readLimit = len(data) / 2
+	file.readErr = errMidStreamRead
+	mockfs.Test(m.T())
+	mockfs.On("Open", manifest.FilePath()).Return(file, nil)
+	defer mockfs.AssertExpectations(m.T())
+
+	var (
+		entries  []ManifestEntry
+		gotError error
+		yields   int
+	)
+	for entry, err := range manifest.Entries(&mockfs, false) {
+		yields++
+		if err != nil {
+			gotError = err
+
+			break
+		}
+		entries = append(entries, entry)
+	}
+	m.Require().NotNil(gotError, "iterator must yield a non-nil error")
+	m.Require().ErrorIs(gotError, errMidStreamRead,
+		"yielded error must equal or wrap the simulated mid-stream read error")
+	m.Equal(yields, len(entries)+1,
+		"the error pair must follow zero or more entry pairs and stop iteration")
+	m.Equal(1, file.closeCount, "file must be closed exactly once after a mid-stream error")
+}
+
+func (m *ManifestTestSuite) TestEntriesCloseErrorAsFinalPair() {
+	var mockfs internal.MockFS
+	manifest := manifestFile{
+		version: 2,
+		SpecID:  1,
+		Path:    manifestFileRecordsV2[0].FilePath(),
+	}
+
+	file := newTrackCloseFile(m.v2ManifestEntries.Bytes())
+	file.closeErr = errCloseFinalPair
+	mockfs.Test(m.T())
+	mockfs.On("Open", manifest.FilePath()).Return(file, nil)
+	defer mockfs.AssertExpectations(m.T())
+
+	var (
+		entries []ManifestEntry
+		errs    []error
+	)
+	for entry, err := range manifest.Entries(&mockfs, false) {
+		if err != nil {
+			errs = append(errs, err)
+
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	m.Len(entries, 2, "iteration must consume every entry before the terminal close pair")
+	m.Require().Len(errs, 1, "iterator must yield exactly one terminal close error")
+	m.ErrorIs(errs[0], errCloseFinalPair,
+		"terminal error must equal or wrap the simulated close error")
+	m.Equal(1, file.closeCount, "file must be closed exactly once even when Close returns an error")
 }
