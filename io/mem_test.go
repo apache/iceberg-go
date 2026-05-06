@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package gocloud_test
+package io_test
 
 import (
 	"context"
@@ -23,7 +23,6 @@ import (
 	"testing"
 
 	icebergio "github.com/apache/iceberg-go/io"
-	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
