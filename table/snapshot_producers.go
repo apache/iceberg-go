@@ -55,7 +55,10 @@ type producerImpl interface {
 	// producers that are safe against concurrent appends (fast-append
 	// and merge-append).
 	validate(cc *conflictContext) error
-
+	// needsValidation reports whether this producer's validate method
+	// performs real conflict checks. Return false only if validate is
+	// unconditionally a no-op; commit() skips validator registration
+	// entirely when this returns false, so validate will never run.
 	needsValidation() bool
 }
 
@@ -504,6 +507,8 @@ func (m *mergeAppendFiles) processManifests(manifests []iceberg.ManifestFile) ([
 	return append(result, unmergedDeleteManifests...), nil
 }
 
+func (m *mergeAppendFiles) needsValidation() bool { return false }
+
 type snapshotProducer struct {
 	producerImpl
 
@@ -899,10 +904,10 @@ func (sp *snapshotProducer) commit(ctx context.Context) (_ []Update, _ []Require
 	// transaction. doCommit runs it against the current catalog state
 	// before cat.CommitTable so conflicts the catalog can't see
 	// (partition-filter overlap, referenced-file removal) are caught
-	// pre-flight. Fast/merge-append producers return nil here and
-	// pay only the no-op-closure cost. Nil producerImpl is possible
-	// only in unit tests that exercise commit() directly on a bare
-	// snapshotProducer; guard to keep those tests green.
+	// pre-flight. Producers that are commutative against concurrent
+	// appends (fast-append, merge-append) opt out via needsValidation()
+	// == false and skip registration entirely. The nil guard remains for
+	// unit tests that drive commit() on a bare snapshotProducer.
 	if impl := sp.producerImpl; impl != nil && impl.needsValidation() {
 		sp.txn.validators = append(sp.txn.validators, func(cc *conflictContext) error {
 			return impl.validate(cc)
