@@ -23,7 +23,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -44,17 +43,10 @@ type HadoopIntegrationSuite struct {
 	stack     *compose.DockerCompose
 }
 
-func repoRoot() string {
-	_, file, _, _ := runtime.Caller(0)
-
-	return filepath.Join(filepath.Dir(file), "..", "..")
-}
-
 func (s *HadoopIntegrationSuite) SetupSuite() {
-	// Create the warehouse directory before Docker starts so it is owned
-	// by the runner user. If Docker creates it first via the volume mount,
-	// it will be root-owned and Go won't be able to write into it.
-	s.warehouse = filepath.Join(repoRoot(), "internal", "recipe", "hadoop-warehouse")
+	// Use the same warehouse path as docker-compose and hadoop_validation.py
+	// so that both Go tests and Spark see the same directory.
+	s.warehouse = "/tmp/iceberg-hadoop-warehouse"
 	s.Require().NoError(os.MkdirAll(s.warehouse, 0o755))
 
 	var err error
