@@ -27,7 +27,6 @@ import (
 	"strings"
 
 	"gocloud.dev/blob"
-	"gocloud.dev/blob/memblob"
 )
 
 // IO is an interface to a hierarchical file system.
@@ -257,9 +256,7 @@ func inferFileIOFromSchema(ctx context.Context, path string, props map[string]st
 		}
 		keyExtractor = defaultKeyExtractor(parsed.Host)
 	case "mem":
-		// memblob doesn't use the URL host or path
-		bucket = memblob.OpenBucket(nil)
-		keyExtractor = defaultKeyExtractor(parsed.Host)
+		return openOrCreateMemBucket(parsed.Host), nil
 	case "file", "":
 		return LocalFS{}, nil
 	case "abfs", "abfss", "wasb", "wasbs":
