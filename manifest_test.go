@@ -1970,6 +1970,9 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 }
 
 func (m *ManifestTestSuite) TestWriteManifestListClosesWriterOnError() {
+	// A v2 manifest list cannot reference v3 manifests because the v2 entry
+	// schema has no first_row_id column; this gives us a deterministic
+	// AddManifests failure to assert that Close still flushes.
 	seqNum := int64(7)
 	var header bytes.Buffer
 	writer, err := NewManifestListWriterV2(&header, snapshotID, seqNum, nil)
@@ -1979,11 +1982,86 @@ func (m *ManifestTestSuite) TestWriteManifestListClosesWriterOnError() {
 	out := &limitedWriter{limit: header.Len(), err: errLimitedWrite}
 	err = WriteManifestList(2, out, snapshotID, nil, &seqNum, 0, []ManifestFile{
 		manifestFileRecordsV2[0],
-		manifestFileRecordsV1[0],
+		manifestFileRecordsV3[0],
 	})
 	m.Require().Error(err)
-	m.Require().ErrorContains(err, "ManifestListWriter only supports version 2 manifest files")
+	m.Require().ErrorContains(err, "manifest list v2 cannot reference v3 manifest files")
 	m.Require().ErrorIs(err, errLimitedWrite)
+}
+
+// TestV2ManifestListAcceptsV1Manifests verifies the spec-mandated upgrade path:
+// a v2 manifest list must be able to reference v1 manifest files written before
+// the table was upgraded, with sequence_number and min_sequence_number both
+// inherited as 0 and content inherited as data.
+func (m *ManifestTestSuite) TestV2ManifestListAcceptsV1Manifests() {
+	seqNum := int64(42)
+	var buf bytes.Buffer
+
+	err := WriteManifestList(2, &buf, snapshotID, nil, &seqNum, 0, []ManifestFile{
+		manifestFileRecordsV1[0],
+	})
+	m.Require().NoError(err)
+
+	got, err := ReadManifestList(&buf)
+	m.Require().NoError(err)
+	m.Require().Len(got, 1)
+
+	entry := got[0]
+	m.Equal(manifestFileRecordsV1[0].FilePath(), entry.FilePath())
+	m.Equal(manifestFileRecordsV1[0].Length(), entry.Length())
+	m.Equal(ManifestContentData, entry.ManifestContent(), "v1 inheritance: content must be data")
+	m.Equal(int64(0), entry.SequenceNum(), "v1 inheritance: sequence_number must be 0")
+	m.Equal(int64(0), entry.MinSequenceNum(), "v1 inheritance: min_sequence_number must be 0")
+	m.Equal(manifestFileRecordsV1[0].AddedRows(), entry.AddedRows())
+}
+
+// TestV3ManifestListAcceptsV1AndV2Manifests verifies that a v3 manifest list
+// can reference both v1 and v2 manifest files (e.g. after a v1->v3 upgrade)
+// and that first_row_id is assigned to data manifests during the write.
+func (m *ManifestTestSuite) TestV3ManifestListAcceptsV1AndV2Manifests() {
+	seqNum := int64(7)
+	firstRowID := int64(1000)
+	var buf bytes.Buffer
+
+	err := WriteManifestList(3, &buf, snapshotID, nil, &seqNum, firstRowID, []ManifestFile{
+		manifestFileRecordsV1[0],
+		manifestFileRecordsV2[0],
+	})
+	m.Require().NoError(err)
+
+	got, err := ReadManifestList(&buf)
+	m.Require().NoError(err)
+	m.Require().Len(got, 2)
+
+	v1Entry := got[0]
+	m.Equal(manifestFileRecordsV1[0].FilePath(), v1Entry.FilePath())
+	m.Equal(ManifestContentData, v1Entry.ManifestContent())
+	m.Equal(int64(0), v1Entry.SequenceNum())
+	m.Equal(int64(0), v1Entry.MinSequenceNum())
+	m.Require().NotNil(v1Entry.FirstRowID(), "v3 list must assign first_row_id for data manifests")
+	m.Equal(firstRowID, *v1Entry.FirstRowID())
+
+	v2Entry := got[1]
+	m.Equal(manifestFileRecordsV2[0].FilePath(), v2Entry.FilePath())
+	// manifestFileRecordsV2[0] is a delete manifest, so first_row_id is not
+	// assigned (assignment is data-only per the v3 ManifestListWriter rules).
+	m.Equal(ManifestContentDeletes, v2Entry.ManifestContent())
+	m.Nil(v2Entry.FirstRowID(), "delete manifests must not be assigned first_row_id")
+}
+
+// TestV2ManifestListRejectsV3Manifests confirms that a v2 manifest list still
+// refuses to reference v3 manifest files, since the v2 entry schema has no
+// place to record first_row_id and accepting them would silently drop data.
+func (m *ManifestTestSuite) TestV2ManifestListRejectsV3Manifests() {
+	seqNum := int64(1)
+	var buf bytes.Buffer
+
+	err := WriteManifestList(2, &buf, snapshotID, nil, &seqNum, 0, []ManifestFile{
+		manifestFileRecordsV3[0],
+	})
+	m.Require().Error(err)
+	m.Require().ErrorIs(err, ErrInvalidArgument)
+	m.Require().ErrorContains(err, "manifest list v2 cannot reference v3 manifest files")
 }
 
 // TestManifestRoundTripSortOrderID verifies that a sort_order_id written onto

@@ -1470,8 +1470,18 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 
 	case 2, 3:
 		for _, file := range files {
-			if file.Version() != m.version {
-				return fmt.Errorf("%w: ManifestListWriter only supports version %d manifest files", ErrInvalidArgument, m.version)
+			// Per the Iceberg spec a v2 manifest list may reference v1 manifest
+			// files (and a v3 list may reference v1 or v2 manifests) so that a
+			// table can be upgraded without rewriting historical manifests. The
+			// in-memory ManifestFile produced for v1 inputs already carries the
+			// inheritance values mandated by the spec — Content=data and
+			// SeqNumber/MinSeqNumber=0 — so it can be encoded directly against
+			// the v2/v3 entry schema. Newer-than-writer inputs are rejected
+			// because the v2 schema cannot represent v3 fields such as
+			// first_row_id.
+			if file.Version() > m.version {
+				return fmt.Errorf("%w: manifest list v%d cannot reference v%d manifest files",
+					ErrInvalidArgument, m.version, file.Version())
 			}
 
 			wrapped := *(file.(*manifestFile))
