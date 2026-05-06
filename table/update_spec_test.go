@@ -210,7 +210,9 @@ func TestUpdateSpecAddField(t *testing.T) {
 			iceberg.NestedField{ID: 1, Name: "id", Required: true, Type: iceberg.PrimitiveTypes.Int64},
 			iceberg.NestedField{ID: 2, Name: "geom", Required: false, Type: iceberg.GeometryType{}},
 		)
-		metadata, err := table.NewMetadata(geoSchema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, "", nil)
+		metadata, err := table.NewMetadata(geoSchema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, "", iceberg.Properties{
+			table.PropertyFormatVersion: "3",
+		})
 		assert.NoError(t, err)
 
 		tbl := table.New([]string{"geo_geometry"}, metadata, "", nil, nil)
@@ -232,7 +234,9 @@ func TestUpdateSpecAddField(t *testing.T) {
 			iceberg.NestedField{ID: 1, Name: "id", Required: true, Type: iceberg.PrimitiveTypes.Int64},
 			iceberg.NestedField{ID: 2, Name: "geog", Required: false, Type: geog},
 		)
-		metadata, err := table.NewMetadata(geoSchema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, "", nil)
+		metadata, err := table.NewMetadata(geoSchema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, "", iceberg.Properties{
+			table.PropertyFormatVersion: "3",
+		})
 		assert.NoError(t, err)
 
 		tbl := table.New([]string{"geo_geography"}, metadata, "", nil, nil)
