@@ -45,8 +45,11 @@ type HadoopIntegrationSuite struct {
 }
 
 func (s *HadoopIntegrationSuite) SetupSuite() {
-	// Use the same warehouse path as docker-compose and hadoop_validation.py
-	// so that both Go tests and Spark see the same directory.
+	// Use the same warehouse path that Spark is configured with inside the
+	// Docker container (see hadoop_validation.py and docker-compose.yml).
+	// The docker-compose volume mount maps host /tmp/iceberg-hadoop-warehouse
+	// to container /tmp/iceberg-hadoop-warehouse, so both Go (on host) and
+	// Spark (in container) share the same directory.
 	s.warehouse = "/tmp/iceberg-hadoop-warehouse"
 	s.Require().NoError(os.MkdirAll(s.warehouse, 0o755))
 
