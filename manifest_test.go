@@ -2109,7 +2109,7 @@ func (f *trackCloseFile) ReadAt(p []byte, off int64) (int, error) {
 }
 
 var (
-	errMidStreamRead = errors.New("simulated mid-stream read error")
+	errMidStreamRead  = errors.New("simulated mid-stream read error")
 	errCloseFinalPair = errors.New("simulated close error")
 )
 
