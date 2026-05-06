@@ -194,6 +194,10 @@ func TestAnyToLiteral_SupportedTypes(t *testing.T) {
 		{"Time", iceberg.Time(1000)},
 		{"Timestamp", iceberg.Timestamp(9999)},
 		{"UUID", uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")},
+		// DecimalLiteral is the named type returned by convertAvroValueToIcebergType
+		// (type DecimalLiteral Decimal). It must be accepted without falling through
+		// to the default error branch.
+		{"DecimalLiteral", iceberg.DecimalLiteral{Scale: 2}},
 	}
 
 	for _, tc := range cases {

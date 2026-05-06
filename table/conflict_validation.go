@@ -593,6 +593,10 @@ func anyToLiteral(v any) (iceberg.Literal, error) {
 		return iceberg.NewLiteral(val), nil
 	case iceberg.Decimal:
 		return iceberg.NewLiteral(val), nil
+	case iceberg.DecimalLiteral:
+		// convertAvroValueToIcebergType returns the named type DecimalLiteral
+		// (type DecimalLiteral Decimal), not Decimal itself. Handle both.
+		return iceberg.NewLiteral(iceberg.Decimal(val)), nil
 	case uuid.UUID:
 		return iceberg.NewLiteral(val), nil
 	default:
