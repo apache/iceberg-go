@@ -23,7 +23,6 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go/io"
-	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -34,15 +33,7 @@ func TestIORegistry(t *testing.T) {
 	assert.ElementsMatch(t, []string{
 		"file",
 		"",
-		"s3",
-		"s3a",
-		"s3n",
-		"gs",
 		"mem",
-		"abfs",
-		"abfss",
-		"wasb",
-		"wasbs",
 	}, io.GetRegisteredSchemes())
 
 	customFactoryCalled := false
@@ -57,15 +48,7 @@ func TestIORegistry(t *testing.T) {
 	assert.ElementsMatch(t, []string{
 		"file",
 		"",
-		"s3",
-		"s3a",
-		"s3n",
-		"gs",
 		"mem",
-		"abfs",
-		"abfss",
-		"wasb",
-		"wasbs",
 		"custom",
 	}, io.GetRegisteredSchemes())
 
@@ -78,15 +61,7 @@ func TestIORegistry(t *testing.T) {
 	assert.ElementsMatch(t, []string{
 		"file",
 		"",
-		"s3",
-		"s3a",
-		"s3n",
-		"gs",
 		"mem",
-		"abfs",
-		"abfss",
-		"wasb",
-		"wasbs",
 	}, io.GetRegisteredSchemes())
 
 	_, err = io.LoadFS(ctx, map[string]string{}, "custom://bucket/path")
@@ -134,11 +109,6 @@ func TestLoadFS(t *testing.T) {
 		{
 			name:        "mem scheme",
 			location:    "mem://bucket/path",
-			expectError: false,
-		},
-		{
-			name:        "s3 scheme",
-			location:    "s3://bucket/path",
 			expectError: false,
 		},
 		{
