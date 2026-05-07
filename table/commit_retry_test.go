@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -710,7 +711,7 @@ func (c *progressingRebuildCatalog) graftPeer() {
 	if err != nil {
 		panic(err)
 	}
-	count := fmt.Sprintf("%d", c.peerCount)
+	count := strconv.Itoa(c.peerCount)
 	if addErr := builder.AddSnapshot(&Snapshot{
 		SnapshotID:       peerID,
 		ParentSnapshotID: parentID,
