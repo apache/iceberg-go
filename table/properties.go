@@ -26,6 +26,7 @@ import (
 const (
 	WriteDataPathKey                        = "write.data.path"
 	WriteMetadataPathKey                    = "write.metadata.path"
+	WriteMetadataLocationKey                = "write.metadata.location"
 	WriteObjectStorePartitionedPathsKey     = "write.object-storage.partitioned-paths"
 	WriteObjectStorePartitionedPathsDefault = true
 	ObjectStoreEnabledKey                   = "write.object-storage.enabled"
