@@ -841,7 +841,7 @@ func (sp *snapshotProducer) computeOwnManifests(allManifests []iceberg.ManifestF
 		return nil, fmt.Errorf("computeOwnManifests: lookup parent snapshot %d: %w", sp.parentSnapshotID, err)
 	}
 	if parent == nil {
-		return nil, fmt.Errorf("computeOwnManifests: parent snapshot %d not found", sp.parentSnapshotID)
+		return nil, fmt.Errorf("%w: computeOwnManifests parent id %d", ErrSnapshotNotFound, sp.parentSnapshotID)
 	}
 
 	parentManifests, err := parent.Manifests(sp.io)

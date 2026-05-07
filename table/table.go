@@ -60,6 +60,11 @@ var ErrCommitFailed = errors.New("commit failed, refresh and try again")
 // need to detect this condition should use errors.Is(err, ErrWriteIORequired).
 var ErrWriteIORequired = errors.New("commit: file system does not implement WriteFileIO")
 
+// ErrSnapshotNotFound is returned (wrapped) by metadata lookups and by
+// computeOwnManifests when a snapshot ID does not exist in the table's
+// snapshot list. Tests pin meaning via errors.Is(err, ErrSnapshotNotFound).
+var ErrSnapshotNotFound = errors.New("snapshot not found")
+
 type FSysF func(ctx context.Context) (icebergio.IO, error)
 
 type Identifier = []string

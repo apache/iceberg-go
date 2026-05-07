@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -418,6 +419,20 @@ func TestDoCommit_OrphanCleanedOnSuccess(t *testing.T) {
 	_, stillExists := wfs.files[originalManifestList]
 	assert.False(t, stillExists,
 		"orphaned manifest list must be removed after successful commit")
+
+	// R3 (latest review): prove the LIVE committed path was preserved, not
+	// just that something got deleted. The catalog's CurrentSnapshot is the
+	// rebuilt one; its ManifestList must (a) differ from the orphan, and
+	// (b) still be present in the filesystem. A regression that flipped the
+	// cleanup loop to delete the committed path instead of the orphan would
+	// fail (b).
+	committedSnap := cat.metadata.CurrentSnapshot()
+	require.NotNil(t, committedSnap, "catalog must record the committed snapshot")
+	committedManifestList := committedSnap.ManifestList
+	require.NotEqual(t, originalManifestList, committedManifestList,
+		"committed manifest list must be the rebuilt path, not the original")
+	require.Contains(t, wfs.files, committedManifestList,
+		"live committed manifest list must be preserved by the cleanup defer")
 }
 
 // TestDoCommit_OrphanNotCleanedOnUnknownError verifies that manifest-list
@@ -457,6 +472,20 @@ func TestDoCommit_OrphanNotCleanedOnUnknownError(t *testing.T) {
 	_, stillExists := wfs.files[originalManifestList]
 	assert.True(t, stillExists,
 		"orphaned manifest list must NOT be removed when commit outcome is unknown (5xx)")
+
+	// R3 (latest review): on unknown-state, EVERY rebuild output must be
+	// preserved — any of them might be the snapshot the catalog silently
+	// accepted. Walk wfs.files and assert there are >=2 distinct manifest-list
+	// entries (the original + at least one rebuild). A regression that
+	// flipped cleanupOrphans=true on this path would leave only the original.
+	manifestListCount := 0
+	for name := range wfs.files {
+		if strings.HasSuffix(name, ".avro") && strings.Contains(name, "snap-") {
+			manifestListCount++
+		}
+	}
+	require.GreaterOrEqual(t, manifestListCount, 2,
+		"on unknown 5xx every rebuild's manifest list must be preserved (one may be the live commit)")
 }
 
 // TestDoCommit_OrphanCleanedOnCommitDiverged verifies that manifest-list files
@@ -565,6 +594,14 @@ func TestDoCommit_OrphanCleanedOnRetriesExhausted(t *testing.T) {
 // retry loop through real freshMeta progression — exactly what reviewer R4
 // asked for ("ensure the next attempt actually sees a different freshMeta and
 // the rebuild operates against it").
+//
+// Note on helper choice: the existing headTrackingCatalog in
+// commit_refresh_replay_test.go advances its metadata only on a SUCCESSFUL
+// CommitTable call, which is sufficient for refresh-and-replay tests but
+// cannot drive the ≥2-retry-progression scenario this test needs (we need
+// the catalog state to advance BETWEEN failed retries to simulate a peer
+// commit landing during our retry budget). progressingCatalog adds exactly
+// that capability while keeping the validate-and-Track invariants minimal.
 type progressingCatalog struct {
 	metadata          Metadata
 	commitTableCalls  atomic.Int32

@@ -1006,7 +1006,7 @@ func (b *MetadataBuilder) SnapshotByID(id int64) (*Snapshot, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("snapshot with id %d not found", id)
+	return nil, fmt.Errorf("%w: id %d", ErrSnapshotNotFound, id)
 }
 
 func (b *MetadataBuilder) NameMapping() iceberg.NameMapping {

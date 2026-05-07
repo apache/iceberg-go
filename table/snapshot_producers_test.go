@@ -935,6 +935,9 @@ func TestComputeOwnManifests_SnapshotByIDError(t *testing.T) {
 
 	got, err := sp.computeOwnManifests(nil)
 	require.Error(t, err, "unknown parent snapshot ID: must return error, not silent fallback")
+	require.ErrorIs(t, err, ErrSnapshotNotFound,
+		"production wraps ErrSnapshotNotFound; pin meaning via errors.Is so a regression "+
+			"that swallows the lookup error and returns a programming-bug error would fail this test")
 	require.Nil(t, got, "error path must return nil manifest slice")
 }
 
@@ -960,5 +963,8 @@ func TestComputeOwnManifests_ParentManifestsIOError(t *testing.T) {
 
 	got, err := sp.computeOwnManifests(nil)
 	require.Error(t, err, "IO error reading parent manifests: must return error, not silent fallback")
+	require.ErrorIs(t, err, fs.ErrNotExist,
+		"production wraps the underlying IO error; pin meaning via errors.Is so a regression that "+
+			"swallows the IO error and returns a programming-bug error would fail this test")
 	require.Nil(t, got, "error path must return nil manifest slice")
 }
