@@ -584,127 +584,275 @@ func TestDoCommit_OrphanCleanedOnRetriesExhausted(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Fix 7 (R4) — retry-progression: freshMeta advances between attempts
+// Fix 7 (R4) — retry-progression: every fix exercised end-to-end
 // ---------------------------------------------------------------------------
 
-// progressingCatalog records the LastSequenceNumber of the metadata observed
-// on every CommitTable / LoadTable call, advances its tracked metadata after
-// each failed attempt (so the next LoadTable sees a higher seq number), and
-// accepts the commit on a configurable attempt index. This drives doCommit's
-// retry loop through real freshMeta progression — exactly what reviewer R4
-// asked for ("ensure the next attempt actually sees a different freshMeta and
-// the rebuild operates against it").
+// progressingRebuildCatalog grafts a real peer commit (with a readable
+// manifest-list file in wfs.files) onto its tracked metadata between every
+// failed retry, then accepts on the final attempt. Each peer commit:
 //
-// Note on helper choice: the existing headTrackingCatalog in
-// commit_refresh_replay_test.go advances its metadata only on a SUCCESSFUL
-// CommitTable call, which is sufficient for refresh-and-replay tests but
-// cannot drive the ≥2-retry-progression scenario this test needs (we need
-// the catalog state to advance BETWEEN failed retries to simulate a peer
-// commit landing during our retry budget). progressingCatalog adds exactly
-// that capability while keeping the validate-and-Track invariants minimal.
-type progressingCatalog struct {
-	metadata          Metadata
-	commitTableCalls  atomic.Int32
-	loadTableCalls    atomic.Int32
-	failTimes         int
-	seenLastSeqNums   []int64 // captured per CommitTable call
-	loadedLastSeqNums []int64 // captured per LoadTable call (what the retry path sees)
-	graftFn           func(Metadata) Metadata
+//   - advances LastSequenceNumber and the branch head,
+//   - publishes a Summary increment ("total-data-files"+1, etc.) so the
+//     next retry's rebuild closure observes an evolving freshParent.Summary,
+//   - writes a real (empty) manifest-list file at a unique path so
+//     freshParent.Manifests(fio) succeeds inside rebuildFn.
+//
+// This is the helper reviewer R4 asked for: a single test that drives ≥2
+// ErrCommitFailed retries with a freshMeta that progresses between attempts,
+// so the rebuild closure is exercised for real (not just the retry-loop
+// refresh path with nil updates). The existing headTrackingCatalog cannot
+// do this — it only advances metadata on a SUCCESSFUL CommitTable call.
+type progressingRebuildCatalog struct {
+	metadata  Metadata
+	wfs       *memIO
+	location  string
+	branch    string
+	failTimes int
+
+	commitTableCalls atomic.Int32
+
+	// Per-call captures (used by assertions).
+	loadedLastSeqNums     []int64  // freshMeta.LastSequenceNumber() at each LoadTable
+	observedManifestLists []string // ManifestList path submitted at each CommitTable
+	observedSeqNums       []int64  // SequenceNumber submitted at each CommitTable
+
+	committedSnapshot *Snapshot // populated when CommitTable accepts
+	peerCount         int       // running peer-commit counter (= total-data-files contributed by peers)
 }
 
-func (c *progressingCatalog) LoadTable(_ context.Context, ident Identifier) (*Table, error) {
-	c.loadTableCalls.Add(1)
+func (c *progressingRebuildCatalog) LoadTable(_ context.Context, ident Identifier) (*Table, error) {
 	c.loadedLastSeqNums = append(c.loadedLastSeqNums, c.metadata.LastSequenceNumber())
 
 	return New(ident, c.metadata, "",
-		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, c), nil
+		func(context.Context) (iceio.IO, error) { return c.wfs, nil }, c), nil
 }
 
-func (c *progressingCatalog) CommitTable(_ context.Context, _ Identifier, _ []Requirement, _ []Update) (Metadata, string, error) {
+func (c *progressingRebuildCatalog) CommitTable(_ context.Context, _ Identifier, _ []Requirement, updates []Update) (Metadata, string, error) {
 	n := c.commitTableCalls.Add(1)
-	c.seenLastSeqNums = append(c.seenLastSeqNums, c.metadata.LastSequenceNumber())
+
+	// Capture the manifest-list path and sequence number being submitted
+	// this attempt — the test asserts each retry produces a unique path
+	// and a strictly advancing seq number.
+	for _, u := range updates {
+		su, ok := u.(*addSnapshotUpdate)
+		if !ok {
+			continue
+		}
+		c.observedManifestLists = append(c.observedManifestLists, su.Snapshot.ManifestList)
+		c.observedSeqNums = append(c.observedSeqNums, su.Snapshot.SequenceNumber)
+
+		break
+	}
 
 	if int(n) <= c.failTimes {
-		// Simulate a peer commit that advances the catalog's view.
-		c.metadata = c.graftFn(c.metadata)
+		c.graftPeer()
 
 		return nil, "", ErrCommitFailed
 	}
 
-	// Accept: a real catalog would apply updates here. For this test we
-	// only need to assert that the loop reached this attempt and that
-	// freshMeta progressed across retries.
-	return c.metadata, "", nil
+	// Accept: capture the submitted snapshot for assertions and apply
+	// the updates so c.metadata.CurrentSnapshot() reflects the commit.
+	for _, u := range updates {
+		if su, ok := u.(*addSnapshotUpdate); ok {
+			snapCopy := *su.Snapshot
+			c.committedSnapshot = &snapCopy
+
+			break
+		}
+	}
+	builder, err := MetadataBuilderFromBase(c.metadata, "")
+	if err != nil {
+		return nil, "", err
+	}
+	for _, u := range updates {
+		if applyErr := u.Apply(builder); applyErr != nil {
+			return nil, "", applyErr
+		}
+	}
+	out, err := builder.Build()
+	if err != nil {
+		return nil, "", err
+	}
+	c.metadata = out
+
+	return out, "", nil
 }
 
-func newProgressingCatalog(t *testing.T, base Metadata, branch string, failTimes int) *progressingCatalog {
-	t.Helper()
-	cat := &progressingCatalog{
-		metadata:  base,
-		failTimes: failTimes,
-	}
-	nextChildID := int64(2_000)
-	cat.graftFn = func(m Metadata) Metadata {
-		nextChildID++
+// graftPeer adds a peer snapshot (with a real, readable empty manifest list)
+// to c.metadata and advances LastSequenceNumber. The peer's Summary contains
+// "total-data-files" = c.peerCount (cumulative), so the producer's rebuild
+// closure observes summary chaining when it rebases against this freshParent.
+func (c *progressingRebuildCatalog) graftPeer() {
+	c.peerCount++
+	peerID := int64(9_000) + int64(c.peerCount)
+	peerSeq := c.metadata.LastSequenceNumber() + 1
 
-		return graftSnapshotOnto(t, m, branch, nextChildID)
+	manifestListPath := fmt.Sprintf("%s/metadata/peer-%d-manifest-list.avro", c.location, peerID)
+	out, err := c.wfs.Create(manifestListPath)
+	if err != nil {
+		panic(err)
+	}
+	if writeErr := iceberg.WriteManifestList(2, out, peerID, nil, &peerSeq, 0, nil); writeErr != nil {
+		panic(writeErr)
+	}
+	if closeErr := out.Close(); closeErr != nil {
+		panic(closeErr)
 	}
 
-	return cat
+	parent := c.metadata.SnapshotByName(c.branch)
+	var parentID *int64
+	if parent != nil {
+		id := parent.SnapshotID
+		parentID = &id
+	}
+
+	builder, err := MetadataBuilderFromBase(c.metadata, "")
+	if err != nil {
+		panic(err)
+	}
+	count := fmt.Sprintf("%d", c.peerCount)
+	if addErr := builder.AddSnapshot(&Snapshot{
+		SnapshotID:       peerID,
+		ParentSnapshotID: parentID,
+		SequenceNumber:   peerSeq,
+		TimestampMs:      c.metadata.LastUpdatedMillis() + 1,
+		ManifestList:     manifestListPath,
+		Summary: &Summary{
+			Operation: OpAppend,
+			Properties: iceberg.Properties{
+				"total-data-files":       count,
+				"total-records":          count,
+				"total-files-size":       count,
+				"total-delete-files":     "0",
+				"total-position-deletes": "0",
+				"total-equality-deletes": "0",
+			},
+		},
+	}); addErr != nil {
+		panic(addErr)
+	}
+	if refErr := builder.SetSnapshotRef(c.branch, peerID, BranchRef); refErr != nil {
+		panic(refErr)
+	}
+	out2, err := builder.Build()
+	if err != nil {
+		panic(err)
+	}
+	c.metadata = out2
 }
 
-// TestDoCommit_RetryProgressesFreshMeta verifies that across multiple
-// ErrCommitFailed retries, each retry's rebuild path observes a distinct,
-// monotonically-advancing freshMeta.LastSequenceNumber(), and the final
-// committed snapshot's SequenceNumber derives from the LAST observed
-// freshMeta — not from the attempt-0 captured value. A regression that
-// caches freshMeta across retries (or feeds the rebuild a stale parent)
-// would fail one or more of these assertions.
+// TestDoCommit_RetryProgressesFreshMeta is the end-to-end regression test
+// for reviewer R4. It drives doCommit through ≥2 ErrCommitFailed retries
+// with a freshMeta that progresses between attempts, and asserts every
+// PR fix is exercised at once:
+//
+//   - Fix 3 (newSeq from freshMeta): the rebuilt SequenceNumber observed
+//     on each retry strictly advances and matches freshMeta.LastSequenceNumber+1.
+//   - Fix 2 (summary chained against fresh parent): the final committed
+//     summary's total-data-files == peerCount + this producer's adds.
+//   - Fix 6 (orphan defer cleanup): the original (attempt-0) and intermediate
+//     rebuild manifest-list paths are deleted; the live committed path is
+//     preserved in wfs.files.
+//   - "Orphan list grows by N": each retry submits a DISTINCT ManifestList
+//     path (proves the rebuild closure rewrote the list every attempt).
+//
+// A regression that cached freshMeta across retries, skipped the rebuild,
+// or carried over the captured-attempt-0 summary would fail one or more
+// of these assertions.
 func TestDoCommit_RetryProgressesFreshMeta(t *testing.T) {
-	writerHead := int64(100)
-	writerBase := newConflictTestMetadataWithProps(t, &writerHead, iceberg.Properties{
-		CommitNumRetriesKey:          "5",
-		CommitMinRetryWaitMsKey:      "1",
-		CommitMaxRetryWaitMsKey:      "2",
-		CommitTotalRetryTimeoutMsKey: "60000",
-	})
+	spec := iceberg.NewPartitionSpec()
+	wfs, meta := newMemIOWithRetryMeta(t, spec)
 
-	// Catalog fails the first 2 attempts (advancing seq each time) and
-	// accepts on attempt 3 → cat.commitTableCalls == 3.
-	cat := newProgressingCatalog(t, writerBase, MainBranch, 2)
+	// Build a real producer commit (with a real rebuildManifestList closure).
+	tbl := newOCCTable(t, meta, wfs, nil)
+	txn := tbl.NewTransaction()
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+	sp.appendDataFile(newTestDataFile(t, spec, "mem://default/table-location/data/f.parquet", nil))
 
-	tbl := New(Identifier{"db", "retry-progress"}, writerBase, "metadata.json",
-		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
+	updates, reqs, err := sp.commit(context.Background())
+	require.NoError(t, err)
+	addSnap := updates[0].(*addSnapshotUpdate)
+	originalManifestList := addSnap.Snapshot.ManifestList
+	require.Contains(t, wfs.files, originalManifestList,
+		"producer must persist the attempt-0 manifest list before doCommit runs")
 
-	noOpValidator := func(*conflictContext) error { return nil }
+	cat := &progressingRebuildCatalog{
+		metadata:  meta,
+		wfs:       wfs,
+		location:  "mem://default/table-location",
+		branch:    MainBranch,
+		failTimes: 2, // 2 fails + 1 success = 3 CommitTable calls
+	}
+	tbl = newOCCTable(t, meta, wfs, cat)
 
-	_, err := tbl.doCommit(context.Background(), nil,
-		[]Requirement{AssertRefSnapshotID(MainBranch, &writerHead)},
-		withCommitBranch(MainBranch),
-		withCommitValidators(noOpValidator),
-	)
+	_, err = tbl.doCommit(context.Background(), updates, reqs, withCommitBranch(MainBranch))
 	require.NoError(t, err, "doCommit must succeed on the third attempt")
 
+	// (a) commitTableCalls: 2 fails + 1 success.
 	require.Equal(t, int32(3), cat.commitTableCalls.Load(),
 		"failTimes=2 → 2 ErrCommitFailed + 1 success = 3 CommitTable calls")
 
-	// LoadTable is called once per retry (attempts 2 and 3 here, since
-	// attempt 1 uses the writer's own base). The two captured seq numbers
-	// must DIFFER, proving each retry actually sees a fresh metadata view
-	// rather than a cached one.
-	require.GreaterOrEqual(t, len(cat.loadedLastSeqNums), 2,
-		"refresh must run on each retry attempt")
-	for i := 1; i < len(cat.loadedLastSeqNums); i++ {
-		require.Greater(t, cat.loadedLastSeqNums[i], cat.loadedLastSeqNums[i-1],
-			"freshMeta.LastSequenceNumber() must strictly advance across retries (attempt %d vs %d): %v",
-			i, i-1, cat.loadedLastSeqNums)
+	// (b) Orphan list grows by N: every retry's submitted ManifestList path
+	// must be DISTINCT. The first equals the producer's original; attempts
+	// 2 and 3 are rebuilt paths from the rebuild closure.
+	require.Len(t, cat.observedManifestLists, 3)
+	seen := make(map[string]struct{}, 3)
+	for i, p := range cat.observedManifestLists {
+		require.NotEmpty(t, p, "attempt %d submitted an empty manifest list path", i)
+		_, dup := seen[p]
+		require.False(t, dup,
+			"every retry must submit a UNIQUE manifest list path (orphan list grows by N): %v",
+			cat.observedManifestLists)
+		seen[p] = struct{}{}
 	}
+	require.Equal(t, originalManifestList, cat.observedManifestLists[0],
+		"attempt 0 must submit the producer's original manifest list")
 
-	// commitTableCalls captured the catalog's own LastSequenceNumber at
-	// each call site — these too must strictly advance.
-	require.Len(t, cat.seenLastSeqNums, 3)
-	require.Greater(t, cat.seenLastSeqNums[1], cat.seenLastSeqNums[0],
-		"catalog state must advance after the first ErrCommitFailed")
-	require.Greater(t, cat.seenLastSeqNums[2], cat.seenLastSeqNums[1],
-		"catalog state must advance after the second ErrCommitFailed")
+	// (c) Each rebuild observed a different LastSequenceNumber. LoadTable
+	// is called once per retry (attempts 1 and 2 here — attempt 0 uses
+	// the writer's own base), so we expect 2 entries that strictly advance.
+	require.Len(t, cat.loadedLastSeqNums, 2,
+		"LoadTable must be called once per retry attempt (=2)")
+	require.Greater(t, cat.loadedLastSeqNums[1], cat.loadedLastSeqNums[0],
+		"freshMeta.LastSequenceNumber() must strictly advance across retries: %v",
+		cat.loadedLastSeqNums)
+
+	// (d) Fix 3 — newSeq derives from freshMeta.LastSequenceNumber()+1 on
+	// each retry. Submitted seq numbers must strictly increase across the
+	// 3 attempts, AND attempts 1 and 2 (the rebuilds) must equal the
+	// freshMeta.LastSequenceNumber observed by their respective LoadTable.
+	require.Len(t, cat.observedSeqNums, 3)
+	require.Greater(t, cat.observedSeqNums[1], cat.observedSeqNums[0],
+		"rebuild attempt 1 must submit a strictly higher seq num than attempt 0: %v",
+		cat.observedSeqNums)
+	require.Greater(t, cat.observedSeqNums[2], cat.observedSeqNums[1],
+		"rebuild attempt 2 must submit a strictly higher seq num than attempt 1: %v",
+		cat.observedSeqNums)
+	require.Equal(t, cat.loadedLastSeqNums[0]+1, cat.observedSeqNums[1],
+		"attempt-1 rebuild seq must equal freshMeta.LastSequenceNumber()+1 from its LoadTable")
+	require.Equal(t, cat.loadedLastSeqNums[1]+1, cat.observedSeqNums[2],
+		"attempt-2 rebuild seq must equal freshMeta.LastSequenceNumber()+1 from its LoadTable")
+
+	// (e) Fix 2 — summary chains on top of an evolving freshParent.
+	// 2 peer commits (each contributing total-data-files=1, then =2) +
+	// this producer's 1 file → final total-data-files == 3.
+	require.NotNil(t, cat.committedSnapshot, "committed snapshot must be captured")
+	require.NotNil(t, cat.committedSnapshot.Summary)
+	gotDataFiles := cat.committedSnapshot.Summary.Properties.GetInt("total-data-files", -1)
+	require.Equal(t, 3, gotDataFiles,
+		"committed total-data-files must = peer cumulative (2) + producer (1) = 3; "+
+			"a regression that ignored freshParent.Summary would publish 1")
+
+	// (f) Fix 6 — defer cleanup: the live committed manifest list is
+	// preserved in wfs.files; the original and intermediate rebuilds
+	// were orphans and have been removed.
+	committedML := cat.committedSnapshot.ManifestList
+	require.Equal(t, cat.observedManifestLists[2], committedML,
+		"the third (accepted) submission must be the live committed manifest list")
+	require.Contains(t, wfs.files, committedML,
+		"live committed manifest list must be preserved by the cleanup defer")
+	require.NotContains(t, wfs.files, originalManifestList,
+		"attempt-0 manifest list must be cleaned as orphan after success")
+	require.NotContains(t, wfs.files, cat.observedManifestLists[1],
+		"attempt-1 rebuild manifest list must be cleaned as orphan after success")
 }
