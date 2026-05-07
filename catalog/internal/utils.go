@@ -55,20 +55,18 @@ func WriteTableMetadata(metadata table.Metadata, fs icebergio.WriteFileIO, loc s
 	defer internal.CheckedClose(out, &err)
 
 	var writer io.Writer = out
-	var compressWriter io.WriteCloser
 	switch compression {
 	case table.MetadataCompressionCodecGzip:
-		compressWriter = gzip.NewWriter(out)
-		writer = compressWriter
-		defer internal.CheckedClose(compressWriter, &err)
+		gzw := gzip.NewWriter(out)
+		writer = gzw
+		defer internal.CheckedClose(gzw, &err)
 	case table.MetadataCompressionCodecZstd:
 		enc, zErr := zstd.NewWriter(out)
 		if zErr != nil {
 			return zErr
 		}
-		compressWriter = enc
-		writer = compressWriter
-		defer internal.CheckedClose(compressWriter, &err)
+		writer = enc
+		defer internal.CheckedClose(enc, &err)
 	}
 
 	err = json.NewEncoder(writer).Encode(metadata)
