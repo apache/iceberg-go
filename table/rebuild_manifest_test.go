@@ -335,6 +335,46 @@ func TestRebuildFn_V3FirstRowIDDerivedFromFreshMeta(t *testing.T) {
 	require.NotNil(t, rebuilt.FirstRowID, "v3 rebuilt snapshot must have FirstRowID")
 	require.Equal(t, int64(50), *rebuilt.FirstRowID,
 		"FirstRowID must equal freshMeta.NextRowID(); hardcoded 0 would conflict with catalog's advanced nextRowID")
+
+	// AddedRows must be recomputed from writer.NextRowID() - firstRowID for
+	// this attempt (NOT carried over from capturedSnapshot at attempt 0).
+	// The single test data file has record count 1, so the producer's own
+	// contribution this attempt is exactly 1 row.
+	require.NotNil(t, rebuilt.AddedRows, "v3 rebuilt snapshot must have AddedRows")
+	require.Equal(t, int64(1), *rebuilt.AddedRows,
+		"AddedRows must equal writer.NextRowID() - firstRowID (1 row from this producer's data file)")
+}
+
+// TestRebuildFn_V3FirstRowIDZeroWhenNilNextRowID verifies that on a v3 table
+// whose freshMeta has NextRowID()==0 (brand-new table — no rows yet) the
+// rebuilt snapshot's FirstRowID is 0 and AddedRows reflects only the rows
+// added by this producer. The Metadata API returns int64 (not *int64), so
+// "nil NextRowID" is encoded as the zero value.
+func TestRebuildFn_V3FirstRowIDZeroWhenNilNextRowID(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	txn.meta.formatVersion = 3
+
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+	sp.appendDataFile(newTestDataFile(t, spec, "mem://default/table-location/data/f.parquet", nil))
+
+	updates, _, err := sp.commit(context.Background())
+	require.NoError(t, err)
+	addSnap := updates[0].(*addSnapshotUpdate)
+	require.NotNil(t, addSnap.rebuildManifestList)
+
+	// freshMeta with NextRowID()==0 (the "nil" equivalent for the int64 API).
+	freshMeta := newV3MetadataWithNextRowID(t, 0)
+	require.Equal(t, int64(0), freshMeta.NextRowID())
+
+	rebuilt, err := addSnap.rebuildManifestList(context.Background(), freshMeta, nil, wfs, 1)
+	require.NoError(t, err, "rebuild must not panic when freshMeta.NextRowID() is 0")
+	require.NotNil(t, rebuilt.FirstRowID)
+	require.Equal(t, int64(0), *rebuilt.FirstRowID,
+		"FirstRowID must be 0 when freshMeta.NextRowID() is 0 (brand-new table)")
+	require.NotNil(t, rebuilt.AddedRows)
+	require.Equal(t, int64(1), *rebuilt.AddedRows,
+		"AddedRows must reflect only this producer's contribution (1 row)")
 }
 
 // ---------------------------------------------------------------------------
@@ -391,7 +431,46 @@ func TestRebuildFn_SummaryRebasedAgainstFreshParent(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, rebuilt.Summary)
 
-	gotTotal := rebuilt.Summary.Properties.GetInt("total-data-files", -1)
-	require.Equal(t, 6, gotTotal,
+	// All three totals named in the reviewer comment must be rebased against
+	// freshParent: total-data-files, total-records, total-files-size.
+	// newTestDataFile contributes record count 1 and file size 1 (both fields
+	// of the data file are set to 1 by newTestDataFileWithCount default).
+	gotDataFiles := rebuilt.Summary.Properties.GetInt("total-data-files", -1)
+	require.Equal(t, 6, gotDataFiles,
 		"total-data-files must be freshParent total (5) + this producer's added count (1); stale attempt-0 total would be wrong")
+	gotRecords := rebuilt.Summary.Properties.GetInt("total-records", -1)
+	require.Equal(t, 501, gotRecords,
+		"total-records must be freshParent total (500) + this producer's added records (1)")
+	gotFileSize := rebuilt.Summary.Properties.GetInt("total-files-size", -1)
+	require.Equal(t, 5001, gotFileSize,
+		"total-files-size must be freshParent total (5000) + this producer's added size (1)")
+}
+
+// TestRebuildFn_SummaryFreshParentNilKeepsCapturedSummary verifies that when
+// freshParent is nil (first snapshot on a brand-new table), the rebuild keeps
+// capturedSnapshot.Summary as-is. There is no prior parent to rebase against,
+// so the attempt-0 summary is the correct base.
+func TestRebuildFn_SummaryFreshParentNilKeepsCapturedSummary(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+	sp.appendDataFile(newTestDataFile(t, spec, "mem://default/table-location/data/f.parquet", nil))
+
+	updates, _, err := sp.commit(context.Background())
+	require.NoError(t, err)
+	addSnap := updates[0].(*addSnapshotUpdate)
+	require.NotNil(t, addSnap.rebuildManifestList)
+
+	capturedSummary := addSnap.Snapshot.Summary
+	require.NotNil(t, capturedSummary)
+
+	freshMeta := newMetadataWithLastSeqNum(t, 1)
+	rebuilt, err := addSnap.rebuildManifestList(context.Background(), freshMeta, nil, wfs, 1)
+	require.NoError(t, err)
+	require.NotNil(t, rebuilt.Summary)
+	require.Equal(t, capturedSummary.Operation, rebuilt.Summary.Operation,
+		"with freshParent=nil, rebuilt.Summary must equal capturedSnapshot.Summary")
+	require.Equal(t, capturedSummary.Properties, rebuilt.Summary.Properties,
+		"with freshParent=nil, rebuilt.Summary properties must be unchanged")
 }

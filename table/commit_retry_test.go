@@ -510,3 +510,41 @@ func TestDoCommit_OrphanCleanedOnCommitDiverged(t *testing.T) {
 		"orphaned manifest list must be removed even on ErrCommitDiverged: "+
 			"the file was never accepted by the catalog so it is safe to delete")
 }
+
+// TestDoCommit_OrphanCleanedOnRetriesExhausted verifies that when every retry
+// attempt fails with ErrCommitFailed and the loop exits with the budget
+// exhausted, the defer still fires with cleanupOrphans=true. None of the
+// orphaned manifest-list files were ever accepted by the catalog, so they are
+// safe to delete on this terminal exit.
+func TestDoCommit_OrphanCleanedOnRetriesExhausted(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	wfs, meta := newMemIOWithRetryMeta(t, spec)
+
+	tbl := newOCCTable(t, meta, wfs, nil)
+	txn := tbl.NewTransaction()
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+	sp.appendDataFile(newTestDataFile(t, spec, "mem://default/table-location/data/f.parquet", nil))
+
+	updates, reqs, err := sp.commit(context.Background())
+	require.NoError(t, err)
+	addSnap := updates[0].(*addSnapshotUpdate)
+	originalManifestList := addSnap.Snapshot.ManifestList
+
+	wfs.files[originalManifestList] = []byte("placeholder")
+
+	// numRetries=3 → 4 attempts; every attempt fails with ErrCommitFailed.
+	cat := &sequentialCatalog{
+		metadata: meta,
+		errs:     []error{ErrCommitFailed, ErrCommitFailed, ErrCommitFailed, ErrCommitFailed},
+	}
+	tbl = newOCCTable(t, meta, wfs, cat)
+
+	_, err = tbl.doCommit(t.Context(), updates, reqs, withCommitBranch(MainBranch))
+	require.ErrorIs(t, err, ErrCommitFailed,
+		"retries exhausted: terminal error must be ErrCommitFailed")
+
+	_, stillExists := wfs.files[originalManifestList]
+	assert.False(t, stillExists,
+		"orphaned manifest list must be removed when retries are exhausted with ErrCommitFailed: "+
+			"none of the retry attempts were accepted, so all orphans are safe to delete")
+}
