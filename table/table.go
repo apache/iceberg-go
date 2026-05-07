@@ -51,15 +51,19 @@ import (
 // catalogs return their conflict errors raw and will not trigger
 // retries until follow-up work wires them through (tracked under
 // issue #830).
-//
-// The retry loop in doCommit re-issues the original updates and
-// requirements unchanged. This recovers only from transient catalog
-// errors (dropped connections, brief 409 during leader election); it
-// does not yet refresh the table metadata between attempts, so a
-// contended commit whose AssertRefSnapshotID requirement has been
-// invalidated by a peer will fail deterministically on every retry.
-// Refresh-and-replay is tracked separately (issue #830).
 var ErrCommitFailed = errors.New("commit failed, refresh and try again")
+
+// ErrWriteIORequired is returned by doCommit when the table's file system
+// does not implement io.WriteFileIO. Manifest-list rebuild on retry requires
+// write access; failing fast here is preferable to silently skipping the
+// rebuild and reintroducing the stale-parent data-loss bug. Callers that
+// need to detect this condition should use errors.Is(err, ErrWriteIORequired).
+var ErrWriteIORequired = errors.New("commit: file system does not implement WriteFileIO")
+
+// ErrSnapshotNotFound is returned (wrapped) by metadata lookups and by
+// computeOwnManifests when a snapshot ID does not exist in the table's
+// snapshot list. Tests pin meaning via errors.Is(err, ErrSnapshotNotFound).
+var ErrSnapshotNotFound = errors.New("snapshot not found")
 
 type FSysF func(ctx context.Context) (icebergio.IO, error)
 
@@ -384,11 +388,37 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		return nil, err
 	}
 
+	// Every real commit-path FS implements WriteFileIO. Failing here is
+	// preferable to silently skipping the manifest-list rebuild inside the
+	// retry loop — a skip reintroduces the original stale-parent data loss.
+	wfs, ok := fs.(icebergio.WriteFileIO)
+	if !ok {
+		return nil, fmt.Errorf("%w: manifest list rebuild requires write access", ErrWriteIORequired)
+	}
+
 	var (
-		newMeta Metadata
-		newLoc  string
-		timer   *time.Timer
+		newMeta           Metadata
+		newLoc            string
+		timer             *time.Timer
+		orphanedManifests []string // manifest-list files orphaned by rebuilds
 	)
+
+	// cleanupOrphans controls whether the defer below removes orphaned manifest-list
+	// files on exit. It defaults to true (clean on all safe exits) and is set to
+	// false only for the one unsafe case: a non-ErrCommitFailed error from
+	// CommitTable, where the catalog may have silently accepted the commit and one
+	// of the "orphaned" files may actually be the live snapshot.
+	cleanupOrphans := true
+	defer func() {
+		if !cleanupOrphans || len(orphanedManifests) == 0 {
+			return
+		}
+		for _, path := range orphanedManifests {
+			if removeErr := wfs.Remove(path); removeErr != nil {
+				log.Printf("Warning: failed to delete orphaned manifest list %s: %v", path, removeErr)
+			}
+		}
+	}()
 
 	// current tracks the catalog state between retries. On attempt 0 it
 	// equals t.metadata (so the conflict context's concurrent-snapshot
@@ -428,6 +458,18 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			}
 			current = fresh.metadata
 			reqs = rewriteRefSnapshotRequirements(reqs, co.branch, current)
+
+			// Rebuild snapshot manifest lists to inherit all files committed
+			// by concurrent writers since the snapshot was originally built.
+			// Without this, the new snapshot's manifest list would only
+			// contain its own files and callers scanning the current snapshot
+			// would miss every concurrent writer's data.
+			rebuiltUpdates, orphaned, rebuildErr := rebuildSnapshotUpdates(retryCtx, updates, current, co.branch, wfs, int(attempt))
+			if rebuildErr != nil {
+				return nil, fmt.Errorf("rebuild manifest list for retry attempt %d: %w", attempt, rebuildErr)
+			}
+			orphanedManifests = append(orphanedManifests, orphaned...)
+			updates = rebuiltUpdates
 		}
 
 		// Pre-flight client-side conflict validation. Producers can
@@ -474,7 +516,11 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		// Only retry on retryable commit conflicts. Unknown-state errors
 		// (5xx, gateway timeouts) must NOT be retried because the commit
 		// may have actually succeeded — retrying could duplicate work.
+		// Suppress orphan cleanup for the same reason: one of the orphaned
+		// manifest-list files may actually be the snapshot the catalog accepted.
 		if !errors.Is(err, ErrCommitFailed) {
+			cleanupOrphans = false
+
 			return nil, err
 		}
 	}
@@ -524,6 +570,66 @@ func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Met
 	}
 
 	return out
+}
+
+// rebuildSnapshotUpdates returns a new slice of updates where any
+// addSnapshotUpdate that carries a rebuildManifestList closure has its
+// snapshot regenerated to inherit all data files committed to the branch
+// since the original snapshot was built. Updates without a rebuild closure
+// pass through unchanged.
+//
+// It also returns the manifest-list file paths that were superseded by
+// the rebuild (i.e., the paths from the input updates that were replaced).
+// These become orphaned objects in object storage and should be removed
+// by the caller after a successful commit.
+//
+// This is the manifest-layer "refresh-and-replay" step: the data files
+// (already written to object storage) are reused as-is; only the manifest
+// list is rewritten to include the fresh parent's manifests so that the
+// rebuilt snapshot contains every committed file.
+func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Metadata, branch string, fs icebergio.WriteFileIO, attempt int) (rebuilt []Update, orphanedPaths []string, err error) {
+	// Determine the fresh branch head to use as the rebuilt snapshot's parent.
+	var freshHead *Snapshot
+	if branch != "" && freshMeta != nil {
+		freshHead = freshMeta.SnapshotByName(branch)
+	} else if freshMeta != nil {
+		freshHead = freshMeta.CurrentSnapshot()
+	}
+
+	result := make([]Update, len(updates))
+	copy(result, updates)
+
+	for i, u := range result {
+		su, ok := u.(*addSnapshotUpdate)
+		if !ok || su.rebuildManifestList == nil {
+			continue
+		}
+
+		// Skip if the parent has not changed — saves an unnecessary S3 write.
+		if freshHead != nil && su.Snapshot.ParentSnapshotID != nil &&
+			*su.Snapshot.ParentSnapshotID == freshHead.SnapshotID {
+			continue
+		}
+
+		oldManifestList := su.Snapshot.ManifestList
+
+		newSnap, rebuildErr := su.rebuildManifestList(ctx, freshMeta, freshHead, fs, attempt)
+		if rebuildErr != nil {
+			return nil, nil, rebuildErr
+		}
+
+		result[i] = &addSnapshotUpdate{
+			baseUpdate:          su.baseUpdate,
+			Snapshot:            newSnap,
+			ownManifests:        su.ownManifests,
+			rebuildManifestList: su.rebuildManifestList,
+		}
+
+		// The old manifest list is now an orphaned object in object storage.
+		orphanedPaths = append(orphanedPaths, oldManifestList)
+	}
+
+	return result, orphanedPaths, nil
 }
 
 type retryConfig struct {

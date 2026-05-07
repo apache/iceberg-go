@@ -416,6 +416,29 @@ func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial 
 }
 
 func (b *MetadataBuilder) AddSnapshot(snapshot *Snapshot) error {
+	return b.addSnapshotInternal(snapshot, nil)
+}
+
+// AddSnapshotUpdate adds a snapshot to the builder and stores the supplied
+// *addSnapshotUpdate as the corresponding entry in builder.updates, preserving
+// runtime-only fields (such as the manifest-list rebuild closure used by the
+// OCC retry path) that would be lost if a fresh update object were constructed.
+//
+// Callers without runtime-only fields should keep using AddSnapshot, which
+// constructs a default *addSnapshotUpdate internally.
+func (b *MetadataBuilder) AddSnapshotUpdate(u *addSnapshotUpdate) error {
+	if u == nil {
+		return nil
+	}
+
+	return b.addSnapshotInternal(u.Snapshot, u)
+}
+
+// addSnapshotInternal contains the shared validation and bookkeeping for both
+// AddSnapshot and AddSnapshotUpdate. When preserveUpdate is non-nil it is
+// appended to b.updates verbatim; otherwise a fresh *addSnapshotUpdate is
+// created via NewAddSnapshotUpdate.
+func (b *MetadataBuilder) addSnapshotInternal(snapshot *Snapshot, preserveUpdate *addSnapshotUpdate) error {
 	if snapshot == nil {
 		return nil
 	}
@@ -450,7 +473,11 @@ func (b *MetadataBuilder) AddSnapshot(snapshot *Snapshot) error {
 		return err
 	}
 
-	b.updates = append(b.updates, NewAddSnapshotUpdate(snapshot))
+	upd := preserveUpdate
+	if upd == nil {
+		upd = NewAddSnapshotUpdate(snapshot)
+	}
+	b.updates = append(b.updates, upd)
 	b.lastUpdatedMS = snapshot.TimestampMs
 	b.lastSequenceNumber = &snapshot.SequenceNumber
 	b.snapshotList = append(b.snapshotList, *snapshot)
@@ -979,7 +1006,7 @@ func (b *MetadataBuilder) SnapshotByID(id int64) (*Snapshot, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("snapshot with id %d not found", id)
+	return nil, fmt.Errorf("%w: id %d", ErrSnapshotNotFound, id)
 }
 
 func (b *MetadataBuilder) NameMapping() iceberg.NameMapping {

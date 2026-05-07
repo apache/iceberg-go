@@ -311,6 +311,18 @@ func (u *setDefaultSortOrderUpdate) Apply(builder *MetadataBuilder) error {
 type addSnapshotUpdate struct {
 	baseUpdate
 	Snapshot *Snapshot `json:"snapshot"`
+
+	// ownManifests holds the manifests written by this producer (those
+	// NOT inherited from the parent snapshot). Populated by
+	// snapshotProducer.commit and used by rebuildManifestList below.
+	ownManifests []iceberg.ManifestFile
+
+	// rebuildManifestList, when non-nil, regenerates the snapshot's
+	// manifest list to inherit from freshParent and combines it with
+	// ownManifests. Called by doCommit on every retry attempt so that
+	// each retry snapshot correctly inherits all files committed by
+	// concurrent writers since the original build.
+	rebuildManifestList func(ctx context.Context, freshMeta Metadata, freshParent *Snapshot, fio io.WriteFileIO, attempt int) (*Snapshot, error)
 }
 
 // NewAddSnapshotUpdate creates a new update that adds the given snapshot to the table metadata.
@@ -321,8 +333,14 @@ func NewAddSnapshotUpdate(snapshot *Snapshot) *addSnapshotUpdate {
 	}
 }
 
+// Apply records this snapshot in the metadata builder. It delegates to
+// MetadataBuilder.AddSnapshotUpdate so that runtime-only fields
+// (ownManifests and rebuildManifestList) are preserved on the stored update
+// without reaching back into builder.updates after the fact. doCommit's retry
+// loop relies on these fields to regenerate the manifest list after an OCC
+// conflict.
 func (u *addSnapshotUpdate) Apply(builder *MetadataBuilder) error {
-	return builder.AddSnapshot(u.Snapshot)
+	return builder.AddSnapshotUpdate(u)
 }
 
 type setSnapshotRefUpdate struct {
