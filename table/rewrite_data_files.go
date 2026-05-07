@@ -137,6 +137,40 @@ type RewriteDataFilesOptions struct {
 	// applied are removed automatically and do NOT need to be passed
 	// in here.
 	ExtraDeleteFilesToRemove []iceberg.DataFile
+
+	// GroupOptions are forwarded to every [ExecuteCompactionGroup]
+	// call to tune the per-group read+write pipeline (target file
+	// size, scan concurrency). See the With* helpers returning
+	// [CompactionGroupOption].
+	GroupOptions []CompactionGroupOption
+}
+
+// CompactionGroupOption configures a single [ExecuteCompactionGroup]
+// call. Use the With* helpers to construct values.
+type CompactionGroupOption func(*compactionGroupConfig)
+
+type compactionGroupConfig struct {
+	targetFileSize  int64
+	scanConcurrency int
+}
+
+// WithCompactionTargetFileSize sets the size target for output files
+// written by [ExecuteCompactionGroup]. Forwarded to [WriteRecords] as
+// [WithTargetFileSize]. Zero (the default) means inherit the table's
+// `write.target-file-size-bytes` property.
+func WithCompactionTargetFileSize(size int64) CompactionGroupOption {
+	return func(c *compactionGroupConfig) {
+		c.targetFileSize = size
+	}
+}
+
+// WithCompactionScanConcurrency sets the scan concurrency used when
+// reading the group's tasks. Forwarded to [Table.Scan] as
+// [WitMaxConcurrency]. Zero (the default) means runtime.GOMAXPROCS.
+func WithCompactionScanConcurrency(n int) CompactionGroupOption {
+	return func(c *compactionGroupConfig) {
+		c.scanConcurrency = n
+	}
 }
 
 // RewriteDataFiles compacts the given groups by reading data with
@@ -179,7 +213,7 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 			continue
 		}
 
-		gr, err := ExecuteCompactionGroup(ctx, t.tbl, group)
+		gr, err := ExecuteCompactionGroup(ctx, t.tbl, group, opts.GroupOptions...)
 		if err != nil {
 			return result, err
 		}
@@ -221,24 +255,42 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 //
 // In-process callers should prefer [Transaction.RewriteDataFiles],
 // which drives this and the commit step in one call.
-func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTaskGroup) (CompactionGroupResult, error) {
+//
+// Tunables are exposed via [CompactionGroupOption]. The clustered
+// write path is always used (a compaction group is single-partition
+// by construction so its read stream is trivially clustered).
+func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTaskGroup, opts ...CompactionGroupOption) (CompactionGroupResult, error) {
 	if len(group.Tasks) == 0 {
 		return CompactionGroupResult{PartitionKey: group.PartitionKey}, nil
 	}
 
-	scan := tbl.Scan()
-	arrowSchema, records, err := scan.ReadTasks(ctx, group.Tasks)
+	cfg := compactionGroupConfig{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	var scanOpts []ScanOption
+	if cfg.scanConcurrency > 0 {
+		scanOpts = append(scanOpts, WitMaxConcurrency(cfg.scanConcurrency))
+	}
+
+	arrowSchema, records, err := tbl.Scan(scanOpts...).ReadTasks(ctx, group.Tasks)
 	if err != nil {
 		return CompactionGroupResult{}, fmt.Errorf("read tasks for compaction group %q: %w", group.PartitionKey, err)
 	}
 
 	// Each compaction group is single-partition by construction, so the
 	// read stream is trivially clustered and we can use the clustered writer.
+	writeOpts := []WriteRecordOption{WithClusteredWrite()}
+	if cfg.targetFileSize > 0 {
+		writeOpts = append(writeOpts, WithTargetFileSize(cfg.targetFileSize))
+	}
+
 	var (
 		newFiles   []iceberg.DataFile
 		bytesAfter int64
 	)
-	for df, err := range WriteRecords(ctx, tbl, arrowSchema, records, WithClusteredWrite()) {
+	for df, err := range WriteRecords(ctx, tbl, arrowSchema, records, writeOpts...) {
 		if err != nil {
 			return CompactionGroupResult{}, fmt.Errorf("write compacted files for group %q: %w", group.PartitionKey, err)
 		}
@@ -278,7 +330,7 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 			continue
 		}
 
-		gr, err := ExecuteCompactionGroup(ctx, t.tbl, group)
+		gr, err := ExecuteCompactionGroup(ctx, t.tbl, group, opts.GroupOptions...)
 		if err != nil {
 			return result, err
 		}
