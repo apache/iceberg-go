@@ -324,6 +324,15 @@ func TestRebuildFn_V3FirstRowIDDerivedFromFreshMeta(t *testing.T) {
 	addSnap := updates[0].(*addSnapshotUpdate)
 	require.NotNil(t, addSnap.rebuildManifestList)
 
+	// Asymmetry probe (R1): mutate the captured snapshot's AddedRows to a
+	// sentinel that cannot match a correct recomputation. If a future
+	// regression carries this value across instead of recomputing it from
+	// writer.NextRowID()-firstRowID, the assertions below will fail.
+	require.NotNil(t, addSnap.Snapshot.AddedRows, "captured snapshot must have AddedRows on v3")
+	capturedAddedRows := *addSnap.Snapshot.AddedRows
+	sentinel := int64(999_999)
+	*addSnap.Snapshot.AddedRows = sentinel
+
 	// Simulate a concurrent writer that added 50 rows, advancing nextRowID to 50.
 	// old code: firstRowID = 0 (hardcoded)
 	// new code: firstRowID = freshMeta.NextRowID() = 50
@@ -336,13 +345,20 @@ func TestRebuildFn_V3FirstRowIDDerivedFromFreshMeta(t *testing.T) {
 	require.Equal(t, int64(50), *rebuilt.FirstRowID,
 		"FirstRowID must equal freshMeta.NextRowID(); hardcoded 0 would conflict with catalog's advanced nextRowID")
 
-	// AddedRows must be recomputed from writer.NextRowID() - firstRowID for
-	// this attempt (NOT carried over from capturedSnapshot at attempt 0).
-	// The single test data file has record count 1, so the producer's own
-	// contribution this attempt is exactly 1 row.
+	// AddedRows must be RECOMPUTED from writer.NextRowID()-firstRowID, not
+	// carried over from the captured snapshot. The producer wrote a single
+	// 1-row file, so the correct recomputed value is 1 — which is also what
+	// capturedAddedRows happened to be before mutation. The sentinel makes
+	// the difference visible: if the rebuild path reused the captured slot,
+	// rebuilt.AddedRows would equal sentinel instead.
 	require.NotNil(t, rebuilt.AddedRows, "v3 rebuilt snapshot must have AddedRows")
+	require.NotEqual(t, sentinel, *rebuilt.AddedRows,
+		"AddedRows must be recomputed; carrying the captured value (mutated to sentinel) would be a regression")
 	require.Equal(t, int64(1), *rebuilt.AddedRows,
-		"AddedRows must equal writer.NextRowID() - firstRowID (1 row from this producer's data file)")
+		"AddedRows must equal writer.NextRowID()-firstRowID (this producer's 1 data row)")
+
+	// Restore so any later inspection of capturedAddedRows is not misleading.
+	*addSnap.Snapshot.AddedRows = capturedAddedRows
 }
 
 // TestRebuildFn_V3FirstRowIDZeroWhenNilNextRowID verifies that on a v3 table
@@ -363,6 +379,12 @@ func TestRebuildFn_V3FirstRowIDZeroWhenNilNextRowID(t *testing.T) {
 	addSnap := updates[0].(*addSnapshotUpdate)
 	require.NotNil(t, addSnap.rebuildManifestList)
 
+	// Asymmetry probe (R1): mutate the captured snapshot's AddedRows to a
+	// sentinel that cannot match a correct recomputation.
+	require.NotNil(t, addSnap.Snapshot.AddedRows, "captured snapshot must have AddedRows on v3")
+	sentinel := int64(888_888)
+	*addSnap.Snapshot.AddedRows = sentinel
+
 	// freshMeta with NextRowID()==0 (the "nil" equivalent for the int64 API).
 	freshMeta := newV3MetadataWithNextRowID(t, 0)
 	require.Equal(t, int64(0), freshMeta.NextRowID())
@@ -373,6 +395,8 @@ func TestRebuildFn_V3FirstRowIDZeroWhenNilNextRowID(t *testing.T) {
 	require.Equal(t, int64(0), *rebuilt.FirstRowID,
 		"FirstRowID must be 0 when freshMeta.NextRowID() is 0 (brand-new table)")
 	require.NotNil(t, rebuilt.AddedRows)
+	require.NotEqual(t, sentinel, *rebuilt.AddedRows,
+		"AddedRows must be recomputed; carrying the captured (sentinel) value would be a regression")
 	require.Equal(t, int64(1), *rebuilt.AddedRows,
 		"AddedRows must reflect only this producer's contribution (1 row)")
 }
@@ -421,15 +445,30 @@ func TestRebuildFn_SummaryRebasedAgainstFreshParent(t *testing.T) {
 
 	freshParentID := int64(77)
 	freshParent := &Snapshot{
-		SnapshotID:   freshParentID,
-		ManifestList: parentManifestListPath,
-		Summary:      &Summary{Operation: OpAppend, Properties: freshParentSummary},
+		SnapshotID: freshParentID,
+		// Set a SequenceNumber that DIFFERS from freshMeta.LastSequenceNumber()
+		// so the assertion below can distinguish "newSeq derived from
+		// freshMeta.LastSequenceNumber()" (correct) from "newSeq derived from
+		// freshParent.SequenceNumber" (regression). Using freshParentSeq = 99
+		// versus freshMeta.LastSequenceNumber() = 1 makes the two paths
+		// disagree by 98.
+		SequenceNumber: 99,
+		ManifestList:   parentManifestListPath,
+		Summary:        &Summary{Operation: OpAppend, Properties: freshParentSummary},
 	}
 	freshMeta := newMetadataWithLastSeqNum(t, 1)
+	require.NotEqual(t, freshParent.SequenceNumber, freshMeta.LastSequenceNumber(),
+		"test fixture must keep these distinct so the seq-num source is observable")
 
 	rebuilt, err := addSnap.rebuildManifestList(context.Background(), freshMeta, freshParent, wfs, 1)
 	require.NoError(t, err)
 	require.NotNil(t, rebuilt.Summary)
+
+	// R2: pin the seq-num source. Must equal freshMeta.LastSequenceNumber()+1
+	// (=2) and must NOT equal freshParent.SequenceNumber+1 (=100). A regression
+	// that derives newSeq from freshParent would fail this assertion.
+	require.Equal(t, freshMeta.LastSequenceNumber()+1, rebuilt.SequenceNumber,
+		"newSeq must derive from freshMeta.LastSequenceNumber(), not freshParent.SequenceNumber")
 
 	// All three totals named in the reviewer comment must be rebased against
 	// freshParent: total-data-files, total-records, total-files-size.
