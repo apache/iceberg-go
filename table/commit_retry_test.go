@@ -37,7 +37,7 @@ import (
 type readOnlyIO struct{}
 
 func (readOnlyIO) Open(_ string) (iceio.File, error) { return nil, errors.New("readOnlyIO: no files") }
-func (readOnlyIO) Remove(_ string) error           { return errors.New("readOnlyIO: read-only") }
+func (readOnlyIO) Remove(_ string) error             { return errors.New("readOnlyIO: read-only") }
 
 // sequentialCatalog returns a predetermined error per CommitTable attempt.
 // If attempts exceed the len(errs) slice it returns nil (success).

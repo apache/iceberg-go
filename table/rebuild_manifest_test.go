@@ -363,10 +363,10 @@ func TestRebuildFn_SummaryRebasedAgainstFreshParent(t *testing.T) {
 	// Our producer added 1 file (added-data-files = 1 in capturedSnapshot.Summary).
 	// Expected rebuilt total-data-files = 5 + 1 = 6.
 	freshParentSummary := iceberg.Properties{
-		"total-data-files":  "5",
-		"total-records":     "500",
-		"total-files-size":  "5000",
-		"total-delete-files": "0",
+		"total-data-files":       "5",
+		"total-records":          "500",
+		"total-files-size":       "5000",
+		"total-delete-files":     "0",
 		"total-position-deletes": "0",
 		"total-equality-deletes": "0",
 	}
