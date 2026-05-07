@@ -53,6 +53,13 @@ import (
 // issue #830).
 var ErrCommitFailed = errors.New("commit failed, refresh and try again")
 
+// ErrWriteIORequired is returned by doCommit when the table's file system
+// does not implement io.WriteFileIO. Manifest-list rebuild on retry requires
+// write access; failing fast here is preferable to silently skipping the
+// rebuild and reintroducing the stale-parent data-loss bug. Callers that
+// need to detect this condition should use errors.Is(err, ErrWriteIORequired).
+var ErrWriteIORequired = errors.New("commit: file system does not implement WriteFileIO")
+
 type FSysF func(ctx context.Context) (icebergio.IO, error)
 
 type Identifier = []string
@@ -381,7 +388,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 	// retry loop — a skip reintroduces the original stale-parent data loss.
 	wfs, ok := fs.(icebergio.WriteFileIO)
 	if !ok {
-		return nil, errors.New("commit: file system does not implement WriteFileIO: manifest list rebuild requires write access")
+		return nil, fmt.Errorf("%w: manifest list rebuild requires write access", ErrWriteIORequired)
 	}
 
 	var (

@@ -335,8 +335,8 @@ func TestDoCommit_NonWriteFileIOReturnsError(t *testing.T) {
 
 	_, doErr := tbl.doCommit(t.Context(), nil, nil)
 	require.Error(t, doErr, "doCommit must fail when FS does not implement WriteFileIO")
-	assert.Contains(t, doErr.Error(), "WriteFileIO",
-		"error message must mention WriteFileIO so callers understand the requirement")
+	require.ErrorIs(t, doErr, ErrWriteIORequired,
+		"doCommit must wrap ErrWriteIORequired so callers can detect this condition with errors.Is")
 	assert.Equal(t, int32(0), cat.attempts.Load(),
 		"CommitTable must not be called when FS check fails")
 }
