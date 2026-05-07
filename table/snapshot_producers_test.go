@@ -724,6 +724,8 @@ func (e *errorOnDeletedEntries) validate(_ *conflictContext) error {
 	return nil
 }
 
+func (e *errorOnDeletedEntries) needsValidation() bool { return true }
+
 // blockingTrackingIO extends trackingIO to signal when a writer is created.
 type blockingTrackingIO struct {
 	*trackingIO
