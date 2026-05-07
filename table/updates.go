@@ -333,26 +333,14 @@ func NewAddSnapshotUpdate(snapshot *Snapshot) *addSnapshotUpdate {
 	}
 }
 
+// Apply records this snapshot in the metadata builder. It delegates to
+// MetadataBuilder.AddSnapshotUpdate so that runtime-only fields
+// (ownManifests and rebuildManifestList) are preserved on the stored update
+// without reaching back into builder.updates after the fact. doCommit's retry
+// loop relies on these fields to regenerate the manifest list after an OCC
+// conflict.
 func (u *addSnapshotUpdate) Apply(builder *MetadataBuilder) error {
-	if err := builder.AddSnapshot(u.Snapshot); err != nil {
-		return err
-	}
-
-	// Propagate the rebuild closure to the newly-added update object so
-	// that doCommit's retry loop can regenerate the manifest list after
-	// an OCC conflict. MetadataBuilder.AddSnapshot always appends a fresh
-	// *addSnapshotUpdate as the last element of builder.updates; we reach
-	// back and copy our runtime-only fields onto it.
-	if u.rebuildManifestList != nil {
-		if n := len(builder.updates); n > 0 {
-			if su, ok := builder.updates[n-1].(*addSnapshotUpdate); ok {
-				su.ownManifests = u.ownManifests
-				su.rebuildManifestList = u.rebuildManifestList
-			}
-		}
-	}
-
-	return nil
+	return builder.AddSnapshotUpdate(u)
 }
 
 type setSnapshotRefUpdate struct {
