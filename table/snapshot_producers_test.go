@@ -40,6 +40,14 @@ type limitedWriteCloser struct {
 	limit   int
 	written int
 	err     error
+
+	// parent and path, when both set, cause Close() to persist the
+	// successfully-written payload back into parent.files[path]. This makes
+	// the orphan/cleanup tests exercise the real write→delete cycle (R3)
+	// instead of pre-populating wfs.files with a placeholder.
+	parent *memIO
+	path   string
+	buf    bytes.Buffer
 }
 
 func (w *limitedWriteCloser) Write(p []byte) (int, error) {
@@ -47,11 +55,21 @@ func (w *limitedWriteCloser) Write(p []byte) (int, error) {
 		return 0, w.err
 	}
 	w.written += len(p)
+	if w.parent != nil {
+		w.buf.Write(p)
+	}
 
 	return len(p), nil
 }
 
 func (w *limitedWriteCloser) Close() error {
+	if w.parent == nil || w.path == "" {
+		return nil
+	}
+	w.parent.mu.Lock()
+	defer w.parent.mu.Unlock()
+	w.parent.files[w.path] = append([]byte(nil), w.buf.Bytes()...)
+
 	return nil
 }
 
@@ -62,6 +80,7 @@ func (w *limitedWriteCloser) ReadFrom(r io.Reader) (int64, error) {
 type memIO struct {
 	limit int
 	err   error
+	mu    sync.Mutex
 	files map[string][]byte
 }
 
@@ -74,7 +93,9 @@ func newMemIO(limit int, err error) *memIO {
 }
 
 func (m *memIO) Open(name string) (iceio.File, error) {
+	m.mu.Lock()
 	data, ok := m.files[name]
+	m.mu.Unlock()
 	if !ok {
 		return nil, fs.ErrNotExist
 	}
@@ -83,16 +104,20 @@ func (m *memIO) Open(name string) (iceio.File, error) {
 }
 
 func (m *memIO) Create(name string) (iceio.FileWriter, error) {
-	return &limitedWriteCloser{limit: m.limit, err: m.err}, nil
+	return &limitedWriteCloser{limit: m.limit, err: m.err, parent: m, path: name}, nil
 }
 
 func (m *memIO) WriteFile(name string, content []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.files[name] = append([]byte(nil), content...)
 
 	return nil
 }
 
 func (m *memIO) Remove(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	delete(m.files, name)
 
 	return nil

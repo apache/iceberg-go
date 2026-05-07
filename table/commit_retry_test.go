@@ -398,9 +398,11 @@ func TestDoCommit_OrphanCleanedOnSuccess(t *testing.T) {
 	addSnap := updates[0].(*addSnapshotUpdate)
 	originalManifestList := addSnap.Snapshot.ManifestList
 
-	// Pre-populate the original manifest list path in the IO so that the
-	// defer's wfs.Remove call has a concrete entry to delete.
-	wfs.files[originalManifestList] = []byte("placeholder")
+	// R3: assert the producer actually wrote the manifest list (real flow,
+	// not pre-populated placeholder). The orphan/cleanup contract is only
+	// meaningful when there is a real file to clean up.
+	require.Contains(t, wfs.files, originalManifestList,
+		"producer.commit() must persist the manifest list via WriteFileIO before doCommit runs")
 
 	// Catalog: fail once with ErrCommitFailed (triggers rebuild that orphans
 	// originalManifestList), then succeed.
@@ -437,7 +439,8 @@ func TestDoCommit_OrphanNotCleanedOnUnknownError(t *testing.T) {
 	addSnap := updates[0].(*addSnapshotUpdate)
 	originalManifestList := addSnap.Snapshot.ManifestList
 
-	wfs.files[originalManifestList] = []byte("placeholder")
+	require.Contains(t, wfs.files, originalManifestList,
+		"producer.commit() must persist the manifest list via WriteFileIO before doCommit runs")
 
 	unknown5xxErr := errors.New("simulated 5xx: internal server error")
 	// Catalog: fail once (ErrCommitFailed → rebuild → orphan created),
@@ -484,7 +487,8 @@ func TestDoCommit_OrphanCleanedOnCommitDiverged(t *testing.T) {
 	addSnap := updates[0].(*addSnapshotUpdate)
 	originalManifestList := addSnap.Snapshot.ManifestList
 
-	wfs.files[originalManifestList] = []byte("placeholder")
+	require.Contains(t, wfs.files, originalManifestList,
+		"producer.commit() must persist the manifest list via WriteFileIO before doCommit runs")
 
 	// Catalog: fail once (ErrCommitFailed → rebuild → orphan created).
 	// LoadTable returns freshMeta (has branch snapshot → validators run on retry).
@@ -530,7 +534,8 @@ func TestDoCommit_OrphanCleanedOnRetriesExhausted(t *testing.T) {
 	addSnap := updates[0].(*addSnapshotUpdate)
 	originalManifestList := addSnap.Snapshot.ManifestList
 
-	wfs.files[originalManifestList] = []byte("placeholder")
+	require.Contains(t, wfs.files, originalManifestList,
+		"producer.commit() must persist the manifest list via WriteFileIO before doCommit runs")
 
 	// numRetries=3 → 4 attempts; every attempt fails with ErrCommitFailed.
 	cat := &sequentialCatalog{
