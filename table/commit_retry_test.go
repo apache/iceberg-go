@@ -32,6 +32,40 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// readOnlyIO implements iceio.IO but NOT iceio.WriteFileIO.
+// Used to verify that doCommit fails early when the FS cannot write.
+type readOnlyIO struct{}
+
+func (readOnlyIO) Open(_ string) (iceio.File, error) { return nil, errors.New("readOnlyIO: no files") }
+func (readOnlyIO) Remove(_ string) error           { return errors.New("readOnlyIO: read-only") }
+
+// sequentialCatalog returns a predetermined error per CommitTable attempt.
+// If attempts exceed the len(errs) slice it returns nil (success).
+type sequentialCatalog struct {
+	metadata Metadata
+	errs     []error
+	attempts atomic.Int32
+}
+
+func (c *sequentialCatalog) LoadTable(_ context.Context, ident Identifier) (*Table, error) {
+	return New(ident, c.metadata, "",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, c), nil
+}
+
+func (c *sequentialCatalog) CommitTable(_ context.Context, _ Identifier, _ []Requirement, updates []Update) (Metadata, string, error) {
+	n := int(c.attempts.Add(1)) - 1 // 0-indexed
+	if n < len(c.errs) && c.errs[n] != nil {
+		return nil, "", c.errs[n]
+	}
+	meta, err := UpdateTableMetadata(c.metadata, updates, "")
+	if err != nil {
+		return nil, "", err
+	}
+	c.metadata = meta
+
+	return meta, "", nil
+}
+
 // flakyCatalog commits successfully only on a specified attempt number.
 // Earlier attempts return the given error.
 type flakyCatalog struct {
@@ -265,4 +299,152 @@ func TestReadRetryConfig_ClampsNegativeProperties(t *testing.T) {
 	assert.Equal(t, uint(CommitMinRetryWaitMsDefault), cfg.minWaitMs)
 	assert.Equal(t, uint(CommitMaxRetryWaitMsDefault), cfg.maxWaitMs)
 	assert.Equal(t, uint(CommitTotalRetryTimeoutMsDefault), cfg.totalTimeoutMs)
+}
+
+// ---------------------------------------------------------------------------
+// Fix 5 — mandatory WriteFileIO check at top of doCommit
+// ---------------------------------------------------------------------------
+
+// TestDoCommit_NonWriteFileIOReturnsError verifies that doCommit fails
+// immediately when the table's file system does not implement WriteFileIO.
+// A silent skip would reuse the stale manifest list — exactly the bug
+// this PR was designed to fix.
+func TestDoCommit_NonWriteFileIOReturnsError(t *testing.T) {
+	cat := &flakyCatalog{}
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "file:///tmp/rotest",
+		iceberg.Properties{PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+	cat.metadata = meta
+
+	tbl := New(
+		Identifier{"db", "ro-test"},
+		meta, "file:///tmp/rotest/v1.metadata.json",
+		func(context.Context) (iceio.IO, error) { return readOnlyIO{}, nil },
+		cat,
+	)
+
+	_, doErr := tbl.doCommit(t.Context(), nil, nil)
+	require.Error(t, doErr, "doCommit must fail when FS does not implement WriteFileIO")
+	assert.Contains(t, doErr.Error(), "WriteFileIO",
+		"error message must mention WriteFileIO so callers understand the requirement")
+	assert.Equal(t, int32(0), cat.attempts.Load(),
+		"CommitTable must not be called when FS check fails")
+}
+
+// ---------------------------------------------------------------------------
+// Fix 6 — orphan cleanup via defer
+// ---------------------------------------------------------------------------
+
+// newOCCTable creates a table that uses the given wfs for its FS and the given
+// catalog for commits. meta should include retry-config properties so that
+// doCommit's retry loop allows at least one retry.
+func newOCCTable(t *testing.T, meta Metadata, wfs iceio.WriteFileIO, cat CatalogIO) *Table {
+	t.Helper()
+
+	return New(
+		Identifier{"db", "occ-cleanup-test"},
+		meta,
+		"mem://default/table-location/metadata/v1.metadata.json",
+		func(context.Context) (iceio.IO, error) { return wfs, nil },
+		cat,
+	)
+}
+
+// newMemIOWithRetryMeta creates a test memIO and a matching table Metadata that
+// includes retry-config properties, so doCommit's retry loop allows retries.
+// The location matches createTestTransactionWithMemIO so they share the same
+// memIO for writing manifest files.
+func newMemIOWithRetryMeta(t *testing.T, spec iceberg.PartitionSpec) (*memIO, Metadata) {
+	t.Helper()
+	wfs := newMemIO(1<<20, nil)
+	schema := simpleSchema()
+	meta, err := NewMetadata(schema, &spec, UnsortedSortOrder, "mem://default/table-location",
+		iceberg.Properties{
+			CommitNumRetriesKey:          "3",
+			CommitMinRetryWaitMsKey:      "1",
+			CommitMaxRetryWaitMsKey:      "2",
+			CommitTotalRetryTimeoutMsKey: "60000",
+		})
+	require.NoError(t, err, "new metadata")
+
+	return wfs, meta
+}
+
+// TestDoCommit_OrphanCleanedOnSuccess verifies that manifest-list files
+// orphaned by OCC retries are removed after a successful commit. These files
+// are written during rebuild and must not leak on the happy path.
+func TestDoCommit_OrphanCleanedOnSuccess(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	wfs, meta := newMemIOWithRetryMeta(t, spec)
+
+	// Build a transaction from the retry-enabled meta and commit via the producer.
+	tbl := newOCCTable(t, meta, wfs, nil)
+	txn := tbl.NewTransaction()
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+	sp.appendDataFile(newTestDataFile(t, spec, "mem://default/table-location/data/f.parquet", nil))
+
+	updates, reqs, err := sp.commit(context.Background())
+	require.NoError(t, err)
+	addSnap := updates[0].(*addSnapshotUpdate)
+	originalManifestList := addSnap.Snapshot.ManifestList
+
+	// Pre-populate the original manifest list path in the IO so that the
+	// defer's wfs.Remove call has a concrete entry to delete.
+	wfs.files[originalManifestList] = []byte("placeholder")
+
+	// Catalog: fail once with ErrCommitFailed (triggers rebuild that orphans
+	// originalManifestList), then succeed.
+	cat := &sequentialCatalog{
+		metadata: meta,
+		errs:     []error{ErrCommitFailed},
+	}
+	tbl = newOCCTable(t, meta, wfs, cat)
+
+	_, err = tbl.doCommit(t.Context(), updates, reqs, withCommitBranch(MainBranch))
+	require.NoError(t, err, "doCommit must succeed on the second attempt")
+
+	_, stillExists := wfs.files[originalManifestList]
+	assert.False(t, stillExists,
+		"orphaned manifest list must be removed after successful commit")
+}
+
+// TestDoCommit_OrphanNotCleanedOnUnknownError verifies that manifest-list
+// files are NOT removed when CommitTable returns an unknown non-ErrCommitFailed
+// error (5xx / gateway timeout). In that case the catalog may have silently
+// accepted the commit, meaning one of the "orphaned" files is actually the
+// live snapshot. Deleting it would permanently corrupt the table.
+func TestDoCommit_OrphanNotCleanedOnUnknownError(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	wfs, meta := newMemIOWithRetryMeta(t, spec)
+
+	tbl := newOCCTable(t, meta, wfs, nil)
+	txn := tbl.NewTransaction()
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+	sp.appendDataFile(newTestDataFile(t, spec, "mem://default/table-location/data/f.parquet", nil))
+
+	updates, reqs, err := sp.commit(context.Background())
+	require.NoError(t, err)
+	addSnap := updates[0].(*addSnapshotUpdate)
+	originalManifestList := addSnap.Snapshot.ManifestList
+
+	wfs.files[originalManifestList] = []byte("placeholder")
+
+	unknown5xxErr := errors.New("simulated 5xx: internal server error")
+	// Catalog: fail once (ErrCommitFailed → rebuild → orphan created),
+	// then return a 5xx (non-ErrCommitFailed → cleanupOrphans=false).
+	cat := &sequentialCatalog{
+		metadata: meta,
+		errs:     []error{ErrCommitFailed, unknown5xxErr},
+	}
+	tbl = newOCCTable(t, meta, wfs, cat)
+
+	_, err = tbl.doCommit(t.Context(), updates, reqs, withCommitBranch(MainBranch))
+	require.ErrorIs(t, err, unknown5xxErr, "5xx error must propagate")
+
+	_, stillExists := wfs.files[originalManifestList]
+	assert.True(t, stillExists,
+		"orphaned manifest list must NOT be removed when commit outcome is unknown (5xx)")
 }

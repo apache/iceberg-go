@@ -376,12 +376,37 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		return nil, err
 	}
 
+	// Every real commit-path FS implements WriteFileIO. Failing here is
+	// preferable to silently skipping the manifest-list rebuild inside the
+	// retry loop — a skip reintroduces the original stale-parent data loss.
+	wfs, ok := fs.(icebergio.WriteFileIO)
+	if !ok {
+		return nil, fmt.Errorf("commit: file system does not implement WriteFileIO: manifest list rebuild requires write access")
+	}
+
 	var (
 		newMeta           Metadata
 		newLoc            string
 		timer             *time.Timer
 		orphanedManifests []string // manifest-list files orphaned by rebuilds
 	)
+
+	// cleanupOrphans controls whether the defer below removes orphaned manifest-list
+	// files on exit. It defaults to true (clean on all safe exits) and is set to
+	// false only for the one unsafe case: a non-ErrCommitFailed error from
+	// CommitTable, where the catalog may have silently accepted the commit and one
+	// of the "orphaned" files may actually be the live snapshot.
+	cleanupOrphans := true
+	defer func() {
+		if !cleanupOrphans || len(orphanedManifests) == 0 {
+			return
+		}
+		for _, path := range orphanedManifests {
+			if removeErr := wfs.Remove(path); removeErr != nil {
+				log.Printf("Warning: failed to delete orphaned manifest list %s: %v", path, removeErr)
+			}
+		}
+	}()
 
 	// current tracks the catalog state between retries. On attempt 0 it
 	// equals t.metadata (so the conflict context's concurrent-snapshot
@@ -427,14 +452,12 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			// Without this, the new snapshot's manifest list would only
 			// contain its own files and callers scanning the current snapshot
 			// would miss every concurrent writer's data.
-			if wfs, ok := fs.(icebergio.WriteFileIO); ok {
-				rebuiltUpdates, orphaned, rebuildErr := rebuildSnapshotUpdates(retryCtx, updates, current, co.branch, wfs, int(attempt))
-				if rebuildErr != nil {
-					return nil, fmt.Errorf("rebuild manifest list for retry attempt %d: %w", attempt, rebuildErr)
-				}
-				orphanedManifests = append(orphanedManifests, orphaned...)
-				updates = rebuiltUpdates
+			rebuiltUpdates, orphaned, rebuildErr := rebuildSnapshotUpdates(retryCtx, updates, current, co.branch, wfs, int(attempt))
+			if rebuildErr != nil {
+				return nil, fmt.Errorf("rebuild manifest list for retry attempt %d: %w", attempt, rebuildErr)
 			}
+			orphanedManifests = append(orphanedManifests, orphaned...)
+			updates = rebuiltUpdates
 		}
 
 		// Pre-flight client-side conflict validation. Producers can
@@ -481,26 +504,17 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		// Only retry on retryable commit conflicts. Unknown-state errors
 		// (5xx, gateway timeouts) must NOT be retried because the commit
 		// may have actually succeeded — retrying could duplicate work.
+		// Suppress orphan cleanup for the same reason: one of the orphaned
+		// manifest-list files may actually be the snapshot the catalog accepted.
 		if !errors.Is(err, ErrCommitFailed) {
+			cleanupOrphans = false
+
 			return nil, err
 		}
 	}
 
 	if err != nil {
 		return nil, err
-	}
-
-	// Delete manifest-list files that were written during failed retry
-	// attempts and have now been superseded by the committed rebuild.
-	// These are orphaned objects that will never be referenced again.
-	if len(orphanedManifests) > 0 {
-		if wfs, ok := fs.(icebergio.WriteFileIO); ok {
-			for _, path := range orphanedManifests {
-				if removeErr := wfs.Remove(path); removeErr != nil {
-					log.Printf("Warning: failed to delete orphaned manifest list %s: %v", path, removeErr)
-				}
-			}
-		}
 	}
 
 	deleteOldMetadata(fs, t.metadata, newMeta)
