@@ -972,7 +972,7 @@ func (sp *snapshotProducer) commit(ctx context.Context) (_ []Update, _ []Require
 		return sp.processManifests(m)
 	}
 
-	rebuildFn := func(_ context.Context, freshParent *Snapshot, fio iceio.WriteFileIO, attempt int) (_ *Snapshot, retErr error) {
+	rebuildFn := func(_ context.Context, freshMeta Metadata, freshParent *Snapshot, fio iceio.WriteFileIO, attempt int) (_ *Snapshot, retErr error) {
 		// Load inherited manifests from the fresh parent.
 		var inherited []iceberg.ManifestFile
 		if freshParent != nil {
@@ -989,16 +989,14 @@ func (sp *snapshotProducer) commit(ctx context.Context) (_ []Update, _ []Require
 			return nil, fmt.Errorf("rebuild manifest list: process manifests: %w", procErr)
 		}
 
-		// Derive the sequence number. When there is a fresh parent, use its
-		// sequence number + 1 so the rebuilt snapshot is strictly greater than
-		// any committed peer. When there is no fresh parent (first snapshot in
-		// the table or unknown parent), preserve the original sequence number
-		// from the initial build.
+		// Derive the sequence number from the fresh table-wide last-sequence-number.
+		// Using freshParent.SequenceNumber + 1 would violate the spec when a
+		// concurrent writer on a different branch bumps last-sequence-number
+		// without advancing this branch's parent — MetadataBuilder.AddSnapshot
+		// rejects SequenceNumber <= lastSequenceNumber.
 		var newSeq int64
-		if freshParent != nil && formatVersion >= 2 {
-			newSeq = freshParent.SequenceNumber + 1
-		} else {
-			newSeq = capturedSnapshot.SequenceNumber
+		if formatVersion >= 2 {
+			newSeq = freshMeta.LastSequenceNumber() + 1
 		}
 
 		// Write the rebuilt manifest list to a path unique to this retry
@@ -1023,7 +1021,12 @@ func (sp *snapshotProducer) commit(ctx context.Context) (_ []Update, _ []Require
 		}
 
 		firstRowID := int64(0)
+		var addedRows int64
 		if formatVersion == 3 {
+			// Derive firstRowID from the fresh metadata so the manifest-list
+			// first-row-id field is consistent with the catalog's nextRowID
+			// after concurrent writers have advanced it since attempt 0.
+			firstRowID = freshMeta.NextRowID()
 			writer, wrErr := iceberg.NewManifestListWriterV3(out, snapshotID, newSeq, firstRowID, parentID)
 			if wrErr != nil {
 				return nil, fmt.Errorf("rebuild manifest list: create v3 writer: %w", wrErr)
@@ -1031,6 +1034,9 @@ func (sp *snapshotProducer) commit(ctx context.Context) (_ []Update, _ []Require
 			defer internal.CheckedClose(writer, &retErr)
 			if addErr := writer.AddManifests(combined); addErr != nil {
 				return nil, fmt.Errorf("rebuild manifest list: add manifests: %w", addErr)
+			}
+			if writer.NextRowID() != nil {
+				addedRows = *writer.NextRowID() - firstRowID
 			}
 		} else {
 			if wErr := iceberg.WriteManifestList(formatVersion, out, snapshotID, parentID, &newSeq, firstRowID, combined); wErr != nil {
@@ -1042,6 +1048,25 @@ func (sp *snapshotProducer) commit(ctx context.Context) (_ []Update, _ []Require
 		rebuilt.ManifestList = manifestListPath
 		rebuilt.ParentSnapshotID = parentID
 		rebuilt.SequenceNumber = newSeq
+		if formatVersion == 3 {
+			rebuilt.FirstRowID = &firstRowID
+			rebuilt.AddedRows = &addedRows
+		}
+
+		// Recompute snapshot summary against the fresh parent so that totals
+		// (total-records, total-data-files, total-files-size) are not regressed
+		// to the stale values captured at attempt 0. The per-operation delta
+		// (added-data-files, added-records, etc.) is preserved in
+		// capturedSnapshot.Summary and is replayed on top of the fresh base.
+		if freshParent != nil && freshParent.Summary != nil && capturedSnapshot.Summary != nil {
+			deltaSummary := Summary{
+				Operation:  capturedSnapshot.Summary.Operation,
+				Properties: maps.Clone(capturedSnapshot.Summary.Properties),
+			}
+			if s, sumErr := updateSnapshotSummaries(deltaSummary, freshParent.Summary.Properties); sumErr == nil {
+				rebuilt.Summary = &s
+			}
+		}
 
 		return &rebuilt, nil
 	}

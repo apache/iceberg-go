@@ -322,7 +322,7 @@ type addSnapshotUpdate struct {
 	// ownManifests. Called by doCommit on every retry attempt so that
 	// each retry snapshot correctly inherits all files committed by
 	// concurrent writers since the original build.
-	rebuildManifestList func(ctx context.Context, freshParent *Snapshot, fio io.WriteFileIO, attempt int) (*Snapshot, error)
+	rebuildManifestList func(ctx context.Context, freshMeta Metadata, freshParent *Snapshot, fio io.WriteFileIO, attempt int) (*Snapshot, error)
 }
 
 // NewAddSnapshotUpdate creates a new update that adds the given snapshot to the table metadata.

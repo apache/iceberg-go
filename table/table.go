@@ -587,7 +587,7 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 
 		oldManifestList := su.Snapshot.ManifestList
 
-		newSnap, rebuildErr := su.rebuildManifestList(ctx, freshHead, fs, attempt)
+		newSnap, rebuildErr := su.rebuildManifestList(ctx, freshMeta, freshHead, fs, attempt)
 		if rebuildErr != nil {
 			return nil, nil, rebuildErr
 		}

@@ -22,10 +22,72 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// newMetadataWithLastSeqNum builds a v2 Metadata whose last-sequence-number
+// equals lastSeqNum by grafting a synthetic snapshot at that sequence number.
+// Used by tests that need to control freshMeta.LastSequenceNumber().
+func newMetadataWithLastSeqNum(t *testing.T, lastSeqNum int64) Metadata {
+	t.Helper()
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "file:///tmp/seqtest",
+		iceberg.Properties{PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	snap := Snapshot{
+		SnapshotID:     1000,
+		SequenceNumber: lastSeqNum,
+		TimestampMs:    meta.LastUpdatedMillis() + 1,
+		Summary:        &Summary{Operation: OpAppend},
+	}
+	require.NoError(t, builder.AddSnapshot(&snap))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1000, BranchRef))
+	out, err := builder.Build()
+	require.NoError(t, err)
+
+	return out
+}
+
+// newV3MetadataWithNextRowID builds a v3 Metadata whose NextRowID() returns
+// nextRowID by adding a synthetic snapshot that consumes that many rows.
+// Used by tests that need to control freshMeta.NextRowID() for v3 row lineage.
+func newV3MetadataWithNextRowID(t *testing.T, nextRowID int64) Metadata {
+	t.Helper()
+	spec := iceberg.NewPartitionSpec()
+	txn, _ := createTestTransactionWithMemIO(t, spec)
+	txn.meta.formatVersion = 3
+
+	firstRowID := int64(0)
+	addedRows := nextRowID
+	snap := Snapshot{
+		SnapshotID:     1000,
+		SequenceNumber: 1,
+		TimestampMs:    txn.meta.base.LastUpdatedMillis() + 1,
+		Summary:        &Summary{Operation: OpAppend},
+		FirstRowID:     &firstRowID,
+		AddedRows:      &addedRows,
+	}
+	require.NoError(t, txn.meta.AddSnapshot(&snap))
+	require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 1000, BranchRef))
+
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+	require.Equal(t, nextRowID, meta.NextRowID())
+
+	return meta
+}
+
+// ptr returns a pointer to v, used in test helper expressions.
+// NOTE: ptr is also declared in pos_delete_partitioned_fanout_writer_test.go;
+// both files share the same package so only one declaration is needed.
+// This comment documents the shared usage — do not re-add a declaration here.
 
 // rebuildUpdate constructs an addSnapshotUpdate whose rebuildManifestList
 // closure simply records the freshParent it received and returns a new
@@ -34,7 +96,7 @@ func rebuildUpdate(snap *Snapshot, newManifestList string, gotParent **Snapshot)
 	return &addSnapshotUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateAddSnapshot},
 		Snapshot:   snap,
-		rebuildManifestList: func(_ context.Context, freshParent *Snapshot, _ iceio.WriteFileIO, _ int) (*Snapshot, error) {
+		rebuildManifestList: func(_ context.Context, _ Metadata, freshParent *Snapshot, _ iceio.WriteFileIO, _ int) (*Snapshot, error) {
 			*gotParent = freshParent
 			rebuilt := *snap
 			rebuilt.ManifestList = newManifestList
@@ -114,7 +176,7 @@ func TestRebuildSnapshotUpdates_SkipsWhenParentUnchanged(t *testing.T) {
 	upd := &addSnapshotUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateAddSnapshot},
 		Snapshot:   snap,
-		rebuildManifestList: func(_ context.Context, _ *Snapshot, _ iceio.WriteFileIO, _ int) (*Snapshot, error) {
+		rebuildManifestList: func(_ context.Context, _ Metadata, _ *Snapshot, _ iceio.WriteFileIO, _ int) (*Snapshot, error) {
 			called = true
 
 			return snap, nil
@@ -175,11 +237,161 @@ func TestRebuildSnapshotUpdates_PropagatesClosureError(t *testing.T) {
 	upd := &addSnapshotUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateAddSnapshot},
 		Snapshot:   snap,
-		rebuildManifestList: func(_ context.Context, _ *Snapshot, _ iceio.WriteFileIO, _ int) (*Snapshot, error) {
+		rebuildManifestList: func(_ context.Context, _ Metadata, _ *Snapshot, _ iceio.WriteFileIO, _ int) (*Snapshot, error) {
 			return nil, wantErr
 		},
 	}
 
 	_, _, err := rebuildSnapshotUpdates(t.Context(), []Update{upd}, freshMeta, MainBranch, iceio.LocalFS{}, 1)
 	assert.ErrorIs(t, err, wantErr)
+}
+
+// ---------------------------------------------------------------------------
+// Fix 3 — newSeq derived from freshMeta.LastSequenceNumber()
+// ---------------------------------------------------------------------------
+
+// TestRebuildFn_SeqNumDerivedFromFreshMeta verifies that the rebuilt snapshot's
+// SequenceNumber equals freshMeta.LastSequenceNumber()+1, NOT
+// freshParent.SequenceNumber+1. A concurrent writer on a different branch can
+// advance the table-wide last-sequence-number without advancing this branch's
+// parent, so using freshParent.SequenceNumber+1 would violate the spec invariant.
+func TestRebuildFn_SeqNumDerivedFromFreshMeta(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+	sp.appendDataFile(newTestDataFile(t, spec, "mem://default/table-location/data/f.parquet", nil))
+
+	updates, _, err := sp.commit(context.Background())
+	require.NoError(t, err)
+	addSnap := updates[0].(*addSnapshotUpdate)
+	require.NotNil(t, addSnap.rebuildManifestList, "rebuildManifestList closure must be set")
+
+	// Simulate a concurrent writer on another branch that bumped the global
+	// last-sequence-number to 99 without advancing this branch's parent.
+	// old code: newSeq = capturedSnapshot.SequenceNumber (stale, ≤ 99 — spec violation)
+	// new code: newSeq = freshMeta.LastSequenceNumber() + 1 = 100
+	freshMeta := newMetadataWithLastSeqNum(t, 99)
+	require.Equal(t, int64(99), freshMeta.LastSequenceNumber())
+
+	rebuilt, err := addSnap.rebuildManifestList(context.Background(), freshMeta, nil, wfs, 1)
+	require.NoError(t, err)
+	require.Equal(t, int64(100), rebuilt.SequenceNumber,
+		"SequenceNumber must be freshMeta.LastSequenceNumber()+1; using freshParent.SequenceNumber+1 violates the spec when another branch advanced the global counter")
+}
+
+// TestRebuildFn_SeqNumV1TableIsZero verifies that v1 tables keep SequenceNumber == 0
+// regardless of what freshMeta reports (v1 does not use sequence numbers).
+func TestRebuildFn_SeqNumV1TableIsZero(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	txn.meta.formatVersion = 1 // override to v1
+
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+	sp.appendDataFile(newTestDataFile(t, spec, "mem://default/table-location/data/f.parquet", nil))
+
+	updates, _, err := sp.commit(context.Background())
+	require.NoError(t, err)
+	addSnap := updates[0].(*addSnapshotUpdate)
+	require.NotNil(t, addSnap.rebuildManifestList)
+
+	freshMeta := newMetadataWithLastSeqNum(t, 99)
+	rebuilt, err := addSnap.rebuildManifestList(context.Background(), freshMeta, nil, wfs, 1)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), rebuilt.SequenceNumber, "v1 tables must always have SequenceNumber == 0")
+}
+
+// ---------------------------------------------------------------------------
+// Fix 1 — firstRowID derived from freshMeta.NextRowID()
+// ---------------------------------------------------------------------------
+
+// TestRebuildFn_V3FirstRowIDDerivedFromFreshMeta verifies that on a v3 table
+// the rebuilt snapshot's FirstRowID equals freshMeta.NextRowID() rather than
+// the hardcoded 0. If two writers race and the peer commits first, the
+// catalog's nextRowID has already advanced; using 0 would produce a
+// first-row-id that disagrees with the catalog's view and fails row-lineage
+// validation.
+func TestRebuildFn_V3FirstRowIDDerivedFromFreshMeta(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	txn.meta.formatVersion = 3
+
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+	sp.appendDataFile(newTestDataFile(t, spec, "mem://default/table-location/data/f.parquet", nil))
+
+	updates, _, err := sp.commit(context.Background())
+	require.NoError(t, err)
+	addSnap := updates[0].(*addSnapshotUpdate)
+	require.NotNil(t, addSnap.rebuildManifestList)
+
+	// Simulate a concurrent writer that added 50 rows, advancing nextRowID to 50.
+	// old code: firstRowID = 0 (hardcoded)
+	// new code: firstRowID = freshMeta.NextRowID() = 50
+	freshMeta := newV3MetadataWithNextRowID(t, 50)
+	require.Equal(t, int64(50), freshMeta.NextRowID(), "freshMeta.NextRowID() must be 50")
+
+	rebuilt, err := addSnap.rebuildManifestList(context.Background(), freshMeta, nil, wfs, 1)
+	require.NoError(t, err)
+	require.NotNil(t, rebuilt.FirstRowID, "v3 rebuilt snapshot must have FirstRowID")
+	require.Equal(t, int64(50), *rebuilt.FirstRowID,
+		"FirstRowID must equal freshMeta.NextRowID(); hardcoded 0 would conflict with catalog's advanced nextRowID")
+}
+
+// ---------------------------------------------------------------------------
+// Fix 2 — snapshot summary recomputed against freshParent
+// ---------------------------------------------------------------------------
+
+// TestRebuildFn_SummaryRebasedAgainstFreshParent verifies that the rebuilt
+// snapshot's summary totals are computed against the fresh parent's summary,
+// not the stale totals captured at attempt 0. If a concurrent writer added
+// files between attempt 0 and the retry, publishing the stale totals would
+// regress every consumer that reads the summary.
+func TestRebuildFn_SummaryRebasedAgainstFreshParent(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+	sp.appendDataFile(newTestDataFile(t, spec, "mem://default/table-location/data/f.parquet", nil))
+
+	updates, _, err := sp.commit(context.Background())
+	require.NoError(t, err)
+	addSnap := updates[0].(*addSnapshotUpdate)
+	require.NotNil(t, addSnap.rebuildManifestList)
+
+	// Construct a freshParent with a known summary. The concurrent writer
+	// added 5 data files (total-data-files = 5) before our retry.
+	// Our producer added 1 file (added-data-files = 1 in capturedSnapshot.Summary).
+	// Expected rebuilt total-data-files = 5 + 1 = 6.
+	freshParentSummary := iceberg.Properties{
+		"total-data-files":  "5",
+		"total-records":     "500",
+		"total-files-size":  "5000",
+		"total-delete-files": "0",
+		"total-position-deletes": "0",
+		"total-equality-deletes": "0",
+	}
+
+	// Write an empty manifest list for the freshParent so Manifests() can open it.
+	parentManifestListPath := "mem://default/table-location/metadata/fresh-parent-snap.avro"
+	out, createErr := wfs.Create(parentManifestListPath)
+	require.NoError(t, createErr)
+	writeErr := iceberg.WriteManifestList(2, out, 77, nil, ptr(int64(0)), 0, nil)
+	require.NoError(t, writeErr)
+	require.NoError(t, out.Close())
+
+	freshParentID := int64(77)
+	freshParent := &Snapshot{
+		SnapshotID:   freshParentID,
+		ManifestList: parentManifestListPath,
+		Summary:      &Summary{Operation: OpAppend, Properties: freshParentSummary},
+	}
+	freshMeta := newMetadataWithLastSeqNum(t, 1)
+
+	rebuilt, err := addSnap.rebuildManifestList(context.Background(), freshMeta, freshParent, wfs, 1)
+	require.NoError(t, err)
+	require.NotNil(t, rebuilt.Summary)
+
+	gotTotal := rebuilt.Summary.Properties.GetInt("total-data-files", -1)
+	require.Equal(t, 6, gotTotal,
+		"total-data-files must be freshParent total (5) + this producer's added count (1); stale attempt-0 total would be wrong")
 }
