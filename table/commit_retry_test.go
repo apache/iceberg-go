@@ -41,14 +41,20 @@ func (readOnlyIO) Remove(_ string) error             { return errors.New("readOn
 
 // sequentialCatalog returns a predetermined error per CommitTable attempt.
 // If attempts exceed the len(errs) slice it returns nil (success).
+// When loadMeta is set, LoadTable returns that metadata instead of c.metadata.
 type sequentialCatalog struct {
 	metadata Metadata
+	loadMeta Metadata // optional: returned by LoadTable if non-nil
 	errs     []error
 	attempts atomic.Int32
 }
 
 func (c *sequentialCatalog) LoadTable(_ context.Context, ident Identifier) (*Table, error) {
-	return New(ident, c.metadata, "",
+	m := c.metadata
+	if c.loadMeta != nil {
+		m = c.loadMeta
+	}
+	return New(ident, m, "",
 		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, c), nil
 }
 
@@ -447,4 +453,59 @@ func TestDoCommit_OrphanNotCleanedOnUnknownError(t *testing.T) {
 	_, stillExists := wfs.files[originalManifestList]
 	assert.True(t, stillExists,
 		"orphaned manifest list must NOT be removed when commit outcome is unknown (5xx)")
+}
+
+// TestDoCommit_OrphanCleanedOnCommitDiverged verifies that manifest-list files
+// orphaned by rebuild attempts are removed when ErrCommitDiverged is returned
+// by a conflict validator. Diverged commits are terminal (no retry), and since
+// neither of the orphaned files was ever accepted by the catalog, they are safe
+// to delete. The defer cleanup runs with cleanupOrphans=true on this path.
+func TestDoCommit_OrphanCleanedOnCommitDiverged(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	wfs, meta := newMemIOWithRetryMeta(t, spec)
+
+	// freshMeta has a snapshot on MainBranch so validators run on the retry attempt.
+	freshID := int64(42)
+	freshMeta := newConflictTestMetadataWithProps(t, &freshID, iceberg.Properties{
+		CommitNumRetriesKey:          "3",
+		CommitMinRetryWaitMsKey:      "1",
+		CommitMaxRetryWaitMsKey:      "2",
+		CommitTotalRetryTimeoutMsKey: "60000",
+	})
+
+	tbl := newOCCTable(t, meta, wfs, nil)
+	txn := tbl.NewTransaction()
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+	sp.appendDataFile(newTestDataFile(t, spec, "mem://default/table-location/data/f.parquet", nil))
+
+	updates, reqs, err := sp.commit(context.Background())
+	require.NoError(t, err)
+	addSnap := updates[0].(*addSnapshotUpdate)
+	originalManifestList := addSnap.Snapshot.ManifestList
+
+	wfs.files[originalManifestList] = []byte("placeholder")
+
+	// Catalog: fail once (ErrCommitFailed → rebuild → orphan created).
+	// LoadTable returns freshMeta (has branch snapshot → validators run on retry).
+	// Validator returns ErrCommitDiverged immediately.
+	cat := &sequentialCatalog{
+		metadata: meta,
+		loadMeta: freshMeta,
+		errs:     []error{ErrCommitFailed},
+	}
+	tbl = newOCCTable(t, meta, wfs, cat)
+
+	divergedValidator := func(*conflictContext) error { return ErrCommitDiverged }
+
+	_, err = tbl.doCommit(t.Context(), updates, reqs,
+		withCommitBranch(MainBranch),
+		withCommitValidators(divergedValidator),
+	)
+	require.ErrorIs(t, err, ErrCommitDiverged)
+
+	// The defer must have fired with cleanupOrphans=true and removed the orphan.
+	_, stillExists := wfs.files[originalManifestList]
+	assert.False(t, stillExists,
+		"orphaned manifest list must be removed even on ErrCommitDiverged: "+
+			"the file was never accepted by the catalog so it is safe to delete")
 }
