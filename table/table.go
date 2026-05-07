@@ -38,6 +38,7 @@ import (
 	"github.com/apache/iceberg-go/internal"
 	icebergio "github.com/apache/iceberg-go/io"
 	tblutils "github.com/apache/iceberg-go/table/internal"
+	"github.com/klauspost/compress/zstd"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -864,13 +865,14 @@ func NewFromLocation(
 			return nil, err
 		}
 
-		if isGzippedMetadataJson(metalocation) {
-			gz, err := gzip.NewReader(bytes.NewReader(data))
+		if codec := metadataCompressionCodec(metalocation); codec != "" {
+			rc, err := newDecompressor(bytes.NewReader(data), codec)
 			if err != nil {
 				return nil, err
 			}
-			defer gz.Close()
-			data, err = io.ReadAll(gz)
+			defer rc.Close()
+
+			data, err = io.ReadAll(rc)
 			if err != nil {
 				return nil, err
 			}
@@ -887,13 +889,14 @@ func NewFromLocation(
 		defer internal.CheckedClose(f, &err)
 
 		var r io.Reader = f
-		if isGzippedMetadataJson(metalocation) {
-			gz, err := gzip.NewReader(f)
+		if codec := metadataCompressionCodec(metalocation); codec != "" {
+			rc, err := newDecompressor(f, codec)
 			if err != nil {
 				return nil, err
 			}
-			defer gz.Close()
-			r = gz
+			defer rc.Close()
+
+			r = rc
 		}
 
 		if meta, err = ParseMetadata(r); err != nil {
@@ -904,6 +907,29 @@ func NewFromLocation(
 	return New(ident, meta, metalocation, fsysF, cat), nil
 }
 
-func isGzippedMetadataJson(location string) bool {
-	return strings.HasSuffix(location, ".gz.metadata.json") || strings.HasSuffix(location, "metadata.json.gz")
+func metadataCompressionCodec(location string) string {
+	switch {
+	case strings.HasSuffix(location, ".gz.metadata.json") || strings.HasSuffix(location, "metadata.json.gz"):
+		return MetadataCompressionCodecGzip
+	case strings.HasSuffix(location, ".zstd.metadata.json") || strings.HasSuffix(location, "metadata.json.zstd"):
+		return MetadataCompressionCodecZstd
+	default:
+		return ""
+	}
+}
+
+func newDecompressor(r io.Reader, codec string) (io.ReadCloser, error) {
+	switch codec {
+	case MetadataCompressionCodecGzip:
+		return gzip.NewReader(r)
+	case MetadataCompressionCodecZstd:
+		dec, err := zstd.NewReader(r)
+		if err != nil {
+			return nil, err
+		}
+
+		return dec.IOReadCloser(), nil
+	default:
+		return nil, fmt.Errorf("unsupported metadata decompression codec: %s", codec)
+	}
 }
