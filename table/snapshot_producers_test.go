@@ -883,3 +883,57 @@ func TestFastAppendInheritsZeroCountManifests(t *testing.T) {
 	}
 	require.True(t, newManifestFound, "new snapshot must include a manifest written by snap2")
 }
+
+// TestComputeOwnManifests_NewTable verifies that when there is no parent
+// snapshot (parentSnapshotID == 0) all manifests are returned as-is with no error.
+func TestComputeOwnManifests_NewTable(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	io := newMemIO(1<<20, nil)
+	txn := createTestTransaction(t, io, spec)
+	sp := newFastAppendFilesProducer(OpAppend, txn, io, nil, nil)
+	// parentSnapshotID is 0 by default (new table) — all manifests belong to this producer.
+
+	got, err := sp.computeOwnManifests(nil)
+	require.NoError(t, err, "new table: computeOwnManifests must not error")
+	require.Nil(t, got, "new table: returned manifests must equal input")
+}
+
+// TestComputeOwnManifests_SnapshotByIDError verifies that when the parent
+// snapshot cannot be found an error is returned instead of silently claiming
+// all manifests as own.
+func TestComputeOwnManifests_SnapshotByIDError(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	io := newMemIO(1<<20, nil)
+	txn := createTestTransaction(t, io, spec)
+	sp := newFastAppendFilesProducer(OpAppend, txn, io, nil, nil)
+	sp.parentSnapshotID = 9999 // no such snapshot in metadata
+
+	got, err := sp.computeOwnManifests(nil)
+	require.Error(t, err, "unknown parent snapshot ID: must return error, not silent fallback")
+	require.Nil(t, got, "error path must return nil manifest slice")
+}
+
+// TestComputeOwnManifests_ParentManifestsIOError verifies that when the parent
+// snapshot exists but its manifest list file cannot be read an error is returned
+// instead of silently claiming all manifests as own (which would cause duplicates
+// in the rebuilt manifest list).
+func TestComputeOwnManifests_ParentManifestsIOError(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	io := newMemIO(1<<20, nil)
+	txn := createTestTransaction(t, io, spec)
+	sp := newFastAppendFilesProducer(OpAppend, txn, io, nil, nil)
+
+	// Add a snapshot with a manifest list path that does not exist in the IO.
+	// parent.Manifests will fail with fs.ErrNotExist when it tries to open it.
+	parentID := int64(42)
+	txn.meta.snapshotList = append(txn.meta.snapshotList, Snapshot{
+		SnapshotID:   parentID,
+		ManifestList: "mem://default/table-location/metadata/ghost-manifest-list.avro",
+		Summary:      &Summary{Operation: OpAppend},
+	})
+	sp.parentSnapshotID = parentID
+
+	got, err := sp.computeOwnManifests(nil)
+	require.Error(t, err, "IO error reading parent manifests: must return error, not silent fallback")
+	require.Nil(t, got, "error path must return nil manifest slice")
+}

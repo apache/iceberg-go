@@ -830,20 +830,23 @@ func (sp *snapshotProducer) summary(props iceberg.Properties) (Summary, error) {
 // by this producer (i.e. not inherited from the parent snapshot). These are
 // preserved across OCC retry attempts when the manifest list is rebuilt
 // against a fresh parent.
-func (sp *snapshotProducer) computeOwnManifests(allManifests []iceberg.ManifestFile) []iceberg.ManifestFile {
+func (sp *snapshotProducer) computeOwnManifests(allManifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
 	if sp.parentSnapshotID <= 0 {
 		// No parent means all manifests are new — nothing to exclude.
-		return allManifests
+		return allManifests, nil
 	}
 
 	parent, err := sp.txn.meta.SnapshotByID(sp.parentSnapshotID)
-	if err != nil || parent == nil {
-		return allManifests
+	if err != nil {
+		return nil, fmt.Errorf("computeOwnManifests: lookup parent snapshot %d: %w", sp.parentSnapshotID, err)
+	}
+	if parent == nil {
+		return nil, fmt.Errorf("computeOwnManifests: parent snapshot %d not found", sp.parentSnapshotID)
 	}
 
 	parentManifests, err := parent.Manifests(sp.io)
 	if err != nil {
-		return allManifests
+		return nil, fmt.Errorf("computeOwnManifests: read parent manifests: %w", err)
 	}
 
 	inherited := make(map[string]bool, len(parentManifests))
@@ -858,7 +861,7 @@ func (sp *snapshotProducer) computeOwnManifests(allManifests []iceberg.ManifestF
 		}
 	}
 
-	return own
+	return own, nil
 }
 
 func (sp *snapshotProducer) commit(ctx context.Context) (_ []Update, _ []Requirement, err error) {
@@ -870,7 +873,10 @@ func (sp *snapshotProducer) commit(ctx context.Context) (_ []Update, _ []Require
 	// Separate "own" manifests (those written by this producer) from
 	// manifests inherited from the stale parent. The own manifests are
 	// preserved when the manifest list is rebuilt during OCC retries.
-	ownManifests := sp.computeOwnManifests(newManifests)
+	ownManifests, err := sp.computeOwnManifests(newManifests)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	nextSequence := sp.txn.meta.nextSequenceNumber()
 	summary, err := sp.summary(sp.snapshotProps)
