@@ -381,7 +381,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 	// retry loop — a skip reintroduces the original stale-parent data loss.
 	wfs, ok := fs.(icebergio.WriteFileIO)
 	if !ok {
-		return nil, fmt.Errorf("commit: file system does not implement WriteFileIO: manifest list rebuild requires write access")
+		return nil, errors.New("commit: file system does not implement WriteFileIO: manifest list rebuild requires write access")
 	}
 
 	var (

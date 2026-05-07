@@ -54,6 +54,7 @@ func (c *sequentialCatalog) LoadTable(_ context.Context, ident Identifier) (*Tab
 	if c.loadMeta != nil {
 		m = c.loadMeta
 	}
+
 	return New(ident, m, "",
 		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, c), nil
 }
