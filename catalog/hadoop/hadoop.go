@@ -398,11 +398,6 @@ func (c *Catalog) CheckTableExists(_ context.Context, ident table.Identifier) (b
 	return isTableDir(c.tableToPath(ident)), nil
 }
 
-// writeMetadataLocationKey is the Java Iceberg property that allows relocating
-// metadata to a custom path. The Hadoop catalog forbids this because it derives
-// metadata paths from the table identifier.
-const writeMetadataLocationKey = "write.metadata.location"
-
 func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
 	if len(ident) < 2 {
 		return nil, "", errors.New("hadoop catalog: table identifier must have at least a namespace and table name")
@@ -448,8 +443,8 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 	}
 
 	// Step 5: Reject write.metadata.location property.
-	if v := updated.Properties().Get(writeMetadataLocationKey, ""); v != "" {
-		return nil, "", fmt.Errorf("hadoop catalog: %s property is not supported", writeMetadataLocationKey)
+	if v := updated.Properties().Get(table.WriteMetadataLocationKey, ""); v != "" {
+		return nil, "", fmt.Errorf("hadoop catalog: %s property is not supported", table.WriteMetadataLocationKey)
 	}
 
 	// Step 6: Determine next version number.
