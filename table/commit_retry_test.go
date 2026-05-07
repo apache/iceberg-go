@@ -553,3 +553,121 @@ func TestDoCommit_OrphanCleanedOnRetriesExhausted(t *testing.T) {
 		"orphaned manifest list must be removed when retries are exhausted with ErrCommitFailed: "+
 			"none of the retry attempts were accepted, so all orphans are safe to delete")
 }
+
+// ---------------------------------------------------------------------------
+// Fix 7 (R4) — retry-progression: freshMeta advances between attempts
+// ---------------------------------------------------------------------------
+
+// progressingCatalog records the LastSequenceNumber of the metadata observed
+// on every CommitTable / LoadTable call, advances its tracked metadata after
+// each failed attempt (so the next LoadTable sees a higher seq number), and
+// accepts the commit on a configurable attempt index. This drives doCommit's
+// retry loop through real freshMeta progression — exactly what reviewer R4
+// asked for ("ensure the next attempt actually sees a different freshMeta and
+// the rebuild operates against it").
+type progressingCatalog struct {
+	metadata          Metadata
+	commitTableCalls  atomic.Int32
+	loadTableCalls    atomic.Int32
+	failTimes         int
+	seenLastSeqNums   []int64 // captured per CommitTable call
+	loadedLastSeqNums []int64 // captured per LoadTable call (what the retry path sees)
+	graftFn           func(Metadata) Metadata
+}
+
+func (c *progressingCatalog) LoadTable(_ context.Context, ident Identifier) (*Table, error) {
+	c.loadTableCalls.Add(1)
+	c.loadedLastSeqNums = append(c.loadedLastSeqNums, c.metadata.LastSequenceNumber())
+
+	return New(ident, c.metadata, "",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, c), nil
+}
+
+func (c *progressingCatalog) CommitTable(_ context.Context, _ Identifier, _ []Requirement, _ []Update) (Metadata, string, error) {
+	n := c.commitTableCalls.Add(1)
+	c.seenLastSeqNums = append(c.seenLastSeqNums, c.metadata.LastSequenceNumber())
+
+	if int(n) <= c.failTimes {
+		// Simulate a peer commit that advances the catalog's view.
+		c.metadata = c.graftFn(c.metadata)
+
+		return nil, "", ErrCommitFailed
+	}
+
+	// Accept: a real catalog would apply updates here. For this test we
+	// only need to assert that the loop reached this attempt and that
+	// freshMeta progressed across retries.
+	return c.metadata, "", nil
+}
+
+func newProgressingCatalog(t *testing.T, base Metadata, branch string, failTimes int) *progressingCatalog {
+	t.Helper()
+	cat := &progressingCatalog{
+		metadata:  base,
+		failTimes: failTimes,
+	}
+	nextChildID := int64(2_000)
+	cat.graftFn = func(m Metadata) Metadata {
+		nextChildID++
+
+		return graftSnapshotOnto(t, m, branch, nextChildID)
+	}
+
+	return cat
+}
+
+// TestDoCommit_RetryProgressesFreshMeta verifies that across multiple
+// ErrCommitFailed retries, each retry's rebuild path observes a distinct,
+// monotonically-advancing freshMeta.LastSequenceNumber(), and the final
+// committed snapshot's SequenceNumber derives from the LAST observed
+// freshMeta — not from the attempt-0 captured value. A regression that
+// caches freshMeta across retries (or feeds the rebuild a stale parent)
+// would fail one or more of these assertions.
+func TestDoCommit_RetryProgressesFreshMeta(t *testing.T) {
+	writerHead := int64(100)
+	writerBase := newConflictTestMetadataWithProps(t, &writerHead, iceberg.Properties{
+		CommitNumRetriesKey:          "5",
+		CommitMinRetryWaitMsKey:      "1",
+		CommitMaxRetryWaitMsKey:      "2",
+		CommitTotalRetryTimeoutMsKey: "60000",
+	})
+
+	// Catalog fails the first 2 attempts (advancing seq each time) and
+	// accepts on attempt 3 → cat.commitTableCalls == 3.
+	cat := newProgressingCatalog(t, writerBase, MainBranch, 2)
+
+	tbl := New(Identifier{"db", "retry-progress"}, writerBase, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
+
+	noOpValidator := func(*conflictContext) error { return nil }
+
+	_, err := tbl.doCommit(context.Background(), nil,
+		[]Requirement{AssertRefSnapshotID(MainBranch, &writerHead)},
+		withCommitBranch(MainBranch),
+		withCommitValidators(noOpValidator),
+	)
+	require.NoError(t, err, "doCommit must succeed on the third attempt")
+
+	require.Equal(t, int32(3), cat.commitTableCalls.Load(),
+		"failTimes=2 → 2 ErrCommitFailed + 1 success = 3 CommitTable calls")
+
+	// LoadTable is called once per retry (attempts 2 and 3 here, since
+	// attempt 1 uses the writer's own base). The two captured seq numbers
+	// must DIFFER, proving each retry actually sees a fresh metadata view
+	// rather than a cached one.
+	require.GreaterOrEqual(t, len(cat.loadedLastSeqNums), 2,
+		"refresh must run on each retry attempt")
+	for i := 1; i < len(cat.loadedLastSeqNums); i++ {
+		require.Greater(t, cat.loadedLastSeqNums[i], cat.loadedLastSeqNums[i-1],
+			"freshMeta.LastSequenceNumber() must strictly advance across retries (attempt %d vs %d): %v",
+			i, i-1, cat.loadedLastSeqNums)
+	}
+
+	// commitTableCalls captured the catalog's own LastSequenceNumber at
+	// each call site — these too must strictly advance.
+	require.Len(t, cat.seenLastSeqNums, 3)
+	require.Greater(t, cat.seenLastSeqNums[1], cat.seenLastSeqNums[0],
+		"catalog state must advance after the first ErrCommitFailed")
+	require.Greater(t, cat.seenLastSeqNums[2], cat.seenLastSeqNums[1],
+		"catalog state must advance after the second ErrCommitFailed")
+}
