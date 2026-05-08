@@ -17,5 +17,44 @@ specific language governing permissions and limitations
 under the License.
 -->
 
-These test fixture files are canonical Puffin files from the Apache Iceberg Java implementation:
+## Canonical fixtures from apache/iceberg
+
+`empty-puffin-uncompressed.bin`, `sample-metric-data-uncompressed.bin`, and
+`sample-metric-data-compressed-zstd.bin` are canonical Puffin files from the
+Apache Iceberg Java implementation:
 https://github.com/apache/iceberg/tree/main/core/src/test/resources/org/apache/iceberg/puffin/v1
+
+## Deletion-vector cross-impl fixtures
+
+`deletion-vector-v1-payload.bin` is a Java-produced 64-bit Roaring deletion
+vector payload lifted directly from apache/iceberg's test resources. 50 bytes
+total: 4-byte BE length, 4-byte 0xD1D33964 magic, serialized roaring bitmap
+(38 bytes), 4-byte BE CRC32. The bitmap encodes 5 deleted positions
+(1, 3, 5, 7, 9). Source:
+https://github.com/apache/iceberg/blob/main/core/src/test/resources/org/apache/iceberg/deletes/small-alternating-values-position-index.bin
+
+`deletion-vector-v1.puffin` wraps that payload in a complete Puffin envelope:
+blob type `deletion-vector-v1`, snapshot-id and sequence-number set to -1
+per spec, with `referenced-data-file` and `cardinality` properties. The
+envelope is what `puffin.Writer` emits today; this is a Go-writer wire-
+format pin, not a strong Java cross-impl pin. The basic envelope shape is
+cross-checked by `TestWriterBitIdenticalWithJava`, but that test does not
+exercise empty `Fields` arrays or multi-key blob `Properties` — both of
+which this fixture relies on — and JSON key ordering of blob `Properties`
+is encoder-defined. The property values
+(`referenced-data-file=data/test.parquet`, `cardinality=5`,
+`created-by="iceberg-go test fixture"`) are fixture choices, not bytes
+inherited from any specific Java-emitted file.
+
+To regenerate after a deliberate puffin-format change:
+
+```
+REGEN_FIXTURES=1 go test ./puffin/ -run TestRegenerateDeletionVectorPuffinFixture
+```
+
+After regen, diff the file before committing to verify only intended bytes
+changed:
+
+```
+git diff -- puffin/testdata/deletion-vector-v1.puffin
+```
