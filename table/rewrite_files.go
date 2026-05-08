@@ -211,4 +211,3 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 
 	return nil
 }
-
