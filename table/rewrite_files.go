@@ -19,8 +19,8 @@ package table
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"maps"
 
 	"github.com/apache/iceberg-go"
 )
@@ -38,19 +38,29 @@ import (
 //     is the defining behavior of a rewrite).
 //   - A rewrite-specific conflict validator is registered so concurrent
 //     pos/eq-delete files targeting any rewritten data file are
-//     rejected pre-flight at [Transaction.Commit] time. Pos-delete
-//     conflict detection requires v3 manifests (which carry the
-//     referenced-data-file column); on v2, only the conservative
-//     eq-delete-during-rewrite rule fires.
+//     rejected pre-flight at [Transaction.Commit] time. The pos-delete
+//     branch only fires when the concurrent writer populated the
+//     manifest's referenced_data_file column (field id 143). That
+//     column is V2-optional and V3-required for deletion-vector
+//     deletes; V2 pos-delete writers commonly leave it empty, in
+//     which case only the conservative eq-delete-during-rewrite rule
+//     fires.
 //
 // Distributed compaction coordinators construct one [RewriteFiles] on
 // the leader transaction, feed worker outputs in via [RewriteFiles.Apply],
 // and commit one snapshot. In-process callers can use
 // [Transaction.RewriteDataFiles] which drives this builder internally.
 //
+// The builder follows the same fail-fast pattern as
+// [view.MetadataBuilder]: a method that hits an invalid input stages
+// the error and short-circuits all subsequent calls until
+// [RewriteFiles.Commit] drains it. The builder is single-use; once
+// Commit has been called, a second call returns an error regardless
+// of whether the first call succeeded.
+//
 // Adding new delete files (e.g., rewriting position deletes into
 // deletion vectors) is not yet supported; [RewriteFiles.AddDataFile]
-// rejects pos/eq-delete inputs at commit time. Add the support to
+// rejects pos/eq-delete inputs at insertion time. Add the support to
 // the underlying [Transaction.ReplaceFiles] before lifting that
 // restriction.
 type RewriteFiles struct {
@@ -59,11 +69,14 @@ type RewriteFiles struct {
 	dataFilesToAdd      []iceberg.DataFile
 	deleteFilesToRemove []iceberg.DataFile
 	snapshotProps       iceberg.Properties
+	err                 error
+	committed           bool
 }
 
 // NewRewrite returns a [RewriteFiles] builder bound to this transaction.
 // Mirrors Java's org.apache.iceberg.Table#newRewrite. snapshotProps is
-// added to the rewrite snapshot's summary; pass nil for none.
+// cloned and the clone is added to the rewrite snapshot's summary;
+// pass nil for none.
 //
 // Usage:
 //
@@ -73,7 +86,7 @@ type RewriteFiles struct {
 //	if err := rewrite.Commit(ctx); err != nil { ... }
 //	committed, err := tx.Commit(ctx)
 func (t *Transaction) NewRewrite(snapshotProps iceberg.Properties) *RewriteFiles {
-	return &RewriteFiles{txn: t, snapshotProps: snapshotProps}
+	return &RewriteFiles{txn: t, snapshotProps: maps.Clone(snapshotProps)}
 }
 
 // DeleteFile marks a file for removal in this rewrite. Routes by
@@ -81,20 +94,44 @@ func (t *Transaction) NewRewrite(snapshotProps iceberg.Properties) *RewriteFiles
 // pos/eq-delete files are queued for delete-file removal alongside
 // the data rewrite (typical when a delete is fully applied to data
 // files being rewritten and is therefore safe to expunge).
+//
+// Any other content type stages an error that is returned from the
+// next [RewriteFiles.Commit] call.
 func (r *RewriteFiles) DeleteFile(df iceberg.DataFile) *RewriteFiles {
-	if df.ContentType() == iceberg.EntryContentData {
+	if r.err != nil {
+		return r
+	}
+
+	switch df.ContentType() {
+	case iceberg.EntryContentData:
 		r.dataFilesToDelete = append(r.dataFilesToDelete, df)
-	} else {
+	case iceberg.EntryContentPosDeletes, iceberg.EntryContentEqDeletes:
 		r.deleteFilesToRemove = append(r.deleteFilesToRemove, df)
+	default:
+		r.err = fmt.Errorf("%w: DeleteFile got unsupported content type %s (%s)",
+			ErrInvalidOperation, df.ContentType(), df.FilePath())
 	}
 
 	return r
 }
 
 // AddDataFile queues a new data file. Adding delete files is not yet
-// supported by the underlying snapshot machinery; passing a
-// pos/eq-delete here is reported at [RewriteFiles.Commit].
+// supported by the underlying snapshot machinery; a pos/eq-delete here
+// stages an error that is returned from the next [RewriteFiles.Commit]
+// call. The error names the offending file path so callers driving the
+// builder via [RewriteFiles.Apply] can identify it without tracking
+// queue order.
 func (r *RewriteFiles) AddDataFile(df iceberg.DataFile) *RewriteFiles {
+	if r.err != nil {
+		return r
+	}
+
+	if df.ContentType() != iceberg.EntryContentData {
+		r.err = fmt.Errorf("%w: AddDataFile only supports data files; got content type %s (%s)",
+			ErrInvalidOperation, df.ContentType(), df.FilePath())
+
+		return r
+	}
 	r.dataFilesToAdd = append(r.dataFilesToAdd, df)
 
 	return r
@@ -120,6 +157,10 @@ func (r *RewriteFiles) AddDataFile(df iceberg.DataFile) *RewriteFiles {
 //	}
 //	if err := rewrite.Commit(ctx); err != nil { ... }
 func (r *RewriteFiles) Apply(deletes, adds, safeDeletes []iceberg.DataFile) *RewriteFiles {
+	if r.err != nil {
+		return r
+	}
+
 	for _, df := range deletes {
 		r.DeleteFile(df)
 	}
@@ -136,26 +177,30 @@ func (r *RewriteFiles) Apply(deletes, adds, safeDeletes []iceberg.DataFile) *Rew
 // Commit stages the rewrite snapshot on the underlying transaction.
 // The catalog commit happens once, later, at [Transaction.Commit] time.
 //
-// Returns an error if the builder has no file changes, if any
-// [RewriteFiles.AddDataFile] input is not a data file, or if the underlying
+// Commit is single-shot: any second call returns an error regardless
+// of whether the first call succeeded, and neither re-stages the
+// rewrite nor re-registers the conflict validator. Returns an error
+// if any file passed to [RewriteFiles.AddDataFile] or
+// [RewriteFiles.DeleteFile] had an unsupported content type, if the
+// builder has no file changes, or if the underlying
 // [Transaction.ReplaceFiles] call fails.
 func (r *RewriteFiles) Commit(ctx context.Context) error {
+	if r.committed {
+		return fmt.Errorf("%w: RewriteFiles.Commit already called on this builder", ErrInvalidOperation)
+	}
+	r.committed = true
+
+	if r.err != nil {
+		return r.err
+	}
 	if len(r.dataFilesToDelete) == 0 && len(r.dataFilesToAdd) == 0 && len(r.deleteFilesToRemove) == 0 {
-		return errors.New("rewrite must have at least one file change")
+		return fmt.Errorf("%w: rewrite must have at least one file change", ErrInvalidOperation)
 	}
 
-	for i, df := range r.dataFilesToAdd {
-		if df.ContentType() != iceberg.EntryContentData {
-			return fmt.Errorf("AddDataFile only supports data files; got content type %s at index %d (%s)",
-				df.ContentType(), i, df.FilePath())
-		}
+	if err := r.txn.ReplaceFiles(ctx, r.dataFilesToDelete, r.dataFilesToAdd, r.deleteFilesToRemove, r.snapshotProps, withRewriteSemantics()); err != nil {
+		return err
 	}
 
-	// Register the rewrite-specific conflict validator covering every
-	// rewritten data file before staging the ReplaceFiles. The validator
-	// pairs with withRewriteSemantics (which suppresses the overwrite
-	// producer's default isolation validator) so concurrent pos/eq
-	// deletes targeting a rewritten file are caught pre-flight.
 	if len(r.dataFilesToDelete) > 0 {
 		rewritten := make([]string, 0, len(r.dataFilesToDelete))
 		for _, df := range r.dataFilesToDelete {
@@ -164,5 +209,6 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 		r.txn.validators = append(r.txn.validators, rewriteValidator(rewritten))
 	}
 
-	return r.txn.ReplaceFiles(ctx, r.dataFilesToDelete, r.dataFilesToAdd, r.deleteFilesToRemove, r.snapshotProps, withRewriteSemantics())
+	return nil
 }
+

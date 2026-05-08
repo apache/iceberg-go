@@ -113,18 +113,24 @@ type CompactionGroupResult struct {
 // RewriteDataFilesOptions bundles the per-rewrite knobs for
 // [Transaction.RewriteDataFiles].
 type RewriteDataFilesOptions struct {
-	// PartialProgress, when true, stages each group via its own
-	// rewrite snapshot inside the loop so work survives a mid-loop
-	// write failure. When false (the default), all groups are
-	// committed in a single atomic rewrite snapshot.
+	// PartialProgress, when true, stages each group as its own
+	// rewrite snapshot inside the loop so a mid-loop write failure
+	// leaves the already-completed groups staged on this transaction
+	// (the in-memory transaction can be discarded by group rather
+	// than wholesale). When false (the default), every group lands in
+	// a single atomic rewrite snapshot.
 	//
-	// In both modes the final catalog commit happens once at
-	// [Transaction.Commit] time. True per-group durability (matching
-	// Java's behavior) requires committing separate transactions per
-	// group, which is left to the caller.
+	// In both modes the catalog commit happens once at
+	// [Transaction.Commit] time, so a process crash mid-loop loses
+	// every staged group regardless of this flag. Callers who need
+	// true per-group catalog durability (matching Java's behavior)
+	// should drive [Transaction.NewRewrite] themselves and commit a
+	// fresh transaction per group.
 	PartialProgress bool
 
 	// SnapshotProps are added to the rewrite snapshot's summary.
+	// In partial-progress mode the same properties land on every
+	// per-group snapshot rather than being summed or split.
 	SnapshotProps iceberg.Properties
 
 	// ExtraDeleteFilesToRemove are delete files (typically equality

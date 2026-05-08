@@ -29,7 +29,6 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -174,6 +173,7 @@ func TestRewriteFiles_EmptyCommit_Errors(t *testing.T) {
 
 	err := tx.NewRewrite(nil).Commit(t.Context())
 	require.Error(t, err, "an empty rewrite has nothing to stage and must reject")
+	assert.ErrorIs(t, err, table.ErrInvalidOperation)
 	assert.Contains(t, err.Error(), "at least one file change")
 }
 
@@ -185,37 +185,158 @@ func TestRewriteFiles_AddDataFile_RejectsNonDataFile(t *testing.T) {
 
 	err := tx.NewRewrite(nil).AddDataFile(posDel).Commit(t.Context())
 	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrInvalidOperation)
 	assert.Contains(t, err.Error(), "AddDataFile only supports data files",
 		"adding a delete file via AddDataFile must be reported at commit time")
+	assert.Contains(t, err.Error(), "spurious-pos-del.parquet",
+		"error must name the offending file path")
+}
+
+func TestRewriteFiles_Commit_SingleShot(t *testing.T) {
+	tbl := newRewriteTestTable(t)
+
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	for i := range 2 {
+		dataPath := tbl.Location() + fmt.Sprintf("/data/seed-%d.parquet", i)
+		writeParquetFile(t, dataPath, arrowSc,
+			fmt.Sprintf(`[{"id": %d, "data": "seed"}]`, i+1))
+		seedTx := tbl.NewTransaction()
+		require.NoError(t, seedTx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		tbl, err = seedTx.Commit(t.Context())
+		require.NoError(t, err)
+	}
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+
+	plan, err := defaultTestCompactionCfg.PlanCompaction(tasks)
+	require.NoError(t, err)
+	require.NotEmpty(t, plan.Groups)
+
+	groups := toTaskGroups(plan.Groups)
+
+	results := make([]table.CompactionGroupResult, 0, len(groups))
+	for _, g := range groups {
+		gr, err := table.ExecuteCompactionGroup(t.Context(), tbl, g)
+		require.NoError(t, err)
+		results = append(results, gr)
+	}
+
+	tx := tbl.NewTransaction()
+	rewrite := tx.NewRewrite(nil)
+	for _, gr := range results {
+		rewrite.Apply(gr.OldDataFiles, gr.NewDataFiles, gr.SafePosDeletes)
+	}
+	require.NoError(t, rewrite.Commit(t.Context()))
+
+	err = rewrite.Commit(t.Context())
+	require.Error(t, err, "double commit must reject so validators are not re-appended")
+	assert.ErrorIs(t, err, table.ErrInvalidOperation)
+	assert.Contains(t, err.Error(), "already called")
+}
+
+// TestRewriteFiles_Commit_SingleShot_AfterFailure pins down the
+// stricter contract: a builder is dead even when the first Commit
+// failed before reaching ReplaceFiles. Without this guard, an
+// empty-rewrite or stranger-file failure would leave the builder
+// reusable, and a retry would slip through and append the conflict
+// validator a second time.
+func TestRewriteFiles_Commit_SingleShot_AfterFailure(t *testing.T) {
+	t.Run("empty rewrite", func(t *testing.T) {
+		tbl := newRewriteTestTable(t)
+		tx := tbl.NewTransaction()
+
+		rewrite := tx.NewRewrite(nil)
+
+		err := rewrite.Commit(t.Context())
+		require.Error(t, err, "first Commit on an empty builder must fail")
+		assert.ErrorIs(t, err, table.ErrInvalidOperation)
+		assert.Contains(t, err.Error(), "at least one file change")
+
+		err = rewrite.Commit(t.Context())
+		require.Error(t, err, "second Commit must reject even though the first never staged anything")
+		assert.ErrorIs(t, err, table.ErrInvalidOperation)
+		assert.Contains(t, err.Error(), "already called")
+	})
+
+	t.Run("ReplaceFiles failure", func(t *testing.T) {
+		tbl := newRewriteTestTable(t)
+		tx := tbl.NewTransaction()
+
+		stranger := newDataFile(t, tbl.Location()+"/data/stranger.parquet")
+		replacement := newDataFile(t, tbl.Location()+"/data/replacement.parquet")
+
+		rewrite := tx.NewRewrite(nil).
+			DeleteFile(stranger).
+			AddDataFile(replacement)
+
+		err := rewrite.Commit(t.Context())
+		require.Error(t, err, "ReplaceFiles must reject a stranger data file")
+
+		err = rewrite.Commit(t.Context())
+		require.Error(t, err, "second Commit must reject so a retry can't re-stage ReplaceFiles or re-append the validator")
+		assert.ErrorIs(t, err, table.ErrInvalidOperation)
+		assert.Contains(t, err.Error(), "already called")
+	})
 }
 
 func TestRewriteFiles_DeleteFile_RoutesByContentType(t *testing.T) {
-	// Validates the routing via observable behavior: a builder that
-	// is given only a pos-delete to delete (no data files) must reach
-	// ReplaceFiles, where the underlying check rejects removing a
-	// delete file that is not in the table. That distinct error proves
-	// DeleteFile routed it to deleteFilesToRemove (not dataFilesToDelete).
+	// Validates routing into the right slice via observable behavior:
+	// the data-slice and delete-file-slice membership checks in
+	// ReplaceFiles produce distinct error messages, so a mis-routed
+	// file would surface the wrong error class.
+	//
+	//   Builder A — DeleteFile(strangerData): if routed correctly, the
+	//   transaction has an empty deleteFilesToRemove slice and falls
+	//   through to ReplaceDataFilesWithDataFiles, which rejects with
+	//   "cannot delete files that do not belong to the table". A
+	//   mis-route into deleteFilesToRemove would error with "cannot
+	//   remove delete files that do not belong to the table" instead.
+	//
+	//   Builder B — DeleteFile(strangerPosDel): if routed correctly,
+	//   ReplaceFiles' main path rejects with "cannot remove delete
+	//   files that do not belong to the table". A mis-route into
+	//   dataFilesToDelete would surface "cannot delete files that do
+	//   not belong to the table" instead.
 	tbl := newRewriteTestTable(t)
-	tx := tbl.NewTransaction()
 
-	dummyData := newDataFile(t, tbl.Location()+"/data/dummy.parquet")
-	posDel := newPosDeleteFile(t, tbl.Location()+"/data/spurious-pos-del.parquet")
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+	dataPath := tbl.Location() + "/data/seed.parquet"
+	writeParquetFile(t, dataPath, arrowSc, `[{"id": 1, "data": "seed"}]`)
+	seedTx := tbl.NewTransaction()
+	require.NoError(t, seedTx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	tbl, err = seedTx.Commit(t.Context())
+	require.NoError(t, err)
 
-	err := tx.NewRewrite(nil).
-		DeleteFile(dummyData).
-		AddDataFile(newDataFile(t, tbl.Location()+"/data/replacement.parquet")).
-		DeleteFile(posDel).
+	strangerData := newDataFile(t, tbl.Location()+"/data/stranger.parquet")
+	strangerPosDel := newPosDeleteFile(t, tbl.Location()+"/data/stranger-pos-del.parquet")
+	replacement := newDataFile(t, tbl.Location()+"/data/replacement.parquet")
+
+	dataSliceMiss := "cannot delete files that do not belong to the table"
+	deleteFileSliceMiss := "cannot remove delete files that do not belong to the table"
+
+	dataTx := tbl.NewTransaction()
+	err = dataTx.NewRewrite(nil).
+		DeleteFile(strangerData).
+		AddDataFile(replacement).
 		Commit(t.Context())
-	require.Error(t, err, "ReplaceFiles fails because the dummy files are not in the empty table")
-	// Any of these messages confirms we got past the builder's own
-	// validation and into ReplaceFiles' membership checks — i.e., the
-	// pos-delete was routed to deleteFilesToRemove and the data file
-	// to dataFilesToDelete.
-	msg := err.Error()
-	assert.True(t,
-		strings.Contains(msg, "do not belong to the table") ||
-			strings.Contains(msg, "without an existing snapshot"),
-		"got %q — expected the underlying ReplaceFiles membership/snapshot error", msg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), dataSliceMiss,
+		"DeleteFile(data) must route into dataFilesToDelete; mis-routed it would surface the delete-file-slice error")
+	assert.NotContains(t, err.Error(), deleteFileSliceMiss)
+
+	delTx := tbl.NewTransaction()
+	err = delTx.NewRewrite(nil).
+		DeleteFile(strangerPosDel).
+		AddDataFile(replacement).
+		Commit(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), deleteFileSliceMiss,
+		"DeleteFile(pos-delete) must route into deleteFilesToRemove; mis-routed it would surface the data-slice error")
+	assert.NotContains(t, err.Error(), dataSliceMiss)
 }
 
 // TestRewriteFiles_DistributedEquivalence proves the worker+coordinator
@@ -275,6 +396,21 @@ func TestRewriteFiles_DistributedEquivalence(t *testing.T) {
 	require.NotNil(t, snap)
 	assert.Equal(t, table.OpReplace, snap.Summary.Operation,
 		"rewrite snapshot must be tagged replace, not overwrite")
+
+	// Lock the cross-client summary contract under OpReplace. PyIceberg
+	// (and other readers) parse these keys; the OpOverwrite → OpReplace
+	// flip must not silently drop any of them.
+	props := snap.Summary.Properties
+	require.NotNil(t, props)
+	assert.Equal(t, "1", props["added-data-files"])
+	assert.Equal(t, "4", props["deleted-data-files"])
+	assert.Equal(t, "4", props["added-records"])
+	assert.Equal(t, "4", props["deleted-records"])
+	assert.Equal(t, "1", props["total-data-files"])
+	assert.Equal(t, "4", props["total-records"])
+	assert.NotEmpty(t, props["added-files-size"], "byte counter must be populated")
+	assert.NotEmpty(t, props["removed-files-size"], "byte counter must be populated")
+	assert.NotEmpty(t, props["total-files-size"], "byte counter must be populated")
 
 	postTasks, err := committed.Scan().PlanFiles(t.Context())
 	require.NoError(t, err)
@@ -350,6 +486,17 @@ func TestRewriteFiles_DropsSafePositionDeletes(t *testing.T) {
 	require.NoError(t, err)
 
 	assertRowCount(t, committed, 5)
+
+	// Pos-delete removal must show up in the OpReplace summary —
+	// `removed-position-delete-files` (count of files) and
+	// `removed-position-deletes` (count of rows) are the keys other
+	// clients read.
+	snap := committed.CurrentSnapshot()
+	require.NotNil(t, snap)
+	props := snap.Summary.Properties
+	require.NotNil(t, props)
+	assert.Equal(t, "1", props["removed-position-delete-files"])
+	assert.Equal(t, "1", props["removed-position-deletes"])
 
 	postTasks, err := committed.Scan().PlanFiles(t.Context())
 	require.NoError(t, err)
@@ -437,6 +584,12 @@ func TestRewriteFiles_RejectsConcurrentEqDelete(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, table.ErrConflictingDeleteFiles,
 		"refresh-and-replay must detect the concurrent equality-delete during a rewrite")
+	// The expected delta is exactly 1 CommitTable invocation, the
+	// first attempt that fails on the stale AssertRefSnapshotID. The
+	// retry refreshes the conflictContext, the rewrite validator
+	// rejects the concurrent eq-delete, and the leader exits before
+	// re-issuing CommitTable. A delta of 0 means the validator fired
+	// pre-flight; a delta of ≥2 means the retry reached the catalog.
 	assert.Equal(t, int32(1), cat.attempts.Load()-beforeLeader,
-		"leader's first attempt fails on stale assertion; validator rejects on retry before re-issuing CommitTable")
+		"only the stale-assertion attempt landed; the retry never reached CommitTable")
 }
