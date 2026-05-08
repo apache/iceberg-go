@@ -94,7 +94,7 @@ func validateIdentifier(ident table.Identifier) error {
 
 // Catalog is a filesystem-based Iceberg catalog that requires no external
 // metastore. All state lives on disk as directories and versioned JSON
-// metadata files.
+// metadata files. Currently only local filesystem paths are supported.
 type Catalog struct {
 	name      string
 	warehouse string
@@ -102,8 +102,9 @@ type Catalog struct {
 }
 
 // NewCatalog creates a new Hadoop catalog rooted at the given warehouse path.
-// The warehouse directory is not created on construction; it is created
-// implicitly by the first CreateNamespace call.
+// Currently only local filesystem paths are supported. The warehouse directory
+// is not created on construction; it is created implicitly by the first
+// CreateNamespace call.
 func NewCatalog(name, warehouse string, props iceberg.Properties) (*Catalog, error) {
 	if warehouse == "" {
 		return nil, errors.New("hadoop catalog requires a warehouse path")
