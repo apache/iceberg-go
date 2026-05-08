@@ -1607,6 +1607,15 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 		}
 	}
 
+	// V3 and later prefer deletion vectors over Parquet position-delete files;
+	// warn so users migrate when DV-write support lands. The check is `>= 3`
+	// rather than `== 3` so the warning carries forward to v4+ without churn.
+	// See apache/iceberg#12048.
+	if latestMetadata.Version() >= 3 {
+		slog.Warn("writing Parquet position-delete file on a v3 table; use deletion vectors instead",
+			"table_location", latestMetadata.Location())
+	}
+
 	if args.writeUUID == nil {
 		u := uuid.Must(uuid.NewRandom())
 		args.writeUUID = &u
