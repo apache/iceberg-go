@@ -944,6 +944,16 @@ func (v3writerImpl) prepareEntry(entry *manifestEntry, snapshotID int64) (Manife
 		}
 	}
 
+	// v3 spec deprecates data_file.distinct_counts (Java parity:
+	// apache/iceberg#12182). prepareEntry takes ownership of the entry's data
+	// file and clears the Avro-facing pointer; the cached distinctCntMap and
+	// DistinctValueCounts() getter are intentionally preserved so in-process
+	// readers keep their view. Best-effort: only the in-tree *dataFile is
+	// cleared; third-party DataFile impls bypass this guard.
+	if df, ok := entry.DataFile().(*dataFile); ok {
+		df.DistinctCounts = nil
+	}
+
 	return entry, nil
 }
 
