@@ -1363,6 +1363,20 @@ var (
 	ErrPartitionSpecNotFound        = errors.New("partition spec not found")
 )
 
+func rejectV3OnlyFields(version int, nextRowID *int64, encryptionKeys []EncryptionKey) error {
+	if nextRowID != nil {
+		return fmt.Errorf("%w: v3-only field 'next-row-id' present in v%d metadata",
+			ErrInvalidMetadata, version)
+	}
+
+	if len(encryptionKeys) > 0 {
+		return fmt.Errorf("%w: v3-only field 'encryption-keys' present in v%d metadata",
+			ErrInvalidMetadata, version)
+	}
+
+	return nil
+}
+
 // ParseMetadata parses json metadata provided by the passed in reader,
 // returning an error if one is encountered.
 func ParseMetadata(r io.Reader) (Metadata, error) {
@@ -1906,6 +1920,10 @@ func (m *metadataV1) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
+	if err := rejectV3OnlyFields(1, aux.NextRowID, aux.EncryptionKeyList); err != nil {
+		return err
+	}
+
 	// CurrentSchemaID was optional in v1, it can also be expressed via Schema.
 	if aux.CurrentSchemaID == -1 && aux.Schema != nil {
 		aux.CurrentSchemaID = aux.Schema.ID
@@ -1969,6 +1987,10 @@ func (m *metadataV2) UnmarshalJSON(b []byte) error {
 	aux.LastColumnId = -1
 
 	if err := json.Unmarshal(b, aux); err != nil {
+		return err
+	}
+
+	if err := rejectV3OnlyFields(2, aux.NextRowID, aux.EncryptionKeyList); err != nil {
 		return err
 	}
 

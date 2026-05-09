@@ -1854,3 +1854,91 @@ func TestZstdGoldenFixture(t *testing.T) {
 
 	assert.True(t, expected.Equals(meta))
 }
+
+func TestV1RejectsNextRowID(t *testing.T) {
+	data := `{
+		"format-version": 1,
+		"table-uuid": "d20125c8-7284-442c-9aea-15fee620737c",
+		"location": "s3://bucket/test/location",
+		"last-updated-ms": 1602638573874,
+		"last-column-id": 3,
+		"schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"x","required":true,"type":"long"}]}],
+		"current-schema-id": 0,
+		"partition-specs": [{"spec-id": 0, "fields": []}],
+		"default-spec-id": 0,
+		"sort-orders": [{"order-id": 0, "fields": []}],
+		"default-sort-order-id": 0,
+		"next-row-id": 42
+	}`
+
+	_, err := ParseMetadataBytes([]byte(data))
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	assert.ErrorContains(t, err, "v3-only field 'next-row-id' present in v1 metadata")
+}
+
+func TestV1RejectsEncryptionKeys(t *testing.T) {
+	data := `{
+		"format-version": 1,
+		"table-uuid": "d20125c8-7284-442c-9aea-15fee620737c",
+		"location": "s3://bucket/test/location",
+		"last-updated-ms": 1602638573874,
+		"last-column-id": 3,
+		"schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"x","required":true,"type":"long"}]}],
+		"current-schema-id": 0,
+		"partition-specs": [{"spec-id": 0, "fields": []}],
+		"default-spec-id": 0,
+		"sort-orders": [{"order-id": 0, "fields": []}],
+		"default-sort-order-id": 0,
+		"encryption-keys": [{"key-id": "k1", "encrypted-key-metadata": "abc123"}]
+	}`
+
+	_, err := ParseMetadataBytes([]byte(data))
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	assert.ErrorContains(t, err, "v3-only field 'encryption-keys' present in v1 metadata")
+}
+
+func TestV2RejectsNextRowID(t *testing.T) {
+	data := `{
+		"format-version": 2,
+		"table-uuid": "d20125c8-7284-442c-9aea-15fee620737c",
+		"location": "s3://bucket/test/location",
+		"last-updated-ms": 1602638573874,
+		"last-column-id": 3,
+		"last-sequence-number": 0,
+		"schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"x","required":true,"type":"long"}]}],
+		"current-schema-id": 0,
+		"partition-specs": [{"spec-id": 0, "fields": []}],
+		"default-spec-id": 0,
+		"last-partition-id": 1000,
+		"sort-orders": [{"order-id": 0, "fields": []}],
+		"default-sort-order-id": 0,
+		"next-row-id": 42
+	}`
+
+	_, err := ParseMetadataBytes([]byte(data))
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	assert.ErrorContains(t, err, "v3-only field 'next-row-id' present in v2 metadata")
+}
+
+func TestV2RejectsEncryptionKeys(t *testing.T) {
+	data := `{
+		"format-version": 2,
+		"table-uuid": "d20125c8-7284-442c-9aea-15fee620737c",
+		"location": "s3://bucket/test/location",
+		"last-updated-ms": 1602638573874,
+		"last-column-id": 3,
+		"last-sequence-number": 0,
+		"schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"x","required":true,"type":"long"}]}],
+		"current-schema-id": 0,
+		"partition-specs": [{"spec-id": 0, "fields": []}],
+		"default-spec-id": 0,
+		"last-partition-id": 1000,
+		"sort-orders": [{"order-id": 0, "fields": []}],
+		"default-sort-order-id": 0,
+		"encryption-keys": [{"key-id": "k1", "encrypted-key-metadata": "abc123"}]
+	}`
+
+	_, err := ParseMetadataBytes([]byte(data))
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	assert.ErrorContains(t, err, "v3-only field 'encryption-keys' present in v2 metadata")
+}
