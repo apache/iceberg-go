@@ -448,6 +448,7 @@ var void = Void{}
 // An error is returned if a requested name cannot be found.
 func (s *Schema) Select(caseSensitive bool, names ...string) (*Schema, error) {
 	ids := make(map[int]Void)
+	var missingMetaFields []NestedField
 	if caseSensitive {
 		nameMap, err := s.lazyNameToID()
 		if err != nil {
@@ -457,6 +458,12 @@ func (s *Schema) Select(caseSensitive bool, names ...string) (*Schema, error) {
 		for _, n := range names {
 			id, ok := nameMap[n]
 			if !ok {
+				// check if v3 row lineage metadata
+				field, isMeta := isRowLineageMeta(n)
+				if isMeta {
+					missingMetaFields = append(missingMetaFields, field)
+					continue
+				}
 				return nil, fmt.Errorf("%w: could not find column %s", ErrInvalidSchema, n)
 			}
 			ids[id] = void
@@ -470,13 +477,25 @@ func (s *Schema) Select(caseSensitive bool, names ...string) (*Schema, error) {
 		for _, n := range names {
 			id, ok := nameMap[strings.ToLower(n)]
 			if !ok {
+				field, isMeta := isRowLineageMeta(n)
+				if isMeta {
+					missingMetaFields = append(missingMetaFields, field)
+					continue
+				}
 				return nil, fmt.Errorf("%w: could not find column %s", ErrInvalidSchema, n)
 			}
 			ids[id] = void
 		}
 	}
 
-	return PruneColumns(s, ids, true)
+	prunedSchema, err := PruneColumns(s, ids, true)
+
+	if len(missingMetaFields) == 0 {
+		return prunedSchema, err
+	}
+
+	return NewSchema(prunedSchema.ID, append(prunedSchema.fields, missingMetaFields...)...), nil
+
 }
 
 func (s *Schema) FieldHasOptionalParent(id int) bool {

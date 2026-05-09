@@ -17,6 +17,8 @@
 
 package iceberg
 
+import "strings"
+
 // Row lineage metadata column field IDs (v3+). Reserved IDs are Integer.MAX_VALUE - 107 and 108
 // per the Iceberg spec (Metadata Columns / Row Lineage).
 const (
@@ -58,4 +60,15 @@ func LastUpdatedSequenceNumber() NestedField {
 // IsMetadataColumn returns true if the field ID is a reserved metadata column (e.g. row lineage).
 func IsMetadataColumn(fieldID int) bool {
 	return fieldID == RowIDFieldID || fieldID == LastUpdatedSequenceNumberFieldID
+}
+
+func isRowLineageMeta(name string) (NestedField, bool) {
+	name = strings.ToLower(name)
+	switch name {
+	case RowIDColumnName:
+		return RowID(), true
+	case LastUpdatedSequenceNumberColumnName:
+		return LastUpdatedSequenceNumber(), true
+	}
+	return NestedField{}, false
 }

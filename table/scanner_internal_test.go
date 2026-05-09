@@ -236,6 +236,70 @@ func TestBuildPartitionEvaluatorWithInvalidSpecID(t *testing.T) {
 	assert.ErrorContains(t, err, "id 999")
 }
 
+// TestProjectionV3PreLineageFile verifies that Projection() succeeds and returns
+// _row_id and _last_updated_sequence_number as nullable (all-null-capable) fields when
+// the table is v3 with next-row-id set but the data file predates row lineage (those
+// columns are absent from the schema).
+func TestProjectionV3PreLineageFile(t *testing.T) {
+	schema := iceberg.NewSchema(
+		1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+
+	metadata, err := NewMetadata(
+		schema,
+		iceberg.UnpartitionedSpec,
+		UnsortedSortOrder,
+		"s3://test-bucket/test_table",
+		iceberg.Properties{"format-version": "3"},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 3, metadata.Version(), "sanity: must be v3")
+	assert.GreaterOrEqual(t, metadata.NextRowID(), int64(0), "sanity: next-row-id must be set")
+
+	// Request the two user columns plus both row-lineage metadata columns.
+	// These metadata columns do NOT exist in the physical schema of a pre-lineage file.
+	scan := &Scan{
+		metadata:       metadata,
+		selectedFields: []string{"id", "payload", iceberg.RowIDColumnName, iceberg.LastUpdatedSequenceNumberColumnName},
+		caseSensitive:  true,
+	}
+
+	proj, err := scan.Projection()
+	require.NoError(t, err, "Projection must not error for pre-lineage metadata columns")
+	require.NotNil(t, proj)
+
+	fields := proj.Fields()
+	require.Len(t, fields, 4, "projected schema must contain all four requested fields")
+
+	fieldByName := make(map[string]iceberg.NestedField, len(fields))
+	for _, f := range fields {
+		fieldByName[f.Name] = f
+	}
+
+	// Regular columns must survive unchanged.
+	idField, ok := fieldByName["id"]
+	require.True(t, ok, "id must be in projection")
+	assert.Equal(t, 1, idField.ID)
+
+	payloadField, ok := fieldByName["payload"]
+	require.True(t, ok, "payload must be in projection")
+	assert.Equal(t, 2, payloadField.ID)
+
+	// Row lineage columns must be present as optional (nullable) fields — the scanner
+	// will return all-nulls for any data file that was written before row lineage existed.
+	rowIDField, ok := fieldByName[iceberg.RowIDColumnName]
+	require.True(t, ok, "_row_id must be in projection")
+	assert.Equal(t, iceberg.RowIDFieldID, rowIDField.ID, "_row_id field ID")
+	assert.False(t, rowIDField.Required, "_row_id must be optional (nullable) for pre-lineage files")
+
+	seqField, ok := fieldByName[iceberg.LastUpdatedSequenceNumberColumnName]
+	require.True(t, ok, "_last_updated_sequence_number must be in projection")
+	assert.Equal(t, iceberg.LastUpdatedSequenceNumberFieldID, seqField.ID, "_last_updated_sequence_number field ID")
+	assert.False(t, seqField.Required, "_last_updated_sequence_number must be optional (nullable) for pre-lineage files")
+}
+
 // TestSynthesizeRowLineageColumns verifies that _row_id and _last_updated_sequence_number
 // are filled from task constants when those columns are present and null.
 func TestSynthesizeRowLineageColumns(t *testing.T) {
