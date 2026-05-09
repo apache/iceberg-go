@@ -70,5 +70,6 @@ func isRowLineageMeta(name string) (NestedField, bool) {
 	case LastUpdatedSequenceNumberColumnName:
 		return LastUpdatedSequenceNumber(), true
 	}
+
 	return NestedField{}, false
 }

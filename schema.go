@@ -462,8 +462,10 @@ func (s *Schema) Select(caseSensitive bool, names ...string) (*Schema, error) {
 				field, isMeta := isRowLineageMeta(n)
 				if isMeta {
 					missingMetaFields = append(missingMetaFields, field)
+
 					continue
 				}
+
 				return nil, fmt.Errorf("%w: could not find column %s", ErrInvalidSchema, n)
 			}
 			ids[id] = void
@@ -480,8 +482,10 @@ func (s *Schema) Select(caseSensitive bool, names ...string) (*Schema, error) {
 				field, isMeta := isRowLineageMeta(n)
 				if isMeta {
 					missingMetaFields = append(missingMetaFields, field)
+
 					continue
 				}
+
 				return nil, fmt.Errorf("%w: could not find column %s", ErrInvalidSchema, n)
 			}
 			ids[id] = void
@@ -495,7 +499,6 @@ func (s *Schema) Select(caseSensitive bool, names ...string) (*Schema, error) {
 	}
 
 	return NewSchema(prunedSchema.ID, append(prunedSchema.fields, missingMetaFields...)...), nil
-
 }
 
 func (s *Schema) FieldHasOptionalParent(id int) bool {
