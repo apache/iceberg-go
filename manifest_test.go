@@ -2115,6 +2115,53 @@ func (m *ManifestTestSuite) TestManifestRoundTripSortOrderID() {
 	m.Equal(expectedSortOrderID, *got)
 }
 
+// TestWriteManifestV3OmitsDistinctCounts verifies the v3 writer clears
+// data_file.distinct_counts (deprecated by v3 spec; Java parity:
+// apache/iceberg#12182). v2 round-trip will be added with #1038.
+func (m *ManifestTestSuite) TestWriteManifestV3OmitsDistinctCounts() {
+	partitionSpec := NewPartitionSpecID(0)
+	snapshotID := int64(1)
+	seqNum := int64(1)
+
+	dataFileBuilder, err := NewDataFileBuilder(
+		partitionSpec,
+		EntryContentData,
+		"s3://bucket/ns/table/data/distinct.parquet",
+		ParquetFile,
+		map[int]any{},
+		map[int]string{},
+		map[int]int{},
+		1,
+		1,
+	)
+	m.Require().NoError(err)
+	dataFileBuilder.DistinctValueCounts(map[int]int64{1: 42})
+
+	entry := NewManifestEntry(
+		EntryStatusADDED,
+		&snapshotID,
+		&seqNum, &seqNum,
+		dataFileBuilder.Build(),
+	)
+
+	var buf bytes.Buffer
+	_, err = WriteManifest(
+		"s3://bucket/ns/table/metadata/distinct.avro", &buf, 3,
+		partitionSpec,
+		NewSchema(
+			0,
+			NestedField{ID: 1, Name: "id", Type: Int64Type{}, Required: true},
+		),
+		snapshotID,
+		[]ManifestEntry{entry},
+	)
+	m.Require().NoError(err)
+
+	df, ok := entry.DataFile().(*dataFile)
+	m.Require().True(ok)
+	m.Nil(df.DistinctCounts, "v3 writer must clear DistinctCounts on the entry's *dataFile")
+}
+
 func (m *ManifestTestSuite) TestWriteManifestClosesWriterOnEntryError() {
 	partitionSpec := NewPartitionSpecID(1,
 		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "VendorID", Transform: IdentityTransform{}},
