@@ -93,8 +93,13 @@ func wrapDVPayloadForTest(bitmapBytes []byte) []byte {
 }
 
 func writePuffinWithDVBlob(t *testing.T, dir string, dvBlobBytes []byte) (string, puffin.BlobMetadata) {
+	// Callers of this wrapper all use the canonical 5-position fixture
+	// (small-alternating-values-position-index.bin), so hardcoding "5" is
+	// safe. Tests that exercise other bitmap sizes call
+	// writePuffinWithDVBlobAndProps directly with their own cardinality.
 	return writePuffinWithDVBlobAndProps(t, dir, dvBlobBytes, map[string]string{
 		"referenced-data-file": "s3://bucket/data/data-001.parquet",
+		"cardinality":          "5",
 	})
 }
 
@@ -437,35 +442,16 @@ func TestReadDVCardinalityValidation(t *testing.T) {
 		assert.Equal(t, int64(5), bm.Cardinality())
 	})
 
-	t.Run("malformed property is rejected", func(t *testing.T) {
-		// Property present but unparseable — silently falling back to -1
-		// would mask writer bugs, so this is a hard error.
-		dir := t.TempDir()
-		path, meta := writePuffinWithDVBlobAndProps(t, dir, dvBlobBytes, map[string]string{
-			"referenced-data-file": "s3://bucket/data/data-001.parquet",
-			"cardinality":          "not-a-number",
-		})
-		offset, size := meta.Offset, meta.Length
-		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "invalid cardinality")
-	})
-
-	t.Run("negative cardinality is rejected (not silently treated as skip-validation sentinel)", func(t *testing.T) {
-		// -1 happens to alias DeserializeDV's internal skip-validation
-		// sentinel; accepting it from blob properties would silently
-		// disable the very check this PR adds. The pre-pass rejects all
-		// negative values.
-		dir := t.TempDir()
-		path, meta := writePuffinWithDVBlobAndProps(t, dir, dvBlobBytes, map[string]string{
-			"referenced-data-file": "s3://bucket/data/data-001.parquet",
-			"cardinality":          "-1",
-		})
-		offset, size := meta.Offset, meta.Length
-		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "must be non-negative")
-	})
+	// Note: the previous "malformed property is rejected" and "negative
+	// cardinality rejected on read" subtests were removed once the puffin
+	// writer started rejecting non-numeric and negative cardinality values
+	// at AddBlob time (via ParseUint). The reader-side checks in
+	// blobCardinality stay as belt-and-suspenders for third-party-written
+	// files but are no longer reachable from any in-tree writer path used
+	// to construct test fixtures. Writer-side coverage:
+	//   TestWriterValidation/deletion_vector_non-numeric_cardinality
+	//   TestWriterValidation/deletion_vector_negative_cardinality
+	// (both in puffin_test.go).
 
 	t.Run("manifest offset not found in footer is rejected with a precise error", func(t *testing.T) {
 		// Manifest entry points at an in-bounds offset that doesn't match
