@@ -2045,6 +2045,41 @@ func (m *metadataV3) UnmarshalJSON(b []byte) error {
 	return m.validate()
 }
 
+// MarshalJSON serializes v3 metadata with the spec-mandated emission of
+// `current-snapshot-id: null` for empty tables, rather than dropping the
+// key via the underlying `omitempty` tag (Java reference behaviour per
+// apache/iceberg#12335). The override re-declares `CurrentSnapshotID`
+// without omitempty in an outer struct that embeds an alias of
+// `metadataV3`; Go's encoding/json resolves the field-name collision in
+// favour of the shallower (outer) declaration, so the value is always
+// emitted — null when nil, the id otherwise.
+//
+// v1/v2 keep the omitempty path since their fixtures use the -1 sentinel
+// for "no current snapshot".
+//
+// `last-partition-id` is required for v2+ per spec — the existing parse-
+// time validation enforces this on read; the symmetric check below
+// rejects writes of malformed in-memory state (builder/parser paths
+// always populate it, so this only fires when code constructs metadataV3
+// directly and skips the builder).
+func (m *metadataV3) MarshalJSON() ([]byte, error) {
+	if m.LastPartitionID == nil {
+		return nil, fmt.Errorf("%w: last-partition-id must be set for v3 metadata", ErrInvalidMetadata)
+	}
+
+	// Alias strips the MarshalJSON method off metadataV3 so json.Marshal
+	// doesn't recurse back into this function via the embedded pointer.
+	type Alias metadataV3
+
+	return json.Marshal(&struct {
+		*Alias
+		CurrentSnapshotID *int64 `json:"current-snapshot-id"`
+	}{
+		Alias:             (*Alias)(m),
+		CurrentSnapshotID: m.CurrentSnapshotID,
+	})
+}
+
 func (m *metadataV3) validate() error {
 	if err := checkLastSequenceNumber(m, m.SnapshotList); err != nil {
 		return err
