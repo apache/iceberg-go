@@ -49,8 +49,15 @@ inherited from any specific Java-emitted file.
 To regenerate after a deliberate puffin-format change:
 
 ```
-REGEN_FIXTURES=1 go test ./puffin/ -run TestRegenerateDeletionVectorPuffinFixture
+go generate ./puffin/...
 ```
+
+The generator lives in `puffin/gen_dv_fixture.go` (built with the
+`//go:build ignore` tag and run via the `//go:generate` directive in
+`puffin/dv_golden_test.go`). It self-validates by reading the freshly-
+written envelope back before overwriting the on-disk file, so a writer
+bug producing a valid-but-unreadable file fails the regen rather than
+calcifying into the fixture.
 
 After regen, diff the file before committing to verify only intended bytes
 changed:

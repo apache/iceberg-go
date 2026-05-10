@@ -17,6 +17,8 @@
 
 package puffin_test
 
+//go:generate go run gen_dv_fixture.go
+
 import (
 	"bytes"
 	"os"
@@ -42,7 +44,7 @@ const dvFixturePayloadName = "deletion-vector-v1-payload.bin"
 // but that test does not exercise empty Fields arrays or multi-key blob
 // Properties, both of which this fixture relies on. JSON key ordering of
 // blob Properties is also encoder-defined.) Regenerate via
-// TestRegenerateDeletionVectorPuffinFixture.
+// `go generate ./puffin/...` (driven by gen_dv_fixture.go).
 const dvFixturePuffinName = "deletion-vector-v1.puffin"
 
 // dvFixtureReferencedDataFile is the placeholder data-file path stored in
@@ -86,43 +88,6 @@ func buildDVFixture(t *testing.T, payload []byte) []byte {
 	return buf.Bytes()
 }
 
-// TestRegenerateDeletionVectorPuffinFixture rewrites
-// puffin/testdata/deletion-vector-v1.puffin from the Java-produced inner
-// payload. Skipped by default — run with REGEN_FIXTURES=1 to regenerate
-// after a deliberate puffin-format change. The regen path round-trips the
-// fixture through puffin.NewReader before writing, so any writer drift
-// that would produce an unreadable file fails here rather than at the
-// next CI run.
-//
-// After regen, diff the file before committing:
-//
-//	git diff -- puffin/testdata/deletion-vector-v1.puffin
-func TestRegenerateDeletionVectorPuffinFixture(t *testing.T) {
-	if os.Getenv("REGEN_FIXTURES") != "1" {
-		t.Skip("regen-only; set REGEN_FIXTURES=1 to rewrite the fixture")
-	}
-
-	payload, err := os.ReadFile(filepath.Join("testdata", dvFixturePayloadName))
-	require.NoError(t, err)
-
-	out := buildDVFixture(t, payload)
-
-	// Self-validate before overwriting: parse what we just produced, read
-	// the blob back, and confirm both the envelope-level invariants and the
-	// inner-payload bytes survive the round-trip. Without the ReadBlob step
-	// a writer bug producing valid-but-mismatched blob offsets/lengths
-	// would still pass parse-only validation and calcify into the fixture.
-	r, err := puffin.NewReader(bytes.NewReader(out))
-	require.NoError(t, err, "regen produced an unreadable puffin file")
-	require.Len(t, r.Blobs(), 1)
-	require.Equal(t, puffin.BlobTypeDeletionVector, r.Blobs()[0].Type)
-	got, err := r.ReadBlob(0)
-	require.NoError(t, err, "regen produced an unreadable blob")
-	require.Equal(t, payload, got.Data, "regen round-trip mangled the inner payload")
-
-	require.NoError(t, os.WriteFile(filepath.Join("testdata", dvFixturePuffinName), out, 0o644))
-}
-
 // TestDeletionVectorPuffinWireFormat is a cross-implementation wire-format
 // pin for puffin envelopes wrapping deletion-vector-v1 blobs. Two layers of
 // guarantee:
@@ -139,7 +104,7 @@ func TestRegenerateDeletionVectorPuffinFixture(t *testing.T) {
 // Independent of #866 (the roaring decoder PR) — uses raw bytes only.
 func TestDeletionVectorPuffinWireFormat(t *testing.T) {
 	puffinBytes, err := os.ReadFile(filepath.Join("testdata", dvFixturePuffinName))
-	require.NoError(t, err, "fixture missing — regenerate with REGEN_FIXTURES=1")
+	require.NoError(t, err, "fixture missing — regenerate with `go generate ./puffin/...`")
 
 	expectedPayload, err := os.ReadFile(filepath.Join("testdata", dvFixturePayloadName))
 	require.NoError(t, err)
@@ -160,8 +125,8 @@ func TestDeletionVectorPuffinWireFormat(t *testing.T) {
 		}
 		t.Fatalf("checked-in envelope no longer matches puffin.Writer output. "+
 			"First diff at byte %d (fixture=%d bytes, fresh=%d bytes). "+
-			"Either a deliberate format change (regenerate with REGEN_FIXTURES=1 "+
-			"and review the diff) or a writer regression.",
+			"Either a deliberate format change (regenerate with "+
+			"`go generate ./puffin/...` and review the diff) or a writer regression.",
 			diffAt, len(puffinBytes), len(freshBytes))
 	}
 
