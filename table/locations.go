@@ -70,6 +70,8 @@ func (slp *simpleLocationProvider) NewTableMetadataFileLocation(newVersion int) 
 		ext = ".metadata.json"
 	case MetadataCompressionCodecGzip:
 		ext = ".gz.metadata.json"
+	case MetadataCompressionCodecZstd:
+		ext = ".zstd.metadata.json"
 	default:
 		return "", fmt.Errorf("unsupported write metadata compression codec: %s", compression)
 	}

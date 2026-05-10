@@ -315,6 +315,8 @@ func (c convertToIceberg) Primitive(dt arrow.DataType) (result iceberg.NestedFie
 		return c.Primitive(dt.Encoded())
 	case *arrow.BooleanType:
 		result.Type = iceberg.PrimitiveTypes.Bool
+	case *arrow.NullType:
+		result.Type = iceberg.PrimitiveTypes.Unknown
 	case *arrow.Uint8Type, *arrow.Uint16Type, *arrow.Uint32Type,
 		*arrow.Int8Type, *arrow.Int16Type, *arrow.Int32Type:
 		result.Type = iceberg.PrimitiveTypes.Int32
@@ -625,9 +627,7 @@ func (c convertToArrow) VisitUUID() arrow.Field {
 }
 
 func (c convertToArrow) VisitUnknown() arrow.Field {
-	return arrow.Field{
-		Type: extensions.NewOpaqueType(arrow.Null, "unknown", "apache.iceberg"),
-	}
+	return arrow.Field{Type: arrow.Null}
 }
 
 var _ iceberg.SchemaVisitorPerPrimitiveType[arrow.Field] = convertToArrow{}
