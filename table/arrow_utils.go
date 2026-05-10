@@ -1612,7 +1612,7 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 	// rather than `== 3` so the warning carries forward to v4+ without churn.
 	// See apache/iceberg#12048.
 	if latestMetadata.Version() >= 3 {
-		slog.Warn("writing Parquet position-delete file on a v3 table; use deletion vectors instead",
+		slog.Warn("writing Parquet position-delete file on a v3 table; prefer deletion vectors",
 			"table_location", latestMetadata.Location())
 	}
 
