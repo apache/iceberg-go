@@ -38,12 +38,14 @@ var adlsURIPattern = regexp.MustCompile(`^(abfss?|wasbs?)://([^/?#]+)(.*)?$`)
 
 // Constants for Azure configuration options
 const (
-	AdlsSasTokenPrefix         = "adls.sas-token."
-	AdlsConnectionStringPrefix = "adls.connection-string."
-	AdlsSharedKeyAccountName   = "adls.auth.shared-key.account.name"
-	AdlsSharedKeyAccountKey    = "adls.auth.shared-key.account.key"
-	AdlsEndpoint               = "adls.endpoint"
-	AdlsProtocol               = "adls.protocol"
+	AdlsSasTokenPrefix          = "adls.sas-token."
+	AdlsConnectionStringPrefix  = "adls.connection-string."
+	AdlsSharedKeyAccountName    = "adls.auth.shared-key.account.name"
+	AdlsSharedKeyAccountKey     = "adls.auth.shared-key.account.key"
+	AdlsEndpoint                = "adls.endpoint"
+	AdlsProtocol                = "adls.protocol"
+	AdlsManagedIdentityEnabled  = "adls.auth.managed-identity.enabled"
+	AdlsManagedIdentityClientID = "adls.auth.managed-identity.client-id"
 
 	// Not in use yet
 	// AdlsReadBlockSize          = "adls.read.block-size-bytes"
@@ -169,6 +171,28 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 		client, err = container.NewClientFromConnectionString(connectionString, location.containerName, nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed container.NewClientFromConnectionString: %w", err)
+		}
+	} else if props[AdlsManagedIdentityEnabled] == "true" {
+		containerURL, err := createContainerURL(location.accountName, protocol, endpoint, "", location.containerName)
+		if err != nil {
+			return nil, err
+		}
+
+		var miOpts *azidentity.ManagedIdentityCredentialOptions
+		if clientID := props[AdlsManagedIdentityClientID]; clientID != "" {
+			miOpts = &azidentity.ManagedIdentityCredentialOptions{
+				ID: azidentity.ClientID(clientID),
+			}
+		}
+
+		cred, err := azidentity.NewManagedIdentityCredential(miOpts)
+		if err != nil {
+			return nil, fmt.Errorf("failed azidentity.NewManagedIdentityCredential: %w", err)
+		}
+
+		client, err = container.NewClient(containerURL, cred, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed container.NewClient: %w", err)
 		}
 	} else {
 		containerURL, err := createContainerURL(location.accountName, protocol, endpoint, "", location.containerName)
