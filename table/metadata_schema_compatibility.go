@@ -39,15 +39,14 @@ func (e ErrIncompatibleSchema) Error() string {
 			fmt.Fprintf(&problems, "\n- invalid type for %s: %s is not supported until v%d", f.ColName, f.Field.Type, f.UnsupportedType.MinFormatVersion)
 		}
 		if f.InvalidDefault != nil {
-			switch f.Field.Type.(type) {
-			case iceberg.GeometryType, iceberg.GeographyType:
+			if f.InvalidDefault.MustBeNullForType {
 				if f.Field.InitialDefault != nil {
 					fmt.Fprintf(&problems, "\n- invalid initial default for %s: %s columns must default to null", f.ColName, f.Field.Type)
 				}
 				if f.Field.WriteDefault != nil {
 					fmt.Fprintf(&problems, "\n- invalid write default for %s: %s columns must default to null", f.ColName, f.Field.Type)
 				}
-			default:
+			} else {
 				fmt.Fprintf(&problems, "\n- invalid initial default for %s: non-null default (%v) is not supported until v%d", f.ColName, f.Field.InitialDefault, f.InvalidDefault.MinFormatVersion)
 			}
 		}
@@ -72,8 +71,9 @@ type UnsupportedType struct {
 }
 
 type InvalidDefault struct {
-	MinFormatVersion int
-	WriteDefault     any
+	MinFormatVersion  int
+	WriteDefault      any
+	MustBeNullForType bool
 }
 
 // checkSchemaCompatibility checks that the schema is compatible with the table's format version.
@@ -125,18 +125,11 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 
 		switch field.Type.(type) {
 		case iceberg.GeometryType, iceberg.GeographyType:
-			if field.InitialDefault != nil {
+			if field.InitialDefault != nil || field.WriteDefault != nil {
 				problems = append(problems, IncompatibleField{
 					Field:          field,
 					ColName:        colName,
-					InvalidDefault: &InvalidDefault{MinFormatVersion: formatVersion, WriteDefault: field.InitialDefault},
-				})
-			}
-			if field.WriteDefault != nil {
-				problems = append(problems, IncompatibleField{
-					Field:          field,
-					ColName:        colName,
-					InvalidDefault: &InvalidDefault{MinFormatVersion: formatVersion, WriteDefault: field.WriteDefault},
+					InvalidDefault: &InvalidDefault{MustBeNullForType: true},
 				})
 			}
 		default:

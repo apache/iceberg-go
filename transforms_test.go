@@ -279,6 +279,8 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
 				iceberg.DecimalTypeOf(2, 1), iceberg.FixedTypeOf(2), &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
 				iceberg.VariantType{},
+				iceberg.GeographyType{},
+				iceberg.GeometryType{},
 			},
 			notAllowed: []iceberg.Type{},
 		},
@@ -312,6 +314,8 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.TimestampNs, iceberg.PrimitiveTypes.TimestampTzNs,
 				&iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
 				iceberg.VariantType{},
+				iceberg.GeometryType{},
+				iceberg.GeographyType{},
 			},
 		},
 		{
@@ -326,6 +330,8 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
 				iceberg.DecimalTypeOf(2, 1), iceberg.FixedTypeOf(2), &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
 				iceberg.VariantType{},
+				iceberg.GeographyType{},
+				iceberg.GeometryType{},
 			},
 		},
 		{
@@ -340,6 +346,8 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
 				iceberg.DecimalTypeOf(2, 1), iceberg.FixedTypeOf(2), &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
 				iceberg.VariantType{},
+				iceberg.GeographyType{},
+				iceberg.GeometryType{},
 			},
 		},
 		{
@@ -354,6 +362,8 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.UUID,
 				iceberg.DecimalTypeOf(2, 1), iceberg.FixedTypeOf(2), &iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
 				iceberg.VariantType{},
+				iceberg.GeographyType{},
+				iceberg.GeometryType{},
 			},
 		},
 		{
@@ -369,6 +379,8 @@ func TestCanTransform(t *testing.T) {
 				iceberg.PrimitiveTypes.Date, iceberg.DecimalTypeOf(2, 1), iceberg.FixedTypeOf(2),
 				&iceberg.StructType{}, &iceberg.ListType{}, &iceberg.MapType{},
 				iceberg.VariantType{},
+				iceberg.GeographyType{},
+				iceberg.GeometryType{},
 			},
 		},
 	}

@@ -346,17 +346,24 @@ func TestAddColumn(t *testing.T) {
 	})
 
 	t.Run("test update schema with add geometry and geography columns", func(t *testing.T) {
-		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		metaV3, err := NewMetadata(originalSchema, nil, UnsortedSortOrder, "", iceberg.Properties{
+			PropertyFormatVersion: "3",
+		})
+		assert.NoError(t, err)
+
+		table := New([]string{"id"}, metaV3, "", nil, nil)
 		txn := table.NewTransaction()
 
-		geog, err := iceberg.GeographyTypeOf("srid:4269", iceberg.EdgeAlgorithmKarney)
+		geog, err := iceberg.GeographyTypeOf("srid:4269", "karney")
 		assert.NoError(t, err)
 
-		newSchema, err := NewUpdateSchema(txn, true, true).
+		upd := NewUpdateSchema(txn, true, true).
 			AddColumn([]string{"geom"}, iceberg.GeometryType{}, "", false, nil).
-			AddColumn([]string{"geog"}, geog, "", false, nil).
-			Apply()
+			AddColumn([]string{"geog"}, geog, "", false, nil)
+		err = upd.Commit()
 		assert.NoError(t, err)
+
+		newSchema := txn.meta.CurrentSchema()
 		assert.NotNil(t, newSchema)
 
 		geomField, ok := newSchema.FindFieldByName("geom")
@@ -368,6 +375,22 @@ func TestAddColumn(t *testing.T) {
 		assert.True(t, ok)
 		assert.Equal(t, 13, geogField.ID)
 		assert.True(t, geogField.Type.Equals(geog))
+	})
+
+	t.Run("test update schema with add geometry and geography columns errors in v2", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		geog, err := iceberg.GeographyTypeOf("srid:4269", "karney")
+		assert.NoError(t, err)
+
+		upd := NewUpdateSchema(txn, true, true).
+			AddColumn([]string{"geom"}, iceberg.GeometryType{}, "", false, nil).
+			AddColumn([]string{"geog"}, geog, "", false, nil)
+		err = upd.Commit()
+		assert.Error(t, err)
+		assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		assert.Contains(t, err.Error(), "is not supported until v3")
 	})
 }
 
@@ -887,9 +910,9 @@ func TestErrorHandling(t *testing.T) {
 	})
 
 	t.Run("test update geography CRS and edge algorithm without allowIncompatibleChanges", func(t *testing.T) {
-		currentGeog, err := iceberg.GeographyTypeOf("srid:4269", iceberg.EdgeAlgorithmKarney)
+		currentGeog, err := iceberg.GeographyTypeOf("srid:4269", "karney")
 		assert.NoError(t, err)
-		targetGeog, err := iceberg.GeographyTypeOf("srid:4326", iceberg.EdgeAlgorithmSpherical)
+		targetGeog, err := iceberg.GeographyTypeOf("srid:4326", "spherical")
 		assert.NoError(t, err)
 
 		geoSchema := iceberg.NewSchema(1,
@@ -908,7 +931,7 @@ func TestErrorHandling(t *testing.T) {
 			FieldType: iceberg.Optional[iceberg.Type]{Valid: true, Val: targetGeog},
 		}).Apply()
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "cannot promote geography(srid:4269, karney) to geography(srid:4326, spherical)")
+		assert.Contains(t, err.Error(), "cannot promote geography(srid:4269, karney) to geography(srid:4326)")
 	})
 
 	t.Run("test add required field without default value", func(t *testing.T) {

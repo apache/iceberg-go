@@ -644,38 +644,45 @@ func TestGeometryType(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, "srid:4326", geom.CRS())
 	})
+
+	t.Run("rejects extra argument", func(t *testing.T) {
+		data := `{"id": 1, "name": "loc", "type": "geometry(srid:4326, extra)", "required": false}`
+		var n iceberg.NestedField
+		err := json.Unmarshal([]byte(data), &n)
+		assert.ErrorIs(t, err, iceberg.ErrInvalidTypeString)
+	})
 }
 
 func TestGeographyType(t *testing.T) {
 	t.Run("default CRS and algorithm", func(t *testing.T) {
 		geog := iceberg.GeographyType{}
 		assert.Equal(t, "OGC:CRS84", geog.CRS())
-		assert.Equal(t, iceberg.EdgeAlgorithm(""), geog.Algorithm())
+		assert.Equal(t, "spherical", geog.Algorithm())
 		assert.Equal(t, "geography", geog.String())
 		assert.True(t, geog.Equals(iceberg.GeographyType{}))
 	})
 
 	t.Run("custom CRS only", func(t *testing.T) {
-		geog, err := iceberg.GeographyTypeOf("srid:4269", "")
+		geog, err := iceberg.GeographyTypeOf("srid:4269", "spherical")
 		require.NoError(t, err)
 		assert.Equal(t, "srid:4269", geog.CRS())
-		assert.Equal(t, iceberg.EdgeAlgorithm(""), geog.Algorithm())
+		assert.Equal(t, "spherical", geog.Algorithm())
 		assert.Equal(t, "geography(srid:4269)", geog.String())
 	})
 
 	t.Run("default CRS with algorithm", func(t *testing.T) {
-		geog, err := iceberg.GeographyTypeOf("OGC:CRS84", iceberg.EdgeAlgorithmKarney)
+		geog, err := iceberg.GeographyTypeOf("OGC:CRS84", "karney")
 		require.NoError(t, err)
 		assert.Equal(t, "OGC:CRS84", geog.CRS())
-		assert.Equal(t, iceberg.EdgeAlgorithmKarney, geog.Algorithm())
+		assert.Equal(t, "karney", geog.Algorithm())
 		assert.Equal(t, "geography(OGC:CRS84, karney)", geog.String())
 	})
 
 	t.Run("custom CRS with algorithm", func(t *testing.T) {
-		geog, err := iceberg.GeographyTypeOf("srid:4269", iceberg.EdgeAlgorithmKarney)
+		geog, err := iceberg.GeographyTypeOf("srid:4269", "karney")
 		require.NoError(t, err)
 		assert.Equal(t, "srid:4269", geog.CRS())
-		assert.Equal(t, iceberg.EdgeAlgorithmKarney, geog.Algorithm())
+		assert.Equal(t, "karney", geog.Algorithm())
 		assert.Equal(t, "geography(srid:4269, karney)", geog.String())
 	})
 
@@ -691,7 +698,7 @@ func TestGeographyType(t *testing.T) {
 		geog, ok := n.Type.(iceberg.GeographyType)
 		require.True(t, ok)
 		assert.Equal(t, "OGC:CRS84", geog.CRS())
-		assert.Equal(t, iceberg.EdgeAlgorithm(""), geog.Algorithm())
+		assert.Equal(t, "spherical", geog.Algorithm())
 
 		out, err := json.Marshal(n)
 		require.NoError(t, err)
@@ -705,7 +712,7 @@ func TestGeographyType(t *testing.T) {
 		geog, ok := n.Type.(iceberg.GeographyType)
 		require.True(t, ok)
 		assert.Equal(t, "srid:4269", geog.CRS())
-		assert.Equal(t, iceberg.EdgeAlgorithm(""), geog.Algorithm())
+		assert.Equal(t, "spherical", geog.Algorithm())
 
 		out, err := json.Marshal(n)
 		require.NoError(t, err)
@@ -719,7 +726,7 @@ func TestGeographyType(t *testing.T) {
 		geog, ok := n.Type.(iceberg.GeographyType)
 		require.True(t, ok)
 		assert.Equal(t, "srid:4269", geog.CRS())
-		assert.Equal(t, iceberg.EdgeAlgorithmKarney, geog.Algorithm())
+		assert.Equal(t, "karney", geog.Algorithm())
 
 		out, err := json.Marshal(n)
 		require.NoError(t, err)
@@ -733,7 +740,7 @@ func TestGeographyType(t *testing.T) {
 		geog, ok := n.Type.(iceberg.GeographyType)
 		require.True(t, ok)
 		assert.Equal(t, "SRID:4269", geog.CRS())
-		assert.Equal(t, iceberg.EdgeAlgorithmKarney, geog.Algorithm())
+		assert.Equal(t, "karney", geog.Algorithm())
 	})
 
 	t.Run("JSON parsing - whitespace tolerance", func(t *testing.T) {
@@ -743,7 +750,7 @@ func TestGeographyType(t *testing.T) {
 		geog, ok := n.Type.(iceberg.GeographyType)
 		require.True(t, ok)
 		assert.Equal(t, "srid:4269", geog.CRS())
-		assert.Equal(t, iceberg.EdgeAlgorithmKarney, geog.Algorithm())
+		assert.Equal(t, "karney", geog.Algorithm())
 	})
 
 	t.Run("JSON parsing - invalid algorithm", func(t *testing.T) {
@@ -752,34 +759,11 @@ func TestGeographyType(t *testing.T) {
 		err := json.Unmarshal([]byte(data), &n)
 		assert.ErrorContains(t, err, "invalid edge interpolation algorithm")
 	})
-}
 
-func TestEdgeAlgorithm(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected iceberg.EdgeAlgorithm
-	}{
-		{"spherical", iceberg.EdgeAlgorithmSpherical},
-		{"vincenty", iceberg.EdgeAlgorithmVincenty},
-		{"thomas", iceberg.EdgeAlgorithmThomas},
-		{"andoyer", iceberg.EdgeAlgorithmAndoyer},
-		{"karney", iceberg.EdgeAlgorithmKarney},
-		{"SPHERICAL", iceberg.EdgeAlgorithmSpherical},
-		{"Vincenty", iceberg.EdgeAlgorithmVincenty},
-		{"KARNEY", iceberg.EdgeAlgorithmKarney},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			algo, err := iceberg.ParseEdgeAlgorithm(tt.input)
-			require.NoError(t, err)
-			assert.Equal(t, tt.expected, algo)
-			assert.Equal(t, string(tt.expected), algo.String())
-		})
-	}
-
-	t.Run("invalid algorithm", func(t *testing.T) {
-		_, err := iceberg.ParseEdgeAlgorithm("invalid")
-		assert.ErrorContains(t, err, "invalid edge interpolation algorithm")
+	t.Run("rejects missing comma between CRS and algorithm", func(t *testing.T) {
+		data := `{"id": 1, "name": "area", "type": "geography(srid:4269 karney)", "required": false}`
+		var n iceberg.NestedField
+		err := json.Unmarshal([]byte(data), &n)
+		assert.ErrorIs(t, err, iceberg.ErrInvalidTypeString)
 	})
 }
