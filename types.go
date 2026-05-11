@@ -875,8 +875,7 @@ func toGeoArrowEdgeInterpolation(s string) (geoarrow.EdgeInterpolation, error) {
 	algo := geoarrow.EdgeInterpolation(strings.ToLower(strings.TrimSpace(s)))
 	switch algo {
 	case geoarrow.EdgeSpherical, geoarrow.EdgeVincenty,
-		geoarrow.EdgeThomas, geoarrow.EdgeAndoyer, geoarrow.EdgeKarney,
-		geoarrow.EdgePlanar:
+		geoarrow.EdgeThomas, geoarrow.EdgeAndoyer, geoarrow.EdgeKarney:
 		return algo, nil
 	default:
 		return "", fmt.Errorf("%w: invalid edge interpolation algorithm", ErrInvalidTypeString)

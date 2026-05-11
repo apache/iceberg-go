@@ -488,6 +488,12 @@ func TestGeometryType(t *testing.T) {
 		assert.True(t, geom.Equals(iceberg.GeometryType{}))
 	})
 
+	t.Run("default CRS explicit", func(t *testing.T) {
+		geom, err := iceberg.GeometryTypeOf("OGC:CRS84")
+		require.NoError(t, err)
+		assert.True(t, geom.Equals(iceberg.GeometryType{}))
+	})
+
 	t.Run("custom CRS", func(t *testing.T) {
 		geom, err := iceberg.GeometryTypeOf("srid:3857")
 		require.NoError(t, err)
@@ -575,6 +581,12 @@ func TestGeographyType(t *testing.T) {
 		assert.Equal(t, "srid:4269", geog.CRS())
 		assert.Equal(t, "spherical", geog.Algorithm())
 		assert.Equal(t, "geography(srid:4269)", geog.String())
+	})
+
+	t.Run("default CRS and algorithm explicit", func(t *testing.T) {
+		geog, err := iceberg.GeographyTypeOf("OGC:CRS84", "spherical")
+		require.NoError(t, err)
+		assert.True(t, geog.Equals(iceberg.GeographyType{}))
 	})
 
 	t.Run("default CRS with algorithm", func(t *testing.T) {

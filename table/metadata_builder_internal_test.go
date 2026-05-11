@@ -1904,7 +1904,7 @@ func TestGeometryGeographyNullOnlyDefaults(t *testing.T) {
 			require.NoError(t, err)
 		})
 
-		t.Run(tt.name+" in v2 with non-null initial default", func(t *testing.T) {
+		t.Run(tt.name+" in v2 type unsupported", func(t *testing.T) {
 			defaultValue := "POINT(0 0)"
 			sc := iceberg.NewSchema(0,
 				iceberg.NestedField{
@@ -1920,6 +1920,27 @@ func TestGeometryGeographyNullOnlyDefaults(t *testing.T) {
 			require.Error(t, err)
 			require.ErrorContains(t, err, "is not supported until v3")
 			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		})
+
+		t.Run(tt.name+" with v3 must default to null", func(t *testing.T) {
+			defaultValue := "POINT(0 0)"
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:           tt.typ,
+					ID:             1,
+					Name:           "location",
+					Required:       false,
+					InitialDefault: &defaultValue,
+					WriteDefault:   &defaultValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 3)
+			require.Error(t, err)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+
+			require.ErrorContains(t, err, "invalid initial default")
+			require.ErrorContains(t, err, "invalid write default")
 		})
 
 		t.Run(tt.name+" with both non-null defaults produces exactly two error lines", func(t *testing.T) {
