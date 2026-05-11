@@ -295,11 +295,13 @@ func TestRewriteFiles_DeleteFile_RoutesByContentType(t *testing.T) {
 	//   mis-route into deleteFilesToRemove would error with "cannot
 	//   remove delete files that do not belong to the table" instead.
 	//
-	//   Builder B — DeleteFile(strangerPosDel): if routed correctly,
-	//   ReplaceFiles' main path rejects with "cannot remove delete
-	//   files that do not belong to the table". A mis-route into
-	//   dataFilesToDelete would surface "cannot delete files that do
-	//   not belong to the table" instead.
+	//   Builder B — DeleteFile(strangerPosDel) only: if routed
+	//   correctly, ReplaceFiles' main path rejects with "cannot remove
+	//   delete files that do not belong to the table". A mis-route
+	//   into dataFilesToDelete would surface "cannot delete files
+	//   that do not belong to the table" instead. (No AddDataFile
+	//   here: adds-without-data-deletes is rejected pre-flight by
+	//   Commit, so it would mask the routing error.)
 	tbl := newRewriteTestTable(t)
 
 	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
@@ -331,12 +333,51 @@ func TestRewriteFiles_DeleteFile_RoutesByContentType(t *testing.T) {
 	delTx := tbl.NewTransaction()
 	err = delTx.NewRewrite(nil).
 		DeleteFile(strangerPosDel).
-		AddDataFile(replacement).
 		Commit(t.Context())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), deleteFileSliceMiss,
 		"DeleteFile(pos-delete) must route into deleteFilesToRemove; mis-routed it would surface the data-slice error")
 	assert.NotContains(t, err.Error(), dataSliceMiss)
+}
+
+// TestRewriteFiles_RejectsAddsWithoutDataDeletes proves that staging
+// new data files with no data files to delete is rejected up front —
+// otherwise the chain would slip through ReplaceFiles →
+// ReplaceDataFilesWithDataFiles → AddDataFiles (an OpAppend producer)
+// and silently tag the snapshot append instead of replace, with no
+// rewrite validator registered.
+func TestRewriteFiles_RejectsAddsWithoutDataDeletes(t *testing.T) {
+	tbl := newRewriteTestTable(t)
+	tx := tbl.NewTransaction()
+
+	add := newDataFile(t, tbl.Location()+"/data/lonely-add.parquet")
+
+	err := tx.NewRewrite(nil).AddDataFile(add).Commit(t.Context())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrInvalidOperation)
+	assert.Contains(t, err.Error(), "must delete at least one data file when adding")
+}
+
+func TestRewriteFiles_RejectsNilDataFile(t *testing.T) {
+	t.Run("DeleteFile", func(t *testing.T) {
+		tbl := newRewriteTestTable(t)
+		tx := tbl.NewTransaction()
+
+		err := tx.NewRewrite(nil).DeleteFile(nil).Commit(t.Context())
+		require.Error(t, err)
+		assert.ErrorIs(t, err, table.ErrInvalidOperation)
+		assert.Contains(t, err.Error(), "DeleteFile got nil data file")
+	})
+
+	t.Run("AddDataFile", func(t *testing.T) {
+		tbl := newRewriteTestTable(t)
+		tx := tbl.NewTransaction()
+
+		err := tx.NewRewrite(nil).AddDataFile(nil).Commit(t.Context())
+		require.Error(t, err)
+		assert.ErrorIs(t, err, table.ErrInvalidOperation)
+		assert.Contains(t, err.Error(), "AddDataFile got nil data file")
+	})
 }
 
 // TestRewriteFiles_DistributedEquivalence proves the worker+coordinator

@@ -265,21 +265,29 @@ func TestExecuteCompactionGroup_TargetFileSizeForwarded(t *testing.T) {
 
 	tasks, err := tbl.Scan().PlanFiles(t.Context())
 	require.NoError(t, err)
+	require.Len(t, tasks, 5)
 
-	plan, err := defaultTestCompactionCfg.PlanCompaction(tasks)
-	require.NoError(t, err)
-	require.NotEmpty(t, plan.Groups)
+	// Build the group manually so option-forwarding is decoupled from
+	// the planner's bin-packing / MinInputFiles knobs.
+	scanTasks := make([]table.FileScanTask, len(tasks))
+	var totalSize int64
+	for i, st := range tasks {
+		scanTasks[i] = st
+		totalSize += st.File.FileSizeBytes()
+	}
+	group := table.CompactionTaskGroup{
+		PartitionKey:   "single",
+		Tasks:          scanTasks,
+		TotalSizeBytes: totalSize,
+	}
 
-	groups := toTaskGroups(plan.Groups)
-	require.Len(t, groups, 1, "test assumes a single group; tighten plan if this changes")
-
-	withTiny, err := table.ExecuteCompactionGroup(t.Context(), tbl, groups[0],
+	withTiny, err := table.ExecuteCompactionGroup(t.Context(), tbl, group,
 		table.WithCompactionTargetFileSize(1))
 	require.NoError(t, err)
 	assert.Greater(t, len(withTiny.NewDataFiles), 1,
 		"WithCompactionTargetFileSize(1) must force the writer to roll over per row")
 
-	withDefault, err := table.ExecuteCompactionGroup(t.Context(), tbl, groups[0])
+	withDefault, err := table.ExecuteCompactionGroup(t.Context(), tbl, group)
 	require.NoError(t, err)
 	assert.Len(t, withDefault.NewDataFiles, 1,
 		"without the option, the same group consolidates into a single file")
@@ -287,9 +295,9 @@ func TestExecuteCompactionGroup_TargetFileSizeForwarded(t *testing.T) {
 
 // TestExecuteCompactionGroup_ScanConcurrencyForwarded is a smoke test
 // confirming WithCompactionScanConcurrency is wired through without
-// breaking the read path. We can't easily observe scan parallelism from
-// the result, so the assertion is correctness equivalence with the
-// default.
+// breaking the read path. We can't easily observe scan parallelism
+// from the result, so the assertion is correctness equivalence with a
+// no-option baseline: same group → same files in / out.
 func TestExecuteCompactionGroup_ScanConcurrencyForwarded(t *testing.T) {
 	tbl := newRewriteTestTable(t)
 
@@ -313,13 +321,19 @@ func TestExecuteCompactionGroup_ScanConcurrencyForwarded(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, plan.Groups)
 
-	groups := toTaskGroups(plan.Groups)
+	group := toTaskGroups(plan.Groups)[0]
 
-	got, err := table.ExecuteCompactionGroup(t.Context(), tbl, groups[0],
+	withOption, err := table.ExecuteCompactionGroup(t.Context(), tbl, group,
 		table.WithCompactionScanConcurrency(1))
 	require.NoError(t, err)
-	assert.NotEmpty(t, got.NewDataFiles)
-	assert.NotEmpty(t, got.OldDataFiles)
+
+	baseline, err := table.ExecuteCompactionGroup(t.Context(), tbl, group)
+	require.NoError(t, err)
+
+	assert.Equal(t, len(baseline.OldDataFiles), len(withOption.OldDataFiles),
+		"setting scan concurrency must not change the set of old files read")
+	assert.Equal(t, len(baseline.NewDataFiles), len(withOption.NewDataFiles),
+		"setting scan concurrency must not change the set of consolidated outputs")
 }
 
 // TestRewriteDataFiles_GroupOptionsForwarded verifies that
@@ -357,6 +371,13 @@ func TestRewriteDataFiles_GroupOptionsForwarded(t *testing.T) {
 
 	assert.Greater(t, result.AddedDataFiles, 1,
 		"GroupOptions must reach ExecuteCompactionGroup; tiny target size should split output")
+
+	// Drive the commit through to catch regressions that break
+	// ReplaceFiles under tiny-target rewrites — the in-process counter
+	// above only proves the option reached the writer.
+	committed, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	assertRowCount(t, committed, 5)
 }
 
 func TestRewriteDataFiles_EmptyGroupSkipped(t *testing.T) {

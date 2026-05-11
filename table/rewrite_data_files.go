@@ -162,9 +162,14 @@ type compactionGroupConfig struct {
 
 // WithCompactionTargetFileSize sets the size target for output files
 // written by [ExecuteCompactionGroup]. Forwarded to [WriteRecords] as
-// [WithTargetFileSize]. Zero (the default) means inherit the table's
-// `write.target-file-size-bytes` property.
+// [WithTargetFileSize]. A non-positive value (including the zero
+// default) means inherit the table's `write.target-file-size-bytes`
+// property.
 func WithCompactionTargetFileSize(size int64) CompactionGroupOption {
+	if size <= 0 {
+		return func(*compactionGroupConfig) {}
+	}
+
 	return func(c *compactionGroupConfig) {
 		c.targetFileSize = size
 	}

@@ -101,6 +101,11 @@ func (r *RewriteFiles) DeleteFile(df iceberg.DataFile) *RewriteFiles {
 	if r.err != nil {
 		return r
 	}
+	if df == nil {
+		r.err = fmt.Errorf("%w: DeleteFile got nil data file", ErrInvalidOperation)
+
+		return r
+	}
 
 	switch df.ContentType() {
 	case iceberg.EntryContentData:
@@ -123,6 +128,11 @@ func (r *RewriteFiles) DeleteFile(df iceberg.DataFile) *RewriteFiles {
 // queue order.
 func (r *RewriteFiles) AddDataFile(df iceberg.DataFile) *RewriteFiles {
 	if r.err != nil {
+		return r
+	}
+	if df == nil {
+		r.err = fmt.Errorf("%w: AddDataFile got nil data file", ErrInvalidOperation)
+
 		return r
 	}
 
@@ -195,6 +205,15 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 	}
 	if len(r.dataFilesToDelete) == 0 && len(r.dataFilesToAdd) == 0 && len(r.deleteFilesToRemove) == 0 {
 		return fmt.Errorf("%w: rewrite must have at least one file change", ErrInvalidOperation)
+	}
+	// Adds-without-deletes would route through ReplaceFiles →
+	// ReplaceDataFilesWithDataFiles → AddDataFiles, an OpAppend
+	// producer that never reads cfg.rewriteSemantics. The snapshot
+	// would be tagged append with no rewrite validator — silently
+	// wrong for a rewrite. A pure delete-file expunge (only
+	// deleteFilesToRemove non-empty) is still legitimate.
+	if len(r.dataFilesToDelete) == 0 && len(r.dataFilesToAdd) > 0 {
+		return fmt.Errorf("%w: rewrite must delete at least one data file when adding data files", ErrInvalidOperation)
 	}
 
 	if err := r.txn.ReplaceFiles(ctx, r.dataFilesToDelete, r.dataFilesToAdd, r.deleteFilesToRemove, r.snapshotProps, withRewriteSemantics()); err != nil {
