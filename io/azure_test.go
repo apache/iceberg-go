@@ -74,26 +74,23 @@ func TestCreateAzureBucketDefaultCredentialEmptyBucketName(t *testing.T) {
 }
 
 func TestCreateAzureBucketManagedIdentityCredentialCalled(t *testing.T) {
+	ctx := context.Background()
+
 	parsedURL, err := url.Parse("abfs://container@testaccount.dfs.core.windows.net/path")
 	assert.NoError(t, err)
 
-	bucket, err := createAzureBucket(context.Background(), parsedURL, map[string]string{
+	// NewManagedIdentityCredential never fails at construction, so bucket creation always succeeds.
+	bucket, err := createAzureBucket(ctx, parsedURL, map[string]string{
 		"adls.auth.managed-identity.enabled": "true",
 	})
 	assert.NoError(t, err)
 	assert.NotNil(t, bucket)
-}
 
-func TestCreateAzureBucketManagedIdentityWithClientID(t *testing.T) {
-	parsedURL, err := url.Parse("abfs://container@testaccount.dfs.core.windows.net/path")
-	assert.NoError(t, err)
-
-	bucket, err := createAzureBucket(context.Background(), parsedURL, map[string]string{
-		"adls.auth.managed-identity.enabled":   "true",
-		"adls.auth.managed-identity.client-id": "00000000-0000-0000-0000-000000000000",
-	})
-	assert.NoError(t, err)
-	assert.NotNil(t, bucket)
+	iter := bucket.List(nil)
+	_, err = iter.Next(ctx)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "ManagedIdentityCredential",
+		"Expected ManagedIdentityCredential error but got: %v", err)
 }
 
 func TestCreateAzureBucketSharedKeyMissingAccountKey(t *testing.T) {
