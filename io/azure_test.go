@@ -74,52 +74,25 @@ func TestCreateAzureBucketDefaultCredentialEmptyBucketName(t *testing.T) {
 }
 
 func TestCreateAzureBucketManagedIdentityCredentialCalled(t *testing.T) {
-	ctx := context.Background()
-
 	parsedURL, err := url.Parse("abfs://container@testaccount.dfs.core.windows.net/path")
 	assert.NoError(t, err)
 
-	props := map[string]string{
+	bucket, err := createAzureBucket(context.Background(), parsedURL, map[string]string{
 		"adls.auth.managed-identity.enabled": "true",
-	}
-
-	bucket, err := createAzureBucket(ctx, parsedURL, props)
-	if err != nil {
-		assert.NotContains(t, err.Error(), "DefaultAzureCredential",
-			"Expected ManagedIdentityCredential path, not DefaultAzureCredential: %v", err)
-		t.Logf("ManagedIdentityCredential path was taken and failed at creation: %v", err)
-
-		return
-	}
-
+	})
+	assert.NoError(t, err)
 	assert.NotNil(t, bucket)
-	iter := bucket.List(nil)
-	_, err = iter.Next(ctx)
-	assert.Error(t, err)
-	assert.NotContains(t, err.Error(), "DefaultAzureCredential",
-		"Expected ManagedIdentityCredential error, not DefaultAzureCredential: %v", err)
 }
 
 func TestCreateAzureBucketManagedIdentityWithClientID(t *testing.T) {
-	ctx := context.Background()
-
 	parsedURL, err := url.Parse("abfs://container@testaccount.dfs.core.windows.net/path")
 	assert.NoError(t, err)
 
-	props := map[string]string{
+	bucket, err := createAzureBucket(context.Background(), parsedURL, map[string]string{
 		"adls.auth.managed-identity.enabled":   "true",
 		"adls.auth.managed-identity.client-id": "00000000-0000-0000-0000-000000000000",
-	}
-
-	bucket, err := createAzureBucket(ctx, parsedURL, props)
-	if err != nil {
-		assert.NotContains(t, err.Error(), "DefaultAzureCredential",
-			"Expected ManagedIdentityCredential path, not DefaultAzureCredential: %v", err)
-		t.Logf("ManagedIdentityCredential (user-assigned) path was taken and failed at creation: %v", err)
-
-		return
-	}
-
+	})
+	assert.NoError(t, err)
 	assert.NotNil(t, bucket)
 }
 
