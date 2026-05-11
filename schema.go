@@ -715,6 +715,10 @@ func visitField[T any](f NestedField, visitor SchemaVisitor[T]) T {
 				return perPrimitive.VisitFixed(t)
 			case UnknownType:
 				return perPrimitive.VisitUnknown()
+			case GeographyType:
+				return perPrimitive.VisitGeography(t)
+			case GeometryType:
+				return perPrimitive.VisitGeometry(t)
 			}
 		}
 

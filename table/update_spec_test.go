@@ -227,7 +227,7 @@ func TestUpdateSpecAddField(t *testing.T) {
 	})
 
 	t.Run("reject geography source for identity partition transform", func(t *testing.T) {
-		geog, err := iceberg.GeographyTypeOf("srid:4269", iceberg.EdgeAlgorithmKarney)
+		geog, err := iceberg.GeographyTypeOf("srid:4269", "karney")
 		assert.NoError(t, err)
 
 		geoSchema := iceberg.NewSchema(1,

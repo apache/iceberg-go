@@ -110,11 +110,10 @@ func (IdentityTransform) CanTransform(t Type) bool {
 	switch t.(type) {
 	case GeometryType, GeographyType:
 		return false
-	default:
-		_, ok := t.(PrimitiveType)
-
-		return ok
 	}
+	_, ok := t.(PrimitiveType)
+
+	return ok
 }
 func (IdentityTransform) ResultType(t Type) Type { return t }
 func (IdentityTransform) PreservesOrder() bool   { return true }

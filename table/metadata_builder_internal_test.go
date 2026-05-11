@@ -20,12 +20,14 @@ package table
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/apache/iceberg-go"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1918,6 +1920,30 @@ func TestGeometryGeographyNullOnlyDefaults(t *testing.T) {
 			require.Error(t, err)
 			require.ErrorContains(t, err, "is not supported until v3")
 			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		})
+
+		t.Run(tt.name+" with both non-null defaults produces exactly two error lines", func(t *testing.T) {
+			defaultValue := "POINT(0 0)"
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:           tt.typ,
+					ID:             1,
+					Name:           "location",
+					Required:       false,
+					InitialDefault: &defaultValue,
+					WriteDefault:   &defaultValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 3)
+			require.Error(t, err)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+
+			errStr := err.Error()
+			initialCount := strings.Count(errStr, "invalid initial default")
+			writeCount := strings.Count(errStr, "invalid write default")
+			assert.Equal(t, 1, initialCount, "expected exactly one 'invalid initial default' line, got %d in: %s", initialCount, errStr)
+			assert.Equal(t, 1, writeCount, "expected exactly one 'invalid write default' line, got %d in: %s", writeCount, errStr)
 		})
 	}
 }

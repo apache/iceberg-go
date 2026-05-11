@@ -1039,7 +1039,7 @@ func TestSanitizeColumnNamesEmptyFieldName(t *testing.T) {
 func TestSchemaWithGeometryGeographyTypes(t *testing.T) {
 	geom, err := iceberg.GeometryTypeOf("srid:4326")
 	require.NoError(t, err)
-	geog, err := iceberg.GeographyTypeOf("srid:4269", iceberg.EdgeAlgorithmKarney)
+	geog, err := iceberg.GeographyTypeOf("srid:4269", "karney")
 	require.NoError(t, err)
 
 	schema := iceberg.NewSchema(1,
@@ -1072,7 +1072,7 @@ func TestSchemaWithGeometryGeographyTypes(t *testing.T) {
 func TestNestedFieldToStringGeographyGeometry(t *testing.T) {
 	geom, err := iceberg.GeometryTypeOf("srid:3857")
 	require.NoError(t, err)
-	geog, err := iceberg.GeographyTypeOf("srid:4269", iceberg.EdgeAlgorithmKarney)
+	geog, err := iceberg.GeographyTypeOf("srid:4269", "karney")
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -1107,7 +1107,7 @@ func TestNestedFieldToStringGeographyGeometry(t *testing.T) {
 func TestSchemaWithGeometryInNestedStructures(t *testing.T) {
 	geom, err := iceberg.GeometryTypeOf("srid:4326")
 	require.NoError(t, err)
-	geog, err := iceberg.GeographyTypeOf("srid:4269", iceberg.EdgeAlgorithmSpherical)
+	geog, err := iceberg.GeographyTypeOf("srid:4269", "spherical")
 	require.NoError(t, err)
 
 	schema := iceberg.NewSchema(1,
@@ -1146,7 +1146,7 @@ func TestSchemaWithGeometryInNestedStructures(t *testing.T) {
 		},
 	)
 
-	data, err := json.Marshal(schema)
+	data, err := json.MarshalIndent(schema, "", "	")
 	require.NoError(t, err)
 
 	var unmarshaledSchema iceberg.Schema
@@ -1154,7 +1154,7 @@ func TestSchemaWithGeometryInNestedStructures(t *testing.T) {
 	assert.True(t, schema.Equals(&unmarshaledSchema))
 
 	assert.Equal(t, "1: locations: required list<geometry(srid:4326)>", schema.Field(0).String())
-	assert.Equal(t, "3: region_data: optional map<string, geography(srid:4269, spherical)>", schema.Field(1).String())
+	assert.Equal(t, "3: region_data: optional map<string, geography(srid:4269)>", schema.Field(1).String())
 }
 
 func TestPruneColumnsWithGeometry(t *testing.T) {
@@ -1179,7 +1179,7 @@ func TestPruneColumnsWithGeometry(t *testing.T) {
 }
 
 func TestSchemaIndexByIDWithGeography(t *testing.T) {
-	geog, err := iceberg.GeographyTypeOf("srid:4269", iceberg.EdgeAlgorithmKarney)
+	geog, err := iceberg.GeographyTypeOf("srid:4269", "karney")
 	require.NoError(t, err)
 
 	schema := iceberg.NewSchema(1,
@@ -1208,4 +1208,101 @@ func TestSchemaFindColumnNameWithGeometryGeography(t *testing.T) {
 	name, ok = schema.FindColumnName(2)
 	assert.True(t, ok)
 	assert.Equal(t, "region", name)
+}
+
+type noopSchemaVisitor struct{}
+
+func (noopSchemaVisitor) Schema(_ *iceberg.Schema, result iceberg.Void) iceberg.Void { return result }
+
+func (noopSchemaVisitor) Struct(_ iceberg.StructType, _ []iceberg.Void) iceberg.Void {
+	return iceberg.Void{}
+}
+
+func (noopSchemaVisitor) Field(_ iceberg.NestedField, _ iceberg.Void) iceberg.Void {
+	return iceberg.Void{}
+}
+
+func (noopSchemaVisitor) List(_ iceberg.ListType, _ iceberg.Void) iceberg.Void { return iceberg.Void{} }
+
+func (noopSchemaVisitor) Map(_ iceberg.MapType, _, _ iceberg.Void) iceberg.Void {
+	return iceberg.Void{}
+}
+
+func (noopSchemaVisitor) Primitive(_ iceberg.PrimitiveType) iceberg.Void { return iceberg.Void{} }
+
+func (noopSchemaVisitor) VisitFixed(_ iceberg.FixedType) iceberg.Void { return iceberg.Void{} }
+
+func (noopSchemaVisitor) VisitDecimal(_ iceberg.DecimalType) iceberg.Void { return iceberg.Void{} }
+
+func (noopSchemaVisitor) VisitBoolean() iceberg.Void { return iceberg.Void{} }
+
+func (noopSchemaVisitor) VisitInt32() iceberg.Void { return iceberg.Void{} }
+
+func (noopSchemaVisitor) VisitInt64() iceberg.Void { return iceberg.Void{} }
+
+func (noopSchemaVisitor) VisitFloat32() iceberg.Void { return iceberg.Void{} }
+
+func (noopSchemaVisitor) VisitFloat64() iceberg.Void { return iceberg.Void{} }
+
+func (noopSchemaVisitor) VisitDate() iceberg.Void { return iceberg.Void{} }
+
+func (noopSchemaVisitor) VisitTime() iceberg.Void { return iceberg.Void{} }
+
+func (noopSchemaVisitor) VisitTimestamp() iceberg.Void { return iceberg.Void{} }
+
+func (noopSchemaVisitor) VisitTimestampNs() iceberg.Void { return iceberg.Void{} }
+
+func (noopSchemaVisitor) VisitTimestampTz() iceberg.Void { return iceberg.Void{} }
+
+func (noopSchemaVisitor) VisitTimestampNsTz() iceberg.Void { return iceberg.Void{} }
+
+func (noopSchemaVisitor) VisitString() iceberg.Void { return iceberg.Void{} }
+
+func (noopSchemaVisitor) VisitBinary() iceberg.Void { return iceberg.Void{} }
+
+func (noopSchemaVisitor) VisitUUID() iceberg.Void { return iceberg.Void{} }
+
+func (noopSchemaVisitor) VisitUnknown() iceberg.Void { return iceberg.Void{} }
+
+func (noopSchemaVisitor) VisitGeometry(_ iceberg.GeometryType) iceberg.Void { return iceberg.Void{} }
+
+func (noopSchemaVisitor) VisitGeography(_ iceberg.GeographyType) iceberg.Void { return iceberg.Void{} }
+
+var _ iceberg.SchemaVisitorPerPrimitiveType[iceberg.Void] = noopSchemaVisitor{}
+
+type failIfGeoFallsBackToPrimitive struct {
+	noopSchemaVisitor
+	geometryCalls  int
+	geographyCalls int
+}
+
+func (*failIfGeoFallsBackToPrimitive) Primitive(_ iceberg.PrimitiveType) iceberg.Void {
+	panic("primitive fallback should not be called for geometry/geography")
+}
+
+func (v *failIfGeoFallsBackToPrimitive) VisitGeometry(_ iceberg.GeometryType) iceberg.Void {
+	v.geometryCalls++
+
+	return iceberg.Void{}
+}
+
+func (v *failIfGeoFallsBackToPrimitive) VisitGeography(_ iceberg.GeographyType) iceberg.Void {
+	v.geographyCalls++
+
+	return iceberg.Void{}
+}
+
+var _ iceberg.SchemaVisitorPerPrimitiveType[iceberg.Void] = (*failIfGeoFallsBackToPrimitive)(nil)
+
+func TestVisitGeoSchemaWithSchemaVisitorPerPrimitiveType(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "point", Type: iceberg.GeometryType{}, Required: false},
+		iceberg.NestedField{ID: 2, Name: "region", Type: iceberg.GeographyType{}, Required: false},
+	)
+
+	v := &failIfGeoFallsBackToPrimitive{}
+	_, err := iceberg.Visit(schema, v)
+	require.NoError(t, err)
+	assert.Equal(t, 1, v.geometryCalls)
+	assert.Equal(t, 1, v.geographyCalls)
 }
