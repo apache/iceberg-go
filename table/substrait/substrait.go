@@ -172,8 +172,11 @@ func (convertToSubstrait) VisitUnknown() types.Type {
 }
 
 func (convertToSubstrait) VisitVariant() types.Type {
-	// Variant has no Substrait equivalent
-	return nil
+	// Variant has no Substrait equivalent today. We return BinaryType as a
+	// structural placeholder so that schema conversion and expression binding
+	// on sibling columns don't panic with a nil type. A proper user-defined
+	// Substrait type will be needed once shredding enables predicate pushdown.
+	return &types.BinaryType{}
 }
 
 var _ iceberg.SchemaVisitorPerPrimitiveType[types.Type] = (*convertToSubstrait)(nil)

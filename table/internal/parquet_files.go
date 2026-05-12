@@ -107,6 +107,27 @@ func (parquetFormat) PathToIDMapping(sc *iceberg.Schema) (map[string]int, error)
 	return result, nil
 }
 
+func VariantFieldIDsFromSchema(sc *iceberg.Schema) map[int]struct{} {
+	if sc == nil {
+		return nil
+	}
+
+	result := make(map[int]struct{})
+	collectVariantFields(sc.Fields(), result)
+
+	return result
+}
+
+func collectVariantFields(fields []iceberg.NestedField, result map[int]struct{}) {
+	for _, field := range fields {
+		if _, ok := field.Type.(iceberg.VariantType); ok {
+			result[field.ID] = struct{}{}
+		} else if nested, ok := field.Type.(iceberg.NestedType); ok {
+			collectVariantFields(nested.Fields(), result)
+		}
+	}
+}
+
 func (p parquetFormat) createStatsAgg(typ iceberg.PrimitiveType, physicalTypeStr string, truncLen int) (StatsAgg, error) {
 	// Switch on Iceberg logical type first, then handle physical representations.
 	// This matches iceberg-java's approach in ParquetConversions.java.
@@ -380,7 +401,7 @@ func (w *ParquetFileWriter) Close() (_ iceberg.DataFile, err error) {
 		return nil, err
 	}
 
-	stats := w.format.DataFileStatsFromMeta(filemeta, w.info.StatsCols, w.colMapping)
+	stats := w.format.DataFileStatsFromMeta(filemeta, w.info.StatsCols, w.colMapping, VariantFieldIDsFromSchema(w.info.FileSchema))
 	stats.EqualityFieldIDs = w.info.EqualityFieldIDs
 
 	return stats.ToDataFile(DataFileOpts{
@@ -544,7 +565,7 @@ func (w wrappedDecByteArrayStats) Max() iceberg.Decimal {
 	return iceberg.Decimal{Val: dec, Scale: w.scale}
 }
 
-func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]StatisticsCollector, colMapping map[string]int) *DataFileStatistics {
+func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]StatisticsCollector, colMapping map[string]int, variantFieldIDs map[int]struct{}) *DataFileStatistics {
 	pqmeta := meta.(*metadata.FileMetaData)
 	var (
 		colSizes        = make(map[int]int64)
@@ -579,17 +600,23 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 
 			fieldID, ok := colMapping[colChunk.PathInSchema().String()]
 			if !ok {
-				// Variant sub-columns (metadata, value) have no Iceberg field ID
-				// (spec: "must not be assigned field IDs"). Skip them only if the
-				// parent column is a variant field.
+				// Variant sub-columns (metadata, value, typed_value children) have no
+				// Iceberg field ID (spec: "must not be assigned field IDs"). Walk up
+				// the path hierarchy to find a variant ancestor.
 				path := colChunk.PathInSchema()
-				if len(path) >= 2 {
-					parentPath := strings.Join(path[:len(path)-1], ".")
-					if parentID, hasParent := colMapping[parentPath]; hasParent {
-						if _, hasStats := statsCols[parentID]; !hasStats {
-							continue
+				found := false
+				for depth := len(path) - 1; depth >= 1; depth-- {
+					ancestorPath := strings.Join(path[:depth], ".")
+					if ancestorID, hasAncestor := colMapping[ancestorPath]; hasAncestor {
+						if _, isVariant := variantFieldIDs[ancestorID]; isVariant {
+							found = true
 						}
+
+						break
 					}
+				}
+				if found {
+					continue
 				}
 
 				panic(fmt.Errorf("column chunk %q not found in column mapping", colChunk.PathInSchema()))

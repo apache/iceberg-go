@@ -1430,6 +1430,7 @@ func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, curre
 		rdr.Metadata(),
 		must(computeStatsPlan(currentSchema, props)),
 		must(format.PathToIDMapping(pathToIDSchema)),
+		tblutils.VariantFieldIDsFromSchema(currentSchema),
 	)
 
 	partitionValues := make(map[int]any)

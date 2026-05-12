@@ -41,7 +41,8 @@ import (
 // for literal values. This represents the actual primitive types that exist in Iceberg
 type LiteralType interface {
 	bool | int32 | int64 | float32 | float64 | Date |
-		Time | Timestamp | TimestampNano | string | []byte | uuid.UUID | Decimal | variant.Value
+		Time | Timestamp | TimestampNano | string | []byte | uuid.UUID | Decimal |
+		variant.Value
 }
 
 // Comparator is a comparison function for specific literal types:
@@ -109,7 +110,7 @@ func NewLiteral[T LiteralType](val T) Literal {
 	case Decimal:
 		return DecimalLiteral(v)
 	case variant.Value:
-		return VariantLiteral{val: v}
+		return VariantLiteral(v)
 	}
 	panic("can't happen due to literal type constraint")
 }
@@ -1393,9 +1394,7 @@ func (d *DecimalLiteral) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
-type VariantLiteral struct {
-	val variant.Value
-}
+type VariantLiteral variant.Value
 
 func (VariantLiteral) Comparator() Comparator[variant.Value] {
 	return func(v1, v2 variant.Value) int {
@@ -1404,12 +1403,12 @@ func (VariantLiteral) Comparator() Comparator[variant.Value] {
 }
 
 func (VariantLiteral) Type() Type             { return VariantType{} }
-func (v VariantLiteral) Value() variant.Value { return v.val }
-func (v VariantLiteral) Any() any             { return v.val }
-func (v VariantLiteral) String() string       { return "variant(...)" }
+func (v VariantLiteral) Value() variant.Value { return variant.Value(v) }
+func (v VariantLiteral) Any() any             { return variant.Value(v) }
+func (v VariantLiteral) String() string       { return variant.Value(v).String() }
 
 func (v VariantLiteral) MarshalBinary() ([]byte, error) {
-	return v.val.Bytes(), nil
+	return variant.Value(v).Bytes(), nil
 }
 
 func (v VariantLiteral) To(typ Type) (Literal, error) {
@@ -1417,6 +1416,8 @@ func (v VariantLiteral) To(typ Type) (Literal, error) {
 		return v, nil
 	}
 
+	// TODO: improve by getting the actual value (using .Type()) and attempting
+	// to convert, or returning an error if it can't.
 	return nil, fmt.Errorf("%w: VariantLiteral to %s", ErrBadCast, typ)
 }
 
@@ -1426,5 +1427,9 @@ func (v VariantLiteral) Equals(other Literal) bool {
 		return false
 	}
 
-	return bytes.Equal(v.val.Bytes(), rhs.val.Bytes())
+	// TODO: use an upstream Equal method once added to parquet/variant
+	lhs := variant.Value(v)
+	r := variant.Value(rhs)
+
+	return bytes.Equal(lhs.Metadata().Bytes(), r.Metadata().Bytes()) && bytes.Equal(lhs.Bytes(), r.Bytes())
 }

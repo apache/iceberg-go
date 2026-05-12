@@ -260,7 +260,7 @@ func TestMetricsPrimitiveTypes(t *testing.T) {
 	mapping, err := format.PathToIDMapping(tblMeta.CurrentSchema())
 	require.NoError(t, err)
 
-	stats := format.DataFileStatsFromMeta(internal.Metadata(meta), getCollector(), mapping)
+	stats := format.DataFileStatsFromMeta(internal.Metadata(meta), getCollector(), mapping, nil)
 	const sortOrderID = 7
 	df := stats.ToDataFile(internal.DataFileOpts{
 		Schema:      tblMeta.CurrentSchema(),
@@ -422,7 +422,7 @@ func TestNanosecondTimestampMetrics(t *testing.T) {
 		2: {FieldID: 2, Mode: modeFull, ColName: "tstz_ns", IcebergTyp: iceberg.PrimitiveTypes.TimestampTzNs},
 	}
 
-	stats := format.DataFileStatsFromMeta(internal.Metadata(meta), collector, mapping)
+	stats := format.DataFileStatsFromMeta(internal.Metadata(meta), collector, mapping, nil)
 	df := stats.ToDataFile(internal.DataFileOpts{
 		Schema:   tableMeta.CurrentSchema(),
 		Spec:     tableMeta.PartitionSpec(),
@@ -571,7 +571,7 @@ func TestDecimalPhysicalTypes(t *testing.T) {
 			}
 
 			// This should not panic - the fix allows INT32/INT64 physical types for decimals
-			stats := format.DataFileStatsFromMeta(internal.Metadata(meta), collector, mapping)
+			stats := format.DataFileStatsFromMeta(internal.Metadata(meta), collector, mapping, nil)
 			require.NotNil(t, stats)
 
 			df := stats.ToDataFile(internal.DataFileOpts{
