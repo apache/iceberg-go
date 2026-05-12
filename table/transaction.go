@@ -142,6 +142,18 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 	return nil
 }
 
+// addValidator appends a conflict validator under t.mx. Producers
+// that register validators from outside doCommit (RowDelta, RewriteFiles)
+// must use this helper rather than mutating t.validators directly —
+// the RewriteFiles type doc endorses fanout builders against a single
+// transaction, so the append races with Transaction.Commit's
+// validator read under t.mx.
+func (t *Transaction) addValidator(v conflictValidatorFunc) {
+	t.mx.Lock()
+	defer t.mx.Unlock()
+	t.validators = append(t.validators, v)
+}
+
 func (t *Transaction) appendSnapshotProducer(afs io.IO, props iceberg.Properties) *snapshotProducer {
 	manifestMerge := t.meta.props.GetBool(ManifestMergeEnabledKey, ManifestMergeEnabledDefault)
 	updateSnapshot := t.updateSnapshot(afs, props, OpAppend)

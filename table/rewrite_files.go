@@ -147,25 +147,14 @@ func (r *RewriteFiles) AddDataFile(df iceberg.DataFile) *RewriteFiles {
 	return r
 }
 
-// Apply is a bulk shortcut that routes a worker's outputs onto this
-// builder: every entry in deletes and safeDeletes is queued via
+// Apply is a bulk shortcut that routes three slices onto this builder:
+// every entry in deletes and safeDeletes is queued via
 // [RewriteFiles.DeleteFile] (which routes data vs. delete files by
 // content type), and every entry in adds via [RewriteFiles.AddDataFile].
 //
-// safeDeletes is the position-delete files referenced by tasks in
-// the rewrite group whose target data file is being rewritten — they
-// are safe to expunge in the rewrite snapshot. [CollectSafePositionDeletes]
-// computes this set; [ExecuteCompactionGroup] populates
-// [CompactionGroupResult.SafePosDeletes] from it.
-//
-// The typical distributed-coordinator pattern is one [RewriteFiles]
-// builder + one Apply call per worker result + one Commit:
-//
-//	rewrite := leaderTxn.NewRewrite(snapshotProps)
-//	for _, gr := range workerResults {
-//	    rewrite.Apply(gr.OldDataFiles, gr.NewDataFiles, gr.SafePosDeletes)
-//	}
-//	if err := rewrite.Commit(ctx); err != nil { ... }
+// Distributed coordinators should prefer [RewriteFiles.ApplyResult],
+// which takes a [CompactionGroupResult] directly: the three positional
+// same-typed slices here transpose silently under refactor.
 func (r *RewriteFiles) Apply(deletes, adds, safeDeletes []iceberg.DataFile) *RewriteFiles {
 	if r.err != nil {
 		return r
@@ -182,6 +171,25 @@ func (r *RewriteFiles) Apply(deletes, adds, safeDeletes []iceberg.DataFile) *Rew
 	}
 
 	return r
+}
+
+// ApplyResult is the typed coordinator entry point: it queues a worker's
+// [CompactionGroupResult] onto this builder by routing OldDataFiles
+// (via DeleteFile), NewDataFiles (via AddDataFile), and SafePosDeletes
+// (via DeleteFile) in one call. Prefer this over [RewriteFiles.Apply]
+// when feeding worker outputs — the field names line up with the
+// builder semantics, so a refactor of CompactionGroupResult cannot
+// silently transpose roles.
+//
+// Typical distributed-coordinator pattern:
+//
+//	rewrite := leaderTxn.NewRewrite(snapshotProps)
+//	for _, gr := range workerResults {
+//	    rewrite.ApplyResult(gr)
+//	}
+//	if err := rewrite.Commit(ctx); err != nil { ... }
+func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
+	return r.Apply(gr.OldDataFiles, gr.NewDataFiles, gr.SafePosDeletes)
 }
 
 // Commit stages the rewrite snapshot on the underlying transaction.
@@ -225,7 +233,7 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 		for _, df := range r.dataFilesToDelete {
 			rewritten = append(rewritten, df.FilePath())
 		}
-		r.txn.validators = append(r.txn.validators, rewriteValidator(rewritten))
+		r.txn.addValidator(rewriteValidator(rewritten))
 	}
 
 	return nil

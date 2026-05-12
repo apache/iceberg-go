@@ -20,6 +20,7 @@ package table
 import (
 	"context"
 	"fmt"
+	"maps"
 
 	"github.com/apache/iceberg-go"
 )
@@ -178,6 +179,9 @@ func WithCompactionTargetFileSize(size int64) CompactionGroupOption {
 // WithCompactionScanConcurrency sets the scan concurrency used when
 // reading the group's tasks. Forwarded to [Table.Scan] as
 // [WitMaxConcurrency]. Zero (the default) means runtime.GOMAXPROCS.
+//
+// TODO: the [WitMaxConcurrency] link enshrines a pre-existing typo
+// (missing `h`). Update this reference when that symbol is renamed.
 func WithCompactionScanConcurrency(n int) CompactionGroupOption {
 	return func(c *compactionGroupConfig) {
 		c.scanConcurrency = n
@@ -325,12 +329,21 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 }
 
 // rewriteDataFilesPartial stages each group as its own rewrite
-// snapshot via a fresh [RewriteFiles] builder. Each builder commits
-// independently inside the loop, so a mid-loop write failure leaves
-// already-staged groups in the transaction and the catalog still
-// receives them at [Transaction.Commit] time.
+// snapshot via [Transaction.ReplaceFiles] directly. Per-group staging
+// lets a mid-loop write failure leave already-staged groups on the
+// transaction; the catalog still receives them at
+// [Transaction.Commit] time.
+//
+// Validator registration is coalesced: a single [rewriteValidator]
+// covering every rewritten path across all groups is registered once,
+// after the loop, instead of one per group. The transaction's
+// validator list otherwise grows linearly with the group count, and
+// each entry independently walks the concurrent-snapshot set on
+// refresh-replay — the union walk subsumes them.
 func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (*RewriteResult, error) {
 	result := &RewriteResult{}
+	props := maps.Clone(opts.SnapshotProps)
+	var allRewritten []string
 
 	for _, group := range groups {
 		if err := ctx.Err(); err != nil {
@@ -350,11 +363,19 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 			continue
 		}
 
-		if err := t.NewRewrite(opts.SnapshotProps).Apply(gr.OldDataFiles, gr.NewDataFiles, gr.SafePosDeletes).Commit(ctx); err != nil {
+		if err := t.ReplaceFiles(ctx, gr.OldDataFiles, gr.NewDataFiles, gr.SafePosDeletes,
+			props, withRewriteSemantics()); err != nil {
 			return result, fmt.Errorf("commit compaction group %q: %w", group.PartitionKey, err)
 		}
 
+		for _, f := range gr.OldDataFiles {
+			allRewritten = append(allRewritten, f.FilePath())
+		}
 		accumulateGroupMetrics(result, gr)
+	}
+
+	if len(allRewritten) > 0 {
+		t.addValidator(rewriteValidator(allRewritten))
 	}
 
 	return result, nil
@@ -396,6 +417,20 @@ func rewriteValidator(rewrittenPaths []string) conflictValidatorFunc {
 // Equality deletes are decided by [compaction.DecideDeadEqualityDeletes]
 // (which needs partition-wide visibility, not just the task scope).
 // Deletion vectors will be handled when DV read support lands.
+//
+// Caller contract: every data file referenced by a returned pos-delete
+// must be in the caller's rewrite set across the entire commit.
+// This function only sees one group's tasks, but a pos-delete file
+// can reference data files across multiple groups (the planner
+// bin-packs within a partition via [compaction.Config.PlanCompaction]
+// and skips files via MinInputFiles). If a pos-delete is reported safe
+// by one group but references a still-live data file in another group
+// — or a file the planner skipped — committing only this group's
+// rewrite would orphan the still-live data file's deletes. Coordinators
+// that aggregate multiple groups into one rewrite snapshot are
+// responsible for re-checking against the full set of rewritten paths,
+// or for moving this computation leader-side once worker outputs have
+// aggregated.
 //
 // [ExecuteCompactionGroup] calls this internally to populate
 // [CompactionGroupResult.SafePosDeletes]. It is kept exported for
