@@ -23,11 +23,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/apache/iceberg-go/internal"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/suite"
 	"github.com/twmb/avro"
 	"github.com/twmb/avro/ocf"
@@ -1970,6 +1972,9 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 }
 
 func (m *ManifestTestSuite) TestWriteManifestListClosesWriterOnError() {
+	// A v2 manifest list cannot reference v3 manifests because the v2 entry
+	// schema has no first_row_id column; this gives us a deterministic
+	// AddManifests failure to assert that Close still flushes.
 	seqNum := int64(7)
 	var header bytes.Buffer
 	writer, err := NewManifestListWriterV2(&header, snapshotID, seqNum, nil)
@@ -1979,11 +1984,86 @@ func (m *ManifestTestSuite) TestWriteManifestListClosesWriterOnError() {
 	out := &limitedWriter{limit: header.Len(), err: errLimitedWrite}
 	err = WriteManifestList(2, out, snapshotID, nil, &seqNum, 0, []ManifestFile{
 		manifestFileRecordsV2[0],
-		manifestFileRecordsV1[0],
+		manifestFileRecordsV3[0],
 	})
 	m.Require().Error(err)
-	m.Require().ErrorContains(err, "ManifestListWriter only supports version 2 manifest files")
+	m.Require().ErrorContains(err, "manifest list v2 cannot reference v3 manifest files")
 	m.Require().ErrorIs(err, errLimitedWrite)
+}
+
+// TestV2ManifestListAcceptsV1Manifests verifies the spec-mandated upgrade path:
+// a v2 manifest list must be able to reference v1 manifest files written before
+// the table was upgraded, with sequence_number and min_sequence_number both
+// inherited as 0 and content inherited as data.
+func (m *ManifestTestSuite) TestV2ManifestListAcceptsV1Manifests() {
+	seqNum := int64(42)
+	var buf bytes.Buffer
+
+	err := WriteManifestList(2, &buf, snapshotID, nil, &seqNum, 0, []ManifestFile{
+		manifestFileRecordsV1[0],
+	})
+	m.Require().NoError(err)
+
+	got, err := ReadManifestList(&buf)
+	m.Require().NoError(err)
+	m.Require().Len(got, 1)
+
+	entry := got[0]
+	m.Equal(manifestFileRecordsV1[0].FilePath(), entry.FilePath())
+	m.Equal(manifestFileRecordsV1[0].Length(), entry.Length())
+	m.Equal(ManifestContentData, entry.ManifestContent(), "v1 inheritance: content must be data")
+	m.Equal(int64(0), entry.SequenceNum(), "v1 inheritance: sequence_number must be 0")
+	m.Equal(int64(0), entry.MinSequenceNum(), "v1 inheritance: min_sequence_number must be 0")
+	m.Equal(manifestFileRecordsV1[0].AddedRows(), entry.AddedRows())
+}
+
+// TestV3ManifestListAcceptsV1AndV2Manifests verifies that a v3 manifest list
+// can reference both v1 and v2 manifest files (e.g. after a v1->v3 upgrade)
+// and that first_row_id is assigned to data manifests during the write.
+func (m *ManifestTestSuite) TestV3ManifestListAcceptsV1AndV2Manifests() {
+	seqNum := int64(7)
+	firstRowID := int64(1000)
+	var buf bytes.Buffer
+
+	err := WriteManifestList(3, &buf, snapshotID, nil, &seqNum, firstRowID, []ManifestFile{
+		manifestFileRecordsV1[0],
+		manifestFileRecordsV2[0],
+	})
+	m.Require().NoError(err)
+
+	got, err := ReadManifestList(&buf)
+	m.Require().NoError(err)
+	m.Require().Len(got, 2)
+
+	v1Entry := got[0]
+	m.Equal(manifestFileRecordsV1[0].FilePath(), v1Entry.FilePath())
+	m.Equal(ManifestContentData, v1Entry.ManifestContent())
+	m.Equal(int64(0), v1Entry.SequenceNum())
+	m.Equal(int64(0), v1Entry.MinSequenceNum())
+	m.Require().NotNil(v1Entry.FirstRowID(), "v3 list must assign first_row_id for data manifests")
+	m.Equal(firstRowID, *v1Entry.FirstRowID())
+
+	v2Entry := got[1]
+	m.Equal(manifestFileRecordsV2[0].FilePath(), v2Entry.FilePath())
+	// manifestFileRecordsV2[0] is a delete manifest, so first_row_id is not
+	// assigned (assignment is data-only per the v3 ManifestListWriter rules).
+	m.Equal(ManifestContentDeletes, v2Entry.ManifestContent())
+	m.Nil(v2Entry.FirstRowID(), "delete manifests must not be assigned first_row_id")
+}
+
+// TestV2ManifestListRejectsV3Manifests confirms that a v2 manifest list still
+// refuses to reference v3 manifest files, since the v2 entry schema has no
+// place to record first_row_id and accepting them would silently drop data.
+func (m *ManifestTestSuite) TestV2ManifestListRejectsV3Manifests() {
+	seqNum := int64(1)
+	var buf bytes.Buffer
+
+	err := WriteManifestList(2, &buf, snapshotID, nil, &seqNum, 0, []ManifestFile{
+		manifestFileRecordsV3[0],
+	})
+	m.Require().Error(err)
+	m.Require().ErrorIs(err, ErrInvalidArgument)
+	m.Require().ErrorContains(err, "manifest list v2 cannot reference v3 manifest files")
 }
 
 // TestManifestRoundTripSortOrderID verifies that a sort_order_id written onto
@@ -2035,6 +2115,53 @@ func (m *ManifestTestSuite) TestManifestRoundTripSortOrderID() {
 	m.Equal(expectedSortOrderID, *got)
 }
 
+// TestWriteManifestV3OmitsDistinctCounts verifies the v3 writer clears
+// data_file.distinct_counts (deprecated by v3 spec; Java parity:
+// apache/iceberg#12182). v2 round-trip will be added with #1038.
+func (m *ManifestTestSuite) TestWriteManifestV3OmitsDistinctCounts() {
+	partitionSpec := NewPartitionSpecID(0)
+	snapshotID := int64(1)
+	seqNum := int64(1)
+
+	dataFileBuilder, err := NewDataFileBuilder(
+		partitionSpec,
+		EntryContentData,
+		"s3://bucket/ns/table/data/distinct.parquet",
+		ParquetFile,
+		map[int]any{},
+		map[int]string{},
+		map[int]int{},
+		1,
+		1,
+	)
+	m.Require().NoError(err)
+	dataFileBuilder.DistinctValueCounts(map[int]int64{1: 42})
+
+	entry := NewManifestEntry(
+		EntryStatusADDED,
+		&snapshotID,
+		&seqNum, &seqNum,
+		dataFileBuilder.Build(),
+	)
+
+	var buf bytes.Buffer
+	_, err = WriteManifest(
+		"s3://bucket/ns/table/metadata/distinct.avro", &buf, 3,
+		partitionSpec,
+		NewSchema(
+			0,
+			NestedField{ID: 1, Name: "id", Type: Int64Type{}, Required: true},
+		),
+		snapshotID,
+		[]ManifestEntry{entry},
+	)
+	m.Require().NoError(err)
+
+	df, ok := entry.DataFile().(*dataFile)
+	m.Require().True(ok)
+	m.Nil(df.DistinctCounts, "v3 writer must clear DistinctCounts on the entry's *dataFile")
+}
+
 func (m *ManifestTestSuite) TestWriteManifestClosesWriterOnEntryError() {
 	partitionSpec := NewPartitionSpecID(1,
 		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "VendorID", Transform: IdentityTransform{}},
@@ -2060,4 +2187,150 @@ func (m *ManifestTestSuite) TestWriteManifestClosesWriterOnEntryError() {
 	m.Require().Error(err)
 	m.Require().ErrorContains(err, "only entries with status ADDED")
 	m.Require().ErrorIs(err, errLimitedWrite)
+}
+
+type trackCloseFile struct {
+	contents   *bytes.Reader
+	closeCount int
+	closeErr   error
+	readLimit  int
+	readErr    error
+	nRead      int
+}
+
+var _ iceio.File = (*trackCloseFile)(nil)
+
+func newTrackCloseFile(data []byte) *trackCloseFile {
+	return &trackCloseFile{contents: bytes.NewReader(data)}
+}
+
+func (f *trackCloseFile) Stat() (fs.FileInfo, error) { return nil, nil }
+
+func (f *trackCloseFile) Read(p []byte) (int, error) {
+	if f.readErr != nil && f.nRead >= f.readLimit {
+		return 0, f.readErr
+	}
+	if f.readErr != nil && f.nRead+len(p) > f.readLimit {
+		p = p[:f.readLimit-f.nRead]
+	}
+	n, err := f.contents.Read(p)
+	f.nRead += n
+
+	return n, err
+}
+
+func (f *trackCloseFile) Close() error {
+	f.closeCount++
+
+	return f.closeErr
+}
+
+func (f *trackCloseFile) Seek(offset int64, whence int) (int64, error) {
+	return f.contents.Seek(offset, whence)
+}
+
+func (f *trackCloseFile) ReadAt(p []byte, off int64) (int, error) {
+	return f.contents.ReadAt(p, off)
+}
+
+var (
+	errMidStreamRead  = errors.New("simulated mid-stream read error")
+	errCloseFinalPair = errors.New("simulated close error")
+)
+
+func (m *ManifestTestSuite) TestEntriesEarlyBreakClosesFile() {
+	var mockfs internal.MockFS
+	manifest := manifestFile{
+		version: 2,
+		SpecID:  1,
+		Path:    manifestFileRecordsV2[0].FilePath(),
+	}
+
+	file := newTrackCloseFile(m.v2ManifestEntries.Bytes())
+	mockfs.Test(m.T())
+	mockfs.On("Open", manifest.FilePath()).Return(file, nil)
+	defer mockfs.AssertExpectations(m.T())
+
+	yielded := 0
+	for entry, err := range manifest.Entries(&mockfs, false) {
+		m.Require().NoError(err, "no error expected on a healthy manifest before break")
+		m.Require().NotNil(entry)
+		yielded++
+		if yielded == 1 {
+			break
+		}
+	}
+	m.Equal(1, yielded, "iteration must stop after the first entry on early break")
+	m.Equal(1, file.closeCount, "file must be closed exactly once on early break")
+}
+
+func (m *ManifestTestSuite) TestEntriesMidStreamErrorYieldsAndStops() {
+	var mockfs internal.MockFS
+	manifest := manifestFile{
+		version: 2,
+		SpecID:  1,
+		Path:    manifestFileRecordsV2[0].FilePath(),
+	}
+
+	data := m.v2ManifestEntries.Bytes()
+	file := newTrackCloseFile(data)
+	file.readLimit = len(data) / 2
+	file.readErr = errMidStreamRead
+	mockfs.Test(m.T())
+	mockfs.On("Open", manifest.FilePath()).Return(file, nil)
+	defer mockfs.AssertExpectations(m.T())
+
+	var (
+		entries  []ManifestEntry
+		gotError error
+		yields   int
+	)
+	for entry, err := range manifest.Entries(&mockfs, false) {
+		yields++
+		if err != nil {
+			gotError = err
+
+			break
+		}
+		entries = append(entries, entry)
+	}
+	m.Require().NotNil(gotError, "iterator must yield a non-nil error")
+	m.Require().ErrorIs(gotError, errMidStreamRead,
+		"yielded error must equal or wrap the simulated mid-stream read error")
+	m.Equal(yields, len(entries)+1,
+		"the error pair must follow zero or more entry pairs and stop iteration")
+	m.Equal(1, file.closeCount, "file must be closed exactly once after a mid-stream error")
+}
+
+func (m *ManifestTestSuite) TestEntriesCloseErrorAsFinalPair() {
+	var mockfs internal.MockFS
+	manifest := manifestFile{
+		version: 2,
+		SpecID:  1,
+		Path:    manifestFileRecordsV2[0].FilePath(),
+	}
+
+	file := newTrackCloseFile(m.v2ManifestEntries.Bytes())
+	file.closeErr = errCloseFinalPair
+	mockfs.Test(m.T())
+	mockfs.On("Open", manifest.FilePath()).Return(file, nil)
+	defer mockfs.AssertExpectations(m.T())
+
+	var (
+		entries []ManifestEntry
+		errs    []error
+	)
+	for entry, err := range manifest.Entries(&mockfs, false) {
+		if err != nil {
+			errs = append(errs, err)
+
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	m.Len(entries, 2, "iteration must consume every entry before the terminal close pair")
+	m.Require().Len(errs, 1, "iterator must yield exactly one terminal close error")
+	m.ErrorIs(errs[0], errCloseFinalPair,
+		"terminal error must equal or wrap the simulated close error")
+	m.Equal(1, file.closeCount, "file must be closed exactly once even when Close returns an error")
 }

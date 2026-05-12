@@ -33,6 +33,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/glue"
+	"github.com/apache/iceberg-go/catalog/hadoop"
 	"github.com/apache/iceberg-go/catalog/hive"
 	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/apache/iceberg-go/config"
@@ -178,6 +179,7 @@ type Args struct {
 	Rename     *RenameCmd     `arg:"subcommand:rename" help:"rename a table"`
 	Properties *PropertiesCmd `arg:"subcommand:properties" help:"manage properties on tables/namespaces"`
 	Compact    *CompactCmd    `arg:"subcommand:compact" help:"analyze or run bin-pack compaction"`
+	Info       *InfoCmd       `arg:"subcommand:info" help:"show single-screen table summary"`
 
 	Catalog     string `arg:"--catalog" default:"rest" help:"catalog type"`
 	CatalogName string `arg:"--catalog-name" default:"default" help:"catalog name from config"`
@@ -285,6 +287,9 @@ func main() {
 		runProperties(ctx, output, cat, args.Properties)
 	case args.Compact != nil:
 		runCompact(ctx, output, cat, args.Compact)
+	case args.Info != nil:
+		tbl := loadTable(ctx, output, cat, args.Info.TableID)
+		output.Info(tbl)
 	}
 }
 
@@ -343,6 +348,12 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 		}
 
 		if cat, err = hive.NewCatalog(props); err != nil {
+			log.Fatal(err)
+		}
+	case catalog.Hadoop:
+		if cat, err = hadoop.NewCatalog("hadoop", args.Warehouse, iceberg.Properties{
+			"warehouse": args.Warehouse,
+		}); err != nil {
 			log.Fatal(err)
 		}
 	default:

@@ -26,6 +26,7 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"time"
 
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/utils"
@@ -129,6 +130,20 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	// Default HTTP client when not configured: use the SDK buildable client so
+	// proxy, TLS, dial, and HTTP/2 behavior match the usual AWS defaults, but
+	// raise per-host idle limits (Go's DefaultTransport uses 2 per host).
+	if awscfg.HTTPClient == nil {
+		awscfg.HTTPClient = awshttp.NewBuildableClient().WithTransportOptions(
+			func(t *http.Transport) {
+				t.MaxIdleConns = 256
+				t.MaxIdleConnsPerHost = 256
+				t.MaxConnsPerHost = 256
+				t.IdleConnTimeout = 90 * time.Second
+			},
+		)
 	}
 
 	endpoint, ok := props[io.S3EndpointURL]

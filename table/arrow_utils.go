@@ -315,6 +315,8 @@ func (c convertToIceberg) Primitive(dt arrow.DataType) (result iceberg.NestedFie
 		return c.Primitive(dt.Encoded())
 	case *arrow.BooleanType:
 		result.Type = iceberg.PrimitiveTypes.Bool
+	case *arrow.NullType:
+		result.Type = iceberg.PrimitiveTypes.Unknown
 	case *arrow.Uint8Type, *arrow.Uint16Type, *arrow.Uint32Type,
 		*arrow.Int8Type, *arrow.Int16Type, *arrow.Int32Type:
 		result.Type = iceberg.PrimitiveTypes.Int32
@@ -629,9 +631,7 @@ func (c convertToArrow) VisitUUID() arrow.Field {
 }
 
 func (c convertToArrow) VisitUnknown() arrow.Field {
-	return arrow.Field{
-		Type: extensions.NewOpaqueType(arrow.Null, "unknown", "apache.iceberg"),
-	}
+	return arrow.Field{Type: arrow.Null}
 }
 
 func (c convertToArrow) VisitVariant() arrow.Field {
@@ -1635,6 +1635,15 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 		return func(yield func(iceberg.DataFile, error) bool) {
 			yield(nil, err)
 		}
+	}
+
+	// V3 and later prefer deletion vectors over Parquet position-delete files;
+	// warn so users migrate when DV-write support lands. The check is `>= 3`
+	// rather than `== 3` so the warning carries forward to v4+ without churn.
+	// See apache/iceberg#12048.
+	if latestMetadata.Version() >= 3 {
+		slog.Warn("writing Parquet position-delete file on a v3 table; prefer deletion vectors",
+			"table_location", latestMetadata.Location())
 	}
 
 	if args.writeUUID == nil {

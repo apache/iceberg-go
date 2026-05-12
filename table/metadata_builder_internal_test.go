@@ -445,7 +445,9 @@ func TestSetRef(t *testing.T) {
 
 	require.NoError(t, builder.AddSnapshot(&snapshot))
 	err := builder.SetSnapshotRef(MainBranch, 10, BranchRef, WithMinSnapshotsToKeep(10))
-	require.ErrorContains(t, err, "can't set snapshot ref main to unknown snapshot 10: snapshot with id 10 not found")
+	require.ErrorIs(t, err, ErrSnapshotNotFound,
+		"missing snapshot lookup must wrap ErrSnapshotNotFound so callers can detect via errors.Is")
+	require.ErrorContains(t, err, "can't set snapshot ref main to unknown snapshot 10")
 	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, BranchRef, WithMinSnapshotsToKeep(10)))
 	require.Len(t, builder.snapshotList, 1)
 	snap, err := builder.SnapshotByID(1)

@@ -492,6 +492,24 @@ type ManifestFile interface {
 	//
 	// Prefer Entries over FetchEntries when walking large manifests
 	// since it avoids loading every entry into memory at once.
+	//
+	// Iteration contract:
+	//
+	//   - On the first error encountered while opening the manifest, decoding
+	//     a record, or applying inheritance, the iterator yields (nil, err)
+	//     and then stops. Callers must treat any non-nil error as terminal and
+	//     break or return without consuming further values.
+	//   - When iteration ends without an error from the read path, the
+	//     iterator may yield a final (nil, closeErr) pair if closing the
+	//     underlying file or manifest reader returns an error. This terminal
+	//     close error is reported only when the consumer ranged through every
+	//     value; an early break suppresses it (see below).
+	//   - Breaking out of the range loop (or any other early termination of
+	//     the yield function) is safe: the iterator releases the underlying
+	//     file handle and reader before returning, and no close error from
+	//     that path is yielded — the caller has already signalled it is no
+	//     longer interested in further values, so an extra synthetic
+	//     (nil, closeErr) tail would be discarded anyway.
 	Entries(fs iceio.IO, discardDeleted bool) iter.Seq2[ManifestEntry, error]
 	// FetchEntries reads the manifest list file to fetch the list of
 	// manifest entries using the provided file system IO interface.
@@ -924,6 +942,16 @@ func (v3writerImpl) prepareEntry(entry *manifestEntry, snapshotID int64) (Manife
 		if entry.EntryStatus != EntryStatusADDED {
 			return nil, errors.New("only entries with status ADDED can be missing a sequence number")
 		}
+	}
+
+	// v3 spec deprecates data_file.distinct_counts (Java parity:
+	// apache/iceberg#12182). prepareEntry takes ownership of the entry's data
+	// file and clears the Avro-facing pointer; the cached distinctCntMap and
+	// DistinctValueCounts() getter are intentionally preserved so in-process
+	// readers keep their view. Best-effort: only the in-tree *dataFile is
+	// cleared; third-party DataFile impls bypass this guard.
+	if df, ok := entry.DataFile().(*dataFile); ok {
+		df.DistinctCounts = nil
 	}
 
 	return entry, nil
@@ -1470,8 +1498,18 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 
 	case 2, 3:
 		for _, file := range files {
-			if file.Version() != m.version {
-				return fmt.Errorf("%w: ManifestListWriter only supports version %d manifest files", ErrInvalidArgument, m.version)
+			// Per the Iceberg spec a v2 manifest list may reference v1 manifest
+			// files (and a v3 list may reference v1 or v2 manifests) so that a
+			// table can be upgraded without rewriting historical manifests. The
+			// in-memory ManifestFile produced for v1 inputs already carries the
+			// inheritance values mandated by the spec — Content=data and
+			// SeqNumber/MinSeqNumber=0 — so it can be encoded directly against
+			// the v2/v3 entry schema. Newer-than-writer inputs are rejected
+			// because the v2 schema cannot represent v3 fields such as
+			// first_row_id.
+			if file.Version() > m.version {
+				return fmt.Errorf("%w: manifest list v%d cannot reference v%d manifest files",
+					ErrInvalidArgument, m.version, file.Version())
 			}
 
 			wrapped := *(file.(*manifestFile))
@@ -1618,6 +1656,7 @@ const (
 	AvroFile    FileFormat = "AVRO"
 	OrcFile     FileFormat = "ORC"
 	ParquetFile FileFormat = "PARQUET"
+	PuffinFile  FileFormat = "PUFFIN"
 )
 
 // FileFormatFromString parses a file format string (case-insensitive).
@@ -1629,6 +1668,8 @@ func FileFormatFromString(s string) (FileFormat, error) {
 		return OrcFile, nil
 	case string(AvroFile):
 		return AvroFile, nil
+	case string(PuffinFile):
+		return PuffinFile, nil
 	default:
 		return "", fmt.Errorf("unknown file format: %s", s)
 	}
@@ -2124,10 +2165,17 @@ func NewDataFileBuilder(
 		return nil, fmt.Errorf("%w: path cannot be empty", ErrInvalidArgument)
 	}
 
-	if format != AvroFile && format != OrcFile && format != ParquetFile {
+	if format != AvroFile && format != OrcFile && format != ParquetFile && format != PuffinFile {
 		return nil, fmt.Errorf(
-			"%w: format must be one of %s, %s, or %s",
-			ErrInvalidArgument, AvroFile, OrcFile, ParquetFile,
+			"%w: format must be one of %s, %s, %s, or %s",
+			ErrInvalidArgument, AvroFile, OrcFile, ParquetFile, PuffinFile,
+		)
+	}
+
+	if format == PuffinFile && content != EntryContentPosDeletes {
+		return nil, fmt.Errorf(
+			"%w: %s format is only valid for %s content",
+			ErrInvalidArgument, PuffinFile, EntryContentPosDeletes,
 		)
 	}
 

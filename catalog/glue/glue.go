@@ -145,6 +145,17 @@ type Catalog struct {
 }
 
 // NewCatalog creates a new instance of glue.Catalog with the given options.
+// To override the AWS config below is an example:
+//
+// import awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
+//
+// client := awshttp.NewBuildableClient().WithTransportOptions(func(t *http.Transport) {
+//     t.IdleConnTimeout     = 90 * time.Second
+//     ...other transport options...
+// })
+// awsCfg.HTTPClient = client
+// catalog := glue.NewCatalog(glue.WithAwsConfig(awsCfg))
+
 func NewCatalog(opts ...Option) *Catalog {
 	glueOps := &options{}
 

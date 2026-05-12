@@ -18,7 +18,9 @@
 package table
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path"
 	"slices"
@@ -29,6 +31,7 @@ import (
 	"github.com/davecgh/go-spew/spew"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
+	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1830,4 +1833,24 @@ func TestV3PartitionStatisticsRoundTrip(t *testing.T) {
 	assert.Equal(t, partStats, roundTripStats)
 
 	assert.JSONEq(t, string(raw), string(serialized))
+}
+
+func TestZstdGoldenFixture(t *testing.T) {
+	compressed, err := os.ReadFile(path.Join("testdata", "TableMetadataV2Valid.zstd.metadata.json"))
+	require.NoError(t, err)
+
+	dec, err := zstd.NewReader(bytes.NewReader(compressed))
+	require.NoError(t, err)
+	defer dec.Close()
+
+	data, err := io.ReadAll(dec)
+	require.NoError(t, err)
+
+	meta, err := ParseMetadataBytes(data)
+	require.NoError(t, err)
+
+	expected, err := getTestTableMetadata("TableMetadataV2ValidMinimal.json")
+	require.NoError(t, err)
+
+	assert.True(t, expected.Equals(meta))
 }

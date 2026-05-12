@@ -40,6 +40,14 @@ type limitedWriteCloser struct {
 	limit   int
 	written int
 	err     error
+
+	// parent and path, when both set, cause Close() to persist the
+	// successfully-written payload back into parent.files[path]. This makes
+	// the orphan/cleanup tests exercise the real write→delete cycle (R3)
+	// instead of pre-populating wfs.files with a placeholder.
+	parent *memIO
+	path   string
+	buf    bytes.Buffer
 }
 
 func (w *limitedWriteCloser) Write(p []byte) (int, error) {
@@ -47,11 +55,21 @@ func (w *limitedWriteCloser) Write(p []byte) (int, error) {
 		return 0, w.err
 	}
 	w.written += len(p)
+	if w.parent != nil {
+		w.buf.Write(p)
+	}
 
 	return len(p), nil
 }
 
 func (w *limitedWriteCloser) Close() error {
+	if w.parent == nil || w.path == "" {
+		return nil
+	}
+	w.parent.mu.Lock()
+	defer w.parent.mu.Unlock()
+	w.parent.files[w.path] = append([]byte(nil), w.buf.Bytes()...)
+
 	return nil
 }
 
@@ -62,6 +80,7 @@ func (w *limitedWriteCloser) ReadFrom(r io.Reader) (int64, error) {
 type memIO struct {
 	limit int
 	err   error
+	mu    sync.Mutex
 	files map[string][]byte
 }
 
@@ -74,7 +93,9 @@ func newMemIO(limit int, err error) *memIO {
 }
 
 func (m *memIO) Open(name string) (iceio.File, error) {
+	m.mu.Lock()
 	data, ok := m.files[name]
+	m.mu.Unlock()
 	if !ok {
 		return nil, fs.ErrNotExist
 	}
@@ -83,16 +104,20 @@ func (m *memIO) Open(name string) (iceio.File, error) {
 }
 
 func (m *memIO) Create(name string) (iceio.FileWriter, error) {
-	return &limitedWriteCloser{limit: m.limit, err: m.err}, nil
+	return &limitedWriteCloser{limit: m.limit, err: m.err, parent: m, path: name}, nil
 }
 
 func (m *memIO) WriteFile(name string, content []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.files[name] = append([]byte(nil), content...)
 
 	return nil
 }
 
 func (m *memIO) Remove(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	delete(m.files, name)
 
 	return nil
@@ -724,6 +749,8 @@ func (e *errorOnDeletedEntries) validate(_ *conflictContext) error {
 	return nil
 }
 
+func (e *errorOnDeletedEntries) needsValidation() bool { return true }
+
 // blockingTrackingIO extends trackingIO to signal when a writer is created.
 type blockingTrackingIO struct {
 	*trackingIO
@@ -880,4 +907,64 @@ func TestFastAppendInheritsZeroCountManifests(t *testing.T) {
 		}
 	}
 	require.True(t, newManifestFound, "new snapshot must include a manifest written by snap2")
+}
+
+// TestComputeOwnManifests_NewTable verifies that when there is no parent
+// snapshot (parentSnapshotID == 0) all manifests are returned as-is with no error.
+func TestComputeOwnManifests_NewTable(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	io := newMemIO(1<<20, nil)
+	txn := createTestTransaction(t, io, spec)
+	sp := newFastAppendFilesProducer(OpAppend, txn, io, nil, nil)
+	// parentSnapshotID is 0 by default (new table) — all manifests belong to this producer.
+
+	got, err := sp.computeOwnManifests(nil)
+	require.NoError(t, err, "new table: computeOwnManifests must not error")
+	require.Nil(t, got, "new table: returned manifests must equal input")
+}
+
+// TestComputeOwnManifests_SnapshotByIDError verifies that when the parent
+// snapshot cannot be found an error is returned instead of silently claiming
+// all manifests as own.
+func TestComputeOwnManifests_SnapshotByIDError(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	io := newMemIO(1<<20, nil)
+	txn := createTestTransaction(t, io, spec)
+	sp := newFastAppendFilesProducer(OpAppend, txn, io, nil, nil)
+	sp.parentSnapshotID = 9999 // no such snapshot in metadata
+
+	got, err := sp.computeOwnManifests(nil)
+	require.Error(t, err, "unknown parent snapshot ID: must return error, not silent fallback")
+	require.ErrorIs(t, err, ErrSnapshotNotFound,
+		"production wraps ErrSnapshotNotFound; pin meaning via errors.Is so a regression "+
+			"that swallows the lookup error and returns a programming-bug error would fail this test")
+	require.Nil(t, got, "error path must return nil manifest slice")
+}
+
+// TestComputeOwnManifests_ParentManifestsIOError verifies that when the parent
+// snapshot exists but its manifest list file cannot be read an error is returned
+// instead of silently claiming all manifests as own (which would cause duplicates
+// in the rebuilt manifest list).
+func TestComputeOwnManifests_ParentManifestsIOError(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	io := newMemIO(1<<20, nil)
+	txn := createTestTransaction(t, io, spec)
+	sp := newFastAppendFilesProducer(OpAppend, txn, io, nil, nil)
+
+	// Add a snapshot with a manifest list path that does not exist in the IO.
+	// parent.Manifests will fail with fs.ErrNotExist when it tries to open it.
+	parentID := int64(42)
+	txn.meta.snapshotList = append(txn.meta.snapshotList, Snapshot{
+		SnapshotID:   parentID,
+		ManifestList: "mem://default/table-location/metadata/ghost-manifest-list.avro",
+		Summary:      &Summary{Operation: OpAppend},
+	})
+	sp.parentSnapshotID = parentID
+
+	got, err := sp.computeOwnManifests(nil)
+	require.Error(t, err, "IO error reading parent manifests: must return error, not silent fallback")
+	require.ErrorIs(t, err, fs.ErrNotExist,
+		"production wraps the underlying IO error; pin meaning via errors.Is so a regression that "+
+			"swallows the IO error and returns a programming-bug error would fail this test")
+	require.Nil(t, got, "error path must return nil manifest slice")
 }

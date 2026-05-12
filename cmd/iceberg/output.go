@@ -39,6 +39,7 @@ type Output interface {
 	DescribeTable(*table.Table)
 	Files(tbl *table.Table, history bool)
 	DescribeProperties(iceberg.Properties)
+	Info(tbl *table.Table)
 	Text(string)
 	Schema(*iceberg.Schema)
 	Spec(iceberg.PartitionSpec)
