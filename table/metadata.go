@@ -708,8 +708,47 @@ func (b *MetadataBuilder) SetFormatVersion(formatVersion int) error {
 		return nil
 	}
 
+	if err := b.validateLastColumnID(); err != nil {
+		return err
+	}
+
+	previousVersion := b.formatVersion
 	b.updates = append(b.updates, NewUpgradeFormatVersionUpdate(formatVersion))
 	b.formatVersion = formatVersion
+
+	if previousVersion < 2 && formatVersion >= 2 {
+		if b.uuid == (uuid.UUID{}) {
+			b.uuid = uuid.New()
+		}
+
+		if b.lastSequenceNumber == nil {
+			seq := int64(0)
+			b.lastSequenceNumber = &seq
+		}
+	}
+
+	if previousVersion < 3 && formatVersion >= 3 {
+		if b.nextRowID == nil {
+			nextRowID := int64(0)
+			b.nextRowID = &nextRowID
+		}
+	}
+
+	return nil
+}
+
+func (b *MetadataBuilder) validateLastColumnID() error {
+	highestFieldID := 0
+	for _, schema := range b.schemaList {
+		if id := schema.HighestFieldID(); id > highestFieldID {
+			highestFieldID = id
+		}
+	}
+
+	if highestFieldID > 0 && b.lastColumnId < highestFieldID {
+		return fmt.Errorf("%w: last-column-id %d is less than the highest field ID %d in schemas",
+			ErrInvalidMetadata, b.lastColumnId, highestFieldID)
+	}
 
 	return nil
 }
