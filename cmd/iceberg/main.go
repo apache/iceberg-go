@@ -55,7 +55,8 @@ type DescribeCmd struct {
 }
 
 type SchemaCmd struct {
-	TableID string `arg:"positional,required" help:"full path to a table"`
+	TableID      string `arg:"positional,required" help:"full path to a table"`
+	ShowDefaults bool   `arg:"--show-defaults" help:"show initial-default and write-default values"`
 }
 
 type SpecCmd struct {
@@ -167,19 +168,28 @@ type CompactCmd struct {
 // Top-level args
 
 type Args struct {
-	List       *ListCmd       `arg:"subcommand:list" help:"list tables or namespaces"`
-	Describe   *DescribeCmd   `arg:"subcommand:describe" help:"describe a namespace or table"`
-	Schema     *SchemaCmd     `arg:"subcommand:schema" help:"get the schema of a table"`
-	Spec       *SpecCmd       `arg:"subcommand:spec" help:"return the partition spec of a table"`
-	Uuid       *UuidCmd       `arg:"subcommand:uuid" help:"return the UUID of a table"`
-	Location   *LocationCmd   `arg:"subcommand:location" help:"return the location of a table"`
-	Create     *CreateCmd     `arg:"subcommand:create" help:"create a namespace or table"`
-	Drop       *DropCmd       `arg:"subcommand:drop" help:"drop a namespace or table"`
-	Files      *FilesCmd      `arg:"subcommand:files" help:"list all files of a table"`
-	Rename     *RenameCmd     `arg:"subcommand:rename" help:"rename a table"`
-	Properties *PropertiesCmd `arg:"subcommand:properties" help:"manage properties on tables/namespaces"`
-	Compact    *CompactCmd    `arg:"subcommand:compact" help:"analyze or run bin-pack compaction"`
-	Info       *InfoCmd       `arg:"subcommand:info" help:"show single-screen table summary"`
+	List         *ListCmd             `arg:"subcommand:list" help:"list tables or namespaces"`
+	Describe     *DescribeCmd         `arg:"subcommand:describe" help:"describe a namespace or table"`
+	Schema       *SchemaCmd           `arg:"subcommand:schema" help:"get the schema of a table"`
+	Spec         *SpecCmd             `arg:"subcommand:spec" help:"return the partition spec of a table"`
+	Uuid         *UuidCmd             `arg:"subcommand:uuid" help:"return the UUID of a table"`
+	Location     *LocationCmd         `arg:"subcommand:location" help:"return the location of a table"`
+	Create       *CreateCmd           `arg:"subcommand:create" help:"create a namespace or table"`
+	Drop         *DropCmd             `arg:"subcommand:drop" help:"drop a namespace or table"`
+	Files        *FilesCmd            `arg:"subcommand:files" help:"list all files of a table"`
+	Rename       *RenameCmd           `arg:"subcommand:rename" help:"rename a table"`
+	Properties   *PropertiesCmd       `arg:"subcommand:properties" help:"manage properties on tables/namespaces"`
+	Compact      *CompactCmd          `arg:"subcommand:compact" help:"analyze or run bin-pack compaction"`
+	Info         *InfoCmd             `arg:"subcommand:info" help:"show single-screen table summary"`
+	Snapshots    *SnapshotsCmd        `arg:"subcommand:snapshots" help:"list table snapshots"`
+	Refs         *RefsCmd             `arg:"subcommand:refs" help:"list snapshot refs"`
+	PartStats    *PartitionStatsCmd   `arg:"subcommand:partition-stats" help:"list partition statistics files"`
+	Branch       *BranchCmd           `arg:"subcommand:branch" help:"manage table branches"`
+	Tag          *TagCmd              `arg:"subcommand:tag" help:"manage table tags"`
+	ExpireSnaps  *ExpireSnapshotsCmd  `arg:"subcommand:expire-snapshots" help:"expire old snapshots"`
+	CleanOrphans *CleanOrphanFilesCmd `arg:"subcommand:clean-orphan-files" help:"remove orphan files"`
+	Upgrade      *UpgradeCmd          `arg:"subcommand:upgrade" help:"upgrade table format version"`
+	Rollback     *RollbackCmd         `arg:"subcommand:rollback" help:"roll back to a previous snapshot"`
 
 	Catalog     string `arg:"--catalog" default:"rest" help:"catalog type"`
 	CatalogName string `arg:"--catalog-name" default:"default" help:"catalog name from config"`
@@ -243,6 +253,12 @@ func main() {
 	case args.Compact != nil && args.Compact.Analyze == nil && args.Compact.Run == nil:
 		_ = parser.WriteHelpForSubcommand(os.Stderr, "compact")
 		os.Exit(1)
+	case args.Branch != nil && args.Branch.Create == nil:
+		_ = parser.WriteHelpForSubcommand(os.Stderr, "branch")
+		os.Exit(1)
+	case args.Tag != nil && args.Tag.Create == nil:
+		_ = parser.WriteHelpForSubcommand(os.Stderr, "tag")
+		os.Exit(1)
 	}
 
 	var output Output
@@ -264,7 +280,11 @@ func main() {
 		runDescribe(ctx, output, cat, args.Describe)
 	case args.Schema != nil:
 		tbl := loadTable(ctx, output, cat, args.Schema.TableID)
-		output.Schema(tbl.Schema())
+		if args.Schema.ShowDefaults {
+			runSchemaWithDefaults(output, tbl.Schema())
+		} else {
+			output.Schema(tbl.Schema())
+		}
 	case args.Spec != nil:
 		tbl := loadTable(ctx, output, cat, args.Spec.TableID)
 		output.Spec(tbl.Spec())
@@ -290,6 +310,24 @@ func main() {
 	case args.Info != nil:
 		tbl := loadTable(ctx, output, cat, args.Info.TableID)
 		output.Info(tbl)
+	case args.Snapshots != nil:
+		runSnapshots(ctx, output, cat, args.Snapshots)
+	case args.Refs != nil:
+		runRefs(ctx, output, cat, args.Refs)
+	case args.PartStats != nil:
+		runPartitionStats(ctx, output, cat, args.PartStats)
+	case args.Branch != nil:
+		runBranch(ctx, output, cat, args.Branch)
+	case args.Tag != nil:
+		runTag(ctx, output, cat, args.Tag)
+	case args.ExpireSnaps != nil:
+		runExpireSnapshots(ctx, output, cat, args.ExpireSnaps)
+	case args.CleanOrphans != nil:
+		runCleanOrphanFiles(ctx, output, cat, args.CleanOrphans)
+	case args.Upgrade != nil:
+		runUpgrade(ctx, output, cat, args.Upgrade)
+	case args.Rollback != nil:
+		runRollback(ctx, output, cat, args.Rollback)
 	}
 }
 
