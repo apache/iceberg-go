@@ -142,6 +142,18 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 	return nil
 }
 
+// addValidator appends a conflict validator under t.mx. Producers
+// that register validators from outside doCommit (RowDelta, RewriteFiles)
+// must use this helper rather than mutating t.validators directly —
+// the RewriteFiles type doc endorses fanout builders against a single
+// transaction, so the append races with Transaction.Commit's
+// validator read under t.mx.
+func (t *Transaction) addValidator(v conflictValidatorFunc) {
+	t.mx.Lock()
+	defer t.mx.Unlock()
+	t.validators = append(t.validators, v)
+}
+
 func (t *Transaction) appendSnapshotProducer(afs io.IO, props iceberg.Properties) *snapshotProducer {
 	manifestMerge := t.meta.props.GetBool(ManifestMergeEnabledKey, ManifestMergeEnabledDefault)
 	updateSnapshot := t.updateSnapshot(afs, props, OpAppend)
@@ -550,10 +562,13 @@ type dataFileCfg struct {
 // withRewriteSemantics marks an overwrite/replace operation as a
 // rewrite (compaction) rather than a user-facing overwrite. The
 // overwrite producer's default pre-commit conflict validator is
-// bypassed; the caller registers a rewrite-specific validator on the
-// transaction separately via validateNoNewDeletesForRewrittenFiles.
-// Unexported: only RewriteDataFiles passes this; there is no public
-// surface for user code to bypass overwrite isolation.
+// suppressed in favor of the rewrite-specific validator built by
+// [rewriteValidator] and queued onto the transaction's validator list.
+//
+// Unexported: the only safe way to flip this flag is via the
+// [RewriteFiles] builder ([Transaction.NewRewrite]), which always
+// pairs the suppression with the matching validator. Direct callers
+// of [Transaction.ReplaceFiles] cannot bypass overwrite isolation.
 func withRewriteSemantics() WriteOption {
 	return func(cfg *dataFileCfg) {
 		cfg.rewriteSemantics = true
@@ -765,8 +780,13 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 		}
 	}
 
+	op := OpOverwrite
+	if cfg.rewriteSemantics {
+		op = OpReplace
+	}
+
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID, nil)
+	updater := t.updateSnapshot(fs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
 	if cfg.rewriteSemantics {
 		// mergeOverwrite guarantees an *overwriteFiles producerImpl.
 		updater.producerImpl.(*overwriteFiles).skipDefaultValidator = true
@@ -882,8 +902,13 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		}
 	}
 
+	op := OpOverwrite
+	if cfg.rewriteSemantics {
+		op = OpReplace
+	}
+
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID, nil)
+	updater := t.updateSnapshot(fs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
 	if cfg.rewriteSemantics {
 		// mergeOverwrite guarantees an *overwriteFiles producerImpl.
 		updater.producerImpl.(*overwriteFiles).skipDefaultValidator = true

@@ -174,7 +174,7 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 	// fast-append producer's validator is a no-op; RowDelta semantics
 	// (pos-delete references, eq-delete predicate) require a dedicated
 	// check that snapshot_producers does not know about.
-	rd.txn.validators = append(rd.txn.validators, rd.validate)
+	rd.txn.addValidator(rd.validate)
 
 	return rd.txn.apply(updates, reqs)
 }
