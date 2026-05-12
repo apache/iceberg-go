@@ -2334,3 +2334,64 @@ func (m *ManifestTestSuite) TestEntriesCloseErrorAsFinalPair() {
 		"terminal error must equal or wrap the simulated close error")
 	m.Equal(1, file.closeCount, "file must be closed exactly once even when Close returns an error")
 }
+
+// TestWriteManifestV2KeepsDistinctCounts is a regression guard that v2
+// manifest writers preserve data_file.distinct_counts (id 111) per the
+// Iceberg v2 spec. Fixes #1038.
+func (m *ManifestTestSuite) TestWriteManifestV2KeepsDistinctCounts() {
+	m.assertDistinctCountsRoundTrip(2)
+}
+
+// TestWriteManifestV1KeepsDistinctCounts is a regression guard that v1
+// manifest writers preserve data_file.distinct_counts (id 111) per the
+// Iceberg v1 spec. Fixes #1038.
+func (m *ManifestTestSuite) TestWriteManifestV1KeepsDistinctCounts() {
+	m.assertDistinctCountsRoundTrip(1)
+}
+
+// assertDistinctCountsRoundTrip writes a manifest at the given format
+// version with distinct_counts populated for one column, round-trips it
+// through ReadManifest, and asserts the read side observes the same map.
+func (m *ManifestTestSuite) assertDistinctCountsRoundTrip(version int) {
+	partitionSpec := NewPartitionSpecID(0)
+	snapshotID := int64(1)
+	seqNum := int64(1)
+
+	dataFileBuilder, err := NewDataFileBuilder(
+		partitionSpec,
+		EntryContentData,
+		"s3://bucket/ns/table/data/distinct.parquet",
+		ParquetFile,
+		map[int]any{},
+		map[int]string{},
+		map[int]int{},
+		1,
+		1,
+	)
+	m.Require().NoError(err)
+	dataFileBuilder.DistinctValueCounts(map[int]int64{1: 42})
+
+	var buf bytes.Buffer
+	file, err := WriteManifest(
+		"s3://bucket/ns/table/metadata/distinct.avro", &buf, version,
+		partitionSpec,
+		NewSchema(0,
+			NestedField{ID: 1, Name: "id", Type: Int64Type{}, Required: true},
+		),
+		snapshotID,
+		[]ManifestEntry{NewManifestEntry(
+			EntryStatusADDED,
+			&snapshotID,
+			&seqNum, &seqNum,
+			dataFileBuilder.Build(),
+		)},
+	)
+	m.Require().NoError(err)
+
+	entries, err := ReadManifest(file, &buf, false)
+	m.Require().NoError(err)
+	m.Require().Len(entries, 1)
+
+	m.Equal(map[int]int64{1: 42}, entries[0].DataFile().DistinctValueCounts(),
+		"manifest writer must preserve distinct_counts for the requested format version")
+}
