@@ -64,22 +64,18 @@ func newV3MetadataWithNextRowID(t *testing.T, nextRowID int64) Metadata {
 	txn, _ := createTestTransactionWithMemIO(t, spec)
 	txn.meta.formatVersion = 3
 
-	// Only add a snapshot if nextRowID > 0. A brand-new table has NextRowID = 0
-	// without any snapshots.
-	if nextRowID > 0 {
-		firstRowID := int64(0)
-		addedRows := nextRowID
-		snap := Snapshot{
-			SnapshotID:     1000,
-			SequenceNumber: 1,
-			TimestampMs:    txn.meta.base.LastUpdatedMillis() + 1,
-			Summary:        &Summary{Operation: OpAppend},
-			FirstRowID:     &firstRowID,
-			AddedRows:      &addedRows,
-		}
-		require.NoError(t, txn.meta.AddSnapshot(&snap))
-		require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 1000, BranchRef))
+	firstRowID := int64(0)
+	addedRows := nextRowID
+	snap := Snapshot{
+		SnapshotID:     1000,
+		SequenceNumber: 1,
+		TimestampMs:    txn.meta.base.LastUpdatedMillis() + 1,
+		Summary:        &Summary{Operation: OpAppend},
+		FirstRowID:     &firstRowID,
+		AddedRows:      &addedRows,
 	}
+	require.NoError(t, txn.meta.AddSnapshot(&snap))
+	require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 1000, BranchRef))
 
 	meta, err := txn.meta.Build()
 	require.NoError(t, err)

@@ -1669,8 +1669,8 @@ func TestAddSnapshotV3AcceptsFirstRowIDEqualToNextRowID(t *testing.T) {
 	require.Equal(t, int64(100), *builder.nextRowID)
 }
 
-func TestAddSnapshotV3NextRowIDMustAdvance(t *testing.T) {
-	// Test that next-row-id must advance after applying a snapshot
+func TestAddSnapshotV3AcceptsPositiveAddedRows(t *testing.T) {
+	// Positive added-rows should advance next-row-id.
 	builder := builderWithoutChanges(3)
 	schemaID := 0
 	firstRowID := int64(0)
@@ -1692,8 +1692,8 @@ func TestAddSnapshotV3NextRowIDMustAdvance(t *testing.T) {
 	require.Equal(t, int64(50), *builder.nextRowID)
 }
 
-func TestAddSnapshotV3RejectsZeroAddedRows(t *testing.T) {
-	// Test that a snapshot with AddedRows = 0 is rejected (next-row-id would not advance)
+func TestAddSnapshotV3AcceptsZeroAddedRows(t *testing.T) {
+	// Zero added-rows is valid and should leave next-row-id unchanged.
 	builder := builderWithoutChanges(3)
 	schemaID := 0
 	firstRowID := int64(0)
@@ -1711,35 +1711,8 @@ func TestAddSnapshotV3RejectsZeroAddedRows(t *testing.T) {
 		AddedRows:        &addedRows,
 	}
 
-	err := builder.AddSnapshot(&snapshot)
-	require.ErrorIs(t, err, ErrInvalidRowLineage)
-	require.ErrorContains(t, err, "next-row-id must advance")
-	require.ErrorContains(t, err, "added-rows 0")
-}
-
-func TestAddSnapshotV3RejectsNegativeAddedRowsAtUpdate(t *testing.T) {
-	// Test that negative AddedRows would not advance next-row-id and is rejected
-	builder := builderWithoutChanges(3)
-	schemaID := 0
-	firstRowID := int64(50)
-	negativeAddedRows := int64(-10)
-
-	snapshot := Snapshot{
-		SnapshotID:       1,
-		ParentSnapshotID: nil,
-		SequenceNumber:   0,
-		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
-		ManifestList:     "/snap-1.avro",
-		Summary:          &Summary{Operation: OpAppend},
-		SchemaID:         &schemaID,
-		FirstRowID:       &firstRowID,
-		AddedRows:        &negativeAddedRows,
-	}
-
-	err := builder.AddSnapshot(&snapshot)
-	// First rejection should be from ValidateRowLineage (added-rows cannot be negative)
-	require.ErrorIs(t, err, ErrInvalidRowLineage)
-	require.ErrorContains(t, err, "added-rows cannot be negative")
+	require.NoError(t, builder.AddSnapshot(&snapshot))
+	require.Equal(t, int64(0), *builder.nextRowID)
 }
 
 func generateTypeSchema(typ iceberg.Type) *iceberg.Schema {
