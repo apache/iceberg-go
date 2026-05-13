@@ -847,7 +847,8 @@ func GeometryTypeOf(crs string) (GeometryType, error) {
 	if crs == "" {
 		return GeometryType{}, fmt.Errorf("%w: invalid CRS: (empty string)", ErrInvalidTypeString)
 	}
-	if strings.EqualFold(crs, defaultGeoCRS) {
+	crs = strings.TrimSpace(crs)
+	if crs == defaultGeoCRS {
 		return GeometryType{}, nil
 	}
 
@@ -909,9 +910,9 @@ func GeographyTypeOf(crs string, algorithm string) (GeographyType, error) {
 	if algorithm == "" {
 		return GeographyType{}, fmt.Errorf("%w: invalid algorithm: (empty string)", ErrInvalidTypeString)
 	}
-
+	crs = strings.TrimSpace(crs)
 	normalizedCRS := crs
-	if strings.EqualFold(crs, defaultGeoCRS) {
+	if normalizedCRS == defaultGeoCRS {
 		normalizedCRS = ""
 	}
 
@@ -920,7 +921,7 @@ func GeographyTypeOf(crs string, algorithm string) (GeographyType, error) {
 		return GeographyType{}, fmt.Errorf("invalid algorithm: %w", err)
 	}
 	normalizedAlgorithm := string(validatedAlg)
-	if strings.EqualFold(algorithm, defaultGeographyAlgorithm) {
+	if validatedAlg == geoarrow.EdgeInterpolation(defaultGeographyAlgorithm) {
 		normalizedAlgorithm = ""
 	}
 
