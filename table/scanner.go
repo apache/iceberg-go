@@ -24,6 +24,7 @@ import (
 	"iter"
 	"math"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -241,6 +242,8 @@ func (scan *Scan) Snapshot() *Snapshot {
 
 func (scan *Scan) Projection() (*iceberg.Schema, error) {
 	curSchema := scan.metadata.CurrentSchema()
+	curVersion := scan.metadata.Version()
+	caseSensitive := scan.caseSensitive
 	if scan.snapshotID != nil {
 		snap := scan.metadata.SnapshotByID(*scan.snapshotID)
 		if snap == nil {
@@ -260,6 +263,20 @@ func (scan *Scan) Projection() (*iceberg.Schema, error) {
 
 	if slices.Contains(scan.selectedFields, "*") {
 		return curSchema, nil
+	}
+
+	hasRowLineageMeta := selectedFieldsContainsMeta(scan.selectedFields, caseSensitive)
+	schemaHasRowLineageMeta := schemaContainsMeta(curSchema)
+	if hasRowLineageMeta && curVersion >= minFormatVersionRowLineage && !schemaHasRowLineageMeta {
+
+		removedMetadataSlice, missingMetaFields := removeMetadataFromSelectedFields(scan.selectedFields, caseSensitive)
+		sch, err := curSchema.Select(scan.caseSensitive, removedMetadataSlice...)
+
+		if err != nil {
+			return nil, err
+		}
+
+		return iceberg.NewSchema(sch.ID, append(sch.Fields(), missingMetaFields...)...), nil
 	}
 
 	return curSchema.Select(scan.caseSensitive, scan.selectedFields...)
@@ -673,4 +690,76 @@ func (scan *Scan) ToArrowTable(ctx context.Context) (arrow.Table, error) {
 	}
 
 	return array.NewTableFromRecords(schema, records), nil
+}
+
+func schemaContainsMeta(schema *iceberg.Schema) bool {
+	if schema == nil {
+		return false
+	}
+
+	_, hasRowIdMeta := schema.FindFieldByID(iceberg.RowIDFieldID)
+	_, hasSequenceMeta := schema.FindFieldByID(iceberg.LastUpdatedSequenceNumberFieldID)
+
+	return hasRowIdMeta || hasSequenceMeta
+}
+
+func selectedFieldsContainsMeta(selectedFields []string, caseSensitive bool) bool {
+	if !caseSensitive {
+		selectedFieldsLower := []string{}
+
+		for _, s := range selectedFields {
+			selectedFieldsLower = append(selectedFieldsLower, strings.ToLower(s))
+		}
+
+		hasRowIdMeta := slices.Contains(selectedFieldsLower, iceberg.RowIDColumnName)
+		hasSequenceMeta := slices.Contains(selectedFieldsLower, iceberg.LastUpdatedSequenceNumberColumnName)
+
+		return hasRowIdMeta || hasSequenceMeta
+	}
+	hasRowIdMeta := slices.Contains(selectedFields, iceberg.RowIDColumnName)
+	hasSequenceMeta := slices.Contains(selectedFields, iceberg.LastUpdatedSequenceNumberColumnName)
+
+	return hasRowIdMeta || hasSequenceMeta
+}
+
+// Goes through a selectedFields and returns a slice of strings representing the selectedFields without
+// any row lineage metadata and a slice of iceberg.NestedFields representing the row lineage metadata present
+// in the selectedFields. Note that both returned slices will be in the same order as they were in selectedFields.
+func removeMetadataFromSelectedFields(selectedFields []string, caseSensitive bool) ([]string, []iceberg.NestedField) {
+	filteredFields := []string{}
+	meta := []iceberg.NestedField{}
+
+	if !caseSensitive {
+		for _, field := range selectedFields {
+			if strings.ToLower(field) == iceberg.RowIDColumnName {
+				meta = append(meta, iceberg.RowID())
+				continue
+			}
+
+			if strings.ToLower(field) == iceberg.LastUpdatedSequenceNumberColumnName {
+				meta = append(meta, iceberg.LastUpdatedSequenceNumber())
+				continue
+			}
+
+			filteredFields = append(filteredFields, field)
+		}
+
+		return filteredFields, meta
+	}
+
+	for _, field := range selectedFields {
+		if field == iceberg.RowIDColumnName {
+			meta = append(meta, iceberg.RowID())
+			continue
+		}
+
+		if field == iceberg.LastUpdatedSequenceNumberColumnName {
+			meta = append(meta, iceberg.LastUpdatedSequenceNumber())
+			continue
+		}
+
+		filteredFields = append(filteredFields, field)
+	}
+
+	return filteredFields, meta
 }

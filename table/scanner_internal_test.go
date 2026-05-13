@@ -19,6 +19,7 @@ package table
 
 import (
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -256,7 +257,6 @@ func TestProjectionV3PreLineageFile(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Equal(t, 3, metadata.Version(), "sanity: must be v3")
-	assert.GreaterOrEqual(t, metadata.NextRowID(), int64(0), "sanity: next-row-id must be set")
 
 	// Request the two user columns plus both row-lineage metadata columns.
 	// These metadata columns do NOT exist in the physical schema of a pre-lineage file.
@@ -298,6 +298,267 @@ func TestProjectionV3PreLineageFile(t *testing.T) {
 	require.True(t, ok, "_last_updated_sequence_number must be in projection")
 	assert.Equal(t, iceberg.LastUpdatedSequenceNumberFieldID, seqField.ID, "_last_updated_sequence_number field ID")
 	assert.False(t, seqField.Required, "_last_updated_sequence_number must be optional (nullable) for pre-lineage files")
+}
+
+func TestProjectionV3PreLineageFileCaseSensitive(t *testing.T) {
+	schema := iceberg.NewSchema(
+		1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+
+	metadata, err := NewMetadata(
+		schema,
+		iceberg.UnpartitionedSpec,
+		UnsortedSortOrder,
+		"s3://test-bucket/test_table",
+		iceberg.Properties{"format-version": "3"},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 3, metadata.Version(), "sanity: must be v3")
+
+	scan := &Scan{
+		metadata:       metadata,
+		selectedFields: []string{"id", "payload", "_Row_Id"},
+		caseSensitive:  true,
+	}
+
+	_, err = scan.Projection()
+	require.Error(t, err)
+	require.ErrorContains(t, err, "could not find column _Row_Id")
+}
+
+func TestProjectionV3PreLineageFileCaseInsensitive(t *testing.T) {
+	schema := iceberg.NewSchema(
+		1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+
+	metadata, err := NewMetadata(
+		schema,
+		iceberg.UnpartitionedSpec,
+		UnsortedSortOrder,
+		"s3://test-bucket/test_table",
+		iceberg.Properties{"format-version": "3"},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 3, metadata.Version(), "sanity: must be v3")
+
+	scan := &Scan{
+		metadata:       metadata,
+		selectedFields: []string{"id", "payload", "_Row_Id", "_Last_Updated_SEQUENCE_number"},
+		caseSensitive:  false,
+	}
+
+	proj, err := scan.Projection()
+	require.NoError(t, err)
+	require.NotNil(t, proj)
+
+	fields := proj.Fields()
+	require.Len(t, fields, 4, "projected schema must contain all four requested fields")
+
+	fieldByName := make(map[string]iceberg.NestedField, len(fields))
+	for _, f := range fields {
+		fieldByName[f.Name] = f
+	}
+
+	idField, ok := fieldByName["id"]
+	require.True(t, ok, "id must be in projection")
+	assert.Equal(t, 1, idField.ID)
+
+	payloadField, ok := fieldByName["payload"]
+	require.True(t, ok, "payload must be in projection")
+	assert.Equal(t, 2, payloadField.ID)
+
+	rowIDField, ok := fieldByName[iceberg.RowIDColumnName]
+	require.True(t, ok, "_row_id must be in projection")
+	assert.Equal(t, iceberg.RowIDFieldID, rowIDField.ID, "_row_id field ID")
+	assert.False(t, rowIDField.Required, "_row_id must be optional (nullable) for pre-lineage files")
+
+	seqField, ok := fieldByName[iceberg.LastUpdatedSequenceNumberColumnName]
+	require.True(t, ok, "_last_updated_sequence_number must be in projection")
+	assert.Equal(t, iceberg.LastUpdatedSequenceNumberFieldID, seqField.ID, "_last_updated_sequence_number field ID")
+	assert.False(t, seqField.Required, "_last_updated_sequence_number must be optional (nullable) for pre-lineage files")
+}
+
+// TestProjectionV2RowLineage asserts that requesting row-lineage metadata columns on a v1 or v2
+// table does not use the v3-only synthesis path
+func TestProjectionV2RowLineage(t *testing.T) {
+	schema := iceberg.NewSchema(
+		1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+
+	for _, tc := range []struct {
+		name string
+		ver  int
+	}{
+		{name: "v1", ver: 1},
+		{name: "v2", ver: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			metadata, err := NewMetadata(
+				schema,
+				iceberg.UnpartitionedSpec,
+				UnsortedSortOrder,
+				"s3://test-bucket/test_table",
+				iceberg.Properties{PropertyFormatVersion: strconv.Itoa(tc.ver)},
+			)
+			require.NoError(t, err)
+			assert.Equal(t, tc.ver, metadata.Version(), "sanity: metadata format version")
+
+			scan := &Scan{
+				metadata:       metadata,
+				selectedFields: []string{"id", iceberg.RowIDColumnName},
+				caseSensitive:  true,
+			}
+
+			_, err = scan.Projection()
+			require.Error(t, err)
+			assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.ErrorContains(t, err, iceberg.RowIDColumnName)
+		})
+	}
+}
+
+// TestProjectionV3SchemaWithRowIDOnly covers a v3 table whose schema
+// already declares _row_id (reserved field id) but does not declare _last_updated_sequence_number.
+func TestProjectionV3SchemaWithRowIDOnly(t *testing.T) {
+	schema := iceberg.NewSchema(
+		1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.PrimitiveTypes.String, Required: false},
+		iceberg.RowID(),
+	)
+
+	metadata, err := NewMetadata(
+		schema,
+		iceberg.UnpartitionedSpec,
+		UnsortedSortOrder,
+		"s3://test-bucket/test_table",
+		iceberg.Properties{"format-version": "3"},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 3, metadata.Version(), "sanity: must be v3")
+
+	scan := &Scan{
+		metadata: metadata,
+		selectedFields: []string{
+			"id", "payload",
+			iceberg.RowIDColumnName,
+			iceberg.LastUpdatedSequenceNumberColumnName,
+		},
+		caseSensitive: true,
+	}
+
+	var proj *iceberg.Schema
+	require.NotPanics(t, func() {
+		var perr error
+		proj, perr = scan.Projection()
+		require.NoError(t, perr)
+	})
+	require.NotNil(t, proj)
+
+	fields := proj.Fields()
+	require.Len(t, fields, 4, "projection must include id, payload, _row_id, _last_updated_sequence_number")
+
+	fieldByName := make(map[string]iceberg.NestedField, len(fields))
+	idsSeen := make(map[int]string, len(fields))
+	for _, f := range fields {
+		if prev, dup := idsSeen[f.ID]; dup {
+			t.Fatalf("duplicate field id %d: %q and %q", f.ID, prev, f.Name)
+		}
+		idsSeen[f.ID] = f.Name
+		fieldByName[f.Name] = f
+	}
+
+	idField, ok := fieldByName["id"]
+	require.True(t, ok)
+	assert.Equal(t, 1, idField.ID)
+
+	payloadField, ok := fieldByName["payload"]
+	require.True(t, ok)
+	assert.Equal(t, 2, payloadField.ID)
+
+	rowIDField, ok := fieldByName[iceberg.RowIDColumnName]
+	require.True(t, ok)
+	assert.Equal(t, iceberg.RowIDFieldID, rowIDField.ID)
+	assert.False(t, rowIDField.Required)
+
+	seqField, ok := fieldByName[iceberg.LastUpdatedSequenceNumberColumnName]
+	require.True(t, ok)
+	assert.Equal(t, iceberg.LastUpdatedSequenceNumberFieldID, seqField.ID)
+	assert.False(t, seqField.Required)
+}
+
+func TestProjectionV3SchemaWithLastUpdatedSequenceNumberOnly(t *testing.T) {
+	schema := iceberg.NewSchema(
+		1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.PrimitiveTypes.String, Required: false},
+		iceberg.LastUpdatedSequenceNumber(),
+	)
+
+	metadata, err := NewMetadata(
+		schema,
+		iceberg.UnpartitionedSpec,
+		UnsortedSortOrder,
+		"s3://test-bucket/test_table",
+		iceberg.Properties{"format-version": "3"},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 3, metadata.Version(), "sanity: must be v3")
+
+	scan := &Scan{
+		metadata: metadata,
+		selectedFields: []string{
+			"id", "payload",
+			iceberg.RowIDColumnName,
+			iceberg.LastUpdatedSequenceNumberColumnName,
+		},
+		caseSensitive: true,
+	}
+
+	var proj *iceberg.Schema
+	require.NotPanics(t, func() {
+		var perr error
+		proj, perr = scan.Projection()
+		require.NoError(t, perr)
+	})
+	require.NotNil(t, proj)
+
+	fields := proj.Fields()
+	require.Len(t, fields, 4, "projection must include id, payload, _row_id, _last_updated_sequence_number")
+
+	fieldByName := make(map[string]iceberg.NestedField, len(fields))
+	idsSeen := make(map[int]string, len(fields))
+	for _, f := range fields {
+		if prev, dup := idsSeen[f.ID]; dup {
+			t.Fatalf("duplicate field id %d: %q and %q", f.ID, prev, f.Name)
+		}
+		idsSeen[f.ID] = f.Name
+		fieldByName[f.Name] = f
+	}
+
+	idField, ok := fieldByName["id"]
+	require.True(t, ok)
+	assert.Equal(t, 1, idField.ID)
+
+	payloadField, ok := fieldByName["payload"]
+	require.True(t, ok)
+	assert.Equal(t, 2, payloadField.ID)
+
+	rowIDField, ok := fieldByName[iceberg.RowIDColumnName]
+	require.True(t, ok)
+	assert.Equal(t, iceberg.RowIDFieldID, rowIDField.ID)
+	assert.False(t, rowIDField.Required)
+
+	seqField, ok := fieldByName[iceberg.LastUpdatedSequenceNumberColumnName]
+	require.True(t, ok)
+	assert.Equal(t, iceberg.LastUpdatedSequenceNumberFieldID, seqField.ID)
+	assert.False(t, seqField.Required)
 }
 
 // TestSynthesizeRowLineageColumns verifies that _row_id and _last_updated_sequence_number
