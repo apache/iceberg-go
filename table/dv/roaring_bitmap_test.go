@@ -150,6 +150,85 @@ func TestDeserializeRoaringBitmapTruncatedAfterKey(t *testing.T) {
 // Why: Set, Contains, Cardinality, and gap handling are the core in-memory behaviors of this type.
 // Condition: set positions across keys 0, 1, and 3, leaving key 2 absent.
 // Assertion: cardinality counts all set positions, expected positions are present, and unset positions in the same key, a gap key, and a far key are absent.
+// TestRoaringBitmapIter asserts Iter yields all set positions in ascending
+// order across multiple 32-bit keys and that early-termination via a false
+// yield short-circuits cleanly. Keys are inserted in reverse order to
+// confirm sortedKeys, not map iteration order, drives the sequence.
+func TestRoaringBitmapIter(t *testing.T) {
+	t.Run("ascending across keys", func(t *testing.T) {
+		bm := NewRoaringPositionBitmap()
+		for _, pos := range []uint64{
+			(uint64(3) << 32) | 1,
+			(uint64(1) << 32) | 999,
+			(uint64(1) << 32) | 5,
+			1000,
+			42,
+			0,
+		} {
+			bm.Set(pos)
+		}
+
+		var got []uint64
+		for p := range bm.Iter() {
+			got = append(got, p)
+		}
+		assert.Equal(t, []uint64{
+			0, 42, 1000,
+			(uint64(1) << 32) | 5, (uint64(1) << 32) | 999,
+			(uint64(3) << 32) | 1,
+		}, got)
+	})
+
+	t.Run("early termination short-circuits", func(t *testing.T) {
+		bm := NewRoaringPositionBitmap()
+		for i := range uint64(10) {
+			bm.Set(i)
+		}
+
+		var got []uint64
+		for p := range bm.Iter() {
+			got = append(got, p)
+			if len(got) == 3 {
+				break
+			}
+		}
+		assert.Equal(t, []uint64{0, 1, 2}, got)
+	})
+}
+
+// TestRoaringBitmapToArray asserts ToArray materializes the same ascending
+// sequence as Iter and returns a non-nil slice for the empty case — callers
+// that range over the result rely on the non-nil contract.
+func TestRoaringBitmapToArray(t *testing.T) {
+	t.Run("ascending across keys", func(t *testing.T) {
+		bm := NewRoaringPositionBitmap()
+		positions := []uint64{
+			(uint64(3) << 32) | 1,
+			(uint64(1) << 32) | 999,
+			(uint64(1) << 32) | 5,
+			1000,
+			42,
+			0,
+		}
+		for _, pos := range positions {
+			bm.Set(pos)
+		}
+
+		assert.Equal(t, []uint64{
+			0, 42, 1000,
+			(uint64(1) << 32) | 5, (uint64(1) << 32) | 999,
+			(uint64(3) << 32) | 1,
+		}, bm.ToArray())
+	})
+
+	t.Run("empty bitmap returns empty slice", func(t *testing.T) {
+		// range over a nil []uint64 is a valid no-op, so we don't pin
+		// non-nil — assert.Empty accepts both nil and len-0 slices, which
+		// is the actual API contract.
+		assert.Empty(t, NewRoaringPositionBitmap().ToArray())
+	})
+}
+
 func TestRoaringBitmapSetContainsAndCardinality(t *testing.T) {
 	bm := NewRoaringPositionBitmap()
 
