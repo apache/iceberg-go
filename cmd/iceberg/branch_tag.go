@@ -47,7 +47,22 @@ func runBranchCreate(ctx context.Context, output Output, cat catalog.Catalog, cm
 	tbl := loadTable(ctx, output, cat, cmd.TableID)
 	meta := tbl.Metadata()
 
+	for name := range meta.Refs() {
+		if name == cmd.BranchName {
+			output.Error(fmt.Errorf("ref %q already exists", cmd.BranchName))
+			os.Exit(1)
+		}
+	}
+
 	snapshotID := resolveSnapshotID(output, tbl, cmd.SnapshotID)
+
+	if err := confirmAction(
+		fmt.Sprintf("Create branch %q on %s at snapshot %d?", cmd.BranchName, tableIDString(tbl), snapshotID),
+		cmd.Yes,
+	); err != nil {
+		output.Error(err)
+		os.Exit(1)
+	}
 
 	var maxRefAgeMs int64
 	if cmd.MaxRefAge != "" {
@@ -78,26 +93,55 @@ func runBranchCreate(ctx context.Context, output Output, cat catalog.Catalog, cm
 
 	update := table.NewSetSnapshotRefUpdate(cmd.BranchName, snapshotID, table.BranchRef,
 		maxRefAgeMs, maxSnapshotAgeMs, minSnapshotsToKeep)
-	reqs := []table.Requirement{table.AssertTableUUID(meta.TableUUID())}
+	reqs := []table.Requirement{
+		table.AssertTableUUID(meta.TableUUID()),
+		table.AssertRefSnapshotID(cmd.BranchName, nil),
+	}
 
 	if _, _, err := cat.CommitTable(ctx, tbl.Identifier(), reqs, []table.Update{update}); err != nil {
-		output.Error(fmt.Errorf("create branch failed: %w", err))
+		output.Error(fmt.Errorf("failed to create branch: %w", err))
 		os.Exit(1)
 	}
 
-	output.RefCreated(RefCreatedResult{
+	result := RefCreatedResult{
 		Table:      tableIDString(tbl),
 		RefName:    cmd.BranchName,
 		RefType:    string(table.BranchRef),
 		SnapshotID: snapshotID,
-	})
+	}
+	if maxRefAgeMs > 0 {
+		result.MaxRefAgeMs = &maxRefAgeMs
+	}
+	if maxSnapshotAgeMs > 0 {
+		result.MaxSnapshotAgeMs = &maxSnapshotAgeMs
+	}
+	if minSnapshotsToKeep > 0 {
+		result.MinSnapshotsToKeep = &minSnapshotsToKeep
+	}
+
+	output.RefCreated(result)
 }
 
 func runTagCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *TagCreateCmd) {
 	tbl := loadTable(ctx, output, cat, cmd.TableID)
 	meta := tbl.Metadata()
 
+	for name := range meta.Refs() {
+		if name == cmd.TagName {
+			output.Error(fmt.Errorf("ref %q already exists", cmd.TagName))
+			os.Exit(1)
+		}
+	}
+
 	snapshotID := resolveSnapshotID(output, tbl, cmd.SnapshotID)
+
+	if err := confirmAction(
+		fmt.Sprintf("Create tag %q on %s at snapshot %d?", cmd.TagName, tableIDString(tbl), snapshotID),
+		cmd.Yes,
+	); err != nil {
+		output.Error(err)
+		os.Exit(1)
+	}
 
 	var maxRefAgeMs int64
 	if cmd.MaxRefAge != "" {
@@ -112,23 +156,36 @@ func runTagCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *
 
 	update := table.NewSetSnapshotRefUpdate(cmd.TagName, snapshotID, table.TagRef,
 		maxRefAgeMs, 0, 0)
-	reqs := []table.Requirement{table.AssertTableUUID(meta.TableUUID())}
+	reqs := []table.Requirement{
+		table.AssertTableUUID(meta.TableUUID()),
+		table.AssertRefSnapshotID(cmd.TagName, nil),
+	}
 
 	if _, _, err := cat.CommitTable(ctx, tbl.Identifier(), reqs, []table.Update{update}); err != nil {
-		output.Error(fmt.Errorf("create tag failed: %w", err))
+		output.Error(fmt.Errorf("failed to create tag: %w", err))
 		os.Exit(1)
 	}
 
-	output.RefCreated(RefCreatedResult{
+	result := RefCreatedResult{
 		Table:      tableIDString(tbl),
 		RefName:    cmd.TagName,
 		RefType:    string(table.TagRef),
 		SnapshotID: snapshotID,
-	})
+	}
+	if maxRefAgeMs > 0 {
+		result.MaxRefAgeMs = &maxRefAgeMs
+	}
+
+	output.RefCreated(result)
 }
 
 func resolveSnapshotID(output Output, tbl *table.Table, explicit *int64) int64 {
 	if explicit != nil {
+		if tbl.Metadata().SnapshotByID(*explicit) == nil {
+			output.Error(fmt.Errorf("snapshot %d not found", *explicit))
+			os.Exit(1)
+		}
+
 		return *explicit
 	}
 

@@ -59,10 +59,10 @@ func TestResolveSnapshotIDExplicit(t *testing.T) {
 	require.NoError(t, err)
 
 	tbl := table.New([]string{"db", "tbl"}, meta, "", nil, nil)
-	explicit := int64(1234)
+	explicit := int64(5000)
 
 	result := resolveSnapshotID(textOutput{}, tbl, &explicit)
-	assert.Equal(t, int64(1234), result)
+	assert.Equal(t, int64(5000), result)
 }
 
 func TestResolveSnapshotIDCurrent(t *testing.T) {
@@ -79,6 +79,10 @@ func TestTextOutputRefCreated(t *testing.T) {
 	var buf bytes.Buffer
 	pterm.SetDefaultOutput(&buf)
 	pterm.DisableColor()
+	t.Cleanup(func() {
+		pterm.SetDefaultOutput(os.Stderr)
+		pterm.EnableColor()
+	})
 
 	result := RefCreatedResult{
 		Table:      "db.events",
@@ -101,6 +105,10 @@ func TestTextOutputRefCreatedTag(t *testing.T) {
 	var buf bytes.Buffer
 	pterm.SetDefaultOutput(&buf)
 	pterm.DisableColor()
+	t.Cleanup(func() {
+		pterm.SetDefaultOutput(os.Stderr)
+		pterm.EnableColor()
+	})
 
 	result := RefCreatedResult{
 		Table:      "db.events",
@@ -119,10 +127,15 @@ func TestTextOutputRefCreatedTag(t *testing.T) {
 }
 
 func TestJSONOutputRefCreated(t *testing.T) {
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+
 	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
 	os.Stdout = w
-	defer func() { os.Stdout = oldStdout }()
+	t.Cleanup(func() {
+		w.Close()
+		os.Stdout = oldStdout
+	})
 
 	result := RefCreatedResult{
 		Table:      "db.events",
@@ -134,6 +147,7 @@ func TestJSONOutputRefCreated(t *testing.T) {
 	jsonOutput{}.RefCreated(result)
 
 	w.Close()
+
 	var buf bytes.Buffer
 	_, _ = buf.ReadFrom(r)
 
@@ -142,4 +156,42 @@ func TestJSONOutputRefCreated(t *testing.T) {
 	assert.Contains(t, output, `"ref_name":"feature-branch"`)
 	assert.Contains(t, output, `"ref_type":"branch"`)
 	assert.Contains(t, output, `"snapshot_id":5000`)
+}
+
+func TestJSONOutputRefCreatedWithRetention(t *testing.T) {
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+
+	oldStdout := os.Stdout
+	os.Stdout = w
+	t.Cleanup(func() {
+		w.Close()
+		os.Stdout = oldStdout
+	})
+
+	maxRefAge := int64(604800000)
+	maxSnapshotAge := int64(86400000)
+	minSnapshots := 5
+
+	result := RefCreatedResult{
+		Table:              "db.events",
+		RefName:            "feature-branch",
+		RefType:            "branch",
+		SnapshotID:         5000,
+		MaxRefAgeMs:        &maxRefAge,
+		MaxSnapshotAgeMs:   &maxSnapshotAge,
+		MinSnapshotsToKeep: &minSnapshots,
+	}
+
+	jsonOutput{}.RefCreated(result)
+
+	w.Close()
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	output := buf.String()
+	assert.Contains(t, output, `"max_ref_age_ms":604800000`)
+	assert.Contains(t, output, `"max_snapshot_age_ms":86400000`)
+	assert.Contains(t, output, `"min_snapshots_to_keep":5`)
 }
