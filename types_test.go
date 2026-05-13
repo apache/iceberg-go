@@ -514,6 +514,20 @@ func TestGeometryType(t *testing.T) {
 		assert.ErrorContains(t, err, "invalid CRS: (empty string)")
 	})
 
+	t.Run("whitespace default CRS", func(t *testing.T) {
+		geom, err := iceberg.GeometryTypeOf("    OGC:CRS84    ")
+		assert.NoError(t, err)
+		assert.Equal(t, "OGC:CRS84", geom.CRS())
+		assert.Equal(t, "geometry", geom.String())
+	})
+
+	t.Run("whitespace custom CRS", func(t *testing.T) {
+		geom, err := iceberg.GeometryTypeOf("    srid:3857    ")
+		assert.NoError(t, err)
+		assert.Equal(t, "srid:3857", geom.CRS())
+		assert.Equal(t, "geometry(srid:3857)", geom.String())
+	})
+
 	t.Run("JSON parsing - default", func(t *testing.T) {
 		data := `{"id": 1, "name": "location", "type": "geometry", "required": false}`
 		var n iceberg.NestedField
@@ -608,6 +622,30 @@ func TestGeographyType(t *testing.T) {
 	t.Run("empty CRS error", func(t *testing.T) {
 		_, err := iceberg.GeographyTypeOf("", "")
 		assert.ErrorContains(t, err, "invalid CRS: (empty string)")
+	})
+
+	t.Run("whitespace default algorithm", func(t *testing.T) {
+		geog, err := iceberg.GeographyTypeOf("OGC:CRS84", "    spherical    ")
+		assert.NoError(t, err)
+		assert.Equal(t, "OGC:CRS84", geog.CRS())
+		assert.Equal(t, "spherical", geog.Algorithm())
+		assert.Equal(t, "geography", geog.String())
+	})
+
+	t.Run("whitespace default CRS and default algorithm", func(t *testing.T) {
+		geog, err := iceberg.GeographyTypeOf("    OGC:CRS84    ", "    spherical    ")
+		assert.NoError(t, err)
+		assert.Equal(t, "OGC:CRS84", geog.CRS())
+		assert.Equal(t, "spherical", geog.Algorithm())
+		assert.Equal(t, "geography", geog.String())
+	})
+
+	t.Run("whitespace custom CRS and custom algorithm", func(t *testing.T) {
+		geog, err := iceberg.GeographyTypeOf("    srid:3857    ", "    karney    ")
+		assert.NoError(t, err)
+		assert.Equal(t, "srid:3857", geog.CRS())
+		assert.Equal(t, "karney", geog.Algorithm())
+		assert.Equal(t, "geography(srid:3857, karney)", geog.String())
 	})
 
 	t.Run("JSON parsing - default", func(t *testing.T) {
