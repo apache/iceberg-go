@@ -1363,15 +1363,17 @@ var (
 	ErrPartitionSpecNotFound        = errors.New("partition spec not found")
 )
 
-func rejectV3OnlyFields(version int, nextRowID *int64, encryptionKeys []EncryptionKey) error {
-	if nextRowID != nil {
-		return fmt.Errorf("%w: v3-only field 'next-row-id' present in v%d metadata",
-			ErrInvalidMetadata, version)
-	}
+type v3FieldCheck struct {
+	name    string
+	present bool
+}
 
-	if len(encryptionKeys) > 0 {
-		return fmt.Errorf("%w: v3-only field 'encryption-keys' present in v%d metadata",
-			ErrInvalidMetadata, version)
+func rejectV3OnlyFields(version int, checks ...v3FieldCheck) error {
+	for _, c := range checks {
+		if c.present {
+			return fmt.Errorf("%w: v3-only field '%s' present in v%d metadata",
+				ErrInvalidMetadataFormatVersion, c.name, version)
+		}
 	}
 
 	return nil
@@ -1920,7 +1922,10 @@ func (m *metadataV1) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	if err := rejectV3OnlyFields(1, aux.NextRowID, aux.EncryptionKeyList); err != nil {
+	if err := rejectV3OnlyFields(aux.FormatVersion,
+		v3FieldCheck{"next-row-id", aux.NextRowID != nil},
+		v3FieldCheck{"encryption-keys", len(aux.EncryptionKeyList) > 0},
+	); err != nil {
 		return err
 	}
 
@@ -1990,7 +1995,10 @@ func (m *metadataV2) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	if err := rejectV3OnlyFields(2, aux.NextRowID, aux.EncryptionKeyList); err != nil {
+	if err := rejectV3OnlyFields(aux.FormatVersion,
+		v3FieldCheck{"next-row-id", aux.NextRowID != nil},
+		v3FieldCheck{"encryption-keys", len(aux.EncryptionKeyList) > 0},
+	); err != nil {
 		return err
 	}
 
