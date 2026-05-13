@@ -271,7 +271,6 @@ func (scan *Scan) Projection() (*iceberg.Schema, error) {
 
 		removedMetadataSlice, missingMetaFields := removeMetadataFromSelectedFields(scan.selectedFields, caseSensitive)
 		sch, err := curSchema.Select(scan.caseSensitive, removedMetadataSlice...)
-
 		if err != nil {
 			return nil, err
 		}
@@ -733,11 +732,13 @@ func removeMetadataFromSelectedFields(selectedFields []string, caseSensitive boo
 		for _, field := range selectedFields {
 			if strings.ToLower(field) == iceberg.RowIDColumnName {
 				meta = append(meta, iceberg.RowID())
+
 				continue
 			}
 
 			if strings.ToLower(field) == iceberg.LastUpdatedSequenceNumberColumnName {
 				meta = append(meta, iceberg.LastUpdatedSequenceNumber())
+
 				continue
 			}
 
@@ -750,11 +751,13 @@ func removeMetadataFromSelectedFields(selectedFields []string, caseSensitive boo
 	for _, field := range selectedFields {
 		if field == iceberg.RowIDColumnName {
 			meta = append(meta, iceberg.RowID())
+
 			continue
 		}
 
 		if field == iceberg.LastUpdatedSequenceNumberColumnName {
 			meta = append(meta, iceberg.LastUpdatedSequenceNumber())
+
 			continue
 		}
 
