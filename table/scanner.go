@@ -681,9 +681,19 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 
 	results := make([]FileScanTask, 0, len(entries.dataEntries))
 	for _, e := range entries.dataEntries {
-		deleteFiles, err := matchDeletesToData(e, entries.positionalDeleteEntries)
-		if err != nil {
-			return nil, err
+		// Spec §Scan Planning: when a deletion vector applies to a data
+		// file, positional-delete files must NOT be applied. The DV is
+		// guaranteed to encode all prior pos-delete positions; reading the
+		// pos-delete Parquet too would be wasteful I/O, and on a buggy
+		// writer whose DV omits prior positions, applying both would
+		// over-delete. Mirrors Java's DeleteFileIndex.forDataFile.
+		dvFiles := matchDVToData(e, dvIndex)
+		var deleteFiles []iceberg.DataFile
+		if len(dvFiles) == 0 {
+			deleteFiles, err = matchDeletesToData(e, entries.positionalDeleteEntries)
+			if err != nil {
+				return nil, err
+			}
 		}
 		eqDeleteFiles := matchEqualityDeletesToData(e, entries.equalityDeleteEntries)
 
@@ -691,7 +701,7 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 			File:                e.DataFile(),
 			DeleteFiles:         deleteFiles,
 			EqualityDeleteFiles: eqDeleteFiles,
-			DeletionVectorFiles: matchDVToData(e, dvIndex),
+			DeletionVectorFiles: dvFiles,
 			Start:               0,
 			Length:              e.DataFile().FileSizeBytes(),
 		}
