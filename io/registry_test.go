@@ -43,6 +43,7 @@ func TestIORegistry(t *testing.T) {
 		"abfss",
 		"wasb",
 		"wasbs",
+		"oss",
 	}, io.GetRegisteredSchemes())
 
 	customFactoryCalled := false
@@ -67,6 +68,7 @@ func TestIORegistry(t *testing.T) {
 		"wasb",
 		"wasbs",
 		"custom",
+		"oss",
 	}, io.GetRegisteredSchemes())
 
 	customIO, err := io.LoadFS(ctx, map[string]string{}, "custom://bucket/path")
@@ -87,6 +89,7 @@ func TestIORegistry(t *testing.T) {
 		"abfss",
 		"wasb",
 		"wasbs",
+		"oss",
 	}, io.GetRegisteredSchemes())
 
 	_, err = io.LoadFS(ctx, map[string]string{}, "custom://bucket/path")
