@@ -19,6 +19,7 @@ package gocloud
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"io/fs"
 	"testing"
@@ -27,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	icebergio "github.com/apache/iceberg-go/io"
+	"gocloud.dev/blob"
 	"gocloud.dev/blob/memblob"
 )
 
@@ -93,6 +95,7 @@ func TestNewWriterExistsError(t *testing.T) {
 		Bucket:       bucket,
 		keyExtractor: func(path string) (string, error) { return path, nil },
 		ctx:          ctx,
+		buckets:      make(map[string]*blob.Bucket),
 	}
 	require.NoError(t, bucket.Close())
 
@@ -378,4 +381,190 @@ func TestBlobFileIODeleteFilesEmpty(t *testing.T) {
 	deleted, err := bulk.DeleteFiles(ctx, nil)
 	require.NoError(t, err)
 	assert.Nil(t, deleted)
+}
+
+// TestMultiBucketWriteAndRead verifies that blobFileIO routes reads and writes
+// to the correct bucket when a URI references a bucket different from the
+// primary one. This is the scenario triggered by Iceberg's write.metadata.path
+// table property pointing to a dedicated metadata bucket while data lives in
+// the warehouse bucket.
+func TestMultiBucketWriteAndRead(t *testing.T) {
+	ctx := context.Background()
+
+	warehouseBucket := memblob.OpenBucket(nil)
+	defer warehouseBucket.Close()
+	metadataBucket := memblob.OpenBucket(nil)
+	defer metadataBucket.Close()
+
+	bfs := &blobFileIO{
+		Bucket:        warehouseBucket,
+		primaryBucket: "warehouse",
+		bucketOpener: func(_ context.Context, name string) (*blob.Bucket, error) {
+			if name == "metadata" {
+				return metadataBucket, nil
+			}
+			return nil, fmt.Errorf("unknown bucket: %s", name)
+		},
+		buckets:      make(map[string]*blob.Bucket),
+		keyExtractor: defaultKeyExtractor("warehouse"),
+		ctx:          ctx,
+	}
+
+	// Write a data file to the primary (warehouse) bucket.
+	require.NoError(t, bfs.WriteFile("s3://warehouse/db/table/data/file.parquet", []byte("data-content")))
+
+	// Write a manifest list to the metadata bucket (simulates write.metadata.path).
+	require.NoError(t, bfs.WriteFile("s3://metadata/db/table/snap-123.avro", []byte("manifest-list")))
+
+	// Verify the data file landed in the warehouse bucket, not the metadata bucket.
+	exists, err := warehouseBucket.Exists(ctx, "db/table/data/file.parquet")
+	require.NoError(t, err)
+	assert.True(t, exists, "data file should exist in warehouse bucket")
+
+	exists, err = metadataBucket.Exists(ctx, "db/table/data/file.parquet")
+	require.NoError(t, err)
+	assert.False(t, exists, "data file should NOT exist in metadata bucket")
+
+	// Verify the manifest list landed in the metadata bucket, not the warehouse bucket.
+	exists, err = metadataBucket.Exists(ctx, "db/table/snap-123.avro")
+	require.NoError(t, err)
+	assert.True(t, exists, "manifest list should exist in metadata bucket")
+
+	exists, err = warehouseBucket.Exists(ctx, "db/table/snap-123.avro")
+	require.NoError(t, err)
+	assert.False(t, exists, "manifest list should NOT exist in warehouse bucket")
+
+	// Read back via Open (uses resolveBucket).
+	f, err := bfs.Open("s3://metadata/db/table/snap-123.avro")
+	require.NoError(t, err)
+	defer f.Close()
+	content, err := io.ReadAll(f)
+	require.NoError(t, err)
+	assert.Equal(t, "manifest-list", string(content))
+
+	// Read from the primary bucket.
+	f2, err := bfs.Open("s3://warehouse/db/table/data/file.parquet")
+	require.NoError(t, err)
+	defer f2.Close()
+	content2, err := io.ReadAll(f2)
+	require.NoError(t, err)
+	assert.Equal(t, "data-content", string(content2))
+}
+
+// TestMultiBucketDelete verifies that Remove and DeleteFiles route to the
+// correct bucket based on the URI.
+func TestMultiBucketDelete(t *testing.T) {
+	ctx := context.Background()
+
+	warehouseBucket := memblob.OpenBucket(nil)
+	defer warehouseBucket.Close()
+	metadataBucket := memblob.OpenBucket(nil)
+	defer metadataBucket.Close()
+
+	bfs := &blobFileIO{
+		Bucket:        warehouseBucket,
+		primaryBucket: "warehouse",
+		bucketOpener: func(_ context.Context, name string) (*blob.Bucket, error) {
+			if name == "metadata" {
+				return metadataBucket, nil
+			}
+			return nil, fmt.Errorf("unknown bucket: %s", name)
+		},
+		buckets:      make(map[string]*blob.Bucket),
+		keyExtractor: defaultKeyExtractor("warehouse"),
+		ctx:          ctx,
+	}
+
+	// Seed files in both buckets.
+	require.NoError(t, warehouseBucket.WriteAll(ctx, "data/file.parquet", []byte("d"), nil))
+	require.NoError(t, metadataBucket.WriteAll(ctx, "snap-456.avro", []byte("m"), nil))
+
+	// Remove from metadata bucket.
+	require.NoError(t, bfs.Remove("s3://metadata/snap-456.avro"))
+	exists, err := metadataBucket.Exists(ctx, "snap-456.avro")
+	require.NoError(t, err)
+	assert.False(t, exists, "metadata file should be deleted")
+
+	// Warehouse file should be untouched.
+	exists, err = warehouseBucket.Exists(ctx, "data/file.parquet")
+	require.NoError(t, err)
+	assert.True(t, exists, "warehouse file should still exist")
+
+	// DeleteFiles across both buckets.
+	require.NoError(t, warehouseBucket.WriteAll(ctx, "old-manifest.avro", []byte("x"), nil))
+	require.NoError(t, metadataBucket.WriteAll(ctx, "old-snap.avro", []byte("y"), nil))
+
+	deleted, err := bfs.DeleteFiles(ctx, []string{
+		"s3://warehouse/old-manifest.avro",
+		"s3://metadata/old-snap.avro",
+	})
+	require.NoError(t, err)
+	assert.Len(t, deleted, 2)
+}
+
+// TestMultiBucketOpenerCaching verifies that the bucket opener is called only
+// once per bucket name, and subsequent requests reuse the cached handle.
+func TestMultiBucketOpenerCaching(t *testing.T) {
+	ctx := context.Background()
+
+	warehouseBucket := memblob.OpenBucket(nil)
+	defer warehouseBucket.Close()
+	metadataBucket := memblob.OpenBucket(nil)
+	defer metadataBucket.Close()
+
+	openCount := 0
+	bfs := &blobFileIO{
+		Bucket:        warehouseBucket,
+		primaryBucket: "warehouse",
+		bucketOpener: func(_ context.Context, name string) (*blob.Bucket, error) {
+			openCount++
+			if name == "metadata" {
+				return metadataBucket, nil
+			}
+			return nil, fmt.Errorf("unknown bucket: %s", name)
+		},
+		buckets:      make(map[string]*blob.Bucket),
+		keyExtractor: defaultKeyExtractor("warehouse"),
+		ctx:          ctx,
+	}
+
+	require.NoError(t, metadataBucket.WriteAll(ctx, "file1.avro", []byte("a"), nil))
+	require.NoError(t, metadataBucket.WriteAll(ctx, "file2.avro", []byte("b"), nil))
+
+	// Two reads from the same secondary bucket.
+	f1, err := bfs.Open("s3://metadata/file1.avro")
+	require.NoError(t, err)
+	f1.Close()
+
+	f2, err := bfs.Open("s3://metadata/file2.avro")
+	require.NoError(t, err)
+	f2.Close()
+
+	assert.Equal(t, 1, openCount, "bucket opener should be called exactly once for 'metadata'")
+}
+
+// TestMultiBucketFallbackWithoutOpener verifies backward compatibility: when
+// no BucketOpener is configured, cross-bucket URIs fall back to the primary
+// bucket with the legacy key extractor.
+func TestMultiBucketFallbackWithoutOpener(t *testing.T) {
+	ctx := context.Background()
+
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	// No bucketOpener set: uses legacy createBlobFS path.
+	bfs := createBlobFS(ctx, bucket, defaultKeyExtractor("warehouse"))
+
+	// Write using a URI with a different bucket name. Without an opener,
+	// the key extractor strips "://other-bucket/" and the file ends up
+	// in the primary bucket under a mangled key (legacy behavior).
+	wfs := bfs.(icebergio.WriteFileIO)
+	require.NoError(t, wfs.WriteFile(
+		"s3://other-bucket/path/file.txt", []byte("hello")))
+
+	// The file lands in the primary bucket with the full "other-bucket/path/file.txt" key
+	// because TrimPrefix("other-bucket/...", "warehouse/") is a no-op.
+	exists, err := bucket.Exists(ctx, "other-bucket/path/file.txt")
+	require.NoError(t, err)
+	assert.True(t, exists, "without opener, cross-bucket URI should fall back to primary bucket with mangled key")
 }

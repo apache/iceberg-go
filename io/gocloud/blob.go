@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	icebergio "github.com/apache/iceberg-go/io"
 	"gocloud.dev/blob"
@@ -91,8 +92,20 @@ func defaultKeyExtractor(bucketName string) KeyExtractor {
 	}
 }
 
+// BucketOpener creates a new blob.Bucket for the given bucket name.
+// Used to lazily open secondary buckets when a URI references a bucket
+// different from the primary one (e.g. write.metadata.path pointing to
+// a separate metadata bucket).
+type BucketOpener func(ctx context.Context, bucketName string) (*blob.Bucket, error)
+
 type blobFileIO struct {
 	*blob.Bucket
+
+	primaryBucket string
+	bucketOpener  BucketOpener
+
+	mu      sync.RWMutex
+	buckets map[string]*blob.Bucket
 
 	keyExtractor KeyExtractor
 	ctx          context.Context
@@ -102,23 +115,78 @@ type blobFileIO struct {
 	newRangeReader func(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error)
 }
 
+// resolveBucket parses path into a bucket handle and object key. If the URI
+// references the primary bucket (or has no scheme), the primary bucket is
+// returned without any additional allocation. URIs that reference a different
+// bucket are resolved via BucketOpener and cached for reuse.
+func (bfs *blobFileIO) resolveBucket(path string) (*blob.Bucket, string, error) {
+	_, after, hasScheme := strings.Cut(path, "://")
+	if !hasScheme {
+		// No scheme: treat as a key in the primary bucket (legacy behavior).
+		key, err := bfs.keyExtractor(path)
+		return bfs.Bucket, key, err
+	}
+
+	bucketName, key, _ := strings.Cut(after, "/")
+	if key == "" {
+		return nil, "", fmt.Errorf("URI path is empty: %s", path)
+	}
+
+	// Fast path: primary bucket.
+	if bucketName == bfs.primaryBucket {
+		return bfs.Bucket, key, nil
+	}
+
+	// Secondary bucket: check cache first.
+	if bfs.bucketOpener == nil {
+		// No opener configured: fall back to primary bucket with legacy key extraction.
+		// This preserves backward compatibility for callers that don't set a BucketOpener.
+		key, err := bfs.keyExtractor(path)
+		return bfs.Bucket, key, err
+	}
+
+	bfs.mu.RLock()
+	b, ok := bfs.buckets[bucketName]
+	bfs.mu.RUnlock()
+	if ok {
+		return b, key, nil
+	}
+
+	// Open a new bucket handle.
+	b, err := bfs.bucketOpener(bfs.ctx, bucketName)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to open bucket %q: %w", bucketName, err)
+	}
+
+	bfs.mu.Lock()
+	// Double-check: another goroutine may have opened it concurrently.
+	if existing, ok := bfs.buckets[bucketName]; ok {
+		bfs.mu.Unlock()
+		_ = b.Close()
+		return existing, key, nil
+	}
+	bfs.buckets[bucketName] = b
+	bfs.mu.Unlock()
+
+	return b, key, nil
+}
+
 func (bfs *blobFileIO) preprocess(path string) (string, error) {
 	return bfs.keyExtractor(path)
 }
 
 func (bfs *blobFileIO) Open(path string) (icebergio.File, error) {
-	var err error
-	path, err = bfs.preprocess(path)
+	bucket, key, err := bfs.resolveBucket(path)
 	if err != nil {
 		return nil, &fs.PathError{Op: "open", Path: path, Err: err}
 	}
-	if !fs.ValidPath(path) {
-		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrInvalid}
+	if !fs.ValidPath(key) {
+		return nil, &fs.PathError{Op: "open", Path: key, Err: fs.ErrInvalid}
 	}
 
-	key, name := path, filepath.Base(path)
+	name := filepath.Base(key)
 
-	r, err := bfs.NewReader(bfs.ctx, key, nil)
+	r, err := bucket.NewReader(bfs.ctx, key, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -127,13 +195,12 @@ func (bfs *blobFileIO) Open(path string) (icebergio.File, error) {
 }
 
 func (bfs *blobFileIO) Remove(name string) error {
-	var err error
-	name, err = bfs.preprocess(name)
+	bucket, key, err := bfs.resolveBucket(name)
 	if err != nil {
 		return &fs.PathError{Op: "remove", Path: name, Err: err}
 	}
 
-	return bfs.Delete(bfs.ctx, name)
+	return bucket.Delete(bfs.ctx, key)
 }
 
 func (bfs *blobFileIO) Create(name string) (icebergio.FileWriter, error) {
@@ -141,13 +208,12 @@ func (bfs *blobFileIO) Create(name string) (icebergio.FileWriter, error) {
 }
 
 func (bfs *blobFileIO) WriteFile(name string, content []byte) error {
-	var err error
-	name, err = bfs.preprocess(name)
+	bucket, key, err := bfs.resolveBucket(name)
 	if err != nil {
 		return &fs.PathError{Op: "write file", Path: name, Err: err}
 	}
 
-	return bfs.WriteAll(bfs.ctx, name, content, nil)
+	return bucket.WriteAll(bfs.ctx, key, content, nil)
 }
 
 // NewWriter returns a Writer that writes to the blob stored at path.
@@ -159,37 +225,53 @@ func (bfs *blobFileIO) WriteFile(name string, content []byte) error {
 // The caller must call Close on the returned Writer, even if the write is
 // aborted.
 func (bfs *blobFileIO) NewWriter(ctx context.Context, path string, overwrite bool, opts *blob.WriterOptions) (w *blobWriteFile, err error) {
-	path, err = bfs.preprocess(path)
+	bucket, key, err := bfs.resolveBucket(path)
 	if err != nil {
 		return nil, &fs.PathError{Op: "new writer", Path: path, Err: err}
 	}
-	if !fs.ValidPath(path) {
-		return nil, &fs.PathError{Op: "new writer", Path: path, Err: fs.ErrInvalid}
+	if !fs.ValidPath(key) {
+		return nil, &fs.PathError{Op: "new writer", Path: key, Err: fs.ErrInvalid}
 	}
 
 	if !overwrite {
-		if exists, err := bfs.Exists(ctx, path); err != nil || exists {
+		if exists, err := bucket.Exists(ctx, key); err != nil || exists {
 			if err != nil {
-				return nil, &fs.PathError{Op: "new writer", Path: path, Err: err}
+				return nil, &fs.PathError{Op: "new writer", Path: key, Err: err}
 			}
 
-			return nil, &fs.PathError{Op: "new writer", Path: path, Err: fs.ErrInvalid}
+			return nil, &fs.PathError{Op: "new writer", Path: key, Err: fs.ErrInvalid}
 		}
 	}
-	bw, err := bfs.Bucket.NewWriter(ctx, path, opts)
+	bw, err := bucket.NewWriter(ctx, key, opts)
 	if err != nil {
 		return nil, err
 	}
 
 	return &blobWriteFile{
 			Writer: bw,
-			name:   path,
+			name:   key,
 		},
 		nil
 }
 
 func createBlobFS(ctx context.Context, bucket *blob.Bucket, keyExtractor KeyExtractor) icebergio.IO {
-	return &blobFileIO{Bucket: bucket, keyExtractor: keyExtractor, ctx: ctx}
+	return &blobFileIO{
+		Bucket:       bucket,
+		keyExtractor: keyExtractor,
+		ctx:          ctx,
+		buckets:      make(map[string]*blob.Bucket),
+	}
+}
+
+func createMultiBucketBlobFS(ctx context.Context, bucket *blob.Bucket, primaryBucket string, opener BucketOpener) icebergio.IO {
+	return &blobFileIO{
+		Bucket:        bucket,
+		primaryBucket: primaryBucket,
+		bucketOpener:  opener,
+		buckets:       make(map[string]*blob.Bucket),
+		keyExtractor:  defaultKeyExtractor(primaryBucket),
+		ctx:           ctx,
+	}
 }
 
 func (bfs *blobFileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
@@ -220,14 +302,14 @@ func (bfs *blobFileIO) DeleteFiles(ctx context.Context, paths []string) ([]strin
 	var errs error
 
 	for _, p := range paths {
-		key, err := bfs.preprocess(p)
+		bucket, key, err := bfs.resolveBucket(p)
 		if err != nil {
 			errs = errors.Join(errs, fmt.Errorf("failed to delete %s: %w", p, err))
 
 			continue
 		}
 
-		if err := bfs.Delete(ctx, key); err != nil {
+		if err := bucket.Delete(ctx, key); err != nil {
 			// Missing files are not errors per the interface contract.
 			if gcerrors.Code(err) == gcerrors.NotFound {
 				deleted = append(deleted, p)
