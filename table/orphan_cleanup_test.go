@@ -640,6 +640,7 @@ func (c *inMemoryCatalog) CommitTable(
 		return nil, "", err
 	}
 	c.metadata = meta
+
 	return meta, "", nil
 }
 
@@ -745,5 +746,6 @@ func dataFilePathsFromSnapshot(
 			}
 		}
 	}
+
 	return paths
 }
