@@ -129,13 +129,17 @@ func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, er
 		return BlobMetadata{}, errors.New("puffin: cannot add blob: fields is required")
 	}
 
-	// Deletion vectors have special requirements per spec
+	// Deletion vectors have special requirements per spec. Format matches
+	// the reader-side validateBlobs check so both sides surface the same
+	// "<type> requires X to be -1, got N" phrasing for log grep.
 	if input.Type == BlobTypeDeletionVector {
 		if input.SnapshotID != -1 {
-			return BlobMetadata{}, errors.New("puffin: deletion-vector-v1 requires snapshot-id to be -1")
+			return BlobMetadata{}, fmt.Errorf("puffin: %s requires snapshot-id to be -1, got %d",
+				BlobTypeDeletionVector, input.SnapshotID)
 		}
 		if input.SequenceNumber != -1 {
-			return BlobMetadata{}, errors.New("puffin: deletion-vector-v1 requires sequence-number to be -1")
+			return BlobMetadata{}, fmt.Errorf("puffin: %s requires sequence-number to be -1, got %d",
+				BlobTypeDeletionVector, input.SequenceNumber)
 		}
 	}
 
