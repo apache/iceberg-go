@@ -29,16 +29,12 @@ import (
 	"github.com/pterm/pterm"
 )
 
+var osExit = os.Exit
+
 func runUpgrade(ctx context.Context, output Output, cat catalog.Catalog, cmd *UpgradeCmd) {
 	tbl := loadTable(ctx, output, cat, cmd.TableID)
 	meta := tbl.Metadata()
 	currentVersion := meta.Version()
-
-	if cmd.FormatVersion <= currentVersion {
-		output.Error(fmt.Errorf("target format version %d must be greater than current version %d",
-			cmd.FormatVersion, currentVersion))
-		os.Exit(1)
-	}
 
 	result := UpgradeResult{
 		DryRun:          cmd.DryRun,
@@ -54,22 +50,36 @@ func runUpgrade(ctx context.Context, output Output, cat catalog.Catalog, cmd *Up
 		return
 	}
 
+	if cmd.FormatVersion <= currentVersion {
+		output.Error(fmt.Errorf("target format version %d must be greater than current version %d",
+			cmd.FormatVersion, currentVersion))
+		osExit(1)
+
+		return
+	}
+
 	prompt := fmt.Sprintf("Upgrade %s from format version %d to %d?",
 		tableIDString(tbl), currentVersion, cmd.FormatVersion)
 	if err := confirmAction(prompt, cmd.Yes); err != nil {
 		output.Error(err)
-		os.Exit(1)
+		osExit(1)
+
+		return
 	}
 
 	tx := tbl.NewTransaction()
 	if err := tx.UpgradeFormatVersion(cmd.FormatVersion); err != nil {
 		output.Error(fmt.Errorf("upgrade failed: %w", err))
-		os.Exit(1)
+		osExit(1)
+
+		return
 	}
 
 	if _, err := tx.Commit(ctx); err != nil {
 		output.Error(fmt.Errorf("commit failed: %w", err))
-		os.Exit(1)
+		osExit(1)
+
+		return
 	}
 
 	output.UpgradeResult(result)
@@ -82,7 +92,18 @@ func runRollback(ctx context.Context, output Output, cat catalog.Catalog, cmd *R
 	snap := meta.SnapshotByID(cmd.SnapshotID)
 	if snap == nil {
 		output.Error(fmt.Errorf("snapshot %d not found in table %s", cmd.SnapshotID, tableIDString(tbl)))
-		os.Exit(1)
+		osExit(1)
+
+		return
+	}
+
+	if cs := meta.CurrentSnapshot(); cs != nil {
+		if !table.IsAncestorOf(cs.SnapshotID, cmd.SnapshotID, meta.SnapshotByID) {
+			output.Error(fmt.Errorf("snapshot %d is not an ancestor of current snapshot %d", cmd.SnapshotID, cs.SnapshotID))
+			osExit(1)
+
+			return
+		}
 	}
 
 	var previousSnapshotID *int64
@@ -94,15 +115,24 @@ func runRollback(ctx context.Context, output Output, cat catalog.Catalog, cmd *R
 	prompt := fmt.Sprintf("Roll back %s to snapshot %d?", tableIDString(tbl), cmd.SnapshotID)
 	if err := confirmAction(prompt, cmd.Yes); err != nil {
 		output.Error(err)
-		os.Exit(1)
+		osExit(1)
+
+		return
 	}
 
-	update := table.NewSetSnapshotRefUpdate(table.MainBranch, cmd.SnapshotID, table.BranchRef, 0, 0, 0)
-	reqs := []table.Requirement{table.AssertTableUUID(meta.TableUUID())}
-
-	if _, _, err := cat.CommitTable(ctx, tbl.Identifier(), reqs, []table.Update{update}); err != nil {
+	tx := tbl.NewTransaction()
+	if err := tx.RollbackToSnapshot(cmd.SnapshotID); err != nil {
 		output.Error(fmt.Errorf("rollback failed: %w", err))
-		os.Exit(1)
+		osExit(1)
+
+		return
+	}
+
+	if _, err := tx.Commit(ctx); err != nil {
+		output.Error(fmt.Errorf("commit failed: %w", err))
+		osExit(1)
+
+		return
 	}
 
 	result := RollbackResult{
@@ -127,7 +157,7 @@ func specURL(version int) string {
 	}
 }
 
-func (t textOutput) UpgradeResult(result UpgradeResult) {
+func (textOutput) UpgradeResult(result UpgradeResult) {
 	if result.DryRun {
 		pterm.Printfln("[DRY RUN] Would upgrade %s from format version %d to %d.",
 			result.Table, result.PreviousVersion, result.TargetVersion)
@@ -145,7 +175,7 @@ func (j jsonOutput) UpgradeResult(result UpgradeResult) {
 	}
 }
 
-func (t textOutput) RollbackResult(result RollbackResult) {
+func (textOutput) RollbackResult(result RollbackResult) {
 	prev := "none"
 	if result.PreviousSnapshotID != nil {
 		prev = strconv.FormatInt(*result.PreviousSnapshotID, 10)
