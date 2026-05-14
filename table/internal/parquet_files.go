@@ -68,6 +68,9 @@ const (
 
 	ParquetBatchSizeKey     = "read.parquet.batch-size"
 	ParquetBatchSizeDefault = 1 << 17 // 131072 rows
+
+	ParquetRootRepetitionKey     = "write.parquet.root-repetition"
+	ParquetRootRepetitionDefault = "required"
 )
 
 type parquetFormat struct{}
@@ -259,8 +262,23 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 		slog.Warn("unrecognized compression codec, falling back to uncompressed", "codec", compression)
 	}
 
+	var rootRepetition parquet.Repetition
+	switch props.Get(ParquetRootRepetitionKey, ParquetRootRepetitionDefault) {
+	case "required":
+		rootRepetition = parquet.Repetitions.Required
+	case "optional":
+		rootRepetition = parquet.Repetitions.Optional
+	case "repeated":
+		rootRepetition = parquet.Repetitions.Repeated
+	default:
+		slog.Warn("unrecognized root repetition, falling back to required",
+			"repetition", props.Get(ParquetRootRepetitionKey, ParquetRootRepetitionDefault))
+		rootRepetition = parquet.Repetitions.Required
+	}
+
 	writerProps = append(writerProps, parquet.WithCompression(codec),
-		parquet.WithCompressionLevel(compressionLevel))
+		parquet.WithCompressionLevel(compressionLevel),
+		parquet.WithRootRepetition(rootRepetition))
 
 	// Bloom filter properties.
 	// write.parquet.bloom-filter-max-bytes caps the per-column bloom filter size.
