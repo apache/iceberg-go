@@ -499,6 +499,15 @@ func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
 			continue
 		}
 		resultType := field.Transform.ResultType(sourceType)
+		// DayTransform.ResultType returns Int32 (days since epoch), but the
+		// Avro encoding of a day-partition column must carry the "date" logical
+		// type so that Trino, Spark, and other engines can read manifests.
+		// Override to DateType here so downstream schema conversion picks it up
+		// automatically via the existing DateType branch, without coupling the
+		// Avro layer to transform internals.
+		if _, ok := field.Transform.(DayTransform); ok {
+			resultType = PrimitiveTypes.Date
+		}
 		nestedFields = append(nestedFields, NestedField{
 			ID:       field.FieldID,
 			Name:     field.Name,
