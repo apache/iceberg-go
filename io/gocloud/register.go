@@ -41,6 +41,7 @@ func registerS3Schemes() {
 
 		opener := func(ctx context.Context, bucketName string) (*blob.Bucket, error) {
 			u := &url.URL{Scheme: parsed.Scheme, Host: bucketName}
+
 			return createS3Bucket(ctx, u, props)
 		}
 

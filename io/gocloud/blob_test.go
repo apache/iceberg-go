@@ -403,6 +403,7 @@ func TestMultiBucketWriteAndRead(t *testing.T) {
 			if name == "metadata" {
 				return metadataBucket, nil
 			}
+
 			return nil, fmt.Errorf("unknown bucket: %s", name)
 		},
 		buckets:      make(map[string]*blob.Bucket),
@@ -468,6 +469,7 @@ func TestMultiBucketDelete(t *testing.T) {
 			if name == "metadata" {
 				return metadataBucket, nil
 			}
+
 			return nil, fmt.Errorf("unknown bucket: %s", name)
 		},
 		buckets:      make(map[string]*blob.Bucket),
@@ -521,6 +523,7 @@ func TestMultiBucketOpenerCaching(t *testing.T) {
 			if name == "metadata" {
 				return metadataBucket, nil
 			}
+
 			return nil, fmt.Errorf("unknown bucket: %s", name)
 		},
 		buckets:      make(map[string]*blob.Bucket),
