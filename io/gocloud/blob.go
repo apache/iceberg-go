@@ -124,6 +124,7 @@ func (bfs *blobFileIO) resolveBucket(path string) (*blob.Bucket, string, error) 
 	if !hasScheme {
 		// No scheme: treat as a key in the primary bucket (legacy behavior).
 		key, err := bfs.keyExtractor(path)
+
 		return bfs.Bucket, key, err
 	}
 
@@ -142,6 +143,7 @@ func (bfs *blobFileIO) resolveBucket(path string) (*blob.Bucket, string, error) 
 		// No opener configured: fall back to primary bucket with legacy key extraction.
 		// This preserves backward compatibility for callers that don't set a BucketOpener.
 		key, err := bfs.keyExtractor(path)
+
 		return bfs.Bucket, key, err
 	}
 
@@ -163,6 +165,7 @@ func (bfs *blobFileIO) resolveBucket(path string) (*blob.Bucket, string, error) 
 	if existing, ok := bfs.buckets[bucketName]; ok {
 		bfs.mu.Unlock()
 		_ = b.Close()
+
 		return existing, key, nil
 	}
 	bfs.buckets[bucketName] = b
