@@ -1296,6 +1296,54 @@ func TestGlueCheckTableNotExists(t *testing.T) {
 	assert.False(exists)
 }
 
+func TestConstructTableInputSchemaColumns(t *testing.T) {
+	schema := iceberg.NewSchemaWithIdentifiers(1, []int{1},
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.StringType{}},
+	)
+
+	builder, err := table.NewMetadataBuilder(2)
+	require.NoError(t, err)
+	require.NoError(t, builder.SetLoc("s3://bucket/db/tbl"))
+	require.NoError(t, builder.AddSchema(schema))
+	require.NoError(t, builder.SetCurrentSchemaID(1))
+	require.NoError(t, builder.AddPartitionSpec(iceberg.UnpartitionedSpec, true))
+	require.NoError(t, builder.SetDefaultSpecID(iceberg.UnpartitionedSpec.ID()))
+	require.NoError(t, builder.AddSortOrder(&table.UnsortedSortOrder))
+	require.NoError(t, builder.SetDefaultSortOrderID(table.UnsortedSortOrderID))
+	meta, err := builder.Build()
+	require.NoError(t, err)
+
+	tbl := table.New([]string{"db", "tbl"}, meta, "s3://bucket/db/tbl/metadata/v1.json", nil, nil)
+
+	t.Run("columns included by default", func(t *testing.T) {
+		input := constructTableInput("tbl", tbl, nil, true)
+		require.NotNil(t, input.StorageDescriptor)
+		assert := require.New(t)
+		assert.Len(input.StorageDescriptor.Columns, 2)
+	})
+
+	t.Run("columns omitted when disabled", func(t *testing.T) {
+		input := constructTableInput("tbl", tbl, nil, false)
+		require.NotNil(t, input.StorageDescriptor)
+		assert := require.New(t)
+		assert.Empty(input.StorageDescriptor.Columns)
+	})
+}
+
+func TestSchemaColumnsLakeFormationIncompatibility(t *testing.T) {
+	cat := &Catalog{
+		props: iceberg.Properties{
+			GlueSchemaColumns:        "false",
+			GlueLakeFormationEnabled: "true",
+		},
+	}
+	_, err := cat.schemaColumnsEnabled()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), GlueSchemaColumns)
+	require.Contains(t, err.Error(), GlueLakeFormationEnabled)
+}
+
 func cleanupTable(t *testing.T, ctlg catalog.Catalog, tbIdent table.Identifier, awsCfg aws.Config) {
 	t.Helper()
 

@@ -65,6 +65,21 @@ const (
 	SkipArchive        = "glue.skip-archive"
 	SkipArchiveDefault = true
 
+	// GlueSchemaColumns controls whether schema columns are written to the Glue
+	// StorageDescriptor on table create/update. Set to "false" to omit columns,
+	// which avoids exceeding Glue's API payload limit for tables with very large
+	// schemas. Note: disabling columns breaks Athena column discovery via Glue
+	// and is incompatible with Lake Formation column-level access control.
+	// Cannot be set to "false" when GlueLakeFormationEnabled is "true".
+	GlueSchemaColumns        = "glue.schema-columns"
+	GlueSchemaColumnsDefault = true
+
+	// GlueLakeFormationEnabled enables Lake Formation access control for the catalog.
+	// When set to "true", schema columns cannot be omitted from the StorageDescriptor
+	// (i.e. GlueSchemaColumns must remain at its default value of "true").
+	GlueLakeFormationEnabled        = "glue.lakeformation-enabled"
+	GlueLakeFormationEnabledDefault = false
+
 	AccessKeyID     = "glue.access-key-id"
 	SecretAccessKey = "glue.secret-access-key"
 	SessionToken    = "glue.session-token"
@@ -182,6 +197,19 @@ func NewCatalog(opts ...Option) *Catalog {
 	}
 }
 
+// schemaColumnsEnabled returns whether schema columns should be included in the
+// Glue StorageDescriptor, and an error if the configuration is invalid.
+func (c *Catalog) schemaColumnsEnabled() (bool, error) {
+	include := c.props.GetBool(GlueSchemaColumns, GlueSchemaColumnsDefault)
+	if !include && c.props.GetBool(GlueLakeFormationEnabled, GlueLakeFormationEnabledDefault) {
+		return false, fmt.Errorf("%s=false is incompatible with %s=true: "+
+			"Lake Formation column-level access control requires StorageDescriptor columns",
+			GlueSchemaColumns, GlueLakeFormationEnabled)
+	}
+
+	return include, nil
+}
+
 // ListTables returns a list of Iceberg tables in the given Glue database.
 //
 // The namespace should just contain the Glue database name.
@@ -261,6 +289,11 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, errors.New("loaded filesystem IO does not support writing")
 	}
 
+	includeColumns, err := c.schemaColumnsEnabled()
+	if err != nil {
+		return nil, err
+	}
+
 	compression := staged.Table.Properties().Get(table.MetadataCompressionKey, table.MetadataCompressionDefault)
 	if err := internal.WriteTableMetadata(staged.Metadata(), wfs, staged.MetadataLocation(), compression); err != nil {
 		return nil, err
@@ -269,7 +302,7 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	_, err = c.glueSvc.CreateTable(ctx, &glue.CreateTableInput{
 		CatalogId:    c.catalogId,
 		DatabaseName: aws.String(database),
-		TableInput:   constructTableInput(tableName, staged.Table, nil),
+		TableInput:   constructTableInput(tableName, staged.Table, nil, includeColumns),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create table %s.%s: %w", database, tableName, err)
@@ -280,6 +313,11 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 
 // RegisterTable registers a new table using existing metadata.
 func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier, metadataLocation string) (*table.Table, error) {
+	includeColumns, err := c.schemaColumnsEnabled()
+	if err != nil {
+		return nil, err
+	}
+
 	database, tableName, err := identifierToGlueTable(identifier)
 	if err != nil {
 		return nil, err
@@ -301,7 +339,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	_, err = c.glueSvc.CreateTable(ctx, &glue.CreateTableInput{
 		CatalogId:    c.catalogId,
 		DatabaseName: aws.String(database),
-		TableInput:   constructTableInput(tableName, tbl, nil),
+		TableInput:   constructTableInput(tableName, tbl, nil, includeColumns),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to register table %s.%s: %w", database, tableName, err)
@@ -311,6 +349,11 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 }
 
 func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
+	includeColumns, err := c.schemaColumnsEnabled()
+	if err != nil {
+		return nil, "", err
+	}
+
 	// Load current table
 	database, tableName, err := identifierToGlueTable(identifier)
 	if err != nil {
@@ -349,7 +392,7 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 		_, err = c.glueSvc.UpdateTable(ctx, &glue.UpdateTableInput{
 			CatalogId:    c.catalogId,
 			DatabaseName: aws.String(database),
-			TableInput:   constructTableInput(tableName, staged.Table, currentGlueTable),
+			TableInput:   constructTableInput(tableName, staged.Table, currentGlueTable, includeColumns),
 			// use `VersionId` to implement optimistic locking
 			VersionId:   currentGlueTable.VersionId,
 			SkipArchive: aws.Bool(c.props.GetBool(SkipArchive, SkipArchiveDefault)),
@@ -369,7 +412,7 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 		_, err = c.glueSvc.CreateTable(ctx, &glue.CreateTableInput{
 			CatalogId:    c.catalogId,
 			DatabaseName: aws.String(database),
-			TableInput:   constructTableInput(tableName, staged.Table, nil),
+			TableInput:   constructTableInput(tableName, staged.Table, nil, includeColumns),
 		})
 		if err != nil {
 			return nil, "", err
@@ -780,15 +823,19 @@ func constructParameters(staged *table.Table, previousGlueTable *types.Table) ma
 	return parameters
 }
 
-func constructTableInput(tableName string, staged *table.Table, previousGlueTable *types.Table) *types.TableInput {
+func constructTableInput(tableName string, staged *table.Table, previousGlueTable *types.Table, includeColumns bool) *types.TableInput {
+	sd := &types.StorageDescriptor{
+		Location: aws.String(staged.Location()),
+	}
+	if includeColumns {
+		sd.Columns = schemasToGlueColumns(staged.Metadata())
+	}
+
 	tableInput := &types.TableInput{
-		Name:       aws.String(tableName),
-		TableType:  aws.String(glueTableType),
-		Parameters: constructParameters(staged, previousGlueTable),
-		StorageDescriptor: &types.StorageDescriptor{
-			Location: aws.String(staged.Location()),
-			Columns:  schemasToGlueColumns(staged.Metadata()),
-		},
+		Name:              aws.String(tableName),
+		TableType:         aws.String(glueTableType),
+		Parameters:        constructParameters(staged, previousGlueTable),
+		StorageDescriptor: sd,
 	}
 
 	if comment, ok := staged.Properties()[PropsKeyDescription]; ok {
