@@ -63,6 +63,7 @@ var (
 	ErrViewAlreadyExists      = errors.New("view already exists")
 	ErrEmptyCommitList        = errors.New("commit list must not be empty")
 	ErrMissingIdentifier      = errors.New("every table commit must have a valid identifier")
+	ErrCommitFailed           = errors.New("commit failed")
 )
 
 type PropertiesUpdateSummary struct {
@@ -163,6 +164,12 @@ type Catalog interface {
 // atomically, or none are. On success the method returns nil; the caller
 // must LoadTable individually to obtain updated metadata because the
 // server returns 204 No Content.
+//
+// Note: Implementations typically follow a preparation phase where metadata
+// files are written to storage before the atomic commit point in the
+// catalog. If the atomic commit fails and the transaction is rolled back,
+// metadata files written during the preparation phase may remain as
+// orphaned files.
 type TransactionalCatalog interface {
 	CommitTransaction(ctx context.Context, commits []table.TableCommit) error
 }
