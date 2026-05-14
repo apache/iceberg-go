@@ -549,19 +549,43 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 		return cmp.Compare(a.SequenceNum(), b.SequenceNum())
 	})
 
-	// Index DVs by referenced data file path for O(1) lookup.
-	dvIndex := make(map[string][]iceberg.DataFile, len(entries.dvEntries))
+	// Index DVs by referenced data file path. Carries ManifestEntry, not
+	// DataFile, so the per-data-file pass below can compare sequence numbers
+	// — required for spec parity with Java's DeleteFileIndex.findDV.
+	dvIndex := make(map[string][]iceberg.ManifestEntry, len(entries.dvEntries))
 	for _, del := range entries.dvEntries {
 		if ref := del.DataFile().ReferencedDataFile(); ref != nil {
-			dvIndex[*ref] = append(dvIndex[*ref], del.DataFile())
+			dvIndex[*ref] = append(dvIndex[*ref], del)
 		}
 	}
 
 	results := make([]FileScanTask, 0, len(entries.dataEntries))
 	for _, e := range entries.dataEntries {
-		deleteFiles, err := matchDeletesToData(e, entries.positionalDeleteEntries)
-		if err != nil {
-			return nil, err
+		// A DV applies to a data file only when its data sequence number is
+		// >= the data file's. Java's DeleteFileIndex.findDV enforces this;
+		// without the guard, a stale DV from a partial DV-migration would
+		// silently misread rows in a newer data file. If no DV passes the
+		// check, fall back to pos-delete matching for this data file.
+		dataSeqNum := e.SequenceNum()
+		var dvFiles []iceberg.DataFile
+		for _, dv := range dvIndex[e.DataFile().FilePath()] {
+			if dv.SequenceNum() >= dataSeqNum {
+				dvFiles = append(dvFiles, dv.DataFile())
+			}
+		}
+		// Spec §Scan Planning: a position-delete file is applied to a data
+		// file only when no deletion vector applies. When a DV is present it
+		// is guaranteed to contain all prior pos-delete positions for that
+		// file, so reading the Parquet pos-deletes too would be wasteful
+		// I/O; with a buggy writer whose DV omits prior positions, it would
+		// silently over-delete. Match Java's DeleteFileIndex.forDataFile by
+		// skipping pos-delete matching when dvFiles is non-empty.
+		var deleteFiles []iceberg.DataFile
+		if len(dvFiles) == 0 {
+			deleteFiles, err = matchDeletesToData(e, entries.positionalDeleteEntries)
+			if err != nil {
+				return nil, err
+			}
 		}
 		eqDeleteFiles := matchEqualityDeletesToData(e, entries.equalityDeleteEntries)
 
@@ -569,7 +593,7 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 			File:                e.DataFile(),
 			DeleteFiles:         deleteFiles,
 			EqualityDeleteFiles: eqDeleteFiles,
-			DeletionVectorFiles: dvIndex[e.DataFile().FilePath()],
+			DeletionVectorFiles: dvFiles,
 			Start:               0,
 			Length:              e.DataFile().FileSizeBytes(),
 		}

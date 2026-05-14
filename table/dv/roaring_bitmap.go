@@ -22,6 +22,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"iter"
 	"maps"
 	"slices"
 	"sort"
@@ -76,9 +77,12 @@ func (b *RoaringPositionBitmap) Contains(pos uint64) bool {
 	return bm.Contains(low)
 }
 
-// IsEmpty returns true if no positions are set.
+// IsEmpty returns true if no positions are set. O(1): zero-cardinality
+// bitmaps are not written to the map (Serialize skips them and the
+// deserializer reads only what was written), so an empty bitmaps map is
+// equivalent to zero cardinality.
 func (b *RoaringPositionBitmap) IsEmpty() bool {
-	return b.Cardinality() == 0
+	return len(b.bitmaps) == 0
 }
 
 // Cardinality returns the total number of set positions.
@@ -89,6 +93,37 @@ func (b *RoaringPositionBitmap) Cardinality() int64 {
 	}
 
 	return c
+}
+
+// Iter yields the set positions in ascending order. Lazy — preferred over
+// ToArray when the caller can consume positions one-at-a-time (e.g. feeding
+// an Arrow builder), since a DV bitmap can hold millions of positions.
+//
+// The bitmap must not be modified while an iterator is running: the closure
+// captures b by pointer and the underlying roaring.Bitmap library does not
+// support concurrent Set/Iterator. Single-goroutine consumption is the only
+// supported pattern.
+func (b *RoaringPositionBitmap) Iter() iter.Seq[uint64] {
+	return func(yield func(uint64) bool) {
+		for _, key := range b.sortedKeys() {
+			hi := uint64(key) << 32
+			// roaring.Bitmap.Iterator yields values in ascending order;
+			// iterating per sorted key gives an overall ascending sequence.
+			it := b.bitmaps[key].Iterator()
+			for it.HasNext() {
+				if !yield(hi | uint64(it.Next())) {
+					return
+				}
+			}
+		}
+	}
+}
+
+// ToArray materializes the set positions in ascending order. Convenience over
+// Iter for callers that need an addressable slice; allocates Cardinality()
+// elements up front, so prefer Iter for large bitmaps.
+func (b *RoaringPositionBitmap) ToArray() []uint64 {
+	return slices.AppendSeq(make([]uint64, 0, b.Cardinality()), b.Iter())
 }
 
 // Serialize writes in the Iceberg portable format (little-endian):
