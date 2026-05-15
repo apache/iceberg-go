@@ -82,6 +82,7 @@ func TestArrowToIceberg(t *testing.T) {
 		{&arrow.TimestampType{Unit: arrow.Microsecond}, iceberg.PrimitiveTypes.Timestamp, true, ""},
 		{&arrow.TimestampType{Unit: arrow.Nanosecond}, iceberg.PrimitiveTypes.TimestampNs, true, ""},
 		{&arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "US/Pacific"}, nil, false, "unsupported arrow type for conversion - timestamp[us, tz=US/Pacific]"},
+		{&arrow.TimestampType{Unit: arrow.Nanosecond, TimeZone: "US/Pacific"}, nil, false, "unsupported arrow type for conversion - timestamp[ns, tz=US/Pacific]"},
 		{arrow.BinaryTypes.String, iceberg.PrimitiveTypes.String, true, ""},
 		{arrow.BinaryTypes.LargeString, iceberg.PrimitiveTypes.String, false, ""},
 		{arrow.BinaryTypes.StringView, nil, false, "unsupported arrow type for conversion - string_view"},
