@@ -21,10 +21,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
-	"slices"
 	"strconv"
 	"time"
 
@@ -40,19 +40,8 @@ import (
 	"gocloud.dev/blob/s3blob"
 )
 
-var unsupportedS3Props = []string{
-	io.S3ConnectTimeout,
-}
-
 // ParseAWSConfig parses S3 properties and returns a configuration.
 func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, error) {
-	// If any unsupported properties are set, return an error.
-	for k := range props {
-		if slices.Contains(unsupportedS3Props, k) {
-			return nil, fmt.Errorf("unsupported S3 property %q", k)
-		}
-	}
-
 	// Remote S3 request signing is not implemented yet.
 	if v, ok := props[io.S3RemoteSigningEnabled]; ok {
 		if enabled, err := strconv.ParseBool(v); err == nil && enabled {
@@ -80,17 +69,37 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 			props[io.S3AccessKeyID], props[io.S3SecretAccessKey], props[io.S3SessionToken])))
 	}
 
+	var httpClient *awshttp.BuildableClient
+
 	if proxy, ok := props[io.S3ProxyURI]; ok {
 		proxyURL, err := url.Parse(proxy)
 		if err != nil {
 			return nil, fmt.Errorf("invalid s3 proxy url '%s'", proxy)
 		}
 
-		opts = append(opts, config.WithHTTPClient(awshttp.NewBuildableClient().WithTransportOptions(
+		httpClient = awshttp.NewBuildableClient().WithTransportOptions(
 			func(t *http.Transport) {
 				t.Proxy = http.ProxyURL(proxyURL)
 			},
-		)))
+		)
+	}
+
+	if connectTimeout, ok := props[io.S3ConnectTimeout]; ok {
+		timeout, err := time.ParseDuration(connectTimeout)
+		if err != nil {
+			return nil, fmt.Errorf("invalid s3 connect timeout %q: %w", connectTimeout, err)
+		}
+
+		if httpClient == nil {
+			httpClient = awshttp.NewBuildableClient()
+		}
+		httpClient = httpClient.WithDialerOptions(func(d *net.Dialer) {
+			d.Timeout = timeout
+		})
+	}
+
+	if httpClient != nil {
+		opts = append(opts, config.WithHTTPClient(httpClient))
 	}
 
 	awscfg := new(aws.Config)

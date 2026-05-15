@@ -20,8 +20,10 @@ package gocloud
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/apache/iceberg-go/io"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -80,13 +82,26 @@ func TestParseAWSConfigRemoteSigningEnabled(t *testing.T) {
 	})
 }
 
-func TestParseAWSConfigUnsupportedProperty(t *testing.T) {
+func TestParseAWSConfigConnectTimeout(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := ParseAWSConfig(context.Background(), map[string]string{
+		io.S3ConnectTimeout: "5s",
+	})
+	require.NoError(t, err)
+
+	client, ok := cfg.HTTPClient.(*awshttp.BuildableClient)
+	require.True(t, ok)
+	assert.Equal(t, 5*time.Second, client.GetDialer().Timeout)
+}
+
+func TestParseAWSConfigInvalidConnectTimeout(t *testing.T) {
 	t.Parallel()
 
 	_, err := ParseAWSConfig(context.Background(), map[string]string{
 		io.S3ConnectTimeout: "5000",
 	})
-	require.ErrorContains(t, err, "unsupported S3 property")
+	require.ErrorContains(t, err, "invalid s3 connect timeout")
 }
 
 func TestResolveUsePathStyle(t *testing.T) {
