@@ -159,6 +159,28 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 		if err != nil {
 			return nil, fmt.Errorf("failed container.NewClientFromConnectionString: %w", err)
 		}
+	} else if props[io.ADLSManagedIdentityEnabled] == "true" {
+		containerURL, err := createContainerURL(location.accountName, protocol, endpoint, "", location.containerName)
+		if err != nil {
+			return nil, err
+		}
+
+		var miOpts *azidentity.ManagedIdentityCredentialOptions
+		if clientID := props[io.ADLSManagedIdentityClientID]; clientID != "" {
+			miOpts = &azidentity.ManagedIdentityCredentialOptions{
+				ID: azidentity.ClientID(clientID),
+			}
+		}
+
+		cred, err := azidentity.NewManagedIdentityCredential(miOpts)
+		if err != nil {
+			return nil, fmt.Errorf("failed azidentity.NewManagedIdentityCredential: %w", err)
+		}
+
+		client, err = container.NewClient(containerURL, cred, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed container.NewClient: %w", err)
+		}
 	} else {
 		containerURL, err := createContainerURL(location.accountName, protocol, endpoint, "", location.containerName)
 		if err != nil {
