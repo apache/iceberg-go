@@ -505,6 +505,11 @@ func (b *MetadataBuilder) validateAndUpdateRowLineage(snapshot *Snapshot) error 
 	}
 
 	newNextRowID := nextRowID + *snapshot.AddedRows
+	if newNextRowID < nextRowID {
+		return fmt.Errorf("%w: next-row-id regressed from %d to %d (added-rows %d)",
+			ErrInvalidRowLineage, nextRowID, newNextRowID, *snapshot.AddedRows)
+	}
+
 	b.nextRowID = &newNextRowID
 
 	return nil
