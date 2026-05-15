@@ -368,9 +368,12 @@ func (c convertToIceberg) Primitive(dt arrow.DataType) (result iceberg.NestedFie
 	case *arrow.FixedSizeBinaryType:
 		result.Type = iceberg.FixedTypeOf(dt.ByteWidth)
 	case arrow.ExtensionType:
-		if dt.ExtensionName() == "arrow.uuid" {
+		switch dt.ExtensionName() {
+		case "arrow.uuid":
 			result.Type = iceberg.PrimitiveTypes.UUID
-		} else {
+		case "parquet.variant":
+			result.Type = iceberg.VariantType{}
+		default:
 			panic(fmt.Errorf("%w: unsupported arrow type for conversion - %s", iceberg.ErrInvalidSchema, dt))
 		}
 	default:
@@ -560,6 +563,7 @@ func (c convertToArrow) Map(m iceberg.MapType, keyResult, valResult arrow.Field)
 }
 
 func (c convertToArrow) Primitive(iceberg.PrimitiveType) arrow.Field { panic("shouldn't be called") }
+func (c convertToArrow) Variant(iceberg.VariantType) arrow.Field     { panic("shouldn't be called") }
 
 func (c convertToArrow) VisitFixed(f iceberg.FixedType) arrow.Field {
 	return arrow.Field{Type: &arrow.FixedSizeBinaryType{ByteWidth: f.Len()}}
@@ -637,6 +641,19 @@ func (c convertToArrow) VisitUUID() arrow.Field {
 
 func (c convertToArrow) VisitUnknown() arrow.Field {
 	return arrow.Field{Type: arrow.Null}
+}
+
+func (c convertToArrow) VisitVariant() arrow.Field {
+	if c.useLargeTypes {
+		vt, _ := extensions.NewVariantType(arrow.StructOf(
+			arrow.Field{Name: "metadata", Type: arrow.BinaryTypes.LargeBinary, Nullable: false},
+			arrow.Field{Name: "value", Type: arrow.BinaryTypes.LargeBinary, Nullable: false},
+		))
+
+		return arrow.Field{Type: vt}
+	}
+
+	return arrow.Field{Type: extensions.NewDefaultVariantType()}
 }
 
 var _ iceberg.SchemaVisitorPerPrimitiveType[arrow.Field] = convertToArrow{}
@@ -1079,6 +1096,10 @@ func (a *arrowProjectionVisitor) Primitive(_ iceberg.PrimitiveType, arr arrow.Ar
 	return arr
 }
 
+func (a *arrowProjectionVisitor) Variant(_ iceberg.VariantType, arr arrow.Array) arrow.Array {
+	return arr
+}
+
 // SchemaOptions controls the behaviour of ToRequestedSchema.
 type SchemaOptions struct {
 	DowncastTimestamp bool
@@ -1244,6 +1265,10 @@ func (sc *schemaCompatVisitor) Primitive(p iceberg.PrimitiveType) bool {
 	return true
 }
 
+func (sc *schemaCompatVisitor) Variant(v iceberg.VariantType) bool {
+	return true
+}
+
 func must[T any](v T, err error) T {
 	if err != nil {
 		panic(err)
@@ -1335,6 +1360,10 @@ func (a *arrowStatsCollector) Primitive(dt iceberg.PrimitiveType) []tblutils.Sta
 	}}
 }
 
+func (a *arrowStatsCollector) Variant(_ iceberg.VariantType) []tblutils.StatisticsCollector {
+	return []tblutils.StatisticsCollector{}
+}
+
 func computeStatsPlan(sc *iceberg.Schema, props iceberg.Properties) (map[int]tblutils.StatisticsCollector, error) {
 	result := make(map[int]tblutils.StatisticsCollector)
 
@@ -1410,6 +1439,7 @@ func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, curre
 		rdr.Metadata(),
 		must(computeStatsPlan(currentSchema, props)),
 		must(format.PathToIDMapping(pathToIDSchema)),
+		tblutils.VariantFieldIDsFromSchema(currentSchema),
 	)
 
 	partitionValues := make(map[int]any)

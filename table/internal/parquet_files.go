@@ -107,6 +107,27 @@ func (parquetFormat) PathToIDMapping(sc *iceberg.Schema) (map[string]int, error)
 	return result, nil
 }
 
+func VariantFieldIDsFromSchema(sc *iceberg.Schema) map[int]struct{} {
+	if sc == nil {
+		return nil
+	}
+
+	result := make(map[int]struct{})
+	collectVariantFields(sc.Fields(), result)
+
+	return result
+}
+
+func collectVariantFields(fields []iceberg.NestedField, result map[int]struct{}) {
+	for _, field := range fields {
+		if _, ok := field.Type.(iceberg.VariantType); ok {
+			result[field.ID] = struct{}{}
+		} else if nested, ok := field.Type.(iceberg.NestedType); ok {
+			collectVariantFields(nested.Fields(), result)
+		}
+	}
+}
+
 func (p parquetFormat) createStatsAgg(typ iceberg.PrimitiveType, physicalTypeStr string, truncLen int) (StatsAgg, error) {
 	// Switch on Iceberg logical type first, then handle physical representations.
 	// This matches iceberg-java's approach in ParquetConversions.java.
@@ -380,7 +401,7 @@ func (w *ParquetFileWriter) Close() (_ iceberg.DataFile, err error) {
 		return nil, err
 	}
 
-	stats := w.format.DataFileStatsFromMeta(filemeta, w.info.StatsCols, w.colMapping)
+	stats := w.format.DataFileStatsFromMeta(filemeta, w.info.StatsCols, w.colMapping, VariantFieldIDsFromSchema(w.info.FileSchema))
 	stats.EqualityFieldIDs = w.info.EqualityFieldIDs
 
 	return stats.ToDataFile(DataFileOpts{
@@ -544,7 +565,7 @@ func (w wrappedDecByteArrayStats) Max() iceberg.Decimal {
 	return iceberg.Decimal{Val: dec, Scale: w.scale}
 }
 
-func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]StatisticsCollector, colMapping map[string]int) *DataFileStatistics {
+func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]StatisticsCollector, colMapping map[string]int, variantFieldIDs map[int]struct{}) *DataFileStatistics {
 	pqmeta := meta.(*metadata.FileMetaData)
 	var (
 		colSizes        = make(map[int]int64)
@@ -577,7 +598,29 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 				panic(err)
 			}
 
-			fieldID := colMapping[colChunk.PathInSchema().String()]
+			fieldID, ok := colMapping[colChunk.PathInSchema().String()]
+			if !ok {
+				// Variant sub-columns (metadata, value, typed_value children) have no
+				// Iceberg field ID (spec: "must not be assigned field IDs"). Walk up
+				// the path hierarchy to find a variant ancestor.
+				path := colChunk.PathInSchema()
+				found := false
+				for depth := len(path) - 1; depth >= 1; depth-- {
+					ancestorPath := strings.Join(path[:depth], ".")
+					if ancestorID, hasAncestor := colMapping[ancestorPath]; hasAncestor {
+						if _, isVariant := variantFieldIDs[ancestorID]; isVariant {
+							found = true
+						}
+
+						break
+					}
+				}
+				if found {
+					continue
+				}
+
+				panic(fmt.Errorf("column chunk %q not found in column mapping", colChunk.PathInSchema()))
+			}
 			statsCol := statsCols[fieldID]
 			if statsCol.Mode.Typ == MetricModeNone {
 				continue
@@ -1079,6 +1122,12 @@ func (p *pruneParquetSchema) Field(field pqarrow.SchemaField, result arrow.Field
 		return result
 	}
 
+	// Variant is an extension type wrapping a struct (metadata + value).
+	// Select the entire field including all children.
+	if ext, ok := field.Field.Type.(arrow.ExtensionType); ok && ext.ExtensionName() == "parquet.variant" {
+		return p.projectVariant(field)
+	}
+
 	if !field.IsLeaf() {
 		panic(errors.New("cannot explicitly project list or map types"))
 	}
@@ -1185,6 +1234,24 @@ func (p *pruneParquetSchema) projectSelectedStruct(projected arrow.DataType) *ar
 	panic("expected a struct")
 }
 
+func (p *pruneParquetSchema) collectLeafIndices(field pqarrow.SchemaField) {
+	if field.IsLeaf() {
+		p.indices = append(p.indices, field.ColIndex)
+
+		return
+	}
+
+	for _, child := range field.Children {
+		p.collectLeafIndices(child)
+	}
+}
+
+func (p *pruneParquetSchema) projectVariant(field pqarrow.SchemaField) arrow.Field {
+	p.collectLeafIndices(field)
+
+	return *field.Field
+}
+
 func (p *pruneParquetSchema) projectList(listType arrow.ListLikeType, elemResult arrow.DataType) arrow.ListLikeType {
 	if arrow.TypeEqual(listType.Elem(), elemResult) {
 		return listType
@@ -1271,5 +1338,9 @@ func (v *id2ParquetPathVisitor) Map(m iceberg.MapType, keyResult func() []id2Par
 }
 
 func (v *id2ParquetPathVisitor) Primitive(iceberg.PrimitiveType) []id2ParquetPath {
+	return []id2ParquetPath{{fieldID: v.fieldID, path: strings.Join(v.path, ".")}}
+}
+
+func (v *id2ParquetPathVisitor) Variant(iceberg.VariantType) []id2ParquetPath {
 	return []id2ParquetPath{{fieldID: v.fieldID, path: strings.Join(v.path, ".")}}
 }

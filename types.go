@@ -153,6 +153,8 @@ func (t *typeIFace) UnmarshalJSON(b []byte) error {
 			t.Type = BinaryType{}
 		case "unknown":
 			t.Type = UnknownType{}
+		case "variant":
+			t.Type = VariantType{}
 		default:
 			switch {
 			case strings.HasPrefix(typename, "fixed"):
@@ -776,6 +778,19 @@ func (UnknownType) Equals(other Type) bool {
 func (UnknownType) primitive()     {}
 func (UnknownType) Type() string   { return "unknown" }
 func (UnknownType) String() string { return "unknown" }
+
+// VariantType represents semi-structured data stored using the Parquet Variant
+// binary encoding. Requires Iceberg format version 3+.
+type VariantType struct{}
+
+func (VariantType) Equals(other Type) bool {
+	_, ok := other.(VariantType)
+
+	return ok
+}
+
+func (VariantType) Type() string   { return "variant" }
+func (VariantType) String() string { return "variant" }
 
 var PrimitiveTypes = struct {
 	Bool          PrimitiveType

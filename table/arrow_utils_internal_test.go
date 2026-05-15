@@ -197,7 +197,7 @@ func (suite *FileStatsMetricsSuite) getDataFile(meta iceberg.Properties, writeSt
 	mapping, err := format.PathToIDMapping(schema)
 	suite.Require().NoError(err)
 
-	stats := format.DataFileStatsFromMeta(fileMeta, collector, mapping)
+	stats := format.DataFileStatsFromMeta(fileMeta, collector, mapping, nil)
 
 	return stats.ToDataFile(internal.DataFileOpts{
 		Schema:      tableMeta.CurrentSchema(),
