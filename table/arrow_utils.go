@@ -344,7 +344,16 @@ func (c convertToIceberg) Primitive(dt arrow.DataType) (result iceberg.NestedFie
 	case *arrow.TimestampType:
 		if dt.Unit == arrow.Nanosecond {
 			if !c.downcastTimestamp {
-				panic(fmt.Errorf("%w: 'ns' timestamp precision not supported", iceberg.ErrType))
+				switch {
+				case slices.Contains(utcAliases, dt.TimeZone):
+					result.Type = iceberg.PrimitiveTypes.TimestampTzNs
+				case dt.TimeZone == "":
+					result.Type = iceberg.PrimitiveTypes.TimestampNs
+				default:
+					panic(fmt.Errorf("%w: unsupported arrow type for conversion - %s", iceberg.ErrInvalidSchema, dt))
+				}
+
+				return result
 			}
 			slog.Warn("downcasting nanosecond timestamp to microsecond, precision loss may occur")
 		}
