@@ -1035,3 +1035,39 @@ func TestSanitizeColumnNamesEmptyFieldName(t *testing.T) {
 	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 	assert.ErrorContains(t, err, "field name cannot be empty")
 }
+
+func TestSchemaSelectCaseSensitiveSuccess(t *testing.T) {
+	selected, err := tableSchemaSimple.Select(true, "foo", "bar")
+	require.NoError(t, err)
+
+	expected := iceberg.NewSchemaWithIdentifiers(1, []int{2},
+		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	assert.Truef(t, selected.Equals(expected), "expected: %s\ngot: %s", expected, selected)
+}
+
+func TestSchemaSelectCaseSensitiveNameMismatch(t *testing.T) {
+	_, err := tableSchemaSimple.Select(true, "FOO")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "could not find column FOO")
+}
+
+func TestSchemaSelectCaseInsensitiveSuccess(t *testing.T) {
+	selected, err := tableSchemaSimple.Select(false, "FOO", "BaR")
+	require.NoError(t, err)
+
+	expected := iceberg.NewSchemaWithIdentifiers(1, []int{2},
+		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	assert.Truef(t, selected.Equals(expected), "expected: %s\ngot: %s", expected, selected)
+}
+
+func TestSchemaSelectCaseInsensitiveMissingColumn(t *testing.T) {
+	_, err := tableSchemaSimple.Select(false, "missing_col")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "could not find column missing_col")
+}
