@@ -968,3 +968,47 @@ func TestComputeOwnManifests_ParentManifestsIOError(t *testing.T) {
 			"swallows the IO error and returns a programming-bug error would fail this test")
 	require.Nil(t, got, "error path must return nil manifest slice")
 }
+
+func TestAddDataFilesV3RejectsWithoutFirstRowID(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, _ := createTestTransactionWithMemIO(t, spec)
+	txn.meta.formatVersion = 3
+
+	df := newTestDataFile(t, spec, "file://data.parquet", nil)
+
+	err := txn.AddDataFiles(context.Background(), []iceberg.DataFile{df}, nil)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "missing first_row_id")
+	require.ErrorContains(t, err, "required for v3 tables")
+}
+
+func TestAddDataFilesV3SucceedsWithFirstRowID(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, _ := createTestTransactionWithMemIO(t, spec)
+	txn.meta.formatVersion = 3
+
+	builder, err := iceberg.NewDataFileBuilder(
+		spec, iceberg.EntryContentData, "file://data.parquet",
+		iceberg.ParquetFile, nil, nil, nil, 5, 100,
+	)
+	require.NoError(t, err)
+	df := builder.FirstRowID(0).Build()
+
+	err = txn.AddDataFiles(context.Background(), []iceberg.DataFile{df}, nil)
+	require.NoError(t, err)
+
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+	require.Equal(t, int64(5), meta.NextRowID(), "next-row-id should advance by record count")
+}
+
+func TestAddDataFilesV2SucceedsWithoutFirstRowID(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, _ := createTestTransactionWithMemIO(t, spec)
+	txn.meta.formatVersion = 2
+
+	df := newTestDataFile(t, spec, "file://data.parquet", nil)
+
+	err := txn.AddDataFiles(context.Background(), []iceberg.DataFile{df}, nil)
+	require.NoError(t, err)
+}

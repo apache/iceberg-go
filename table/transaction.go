@@ -568,6 +568,12 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 		if err := validateDataFilePartitionData(df, currentSpec); err != nil {
 			return nil, fmt.Errorf("data file %s has invalid partition data for %s: %w", path, operation, err)
 		}
+
+		if t.meta.formatVersion >= 3 && df.FirstRowID() == nil {
+			return nil, fmt.Errorf(
+				"data file %s is missing first_row_id which is required for v3 tables for %s: use DataFileBuilder.FirstRowID() to set it explicitly",
+				path, operation)
+		}
 	}
 
 	return setToAdd, nil
