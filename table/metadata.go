@@ -1363,6 +1363,23 @@ var (
 	ErrPartitionSpecNotFound        = errors.New("partition spec not found")
 )
 
+type v3FieldCheck struct {
+	name    string
+	present bool
+}
+
+func rejectV3OnlyFields(version int, checks ...v3FieldCheck) error {
+	var errs []error
+	for _, c := range checks {
+		if c.present {
+			errs = append(errs, fmt.Errorf("%w: v3-only field '%s' present in v%d metadata",
+				ErrInvalidMetadataFormatVersion, c.name, version))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
 // ParseMetadata parses json metadata provided by the passed in reader,
 // returning an error if one is encountered.
 func ParseMetadata(r io.Reader) (Metadata, error) {
@@ -1906,6 +1923,13 @@ func (m *metadataV1) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
+	if err := rejectV3OnlyFields(aux.FormatVersion,
+		v3FieldCheck{"next-row-id", aux.NextRowID != nil},
+		v3FieldCheck{"encryption-keys", len(aux.EncryptionKeyList) > 0},
+	); err != nil {
+		return err
+	}
+
 	// CurrentSchemaID was optional in v1, it can also be expressed via Schema.
 	if aux.CurrentSchemaID == -1 && aux.Schema != nil {
 		aux.CurrentSchemaID = aux.Schema.ID
@@ -1969,6 +1993,13 @@ func (m *metadataV2) UnmarshalJSON(b []byte) error {
 	aux.LastColumnId = -1
 
 	if err := json.Unmarshal(b, aux); err != nil {
+		return err
+	}
+
+	if err := rejectV3OnlyFields(aux.FormatVersion,
+		v3FieldCheck{"next-row-id", aux.NextRowID != nil},
+		v3FieldCheck{"encryption-keys", len(aux.EncryptionKeyList) > 0},
+	); err != nil {
 		return err
 	}
 
