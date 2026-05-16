@@ -27,11 +27,14 @@ import (
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal"
+	"github.com/geoarrow/geoarrow-go"
 )
 
 var (
 	regexFromBrackets = regexp.MustCompile(`^\w+\[(\d+)\]$`)
 	decimalRegex      = regexp.MustCompile(`decimal\(\s*(\d+)\s*,\s*(\d+)\s*\)`)
+	geometryRegex     = regexp.MustCompile(`(?i)^geometry\s*(?:\(\s*([^),]+?)\s*\))?$`)
+	geographyRegex    = regexp.MustCompile(`(?i)^geography\s*(?:\(\s*([^\s,)]+)\s*(?:,\s*(\w+)\s*)?\))?$`)
 )
 
 type Properties map[string]string
@@ -153,6 +156,10 @@ func (t *typeIFace) UnmarshalJSON(b []byte) error {
 			t.Type = BinaryType{}
 		case "unknown":
 			t.Type = UnknownType{}
+		case "geometry":
+			t.Type = GeometryType{}
+		case "geography":
+			t.Type = GeographyType{}
 		default:
 			switch {
 			case strings.HasPrefix(typename, "fixed"):
@@ -172,6 +179,44 @@ func (t *typeIFace) UnmarshalJSON(b []byte) error {
 				prec, _ := strconv.Atoi(matches[1])
 				scale, _ := strconv.Atoi(matches[2])
 				t.Type = DecimalType{precision: prec, scale: scale}
+			// note that geo type names are case insensitive but other type names are case sensitive.
+			// matches java behavior - this behavior is intentional
+			case strings.HasPrefix(strings.ToLower(typename), "geometry"):
+				matches := geometryRegex.FindStringSubmatch(typename)
+				if len(matches) != 2 {
+					return fmt.Errorf("%w: %s", ErrInvalidTypeString, typename)
+				}
+
+				if matches[1] != "" {
+					geom, err := GeometryTypeOf(strings.TrimSpace(matches[1]))
+					if err != nil {
+						return err
+					}
+					t.Type = geom
+				} else {
+					t.Type = GeometryType{}
+				}
+			case strings.HasPrefix(strings.ToLower(typename), "geography"):
+				matches := geographyRegex.FindStringSubmatch(typename)
+				if len(matches) != 3 {
+					return fmt.Errorf("%w: %s", ErrInvalidTypeString, typename)
+				}
+
+				crs := defaultGeoCRS
+				if matches[1] != "" {
+					crs = strings.TrimSpace(matches[1])
+				}
+
+				algorithm := defaultGeographyAlgorithm
+				if matches[2] != "" {
+					algorithm = strings.TrimSpace(matches[2])
+				}
+
+				geog, err := GeographyTypeOf(crs, algorithm)
+				if err != nil {
+					return err
+				}
+				t.Type = geog
 			default:
 				return fmt.Errorf("%w: unrecognized field type", ErrInvalidSchema)
 			}
@@ -776,6 +821,144 @@ func (UnknownType) Equals(other Type) bool {
 func (UnknownType) primitive()     {}
 func (UnknownType) Type() string   { return "unknown" }
 func (UnknownType) String() string { return "unknown" }
+
+const defaultGeoCRS = "OGC:CRS84"
+
+type GeometryType struct {
+	crs string
+}
+
+func GeometryTypeOf(crs string) (GeometryType, error) {
+	if crs == "" {
+		return GeometryType{}, fmt.Errorf("%w: invalid CRS: (empty string)", ErrInvalidTypeString)
+	}
+	crs = strings.TrimSpace(crs)
+	if crs == defaultGeoCRS {
+		return GeometryType{}, nil
+	}
+
+	return GeometryType{crs: crs}, nil
+}
+
+func (g GeometryType) CRS() string {
+	if g.crs == "" {
+		return defaultGeoCRS
+	}
+
+	return g.crs
+}
+
+func (g GeometryType) Equals(other Type) bool {
+	rhs, ok := other.(GeometryType)
+	if !ok {
+		return false
+	}
+
+	return g.crs == rhs.crs
+}
+
+func (GeometryType) primitive() {}
+func (g GeometryType) Type() string {
+	if g.crs == "" {
+		return "geometry"
+	}
+
+	return fmt.Sprintf("geometry(%s)", g.crs)
+}
+
+func (g GeometryType) String() string {
+	return g.Type()
+}
+
+const defaultGeographyAlgorithm = string(geoarrow.EdgeSpherical)
+
+func toGeoArrowEdgeInterpolation(s string) (geoarrow.EdgeInterpolation, error) {
+	algo := geoarrow.EdgeInterpolation(strings.ToLower(strings.TrimSpace(s)))
+	switch algo {
+	case geoarrow.EdgeSpherical, geoarrow.EdgeVincenty,
+		geoarrow.EdgeThomas, geoarrow.EdgeAndoyer, geoarrow.EdgeKarney:
+		return algo, nil
+	default:
+		return "", fmt.Errorf("%w: invalid edge interpolation algorithm", ErrInvalidTypeString)
+	}
+}
+
+type GeographyType struct {
+	crs       string
+	algorithm string
+}
+
+func GeographyTypeOf(crs string, algorithm string) (GeographyType, error) {
+	if crs == "" {
+		return GeographyType{}, fmt.Errorf("%w: invalid CRS: (empty string)", ErrInvalidTypeString)
+	}
+	if algorithm == "" {
+		return GeographyType{}, fmt.Errorf("%w: invalid algorithm: (empty string)", ErrInvalidTypeString)
+	}
+	crs = strings.TrimSpace(crs)
+	normalizedCRS := crs
+	if normalizedCRS == defaultGeoCRS {
+		normalizedCRS = ""
+	}
+
+	validatedAlg, err := toGeoArrowEdgeInterpolation(algorithm) // validate algorithm
+	if err != nil {
+		return GeographyType{}, fmt.Errorf("invalid algorithm: %w", err)
+	}
+	normalizedAlgorithm := string(validatedAlg)
+	if validatedAlg == geoarrow.EdgeInterpolation(defaultGeographyAlgorithm) {
+		normalizedAlgorithm = ""
+	}
+
+	return GeographyType{crs: normalizedCRS, algorithm: normalizedAlgorithm}, nil
+}
+
+func (g GeographyType) CRS() string {
+	if g.crs == "" {
+		return defaultGeoCRS
+	}
+
+	return g.crs
+}
+
+func (g GeographyType) Algorithm() string {
+	if g.algorithm == "" {
+		return defaultGeographyAlgorithm
+	}
+
+	return g.algorithm
+}
+
+func (g GeographyType) Equals(other Type) bool {
+	rhs, ok := other.(GeographyType)
+	if !ok {
+		return false
+	}
+
+	return g.crs == rhs.crs && g.algorithm == rhs.algorithm
+}
+
+func (GeographyType) primitive() {}
+func (g GeographyType) Type() string {
+	hasCRS := g.crs != ""
+	hasAlgo := g.algorithm != ""
+
+	if !hasCRS && !hasAlgo {
+		return "geography"
+	}
+	if hasCRS && !hasAlgo {
+		return fmt.Sprintf("geography(%s)", g.crs)
+	}
+	if !hasCRS && hasAlgo {
+		return fmt.Sprintf("geography(%s, %s)", defaultGeoCRS, g.algorithm)
+	}
+
+	return fmt.Sprintf("geography(%s, %s)", g.crs, g.algorithm)
+}
+
+func (g GeographyType) String() string {
+	return g.Type()
+}
 
 var PrimitiveTypes = struct {
 	Bool          PrimitiveType

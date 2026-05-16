@@ -204,6 +204,53 @@ func TestUpdateSpecAddField(t *testing.T) {
 		assert.NotNil(t, newSpec)
 		assert.Equal(t, "street_void_1001", newSpec.FieldsBySourceID(5)[0].Name)
 	})
+
+	t.Run("reject geometry source for identity partition transform", func(t *testing.T) {
+		geoSchema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Required: true, Type: iceberg.PrimitiveTypes.Int64},
+			iceberg.NestedField{ID: 2, Name: "geom", Required: false, Type: iceberg.GeometryType{}},
+		)
+		metadata, err := table.NewMetadata(geoSchema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, "", iceberg.Properties{
+			table.PropertyFormatVersion: "3",
+		})
+		assert.NoError(t, err)
+
+		tbl := table.New([]string{"geo_geometry"}, metadata, "", nil, nil)
+		specUpdate := table.NewUpdateSpec(tbl.NewTransaction(), true)
+
+		updates, reqs, err := specUpdate.
+			AddField("geom", iceberg.IdentityTransform{}, "geom_identity").
+			BuildUpdates()
+		assert.Error(t, err)
+		assert.Nil(t, updates)
+		assert.Nil(t, reqs)
+	})
+
+	t.Run("reject geography source for identity partition transform", func(t *testing.T) {
+		geog, err := iceberg.GeographyTypeOf("srid:4269", "karney")
+		assert.NoError(t, err)
+
+		geoSchema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Required: true, Type: iceberg.PrimitiveTypes.Int64},
+			iceberg.NestedField{ID: 2, Name: "geog", Required: false, Type: geog},
+		)
+		metadata, err := table.NewMetadata(geoSchema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, "", iceberg.Properties{
+			table.PropertyFormatVersion: "3",
+		})
+		assert.NoError(t, err)
+
+		tbl := table.New([]string{"geo_geography"}, metadata, "", nil, nil)
+		specUpdate := table.NewUpdateSpec(tbl.NewTransaction(), true)
+
+		updates, reqs, err := specUpdate.
+			AddField("geog", iceberg.IdentityTransform{}, "geog_identity").
+			BuildUpdates()
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, "cannot transform")
+		assert.ErrorContains(t, err, "geog")
+		assert.Nil(t, updates)
+		assert.Nil(t, reqs)
+	})
 }
 
 func TestUpdateSpecAddIdentityField(t *testing.T) {

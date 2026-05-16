@@ -344,6 +344,54 @@ func TestAddColumn(t *testing.T) {
 			}},
 		}, newSchema.Fields())
 	})
+
+	t.Run("test update schema with add geometry and geography columns", func(t *testing.T) {
+		metaV3, err := NewMetadata(originalSchema, nil, UnsortedSortOrder, "", iceberg.Properties{
+			PropertyFormatVersion: "3",
+		})
+		assert.NoError(t, err)
+
+		table := New([]string{"id"}, metaV3, "", nil, nil)
+		txn := table.NewTransaction()
+
+		geog, err := iceberg.GeographyTypeOf("srid:4269", "karney")
+		assert.NoError(t, err)
+
+		upd := NewUpdateSchema(txn, true, true).
+			AddColumn([]string{"geom"}, iceberg.GeometryType{}, "", false, nil).
+			AddColumn([]string{"geog"}, geog, "", false, nil)
+		err = upd.Commit()
+		assert.NoError(t, err)
+
+		newSchema := txn.meta.CurrentSchema()
+		assert.NotNil(t, newSchema)
+
+		geomField, ok := newSchema.FindFieldByName("geom")
+		assert.True(t, ok)
+		assert.Equal(t, 12, geomField.ID)
+		assert.Equal(t, iceberg.GeometryType{}, geomField.Type)
+
+		geogField, ok := newSchema.FindFieldByName("geog")
+		assert.True(t, ok)
+		assert.Equal(t, 13, geogField.ID)
+		assert.True(t, geogField.Type.Equals(geog))
+	})
+
+	t.Run("test update schema with add geometry and geography columns errors in v2", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		geog, err := iceberg.GeographyTypeOf("srid:4269", "karney")
+		assert.NoError(t, err)
+
+		upd := NewUpdateSchema(txn, true, true).
+			AddColumn([]string{"geom"}, iceberg.GeometryType{}, "", false, nil).
+			AddColumn([]string{"geog"}, geog, "", false, nil)
+		err = upd.Commit()
+		assert.Error(t, err)
+		assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		assert.Contains(t, err.Error(), "is not supported until v3")
+	})
 }
 
 func TestApplyChanges(t *testing.T) {
@@ -859,6 +907,31 @@ func TestErrorHandling(t *testing.T) {
 		}).Apply()
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot change column nullability from optional to required")
+	})
+
+	t.Run("test update geography CRS and edge algorithm without allowIncompatibleChanges", func(t *testing.T) {
+		currentGeog, err := iceberg.GeographyTypeOf("srid:4269", "karney")
+		assert.NoError(t, err)
+		targetGeog, err := iceberg.GeographyTypeOf("srid:4326", "spherical")
+		assert.NoError(t, err)
+
+		geoSchema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+			iceberg.NestedField{ID: 2, Name: "geog", Type: currentGeog, Required: false},
+		)
+		geoMeta, err := NewMetadata(geoSchema, nil, UnsortedSortOrder, "", iceberg.Properties{
+			PropertyFormatVersion: "3",
+		})
+		assert.NoError(t, err)
+
+		table := New([]string{"geo"}, geoMeta, "", nil, nil)
+		txn := table.NewTransaction()
+
+		_, err = NewUpdateSchema(txn, true, false).UpdateColumn([]string{"geog"}, ColumnUpdate{
+			FieldType: iceberg.Optional[iceberg.Type]{Valid: true, Val: targetGeog},
+		}).Apply()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot promote geography(srid:4269, karney) to geography(srid:4326)")
 	})
 
 	t.Run("test add required field without default value", func(t *testing.T) {
