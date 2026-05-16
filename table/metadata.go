@@ -1369,14 +1369,15 @@ type v3FieldCheck struct {
 }
 
 func rejectV3OnlyFields(version int, checks ...v3FieldCheck) error {
+	var errs []error
 	for _, c := range checks {
 		if c.present {
-			return fmt.Errorf("%w: v3-only field '%s' present in v%d metadata",
-				ErrInvalidMetadataFormatVersion, c.name, version)
+			errs = append(errs, fmt.Errorf("%w: v3-only field '%s' present in v%d metadata",
+				ErrInvalidMetadataFormatVersion, c.name, version))
 		}
 	}
 
-	return nil
+	return errors.Join(errs...)
 }
 
 // ParseMetadata parses json metadata provided by the passed in reader,

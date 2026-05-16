@@ -1925,6 +1925,12 @@ func TestRejectV3OnlyFields(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:      "v2 rejects multiple v3 fields at once",
+			json:      v2Base + `, "next-row-id": 42, "encryption-keys": [{"key-id": "k1", "encrypted-key-metadata": "abc123"}]}`,
+			wantErr:   true,
+			errSubstr: "next-row-id",
+		},
+		{
 			name: "v3 accepts encryption-keys",
 			json: `{
 				"format-version": 3,
@@ -1958,4 +1964,13 @@ func TestRejectV3OnlyFields(t *testing.T) {
 			}
 		})
 	}
+
+	// Verify multiple v3 fields are all reported in a single error.
+	t.Run("reports all rejected fields", func(t *testing.T) {
+		input := v2Base + `, "next-row-id": 42, "encryption-keys": [{"key-id": "k1", "encrypted-key-metadata": "abc123"}]}`
+		_, err := ParseMetadataBytes([]byte(input))
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "next-row-id")
+		assert.ErrorContains(t, err, "encryption-keys")
+	})
 }
