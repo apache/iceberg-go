@@ -76,6 +76,11 @@ const (
 	WriteDeleteModeKey     = "write.delete.mode"
 	WriteDeleteModeDefault = WriteModeCopyOnWrite
 
+	WriteDeleteFormatKey = "write.delete.format"
+
+	WriteDeleteFormatPosition = "position"
+	WriteDeleteFormatDV       = "dv"
+
 	MetadataDeleteAfterCommitEnabledKey     = "write.metadata.delete-after-commit.enabled"
 	MetadataDeleteAfterCommitEnabledDefault = false
 

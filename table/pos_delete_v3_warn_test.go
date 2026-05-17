@@ -123,20 +123,20 @@ func runPositionDeleteWrite(t *testing.T, mb *MetadataBuilder, partitions map[st
 }
 
 // TestPositionDeleteV3Warning verifies the writer emits a single deduped
-// slog.Warn naming the table when position-deletes are written on a v3 table,
-// and stays silent on v2 where Parquet position-deletes are still canonical.
+// slog.Warn naming the table when position-deletes are written on a v3 table
+// with write.delete.format explicitly set to "position", and stays silent on
+// v2 where Parquet position-deletes are still canonical.
 //
-// The warning fires once at writer entry, before partition fanout, so a
-// partitioned write logs once total — not once per partition. The partitioned
-// subtest locks that contract: the issue specifically called out "deduped",
-// and a future change that moved the warning into per-partition writers would
-// silently regress this property without it.
+// On v3 with the default (or explicit "dv") format, the DV writer is used
+// instead and no warning is emitted.
 func TestPositionDeleteV3Warning(t *testing.T) {
 	emptyItr := func(yield func(arrow.RecordBatch, error) bool) {}
 
-	t.Run("v3 unpartitioned warns once with table location", func(t *testing.T) {
+	t.Run("v3 with explicit position format warns once with table location", func(t *testing.T) {
+		mb := newPositionDeleteUnpartitionedMetadata(t, 3)
+		mb.props = iceberg.Properties{WriteDeleteFormatKey: WriteDeleteFormatPosition}
 		out := captureSlog(t, func() {
-			runPositionDeleteWrite(t, newPositionDeleteUnpartitionedMetadata(t, 3), nil, emptyItr)
+			runPositionDeleteWrite(t, mb, nil, emptyItr)
 		})
 		assert.Equal(t, 1, countWarnRecords(out),
 			"expected exactly one WARN record, got: %s", out)
@@ -154,15 +154,17 @@ func TestPositionDeleteV3Warning(t *testing.T) {
 			"v2 position-delete writes should not warn, got: %s", out)
 	})
 
-	t.Run("v3 partitioned write warns exactly once across multiple partitions", func(t *testing.T) {
-		// Two batches each routed to a distinct partition. The fanout
-		// writer's processBatch reads only the first row's file_path, so a
-		// per-partition regression of the warn (e.g. moved into processBatch
-		// or per-rolling-writer init) would emit 2 records here. One batch
-		// with two rows would not exercise the fanout — it would all go to
-		// one partition. Two batches force two processBatch invocations
-		// targeting two different partition contexts.
+	t.Run("v3 default format uses DV path without warning", func(t *testing.T) {
+		out := captureSlog(t, func() {
+			runPositionDeleteWrite(t, newPositionDeleteUnpartitionedMetadata(t, 3), nil, emptyItr)
+		})
+		assert.Equal(t, 0, countWarnRecords(out),
+			"v3 with default DV format should not warn, got: %s", out)
+	})
+
+	t.Run("v3 partitioned write with explicit position format warns exactly once", func(t *testing.T) {
 		mb := newPositionDeletePartitionedMetadata(t, 3)
+		mb.props = iceberg.Properties{WriteDeleteFormatKey: WriteDeleteFormatPosition}
 		partitions := map[string]partitionContext{
 			"file://namespace/age_bucket=0/test.parquet": {
 				partitionData: map[int]any{iceberg.PartitionDataIDStart: 0}, specID: 0,
