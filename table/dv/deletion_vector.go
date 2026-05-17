@@ -18,6 +18,7 @@
 package dv
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
@@ -99,6 +100,33 @@ func DeserializeDV(data []byte, expectedCardinality int64) (*RoaringPositionBitm
 	}
 
 	return bitmap, nil
+}
+
+// SerializeDV produces the spec-format DV binary envelope from a bitmap:
+//
+//   - Length (4 bytes, big-endian): size of magic + bitmap data, excluding CRC-32
+//   - Magic  (4 bytes, little-endian): DVMagicNumber
+//   - Bitmap (variable): roaring bitmap in Iceberg portable format
+//   - CRC-32 (4 bytes, big-endian): checksum over magic + bitmap
+func SerializeDV(bitmap *RoaringPositionBitmap) ([]byte, error) {
+	var bitmapBuf bytes.Buffer
+	if err := bitmap.Serialize(&bitmapBuf); err != nil {
+		return nil, fmt.Errorf("serialize roaring bitmap: %w", err)
+	}
+
+	bitmapBytes := bitmapBuf.Bytes()
+	innerLen := dvMagicSize + len(bitmapBytes)
+	totalSize := dvLengthSize + innerLen + dvCRCSize
+	out := make([]byte, totalSize)
+
+	binary.BigEndian.PutUint32(out[0:dvLengthSize], uint32(innerLen))
+	binary.LittleEndian.PutUint32(out[dvLengthSize:dvLengthSize+dvMagicSize], DVMagicNumber)
+	copy(out[dvLengthSize+dvMagicSize:], bitmapBytes)
+
+	crc := crc32.ChecksumIEEE(out[dvLengthSize : totalSize-dvCRCSize])
+	binary.BigEndian.PutUint32(out[totalSize-dvCRCSize:], crc)
+
+	return out, nil
 }
 
 // ReadDV reads a deletion vector from a puffin file using the manifest entry metadata.
