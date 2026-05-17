@@ -1363,17 +1363,18 @@ var (
 	ErrPartitionSpecNotFound        = errors.New("partition spec not found")
 )
 
-type v3FieldCheck struct {
-	name    string
-	present bool
+type versionScopedField struct {
+	name       string
+	introduced int
+	present    bool
 }
 
-func rejectV3OnlyFields(version int, checks ...v3FieldCheck) error {
+func rejectFieldsBeyondVersion(currentVersion int, fields ...versionScopedField) error {
 	var errs []error
-	for _, c := range checks {
-		if c.present {
-			errs = append(errs, fmt.Errorf("%w: v3-only field '%s' present in v%d metadata",
-				ErrInvalidMetadataFormatVersion, c.name, version))
+	for _, f := range fields {
+		if f.present && currentVersion < f.introduced {
+			errs = append(errs, fmt.Errorf("%w: v%d-only field '%s' present in v%d metadata",
+				ErrInvalidMetadataFormatVersion, f.introduced, f.name, currentVersion))
 		}
 	}
 
@@ -1923,9 +1924,11 @@ func (m *metadataV1) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	if err := rejectV3OnlyFields(aux.FormatVersion,
-		v3FieldCheck{"next-row-id", aux.NextRowID != nil},
-		v3FieldCheck{"encryption-keys", len(aux.EncryptionKeyList) > 0},
+	if err := rejectFieldsBeyondVersion(
+		aux.FormatVersion,
+		versionScopedField{name: "last-sequence-number", introduced: 2, present: aux.LastSequenceNumber != nil},
+		versionScopedField{name: "next-row-id", introduced: 3, present: aux.NextRowID != nil},
+		versionScopedField{name: "encryption-keys", introduced: 3, present: len(aux.EncryptionKeyList) > 0},
 	); err != nil {
 		return err
 	}
@@ -1996,9 +1999,10 @@ func (m *metadataV2) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	if err := rejectV3OnlyFields(aux.FormatVersion,
-		v3FieldCheck{"next-row-id", aux.NextRowID != nil},
-		v3FieldCheck{"encryption-keys", len(aux.EncryptionKeyList) > 0},
+	if err := rejectFieldsBeyondVersion(
+		aux.FormatVersion,
+		versionScopedField{name: "next-row-id", introduced: 3, present: aux.NextRowID != nil},
+		versionScopedField{name: "encryption-keys", introduced: 3, present: len(aux.EncryptionKeyList) > 0},
 	); err != nil {
 		return err
 	}
