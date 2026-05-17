@@ -125,6 +125,10 @@ func TestReaderRejectsDeletionVectorWithBadHeader(t *testing.T) {
 			SnapshotID:     -1,
 			SequenceNumber: -1,
 			Fields:         []int32{rowPositionFieldID},
+			Properties: map[string]string{
+				"cardinality":          "0",
+				"referenced-data-file": "data/x.parquet",
+			},
 		}, []byte("payload"))
 		require.NoError(t, err)
 		require.NoError(t, w.Finish())
