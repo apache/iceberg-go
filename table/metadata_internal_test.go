@@ -1854,3 +1854,123 @@ func TestZstdGoldenFixture(t *testing.T) {
 
 	assert.True(t, expected.Equals(meta))
 }
+
+func TestRejectV3OnlyFields(t *testing.T) {
+	v1Base := `{
+		"format-version": 1,
+		"table-uuid": "d20125c8-7284-442c-9aea-15fee620737c",
+		"location": "s3://bucket/test/location",
+		"last-updated-ms": 1602638573874,
+		"last-column-id": 3,
+		"schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"x","required":true,"type":"long"}]}],
+		"current-schema-id": 0,
+		"partition-specs": [{"spec-id": 0, "fields": []}],
+		"default-spec-id": 0,
+		"sort-orders": [{"order-id": 0, "fields": []}],
+		"default-sort-order-id": 0`
+
+	v2Base := `{
+		"format-version": 2,
+		"table-uuid": "d20125c8-7284-442c-9aea-15fee620737c",
+		"location": "s3://bucket/test/location",
+		"last-updated-ms": 1602638573874,
+		"last-column-id": 3,
+		"last-sequence-number": 0,
+		"schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"x","required":true,"type":"long"}]}],
+		"current-schema-id": 0,
+		"partition-specs": [{"spec-id": 0, "fields": []}],
+		"default-spec-id": 0,
+		"last-partition-id": 1000,
+		"sort-orders": [{"order-id": 0, "fields": []}],
+		"default-sort-order-id": 0`
+
+	tests := []struct {
+		name      string
+		json      string
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name:      "v1 rejects next-row-id",
+			json:      v1Base + `, "next-row-id": 42}`,
+			wantErr:   true,
+			errSubstr: "v3-only field 'next-row-id' present in v1 metadata",
+		},
+		{
+			name:      "v1 rejects encryption-keys",
+			json:      v1Base + `, "encryption-keys": [{"key-id": "k1", "encrypted-key-metadata": "abc123"}]}`,
+			wantErr:   true,
+			errSubstr: "v3-only field 'encryption-keys' present in v1 metadata",
+		},
+		{
+			name:    "v1 accepts empty encryption-keys",
+			json:    v1Base + `, "encryption-keys": []}`,
+			wantErr: false,
+		},
+		{
+			name:      "v2 rejects next-row-id",
+			json:      v2Base + `, "next-row-id": 42}`,
+			wantErr:   true,
+			errSubstr: "v3-only field 'next-row-id' present in v2 metadata",
+		},
+		{
+			name:      "v2 rejects encryption-keys",
+			json:      v2Base + `, "encryption-keys": [{"key-id": "k1", "encrypted-key-metadata": "abc123"}]}`,
+			wantErr:   true,
+			errSubstr: "v3-only field 'encryption-keys' present in v2 metadata",
+		},
+		{
+			name:    "v2 accepts empty encryption-keys",
+			json:    v2Base + `, "encryption-keys": []}`,
+			wantErr: false,
+		},
+		{
+			name:      "v2 rejects multiple v3 fields at once",
+			json:      v2Base + `, "next-row-id": 42, "encryption-keys": [{"key-id": "k1", "encrypted-key-metadata": "abc123"}]}`,
+			wantErr:   true,
+			errSubstr: "next-row-id",
+		},
+		{
+			name: "v3 accepts encryption-keys",
+			json: `{
+				"format-version": 3,
+				"table-uuid": "d20125c8-7284-442c-9aea-15fee620737c",
+				"location": "s3://bucket/test/location",
+				"last-updated-ms": 1602638573874,
+				"last-column-id": 3,
+				"last-sequence-number": 0,
+				"next-row-id": 1,
+				"schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"x","required":true,"type":"long"}]}],
+				"current-schema-id": 0,
+				"partition-specs": [{"spec-id": 0, "fields": []}],
+				"default-spec-id": 0,
+				"last-partition-id": 1000,
+				"sort-orders": [{"order-id": 0, "fields": []}],
+				"default-sort-order-id": 0,
+				"encryption-keys": [{"key-id": "k1", "encrypted-key-metadata": "abc123"}]
+			}`,
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseMetadataBytes([]byte(tt.json))
+			if tt.wantErr {
+				require.ErrorIs(t, err, ErrInvalidMetadataFormatVersion)
+				assert.ErrorContains(t, err, tt.errSubstr)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+
+	// Verify multiple v3 fields are all reported in a single error.
+	t.Run("reports all rejected fields", func(t *testing.T) {
+		input := v2Base + `, "next-row-id": 42, "encryption-keys": [{"key-id": "k1", "encrypted-key-metadata": "abc123"}]}`
+		_, err := ParseMetadataBytes([]byte(input))
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "next-row-id")
+		assert.ErrorContains(t, err, "encryption-keys")
+	})
+}
