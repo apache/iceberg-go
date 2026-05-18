@@ -1855,7 +1855,7 @@ func TestZstdGoldenFixture(t *testing.T) {
 	assert.True(t, expected.Equals(meta))
 }
 
-func TestRejectV3OnlyFields(t *testing.T) {
+func TestRejectFieldsBeyondVersion(t *testing.T) {
 	v1Base := `{
 		"format-version": 1,
 		"table-uuid": "d20125c8-7284-442c-9aea-15fee620737c",
@@ -1908,6 +1908,12 @@ func TestRejectV3OnlyFields(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:      "v1 rejects last-sequence-number",
+			json:      v1Base + `, "last-sequence-number": 7}`,
+			wantErr:   true,
+			errSubstr: "v2-only field 'last-sequence-number' present in v1 metadata",
+		},
+		{
 			name:      "v2 rejects next-row-id",
 			json:      v2Base + `, "next-row-id": 42}`,
 			wantErr:   true,
@@ -1922,6 +1928,11 @@ func TestRejectV3OnlyFields(t *testing.T) {
 		{
 			name:    "v2 accepts empty encryption-keys",
 			json:    v2Base + `, "encryption-keys": []}`,
+			wantErr: false,
+		},
+		{
+			name:    "v2 accepts last-sequence-number",
+			json:    v2Base + `, "last-sequence-number": 7}`,
 			wantErr: false,
 		},
 		{
@@ -1972,6 +1983,15 @@ func TestRejectV3OnlyFields(t *testing.T) {
 		require.Error(t, err)
 		assert.ErrorContains(t, err, "next-row-id")
 		assert.ErrorContains(t, err, "encryption-keys")
+	})
+
+	// Verify mixed v2-only and v3-only fields in v1 metadata are all reported.
+	t.Run("v1 reports fields from both v2 and v3", func(t *testing.T) {
+		input := v1Base + `, "last-sequence-number": 7, "next-row-id": 42}`
+		_, err := ParseMetadataBytes([]byte(input))
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "last-sequence-number")
+		assert.ErrorContains(t, err, "next-row-id")
 	})
 }
 
