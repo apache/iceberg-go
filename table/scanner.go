@@ -265,17 +265,19 @@ func (scan *Scan) Projection() (*iceberg.Schema, error) {
 		return curSchema, nil
 	}
 
-	hasRowLineageMeta := selectedFieldsContainsMeta(scan.selectedFields, caseSensitive)
-	schemaHasRowLineageMeta := schemaContainsMeta(curSchema)
-	if hasRowLineageMeta && curVersion >= minFormatVersionRowLineage && !schemaHasRowLineageMeta {
+	selectedFieldsMeta := metaFieldsFromSelectedFields(scan.selectedFields, caseSensitive)
+	schemaMeta := metaFieldsFromSchema(curSchema)
+	synthesisMeta := synthesizeMeta(selectedFieldsMeta, schemaMeta)
+	if len(synthesisMeta) > 0 && curVersion >= minFormatVersionRowLineage {
 
-		removedMetadataSlice, missingMetaFields := removeMetadataFromSelectedFields(scan.selectedFields, caseSensitive)
-		sch, err := curSchema.Select(scan.caseSensitive, removedMetadataSlice...)
+		// synthesis path
+		removedMetaSlice, missingMetaFields := removeMetadataFromSelectedFields(scan.selectedFields, synthesisMeta)
+		sch, err := curSchema.Select(scan.caseSensitive, removedMetaSlice...)
 		if err != nil {
 			return nil, err
 		}
 
-		return iceberg.NewSchema(sch.ID, append(sch.Fields(), missingMetaFields...)...), nil
+		return iceberg.NewSchemaWithIdentifiers(sch.ID, sch.IdentifierFieldIDs, append(sch.Fields(), missingMetaFields...)...), nil
 	}
 
 	return curSchema.Select(scan.caseSensitive, scan.selectedFields...)
@@ -691,72 +693,22 @@ func (scan *Scan) ToArrowTable(ctx context.Context) (arrow.Table, error) {
 	return array.NewTableFromRecords(schema, records), nil
 }
 
-func schemaContainsMeta(schema *iceberg.Schema) bool {
-	if schema == nil {
-		return false
-	}
-
-	_, hasRowIdMeta := schema.FindFieldByID(iceberg.RowIDFieldID)
-	_, hasSequenceMeta := schema.FindFieldByID(iceberg.LastUpdatedSequenceNumberFieldID)
-
-	return hasRowIdMeta || hasSequenceMeta
-}
-
-func selectedFieldsContainsMeta(selectedFields []string, caseSensitive bool) bool {
-	if !caseSensitive {
-		selectedFieldsLower := []string{}
-
-		for _, s := range selectedFields {
-			selectedFieldsLower = append(selectedFieldsLower, strings.ToLower(s))
-		}
-
-		hasRowIdMeta := slices.Contains(selectedFieldsLower, iceberg.RowIDColumnName)
-		hasSequenceMeta := slices.Contains(selectedFieldsLower, iceberg.LastUpdatedSequenceNumberColumnName)
-
-		return hasRowIdMeta || hasSequenceMeta
-	}
-	hasRowIdMeta := slices.Contains(selectedFields, iceberg.RowIDColumnName)
-	hasSequenceMeta := slices.Contains(selectedFields, iceberg.LastUpdatedSequenceNumberColumnName)
-
-	return hasRowIdMeta || hasSequenceMeta
-}
-
-// Goes through a selectedFields and returns a slice of strings representing the selectedFields without
-// any row lineage metadata and a slice of iceberg.NestedFields representing the row lineage metadata present
-// in the selectedFields. Note that both returned slices will be in the same order as they were in selectedFields.
-func removeMetadataFromSelectedFields(selectedFields []string, caseSensitive bool) ([]string, []iceberg.NestedField) {
+// Removes metaFields from selectedField if it exists. Returns a []string representing the filtered selectedFields
+// and an iceberg.NestedField[] representing the removed metadata. Note that metaFields is passed in
+// after being validated from metaFieldsFromSelectedFields.
+func removeMetadataFromSelectedFields(selectedFields []string, metaFields []string) ([]string, []iceberg.NestedField) {
 	filteredFields := []string{}
 	meta := []iceberg.NestedField{}
 
-	if !caseSensitive {
-		for _, field := range selectedFields {
-			if strings.ToLower(field) == iceberg.RowIDColumnName {
-				meta = append(meta, iceberg.RowID())
-
-				continue
-			}
-
-			if strings.ToLower(field) == iceberg.LastUpdatedSequenceNumberColumnName {
-				meta = append(meta, iceberg.LastUpdatedSequenceNumber())
-
-				continue
-			}
-
-			filteredFields = append(filteredFields, field)
-		}
-
-		return filteredFields, meta
-	}
-
 	for _, field := range selectedFields {
-		if field == iceberg.RowIDColumnName {
-			meta = append(meta, iceberg.RowID())
+		if slices.Contains(metaFields, strings.ToLower(field)) {
 
-			continue
-		}
-
-		if field == iceberg.LastUpdatedSequenceNumberColumnName {
-			meta = append(meta, iceberg.LastUpdatedSequenceNumber())
+			switch strings.ToLower(field) {
+			case iceberg.LastUpdatedSequenceNumberColumnName:
+				meta = append(meta, iceberg.LastUpdatedSequenceNumber())
+			case iceberg.RowIDColumnName:
+				meta = append(meta, iceberg.RowID())
+			}
 
 			continue
 		}
@@ -765,4 +717,55 @@ func removeMetadataFromSelectedFields(selectedFields []string, caseSensitive boo
 	}
 
 	return filteredFields, meta
+}
+
+func metaFieldsFromSelectedFields(selectedFields []string, caseSensitive bool) []string {
+	meta := []string{}
+	if !caseSensitive {
+		for _, field := range selectedFields {
+			if strings.EqualFold(field, iceberg.RowIDColumnName) || strings.EqualFold(field, iceberg.LastUpdatedSequenceNumberColumnName) {
+				meta = append(meta, strings.ToLower(field))
+			}
+		}
+
+		return meta
+	}
+
+	for _, field := range selectedFields {
+		if field == iceberg.RowIDColumnName || field == iceberg.LastUpdatedSequenceNumberColumnName {
+			meta = append(meta, strings.ToLower(field))
+		}
+	}
+
+	return meta
+}
+
+// Takes in a *iceberg.Schema and returns a []string representing the row lineage metadata present
+// in the schema.
+func metaFieldsFromSchema(sch *iceberg.Schema) []string {
+	meta := []string{}
+	_, hasRowIDMeta := sch.FindFieldByName(iceberg.RowIDColumnName)
+	_, hasSeqMeta := sch.FindFieldByName(iceberg.LastUpdatedSequenceNumberColumnName)
+
+	if hasRowIDMeta {
+		meta = append(meta, iceberg.RowIDColumnName)
+	}
+	if hasSeqMeta {
+		meta = append(meta, iceberg.LastUpdatedSequenceNumberColumnName)
+	}
+
+	return meta
+}
+
+// Any metadata which is in selectedFieldsMeta and not in schemaMeta is a synthesis meta
+func synthesizeMeta(selectedFieldsMeta []string, schemaMeta []string) []string {
+	synthesis := []string{}
+
+	for _, f := range selectedFieldsMeta {
+		if !slices.Contains(schemaMeta, f) {
+			synthesis = append(synthesis, f)
+		}
+	}
+
+	return synthesis
 }

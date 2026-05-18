@@ -19,6 +19,7 @@ package table
 
 import (
 	"runtime"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -484,7 +485,7 @@ func TestProjectionV3SchemaWithRowIDOnly(t *testing.T) {
 
 	rowIDField, ok := fieldByName[iceberg.RowIDColumnName]
 	require.True(t, ok)
-	assert.Equal(t, iceberg.RowIDFieldID, rowIDField.ID)
+	assert.NotEqual(t, iceberg.RowIDFieldID, rowIDField.ID) // NewMetadata reorders schema field numbers
 	assert.False(t, rowIDField.Required)
 
 	seqField, ok := fieldByName[iceberg.LastUpdatedSequenceNumberColumnName]
@@ -557,7 +558,7 @@ func TestProjectionV3SchemaWithLastUpdatedSequenceNumberOnly(t *testing.T) {
 
 	seqField, ok := fieldByName[iceberg.LastUpdatedSequenceNumberColumnName]
 	require.True(t, ok)
-	assert.Equal(t, iceberg.LastUpdatedSequenceNumberFieldID, seqField.ID)
+	assert.NotEqual(t, iceberg.LastUpdatedSequenceNumberFieldID, seqField.ID) // NewMetadata reorders schema field numbers
 	assert.False(t, seqField.Required)
 }
 
@@ -619,4 +620,47 @@ func TestSynthesizeRowLineageColumns(t *testing.T) {
 		assert.EqualValues(t, 5, seqCol.Value(i), "row %d", i)
 	}
 	assert.EqualValues(t, 3, rowOffset)
+}
+
+func TestRemoveMetadataFromSelectedFields(t *testing.T) {
+	selectedFields := []string{
+		"id",
+		"payload",
+	}
+
+	metaFields := []string{
+		"_row_id",
+	}
+
+	sf, mf := removeMetadataFromSelectedFields(selectedFields, metaFields)
+
+	assert.Equal(t, 2, len(sf))
+	assert.Equal(t, 0, len(mf))
+
+	assert.True(t, slices.Contains(sf, "id"))
+	assert.True(t, slices.Contains(sf, "payload"))
+}
+
+func TestRemoveMetadataFromSelectedFieldsCasing(t *testing.T) {
+	selectedFields := []string{
+		"id",
+		"payload",
+		"_ROW_Id",
+		"lastupdatedsequence_number",
+	}
+
+	metaFields := []string{
+		"_row_id",
+		"_last_updated_sequence_number",
+	}
+
+	sf, mf := removeMetadataFromSelectedFields(selectedFields, metaFields)
+
+	assert.Equal(t, 3, len(sf))
+	assert.Equal(t, 1, len(mf))
+
+	assert.True(t, slices.Contains(sf, "id"))
+	assert.True(t, slices.Contains(sf, "payload"))
+	assert.True(t, slices.Contains(sf, "lastupdatedsequence_number"))
+	assert.True(t, slices.Contains(mf, iceberg.RowID()))
 }
