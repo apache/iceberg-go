@@ -51,7 +51,29 @@ func TestEncodeDataFileRejectsForeignImpl(t *testing.T) {
 	spec, schema, _ := fullyPopulatedDataFile(t, 2)
 	_, err := codec.EncodeDataFile(stubDataFile{}, spec, schema, 2)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "DataFile implementation")
+	require.Contains(t, err.Error(), "iceberg.AvroEntryMarshaler",
+		"error should name the interface the caller needs to satisfy")
+}
+
+// TestEncodeDataFileAcceptsExternalMarshaler exercises the
+// extensibility contract: any DataFile that also implements
+// [iceberg.AvroEntryMarshaler] is accepted by the codec, not only the
+// iceberg package's built-in implementation.
+func TestEncodeDataFileAcceptsExternalMarshaler(t *testing.T) {
+	spec, schema, _ := fullyPopulatedDataFile(t, 2)
+	got, err := codec.EncodeDataFile(externalMarshaler{payload: []byte{0xCA, 0xFE}}, spec, schema, 2)
+	require.NoError(t, err)
+	require.Equal(t, []byte{0xCA, 0xFE}, got,
+		"the marshaler interface contract must let external impls supply their own bytes")
+}
+
+type externalMarshaler struct {
+	stubDataFile
+	payload []byte
+}
+
+func (e externalMarshaler) MarshalAvroEntry(iceberg.PartitionSpec, *iceberg.Schema, int) ([]byte, error) {
+	return e.payload, nil
 }
 
 func TestEncodeDataFileIdempotent(t *testing.T) {
@@ -130,6 +152,12 @@ func fullyPopulatedDataFile(t *testing.T, version int) (iceberg.PartitionSpec, *
 		SortOrderID(0).
 		KeyMetadata([]byte("kms-key-1"))
 	if version < 3 {
+		// distinct_counts is deprecated for all versions in the spec
+		// (apache/iceberg#12182). The fixture sets it on v1/v2 to
+		// exercise the read-compatibility round-trip path — counts
+		// already present on a DataFile read from a legacy manifest
+		// must survive an encode→decode cycle. New DataFiles should
+		// not carry distinct counts.
 		builder.DistinctValueCounts(map[int]int64{1: 64, 2: 128})
 	}
 	if version >= 2 {
@@ -162,7 +190,12 @@ func assertDataFileEqual(t *testing.T, want, got iceberg.DataFile, version int) 
 	require.Equal(t, want.SplitOffsets(), got.SplitOffsets())
 	require.Equal(t, want.SortOrderID(), got.SortOrderID())
 	require.Equal(t, want.SpecID(), got.SpecID())
+	require.Equal(t, want.ContentType(), got.ContentType())
 	if version < 3 {
+		// distinct_counts (field 111) is deprecated for all versions
+		// but still writable on v1/v2. The codec preserves it on
+		// round-trip for read compatibility with legacy manifests; v3
+		// drops it per spec (apache/iceberg#12182).
 		require.Equal(t, want.DistinctValueCounts(), got.DistinctValueCounts())
 	} else {
 		require.Empty(t, got.DistinctValueCounts(),
@@ -170,7 +203,6 @@ func assertDataFileEqual(t *testing.T, want, got iceberg.DataFile, version int) 
 				"see internal/avro_schemas.go data_file_v3")
 	}
 	if version >= 2 {
-		require.Equal(t, want.ContentType(), got.ContentType())
 		require.Equal(t, want.EqualityFieldIDs(), got.EqualityFieldIDs())
 	}
 	if version >= 3 {

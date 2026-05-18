@@ -52,6 +52,18 @@ func TestEncodeDecodeFileScanTaskRoundTrip(t *testing.T) {
 				require.Equal(t, original.EqualityDeleteFiles[i].FilePath(), decoded.EqualityDeleteFiles[i].FilePath())
 			}
 			require.Len(t, decoded.DeletionVectorFiles, len(original.DeletionVectorFiles))
+			for i := range original.DeletionVectorFiles {
+				require.Equal(t, original.DeletionVectorFiles[i].FilePath(), decoded.DeletionVectorFiles[i].FilePath(),
+					"DV file path must round-trip")
+				require.Equal(t, original.DeletionVectorFiles[i].ReferencedDataFile(), decoded.DeletionVectorFiles[i].ReferencedDataFile(),
+					"DV file must remember the data file it deletes from")
+				require.Equal(t, original.DeletionVectorFiles[i].ContentOffset(), decoded.DeletionVectorFiles[i].ContentOffset(),
+					"DV file content offset (puffin blob offset) must round-trip")
+				require.Equal(t, original.DeletionVectorFiles[i].ContentSizeInBytes(), decoded.DeletionVectorFiles[i].ContentSizeInBytes(),
+					"DV file content size must round-trip")
+				require.Equal(t, original.DeletionVectorFiles[i].FileFormat(), decoded.DeletionVectorFiles[i].FileFormat(),
+					"DV file format must round-trip")
+			}
 
 			require.Equal(t, original.Start, decoded.Start)
 			require.Equal(t, original.Length, decoded.Length)
@@ -86,14 +98,14 @@ func fullyPopulatedFileScanTask(t *testing.T, version int) (iceberg.PartitionSpe
 		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "id_part", Transform: iceberg.IdentityTransform{}},
 	)
 
-	file := newScanTaskDataFile(t, spec, "s3://bucket/ns/tbl/data/part-0000.parquet", iceberg.EntryContentData, version)
-	delete1 := newScanTaskDataFile(t, spec, "s3://bucket/ns/tbl/data/del-0001.parquet", iceberg.EntryContentPosDeletes, version)
-	eq1 := newScanTaskDataFile(t, spec, "s3://bucket/ns/tbl/data/eq-0001.parquet", iceberg.EntryContentEqDeletes, version)
+	file := newScanTaskDataFile(t, spec, "s3://bucket/ns/tbl/data/part-0000.parquet", iceberg.EntryContentData, iceberg.ParquetFile, "", version)
+	delete1 := newScanTaskDataFile(t, spec, "s3://bucket/ns/tbl/data/del-0001.parquet", iceberg.EntryContentPosDeletes, iceberg.ParquetFile, "", version)
+	eq1 := newScanTaskDataFile(t, spec, "s3://bucket/ns/tbl/data/eq-0001.parquet", iceberg.EntryContentEqDeletes, iceberg.ParquetFile, "", version)
 
 	firstRow := int64(0)
 	dataSeq := int64(17)
 
-	return spec, schema, table.FileScanTask{
+	task := table.FileScanTask{
 		File:                file,
 		DeleteFiles:         []iceberg.DataFile{delete1},
 		EqualityDeleteFiles: []iceberg.DataFile{eq1},
@@ -102,11 +114,23 @@ func fullyPopulatedFileScanTask(t *testing.T, version int) (iceberg.PartitionSpe
 		FirstRowID:          &firstRow,
 		DataSequenceNumber:  &dataSeq,
 	}
+
+	if version >= 3 {
+		// Deletion vectors are v3's first-class delete mechanism: a
+		// Puffin blob that references the data file whose rows it
+		// deletes. The round-trip test asserts the DV-specific fields
+		// (file format, ReferencedDataFile, ContentOffset, ContentSize
+		// In Bytes) so a regression in the DV encode path surfaces.
+		dv := newScanTaskDataFile(t, spec, "s3://bucket/ns/tbl/data/dv-0001.puffin",
+			iceberg.EntryContentPosDeletes, iceberg.PuffinFile, file.FilePath(), version)
+		task.DeletionVectorFiles = []iceberg.DataFile{dv}
+	}
+
+	return spec, schema, task
 }
 
-func newScanTaskDataFile(t *testing.T, spec iceberg.PartitionSpec, path string, content iceberg.ManifestEntryContent, version int) iceberg.DataFile {
+func newScanTaskDataFile(t *testing.T, spec iceberg.PartitionSpec, path string, content iceberg.ManifestEntryContent, format iceberg.FileFormat, referencedDataFile string, version int) iceberg.DataFile {
 	t.Helper()
-	format := iceberg.ParquetFile
 	builder, err := iceberg.NewDataFileBuilder(
 		spec,
 		content,
@@ -130,6 +154,11 @@ func newScanTaskDataFile(t *testing.T, spec iceberg.PartitionSpec, path string, 
 	}
 	if version >= 3 {
 		builder.FirstRowID(0)
+	}
+	if referencedDataFile != "" {
+		builder.ReferencedDataFile(referencedDataFile).
+			ContentOffset(128).
+			ContentSizeInBytes(2048)
 	}
 
 	return builder.Build()

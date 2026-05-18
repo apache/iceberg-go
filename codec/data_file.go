@@ -30,13 +30,14 @@
 //
 // The receiver supplies (spec, schema, version) out of band. Both sides
 // in a distributed-processing design already hold table metadata, and
-// the per-(specID, version) avro schema is cached.
+// the per-(partition-type, version) avro schema is cached.
 package codec
 
 import (
 	"fmt"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal/datafileavro"
 )
 
 // EncodeDataFile encodes a single DataFile for cross-process transport
@@ -46,22 +47,29 @@ import (
 // call [DecodeDataFile] with the matching (spec, schema, version)
 // triple.
 //
-// df must be a DataFile produced by the iceberg-go package (for
-// example via [iceberg.NewDataFileBuilder] or a manifest read).
-// Foreign implementations are rejected.
+// df must implement [iceberg.AvroEntryMarshaler]. The iceberg
+// package's built-in DataFile implementation satisfies it; external
+// implementations of [iceberg.DataFile] can opt in by implementing
+// the marshaler interface themselves.
 //
 // EncodeDataFile is non-mutating and safe to call concurrently with
-// any other reader or encoder of the same DataFile.
+// any other reader or encoder of the same DataFile, provided the
+// underlying implementation honors that contract.
 //
-// distinct_counts round-trips on v1 and v2. The v3 manifest-entry
-// schema omits the field (deprecated in the v3 spec, see
-// apache/iceberg#12182), so it does not survive encode→decode on v3 —
-// callers on v3 that need distinct counts must transport them
-// separately.
+// v1 note: v1 manifest entries carry a non-nullable snapshot_id which
+// is written as 0 by the iceberg implementation. v1 bytes are not
+// usable as a standalone manifest entry — they only round-trip via
+// [DecodeDataFile].
+//
+// distinct_counts (field 111) is deprecated in the spec for all
+// versions. Already-set values round-trip on v1 and v2 as a
+// read-compatibility artifact; v3 omits the field entirely
+// (apache/iceberg#12182). New DataFiles should not set distinct
+// counts.
 func EncodeDataFile(df iceberg.DataFile, spec iceberg.PartitionSpec, schema *iceberg.Schema, version int) ([]byte, error) {
-	m, ok := df.(avroEntryMarshaler)
+	m, ok := df.(iceberg.AvroEntryMarshaler)
 	if !ok {
-		return nil, fmt.Errorf("codec: EncodeDataFile requires the iceberg package's DataFile implementation, got %T", df)
+		return nil, fmt.Errorf("codec: EncodeDataFile requires a DataFile implementing iceberg.AvroEntryMarshaler, got %T", df)
 	}
 
 	return m.MarshalAvroEntry(spec, schema, version)
@@ -76,12 +84,10 @@ func EncodeDataFile(df iceberg.DataFile, spec iceberg.PartitionSpec, schema *ice
 // lookup tables, so Partition() and the stats accessors return id-keyed
 // maps as if the file had been read from a manifest.
 func DecodeDataFile(data []byte, spec iceberg.PartitionSpec, schema *iceberg.Schema, version int) (iceberg.DataFile, error) {
-	return iceberg.UnmarshalAvroDataFileEntry(data, spec, schema, version)
-}
+	res, err := datafileavro.Unmarshal(data, spec, schema, version)
+	if err != nil {
+		return nil, err
+	}
 
-// avroEntryMarshaler is the iceberg-package side of the DataFile codec.
-// The iceberg package's DataFile implementation satisfies it; foreign
-// implementations do not, which is how [EncodeDataFile] rejects them.
-type avroEntryMarshaler interface {
-	MarshalAvroEntry(spec iceberg.PartitionSpec, schema *iceberg.Schema, version int) ([]byte, error)
+	return res.(iceberg.DataFile), nil
 }

@@ -23,8 +23,28 @@ import (
 	"sync"
 
 	"github.com/apache/iceberg-go/internal"
+	"github.com/apache/iceberg-go/internal/datafileavro"
 	"github.com/twmb/avro"
 )
+
+func init() {
+	datafileavro.Unmarshal = func(data []byte, spec, schema any, version int) (any, error) {
+		return unmarshalAvroDataFileEntry(data, spec.(PartitionSpec), schema.(*Schema), version)
+	}
+}
+
+// AvroEntryMarshaler is implemented by DataFile values that can be
+// encoded using the manifest-entry Avro encoding. The iceberg
+// package's built-in DataFile implementation satisfies it; external
+// implementations can also satisfy it to participate in the
+// [github.com/apache/iceberg-go/codec] DataFile codec.
+//
+// The encoded bytes are the same bytes a manifest carries for this
+// data file. Implementations must produce output that the iceberg
+// package's manifest-entry Avro decoder accepts.
+type AvroEntryMarshaler interface {
+	MarshalAvroEntry(spec PartitionSpec, schema *Schema, version int) ([]byte, error)
+}
 
 // MarshalAvroEntry encodes this DataFile as Avro bytes using the
 // manifest-entry encoding for the given partition spec, table schema
@@ -34,22 +54,29 @@ import (
 // MarshalAvroEntry transports — there is no separate wire-mirror
 // struct to keep in sync.
 //
-// MarshalAvroEntry is the low-level avro primitive used by the
-// [github.com/apache/iceberg-go/codec] package; callers performing
-// cross-process transport should use that package's high-level API
-// rather than calling this method directly. The receiver MUST decode
-// with [UnmarshalAvroDataFileEntry] and the matching
-// (spec, schema, version) triple.
+// MarshalAvroEntry is the iceberg-package side of the
+// [github.com/apache/iceberg-go/codec] DataFile codec; callers
+// performing cross-process transport should prefer that package's
+// high-level API.
 //
-// MarshalAvroEntry is non-mutating and safe to call concurrently with
-// any other reader or encoder of the same DataFile: it encodes a
-// shallow copy of df's avro-tagged fields, leaving df untouched.
+// MarshalAvroEntry is safe to call concurrently with any other
+// reader or encoder of the same DataFile: a fresh *dataFile is
+// cloned (avro-tagged fields only) and the avro encoder reads, but
+// does not mutate, the cloned values. Pointer-typed avro fields like
+// ColSizes share their backing storage with the source; the
+// thread-safety guarantee relies on the avro encoder being
+// non-mutating.
 //
-// distinct_counts round-trips on v1 and v2. The v3 manifest-entry
-// schema omits the field (deprecated in the v3 spec, see
-// apache/iceberg#12182), so it does not survive encode→decode on v3 —
-// callers on v3 that need distinct counts must transport them
-// separately.
+// v1 note: the v1 manifest-entry schema has a non-nullable snapshot_id
+// field. MarshalAvroEntry writes 0 there, so v1 bytes are not usable
+// as a standalone manifest entry — they only round-trip via the
+// matching decoder.
+//
+// distinct_counts (field 111) is deprecated in the spec for all
+// versions. MarshalAvroEntry preserves any value already on the
+// source for v1 and v2 as a read-compatibility artifact; v3 omits
+// the field entirely (apache/iceberg#12182). New DataFiles should
+// not set distinct counts.
 func (d *dataFile) MarshalAvroEntry(spec PartitionSpec, schema *Schema, version int) ([]byte, error) {
 	if version < 1 || version > 3 {
 		return nil, fmt.Errorf("iceberg: MarshalAvroEntry: unsupported format version %d", version)
@@ -64,23 +91,21 @@ func (d *dataFile) MarshalAvroEntry(spec PartitionSpec, schema *Schema, version 
 	return s.Encode(newEncodeEntry(version, clone))
 }
 
-// UnmarshalAvroDataFileEntry decodes Avro bytes produced by
+// unmarshalAvroDataFileEntry decodes Avro bytes produced by
 // [(*dataFile).MarshalAvroEntry] back into a DataFile. The
 // (spec, schema, version) triple must match the encoder; passing a
 // different spec or version yields a decode error or silently
 // mis-typed partition values.
 //
-// UnmarshalAvroDataFileEntry is the low-level avro primitive used by
-// the [github.com/apache/iceberg-go/codec] package; callers performing
-// cross-process transport should use that package's high-level API
-// rather than calling this function directly.
-//
 // The returned DataFile carries the partition spec id and the field-id
 // lookup tables, so Partition() and the stats accessors return id-keyed
 // maps as if the file had been read from a manifest.
-func UnmarshalAvroDataFileEntry(data []byte, spec PartitionSpec, schema *Schema, version int) (DataFile, error) {
+//
+// It is reachable from the [github.com/apache/iceberg-go/codec]
+// package through the [datafileavro] bridge.
+func unmarshalAvroDataFileEntry(data []byte, spec PartitionSpec, schema *Schema, version int) (DataFile, error) {
 	if version < 1 || version > 3 {
-		return nil, fmt.Errorf("iceberg: UnmarshalAvroDataFileEntry: unsupported format version %d", version)
+		return nil, fmt.Errorf("iceberg: unmarshalAvroDataFileEntry: unsupported format version %d", version)
 	}
 	s, maps, err := manifestEntrySchemaFor(spec, schema, version)
 	if err != nil {
@@ -88,7 +113,7 @@ func UnmarshalAvroDataFileEntry(data []byte, spec PartitionSpec, schema *Schema,
 	}
 	entry, df := newDecodeEntry(version)
 	if _, err := s.Decode(data, entry); err != nil {
-		return nil, fmt.Errorf("iceberg: UnmarshalAvroDataFileEntry: %w", err)
+		return nil, fmt.Errorf("iceberg: unmarshalAvroDataFileEntry: %w", err)
 	}
 	df.specID = int32(spec.ID())
 	df.fieldNameToID = maps.nameToID
@@ -134,6 +159,13 @@ func newDecodeEntry(version int) (any, *dataFile) {
 // remains the single source of truth for the wire shape. It also
 // sidesteps the go-vet copies-lock warning that would fire on a
 // struct-literal copy of *dataFile (it embeds sync.Once).
+//
+// Note: this is a shallow copy. Pointer-typed avro fields (ColSizes,
+// LowerBounds, etc.) share their backing storage with the source.
+// The no-mutation guarantee of MarshalAvroEntry depends on the avro
+// encoder being read-only on the values it walks; TestMarshalAvroEntry
+// DoesNotMutate asserts this end-to-end across every avro-tagged
+// field, so a future regression in the encoder surfaces in tests.
 func cloneDataFileAvroFields(src *dataFile) *dataFile {
 	out := &dataFile{}
 	srcVal := reflect.ValueOf(src).Elem()
@@ -170,9 +202,15 @@ type dataFileFieldMaps struct {
 	idToFixedSize map[int]int
 }
 
+// dataFileSchemaCacheKey identifies a cached avro schema by the
+// structural fingerprint of its partition type and the format version.
+// Using the fingerprint (rather than spec.ID()) avoids cross-table
+// collisions: two tables that both rely on InitialPartitionSpecID = 0
+// but expose different partition column types receive different
+// cached schemas.
 type dataFileSchemaCacheKey struct {
-	specID  int
-	version int
+	partTypeFingerprint string
+	version             int
 }
 
 type dataFileSchemaEntry struct {
@@ -183,16 +221,19 @@ type dataFileSchemaEntry struct {
 var dataFileSchemaCache sync.Map
 
 // manifestEntrySchemaFor returns the cached avro schema and partition
-// field-id lookups for (spec, version). The schema is independent of
-// the table schema apart from how it shapes the partition struct.
+// field-id lookups for the given partition type and format version.
+// The cache key uses [StructType.String] as a structural fingerprint
+// of the partition type, so two specs that produce different partition
+// column types cache under different keys even when they share an id.
 func manifestEntrySchemaFor(spec PartitionSpec, schema *Schema, version int) (*avro.Schema, dataFileFieldMaps, error) {
-	key := dataFileSchemaCacheKey{specID: spec.ID(), version: version}
+	partType := spec.PartitionType(schema)
+	key := dataFileSchemaCacheKey{partTypeFingerprint: partType.String(), version: version}
 	if cached, ok := dataFileSchemaCache.Load(key); ok {
 		e := cached.(*dataFileSchemaEntry)
 
 		return e.schema, e.maps, nil
 	}
-	partSchema, err := partitionTypeToAvroSchema(spec.PartitionType(schema))
+	partSchema, err := partitionTypeToAvroSchema(partType)
 	if err != nil {
 		return nil, dataFileFieldMaps{}, err
 	}

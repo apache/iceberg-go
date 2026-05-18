@@ -30,7 +30,18 @@ import (
 // a small record that also carries the scan range and v3 row lineage.
 // The (spec, schema, version) triple must match what [DecodeFileScanTask]
 // is given on the receiver.
+//
+// All carried DataFiles (data, positional deletes, equality deletes,
+// and deletion vectors) are encoded against the same (spec, schema)
+// passed in. After partition evolution, delete files may have been
+// written under a different partition spec than the data file; callers
+// holding such files must encode them against the spec they were
+// written with, typically by partitioning the FileScanTask by per-file
+// specID and calling EncodeFileScanTask once per group.
 func EncodeFileScanTask(task table.FileScanTask, spec iceberg.PartitionSpec, schema *iceberg.Schema, version int) ([]byte, error) {
+	if version < 1 || version > 3 {
+		return nil, fmt.Errorf("codec: EncodeFileScanTask: unsupported format version %d", version)
+	}
 	fileBytes, err := EncodeDataFile(task.File, spec, schema, version)
 	if err != nil {
 		return nil, fmt.Errorf("file: %w", err)
@@ -64,6 +75,9 @@ func EncodeFileScanTask(task table.FileScanTask, spec iceberg.PartitionSpec, sch
 // DecodeFileScanTask reverses [EncodeFileScanTask]. The triple
 // (spec, schema, version) must match the encoder.
 func DecodeFileScanTask(data []byte, spec iceberg.PartitionSpec, schema *iceberg.Schema, version int) (table.FileScanTask, error) {
+	if version < 1 || version > 3 {
+		return table.FileScanTask{}, fmt.Errorf("codec: DecodeFileScanTask: unsupported format version %d", version)
+	}
 	var envelope fileScanTaskEnvelope
 	if _, err := fileScanTaskSchema.Decode(data, &envelope); err != nil {
 		return table.FileScanTask{}, fmt.Errorf("decode: %w", err)
