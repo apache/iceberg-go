@@ -1998,3 +1998,151 @@ func TestComplexTypeDefaultValidation(t *testing.T) {
 		require.ErrorContains(t, err, "list type field 'inner' (id: 2) must have null or JSON array initial-default")
 	})
 }
+
+func TestSetFormatVersionV1ToV2InitializesSequenceNumber(t *testing.T) {
+	builder := builderWithoutChanges(1)
+	require.NoError(t, builder.SetFormatVersion(2))
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.Equal(t, 2, meta.Version())
+	require.Equal(t, int64(0), meta.LastSequenceNumber())
+}
+
+func TestSetFormatVersionV1ToV3InitializesSequenceNumberAndNextRowID(t *testing.T) {
+	builder := builderWithoutChanges(1)
+	require.NoError(t, builder.SetFormatVersion(3))
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.Equal(t, 3, meta.Version())
+	require.Equal(t, int64(0), meta.LastSequenceNumber())
+	require.Equal(t, int64(0), meta.NextRowID())
+}
+
+func TestSetFormatVersionV2ToV3InitializesNextRowID(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	require.NoError(t, builder.SetFormatVersion(3))
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.Equal(t, 3, meta.Version())
+	require.Equal(t, int64(0), meta.NextRowID())
+}
+
+func TestSetFormatVersionV1ToV2AssignsUUID(t *testing.T) {
+	builder := builderWithoutChanges(1)
+	require.NoError(t, builder.SetFormatVersion(2))
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.NotEqual(t, uuid.UUID{}, meta.TableUUID())
+}
+
+func TestSetFormatVersionPreservesExistingUUID(t *testing.T) {
+	builder := builderWithoutChanges(1)
+	existingUUID := uuid.New()
+	require.NoError(t, builder.SetUUID(existingUUID))
+	require.NoError(t, builder.SetFormatVersion(2))
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.Equal(t, existingUUID, meta.TableUUID())
+}
+
+func TestSetFormatVersionDowngradeNotAllowed(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	err := builder.SetFormatVersion(1)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "downgrading format version from 2 to 1 is not allowed")
+}
+
+func TestSetFormatVersionRejectsUnsupportedVersion(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	err := builder.SetFormatVersion(99)
+	require.Error(t, err)
+	require.ErrorIs(t, err, iceberg.ErrInvalidFormatVersion)
+}
+
+func TestSetFormatVersionNoOpWhenSameVersion(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	require.NoError(t, builder.SetFormatVersion(2))
+	require.False(t, builder.HasChanges())
+}
+
+func TestSetFormatVersionValidatesLastColumnID(t *testing.T) {
+	tableSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "x", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "y", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 3, Name: "z", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	partSpec := iceberg.NewPartitionSpecID(0)
+
+	builder, err := NewMetadataBuilder(1)
+	require.NoError(t, err)
+	require.NoError(t, builder.SetLoc("s3://bucket/test"))
+	require.NoError(t, builder.AddSchema(tableSchema))
+	require.NoError(t, builder.SetCurrentSchemaID(-1))
+	require.NoError(t, builder.AddSortOrder(&UnsortedSortOrder))
+	require.NoError(t, builder.SetDefaultSortOrderID(-1))
+	require.NoError(t, builder.AddPartitionSpec(&partSpec, true))
+	require.NoError(t, builder.SetDefaultSpecID(-1))
+
+	// Corrupt lastColumnId to be less than the highest field ID in the schema
+	builder.lastColumnId = 1
+
+	err = builder.SetFormatVersion(2)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "last-column-id 1 is less than the highest field ID 3")
+
+	// Builder format version must remain unchanged after validation failure
+	require.Equal(t, 1, builder.formatVersion)
+}
+
+func TestSetFormatVersionV2ToV3PreservesSequenceNumber(t *testing.T) {
+	builder := builderWithoutChanges(2)
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+
+	builder2, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	require.NoError(t, builder2.SetFormatVersion(3))
+
+	meta3, err := builder2.Build()
+	require.NoError(t, err)
+	require.Equal(t, int64(0), meta3.LastSequenceNumber())
+}
+
+func TestSetFormatVersionV1ToV3FromDeserializedMetadata(t *testing.T) {
+	meta, err := ParseMetadataString(ExampleTableMetadataV1)
+	require.NoError(t, err)
+	require.Equal(t, 1, meta.Version())
+
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	require.NoError(t, builder.SetFormatVersion(3))
+
+	meta3, err := builder.Build()
+	require.NoError(t, err)
+	require.Equal(t, 3, meta3.Version())
+	require.Equal(t, int64(0), meta3.LastSequenceNumber())
+	require.Equal(t, int64(0), meta3.NextRowID())
+	require.NotEqual(t, uuid.UUID{}, meta3.TableUUID())
+}
+
+func TestSetFormatVersionV2ToV3FromDeserializedMetadata(t *testing.T) {
+	meta, err := ParseMetadataString(ExampleTableMetadataV2)
+	require.NoError(t, err)
+	require.Equal(t, 2, meta.Version())
+
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	require.NoError(t, builder.SetFormatVersion(3))
+
+	meta3, err := builder.Build()
+	require.NoError(t, err)
+	require.Equal(t, 3, meta3.Version())
+	require.Equal(t, int64(34), meta3.LastSequenceNumber())
+	require.Equal(t, int64(0), meta3.NextRowID())
+}

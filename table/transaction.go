@@ -187,6 +187,29 @@ func (t *Transaction) UpgradeFormatVersion(version int) error {
 	return t.apply([]Update{NewUpgradeFormatVersionUpdate(version)}, nil)
 }
 
+func (t *Transaction) RollbackToSnapshot(snapshotID int64) error {
+	cs := t.meta.currentSnapshot()
+	if cs == nil {
+		return errors.New("cannot rollback: table has no current snapshot")
+	}
+
+	lookup := func(id int64) *Snapshot {
+		s, _ := t.meta.SnapshotByID(id)
+
+		return s
+	}
+
+	if !IsAncestorOf(cs.SnapshotID, snapshotID, lookup) {
+		return fmt.Errorf("snapshot %d is not an ancestor of current snapshot %d",
+			snapshotID, cs.SnapshotID)
+	}
+
+	update := NewSetSnapshotRefUpdate(MainBranch, snapshotID, BranchRef, 0, 0, 0)
+	req := AssertRefSnapshotID(MainBranch, &cs.SnapshotID)
+
+	return t.apply([]Update{update}, []Requirement{req})
+}
+
 func (t *Transaction) UpdateSpec(caseSensitive bool) *UpdateSpec {
 	return NewUpdateSpec(t, caseSensitive)
 }

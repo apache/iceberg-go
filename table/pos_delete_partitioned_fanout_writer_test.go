@@ -215,7 +215,6 @@ func TestPositionDeletePartitionedFanoutWriterPartitionPathIsDeterministic(t *te
 
 	writer := &positionDeletePartitionedFanoutWriter{
 		metadata: latestMeta,
-		schema:   iceberg.PositionalDeleteSchema,
 	}
 
 	ctx := partitionContext{
@@ -231,7 +230,7 @@ func TestPositionDeletePartitionedFanoutWriterPartitionPathIsDeterministic(t *te
 		ctx.partitionData[1000],
 		ctx.partitionData[1001],
 		ctx.partitionData[1002],
-	}, iceberg.PositionalDeleteSchema)
+	}, latestMeta.CurrentSchema())
 
 	// run multiple times to ensure it consistently
 	// produces the same output for the same input context
@@ -244,6 +243,169 @@ func TestPositionDeletePartitionedFanoutWriterPartitionPathIsDeterministic(t *te
 
 	require.Lenf(t, seen, 1, "partition path must be stable for the same input map, got paths: %v", slices.Collect(maps.Keys(seen)))
 	require.Contains(t, seen, expectedPath)
+}
+
+// TestPositionDeletePartitionedFanoutWriterPartitionPathUsesTableSchema is a
+// regression test for https://github.com/apache/iceberg-go/issues/1082.
+//
+// The partitioned position-delete writer used to derive partition paths from
+// iceberg.PositionalDeleteSchema. That schema only contains file_path/pos, so
+// any partition field whose source column lives on the table data schema was
+// silently dropped by PartitionSpec.PartitionType, collapsing distinct target
+// partitions into a single empty partition path. Downstream, the rolling
+// writer factory keys writers by that path, so position-delete rows for
+// different target partitions ended up in the same delete file.
+//
+// This test pins the fix: when the partition spec references a real table
+// data column, two partitionContexts with different partition values must
+// produce distinct, non-empty partition paths.
+func TestPositionDeletePartitionedFanoutWriterPartitionPathUsesTableSchema(t *testing.T) {
+	t.Parallel()
+
+	// Table schema: id int + data string. Partition identity on `id`.
+	tableSchema := iceberg.NewSchema(
+		0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+
+	partitionSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		FieldID:   1000,
+		SourceIDs: []int{1},
+		Name:      "id",
+		Transform: iceberg.IdentityTransform{},
+	})
+
+	metadataBuilder, err := NewMetadataBuilder(2)
+	require.NoError(t, err)
+	require.NoError(t, metadataBuilder.AddSchema(tableSchema))
+	require.NoError(t, metadataBuilder.SetCurrentSchemaID(0))
+	require.NoError(t, metadataBuilder.AddPartitionSpec(&partitionSpec, true))
+	require.NoError(t, metadataBuilder.SetDefaultSpecID(0))
+	sortOrder, err := NewSortOrder(1, []SortField{{
+		SourceIDs: []int{1},
+		Direction: SortASC,
+		Transform: iceberg.IdentityTransform{},
+		NullOrder: NullsFirst,
+	}})
+	require.NoError(t, err)
+	require.NoError(t, metadataBuilder.AddSortOrder(&sortOrder))
+	require.NoError(t, metadataBuilder.SetDefaultSortOrderID(1))
+
+	latestMeta, err := metadataBuilder.Build()
+	require.NoError(t, err)
+
+	writer := &positionDeletePartitionedFanoutWriter{
+		metadata: latestMeta,
+	}
+
+	ctxA := partitionContext{specID: 0, partitionData: map[int]any{1000: int32(1)}}
+	ctxB := partitionContext{specID: 0, partitionData: map[int]any{1000: int32(2)}}
+
+	pathA, err := writer.partitionPath(ctxA)
+	require.NoError(t, err)
+	pathB, err := writer.partitionPath(ctxB)
+	require.NoError(t, err)
+
+	// Distinct, non-empty, table-schema-derived paths. If the writer reverts to using
+	// PositionalDeleteSchema, both calls collapse to "" and the rolling-writer factory
+	// keys them onto the same writer — the bug from #1082.
+	assert.Equal(t, "id=1", pathA)
+	assert.Equal(t, "id=2", pathB)
+}
+
+// TestPositionDeletePartitionedFanoutWriterRoutesPartitionsIndependently is the end-to-end
+// regression for https://github.com/apache/iceberg-go/issues/1082. It drives processBatch
+// with two batches whose target data files live in distinct partitions and asserts that
+// the writer factory produced two separate delete files, each tagged with the right
+// partition. Pre-fix, both batches collapsed onto one writer (one output file, wrong
+// partition metadata for the second batch's rows).
+func TestPositionDeletePartitionedFanoutWriterRoutesPartitionsIndependently(t *testing.T) {
+	t.Parallel()
+
+	tableSchema := iceberg.NewSchema(
+		0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+
+	partitionSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		FieldID:   1000,
+		SourceIDs: []int{1},
+		Name:      "id",
+		Transform: iceberg.IdentityTransform{},
+	})
+
+	metadataBuilder, err := NewMetadataBuilder(2)
+	require.NoError(t, err)
+	require.NoError(t, metadataBuilder.AddSchema(tableSchema))
+	require.NoError(t, metadataBuilder.SetCurrentSchemaID(0))
+	require.NoError(t, metadataBuilder.AddPartitionSpec(&partitionSpec, true))
+	require.NoError(t, metadataBuilder.SetDefaultSpecID(0))
+	sortOrder, err := NewSortOrder(1, []SortField{{
+		SourceIDs: []int{1},
+		Direction: SortASC,
+		Transform: iceberg.IdentityTransform{},
+		NullOrder: NullsFirst,
+	}})
+	require.NoError(t, err)
+	require.NoError(t, metadataBuilder.AddSortOrder(&sortOrder))
+	require.NoError(t, metadataBuilder.SetDefaultSortOrderID(1))
+	latestMeta, err := metadataBuilder.Build()
+	require.NoError(t, err)
+
+	const (
+		pathA = "file://t/id=1/a.parquet"
+		pathB = "file://t/id=2/b.parquet"
+	)
+	pathToCtx := map[string]partitionContext{
+		pathA: {partitionData: map[int]any{1000: int32(1)}, specID: 0},
+		pathB: {partitionData: map[int]any{1000: int32(2)}, specID: 0},
+	}
+
+	writeUUID := uuid.New()
+	cw := newConcurrentDataFileWriter(func(rootLocation string, fs io.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
+		return newPositionDeleteWriter(rootLocation, fs, meta, props, opts...)
+	})
+	factory, err := newWriterFactory(t.TempDir(), recordWritingArgs{
+		fs:        &io.LocalFS{},
+		sc:        PositionalDeleteArrowSchema,
+		writeUUID: &writeUUID,
+		counter:   internal.Counter(0),
+	}, metadataBuilder, iceberg.PositionalDeleteSchema, 1024*1024,
+		withContentType(iceberg.EntryContentPosDeletes),
+		withFactoryFileSchema(iceberg.PositionalDeleteSchema))
+	require.NoError(t, err)
+	writer := newPositionDeletePartitionedFanoutWriter(latestMeta, cw, pathToCtx, nil, factory)
+
+	dataFileCh := make(chan iceberg.DataFile, 4)
+
+	batchA := mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema,
+		fmt.Sprintf(`[{"file_path": %q, "pos": 0},{"file_path": %q, "pos": 1}]`, pathA, pathA))
+	batchB := mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema,
+		fmt.Sprintf(`[{"file_path": %q, "pos": 5}]`, pathB))
+
+	require.NoError(t, writer.processBatch(t.Context(), batchA, dataFileCh))
+	require.NoError(t, writer.processBatch(t.Context(), batchB, dataFileCh))
+	require.NoError(t, factory.closeAll())
+	close(dataFileCh)
+
+	var files []iceberg.DataFile
+	for df := range dataFileCh {
+		files = append(files, df)
+	}
+	require.Len(t, files, 2, "expected one delete file per target partition; pre-fix collapse produces only 1")
+
+	byPart := make(map[int32]iceberg.DataFile, 2)
+	for _, df := range files {
+		part, ok := df.Partition()[1000].(int32)
+		require.True(t, ok, "DataFile.Partition()[1000] must be int32, got %T", df.Partition()[1000])
+		byPart[part] = df
+	}
+	require.Contains(t, byPart, int32(1))
+	require.Contains(t, byPart, int32(2))
+	assert.Equal(t, int64(2), byPart[1].Count(), "id=1 delete file must contain only the two rows targeting pathA")
+	assert.Equal(t, int64(1), byPart[2].Count(), "id=2 delete file must contain only the one row targeting pathB")
 }
 
 func TestPositionDeletePartitionedNoGoroutineLeak(t *testing.T) {
@@ -569,7 +731,8 @@ func TestPositionDeleteUnpartitionedSortOrderID(t *testing.T) {
 func TestEqualityDeleteUnpartitionedSortOrderID(t *testing.T) {
 	t.Parallel()
 
-	delSchema := iceberg.NewSchema(0,
+	delSchema := iceberg.NewSchema(
+		0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 	)
 

@@ -708,8 +708,47 @@ func (b *MetadataBuilder) SetFormatVersion(formatVersion int) error {
 		return nil
 	}
 
+	if err := b.validateLastColumnID(); err != nil {
+		return err
+	}
+
+	previousVersion := b.formatVersion
 	b.updates = append(b.updates, NewUpgradeFormatVersionUpdate(formatVersion))
 	b.formatVersion = formatVersion
+
+	if previousVersion < 2 && formatVersion >= 2 {
+		if b.uuid == (uuid.UUID{}) {
+			b.uuid = uuid.New()
+		}
+
+		if b.lastSequenceNumber == nil {
+			seq := int64(0)
+			b.lastSequenceNumber = &seq
+		}
+	}
+
+	if previousVersion < 3 && formatVersion >= 3 {
+		if b.nextRowID == nil {
+			nextRowID := int64(0)
+			b.nextRowID = &nextRowID
+		}
+	}
+
+	return nil
+}
+
+func (b *MetadataBuilder) validateLastColumnID() error {
+	highestFieldID := 0
+	for _, schema := range b.schemaList {
+		if id := schema.HighestFieldID(); id > highestFieldID {
+			highestFieldID = id
+		}
+	}
+
+	if highestFieldID > 0 && b.lastColumnId < highestFieldID {
+		return fmt.Errorf("%w: last-column-id %d is less than the highest field ID %d in schemas",
+			ErrInvalidMetadata, b.lastColumnId, highestFieldID)
+	}
 
 	return nil
 }
@@ -1324,6 +1363,24 @@ var (
 	ErrPartitionSpecNotFound        = errors.New("partition spec not found")
 )
 
+type versionScopedField struct {
+	name       string
+	introduced int
+	present    bool
+}
+
+func rejectFieldsBeyondVersion(currentVersion int, fields ...versionScopedField) error {
+	var errs []error
+	for _, f := range fields {
+		if f.present && currentVersion < f.introduced {
+			errs = append(errs, fmt.Errorf("%w: v%d-only field '%s' present in v%d metadata",
+				ErrInvalidMetadataFormatVersion, f.introduced, f.name, currentVersion))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
 // ParseMetadata parses json metadata provided by the passed in reader,
 // returning an error if one is encountered.
 func ParseMetadata(r io.Reader) (Metadata, error) {
@@ -1867,6 +1924,15 @@ func (m *metadataV1) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
+	if err := rejectFieldsBeyondVersion(
+		aux.FormatVersion,
+		versionScopedField{name: "last-sequence-number", introduced: 2, present: aux.LastSequenceNumber != nil},
+		versionScopedField{name: "next-row-id", introduced: 3, present: aux.NextRowID != nil},
+		versionScopedField{name: "encryption-keys", introduced: 3, present: len(aux.EncryptionKeyList) > 0},
+	); err != nil {
+		return err
+	}
+
 	// CurrentSchemaID was optional in v1, it can also be expressed via Schema.
 	if aux.CurrentSchemaID == -1 && aux.Schema != nil {
 		aux.CurrentSchemaID = aux.Schema.ID
@@ -1930,6 +1996,14 @@ func (m *metadataV2) UnmarshalJSON(b []byte) error {
 	aux.LastColumnId = -1
 
 	if err := json.Unmarshal(b, aux); err != nil {
+		return err
+	}
+
+	if err := rejectFieldsBeyondVersion(
+		aux.FormatVersion,
+		versionScopedField{name: "next-row-id", introduced: 3, present: aux.NextRowID != nil},
+		versionScopedField{name: "encryption-keys", introduced: 3, present: len(aux.EncryptionKeyList) > 0},
+	); err != nil {
 		return err
 	}
 
@@ -2004,6 +2078,41 @@ func (m *metadataV3) UnmarshalJSON(b []byte) error {
 	m.preValidate()
 
 	return m.validate()
+}
+
+// MarshalJSON serializes v3 metadata with the spec-mandated emission of
+// `current-snapshot-id: null` for empty tables, rather than dropping the
+// key via the underlying `omitempty` tag (Java reference behaviour per
+// apache/iceberg#12335). The override re-declares `CurrentSnapshotID`
+// without omitempty in an outer struct that embeds an alias of
+// `metadataV3`; Go's encoding/json resolves the field-name collision in
+// favour of the shallower (outer) declaration, so the value is always
+// emitted — null when nil, the id otherwise.
+//
+// v1/v2 keep the omitempty path since their fixtures use the -1 sentinel
+// for "no current snapshot".
+//
+// `last-partition-id` is required for v2+ per spec — the existing parse-
+// time validation enforces this on read; the symmetric check below
+// rejects writes of malformed in-memory state (builder/parser paths
+// always populate it, so this only fires when code constructs metadataV3
+// directly and skips the builder).
+func (m *metadataV3) MarshalJSON() ([]byte, error) {
+	if m.LastPartitionID == nil {
+		return nil, fmt.Errorf("%w: last-partition-id must be set for v3 metadata", ErrInvalidMetadata)
+	}
+
+	// Alias strips the MarshalJSON method off metadataV3 so json.Marshal
+	// doesn't recurse back into this function via the embedded pointer.
+	type Alias metadataV3
+
+	return json.Marshal(&struct {
+		*Alias
+		CurrentSnapshotID *int64 `json:"current-snapshot-id"`
+	}{
+		Alias:             (*Alias)(m),
+		CurrentSnapshotID: m.CurrentSnapshotID,
+	})
 }
 
 func (m *metadataV3) validate() error {

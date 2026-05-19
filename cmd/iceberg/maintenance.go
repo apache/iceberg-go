@@ -86,6 +86,7 @@ type BranchCreateCmd struct {
 	MaxRefAge          string `arg:"--max-ref-age" help:"max ref age duration (e.g. 7d, 168h)"`
 	MaxSnapshotAge     string `arg:"--max-snapshot-age" help:"max snapshot age duration"`
 	MinSnapshotsToKeep *int   `arg:"--min-snapshots-to-keep" help:"minimum snapshots to keep"`
+	Yes                bool   `arg:"--yes" help:"skip confirmation prompt"`
 }
 
 type BranchCmd struct {
@@ -97,6 +98,7 @@ type TagCreateCmd struct {
 	TagName    string `arg:"positional,required" help:"tag name"`
 	SnapshotID *int64 `arg:"--snapshot-id" help:"snapshot ID (defaults to current snapshot)"`
 	MaxRefAge  string `arg:"--max-ref-age" help:"max ref age duration (e.g. 7d, 168h)"`
+	Yes        bool   `arg:"--yes" help:"skip confirmation prompt"`
 }
 
 type TagCmd struct {
@@ -173,10 +175,13 @@ type RollbackResult struct {
 }
 
 type RefCreatedResult struct {
-	Table      string `json:"table"`
-	RefName    string `json:"ref_name"`
-	RefType    string `json:"ref_type"`
-	SnapshotID int64  `json:"snapshot_id"`
+	Table              string `json:"table"`
+	RefName            string `json:"ref_name"`
+	RefType            string `json:"ref_type"`
+	SnapshotID         int64  `json:"snapshot_id"`
+	MaxRefAgeMs        *int64 `json:"max_ref_age_ms,omitempty"`
+	MaxSnapshotAgeMs   *int64 `json:"max_snapshot_age_ms,omitempty"`
+	MinSnapshotsToKeep *int   `json:"min_snapshots_to_keep,omitempty"`
 }
 
 // Shared helpers
