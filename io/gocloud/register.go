@@ -43,6 +43,7 @@ func registerS3Schemes() {
 	icebergio.Register("s3", s3Factory)
 	icebergio.Register("s3a", s3Factory)
 	icebergio.Register("s3n", s3Factory)
+	icebergio.Register("oss", s3Factory)
 }
 
 // registerGCSScheme registers the Google Cloud Storage scheme (gs).

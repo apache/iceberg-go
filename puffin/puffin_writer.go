@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strconv"
 
 	"github.com/apache/iceberg-go"
 )
@@ -129,13 +130,36 @@ func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, er
 		return BlobMetadata{}, errors.New("puffin: cannot add blob: fields is required")
 	}
 
-	// Deletion vectors have special requirements per spec
+	// Deletion vectors have special requirements per spec. Format matches
+	// the reader-side validateBlobs check so both sides surface the same
+	// "<type> requires X to be -1, got N" phrasing for log grep.
 	if input.Type == BlobTypeDeletionVector {
 		if input.SnapshotID != -1 {
-			return BlobMetadata{}, errors.New("puffin: deletion-vector-v1 requires snapshot-id to be -1")
+			return BlobMetadata{}, fmt.Errorf("puffin: %s requires snapshot-id to be -1, got %d",
+				BlobTypeDeletionVector, input.SnapshotID)
 		}
 		if input.SequenceNumber != -1 {
-			return BlobMetadata{}, errors.New("puffin: deletion-vector-v1 requires sequence-number to be -1")
+			return BlobMetadata{}, fmt.Errorf("puffin: %s requires sequence-number to be -1, got %d",
+				BlobTypeDeletionVector, input.SequenceNumber)
+		}
+		// Properties cardinality and referenced-data-file are spec-mandated
+		// for deletion-vector-v1; the reader in table/dv does not enforce
+		// them today, so we hold the line here to keep Go-emitted files
+		// always conformant.
+		if input.Properties["cardinality"] == "" {
+			return BlobMetadata{}, errors.New("puffin: deletion-vector-v1 requires a cardinality property")
+		}
+		// Reject non-numeric or negative values at write time too — otherwise
+		// a writer could emit "cardinality": "abc" or "-1" that the reader
+		// hard-rejects later. ParseUint covers both: "-1" fails as invalid
+		// syntax (the minus is rejected before any value is parsed), so
+		// non-numeric and negative collapse into one error path.
+		if _, err := strconv.ParseUint(input.Properties["cardinality"], 10, 64); err != nil {
+			return BlobMetadata{}, fmt.Errorf("puffin: deletion-vector-v1 cardinality property %q is not a valid non-negative integer: %w",
+				input.Properties["cardinality"], err)
+		}
+		if input.Properties["referenced-data-file"] == "" {
+			return BlobMetadata{}, errors.New("puffin: deletion-vector-v1 requires a referenced-data-file property")
 		}
 	}
 

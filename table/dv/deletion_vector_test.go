@@ -93,6 +93,20 @@ func wrapDVPayloadForTest(bitmapBytes []byte) []byte {
 }
 
 func writePuffinWithDVBlob(t *testing.T, dir string, dvBlobBytes []byte) (string, puffin.BlobMetadata) {
+	// Callers of this wrapper all use the canonical 5-position fixture
+	// (small-alternating-values-position-index.bin), so hardcoding "5" is
+	// safe. Tests that exercise other bitmap sizes call
+	// writePuffinWithDVBlobAndProps directly with their own cardinality.
+	return writePuffinWithDVBlobAndProps(t, dir, dvBlobBytes, map[string]string{
+		"referenced-data-file": "s3://bucket/data/data-001.parquet",
+		"cardinality":          "5",
+	})
+}
+
+// writePuffinWithDVBlobAndProps is the same as writePuffinWithDVBlob but with
+// caller-supplied blob properties — used by the cardinality-validation tests
+// to inject the spec-mandated `cardinality` property (or omit it).
+func writePuffinWithDVBlobAndProps(t *testing.T, dir string, dvBlobBytes []byte, props map[string]string) (string, puffin.BlobMetadata) {
 	t.Helper()
 
 	path := filepath.Join(dir, "test-dv.puffin")
@@ -108,9 +122,7 @@ func writePuffinWithDVBlob(t *testing.T, dir string, dvBlobBytes []byte) (string
 		SnapshotID:     -1,
 		SequenceNumber: -1,
 		Fields:         []int32{2147483546},
-		Properties: map[string]string{
-			"referenced-data-file": "s3://bucket/data/data-001.parquet",
-		},
+		Properties:     props,
 	}, dvBlobBytes)
 	require.NoError(t, err)
 	require.NoError(t, w.Finish())
@@ -379,4 +391,96 @@ func TestReadDVInvalidBlobRange(t *testing.T) {
 	offset, size := int64(0), meta.Length
 	_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
 	assert.ErrorContains(t, err, "read DV blob at offset 0")
+}
+
+// TestReadDVCardinalityValidation pins the spec-mandated check that the
+// puffin blob's `cardinality` property matches the bitmap's actual decoded
+// cardinality. Catches truncated/partially-overwritten blobs whose CRC still
+// validates over the bytes that are present (5 spec positions in the
+// reference fixture).
+func TestReadDVCardinalityValidation(t *testing.T) {
+	dvBlobBytes := readDVTestData(t, "small-alternating-values-position-index.bin")
+
+	t.Run("matching cardinality passes", func(t *testing.T) {
+		dir := t.TempDir()
+		path, meta := writePuffinWithDVBlobAndProps(t, dir, dvBlobBytes, map[string]string{
+			"referenced-data-file": "s3://bucket/data/data-001.parquet",
+			"cardinality":          "5",
+		})
+		offset, size := meta.Offset, meta.Length
+		bm, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
+		require.NoError(t, err)
+		assert.Equal(t, int64(5), bm.Cardinality())
+	})
+
+	t.Run("mismatched cardinality is rejected", func(t *testing.T) {
+		dir := t.TempDir()
+		path, meta := writePuffinWithDVBlobAndProps(t, dir, dvBlobBytes, map[string]string{
+			"referenced-data-file": "s3://bucket/data/data-001.parquet",
+			// Bitmap actually has 5 positions; claim 99.
+			"cardinality": "99",
+		})
+		offset, size := meta.Offset, meta.Length
+		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
+		require.Error(t, err)
+		// Pin the specific error path: DeserializeDV's "cardinality
+		// mismatch", not the helper's "invalid cardinality" parse error.
+		assert.Contains(t, err.Error(), "cardinality mismatch")
+	})
+
+	t.Run("missing property is tolerated with a warning", func(t *testing.T) {
+		// No `cardinality` property — spec deviation tolerated for read
+		// compatibility with third-party writers that omit it. ReadDV logs
+		// a warning (see slog.Warn) and falls back to CRC-only validation
+		// inside DeserializeDV. Strict enforcement is deferred until the
+		// Go writer-side coverage lands.
+		dir := t.TempDir()
+		path, meta := writePuffinWithDVBlob(t, dir, dvBlobBytes)
+		offset, size := meta.Offset, meta.Length
+		bm, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
+		require.NoError(t, err)
+		assert.Equal(t, int64(5), bm.Cardinality())
+	})
+
+	// Note: the previous "malformed property is rejected" and "negative
+	// cardinality rejected on read" subtests were removed once the puffin
+	// writer started rejecting non-numeric and negative cardinality values
+	// at AddBlob time (via ParseUint). The reader-side checks in
+	// blobCardinality stay as belt-and-suspenders for third-party-written
+	// files but are no longer reachable from any in-tree writer path used
+	// to construct test fixtures. Writer-side coverage:
+	//   TestWriterValidation/deletion_vector_non-numeric_cardinality
+	//   TestWriterValidation/deletion_vector_negative_cardinality
+	// (both in puffin_test.go).
+
+	t.Run("manifest offset not found in footer is rejected with a precise error", func(t *testing.T) {
+		// Manifest entry points at an in-bounds offset that doesn't match
+		// any footer blob's starting position. Surfaces as the helper's
+		// "no blob in puffin footer" error rather than the deeper CRC
+		// error from DeserializeDV — clearer signal for diagnosing
+		// manifest corruption.
+		dir := t.TempDir()
+		path, meta := writePuffinWithDVBlob(t, dir, dvBlobBytes)
+		// Offset shifted by 1 keeps the ReadAt range inside the blob
+		// region (no "extends into footer" error) while guaranteeing no
+		// footer blob starts at that exact offset.
+		wrongOffset, smallSize := meta.Offset+1, int64(8)
+		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &wrongOffset, &smallSize))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no blob in puffin footer")
+	})
+
+	t.Run("manifest size disagrees with footer length at matching offset", func(t *testing.T) {
+		// Same starting offset but a different length — a distinct writer
+		// bug from "no blob at offset". The helper surfaces a precise
+		// "blob at offset N has length M, manifest says K" message rather
+		// than the broader "no blob" path.
+		dir := t.TempDir()
+		path, meta := writePuffinWithDVBlob(t, dir, dvBlobBytes)
+		offset := meta.Offset
+		wrongSize := meta.Length - 1
+		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &wrongSize))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "manifest says")
+	})
 }

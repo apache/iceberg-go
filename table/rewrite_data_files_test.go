@@ -243,6 +243,143 @@ func TestRewriteDataFiles_EmptyPlan(t *testing.T) {
 	assert.Equal(t, int64(0), result.BytesBefore)
 }
 
+// TestExecuteCompactionGroup_TargetFileSizeForwarded verifies that
+// WithCompactionTargetFileSize reaches the underlying WriteRecords
+// call: a tiny target size on a multi-row group must force the
+// writer to emit more than one output file.
+func TestExecuteCompactionGroup_TargetFileSizeForwarded(t *testing.T) {
+	tbl := newRewriteTestTable(t)
+
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	for i := range 5 {
+		dataPath := tbl.Location() + fmt.Sprintf("/data/file-%d.parquet", i)
+		writeParquetFile(t, dataPath, arrowSc,
+			fmt.Sprintf(`[{"id": %d, "data": "row-%d"}]`, i+1, i+1))
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		tbl, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+	}
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 5)
+
+	// Build the group manually so option-forwarding is decoupled from
+	// the planner's bin-packing / MinInputFiles knobs.
+	scanTasks := make([]table.FileScanTask, len(tasks))
+	var totalSize int64
+	for i, st := range tasks {
+		scanTasks[i] = st
+		totalSize += st.File.FileSizeBytes()
+	}
+	group := table.CompactionTaskGroup{
+		PartitionKey:   "single",
+		Tasks:          scanTasks,
+		TotalSizeBytes: totalSize,
+	}
+
+	withTiny, err := table.ExecuteCompactionGroup(t.Context(), tbl, group,
+		table.WithCompactionTargetFileSize(1))
+	require.NoError(t, err)
+	assert.Greater(t, len(withTiny.NewDataFiles), 1,
+		"WithCompactionTargetFileSize(1) must force the writer to roll over per row")
+
+	withDefault, err := table.ExecuteCompactionGroup(t.Context(), tbl, group)
+	require.NoError(t, err)
+	assert.Len(t, withDefault.NewDataFiles, 1,
+		"without the option, the same group consolidates into a single file")
+}
+
+// TestExecuteCompactionGroup_ScanConcurrencyForwarded is a smoke test
+// confirming WithCompactionScanConcurrency is wired through without
+// breaking the read path. We can't easily observe scan parallelism
+// from the result, so the assertion is correctness equivalence with a
+// no-option baseline: same group → same files in / out.
+func TestExecuteCompactionGroup_ScanConcurrencyForwarded(t *testing.T) {
+	tbl := newRewriteTestTable(t)
+
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	for i := range 3 {
+		dataPath := tbl.Location() + fmt.Sprintf("/data/file-%d.parquet", i)
+		writeParquetFile(t, dataPath, arrowSc,
+			fmt.Sprintf(`[{"id": %d, "data": "row-%d"}]`, i+1, i+1))
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		tbl, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+	}
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+
+	plan, err := defaultTestCompactionCfg.PlanCompaction(tasks)
+	require.NoError(t, err)
+	require.NotEmpty(t, plan.Groups)
+
+	group := toTaskGroups(plan.Groups)[0]
+
+	withOption, err := table.ExecuteCompactionGroup(t.Context(), tbl, group,
+		table.WithCompactionScanConcurrency(1))
+	require.NoError(t, err)
+
+	baseline, err := table.ExecuteCompactionGroup(t.Context(), tbl, group)
+	require.NoError(t, err)
+
+	assert.Equal(t, len(baseline.OldDataFiles), len(withOption.OldDataFiles),
+		"setting scan concurrency must not change the set of old files read")
+	assert.Equal(t, len(baseline.NewDataFiles), len(withOption.NewDataFiles),
+		"setting scan concurrency must not change the set of consolidated outputs")
+}
+
+// TestRewriteDataFiles_GroupOptionsForwarded verifies that
+// RewriteDataFilesOptions.GroupOptions are piped through to every
+// ExecuteCompactionGroup call.
+func TestRewriteDataFiles_GroupOptionsForwarded(t *testing.T) {
+	tbl := newRewriteTestTable(t)
+
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	for i := range 5 {
+		dataPath := tbl.Location() + fmt.Sprintf("/data/file-%d.parquet", i)
+		writeParquetFile(t, dataPath, arrowSc,
+			fmt.Sprintf(`[{"id": %d, "data": "row-%d"}]`, i+1, i+1))
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		tbl, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+	}
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+
+	plan, err := defaultTestCompactionCfg.PlanCompaction(tasks)
+	require.NoError(t, err)
+
+	tx := tbl.NewTransaction()
+	result, err := tx.RewriteDataFiles(t.Context(), toTaskGroups(plan.Groups), table.RewriteDataFilesOptions{
+		GroupOptions: []table.CompactionGroupOption{
+			table.WithCompactionTargetFileSize(1),
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Greater(t, result.AddedDataFiles, 1,
+		"GroupOptions must reach ExecuteCompactionGroup; tiny target size should split output")
+
+	// Drive the commit through to catch regressions that break
+	// ReplaceFiles under tiny-target rewrites — the in-process counter
+	// above only proves the option reached the writer.
+	committed, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	assertRowCount(t, committed, 5)
+}
+
 func TestRewriteDataFiles_EmptyGroupSkipped(t *testing.T) {
 	tbl := newRewriteTestTable(t)
 
