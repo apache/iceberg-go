@@ -19,7 +19,7 @@ under the License.
 
 # Geopatial Parquet Fixtures from [parquet-testing](https://github.com/apache/parquet-testing)
 
-This directory contains all the parquet fixtures from the [parquet-testing geospatial fixtures](https://github.com/apache/parquet-testing/tree/master/data/geospatial). It is duplicated here
+This directory contains all the geospatial parquet test fixtures from the [parquet-testing repository](https://github.com/apache/parquet-testing/tree/master/data/geospatial). It is duplicated here
 to use for testing. These files are intended to call out specific edge cases related to null values, crs projections, and variations in the geometry type.
 
 
