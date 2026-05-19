@@ -11,7 +11,8 @@ START_MARKER="<!-- BEGIN GENERATED FIXTURE LINKS -->"
 
 JSON="$(curl -s "$API_URL")"
 
-# Download all parquet fixtures
+# Download all the parquet fixtures, not the associated config files
+# or generation scripts
 printf '%s\n' "$JSON" \
   | jq -r '.[] | .download_url' \
   | grep '\.parquet$' \
@@ -31,8 +32,6 @@ rm -f "${README}.bak"
   echo "## Source of Parquet Fixtures"
   echo
 
-  # Only download parquet files with the native geometry type
-  # not geoparquet
   printf '%s\n' "$JSON" \
     | jq -r '
         .[]
