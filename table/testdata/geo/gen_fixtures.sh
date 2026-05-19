@@ -19,6 +19,8 @@
 
 set -euo pipefail
 
+cd "$(dirname "$0")"
+
 # Pin to the specific commit for reproducibility
 # If there are changes to the data, this can be bumped
 REF="d1f14a06f800238b127b51fef6fa6b9feb15ab0b"
@@ -27,14 +29,15 @@ README="README.md"
 
 START_MARKER="<!-- BEGIN GENERATED FIXTURE LINKS -->"
 
-JSON="$(curl -s "$API_URL")"
+# Fail on HTTP errors + show them
+JSON=$(curl -fsSL "$API_URL")
 
 # Download all the parquet fixtures, not the associated config files
 # or generation scripts
 printf '%s\n' "$JSON" \
   | jq -r '.[] | .download_url' \
   | grep '\.parquet$' \
-  | xargs -n 1 wget -N
+  | xargs -I {} curl -fLO {}
 
 # Remove previously generated section
 # We use a .bak file to avoid clobbering the original
@@ -60,3 +63,5 @@ rm -f "${README}.bak"
   echo
   echo "<!-- END GENERATED FIXTURE LINKS -->"
 } >> "$README"
+
+echo "Finished fetching parquet fixtures with geo data from parquet-testing repo"
