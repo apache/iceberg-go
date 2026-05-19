@@ -20,16 +20,35 @@ package iceberg
 import (
 	"fmt"
 	"reflect"
-	"sync"
 
 	"github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/internal/datafileavro"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/twmb/avro"
 )
 
+// defaultSchemaCacheSize is the initial capacity of dataFileSchemaCache.
+// 8192 covers a few thousand active tables (each contributing 1–3 entries
+// for its partition spec × format version) which is what a long-running
+// consumer like a server-side compaction service typically sees.
+// SetSchemaCacheSize tunes this at runtime.
+const defaultSchemaCacheSize = 8192
+
 func init() {
+	if datafileavro.Unmarshal != nil {
+		panic("iceberg: datafileavro.Unmarshal already set")
+	}
 	datafileavro.Unmarshal = func(data []byte, spec, schema any, version int) (any, error) {
-		return unmarshalAvroDataFileEntry(data, spec.(PartitionSpec), schema.(*Schema), version)
+		s, ok := spec.(PartitionSpec)
+		if !ok {
+			return nil, fmt.Errorf("iceberg: datafileavro.Unmarshal: expected PartitionSpec, got %T", spec)
+		}
+		sc, ok := schema.(*Schema)
+		if !ok {
+			return nil, fmt.Errorf("iceberg: datafileavro.Unmarshal: expected *Schema, got %T", schema)
+		}
+
+		return unmarshalAvroDataFileEntry(data, s, sc, version)
 	}
 }
 
@@ -203,13 +222,14 @@ type dataFileFieldMaps struct {
 }
 
 // dataFileSchemaCacheKey identifies a cached avro schema by the
-// structural fingerprint of its partition type and the format version.
-// Using the fingerprint (rather than spec.ID()) avoids cross-table
-// collisions: two tables that both rely on InitialPartitionSpecID = 0
-// but expose different partition column types receive different
-// cached schemas.
+// structural fingerprint of the partition Avro shape and the format
+// version. The fingerprint is taken from the avro schema produced by
+// [partitionTypeToAvroSchema] rather than [StructType.String]: the
+// avro shape ignores doc strings and other metadata that don't change
+// the wire format, so structurally identical specs that differ only
+// in documentation share a single cache entry.
 type dataFileSchemaCacheKey struct {
-	partTypeFingerprint string
+	partAvroFingerprint string
 	version             int
 }
 
@@ -218,24 +238,46 @@ type dataFileSchemaEntry struct {
 	maps   dataFileFieldMaps
 }
 
-var dataFileSchemaCache sync.Map
+var dataFileSchemaCache = mustNewSchemaCache(defaultSchemaCacheSize)
+
+func mustNewSchemaCache(size int) *lru.Cache[dataFileSchemaCacheKey, *dataFileSchemaEntry] {
+	c, err := lru.New[dataFileSchemaCacheKey, *dataFileSchemaEntry](size)
+	if err != nil {
+		panic(fmt.Sprintf("iceberg: schema cache size %d invalid: %v", size, err))
+	}
+
+	return c
+}
+
+// SetSchemaCacheSize resizes the manifest-entry schema cache used by
+// the DataFile codec. The default capacity is sized for a few thousand
+// active partition specs; long-running consumers with larger working
+// sets (e.g. a compaction service touching many tables) should raise
+// it. Existing entries are preserved on grow; on shrink, least-recently
+// used entries are evicted down to the new size. Not safe to call
+// concurrently with codec operations.
+func SetSchemaCacheSize(size int) error {
+	if size <= 0 {
+		return fmt.Errorf("iceberg: SetSchemaCacheSize: size must be positive, got %d", size)
+	}
+	dataFileSchemaCache.Resize(size)
+
+	return nil
+}
 
 // manifestEntrySchemaFor returns the cached avro schema and partition
 // field-id lookups for the given partition type and format version.
-// The cache key uses [StructType.String] as a structural fingerprint
-// of the partition type, so two specs that produce different partition
-// column types cache under different keys even when they share an id.
+// The cache key fingerprints the partition Avro shape, so specs that
+// differ only in field documentation share a single entry.
 func manifestEntrySchemaFor(spec PartitionSpec, schema *Schema, version int) (*avro.Schema, dataFileFieldMaps, error) {
 	partType := spec.PartitionType(schema)
-	key := dataFileSchemaCacheKey{partTypeFingerprint: partType.String(), version: version}
-	if cached, ok := dataFileSchemaCache.Load(key); ok {
-		e := cached.(*dataFileSchemaEntry)
-
-		return e.schema, e.maps, nil
-	}
 	partSchema, err := partitionTypeToAvroSchema(partType)
 	if err != nil {
 		return nil, dataFileFieldMaps{}, err
+	}
+	key := dataFileSchemaCacheKey{partAvroFingerprint: partSchema.String(), version: version}
+	if cached, ok := dataFileSchemaCache.Get(key); ok {
+		return cached.schema, cached.maps, nil
 	}
 	fullSchema, err := internal.NewManifestEntrySchema(partSchema, version)
 	if err != nil {
@@ -250,11 +292,7 @@ func manifestEntrySchemaFor(spec PartitionSpec, schema *Schema, version int) (*a
 			idToFixedSize: i2s,
 		},
 	}
-	if actual, loaded := dataFileSchemaCache.LoadOrStore(key, entry); loaded {
-		e := actual.(*dataFileSchemaEntry)
-
-		return e.schema, e.maps, nil
-	}
+	dataFileSchemaCache.Add(key, entry)
 
 	return entry.schema, entry.maps, nil
 }

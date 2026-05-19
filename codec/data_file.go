@@ -67,12 +67,19 @@ import (
 // (apache/iceberg#12182). New DataFiles should not set distinct
 // counts.
 func EncodeDataFile(df iceberg.DataFile, spec iceberg.PartitionSpec, schema *iceberg.Schema, version int) ([]byte, error) {
+	if version < 1 || version > 3 {
+		return nil, fmt.Errorf("codec: EncodeDataFile: unsupported format version %d", version)
+	}
 	m, ok := df.(iceberg.AvroEntryMarshaler)
 	if !ok {
-		return nil, fmt.Errorf("codec: EncodeDataFile requires a DataFile implementing iceberg.AvroEntryMarshaler, got %T", df)
+		return nil, fmt.Errorf("codec: EncodeDataFile: requires a DataFile implementing iceberg.AvroEntryMarshaler, got %T", df)
+	}
+	b, err := m.MarshalAvroEntry(spec, schema, version)
+	if err != nil {
+		return nil, fmt.Errorf("codec: EncodeDataFile: %w", err)
 	}
 
-	return m.MarshalAvroEntry(spec, schema, version)
+	return b, nil
 }
 
 // DecodeDataFile decodes bytes produced by [EncodeDataFile] back into a
@@ -84,10 +91,20 @@ func EncodeDataFile(df iceberg.DataFile, spec iceberg.PartitionSpec, schema *ice
 // lookup tables, so Partition() and the stats accessors return id-keyed
 // maps as if the file had been read from a manifest.
 func DecodeDataFile(data []byte, spec iceberg.PartitionSpec, schema *iceberg.Schema, version int) (iceberg.DataFile, error) {
+	if version < 1 || version > 3 {
+		return nil, fmt.Errorf("codec: DecodeDataFile: unsupported format version %d", version)
+	}
+	if datafileavro.Unmarshal == nil {
+		return nil, fmt.Errorf("codec: DecodeDataFile: bridge not initialized; the iceberg package must be imported to register the decoder")
+	}
 	res, err := datafileavro.Unmarshal(data, spec, schema, version)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("codec: DecodeDataFile: %w", err)
+	}
+	df, ok := res.(iceberg.DataFile)
+	if !ok {
+		return nil, fmt.Errorf("codec: DecodeDataFile: bridge returned unexpected type %T", res)
 	}
 
-	return res.(iceberg.DataFile), nil
+	return df, nil
 }

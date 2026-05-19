@@ -32,12 +32,12 @@ import (
 // is given on the receiver.
 //
 // All carried DataFiles (data, positional deletes, equality deletes,
-// and deletion vectors) are encoded against the same (spec, schema)
-// passed in. After partition evolution, delete files may have been
-// written under a different partition spec than the data file; callers
-// holding such files must encode them against the spec they were
-// written with, typically by partitioning the FileScanTask by per-file
-// specID and calling EncodeFileScanTask once per group.
+// and deletion vectors) must share the supplied spec.ID(): each delete
+// file's SpecID is validated and a mismatch returns an error. After
+// partition evolution, delete files may have been written under a
+// different partition spec than the data file; the caller is
+// responsible for partitioning the FileScanTask by per-file specID and
+// calling EncodeFileScanTask once per group.
 func EncodeFileScanTask(task table.FileScanTask, spec iceberg.PartitionSpec, schema *iceberg.Schema, version int) ([]byte, error) {
 	if version < 1 || version > 3 {
 		return nil, fmt.Errorf("codec: EncodeFileScanTask: unsupported format version %d", version)
@@ -178,6 +178,9 @@ func encodeDataFileSlice(files []iceberg.DataFile, spec iceberg.PartitionSpec, s
 	}
 	out := make([][]byte, 0, len(files))
 	for i, f := range files {
+		if int(f.SpecID()) != spec.ID() {
+			return nil, fmt.Errorf("entry %d: data file spec id %d does not match codec spec id %d (partition evolution requires per-spec grouping)", i, f.SpecID(), spec.ID())
+		}
 		b, err := EncodeDataFile(f, spec, schema, version)
 		if err != nil {
 			return nil, fmt.Errorf("entry %d: %w", i, err)

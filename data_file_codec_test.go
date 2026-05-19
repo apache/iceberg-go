@@ -19,12 +19,43 @@ package iceberg
 
 import (
 	"reflect"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-func TestManifestEntrySchemaForCachesByPartitionTypeFingerprint(t *testing.T) {
+func TestSchemaCacheLRUBoundsSize(t *testing.T) {
+	require.NoError(t, SetSchemaCacheSize(2))
+	t.Cleanup(func() { require.NoError(t, SetSchemaCacheSize(defaultSchemaCacheSize)) })
+
+	sc := NewSchema(0,
+		NestedField{ID: 1, Name: "a", Type: Int64Type{}, Required: true},
+		NestedField{ID: 2, Name: "b", Type: StringType{}, Required: true},
+		NestedField{ID: 3, Name: "c", Type: BooleanType{}, Required: true},
+	)
+	for i, src := range []int{1, 2, 3} {
+		spec := NewPartitionSpec(PartitionField{
+			SourceIDs: []int{src},
+			FieldID:   1000 + i,
+			Name:      "part_" + strconv.Itoa(src),
+			Transform: IdentityTransform{},
+		})
+		_, _, err := manifestEntrySchemaFor(spec, sc, 2)
+		require.NoError(t, err)
+	}
+	require.LessOrEqual(t, dataFileSchemaCache.Len(), 2,
+		"LRU must enforce its size bound by evicting least-recently-used entries on insert")
+}
+
+func TestSetSchemaCacheSizeRejectsNonPositive(t *testing.T) {
+	for _, size := range []int{0, -1} {
+		require.Error(t, SetSchemaCacheSize(size),
+			"size %d must be rejected", size)
+	}
+}
+
+func TestManifestEntrySchemaForCachesByPartitionAvroFingerprint(t *testing.T) {
 	spec, schema, _ := fullyPopulatedDataFileForCodec(t, 2)
 	s1, _, err := manifestEntrySchemaFor(spec, schema, 2)
 	require.NoError(t, err)

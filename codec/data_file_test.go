@@ -53,6 +53,38 @@ func TestEncodeDataFileRejectsForeignImpl(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "iceberg.AvroEntryMarshaler",
 		"error should name the interface the caller needs to satisfy")
+	require.Contains(t, err.Error(), "codec: EncodeDataFile:",
+		"codec errors should be prefixed with the codec entry point name")
+}
+
+func TestEncodeDataFileRejectsBadVersion(t *testing.T) {
+	spec, schema, df := fullyPopulatedDataFile(t, 2)
+	for _, v := range []int{0, 4, -1} {
+		_, err := codec.EncodeDataFile(df, spec, schema, v)
+		require.Error(t, err, "version %d must be rejected", v)
+		require.Contains(t, err.Error(), "codec: EncodeDataFile:")
+		require.Contains(t, err.Error(), "unsupported format version")
+	}
+}
+
+func TestDecodeDataFileRejectsBadVersion(t *testing.T) {
+	spec, schema, df := fullyPopulatedDataFile(t, 2)
+	encoded, err := codec.EncodeDataFile(df, spec, schema, 2)
+	require.NoError(t, err)
+	for _, v := range []int{0, 4, -1} {
+		_, err := codec.DecodeDataFile(encoded, spec, schema, v)
+		require.Error(t, err, "version %d must be rejected", v)
+		require.Contains(t, err.Error(), "codec: DecodeDataFile:")
+		require.Contains(t, err.Error(), "unsupported format version")
+	}
+}
+
+func TestDecodeDataFileWrapsDecodeError(t *testing.T) {
+	spec, schema, _ := fullyPopulatedDataFile(t, 2)
+	_, err := codec.DecodeDataFile([]byte{0xCA, 0xFE}, spec, schema, 2)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "codec: DecodeDataFile:",
+		"decode-side errors from the bridge should be wrapped with the codec entry point")
 }
 
 // TestEncodeDataFileAcceptsExternalMarshaler exercises the
