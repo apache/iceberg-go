@@ -60,6 +60,11 @@ type MemFS struct {
 	files map[string][]byte // keyed by full URI
 }
 
+// NewMemFS creates an initialized MemFS ready for use.
+func NewMemFS() *MemFS {
+	return &MemFS{files: make(map[string][]byte)}
+}
+
 func (m *MemFS) Open(name string) (File, error) {
 	m.mu.RLock()
 	data, ok := m.files[name]
