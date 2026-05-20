@@ -181,11 +181,11 @@ func (s *RestIntegrationSuite) TestCreateTable() {
 	s.Equal("s3://warehouse/rest-integration-test/test-create-table", tbl.Location())
 	s.Equal("baz", tbl.Properties()["foobar"])
 
-	exists, err := s.cat.CheckTableExists(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table"))
+	exists, err := s.cat.CheckTableExists(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-create-table"))
 	s.Require().NoError(err)
 	s.True(exists)
 
-	s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table")))
+	s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-create-table")))
 }
 
 func (s *RestIntegrationSuite) TestCreateView() {
