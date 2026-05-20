@@ -2372,6 +2372,8 @@ func (suite *StrictMetricsTestSuite) TestMissingNullCounts() {
 		msg      string
 	}{
 		{iceberg.GreaterThan(iceberg.Reference("optional_id"), int32(0)), false, "should skip: optional field missing null count may contain nulls"},
+		{iceberg.EqualTo(iceberg.Reference("optional_id"), int32(1)), false, "should skip: optional field missing null count may contain nulls"},
+		{iceberg.IsIn(iceberg.Reference("optional_id"), int32(1), int32(2)), false, "should skip: optional field missing null count may contain nulls"},
 		{iceberg.GreaterThan(iceberg.Reference("required_id"), int32(0)), true, "should read: required field cannot contain nulls"},
 	}
 

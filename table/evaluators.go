@@ -1586,16 +1586,15 @@ func (m *strictMetricsEval) canContainNans(fieldID int) bool {
 func (m *strictMetricsEval) mayContainNans(field iceberg.NestedField) bool {
 	switch field.Type.(type) {
 	case iceberg.Float32Type, iceberg.Float64Type:
+		cnt, exists := m.nanCounts[field.ID]
+		if !exists {
+			return true
+		}
+
+		return cnt > 0
 	default:
 		return false
 	}
-
-	cnt, exists := m.nanCounts[field.ID]
-	if !exists {
-		return true
-	}
-
-	return cnt > 0
 }
 
 // literalToPhysBytes converts an Iceberg literal to the physical byte
