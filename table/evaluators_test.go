@@ -2078,7 +2078,7 @@ func (suite *StrictMetricsTestSuite) SetupSuite() {
 				4: 50, 5: 50, 6: 50, 8: 50, 9: 50,
 				10: 50, 11: 50, 12: 50, 13: 50, 14: 50,
 			},
-			nullCounts: map[int]int64{4: 50, 5: 10, 6: 0, 11: 50, 12: 0, 13: 1},
+			nullCounts: map[int]int64{4: 50, 5: 10, 6: 0, 7: 0, 11: 50, 12: 0, 13: 1},
 			nanCounts:  map[int]int64{8: 50, 9: 10, 10: 0},
 			lowerBounds: map[int][]byte{
 				1:  IntMin,
@@ -2342,6 +2342,89 @@ func (suite *StrictMetricsTestSuite) TestMissingStats() {
 			shouldRead, err := eval(noStatsFile)
 			suite.Require().NoError(err)
 			suite.False(shouldRead, "should not read when stats are missing")
+		})
+	}
+}
+
+func (suite *StrictMetricsTestSuite) TestMissingNullCounts() {
+	var (
+		IntOne, _ = iceberg.Int32Literal(1).MarshalBinary()
+		IntTwo, _ = iceberg.Int32Literal(2).MarshalBinary()
+	)
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "optional_id", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "required_id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	file := &mockDataFile{
+		path:        "file_1.parquet",
+		format:      iceberg.ParquetFile,
+		count:       2,
+		valueCounts: map[int]int64{1: 2, 2: 2},
+		nullCounts:  map[int]int64{2: 0},
+		lowerBounds: map[int][]byte{1: IntOne, 2: IntOne},
+		upperBounds: map[int][]byte{1: IntTwo, 2: IntTwo},
+	}
+
+	tests := []struct {
+		expr     iceberg.BooleanExpression
+		expected bool
+		msg      string
+	}{
+		{iceberg.GreaterThan(iceberg.Reference("optional_id"), int32(0)), false, "should skip: optional field missing null count may contain nulls"},
+		{iceberg.EqualTo(iceberg.Reference("optional_id"), int32(1)), false, "should skip: optional field missing null count may contain nulls"},
+		{iceberg.IsIn(iceberg.Reference("optional_id"), int32(1), int32(2)), false, "should skip: optional field missing null count may contain nulls"},
+		{iceberg.GreaterThan(iceberg.Reference("required_id"), int32(0)), true, "should read: required field cannot contain nulls"},
+	}
+
+	for _, tt := range tests {
+		suite.Run(tt.expr.String(), func() {
+			eval, err := newStrictMetricsEvaluator(schema, tt.expr, true, true)
+			suite.Require().NoError(err)
+			shouldRead, err := eval(file)
+			suite.Require().NoError(err)
+			suite.Equal(tt.expected, shouldRead, tt.msg)
+		})
+	}
+}
+
+func (suite *StrictMetricsTestSuite) TestMissingNaNCounts() {
+	var (
+		FltOne, _ = iceberg.Float32Literal(1).MarshalBinary()
+		FltTwo, _ = iceberg.Float32Literal(2).MarshalBinary()
+	)
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "maybe_nan", Type: iceberg.PrimitiveTypes.Float32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "no_nan", Type: iceberg.PrimitiveTypes.Float32, Required: true},
+	)
+	file := &mockDataFile{
+		path:        "file_1.parquet",
+		format:      iceberg.ParquetFile,
+		count:       2,
+		valueCounts: map[int]int64{1: 2, 2: 2},
+		nullCounts:  map[int]int64{1: 0, 2: 0},
+		nanCounts:   map[int]int64{2: 0},
+		lowerBounds: map[int][]byte{1: FltOne, 2: FltOne},
+		upperBounds: map[int][]byte{1: FltTwo, 2: FltTwo},
+	}
+
+	tests := []struct {
+		expr     iceberg.BooleanExpression
+		expected bool
+		msg      string
+	}{
+		{iceberg.GreaterThan(iceberg.Reference("maybe_nan"), float32(0)), false, "should skip: float field missing NaN count may contain NaNs"},
+		{iceberg.GreaterThan(iceberg.Reference("no_nan"), float32(0)), true, "should read: known zero NaN count and bounds prove all values match"},
+	}
+
+	for _, tt := range tests {
+		suite.Run(tt.expr.String(), func() {
+			eval, err := newStrictMetricsEvaluator(schema, tt.expr, true, true)
+			suite.Require().NoError(err)
+			shouldRead, err := eval(file)
+			suite.Require().NoError(err)
+			suite.Equal(tt.expected, shouldRead, tt.msg)
 		})
 	}
 }

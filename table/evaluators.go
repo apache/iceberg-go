@@ -1308,7 +1308,7 @@ func (m *strictMetricsEval) VisitLess(t iceberg.BoundTerm, lit iceberg.Literal) 
 	field := t.Ref().Field()
 	fieldID := field.ID
 
-	if m.canContainNulls(fieldID) || m.canContainNans(fieldID) {
+	if m.mayContainNulls(field) || m.mayContainNans(field) {
 		return rowsMightNotMatch
 	}
 
@@ -1330,7 +1330,7 @@ func (m *strictMetricsEval) VisitLessEqual(t iceberg.BoundTerm, lit iceberg.Lite
 	field := t.Ref().Field()
 	fieldID := field.ID
 
-	if m.canContainNulls(fieldID) || m.canContainNans(fieldID) {
+	if m.mayContainNulls(field) || m.mayContainNans(field) {
 		return rowsMightNotMatch
 	}
 
@@ -1352,7 +1352,7 @@ func (m *strictMetricsEval) VisitGreater(t iceberg.BoundTerm, lit iceberg.Litera
 	field := t.Ref().Field()
 	fieldID := field.ID
 
-	if m.canContainNulls(fieldID) || m.canContainNans(fieldID) {
+	if m.mayContainNulls(field) || m.mayContainNans(field) {
 		return rowsMightNotMatch
 	}
 
@@ -1379,7 +1379,7 @@ func (m *strictMetricsEval) VisitGreaterEqual(t iceberg.BoundTerm, lit iceberg.L
 	field := t.Ref().Field()
 	fieldID := field.ID
 
-	if m.canContainNulls(fieldID) || m.canContainNans(fieldID) {
+	if m.mayContainNulls(field) || m.mayContainNans(field) {
 		return rowsMightNotMatch
 	}
 
@@ -1406,7 +1406,7 @@ func (m *strictMetricsEval) VisitEqual(t iceberg.BoundTerm, lit iceberg.Literal)
 	field := t.Ref().Field()
 	fieldID := field.ID
 
-	if m.canContainNulls(fieldID) || m.canContainNans(fieldID) {
+	if m.mayContainNulls(field) || m.mayContainNans(field) {
 		return rowsMightNotMatch
 	}
 
@@ -1480,7 +1480,7 @@ func (m *strictMetricsEval) VisitIn(t iceberg.BoundTerm, s iceberg.Set[iceberg.L
 	field := t.Ref().Field()
 	fieldID := field.ID
 
-	if m.canContainNulls(fieldID) || m.canContainNans(fieldID) {
+	if m.mayContainNulls(field) || m.mayContainNans(field) {
 		return rowsMightNotMatch
 	}
 
@@ -1568,10 +1568,33 @@ func (m *strictMetricsEval) canContainNulls(fieldID int) bool {
 	return exists && cnt > 0
 }
 
+func (m *strictMetricsEval) mayContainNulls(field iceberg.NestedField) bool {
+	cnt, exists := m.nullCounts[field.ID]
+	if !exists {
+		return !field.Required
+	}
+
+	return cnt > 0
+}
+
 func (m *strictMetricsEval) canContainNans(fieldID int) bool {
 	cnt, exists := m.nanCounts[fieldID]
 
 	return exists && cnt > 0
+}
+
+func (m *strictMetricsEval) mayContainNans(field iceberg.NestedField) bool {
+	switch field.Type.(type) {
+	case iceberg.Float32Type, iceberg.Float64Type:
+		cnt, exists := m.nanCounts[field.ID]
+		if !exists {
+			return true
+		}
+
+		return cnt > 0
+	default:
+		return false
+	}
 }
 
 // literalToPhysBytes converts an Iceberg literal to the physical byte
