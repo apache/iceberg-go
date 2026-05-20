@@ -34,6 +34,7 @@
 package codec
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/apache/iceberg-go"
@@ -95,7 +96,7 @@ func DecodeDataFile(data []byte, spec iceberg.PartitionSpec, schema *iceberg.Sch
 		return nil, fmt.Errorf("codec: DecodeDataFile: unsupported format version %d", version)
 	}
 	if datafileavro.Unmarshal == nil {
-		return nil, fmt.Errorf("codec: DecodeDataFile: bridge not initialized; the iceberg package must be imported to register the decoder")
+		return nil, errors.New("codec: DecodeDataFile: bridge not initialized; the iceberg package must be imported to register the decoder")
 	}
 	res, err := datafileavro.Unmarshal(data, spec, schema, version)
 	if err != nil {
