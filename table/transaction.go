@@ -1653,6 +1653,10 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 
 	deletesPerFile, err := readAllDeleteFiles(ctx, fs, tasks, concurrency)
 	if err != nil {
+		// readAllDeleteFiles can return a partially-populated map alongside
+		// the error if some goroutines completed before the failure.
+		releasePerFilePosDeletes(deletesPerFile)
+
 		return nil, err
 	}
 

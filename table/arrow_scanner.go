@@ -51,6 +51,24 @@ type (
 	perFilePosDeletes = map[string]positionDeletes
 )
 
+// releasePerFilePosDeletes releases every Arrow chunk in a positional-delete
+// map. Required on every error return between readAllDeleteFiles and the
+// iterator returned by createIterator — Arrow allocations are not freed by
+// GC, so dropping the map on the floor leaks the chunks. Safe to call on a
+// nil map; the nil-chunk guard is defensive — readDeletes never inserts a
+// nil *arrow.Chunked, but the guard keeps callers safe if that invariant
+// ever changes (e.g. when readAllDeletionVectors lands and starts merging
+// into the same map).
+func releasePerFilePosDeletes(deletesPerFile perFilePosDeletes) {
+	for _, chunks := range deletesPerFile {
+		for _, chunk := range chunks {
+			if chunk != nil {
+				chunk.Release()
+			}
+		}
+	}
+}
+
 func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, concurrency int) (perFilePosDeletes, error) {
 	var (
 		deletesPerFile = make(perFilePosDeletes)
@@ -751,11 +769,7 @@ func createIterator(ctx context.Context, numWorkers uint, records <-chan enumera
 				}
 			}
 
-			for _, v := range deletesPerFile {
-				for _, chunk := range v {
-					chunk.Release()
-				}
-			}
+			releasePerFilePosDeletes(deletesPerFile)
 		}()
 
 		defer cancel(nil)
@@ -889,12 +903,19 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 
 	deletesPerFile, err := readAllDeleteFiles(ctx, as.fs, tasks, as.concurrency)
 	if err != nil {
+		// readAllDeleteFiles can return a partially-populated map alongside
+		// the error if some goroutines completed before the failure.
+		releasePerFilePosDeletes(deletesPerFile)
+
 		return nil, nil, err
 	}
 
 	eqDeleteSets, err := readAllEqualityDeleteFiles(ctx, as.fs,
 		as.metadata.CurrentSchema(), tasks, as.concurrency)
 	if err != nil {
+		// Positional deletes were fully loaded; release them before aborting.
+		releasePerFilePosDeletes(deletesPerFile)
+
 		return nil, nil, err
 	}
 

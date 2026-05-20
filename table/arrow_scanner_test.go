@@ -127,3 +127,67 @@ func mustLoadRecordBatchFromJSON(schema *arrow.Schema, content string) arrow.Rec
 
 	return recordBatch
 }
+
+// chunkedPosDelete allocates a positional-delete *arrow.Chunked against mem so
+// the CheckedAllocator can prove leaks. Returns a chunked that owns one Int64
+// array of `positions` values.
+func chunkedPosDelete(t *testing.T, mem memory.Allocator, positions []int64) *arrow.Chunked {
+	t.Helper()
+	bldr := array.NewInt64Builder(mem)
+	defer bldr.Release()
+	bldr.AppendValues(positions, nil)
+	arr := bldr.NewArray()
+	defer arr.Release()
+
+	return arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{arr})
+}
+
+// TestReleasePerFilePosDeletes verifies the helper releases every Arrow chunk
+// it holds, leaving the allocator at zero outstanding bytes. Three cases:
+// populated map, nil map (must not panic), and a positionDeletes slice
+// containing a nil chunk (must not panic).
+//
+// This is the regression net for GetRecords' error-return paths: a future
+// change that drops a perFilePosDeletes map on the floor without calling
+// this helper will reintroduce the leak fixed by #1051.
+func TestReleasePerFilePosDeletes(t *testing.T) {
+	t.Run("populated map releases all chunks", func(t *testing.T) {
+		mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+		defer mem.AssertSize(t, 0)
+
+		m := perFilePosDeletes{
+			"file://a.parquet": positionDeletes{
+				chunkedPosDelete(t, mem, []int64{0, 1, 2}),
+				chunkedPosDelete(t, mem, []int64{10, 11}),
+			},
+			"file://b.parquet": positionDeletes{
+				chunkedPosDelete(t, mem, []int64{42}),
+			},
+		}
+
+		releasePerFilePosDeletes(m)
+	})
+
+	t.Run("nil map does not panic", func(t *testing.T) {
+		require.NotPanics(t, func() { releasePerFilePosDeletes(nil) })
+	})
+
+	t.Run("nil chunk in slice does not panic", func(t *testing.T) {
+		// Defensive: production code paths never insert a nil *arrow.Chunked
+		// into the map. This subtest pins the guard so a future caller (the
+		// in-flight readAllDeletionVectors merger, or a refactor of readDeletes)
+		// can't silently NPE the cleanup path.
+		mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+		defer mem.AssertSize(t, 0)
+
+		m := perFilePosDeletes{
+			"file://a.parquet": positionDeletes{
+				nil,
+				chunkedPosDelete(t, mem, []int64{7}),
+				nil,
+			},
+		}
+
+		require.NotPanics(t, func() { releasePerFilePosDeletes(m) })
+	})
+}
