@@ -1538,6 +1538,26 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, fs io.IO, originalF
 		Length: originalFile.FileSizeBytes(),
 	}
 
+	// Preserve row lineage for v3 tables: include _row_id in the scan
+	// projection so it is synthesized (or read from existing explicit values)
+	// and written into the output file. _last_updated_sequence_number is left
+	// out — it will be null in the output and inherited from the new file's
+	// data_sequence_number at read time, which satisfies the spec requirement
+	// that CoW rewrites bump _last_updated_sequence_number to the new commit's
+	// sequence number.
+	//
+	// When preserving lineage, the row filter must NOT be applied inside the
+	// scanner because _row_id synthesis depends on original file position. The
+	// filter is applied post-synthesis in the record iterator instead.
+	preserveRowLineage := t.meta.formatVersion >= 3 && originalFile.FirstRowID() != nil
+	projectedSchema := t.meta.CurrentSchema()
+	var factoryOpts []writerFactoryOption
+	if preserveRowLineage {
+		projectedSchema = iceberg.SchemaWithRowID(projectedSchema)
+		factoryOpts = append(factoryOpts, withFactoryFileSchema(projectedSchema))
+		scanTask.FirstRowID = originalFile.FirstRowID()
+	}
+
 	boundFilter, err := iceberg.BindExpr(t.meta.CurrentSchema(), filter, caseSensitive)
 	if err != nil {
 		return nil, fmt.Errorf("failed to bind filter: %w", err)
@@ -1548,11 +1568,19 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, fs io.IO, originalF
 		return nil, fmt.Errorf("failed to build metadata: %w", err)
 	}
 
+	// When preserving row lineage, omit the row filter from the scanner so that
+	// _row_id is synthesized using the true file-level row positions. The filter
+	// is applied below in the record iterator.
+	scanFilter := iceberg.BooleanExpression(iceberg.AlwaysTrue{})
+	if !preserveRowLineage {
+		scanFilter = boundFilter
+	}
+
 	scanner := &arrowScan{
 		metadata:        meta,
 		fs:              fs,
-		projectedSchema: t.meta.CurrentSchema(),
-		boundRowFilter:  boundFilter,
+		projectedSchema: projectedSchema,
+		boundRowFilter:  scanFilter,
 		caseSensitive:   caseSensitive,
 		rowLimit:        -1, // No limit
 		concurrency:     concurrency,
@@ -1563,7 +1591,18 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, fs io.IO, originalF
 		return nil, fmt.Errorf("failed to get records from original file: %w", err)
 	}
 
-	// Wrap the iterator to release records after consumption
+	// When preserving row lineage, use an Arrow schema with field IDs so that
+	// recordsToDataFiles can resolve _row_id via field ID rather than the name
+	// mapping (which doesn't include metadata columns).
+	if preserveRowLineage {
+		arrowSchema, err = SchemaToArrowSchema(projectedSchema, nil, true, false)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build arrow schema with field IDs: %w", err)
+		}
+	}
+
+	// Wrap the iterator to release records after consumption.
+	// When preserving row lineage, also apply the filter here (post-synthesis).
 	releaseIter := func(yield func(arrow.RecordBatch, error) bool) {
 		for rec, err := range recordIter {
 			if err != nil {
@@ -1571,6 +1610,21 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, fs io.IO, originalF
 
 				return
 			}
+
+			if preserveRowLineage {
+				rec, err = filterRecordBatch(ctx, rec, filter, t.meta.CurrentSchema(), caseSensitive)
+				if err != nil {
+					yield(nil, err)
+
+					return
+				}
+				if rec.NumRows() == 0 {
+					rec.Release()
+
+					continue
+				}
+			}
+
 			if !yield(rec, nil) {
 				rec.Release()
 
@@ -1582,10 +1636,11 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, fs io.IO, originalF
 
 	var result []iceberg.DataFile
 	itr := recordsToDataFiles(ctx, t.tbl.Location(), t.meta, recordWritingArgs{
-		sc:        arrowSchema,
-		itr:       releaseIter,
-		fs:        fs.(io.WriteFileIO),
-		writeUUID: &commitUUID,
+		sc:          arrowSchema,
+		itr:         releaseIter,
+		fs:          fs.(io.WriteFileIO),
+		writeUUID:   &commitUUID,
+		factoryOpts: factoryOpts,
 	})
 
 	for df, err := range itr {
@@ -1797,4 +1852,41 @@ func (s *StagedTable) Refresh(ctx context.Context) (*Table, error) {
 
 func (s *StagedTable) Scan(opts ...ScanOption) *Scan {
 	panic(fmt.Errorf("%w: cannot scan a staged table", ErrInvalidOperation))
+}
+
+// filterRecordBatch applies an Iceberg filter to a record batch, returning
+// only matching rows. The filter is provided unbound and is bound against the
+// given schema internally. Used for post-synthesis row filtering in CoW rewrites
+// where row lineage must be synthesized before filtering.
+func filterRecordBatch(ctx context.Context, rec arrow.RecordBatch, filter iceberg.BooleanExpression, schema *iceberg.Schema, caseSensitive bool) (arrow.RecordBatch, error) {
+	if filter == nil || filter.Equals(iceberg.AlwaysTrue{}) {
+		return rec, nil
+	}
+
+	bound, err := iceberg.BindExpr(schema, filter, caseSensitive)
+	if err != nil {
+		return nil, fmt.Errorf("filterRecordBatch: bind expression: %w", err)
+	}
+
+	if bound == nil {
+		return rec, nil
+	}
+
+	if bound.Equals(iceberg.AlwaysFalse{}) {
+		defer rec.Release()
+
+		emptySchema := rec.Schema()
+
+		return array.NewRecordBatch(emptySchema, nil, 0), nil
+	}
+
+	extSet, substraitFilter, err := substrait.ConvertExpr(schema, bound, caseSensitive)
+	if err != nil {
+		return nil, fmt.Errorf("filterRecordBatch: convert expression: %w", err)
+	}
+
+	ctx = exprs.WithExtensionIDSet(ctx, exprs.NewExtensionSetDefault(*extSet))
+	fn := filterRecords(ctx, substraitFilter)
+
+	return fn(rec)
 }

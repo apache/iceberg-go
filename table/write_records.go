@@ -39,6 +39,7 @@ type writeRecordConfig struct {
 	writeUUID       *uuid.UUID
 	maxWriteWorkers int
 	clustered       bool
+	fileSchema      *iceberg.Schema
 }
 
 // WithTargetFileSize overrides the table's default target file size.
@@ -91,6 +92,16 @@ func WithMaxWriteWorkers(n int) WriteRecordOption {
 func WithClusteredWrite() WriteRecordOption {
 	return func(c *writeRecordConfig) {
 		c.clustered = true
+	}
+}
+
+// WithPreserveRowLineage sets the output file schema to include _row_id so that
+// row identity is preserved through rewrites and compactions on v3 tables. The
+// input records must already contain the _row_id column (e.g. from a scan that
+// projected lineage columns).
+func WithPreserveRowLineage(schema *iceberg.Schema) WriteRecordOption {
+	return func(c *writeRecordConfig) {
+		c.fileSchema = schema
 	}
 }
 
@@ -172,6 +183,10 @@ func WriteRecords(ctx context.Context, tbl *Table,
 		writeUUID:       cfg.writeUUID,
 		maxWriteWorkers: cfg.maxWriteWorkers,
 		clustered:       cfg.clustered,
+	}
+
+	if cfg.fileSchema != nil {
+		args.factoryOpts = append(args.factoryOpts, withFactoryFileSchema(cfg.fileSchema))
 	}
 
 	return recordsToDataFiles(ctx, tbl.Location(), meta, args)

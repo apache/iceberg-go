@@ -59,3 +59,12 @@ func LastUpdatedSequenceNumber() NestedField {
 func IsMetadataColumn(fieldID int) bool {
 	return fieldID == RowIDFieldID || fieldID == LastUpdatedSequenceNumberFieldID
 }
+
+// SchemaWithRowID returns a new schema that appends the _row_id metadata column
+// to the given schema's fields. Used when reading source files during a CoW rewrite
+// so that row identity is preserved in the output.
+func SchemaWithRowID(s *Schema) *Schema {
+	fields := append(s.Fields(), RowID())
+
+	return NewSchemaWithIdentifiers(s.ID, s.IdentifierFieldIDs, fields...)
+}

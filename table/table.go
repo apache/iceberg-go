@@ -816,6 +816,14 @@ func WithOptions(opts iceberg.Properties) ScanOption {
 	}
 }
 
+// WithRowLineage adds _row_id to the scan projection so that row identity is
+// preserved through rewrites. Only meaningful for v3 tables; ignored otherwise.
+func WithRowLineage() ScanOption {
+	return func(scan *Scan) {
+		scan.includeRowLineage = true
+	}
+}
+
 func (t Table) Scan(opts ...ScanOption) *Scan {
 	s := &Scan{
 		metadata:       t.metadata,

@@ -1499,6 +1499,7 @@ type recordWritingArgs struct {
 	counter         iter.Seq[int]
 	maxWriteWorkers int
 	clustered       bool
+	factoryOpts     []writerFactoryOption
 }
 
 func recordsToDataFiles(ctx context.Context, rootLocation string, meta *MetadataBuilder, args recordWritingArgs) (ret iter.Seq2[iceberg.DataFile, error]) {
@@ -1537,7 +1538,7 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 		}
 	}
 
-	factory, err := newWriterFactory(rootLocation, args, meta, taskSchema, targetFileSize)
+	factory, err := newWriterFactory(rootLocation, args, meta, taskSchema, targetFileSize, args.factoryOpts...)
 	if err != nil {
 		panic(err)
 	}

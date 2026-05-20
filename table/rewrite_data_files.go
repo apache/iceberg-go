@@ -289,6 +289,11 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		scanOpts = append(scanOpts, WitMaxConcurrency(cfg.scanConcurrency))
 	}
 
+	preserveLineage := tbl.metadata.Version() >= 3 && hasRowLineage(group.Tasks)
+	if preserveLineage {
+		scanOpts = append(scanOpts, WithRowLineage())
+	}
+
 	arrowSchema, records, err := tbl.Scan(scanOpts...).ReadTasks(ctx, group.Tasks)
 	if err != nil {
 		return CompactionGroupResult{}, fmt.Errorf("read tasks for compaction group %q: %w", group.PartitionKey, err)
@@ -299,6 +304,9 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	writeOpts := []WriteRecordOption{WithClusteredWrite()}
 	if cfg.targetFileSize > 0 {
 		writeOpts = append(writeOpts, WithTargetFileSize(cfg.targetFileSize))
+	}
+	if preserveLineage {
+		writeOpts = append(writeOpts, WithPreserveRowLineage(iceberg.SchemaWithRowID(tbl.Schema())))
 	}
 
 	var (
@@ -326,6 +334,18 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		BytesBefore:    group.TotalSizeBytes,
 		BytesAfter:     bytesAfter,
 	}, nil
+}
+
+// hasRowLineage returns true if any task in the group has a non-nil FirstRowID,
+// indicating the table has v3 row lineage data to preserve.
+func hasRowLineage(tasks []FileScanTask) bool {
+	for _, t := range tasks {
+		if t.FirstRowID != nil {
+			return true
+		}
+	}
+
+	return false
 }
 
 // rewriteDataFilesPartial stages each group as its own rewrite

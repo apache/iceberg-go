@@ -917,6 +917,11 @@ func (sp *snapshotProducer) commit(ctx context.Context) (_ []Update, _ []Require
 			return nil, nil, err
 		}
 		if writer.NextRowID() != nil {
+			// addedRows counts ALL rows in new manifests (existing + added), even
+			// for rewrites where survivors preserve old _row_id values. This
+			// "wastes" ID space but doesn't violate uniqueness: actual row IDs come
+			// from the explicit Parquet column, not the global counter. Java's
+			// ManifestListWriter.V4Writer uses the same accounting.
 			addedRows = *writer.NextRowID() - firstRowID
 		}
 	} else {
