@@ -1266,6 +1266,8 @@ func (noopSchemaVisitor) Map(_ iceberg.MapType, _, _ iceberg.Void) iceberg.Void 
 
 func (noopSchemaVisitor) Primitive(_ iceberg.PrimitiveType) iceberg.Void { return iceberg.Void{} }
 
+func (noopSchemaVisitor) Variant(_ iceberg.VariantType) iceberg.Void { return iceberg.Void{} }
+
 func (noopSchemaVisitor) VisitFixed(_ iceberg.FixedType) iceberg.Void { return iceberg.Void{} }
 
 func (noopSchemaVisitor) VisitDecimal(_ iceberg.DecimalType) iceberg.Void { return iceberg.Void{} }
@@ -1303,6 +1305,8 @@ func (noopSchemaVisitor) VisitUnknown() iceberg.Void { return iceberg.Void{} }
 func (noopSchemaVisitor) VisitGeometry(_ iceberg.GeometryType) iceberg.Void { return iceberg.Void{} }
 
 func (noopSchemaVisitor) VisitGeography(_ iceberg.GeographyType) iceberg.Void { return iceberg.Void{} }
+
+func (noopSchemaVisitor) VisitVariant() iceberg.Void { return iceberg.Void{} }
 
 var _ iceberg.SchemaVisitorPerPrimitiveType[iceberg.Void] = noopSchemaVisitor{}
 
