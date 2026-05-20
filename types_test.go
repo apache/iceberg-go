@@ -45,6 +45,7 @@ func TestTypesBasic(t *testing.T) {
 		{"uuid", iceberg.PrimitiveTypes.UUID},
 		{"binary", iceberg.PrimitiveTypes.Binary},
 		{"unknown", iceberg.PrimitiveTypes.Unknown},
+		{"variant", iceberg.VariantType{}},
 		{"fixed[5]", iceberg.FixedTypeOf(5)},
 		{"decimal(9, 4)", iceberg.DecimalTypeOf(9, 4)},
 	}
@@ -189,6 +190,7 @@ var NonParameterizedTypes = []iceberg.Type{
 	iceberg.PrimitiveTypes.Binary,
 	iceberg.PrimitiveTypes.UUID,
 	iceberg.PrimitiveTypes.Unknown,
+	iceberg.VariantType{},
 }
 
 func TestNonParameterizedTypeEquality(t *testing.T) {
@@ -223,6 +225,7 @@ func TestTypeStrings(t *testing.T) {
 		{iceberg.PrimitiveTypes.UUID, "uuid"},
 		{iceberg.PrimitiveTypes.Binary, "binary"},
 		{iceberg.PrimitiveTypes.Unknown, "unknown"},
+		{iceberg.VariantType{}, "variant"},
 		{iceberg.FixedTypeOf(22), "fixed[22]"},
 		{iceberg.DecimalTypeOf(19, 25), "decimal(19, 25)"},
 		{&iceberg.StructType{
@@ -392,6 +395,96 @@ func TestUnknownTypeEquality(t *testing.T) {
 	assert.True(t, unknown2.Equals(unknown1))
 	assert.Equal(t, "unknown", unknown1.String())
 	assert.Equal(t, "unknown", unknown2.String())
+}
+
+func TestVariantTypeEquality(t *testing.T) {
+	v1 := iceberg.VariantType{}
+	v2 := iceberg.VariantType{}
+
+	assert.True(t, v1.Equals(v2))
+	assert.True(t, v2.Equals(v1))
+	assert.False(t, v1.Equals(iceberg.BinaryType{}))
+	assert.False(t, v1.Equals(iceberg.UnknownType{}))
+}
+
+func TestVariantTypeJSONRoundTrip(t *testing.T) {
+	field := iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.VariantType{}, Required: false}
+	data, err := json.Marshal(field)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"type":"variant"`)
+
+	var out iceberg.NestedField
+	require.NoError(t, json.Unmarshal(data, &out))
+	assert.True(t, out.Type.Equals(iceberg.VariantType{}))
+}
+
+func TestVariantInSchema(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}, Required: false},
+	)
+	data, err := json.Marshal(sc)
+	require.NoError(t, err)
+
+	var out iceberg.Schema
+	require.NoError(t, json.Unmarshal(data, &out))
+	assert.True(t, out.Field(1).Type.Equals(iceberg.VariantType{}))
+}
+
+func TestVariantInNestedTypes(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "events", Type: &iceberg.ListType{
+			ElementID:       2,
+			Element:         iceberg.VariantType{},
+			ElementRequired: false,
+		}},
+		iceberg.NestedField{ID: 3, Name: "metadata", Type: &iceberg.MapType{
+			KeyID:         4,
+			KeyType:       iceberg.PrimitiveTypes.String,
+			ValueID:       5,
+			ValueType:     iceberg.VariantType{},
+			ValueRequired: false,
+		}},
+	)
+
+	data, err := json.Marshal(sc)
+	require.NoError(t, err)
+
+	var out iceberg.Schema
+	require.NoError(t, json.Unmarshal(data, &out))
+
+	listField := out.Field(0)
+	listType, ok := listField.Type.(*iceberg.ListType)
+	require.True(t, ok)
+	assert.True(t, listType.Element.Equals(iceberg.VariantType{}))
+
+	mapField := out.Field(1)
+	mapType, ok := mapField.Type.(*iceberg.MapType)
+	require.True(t, ok)
+	assert.True(t, mapType.ValueType.Equals(iceberg.VariantType{}))
+}
+
+func TestVariantInStructField(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "nested", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 3, Name: "name", Type: iceberg.PrimitiveTypes.String},
+				{ID: 4, Name: "payload", Type: iceberg.VariantType{}},
+			},
+		}},
+	)
+
+	data, err := json.Marshal(sc)
+	require.NoError(t, err)
+
+	var out iceberg.Schema
+	require.NoError(t, json.Unmarshal(data, &out))
+
+	nested, ok := out.Field(1).Type.(*iceberg.StructType)
+	require.True(t, ok)
+	assert.True(t, nested.FieldList[0].Type.Equals(iceberg.PrimitiveTypes.String))
+	assert.True(t, nested.FieldList[1].Type.Equals(iceberg.VariantType{}))
 }
 
 func TestNestedFieldUnmarshalMissingID(t *testing.T) {

@@ -422,6 +422,15 @@ func (n *nameMapProjectVisitor) Primitive(p PrimitiveType, primitivePartner *Map
 	return NestedField{Type: p}
 }
 
+func (n *nameMapProjectVisitor) Variant(v VariantType, variantPartner *MappedField) NestedField {
+	if variantPartner == nil {
+		panic(fmt.Errorf("%w: field missing from name mapping: %s",
+			ErrInvalidArgument, strings.Join(n.currentPath, ".")))
+	}
+
+	return NestedField{Type: v}
+}
+
 func ApplyNameMapping(schemaWithoutIDs *Schema, nameMapping NameMapping) (*Schema, error) {
 	top, err := VisitSchemaWithPartner(schemaWithoutIDs,
 		&MappedField{Fields: nameMapping},
@@ -482,6 +491,10 @@ func (createMapping) Map(mapType MapType, keyResult, valResult []MappedField) []
 }
 
 func (createMapping) Primitive(_ PrimitiveType) []MappedField {
+	return []MappedField{}
+}
+
+func (createMapping) Variant(_ VariantType) []MappedField {
 	return []MappedField{}
 }
 

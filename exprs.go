@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/google/uuid"
 )
 
@@ -450,6 +451,8 @@ func createBoundRef(field NestedField, acc accessor) BoundReference {
 		return &boundRef[Decimal]{field: field, acc: acc}
 	case UUIDType:
 		return &boundRef[uuid.UUID]{field: field, acc: acc}
+	case VariantType:
+		return &boundRef[variant.Value]{field: field, acc: acc}
 	}
 	panic("unhandled bound reference type: " + field.Type.String())
 }
@@ -638,6 +641,8 @@ func createBoundUnaryPredicate(op Operation, term BoundTerm) BoundUnaryPredicate
 		return newBoundUnaryPred[Decimal](op, term)
 	case UUIDType:
 		return newBoundUnaryPred[uuid.UUID](op, term)
+	case VariantType:
+		return newBoundUnaryPred[variant.Value](op, term)
 	}
 	panic("unhandled bound reference type: " + term.Type().String())
 }

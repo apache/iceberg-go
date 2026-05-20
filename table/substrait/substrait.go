@@ -135,6 +135,7 @@ func (c convertToSubstrait) Map(m iceberg.MapType, keyResult, valResult types.Ty
 }
 
 func (convertToSubstrait) Primitive(iceberg.PrimitiveType) types.Type { panic("should not be called") }
+func (convertToSubstrait) Variant(iceberg.VariantType) types.Type     { panic("should not be called") }
 
 func (convertToSubstrait) VisitFixed(f iceberg.FixedType) types.Type {
 	return &types.FixedBinaryType{Length: int32(f.Len())}
@@ -168,6 +169,14 @@ func (convertToSubstrait) VisitUnknown() types.Type {
 	// Unknown types cannot be stored in data files and have no Substrait equivalent
 	// Returning nil indicates this type cannot be converted to Substrait
 	return nil
+}
+
+func (convertToSubstrait) VisitVariant() types.Type {
+	// Variant has no Substrait equivalent today. We return BinaryType as a
+	// structural placeholder so that schema conversion and expression binding
+	// on sibling columns don't panic with a nil type. A proper user-defined
+	// Substrait type will be needed once shredding enables predicate pushdown.
+	return &types.BinaryType{}
 }
 
 var _ iceberg.SchemaVisitorPerPrimitiveType[types.Type] = (*convertToSubstrait)(nil)

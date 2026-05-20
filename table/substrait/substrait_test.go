@@ -136,3 +136,22 @@ func TestExprs(t *testing.T) {
 		})
 	}
 }
+
+func TestVariantSchemaConversionDoesNotPanic(t *testing.T) {
+	sc := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+
+	// Schema conversion should not panic - variant maps to BinaryType placeholder
+	_, err := substrait.ConvertSchema(sc)
+	require.NoError(t, err)
+
+	// Expression on a sibling primitive column should work even with variant present
+	pred, err := iceberg.EqualTo(iceberg.Reference("id"), int64(1)).Bind(sc, true)
+	require.NoError(t, err)
+
+	_, expr, err := substrait.ConvertExpr(sc, pred, true)
+	require.NoError(t, err)
+	assert.NotNil(t, expr)
+}

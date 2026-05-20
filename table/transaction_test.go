@@ -27,9 +27,12 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
+	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/rest"
@@ -334,6 +337,118 @@ func (s *SparkIntegrationTestSuite) TestUpdateSpec() {
 |Part 0                      |truncate(5, bar)                            |       |
 |Part 1                      |bucket(3, baz)                              |       |
 |                            |                                            |       |`)
+}
+
+func (s *SparkIntegrationTestSuite) TestVariantWriteAndScan() {
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "event", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "payload", Type: iceberg.VariantType{}},
+	)
+
+	tbl, err := s.cat.CreateTable(
+		s.ctx,
+		catalog.ToIdentifier("default", "go_variant_events"),
+		icebergSchema,
+		catalog.WithProperties(iceberg.Properties{table.PropertyFormatVersion: "3"}),
+	)
+	s.Require().NoError(err)
+
+	arrowSchema, err := table.SchemaToArrowSchema(icebergSchema, nil, true, false)
+	s.Require().NoError(err)
+
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(s.T(), 0)
+
+	scanMem := memory.DefaultAllocator
+
+	tsBldr := array.NewInt64Builder(mem)
+	defer tsBldr.Release()
+	evtBldr := array.NewStringBuilder(mem)
+	defer evtBldr.Release()
+	payloadBldr := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
+	defer payloadBldr.Release()
+
+	mkVariant := func(v any) variant.Value {
+		var b variant.Builder
+		s.Require().NoError(b.Append(v))
+		val, err := b.Build()
+		s.Require().NoError(err)
+
+		return val
+	}
+
+	tsBldr.Append(1713700000)
+	evtBldr.Append("click")
+	payloadBldr.Append(mkVariant(map[string]any{
+		"x": int64(320), "y": int64(480), "target": "button-submit",
+	}))
+
+	tsBldr.Append(1713700005)
+	evtBldr.Append("metric")
+	payloadBldr.Append(mkVariant(float64(98.6)))
+
+	tsBldr.Append(1713700010)
+	evtBldr.Append("flag")
+	payloadBldr.Append(mkVariant(true))
+
+	tsBldr.Append(1713700015)
+	evtBldr.AppendNull()
+	payloadBldr.AppendNull()
+
+	tsBldr.Append(1713700020)
+	evtBldr.Append("tags")
+	payloadBldr.Append(mkVariant([]any{"prod", "us-west-2", int64(7)}))
+
+	tsArr := tsBldr.NewInt64Array()
+	defer tsArr.Release()
+	evtArr := evtBldr.NewStringArray()
+	defer evtArr.Release()
+	payloadArr := payloadBldr.NewArray()
+	defer payloadArr.Release()
+
+	rec := array.NewRecord(arrowSchema, []arrow.Array{tsArr, evtArr, payloadArr}, 5)
+	defer rec.Release()
+
+	arrTable := array.NewTableFromRecords(arrowSchema, []arrow.Record{rec})
+	defer arrTable.Release()
+
+	tx := tbl.NewTransaction()
+	s.Require().NoError(tx.AppendTable(s.ctx, arrTable, 2048, nil))
+	tbl, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	ctx := compute.WithAllocator(s.ctx, scanMem)
+	results, err := tbl.Scan().ToArrowTable(ctx)
+	s.Require().NoError(err)
+	defer results.Release()
+
+	s.EqualValues(5, results.NumRows())
+	s.EqualValues(3, results.NumCols())
+
+	variantCol := results.Column(2).Data().Chunk(0).(*extensions.VariantArray)
+
+	v0, err := variantCol.Value(0)
+	s.Require().NoError(err)
+	obj, ok := v0.Value().(variant.ObjectValue)
+	s.Require().True(ok)
+	s.EqualValues(3, obj.NumElements())
+
+	v1, err := variantCol.Value(1)
+	s.Require().NoError(err)
+	s.InDelta(98.6, v1.Value(), 0.01)
+
+	v2, err := variantCol.Value(2)
+	s.Require().NoError(err)
+	s.EqualValues(true, v2.Value())
+
+	s.True(variantCol.IsNull(3))
+
+	v4, err := variantCol.Value(4)
+	s.Require().NoError(err)
+	arrVal, ok := v4.Value().(variant.ArrayValue)
+	s.Require().True(ok)
+	s.EqualValues(3, arrVal.Len())
 }
 
 func (s *SparkIntegrationTestSuite) TestOverwriteBasic() {
