@@ -789,7 +789,7 @@ func (t DayTransform) MarshalText() ([]byte, error) {
 func (DayTransform) String() string { return "day" }
 
 func (t DayTransform) CanTransform(sourceType Type) bool { return canTransformTime(t, sourceType) }
-func (DayTransform) ResultType(Type) Type                { return PrimitiveTypes.Int32 }
+func (DayTransform) ResultType(Type) Type                { return PrimitiveTypes.Date }
 func (DayTransform) PreservesOrder() bool                { return true }
 
 func (DayTransform) Equals(other Transform) bool {
