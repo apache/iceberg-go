@@ -684,6 +684,39 @@ func (s *SqliteCatalogTestSuite) TestDropTableNotExist() {
 	}
 }
 
+func (s *SqliteCatalogTestSuite) TestPurgeTable() {
+	tests := []struct {
+		cat   *sqlcat.Catalog
+		tblID table.Identifier
+	}{
+		{s.getCatalogMemory(), s.randomTableIdentifier()},
+		{s.getCatalogSqlite(), s.randomHierarchicalIdentifier()},
+	}
+
+	for _, tt := range tests {
+		ns := catalog.NamespaceFromIdent(tt.tblID)
+		s.Require().NoError(tt.cat.CreateNamespace(context.Background(), ns, nil))
+		tbl, err := tt.cat.CreateTable(context.Background(), tt.tblID, tableSchemaNested)
+		s.Require().NoError(err)
+
+		metaFile := strings.TrimPrefix(tbl.MetadataLocation(), "file://")
+		s.FileExists(metaFile)
+
+		// Assert that the catalog implements PurgeableTable
+		purger, ok := any(tt.cat).(catalog.PurgeableTable)
+		s.Require().True(ok, "catalog must implement PurgeableTable")
+
+		s.NoError(purger.PurgeTable(context.Background(), tt.tblID))
+
+		// The table catalog entry should be gone
+		_, err = tt.cat.LoadTable(context.Background(), tt.tblID)
+		s.ErrorIs(err, catalog.ErrNoSuchTable)
+
+		// The physical file should be gone
+		s.NoFileExists(metaFile)
+	}
+}
+
 func (s *SqliteCatalogTestSuite) TestRenameTable() {
 	tests := []struct {
 		cat       *sqlcat.Catalog

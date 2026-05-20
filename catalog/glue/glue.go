@@ -405,6 +405,28 @@ func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 	return nil
 }
 
+func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) error {
+	tbl, err := c.LoadTable(ctx, identifier)
+	if err != nil {
+		if errors.Is(err, catalog.ErrNoSuchTable) {
+			return err
+		}
+		// If we can't load the table, fall back to dropping metadata only
+		return c.DropTable(ctx, identifier)
+	}
+
+	// Drop the table entry from the catalog first
+	err = c.DropTable(ctx, identifier)
+	if err != nil {
+		return err
+	}
+
+	// Physically delete all table files on storage
+	_ = internal.PurgeTableFiles(ctx, tbl)
+
+	return nil
+}
+
 // RenameTable renames an Iceberg table in the Glue catalog.
 func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error) {
 	fromDatabase, fromTable, err := identifierToGlueTable(from)

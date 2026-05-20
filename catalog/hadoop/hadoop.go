@@ -561,6 +561,10 @@ func (c *Catalog) DropTable(_ context.Context, ident table.Identifier) error {
 	return os.RemoveAll(tablePath)
 }
 
+func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) error {
+	return c.DropTable(ctx, identifier)
+}
+
 func (c *Catalog) RenameTable(_ context.Context, _, _ table.Identifier) (*table.Table, error) {
 	return nil, errors.New("hadoop catalog: rename table is not supported")
 }

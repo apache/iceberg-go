@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	stdfs "io/fs"
 	"maps"
 	"net/url"
 	"path"
@@ -240,4 +241,38 @@ func UpdateAndStageTable(ctx context.Context, current *table.Table, ident table.
 			cat,
 		),
 	}, nil
+}
+
+// PurgeTableFiles physically deletes all files under the table's warehouse location using WalkDir.
+// It is best-effort — if interrupted, orphaned files may remain.
+func PurgeTableFiles(ctx context.Context, tbl *table.Table) (err error) {
+	fs, err := tbl.FS(ctx)
+	if err != nil {
+		return err
+	}
+	location := tbl.Metadata().Location()
+
+	var files []string
+	if listable, ok := fs.(icebergio.ListableIO); ok {
+		_ = listable.WalkDir(location, func(path string, d stdfs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if !d.IsDir() {
+				files = append(files, path)
+			}
+
+			return nil
+		})
+	}
+
+	if bulk, ok := fs.(icebergio.BulkRemovableIO); ok && len(files) > 0 {
+		_, _ = bulk.DeleteFiles(ctx, files)
+	} else {
+		for _, file := range files {
+			_ = fs.Remove(file)
+		}
+	}
+
+	return nil
 }

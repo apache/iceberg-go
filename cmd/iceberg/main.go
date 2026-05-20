@@ -112,6 +112,7 @@ type DropNamespaceCmd struct {
 
 type DropTableCmd struct {
 	Identifier string `arg:"positional,required" help:"fully qualified table"`
+	Purge      bool   `arg:"--purge" help:"physically delete all table files"`
 }
 
 type DropCmd struct {
@@ -537,10 +538,21 @@ func runDrop(ctx context.Context, output Output, cat catalog.Catalog, cmd *DropC
 			os.Exit(1)
 		}
 	case cmd.Table != nil:
-		err := cat.DropTable(ctx, catalog.ToIdentifier(cmd.Table.Identifier))
+		ident := catalog.ToIdentifier(cmd.Table.Identifier)
+		var err error
+		if cmd.Table.Purge {
+			if purger, ok := cat.(catalog.PurgeableTable); ok {
+				err = purger.PurgeTable(ctx, ident)
+			} else {
+				output.Error(fmt.Errorf("catalog %s does not support purge", cat.CatalogType()))
+				osExit(1)
+			}
+		} else {
+			err = cat.DropTable(ctx, ident)
+		}
 		if err != nil {
 			output.Error(err)
-			os.Exit(1)
+			osExit(1)
 		}
 	}
 }

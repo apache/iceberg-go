@@ -1447,3 +1447,28 @@ func TestIsConcurrentModificationException(t *testing.T) {
 	require.False(t, isConcurrentModificationException(errors.New("network timeout")))
 	require.False(t, isConcurrentModificationException(nil))
 }
+
+func TestGluePurgeTable(t *testing.T) {
+	assert := require.New(t)
+
+	mockGlueSvc := &mockGlueClient{}
+
+	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything).Return(&glue.GetTableOutput{
+		Table: &testIcebergGlueTable1,
+	}, nil).Twice()
+
+	mockGlueSvc.On("DeleteTable", mock.Anything, &glue.DeleteTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything).Return(&glue.DeleteTableOutput{}, nil).Once()
+
+	glueCatalog := &Catalog{
+		glueSvc: mockGlueSvc,
+	}
+
+	err := glueCatalog.PurgeTable(context.TODO(), TableIdentifier("test_database", "test_table"))
+	assert.NoError(err)
+}

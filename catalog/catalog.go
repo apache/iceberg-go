@@ -167,6 +167,12 @@ type TransactionalCatalog interface {
 	CommitTransaction(ctx context.Context, commits []table.TableCommit) error
 }
 
+// PurgeableTable is an optional interface that catalogs can implement
+// to support physical table deletion.
+type PurgeableTable interface {
+	PurgeTable(ctx context.Context, identifier table.Identifier) error
+}
+
 func ToIdentifier(ident ...string) table.Identifier {
 	if len(ident) == 1 {
 		if ident[0] == "" {
