@@ -2334,4 +2334,3 @@ func (m *ManifestTestSuite) TestEntriesCloseErrorAsFinalPair() {
 		"terminal error must equal or wrap the simulated close error")
 	m.Equal(1, file.closeCount, "file must be closed exactly once even when Close returns an error")
 }
-
