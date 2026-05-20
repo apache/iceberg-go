@@ -38,6 +38,7 @@ require (
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
+	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/klauspost/compress v1.18.6
 	github.com/pterm/pterm v0.12.83
 	github.com/stretchr/testify v1.11.1

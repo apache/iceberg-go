@@ -57,3 +57,6 @@ jobs:
         args: --timeout=10m
     - name: Run tests
       run: go test -v ./...
+    # Race detector is opt-in per package/test.
+    - name: Run race detector
+      run: go test -race -v ./codec/...

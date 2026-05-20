@@ -17,10 +17,14 @@
 # golangci-lint version (keep in sync with CI and README)
 GOLANGCI_LINT_VERSION := v2.8.0
 
-.PHONY: test lint lint-install integration-setup integration-test integration-scanner integration-io integration-rest integration-spark integration-hadoop integration-down integration-logs docs-gen
+.PHONY: test test-race lint lint-install integration-setup integration-test integration-scanner integration-io integration-rest integration-spark integration-hadoop integration-down integration-logs docs-gen
 
 test:
 	go test -v ./...
+
+# Race detector is opt-in per package/test.
+test-race:
+	go test -race -v ./codec/...
 
 docs-gen:
 	go run ./website/gen
