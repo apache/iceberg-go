@@ -2429,6 +2429,55 @@ func (suite *StrictMetricsTestSuite) TestMissingNaNCounts() {
 	}
 }
 
+func (suite *StrictMetricsTestSuite) TestNegativePredicatesWithMixedNullsAndNaNs() {
+	var (
+		IntFive, _ = iceberg.Int32Literal(5).MarshalBinary()
+		FltFive, _ = iceberg.Float32Literal(5).MarshalBinary()
+	)
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "mixed_nulls", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "all_nulls", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 3, Name: "mixed_nans", Type: iceberg.PrimitiveTypes.Float32, Required: true},
+		iceberg.NestedField{ID: 4, Name: "all_nans", Type: iceberg.PrimitiveTypes.Float32, Required: true},
+	)
+	file := &mockDataFile{
+		path:        "file_1.parquet",
+		format:      iceberg.ParquetFile,
+		count:       2,
+		valueCounts: map[int]int64{1: 2, 2: 2, 3: 2, 4: 2},
+		nullCounts:  map[int]int64{1: 1, 2: 2, 3: 0, 4: 0},
+		nanCounts:   map[int]int64{3: 1, 4: 2},
+		lowerBounds: map[int][]byte{1: IntFive, 3: FltFive},
+		upperBounds: map[int][]byte{1: IntFive, 3: FltFive},
+	}
+
+	tests := []struct {
+		expr     iceberg.BooleanExpression
+		expected bool
+		msg      string
+	}{
+		{iceberg.NotEqualTo(iceberg.Reference("mixed_nulls"), int32(5)), false, "should skip: mixed nulls do not prove all rows match notEqual"},
+		{iceberg.NotIn(iceberg.Reference("mixed_nulls"), int32(5)), false, "should skip: mixed nulls do not prove all rows match notIn"},
+		{iceberg.NotEqualTo(iceberg.Reference("all_nulls"), int32(5)), true, "should read: all-null column matches notEqual"},
+		{iceberg.NotIn(iceberg.Reference("all_nulls"), int32(5)), true, "should read: all-null column matches notIn"},
+		{iceberg.NotEqualTo(iceberg.Reference("mixed_nans"), float32(5)), false, "should skip: mixed NaNs do not prove all rows match notEqual"},
+		{iceberg.NotIn(iceberg.Reference("mixed_nans"), float32(5)), false, "should skip: mixed NaNs do not prove all rows match notIn"},
+		{iceberg.NotEqualTo(iceberg.Reference("all_nans"), float32(5)), true, "should read: all-NaN column matches notEqual"},
+		{iceberg.NotIn(iceberg.Reference("all_nans"), float32(5)), true, "should read: all-NaN column matches notIn"},
+	}
+
+	for _, tt := range tests {
+		suite.Run(tt.expr.String(), func() {
+			eval, err := newStrictMetricsEvaluator(schema, tt.expr, true, true)
+			suite.Require().NoError(err)
+			shouldRead, err := eval(file)
+			suite.Require().NoError(err)
+			suite.Equal(tt.expected, shouldRead, tt.msg)
+		})
+	}
+}
+
 func (suite *StrictMetricsTestSuite) TestZeroRecordFileStats() {
 	zeroRecordFile := &mockDataFile{
 		path:   "file_1.parquet",
@@ -2792,7 +2841,7 @@ func (suite *StrictMetricsTestSuite) TestNotInMetrics() {
 		{iceberg.NotIn(ref, IntMaxValue+1, IntMaxValue+2), true, "should read: no values == 80 or == 81"},
 		{iceberg.NotIn(iceberg.Reference("always_5"), int32(5), int32(6)), false, "should skip: all values == 5"},
 		{iceberg.NotIn(iceberg.Reference("all_nulls"), "abc", "def"), true, "should read: notIn on all nulls column"},
-		{iceberg.NotIn(iceberg.Reference("some_nulls"), "abc", "def"), true, "should read: notIn on some nulls column"},
+		{iceberg.NotIn(iceberg.Reference("some_nulls"), "abc", "def"), false, "should skip: notIn on some nulls column"},
 		{iceberg.NotIn(iceberg.Reference("no_nulls"), "abc", "def"), false, "should read: notIn on no nulls column"},
 	}
 
