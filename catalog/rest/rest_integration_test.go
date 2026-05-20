@@ -295,13 +295,13 @@ func (s *RestIntegrationSuite) TestWriteCommitTable() {
 	const expectedLocation = "s3://warehouse/rest-integration-test/test-write-commit-table"
 
 	tbl, err := s.cat.CreateTable(s.ctx,
-		catalog.ToIdentifier(TestNamespaceIdent, "test-table-2"),
+		catalog.ToIdentifier(TestNamespaceIdent, "test-write-commit-table"),
 		tableSchemaNested)
 	s.Require().NoError(err)
 	s.Require().NotNil(tbl)
 
 	defer func() {
-		s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table-2")))
+		s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-write-commit-table")))
 	}()
 
 	s.Equal(expectedLocation, tbl.Location())
