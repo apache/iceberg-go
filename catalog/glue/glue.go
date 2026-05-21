@@ -408,11 +408,7 @@ func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) error {
 	tbl, err := c.LoadTable(ctx, identifier)
 	if err != nil {
-		if errors.Is(err, catalog.ErrNoSuchTable) {
-			return err
-		}
-		// If we can't load the table, fall back to dropping metadata only
-		return c.DropTable(ctx, identifier)
+		return err
 	}
 
 	// Drop the table entry from the catalog first
@@ -422,7 +418,9 @@ func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 	}
 
 	// Physically delete all table files on storage
-	_ = internal.PurgeTableFiles(ctx, tbl)
+	if purgeErr := internal.PurgeTableFiles(ctx, tbl); purgeErr != nil {
+		return fmt.Errorf("dropped table but failed to purge files: %w", purgeErr)
+	}
 
 	return nil
 }

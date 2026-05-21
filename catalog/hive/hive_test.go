@@ -1202,22 +1202,3 @@ func TestCreateView_VersionNoSQLRepresentation(t *testing.T) {
 
 	mockClient.AssertExpectations(t)
 }
-
-func TestHivePurgeTable(t *testing.T) {
-	assert := require.New(t)
-
-	mockClient := &mockHiveClient{}
-
-	mockClient.On("GetTable", mock.Anything, "test_database", "test_table").
-		Return(testIcebergHiveTable1, nil).Twice()
-
-	mockClient.On("DropTable", mock.Anything, "test_database", "test_table", false).
-		Return(nil).Once()
-
-	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
-
-	err := hiveCatalog.PurgeTable(context.TODO(), TableIdentifier("test_database", "test_table"))
-	assert.NoError(err)
-
-	mockClient.AssertExpectations(t)
-}

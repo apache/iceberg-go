@@ -192,7 +192,7 @@ func (t Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConfi
 		scanLocation = t.metadata.Location()
 	}
 
-	referencedFiles, err := t.getReferencedFiles(fs)
+	referencedFiles, err := t.GetReferencedFiles(fs)
 	if err != nil {
 		return OrphanCleanupResult{}, fmt.Errorf("failed to get referenced files: %w", err)
 	}
@@ -225,10 +225,10 @@ func (t Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConfi
 	return result, nil
 }
 
-// getReferencedFiles collects all files referenced by table metadata: previous metadata
+// GetReferencedFiles collects all files referenced by table metadata: previous metadata
 // files, statistics and partition-statistics paths (Puffin, etc.), and all paths reachable
 // from current snapshots (manifest lists, manifests, data files).
-func (t Table) getReferencedFiles(fs iceio.IO) (map[string]bool, error) {
+func (t Table) GetReferencedFiles(fs iceio.IO) (map[string]bool, error) {
 	referenced := make(map[string]bool)
 	metadata := t.metadata
 

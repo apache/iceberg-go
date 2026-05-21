@@ -168,7 +168,21 @@ type TransactionalCatalog interface {
 }
 
 // PurgeableTable is an optional interface that catalogs can implement
-// to support physical table deletion.
+// to support physical table deletion (catalog entry + underlying files).
+// Callers should check for this capability via a type assertion:
+//
+//	if purger, ok := cat.(catalog.PurgeableTable); ok {
+//	    err := purger.PurgeTable(ctx, ident)
+//	}
+//
+// For REST catalogs the purge is delegated server-side. For client-side
+// catalogs (SQL, Glue, Hive, Hadoop) the table is first dropped from
+// the catalog, then all files under the table's [table.Metadata.Location]
+// root, plus any referenced files written outside the root (e.g. via
+// write.data.path or write.metadata.path table properties), are deleted.
+// File-deletion errors are propagated to the caller, but because the
+// catalog entry is already removed at that point there is no automatic
+// retry path.
 type PurgeableTable interface {
 	PurgeTable(ctx context.Context, identifier table.Identifier) error
 }

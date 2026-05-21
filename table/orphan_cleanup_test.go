@@ -529,7 +529,7 @@ func TestGetReferencedFiles_IncludesStatisticsFiles(t *testing.T) {
 	}
 
 	// No snapshots: FileIO is not used; statistics paths must still be referenced.
-	refs, err := tbl.getReferencedFiles(nil)
+	refs, err := tbl.GetReferencedFiles(nil)
 	require.NoError(t, err)
 
 	assert.True(t, refs["s3://bucket/stats/table-stats.puffin"])
@@ -716,7 +716,7 @@ func TestGetReferencedFiles_OverwriteThenExpireExcludesTombstones(t *testing.T) 
 
 	// fileA is now referenced only via a DELETED entry in the surviving
 	// snapshot's tombstone manifest. The fix must exclude it.
-	refs, err := tbl.getReferencedFiles(fs)
+	refs, err := tbl.GetReferencedFiles(fs)
 	require.NoError(t, err)
 
 	assert.True(t, refs[fileB],

@@ -27,8 +27,10 @@ import (
 	stdfs "io/fs"
 	"maps"
 	"net/url"
+	"os"
 	"path"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -171,6 +173,7 @@ func getDefaultWarehouseLocation(dbname, tablename string, nsprops, catprops ice
 // ([\w-]{36})      -> UUID (36 characters, including hyphens)
 // (?:\.\w+)?       -> optional codec name
 // \.metadata\.json -> file extension
+// var tableMetadataFileNameRegex = regexp.MustCompile(`^(\d+)-([\w-]{36})(?:\.\w+)?\.metadata\.json`)
 var tableMetadataFileNameRegex = regexp.MustCompile(`^(\d+)-([\w-]{36})(?:\.\w+)?\.metadata\.json`)
 
 func ParseMetadataVersion(location string) int {
@@ -243,36 +246,78 @@ func UpdateAndStageTable(ctx context.Context, current *table.Table, ident table.
 	}, nil
 }
 
-// PurgeTableFiles physically deletes all files under the table's warehouse location using WalkDir.
+func normalizeURI(uri string) string {
+	if strings.HasPrefix(uri, "file:") {
+		// Clean "file:/", "file://", "file:///" to all consistently have "file:///" prefix
+		cleaned := strings.TrimPrefix(uri, "file:")
+		cleaned = strings.TrimPrefix(cleaned, "//")
+		cleaned = strings.TrimPrefix(cleaned, "/")
+
+		return "file:///" + cleaned
+	}
+
+	return uri
+}
+
+// PurgeTableFiles physically deletes all files under the table's warehouse location
+// and any referenced files written outside the location root (e.g., via write.data.path
+// or write.metadata.path properties).
 // It is best-effort — if interrupted, orphaned files may remain.
-func PurgeTableFiles(ctx context.Context, tbl *table.Table) (err error) {
+func PurgeTableFiles(ctx context.Context, tbl *table.Table) error {
 	fs, err := tbl.FS(ctx)
 	if err != nil {
 		return err
 	}
 	location := tbl.Metadata().Location()
 
-	var files []string
+	var errs []error
+	fileSet := make(map[string]bool)
+
+	// 1. Walk the table location directory tree to capture all local files
 	if listable, ok := fs.(icebergio.ListableIO); ok {
-		_ = listable.WalkDir(location, func(path string, d stdfs.DirEntry, err error) error {
+		walkErr := listable.WalkDir(location, func(path string, d stdfs.DirEntry, err error) error {
 			if err != nil {
-				return nil
+				return err
 			}
 			if !d.IsDir() {
-				files = append(files, path)
+				fileSet[normalizeURI(path)] = true
 			}
 
 			return nil
 		})
-	}
-
-	if bulk, ok := fs.(icebergio.BulkRemovableIO); ok && len(files) > 0 {
-		_, _ = bulk.DeleteFiles(ctx, files)
-	} else {
-		for _, file := range files {
-			_ = fs.Remove(file)
+		if walkErr != nil {
+			errs = append(errs, fmt.Errorf("failed walking directory %s: %w", location, walkErr))
 		}
 	}
 
-	return nil
+	// 2. Union in manifest-referenced and metadata files (which might be outside the table location)
+	if referencedFiles, refErr := tbl.GetReferencedFiles(fs); refErr == nil {
+		for path := range referencedFiles {
+			fileSet[normalizeURI(path)] = true
+		}
+	} else {
+		errs = append(errs, fmt.Errorf("failed to get referenced files from metadata: %w", refErr))
+	}
+
+	// Convert to slice and sort for deterministic behavior
+	files := make([]string, 0, len(fileSet))
+	for f := range fileSet {
+		files = append(files, f)
+	}
+	slices.Sort(files)
+
+	if bulk, ok := fs.(icebergio.BulkRemovableIO); ok && len(files) > 0 {
+		_, bulkErr := bulk.DeleteFiles(ctx, files)
+		if bulkErr != nil {
+			errs = append(errs, fmt.Errorf("bulk deletion failed: %w", bulkErr))
+		}
+	} else {
+		for _, file := range files {
+			if rmErr := fs.Remove(file); rmErr != nil && !os.IsNotExist(rmErr) {
+				errs = append(errs, fmt.Errorf("failed to remove %s: %w", file, rmErr))
+			}
+		}
+	}
+
+	return errors.Join(errs...)
 }
