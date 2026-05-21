@@ -82,6 +82,12 @@ func TestParseTransform(t *testing.T) {
 		{"truncate no val", "truncate[]"},
 		{"bucket neg", "bucket[-1]"},
 		{"truncate neg", "truncate[-1]"},
+		{"bucket zero", "bucket[0]"},
+		{"truncate zero", "truncate[0]"},
+		{"bucket atoi overflow", "bucket[999999999999999999999999999999999999999]"},
+		{"truncate atoi overflow", "truncate[999999999999999999999999999999999999999]"},
+		{"bucket int32 overflow", "bucket[4294967296]"},
+		{"truncate int32 overflow", "truncate[4294967296]"},
 	}
 
 	for _, tt := range errorTests {
