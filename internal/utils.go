@@ -25,7 +25,20 @@ import (
 	"iter"
 	"slices"
 	"sync/atomic"
+
+	"golang.org/x/exp/constraints"
 )
+
+// FloorDiv performs floored integer division, rounding toward negative infinity.
+// This matches Java's Math.floorDiv behavior for negative dividends.
+func FloorDiv[T constraints.Integer](a, b T) T {
+	d := a / b
+	if (a^b) < 0 && d*b != a {
+		d--
+	}
+
+	return d
+}
 
 // Helper function to find the difference between two slices (a - b).
 func Difference(a, b []string) []string {

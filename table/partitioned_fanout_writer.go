@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"math"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -29,6 +30,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -49,6 +51,12 @@ type partitionInfo struct {
 	rows            []int64
 	partitionValues map[int]any
 	partitionRec    partitionRecord // The actual partition values for generating the path
+}
+
+type partitionFieldInfo struct {
+	sourceField iceberg.PartitionField
+	fieldID     int
+	sourceType  iceberg.Type
 }
 
 // NewPartitionedFanoutWriter creates a new PartitionedFanoutWriter with the specified
@@ -214,28 +222,37 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 	partitionRec := make(partitionRecord, len(partitionFields))
 
 	partitionColumns := make([]arrow.Array, len(partitionFields))
-	partitionFieldsInfo := make([]struct {
-		sourceField *iceberg.PartitionField
-		fieldID     int
-	}, len(partitionFields))
+	partitionFieldsInfo := make([]partitionFieldInfo, len(partitionFields))
 
 	for i := range partitionFields {
 		sourceField := spec.Field(i)
-		colName, _ := schema.FindColumnName(sourceField.SourceID())
-		colIdx := record.Schema().FieldIndices(colName)[0]
-		partitionColumns[i] = record.Column(colIdx)
-		partitionFieldsInfo[i] = struct {
-			sourceField *iceberg.PartitionField
-			fieldID     int
-		}{&sourceField, sourceField.FieldID}
+		colName, ok := schema.FindColumnName(sourceField.SourceID())
+		if !ok {
+			return nil, fmt.Errorf("failed to find source field ID %d in schema", sourceField.SourceID())
+		}
+		colIndices := record.Schema().FieldIndices(colName)
+		if len(colIndices) == 0 {
+			return nil, fmt.Errorf("failed to find source column %q in record schema", colName)
+		}
+		sourceType, ok := schema.FindTypeByID(sourceField.SourceID())
+		if !ok {
+			return nil, fmt.Errorf("failed to find type for source field ID %d in schema", sourceField.SourceID())
+		}
+		partitionColumns[i] = record.Column(colIndices[0])
+		partitionFieldsInfo[i] = partitionFieldInfo{
+			sourceField: sourceField,
+			fieldID:     sourceField.FieldID,
+			sourceType:  sourceType,
+		}
 	}
 
 	for row := range record.NumRows() {
 		for i := range partitionFields {
 			col := partitionColumns[i]
 			if !col.IsNull(int(row)) {
-				sourceField := partitionFieldsInfo[i].sourceField
-				val, err := getArrowValueAsIcebergLiteral(col, int(row))
+				fieldInfo := partitionFieldsInfo[i]
+				sourceField := fieldInfo.sourceField
+				val, err := getArrowValueAsIcebergLiteral(col, int(row), fieldInfo.sourceType)
 				if err != nil {
 					return nil, fmt.Errorf("failed to get arrow values as iceberg literal: %w", err)
 				}
@@ -278,11 +295,7 @@ func newPartitionMapNode() *partitionMapNode {
 
 // getOrCreate navigates the tree and returns the partitionInfo for the given partition key,
 // creating nodes along the way if they don't exist
-func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo []struct {
-	sourceField *iceberg.PartitionField
-	fieldID     int
-},
-) *partitionInfo {
+func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo []partitionFieldInfo) *partitionInfo {
 	// Navigate through all but the last partition field
 	node := n
 	for _, part := range partitionRec[:len(partitionRec)-1] {
@@ -369,7 +382,7 @@ func partitionBatchByKey(ctx context.Context) partitionBatchFn {
 	}
 }
 
-func getArrowValueAsIcebergLiteral(column arrow.Array, row int) (iceberg.Literal, error) {
+func getArrowValueAsIcebergLiteral(column arrow.Array, row int, sourceType iceberg.Type) (iceberg.Literal, error) {
 	if column.IsNull(row) {
 		return nil, nil
 	}
@@ -383,7 +396,7 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int) (iceberg.Literal
 		return iceberg.NewLiteral(iceberg.Time(arr.Value(row))), nil
 	case *array.Timestamp:
 
-		return iceberg.NewLiteral(iceberg.Timestamp(arr.Value(row))), nil
+		return timestampLiteralFromArrow(arr, row, sourceType)
 	case *array.Decimal32:
 		val := arr.Value(row)
 		dec := iceberg.Decimal{
@@ -463,4 +476,67 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int) (iceberg.Literal
 
 		return nil, fmt.Errorf("unsupported value type: %T", val)
 	}
+}
+
+func timestampLiteralFromArrow(arr *array.Timestamp, row int, sourceType iceberg.Type) (iceberg.Literal, error) {
+	timestampType := arr.DataType().(*arrow.TimestampType)
+	value := int64(arr.Value(row))
+
+	switch sourceType.(type) {
+	case iceberg.TimestampType, iceberg.TimestampTzType:
+		micros, err := arrowTimestampToMicros(value, timestampType.Unit)
+		if err != nil {
+			return nil, err
+		}
+
+		return iceberg.NewLiteral(iceberg.Timestamp(micros)), nil
+	case iceberg.TimestampNsType, iceberg.TimestampTzNsType:
+		nanos, err := arrowTimestampToNanos(value, timestampType.Unit)
+		if err != nil {
+			return nil, err
+		}
+
+		return iceberg.NewLiteral(iceberg.TimestampNano(nanos)), nil
+	default:
+		return nil, fmt.Errorf("cannot convert arrow timestamp to iceberg literal for source type %v", sourceType)
+	}
+}
+
+func arrowTimestampToMicros(value int64, unit arrow.TimeUnit) (int64, error) {
+	switch unit {
+	case arrow.Second:
+		return scaleTimestamp(value, 1_000_000)
+	case arrow.Millisecond:
+		return scaleTimestamp(value, 1_000)
+	case arrow.Microsecond:
+		return value, nil
+	case arrow.Nanosecond:
+		return internal.FloorDiv(value, int64(1_000)), nil
+	default:
+		return 0, fmt.Errorf("unsupported arrow timestamp unit: %s", unit)
+	}
+}
+
+func arrowTimestampToNanos(value int64, unit arrow.TimeUnit) (int64, error) {
+	switch unit {
+	case arrow.Second:
+		return scaleTimestamp(value, 1_000_000_000)
+	case arrow.Millisecond:
+		return scaleTimestamp(value, 1_000_000)
+	case arrow.Microsecond:
+		return scaleTimestamp(value, 1_000)
+	case arrow.Nanosecond:
+		return value, nil
+	default:
+		return 0, fmt.Errorf("unsupported arrow timestamp unit: %s", unit)
+	}
+}
+
+func scaleTimestamp(value, factor int64) (int64, error) {
+	if (value > 0 && value > math.MaxInt64/factor) ||
+		(value < 0 && value < math.MinInt64/factor) {
+		return 0, fmt.Errorf("arrow timestamp value %d overflows int64 when scaled by %d", value, factor)
+	}
+
+	return value * factor, nil
 }

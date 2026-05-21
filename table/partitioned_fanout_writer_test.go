@@ -20,6 +20,7 @@ package table
 import (
 	"context"
 	"fmt"
+	"math"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -298,6 +299,188 @@ func (s *FanoutWriterTestSuite) TestHourTransform() {
 	defer testRecord.Release()
 
 	s.testTransformPartition(iceberg.HourTransform{}, "created_ts", "hour", testRecord, 3)
+}
+
+func (s *FanoutWriterTestSuite) TestTimestampPartitionUsesArrowUnit() {
+	tests := []struct {
+		name           string
+		arrowType      *arrow.TimestampType
+		value          arrow.Timestamp
+		expectedSource iceberg.Type
+	}{
+		{
+			name:           "second",
+			arrowType:      &arrow.TimestampType{Unit: arrow.Second},
+			value:          arrow.Timestamp(1_700_000_000),
+			expectedSource: iceberg.PrimitiveTypes.Timestamp,
+		},
+		{
+			name:           "millisecond",
+			arrowType:      &arrow.TimestampType{Unit: arrow.Millisecond},
+			value:          arrow.Timestamp(1_700_000_000_000),
+			expectedSource: iceberg.PrimitiveTypes.Timestamp,
+		},
+		{
+			name:           "microsecond",
+			arrowType:      &arrow.TimestampType{Unit: arrow.Microsecond},
+			value:          arrow.Timestamp(1_700_000_000_000_000),
+			expectedSource: iceberg.PrimitiveTypes.Timestamp,
+		},
+		{
+			name:           "millisecond UTC",
+			arrowType:      &arrow.TimestampType{Unit: arrow.Millisecond, TimeZone: "UTC"},
+			value:          arrow.Timestamp(1_700_000_000_000),
+			expectedSource: iceberg.PrimitiveTypes.TimestampTz,
+		},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			arrSchema := arrow.NewSchema([]arrow.Field{
+				{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+				{Name: "created_ts", Type: tt.arrowType, Nullable: true},
+			}, nil)
+
+			testRecord := s.createCustomTestRecord(arrSchema, [][]any{
+				{int32(1), tt.value},
+			})
+			defer testRecord.Release()
+
+			icebergSchema, err := ArrowSchemaToIcebergWithFreshIDs(testRecord.Schema(), false)
+			s.Require().NoError(err)
+
+			sourceField, ok := icebergSchema.FindFieldByName("created_ts")
+			s.Require().True(ok)
+			s.True(tt.expectedSource.Equals(sourceField.Type))
+
+			spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+				SourceIDs: []int{sourceField.ID},
+				FieldID:   1000,
+				Transform: iceberg.DayTransform{},
+				Name:      "created_day",
+			})
+
+			partitions, err := getRecordPartitions(spec, icebergSchema, testRecord)
+			s.Require().NoError(err)
+			s.Require().Len(partitions, 1)
+
+			partitionPath := spec.PartitionToPath(partitions[0].partitionRec, icebergSchema)
+			s.Equal("created_day=2023-11-14", partitionPath)
+		})
+	}
+}
+
+func (s *FanoutWriterTestSuite) TestTimestampNsPartitionUsesArrowUnit() {
+	tests := []struct {
+		name           string
+		arrowType      *arrow.TimestampType
+		expectedSource iceberg.Type
+	}{
+		{
+			name:           "nanosecond",
+			arrowType:      &arrow.TimestampType{Unit: arrow.Nanosecond},
+			expectedSource: iceberg.PrimitiveTypes.TimestampNs,
+		},
+		{
+			name:           "nanosecond UTC",
+			arrowType:      &arrow.TimestampType{Unit: arrow.Nanosecond, TimeZone: "UTC"},
+			expectedSource: iceberg.PrimitiveTypes.TimestampTzNs,
+		},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			arrSchema := arrow.NewSchema([]arrow.Field{
+				{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+				{Name: "created_ts", Type: tt.arrowType, Nullable: true},
+			}, nil)
+
+			testRecord := s.createCustomTestRecord(arrSchema, [][]any{
+				{int32(1), arrow.Timestamp(1_700_000_000_000_000_000)},
+			})
+			defer testRecord.Release()
+
+			icebergSchema, err := ArrowSchemaToIcebergWithFreshIDs(testRecord.Schema(), false)
+			s.Require().NoError(err)
+
+			sourceField, ok := icebergSchema.FindFieldByName("created_ts")
+			s.Require().True(ok)
+			s.True(tt.expectedSource.Equals(sourceField.Type))
+
+			spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+				SourceIDs: []int{sourceField.ID},
+				FieldID:   1000,
+				Transform: iceberg.DayTransform{},
+				Name:      "created_day",
+			})
+
+			partitions, err := getRecordPartitions(spec, icebergSchema, testRecord)
+			s.Require().NoError(err)
+			s.Require().Len(partitions, 1)
+
+			partitionPath := spec.PartitionToPath(partitions[0].partitionRec, icebergSchema)
+			s.Equal("created_day=2023-11-14", partitionPath)
+		})
+	}
+}
+
+func (s *FanoutWriterTestSuite) TestTimestampPartitionFloorsNegativeNanoseconds() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "created_ts", Type: &arrow.TimestampType{Unit: arrow.Nanosecond}, Nullable: true},
+	}, nil)
+
+	testRecord := s.createCustomTestRecord(arrSchema, [][]any{
+		{int32(1), arrow.Timestamp(-1_500)},
+	})
+	defer testRecord.Release()
+
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "created_ts", Type: iceberg.PrimitiveTypes.Timestamp},
+	)
+
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{2},
+		FieldID:   1000,
+		Transform: iceberg.IdentityTransform{},
+		Name:      "created_ts",
+	})
+
+	partitions, err := getRecordPartitions(spec, icebergSchema, testRecord)
+	s.Require().NoError(err)
+	s.Require().Len(partitions, 1)
+	s.Equal(iceberg.Timestamp(-2), partitions[0].partitionRec.Get(0))
+
+	partitionPath := spec.PartitionToPath(partitions[0].partitionRec, icebergSchema)
+	s.Equal("created_ts=1969-12-31T23%3A59%3A59.999998", partitionPath)
+}
+
+func (s *FanoutWriterTestSuite) TestTimestampPartitionRejectsOverflowWhenScalingArrowUnit() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "created_ts", Type: &arrow.TimestampType{Unit: arrow.Second}, Nullable: true},
+	}, nil)
+
+	testRecord := s.createCustomTestRecord(arrSchema, [][]any{
+		{int32(1), arrow.Timestamp(math.MaxInt64)},
+	})
+	defer testRecord.Release()
+
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "created_ts", Type: iceberg.PrimitiveTypes.Timestamp},
+	)
+
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{2},
+		FieldID:   1000,
+		Transform: iceberg.DayTransform{},
+		Name:      "created_day",
+	})
+
+	_, err := getRecordPartitions(spec, icebergSchema, testRecord)
+	s.Require().ErrorContains(err, "overflows int64")
 }
 
 func (s *FanoutWriterTestSuite) TestVoidTransform() {
