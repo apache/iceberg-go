@@ -1436,7 +1436,7 @@ func (m *strictMetricsEval) VisitNotEqual(t iceberg.BoundTerm, lit iceberg.Liter
 	field := t.Ref().Field()
 	fieldID := field.ID
 
-	if m.canContainNulls(fieldID) || m.canContainNans(fieldID) {
+	if m.containsNullsOnly(fieldID) || m.containsNansOnly(fieldID) {
 		return rowsMustMatch
 	}
 
@@ -1518,7 +1518,7 @@ func (m *strictMetricsEval) VisitNotIn(t iceberg.BoundTerm, s iceberg.Set[iceber
 	field := t.Ref().Field()
 	fieldID := field.ID
 
-	if m.canContainNulls(fieldID) || m.canContainNans(fieldID) {
+	if m.containsNullsOnly(fieldID) || m.containsNansOnly(fieldID) {
 		return rowsMustMatch
 	}
 
@@ -1562,12 +1562,6 @@ func (m *strictMetricsEval) VisitNotStartsWith(iceberg.BoundTerm, iceberg.Litera
 	return rowsMightNotMatch
 }
 
-func (m *strictMetricsEval) canContainNulls(fieldID int) bool {
-	cnt, exists := m.nullCounts[fieldID]
-
-	return exists && cnt > 0
-}
-
 func (m *strictMetricsEval) mayContainNulls(field iceberg.NestedField) bool {
 	cnt, exists := m.nullCounts[field.ID]
 	if !exists {
@@ -1575,12 +1569,6 @@ func (m *strictMetricsEval) mayContainNulls(field iceberg.NestedField) bool {
 	}
 
 	return cnt > 0
-}
-
-func (m *strictMetricsEval) canContainNans(fieldID int) bool {
-	cnt, exists := m.nanCounts[fieldID]
-
-	return exists && cnt > 0
 }
 
 func (m *strictMetricsEval) mayContainNans(field iceberg.NestedField) bool {
