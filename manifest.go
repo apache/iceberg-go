@@ -944,16 +944,6 @@ func (v3writerImpl) prepareEntry(entry *manifestEntry, snapshotID int64) (Manife
 		}
 	}
 
-	// v3 spec deprecates data_file.distinct_counts (Java parity:
-	// apache/iceberg#12182). prepareEntry takes ownership of the entry's data
-	// file and clears the Avro-facing pointer; the cached distinctCntMap and
-	// DistinctValueCounts() getter are intentionally preserved so in-process
-	// readers keep their view. Best-effort: only the in-tree *dataFile is
-	// cleared; third-party DataFile impls bypass this guard.
-	if df, ok := entry.DataFile().(*dataFile); ok {
-		df.DistinctCounts = nil
-	}
-
 	return entry, nil
 }
 
@@ -2248,6 +2238,13 @@ func (b *DataFileBuilder) NaNValueCounts(counts map[int]int64) *DataFileBuilder 
 }
 
 // DistinctValueCounts sets the distinct value counts for the data file.
+//
+// Deprecated: distinct_counts (field 111) is deprecated in every
+// version of the Iceberg spec (apache/iceberg#12182). The Avro
+// manifest-entry schemas omit the field for v1, v2, and v3, so values
+// set here are not transported in manifests written by this library.
+// The setter is retained for round-tripping legacy DataFiles read from
+// older manifests; new code should not call it.
 func (b *DataFileBuilder) DistinctValueCounts(counts map[int]int64) *DataFileBuilder {
 	b.d.DistinctCounts = mapToAvroColMap(counts)
 

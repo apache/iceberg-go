@@ -91,11 +91,13 @@ type AvroEntryMarshaler interface {
 // as a standalone manifest entry — they only round-trip via the
 // matching decoder.
 //
-// distinct_counts (field 111) is deprecated in the spec for all
-// versions. MarshalAvroEntry preserves any value already on the
-// source for v1 and v2 as a read-compatibility artifact; v3 omits
-// the field entirely (apache/iceberg#12182). New DataFiles should
-// not set distinct counts.
+// distinct_counts (field 111) is deprecated in the spec for every
+// version (apache/iceberg#12182). MarshalAvroEntry drops the field
+// on encode for v1, v2, and v3 alike — values populated on the
+// source DataFile are not transported. The Avro tag on the dataFile
+// struct is intentionally retained so legacy manifests that already
+// carry the field on the wire still decode through the matching
+// reader. New DataFiles should not set distinct counts.
 func (d *dataFile) MarshalAvroEntry(spec PartitionSpec, schema *Schema, version int) ([]byte, error) {
 	if version < 1 || version > 3 {
 		return nil, fmt.Errorf("iceberg: MarshalAvroEntry: unsupported format version %d", version)

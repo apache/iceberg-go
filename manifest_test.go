@@ -2115,10 +2115,21 @@ func (m *ManifestTestSuite) TestManifestRoundTripSortOrderID() {
 	m.Equal(expectedSortOrderID, *got)
 }
 
-// TestWriteManifestV3OmitsDistinctCounts verifies the v3 writer clears
-// data_file.distinct_counts (deprecated by v3 spec; Java parity:
-// apache/iceberg#12182).
-func (m *ManifestTestSuite) TestWriteManifestV3OmitsDistinctCounts() {
+// TestWriteManifestOmitsDistinctCounts verifies that the manifest
+// writer drops the deprecated distinct_counts field (id 111) from the
+// wire for every format version, regardless of what the source
+// DataFile carries (apache/iceberg#12182). The data_file_v{1,2,3}
+// Avro schemas in internal/avro_schemas.go omit field 111, so the
+// encoder never emits it and a round-trip read returns an empty map.
+func (m *ManifestTestSuite) TestWriteManifestOmitsDistinctCounts() {
+	for _, version := range []int{1, 2, 3} {
+		m.Run("v"+strconv.Itoa(version), func() {
+			m.assertWriteOmitsDistinctCounts(version)
+		})
+	}
+}
+
+func (m *ManifestTestSuite) assertWriteOmitsDistinctCounts(version int) {
 	partitionSpec := NewPartitionSpecID(0)
 	snapshotID := int64(1)
 	seqNum := int64(1)
@@ -2137,29 +2148,158 @@ func (m *ManifestTestSuite) TestWriteManifestV3OmitsDistinctCounts() {
 	m.Require().NoError(err)
 	dataFileBuilder.DistinctValueCounts(map[int]int64{1: 42})
 
-	entry := NewManifestEntry(
-		EntryStatusADDED,
-		&snapshotID,
-		&seqNum, &seqNum,
-		dataFileBuilder.Build(),
-	)
-
 	var buf bytes.Buffer
-	_, err = WriteManifest(
-		"s3://bucket/ns/table/metadata/distinct.avro", &buf, 3,
+	file, err := WriteManifest(
+		"s3://bucket/ns/table/metadata/distinct.avro", &buf, version,
 		partitionSpec,
-		NewSchema(
-			0,
+		NewSchema(0,
 			NestedField{ID: 1, Name: "id", Type: Int64Type{}, Required: true},
 		),
 		snapshotID,
-		[]ManifestEntry{entry},
+		[]ManifestEntry{NewManifestEntry(
+			EntryStatusADDED,
+			&snapshotID,
+			&seqNum, &seqNum,
+			dataFileBuilder.Build(),
+		)},
 	)
 	m.Require().NoError(err)
 
-	df, ok := entry.DataFile().(*dataFile)
-	m.Require().True(ok)
-	m.Nil(df.DistinctCounts, "v3 writer must clear DistinctCounts on the entry's *dataFile")
+	entries, err := ReadManifest(file, &buf, false)
+	m.Require().NoError(err)
+	m.Require().Len(entries, 1)
+	m.Empty(entries[0].DataFile().DistinctValueCounts(),
+		"manifest writer must drop distinct_counts on the wire for every format version; "+
+			"see internal/avro_schemas.go data_file_v"+strconv.Itoa(version))
+}
+
+// TestReadManifestLegacyDistinctCounts is a back-compat regression
+// guard. Older iceberg-go and other Iceberg writers (Java, PySpark)
+// embed distinct_counts (id 111) in the data_file record. PR #1102
+// dropped the field from this library's writer schema, but legacy
+// manifests already on disk must still decode correctly: the dataFile
+// struct's avro:"distinct_counts" tag is intentionally retained for
+// this read path.
+//
+// The test bypasses WriteManifest and writes a raw OCF using a
+// fixture schema that mirrors the pre-PR data_file_v2 (with field
+// 111 re-injected), then reads it through ReadManifest and asserts
+// the distinct counts come back populated.
+func (m *ManifestTestSuite) TestReadManifestLegacyDistinctCounts() {
+	partitionSpec := NewPartitionSpec()
+	tableSchema := NewSchema(0,
+		NestedField{ID: 1, Name: "id", Type: Int64Type{}, Required: true},
+	)
+	partitionSchema, err := partitionTypeToAvroSchema(partitionSpec.PartitionType(tableSchema))
+	m.Require().NoError(err)
+
+	legacySchema := injectDistinctCountsIntoEntrySchema(m.T(), partitionSchema, 2)
+
+	snapshotID := int64(42)
+	seqNum := int64(7)
+	df := &dataFile{
+		Content:        EntryContentData,
+		Path:           "s3://bucket/ns/table/data/legacy.parquet",
+		Format:         ParquetFile,
+		PartitionData:  map[string]any{},
+		RecordCount:    100,
+		FileSize:       4096,
+		DistinctCounts: mapToAvroColMap(map[int]int64{1: 99, 2: 88}),
+	}
+	entry := &manifestEntry{
+		EntryStatus: EntryStatusADDED,
+		Snapshot:    &snapshotID,
+		SeqNum:      &seqNum,
+		FileSeqNum:  &seqNum,
+		Data:        df,
+	}
+
+	var buf bytes.Buffer
+	wr, err := ocf.NewWriter(&buf, legacySchema,
+		ocf.WithSchema(legacySchema.String()),
+		ocf.WithMetadata(map[string][]byte{
+			"format-version": []byte("2"),
+			"content":        []byte("data"),
+		}),
+	)
+	m.Require().NoError(err)
+	m.Require().NoError(wr.Encode(entry))
+	m.Require().NoError(wr.Close())
+
+	file := &manifestFile{
+		version: 2,
+		Path:    "s3://bucket/ns/table/metadata/legacy.avro",
+		Content: ManifestContentData,
+	}
+	entries, err := ReadManifest(file, &buf, false)
+	m.Require().NoError(err)
+	m.Require().Len(entries, 1)
+	m.Equal(map[int]int64{1: 99, 2: 88}, entries[0].DataFile().DistinctValueCounts(),
+		"ReadManifest must decode distinct_counts (field 111) from legacy "+
+			"manifests where the file's writer schema still carries the field")
+}
+
+// injectDistinctCountsIntoEntrySchema returns a manifest_entry avro
+// schema for the given format version with the deprecated
+// distinct_counts field (id 111) re-added into the data_file record.
+// The shape mirrors the pre-PR-1102 data_file_v{version} schema
+// definition that was removed from internal/avro_schemas.go, so it
+// can be used to fixture-up legacy manifests for back-compat tests.
+func injectDistinctCountsIntoEntrySchema(t *testing.T, partitionSchema *avro.Schema, version int) *avro.Schema {
+	t.Helper()
+
+	base, err := internal.NewManifestEntrySchema(partitionSchema, version)
+	if err != nil {
+		t.Fatalf("base entry schema for v%d: %v", version, err)
+	}
+	root := base.Root()
+
+	dfIdx := -1
+	for i := range root.Fields {
+		if root.Fields[i].Name == "data_file" {
+			dfIdx = i
+
+			break
+		}
+	}
+	if dfIdx == -1 {
+		t.Fatalf("data_file field not found on manifest_entry v%d schema", version)
+	}
+
+	distinctCountsField := avro.SchemaField{
+		Name: "distinct_counts",
+		Type: avro.SchemaNode{
+			Type: "union",
+			Branches: []avro.SchemaNode{
+				{Type: "null"},
+				{
+					Type: "array",
+					Items: &avro.SchemaNode{
+						Type: "record",
+						Name: "k123_v124",
+						Fields: []avro.SchemaField{
+							{Name: "key", Type: avro.SchemaNode{Type: "int"}, Props: map[string]any{"field-id": 123}},
+							{Name: "value", Type: avro.SchemaNode{Type: "long"}, Props: map[string]any{"field-id": 124}},
+						},
+					},
+					Props: map[string]any{"logicalType": "map"},
+				},
+			},
+		},
+		Props: map[string]any{"field-id": 111},
+		Doc:   "map of column id to distinct value count",
+	}
+
+	dfField := root.Fields[dfIdx]
+	dfField.Type.Fields = append(append([]avro.SchemaField{}, dfField.Type.Fields...), distinctCountsField)
+	root.Fields[dfIdx] = dfField
+
+	legacy, err := root.Schema()
+	if err != nil {
+		t.Fatalf("recompiling legacy entry schema for v%d: %v", version, err)
+	}
+
+	return legacy
 }
 
 func (m *ManifestTestSuite) TestWriteManifestClosesWriterOnEntryError() {

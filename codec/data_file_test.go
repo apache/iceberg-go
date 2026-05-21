@@ -187,8 +187,9 @@ func fullyPopulatedDataFile(t *testing.T, version int) (iceberg.PartitionSpec, *
 	// version (apache/iceberg#12182). The fixture populates it on every
 	// version to assert that the wire codec drops the field on encode
 	// regardless of what the in-memory DataFile carries — strict readers
-	// (e.g. PyIceberg) reject manifests that emit it.
-	builder.DistinctValueCounts(map[int]int64{1: 64, 2: 128})
+	// (e.g. PyIceberg) reject manifests that emit it. The deprecated
+	// setter is invoked here intentionally to exercise that drop path.
+	builder.DistinctValueCounts(map[int]int64{1: 64, 2: 128}) //nolint:staticcheck // SA1019: deliberate use of deprecated setter to assert the encoder drops the field
 	if version >= 2 {
 		builder.EqualityFieldIDs([]int{1})
 	}
