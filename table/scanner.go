@@ -442,6 +442,7 @@ func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]iceberg.Manifes
 			dvIndex[*ref] = del
 		}
 	}
+
 	return dvIndex, nil
 }
 
@@ -456,6 +457,7 @@ func matchDVToData(dataEntry iceberg.ManifestEntry, dvIndex map[string]iceberg.M
 	if dataEntry.SequenceNum() <= dvEntry.SequenceNum() {
 		return []iceberg.DataFile{dvEntry.DataFile()}
 	}
+
 	return nil
 }
 
