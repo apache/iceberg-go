@@ -17,6 +17,8 @@
 
 package iceberg
 
+import "slices"
+
 // Row lineage metadata column field IDs (v3+). Reserved IDs are Integer.MAX_VALUE - 107 and 108
 // per the Iceberg spec (Metadata Columns / Row Lineage).
 const (
@@ -60,11 +62,37 @@ func IsMetadataColumn(fieldID int) bool {
 	return fieldID == RowIDFieldID || fieldID == LastUpdatedSequenceNumberFieldID
 }
 
-// SchemaWithRowID returns a new schema that appends the _row_id metadata column
-// to the given schema's fields. Used when reading source files during a CoW rewrite
-// so that row identity is preserved in the output.
-func SchemaWithRowID(s *Schema) *Schema {
-	fields := append(s.Fields(), RowID())
+// SchemaWithRowLineage returns a new schema with the row-lineage metadata columns
+// (_row_id, _last_updated_sequence_number) appended to the given schema's fields.
+// Used when reading source files during a CoW rewrite or compaction so that row
+// identity and per-row update sequence are preserved in the output.
+//
+// Idempotent: if a row-lineage column is already present (by reserved field ID),
+// it is not appended again. The returned schema always allocates a fresh field
+// slice so it cannot alias the input schema's backing array.
+func SchemaWithRowLineage(s *Schema) *Schema {
+	// Clone the field slice up front so we never share a backing array with the
+	// caller's schema — append-with-spare-capacity could otherwise mutate the
+	// source schema's fields when the caller next mutates either side.
+	fields := slices.Clone(s.Fields())
+
+	hasRowID := false
+	hasSeqNum := false
+	for _, f := range fields {
+		switch f.ID {
+		case RowIDFieldID:
+			hasRowID = true
+		case LastUpdatedSequenceNumberFieldID:
+			hasSeqNum = true
+		}
+	}
+
+	if !hasRowID {
+		fields = append(fields, RowID())
+	}
+	if !hasSeqNum {
+		fields = append(fields, LastUpdatedSequenceNumber())
+	}
 
 	return NewSchemaWithIdentifiers(s.ID, s.IdentifierFieldIDs, fields...)
 }

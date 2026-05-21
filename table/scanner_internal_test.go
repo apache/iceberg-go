@@ -295,3 +295,166 @@ func TestSynthesizeRowLineageColumns(t *testing.T) {
 	}
 	assert.EqualValues(t, 3, rowOffset)
 }
+
+// TestProjectionV3SelectRowLineageColumns verifies that explicitly selecting
+// _row_id (and _last_updated_sequence_number) on a v3 table yields a projection
+// containing those metadata columns, even though they are not declared in the
+// user schema. This is the legacy "Select(_row_id)" escape hatch.
+func TestProjectionV3SelectRowLineageColumns(t *testing.T) {
+	schema := iceberg.NewSchema(
+		1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+
+	metadata, err := NewMetadata(
+		schema,
+		iceberg.UnpartitionedSpec,
+		UnsortedSortOrder,
+		"s3://test-bucket/test_table",
+		iceberg.Properties{"format-version": "3"},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 3, metadata.Version(), "sanity: must be v3")
+
+	scan := &Scan{
+		metadata:       metadata,
+		selectedFields: []string{"id", "payload", iceberg.RowIDColumnName, iceberg.LastUpdatedSequenceNumberColumnName},
+		caseSensitive:  true,
+	}
+
+	proj, err := scan.Projection()
+	require.NoError(t, err, "Projection must accept lineage column names on v3")
+	require.NotNil(t, proj)
+
+	fields := proj.Fields()
+	require.Len(t, fields, 4, "projected schema must contain id, payload, _row_id, _last_updated_sequence_number")
+
+	fieldByName := make(map[string]iceberg.NestedField, len(fields))
+	for _, f := range fields {
+		fieldByName[f.Name] = f
+	}
+
+	rowIDField, ok := fieldByName[iceberg.RowIDColumnName]
+	require.True(t, ok, "_row_id must be in projection")
+	assert.Equal(t, iceberg.RowIDFieldID, rowIDField.ID)
+	assert.False(t, rowIDField.Required, "_row_id must be optional")
+
+	seqField, ok := fieldByName[iceberg.LastUpdatedSequenceNumberColumnName]
+	require.True(t, ok, "_last_updated_sequence_number must be in projection")
+	assert.Equal(t, iceberg.LastUpdatedSequenceNumberFieldID, seqField.ID)
+	assert.False(t, seqField.Required, "_last_updated_sequence_number must be optional")
+}
+
+// TestProjectionRowLineageRejectedOnV1V2 asserts that requesting a row-lineage
+// metadata column via Select on a v1 or v2 table is an error (those format
+// versions do not support row lineage).
+func TestProjectionRowLineageRejectedOnV1V2(t *testing.T) {
+	schema := iceberg.NewSchema(
+		1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+
+	for _, tc := range []struct {
+		name string
+		ver  string
+	}{
+		{name: "v1", ver: "1"},
+		{name: "v2", ver: "2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			metadata, err := NewMetadata(
+				schema,
+				iceberg.UnpartitionedSpec,
+				UnsortedSortOrder,
+				"s3://test-bucket/test_table",
+				iceberg.Properties{PropertyFormatVersion: tc.ver},
+			)
+			require.NoError(t, err)
+
+			scan := &Scan{
+				metadata:       metadata,
+				selectedFields: []string{"id", iceberg.RowIDColumnName},
+				caseSensitive:  true,
+			}
+
+			_, err = scan.Projection()
+			require.Error(t, err, "Projection must reject lineage columns on pre-v3 tables")
+			assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.ErrorContains(t, err, iceberg.RowIDColumnName)
+		})
+	}
+}
+
+// TestProjectionWithRowLineageRequiresV3 asserts that the WithRowLineage scan
+// option errors out on Projection() when the table format version is below 3.
+func TestProjectionWithRowLineageRequiresV3(t *testing.T) {
+	schema := iceberg.NewSchema(
+		1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+
+	metadata, err := NewMetadata(
+		schema,
+		iceberg.UnpartitionedSpec,
+		UnsortedSortOrder,
+		"s3://test-bucket/test_table",
+		iceberg.Properties{PropertyFormatVersion: "2"},
+	)
+	require.NoError(t, err)
+
+	scan := &Scan{
+		metadata:          metadata,
+		selectedFields:    []string{"*"},
+		caseSensitive:     true,
+		includeRowLineage: true,
+	}
+
+	_, err = scan.Projection()
+	require.Error(t, err, "WithRowLineage on a v2 table must be an explicit error")
+	assert.ErrorContains(t, err, "row lineage")
+}
+
+// TestProjectionV3SchemaAlreadyHasRowID covers the case where the user schema
+// already declares _row_id (a reserved field id, but legal in v3). The
+// projection helper must be idempotent and not panic on the duplicate ID.
+func TestProjectionV3SchemaAlreadyHasRowID(t *testing.T) {
+	schema := iceberg.NewSchema(
+		1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.PrimitiveTypes.String, Required: false},
+		iceberg.RowID(),
+	)
+
+	metadata, err := NewMetadata(
+		schema,
+		iceberg.UnpartitionedSpec,
+		UnsortedSortOrder,
+		"s3://test-bucket/test_table",
+		iceberg.Properties{"format-version": "3"},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 3, metadata.Version(), "sanity: must be v3")
+
+	scan := &Scan{
+		metadata:          metadata,
+		selectedFields:    []string{"*"},
+		caseSensitive:     true,
+		includeRowLineage: true,
+	}
+
+	require.NotPanics(t, func() {
+		proj, perr := scan.Projection()
+		require.NoError(t, perr)
+		require.NotNil(t, proj)
+
+		seen := make(map[int]string, len(proj.Fields()))
+		for _, f := range proj.Fields() {
+			if prev, dup := seen[f.ID]; dup {
+				t.Fatalf("duplicate field id %d: %q and %q", f.ID, prev, f.Name)
+			}
+			seen[f.ID] = f.Name
+		}
+	})
+}

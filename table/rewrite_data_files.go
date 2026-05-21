@@ -289,7 +289,16 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		scanOpts = append(scanOpts, WitMaxConcurrency(cfg.scanConcurrency))
 	}
 
-	preserveLineage := tbl.metadata.Version() >= 3 && hasRowLineage(group.Tasks)
+	// Preserve row lineage only when every source file in the group carries
+	// it. A mixed group (some files with FirstRowID, some without — e.g.
+	// legacy files on a v3 table) would otherwise produce one output where
+	// post-lineage rows have explicit _row_id values and pre-lineage rows
+	// have nulls, which violates the per-file uniqueness/coverage
+	// invariant the v3 spec requires. Splitting mixed groups into separate
+	// outputs is a larger refactor and is left as a follow-up; for now we
+	// degrade gracefully (the rewrite still succeeds, but lineage is not
+	// preserved for the surviving rows).
+	preserveLineage := tbl.metadata.Version() >= 3 && allTasksHaveRowLineage(group.Tasks)
 	if preserveLineage {
 		scanOpts = append(scanOpts, WithRowLineage())
 	}
@@ -306,7 +315,18 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		writeOpts = append(writeOpts, WithTargetFileSize(cfg.targetFileSize))
 	}
 	if preserveLineage {
-		writeOpts = append(writeOpts, WithPreserveRowLineage(iceberg.SchemaWithRowID(tbl.Schema())))
+		// Rebuild the arrow schema from the projected iceberg schema so the
+		// reserved row-lineage field IDs (_row_id, _last_updated_sequence_number)
+		// are attached as Arrow field metadata. ArrowSchemaToIceberg prefers
+		// embedded field IDs when present and otherwise falls back to the
+		// table's name mapping — which doesn't (and cannot) contain the
+		// reserved metadata column names, so the fallback path panics.
+		projectedSchema := iceberg.SchemaWithRowLineage(tbl.Schema())
+		arrowSchema, err = SchemaToArrowSchema(projectedSchema, nil, true, false)
+		if err != nil {
+			return CompactionGroupResult{}, fmt.Errorf("build arrow schema for lineage write in group %q: %w", group.PartitionKey, err)
+		}
+		writeOpts = append(writeOpts, WithPreserveRowLineage(projectedSchema))
 	}
 
 	var (
@@ -336,16 +356,22 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	}, nil
 }
 
-// hasRowLineage returns true if any task in the group has a non-nil FirstRowID,
-// indicating the table has v3 row lineage data to preserve.
-func hasRowLineage(tasks []FileScanTask) bool {
+// allTasksHaveRowLineage returns true iff every task in the group has a
+// non-nil FirstRowID — i.e. every source file already carries v3 row lineage.
+// Used to gate the preservation path on compaction: mixed groups (some
+// lineage, some legacy) would otherwise produce per-file invariant
+// violations, so the gate is conservative.
+func allTasksHaveRowLineage(tasks []FileScanTask) bool {
+	if len(tasks) == 0 {
+		return false
+	}
 	for _, t := range tasks {
-		if t.FirstRowID != nil {
-			return true
+		if t.FirstRowID == nil {
+			return false
 		}
 	}
 
-	return false
+	return true
 }
 
 // rewriteDataFilesPartial stages each group as its own rewrite

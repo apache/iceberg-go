@@ -24,6 +24,7 @@ import (
 	"iter"
 	"math"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -243,6 +244,7 @@ func (scan *Scan) Snapshot() *Snapshot {
 
 func (scan *Scan) Projection() (*iceberg.Schema, error) {
 	curSchema := scan.metadata.CurrentSchema()
+	curVersion := scan.metadata.Version()
 	if scan.snapshotID != nil {
 		snap := scan.metadata.SnapshotByID(*scan.snapshotID)
 		if snap == nil {
@@ -260,22 +262,96 @@ func (scan *Scan) Projection() (*iceberg.Schema, error) {
 		}
 	}
 
+	if scan.includeRowLineage && curVersion < minFormatVersionRowLineage {
+		return nil, fmt.Errorf("%w: row lineage requires format version %d, table is v%d",
+			ErrInvalidOperation, minFormatVersionRowLineage, curVersion)
+	}
+
 	var schema *iceberg.Schema
 	if slices.Contains(scan.selectedFields, "*") {
 		schema = curSchema
 	} else {
+		// Intercept row-lineage metadata column names (_row_id,
+		// _last_updated_sequence_number) before calling Select: they are
+		// reserved and never appear in the user schema's fields, so
+		// Select would fail with "could not find column" on v3 tables
+		// where they are otherwise legal to project. The scanner reads
+		// them from file metadata (or synthesizes them) at scan time;
+		// here we just need to ensure they survive into the projection.
+		//
+		// On v1/v2 tables, Select is left to fail naturally — those
+		// versions don't have row lineage, so requesting these columns
+		// is an error.
+		userFields, lineageFields := splitLineageMetadataFields(scan.selectedFields, scan.caseSensitive)
+		if len(lineageFields) > 0 && curVersion < minFormatVersionRowLineage {
+			userFields = scan.selectedFields
+			lineageFields = nil
+		}
+
 		var err error
-		schema, err = curSchema.Select(scan.caseSensitive, scan.selectedFields...)
+		schema, err = curSchema.Select(scan.caseSensitive, userFields...)
 		if err != nil {
 			return nil, err
+		}
+		if len(lineageFields) > 0 {
+			schema = appendMissingLineageFields(schema, lineageFields)
 		}
 	}
 
 	if scan.includeRowLineage {
-		schema = iceberg.SchemaWithRowID(schema)
+		schema = iceberg.SchemaWithRowLineage(schema)
 	}
 
 	return schema, nil
+}
+
+// splitLineageMetadataFields partitions selectedFields into user fields and
+// row-lineage metadata fields (_row_id, _last_updated_sequence_number). The
+// returned lineage slice contains the canonical NestedField for each
+// metadata column name found, in the order encountered.
+func splitLineageMetadataFields(selectedFields []string, caseSensitive bool) (userFields []string, lineageFields []iceberg.NestedField) {
+	matches := func(field, target string) bool {
+		if caseSensitive {
+			return field == target
+		}
+
+		return strings.EqualFold(field, target)
+	}
+
+	userFields = make([]string, 0, len(selectedFields))
+	for _, field := range selectedFields {
+		switch {
+		case matches(field, iceberg.RowIDColumnName):
+			lineageFields = append(lineageFields, iceberg.RowID())
+		case matches(field, iceberg.LastUpdatedSequenceNumberColumnName):
+			lineageFields = append(lineageFields, iceberg.LastUpdatedSequenceNumber())
+		default:
+			userFields = append(userFields, field)
+		}
+	}
+
+	return userFields, lineageFields
+}
+
+// appendMissingLineageFields returns a new schema with each lineage field
+// appended only if no field with that ID is already present. Idempotent so
+// callers can pass schemas that already declare the reserved fields.
+func appendMissingLineageFields(s *iceberg.Schema, lineageFields []iceberg.NestedField) *iceberg.Schema {
+	existing := make(map[int]struct{}, len(s.Fields()))
+	for _, f := range s.Fields() {
+		existing[f.ID] = struct{}{}
+	}
+
+	fields := slices.Clone(s.Fields())
+	for _, f := range lineageFields {
+		if _, ok := existing[f.ID]; ok {
+			continue
+		}
+		fields = append(fields, f)
+		existing[f.ID] = struct{}{}
+	}
+
+	return iceberg.NewSchemaWithIdentifiers(s.ID, s.IdentifierFieldIDs, fields...)
 }
 
 func (scan *Scan) buildPartitionProjection(specID int) (iceberg.BooleanExpression, error) {

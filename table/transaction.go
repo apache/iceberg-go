@@ -1215,7 +1215,7 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(fs, snapshotProps, operation).mergeOverwrite(&commitUUID, filter)
 
-	filesToDelete, filesToRewrite, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
+	filesToDelete, filesToRewrite, fileSeqByPath, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
 	if err != nil {
 		return nil, err
 	}
@@ -1225,7 +1225,7 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 	}
 
 	if len(filesToRewrite) > 0 {
-		if err := t.rewriteFilesWithFilter(ctx, fs, updater, filesToRewrite, filter, caseSensitive, concurrency); err != nil {
+		if err := t.rewriteFilesWithFilter(ctx, fs, updater, filesToRewrite, fileSeqByPath, filter, caseSensitive, concurrency); err != nil {
 			return nil, err
 		}
 	}
@@ -1254,7 +1254,7 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(fs, snapshotProps, OpDelete).mergeOverwrite(&commitUUID, filter)
 
-	filesToDelete, withPartialDeletions, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
+	filesToDelete, withPartialDeletions, _, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
 	if err != nil {
 		return nil, err
 	}
@@ -1355,24 +1355,26 @@ func (t *Transaction) Delete(ctx context.Context, filter iceberg.BooleanExpressi
 }
 
 // classifyFilesForDeletions classifies existing data files based on the provided filter.
-// Returns files to delete completely, files to rewrite partially, and any error.
-func (t *Transaction) classifyFilesForDeletions(ctx context.Context, fs io.IO, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (filesToDelete, filesWithPartialDeletions []iceberg.DataFile, err error) {
+// Returns files to delete completely, files to rewrite partially, the
+// per-file file_sequence_number map for rewrite candidates (used to
+// synthesize row-lineage columns when reading), and any error.
+func (t *Transaction) classifyFilesForDeletions(ctx context.Context, fs io.IO, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (filesToDelete, filesWithPartialDeletions []iceberg.DataFile, fileSeqByPath map[string]*int64, err error) {
 	s := t.meta.currentSnapshot()
 	if s == nil {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	if filter == nil || filter.Equals(iceberg.AlwaysTrue{}) {
 		for df, err := range s.dataFiles(fs, nil) {
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			if df.ContentType() == iceberg.EntryContentData {
 				filesToDelete = append(filesToDelete, df)
 			}
 		}
 
-		return filesToDelete, filesWithPartialDeletions, nil
+		return filesToDelete, filesWithPartialDeletions, nil, nil
 	}
 
 	return t.classifyFilesForFilteredDeletions(ctx, fs, filter, caseSensitive, concurrency)
@@ -1405,22 +1407,23 @@ func (t *fileClassificationTask) buildPartitionProjection(specID int) (iceberg.B
 }
 
 // classifyFilesForFilteredDeletions classifies files for filtered overwrite operations.
-// Returns files to delete completely, files to rewrite partially, and any error.
-func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs io.IO, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (filesToDelete, filesWithPartialDeletes []iceberg.DataFile, err error) {
+// Returns files to delete completely, files to rewrite partially, the
+// per-file file_sequence_number map for rewrite candidates, and any error.
+func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs io.IO, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (filesToDelete, filesWithPartialDeletes []iceberg.DataFile, fileSeqByPath map[string]*int64, err error) {
 	schema := t.meta.CurrentSchema()
 	meta, err := t.meta.Build()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	inclusiveEvaluator, err := newInclusiveMetricsEvaluator(schema, filter, caseSensitive, false)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create inclusive metrics evaluator: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to create inclusive metrics evaluator: %w", err)
 	}
 
 	strictEvaluator, err := newStrictMetricsEvaluator(schema, filter, caseSensitive, false)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create strict metrics evaluator: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to create strict metrics evaluator: %w", err)
 	}
 
 	classificationTask := newFileClassificationTask(meta, filter, caseSensitive)
@@ -1431,11 +1434,12 @@ func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs 
 	if s != nil {
 		manifests, err = s.Manifests(fs)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to get manifests: %w", err)
+			return nil, nil, nil, fmt.Errorf("failed to get manifests: %w", err)
 		}
 	}
 
 	var mu sync.Mutex
+	fileSeqByPath = make(map[string]*int64)
 
 	g, _ := errgroup.WithContext(ctx)
 	g.SetLimit(min(concurrency, len(manifests)))
@@ -1456,6 +1460,7 @@ func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs 
 
 			localDelete := make([]iceberg.DataFile, 0)
 			localRewrite := make([]iceberg.DataFile, 0)
+			localSeqByPath := make(map[string]*int64)
 
 			for entry, err := range manifest.Entries(fs, false) {
 				if err != nil {
@@ -1488,6 +1493,13 @@ func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs 
 					localDelete = append(localDelete, df)
 				} else {
 					localRewrite = append(localRewrite, df)
+					// Capture the file's sequence number from the
+					// manifest entry so the rewrite path can synthesize
+					// _last_updated_sequence_number for source rows
+					// that have a null value (or no column) in the file.
+					if fseq := entry.FileSequenceNum(); fseq != nil {
+						localSeqByPath[df.FilePath()] = fseq
+					}
 				}
 			}
 
@@ -1495,6 +1507,9 @@ func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs 
 				mu.Lock()
 				filesToDelete = append(filesToDelete, localDelete...)
 				filesWithPartialDeletes = append(filesWithPartialDeletes, localRewrite...)
+				for k, v := range localSeqByPath {
+					fileSeqByPath[k] = v
+				}
 				mu.Unlock()
 			}
 
@@ -1503,20 +1518,32 @@ func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs 
 	}
 
 	if err := g.Wait(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
-	return filesToDelete, filesWithPartialDeletes, nil
+	return filesToDelete, filesWithPartialDeletes, fileSeqByPath, nil
 }
 
-// rewriteFilesWithFilter rewrites data files by preserving only rows that do NOT match the filter
-func (t *Transaction) rewriteFilesWithFilter(ctx context.Context, fs io.IO, updater *snapshotProducer, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) error {
+// rewriteFilesWithFilter rewrites data files by preserving only rows that do NOT match the filter.
+// fileSeqByPath maps each file's path to its file_sequence_number from the source manifest entry,
+// used to synthesize _last_updated_sequence_number when the source row's value is null. The
+// filter binding and substrait conversion are computed once here and reused across every file.
+func (t *Transaction) rewriteFilesWithFilter(ctx context.Context, fs io.IO, updater *snapshotProducer, files []iceberg.DataFile, fileSeqByPath map[string]*int64, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) error {
 	complementFilter := iceberg.NewNot(filter)
+
+	// Bind + convert the complement filter once for the whole rewrite. The
+	// per-batch filter function is reused across every record batch from
+	// every file in this rewrite — substrait conversion in particular is
+	// non-trivial so doing it inside the iterator loop wastes work.
+	postFilter, err := prepareBatchFilter(ctx, complementFilter, t.meta.CurrentSchema(), caseSensitive)
+	if err != nil {
+		return err
+	}
 
 	for _, originalFile := range files {
 		// Use a separate UUID for rewrite operations to avoid filename collisions with new data files
 		rewriteUUID := uuid.New()
-		rewrittenFiles, err := t.rewriteSingleFile(ctx, fs, originalFile, complementFilter, caseSensitive, rewriteUUID, concurrency)
+		rewrittenFiles, err := t.rewriteSingleFile(ctx, fs, originalFile, fileSeqByPath[originalFile.FilePath()], complementFilter, postFilter, caseSensitive, rewriteUUID, concurrency)
 		if err != nil {
 			return fmt.Errorf("failed to rewrite file %s: %w", originalFile.FilePath(), err)
 		}
@@ -1530,32 +1557,48 @@ func (t *Transaction) rewriteFilesWithFilter(ctx context.Context, fs io.IO, upda
 	return nil
 }
 
-// rewriteSingleFile reads a single data file, applies the filter, and writes new files with filtered data
-func (t *Transaction) rewriteSingleFile(ctx context.Context, fs io.IO, originalFile iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, commitUUID uuid.UUID, concurrency int) ([]iceberg.DataFile, error) {
+// rewriteSingleFile reads a single data file, applies the filter, and writes new files with filtered data.
+// fileSeqNum is the source file's file_sequence_number from its manifest entry; required to synthesize
+// _last_updated_sequence_number for rows whose value is null in the source file.
+func (t *Transaction) rewriteSingleFile(ctx context.Context, fs io.IO, originalFile iceberg.DataFile, fileSeqNum *int64, filter iceberg.BooleanExpression, postFilter func(arrow.RecordBatch) (arrow.RecordBatch, error), caseSensitive bool, commitUUID uuid.UUID, concurrency int) ([]iceberg.DataFile, error) {
 	scanTask := &FileScanTask{
 		File:   originalFile,
 		Start:  0,
 		Length: originalFile.FileSizeBytes(),
 	}
 
-	// Preserve row lineage for v3 tables: include _row_id in the scan
-	// projection so it is synthesized (or read from existing explicit values)
-	// and written into the output file. _last_updated_sequence_number is left
-	// out — it will be null in the output and inherited from the new file's
-	// data_sequence_number at read time, which satisfies the spec requirement
-	// that CoW rewrites bump _last_updated_sequence_number to the new commit's
-	// sequence number.
+	// Preserve row lineage for v3 tables: include _row_id and
+	// _last_updated_sequence_number in the scan projection so they are read
+	// from the source file (or synthesized from file metadata when null) and
+	// written explicitly into the output Parquet. The Iceberg v3 spec says
+	// _last_updated_sequence_number on a data file row is the sequence
+	// number of the snapshot that last *logically* updated the row — for a
+	// pure CoW rewrite the surviving rows are unchanged, so they must keep
+	// their original value rather than inheriting the new commit's seq.
 	//
 	// When preserving lineage, the row filter must NOT be applied inside the
 	// scanner because _row_id synthesis depends on original file position. The
 	// filter is applied post-synthesis in the record iterator instead.
+	//
+	// TODO(perf): disabling the scan-time row filter forfeits both manifest-
+	// and file-level pushdown for the rewrite read. For selective deletes on
+	// wide partitions this means re-reading every survivor candidate end-to-
+	// end. File-level skipping (against the bound filter's residual on file
+	// stats) could be re-enabled here without breaking _row_id synthesis,
+	// since synthesis depends only on within-file row positions.
 	preserveRowLineage := t.meta.formatVersion >= 3 && originalFile.FirstRowID() != nil
 	projectedSchema := t.meta.CurrentSchema()
 	var factoryOpts []writerFactoryOption
 	if preserveRowLineage {
-		projectedSchema = iceberg.SchemaWithRowID(projectedSchema)
+		projectedSchema = iceberg.SchemaWithRowLineage(projectedSchema)
 		factoryOpts = append(factoryOpts, withFactoryFileSchema(projectedSchema))
 		scanTask.FirstRowID = originalFile.FirstRowID()
+		// fileSeqNum drives _last_updated_sequence_number synthesis for
+		// source rows whose value is null in the file (or for source
+		// files written before row lineage existed). When the column
+		// is non-null the existing per-row value wins, preserving the
+		// original update sequence across the rewrite.
+		scanTask.DataSequenceNumber = fileSeqNum
 	}
 
 	boundFilter, err := iceberg.BindExpr(t.meta.CurrentSchema(), filter, caseSensitive)
@@ -1602,7 +1645,8 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, fs io.IO, originalF
 	}
 
 	// Wrap the iterator to release records after consumption.
-	// When preserving row lineage, also apply the filter here (post-synthesis).
+	// When preserving row lineage, also apply the (pre-bound) filter here
+	// post-synthesis so _row_id positions stay correct.
 	releaseIter := func(yield func(arrow.RecordBatch, error) bool) {
 		for rec, err := range recordIter {
 			if err != nil {
@@ -1612,7 +1656,7 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, fs io.IO, originalF
 			}
 
 			if preserveRowLineage {
-				rec, err = filterRecordBatch(ctx, rec, filter, t.meta.CurrentSchema(), caseSensitive)
+				rec, err = postFilter(rec)
 				if err != nil {
 					yield(nil, err)
 
@@ -1854,39 +1898,52 @@ func (s *StagedTable) Scan(opts ...ScanOption) *Scan {
 	panic(fmt.Errorf("%w: cannot scan a staged table", ErrInvalidOperation))
 }
 
-// filterRecordBatch applies an Iceberg filter to a record batch, returning
-// only matching rows. The filter is provided unbound and is bound against the
-// given schema internally. Used for post-synthesis row filtering in CoW rewrites
-// where row lineage must be synthesized before filtering.
-func filterRecordBatch(ctx context.Context, rec arrow.RecordBatch, filter iceberg.BooleanExpression, schema *iceberg.Schema, caseSensitive bool) (arrow.RecordBatch, error) {
+// prepareBatchFilter binds the given Iceberg filter against schema and converts
+// it to substrait once, returning a per-batch filter function that can be
+// reused across every record batch. The setup work (BindExpr, ConvertExpr) is
+// independent of the batch and is the most expensive part of filter-eval, so
+// hoisting it out of the iterator loop is a measurable win on rewrites that
+// produce many batches.
+//
+// The returned function takes ownership of the input batch (it releases it on
+// the AlwaysFalse fast-path) and returns a possibly-new batch the caller is
+// responsible for releasing.
+func prepareBatchFilter(ctx context.Context, filter iceberg.BooleanExpression, schema *iceberg.Schema, caseSensitive bool) (func(arrow.RecordBatch) (arrow.RecordBatch, error), error) {
 	if filter == nil || filter.Equals(iceberg.AlwaysTrue{}) {
-		return rec, nil
+		return func(rec arrow.RecordBatch) (arrow.RecordBatch, error) {
+			return rec, nil
+		}, nil
 	}
 
 	bound, err := iceberg.BindExpr(schema, filter, caseSensitive)
 	if err != nil {
-		return nil, fmt.Errorf("filterRecordBatch: bind expression: %w", err)
+		return nil, fmt.Errorf("prepareBatchFilter: bind expression: %w", err)
 	}
 
 	if bound == nil {
-		return rec, nil
+		return func(rec arrow.RecordBatch) (arrow.RecordBatch, error) {
+			return rec, nil
+		}, nil
 	}
 
 	if bound.Equals(iceberg.AlwaysFalse{}) {
-		defer rec.Release()
+		// Return a record with the same schema and zero rows. NewSlice(0, 0)
+		// preserves the per-field arrays so downstream code that calls
+		// rec.Column(i) does not panic on the empty result.
+		return func(rec arrow.RecordBatch) (arrow.RecordBatch, error) {
+			defer rec.Release()
 
-		emptySchema := rec.Schema()
-
-		return array.NewRecordBatch(emptySchema, nil, 0), nil
+			return rec.NewSlice(0, 0), nil
+		}, nil
 	}
 
 	extSet, substraitFilter, err := substrait.ConvertExpr(schema, bound, caseSensitive)
 	if err != nil {
-		return nil, fmt.Errorf("filterRecordBatch: convert expression: %w", err)
+		return nil, fmt.Errorf("prepareBatchFilter: convert expression: %w", err)
 	}
 
 	ctx = exprs.WithExtensionIDSet(ctx, exprs.NewExtensionSetDefault(*extSet))
 	fn := filterRecords(ctx, substraitFilter)
 
-	return fn(rec)
+	return fn, nil
 }
