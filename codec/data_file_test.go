@@ -183,15 +183,12 @@ func fullyPopulatedDataFile(t *testing.T, version int) (iceberg.PartitionSpec, *
 		SplitOffsets([]int64{0, 4096}).
 		SortOrderID(0).
 		KeyMetadata([]byte("kms-key-1"))
-	if version < 3 {
-		// distinct_counts is deprecated for all versions in the spec
-		// (apache/iceberg#12182). The fixture sets it on v1/v2 to
-		// exercise the read-compatibility round-trip path — counts
-		// already present on a DataFile read from a legacy manifest
-		// must survive an encode→decode cycle. New DataFiles should
-		// not carry distinct counts.
-		builder.DistinctValueCounts(map[int]int64{1: 64, 2: 128})
-	}
+	// distinct_counts (field 111) is deprecated in the spec for every
+	// version (apache/iceberg#12182). The fixture populates it on every
+	// version to assert that the wire codec drops the field on encode
+	// regardless of what the in-memory DataFile carries — strict readers
+	// (e.g. PyIceberg) reject manifests that emit it.
+	builder.DistinctValueCounts(map[int]int64{1: 64, 2: 128})
 	if version >= 2 {
 		builder.EqualityFieldIDs([]int{1})
 	}
@@ -223,17 +220,11 @@ func assertDataFileEqual(t *testing.T, want, got iceberg.DataFile, version int) 
 	require.Equal(t, want.SortOrderID(), got.SortOrderID())
 	require.Equal(t, want.SpecID(), got.SpecID())
 	require.Equal(t, want.ContentType(), got.ContentType())
-	if version < 3 {
-		// distinct_counts (field 111) is deprecated for all versions
-		// but still writable on v1/v2. The codec preserves it on
-		// round-trip for read compatibility with legacy manifests; v3
-		// drops it per spec (apache/iceberg#12182).
-		require.Equal(t, want.DistinctValueCounts(), got.DistinctValueCounts())
-	} else {
-		require.Empty(t, got.DistinctValueCounts(),
-			"v3 manifest-entry schema omits distinct_counts (deprecated in spec); "+
-				"see internal/avro_schemas.go data_file_v3")
-	}
+	require.Empty(t, got.DistinctValueCounts(),
+		"distinct_counts (field 111) is deprecated in every version "+
+			"(apache/iceberg#12182); the manifest-entry schemas in "+
+			"internal/avro_schemas.go omit it for v1/v2/v3 so the encoder "+
+			"drops it on the wire regardless of what the source DataFile carries")
 	if version >= 2 {
 		require.Equal(t, want.EqualityFieldIDs(), got.EqualityFieldIDs())
 	}
