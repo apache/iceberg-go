@@ -744,7 +744,7 @@ func (s *SqliteCatalogTestSuite) TestPurgeTable() {
 		s.Require().NoError(json.Unmarshal(metaBytes, &metaMap))
 		metaMap["statistics"] = []any{
 			map[string]any{
-				"snapshot-id":               int64(1),
+				"snapshot-id":               tbl.Metadata().CurrentSnapshot().SnapshotID,
 				"statistics-path":           "file://" + externalStatsPath,
 				"file-size-in-bytes":        17,
 				"file-footer-size-in-bytes": 10,
@@ -783,6 +783,64 @@ func (s *SqliteCatalogTestSuite) TestPurgeTable() {
 			return nil
 		})
 		s.Require().NoError(walkErr)
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestPurgeTableGCDisabled() {
+	tests := []struct {
+		cat   *sqlcat.Catalog
+		tblID table.Identifier
+	}{
+		{s.getCatalogMemory(), s.randomTableIdentifier()},
+		{s.getCatalogSqlite(), s.randomHierarchicalIdentifier()},
+	}
+
+	for _, tt := range tests {
+		ns := catalog.NamespaceFromIdent(tt.tblID)
+		s.Require().NoError(tt.cat.CreateNamespace(context.Background(), ns, nil))
+
+		schema := iceberg.NewSchema(1, iceberg.NestedField{
+			ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: true,
+		})
+		tbl, err := tt.cat.CreateTable(context.Background(), tt.tblID, schema, catalog.WithProperties(iceberg.Properties{"gc.enabled": "false"}))
+		s.Require().NoError(err)
+
+		// Append data to create data files and manifest files
+		arrowSchema := arrow.NewSchema([]arrow.Field{
+			{Name: "foo", Type: arrow.BinaryTypes.String},
+		}, nil)
+
+		bldr := array.NewStringBuilder(memory.DefaultAllocator)
+		bldr.Append("bar")
+		arr := bldr.NewArray()
+
+		rec := array.NewRecordBatch(arrowSchema, []arrow.Array{arr}, 1)
+		arrTable := array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{rec})
+
+		tx := tbl.NewTransaction()
+		s.Require().NoError(tx.AppendTable(context.Background(), arrTable, 1024, nil))
+		tbl, err = tx.Commit(context.Background())
+		s.Require().NoError(err)
+
+		arr.Release()
+		bldr.Release()
+		rec.Release()
+		arrTable.Release()
+
+		metaLoc := strings.TrimPrefix(tbl.MetadataLocation(), "file://")
+		s.FileExists(metaLoc)
+
+		purger, ok := any(tt.cat).(catalog.PurgeableTable)
+		s.Require().True(ok, "catalog must implement PurgeableTable")
+
+		s.NoError(purger.PurgeTable(context.Background(), tt.tblID))
+
+		// The table catalog entry should be gone
+		_, err = tt.cat.LoadTable(context.Background(), tt.tblID)
+		s.ErrorIs(err, catalog.ErrNoSuchTable)
+
+		// With gc.enabled=false, physical files should STILL exist!
+		s.FileExists(metaLoc)
 	}
 }
 

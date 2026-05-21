@@ -198,3 +198,29 @@ func TestRunDropTableError(t *testing.T) {
 	assert.Equal(t, 1, exitCode)
 	assert.ErrorIs(t, errOut.lastErr, expectedErr)
 }
+
+func TestRunDropTablePurgeError(t *testing.T) {
+	expectedErr := errors.New("dropped table but failed to purge files: some error")
+	cat := &mockPurgeableCatalog{
+		mockCatalogForDrop: mockCatalogForDrop{
+			catalogType: catalog.SQL,
+		},
+		purgeErr: expectedErr,
+	}
+
+	cmd := &DropCmd{
+		Table: &DropTableCmd{
+			Identifier: "db.events",
+			Purge:      true,
+		},
+	}
+
+	var errOut errCapture
+	exitCode := captureExit(func() {
+		runDrop(context.Background(), &errOut, cat, cmd)
+	})
+
+	assert.Equal(t, 1, exitCode)
+	assert.True(t, cat.purgeCalled)
+	assert.ErrorIs(t, errOut.lastErr, expectedErr)
+}

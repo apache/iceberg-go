@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"log"
 	"maps"
 	"strconv"
 	"strings"
@@ -136,6 +137,8 @@ type glueAPI interface {
 	DeleteDatabase(ctx context.Context, params *glue.DeleteDatabaseInput, optFns ...func(*glue.Options)) (*glue.DeleteDatabaseOutput, error)
 	UpdateDatabase(ctx context.Context, params *glue.UpdateDatabaseInput, optFns ...func(*glue.Options)) (*glue.UpdateDatabaseOutput, error)
 }
+
+var _ catalog.PurgeableTable = (*Catalog)(nil)
 
 type Catalog struct {
 	glueSvc   glueAPI
@@ -417,9 +420,9 @@ func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 		return err
 	}
 
-	// Physically delete all table files on storage
-	if purgeErr := internal.PurgeTableFiles(ctx, tbl); purgeErr != nil {
-		return fmt.Errorf("dropped table but failed to purge files: %w", purgeErr)
+	// Physically delete all table files on storage best-effort
+	if purgeErr := tbl.PurgeFiles(ctx); purgeErr != nil {
+		log.Printf("WARNING: dropped table %s but failed to purge files: %v", identifier, purgeErr)
 	}
 
 	return nil

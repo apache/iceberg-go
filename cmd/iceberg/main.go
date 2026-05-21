@@ -535,7 +535,7 @@ func runDrop(ctx context.Context, output Output, cat catalog.Catalog, cmd *DropC
 		err := cat.DropNamespace(ctx, catalog.ToIdentifier(cmd.Namespace.Identifier))
 		if err != nil {
 			output.Error(err)
-			os.Exit(1)
+			osExit(1)
 		}
 	case cmd.Table != nil:
 		ident := catalog.ToIdentifier(cmd.Table.Identifier)

@@ -95,6 +95,8 @@ func validateIdentifier(ident table.Identifier) error {
 // Catalog is a filesystem-based Iceberg catalog that requires no external
 // metastore. All state lives on disk as directories and versioned JSON
 // metadata files. Currently only local filesystem paths are supported.
+var _ catalog.PurgeableTable = (*Catalog)(nil)
+
 type Catalog struct {
 	name      string
 	warehouse string
@@ -562,6 +564,17 @@ func (c *Catalog) DropTable(_ context.Context, ident table.Identifier) error {
 }
 
 func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) error {
+	tbl, err := c.LoadTable(ctx, identifier)
+	if err != nil {
+		return err
+	}
+
+	// For Hadoop catalog, physical files walk must run BEFORE deleting the table directory root
+	if purgeErr := tbl.PurgeFiles(ctx); purgeErr != nil {
+		log.Printf("WARNING: failing to purge some files in Hadoop table %s: %v", identifier, purgeErr)
+	}
+
+	// Delete the table directory root from the local storage
 	return c.DropTable(ctx, identifier)
 }
 

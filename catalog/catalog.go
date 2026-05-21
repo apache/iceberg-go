@@ -179,10 +179,13 @@ type TransactionalCatalog interface {
 // catalogs (SQL, Glue, Hive, Hadoop) the table is first dropped from
 // the catalog, then all files under the table's [table.Metadata.Location]
 // root, plus any referenced files written outside the root (e.g. via
-// write.data.path or write.metadata.path table properties), are deleted.
-// File-deletion errors are propagated to the caller, but because the
-// catalog entry is already removed at that point there is no automatic
-// retry path.
+// write.data.path or write.metadata.path table properties), are physically deleted.
+//
+// File physical deletion is performed on a best-effort basis. If gc.enabled is
+// set to false on the table metadata, physical deletion is skipped entirely.
+// Any file-deletion, directory walk, or listing errors encountered are logged
+// as warnings, and the operation succeeds (returns nil) so that the catalog drop
+// remains the single source of truth.
 type PurgeableTable interface {
 	PurgeTable(ctx context.Context, identifier table.Identifier) error
 }

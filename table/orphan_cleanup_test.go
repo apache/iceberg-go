@@ -117,7 +117,7 @@ func TestNormalizeFilePath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := normalizeFilePath(tt.input, cfg)
+			result := normalizeFilePathWithConfig(tt.input, cfg)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
@@ -365,7 +365,7 @@ func TestIsFileOrphan(t *testing.T) {
 	}
 	normalizedReferencedFiles := make(map[string]string)
 	for refPath := range referencedFiles {
-		normalizedPath := normalizeFilePath(refPath, cfg)
+		normalizedPath := normalizeFilePathWithConfig(refPath, cfg)
 		normalizedReferencedFiles[normalizedPath] = refPath
 	}
 
@@ -529,13 +529,13 @@ func TestGetReferencedFiles_IncludesStatisticsFiles(t *testing.T) {
 	}
 
 	// No snapshots: FileIO is not used; statistics paths must still be referenced.
-	refs, err := tbl.GetReferencedFiles(nil)
+	refs, err := tbl.getReferencedFiles(nil)
 	require.NoError(t, err)
 
-	assert.True(t, refs["s3://bucket/stats/table-stats.puffin"])
-	assert.True(t, refs["s3://bucket/stats/part-stats.puffin"])
-	assert.True(t, refs[tbl.metadataLocation])
-	assert.False(t, refs["s3://bucket/stats/not-referenced.puffin"])
+	assert.True(t, refs[normalizeFilePath("s3://bucket/stats/table-stats.puffin")])
+	assert.True(t, refs[normalizeFilePath("s3://bucket/stats/part-stats.puffin")])
+	assert.True(t, refs[normalizeFilePath(tbl.metadataLocation)])
+	assert.False(t, refs[normalizeFilePath("s3://bucket/stats/not-referenced.puffin")])
 	assert.False(t, refs[""])
 }
 
@@ -716,12 +716,12 @@ func TestGetReferencedFiles_OverwriteThenExpireExcludesTombstones(t *testing.T) 
 
 	// fileA is now referenced only via a DELETED entry in the surviving
 	// snapshot's tombstone manifest. The fix must exclude it.
-	refs, err := tbl.GetReferencedFiles(fs)
+	refs, err := tbl.getReferencedFiles(fs)
 	require.NoError(t, err)
 
-	assert.True(t, refs[fileB],
+	assert.True(t, refs[normalizeFilePath(fileB)],
 		"new live file (ADDED in surviving snapshot) must be in reference set")
-	assert.False(t, refs[fileA],
+	assert.False(t, refs[normalizeFilePath(fileA)],
 		"overwritten file (only present as DELETED tombstone) must NOT be in reference set")
 }
 

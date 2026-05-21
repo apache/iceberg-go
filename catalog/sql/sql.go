@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"log"
 	"maps"
 	"slices"
 	"strings"
@@ -168,6 +169,8 @@ func withWriteTx(ctx context.Context, db *bun.DB, fn func(context.Context, bun.T
 		return fn(ctx, tx)
 	})
 }
+
+var _ catalog.PurgeableTable = (*Catalog)(nil)
 
 type Catalog struct {
 	db    *bun.DB
@@ -477,9 +480,9 @@ func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 		return err
 	}
 
-	// Physically delete all table files on storage
-	if purgeErr := internal.PurgeTableFiles(ctx, tbl); purgeErr != nil {
-		return fmt.Errorf("dropped table but failed to purge files: %w", purgeErr)
+	// Physically delete all table files on storage best-effort
+	if purgeErr := tbl.PurgeFiles(ctx); purgeErr != nil {
+		log.Printf("WARNING: dropped table %s but failed to purge files: %v", identifier, purgeErr)
 	}
 
 	return nil
