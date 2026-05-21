@@ -181,11 +181,11 @@ func (s *RestIntegrationSuite) TestCreateTable() {
 	s.Equal("s3://warehouse/rest-integration-test/test-create-table", tbl.Location())
 	s.Equal("baz", tbl.Properties()["foobar"])
 
-	exists, err := s.cat.CheckTableExists(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table"))
+	exists, err := s.cat.CheckTableExists(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-create-table"))
 	s.Require().NoError(err)
 	s.True(exists)
 
-	s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table")))
+	s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-create-table")))
 }
 
 func (s *RestIntegrationSuite) TestCreateView() {
@@ -295,13 +295,13 @@ func (s *RestIntegrationSuite) TestWriteCommitTable() {
 	const expectedLocation = "s3://warehouse/rest-integration-test/test-write-commit-table"
 
 	tbl, err := s.cat.CreateTable(s.ctx,
-		catalog.ToIdentifier(TestNamespaceIdent, "test-table-2"),
+		catalog.ToIdentifier(TestNamespaceIdent, "test-write-commit-table"),
 		tableSchemaNested)
 	s.Require().NoError(err)
 	s.Require().NotNil(tbl)
 
 	defer func() {
-		s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table-2")))
+		s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-write-commit-table")))
 	}()
 
 	s.Equal(expectedLocation, tbl.Location())
