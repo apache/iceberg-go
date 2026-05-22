@@ -429,6 +429,38 @@ func partitionsMatch(a, b map[int]any) bool {
 	return true
 }
 
+// buildDVIndex indexes deletion vectors by the data file path they reference.
+// The spec requires at most one DV per data file; a second entry for the same
+// path is rejected with an error.
+func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]iceberg.ManifestEntry, error) {
+	dvIndex := make(map[string]iceberg.ManifestEntry, len(dvEntries))
+	for _, del := range dvEntries {
+		if ref := del.DataFile().ReferencedDataFile(); ref != nil {
+			if _, exists := dvIndex[*ref]; exists {
+				return nil, fmt.Errorf("can't index multiple deletion vectors for %s", *ref)
+			}
+			dvIndex[*ref] = del
+		}
+	}
+
+	return dvIndex, nil
+}
+
+// matchDVToData returns the deletion vector that applies to the given data
+// entry, if any. A DV applies only when the data file's sequence number is
+// less than or equal to the DV's sequence number.
+func matchDVToData(dataEntry iceberg.ManifestEntry, dvIndex map[string]iceberg.ManifestEntry) []iceberg.DataFile {
+	dvEntry, ok := dvIndex[dataEntry.DataFile().FilePath()]
+	if !ok {
+		return nil
+	}
+	if dataEntry.SequenceNum() <= dvEntry.SequenceNum() {
+		return []iceberg.DataFile{dvEntry.DataFile()}
+	}
+
+	return nil
+}
+
 // fetchPartitionSpecFilteredManifests retrieves the table's current snapshot,
 // fetches its manifest files, and applies partition-spec filters to remove irrelevant manifests.
 func (scan *Scan) fetchPartitionSpecFilteredManifests(ctx context.Context) ([]iceberg.ManifestFile, error) {
@@ -567,12 +599,9 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 		return cmp.Compare(a.SequenceNum(), b.SequenceNum())
 	})
 
-	// Index DVs by referenced data file path for O(1) lookup.
-	dvIndex := make(map[string][]iceberg.DataFile, len(entries.dvEntries))
-	for _, del := range entries.dvEntries {
-		if ref := del.DataFile().ReferencedDataFile(); ref != nil {
-			dvIndex[*ref] = append(dvIndex[*ref], del.DataFile())
-		}
+	dvIndex, err := buildDVIndex(entries.dvEntries)
+	if err != nil {
+		return nil, err
 	}
 
 	results := make([]FileScanTask, 0, len(entries.dataEntries))
@@ -587,7 +616,7 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 			File:                e.DataFile(),
 			DeleteFiles:         deleteFiles,
 			EqualityDeleteFiles: eqDeleteFiles,
-			DeletionVectorFiles: dvIndex[e.DataFile().FilePath()],
+			DeletionVectorFiles: matchDVToData(e, dvIndex),
 			Start:               0,
 			Length:              e.DataFile().FileSizeBytes(),
 		}
