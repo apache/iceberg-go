@@ -523,7 +523,15 @@ func validateDataFilePartitionData(df iceberg.DataFile, spec *iceberg.PartitionS
 
 // validateDataFilesToAdd performs metadata-only validation for caller-provided
 // DataFiles and returns a set of paths that passed validation.
-func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, operation string) (map[string]struct{}, error) {
+//
+// requireFirstRowID gates the v3 first_row_id check: callers handing in
+// externally-written parquet files (e.g. [Transaction.AddDataFiles]) must set
+// first_row_id explicitly because the library cannot fabricate row IDs for
+// files it did not write. Library-internal rewrite paths (compaction via
+// [withRewriteSemantics]) pass false because the manifest-list writer assigns
+// first_row_id via inheritance at write time and the output files carry
+// explicit _row_id columns that win on read regardless.
+func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, operation string, requireFirstRowID bool) (map[string]struct{}, error) {
 	currentSpec, err := t.meta.CurrentSpec()
 	if err != nil {
 		return nil, fmt.Errorf("could not get current partition spec: %w", err)
@@ -569,7 +577,7 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 			return nil, fmt.Errorf("data file %s has invalid partition data for %s: %w", path, operation, err)
 		}
 
-		if t.meta.formatVersion >= 3 && df.FirstRowID() == nil {
+		if requireFirstRowID && t.meta.formatVersion >= 3 && df.FirstRowID() == nil {
 			return nil, fmt.Errorf(
 				"data file %s is missing first_row_id which is required for v3 tables for %s: use DataFileBuilder.FirstRowID() to set it explicitly",
 				path, operation)
@@ -668,7 +676,7 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 		o(&cfg)
 	}
 
-	setToAdd, err := t.validateDataFilesToAdd(dataFiles, "AddDataFiles")
+	setToAdd, err := t.validateDataFilesToAdd(dataFiles, "AddDataFiles", true)
 	if err != nil {
 		return err
 	}
@@ -752,7 +760,7 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 		o(&cfg)
 	}
 
-	setToAdd, err := t.validateDataFilesToAdd(filesToAdd, "ReplaceDataFilesWithDataFiles")
+	setToAdd, err := t.validateDataFilesToAdd(filesToAdd, "ReplaceDataFilesWithDataFiles", !cfg.rewriteSemantics)
 	if err != nil {
 		return err
 	}
@@ -852,7 +860,7 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		o(&cfg)
 	}
 
-	setToAdd, err := t.validateDataFilesToAdd(dataFilesToAdd, "ReplaceFiles")
+	setToAdd, err := t.validateDataFilesToAdd(dataFilesToAdd, "ReplaceFiles", !cfg.rewriteSemantics)
 	if err != nil {
 		return err
 	}
