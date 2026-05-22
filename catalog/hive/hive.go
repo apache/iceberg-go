@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"log"
 	"maps"
 	"strings"
 	_ "unsafe"
@@ -48,6 +49,8 @@ func init() {
 		return NewCatalog(props)
 	}))
 }
+
+var _ catalog.PurgeableTable = (*Catalog)(nil)
 
 type Catalog struct {
 	client HiveClient
@@ -386,6 +389,26 @@ func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 
 	if err := c.client.DropTable(ctx, database, tableName, false); err != nil {
 		return fmt.Errorf("failed to drop table %s.%s: %w", database, tableName, err)
+	}
+
+	return nil
+}
+
+func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) error {
+	tbl, err := c.LoadTable(ctx, identifier)
+	if err != nil {
+		return err
+	}
+
+	// Drop the table entry from the catalog first
+	err = c.DropTable(ctx, identifier)
+	if err != nil {
+		return err
+	}
+
+	// Physically delete all table files on storage best-effort
+	if purgeErr := tbl.PurgeFiles(ctx); purgeErr != nil {
+		log.Printf("WARNING: dropped table %s but failed to purge files: %v", identifier, purgeErr)
 	}
 
 	return nil
