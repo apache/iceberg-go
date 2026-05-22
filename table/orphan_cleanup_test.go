@@ -529,12 +529,12 @@ func TestGetReferencedFiles_IncludesStatisticsFiles(t *testing.T) {
 	}
 
 	// No snapshots: FileIO is not used; statistics paths must still be referenced.
-	refs, err := tbl.getReferencedFiles(nil)
+	refs, err := tbl.getReferencedFiles(nil, true)
 	require.NoError(t, err)
 
-	assert.True(t, refs[normalizeFilePath("s3://bucket/stats/table-stats.puffin")])
-	assert.True(t, refs[normalizeFilePath("s3://bucket/stats/part-stats.puffin")])
-	assert.True(t, refs[normalizeFilePath(tbl.metadataLocation)])
+	assert.Contains(t, refs, normalizeFilePath("s3://bucket/stats/table-stats.puffin"))
+	assert.Contains(t, refs, normalizeFilePath("s3://bucket/stats/part-stats.puffin"))
+	assert.Contains(t, refs, normalizeFilePath(tbl.metadataLocation))
 	assert.False(t, refs[normalizeFilePath("s3://bucket/stats/not-referenced.puffin")])
 	assert.False(t, refs[""])
 }
@@ -716,12 +716,12 @@ func TestGetReferencedFiles_OverwriteThenExpireExcludesTombstones(t *testing.T) 
 
 	// fileA is now referenced only via a DELETED entry in the surviving
 	// snapshot's tombstone manifest. The fix must exclude it.
-	refs, err := tbl.getReferencedFiles(fs)
+	refs, err := tbl.getReferencedFiles(fs, true)
 	require.NoError(t, err)
 
-	assert.True(t, refs[normalizeFilePath(fileB)],
+	assert.Contains(t, refs, normalizeFilePath(fileB),
 		"new live file (ADDED in surviving snapshot) must be in reference set")
-	assert.False(t, refs[normalizeFilePath(fileA)],
+	assert.NotContains(t, refs, normalizeFilePath(fileA),
 		"overwritten file (only present as DELETED tombstone) must NOT be in reference set")
 }
 

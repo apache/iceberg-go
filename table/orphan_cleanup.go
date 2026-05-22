@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	stdfs "io/fs"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -194,7 +195,7 @@ func (t Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConfi
 		scanLocation = t.metadata.Location()
 	}
 
-	referencedFiles, err := t.getReferencedFiles(fs)
+	referencedFiles, err := t.getReferencedFiles(fs, true)
 	if err != nil {
 		return OrphanCleanupResult{}, fmt.Errorf("failed to get referenced files: %w", err)
 	}
@@ -233,30 +234,30 @@ func (t Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConfi
 //
 // If the table has snapshots, fs must not be nil, otherwise an error is returned.
 // All returned paths are normalized using the package-level normalizeFilePath function.
-func (t Table) getReferencedFiles(fs iceio.IO) (map[string]bool, error) {
+func (t Table) getReferencedFiles(fs iceio.IO, discardDeleted bool) (map[string]bool, error) {
 	referenced := make(map[string]bool)
 	metadata := t.metadata
 
 	for entry := range metadata.PreviousFiles() {
-		referenced[normalizeFilePath(entry.MetadataFile)] = true
+		referenced[normalizeFilePath(entry.MetadataFile)] = false
 	}
-	referenced[normalizeFilePath(t.metadataLocation)] = true
+	referenced[normalizeFilePath(t.metadataLocation)] = false
 
 	// Add version hint file (for Hadoop-style tables)
 	// Following Java's ReachableFileUtil.versionHintLocation() logic:
 	versionHintPath := filepath.Join(metadata.Location(), "metadata", "version-hint.text")
-	referenced[normalizeFilePath(versionHintPath)] = true
+	referenced[normalizeFilePath(versionHintPath)] = false
 
 	for sf := range metadata.Statistics() {
 		// Guard against malformed metadata; statistics-path is required per spec.
 		if sf.StatisticsPath != "" {
-			referenced[normalizeFilePath(sf.StatisticsPath)] = true
+			referenced[normalizeFilePath(sf.StatisticsPath)] = false
 		}
 	}
 	for psf := range metadata.PartitionStatistics() {
 		// Guard against malformed metadata; statistics-path is required per spec.
 		if psf.StatisticsPath != "" {
-			referenced[normalizeFilePath(psf.StatisticsPath)] = true
+			referenced[normalizeFilePath(psf.StatisticsPath)] = false
 		}
 	}
 
@@ -266,7 +267,7 @@ func (t Table) getReferencedFiles(fs iceio.IO) (map[string]bool, error) {
 
 	for _, snapshot := range metadata.Snapshots() {
 		if snapshot.ManifestList != "" {
-			referenced[normalizeFilePath(snapshot.ManifestList)] = true
+			referenced[normalizeFilePath(snapshot.ManifestList)] = false
 		}
 
 		manifestFiles, err := snapshot.Manifests(fs)
@@ -275,7 +276,7 @@ func (t Table) getReferencedFiles(fs iceio.IO) (map[string]bool, error) {
 		}
 
 		for _, manifest := range manifestFiles {
-			referenced[normalizeFilePath(manifest.FilePath())] = true
+			referenced[normalizeFilePath(manifest.FilePath())] = false
 
 			// discardDeleted=true: skip DELETED-status entries when
 			// computing the reachable file set. A DELETED entry is
@@ -283,10 +284,12 @@ func (t Table) getReferencedFiles(fs iceio.IO) (map[string]bool, error) {
 			// against orphan cleanup once the snapshot that
 			// originally held it live has been expired.
 			// This matches iceberg-java and pyiceberg behavior.
-			for entry, err := range manifest.Entries(fs, true) {
+			for entry, err := range manifest.Entries(fs, discardDeleted) {
 				if err != nil {
 					return nil, fmt.Errorf("failed to read manifest entries: %w", err)
 				}
+				// All files tracked within a manifest (data files, equality deletes, position deletes)
+				// are considered "data files" for the purposes of gc.enabled.
 				referenced[normalizeFilePath(entry.DataFile().FilePath())] = true
 				if ref := entry.DataFile().ReferencedDataFile(); ref != nil {
 					// This is a deletion vector entry referencing a data file.
@@ -566,25 +569,33 @@ func deleteFilesParallel(fs iceio.IO, orphanFiles []string, cfg *orphanCleanupCo
 // normalizeFilePath normalizes a file path for comparison, handling schemes, authorities, and separators.
 // It also aligns file:// URIs and bare local file system paths so they normalize to the same format.
 func normalizeFilePath(path string) string {
-	if strings.HasPrefix(path, "file:") {
-		// Strip file:, file:/, file://, file:///, file:/// to get a bare path
-		p := strings.TrimPrefix(path, "file:")
-		p = strings.TrimPrefix(p, "///")
-		p = strings.TrimPrefix(p, "//")
-		p = strings.TrimPrefix(p, "/")
-		path = "/" + p
-	}
-
 	return normalizeFilePathWithConfig(path, nil)
 }
 
 func normalizeFilePathWithConfig(path string, cfg *orphanCleanupConfig) string {
+	if strings.HasPrefix(path, "file:") {
+		if u, err := url.Parse(path); err == nil {
+			host := strings.ToLower(u.Host)
+			if host == "" || host == "localhost" {
+				pathStr := u.Path
+				// Intercept Windows drive letters (e.g., /C:/) and strip the leading slash
+				if len(pathStr) >= 3 && pathStr[0] == '/' && pathStr[2] == ':' {
+					pathStr = pathStr[1:]
+				}
+
+				return filepath.Clean(pathStr)
+			}
+			// Remote authority – keep it as //host/path
+			return filepath.Clean("//" + u.Host + u.Path)
+		}
+	}
+
 	// Handle URL-based paths (s3://, gs://, etc.)
 	if strings.Contains(path, "://") {
 		return normalizeURLPath(path, cfg)
-	} else {
-		return normalizeNonURLPath(path)
 	}
+
+	return normalizeNonURLPath(path)
 }
 
 // normalizeURLPath normalizes URL-based file paths with scheme/authority equivalence.
@@ -750,56 +761,69 @@ func checkPrefixMismatch(referencedPath, filesystemPath string, cfg *orphanClean
 // PurgeFiles physically deletes all files under the table's warehouse location
 // and any referenced files written outside the location root (e.g., via write.data.path
 // or write.metadata.path properties).
-// If gc.enabled is set to false in the table metadata properties, physical deletion
-// is skipped entirely.
-// Any file deletion or directory walk errors are collected via errors.Join and returned.
+//
+// It operates on a best-effort basis. Errors from individual file deletions are
+// collected and returned together. If files cannot be deleted (e.g. due to
+// permission errors or missing paths), the errors are logged but the overall
+// catalog drop operation should typically proceed so the catalog does not
+// get out of sync with storage.
 func (t Table) PurgeFiles(ctx context.Context) error {
-	if !t.Metadata().Properties().GetBool("gc.enabled", true) {
-		return nil
-	}
+	gcEnabled := t.Metadata().Properties().GetBool("gc.enabled", true)
 
 	fs, err := t.FS(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to load filesystem for table purge: %w", err)
 	}
-	location := t.Metadata().Location()
 
-	fileSet := make(map[string]string) // normalized -> original path
 	var errs []error
+	fileSet := make(map[string]string)
+	location := t.metadata.Location()
 
 	// 1. Walk the table location directory tree to capture all local files
-	if listable, ok := fs.(iceio.ListableIO); ok {
-		walkErr := listable.WalkDir(location, func(path string, d stdfs.DirEntry, err error) error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if err != nil {
-				if os.IsNotExist(err) || errors.Is(err, stdfs.ErrNotExist) {
-					return nil
+	// Only walk the directory if gc.enabled=true to prevent accidental deletion
+	// of unreferenced branched data files.
+	if gcEnabled {
+		if listable, ok := fs.(iceio.ListableIO); ok {
+			walkErr := listable.WalkDir(location, func(path string, d stdfs.DirEntry, err error) error {
+				if err := ctx.Err(); err != nil {
+					return err
 				}
-				return err
-			}
-			if !d.IsDir() {
-				fileSet[normalizeFilePath(path)] = path
-			}
+				if err != nil {
+					if os.IsNotExist(err) || errors.Is(err, stdfs.ErrNotExist) {
+						return nil
+					}
 
-			return nil
-		})
-		if walkErr != nil && !os.IsNotExist(walkErr) && !errors.Is(walkErr, stdfs.ErrNotExist) {
-			errs = append(errs, fmt.Errorf("failed walking directory %s: %w", location, walkErr))
+					return err
+				}
+				if !d.IsDir() {
+					fileSet[normalizeFilePath(path)] = path
+				}
+
+				return nil
+			})
+			if walkErr != nil && !os.IsNotExist(walkErr) && !errors.Is(walkErr, stdfs.ErrNotExist) {
+				errs = append(errs, fmt.Errorf("failed walking directory %s: %w", location, walkErr))
+			}
 		}
 	}
 
 	// 2. Union in manifest-referenced and metadata files (which might be outside the table location)
-	if referencedFiles, refErr := t.getReferencedFiles(fs); refErr == nil {
-		for path := range referencedFiles {
-			norm := normalizeFilePath(path)
-			if _, ok := fileSet[norm]; !ok {
-				fileSet[norm] = path
-			}
+	referencedFiles, refErr := t.getReferencedFiles(fs, false)
+	if refErr != nil {
+		return fmt.Errorf("failed to get referenced files: %w", refErr)
+	}
+
+	for path, isData := range referencedFiles {
+		if !gcEnabled && isData {
+			slog.WarnContext(ctx, "purge: skipping data file, gc.enabled=false", "path", path)
+
+			continue
 		}
-	} else {
-		errs = append(errs, fmt.Errorf("failed to get referenced files from metadata: %w", refErr))
+
+		norm := normalizeFilePath(path)
+		if _, ok := fileSet[norm]; !ok {
+			fileSet[norm] = path
+		}
 	}
 
 	// Convert to slice and sort for deterministic behavior
@@ -819,6 +843,7 @@ func (t Table) PurgeFiles(ctx context.Context) error {
 			for _, file := range files {
 				if err := ctx.Err(); err != nil {
 					errs = append(errs, err)
+
 					break
 				}
 				if rmErr := fs.Remove(file); rmErr != nil && !os.IsNotExist(rmErr) {

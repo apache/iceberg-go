@@ -839,8 +839,8 @@ func (s *SqliteCatalogTestSuite) TestPurgeTableGCDisabled() {
 		_, err = tt.cat.LoadTable(context.Background(), tt.tblID)
 		s.ErrorIs(err, catalog.ErrNoSuchTable)
 
-		// With gc.enabled=false, physical files should STILL exist!
-		s.FileExists(metaLoc)
+		// With gc.enabled=false, metadata files are still deleted, but data files are skipped.
+		s.NoFileExists(metaLoc)
 	}
 }
 

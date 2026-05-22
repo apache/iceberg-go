@@ -200,7 +200,7 @@ func TestRunDropTableError(t *testing.T) {
 }
 
 func TestRunDropTablePurgeError(t *testing.T) {
-	expectedErr := errors.New("dropped table but failed to purge files: some error")
+	expectedErr := errors.New("some error")
 	cat := &mockPurgeableCatalog{
 		mockCatalogForDrop: mockCatalogForDrop{
 			catalogType: catalog.SQL,
