@@ -47,7 +47,10 @@ func ParseTransform(s string) (Transform, error) {
 			break
 		}
 
-		n, _ := strconv.Atoi(matches[1])
+		n, err := strconv.Atoi(matches[1])
+		if err != nil || n <= 0 || n > math.MaxInt32 {
+			break
+		}
 
 		return BucketTransform{NumBuckets: n}, nil
 	case strings.HasPrefix(s, "truncate"):
@@ -56,7 +59,10 @@ func ParseTransform(s string) (Transform, error) {
 			break
 		}
 
-		n, _ := strconv.Atoi(matches[1])
+		n, err := strconv.Atoi(matches[1])
+		if err != nil || n <= 0 || n > math.MaxInt32 {
+			break
+		}
 
 		return TruncateTransform{Width: n}, nil
 	default:
