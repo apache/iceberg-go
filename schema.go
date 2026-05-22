@@ -569,6 +569,8 @@ type SchemaVisitorPerPrimitiveType[T any] interface {
 	VisitUUID() T
 	VisitUnknown() T
 	VisitVariant() T
+	VisitGeometry(GeometryType) T
+	VisitGeography(GeographyType) T
 }
 
 // Visit accepts a visitor and performs a post-order traversal of the given schema.
@@ -721,6 +723,10 @@ func visitField[T any](f NestedField, visitor SchemaVisitor[T]) T {
 				return perPrimitive.VisitFixed(t)
 			case UnknownType:
 				return perPrimitive.VisitUnknown()
+			case GeographyType:
+				return perPrimitive.VisitGeography(t)
+			case GeometryType:
+				return perPrimitive.VisitGeometry(t)
 			}
 		}
 

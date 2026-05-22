@@ -171,6 +171,14 @@ func (convertToSubstrait) VisitUnknown() types.Type {
 	return nil
 }
 
+func (convertToSubstrait) VisitGeometry(iceberg.GeometryType) types.Type {
+	return &types.BinaryType{}
+}
+
+func (convertToSubstrait) VisitGeography(iceberg.GeographyType) types.Type {
+	return &types.BinaryType{}
+}
+
 func (convertToSubstrait) VisitVariant() types.Type {
 	// Variant has no Substrait equivalent today. We return BinaryType as a
 	// structural placeholder so that schema conversion and expression binding
@@ -360,7 +368,8 @@ func (t *toSubstraitExpr) VisitIsNan(term iceberg.BoundTerm) expr.Builder {
 
 func (t *toSubstraitExpr) VisitNotNan(term iceberg.BoundTerm) expr.Builder {
 	return t.bldr.ScalarFunc(notID).Args(
-		t.makeRefFunc(isNaNID, term).(expr.FuncArgBuilder))
+		t.makeRefFunc(isNaNID, term).(expr.FuncArgBuilder),
+	)
 }
 
 func (t *toSubstraitExpr) VisitIsNull(term iceberg.BoundTerm) expr.Builder {
@@ -406,5 +415,6 @@ func (t *toSubstraitExpr) VisitStartsWith(term iceberg.BoundTerm, lit iceberg.Li
 
 func (t *toSubstraitExpr) VisitNotStartsWith(term iceberg.BoundTerm, lit iceberg.Literal) expr.Builder {
 	return t.bldr.ScalarFunc(notID).Args(
-		t.makeLitFunc(startsWithID, term, lit).(expr.FuncArgBuilder))
+		t.makeLitFunc(startsWithID, term, lit).(expr.FuncArgBuilder),
+	)
 }

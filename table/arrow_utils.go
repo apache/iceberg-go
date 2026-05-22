@@ -41,6 +41,7 @@ import (
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	tblutils "github.com/apache/iceberg-go/table/internal"
+	"github.com/geoarrow/geoarrow-go"
 	"github.com/google/uuid"
 	"github.com/pterm/pterm"
 	"golang.org/x/sync/errgroup"
@@ -654,6 +655,22 @@ func (c convertToArrow) VisitVariant() arrow.Field {
 	}
 
 	return arrow.Field{Type: extensions.NewDefaultVariantType()}
+}
+
+func (c convertToArrow) VisitGeometry(iceberg.GeometryType) arrow.Field {
+	if c.useLargeTypes {
+		return arrow.Field{Type: geoarrow.NewWKBType(geoarrow.WKBWithLargeBinaryStorage())}
+	}
+
+	return arrow.Field{Type: geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage())}
+}
+
+func (c convertToArrow) VisitGeography(iceberg.GeographyType) arrow.Field {
+	if c.useLargeTypes {
+		return arrow.Field{Type: geoarrow.NewWKBType(geoarrow.WKBWithLargeBinaryStorage())}
+	}
+
+	return arrow.Field{Type: geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage())}
 }
 
 var _ iceberg.SchemaVisitorPerPrimitiveType[arrow.Field] = convertToArrow{}
