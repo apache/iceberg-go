@@ -506,6 +506,27 @@ func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table,
 		}
 	}
 
+	// Manifest paths kept alive by retained snapshots, plus their
+	// loaded manifest-file slices so the live-data-file pass below
+	// doesn't re-download each manifest list.
+	retainedManifests := make(map[string]struct{})
+	retainedSnapshotManifests := make(map[int64][]iceberg.ManifestFile)
+	for _, snap := range postTable.Metadata().Snapshots() {
+		mans, err := snap.Manifests(prefs)
+		if err != nil {
+			return err
+		}
+		retainedSnapshotManifests[snap.SnapshotID] = mans
+		for _, man := range mans {
+			retainedManifests[man.FilePath()] = struct{}{}
+		}
+	}
+
+	// Open each orphaned manifest at most once: skip manifests that
+	// retained snapshots still reference, and dedupe across expired
+	// snapshots that share manifests by reference.
+	visitedManifests := make(map[string]struct{})
+
 	for _, snapId := range u.SnapshotIDs {
 		snap := preTable.SnapshotByID(snapId)
 		if snap == nil {
@@ -518,7 +539,17 @@ func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table,
 		}
 
 		for _, man := range mans {
-			filesToDelete[man.FilePath()] = struct{}{}
+			manPath := man.FilePath()
+
+			if _, ok := retainedManifests[manPath]; ok {
+				continue
+			}
+			if _, ok := visitedManifests[manPath]; ok {
+				continue
+			}
+			visitedManifests[manPath] = struct{}{}
+
+			filesToDelete[manPath] = struct{}{}
 
 			for entry, err := range man.Entries(prefs, false) {
 				if err != nil {
@@ -529,14 +560,17 @@ func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table,
 		}
 	}
 
-	for _, snap := range postTable.Metadata().Snapshots() {
-		mans, err := snap.Manifests(prefs)
-		if err != nil {
-			return err
-		}
-
+	// Keep files still referenced (non-DELETED) by retained manifests,
+	// including data files carried forward as EXISTING by manifest
+	// merges. Each retained manifest is walked at most once.
+	walkedRetained := make(map[string]struct{}, len(retainedManifests))
+	for _, mans := range retainedSnapshotManifests {
 		for _, man := range mans {
-			delete(filesToDelete, man.FilePath())
+			manPath := man.FilePath()
+			if _, ok := walkedRetained[manPath]; ok {
+				continue
+			}
+			walkedRetained[manPath] = struct{}{}
 
 			for entry, err := range man.Entries(prefs, false) {
 				if err != nil {
