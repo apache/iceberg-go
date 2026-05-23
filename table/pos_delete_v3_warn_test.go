@@ -123,28 +123,13 @@ func runPositionDeleteWrite(t *testing.T, mb *MetadataBuilder, partitions map[st
 }
 
 // TestPositionDeleteV3Warning verifies the writer emits a single deduped
-// slog.Warn naming the table when position-deletes are written on a v3 table
-// with write.delete.format explicitly set to "position", and stays silent on
-// v2 where Parquet position-deletes are still canonical.
-//
-// On v3 with the default (or explicit "dv") format, the DV writer is used
-// instead and no warning is emitted.
+// slog.Warn naming the table when v3 position-deletes fall through to the
+// Parquet writer (currently: any partitioned v3 write, since DV+partitioned
+// support is deferred), and stays silent on v2 where Parquet position-
+// deletes are still canonical and on v3 unpartitioned writes that take the
+// DV path.
 func TestPositionDeleteV3Warning(t *testing.T) {
 	emptyItr := func(yield func(arrow.RecordBatch, error) bool) {}
-
-	t.Run("v3 with explicit position format warns once with table location", func(t *testing.T) {
-		mb := newPositionDeleteUnpartitionedMetadata(t, 3)
-		mb.props = iceberg.Properties{WriteDeleteFormatKey: WriteDeleteFormatPosition}
-		out := captureSlog(t, func() {
-			runPositionDeleteWrite(t, mb, nil, emptyItr)
-		})
-		assert.Equal(t, 1, countWarnRecords(out),
-			"expected exactly one WARN record, got: %s", out)
-		assert.Contains(t, out, "Parquet position-delete")
-		assert.Contains(t, out, "deletion vectors")
-		assert.Contains(t, out, "table_location=file:///warn-test",
-			"warning should name the table location")
-	})
 
 	t.Run("v2 does not warn", func(t *testing.T) {
 		out := captureSlog(t, func() {
@@ -154,17 +139,16 @@ func TestPositionDeleteV3Warning(t *testing.T) {
 			"v2 position-delete writes should not warn, got: %s", out)
 	})
 
-	t.Run("v3 default format uses DV path without warning", func(t *testing.T) {
+	t.Run("v3 unpartitioned uses DV path without warning", func(t *testing.T) {
 		out := captureSlog(t, func() {
 			runPositionDeleteWrite(t, newPositionDeleteUnpartitionedMetadata(t, 3), nil, emptyItr)
 		})
 		assert.Equal(t, 0, countWarnRecords(out),
-			"v3 with default DV format should not warn, got: %s", out)
+			"v3 unpartitioned writes should route through DV without warning, got: %s", out)
 	})
 
-	t.Run("v3 partitioned write with explicit position format warns exactly once", func(t *testing.T) {
+	t.Run("v3 partitioned write warns exactly once with table location", func(t *testing.T) {
 		mb := newPositionDeletePartitionedMetadata(t, 3)
-		mb.props = iceberg.Properties{WriteDeleteFormatKey: WriteDeleteFormatPosition}
 		partitions := map[string]partitionContext{
 			"file://namespace/age_bucket=0/test.parquet": {
 				partitionData: map[int]any{iceberg.PartitionDataIDStart: 0}, specID: 0,
@@ -191,5 +175,9 @@ func TestPositionDeleteV3Warning(t *testing.T) {
 		})
 		assert.Equal(t, 1, countWarnRecords(out),
 			"expected exactly one WARN record across multiple partitions, got: %s", out)
+		assert.Contains(t, out, "Parquet position-delete")
+		assert.Contains(t, out, "deletion vectors")
+		assert.Contains(t, out, "table_location=file:///warn-test-partitioned",
+			"warning should name the table location")
 	})
 }

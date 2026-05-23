@@ -1647,19 +1647,18 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 		}
 	}
 
-	deleteFormat := meta.props.Get(WriteDeleteFormatKey, "")
-	if deleteFormat == "" {
-		if latestMetadata.Version() >= 3 {
-			deleteFormat = WriteDeleteFormatDV
-		} else {
-			deleteFormat = WriteDeleteFormatPosition
-		}
-	}
-
-	if deleteFormat == WriteDeleteFormatDV {
+	// V3+ unpartitioned tables write deletion vectors via Puffin, matching the
+	// Java reference implementation, which hardcodes DV for v3 and does not
+	// expose a property to opt out. DV+partitioned support is deferred to a
+	// follow-up; partitioned v3 writes fall through to the Parquet writer
+	// below and emit the deprecation warning.
+	if latestMetadata.Version() >= 3 && latestMetadata.PartitionSpec().IsUnpartitioned() {
 		return positionDeleteRecordsToDataFilesDV(ctx, rootLocation, args)
 	}
 
+	// V3 and later prefer deletion vectors over Parquet position-delete files;
+	// warn so users migrate. The check is `>= 3` rather than `== 3` so the
+	// warning carries forward to v4+ without churn. See apache/iceberg#12048.
 	if latestMetadata.Version() >= 3 {
 		slog.Warn("writing Parquet position-delete file on a v3 table; prefer deletion vectors",
 			"table_location", latestMetadata.Location())
@@ -1719,6 +1718,7 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 	return func(yield func(iceberg.DataFile, error) bool) {
 		writer := dv.NewDVWriter(args.fs)
 
+		hasEntries := false
 		for batch, err := range args.itr {
 			if err != nil {
 				yield(nil, err)
@@ -1731,14 +1731,19 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 
 			for i := range batch.NumRows() {
 				writer.Add(filePaths.Value(int(i)), []int64{positions.Value(int(i))})
+				hasEntries = true
 			}
 		}
 
-		u := uuid.Must(uuid.NewRandom())
-		if args.writeUUID != nil {
-			u = *args.writeUUID
+		if !hasEntries {
+			return
 		}
-		location := rootLocation + "/data/" + fmt.Sprintf("dv-%s.puffin", u)
+
+		if args.writeUUID == nil {
+			u := uuid.Must(uuid.NewRandom())
+			args.writeUUID = &u
+		}
+		location := rootLocation + "/data/" + fmt.Sprintf("00000-0-%s-deletes.puffin", *args.writeUUID)
 
 		dataFiles, err := writer.Flush(ctx, location)
 		if err != nil {
