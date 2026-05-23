@@ -198,12 +198,15 @@ func TestCoWRewriteRowIDNextRowIDAccounting(t *testing.T) {
 	tbl, err = tbl.Delete(ctx, filter, nil)
 	require.NoError(t, err)
 
-	// next-row-id advances by 3 (original) + 2 (rewritten survivors) = 5,
-	// even though the surviving rows preserve their old IDs. This "wastes"
-	// ID space but doesn't violate uniqueness — actual row IDs come from
-	// the explicit Parquet column, not the global counter.
+	// next-row-id advances by the new manifest's added-rows count (2 here),
+	// even though the surviving rows preserve their old IDs. Going from 3
+	// (after the initial append) to 5 (= prior NextRowID + manifest's added
+	// rows). This "wastes" ID space but doesn't violate uniqueness — actual
+	// row IDs come from the explicit Parquet column, not the global counter.
+	// Mirrors Java's ManifestListWriter.V3Writer.prepare() in
+	// table/snapshot_producers.go.
 	assert.Equal(t, int64(5), tbl.Metadata().NextRowID(),
-		"next-row-id should advance by original (3) + rewritten (2) = 5")
+		"next-row-id should advance from 3 by the rewrite manifest's 2 added rows")
 }
 
 // TestExecuteCompactionGroupPreservesRowID verifies that

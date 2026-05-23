@@ -278,14 +278,14 @@ func (scan *Scan) Projection() (*iceberg.Schema, error) {
 		// where they are otherwise legal to project. The scanner reads
 		// them from file metadata (or synthesizes them) at scan time;
 		// here we just need to ensure they survive into the projection.
-		//
-		// On v1/v2 tables, Select is left to fail naturally — those
-		// versions don't have row lineage, so requesting these columns
-		// is an error.
 		userFields, lineageFields := splitLineageMetadataFields(scan.selectedFields, scan.caseSensitive)
 		if len(lineageFields) > 0 && curVersion < minFormatVersionRowLineage {
-			userFields = scan.selectedFields
-			lineageFields = nil
+			// Reject explicitly so the contract lives in the code rather
+			// than emerging from Select's "could not find column" path —
+			// a future v2 schema field literally named _row_id should not
+			// silently succeed here.
+			return nil, fmt.Errorf("%w: row lineage column %q requires format version %d, table is v%d",
+				ErrInvalidOperation, lineageFields[0].Name, minFormatVersionRowLineage, curVersion)
 		}
 
 		var err error
@@ -293,7 +293,11 @@ func (scan *Scan) Projection() (*iceberg.Schema, error) {
 		if err != nil {
 			return nil, err
 		}
-		if len(lineageFields) > 0 {
+		// Skip the per-name append when scan.includeRowLineage is set: the
+		// SchemaWithRowLineage call below adds both lineage columns
+		// unconditionally, and appendMissingLineageFields would just be
+		// redundant work whose result is overwritten.
+		if len(lineageFields) > 0 && !scan.includeRowLineage {
 			schema = appendMissingLineageFields(schema, lineageFields)
 		}
 	}
@@ -692,10 +696,15 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 			Length:              e.DataFile().FileSizeBytes(),
 		}
 		// Row lineage constants: readers use these to synthesize _row_id and
-		// _last_updated_sequence_number when requested.
+		// _last_updated_sequence_number when requested. Per spec the
+		// synthesized _last_updated_sequence_number is the manifest entry's
+		// data sequence number (field id 3), not file sequence number
+		// (field id 4); back-dated EXISTING entries can have the two
+		// diverge and Java/iceberg-rust use the data sequence number.
 		task.FirstRowID = e.DataFile().FirstRowID()
-		if fseq := e.FileSequenceNum(); fseq != nil {
-			task.DataSequenceNumber = fseq
+		if seq := e.SequenceNum(); seq >= 0 {
+			s := seq
+			task.DataSequenceNumber = &s
 		}
 		results = append(results, task)
 	}

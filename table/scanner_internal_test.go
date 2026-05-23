@@ -296,6 +296,81 @@ func TestSynthesizeRowLineageColumns(t *testing.T) {
 	assert.EqualValues(t, 3, rowOffset)
 }
 
+// TestSynthesizeRowLineageColumnsPreservesExplicit covers the spec's null-
+// coalescing rule: if a row already has an explicit (non-null) value in the
+// source file, that value MUST be preserved; only null entries inherit the
+// file-level constants. This is the case that arises when rewriting a file
+// that already carries explicit lineage from a prior rewrite.
+func TestSynthesizeRowLineageColumnsPreservesExplicit(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	ctx := compute.WithAllocator(t.Context(), mem)
+	defer mem.AssertSize(t, 0)
+
+	firstRowID := int64(1000)
+	dataSeqNum := int64(5)
+	task := FileScanTask{FirstRowID: &firstRowID, DataSequenceNumber: &dataSeqNum}
+	rowOffset := int64(0)
+
+	schema := arrow.NewSchema(
+		[]arrow.Field{
+			{Name: "x", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+			{Name: iceberg.RowIDColumnName, Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+			{Name: iceberg.LastUpdatedSequenceNumberColumnName, Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+		},
+		nil,
+	)
+	const nrows = 3
+
+	xBldr := array.NewInt64Builder(mem)
+	defer xBldr.Release()
+	xBldr.AppendValues([]int64{1, 2, 3}, nil)
+
+	// Mixed _row_id: explicit 42, null, explicit 99. Non-null values must
+	// survive untouched. Null gets firstRowID + row position = 1000 + 1.
+	rowIDBldr := array.NewInt64Builder(mem)
+	defer rowIDBldr.Release()
+	rowIDBldr.AppendValues([]int64{42, 0, 99}, []bool{true, false, true})
+
+	// Mixed _last_updated_sequence_number: explicit 7, null, explicit 9.
+	// Null gets task.DataSequenceNumber = 5; others survive.
+	seqBldr := array.NewInt64Builder(mem)
+	defer seqBldr.Release()
+	seqBldr.AppendValues([]int64{7, 0, 9}, []bool{true, false, true})
+
+	xArr := xBldr.NewArray()
+	rowIDArr := rowIDBldr.NewArray()
+	seqArr := seqBldr.NewArray()
+	batch := array.NewRecordBatch(schema, []arrow.Array{xArr, rowIDArr, seqArr}, nrows)
+	xArr.Release()
+	rowIDArr.Release()
+	seqArr.Release()
+	defer batch.Release()
+
+	out, err := synthesizeRowLineageColumns(ctx, &rowOffset, task, batch)
+	require.NoError(t, err)
+	defer out.Release()
+
+	rowIDCol := out.Column(1).(*array.Int64)
+	require.Equal(t, nrows, rowIDCol.Len())
+	assert.False(t, rowIDCol.IsNull(0))
+	assert.EqualValues(t, 42, rowIDCol.Value(0), "explicit _row_id must survive")
+	assert.False(t, rowIDCol.IsNull(1))
+	assert.EqualValues(t, 1001, rowIDCol.Value(1), "null _row_id must inherit firstRowID + position")
+	assert.False(t, rowIDCol.IsNull(2))
+	assert.EqualValues(t, 99, rowIDCol.Value(2), "explicit _row_id must survive even with a different value")
+
+	seqCol := out.Column(2).(*array.Int64)
+	require.Equal(t, nrows, seqCol.Len())
+	assert.False(t, seqCol.IsNull(0))
+	assert.EqualValues(t, 7, seqCol.Value(0), "explicit seq must survive")
+	assert.False(t, seqCol.IsNull(1))
+	assert.EqualValues(t, 5, seqCol.Value(1), "null seq must inherit task.DataSequenceNumber")
+	assert.False(t, seqCol.IsNull(2))
+	assert.EqualValues(t, 9, seqCol.Value(2), "explicit seq must survive even with a different value")
+
+	assert.EqualValues(t, 3, rowOffset)
+}
+
 // TestProjectionV3SelectRowLineageColumns verifies that explicitly selecting
 // _row_id (and _last_updated_sequence_number) on a v3 table yields a projection
 // containing those metadata columns, even though they are not declared in the
@@ -381,8 +456,9 @@ func TestProjectionRowLineageRejectedOnV1V2(t *testing.T) {
 
 			_, err = scan.Projection()
 			require.Error(t, err, "Projection must reject lineage columns on pre-v3 tables")
-			assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.ErrorIs(t, err, ErrInvalidOperation)
 			assert.ErrorContains(t, err, iceberg.RowIDColumnName)
+			assert.ErrorContains(t, err, "format version")
 		})
 	}
 }

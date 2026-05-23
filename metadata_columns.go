@@ -19,13 +19,14 @@ package iceberg
 
 import "slices"
 
-// Row lineage metadata column field IDs (v3+). Reserved IDs are Integer.MAX_VALUE - 107 and 108
-// per the Iceberg spec (Metadata Columns / Row Lineage).
+// Row lineage metadata column field IDs (v3+). Reserved IDs are Integer.MAX_VALUE - 107
+// and Integer.MAX_VALUE - 108 per the Iceberg spec (Metadata Columns / Row Lineage).
 const (
 	// RowIDFieldID is the field ID for _row_id (optional long). A unique long identifier for every row.
+	// Reserved as Integer.MAX_VALUE - 107.
 	RowIDFieldID = 2147483540
 	// LastUpdatedSequenceNumberFieldID is the field ID for _last_updated_sequence_number (optional long).
-	// The sequence number of the commit that last updated the row.
+	// The sequence number of the commit that last updated the row. Reserved as Integer.MAX_VALUE - 108.
 	LastUpdatedSequenceNumberFieldID = 2147483539
 )
 
@@ -71,6 +72,9 @@ func IsMetadataColumn(fieldID int) bool {
 // it is not appended again. The returned schema always allocates a fresh field
 // slice so it cannot alias the input schema's backing array.
 func SchemaWithRowLineage(s *Schema) *Schema {
+	if s == nil {
+		return nil
+	}
 	// Clone the field slice up front so we never share a backing array with the
 	// caller's schema — append-with-spare-capacity could otherwise mutate the
 	// source schema's fields when the caller next mutates either side.

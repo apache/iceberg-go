@@ -20,6 +20,7 @@ package table
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"maps"
 
 	"github.com/apache/iceberg-go"
@@ -301,6 +302,26 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	preserveLineage := tbl.metadata.Version() >= 3 && allTasksHaveRowLineage(group.Tasks)
 	if preserveLineage {
 		scanOpts = append(scanOpts, WithRowLineage())
+	} else if tbl.metadata.Version() >= 3 {
+		// Mixed group on a v3 table — at least one source file lacks
+		// FirstRowID so we drop lineage on the surviving rows. This is the
+		// common case during a v1/v2→v3 migration; surface it so operators
+		// can detect silent lineage loss instead of having to diff
+		// metadata before/after.
+		var lineageFiles, legacyFiles int
+		for _, t := range group.Tasks {
+			if t.FirstRowID != nil {
+				lineageFiles++
+			} else {
+				legacyFiles++
+			}
+		}
+		if lineageFiles > 0 {
+			slog.Warn("compaction group has mixed row lineage; dropping _row_id on output",
+				"partition_key", group.PartitionKey,
+				"lineage_files", lineageFiles,
+				"legacy_files", legacyFiles)
+		}
 	}
 
 	arrowSchema, records, err := tbl.Scan(scanOpts...).ReadTasks(ctx, group.Tasks)
