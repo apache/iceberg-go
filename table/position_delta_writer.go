@@ -29,19 +29,28 @@ import (
 	"github.com/google/uuid"
 )
 
-// PositionDeltaWriter implements the position-delta write pattern for MoR
-// updates. It distinguishes between reinserted rows (survivors from a
-// position-delete that preserve their original _row_id) and fresh inserts
-// (new rows that get identity at read time).
+// PositionDeltaWriter writes data files for the position-delta MoR pattern,
+// distinguishing reinserted rows (survivors of a position-delta rewrite that
+// preserve their original _row_id) from fresh inserts (rows that get a new
+// _row_id synthesized at read time).
 //
-// This mirrors Java's SparkPositionDeltaWrite.reinsert(meta, row) vs
-// insert(row) pattern.
+// Scope: this writer produces *data files only*. The position-delete entries
+// that pair with reinserts (and that turn an UPDATE into delete-old + reinsert)
+// are not emitted here — the engine driver is responsible for composing this
+// writer with a position-delete writer and committing both via a RowDelta-style
+// snapshot. This mirrors the data-file half of Java's
+// SparkPositionDeltaWrite.reinsert(meta, row) vs insert(row) split.
+//
+// _last_updated_sequence_number is intentionally not written: the row-id-only
+// file schema lets the reader synthesize it from the manifest entry's
+// data_sequence_number, which after the rewrite is the new snapshot's sequence
+// number — the value the spec requires.
 //
 // Usage:
 //
-//	w := table.NewPositionDeltaWriter(tbl)
-//	w.Reinsert(survivorBatch)  // batch must include _row_id column
-//	w.Insert(freshBatch)       // batch without _row_id (or null values)
+//	w, err := table.NewPositionDeltaWriter(tbl)
+//	w.Reinsert(survivorBatch)  // batch must include _row_id column with non-null values
+//	w.Insert(freshBatch)       // batch without _row_id (writer appends nulls)
 //	dataFiles, err := w.Close(ctx)
 type PositionDeltaWriter struct {
 	tbl       *Table
@@ -71,9 +80,7 @@ func NewPositionDeltaWriter(tbl *Table) (*PositionDeltaWriter, error) {
 
 // Reinsert adds survivor rows that preserve their original _row_id. The batch
 // MUST contain a _row_id column (field name "_row_id") with non-null int64
-// values representing the preserved row identities. _last_updated_sequence_number
-// should be absent or null — it will inherit from the new file's
-// data_sequence_number at read time.
+// values representing the preserved row identities.
 //
 // Per the Iceberg spec, only position-delete rewrites and CoW can preserve
 // lineage. Equality deletes cannot preserve lineage because the engine writes
@@ -101,12 +108,19 @@ func (w *PositionDeltaWriter) Reinsert(batch arrow.RecordBatch) error {
 	return nil
 }
 
-// Insert adds fresh rows that get new identity at read time. The batch should
-// NOT contain a _row_id column, or if it does, all values must be null. These
-// rows represent genuinely new data (not survivors of a rewrite).
+// Insert adds fresh rows that get a new _row_id at read time. The batch should
+// NOT contain a _row_id column; if it does, all values must be null. These rows
+// represent genuinely new data (not survivors of a rewrite).
 func (w *PositionDeltaWriter) Insert(batch arrow.RecordBatch) error {
 	if w.closed {
 		return fmt.Errorf("%w: writer is already closed", ErrInvalidOperation)
+	}
+
+	if indices := batch.Schema().FieldIndices(iceberg.RowIDColumnName); len(indices) > 0 {
+		if batch.Column(indices[0]).NullN() != int(batch.NumRows()) {
+			return fmt.Errorf("%w: Insert batch %s column must be all null (use Reinsert for preserved IDs)",
+				iceberg.ErrInvalidArgument, iceberg.RowIDColumnName)
+		}
 	}
 
 	batch.Retain()
@@ -116,12 +130,12 @@ func (w *PositionDeltaWriter) Insert(batch arrow.RecordBatch) error {
 }
 
 // Close finalizes the writer and returns the data files produced. The returned
-// files contain both reinserted and fresh rows, with the _row_id column
-// written explicitly for reinserted rows (non-null) and left null for fresh
-// inserts.
+// files contain both reinserted and fresh rows, with the _row_id column written
+// explicitly for reinserted rows (non-null) and left null for fresh inserts.
 //
 // The caller is responsible for adding these files to a snapshot (typically via
-// a Transaction's snapshot producer).
+// a Transaction's snapshot producer) along with any position-delete entries
+// that pair with the reinserts.
 func (w *PositionDeltaWriter) Close(ctx context.Context) ([]iceberg.DataFile, error) {
 	if w.closed {
 		return nil, fmt.Errorf("%w: writer is already closed", ErrInvalidOperation)
@@ -142,16 +156,17 @@ func (w *PositionDeltaWriter) Close(ctx context.Context) ([]iceberg.DataFile, er
 	}
 
 	fileSchema := iceberg.SchemaWithRowID(w.tbl.Schema())
+	arrowSc, err := SchemaToArrowSchema(fileSchema, nil, true, false)
+	if err != nil {
+		return nil, fmt.Errorf("PositionDeltaWriter: build arrow schema: %w", err)
+	}
+
 	writeOpts := []WriteRecordOption{
 		WithPreserveRowLineage(fileSchema),
 		WithWriteUUID(w.writeUUID),
 	}
 
-	records := w.buildUnifiedIterator(ctx)
-	arrowSc, err := SchemaToArrowSchema(fileSchema, nil, true, false)
-	if err != nil {
-		return nil, fmt.Errorf("PositionDeltaWriter: build arrow schema: %w", err)
-	}
+	records := w.buildUnifiedIterator()
 
 	var result []iceberg.DataFile
 	for df, err := range WriteRecords(ctx, w.tbl, arrowSc, records, writeOpts...) {
@@ -167,12 +182,15 @@ func (w *PositionDeltaWriter) Close(ctx context.Context) ([]iceberg.DataFile, er
 // buildUnifiedIterator merges reinsert and insert batches into a single
 // iterator. Reinsert batches already have _row_id; insert batches get a null
 // _row_id column appended.
-func (w *PositionDeltaWriter) buildUnifiedIterator(ctx context.Context) iter.Seq2[arrow.RecordBatch, error] {
+func (w *PositionDeltaWriter) buildUnifiedIterator() iter.Seq2[arrow.RecordBatch, error] {
 	return func(yield func(arrow.RecordBatch, error) bool) {
 		alloc := memory.NewGoAllocator()
 
 		for _, batch := range w.reinsertBatches {
+			batch.Retain()
 			if !yield(batch, nil) {
+				batch.Release()
+
 				return
 			}
 		}
@@ -194,10 +212,11 @@ func (w *PositionDeltaWriter) buildUnifiedIterator(ctx context.Context) iter.Seq
 }
 
 // appendNullRowIDColumn appends a null-filled _row_id column to a batch that
-// doesn't have one, signaling that these are fresh inserts.
+// doesn't have one, signaling that these are fresh inserts. If the batch
+// already has _row_id (validated to be all-null by Insert), it is returned
+// retained as-is.
 func appendNullRowIDColumn(alloc memory.Allocator, batch arrow.RecordBatch) (arrow.RecordBatch, error) {
-	indices := batch.Schema().FieldIndices(iceberg.RowIDColumnName)
-	if len(indices) > 0 {
+	if indices := batch.Schema().FieldIndices(iceberg.RowIDColumnName); len(indices) > 0 {
 		batch.Retain()
 
 		return batch, nil
