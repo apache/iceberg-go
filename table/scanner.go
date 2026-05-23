@@ -194,6 +194,8 @@ type Scan struct {
 	options        iceberg.Properties
 	limit          int64
 
+	includeRowLineage bool
+
 	partitionFilters *keyDefaultMap[int, iceberg.BooleanExpression]
 	concurrency      int
 }
@@ -243,7 +245,6 @@ func (scan *Scan) Snapshot() *Snapshot {
 func (scan *Scan) Projection() (*iceberg.Schema, error) {
 	curSchema := scan.metadata.CurrentSchema()
 	curVersion := scan.metadata.Version()
-	caseSensitive := scan.caseSensitive
 	if scan.snapshotID != nil {
 		snap := scan.metadata.SnapshotByID(*scan.snapshotID)
 		if snap == nil {
@@ -261,26 +262,100 @@ func (scan *Scan) Projection() (*iceberg.Schema, error) {
 		}
 	}
 
-	if slices.Contains(scan.selectedFields, "*") {
-		return curSchema, nil
+	if scan.includeRowLineage && curVersion < minFormatVersionRowLineage {
+		return nil, fmt.Errorf("%w: row lineage requires format version %d, table is v%d",
+			ErrInvalidOperation, minFormatVersionRowLineage, curVersion)
 	}
 
-	selectedFieldsMeta := metaFieldsFromSelectedFields(scan.selectedFields, caseSensitive)
-	schemaMeta := metaFieldsFromSchema(curSchema)
-	synthesisMeta := synthesizeMeta(selectedFieldsMeta, schemaMeta)
-	if len(synthesisMeta) > 0 && curVersion >= minFormatVersionRowLineage {
+	var schema *iceberg.Schema
+	if slices.Contains(scan.selectedFields, "*") {
+		schema = curSchema
+	} else {
+		// Intercept row-lineage metadata column names (_row_id,
+		// _last_updated_sequence_number) before calling Select: they are
+		// reserved and never appear in the user schema's fields, so
+		// Select would fail with "could not find column" on v3 tables
+		// where they are otherwise legal to project. The scanner reads
+		// them from file metadata (or synthesizes them) at scan time;
+		// here we just need to ensure they survive into the projection.
+		userFields, lineageFields := splitLineageMetadataFields(scan.selectedFields, scan.caseSensitive)
+		if len(lineageFields) > 0 && curVersion < minFormatVersionRowLineage {
+			// Reject explicitly so the contract lives in the code rather
+			// than emerging from Select's "could not find column" path —
+			// a future v2 schema field literally named _row_id should not
+			// silently succeed here.
+			return nil, fmt.Errorf("%w: row lineage column %q requires format version %d, table is v%d",
+				ErrInvalidOperation, lineageFields[0].Name, minFormatVersionRowLineage, curVersion)
+		}
 
-		// synthesis path
-		removedMetaSlice, missingMetaFields := removeMetadataFromSelectedFields(scan.selectedFields, synthesisMeta)
-		sch, err := curSchema.Select(scan.caseSensitive, removedMetaSlice...)
+		var err error
+		schema, err = curSchema.Select(scan.caseSensitive, userFields...)
 		if err != nil {
 			return nil, err
 		}
-
-		return iceberg.NewSchemaWithIdentifiers(sch.ID, sch.IdentifierFieldIDs, append(sch.Fields(), missingMetaFields...)...), nil
+		// Skip the per-name append when scan.includeRowLineage is set: the
+		// SchemaWithRowLineage call below adds both lineage columns
+		// unconditionally, and appendMissingLineageFields would just be
+		// redundant work whose result is overwritten.
+		if len(lineageFields) > 0 && !scan.includeRowLineage {
+			schema = appendMissingLineageFields(schema, lineageFields)
+		}
 	}
 
-	return curSchema.Select(scan.caseSensitive, scan.selectedFields...)
+	if scan.includeRowLineage {
+		schema = iceberg.SchemaWithRowLineage(schema)
+	}
+
+	return schema, nil
+}
+
+// splitLineageMetadataFields partitions selectedFields into user fields and
+// row-lineage metadata fields (_row_id, _last_updated_sequence_number). The
+// returned lineage slice contains the canonical NestedField for each
+// metadata column name found, in the order encountered.
+func splitLineageMetadataFields(selectedFields []string, caseSensitive bool) (userFields []string, lineageFields []iceberg.NestedField) {
+	matches := func(field, target string) bool {
+		if caseSensitive {
+			return field == target
+		}
+
+		return strings.EqualFold(field, target)
+	}
+
+	userFields = make([]string, 0, len(selectedFields))
+	for _, field := range selectedFields {
+		switch {
+		case matches(field, iceberg.RowIDColumnName):
+			lineageFields = append(lineageFields, iceberg.RowID())
+		case matches(field, iceberg.LastUpdatedSequenceNumberColumnName):
+			lineageFields = append(lineageFields, iceberg.LastUpdatedSequenceNumber())
+		default:
+			userFields = append(userFields, field)
+		}
+	}
+
+	return userFields, lineageFields
+}
+
+// appendMissingLineageFields returns a new schema with each lineage field
+// appended only if no field with that ID is already present. Idempotent so
+// callers can pass schemas that already declare the reserved fields.
+func appendMissingLineageFields(s *iceberg.Schema, lineageFields []iceberg.NestedField) *iceberg.Schema {
+	existing := make(map[int]struct{}, len(s.Fields()))
+	for _, f := range s.Fields() {
+		existing[f.ID] = struct{}{}
+	}
+
+	fields := slices.Clone(s.Fields())
+	for _, f := range lineageFields {
+		if _, ok := existing[f.ID]; ok {
+			continue
+		}
+		fields = append(fields, f)
+		existing[f.ID] = struct{}{}
+	}
+
+	return iceberg.NewSchemaWithIdentifiers(s.ID, s.IdentifierFieldIDs, fields...)
 }
 
 func (scan *Scan) buildPartitionProjection(specID int) (iceberg.BooleanExpression, error) {
@@ -621,10 +696,15 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 			Length:              e.DataFile().FileSizeBytes(),
 		}
 		// Row lineage constants: readers use these to synthesize _row_id and
-		// _last_updated_sequence_number when requested.
+		// _last_updated_sequence_number when requested. Per spec the
+		// synthesized _last_updated_sequence_number is the manifest entry's
+		// data sequence number (field id 3), not file sequence number
+		// (field id 4); back-dated EXISTING entries can have the two
+		// diverge and Java/iceberg-rust use the data sequence number.
 		task.FirstRowID = e.DataFile().FirstRowID()
-		if fseq := e.FileSequenceNum(); fseq != nil {
-			task.DataSequenceNumber = fseq
+		if seq := e.SequenceNum(); seq >= 0 {
+			s := seq
+			task.DataSequenceNumber = &s
 		}
 		results = append(results, task)
 	}
@@ -720,81 +800,4 @@ func (scan *Scan) ToArrowTable(ctx context.Context) (arrow.Table, error) {
 	}
 
 	return array.NewTableFromRecords(schema, records), nil
-}
-
-// Removes metaFields from selectedField if it exists. Returns a []string representing the filtered selectedFields
-// and an iceberg.NestedField[] representing the removed metadata. Note that metaFields is passed in
-// after being validated from metaFieldsFromSelectedFields.
-func removeMetadataFromSelectedFields(selectedFields []string, metaFields []string) ([]string, []iceberg.NestedField) {
-	filteredFields := []string{}
-	meta := []iceberg.NestedField{}
-
-	for _, field := range selectedFields {
-		if slices.Contains(metaFields, strings.ToLower(field)) {
-
-			switch strings.ToLower(field) {
-			case iceberg.LastUpdatedSequenceNumberColumnName:
-				meta = append(meta, iceberg.LastUpdatedSequenceNumber())
-			case iceberg.RowIDColumnName:
-				meta = append(meta, iceberg.RowID())
-			}
-
-			continue
-		}
-
-		filteredFields = append(filteredFields, field)
-	}
-
-	return filteredFields, meta
-}
-
-func metaFieldsFromSelectedFields(selectedFields []string, caseSensitive bool) []string {
-	meta := []string{}
-	if !caseSensitive {
-		for _, field := range selectedFields {
-			if strings.EqualFold(field, iceberg.RowIDColumnName) || strings.EqualFold(field, iceberg.LastUpdatedSequenceNumberColumnName) {
-				meta = append(meta, strings.ToLower(field))
-			}
-		}
-
-		return meta
-	}
-
-	for _, field := range selectedFields {
-		if field == iceberg.RowIDColumnName || field == iceberg.LastUpdatedSequenceNumberColumnName {
-			meta = append(meta, strings.ToLower(field))
-		}
-	}
-
-	return meta
-}
-
-// Takes in a *iceberg.Schema and returns a []string representing the row lineage metadata present
-// in the schema.
-func metaFieldsFromSchema(sch *iceberg.Schema) []string {
-	meta := []string{}
-	_, hasRowIDMeta := sch.FindFieldByName(iceberg.RowIDColumnName)
-	_, hasSeqMeta := sch.FindFieldByName(iceberg.LastUpdatedSequenceNumberColumnName)
-
-	if hasRowIDMeta {
-		meta = append(meta, iceberg.RowIDColumnName)
-	}
-	if hasSeqMeta {
-		meta = append(meta, iceberg.LastUpdatedSequenceNumberColumnName)
-	}
-
-	return meta
-}
-
-// Any metadata which is in selectedFieldsMeta and not in schemaMeta is a synthesis meta
-func synthesizeMeta(selectedFieldsMeta []string, schemaMeta []string) []string {
-	synthesis := []string{}
-
-	for _, f := range selectedFieldsMeta {
-		if !slices.Contains(schemaMeta, f) {
-			synthesis = append(synthesis, f)
-		}
-	}
-
-	return synthesis
 }

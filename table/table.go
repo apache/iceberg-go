@@ -816,6 +816,17 @@ func WithOptions(opts iceberg.Properties) ScanOption {
 	}
 }
 
+// WithRowLineage projects the row-lineage metadata columns (_row_id and
+// _last_updated_sequence_number) so that row identity and per-row update
+// sequence are preserved through rewrites and compactions. Requires a v3
+// table — calling Scan.Projection on a v1/v2 table after applying this
+// option returns an error.
+func WithRowLineage() ScanOption {
+	return func(scan *Scan) {
+		scan.includeRowLineage = true
+	}
+}
+
 func (t Table) Scan(opts ...ScanOption) *Scan {
 	s := &Scan{
 		metadata:       t.metadata,

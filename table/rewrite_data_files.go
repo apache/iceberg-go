@@ -20,6 +20,7 @@ package table
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"maps"
 
 	"github.com/apache/iceberg-go"
@@ -289,6 +290,40 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		scanOpts = append(scanOpts, WitMaxConcurrency(cfg.scanConcurrency))
 	}
 
+	// Preserve row lineage only when every source file in the group carries
+	// it. A mixed group (some files with FirstRowID, some without — e.g.
+	// legacy files on a v3 table) would otherwise produce one output where
+	// post-lineage rows have explicit _row_id values and pre-lineage rows
+	// have nulls, which violates the per-file uniqueness/coverage
+	// invariant the v3 spec requires. Splitting mixed groups into separate
+	// outputs is a larger refactor and is left as a follow-up; for now we
+	// degrade gracefully (the rewrite still succeeds, but lineage is not
+	// preserved for the surviving rows).
+	preserveLineage := tbl.metadata.Version() >= 3 && allTasksHaveRowLineage(group.Tasks)
+	if preserveLineage {
+		scanOpts = append(scanOpts, WithRowLineage())
+	} else if tbl.metadata.Version() >= 3 {
+		// Mixed group on a v3 table — at least one source file lacks
+		// FirstRowID so we drop lineage on the surviving rows. This is the
+		// common case during a v1/v2→v3 migration; surface it so operators
+		// can detect silent lineage loss instead of having to diff
+		// metadata before/after.
+		var lineageFiles, legacyFiles int
+		for _, t := range group.Tasks {
+			if t.FirstRowID != nil {
+				lineageFiles++
+			} else {
+				legacyFiles++
+			}
+		}
+		if lineageFiles > 0 {
+			slog.Warn("compaction group has mixed row lineage; dropping _row_id on output",
+				"partition_key", group.PartitionKey,
+				"lineage_files", lineageFiles,
+				"legacy_files", legacyFiles)
+		}
+	}
+
 	arrowSchema, records, err := tbl.Scan(scanOpts...).ReadTasks(ctx, group.Tasks)
 	if err != nil {
 		return CompactionGroupResult{}, fmt.Errorf("read tasks for compaction group %q: %w", group.PartitionKey, err)
@@ -299,6 +334,20 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	writeOpts := []WriteRecordOption{WithClusteredWrite()}
 	if cfg.targetFileSize > 0 {
 		writeOpts = append(writeOpts, WithTargetFileSize(cfg.targetFileSize))
+	}
+	if preserveLineage {
+		// Rebuild the arrow schema from the projected iceberg schema so the
+		// reserved row-lineage field IDs (_row_id, _last_updated_sequence_number)
+		// are attached as Arrow field metadata. ArrowSchemaToIceberg prefers
+		// embedded field IDs when present and otherwise falls back to the
+		// table's name mapping — which doesn't (and cannot) contain the
+		// reserved metadata column names, so the fallback path panics.
+		projectedSchema := iceberg.SchemaWithRowLineage(tbl.Schema())
+		arrowSchema, err = SchemaToArrowSchema(projectedSchema, nil, true, false)
+		if err != nil {
+			return CompactionGroupResult{}, fmt.Errorf("build arrow schema for lineage write in group %q: %w", group.PartitionKey, err)
+		}
+		writeOpts = append(writeOpts, WithPreserveRowLineage(projectedSchema))
 	}
 
 	var (
@@ -326,6 +375,24 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		BytesBefore:    group.TotalSizeBytes,
 		BytesAfter:     bytesAfter,
 	}, nil
+}
+
+// allTasksHaveRowLineage returns true iff every task in the group has a
+// non-nil FirstRowID — i.e. every source file already carries v3 row lineage.
+// Used to gate the preservation path on compaction: mixed groups (some
+// lineage, some legacy) would otherwise produce per-file invariant
+// violations, so the gate is conservative.
+func allTasksHaveRowLineage(tasks []FileScanTask) bool {
+	if len(tasks) == 0 {
+		return false
+	}
+	for _, t := range tasks {
+		if t.FirstRowID == nil {
+			return false
+		}
+	}
+
+	return true
 }
 
 // rewriteDataFilesPartial stages each group as its own rewrite
