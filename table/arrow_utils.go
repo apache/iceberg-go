@@ -913,14 +913,16 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 	}
 
 	if !field.Type.Equals(typ) {
-		promoted := retOrPanic(iceberg.PromoteType(fileField.Type, field.Type))
-		targetType := retOrPanic(TypeToArrowType(promoted, a.includeFieldIDs, a.useLargeTypes))
-		if !a.useLargeTypes {
-			targetType = retOrPanic(ensureSmallArrowTypes(targetType))
-		}
+		if !canDowncastTimestampPrecision(fileField.Type, field.Type, a.downcastNsTimestamp) {
+			promoted := retOrPanic(iceberg.PromoteType(fileField.Type, field.Type))
+			targetType := retOrPanic(TypeToArrowType(promoted, a.includeFieldIDs, a.useLargeTypes))
+			if !a.useLargeTypes {
+				targetType = retOrPanic(ensureSmallArrowTypes(targetType))
+			}
 
-		return retOrPanic(compute.CastArray(a.ctx, vals,
-			compute.SafeCastOptions(targetType)))
+			return retOrPanic(compute.CastArray(a.ctx, vals,
+				compute.SafeCastOptions(targetType)))
+		}
 	}
 
 	targetType := retOrPanic(TypeToArrowType(field.Type, a.includeFieldIDs, a.useLargeTypes))
@@ -932,7 +934,8 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 
 			if tgtok && valok && tt.TimeZone == "" && vt.TimeZone == "" && tt.Unit == arrow.Microsecond {
 				if vt.Unit == arrow.Nanosecond && a.downcastNsTimestamp {
-					return retOrPanic(compute.CastArray(a.ctx, vals, compute.UnsafeCastOptions(tt)))
+					return floorTimestampNanosecondsToMicroseconds(
+						compute.GetAllocator(a.ctx), vals.(*array.Timestamp), tt)
 				} else if vt.Unit == arrow.Second || vt.Unit == arrow.Millisecond {
 					return retOrPanic(compute.CastArray(a.ctx, vals, compute.SafeCastOptions(tt)))
 				}
@@ -947,7 +950,8 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 			if tgtok && valok && tt.TimeZone == "UTC" &&
 				slices.Contains(utcAliases, vt.TimeZone) && tt.Unit == arrow.Microsecond {
 				if vt.Unit == arrow.Nanosecond && a.downcastNsTimestamp {
-					return retOrPanic(compute.CastArray(a.ctx, vals, compute.UnsafeCastOptions(tt)))
+					return floorTimestampNanosecondsToMicroseconds(
+						compute.GetAllocator(a.ctx), vals.(*array.Timestamp), tt)
 				} else if vt.Unit != arrow.Nanosecond {
 					return retOrPanic(compute.CastArray(a.ctx, vals, compute.SafeCastOptions(tt)))
 				}
@@ -963,6 +967,46 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 	vals.Retain()
 
 	return vals
+}
+
+func canDowncastTimestampPrecision(fileType, readType iceberg.Type, enabled bool) bool {
+	if !enabled {
+		return false
+	}
+
+	switch fileType.(type) {
+	case iceberg.TimestampNsType:
+		_, ok := readType.(iceberg.TimestampType)
+
+		return ok
+	case iceberg.TimestampTzNsType:
+		_, ok := readType.(iceberg.TimestampTzType)
+
+		return ok
+	default:
+		return false
+	}
+}
+
+func floorTimestampNanosecondsToMicroseconds(
+	mem memory.Allocator,
+	vals *array.Timestamp,
+	targetType *arrow.TimestampType,
+) arrow.Array {
+	bldr := array.NewTimestampBuilder(mem, targetType)
+	defer bldr.Release()
+
+	for i := range vals.Len() {
+		if vals.IsNull(i) {
+			bldr.AppendNull()
+
+			continue
+		}
+
+		bldr.Append(arrow.Timestamp(internal.FloorDiv(int64(vals.Value(i)), int64(1_000))))
+	}
+
+	return bldr.NewArray()
 }
 
 func (a *arrowProjectionVisitor) constructField(field iceberg.NestedField, arrowType arrow.DataType) arrow.Field {

@@ -125,7 +125,11 @@ func (w *defaultDataFileWriter) writeFile(ctx context.Context, partitionValues m
 	batches := make([]arrow.RecordBatch, len(task.Batches))
 	for i, b := range task.Batches {
 		rec, err := ToRequestedSchema(ctx, w.fileSchema,
-			task.Schema, b, SchemaOptions{IncludeFieldIDs: true, UseWriteDefault: true})
+			task.Schema, b, SchemaOptions{
+				DowncastTimestamp: true,
+				IncludeFieldIDs:   true,
+				UseWriteDefault:   true,
+			})
 		if err != nil {
 			return nil, err
 		}

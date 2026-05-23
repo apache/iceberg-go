@@ -27,6 +27,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/file"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
@@ -251,6 +253,78 @@ func (s *WriteRecordsTestSuite) TestEmptyInput() {
 	}
 
 	s.Equal(0, count)
+}
+
+func (s *WriteRecordsTestSuite) TestTimestampNanosecondsShouldFloorNegativeValuesIfTableUsesMicroseconds() {
+	loc := filepath.ToSlash(s.T().TempDir())
+	iceSch := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: 2, Name: "created_ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: false},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{2},
+		FieldID:   1000,
+		Transform: iceberg.IdentityTransform{},
+		Name:      "created_ts",
+	})
+	meta, err := table.NewMetadata(iceSch, &spec, table.UnsortedSortOrder, loc, iceberg.Properties{})
+	s.Require().NoError(err)
+
+	tbl := table.New(
+		table.Identifier{"test", "write_records_timestamps"},
+		meta,
+		filepath.Join(loc, "metadata", "v1.metadata.json"),
+		func(ctx context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil },
+		nil,
+	)
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "created_ts", Type: &arrow.TimestampType{Unit: arrow.Nanosecond}, Nullable: true},
+	}, nil)
+
+	records := func(yield func(arrow.RecordBatch, error) bool) {
+		bldr := array.NewRecordBuilder(s.mem, arrowSchema)
+		defer bldr.Release()
+
+		bldr.Field(0).(*array.Int32Builder).Append(1)
+		bldr.Field(1).(*array.TimestampBuilder).Append(arrow.Timestamp(-1_500))
+
+		yield(bldr.NewRecordBatch(), nil)
+	}
+
+	var dataFiles []iceberg.DataFile
+	for df, err := range table.WriteRecords(s.ctx, tbl, arrowSchema, records) {
+		s.Require().NoError(err)
+		dataFiles = append(dataFiles, df)
+	}
+
+	s.Require().Len(dataFiles, 1)
+
+	partitionRec := table.GetPartitionRecord(dataFiles[0], spec.PartitionType(iceSch))
+	s.Equal("created_ts=1969-12-31T23%3A59%3A59.999998", spec.PartitionToPath(partitionRec, iceSch))
+
+	rdr, err := file.OpenParquetFile(dataFiles[0].FilePath(), false)
+	s.Require().NoError(err)
+	defer rdr.Close()
+
+	arrowRdr, err := pqarrow.NewFileReader(rdr, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	s.Require().NoError(err)
+
+	written, err := arrowRdr.ReadTable(s.ctx)
+	s.Require().NoError(err)
+	defer written.Release()
+
+	s.Equal(int64(1), written.NumRows())
+	chunks := written.Column(1).Data().Chunks()
+	s.Require().Len(chunks, 1)
+
+	timestamps := chunks[0].(*array.Timestamp)
+	s.Equal(arrow.Timestamp(-2), timestamps.Value(0))
+
+	writtenType := timestamps.DataType().(*arrow.TimestampType)
+	s.Equal(arrow.Microsecond, writtenType.Unit)
+	s.Empty(writtenType.TimeZone)
 }
 
 type readOnlyFS struct{}
