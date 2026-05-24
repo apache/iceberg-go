@@ -376,7 +376,7 @@ func (m *manifestFile) FetchEntries(fs iceio.IO, discardDeleted bool) (_ []Manif
 	return ReadManifest(m, f, discardDeleted)
 }
 
-func getFieldIDMap(sc *avro.Schema) (map[string]int, map[int]string, map[int]int) {
+func getFieldIDMap(sc *avro.Schema) (map[string]int, map[int]string, map[int]int, map[int]int) {
 	root := sc.Root()
 	getField := func(node avro.SchemaNode, name string) *avro.SchemaField {
 		for i := range node.Fields {
@@ -390,7 +390,8 @@ func getFieldIDMap(sc *avro.Schema) (map[string]int, map[int]string, map[int]int
 
 	result := make(map[string]int)
 	logicalTypes := make(map[int]string)
-	fixedSizes := make(map[int]int)
+	decimalScales := make(map[int]int)
+	decimalPrecisions := make(map[int]int)
 
 	entryField := getField(root, "data_file")
 	partitionField := getField(entryField.Type, "partition")
@@ -414,18 +415,19 @@ func getFieldIDMap(sc *avro.Schema) (map[string]int, map[int]string, map[int]int
 		if typ.LogicalType != "" {
 			logicalTypes[fid] = typ.LogicalType
 			if typ.LogicalType == atype.Decimal {
-				fixedSizes[fid] = typ.Scale
+				decimalScales[fid] = typ.Scale
+				decimalPrecisions[fid] = typ.Precision
 			}
 		}
 	}
 
-	return result, logicalTypes, fixedSizes
+	return result, logicalTypes, decimalScales, decimalPrecisions
 }
 
 type hasFieldToIDMap interface {
 	setFieldNameToIDMap(map[string]int)
 	setFieldIDToLogicalTypeMap(map[int]string)
-	setFieldIDToFixedSizeMap(map[int]int)
+	setFieldIDToScaleMap(map[int]int)
 }
 
 // ManifestFile is the interface which covers both V1 and V2 manifest files.
@@ -581,14 +583,14 @@ func decodeManifests[I interface {
 // This type is not thread-safe; its methods should not be called from
 // multiple goroutines.
 type ManifestReader struct {
-	rd            *ocf.Reader
-	file          ManifestFile
-	formatVersion int
-	isFallback    bool
-	content       ManifestContent
-	fieldNameToID map[string]int
-	fieldIDToType map[int]string
-	fieldIDToSize map[int]int
+	rd             *ocf.Reader
+	file           ManifestFile
+	formatVersion  int
+	isFallback     bool
+	content        ManifestContent
+	fieldNameToID  map[string]int
+	fieldIDToType  map[int]string
+	fieldIDToScale map[int]int
 
 	// The rest are lazily populated, on demand. Most readers
 	// will likely only try to load the entries.
@@ -666,7 +668,7 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 			}
 		}
 	}
-	fieldNameToID, fieldIDToType, fieldIDToSize := getFieldIDMap(sc)
+	fieldNameToID, fieldIDToType, fieldIDToScale, _ := getFieldIDMap(sc)
 
 	inheritRowIDs := formatVersion >= 3 &&
 		content == ManifestContentData &&
@@ -684,7 +686,7 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 		content:        content,
 		fieldNameToID:  fieldNameToID,
 		fieldIDToType:  fieldIDToType,
-		fieldIDToSize:  fieldIDToSize,
+		fieldIDToScale: fieldIDToScale,
 		inheritRowIDs:  inheritRowIDs,
 		nextFirstRowID: nextFirstRowID,
 	}, nil
@@ -796,7 +798,7 @@ func (c *ManifestReader) ReadEntry() (ManifestEntry, error) {
 	if fieldToIDMap, ok := tmp.DataFile().(hasFieldToIDMap); ok {
 		fieldToIDMap.setFieldNameToIDMap(c.fieldNameToID)
 		fieldToIDMap.setFieldIDToLogicalTypeMap(c.fieldIDToType)
-		fieldToIDMap.setFieldIDToFixedSizeMap(c.fieldIDToSize)
+		fieldToIDMap.setFieldIDToScaleMap(c.fieldIDToScale)
 	}
 
 	return tmp, nil
@@ -1113,8 +1115,9 @@ type ManifestWriter struct {
 	schema  *Schema
 	content ManifestContent
 
-	partFieldNameToID map[string]int
-	partFieldIDToType map[int]string
+	partFieldNameToID        map[string]int
+	partFieldIDToType        map[int]string
+	partFieldIDToDecimalPrec map[int]int
 
 	snapshotID    int64
 	addedFiles    int32
@@ -1161,20 +1164,21 @@ func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *S
 		return nil, err
 	}
 
-	nameToID, idToType, _ := getFieldIDMap(fileSchema)
+	nameToID, idToType, _, idToDecimalPrec := getFieldIDMap(fileSchema)
 
 	w := &ManifestWriter{
-		impl:              impl,
-		version:           version,
-		output:            out,
-		spec:              spec,
-		content:           ManifestContentData,
-		schema:            schema,
-		partFieldNameToID: nameToID,
-		partFieldIDToType: idToType,
-		snapshotID:        snapshotID,
-		minSeqNum:         -1,
-		partitions:        make([]map[int]any, 0),
+		impl:                     impl,
+		version:                  version,
+		output:                   out,
+		spec:                     spec,
+		content:                  ManifestContentData,
+		schema:                   schema,
+		partFieldNameToID:        nameToID,
+		partFieldIDToType:        idToType,
+		partFieldIDToDecimalPrec: idToDecimalPrec,
+		snapshotID:               snapshotID,
+		minSeqNum:                -1,
+		partitions:               make([]map[int]any, 0),
 	}
 
 	for _, apply := range opts {
@@ -1314,7 +1318,7 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 	}
 
 	w.partitions = append(w.partitions, entry.Data.Partition())
-	partitionData := avroPartitionData(entry.Data.Partition(), w.partFieldIDToType)
+	partitionData := avroPartitionData(entry.Data.Partition(), w.partFieldIDToType, w.partFieldIDToDecimalPrec)
 
 	if dataFile, ok := entry.DataFile().(*dataFile); ok {
 		convertedPartitionData := make(map[string]any)
@@ -1696,11 +1700,11 @@ func mapToAvroColMap[K comparable, V any](m map[K]V) *[]colMap[K, V] {
 	return &out
 }
 
-func avroPartitionData(input map[int]any, logicalTypes map[int]string) map[int]any {
+func avroPartitionData(input map[int]any, logicalTypes map[int]string, decimalPrecisions map[int]int) map[int]any {
 	out := make(map[int]any)
 	for k, v := range input {
 		if logical, ok := logicalTypes[k]; ok {
-			out[k] = convertLogicalTypeValue(v, logical)
+			out[k] = convertLogicalTypeValue(v, logical, decimalPrecisions[k])
 		} else {
 			out[k] = v
 		}
@@ -1709,7 +1713,7 @@ func avroPartitionData(input map[int]any, logicalTypes map[int]string) map[int]a
 	return out
 }
 
-func convertLogicalTypeValue(v any, logicalType string) any {
+func convertLogicalTypeValue(v any, logicalType string, decimalPrecision int) any {
 	switch logicalType {
 	case atype.Date:
 		return convertDateValue(v)
@@ -1718,7 +1722,7 @@ func convertLogicalTypeValue(v any, logicalType string) any {
 	case atype.TimestampMicros:
 		return convertTimestampMicrosValue(v)
 	case atype.Decimal:
-		return convertDecimalValue(v)
+		return convertDecimalValue(v, decimalPrecision)
 	case atype.UUID:
 		return convertUUIDValue(v)
 	default:
@@ -1750,9 +1754,12 @@ func convertTimestampMicrosValue(v any) any {
 	return v
 }
 
-func convertDecimalValue(v any) any {
+func convertDecimalValue(v any, precision int) any {
 	if dec, ok := v.(Decimal); ok {
-		fixedSize := internal.DecimalRequiredBytes(len(dec.String()))
+		fixedSize := internal.DecimalRequiredBytes(precision)
+		if fixedSize <= 0 {
+			return v
+		}
 		bytes, err := DecimalLiteral(dec).MarshalBinary()
 		if err != nil {
 			return v
@@ -1817,7 +1824,7 @@ type dataFile struct {
 	fieldNameToID          map[string]int
 	fieldIDToLogicalType   map[int]string
 	fieldIDToPartitionData map[int]any
-	fieldIDToFixedSize     map[int]int
+	fieldIDToScale         map[int]int
 
 	specID   int32
 	initMaps sync.Once
@@ -1890,7 +1897,7 @@ func (d *dataFile) convertAvroValueToIcebergType(v any, fieldID int) any {
 			return TimestampNano(v.(int64))
 		case atype.Decimal:
 			if r, ok := v.(*big.Rat); ok {
-				scale := d.fieldIDToFixedSize[fieldID]
+				scale := d.fieldIDToScale[fieldID]
 				scaleFactor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(scale)), nil)
 				unscaled := new(big.Int).Mul(r.Num(), scaleFactor)
 				unscaled = unscaled.Div(unscaled, r.Denom())
@@ -1918,7 +1925,7 @@ func (d *dataFile) setFieldNameToIDMap(m map[string]int) { d.fieldNameToID = m }
 func (d *dataFile) setFieldIDToLogicalTypeMap(m map[int]string) {
 	d.fieldIDToLogicalType = m
 }
-func (d *dataFile) setFieldIDToFixedSizeMap(m map[int]int) { d.fieldIDToFixedSize = m }
+func (d *dataFile) setFieldIDToScaleMap(m map[int]int) { d.fieldIDToScale = m }
 
 func (d *dataFile) ContentType() ManifestEntryContent { return d.Content }
 func (d *dataFile) FilePath() string                  { return d.Path }
@@ -2140,7 +2147,7 @@ func NewDataFileBuilder(
 	format FileFormat,
 	fieldIDToPartitionData map[int]any,
 	fieldIDToLogicalType map[int]string,
-	fieldIDToFixedSize map[int]int,
+	fieldIDToScale map[int]int,
 	recordCount int64,
 	fileSize int64,
 ) (*DataFileBuilder, error) {
@@ -2197,7 +2204,7 @@ func NewDataFileBuilder(
 			fieldIDToPartitionData: fieldIDToPartitionData,
 			fieldNameToID:          fieldNameToID,
 			fieldIDToLogicalType:   fieldIDToLogicalType,
-			fieldIDToFixedSize:     fieldIDToFixedSize,
+			fieldIDToScale:         fieldIDToScale,
 		},
 	}, nil
 }
