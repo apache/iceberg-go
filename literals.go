@@ -1221,6 +1221,12 @@ func (DecimalLiteral) Comparator() Comparator[Decimal] {
 		return v1.Val.Cmp(rescaled)
 	}
 }
+
+// Type returns a DecimalType built from the literal's scale and a hardcoded
+// precision of 9. The precision is NOT the originating column's declared
+// precision; DecimalLiteral does not carry precision. Callers that need the
+// real column precision must consult the bound field's type rather than
+// lit.Type(). See https://github.com/apache/iceberg-go/issues/1028.
 func (d DecimalLiteral) Type() Type     { return DecimalTypeOf(9, d.Scale) }
 func (d DecimalLiteral) Value() Decimal { return Decimal(d) }
 func (d DecimalLiteral) Any() any       { return d.Value() }
