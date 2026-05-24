@@ -362,6 +362,17 @@ func (scan *Scan) buildPartitionProjection(specID int) (iceberg.BooleanExpressio
 	return buildPartitionProjection(specID, scan.metadata, scan.rowFilter, scan.caseSensitive)
 }
 
+func (scan *Scan) validateRowFilter() error {
+	_, err := newInclusiveMetricsEvaluator(
+		scan.metadata.CurrentSchema(),
+		scan.rowFilter,
+		scan.caseSensitive,
+		scan.options["include_empty_files"] == "true",
+	)
+
+	return err
+}
+
 func buildPartitionProjection(specID int, meta Metadata, rowFilter iceberg.BooleanExpression, caseSensitive bool) (iceberg.BooleanExpression, error) {
 	spec := meta.PartitionSpecByID(specID)
 	if spec == nil {
@@ -657,6 +668,10 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 		scan.snapshotID = &snapshot.SnapshotID
 		scan.asOfTimestamp = nil
 	}
+	if err := scan.validateRowFilter(); err != nil {
+		return nil, err
+	}
+
 	// Step 1: Retrieve filtered manifests based on snapshot and partition specs.
 	manifestList, err := scan.fetchPartitionSpecFilteredManifests(ctx)
 	if err != nil || len(manifestList) == 0 {
