@@ -18,15 +18,114 @@
 package table
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func testFSF(io iceio.IO) FSysF {
+	return func(context.Context) (iceio.IO, error) { return io, nil }
+}
+
+// trackedOpensIO wraps trackingIO to count Open calls per path.
+type trackedOpensIO struct {
+	*trackingIO
+	openCount map[string]int
+}
+
+func newTrackedOpensIO() *trackedOpensIO {
+	return &trackedOpensIO{
+		trackingIO: newTrackingIO(),
+		openCount:  make(map[string]int),
+	}
+}
+
+func (c *trackedOpensIO) Open(name string) (iceio.File, error) {
+	c.openCount[name]++
+	return c.trackingIO.Open(name)
+}
+
+// writeManifest writes a v2 data manifest with a single ADDED
+// entry pointing at dataPath into tio.files at manifestPath, and returns a
+// ManifestFile descriptor with seqNum pre-assigned so the same descriptor
+// can be referenced from multiple manifest lists.
+func writeManifest(t *testing.T, tio *trackingIO, snapshotID, seqNum int64, manifestPath, dataPath string) iceberg.ManifestFile {
+	t.Helper()
+
+	dataSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "x", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	spec := iceberg.NewPartitionSpec()
+
+	df, err := iceberg.NewDataFileBuilder(
+		spec, iceberg.EntryContentData, dataPath, iceberg.ParquetFile,
+		nil, nil, nil, 1, 1024,
+	)
+	require.NoError(t, err)
+
+	entry := iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, &snapshotID, df.Build()).
+		SequenceNum(seqNum).
+		Build()
+
+	var buf bytes.Buffer
+	_, err = iceberg.WriteManifest(manifestPath, &buf, 2, spec, dataSchema, snapshotID, []iceberg.ManifestEntry{entry})
+	require.NoError(t, err)
+	require.NoError(t, tio.WriteFile(manifestPath, buf.Bytes()))
+
+	return iceberg.NewManifestFile(2, manifestPath, int64(buf.Len()), 0, snapshotID).
+		SequenceNum(seqNum, seqNum).
+		AddedFiles(1).
+		AddedRows(1).
+		Build()
+}
+
+// writeManifestList writes a v2 manifest list referencing the
+// given manifests into tio.files at listPath.
+func writeManifestList(t *testing.T, tio *trackingIO, snapshotID int64, listPath string, manifests []iceberg.ManifestFile) {
+	t.Helper()
+
+	var buf bytes.Buffer
+	seqNum := int64(1)
+	require.NoError(t, iceberg.WriteManifestList(2, &buf, snapshotID, nil, &seqNum, 0, manifests))
+	require.NoError(t, tio.WriteFile(listPath, buf.Bytes()))
+}
+
+// metaJSONOpts configures the metadata document built by buildMetaJSON.
+type metaJSONOpts struct {
+	snapshots           string
+	statistics          string
+	partitionStatistics string
+}
+
+// buildMetaJSON returns the minimal v2 metadata document that ParseMetadataString will accept
+func buildMetaJSON(o metaJSONOpts) string {
+	return fmt.Sprintf(`{
+	  "format-version": 2,
+	  "table-uuid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+	  "location": "s3://bucket/table",
+	  "last-sequence-number": 0,
+	  "last-updated-ms": 1000,
+	  "last-column-id": 1,
+	  "current-schema-id": 0,
+	  "schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"x","required":true,"type":"long"}]}],
+	  "default-spec-id": 0,
+	  "partition-specs": [{"spec-id":0,"fields":[]}],
+	  "last-partition-id": 0,
+	  "default-sort-order-id": 0,
+	  "sort-orders": [{"order-id":0,"fields":[]}],
+	  "snapshots": [%s],
+	  "statistics": [%s],
+	  "partition-statistics": [%s]
+	}`, o.snapshots, o.statistics, o.partitionStatistics)
+}
 
 func TestRemoveSnapshotsPostCommitSkipped(t *testing.T) {
 	update := NewRemoveSnapshotsUpdate([]int64{1, 2, 3}, false)
@@ -41,57 +140,23 @@ func TestRemoveSnapshotsPostCommitDeletesStatisticsFiles(t *testing.T) {
 	// preTable has snapshot 1 with associated statistics and partition statistics files.
 	// postTable has no snapshots and no statistics (snapshot 1 has been expired).
 	// PostCommit must delete the statistics paths that belonged to the expired snapshot.
-	const preMeta = `{
-	  "format-version": 2,
-	  "table-uuid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-	  "location": "s3://bucket/table",
-	  "last-sequence-number": 1,
-	  "last-updated-ms": 1000,
-	  "last-column-id": 1,
-	  "current-schema-id": 0,
-	  "schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"x","required":true,"type":"long"}]}],
-	  "default-spec-id": 0,
-	  "partition-specs": [{"spec-id":0,"fields":[]}],
-	  "last-partition-id": 0,
-	  "default-sort-order-id": 0,
-	  "sort-orders": [{"order-id":0,"fields":[]}],
-	  "current-snapshot-id": 1,
-	  "snapshots": [{"snapshot-id":1,"timestamp-ms":1000,"sequence-number":1,"schema-id":0}],
-	  "snapshot-log": [],
-	  "metadata-log": [],
-	  "statistics": [{"snapshot-id":1,"statistics-path":"s3://bucket/stats/snap1.puffin","file-size-in-bytes":100,"file-footer-size-in-bytes":10,"blob-metadata":[]}],
-	  "partition-statistics": [{"snapshot-id":1,"statistics-path":"s3://bucket/stats/snap1-part.puffin","file-size-in-bytes":50}]
-	}`
-	const postMeta = `{
-	  "format-version": 2,
-	  "table-uuid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-	  "location": "s3://bucket/table",
-	  "last-sequence-number": 1,
-	  "last-updated-ms": 2000,
-	  "last-column-id": 1,
-	  "current-schema-id": 0,
-	  "schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"x","required":true,"type":"long"}]}],
-	  "default-spec-id": 0,
-	  "partition-specs": [{"spec-id":0,"fields":[]}],
-	  "last-partition-id": 0,
-	  "default-sort-order-id": 0,
-	  "sort-orders": [{"order-id":0,"fields":[]}],
-	  "snapshot-log": [],
-	  "metadata-log": []
-	}`
+	preMeta := buildMetaJSON(metaJSONOpts{
+		snapshots:           `{"snapshot-id":1,"timestamp-ms":1000}`,
+		statistics:          `{"snapshot-id":1,"statistics-path":"s3://bucket/stats/snap1.puffin","file-size-in-bytes":100,"file-footer-size-in-bytes":10,"blob-metadata":[]}`,
+		partitionStatistics: `{"snapshot-id":1,"statistics-path":"s3://bucket/stats/snap1-part.puffin","file-size-in-bytes":50}`,
+	})
+	postMeta := buildMetaJSON(metaJSONOpts{})
 
 	pre, err := ParseMetadataString(preMeta)
 	require.NoError(t, err)
 	post, err := ParseMetadataString(postMeta)
 	require.NoError(t, err)
 
-	// Pass *trackingIO to createTestTransaction — Go converts it to iceio.IO implicitly,
 	tio := newTrackingIO()
 	tio.files["s3://bucket/stats/snap1.puffin"] = []byte("puffin")
 	tio.files["s3://bucket/stats/snap1-part.puffin"] = []byte("puffin")
 
-	txn := createTestTransaction(t, tio, iceberg.NewPartitionSpec())
-	fsF := txn.tbl.fsF
+	fsF := testFSF(tio)
 	preTable := New(Identifier{"ns", "tbl"}, pre, "metadata.json", fsF, nil)
 	postTable := New(Identifier{"ns", "tbl"}, post, "metadata.json", fsF, nil)
 
@@ -107,63 +172,18 @@ func TestRemoveSnapshotsPostCommitPreservesStatisticsOfSurvivingSnapshots(t *tes
 	// pre:  snapshots 1 and 2, statistics for both.
 	// post: snapshot 1 expired, snapshot 2 kept with its statistics still present.
 	// PostCommit must delete only snap1's statistics files; snap2's must survive.
-	const preMeta = `{
-	  "format-version": 2,
-	  "table-uuid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-	  "location": "s3://bucket/table",
-	  "last-sequence-number": 2,
-	  "last-updated-ms": 1000,
-	  "last-column-id": 1,
-	  "current-schema-id": 0,
-	  "schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"x","required":true,"type":"long"}]}],
-	  "default-spec-id": 0,
-	  "partition-specs": [{"spec-id":0,"fields":[]}],
-	  "last-partition-id": 0,
-	  "default-sort-order-id": 0,
-	  "sort-orders": [{"order-id":0,"fields":[]}],
-	  "current-snapshot-id": 2,
-	  "snapshots": [
-	    {"snapshot-id":1,"timestamp-ms":1000,"sequence-number":1,"schema-id":0},
-	    {"snapshot-id":2,"timestamp-ms":2000,"sequence-number":2,"schema-id":0}
-	  ],
-	  "snapshot-log": [],
-	  "metadata-log": [],
-	  "statistics": [
-	    {"snapshot-id":1,"statistics-path":"s3://bucket/stats/snap1.puffin","file-size-in-bytes":100,"file-footer-size-in-bytes":10,"blob-metadata":[]},
-	    {"snapshot-id":2,"statistics-path":"s3://bucket/stats/snap2.puffin","file-size-in-bytes":100,"file-footer-size-in-bytes":10,"blob-metadata":[]}
-	  ],
-	  "partition-statistics": [
-	    {"snapshot-id":1,"statistics-path":"s3://bucket/stats/snap1-part.puffin","file-size-in-bytes":50},
-	    {"snapshot-id":2,"statistics-path":"s3://bucket/stats/snap2-part.puffin","file-size-in-bytes":50}
-	  ]
-	}`
-	const postMeta = `{
-	  "format-version": 2,
-	  "table-uuid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-	  "location": "s3://bucket/table",
-	  "last-sequence-number": 2,
-	  "last-updated-ms": 3000,
-	  "last-column-id": 1,
-	  "current-schema-id": 0,
-	  "schemas": [{"type":"struct","schema-id":0,"fields":[{"id":1,"name":"x","required":true,"type":"long"}]}],
-	  "default-spec-id": 0,
-	  "partition-specs": [{"spec-id":0,"fields":[]}],
-	  "last-partition-id": 0,
-	  "default-sort-order-id": 0,
-	  "sort-orders": [{"order-id":0,"fields":[]}],
-	  "current-snapshot-id": 2,
-	  "snapshots": [
-	    {"snapshot-id":2,"timestamp-ms":2000,"sequence-number":2,"schema-id":0}
-	  ],
-	  "snapshot-log": [],
-	  "metadata-log": [],
-	  "statistics": [
-	    {"snapshot-id":2,"statistics-path":"s3://bucket/stats/snap2.puffin","file-size-in-bytes":100,"file-footer-size-in-bytes":10,"blob-metadata":[]}
-	  ],
-	  "partition-statistics": [
-	    {"snapshot-id":2,"statistics-path":"s3://bucket/stats/snap2-part.puffin","file-size-in-bytes":50}
-	  ]
-	}`
+	preMeta := buildMetaJSON(metaJSONOpts{
+		snapshots: `{"snapshot-id":1,"timestamp-ms":1000},{"snapshot-id":2,"timestamp-ms":2000}`,
+		statistics: `{"snapshot-id":1,"statistics-path":"s3://bucket/stats/snap1.puffin","file-size-in-bytes":100,"file-footer-size-in-bytes":10,"blob-metadata":[]},` +
+			`{"snapshot-id":2,"statistics-path":"s3://bucket/stats/snap2.puffin","file-size-in-bytes":100,"file-footer-size-in-bytes":10,"blob-metadata":[]}`,
+		partitionStatistics: `{"snapshot-id":1,"statistics-path":"s3://bucket/stats/snap1-part.puffin","file-size-in-bytes":50},` +
+			`{"snapshot-id":2,"statistics-path":"s3://bucket/stats/snap2-part.puffin","file-size-in-bytes":50}`,
+	})
+	postMeta := buildMetaJSON(metaJSONOpts{
+		snapshots:           `{"snapshot-id":2,"timestamp-ms":2000}`,
+		statistics:          `{"snapshot-id":2,"statistics-path":"s3://bucket/stats/snap2.puffin","file-size-in-bytes":100,"file-footer-size-in-bytes":10,"blob-metadata":[]}`,
+		partitionStatistics: `{"snapshot-id":2,"statistics-path":"s3://bucket/stats/snap2-part.puffin","file-size-in-bytes":50}`,
+	})
 
 	pre, err := ParseMetadataString(preMeta)
 	require.NoError(t, err)
@@ -176,8 +196,7 @@ func TestRemoveSnapshotsPostCommitPreservesStatisticsOfSurvivingSnapshots(t *tes
 	tio.files["s3://bucket/stats/snap2.puffin"] = []byte("puffin")
 	tio.files["s3://bucket/stats/snap2-part.puffin"] = []byte("puffin")
 
-	txn := createTestTransaction(t, tio, iceberg.NewPartitionSpec())
-	fsF := txn.tbl.fsF
+	fsF := testFSF(tio)
 	preTable := New(Identifier{"ns", "tbl"}, pre, "metadata.json", fsF, nil)
 	postTable := New(Identifier{"ns", "tbl"}, post, "metadata.json", fsF, nil)
 
@@ -192,6 +211,111 @@ func TestRemoveSnapshotsPostCommitPreservesStatisticsOfSurvivingSnapshots(t *tes
 	// snap2's statistics must survive
 	assert.Contains(t, tio.files, "s3://bucket/stats/snap2.puffin")
 	assert.Contains(t, tio.files, "s3://bucket/stats/snap2-part.puffin")
+}
+
+func TestRemoveSnapshotsPostCommitSharedManifestRetained(t *testing.T) {
+	// Manifest M is referenced by both an expired snapshot (1) and a
+	// retained snapshot (2). PostCommit must keep M and its data file
+	// because a retained snapshot still references them; only snap1's
+	// manifest list should be deleted.
+	const (
+		dataPath      = "s3://bucket/data/file-1.parquet"
+		manifestPath  = "s3://bucket/meta/manifest-shared.avro"
+		manifestList1 = "s3://bucket/meta/snap-1.avro"
+		manifestList2 = "s3://bucket/meta/snap-2.avro"
+	)
+
+	tio := newTrackingIO()
+	mf := writeManifest(t, tio, 1, 1, manifestPath, dataPath)
+	writeManifestList(t, tio, 1, manifestList1, []iceberg.ManifestFile{mf})
+	writeManifestList(t, tio, 2, manifestList2, []iceberg.ManifestFile{mf})
+	tio.files[dataPath] = []byte("data")
+
+	preMeta := buildMetaJSON(metaJSONOpts{
+		snapshots: fmt.Sprintf(
+			`{"snapshot-id":1,"timestamp-ms":1000,"manifest-list":%q},`+
+				`{"snapshot-id":2,"timestamp-ms":2000,"manifest-list":%q}`,
+			manifestList1, manifestList2),
+	})
+	postMeta := buildMetaJSON(metaJSONOpts{
+		snapshots: fmt.Sprintf(`{"snapshot-id":2,"timestamp-ms":2000,"manifest-list":%q}`, manifestList2),
+	})
+
+	pre, err := ParseMetadataString(preMeta)
+	require.NoError(t, err)
+	post, err := ParseMetadataString(postMeta)
+	require.NoError(t, err)
+
+	fsF := testFSF(tio)
+	preTable := New(Identifier{"ns", "tbl"}, pre, "metadata.json", fsF, nil)
+	postTable := New(Identifier{"ns", "tbl"}, post, "metadata.json", fsF, nil)
+
+	update := NewRemoveSnapshotsUpdate([]int64{1}, true)
+	err = update.PostCommit(context.Background(), preTable, postTable)
+	require.NoError(t, err)
+
+	// snap1's manifest list must be deleted.
+	assert.NotContains(t, tio.files, manifestList1)
+
+	// The shared manifest, its data file, and the retained snapshot's
+	// manifest list must all survive because snap2 still references them.
+	assert.Contains(t, tio.files, manifestPath)
+	assert.Contains(t, tio.files, dataPath)
+	assert.Contains(t, tio.files, manifestList2)
+}
+
+func TestRemoveSnapshotsPostCommitSharedManifestExpiredOnce(t *testing.T) {
+	// Manifest M is referenced by two expired snapshots (1 and 2) and no
+	// retained snapshot. PostCommit must delete M and its data file, and
+	// must open M exactly once across the two expired snapshots — the
+	// dedup invariant the PR is built on. Open count on the shared
+	// manifest is the perf signal: a regression that drops the dedup
+	// would open it twice.
+	const (
+		dataPath      = "s3://bucket/data/file-1.parquet"
+		manifestPath  = "s3://bucket/meta/manifest-shared.avro"
+		manifestList1 = "s3://bucket/meta/snap-1.avro"
+		manifestList2 = "s3://bucket/meta/snap-2.avro"
+	)
+
+	tio := newTrackedOpensIO()
+	mf := writeManifest(t, tio.trackingIO, 1, 1, manifestPath, dataPath)
+	writeManifestList(t, tio.trackingIO, 1, manifestList1, []iceberg.ManifestFile{mf})
+	writeManifestList(t, tio.trackingIO, 2, manifestList2, []iceberg.ManifestFile{mf})
+	tio.files[dataPath] = []byte("data")
+
+	preMeta := buildMetaJSON(metaJSONOpts{
+		snapshots: fmt.Sprintf(
+			`{"snapshot-id":1,"timestamp-ms":1000,"manifest-list":%q},`+
+				`{"snapshot-id":2,"timestamp-ms":2000,"manifest-list":%q}`,
+			manifestList1, manifestList2),
+	})
+	postMeta := buildMetaJSON(metaJSONOpts{})
+
+	pre, err := ParseMetadataString(preMeta)
+	require.NoError(t, err)
+	post, err := ParseMetadataString(postMeta)
+	require.NoError(t, err)
+
+	fsF := testFSF(tio)
+	preTable := New(Identifier{"ns", "tbl"}, pre, "metadata.json", fsF, nil)
+	postTable := New(Identifier{"ns", "tbl"}, post, "metadata.json", fsF, nil)
+
+	update := NewRemoveSnapshotsUpdate([]int64{1, 2}, true)
+	err = update.PostCommit(context.Background(), preTable, postTable)
+	require.NoError(t, err)
+
+	// Both manifest lists, the shared manifest, and its data file must
+	// all be deleted.
+	assert.NotContains(t, tio.files, manifestList1)
+	assert.NotContains(t, tio.files, manifestList2)
+	assert.NotContains(t, tio.files, manifestPath)
+	assert.NotContains(t, tio.files, dataPath)
+
+	// The shared manifest must be opened exactly once: snap1's pass
+	// records it in visitedManifests, snap2's pass must skip it.
+	assert.Equal(t, 1, tio.openCount[manifestPath],
+		"shared manifest must be read only once across expired snapshots")
 }
 
 func TestUnmarshalUpdates(t *testing.T) {
