@@ -52,11 +52,13 @@ func newTrackingCallsIO() *trackingCallsIO {
 
 func (c *trackingCallsIO) Open(name string) (iceio.File, error) {
 	c.openCount[name]++
+
 	return c.trackingIO.Open(name)
 }
 
 func (c *trackingCallsIO) Remove(name string) error {
 	c.removeCount[name]++
+
 	return c.trackingIO.Remove(name)
 }
 
