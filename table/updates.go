@@ -506,19 +506,21 @@ func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table,
 		}
 	}
 
-	// Manifest paths kept alive by retained snapshots, plus their
-	// loaded manifest-file slices so the live-data-file pass below
-	// doesn't re-download each manifest list.
+	// Preload retained manifest lists once so the live-data-file pass below can walk them without re-fetching.
+	retainedSnapshots := postTable.Metadata().Snapshots()
 	retainedManifests := make(map[string]struct{})
-	retainedSnapshotManifests := make(map[int64][]iceberg.ManifestFile)
-	for _, snap := range postTable.Metadata().Snapshots() {
+	retainedSnapshotManifests := make([]iceberg.ManifestFile, 0, len(retainedSnapshots))
+	for _, snap := range retainedSnapshots {
 		mans, err := snap.Manifests(prefs)
 		if err != nil {
 			return err
 		}
-		retainedSnapshotManifests[snap.SnapshotID] = mans
 		for _, man := range mans {
-			retainedManifests[man.FilePath()] = struct{}{}
+			manPath := man.FilePath()
+			if _, ok := retainedManifests[manPath]; !ok {
+				retainedManifests[manPath] = struct{}{}
+				retainedSnapshotManifests = append(retainedSnapshotManifests, man)
+			}
 		}
 	}
 
@@ -530,7 +532,7 @@ func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table,
 	for _, snapId := range u.SnapshotIDs {
 		snap := preTable.SnapshotByID(snapId)
 		if snap == nil {
-			return errors.New("missing snapshot")
+			return fmt.Errorf("missing snapshot %d", snapId)
 		}
 
 		mans, err := snap.Manifests(prefs)
@@ -561,17 +563,9 @@ func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table,
 	}
 
 	// Keep files still referenced (non-DELETED) by retained manifests,
-	// including data files carried forward as EXISTING by manifest
-	// merges. Each retained manifest is walked at most once.
-	walkedRetained := make(map[string]struct{}, len(retainedManifests))
-	for _, mans := range retainedSnapshotManifests {
-		for _, man := range mans {
-			manPath := man.FilePath()
-			if _, ok := walkedRetained[manPath]; ok {
-				continue
-			}
-			walkedRetained[manPath] = struct{}{}
-
+	// including data files carried forward as EXISTING by manifest merges.
+	if len(filesToDelete) > 0 {
+		for _, man := range retainedSnapshotManifests {
 			for entry, err := range man.Entries(prefs, false) {
 				if err != nil {
 					return err
