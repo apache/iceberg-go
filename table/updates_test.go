@@ -35,22 +35,29 @@ func testFSF(io iceio.IO) FSysF {
 	return func(context.Context) (iceio.IO, error) { return io, nil }
 }
 
-// trackedOpensIO wraps trackingIO to count Open calls per path.
-type trackedOpensIO struct {
+// trackingCallsIO wraps trackingIO to count Open and Remove calls per path.
+type trackingCallsIO struct {
 	*trackingIO
-	openCount map[string]int
+	openCount   map[string]int
+	removeCount map[string]int
 }
 
-func newTrackedOpensIO() *trackedOpensIO {
-	return &trackedOpensIO{
-		trackingIO: newTrackingIO(),
-		openCount:  make(map[string]int),
+func newTrackingCallsIO() *trackingCallsIO {
+	return &trackingCallsIO{
+		trackingIO:  newTrackingIO(),
+		openCount:   make(map[string]int),
+		removeCount: make(map[string]int),
 	}
 }
 
-func (c *trackedOpensIO) Open(name string) (iceio.File, error) {
+func (c *trackingCallsIO) Open(name string) (iceio.File, error) {
 	c.openCount[name]++
 	return c.trackingIO.Open(name)
+}
+
+func (c *trackingCallsIO) Remove(name string) error {
+	c.removeCount[name]++
+	return c.trackingIO.Remove(name)
 }
 
 // writeManifest writes a v2 data manifest with a single ADDED
@@ -278,7 +285,7 @@ func TestRemoveSnapshotsPostCommitSharedManifestExpiredOnce(t *testing.T) {
 		manifestList2 = "s3://bucket/meta/snap-2.avro"
 	)
 
-	tio := newTrackedOpensIO()
+	tio := newTrackingCallsIO()
 	mf := writeManifest(t, tio.trackingIO, 1, 1, manifestPath, dataPath)
 	writeManifestList(t, tio.trackingIO, 1, manifestList1, []iceberg.ManifestFile{mf})
 	writeManifestList(t, tio.trackingIO, 2, manifestList2, []iceberg.ManifestFile{mf})
@@ -316,6 +323,12 @@ func TestRemoveSnapshotsPostCommitSharedManifestExpiredOnce(t *testing.T) {
 	// records it in visitedManifests, snap2's pass must skip it.
 	assert.Equal(t, 1, tio.openCount[manifestPath],
 		"shared manifest must be read only once across expired snapshots")
+
+	// Each file must be deleted exactly once.
+	assert.Equal(t, 1, tio.removeCount[manifestPath],
+		"shared manifest must be deleted exactly once")
+	assert.Equal(t, 1, tio.removeCount[dataPath],
+		"data file must be deleted exactly once")
 }
 
 func TestUnmarshalUpdates(t *testing.T) {
