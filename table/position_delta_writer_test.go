@@ -63,10 +63,21 @@ func TestPositionDeltaWriter_ReinsertPreservesRowID(t *testing.T) {
 	w, err := table.NewPositionDeltaWriter(tbl)
 	require.NoError(t, err)
 
+	// Use _row_id values far outside any plausible synthesized first_row_id
+	// range so the assertions actually prove preservation: if the writer
+	// silently dropped _row_id and the reader fell back to synthesizing IDs
+	// from the new file's first_row_id, the survivors would *not* land on
+	// these high values. Picking small IDs (e.g. 0, 1) would be
+	// indistinguishable from a synthesized 0/1 in the rewritten file.
+	const (
+		preservedRowID1 = int64(1) << 40
+		preservedRowID2 = preservedRowID1 + 1
+	)
+
 	reinsertBatch := buildReinsertBatch(mem,
 		[]int64{1, 2},
 		[]string{"a_updated", "b"},
-		[]int64{0, 1},
+		[]int64{preservedRowID1, preservedRowID2},
 	)
 	defer reinsertBatch.Release()
 	require.NoError(t, w.Reinsert(reinsertBatch))
@@ -113,11 +124,13 @@ func TestPositionDeltaWriter_ReinsertPreservesRowID(t *testing.T) {
 	require.Contains(t, rowsByID, int64(2))
 	require.Contains(t, rowsByID, int64(99))
 
-	assert.Equal(t, int64(0), rowsByID[1], "reinserted id=1 must preserve original _row_id=0")
-	assert.Equal(t, int64(1), rowsByID[2], "reinserted id=2 must preserve original _row_id=1")
-	// The fresh row's _row_id must collide with no preserved survivor's id.
-	assert.NotEqual(t, int64(0), rowsByID[99])
-	assert.NotEqual(t, int64(1), rowsByID[99])
+	assert.Equal(t, preservedRowID1, rowsByID[1], "reinserted id=1 must preserve original _row_id")
+	assert.Equal(t, preservedRowID2, rowsByID[2], "reinserted id=2 must preserve original _row_id")
+	// The fresh row's synthesized _row_id must not collide with the preserved
+	// survivors. With first_row_id allocated from a fresh assign-counter, it
+	// will sit in a low range and the high preserved values are unreachable.
+	assert.NotEqual(t, preservedRowID1, rowsByID[99])
+	assert.NotEqual(t, preservedRowID2, rowsByID[99])
 }
 
 // buildReinsertBatch creates an Arrow record batch with id, data, and _row_id

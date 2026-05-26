@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"strconv"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -46,6 +47,13 @@ import (
 // data_sequence_number, which after the rewrite is the new snapshot's sequence
 // number — the value the spec requires.
 //
+// Memory model: Reinsert and Insert retain each batch and accumulate them in
+// memory until [PositionDeltaWriter.Close] flushes everything to Parquet in a
+// single WriteRecords pass. Peak memory therefore scales with the total Arrow
+// payload of all staged batches, which is appropriate for engine-driver UPDATE
+// flows but not for full-partition compaction. A streaming variant that takes
+// the iterator at construction time is left for the position-delete writer PR.
+//
 // Usage:
 //
 //	w, err := table.NewPositionDeltaWriter(tbl)
@@ -55,6 +63,11 @@ import (
 type PositionDeltaWriter struct {
 	tbl       *Table
 	writeUUID uuid.UUID
+	// userOpts are caller-supplied [WriteRecordOption]s threaded through to
+	// the underlying [WriteRecords] call. WithWriteUUID and
+	// WithPreserveRowLineage are owned by this writer and are appended after
+	// userOpts so they take precedence.
+	userOpts []WriteRecordOption
 
 	// reinsertBatches hold records with explicit _row_id values (preserving lineage).
 	reinsertBatches []arrow.RecordBatch
@@ -66,7 +79,13 @@ type PositionDeltaWriter struct {
 
 // NewPositionDeltaWriter creates a writer for the position-delta MoR update
 // pattern on the given table. The table must be format version 3 or higher.
-func NewPositionDeltaWriter(tbl *Table) (*PositionDeltaWriter, error) {
+//
+// Caller-supplied opts are forwarded to the underlying [WriteRecords] call at
+// [PositionDeltaWriter.Close]. WithWriteUUID and WithPreserveRowLineage are
+// reserved by this writer and will override any caller-supplied values for
+// those two options; everything else (target file size, worker count,
+// clustered write) flows through.
+func NewPositionDeltaWriter(tbl *Table, opts ...WriteRecordOption) (*PositionDeltaWriter, error) {
 	if tbl.metadata.Version() < 3 {
 		return nil, fmt.Errorf("%w: PositionDeltaWriter requires format version >= 3, got %d",
 			iceberg.ErrInvalidArgument, tbl.metadata.Version())
@@ -75,6 +94,7 @@ func NewPositionDeltaWriter(tbl *Table) (*PositionDeltaWriter, error) {
 	return &PositionDeltaWriter{
 		tbl:       tbl,
 		writeUUID: uuid.New(),
+		userOpts:  opts,
 	}, nil
 }
 
@@ -161,10 +181,10 @@ func (w *PositionDeltaWriter) Close(ctx context.Context) ([]iceberg.DataFile, er
 		return nil, fmt.Errorf("PositionDeltaWriter: build arrow schema: %w", err)
 	}
 
-	writeOpts := []WriteRecordOption{
+	writeOpts := append(append([]WriteRecordOption{}, w.userOpts...),
 		WithPreserveRowLineage(fileSchema),
 		WithWriteUUID(w.writeUUID),
-	}
+	)
 
 	records := w.buildUnifiedIterator()
 
@@ -182,6 +202,12 @@ func (w *PositionDeltaWriter) Close(ctx context.Context) ([]iceberg.DataFile, er
 // buildUnifiedIterator merges reinsert and insert batches into a single
 // iterator. Reinsert batches already have _row_id; insert batches get a null
 // _row_id column appended.
+//
+// Releases are owned by [WriteRecords]'s releasing wrapper: each batch yielded
+// here will be released exactly once by the consumer, on both the success and
+// the early-stop paths. Releasing again here would drive Arrow's refcount
+// below zero (undefined behavior — happy-path tests don't catch it; any IO
+// error mid-write would silently corrupt the allocator).
 func (w *PositionDeltaWriter) buildUnifiedIterator() iter.Seq2[arrow.RecordBatch, error] {
 	return func(yield func(arrow.RecordBatch, error) bool) {
 		alloc := memory.NewGoAllocator()
@@ -189,8 +215,6 @@ func (w *PositionDeltaWriter) buildUnifiedIterator() iter.Seq2[arrow.RecordBatch
 		for _, batch := range w.reinsertBatches {
 			batch.Retain()
 			if !yield(batch, nil) {
-				batch.Release()
-
 				return
 			}
 		}
@@ -203,8 +227,6 @@ func (w *PositionDeltaWriter) buildUnifiedIterator() iter.Seq2[arrow.RecordBatch
 				return
 			}
 			if !yield(enriched, nil) {
-				enriched.Release()
-
 				return
 			}
 		}
@@ -229,12 +251,22 @@ func appendNullRowIDColumn(alloc memory.Allocator, batch arrow.RecordBatch) (arr
 	nullCol := bldr.NewArray()
 	defer nullCol.Release()
 
-	fields := append(batch.Schema().Fields(), arrow.Field{
+	rowIDField := arrow.Field{
 		Name:     iceberg.RowIDColumnName,
 		Type:     arrow.PrimitiveTypes.Int64,
 		Nullable: true,
-	})
-	cols := append(batch.Columns(), nullCol)
+		Metadata: arrow.MetadataFrom(map[string]string{
+			ArrowParquetFieldIDKey: strconv.Itoa(iceberg.RowIDFieldID),
+		}),
+	}
+
+	// Three-index slice the source field/column slices: append into a
+	// shared backing array would silently mutate the source batch's
+	// internal arrs/fields when len < cap.
+	srcFields := batch.Schema().Fields()
+	srcCols := batch.Columns()
+	fields := append(srcFields[:len(srcFields):len(srcFields)], rowIDField)
+	cols := append(srcCols[:len(srcCols):len(srcCols)], nullCol)
 	newSchema := arrow.NewSchema(fields, nil)
 
 	return array.NewRecordBatch(newSchema, cols, nrows), nil
