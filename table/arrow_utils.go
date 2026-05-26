@@ -40,6 +40,7 @@ import (
 	"github.com/apache/iceberg-go/config"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table/dv"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/geoarrow/geoarrow-go"
 	"github.com/google/uuid"
@@ -1664,10 +1665,18 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 		}
 	}
 
+	// V3+ unpartitioned tables write deletion vectors via Puffin, matching the
+	// Java reference implementation, which hardcodes DV for v3 and does not
+	// expose a property to opt out. DV+partitioned support is deferred to a
+	// follow-up; partitioned v3 writes fall through to the Parquet writer
+	// below and emit the deprecation warning.
+	if latestMetadata.Version() >= 3 && latestMetadata.PartitionSpec().IsUnpartitioned() {
+		return positionDeleteRecordsToDataFilesDV(ctx, rootLocation, args)
+	}
+
 	// V3 and later prefer deletion vectors over Parquet position-delete files;
-	// warn so users migrate when DV-write support lands. The check is `>= 3`
-	// rather than `== 3` so the warning carries forward to v4+ without churn.
-	// See apache/iceberg#12048.
+	// warn so users migrate. The check is `>= 3` rather than `== 3` so the
+	// warning carries forward to v4+ without churn. See apache/iceberg#12048.
 	if latestMetadata.Version() >= 3 {
 		slog.Warn("writing Parquet position-delete file on a v3 table; prefer deletion vectors",
 			"table_location", latestMetadata.Location())
@@ -1721,4 +1730,50 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 	workers := config.EnvConfig.MaxWorkers
 
 	return partitionWriter.Write(ctx, workers)
+}
+
+func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string, args recordWritingArgs) iter.Seq2[iceberg.DataFile, error] {
+	return func(yield func(iceberg.DataFile, error) bool) {
+		writer := dv.NewDVWriter(args.fs)
+
+		hasEntries := false
+		for batch, err := range args.itr {
+			if err != nil {
+				yield(nil, err)
+
+				return
+			}
+
+			filePaths := batch.Column(0).(*array.String)
+			positions := batch.Column(1).(*array.Int64)
+
+			for i := range batch.NumRows() {
+				writer.Add(filePaths.Value(int(i)), []int64{positions.Value(int(i))})
+				hasEntries = true
+			}
+		}
+
+		if !hasEntries {
+			return
+		}
+
+		if args.writeUUID == nil {
+			u := uuid.Must(uuid.NewRandom())
+			args.writeUUID = &u
+		}
+		location := rootLocation + "/data/" + fmt.Sprintf("00000-0-%s-deletes.puffin", *args.writeUUID)
+
+		dataFiles, err := writer.Flush(ctx, location)
+		if err != nil {
+			yield(nil, err)
+
+			return
+		}
+
+		for _, df := range dataFiles {
+			if !yield(df, nil) {
+				return
+			}
+		}
+	}
 }

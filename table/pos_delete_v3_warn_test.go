@@ -123,28 +123,13 @@ func runPositionDeleteWrite(t *testing.T, mb *MetadataBuilder, partitions map[st
 }
 
 // TestPositionDeleteV3Warning verifies the writer emits a single deduped
-// slog.Warn naming the table when position-deletes are written on a v3 table,
-// and stays silent on v2 where Parquet position-deletes are still canonical.
-//
-// The warning fires once at writer entry, before partition fanout, so a
-// partitioned write logs once total — not once per partition. The partitioned
-// subtest locks that contract: the issue specifically called out "deduped",
-// and a future change that moved the warning into per-partition writers would
-// silently regress this property without it.
+// slog.Warn naming the table when v3 position-deletes fall through to the
+// Parquet writer (currently: any partitioned v3 write, since DV+partitioned
+// support is deferred), and stays silent on v2 where Parquet position-
+// deletes are still canonical and on v3 unpartitioned writes that take the
+// DV path.
 func TestPositionDeleteV3Warning(t *testing.T) {
 	emptyItr := func(yield func(arrow.RecordBatch, error) bool) {}
-
-	t.Run("v3 unpartitioned warns once with table location", func(t *testing.T) {
-		out := captureSlog(t, func() {
-			runPositionDeleteWrite(t, newPositionDeleteUnpartitionedMetadata(t, 3), nil, emptyItr)
-		})
-		assert.Equal(t, 1, countWarnRecords(out),
-			"expected exactly one WARN record, got: %s", out)
-		assert.Contains(t, out, "Parquet position-delete")
-		assert.Contains(t, out, "deletion vectors")
-		assert.Contains(t, out, "table_location=file:///warn-test",
-			"warning should name the table location")
-	})
 
 	t.Run("v2 does not warn", func(t *testing.T) {
 		out := captureSlog(t, func() {
@@ -154,14 +139,15 @@ func TestPositionDeleteV3Warning(t *testing.T) {
 			"v2 position-delete writes should not warn, got: %s", out)
 	})
 
-	t.Run("v3 partitioned write warns exactly once across multiple partitions", func(t *testing.T) {
-		// Two batches each routed to a distinct partition. The fanout
-		// writer's processBatch reads only the first row's file_path, so a
-		// per-partition regression of the warn (e.g. moved into processBatch
-		// or per-rolling-writer init) would emit 2 records here. One batch
-		// with two rows would not exercise the fanout — it would all go to
-		// one partition. Two batches force two processBatch invocations
-		// targeting two different partition contexts.
+	t.Run("v3 unpartitioned uses DV path without warning", func(t *testing.T) {
+		out := captureSlog(t, func() {
+			runPositionDeleteWrite(t, newPositionDeleteUnpartitionedMetadata(t, 3), nil, emptyItr)
+		})
+		assert.Equal(t, 0, countWarnRecords(out),
+			"v3 unpartitioned writes should route through DV without warning, got: %s", out)
+	})
+
+	t.Run("v3 partitioned write warns exactly once with table location", func(t *testing.T) {
 		mb := newPositionDeletePartitionedMetadata(t, 3)
 		partitions := map[string]partitionContext{
 			"file://namespace/age_bucket=0/test.parquet": {
@@ -189,5 +175,9 @@ func TestPositionDeleteV3Warning(t *testing.T) {
 		})
 		assert.Equal(t, 1, countWarnRecords(out),
 			"expected exactly one WARN record across multiple partitions, got: %s", out)
+		assert.Contains(t, out, "Parquet position-delete")
+		assert.Contains(t, out, "deletion vectors")
+		assert.Contains(t, out, "table_location=file:///warn-test-partitioned",
+			"warning should name the table location")
 	})
 }
