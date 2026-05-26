@@ -45,8 +45,8 @@ func TestPositionDeltaWriter_BuildUnifiedIterator_AbortNoDoubleRelease(t *testin
 		// abortAfter yields are consumed and released by the test, then the
 		// loop breaks — triggering the producer's !yield branch on whichever
 		// phase the next yield would have come from.
-		abortAfter  int
-		abortPhase  string
+		abortAfter int
+		abortPhase string
 	}{
 		{name: "abort_on_reinsert", numReinserts: 2, numInserts: 1, abortAfter: 1, abortPhase: "reinsert"},
 		{name: "abort_on_insert", numReinserts: 0, numInserts: 2, abortAfter: 1, abortPhase: "insert"},
