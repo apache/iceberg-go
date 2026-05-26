@@ -166,7 +166,7 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 		}
 
 		var miOpts *azidentity.ManagedIdentityCredentialOptions
-		if clientID := props[io.ADLSManagedIdentityClientID]; clientID != "" {
+		if clientID := props[io.ADLSClientID]; clientID != "" {
 			miOpts = &azidentity.ManagedIdentityCredentialOptions{
 				ID: azidentity.ClientID(clientID),
 			}

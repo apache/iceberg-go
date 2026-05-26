@@ -43,14 +43,14 @@ const (
 
 // Constants for Azure configuration options
 const (
-	ADLSSasTokenPrefix          = "adls.sas-token."
-	ADLSConnectionStringPrefix  = "adls.connection-string."
-	ADLSSharedKeyAccountName    = "adls.auth.shared-key.account.name"
-	ADLSSharedKeyAccountKey     = "adls.auth.shared-key.account.key"
-	ADLSEndpoint                = "adls.endpoint"
-	ADLSProtocol                = "adls.protocol"
-	ADLSManagedIdentityEnabled  = "adls.auth.managed-identity.enabled"
-	ADLSManagedIdentityClientID = "adls.auth.managed-identity.client-id"
+	ADLSSasTokenPrefix         = "adls.sas-token."
+	ADLSConnectionStringPrefix = "adls.connection-string."
+	ADLSSharedKeyAccountName   = "adls.auth.shared-key.account.name"
+	ADLSSharedKeyAccountKey    = "adls.auth.shared-key.account.key"
+	ADLSClientID               = "adls.client-id"
+	ADLSEndpoint               = "adls.endpoint"
+	ADLSProtocol               = "adls.protocol"
+	ADLSManagedIdentityEnabled = "adls.auth.managed-identity.enabled"
 
 	// Not in use yet
 	// ADLSReadBlockSize          = "adls.read.block-size-bytes"
