@@ -22,11 +22,11 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"maps"
-	"slices"
 	"sort"
 
 	"github.com/RoaringBitmap/roaring/v2"
+	"github.com/apache/arrow-go/v18/arrow/bitutil"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go/puffin"
 )
 
@@ -76,7 +76,11 @@ func (b *RoaringPositionBitmap) Contains(pos uint64) bool {
 	return bm.Contains(low)
 }
 
-// IsEmpty returns true if no positions are set.
+// IsEmpty returns true if no positions are set. Returns true both for the
+// no-bucket case and for the (currently impossible-via-public-API) case
+// where a bucket exists but its inner roaring bitmap has zero cardinality
+// — the latter only matters if a future Remove-style method ever lets a
+// bucket drop to empty without being deleted from the map.
 func (b *RoaringPositionBitmap) IsEmpty() bool {
 	return b.Cardinality() == 0
 }
@@ -160,7 +164,76 @@ func DeserializeRoaringPositionBitmap(data []byte) (*RoaringPositionBitmap, erro
 	return b, nil
 }
 
-// sortedKeys returns the bitmap keys in ascending order.
-func (b *RoaringPositionBitmap) sortedKeys() []uint32 {
-	return slices.Sorted(maps.Keys(b.bitmaps))
+// KeepMaskBytes returns a bit-packed []byte of length ⌈length/8⌉ where bit i
+// (LSB-first within a byte) is 1 iff position i is NOT in the bitmap. The
+// layout matches Arrow Boolean buffer convention so callers can wrap the
+// result via memory.NewBufferBytes / array.NewBoolean without re-packing.
+//
+// length bounds the range of positions the caller cares about — typically the
+// data file's row count. Bits past length-1 in the final byte are cleared.
+// Positions in the bitmap that fall outside [0, length) are ignored, so a
+// caller can safely pass a length smaller than the bitmap's max position
+// (e.g. when the file row count is below a stale upper bound).
+//
+// Bucket-key arithmetic is exact: each 32-bit bucket covers exactly 2^32
+// positions, so per-bucket bit offsets are 8-byte-aligned and the writer can
+// pack inverted dense words straight in. bitutil.BitmapWordWriter handles
+// host-endianness internally (PutNextWord LE-packs regardless of platform),
+// so the helper is portable on any GOARCH.
+func (b *RoaringPositionBitmap) KeepMaskBytes(length int64) []byte {
+	if length <= 0 {
+		return nil
+	}
+	out := make([]byte, bitutil.BytesForBits(length))
+	// Pre-fill ALL bits to 1 (keep) before any bucket write. BitmapWordWriter
+	// does full-word stores (not read-modify-write), so the un-deleted bits
+	// in each 8-byte word land at 1 only because this initialization
+	// happened. A future refactor that moves bucket writes before the
+	// memory.Set, or removes it entirely, would silently corrupt the mask.
+	memory.Set(out, 0xFF)
+
+	for key, bm := range b.bitmaps {
+		bucketBitBase := int64(key) << 32
+		if bucketBitBase >= length {
+			continue
+		}
+		dense := bm.ToDense()
+		if len(dense) == 0 {
+			continue
+		}
+		// Cap the bucket's bit range to what fits in `length`.
+		bucketBits := int64(len(dense)) * 64
+		if bucketBitBase+bucketBits > length {
+			bucketBits = length - bucketBitBase
+		}
+		// bucketBitBase = key << 32 is always 8-byte-aligned, so the
+		// BitmapWordWriter runs with offset=0 internally. The trailing-byte
+		// loop below relies on that alignment — PutNextTrailingByte's
+		// validBits=8 path is byte-aligned only when offset == 0.
+		wr := bitutil.NewBitmapWordWriter(out, int(bucketBitBase), int(bucketBits))
+		full := int(bucketBits / 64)
+		for i := 0; i < full; i++ {
+			wr.PutNextWord(^dense[i])
+		}
+		if rem := int(bucketBits & 63); rem > 0 {
+			last := ^dense[full]
+			for rem > 0 {
+				valid := 8
+				if rem < 8 {
+					valid = rem
+				}
+				wr.PutNextTrailingByte(byte(last), valid)
+				last >>= 8
+				rem -= valid
+			}
+		}
+	}
+	// Pad bits past length-1 in the trailing byte must be 0; the writer can
+	// paint into them when bucketBits stops mid-byte, so the clear has to
+	// happen after all bucket writes complete.
+	if pad := int64(len(out))*8 - length; pad > 0 {
+		bitutil.SetBitsTo(out, length, pad, false)
+	}
+
+	return out
 }

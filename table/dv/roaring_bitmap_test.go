@@ -22,6 +22,7 @@ import (
 	"encoding/binary"
 	"testing"
 
+	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -147,9 +148,161 @@ func TestDeserializeRoaringBitmapTruncatedAfterKey(t *testing.T) {
 	assert.ErrorContains(t, err, "read bitmap for key 0")
 }
 
-// Why: Set, Contains, Cardinality, and gap handling are the core in-memory behaviors of this type.
-// Condition: set positions across keys 0, 1, and 3, leaving key 2 absent.
-// Assertion: cardinality counts all set positions, expected positions are present, and unset positions in the same key, a gap key, and a far key are absent.
+// TestKeepMaskBytes pins KeepMaskBytes' contract: a bit-packed []byte where
+// bit i is 1 iff position i is NOT in the bitmap, sized to ⌈length/8⌉ bytes,
+// matching Arrow Boolean buffer layout so it can be wrapped without re-packing.
+func TestKeepMaskBytes(t *testing.T) {
+	// bitAt returns the LSB-first bit at position i in mask.
+	bitAt := func(mask []byte, i int64) bool {
+		return mask[i>>3]&(1<<uint(i&7)) != 0
+	}
+
+	t.Run("empty bitmap: all bits kept", func(t *testing.T) {
+		bm := NewRoaringPositionBitmap()
+		mask := bm.KeepMaskBytes(10)
+		require.Len(t, mask, 2) // ⌈10/8⌉ = 2
+		for i := int64(0); i < 10; i++ {
+			assert.True(t, bitAt(mask, i), "bit %d should be kept", i)
+		}
+		// Bits 10..15 in the trailing byte must be cleared so callers
+		// inspecting raw bytes don't see phantom keep bits past length.
+		assert.Equal(t, byte(0b00000011), mask[1])
+	})
+
+	t.Run("single bucket: deleted bits cleared, others kept", func(t *testing.T) {
+		bm := NewRoaringPositionBitmap()
+		bm.Set(0)
+		bm.Set(3)
+		bm.Set(7)
+		bm.Set(9)
+
+		mask := bm.KeepMaskBytes(16)
+		require.Len(t, mask, 2)
+		for _, deleted := range []int64{0, 3, 7, 9} {
+			assert.False(t, bitAt(mask, deleted), "bit %d should be deleted", deleted)
+		}
+		for _, kept := range []int64{1, 2, 4, 5, 6, 8, 10, 11, 12, 13, 14, 15} {
+			assert.True(t, bitAt(mask, kept), "bit %d should be kept", kept)
+		}
+	})
+
+	t.Run("length zero returns nil", func(t *testing.T) {
+		bm := NewRoaringPositionBitmap()
+		bm.Set(0)
+		assert.Nil(t, bm.KeepMaskBytes(0))
+	})
+
+	t.Run("length shorter than bitmap: extra positions ignored", func(t *testing.T) {
+		// Bitmap holds a delete at position 50, but the caller asks for only
+		// the first 32 positions. The mask must not extend to position 50,
+		// and the in-range bits must all be kept.
+		bm := NewRoaringPositionBitmap()
+		bm.Set(50)
+
+		mask := bm.KeepMaskBytes(32)
+		require.Len(t, mask, 4)
+		for i := int64(0); i < 32; i++ {
+			assert.True(t, bitAt(mask, i), "bit %d should be kept", i)
+		}
+	})
+
+	t.Run("length not byte-aligned: trailing bits cleared", func(t *testing.T) {
+		// Length 13 → 2 bytes, bits 13..15 in byte 1 must be 0 even when no
+		// deletes touch them. Pins the trailing-byte mask logic.
+		bm := NewRoaringPositionBitmap()
+		mask := bm.KeepMaskBytes(13)
+		require.Len(t, mask, 2)
+		assert.Equal(t, byte(0xFF), mask[0])
+		assert.Equal(t, byte(0b00011111), mask[1])
+	})
+
+	t.Run("multi-bucket: deletes from a non-zero bucket are out of range and ignored", func(t *testing.T) {
+		// Spec parity case: a DV bitmap with positions in bucket 1
+		// (position >= 2^32) cannot fit in a realistic caller-supplied
+		// length, since allocating ⌈length/8⌉ bytes for length >= 2^32
+		// would require >= 512 MiB. KeepMaskBytes must correctly walk every
+		// bucket and skip those whose byte-offset already exceeds the mask
+		// length — without this guard the bucket-1 ToDense allocation would
+		// run anyway and (worse) try to index past out[len(out)-1].
+		bm := NewRoaringPositionBitmap()
+		bm.Set(5)              // bucket 0
+		bm.Set(1<<32 | 7)      // bucket 1 — out of range for length 64
+		bm.Set(3<<32 | 999999) // bucket 3 — out of range for length 64
+
+		mask := bm.KeepMaskBytes(64)
+		require.Len(t, mask, 8)
+		assert.False(t, bitAt(mask, 5))
+		for i := int64(0); i < 64; i++ {
+			if i == 5 {
+				continue
+			}
+			assert.True(t, bitAt(mask, i), "bit %d should be kept", i)
+		}
+	})
+
+	t.Run("multi-bucket within range: bucket-1 deletes land at correct offset", func(t *testing.T) {
+		// Construct the bitmaps map manually with a synthetic small-key
+		// "bucket 1" so the test can verify cross-bucket bit placement
+		// without allocating 512 MiB. The internal layout is exactly the
+		// same as Set would produce for a real position >= 2^32; this just
+		// dodges the high-position allocation. Verifies that the per-bucket
+		// bucketBitBase = key << 32 (bit offset 2^32, i.e. byte offset 2^29)
+		// places bucket-1 deletes at byte 2^29, not at byte 0.
+		const length int64 = (1 << 32) + 16 // just past the bucket-0/1 boundary
+		bm := &RoaringPositionBitmap{bitmaps: make(map[uint32]*roaring.Bitmap)}
+		bm.Set(5) // bucket 0
+		// Directly install a bucket-1 entry with low-bits 7 set, which is
+		// what Set((1<<32)+7) would produce — but avoids the 512 MiB mask.
+		bucket1 := roaring.New()
+		bucket1.Add(7)
+		bm.bitmaps[1] = bucket1
+
+		mask := bm.KeepMaskBytes(length)
+		require.Len(t, mask, int((length+7)/8))
+		assert.False(t, bitAt(mask, 5), "bucket-0 delete at position 5 must land in byte 0")
+		assert.False(t, bitAt(mask, (1<<32)+7), "bucket-1 delete at position 2^32+7 must land at byte 2^29")
+		// Adjacent positions in each bucket should be kept.
+		assert.True(t, bitAt(mask, 4))
+		assert.True(t, bitAt(mask, 6))
+		assert.True(t, bitAt(mask, (1<<32)+6))
+		assert.True(t, bitAt(mask, (1<<32)+8))
+	})
+
+	// Pins PutNextTrailingByte's per-byte loop in KeepMaskBytes: when a
+	// bucket's bit range stops mid-word (bucketBits & 63 != 0), the loop
+	// must place delete bits inside the trailing partial word. Without
+	// coverage, an off-by-one in `last >>= 8` or `valid = min(8, rem)`
+	// would silently keep a deleted row visible.
+	for _, tc := range []struct {
+		name       string
+		length     int64
+		deletePos  uint64
+		expectBits []int64 // additional positions that must be kept
+	}{
+		// rem = length % 64. For each rem in {1, 7, 8, 63}, place a
+		// deletion at the LAST in-range bit so the trailing loop must
+		// reach validBits = rem on its final iteration.
+		{name: "rem=1: delete at length-1", length: 65, deletePos: 64, expectBits: []int64{0, 32, 63}},
+		{name: "rem=7: delete at length-1", length: 71, deletePos: 70, expectBits: []int64{0, 63, 64, 69}},
+		{name: "rem=8: delete at length-1", length: 72, deletePos: 71, expectBits: []int64{0, 64, 70}},
+		{name: "rem=63: delete at length-1", length: 127, deletePos: 126, expectBits: []int64{0, 64, 125}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bm := NewRoaringPositionBitmap()
+			bm.Set(tc.deletePos)
+
+			mask := bm.KeepMaskBytes(tc.length)
+			require.Len(t, mask, int((tc.length+7)/8))
+			assert.False(t, bitAt(mask, int64(tc.deletePos)),
+				"position %d (length-1) must be deleted", tc.deletePos)
+			for _, kept := range tc.expectBits {
+				assert.True(t, bitAt(mask, kept),
+					"position %d must be kept", kept)
+			}
+		})
+	}
+}
+
 func TestRoaringBitmapSetContainsAndCardinality(t *testing.T) {
 	bm := NewRoaringPositionBitmap()
 
