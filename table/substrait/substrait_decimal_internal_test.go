@@ -91,3 +91,40 @@ func TestToDecimalLiteralFallbackWhenTypIsNotDecimal(t *testing.T) {
 	assert.Equal(t, int32(9), dt.Precision)
 	assert.Equal(t, int32(4), dt.Scale)
 }
+
+// TestToDecimalLiteralRealisticValues exercises values whose MarshalBinary
+// output is shorter than 16 bytes. expr.NewLiteral rejects non-16-byte input
+// and DecimalLiteral.MarshalBinary uses the minimum byte representation, so
+// before the BE-min → LE-16 conversion these cases returned nil and panicked
+// in the caller. ValueString uses substrait-go's own LE decoder; matching it
+// against the expected string confirms the bytes are spec-conformant
+// little-endian two's complement.
+func TestToDecimalLiteralRealisticValues(t *testing.T) {
+	cases := []struct {
+		name     string
+		val      decimal128.Num
+		scale    int
+		expected string
+	}{
+		{"positive small 1.0000", decimal128.New(0, 10000), 4, "1.0000"},
+		{"positive 12345.67", decimal128.New(0, 1234567), 2, "12345.67"},
+		{"zero", decimal128.New(0, 0), 4, "0.0000"},
+		{"negative -1.0000", decimal128.FromI64(-10000), 4, "-1.0000"},
+		{"negative -12345.67", decimal128.FromI64(-1234567), 2, "-12345.67"},
+		// 16-byte negative: MarshalBinary returns exactly 16 bytes, so the
+		// 0xff sign-extend fill must be fully overwritten by the copy.
+		{"negative -2^120", decimal128.New(-(1 << 56), 0), 0, "-1329227995784915872903807060280344576"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fieldType := iceberg.DecimalTypeOf(18, tc.scale)
+			lit := iceberg.DecimalLiteral{Val: tc.val, Scale: tc.scale}
+
+			got := toDecimalLiteral(fieldType, lit)
+			require.NotNil(t, got, "toDecimalLiteral must not return nil for sub-16-byte values")
+
+			assert.Equal(t, tc.expected, got.ValueString())
+		})
+	}
+}
