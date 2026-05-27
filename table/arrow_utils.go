@@ -1732,6 +1732,9 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 	return partitionWriter.Write(ctx, workers)
 }
 
+// TODO(#1135 PR2): take a partitionContextByFilePath map[string]partitionContext
+// and look up each data file's spec + partitionData per Add, removing the
+// hardcoded UnpartitionedSpec/nil below and the IsUnpartitioned gate upstream.
 func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string, args recordWritingArgs) iter.Seq2[iceberg.DataFile, error] {
 	return func(yield func(iceberg.DataFile, error) bool) {
 		writer := dv.NewDVWriter(args.fs)
@@ -1748,7 +1751,13 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 			positions := batch.Column(1).(*array.Int64)
 
 			for i := range batch.NumRows() {
-				writer.Add(filePaths.Value(int(i)), []int64{positions.Value(int(i))})
+				// PR (1) of #1135 wires DVWriter for partitioned tables. This
+				// call site is currently reachable only for unpartitioned v3
+				// (the gate above hard-routes partitioned writes elsewhere),
+				// so we pass UnpartitionedSpec + nil partition data. PR (2)
+				// drops the gate and threads partitionContext through here.
+				writer.Add(filePaths.Value(int(i)), []int64{positions.Value(int(i))},
+					*iceberg.UnpartitionedSpec, nil)
 				hasEntries = true
 			}
 		}

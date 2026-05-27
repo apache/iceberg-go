@@ -103,7 +103,7 @@ func TestDVWriterSingleDataFile(t *testing.T) {
 	w := NewDVWriter(fs)
 
 	dataPath := "s3://bucket/data/file-001.parquet"
-	w.Add(dataPath, []int64{1, 3, 5, 7, 9})
+	w.Add(dataPath, []int64{1, 3, 5, 7, 9}, *iceberg.UnpartitionedSpec, nil)
 
 	dataFiles, err := w.Flush(context.Background(), "mem://test/dv.puffin")
 	require.NoError(t, err)
@@ -118,6 +118,10 @@ func TestDVWriterSingleDataFile(t *testing.T) {
 	assert.Equal(t, dataPath, *df.ReferencedDataFile())
 	assert.NotNil(t, df.ContentOffset())
 	assert.NotNil(t, df.ContentSizeInBytes())
+	assert.Empty(t, df.Partition(),
+		"unpartitioned DV manifest entry carries no partition record")
+	assert.Equal(t, int32(0), df.SpecID(),
+		"unpartitioned spec has id 0")
 
 	verifyDVReadBack(t, fs, df)
 }
@@ -128,8 +132,8 @@ func TestDVWriterMultipleDataFiles(t *testing.T) {
 
 	path1 := "s3://bucket/data/file-001.parquet"
 	path2 := "s3://bucket/data/file-002.parquet"
-	w.Add(path1, []int64{0, 10, 20})
-	w.Add(path2, []int64{5, 15, 25, 35})
+	w.Add(path1, []int64{0, 10, 20}, *iceberg.UnpartitionedSpec, nil)
+	w.Add(path2, []int64{5, 15, 25, 35}, *iceberg.UnpartitionedSpec, nil)
 
 	dataFiles, err := w.Flush(context.Background(), "mem://test/multi-dv.puffin")
 	require.NoError(t, err)
@@ -152,8 +156,8 @@ func TestDVWriterDeduplicatesPositions(t *testing.T) {
 	w := NewDVWriter(fs)
 
 	dataPath := "s3://bucket/data/file-001.parquet"
-	w.Add(dataPath, []int64{1, 3, 5})
-	w.Add(dataPath, []int64{3, 5, 7})
+	w.Add(dataPath, []int64{1, 3, 5}, *iceberg.UnpartitionedSpec, nil)
+	w.Add(dataPath, []int64{3, 5, 7}, *iceberg.UnpartitionedSpec, nil)
 
 	dataFiles, err := w.Flush(context.Background(), "mem://test/dedup.puffin")
 	require.NoError(t, err)
@@ -168,13 +172,219 @@ func TestDVWriterResetsAfterFlush(t *testing.T) {
 	fs := newTestFS()
 	w := NewDVWriter(fs)
 
-	w.Add("s3://bucket/data/file-001.parquet", []int64{1, 2, 3})
+	w.Add("s3://bucket/data/file-001.parquet", []int64{1, 2, 3},
+		*iceberg.UnpartitionedSpec, nil)
 	_, err := w.Flush(context.Background(), "mem://test/first.puffin")
 	require.NoError(t, err)
 
 	dataFiles, err := w.Flush(context.Background(), "mem://test/second.puffin")
 	require.NoError(t, err)
 	assert.Nil(t, dataFiles)
+}
+
+// TestDVWriterPartitionedSingleFile verifies that a DV manifest entry for a
+// data file in a partitioned table carries the data file's partition record
+// and spec id. The partition propagation is the load-bearing piece for
+// partitioned-DV write support (#1135 PR 2 lifts the unpartitioned-only gate
+// in arrow_utils.go and starts threading real spec+partition through here).
+func TestDVWriterPartitionedSingleFile(t *testing.T) {
+	fs := newTestFS()
+	w := NewDVWriter(fs)
+
+	spec := iceberg.NewPartitionSpecID(7, iceberg.PartitionField{
+		SourceIDs: []int{2},
+		FieldID:   1000,
+		Name:      "tenant_id",
+		Transform: iceberg.IdentityTransform{},
+	})
+	partition := map[int]any{1000: int32(42)}
+	dataPath := "s3://bucket/tenant=42/file-001.parquet"
+	w.Add(dataPath, []int64{1, 2, 3}, spec, partition)
+
+	dataFiles, err := w.Flush(context.Background(), "mem://test/partitioned.puffin")
+	require.NoError(t, err)
+	require.Len(t, dataFiles, 1)
+
+	df := dataFiles[0]
+	assert.Equal(t, iceberg.EntryContentPosDeletes, df.ContentType(),
+		"DV manifest entries must declare position-delete content type")
+	assert.Equal(t, int32(7), df.SpecID(),
+		"DV manifest entry must carry the data file's spec id")
+	assert.Equal(t, map[int]any{1000: int32(42)}, df.Partition(),
+		"DV manifest entry must carry the data file's partition record")
+	assert.Equal(t, dataPath, *df.ReferencedDataFile())
+
+	verifyDVReadBack(t, fs, df)
+}
+
+// TestDVWriterPartitionedMultipleFiles pins per-data-file partition storage:
+// each data file path gets its own DataFile with the partition values from
+// its Add. Two data files in two distinct partitions land in the same Puffin
+// file but produce two manifest entries with distinct partition records and
+// the same spec id.
+func TestDVWriterPartitionedMultipleFiles(t *testing.T) {
+	fs := newTestFS()
+	w := NewDVWriter(fs)
+
+	spec := iceberg.NewPartitionSpecID(3, iceberg.PartitionField{
+		SourceIDs: []int{2},
+		FieldID:   1000,
+		Name:      "region",
+		Transform: iceberg.IdentityTransform{},
+	})
+	pathEU := "s3://bucket/region=EU/file-eu.parquet"
+	pathUS := "s3://bucket/region=US/file-us.parquet"
+
+	w.Add(pathEU, []int64{1, 2}, spec, map[int]any{1000: "EU"})
+	w.Add(pathUS, []int64{3, 4, 5}, spec, map[int]any{1000: "US"})
+
+	dataFiles, err := w.Flush(context.Background(), "mem://test/multi-partition.puffin")
+	require.NoError(t, err)
+	require.Len(t, dataFiles, 2)
+
+	byRef := make(map[string]iceberg.DataFile, len(dataFiles))
+	for _, df := range dataFiles {
+		require.NotNil(t, df.ReferencedDataFile())
+		byRef[*df.ReferencedDataFile()] = df
+	}
+
+	require.Contains(t, byRef, pathEU)
+	require.Contains(t, byRef, pathUS)
+
+	assert.Equal(t, map[int]any{1000: "EU"}, byRef[pathEU].Partition(),
+		"EU file's DV manifest entry must carry the EU partition record")
+	assert.Equal(t, map[int]any{1000: "US"}, byRef[pathUS].Partition(),
+		"US file's DV manifest entry must carry the US partition record")
+	assert.Equal(t, int32(3), byRef[pathEU].SpecID())
+	assert.Equal(t, int32(3), byRef[pathUS].SpecID())
+	assert.Equal(t, iceberg.EntryContentPosDeletes, byRef[pathEU].ContentType())
+	assert.Equal(t, iceberg.EntryContentPosDeletes, byRef[pathUS].ContentType())
+}
+
+// TestDVWriterPartitionCapturedOnFirstAdd pins the capture invariant: Add
+// captures spec and partition on first call for a given data file path;
+// subsequent Adds contribute positions only. Callers must not pass conflicting
+// partition data on follow-up Adds (one data file has one partition by
+// construction), but if they do, the first-Add capture is the one that lands
+// on the output DataFile. Matches Java's BaseDVFileWriter.deletesByPath
+// computeIfAbsent semantics.
+//
+// Two subtests cover the two dimensions of the captured pair so a future
+// implementation that stops capturing one of them on first Add is detected.
+func TestDVWriterPartitionCapturedOnFirstAdd(t *testing.T) {
+	spec0 := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
+		SourceIDs: []int{2},
+		FieldID:   1000,
+		Name:      "region",
+		Transform: iceberg.IdentityTransform{},
+	})
+	spec5 := iceberg.NewPartitionSpecID(5, iceberg.PartitionField{
+		SourceIDs: []int{2},
+		FieldID:   1000,
+		Name:      "region",
+		Transform: iceberg.IdentityTransform{},
+	})
+	dataPath := "s3://bucket/region=EU/file.parquet"
+
+	t.Run("partitionData captured on first Add", func(t *testing.T) {
+		fs := newTestFS()
+		w := NewDVWriter(fs)
+
+		w.Add(dataPath, []int64{1}, spec0, map[int]any{1000: "EU"})
+		// Second Add carries a different partition value; capture is unaffected.
+		w.Add(dataPath, []int64{2}, spec0, map[int]any{1000: "US"})
+
+		dataFiles, err := w.Flush(context.Background(), "mem://test/capture-partition.puffin")
+		require.NoError(t, err)
+		require.Len(t, dataFiles, 1)
+		assert.Equal(t, map[int]any{1000: "EU"}, dataFiles[0].Partition())
+	})
+
+	t.Run("spec captured on first Add", func(t *testing.T) {
+		fs := newTestFS()
+		w := NewDVWriter(fs)
+
+		w.Add(dataPath, []int64{1}, spec0, map[int]any{1000: "EU"})
+		// Second Add carries a different spec id; capture is unaffected.
+		w.Add(dataPath, []int64{2}, spec5, map[int]any{1000: "EU"})
+
+		dataFiles, err := w.Flush(context.Background(), "mem://test/capture-spec.puffin")
+		require.NoError(t, err)
+		require.Len(t, dataFiles, 1)
+		assert.Equal(t, int32(0), dataFiles[0].SpecID(),
+			"spec captured on first Add; later Adds with a different spec id "+
+				"do not overwrite the entry's spec")
+	})
+}
+
+// TestDVWriterAddDefensiveCopies pins that Add takes a defensive copy of the
+// partition data map at capture, so a caller that mutates the map between Add
+// and Flush does not silently corrupt the entry. Matches Java's
+// StructLikeUtil.copy(partition) in BaseDVFileWriter.Deletes.
+func TestDVWriterAddDefensiveCopies(t *testing.T) {
+	fs := newTestFS()
+	w := NewDVWriter(fs)
+
+	spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
+		SourceIDs: []int{2},
+		FieldID:   1000,
+		Name:      "region",
+		Transform: iceberg.IdentityTransform{},
+	})
+	partition := map[int]any{1000: "EU"}
+
+	w.Add("s3://bucket/region=EU/file.parquet", []int64{1}, spec, partition)
+	// Mutate the caller's map after Add. A reference-storing writer would
+	// produce a DataFile carrying "MUTATED" on Flush; a defensive-copy
+	// implementation keeps the original captured value.
+	partition[1000] = "MUTATED"
+
+	dataFiles, err := w.Flush(context.Background(), "mem://test/defensive-copy.puffin")
+	require.NoError(t, err)
+	require.Len(t, dataFiles, 1)
+	assert.Equal(t, map[int]any{1000: "EU"}, dataFiles[0].Partition(),
+		"Add must defensively copy partitionData so post-Add caller mutations "+
+			"do not corrupt the captured entry")
+}
+
+// TestDVWriterFlushMixedSpecIDs covers the partition-evolution case: two data
+// files in one Flush carry different spec IDs (because their referenced data
+// files were written under different specs). Today the writer accepts this
+// silently and emits one DataFile per entry with each carrying its own spec
+// id. Manifest assembly downstream is expected to group by spec id; this
+// test pins that the writer does not flatten or drop a spec id at this layer.
+func TestDVWriterFlushMixedSpecIDs(t *testing.T) {
+	fs := newTestFS()
+	w := NewDVWriter(fs)
+
+	specOld := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
+		SourceIDs: []int{2}, FieldID: 1000, Name: "region",
+		Transform: iceberg.IdentityTransform{},
+	})
+	specNew := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+		SourceIDs: []int{2}, FieldID: 1001, Name: "region_bucket",
+		Transform: iceberg.IdentityTransform{},
+	})
+
+	pathOld := "s3://bucket/region=EU/file.parquet"
+	pathNew := "s3://bucket/region_bucket=0/file.parquet"
+
+	w.Add(pathOld, []int64{1}, specOld, map[int]any{1000: "EU"})
+	w.Add(pathNew, []int64{2}, specNew, map[int]any{1001: int32(0)})
+
+	dataFiles, err := w.Flush(context.Background(), "mem://test/mixed-spec.puffin")
+	require.NoError(t, err)
+	require.Len(t, dataFiles, 2)
+
+	byRef := make(map[string]iceberg.DataFile, len(dataFiles))
+	for _, df := range dataFiles {
+		byRef[*df.ReferencedDataFile()] = df
+	}
+
+	assert.Equal(t, int32(0), byRef[pathOld].SpecID(),
+		"each DV DataFile must carry the spec id captured at its Add — "+
+			"flushing a mixed-spec batch must not flatten spec ids")
+	assert.Equal(t, int32(1), byRef[pathNew].SpecID())
 }
 
 func verifyDVReadBack(t *testing.T, fs iceio.IO, df iceberg.DataFile) {

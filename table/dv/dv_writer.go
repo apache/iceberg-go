@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"strconv"
 
 	"github.com/apache/iceberg-go"
@@ -28,12 +29,22 @@ import (
 	"github.com/apache/iceberg-go/puffin"
 )
 
+// dvEntry holds the per-data-file state a DV manifest entry needs. Each entry
+// is keyed by the referenced data file path; the spec and partition record
+// come from the data file itself and are propagated unchanged onto the output
+// DV manifest entry — matching Java's BaseDVFileWriter.Deletes shape.
+type dvEntry struct {
+	bitmap        *RoaringPositionBitmap
+	spec          iceberg.PartitionSpec
+	partitionData map[int]any
+}
+
 // DVWriter accumulates deletion positions per data file and flushes them as
 // a single Puffin file containing one deletion-vector-v1 blob per data file.
 // The returned DataFile entries are ready for RowDelta.AddDeletes().
 type DVWriter struct {
 	fs      iceio.WriteFileIO
-	entries map[string]*RoaringPositionBitmap
+	entries map[string]*dvEntry
 	order   []string
 }
 
@@ -41,31 +52,71 @@ type DVWriter struct {
 func NewDVWriter(fs iceio.WriteFileIO) *DVWriter {
 	return &DVWriter{
 		fs:      fs,
-		entries: make(map[string]*RoaringPositionBitmap),
+		entries: make(map[string]*dvEntry),
 	}
 }
 
-// Add accumulates positions to delete for a given data file.
-// Positions are deduplicated via the underlying roaring bitmap.
-func (w *DVWriter) Add(dataFilePath string, positions []int64) {
-	bm, ok := w.entries[dataFilePath]
+// Add accumulates positions to delete for a given data file. The spec and
+// partitionData are the data file's own partition metadata (from its manifest
+// entry) and are propagated to the output DV manifest entry, so partitioned
+// tables produce DV entries with the correct partition record. Positions are
+// deduplicated via the underlying roaring bitmap.
+//
+// partitionData keys must be partition field IDs (PartitionField.FieldID), not
+// source column IDs. NewDataFileBuilder iterates spec.Fields() and re-keys by
+// field name using these IDs; wrong keys silently produce an empty partition
+// record on the output DataFile.
+//
+// First Add for a given dataFilePath captures spec and partitionData on the
+// entry; later Adds for the same path append positions only and ignore the
+// new spec/partitionData args. This mirrors Java's BaseDVFileWriter, which
+// stores partition metadata via computeIfAbsent on the same key. Callers must
+// not pass conflicting partition values across Adds for the same data file —
+// the writer trusts the first-Add values for the rest of the writer's life.
+func (w *DVWriter) Add(dataFilePath string, positions []int64, spec iceberg.PartitionSpec, partitionData map[int]any) {
+	entry, ok := w.entries[dataFilePath]
 	if !ok {
-		bm = NewRoaringPositionBitmap()
-		w.entries[dataFilePath] = bm
+		// Defensive copies on capture so a caller that mutates or reuses
+		// the spec / partition map between Add and Flush can't silently
+		// corrupt the entry. Mirrors Java's StructLikeUtil.copy(partition)
+		// in BaseDVFileWriter.Deletes. partitionData=nil round-trips as nil
+		// (maps.Clone returns nil on nil input).
+		entry = &dvEntry{
+			bitmap:        NewRoaringPositionBitmap(),
+			spec:          copyPartitionSpec(spec),
+			partitionData: maps.Clone(partitionData),
+		}
+		w.entries[dataFilePath] = entry
 		w.order = append(w.order, dataFilePath)
 	}
 
 	for _, pos := range positions {
-		bm.Set(uint64(pos))
+		entry.bitmap.Set(uint64(pos))
 	}
 }
 
-// Flush writes one Puffin file containing one blob per data file,
-// and returns manifest entries ready for RowDelta.AddDeletes().
+// copyPartitionSpec returns a fresh PartitionSpec that does not alias the
+// caller's slice and map backing arrays. PartitionSpec carries a `fields`
+// slice and a `sourceIdToFields` map; assigning by value shares both. The
+// reconstructed spec calls initialize() internally, building a private
+// sourceIdToFields map.
+func copyPartitionSpec(spec iceberg.PartitionSpec) iceberg.PartitionSpec {
+	fields := make([]iceberg.PartitionField, 0, spec.NumFields())
+	for _, f := range spec.Fields() {
+		fields = append(fields, f)
+	}
+
+	return iceberg.NewPartitionSpecID(spec.ID(), fields...)
+}
+
+// Flush writes one Puffin file containing one blob per data file, and returns
+// manifest entries ready for RowDelta.AddDeletes(). Each output DataFile
+// carries the partition spec and partition record of the data file it
+// references, so partitioned tables get spec-correct manifest entries.
 //
-// The location parameter is the full path (including filename) for the
-// Puffin file to create. The caller is responsible for generating a
-// unique path within the table's metadata directory.
+// The location parameter is the full path (including filename) for the Puffin
+// file to create. The caller is responsible for generating a unique path
+// within the table's metadata directory.
 func (w *DVWriter) Flush(_ context.Context, location string) ([]iceberg.DataFile, error) {
 	if len(w.entries) == 0 {
 		return nil, nil
@@ -80,6 +131,7 @@ func (w *DVWriter) Flush(_ context.Context, location string) ([]iceberg.DataFile
 
 	type blobResult struct {
 		dataFilePath string
+		entry        *dvEntry
 		meta         puffin.BlobMetadata
 		cardinality  int64
 	}
@@ -87,13 +139,13 @@ func (w *DVWriter) Flush(_ context.Context, location string) ([]iceberg.DataFile
 	results := make([]blobResult, 0, len(w.order))
 
 	for _, dataFilePath := range w.order {
-		bm := w.entries[dataFilePath]
-		dvBytes, err := SerializeDV(bm)
+		entry := w.entries[dataFilePath]
+		dvBytes, err := SerializeDV(entry.bitmap)
 		if err != nil {
 			return nil, fmt.Errorf("serialize DV for %s: %w", dataFilePath, err)
 		}
 
-		cardinality := bm.Cardinality()
+		cardinality := entry.bitmap.Cardinality()
 		meta, err := pw.AddBlob(puffin.BlobMetadataInput{
 			Type:           puffin.BlobTypeDeletionVector,
 			SnapshotID:     -1,
@@ -110,6 +162,7 @@ func (w *DVWriter) Flush(_ context.Context, location string) ([]iceberg.DataFile
 
 		results = append(results, blobResult{
 			dataFilePath: dataFilePath,
+			entry:        entry,
 			meta:         meta,
 			cardinality:  cardinality,
 		})
@@ -129,11 +182,12 @@ func (w *DVWriter) Flush(_ context.Context, location string) ([]iceberg.DataFile
 	dataFiles := make([]iceberg.DataFile, 0, len(results))
 	for _, r := range results {
 		builder, err := iceberg.NewDataFileBuilder(
-			iceberg.PartitionSpec{},
+			r.entry.spec,
 			iceberg.EntryContentPosDeletes,
 			location,
 			iceberg.PuffinFile,
-			nil, nil, nil,
+			r.entry.partitionData,
+			nil, nil,
 			r.cardinality,
 			fileSize,
 		)
@@ -150,7 +204,7 @@ func (w *DVWriter) Flush(_ context.Context, location string) ([]iceberg.DataFile
 		dataFiles = append(dataFiles, df)
 	}
 
-	w.entries = make(map[string]*RoaringPositionBitmap)
+	w.entries = make(map[string]*dvEntry)
 	w.order = nil
 
 	return dataFiles, nil
