@@ -19,8 +19,10 @@ package substrait
 
 import (
 	_ "embed"
+	"encoding/binary"
 	"fmt"
 	"strings"
+	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/iceberg-go"
@@ -270,10 +272,22 @@ func toDecimalLiteral(typ iceberg.Type, v iceberg.DecimalLiteral) expr.Literal {
 		precision = dt.Precision()
 	}
 
-	byts, _ := v.MarshalBinary()
+	// decimal128.Num is {lo uint64, hi int64} — its raw in-memory bytes on
+	// LE hosts are already the 16-byte little-endian two's-complement
+	// representation Substrait wants. hostIsLE is a build-tag const, so the
+	// compiler drops the unused branch on every known GOARCH.
+	n := v.Value().Val
+	buf := make([]byte, 16)
+	if hostIsLE {
+		copy(buf, unsafe.Slice((*byte)(unsafe.Pointer(&n)), 16))
+	} else {
+		binary.LittleEndian.PutUint64(buf[:8], n.LowBits())
+		binary.LittleEndian.PutUint64(buf[8:], uint64(n.HighBits()))
+	}
+
 	result, _ := expr.NewLiteral(&types.Decimal{
 		Scale:     int32(v.Scale),
-		Value:     byts,
+		Value:     buf,
 		Precision: int32(precision),
 	}, false)
 
