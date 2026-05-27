@@ -210,6 +210,7 @@ func (t *Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConf
 	g.Go(func() error {
 		var err error
 		referencedFiles, err = t.getReferencedFiles(gctx, fs, cfg.maxConcurrency, true)
+
 		return err
 	})
 
@@ -224,6 +225,7 @@ func (t *Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConf
 				return nil
 			}
 			scannedFiles = append(scannedFiles, scannedFile{path: path, size: info.Size()})
+
 			return nil
 		})
 	})
@@ -387,6 +389,7 @@ func (t *Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurre
 				referenced[e.path] = e.isData
 			}
 			mu.Unlock()
+
 			return nil
 		})
 	}
