@@ -33,7 +33,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"golang.org/x/sync/errgroup"
 )
 
 // PrefixMismatchMode defines how to handle cases where candidate files have different
@@ -164,7 +166,7 @@ type OrphanCleanupResult struct {
 	TotalSizeBytes      int64
 }
 
-func (t Table) DeleteOrphanFiles(ctx context.Context, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
+func (t *Table) DeleteOrphanFiles(ctx context.Context, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := &orphanCleanupConfig{
 		location:           "",             // empty means use table's data location
 		olderThan:          72 * time.Hour, // 3 days ago
@@ -184,7 +186,12 @@ func (t Table) DeleteOrphanFiles(ctx context.Context, opts ...OrphanCleanupOptio
 	return t.executeOrphanCleanup(ctx, cfg)
 }
 
-func (t Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConfig) (OrphanCleanupResult, error) {
+type scannedFile struct {
+	path string
+	size int64
+}
+
+func (t *Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConfig) (OrphanCleanupResult, error) {
 	fs, err := t.fsF(ctx)
 	if err != nil {
 		return OrphanCleanupResult{}, fmt.Errorf("failed to get filesystem: %w", err)
@@ -195,24 +202,60 @@ func (t Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConfi
 		scanLocation = t.metadata.Location()
 	}
 
-	referencedFiles, err := t.getReferencedFiles(fs, true)
-	if err != nil {
-		return OrphanCleanupResult{}, fmt.Errorf("failed to get referenced files: %w", err)
+	// Run the S3 walk and referenced-file collection concurrently.
+	var referencedFiles map[string]bool
+	var scannedFiles []scannedFile
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		var err error
+		referencedFiles, err = t.getReferencedFiles(gctx, fs, cfg.maxConcurrency, true)
+		return err
+	})
+
+	g.Go(func() error {
+		cutoff := time.Now().Add(-cfg.olderThan)
+
+		return walkDirectory(fs, scanLocation, func(path string, info stdfs.FileInfo) error {
+			if gctx.Err() != nil {
+				return gctx.Err()
+			}
+			if info.IsDir() || !info.ModTime().Before(cutoff) {
+				return nil
+			}
+			scannedFiles = append(scannedFiles, scannedFile{path: path, size: info.Size()})
+			return nil
+		})
+	})
+
+	if err = g.Wait(); err != nil {
+		return OrphanCleanupResult{}, err
 	}
 
-	allFiles, totalSize, err := t.scanFiles(fs, scanLocation, cfg)
-	if err != nil {
-		return OrphanCleanupResult{}, fmt.Errorf("failed to scan files: %w", err)
+	// Identify orphans.
+	normalizedRef := make(map[string]string, len(referencedFiles))
+	for refPath := range referencedFiles {
+		normalizedPath := normalizeFilePathWithConfig(refPath, cfg)
+		normalizedRef[normalizedPath] = refPath
+		normalizedRef[refPath] = refPath
 	}
 
-	orphanFiles, err := identifyOrphanFiles(allFiles, referencedFiles, cfg)
-	if err != nil {
-		return OrphanCleanupResult{}, fmt.Errorf("failed to identify orphan files: %w", err)
+	var orphanFiles []string
+	var totalOrphanSize int64
+	for _, f := range scannedFiles {
+		isOrphan, err := isFileOrphan(f.path, referencedFiles, normalizedRef, cfg)
+		if err != nil {
+			return OrphanCleanupResult{}, fmt.Errorf("failed to identify orphan %s: %w", f.path, err)
+		}
+		if isOrphan {
+			orphanFiles = append(orphanFiles, f.path)
+			totalOrphanSize += f.size
+		}
 	}
 
 	result := OrphanCleanupResult{
 		OrphanFileLocations: orphanFiles,
-		TotalSizeBytes:      totalSize,
+		TotalSizeBytes:      totalOrphanSize,
 	}
 
 	if cfg.dryRun {
@@ -232,9 +275,17 @@ func (t Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConfi
 // files, statistics and partition-statistics paths (Puffin, etc.), and all paths reachable
 // from current snapshots (manifest lists, manifests, data files).
 //
+// The collection uses a two-pass approach: first it reads every snapshot's manifest list
+// (small files) to discover the set of unique manifest file paths, then it reads each
+// unique manifest's entries in parallel. Manifests are immutable and shared across
+// snapshots via copy-on-write, so deduplicating avoids redundant I/O that would
+// otherwise grow as O(snapshots × manifests-per-snapshot).
+//
 // If the table has snapshots, fs must not be nil, otherwise an error is returned.
 // All returned paths are normalized using the package-level normalizeFilePath function.
-func (t Table) getReferencedFiles(fs iceio.IO, discardDeleted bool) (map[string]bool, error) {
+// The bool value distinguishes data files (true) from metadata files (false), which
+// is used by PurgeFiles to respect gc.enabled.
+func (t *Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurrency int, discardDeleted bool) (map[string]bool, error) {
 	referenced := make(map[string]bool)
 	metadata := t.metadata
 
@@ -265,6 +316,8 @@ func (t Table) getReferencedFiles(fs iceio.IO, discardDeleted bool) (map[string]
 		return nil, errors.New("fs cannot be nil when table has snapshots")
 	}
 
+	// Pass 1: Read manifest lists (lightweight) to collect unique manifests.
+	uniqueManifests := make(map[string]iceberg.ManifestFile)
 	for _, snapshot := range metadata.Snapshots() {
 		if snapshot.ManifestList != "" {
 			referenced[normalizeFilePath(snapshot.ManifestList)] = false
@@ -276,58 +329,73 @@ func (t Table) getReferencedFiles(fs iceio.IO, discardDeleted bool) (map[string]
 		}
 
 		for _, manifest := range manifestFiles {
-			referenced[normalizeFilePath(manifest.FilePath())] = false
+			path := manifest.FilePath()
+			if _, ok := uniqueManifests[path]; !ok {
+				uniqueManifests[path] = manifest
+				referenced[normalizeFilePath(path)] = false
+			}
+		}
+	}
 
+	if len(uniqueManifests) == 0 {
+		return referenced, nil
+	}
+
+	// Pass 2: Read entries from each unique manifest in parallel.
+	type refEntry struct {
+		path   string
+		isData bool
+	}
+	var mu sync.Mutex
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(max(min(maxConcurrency, len(uniqueManifests)), 1))
+	for _, m := range uniqueManifests {
+		g.Go(func() error {
+			var entries []refEntry
 			// discardDeleted=true: skip DELETED-status entries when
 			// computing the reachable file set. A DELETED entry is
 			// not live in this snapshot and should not pin the file
 			// against orphan cleanup once the snapshot that
 			// originally held it live has been expired.
 			// This matches iceberg-java and pyiceberg behavior.
-			for entry, err := range manifest.Entries(fs, discardDeleted) {
+			for entry, err := range m.Entries(fs, discardDeleted) {
 				if err != nil {
-					return nil, fmt.Errorf("failed to read manifest entries: %w", err)
+					return fmt.Errorf("manifest %s: %w", m.FilePath(), err)
+				}
+				if gctx.Err() != nil {
+					return gctx.Err()
 				}
 				// All files tracked within a manifest (data files, equality deletes, position deletes)
 				// are considered "data files" for the purposes of gc.enabled.
-				referenced[normalizeFilePath(entry.DataFile().FilePath())] = true
+				entries = append(entries, refEntry{
+					path:   normalizeFilePath(entry.DataFile().FilePath()),
+					isData: true,
+				})
 				if ref := entry.DataFile().ReferencedDataFile(); ref != nil {
 					// This is a deletion vector entry referencing a data file.
 					// Its FilePath() is the deletion vector (.dv) file itself (added above).
 					// We must also mark the referenced data file as referenced.
-					referenced[normalizeFilePath(*ref)] = true
+					entries = append(entries, refEntry{
+						path:   normalizeFilePath(*ref),
+						isData: true,
+					})
 				}
 			}
-		}
+
+			mu.Lock()
+			for _, e := range entries {
+				referenced[e.path] = e.isData
+			}
+			mu.Unlock()
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return nil, fmt.Errorf("failed to read manifest entries: %w", err)
 	}
 
 	return referenced, nil
-}
-
-func (t Table) scanFiles(fs iceio.IO, location string, cfg *orphanCleanupConfig) ([]string, int64, error) {
-	var allFiles []string
-	var totalSize int64
-
-	err := walkDirectory(fs, location, func(path string, info stdfs.FileInfo) error {
-		if info.IsDir() {
-			return nil
-		}
-
-		cutOffTime := time.Now().Add(-cfg.olderThan)
-		if !info.ModTime().Before(cutOffTime) {
-			return nil // Skip files that are newer than or equal to the threshold
-		}
-
-		allFiles = append(allFiles, path)
-		totalSize += info.Size()
-
-		return nil
-	})
-	if err != nil {
-		return nil, 0, err
-	}
-
-	return allFiles, totalSize, nil
 }
 
 func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {
@@ -411,35 +479,13 @@ func makeFileWalkFunc(fn func(path string, info stdfs.FileInfo) error, pathTrans
 	}
 }
 
-func identifyOrphanFiles(allFiles []string, referencedFiles map[string]bool, cfg *orphanCleanupConfig) ([]string, error) {
-	normalizedReferencedFiles := make(map[string]string)
-	for refPath := range referencedFiles {
-		normalizedPath := normalizeFilePathWithConfig(refPath, cfg)
-		normalizedReferencedFiles[normalizedPath] = refPath
-		// Also include the original path for direct lookup
-		normalizedReferencedFiles[refPath] = refPath
-	}
-
-	var orphans []string
-
-	for _, file := range allFiles {
-		isOrphan, err := isFileOrphan(file, referencedFiles, normalizedReferencedFiles, cfg)
-		if err != nil {
-			return nil, fmt.Errorf("failed to determine if file %s is orphan: %w", file, err)
-		}
-
-		if isOrphan {
-			orphans = append(orphans, file)
-		}
-	}
-
-	return orphans, nil
-}
-
 func isFileOrphan(file string, referencedFiles map[string]bool, normalizedReferencedFiles map[string]string, cfg *orphanCleanupConfig) (bool, error) {
 	normalizedFile := normalizeFilePathWithConfig(file, cfg)
 
-	if referencedFiles[file] || referencedFiles[normalizedFile] {
+	if _, ok := referencedFiles[file]; ok {
+		return false, nil
+	}
+	if _, ok := referencedFiles[normalizedFile]; ok {
 		return false, nil
 	}
 
@@ -808,7 +854,7 @@ func (t Table) PurgeFiles(ctx context.Context) error {
 	}
 
 	// 2. Union in manifest-referenced and metadata files (which might be outside the table location)
-	referencedFiles, refErr := t.getReferencedFiles(fs, false)
+	referencedFiles, refErr := t.getReferencedFiles(ctx, fs, runtime.GOMAXPROCS(0), false)
 	if refErr != nil {
 		return fmt.Errorf("failed to get referenced files: %w", refErr)
 	}
