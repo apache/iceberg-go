@@ -159,11 +159,23 @@ func collectDVScanRows(t *testing.T, scan *Scan, tasks []FileScanTask) []int64 {
 // Empirically verified to catch a regression: temporarily replacing the
 // filterByDeletionVector body with a passthrough makes cases 2/3/4/6 fail
 // with surviving-row mismatches. See PR description for details.
+// newDVScanTestEnv allocates a LocalFS-backed scratch dir and a *Table pointed
+// at it. Hoisted out of the subtests so each case states its DV-specific
+// fixture (data file path, bitmap, expected survivors) and nothing else.
+// Returns LocalFS by concrete type so callers can pass it to both the
+// read-side (Table.Scan -> iceio.IO) and write-side (writeIntParquetWithFieldID
+// -> iceio.WriteFileIO) helpers without a re-type-assert.
+func newDVScanTestEnv(t *testing.T) (iceio.LocalFS, string, *Table) {
+	t.Helper()
+	fs := iceio.LocalFS{}
+	tmp := t.TempDir()
+
+	return fs, tmp, buildDVScanTestTable(t, fs, tmp)
+}
+
 func TestDVScanEndToEnd(t *testing.T) {
 	t.Run("no DV — all rows survive", func(t *testing.T) {
-		fs := iceio.LocalFS{}
-		tmp := t.TempDir()
-		tbl := buildDVScanTestTable(t, fs, tmp)
+		fs, tmp, tbl := newDVScanTestEnv(t)
 
 		df := writeIntParquetWithFieldID(t, fs, filepath.Join(tmp, "data-1.parquet"), 0, 10)
 
@@ -173,9 +185,7 @@ func TestDVScanEndToEnd(t *testing.T) {
 	})
 
 	t.Run("DV deletes interior positions {1,3,5,7,9}", func(t *testing.T) {
-		fs := iceio.LocalFS{}
-		tmp := t.TempDir()
-		tbl := buildDVScanTestTable(t, fs, tmp)
+		fs, tmp, tbl := newDVScanTestEnv(t)
 
 		dataPath := filepath.Join(tmp, "data-2.parquet")
 		df := writeIntParquetWithFieldID(t, fs, dataPath, 0, 10)
@@ -191,9 +201,7 @@ func TestDVScanEndToEnd(t *testing.T) {
 	})
 
 	t.Run("DV deletes boundary positions {0,4}", func(t *testing.T) {
-		fs := iceio.LocalFS{}
-		tmp := t.TempDir()
-		tbl := buildDVScanTestTable(t, fs, tmp)
+		fs, tmp, tbl := newDVScanTestEnv(t)
 
 		dataPath := filepath.Join(tmp, "data-3.parquet")
 		df := writeIntParquetWithFieldID(t, fs, dataPath, 0, 5)
@@ -209,9 +217,7 @@ func TestDVScanEndToEnd(t *testing.T) {
 	})
 
 	t.Run("DV deletes all rows", func(t *testing.T) {
-		fs := iceio.LocalFS{}
-		tmp := t.TempDir()
-		tbl := buildDVScanTestTable(t, fs, tmp)
+		fs, tmp, tbl := newDVScanTestEnv(t)
 
 		dataPath := filepath.Join(tmp, "data-4.parquet")
 		df := writeIntParquetWithFieldID(t, fs, dataPath, 0, 5)
@@ -226,9 +232,13 @@ func TestDVScanEndToEnd(t *testing.T) {
 	})
 
 	t.Run("empty DV bitmap — all rows survive", func(t *testing.T) {
-		fs := iceio.LocalFS{}
-		tmp := t.TempDir()
-		tbl := buildDVScanTestTable(t, fs, tmp)
+		// The no-op here is delivered by the IsEmpty short-circuit at the
+		// pipeline-assembly site (arrow_scanner.go: filterByDeletionVector
+		// is only appended when `!dvBitmap.IsEmpty()`), not by the filter
+		// itself. This case pins that an empty DV doesn't accidentally skip
+		// the file or trip a divide-by-zero on the keep-mask path — the
+		// in-bitmap filter exercise lives in the other cases.
+		fs, tmp, tbl := newDVScanTestEnv(t)
 
 		dataPath := filepath.Join(tmp, "data-5.parquet")
 		df := writeIntParquetWithFieldID(t, fs, dataPath, 0, 5)
@@ -256,9 +266,7 @@ func TestDVScanEndToEnd(t *testing.T) {
 		//    at positions {1,3,4} = [11,13,14]
 		// Correct sorted aggregate: [0,2,4,11,13,14].
 		// Swapped (A gets {0,2}, B gets {1,3}): [1,3,4,10,12,14] — different.
-		fs := iceio.LocalFS{}
-		tmp := t.TempDir()
-		tbl := buildDVScanTestTable(t, fs, tmp)
+		fs, tmp, tbl := newDVScanTestEnv(t)
 
 		dataPathA := filepath.Join(tmp, "data-6a.parquet")
 		dataPathB := filepath.Join(tmp, "data-6b.parquet")
@@ -290,9 +298,7 @@ func TestDVScanEndToEnd(t *testing.T) {
 		// or affecting present rows. Matches Java's behaviour. If
 		// KeepMaskBytes ever grows an explicit bounds-check that errors on
 		// out-of-range positions, this case is the first place to revisit.
-		fs := iceio.LocalFS{}
-		tmp := t.TempDir()
-		tbl := buildDVScanTestTable(t, fs, tmp)
+		fs, tmp, tbl := newDVScanTestEnv(t)
 
 		dataPath := filepath.Join(tmp, "data-7.parquet")
 		df := writeIntParquetWithFieldID(t, fs, dataPath, 0, 5)
@@ -305,5 +311,27 @@ func TestDVScanEndToEnd(t *testing.T) {
 		}})
 		assert.Equal(t, []int64{0, 1, 2, 3, 4}, got,
 			"out-of-range DV position must not affect present rows")
+	})
+
+	t.Run("DV with mixed in-range + out-of-range positions", func(t *testing.T) {
+		// Combined case: one position that lands within File.Count() and one
+		// past it. The in-range entry must filter its row out of the output;
+		// the out-of-range entry must be silently ignored. Pure-OOR coverage
+		// alone (the case above) can't prove the in-range portion of the
+		// same bitmap is honoured.
+		fs, tmp, tbl := newDVScanTestEnv(t)
+
+		dataPath := filepath.Join(tmp, "data-8.parquet")
+		df := writeIntParquetWithFieldID(t, fs, dataPath, 0, 5)
+		puffinPath, offset, length := writeDVPuffinFixture(t, []uint64{1, 100}, dataPath)
+		dvFile := newDVMockDataFile(puffinPath, dataPath, offset, length)
+
+		got := collectDVScanRows(t, tbl.Scan(), []FileScanTask{{
+			File:                df,
+			DeletionVectorFiles: []iceberg.DataFile{dvFile},
+		}})
+		assert.Equal(t, []int64{0, 2, 3, 4}, got,
+			"in-range DV position must be filtered; out-of-range entry in the "+
+				"same bitmap must silently no-op")
 	})
 }
