@@ -40,6 +40,7 @@ import (
 	internal2 "github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/table/internal"
+	"github.com/geoarrow/geoarrow-go"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -601,6 +602,101 @@ func TestDecimalPhysicalTypes(t *testing.T) {
 			assert.Equal(t, tt.scale, maxDec.Scale)
 		})
 	}
+}
+
+func TestParquetGeoArrowExtensionMetadataRoundTrip(t *testing.T) {
+	geomType, err := iceberg.GeometryTypeOf("srid:4326")
+	require.NoError(t, err)
+
+	geogType, err := iceberg.GeographyTypeOf("srid:4326", "vincenty")
+	require.NoError(t, err)
+
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: 2, Name: "geom", Type: geomType, Required: false},
+		iceberg.NestedField{ID: 3, Name: "geog", Type: geogType, Required: false},
+	)
+
+	arrowSchema, err := table.SchemaToArrowSchema(iceSchema, nil, true, false)
+	require.NoError(t, err)
+
+	geomWKB, err := internal.WKTToWKB("POINT (30 10)")
+	require.NoError(t, err)
+	geogWKB, err := internal.WKTToWKB("POINT (20 5)")
+	require.NoError(t, err)
+
+	rec, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSchema, strings.NewReader(`[
+		{"id": 1, "geom": "`+geomWKB.String()+`", "geog": "`+geogWKB.String()+`"},
+		{"id": null, "geom": null, "geog": "`+geogWKB.String()+`"}
+	]`))
+	require.NoError(t, err)
+	defer rec.Release()
+
+	arrProps := pqarrow.NewArrowWriterProperties(
+		pqarrow.WithAllocator(memory.DefaultAllocator),
+		pqarrow.WithStoreSchema(),
+	)
+	var buf bytes.Buffer
+	wr, err := pqarrow.NewFileWriter(arrowSchema, &buf,
+		parquet.NewWriterProperties(parquet.WithStats(true)),
+		arrProps)
+	require.NoError(t, err)
+	require.NoError(t, wr.Write(rec))
+	require.NoError(t, wr.Close())
+
+	pqRdr, err := file.NewParquetReader(bytes.NewReader(buf.Bytes()))
+	require.NoError(t, err)
+	defer pqRdr.Close()
+
+	arrRdr, err := pqarrow.NewFileReader(pqRdr, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	require.NoError(t, err)
+	fr := internal.WrapParquetFileReader(arrRdr)
+
+	tbl, err := fr.ReadTable(context.Background())
+	require.NoError(t, err)
+	defer tbl.Release()
+
+	roundTripSchema := tbl.Schema()
+
+	origGeomType := arrowSchema.Field(1).Type.(*geoarrow.WKBType)
+	origGeogType := arrowSchema.Field(2).Type.(*geoarrow.WKBType)
+	rtGeomField := roundTripSchema.Field(1)
+	rtGeogField := roundTripSchema.Field(2)
+
+	rtGeomExt := rtGeomField.Type.(arrow.ExtensionType)
+	rtGeogExt := rtGeogField.Type.(arrow.ExtensionType)
+	rtGeomType := rtGeomExt.(*geoarrow.WKBType)
+	rtGeogType := rtGeogExt.(*geoarrow.WKBType)
+
+	assert.Equal(t, origGeomType.ExtensionName(), rtGeomExt.ExtensionName())
+	assert.Equal(t, origGeogType.ExtensionName(), rtGeogExt.ExtensionName())
+	assert.True(t, arrow.TypeEqual(origGeomType.StorageType(), rtGeomType.StorageType()))
+	assert.True(t, arrow.TypeEqual(origGeogType.StorageType(), rtGeogType.StorageType()))
+	assert.Equal(t, origGeomType.Metadata(), rtGeomType.Metadata())
+	assert.Equal(t, origGeogType.Metadata(), rtGeogType.Metadata())
+	assert.Equal(t, geoarrow.CRSTypeSRID, rtGeomType.Metadata().CRSType)
+	assert.Equal(t, geoarrow.EdgePlanar, rtGeomType.Metadata().Edges)
+	assert.Equal(t, geoarrow.CRSTypeSRID, rtGeogType.Metadata().CRSType)
+	assert.Equal(t, geoarrow.EdgeVincenty, rtGeogType.Metadata().Edges)
+
+	rr, err := fr.GetRecords(context.Background(), nil, nil)
+	require.NoError(t, err)
+	defer rr.Release()
+	require.True(t, rr.Next())
+
+	batch := rr.RecordBatch()
+	defer batch.Release()
+	require.Equal(t, int64(2), batch.NumRows())
+
+	geomArr, ok := batch.Column(1).(*geoarrow.WKBArray)
+	assert.True(t, ok)
+	assert.Equal(t, geomWKB, geomArr.Value(0))
+	assert.Nil(t, geomArr.Value(1))
+
+	geogArr, ok := batch.Column(2).(*geoarrow.WKBArray)
+	assert.True(t, ok)
+	assert.Equal(t, geogWKB, geogArr.Value(0))
+	assert.Equal(t, geogWKB, geogArr.Value(1))
 }
 
 func TestWriteDataFileErrOnClose(t *testing.T) {

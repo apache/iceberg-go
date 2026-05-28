@@ -565,7 +565,8 @@ func (c convertToArrow) Map(m iceberg.MapType, keyResult, valResult arrow.Field)
 }
 
 func (c convertToArrow) Primitive(iceberg.PrimitiveType) arrow.Field { panic("shouldn't be called") }
-func (c convertToArrow) Variant(iceberg.VariantType) arrow.Field     { panic("shouldn't be called") }
+
+func (c convertToArrow) Variant(iceberg.VariantType) arrow.Field { panic("shouldn't be called") }
 
 func (c convertToArrow) VisitFixed(f iceberg.FixedType) arrow.Field {
 	return arrow.Field{Type: &arrow.FixedSizeBinaryType{ByteWidth: f.Len()}}
@@ -658,20 +659,26 @@ func (c convertToArrow) VisitVariant() arrow.Field {
 	return arrow.Field{Type: extensions.NewDefaultVariantType()}
 }
 
-func (c convertToArrow) VisitGeometry(iceberg.GeometryType) arrow.Field {
+func (c convertToArrow) VisitGeometry(g iceberg.GeometryType) arrow.Field {
+	meta := icebergCRSToGeoArrowMetadata(g.CRS())
 	if c.useLargeTypes {
-		return arrow.Field{Type: geoarrow.NewWKBType(geoarrow.WKBWithLargeBinaryStorage())}
+		return arrow.Field{Type: geoarrow.NewWKBType(geoarrow.WKBWithLargeBinaryStorage(), geoarrow.WKBWithMetadata(meta))}
 	}
 
-	return arrow.Field{Type: geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage())}
+	return arrow.Field{Type: geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage(), geoarrow.WKBWithMetadata(meta))}
 }
 
-func (c convertToArrow) VisitGeography(iceberg.GeographyType) arrow.Field {
-	if c.useLargeTypes {
-		return arrow.Field{Type: geoarrow.NewWKBType(geoarrow.WKBWithLargeBinaryStorage())}
+func (c convertToArrow) VisitGeography(g iceberg.GeographyType) arrow.Field {
+	meta := icebergCRSToGeoArrowMetadata(g.CRS())
+	if g.Algorithm() != "spherical" {
+		meta.Edges = geoarrow.EdgeInterpolation(g.Algorithm())
 	}
 
-	return arrow.Field{Type: geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage())}
+	if c.useLargeTypes {
+		return arrow.Field{Type: geoarrow.NewWKBType(geoarrow.WKBWithLargeBinaryStorage(), geoarrow.WKBWithMetadata(meta))}
+	}
+
+	return arrow.Field{Type: geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage(), geoarrow.WKBWithMetadata(meta))}
 }
 
 var _ iceberg.SchemaVisitorPerPrimitiveType[arrow.Field] = convertToArrow{}
@@ -1824,5 +1831,27 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 				return
 			}
 		}
+	}
+}
+
+func icebergCRSToGeoArrowMetadata(crs string) geoarrow.Metadata {
+	if crs == "OGC:CRS84" {
+		return geoarrow.NewMetadata()
+	}
+
+	if strings.HasPrefix(strings.ToLower(crs), "srid:") {
+		id := crs[len("srid:"):]
+		raw, _ := json.Marshal(id)
+
+		return geoarrow.Metadata{
+			CRS:     raw,
+			CRSType: geoarrow.CRSTypeSRID,
+		}
+	}
+	raw, _ := json.Marshal(crs)
+
+	return geoarrow.Metadata{
+		CRS:     raw,
+		CRSType: geoarrow.CRSTypeAuthorityCode,
 	}
 }
