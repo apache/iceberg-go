@@ -84,6 +84,16 @@ make lint-install
 
    Or run a single suite: `make integration-scanner`, `make integration-io`, `make integration-rest`, `make integration-spark`.
 
+#### Running against Spark 4.0
+
+To validate against Spark 4.0 (used by v3 feature tests), substitute the setup step:
+
+```shell
+make integration-setup-spark4
+```
+
+The exported env vars and `make integration-test` invocation are identical to the Spark 3.5 flow above.
+
 ## Feature Support / Roadmap
 
 ### FileSystem Support

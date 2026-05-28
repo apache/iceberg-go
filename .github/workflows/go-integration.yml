@@ -33,6 +33,12 @@ permissions:
 jobs:
   integration-test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        spark:
+          - { version: "3.5", setup: "integration-setup" }
+          - { version: "4.0", setup: "integration-setup-spark4" }
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -45,8 +51,8 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
-      - name: Integration setup
-        run: make integration-setup
+      - name: Integration setup (Spark ${{ matrix.spark.version }})
+        run: make ${{ matrix.spark.setup }}
 
       - name: Setup environment variables
         run: |
