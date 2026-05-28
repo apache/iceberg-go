@@ -565,8 +565,7 @@ func (c convertToArrow) Map(m iceberg.MapType, keyResult, valResult arrow.Field)
 }
 
 func (c convertToArrow) Primitive(iceberg.PrimitiveType) arrow.Field { panic("shouldn't be called") }
-
-func (c convertToArrow) Variant(iceberg.VariantType) arrow.Field { panic("shouldn't be called") }
+func (c convertToArrow) Variant(iceberg.VariantType) arrow.Field     { panic("shouldn't be called") }
 
 func (c convertToArrow) VisitFixed(f iceberg.FixedType) arrow.Field {
 	return arrow.Field{Type: &arrow.FixedSizeBinaryType{ByteWidth: f.Len()}}
