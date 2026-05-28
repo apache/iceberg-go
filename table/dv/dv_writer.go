@@ -29,13 +29,17 @@ import (
 	"github.com/apache/iceberg-go/puffin"
 )
 
-// dvEntry holds the per-data-file state a DV manifest entry needs. Each entry
-// is keyed by the referenced data file path; the spec and partition record
-// come from the data file itself and are propagated unchanged onto the output
-// DV manifest entry — matching Java's BaseDVFileWriter.Deletes shape.
+// SpecResolver looks up a PartitionSpec by its id, mirroring
+// Metadata.PartitionSpecByID. Returns nil if the id is not known.
+type SpecResolver func(specID int32) *iceberg.PartitionSpec
+
+// dvEntry holds the per-data-file state a DV manifest entry needs. specID and
+// partitionData come from the data file's own manifest entry; the spec itself
+// is resolved at Flush time via the writer's SpecResolver, matching how the
+// partitioned Parquet writer consults metadata.PartitionSpecByID.
 type dvEntry struct {
 	bitmap        *RoaringPositionBitmap
-	spec          iceberg.PartitionSpec
+	specID        int32
 	partitionData map[int]any
 }
 
@@ -43,47 +47,56 @@ type dvEntry struct {
 // a single Puffin file containing one deletion-vector-v1 blob per data file.
 // The returned DataFile entries are ready for RowDelta.AddDeletes().
 type DVWriter struct {
-	fs      iceio.WriteFileIO
-	entries map[string]*dvEntry
-	order   []string
+	fs       iceio.WriteFileIO
+	specByID SpecResolver
+	entries  map[string]*dvEntry
+	order    []string
 }
 
 // NewDVWriter creates a DVWriter backed by the given writable filesystem.
-func NewDVWriter(fs iceio.WriteFileIO) *DVWriter {
+// specByID resolves PartitionSpec values at Flush time; typically the
+// caller passes Metadata.PartitionSpecByID directly (wrapped to convert
+// int → int32). The unpartitioned path can pass a resolver that returns
+// iceberg.UnpartitionedSpec for id 0.
+func NewDVWriter(fs iceio.WriteFileIO, specByID SpecResolver) *DVWriter {
 	return &DVWriter{
-		fs:      fs,
-		entries: make(map[string]*dvEntry),
+		fs:       fs,
+		specByID: specByID,
+		entries:  make(map[string]*dvEntry),
 	}
 }
 
-// Add accumulates positions to delete for a given data file. The spec and
-// partitionData are the data file's own partition metadata (from its manifest
-// entry) and are propagated to the output DV manifest entry, so partitioned
-// tables produce DV entries with the correct partition record. Positions are
-// deduplicated via the underlying roaring bitmap.
+// Add accumulates positions to delete for a given data file. specID and
+// partitionData come from the data file's own manifest entry (typically
+// partitionContext.specID + partitionContext.partitionData on the caller
+// side) and are propagated to the output DV manifest entry, so partitioned
+// tables produce DV entries with the correct spec id and partition record.
+// Positions are deduplicated via the underlying roaring bitmap.
 //
-// partitionData keys must be partition field IDs (PartitionField.FieldID), not
-// source column IDs. NewDataFileBuilder iterates spec.Fields() and re-keys by
-// field name using these IDs; wrong keys silently produce an empty partition
-// record on the output DataFile.
+// partitionData keys must be partition field IDs (PartitionField.FieldID),
+// not source column IDs. NewDataFileBuilder iterates spec.Fields() and
+// re-keys by field name using these IDs; wrong keys silently produce an
+// empty partition record on the output DataFile.
 //
-// First Add for a given dataFilePath captures spec and partitionData on the
-// entry; later Adds for the same path append positions only and ignore the
-// new spec/partitionData args. This mirrors Java's BaseDVFileWriter, which
-// stores partition metadata via computeIfAbsent on the same key. Callers must
-// not pass conflicting partition values across Adds for the same data file —
-// the writer trusts the first-Add values for the rest of the writer's life.
-func (w *DVWriter) Add(dataFilePath string, positions []int64, spec iceberg.PartitionSpec, partitionData map[int]any) {
+// First Add for a given dataFilePath captures specID and partitionData on
+// the entry; later Adds for the same path append positions only and ignore
+// the new specID/partitionData args. This mirrors Java's BaseDVFileWriter,
+// which stores partition metadata via computeIfAbsent on the same key.
+// Callers must not pass conflicting partition values across Adds for the
+// same data file — the writer trusts the first-Add values for the rest of
+// the writer's life.
+func (w *DVWriter) Add(dataFilePath string, positions []int64, specID int32, partitionData map[int]any) {
 	entry, ok := w.entries[dataFilePath]
 	if !ok {
-		// Defensive copies on capture so a caller that mutates or reuses
-		// the spec / partition map between Add and Flush can't silently
+		// Defensive copy of partitionData on capture so a caller that
+		// mutates or reuses the map between Add and Flush can't silently
 		// corrupt the entry. Mirrors Java's StructLikeUtil.copy(partition)
-		// in BaseDVFileWriter.Deletes. partitionData=nil round-trips as nil
-		// (maps.Clone returns nil on nil input).
+		// in BaseDVFileWriter.Deletes. partitionData=nil round-trips as
+		// nil (maps.Clone returns nil on nil input). specID is a value
+		// type so no copy is needed.
 		entry = &dvEntry{
 			bitmap:        NewRoaringPositionBitmap(),
-			spec:          copyPartitionSpec(spec),
+			specID:        specID,
 			partitionData: maps.Clone(partitionData),
 		}
 		w.entries[dataFilePath] = entry
@@ -95,28 +108,16 @@ func (w *DVWriter) Add(dataFilePath string, positions []int64, spec iceberg.Part
 	}
 }
 
-// copyPartitionSpec returns a fresh PartitionSpec that does not alias the
-// caller's slice and map backing arrays. PartitionSpec carries a `fields`
-// slice and a `sourceIdToFields` map; assigning by value shares both. The
-// reconstructed spec calls initialize() internally, building a private
-// sourceIdToFields map.
-func copyPartitionSpec(spec iceberg.PartitionSpec) iceberg.PartitionSpec {
-	fields := make([]iceberg.PartitionField, 0, spec.NumFields())
-	for _, f := range spec.Fields() {
-		fields = append(fields, f)
-	}
-
-	return iceberg.NewPartitionSpecID(spec.ID(), fields...)
-}
-
 // Flush writes one Puffin file containing one blob per data file, and returns
 // manifest entries ready for RowDelta.AddDeletes(). Each output DataFile
 // carries the partition spec and partition record of the data file it
-// references, so partitioned tables get spec-correct manifest entries.
+// references, with the spec resolved via the writer's SpecResolver at Flush
+// time. A specID with no corresponding spec is a programming error and is
+// surfaced as an error here rather than producing a malformed DataFile.
 //
-// The location parameter is the full path (including filename) for the Puffin
-// file to create. The caller is responsible for generating a unique path
-// within the table's metadata directory.
+// The location parameter is the full path (including filename) for the
+// Puffin file to create. The caller is responsible for generating a unique
+// path within the table's metadata directory.
 func (w *DVWriter) Flush(_ context.Context, location string) ([]iceberg.DataFile, error) {
 	if len(w.entries) == 0 {
 		return nil, nil
@@ -181,8 +182,14 @@ func (w *DVWriter) Flush(_ context.Context, location string) ([]iceberg.DataFile
 
 	dataFiles := make([]iceberg.DataFile, 0, len(results))
 	for _, r := range results {
+		spec := w.specByID(r.entry.specID)
+		if spec == nil {
+			return nil, fmt.Errorf("unknown partition spec id %d for data file %s",
+				r.entry.specID, r.dataFilePath)
+		}
+
 		builder, err := iceberg.NewDataFileBuilder(
-			r.entry.spec,
+			*spec,
 			iceberg.EntryContentPosDeletes,
 			location,
 			iceberg.PuffinFile,
