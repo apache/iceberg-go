@@ -1671,7 +1671,7 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 	// follow-up; partitioned v3 writes fall through to the Parquet writer
 	// below and emit the deprecation warning.
 	if latestMetadata.Version() >= 3 && latestMetadata.PartitionSpec().IsUnpartitioned() {
-		return positionDeleteRecordsToDataFilesDV(ctx, rootLocation, args)
+		return positionDeleteRecordsToDataFilesDV(ctx, rootLocation, args, latestMetadata)
 	}
 
 	// V3 and later prefer deletion vectors over Parquet position-delete files;
@@ -1732,9 +1732,14 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 	return partitionWriter.Write(ctx, workers)
 }
 
-func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string, args recordWritingArgs) iter.Seq2[iceberg.DataFile, error] {
+// TODO(#1135 PR2): take a partitionContextByFilePath map[string]partitionContext
+// and look up each data file's specID + partitionData per Add, removing the
+// hardcoded 0/nil below and the IsUnpartitioned gate upstream.
+func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string, args recordWritingArgs, metadata Metadata) iter.Seq2[iceberg.DataFile, error] {
 	return func(yield func(iceberg.DataFile, error) bool) {
-		writer := dv.NewDVWriter(args.fs)
+		writer := dv.NewDVWriter(args.fs, func(id int32) *iceberg.PartitionSpec {
+			return metadata.PartitionSpecByID(int(id))
+		})
 
 		hasEntries := false
 		for batch, err := range args.itr {
@@ -1748,7 +1753,13 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 			positions := batch.Column(1).(*array.Int64)
 
 			for i := range batch.NumRows() {
-				writer.Add(filePaths.Value(int(i)), []int64{positions.Value(int(i))})
+				// PR (1) of #1135 reshaped DVWriter.Add to take (specID,
+				// partitionData) so the partitioned path can pass through
+				// partitionContext directly. This site is still
+				// unpartitioned-only (the gate above routes partitioned
+				// writes elsewhere), so specID=0 + nil partition. PR (2)
+				// drops the gate and threads partitionContext through here.
+				writer.Add(filePaths.Value(int(i)), []int64{positions.Value(int(i))}, 0, nil)
 				hasEntries = true
 			}
 		}
