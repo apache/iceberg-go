@@ -46,7 +46,8 @@ func TestDVWritePathProducesReadableOutput(t *testing.T) {
 		yield(batch, nil)
 	}
 
-	seq := positionDeleteRecordsToDataFiles(context.Background(), "mem://test", mb, nil,
+	seq := positionDeleteRecordsToDataFiles(context.Background(), "mem://test", mb,
+		unpartitionedContexts("s3://bucket/data/file-001.parquet", "s3://bucket/data/file-002.parquet"),
 		recordWritingArgs{
 			sc:  PositionalDeleteArrowSchema,
 			itr: itr,
@@ -117,27 +118,41 @@ func TestDVWritePathV2UsesParquetPositionDeletes(t *testing.T) {
 		"v2 must use Parquet position-delete files, not Puffin DVs")
 }
 
-func TestDVWritePathV3PartitionedUsesParquetPositionDeletes(t *testing.T) {
-	// DV+partitioned support is deferred; v3 partitioned writes must still
-	// route through the Parquet position-delete writer.
+// TestDVWritePathV3PartitionedUsesPuffinDV pins the contract introduced in
+// #1135: v3 partitioned tables must produce deletion vectors (Puffin), not
+// Parquet position-delete files. Each output DataFile must carry the spec id
+// and partition record of the data file it references — that's what lets a
+// partitioned manifest writer place the DV entries under the correct
+// (specID, partition) grouping downstream.
+func TestDVWritePathV3PartitionedUsesPuffinDV(t *testing.T) {
 	mb := newPositionDeletePartitionedMetadata(t, 3)
+	fs := iceio.NewMemFS()
 
-	const path = "file://namespace/age_bucket=1/test.parquet"
+	const (
+		pathBucket0 = "file://namespace/age_bucket=0/file-a.parquet"
+		pathBucket1 = "file://namespace/age_bucket=1/file-b.parquet"
+	)
 	partitions := map[string]partitionContext{
-		path: {partitionData: map[int]any{iceberg.PartitionDataIDStart: 1}, specID: 0},
+		pathBucket0: {partitionData: map[int]any{iceberg.PartitionDataIDStart: int32(0)}, specID: 0},
+		pathBucket1: {partitionData: map[int]any{iceberg.PartitionDataIDStart: int32(1)}, specID: 0},
 	}
-	batch := mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema,
-		`[{"file_path": "`+path+`", "pos": 0}]`)
+	batch := mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema, `[
+		{"file_path": "`+pathBucket0+`", "pos": 1},
+		{"file_path": "`+pathBucket0+`", "pos": 4},
+		{"file_path": "`+pathBucket1+`", "pos": 0},
+		{"file_path": "`+pathBucket1+`", "pos": 2},
+		{"file_path": "`+pathBucket1+`", "pos": 9}
+	]`)
 	itr := func(yield func(arrow.RecordBatch, error) bool) {
 		batch.Retain()
 		yield(batch, nil)
 	}
 
-	seq := positionDeleteRecordsToDataFiles(context.Background(), t.TempDir(), mb, partitions,
+	seq := positionDeleteRecordsToDataFiles(context.Background(), "mem://test", mb, partitions,
 		recordWritingArgs{
 			sc:  PositionalDeleteArrowSchema,
 			itr: itr,
-			fs:  iceio.LocalFS{},
+			fs:  fs,
 		})
 
 	var dataFiles []iceberg.DataFile
@@ -145,10 +160,88 @@ func TestDVWritePathV3PartitionedUsesParquetPositionDeletes(t *testing.T) {
 		require.NoError(t, err)
 		dataFiles = append(dataFiles, df)
 	}
+	require.Len(t, dataFiles, 2,
+		"two distinct partitions should produce two DV manifest entries (one per data file)")
 
-	require.NotEmpty(t, dataFiles, "v3 partitioned write should still produce Parquet position deletes")
-	assert.Equal(t, iceberg.ParquetFile, dataFiles[0].FileFormat(),
-		"v3 partitioned write must fall back to Parquet until DV+partitioned support lands")
+	byRef := make(map[string]iceberg.DataFile, len(dataFiles))
+	for _, df := range dataFiles {
+		assert.Equal(t, iceberg.PuffinFile, df.FileFormat(),
+			"v3 partitioned writes must produce Puffin DV, not Parquet position deletes")
+		assert.Equal(t, iceberg.EntryContentPosDeletes, df.ContentType())
+		require.NotNil(t, df.ReferencedDataFile())
+		byRef[*df.ReferencedDataFile()] = df
+	}
+	require.Contains(t, byRef, pathBucket0)
+	require.Contains(t, byRef, pathBucket1)
+
+	df0 := byRef[pathBucket0]
+	assert.Equal(t, int32(0), df0.SpecID())
+	assert.Equal(t, map[int]any{iceberg.PartitionDataIDStart: int32(0)}, df0.Partition(),
+		"DV manifest entry must carry the source data file's partition record")
+	assert.Equal(t, int64(2), df0.Count())
+
+	df1 := byRef[pathBucket1]
+	assert.Equal(t, int32(0), df1.SpecID())
+	assert.Equal(t, map[int]any{iceberg.PartitionDataIDStart: int32(1)}, df1.Partition())
+	assert.Equal(t, int64(3), df1.Count())
+
+	bm0, err := dv.ReadDV(fs, df0)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), bm0.Cardinality())
+	assert.True(t, bm0.Contains(1))
+	assert.True(t, bm0.Contains(4))
+
+	bm1, err := dv.ReadDV(fs, df1)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), bm1.Cardinality())
+	assert.True(t, bm1.Contains(0))
+	assert.True(t, bm1.Contains(2))
+	assert.True(t, bm1.Contains(9))
+}
+
+// TestDVWritePathPartitionedMissingContextErrors pins that on a partitioned
+// table, a row whose data file path is not present in partitionContextByFilePath
+// surfaces an error rather than silently producing a DV entry with a default
+// (specID=0, nil) partition. That guards against a caller bug — the per-file
+// lookup is the only source of truth for the manifest entry's partition, so
+// a missing entry must not be treated as "use the default".
+func TestDVWritePathPartitionedMissingContextErrors(t *testing.T) {
+	mb := newPositionDeletePartitionedMetadata(t, 3)
+	fs := iceio.NewMemFS()
+
+	batch := mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema,
+		`[{"file_path": "file://namespace/age_bucket=0/unregistered.parquet", "pos": 0}]`)
+	itr := func(yield func(arrow.RecordBatch, error) bool) {
+		batch.Retain()
+		yield(batch, nil)
+	}
+
+	// Empty partitionContextByFilePath — the file in the batch was never
+	// registered.
+	seq := positionDeleteRecordsToDataFiles(context.Background(), "mem://test", mb,
+		map[string]partitionContext{},
+		recordWritingArgs{
+			sc:  PositionalDeleteArrowSchema,
+			itr: itr,
+			fs:  fs,
+		})
+
+	var sawErr bool
+	var dataFiles []iceberg.DataFile
+	for df, err := range seq {
+		if err != nil {
+			sawErr = true
+			assert.ErrorContains(t, err, "missing partition context")
+			assert.ErrorContains(t, err, "unregistered.parquet")
+
+			continue
+		}
+		dataFiles = append(dataFiles, df)
+	}
+	assert.True(t, sawErr,
+		"partitioned DV path must error on a row with no partition context")
+	assert.Empty(t, dataFiles,
+		"no DataFiles should be flushed when the per-file lookup fails")
 }
 
 // TestDVWritePathCancelledContext verifies that when the iterator surfaces a
@@ -207,7 +300,8 @@ func TestDVWritePathPropagatesMidStreamError(t *testing.T) {
 		yield(nil, wantErr)
 	}
 
-	seq := positionDeleteRecordsToDataFiles(context.Background(), "mem://test", mb, nil,
+	seq := positionDeleteRecordsToDataFiles(context.Background(), "mem://test", mb,
+		unpartitionedContexts("s3://bucket/data/file-001.parquet"),
 		recordWritingArgs{
 			sc:  PositionalDeleteArrowSchema,
 			itr: itr,
@@ -256,7 +350,8 @@ func TestDVWritePathMergesMultiBatchSameFile(t *testing.T) {
 		yield(batch2, nil)
 	}
 
-	seq := positionDeleteRecordsToDataFiles(context.Background(), "mem://test", mb, nil,
+	seq := positionDeleteRecordsToDataFiles(context.Background(), "mem://test", mb,
+		unpartitionedContexts(path),
 		recordWritingArgs{
 			sc:  PositionalDeleteArrowSchema,
 			itr: itr,
