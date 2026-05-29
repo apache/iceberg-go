@@ -375,6 +375,17 @@ func (c convertToIceberg) Primitive(dt arrow.DataType) (result iceberg.NestedFie
 			result.Type = iceberg.PrimitiveTypes.UUID
 		case "parquet.variant":
 			result.Type = iceberg.VariantType{}
+		case "geoarrow.wkb":
+			wkb, ok := dt.(*geoarrow.WKBType)
+			if !ok {
+				panic(fmt.Errorf("%w: unsupported arrow type for conversion - %s", iceberg.ErrInvalidSchema, dt))
+			}
+
+			iceType, err := geoArrowMetadataToIcebergType(wkb.Metadata())
+			if err != nil {
+				panic(fmt.Errorf("%w: %v", iceberg.ErrInvalidSchema, err))
+			}
+			result.Type = iceType
 		default:
 			panic(fmt.Errorf("%w: unsupported arrow type for conversion - %s", iceberg.ErrInvalidSchema, dt))
 		}
@@ -669,9 +680,7 @@ func (c convertToArrow) VisitGeometry(g iceberg.GeometryType) arrow.Field {
 
 func (c convertToArrow) VisitGeography(g iceberg.GeographyType) arrow.Field {
 	meta := icebergCRSToGeoArrowMetadata(g.CRS())
-	if g.Algorithm() != "spherical" {
-		meta.Edges = geoarrow.EdgeInterpolation(g.Algorithm())
-	}
+	meta.Edges = geoarrow.EdgeInterpolation(g.Algorithm()) // Always add an edge to differentiate between Geography and Geometry arrow fields.
 
 	if c.useLargeTypes {
 		return arrow.Field{Type: geoarrow.NewWKBType(geoarrow.WKBWithLargeBinaryStorage(), geoarrow.WKBWithMetadata(meta))}
@@ -1830,6 +1839,44 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 				return
 			}
 		}
+	}
+}
+
+func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
+	if len(meta.CRS) == 0 && meta.CRSType == "" {
+		return "OGC:CRS84", nil
+	}
+
+	var crs string
+	if len(meta.CRS) > 0 {
+		if err := json.Unmarshal(meta.CRS, &crs); err != nil {
+			return "", fmt.Errorf("invalid geoarrow CRS metadata: %w", err)
+		}
+	}
+
+	switch meta.CRSType {
+	case geoarrow.CRSTypeSRID:
+		return "srid:" + crs, nil
+	case geoarrow.CRSTypeAuthorityCode:
+		return crs, nil
+	default:
+		return "", fmt.Errorf("unsupported geoarrow CRS type %q", meta.CRSType)
+	}
+}
+
+func geoArrowMetadataToIcebergType(meta geoarrow.Metadata) (iceberg.Type, error) {
+	crs, err := geoArrowCRSToIcebergCRS(meta)
+	if err != nil {
+		return nil, err
+	}
+
+	switch meta.Edges {
+	case geoarrow.EdgePlanar:
+		return iceberg.GeometryTypeOf(crs)
+	case geoarrow.EdgeVincenty, geoarrow.EdgeKarney, geoarrow.EdgeThomas, geoarrow.EdgeAndoyer, geoarrow.EdgeSpherical:
+		return iceberg.GeographyTypeOf(crs, string(meta.Edges))
+	default:
+		return nil, fmt.Errorf("unsupported geoarrow edges %q", meta.Edges)
 	}
 }
 

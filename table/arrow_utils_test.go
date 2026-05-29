@@ -35,6 +35,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
+	"github.com/geoarrow/geoarrow-go"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -427,6 +428,190 @@ func TestVariantArrowConversion(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, ice.Field(1).Type.Equals(iceberg.VariantType{}))
 		assert.True(t, ice.Field(2).Type.Equals(iceberg.VariantType{}))
+	})
+}
+
+func assertGeoArrowWKB(t *testing.T, dt arrow.DataType, storage arrow.DataType, want geoarrow.Metadata) {
+	t.Helper()
+
+	wkb, ok := dt.(*geoarrow.WKBType)
+	require.True(t, ok, "expected *geoarrow.WKBType, got %T", dt)
+	assert.Equal(t, "geoarrow.wkb", wkb.ExtensionName())
+	assert.True(t, arrow.TypeEqual(storage, wkb.StorageType()))
+	assert.Equal(t, want, wkb.Metadata())
+}
+
+func jsonCRS(s string) json.RawMessage {
+	raw, _ := json.Marshal(s)
+
+	return raw
+}
+
+func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
+	geomSRID, err := iceberg.GeometryTypeOf("srid:4326")
+	require.NoError(t, err)
+	geogKarney, err := iceberg.GeographyTypeOf("srid:4269", "karney")
+	require.NoError(t, err)
+	geomEPSG, err := iceberg.GeometryTypeOf("EPSG:3857")
+	require.NoError(t, err)
+	geogVincenty, err := iceberg.GeographyTypeOf("OGC:CRS84", "vincenty")
+	require.NoError(t, err)
+
+	typeCases := []struct {
+		name     string
+		ice      iceberg.Type
+		wantMeta geoarrow.Metadata
+	}{
+		{
+			name:     "canonical_geometry",
+			ice:      iceberg.GeometryType{},
+			wantMeta: geoarrow.NewMetadata(),
+		},
+		{
+			name:     "canonical_geography",
+			ice:      iceberg.GeographyType{},
+			wantMeta: geoarrow.Metadata{Edges: geoarrow.EdgeSpherical},
+		},
+		{
+			name: "custom_srid_geometry",
+			ice:  geomSRID,
+			wantMeta: geoarrow.Metadata{
+				CRS:     jsonCRS("4326"),
+				CRSType: geoarrow.CRSTypeSRID,
+			},
+		},
+		{
+			name: "custom_srid_geography_karney",
+			ice:  geogKarney,
+			wantMeta: geoarrow.Metadata{
+				CRS:     jsonCRS("4269"),
+				CRSType: geoarrow.CRSTypeSRID,
+				Edges:   geoarrow.EdgeKarney,
+			},
+		},
+		{
+			name: "authority_code_geometry",
+			ice:  geomEPSG,
+			wantMeta: geoarrow.Metadata{
+				CRS:     jsonCRS("EPSG:3857"),
+				CRSType: geoarrow.CRSTypeAuthorityCode,
+			},
+		},
+		{
+			name: "default_crs_vincenty_geography",
+			ice:  geogVincenty,
+			wantMeta: geoarrow.Metadata{
+				Edges: geoarrow.EdgeVincenty,
+			},
+		},
+	}
+
+	for _, tt := range typeCases {
+		t.Run("type/"+tt.name, func(t *testing.T) {
+			result, err := table.TypeToArrowType(tt.ice, true, false)
+			require.NoError(t, err)
+			assertGeoArrowWKB(t, result, arrow.BinaryTypes.Binary, tt.wantMeta)
+		})
+	}
+
+	for _, tt := range typeCases {
+		t.Run("arrow_to_iceberg/"+tt.name, func(t *testing.T) {
+			arrowType, err := table.TypeToArrowType(tt.ice, true, false)
+			require.NoError(t, err)
+
+			iceType, err := table.ArrowTypeToIceberg(arrowType, false)
+			require.NoError(t, err)
+			assert.True(t, tt.ice.Equals(iceType), "expected %s, got %s", tt.ice, iceType)
+		})
+	}
+
+	t.Run("type/geometry_vs_geography_edge_differentiation", func(t *testing.T) {
+		geomResult, err := table.TypeToArrowType(iceberg.GeometryType{}, true, false)
+		require.NoError(t, err)
+		geogResult, err := table.TypeToArrowType(iceberg.GeographyType{}, true, false)
+		require.NoError(t, err)
+
+		geomWKB, ok := geomResult.(*geoarrow.WKBType)
+		require.True(t, ok)
+		geogWKB, ok := geogResult.(*geoarrow.WKBType)
+		require.True(t, ok)
+
+		assert.Equal(t, geoarrow.EdgePlanar, geomWKB.Metadata().Edges)
+		assert.Equal(t, geoarrow.EdgeSpherical, geogWKB.Metadata().Edges)
+	})
+
+	t.Run("large_binary_storage", func(t *testing.T) {
+		result, err := table.TypeToArrowType(iceberg.GeometryType{}, true, true)
+		require.NoError(t, err)
+		assertGeoArrowWKB(t, result, arrow.BinaryTypes.LargeBinary, geoarrow.NewMetadata())
+	})
+
+	t.Run("schema", func(t *testing.T) {
+		geomList, err := iceberg.GeometryTypeOf("srid:4326")
+		require.NoError(t, err)
+
+		iceSchema := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "point", Type: iceberg.GeometryType{}, Required: false},
+			iceberg.NestedField{ID: 2, Name: "loc", Type: geomSRID, Required: true},
+			iceberg.NestedField{ID: 3, Name: "area", Type: iceberg.GeographyType{}, Required: false},
+			iceberg.NestedField{ID: 4, Name: "region", Type: geogKarney, Required: false},
+			iceberg.NestedField{
+				ID:   5,
+				Name: "locations",
+				Type: &iceberg.ListType{
+					ElementID:       6,
+					Element:         geomList,
+					ElementRequired: true,
+				},
+				Required: true,
+			},
+		)
+
+		arrowSc, err := table.SchemaToArrowSchema(iceSchema, nil, true, false)
+		require.NoError(t, err)
+		require.Equal(t, 5, arrowSc.NumFields())
+
+		wantFields := []struct {
+			name     string
+			nullable bool
+			fieldID  string
+			wantMeta geoarrow.Metadata
+		}{
+			{"point", true, "1", geoarrow.NewMetadata()},
+			{"loc", false, "2", geoarrow.Metadata{CRS: jsonCRS("4326"), CRSType: geoarrow.CRSTypeSRID}},
+			{"area", true, "3", geoarrow.Metadata{Edges: geoarrow.EdgeSpherical}},
+			{"region", true, "4", geoarrow.Metadata{CRS: jsonCRS("4269"), CRSType: geoarrow.CRSTypeSRID, Edges: geoarrow.EdgeKarney}},
+		}
+
+		for i, want := range wantFields {
+			field := arrowSc.Field(i)
+			assert.Equal(t, want.name, field.Name)
+			assert.Equal(t, want.nullable, field.Nullable)
+			fieldID, ok := field.Metadata.GetValue(table.ArrowParquetFieldIDKey)
+			require.True(t, ok)
+			assert.Equal(t, want.fieldID, fieldID)
+			assertGeoArrowWKB(t, field.Type, arrow.BinaryTypes.Binary, want.wantMeta)
+		}
+
+		listField := arrowSc.Field(4)
+		assert.Equal(t, "locations", listField.Name)
+		assert.False(t, listField.Nullable)
+		listFieldID, ok := listField.Metadata.GetValue(table.ArrowParquetFieldIDKey)
+		require.True(t, ok)
+		assert.Equal(t, "5", listFieldID)
+		listType, ok := listField.Type.(*arrow.ListType)
+		require.True(t, ok, "expected list type, got %T", listField.Type)
+
+		elemField := listType.ElemField()
+		assert.Equal(t, "element", elemField.Name)
+		assert.False(t, elemField.Nullable)
+		elemFieldID, ok := elemField.Metadata.GetValue(table.ArrowParquetFieldIDKey)
+		require.True(t, ok)
+		assert.Equal(t, "6", elemFieldID)
+		assertGeoArrowWKB(t, elemField.Type, arrow.BinaryTypes.Binary, geoarrow.Metadata{
+			CRS:     jsonCRS("4326"),
+			CRSType: geoarrow.CRSTypeSRID,
+		})
 	})
 }
 
