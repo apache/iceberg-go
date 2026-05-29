@@ -19,3 +19,10 @@ under the License.
 
 These test fixture files are canonical deletion vector and roaring bitmap files from the Apache Iceberg Java implementation:
 https://github.com/apache/iceberg/tree/main/core/src/test/resources/org/apache/iceberg/deletes
+
+`single-blob-dv.puffin` and `multi-blob-dv.puffin` are Java-authored Puffin
+files used by the cross-client tests in `table/dv/dv_cross_client_test.go`.
+Apache Iceberg upstream does not commit any `.puffin` DV fixtures, so they are
+produced from `dev/dv-fixtures/GenerateDVFixtures.java` against an
+`apache/iceberg` checkout — see `dev/dv-fixtures/README.md` for regeneration
+instructions.
