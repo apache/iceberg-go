@@ -233,9 +233,23 @@ for catalog_name, catalog in catalogs.items():
         .withColumn("structCol", expr("STRUCT(mapCol, arrayCol)"))
     )
 
-    all_types_dataframe.writeTo(f"default.test_all_types").tableProperty("format-version", "2").partitionedBy(
-        "intCol"
-    ).create()
+    all_types_dataframe.createOrReplaceTempView("_all_types_temp")
+    spark.sql(
+        f"""
+      CREATE OR REPLACE TABLE default.test_all_types (
+        longCol BIGINT, intCol INT, floatCol FLOAT, doubleCol DOUBLE,
+        dateCol DATE, timestampCol TIMESTAMP, stringCol STRING,
+        booleanCol BOOLEAN, binaryCol BINARY, byteCol BYTE,
+        decimalCol DECIMAL(10,2), shortCol SHORT,
+        mapCol MAP<BIGINT, DECIMAL(10,2)>, arrayCol ARRAY<BIGINT>,
+        structCol STRUCT<mapCol: MAP<BIGINT, DECIMAL(10,2)>, arrayCol: ARRAY<BIGINT>>
+      )
+      USING iceberg
+      PARTITIONED BY (intCol)
+      TBLPROPERTIES ('format-version'='2');
+    """
+    )
+    spark.sql("INSERT INTO default.test_all_types SELECT * FROM _all_types_temp")
 
     for table_name, partition in [
         ("test_partitioned_by_identity", "ts"),
