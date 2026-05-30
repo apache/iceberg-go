@@ -163,10 +163,11 @@ func WithEqualAuthorities(authorities map[string]string) OrphanCleanupOption {
 type OrphanCleanupResult struct {
 	OrphanFileLocations []string
 	DeletedFiles        []string
-	TotalSizeBytes      int64
+	// TotalSizeBytes is the combined size of orphan files only, not all scanned files.
+	TotalSizeBytes int64
 }
 
-func (t *Table) DeleteOrphanFiles(ctx context.Context, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
+func (t Table) DeleteOrphanFiles(ctx context.Context, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := &orphanCleanupConfig{
 		location:           "",             // empty means use table's data location
 		olderThan:          72 * time.Hour, // 3 days ago
@@ -191,7 +192,7 @@ type scannedFile struct {
 	size int64
 }
 
-func (t *Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConfig) (OrphanCleanupResult, error) {
+func (t Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConfig) (OrphanCleanupResult, error) {
 	fs, err := t.fsF(ctx)
 	if err != nil {
 		return OrphanCleanupResult{}, fmt.Errorf("failed to get filesystem: %w", err)
@@ -203,6 +204,7 @@ func (t *Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConf
 	}
 
 	// Run the S3 walk and referenced-file collection concurrently.
+	// Each goroutine owns its variable exclusively — no shared writes.
 	var referencedFiles map[string]bool
 	var scannedFiles []scannedFile
 
@@ -287,7 +289,7 @@ func (t *Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConf
 // All returned paths are normalized using the package-level normalizeFilePath function.
 // The bool value distinguishes data files (true) from metadata files (false), which
 // is used by PurgeFiles to respect gc.enabled.
-func (t *Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurrency int, discardDeleted bool) (map[string]bool, error) {
+func (t Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurrency int, discardDeleted bool) (map[string]bool, error) {
 	referenced := make(map[string]bool)
 	metadata := t.metadata
 
@@ -485,6 +487,8 @@ func makeFileWalkFunc(fn func(path string, info stdfs.FileInfo) error, pathTrans
 func isFileOrphan(file string, referencedFiles map[string]bool, normalizedReferencedFiles map[string]string, cfg *orphanCleanupConfig) (bool, error) {
 	normalizedFile := normalizeFilePathWithConfig(file, cfg)
 
+	// Any presence in referencedFiles means referenced;
+	// the bool distinguishes data vs metadata for gc.enabled, not membership"
 	if _, ok := referencedFiles[file]; ok {
 		return false, nil
 	}

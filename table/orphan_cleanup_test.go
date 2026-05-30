@@ -323,15 +323,21 @@ func TestCheckPrefixMismatch(t *testing.T) {
 }
 
 func TestIsFileOrphan(t *testing.T) {
+	// PrefixMismatchError ensures that metadata files (value=false) found via
+	// normalized lookup don't accidentally fall through to the prefix-mismatch
+	// error path. This would happen if isFileOrphan used a bare map-value check
+	// instead of the existence check (_, ok).
 	cfg := &orphanCleanupConfig{
-		prefixMismatchMode: PrefixMismatchIgnore,
+		prefixMismatchMode: PrefixMismatchError,
 		equalSchemes:       map[string]string{"s3,s3a,s3n": "s3"},
+		equalAuthorities:   map[string]string{"host-a,host-b": "host-a"},
 	}
 
 	referencedFiles := map[string]bool{
-		"s3://bucket/data/file1.parquet":     true,
-		"s3://bucket/metadata/manifest.avro": true,
-		"/local/path/file2.parquet":          true,
+		"s3://bucket/data/file1.parquet":        true,
+		"s3://host-a/metadata/v1.metadata.json": false, // metadata → value=false
+		"s3://host-a/data/file1.parquet":        true,
+		"/local/path/file2.parquet":             true,
 	}
 
 	tests := []struct {
@@ -364,11 +370,27 @@ func TestIsFileOrphan(t *testing.T) {
 			file:         "/local/path/orphan.parquet",
 			expectOrphan: true,
 		},
+		{
+			name:         "metadata_exact_host_match",
+			file:         "s3://host-a/metadata/v1.metadata.json",
+			expectOrphan: false,
+		},
+		{
+			name:         "metadata_equivalent_host",
+			file:         "s3://host-b/metadata/v1.metadata.json",
+			expectOrphan: false,
+		},
+		{
+			name:         "data_equivalent_host",
+			file:         "s3://host-b/data/file1.parquet",
+			expectOrphan: false,
+		},
 	}
 	normalizedReferencedFiles := make(map[string]string)
 	for refPath := range referencedFiles {
 		normalizedPath := normalizeFilePathWithConfig(refPath, cfg)
 		normalizedReferencedFiles[normalizedPath] = refPath
+		normalizedReferencedFiles[refPath] = refPath
 	}
 
 	for _, tt := range tests {
