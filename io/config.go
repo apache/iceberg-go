@@ -19,12 +19,14 @@ package io
 
 // Constants for S3 configuration options
 const (
-	S3Region                 = "s3.region"
-	S3SessionToken           = "s3.session-token"
-	S3SecretAccessKey        = "s3.secret-access-key"
-	S3AccessKeyID            = "s3.access-key-id"
-	S3EndpointURL            = "s3.endpoint"
-	S3ProxyURI               = "s3.proxy-uri"
+	S3Region          = "s3.region"
+	S3SessionToken    = "s3.session-token"
+	S3SecretAccessKey = "s3.secret-access-key"
+	S3AccessKeyID     = "s3.access-key-id"
+	S3EndpointURL     = "s3.endpoint"
+	S3ProxyURI        = "s3.proxy-uri"
+	// S3ConnectTimeout accepts seconds as a number, such as "60" or "60.0",
+	// or a Go duration string, such as "5s".
 	S3ConnectTimeout         = "s3.connect-timeout"
 	S3SignerURI              = "s3.signer.uri"
 	S3RemoteSigningEnabled   = "s3.remote-signing-enabled"

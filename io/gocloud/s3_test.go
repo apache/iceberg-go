@@ -19,9 +19,13 @@ package gocloud
 
 import (
 	"context"
+	"net/http"
+	"net/url"
 	"testing"
+	"time"
 
 	"github.com/apache/iceberg-go/io"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -80,13 +84,116 @@ func TestParseAWSConfigRemoteSigningEnabled(t *testing.T) {
 	})
 }
 
-func TestParseAWSConfigUnsupportedProperty(t *testing.T) {
+func TestParseAWSConfigInvalidConnectTimeout(t *testing.T) {
 	t.Parallel()
 
 	_, err := ParseAWSConfig(context.Background(), map[string]string{
-		io.S3ConnectTimeout: "5000",
+		io.S3Region:         "us-east-1",
+		io.S3ConnectTimeout: "not-a-duration",
 	})
-	require.ErrorContains(t, err, "unsupported S3 property")
+	require.ErrorContains(t, err, "invalid s3.connect-timeout")
+}
+
+func TestParseAWSConfigConnectTimeout(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		timeout string
+		want    time.Duration
+	}{
+		{
+			name:    "integer seconds",
+			timeout: "60",
+			want:    60 * time.Second,
+		},
+		{
+			name:    "decimal seconds",
+			timeout: "60.0",
+			want:    60 * time.Second,
+		},
+		{
+			name:    "fractional seconds",
+			timeout: "1.5",
+			want:    1500 * time.Millisecond,
+		},
+		{
+			name:    "go duration",
+			timeout: "5s",
+			want:    5 * time.Second,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg, err := ParseAWSConfig(context.Background(), map[string]string{
+				io.S3Region:         "us-east-1",
+				io.S3ConnectTimeout: tt.timeout,
+			})
+			require.NoError(t, err)
+
+			client, ok := cfg.HTTPClient.(*awshttp.BuildableClient)
+			require.True(t, ok)
+			assert.Equal(t, tt.want, client.GetDialer().Timeout)
+		})
+	}
+}
+
+func TestParseAWSConfigConnectTimeoutRejectsNonPositiveDurations(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		timeout string
+	}{
+		{
+			name:    "zero",
+			timeout: "0",
+		},
+		{
+			name:    "negative",
+			timeout: "-5s",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := ParseAWSConfig(context.Background(), map[string]string{
+				io.S3Region:         "us-east-1",
+				io.S3ConnectTimeout: tt.timeout,
+			})
+			require.ErrorContains(t, err, "must be a positive duration")
+		})
+	}
+}
+
+func TestParseAWSConfigProxyAndConnectTimeout(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := ParseAWSConfig(context.Background(), map[string]string{
+		io.S3Region:         "us-east-1",
+		io.S3ProxyURI:       "http://proxy.example.com:8080",
+		io.S3ConnectTimeout: "5s",
+	})
+	require.NoError(t, err)
+
+	client, ok := cfg.HTTPClient.(*awshttp.BuildableClient)
+	require.True(t, ok)
+	assert.Equal(t, 5*time.Second, client.GetDialer().Timeout)
+
+	proxyFunc := client.GetTransport().Proxy
+	require.NotNil(t, proxyFunc)
+
+	proxyURL, err := proxyFunc(&http.Request{
+		URL: &url.URL{Scheme: "https", Host: "bucket.s3.amazonaws.com"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, proxyURL)
+	assert.Equal(t, "http://proxy.example.com:8080", proxyURL.String())
 }
 
 func TestResolveUsePathStyle(t *testing.T) {
