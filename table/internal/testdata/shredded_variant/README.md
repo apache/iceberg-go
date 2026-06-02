@@ -19,18 +19,3 @@ Each `*.variant.bin` file is the variant metadata bytes immediately
 followed by the variant value bytes (no length prefix). Use the
 in-package `splitVariantBin` helper to slice them apart before
 constructing a `variant.Value`.
-
-## Refreshing the fixtures
-
-The upstream files live in
-`apache/parquet-testing/shredded_variant/`. Update with `gh api`:
-
-```bash
-gh api repos/apache/parquet-testing/contents/shredded_variant/<file> \
-    | python3 -c 'import sys, json, base64; data = json.load(sys.stdin); sys.stdout.buffer.write(base64.b64decode(data["content"]))' \
-    > <file>
-```
-
-When apache/iceberg-go#986 (shredded reader) lands, this directory
-should be expanded to cover every applicable `cases.json` entry so
-the iceberg-go reader can self-verify too.
