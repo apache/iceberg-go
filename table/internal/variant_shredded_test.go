@@ -252,5 +252,6 @@ func toInt64(v any) *int64 {
 	default:
 		return nil
 	}
+
 	return &i
 }

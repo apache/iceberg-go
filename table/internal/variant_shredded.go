@@ -83,6 +83,7 @@ func ReassembleShreddedVariant(metadata, value []byte, typedValue arrow.Array, r
 func ReassembleShreddedVariantColumn(arr *extensions.VariantArray, mem memory.Allocator) (*extensions.VariantArray, error) {
 	if !arr.IsShredded() {
 		arr.Retain()
+
 		return arr, nil
 	}
 	if mem == nil {
@@ -133,8 +134,9 @@ func singleRowBinary(mem memory.Allocator, b []byte, nullable bool) arrow.Array 
 // When the inner schema has no shredded columns the wrapper is a no-op.
 type reassemblingRecordReader struct {
 	inner       array.RecordReader
-	schema      *arrow.Schema   // schema with shredded variant types rewritten to non-shredded
-	variantCols []int           // top-level column indices that need post-processing
+	mem         memory.Allocator
+	schema      *arrow.Schema // schema with shredded variant types rewritten to non-shredded
+	variantCols []int         // top-level column indices that need post-processing
 	cur         arrow.RecordBatch
 	refCount    atomic.Int64
 }
@@ -180,6 +182,7 @@ func WrapShreddedVariantReader(inner array.RecordReader, mem memory.Allocator) a
 	srcMeta := inner.Schema().Metadata()
 	rdr := &reassemblingRecordReader{
 		inner:       inner,
+		mem:         mem,
 		schema:      arrow.NewSchema(dstFields, &srcMeta),
 		variantCols: variantCols,
 	}
@@ -241,7 +244,7 @@ func (r *reassemblingRecordReader) materialize(rec arrow.RecordBatch) arrow.Reco
 		if !ok || !vArr.IsShredded() {
 			continue
 		}
-		reassembled, err := ReassembleShreddedVariantColumn(vArr, memory.DefaultAllocator)
+		reassembled, err := ReassembleShreddedVariantColumn(vArr, r.mem)
 		if err != nil {
 			// Best-effort: keep the original column and let downstream
 			// .Value(i) calls surface the underlying error per row.
@@ -251,7 +254,7 @@ func (r *reassemblingRecordReader) materialize(rec arrow.RecordBatch) arrow.Reco
 		cols[idx] = reassembled
 	}
 
-	out := array.NewRecord(r.schema, cols, rec.NumRows())
+	out := array.NewRecordBatch(r.schema, cols, rec.NumRows())
 	for _, c := range cols {
 		c.Release()
 	}
