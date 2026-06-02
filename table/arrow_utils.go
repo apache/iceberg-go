@@ -1686,10 +1686,10 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 	targetFileSize := int64(meta.props.GetInt(WriteTargetFileSizeBytesKey,
 		WriteTargetFileSizeBytesDefault))
 
-	cw := newConcurrentDataFileWriter(func(rootLocation string, fs iceio.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
-		return newPositionDeleteWriter(rootLocation, fs, meta, props, opts...)
-	}, withSchemaSanitization(false))
 	if latestMetadata.PartitionSpec().IsUnpartitioned() {
+		cw := newConcurrentDataFileWriter(func(rootLocation string, fs iceio.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
+			return newPositionDeleteWriter(rootLocation, fs, meta, props, opts...)
+		}, withSchemaSanitization(false))
 		nextCount, stopCount := iter.Pull(args.counter)
 		tasks := func(yield func(WriteTask) bool) {
 			defer stopCount()
