@@ -50,12 +50,6 @@ var shreddedVariantCases = []struct {
 	{"partially shredded object — typed_value+residual merge (case-134)", "case-134.parquet", "case-134_row-0.variant.bin"},
 }
 
-// TestReassembleShreddedVariant exercises the per-row pure function
-// against the apache/parquet-testing fixtures: for each case it
-// opens the Parquet via raw pqarrow, extracts the shredded triple
-// (metadata bytes, residual value bytes, typed_value column),
-// reassembles row 0 via ReassembleShreddedVariant, and asserts
-// structural equality with the canonical .variant.bin reference.
 func TestReassembleShreddedVariant(t *testing.T) {
 	for _, tc := range shreddedVariantCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -76,12 +70,6 @@ func TestReassembleShreddedVariant(t *testing.T) {
 	}
 }
 
-// TestShreddedVariantInvisibleToScanner reads each fixture through
-// iceberg-go's parquetFormat.Open + GetRecords path — the same path
-// the table scanner uses — and asserts (a) the variant column the
-// scanner sees is non-shredded (the WrapShreddedVariantReader
-// contract) and (b) calling .Value(0) on it reassembles to the
-// canonical reference variant.
 func TestShreddedVariantInvisibleToScanner(t *testing.T) {
 	ctx := context.Background()
 	fm := internal.GetFileFormat(iceberg.ParquetFile)
@@ -114,10 +102,9 @@ func TestShreddedVariantInvisibleToScanner(t *testing.T) {
 	}
 }
 
-// openVariantArray opens a fixture parquet via raw pqarrow (no
-// iceberg-go pruning) and returns the last column as a VariantArray.
-// The fixtures all use "id" + "var" so the variant is the trailing
-// column. Caller owns Release.
+// openVariantArray reads a fixture via raw pqarrow and returns the last column
+// as a VariantArray. Fixtures use "id"+"var" so the variant is always last.
+// Caller owns Release.
 func openVariantArray(t *testing.T, path string) *extensions.VariantArray {
 	t.Helper()
 	f, err := os.Open(path)
@@ -144,8 +131,6 @@ func openVariantArray(t *testing.T, path string) *extensions.VariantArray {
 	return v
 }
 
-// lastVariantColumn returns the last column of rec cast to
-// *extensions.VariantArray.
 func lastVariantColumn(t *testing.T, rec arrow.RecordBatch) *extensions.VariantArray {
 	t.Helper()
 	col := rec.Column(int(rec.NumCols()) - 1)
@@ -174,10 +159,8 @@ func allColumnIndices(t *testing.T, path string) []int {
 	return out
 }
 
-// readVariantBin parses a .variant.bin (concatenated metadata||value
-// per apache/parquet-testing's encoding) into a variant.Value. Split
-// logic mirrors arrow-go's pqarrow variant_test.go so the fixture
-// format stays in lockstep with upstream test data.
+// readVariantBin parses a .variant.bin file (metadata bytes immediately
+// followed by value bytes) by reading the metadata header to find the split.
 func readVariantBin(t *testing.T, path string) variant.Value {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -205,11 +188,9 @@ func readVariantUnsigned(b []byte) uint64 {
 	return binary.LittleEndian.Uint64(buf[:])
 }
 
-// assertVariantStructurallyEqual compares two variant values by
-// walking object/array shape and comparing primitive payloads.
-// Mirrors arrow-go's assertVariantEqual — Bytes() comparisons are
-// fragile because semantically-equal values may re-encode to
-// different bytes.
+// assertVariantStructurallyEqual walks object/array shape and compares
+// primitive payloads. Bytes() is avoided because semantically-equal
+// values may re-encode to different byte sequences.
 func assertVariantStructurallyEqual(t *testing.T, expected, actual variant.Value) {
 	t.Helper()
 	switch expected.BasicType() {

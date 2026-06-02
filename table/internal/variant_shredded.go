@@ -28,26 +28,10 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/variant"
 )
 
-// ReassembleShreddedVariant returns the variant.Value reconstructed
-// from one row of a shredded Parquet variant column, following the
-// Parquet Variant Shredding spec:
-//
-//   - typed_value wins when present at any level,
-//   - the residual value supplies fields that typed_value omits,
-//   - object fields are merged element-wise.
-//
-// metadata is the variant metadata bytes for the row. value is the
-// residual variant value bytes (may be empty/nil if the whole value
-// is shredded). typedValue is the typed_value column of the
-// shredded variant — its data type must already satisfy the
-// shredding-spec invariants that arrow-go's
-// extensions.NewVariantType enforces. row is the index into
-// typedValue to reconstruct.
-//
-// The actual walk is delegated to arrow-go's *extensions.VariantArray
-// reader, which implements the spec. This wrapper exists so the
-// shredded-vs-non-shredded distinction has a single named entry
-// point.
+// ReassembleShreddedVariant reconstructs the variant.Value for one row of a
+// shredded Parquet variant column (typed_value wins per-field; residual value
+// supplies fields typed_value omits; object fields are merged element-wise).
+// The spec walk is delegated to arrow-go's *extensions.VariantArray.
 func ReassembleShreddedVariant(metadata, value []byte, typedValue arrow.Array, row int) (variant.Value, error) {
 	if typedValue == nil {
 		// Pure unshredded path — no typed_value, just (metadata, value).
@@ -93,17 +77,9 @@ func ReassembleShreddedVariant(metadata, value []byte, typedValue arrow.Array, r
 	return variantArr.Value(0)
 }
 
-// ReassembleShreddedVariantColumn rewrites a *extensions.VariantArray
-// that uses the 3-field shredded storage into a non-shredded
-// *extensions.VariantArray whose per-row .Value(i) is byte-equivalent
-// to the input's reassembled variant.
-//
-// Used from the Parquet read path so a shredded column is invisible
-// to the scanner: downstream callers see the same
-// struct<metadata, value> layout regardless of how the Parquet file
-// was written. If arr is already non-shredded the function returns
-// arr unchanged (with a Retain) so the caller can keep using its
-// Release pattern uniformly.
+// ReassembleShreddedVariantColumn rewrites a shredded *extensions.VariantArray
+// into a non-shredded one. If arr is already non-shredded it is returned
+// unchanged (with a Retain) so callers can use a uniform Release pattern.
 func ReassembleShreddedVariantColumn(arr *extensions.VariantArray, mem memory.Allocator) (*extensions.VariantArray, error) {
 	if !arr.IsShredded() {
 		arr.Retain()
@@ -152,15 +128,9 @@ func singleRowBinary(mem memory.Allocator, b []byte, nullable bool) arrow.Array 
 	return bldr.NewArray()
 }
 
-// reassemblingRecordReader wraps an array.RecordReader so that any
-// shredded variant column in each record is replaced with its
-// reassembled non-shredded equivalent before being handed to the
-// caller. Downstream code sees a uniform struct<metadata, value>
-// layout regardless of how the underlying Parquet file encoded the
-// column.
-//
-// If the inner reader's schema has no shredded variant columns the
-// wrapper passes records through unchanged.
+// reassemblingRecordReader wraps an array.RecordReader and replaces shredded
+// variant columns with reassembled non-shredded equivalents on each Next call.
+// When the inner schema has no shredded columns the wrapper is a no-op.
 type reassemblingRecordReader struct {
 	inner       array.RecordReader
 	schema      *arrow.Schema   // schema with shredded variant types rewritten to non-shredded
@@ -170,12 +140,9 @@ type reassemblingRecordReader struct {
 }
 
 // WrapShreddedVariantReader returns a RecordReader that transparently
-// reassembles shredded variant columns produced by the inner reader.
-// The returned reader's Schema reports the rewritten (non-shredded)
-// variant types so the rest of the pipeline sees the same shape
-// regardless of physical encoding. When the inner schema has no
-// shredded variant columns, the returned reader is a thin pass-
-// through that shares the inner schema and never copies records.
+// reassembles shredded variant columns so the scanner always sees the
+// non-shredded layout. When the inner schema has no shredded columns,
+// the inner reader is returned unchanged.
 func WrapShreddedVariantReader(inner array.RecordReader, mem memory.Allocator) array.RecordReader {
 	if mem == nil {
 		mem = memory.DefaultAllocator
@@ -256,10 +223,9 @@ func (r *reassemblingRecordReader) Next() bool {
 func (r *reassemblingRecordReader) RecordBatch() arrow.RecordBatch { return r.cur }
 func (r *reassemblingRecordReader) Record() arrow.RecordBatch      { return r.cur }
 
-// materialize rebuilds rec with shredded variant columns reassembled
-// in place. The new RecordBatch carries the wrapper's rewritten
-// schema. On reassembly failure the row is left untouched and the
-// error surfaces via Err() on the next iteration boundary.
+// materialize returns rec with shredded variant columns replaced by their
+// reassembled equivalents. On failure the original column is kept and the
+// error surfaces through the next Err() call.
 func (r *reassemblingRecordReader) materialize(rec arrow.RecordBatch) arrow.RecordBatch {
 	rec.Retain()
 	numCols := int(rec.NumCols())
