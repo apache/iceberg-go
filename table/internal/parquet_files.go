@@ -813,7 +813,12 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 		}
 	}
 
-	return w.GetRecordReader(ctx, cols, rgList)
+	inner, err := w.GetRecordReader(ctx, cols, rgList)
+	if err != nil {
+		return nil, err
+	}
+
+	return WrapShreddedVariantReader(inner, compute.GetAllocator(ctx)), nil
 }
 
 // buildFieldIDToColIdx maps each Iceberg field ID to its 0-based column index in
