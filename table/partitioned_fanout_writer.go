@@ -36,10 +36,10 @@ import (
 // a partition specification, writing data to separate files for each partition using
 // a fanout pattern with configurable parallelism.
 type partitionedFanoutWriter struct {
-	partitionSpec            iceberg.PartitionSpec
-	schema                   *iceberg.Schema
-	itr                      iter.Seq2[arrow.RecordBatch, error]
-	writerFactory            *writerFactory
+	partitionSpec iceberg.PartitionSpec
+	schema        *iceberg.Schema
+	itr           iter.Seq2[arrow.RecordBatch, error]
+	writerFactory *writerFactory
 }
 
 // PartitionInfo holds the row indices and partition values for a specific partition,
@@ -54,10 +54,10 @@ type partitionInfo struct {
 // partition specification, schema, record iterator, and writerFactory.
 func newPartitionedFanoutWriter(partitionSpec iceberg.PartitionSpec, schema *iceberg.Schema, itr iter.Seq2[arrow.RecordBatch, error], writerFactory *writerFactory) *partitionedFanoutWriter {
 	return &partitionedFanoutWriter{
-		partitionSpec:            partitionSpec,
-		schema:                   schema,
-		itr:                      itr,
-		writerFactory:            writerFactory,
+		partitionSpec: partitionSpec,
+		schema:        schema,
+		itr:           itr,
+		writerFactory: writerFactory,
 	}
 }
 

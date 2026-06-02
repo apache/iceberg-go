@@ -233,30 +233,30 @@ func (w *writerFactory) partitionLocProvider(partitionPath string) (LocationProv
 // RollingDataWriter writes Arrow records for a specific partition, rolling to
 // new data files when the actual compressed file size reaches the target.
 type RollingDataWriter struct {
-	partitionKey     string
-	partitionID      int
-	fileCount        atomic.Int64
-	recordCh         chan arrow.RecordBatch
-	errorCh          chan error
-	factory          *writerFactory
-	partitionValues  map[int]any
-	ctx              context.Context
-	cancel           context.CancelFunc
-	wg               sync.WaitGroup
+	partitionKey    string
+	partitionID     int
+	fileCount       atomic.Int64
+	recordCh        chan arrow.RecordBatch
+	errorCh         chan error
+	factory         *writerFactory
+	partitionValues map[int]any
+	ctx             context.Context
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
 }
 
 func (w *writerFactory) newRollingDataWriter(ctx context.Context, partition string, partitionValues map[int]any, outputDataFilesCh chan<- iceberg.DataFile) *RollingDataWriter {
 	ctx, cancel := context.WithCancel(ctx)
 	partitionID := int(w.partitionIDCounter.Add(1) - 1)
 	writer := &RollingDataWriter{
-		partitionKey:     partition,
-		partitionID:      partitionID,
-		recordCh:         make(chan arrow.RecordBatch, 64),
-		errorCh:          make(chan error, 1),
-		factory:          w,
-		partitionValues:  partitionValues,
-		ctx:              ctx,
-		cancel:           cancel,
+		partitionKey:    partition,
+		partitionID:     partitionID,
+		recordCh:        make(chan arrow.RecordBatch, 64),
+		errorCh:         make(chan error, 1),
+		factory:         w,
+		partitionValues: partitionValues,
+		ctx:             ctx,
+		cancel:          cancel,
 	}
 
 	writer.wg.Add(1)
