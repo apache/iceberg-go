@@ -243,10 +243,9 @@ type RollingDataWriter struct {
 	ctx              context.Context
 	cancel           context.CancelFunc
 	wg               sync.WaitGroup
-	concurrentWriter *concurrentDataFileWriter
 }
 
-func (w *writerFactory) newRollingDataWriter(ctx context.Context, concurrentWriter *concurrentDataFileWriter, partition string, partitionValues map[int]any, outputDataFilesCh chan<- iceberg.DataFile) *RollingDataWriter {
+func (w *writerFactory) newRollingDataWriter(ctx context.Context, partition string, partitionValues map[int]any, outputDataFilesCh chan<- iceberg.DataFile) *RollingDataWriter {
 	ctx, cancel := context.WithCancel(ctx)
 	partitionID := int(w.partitionIDCounter.Add(1) - 1)
 	writer := &RollingDataWriter{
@@ -257,7 +256,6 @@ func (w *writerFactory) newRollingDataWriter(ctx context.Context, concurrentWrit
 		factory:          w,
 		partitionValues:  partitionValues,
 		ctx:              ctx,
-		concurrentWriter: concurrentWriter,
 		cancel:           cancel,
 	}
 
@@ -267,7 +265,7 @@ func (w *writerFactory) newRollingDataWriter(ctx context.Context, concurrentWrit
 	return writer
 }
 
-func (w *writerFactory) getOrCreateRollingDataWriter(ctx context.Context, concurrentWriter *concurrentDataFileWriter, partition string, partitionValues map[int]any, outputDataFilesCh chan<- iceberg.DataFile) (*RollingDataWriter, error) {
+func (w *writerFactory) getOrCreateRollingDataWriter(ctx context.Context, partition string, partitionValues map[int]any, outputDataFilesCh chan<- iceberg.DataFile) (*RollingDataWriter, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -279,7 +277,7 @@ func (w *writerFactory) getOrCreateRollingDataWriter(ctx context.Context, concur
 		return nil, fmt.Errorf("invalid writer type for partition: %s", partition)
 	}
 
-	writer := w.newRollingDataWriter(ctx, concurrentWriter, partition, partitionValues, outputDataFilesCh)
+	writer := w.newRollingDataWriter(ctx, partition, partitionValues, outputDataFilesCh)
 	w.writers.Store(partition, writer)
 
 	return writer, nil

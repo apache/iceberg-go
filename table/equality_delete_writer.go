@@ -184,7 +184,7 @@ func equalityDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 		}
 
 		partitionWriter := newPartitionedFanoutWriter(
-			partitionSpec, cw, writeSchema, args.itr, factory)
+			partitionSpec, writeSchema, args.itr, factory)
 		workers := config.EnvConfig.MaxWorkers
 
 		return partitionWriter.Write(ctx, workers), nil
