@@ -46,6 +46,8 @@ var shreddedVariantCases = []struct {
 	{"int8 primitive (case-006)", "case-006.parquet", "case-006_row-0.variant.bin"},
 	{"int64 primitive (case-012)", "case-012.parquet", "case-012_row-0.variant.bin"},
 	{"object with null + empty string (case-046)", "case-046.parquet", "case-046_row-0.variant.bin"},
+	{"nested shredded object (case-044)", "case-044.parquet", "case-044_row-0.variant.bin"},
+	{"partially shredded object — typed_value+residual merge (case-134)", "case-134.parquet", "case-134_row-0.variant.bin"},
 }
 
 // TestReassembleShreddedVariant exercises the per-row pure function
@@ -236,12 +238,38 @@ func assertVariantStructurallyEqual(t *testing.T, expected, actual variant.Value
 			assertVariantStructurallyEqual(t, expVal, actVal)
 		}
 	default:
-		assert.Equal(t, expected.Value(), actual.Value(),
-			"primitive mismatch: expected %v (%T), got %v (%T)",
-			expected.Value(), expected.Value(), actual.Value(), actual.Value())
+		ev, av := expected.Value(), actual.Value()
+		// Integer types may differ in width between the Java reference encoding
+		// and what arrow-go produces from the Parquet typed_value column type.
+		// Compare by numeric value in that case.
+		if ei := toInt64(ev); ei != nil {
+			ai := toInt64(av)
+			require.NotNil(t, ai, "primitive mismatch: expected integer %v (%T), got %v (%T)", ev, ev, av, av)
+			assert.Equal(t, *ei, *ai, "integer value mismatch")
+		} else {
+			assert.Equal(t, ev, av,
+				"primitive mismatch: expected %v (%T), got %v (%T)", ev, ev, av, av)
+		}
 	}
 }
 
 func fixturePath(name string) string {
 	return filepath.Join("testdata", "shredded_variant", name)
+}
+
+func toInt64(v any) *int64 {
+	var i int64
+	switch x := v.(type) {
+	case int8:
+		i = int64(x)
+	case int16:
+		i = int64(x)
+	case int32:
+		i = int64(x)
+	case int64:
+		i = x
+	default:
+		return nil
+	}
+	return &i
 }

@@ -12,6 +12,8 @@ Parquet reference readers.
 | `case-006.parquet` + `_row-0.variant.bin` | 6 | `testShreddedVariantPrimitives` | `INT8` (34) |
 | `case-012.parquet` + `_row-0.variant.bin` | 12 | `testShreddedVariantPrimitives` | `INT64` (9876543210) |
 | `case-046.parquet` + `_row-0.variant.bin` | 46 | `testShreddedObject` | `{a: null, b: ""}` |
+| `case-044.parquet` + `_row-0.variant.bin` | 44 | `testShreddedObjectWithinShreddedObject` | `{c: {a: 34, b: "iceberg"}, d: -0.0}` |
+| `case-134.parquet` + `_row-0.variant.bin` | 134 | `testPartiallyShreddedObject` | `{a: null, b: "iceberg", d: DATE(2024-01-30)}` |
 
 ## Variant `.bin` encoding
 
