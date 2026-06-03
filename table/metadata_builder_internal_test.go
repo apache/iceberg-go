@@ -18,6 +18,7 @@
 package table
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"testing"
@@ -1835,5 +1836,76 @@ func TestUnknownTypeValidation(t *testing.T) {
 		err := checkSchemaCompatibility(invalidSchema, 3)
 		require.Error(t, err, "should error when unknown type is used as map value")
 		require.ErrorContains(t, err, "must be optional")
+	})
+}
+
+func TestMetadataBuilderNameMapping(t *testing.T) {
+	idPtr := func(v int) *int { return &v }
+
+	nested := iceberg.NameMapping{
+		{FieldID: idPtr(1), Names: []string{"foo"}},
+		{FieldID: idPtr(2), Names: []string{"bar", "bar_legacy"}},
+		{FieldID: idPtr(3), Names: []string{"location"}, Fields: []iceberg.MappedField{
+			{FieldID: idPtr(4), Names: []string{"element"}, Fields: []iceberg.MappedField{
+				{FieldID: idPtr(5), Names: []string{"latitude"}},
+				{FieldID: idPtr(6), Names: []string{"longitude"}},
+			}},
+		}},
+		{FieldID: idPtr(7), Names: []string{"props"}, Fields: []iceberg.MappedField{
+			{FieldID: idPtr(8), Names: []string{"key"}},
+			{FieldID: idPtr(9), Names: []string{"value"}},
+		}},
+	}
+
+	t.Run("ReturnsNilWhenPropertyMissing", func(t *testing.T) {
+		builder := builderWithoutChanges(2)
+		require.NotContains(t, builder.props, DefaultNameMappingKey)
+		require.Nil(t, builder.NameMapping())
+	})
+
+	t.Run("ReturnsParsedMappingFromValidJSON", func(t *testing.T) {
+		builder := builderWithoutChanges(2)
+		mappingJSON, err := json.Marshal(nested)
+		require.NoError(t, err)
+
+		require.NoError(t, builder.SetProperties(iceberg.Properties{
+			DefaultNameMappingKey: string(mappingJSON),
+		}))
+
+		got := builder.NameMapping()
+		require.NotNil(t, got)
+		require.Equal(t, nested, got)
+	})
+
+	t.Run("RoundTripsThroughBuildAndReload", func(t *testing.T) {
+		builder := builderWithoutChanges(2)
+		mappingJSON, err := json.Marshal(nested)
+		require.NoError(t, err)
+
+		require.NoError(t, builder.SetProperties(iceberg.Properties{
+			DefaultNameMappingKey: string(mappingJSON),
+		}))
+		meta, err := builder.Build()
+		require.NoError(t, err)
+
+		reloaded, err := MetadataBuilderFromBase(meta, "s3://bucket/test/location/metadata/metadata2.json")
+		require.NoError(t, err)
+		require.Equal(t, nested, reloaded.NameMapping())
+	})
+
+	t.Run("ReturnsNilForNonJSONStringRepresentation", func(t *testing.T) {
+		builder := builderWithoutChanges(2)
+		require.NoError(t, builder.SetProperties(iceberg.Properties{
+			DefaultNameMappingKey: nested.String(),
+		}))
+		require.Nil(t, builder.NameMapping())
+	})
+
+	t.Run("ReturnsNilForMalformedJSON", func(t *testing.T) {
+		builder := builderWithoutChanges(2)
+		require.NoError(t, builder.SetProperties(iceberg.Properties{
+			DefaultNameMappingKey: "{not valid json",
+		}))
+		require.Nil(t, builder.NameMapping())
 	})
 }
