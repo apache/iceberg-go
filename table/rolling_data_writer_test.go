@@ -26,6 +26,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/file"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	tblutils "github.com/apache/iceberg-go/table/internal"
@@ -451,4 +453,201 @@ func (s *RollingDataWriterTestSuite) TestPartitionLocProviderPreservesObjectStor
 	s.Contains(dataLoc, "table_location/data/dt=2026-06-04/")
 	s.NotEqual("table_location/data/dt=2026-06-04/a", dataLoc,
 		"object storage layout should inject an entropy hash prefix between partition dir and file")
+}
+
+// TestSortsRowsBeforeWriting exercises the sort-on-write path: the rolling
+// data writer must reorder rows according to the table's default sort order
+// before flushing them to the data file. We use a multi-key order with mixed
+// directions and null placement to cover the full SortField surface.
+func (s *RollingDataWriterTestSuite) TestSortsRowsBeforeWriting() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	icebergSchema, err := ArrowSchemaToIcebergWithFreshIDs(arrSchema, false)
+	s.Require().NoError(err)
+	idFieldID := icebergSchema.Fields()[0].ID
+	nameFieldID := icebergSchema.Fields()[1].ID
+
+	// id ASC NULLS LAST, name DESC NULLS FIRST.
+	sortOrder, err := NewSortOrder(1, []SortField{
+		{SourceIDs: []int{idFieldID}, Transform: iceberg.IdentityTransform{}, Direction: SortASC, NullOrder: NullsLast},
+		{SourceIDs: []int{nameFieldID}, Transform: iceberg.IdentityTransform{}, Direction: SortDESC, NullOrder: NullsFirst},
+	})
+	s.Require().NoError(err)
+
+	loc := filepath.ToSlash(s.T().TempDir())
+	spec := iceberg.NewPartitionSpec()
+	meta, err := NewMetadata(icebergSchema, &spec, UnsortedSortOrder, loc, iceberg.Properties{})
+	s.Require().NoError(err)
+	metaBuilder, err := MetadataBuilderFromBase(meta, "")
+	s.Require().NoError(err)
+	s.Require().NoError(metaBuilder.AddSortOrder(&sortOrder))
+	s.Require().NoError(metaBuilder.SetDefaultSortOrderID(-1))
+
+	writeUUID := uuid.New()
+	args := recordWritingArgs{
+		sc:        arrSchema,
+		fs:        iceio.LocalFS{},
+		writeUUID: &writeUUID,
+		counter: func(yield func(int) bool) {
+			for i := 0; ; i++ {
+				if !yield(i) {
+					break
+				}
+			}
+		},
+	}
+
+	factory, err := newWriterFactory(loc, args, metaBuilder, icebergSchema, 1024*1024)
+	s.Require().NoError(err)
+	defer factory.closeAll()
+
+	bldr := array.NewRecordBuilder(s.mem, arrSchema)
+	defer bldr.Release()
+	idBldr := bldr.Field(0).(*array.Int32Builder)
+	nameBldr := bldr.Field(1).(*array.StringBuilder)
+	type row struct {
+		id   int32
+		idOK bool
+		name string
+		nmOK bool
+	}
+	rows := []row{
+		{id: 3, idOK: true, name: "c", nmOK: true},
+		{id: 1, idOK: true, name: "b", nmOK: true},
+		{id: 1, idOK: true, name: "a", nmOK: true},
+		{idOK: false, name: "x", nmOK: true},
+		{id: 2, idOK: true, nmOK: false},
+		{id: 1, idOK: true, name: "z", nmOK: true},
+	}
+	for _, r := range rows {
+		if r.idOK {
+			idBldr.Append(r.id)
+		} else {
+			idBldr.AppendNull()
+		}
+		if r.nmOK {
+			nameBldr.Append(r.name)
+		} else {
+			nameBldr.AppendNull()
+		}
+	}
+	record := bldr.NewRecordBatch()
+	defer record.Release()
+
+	outputCh := make(chan iceberg.DataFile, 10)
+	writer := factory.newRollingDataWriter(s.ctx, nil, "", nil, outputCh)
+	s.Require().NoError(writer.Add(record))
+	s.Require().NoError(writer.closeAndWait())
+	close(outputCh)
+
+	var dataFiles []iceberg.DataFile
+	for df := range outputCh {
+		dataFiles = append(dataFiles, df)
+	}
+	s.Require().Len(dataFiles, 1)
+
+	rdr, err := file.OpenParquetFile(dataFiles[0].FilePath(), false)
+	s.Require().NoError(err)
+	defer rdr.Close()
+	arrowRdr, err := pqarrow.NewFileReader(rdr, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	s.Require().NoError(err)
+	tbl, err := arrowRdr.ReadTable(s.ctx)
+	s.Require().NoError(err)
+	defer tbl.Release()
+
+	s.Equal(int64(len(rows)), tbl.NumRows())
+
+	type observed struct {
+		id   int32
+		idOK bool
+		name string
+		nmOK bool
+	}
+	var got []observed
+	idChunks := tbl.Column(0).Data().Chunks()
+	nameChunks := tbl.Column(1).Data().Chunks()
+	for c := range idChunks {
+		idArr := idChunks[c].(*array.Int32)
+		nameArr := nameChunks[c].(*array.String)
+		for i := 0; i < idArr.Len(); i++ {
+			o := observed{}
+			if idArr.IsValid(i) {
+				o.id = idArr.Value(i)
+				o.idOK = true
+			}
+			if nameArr.IsValid(i) {
+				o.name = nameArr.Value(i)
+				o.nmOK = true
+			}
+			got = append(got, o)
+		}
+	}
+
+	// Expected order: id ASC NULLS LAST, then name DESC NULLS FIRST.
+	want := []observed{
+		{id: 1, idOK: true, name: "z", nmOK: true},
+		{id: 1, idOK: true, name: "b", nmOK: true},
+		{id: 1, idOK: true, name: "a", nmOK: true},
+		{id: 2, idOK: true, nmOK: false},
+		{id: 3, idOK: true, name: "c", nmOK: true},
+		{idOK: false, name: "x", nmOK: true},
+	}
+	s.Equal(want, got)
+}
+
+// TestUnsortedOrderIsNoOp confirms that when the table has no sort order
+// (id 0), batches are written in arrival order — i.e. the sort path costs
+// nothing for unsorted tables.
+func (s *RollingDataWriterTestSuite) TestUnsortedOrderIsNoOp() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	loc := filepath.ToSlash(s.T().TempDir())
+	factory, _ := s.createWriterFactory(loc, arrSchema, 1024*1024)
+	defer factory.closeAll()
+	s.Require().Nil(factory.sortKeys, "unsorted tables must skip sort key resolution")
+
+	bldr := array.NewRecordBuilder(s.mem, arrSchema)
+	defer bldr.Release()
+	for _, v := range []int32{3, 1, 2} {
+		bldr.Field(0).(*array.Int32Builder).Append(v)
+		bldr.Field(1).(*array.StringBuilder).Append("x")
+	}
+	record := bldr.NewRecordBatch()
+	defer record.Release()
+
+	outputCh := make(chan iceberg.DataFile, 10)
+	writer := factory.newRollingDataWriter(s.ctx, nil, "", nil, outputCh)
+	s.Require().NoError(writer.Add(record))
+	s.Require().NoError(writer.closeAndWait())
+	close(outputCh)
+
+	var dataFiles []iceberg.DataFile
+	for df := range outputCh {
+		dataFiles = append(dataFiles, df)
+	}
+	s.Require().Len(dataFiles, 1)
+
+	rdr, err := file.OpenParquetFile(dataFiles[0].FilePath(), false)
+	s.Require().NoError(err)
+	defer rdr.Close()
+	arrowRdr, err := pqarrow.NewFileReader(rdr, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	s.Require().NoError(err)
+	tbl, err := arrowRdr.ReadTable(s.ctx)
+	s.Require().NoError(err)
+	defer tbl.Release()
+
+	var ids []int32
+	for _, chunk := range tbl.Column(0).Data().Chunks() {
+		arr := chunk.(*array.Int32)
+		for i := 0; i < arr.Len(); i++ {
+			ids = append(ids, arr.Value(i))
+		}
+	}
+	s.Equal([]int32{3, 1, 2}, ids, "unsorted order must preserve arrival order")
 }
