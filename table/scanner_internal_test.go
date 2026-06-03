@@ -18,6 +18,7 @@
 package table
 
 import (
+	"context"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -28,6 +29,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -234,6 +236,72 @@ func TestBuildPartitionEvaluatorWithInvalidSpecID(t *testing.T) {
 	assert.Nil(t, evaluator)
 	assert.ErrorIs(t, err, ErrPartitionSpecNotFound)
 	assert.ErrorContains(t, err, "id 999")
+}
+
+func newScanValidationMetadata(t *testing.T) Metadata {
+	t.Helper()
+
+	schema := iceberg.NewSchema(
+		1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	metadata, err := NewMetadata(
+		schema,
+		iceberg.UnpartitionedSpec,
+		UnsortedSortOrder,
+		"s3://test-bucket/test_table",
+		iceberg.Properties{},
+	)
+	require.NoError(t, err)
+
+	return metadata
+}
+
+func TestPlanFilesValidatesRowFilterWithoutCurrentSnapshot(t *testing.T) {
+	metadata := newScanValidationMetadata(t)
+
+	scan := &Scan{
+		metadata:      metadata,
+		rowFilter:     iceberg.EqualTo(iceberg.Reference("missing"), int64(1)),
+		caseSensitive: true,
+		options:       iceberg.Properties{},
+	}
+
+	_, err := scan.PlanFiles(t.Context())
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "missing")
+}
+
+func TestPlanFilesValidatesRowFilterWithEmptyManifestList(t *testing.T) {
+	metadata := newScanValidationMetadata(t)
+	builder, err := MetadataBuilderFromBase(metadata, "")
+	require.NoError(t, err)
+
+	const snapshotID = int64(1)
+	require.NoError(t, builder.AddSnapshot(&Snapshot{
+		SnapshotID:     snapshotID,
+		SequenceNumber: 1,
+		TimestampMs:    metadata.LastUpdatedMillis() + 1,
+		ManifestList:   "",
+		Summary:        &Summary{Operation: OpAppend},
+	}))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, snapshotID, BranchRef))
+
+	metadata, err = builder.Build()
+	require.NoError(t, err)
+	require.NotNil(t, metadata.CurrentSnapshot())
+
+	scan := &Scan{
+		metadata:      metadata,
+		ioF:           func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil },
+		rowFilter:     iceberg.EqualTo(iceberg.Reference("missing"), int64(1)),
+		caseSensitive: true,
+		options:       iceberg.Properties{},
+	}
+
+	_, err = scan.PlanFiles(t.Context())
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "missing")
 }
 
 // TestSynthesizeRowLineageColumns verifies that _row_id and _last_updated_sequence_number
