@@ -392,6 +392,9 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int, sourceType icebe
 
 		return iceberg.NewLiteral(iceberg.Date(arr.Value(row))), nil
 	case *array.Time64:
+		if unit := arr.DataType().(*arrow.Time64Type).Unit; unit != arrow.Microsecond {
+			return nil, fmt.Errorf("%w: unsupported arrow type for conversion - time64[%s]", iceberg.ErrInvalidSchema, unit)
+		}
 
 		return iceberg.NewLiteral(iceberg.Time(arr.Value(row))), nil
 	case *array.Timestamp:
