@@ -122,7 +122,8 @@ func WithPreserveRowLineage(schema *iceberg.Schema) WriteRecordOption {
 // field ID (or by name via the table's name mapping if field IDs are absent).
 // The Arrow schema may be a subset of the table schema (projection), but every
 // field present must have a type that is promotable to the corresponding table
-// field type.
+// field type. When the table uses microsecond timestamps, Arrow nanosecond
+// timestamps are also accepted and are downcast during the write path.
 //
 // WriteRecords releases each RecordBatch it consumes. If the caller needs a
 // batch to remain valid after it has been yielded, it must call Retain before
@@ -161,7 +162,13 @@ func WriteRecords(ctx context.Context, tbl *Table,
 	if cfg.fileSchema != nil {
 		checkSchema = cfg.fileSchema
 	}
-	if err := checkArrowSchemaCompat(checkSchema, schema, false); err != nil {
+	err := checkArrowSchemaCompat(checkSchema, schema, false)
+	if err != nil {
+		if downcastErr := checkArrowSchemaCompat(checkSchema, schema, true); downcastErr == nil {
+			err = nil
+		}
+	}
+	if err != nil {
 		return internal.SingleErrorIter[iceberg.DataFile](
 			fmt.Errorf("arrow schema is not compatible with the table schema: %w", err))
 	}

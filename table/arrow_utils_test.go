@@ -636,6 +636,64 @@ func TestToRequestedSchemaTimestamps(t *testing.T) {
 	}
 }
 
+func TestToRequestedSchemaTimestampDowncastFloorsNegativeNanoseconds(t *testing.T) {
+	tests := []struct {
+		name         string
+		sourceArrow  *arrow.TimestampType
+		sourceType   iceberg.Type
+		requested    iceberg.Type
+		expectedType *arrow.TimestampType
+	}{
+		{
+			name:         "timestamp",
+			sourceArrow:  &arrow.TimestampType{Unit: arrow.Nanosecond},
+			sourceType:   iceberg.PrimitiveTypes.TimestampNs,
+			requested:    iceberg.PrimitiveTypes.Timestamp,
+			expectedType: &arrow.TimestampType{Unit: arrow.Microsecond},
+		},
+		{
+			name:         "timestamptz",
+			sourceArrow:  &arrow.TimestampType{Unit: arrow.Nanosecond, TimeZone: "UTC"},
+			sourceType:   iceberg.PrimitiveTypes.TimestampTzNs,
+			requested:    iceberg.PrimitiveTypes.TimestampTz,
+			expectedType: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+			defer mem.AssertSize(t, 0)
+
+			arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "ts", Type: tt.sourceArrow, Nullable: true}}, nil)
+			bldr := array.NewRecordBuilder(mem, arrowSchema)
+			defer bldr.Release()
+			bldr.Field(0).(*array.TimestampBuilder).Append(arrow.Timestamp(-1_500))
+
+			rec := bldr.NewRecordBatch()
+			defer rec.Release()
+
+			requested := iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "ts", Type: tt.requested, Required: false},
+			)
+			fileSchema := iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "ts", Type: tt.sourceType, Required: false},
+			)
+
+			converted, err := table.ToRequestedSchema(ctx, requested, fileSchema, rec, table.SchemaOptions{
+				DowncastTimestamp: true,
+			})
+			require.NoError(t, err)
+			defer converted.Release()
+
+			col := converted.Column(0).(*array.Timestamp)
+			require.True(t, arrow.TypeEqual(tt.expectedType, col.DataType()))
+			assert.Equal(t, arrow.Timestamp(-2), col.Value(0))
+		})
+	}
+}
+
 func TestToRequestedSchema(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	defer mem.AssertSize(t, 0)

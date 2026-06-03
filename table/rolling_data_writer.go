@@ -343,7 +343,11 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 		}
 
 		converted, err := ToRequestedSchema(r.ctx, r.factory.fileSchema,
-			r.factory.taskSchema, record, SchemaOptions{IncludeFieldIDs: true, UseWriteDefault: true})
+			r.factory.taskSchema, record, SchemaOptions{
+				DowncastTimestamp: true,
+				IncludeFieldIDs:   true,
+				UseWriteDefault:   true,
+			})
 		if err != nil {
 			record.Release()
 			r.sendError(err)
