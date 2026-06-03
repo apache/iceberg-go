@@ -2017,6 +2017,47 @@ func (m *ManifestTestSuite) TestV2ManifestListAcceptsV1Manifests() {
 	m.Equal(manifestFileRecordsV1[0].AddedRows(), entry.AddedRows())
 }
 
+// TestManifestWriterPreservesMinSequenceNumberZero verifies that a v2 manifest
+// writer correctly records min_sequence_number=0 when all live ADDED/EXISTING
+// entries carry the v1-inherited sequence number 0. Per spec, 0 is a valid
+// minimum — it must not be treated as "unset" and replaced by the commit's
+// sequence number when the manifest is added to a manifest list.
+func (m *ManifestTestSuite) TestManifestWriterPreservesMinSequenceNumberZero() {
+	partitionSpec := NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "VendorID", Transform: IdentityTransform{}},
+		PartitionField{FieldID: 1001, SourceIDs: []int{2}, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
+
+	seqZero := int64(0)
+	oldSnapshot := int64(999)
+	entries := make([]ManifestEntry, len(manifestEntryV1Records))
+	for i, rec := range manifestEntryV1Records {
+		entries[i] = NewManifestEntry(
+			EntryStatusEXISTING,
+			&oldSnapshot,
+			&seqZero,
+			&seqZero,
+			rec.DataFile(),
+		)
+	}
+
+	var manifestBuf bytes.Buffer
+	mf, err := WriteManifest("carried-forward-v1.avro", &manifestBuf, 2, partitionSpec, testSchema, snapshotID, entries)
+	m.Require().NoError(err)
+	m.Equal(int64(0), mf.MinSequenceNum(), "min_sequence_number must be 0 for v1-inherited live entries")
+	m.Equal(int64(-1), mf.SequenceNum(), "manifest-level sequence_number is assigned by the manifest list writer")
+
+	commitSeq := int64(42)
+	var listBuf bytes.Buffer
+	err = WriteManifestList(2, &listBuf, snapshotID, nil, &commitSeq, 0, []ManifestFile{mf})
+	m.Require().NoError(err)
+
+	list, err := ReadManifestList(&listBuf)
+	m.Require().NoError(err)
+	m.Require().Len(list, 1)
+	m.Equal(int64(0), list[0].MinSequenceNum(), "manifest list must preserve min_sequence_number 0")
+	m.Equal(commitSeq, list[0].SequenceNum(), "manifest list assigns sequence_number from the commit")
+}
+
 // TestV3ManifestListAcceptsV1AndV2Manifests verifies that a v3 manifest list
 // can reference both v1 and v2 manifest files (e.g. after a v1->v3 upgrade)
 // and that first_row_id is assigned to data manifests during the write.

@@ -1228,10 +1228,6 @@ func (w *ManifestWriter) ToManifestFile(location string, length int64, opts ...M
 		return nil, err
 	}
 
-	if w.minSeqNum == initialSequenceNumber {
-		w.minSeqNum = -1
-	}
-
 	partitions, err := constructPartitionSummaries(w.spec, w.schema, w.partitions)
 	if err != nil {
 		return nil, err
@@ -1330,9 +1326,10 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 		dataFile.PartitionData = convertedPartitionData
 	}
 
-	if (entry.Status() == EntryStatusADDED || entry.Status() == EntryStatusEXISTING) &&
-		entry.SequenceNum() > 0 && (w.minSeqNum < 0 || entry.SequenceNum() < w.minSeqNum) {
-		w.minSeqNum = entry.SequenceNum()
+	if entry.Status() == EntryStatusADDED || entry.Status() == EntryStatusEXISTING {
+		if seq := entry.SequenceNum(); seq >= 0 && (w.minSeqNum < 0 || seq < w.minSeqNum) {
+			w.minSeqNum = seq
+		}
 	}
 
 	toEncode, err := w.impl.prepareEntry(entry, w.snapshotID)
