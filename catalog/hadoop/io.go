@@ -13,7 +13,7 @@ type HadoopCatalogFS interface {
 	icebergio.ReadFileIO
 	icebergio.WriteFileIO
 	StatIO
-	RemameIO
+	RenameIO
 	RemoveAllIO
 	MkdirAllIO
 	MkdirIO
@@ -26,7 +26,7 @@ type HadoopCatalogFS interface {
 var (
 	_ icebergio.IO = (*icebergio.LocalFS)(nil)
 	_ StatIO       = (*icebergio.LocalFS)(nil)
-	_ RemameIO     = (*icebergio.LocalFS)(nil)
+	_ RenameIO     = (*icebergio.LocalFS)(nil)
 	_ RemoveAllIO  = (*icebergio.LocalFS)(nil)
 	_ MkdirIO      = (*icebergio.LocalFS)(nil)
 	_ MkdirAllIO   = (*icebergio.LocalFS)(nil)
@@ -41,9 +41,9 @@ type StatIO interface {
 	Stat(name string) (fs.FileInfo, error)
 }
 
-// RemameIO is an extension of IO interface that includes the Rename
+// RenameIO is an extension of IO interface that includes the Rename
 // method for renaming (moving) files or directories; this should be atomic
-type RemameIO interface {
+type RenameIO interface {
 	icebergio.IO
 
 	Rename(oldpath, newpath string) error
