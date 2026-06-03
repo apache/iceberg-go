@@ -46,7 +46,8 @@ import (
 // Subcommand structs
 
 type ListCmd struct {
-	Parent string `arg:"positional" help:"catalog parent namespace"`
+	Parent   string `arg:"positional" help:"catalog parent namespace"`
+	PageSize int    `arg:"--page-size" help:"page size for paginated list requests (REST catalog only); 0 uses the catalog default"`
 }
 
 type DescribeCmd struct {
@@ -285,7 +286,7 @@ func main() {
 
 	switch {
 	case args.List != nil:
-		list(ctx, output, cat, args.List.Parent)
+		list(ctx, output, cat, args.List.Parent, args.List.PageSize)
 	case args.Describe != nil:
 		runDescribe(ctx, output, cat, args.Describe)
 	case args.Schema != nil:
@@ -691,8 +692,19 @@ func runCompact(ctx context.Context, output Output, cat catalog.Catalog, cmd *Co
 	}
 }
 
-func list(ctx context.Context, output Output, cat catalog.Catalog, parent string) {
+func list(ctx context.Context, output Output, cat catalog.Catalog, parent string, pageSize int) {
 	prnt := catalog.ToIdentifier(parent)
+
+	if pageSize < 0 {
+		output.Error(fmt.Errorf("--page-size must be non-negative, got %d", pageSize))
+		os.Exit(1)
+	}
+
+	if pageSize > 0 {
+		if rc, ok := cat.(*rest.Catalog); ok {
+			ctx = rc.SetPageSize(ctx, pageSize)
+		}
+	}
 
 	var ids []table.Identifier
 
