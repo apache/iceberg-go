@@ -416,6 +416,29 @@ func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial 
 }
 
 func (b *MetadataBuilder) AddSnapshot(snapshot *Snapshot) error {
+	return b.addSnapshotInternal(snapshot, nil)
+}
+
+// AddSnapshotUpdate adds a snapshot to the builder and stores the supplied
+// *addSnapshotUpdate as the corresponding entry in builder.updates, preserving
+// runtime-only fields (such as the manifest-list rebuild closure used by the
+// OCC retry path) that would be lost if a fresh update object were constructed.
+//
+// Callers without runtime-only fields should keep using AddSnapshot, which
+// constructs a default *addSnapshotUpdate internally.
+func (b *MetadataBuilder) AddSnapshotUpdate(u *addSnapshotUpdate) error {
+	if u == nil {
+		return nil
+	}
+
+	return b.addSnapshotInternal(u.Snapshot, u)
+}
+
+// addSnapshotInternal contains the shared validation and bookkeeping for both
+// AddSnapshot and AddSnapshotUpdate. When preserveUpdate is non-nil it is
+// appended to b.updates verbatim; otherwise a fresh *addSnapshotUpdate is
+// created via NewAddSnapshotUpdate.
+func (b *MetadataBuilder) addSnapshotInternal(snapshot *Snapshot, preserveUpdate *addSnapshotUpdate) error {
 	if snapshot == nil {
 		return nil
 	}
@@ -450,7 +473,11 @@ func (b *MetadataBuilder) AddSnapshot(snapshot *Snapshot) error {
 		return err
 	}
 
-	b.updates = append(b.updates, NewAddSnapshotUpdate(snapshot))
+	upd := preserveUpdate
+	if upd == nil {
+		upd = NewAddSnapshotUpdate(snapshot)
+	}
+	b.updates = append(b.updates, upd)
 	b.lastUpdatedMS = snapshot.TimestampMs
 	b.lastSequenceNumber = &snapshot.SequenceNumber
 	b.snapshotList = append(b.snapshotList, *snapshot)
@@ -681,8 +708,47 @@ func (b *MetadataBuilder) SetFormatVersion(formatVersion int) error {
 		return nil
 	}
 
+	if err := b.validateLastColumnID(); err != nil {
+		return err
+	}
+
+	previousVersion := b.formatVersion
 	b.updates = append(b.updates, NewUpgradeFormatVersionUpdate(formatVersion))
 	b.formatVersion = formatVersion
+
+	if previousVersion < 2 && formatVersion >= 2 {
+		if b.uuid == (uuid.UUID{}) {
+			b.uuid = uuid.New()
+		}
+
+		if b.lastSequenceNumber == nil {
+			seq := int64(0)
+			b.lastSequenceNumber = &seq
+		}
+	}
+
+	if previousVersion < 3 && formatVersion >= 3 {
+		if b.nextRowID == nil {
+			nextRowID := int64(0)
+			b.nextRowID = &nextRowID
+		}
+	}
+
+	return nil
+}
+
+func (b *MetadataBuilder) validateLastColumnID() error {
+	highestFieldID := 0
+	for _, schema := range b.schemaList {
+		if id := schema.HighestFieldID(); id > highestFieldID {
+			highestFieldID = id
+		}
+	}
+
+	if highestFieldID > 0 && b.lastColumnId < highestFieldID {
+		return fmt.Errorf("%w: last-column-id %d is less than the highest field ID %d in schemas",
+			ErrInvalidMetadata, b.lastColumnId, highestFieldID)
+	}
 
 	return nil
 }
@@ -979,7 +1045,7 @@ func (b *MetadataBuilder) SnapshotByID(id int64) (*Snapshot, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("snapshot with id %d not found", id)
+	return nil, fmt.Errorf("%w: id %d", ErrSnapshotNotFound, id)
 }
 
 func (b *MetadataBuilder) NameMapping() iceberg.NameMapping {
@@ -1208,6 +1274,40 @@ func (b *MetadataBuilder) RemoveStatistics(snapshotID int64) error {
 	return nil
 }
 
+// SetPartitionStatistics adds or replaces a partition statistics file for the given snapshot.
+// If a partition statistics file with the same snapshot ID already exists it is replaced,
+// otherwise the file is appended.
+func (b *MetadataBuilder) SetPartitionStatistics(stats PartitionStatisticsFile) error {
+	replaced := false
+	for i, s := range b.partitionStatsList {
+		if s.SnapshotID == stats.SnapshotID {
+			b.partitionStatsList[i] = stats
+			replaced = true
+
+			break
+		}
+	}
+
+	if !replaced {
+		b.partitionStatsList = append(b.partitionStatsList, stats)
+	}
+
+	b.updates = append(b.updates, NewSetPartitionStatisticsUpdate(stats))
+
+	return nil
+}
+
+// RemovePartitionStatistics removes the partition statistics file associated with the given
+// snapshot ID. It is not an error if no such file exists.
+func (b *MetadataBuilder) RemovePartitionStatistics(snapshotID int64) error {
+	b.partitionStatsList = slices.DeleteFunc(b.partitionStatsList, func(s PartitionStatisticsFile) bool {
+		return s.SnapshotID == snapshotID
+	})
+	b.updates = append(b.updates, NewRemovePartitionStatisticsUpdate(snapshotID))
+
+	return nil
+}
+
 // AddEncryptionKey adds or replaces an encryption key indexed by its key-id.
 // Encryption keys are only supported for format version 3 and above.
 func (b *MetadataBuilder) AddEncryptionKey(key EncryptionKey) error {
@@ -1262,6 +1362,24 @@ var (
 	ErrInvalidMetadata              = errors.New("invalid metadata")
 	ErrPartitionSpecNotFound        = errors.New("partition spec not found")
 )
+
+type versionScopedField struct {
+	name       string
+	introduced int
+	present    bool
+}
+
+func rejectFieldsBeyondVersion(currentVersion int, fields ...versionScopedField) error {
+	var errs []error
+	for _, f := range fields {
+		if f.present && currentVersion < f.introduced {
+			errs = append(errs, fmt.Errorf("%w: v%d-only field '%s' present in v%d metadata",
+				ErrInvalidMetadataFormatVersion, f.introduced, f.name, currentVersion))
+		}
+	}
+
+	return errors.Join(errs...)
+}
 
 // ParseMetadata parses json metadata provided by the passed in reader,
 // returning an error if one is encountered.
@@ -1806,6 +1924,15 @@ func (m *metadataV1) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
+	if err := rejectFieldsBeyondVersion(
+		aux.FormatVersion,
+		versionScopedField{name: "last-sequence-number", introduced: 2, present: aux.LastSequenceNumber != nil},
+		versionScopedField{name: "next-row-id", introduced: 3, present: aux.NextRowID != nil},
+		versionScopedField{name: "encryption-keys", introduced: 3, present: len(aux.EncryptionKeyList) > 0},
+	); err != nil {
+		return err
+	}
+
 	// CurrentSchemaID was optional in v1, it can also be expressed via Schema.
 	if aux.CurrentSchemaID == -1 && aux.Schema != nil {
 		aux.CurrentSchemaID = aux.Schema.ID
@@ -1869,6 +1996,14 @@ func (m *metadataV2) UnmarshalJSON(b []byte) error {
 	aux.LastColumnId = -1
 
 	if err := json.Unmarshal(b, aux); err != nil {
+		return err
+	}
+
+	if err := rejectFieldsBeyondVersion(
+		aux.FormatVersion,
+		versionScopedField{name: "next-row-id", introduced: 3, present: aux.NextRowID != nil},
+		versionScopedField{name: "encryption-keys", introduced: 3, present: len(aux.EncryptionKeyList) > 0},
+	); err != nil {
 		return err
 	}
 
@@ -1943,6 +2078,41 @@ func (m *metadataV3) UnmarshalJSON(b []byte) error {
 	m.preValidate()
 
 	return m.validate()
+}
+
+// MarshalJSON serializes v3 metadata with the spec-mandated emission of
+// `current-snapshot-id: null` for empty tables, rather than dropping the
+// key via the underlying `omitempty` tag (Java reference behaviour per
+// apache/iceberg#12335). The override re-declares `CurrentSnapshotID`
+// without omitempty in an outer struct that embeds an alias of
+// `metadataV3`; Go's encoding/json resolves the field-name collision in
+// favour of the shallower (outer) declaration, so the value is always
+// emitted — null when nil, the id otherwise.
+//
+// v1/v2 keep the omitempty path since their fixtures use the -1 sentinel
+// for "no current snapshot".
+//
+// `last-partition-id` is required for v2+ per spec — the existing parse-
+// time validation enforces this on read; the symmetric check below
+// rejects writes of malformed in-memory state (builder/parser paths
+// always populate it, so this only fires when code constructs metadataV3
+// directly and skips the builder).
+func (m *metadataV3) MarshalJSON() ([]byte, error) {
+	if m.LastPartitionID == nil {
+		return nil, fmt.Errorf("%w: last-partition-id must be set for v3 metadata", ErrInvalidMetadata)
+	}
+
+	// Alias strips the MarshalJSON method off metadataV3 so json.Marshal
+	// doesn't recurse back into this function via the embedded pointer.
+	type Alias metadataV3
+
+	return json.Marshal(&struct {
+		*Alias
+		CurrentSnapshotID *int64 `json:"current-snapshot-id"`
+	}{
+		Alias:             (*Alias)(m),
+		CurrentSnapshotID: m.CurrentSnapshotID,
+	})
 }
 
 func (m *metadataV3) validate() error {

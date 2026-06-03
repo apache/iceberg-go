@@ -147,3 +147,37 @@ func TestRowDelta_RegistersValidatorOnTransaction(t *testing.T) {
 	require.NotEmpty(t, txn.validators,
 		"RowDelta.Commit must append at least one validator to the transaction")
 }
+
+// TestFastAppend_CommitLeavesValidatorsEmpty asserts that
+// fastAppendFiles.commit() does not register a validator on
+// txn.validators. Fast-appends are commutative and need no
+// conflict validation; accumulating no-op closures is wasteful.
+func TestFastAppend_CommitLeavesValidatorsEmpty(t *testing.T) {
+	trackIO := newTrackingIO()
+	spec := iceberg.NewPartitionSpec()
+	txn := createTestTransaction(t, trackIO, spec)
+
+	sp := newFastAppendFilesProducer(OpAppend, txn, trackIO, nil, nil)
+	sp.appendDataFile(newTestDataFile(t, spec, "file://data.parquet", nil))
+
+	_, _, err := sp.commit(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, txn.validators,
+		"fastAppendFiles.commit must not register a validator on the transaction")
+}
+
+// TestMergeAppend_CommitLeavesValidatorsEmpty pins the same behaviour
+// for mergeAppendFiles, which inherits needsValidation() via embedding.
+func TestMergeAppend_CommitLeavesValidatorsEmpty(t *testing.T) {
+	trackIO := newTrackingIO()
+	spec := iceberg.NewPartitionSpec()
+	txn := createTestTransaction(t, trackIO, spec)
+
+	sp := newMergeAppendFilesProducer(OpAppend, txn, trackIO, nil, nil)
+	sp.appendDataFile(newTestDataFile(t, spec, "file://data.parquet", nil))
+
+	_, _, err := sp.commit(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, txn.validators,
+		"mergeAppendFiles.commit must not register a validator on the transaction")
+}

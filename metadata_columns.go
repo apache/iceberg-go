@@ -17,13 +17,16 @@
 
 package iceberg
 
-// Row lineage metadata column field IDs (v3+). Reserved IDs are Integer.MAX_VALUE - 107 and 108
-// per the Iceberg spec (Metadata Columns / Row Lineage).
+import "slices"
+
+// Row lineage metadata column field IDs (v3+). Reserved IDs are Integer.MAX_VALUE - 107
+// and Integer.MAX_VALUE - 108 per the Iceberg spec (Metadata Columns / Row Lineage).
 const (
 	// RowIDFieldID is the field ID for _row_id (optional long). A unique long identifier for every row.
+	// Reserved as Integer.MAX_VALUE - 107.
 	RowIDFieldID = 2147483540
 	// LastUpdatedSequenceNumberFieldID is the field ID for _last_updated_sequence_number (optional long).
-	// The sequence number of the commit that last updated the row.
+	// The sequence number of the commit that last updated the row. Reserved as Integer.MAX_VALUE - 108.
 	LastUpdatedSequenceNumberFieldID = 2147483539
 )
 
@@ -58,4 +61,67 @@ func LastUpdatedSequenceNumber() NestedField {
 // IsMetadataColumn returns true if the field ID is a reserved metadata column (e.g. row lineage).
 func IsMetadataColumn(fieldID int) bool {
 	return fieldID == RowIDFieldID || fieldID == LastUpdatedSequenceNumberFieldID
+}
+
+// SchemaWithRowLineage returns a new schema with the row-lineage metadata columns
+// (_row_id, _last_updated_sequence_number) appended to the given schema's fields.
+// Used when reading source files during a CoW rewrite or compaction so that row
+// identity and per-row update sequence are preserved in the output.
+//
+// Idempotent: if a row-lineage column is already present (by reserved field ID),
+// it is not appended again. The returned schema always allocates a fresh field
+// slice so it cannot alias the input schema's backing array.
+func SchemaWithRowLineage(s *Schema) *Schema {
+	if s == nil {
+		return nil
+	}
+	// Clone the field slice up front so we never share a backing array with the
+	// caller's schema — append-with-spare-capacity could otherwise mutate the
+	// source schema's fields when the caller next mutates either side.
+	fields := slices.Clone(s.Fields())
+
+	hasRowID := false
+	hasSeqNum := false
+	for _, f := range fields {
+		switch f.ID {
+		case RowIDFieldID:
+			hasRowID = true
+		case LastUpdatedSequenceNumberFieldID:
+			hasSeqNum = true
+		}
+	}
+
+	if !hasRowID {
+		fields = append(fields, RowID())
+	}
+	if !hasSeqNum {
+		fields = append(fields, LastUpdatedSequenceNumber())
+	}
+
+	return NewSchemaWithIdentifiers(s.ID, s.IdentifierFieldIDs, fields...)
+}
+
+// SchemaWithRowID returns a new schema with only the _row_id metadata column
+// appended. _last_updated_sequence_number is intentionally omitted: leaving it
+// absent in the written Parquet means readers synthesize it from the manifest
+// entry's data_sequence_number, which is the new file's snapshot sequence
+// number after the rewrite — exactly the value the spec requires for rewritten
+// rows without an explicit override.
+//
+// Idempotent on RowIDFieldID; allocates a fresh field slice.
+func SchemaWithRowID(s *Schema) *Schema {
+	if s == nil {
+		return nil
+	}
+	fields := slices.Clone(s.Fields())
+
+	for _, f := range fields {
+		if f.ID == RowIDFieldID {
+			return NewSchemaWithIdentifiers(s.ID, s.IdentifierFieldIDs, fields...)
+		}
+	}
+
+	fields = append(fields, RowID())
+
+	return NewSchemaWithIdentifiers(s.ID, s.IdentifierFieldIDs, fields...)
 }

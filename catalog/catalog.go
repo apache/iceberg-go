@@ -167,6 +167,29 @@ type TransactionalCatalog interface {
 	CommitTransaction(ctx context.Context, commits []table.TableCommit) error
 }
 
+// PurgeableTable is an optional interface that catalogs can implement
+// to support physical table deletion (catalog entry + underlying files).
+// Callers should check for this capability via a type assertion:
+//
+//	if purger, ok := cat.(catalog.PurgeableTable); ok {
+//	    err := purger.PurgeTable(ctx, ident)
+//	}
+//
+// For REST catalogs the purge is delegated server-side. For client-side
+// catalogs (SQL, Glue, Hive, Hadoop) the table is first dropped from
+// the catalog, then all files under the table's [table.Metadata.Location]
+// root, plus any referenced files written outside the root (e.g. via
+// write.data.path or write.metadata.path table properties), are physically deleted.
+//
+// File physical deletion is performed on a best-effort basis. If gc.enabled is
+// set to false on the table metadata, physical deletion is skipped entirely.
+// Any file-deletion, directory walk, or listing errors encountered are logged
+// as warnings, and the operation succeeds (returns nil) so that the catalog drop
+// remains the single source of truth.
+type PurgeableTable interface {
+	PurgeTable(ctx context.Context, identifier table.Identifier) error
+}
+
 func ToIdentifier(ident ...string) table.Identifier {
 	if len(ident) == 1 {
 		if ident[0] == "" {

@@ -580,6 +580,12 @@ func TestLiteralIdentityConversions(t *testing.T) {
 	}
 }
 
+func TestVariantLiteralFromBytes(t *testing.T) {
+	_, err := iceberg.LiteralFromBytes(iceberg.VariantType{}, []byte{0x01, 0x00, 0x00})
+	assert.ErrorIs(t, err, iceberg.ErrType)
+	assert.ErrorContains(t, err, "variant")
+}
+
 func TestFixedLiteral(t *testing.T) {
 	fixedLit012 := iceberg.FixedLiteral{0x00, 0x01, 0x02}
 	fixedLit013 := iceberg.FixedLiteral{0x00, 0x01, 0x03}

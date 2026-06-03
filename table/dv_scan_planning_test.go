@@ -24,7 +24,8 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// dvMockDataFile extends mockDataFile with DV fields.
+// dvMockDataFile extends mockDataFile with the DV-specific fields
+// (referenced data file, content offset/size) needed by scan planning tests.
 type dvMockDataFile struct {
 	mockDataFile
 	referencedDataFile *string
@@ -163,43 +164,35 @@ func TestDVMatchingToDataFiles(t *testing.T) {
 	}
 
 	snapshotID := int64(1)
+	seqNum := int64(1)
 	dvEntries := []iceberg.ManifestEntry{
-		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil, dvForData1),
-		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil, dvForData2),
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil, dvForData1),
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil, dvForData2),
 	}
+
+	dvIndex, err := buildDVIndex(dvEntries)
+	assert.NoError(t, err)
+	assert.Len(t, dvIndex, 2)
 
 	// Match DVs against data-001 — should only get dv-001
-	var matched []iceberg.DataFile
-	for _, del := range dvEntries {
-		if del.DataFile().ReferencedDataFile() == nil {
-			continue
-		}
-
-		if *del.DataFile().ReferencedDataFile() == dataFilePath {
-			matched = append(matched, del.DataFile())
-		}
-	}
-
+	dataEntry1 := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil,
+		&mockDataFile{path: dataFilePath, contentType: iceberg.EntryContentData})
+	matched := matchDVToData(dataEntry1, dvIndex)
 	assert.Len(t, matched, 1)
 	assert.Equal(t, dvForData1.path, matched[0].FilePath())
 
 	// Match DVs against data-002 — should only get dv-002
-	var matched2 []iceberg.DataFile
-	for _, del := range dvEntries {
-		if del.DataFile().ReferencedDataFile() == nil {
-			continue
-		}
-
-		if *del.DataFile().ReferencedDataFile() == otherDataFilePath {
-			matched2 = append(matched2, del.DataFile())
-		}
-	}
-
+	dataEntry2 := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil,
+		&mockDataFile{path: otherDataFilePath, contentType: iceberg.EntryContentData})
+	matched2 := matchDVToData(dataEntry2, dvIndex)
 	assert.Len(t, matched2, 1)
 	assert.Equal(t, dvForData2.path, matched2[0].FilePath())
 }
 
 func TestDVMatchingNoMatch(t *testing.T) {
+	snapshotID := int64(1)
+	seqNum := int64(1)
+
 	dvFile := &dvMockDataFile{
 		mockDataFile: mockDataFile{
 			path:        "s3://bucket/data/dv-001.puffin",
@@ -210,23 +203,101 @@ func TestDVMatchingNoMatch(t *testing.T) {
 		contentSizeInBytes: int64Ptr(128),
 	}
 
-	snapshotID := int64(1)
 	dvEntries := []iceberg.ManifestEntry{
-		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil, dvFile),
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil, dvFile),
 	}
 
-	var matched []iceberg.DataFile
-	for _, del := range dvEntries {
-		if del.DataFile().ReferencedDataFile() == nil {
-			continue
-		}
+	dvIndex, err := buildDVIndex(dvEntries)
+	assert.NoError(t, err)
 
-		if *del.DataFile().ReferencedDataFile() == "s3://bucket/data/data-001.parquet" {
-			matched = append(matched, del.DataFile())
-		}
-	}
-
+	dataEntry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil,
+		&mockDataFile{path: "s3://bucket/data/data-001.parquet", contentType: iceberg.EntryContentData})
+	matched := matchDVToData(dataEntry, dvIndex)
 	assert.Empty(t, matched)
+}
+
+func TestBuildDVIndex_RejectsMultipleDVsPerDataFile(t *testing.T) {
+	dataFilePath := "s3://bucket/data/data-001.parquet"
+	snapshotID := int64(1)
+	seqNum := int64(1)
+
+	dv1 := &dvMockDataFile{
+		mockDataFile: mockDataFile{
+			path:        "s3://bucket/data/dv-001.puffin",
+			contentType: iceberg.EntryContentPosDeletes,
+		},
+		referencedDataFile: strPtr(dataFilePath),
+		contentOffset:      int64Ptr(0),
+		contentSizeInBytes: int64Ptr(128),
+	}
+
+	dv2 := &dvMockDataFile{
+		mockDataFile: mockDataFile{
+			path:        "s3://bucket/data/dv-002.puffin",
+			contentType: iceberg.EntryContentPosDeletes,
+		},
+		referencedDataFile: strPtr(dataFilePath),
+		contentOffset:      int64Ptr(256),
+		contentSizeInBytes: int64Ptr(64),
+	}
+
+	dvEntries := []iceberg.ManifestEntry{
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil, dv1),
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil, dv2),
+	}
+
+	_, err := buildDVIndex(dvEntries)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "can't index multiple deletion vectors")
+	assert.Contains(t, err.Error(), dataFilePath)
+}
+
+func TestMatchDVToData_SequenceNumberGuard(t *testing.T) {
+	dataFilePath := "s3://bucket/data/data-001.parquet"
+	snapshotID := int64(1)
+
+	dvFile := &dvMockDataFile{
+		mockDataFile: mockDataFile{
+			path:        "s3://bucket/data/dv-001.puffin",
+			contentType: iceberg.EntryContentPosDeletes,
+		},
+		referencedDataFile: strPtr(dataFilePath),
+		contentOffset:      int64Ptr(0),
+		contentSizeInBytes: int64Ptr(128),
+	}
+
+	dvSeqNum := int64(5)
+	dvEntries := []iceberg.ManifestEntry{
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &dvSeqNum, nil, dvFile),
+	}
+
+	dvIndex, err := buildDVIndex(dvEntries)
+	assert.NoError(t, err)
+
+	tests := []struct {
+		name       string
+		dataSeqNum int64
+		expectDV   bool
+	}{
+		{"data seq < DV seq — DV applies", 3, true},
+		{"data seq == DV seq — DV applies", 5, true},
+		{"data seq > DV seq — DV skipped", 7, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			seqNum := tt.dataSeqNum
+			dataEntry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil,
+				&mockDataFile{path: dataFilePath, contentType: iceberg.EntryContentData})
+			matched := matchDVToData(dataEntry, dvIndex)
+			if tt.expectDV {
+				assert.Len(t, matched, 1)
+				assert.Equal(t, dvFile.path, matched[0].FilePath())
+			} else {
+				assert.Empty(t, matched)
+			}
+		})
+	}
 }
 
 func TestFileScanTask_DeletionVectorFilesField(t *testing.T) {

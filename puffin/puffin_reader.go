@@ -369,6 +369,24 @@ func (r *Reader) validateBlobs(blobs []BlobMetadata, footerStart int64) error {
 			return fmt.Errorf("puffin: blob %d: extends into footer: offset=%d length=%d footerStart=%d",
 				i, blob.Offset, blob.Length, footerStart)
 		}
+
+		// Spec invariant for deletion-vector-v1: snapshot-id and sequence-
+		// number MUST be -1. The writer enforces this on the way out; the
+		// reader symmetrically rejects malformed blobs on the way in so a
+		// third-party tool that violates the contract can't sneak data
+		// into the deserialization layer. Phrasing matches the writer's
+		// "<type> requires X to be -1, got N" so both sides share a
+		// grep-able canonical message.
+		if blob.Type == BlobTypeDeletionVector {
+			if blob.SnapshotID != -1 {
+				return fmt.Errorf("puffin: blob %d: %s requires snapshot-id to be -1, got %d",
+					i, BlobTypeDeletionVector, blob.SnapshotID)
+			}
+			if blob.SequenceNumber != -1 {
+				return fmt.Errorf("puffin: blob %d: %s requires sequence-number to be -1, got %d",
+					i, BlobTypeDeletionVector, blob.SequenceNumber)
+			}
+		}
 	}
 
 	return nil

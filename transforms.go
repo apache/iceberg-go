@@ -47,7 +47,10 @@ func ParseTransform(s string) (Transform, error) {
 			break
 		}
 
-		n, _ := strconv.Atoi(matches[1])
+		n, err := strconv.Atoi(matches[1])
+		if err != nil || n <= 0 || n > math.MaxInt32 {
+			break
+		}
 
 		return BucketTransform{NumBuckets: n}, nil
 	case strings.HasPrefix(s, "truncate"):
@@ -56,7 +59,10 @@ func ParseTransform(s string) (Transform, error) {
 			break
 		}
 
-		n, _ := strconv.Atoi(matches[1])
+		n, err := strconv.Atoi(matches[1])
+		if err != nil || n <= 0 || n > math.MaxInt32 {
+			break
+		}
 
 		return TruncateTransform{Width: n}, nil
 	default:
@@ -107,6 +113,10 @@ func (t IdentityTransform) MarshalText() ([]byte, error) {
 func (IdentityTransform) String() string { return "identity" }
 
 func (IdentityTransform) CanTransform(t Type) bool {
+	switch t.(type) {
+	case GeometryType, GeographyType:
+		return false
+	}
 	_, ok := t.(PrimitiveType)
 
 	return ok

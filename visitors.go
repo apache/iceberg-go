@@ -320,7 +320,7 @@ func doCmp(st StructLike, term BoundTerm, lit Literal) int {
 		return typedCmp[Time](st, term, lit)
 	case TimestampType, TimestampTzType:
 		return typedCmp[Timestamp](st, term, lit)
-	case BinaryType, FixedType:
+	case BinaryType, FixedType, GeographyType, GeometryType:
 		return typedCmp[[]byte](st, term, lit)
 	case StringType:
 		return typedCmp[string](st, term, lit)
@@ -328,6 +328,8 @@ func doCmp(st StructLike, term BoundTerm, lit Literal) int {
 		return typedCmp[uuid.UUID](st, term, lit)
 	case DecimalType:
 		return typedCmp[Decimal](st, term, lit)
+	case VariantType:
+		panic("variant values are not comparable")
 	}
 	panic(ErrType)
 }

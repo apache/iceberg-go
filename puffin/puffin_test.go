@@ -92,7 +92,7 @@ func TestRoundTrip(t *testing.T) {
 		SnapshotID:     -1,
 		SequenceNumber: -1,
 		Fields:         []int32{},
-		Properties:     map[string]string{"referenced-data-file": "data/file.parquet"},
+		Properties:     map[string]string{"referenced-data-file": "data/file.parquet", "cardinality": "0"},
 	}, blob2Data)
 	require.NoError(t, err)
 	require.NoError(t, w.Finish())
@@ -236,6 +236,76 @@ func TestWriterValidation(t *testing.T) {
 			Type: puffin.BlobTypeDeletionVector, SnapshotID: -1, SequenceNumber: 5, Fields: []int32{},
 		}, []byte("x"))
 		assert.ErrorContains(t, err, "sequence-number")
+	})
+
+	// deletion vector missing cardinality property: spec requires both
+	// cardinality and referenced-data-file; the table/dv reader does not
+	// enforce them, so we keep Go-emitted files always conformant here.
+	t.Run("deletion vector missing cardinality property", func(t *testing.T) {
+		w, _ := newWriter()
+		_, err := w.AddBlob(puffin.BlobMetadataInput{
+			Type: puffin.BlobTypeDeletionVector, SnapshotID: -1, SequenceNumber: -1, Fields: []int32{},
+			Properties: map[string]string{"referenced-data-file": "data/x.parquet"},
+		}, []byte("x"))
+		assert.ErrorContains(t, err, "cardinality")
+	})
+
+	// deletion vector empty-string cardinality: caller explicitly set the
+	// key to ""; treated identically to "absent" since "" isn't a valid
+	// cardinality value either.
+	t.Run("deletion vector empty cardinality value", func(t *testing.T) {
+		w, _ := newWriter()
+		_, err := w.AddBlob(puffin.BlobMetadataInput{
+			Type: puffin.BlobTypeDeletionVector, SnapshotID: -1, SequenceNumber: -1, Fields: []int32{},
+			Properties: map[string]string{"cardinality": "", "referenced-data-file": "data/x.parquet"},
+		}, []byte("x"))
+		assert.ErrorContains(t, err, "cardinality")
+	})
+
+	// deletion vector non-numeric cardinality: caller passed gibberish.
+	// Caught at write time via ParseUint so the reader doesn't surface
+	// it later as a cryptic parse error.
+	t.Run("deletion vector non-numeric cardinality", func(t *testing.T) {
+		w, _ := newWriter()
+		_, err := w.AddBlob(puffin.BlobMetadataInput{
+			Type: puffin.BlobTypeDeletionVector, SnapshotID: -1, SequenceNumber: -1, Fields: []int32{},
+			Properties: map[string]string{"cardinality": "not-a-number", "referenced-data-file": "data/x.parquet"},
+		}, []byte("x"))
+		assert.ErrorContains(t, err, "not a valid non-negative integer")
+	})
+
+	// deletion vector negative cardinality: -1 aliases dv.DeserializeDV's
+	// skip-validation sentinel, so accepting it on the write side would
+	// let writers silently disable the read-side check. ParseUint catches
+	// this via the same invalid-syntax error path as non-numeric input —
+	// one validation, both cases.
+	t.Run("deletion vector negative cardinality", func(t *testing.T) {
+		w, _ := newWriter()
+		_, err := w.AddBlob(puffin.BlobMetadataInput{
+			Type: puffin.BlobTypeDeletionVector, SnapshotID: -1, SequenceNumber: -1, Fields: []int32{},
+			Properties: map[string]string{"cardinality": "-1", "referenced-data-file": "data/x.parquet"},
+		}, []byte("x"))
+		assert.ErrorContains(t, err, "not a valid non-negative integer")
+	})
+
+	// deletion vector missing referenced-data-file property: spec-mandated.
+	t.Run("deletion vector missing referenced-data-file property", func(t *testing.T) {
+		w, _ := newWriter()
+		_, err := w.AddBlob(puffin.BlobMetadataInput{
+			Type: puffin.BlobTypeDeletionVector, SnapshotID: -1, SequenceNumber: -1, Fields: []int32{},
+			Properties: map[string]string{"cardinality": "0"},
+		}, []byte("x"))
+		assert.ErrorContains(t, err, "referenced-data-file")
+	})
+
+	// deletion vector with all required properties succeeds.
+	t.Run("deletion vector with all required properties", func(t *testing.T) {
+		w, _ := newWriter()
+		_, err := w.AddBlob(puffin.BlobMetadataInput{
+			Type: puffin.BlobTypeDeletionVector, SnapshotID: -1, SequenceNumber: -1, Fields: []int32{},
+			Properties: map[string]string{"cardinality": "0", "referenced-data-file": "data/x.parquet"},
+		}, []byte("x"))
+		require.NoError(t, err)
 	})
 }
 

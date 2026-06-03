@@ -19,8 +19,10 @@ package substrait
 
 import (
 	_ "embed"
+	"encoding/binary"
 	"fmt"
 	"strings"
+	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/iceberg-go"
@@ -135,6 +137,7 @@ func (c convertToSubstrait) Map(m iceberg.MapType, keyResult, valResult types.Ty
 }
 
 func (convertToSubstrait) Primitive(iceberg.PrimitiveType) types.Type { panic("should not be called") }
+func (convertToSubstrait) Variant(iceberg.VariantType) types.Type     { panic("should not be called") }
 
 func (convertToSubstrait) VisitFixed(f iceberg.FixedType) types.Type {
 	return &types.FixedBinaryType{Length: int32(f.Len())}
@@ -168,6 +171,22 @@ func (convertToSubstrait) VisitUnknown() types.Type {
 	// Unknown types cannot be stored in data files and have no Substrait equivalent
 	// Returning nil indicates this type cannot be converted to Substrait
 	return nil
+}
+
+func (convertToSubstrait) VisitGeometry(iceberg.GeometryType) types.Type {
+	return &types.BinaryType{}
+}
+
+func (convertToSubstrait) VisitGeography(iceberg.GeographyType) types.Type {
+	return &types.BinaryType{}
+}
+
+func (convertToSubstrait) VisitVariant() types.Type {
+	// Variant has no Substrait equivalent today. We return BinaryType as a
+	// structural placeholder so that schema conversion and expression binding
+	// on sibling columns don't panic with a nil type. A proper user-defined
+	// Substrait type will be needed once shredding enables predicate pushdown.
+	return &types.BinaryType{}
 }
 
 var _ iceberg.SchemaVisitorPerPrimitiveType[types.Type] = (*convertToSubstrait)(nil)
@@ -241,12 +260,35 @@ func toByteSliceSubstraitLiteral[T []byte | types.UUID](v T) expr.Literal {
 	return expr.NewByteSliceLiteral(v, false)
 }
 
-func toDecimalLiteral(v iceberg.DecimalLiteral) expr.Literal {
-	byts, _ := v.MarshalBinary()
+// toDecimalLiteral converts an iceberg.DecimalLiteral into a Substrait decimal
+// literal. Precision is taken from the bound field's iceberg.DecimalType (typ),
+// NOT from v.Type(). DecimalLiteral does not carry the originating column's
+// precision, so v.Type() always reports a hardcoded precision of 9 (see
+// https://github.com/apache/iceberg-go/issues/1028). If typ is not a
+// DecimalType, this falls back to v.Type()'s (hardcoded) precision.
+func toDecimalLiteral(typ iceberg.Type, v iceberg.DecimalLiteral) expr.Literal {
+	precision := v.Type().(iceberg.DecimalType).Precision()
+	if dt, ok := typ.(iceberg.DecimalType); ok {
+		precision = dt.Precision()
+	}
+
+	// decimal128.Num is {lo uint64, hi int64} — its raw in-memory bytes on
+	// LE hosts are already the 16-byte little-endian two's-complement
+	// representation Substrait wants. hostIsLE is a build-tag const, so the
+	// compiler drops the unused branch on every known GOARCH.
+	n := v.Value().Val
+	buf := make([]byte, 16)
+	if hostIsLE {
+		copy(buf, unsafe.Slice((*byte)(unsafe.Pointer(&n)), 16))
+	} else {
+		binary.LittleEndian.PutUint64(buf[:8], n.LowBits())
+		binary.LittleEndian.PutUint64(buf[8:], uint64(n.HighBits()))
+	}
+
 	result, _ := expr.NewLiteral(&types.Decimal{
 		Scale:     int32(v.Scale),
-		Value:     byts,
-		Precision: int32(v.Type().(*iceberg.DecimalType).Precision()),
+		Value:     buf,
+		Precision: int32(precision),
 	}, false)
 
 	return result
@@ -287,7 +329,7 @@ func toSubstraitLiteral(typ iceberg.Type, lit iceberg.Literal) expr.Literal {
 	case iceberg.UUIDLiteral:
 		return toByteSliceSubstraitLiteral(types.UUID(lit[:]))
 	case iceberg.DecimalLiteral:
-		return toDecimalLiteral(lit)
+		return toDecimalLiteral(typ, lit)
 	}
 	panic(fmt.Errorf("invalid literal type: %s", lit.Type()))
 }
@@ -351,7 +393,8 @@ func (t *toSubstraitExpr) VisitIsNan(term iceberg.BoundTerm) expr.Builder {
 
 func (t *toSubstraitExpr) VisitNotNan(term iceberg.BoundTerm) expr.Builder {
 	return t.bldr.ScalarFunc(notID).Args(
-		t.makeRefFunc(isNaNID, term).(expr.FuncArgBuilder))
+		t.makeRefFunc(isNaNID, term).(expr.FuncArgBuilder),
+	)
 }
 
 func (t *toSubstraitExpr) VisitIsNull(term iceberg.BoundTerm) expr.Builder {
@@ -397,5 +440,6 @@ func (t *toSubstraitExpr) VisitStartsWith(term iceberg.BoundTerm, lit iceberg.Li
 
 func (t *toSubstraitExpr) VisitNotStartsWith(term iceberg.BoundTerm, lit iceberg.Literal) expr.Builder {
 	return t.bldr.ScalarFunc(notID).Args(
-		t.makeLitFunc(startsWithID, term, lit).(expr.FuncArgBuilder))
+		t.makeLitFunc(startsWithID, term, lit).(expr.FuncArgBuilder),
+	)
 }

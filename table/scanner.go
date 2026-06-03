@@ -24,6 +24,7 @@ import (
 	"iter"
 	"math"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -193,6 +194,8 @@ type Scan struct {
 	options        iceberg.Properties
 	limit          int64
 
+	includeRowLineage bool
+
 	partitionFilters *keyDefaultMap[int, iceberg.BooleanExpression]
 	concurrency      int
 }
@@ -241,6 +244,7 @@ func (scan *Scan) Snapshot() *Snapshot {
 
 func (scan *Scan) Projection() (*iceberg.Schema, error) {
 	curSchema := scan.metadata.CurrentSchema()
+	curVersion := scan.metadata.Version()
 	if scan.snapshotID != nil {
 		snap := scan.metadata.SnapshotByID(*scan.snapshotID)
 		if snap == nil {
@@ -258,11 +262,100 @@ func (scan *Scan) Projection() (*iceberg.Schema, error) {
 		}
 	}
 
-	if slices.Contains(scan.selectedFields, "*") {
-		return curSchema, nil
+	if scan.includeRowLineage && curVersion < minFormatVersionRowLineage {
+		return nil, fmt.Errorf("%w: row lineage requires format version %d, table is v%d",
+			ErrInvalidOperation, minFormatVersionRowLineage, curVersion)
 	}
 
-	return curSchema.Select(scan.caseSensitive, scan.selectedFields...)
+	var schema *iceberg.Schema
+	if slices.Contains(scan.selectedFields, "*") {
+		schema = curSchema
+	} else {
+		// Intercept row-lineage metadata column names (_row_id,
+		// _last_updated_sequence_number) before calling Select: they are
+		// reserved and never appear in the user schema's fields, so
+		// Select would fail with "could not find column" on v3 tables
+		// where they are otherwise legal to project. The scanner reads
+		// them from file metadata (or synthesizes them) at scan time;
+		// here we just need to ensure they survive into the projection.
+		userFields, lineageFields := splitLineageMetadataFields(scan.selectedFields, scan.caseSensitive)
+		if len(lineageFields) > 0 && curVersion < minFormatVersionRowLineage {
+			// Reject explicitly so the contract lives in the code rather
+			// than emerging from Select's "could not find column" path —
+			// a future v2 schema field literally named _row_id should not
+			// silently succeed here.
+			return nil, fmt.Errorf("%w: row lineage column %q requires format version %d, table is v%d",
+				ErrInvalidOperation, lineageFields[0].Name, minFormatVersionRowLineage, curVersion)
+		}
+
+		var err error
+		schema, err = curSchema.Select(scan.caseSensitive, userFields...)
+		if err != nil {
+			return nil, err
+		}
+		// Skip the per-name append when scan.includeRowLineage is set: the
+		// SchemaWithRowLineage call below adds both lineage columns
+		// unconditionally, and appendMissingLineageFields would just be
+		// redundant work whose result is overwritten.
+		if len(lineageFields) > 0 && !scan.includeRowLineage {
+			schema = appendMissingLineageFields(schema, lineageFields)
+		}
+	}
+
+	if scan.includeRowLineage {
+		schema = iceberg.SchemaWithRowLineage(schema)
+	}
+
+	return schema, nil
+}
+
+// splitLineageMetadataFields partitions selectedFields into user fields and
+// row-lineage metadata fields (_row_id, _last_updated_sequence_number). The
+// returned lineage slice contains the canonical NestedField for each
+// metadata column name found, in the order encountered.
+func splitLineageMetadataFields(selectedFields []string, caseSensitive bool) (userFields []string, lineageFields []iceberg.NestedField) {
+	matches := func(field, target string) bool {
+		if caseSensitive {
+			return field == target
+		}
+
+		return strings.EqualFold(field, target)
+	}
+
+	userFields = make([]string, 0, len(selectedFields))
+	for _, field := range selectedFields {
+		switch {
+		case matches(field, iceberg.RowIDColumnName):
+			lineageFields = append(lineageFields, iceberg.RowID())
+		case matches(field, iceberg.LastUpdatedSequenceNumberColumnName):
+			lineageFields = append(lineageFields, iceberg.LastUpdatedSequenceNumber())
+		default:
+			userFields = append(userFields, field)
+		}
+	}
+
+	return userFields, lineageFields
+}
+
+// appendMissingLineageFields returns a new schema with each lineage field
+// appended only if no field with that ID is already present. Idempotent so
+// callers can pass schemas that already declare the reserved fields.
+func appendMissingLineageFields(s *iceberg.Schema, lineageFields []iceberg.NestedField) *iceberg.Schema {
+	existing := make(map[int]struct{}, len(s.Fields()))
+	for _, f := range s.Fields() {
+		existing[f.ID] = struct{}{}
+	}
+
+	fields := slices.Clone(s.Fields())
+	for _, f := range lineageFields {
+		if _, ok := existing[f.ID]; ok {
+			continue
+		}
+		fields = append(fields, f)
+		existing[f.ID] = struct{}{}
+	}
+
+	return iceberg.NewSchemaWithIdentifiers(s.ID, s.IdentifierFieldIDs, fields...)
 }
 
 func (scan *Scan) buildPartitionProjection(specID int) (iceberg.BooleanExpression, error) {
@@ -411,6 +504,38 @@ func partitionsMatch(a, b map[int]any) bool {
 	return true
 }
 
+// buildDVIndex indexes deletion vectors by the data file path they reference.
+// The spec requires at most one DV per data file; a second entry for the same
+// path is rejected with an error.
+func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]iceberg.ManifestEntry, error) {
+	dvIndex := make(map[string]iceberg.ManifestEntry, len(dvEntries))
+	for _, del := range dvEntries {
+		if ref := del.DataFile().ReferencedDataFile(); ref != nil {
+			if _, exists := dvIndex[*ref]; exists {
+				return nil, fmt.Errorf("can't index multiple deletion vectors for %s", *ref)
+			}
+			dvIndex[*ref] = del
+		}
+	}
+
+	return dvIndex, nil
+}
+
+// matchDVToData returns the deletion vector that applies to the given data
+// entry, if any. A DV applies only when the data file's sequence number is
+// less than or equal to the DV's sequence number.
+func matchDVToData(dataEntry iceberg.ManifestEntry, dvIndex map[string]iceberg.ManifestEntry) []iceberg.DataFile {
+	dvEntry, ok := dvIndex[dataEntry.DataFile().FilePath()]
+	if !ok {
+		return nil
+	}
+	if dataEntry.SequenceNum() <= dvEntry.SequenceNum() {
+		return []iceberg.DataFile{dvEntry.DataFile()}
+	}
+
+	return nil
+}
+
 // fetchPartitionSpecFilteredManifests retrieves the table's current snapshot,
 // fetches its manifest files, and applies partition-spec filters to remove irrelevant manifests.
 func (scan *Scan) fetchPartitionSpecFilteredManifests(ctx context.Context) ([]iceberg.ManifestFile, error) {
@@ -549,19 +674,26 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 		return cmp.Compare(a.SequenceNum(), b.SequenceNum())
 	})
 
-	// Index DVs by referenced data file path for O(1) lookup.
-	dvIndex := make(map[string][]iceberg.DataFile, len(entries.dvEntries))
-	for _, del := range entries.dvEntries {
-		if ref := del.DataFile().ReferencedDataFile(); ref != nil {
-			dvIndex[*ref] = append(dvIndex[*ref], del.DataFile())
-		}
+	dvIndex, err := buildDVIndex(entries.dvEntries)
+	if err != nil {
+		return nil, err
 	}
 
 	results := make([]FileScanTask, 0, len(entries.dataEntries))
 	for _, e := range entries.dataEntries {
-		deleteFiles, err := matchDeletesToData(e, entries.positionalDeleteEntries)
-		if err != nil {
-			return nil, err
+		// Spec §Scan Planning: when a deletion vector applies to a data
+		// file, positional-delete files must NOT be applied. The DV is
+		// guaranteed to encode all prior pos-delete positions; reading the
+		// pos-delete Parquet too would be wasteful I/O, and on a buggy
+		// writer whose DV omits prior positions, applying both would
+		// over-delete. Mirrors Java's DeleteFileIndex.forDataFile.
+		dvFiles := matchDVToData(e, dvIndex)
+		var deleteFiles []iceberg.DataFile
+		if len(dvFiles) == 0 {
+			deleteFiles, err = matchDeletesToData(e, entries.positionalDeleteEntries)
+			if err != nil {
+				return nil, err
+			}
 		}
 		eqDeleteFiles := matchEqualityDeletesToData(e, entries.equalityDeleteEntries)
 
@@ -569,15 +701,20 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 			File:                e.DataFile(),
 			DeleteFiles:         deleteFiles,
 			EqualityDeleteFiles: eqDeleteFiles,
-			DeletionVectorFiles: dvIndex[e.DataFile().FilePath()],
+			DeletionVectorFiles: dvFiles,
 			Start:               0,
 			Length:              e.DataFile().FileSizeBytes(),
 		}
 		// Row lineage constants: readers use these to synthesize _row_id and
-		// _last_updated_sequence_number when requested.
+		// _last_updated_sequence_number when requested. Per spec the
+		// synthesized _last_updated_sequence_number is the manifest entry's
+		// data sequence number (field id 3), not file sequence number
+		// (field id 4); back-dated EXISTING entries can have the two
+		// diverge and Java/iceberg-rust use the data sequence number.
 		task.FirstRowID = e.DataFile().FirstRowID()
-		if fseq := e.FileSequenceNum(); fseq != nil {
-			task.DataSequenceNumber = fseq
+		if seq := e.SequenceNum(); seq >= 0 {
+			s := seq
+			task.DataSequenceNumber = &s
 		}
 		results = append(results, task)
 	}

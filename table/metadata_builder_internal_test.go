@@ -21,12 +21,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/apache/iceberg-go"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -446,7 +448,9 @@ func TestSetRef(t *testing.T) {
 
 	require.NoError(t, builder.AddSnapshot(&snapshot))
 	err := builder.SetSnapshotRef(MainBranch, 10, BranchRef, WithMinSnapshotsToKeep(10))
-	require.ErrorContains(t, err, "can't set snapshot ref main to unknown snapshot 10: snapshot with id 10 not found")
+	require.ErrorIs(t, err, ErrSnapshotNotFound,
+		"missing snapshot lookup must wrap ErrSnapshotNotFound so callers can detect via errors.Is")
+	require.ErrorContains(t, err, "can't set snapshot ref main to unknown snapshot 10")
 	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, BranchRef, WithMinSnapshotsToKeep(10)))
 	require.Len(t, builder.snapshotList, 1)
 	snap, err := builder.SnapshotByID(1)
@@ -1411,6 +1415,8 @@ func TestUnsupportedTypes(t *testing.T) {
 	TestTypes := []iceberg.Type{
 		iceberg.TimestampNsType{},
 		iceberg.TimestampTzNsType{},
+		iceberg.GeometryType{},
+		iceberg.GeographyType{},
 	}
 	for _, typ := range TestTypes {
 		for unsupportedVersion := 1; unsupportedVersion < minFormatVersionForType(typ); unsupportedVersion++ {
@@ -1908,4 +1914,473 @@ func TestMetadataBuilderNameMapping(t *testing.T) {
 		}))
 		require.Nil(t, builder.NameMapping())
 	})
+}
+func TestVariantTypeValidation(t *testing.T) {
+	t.Run("ValidRequiredVariant", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+			iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}, Required: true},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.NoError(t, err, "variant can be required per spec")
+	})
+
+	t.Run("ValidOptionalVariant", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+			iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}, Required: false},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.NoError(t, err, "variant can be optional")
+	})
+
+	t.Run("InvalidVariantInitialDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.VariantType{}, Required: false, InitialDefault: "invalid"},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err, "variant must have null initial-default")
+		require.ErrorContains(t, err, "must have null initial-default")
+	})
+
+	t.Run("InvalidVariantWriteDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.VariantType{}, Required: false, WriteDefault: "invalid"},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err, "variant must have null write-default")
+		require.ErrorContains(t, err, "must have null write-default")
+	})
+}
+
+func TestGeometryGeographyNullOnlyDefaults(t *testing.T) {
+	testTypes := []struct {
+		name string
+		typ  iceberg.Type
+	}{
+		{"geometry", iceberg.GeometryType{}},
+		{"geography", iceberg.GeographyType{}},
+	}
+
+	for _, tt := range testTypes {
+		t.Run(tt.name+" with non-null initial default", func(t *testing.T) {
+			defaultValue := "POINT(0 0)"
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:           tt.typ,
+					ID:             1,
+					Name:           "location",
+					Required:       false,
+					InitialDefault: &defaultValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 3)
+			require.Error(t, err)
+			require.ErrorContains(t, err, "columns must default to null")
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		})
+
+		t.Run(tt.name+" with non-null write default", func(t *testing.T) {
+			defaultValue := "POINT(0 0)"
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:         tt.typ,
+					ID:           1,
+					Name:         "location",
+					Required:     false,
+					WriteDefault: &defaultValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 3)
+			require.Error(t, err)
+			require.ErrorContains(t, err, "columns must default to null")
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		})
+
+		t.Run(tt.name+" with null defaults", func(t *testing.T) {
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:     tt.typ,
+					ID:       1,
+					Name:     "location",
+					Required: false,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 3)
+			require.NoError(t, err)
+		})
+
+		t.Run(tt.name+" in v2 type unsupported", func(t *testing.T) {
+			defaultValue := "POINT(0 0)"
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:           tt.typ,
+					ID:             1,
+					Name:           "location",
+					Required:       false,
+					InitialDefault: &defaultValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 2)
+			require.Error(t, err)
+			require.ErrorContains(t, err, "is not supported until v3")
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		})
+
+		t.Run(tt.name+" with v3 must default to null", func(t *testing.T) {
+			defaultValue := "POINT(0 0)"
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:           tt.typ,
+					ID:             1,
+					Name:           "location",
+					Required:       false,
+					InitialDefault: &defaultValue,
+					WriteDefault:   &defaultValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 3)
+			require.Error(t, err)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+
+			require.ErrorContains(t, err, "invalid initial default")
+			require.ErrorContains(t, err, "invalid write default")
+		})
+
+		t.Run(tt.name+" with both non-null defaults produces exactly two error lines", func(t *testing.T) {
+			defaultValue := "POINT(0 0)"
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:           tt.typ,
+					ID:             1,
+					Name:           "location",
+					Required:       false,
+					InitialDefault: &defaultValue,
+					WriteDefault:   &defaultValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 3)
+			require.Error(t, err)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+
+			errStr := err.Error()
+			initialCount := strings.Count(errStr, "invalid initial default")
+			writeCount := strings.Count(errStr, "invalid write default")
+			assert.Equal(t, 1, initialCount, "expected exactly one 'invalid initial default' line, got %d in: %s", initialCount, errStr)
+			assert.Equal(t, 1, writeCount, "expected exactly one 'invalid write default' line, got %d in: %s", writeCount, errStr)
+		})
+	}
+}
+
+func TestComplexTypeDefaultValidation(t *testing.T) {
+	t.Run("InvalidStructInitialDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "s", Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 2, Name: "x", Type: iceberg.Int32Type{}, Required: false},
+				},
+			}, Required: false, InitialDefault: "not a struct"},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "struct type field 's' (id: 1) must have null or JSON object initial-default")
+	})
+
+	t.Run("InvalidStructWriteDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "s", Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 2, Name: "x", Type: iceberg.Int32Type{}, Required: false},
+				},
+			}, Required: false, WriteDefault: float64(42)},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "struct type field 's' (id: 1) must have null or JSON object write-default")
+	})
+
+	t.Run("ValidStructNullDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "s", Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 2, Name: "x", Type: iceberg.Int32Type{}, Required: false},
+				},
+			}, Required: false},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.NoError(t, err)
+	})
+
+	t.Run("ValidStructObjectDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "s", Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 2, Name: "x", Type: iceberg.Int32Type{}, Required: false},
+				},
+			}, Required: false, InitialDefault: map[string]any{"x": float64(1)}},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.NoError(t, err)
+	})
+
+	t.Run("InvalidListInitialDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "l", Type: &iceberg.ListType{
+				ElementID: 2, Element: iceberg.StringType{}, ElementRequired: false,
+			}, Required: false, InitialDefault: "not a list"},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "list type field 'l' (id: 1) must have null or JSON array initial-default")
+	})
+
+	t.Run("InvalidListWriteDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "l", Type: &iceberg.ListType{
+				ElementID: 2, Element: iceberg.StringType{}, ElementRequired: false,
+			}, Required: false, WriteDefault: map[string]any{"a": "b"}},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "list type field 'l' (id: 1) must have null or JSON array write-default")
+	})
+
+	t.Run("ValidListNullDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "l", Type: &iceberg.ListType{
+				ElementID: 2, Element: iceberg.StringType{}, ElementRequired: false,
+			}, Required: false},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.NoError(t, err)
+	})
+
+	t.Run("ValidListArrayDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "l", Type: &iceberg.ListType{
+				ElementID: 2, Element: iceberg.StringType{}, ElementRequired: false,
+			}, Required: false, InitialDefault: []any{"a", "b"}},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.NoError(t, err)
+	})
+
+	t.Run("InvalidMapInitialDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
+				KeyID: 2, KeyType: iceberg.StringType{}, ValueID: 3, ValueType: iceberg.Int32Type{}, ValueRequired: false,
+			}, Required: false, InitialDefault: []any{"not", "a", "map"}},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "map type field 'm' (id: 1) must have null or JSON object initial-default")
+	})
+
+	t.Run("InvalidMapWriteDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
+				KeyID: 2, KeyType: iceberg.StringType{}, ValueID: 3, ValueType: iceberg.Int32Type{}, ValueRequired: false,
+			}, Required: false, WriteDefault: "not a map"},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "map type field 'm' (id: 1) must have null or JSON object write-default")
+	})
+
+	t.Run("ValidMapNullDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
+				KeyID: 2, KeyType: iceberg.StringType{}, ValueID: 3, ValueType: iceberg.Int32Type{}, ValueRequired: false,
+			}, Required: false},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.NoError(t, err)
+	})
+
+	t.Run("ValidMapObjectDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
+				KeyID: 2, KeyType: iceberg.StringType{}, ValueID: 3, ValueType: iceberg.Int32Type{}, ValueRequired: false,
+			}, Required: false, InitialDefault: map[string]any{"keys": []any{"a"}, "values": []any{float64(1)}}},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.NoError(t, err)
+	})
+
+	t.Run("PrimitiveDefaultPassesThrough", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "n", Type: iceberg.Int64Type{}, Required: false, InitialDefault: float64(42)},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.NoError(t, err)
+	})
+
+	t.Run("InvalidNestedStructDefault", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "outer", Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 2, Name: "inner", Type: &iceberg.ListType{
+						ElementID: 3, Element: iceberg.StringType{}, ElementRequired: false,
+					}, Required: false, InitialDefault: "not a list"},
+				},
+			}, Required: false},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "list type field 'inner' (id: 2) must have null or JSON array initial-default")
+	})
+}
+
+func TestSetFormatVersionV1ToV2InitializesSequenceNumber(t *testing.T) {
+	builder := builderWithoutChanges(1)
+	require.NoError(t, builder.SetFormatVersion(2))
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.Equal(t, 2, meta.Version())
+	require.Equal(t, int64(0), meta.LastSequenceNumber())
+}
+
+func TestSetFormatVersionV1ToV3InitializesSequenceNumberAndNextRowID(t *testing.T) {
+	builder := builderWithoutChanges(1)
+	require.NoError(t, builder.SetFormatVersion(3))
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.Equal(t, 3, meta.Version())
+	require.Equal(t, int64(0), meta.LastSequenceNumber())
+	require.Equal(t, int64(0), meta.NextRowID())
+}
+
+func TestSetFormatVersionV2ToV3InitializesNextRowID(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	require.NoError(t, builder.SetFormatVersion(3))
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.Equal(t, 3, meta.Version())
+	require.Equal(t, int64(0), meta.NextRowID())
+}
+
+func TestSetFormatVersionV1ToV2AssignsUUID(t *testing.T) {
+	builder := builderWithoutChanges(1)
+	require.NoError(t, builder.SetFormatVersion(2))
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.NotEqual(t, uuid.UUID{}, meta.TableUUID())
+}
+
+func TestSetFormatVersionPreservesExistingUUID(t *testing.T) {
+	builder := builderWithoutChanges(1)
+	existingUUID := uuid.New()
+	require.NoError(t, builder.SetUUID(existingUUID))
+	require.NoError(t, builder.SetFormatVersion(2))
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.Equal(t, existingUUID, meta.TableUUID())
+}
+
+func TestSetFormatVersionDowngradeNotAllowed(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	err := builder.SetFormatVersion(1)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "downgrading format version from 2 to 1 is not allowed")
+}
+
+func TestSetFormatVersionRejectsUnsupportedVersion(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	err := builder.SetFormatVersion(99)
+	require.Error(t, err)
+	require.ErrorIs(t, err, iceberg.ErrInvalidFormatVersion)
+}
+
+func TestSetFormatVersionNoOpWhenSameVersion(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	require.NoError(t, builder.SetFormatVersion(2))
+	require.False(t, builder.HasChanges())
+}
+
+func TestSetFormatVersionValidatesLastColumnID(t *testing.T) {
+	tableSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "x", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "y", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 3, Name: "z", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	partSpec := iceberg.NewPartitionSpecID(0)
+
+	builder, err := NewMetadataBuilder(1)
+	require.NoError(t, err)
+	require.NoError(t, builder.SetLoc("s3://bucket/test"))
+	require.NoError(t, builder.AddSchema(tableSchema))
+	require.NoError(t, builder.SetCurrentSchemaID(-1))
+	require.NoError(t, builder.AddSortOrder(&UnsortedSortOrder))
+	require.NoError(t, builder.SetDefaultSortOrderID(-1))
+	require.NoError(t, builder.AddPartitionSpec(&partSpec, true))
+	require.NoError(t, builder.SetDefaultSpecID(-1))
+
+	// Corrupt lastColumnId to be less than the highest field ID in the schema
+	builder.lastColumnId = 1
+
+	err = builder.SetFormatVersion(2)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "last-column-id 1 is less than the highest field ID 3")
+
+	// Builder format version must remain unchanged after validation failure
+	require.Equal(t, 1, builder.formatVersion)
+}
+
+func TestSetFormatVersionV2ToV3PreservesSequenceNumber(t *testing.T) {
+	builder := builderWithoutChanges(2)
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+
+	builder2, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	require.NoError(t, builder2.SetFormatVersion(3))
+
+	meta3, err := builder2.Build()
+	require.NoError(t, err)
+	require.Equal(t, int64(0), meta3.LastSequenceNumber())
+}
+
+func TestSetFormatVersionV1ToV3FromDeserializedMetadata(t *testing.T) {
+	meta, err := ParseMetadataString(ExampleTableMetadataV1)
+	require.NoError(t, err)
+	require.Equal(t, 1, meta.Version())
+
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	require.NoError(t, builder.SetFormatVersion(3))
+
+	meta3, err := builder.Build()
+	require.NoError(t, err)
+	require.Equal(t, 3, meta3.Version())
+	require.Equal(t, int64(0), meta3.LastSequenceNumber())
+	require.Equal(t, int64(0), meta3.NextRowID())
+	require.NotEqual(t, uuid.UUID{}, meta3.TableUUID())
+}
+
+func TestSetFormatVersionV2ToV3FromDeserializedMetadata(t *testing.T) {
+	meta, err := ParseMetadataString(ExampleTableMetadataV2)
+	require.NoError(t, err)
+	require.Equal(t, 2, meta.Version())
+
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	require.NoError(t, builder.SetFormatVersion(3))
+
+	meta3, err := builder.Build()
+	require.NoError(t, err)
+	require.Equal(t, 3, meta3.Version())
+	require.Equal(t, int64(34), meta3.LastSequenceNumber())
+	require.Equal(t, int64(0), meta3.NextRowID())
 }

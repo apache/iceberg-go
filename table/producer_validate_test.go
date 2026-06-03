@@ -108,13 +108,13 @@ func TestFastAppendFiles_ValidateNoop(t *testing.T) {
 	require.NoError(t, fa.validate(newEmptyConflictContext(t)))
 }
 
-// mergeAppendFiles embeds fastAppendFiles; the validator promotion
-// makes it satisfy producerImpl without an explicit method. Pin the
-// behavior so a future refactor doesn't silently drop it.
-func TestMergeAppendFiles_InheritsFastAppendValidator(t *testing.T) {
+// mergeAppendFiles has its own explicit needsValidation() and validate()
+// methods. Pin the behavior so a future refactor doesn't silently drop it.
+func TestMergeAppendFiles_ValidateNoop(t *testing.T) {
 	ma := &mergeAppendFiles{}
 	require.NoError(t, ma.validate(nil))
 	require.NoError(t, ma.validate(newEmptyConflictContext(t)))
+	require.False(t, ma.needsValidation())
 
 	var _ producerImpl = ma
 }

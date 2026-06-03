@@ -23,11 +23,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/apache/iceberg-go/internal"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/suite"
 	"github.com/twmb/avro"
 	"github.com/twmb/avro/ocf"
@@ -1970,6 +1972,9 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 }
 
 func (m *ManifestTestSuite) TestWriteManifestListClosesWriterOnError() {
+	// A v2 manifest list cannot reference v3 manifests because the v2 entry
+	// schema has no first_row_id column; this gives us a deterministic
+	// AddManifests failure to assert that Close still flushes.
 	seqNum := int64(7)
 	var header bytes.Buffer
 	writer, err := NewManifestListWriterV2(&header, snapshotID, seqNum, nil)
@@ -1979,11 +1984,86 @@ func (m *ManifestTestSuite) TestWriteManifestListClosesWriterOnError() {
 	out := &limitedWriter{limit: header.Len(), err: errLimitedWrite}
 	err = WriteManifestList(2, out, snapshotID, nil, &seqNum, 0, []ManifestFile{
 		manifestFileRecordsV2[0],
-		manifestFileRecordsV1[0],
+		manifestFileRecordsV3[0],
 	})
 	m.Require().Error(err)
-	m.Require().ErrorContains(err, "ManifestListWriter only supports version 2 manifest files")
+	m.Require().ErrorContains(err, "manifest list v2 cannot reference v3 manifest files")
 	m.Require().ErrorIs(err, errLimitedWrite)
+}
+
+// TestV2ManifestListAcceptsV1Manifests verifies the spec-mandated upgrade path:
+// a v2 manifest list must be able to reference v1 manifest files written before
+// the table was upgraded, with sequence_number and min_sequence_number both
+// inherited as 0 and content inherited as data.
+func (m *ManifestTestSuite) TestV2ManifestListAcceptsV1Manifests() {
+	seqNum := int64(42)
+	var buf bytes.Buffer
+
+	err := WriteManifestList(2, &buf, snapshotID, nil, &seqNum, 0, []ManifestFile{
+		manifestFileRecordsV1[0],
+	})
+	m.Require().NoError(err)
+
+	got, err := ReadManifestList(&buf)
+	m.Require().NoError(err)
+	m.Require().Len(got, 1)
+
+	entry := got[0]
+	m.Equal(manifestFileRecordsV1[0].FilePath(), entry.FilePath())
+	m.Equal(manifestFileRecordsV1[0].Length(), entry.Length())
+	m.Equal(ManifestContentData, entry.ManifestContent(), "v1 inheritance: content must be data")
+	m.Equal(int64(0), entry.SequenceNum(), "v1 inheritance: sequence_number must be 0")
+	m.Equal(int64(0), entry.MinSequenceNum(), "v1 inheritance: min_sequence_number must be 0")
+	m.Equal(manifestFileRecordsV1[0].AddedRows(), entry.AddedRows())
+}
+
+// TestV3ManifestListAcceptsV1AndV2Manifests verifies that a v3 manifest list
+// can reference both v1 and v2 manifest files (e.g. after a v1->v3 upgrade)
+// and that first_row_id is assigned to data manifests during the write.
+func (m *ManifestTestSuite) TestV3ManifestListAcceptsV1AndV2Manifests() {
+	seqNum := int64(7)
+	firstRowID := int64(1000)
+	var buf bytes.Buffer
+
+	err := WriteManifestList(3, &buf, snapshotID, nil, &seqNum, firstRowID, []ManifestFile{
+		manifestFileRecordsV1[0],
+		manifestFileRecordsV2[0],
+	})
+	m.Require().NoError(err)
+
+	got, err := ReadManifestList(&buf)
+	m.Require().NoError(err)
+	m.Require().Len(got, 2)
+
+	v1Entry := got[0]
+	m.Equal(manifestFileRecordsV1[0].FilePath(), v1Entry.FilePath())
+	m.Equal(ManifestContentData, v1Entry.ManifestContent())
+	m.Equal(int64(0), v1Entry.SequenceNum())
+	m.Equal(int64(0), v1Entry.MinSequenceNum())
+	m.Require().NotNil(v1Entry.FirstRowID(), "v3 list must assign first_row_id for data manifests")
+	m.Equal(firstRowID, *v1Entry.FirstRowID())
+
+	v2Entry := got[1]
+	m.Equal(manifestFileRecordsV2[0].FilePath(), v2Entry.FilePath())
+	// manifestFileRecordsV2[0] is a delete manifest, so first_row_id is not
+	// assigned (assignment is data-only per the v3 ManifestListWriter rules).
+	m.Equal(ManifestContentDeletes, v2Entry.ManifestContent())
+	m.Nil(v2Entry.FirstRowID(), "delete manifests must not be assigned first_row_id")
+}
+
+// TestV2ManifestListRejectsV3Manifests confirms that a v2 manifest list still
+// refuses to reference v3 manifest files, since the v2 entry schema has no
+// place to record first_row_id and accepting them would silently drop data.
+func (m *ManifestTestSuite) TestV2ManifestListRejectsV3Manifests() {
+	seqNum := int64(1)
+	var buf bytes.Buffer
+
+	err := WriteManifestList(2, &buf, snapshotID, nil, &seqNum, 0, []ManifestFile{
+		manifestFileRecordsV3[0],
+	})
+	m.Require().Error(err)
+	m.Require().ErrorIs(err, ErrInvalidArgument)
+	m.Require().ErrorContains(err, "manifest list v2 cannot reference v3 manifest files")
 }
 
 // TestManifestRoundTripSortOrderID verifies that a sort_order_id written onto
@@ -2035,6 +2115,193 @@ func (m *ManifestTestSuite) TestManifestRoundTripSortOrderID() {
 	m.Equal(expectedSortOrderID, *got)
 }
 
+// TestWriteManifestOmitsDistinctCounts verifies that the manifest
+// writer drops the deprecated distinct_counts field (id 111) from the
+// wire for every format version, regardless of what the source
+// DataFile carries (apache/iceberg#12182). The data_file_v{1,2,3}
+// Avro schemas in internal/avro_schemas.go omit field 111, so the
+// encoder never emits it and a round-trip read returns an empty map.
+func (m *ManifestTestSuite) TestWriteManifestOmitsDistinctCounts() {
+	for _, version := range []int{1, 2, 3} {
+		m.Run("v"+strconv.Itoa(version), func() {
+			m.assertWriteOmitsDistinctCounts(version)
+		})
+	}
+}
+
+func (m *ManifestTestSuite) assertWriteOmitsDistinctCounts(version int) {
+	partitionSpec := NewPartitionSpecID(0)
+	snapshotID := int64(1)
+	seqNum := int64(1)
+
+	dataFileBuilder, err := NewDataFileBuilder(
+		partitionSpec,
+		EntryContentData,
+		"s3://bucket/ns/table/data/distinct.parquet",
+		ParquetFile,
+		map[int]any{},
+		map[int]string{},
+		map[int]int{},
+		1,
+		1,
+	)
+	m.Require().NoError(err)
+	dataFileBuilder.DistinctValueCounts(map[int]int64{1: 42})
+
+	var buf bytes.Buffer
+	file, err := WriteManifest(
+		"s3://bucket/ns/table/metadata/distinct.avro", &buf, version,
+		partitionSpec,
+		NewSchema(0,
+			NestedField{ID: 1, Name: "id", Type: Int64Type{}, Required: true},
+		),
+		snapshotID,
+		[]ManifestEntry{NewManifestEntry(
+			EntryStatusADDED,
+			&snapshotID,
+			&seqNum, &seqNum,
+			dataFileBuilder.Build(),
+		)},
+	)
+	m.Require().NoError(err)
+
+	entries, err := ReadManifest(file, &buf, false)
+	m.Require().NoError(err)
+	m.Require().Len(entries, 1)
+	m.Empty(entries[0].DataFile().DistinctValueCounts(),
+		"manifest writer must drop distinct_counts on the wire for every format version; "+
+			"see internal/avro_schemas.go data_file_v"+strconv.Itoa(version))
+}
+
+// TestReadManifestLegacyDistinctCounts is a back-compat regression
+// guard. Older iceberg-go and other Iceberg writers (Java, PySpark)
+// embed distinct_counts (id 111) in the data_file record. PR #1102
+// dropped the field from this library's writer schema, but legacy
+// manifests already on disk must still decode correctly: the dataFile
+// struct's avro:"distinct_counts" tag is intentionally retained for
+// this read path.
+//
+// The test bypasses WriteManifest and writes a raw OCF using a
+// fixture schema that mirrors the pre-PR data_file_v2 (with field
+// 111 re-injected), then reads it through ReadManifest and asserts
+// the distinct counts come back populated.
+func (m *ManifestTestSuite) TestReadManifestLegacyDistinctCounts() {
+	partitionSpec := NewPartitionSpec()
+	tableSchema := NewSchema(0,
+		NestedField{ID: 1, Name: "id", Type: Int64Type{}, Required: true},
+	)
+	partitionSchema, err := partitionTypeToAvroSchema(partitionSpec.PartitionType(tableSchema))
+	m.Require().NoError(err)
+
+	legacySchema := injectDistinctCountsIntoEntrySchema(m.T(), partitionSchema, 2)
+
+	snapshotID := int64(42)
+	seqNum := int64(7)
+	df := &dataFile{
+		Content:        EntryContentData,
+		Path:           "s3://bucket/ns/table/data/legacy.parquet",
+		Format:         ParquetFile,
+		PartitionData:  map[string]any{},
+		RecordCount:    100,
+		FileSize:       4096,
+		DistinctCounts: mapToAvroColMap(map[int]int64{1: 99, 2: 88}),
+	}
+	entry := &manifestEntry{
+		EntryStatus: EntryStatusADDED,
+		Snapshot:    &snapshotID,
+		SeqNum:      &seqNum,
+		FileSeqNum:  &seqNum,
+		Data:        df,
+	}
+
+	var buf bytes.Buffer
+	wr, err := ocf.NewWriter(&buf, legacySchema,
+		ocf.WithSchema(legacySchema.String()),
+		ocf.WithMetadata(map[string][]byte{
+			"format-version": []byte("2"),
+			"content":        []byte("data"),
+		}),
+	)
+	m.Require().NoError(err)
+	m.Require().NoError(wr.Encode(entry))
+	m.Require().NoError(wr.Close())
+
+	file := &manifestFile{
+		version: 2,
+		Path:    "s3://bucket/ns/table/metadata/legacy.avro",
+		Content: ManifestContentData,
+	}
+	entries, err := ReadManifest(file, &buf, false)
+	m.Require().NoError(err)
+	m.Require().Len(entries, 1)
+	m.Equal(map[int]int64{1: 99, 2: 88}, entries[0].DataFile().DistinctValueCounts(),
+		"ReadManifest must decode distinct_counts (field 111) from legacy "+
+			"manifests where the file's writer schema still carries the field")
+}
+
+// injectDistinctCountsIntoEntrySchema returns a manifest_entry avro
+// schema for the given format version with the deprecated
+// distinct_counts field (id 111) re-added into the data_file record.
+// The shape mirrors the pre-PR-1102 data_file_v{version} schema
+// definition that was removed from internal/avro_schemas.go, so it
+// can be used to fixture-up legacy manifests for back-compat tests.
+func injectDistinctCountsIntoEntrySchema(t *testing.T, partitionSchema *avro.Schema, version int) *avro.Schema {
+	t.Helper()
+
+	base, err := internal.NewManifestEntrySchema(partitionSchema, version)
+	if err != nil {
+		t.Fatalf("base entry schema for v%d: %v", version, err)
+	}
+	root := base.Root()
+
+	dfIdx := -1
+	for i := range root.Fields {
+		if root.Fields[i].Name == "data_file" {
+			dfIdx = i
+
+			break
+		}
+	}
+	if dfIdx == -1 {
+		t.Fatalf("data_file field not found on manifest_entry v%d schema", version)
+	}
+
+	distinctCountsField := avro.SchemaField{
+		Name: "distinct_counts",
+		Type: avro.SchemaNode{
+			Type: "union",
+			Branches: []avro.SchemaNode{
+				{Type: "null"},
+				{
+					Type: "array",
+					Items: &avro.SchemaNode{
+						Type: "record",
+						Name: "k123_v124",
+						Fields: []avro.SchemaField{
+							{Name: "key", Type: avro.SchemaNode{Type: "int"}, Props: map[string]any{"field-id": 123}},
+							{Name: "value", Type: avro.SchemaNode{Type: "long"}, Props: map[string]any{"field-id": 124}},
+						},
+					},
+					Props: map[string]any{"logicalType": "map"},
+				},
+			},
+		},
+		Props: map[string]any{"field-id": 111},
+		Doc:   "map of column id to distinct value count",
+	}
+
+	dfField := root.Fields[dfIdx]
+	dfField.Type.Fields = append(append([]avro.SchemaField{}, dfField.Type.Fields...), distinctCountsField)
+	root.Fields[dfIdx] = dfField
+
+	legacy, err := root.Schema()
+	if err != nil {
+		t.Fatalf("recompiling legacy entry schema for v%d: %v", version, err)
+	}
+
+	return legacy
+}
+
 func (m *ManifestTestSuite) TestWriteManifestClosesWriterOnEntryError() {
 	partitionSpec := NewPartitionSpecID(1,
 		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "VendorID", Transform: IdentityTransform{}},
@@ -2060,4 +2327,150 @@ func (m *ManifestTestSuite) TestWriteManifestClosesWriterOnEntryError() {
 	m.Require().Error(err)
 	m.Require().ErrorContains(err, "only entries with status ADDED")
 	m.Require().ErrorIs(err, errLimitedWrite)
+}
+
+type trackCloseFile struct {
+	contents   *bytes.Reader
+	closeCount int
+	closeErr   error
+	readLimit  int
+	readErr    error
+	nRead      int
+}
+
+var _ iceio.File = (*trackCloseFile)(nil)
+
+func newTrackCloseFile(data []byte) *trackCloseFile {
+	return &trackCloseFile{contents: bytes.NewReader(data)}
+}
+
+func (f *trackCloseFile) Stat() (fs.FileInfo, error) { return nil, nil }
+
+func (f *trackCloseFile) Read(p []byte) (int, error) {
+	if f.readErr != nil && f.nRead >= f.readLimit {
+		return 0, f.readErr
+	}
+	if f.readErr != nil && f.nRead+len(p) > f.readLimit {
+		p = p[:f.readLimit-f.nRead]
+	}
+	n, err := f.contents.Read(p)
+	f.nRead += n
+
+	return n, err
+}
+
+func (f *trackCloseFile) Close() error {
+	f.closeCount++
+
+	return f.closeErr
+}
+
+func (f *trackCloseFile) Seek(offset int64, whence int) (int64, error) {
+	return f.contents.Seek(offset, whence)
+}
+
+func (f *trackCloseFile) ReadAt(p []byte, off int64) (int, error) {
+	return f.contents.ReadAt(p, off)
+}
+
+var (
+	errMidStreamRead  = errors.New("simulated mid-stream read error")
+	errCloseFinalPair = errors.New("simulated close error")
+)
+
+func (m *ManifestTestSuite) TestEntriesEarlyBreakClosesFile() {
+	var mockfs internal.MockFS
+	manifest := manifestFile{
+		version: 2,
+		SpecID:  1,
+		Path:    manifestFileRecordsV2[0].FilePath(),
+	}
+
+	file := newTrackCloseFile(m.v2ManifestEntries.Bytes())
+	mockfs.Test(m.T())
+	mockfs.On("Open", manifest.FilePath()).Return(file, nil)
+	defer mockfs.AssertExpectations(m.T())
+
+	yielded := 0
+	for entry, err := range manifest.Entries(&mockfs, false) {
+		m.Require().NoError(err, "no error expected on a healthy manifest before break")
+		m.Require().NotNil(entry)
+		yielded++
+		if yielded == 1 {
+			break
+		}
+	}
+	m.Equal(1, yielded, "iteration must stop after the first entry on early break")
+	m.Equal(1, file.closeCount, "file must be closed exactly once on early break")
+}
+
+func (m *ManifestTestSuite) TestEntriesMidStreamErrorYieldsAndStops() {
+	var mockfs internal.MockFS
+	manifest := manifestFile{
+		version: 2,
+		SpecID:  1,
+		Path:    manifestFileRecordsV2[0].FilePath(),
+	}
+
+	data := m.v2ManifestEntries.Bytes()
+	file := newTrackCloseFile(data)
+	file.readLimit = len(data) / 2
+	file.readErr = errMidStreamRead
+	mockfs.Test(m.T())
+	mockfs.On("Open", manifest.FilePath()).Return(file, nil)
+	defer mockfs.AssertExpectations(m.T())
+
+	var (
+		entries  []ManifestEntry
+		gotError error
+		yields   int
+	)
+	for entry, err := range manifest.Entries(&mockfs, false) {
+		yields++
+		if err != nil {
+			gotError = err
+
+			break
+		}
+		entries = append(entries, entry)
+	}
+	m.Require().NotNil(gotError, "iterator must yield a non-nil error")
+	m.Require().ErrorIs(gotError, errMidStreamRead,
+		"yielded error must equal or wrap the simulated mid-stream read error")
+	m.Equal(yields, len(entries)+1,
+		"the error pair must follow zero or more entry pairs and stop iteration")
+	m.Equal(1, file.closeCount, "file must be closed exactly once after a mid-stream error")
+}
+
+func (m *ManifestTestSuite) TestEntriesCloseErrorAsFinalPair() {
+	var mockfs internal.MockFS
+	manifest := manifestFile{
+		version: 2,
+		SpecID:  1,
+		Path:    manifestFileRecordsV2[0].FilePath(),
+	}
+
+	file := newTrackCloseFile(m.v2ManifestEntries.Bytes())
+	file.closeErr = errCloseFinalPair
+	mockfs.Test(m.T())
+	mockfs.On("Open", manifest.FilePath()).Return(file, nil)
+	defer mockfs.AssertExpectations(m.T())
+
+	var (
+		entries []ManifestEntry
+		errs    []error
+	)
+	for entry, err := range manifest.Entries(&mockfs, false) {
+		if err != nil {
+			errs = append(errs, err)
+
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	m.Len(entries, 2, "iteration must consume every entry before the terminal close pair")
+	m.Require().Len(errs, 1, "iterator must yield exactly one terminal close error")
+	m.ErrorIs(errs[0], errCloseFinalPair,
+		"terminal error must equal or wrap the simulated close error")
+	m.Equal(1, file.closeCount, "file must be closed exactly once even when Close returns an error")
 }

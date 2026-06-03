@@ -143,6 +143,17 @@ func TestArgsParsing(t *testing.T) {
 				require.NotNil(t, a.Drop)
 				require.NotNil(t, a.Drop.Table)
 				assert.Equal(t, "prod.db.events", a.Drop.Table.Identifier)
+				assert.False(t, a.Drop.Table.Purge)
+			},
+		},
+		{
+			name: "drop table with --purge",
+			args: []string{"drop", "table", "prod.db.events", "--purge"},
+			check: func(t *testing.T, a Args) {
+				require.NotNil(t, a.Drop)
+				require.NotNil(t, a.Drop.Table)
+				assert.Equal(t, "prod.db.events", a.Drop.Table.Identifier)
+				assert.True(t, a.Drop.Table.Purge)
 			},
 		},
 		{

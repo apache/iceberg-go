@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/google/uuid"
 )
 
@@ -444,12 +445,14 @@ func createBoundRef(field NestedField, acc accessor) BoundReference {
 		return &boundRef[Timestamp]{field: field, acc: acc}
 	case StringType:
 		return &boundRef[string]{field: field, acc: acc}
-	case FixedType, BinaryType:
+	case FixedType, BinaryType, GeographyType, GeometryType:
 		return &boundRef[[]byte]{field: field, acc: acc}
 	case DecimalType:
 		return &boundRef[Decimal]{field: field, acc: acc}
 	case UUIDType:
 		return &boundRef[uuid.UUID]{field: field, acc: acc}
+	case VariantType:
+		return &boundRef[variant.Value]{field: field, acc: acc}
 	}
 	panic("unhandled bound reference type: " + field.Type.String())
 }
@@ -632,12 +635,14 @@ func createBoundUnaryPredicate(op Operation, term BoundTerm) BoundUnaryPredicate
 		return newBoundUnaryPred[Timestamp](op, term)
 	case StringType:
 		return newBoundUnaryPred[string](op, term)
-	case FixedType, BinaryType:
+	case FixedType, BinaryType, GeographyType, GeometryType:
 		return newBoundUnaryPred[[]byte](op, term)
 	case DecimalType:
 		return newBoundUnaryPred[Decimal](op, term)
 	case UUIDType:
 		return newBoundUnaryPred[uuid.UUID](op, term)
+	case VariantType:
+		return newBoundUnaryPred[variant.Value](op, term)
 	}
 	panic("unhandled bound reference type: " + term.Type().String())
 }
@@ -794,7 +799,7 @@ func createBoundLiteralPredicate(op Operation, term BoundTerm, lit Literal) (Bou
 		return newBoundLiteralPredicate[Timestamp](op, term, finalLit), nil
 	case StringType:
 		return newBoundLiteralPredicate[string](op, term, finalLit), nil
-	case FixedType, BinaryType:
+	case FixedType, BinaryType, GeographyType, GeometryType:
 		return newBoundLiteralPredicate[[]byte](op, term, finalLit), nil
 	case DecimalType:
 		return newBoundLiteralPredicate[Decimal](op, term, finalLit), nil
@@ -962,7 +967,7 @@ func createBoundSetPredicate(op Operation, term BoundTerm, lits Set[Literal]) (B
 		return newBoundSetPredicate[Timestamp](op, term, typedSet), nil
 	case StringType:
 		return newBoundSetPredicate[string](op, term, typedSet), nil
-	case BinaryType, FixedType:
+	case BinaryType, FixedType, GeographyType, GeometryType:
 		return newBoundSetPredicate[[]byte](op, term, typedSet), nil
 	case DecimalType:
 		return newBoundSetPredicate[Decimal](op, term, typedSet), nil

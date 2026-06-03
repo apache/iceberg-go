@@ -40,7 +40,9 @@ import (
 	"github.com/apache/iceberg-go/config"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table/dv"
 	tblutils "github.com/apache/iceberg-go/table/internal"
+	"github.com/geoarrow/geoarrow-go"
 	"github.com/google/uuid"
 	"github.com/pterm/pterm"
 	"golang.org/x/sync/errgroup"
@@ -315,6 +317,8 @@ func (c convertToIceberg) Primitive(dt arrow.DataType) (result iceberg.NestedFie
 		return c.Primitive(dt.Encoded())
 	case *arrow.BooleanType:
 		result.Type = iceberg.PrimitiveTypes.Bool
+	case *arrow.NullType:
+		result.Type = iceberg.PrimitiveTypes.Unknown
 	case *arrow.Uint8Type, *arrow.Uint16Type, *arrow.Uint32Type,
 		*arrow.Int8Type, *arrow.Int16Type, *arrow.Int32Type:
 		result.Type = iceberg.PrimitiveTypes.Int32
@@ -342,7 +346,16 @@ func (c convertToIceberg) Primitive(dt arrow.DataType) (result iceberg.NestedFie
 	case *arrow.TimestampType:
 		if dt.Unit == arrow.Nanosecond {
 			if !c.downcastTimestamp {
-				panic(fmt.Errorf("%w: 'ns' timestamp precision not supported", iceberg.ErrType))
+				switch {
+				case slices.Contains(utcAliases, dt.TimeZone):
+					result.Type = iceberg.PrimitiveTypes.TimestampTzNs
+				case dt.TimeZone == "":
+					result.Type = iceberg.PrimitiveTypes.TimestampNs
+				default:
+					panic(fmt.Errorf("%w: unsupported arrow type for conversion - %s", iceberg.ErrInvalidSchema, dt))
+				}
+
+				return result
 			}
 			slog.Warn("downcasting nanosecond timestamp to microsecond, precision loss may occur")
 		}
@@ -357,9 +370,12 @@ func (c convertToIceberg) Primitive(dt arrow.DataType) (result iceberg.NestedFie
 	case *arrow.FixedSizeBinaryType:
 		result.Type = iceberg.FixedTypeOf(dt.ByteWidth)
 	case arrow.ExtensionType:
-		if dt.ExtensionName() == "arrow.uuid" {
+		switch dt.ExtensionName() {
+		case "arrow.uuid":
 			result.Type = iceberg.PrimitiveTypes.UUID
-		} else {
+		case "parquet.variant":
+			result.Type = iceberg.VariantType{}
+		default:
 			panic(fmt.Errorf("%w: unsupported arrow type for conversion - %s", iceberg.ErrInvalidSchema, dt))
 		}
 	default:
@@ -549,6 +565,7 @@ func (c convertToArrow) Map(m iceberg.MapType, keyResult, valResult arrow.Field)
 }
 
 func (c convertToArrow) Primitive(iceberg.PrimitiveType) arrow.Field { panic("shouldn't be called") }
+func (c convertToArrow) Variant(iceberg.VariantType) arrow.Field     { panic("shouldn't be called") }
 
 func (c convertToArrow) VisitFixed(f iceberg.FixedType) arrow.Field {
 	return arrow.Field{Type: &arrow.FixedSizeBinaryType{ByteWidth: f.Len()}}
@@ -625,9 +642,36 @@ func (c convertToArrow) VisitUUID() arrow.Field {
 }
 
 func (c convertToArrow) VisitUnknown() arrow.Field {
-	return arrow.Field{
-		Type: extensions.NewOpaqueType(arrow.Null, "unknown", "apache.iceberg"),
+	return arrow.Field{Type: arrow.Null}
+}
+
+func (c convertToArrow) VisitVariant() arrow.Field {
+	if c.useLargeTypes {
+		vt, _ := extensions.NewVariantType(arrow.StructOf(
+			arrow.Field{Name: "metadata", Type: arrow.BinaryTypes.LargeBinary, Nullable: false},
+			arrow.Field{Name: "value", Type: arrow.BinaryTypes.LargeBinary, Nullable: false},
+		))
+
+		return arrow.Field{Type: vt}
 	}
+
+	return arrow.Field{Type: extensions.NewDefaultVariantType()}
+}
+
+func (c convertToArrow) VisitGeometry(iceberg.GeometryType) arrow.Field {
+	if c.useLargeTypes {
+		return arrow.Field{Type: geoarrow.NewWKBType(geoarrow.WKBWithLargeBinaryStorage())}
+	}
+
+	return arrow.Field{Type: geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage())}
+}
+
+func (c convertToArrow) VisitGeography(iceberg.GeographyType) arrow.Field {
+	if c.useLargeTypes {
+		return arrow.Field{Type: geoarrow.NewWKBType(geoarrow.WKBWithLargeBinaryStorage())}
+	}
+
+	return arrow.Field{Type: geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage())}
 }
 
 var _ iceberg.SchemaVisitorPerPrimitiveType[arrow.Field] = convertToArrow{}
@@ -1070,6 +1114,10 @@ func (a *arrowProjectionVisitor) Primitive(_ iceberg.PrimitiveType, arr arrow.Ar
 	return arr
 }
 
+func (a *arrowProjectionVisitor) Variant(_ iceberg.VariantType, arr arrow.Array) arrow.Array {
+	return arr
+}
+
 // SchemaOptions controls the behaviour of ToRequestedSchema.
 type SchemaOptions struct {
 	DowncastTimestamp bool
@@ -1235,6 +1283,10 @@ func (sc *schemaCompatVisitor) Primitive(p iceberg.PrimitiveType) bool {
 	return true
 }
 
+func (sc *schemaCompatVisitor) Variant(v iceberg.VariantType) bool {
+	return true
+}
+
 func must[T any](v T, err error) T {
 	if err != nil {
 		panic(err)
@@ -1326,6 +1378,10 @@ func (a *arrowStatsCollector) Primitive(dt iceberg.PrimitiveType) []tblutils.Sta
 	}}
 }
 
+func (a *arrowStatsCollector) Variant(_ iceberg.VariantType) []tblutils.StatisticsCollector {
+	return []tblutils.StatisticsCollector{}
+}
+
 func computeStatsPlan(sc *iceberg.Schema, props iceberg.Properties) (map[int]tblutils.StatisticsCollector, error) {
 	result := make(map[int]tblutils.StatisticsCollector)
 
@@ -1401,6 +1457,7 @@ func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, curre
 		rdr.Metadata(),
 		must(computeStatsPlan(currentSchema, props)),
 		must(format.PathToIDMapping(pathToIDSchema)),
+		tblutils.VariantFieldIDsFromSchema(currentSchema),
 	)
 
 	partitionValues := make(map[int]any)
@@ -1460,6 +1517,7 @@ type recordWritingArgs struct {
 	counter         iter.Seq[int]
 	maxWriteWorkers int
 	clustered       bool
+	factoryOpts     []writerFactoryOption
 }
 
 func recordsToDataFiles(ctx context.Context, rootLocation string, meta *MetadataBuilder, args recordWritingArgs) (ret iter.Seq2[iceberg.DataFile, error]) {
@@ -1498,7 +1556,7 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 		}
 	}
 
-	factory, err := newWriterFactory(rootLocation, args, meta, taskSchema, targetFileSize)
+	factory, err := newWriterFactory(rootLocation, args, meta, taskSchema, targetFileSize, args.factoryOpts...)
 	if err != nil {
 		panic(err)
 	}
@@ -1607,6 +1665,23 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 		}
 	}
 
+	// V3+ unpartitioned tables write deletion vectors via Puffin, matching the
+	// Java reference implementation, which hardcodes DV for v3 and does not
+	// expose a property to opt out. DV+partitioned support is deferred to a
+	// follow-up; partitioned v3 writes fall through to the Parquet writer
+	// below and emit the deprecation warning.
+	if latestMetadata.Version() >= 3 && latestMetadata.PartitionSpec().IsUnpartitioned() {
+		return positionDeleteRecordsToDataFilesDV(ctx, rootLocation, args, latestMetadata)
+	}
+
+	// V3 and later prefer deletion vectors over Parquet position-delete files;
+	// warn so users migrate. The check is `>= 3` rather than `== 3` so the
+	// warning carries forward to v4+ without churn. See apache/iceberg#12048.
+	if latestMetadata.Version() >= 3 {
+		slog.Warn("writing Parquet position-delete file on a v3 table; prefer deletion vectors",
+			"table_location", latestMetadata.Location())
+	}
+
 	if args.writeUUID == nil {
 		u := uuid.Must(uuid.NewRandom())
 		args.writeUUID = &u
@@ -1655,4 +1730,61 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 	workers := config.EnvConfig.MaxWorkers
 
 	return partitionWriter.Write(ctx, workers)
+}
+
+// TODO(#1135 PR2): take a partitionContextByFilePath map[string]partitionContext
+// and look up each data file's specID + partitionData per Add, removing the
+// hardcoded 0/nil below and the IsUnpartitioned gate upstream.
+func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string, args recordWritingArgs, metadata Metadata) iter.Seq2[iceberg.DataFile, error] {
+	return func(yield func(iceberg.DataFile, error) bool) {
+		writer := dv.NewDVWriter(args.fs, func(id int32) *iceberg.PartitionSpec {
+			return metadata.PartitionSpecByID(int(id))
+		})
+
+		hasEntries := false
+		for batch, err := range args.itr {
+			if err != nil {
+				yield(nil, err)
+
+				return
+			}
+
+			filePaths := batch.Column(0).(*array.String)
+			positions := batch.Column(1).(*array.Int64)
+
+			for i := range batch.NumRows() {
+				// PR (1) of #1135 reshaped DVWriter.Add to take (specID,
+				// partitionData) so the partitioned path can pass through
+				// partitionContext directly. This site is still
+				// unpartitioned-only (the gate above routes partitioned
+				// writes elsewhere), so specID=0 + nil partition. PR (2)
+				// drops the gate and threads partitionContext through here.
+				writer.Add(filePaths.Value(int(i)), []int64{positions.Value(int(i))}, 0, nil)
+				hasEntries = true
+			}
+		}
+
+		if !hasEntries {
+			return
+		}
+
+		if args.writeUUID == nil {
+			u := uuid.Must(uuid.NewRandom())
+			args.writeUUID = &u
+		}
+		location := rootLocation + "/data/" + fmt.Sprintf("00000-0-%s-deletes.puffin", *args.writeUUID)
+
+		dataFiles, err := writer.Flush(ctx, location)
+		if err != nil {
+			yield(nil, err)
+
+			return
+		}
+
+		for _, df := range dataFiles {
+			if !yield(df, nil) {
+				return
+			}
+		}
+	}
 }

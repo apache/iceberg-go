@@ -23,6 +23,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -113,7 +117,7 @@ func TestNormalizeFilePath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := normalizeFilePath(tt.input, cfg)
+			result := normalizeFilePathWithConfig(tt.input, cfg)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
@@ -361,7 +365,7 @@ func TestIsFileOrphan(t *testing.T) {
 	}
 	normalizedReferencedFiles := make(map[string]string)
 	for refPath := range referencedFiles {
-		normalizedPath := normalizeFilePath(refPath, cfg)
+		normalizedPath := normalizeFilePathWithConfig(refPath, cfg)
 		normalizedReferencedFiles[normalizedPath] = refPath
 	}
 
@@ -525,13 +529,13 @@ func TestGetReferencedFiles_IncludesStatisticsFiles(t *testing.T) {
 	}
 
 	// No snapshots: FileIO is not used; statistics paths must still be referenced.
-	refs, err := tbl.getReferencedFiles(nil)
+	refs, err := tbl.getReferencedFiles(nil, true)
 	require.NoError(t, err)
 
-	assert.True(t, refs["s3://bucket/stats/table-stats.puffin"])
-	assert.True(t, refs["s3://bucket/stats/part-stats.puffin"])
-	assert.True(t, refs[tbl.metadataLocation])
-	assert.False(t, refs["s3://bucket/stats/not-referenced.puffin"])
+	assert.Contains(t, refs, normalizeFilePath("s3://bucket/stats/table-stats.puffin"))
+	assert.Contains(t, refs, normalizeFilePath("s3://bucket/stats/part-stats.puffin"))
+	assert.Contains(t, refs, normalizeFilePath(tbl.metadataLocation))
+	assert.False(t, refs[normalizeFilePath("s3://bucket/stats/not-referenced.puffin")])
 	assert.False(t, refs[""])
 }
 
@@ -619,4 +623,129 @@ func TestDeleteFilesFallsBackToExistingBehavior(t *testing.T) {
 	require.NoError(t, err)
 	assert.ElementsMatch(t, orphans, mock.removed)
 	assert.ElementsMatch(t, orphans, deleted)
+}
+
+type inMemoryCatalog struct {
+	metadata Metadata
+}
+
+func (c *inMemoryCatalog) CommitTable(
+	ctx context.Context,
+	ident Identifier,
+	reqs []Requirement,
+	updates []Update,
+) (Metadata, string, error) {
+	meta, err := UpdateTableMetadata(c.metadata, updates, "")
+	if err != nil {
+		return nil, "", err
+	}
+	c.metadata = meta
+
+	return meta, "", nil
+}
+
+func (c *inMemoryCatalog) LoadTable(ctx context.Context, ident Identifier) (*Table, error) {
+	return nil, nil
+}
+
+func TestGetReferencedFiles_OverwriteThenExpireExcludesTombstones(t *testing.T) {
+	ctx := context.Background()
+	tableLocation := t.TempDir()
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+	}, nil)
+	spec := *iceberg.UnpartitionedSpec
+
+	meta, err := NewMetadata(schema, &spec, UnsortedSortOrder, tableLocation,
+		iceberg.Properties{PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+
+	fs := io.LocalFS{}
+	tbl := New(
+		Identifier{"db", "tbl"},
+		meta,
+		tableLocation+"/metadata/v0.metadata.json",
+		func(context.Context) (io.IO, error) { return fs, nil },
+		&inMemoryCatalog{meta},
+	)
+
+	// Step 1: append id=1. Produces snapshot 1 with one ADDED entry for fileA.
+	arrA, err := array.TableFromJSON(memory.DefaultAllocator, arrSchema, []string{`[{"id": 1}]`})
+	require.NoError(t, err)
+	defer arrA.Release()
+	tbl, err = tbl.AppendTable(ctx, arrA, 1, nil)
+	require.NoError(t, err)
+
+	snap1 := tbl.CurrentSnapshot()
+	require.NotNil(t, snap1)
+	pathA := dataFilePathsFromSnapshot(t, snap1, fs, iceberg.EntryStatusADDED)
+	require.Len(t, pathA, 1, "expected one ADDED data file after append")
+	fileA := pathA[0]
+
+	// Step 2: overwrite with id=2. Produces snapshot 2 whose manifest list
+	// contains [added-fileB-manifest, deleted-fileA-manifest]. fileA still
+	// lives in snapshot 1's manifest as ADDED at this point.
+	arrB, err := array.TableFromJSON(memory.DefaultAllocator, arrSchema, []string{`[{"id": 2}]`})
+	require.NoError(t, err)
+	defer arrB.Release()
+	tbl, err = tbl.OverwriteTable(ctx, arrB, 1, nil)
+	require.NoError(t, err)
+	require.Len(t, tbl.Metadata().Snapshots(), 2, "expected two snapshots after overwrite")
+
+	pathB := dataFilePathsFromSnapshot(t, tbl.CurrentSnapshot(), fs, iceberg.EntryStatusADDED)
+	require.Len(t, pathB, 1, "expected one ADDED data file after overwrite")
+	fileB := pathB[0]
+
+	// Step 3: expire snapshot 1, keeping only the overwrite snapshot.
+	// WithPostCommit(false) keeps fileA on disk so the test only exercises
+	// metadata reachability, not the side-effect of file removal.
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.ExpireSnapshots(
+		WithRetainLast(1),
+		WithOlderThan(0),
+		WithPostCommit(false),
+	))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	require.Len(t, tbl.Metadata().Snapshots(), 1,
+		"only the overwrite snapshot should remain after expiration")
+
+	// fileA is now referenced only via a DELETED entry in the surviving
+	// snapshot's tombstone manifest. The fix must exclude it.
+	refs, err := tbl.getReferencedFiles(fs, true)
+	require.NoError(t, err)
+
+	assert.Contains(t, refs, normalizeFilePath(fileB),
+		"new live file (ADDED in surviving snapshot) must be in reference set")
+	assert.NotContains(t, refs, normalizeFilePath(fileA),
+		"overwritten file (only present as DELETED tombstone) must NOT be in reference set")
+}
+
+// dataFilePathsFromSnapshot returns the data-file paths referenced by the
+// given snapshot's manifests, filtered to entries matching wantStatus.
+func dataFilePathsFromSnapshot(
+	t *testing.T,
+	snap *Snapshot,
+	fs io.IO,
+	wantStatus iceberg.ManifestEntryStatus,
+) []string {
+	t.Helper()
+	manifests, err := snap.Manifests(fs)
+	require.NoError(t, err)
+
+	var paths []string
+	for _, m := range manifests {
+		for e, err := range m.Entries(fs, false) {
+			require.NoError(t, err)
+			if e.Status() == wantStatus {
+				paths = append(paths, e.DataFile().FilePath())
+			}
+		}
+	}
+
+	return paths
 }

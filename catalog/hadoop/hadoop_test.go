@@ -19,6 +19,7 @@ package hadoop
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -26,6 +27,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -566,7 +568,7 @@ func (s *HadoopCatalogTestSuite) TestLoadNamespacePropertiesFileNotDir() {
 func (s *HadoopCatalogTestSuite) TestUpdateNamespacePropertiesUnsupported() {
 	_, err := s.cat.UpdateNamespaceProperties(context.Background(), []string{"ns"}, nil, nil)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "not supported")
+	s.Contains(err.Error(), "not yet implemented")
 }
 
 func (s *HadoopCatalogTestSuite) TestDropNamespaceWithRegularFilesOnly() {
@@ -709,4 +711,664 @@ func (s *HadoopCatalogTestSuite) TestIsTableDirFalseNonMatchingFiles() {
 	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "random.json"), nil, 0o644))
 
 	s.False(isTableDir(tableDir))
+}
+
+// Helper to create a fake table directory with a metadata file.
+func (s *HadoopCatalogTestSuite) createFakeTable(ident table.Identifier) {
+	metaDir := filepath.Join(s.cat.tableToPath(ident), "metadata")
+	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
+	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "v1.metadata.json"), []byte("{}"), 0o644))
+}
+
+// ListTables tests
+
+func (s *HadoopCatalogTestSuite) TestListTablesEmpty() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	var tables []table.Identifier
+	for ident, err := range s.cat.ListTables(ctx, []string{"ns"}) {
+		s.Require().NoError(err)
+		tables = append(tables, ident)
+	}
+
+	s.Empty(tables)
+}
+
+func (s *HadoopCatalogTestSuite) TestListTablesWithTables() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	s.createFakeTable([]string{"ns", "tbl1"})
+	s.createFakeTable([]string{"ns", "tbl2"})
+
+	var tables []table.Identifier
+	for ident, err := range s.cat.ListTables(ctx, []string{"ns"}) {
+		s.Require().NoError(err)
+		tables = append(tables, ident)
+	}
+
+	s.Len(tables, 2)
+	s.Contains(tables, table.Identifier{"ns", "tbl1"})
+	s.Contains(tables, table.Identifier{"ns", "tbl2"})
+}
+
+func (s *HadoopCatalogTestSuite) TestListTablesNoNamespace() {
+	ctx := context.Background()
+
+	for _, err := range s.cat.ListTables(ctx, []string{"nope"}) {
+		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+
+		break
+	}
+}
+
+func (s *HadoopCatalogTestSuite) TestListTablesEmptyIdentifier() {
+	ctx := context.Background()
+
+	for _, err := range s.cat.ListTables(ctx, []string{}) {
+		s.Require().Error(err)
+		s.Contains(err.Error(), "must not be empty")
+
+		break
+	}
+}
+
+func (s *HadoopCatalogTestSuite) TestListTablesMixedContent() {
+	// Namespace with tables, child namespaces, and regular files.
+	// Only table dirs should be returned.
+	ctx := context.Background()
+	nsDir := filepath.Join(s.warehouse, "ns")
+	s.Require().NoError(os.Mkdir(nsDir, 0o755))
+
+	s.createFakeTable([]string{"ns", "tbl1"})
+	s.Require().NoError(os.Mkdir(filepath.Join(nsDir, "child_ns"), 0o755))
+	s.Require().NoError(os.WriteFile(filepath.Join(nsDir, "stray_file.txt"), nil, 0o644))
+
+	var tables []table.Identifier
+	for ident, err := range s.cat.ListTables(ctx, []string{"ns"}) {
+		s.Require().NoError(err)
+		tables = append(tables, ident)
+	}
+
+	s.Len(tables, 1)
+	s.Equal(table.Identifier{"ns", "tbl1"}, tables[0])
+}
+
+func (s *HadoopCatalogTestSuite) TestListTablesNestedNamespace() {
+	ctx := context.Background()
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.warehouse, "a", "b"), 0o755))
+
+	s.createFakeTable([]string{"a", "b", "tbl1"})
+
+	var tables []table.Identifier
+	for ident, err := range s.cat.ListTables(ctx, []string{"a", "b"}) {
+		s.Require().NoError(err)
+		tables = append(tables, ident)
+	}
+
+	s.Len(tables, 1)
+	s.Equal(table.Identifier{"a", "b", "tbl1"}, tables[0])
+}
+
+// DropTable tests
+
+func (s *HadoopCatalogTestSuite) TestDropTable() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+	s.createFakeTable([]string{"ns", "tbl"})
+
+	err := s.cat.DropTable(ctx, []string{"ns", "tbl"})
+	s.Require().NoError(err)
+
+	// Verify the table directory is completely removed.
+	_, statErr := os.Stat(filepath.Join(s.warehouse, "ns", "tbl"))
+	s.True(os.IsNotExist(statErr))
+}
+
+func (s *HadoopCatalogTestSuite) TestDropTableNotExists() {
+	err := s.cat.DropTable(context.Background(), []string{"ns", "tbl"})
+	s.ErrorIs(err, catalog.ErrNoSuchTable)
+}
+
+func (s *HadoopCatalogTestSuite) TestDropTableVerifyCleanup() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+	s.createFakeTable([]string{"ns", "tbl"})
+
+	// Add a data file to confirm everything is purged.
+	dataDir := filepath.Join(s.warehouse, "ns", "tbl", "data")
+	s.Require().NoError(os.MkdirAll(dataDir, 0o755))
+	s.Require().NoError(os.WriteFile(filepath.Join(dataDir, "00000-0-0-00000.parquet"), []byte("data"), 0o644))
+
+	err := s.cat.DropTable(ctx, []string{"ns", "tbl"})
+	s.Require().NoError(err)
+
+	_, statErr := os.Stat(filepath.Join(s.warehouse, "ns", "tbl"))
+	s.True(os.IsNotExist(statErr))
+}
+
+func (s *HadoopCatalogTestSuite) TestDropTableShortIdentifier() {
+	err := s.cat.DropTable(context.Background(), []string{"tbl"})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "at least a namespace and table name")
+}
+
+// CreateTable tests
+
+func (s *HadoopCatalogTestSuite) testSchema() *iceberg.Schema {
+	return iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTable() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	tbl, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema())
+	s.Require().NoError(err)
+	s.NotNil(tbl)
+
+	// Verify metadata directory and files exist
+	metaDir := filepath.Join(s.warehouse, "ns", "tbl", "metadata")
+	s.DirExists(metaDir)
+	s.FileExists(filepath.Join(metaDir, "v1.metadata.json"))
+
+	// Verify version hint
+	data, err := os.ReadFile(filepath.Join(metaDir, "version-hint.text"))
+	s.Require().NoError(err)
+	s.Equal("1", string(data))
+
+	// Verify metadata
+	s.Equal(filepath.Join(metaDir, "v1.metadata.json"), tbl.MetadataLocation())
+	s.Equal(filepath.Join(s.warehouse, "ns", "tbl"), tbl.Location())
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTableAndLoad() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	schema := s.testSchema()
+	created, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, schema)
+	s.Require().NoError(err)
+
+	loaded, err := s.cat.LoadTable(ctx, []string{"ns", "tbl"})
+	s.Require().NoError(err)
+
+	s.Equal(created.Metadata().TableUUID(), loaded.Metadata().TableUUID())
+	s.Equal(created.Location(), loaded.Location())
+	s.Equal(len(created.Schema().Fields()), len(loaded.Schema().Fields()))
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTableCustomLocation() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	_, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema(),
+		catalog.WithLocation("/some/other/path"))
+	s.Require().Error(err)
+	s.Contains(err.Error(), "custom table locations are not supported")
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTableSameLocationAllowed() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	loc := filepath.Join(s.warehouse, "ns", "tbl")
+	tbl, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema(),
+		catalog.WithLocation(loc))
+	s.Require().NoError(err)
+	s.Equal(loc, tbl.Location())
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTableNoNamespace() {
+	ctx := context.Background()
+
+	_, err := s.cat.CreateTable(ctx, []string{"nonexistent", "tbl"}, s.testSchema())
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTableAlreadyExists() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	_, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema())
+	s.Require().NoError(err)
+
+	_, err = s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema())
+	s.ErrorIs(err, catalog.ErrTableAlreadyExists)
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTableWithPartitionSpec() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	spec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{
+			SourceIDs: []int{1},
+			FieldID:   1000,
+			Name:      "id_bucket",
+			Transform: iceberg.BucketTransform{NumBuckets: 16},
+		},
+	)
+
+	tbl, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema(),
+		catalog.WithPartitionSpec(&spec))
+	s.Require().NoError(err)
+	s.False(tbl.Spec().IsUnpartitioned())
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTableWithSortOrder() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	sortOrder, err := table.NewSortOrder(1, []table.SortField{
+		{
+			SourceIDs: []int{1},
+			Transform: iceberg.IdentityTransform{},
+			Direction: table.SortASC,
+			NullOrder: table.NullsFirst,
+		},
+	})
+	s.Require().NoError(err)
+
+	tbl, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema(),
+		catalog.WithSortOrder(sortOrder))
+	s.Require().NoError(err)
+	s.Greater(tbl.SortOrder().Len(), 0)
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTableWithProperties() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	props := iceberg.Properties{
+		"custom.key": "custom.value",
+	}
+
+	tbl, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema(),
+		catalog.WithProperties(props))
+	s.Require().NoError(err)
+	s.Equal("custom.value", tbl.Properties()["custom.key"])
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTableShortIdentifier() {
+	ctx := context.Background()
+
+	_, err := s.cat.CreateTable(ctx, []string{"tbl"}, s.testSchema())
+	s.Require().Error(err)
+	s.Contains(err.Error(), "at least a namespace and table name")
+}
+
+func (s *HadoopCatalogTestSuite) TestDropTableNamespacePreserved() {
+	// Dropping a table should not affect the parent namespace directory.
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+	s.createFakeTable([]string{"ns", "tbl"})
+
+	s.Require().NoError(s.cat.DropTable(ctx, []string{"ns", "tbl"}))
+
+	// Namespace dir should still exist.
+	info, err := os.Stat(filepath.Join(s.warehouse, "ns"))
+	s.Require().NoError(err)
+	s.True(info.IsDir())
+}
+
+// RenameTable tests
+
+func (s *HadoopCatalogTestSuite) TestRenameTableUnsupported() {
+	_, err := s.cat.RenameTable(context.Background(), []string{"ns", "old"}, []string{"ns", "new"})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "not supported")
+}
+
+func (s *HadoopCatalogTestSuite) TestListTablesNamespaceIsFile() {
+	ctx := context.Background()
+	s.Require().NoError(os.WriteFile(filepath.Join(s.warehouse, "not_a_ns"), nil, 0o644))
+
+	for _, err := range s.cat.ListTables(ctx, []string{"not_a_ns"}) {
+		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+
+		break
+	}
+}
+
+func (s *HadoopCatalogTestSuite) TestListTablesIdentifierIsolation() {
+	// Verify that yielded identifiers don't alias the namespace slice.
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+	s.createFakeTable([]string{"ns", "tbl1"})
+	s.createFakeTable([]string{"ns", "tbl2"})
+
+	var tables []table.Identifier
+	for ident, err := range s.cat.ListTables(ctx, []string{"ns"}) {
+		s.Require().NoError(err)
+		tables = append(tables, ident)
+	}
+
+	s.Len(tables, 2)
+	// Each identifier should be independent — no aliasing.
+	s.NotEqual(tables[0][len(tables[0])-1], tables[1][len(tables[1])-1])
+}
+
+// LoadTable tests
+
+func (s *HadoopCatalogTestSuite) TestLoadTableNotExists() {
+	ctx := context.Background()
+
+	_, err := s.cat.LoadTable(ctx, []string{"ns", "tbl"})
+	s.Require().Error(err)
+	s.ErrorIs(err, catalog.ErrNoSuchTable)
+}
+
+func (s *HadoopCatalogTestSuite) TestLoadTableStaleHint() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	// Create table (version 1)
+	_, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema())
+	s.Require().NoError(err)
+
+	// Manually set the hint to a stale value
+	ident := []string{"ns", "tbl"}
+	s.cat.writeVersionHint(ident, 99)
+
+	// LoadTable should still succeed by falling back to dir listing
+	tbl, err := s.cat.LoadTable(ctx, ident)
+	s.Require().NoError(err)
+	s.NotNil(tbl)
+}
+
+func (s *HadoopCatalogTestSuite) TestLoadTableShortIdentifier() {
+	ctx := context.Background()
+
+	_, err := s.cat.LoadTable(ctx, []string{"tbl"})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "at least a namespace and table name")
+}
+
+// CheckTableExists tests
+
+func (s *HadoopCatalogTestSuite) TestCheckTableExistsTrue() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	_, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema())
+	s.Require().NoError(err)
+
+	exists, err := s.cat.CheckTableExists(ctx, []string{"ns", "tbl"})
+	s.Require().NoError(err)
+	s.True(exists)
+}
+
+func (s *HadoopCatalogTestSuite) TestCheckTableExistsFalse() {
+	exists, err := s.cat.CheckTableExists(context.Background(), []string{"ns", "tbl"})
+	s.Require().NoError(err)
+	s.False(exists)
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTableNestedNamespace() {
+	ctx := context.Background()
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.warehouse, "a", "b"), 0o755))
+
+	tbl, err := s.cat.CreateTable(ctx, []string{"a", "b", "tbl"}, s.testSchema())
+	s.Require().NoError(err)
+	s.Equal(filepath.Join(s.warehouse, "a", "b", "tbl"), tbl.Location())
+
+	// Verify round-trip
+	loaded, err := s.cat.LoadTable(ctx, []string{"a", "b", "tbl"})
+	s.Require().NoError(err)
+	s.Equal(tbl.Metadata().TableUUID(), loaded.Metadata().TableUUID())
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTableMetadataFormatVersion() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	tbl, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema())
+	s.Require().NoError(err)
+
+	// Default format version should be V2
+	s.Equal(2, tbl.Metadata().Version())
+}
+
+// CommitTable tests
+
+func (s *HadoopCatalogTestSuite) createTestTable(ns, name string) *table.Table {
+	ctx := context.Background()
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.warehouse, ns), 0o755))
+
+	tbl, err := s.cat.CreateTable(ctx, []string{ns, name}, s.testSchema())
+	s.Require().NoError(err)
+
+	return tbl
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableSingleUpdate() {
+	ctx := context.Background()
+	tbl := s.createTestTable("ns", "tbl")
+
+	meta, metaLoc, err := s.cat.CommitTable(ctx, []string{"ns", "tbl"},
+		[]table.Requirement{
+			table.AssertTableUUID(tbl.Metadata().TableUUID()),
+		},
+		[]table.Update{
+			table.NewSetPropertiesUpdate(iceberg.Properties{"test.key": "test.value"}),
+		},
+	)
+	s.Require().NoError(err)
+
+	// Version should have incremented to 2.
+	s.Contains(metaLoc, "v2.metadata.json")
+	s.Equal("test.value", meta.Properties()["test.key"])
+
+	// File should exist on disk.
+	s.FileExists(metaLoc)
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableMultipleSequential() {
+	ctx := context.Background()
+	tbl := s.createTestTable("ns", "tbl")
+	ident := []string{"ns", "tbl"}
+
+	for i := 0; i < 3; i++ {
+		loaded, err := s.cat.LoadTable(ctx, ident)
+		s.Require().NoError(err)
+
+		_, metaLoc, err := s.cat.CommitTable(ctx, ident,
+			[]table.Requirement{
+				table.AssertTableUUID(loaded.Metadata().TableUUID()),
+			},
+			[]table.Update{
+				table.NewSetPropertiesUpdate(iceberg.Properties{
+					fmt.Sprintf("iter.%d", i): "val",
+				}),
+			},
+		)
+		s.Require().NoError(err)
+		s.Contains(metaLoc, fmt.Sprintf("v%d.metadata.json", i+2))
+	}
+
+	// Final load should have all properties.
+	final, err := s.cat.LoadTable(ctx, ident)
+	s.Require().NoError(err)
+	s.Equal("val", final.Properties()["iter.0"])
+	s.Equal("val", final.Properties()["iter.1"])
+	s.Equal("val", final.Properties()["iter.2"])
+
+	// Version hint should reflect the latest version.
+	_ = tbl // suppress unused
+	s.Equal(4, s.cat.readVersionHint(ident))
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableNoChanges() {
+	ctx := context.Background()
+	tbl := s.createTestTable("ns", "tbl")
+
+	meta, metaLoc, err := s.cat.CommitTable(ctx, []string{"ns", "tbl"},
+		[]table.Requirement{
+			table.AssertTableUUID(tbl.Metadata().TableUUID()),
+		},
+		nil, // no updates
+	)
+	s.Require().NoError(err)
+
+	// Even with no updates, UpdateTableMetadata produces a new metadata
+	// object (different timestamp), so a new version is written.
+	s.Contains(metaLoc, "v2.metadata.json")
+	s.Equal(tbl.Metadata().TableUUID(), meta.TableUUID())
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableConflictDetection() {
+	// Conflict detection relies on os.Stat checking whether the target
+	// v{N+1}.metadata.json already exists before the atomic rename.
+	// In a single-threaded test we cannot trigger the TOCTOU race
+	// between findVersion and os.Stat. Instead, we verify that after
+	// multiple sequential commits, the version sequence is contiguous
+	// and no versions are skipped or duplicated.
+	ctx := context.Background()
+	s.createTestTable("ns", "tbl")
+	ident := []string{"ns", "tbl"}
+
+	for i := 2; i <= 5; i++ {
+		_, metaLoc, err := s.cat.CommitTable(ctx, ident,
+			nil,
+			[]table.Update{
+				table.NewSetPropertiesUpdate(iceberg.Properties{
+					fmt.Sprintf("v%d", i): "committed",
+				}),
+			},
+		)
+		s.Require().NoError(err)
+		s.Contains(metaLoc, fmt.Sprintf("v%d.metadata.json", i))
+		s.FileExists(s.cat.metadataFilePath(ident, i))
+	}
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableRequirementFailure() {
+	ctx := context.Background()
+	s.createTestTable("ns", "tbl")
+
+	wrongUUID := uuid.New()
+	_, _, err := s.cat.CommitTable(ctx, []string{"ns", "tbl"},
+		[]table.Requirement{
+			table.AssertTableUUID(wrongUUID),
+		},
+		[]table.Update{
+			table.NewSetPropertiesUpdate(iceberg.Properties{"k": "v"}),
+		},
+	)
+	s.Require().Error(err)
+	s.Contains(err.Error(), "UUID")
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableLocationChange() {
+	ctx := context.Background()
+	s.createTestTable("ns", "tbl")
+
+	_, _, err := s.cat.CommitTable(ctx, []string{"ns", "tbl"},
+		nil,
+		[]table.Update{
+			table.NewSetLocationUpdate("/some/other/location"),
+		},
+	)
+	s.Require().Error(err)
+	s.Contains(err.Error(), "location cannot be changed")
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableWriteMetadataLocation() {
+	ctx := context.Background()
+	s.createTestTable("ns", "tbl")
+
+	_, _, err := s.cat.CommitTable(ctx, []string{"ns", "tbl"},
+		nil,
+		[]table.Update{
+			table.NewSetPropertiesUpdate(iceberg.Properties{
+				"write.metadata.location": "/custom/metadata/path",
+			}),
+		},
+	)
+	s.Require().Error(err)
+	s.Contains(err.Error(), "write.metadata.location")
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableNoOrphanedTempFiles() {
+	ctx := context.Background()
+	s.createTestTable("ns", "tbl")
+	ident := []string{"ns", "tbl"}
+
+	// Do several commits and verify no temp files are left behind.
+	for i := 0; i < 3; i++ {
+		_, _, err := s.cat.CommitTable(ctx, ident,
+			nil,
+			[]table.Update{
+				table.NewSetPropertiesUpdate(iceberg.Properties{
+					fmt.Sprintf("iter.%d", i): "val",
+				}),
+			},
+		)
+		s.Require().NoError(err)
+	}
+
+	metaDir := s.cat.metadataDir(ident)
+	entries, err := os.ReadDir(metaDir)
+	s.Require().NoError(err)
+
+	for _, e := range entries {
+		if !e.IsDir() && !versionPattern.MatchString(e.Name()) && e.Name() != "version-hint.text" {
+			s.Failf("orphaned temp file", "found orphaned file: %s", e.Name())
+		}
+	}
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableVersionHintUpdated() {
+	ctx := context.Background()
+	s.createTestTable("ns", "tbl")
+	ident := []string{"ns", "tbl"}
+
+	_, _, err := s.cat.CommitTable(ctx, ident,
+		nil,
+		[]table.Update{
+			table.NewSetPropertiesUpdate(iceberg.Properties{"k": "v"}),
+		},
+	)
+	s.Require().NoError(err)
+
+	s.Equal(2, s.cat.readVersionHint(ident))
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableCreateViaCommit() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+	ident := []string{"ns", "tbl"}
+
+	loc := s.cat.defaultTableLocation(ident)
+	meta, metaLoc, err := s.cat.CommitTable(ctx, ident,
+		[]table.Requirement{
+			table.AssertCreate(),
+		},
+		[]table.Update{
+			table.NewAssignUUIDUpdate(uuid.New()),
+			table.NewUpgradeFormatVersionUpdate(2),
+			table.NewAddSchemaUpdate(s.testSchema()),
+			table.NewSetCurrentSchemaUpdate(-1),
+			table.NewSetLocationUpdate(loc),
+		},
+	)
+	s.Require().NoError(err)
+	s.Contains(metaLoc, "v1.metadata.json")
+	s.Equal(loc, meta.Location())
+
+	// Should be loadable.
+	loaded, err := s.cat.LoadTable(ctx, ident)
+	s.Require().NoError(err)
+	s.Equal(meta.TableUUID(), loaded.Metadata().TableUUID())
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableShortIdentifier() {
+	_, _, err := s.cat.CommitTable(context.Background(), []string{"tbl"}, nil, nil)
+	s.Require().Error(err)
+	s.Contains(err.Error(), "at least a namespace and table name")
 }

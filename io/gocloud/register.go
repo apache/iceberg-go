@@ -22,13 +22,11 @@ import (
 	"net/url"
 
 	icebergio "github.com/apache/iceberg-go/io"
-	"gocloud.dev/blob/memblob"
 )
 
 func init() {
 	registerS3Schemes()
 	registerGCSScheme()
-	registerMemScheme()
 	registerAzureSchemes()
 }
 
@@ -45,6 +43,7 @@ func registerS3Schemes() {
 	icebergio.Register("s3", s3Factory)
 	icebergio.Register("s3a", s3Factory)
 	icebergio.Register("s3n", s3Factory)
+	icebergio.Register("oss", s3Factory)
 }
 
 // registerGCSScheme registers the Google Cloud Storage scheme (gs).
@@ -54,15 +53,6 @@ func registerGCSScheme() {
 		if err != nil {
 			return nil, err
 		}
-
-		return createBlobFS(ctx, bucket, defaultKeyExtractor(parsed.Host)), nil
-	})
-}
-
-// registerMemScheme registers the in-memory blob storage scheme (mem).
-func registerMemScheme() {
-	icebergio.Register("mem", func(ctx context.Context, parsed *url.URL, props map[string]string) (icebergio.IO, error) {
-		bucket := memblob.OpenBucket(nil)
 
 		return createBlobFS(ctx, bucket, defaultKeyExtractor(parsed.Host)), nil
 	})

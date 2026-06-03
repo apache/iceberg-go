@@ -492,6 +492,24 @@ type ManifestFile interface {
 	//
 	// Prefer Entries over FetchEntries when walking large manifests
 	// since it avoids loading every entry into memory at once.
+	//
+	// Iteration contract:
+	//
+	//   - On the first error encountered while opening the manifest, decoding
+	//     a record, or applying inheritance, the iterator yields (nil, err)
+	//     and then stops. Callers must treat any non-nil error as terminal and
+	//     break or return without consuming further values.
+	//   - When iteration ends without an error from the read path, the
+	//     iterator may yield a final (nil, closeErr) pair if closing the
+	//     underlying file or manifest reader returns an error. This terminal
+	//     close error is reported only when the consumer ranged through every
+	//     value; an early break suppresses it (see below).
+	//   - Breaking out of the range loop (or any other early termination of
+	//     the yield function) is safe: the iterator releases the underlying
+	//     file handle and reader before returning, and no close error from
+	//     that path is yielded — the caller has already signalled it is no
+	//     longer interested in further values, so an extra synthetic
+	//     (nil, closeErr) tail would be discarded anyway.
 	Entries(fs iceio.IO, discardDeleted bool) iter.Seq2[ManifestEntry, error]
 	// FetchEntries reads the manifest list file to fetch the list of
 	// manifest entries using the provided file system IO interface.
@@ -1470,8 +1488,18 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 
 	case 2, 3:
 		for _, file := range files {
-			if file.Version() != m.version {
-				return fmt.Errorf("%w: ManifestListWriter only supports version %d manifest files", ErrInvalidArgument, m.version)
+			// Per the Iceberg spec a v2 manifest list may reference v1 manifest
+			// files (and a v3 list may reference v1 or v2 manifests) so that a
+			// table can be upgraded without rewriting historical manifests. The
+			// in-memory ManifestFile produced for v1 inputs already carries the
+			// inheritance values mandated by the spec — Content=data and
+			// SeqNumber/MinSeqNumber=0 — so it can be encoded directly against
+			// the v2/v3 entry schema. Newer-than-writer inputs are rejected
+			// because the v2 schema cannot represent v3 fields such as
+			// first_row_id.
+			if file.Version() > m.version {
+				return fmt.Errorf("%w: manifest list v%d cannot reference v%d manifest files",
+					ErrInvalidArgument, m.version, file.Version())
 			}
 
 			wrapped := *(file.(*manifestFile))
@@ -1618,6 +1646,7 @@ const (
 	AvroFile    FileFormat = "AVRO"
 	OrcFile     FileFormat = "ORC"
 	ParquetFile FileFormat = "PARQUET"
+	PuffinFile  FileFormat = "PUFFIN"
 )
 
 // FileFormatFromString parses a file format string (case-insensitive).
@@ -1629,6 +1658,8 @@ func FileFormatFromString(s string) (FileFormat, error) {
 		return OrcFile, nil
 	case string(AvroFile):
 		return AvroFile, nil
+	case string(PuffinFile):
+		return PuffinFile, nil
 	default:
 		return "", fmt.Errorf("unknown file format: %s", s)
 	}
@@ -1851,6 +1882,12 @@ func (d *dataFile) convertAvroValueToIcebergType(v any, fieldID int) any {
 			}
 
 			return Timestamp(v.(int64))
+		case atype.TimestampNanos:
+			if val, ok := v.(time.Time); ok {
+				return TimestampNano(val.UTC().UnixNano())
+			}
+
+			return TimestampNano(v.(int64))
 		case atype.Decimal:
 			if r, ok := v.(*big.Rat); ok {
 				scale := d.fieldIDToFixedSize[fieldID]
@@ -2118,10 +2155,17 @@ func NewDataFileBuilder(
 		return nil, fmt.Errorf("%w: path cannot be empty", ErrInvalidArgument)
 	}
 
-	if format != AvroFile && format != OrcFile && format != ParquetFile {
+	if format != AvroFile && format != OrcFile && format != ParquetFile && format != PuffinFile {
 		return nil, fmt.Errorf(
-			"%w: format must be one of %s, %s, or %s",
-			ErrInvalidArgument, AvroFile, OrcFile, ParquetFile,
+			"%w: format must be one of %s, %s, %s, or %s",
+			ErrInvalidArgument, AvroFile, OrcFile, ParquetFile, PuffinFile,
+		)
+	}
+
+	if format == PuffinFile && content != EntryContentPosDeletes {
+		return nil, fmt.Errorf(
+			"%w: %s format is only valid for %s content",
+			ErrInvalidArgument, PuffinFile, EntryContentPosDeletes,
 		)
 	}
 
@@ -2194,6 +2238,13 @@ func (b *DataFileBuilder) NaNValueCounts(counts map[int]int64) *DataFileBuilder 
 }
 
 // DistinctValueCounts sets the distinct value counts for the data file.
+//
+// Deprecated: distinct_counts (field 111) is deprecated in every
+// version of the Iceberg spec (apache/iceberg#12182). The Avro
+// manifest-entry schemas omit the field for v1, v2, and v3, so values
+// set here are not transported in manifests written by this library.
+// The setter is retained for round-tripping legacy DataFiles read from
+// older manifests; new code should not call it.
 func (b *DataFileBuilder) DistinctValueCounts(counts map[int]int64) *DataFileBuilder {
 	b.d.DistinctCounts = mapToAvroColMap(counts)
 
