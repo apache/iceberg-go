@@ -45,6 +45,7 @@ type writerFactory struct {
 	targetFileSize int64
 
 	locProvider      LocationProvider
+	tableProps       iceberg.Properties
 	fileSchema       *iceberg.Schema
 	arrowSchema      *arrow.Schema
 	writeProps       any
@@ -152,6 +153,7 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		taskSchema:     taskSchema,
 		targetFileSize: targetFileSize,
 		locProvider:    locProvider,
+		tableProps:     meta.props,
 		fileSchema:     fileSchema,
 		arrowSchema:    arrowSchema,
 		writeProps:     format.GetWriteProperties(meta.props),
@@ -219,8 +221,12 @@ func (w *writerFactory) partitionLocProvider(partitionPath string) (LocationProv
 	}
 
 	partitionDataPath := w.rootURL.JoinPath("data", partitionPath).String()
-	loc, err := LoadLocationProvider(w.rootLocation,
-		iceberg.Properties{WriteDataPathKey: partitionDataPath})
+	partitionProps := make(iceberg.Properties, len(w.tableProps)+1)
+	for k, v := range w.tableProps {
+		partitionProps[k] = v
+	}
+	partitionProps[WriteDataPathKey] = partitionDataPath
+	loc, err := LoadLocationProvider(w.rootLocation, partitionProps)
 	if err != nil {
 		return nil, err
 	}

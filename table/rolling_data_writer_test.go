@@ -400,3 +400,55 @@ func (s *RollingDataWriterTestSuite) TestBytesWrittenReflectsCompressedSize() {
 	s.Require().NoError(err)
 	s.Equal(int64(100), df.Count())
 }
+
+// TestPartitionLocProviderPreservesObjectStorageProps reproduces #1155: when
+// write.object-storage.enabled is true on a partitioned table, partition data
+// file paths must include entropy hash dirs from objectStoreLocationProvider.
+// Previously partitionLocProvider rebuilt props with only WriteDataPathKey, so
+// LoadLocationProvider fell back to simpleLocationProvider for partitions.
+func (s *RollingDataWriterTestSuite) TestPartitionLocProviderPreservesObjectStorageProps() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	icebergSchema, err := ArrowSchemaToIcebergWithFreshIDs(arrSchema, false)
+	s.Require().NoError(err)
+
+	spec := iceberg.NewPartitionSpec()
+	loc := "table_location"
+	meta, err := NewMetadata(icebergSchema, &spec, UnsortedSortOrder, loc, iceberg.Properties{
+		ObjectStoreEnabledKey: "true",
+	})
+	s.Require().NoError(err)
+	metaBuilder, err := MetadataBuilderFromBase(meta, "")
+	s.Require().NoError(err)
+
+	writeUUID := uuid.New()
+	args := recordWritingArgs{
+		sc:        arrSchema,
+		fs:        iceio.LocalFS{},
+		writeUUID: &writeUUID,
+		counter: func(yield func(int) bool) {
+			for i := 0; ; i++ {
+				if !yield(i) {
+					break
+				}
+			}
+		},
+	}
+	factory, err := newWriterFactory(loc, args, metaBuilder, icebergSchema, 1024*1024)
+	s.Require().NoError(err)
+	defer factory.closeAll()
+
+	provider, err := factory.partitionLocProvider("dt=2026-06-04")
+	s.Require().NoError(err)
+	_, ok := provider.(*objectStoreLocationProvider)
+	s.True(ok, "expected objectStoreLocationProvider for partitioned writes when write.object-storage.enabled=true")
+
+	// Hashed prefix should appear before the file name for object storage layout.
+	dataLoc := provider.NewDataLocation("a")
+	s.Contains(dataLoc, "table_location/data/dt=2026-06-04/")
+	s.NotEqual("table_location/data/dt=2026-06-04/a", dataLoc,
+		"object storage layout should inject an entropy hash prefix between partition dir and file")
+}
