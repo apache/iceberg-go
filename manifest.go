@@ -1819,9 +1819,9 @@ type dataFile struct {
 	fieldIDToPartitionData map[int]any
 	fieldIDToFixedSize     map[int]int
 
-	specID        int32
-	initPartition sync.Once
-	initColStats  sync.Once
+	specID          int32
+	initPartition   sync.Once
+	initColumnStats sync.Once
 }
 
 func (d *dataFile) initPartitionData() {
@@ -1839,7 +1839,7 @@ func (d *dataFile) initPartitionData() {
 }
 
 func (d *dataFile) initColumnStatsData() {
-	d.initColStats.Do(func() {
+	d.initColumnStats.Do(func() {
 		d.colSizeMap = avroColMapToMap(d.ColSizes)
 		d.valCntMap = avroColMapToMap(d.ValCounts)
 		d.nullCntMap = avroColMapToMap(d.NullCounts)
