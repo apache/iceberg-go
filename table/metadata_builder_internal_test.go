@@ -1915,6 +1915,7 @@ func TestMetadataBuilderNameMapping(t *testing.T) {
 		require.Nil(t, builder.NameMapping())
 	})
 }
+
 func TestVariantTypeValidation(t *testing.T) {
 	t.Run("ValidRequiredVariant", func(t *testing.T) {
 		schema := iceberg.NewSchema(1,
