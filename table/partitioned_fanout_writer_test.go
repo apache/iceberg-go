@@ -597,7 +597,7 @@ func (s *FanoutWriterTestSuite) TestGetArrowValueAsIcebergLiteralTime64() {
 	usArr := usBldr.NewTime64Array()
 	defer usArr.Release()
 
-	lit, err := getArrowValueAsIcebergLiteral(usArr, 0)
+	lit, err := getArrowValueAsIcebergLiteral(usArr, 0, iceberg.PrimitiveTypes.Time)
 	s.Require().NoError(err)
 	s.Equal(iceberg.NewLiteral(iceberg.Time(5_000_000)), lit)
 
@@ -608,7 +608,7 @@ func (s *FanoutWriterTestSuite) TestGetArrowValueAsIcebergLiteralTime64() {
 	nsArr := nsBldr.NewTime64Array()
 	defer nsArr.Release()
 
-	_, err = getArrowValueAsIcebergLiteral(nsArr, 0)
+	_, err = getArrowValueAsIcebergLiteral(nsArr, 0, iceberg.PrimitiveTypes.Time)
 	s.Require().ErrorIs(err, iceberg.ErrInvalidSchema)
 	s.Contains(err.Error(), "time64[ns]")
 }
