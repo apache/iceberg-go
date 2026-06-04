@@ -137,6 +137,7 @@ func TestParseAWSConfigConnectTimeout(t *testing.T) {
 			client, ok := cfg.HTTPClient.(*awshttp.BuildableClient)
 			require.True(t, ok)
 			assert.Equal(t, tt.want, client.GetDialer().Timeout)
+			assertS3TransportTuning(t, client.GetTransport())
 		})
 	}
 }
@@ -171,6 +172,21 @@ func TestParseAWSConfigConnectTimeoutRejectsNonPositiveDurations(t *testing.T) {
 	}
 }
 
+func TestParseAWSConfigProxyUsesTunedTransport(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := ParseAWSConfig(context.Background(), map[string]string{
+		io.S3Region:   "us-east-1",
+		io.S3ProxyURI: "http://proxy.example.com:8080",
+	})
+	require.NoError(t, err)
+
+	client, ok := cfg.HTTPClient.(*awshttp.BuildableClient)
+	require.True(t, ok)
+	assertS3TransportTuning(t, client.GetTransport())
+	assertProxyURL(t, client.GetTransport(), "http://proxy.example.com:8080")
+}
+
 func TestParseAWSConfigProxyAndConnectTimeout(t *testing.T) {
 	t.Parallel()
 
@@ -184,8 +200,15 @@ func TestParseAWSConfigProxyAndConnectTimeout(t *testing.T) {
 	client, ok := cfg.HTTPClient.(*awshttp.BuildableClient)
 	require.True(t, ok)
 	assert.Equal(t, 5*time.Second, client.GetDialer().Timeout)
+	assertS3TransportTuning(t, client.GetTransport())
+	assertProxyURL(t, client.GetTransport(), "http://proxy.example.com:8080")
+}
 
-	proxyFunc := client.GetTransport().Proxy
+func assertProxyURL(t *testing.T, transport *http.Transport, want string) {
+	t.Helper()
+
+	require.NotNil(t, transport)
+	proxyFunc := transport.Proxy
 	require.NotNil(t, proxyFunc)
 
 	proxyURL, err := proxyFunc(&http.Request{
@@ -193,7 +216,17 @@ func TestParseAWSConfigProxyAndConnectTimeout(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, proxyURL)
-	assert.Equal(t, "http://proxy.example.com:8080", proxyURL.String())
+	assert.Equal(t, want, proxyURL.String())
+}
+
+func assertS3TransportTuning(t *testing.T, transport *http.Transport) {
+	t.Helper()
+
+	require.NotNil(t, transport)
+	assert.Equal(t, 256, transport.MaxIdleConns)
+	assert.Equal(t, 256, transport.MaxIdleConnsPerHost)
+	assert.Equal(t, 2048, transport.MaxConnsPerHost)
+	assert.Equal(t, 90*time.Second, transport.IdleConnTimeout)
 }
 
 func TestResolveUsePathStyle(t *testing.T) {

@@ -76,7 +76,7 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 			return nil, fmt.Errorf("invalid s3 proxy url %q: %w", proxy, err)
 		}
 
-		httpClient = awshttp.NewBuildableClient().WithTransportOptions(
+		httpClient = newS3BuildableClient().WithTransportOptions(
 			func(t *http.Transport) {
 				t.Proxy = http.ProxyURL(proxyURL)
 			},
@@ -90,7 +90,7 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 		}
 
 		if httpClient == nil {
-			httpClient = awshttp.NewBuildableClient()
+			httpClient = newS3BuildableClient()
 		}
 		httpClient = httpClient.WithDialerOptions(func(d *net.Dialer) {
 			d.Timeout = duration
@@ -130,6 +130,28 @@ func parseS3ConnectTimeout(timeout string) (time.Duration, error) {
 	return duration, nil
 }
 
+// S3 transport tuning shared by all S3 BuildableClient paths.
+const (
+	s3MaxIdleConns        = 256
+	s3MaxIdleConnsPerHost = 256
+	s3MaxConnsPerHost     = 2048
+	s3IdleConnTimeout     = 90 * time.Second
+)
+
+// newS3BuildableClient returns an AWS buildable HTTP client with the S3
+// transport tuning applied. Subsequent WithTransportOptions/WithDialerOptions
+// calls preserve this tuning, since the builder clones the transport forward.
+func newS3BuildableClient() *awshttp.BuildableClient {
+	return awshttp.NewBuildableClient().WithTransportOptions(applyS3TransportTuning)
+}
+
+func applyS3TransportTuning(t *http.Transport) {
+	t.MaxIdleConns = s3MaxIdleConns
+	t.MaxIdleConnsPerHost = s3MaxIdleConnsPerHost
+	t.MaxConnsPerHost = s3MaxConnsPerHost
+	t.IdleConnTimeout = s3IdleConnTimeout
+}
+
 // resolveUsePathStyle determines whether the S3 client should use
 // path-style addressing. It defaults to virtual-hosted style for
 // standard AWS S3 and path-style for custom endpoints (e.g. MinIO).
@@ -160,17 +182,10 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 	}
 
 	// Default HTTP client when not configured: use the SDK buildable client so
-	// proxy, TLS, dial, and HTTP/2 behavior match the usual AWS defaults, but
-	// raise per-host idle limits (Go's DefaultTransport uses 2 per host).
+	// proxy, TLS, dial, and HTTP/2 behavior match the usual AWS defaults, with
+	// the S3 transport tuning applied (see applyS3TransportTuning).
 	if awscfg.HTTPClient == nil {
-		awscfg.HTTPClient = awshttp.NewBuildableClient().WithTransportOptions(
-			func(t *http.Transport) {
-				t.MaxIdleConns = 256
-				t.MaxIdleConnsPerHost = 256
-				t.MaxConnsPerHost = 256
-				t.IdleConnTimeout = 90 * time.Second
-			},
-		)
+		awscfg.HTTPClient = newS3BuildableClient()
 	}
 
 	endpoint, ok := props[io.S3EndpointURL]
