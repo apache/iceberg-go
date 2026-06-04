@@ -761,6 +761,39 @@ func TestAssignFreshSchemaIDs(t *testing.T) {
 	}
 }
 
+func TestAssignFreshSchemaIDsPreservesDefaults(t *testing.T) {
+	src := iceberg.NewSchema(0,
+		iceberg.NestedField{
+			ID:             1,
+			Name:           "with_defaults",
+			Type:           iceberg.PrimitiveTypes.Int64,
+			Required:       true,
+			InitialDefault: int64(42),
+			WriteDefault:   int64(42),
+		},
+		iceberg.NestedField{
+			ID:       2,
+			Name:     "without_defaults",
+			Type:     iceberg.PrimitiveTypes.String,
+			Required: false,
+		},
+	)
+
+	out, err := iceberg.AssignFreshSchemaIDs(src, nil)
+	require.NoError(t, err)
+	require.Len(t, out.Fields(), 2)
+
+	withDefaults := out.Fields()[0]
+	assert.Equal(t, "with_defaults", withDefaults.Name)
+	assert.Equal(t, int64(42), withDefaults.InitialDefault, "InitialDefault must survive AssignFreshSchemaIDs")
+	assert.Equal(t, int64(42), withDefaults.WriteDefault, "WriteDefault must survive AssignFreshSchemaIDs")
+
+	withoutDefaults := out.Fields()[1]
+	assert.Equal(t, "without_defaults", withoutDefaults.Name)
+	assert.Nil(t, withoutDefaults.InitialDefault)
+	assert.Nil(t, withoutDefaults.WriteDefault)
+}
+
 func TestSchemaRoundTrip(t *testing.T) {
 	data, err := json.Marshal(tableSchemaNested)
 	require.NoError(t, err)
