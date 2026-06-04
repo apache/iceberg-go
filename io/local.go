@@ -46,7 +46,7 @@ func (LocalFS) Create(name string) (FileWriter, error) {
 }
 
 func (LocalFS) WriteFile(name string, content []byte) error {
-	return os.WriteFile(strings.TrimPrefix(name, "file://"), content, 0o755)
+	return os.WriteFile(strings.TrimPrefix(name, "file://"), content, 0o644)
 }
 
 func (LocalFS) Remove(name string) error {

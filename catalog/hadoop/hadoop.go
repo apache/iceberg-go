@@ -356,7 +356,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		}
 	}
 
-	if err := internal.WriteTableMetadata(metadata, icebergio.LocalFS{}, tempPath, compression); err != nil {
+	if err := internal.WriteTableMetadata(metadata, c.filesystem, tempPath, compression); err != nil {
 		_ = c.filesystem.Remove(tempPath)
 
 		return nil, fmt.Errorf("hadoop catalog: failed to write table metadata: %w", err)
