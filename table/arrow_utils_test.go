@@ -22,7 +22,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -1889,8 +1888,6 @@ func TestToRequestedSchemaMissingNestedFieldID(t *testing.T) {
 	rec2, err := table.ToRequestedSchema(context.Background(), reqIcesc, fileIcesc, rec, table.SchemaOptions{IncludeFieldIDs: true})
 	require.NoError(t, err)
 	defer rec2.Release()
-
-	fmt.Println("Result Schema:", rec2.Schema().String())
 
 	targetSchema := arrow.NewSchema([]arrow.Field{
 		{
