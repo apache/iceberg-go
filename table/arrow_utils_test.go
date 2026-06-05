@@ -1891,7 +1891,7 @@ func TestToRequestedSchemaMissingNestedFieldID(t *testing.T) {
 	defer rec2.Release()
 
 	fmt.Println("Result Schema:", rec2.Schema().String())
-	
+
 	targetSchema := arrow.NewSchema([]arrow.Field{
 		{
 			Name: "other_field", Type: arrow.PrimitiveTypes.Int32, Nullable: true,
