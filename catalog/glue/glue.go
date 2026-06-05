@@ -334,14 +334,16 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 	}
 
 	// Create a staging table with the updates applied
-	staged, err := internal.UpdateAndStageTable(ctx, current, identifier, requirements, updates, c)
+	staged, err := internal.UpdateAndStageTable(ctx, c.props, current, identifier, requirements, updates, c)
 	if err != nil {
 		return nil, "", err
 	}
 	if current != nil && staged.Metadata().Equals(current.Metadata()) {
 		return current.Metadata(), current.MetadataLocation(), nil
 	}
-	if err := internal.WriteMetadata(ctx, staged.Metadata(), staged.MetadataLocation(), staged.Properties()); err != nil {
+	ioProps := maps.Clone(c.props)
+	maps.Copy(ioProps, staged.Properties())
+	if err := internal.WriteMetadata(ctx, staged.Metadata(), staged.MetadataLocation(), ioProps); err != nil {
 		return nil, "", err
 	}
 

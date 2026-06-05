@@ -192,7 +192,7 @@ func ParseMetadataVersion(location string) int {
 	return v
 }
 
-func UpdateAndStageTable(ctx context.Context, current *table.Table, ident table.Identifier, reqs []table.Requirement, updates []table.Update, cat table.CatalogIO) (*table.StagedTable, error) {
+func UpdateAndStageTable(ctx context.Context, catprops iceberg.Properties, current *table.Table, ident table.Identifier, reqs []table.Requirement, updates []table.Update, cat table.CatalogIO) (*table.StagedTable, error) {
 	var (
 		baseMeta    table.Metadata
 		metadataLoc string
@@ -231,12 +231,15 @@ func UpdateAndStageTable(ctx context.Context, current *table.Table, ident table.
 		return nil, err
 	}
 
+	ioProps := maps.Clone(catprops)
+	maps.Copy(ioProps, updated.Properties())
+
 	return &table.StagedTable{
 		Table: table.New(
 			ident,
 			updated,
 			newLocation,
-			icebergio.LoadFSFunc(updated.Properties(), newLocation),
+			icebergio.LoadFSFunc(ioProps, newLocation),
 			cat,
 		),
 	}, nil

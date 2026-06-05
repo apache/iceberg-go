@@ -483,7 +483,7 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 		}
 	}
 
-	staged, err := internal.UpdateAndStageTable(ctx, current, identifier, requirements, updates, c)
+	staged, err := internal.UpdateAndStageTable(ctx, c.opts.props, current, identifier, requirements, updates, c)
 	if err != nil {
 		return nil, "", err
 	}
@@ -492,7 +492,9 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 		return current.Metadata(), current.MetadataLocation(), nil
 	}
 
-	if err := internal.WriteMetadata(ctx, staged.Metadata(), staged.MetadataLocation(), staged.Properties()); err != nil {
+	ioProps := maps.Clone(c.opts.props)
+	maps.Copy(ioProps, staged.Properties())
+	if err := internal.WriteMetadata(ctx, staged.Metadata(), staged.MetadataLocation(), ioProps); err != nil {
 		return nil, "", err
 	}
 
