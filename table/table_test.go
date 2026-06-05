@@ -1275,6 +1275,55 @@ func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFiles() {
 	t.Equal("2", staged.CurrentSnapshot().Summary.Properties["deleted-data-files"])
 }
 
+func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFilesDoesNotCarryEmptyManifests() {
+	ident := table.Identifier{"default", "replace_data_files_drops_empty_manifests_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	writeDataFile := func(name string) iceberg.DataFile {
+		path := fmt.Sprintf("%s/%s/%s.parquet", t.location, ident[1], name)
+		t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), path, t.arrTbl)
+
+		return mustDataFile(t.T(), *iceberg.UnpartitionedSpec, path, nil, 1, mustFileSize(t.T(), path))
+	}
+
+	current := writeDataFile("data-0")
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddDataFiles(t.ctx, []iceberg.DataFile{current}, nil))
+	var err error
+	tbl, err = tx.Commit(t.ctx)
+	t.Require().NoError(err)
+
+	for i := 1; i <= 5; i++ {
+		next := writeDataFile(fmt.Sprintf("data-%d", i))
+		tx = tbl.NewTransaction()
+		t.Require().NoError(tx.ReplaceDataFilesWithDataFiles(t.ctx, []iceberg.DataFile{current}, []iceberg.DataFile{next}, nil))
+		tbl, err = tx.Commit(t.ctx)
+		t.Require().NoError(err)
+		current = next
+	}
+
+	manifests, err := tbl.CurrentSnapshot().Manifests(mustFS(t.T(), tbl))
+	t.Require().NoError(err)
+	t.Len(manifests, 2, "repeated overwrites should keep only the current add manifest and current delete manifest")
+
+	var liveEntries, emptyCurrentManifests int
+	for _, manifest := range manifests {
+		manifestLiveEntries := 0
+		for entry, err := range manifest.Entries(mustFS(t.T(), tbl), true) {
+			t.Require().NoError(err)
+			t.Equal(current.FilePath(), entry.DataFile().FilePath())
+			manifestLiveEntries++
+			liveEntries++
+		}
+		if manifestLiveEntries == 0 {
+			t.Equal(tbl.CurrentSnapshot().SnapshotID, manifest.SnapshotID(), "only the current overwrite's delete manifest should remain empty")
+			emptyCurrentManifests++
+		}
+	}
+	t.Equal(1, liveEntries)
+	t.Equal(1, emptyCurrentManifests)
+}
+
 func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFilesValidatesPartitionSpecID() {
 	ident := table.Identifier{"default", "replace_data_files_with_datafiles_spec_validation_v" + strconv.Itoa(t.formatVersion)}
 	spec := iceberg.NewPartitionSpec(

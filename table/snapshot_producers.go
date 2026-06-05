@@ -187,13 +187,13 @@ func (of *overwriteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 			}
 		}
 
-		if foundDeletedCount == 0 {
-			existingFiles = append(existingFiles, m)
-
+		if len(notDeleted) == 0 {
 			continue
 		}
 
-		if len(notDeleted) == 0 {
+		if foundDeletedCount == 0 {
+			existingFiles = append(existingFiles, m)
+
 			continue
 		}
 
