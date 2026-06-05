@@ -1051,7 +1051,7 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 			fieldArrs[i] = arr
 			fields[i] = a.constructField(field, arr.DataType())
 		} else {
-			dt := retOrPanic(TypeToArrowType(field.Type, false, a.useLargeTypes))
+			dt := retOrPanic(TypeToArrowType(field.Type, a.includeFieldIDs, a.useLargeTypes))
 			alloc := compute.GetAllocator(a.ctx)
 
 			switch {
