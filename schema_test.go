@@ -777,11 +777,34 @@ func TestAssignFreshSchemaIDsPreservesDefaults(t *testing.T) {
 			Type:     iceberg.PrimitiveTypes.String,
 			Required: false,
 		},
+		iceberg.NestedField{
+			ID:       3,
+			Name:     "nested",
+			Required: true,
+			Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{
+						ID:             4,
+						Name:           "nested_with_defaults",
+						Type:           iceberg.PrimitiveTypes.Int64,
+						Required:       true,
+						InitialDefault: int64(7),
+						WriteDefault:   int64(7),
+					},
+					{
+						ID:       5,
+						Name:     "nested_without_defaults",
+						Type:     iceberg.PrimitiveTypes.String,
+						Required: false,
+					},
+				},
+			},
+		},
 	)
 
 	out, err := iceberg.AssignFreshSchemaIDs(src, nil)
 	require.NoError(t, err)
-	require.Len(t, out.Fields(), 2)
+	require.Len(t, out.Fields(), 3)
 
 	withDefaults := out.Fields()[0]
 	assert.Equal(t, "with_defaults", withDefaults.Name)
@@ -792,6 +815,22 @@ func TestAssignFreshSchemaIDsPreservesDefaults(t *testing.T) {
 	assert.Equal(t, "without_defaults", withoutDefaults.Name)
 	assert.Nil(t, withoutDefaults.InitialDefault)
 	assert.Nil(t, withoutDefaults.WriteDefault)
+
+	nested := out.Fields()[2]
+	assert.Equal(t, "nested", nested.Name)
+	nestedStruct, ok := nested.Type.(*iceberg.StructType)
+	require.True(t, ok, "nested field must remain a StructType")
+	require.Len(t, nestedStruct.FieldList, 2)
+
+	nestedWithDefaults := nestedStruct.FieldList[0]
+	assert.Equal(t, "nested_with_defaults", nestedWithDefaults.Name)
+	assert.Equal(t, int64(7), nestedWithDefaults.InitialDefault, "nested InitialDefault must survive AssignFreshSchemaIDs")
+	assert.Equal(t, int64(7), nestedWithDefaults.WriteDefault, "nested WriteDefault must survive AssignFreshSchemaIDs")
+
+	nestedWithoutDefaults := nestedStruct.FieldList[1]
+	assert.Equal(t, "nested_without_defaults", nestedWithoutDefaults.Name)
+	assert.Nil(t, nestedWithoutDefaults.InitialDefault)
+	assert.Nil(t, nestedWithoutDefaults.WriteDefault)
 }
 
 func TestSchemaRoundTrip(t *testing.T) {
