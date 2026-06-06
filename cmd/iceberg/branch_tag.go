@@ -242,9 +242,11 @@ func runRefDelete(ctx context.Context, output Output, cat catalog.Catalog, table
 	}
 
 	update := table.NewRemoveSnapshotRefUpdate(refName)
-	// Pin the ref to the snapshot we observed so a concurrent move or delete of
-	// the ref between load and commit fails the requirement instead of silently
-	// removing a different ref state.
+	// Pin the ref to the snapshot we observed so the delete only succeeds while
+	// the ref is unchanged: any concurrent head change, including a move, delete,
+	// or append that advances it, trips the requirement, and the user re-runs
+	// against the latest state. This is safe-by-default for a destructive
+	// operation and matches the create path's optimistic-concurrency style.
 	snapshotID := ref.SnapshotID
 	reqs := []table.Requirement{
 		table.AssertTableUUID(meta.TableUUID()),
