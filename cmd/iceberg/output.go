@@ -49,6 +49,7 @@ type Output interface {
 	UpgradeResult(result UpgradeResult)
 	RollbackResult(result RollbackResult)
 	RefCreated(result RefCreatedResult)
+	RefDeleted(result RefDeletedResult)
 	Text(string)
 	Schema(*iceberg.Schema)
 	Spec(iceberg.PartitionSpec)
