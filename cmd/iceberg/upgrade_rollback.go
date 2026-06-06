@@ -20,9 +20,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"
@@ -86,20 +88,27 @@ func runUpgrade(ctx context.Context, output Output, cat catalog.Catalog, cmd *Up
 }
 
 func runRollback(ctx context.Context, output Output, cat catalog.Catalog, cmd *RollbackCmd) {
+	if err := validateRollbackSelector(cmd); err != nil {
+		output.Error(err)
+		osExit(1)
+
+		return
+	}
+
 	tbl := loadTable(ctx, output, cat, cmd.TableID)
 	meta := tbl.Metadata()
 
-	snap := meta.SnapshotByID(cmd.SnapshotID)
-	if snap == nil {
-		output.Error(fmt.Errorf("snapshot %d not found in table %s", cmd.SnapshotID, tableIDString(tbl)))
+	snapshotID, err := resolveRollbackSnapshotID(tbl, cmd)
+	if err != nil {
+		output.Error(err)
 		osExit(1)
 
 		return
 	}
 
 	if cs := meta.CurrentSnapshot(); cs != nil {
-		if !table.IsAncestorOf(cs.SnapshotID, cmd.SnapshotID, meta.SnapshotByID) {
-			output.Error(fmt.Errorf("snapshot %d is not an ancestor of current snapshot %d", cmd.SnapshotID, cs.SnapshotID))
+		if !table.IsAncestorOf(cs.SnapshotID, snapshotID, meta.SnapshotByID) {
+			output.Error(fmt.Errorf("snapshot %d is not an ancestor of current snapshot %d", snapshotID, cs.SnapshotID))
 			osExit(1)
 
 			return
@@ -112,7 +121,7 @@ func runRollback(ctx context.Context, output Output, cat catalog.Catalog, cmd *R
 		previousSnapshotID = &id
 	}
 
-	prompt := fmt.Sprintf("Roll back %s to snapshot %d?", tableIDString(tbl), cmd.SnapshotID)
+	prompt := fmt.Sprintf("Roll back %s to snapshot %d?", tableIDString(tbl), snapshotID)
 	if err := confirmAction(prompt, cmd.Yes); err != nil {
 		output.Error(err)
 		osExit(1)
@@ -121,7 +130,7 @@ func runRollback(ctx context.Context, output Output, cat catalog.Catalog, cmd *R
 	}
 
 	tx := tbl.NewTransaction()
-	if err := tx.RollbackToSnapshot(cmd.SnapshotID); err != nil {
+	if err := tx.RollbackToSnapshot(snapshotID); err != nil {
 		output.Error(fmt.Errorf("rollback failed: %w", err))
 		osExit(1)
 
@@ -138,10 +147,59 @@ func runRollback(ctx context.Context, output Output, cat catalog.Catalog, cmd *R
 	result := RollbackResult{
 		Table:                  tableIDString(tbl),
 		PreviousSnapshotID:     previousSnapshotID,
-		RolledBackToSnapshotID: cmd.SnapshotID,
+		RolledBackToSnapshotID: snapshotID,
 	}
 
 	output.RollbackResult(result)
+}
+
+// resolveRollbackSnapshotID maps the rollback selector to a concrete snapshot
+// ID. It assumes the caller has already run validateRollbackSelector, so exactly
+// one of cmd.SnapshotID / cmd.Timestamp is set.
+func resolveRollbackSnapshotID(tbl *table.Table, cmd *RollbackCmd) (int64, error) {
+	if cmd.SnapshotID != nil {
+		snapshotID := *cmd.SnapshotID
+		if tbl.Metadata().SnapshotByID(snapshotID) == nil {
+			return 0, fmt.Errorf("snapshot %d not found in table %s", snapshotID, tableIDString(tbl))
+		}
+
+		return snapshotID, nil
+	}
+
+	timestamp, err := parseRollbackTimestamp(cmd.Timestamp)
+	if err != nil {
+		return 0, err
+	}
+
+	if snap := tbl.SnapshotAsOf(timestamp.UnixMilli(), true); snap != nil {
+		return snap.SnapshotID, nil
+	}
+
+	return 0, fmt.Errorf("no snapshot found at or before timestamp %q in table %s", cmd.Timestamp, tableIDString(tbl))
+}
+
+func validateRollbackSelector(cmd *RollbackCmd) error {
+	hasSnapshotID := cmd.SnapshotID != nil
+	hasTimestamp := cmd.Timestamp != ""
+
+	switch {
+	case hasSnapshotID && hasTimestamp:
+		return errors.New("--snapshot-id and --timestamp are mutually exclusive")
+	case !hasSnapshotID && !hasTimestamp:
+		return errors.New("exactly one of --snapshot-id or --timestamp is required")
+	default:
+		return nil
+	}
+}
+
+func parseRollbackTimestamp(value string) (time.Time, error) {
+	timestamp, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid --timestamp %q: expected RFC3339 timestamp like %q: %w",
+			value, "2026-01-15T03:00:00Z", err)
+	}
+
+	return timestamp, nil
 }
 
 func specURL(version int) string {
