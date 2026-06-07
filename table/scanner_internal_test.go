@@ -18,6 +18,8 @@
 package table
 
 import (
+	"bytes"
+	"context"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -28,6 +30,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -170,6 +173,52 @@ func TestBuildPartitionProjectionWithInvalidSpecID(t *testing.T) {
 	assert.Nil(t, expr)
 	assert.ErrorIs(t, err, ErrPartitionSpecNotFound)
 	assert.ErrorContains(t, err, "id 999")
+}
+
+func TestFetchPartitionSpecFilteredManifests_PropagatesEvalError(t *testing.T) {
+	spec := partitionedSpec()
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+
+	const (
+		snapshotID       = int64(1)
+		manifestListPath = "mem://default/table-location/metadata/snap-1-manifest-list.avro"
+	)
+
+	// Invalid int32 bounds trigger a LiteralFromBytes error during manifest eval.
+	badBounds := []byte{0x00, 0x01}
+	mf := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/manifest.avro", 100, int32(spec.ID()), snapshotID).
+		Partitions([]iceberg.FieldSummary{
+			{LowerBound: &badBounds, UpperBound: &badBounds, ContainsNull: false},
+		}).Build()
+
+	var listBuf bytes.Buffer
+	seqNum := int64(1)
+	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &seqNum, 0, []iceberg.ManifestFile{mf}))
+	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+
+	snapID := snapshotID
+	txn.meta.snapshotList = []Snapshot{{
+		SnapshotID:     snapshotID,
+		ManifestList:   manifestListPath,
+		SequenceNumber: seqNum,
+	}}
+	txn.meta.currentSnapshotID = &snapID
+
+	built, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	tbl := New(Identifier{"db", "tbl"}, built, "metadata.json", func(context.Context) (iceio.IO, error) {
+		return memIO, nil
+	}, nil)
+
+	scan := tbl.Scan(WithRowFilter(iceberg.EqualTo(iceberg.Reference("id"), int32(5))))
+
+	_, err = scan.fetchPartitionSpecFilteredManifests(context.Background())
+	require.Error(t, err, "manifest eval errors must propagate instead of silently dropping manifests")
+	require.ErrorContains(t, err, "manifest")
+
+	_, err = scan.PlanFiles(context.Background())
+	require.Error(t, err, "PlanFiles must fail when manifest filtering errors")
 }
 
 func TestBuildManifestEvaluatorWithInvalidSpecID(t *testing.T) {
