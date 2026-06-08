@@ -178,17 +178,7 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, err
 	}
 
-	afs, err := staged.FS(ctx)
-	if err != nil {
-		return nil, err
-	}
-	wfs, ok := afs.(io.WriteFileIO)
-	if !ok {
-		return nil, errors.New("loaded filesystem IO does not support writing")
-	}
-
-	compression := staged.Table.Properties().Get(table.MetadataCompressionKey, table.MetadataCompressionDefault)
-	if err := internal.WriteTableMetadata(staged.Metadata(), wfs, staged.MetadataLocation(), compression); err != nil {
+	if err := internal.WriteMetadata(ctx, staged.Table); err != nil {
 		return nil, err
 	}
 
@@ -492,9 +482,7 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 		return current.Metadata(), current.MetadataLocation(), nil
 	}
 
-	ioProps := maps.Clone(c.opts.props)
-	maps.Copy(ioProps, staged.Properties())
-	if err := internal.WriteMetadata(ctx, staged.Metadata(), staged.MetadataLocation(), ioProps); err != nil {
+	if err := internal.WriteMetadata(ctx, staged.Table); err != nil {
 		return nil, "", err
 	}
 
