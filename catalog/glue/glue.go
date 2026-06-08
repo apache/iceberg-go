@@ -255,17 +255,7 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, err
 	}
 
-	afs, err := staged.FS(ctx)
-	if err != nil {
-		return nil, err
-	}
-	wfs, ok := afs.(io.WriteFileIO)
-	if !ok {
-		return nil, errors.New("loaded filesystem IO does not support writing")
-	}
-
-	compression := staged.Table.Properties().Get(table.MetadataCompressionKey, table.MetadataCompressionDefault)
-	if err := internal.WriteTableMetadata(staged.Metadata(), wfs, staged.MetadataLocation(), compression); err != nil {
+	if err := internal.WriteMetadata(ctx, staged.Table); err != nil {
 		return nil, err
 	}
 
@@ -334,14 +324,14 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 	}
 
 	// Create a staging table with the updates applied
-	staged, err := internal.UpdateAndStageTable(ctx, current, identifier, requirements, updates, c)
+	staged, err := internal.UpdateAndStageTable(ctx, c.props, current, identifier, requirements, updates, c)
 	if err != nil {
 		return nil, "", err
 	}
 	if current != nil && staged.Metadata().Equals(current.Metadata()) {
 		return current.Metadata(), current.MetadataLocation(), nil
 	}
-	if err := internal.WriteMetadata(ctx, staged.Metadata(), staged.MetadataLocation(), staged.Properties()); err != nil {
+	if err := internal.WriteMetadata(ctx, staged.Table); err != nil {
 		return nil, "", err
 	}
 

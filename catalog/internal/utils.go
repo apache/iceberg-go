@@ -74,8 +74,8 @@ func WriteTableMetadata(metadata table.Metadata, fs icebergio.WriteFileIO, loc s
 	return
 }
 
-func WriteMetadata(ctx context.Context, metadata table.Metadata, loc string, props iceberg.Properties) error {
-	fs, err := icebergio.LoadFS(ctx, props, loc)
+func WriteMetadata(ctx context.Context, tbl *table.Table) error {
+	fs, err := tbl.FS(ctx)
 	if err != nil {
 		return err
 	}
@@ -85,9 +85,9 @@ func WriteMetadata(ctx context.Context, metadata table.Metadata, loc string, pro
 		return errors.New("filesystem IO does not support writing")
 	}
 
-	compression := props.Get(table.MetadataCompressionKey, table.MetadataCompressionDefault)
+	compression := tbl.Properties().Get(table.MetadataCompressionKey, table.MetadataCompressionDefault)
 
-	return WriteTableMetadata(metadata, wfs, loc, compression)
+	return WriteTableMetadata(tbl.Metadata(), wfs, tbl.MetadataLocation(), compression)
 }
 
 func UpdateTableMetadata(base table.Metadata, updates []table.Update, metadataLoc string) (table.Metadata, error) {
@@ -125,6 +125,9 @@ func CreateStagedTable(ctx context.Context, catprops iceberg.Properties, nsprops
 	}
 
 	ioProps := maps.Clone(catprops)
+	if ioProps == nil {
+		ioProps = iceberg.Properties{}
+	}
 	maps.Copy(ioProps, cfg.Properties)
 
 	return table.StagedTable{
@@ -192,7 +195,7 @@ func ParseMetadataVersion(location string) int {
 	return v
 }
 
-func UpdateAndStageTable(ctx context.Context, current *table.Table, ident table.Identifier, reqs []table.Requirement, updates []table.Update, cat table.CatalogIO) (*table.StagedTable, error) {
+func UpdateAndStageTable(ctx context.Context, catprops iceberg.Properties, current *table.Table, ident table.Identifier, reqs []table.Requirement, updates []table.Update, cat table.CatalogIO) (*table.StagedTable, error) {
 	var (
 		baseMeta    table.Metadata
 		metadataLoc string
@@ -231,12 +234,18 @@ func UpdateAndStageTable(ctx context.Context, current *table.Table, ident table.
 		return nil, err
 	}
 
+	ioProps := maps.Clone(catprops)
+	if ioProps == nil {
+		ioProps = iceberg.Properties{}
+	}
+	maps.Copy(ioProps, updated.Properties())
+
 	return &table.StagedTable{
 		Table: table.New(
 			ident,
 			updated,
 			newLocation,
-			icebergio.LoadFSFunc(updated.Properties(), newLocation),
+			icebergio.LoadFSFunc(ioProps, newLocation),
 			cat,
 		),
 	}, nil
