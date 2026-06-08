@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"maps"
 	"net/url"
 	"strings"
 	"sync"
@@ -222,9 +223,7 @@ func (w *writerFactory) partitionLocProvider(partitionPath string) (LocationProv
 
 	partitionDataPath := w.rootURL.JoinPath("data", partitionPath).String()
 	partitionProps := make(iceberg.Properties, len(w.tableProps)+1)
-	for k, v := range w.tableProps {
-		partitionProps[k] = v
-	}
+	maps.Copy(partitionProps, w.tableProps)
 	partitionProps[WriteDataPathKey] = partitionDataPath
 	loc, err := LoadLocationProvider(w.rootLocation, partitionProps)
 	if err != nil {
