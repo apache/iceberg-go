@@ -33,6 +33,8 @@ func runBranch(ctx context.Context, output Output, cat catalog.Catalog, cmd *Bra
 	switch {
 	case cmd.Create != nil:
 		runBranchCreate(ctx, output, cat, cmd.Create)
+	case cmd.Delete != nil:
+		runBranchDelete(ctx, output, cat, cmd.Delete)
 	}
 }
 
@@ -40,6 +42,8 @@ func runTag(ctx context.Context, output Output, cat catalog.Catalog, cmd *TagCmd
 	switch {
 	case cmd.Create != nil:
 		runTagCreate(ctx, output, cat, cmd.Create)
+	case cmd.Delete != nil:
+		runTagDelete(ctx, output, cat, cmd.Delete)
 	}
 }
 
@@ -47,11 +51,11 @@ func runBranchCreate(ctx context.Context, output Output, cat catalog.Catalog, cm
 	tbl := loadTable(ctx, output, cat, cmd.TableID)
 	meta := tbl.Metadata()
 
-	for name := range meta.Refs() {
-		if name == cmd.BranchName {
-			output.Error(fmt.Errorf("ref %q already exists", cmd.BranchName))
-			os.Exit(1)
-		}
+	if _, found := findSnapshotRef(meta, cmd.BranchName); found {
+		output.Error(fmt.Errorf("ref %q already exists", cmd.BranchName))
+		osExit(1)
+
+		return
 	}
 
 	snapshotID := resolveSnapshotID(output, tbl, cmd.SnapshotID)
@@ -61,7 +65,9 @@ func runBranchCreate(ctx context.Context, output Output, cat catalog.Catalog, cm
 		cmd.Yes,
 	); err != nil {
 		output.Error(err)
-		os.Exit(1)
+		osExit(1)
+
+		return
 	}
 
 	var maxRefAgeMs int64
@@ -69,7 +75,9 @@ func runBranchCreate(ctx context.Context, output Output, cat catalog.Catalog, cm
 		d, err := parseDuration(cmd.MaxRefAge)
 		if err != nil {
 			output.Error(fmt.Errorf("invalid --max-ref-age: %w", err))
-			os.Exit(1)
+			osExit(1)
+
+			return
 		}
 
 		maxRefAgeMs = d.Milliseconds()
@@ -80,7 +88,9 @@ func runBranchCreate(ctx context.Context, output Output, cat catalog.Catalog, cm
 		d, err := parseDuration(cmd.MaxSnapshotAge)
 		if err != nil {
 			output.Error(fmt.Errorf("invalid --max-snapshot-age: %w", err))
-			os.Exit(1)
+			osExit(1)
+
+			return
 		}
 
 		maxSnapshotAgeMs = d.Milliseconds()
@@ -100,7 +110,9 @@ func runBranchCreate(ctx context.Context, output Output, cat catalog.Catalog, cm
 
 	if _, _, err := cat.CommitTable(ctx, tbl.Identifier(), reqs, []table.Update{update}); err != nil {
 		output.Error(fmt.Errorf("failed to create branch: %w", err))
-		os.Exit(1)
+		osExit(1)
+
+		return
 	}
 
 	result := RefCreatedResult{
@@ -126,11 +138,11 @@ func runTagCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *
 	tbl := loadTable(ctx, output, cat, cmd.TableID)
 	meta := tbl.Metadata()
 
-	for name := range meta.Refs() {
-		if name == cmd.TagName {
-			output.Error(fmt.Errorf("ref %q already exists", cmd.TagName))
-			os.Exit(1)
-		}
+	if _, found := findSnapshotRef(meta, cmd.TagName); found {
+		output.Error(fmt.Errorf("ref %q already exists", cmd.TagName))
+		osExit(1)
+
+		return
 	}
 
 	snapshotID := resolveSnapshotID(output, tbl, cmd.SnapshotID)
@@ -140,7 +152,9 @@ func runTagCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *
 		cmd.Yes,
 	); err != nil {
 		output.Error(err)
-		os.Exit(1)
+		osExit(1)
+
+		return
 	}
 
 	var maxRefAgeMs int64
@@ -148,7 +162,9 @@ func runTagCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *
 		d, err := parseDuration(cmd.MaxRefAge)
 		if err != nil {
 			output.Error(fmt.Errorf("invalid --max-ref-age: %w", err))
-			os.Exit(1)
+			osExit(1)
+
+			return
 		}
 
 		maxRefAgeMs = d.Milliseconds()
@@ -163,7 +179,9 @@ func runTagCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *
 
 	if _, _, err := cat.CommitTable(ctx, tbl.Identifier(), reqs, []table.Update{update}); err != nil {
 		output.Error(fmt.Errorf("failed to create tag: %w", err))
-		os.Exit(1)
+		osExit(1)
+
+		return
 	}
 
 	result := RefCreatedResult{
@@ -179,11 +197,94 @@ func runTagCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *
 	output.RefCreated(result)
 }
 
+func runBranchDelete(ctx context.Context, output Output, cat catalog.Catalog, cmd *BranchDeleteCmd) {
+	if cmd.BranchName == table.MainBranch {
+		output.Error(errors.New(`cannot delete the "main" branch`))
+		osExit(1)
+
+		return
+	}
+
+	runRefDelete(ctx, output, cat, cmd.TableID, cmd.BranchName, table.BranchRef, cmd.Yes)
+}
+
+func runTagDelete(ctx context.Context, output Output, cat catalog.Catalog, cmd *TagDeleteCmd) {
+	runRefDelete(ctx, output, cat, cmd.TableID, cmd.TagName, table.TagRef, cmd.Yes)
+}
+
+func runRefDelete(ctx context.Context, output Output, cat catalog.Catalog, tableID, refName string, refType table.RefType, yes bool) {
+	tbl := loadTable(ctx, output, cat, tableID)
+	meta := tbl.Metadata()
+
+	ref, found := findSnapshotRef(meta, refName)
+	if !found {
+		output.Error(fmt.Errorf("%s %q does not exist", refType, refName))
+		osExit(1)
+
+		return
+	}
+
+	if ref.SnapshotRefType != refType {
+		output.Error(fmt.Errorf("ref %q is a %s, not a %s", refName, ref.SnapshotRefType, refType))
+		osExit(1)
+
+		return
+	}
+
+	if err := confirmAction(
+		fmt.Sprintf("Delete %s %q from %s at snapshot %d?", refType, refName, tableIDString(tbl), ref.SnapshotID),
+		yes,
+	); err != nil {
+		output.Error(err)
+		osExit(1)
+
+		return
+	}
+
+	update := table.NewRemoveSnapshotRefUpdate(refName)
+	// Pin the ref to the snapshot we observed so the delete only succeeds while
+	// the ref is unchanged: any concurrent head change, including a move, delete,
+	// or append that advances it, trips the requirement, and the user re-runs
+	// against the latest state. This is safe-by-default for a destructive
+	// operation and matches the create path's optimistic-concurrency style.
+	snapshotID := ref.SnapshotID
+	reqs := []table.Requirement{
+		table.AssertTableUUID(meta.TableUUID()),
+		table.AssertRefSnapshotID(refName, &snapshotID),
+	}
+
+	if _, _, err := cat.CommitTable(ctx, tbl.Identifier(), reqs, []table.Update{update}); err != nil {
+		output.Error(fmt.Errorf("failed to delete %s: %w", refType, err))
+		osExit(1)
+
+		return
+	}
+
+	output.RefDeleted(RefDeletedResult{
+		Table:      tableIDString(tbl),
+		RefName:    refName,
+		RefType:    string(refType),
+		SnapshotID: snapshotID,
+	})
+}
+
+func findSnapshotRef(meta table.Metadata, name string) (table.SnapshotRef, bool) {
+	for refName, ref := range meta.Refs() {
+		if refName == name {
+			return ref, true
+		}
+	}
+
+	return table.SnapshotRef{}, false
+}
+
 func resolveSnapshotID(output Output, tbl *table.Table, explicit *int64) int64 {
 	if explicit != nil {
 		if tbl.Metadata().SnapshotByID(*explicit) == nil {
 			output.Error(fmt.Errorf("snapshot %d not found", *explicit))
-			os.Exit(1)
+			osExit(1)
+
+			return 0
 		}
 
 		return *explicit
@@ -192,7 +293,9 @@ func resolveSnapshotID(output Output, tbl *table.Table, explicit *int64) int64 {
 	snap := tbl.Metadata().CurrentSnapshot()
 	if snap == nil {
 		output.Error(errors.New("table has no current snapshot; specify --snapshot-id explicitly"))
-		os.Exit(1)
+		osExit(1)
+
+		return 0
 	}
 
 	return snap.SnapshotID
@@ -204,6 +307,17 @@ func (t textOutput) RefCreated(result RefCreatedResult) {
 }
 
 func (j jsonOutput) RefCreated(result RefCreatedResult) {
+	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
+		j.Error(err)
+	}
+}
+
+func (t textOutput) RefDeleted(result RefDeletedResult) {
+	pterm.Printfln("Deleted %s %q from %s at snapshot %d.",
+		result.RefType, result.RefName, result.Table, result.SnapshotID)
+}
+
+func (j jsonOutput) RefDeleted(result RefDeletedResult) {
 	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
 		j.Error(err)
 	}

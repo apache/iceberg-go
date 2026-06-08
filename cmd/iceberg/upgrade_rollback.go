@@ -31,8 +31,6 @@ import (
 	"github.com/pterm/pterm"
 )
 
-var osExit = os.Exit
-
 func runUpgrade(ctx context.Context, output Output, cat catalog.Catalog, cmd *UpgradeCmd) {
 	tbl := loadTable(ctx, output, cat, cmd.TableID)
 	meta := tbl.Metadata()
