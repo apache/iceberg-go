@@ -1672,7 +1672,7 @@ func avroColMapToMap[K comparable, V any](c *[]colMap[K, V]) map[K]V {
 		return nil
 	}
 
-	out := make(map[K]V)
+	out := make(map[K]V, len(*c))
 	for _, data := range *c {
 		out[data.Key] = data.Value
 	}
@@ -1816,20 +1816,13 @@ type dataFile struct {
 	fieldIDToPartitionData map[int]any
 	fieldIDToFixedSize     map[int]int
 
-	specID   int32
-	initMaps sync.Once
+	specID          int32
+	initPartition   sync.Once
+	initColumnStats sync.Once
 }
 
-func (d *dataFile) initializeMapData() {
-	d.initMaps.Do(func() {
-		d.colSizeMap = avroColMapToMap(d.ColSizes)
-		d.valCntMap = avroColMapToMap(d.ValCounts)
-		d.nullCntMap = avroColMapToMap(d.NullCounts)
-		d.nanCntMap = avroColMapToMap(d.NaNCounts)
-		d.distinctCntMap = avroColMapToMap(d.DistinctCounts)
-		d.lowerBoundMap = avroColMapToMap(d.LowerBounds)
-		d.upperBoundMap = avroColMapToMap(d.UpperBounds)
-		// Populate fieldIDToPartition map if dataFile read from manifest file
+func (d *dataFile) initPartitionData() {
+	d.initPartition.Do(func() {
 		if len(d.fieldIDToPartitionData) < len(d.PartitionData) {
 			d.fieldIDToPartitionData = make(map[int]any, len(d.PartitionData))
 			for k, v := range d.PartitionData {
@@ -1839,6 +1832,18 @@ func (d *dataFile) initializeMapData() {
 				}
 			}
 		}
+	})
+}
+
+func (d *dataFile) initColumnStatsData() {
+	d.initColumnStats.Do(func() {
+		d.colSizeMap = avroColMapToMap(d.ColSizes)
+		d.valCntMap = avroColMapToMap(d.ValCounts)
+		d.nullCntMap = avroColMapToMap(d.NullCounts)
+		d.nanCntMap = avroColMapToMap(d.NaNCounts)
+		d.distinctCntMap = avroColMapToMap(d.DistinctCounts)
+		d.lowerBoundMap = avroColMapToMap(d.LowerBounds)
+		d.upperBoundMap = avroColMapToMap(d.UpperBounds)
 	})
 }
 
@@ -1923,7 +1928,7 @@ func (d *dataFile) FileFormat() FileFormat            { return d.Format }
 
 // Partition returns the partition data as a map of partition field ID to value.
 func (d *dataFile) Partition() map[int]any {
-	d.initializeMapData()
+	d.initPartitionData()
 
 	return d.fieldIDToPartitionData
 }
@@ -1933,43 +1938,43 @@ func (d *dataFile) FileSizeBytes() int64 { return d.FileSize }
 func (d *dataFile) SpecID() int32        { return d.specID }
 
 func (d *dataFile) ColumnSizes() map[int]int64 {
-	d.initializeMapData()
+	d.initColumnStatsData()
 
 	return d.colSizeMap
 }
 
 func (d *dataFile) ValueCounts() map[int]int64 {
-	d.initializeMapData()
+	d.initColumnStatsData()
 
 	return d.valCntMap
 }
 
 func (d *dataFile) NullValueCounts() map[int]int64 {
-	d.initializeMapData()
+	d.initColumnStatsData()
 
 	return d.nullCntMap
 }
 
 func (d *dataFile) NaNValueCounts() map[int]int64 {
-	d.initializeMapData()
+	d.initColumnStatsData()
 
 	return d.nanCntMap
 }
 
 func (d *dataFile) DistinctValueCounts() map[int]int64 {
-	d.initializeMapData()
+	d.initColumnStatsData()
 
 	return d.distinctCntMap
 }
 
 func (d *dataFile) LowerBoundValues() map[int][]byte {
-	d.initializeMapData()
+	d.initColumnStatsData()
 
 	return d.lowerBoundMap
 }
 
 func (d *dataFile) UpperBoundValues() map[int][]byte {
-	d.initializeMapData()
+	d.initColumnStatsData()
 
 	return d.upperBoundMap
 }
