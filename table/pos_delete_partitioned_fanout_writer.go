@@ -36,18 +36,16 @@ type positionDeletePartitionedFanoutWriter struct {
 	metadata                   Metadata
 	itr                        iter.Seq2[arrow.RecordBatch, error]
 	writerFactory              *writerFactory
-	concurrentDataFileWriter   *concurrentDataFileWriter
 }
 
 // newPositionDeletePartitionedFanoutWriter creates a new PartitionedFanoutWriter with the specified
 // metadata, partition context, and record iterator.
-func newPositionDeletePartitionedFanoutWriter(metadata Metadata, concurrentWriter *concurrentDataFileWriter, partitionContextByFilePath map[string]partitionContext, itr iter.Seq2[arrow.RecordBatch, error], writerFactory *writerFactory) *positionDeletePartitionedFanoutWriter {
+func newPositionDeletePartitionedFanoutWriter(metadata Metadata, partitionContextByFilePath map[string]partitionContext, itr iter.Seq2[arrow.RecordBatch, error], writerFactory *writerFactory) *positionDeletePartitionedFanoutWriter {
 	return &positionDeletePartitionedFanoutWriter{
 		partitionContextByFilePath: partitionContextByFilePath,
 		metadata:                   metadata,
 		itr:                        itr,
 		writerFactory:              writerFactory,
-		concurrentDataFileWriter:   concurrentWriter,
 	}
 }
 
@@ -114,7 +112,7 @@ func (p *positionDeletePartitionedFanoutWriter) processBatch(ctx context.Context
 	if err != nil {
 		return err
 	}
-	rollingDataWriter, err := p.writerFactory.getOrCreateRollingDataWriter(ctx, p.concurrentDataFileWriter, partitionPath, partitionContext.partitionData, dataFilesChannel)
+	rollingDataWriter, err := p.writerFactory.getOrCreateRollingDataWriter(ctx, partitionPath, partitionContext.partitionData, dataFilesChannel)
 	if err != nil {
 		return err
 	}

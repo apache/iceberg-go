@@ -38,11 +38,10 @@ import (
 // a partition specification, writing data to separate files for each partition using
 // a fanout pattern with configurable parallelism.
 type partitionedFanoutWriter struct {
-	partitionSpec            iceberg.PartitionSpec
-	schema                   *iceberg.Schema
-	itr                      iter.Seq2[arrow.RecordBatch, error]
-	writerFactory            *writerFactory
-	concurrentDataFileWriter *concurrentDataFileWriter
+	partitionSpec iceberg.PartitionSpec
+	schema        *iceberg.Schema
+	itr           iter.Seq2[arrow.RecordBatch, error]
+	writerFactory *writerFactory
 }
 
 // PartitionInfo holds the row indices and partition values for a specific partition,
@@ -61,13 +60,12 @@ type partitionFieldInfo struct {
 
 // NewPartitionedFanoutWriter creates a new PartitionedFanoutWriter with the specified
 // partition specification, schema, record iterator, and writerFactory.
-func newPartitionedFanoutWriter(partitionSpec iceberg.PartitionSpec, concurrentWriter *concurrentDataFileWriter, schema *iceberg.Schema, itr iter.Seq2[arrow.RecordBatch, error], writerFactory *writerFactory) *partitionedFanoutWriter {
+func newPartitionedFanoutWriter(partitionSpec iceberg.PartitionSpec, schema *iceberg.Schema, itr iter.Seq2[arrow.RecordBatch, error], writerFactory *writerFactory) *partitionedFanoutWriter {
 	return &partitionedFanoutWriter{
-		partitionSpec:            partitionSpec,
-		schema:                   schema,
-		itr:                      itr,
-		writerFactory:            writerFactory,
-		concurrentDataFileWriter: concurrentWriter,
+		partitionSpec: partitionSpec,
+		schema:        schema,
+		itr:           itr,
+		writerFactory: writerFactory,
 	}
 }
 
@@ -159,7 +157,7 @@ func (p *partitionedFanoutWriter) processRecord(ctx context.Context, record arro
 		}
 
 		partitionPath := p.partitionPath(val.partitionRec)
-		rollingDataWriter, err := p.writerFactory.getOrCreateRollingDataWriter(ctx, p.concurrentDataFileWriter, partitionPath, val.partitionValues, dataFilesChannel)
+		rollingDataWriter, err := p.writerFactory.getOrCreateRollingDataWriter(ctx, partitionPath, val.partitionValues, dataFilesChannel)
 		if err != nil {
 			partitionRecord.Release()
 

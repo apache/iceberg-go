@@ -125,7 +125,7 @@ func clusteredPartitionedWrite(
 				}
 				partitionPath := spec.PartitionToPath(part.partitionRec, schema)
 				currentWriter = factory.newRollingDataWriter(
-					ctx, nil, partitionPath, part.partitionValues, outputCh)
+					ctx, partitionPath, part.partitionValues, outputCh)
 				currentRec = part.partitionRec
 			}
 

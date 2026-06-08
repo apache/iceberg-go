@@ -591,12 +591,9 @@ func writeWithMeasurement(t testing.TB, name string, numPartitions, rowsPerParti
 
 	switch name {
 	case "fanout":
-		cw := newConcurrentDataFileWriter(func(rootLocation string, fs iceio.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
-			return newDataFileWriter(rootLocation, fs, meta, props, opts...)
-		})
 		factory, err := newWriterFactory(loc, args, metaBuilder, icebergSchema, 512*1024*1024)
 		require.NoError(t, err)
-		writer := newPartitionedFanoutWriter(spec, cw, icebergSchema, args.itr, factory)
+		writer := newPartitionedFanoutWriter(spec, icebergSchema, args.itr, factory)
 		captureBaseline()
 		for df, err := range writer.Write(context.Background(), config.EnvConfig.MaxWorkers) {
 			require.NoError(t, err)

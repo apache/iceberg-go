@@ -1613,11 +1613,7 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 		return clusteredPartitionedWrite(ctx, factory.currentSpec, meta.CurrentSchema(), factory, args.itr)
 	}
 
-	cw := newConcurrentDataFileWriter(func(rootLocation string, fs iceio.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
-		return newDataFileWriter(rootLocation, fs, meta, props, opts...)
-	})
-
-	partitionWriter := newPartitionedFanoutWriter(factory.currentSpec, cw, meta.CurrentSchema(), args.itr, factory)
+	partitionWriter := newPartitionedFanoutWriter(factory.currentSpec, meta.CurrentSchema(), args.itr, factory)
 	workers := config.EnvConfig.MaxWorkers
 	if args.maxWriteWorkers > 0 {
 		workers = args.maxWriteWorkers
@@ -1634,7 +1630,7 @@ func unpartitionedWrite(ctx context.Context, factory *writerFactory, records ite
 		defer close(outputCh)
 		defer factory.stopCount()
 
-		writer := factory.newRollingDataWriter(ctx, nil, "", nil, outputCh)
+		writer := factory.newRollingDataWriter(ctx, "", nil, outputCh)
 		for rec, err := range records {
 			if err != nil {
 				errCh <- err
@@ -1734,10 +1730,10 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 	targetFileSize := int64(meta.props.GetInt(WriteTargetFileSizeBytesKey,
 		WriteTargetFileSizeBytesDefault))
 
-	cw := newConcurrentDataFileWriter(func(rootLocation string, fs iceio.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
-		return newPositionDeleteWriter(rootLocation, fs, meta, props, opts...)
-	}, withSchemaSanitization(false))
 	if latestMetadata.PartitionSpec().IsUnpartitioned() {
+		cw := newConcurrentDataFileWriter(func(rootLocation string, fs iceio.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
+			return newPositionDeleteWriter(rootLocation, fs, meta, props, opts...)
+		}, withSchemaSanitization(false))
 		nextCount, stopCount := iter.Pull(args.counter)
 		tasks := func(yield func(WriteTask) bool) {
 			defer stopCount()
@@ -1770,7 +1766,7 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 		panic(err)
 	}
 
-	partitionWriter := newPositionDeletePartitionedFanoutWriter(latestMetadata, cw, partitionContextByFilePath, args.itr, factory)
+	partitionWriter := newPositionDeletePartitionedFanoutWriter(latestMetadata, partitionContextByFilePath, args.itr, factory)
 	workers := config.EnvConfig.MaxWorkers
 
 	return partitionWriter.Write(ctx, workers)

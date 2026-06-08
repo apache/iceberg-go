@@ -128,9 +128,6 @@ func TestPositionDeletePartitionedFanoutWriterProcessBatch(t *testing.T) {
 			require.NoError(t, err)
 
 			writeUUID := uuid.New()
-			cw := newConcurrentDataFileWriter(func(rootLocation string, fs io.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
-				return newPositionDeleteWriter(rootLocation, fs, meta, props, opts...)
-			})
 			factory, err := newWriterFactory(t.TempDir(), recordWritingArgs{
 				fs:        &io.LocalFS{},
 				sc:        PositionalDeleteArrowSchema,
@@ -140,7 +137,7 @@ func TestPositionDeletePartitionedFanoutWriterProcessBatch(t *testing.T) {
 				withContentType(iceberg.EntryContentPosDeletes),
 				withFactoryFileSchema(iceberg.PositionalDeleteSchema))
 			require.NoError(t, err)
-			writer := newPositionDeletePartitionedFanoutWriter(latestMeta, cw, tc.pathToPartitionContext, nil, factory)
+			writer := newPositionDeletePartitionedFanoutWriter(latestMeta, tc.pathToPartitionContext, nil, factory)
 
 			dataFileCh := make(chan iceberg.DataFile, 10)
 			err = writer.processBatch(ctx, tc.input, dataFileCh)
@@ -364,9 +361,6 @@ func TestPositionDeletePartitionedFanoutWriterRoutesPartitionsIndependently(t *t
 	}
 
 	writeUUID := uuid.New()
-	cw := newConcurrentDataFileWriter(func(rootLocation string, fs io.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
-		return newPositionDeleteWriter(rootLocation, fs, meta, props, opts...)
-	})
 	factory, err := newWriterFactory(t.TempDir(), recordWritingArgs{
 		fs:        &io.LocalFS{},
 		sc:        PositionalDeleteArrowSchema,
@@ -376,7 +370,7 @@ func TestPositionDeletePartitionedFanoutWriterRoutesPartitionsIndependently(t *t
 		withContentType(iceberg.EntryContentPosDeletes),
 		withFactoryFileSchema(iceberg.PositionalDeleteSchema))
 	require.NoError(t, err)
-	writer := newPositionDeletePartitionedFanoutWriter(latestMeta, cw, pathToCtx, nil, factory)
+	writer := newPositionDeletePartitionedFanoutWriter(latestMeta, pathToCtx, nil, factory)
 
 	dataFileCh := make(chan iceberg.DataFile, 4)
 

@@ -158,9 +158,6 @@ func equalityDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 	targetFileSize := int64(meta.props.GetInt(WriteTargetFileSizeBytesKey,
 		WriteTargetFileSizeBytesDefault))
 
-	cw := newConcurrentDataFileWriter(newEqualityDeleteWriterMaker(deleteSchema, equalityFieldIDs),
-		withSchemaSanitization(false))
-
 	latestMetadata, err := meta.Build()
 	if err != nil {
 		return nil, err
@@ -184,11 +181,14 @@ func equalityDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 		}
 
 		partitionWriter := newPartitionedFanoutWriter(
-			partitionSpec, cw, writeSchema, args.itr, factory)
+			partitionSpec, writeSchema, args.itr, factory)
 		workers := config.EnvConfig.MaxWorkers
 
 		return partitionWriter.Write(ctx, workers), nil
 	}
+
+	cw := newConcurrentDataFileWriter(newEqualityDeleteWriterMaker(deleteSchema, equalityFieldIDs),
+		withSchemaSanitization(false))
 
 	nextCount, stopCount := iter.Pull(args.counter)
 	tasks := func(yield func(WriteTask) bool) {
