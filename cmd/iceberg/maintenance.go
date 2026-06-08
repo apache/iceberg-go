@@ -75,7 +75,8 @@ type UpgradeCmd struct {
 
 type RollbackCmd struct {
 	TableID    string `arg:"positional,required" help:"full path to a table"`
-	SnapshotID int64  `arg:"--snapshot-id,required" help:"snapshot ID to roll back to"`
+	SnapshotID *int64 `arg:"--snapshot-id" help:"snapshot ID to roll back to (mutually exclusive with --timestamp)"`
+	Timestamp  string `arg:"--timestamp" help:"RFC3339 timestamp to roll back to; fractional seconds accepted (mutually exclusive with --snapshot-id)"`
 	Yes        bool   `arg:"--yes" help:"skip confirmation prompt"`
 }
 

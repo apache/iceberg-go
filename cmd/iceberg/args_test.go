@@ -211,6 +211,28 @@ func TestArgsParsing(t *testing.T) {
 			},
 		},
 		{
+			name: "rollback with snapshot id",
+			args: []string{"rollback", "prod.db.events", "--snapshot-id", "123", "--yes"},
+			check: func(t *testing.T, a Args) {
+				require.NotNil(t, a.Rollback)
+				assert.Equal(t, "prod.db.events", a.Rollback.TableID)
+				require.NotNil(t, a.Rollback.SnapshotID)
+				assert.Equal(t, int64(123), *a.Rollback.SnapshotID)
+				assert.Equal(t, "", a.Rollback.Timestamp)
+				assert.True(t, a.Rollback.Yes)
+			},
+		},
+		{
+			name: "rollback with timestamp",
+			args: []string{"rollback", "prod.db.events", "--timestamp", "2026-01-15T03:00:00Z"},
+			check: func(t *testing.T, a Args) {
+				require.NotNil(t, a.Rollback)
+				assert.Equal(t, "prod.db.events", a.Rollback.TableID)
+				assert.Nil(t, a.Rollback.SnapshotID)
+				assert.Equal(t, "2026-01-15T03:00:00Z", a.Rollback.Timestamp)
+			},
+		},
+		{
 			name:    "describe without identifier errors",
 			args:    []string{"describe"},
 			wantErr: true,

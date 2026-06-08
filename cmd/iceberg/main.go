@@ -272,6 +272,15 @@ func main() {
 		log.Fatal("unimplemented output type")
 	}
 
+	// Validate the rollback selector before catalog init so invalid flags fail
+	// fast with a clear message instead of a catalog connection error.
+	if args.Rollback != nil {
+		if err := validateRollbackSelector(args.Rollback); err != nil {
+			output.Error(err)
+			os.Exit(1)
+		}
+	}
+
 	cat := initCatalog(ctx, args)
 
 	switch {
