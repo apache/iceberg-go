@@ -556,14 +556,19 @@ func (scan *Scan) fetchPartitionSpecFilteredManifests(ctx context.Context) ([]ic
 
 	// Build per-spec manifest evaluators and filter out irrelevant manifests.
 	manifestEvaluators := newKeyDefaultMapWrapErr(scan.buildManifestEvaluator)
-	manifestList = slices.DeleteFunc(manifestList, func(mf iceberg.ManifestFile) bool {
+	filtered := make([]iceberg.ManifestFile, 0, len(manifestList))
+	for _, mf := range manifestList {
 		eval := manifestEvaluators.Get(int(mf.PartitionSpecID()))
 		use, err := eval(mf)
+		if err != nil {
+			return nil, fmt.Errorf("failed to evaluate manifest %s: %w", mf.FilePath(), err)
+		}
+		if use {
+			filtered = append(filtered, mf)
+		}
+	}
 
-		return !use || err != nil
-	})
-
-	return manifestList, nil
+	return filtered, nil
 }
 
 // collectManifestEntries concurrently opens manifests, applies partition and metrics
