@@ -32,9 +32,13 @@ func (LocalFS) Open(name string) (File, error) {
 	return os.Open(strings.TrimPrefix(name, "file://"))
 }
 
+func (LocalFS) ReadFile(name string) ([]byte, error) {
+	return os.ReadFile(strings.TrimPrefix(name, "file://"))
+}
+
 func (LocalFS) Create(name string) (FileWriter, error) {
 	filename := strings.TrimPrefix(name, "file://")
-	if err := os.MkdirAll(filepath.Dir(filename), 0o777); err != nil {
+	if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
 		return nil, err
 	}
 
@@ -42,13 +46,37 @@ func (LocalFS) Create(name string) (FileWriter, error) {
 }
 
 func (LocalFS) WriteFile(name string, content []byte) error {
-	return os.WriteFile(strings.TrimPrefix(name, "file://"), content, 0o777)
+	return os.WriteFile(strings.TrimPrefix(name, "file://"), content, 0o644)
 }
 
 func (LocalFS) Remove(name string) error {
 	return os.Remove(strings.TrimPrefix(name, "file://"))
 }
 
+func (LocalFS) RemoveAll(name string) error {
+	return os.RemoveAll(strings.TrimPrefix(name, "file://"))
+}
+
 func (LocalFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 	return filepath.WalkDir(strings.TrimPrefix(root, "file://"), fn)
+}
+
+func (LocalFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	return os.ReadDir(strings.TrimPrefix(name, "file://"))
+}
+
+func (LocalFS) MkdirAll(path string) error {
+	return os.MkdirAll(strings.TrimPrefix(path, "file://"), 0o755)
+}
+
+func (LocalFS) Mkdir(path string) error {
+	return os.Mkdir(strings.TrimPrefix(path, "file://"), 0o755)
+}
+
+func (LocalFS) Stat(name string) (fs.FileInfo, error) {
+	return os.Stat(strings.TrimPrefix(name, "file://"))
+}
+
+func (LocalFS) Rename(oldpath, newpath string) error {
+	return os.Rename(strings.TrimPrefix(oldpath, "file://"), strings.TrimPrefix(newpath, "file://"))
 }

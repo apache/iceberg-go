@@ -184,14 +184,14 @@ func (s *HadoopCatalogTestSuite) TestIsTableDirTrue() {
 	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
 	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "v1.metadata.json"), nil, 0o644))
 
-	s.True(isTableDir(tableDir))
+	s.True(isTableDir(s.cat.filesystem, tableDir))
 }
 
 func (s *HadoopCatalogTestSuite) TestIsTableDirFalseNoMetadataDir() {
 	nsDir := filepath.Join(s.warehouse, "ns")
 	s.Require().NoError(os.MkdirAll(nsDir, 0o755))
 
-	s.False(isTableDir(nsDir))
+	s.False(isTableDir(s.cat.filesystem, nsDir))
 }
 
 func (s *HadoopCatalogTestSuite) TestIsTableDirFalseEmptyMetadataDir() {
@@ -199,7 +199,7 @@ func (s *HadoopCatalogTestSuite) TestIsTableDirFalseEmptyMetadataDir() {
 	metaDir := filepath.Join(tableDir, "metadata")
 	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
 
-	s.False(isTableDir(tableDir))
+	s.False(isTableDir(s.cat.filesystem, tableDir))
 }
 
 func (s *HadoopCatalogTestSuite) TestIsTableDirTrueUUIDMetadata() {
@@ -208,7 +208,7 @@ func (s *HadoopCatalogTestSuite) TestIsTableDirTrueUUIDMetadata() {
 	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
 	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "00001-a1b2c3d4-e5f6-7890-abcd-ef1234567890.metadata.json"), nil, 0o644))
 
-	s.True(isTableDir(tableDir))
+	s.True(isTableDir(s.cat.filesystem, tableDir))
 }
 
 func (s *HadoopCatalogTestSuite) TestIsTableDirWithGzipMetadata() {
@@ -217,11 +217,11 @@ func (s *HadoopCatalogTestSuite) TestIsTableDirWithGzipMetadata() {
 	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
 	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "v1.gz.metadata.json"), nil, 0o644))
 
-	s.True(isTableDir(tableDir))
+	s.True(isTableDir(s.cat.filesystem, tableDir))
 }
 
 func (s *HadoopCatalogTestSuite) TestIsTableDirNonExistentPath() {
-	s.False(isTableDir(filepath.Join(s.warehouse, "does", "not", "exist")))
+	s.False(isTableDir(s.cat.filesystem, filepath.Join(s.warehouse, "does", "not", "exist")))
 }
 
 func (s *HadoopCatalogTestSuite) createMetadataFile(ident table.Identifier, version int) {
@@ -692,7 +692,7 @@ func (s *HadoopCatalogTestSuite) TestIsTableDirTrueVersionHintText() {
 	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
 	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "version-hint.text"), []byte("1"), 0o644))
 
-	s.True(isTableDir(tableDir))
+	s.True(isTableDir(s.cat.filesystem, tableDir))
 }
 
 func (s *HadoopCatalogTestSuite) TestIsTableDirTrueUUIDMetadataGzip() {
@@ -701,7 +701,7 @@ func (s *HadoopCatalogTestSuite) TestIsTableDirTrueUUIDMetadataGzip() {
 	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
 	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "00001-a1b2c3d4-e5f6-7890-abcd-ef1234567890.gz.metadata.json"), nil, 0o644))
 
-	s.True(isTableDir(tableDir))
+	s.True(isTableDir(s.cat.filesystem, tableDir))
 }
 
 func (s *HadoopCatalogTestSuite) TestIsTableDirFalseNonMatchingFiles() {
@@ -710,7 +710,7 @@ func (s *HadoopCatalogTestSuite) TestIsTableDirFalseNonMatchingFiles() {
 	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
 	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "random.json"), nil, 0o644))
 
-	s.False(isTableDir(tableDir))
+	s.False(isTableDir(s.cat.filesystem, tableDir))
 }
 
 // Helper to create a fake table directory with a metadata file.
