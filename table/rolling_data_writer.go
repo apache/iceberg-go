@@ -28,6 +28,7 @@ import (
 	"sync/atomic"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	tblutils "github.com/apache/iceberg-go/table/internal"
@@ -57,6 +58,7 @@ type writerFactory struct {
 	content          iceberg.ManifestEntryContent
 	equalityFieldIDs []int
 	sortOrderID      int
+	sortKeys         []compute.SortKey
 
 	writers               sync.Map
 	partitionLocProviders sync.Map
@@ -174,6 +176,21 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		stopCount()
 
 		return nil, err
+	}
+
+	if f.content == iceberg.EntryContentData && f.sortOrderID != UnsortedSortOrderID {
+		sortOrder, err := meta.GetSortOrderByID(f.sortOrderID)
+		if err != nil {
+			stopCount()
+
+			return nil, err
+		}
+		f.sortKeys, err = resolveSortKeys(*sortOrder, f.fileSchema)
+		if err != nil {
+			stopCount()
+
+			return nil, err
+		}
 	}
 
 	return f, nil
@@ -356,6 +373,21 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 			r.sendError(err)
 
 			return
+		}
+
+		// Sort each batch independently before writing. This is per-batch, not
+		// per-file: rows are not merged into one globally sorted run across
+		// batches. See resolveSortKeys for the full list of limitations.
+		if len(r.factory.sortKeys) > 0 {
+			sorted, err := compute.SortRecordBatch(r.ctx, converted, r.factory.sortKeys)
+			converted.Release()
+			if err != nil {
+				record.Release()
+				r.sendError(err)
+
+				return
+			}
+			converted = sorted
 		}
 
 		err = currentWriter.Write(converted)
