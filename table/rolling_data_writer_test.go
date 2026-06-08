@@ -538,7 +538,7 @@ func (s *RollingDataWriterTestSuite) TestSortsRowsBeforeWriting() {
 	defer record.Release()
 
 	outputCh := make(chan iceberg.DataFile, 10)
-	writer := factory.newRollingDataWriter(s.ctx, nil, "", nil, outputCh)
+	writer := factory.newRollingDataWriter(s.ctx, "", nil, outputCh)
 	s.Require().NoError(writer.Add(record))
 	s.Require().NoError(writer.closeAndWait())
 	close(outputCh)
@@ -622,7 +622,7 @@ func (s *RollingDataWriterTestSuite) TestUnsortedOrderIsNoOp() {
 	defer record.Release()
 
 	outputCh := make(chan iceberg.DataFile, 10)
-	writer := factory.newRollingDataWriter(s.ctx, nil, "", nil, outputCh)
+	writer := factory.newRollingDataWriter(s.ctx, "", nil, outputCh)
 	s.Require().NoError(writer.Add(record))
 	s.Require().NoError(writer.closeAndWait())
 	close(outputCh)
