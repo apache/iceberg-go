@@ -1845,3 +1845,63 @@ func TestToRequestedSchemaWriteDefaultJSONRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+func TestToRequestedSchemaMissingNestedFieldID(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	// Create an Arrow schema that lacks the nested list completely
+	schemaWithoutMetadata := arrow.NewSchema([]arrow.Field{
+		{
+			Name: "other_field", Type: arrow.PrimitiveTypes.Int32,
+		},
+	}, nil)
+
+	bldr := array.NewRecordBuilder(mem, schemaWithoutMetadata)
+	defer bldr.Release()
+
+	const data = `{"other_field": 1}
+				  {"other_field": 2}`
+
+	s := bufio.NewScanner(strings.NewReader(data))
+	for s.Scan() {
+		require.NoError(t, bldr.UnmarshalJSON(s.Bytes()))
+	}
+
+	rec := bldr.NewRecordBatch()
+	defer rec.Release()
+
+	// The file schema lacks the nested_list
+	fileIcesc := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 10, Name: "other_field", Type: iceberg.PrimitiveTypes.Int32, Required: false,
+	})
+
+	// The requested schema has the nested_list
+	reqIcesc := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 10, Name: "other_field", Type: iceberg.PrimitiveTypes.Int32, Required: false,
+	}, iceberg.NestedField{
+		ID: 11, Name: "nested_list", Type: &iceberg.ListType{
+			ElementID: 12, Element: iceberg.PrimitiveTypes.String, ElementRequired: false,
+		}, Required: false,
+	})
+
+	rec2, err := table.ToRequestedSchema(context.Background(), reqIcesc, fileIcesc, rec, table.SchemaOptions{IncludeFieldIDs: true})
+	require.NoError(t, err)
+	defer rec2.Release()
+
+	targetSchema := arrow.NewSchema([]arrow.Field{
+		{
+			Name: "other_field", Type: arrow.PrimitiveTypes.Int32, Nullable: true,
+			Metadata: arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: "10"}),
+		},
+		{
+			Name: "nested_list", Type: arrow.ListOfField(arrow.Field{
+				Name: "element", Type: arrow.BinaryTypes.String, Nullable: true,
+				Metadata: arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: "12"}),
+			}),
+			Metadata: arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: "11"}),
+			Nullable: true,
+		},
+	}, nil)
+	require.True(t, targetSchema.Equal(rec2.Schema()), "Schema is not perfectly equal")
+}
