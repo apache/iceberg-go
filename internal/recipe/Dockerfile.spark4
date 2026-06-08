@@ -1,0 +1,47 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+FROM apache/spark:4.0.2-python3
+
+USER root
+
+ARG ICEBERG_VERSION=1.10.0
+ARG SCALA_VERSION=2.13
+
+RUN curl --progress-bar -L --retry 3 \
+    "https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-4.0_${SCALA_VERSION}/${ICEBERG_VERSION}/iceberg-spark-runtime-4.0_${SCALA_VERSION}-${ICEBERG_VERSION}.jar" \
+    -o "${SPARK_HOME}/jars/iceberg-spark-runtime.jar"
+
+RUN curl --progress-bar -L --retry 3 \
+    "https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-aws-bundle/${ICEBERG_VERSION}/iceberg-aws-bundle-${ICEBERG_VERSION}.jar" \
+    -o "${SPARK_HOME}/jars/iceberg-aws-bundle.jar"
+
+RUN pip3 install --no-cache-dir --upgrade pip
+RUN pip3 install --no-cache-dir pyspark==4.0.0 py4j
+RUN pip3 install --no-cache-dir ipython
+RUN pip3 install --no-cache-dir 'pyiceberg[s3fs,hive]'
+RUN pip3 install --no-cache-dir pyarrow
+
+RUN ln -sf /usr/bin/python3 /usr/local/bin/python
+
+COPY spark-defaults.conf ${SPARK_HOME}/conf/spark-defaults.conf
+COPY provision.py validation.py hadoop_validation.py /opt/spark/work-dir/
+COPY entrypoint.sh /opt/spark/work-dir/entrypoint.sh
+RUN chmod +x /opt/spark/work-dir/entrypoint.sh
+
+WORKDIR /opt/spark/work-dir
+
+ENTRYPOINT ["./entrypoint.sh"]
+CMD ["notebook"]

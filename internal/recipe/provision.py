@@ -38,6 +38,11 @@ catalogs = {
 }
 
 for catalog_name, catalog in catalogs.items():
+    try:
+        catalog.create_namespace("default")
+    except Exception:
+        pass  # namespace already exists
+
     spark.sql(
         f"""
       CREATE DATABASE IF NOT EXISTS default;
@@ -64,32 +69,53 @@ for catalog_name, catalog in catalogs.items():
 
     spark.sql(
         f"""
-      CREATE OR REPLACE TABLE default.test_null_nan
-      USING iceberg
-      AS SELECT
-        1            AS idx,
-        float('NaN') AS col_numeric
-    UNION ALL SELECT
-        2            AS idx,
-        null         AS col_numeric
-    UNION ALL SELECT
-        3            AS idx,
-        1            AS col_numeric;
+      CREATE OR REPLACE TABLE default.test_null_nan (
+        idx         INT,
+        col_numeric FLOAT
+      )
+      USING iceberg;
     """
     )
 
     spark.sql(
         f"""
-      CREATE OR REPLACE TABLE default.test_null_nan_rewritten
-      USING iceberg
-      AS SELECT * FROM default.test_null_nan;
+      INSERT INTO default.test_null_nan VALUES
+        (1, float('NaN')),
+        (2, NULL),
+        (3, 1.0);
     """
     )
 
     spark.sql(
         f"""
-    CREATE OR REPLACE TABLE default.test_limit as
-      SELECT * LATERAL VIEW explode(ARRAY(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)) AS idx;
+      CREATE OR REPLACE TABLE default.test_null_nan_rewritten (
+        idx         INT,
+        col_numeric FLOAT
+      )
+      USING iceberg;
+    """
+    )
+
+    spark.sql(
+        f"""
+      INSERT INTO default.test_null_nan_rewritten
+      SELECT * FROM default.test_null_nan;
+    """
+    )
+
+    spark.sql(
+        f"""
+    CREATE OR REPLACE TABLE default.test_limit (
+      idx INT
+    )
+    USING iceberg;
+    """
+    )
+
+    spark.sql(
+        f"""
+    INSERT INTO default.test_limit VALUES
+      (1),(2),(3),(4),(5),(6),(7),(8),(9),(10);
     """
     )
 
@@ -207,9 +233,23 @@ for catalog_name, catalog in catalogs.items():
         .withColumn("structCol", expr("STRUCT(mapCol, arrayCol)"))
     )
 
-    all_types_dataframe.writeTo(f"default.test_all_types").tableProperty("format-version", "2").partitionedBy(
-        "intCol"
-    ).createOrReplace()
+    all_types_dataframe.createOrReplaceTempView("_all_types_temp")
+    spark.sql(
+        f"""
+      CREATE OR REPLACE TABLE default.test_all_types (
+        longCol BIGINT, intCol INT, floatCol FLOAT, doubleCol DOUBLE,
+        dateCol DATE, timestampCol TIMESTAMP, stringCol STRING,
+        booleanCol BOOLEAN, binaryCol BINARY, byteCol BYTE,
+        decimalCol DECIMAL(10,2), shortCol SHORT,
+        mapCol MAP<BIGINT, DECIMAL(10,2)>, arrayCol ARRAY<BIGINT>,
+        structCol STRUCT<mapCol: MAP<BIGINT, DECIMAL(10,2)>, arrayCol: ARRAY<BIGINT>>
+      )
+      USING iceberg
+      PARTITIONED BY (intCol)
+      TBLPROPERTIES ('format-version'='2');
+    """
+    )
+    spark.sql("INSERT INTO default.test_all_types SELECT * FROM _all_types_temp")
 
     for table_name, partition in [
         ("test_partitioned_by_identity", "ts"),

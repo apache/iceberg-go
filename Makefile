@@ -17,7 +17,7 @@
 # golangci-lint version (keep in sync with CI and README)
 GOLANGCI_LINT_VERSION := v2.8.0
 
-.PHONY: test test-race lint lint-install integration-setup integration-test integration-scanner integration-io integration-rest integration-spark integration-hadoop integration-down integration-logs docs-gen
+.PHONY: test test-race lint lint-install integration-setup integration-setup-spark4 integration-test integration-scanner integration-io integration-rest integration-spark integration-hadoop integration-down integration-logs docs-gen
 
 test:
 	go test -v ./...
@@ -38,6 +38,12 @@ lint-install:
 integration-setup:
 	mkdir -p /tmp/iceberg-hadoop-warehouse
 	docker compose -f internal/recipe/docker-compose.yml up -d --wait
+	docker compose -f internal/recipe/docker-compose.yml exec -T spark-iceberg ipython ./provision.py
+
+integration-setup-spark4:
+	mkdir -p /tmp/iceberg-hadoop-warehouse
+	SPARK_IMAGE=pyiceberg-spark4 SPARK_DOCKERFILE=Dockerfile.spark4 docker compose -f internal/recipe/docker-compose.yml build spark-iceberg
+	SPARK_IMAGE=pyiceberg-spark4 SPARK_DOCKERFILE=Dockerfile.spark4 docker compose -f internal/recipe/docker-compose.yml up -d --wait
 	docker compose -f internal/recipe/docker-compose.yml exec -T spark-iceberg ipython ./provision.py
 
 integration-down:
