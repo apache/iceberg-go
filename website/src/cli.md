@@ -88,7 +88,7 @@ All commands accept `--output text` (default, human-readable) or `--output json`
 **Create table**
 
 Note: only the identity transform is supported for `--partition-spec` at this moment.
-```
+```shell
 # Create a simple table with REST catalog and Minio
 ./iceberg create table default.table-1 \
         --properties write.format.default=parquet \
@@ -131,21 +131,21 @@ write.parquet.compression-codec | zstd
 
 ### `info` — single-screen summary
 
-```
+```shell
 iceberg info my_db.events
 ```
 Reports format version, location, current snapshot, schema, partition spec, sort order, snapshot count, ref count, and property count for a table.
 
 ### `snapshots` — snapshot history
 
-```
+```shell
 iceberg snapshots my_db.events
 ```
 Lists all snapshots with timestamp, parent snapshot, operation (`append`, `overwrite`, `delete`, `replace`), and added/deleted data file counts.
 
 ### `refs` — branches and tags
 
-```
+```shell
 iceberg refs my_db.events
 iceberg refs --type branch my_db.events
 iceberg refs --type tag    my_db.events
@@ -154,7 +154,7 @@ Lists snapshot refs along with their retention settings (`max-ref-age`, `max-sna
 
 ### `partition-stats` — partition statistics files
 
-```
+```shell
 iceberg partition-stats my_db.events                          # current snapshot
 iceberg partition-stats --snapshot-id 7234981023498 my_db.events
 iceberg partition-stats --all my_db.events                    # all snapshots
@@ -162,7 +162,7 @@ iceberg partition-stats --all my_db.events                    # all snapshots
 
 ### `schema --show-defaults`
 
-```
+```shell
 iceberg schema --show-defaults my_db.events
 ```
 Prints the schema and surfaces each field's `initial-default` and `write-default` — useful when debugging schema-evolution behavior.
@@ -180,7 +180,7 @@ Drop old snapshots so their unreferenced data files become eligible for cleanup.
 | `--dry-run` | List what would be expired without committing |
 | `--yes` | Skip the confirmation prompt |
 
-```
+```shell
 # Preview
 iceberg expire-snapshots --older-than 7d --dry-run my_db.events
 
@@ -199,7 +199,7 @@ Remove data files in the table location that are not referenced by any snapshot'
 | `--dry-run` | List orphan files without deleting |
 | `--yes` | Skip the confirmation prompt |
 
-```
+```shell
 iceberg clean-orphan-files --dry-run my_db.events
 iceberg clean-orphan-files --older-than 5d my_db.events
 iceberg clean-orphan-files --location s3://old-warehouse/my_db/events my_db.events
@@ -214,7 +214,7 @@ Reset the current snapshot pointer to a previous snapshot. The target must be an
 | `--snapshot-id ID` | Snapshot to roll back to (required) |
 | `--yes` | Skip the confirmation prompt |
 
-```
+```shell
 iceberg rollback --snapshot-id 6891234567890 my_db.events
 ```
 
@@ -227,7 +227,7 @@ Upgrade the table format version (metadata-only operation; no data files are rew
 | `--dry-run` | Show what would change without committing |
 | `--yes` | Skip the confirmation prompt |
 
-```
+```shell
 iceberg upgrade --dry-run my_db.events 2
 iceberg upgrade my_db.events 2
 ```
@@ -236,7 +236,7 @@ iceberg upgrade my_db.events 2
 
 ### `branch create`
 
-```
+```shell
 iceberg branch create my_db.events ml-experiment-v3
 ```
 
@@ -248,7 +248,7 @@ iceberg branch create my_db.events ml-experiment-v3
 | `--min-snapshots-to-keep N` | Always retain at least N snapshots on the branch |
 | `--yes` | Skip the confirmation prompt |
 
-```
+```shell
 iceberg branch create \
   --snapshot-id 7234981023498 \
   --max-ref-age 30d \
@@ -259,7 +259,7 @@ iceberg branch create \
 
 ### `tag create`
 
-```
+```shell
 iceberg tag create my_db.events pre-migration-v4
 ```
 
@@ -269,7 +269,7 @@ iceberg tag create my_db.events pre-migration-v4
 | `--max-ref-age DURATION` | Tag is auto-cleaned after this age |
 | `--yes` | Skip the confirmation prompt |
 
-```
+```shell
 iceberg tag create \
   --snapshot-id 7234981023498 \
   --max-ref-age 90d \
