@@ -361,39 +361,59 @@ If you don't have a go.mod file, create it with <code>go mod init gin</code>.</p
 -->
 <h1 id="cli"><a class="header" href="#cli">CLI</a></h1>
 <p>Run <code>go build ./cmd/iceberg</code> from the root of this repository to build the CLI executable, alternately you can run <code>go install github.com/apache/iceberg-go/cmd/iceberg</code> to install it to the <code>bin</code> directory of your <code>GOPATH</code>.</p>
-<p>The <code>iceberg</code> CLI usage is very similar to <a href="https://py.iceberg.apache.org/cli/">pyiceberg CLI</a> <br />
-You can pass the catalog URI with <code>--uri</code> argument.</p>
-<p>Example:
-You can start the Iceberg REST API docker image which runs on default in port <code>8181</code></p>
+<p>The <code>iceberg</code> CLI usage is very similar to <a href="https://py.iceberg.apache.org/cli/">pyiceberg CLI</a>. <br />
+You can pass the catalog URI with the <code>--uri</code> argument.</p>
+<h2 id="connecting-to-a-catalog"><a class="header" href="#connecting-to-a-catalog">Connecting to a catalog</a></h2>
+<p>Start a local REST catalog (the default <code>--catalog</code> type):</p>
 <pre><code>docker pull apache/iceberg-rest-fixture:latest
 docker run -p 8181:8181 apache/iceberg-rest-fixture:latest
 </code></pre>
-<p>and run the <code>iceberg</code> CLI pointing to the REST API server.</p>
+<p>and run the <code>iceberg</code> CLI pointing to the REST API server:</p>
 <pre><code> ./iceberg --uri http://0.0.0.0:8181 list
 ┌─────┐
 | IDs |
 | --- |
 └─────┘
 </code></pre>
-<p><strong>Create Namespace</strong></p>
+<p>Catalog connection flags are global and apply to every subcommand:</p>
+<div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>--catalog</code></td><td>Catalog type: <code>rest</code> (default), <code>glue</code>, <code>hive</code>, <code>hadoop</code></td></tr>
+<tr><td><code>--uri</code></td><td>Catalog URI (REST/Hive)</td></tr>
+<tr><td><code>--warehouse</code></td><td>Warehouse location</td></tr>
+<tr><td><code>--credential</code></td><td>Credentials for the catalog</td></tr>
+<tr><td><code>--token</code></td><td>OAuth token (skips OAuth flow)</td></tr>
+<tr><td><code>--scope</code></td><td>OAuth scope (default <code>catalog</code>)</td></tr>
+<tr><td><code>--catalog-name</code></td><td>Catalog name to load from config file (default <code>default</code>)</td></tr>
+<tr><td><code>--config</code></td><td>Path to a config file</td></tr>
+</tbody></table>
+</div>
+<p>To avoid passing flags every time, define a config file at <code>~/.iceberg-go.yaml</code>:</p>
+<pre><code class="language-yaml">default-catalog: default
+catalog:
+  default:
+    type: rest
+    uri: http://localhost:8181
+    warehouse: s3://my-warehouse
+</code></pre>
+<p>Flags on the command line override values from the config file.</p>
+<h2 id="output-format"><a class="header" href="#output-format">Output format</a></h2>
+<p>All commands accept <code>--output text</code> (default, human-readable) or <code>--output json</code> (machine-readable, suitable for piping into <code>jq</code> or scripts).</p>
+<h2 id="catalog-and-namespace-commands"><a class="header" href="#catalog-and-namespace-commands">Catalog and namespace commands</a></h2>
+<p><strong>Create namespace</strong></p>
 <pre><code>./iceberg --uri http://0.0.0.0:8181 create namespace taxitrips
 </code></pre>
-<p><strong>List Namespace</strong></p>
+<p><strong>List namespaces</strong></p>
 <pre><code> ./iceberg --uri http://0.0.0.0:8181 list
 ┌───────────┐
 | IDs       |
 | --------- |
 | taxitrips |
 └───────────┘
-
-
 </code></pre>
-<p><strong>Create Table</strong></p>
-<ul>
-<li>Notes: Only identity transform is supported at this moment</li>
-</ul>
-<pre><code># Create a simple table with REST catalog and Minio
-./iceberg create table default.table-1 
+<p><strong>Create table</strong></p>
+<p>Note: only the identity transform is supported for <code>--partition-spec</code> at this moment.</p>
+<pre><code class="language-shell"># Create a simple table with REST catalog and Minio
+./iceberg create table default.table-1 \
         --properties write.format.default=parquet \
         --partition-spec foo \
         --sort-order foo:desc:nulls-last \
@@ -404,32 +424,169 @@ Table default.table-1 created successfully
 
 # Describe the newly created table
 ./iceberg describe --catalog rest --uri http://localhost:8181 default.table-1
-Table format version | 2                                                                                               
+Table format version | 2
 Metadata location    | s3://warehouse/default/table-1/metadata/00000-f0ccaadd-d988-482e-99da-3a37870288fe.metadata.json
-Table UUID           | 33fa3fac-e638-4335-a085-343c6d9e7de5                                                            
-Last updated         | 1753133512562                                                                                   
-Sort Order           | 1: [                                                                                            
-                     | 1 desc nulls-last                                                                               
-                     | ]                                                                                               
-Partition Spec       | [                                                                                               
-                     |  1000: foo: identity(1)                                                                          
-                     | ]                                                                                               
+Table UUID           | 33fa3fac-e638-4335-a085-343c6d9e7de5
+Last updated         | 1753133512562
+Sort Order           | 1: [
+                     | 1 desc nulls-last
+                     | ]
+Partition Spec       | [
+                     |  1000: foo: identity(1)
+                     | ]
 
 Current Schema, id=0
 ├──1: foo: optional string
 └──2: bar: required int
 
-Current Snapshot | 
+Current Snapshot |
 
 Snapshots
 
 Properties
-key                             | value  
+key                             | value
 -----------------------------------------
 write.format.default            | parquet
-write.parquet.compression-codec | zstd   
-
+write.parquet.compression-codec | zstd
 </code></pre>
+<h2 id="inspecting-tables"><a class="header" href="#inspecting-tables">Inspecting tables</a></h2>
+<h3 id="info--single-screen-summary"><a class="header" href="#info--single-screen-summary"><code>info</code> — single-screen summary</a></h3>
+<pre><code class="language-shell">iceberg info my_db.events
+</code></pre>
+<p>Reports format version, location, current snapshot, schema, partition spec, sort order, snapshot count, ref count, and property count for a table.</p>
+<h3 id="snapshots--snapshot-history"><a class="header" href="#snapshots--snapshot-history"><code>snapshots</code> — snapshot history</a></h3>
+<pre><code class="language-shell">iceberg snapshots my_db.events
+</code></pre>
+<p>Lists all snapshots with timestamp, parent snapshot, operation (<code>append</code>, <code>overwrite</code>, <code>delete</code>, <code>replace</code>), and added/deleted data file counts.</p>
+<h3 id="refs--branches-and-tags"><a class="header" href="#refs--branches-and-tags"><code>refs</code> — branches and tags</a></h3>
+<pre><code class="language-shell">iceberg refs my_db.events
+iceberg refs --type branch my_db.events
+iceberg refs --type tag    my_db.events
+</code></pre>
+<p>Lists snapshot refs along with their retention settings (<code>max-ref-age</code>, <code>max-snapshot-age</code>, <code>min-snapshots-to-keep</code>).</p>
+<h3 id="partition-stats--partition-statistics-files"><a class="header" href="#partition-stats--partition-statistics-files"><code>partition-stats</code> — partition statistics files</a></h3>
+<pre><code class="language-shell">iceberg partition-stats my_db.events                          # current snapshot
+iceberg partition-stats --snapshot-id 7234981023498 my_db.events
+iceberg partition-stats --all my_db.events                    # all snapshots
+</code></pre>
+<h3 id="schema---show-defaults"><a class="header" href="#schema---show-defaults"><code>schema --show-defaults</code></a></h3>
+<pre><code class="language-shell">iceberg schema --show-defaults my_db.events
+</code></pre>
+<p>Prints the schema and surfaces each field's <code>initial-default</code> and <code>write-default</code> — useful when debugging schema-evolution behavior.</p>
+<h2 id="snapshot-maintenance"><a class="header" href="#snapshot-maintenance">Snapshot maintenance</a></h2>
+<h3 id="expire-snapshots"><a class="header" href="#expire-snapshots"><code>expire-snapshots</code></a></h3>
+<p>Drop old snapshots so their unreferenced data files become eligible for cleanup.</p>
+<div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>--older-than DURATION</code></td><td>Expire snapshots older than the given duration (<code>7d</code>, <code>168h</code>)</td></tr>
+<tr><td><code>--retain-last N</code></td><td>Always keep at least N snapshots, regardless of age</td></tr>
+<tr><td><code>--dry-run</code></td><td>List what would be expired without committing</td></tr>
+<tr><td><code>--yes</code></td><td>Skip the confirmation prompt</td></tr>
+</tbody></table>
+</div>
+<pre><code class="language-shell"># Preview
+iceberg expire-snapshots --older-than 7d --dry-run my_db.events
+
+# Commit, retaining at least 5 snapshots
+iceberg expire-snapshots --older-than 7d --retain-last 5 my_db.events
+</code></pre>
+<h3 id="clean-orphan-files"><a class="header" href="#clean-orphan-files"><code>clean-orphan-files</code></a></h3>
+<p>Remove data files in the table location that are not referenced by any snapshot's manifests (e.g. left behind by failed writes).</p>
+<div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>--older-than DURATION</code></td><td>Only consider files older than this (default <code>72h</code>, gives in-flight writes time to finish)</td></tr>
+<tr><td><code>--location PATH</code></td><td>Scan a different directory (e.g. an old warehouse path after migration)</td></tr>
+<tr><td><code>--dry-run</code></td><td>List orphan files without deleting</td></tr>
+<tr><td><code>--yes</code></td><td>Skip the confirmation prompt</td></tr>
+</tbody></table>
+</div>
+<pre><code class="language-shell">iceberg clean-orphan-files --dry-run my_db.events
+iceberg clean-orphan-files --older-than 5d my_db.events
+iceberg clean-orphan-files --location s3://old-warehouse/my_db/events my_db.events
+</code></pre>
+<h2 id="rollback"><a class="header" href="#rollback">Rollback</a></h2>
+<p>Reset the current snapshot pointer to a previous snapshot. The target must be an ancestor of the current snapshot.</p>
+<div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>--snapshot-id ID</code></td><td>Snapshot to roll back to (required)</td></tr>
+<tr><td><code>--yes</code></td><td>Skip the confirmation prompt</td></tr>
+</tbody></table>
+</div>
+<pre><code class="language-shell">iceberg rollback --snapshot-id 6891234567890 my_db.events
+</code></pre>
+<h2 id="format-upgrade"><a class="header" href="#format-upgrade">Format upgrade</a></h2>
+<p>Upgrade the table format version (metadata-only operation; no data files are rewritten). Refuses downgrades and same-version &quot;upgrades&quot;.</p>
+<div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>--dry-run</code></td><td>Show what would change without committing</td></tr>
+<tr><td><code>--yes</code></td><td>Skip the confirmation prompt</td></tr>
+</tbody></table>
+</div>
+<pre><code class="language-shell">iceberg upgrade --dry-run my_db.events 2
+iceberg upgrade my_db.events 2
+</code></pre>
+<h2 id="branches-and-tags"><a class="header" href="#branches-and-tags">Branches and tags</a></h2>
+<h3 id="branch-create"><a class="header" href="#branch-create"><code>branch create</code></a></h3>
+<pre><code class="language-shell">iceberg branch create my_db.events ml-experiment-v3
+</code></pre>
+<div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>--snapshot-id ID</code></td><td>Snapshot the branch points at (default: current snapshot)</td></tr>
+<tr><td><code>--max-ref-age DURATION</code></td><td>Branch itself expires after this age</td></tr>
+<tr><td><code>--max-snapshot-age DURATION</code></td><td>Snapshots on the branch older than this can be expired</td></tr>
+<tr><td><code>--min-snapshots-to-keep N</code></td><td>Always retain at least N snapshots on the branch</td></tr>
+<tr><td><code>--yes</code></td><td>Skip the confirmation prompt</td></tr>
+</tbody></table>
+</div>
+<pre><code class="language-shell">iceberg branch create \
+  --snapshot-id 7234981023498 \
+  --max-ref-age 30d \
+  --max-snapshot-age 7d \
+  --min-snapshots-to-keep 10 \
+  my_db.events audit-2026-q2
+</code></pre>
+<h3 id="tag-create"><a class="header" href="#tag-create"><code>tag create</code></a></h3>
+<pre><code class="language-shell">iceberg tag create my_db.events pre-migration-v4
+</code></pre>
+<div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>--snapshot-id ID</code></td><td>Snapshot the tag points at (default: current snapshot)</td></tr>
+<tr><td><code>--max-ref-age DURATION</code></td><td>Tag is auto-cleaned after this age</td></tr>
+<tr><td><code>--yes</code></td><td>Skip the confirmation prompt</td></tr>
+</tbody></table>
+</div>
+<pre><code class="language-shell">iceberg tag create \
+  --snapshot-id 7234981023498 \
+  --max-ref-age 90d \
+  my_db.events monthly-backup-may
+</code></pre>
+<h2 id="automation"><a class="header" href="#automation">Automation</a></h2>
+<p>Two flags make these commands safe to run from cron jobs or CI:</p>
+<ul>
+<li><code>--yes</code> skips the interactive prompt. Without it in a non-interactive environment, the CLI exits with <code>stdin is not a terminal: use --yes to confirm in non-interactive mode</code> rather than hanging.</li>
+<li><code>--output json</code> emits structured output that can be consumed by <code>jq</code> and downstream tooling.</li>
+</ul>
+<p>Daily maintenance over every table in a namespace:</p>
+<pre><code class="language-bash">#!/bin/bash
+TABLES=$(iceberg list my_db --output json | jq -r '.identifiers[].name')
+for table in $TABLES; do
+  iceberg expire-snapshots --older-than 7d --retain-last 3 --yes \
+    --output json &quot;my_db.$table&quot;
+  iceberg clean-orphan-files --older-than 3d --yes \
+    --output json &quot;my_db.$table&quot;
+done
+</code></pre>
+<p>Tag tables before a deploy:</p>
+<pre><code class="language-bash">iceberg tag create --yes my_db.events &quot;pre-deploy-$VERSION&quot;
+iceberg tag create --yes my_db.users  &quot;pre-deploy-$VERSION&quot;
+</code></pre>
+<p>Audit-only report (no commits):</p>
+<pre><code class="language-bash">iceberg expire-snapshots --older-than 7d --dry-run --output json my_db.events \
+  | jq '{table, would_expire: .expired_snapshot_count}'
+</code></pre>
+<h2 id="safety-features"><a class="header" href="#safety-features">Safety features</a></h2>
+<p>Every write command has multiple layers of protection:</p>
+<ul>
+<li><strong><code>--dry-run</code></strong> — shows the would-be effect without committing. Look for <code>[DRY RUN]</code> in text output or <code>&quot;dry_run&quot;: true</code> in JSON.</li>
+<li><strong><code>--yes</code></strong> — required to skip the prompt; without it, non-interactive shells get an explicit error rather than hanging.</li>
+<li><strong>TTY detection</strong> — interactive prompts are only shown when stdout is a terminal.</li>
+<li><strong>Ancestor validation</strong> — <code>rollback</code> rejects target snapshots that are not in the current branch's history.</li>
+<li><strong>Version check</strong> — <code>upgrade</code> refuses same-version or downgrade requests.</li>
+</ul>
 <div style="break-before: page; page-break-before: always;"></div><!--
   ~ Licensed to the Apache Software Foundation (ASF) under one
   ~ or more contributor license agreements.  See the NOTICE file
