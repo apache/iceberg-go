@@ -1042,11 +1042,13 @@ func (p *pruneColVisitor) Struct(st StructType, fieldResults []Type) Type {
 			sameType = false
 			// type has changed, create a new field with the projected type
 			selected = append(selected, NestedField{
-				ID:       field.ID,
-				Name:     field.Name,
-				Type:     t,
-				Doc:      field.Doc,
-				Required: field.Required,
+				ID:             field.ID,
+				Name:           field.Name,
+				Type:           t,
+				Doc:            field.Doc,
+				Required:       field.Required,
+				InitialDefault: field.InitialDefault,
+				WriteDefault:   field.WriteDefault,
 			})
 		}
 	}
@@ -1354,11 +1356,13 @@ func (s *setFreshIDs) Struct(st StructType, fieldResults []func() Type) Type {
 	newFields := make([]NestedField, len(st.FieldList))
 	for idx, f := range st.FieldList {
 		newFields[idx] = NestedField{
-			ID:       s.getAndInc(f.ID),
-			Name:     f.Name,
-			Type:     fieldResults[idx](),
-			Doc:      f.Doc,
-			Required: f.Required,
+			ID:             s.getAndInc(f.ID),
+			Name:           f.Name,
+			Type:           fieldResults[idx](),
+			Doc:            f.Doc,
+			Required:       f.Required,
+			InitialDefault: f.InitialDefault,
+			WriteDefault:   f.WriteDefault,
 		}
 	}
 

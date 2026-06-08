@@ -81,7 +81,15 @@ func TestAddColumn(t *testing.T) {
 				ValueType:     iceberg.PrimitiveTypes.String,
 				ValueRequired: false,
 			}, Required: false, Doc: ""},
-			{ID: 12, Name: "gender", Type: iceberg.PrimitiveTypes.String, Required: false, Doc: ""},
+			{
+				ID:             12,
+				Name:           "gender",
+				Type:           iceberg.PrimitiveTypes.String,
+				Required:       false,
+				Doc:            "",
+				InitialDefault: "male",
+				WriteDefault:   "male",
+			},
 		}, newSchema.Fields())
 	})
 
