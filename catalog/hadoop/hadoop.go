@@ -476,7 +476,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 
 	compression := updated.Properties().Get(table.MetadataCompressionKey, table.MetadataCompressionDefault)
 
-	if err := internal.WriteTableMetadata(updated, icebergio.LocalFS{}, tempPath, compression); err != nil {
+	if err := internal.WriteTableMetadata(updated, c.filesystem, tempPath, compression); err != nil {
 		_ = c.filesystem.Remove(tempPath)
 
 		return nil, "", fmt.Errorf("hadoop catalog: failed to write table metadata: %w", err)
