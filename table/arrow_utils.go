@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"log/slog"
@@ -1844,7 +1845,7 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 
 func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 	if len(meta.CRS) == 0 && meta.CRSType == "" {
-		return "OGC:CRS84", nil
+		return "srid:0", nil
 	}
 
 	var crs string
@@ -1854,13 +1855,17 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 		}
 	}
 
+	if crs == "OGC:CRS84" || crs == "EPSG:4326" {
+		return "OGC:CRS84", nil
+	}
+
 	switch meta.CRSType {
 	case geoarrow.CRSTypeSRID:
 		return "srid:" + crs, nil
-	case geoarrow.CRSTypeAuthorityCode:
-		return crs, nil
+	case geoarrow.CRSTypePROJJSON:
+		return "", errors.New("geoarrow CRS type projjson not supported yet")
 	default:
-		return "", fmt.Errorf("unsupported geoarrow CRS type %q", meta.CRSType)
+		return crs, nil
 	}
 }
 
@@ -1881,12 +1886,13 @@ func geoArrowMetadataToIcebergType(meta geoarrow.Metadata) (iceberg.Type, error)
 }
 
 func icebergCRSToGeoArrowMetadata(crs string) geoarrow.Metadata {
-	if crs == "OGC:CRS84" {
-		return geoarrow.NewMetadata()
-	}
-
 	if strings.HasPrefix(strings.ToLower(crs), "srid:") {
 		id := crs[len("srid:"):]
+
+		if id == "0" {
+			return geoarrow.NewMetadata() // srid:0 maps to omitted GeoArrow CRS
+		}
+
 		raw, _ := json.Marshal(id)
 
 		return geoarrow.Metadata{
@@ -1894,10 +1900,14 @@ func icebergCRSToGeoArrowMetadata(crs string) geoarrow.Metadata {
 			CRSType: geoarrow.CRSTypeSRID,
 		}
 	}
+
+	if strings.HasPrefix(strings.ToLower(crs), "projjson:") {
+		panic(fmt.Errorf("%w: projjson CRS not supported yet", iceberg.ErrInvalidSchema))
+	}
+
 	raw, _ := json.Marshal(crs)
 
 	return geoarrow.Metadata{
-		CRS:     raw,
-		CRSType: geoarrow.CRSTypeAuthorityCode,
+		CRS: raw,
 	}
 }

@@ -441,6 +441,16 @@ func assertGeoArrowWKB(t *testing.T, dt arrow.DataType, storage arrow.DataType, 
 	assert.Equal(t, want, wkb.Metadata())
 }
 
+func assertGeoArrowWKBMetadataJSON(t *testing.T, dt arrow.DataType, storage arrow.DataType, wantJSON string) {
+	t.Helper()
+
+	wkb, ok := dt.(*geoarrow.WKBType)
+	require.True(t, ok, "expected *geoarrow.WKBType, got %T", dt)
+	assert.Equal(t, "geoarrow.wkb", wkb.ExtensionName())
+	assert.True(t, arrow.TypeEqual(storage, wkb.StorageType()))
+	assert.Equal(t, wantJSON, wkb.Serialize())
+}
+
 func jsonCRS(s string) json.RawMessage {
 	raw, _ := json.Marshal(s)
 
@@ -452,57 +462,94 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 	require.NoError(t, err)
 	geogKarney, err := iceberg.GeographyTypeOf("srid:4269", "karney")
 	require.NoError(t, err)
-	geomEPSG, err := iceberg.GeometryTypeOf("EPSG:3857")
+
+	// Note that these tests below are based on arrow-rs tests (TODO: provide a link to tests once they merge to main)
+	geomSRID0, err := iceberg.GeometryTypeOf("srid:0")
+	require.NoError(t, err)
+	geomEPSG4267, err := iceberg.GeometryTypeOf("EPSG:4267")
+	require.NoError(t, err)
+
+	geogSpherical, err := iceberg.GeographyTypeOf("OGC:CRS84", "spherical")
+	require.NoError(t, err)
+	geogKarneyDefaultCRS, err := iceberg.GeographyTypeOf("OGC:CRS84", "karney")
 	require.NoError(t, err)
 	geogVincenty, err := iceberg.GeographyTypeOf("OGC:CRS84", "vincenty")
 	require.NoError(t, err)
+	geogAndoyer, err := iceberg.GeographyTypeOf("OGC:CRS84", "andoyer")
+	require.NoError(t, err)
+	geogThomas, err := iceberg.GeographyTypeOf("OGC:CRS84", "thomas")
+	require.NoError(t, err)
+	geogSRID0, err := iceberg.GeographyTypeOf("srid:0", "spherical")
+	require.NoError(t, err)
+	geogEPSG4267, err := iceberg.GeographyTypeOf("EPSG:4267", "spherical")
+	require.NoError(t, err)
 
 	typeCases := []struct {
-		name     string
-		ice      iceberg.Type
-		wantMeta geoarrow.Metadata
+		name         string
+		ice          iceberg.Type
+		wantMetaJSON string
 	}{
+		// Geometry with default CRS (defaults to OGC:CRS84 per Parquet spec)
 		{
-			name:     "canonical_geometry",
-			ice:      iceberg.GeometryType{},
-			wantMeta: geoarrow.NewMetadata(),
+			name:         "geometry_default_crs",
+			ice:          iceberg.GeometryType{},
+			wantMetaJSON: `{"crs":"OGC:CRS84"}`,
+		},
+		// Geometry with srid:0 should result in an unset (omitted) CRS
+		{
+			name:         "geometry_srid_0",
+			ice:          geomSRID0,
+			wantMetaJSON: `{}`,
+		},
+		// Geometry with custom CRSes (authority:code and partial projjson)
+		{
+			name:         "geometry_epsg_4267",
+			ice:          geomEPSG4267,
+			wantMetaJSON: `{"crs":"EPSG:4267"}`,
+		},
+		// Geography with default CRS (default OGC:CRS84, spherical edges)
+		{
+			name:         "geography_default_crs",
+			ice:          iceberg.GeographyType{},
+			wantMetaJSON: `{"crs":"OGC:CRS84","edges":"spherical"}`,
+		},
+		// Geography with explicit edges
+		{
+			name:         "geography_explicit_spherical",
+			ice:          geogSpherical,
+			wantMetaJSON: `{"crs":"OGC:CRS84","edges":"spherical"}`,
 		},
 		{
-			name:     "canonical_geography",
-			ice:      iceberg.GeographyType{},
-			wantMeta: geoarrow.Metadata{Edges: geoarrow.EdgeSpherical},
+			name:         "geography_karney",
+			ice:          geogKarneyDefaultCRS,
+			wantMetaJSON: `{"crs":"OGC:CRS84","edges":"karney"}`,
 		},
 		{
-			name: "custom_srid_geometry",
-			ice:  geomSRID,
-			wantMeta: geoarrow.Metadata{
-				CRS:     jsonCRS("4326"),
-				CRSType: geoarrow.CRSTypeSRID,
-			},
+			name:         "geography_vincenty",
+			ice:          geogVincenty,
+			wantMetaJSON: `{"crs":"OGC:CRS84","edges":"vincenty"}`,
 		},
 		{
-			name: "custom_srid_geography_karney",
-			ice:  geogKarney,
-			wantMeta: geoarrow.Metadata{
-				CRS:     jsonCRS("4269"),
-				CRSType: geoarrow.CRSTypeSRID,
-				Edges:   geoarrow.EdgeKarney,
-			},
+			name:         "geography_andoyer",
+			ice:          geogAndoyer,
+			wantMetaJSON: `{"crs":"OGC:CRS84","edges":"andoyer"}`,
 		},
 		{
-			name: "authority_code_geometry",
-			ice:  geomEPSG,
-			wantMeta: geoarrow.Metadata{
-				CRS:     jsonCRS("EPSG:3857"),
-				CRSType: geoarrow.CRSTypeAuthorityCode,
-			},
+			name:         "geography_thomas",
+			ice:          geogThomas,
+			wantMetaJSON: `{"crs":"OGC:CRS84","edges":"thomas"}`,
 		},
+		// Geography with srid:0 should result in an unset (omitted) CRS and spherical edges
 		{
-			name: "default_crs_vincenty_geography",
-			ice:  geogVincenty,
-			wantMeta: geoarrow.Metadata{
-				Edges: geoarrow.EdgeVincenty,
-			},
+			name:         "geography_srid_0",
+			ice:          geogSRID0,
+			wantMetaJSON: `{"edges":"spherical"}`,
+		},
+		// Geography with custom CRSes (authority:code and partial projjson)
+		{
+			name:         "geography_epsg_4267",
+			ice:          geogEPSG4267,
+			wantMetaJSON: `{"crs":"EPSG:4267","edges":"spherical"}`,
 		},
 	}
 
@@ -510,7 +557,7 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 		t.Run("type/"+tt.name, func(t *testing.T) {
 			result, err := table.TypeToArrowType(tt.ice, true, false)
 			require.NoError(t, err)
-			assertGeoArrowWKB(t, result, arrow.BinaryTypes.Binary, tt.wantMeta)
+			assertGeoArrowWKBMetadataJSON(t, result, arrow.BinaryTypes.Binary, tt.wantMetaJSON)
 		})
 	}
 
@@ -543,7 +590,7 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 	t.Run("large_binary_storage", func(t *testing.T) {
 		result, err := table.TypeToArrowType(iceberg.GeometryType{}, true, true)
 		require.NoError(t, err)
-		assertGeoArrowWKB(t, result, arrow.BinaryTypes.LargeBinary, geoarrow.NewMetadata())
+		assertGeoArrowWKB(t, result, arrow.BinaryTypes.LargeBinary, geoarrow.Metadata{CRS: jsonCRS("OGC:CRS84")})
 	})
 
 	t.Run("schema", func(t *testing.T) {
@@ -577,9 +624,9 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 			fieldID  string
 			wantMeta geoarrow.Metadata
 		}{
-			{"point", true, "1", geoarrow.NewMetadata()},
+			{"point", true, "1", geoarrow.Metadata{CRS: jsonCRS("OGC:CRS84")}},
 			{"loc", false, "2", geoarrow.Metadata{CRS: jsonCRS("4326"), CRSType: geoarrow.CRSTypeSRID}},
-			{"area", true, "3", geoarrow.Metadata{Edges: geoarrow.EdgeSpherical}},
+			{"area", true, "3", geoarrow.Metadata{CRS: jsonCRS("OGC:CRS84"), Edges: geoarrow.EdgeSpherical}},
 			{"region", true, "4", geoarrow.Metadata{CRS: jsonCRS("4269"), CRSType: geoarrow.CRSTypeSRID, Edges: geoarrow.EdgeKarney}},
 		}
 
