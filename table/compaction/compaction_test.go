@@ -148,6 +148,11 @@ func TestConfig_Validate(t *testing.T) {
 			err:  "delete file threshold must be >= 1",
 		},
 		{
+			name: "negative max files to rewrite",
+			cfg:  compaction.Config{TargetFileSizeBytes: 100, MinFileSizeBytes: 10, MaxFileSizeBytes: 200, MinInputFiles: 1, DeleteFileThreshold: 1, MaxFilesToRewrite: -1},
+			err:  "max files to rewrite must be non-negative",
+		},
+		{
 			name: "valid",
 			cfg:  compaction.DefaultConfig(),
 		},
@@ -508,4 +513,120 @@ func TestPlanCompaction_InvalidConfig(t *testing.T) {
 	_, err := cfg.PlanCompaction(nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid compaction config")
+}
+
+func TestPlanCompaction_MaxFilesToRewriteUnlimited(t *testing.T) {
+	cfg := compaction.Config{
+		TargetFileSizeBytes: 100 * 1024 * 1024,
+		MinFileSizeBytes:    75 * 1024 * 1024,
+		MaxFileSizeBytes:    180 * 1024 * 1024,
+		MinInputFiles:       2,
+		DeleteFileThreshold: 5,
+		PackingLookback:     compaction.DefaultPackingLookback,
+		MaxFilesToRewrite:   0,
+	}
+
+	var tasks []table.FileScanTask
+	for i := range 10 {
+		tasks = append(tasks, makeTask(newDataFile(fmt.Sprintf("file-%d.parquet", i), 10), 0, 0))
+	}
+
+	plan, err := cfg.PlanCompaction(tasks)
+	require.NoError(t, err)
+
+	total := 0
+	for _, g := range plan.Groups {
+		total += len(g.Tasks)
+	}
+	assert.Equal(t, 10, total)
+}
+
+func TestPlanCompaction_MaxFilesToRewriteExactLimit(t *testing.T) {
+	cfg := compaction.Config{
+		TargetFileSizeBytes: 100 * 1024 * 1024,
+		MinFileSizeBytes:    75 * 1024 * 1024,
+		MaxFileSizeBytes:    180 * 1024 * 1024,
+		MinInputFiles:       2,
+		DeleteFileThreshold: 5,
+		PackingLookback:     compaction.DefaultPackingLookback,
+		MaxFilesToRewrite:   10,
+	}
+
+	var tasks []table.FileScanTask
+	for i := range 10 {
+		tasks = append(tasks, makeTask(newDataFile(fmt.Sprintf("file-%d.parquet", i), 10), 0, 0))
+	}
+
+	plan, err := cfg.PlanCompaction(tasks)
+	require.NoError(t, err)
+
+	total := 0
+	for _, g := range plan.Groups {
+		total += len(g.Tasks)
+	}
+	assert.Equal(t, 10, total)
+	assert.Equal(t, 0, plan.SkippedFiles)
+}
+
+func TestPlanCompaction_MaxFilesToRewriteTruncatesGroup(t *testing.T) {
+	cfg := compaction.Config{
+		TargetFileSizeBytes: 100 * 1024 * 1024,
+		MinFileSizeBytes:    75 * 1024 * 1024,
+		MaxFileSizeBytes:    180 * 1024 * 1024,
+		MinInputFiles:       2,
+		DeleteFileThreshold: 5,
+		PackingLookback:     compaction.DefaultPackingLookback,
+		MaxFilesToRewrite:   3,
+	}
+
+	var tasks []table.FileScanTask
+	for i := range 10 {
+		tasks = append(tasks, makeTask(newDataFile(fmt.Sprintf("file-%d.parquet", i), 10), 0, 0))
+	}
+
+	plan, err := cfg.PlanCompaction(tasks)
+	require.NoError(t, err)
+
+	total := 0
+	for _, g := range plan.Groups {
+		total += len(g.Tasks)
+	}
+	assert.Equal(t, 3, total)
+	assert.Equal(t, 7, plan.SkippedFiles)
+}
+
+func TestPlanCompaction_MaxFilesToRewriteDropsWholeGroups(t *testing.T) {
+	cfg := compaction.Config{
+		TargetFileSizeBytes: 100 * 1024 * 1024,
+		MinFileSizeBytes:    75 * 1024 * 1024,
+		MaxFileSizeBytes:    180 * 1024 * 1024,
+		MinInputFiles:       2,
+		DeleteFileThreshold: 5,
+		PackingLookback:     compaction.DefaultPackingLookback,
+		MaxFilesToRewrite:   5,
+	}
+
+	var tasks []table.FileScanTask
+	for i := range 5 {
+		tasks = append(tasks, makeTask(
+			newPartitionedDataFile(fmt.Sprintf("a-%d.parquet", i), 10, map[int]any{1000: "p1"}),
+			0, 0,
+		))
+	}
+	for i := range 5 {
+		tasks = append(tasks, makeTask(
+			newPartitionedDataFile(fmt.Sprintf("b-%d.parquet", i), 10, map[int]any{1000: "p2"}),
+			0, 0,
+		))
+	}
+
+	plan, err := cfg.PlanCompaction(tasks)
+	require.NoError(t, err)
+
+	total := 0
+	for _, g := range plan.Groups {
+		total += len(g.Tasks)
+	}
+	assert.Equal(t, 5, total)
+	assert.Equal(t, 5, plan.SkippedFiles)
 }
