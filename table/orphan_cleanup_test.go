@@ -20,6 +20,8 @@ package table
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -321,15 +323,21 @@ func TestCheckPrefixMismatch(t *testing.T) {
 }
 
 func TestIsFileOrphan(t *testing.T) {
+	// PrefixMismatchError ensures that metadata files (value=false) found via
+	// normalized lookup don't accidentally fall through to the prefix-mismatch
+	// error path. This would happen if isFileOrphan used a bare map-value check
+	// instead of the existence check (_, ok).
 	cfg := &orphanCleanupConfig{
-		prefixMismatchMode: PrefixMismatchIgnore,
+		prefixMismatchMode: PrefixMismatchError,
 		equalSchemes:       map[string]string{"s3,s3a,s3n": "s3"},
+		equalAuthorities:   map[string]string{"host-a,host-b": "host-a"},
 	}
 
 	referencedFiles := map[string]bool{
-		"s3://bucket/data/file1.parquet":     true,
-		"s3://bucket/metadata/manifest.avro": true,
-		"/local/path/file2.parquet":          true,
+		"s3://bucket/data/file1.parquet":        true,
+		"s3://host-a/metadata/v1.metadata.json": false, // metadata → value=false
+		"s3://host-a/data/file1.parquet":        true,
+		"/local/path/file2.parquet":             true,
 	}
 
 	tests := []struct {
@@ -362,11 +370,27 @@ func TestIsFileOrphan(t *testing.T) {
 			file:         "/local/path/orphan.parquet",
 			expectOrphan: true,
 		},
+		{
+			name:         "metadata_exact_host_match",
+			file:         "s3://host-a/metadata/v1.metadata.json",
+			expectOrphan: false,
+		},
+		{
+			name:         "metadata_equivalent_host",
+			file:         "s3://host-b/metadata/v1.metadata.json",
+			expectOrphan: false,
+		},
+		{
+			name:         "data_equivalent_host",
+			file:         "s3://host-b/data/file1.parquet",
+			expectOrphan: false,
+		},
 	}
 	normalizedReferencedFiles := make(map[string]string)
 	for refPath := range referencedFiles {
 		normalizedPath := normalizeFilePathWithConfig(refPath, cfg)
 		normalizedReferencedFiles[normalizedPath] = refPath
+		normalizedReferencedFiles[refPath] = refPath
 	}
 
 	for _, tt := range tests {
@@ -376,34 +400,6 @@ func TestIsFileOrphan(t *testing.T) {
 			assert.Equal(t, tt.expectOrphan, isOrphan)
 		})
 	}
-}
-
-func TestIdentifyOrphanFiles(t *testing.T) {
-	cfg := &orphanCleanupConfig{
-		prefixMismatchMode: PrefixMismatchIgnore,
-	}
-
-	allFiles := []string{
-		"s3://bucket/data/file1.parquet",
-		"s3://bucket/data/file2.parquet",
-		"s3://bucket/data/orphan1.parquet",
-		"s3://bucket/data/orphan2.parquet",
-	}
-
-	referencedFiles := map[string]bool{
-		"s3://bucket/data/file1.parquet": true,
-		"s3://bucket/data/file2.parquet": true,
-	}
-
-	orphans, err := identifyOrphanFiles(allFiles, referencedFiles, cfg)
-	require.NoError(t, err)
-
-	expectedOrphans := []string{
-		"s3://bucket/data/orphan1.parquet",
-		"s3://bucket/data/orphan2.parquet",
-	}
-
-	assert.ElementsMatch(t, expectedOrphans, orphans)
 }
 
 func TestNormalizeURLPath(t *testing.T) {
@@ -529,14 +525,14 @@ func TestGetReferencedFiles_IncludesStatisticsFiles(t *testing.T) {
 	}
 
 	// No snapshots: FileIO is not used; statistics paths must still be referenced.
-	refs, err := tbl.getReferencedFiles(nil, true)
+	refs, err := tbl.getReferencedFiles(context.Background(), nil, 1, true)
 	require.NoError(t, err)
 
 	assert.Contains(t, refs, normalizeFilePath("s3://bucket/stats/table-stats.puffin"))
 	assert.Contains(t, refs, normalizeFilePath("s3://bucket/stats/part-stats.puffin"))
 	assert.Contains(t, refs, normalizeFilePath(tbl.metadataLocation))
-	assert.False(t, refs[normalizeFilePath("s3://bucket/stats/not-referenced.puffin")])
-	assert.False(t, refs[""])
+	assert.NotContains(t, refs, normalizeFilePath("s3://bucket/stats/not-referenced.puffin"))
+	assert.NotContains(t, refs, "")
 }
 
 // mockBulkRemovableIO is a test double that implements BulkRemovableIO.
@@ -716,7 +712,7 @@ func TestGetReferencedFiles_OverwriteThenExpireExcludesTombstones(t *testing.T) 
 
 	// fileA is now referenced only via a DELETED entry in the surviving
 	// snapshot's tombstone manifest. The fix must exclude it.
-	refs, err := tbl.getReferencedFiles(fs, true)
+	refs, err := tbl.getReferencedFiles(ctx, fs, 1, true)
 	require.NoError(t, err)
 
 	assert.Contains(t, refs, normalizeFilePath(fileB),
@@ -748,4 +744,114 @@ func dataFilePathsFromSnapshot(
 	}
 
 	return paths
+}
+
+func TestGetReferencedFiles_SharedManifestReadOnce(t *testing.T) {
+	// A manifest shared by two snapshots must be opened exactly once.
+	// A regression that drops the dedup would open it twice, turning
+	// O(unique_manifests) into O(snapshots × manifests_per_snapshot).
+	const (
+		dataPath      = "s3://bucket/data/file-1.parquet"
+		manifestPath  = "s3://bucket/meta/manifest-shared.avro"
+		manifestList1 = "s3://bucket/meta/snap-1.avro"
+		manifestList2 = "s3://bucket/meta/snap-2.avro"
+	)
+
+	tio := newTrackingCallsIO()
+	mf := writeManifest(t, tio.trackingIO, 1, 1, manifestPath, dataPath)
+	writeManifestList(t, tio.trackingIO, 1, manifestList1, []iceberg.ManifestFile{mf})
+	writeManifestList(t, tio.trackingIO, 2, manifestList2, []iceberg.ManifestFile{mf})
+	tio.files[dataPath] = []byte("data")
+
+	meta, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{
+		snapshots: fmt.Sprintf(
+			`{"snapshot-id":1,"timestamp-ms":1000,"manifest-list":%q},`+
+				`{"snapshot-id":2,"timestamp-ms":2000,"manifest-list":%q}`,
+			manifestList1, manifestList2),
+	}))
+	require.NoError(t, err)
+
+	tbl := New(Identifier{"ns", "tbl"}, meta, "metadata.json", testFSF(tio), nil)
+	refs, err := tbl.getReferencedFiles(context.Background(), tio, 1, true)
+	require.NoError(t, err)
+
+	assert.Contains(t, refs, dataPath)
+	assert.Contains(t, refs, manifestPath)
+	assert.Contains(t, refs, manifestList1)
+	assert.Contains(t, refs, manifestList2)
+
+	assert.Equal(t, 1, tio.openCount[manifestPath],
+		"shared manifest must be opened exactly once across snapshots")
+}
+
+func TestGetReferencedFiles_DisjointManifestsAllRead(t *testing.T) {
+	// Two snapshots with disjoint manifests: both must be read,
+	// and each data file must appear in the referenced set.
+	const (
+		dataPath1     = "s3://bucket/data/file-1.parquet"
+		dataPath2     = "s3://bucket/data/file-2.parquet"
+		manifestPath1 = "s3://bucket/meta/manifest-1.avro"
+		manifestPath2 = "s3://bucket/meta/manifest-2.avro"
+		manifestList1 = "s3://bucket/meta/snap-1.avro"
+		manifestList2 = "s3://bucket/meta/snap-2.avro"
+	)
+
+	tio := newTrackingCallsIO()
+	mf1 := writeManifest(t, tio.trackingIO, 1, 1, manifestPath1, dataPath1)
+	mf2 := writeManifest(t, tio.trackingIO, 2, 2, manifestPath2, dataPath2)
+	writeManifestList(t, tio.trackingIO, 1, manifestList1, []iceberg.ManifestFile{mf1})
+	writeManifestList(t, tio.trackingIO, 2, manifestList2, []iceberg.ManifestFile{mf2})
+
+	meta, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{
+		snapshots: fmt.Sprintf(
+			`{"snapshot-id":1,"timestamp-ms":1000,"manifest-list":%q},`+
+				`{"snapshot-id":2,"timestamp-ms":2000,"manifest-list":%q}`,
+			manifestList1, manifestList2),
+	}))
+	require.NoError(t, err)
+
+	tbl := New(Identifier{"ns", "tbl"}, meta, "metadata.json", testFSF(tio), nil)
+	refs, err := tbl.getReferencedFiles(context.Background(), tio, 1, true)
+	require.NoError(t, err)
+
+	assert.Contains(t, refs, dataPath1)
+	assert.Contains(t, refs, dataPath2)
+	assert.Equal(t, 1, tio.openCount[manifestPath1])
+	assert.Equal(t, 1, tio.openCount[manifestPath2])
+}
+
+func TestGetReferencedFiles_ManySnapshotsShareManifest(t *testing.T) {
+	// Stress the dedup: 10 snapshots all reference the same manifest.
+	// The manifest must be opened exactly once.
+	const (
+		dataPath     = "s3://bucket/data/file-1.parquet"
+		manifestPath = "s3://bucket/meta/manifest-shared.avro"
+	)
+
+	tio := newTrackingCallsIO()
+	mf := writeManifest(t, tio.trackingIO, 1, 1, manifestPath, dataPath)
+
+	numSnapshots := 10
+	var snapJSON []string
+	for i := 1; i <= numSnapshots; i++ {
+		listPath := fmt.Sprintf("s3://bucket/meta/snap-%d.avro", i)
+		writeManifestList(t, tio.trackingIO, int64(i), listPath, []iceberg.ManifestFile{mf})
+		snapJSON = append(snapJSON,
+			fmt.Sprintf(`{"snapshot-id":%d,"timestamp-ms":%d,"manifest-list":%q}`,
+				i, i*1000, listPath))
+	}
+
+	meta, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{
+		snapshots: strings.Join(snapJSON, ","),
+	}))
+	require.NoError(t, err)
+
+	tbl := New(Identifier{"ns", "tbl"}, meta, "metadata.json", testFSF(tio), nil)
+	refs, err := tbl.getReferencedFiles(context.Background(), tio, 4, true)
+	require.NoError(t, err)
+
+	assert.Contains(t, refs, dataPath)
+	assert.Contains(t, refs, manifestPath)
+	assert.Equal(t, 1, tio.openCount[manifestPath],
+		"shared manifest must be opened exactly once even with %d snapshots", numSnapshots)
 }
