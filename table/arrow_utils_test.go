@@ -463,7 +463,7 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 	geogKarney, err := iceberg.GeographyTypeOf("srid:4269", "karney")
 	require.NoError(t, err)
 
-	// Note that these tests below are based on arrow-rs tests (TODO: provide a link to tests once they merge to main)
+	// Note that these tests below are based on arrow-rs tests (https://github.com/apache/arrow-rs/pull/10065)
 	geomSRID0, err := iceberg.GeometryTypeOf("srid:0")
 	require.NoError(t, err)
 	geomEPSG4267, err := iceberg.GeometryTypeOf("EPSG:4267")
