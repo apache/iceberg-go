@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -31,6 +32,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
@@ -426,6 +428,52 @@ func TestVariantArrowConversion(t *testing.T) {
 		assert.True(t, ice.Field(1).Type.Equals(iceberg.VariantType{}))
 		assert.True(t, ice.Field(2).Type.Equals(iceberg.VariantType{}))
 	})
+}
+
+func TestVariantArrayBuilderLargeValues(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	bldr := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
+	defer bldr.Release()
+
+	mkVariant := func(v any) variant.Value {
+		var b variant.Builder
+		require.NoError(t, b.Append(v))
+		val, err := b.Build()
+		require.NoError(t, err)
+
+		return val
+	}
+
+	const arrayLen = 300
+	elems := make([]any, arrayLen)
+	for i := range elems {
+		elems[i] = int64(i)
+	}
+	bldr.Append(mkVariant(elems))
+
+	const objFields = 40
+	obj := make(map[string]any, objFields)
+	for i := 0; i < objFields; i++ {
+		obj["k"+strconv.Itoa(i)] = int64(i)
+	}
+	bldr.Append(mkVariant(obj))
+
+	arr := bldr.NewArray()
+	defer arr.Release()
+
+	varr, ok := arr.(*extensions.VariantArray)
+	require.True(t, ok)
+	require.Equal(t, 2, varr.Len())
+
+	v0, err := varr.Value(0)
+	require.NoError(t, err)
+	require.NotEmpty(t, v0.Bytes())
+
+	v1, err := varr.Value(1)
+	require.NoError(t, err)
+	require.NotEmpty(t, v1.Bytes())
 }
 
 func TestVariantProjectionExclusion(t *testing.T) {
