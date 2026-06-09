@@ -49,6 +49,23 @@ func TestArgsParsing(t *testing.T) {
 			},
 		},
 		{
+			name: "list with page-size",
+			args: []string{"list", "prod.db", "--page-size", "100"},
+			check: func(t *testing.T, a Args) {
+				require.NotNil(t, a.List)
+				assert.Equal(t, "prod.db", a.List.Parent)
+				assert.Equal(t, 100, a.List.PageSize)
+			},
+		},
+		{
+			name: "list defaults page-size to zero",
+			args: []string{"list"},
+			check: func(t *testing.T, a Args) {
+				require.NotNil(t, a.List)
+				assert.Equal(t, 0, a.List.PageSize)
+			},
+		},
+		{
 			name: "describe direct identifier",
 			args: []string{"describe", "prod.db.events"},
 			check: func(t *testing.T, a Args) {
