@@ -107,7 +107,8 @@ func (d *dataFile) MarshalAvroEntry(spec PartitionSpec, schema *Schema, version 
 		return nil, err
 	}
 	clone := cloneDataFileAvroFields(d)
-	clone.PartitionData = avroEncodePartitionData(d.Partition(), maps.nameToID, maps.idToType)
+	normalized := normalizePartitionEncodeValues(d.Partition(), spec, schema)
+	clone.PartitionData = avroEncodePartitionData(normalized, maps.nameToID, maps.idToType)
 
 	return s.Encode(newEncodeEntry(version, clone))
 }

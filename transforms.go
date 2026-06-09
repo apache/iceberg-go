@@ -786,7 +786,7 @@ func (t DayTransform) MarshalText() ([]byte, error) {
 func (DayTransform) String() string { return "day" }
 
 func (t DayTransform) CanTransform(sourceType Type) bool { return canTransformTime(t, sourceType) }
-func (DayTransform) ResultType(Type) Type                { return PrimitiveTypes.Int32 }
+func (DayTransform) ResultType(Type) Type                { return PrimitiveTypes.Date }
 func (DayTransform) PreservesOrder() bool                { return true }
 
 func (DayTransform) Equals(other Transform) bool {
@@ -856,9 +856,9 @@ func (DayTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 func (DayTransform) ToHumanStr(val any) string {
 	switch v := val.(type) {
 	case int32:
-		tm := epochTM.AddDate(0, 0, int(v))
-
-		return tm.Format("2006-01-02")
+		return epochTM.AddDate(0, 0, int(v)).Format("2006-01-02")
+	case Date:
+		return epochTM.AddDate(0, 0, int(v)).Format("2006-01-02")
 	default:
 		return "null"
 	}

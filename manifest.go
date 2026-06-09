@@ -1309,8 +1309,9 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 		setter.setFieldIDToLogicalTypeMap(w.partFieldIDToType)
 	}
 
-	w.partitions = append(w.partitions, entry.Data.Partition())
-	partitionData := avroPartitionData(entry.Data.Partition(), w.partFieldIDToType)
+	normalizedPartition := normalizePartitionEncodeValues(entry.Data.Partition(), w.spec, w.schema)
+	w.partitions = append(w.partitions, normalizedPartition)
+	partitionData := avroPartitionData(normalizedPartition, w.partFieldIDToType)
 
 	if dataFile, ok := entry.DataFile().(*dataFile); ok {
 		convertedPartitionData := make(map[string]any)
@@ -1691,6 +1692,43 @@ func mapToAvroColMap[K comparable, V any](m map[K]V) *[]colMap[K, V] {
 	}
 
 	return &out
+}
+
+// normalizePartitionEncodeValues converts temporal partition values that
+// arrived as Go time.Time/time.Duration into the int days / long micros the
+// manifest avro field expects, deriving the target from the partition field's
+// iceberg type. A raw time.Time can reach the encoder when a partition map is
+// built directly by a caller rather than through Partition()'s typed decode.
+// The manifest-entry encoder rejects time.Time for the int/long field.
+// iceberg-typed and primitive values pass through unchanged.
+func normalizePartitionEncodeValues(idKeyed map[int]any, spec PartitionSpec, schema *Schema) map[int]any {
+	partType := spec.PartitionType(schema)
+	typeByID := make(map[int]Type, len(partType.FieldList))
+	for _, f := range partType.FieldList {
+		typeByID[f.ID] = f.Type
+	}
+	out := make(map[int]any, len(idKeyed))
+	for id, v := range idKeyed {
+		out[id] = normalizeTemporalPartitionValue(v, typeByID[id])
+	}
+
+	return out
+}
+
+func normalizeTemporalPartitionValue(v any, t Type) any {
+	switch val := v.(type) {
+	case time.Time:
+		switch t.(type) {
+		case Int64Type, TimestampType, TimestampTzType:
+			return val.UTC().UnixMicro()
+		default:
+			return int32(val.UTC().Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
+		}
+	case time.Duration:
+		return val.Microseconds()
+	}
+
+	return v
 }
 
 func avroPartitionData(input map[int]any, logicalTypes map[int]string) map[int]any {
