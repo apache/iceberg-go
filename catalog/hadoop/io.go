@@ -33,20 +33,18 @@ type HadoopCatalogFS interface {
 	RenameIO
 	RemoveAllIO
 	MkdirAllIO
-	MkdirIO
-	ReadDirIO
 }
 
 var _ HadoopCatalogFS = (*icebergio.LocalFS)(nil)
 
 // StatIO is an extension of IO interface that includes the Stat
-// method for retrieving file information without reading the file
+// method for retrieving file or directory information
 type StatIO interface {
 	icebergio.IO
 
-	// The Stat method returns a FileInfo describing the named file, or an error
-	// satisfying errors.Is(err, fs.ErrNotExist) if the file does not exist
-	Stat(name string) (fs.FileInfo, error)
+	// The Stat method returns a FileInfo describing the named file or directory,
+	// or an error satisfying errors.Is(err, fs.ErrNotExist) if the file does not exist
+	Stat(path string) (fs.FileInfo, error)
 }
 
 // RenameIO is an extension of IO interface that includes the Rename
@@ -66,32 +64,10 @@ type RemoveAllIO interface {
 	RemoveAll(name string) error
 }
 
-// MkdirIO is an extension of IO interface that includes the Mkdir
-// method for creating a directory
-type MkdirIO interface {
-	icebergio.IO
-
-	// Mkdir creates a new directory or returns an error
-	// satisfying errors.Is(err, fs.ErrExist) if the directory already exists or
-	// errors.Is(err, fs.ErrNotExist) if it does not create parent directories
-	Mkdir(path string) error
-}
-
 // MkdirAllIO is an extension of IO interface that includes the MkdirAll
 // method for creating a directory path recursively
 type MkdirAllIO interface {
 	icebergio.IO
 
 	MkdirAll(path string) error
-}
-
-// ReadDirIO is an extension of IO interface that includes the ReadDir
-// method for reading the contents of a directory and returning a slice of
-// DirEntry values
-type ReadDirIO interface {
-	icebergio.IO
-
-	// ReadDir returns a slice of DirEntry values for the named directory
-	// or an error satisfying errors.Is(err, fs.ErrNotExist) if the directory does not exist
-	ReadDir(name string) ([]fs.DirEntry, error)
 }
