@@ -342,6 +342,42 @@ func TestRowDeltaValidate_SamePartitionRejected(t *testing.T) {
 	assert.ErrorIs(t, err, ErrConflictingDataFiles)
 }
 
+func TestRowDeltaValidate_NullIdentityPartitionRejected(t *testing.T) {
+	dir := filepath.ToSlash(t.TempDir())
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "dt", Type: iceberg.PrimitiveTypes.Date},
+	)
+
+	writerBaseID := int64(249)
+	baseMeta := partitionedConflictMeta(t, schema, 2, &writerBaseID)
+	concSnapshotID := int64(250)
+
+	spec := baseMeta.PartitionSpec()
+
+	nullPartition := map[int]any{}
+	for _, pf := range spec.Fields() {
+		nullPartition[pf.FieldID] = nil
+	}
+	mf := writeTestManifest(t, dir, spec, schema, concSnapshotID, nullPartition, dir+"/null-dt-data.parquet")
+	listPath := writeTestManifestList(t, dir, concSnapshotID, []iceberg.ManifestFile{mf})
+
+	ctx := buildPartitionedContext(t, baseMeta, listPath, writerBaseID, concSnapshotID)
+	require.Len(t, ctx.concurrent, 1)
+
+	eqDf, err := iceberg.NewDataFileBuilder(
+		spec, iceberg.EntryContentEqDeletes,
+		dir+"/null-dt-eq-del.parquet", iceberg.ParquetFile,
+		nullPartition, nil, nil, 1, 1024,
+	)
+	require.NoError(t, err)
+
+	err = validateNoConflictingDataFilesInPartitions(ctx, []iceberg.DataFile{eqDf.Build()}, IsolationSerializable)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrConflictingDataFiles)
+}
+
 // ---------------------------------------------------------------------------
 // UUID partition column: same UUID rejected, different UUID allowed
 // ---------------------------------------------------------------------------

@@ -539,7 +539,14 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 				return nil, fmt.Errorf("source field ID %d (partition field %q) not found in schema", pf.SourceID(), pf.Name)
 			}
 
-			lit, err := anyToLiteral(p[partFieldID])
+			value := p[partFieldID]
+			if value == nil {
+				conjuncts = append(conjuncts, iceberg.IsNull(iceberg.Reference(sourceField.Name)))
+
+				continue
+			}
+
+			lit, err := anyToLiteral(value)
 			if err != nil {
 				return nil, fmt.Errorf("partition field %q: %w", sourceField.Name, err)
 			}
