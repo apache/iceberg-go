@@ -597,6 +597,11 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 			wantMetaJSON: `{"crs":"OgC:cRs84"}`,
 		},
 		{
+			name:         "case_insensitive_default_geometry_epsg_4326",
+			ice:          defaultGeometry,
+			wantMetaJSON: `{"crs":"EpSg:4326"}`,
+		},
+		{
 			name:         "geometry_epsg_4326",
 			ice:          defaultGeometry,
 			wantMetaJSON: `{"crs":"epsg:4326"}`,
@@ -795,6 +800,15 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 
 		_, err = table.ArrowTypeToIceberg(arrowType, false)
 		require.Error(t, err)
+		require.ErrorContains(t, err, "CRS type wkt2:2019 not supported")
+
+		arrowTypeWithoutCRSType, err := geoarrow.NewWKBType().Deserialize(arrow.BinaryTypes.Binary,
+			`{"crs":"GEOGCRS[\"WGS 84\",DATUM[\"World Geodetic System 1984\",ELLIPSOID[\"WGS 84\",6378137,298.257223563]],CS[ellipsoidal,2],AXIS[\"geodetic latitude (Lat)\",north],AXIS[\"geodetic longitude (Lon)\",east],ID[\"EPSG\",4326]]"}`)
+		require.NoError(t, err)
+
+		_, err = table.ArrowTypeToIceberg(arrowTypeWithoutCRSType, false)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "crs length too long")
 	})
 
 	t.Run("schema", func(t *testing.T) {
