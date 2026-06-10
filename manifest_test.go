@@ -2107,6 +2107,46 @@ func (m *ManifestTestSuite) TestV2ManifestListRejectsV3Manifests() {
 	m.Require().ErrorContains(err, "manifest list v2 cannot reference v3 manifest files")
 }
 
+// TestReadV1ManifestFromV2List verifies that a v1-written manifest referenced
+// from a v2 manifest list (the in-place v1->v2 upgrade case) can still be read.
+// ReadManifestList stamps every entry with the list's version, so the v1
+// manifest's entry reports Version()==2; NewManifestReader must trust the
+// manifest's own format-version metadata rather than reject the mismatch.
+func (m *ManifestTestSuite) TestReadV1ManifestFromV2List() {
+	partitionSpec := NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "VendorID", Transform: IdentityTransform{}},
+		PartitionField{FieldID: 1001, SourceIDs: []int{2}, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
+
+	entries := make([]ManifestEntry, len(manifestEntryV1Records))
+	for i, rec := range manifestEntryV1Records {
+		entries[i] = rec
+	}
+
+	var manifestBuf bytes.Buffer
+	mf, err := WriteManifest("v1-before-upgrade.avro", &manifestBuf, 1, partitionSpec, testSchema, entrySnapshotID, entries)
+	m.Require().NoError(err)
+	manifestBytes := manifestBuf.Bytes()
+
+	seqNum := int64(5)
+	var listBuf bytes.Buffer
+	err = WriteManifestList(2, &listBuf, entrySnapshotID, nil, &seqNum, 0, []ManifestFile{mf})
+	m.Require().NoError(err)
+
+	list, err := ReadManifestList(&listBuf)
+	m.Require().NoError(err)
+	m.Require().Len(list, 1)
+	m.Equal(2, list[0].Version(), "v2 list stamps its entries with the list version")
+
+	reader, err := NewManifestReader(list[0], bytes.NewReader(manifestBytes))
+	m.Require().NoError(err)
+	m.Equal(1, reader.Version(), "manifest's own format-version metadata is authoritative")
+
+	got, err := ReadManifest(list[0], bytes.NewReader(manifestBytes), false)
+	m.Require().NoError(err)
+	m.Require().Len(got, len(entries))
+	m.NoError(reader.Close())
+}
+
 // TestManifestRoundTripSortOrderID verifies that a sort_order_id written onto
 // a data file survives an avro manifest round-trip (write → read). This
 // backs the end-to-end guarantee that callers of WriteTask/WriteFileInfo see
