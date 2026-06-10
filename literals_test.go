@@ -25,6 +25,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
+	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -584,6 +585,57 @@ func TestVariantLiteralFromBytes(t *testing.T) {
 	_, err := iceberg.LiteralFromBytes(iceberg.VariantType{}, []byte{0x01, 0x00, 0x00})
 	assert.ErrorIs(t, err, iceberg.ErrType)
 	assert.ErrorContains(t, err, "variant")
+}
+
+func TestVariantLiteralLargeArray(t *testing.T) {
+	const n = 300
+	elems := make([]any, n)
+	for i := range elems {
+		elems[i] = int64(i)
+	}
+
+	var b variant.Builder
+	require.NoError(t, b.Append(elems))
+	val, err := b.Build()
+	require.NoError(t, err)
+
+	lit := iceberg.VariantLiteral(val)
+
+	bytes, err := lit.MarshalBinary()
+	require.NoError(t, err)
+	require.NotEmpty(t, bytes)
+
+	assert.Contains(t, lit.String(), strconv.Itoa(n-1))
+
+	var b2 variant.Builder
+	require.NoError(t, b2.Append(elems))
+	val2, err := b2.Build()
+	require.NoError(t, err)
+	assert.True(t, lit.Equals(iceberg.VariantLiteral(val2)))
+}
+
+func TestVariantLiteralLargeObject(t *testing.T) {
+	const n = 40
+	obj := make(map[string]any, n)
+	for i := 0; i < n; i++ {
+		obj["k"+strconv.Itoa(i)] = int64(i)
+	}
+
+	var b variant.Builder
+	require.NoError(t, b.Append(obj))
+	val, err := b.Build()
+	require.NoError(t, err)
+
+	lit := iceberg.VariantLiteral(val)
+
+	bytes, err := lit.MarshalBinary()
+	require.NoError(t, err)
+	require.NotEmpty(t, bytes)
+
+	s := lit.String()
+	for i := 0; i < n; i++ {
+		assert.Contains(t, s, "k"+strconv.Itoa(i))
+	}
 }
 
 func TestFixedLiteral(t *testing.T) {
