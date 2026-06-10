@@ -19,6 +19,7 @@ package rest
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -59,10 +60,54 @@ func TestEndpointFromString(t *testing.T) {
 func TestEndpointRoundTripString(t *testing.T) {
 	t.Parallel()
 
-	for _, e := range fallbackEndpoints {
+	all := append(append([]endpoint{}, defaultEndpoints...), viewEndpoints...)
+	for _, e := range all {
 		got, err := endpointFromString(e.String())
 		require.NoError(t, err)
 		assert.Equal(t, e, got)
+	}
+}
+
+func TestReqPath(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		ep      endpoint
+		params  []string
+		want    []string
+		wantErr bool
+	}{
+		{name: "no params", ep: endpointCommitTransaction, want: []string{"transactions", "commit"}},
+		{name: "one param", ep: endpointCreateTable, params: []string{"ns"}, want: []string{"namespaces", "ns", "tables"}},
+		{name: "two params", ep: endpointLoadTable, params: []string{"ns", "tbl"}, want: []string{"namespaces", "ns", "tables", "tbl"}},
+		{name: "too few", ep: endpointLoadTable, params: []string{"ns"}, wantErr: true},
+		{name: "too many", ep: endpointCommitTransaction, params: []string{"extra"}, wantErr: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.ep.reqPath(tc.params...)
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.ErrorIs(t, err, ErrRESTError)
+
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestEndpointConstantsWellFormed(t *testing.T) {
+	t.Parallel()
+
+	for _, e := range allEndpoints {
+		assert.Truef(t, strings.HasPrefix(e.path, pathPrefix+"/"),
+			"%s: path must start with %q", e, pathPrefix)
+		_, err := e.reqPath(make([]string, e.nparams())...)
+		assert.NoErrorf(t, err, "%s: should render with %d params", e, e.nparams())
 	}
 }
 
@@ -75,7 +120,8 @@ func TestEndpointSetCheck(t *testing.T) {
 	err := s.check(endpointCreateTable)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrEndpointNotSupported)
-	assert.ErrorIs(t, err, ErrRESTError)
+	// A capability error is distinct from a transport error.
+	assert.NotErrorIs(t, err, ErrRESTError)
 	assert.Contains(t, err.Error(), endpointCreateTable.String())
 
 	// A nil set means capabilities were never negotiated: everything is allowed.
@@ -86,26 +132,34 @@ func TestEndpointSetCheck(t *testing.T) {
 func TestResolveEndpointsFallback(t *testing.T) {
 	t.Parallel()
 
-	// When the server advertises nothing, the backward-compatible fallback set
-	// is used: the full set of operations iceberg-go knows how to invoke.
-	for _, advertised := range [][]string{nil, {}, {"garbage", "alsobad"}} {
-		s := resolveEndpoints(advertised)
-		for _, e := range fallbackEndpoints {
+	// No advertised endpoints falls back to the spec default set, without views.
+	for _, advertised := range [][]string{nil, {}} {
+		s := resolveEndpoints(advertised, false)
+		for _, e := range defaultEndpoints {
 			assert.Truef(t, s.contains(e), "fallback should contain %s", e)
 		}
+		assert.False(t, s.contains(endpointListViews))
+		// HEAD existence endpoints are excluded so Check*Exists degrades to GET.
+		assert.False(t, s.contains(endpointTableExists))
+	}
+
+	// View endpoints are merged in only when view-endpoints-supported is set.
+	s := resolveEndpoints(nil, true)
+	for _, e := range viewEndpoints {
+		assert.Truef(t, s.contains(e), "view fallback should contain %s", e)
 	}
 }
 
 func TestResolveEndpointsAdvertised(t *testing.T) {
 	t.Parallel()
 
-	// When the server advertises a set, only those endpoints are honored;
-	// unparseable entries are ignored.
+	// A non-empty advertised list is authoritative; unparseable entries are
+	// dropped and nothing else is assumed.
 	s := resolveEndpoints([]string{
 		endpointLoadTable.String(),
 		endpointListNamespaces.String(),
 		"not-an-endpoint",
-	})
+	}, false)
 
 	assert.True(t, s.contains(endpointLoadTable))
 	assert.True(t, s.contains(endpointListNamespaces))

@@ -35,6 +35,8 @@ import (
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -43,6 +45,36 @@ const (
 	TestToken       = "some_jwt_token"
 	defaultPageSize = 20
 )
+
+// allEndpointStrings advertises every operation the client knows, so the test
+// server behaves like a fully-capable catalog.
+var allEndpointStrings = []string{
+	"GET /v1/{prefix}/namespaces",
+	"GET /v1/{prefix}/namespaces/{namespace}",
+	"HEAD /v1/{prefix}/namespaces/{namespace}",
+	"POST /v1/{prefix}/namespaces",
+	"POST /v1/{prefix}/namespaces/{namespace}/properties",
+	"DELETE /v1/{prefix}/namespaces/{namespace}",
+	"POST /v1/{prefix}/transactions/commit",
+	"GET /v1/{prefix}/namespaces/{namespace}/tables",
+	"GET /v1/{prefix}/namespaces/{namespace}/tables/{table}",
+	"HEAD /v1/{prefix}/namespaces/{namespace}/tables/{table}",
+	"POST /v1/{prefix}/namespaces/{namespace}/tables",
+	"POST /v1/{prefix}/namespaces/{namespace}/tables/{table}",
+	"DELETE /v1/{prefix}/namespaces/{namespace}/tables/{table}",
+	"POST /v1/{prefix}/tables/rename",
+	"POST /v1/{prefix}/namespaces/{namespace}/register",
+	"POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics",
+	"GET /v1/{prefix}/namespaces/{namespace}/tables/{table}/credentials",
+	"GET /v1/{prefix}/namespaces/{namespace}/views",
+	"GET /v1/{prefix}/namespaces/{namespace}/views/{view}",
+	"HEAD /v1/{prefix}/namespaces/{namespace}/views/{view}",
+	"POST /v1/{prefix}/namespaces/{namespace}/views",
+	"POST /v1/{prefix}/namespaces/{namespace}/views/{view}",
+	"DELETE /v1/{prefix}/namespaces/{namespace}/views/{view}",
+	"POST /v1/{prefix}/views/rename",
+	"POST /v1/{prefix}/namespaces/{namespace}/register-view",
+}
 
 var (
 	TestHeaders = http.Header{
@@ -74,6 +106,7 @@ func (r *RestCatalogSuite) SetupTest() {
 		json.NewEncoder(w).Encode(map[string]any{
 			"defaults":  map[string]any{},
 			"overrides": map[string]any{},
+			"endpoints": allEndpointStrings,
 		})
 	})
 
@@ -2271,6 +2304,7 @@ func (r *RestTLSCatalogSuite) SetupTest() {
 		json.NewEncoder(w).Encode(map[string]any{
 			"defaults":  map[string]any{},
 			"overrides": map[string]any{},
+			"endpoints": allEndpointStrings,
 		})
 	})
 
@@ -3211,4 +3245,52 @@ func (r *RestCatalogSuite) TestCommitTransactionErrCommitStateUnknown() {
 				"%d should return ErrCommitStateUnknown, got: %v", code, err)
 		})
 	}
+}
+
+// TestEndpointNegotiation drives a catalog against a server that advertises only
+// a subset of endpoints, exercising the negotiation path end to end.
+func TestEndpointNegotiation(t *testing.T) {
+	var listNamespacesHit, tablesHit bool
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, req *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults":  map[string]any{},
+			"overrides": map[string]any{},
+			// Advertise list-namespaces only: create-table and list-tables are
+			// deliberately absent.
+			"endpoints": []string{"GET /v1/{prefix}/namespaces"},
+		})
+	})
+	mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
+		listNamespacesHit = true
+		json.NewEncoder(w).Encode(map[string]any{"namespaces": []any{}})
+	})
+	mux.HandleFunc("/v1/namespaces/", func(w http.ResponseWriter, req *http.Request) {
+		tablesHit = true
+		http.Error(w, "unexpected request to unsupported endpoint", http.StatusInternalServerError)
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", srv.URL, rest.WithOAuthToken(TestToken))
+	require.NoError(t, err)
+
+	// An unsupported op fails with the capability sentinel, not a transport error.
+	_, err = cat.CreateTable(context.Background(), table.Identifier{"ns", "tbl"}, tableSchemaSimple)
+	assert.ErrorIs(t, err, rest.ErrEndpointNotSupported)
+	assert.NotErrorIs(t, err, rest.ErrRESTError)
+
+	// An advertised op works.
+	nss, err := cat.ListNamespaces(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Empty(t, nss)
+	assert.True(t, listNamespacesHit)
+
+	// An unsupported list op yields empty without erroring or calling the server.
+	for _, err := range cat.ListTables(context.Background(), table.Identifier{"ns"}) {
+		require.NoError(t, err)
+	}
+	assert.False(t, tablesHit)
 }

@@ -18,25 +18,21 @@
 package rest
 
 import (
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 )
 
-// ErrEndpointNotSupported indicates the server did not advertise a REST endpoint
-// required by the requested operation. It wraps [ErrRESTError].
-var ErrEndpointNotSupported = fmt.Errorf("%w: endpoint not supported by server", ErrRESTError)
+// ErrEndpointNotSupported means the server did not advertise an endpoint the
+// operation needs.
+var ErrEndpointNotSupported = errors.New("endpoint not supported by server")
 
-// pathPrefix is the part of every endpoint template already encoded in the base
-// URI (API version plus optional catalog prefix); reqPath strips it.
 const pathPrefix = "/v1/{prefix}"
 
-// endpoint identifies a REST catalog operation by HTTP method and path template
-// (e.g. "GET /v1/{prefix}/namespaces"). Servers advertise the endpoints they
-// support in the config response so the client can negotiate capabilities.
-//
-// Each endpoint both gates capability and builds the request path (see
-// [endpoint.reqPath]), making it the single source of truth for its operation.
+// endpoint identifies a REST catalog operation by method and path template. It
+// both gates capability and builds the request path.
 type endpoint struct {
 	method string
 	path   string
@@ -44,9 +40,26 @@ type endpoint struct {
 
 func (e endpoint) String() string { return e.method + " " + e.path }
 
-// reqPath renders the request path relative to the base URI, substituting params
-// in order for the "{...}" placeholders that follow [pathPrefix].
-func (e endpoint) reqPath(params ...string) []string {
+// nparams is the number of "{...}" placeholders reqPath expects.
+func (e endpoint) nparams() int {
+	n := 0
+	for _, s := range strings.Split(strings.TrimPrefix(e.path, pathPrefix+"/"), "/") {
+		if strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}") {
+			n++
+		}
+	}
+
+	return n
+}
+
+// reqPath fills the "{...}" placeholders with params in order, returning the
+// path relative to the base URI. It errors on a param count mismatch.
+func (e endpoint) reqPath(params ...string) ([]string, error) {
+	if n := e.nparams(); len(params) != n {
+		return nil, fmt.Errorf("%w: endpoint %s expects %d path parameter(s), got %d",
+			ErrRESTError, e, n, len(params))
+	}
+
 	segs := strings.Split(strings.TrimPrefix(e.path, pathPrefix+"/"), "/")
 
 	out := make([]string, len(segs))
@@ -59,11 +72,10 @@ func (e endpoint) reqPath(params ...string) []string {
 		}
 	}
 
-	return out
+	return out, nil
 }
 
-// endpointFromString parses an endpoint from its "METHOD PATH" wire form,
-// erroring unless the string is exactly two whitespace-separated tokens.
+// endpointFromString parses an endpoint from its "METHOD PATH" wire form.
 func endpointFromString(s string) (endpoint, error) {
 	fields := strings.Fields(s)
 	if len(fields) != 2 {
@@ -104,32 +116,39 @@ var (
 	endpointRegisterView = endpoint{http.MethodPost, "/v1/{prefix}/namespaces/{namespace}/register-view"}
 )
 
-// fallbackEndpoints is assumed when a server advertises no "endpoints" list. It
-// covers every operation the client can invoke, for compatibility with servers
-// that predate endpoint negotiation.
-var fallbackEndpoints = []endpoint{
-	// namespace and table operations
+// defaultEndpoints is the spec default set, assumed when the server advertises
+// no endpoints. The HEAD existence endpoints are excluded on purpose: their
+// absence is what makes Check*Exists fall back to GET.
+var defaultEndpoints = []endpoint{
 	endpointListNamespaces, endpointLoadNamespace, endpointCreateNamespace,
 	endpointUpdateNamespace, endpointDeleteNamespace,
 	endpointListTables, endpointLoadTable, endpointCreateTable,
 	endpointUpdateTable, endpointDeleteTable, endpointRenameTable,
 	endpointRegisterTable, endpointReportMetrics, endpointCommitTransaction,
+}
 
-	// view operations
+// viewEndpoints is added to the default set only when view-endpoints-supported
+// is set.
+var viewEndpoints = []endpoint{
 	endpointListViews, endpointLoadView, endpointCreateView,
 	endpointUpdateView, endpointDeleteView, endpointRenameView,
+}
 
-	// Existence checks and view registration are included for parity with past
-	// behavior. When an advertised set omits a HEAD endpoint, Check*Exists still
-	// degrades to a GET.
-	endpointNamespaceExists, endpointTableExists, endpointViewExists,
-	endpointRegisterView,
+// allEndpoints lists every endpoint constant, for tests that validate templates.
+var allEndpoints = []endpoint{
+	endpointListNamespaces, endpointLoadNamespace, endpointNamespaceExists,
+	endpointCreateNamespace, endpointUpdateNamespace, endpointDeleteNamespace,
+	endpointCommitTransaction,
+	endpointListTables, endpointLoadTable, endpointTableExists, endpointCreateTable,
+	endpointUpdateTable, endpointDeleteTable, endpointRenameTable, endpointRegisterTable,
+	endpointReportMetrics, endpointTableCredentials,
+	endpointListViews, endpointLoadView, endpointViewExists, endpointCreateView,
+	endpointUpdateView, endpointDeleteView, endpointRenameView, endpointRegisterView,
 }
 
 // endpointSet is the set of endpoints a catalog server supports.
 type endpointSet map[endpoint]struct{}
 
-// newEndpointSet builds a set from a list of endpoints.
 func newEndpointSet(eps []endpoint) endpointSet {
 	s := endpointSet{}
 	for _, e := range eps {
@@ -145,28 +164,44 @@ func (s endpointSet) contains(e endpoint) bool {
 	return ok
 }
 
-// check returns [ErrEndpointNotSupported] if the endpoint is not in the set. A
-// nil set (capabilities never negotiated) permits every endpoint.
+// allowed reports whether an endpoint may be called. A nil set (never
+// negotiated) permits everything.
+func (s endpointSet) allowed(e endpoint) bool {
+	return s == nil || s.contains(e)
+}
+
+// check returns ErrEndpointNotSupported if the endpoint is not allowed.
 func (s endpointSet) check(e endpoint) error {
-	if s == nil || s.contains(e) {
+	if s.allowed(e) {
 		return nil
 	}
 
 	return fmt.Errorf("%w: %s", ErrEndpointNotSupported, e)
 }
 
-// resolveEndpoints builds the effective endpoint set from the advertised list.
-func resolveEndpoints(advertised []string) endpointSet {
+// resolveEndpoints builds the effective set from what the server advertised. A
+// non-empty list is authoritative; unparseable entries are dropped with a
+// warning. An empty list falls back to defaultEndpoints, plus viewEndpoints when
+// viewEndpointsSupported is set.
+func resolveEndpoints(advertised []string, viewEndpointsSupported bool) endpointSet {
+	if len(advertised) == 0 {
+		eps := defaultEndpoints
+		if viewEndpointsSupported {
+			eps = append(append([]endpoint{}, defaultEndpoints...), viewEndpoints...)
+		}
+
+		return newEndpointSet(eps)
+	}
+
 	s := endpointSet{}
 	for _, raw := range advertised {
-		if e, err := endpointFromString(raw); err == nil {
-			s[e] = struct{}{}
+		e, err := endpointFromString(raw)
+		if err != nil {
+			slog.Warn("dropping unparseable advertised REST endpoint", "endpoint", raw, "error", err)
+
+			continue
 		}
-	}
-	// A server that advertises nothing (or only unparseable values) gets the
-	// backward-compatibility fallback set.
-	if len(s) == 0 {
-		return newEndpointSet(fallbackEndpoints)
+		s[e] = struct{}{}
 	}
 
 	return s

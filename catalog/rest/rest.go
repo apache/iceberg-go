@@ -80,6 +80,8 @@ const (
 	keyRestSigV4Service = "rest.signing-name"
 	keyAuthUrl          = "rest.authorization-url"
 	keyTlsSkipVerify    = "rest.tls.skip-verify"
+
+	keyViewEndpointsSupported = "view-endpoints-supported"
 )
 
 var (
@@ -734,16 +736,16 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client,
 		return nil, nil, err
 	}
 
-	// Negotiate capabilities from the endpoints the server advertises, falling
-	// back to a backward-compatible default set when none are provided.
-	r.endpoints = resolveEndpoints(rsp.Endpoints)
-
 	cfg := rsp.Defaults
 	if cfg == nil {
 		cfg = iceberg.Properties{}
 	}
 	maps.Copy(cfg, toProps(opts))
 	maps.Copy(cfg, rsp.Overrides)
+
+	// Negotiate capabilities from the endpoints the server advertises, falling
+	// back to a backward-compatible default set when none are provided.
+	r.endpoints = resolveEndpoints(rsp.Endpoints, cfg.GetBool(keyViewEndpointsSupported, false))
 
 	o := *opts
 	fromProps(cfg, &o)
@@ -797,12 +799,21 @@ func (r *Catalog) tableFromResponse(_ context.Context, identifier []string, meta
 }
 
 func (r *Catalog) fetchTableCreds(ctx context.Context, ident []string, location string) (iceberg.Properties, error) {
+	if err := r.endpoints.check(endpointTableCredentials); err != nil {
+		return nil, err
+	}
+
 	ns, tbl, err := splitIdentForPath(ident)
 	if err != nil {
 		return nil, err
 	}
 
-	ret, err := doGet[loadCredentialsResponse](ctx, r.baseURI, endpointTableCredentials.reqPath(ns, tbl),
+	path, err := endpointTableCredentials.reqPath(ns, tbl)
+	if err != nil {
+		return nil, err
+	}
+
+	ret, err := doGet[loadCredentialsResponse](ctx, r.baseURI, path,
 		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable})
 	if err != nil {
 		return nil, err
@@ -811,6 +822,8 @@ func (r *Catalog) fetchTableCreds(ctx context.Context, ident []string, location 
 	return resolveStorageCredentials(ret.StorageCredentials, location), nil
 }
 
+// ListTables lists the tables in a namespace. If the server does not advertise
+// the list-tables endpoint, it yields no tables rather than an error.
 func (r *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
 	return func(yield func(table.Identifier, error) bool) {
 		pageSize := r.getPageSize(ctx)
@@ -841,11 +854,15 @@ func (r *Catalog) listTablesPage(ctx context.Context, namespace table.Identifier
 		return nil, "", err
 	}
 	// Unsupported listing yields an empty result rather than an error.
-	if r.endpoints != nil && !r.endpoints.contains(endpointListTables) {
+	if !r.endpoints.allowed(endpointListTables) {
 		return nil, "", nil
 	}
 	ns := strings.Join(namespace, namespaceSeparator)
-	uri := r.baseURI.JoinPath(endpointListTables.reqPath(ns)...)
+	path, err := endpointListTables.reqPath(ns)
+	if err != nil {
+		return nil, "", err
+	}
+	uri := r.baseURI.JoinPath(path...)
 
 	v := url.Values{}
 	if pageSize > 0 {
@@ -912,7 +929,12 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		Props:         cfg.Properties,
 	}
 
-	ret, err := doPost[createTableRequest, loadTableResponse](ctx, r.baseURI, endpointCreateTable.reqPath(ns), payload,
+	path, err := endpointCreateTable.reqPath(ns)
+	if err != nil {
+		return nil, err
+	}
+
+	ret, err := doPost[createTableRequest, loadTableResponse](ctx, r.baseURI, path, payload,
 		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrTableAlreadyExists})
 	if err != nil {
 		return nil, err
@@ -1008,7 +1030,12 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 		Updates      []table.Update      `json:"updates"`
 	}
 
-	ret, err := doPost[payload, commitTableResponse](ctx, r.baseURI, endpointUpdateTable.reqPath(ns, tblName),
+	path, err := endpointUpdateTable.reqPath(ns, tblName)
+	if err != nil {
+		return nil, "", err
+	}
+
+	ret, err := doPost[payload, commitTableResponse](ctx, r.baseURI, path,
 		payload{Identifier: restIdentifier, Requirements: requirements, Updates: updates}, r.cl,
 		map[int]error{
 			http.StatusNotFound:            catalog.ErrNoSuchTable,
@@ -1075,8 +1102,13 @@ func (r *Catalog) CommitTransaction(ctx context.Context, commits []table.TableCo
 		}
 	}
 
-	_, err := doPostAllowNoContent[payload, struct{}](
-		ctx, r.baseURI, endpointCommitTransaction.reqPath(),
+	path, err := endpointCommitTransaction.reqPath()
+	if err != nil {
+		return err
+	}
+
+	_, err = doPostAllowNoContent[payload, struct{}](
+		ctx, r.baseURI, path,
 		payload{TableChanges: changes}, r.cl,
 		map[int]error{
 			http.StatusNotFound:            catalog.ErrNoSuchTable,
@@ -1107,7 +1139,12 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		MetadataLoc string `json:"metadata-location"`
 	}
 
-	ret, err := doPost[payload, loadTableResponse](ctx, r.baseURI, endpointRegisterTable.reqPath(ns),
+	path, err := endpointRegisterTable.reqPath(ns)
+	if err != nil {
+		return nil, err
+	}
+
+	ret, err := doPost[payload, loadTableResponse](ctx, r.baseURI, path,
 		payload{Name: tbl, MetadataLoc: metadataLoc}, r.cl, map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrTableAlreadyExists,
 		})
@@ -1134,7 +1171,12 @@ func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 		return nil, err
 	}
 
-	ret, err := doGet[loadTableResponse](ctx, r.baseURI, endpointLoadTable.reqPath(ns, tbl),
+	path, err := endpointLoadTable.reqPath(ns, tbl)
+	if err != nil {
+		return nil, err
+	}
+
+	ret, err := doGet[loadTableResponse](ctx, r.baseURI, path,
 		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable})
 	if err != nil {
 		return nil, err
@@ -1168,7 +1210,12 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 		Requirements []table.Requirement `json:"requirements"`
 		Updates      []table.Update      `json:"updates"`
 	}
-	ret, err := doPost[payload, commitTableResponse](ctx, r.baseURI, endpointUpdateTable.reqPath(ns, tbl),
+	path, err := endpointUpdateTable.reqPath(ns, tbl)
+	if err != nil {
+		return nil, err
+	}
+
+	ret, err := doPost[payload, commitTableResponse](ctx, r.baseURI, path,
 		payload{Identifier: restIdentifier, Requirements: requirements, Updates: updates}, r.cl,
 		map[int]error{
 			http.StatusNotFound:            catalog.ErrNoSuchTable,
@@ -1198,7 +1245,12 @@ func (r *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 		return err
 	}
 
-	uri := r.baseURI.JoinPath(endpointDeleteTable.reqPath(ns, tbl)...)
+	path, err := endpointDeleteTable.reqPath(ns, tbl)
+	if err != nil {
+		return err
+	}
+
+	uri := r.baseURI.JoinPath(path...)
 	v := url.Values{}
 	v.Set("purgeRequested", "false")
 	uri.RawQuery = v.Encode()
@@ -1219,7 +1271,12 @@ func (r *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 		return err
 	}
 
-	uri := r.baseURI.JoinPath(endpointDeleteTable.reqPath(ns, tbl)...)
+	path, err := endpointDeleteTable.reqPath(ns, tbl)
+	if err != nil {
+		return err
+	}
+
+	uri := r.baseURI.JoinPath(path...)
 	v := url.Values{}
 	v.Set("purgeRequested", "true")
 	uri.RawQuery = v.Encode()
@@ -1248,7 +1305,12 @@ func (r *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 		Name:      catalog.TableNameFromIdent(to),
 	}
 
-	_, err := doPostAllowNoContent[payload, any](ctx, r.baseURI, endpointRenameTable.reqPath(), payload{Source: src, Destination: dst}, r.cl,
+	path, err := endpointRenameTable.reqPath()
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = doPostAllowNoContent[payload, any](ctx, r.baseURI, path, payload{Source: src, Destination: dst}, r.cl,
 		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable}, true)
 	if err != nil {
 		return nil, err
@@ -1266,7 +1328,12 @@ func (r *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifie
 		return err
 	}
 
-	_, err := doPost[map[string]any, struct{}](ctx, r.baseURI, endpointCreateNamespace.reqPath(),
+	path, err := endpointCreateNamespace.reqPath()
+	if err != nil {
+		return err
+	}
+
+	_, err = doPost[map[string]any, struct{}](ctx, r.baseURI, path,
 		map[string]any{"namespace": namespace, "properties": props}, r.cl, map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrNamespaceAlreadyExists,
 		})
@@ -1283,12 +1350,19 @@ func (r *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 		return err
 	}
 
-	_, err := doDelete[struct{}](ctx, r.baseURI, endpointDeleteNamespace.reqPath(strings.Join(namespace, namespaceSeparator)),
+	path, err := endpointDeleteNamespace.reqPath(strings.Join(namespace, namespaceSeparator))
+	if err != nil {
+		return err
+	}
+
+	_, err = doDelete[struct{}](ctx, r.baseURI, path,
 		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
 
 	return err
 }
 
+// ListNamespaces lists namespaces under parent. If the server does not advertise
+// the list-namespaces endpoint, it returns an empty slice rather than an error.
 func (r *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error) {
 	var allNamespaces []table.Identifier
 	pageSize := r.getPageSize(ctx)
@@ -1311,11 +1385,16 @@ func (r *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) (
 
 func (r *Catalog) listNamespacesPage(ctx context.Context, parent table.Identifier, pageToken string, pageSize int) ([]table.Identifier, string, error) {
 	// Unsupported listing yields an empty result rather than an error.
-	if r.endpoints != nil && !r.endpoints.contains(endpointListNamespaces) {
+	if !r.endpoints.allowed(endpointListNamespaces) {
 		return nil, "", nil
 	}
 
-	uri := r.baseURI.JoinPath(endpointListNamespaces.reqPath()...)
+	path, err := endpointListNamespaces.reqPath()
+	if err != nil {
+		return nil, "", err
+	}
+
+	uri := r.baseURI.JoinPath(path...)
 
 	v := url.Values{}
 	if len(parent) != 0 {
@@ -1358,7 +1437,12 @@ func (r *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 		Props     iceberg.Properties `json:"properties"`
 	}
 
-	rsp, err := doGet[nsresponse](ctx, r.baseURI, endpointLoadNamespace.reqPath(strings.Join(namespace, namespaceSeparator)),
+	path, err := endpointLoadNamespace.reqPath(strings.Join(namespace, namespaceSeparator))
+	if err != nil {
+		return nil, err
+	}
+
+	rsp, err := doGet[nsresponse](ctx, r.baseURI, path,
 		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
 	if err != nil {
 		return nil, err
@@ -1385,7 +1469,12 @@ func (r *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 
 	ns := strings.Join(namespace, namespaceSeparator)
 
-	return doPost[payload, catalog.PropertiesUpdateSummary](ctx, r.baseURI, endpointUpdateNamespace.reqPath(ns),
+	path, err := endpointUpdateNamespace.reqPath(ns)
+	if err != nil {
+		return catalog.PropertiesUpdateSummary{}, err
+	}
+
+	return doPost[payload, catalog.PropertiesUpdateSummary](ctx, r.baseURI, path,
 		payload{Remove: removals, Updates: updates}, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
 }
 
@@ -1394,9 +1483,9 @@ func (r *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Iden
 		return false, err
 	}
 
-	// If the server does not advertise the HEAD existence endpoint, fall back to
-	// a GET (load) for compatibility with servers that predate it.
-	if r.endpoints != nil && !r.endpoints.contains(endpointNamespaceExists) {
+	// No HEAD endpoint: fall back to GET (load). If load is unsupported too, its
+	// ErrEndpointNotSupported surfaces rather than a bogus "not found".
+	if !r.endpoints.contains(endpointNamespaceExists) {
 		_, err := r.LoadNamespaceProperties(ctx, namespace)
 		if err != nil {
 			if errors.Is(err, catalog.ErrNoSuchNamespace) {
@@ -1409,7 +1498,12 @@ func (r *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Iden
 		return true, nil
 	}
 
-	err := doHead(ctx, r.baseURI, endpointNamespaceExists.reqPath(strings.Join(namespace, namespaceSeparator)),
+	path, err := endpointNamespaceExists.reqPath(strings.Join(namespace, namespaceSeparator))
+	if err != nil {
+		return false, err
+	}
+
+	err = doHead(ctx, r.baseURI, path,
 		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
 	if err != nil {
 		if errors.Is(err, catalog.ErrNoSuchNamespace) {
@@ -1428,9 +1522,9 @@ func (r *Catalog) CheckTableExists(ctx context.Context, identifier table.Identif
 		return false, err
 	}
 
-	// If the server does not advertise the HEAD existence endpoint, fall back to
-	// a GET (load) for compatibility with servers that predate it.
-	if r.endpoints != nil && !r.endpoints.contains(endpointTableExists) {
+	// No HEAD endpoint: fall back to GET (load). If load is unsupported too, its
+	// ErrEndpointNotSupported surfaces rather than a bogus "not found".
+	if !r.endpoints.contains(endpointTableExists) {
 		_, err := r.LoadTable(ctx, identifier)
 		if err != nil {
 			if errors.Is(err, catalog.ErrNoSuchTable) {
@@ -1443,7 +1537,12 @@ func (r *Catalog) CheckTableExists(ctx context.Context, identifier table.Identif
 		return true, nil
 	}
 
-	err = doHead(ctx, r.baseURI, endpointTableExists.reqPath(ns, tbl),
+	path, err := endpointTableExists.reqPath(ns, tbl)
+	if err != nil {
+		return false, err
+	}
+
+	err = doHead(ctx, r.baseURI, path,
 		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable})
 	if err != nil {
 		if errors.Is(err, catalog.ErrNoSuchTable) {
@@ -1456,6 +1555,8 @@ func (r *Catalog) CheckTableExists(ctx context.Context, identifier table.Identif
 	return true, nil
 }
 
+// ListViews lists the views in a namespace. If the server does not advertise the
+// list-views endpoint, it yields no views rather than an error.
 func (r *Catalog) ListViews(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
 	return func(yield func(table.Identifier, error) bool) {
 		pageSize := r.getPageSize(ctx)
@@ -1486,11 +1587,15 @@ func (r *Catalog) listViewsPage(ctx context.Context, namespace table.Identifier,
 		return nil, "", err
 	}
 	// Unsupported listing yields an empty result rather than an error.
-	if r.endpoints != nil && !r.endpoints.contains(endpointListViews) {
+	if !r.endpoints.allowed(endpointListViews) {
 		return nil, "", nil
 	}
 	ns := strings.Join(namespace, namespaceSeparator)
-	uri := r.baseURI.JoinPath(endpointListViews.reqPath(ns)...)
+	path, err := endpointListViews.reqPath(ns)
+	if err != nil {
+		return nil, "", err
+	}
+	uri := r.baseURI.JoinPath(path...)
 
 	v := url.Values{}
 	if pageSize > 0 {
@@ -1541,7 +1646,12 @@ func (r *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 		return err
 	}
 
-	_, err = doDelete[struct{}](ctx, r.baseURI, endpointDeleteView.reqPath(ns, view), r.cl,
+	path, err := endpointDeleteView.reqPath(ns, view)
+	if err != nil {
+		return err
+	}
+
+	_, err = doDelete[struct{}](ctx, r.baseURI, path, r.cl,
 		map[int]error{http.StatusNotFound: catalog.ErrNoSuchView})
 
 	return err
@@ -1553,9 +1663,9 @@ func (r *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifi
 		return false, err
 	}
 
-	// If the server does not advertise the HEAD existence endpoint, fall back to
-	// a GET (load) for compatibility with servers that predate it.
-	if r.endpoints != nil && !r.endpoints.contains(endpointViewExists) {
+	// No HEAD endpoint: fall back to GET (load). If load is unsupported too, its
+	// ErrEndpointNotSupported surfaces rather than a bogus "not found".
+	if !r.endpoints.contains(endpointViewExists) {
 		_, err := r.LoadView(ctx, identifier)
 		if err != nil {
 			if errors.Is(err, catalog.ErrNoSuchView) {
@@ -1568,7 +1678,12 @@ func (r *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifi
 		return true, nil
 	}
 
-	err = doHead(ctx, r.baseURI, endpointViewExists.reqPath(ns, view),
+	path, err := endpointViewExists.reqPath(ns, view)
+	if err != nil {
+		return false, err
+	}
+
+	err = doHead(ctx, r.baseURI, path,
 		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchView})
 	if err != nil {
 		if errors.Is(err, catalog.ErrNoSuchView) {
@@ -1651,7 +1766,12 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		ViewVersion: version,
 	}
 
-	ret, err := doPost[createViewRequest, viewResponse](ctx, r.baseURI, endpointCreateView.reqPath(ns), payload,
+	path, err := endpointCreateView.reqPath(ns)
+	if err != nil {
+		return nil, err
+	}
+
+	ret, err := doPost[createViewRequest, viewResponse](ctx, r.baseURI, path, payload,
 		r.cl, map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchNamespace,
 			http.StatusConflict: catalog.ErrViewAlreadyExists,
@@ -1683,7 +1803,12 @@ func (r *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 		Requirements []view.Requirement `json:"requirements"`
 		Updates      []view.Update      `json:"updates"`
 	}
-	ret, err := doPost[payload, viewResponse](ctx, r.baseURI, endpointUpdateView.reqPath(ns, viewName),
+	path, err := endpointUpdateView.reqPath(ns, viewName)
+	if err != nil {
+		return nil, err
+	}
+
+	ret, err := doPost[payload, viewResponse](ctx, r.baseURI, path,
 		payload{Identifier: restIdentifier, Requirements: requirements, Updates: updates}, r.cl,
 		map[int]error{http.StatusNotFound: catalog.ErrNoSuchView, http.StatusConflict: ErrCommitFailed})
 	if err != nil {
@@ -1719,7 +1844,12 @@ func (r *Catalog) RegisterView(ctx context.Context, identifier table.Identifier,
 		MetadataLoc string `json:"metadata-location"`
 	}
 
-	rsp, err := doPost[payload, loadViewResponse](ctx, r.baseURI, endpointRegisterView.reqPath(ns),
+	path, err := endpointRegisterView.reqPath(ns)
+	if err != nil {
+		return nil, err
+	}
+
+	rsp, err := doPost[payload, loadViewResponse](ctx, r.baseURI, path,
 		payload{Name: v, MetadataLoc: metadataLoc}, r.cl, map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchNamespace, http.StatusConflict: catalog.ErrViewAlreadyExists,
 		})
@@ -1746,7 +1876,12 @@ func (r *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*v
 		return nil, err
 	}
 
-	rsp, err := doGet[loadViewResponse](ctx, r.baseURI, endpointLoadView.reqPath(ns, v),
+	path, err := endpointLoadView.reqPath(ns, v)
+	if err != nil {
+		return nil, err
+	}
+
+	rsp, err := doGet[loadViewResponse](ctx, r.baseURI, path,
 		r.cl, map[int]error{
 			http.StatusNotFound: catalog.ErrNoSuchView,
 		})
