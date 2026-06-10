@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/docker/docker/api/types/container"
@@ -139,4 +141,34 @@ func ExecuteSpark(t *testing.T, scriptPath string, args ...string) (string, erro
 	}
 
 	return string(output), nil
+}
+
+var (
+	sparkMajorOnce sync.Once
+	sparkMajor     int
+	sparkMajorErr  error
+)
+
+// SparkMajorVersion returns the major pyspark version (3 or 4) of the
+// spark-iceberg container. Extracted once per process.
+func SparkMajorVersion(t *testing.T) (int, error) {
+	sparkMajorOnce.Do(func() {
+		out, err := ExecuteSpark(t, "-c",
+			`import pyspark; print('PYSPARK_MAJOR=' + pyspark.__version__.split('.')[0])`)
+		if err != nil {
+			sparkMajorErr = fmt.Errorf("extract spark version: %w", err)
+
+			return
+		}
+		switch {
+		case strings.Contains(out, "PYSPARK_MAJOR=4"):
+			sparkMajor = 4
+		case strings.Contains(out, "PYSPARK_MAJOR=3"):
+			sparkMajor = 3
+		default:
+			sparkMajorErr = fmt.Errorf("unrecognized pyspark version output: %q", out)
+		}
+	})
+
+	return sparkMajor, sparkMajorErr
 }
