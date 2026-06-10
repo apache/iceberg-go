@@ -19,86 +19,29 @@
 
 # Iceberg Go
 
-Iceberg Go is a go-native implementation for accessing iceberg tables.
+Apache Iceberg Go is a Go-native implementation of [Apache Iceberg](https://iceberg.apache.org/), the open table format for analytic datasets. Read and write Iceberg tables from Go services and tooling without a JVM.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/apache/iceberg-go.svg)](https://pkg.go.dev/github.com/apache/iceberg-go)
 
-`iceberg` is a Golang implementation of the [Iceberg table spec](https://iceberg.apache.org/spec/).
+## Where to start
 
+- **[Install](./install.md)** - get the library and CLI on your machine.
+- **[CLI](./cli.md)** - inspect tables, run maintenance, manage refs.
+- **[API](./api.md)** - construct catalogs, scan tables, write Arrow data, evolve schemas.
+- **[Configuration](./configuration.md)** - YAML config file, catalog options, FileIO and credentials, table properties.
 
-## Feature Support / Roadmap
+## What works today
 
-### FileSystem Support
+A capability matrix - filesystem, metadata operations, catalog support, and write operations - lives on the dedicated **[Feature Status](./feature-status.md)** page.
 
-| Filesystem Type      | Supported |
-| :------------------: | :-------: |
-| S3                   |    X      |
-| Google Cloud Storage |    X      |
-| Azure Blob Storage   |    X      |
-| Local Filesystem     |    X      |
+## Beyond Go
 
-### Metadata
+Apache Iceberg is multi-language. PyIceberg, iceberg-rust, iceberg-cpp, and the Java reference implementation all target the same spec - see **[Other Iceberg implementations](./ecosystem.md)** for cross-links.
 
-| Operation                | Supported |
-| :----------------------- | :-------: |
-| Get Schema               |     X     |
-| Get Snapshots            |     X     |
-| Get Sort Orders          |     X     |
-| Get Partition Specs      |     X     |
-| Get Manifests            |     X     |
-| Create New Manifests     |     X     |
-| Plan Scan                |     X     |
-| Plan Scan for Snapshot   |     X     |
+## Help and contribution
 
-### Catalog Support
+- Questions and discussion: **[Community](./community.md)**
+- Contributing code or docs: **[Contributing](./contributing.md)**
+- Cutting or verifying a release: **[Releases](./releases.md)**
 
-| Operation                   | REST | Hive |  Glue  | SQL  |
-|:----------------------------|:----:|:----:|:------:|:----:|
-| Load Table                  |  X   |  X   |   X    |  X   |
-| List Tables                 |  X   |  X   |   X    |  X   |
-| Create Table                |  X   |  X   |   X    |  X   |
-| Register Table              |  X   |  X   |   X    |      |
-| Update Current Snapshot     |  X   |  X   |   X    |  X   |
-| Create New Snapshot         |  X   |  X   |   X    |  X   |
-| Rename Table                |  X   |  X   |   X    |  X   |
-| Drop Table                  |  X   |  X   |   X    |  X   |
-| Alter Table                 |  X   |  X   |   X    |  X   |
-| Check Table Exists          |  X   |  X   |   X    |  X   |
-| Set Table Properties        |  X   |  X   |   X    |  X   |
-| List Namespaces             |  X   |  X   |   X    |  X   |
-| Create Namespace            |  X   |  X   |   X    |  X   |
-| Check Namespace Exists      |  X   |  X   |   X    |  X   |
-| Drop Namespace              |  X   |  X   |   X    |  X   |
-| Update Namespace Properties |  X   |  X   |   X    |  X   |
-| Create View                 |  X   |  X   |        |  X   |
-| Load View                   |      |  X   |        |  X   |
-| List View                   |  X   |  X   |        |  X   |
-| Drop View                   |  X   |  X   |        |  X   |
-| Check View Exists           |  X   |  X   |        |  X   |
-
-### Read/Write Data Support
-
-* Data can currently be read as an Arrow Table or as a stream of Arrow record batches.
-
-#### Supported Write Operations
-
-As long as the FileSystem is supported and the Catalog supports altering
-the table, the following tracks the current write support:
-
-| Operation            | Supported |
-|:---------------------|:---------:|
-| Append Stream        |     X     |
-| Append Data Files    |     X     |
-| Rewrite Files        |           |
-| Rewrite manifests    |           |
-| Overwrite Files      |     X     |
-| Copy-On-Write Delete |     X     |
-| Write Pos Delete     |     X     |
-| Write Eq Delete      |           |
-| Row Delta            |           |
-
-
-## Get in Touch
-
-- [Iceberg community](https://iceberg.apache.org/community/)
-- [Iceberg-Go Slack](https://apache-iceberg.slack.com/archives/C05J3MJ42BD)
+The canonical Iceberg specification, terminology, and multi-engine policy live with the main project at [iceberg.apache.org](https://iceberg.apache.org/). This site covers what is specific to the Go implementation.

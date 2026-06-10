@@ -17,32 +17,4 @@
   ~ under the License.
 -->
 
-- [Introduction](./introduction.md)
-
-# User Guide
-
-- [Install](./install.md)
-- [Getting Started](./getting-started.md)
-- [Configuration](./configuration.md)
-- [CLI](./cli.md)
-- [API](./api.md)
-  - [Row Filter Syntax](./row-filter-syntax.md)
-  - [Expression DSL](./expression-dsl.md)
-- [Feature Status](./feature-status.md)
-
-# Developer Guide
-
-- [Contributing](./contributing.md)
-- [Community](./community.md)
-- [Glossary](./glossary.md)
-
-# Releases
-
-- [Releases](./releases.md)
-  - [Verify a release](./verify-release.md)
-  - [How to release](./how-to-release.md)
-
-# Ecosystem
-
-- [Other Iceberg implementations](./ecosystem.md)
-
+{{#include ../../CONTRIBUTING.md:18:}}
