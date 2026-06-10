@@ -1848,6 +1848,10 @@ func (d *dataFile) initColumnStatsData() {
 }
 
 func (d *dataFile) convertAvroValueToIcebergType(v any, fieldID int) any {
+	if v == nil {
+		return nil
+	}
+
 	if logicalType, ok := d.fieldIDToLogicalType[fieldID]; ok {
 		// twmb/avro returns rich Go types (time.Time, time.Duration,
 		// *big.Rat, [16]byte) when the file schema includes a logicalType,

@@ -32,6 +32,7 @@ import (
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/suite"
 	"github.com/twmb/avro"
+	"github.com/twmb/avro/atype"
 	"github.com/twmb/avro/ocf"
 )
 
@@ -1798,6 +1799,28 @@ func (m *ManifestTestSuite) TestManifestWriterMeta() {
 	m.Require().NoError(err)
 	m.NotEqual("null", string(md["partition-spec"]))
 	m.Equal("[]", string(md["partition-spec"]))
+}
+
+func TestDataFileInitializeMapDataHandlesNilLogicalPartitionValue(t *testing.T) {
+	df := &dataFile{
+		PartitionData: map[string]any{
+			"dt": nil,
+		},
+		fieldNameToID: map[string]int{
+			"dt": 1000,
+		},
+		fieldIDToLogicalType: map[int]string{
+			1000: atype.Date,
+		},
+	}
+
+	if got := df.ValueCounts(); len(got) != 0 {
+		t.Fatalf("ValueCounts() = %v, want empty map", got)
+	}
+
+	if got := df.Partition()[1000]; got != nil {
+		t.Fatalf("Partition()[1000] = %v, want nil", got)
+	}
 }
 
 func TestManifests(t *testing.T) {
