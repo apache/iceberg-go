@@ -18,6 +18,7 @@
 package table
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -25,6 +26,7 @@ import (
 	"fmt"
 	"iter"
 	"log/slog"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -384,7 +386,7 @@ func (c convertToIceberg) Primitive(dt arrow.DataType) (result iceberg.NestedFie
 
 			iceType, err := geoArrowMetadataToIcebergType(wkb.Metadata())
 			if err != nil {
-				panic(fmt.Errorf("%w: %v", iceberg.ErrInvalidSchema, err))
+				panic(fmt.Errorf("%w: converting geoarrow metadata: %w", iceberg.ErrInvalidSchema, err))
 			}
 			result.Type = iceType
 		default:
@@ -681,7 +683,9 @@ func (c convertToArrow) VisitGeometry(g iceberg.GeometryType) arrow.Field {
 
 func (c convertToArrow) VisitGeography(g iceberg.GeographyType) arrow.Field {
 	meta := icebergCRSToGeoArrowMetadata(g.CRS())
-	meta.Edges = geoarrow.EdgeInterpolation(g.Algorithm()) // Always add an edge to differentiate between Geography and Geometry arrow fields.
+	// Always add an edge to differentiate between Geography and Geometry arrow fields.
+	// Note that the edge convention is a best-effort hint and planar geography from other clients won't round-trip through Arrow alone.
+	meta.Edges = geoarrow.EdgeInterpolation(g.Algorithm())
 
 	if c.useLargeTypes {
 		return arrow.Field{Type: geoarrow.NewWKBType(geoarrow.WKBWithLargeBinaryStorage(), geoarrow.WKBWithMetadata(meta))}
@@ -1843,29 +1847,98 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 	}
 }
 
+func checkCRSString(rawCrs json.RawMessage) bool {
+	b := bytes.TrimSpace(rawCrs)
+
+	return len(b) > 0 && b[0] == '"'
+}
+
+func checkCRSSJSON(rawCrs json.RawMessage) bool {
+	b := bytes.TrimSpace(rawCrs)
+
+	return len(b) > 0 && b[0] == '{'
+}
+
 func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
-	if len(meta.CRS) == 0 && meta.CRSType == "" {
+	if len(meta.CRS) == 0 {
 		return "srid:0", nil
 	}
 
-	var crs string
-	if len(meta.CRS) > 0 {
-		if err := json.Unmarshal(meta.CRS, &crs); err != nil {
-			return "", fmt.Errorf("invalid geoarrow CRS metadata: %w", err)
+	switch {
+	case checkCRSString(meta.CRS):
+		var crs string
+		if len(meta.CRS) > 0 {
+			if err := json.Unmarshal(meta.CRS, &crs); err != nil {
+				return "", fmt.Errorf("invalid geoarrow CRS metadata: %w", err)
+			}
 		}
-	}
 
-	if crs == "OGC:CRS84" || crs == "EPSG:4326" {
-		return "OGC:CRS84", nil
-	}
+		if strings.EqualFold(crs, "OGC:CRS84") || strings.EqualFold(crs, "EPSG:4326") {
+			return "OGC:CRS84", nil
+		}
 
-	switch meta.CRSType {
-	case geoarrow.CRSTypeSRID:
-		return "srid:" + crs, nil
-	case geoarrow.CRSTypePROJJSON:
-		return "", errors.New("geoarrow CRS type projjson not supported yet")
+		switch meta.CRSType {
+		case geoarrow.CRSTypeSRID:
+			return "srid:" + crs, nil
+		case geoarrow.CRSTypePROJJSON:
+			return "", errors.New("JSON object written to crs as string")
+		case geoarrow.CRSTypeWKT22019:
+			return "", errors.New("CRS type wkt2:2019 not supported")
+		default:
+			if len(crs) <= 32 {
+				return crs, nil
+			}
+
+			return "", errors.New("crs length too long")
+		}
+	case checkCRSSJSON(meta.CRS):
+		var crs map[string]json.RawMessage
+		if len(meta.CRS) > 0 {
+			if err := json.Unmarshal(meta.CRS, &crs); err != nil {
+				return "", fmt.Errorf("invalid geoarrow CRS metadata: %w", err)
+			}
+		}
+
+		idRaw, ok := crs["id"]
+		if !ok || len(idRaw) == 0 {
+			return "", errors.New("unsupported CRS")
+		}
+
+		var id map[string]json.RawMessage
+		if err := json.Unmarshal(idRaw, &id); err != nil {
+			return "", errors.New("unsupported CRS")
+		}
+
+		var authority string
+		if err := json.Unmarshal(id["authority"], &authority); err != nil || authority == "" {
+			return "", errors.New("unsupported CRS")
+		}
+
+		codeRaw := id["code"]
+		if len(codeRaw) == 0 {
+			return "", errors.New("unsupported CRS")
+		}
+
+		var code string
+		if err := json.Unmarshal(codeRaw, &code); err != nil {
+			var codeNum json.Number
+			if err := json.Unmarshal(codeRaw, &codeNum); err != nil || codeNum.String() == "" {
+				return "", errors.New("unsupported CRS")
+			}
+			code = codeNum.String()
+		}
+		if code == "" {
+			return "", errors.New("unsupported CRS")
+		}
+
+		authorityCode := authority + ":" + code
+		if strings.EqualFold(authorityCode, "OGC:CRS84") || strings.EqualFold(authorityCode, "EPSG:4326") {
+			return "OGC:CRS84", nil
+		}
+
+		return authorityCode, nil
 	default:
-		return crs, nil
+		return "", errors.New("unsupported CRS: CRS must either be omitted, a string, or a JSON object")
 	}
 }
 
@@ -1885,15 +1958,18 @@ func geoArrowMetadataToIcebergType(meta geoarrow.Metadata) (iceberg.Type, error)
 	}
 }
 
+var authorityCodeCRS = regexp.MustCompile(`^[^:]+:.+$`)
+
 func icebergCRSToGeoArrowMetadata(crs string) geoarrow.Metadata {
-	if strings.HasPrefix(strings.ToLower(crs), "srid:") {
-		id := crs[len("srid:"):]
+	lowerCRS := strings.ToLower(crs)
+	if strings.HasPrefix(lowerCRS, "srid:") {
+		id := lowerCRS[len("srid:"):]
 
 		if id == "0" {
 			return geoarrow.NewMetadata() // srid:0 maps to omitted GeoArrow CRS
 		}
 
-		raw, _ := json.Marshal(id)
+		raw, _ := json.Marshal(id) //nolint:errcheck // Marshalling a string can't fail
 
 		return geoarrow.Metadata{
 			CRS:     raw,
@@ -1901,13 +1977,23 @@ func icebergCRSToGeoArrowMetadata(crs string) geoarrow.Metadata {
 		}
 	}
 
-	if strings.HasPrefix(strings.ToLower(crs), "projjson:") {
+	if strings.HasPrefix(lowerCRS, "projjson:") {
 		panic(fmt.Errorf("%w: projjson CRS not supported yet", iceberg.ErrInvalidSchema))
 	}
 
-	raw, _ := json.Marshal(crs)
+	var raw []byte
 
-	return geoarrow.Metadata{
-		CRS: raw,
+	if strings.EqualFold(lowerCRS, "EPSG:4326") {
+		// collapse EPSG:4326 to OGC:CRS84
+		raw, _ = json.Marshal("OGC:CRS84") //nolint:errcheck // Marshalling a string can't fail
+	} else {
+		raw, _ = json.Marshal(crs) //nolint:errcheck // Marshalling a string can't fail
 	}
+
+	meta := geoarrow.Metadata{CRS: raw}
+	if authorityCodeCRS.MatchString(crs) {
+		meta.CRSType = geoarrow.CRSTypeAuthorityCode
+	}
+
+	return meta
 }
