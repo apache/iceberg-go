@@ -304,13 +304,20 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_
 
 type set[T comparable] map[T]struct{}
 
+// combinePositionalDeletes builds the surviving-row index list for a single record
+// batch. The deletes set holds file-relative (global) positions, and [start, end) is
+// the global position span the batch covers, so the indices are rebased to batch-local
+// coordinates (i-start): they index into the batch handed to compute.Take, not into the
+// whole file. Without the rebase, the second and later batches of a file would pass
+// indices >= the batch length and compute.Take would fail with "index error: N out of
+// bounds".
 func combinePositionalDeletes(mem memory.Allocator, deletes set[int64], start, end int64) arrow.Array {
 	bldr := array.NewInt64Builder(mem)
 	defer bldr.Release()
 
 	for i := start; i < end; i++ {
 		if _, ok := deletes[i]; !ok {
-			bldr.Append(i)
+			bldr.Append(i - start)
 		}
 	}
 
