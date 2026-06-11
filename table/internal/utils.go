@@ -338,8 +338,15 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 	}
 
 	// Position deletes are ordered by (file_path, pos), never by a table sort
-	// order; the spec requires their sort order id to stay null.
-	if opts.SortOrderID != unsortedSortOrderID && opts.Content != iceberg.EntryContentPosDeletes {
+	// order; the spec requires their sort order id to stay null. This is an
+	// internal invariant, not user-input validation: no exported API accepts
+	// a WriteTask or reaches this package, and the pos-delete producers never
+	// set a claim — a non-zero value here is a library bug.
+	if opts.Content == iceberg.EntryContentPosDeletes && opts.SortOrderID != unsortedSortOrderID {
+		panic(fmt.Errorf("position delete file %q claims sort order id %d; the spec requires a null sort order id for position deletes",
+			opts.Path, opts.SortOrderID))
+	}
+	if opts.SortOrderID != unsortedSortOrderID {
 		bldr.SortOrderID(opts.SortOrderID)
 	}
 

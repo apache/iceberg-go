@@ -40,7 +40,11 @@ type WriteTask struct {
 	Batches     []arrow.RecordBatch
 	// SortOrderID, when non-zero, is recorded on the resulting file as its
 	// sort order. Set it only when Batches are fully sorted by that order —
-	// the writer does not verify or enforce the claim.
+	// the writer does not verify or enforce the claim. Only the bin-packed
+	// task path (defaultDataFileWriter.writeFile) honors it; the rolling
+	// data writer builds its own file info and ignores it, and position
+	// delete content must leave it zero (the spec requires a null sort
+	// order id there).
 	SortOrderID int
 }
 

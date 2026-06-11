@@ -20,6 +20,9 @@ package table
 import (
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -164,4 +167,70 @@ func TestGenerateDataFileNameUniqueness(t *testing.T) {
 		assert.False(t, seen[f], "filename %s should be unique", f)
 		seen[f] = true
 	}
+}
+
+// TestWriteFileHonorsExplicitSortOrderID covers the one path where
+// WriteTask.SortOrderID is load-bearing: defaultDataFileWriter.writeFile must
+// record a caller's non-zero claim on the resulting DataFile, and must record
+// nothing when the task makes no claim.
+func TestWriteFileHonorsExplicitSortOrderID(t *testing.T) {
+	t.Parallel()
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+
+	metadataBuilder, err := NewMetadataBuilder(2)
+	require.NoError(t, err)
+	require.NoError(t, metadataBuilder.AddSchema(schema))
+	require.NoError(t, metadataBuilder.SetCurrentSchemaID(0))
+	unpartitioned := *iceberg.UnpartitionedSpec
+	require.NoError(t, metadataBuilder.AddPartitionSpec(&unpartitioned, true))
+	require.NoError(t, metadataBuilder.SetDefaultSpecID(0))
+	sortOrder, err := NewSortOrder(1, []SortField{{
+		SourceIDs: []int{1},
+		Direction: SortASC,
+		Transform: iceberg.IdentityTransform{},
+		NullOrder: NullsFirst,
+	}})
+	require.NoError(t, err)
+	require.NoError(t, metadataBuilder.AddSortOrder(&sortOrder))
+	require.NoError(t, metadataBuilder.SetDefaultSortOrderID(-1))
+
+	built, err := metadataBuilder.Build()
+	require.NoError(t, err)
+	claimedID := built.DefaultSortOrder()
+	require.NotZero(t, claimedID, "sanity: sort order id should be non-zero")
+
+	arrowSc, err := SchemaToArrowSchema(schema, nil, true, false)
+	require.NoError(t, err)
+
+	writer, err := newDataFileWriter(t.TempDir(), &io.LocalFS{}, metadataBuilder, iceberg.Properties{})
+	require.NoError(t, err)
+
+	writeTask := func(id, sortOrderID int) WriteTask {
+		rb := mustLoadRecordBatchFromJSON(arrowSc, `[{"id": 2}, {"id": 1}]`)
+
+		return WriteTask{
+			Uuid:        uuid.New(),
+			ID:          id,
+			FileCount:   1,
+			Schema:      schema,
+			Batches:     []arrow.RecordBatch{rb},
+			SortOrderID: sortOrderID,
+		}
+	}
+
+	t.Run("non-zero claim lands on the data file", func(t *testing.T) {
+		df, err := writer.writeFile(t.Context(), nil, writeTask(0, claimedID))
+		require.NoError(t, err)
+		require.NotNil(t, df.SortOrderID(), "explicit claim must be recorded on the DataFile")
+		assert.Equal(t, claimedID, *df.SortOrderID())
+	})
+
+	t.Run("zero claim leaves the field absent", func(t *testing.T) {
+		df, err := writer.writeFile(t.Context(), nil, writeTask(1, UnsortedSortOrderID))
+		require.NoError(t, err)
+		assert.Nil(t, df.SortOrderID())
+	})
 }
