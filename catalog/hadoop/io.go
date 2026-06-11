@@ -69,5 +69,8 @@ type RemoveAllIO interface {
 type MkdirAllIO interface {
 	icebergio.IO
 
+	// MkdirAll should not raise an error if the directory already exists,
+	// and should create any parent directories in the path if they
+	// do not already exist.
 	MkdirAll(path string) error
 }

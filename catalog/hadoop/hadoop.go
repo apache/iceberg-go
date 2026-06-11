@@ -363,11 +363,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 	}
 
 	metaDir := c.metadataDir(ident)
-	if err := c.validSubpaths(ident, false); err != nil {
-		return nil, err
-	}
-
-	if err := c.filesystem.MkdirAll(metaDir); err != nil {
+	if err := c.CheckedMkdirAll(ident, false); err != nil {
 		return nil, fmt.Errorf("hadoop catalog: failed to create metadata directory: %w", err)
 	}
 
@@ -493,10 +489,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 
 	// Step 7: Create metadata directory if needed (create-via-commit).
 	metaDir := c.metadataDir(ident)
-	if err := c.validSubpaths(ident, false); err != nil {
-		return nil, "", err
-	}
-	if err := c.filesystem.MkdirAll(metaDir); err != nil {
+	if err := c.CheckedMkdirAll(ident, false); err != nil {
 		return nil, "", fmt.Errorf("hadoop catalog: failed to create metadata directory: %w", err)
 	}
 
@@ -631,16 +624,20 @@ func (c *Catalog) CreateNamespace(_ context.Context, ns table.Identifier, props 
 		return errors.New("hadoop catalog: namespace properties are not supported")
 	}
 
-	path := c.namespaceToPath(ns)
-
 	// Raise an error if the namespace already exists
-	if err := c.validSubpaths(ns, true); err != nil {
-		return err
-	}
+	if err := c.CheckedMkdirAll(ns, true); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("%w: %s", catalog.ErrNamespaceAlreadyExists, strings.Join(ns, "."))
+		}
 
-	if err := c.filesystem.MkdirAll(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%w: parent namespace does not exist for %s",
+				catalog.ErrNoSuchNamespace, strings.Join(ns, "."))
+		}
+
 		return fmt.Errorf("hadoop catalog: failed to create namespace: %w", err)
 	}
+
 	return nil
 }
 
@@ -776,28 +773,23 @@ func (c *Catalog) UpdateNamespaceProperties(_ context.Context, _ table.Identifie
 	return catalog.PropertiesUpdateSummary{}, errors.New("hadoop catalog: UpdateNamespaceProperties not yet implemented")
 }
 
-// Helper function for checking that all subpaths in a path exist and that the
-// final path does not already exist.
-// this means that all parent namespaces must already exist, and the target namespace
-// itself must not already exist; this should be used before calls like MkdirAll
-// which don't raise errors if the target already exists.
-func (c *Catalog) validSubpaths(ns table.Identifier, errorIfExists bool) error {
-	path := c.namespaceToPath(ns)
-	for pathIndex := range ns {
-		subPath := ns[:pathIndex]
+// CheckedMkdirAll is a helper function that checkes
+// all subdirectories of a given identifier path exist before creting the full path.
+// If errIfExists is true, it also checks that the full path does not already exist before creating it.
+func (c *Catalog) CheckedMkdirAll(id table.Identifier, errIfExists bool) error {
+	path := c.namespaceToPath(id)
+	for pathIndex := range id {
+		subPath := id[:pathIndex]
 		parentPath := c.namespaceToPath(subPath)
-		_, err := c.filesystem.Stat(parentPath)
-		if errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("%w: parent namespace does not exist for %s", catalog.ErrNoSuchNamespace, strings.Join(subPath, "."))
-		}
-		if err != nil {
-			return fmt.Errorf("hadoop catalog: failed to stat parent namespace: %w", err)
+		if _, err := c.filesystem.Stat(parentPath); err != nil {
+			return err
 		}
 	}
-	if errorIfExists {
+	if errIfExists {
 		if _, err := c.filesystem.Stat(path); err == nil {
-			return fmt.Errorf("%w: %s", catalog.ErrNamespaceAlreadyExists, strings.Join(ns, "."))
+			return err
 		}
 	}
-	return nil
+	return c.filesystem.MkdirAll(path)
+
 }
