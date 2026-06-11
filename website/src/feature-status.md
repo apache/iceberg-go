@@ -36,7 +36,7 @@ All V1 features are supported. V1 is the format-version baseline.
 | Sequence numbers | Supported |
 | Manifest entry status (added / existing / deleted) | Supported |
 | Positional deletes | Supported (read + write) |
-| Equality deletes | Read supported. Write supported via `Transaction.WriteEqualityDeletes`; full row-delta / merge-on-read flow tracked under [#829](https://github.com/apache/iceberg-go/issues/829) |
+| Equality deletes | Supported (read + write). Write via `Transaction.WriteEqualityDeletes`; row-level commits via `Transaction.NewRowDelta` |
 | Partition spec evolution | Supported |
 | Sort order enforcement on write | Supported (PR [#1157](https://github.com/apache/iceberg-go/pull/1157), closes [#833](https://github.com/apache/iceberg-go/issues/833)) |
 | `ReplaceDataFiles` using `OpReplace` | Pending ([#841](https://github.com/apache/iceberg-go/issues/841)) |
@@ -122,10 +122,10 @@ As long as the FileSystem is supported and the Catalog supports altering the tab
 |:---------------------|:---------:|
 | Append Stream        |     X     |
 | Append Data Files    |     X     |
-| Rewrite Files        |           |
+| Rewrite Files        |     X     |
 | Rewrite manifests    |           |
 | Overwrite Files      |     X     |
 | Copy-On-Write Delete |     X     |
 | Write Pos Delete     |     X     |
-| Write Eq Delete      |           |
-| Row Delta            |           |
+| Write Eq Delete      |     X     |
+| Row Delta            |     X     |
