@@ -209,6 +209,7 @@ func isTableDir(filesystem HadoopCatalogFS, path string) bool {
 			uuidMetadataPattern.MatchString(name) ||
 			name == "version-hint.text" {
 			found_metadata = true
+
 			return fs.SkipAll
 		}
 
@@ -578,6 +579,7 @@ func (c *Catalog) ListTables(_ context.Context, ns table.Identifier) iter.Seq2[t
 		})
 		if err != nil {
 			yield(nil, fmt.Errorf("hadoop catalog: failed to read namespace directory: %w", err))
+
 			return
 		}
 	}
@@ -662,7 +664,6 @@ func (c *Catalog) DropNamespace(_ context.Context, ns table.Identifier) error {
 
 		return fs.SkipAll
 	})
-
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(ns, "."))
@@ -790,6 +791,6 @@ func (c *Catalog) CheckedMkdirAll(id table.Identifier, errIfExists bool) error {
 			return err
 		}
 	}
-	return c.filesystem.MkdirAll(path)
 
+	return c.filesystem.MkdirAll(path)
 }
