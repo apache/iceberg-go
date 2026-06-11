@@ -57,7 +57,6 @@ type writerFactory struct {
 	format           tblutils.FileFormat
 	content          iceberg.ManifestEntryContent
 	equalityFieldIDs []int
-	sortOrderID      int
 	sortKeys         []compute.SortKey
 
 	writers               sync.Map
@@ -165,7 +164,6 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		format:         format,
 		nextCount:      nextCount,
 		stopCount:      stopCount,
-		sortOrderID:    meta.defaultSortOrderID,
 	}
 	for _, apply := range opts {
 		apply(f)
@@ -178,8 +176,8 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		return nil, err
 	}
 
-	if f.content == iceberg.EntryContentData && f.sortOrderID != UnsortedSortOrderID {
-		sortOrder, err := meta.GetSortOrderByID(f.sortOrderID)
+	if f.content == iceberg.EntryContentData && meta.defaultSortOrderID != UnsortedSortOrderID {
+		sortOrder, err := meta.GetSortOrderByID(meta.defaultSortOrderID)
 		if err != nil {
 			stopCount()
 
@@ -221,6 +219,9 @@ func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string
 		filePath = w.locProvider.NewDataLocation(fileName)
 	}
 
+	// SortOrderID is intentionally left unset: batches are only sorted
+	// individually (see resolveSortKeys), which does not satisfy the spec's
+	// per-file sort_order_id contract.
 	return w.format.NewFileWriter(ctx, w.fs, partitionValues, tblutils.WriteFileInfo{
 		FileSchema:       w.fileSchema,
 		FileName:         filePath,
@@ -229,7 +230,6 @@ func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string
 		Spec:             w.currentSpec,
 		Content:          w.content,
 		EqualityFieldIDs: w.equalityFieldIDs,
-		SortOrderID:      w.sortOrderID,
 	}, w.arrowSchema)
 }
 

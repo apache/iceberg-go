@@ -38,6 +38,9 @@ type WriteTask struct {
 	FileCount   int // FileCount is a sequential counter for files written by this task.
 	Schema      *iceberg.Schema
 	Batches     []arrow.RecordBatch
+	// SortOrderID, when non-zero, is recorded on the resulting file as its
+	// sort order. Set it only when Batches are fully sorted by that order —
+	// the writer does not verify or enforce the claim.
 	SortOrderID int
 }
 

@@ -243,11 +243,11 @@ func (s *RollingDataWriterTestSuite) TestBytesWrittenNoDoubleCountAcrossRowGroup
 		"DataFile.FileSizeBytes should match actual file size on disk")
 }
 
-// TestWriterFactoryPropagatesSortOrderID covers the standard data write path:
-// the rolling data writer must stamp each emitted DataFile with the table's
-// default sort order id, mirroring how the partitioned fanout writer uses
-// writerFactory under the hood.
-func (s *RollingDataWriterTestSuite) TestWriterFactoryPropagatesSortOrderID() {
+// TestWriterFactoryDoesNotStampSortOrderID covers the standard data write
+// path: the rolling data writer sorts only per batch, so the emitted DataFile
+// must NOT claim the table's default sort order id — the spec's per-file
+// sort_order_id asserts the whole file is sorted by that order.
+func (s *RollingDataWriterTestSuite) TestWriterFactoryDoesNotStampSortOrderID() {
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
 		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
@@ -276,8 +276,8 @@ func (s *RollingDataWriterTestSuite) TestWriterFactoryPropagatesSortOrderID() {
 	s.Require().NoError(metaBuilder.SetDefaultSortOrderID(-1))
 	builtMeta, err := metaBuilder.Build()
 	s.Require().NoError(err)
-	expectedSortOrderID := builtMeta.DefaultSortOrder()
-	s.Require().NotEqual(UnsortedSortOrderID, expectedSortOrderID, "sanity: sort order id should be non-zero")
+	s.Require().NotEqual(UnsortedSortOrderID, builtMeta.DefaultSortOrder(),
+		"sanity: sort order id should be non-zero")
 
 	writeUUID := uuid.New()
 	args := recordWritingArgs{
@@ -313,8 +313,8 @@ func (s *RollingDataWriterTestSuite) TestWriterFactoryPropagatesSortOrderID() {
 	}
 
 	s.Require().Len(dataFiles, 1)
-	s.Require().NotNil(dataFiles[0].SortOrderID(), "SortOrderID must be set on the emitted DataFile")
-	s.Equal(expectedSortOrderID, *dataFiles[0].SortOrderID())
+	s.Nil(dataFiles[0].SortOrderID(),
+		"emitted DataFile must not claim a sort order id: batches are only sorted individually")
 }
 
 func (s *RollingDataWriterTestSuite) TestAbortWithZeroRowsWritten() {

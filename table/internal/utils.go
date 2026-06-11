@@ -248,8 +248,15 @@ type DataFileOpts struct {
 	Content         iceberg.ManifestEntryContent
 	FileSize        int64
 	PartitionValues map[int]any
-	SortOrderID     int
+	// SortOrderID is a per-file claim that the file's rows are fully sorted
+	// by that order. Zero (the unsorted order) makes no claim and leaves the
+	// manifest field absent.
+	SortOrderID int
 }
+
+// unsortedSortOrderID mirrors table.UnsortedSortOrderID (order id 0 is
+// reserved for the unsorted order by the spec).
+const unsortedSortOrderID = 0
 
 func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 	var fieldIDToPartitionData map[int]any
@@ -330,7 +337,11 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 		bldr.EqualityFieldIDs(d.EqualityFieldIDs)
 	}
 
-	bldr.SortOrderID(opts.SortOrderID)
+	// Position deletes are ordered by (file_path, pos), never by a table sort
+	// order; the spec requires their sort order id to stay null.
+	if opts.SortOrderID != unsortedSortOrderID && opts.Content != iceberg.EntryContentPosDeletes {
+		bldr.SortOrderID(opts.SortOrderID)
+	}
 
 	return bldr.Build()
 }
