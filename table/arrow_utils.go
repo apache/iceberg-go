@@ -1880,8 +1880,6 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 		switch meta.CRSType {
 		case geoarrow.CRSTypeSRID:
 			return "srid:" + crs, nil
-		case geoarrow.CRSTypePROJJSON:
-			return "", errors.New("JSON object written to crs as string")
 		case geoarrow.CRSTypeWKT22019:
 			return "", errors.New("CRS type wkt2:2019 not supported")
 		default:
@@ -1958,7 +1956,7 @@ func geoArrowMetadataToIcebergType(meta geoarrow.Metadata) (iceberg.Type, error)
 	}
 }
 
-var authorityCodeCRS = regexp.MustCompile(`^[^:]+:.+$`)
+var authorityCodeCRS = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*:[A-Za-z0-9_.-]+$`)
 
 func icebergCRSToGeoArrowMetadata(crs string) geoarrow.Metadata {
 	lowerCRS := strings.ToLower(crs)

@@ -512,191 +512,196 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 	require.NoError(t, err)
 
 	typeCases := []struct {
-		name         string
-		ice          iceberg.Type
-		wantMetaJSON string
+		name             string
+		ice              iceberg.Type
+		geoarrowMetaJSON string
 	}{
 		// Geometry with default CRS (defaults to OGC:CRS84 per Parquet spec)
 		{
-			name:         "geometry_default_crs",
-			ice:          iceberg.GeometryType{},
-			wantMetaJSON: `{"crs":"OGC:CRS84"}`,
+			name:             "geometry_default_crs",
+			ice:              iceberg.GeometryType{},
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84"}`,
 		},
 		// Geometry with srid:0 should result in an unset (omitted) CRS
 		{
-			name:         "geometry_srid_0",
-			ice:          geomSRID0,
-			wantMetaJSON: `{}`,
+			name:             "geometry_srid_0",
+			ice:              geomSRID0,
+			geoarrowMetaJSON: `{}`,
 		},
 		// Geometry with custom CRSes (authority:code and partial projjson)
 		{
-			name:         "geometry_epsg_4267",
-			ice:          geomEPSG4267,
-			wantMetaJSON: `{"crs":"EPSG:4267"}`,
+			name:             "geometry_epsg_4267",
+			ice:              geomEPSG4267,
+			geoarrowMetaJSON: `{"crs":"EPSG:4267"}`,
 		},
 		// Geography with default CRS (default OGC:CRS84, spherical edges)
 		{
-			name:         "geography_default_crs",
-			ice:          iceberg.GeographyType{},
-			wantMetaJSON: `{"crs":"OGC:CRS84","edges":"spherical"}`,
+			name:             "geography_default_crs",
+			ice:              iceberg.GeographyType{},
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"spherical"}`,
 		},
 		// Geography with explicit edges
 		{
-			name:         "geography_explicit_spherical",
-			ice:          geogSpherical,
-			wantMetaJSON: `{"crs":"OGC:CRS84","edges":"spherical"}`,
+			name:             "geography_explicit_spherical",
+			ice:              geogSpherical,
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"spherical"}`,
 		},
 		{
-			name:         "geography_karney",
-			ice:          geogKarneyDefaultCRS,
-			wantMetaJSON: `{"crs":"OGC:CRS84","edges":"karney"}`,
+			name:             "geography_karney",
+			ice:              geogKarneyDefaultCRS,
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"karney"}`,
 		},
 		{
-			name:         "geography_vincenty",
-			ice:          geogVincenty,
-			wantMetaJSON: `{"crs":"OGC:CRS84","edges":"vincenty"}`,
+			name:             "geography_vincenty",
+			ice:              geogVincenty,
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"vincenty"}`,
 		},
 		{
-			name:         "geography_andoyer",
-			ice:          geogAndoyer,
-			wantMetaJSON: `{"crs":"OGC:CRS84","edges":"andoyer"}`,
+			name:             "geography_andoyer",
+			ice:              geogAndoyer,
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"andoyer"}`,
 		},
 		{
-			name:         "geography_thomas",
-			ice:          geogThomas,
-			wantMetaJSON: `{"crs":"OGC:CRS84","edges":"thomas"}`,
+			name:             "geography_thomas",
+			ice:              geogThomas,
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"thomas"}`,
 		},
 		// Geography with srid:0 should result in an unset (omitted) CRS and spherical edges
 		{
-			name:         "geography_srid_0",
-			ice:          geogSRID0,
-			wantMetaJSON: `{"edges":"spherical"}`,
+			name:             "geography_srid_0",
+			ice:              geogSRID0,
+			geoarrowMetaJSON: `{"edges":"spherical"}`,
 		},
 		// Geography with custom CRSes (authority:code and partial projjson)
 		{
-			name:         "geography_epsg_4267",
-			ice:          geogEPSG4267,
-			wantMetaJSON: `{"crs":"EPSG:4267","edges":"spherical"}`,
+			name:             "geography_epsg_4267",
+			ice:              geogEPSG4267,
+			geoarrowMetaJSON: `{"crs":"EPSG:4267","edges":"spherical"}`,
 		},
 	}
 
 	// The following tests focus on edge cases and pinning specific behavior for read case
 	readOnlyCases := []struct {
-		name         string
-		ice          iceberg.Type
-		wantMetaJSON string
+		name             string
+		ice              iceberg.Type
+		geoarrowMetaJSON string
 	}{
 		{
-			name:         "geometry_srid_0_with_crs_type",
-			ice:          geomSRID0,
-			wantMetaJSON: `{"crs_type":"authority_code"}`,
+			name:             "geometry_srid_0_with_crs_type",
+			ice:              geomSRID0,
+			geoarrowMetaJSON: `{"crs_type":"authority_code"}`,
 		},
 		{
-			name:         "case_insensitive_default_geometry",
-			ice:          defaultGeometry,
-			wantMetaJSON: `{"crs":"OgC:cRs84"}`,
+			name:             "case_insensitive_default_geometry",
+			ice:              defaultGeometry,
+			geoarrowMetaJSON: `{"crs":"OgC:cRs84"}`,
 		},
 		{
-			name:         "case_insensitive_default_geometry_epsg_4326",
-			ice:          defaultGeometry,
-			wantMetaJSON: `{"crs":"EpSg:4326"}`,
+			name:             "case_insensitive_default_geometry_epsg_4326",
+			ice:              defaultGeometry,
+			geoarrowMetaJSON: `{"crs":"EpSg:4326"}`,
 		},
 		{
-			name:         "geometry_epsg_4326",
-			ice:          defaultGeometry,
-			wantMetaJSON: `{"crs":"epsg:4326"}`,
+			name:             "geometry_epsg_4326",
+			ice:              defaultGeometry,
+			geoarrowMetaJSON: `{"crs":"epsg:4326"}`,
+		},
+		{
+			name:             "geometry_epsg_4326_incorrect_type",
+			ice:              defaultGeometry,
+			geoarrowMetaJSON: `{"crs":"epsg:4326", "crs_type":"projjson"}`,
 		},
 
 		// Translated from arrow-rs geo logical type read tests (https://github.com/apache/arrow-rs/pull/10065)
 		// Geometry with no CRS should be GEOMETRY(srid:0)
 		{
-			name:         "geometry_no_crs",
-			ice:          geomSRID0,
-			wantMetaJSON: `{}`,
+			name:             "geometry_no_crs",
+			ice:              geomSRID0,
+			geoarrowMetaJSON: `{}`,
 		},
 		// Geometry with string CRS
 		{
-			name:         "geometry_epsg_4267_from_crs",
-			ice:          geomEPSG4267,
-			wantMetaJSON: `{"crs":"EPSG:4267"}`,
+			name:             "geometry_epsg_4267_from_crs",
+			ice:              geomEPSG4267,
+			geoarrowMetaJSON: `{"crs":"EPSG:4267"}`,
 		},
 		// Geometry with PROJJSON CRS
 		{
-			name:         "geometry_projjson_epsg_3857",
-			ice:          geomPROJJSON3857,
-			wantMetaJSON: `{"crs":{"id":{"authority":"EPSG","code":3857}}}`,
+			name:             "geometry_projjson_epsg_3857",
+			ice:              geomPROJJSON3857,
+			geoarrowMetaJSON: `{"crs":{"id":{"authority":"EPSG","code":3857}}}`,
 		},
 		// Geometry with lon/lat CRSes (canonically removed because lon/lat is the
-		// default Parquet CRS)
+		// default Iceberg CRS)
 		{
-			name:         "geometry_ogc_crs84_canonical",
-			ice:          iceberg.GeometryType{},
-			wantMetaJSON: `{"crs":"OGC:CRS84"}`,
+			name:             "geometry_ogc_crs84_canonical",
+			ice:              iceberg.GeometryType{},
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84"}`,
 		},
 		{
-			name:         "geometry_epsg_4326_canonical",
-			ice:          iceberg.GeometryType{},
-			wantMetaJSON: `{"crs":"EPSG:4326"}`,
+			name:             "geometry_epsg_4326_canonical",
+			ice:              iceberg.GeometryType{},
+			geoarrowMetaJSON: `{"crs":"EPSG:4326"}`,
 		},
 		{
-			name:         "geometry_projjson_epsg_4326_canonical",
-			ice:          iceberg.GeometryType{},
-			wantMetaJSON: `{"crs":{"id":{"authority":"EPSG","code":4326}}}`,
+			name:             "geometry_projjson_epsg_4326_canonical",
+			ice:              iceberg.GeometryType{},
+			geoarrowMetaJSON: `{"crs":{"id":{"authority":"EPSG","code":4326}}}`,
 		},
 		{
-			name:         "geometry_projjson_epsg_4326_string_code_canonical",
-			ice:          iceberg.GeometryType{},
-			wantMetaJSON: `{"crs":{"id":{"authority":"EPSG","code":"4326"}}}`,
+			name:             "geometry_projjson_epsg_4326_string_code_canonical",
+			ice:              iceberg.GeometryType{},
+			geoarrowMetaJSON: `{"crs":{"id":{"authority":"EPSG","code":"4326"}}}`,
 		},
 		{
-			name:         "geometry_projjson_ogc_crs84_canonical",
-			ice:          iceberg.GeometryType{},
-			wantMetaJSON: `{"crs":{"id":{"authority":"OGC","code":"CRS84"}}}`,
+			name:             "geometry_projjson_ogc_crs84_canonical",
+			ice:              iceberg.GeometryType{},
+			geoarrowMetaJSON: `{"crs":{"id":{"authority":"OGC","code":"CRS84"}}}`,
 		},
 		// Geography with no CRS, spherical edges
 		{
-			name:         "geography_no_crs_spherical",
-			ice:          geogSRID0,
-			wantMetaJSON: `{"edges":"spherical"}`,
+			name:             "geography_no_crs_spherical",
+			ice:              geogSRID0,
+			geoarrowMetaJSON: `{"edges":"spherical"}`,
 		},
 		// Geography with OGC:CRS84 and spherical edges
 		{
-			name:         "geography_ogc_crs84_spherical_canonical",
-			ice:          iceberg.GeographyType{},
-			wantMetaJSON: `{"crs":"OGC:CRS84","edges":"spherical"}`,
+			name:             "geography_ogc_crs84_spherical_canonical",
+			ice:              iceberg.GeographyType{},
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"spherical"}`,
 		},
 		// Geography with different edge algorithms
 		{
-			name:         "geography_ogc_crs84_karney",
-			ice:          geogKarneyDefaultCRS,
-			wantMetaJSON: `{"crs":"OGC:CRS84","edges":"karney"}`,
+			name:             "geography_ogc_crs84_karney",
+			ice:              geogKarneyDefaultCRS,
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"karney"}`,
 		},
 		{
-			name:         "geography_ogc_crs84_vincenty",
-			ice:          geogVincenty,
-			wantMetaJSON: `{"crs":"OGC:CRS84","edges":"vincenty"}`,
+			name:             "geography_ogc_crs84_vincenty",
+			ice:              geogVincenty,
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"vincenty"}`,
 		},
 		{
-			name:         "geography_ogc_crs84_andoyer",
-			ice:          geogAndoyer,
-			wantMetaJSON: `{"crs":"OGC:CRS84","edges":"andoyer"}`,
+			name:             "geography_ogc_crs84_andoyer",
+			ice:              geogAndoyer,
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"andoyer"}`,
 		},
 		{
-			name:         "geography_ogc_crs84_thomas",
-			ice:          geogThomas,
-			wantMetaJSON: `{"crs":"OGC:CRS84","edges":"thomas"}`,
+			name:             "geography_ogc_crs84_thomas",
+			ice:              geogThomas,
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"thomas"}`,
 		},
 		// Geography with custom CRS and edges
 		{
-			name:         "geography_epsg_4267_karney",
-			ice:          geogEPSG4267Karney,
-			wantMetaJSON: `{"crs":"EPSG:4267","edges":"karney"}`,
+			name:             "geography_epsg_4267_karney",
+			ice:              geogEPSG4267Karney,
+			geoarrowMetaJSON: `{"crs":"EPSG:4267","edges":"karney"}`,
 		},
 		// Geography with PROJJSON CRS
 		{
-			name:         "geography_projjson_epsg_4267_spherical",
-			ice:          geogPROJJSON4267,
-			wantMetaJSON: `{"crs":{"id":{"authority":"EPSG","code":4267}},"edges":"spherical"}`,
+			name:             "geography_projjson_epsg_4267_spherical",
+			ice:              geogPROJJSON4267,
+			geoarrowMetaJSON: `{"crs":{"id":{"authority":"EPSG","code":4267}},"edges":"spherical"}`,
 		},
 	}
 
@@ -704,7 +709,7 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 		t.Run("iceberg_to_arrow/"+tt.name, func(t *testing.T) {
 			result, err := table.TypeToArrowType(tt.ice, true, false)
 			require.NoError(t, err)
-			assertGeoArrowWKBMetadataJSON(t, result, arrow.BinaryTypes.Binary, tt.wantMetaJSON)
+			assertGeoArrowWKBMetadataJSON(t, result, arrow.BinaryTypes.Binary, tt.geoarrowMetaJSON)
 		})
 	}
 
@@ -721,7 +726,7 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 
 	for _, tt := range append(typeCases, readOnlyCases...) {
 		t.Run("arrow_to_iceberg/"+tt.name, func(t *testing.T) {
-			arrowType, err := geoarrow.NewWKBType().Deserialize(arrow.BinaryTypes.Binary, tt.wantMetaJSON)
+			arrowType, err := geoarrow.NewWKBType().Deserialize(arrow.BinaryTypes.Binary, tt.geoarrowMetaJSON)
 			require.NoError(t, err)
 
 			iceType, err := table.ArrowTypeToIceberg(arrowType, false)
