@@ -259,7 +259,7 @@ func TestDVWritePathCancelledContext(t *testing.T) {
 		yield(nil, ctx.Err())
 	}
 
-	seq := positionDeleteRecordsToDataFiles(ctx, "mem://test", mb, nil,
+	seq := positionDeleteRecordsToDataFiles(ctx, "mem://test", mb, unpartitionedContexts(),
 		recordWritingArgs{
 			sc:  PositionalDeleteArrowSchema,
 			itr: itr,
