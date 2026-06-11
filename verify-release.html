@@ -3,8 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Page not found - Iceberg Golang</title>
-        <base href="/">
+        <title>Verify a release - Iceberg Golang</title>
 
 
         <!-- Custom HTML head -->
@@ -124,7 +123,7 @@
 
         <nav id="sidebar" class="sidebar" aria-label="Table of contents">
             <div class="sidebar-scrollbox">
-                <ol class="chapter"><li class="chapter-item expanded "><a href="introduction.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">User Guide</li><li class="chapter-item expanded "><a href="install.html">Install</a></li><li class="chapter-item expanded "><a href="getting-started.html">Getting Started</a></li><li class="chapter-item expanded "><a href="configuration.html">Configuration</a></li><li class="chapter-item expanded "><a href="cli.html">CLI</a></li><li class="chapter-item expanded "><a href="api.html">API</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="row-filter-syntax.html">Row Filter Syntax</a></li><li class="chapter-item expanded "><a href="expression-dsl.html">Expression DSL</a></li></ol></li><li class="chapter-item expanded "><a href="feature-status.html">Feature Status</a></li><li class="chapter-item expanded affix "><li class="part-title">Developer Guide</li><li class="chapter-item expanded "><a href="contributing.html">Contributing</a></li><li class="chapter-item expanded "><a href="community.html">Community</a></li><li class="chapter-item expanded "><a href="glossary.html">Glossary</a></li><li class="chapter-item expanded affix "><li class="part-title">Releases</li><li class="chapter-item expanded "><a href="releases.html">Releases</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="verify-release.html">Verify a release</a></li><li class="chapter-item expanded "><a href="how-to-release.html">How to release</a></li></ol></li><li class="chapter-item expanded "><li class="part-title">Ecosystem</li><li class="chapter-item expanded "><a href="ecosystem.html">Other Iceberg implementations</a></li></ol>
+                <ol class="chapter"><li class="chapter-item expanded "><a href="introduction.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">User Guide</li><li class="chapter-item expanded "><a href="install.html">Install</a></li><li class="chapter-item expanded "><a href="getting-started.html">Getting Started</a></li><li class="chapter-item expanded "><a href="configuration.html">Configuration</a></li><li class="chapter-item expanded "><a href="cli.html">CLI</a></li><li class="chapter-item expanded "><a href="api.html">API</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="row-filter-syntax.html">Row Filter Syntax</a></li><li class="chapter-item expanded "><a href="expression-dsl.html">Expression DSL</a></li></ol></li><li class="chapter-item expanded "><a href="feature-status.html">Feature Status</a></li><li class="chapter-item expanded affix "><li class="part-title">Developer Guide</li><li class="chapter-item expanded "><a href="contributing.html">Contributing</a></li><li class="chapter-item expanded "><a href="community.html">Community</a></li><li class="chapter-item expanded "><a href="glossary.html">Glossary</a></li><li class="chapter-item expanded affix "><li class="part-title">Releases</li><li class="chapter-item expanded "><a href="releases.html">Releases</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="verify-release.html" class="active">Verify a release</a></li><li class="chapter-item expanded "><a href="how-to-release.html">How to release</a></li></ol></li><li class="chapter-item expanded "><li class="part-title">Ecosystem</li><li class="chapter-item expanded "><a href="ecosystem.html">Other Iceberg implementations</a></li></ol>
             </div>
             <div id="sidebar-resize-handle" class="sidebar-resize-handle">
                 <div class="sidebar-resize-indicator"></div>
@@ -186,6 +185,9 @@
                         <a href="https://github.com/apache/iceberg-go" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
+                        <a href="https://github.com/apache/iceberg-go/edit/main/website/src/verify-release.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
 
                     </div>
                 </div>
@@ -212,14 +214,96 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="document-not-found-404"><a class="header" href="#document-not-found-404">Document not found (404)</a></h1>
-<p>This URL is invalid, sorry. Please use the navigation bar or search to continue.</p>
+                        <!--
+  ~ Licensed to the Apache Software Foundation (ASF) under one
+  ~ or more contributor license agreements.  See the NOTICE file
+  ~ distributed with this work for additional information
+  ~ regarding copyright ownership.  The ASF licenses this file
+  ~ to you under the Apache License, Version 2.0 (the
+  ~ "License"); you may not use this file except in compliance
+  ~ with the License.  You may obtain a copy of the License at
+  ~
+  ~   http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing,
+  ~ software distributed under the License is distributed on an
+  ~ "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+  ~ KIND, either express or implied.  See the License for the
+  ~ specific language governing permissions and limitations
+  ~ under the License.
+-->
+<h1 id="verify-a-release"><a class="header" href="#verify-a-release">Verify a release</a></h1>
+<p>When a release candidate is announced on <code>dev@iceberg.apache.org</code>, anyone (committer or not) can help by verifying the artifacts. Verification is required from at least three Apache Iceberg PMC members for the vote to pass.</p>
+<p>The repository ships a script that performs the full verification end-to-end: <code>dev/release/verify_rc.sh</code>.</p>
+<h2 id="what-an-rc-announcement-contains"><a class="header" href="#what-an-rc-announcement-contains">What an RC announcement contains</a></h2>
+<p>A <code>[VOTE] iceberg-go X.Y.Z RC&lt;N&gt;</code> thread on <code>dev@iceberg.apache.org</code> will reference:</p>
+<ul>
+<li>A signed source tarball under <code>https://dist.apache.org/repos/dist/dev/iceberg/apache-iceberg-go-${VERSION}-rc${RC}/</code> (<code>.tar.gz</code>, <code>.tar.gz.asc</code>, <code>.tar.gz.sha512</code>)</li>
+<li>The Apache Iceberg <code>KEYS</code> file at <code>https://downloads.apache.org/iceberg/KEYS</code></li>
+<li>A GitHub compare URL between the previous release tag and the new RC tag</li>
+</ul>
+<h2 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h2>
+<p>The script requires:</p>
+<ul>
+<li><code>curl</code></li>
+<li><code>gpg</code></li>
+<li><code>shasum</code> or <code>sha512sum</code></li>
+<li><code>tar</code></li>
+</ul>
+<p>You do not need Go installed - if Go is not on the system, the latest Go is downloaded automatically and used only for verification.</p>
+<h2 id="import-the-apache-iceberg-keys"><a class="header" href="#import-the-apache-iceberg-keys">Import the Apache Iceberg KEYS</a></h2>
+<pre><code class="language-sh">curl https://downloads.apache.org/iceberg/KEYS -o KEYS
+gpg --import KEYS
+</code></pre>
+<h2 id="run-the-verification-script"><a class="header" href="#run-the-verification-script">Run the verification script</a></h2>
+<p>The script takes the version and RC number as positional arguments:</p>
+<pre><code class="language-sh">dev/release/verify_rc.sh ${VERSION} ${RC}
+</code></pre>
+<p>For example, to verify <code>0.6.0</code> RC1:</p>
+<pre><code class="language-sh">dev/release/verify_rc.sh 0.6.0 1
+</code></pre>
+<p>If the verification succeeds, the script prints:</p>
+<pre><code>RC looks good!
+</code></pre>
+<h2 id="optional-environment-variables"><a class="header" href="#optional-environment-variables">Optional environment variables</a></h2>
+<p><code>verify_rc.sh</code> honors these environment variables (all optional):</p>
+<div class="table-wrapper"><table><thead><tr><th>Variable</th><th>Default</th><th>Effect</th></tr></thead><tbody>
+<tr><td><code>VERIFY_DEFAULT</code></td><td><code>1</code></td><td>Master switch propagated to <code>VERIFY_DOWNLOAD</code> and <code>VERIFY_SIGN</code> if they are unset.</td></tr>
+<tr><td><code>VERIFY_DOWNLOAD</code></td><td><code>${VERIFY_DEFAULT}</code></td><td>Re-download artifacts when <code>1</code>; reuse the local copy when <code>0</code>.</td></tr>
+<tr><td><code>VERIFY_SIGN</code></td><td><code>${VERIFY_DEFAULT}</code></td><td>Re-run signature and checksum verification when <code>1</code>.</td></tr>
+<tr><td><code>VERIFY_FORCE_USE_GO_BINARY</code></td><td><code>0</code></td><td>When <code>1</code>, ignore any system Go and use the script's auto-downloaded Go.</td></tr>
+<tr><td><code>GITHUB_TOKEN</code></td><td>unset</td><td>Optional - supplies authenticated requests when fetching the latest Go release, avoiding rate limits.</td></tr>
+</tbody></table>
+</div>
+<h2 id="manual-verification-fallback"><a class="header" href="#manual-verification-fallback">Manual verification fallback</a></h2>
+<p>If you would rather verify by hand, the underlying steps are:</p>
+<pre><code class="language-sh"># Download the artifacts
+curl -O https://dist.apache.org/repos/dist/dev/iceberg/apache-iceberg-go-${VERSION}-rc${RC}/apache-iceberg-go-${VERSION}.tar.gz
+curl -O https://dist.apache.org/repos/dist/dev/iceberg/apache-iceberg-go-${VERSION}-rc${RC}/apache-iceberg-go-${VERSION}.tar.gz.asc
+curl -O https://dist.apache.org/repos/dist/dev/iceberg/apache-iceberg-go-${VERSION}-rc${RC}/apache-iceberg-go-${VERSION}.tar.gz.sha512
+
+# Verify the signature
+gpg --verify apache-iceberg-go-${VERSION}.tar.gz.asc apache-iceberg-go-${VERSION}.tar.gz
+
+# Verify the checksum (or sha512sum -c on systems without shasum)
+shasum -a 512 --check apache-iceberg-go-${VERSION}.tar.gz.sha512
+
+# Inspect the contents
+tar xf apache-iceberg-go-${VERSION}.tar.gz
+</code></pre>
+<p>You should reply to the <code>[VOTE]</code> thread with <code>+1</code>, <code>+0</code>, or <code>-1</code> and a one-line description of what you verified (for example, &quot;verified signatures, checksums, and <code>verify_rc.sh</code> passed on macOS arm64 with system Go 1.25.5&quot;).</p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="releases.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
 
+                            <a rel="next prefetch" href="how-to-release.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
 
                         <div style="clear: both"></div>
                     </nav>
@@ -227,7 +311,13 @@
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="releases.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
 
+                    <a rel="next prefetch" href="how-to-release.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
             </nav>
 
         </div>

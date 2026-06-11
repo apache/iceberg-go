@@ -1,0 +1,541 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Configuration - Iceberg Golang</title>
+
+
+        <!-- Custom HTML head -->
+        <!--
+          ~ Licensed to the Apache Software Foundation (ASF) under one
+          ~ or more contributor license agreements.  See the NOTICE file
+          ~ distributed with this work for additional information
+          ~ regarding copyright ownership.  The ASF licenses this file
+          ~ to you under the Apache License, Version 2.0 (the
+          ~ "License"); you may not use this file except in compliance
+          ~ with the License.  You may obtain a copy of the License at
+          ~
+          ~   http://www.apache.org/licenses/LICENSE-2.0
+          ~
+          ~ Unless required by applicable law or agreed to in writing,
+          ~ software distributed under the License is distributed on an
+          ~ "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+          ~ KIND, either express or implied.  See the License for the
+          ~ specific language governing permissions and limitations
+          ~ under the License.
+        -->
+          <!-- Matomo -->
+          <script>
+            var _paq = window._paq = window._paq || [];
+            /* tracker methods like "setCustomDimension" should be called before "trackPageView" */
+            _paq.push(["setDoNotTrack", true]);
+            _paq.push(["disableCookies"]);
+            _paq.push(['trackPageView']);
+            _paq.push(['enableLinkTracking']);
+            (function() {
+              var u="https://analytics.apache.org/";
+              _paq.push(['setTrackerUrl', u+'matomo.php']);
+              _paq.push(['setSiteId', '82']);
+              var d=document, g=d.createElement('script'), s=d.getElementsByTagName('script')[0];
+              g.async=true; g.src=u+'matomo.js'; s.parentNode.insertBefore(g,s);
+            })();
+          </script>
+          <!-- End Matomo Code -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+        <link rel="stylesheet" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded "><a href="introduction.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">User Guide</li><li class="chapter-item expanded "><a href="install.html">Install</a></li><li class="chapter-item expanded "><a href="getting-started.html">Getting Started</a></li><li class="chapter-item expanded "><a href="configuration.html" class="active">Configuration</a></li><li class="chapter-item expanded "><a href="cli.html">CLI</a></li><li class="chapter-item expanded "><a href="api.html">API</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="row-filter-syntax.html">Row Filter Syntax</a></li><li class="chapter-item expanded "><a href="expression-dsl.html">Expression DSL</a></li></ol></li><li class="chapter-item expanded "><a href="feature-status.html">Feature Status</a></li><li class="chapter-item expanded affix "><li class="part-title">Developer Guide</li><li class="chapter-item expanded "><a href="contributing.html">Contributing</a></li><li class="chapter-item expanded "><a href="community.html">Community</a></li><li class="chapter-item expanded "><a href="glossary.html">Glossary</a></li><li class="chapter-item expanded affix "><li class="part-title">Releases</li><li class="chapter-item expanded "><a href="releases.html">Releases</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="verify-release.html">Verify a release</a></li><li class="chapter-item expanded "><a href="how-to-release.html">How to release</a></li></ol></li><li class="chapter-item expanded "><li class="part-title">Ecosystem</li><li class="chapter-item expanded "><a href="ecosystem.html">Other Iceberg implementations</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Iceberg Golang</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/apache/iceberg-go" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/apache/iceberg-go/edit/main/website/src/configuration.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <!--
+  ~ Licensed to the Apache Software Foundation (ASF) under one
+  ~ or more contributor license agreements.  See the NOTICE file
+  ~ distributed with this work for additional information
+  ~ regarding copyright ownership.  The ASF licenses this file
+  ~ to you under the Apache License, Version 2.0 (the
+  ~ "License"); you may not use this file except in compliance
+  ~ with the License.  You may obtain a copy of the License at
+  ~
+  ~   http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing,
+  ~ software distributed under the License is distributed on an
+  ~ "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+  ~ KIND, either express or implied.  See the License for the
+  ~ specific language governing permissions and limitations
+  ~ under the License.
+-->
+<h1 id="configuration"><a class="header" href="#configuration">Configuration</a></h1>
+<p>This page documents how to configure Apache Iceberg Go: the CLI's YAML config file, per-catalog <code>Option</code> surfaces, file-system credentials, table write properties, concurrency, and how to plug in custom catalogs and IO backends.</p>
+<p>Only properties and options that the iceberg-go code actually reads are listed. Properties defined in the Apache Iceberg spec but not yet wired into iceberg-go are intentionally omitted - check <code>pkg.go.dev/github.com/apache/iceberg-go</code> for the latest read sites.</p>
+<h2 id="cli-configuration-file"><a class="header" href="#cli-configuration-file">CLI configuration file</a></h2>
+<p>The <code>iceberg</code> CLI loads catalog defaults from <code>~/.iceberg-go.yaml</code> (override the directory with <code>GOICEBERG_HOME</code>). The schema, defined in <a href="https://github.com/apache/iceberg-go/blob/main/config/config.go"><code>config/config.go</code></a>, is:</p>
+<pre><code class="language-yaml">default-catalog: default
+max-workers: 5
+catalog:
+  default:
+    type: rest
+    uri: https://example.com/iceberg
+    warehouse: s3://my-bucket/warehouse
+    credential: &lt;client-id&gt;:&lt;client-secret&gt;
+    output: text
+    rest:
+      sigv4-enabled: false
+      signing-name: &quot;&quot;
+      signing-region: &quot;&quot;
+</code></pre>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>default-catalog</code></td><td>Name used when <code>--catalog-name</code> is not passed on the CLI.</td></tr>
+<tr><td><code>max-workers</code></td><td>Worker pool size for concurrent operations. Default <code>5</code>.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.type</code></td><td>One of <code>rest</code>, <code>hive</code>, <code>glue</code>, <code>sql</code>, <code>hadoop</code>.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.uri</code></td><td>Catalog endpoint or DSN.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.warehouse</code></td><td>Warehouse identifier (REST/Glue) or location (Hive/SQL).</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.credential</code></td><td>Credential string passed through to the catalog's auth handler.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.output</code></td><td>CLI output format (e.g. <code>text</code>, <code>json</code>).</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.rest.sigv4-enabled</code></td><td>Enable AWS SigV4 signing for REST.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.rest.signing-name</code></td><td>SigV4 service name.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.rest.signing-region</code></td><td>SigV4 region.</td></tr>
+</tbody></table>
+</div>
+<h2 id="catalog-options"><a class="header" href="#catalog-options">Catalog options</a></h2>
+<p>Each catalog package exposes its own functional <code>Option</code> set. The lists below reflect the public option surface; <code>pkg.go.dev</code> is authoritative for the current set.</p>
+<h3 id="rest-catalogrest"><a class="header" href="#rest-catalogrest">REST (<code>catalog/rest</code>)</a></h3>
+<p>The most option-rich surface. Source: <a href="https://github.com/apache/iceberg-go/blob/main/catalog/rest/options.go"><code>catalog/rest/options.go</code></a>.</p>
+<div class="table-wrapper"><table><thead><tr><th>Group</th><th>Options</th></tr></thead><tbody>
+<tr><td>Authentication</td><td><code>WithCredential</code>, <code>WithOAuthToken</code>, <code>WithAuthManager</code>, <code>WithAuthURI</code>, <code>WithScope</code>, <code>WithAudience</code>, <code>WithResource</code></td></tr>
+<tr><td>AWS SigV4</td><td><code>WithSigV4</code>, <code>WithSigV4RegionSvc</code>, <code>WithAwsConfig</code></td></tr>
+<tr><td>HTTP</td><td><code>WithHeaders</code>, <code>WithTLSConfig</code>, <code>WithOAuthTLSConfig</code>, <code>WithCustomTransport</code></td></tr>
+<tr><td>Catalog routing</td><td><code>WithPrefix</code>, <code>WithWarehouseLocation</code>, <code>WithMetadataLocation</code></td></tr>
+<tr><td>Pass-through</td><td><code>WithAdditionalProps</code></td></tr>
+</tbody></table>
+</div>
+<h3 id="hive-cataloghive"><a class="header" href="#hive-cataloghive">Hive (<code>catalog/hive</code>)</a></h3>
+<p>Source: <a href="https://github.com/apache/iceberg-go/blob/main/catalog/hive/options.go"><code>catalog/hive/options.go</code></a>.</p>
+<ul>
+<li><code>WithURI(uri string)</code> - Thrift URI for the Hive Metastore (e.g. <code>thrift://127.0.0.1:9083</code>).</li>
+<li><code>WithWarehouse(warehouse string)</code></li>
+<li><code>WithProperties(props iceberg.Properties)</code></li>
+</ul>
+<h3 id="glue-catalogglue"><a class="header" href="#glue-catalogglue">Glue (<code>catalog/glue</code>)</a></h3>
+<p>Source: <a href="https://github.com/apache/iceberg-go/blob/main/catalog/glue/options.go"><code>catalog/glue/options.go</code></a>.</p>
+<ul>
+<li><code>WithAwsConfig(cfg aws.Config)</code> - AWS SDK v2 config; respects the AWS default credential chain.</li>
+<li><code>WithAwsProperties(props AwsProperties)</code> - explicit overrides for region/endpoint/access keys.</li>
+</ul>
+<h3 id="sql-catalogsql"><a class="header" href="#sql-catalogsql">SQL (<code>catalog/sql</code>)</a></h3>
+<p>The SQL catalog has no functional-option surface. Construct it with <code>NewCatalog</code>:</p>
+<pre><code class="language-go">db, _ := sql.Open(sqliteshim.ShimName, &quot;file:catalog.db&quot;)
+cat, err := sqlcat.NewCatalog(&quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
+    &quot;warehouse&quot;: &quot;file:///tmp/warehouse&quot;,
+})
+</code></pre>
+<p>Supported dialects: <code>sqlcat.Postgres</code>, <code>sqlcat.MySQL</code>, <code>sqlcat.SQLite</code>, <code>sqlcat.MSSQL</code>, <code>sqlcat.Oracle</code> (<code>catalog/sql/sql.go:50</code>).</p>
+<h3 id="shared-options-on-the-base-catalog-package"><a class="header" href="#shared-options-on-the-base-catalog-package">Shared options on the base <code>catalog</code> package</a></h3>
+<p>Operations that create or update tables/views accept these (<code>catalog/catalog.go</code>):</p>
+<ul>
+<li><code>WithLocation</code>, <code>WithPartitionSpec</code>, <code>WithSortOrder</code>, <code>WithProperties</code>, <code>WithStagedUpdates</code></li>
+<li>View-specific: <code>WithViewLocation</code>, <code>WithViewProperties</code></li>
+</ul>
+<h2 id="file-system-credentials"><a class="header" href="#file-system-credentials">File-system credentials</a></h2>
+<p>iceberg-go registers the local file system (<code>file://</code>) automatically. Cloud schemes are <em>not</em> registered until you add a blank import:</p>
+<pre><code class="language-go">import _ &quot;github.com/apache/iceberg-go/io/gocloud&quot;
+</code></pre>
+<p>The <code>init()</code> function in <a href="https://github.com/apache/iceberg-go/blob/main/io/gocloud/register.go"><code>io/gocloud/register.go</code></a> registers <code>s3</code>, <code>s3a</code>, <code>s3n</code>, <code>oss</code>, <code>gs</code>, <code>abfs</code>, <code>abfss</code>, <code>wasb</code>, and <code>wasbs</code>. Without the blank import, these schemes return <code>ErrIOSchemeNotFound</code> with a hint to add the import.</p>
+<p>All credential and tuning property keys are constants in <a href="https://github.com/apache/iceberg-go/blob/main/io/config.go"><code>io/config.go</code></a>. They can be supplied through table properties, catalog properties, or per-call <code>iceberg.Properties</code> arguments depending on context.</p>
+<h3 id="s3"><a class="header" href="#s3">S3</a></h3>
+<p>Authentication is resolved in this order (<code>io/gocloud/s3.go</code>):</p>
+<ol>
+<li>Static credentials in properties: <code>s3.access-key-id</code> + <code>s3.secret-access-key</code> (+ optional <code>s3.session-token</code>).</li>
+<li>The standard AWS SDK v2 default credential chain - environment variables (<code>AWS_ACCESS_KEY_ID</code>, <code>AWS_SECRET_ACCESS_KEY</code>, <code>AWS_SESSION_TOKEN</code>), <code>~/.aws/credentials</code>, container/IAM role.</li>
+</ol>
+<p>Tuning properties:</p>
+<div class="table-wrapper"><table><thead><tr><th>Key (constant)</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>s3.region</code> (<code>io.S3Region</code>) / <code>client.region</code> (<code>io.S3ClientRegion</code>)</td><td>AWS region.</td></tr>
+<tr><td><code>s3.endpoint</code> (<code>io.S3EndpointURL</code>)</td><td>Override S3 endpoint URL (custom or compatible storage). Falls back to <code>AWS_S3_ENDPOINT</code> env.</td></tr>
+<tr><td><code>s3.access-key-id</code> (<code>io.S3AccessKeyID</code>)</td><td>Static access key.</td></tr>
+<tr><td><code>s3.secret-access-key</code> (<code>io.S3SecretAccessKey</code>)</td><td>Static secret key.</td></tr>
+<tr><td><code>s3.session-token</code> (<code>io.S3SessionToken</code>)</td><td>Static session token.</td></tr>
+<tr><td><code>s3.proxy-uri</code> (<code>io.S3ProxyURI</code>)</td><td>HTTP proxy URL.</td></tr>
+<tr><td><code>s3.connect-timeout</code> (<code>io.S3ConnectTimeout</code>)</td><td>Either a number of seconds (<code>&quot;60&quot;</code>, <code>&quot;60.0&quot;</code>) or a Go duration (<code>&quot;5s&quot;</code>).</td></tr>
+<tr><td><code>s3.force-virtual-addressing</code> (<code>io.S3ForceVirtualAddressing</code>)</td><td>Force virtual-host-style addressing.</td></tr>
+<tr><td><code>s3.signer.uri</code> (<code>io.S3SignerURI</code>)</td><td>Reserved for remote-signing endpoint (not yet implemented).</td></tr>
+</tbody></table>
+</div>
+<h3 id="google-cloud-storage"><a class="header" href="#google-cloud-storage">Google Cloud Storage</a></h3>
+<p>Authentication resolution (<code>io/gocloud/gcs.go</code>):</p>
+<ol>
+<li>Explicit JSON key bytes via <code>gcs.jsonkey</code> or path via <code>gcs.keypath</code>.</li>
+<li>Optional <code>gcs.credtype</code> selecting one of <code>service_account</code>, <code>authorized_user</code>, <code>impersonated_service_account</code>, <code>external_account</code>.</li>
+<li>The GCP default credentials chain (<code>gcp.DefaultCredentials</code>) - falls back to anonymous if no creds are found.</li>
+</ol>
+<p>Tuning properties:</p>
+<div class="table-wrapper"><table><thead><tr><th>Key (constant)</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>gcs.endpoint</code> (<code>io.GCSEndpoint</code>)</td><td>Custom GCS endpoint URL.</td></tr>
+<tr><td><code>gcs.keypath</code> (<code>io.GCSKeyPath</code>)</td><td>Path to a JSON service-account key file.</td></tr>
+<tr><td><code>gcs.jsonkey</code> (<code>io.GCSJSONKey</code>)</td><td>JSON key as a string.</td></tr>
+<tr><td><code>gcs.credtype</code> (<code>io.GCSCredType</code>)</td><td>Credential type override.</td></tr>
+<tr><td><code>gcs.usejsonapi</code> (<code>io.GCSUseJSONAPI</code>)</td><td>Set to any value to enable the GCS JSON API for reads.</td></tr>
+</tbody></table>
+</div>
+<h3 id="azure-data-lake-storage--blob"><a class="header" href="#azure-data-lake-storage--blob">Azure Data Lake Storage / Blob</a></h3>
+<p>Authentication is selected based on the property keys present (<code>io/gocloud/azure.go</code>):</p>
+<ol>
+<li>Shared key: both <code>adls.auth.shared-key.account.name</code> and <code>adls.auth.shared-key.account.key</code> set.</li>
+<li>Per-host SAS token: <code>adls.sas-token.&lt;hostname&gt;</code> (prefix-matched against the storage account host).</li>
+<li>Per-host connection string: <code>adls.connection-string.&lt;hostname&gt;</code>.</li>
+<li>Managed identity: <code>adls.auth.managed-identity.enabled</code> set to a truthy value.</li>
+</ol>
+<p>Tuning properties:</p>
+<div class="table-wrapper"><table><thead><tr><th>Key (constant)</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>adls.auth.shared-key.account.name</code> (<code>io.ADLSSharedKeyAccountName</code>)</td><td>Account name.</td></tr>
+<tr><td><code>adls.auth.shared-key.account.key</code> (<code>io.ADLSSharedKeyAccountKey</code>)</td><td>Account key.</td></tr>
+<tr><td><code>adls.sas-token.&lt;host&gt;</code> (prefix <code>io.ADLSSasTokenPrefix</code>)</td><td>Per-host SAS token.</td></tr>
+<tr><td><code>adls.connection-string.&lt;host&gt;</code> (prefix <code>io.ADLSConnectionStringPrefix</code>)</td><td>Per-host connection string.</td></tr>
+<tr><td><code>adls.client-id</code> (<code>io.ADLSClientID</code>)</td><td>Client/application ID for AAD auth.</td></tr>
+<tr><td><code>adls.endpoint</code> (<code>io.ADLSEndpoint</code>)</td><td>Storage domain (e.g. <code>blob.core.windows.net</code>).</td></tr>
+<tr><td><code>adls.protocol</code> (<code>io.ADLSProtocol</code>)</td><td><code>http</code> or <code>https</code>.</td></tr>
+<tr><td><code>adls.auth.managed-identity.enabled</code> (<code>io.ADLSManagedIdentityEnabled</code>)</td><td>Enable Azure Managed Identity auth.</td></tr>
+</tbody></table>
+</div>
+<h2 id="environment-variables"><a class="header" href="#environment-variables">Environment variables</a></h2>
+<p>iceberg-go reads only a small set of environment variables directly. AWS / GCP / Azure credentials flow through the respective SDKs, not through iceberg-go-defined env vars.</p>
+<div class="table-wrapper"><table><thead><tr><th>Variable</th><th>Purpose</th><th>Read at</th></tr></thead><tbody>
+<tr><td><code>GOICEBERG_HOME</code></td><td>Directory containing <code>.iceberg-go.yaml</code>. Defaults to the user's home directory.</td><td><code>config/config.go:87</code></td></tr>
+<tr><td><code>ICEBERG_SQL_DEBUG</code></td><td>SQL catalog query logging - <code>1</code> (failed queries), <code>2</code> (all queries).</td><td><code>catalog/sql/sql.go:206</code></td></tr>
+<tr><td><code>AWS_S3_ENDPOINT</code></td><td>Fallback S3 endpoint when <code>s3.endpoint</code> is unset.</td><td><code>io/gocloud/s3.go:193</code></td></tr>
+</tbody></table>
+</div>
+<p>There is no <code>PYICEBERG_*</code>-style env var convention. Use the YAML config file or pass <code>iceberg.Properties</code> to overrides programmatically.</p>
+<h2 id="concurrency"><a class="header" href="#concurrency">Concurrency</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Setting</th><th>Source</th><th>Effect</th></tr></thead><tbody>
+<tr><td><code>max-workers</code> in <code>~/.iceberg-go.yaml</code> (<code>config.EnvConfig.MaxWorkers</code>)</td><td>YAML config</td><td>Worker pool size used by parallel column writes, snapshot producers, scan plan, equality-delete writers. Default <code>5</code>.</td></tr>
+<tr><td><code>WitMaxConcurrency(n int) ScanOption</code></td><td>Code (<code>table.WitMaxConcurrency</code>)</td><td>Per-scan override. Note: function name is <code>Wit...</code> (not <code>With...</code>) - this is a pre-existing typo in the public API.</td></tr>
+<tr><td><code>WithMaxWriteWorkers(n int)</code></td><td>Code (per-write API on <code>WriteRecords</code>)</td><td>Per-write override of the worker count.</td></tr>
+<tr><td><code>WithClusteredWrite()</code></td><td>Code (per-write API on <code>WriteRecords</code>)</td><td>Forces single-threaded writes. Mutually exclusive with <code>WithMaxWriteWorkers</code>.</td></tr>
+</tbody></table>
+</div>
+<h2 id="pluggability"><a class="header" href="#pluggability">Pluggability</a></h2>
+<p>Two registries are user-extensible. The third (LocationProvider) is currently informational.</p>
+<h3 id="io-scheme-registry"><a class="header" href="#io-scheme-registry">IO scheme registry</a></h3>
+<p>Register a custom URL scheme with <a href="https://github.com/apache/iceberg-go/blob/main/io/registry.go"><code>io.Register</code></a>:</p>
+<pre><code class="language-go">import (
+    &quot;context&quot;
+    &quot;net/url&quot;
+
+    &quot;github.com/apache/iceberg-go/io&quot;
+)
+
+func init() {
+    io.Register(&quot;myfs&quot;, func(ctx context.Context, parsed *url.URL, props map[string]string) (io.IO, error) {
+        return newMyFS(parsed, props)
+    })
+}
+</code></pre>
+<p><code>io.Register</code> panics on <code>nil</code> factory or duplicate scheme. Built-in schemes: <code>file</code>, <code>&quot;&quot;</code> (the empty scheme). Cloud schemes (<code>s3</code>, <code>gs</code>, <code>abfs</code>, etc.) are registered by <code>io/gocloud</code> only when its package is blank-imported.</p>
+<p><code>io.GetRegisteredSchemes()</code> returns the current scheme list; <code>io.Unregister(scheme)</code> removes one.</p>
+<h3 id="catalog-type-registry"><a class="header" href="#catalog-type-registry">Catalog type registry</a></h3>
+<p>Register a custom catalog type with <a href="https://github.com/apache/iceberg-go/blob/main/catalog/registry.go"><code>catalog.Register</code></a>:</p>
+<pre><code class="language-go">import (
+    &quot;context&quot;
+
+    &quot;github.com/apache/iceberg-go&quot;
+    &quot;github.com/apache/iceberg-go/catalog&quot;
+)
+
+func init() {
+    catalog.Register(&quot;mycatalog&quot;, catalog.RegistrarFunc(
+        func(ctx context.Context, name string, props iceberg.Properties) (catalog.Catalog, error) {
+            return newMyCatalog(name, props)
+        },
+    ))
+}
+</code></pre>
+<p>After registration, <code>catalog.Load(ctx, &quot;default&quot;, iceberg.Properties{&quot;type&quot;: &quot;mycatalog&quot;, ...})</code> will route to the factory. Built-in types: <code>rest</code>, <code>hive</code>, <code>glue</code>, <code>sql</code>, <code>hadoop</code>.</p>
+<p><code>catalog.GetRegisteredCatalogs()</code> returns the current list; <code>catalog.Unregister(catalogType)</code> removes one.</p>
+<h3 id="locationprovider"><a class="header" href="#locationprovider">LocationProvider</a></h3>
+<p><a href="https://github.com/apache/iceberg-go/blob/main/table/locations.go"><code>table/locations.go</code></a> defines the <code>LocationProvider</code> interface and ships two implementations: <code>simpleLocationProvider</code> (default) and <code>objectStoreLocationProvider</code> (selected by <code>write.object-storage.enabled = true</code>). The provider is chosen by table properties and is not user-pluggable today.</p>
+<h2 id="table-write-properties"><a class="header" href="#table-write-properties">Table write properties</a></h2>
+<p>Property key constants are in <a href="https://github.com/apache/iceberg-go/blob/main/table/properties.go"><code>table/properties.go</code></a> and Parquet keys in <a href="https://github.com/apache/iceberg-go/blob/main/table/internal/parquet_files.go"><code>table/internal/parquet_files.go</code></a>. The keys below have verified read sites in non-test code.</p>
+<h3 id="format-and-file-sizing"><a class="header" href="#format-and-file-sizing">Format and file sizing</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>write.format.default</code></td><td><code>parquet</code></td><td>File format used when writing data files. Read in <code>table/writer.go</code> and <code>table/rolling_data_writer.go</code>.</td></tr>
+<tr><td><code>write.target-file-size-bytes</code></td><td>(set by writer)</td><td>Target size for newly written data files. Read in <code>table/arrow_utils.go</code> and <code>table/equality_delete_writer.go</code>.</td></tr>
+</tbody></table>
+</div>
+<h3 id="metrics-and-metadata-lifecycle"><a class="header" href="#metrics-and-metadata-lifecycle">Metrics and metadata lifecycle</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>write.metadata.metrics.default</code></td><td>Default per-column metrics mode.</td></tr>
+<tr><td><code>write.metadata.metrics.column.&lt;name&gt;</code></td><td>Per-column override prefix.</td></tr>
+<tr><td><code>write.metadata.delete-after-commit.enabled</code></td><td>When true, expire old metadata files after a successful commit.</td></tr>
+<tr><td><code>write.metadata.previous-versions-max</code></td><td>Cap on retained metadata files. Default <code>100</code>.</td></tr>
+<tr><td><code>write.metadata.compression-codec</code></td><td>Compression for metadata JSON.</td></tr>
+</tbody></table>
+</div>
+<h3 id="manifest-and-commit"><a class="header" href="#manifest-and-commit">Manifest and commit</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>commit.manifest-merge.enabled</code></td><td>Merge small manifests during commit.</td></tr>
+<tr><td><code>commit.manifest.target-size-bytes</code></td><td>Target size for merged manifests.</td></tr>
+<tr><td><code>commit.manifest.min-count-to-merge</code></td><td>Minimum manifest count that triggers a merge.</td></tr>
+<tr><td><code>commit.retry.num-retries</code></td><td>Retries for <code>ErrCommitFailed</code>.</td></tr>
+<tr><td><code>commit.retry.min-wait-ms</code> / <code>commit.retry.max-wait-ms</code> / <code>commit.retry.total-timeout-ms</code></td><td>Backoff bounds.</td></tr>
+</tbody></table>
+</div>
+<h3 id="snapshot-retention"><a class="header" href="#snapshot-retention">Snapshot retention</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>min-snapshots-to-keep</code></td><td>Minimum snapshots to retain when expiring.</td></tr>
+<tr><td><code>max-snapshot-age-ms</code></td><td>Maximum age of retained snapshots.</td></tr>
+<tr><td><code>max-ref-age-ms</code></td><td>Maximum age of branch/tag refs that are not the main branch.</td></tr>
+<tr><td><code>gc.enabled</code></td><td>Gate for orphan-file cleanup.</td></tr>
+</tbody></table>
+</div>
+<h3 id="delete-mode"><a class="header" href="#delete-mode">Delete mode</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>write.delete.mode</code></td><td>Delete strategy used by row-level delete writers.</td></tr>
+</tbody></table>
+</div>
+<h3 id="object-store-data-layout"><a class="header" href="#object-store-data-layout">Object-store data layout</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>write.data.path</code></td><td>Override data file directory.</td></tr>
+<tr><td><code>write.metadata.path</code></td><td>Override metadata file directory.</td></tr>
+<tr><td><code>write.object-storage.enabled</code></td><td>Switch the location provider to the hashed object-storage layout.</td></tr>
+<tr><td><code>write.object-storage.partitioned-paths</code></td><td>Whether partition values are included in object-storage paths.</td></tr>
+</tbody></table>
+</div>
+<h3 id="parquet-writer"><a class="header" href="#parquet-writer">Parquet writer</a></h3>
+<p>All defined in <code>table/internal/parquet_files.go</code> and read by the Parquet writer:</p>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Default</th></tr></thead><tbody>
+<tr><td><code>write.parquet.row-group-size-bytes</code></td><td>128 MB</td></tr>
+<tr><td><code>write.parquet.row-group-limit</code></td><td>1,048,576 rows</td></tr>
+<tr><td><code>write.parquet.page-size-bytes</code></td><td>1 MB</td></tr>
+<tr><td><code>write.parquet.page-row-limit</code></td><td>20,000 rows</td></tr>
+<tr><td><code>write.parquet.dict-size-bytes</code></td><td>2 MB</td></tr>
+<tr><td><code>write.parquet.page-version</code></td><td><code>2</code></td></tr>
+<tr><td><code>write.parquet.compression-codec</code></td><td><code>zstd</code></td></tr>
+<tr><td><code>write.parquet.compression-level</code></td><td><code>-1</code> (codec default)</td></tr>
+<tr><td><code>write.parquet.bloom-filter-max-bytes</code></td><td>1 MB</td></tr>
+<tr><td><code>write.parquet.bloom-filter-enabled.column.&lt;name&gt;</code></td><td>(per-column toggle, prefix-matched)</td></tr>
+</tbody></table>
+</div>
+<h3 id="parquet-reader"><a class="header" href="#parquet-reader">Parquet reader</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>read.parquet.batch-size</code></td><td>Arrow record-batch size used by the Parquet reader.</td></tr>
+</tbody></table>
+</div>
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="getting-started.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="cli.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="getting-started.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="cli.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Introduction - Iceberg Golang</title>
+        <title>Row Filter Syntax - Iceberg Golang</title>
 
 
         <!-- Custom HTML head -->
@@ -123,7 +123,7 @@
 
         <nav id="sidebar" class="sidebar" aria-label="Table of contents">
             <div class="sidebar-scrollbox">
-                <ol class="chapter"><li class="chapter-item expanded "><a href="introduction.html" class="active">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">User Guide</li><li class="chapter-item expanded "><a href="install.html">Install</a></li><li class="chapter-item expanded "><a href="getting-started.html">Getting Started</a></li><li class="chapter-item expanded "><a href="configuration.html">Configuration</a></li><li class="chapter-item expanded "><a href="cli.html">CLI</a></li><li class="chapter-item expanded "><a href="api.html">API</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="row-filter-syntax.html">Row Filter Syntax</a></li><li class="chapter-item expanded "><a href="expression-dsl.html">Expression DSL</a></li></ol></li><li class="chapter-item expanded "><a href="feature-status.html">Feature Status</a></li><li class="chapter-item expanded affix "><li class="part-title">Developer Guide</li><li class="chapter-item expanded "><a href="contributing.html">Contributing</a></li><li class="chapter-item expanded "><a href="community.html">Community</a></li><li class="chapter-item expanded "><a href="glossary.html">Glossary</a></li><li class="chapter-item expanded affix "><li class="part-title">Releases</li><li class="chapter-item expanded "><a href="releases.html">Releases</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="verify-release.html">Verify a release</a></li><li class="chapter-item expanded "><a href="how-to-release.html">How to release</a></li></ol></li><li class="chapter-item expanded "><li class="part-title">Ecosystem</li><li class="chapter-item expanded "><a href="ecosystem.html">Other Iceberg implementations</a></li></ol>
+                <ol class="chapter"><li class="chapter-item expanded "><a href="introduction.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">User Guide</li><li class="chapter-item expanded "><a href="install.html">Install</a></li><li class="chapter-item expanded "><a href="getting-started.html">Getting Started</a></li><li class="chapter-item expanded "><a href="configuration.html">Configuration</a></li><li class="chapter-item expanded "><a href="cli.html">CLI</a></li><li class="chapter-item expanded "><a href="api.html">API</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="row-filter-syntax.html" class="active">Row Filter Syntax</a></li><li class="chapter-item expanded "><a href="expression-dsl.html">Expression DSL</a></li></ol></li><li class="chapter-item expanded "><a href="feature-status.html">Feature Status</a></li><li class="chapter-item expanded affix "><li class="part-title">Developer Guide</li><li class="chapter-item expanded "><a href="contributing.html">Contributing</a></li><li class="chapter-item expanded "><a href="community.html">Community</a></li><li class="chapter-item expanded "><a href="glossary.html">Glossary</a></li><li class="chapter-item expanded affix "><li class="part-title">Releases</li><li class="chapter-item expanded "><a href="releases.html">Releases</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="verify-release.html">Verify a release</a></li><li class="chapter-item expanded "><a href="how-to-release.html">How to release</a></li></ol></li><li class="chapter-item expanded "><li class="part-title">Ecosystem</li><li class="chapter-item expanded "><a href="ecosystem.html">Other Iceberg implementations</a></li></ol>
             </div>
             <div id="sidebar-resize-handle" class="sidebar-resize-handle">
                 <div class="sidebar-resize-indicator"></div>
@@ -185,7 +185,7 @@
                         <a href="https://github.com/apache/iceberg-go" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
-                        <a href="https://github.com/apache/iceberg-go/edit/main/website/src/introduction.md" title="Suggest an edit" aria-label="Suggest an edit">
+                        <a href="https://github.com/apache/iceberg-go/edit/main/website/src/row-filter-syntax.md" title="Suggest an edit" aria-label="Suggest an edit">
                             <i id="git-edit-button" class="fa fa-edit"></i>
                         </a>
 
@@ -232,34 +232,99 @@
   ~ specific language governing permissions and limitations
   ~ under the License.
 -->
-<h1 id="iceberg-go"><a class="header" href="#iceberg-go">Iceberg Go</a></h1>
-<p>Apache Iceberg Go is a Go-native implementation of <a href="https://iceberg.apache.org/">Apache Iceberg</a>, the open table format for analytic datasets. Read and write Iceberg tables from Go services and tooling without a JVM.</p>
-<p><a href="https://pkg.go.dev/github.com/apache/iceberg-go"><img src="https://pkg.go.dev/badge/github.com/apache/iceberg-go.svg" alt="Go Reference" /></a></p>
-<h2 id="where-to-start"><a class="header" href="#where-to-start">Where to start</a></h2>
+<h1 id="row-filter-syntax"><a class="header" href="#row-filter-syntax">Row Filter Syntax</a></h1>
+<p>Row filters drive predicate pushdown during scans, partition pruning, and row-level deletes. The DSL lives in the root <code>iceberg</code> package - all you need is the import:</p>
+<pre><code class="language-go">import &quot;github.com/apache/iceberg-go&quot;
+</code></pre>
+<p>A column is referenced with <code>iceberg.Reference(&quot;column_name&quot;)</code>. Predicate constructors return a <code>BooleanExpression</code> (or an <code>UnboundPredicate</code>, which satisfies <code>BooleanExpression</code>) that can be combined with the boolean combinators in the <a href="./expression-dsl.html">Expression DSL</a> and passed to APIs like <code>table.WithRowFilter(...)</code>.</p>
+<h2 id="equality"><a class="header" href="#equality">Equality</a></h2>
+<pre><code class="language-go">iceberg.EqualTo(iceberg.Reference(&quot;status&quot;), &quot;active&quot;)
+iceberg.NotEqualTo(iceberg.Reference(&quot;retries&quot;), int32(0))
+</code></pre>
+<p><code>EqualTo[T]</code> and <code>NotEqualTo[T]</code> are generic over <code>LiteralType</code> (<code>bool</code>, <code>int32</code>, <code>int64</code>, <code>float32</code>, <code>float64</code>, <code>string</code>, <code>[]byte</code>, plus a few iceberg-specific types). The value's type must be in that set - bare <code>int</code> literals are not, so use <code>int32(0)</code> / <code>int64(0)</code> explicitly. They wrap <code>LiteralPredicate(OpEQ, ...)</code> and <code>LiteralPredicate(OpNEQ, ...)</code> (<code>predicates.go:83-91</code>).</p>
+<h2 id="comparison"><a class="header" href="#comparison">Comparison</a></h2>
+<pre><code class="language-go">iceberg.LessThan(iceberg.Reference(&quot;amount&quot;), 100.0)
+iceberg.LessThanEqual(iceberg.Reference(&quot;amount&quot;), 100.0)
+iceberg.GreaterThan(iceberg.Reference(&quot;created_at&quot;), int64(1700000000))
+iceberg.GreaterThanEqual(iceberg.Reference(&quot;score&quot;), int32(50))
+</code></pre>
+<p>Operators: <code>OpLT</code>, <code>OpLTEQ</code>, <code>OpGT</code>, <code>OpGTEQ</code> (<code>exprs.go:47-50</code>). Constructors at <code>predicates.go:98-124</code>.</p>
+<h2 id="set-membership"><a class="header" href="#set-membership">Set membership</a></h2>
+<pre><code class="language-go">iceberg.IsIn(iceberg.Reference(&quot;region&quot;), &quot;us-east&quot;, &quot;us-west&quot;, &quot;eu-west&quot;)
+iceberg.NotIn(iceberg.Reference(&quot;status&quot;), &quot;deleted&quot;, &quot;archived&quot;)
+</code></pre>
+<p><code>IsIn</code> and <code>NotIn</code> are variadic. They return a <code>BooleanExpression</code> (not <code>UnboundPredicate</code>) because the result can simplify automatically:</p>
 <ul>
-<li><strong><a href="./install.html">Install</a></strong> - get the library and CLI on your machine.</li>
-<li><strong><a href="./cli.html">CLI</a></strong> - inspect tables, run maintenance, manage refs.</li>
-<li><strong><a href="./api.html">API</a></strong> - construct catalogs, scan tables, write Arrow data, evolve schemas.</li>
-<li><strong><a href="./configuration.html">Configuration</a></strong> - YAML config file, catalog options, FileIO and credentials, table properties.</li>
+<li>Zero values - reduces to <code>AlwaysFalse{}</code> (for <code>IsIn</code>) or <code>AlwaysTrue{}</code> (for <code>NotIn</code>).</li>
+<li>One value - reduces to <code>EqualTo</code> / <code>NotEqualTo</code>.</li>
 </ul>
-<h2 id="what-works-today"><a class="header" href="#what-works-today">What works today</a></h2>
-<p>A capability matrix - filesystem, metadata operations, catalog support, and write operations - lives on the dedicated <strong><a href="./feature-status.html">Feature Status</a></strong> page.</p>
-<h2 id="beyond-go"><a class="header" href="#beyond-go">Beyond Go</a></h2>
-<p>Apache Iceberg is multi-language. PyIceberg, iceberg-rust, iceberg-cpp, and the Java reference implementation all target the same spec - see <strong><a href="./ecosystem.html">Other Iceberg implementations</a></strong> for cross-links.</p>
-<h2 id="help-and-contribution"><a class="header" href="#help-and-contribution">Help and contribution</a></h2>
-<ul>
-<li>Questions and discussion: <strong><a href="./community.html">Community</a></strong></li>
-<li>Contributing code or docs: <strong><a href="./contributing.html">Contributing</a></strong></li>
-<li>Cutting or verifying a release: <strong><a href="./releases.html">Releases</a></strong></li>
-</ul>
-<p>The canonical Iceberg specification, terminology, and multi-engine policy live with the main project at <a href="https://iceberg.apache.org/">iceberg.apache.org</a>. This site covers what is specific to the Go implementation.</p>
+<p>See <code>predicates.go:55-78</code>.</p>
+<h2 id="null-checks"><a class="header" href="#null-checks">Null checks</a></h2>
+<pre><code class="language-go">iceberg.IsNull(iceberg.Reference(&quot;deleted_at&quot;))
+iceberg.NotNull(iceberg.Reference(&quot;user_id&quot;))
+</code></pre>
+<p>These wrap <code>UnaryPredicate(OpIsNull, ...)</code> and <code>UnaryPredicate(OpNotNull, ...)</code>. Both panic if the term is <code>nil</code> (<code>predicates.go:23-32</code>).</p>
+<h2 id="nan-checks-float--double-columns-only"><a class="header" href="#nan-checks-float--double-columns-only">NaN checks (float / double columns only)</a></h2>
+<pre><code class="language-go">iceberg.IsNaN(iceberg.Reference(&quot;ratio&quot;))
+iceberg.NotNaN(iceberg.Reference(&quot;ratio&quot;))
+</code></pre>
+<p>Operators <code>OpIsNan</code> and <code>OpNotNan</code>. Use these instead of <code>EqualTo(..., math.NaN())</code> - NaN is never equal to itself.</p>
+<h2 id="string-prefix"><a class="header" href="#string-prefix">String prefix</a></h2>
+<pre><code class="language-go">iceberg.StartsWith(iceberg.Reference(&quot;path&quot;), &quot;/var/log/&quot;)
+iceberg.NotStartsWith(iceberg.Reference(&quot;name&quot;), &quot;tmp_&quot;)
+</code></pre>
+<p>Operators <code>OpStartsWith</code> and <code>OpNotStartsWith</code> (<code>exprs.go:53-54</code>). The value must be a <code>string</code>.</p>
+<h2 id="constants"><a class="header" href="#constants">Constants</a></h2>
+<pre><code class="language-go">iceberg.AlwaysTrue{}
+iceberg.AlwaysFalse{}
+</code></pre>
+<p>These satisfy <code>BooleanExpression</code> and short-circuit during expression simplification. Useful as a base case when filters are built dynamically:</p>
+<pre><code class="language-go">filter := iceberg.BooleanExpression(iceberg.AlwaysTrue{})
+for _, clause := range userClauses {
+    filter = iceberg.NewAnd(filter, clause)
+}
+</code></pre>
+<h2 id="operator-reference"><a class="header" href="#operator-reference">Operator reference</a></h2>
+<p>The full operator set is the <code>Operation</code> enum at <code>exprs.go:34-62</code>:</p>
+<div class="table-wrapper"><table><thead><tr><th>Operator</th><th>Constant</th><th>Convenience builder</th></tr></thead><tbody>
+<tr><td><code>&lt;</code></td><td><code>OpLT</code></td><td><code>LessThan</code></td></tr>
+<tr><td><code>&lt;=</code></td><td><code>OpLTEQ</code></td><td><code>LessThanEqual</code></td></tr>
+<tr><td><code>&gt;</code></td><td><code>OpGT</code></td><td><code>GreaterThan</code></td></tr>
+<tr><td><code>&gt;=</code></td><td><code>OpGTEQ</code></td><td><code>GreaterThanEqual</code></td></tr>
+<tr><td><code>==</code></td><td><code>OpEQ</code></td><td><code>EqualTo</code></td></tr>
+<tr><td><code>!=</code></td><td><code>OpNEQ</code></td><td><code>NotEqualTo</code></td></tr>
+<tr><td><code>IS NULL</code></td><td><code>OpIsNull</code></td><td><code>IsNull</code></td></tr>
+<tr><td><code>IS NOT NULL</code></td><td><code>OpNotNull</code></td><td><code>NotNull</code></td></tr>
+<tr><td><code>IS NaN</code></td><td><code>OpIsNan</code></td><td><code>IsNaN</code></td></tr>
+<tr><td><code>IS NOT NaN</code></td><td><code>OpNotNan</code></td><td><code>NotNaN</code></td></tr>
+<tr><td><code>IN</code></td><td><code>OpIn</code></td><td><code>IsIn</code></td></tr>
+<tr><td><code>NOT IN</code></td><td><code>OpNotIn</code></td><td><code>NotIn</code></td></tr>
+<tr><td><code>STARTS WITH</code></td><td><code>OpStartsWith</code></td><td><code>StartsWith</code></td></tr>
+<tr><td><code>NOT STARTS WITH</code></td><td><code>OpNotStartsWith</code></td><td><code>NotStartsWith</code></td></tr>
+<tr><td><code>AND</code> / <code>OR</code> / <code>NOT</code></td><td><code>OpAnd</code> / <code>OpOr</code> / <code>OpNot</code></td><td><code>NewAnd</code> / <code>NewOr</code> / <code>NewNot</code> (see <a href="./expression-dsl.html">Expression DSL</a>)</td></tr>
+</tbody></table>
+</div>
+<h2 id="putting-it-together"><a class="header" href="#putting-it-together">Putting it together</a></h2>
+<p>A typical filter passed to a scan:</p>
+<pre><code class="language-go">filter := iceberg.NewAnd(
+    iceberg.GreaterThanEqual(iceberg.Reference(&quot;event_time&quot;), int64(1700000000)),
+    iceberg.IsIn(iceberg.Reference(&quot;region&quot;), &quot;us-east&quot;, &quot;us-west&quot;),
+    iceberg.NotNull(iceberg.Reference(&quot;user_id&quot;)),
+)
+
+scan := tbl.Scan(table.WithRowFilter(filter))
+</code></pre>
+<p>For boolean combination, term details, and the lower-level escape hatches (<code>UnaryPredicate</code>, <code>LiteralPredicate</code>, <code>SetPredicate</code>), see <a href="./expression-dsl.html">Expression DSL</a>.</p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="api.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
 
-                            <a rel="next prefetch" href="install.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="expression-dsl.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -269,8 +334,11 @@
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="api.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
 
-                    <a rel="next prefetch" href="install.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="expression-dsl.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>

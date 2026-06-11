@@ -123,7 +123,7 @@
 
         <nav id="sidebar" class="sidebar" aria-label="Table of contents">
             <div class="sidebar-scrollbox">
-                <ol class="chapter"><li class="chapter-item expanded "><a href="introduction.html" class="active">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">User Guide</li><li class="chapter-item expanded "><a href="install.html">Install</a></li><li class="chapter-item expanded "><a href="cli.html">CLI</a></li><li class="chapter-item expanded "><a href="api.html">API</a></li><li class="chapter-item expanded affix "><li class="part-title">Developer Guide</li><li class="chapter-item expanded "><a href="glossary.html">Glossary</a></li></ol>
+                <ol class="chapter"><li class="chapter-item expanded "><a href="introduction.html" class="active">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">User Guide</li><li class="chapter-item expanded "><a href="install.html">Install</a></li><li class="chapter-item expanded "><a href="getting-started.html">Getting Started</a></li><li class="chapter-item expanded "><a href="configuration.html">Configuration</a></li><li class="chapter-item expanded "><a href="cli.html">CLI</a></li><li class="chapter-item expanded "><a href="api.html">API</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="row-filter-syntax.html">Row Filter Syntax</a></li><li class="chapter-item expanded "><a href="expression-dsl.html">Expression DSL</a></li></ol></li><li class="chapter-item expanded "><a href="feature-status.html">Feature Status</a></li><li class="chapter-item expanded affix "><li class="part-title">Developer Guide</li><li class="chapter-item expanded "><a href="contributing.html">Contributing</a></li><li class="chapter-item expanded "><a href="community.html">Community</a></li><li class="chapter-item expanded "><a href="glossary.html">Glossary</a></li><li class="chapter-item expanded affix "><li class="part-title">Releases</li><li class="chapter-item expanded "><a href="releases.html">Releases</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="verify-release.html">Verify a release</a></li><li class="chapter-item expanded "><a href="how-to-release.html">How to release</a></li></ol></li><li class="chapter-item expanded "><li class="part-title">Ecosystem</li><li class="chapter-item expanded "><a href="ecosystem.html">Other Iceberg implementations</a></li></ol>
             </div>
             <div id="sidebar-resize-handle" class="sidebar-resize-handle">
                 <div class="sidebar-resize-indicator"></div>
@@ -233,79 +233,26 @@
   ~ under the License.
 -->
 <h1 id="iceberg-go"><a class="header" href="#iceberg-go">Iceberg Go</a></h1>
-<p>Iceberg Go is a go-native implementation for accessing iceberg tables.</p>
+<p>Apache Iceberg Go is a Go-native implementation of <a href="https://iceberg.apache.org/">Apache Iceberg</a>, the open table format for analytic datasets. Read and write Iceberg tables from Go services and tooling without a JVM.</p>
 <p><a href="https://pkg.go.dev/github.com/apache/iceberg-go"><img src="https://pkg.go.dev/badge/github.com/apache/iceberg-go.svg" alt="Go Reference" /></a></p>
-<p><code>iceberg</code> is a Golang implementation of the <a href="https://iceberg.apache.org/spec/">Iceberg table spec</a>.</p>
-<h2 id="feature-support--roadmap"><a class="header" href="#feature-support--roadmap">Feature Support / Roadmap</a></h2>
-<h3 id="filesystem-support"><a class="header" href="#filesystem-support">FileSystem Support</a></h3>
-<div class="table-wrapper"><table><thead><tr><th style="text-align: center">Filesystem Type</th><th style="text-align: center">Supported</th></tr></thead><tbody>
-<tr><td style="text-align: center">S3</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: center">Google Cloud Storage</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: center">Azure Blob Storage</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: center">Local Filesystem</td><td style="text-align: center">X</td></tr>
-</tbody></table>
-</div>
-<h3 id="metadata"><a class="header" href="#metadata">Metadata</a></h3>
-<div class="table-wrapper"><table><thead><tr><th style="text-align: left">Operation</th><th style="text-align: center">Supported</th></tr></thead><tbody>
-<tr><td style="text-align: left">Get Schema</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Get Snapshots</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Get Sort Orders</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Get Partition Specs</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Get Manifests</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Create New Manifests</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Plan Scan</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Plan Scan for Snapshot</td><td style="text-align: center">X</td></tr>
-</tbody></table>
-</div>
-<h3 id="catalog-support"><a class="header" href="#catalog-support">Catalog Support</a></h3>
-<div class="table-wrapper"><table><thead><tr><th style="text-align: left">Operation</th><th style="text-align: center">REST</th><th style="text-align: center">Hive</th><th style="text-align: center">Glue</th><th style="text-align: center">SQL</th></tr></thead><tbody>
-<tr><td style="text-align: left">Load Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">List Tables</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Create Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Register Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td></tr>
-<tr><td style="text-align: left">Update Current Snapshot</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Create New Snapshot</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Rename Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Drop Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Alter Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Check Table Exists</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Set Table Properties</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">List Namespaces</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Create Namespace</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Check Namespace Exists</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Drop Namespace</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Update Namespace Properties</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Create View</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Load View</td><td style="text-align: center"></td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">List View</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Drop View</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Check View Exists</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td></tr>
-</tbody></table>
-</div>
-<h3 id="readwrite-data-support"><a class="header" href="#readwrite-data-support">Read/Write Data Support</a></h3>
+<h2 id="where-to-start"><a class="header" href="#where-to-start">Where to start</a></h2>
 <ul>
-<li>Data can currently be read as an Arrow Table or as a stream of Arrow record batches.</li>
+<li><strong><a href="./install.html">Install</a></strong> - get the library and CLI on your machine.</li>
+<li><strong><a href="./cli.html">CLI</a></strong> - inspect tables, run maintenance, manage refs.</li>
+<li><strong><a href="./api.html">API</a></strong> - construct catalogs, scan tables, write Arrow data, evolve schemas.</li>
+<li><strong><a href="./configuration.html">Configuration</a></strong> - YAML config file, catalog options, FileIO and credentials, table properties.</li>
 </ul>
-<h4 id="supported-write-operations"><a class="header" href="#supported-write-operations">Supported Write Operations</a></h4>
-<p>As long as the FileSystem is supported and the Catalog supports altering
-the table, the following tracks the current write support:</p>
-<div class="table-wrapper"><table><thead><tr><th style="text-align: left">Operation</th><th style="text-align: center">Supported</th></tr></thead><tbody>
-<tr><td style="text-align: left">Append Stream</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Append Data Files</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Rewrite Files</td><td style="text-align: center"></td></tr>
-<tr><td style="text-align: left">Rewrite manifests</td><td style="text-align: center"></td></tr>
-<tr><td style="text-align: left">Overwrite Files</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Copy-On-Write Delete</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Write Pos Delete</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Write Eq Delete</td><td style="text-align: center"></td></tr>
-<tr><td style="text-align: left">Row Delta</td><td style="text-align: center"></td></tr>
-</tbody></table>
-</div>
-<h2 id="get-in-touch"><a class="header" href="#get-in-touch">Get in Touch</a></h2>
+<h2 id="what-works-today"><a class="header" href="#what-works-today">What works today</a></h2>
+<p>A capability matrix - filesystem, metadata operations, catalog support, and write operations - lives on the dedicated <strong><a href="./feature-status.html">Feature Status</a></strong> page.</p>
+<h2 id="beyond-go"><a class="header" href="#beyond-go">Beyond Go</a></h2>
+<p>Apache Iceberg is multi-language. PyIceberg, iceberg-rust, iceberg-cpp, and the Java reference implementation all target the same spec - see <strong><a href="./ecosystem.html">Other Iceberg implementations</a></strong> for cross-links.</p>
+<h2 id="help-and-contribution"><a class="header" href="#help-and-contribution">Help and contribution</a></h2>
 <ul>
-<li><a href="https://iceberg.apache.org/community/">Iceberg community</a></li>
-<li><a href="https://apache-iceberg.slack.com/archives/C05J3MJ42BD">Iceberg-Go Slack</a></li>
+<li>Questions and discussion: <strong><a href="./community.html">Community</a></strong></li>
+<li>Contributing code or docs: <strong><a href="./contributing.html">Contributing</a></strong></li>
+<li>Cutting or verifying a release: <strong><a href="./releases.html">Releases</a></strong></li>
 </ul>
+<p>The canonical Iceberg specification, terminology, and multi-engine policy live with the main project at <a href="https://iceberg.apache.org/">iceberg.apache.org</a>. This site covers what is specific to the Go implementation.</p>
 
                     </main>
 

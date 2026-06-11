@@ -124,7 +124,7 @@
 
         <nav id="sidebar" class="sidebar" aria-label="Table of contents">
             <div class="sidebar-scrollbox">
-                <ol class="chapter"><li class="chapter-item expanded "><a href="introduction.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">User Guide</li><li class="chapter-item expanded "><a href="install.html">Install</a></li><li class="chapter-item expanded "><a href="cli.html">CLI</a></li><li class="chapter-item expanded "><a href="api.html">API</a></li><li class="chapter-item expanded affix "><li class="part-title">Developer Guide</li><li class="chapter-item expanded "><a href="glossary.html">Glossary</a></li></ol>
+                <ol class="chapter"><li class="chapter-item expanded "><a href="introduction.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">User Guide</li><li class="chapter-item expanded "><a href="install.html">Install</a></li><li class="chapter-item expanded "><a href="getting-started.html">Getting Started</a></li><li class="chapter-item expanded "><a href="configuration.html">Configuration</a></li><li class="chapter-item expanded "><a href="cli.html">CLI</a></li><li class="chapter-item expanded "><a href="api.html">API</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="row-filter-syntax.html">Row Filter Syntax</a></li><li class="chapter-item expanded "><a href="expression-dsl.html">Expression DSL</a></li></ol></li><li class="chapter-item expanded "><a href="feature-status.html">Feature Status</a></li><li class="chapter-item expanded affix "><li class="part-title">Developer Guide</li><li class="chapter-item expanded "><a href="contributing.html">Contributing</a></li><li class="chapter-item expanded "><a href="community.html">Community</a></li><li class="chapter-item expanded "><a href="glossary.html">Glossary</a></li><li class="chapter-item expanded affix "><li class="part-title">Releases</li><li class="chapter-item expanded "><a href="releases.html">Releases</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="verify-release.html">Verify a release</a></li><li class="chapter-item expanded "><a href="how-to-release.html">How to release</a></li></ol></li><li class="chapter-item expanded "><li class="part-title">Ecosystem</li><li class="chapter-item expanded "><a href="ecosystem.html">Other Iceberg implementations</a></li></ol>
             </div>
             <div id="sidebar-resize-handle" class="sidebar-resize-handle">
                 <div class="sidebar-resize-indicator"></div>
@@ -231,79 +231,26 @@
   ~ under the License.
 -->
 <h1 id="iceberg-go"><a class="header" href="#iceberg-go">Iceberg Go</a></h1>
-<p>Iceberg Go is a go-native implementation for accessing iceberg tables.</p>
+<p>Apache Iceberg Go is a Go-native implementation of <a href="https://iceberg.apache.org/">Apache Iceberg</a>, the open table format for analytic datasets. Read and write Iceberg tables from Go services and tooling without a JVM.</p>
 <p><a href="https://pkg.go.dev/github.com/apache/iceberg-go"><img src="https://pkg.go.dev/badge/github.com/apache/iceberg-go.svg" alt="Go Reference" /></a></p>
-<p><code>iceberg</code> is a Golang implementation of the <a href="https://iceberg.apache.org/spec/">Iceberg table spec</a>.</p>
-<h2 id="feature-support--roadmap"><a class="header" href="#feature-support--roadmap">Feature Support / Roadmap</a></h2>
-<h3 id="filesystem-support"><a class="header" href="#filesystem-support">FileSystem Support</a></h3>
-<div class="table-wrapper"><table><thead><tr><th style="text-align: center">Filesystem Type</th><th style="text-align: center">Supported</th></tr></thead><tbody>
-<tr><td style="text-align: center">S3</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: center">Google Cloud Storage</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: center">Azure Blob Storage</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: center">Local Filesystem</td><td style="text-align: center">X</td></tr>
-</tbody></table>
-</div>
-<h3 id="metadata"><a class="header" href="#metadata">Metadata</a></h3>
-<div class="table-wrapper"><table><thead><tr><th style="text-align: left">Operation</th><th style="text-align: center">Supported</th></tr></thead><tbody>
-<tr><td style="text-align: left">Get Schema</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Get Snapshots</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Get Sort Orders</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Get Partition Specs</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Get Manifests</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Create New Manifests</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Plan Scan</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Plan Scan for Snapshot</td><td style="text-align: center">X</td></tr>
-</tbody></table>
-</div>
-<h3 id="catalog-support"><a class="header" href="#catalog-support">Catalog Support</a></h3>
-<div class="table-wrapper"><table><thead><tr><th style="text-align: left">Operation</th><th style="text-align: center">REST</th><th style="text-align: center">Hive</th><th style="text-align: center">Glue</th><th style="text-align: center">SQL</th></tr></thead><tbody>
-<tr><td style="text-align: left">Load Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">List Tables</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Create Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Register Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td></tr>
-<tr><td style="text-align: left">Update Current Snapshot</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Create New Snapshot</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Rename Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Drop Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Alter Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Check Table Exists</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Set Table Properties</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">List Namespaces</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Create Namespace</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Check Namespace Exists</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Drop Namespace</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Update Namespace Properties</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Create View</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Load View</td><td style="text-align: center"></td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">List View</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Drop View</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Check View Exists</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td></tr>
-</tbody></table>
-</div>
-<h3 id="readwrite-data-support"><a class="header" href="#readwrite-data-support">Read/Write Data Support</a></h3>
+<h2 id="where-to-start"><a class="header" href="#where-to-start">Where to start</a></h2>
 <ul>
-<li>Data can currently be read as an Arrow Table or as a stream of Arrow record batches.</li>
+<li><strong><a href="./install.html">Install</a></strong> - get the library and CLI on your machine.</li>
+<li><strong><a href="./cli.html">CLI</a></strong> - inspect tables, run maintenance, manage refs.</li>
+<li><strong><a href="./api.html">API</a></strong> - construct catalogs, scan tables, write Arrow data, evolve schemas.</li>
+<li><strong><a href="./configuration.html">Configuration</a></strong> - YAML config file, catalog options, FileIO and credentials, table properties.</li>
 </ul>
-<h4 id="supported-write-operations"><a class="header" href="#supported-write-operations">Supported Write Operations</a></h4>
-<p>As long as the FileSystem is supported and the Catalog supports altering
-the table, the following tracks the current write support:</p>
-<div class="table-wrapper"><table><thead><tr><th style="text-align: left">Operation</th><th style="text-align: center">Supported</th></tr></thead><tbody>
-<tr><td style="text-align: left">Append Stream</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Append Data Files</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Rewrite Files</td><td style="text-align: center"></td></tr>
-<tr><td style="text-align: left">Rewrite manifests</td><td style="text-align: center"></td></tr>
-<tr><td style="text-align: left">Overwrite Files</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Copy-On-Write Delete</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Write Pos Delete</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Write Eq Delete</td><td style="text-align: center"></td></tr>
-<tr><td style="text-align: left">Row Delta</td><td style="text-align: center"></td></tr>
-</tbody></table>
-</div>
-<h2 id="get-in-touch"><a class="header" href="#get-in-touch">Get in Touch</a></h2>
+<h2 id="what-works-today"><a class="header" href="#what-works-today">What works today</a></h2>
+<p>A capability matrix - filesystem, metadata operations, catalog support, and write operations - lives on the dedicated <strong><a href="./feature-status.html">Feature Status</a></strong> page.</p>
+<h2 id="beyond-go"><a class="header" href="#beyond-go">Beyond Go</a></h2>
+<p>Apache Iceberg is multi-language. PyIceberg, iceberg-rust, iceberg-cpp, and the Java reference implementation all target the same spec - see <strong><a href="./ecosystem.html">Other Iceberg implementations</a></strong> for cross-links.</p>
+<h2 id="help-and-contribution"><a class="header" href="#help-and-contribution">Help and contribution</a></h2>
 <ul>
-<li><a href="https://iceberg.apache.org/community/">Iceberg community</a></li>
-<li><a href="https://apache-iceberg.slack.com/archives/C05J3MJ42BD">Iceberg-Go Slack</a></li>
+<li>Questions and discussion: <strong><a href="./community.html">Community</a></strong></li>
+<li>Contributing code or docs: <strong><a href="./contributing.html">Contributing</a></strong></li>
+<li>Cutting or verifying a release: <strong><a href="./releases.html">Releases</a></strong></li>
 </ul>
+<p>The canonical Iceberg specification, terminology, and multi-engine policy live with the main project at <a href="https://iceberg.apache.org/">iceberg.apache.org</a>. This site covers what is specific to the Go implementation.</p>
 <div style="break-before: page; page-break-before: always;"></div><!--
   ~ Licensed to the Apache Software Foundation (ASF) under one
   ~ or more contributor license agreements.  See the NOTICE file
@@ -342,6 +289,492 @@ If you don't have a go.mod file, create it with <code>go mod init gin</code>.</p
 <pre><code class="language-go">import &quot;github.com/apache/iceberg-go&quot;
 </code></pre>
 <div style="break-before: page; page-break-before: always;"></div><!--
+  ~ Licensed to the Apache Software Foundation (ASF) under one
+  ~ or more contributor license agreements.  See the NOTICE file
+  ~ distributed with this work for additional information
+  ~ regarding copyright ownership.  The ASF licenses this file
+  ~ to you under the Apache License, Version 2.0 (the
+  ~ "License"); you may not use this file except in compliance
+  ~ with the License.  You may obtain a copy of the License at
+  ~
+  ~   http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing,
+  ~ software distributed under the License is distributed on an
+  ~ "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+  ~ KIND, either express or implied.  See the License for the
+  ~ specific language governing permissions and limitations
+  ~ under the License.
+-->
+<h1 id="getting-started"><a class="header" href="#getting-started">Getting Started</a></h1>
+<p>This walkthrough takes you from <code>go get</code> to a fully written-and-read Iceberg table in a few minutes, using a local SQLite-backed catalog so you do not need any external services. By the end you will have:</p>
+<ul>
+<li>An Iceberg catalog stored in a SQLite file</li>
+<li>A table with an Arrow schema</li>
+<li>Data written from Apache Arrow Go and read back</li>
+<li>A schema evolution committed</li>
+<li>A branch created on top of the table</li>
+</ul>
+<p>If you would rather see all the operations as a reference, jump straight to the <a href="./api.html">API</a>.</p>
+<h2 id="1-install"><a class="header" href="#1-install">1. Install</a></h2>
+<pre><code class="language-sh">go mod init iceberg-go-tutorial
+go get github.com/apache/iceberg-go@latest
+go get github.com/apache/arrow-go/v18@latest
+go get github.com/uptrace/bun/driver/sqliteshim@latest
+</code></pre>
+<p><code>iceberg-go</code> itself only registers the local file system. For S3, GCS, or Azure Blob you would also blank-import <code>github.com/apache/iceberg-go/io/gocloud</code>. We are staying on local disk for this tutorial.</p>
+<h2 id="2-open-a-local-catalog"><a class="header" href="#2-open-a-local-catalog">2. Open a local catalog</a></h2>
+<p>The SQL catalog stores its metadata in a database, and the actual data files live under a &quot;warehouse&quot; directory. We will use SQLite for both the catalog DB and a local folder for the warehouse.</p>
+<pre><code class="language-go">package main
+
+import (
+    &quot;context&quot;
+    &quot;database/sql&quot;
+    &quot;log&quot;
+
+    &quot;github.com/apache/iceberg-go&quot;
+    sqlcat &quot;github.com/apache/iceberg-go/catalog/sql&quot;
+    &quot;github.com/uptrace/bun/driver/sqliteshim&quot;
+)
+
+func openCatalog(ctx context.Context) (*sqlcat.Catalog, error) {
+    db, err := sql.Open(sqliteshim.ShimName, &quot;file:./tutorial-catalog.db?cache=shared&quot;)
+    if err != nil {
+        return nil, err
+    }
+    return sqlcat.NewCatalog(&quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
+        &quot;warehouse&quot;:            &quot;file:///tmp/iceberg-tutorial&quot;,
+        &quot;init_catalog_tables&quot;:  &quot;true&quot;,
+    })
+}
+</code></pre>
+<p><code>init_catalog_tables: &quot;true&quot;</code> lets the catalog create its bookkeeping tables (<code>iceberg_tables</code>, <code>iceberg_namespace_properties</code>) on first use. Make sure <code>/tmp/iceberg-tutorial</code> is writable.</p>
+<h2 id="3-create-a-namespace-and-a-table"><a class="header" href="#3-create-a-namespace-and-a-table">3. Create a namespace and a table</a></h2>
+<p>Iceberg organizes tables under namespaces (the analog of databases). We will create one and put a table inside it.</p>
+<pre><code class="language-go">import (
+    &quot;github.com/apache/iceberg-go/catalog&quot;
+    &quot;github.com/apache/iceberg-go/table&quot;
+)
+
+func createTrips(ctx context.Context, cat *sqlcat.Catalog) (*table.Table, error) {
+    ns := table.Identifier{&quot;taxi&quot;}
+    if err := cat.CreateNamespace(ctx, ns, nil); err != nil {
+        return nil, err
+    }
+
+    schema := iceberg.NewSchema(1,
+        iceberg.NestedField{ID: 1, Name: &quot;trip_id&quot;, Type: iceberg.PrimitiveTypes.Int64, Required: true},
+        iceberg.NestedField{ID: 2, Name: &quot;fare&quot;, Type: iceberg.PrimitiveTypes.Float64, Required: false},
+        iceberg.NestedField{ID: 3, Name: &quot;borough&quot;, Type: iceberg.PrimitiveTypes.String, Required: false},
+    )
+
+    ident := catalog.ToIdentifier(&quot;taxi&quot;, &quot;trips&quot;)
+    return cat.CreateTable(ctx, ident, schema)
+}
+</code></pre>
+<p>If the namespace already exists, <code>CreateNamespace</code> returns an error - the example skips error handling for brevity; production code should check for <code>iceberg.ErrAlreadyExists</code> and recover.</p>
+<h2 id="4-write-some-arrow-data"><a class="header" href="#4-write-some-arrow-data">4. Write some Arrow data</a></h2>
+<p>The write path takes either a streaming <a href="https://pkg.go.dev/github.com/apache/arrow-go/v18/arrow/array#RecordReader"><code>array.RecordReader</code></a> or a fully materialized <a href="https://pkg.go.dev/github.com/apache/arrow-go/v18/arrow#Table"><code>arrow.Table</code></a>. We will build a small Arrow table inline and append it.</p>
+<pre><code class="language-go">import (
+    &quot;github.com/apache/arrow-go/v18/arrow&quot;
+    &quot;github.com/apache/arrow-go/v18/arrow/array&quot;
+    &quot;github.com/apache/arrow-go/v18/arrow/memory&quot;
+)
+
+func writeSomeTrips(ctx context.Context, tbl *table.Table) (*table.Table, error) {
+    mem := memory.NewGoAllocator()
+
+    arrowSchema := arrow.NewSchema([]arrow.Field{
+        {Name: &quot;trip_id&quot;, Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+        {Name: &quot;fare&quot;, Type: arrow.PrimitiveTypes.Float64, Nullable: true},
+        {Name: &quot;borough&quot;, Type: arrow.BinaryTypes.String, Nullable: true},
+    }, nil)
+
+    b := array.NewRecordBuilder(mem, arrowSchema)
+    defer b.Release()
+
+    b.Field(0).(*array.Int64Builder).AppendValues([]int64{1, 2, 3}, nil)
+    b.Field(1).(*array.Float64Builder).AppendValues([]float64{12.50, 8.75, 22.10}, nil)
+    b.Field(2).(*array.StringBuilder).AppendValues([]string{&quot;Manhattan&quot;, &quot;Brooklyn&quot;, &quot;Queens&quot;}, nil)
+
+    rec := b.NewRecord()
+    defer rec.Release()
+
+    arrowTbl := array.NewTableFromRecords(arrowSchema, []arrow.Record{rec})
+    defer arrowTbl.Release()
+
+    return tbl.AppendTable(ctx, arrowTbl, 1024 /* batchSize */, nil)
+}
+</code></pre>
+<p><code>AppendTable</code> returns a refreshed <code>*table.Table</code> reflecting the new snapshot.</p>
+<h2 id="5-read-the-data-back"><a class="header" href="#5-read-the-data-back">5. Read the data back</a></h2>
+<pre><code class="language-go">func readAll(ctx context.Context, tbl *table.Table) error {
+    arrowTbl, err := tbl.Scan().ToArrowTable(ctx)
+    if err != nil {
+        return err
+    }
+    defer arrowTbl.Release()
+
+    log.Printf(&quot;read %d rows in %d columns&quot;, arrowTbl.NumRows(), arrowTbl.NumCols())
+    return nil
+}
+</code></pre>
+<p>For larger tables, use streaming so only one batch is in memory at a time:</p>
+<pre><code class="language-go">arrowSchema, batches, err := tbl.Scan().ToArrowRecords(ctx)
+if err != nil {
+    return err
+}
+log.Printf(&quot;scan schema: %s&quot;, arrowSchema)
+
+for batch, err := range batches {
+    if err != nil {
+        return err
+    }
+    log.Printf(&quot;batch with %d rows&quot;, batch.NumRows())
+    batch.Release()
+}
+</code></pre>
+<h2 id="6-filter-and-project"><a class="header" href="#6-filter-and-project">6. Filter and project</a></h2>
+<p>Use the <a href="./row-filter-syntax.html">predicate DSL</a> to push filters down into the scan, and <code>WithSelectedFields</code> to project columns:</p>
+<pre><code class="language-go">filter := iceberg.GreaterThan(iceberg.Reference(&quot;fare&quot;), float64(10.0))
+
+arrowTbl, err := tbl.Scan(
+    table.WithSelectedFields(&quot;trip_id&quot;, &quot;fare&quot;),
+    table.WithRowFilter(filter),
+).ToArrowTable(ctx)
+</code></pre>
+<h2 id="7-evolve-the-schema"><a class="header" href="#7-evolve-the-schema">7. Evolve the schema</a></h2>
+<p>Most schema changes go through a transaction. Add a <code>tip</code> column:</p>
+<pre><code class="language-go">import &quot;github.com/apache/iceberg-go/table&quot;
+
+func addTipColumn(ctx context.Context, tbl *table.Table) (*table.Table, error) {
+    txn := tbl.NewTransaction()
+
+    err := table.NewUpdateSchema(txn, true /* caseSensitive */, false /* allowIncompatible */).
+        AddColumn([]string{&quot;tip&quot;}, iceberg.PrimitiveTypes.Float64, &quot;Tip in dollars&quot;, false, nil).
+        Commit()
+    if err != nil {
+        return nil, err
+    }
+
+    return txn.Commit(ctx)
+}
+</code></pre>
+<p>The returned table has the new schema and a fresh metadata file.</p>
+<h2 id="8-branch-the-table"><a class="header" href="#8-branch-the-table">8. Branch the table</a></h2>
+<p>A branch is a named ref that points at a snapshot. Creating one requires a metadata commit that adds the ref - <code>NewTransactionOnBranch</code> only writes to a branch that already exists. Two steps:</p>
+<pre><code class="language-go">import &quot;github.com/apache/iceberg-go/table&quot;
+
+// Step 1: create the branch via Catalog.CommitTable.
+func createExperimentBranch(ctx context.Context, cat *sqlcat.Catalog, tbl *table.Table) (*table.Table, error) {
+    snap := tbl.CurrentSnapshot()
+    update := table.NewSetSnapshotRefUpdate(
+        &quot;experiment&quot;, snap.SnapshotID, table.BranchRef,
+        0 /* maxRefAgeMs */, 0 /* maxSnapshotAgeMs */, 0 /* minSnapshotsToKeep */,
+    )
+    reqs := []table.Requirement{
+        table.AssertTableUUID(tbl.Metadata().TableUUID()),
+        table.AssertRefSnapshotID(&quot;experiment&quot;, nil), // branch must not yet exist
+    }
+    if _, _, err := cat.CommitTable(ctx, tbl.Identifier(), reqs, []table.Update{update}); err != nil {
+        return nil, err
+    }
+    // Reload so subsequent transactions see the new ref.
+    return cat.LoadTable(ctx, tbl.Identifier())
+}
+
+// Step 2: open a transaction on the branch and write.
+func writeOnBranch(ctx context.Context, tbl *table.Table, arrowTbl arrow.Table) (*table.Table, error) {
+    txn := tbl.NewTransactionOnBranch(&quot;experiment&quot;)
+    if err := txn.AppendTable(ctx, arrowTbl, 1024, nil); err != nil {
+        return nil, err
+    }
+    return txn.Commit(ctx)
+}
+</code></pre>
+<p>Reads can target the branch with <code>tbl.Scan().UseRef(&quot;experiment&quot;)</code>.</p>
+<h2 id="where-to-go-next"><a class="header" href="#where-to-go-next">Where to go next</a></h2>
+<ul>
+<li><a href="./api.html">API</a> - the full Go surface for catalogs, tables, scans, writes, transactions, schema and partition evolution, snapshot management, maintenance, and views.</li>
+<li><a href="./configuration.html">Configuration</a> - cloud credentials, table properties, concurrency, custom catalog and IO registration.</li>
+<li><a href="./cli.html">CLI</a> - inspect, expire, compact, branch, and tag from the command line.</li>
+<li><a href="./row-filter-syntax.html">Row Filter Syntax</a> and <a href="./expression-dsl.html">Expression DSL</a> - the predicate DSL in detail.</li>
+</ul>
+<p>The full Iceberg specification, terminology, and engine integration policy live with the main project at <a href="https://iceberg.apache.org/">iceberg.apache.org</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div><!--
+  ~ Licensed to the Apache Software Foundation (ASF) under one
+  ~ or more contributor license agreements.  See the NOTICE file
+  ~ distributed with this work for additional information
+  ~ regarding copyright ownership.  The ASF licenses this file
+  ~ to you under the Apache License, Version 2.0 (the
+  ~ "License"); you may not use this file except in compliance
+  ~ with the License.  You may obtain a copy of the License at
+  ~
+  ~   http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing,
+  ~ software distributed under the License is distributed on an
+  ~ "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+  ~ KIND, either express or implied.  See the License for the
+  ~ specific language governing permissions and limitations
+  ~ under the License.
+-->
+<h1 id="configuration"><a class="header" href="#configuration">Configuration</a></h1>
+<p>This page documents how to configure Apache Iceberg Go: the CLI's YAML config file, per-catalog <code>Option</code> surfaces, file-system credentials, table write properties, concurrency, and how to plug in custom catalogs and IO backends.</p>
+<p>Only properties and options that the iceberg-go code actually reads are listed. Properties defined in the Apache Iceberg spec but not yet wired into iceberg-go are intentionally omitted - check <code>pkg.go.dev/github.com/apache/iceberg-go</code> for the latest read sites.</p>
+<h2 id="cli-configuration-file"><a class="header" href="#cli-configuration-file">CLI configuration file</a></h2>
+<p>The <code>iceberg</code> CLI loads catalog defaults from <code>~/.iceberg-go.yaml</code> (override the directory with <code>GOICEBERG_HOME</code>). The schema, defined in <a href="https://github.com/apache/iceberg-go/blob/main/config/config.go"><code>config/config.go</code></a>, is:</p>
+<pre><code class="language-yaml">default-catalog: default
+max-workers: 5
+catalog:
+  default:
+    type: rest
+    uri: https://example.com/iceberg
+    warehouse: s3://my-bucket/warehouse
+    credential: &lt;client-id&gt;:&lt;client-secret&gt;
+    output: text
+    rest:
+      sigv4-enabled: false
+      signing-name: &quot;&quot;
+      signing-region: &quot;&quot;
+</code></pre>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>default-catalog</code></td><td>Name used when <code>--catalog-name</code> is not passed on the CLI.</td></tr>
+<tr><td><code>max-workers</code></td><td>Worker pool size for concurrent operations. Default <code>5</code>.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.type</code></td><td>One of <code>rest</code>, <code>hive</code>, <code>glue</code>, <code>sql</code>, <code>hadoop</code>.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.uri</code></td><td>Catalog endpoint or DSN.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.warehouse</code></td><td>Warehouse identifier (REST/Glue) or location (Hive/SQL).</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.credential</code></td><td>Credential string passed through to the catalog's auth handler.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.output</code></td><td>CLI output format (e.g. <code>text</code>, <code>json</code>).</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.rest.sigv4-enabled</code></td><td>Enable AWS SigV4 signing for REST.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.rest.signing-name</code></td><td>SigV4 service name.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.rest.signing-region</code></td><td>SigV4 region.</td></tr>
+</tbody></table>
+</div>
+<h2 id="catalog-options"><a class="header" href="#catalog-options">Catalog options</a></h2>
+<p>Each catalog package exposes its own functional <code>Option</code> set. The lists below reflect the public option surface; <code>pkg.go.dev</code> is authoritative for the current set.</p>
+<h3 id="rest-catalogrest"><a class="header" href="#rest-catalogrest">REST (<code>catalog/rest</code>)</a></h3>
+<p>The most option-rich surface. Source: <a href="https://github.com/apache/iceberg-go/blob/main/catalog/rest/options.go"><code>catalog/rest/options.go</code></a>.</p>
+<div class="table-wrapper"><table><thead><tr><th>Group</th><th>Options</th></tr></thead><tbody>
+<tr><td>Authentication</td><td><code>WithCredential</code>, <code>WithOAuthToken</code>, <code>WithAuthManager</code>, <code>WithAuthURI</code>, <code>WithScope</code>, <code>WithAudience</code>, <code>WithResource</code></td></tr>
+<tr><td>AWS SigV4</td><td><code>WithSigV4</code>, <code>WithSigV4RegionSvc</code>, <code>WithAwsConfig</code></td></tr>
+<tr><td>HTTP</td><td><code>WithHeaders</code>, <code>WithTLSConfig</code>, <code>WithOAuthTLSConfig</code>, <code>WithCustomTransport</code></td></tr>
+<tr><td>Catalog routing</td><td><code>WithPrefix</code>, <code>WithWarehouseLocation</code>, <code>WithMetadataLocation</code></td></tr>
+<tr><td>Pass-through</td><td><code>WithAdditionalProps</code></td></tr>
+</tbody></table>
+</div>
+<h3 id="hive-cataloghive"><a class="header" href="#hive-cataloghive">Hive (<code>catalog/hive</code>)</a></h3>
+<p>Source: <a href="https://github.com/apache/iceberg-go/blob/main/catalog/hive/options.go"><code>catalog/hive/options.go</code></a>.</p>
+<ul>
+<li><code>WithURI(uri string)</code> - Thrift URI for the Hive Metastore (e.g. <code>thrift://127.0.0.1:9083</code>).</li>
+<li><code>WithWarehouse(warehouse string)</code></li>
+<li><code>WithProperties(props iceberg.Properties)</code></li>
+</ul>
+<h3 id="glue-catalogglue"><a class="header" href="#glue-catalogglue">Glue (<code>catalog/glue</code>)</a></h3>
+<p>Source: <a href="https://github.com/apache/iceberg-go/blob/main/catalog/glue/options.go"><code>catalog/glue/options.go</code></a>.</p>
+<ul>
+<li><code>WithAwsConfig(cfg aws.Config)</code> - AWS SDK v2 config; respects the AWS default credential chain.</li>
+<li><code>WithAwsProperties(props AwsProperties)</code> - explicit overrides for region/endpoint/access keys.</li>
+</ul>
+<h3 id="sql-catalogsql"><a class="header" href="#sql-catalogsql">SQL (<code>catalog/sql</code>)</a></h3>
+<p>The SQL catalog has no functional-option surface. Construct it with <code>NewCatalog</code>:</p>
+<pre><code class="language-go">db, _ := sql.Open(sqliteshim.ShimName, &quot;file:catalog.db&quot;)
+cat, err := sqlcat.NewCatalog(&quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
+    &quot;warehouse&quot;: &quot;file:///tmp/warehouse&quot;,
+})
+</code></pre>
+<p>Supported dialects: <code>sqlcat.Postgres</code>, <code>sqlcat.MySQL</code>, <code>sqlcat.SQLite</code>, <code>sqlcat.MSSQL</code>, <code>sqlcat.Oracle</code> (<code>catalog/sql/sql.go:50</code>).</p>
+<h3 id="shared-options-on-the-base-catalog-package"><a class="header" href="#shared-options-on-the-base-catalog-package">Shared options on the base <code>catalog</code> package</a></h3>
+<p>Operations that create or update tables/views accept these (<code>catalog/catalog.go</code>):</p>
+<ul>
+<li><code>WithLocation</code>, <code>WithPartitionSpec</code>, <code>WithSortOrder</code>, <code>WithProperties</code>, <code>WithStagedUpdates</code></li>
+<li>View-specific: <code>WithViewLocation</code>, <code>WithViewProperties</code></li>
+</ul>
+<h2 id="file-system-credentials"><a class="header" href="#file-system-credentials">File-system credentials</a></h2>
+<p>iceberg-go registers the local file system (<code>file://</code>) automatically. Cloud schemes are <em>not</em> registered until you add a blank import:</p>
+<pre><code class="language-go">import _ &quot;github.com/apache/iceberg-go/io/gocloud&quot;
+</code></pre>
+<p>The <code>init()</code> function in <a href="https://github.com/apache/iceberg-go/blob/main/io/gocloud/register.go"><code>io/gocloud/register.go</code></a> registers <code>s3</code>, <code>s3a</code>, <code>s3n</code>, <code>oss</code>, <code>gs</code>, <code>abfs</code>, <code>abfss</code>, <code>wasb</code>, and <code>wasbs</code>. Without the blank import, these schemes return <code>ErrIOSchemeNotFound</code> with a hint to add the import.</p>
+<p>All credential and tuning property keys are constants in <a href="https://github.com/apache/iceberg-go/blob/main/io/config.go"><code>io/config.go</code></a>. They can be supplied through table properties, catalog properties, or per-call <code>iceberg.Properties</code> arguments depending on context.</p>
+<h3 id="s3"><a class="header" href="#s3">S3</a></h3>
+<p>Authentication is resolved in this order (<code>io/gocloud/s3.go</code>):</p>
+<ol>
+<li>Static credentials in properties: <code>s3.access-key-id</code> + <code>s3.secret-access-key</code> (+ optional <code>s3.session-token</code>).</li>
+<li>The standard AWS SDK v2 default credential chain - environment variables (<code>AWS_ACCESS_KEY_ID</code>, <code>AWS_SECRET_ACCESS_KEY</code>, <code>AWS_SESSION_TOKEN</code>), <code>~/.aws/credentials</code>, container/IAM role.</li>
+</ol>
+<p>Tuning properties:</p>
+<div class="table-wrapper"><table><thead><tr><th>Key (constant)</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>s3.region</code> (<code>io.S3Region</code>) / <code>client.region</code> (<code>io.S3ClientRegion</code>)</td><td>AWS region.</td></tr>
+<tr><td><code>s3.endpoint</code> (<code>io.S3EndpointURL</code>)</td><td>Override S3 endpoint URL (custom or compatible storage). Falls back to <code>AWS_S3_ENDPOINT</code> env.</td></tr>
+<tr><td><code>s3.access-key-id</code> (<code>io.S3AccessKeyID</code>)</td><td>Static access key.</td></tr>
+<tr><td><code>s3.secret-access-key</code> (<code>io.S3SecretAccessKey</code>)</td><td>Static secret key.</td></tr>
+<tr><td><code>s3.session-token</code> (<code>io.S3SessionToken</code>)</td><td>Static session token.</td></tr>
+<tr><td><code>s3.proxy-uri</code> (<code>io.S3ProxyURI</code>)</td><td>HTTP proxy URL.</td></tr>
+<tr><td><code>s3.connect-timeout</code> (<code>io.S3ConnectTimeout</code>)</td><td>Either a number of seconds (<code>&quot;60&quot;</code>, <code>&quot;60.0&quot;</code>) or a Go duration (<code>&quot;5s&quot;</code>).</td></tr>
+<tr><td><code>s3.force-virtual-addressing</code> (<code>io.S3ForceVirtualAddressing</code>)</td><td>Force virtual-host-style addressing.</td></tr>
+<tr><td><code>s3.signer.uri</code> (<code>io.S3SignerURI</code>)</td><td>Reserved for remote-signing endpoint (not yet implemented).</td></tr>
+</tbody></table>
+</div>
+<h3 id="google-cloud-storage"><a class="header" href="#google-cloud-storage">Google Cloud Storage</a></h3>
+<p>Authentication resolution (<code>io/gocloud/gcs.go</code>):</p>
+<ol>
+<li>Explicit JSON key bytes via <code>gcs.jsonkey</code> or path via <code>gcs.keypath</code>.</li>
+<li>Optional <code>gcs.credtype</code> selecting one of <code>service_account</code>, <code>authorized_user</code>, <code>impersonated_service_account</code>, <code>external_account</code>.</li>
+<li>The GCP default credentials chain (<code>gcp.DefaultCredentials</code>) - falls back to anonymous if no creds are found.</li>
+</ol>
+<p>Tuning properties:</p>
+<div class="table-wrapper"><table><thead><tr><th>Key (constant)</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>gcs.endpoint</code> (<code>io.GCSEndpoint</code>)</td><td>Custom GCS endpoint URL.</td></tr>
+<tr><td><code>gcs.keypath</code> (<code>io.GCSKeyPath</code>)</td><td>Path to a JSON service-account key file.</td></tr>
+<tr><td><code>gcs.jsonkey</code> (<code>io.GCSJSONKey</code>)</td><td>JSON key as a string.</td></tr>
+<tr><td><code>gcs.credtype</code> (<code>io.GCSCredType</code>)</td><td>Credential type override.</td></tr>
+<tr><td><code>gcs.usejsonapi</code> (<code>io.GCSUseJSONAPI</code>)</td><td>Set to any value to enable the GCS JSON API for reads.</td></tr>
+</tbody></table>
+</div>
+<h3 id="azure-data-lake-storage--blob"><a class="header" href="#azure-data-lake-storage--blob">Azure Data Lake Storage / Blob</a></h3>
+<p>Authentication is selected based on the property keys present (<code>io/gocloud/azure.go</code>):</p>
+<ol>
+<li>Shared key: both <code>adls.auth.shared-key.account.name</code> and <code>adls.auth.shared-key.account.key</code> set.</li>
+<li>Per-host SAS token: <code>adls.sas-token.&lt;hostname&gt;</code> (prefix-matched against the storage account host).</li>
+<li>Per-host connection string: <code>adls.connection-string.&lt;hostname&gt;</code>.</li>
+<li>Managed identity: <code>adls.auth.managed-identity.enabled</code> set to a truthy value.</li>
+</ol>
+<p>Tuning properties:</p>
+<div class="table-wrapper"><table><thead><tr><th>Key (constant)</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>adls.auth.shared-key.account.name</code> (<code>io.ADLSSharedKeyAccountName</code>)</td><td>Account name.</td></tr>
+<tr><td><code>adls.auth.shared-key.account.key</code> (<code>io.ADLSSharedKeyAccountKey</code>)</td><td>Account key.</td></tr>
+<tr><td><code>adls.sas-token.&lt;host&gt;</code> (prefix <code>io.ADLSSasTokenPrefix</code>)</td><td>Per-host SAS token.</td></tr>
+<tr><td><code>adls.connection-string.&lt;host&gt;</code> (prefix <code>io.ADLSConnectionStringPrefix</code>)</td><td>Per-host connection string.</td></tr>
+<tr><td><code>adls.client-id</code> (<code>io.ADLSClientID</code>)</td><td>Client/application ID for AAD auth.</td></tr>
+<tr><td><code>adls.endpoint</code> (<code>io.ADLSEndpoint</code>)</td><td>Storage domain (e.g. <code>blob.core.windows.net</code>).</td></tr>
+<tr><td><code>adls.protocol</code> (<code>io.ADLSProtocol</code>)</td><td><code>http</code> or <code>https</code>.</td></tr>
+<tr><td><code>adls.auth.managed-identity.enabled</code> (<code>io.ADLSManagedIdentityEnabled</code>)</td><td>Enable Azure Managed Identity auth.</td></tr>
+</tbody></table>
+</div>
+<h2 id="environment-variables"><a class="header" href="#environment-variables">Environment variables</a></h2>
+<p>iceberg-go reads only a small set of environment variables directly. AWS / GCP / Azure credentials flow through the respective SDKs, not through iceberg-go-defined env vars.</p>
+<div class="table-wrapper"><table><thead><tr><th>Variable</th><th>Purpose</th><th>Read at</th></tr></thead><tbody>
+<tr><td><code>GOICEBERG_HOME</code></td><td>Directory containing <code>.iceberg-go.yaml</code>. Defaults to the user's home directory.</td><td><code>config/config.go:87</code></td></tr>
+<tr><td><code>ICEBERG_SQL_DEBUG</code></td><td>SQL catalog query logging - <code>1</code> (failed queries), <code>2</code> (all queries).</td><td><code>catalog/sql/sql.go:206</code></td></tr>
+<tr><td><code>AWS_S3_ENDPOINT</code></td><td>Fallback S3 endpoint when <code>s3.endpoint</code> is unset.</td><td><code>io/gocloud/s3.go:193</code></td></tr>
+</tbody></table>
+</div>
+<p>There is no <code>PYICEBERG_*</code>-style env var convention. Use the YAML config file or pass <code>iceberg.Properties</code> to overrides programmatically.</p>
+<h2 id="concurrency"><a class="header" href="#concurrency">Concurrency</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Setting</th><th>Source</th><th>Effect</th></tr></thead><tbody>
+<tr><td><code>max-workers</code> in <code>~/.iceberg-go.yaml</code> (<code>config.EnvConfig.MaxWorkers</code>)</td><td>YAML config</td><td>Worker pool size used by parallel column writes, snapshot producers, scan plan, equality-delete writers. Default <code>5</code>.</td></tr>
+<tr><td><code>WitMaxConcurrency(n int) ScanOption</code></td><td>Code (<code>table.WitMaxConcurrency</code>)</td><td>Per-scan override. Note: function name is <code>Wit...</code> (not <code>With...</code>) - this is a pre-existing typo in the public API.</td></tr>
+<tr><td><code>WithMaxWriteWorkers(n int)</code></td><td>Code (per-write API on <code>WriteRecords</code>)</td><td>Per-write override of the worker count.</td></tr>
+<tr><td><code>WithClusteredWrite()</code></td><td>Code (per-write API on <code>WriteRecords</code>)</td><td>Forces single-threaded writes. Mutually exclusive with <code>WithMaxWriteWorkers</code>.</td></tr>
+</tbody></table>
+</div>
+<h2 id="pluggability"><a class="header" href="#pluggability">Pluggability</a></h2>
+<p>Two registries are user-extensible. The third (LocationProvider) is currently informational.</p>
+<h3 id="io-scheme-registry"><a class="header" href="#io-scheme-registry">IO scheme registry</a></h3>
+<p>Register a custom URL scheme with <a href="https://github.com/apache/iceberg-go/blob/main/io/registry.go"><code>io.Register</code></a>:</p>
+<pre><code class="language-go">import (
+    &quot;context&quot;
+    &quot;net/url&quot;
+
+    &quot;github.com/apache/iceberg-go/io&quot;
+)
+
+func init() {
+    io.Register(&quot;myfs&quot;, func(ctx context.Context, parsed *url.URL, props map[string]string) (io.IO, error) {
+        return newMyFS(parsed, props)
+    })
+}
+</code></pre>
+<p><code>io.Register</code> panics on <code>nil</code> factory or duplicate scheme. Built-in schemes: <code>file</code>, <code>&quot;&quot;</code> (the empty scheme). Cloud schemes (<code>s3</code>, <code>gs</code>, <code>abfs</code>, etc.) are registered by <code>io/gocloud</code> only when its package is blank-imported.</p>
+<p><code>io.GetRegisteredSchemes()</code> returns the current scheme list; <code>io.Unregister(scheme)</code> removes one.</p>
+<h3 id="catalog-type-registry"><a class="header" href="#catalog-type-registry">Catalog type registry</a></h3>
+<p>Register a custom catalog type with <a href="https://github.com/apache/iceberg-go/blob/main/catalog/registry.go"><code>catalog.Register</code></a>:</p>
+<pre><code class="language-go">import (
+    &quot;context&quot;
+
+    &quot;github.com/apache/iceberg-go&quot;
+    &quot;github.com/apache/iceberg-go/catalog&quot;
+)
+
+func init() {
+    catalog.Register(&quot;mycatalog&quot;, catalog.RegistrarFunc(
+        func(ctx context.Context, name string, props iceberg.Properties) (catalog.Catalog, error) {
+            return newMyCatalog(name, props)
+        },
+    ))
+}
+</code></pre>
+<p>After registration, <code>catalog.Load(ctx, &quot;default&quot;, iceberg.Properties{&quot;type&quot;: &quot;mycatalog&quot;, ...})</code> will route to the factory. Built-in types: <code>rest</code>, <code>hive</code>, <code>glue</code>, <code>sql</code>, <code>hadoop</code>.</p>
+<p><code>catalog.GetRegisteredCatalogs()</code> returns the current list; <code>catalog.Unregister(catalogType)</code> removes one.</p>
+<h3 id="locationprovider"><a class="header" href="#locationprovider">LocationProvider</a></h3>
+<p><a href="https://github.com/apache/iceberg-go/blob/main/table/locations.go"><code>table/locations.go</code></a> defines the <code>LocationProvider</code> interface and ships two implementations: <code>simpleLocationProvider</code> (default) and <code>objectStoreLocationProvider</code> (selected by <code>write.object-storage.enabled = true</code>). The provider is chosen by table properties and is not user-pluggable today.</p>
+<h2 id="table-write-properties"><a class="header" href="#table-write-properties">Table write properties</a></h2>
+<p>Property key constants are in <a href="https://github.com/apache/iceberg-go/blob/main/table/properties.go"><code>table/properties.go</code></a> and Parquet keys in <a href="https://github.com/apache/iceberg-go/blob/main/table/internal/parquet_files.go"><code>table/internal/parquet_files.go</code></a>. The keys below have verified read sites in non-test code.</p>
+<h3 id="format-and-file-sizing"><a class="header" href="#format-and-file-sizing">Format and file sizing</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>write.format.default</code></td><td><code>parquet</code></td><td>File format used when writing data files. Read in <code>table/writer.go</code> and <code>table/rolling_data_writer.go</code>.</td></tr>
+<tr><td><code>write.target-file-size-bytes</code></td><td>(set by writer)</td><td>Target size for newly written data files. Read in <code>table/arrow_utils.go</code> and <code>table/equality_delete_writer.go</code>.</td></tr>
+</tbody></table>
+</div>
+<h3 id="metrics-and-metadata-lifecycle"><a class="header" href="#metrics-and-metadata-lifecycle">Metrics and metadata lifecycle</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>write.metadata.metrics.default</code></td><td>Default per-column metrics mode.</td></tr>
+<tr><td><code>write.metadata.metrics.column.&lt;name&gt;</code></td><td>Per-column override prefix.</td></tr>
+<tr><td><code>write.metadata.delete-after-commit.enabled</code></td><td>When true, expire old metadata files after a successful commit.</td></tr>
+<tr><td><code>write.metadata.previous-versions-max</code></td><td>Cap on retained metadata files. Default <code>100</code>.</td></tr>
+<tr><td><code>write.metadata.compression-codec</code></td><td>Compression for metadata JSON.</td></tr>
+</tbody></table>
+</div>
+<h3 id="manifest-and-commit"><a class="header" href="#manifest-and-commit">Manifest and commit</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>commit.manifest-merge.enabled</code></td><td>Merge small manifests during commit.</td></tr>
+<tr><td><code>commit.manifest.target-size-bytes</code></td><td>Target size for merged manifests.</td></tr>
+<tr><td><code>commit.manifest.min-count-to-merge</code></td><td>Minimum manifest count that triggers a merge.</td></tr>
+<tr><td><code>commit.retry.num-retries</code></td><td>Retries for <code>ErrCommitFailed</code>.</td></tr>
+<tr><td><code>commit.retry.min-wait-ms</code> / <code>commit.retry.max-wait-ms</code> / <code>commit.retry.total-timeout-ms</code></td><td>Backoff bounds.</td></tr>
+</tbody></table>
+</div>
+<h3 id="snapshot-retention"><a class="header" href="#snapshot-retention">Snapshot retention</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>min-snapshots-to-keep</code></td><td>Minimum snapshots to retain when expiring.</td></tr>
+<tr><td><code>max-snapshot-age-ms</code></td><td>Maximum age of retained snapshots.</td></tr>
+<tr><td><code>max-ref-age-ms</code></td><td>Maximum age of branch/tag refs that are not the main branch.</td></tr>
+<tr><td><code>gc.enabled</code></td><td>Gate for orphan-file cleanup.</td></tr>
+</tbody></table>
+</div>
+<h3 id="delete-mode"><a class="header" href="#delete-mode">Delete mode</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>write.delete.mode</code></td><td>Delete strategy used by row-level delete writers.</td></tr>
+</tbody></table>
+</div>
+<h3 id="object-store-data-layout"><a class="header" href="#object-store-data-layout">Object-store data layout</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>write.data.path</code></td><td>Override data file directory.</td></tr>
+<tr><td><code>write.metadata.path</code></td><td>Override metadata file directory.</td></tr>
+<tr><td><code>write.object-storage.enabled</code></td><td>Switch the location provider to the hashed object-storage layout.</td></tr>
+<tr><td><code>write.object-storage.partitioned-paths</code></td><td>Whether partition values are included in object-storage paths.</td></tr>
+</tbody></table>
+</div>
+<h3 id="parquet-writer"><a class="header" href="#parquet-writer">Parquet writer</a></h3>
+<p>All defined in <code>table/internal/parquet_files.go</code> and read by the Parquet writer:</p>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Default</th></tr></thead><tbody>
+<tr><td><code>write.parquet.row-group-size-bytes</code></td><td>128 MB</td></tr>
+<tr><td><code>write.parquet.row-group-limit</code></td><td>1,048,576 rows</td></tr>
+<tr><td><code>write.parquet.page-size-bytes</code></td><td>1 MB</td></tr>
+<tr><td><code>write.parquet.page-row-limit</code></td><td>20,000 rows</td></tr>
+<tr><td><code>write.parquet.dict-size-bytes</code></td><td>2 MB</td></tr>
+<tr><td><code>write.parquet.page-version</code></td><td><code>2</code></td></tr>
+<tr><td><code>write.parquet.compression-codec</code></td><td><code>zstd</code></td></tr>
+<tr><td><code>write.parquet.compression-level</code></td><td><code>-1</code> (codec default)</td></tr>
+<tr><td><code>write.parquet.bloom-filter-max-bytes</code></td><td>1 MB</td></tr>
+<tr><td><code>write.parquet.bloom-filter-enabled.column.&lt;name&gt;</code></td><td>(per-column toggle, prefix-matched)</td></tr>
+</tbody></table>
+</div>
+<h3 id="parquet-reader"><a class="header" href="#parquet-reader">Parquet reader</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>read.parquet.batch-size</code></td><td>Arrow record-batch size used by the Parquet reader.</td></tr>
+</tbody></table>
+</div><div style="break-before: page; page-break-before: always;"></div><!--
   ~ Licensed to the Apache Software Foundation (ASF) under one
   ~ or more contributor license agreements.  See the NOTICE file
   ~ distributed with this work for additional information
@@ -605,476 +1038,840 @@ iceberg tag create --yes my_db.users  &quot;pre-deploy-$VERSION&quot;
   ~ specific language governing permissions and limitations
   ~ under the License.
 -->
-<h1 id="catalog"><a class="header" href="#catalog">Catalog</a></h1>
-<p><code>Catalog</code> is the entry point for accessing iceberg tables. You can use a catalog to:</p>
-<ul>
-<li>Create and list namespaces.</li>
-<li>Create, load, and drop tables</li>
-</ul>
-<p>Multiple catalog implementations are available: REST, Hive, Glue, and SQL. Here is an
-example of how to create a <code>RestCatalog</code>:</p>
+<h1 id="api"><a class="header" href="#api">API</a></h1>
+<p>The Go API surface for Apache Iceberg Go. New to the project? Walk through the <a href="./getting-started.html">Getting Started</a> tutorial first - the recipes here assume you already have a catalog and a table.</p>
+<p>For configuration knobs (catalog options, FileIO credentials, table properties), see <a href="./configuration.html">Configuration</a>. For predicate construction details, see <a href="./row-filter-syntax.html">Row Filter Syntax</a> and <a href="./expression-dsl.html">Expression DSL</a>.</p>
+<h2 id="catalog"><a class="header" href="#catalog">Catalog</a></h2>
+<p><code>catalog.Catalog</code> is the entry point for everything: namespaces, tables, views.</p>
+<h3 id="constructing-a-catalog"><a class="header" href="#constructing-a-catalog">Constructing a catalog</a></h3>
+<h4 id="rest"><a class="header" href="#rest">REST</a></h4>
 <pre><code class="language-go">import (
     &quot;context&quot;
-    &quot;github.com/apache/iceberg-go/catalog&quot;
+
     &quot;github.com/apache/iceberg-go/catalog/rest&quot;
 )
 
-// Create a REST catalog
-cat, err := rest.NewCatalog(context.Background(), &quot;rest&quot;, &quot;http://localhost:8181&quot;, 
+cat, err := rest.NewCatalog(context.Background(), &quot;rest&quot;, &quot;http://localhost:8181&quot;,
     rest.WithOAuthToken(&quot;your-token&quot;))
-if err != nil {
-    log.Fatal(err)
-}
 </code></pre>
-<p>You can run the following code to list all root namespaces:</p>
-<pre><code class="language-go">// List all root namespaces
-namespaces, err := cat.ListNamespaces(context.Background(), nil)
-if err != nil {
-    log.Fatal(err)
-}
-
-for _, ns := range namespaces {
-    fmt.Printf(&quot;Namespace: %v\n&quot;, ns)
-}
-</code></pre>
-<p>Then you can run the following code to create namespace:</p>
-<pre><code class="language-go">// Create a namespace
-namespace := catalog.ToIdentifier(&quot;my_namespace&quot;)
-err = cat.CreateNamespace(context.Background(), namespace, nil)
-if err != nil {
-    log.Fatal(err)
-}
-</code></pre>
-<h2 id="other-catalog-types"><a class="header" href="#other-catalog-types">Other Catalog Types</a></h2>
-<h3 id="sql-catalog"><a class="header" href="#sql-catalog">SQL Catalog</a></h3>
-<p>You can also use SQL-based catalogs:</p>
+<h4 id="sql-sqlite-postgres-mysql-oracle-mssql"><a class="header" href="#sql-sqlite-postgres-mysql-oracle-mssql">SQL (SQLite, Postgres, MySQL, Oracle, MSSQL)</a></h4>
 <pre><code class="language-go">import (
-    &quot;github.com/apache/iceberg-go/catalog&quot;
-    &quot;github.com/apache/iceberg-go/io&quot;
+    &quot;database/sql&quot;
+
+    &quot;github.com/apache/iceberg-go&quot;
+    sqlcat &quot;github.com/apache/iceberg-go/catalog/sql&quot;
+    &quot;github.com/uptrace/bun/driver/sqliteshim&quot;
 )
 
-// Create a SQLite catalog
-cat, err := catalog.Load(context.Background(), &quot;local&quot;, iceberg.Properties{
-    &quot;type&quot;:               &quot;sql&quot;,
-    &quot;uri&quot;:                &quot;file:iceberg-catalog.db&quot;,
-    &quot;sql.dialect&quot;:        &quot;sqlite&quot;,
-    &quot;sql.driver&quot;:         &quot;sqlite&quot;,
-    io.S3Region:          &quot;us-east-1&quot;,
-    io.S3AccessKeyID:     &quot;admin&quot;,
-    io.S3SecretAccessKey: &quot;password&quot;,
-    &quot;warehouse&quot;:          &quot;file:///tmp/warehouse&quot;,
+db, err := sql.Open(sqliteshim.ShimName, &quot;file:catalog.db&quot;)
+// handle err
+cat, err := sqlcat.NewCatalog(&quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
+    &quot;warehouse&quot;: &quot;file:///tmp/warehouse&quot;,
 })
-if err != nil {
-    log.Fatal(err)
-}
 </code></pre>
-<h3 id="glue-catalog"><a class="header" href="#glue-catalog">Glue Catalog</a></h3>
-<p>For AWS Glue integration:</p>
+<h4 id="glue"><a class="header" href="#glue">Glue</a></h4>
 <pre><code class="language-go">import (
     &quot;github.com/apache/iceberg-go/catalog/glue&quot;
     &quot;github.com/aws/aws-sdk-go-v2/config&quot;
 )
 
-// Create AWS config
 awsCfg, err := config.LoadDefaultConfig(context.TODO())
-if err != nil {
-    log.Fatal(err)
-}
-
-// Create Glue catalog
+// handle err
 cat := glue.NewCatalog(glue.WithAwsConfig(awsCfg))
-
-// Create a table in Glue
-tableIdent := catalog.ToIdentifier(&quot;my_database&quot;, &quot;my_table&quot;)
-tbl, err := cat.CreateTable(
-    context.Background(),
-    tableIdent,
-    schema,
-    catalog.WithLocation(&quot;s3://my-bucket/tables/my_table&quot;),
-)
-if err != nil {
-    log.Fatal(err)
-}
 </code></pre>
-<h1 id="table"><a class="header" href="#table">Table</a></h1>
-<p>After creating <code>Catalog</code>, we can manipulate tables through <code>Catalog</code>.</p>
-<p>You can use the following code to create a table:</p>
+<h4 id="hive"><a class="header" href="#hive">Hive</a></h4>
+<pre><code class="language-go">import (
+    &quot;github.com/apache/iceberg-go&quot;
+    &quot;github.com/apache/iceberg-go/catalog/hive&quot;
+)
+
+cat, err := hive.NewCatalog(iceberg.Properties{},
+    hive.WithURI(&quot;thrift://localhost:9083&quot;),
+    hive.WithWarehouse(&quot;s3://my-bucket/warehouse&quot;))
+</code></pre>
+<h4 id="hadoop"><a class="header" href="#hadoop">Hadoop</a></h4>
+<pre><code class="language-go">import (
+    &quot;github.com/apache/iceberg-go&quot;
+    &quot;github.com/apache/iceberg-go/catalog/hadoop&quot;
+)
+
+cat, err := hadoop.NewCatalog(&quot;default&quot;, &quot;file:///tmp/warehouse&quot;, iceberg.Properties{})
+</code></pre>
+<h4 id="via-the-registry"><a class="header" href="#via-the-registry">Via the registry</a></h4>
+<p><code>catalog.Load</code> looks up the right backend via the <code>type</code> property (or <code>uri</code> scheme as a fallback) plus your <code>~/.iceberg-go.yaml</code>. Useful when you want runtime selection:</p>
 <pre><code class="language-go">import (
     &quot;github.com/apache/iceberg-go&quot;
     &quot;github.com/apache/iceberg-go/catalog&quot;
-    &quot;github.com/apache/iceberg-go/table&quot;
 )
 
-// Create a simple schema
-schema := iceberg.NewSchemaWithIdentifiers(1, []int{2},
-    iceberg.NestedField{ID: 1, Name: &quot;foo&quot;, Type: iceberg.PrimitiveTypes.String, Required: false},
-    iceberg.NestedField{ID: 2, Name: &quot;bar&quot;, Type: iceberg.PrimitiveTypes.Int32, Required: true},
-    iceberg.NestedField{ID: 3, Name: &quot;baz&quot;, Type: iceberg.PrimitiveTypes.Bool, Required: false},
-)
-
-// Create a table identifier
-tableIdent := catalog.ToIdentifier(&quot;my_namespace&quot;, &quot;my_table&quot;)
-
-// Create a table with optional properties
-tbl, err := cat.CreateTable(
-    context.Background(),
-    tableIdent,
-    schema,
-    catalog.WithProperties(map[string]string{&quot;owner&quot;: &quot;me&quot;}),
-    catalog.WithLocation(&quot;s3://my-bucket/tables/my_table&quot;),
-)
-if err != nil {
-    log.Fatal(err)
-}
+cat, err := catalog.Load(ctx, &quot;default&quot;, iceberg.Properties{
+    &quot;type&quot;:      &quot;rest&quot;,
+    &quot;uri&quot;:       &quot;http://localhost:8181&quot;,
+    &quot;warehouse&quot;: &quot;s3://my-bucket/warehouse&quot;,
+})
 </code></pre>
-<p>Also, you can load a table directly:</p>
-<pre><code class="language-go">// Load an existing table
-tbl, err := cat.LoadTable(context.Background(), tableIdent, nil)
-if err != nil {
-    log.Fatal(err)
-}
+<h3 id="namespaces"><a class="header" href="#namespaces">Namespaces</a></h3>
+<pre><code class="language-go">ns := table.Identifier{&quot;sales&quot;}
 
-fmt.Printf(&quot;Table: %s\n&quot;, tbl.Identifier())
-fmt.Printf(&quot;Location: %s\n&quot;, tbl.MetadataLocation())
+err := cat.CreateNamespace(ctx, ns, iceberg.Properties{&quot;owner&quot;: &quot;data-team&quot;})
+
+namespaces, err := cat.ListNamespaces(ctx, nil) // []table.Identifier
+exists, err := cat.CheckNamespaceExists(ctx, ns)
+props, err := cat.LoadNamespaceProperties(ctx, ns)
+summary, err := cat.UpdateNamespaceProperties(ctx, ns,
+    []string{&quot;deprecated&quot;}, // removals
+    iceberg.Properties{&quot;owner&quot;: &quot;platform-team&quot;}, // updates
+)
+err = cat.DropNamespace(ctx, ns)
 </code></pre>
-<h2 id="schema-creation"><a class="header" href="#schema-creation">Schema Creation</a></h2>
-<p>Here are some examples of creating different types of schemas:</p>
-<pre><code class="language-go">// Simple schema with primitive types
-simpleSchema := iceberg.NewSchemaWithIdentifiers(1, []int{2},
-    iceberg.NestedField{ID: 1, Name: &quot;id&quot;, Type: iceberg.PrimitiveTypes.Int32, Required: true},
+<p><code>table.Identifier</code> is <code>[]string</code>; use <code>catalog.ToIdentifier(&quot;sales&quot;, &quot;orders&quot;)</code> (or <code>catalog.ToIdentifier(&quot;sales.orders&quot;)</code>) to build one from string parts.</p>
+<h3 id="tables"><a class="header" href="#tables">Tables</a></h3>
+<h4 id="defining-a-schema"><a class="header" href="#defining-a-schema">Defining a schema</a></h4>
+<pre><code class="language-go">import &quot;github.com/apache/iceberg-go&quot;
+
+schema := iceberg.NewSchema(1,
+    iceberg.NestedField{ID: 1, Name: &quot;id&quot;, Type: iceberg.PrimitiveTypes.Int64, Required: true},
     iceberg.NestedField{ID: 2, Name: &quot;name&quot;, Type: iceberg.PrimitiveTypes.String, Required: false},
     iceberg.NestedField{ID: 3, Name: &quot;active&quot;, Type: iceberg.PrimitiveTypes.Bool, Required: false},
 )
+</code></pre>
+<p>For nested types use <code>&amp;iceberg.StructType{...}</code>, <code>&amp;iceberg.ListType{...}</code>, or <code>&amp;iceberg.MapType{...}</code>. Use <code>NewSchemaWithIdentifiers(id, identifierIDs, fields...)</code> to mark identifier columns.</p>
+<h4 id="create"><a class="header" href="#create">Create</a></h4>
+<pre><code class="language-go">import &quot;github.com/apache/iceberg-go/catalog&quot;
 
-// Schema with nested struct
-nestedSchema := iceberg.NewSchemaWithIdentifiers(1, []int{1},
-    iceberg.NestedField{ID: 1, Name: &quot;person&quot;, Type: &amp;iceberg.StructType{
-        FieldList: []iceberg.NestedField{
-            {ID: 2, Name: &quot;name&quot;, Type: iceberg.PrimitiveTypes.String, Required: false},
-            {ID: 3, Name: &quot;age&quot;, Type: iceberg.PrimitiveTypes.Int32, Required: true},
-        },
-    }, Required: false},
-)
+ident := catalog.ToIdentifier(&quot;sales&quot;, &quot;orders&quot;)
 
-// Schema with list and map types
-complexSchema := iceberg.NewSchemaWithIdentifiers(1, []int{1},
-    iceberg.NestedField{ID: 1, Name: &quot;tags&quot;, Type: &amp;iceberg.ListType{
-        ElementID: 2, Element: iceberg.PrimitiveTypes.String, ElementRequired: true,
-    }, Required: false},
-    iceberg.NestedField{ID: 3, Name: &quot;metadata&quot;, Type: &amp;iceberg.MapType{
-        KeyID: 4, KeyType: iceberg.PrimitiveTypes.String,
-        ValueID: 5, ValueType: iceberg.PrimitiveTypes.String, ValueRequired: true,
-    }, Required: false},
+tbl, err := cat.CreateTable(ctx, ident, schema,
+    catalog.WithLocation(&quot;s3://my-bucket/sales/orders&quot;),
+    catalog.WithProperties(iceberg.Properties{&quot;owner&quot;: &quot;data-team&quot;}),
 )
 </code></pre>
-<h2 id="table-operations"><a class="header" href="#table-operations">Table Operations</a></h2>
-<p>Here are some common table operations:</p>
-<pre><code class="language-go">// List tables in a namespace
-tables := cat.ListTables(context.Background(), catalog.ToIdentifier(&quot;my_namespace&quot;))
-for tableIdent, err := range tables {
-    if err != nil {
-        log.Printf(&quot;Error listing table: %v&quot;, err)
-        continue
-    }
-    fmt.Printf(&quot;Table: %v\n&quot;, tableIdent)
+<p>Optional <code>catalog.WithPartitionSpec</code>, <code>catalog.WithSortOrder</code>, and <code>catalog.WithStagedUpdates</code> are also available.</p>
+<h4 id="load-exists-list-drop-rename"><a class="header" href="#load-exists-list-drop-rename">Load, exists, list, drop, rename</a></h4>
+<pre><code class="language-go">tbl, err := cat.LoadTable(ctx, ident)
+
+exists, err := cat.CheckTableExists(ctx, ident)
+
+for ident, err := range cat.ListTables(ctx, table.Identifier{&quot;sales&quot;}) {
+    if err != nil { /* ... */ }
+    fmt.Println(ident)
 }
 
-// Check if table exists
-exists, err := cat.CheckTableExists(context.Background(), tableIdent)
-if err != nil {
-    log.Fatal(err)
-}
-fmt.Printf(&quot;Table exists: %t\n&quot;, exists)
+err = cat.DropTable(ctx, ident)
 
-// Drop a table
-err = cat.DropTable(context.Background(), tableIdent)
-if err != nil {
-    log.Fatal(err)
+renamed, err := cat.RenameTable(ctx,
+    catalog.ToIdentifier(&quot;sales&quot;, &quot;orders&quot;),
+    catalog.ToIdentifier(&quot;sales&quot;, &quot;orders_v2&quot;))
+</code></pre>
+<p><code>ListTables</code> returns an <code>iter.Seq2[table.Identifier, error]</code> that streams results.</p>
+<h4 id="inspecting-metadata"><a class="header" href="#inspecting-metadata">Inspecting metadata</a></h4>
+<pre><code class="language-go">tbl.Identifier()         // table.Identifier
+tbl.Location()           // string
+tbl.MetadataLocation()   // string (path of current metadata.json)
+tbl.Metadata()           // table.Metadata
+tbl.Schema()             // *iceberg.Schema (current)
+tbl.Schemas()            // map[int]*iceberg.Schema
+tbl.Spec()               // iceberg.PartitionSpec
+tbl.SortOrder()          // table.SortOrder
+tbl.Properties()         // iceberg.Properties
+
+if snap := tbl.CurrentSnapshot(); snap != nil {
+    fmt.Println(snap.SnapshotID, snap.TimestampMs, snap.Summary)
 }
 
-// Rename a table
-fromIdent := catalog.ToIdentifier(&quot;my_namespace&quot;, &quot;old_table&quot;)
-toIdent := catalog.ToIdentifier(&quot;my_namespace&quot;, &quot;new_table&quot;)
-renamedTable, err := cat.RenameTable(context.Background(), fromIdent, toIdent)
-if err != nil {
-    log.Fatal(err)
+// All snapshots
+for _, snap := range tbl.Metadata().Snapshots() {
+    fmt.Println(snap.SnapshotID)
+}
+
+// Stream all manifest files across all snapshots
+for mf, err := range tbl.AllManifests(ctx) {
+    if err != nil { /* ... */ }
+    fmt.Println(mf.FilePath())
 }
 </code></pre>
-<h2 id="working-with-table-metadata"><a class="header" href="#working-with-table-metadata">Working with Table Metadata</a></h2>
-<p>Once you have a table, you can access its metadata and properties:</p>
-<pre><code class="language-go">// Access table metadata
-metadata := tbl.Metadata()
-fmt.Printf(&quot;Table UUID: %s\n&quot;, metadata.TableUUID())
-fmt.Printf(&quot;Format version: %d\n&quot;, metadata.Version())
-fmt.Printf(&quot;Last updated: %d\n&quot;, metadata.LastUpdatedMillis())
+<h2 id="reading-data"><a class="header" href="#reading-data">Reading data</a></h2>
+<p><code>(t Table) Scan(opts ...ScanOption) *Scan</code> returns a scan that you can resolve into Arrow data.</p>
+<h3 id="streaming-record-batches"><a class="header" href="#streaming-record-batches">Streaming record batches</a></h3>
+<pre><code class="language-go">import &quot;github.com/apache/iceberg-go/table&quot;
 
-// Access table schema
-schema := tbl.Schema()
-fmt.Printf(&quot;Schema ID: %d\n&quot;, schema.ID)
-fmt.Printf(&quot;Number of fields: %d\n&quot;, schema.NumFields())
+scan := tbl.Scan()
+arrowSchema, batches, err := scan.ToArrowRecords(ctx)
+if err != nil { /* ... */ }
 
-// Access table properties
-props := tbl.Properties()
-fmt.Printf(&quot;Owner: %s\n&quot;, props[&quot;owner&quot;])
-
-// Access the current snapshot
-if snapshot := tbl.CurrentSnapshot(); snapshot != nil {
-    fmt.Printf(&quot;Current snapshot ID: %d\n&quot;, snapshot.SnapshotID)
-    fmt.Printf(&quot;Snapshot timestamp: %d\n&quot;, snapshot.TimestampMs)
-}
-
-// List all snapshots
-for _, snapshot := range tbl.Snapshots() {
-    fmt.Printf(&quot;Snapshot %d: %s\n&quot;, snapshot.SnapshotID, snapshot.Summary.Operation)
+fmt.Println(arrowSchema)
+for batch, err := range batches {
+    if err != nil { /* ... */ }
+    fmt.Printf(&quot;batch with %d rows\n&quot;, batch.NumRows())
+    batch.Release()
 }
 </code></pre>
-<h2 id="creating-tables-with-partitioning"><a class="header" href="#creating-tables-with-partitioning">Creating Tables with Partitioning</a></h2>
-<p>You can create tables with partitioning:</p>
+<p><code>ToArrowRecords</code> returns <code>iter.Seq2[arrow.RecordBatch, error]</code> so only one batch is in memory at a time. Always call <code>batch.Release()</code> to free Arrow buffers.</p>
+<h3 id="materializing-as-an-arrow-table"><a class="header" href="#materializing-as-an-arrow-table">Materializing as an Arrow Table</a></h3>
+<pre><code class="language-go">arrowTbl, err := tbl.Scan().ToArrowTable(ctx)
+if err != nil { /* ... */ }
+defer arrowTbl.Release()
+fmt.Printf(&quot;%d rows in %d cols\n&quot;, arrowTbl.NumRows(), arrowTbl.NumCols())
+</code></pre>
+<h3 id="projection-and-filters"><a class="header" href="#projection-and-filters">Projection and filters</a></h3>
+<pre><code class="language-go">import &quot;github.com/apache/iceberg-go&quot;
+
+scan := tbl.Scan(
+    table.WithSelectedFields(&quot;id&quot;, &quot;name&quot;),
+    table.WithRowFilter(
+        iceberg.NewAnd(
+            iceberg.GreaterThanEqual(iceberg.Reference(&quot;id&quot;), int64(100)),
+            iceberg.IsIn(iceberg.Reference(&quot;region&quot;), &quot;us-east&quot;, &quot;us-west&quot;),
+        ),
+    ),
+    table.WithLimit(1000),
+    table.WithCaseSensitive(true),
+)
+</code></pre>
+<p>For the predicate vocabulary, see <a href="./row-filter-syntax.html">Row Filter Syntax</a>.</p>
+<h3 id="time-travel"><a class="header" href="#time-travel">Time travel</a></h3>
+<pre><code class="language-go">// By snapshot ID
+scan := tbl.Scan(table.WithSnapshotID(snap.SnapshotID))
+
+// As of a timestamp (milliseconds since epoch)
+scan = tbl.Scan(table.WithSnapshotAsOf(time.Now().Add(-24*time.Hour).UnixMilli()))
+</code></pre>
+<h3 id="reading-from-a-branch-or-tag"><a class="header" href="#reading-from-a-branch-or-tag">Reading from a branch or tag</a></h3>
+<pre><code class="language-go">scan, err := tbl.Scan().UseRef(&quot;audit-branch&quot;)
+if err != nil { /* ... */ }
+
+arrowTbl, err := scan.ToArrowTable(ctx)
+</code></pre>
+<h3 id="iterating-tasks-for-custom-processing"><a class="header" href="#iterating-tasks-for-custom-processing">Iterating tasks for custom processing</a></h3>
+<p>If you need finer control (custom file readers, distributed scan planning):</p>
+<pre><code class="language-go">scan := tbl.Scan(table.WithRowFilter(myFilter))
+tasks, err := scan.PlanFiles(ctx)
+if err != nil { /* ... */ }
+
+arrowSchema, batches, err := scan.ReadTasks(ctx, tasks)
+</code></pre>
+<h2 id="writing-data"><a class="header" href="#writing-data">Writing data</a></h2>
+<p>The shortcut methods on <code>Table</code> open a transaction, perform the write, and commit. Use <code>NewTransaction</code> directly when you need to combine multiple operations.</p>
+<h3 id="append"><a class="header" href="#append">Append</a></h3>
 <pre><code class="language-go">import (
-    &quot;github.com/apache/iceberg-go&quot;
-    &quot;github.com/apache/iceberg-go/catalog&quot;
+    &quot;github.com/apache/arrow-go/v18/arrow/array&quot;
 )
 
-// Create schema
-schema := iceberg.NewSchemaWithIdentifiers(1, []int{1},
-    iceberg.NestedField{ID: 1, Name: &quot;id&quot;, Type: iceberg.PrimitiveTypes.Int32, Required: true},
-    iceberg.NestedField{ID: 2, Name: &quot;name&quot;, Type: iceberg.PrimitiveTypes.String, Required: false},
-    iceberg.NestedField{ID: 3, Name: &quot;date&quot;, Type: iceberg.PrimitiveTypes.Date, Required: false},
-)
+// From a streaming RecordReader
+newTbl, err := tbl.Append(ctx, recordReader, nil /* snapshot props */)
 
-// Create a partition spec
-partitionSpec := iceberg.NewPartitionSpec(
-    iceberg.PartitionField{SourceID: 3, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: &quot;date&quot;},
-)
+// From an in-memory Arrow Table; batchSize controls the rolling writer
+newTbl, err = tbl.AppendTable(ctx, arrowTbl, 1024, nil)
+</code></pre>
+<h3 id="overwrite"><a class="header" href="#overwrite">Overwrite</a></h3>
+<pre><code class="language-go">import &quot;github.com/apache/iceberg-go/table&quot;
 
-// Create a table with partitioning
-tbl, err := cat.CreateTable(
-    context.Background(),
-    tableIdent,
-    schema,
-    catalog.WithPartitionSpec(&amp;partitionSpec),
-    catalog.WithLocation(&quot;s3://my-bucket/tables/partitioned_table&quot;),
+// Replace all data
+newTbl, err := tbl.Overwrite(ctx, recordReader, nil)
+
+// Replace only rows matching a filter
+newTbl, err = tbl.Overwrite(ctx, recordReader, nil,
+    table.WithOverwriteFilter(
+        iceberg.EqualTo(iceberg.Reference(&quot;date&quot;), &quot;2026-01-01&quot;),
+    ),
 )
-if err != nil {
-    log.Fatal(err)
+</code></pre>
+<p><code>OverwriteTable</code> is the <code>arrow.Table</code> variant.</p>
+<h3 id="delete"><a class="header" href="#delete">Delete</a></h3>
+<pre><code class="language-go">newTbl, err := tbl.Delete(ctx,
+    iceberg.LessThan(iceberg.Reference(&quot;id&quot;), int64(100)),
+    nil, /* snapshot props */
+)
+</code></pre>
+<h3 id="add-existing-files"><a class="header" href="#add-existing-files">Add existing files</a></h3>
+<p>When you already have data files (e.g. produced by another writer), register them without rewriting:</p>
+<pre><code class="language-go">txn := tbl.NewTransaction()
+err := txn.AddFiles(ctx, []string{
+    &quot;s3://my-bucket/sales/orders/data/file-1.parquet&quot;,
+    &quot;s3://my-bucket/sales/orders/data/file-2.parquet&quot;,
+}, nil /* snapshot props */, false /* ignoreDuplicates */)
+if err != nil { /* ... */ }
+
+newTbl, err := txn.Commit(ctx)
+</code></pre>
+<p><code>ReplaceDataFiles(ctx, filesToDelete, filesToAdd, snapshotProps)</code> and <code>ReplaceDataFilesWithDataFiles(ctx, filesToDelete, dataFilesToAdd, snapshotProps, opts...)</code> are also available on <code>*Transaction</code> for swapping files atomically.</p>
+<h3 id="transactions"><a class="header" href="#transactions">Transactions</a></h3>
+<p>Group writes and metadata changes into one atomic snapshot:</p>
+<pre><code class="language-go">txn := tbl.NewTransaction()
+
+if err := txn.Delete(ctx,
+    iceberg.LessThan(iceberg.Reference(&quot;date&quot;), &quot;2026-01-01&quot;), nil); err != nil {
+    /* ... */
+}
+if err := txn.Append(ctx, recordReader, nil); err != nil {
+    /* ... */
+}
+if err := txn.SetProperties(iceberg.Properties{&quot;commit.user&quot;: &quot;data-pipeline&quot;}); err != nil {
+    /* ... */
+}
+
+newTbl, err := txn.Commit(ctx)
+</code></pre>
+<p>To target a specific branch:</p>
+<pre><code class="language-go">txn := tbl.NewTransactionOnBranch(&quot;staging&quot;)
+</code></pre>
+<p><code>Commit</code> retries automatically on conflict (<code>ErrCommitFailed</code>) - tune via the <code>commit.retry.*</code> table properties.</p>
+<h2 id="schema-and-partition-evolution"><a class="header" href="#schema-and-partition-evolution">Schema and partition evolution</a></h2>
+<h3 id="schema-evolution"><a class="header" href="#schema-evolution">Schema evolution</a></h3>
+<pre><code class="language-go">import &quot;github.com/apache/iceberg-go/table&quot;
+
+txn := tbl.NewTransaction()
+
+err := table.NewUpdateSchema(txn, true /* caseSensitive */, false /* allowIncompatibleChanges */).
+    AddColumn([]string{&quot;tip&quot;}, iceberg.PrimitiveTypes.Float64, &quot;Tip in dollars&quot;, false, nil).
+    RenameColumn([]string{&quot;name&quot;}, &quot;full_name&quot;).
+    DeleteColumn([]string{&quot;deprecated_field&quot;}).
+    Commit()
+if err != nil { /* ... */ }
+
+newTbl, err := txn.Commit(ctx)
+</code></pre>
+<p>Reorder fields with <code>MoveFirst</code>, <code>MoveBefore</code>, or <code>MoveAfter</code>. Set <code>allowIncompatibleChanges</code> to <code>true</code> to permit type narrowing or making optional columns required.</p>
+<h3 id="partition-evolution"><a class="header" href="#partition-evolution">Partition evolution</a></h3>
+<pre><code class="language-go">us := table.NewUpdateSpec(txn, true /* caseSensitive */)
+us.AddField(&quot;event_time&quot;, iceberg.DayTransform{}, &quot;event_day&quot;) // sourceColName, transform, partitionFieldName
+us.RemoveField(&quot;legacy_partition&quot;)
+if err := us.Commit(); err != nil { /* ... */ }
+</code></pre>
+<p><code>AddField</code> chains; <code>AddIdentity(sourceCol)</code> is a shortcut for an identity transform; <code>RenameField(name, newName)</code> renames an existing partition field.</p>
+<p>Available transforms (root <code>iceberg</code> package): <code>IdentityTransform{}</code>, <code>YearTransform{}</code>, <code>MonthTransform{}</code>, <code>DayTransform{}</code>, <code>HourTransform{}</code>, <code>BucketTransform{NumBuckets: N}</code>, <code>TruncateTransform{Width: W}</code>.</p>
+<h2 id="snapshots-and-refs"><a class="header" href="#snapshots-and-refs">Snapshots and refs</a></h2>
+<h3 id="inspecting"><a class="header" href="#inspecting">Inspecting</a></h3>
+<pre><code class="language-go">if snap := tbl.CurrentSnapshot(); snap != nil {
+    fmt.Println(snap.SnapshotID, snap.TimestampMs, snap.Summary)
+}
+snap := tbl.SnapshotByID(snapshotID)
+named := tbl.SnapshotByName(&quot;audit&quot;)
+
+for _, s := range tbl.Metadata().Snapshots() {
+    fmt.Println(s.SnapshotID, s.Summary)
 }
 </code></pre>
-<h1 id="scanning-reading-data"><a class="header" href="#scanning-reading-data">Scanning (Reading Data)</a></h1>
-<p>The <code>Scan</code> API reads data from Iceberg tables as Apache Arrow record batches. It supports
-column projection, row filtering, snapshot selection, and time travel.</p>
-<h2 id="basic-scan"><a class="header" href="#basic-scan">Basic Scan</a></h2>
-<h3 id="streaming-record-batches"><a class="header" href="#streaming-record-batches">Streaming Record Batches</a></h3>
+<h3 id="branches-and-tags-1"><a class="header" href="#branches-and-tags-1">Branches and tags</a></h3>
+<p>The CLI's <code>branch create</code> and <code>tag create</code> commands (<a href="./cli.html">CLI</a>) are the most ergonomic surface today. Programmatically, ref creation goes through <code>Catalog.CommitTable</code> with a <code>SetSnapshotRef</code> update:</p>
+<pre><code class="language-go">import &quot;github.com/apache/iceberg-go/table&quot;
+
+snap := tbl.CurrentSnapshot()
+update := table.NewSetSnapshotRefUpdate(
+    &quot;audit&quot;,                  // ref name
+    snap.SnapshotID,
+    table.BranchRef,          // or table.TagRef
+    0,                        // maxRefAgeMs (0 = unset)
+    0,                        // maxSnapshotAgeMs (0 = unset)
+    0,                        // minSnapshotsToKeep (0 = unset)
+)
+reqs := []table.Requirement{
+    table.AssertTableUUID(tbl.Metadata().TableUUID()),
+    table.AssertRefSnapshotID(&quot;audit&quot;, nil), // ref must not already exist
+}
+
+_, _, err := cat.CommitTable(ctx, tbl.Identifier(), reqs, []table.Update{update})
+</code></pre>
+<p>Constants <code>table.MainBranch</code>, <code>table.BranchRef</code>, <code>table.TagRef</code> live in <a href="https://github.com/apache/iceberg-go/blob/main/table/refs.go"><code>table/refs.go</code></a>. A higher-level builder is on the roadmap.</p>
+<h3 id="expiration-and-rollback"><a class="header" href="#expiration-and-rollback">Expiration and rollback</a></h3>
+<pre><code class="language-go">// Expire snapshots older than the table's retention properties
+err := txn.ExpireSnapshots(/* options */)
+
+// Roll back to a previous snapshot
+err = txn.RollbackToSnapshot(targetSnapshotID)
+</code></pre>
+<p>Tune retention with the <code>min-snapshots-to-keep</code>, <code>max-snapshot-age-ms</code>, and <code>max-ref-age-ms</code> table properties (see <a href="./configuration.html">Configuration</a>).</p>
+<h2 id="maintenance"><a class="header" href="#maintenance">Maintenance</a></h2>
+<h3 id="orphan-file-cleanup"><a class="header" href="#orphan-file-cleanup">Orphan file cleanup</a></h3>
 <pre><code class="language-go">import (
-    &quot;context&quot;
-    &quot;fmt&quot;
+    &quot;time&quot;
 
     &quot;github.com/apache/iceberg-go/table&quot;
 )
 
-// Stream record batches one at a time — only one batch
-// is in memory at any point.
-scan := tbl.Scan()
-arrowSchema, records, err := scan.ToArrowRecords(context.Background())
-if err != nil {
-    log.Fatal(err)
-}
-
-fmt.Printf(&quot;Schema: %s\n&quot;, arrowSchema)
-for batch, err := range records {
-    if err != nil {
-        log.Fatal(err)
-    }
-    fmt.Printf(&quot;Batch with %d rows\n&quot;, batch.NumRows())
-    batch.Release()
-}
-</code></pre>
-<h3 id="materializing-as-an-arrow-table"><a class="header" href="#materializing-as-an-arrow-table">Materializing as an Arrow Table</a></h3>
-<pre><code class="language-go">// Materialize all record batches into a single Arrow Table.
-scan := tbl.Scan()
-arrowTable, err := scan.ToArrowTable(context.Background())
-if err != nil {
-    log.Fatal(err)
-}
-defer arrowTable.Release()
-
-fmt.Printf(&quot;Read %d rows in %d columns\n&quot;,
-    arrowTable.NumRows(), arrowTable.NumCols())
-</code></pre>
-<h2 id="column-selection-and-row-filtering"><a class="header" href="#column-selection-and-row-filtering">Column Selection and Row Filtering</a></h2>
-<pre><code class="language-go">import &quot;github.com/apache/iceberg-go&quot;
-
-// Select specific columns and filter rows
-scan := tbl.Scan(
-    table.WithSelectedFields(&quot;id&quot;, &quot;name&quot;, &quot;date&quot;),
-    table.WithRowFilter(
-        iceberg.GreaterThanEqual(iceberg.Reference(&quot;id&quot;), int32(100)),
-    ),
-    table.WithCaseSensitive(true),
-    table.WithLimit(1000),
+result, err := tbl.DeleteOrphanFiles(ctx,
+    table.WithFilesOlderThan(72*time.Hour),
+    table.WithDryRun(false),
+    table.WithMaxConcurrency(8),
 )
-
-arrowSchema, records, err := scan.ToArrowRecords(context.Background())
-if err != nil {
-    log.Fatal(err)
-}
+if err != nil { /* ... */ }
+fmt.Printf(&quot;removed %d files\n&quot;, len(result.DeletedFiles))
 </code></pre>
-<h2 id="time-travel"><a class="header" href="#time-travel">Time Travel</a></h2>
-<pre><code class="language-go">// Read a specific snapshot by ID
-scan := tbl.Scan(
-    table.WithSnapshotID(snapshotID),
-)
-
-// Read data as of a specific timestamp (milliseconds since epoch)
-scan = tbl.Scan(
-    table.WithSnapshotAsOf(timestampMs),
-)
-
-// Read from a named branch or tag
-scan = tbl.Scan()
-scan, err := scan.UseRef(&quot;audit-branch&quot;)
-if err != nil {
-    log.Fatal(err)
-}
-</code></pre>
-<h2 id="reading-as-an-arrow-table"><a class="header" href="#reading-as-an-arrow-table">Reading as an Arrow Table</a></h2>
-<pre><code class="language-go">// Load all results into a single Arrow Table (in-memory)
-arrowTable, err := tbl.Scan().ToArrowTable(context.Background())
-if err != nil {
-    log.Fatal(err)
-}
-defer arrowTable.Release()
-
-fmt.Printf(&quot;Total rows: %d\n&quot;, arrowTable.NumRows())
-fmt.Printf(&quot;Total columns: %d\n&quot;, arrowTable.NumCols())
-</code></pre>
-<h1 id="writing-data"><a class="header" href="#writing-data">Writing Data</a></h1>
-<p>The write API uses Apache Arrow as the input format. Data can be written using
-<code>arrow.Table</code> or <code>array.RecordReader</code> (streaming).</p>
-<h2 id="append-data"><a class="header" href="#append-data">Append Data</a></h2>
-<pre><code class="language-go">import (
-    &quot;context&quot;
-
-    &quot;github.com/apache/arrow-go/v18/arrow&quot;
-    &quot;github.com/apache/arrow-go/v18/arrow/array&quot;
-    &quot;github.com/apache/arrow-go/v18/arrow/memory&quot;
-)
-
-// Append using a RecordReader (streaming)
-// The RecordReader's schema must be compatible with the table schema.
-newTable, err := tbl.Append(context.Background(), recordReader, nil)
-if err != nil {
-    log.Fatal(err)
-}
-
-// Append using an Arrow Table with a batch size
-newTable, err = tbl.AppendTable(context.Background(), arrowTable, 1024, nil)
-if err != nil {
-    log.Fatal(err)
-}
-</code></pre>
-<h2 id="overwrite-data"><a class="header" href="#overwrite-data">Overwrite Data</a></h2>
-<p>Overwrite replaces existing data. An optional filter controls which rows are replaced.</p>
-<pre><code class="language-go">import &quot;github.com/apache/iceberg-go&quot;
-
-// Overwrite all existing data with new data
-newTable, err := tbl.Overwrite(context.Background(), recordReader, nil)
-if err != nil {
-    log.Fatal(err)
-}
-
-// Overwrite only rows matching a filter
-newTable, err = tbl.Overwrite(context.Background(), recordReader, nil,
-    table.WithOverwriteFilter(
-        iceberg.EqualTo(iceberg.Reference(&quot;date&quot;), &quot;2024-01-01&quot;),
-    ),
-)
-if err != nil {
-    log.Fatal(err)
-}
-</code></pre>
-<h2 id="delete-data"><a class="header" href="#delete-data">Delete Data</a></h2>
-<p>Delete removes rows matching a filter expression.</p>
-<pre><code class="language-go">import &quot;github.com/apache/iceberg-go&quot;
-
-// Delete rows matching a filter
-newTable, err := tbl.Delete(context.Background(),
-    iceberg.LessThan(iceberg.Reference(&quot;id&quot;), int32(100)),
-    nil, // snapshot properties
-)
-if err != nil {
-    log.Fatal(err)
-}
-</code></pre>
-<h1 id="transactions"><a class="header" href="#transactions">Transactions</a></h1>
-<p>Transactions group multiple operations into a single atomic commit. Use transactions
-when you need to perform multiple writes or metadata changes together.</p>
-<h2 id="basic-transaction"><a class="header" href="#basic-transaction">Basic Transaction</a></h2>
-<pre><code class="language-go">import (
-    &quot;context&quot;
-
-    &quot;github.com/apache/iceberg-go&quot;
-)
+<p>Also see <code>table.WithLocation</code>, <code>table.WithDeleteFunc</code>, <code>table.WithPrefixMismatchMode</code>, <code>table.WithEqualSchemes</code>, and <code>table.WithEqualAuthorities</code> in <code>table/orphan_cleanup.go</code>.</p>
+<h3 id="compaction-rewrite-data-files"><a class="header" href="#compaction-rewrite-data-files">Compaction (rewrite data files)</a></h3>
+<pre><code class="language-go">import &quot;github.com/apache/iceberg-go/table&quot;
 
 txn := tbl.NewTransaction()
+result, err := txn.RewriteDataFiles(ctx, groups /* []table.CompactionTaskGroup */, table.RewriteDataFilesOptions{})
+if err != nil { /* ... */ }
 
-// Append new data
-err := txn.Append(context.Background(), recordReader, nil)
-if err != nil {
-    log.Fatal(err)
-}
-
-// Set table properties
-err = txn.SetProperties(iceberg.Properties{
-    &quot;commit.user&quot;: &quot;data-pipeline&quot;,
-})
-if err != nil {
-    log.Fatal(err)
-}
-
-// Commit all changes atomically
-newTable, err := txn.Commit(context.Background())
-if err != nil {
-    log.Fatal(err)
-}
+newTbl, err := txn.Commit(ctx)
+fmt.Printf(&quot;rewrote %d files into %d (%d -&gt; %d bytes)\n&quot;,
+    result.RemovedDataFiles, result.AddedDataFiles, result.BytesBefore, result.BytesAfter)
 </code></pre>
-<h2 id="multi-operation-transaction"><a class="header" href="#multi-operation-transaction">Multi-Operation Transaction</a></h2>
-<pre><code class="language-go">txn := tbl.NewTransaction()
+<p>The <code>table/compaction</code> subpackage provides bin-packing planning. The <code>iceberg compact analyze</code> and <code>compact run</code> CLI commands wrap the same machinery - see <a href="./cli.html">CLI</a>.</p>
+<h2 id="views"><a class="header" href="#views">Views</a></h2>
+<p>Views are created and loaded through catalogs that support them (REST, Hive, SQL):</p>
+<pre><code class="language-go">import &quot;github.com/apache/iceberg-go/view&quot;
 
-// Delete old data
-err := txn.Delete(context.Background(),
-    iceberg.LessThan(iceberg.Reference(&quot;date&quot;), &quot;2023-01-01&quot;),
-    nil,
+// Create
+v, err := view.CreateView(
+    ctx,
+    &quot;my-catalog&quot;,
+    table.Identifier{&quot;analytics&quot;, &quot;monthly_orders&quot;},
+    schema,
+    &quot;SELECT month, sum(amount) FROM orders GROUP BY month&quot;,
+    table.Identifier{&quot;sales&quot;},                      // default namespace for unqualified names
+    &quot;s3://my-bucket/views/monthly_orders&quot;,
+    iceberg.Properties{},
 )
-if err != nil {
-    log.Fatal(err)
-}
 
-// Append replacement data
-err = txn.Append(context.Background(), recordReader, nil)
-if err != nil {
-    log.Fatal(err)
-}
-
-// Commit both operations as one atomic snapshot
-newTable, err := txn.Commit(context.Background())
-if err != nil {
-    log.Fatal(err)
+// Inspect
+v.CurrentVersion()      // *view.Version
+v.CurrentSchema()       // *iceberg.Schema
+v.Versions()            // []*view.Version
+v.Schemas()             // map[int]*iceberg.Schema
+v.Properties()          // iceberg.Properties
+</code></pre>
+<p><code>view.New(ident, meta, metadataLocation)</code> constructs a view from already-loaded metadata; <code>view.NewFromLocation(ctx, ident, metadataLocation, fsysFactory)</code> loads metadata from disk or object storage.</p>
+<h2 id="iceberg--arrow-types"><a class="header" href="#iceberg--arrow-types">Iceberg ↔ Arrow types</a></h2>
+<p>When iceberg-go converts an Iceberg schema to Arrow (e.g. for the scanner output) or vice versa, the type mapping is:</p>
+<div class="table-wrapper"><table><thead><tr><th>Iceberg type</th><th>Arrow type</th></tr></thead><tbody>
+<tr><td><code>boolean</code></td><td><code>arrow.FixedWidthTypes.Boolean</code></td></tr>
+<tr><td><code>int</code></td><td><code>arrow.PrimitiveTypes.Int32</code></td></tr>
+<tr><td><code>long</code></td><td><code>arrow.PrimitiveTypes.Int64</code></td></tr>
+<tr><td><code>float</code></td><td><code>arrow.PrimitiveTypes.Float32</code></td></tr>
+<tr><td><code>double</code></td><td><code>arrow.PrimitiveTypes.Float64</code></td></tr>
+<tr><td><code>decimal(p, s)</code></td><td><code>arrow.Decimal128Type{Precision: p, Scale: s}</code></td></tr>
+<tr><td><code>date</code></td><td><code>arrow.FixedWidthTypes.Date32</code></td></tr>
+<tr><td><code>time</code></td><td><code>arrow.FixedWidthTypes.Time64us</code></td></tr>
+<tr><td><code>timestamp</code></td><td><code>&amp;arrow.TimestampType{Unit: arrow.Microsecond}</code> (no zone)</td></tr>
+<tr><td><code>timestamptz</code></td><td><code>arrow.FixedWidthTypes.Timestamp_us</code> (<code>UTC</code> zone)</td></tr>
+<tr><td><code>timestamp_ns</code></td><td><code>&amp;arrow.TimestampType{Unit: arrow.Nanosecond}</code> (no zone)</td></tr>
+<tr><td><code>timestamptz_ns</code></td><td><code>arrow.FixedWidthTypes.Timestamp_ns</code> (<code>UTC</code> zone)</td></tr>
+<tr><td><code>string</code></td><td><code>arrow.BinaryTypes.String</code></td></tr>
+<tr><td><code>binary</code></td><td><code>arrow.BinaryTypes.Binary</code></td></tr>
+<tr><td><code>fixed[L]</code></td><td><code>&amp;arrow.FixedSizeBinaryType{ByteWidth: L}</code></td></tr>
+<tr><td><code>uuid</code></td><td><code>arrow.FixedWidthTypes.UUID</code> (extension type)</td></tr>
+<tr><td><code>struct&lt;...&gt;</code></td><td><code>arrow.StructOf(...)</code></td></tr>
+<tr><td><code>list&lt;E&gt;</code></td><td><code>arrow.ListOf(E)</code> (or <code>LargeListOf</code> if <code>useLargeTypes</code>)</td></tr>
+<tr><td><code>map&lt;K, V&gt;</code></td><td><code>arrow.MapOf(K, V)</code></td></tr>
+<tr><td><code>variant</code></td><td><code>arrow.ExtensionType</code> for Variant</td></tr>
+</tbody></table>
+</div>
+<p>Helpers in <a href="https://github.com/apache/iceberg-go/blob/main/table/arrow_utils.go"><code>table/arrow_utils.go</code></a>:</p>
+<ul>
+<li><code>SchemaToArrowSchema(sc *iceberg.Schema, nameMapping NameMapping, useLargeTypes, includeRowLineage bool) (*arrow.Schema, error)</code></li>
+<li><code>VisitArrowSchema[T](sc *arrow.Schema, visitor ArrowSchemaVisitor[T]) (T, error)</code></li>
+</ul>
+<p>For a writer-side schema (Arrow → Iceberg), the scanner and writers handle conversion automatically as long as your Arrow schema is compatible with the table schema.</p>
+<div style="break-before: page; page-break-before: always;"></div><!--
+  ~ Licensed to the Apache Software Foundation (ASF) under one
+  ~ or more contributor license agreements.  See the NOTICE file
+  ~ distributed with this work for additional information
+  ~ regarding copyright ownership.  The ASF licenses this file
+  ~ to you under the Apache License, Version 2.0 (the
+  ~ "License"); you may not use this file except in compliance
+  ~ with the License.  You may obtain a copy of the License at
+  ~
+  ~   http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing,
+  ~ software distributed under the License is distributed on an
+  ~ "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+  ~ KIND, either express or implied.  See the License for the
+  ~ specific language governing permissions and limitations
+  ~ under the License.
+-->
+<h1 id="row-filter-syntax"><a class="header" href="#row-filter-syntax">Row Filter Syntax</a></h1>
+<p>Row filters drive predicate pushdown during scans, partition pruning, and row-level deletes. The DSL lives in the root <code>iceberg</code> package - all you need is the import:</p>
+<pre><code class="language-go">import &quot;github.com/apache/iceberg-go&quot;
+</code></pre>
+<p>A column is referenced with <code>iceberg.Reference(&quot;column_name&quot;)</code>. Predicate constructors return a <code>BooleanExpression</code> (or an <code>UnboundPredicate</code>, which satisfies <code>BooleanExpression</code>) that can be combined with the boolean combinators in the <a href="./expression-dsl.html">Expression DSL</a> and passed to APIs like <code>table.WithRowFilter(...)</code>.</p>
+<h2 id="equality"><a class="header" href="#equality">Equality</a></h2>
+<pre><code class="language-go">iceberg.EqualTo(iceberg.Reference(&quot;status&quot;), &quot;active&quot;)
+iceberg.NotEqualTo(iceberg.Reference(&quot;retries&quot;), int32(0))
+</code></pre>
+<p><code>EqualTo[T]</code> and <code>NotEqualTo[T]</code> are generic over <code>LiteralType</code> (<code>bool</code>, <code>int32</code>, <code>int64</code>, <code>float32</code>, <code>float64</code>, <code>string</code>, <code>[]byte</code>, plus a few iceberg-specific types). The value's type must be in that set - bare <code>int</code> literals are not, so use <code>int32(0)</code> / <code>int64(0)</code> explicitly. They wrap <code>LiteralPredicate(OpEQ, ...)</code> and <code>LiteralPredicate(OpNEQ, ...)</code> (<code>predicates.go:83-91</code>).</p>
+<h2 id="comparison"><a class="header" href="#comparison">Comparison</a></h2>
+<pre><code class="language-go">iceberg.LessThan(iceberg.Reference(&quot;amount&quot;), 100.0)
+iceberg.LessThanEqual(iceberg.Reference(&quot;amount&quot;), 100.0)
+iceberg.GreaterThan(iceberg.Reference(&quot;created_at&quot;), int64(1700000000))
+iceberg.GreaterThanEqual(iceberg.Reference(&quot;score&quot;), int32(50))
+</code></pre>
+<p>Operators: <code>OpLT</code>, <code>OpLTEQ</code>, <code>OpGT</code>, <code>OpGTEQ</code> (<code>exprs.go:47-50</code>). Constructors at <code>predicates.go:98-124</code>.</p>
+<h2 id="set-membership"><a class="header" href="#set-membership">Set membership</a></h2>
+<pre><code class="language-go">iceberg.IsIn(iceberg.Reference(&quot;region&quot;), &quot;us-east&quot;, &quot;us-west&quot;, &quot;eu-west&quot;)
+iceberg.NotIn(iceberg.Reference(&quot;status&quot;), &quot;deleted&quot;, &quot;archived&quot;)
+</code></pre>
+<p><code>IsIn</code> and <code>NotIn</code> are variadic. They return a <code>BooleanExpression</code> (not <code>UnboundPredicate</code>) because the result can simplify automatically:</p>
+<ul>
+<li>Zero values - reduces to <code>AlwaysFalse{}</code> (for <code>IsIn</code>) or <code>AlwaysTrue{}</code> (for <code>NotIn</code>).</li>
+<li>One value - reduces to <code>EqualTo</code> / <code>NotEqualTo</code>.</li>
+</ul>
+<p>See <code>predicates.go:55-78</code>.</p>
+<h2 id="null-checks"><a class="header" href="#null-checks">Null checks</a></h2>
+<pre><code class="language-go">iceberg.IsNull(iceberg.Reference(&quot;deleted_at&quot;))
+iceberg.NotNull(iceberg.Reference(&quot;user_id&quot;))
+</code></pre>
+<p>These wrap <code>UnaryPredicate(OpIsNull, ...)</code> and <code>UnaryPredicate(OpNotNull, ...)</code>. Both panic if the term is <code>nil</code> (<code>predicates.go:23-32</code>).</p>
+<h2 id="nan-checks-float--double-columns-only"><a class="header" href="#nan-checks-float--double-columns-only">NaN checks (float / double columns only)</a></h2>
+<pre><code class="language-go">iceberg.IsNaN(iceberg.Reference(&quot;ratio&quot;))
+iceberg.NotNaN(iceberg.Reference(&quot;ratio&quot;))
+</code></pre>
+<p>Operators <code>OpIsNan</code> and <code>OpNotNan</code>. Use these instead of <code>EqualTo(..., math.NaN())</code> - NaN is never equal to itself.</p>
+<h2 id="string-prefix"><a class="header" href="#string-prefix">String prefix</a></h2>
+<pre><code class="language-go">iceberg.StartsWith(iceberg.Reference(&quot;path&quot;), &quot;/var/log/&quot;)
+iceberg.NotStartsWith(iceberg.Reference(&quot;name&quot;), &quot;tmp_&quot;)
+</code></pre>
+<p>Operators <code>OpStartsWith</code> and <code>OpNotStartsWith</code> (<code>exprs.go:53-54</code>). The value must be a <code>string</code>.</p>
+<h2 id="constants"><a class="header" href="#constants">Constants</a></h2>
+<pre><code class="language-go">iceberg.AlwaysTrue{}
+iceberg.AlwaysFalse{}
+</code></pre>
+<p>These satisfy <code>BooleanExpression</code> and short-circuit during expression simplification. Useful as a base case when filters are built dynamically:</p>
+<pre><code class="language-go">filter := iceberg.BooleanExpression(iceberg.AlwaysTrue{})
+for _, clause := range userClauses {
+    filter = iceberg.NewAnd(filter, clause)
 }
 </code></pre>
-<h2 id="branch-transactions"><a class="header" href="#branch-transactions">Branch Transactions</a></h2>
-<pre><code class="language-go">// Create a transaction that commits to a specific branch
-txn := tbl.NewTransactionOnBranch(&quot;staging&quot;)
+<h2 id="operator-reference"><a class="header" href="#operator-reference">Operator reference</a></h2>
+<p>The full operator set is the <code>Operation</code> enum at <code>exprs.go:34-62</code>:</p>
+<div class="table-wrapper"><table><thead><tr><th>Operator</th><th>Constant</th><th>Convenience builder</th></tr></thead><tbody>
+<tr><td><code>&lt;</code></td><td><code>OpLT</code></td><td><code>LessThan</code></td></tr>
+<tr><td><code>&lt;=</code></td><td><code>OpLTEQ</code></td><td><code>LessThanEqual</code></td></tr>
+<tr><td><code>&gt;</code></td><td><code>OpGT</code></td><td><code>GreaterThan</code></td></tr>
+<tr><td><code>&gt;=</code></td><td><code>OpGTEQ</code></td><td><code>GreaterThanEqual</code></td></tr>
+<tr><td><code>==</code></td><td><code>OpEQ</code></td><td><code>EqualTo</code></td></tr>
+<tr><td><code>!=</code></td><td><code>OpNEQ</code></td><td><code>NotEqualTo</code></td></tr>
+<tr><td><code>IS NULL</code></td><td><code>OpIsNull</code></td><td><code>IsNull</code></td></tr>
+<tr><td><code>IS NOT NULL</code></td><td><code>OpNotNull</code></td><td><code>NotNull</code></td></tr>
+<tr><td><code>IS NaN</code></td><td><code>OpIsNan</code></td><td><code>IsNaN</code></td></tr>
+<tr><td><code>IS NOT NaN</code></td><td><code>OpNotNan</code></td><td><code>NotNaN</code></td></tr>
+<tr><td><code>IN</code></td><td><code>OpIn</code></td><td><code>IsIn</code></td></tr>
+<tr><td><code>NOT IN</code></td><td><code>OpNotIn</code></td><td><code>NotIn</code></td></tr>
+<tr><td><code>STARTS WITH</code></td><td><code>OpStartsWith</code></td><td><code>StartsWith</code></td></tr>
+<tr><td><code>NOT STARTS WITH</code></td><td><code>OpNotStartsWith</code></td><td><code>NotStartsWith</code></td></tr>
+<tr><td><code>AND</code> / <code>OR</code> / <code>NOT</code></td><td><code>OpAnd</code> / <code>OpOr</code> / <code>OpNot</code></td><td><code>NewAnd</code> / <code>NewOr</code> / <code>NewNot</code> (see <a href="./expression-dsl.html">Expression DSL</a>)</td></tr>
+</tbody></table>
+</div>
+<h2 id="putting-it-together"><a class="header" href="#putting-it-together">Putting it together</a></h2>
+<p>A typical filter passed to a scan:</p>
+<pre><code class="language-go">filter := iceberg.NewAnd(
+    iceberg.GreaterThanEqual(iceberg.Reference(&quot;event_time&quot;), int64(1700000000)),
+    iceberg.IsIn(iceberg.Reference(&quot;region&quot;), &quot;us-east&quot;, &quot;us-west&quot;),
+    iceberg.NotNull(iceberg.Reference(&quot;user_id&quot;)),
+)
 
-err := txn.Append(context.Background(), recordReader, nil)
-if err != nil {
-    log.Fatal(err)
-}
-
-newTable, err := txn.Commit(context.Background())
-if err != nil {
-    log.Fatal(err)
-}
+scan := tbl.Scan(table.WithRowFilter(filter))
 </code></pre>
+<p>For boolean combination, term details, and the lower-level escape hatches (<code>UnaryPredicate</code>, <code>LiteralPredicate</code>, <code>SetPredicate</code>), see <a href="./expression-dsl.html">Expression DSL</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div><!--
+  ~ Licensed to the Apache Software Foundation (ASF) under one
+  ~ or more contributor license agreements.  See the NOTICE file
+  ~ distributed with this work for additional information
+  ~ regarding copyright ownership.  The ASF licenses this file
+  ~ to you under the Apache License, Version 2.0 (the
+  ~ "License"); you may not use this file except in compliance
+  ~ with the License.  You may obtain a copy of the License at
+  ~
+  ~   http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing,
+  ~ software distributed under the License is distributed on an
+  ~ "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+  ~ KIND, either express or implied.  See the License for the
+  ~ specific language governing permissions and limitations
+  ~ under the License.
+-->
+<h1 id="expression-dsl"><a class="header" href="#expression-dsl">Expression DSL</a></h1>
+<p>This page covers the building blocks behind the row-filter shortcuts in <a href="./row-filter-syntax.html">Row Filter Syntax</a>: boolean combinators, terms, and the lower-level predicate constructors.</p>
+<p>The DSL lives entirely in the root <code>iceberg</code> package (see <code>exprs.go</code> and <code>predicates.go</code>).</p>
+<h2 id="boolean-combinators"><a class="header" href="#boolean-combinators">Boolean combinators</a></h2>
+<pre><code class="language-go">iceberg.NewAnd(a, b)              // a AND b
+iceberg.NewAnd(a, b, c, d)        // a AND b AND c AND d (variadic)
+iceberg.NewOr(a, b)               // a OR b
+iceberg.NewOr(a, b, c, d)         // a OR b OR c OR d
+iceberg.NewNot(a)                 // NOT a
+</code></pre>
+<p><code>NewAnd</code> and <code>NewOr</code> accept two required arguments plus a variadic tail (<code>exprs.go:226</code>, <code>exprs.go:287</code>). They simplify automatically:</p>
+<ul>
+<li><code>NewAnd(x, AlwaysTrue{})</code> reduces to <code>x</code>.</li>
+<li><code>NewAnd(x, AlwaysFalse{})</code> reduces to <code>AlwaysFalse{}</code>.</li>
+<li><code>NewOr(x, AlwaysFalse{})</code> reduces to <code>x</code>.</li>
+<li><code>NewOr(x, AlwaysTrue{})</code> reduces to <code>AlwaysTrue{}</code>.</li>
+<li><code>NewNot(NewNot(x))</code> reduces to <code>x</code>.</li>
+</ul>
+<h2 id="constants-1"><a class="header" href="#constants-1">Constants</a></h2>
+<pre><code class="language-go">iceberg.AlwaysTrue{}
+iceberg.AlwaysFalse{}
+</code></pre>
+<p>Both satisfy <code>BooleanExpression</code>. Use them as the identity element when composing filters dynamically.</p>
+<h2 id="terms"><a class="header" href="#terms">Terms</a></h2>
+<p>A <em>term</em> is the left-hand side of a predicate. Iceberg-go has two flavors:</p>
+<ul>
+<li><code>Reference(&quot;column_name&quot;)</code> - an unbound term that names a column (<code>exprs.go:373</code>). Typing happens at bind time, when the expression is matched against a schema. This is what you almost always want.</li>
+<li><code>BoundReference</code> - the resolved form, produced by <code>Reference.Bind(schema, caseSensitive)</code> (<code>exprs.go:389</code>). You only encounter these when writing custom expression visitors.</li>
+</ul>
+<p>The interfaces are:</p>
+<pre><code class="language-go">type Term interface { ... }                        // shared marker
+type UnboundTerm interface { Term; ... }           // pre-bind
+type BoundTerm interface { Term; Ref() BoundReference; ... }
+</code></pre>
+<p>(<code>exprs.go:317-348</code>)</p>
+<h2 id="predicates"><a class="header" href="#predicates">Predicates</a></h2>
+<p>A <em>predicate</em> applies an <code>Operation</code> to one or more terms. <code>BooleanExpression</code> is the shared interface (<code>exprs.go:123</code>).</p>
+<h3 id="convenience-builders-recommended"><a class="header" href="#convenience-builders-recommended">Convenience builders (recommended)</a></h3>
+<p>For all the common shapes, the constructors in <code>predicates.go</code> are the right tool. See <a href="./row-filter-syntax.html">Row Filter Syntax</a> for the full list (<code>EqualTo</code>, <code>LessThan</code>, <code>IsIn</code>, <code>IsNull</code>, <code>StartsWith</code>, etc.).</p>
+<h3 id="lower-level-escape-hatches"><a class="header" href="#lower-level-escape-hatches">Lower-level escape hatches</a></h3>
+<p>When the convenience builders are not enough (custom operators, dynamic operation selection, working with already-typed <code>Literal</code> values), use the predicate constructors directly:</p>
+<pre><code class="language-go">// Unary predicates: IS NULL / NOT NULL / IS NaN / NOT NaN
+pred := iceberg.UnaryPredicate(iceberg.OpIsNull, iceberg.Reference(&quot;col&quot;))
+
+// Literal predicates: &lt;, &lt;=, &gt;, &gt;=, ==, !=, STARTS WITH, NOT STARTS WITH
+lit := iceberg.NewLiteral(int64(42))
+pred := iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference(&quot;col&quot;), lit)
+
+// Set predicates: IN / NOT IN
+lits := []iceberg.Literal{iceberg.NewLiteral(&quot;a&quot;), iceberg.NewLiteral(&quot;b&quot;)}
+pred := iceberg.SetPredicate(iceberg.OpIn, iceberg.Reference(&quot;col&quot;), lits)
+</code></pre>
+<p><code>UnaryPredicate</code> lives at <code>exprs.go:534</code>. <code>LiteralPredicate</code> and <code>SetPredicate</code> live in the same file.</p>
+<h2 id="negation"><a class="header" href="#negation">Negation</a></h2>
+<p>Every <code>BooleanExpression</code> and every <code>Operation</code> knows how to negate itself.</p>
+<pre><code class="language-go">op := iceberg.OpEQ
+op.Negate()  // -&gt; OpNEQ
+</code></pre>
+<p>(<code>exprs.go:65-98</code>. <code>OpNot</code>, <code>OpAnd</code>, and <code>OpOr</code> panic on direct negation - negate the wrapping expression instead.)</p>
+<pre><code class="language-go">expr := iceberg.EqualTo(iceberg.Reference(&quot;status&quot;), &quot;active&quot;)
+inverted := expr.Negate()  // equivalent to NotEqualTo(...)
+</code></pre>
+<h2 id="binding-and-evaluation"><a class="header" href="#binding-and-evaluation">Binding and evaluation</a></h2>
+<p>Most user code stops at constructing the unbound expression - the scan pipeline handles binding, projection, and evaluation internally. If you are writing a custom visitor:</p>
+<ul>
+<li><code>(Reference).Bind(schema, caseSensitive)</code> returns a <code>BoundTerm</code> (<code>exprs.go:389</code>).</li>
+<li><code>BoundExpression</code>s expose <code>Ref()</code>, <code>Type()</code>, and (for terms) the underlying <code>accessor</code> for evaluating against a <code>StructLike</code> row.</li>
+</ul>
+<p>For projection, evaluation, and visitor patterns, see <code>visitors.go</code> and the scan internals in <code>table/scanner.go</code>.</p>
+<h2 id="when-to-reach-for-what"><a class="header" href="#when-to-reach-for-what">When to reach for what</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Goal</th><th>Use</th></tr></thead><tbody>
+<tr><td>Filter a scan or row-level delete</td><td>Convenience builders + <code>NewAnd</code>/<code>NewOr</code>/<code>NewNot</code></td></tr>
+<tr><td>Combine many clauses dynamically</td><td>Start from <code>AlwaysTrue{}</code> (for AND) or <code>AlwaysFalse{}</code> (for OR), fold with <code>NewAnd</code>/<code>NewOr</code></td></tr>
+<tr><td>Construct a predicate whose operator is chosen at runtime</td><td><code>UnaryPredicate(op, term)</code>, <code>LiteralPredicate(op, term, lit)</code>, <code>SetPredicate(op, term, lits)</code></td></tr>
+<tr><td>Walk an expression tree</td><td>A custom <code>BooleanExprVisitor</code> from <code>visitors.go</code></td></tr>
+</tbody></table>
+</div>
+<p>For the per-operator cookbook, return to <a href="./row-filter-syntax.html">Row Filter Syntax</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div><!--
+  ~ Licensed to the Apache Software Foundation (ASF) under one
+  ~ or more contributor license agreements.  See the NOTICE file
+  ~ distributed with this work for additional information
+  ~ regarding copyright ownership.  The ASF licenses this file
+  ~ to you under the Apache License, Version 2.0 (the
+  ~ "License"); you may not use this file except in compliance
+  ~ with the License.  You may obtain a copy of the License at
+  ~
+  ~   http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing,
+  ~ software distributed under the License is distributed on an
+  ~ "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+  ~ KIND, either express or implied.  See the License for the
+  ~ specific language governing permissions and limitations
+  ~ under the License.
+-->
+<h1 id="feature-status"><a class="header" href="#feature-status">Feature Status</a></h1>
+<p>This page tracks what Apache Iceberg Go currently supports. The matrix is kept in sync with the project <a href="https://github.com/apache/iceberg-go/blob/main/README.md"><code>README.md</code></a>; if you spot a discrepancy, file an issue.</p>
+<h2 id="spec-format-version-coverage"><a class="header" href="#spec-format-version-coverage">Spec format version coverage</a></h2>
+<p>Apache Iceberg Go reads and writes table format versions 1, 2, and 3. The maximum supported version is enforced at <a href="https://github.com/apache/iceberg-go/blob/main/table/metadata.go"><code>table/metadata.go</code></a> (<code>supportedTableFormatVersion = 3</code>). For active tracking, see issues <a href="https://github.com/apache/iceberg-go/issues/589">#589 (V3)</a> and <a href="https://github.com/apache/iceberg-go/issues/829">#829 (V2 completion)</a>.</p>
+<h3 id="v1"><a class="header" href="#v1">V1</a></h3>
+<p>All V1 features are supported. V1 is the format-version baseline.</p>
+<h3 id="v2"><a class="header" href="#v2">V2</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Feature</th><th>Status</th></tr></thead><tbody>
+<tr><td>Sequence numbers</td><td>Supported</td></tr>
+<tr><td>Manifest entry status (added / existing / deleted)</td><td>Supported</td></tr>
+<tr><td>Positional deletes</td><td>Supported (read + write)</td></tr>
+<tr><td>Equality deletes</td><td>Supported (read + write). Write via <code>Transaction.WriteEqualityDeletes</code>; row-level commits via <code>Transaction.NewRowDelta</code></td></tr>
+<tr><td>Partition spec evolution</td><td>Supported</td></tr>
+<tr><td>Sort order enforcement on write</td><td>Supported (PR <a href="https://github.com/apache/iceberg-go/pull/1157">#1157</a>, closes <a href="https://github.com/apache/iceberg-go/issues/833">#833</a>)</td></tr>
+<tr><td><code>ReplaceDataFiles</code> using <code>OpReplace</code></td><td>Pending (<a href="https://github.com/apache/iceberg-go/issues/841">#841</a>)</td></tr>
+</tbody></table>
+</div>
+<h3 id="v3"><a class="header" href="#v3">V3</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Feature</th><th>Status</th></tr></thead><tbody>
+<tr><td>Nanosecond timestamps (<code>timestamp_ns</code>, <code>timestamptz_ns</code>)</td><td>Supported</td></tr>
+<tr><td>Default values (<code>initial-default</code>, <code>write-default</code>)</td><td>Supported</td></tr>
+<tr><td>Row lineage (<code>_row_id</code>, <code>_last_updated_sequence_number</code>)</td><td>Supported</td></tr>
+<tr><td>Encryption keys in metadata</td><td>Supported</td></tr>
+<tr><td>Variant type, non-shredded</td><td>Supported (PR <a href="https://github.com/apache/iceberg-go/pull/932">#932</a>; umbrella <a href="https://github.com/apache/iceberg-go/issues/929">#929</a>)</td></tr>
+<tr><td>Variant type, shredded reader / writer</td><td>In progress (<a href="https://github.com/apache/iceberg-go/issues/986">#986</a>, <a href="https://github.com/apache/iceberg-go/issues/987">#987</a>)</td></tr>
+<tr><td>Deletion vectors, read</td><td>Supported</td></tr>
+<tr><td>Deletion vectors, write (unpartitioned)</td><td>Supported</td></tr>
+<tr><td>Deletion vectors, write (partitioned)</td><td>In progress (<a href="https://github.com/apache/iceberg-go/issues/1135">#1135</a>, PR <a href="https://github.com/apache/iceberg-go/pull/1151">#1151</a>)</td></tr>
+<tr><td>Geometry / Geography types (schema)</td><td>Supported</td></tr>
+<tr><td>Geometry / Geography (transforms, statistics, pruning)</td><td>In progress (umbrella <a href="https://github.com/apache/iceberg-go/issues/989">#989</a>)</td></tr>
+<tr><td>Multi-argument transforms</td><td>Infrastructure present; no concrete implementations exercised yet</td></tr>
+</tbody></table>
+</div>
+<h2 id="filesystem-support"><a class="header" href="#filesystem-support">FileSystem support</a></h2>
+<div class="table-wrapper"><table><thead><tr><th style="text-align: center">Filesystem Type</th><th style="text-align: center">Supported</th></tr></thead><tbody>
+<tr><td style="text-align: center">S3</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: center">Google Cloud Storage</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: center">Azure Blob Storage</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: center">Local Filesystem</td><td style="text-align: center">X</td></tr>
+</tbody></table>
+</div>
+<p>S3, GCS, and Azure require a blank import: <code>_ &quot;github.com/apache/iceberg-go/io/gocloud&quot;</code>. See <a href="./configuration.html">Configuration</a>.</p>
+<h2 id="metadata-operations"><a class="header" href="#metadata-operations">Metadata operations</a></h2>
+<div class="table-wrapper"><table><thead><tr><th style="text-align: left">Operation</th><th style="text-align: center">Supported</th></tr></thead><tbody>
+<tr><td style="text-align: left">Get Schema</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Get Snapshots</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Get Sort Orders</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Get Partition Specs</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Get Manifests</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Create New Manifests</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Plan Scan</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Plan Scan for Snapshot</td><td style="text-align: center">X</td></tr>
+</tbody></table>
+</div>
+<h2 id="catalog-support"><a class="header" href="#catalog-support">Catalog support</a></h2>
+<div class="table-wrapper"><table><thead><tr><th style="text-align: left">Operation</th><th style="text-align: center">REST</th><th style="text-align: center">Hive</th><th style="text-align: center">Glue</th><th style="text-align: center">SQL</th><th style="text-align: center">Hadoop</th></tr></thead><tbody>
+<tr><td style="text-align: left">Load Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">List Tables</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Create Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Register Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center"></td></tr>
+<tr><td style="text-align: left">Update Current Snapshot</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Create New Snapshot</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Rename Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td></tr>
+<tr><td style="text-align: left">Drop Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Alter Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Check Table Exists</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Set Table Properties</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">List Namespaces</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Create Namespace</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Check Namespace Exists</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Drop Namespace</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Update Namespace Properties</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td></tr>
+<tr><td style="text-align: left">Create View</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td><td style="text-align: center"></td></tr>
+<tr><td style="text-align: left">Load View</td><td style="text-align: center"></td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td><td style="text-align: center"></td></tr>
+<tr><td style="text-align: left">List View</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td><td style="text-align: center"></td></tr>
+<tr><td style="text-align: left">Drop View</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td><td style="text-align: center"></td></tr>
+<tr><td style="text-align: left">Check View Exists</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td><td style="text-align: center"></td></tr>
+</tbody></table>
+</div>
+<p>A Hadoop catalog is also available - see <a href="https://github.com/apache/iceberg-go/tree/main/catalog/hadoop"><code>catalog/hadoop</code></a>.</p>
+<h2 id="read--write-data"><a class="header" href="#read--write-data">Read / write data</a></h2>
+<p>Data can be read as an Arrow <code>Table</code> or as a stream of Arrow record batches via <code>iter.Seq2</code>. See <a href="./api.html">API Reference</a>.</p>
+<h3 id="supported-write-operations"><a class="header" href="#supported-write-operations">Supported write operations</a></h3>
+<p>As long as the FileSystem is supported and the Catalog supports altering the table:</p>
+<div class="table-wrapper"><table><thead><tr><th style="text-align: left">Operation</th><th style="text-align: center">Supported</th></tr></thead><tbody>
+<tr><td style="text-align: left">Append Stream</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Append Data Files</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Rewrite Files</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Rewrite manifests</td><td style="text-align: center"></td></tr>
+<tr><td style="text-align: left">Overwrite Files</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Copy-On-Write Delete</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Write Pos Delete</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Write Eq Delete</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Row Delta</td><td style="text-align: center">X</td></tr>
+</tbody></table>
+</div><div style="break-before: page; page-break-before: always;"></div><!--
+  ~ Licensed to the Apache Software Foundation (ASF) under one
+  ~ or more contributor license agreements.  See the NOTICE file
+  ~ distributed with this work for additional information
+  ~ regarding copyright ownership.  The ASF licenses this file
+  ~ to you under the Apache License, Version 2.0 (the
+  ~ "License"); you may not use this file except in compliance
+  ~ with the License.  You may obtain a copy of the License at
+  ~
+  ~   http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing,
+  ~ software distributed under the License is distributed on an
+  ~ "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+  ~ KIND, either express or implied.  See the License for the
+  ~ specific language governing permissions and limitations
+  ~ under the License.
+-->
+<h1 id="contributing"><a class="header" href="#contributing">Contributing</a></h1>
+<h2 id="get-in-touch"><a class="header" href="#get-in-touch">Get in Touch</a></h2>
+<ul>
+<li><a href="https://iceberg.apache.org/community/">Iceberg community</a></li>
+<li><a href="https://apache-iceberg.slack.com/archives/C05J3MJ42BD">Iceberg-Go Slack</a></li>
+</ul>
+<h2 id="picking-up-issues"><a class="header" href="#picking-up-issues">Picking Up Issues</a></h2>
+<p>Before starting work on an issue:</p>
+<ol>
+<li><strong>Check for existing PRs.</strong> Search the <a href="https://github.com/apache/iceberg-go/pulls">open pull requests</a> to make sure nobody is already working on it.</li>
+<li><strong>Claim the issue.</strong> Leave a comment on the issue (e.g., &quot;I'd like to work on this&quot;) and wait for a maintainer to acknowledge before writing code.</li>
+<li><strong>One at a time for new contributors.</strong> If you haven't had a PR merged into iceberg-go yet, please work on one issue at a time. Get it reviewed, address feedback, get it merged — then pick up the next one. This helps us give your work the attention it deserves and avoids wasted effort from overlapping contributions.</li>
+</ol>
+<p>If two PRs land for the same issue, we will generally keep the one from the contributor who claimed it first.</p>
+<h2 id="submitting-a-pull-request"><a class="header" href="#submitting-a-pull-request">Submitting a Pull Request</a></h2>
+<ul>
+<li>Reference the issue number in your PR description (e.g., &quot;Fixes #123&quot;).</li>
+<li>Keep PRs focused — one issue per PR.</li>
+<li>Run <code>go test ./...</code>, <code>gofmt</code>, and <code>golangci-lint run</code> before pushing. CI runs all of these too, but catching issues locally saves a round-trip.</li>
+<li>All commits must have a <code>Signed-off-by</code> line (<a href="https://developercertificate.org/">DCO</a>).</li>
+</ul>
+<h2 id="code-review"><a class="header" href="#code-review">Code Review</a></h2>
+<ul>
+<li>Maintainers may request changes. This is normal — it doesn't mean the PR is bad, it means we want to get it right.</li>
+<li>Respond to review comments by pushing new commits (don't force-push over reviewed code).</li>
+<li>If your PR has been waiting for review for more than a few days, ping on <a href="https://apache-iceberg.slack.com/archives/C05J3MJ42BD">Slack</a>.</li>
+</ul>
+<h2 id="development-setup"><a class="header" href="#development-setup">Development Setup</a></h2>
+<pre><code class="language-bash">git clone https://github.com/apache/iceberg-go.git
+cd iceberg-go
+go build ./...
+go test ./...
+</code></pre>
+<h3 id="integration-tests"><a class="header" href="#integration-tests">Integration Tests</a></h3>
+<p>Integration tests require Docker and are gated behind a build tag:</p>
+<pre><code class="language-bash">docker compose -f internal/recipe/docker-compose.yml up -d rest minio mc --wait
+go test -tags integration ./...
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div><!--
+  ~ Licensed to the Apache Software Foundation (ASF) under one
+  ~ or more contributor license agreements.  See the NOTICE file
+  ~ distributed with this work for additional information
+  ~ regarding copyright ownership.  The ASF licenses this file
+  ~ to you under the Apache License, Version 2.0 (the
+  ~ "License"); you may not use this file except in compliance
+  ~ with the License.  You may obtain a copy of the License at
+  ~
+  ~   http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing,
+  ~ software distributed under the License is distributed on an
+  ~ "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+  ~ KIND, either express or implied.  See the License for the
+  ~ specific language governing permissions and limitations
+  ~ under the License.
+-->
+<h1 id="community"><a class="header" href="#community">Community</a></h1>
+<p>Apache Iceberg Go is developed in the open as part of the broader Apache Iceberg project. The fastest ways to ask questions, share work, and follow development are below.</p>
+<h2 id="chat"><a class="header" href="#chat">Chat</a></h2>
+<ul>
+<li><a href="https://apache-iceberg.slack.com/archives/C05J3MJ42BD">#iceberg-go on Apache Iceberg Slack</a> - day-to-day discussion, design questions, help requests.</li>
+</ul>
+<h2 id="mailing-list"><a class="header" href="#mailing-list">Mailing list</a></h2>
+<p>The Apache Iceberg project uses a single dev mailing list across all language implementations.</p>
+<ul>
+<li>Read / post: <code>dev@iceberg.apache.org</code></li>
+<li>Subscribe: send any email to <code>dev-subscribe@iceberg.apache.org</code></li>
+</ul>
+<h2 id="issues-and-pull-requests"><a class="header" href="#issues-and-pull-requests">Issues and pull requests</a></h2>
+<ul>
+<li><a href="https://github.com/apache/iceberg-go/issues">Issue tracker</a></li>
+<li><a href="https://github.com/apache/iceberg-go/pulls">Pull requests</a></li>
+</ul>
+<p>For contribution guidelines, see <a href="./contributing.html">Contributing</a>.</p>
+<h2 id="apache-iceberg-community-at-large"><a class="header" href="#apache-iceberg-community-at-large">Apache Iceberg community at large</a></h2>
+<ul>
+<li><a href="https://iceberg.apache.org/community/">Apache Iceberg community page</a> - cross-implementation links, sync calls, and the project Code of Conduct.</li>
+<li><a href="https://www.apache.org/foundation/policies/conduct.html">Apache Iceberg Code of Conduct</a> - applies to all participation in this project.</li>
+</ul>
 <div style="break-before: page; page-break-before: always;"></div><!--
   ~ Licensed to the Apache Software Foundation (ASF) under one
   ~ or more contributor license agreements.  See the NOTICE file
@@ -1175,7 +1972,7 @@ if err != nil {
 <tr><td><strong>ORC</strong></td><td>Data files</td><td>An alternative columnar format supported by some Iceberg implementations.</td></tr>
 </tbody></table>
 </div>
-<h2 id="metadata-1"><a class="header" href="#metadata-1">Metadata</a></h2>
+<h2 id="metadata"><a class="header" href="#metadata">Metadata</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Term</th><th>Definition</th></tr></thead><tbody>
 <tr><td><strong>Metadata File</strong></td><td>A JSON file containing table metadata including schema, partition spec, properties, and snapshot information.</td></tr>
 <tr><td><strong>Metadata Location</strong></td><td>The URI pointing to the current metadata file for a table, stored in the catalog.</td></tr>
@@ -1211,7 +2008,7 @@ if err != nil {
 <tr><td><strong>Statistics-based Optimization</strong></td><td>Using table and file statistics to optimize query execution plans and file selection.</td></tr>
 </tbody></table>
 </div>
-<h2 id="schema-evolution"><a class="header" href="#schema-evolution">Schema Evolution</a></h2>
+<h2 id="schema-evolution-1"><a class="header" href="#schema-evolution-1">Schema Evolution</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Term</th><th>Definition</th></tr></thead><tbody>
 <tr><td><strong>Schema Evolution</strong></td><td>The process of modifying a table's schema over time while maintaining backward compatibility.</td></tr>
 <tr><td><strong>Column Addition</strong></td><td>Adding new columns to a table schema, which are typically optional to maintain compatibility.</td></tr>
@@ -1233,7 +2030,240 @@ if err != nil {
 <tr><td><strong>Isolation</strong></td><td>Ensures that concurrent transactions do not interfere with each other.</td></tr>
 <tr><td><strong>Durability</strong></td><td>Ensures that committed changes are permanently stored and survive system failures.</td></tr>
 </tbody></table>
+</div><div style="break-before: page; page-break-before: always;"></div><!--
+  ~ Licensed to the Apache Software Foundation (ASF) under one
+  ~ or more contributor license agreements.  See the NOTICE file
+  ~ distributed with this work for additional information
+  ~ regarding copyright ownership.  The ASF licenses this file
+  ~ to you under the Apache License, Version 2.0 (the
+  ~ "License"); you may not use this file except in compliance
+  ~ with the License.  You may obtain a copy of the License at
+  ~
+  ~   http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing,
+  ~ software distributed under the License is distributed on an
+  ~ "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+  ~ KIND, either express or implied.  See the License for the
+  ~ specific language governing permissions and limitations
+  ~ under the License.
+-->
+<h1 id="releases"><a class="header" href="#releases">Releases</a></h1>
+<p>Apache Iceberg Go follows the standard Apache release process. Releases are cut from <code>main</code>, voted on by the Apache Iceberg PMC, and published as signed source tarballs to <code>https://downloads.apache.org/iceberg/</code> and as Go module versions tagged <code>vX.Y.Z</code>.</p>
+<h2 id="latest-release"><a class="header" href="#latest-release">Latest release</a></h2>
+<ul>
+<li><a href="https://github.com/apache/iceberg-go/releases/latest">Latest release on GitHub</a></li>
+<li>All releases: <a href="https://github.com/apache/iceberg-go/releases">github.com/apache/iceberg-go/releases</a></li>
+</ul>
+<h2 id="using-a-release"><a class="header" href="#using-a-release">Using a release</a></h2>
+<p>Pin a tagged version directly with Go modules:</p>
+<pre><code class="language-sh">go get github.com/apache/iceberg-go@vX.Y.Z
+</code></pre>
+<p>To track <code>main</code>, use <code>@main</code> instead of a version tag.</p>
+<h2 id="release-notes"><a class="header" href="#release-notes">Release notes</a></h2>
+<p>Per-release notes (highlights, breaking changes, contributors) are published on the <a href="https://github.com/apache/iceberg-go/releases">GitHub Releases page</a>. Iceberg Go does not maintain a curated <code>CHANGELOG.md</code> in the repository; the GitHub Releases page is the canonical source.</p>
+<h2 id="verifying-and-producing-releases"><a class="header" href="#verifying-and-producing-releases">Verifying and producing releases</a></h2>
+<p>If you are validating an RC or cutting a new release, see:</p>
+<ul>
+<li><a href="./verify-release.html">Verify a release</a> - what to do when a <code>[VOTE]</code> thread is posted on <code>dev@iceberg.apache.org</code>.</li>
+<li><a href="./how-to-release.html">How to release</a> - PMC/committer process for cutting an RC and publishing.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><!--
+  ~ Licensed to the Apache Software Foundation (ASF) under one
+  ~ or more contributor license agreements.  See the NOTICE file
+  ~ distributed with this work for additional information
+  ~ regarding copyright ownership.  The ASF licenses this file
+  ~ to you under the Apache License, Version 2.0 (the
+  ~ "License"); you may not use this file except in compliance
+  ~ with the License.  You may obtain a copy of the License at
+  ~
+  ~   http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing,
+  ~ software distributed under the License is distributed on an
+  ~ "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+  ~ KIND, either express or implied.  See the License for the
+  ~ specific language governing permissions and limitations
+  ~ under the License.
+-->
+<h1 id="verify-a-release"><a class="header" href="#verify-a-release">Verify a release</a></h1>
+<p>When a release candidate is announced on <code>dev@iceberg.apache.org</code>, anyone (committer or not) can help by verifying the artifacts. Verification is required from at least three Apache Iceberg PMC members for the vote to pass.</p>
+<p>The repository ships a script that performs the full verification end-to-end: <code>dev/release/verify_rc.sh</code>.</p>
+<h2 id="what-an-rc-announcement-contains"><a class="header" href="#what-an-rc-announcement-contains">What an RC announcement contains</a></h2>
+<p>A <code>[VOTE] iceberg-go X.Y.Z RC&lt;N&gt;</code> thread on <code>dev@iceberg.apache.org</code> will reference:</p>
+<ul>
+<li>A signed source tarball under <code>https://dist.apache.org/repos/dist/dev/iceberg/apache-iceberg-go-${VERSION}-rc${RC}/</code> (<code>.tar.gz</code>, <code>.tar.gz.asc</code>, <code>.tar.gz.sha512</code>)</li>
+<li>The Apache Iceberg <code>KEYS</code> file at <code>https://downloads.apache.org/iceberg/KEYS</code></li>
+<li>A GitHub compare URL between the previous release tag and the new RC tag</li>
+</ul>
+<h2 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h2>
+<p>The script requires:</p>
+<ul>
+<li><code>curl</code></li>
+<li><code>gpg</code></li>
+<li><code>shasum</code> or <code>sha512sum</code></li>
+<li><code>tar</code></li>
+</ul>
+<p>You do not need Go installed - if Go is not on the system, the latest Go is downloaded automatically and used only for verification.</p>
+<h2 id="import-the-apache-iceberg-keys"><a class="header" href="#import-the-apache-iceberg-keys">Import the Apache Iceberg KEYS</a></h2>
+<pre><code class="language-sh">curl https://downloads.apache.org/iceberg/KEYS -o KEYS
+gpg --import KEYS
+</code></pre>
+<h2 id="run-the-verification-script"><a class="header" href="#run-the-verification-script">Run the verification script</a></h2>
+<p>The script takes the version and RC number as positional arguments:</p>
+<pre><code class="language-sh">dev/release/verify_rc.sh ${VERSION} ${RC}
+</code></pre>
+<p>For example, to verify <code>0.6.0</code> RC1:</p>
+<pre><code class="language-sh">dev/release/verify_rc.sh 0.6.0 1
+</code></pre>
+<p>If the verification succeeds, the script prints:</p>
+<pre><code>RC looks good!
+</code></pre>
+<h2 id="optional-environment-variables"><a class="header" href="#optional-environment-variables">Optional environment variables</a></h2>
+<p><code>verify_rc.sh</code> honors these environment variables (all optional):</p>
+<div class="table-wrapper"><table><thead><tr><th>Variable</th><th>Default</th><th>Effect</th></tr></thead><tbody>
+<tr><td><code>VERIFY_DEFAULT</code></td><td><code>1</code></td><td>Master switch propagated to <code>VERIFY_DOWNLOAD</code> and <code>VERIFY_SIGN</code> if they are unset.</td></tr>
+<tr><td><code>VERIFY_DOWNLOAD</code></td><td><code>${VERIFY_DEFAULT}</code></td><td>Re-download artifacts when <code>1</code>; reuse the local copy when <code>0</code>.</td></tr>
+<tr><td><code>VERIFY_SIGN</code></td><td><code>${VERIFY_DEFAULT}</code></td><td>Re-run signature and checksum verification when <code>1</code>.</td></tr>
+<tr><td><code>VERIFY_FORCE_USE_GO_BINARY</code></td><td><code>0</code></td><td>When <code>1</code>, ignore any system Go and use the script's auto-downloaded Go.</td></tr>
+<tr><td><code>GITHUB_TOKEN</code></td><td>unset</td><td>Optional - supplies authenticated requests when fetching the latest Go release, avoiding rate limits.</td></tr>
+</tbody></table>
 </div>
+<h2 id="manual-verification-fallback"><a class="header" href="#manual-verification-fallback">Manual verification fallback</a></h2>
+<p>If you would rather verify by hand, the underlying steps are:</p>
+<pre><code class="language-sh"># Download the artifacts
+curl -O https://dist.apache.org/repos/dist/dev/iceberg/apache-iceberg-go-${VERSION}-rc${RC}/apache-iceberg-go-${VERSION}.tar.gz
+curl -O https://dist.apache.org/repos/dist/dev/iceberg/apache-iceberg-go-${VERSION}-rc${RC}/apache-iceberg-go-${VERSION}.tar.gz.asc
+curl -O https://dist.apache.org/repos/dist/dev/iceberg/apache-iceberg-go-${VERSION}-rc${RC}/apache-iceberg-go-${VERSION}.tar.gz.sha512
+
+# Verify the signature
+gpg --verify apache-iceberg-go-${VERSION}.tar.gz.asc apache-iceberg-go-${VERSION}.tar.gz
+
+# Verify the checksum (or sha512sum -c on systems without shasum)
+shasum -a 512 --check apache-iceberg-go-${VERSION}.tar.gz.sha512
+
+# Inspect the contents
+tar xf apache-iceberg-go-${VERSION}.tar.gz
+</code></pre>
+<p>You should reply to the <code>[VOTE]</code> thread with <code>+1</code>, <code>+0</code>, or <code>-1</code> and a one-line description of what you verified (for example, &quot;verified signatures, checksums, and <code>verify_rc.sh</code> passed on macOS arm64 with system Go 1.25.5&quot;).</p>
+<div style="break-before: page; page-break-before: always;"></div><!--
+  ~ Licensed to the Apache Software Foundation (ASF) under one
+  ~ or more contributor license agreements.  See the NOTICE file
+  ~ distributed with this work for additional information
+  ~ regarding copyright ownership.  The ASF licenses this file
+  ~ to you under the Apache License, Version 2.0 (the
+  ~ "License"); you may not use this file except in compliance
+  ~ with the License.  You may obtain a copy of the License at
+  ~
+  ~   http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing,
+  ~ software distributed under the License is distributed on an
+  ~ "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+  ~ KIND, either express or implied.  See the License for the
+  ~ specific language governing permissions and limitations
+  ~ under the License.
+-->
+<h1 id="how-to-release"><a class="header" href="#how-to-release">How to release</a></h1>
+<p>This page is for Apache Iceberg PMC members and committers who are cutting a new Apache Iceberg Go release. The canonical scripts live in <a href="https://github.com/apache/iceberg-go/tree/main/dev/release"><code>dev/release/</code></a> and <code>dev/release/README.md</code> is the source of truth - this page mirrors it and adds context.</p>
+<h2 id="requirements-1"><a class="header" href="#requirements-1">Requirements</a></h2>
+<ul>
+<li>
+<p>You must be an Apache Iceberg committer or PMC member.</p>
+</li>
+<li>
+<p>You must prepare a PGP key for signing. See <a href="https://infra.apache.org/release-signing.html#generate">https://infra.apache.org/release-signing.html#generate</a>.</p>
+</li>
+<li>
+<p>Your PGP key must be registered in the Apache Iceberg <code>KEYS</code> file at <code>https://downloads.apache.org/iceberg/KEYS</code>. To add a key:</p>
+<pre><code class="language-sh">svn co https://dist.apache.org/repos/dist/release/iceberg
+cd iceberg
+$EDITOR KEYS
+svn ci KEYS
+</code></pre>
+</li>
+<li>
+<p>You must run the release scripts from a working copy whose <code>origin</code> remote is <code>git@github.com:apache/iceberg-go.git</code> (not your fork). <code>release_rc.sh</code> enforces this.</p>
+</li>
+</ul>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<ol>
+<li>Test the revision to be released.</li>
+<li>Prepare an RC and start a vote.</li>
+<li>On a passing vote, publish.</li>
+</ol>
+<h2 id="prepare-an-rc-and-vote"><a class="header" href="#prepare-an-rc-and-vote">Prepare an RC and vote</a></h2>
+<p>Run <code>dev/release/release_rc.sh</code> against the canonical clone:</p>
+<pre><code class="language-sh">git clone git@github.com:apache/iceberg-go.git
+cd iceberg-go
+GH_TOKEN=${YOUR_GITHUB_TOKEN} dev/release/release_rc.sh ${VERSION} ${RC}
+</code></pre>
+<p>Example for <code>0.6.0</code> RC1:</p>
+<pre><code class="language-sh">GH_TOKEN=${YOUR_GITHUB_TOKEN} dev/release/release_rc.sh 0.6.0 1
+</code></pre>
+<p>The arguments are the version and the RC number. If <code>RC1</code> has a problem, increment the RC number to <code>RC2</code>, <code>RC3</code>, and so on.</p>
+<p><code>release_rc.sh</code> will:</p>
+<ul>
+<li>Tag <code>vX.Y.Z-rc&lt;N&gt;</code> and push the tag.</li>
+<li>Create a signed source tarball.</li>
+<li>Upload the artifacts to <code>https://dist.apache.org/repos/dist/dev/iceberg/</code>.</li>
+<li>Print a draft <code>[VOTE]</code> email you can use on <code>dev@iceberg.apache.org</code>.</li>
+</ul>
+<p>Send the <code>[VOTE]</code> email. The vote runs for at least 72 hours and requires three +1 votes from PMC members with no -1 votes to pass.</p>
+<h2 id="publish"><a class="header" href="#publish">Publish</a></h2>
+<p>When the vote passes, run:</p>
+<pre><code class="language-sh">GH_TOKEN=${YOUR_GITHUB_TOKEN} dev/release/release.sh ${VERSION} ${RC}
+</code></pre>
+<p><code>release.sh</code> moves the artifacts from <code>https://dist.apache.org/repos/dist/dev/iceberg/</code> to <code>https://dist.apache.org/repos/dist/release/iceberg/</code> (which feeds <code>https://downloads.apache.org/iceberg/</code>) and creates a GitHub Release with auto-generated notes.</p>
+<h2 id="post-release-tasks"><a class="header" href="#post-release-tasks">Post-release tasks</a></h2>
+<p>After publishing, complete these steps:</p>
+<ol>
+<li>Add the release to ASF's report database at the <a href="https://reporter.apache.org/addrelease.html?iceberg">Apache Committee Report Helper</a>.</li>
+<li>Verify the GitHub Release at <code>https://github.com/apache/iceberg-go/releases</code> is correctly tagged, has generated release notes against the prior tag, and is marked as latest. <code>release.sh</code> runs <code>gh release create ... --generate-notes --verify-tag</code> so the release should already exist; double-check the notes and the &quot;Latest&quot; badge.</li>
+<li>Send the <code>[ANNOUNCE]</code> email to <code>dev@iceberg.apache.org</code> and <code>announce@apache.org</code>.</li>
+<li>File a release blog post in <a href="https://github.com/apache/iceberg"><code>apache/iceberg</code></a> under <code>site/docs/blog/posts/</code>. See the prior 0.5.0 post (<code>2026-03-05-iceberg-go-0.5.0-release.md</code>) for the frontmatter and structure.</li>
+</ol>
+<h2 id="patch-releases"><a class="header" href="#patch-releases">Patch releases</a></h2>
+<p><code>dev/release/README.md</code> does not document a patch-branch convention (e.g. <code>iceberg-go-0.X.x</code>). Confirm with the PMC on <code>dev@iceberg.apache.org</code> before cutting a patch release.</p>
+<div style="break-before: page; page-break-before: always;"></div><!--
+  ~ Licensed to the Apache Software Foundation (ASF) under one
+  ~ or more contributor license agreements.  See the NOTICE file
+  ~ distributed with this work for additional information
+  ~ regarding copyright ownership.  The ASF licenses this file
+  ~ to you under the Apache License, Version 2.0 (the
+  ~ "License"); you may not use this file except in compliance
+  ~ with the License.  You may obtain a copy of the License at
+  ~
+  ~   http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing,
+  ~ software distributed under the License is distributed on an
+  ~ "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+  ~ KIND, either express or implied.  See the License for the
+  ~ specific language governing permissions and limitations
+  ~ under the License.
+-->
+<h1 id="other-iceberg-implementations"><a class="header" href="#other-iceberg-implementations">Other Iceberg implementations</a></h1>
+<p>Apache Iceberg Go is one of several official Iceberg implementations. Pick the one that matches your runtime; the table format and catalog protocols are the same across all of them.</p>
+<div class="table-wrapper"><table><thead><tr><th>Project</th><th>Language</th><th>Repository</th><th>Documentation</th></tr></thead><tbody>
+<tr><td>Apache Iceberg</td><td>Java (reference)</td><td><a href="https://github.com/apache/iceberg">apache/iceberg</a></td><td><a href="https://iceberg.apache.org/">iceberg.apache.org</a></td></tr>
+<tr><td>PyIceberg</td><td>Python</td><td><a href="https://github.com/apache/iceberg-python">apache/iceberg-python</a></td><td><a href="https://py.iceberg.apache.org/">py.iceberg.apache.org</a></td></tr>
+<tr><td>iceberg-rust</td><td>Rust</td><td><a href="https://github.com/apache/iceberg-rust">apache/iceberg-rust</a></td><td><a href="https://rust.iceberg.apache.org/">rust.iceberg.apache.org</a></td></tr>
+<tr><td>iceberg-cpp</td><td>C++</td><td><a href="https://github.com/apache/iceberg-cpp">apache/iceberg-cpp</a></td><td><a href="https://cpp.iceberg.apache.org/">cpp.iceberg.apache.org</a> (early stage)</td></tr>
+</tbody></table>
+</div>
+<h2 id="when-to-use-which"><a class="header" href="#when-to-use-which">When to use which</a></h2>
+<ul>
+<li><strong>Java</strong> is the reference implementation and is what every query engine integrates against (Spark, Flink, Trino, Hive, Presto, Dremio, etc.). If you are running a JVM workload, this is the canonical choice.</li>
+<li><strong>PyIceberg</strong> is for Python and the dataframe ecosystem (PyArrow, Pandas, Polars, DuckDB, Daft, Ray). Most data-science and ML workflows live here.</li>
+<li><strong>iceberg-rust</strong> is the Rust implementation, used by <code>pyiceberg-core</code>, DataFusion-based engines, and other Rust-native systems.</li>
+<li><strong>iceberg-cpp</strong> is early-stage (0.2.0 released 2026-01-26). Track the project for native C++ integration once it stabilizes.</li>
+<li><strong>iceberg-go</strong> (this project) is for Go services and tooling. Tight Apache Arrow Go integration makes it a good fit for streaming Arrow record batches into and out of Iceberg tables.</li>
+</ul>
+<h2 id="specifications-and-shared-concepts"><a class="header" href="#specifications-and-shared-concepts">Specifications and shared concepts</a></h2>
+<p>The Iceberg spec, terminology, partitioning semantics, evolution semantics, REST Catalog OpenAPI, and multi-engine support policy live with the main project at <a href="https://iceberg.apache.org/">iceberg.apache.org</a>. All the implementations above target the same spec.</p>
+<p>For Apache Iceberg Go-specific guidance, continue with the <a href="./api.html">API Reference</a>, <a href="./cli.html">CLI</a>, or <a href="./configuration.html">Configuration</a>.</p>
+
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
