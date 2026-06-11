@@ -200,8 +200,6 @@ func TestPartitionTypeToAvroSchemaDuplicateNamedTypes(t *testing.T) {
 
 // TestDayTransformPartitionAvroDateEncoding verifies that a day(ts) partition
 // field is encoded with the Avro "date" logical type, not as a plain integer.
-// This is required for interoperability with Trino, Spark, and other Iceberg
-// engines that reject manifests where day-partition columns lack the date type.
 //
 // The fix lives in PartitionSpec.PartitionType: it overrides DayTransform's
 // ResultType (Int32) to DateType so the existing DateType branch in
