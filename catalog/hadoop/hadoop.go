@@ -363,7 +363,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 	}
 
 	metaDir := c.metadataDir(ident)
-	if err := c.CheckedMkdirAll(ident, false); err != nil {
+	if err := c.filesystem.MkdirAll(metaDir); err != nil {
 		return nil, fmt.Errorf("hadoop catalog: failed to create metadata directory: %w", err)
 	}
 
@@ -489,7 +489,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 
 	// Step 7: Create metadata directory if needed (create-via-commit).
 	metaDir := c.metadataDir(ident)
-	if err := c.CheckedMkdirAll(ident, false); err != nil {
+	if err := c.filesystem.MkdirAll(metaDir); err != nil {
 		return nil, "", fmt.Errorf("hadoop catalog: failed to create metadata directory: %w", err)
 	}
 
