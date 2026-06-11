@@ -788,7 +788,9 @@ func (c *Catalog) CheckedMkdirAll(id table.Identifier, errIfExists bool) error {
 	}
 	if errIfExists {
 		if _, err := c.filesystem.Stat(path); err == nil {
-			return err
+			// If there is no error and stat returns successfully,
+			// it means that it must already exist
+			return fs.ErrExist
 		}
 	}
 
