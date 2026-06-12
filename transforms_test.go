@@ -872,3 +872,41 @@ func TestTruncateTransformStringUnicode(t *testing.T) {
 		})
 	}
 }
+
+func TestTruncateStringDoesNotSplitUTF8(t *testing.T) {
+	transform := iceberg.TruncateTransform{Width: 1}
+
+	out := transform.Apply(iceberg.Optional[iceberg.Literal]{
+		Valid: true,
+		Val:   iceberg.StringLiteral("éx"),
+	})
+	require.True(t, out.Valid)
+	got := string(out.Val.(iceberg.StringLiteral))
+	require.True(t, utf8.ValidString(got), "truncate produced invalid UTF-8: %q", got)
+	assert.Equal(t, "é", got)
+
+	fn, err := transform.Transformer(iceberg.PrimitiveTypes.String)
+	require.NoError(t, err)
+	transformed := fn("éx").(string)
+	require.True(t, utf8.ValidString(transformed), "transformer produced invalid UTF-8: %q", transformed)
+	assert.Equal(t, "é", transformed)
+
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID:   1,
+		Name: "s",
+		Type: iceberg.PrimitiveTypes.String,
+	})
+	bound, err := iceberg.EqualTo(iceberg.Reference("s"), "éx").Bind(schema, true)
+	require.NoError(t, err)
+
+	projected, err := transform.Project("s_trunc", bound.(iceberg.BoundPredicate))
+	require.NoError(t, err)
+	assert.True(t, iceberg.EqualTo(iceberg.Reference("s_trunc"), "é").Equals(projected))
+
+	binary := transform.Apply(iceberg.Optional[iceberg.Literal]{
+		Valid: true,
+		Val:   iceberg.BinaryLiteral([]byte("éx")),
+	})
+	require.True(t, binary.Valid)
+	assert.Equal(t, iceberg.BinaryLiteral([]byte{0xc3}), binary.Val)
+}

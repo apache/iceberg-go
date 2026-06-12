@@ -27,7 +27,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
@@ -484,22 +483,23 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 
 			return val - (((val % width) + width) % width)
 		}, nil
-	case StringType, BinaryType:
+	case StringType:
 		return func(v any) any {
-			switch v := v.(type) {
-			case string:
-				byteOff := 0
-				for cp := 0; cp < t.Width && byteOff < len(v); cp++ {
-					_, size := utf8.DecodeRuneInString(v[byteOff:])
-					byteOff += size
-				}
-
-				return v[:byteOff]
-			case []byte:
-				return v[:min(len(v), t.Width)]
-			default:
+			str, ok := v.(string)
+			if !ok {
 				return nil
 			}
+
+			return truncateString(str, t.Width)
+		}, nil
+	case BinaryType:
+		return func(v any) any {
+			b, ok := v.([]byte)
+			if !ok {
+				return nil
+			}
+
+			return b[:min(len(b), t.Width)]
 		}, nil
 	case DecimalType:
 		bigWidth := big.NewInt(int64(t.Width))
@@ -522,6 +522,20 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 
 	return nil, fmt.Errorf("%w: cannot truncate for type %s",
 		ErrInvalidArgument, src)
+}
+
+// Range yields byte indexes at UTF-8 code point boundaries, so slicing on idx
+// truncates by Unicode characters without copying the whole string to []rune.
+func truncateString(s string, width int) string {
+	for idx := range s {
+		if width == 0 {
+			return s[:idx]
+		}
+
+		width--
+	}
+
+	return s
 }
 
 func (t TruncateTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
