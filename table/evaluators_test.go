@@ -966,6 +966,9 @@ func (p *ProjectionTestSuite) TestStringTruncateProjection() {
 		{iceberg.NotEqualTo(ref, "aaa"), iceberg.AlwaysTrue{}},
 		{iceberg.IsIn(ref, "aaa", "aab"), iceberg.EqualTo(truncStr, "aa")},
 		{iceberg.NotIn(ref, "aaa", "aab"), iceberg.AlwaysTrue{}},
+		{iceberg.NotStartsWith(ref, "a"), iceberg.NotStartsWith(truncStr, "a")},
+		{iceberg.NotStartsWith(ref, "aa"), iceberg.NotEqualTo(truncStr, "aa")},
+		{iceberg.NotStartsWith(ref, "aaa"), iceberg.AlwaysTrue{}},
 	}
 
 	project := newInclusiveProjection(schema, spec, true)
