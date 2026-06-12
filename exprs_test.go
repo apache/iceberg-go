@@ -216,7 +216,17 @@ func TestRefTypes(t *testing.T) {
 		iceberg.NestedField{ID: 11, Name: "k", Type: iceberg.PrimitiveTypes.Binary},
 		iceberg.NestedField{ID: 12, Name: "l", Type: iceberg.PrimitiveTypes.UUID},
 		iceberg.NestedField{ID: 13, Name: "m", Type: iceberg.FixedTypeOf(5)},
-		iceberg.NestedField{ID: 14, Name: "n", Type: iceberg.VariantType{}})
+		iceberg.NestedField{ID: 14, Name: "n", Type: iceberg.VariantType{}},
+		iceberg.NestedField{ID: 15, Name: "o", Type: iceberg.PrimitiveTypes.TimestampNs},
+		iceberg.NestedField{ID: 16, Name: "p", Type: iceberg.PrimitiveTypes.TimestampTzNs})
+
+	timestampNanoFields := []struct {
+		name string
+		typ  iceberg.Type
+	}{
+		{name: "o", typ: iceberg.PrimitiveTypes.TimestampNs},
+		{name: "p", typ: iceberg.PrimitiveTypes.TimestampTzNs},
+	}
 
 	t.Run("bind term", func(t *testing.T) {
 		for i := 0; i < sc.NumFields(); i++ {
@@ -294,6 +304,20 @@ func TestRefTypes(t *testing.T) {
 			assert.Equal(t, iceberg.OpEQ, uid.Op())
 			assert.True(t, uid.(iceberg.BoundLiteralPredicate).Literal().Type().Equals(iceberg.PrimitiveTypes.UUID))
 		})
+
+		t.Run("timestamp-nanos", func(t *testing.T) {
+			for _, tt := range timestampNanoFields {
+				t.Run(tt.typ.String(), func(t *testing.T) {
+					value := iceberg.TimestampNano(123456789)
+					b, err := iceberg.EqualTo(iceberg.Reference(tt.name), value).Bind(sc, true)
+					require.NoError(t, err)
+
+					assert.Equal(t, iceberg.OpEQ, b.Op())
+					assert.True(t, b.(iceberg.BoundLiteralPredicate).Ref().Type().Equals(tt.typ))
+					assert.Equal(t, value, b.(iceberg.BoundLiteralPredicate).Literal().Any())
+				})
+			}
+		})
 	})
 
 	t.Run("bind set", func(t *testing.T) {
@@ -363,6 +387,28 @@ func TestRefTypes(t *testing.T) {
 			assert.True(t, uid.(iceberg.BoundSetPredicate).Ref().Type().Equals(iceberg.PrimitiveTypes.UUID))
 			for _, v := range uid.(iceberg.BoundSetPredicate).Literals().Members() {
 				assert.True(t, v.Type().Equals(iceberg.PrimitiveTypes.UUID))
+			}
+		})
+
+		t.Run("timestamp-nanos", func(t *testing.T) {
+			for _, tt := range timestampNanoFields {
+				t.Run(tt.typ.String(), func(t *testing.T) {
+					b, err := iceberg.IsIn(
+						iceberg.Reference(tt.name),
+						iceberg.TimestampNano(123456789),
+						iceberg.TimestampNano(987654321),
+					).(iceberg.UnboundPredicate).Bind(sc, true)
+					require.NoError(t, err)
+
+					assert.Equal(t, iceberg.OpIn, b.Op())
+					assert.True(t, b.(iceberg.BoundSetPredicate).Ref().Type().Equals(tt.typ))
+					assert.Equal(t, 2, b.(iceberg.BoundSetPredicate).Literals().Len())
+					assert.True(t, b.(iceberg.BoundSetPredicate).Literals().All(func(lit iceberg.Literal) bool {
+						_, ok := lit.(iceberg.TimestampNsLiteral)
+
+						return ok
+					}))
+				})
 			}
 		})
 	})

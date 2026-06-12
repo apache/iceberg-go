@@ -443,6 +443,8 @@ func createBoundRef(field NestedField, acc accessor) BoundReference {
 		return &boundRef[Time]{field: field, acc: acc}
 	case TimestampType, TimestampTzType:
 		return &boundRef[Timestamp]{field: field, acc: acc}
+	case TimestampNsType, TimestampTzNsType:
+		return &boundRef[TimestampNano]{field: field, acc: acc}
 	case StringType:
 		return &boundRef[string]{field: field, acc: acc}
 	case FixedType, BinaryType, GeographyType, GeometryType:
@@ -633,6 +635,8 @@ func createBoundUnaryPredicate(op Operation, term BoundTerm) BoundUnaryPredicate
 		return newBoundUnaryPred[Time](op, term)
 	case TimestampType, TimestampTzType:
 		return newBoundUnaryPred[Timestamp](op, term)
+	case TimestampNsType, TimestampTzNsType:
+		return newBoundUnaryPred[TimestampNano](op, term)
 	case StringType:
 		return newBoundUnaryPred[string](op, term)
 	case FixedType, BinaryType, GeographyType, GeometryType:
@@ -797,6 +801,8 @@ func createBoundLiteralPredicate(op Operation, term BoundTerm, lit Literal) (Bou
 		return newBoundLiteralPredicate[Time](op, term, finalLit), nil
 	case TimestampType, TimestampTzType:
 		return newBoundLiteralPredicate[Timestamp](op, term, finalLit), nil
+	case TimestampNsType, TimestampTzNsType:
+		return newBoundLiteralPredicate[TimestampNano](op, term, finalLit), nil
 	case StringType:
 		return newBoundLiteralPredicate[string](op, term, finalLit), nil
 	case FixedType, BinaryType, GeographyType, GeometryType:
@@ -965,6 +971,8 @@ func createBoundSetPredicate(op Operation, term BoundTerm, lits Set[Literal]) (B
 		return newBoundSetPredicate[Time](op, term, typedSet), nil
 	case TimestampType, TimestampTzType:
 		return newBoundSetPredicate[Timestamp](op, term, typedSet), nil
+	case TimestampNsType, TimestampTzNsType:
+		return newBoundSetPredicate[TimestampNano](op, term, typedSet), nil
 	case StringType:
 		return newBoundSetPredicate[string](op, term, typedSet), nil
 	case BinaryType, FixedType, GeographyType, GeometryType:
