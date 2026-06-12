@@ -1705,21 +1705,13 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 		}
 	}
 
-	// V3+ unpartitioned tables write deletion vectors via Puffin, matching the
-	// Java reference implementation, which hardcodes DV for v3 and does not
-	// expose a property to opt out. DV+partitioned support is deferred to a
-	// follow-up; partitioned v3 writes fall through to the Parquet writer
-	// below and emit the deprecation warning.
-	if latestMetadata.Version() >= 3 && latestMetadata.PartitionSpec().IsUnpartitioned() {
-		return positionDeleteRecordsToDataFilesDV(ctx, rootLocation, args, latestMetadata)
-	}
-
-	// V3 and later prefer deletion vectors over Parquet position-delete files;
-	// warn so users migrate. The check is `>= 3` rather than `== 3` so the
-	// warning carries forward to v4+ without churn. See apache/iceberg#12048.
+	// V3+ tables write deletion vectors via Puffin regardless of partitioning,
+	// matching the Java reference implementation, which hardcodes DV for v3 and
+	// does not expose a property to opt out. The DV path threads each data
+	// file's spec id and partition record through DVWriter.Add so partitioned
+	// outputs carry the correct manifest-entry partition.
 	if latestMetadata.Version() >= 3 {
-		slog.Warn("writing Parquet position-delete file on a v3 table; prefer deletion vectors",
-			"table_location", latestMetadata.Location())
+		return positionDeleteRecordsToDataFilesDV(ctx, rootLocation, args, latestMetadata, partitionContextByFilePath)
 	}
 
 	if args.writeUUID == nil {
@@ -1772,10 +1764,15 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 	return partitionWriter.Write(ctx, workers)
 }
 
-// TODO(#1135 PR2): take a partitionContextByFilePath map[string]partitionContext
-// and look up each data file's specID + partitionData per Add, removing the
-// hardcoded 0/nil below and the IsUnpartitioned gate upstream.
-func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string, args recordWritingArgs, metadata Metadata) iter.Seq2[iceberg.DataFile, error] {
+// positionDeleteRecordsToDataFilesDV produces deletion-vector Puffin output
+// for v3+ tables. Each row's data file path must have an entry in
+// partitionContextByFilePath: the (specID, partitionData) is captured on
+// DVWriter.Add and lands on the output DataFile manifest entry, mirroring
+// Java's BaseDVFileWriter, which keys deletes by (path, spec, partition).
+// A missing entry is a programming error (the caller failed to pre-register
+// every data file targeted by the delete) and surfaces as an error rather
+// than silently producing a default-partition entry.
+func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string, args recordWritingArgs, metadata Metadata, partitionContextByFilePath map[string]partitionContext) iter.Seq2[iceberg.DataFile, error] {
 	return func(yield func(iceberg.DataFile, error) bool) {
 		writer := dv.NewDVWriter(args.fs, func(id int32) *iceberg.PartitionSpec {
 			return metadata.PartitionSpecByID(int(id))
@@ -1793,13 +1790,14 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 			positions := batch.Column(1).(*array.Int64)
 
 			for i := range batch.NumRows() {
-				// PR (1) of #1135 reshaped DVWriter.Add to take (specID,
-				// partitionData) so the partitioned path can pass through
-				// partitionContext directly. This site is still
-				// unpartitioned-only (the gate above routes partitioned
-				// writes elsewhere), so specID=0 + nil partition. PR (2)
-				// drops the gate and threads partitionContext through here.
-				writer.Add(filePaths.Value(int(i)), []int64{positions.Value(int(i))}, 0, nil)
+				filePath := filePaths.Value(int(i))
+				pCtx, ok := partitionContextByFilePath[filePath]
+				if !ok {
+					yield(nil, fmt.Errorf("unexpected missing partition context for path %s", filePath))
+
+					return
+				}
+				writer.Add(filePath, []int64{positions.Value(int(i))}, pCtx.specID, pCtx.partitionData)
 				hasEntries = true
 			}
 		}
