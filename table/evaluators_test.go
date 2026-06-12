@@ -715,6 +715,53 @@ func TestManifestEvaluator(t *testing.T) {
 	})
 }
 
+func TestManifestEvaluatorWithDroppedPartitionSource(t *testing.T) {
+	qMin, err := iceberg.Int64Literal(10).MarshalBinary()
+	require.NoError(t, err)
+	qMax, err := iceberg.Int64Literal(20).MarshalBinary()
+	require.NoError(t, err)
+	pMin, err := iceberg.Int64Literal(2).MarshalBinary()
+	require.NoError(t, err)
+	pMax, err := iceberg.Int64Literal(2).MarshalBinary()
+	require.NoError(t, err)
+
+	spec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{SourceIDs: []int{3}, FieldID: 1000, Name: "q_part", Transform: iceberg.IdentityTransform{}},
+		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1001, Name: "p_part", Transform: iceberg.IdentityTransform{}},
+	)
+
+	currentSchema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "p", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	manifest := iceberg.NewManifestFile(1, "", 0, 0, 0).Partitions(
+		[]iceberg.FieldSummary{
+			{
+				ContainsNull: false,
+				LowerBound:   &qMin,
+				UpperBound:   &qMax,
+			},
+			{
+				ContainsNull: false,
+				LowerBound:   &pMin,
+				UpperBound:   &pMax,
+			},
+		}).Build()
+
+	project := newInclusiveProjection(currentSchema, spec, true)
+	partitionFilter, err := project(iceberg.EqualTo(iceberg.Reference("p"), int64(2)))
+	require.NoError(t, err)
+
+	// Manifest partition summaries are positional. The manifest was written
+	// with q_part at slot 0 and p_part at slot 1; dropping q from the current
+	// schema must not compact p_part to slot 0 during manifest evaluation.
+	eval, err := newManifestEvaluator(spec, currentSchema, partitionFilter, true)
+	require.NoError(t, err)
+	result, err := eval(manifest)
+	require.NoError(t, err)
+	assert.True(t, result, "p_part must be evaluated against slot 1, not q_part's slot 0")
+}
+
 type ProjectionTestSuite struct {
 	suite.Suite
 }
