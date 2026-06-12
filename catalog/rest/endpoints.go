@@ -180,8 +180,9 @@ func (s endpointSet) check(e endpoint) error {
 }
 
 // resolveEndpoints builds the effective set from what the server advertised. A
-// non-empty list is authoritative; unparseable entries are dropped with a
-// warning. An empty list falls back to defaultEndpoints, plus viewEndpoints when
+// non-empty list is authoritative: unparseable entries are dropped with a
+// warning, so a bad entry narrows capability instead of falling back. An empty
+// list falls back to defaultEndpoints, plus viewEndpoints when
 // viewEndpointsSupported is set.
 func resolveEndpoints(advertised []string, viewEndpointsSupported bool) endpointSet {
 	if len(advertised) == 0 {

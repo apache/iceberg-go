@@ -26,6 +26,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// AllEndpointStrings is the wire form of every endpoint, so external tests can
+// advertise a fully-capable server without a second list to keep in sync.
+var AllEndpointStrings = func() []string {
+	s := make([]string, len(allEndpoints))
+	for i, e := range allEndpoints {
+		s[i] = e.String()
+	}
+
+	return s
+}()
+
 func TestEndpointFromString(t *testing.T) {
 	t.Parallel()
 

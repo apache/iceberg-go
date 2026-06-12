@@ -36,7 +36,9 @@ func TestEndpointNegotiation(t *testing.T) {
 	cat, err := NewCatalog(context.Background(), "rest", "http://localhost:8181")
 	require.NoError(t, err)
 
-	require.NotEmpty(t, cat.endpoints, "fixture should advertise an endpoints list")
+	// Not in the fallback defaults, so its presence means we read the wire list.
+	require.Truef(t, cat.endpoints.contains(endpointTableExists),
+		"negotiated set must contain advertised %s, not just the fallback defaults", endpointTableExists)
 	for _, want := range []endpoint{
 		endpointListNamespaces, endpointCreateNamespace,
 		endpointListTables, endpointCreateTable, endpointLoadTable,

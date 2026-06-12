@@ -46,36 +46,6 @@ const (
 	defaultPageSize = 20
 )
 
-// allEndpointStrings advertises every operation the client knows, so the test
-// server behaves like a fully-capable catalog.
-var allEndpointStrings = []string{
-	"GET /v1/{prefix}/namespaces",
-	"GET /v1/{prefix}/namespaces/{namespace}",
-	"HEAD /v1/{prefix}/namespaces/{namespace}",
-	"POST /v1/{prefix}/namespaces",
-	"POST /v1/{prefix}/namespaces/{namespace}/properties",
-	"DELETE /v1/{prefix}/namespaces/{namespace}",
-	"POST /v1/{prefix}/transactions/commit",
-	"GET /v1/{prefix}/namespaces/{namespace}/tables",
-	"GET /v1/{prefix}/namespaces/{namespace}/tables/{table}",
-	"HEAD /v1/{prefix}/namespaces/{namespace}/tables/{table}",
-	"POST /v1/{prefix}/namespaces/{namespace}/tables",
-	"POST /v1/{prefix}/namespaces/{namespace}/tables/{table}",
-	"DELETE /v1/{prefix}/namespaces/{namespace}/tables/{table}",
-	"POST /v1/{prefix}/tables/rename",
-	"POST /v1/{prefix}/namespaces/{namespace}/register",
-	"POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics",
-	"GET /v1/{prefix}/namespaces/{namespace}/tables/{table}/credentials",
-	"GET /v1/{prefix}/namespaces/{namespace}/views",
-	"GET /v1/{prefix}/namespaces/{namespace}/views/{view}",
-	"HEAD /v1/{prefix}/namespaces/{namespace}/views/{view}",
-	"POST /v1/{prefix}/namespaces/{namespace}/views",
-	"POST /v1/{prefix}/namespaces/{namespace}/views/{view}",
-	"DELETE /v1/{prefix}/namespaces/{namespace}/views/{view}",
-	"POST /v1/{prefix}/views/rename",
-	"POST /v1/{prefix}/namespaces/{namespace}/register-view",
-}
-
 var (
 	TestHeaders = http.Header{
 		"X-Client-Version": {"0.14.1"},
@@ -106,7 +76,7 @@ func (r *RestCatalogSuite) SetupTest() {
 		json.NewEncoder(w).Encode(map[string]any{
 			"defaults":  map[string]any{},
 			"overrides": map[string]any{},
-			"endpoints": allEndpointStrings,
+			"endpoints": rest.AllEndpointStrings,
 		})
 	})
 
@@ -2304,7 +2274,7 @@ func (r *RestTLSCatalogSuite) SetupTest() {
 		json.NewEncoder(w).Encode(map[string]any{
 			"defaults":  map[string]any{},
 			"overrides": map[string]any{},
-			"endpoints": allEndpointStrings,
+			"endpoints": rest.AllEndpointStrings,
 		})
 	})
 
