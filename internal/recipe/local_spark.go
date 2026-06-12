@@ -19,6 +19,7 @@ package recipe
 
 import (
 	"bytes"
+	"context"
 	_ "embed"
 	"fmt"
 	"io"
@@ -71,6 +72,13 @@ func Start(t *testing.T) (*compose.DockerCompose, error) {
 }
 
 func ExecuteSpark(t *testing.T, scriptPath string, args ...string) (string, error) {
+	return executeSparkContainer(t.Context(), scriptPath, args...)
+}
+
+// executeSparkContainer runs `python <scriptPath> <args...>` in the
+// spark-iceberg container. Decoupled from *testing.T so it can be driven by
+// non-test contexts (e.g. SparkMajorVersion uses context.Background()).
+func executeSparkContainer(ctx context.Context, scriptPath string, args ...string) (string, error) {
 	var cli *client.Client
 	var err error
 
@@ -87,19 +95,14 @@ func ExecuteSpark(t *testing.T, scriptPath string, args ...string) (string, erro
 	if err != nil {
 		return "", err
 	}
-	defer func(cli *client.Client) {
-		err := cli.Close()
-		if err != nil {
-			t.Logf("failed to close docker client")
-		}
-	}(cli)
+	defer cli.Close()
 
 	var sparkContainerID string
 	if _, ok := os.LookupEnv("SPARK_CONTAINER_ID"); ok {
 		sparkContainerID = os.Getenv("SPARK_CONTAINER_ID")
 	} else {
 		filter := filters.NewArgs(filters.Arg("name", sparkContainer))
-		containers, err := cli.ContainerList(t.Context(), container.ListOptions{
+		containers, err := cli.ContainerList(ctx, container.ListOptions{
 			Filters: filter,
 		})
 		if err != nil {
@@ -111,7 +114,7 @@ func ExecuteSpark(t *testing.T, scriptPath string, args ...string) (string, erro
 		sparkContainerID = containers[0].ID
 	}
 
-	response, err := cli.ContainerExecCreate(t.Context(), sparkContainerID, container.ExecOptions{
+	response, err := cli.ContainerExecCreate(ctx, sparkContainerID, container.ExecOptions{
 		Cmd:          append([]string{"python", scriptPath}, args...),
 		AttachStdout: true,
 		AttachStderr: true,
@@ -120,7 +123,7 @@ func ExecuteSpark(t *testing.T, scriptPath string, args ...string) (string, erro
 		return "", err
 	}
 
-	attachResp, err := cli.ContainerExecAttach(t.Context(), response.ID, container.ExecAttachOptions{})
+	attachResp, err := cli.ContainerExecAttach(ctx, response.ID, container.ExecAttachOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -132,7 +135,7 @@ func ExecuteSpark(t *testing.T, scriptPath string, args ...string) (string, erro
 	}
 	fmt.Printf("%s\n", string(output))
 
-	inspect, err := cli.ContainerExecInspect(t.Context(), response.ID)
+	inspect, err := cli.ContainerExecInspect(ctx, response.ID)
 	if err != nil {
 		return "", err
 	}
@@ -144,31 +147,36 @@ func ExecuteSpark(t *testing.T, scriptPath string, args ...string) (string, erro
 }
 
 var (
-	sparkMajorOnce sync.Once
-	sparkMajor     int
-	sparkMajorErr  error
+	sparkMajorMu sync.Mutex
+	sparkMajor   int // 0 = not yet extracted; 3 or 4 once cached
 )
 
 // SparkMajorVersion returns the major pyspark version (3 or 4) of the
-// spark-iceberg container. Extracted once per process.
-func SparkMajorVersion(t *testing.T) (int, error) {
-	sparkMajorOnce.Do(func() {
-		out, err := ExecuteSpark(t, "-c",
-			`import pyspark; print('PYSPARK_MAJOR=' + pyspark.__version__.split('.')[0])`)
-		if err != nil {
-			sparkMajorErr = fmt.Errorf("extract spark version: %w", err)
+// spark-iceberg container. Extraction runs once per process on success;
+// failures are not cached so transient docker-exec errors do not poison the
+// result for the rest of the run.
+func SparkMajorVersion() (int, error) {
+	sparkMajorMu.Lock()
+	defer sparkMajorMu.Unlock()
 
-			return
-		}
-		switch {
-		case strings.Contains(out, "PYSPARK_MAJOR=4"):
-			sparkMajor = 4
-		case strings.Contains(out, "PYSPARK_MAJOR=3"):
-			sparkMajor = 3
-		default:
-			sparkMajorErr = fmt.Errorf("unrecognized pyspark version output: %q", out)
-		}
-	})
+	if sparkMajor != 0 {
+		return sparkMajor, nil
+	}
 
-	return sparkMajor, sparkMajorErr
+	out, err := executeSparkContainer(context.Background(), "-c",
+		`import pyspark; print('PYSPARK_MAJOR=' + pyspark.__version__.split('.')[0])`)
+	if err != nil {
+		return 0, fmt.Errorf("extract spark version: %w", err)
+	}
+
+	switch {
+	case strings.Contains(out, "PYSPARK_MAJOR=4"):
+		sparkMajor = 4
+	case strings.Contains(out, "PYSPARK_MAJOR=3"):
+		sparkMajor = 3
+	default:
+		return 0, fmt.Errorf("unrecognized pyspark version output: %q", out)
+	}
+
+	return sparkMajor, nil
 }

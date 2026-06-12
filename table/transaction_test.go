@@ -75,7 +75,7 @@ func (s *SparkIntegrationTestSuite) SetupTest() {
 
 func (s *SparkIntegrationTestSuite) requireSpark4() {
 	s.T().Helper()
-	major, err := recipe.SparkMajorVersion(s.T())
+	major, err := recipe.SparkMajorVersion()
 	s.Require().NoError(err, "spark version extraction failed")
 	if major < 4 {
 		s.T().Skipf("requires Spark 4+ (running Spark %d)", major)
@@ -349,6 +349,8 @@ func (s *SparkIntegrationTestSuite) TestUpdateSpec() {
 }
 
 func (s *SparkIntegrationTestSuite) TestVariantWriteAndScan() {
+	s.requireSpark4()
+
 	icebergSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "event", Type: iceberg.PrimitiveTypes.String},
@@ -459,7 +461,6 @@ func (s *SparkIntegrationTestSuite) TestVariantWriteAndScan() {
 	s.Require().True(ok)
 	s.EqualValues(3, arrVal.Len())
 
-	s.requireSpark4()
 	out, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--sql",
 		"SELECT ts, event, to_json(payload) AS pj FROM default.go_variant_events ORDER BY ts")
 	s.Require().NoError(err)
@@ -470,6 +471,8 @@ func (s *SparkIntegrationTestSuite) TestVariantWriteAndScan() {
 }
 
 func (s *SparkIntegrationTestSuite) TestUnknownTypeWriteAndScan() {
+	s.requireSpark4()
+
 	icebergSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "note", Type: iceberg.UnknownType{}, Required: false},
@@ -516,8 +519,6 @@ func (s *SparkIntegrationTestSuite) TestUnknownTypeWriteAndScan() {
 	defer results.Release()
 	s.EqualValues(3, results.NumRows())
 	s.EqualValues(2, results.NumCols())
-
-	s.requireSpark4()
 
 	desc, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--sql",
 		"DESCRIBE default.go_unknown_table")
