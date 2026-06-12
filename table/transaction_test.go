@@ -73,6 +73,15 @@ func (s *SparkIntegrationTestSuite) SetupTest() {
 	s.cat = cat
 }
 
+func (s *SparkIntegrationTestSuite) requireSpark4() {
+	s.T().Helper()
+	major, err := recipe.SparkMajorVersion()
+	s.Require().NoError(err, "spark version extraction failed")
+	if major < 4 {
+		s.T().Skipf("requires Spark 4+ (running Spark %d)", major)
+	}
+}
+
 func (s *SparkIntegrationTestSuite) TestSetProperties() {
 	icebergSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.Bool},
@@ -340,6 +349,8 @@ func (s *SparkIntegrationTestSuite) TestUpdateSpec() {
 }
 
 func (s *SparkIntegrationTestSuite) TestVariantWriteAndScan() {
+	s.requireSpark4()
+
 	icebergSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "event", Type: iceberg.PrimitiveTypes.String},
@@ -449,6 +460,71 @@ func (s *SparkIntegrationTestSuite) TestVariantWriteAndScan() {
 	arrVal, ok := v4.Value().(variant.ArrayValue)
 	s.Require().True(ok)
 	s.EqualValues(3, arrVal.Len())
+
+	out, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--sql",
+		"SELECT ts, event, to_json(payload) AS pj FROM default.go_variant_events ORDER BY ts")
+	s.Require().NoError(err)
+	s.Require().Contains(out, `"target":"button-submit"`)
+	s.Require().Contains(out, `98.6`)
+	s.Require().Contains(out, `true`)
+	s.Require().Contains(out, `["prod","us-west-2",7]`)
+}
+
+func (s *SparkIntegrationTestSuite) TestUnknownTypeWriteAndScan() {
+	s.requireSpark4()
+
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "note", Type: iceberg.UnknownType{}, Required: false},
+	)
+
+	tbl, err := s.cat.CreateTable(
+		s.ctx,
+		catalog.ToIdentifier("default", "go_unknown_table"),
+		icebergSchema,
+		catalog.WithProperties(iceberg.Properties{table.PropertyFormatVersion: "3"}),
+	)
+	s.Require().NoError(err)
+
+	arrowSchema, err := table.SchemaToArrowSchema(icebergSchema, nil, true, false)
+	s.Require().NoError(err)
+
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(s.T(), 0)
+
+	idBldr := array.NewInt64Builder(mem)
+	defer idBldr.Release()
+	idBldr.AppendValues([]int64{1, 2, 3}, nil)
+	idArr := idBldr.NewInt64Array()
+	defer idArr.Release()
+
+	nullArr := array.NewNull(3)
+	defer nullArr.Release()
+
+	rec := array.NewRecord(arrowSchema, []arrow.Array{idArr, nullArr}, 3)
+	defer rec.Release()
+
+	arrTable := array.NewTableFromRecords(arrowSchema, []arrow.Record{rec})
+	defer arrTable.Release()
+
+	tx := tbl.NewTransaction()
+	s.Require().NoError(tx.AppendTable(s.ctx, arrTable, 2048, nil))
+	tbl, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	scanMem := memory.DefaultAllocator
+	ctx := compute.WithAllocator(s.ctx, scanMem)
+	results, err := tbl.Scan().ToArrowTable(ctx)
+	s.Require().NoError(err)
+	defer results.Release()
+	s.EqualValues(3, results.NumRows())
+	s.EqualValues(2, results.NumCols())
+
+	desc, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--sql",
+		"DESCRIBE default.go_unknown_table")
+	s.Require().NoError(err)
+	s.Require().Contains(desc, "note")
+	s.Require().Contains(desc, "void")
 }
 
 func (s *SparkIntegrationTestSuite) TestOverwriteBasic() {

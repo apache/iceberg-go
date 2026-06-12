@@ -94,6 +94,8 @@ make integration-setup-spark4
 
 The exported env vars and `make integration-test` invocation are identical to the Spark 3.5 flow above.
 
+Tests requiring Spark 4 (currently the variant and unknown-type tests) automatically skip on the Spark 3.5 setup.
+
 ## Feature Support / Roadmap
 
 ### FileSystem Support
