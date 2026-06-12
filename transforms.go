@@ -650,6 +650,17 @@ func (YearTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 				Val:   int32(v.(Timestamp).ToTime().Year() - epochTM.Year()),
 			}
 		}, nil
+	case TimestampNsType, TimestampTzNsType:
+		return func(v any) Optional[int32] {
+			if v == nil {
+				return Optional[int32]{}
+			}
+
+			return Optional[int32]{
+				Valid: true,
+				Val:   int32(v.(TimestampNano).ToTime().Year() - epochTM.Year()),
+			}
+		}, nil
 	}
 
 	return nil, fmt.Errorf("%w: cannot apply year transform for type %s",
@@ -668,6 +679,9 @@ func (YearTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 	case TimestampLiteral:
 		out.Valid = true
 		out.Val = Int32Literal(Timestamp(v).ToTime().Year() - epochTM.Year())
+	case TimestampNsLiteral:
+		out.Valid = true
+		out.Val = Int32Literal(TimestampNano(v).ToTime().Year() - epochTM.Year())
 	}
 
 	return out
@@ -733,6 +747,19 @@ func (MonthTransform) Transformer(src Type) (func(any) Optional[int32], error) {
 				Val:   int32((d.Year()-epochTM.Year())*12 + (int(d.Month()) - int(epochTM.Month()))),
 			}
 		}, nil
+	case TimestampNsType, TimestampTzNsType:
+		return func(v any) Optional[int32] {
+			if v == nil {
+				return Optional[int32]{}
+			}
+
+			d := v.(TimestampNano).ToTime()
+
+			return Optional[int32]{
+				Valid: true,
+				Val:   int32((d.Year()-epochTM.Year())*12 + (int(d.Month()) - int(epochTM.Month()))),
+			}
+		}, nil
 
 	}
 
@@ -751,6 +778,8 @@ func (MonthTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 		tm = Date(v).ToTime()
 	case TimestampLiteral:
 		tm = Timestamp(v).ToTime()
+	case TimestampNsLiteral:
+		tm = TimestampNano(v).ToTime()
 	default:
 		return out
 	}

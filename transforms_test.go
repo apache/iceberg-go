@@ -395,6 +395,45 @@ func TestCanTransform(t *testing.T) {
 	}
 }
 
+func TestYearMonthTransformNanoseconds(t *testing.T) {
+	ts := iceberg.TimestampNano(time.Date(2024, time.February, 3, 4, 5, 6, 789_000_000, time.UTC).UnixNano())
+	lit := iceberg.NewLiteral(ts)
+
+	tests := []struct {
+		name      string
+		transform iceberg.TimeTransform
+		expected  int32
+	}{
+		{name: "year", transform: iceberg.YearTransform{}, expected: 54},
+		{name: "month", transform: iceberg.MonthTransform{}, expected: 649},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name+"/Apply", func(t *testing.T) {
+			result := tt.transform.Apply(iceberg.Optional[iceberg.Literal]{
+				Valid: true,
+				Val:   lit,
+			})
+			require.True(t, result.Valid)
+			assert.Equal(t, iceberg.Int32Literal(tt.expected), result.Val)
+		})
+
+		for _, srcType := range []iceberg.Type{
+			iceberg.PrimitiveTypes.TimestampNs,
+			iceberg.PrimitiveTypes.TimestampTzNs,
+		} {
+			t.Run(tt.name+"/Transformer/"+srcType.String(), func(t *testing.T) {
+				fn, err := tt.transform.Transformer(srcType)
+				require.NoError(t, err)
+
+				result := fn(ts)
+				require.True(t, result.Valid)
+				assert.Equal(t, tt.expected, result.Val)
+			})
+		}
+	}
+}
+
 func TestHourTransformPreEpoch(t *testing.T) {
 	const microsecondsPerHour = int64(time.Hour / time.Microsecond)
 
