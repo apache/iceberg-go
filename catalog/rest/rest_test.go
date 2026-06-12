@@ -35,6 +35,8 @@ import (
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -74,6 +76,7 @@ func (r *RestCatalogSuite) SetupTest() {
 		json.NewEncoder(w).Encode(map[string]any{
 			"defaults":  map[string]any{},
 			"overrides": map[string]any{},
+			"endpoints": rest.AllEndpointStrings,
 		})
 	})
 
@@ -2271,6 +2274,7 @@ func (r *RestTLSCatalogSuite) SetupTest() {
 		json.NewEncoder(w).Encode(map[string]any{
 			"defaults":  map[string]any{},
 			"overrides": map[string]any{},
+			"endpoints": rest.AllEndpointStrings,
 		})
 	})
 
@@ -3211,4 +3215,52 @@ func (r *RestCatalogSuite) TestCommitTransactionErrCommitStateUnknown() {
 				"%d should return ErrCommitStateUnknown, got: %v", code, err)
 		})
 	}
+}
+
+// TestEndpointNegotiation drives a catalog against a server that advertises only
+// a subset of endpoints, exercising the negotiation path end to end.
+func TestEndpointNegotiation(t *testing.T) {
+	var listNamespacesHit, tablesHit bool
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, req *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults":  map[string]any{},
+			"overrides": map[string]any{},
+			// Advertise list-namespaces only: create-table and list-tables are
+			// deliberately absent.
+			"endpoints": []string{"GET /v1/{prefix}/namespaces"},
+		})
+	})
+	mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
+		listNamespacesHit = true
+		json.NewEncoder(w).Encode(map[string]any{"namespaces": []any{}})
+	})
+	mux.HandleFunc("/v1/namespaces/", func(w http.ResponseWriter, req *http.Request) {
+		tablesHit = true
+		http.Error(w, "unexpected request to unsupported endpoint", http.StatusInternalServerError)
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", srv.URL, rest.WithOAuthToken(TestToken))
+	require.NoError(t, err)
+
+	// An unsupported op fails with the capability sentinel, not a transport error.
+	_, err = cat.CreateTable(context.Background(), table.Identifier{"ns", "tbl"}, tableSchemaSimple)
+	assert.ErrorIs(t, err, rest.ErrEndpointNotSupported)
+	assert.NotErrorIs(t, err, rest.ErrRESTError)
+
+	// An advertised op works.
+	nss, err := cat.ListNamespaces(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Empty(t, nss)
+	assert.True(t, listNamespacesHit)
+
+	// An unsupported list op yields empty without erroring or calling the server.
+	for _, err := range cat.ListTables(context.Background(), table.Identifier{"ns"}) {
+		require.NoError(t, err)
+	}
+	assert.False(t, tablesHit)
 }
