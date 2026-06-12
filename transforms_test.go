@@ -395,6 +395,86 @@ func TestCanTransform(t *testing.T) {
 	}
 }
 
+func TestYearMonthTransformNanoseconds(t *testing.T) {
+	type testCase struct {
+		name  string
+		ts    iceberg.TimestampNano
+		year  int32
+		month int32
+	}
+
+	values := []testCase{
+		{
+			name:  "post-epoch",
+			ts:    iceberg.TimestampNano(time.Date(2024, time.February, 3, 4, 5, 6, 789_000_000, time.UTC).UnixNano()),
+			year:  54,
+			month: 649,
+		},
+		{
+			name:  "pre-epoch",
+			ts:    iceberg.TimestampNano(-1),
+			year:  -1,
+			month: -1,
+		},
+	}
+
+	tests := []struct {
+		name      string
+		transform iceberg.TimeTransform
+		expected  func(testCase) int32
+	}{
+		{name: "year", transform: iceberg.YearTransform{}, expected: func(tc testCase) int32 { return tc.year }},
+		{name: "month", transform: iceberg.MonthTransform{}, expected: func(tc testCase) int32 { return tc.month }},
+	}
+
+	for _, tt := range tests {
+		for _, tc := range values {
+			t.Run(tt.name+"/"+tc.name+"/Apply", func(t *testing.T) {
+				result := tt.transform.Apply(iceberg.Optional[iceberg.Literal]{
+					Valid: true,
+					Val:   iceberg.NewLiteral(tc.ts),
+				})
+				require.True(t, result.Valid)
+				assert.Equal(t, iceberg.Int32Literal(tt.expected(tc)), result.Val)
+			})
+
+			for _, srcType := range []iceberg.Type{
+				iceberg.PrimitiveTypes.TimestampNs,
+				iceberg.PrimitiveTypes.TimestampTzNs,
+			} {
+				t.Run(tt.name+"/"+tc.name+"/Transformer/"+srcType.String(), func(t *testing.T) {
+					fn, err := tt.transform.Transformer(srcType)
+					require.NoError(t, err)
+
+					result := fn(tc.ts)
+					require.True(t, result.Valid)
+					assert.Equal(t, tt.expected(tc), result.Val)
+				})
+			}
+
+			t.Run(tt.name+"/"+tc.name+"/Project", func(t *testing.T) {
+				schema := iceberg.NewSchema(1, iceberg.NestedField{
+					ID:   1,
+					Name: "ts",
+					Type: iceberg.PrimitiveTypes.TimestampNs,
+				})
+				bound, err := iceberg.GreaterThanEqual(
+					iceberg.Reference("ts"),
+					tc.ts,
+				).Bind(schema, true)
+				require.NoError(t, err)
+
+				projected, err := tt.transform.Project("ts_part", bound.(iceberg.BoundPredicate))
+				require.NoError(t, err)
+				assert.True(t, iceberg.GreaterThanEqual(
+					iceberg.Reference("ts_part"),
+					tt.expected(tc),
+				).Equals(projected))
+			})
+		}
+	}
+}
+
 func TestHourTransformPreEpoch(t *testing.T) {
 	const microsecondsPerHour = int64(time.Hour / time.Microsecond)
 
