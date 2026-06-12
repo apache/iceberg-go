@@ -60,3 +60,28 @@ jobs:
     # Race detector is opt-in per package/test.
     - name: Run race detector
       run: go test -race -v ./codec/...
+
+  # Guards against big-endian-only failures such as the runtime.staticuint64s
+  # relocation misalignment triggered by boxing scalars in generic code
+  # (golang/go#76744). The fault is a linker error and only s390x's linker
+  # rejects the misaligned relocation, so this must build a main package for
+  # s390x specifically rather than just vet or compile libraries.
+  cross-compile:
+    name: cross-compile linux/s390x
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        persist-credentials: false
+    - name: Install Go
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+      with:
+        go-version: '1.26.1'
+        cache: true
+        cache-dependency-path: go.sum
+    - name: Build for big-endian (s390x)
+      env:
+        GOOS: linux
+        GOARCH: s390x
+        CGO_ENABLED: '0'
+      run: go build ./...
