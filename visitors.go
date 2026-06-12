@@ -320,6 +320,8 @@ func doCmp(st StructLike, term BoundTerm, lit Literal) int {
 		return typedCmp[Time](st, term, lit)
 	case TimestampType, TimestampTzType:
 		return typedCmp[Timestamp](st, term, lit)
+	case TimestampNsType, TimestampTzNsType:
+		return typedCmp[TimestampNano](st, term, lit)
 	case BinaryType, FixedType, GeographyType, GeometryType:
 		return typedCmp[[]byte](st, term, lit)
 	case StringType:

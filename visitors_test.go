@@ -556,14 +556,17 @@ func TestEvaluatorCmpTypes(t *testing.T) {
 		iceberg.NestedField{ID: 10, Name: "j", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 11, Name: "k", Type: iceberg.PrimitiveTypes.Binary},
 		iceberg.NestedField{ID: 12, Name: "l", Type: iceberg.PrimitiveTypes.UUID},
-		iceberg.NestedField{ID: 13, Name: "m", Type: iceberg.FixedTypeOf(5)})
+		iceberg.NestedField{ID: 13, Name: "m", Type: iceberg.FixedTypeOf(5)},
+		iceberg.NestedField{ID: 14, Name: "n", Type: iceberg.PrimitiveTypes.TimestampNs},
+		iceberg.NestedField{ID: 15, Name: "o", Type: iceberg.PrimitiveTypes.TimestampTzNs})
 
 	rowData := rowOf(true,
 		5, 5, float32(5.0), float64(5.0),
 		29, 51661919000, 1503066061919234,
 		iceberg.Decimal{Scale: 2, Val: decimal128.FromI64(3456)},
 		"abcdef", []byte{0x01, 0x02, 0x03},
-		uuid.New(), []byte{0xDE, 0xAD, 0xBE, 0xEF, 0x0})
+		uuid.New(), []byte{0xDE, 0xAD, 0xBE, 0xEF, 0x0},
+		iceberg.TimestampNano(123456789), iceberg.TimestampNano(987654321))
 
 	tests := []struct {
 		ref iceberg.BooleanExpression
@@ -593,6 +596,10 @@ func TestEvaluatorCmpTypes(t *testing.T) {
 		{iceberg.EqualTo(iceberg.Reference("l"), rowData[11].(uuid.UUID)), true},
 		{iceberg.EqualTo(iceberg.Reference("m"), []byte{0xDE, 0xAD, 0xBE, 0xEF, 0x1}), false},
 		{iceberg.EqualTo(iceberg.Reference("m"), []byte{0xDE, 0xAD, 0xBE, 0xEF, 0x0}), true},
+		{iceberg.EqualTo(iceberg.Reference("n"), iceberg.TimestampNano(123456789)), true},
+		{iceberg.GreaterThan(iceberg.Reference("n"), iceberg.TimestampNano(1)), true},
+		{iceberg.EqualTo(iceberg.Reference("o"), iceberg.TimestampNano(987654321)), true},
+		{iceberg.GreaterThan(iceberg.Reference("o"), iceberg.TimestampNano(1)), true},
 	}
 
 	for _, tt := range tests {
