@@ -475,6 +475,59 @@ func TestYearMonthTransformNanoseconds(t *testing.T) {
 	}
 }
 
+func TestBucketTransformTimestampNanoseconds(t *testing.T) {
+	transform := iceberg.BucketTransform{NumBuckets: 16}
+	values := []struct {
+		name string
+		ts   iceberg.TimestampNano
+	}{
+		{name: "post-epoch", ts: iceberg.TimestampNano(123456789)},
+		{name: "pre-epoch", ts: iceberg.TimestampNano(-1)},
+	}
+
+	for _, srcType := range []iceberg.Type{
+		iceberg.PrimitiveTypes.TimestampNs,
+		iceberg.PrimitiveTypes.TimestampTzNs,
+	} {
+		t.Run(srcType.String(), func(t *testing.T) {
+			require.True(t, transform.CanTransform(srcType))
+
+			fn := transform.Transformer(srcType)
+			for _, tt := range values {
+				t.Run(tt.name, func(t *testing.T) {
+					applied := transform.Apply(iceberg.Optional[iceberg.Literal]{
+						Valid: true,
+						Val:   iceberg.NewLiteral(tt.ts),
+					})
+					require.True(t, applied.Valid)
+
+					var transformed iceberg.Optional[int32]
+					require.NotPanics(t, func() {
+						transformed = fn(tt.ts)
+					})
+					require.True(t, transformed.Valid)
+					assert.Equal(t, applied.Val, iceberg.NewLiteral(transformed.Val))
+
+					schema := iceberg.NewSchema(1, iceberg.NestedField{
+						ID:   1,
+						Name: "ts",
+						Type: srcType,
+					})
+					bound, err := iceberg.EqualTo(iceberg.Reference("ts"), tt.ts).Bind(schema, true)
+					require.NoError(t, err)
+
+					projected, err := transform.Project("ts_bucket", bound.(iceberg.BoundPredicate))
+					require.NoError(t, err)
+					assert.True(t, iceberg.EqualTo(
+						iceberg.Reference("ts_bucket"),
+						transformed.Val,
+					).Equals(projected))
+				})
+			}
+		})
+	}
+}
+
 func TestHourTransformPreEpoch(t *testing.T) {
 	const microsecondsPerHour = int64(time.Hour / time.Microsecond)
 
