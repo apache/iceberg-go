@@ -1031,6 +1031,8 @@ func transformLiteral[T LiteralType](fn func(any) Optional[T], lit Literal) Lite
 		return NewLiteral(fn(Time(l)).Val)
 	case TimestampLiteral:
 		return NewLiteral(fn(Timestamp(l)).Val)
+	case TimestampNsLiteral:
+		return NewLiteral(fn(TimestampNano(l)).Val)
 	case StringLiteral:
 		return NewLiteral(fn(string(l)).Val)
 	case FixedLiteral:
