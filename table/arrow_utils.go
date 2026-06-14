@@ -1853,7 +1853,7 @@ func checkCRSString(rawCrs json.RawMessage) bool {
 	return len(b) > 0 && b[0] == '"'
 }
 
-func checkCRSSJSON(rawCrs json.RawMessage) bool {
+func checkCRSJSON(rawCrs json.RawMessage) bool {
 	b := bytes.TrimSpace(rawCrs)
 
 	return len(b) > 0 && b[0] == '{'
@@ -1867,10 +1867,9 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 	switch {
 	case checkCRSString(meta.CRS):
 		var crs string
-		if len(meta.CRS) > 0 {
-			if err := json.Unmarshal(meta.CRS, &crs); err != nil {
-				return "", fmt.Errorf("invalid geoarrow CRS metadata: %w", err)
-			}
+
+		if err := json.Unmarshal(meta.CRS, &crs); err != nil {
+			return "", fmt.Errorf("invalid geoarrow CRS metadata: %w", err)
 		}
 
 		if strings.EqualFold(crs, "OGC:CRS84") || strings.EqualFold(crs, "EPSG:4326") {
@@ -1889,12 +1888,11 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 
 			return "", errors.New("crs length too long")
 		}
-	case checkCRSSJSON(meta.CRS):
+	case checkCRSJSON(meta.CRS):
 		var crs map[string]json.RawMessage
-		if len(meta.CRS) > 0 {
-			if err := json.Unmarshal(meta.CRS, &crs); err != nil {
-				return "", fmt.Errorf("invalid geoarrow CRS metadata: %w", err)
-			}
+
+		if err := json.Unmarshal(meta.CRS, &crs); err != nil {
+			return "", fmt.Errorf("invalid geoarrow CRS metadata: %w", err)
 		}
 
 		idRaw, ok := crs["id"]
@@ -1920,7 +1918,7 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 		var code string
 		if err := json.Unmarshal(codeRaw, &code); err != nil {
 			var codeNum json.Number
-			if err := json.Unmarshal(codeRaw, &codeNum); err != nil || codeNum.String() == "" {
+			if err := json.Unmarshal(codeRaw, &codeNum); err != nil {
 				return "", errors.New("unsupported CRS")
 			}
 			code = codeNum.String()
@@ -1961,7 +1959,7 @@ var authorityCodeCRS = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*:[A-Za-z0-9_.-
 func icebergCRSToGeoArrowMetadata(crs string) geoarrow.Metadata {
 	lowerCRS := strings.ToLower(crs)
 	if strings.HasPrefix(lowerCRS, "srid:") {
-		id := lowerCRS[len("srid:"):]
+		id := crs[len("srid:"):]
 
 		if id == "0" {
 			return geoarrow.NewMetadata() // srid:0 maps to omitted GeoArrow CRS
@@ -1981,7 +1979,7 @@ func icebergCRSToGeoArrowMetadata(crs string) geoarrow.Metadata {
 
 	var raw []byte
 
-	if strings.EqualFold(lowerCRS, "EPSG:4326") {
+	if lowerCRS == "epsg:4326" {
 		// collapse EPSG:4326 to OGC:CRS84
 		raw, _ = json.Marshal("OGC:CRS84") //nolint:errcheck // Marshalling a string can't fail
 	} else {

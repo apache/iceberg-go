@@ -18,18 +18,39 @@
 package internal_test
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 
-	"github.com/apache/iceberg-go/table/internal"
+	"github.com/geoarrow/geoarrow-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/twpayne/go-geom/encoding/wkb"
+	"github.com/twpayne/go-geom/encoding/wkt"
 )
+
+// wktToWKB is a helper which converts Well Known Text (WKT) to Well Known Bytes (WKB).
+// Note that return bytes are little endian.
+func wktToWKB(s string) (geoarrow.WKBBytes, error) {
+	geometry, err := wkt.Unmarshal(s)
+	if err != nil {
+		return nil, fmt.Errorf("parse WKT: %w", err)
+	}
+
+	wkbBytes, err := wkb.Marshal(geometry, wkb.NDR) // little endian
+	if err != nil {
+		return nil, fmt.Errorf("parse WKT: %w", err)
+	}
+
+	return geoarrow.WKBBytes(wkbBytes), nil
+}
 
 func TestWKTToWKB(t *testing.T) {
 	tests := []struct {
 		name    string
 		wkt     string
 		wantWKB string
+		wantErr error
 	}{
 		{
 			name:    "point",
@@ -56,11 +77,23 @@ func TestWKTToWKB(t *testing.T) {
 			wkt:     "GEOMETRYCOLLECTION (POINT (4 6), LINESTRING (4 6, 7 10))",
 			wantWKB: "010700000002000000010100000000000000000010400000000000001840010200000002000000000000000000104000000000000018400000000000001c400000000000002440",
 		},
+		{
+			name:    "unknown wkt",
+			wkt:     "POINT (30 10",
+			wantErr: errors.New("parse WKT: syntax error: unexpected $end, expecting ')'"),
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := internal.WKTToWKB(tt.wkt)
+			got, err := wktToWKB(tt.wkt)
+			if tt.wantErr != nil {
+				require.Error(t, err)
+				assert.ErrorContains(t, err, tt.wantErr.Error())
+
+				return
+			}
+
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantWKB, got.String())
 		})

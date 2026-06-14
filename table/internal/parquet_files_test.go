@@ -620,9 +620,9 @@ func TestParquetGeoArrowExtensionMetadataRoundTrip(t *testing.T) {
 	arrowSchema, err := table.SchemaToArrowSchema(iceSchema, nil, true, false)
 	require.NoError(t, err)
 
-	geomWKB, err := internal.WKTToWKB("POINT (30 10)")
+	geomWKB, err := wktToWKB("POINT (30 10)")
 	require.NoError(t, err)
-	geogWKB, err := internal.WKTToWKB("POINT (20 5)")
+	geogWKB, err := wktToWKB("POINT (20 5)")
 	require.NoError(t, err)
 
 	rec, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSchema, strings.NewReader(`[

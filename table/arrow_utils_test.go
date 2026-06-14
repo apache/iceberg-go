@@ -578,6 +578,12 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 			ice:              geogEPSG4267,
 			geoarrowMetaJSON: `{"crs":"EPSG:4267","edges":"spherical"}`,
 		},
+		// Happy path SRID
+		{
+			name:             "geometry_srid_4326",
+			ice:              geomSRID,
+			geoarrowMetaJSON: `{"crs":"4326", "crs_type":"srid"}`,
+		},
 	}
 
 	// The following tests focus on edge cases and pinning specific behavior for read case
