@@ -422,6 +422,32 @@ func getFieldIDMap(sc *avro.Schema) (map[string]int, map[int]string, map[int]int
 	return result, logicalTypes, fixedSizes
 }
 
+// applyDayTransformDates marks every day(...) partition field described by the
+// manifest's partition-spec metadata as a "date" logical type. This normalizes
+// day-transform partition values to iceberg.Date even when they were written as
+// a plain Avro int with no logical type, so callers never observe the Avro
+// encoding difference. Only day transforms are affected; other plain integer
+// partition values (including hour/month/year transforms) are left untouched.
+//
+// Absent or malformed partition-spec metadata is ignored: the reader simply
+// falls back to the logical types declared in the Avro schema.
+func applyDayTransformDates(specJSON []byte, fieldIDToType map[int]string) {
+	if len(specJSON) == 0 {
+		return
+	}
+
+	var fields []PartitionField
+	if err := json.Unmarshal(specJSON, &fields); err != nil {
+		return
+	}
+
+	for _, f := range fields {
+		if _, ok := f.Transform.(DayTransform); ok {
+			fieldIDToType[f.FieldID] = atype.Date
+		}
+	}
+}
+
 type hasFieldToIDMap interface {
 	setFieldNameToIDMap(map[string]int)
 	setFieldIDToLogicalTypeMap(map[int]string)
@@ -667,6 +693,12 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 		}
 	}
 	fieldNameToID, fieldIDToType, fieldIDToSize := getFieldIDMap(sc)
+	// day(...) partition values are days since the Unix epoch, but a manifest
+	// may encode them either as an Avro int carrying the "date" logical type or
+	// as a legacy plain Avro int. Overlay the manifest's partition spec so
+	// day-transform fields are always exposed as iceberg.Date, regardless of the
+	// Avro encoding used to write them.
+	applyDayTransformDates(metadata["partition-spec"], fieldIDToType)
 
 	inheritRowIDs := formatVersion >= 3 &&
 		content == ManifestContentData &&
@@ -1858,8 +1890,11 @@ func (d *dataFile) convertAvroValueToIcebergType(v any, fieldID int) any {
 			if val, ok := v.(time.Time); ok {
 				return Date(val.Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
 			}
+			if val, ok := v.(int32); ok {
+				return Date(val)
+			}
 
-			return Date(v.(int32))
+			return v
 		case atype.TimeMillis:
 			if val, ok := v.(time.Duration); ok {
 				return Time(val.Milliseconds())
