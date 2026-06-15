@@ -857,7 +857,8 @@ func (s *HadoopCatalogTestSuite) TestDropTableShortIdentifier() {
 // CreateTable tests
 
 func (s *HadoopCatalogTestSuite) testSchema() *iceberg.Schema {
-	return iceberg.NewSchema(1,
+	return iceberg.NewSchema(
+		1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
 	)
@@ -1150,7 +1151,8 @@ func (s *HadoopCatalogTestSuite) TestCommitTableSingleUpdate() {
 	ctx := context.Background()
 	tbl := s.createTestTable("ns", "tbl")
 
-	meta, metaLoc, err := s.cat.CommitTable(ctx, []string{"ns", "tbl"},
+	meta, metaLoc, err := s.cat.CommitTable(
+		ctx, []string{"ns", "tbl"},
 		[]table.Requirement{
 			table.AssertTableUUID(tbl.Metadata().TableUUID()),
 		},
@@ -1177,7 +1179,8 @@ func (s *HadoopCatalogTestSuite) TestCommitTableMultipleSequential() {
 		loaded, err := s.cat.LoadTable(ctx, ident)
 		s.Require().NoError(err)
 
-		_, metaLoc, err := s.cat.CommitTable(ctx, ident,
+		_, metaLoc, err := s.cat.CommitTable(
+			ctx, ident,
 			[]table.Requirement{
 				table.AssertTableUUID(loaded.Metadata().TableUUID()),
 			},
@@ -1207,7 +1210,8 @@ func (s *HadoopCatalogTestSuite) TestCommitTableNoChanges() {
 	ctx := context.Background()
 	tbl := s.createTestTable("ns", "tbl")
 
-	meta, metaLoc, err := s.cat.CommitTable(ctx, []string{"ns", "tbl"},
+	meta, metaLoc, err := s.cat.CommitTable(
+		ctx, []string{"ns", "tbl"},
 		[]table.Requirement{
 			table.AssertTableUUID(tbl.Metadata().TableUUID()),
 		},
@@ -1233,7 +1237,8 @@ func (s *HadoopCatalogTestSuite) TestCommitTableConflictDetection() {
 	ident := []string{"ns", "tbl"}
 
 	for i := 2; i <= 5; i++ {
-		_, metaLoc, err := s.cat.CommitTable(ctx, ident,
+		_, metaLoc, err := s.cat.CommitTable(
+			ctx, ident,
 			nil,
 			[]table.Update{
 				table.NewSetPropertiesUpdate(iceberg.Properties{
@@ -1252,7 +1257,8 @@ func (s *HadoopCatalogTestSuite) TestCommitTableRequirementFailure() {
 	s.createTestTable("ns", "tbl")
 
 	wrongUUID := uuid.New()
-	_, _, err := s.cat.CommitTable(ctx, []string{"ns", "tbl"},
+	_, _, err := s.cat.CommitTable(
+		ctx, []string{"ns", "tbl"},
 		[]table.Requirement{
 			table.AssertTableUUID(wrongUUID),
 		},
@@ -1268,7 +1274,8 @@ func (s *HadoopCatalogTestSuite) TestCommitTableLocationChange() {
 	ctx := context.Background()
 	s.createTestTable("ns", "tbl")
 
-	_, _, err := s.cat.CommitTable(ctx, []string{"ns", "tbl"},
+	_, _, err := s.cat.CommitTable(
+		ctx, []string{"ns", "tbl"},
 		nil,
 		[]table.Update{
 			table.NewSetLocationUpdate("/some/other/location"),
@@ -1282,7 +1289,8 @@ func (s *HadoopCatalogTestSuite) TestCommitTableWriteMetadataLocation() {
 	ctx := context.Background()
 	s.createTestTable("ns", "tbl")
 
-	_, _, err := s.cat.CommitTable(ctx, []string{"ns", "tbl"},
+	_, _, err := s.cat.CommitTable(
+		ctx, []string{"ns", "tbl"},
 		nil,
 		[]table.Update{
 			table.NewSetPropertiesUpdate(iceberg.Properties{
@@ -1301,7 +1309,8 @@ func (s *HadoopCatalogTestSuite) TestCommitTableNoOrphanedTempFiles() {
 
 	// Do several commits and verify no temp files are left behind.
 	for i := 0; i < 3; i++ {
-		_, _, err := s.cat.CommitTable(ctx, ident,
+		_, _, err := s.cat.CommitTable(
+			ctx, ident,
 			nil,
 			[]table.Update{
 				table.NewSetPropertiesUpdate(iceberg.Properties{
@@ -1328,7 +1337,8 @@ func (s *HadoopCatalogTestSuite) TestCommitTableVersionHintUpdated() {
 	s.createTestTable("ns", "tbl")
 	ident := []string{"ns", "tbl"}
 
-	_, _, err := s.cat.CommitTable(ctx, ident,
+	_, _, err := s.cat.CommitTable(
+		ctx, ident,
 		nil,
 		[]table.Update{
 			table.NewSetPropertiesUpdate(iceberg.Properties{"k": "v"}),
@@ -1345,7 +1355,8 @@ func (s *HadoopCatalogTestSuite) TestCommitTableCreateViaCommit() {
 	ident := []string{"ns", "tbl"}
 
 	loc := s.cat.defaultTableLocation(ident)
-	meta, metaLoc, err := s.cat.CommitTable(ctx, ident,
+	meta, metaLoc, err := s.cat.CommitTable(
+		ctx, ident,
 		[]table.Requirement{
 			table.AssertCreate(),
 		},

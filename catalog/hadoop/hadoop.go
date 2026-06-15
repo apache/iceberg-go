@@ -215,7 +215,6 @@ func isTableDir(filesystem HadoopCatalogFS, path string) bool {
 
 		return nil
 	})
-
 	if err != nil {
 		return false
 	}
