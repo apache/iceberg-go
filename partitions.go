@@ -491,6 +491,15 @@ func (ps *PartitionSpec) LastAssignedFieldID() int {
 // There is a case where we can guarantee that a partition field in the first
 // and only parittion spec that uses a required source column will never be
 // null, but it doesn't seem worth tracking this case.
+//
+// Note: the result is compacted. A partition field whose source column is not
+// present in schema (for example, the column was dropped) is omitted rather
+// than retained, so the returned struct does NOT positionally correspond to a
+// manifest's partition FieldSummary list, which is ordered by the full
+// partition spec. It must therefore not be used to index positional partition
+// summaries; build a schema that keeps every spec field (with an UnknownType
+// placeholder for dropped sources) for that purpose — see manifestPartitionFields
+// in the table package.
 func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
 	nestedFields := []NestedField{}
 	for _, field := range ps.fields {
