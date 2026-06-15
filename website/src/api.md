@@ -514,6 +514,27 @@ fmt.Printf("rewrote %d files into %d (%d -> %d bytes)\n",
 
 The `table/compaction` subpackage provides bin-packing planning. The `iceberg compact analyze` and `compact run` CLI commands wrap the same machinery - see [CLI](./cli.md).
 
+### Expiring snapshots
+
+```go
+import (
+    "time"
+
+    "github.com/apache/iceberg-go/table"
+)
+
+txn := tbl.NewTransaction()
+err := txn.ExpireSnapshots(
+    table.WithOlderThan(7*24*time.Hour),
+    table.WithRetainLast(10),
+)
+if err != nil { /* ... */ }
+
+newTbl, err := txn.Commit(ctx)
+```
+
+Pass `table.WithPostCommit(true)` to delete the unreferenced data and metadata files after the commit lands. The `iceberg expire-snapshots` CLI command wraps the same operation - see [CLI](./cli.md).
+
 ## Views
 
 Views are created and loaded through catalogs that support them (REST, Hive, SQL):
