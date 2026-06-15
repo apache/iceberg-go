@@ -811,6 +811,8 @@ func createBoundLiteralPredicate(op Operation, term BoundTerm, lit Literal) (Bou
 		return newBoundLiteralPredicate[Decimal](op, term, finalLit), nil
 	case UUIDType:
 		return newBoundLiteralPredicate[uuid.UUID](op, term, finalLit), nil
+	case VariantType:
+		return nil, fmt.Errorf("%w: ordered predicates are not supported on variant fields", ErrInvalidArgument)
 	}
 
 	return nil, fmt.Errorf("%w: could not create bound literal predicate for term type %s",

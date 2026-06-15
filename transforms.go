@@ -114,7 +114,7 @@ func (IdentityTransform) String() string { return "identity" }
 
 func (IdentityTransform) CanTransform(t Type) bool {
 	switch t.(type) {
-	case GeometryType, GeographyType:
+	case GeometryType, GeographyType, VariantType:
 		return false
 	}
 	_, ok := t.(PrimitiveType)
