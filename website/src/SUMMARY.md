@@ -28,6 +28,7 @@
 - [API](./api.md)
   - [Row Filter Syntax](./row-filter-syntax.md)
   - [Expression DSL](./expression-dsl.md)
+  - [Concurrent Writes](./concurrent-writes.md)
 - [Feature Status](./feature-status.md)
 
 # Developer Guide
