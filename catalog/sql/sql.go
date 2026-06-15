@@ -92,7 +92,7 @@ func init() {
 			}
 		}()
 
-		return NewCatalog(p.Get(name, "sql"), sqldb, SupportedDialect(dialect), p)
+		return NewCatalog(name, sqldb, SupportedDialect(dialect), p)
 	}))
 }
 

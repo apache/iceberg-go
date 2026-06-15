@@ -322,6 +322,28 @@ func (s *SqliteCatalogTestSuite) TestCreationAllTablesExist() {
 	s.confirmTablesExist(sqldb)
 }
 
+func (s *SqliteCatalogTestSuite) TestCatalogNameMatchesLoaderArg() {
+	const catalogName = "test_catalog"
+	cat, err := catalog.Load(context.Background(), catalogName, iceberg.Properties{
+		"uri":             ":memory:",
+		sqlcat.DriverKey:  sqliteshim.ShimName,
+		sqlcat.DialectKey: string(sqlcat.SQLite),
+		"type":            "sql",
+		"warehouse":       "file://" + s.warehouse,
+	})
+	s.Require().NoError(err)
+	sqlCat := cat.(*sqlcat.Catalog)
+	s.Equal(catalogName, sqlCat.Name(), "SQL catalog must surface the name passed to catalog.Load")
+
+	ctx := context.Background()
+	ns := table.Identifier{"test"}
+	s.Require().NoError(sqlCat.CreateNamespace(ctx, ns, iceberg.Properties{"created_by": "iceberg-go"}))
+
+	got, err := sqlCat.ListNamespaces(ctx, table.Identifier{})
+	s.Require().NoError(err)
+	s.Contains(got, ns, "iceberg-go must list a namespace it just created under its own catalog name")
+}
+
 func (s *SqliteCatalogTestSuite) TestDropSQLTablesIdempotency() {
 	sqldb := s.getDB()
 	s.confirmNoTables(sqldb)
