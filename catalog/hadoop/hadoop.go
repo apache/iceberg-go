@@ -793,5 +793,6 @@ func (c *Catalog) CheckedMkdirAll(id table.Identifier) error {
 		// it means that it must already exist
 		return fs.ErrExist
 	}
+
 	return c.filesystem.MkdirAll(path)
 }
