@@ -248,14 +248,12 @@ type DataFileOpts struct {
 	Content         iceberg.ManifestEntryContent
 	FileSize        int64
 	PartitionValues map[int]any
-	// SortOrderID is a per-file claim that the file's rows are fully sorted
-	// by that order. Zero (the unsorted order) makes no claim and leaves the
-	// manifest field absent.
+	// SortOrderID claims the file's rows are fully sorted by that order; zero
+	// makes no claim and leaves the field absent.
 	SortOrderID int
 }
 
-// unsortedSortOrderID mirrors table.UnsortedSortOrderID (order id 0 is
-// reserved for the unsorted order by the spec).
+// unsortedSortOrderID mirrors table.UnsortedSortOrderID.
 const unsortedSortOrderID = 0
 
 func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
@@ -337,15 +335,7 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 		bldr.EqualityFieldIDs(d.EqualityFieldIDs)
 	}
 
-	// Position deletes are ordered by (file_path, pos), never by a table sort
-	// order; the spec requires their sort order id to stay null. This is an
-	// internal invariant, not user-input validation: no exported API accepts
-	// a WriteTask or reaches this package, and the pos-delete producers never
-	// set a claim — a non-zero value here is a library bug.
-	if opts.Content == iceberg.EntryContentPosDeletes && opts.SortOrderID != unsortedSortOrderID {
-		panic(fmt.Errorf("position delete file %q claims sort order id %d; the spec requires a null sort order id for position deletes",
-			opts.Path, opts.SortOrderID))
-	}
+	// Claim invariants are enforced upstream in defaultDataFileWriter.writeFile.
 	if opts.SortOrderID != unsortedSortOrderID {
 		bldr.SortOrderID(opts.SortOrderID)
 	}

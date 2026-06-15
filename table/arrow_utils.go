@@ -1483,9 +1483,8 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 	return dataFiles, nil
 }
 
-// fileToDataFile builds a DataFile for a pre-existing file (AddFiles and
-// ReplaceDataFiles take bare paths). The API gives the caller no way to
-// convey the file's sort layout, so no sort_order_id is claimed.
+// fileToDataFile builds a DataFile for a pre-existing file. The caller cannot
+// convey its sort layout, so no sort_order_id is claimed.
 func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, currentSchema *iceberg.Schema, currentSpec iceberg.PartitionSpec, props iceberg.Properties) iceberg.DataFile {
 	format := tblutils.FormatFromFileName(filePath)
 	rdr := must(format.Open(ctx, fileIO, filePath))

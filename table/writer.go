@@ -31,6 +31,8 @@ import (
 	"github.com/google/uuid"
 )
 
+// WriteTask writes all its Batches into one file. The rolling writer bypasses
+// it, naming files via dataFileName directly.
 type WriteTask struct {
 	Uuid        uuid.UUID
 	ID          int
@@ -38,21 +40,20 @@ type WriteTask struct {
 	FileCount   int // FileCount is a sequential counter for files written by this task.
 	Schema      *iceberg.Schema
 	Batches     []arrow.RecordBatch
-	// SortOrderID, when non-zero, is recorded on the resulting file as its
-	// sort order. Set it only when Batches are fully sorted by that order —
-	// the writer does not verify or enforce the claim. Only the bin-packed
-	// task path (defaultDataFileWriter.writeFile) honors it; the rolling
-	// data writer builds its own file info and ignores it, and position
-	// delete content must leave it zero (the spec requires a null sort
-	// order id there).
+	// SortOrderID claims Batches are globally sorted by that order; writeFile
+	// records it unverified. Must stay zero for position deletes.
 	SortOrderID int
 }
 
 func (w WriteTask) GenerateDataFileName(extension string) string {
-	// Mimics the behavior in the Java API:
-	// https://github.com/apache/iceberg/blob/03ed4ba9af4e47d32bdb22b7e3d033eb2a4b2c83/core/src/main/java/org/apache/iceberg/io/OutputFileFactory.java#L93
-	// Format: {partitionId:05d}-{taskId}-{operationId}-{fileCount:05d}.{extension}
-	return fmt.Sprintf("%05d-%d-%s-%05d.%s", w.PartitionID, w.ID, w.Uuid, w.FileCount, extension)
+	return dataFileName(w.Uuid, w.ID, w.PartitionID, w.FileCount, extension)
+}
+
+// dataFileName builds a data file name, mirroring the Java API:
+// https://github.com/apache/iceberg/blob/03ed4ba9af4e47d32bdb22b7e3d033eb2a4b2c83/core/src/main/java/org/apache/iceberg/io/OutputFileFactory.java#L93
+// Format: {partitionId:05d}-{taskId}-{operationId}-{fileCount:05d}.{extension}
+func dataFileName(writeUUID uuid.UUID, taskID, partitionID, fileCount int, extension string) string {
+	return fmt.Sprintf("%05d-%d-%s-%05d.%s", partitionID, taskID, writeUUID, fileCount, extension)
 }
 
 type defaultDataFileWriter struct {
@@ -128,6 +129,12 @@ func (w *defaultDataFileWriter) writeFile(ctx context.Context, partitionValues m
 			b.Release()
 		}
 	}()
+
+	// Reject here on the caller's goroutine, not deep in the writer's Close().
+	if task.SortOrderID != UnsortedSortOrderID && w.content == iceberg.EntryContentPosDeletes {
+		return nil, fmt.Errorf("position delete file claims sort order id %d; the spec requires a null sort order id for position deletes",
+			task.SortOrderID)
+	}
 
 	batches := make([]arrow.RecordBatch, len(task.Batches))
 	for i, b := range task.Batches {

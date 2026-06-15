@@ -169,10 +169,8 @@ func TestGenerateDataFileNameUniqueness(t *testing.T) {
 	}
 }
 
-// TestWriteFileHonorsExplicitSortOrderID covers the one path where
-// WriteTask.SortOrderID is load-bearing: defaultDataFileWriter.writeFile must
-// record a caller's non-zero claim on the resulting DataFile, and must record
-// nothing when the task makes no claim.
+// writeFile records a non-zero WriteTask.SortOrderID on the DataFile, nothing
+// when the task makes no claim.
 func TestWriteFileHonorsExplicitSortOrderID(t *testing.T) {
 	t.Parallel()
 
@@ -233,4 +231,37 @@ func TestWriteFileHonorsExplicitSortOrderID(t *testing.T) {
 		require.NoError(t, err)
 		assert.Nil(t, df.SortOrderID())
 	})
+}
+
+// A sort order claim on position delete content is rejected with an error, not
+// a panic deep in the file writer's Close().
+func TestWriteFileRejectsPosDeleteSortOrderClaim(t *testing.T) {
+	t.Parallel()
+
+	metadataBuilder, err := NewMetadataBuilder(2)
+	require.NoError(t, err)
+	require.NoError(t, metadataBuilder.AddSchema(iceberg.PositionalDeleteSchema))
+	require.NoError(t, metadataBuilder.SetCurrentSchemaID(0))
+	unpartitioned := *iceberg.UnpartitionedSpec
+	require.NoError(t, metadataBuilder.AddPartitionSpec(&unpartitioned, true))
+	require.NoError(t, metadataBuilder.SetDefaultSpecID(0))
+
+	writer, err := newPositionDeleteWriter(t.TempDir(), &io.LocalFS{}, metadataBuilder, iceberg.Properties{})
+	require.NoError(t, err)
+
+	rb := mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema,
+		`[{"file_path": "file://t/data.parquet", "pos": 0}]`)
+	task := WriteTask{
+		Uuid:        uuid.New(),
+		ID:          0,
+		FileCount:   1,
+		Schema:      iceberg.PositionalDeleteSchema,
+		Batches:     []arrow.RecordBatch{rb},
+		SortOrderID: 1,
+	}
+
+	df, err := writer.writeFile(t.Context(), nil, task)
+	require.Error(t, err, "a sort order claim on position delete content must be rejected")
+	assert.Nil(t, df)
+	assert.Contains(t, err.Error(), "position delete")
 }

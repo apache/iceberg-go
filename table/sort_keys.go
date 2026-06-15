@@ -34,13 +34,9 @@ import (
 //
 // Limitations:
 //
-//   - Per-batch, not per-file: the resolved keys are applied to each record
-//     batch independently as it is flushed; rows are not merged into a single
-//     globally sorted run across batches within a file. Because of this the
-//     written files do not record a sort_order_id — the spec's per-file field
-//     asserts the whole file is sorted by that order. The per-batch sort is
-//     purely a layout optimization (tighter page statistics, better
-//     encodings).
+//   - Per-batch, not per-file: keys are applied to each batch independently,
+//     not merged into a globally sorted run across batches. Files therefore
+//     record no sort_order_id, which asserts the whole file is sorted.
 //   - Bucket transform falls back to source-column order, since the hash
 //     bucket is not order-preserving.
 //   - Multi-argument transform sort fields use only the first source column.

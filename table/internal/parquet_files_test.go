@@ -344,33 +344,6 @@ func TestMetricsPrimitiveTypes(t *testing.T) {
 	})
 }
 
-// TestToDataFilePanicsOnPosDeleteSortOrderClaim pins the spec invariant that
-// position delete files never carry a sort order id: a non-zero claim is a
-// caller bug and must be surfaced rather than silently dropped.
-func TestToDataFilePanicsOnPosDeleteSortOrderClaim(t *testing.T) {
-	format := internal.GetFileFormat(iceberg.ParquetFile)
-
-	meta, tblMeta := constructTestTablePrimitiveTypes(t)
-	require.NotNil(t, tblMeta)
-	require.NotNil(t, meta)
-
-	mapping, err := format.PathToIDMapping(tblMeta.CurrentSchema())
-	require.NoError(t, err)
-
-	stats := format.DataFileStatsFromMeta(internal.Metadata(meta), getCollector(), mapping, nil)
-	require.Panics(t, func() {
-		stats.ToDataFile(internal.DataFileOpts{
-			Schema:      tblMeta.CurrentSchema(),
-			Spec:        tblMeta.PartitionSpec(),
-			Path:        "fake-path.parquet",
-			Format:      iceberg.ParquetFile,
-			Content:     iceberg.EntryContentPosDeletes,
-			FileSize:    meta.GetSourceFileSize(),
-			SortOrderID: 7,
-		})
-	})
-}
-
 // TestNanosecondTimestampMetrics tests that nanosecond timestamp types (v3)
 // are correctly handled for Parquet stats collection and physical type mapping.
 func TestNanosecondTimestampMetrics(t *testing.T) {

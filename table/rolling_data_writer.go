@@ -201,12 +201,9 @@ func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string
 	cnt, _ := w.nextCount()
 	w.countMu.Unlock()
 
-	fileName := WriteTask{
-		Uuid:        *w.writeUUID,
-		ID:          cnt,
-		PartitionID: partitionID,
-		FileCount:   fileCount,
-	}.GenerateDataFileName(strings.ToLower(string(w.fileFormat)))
+	// Names files directly, not via WriteTask: it has no per-task sort claim.
+	fileName := dataFileName(*w.writeUUID, cnt, partitionID, fileCount,
+		strings.ToLower(string(w.fileFormat)))
 
 	var filePath string
 	if partitionPath != "" {
@@ -219,9 +216,7 @@ func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string
 		filePath = w.locProvider.NewDataLocation(fileName)
 	}
 
-	// SortOrderID is intentionally left unset: batches are only sorted
-	// individually (see resolveSortKeys), which does not satisfy the spec's
-	// per-file sort_order_id contract.
+	// No SortOrderID: batches are sorted only individually (see resolveSortKeys).
 	return w.format.NewFileWriter(ctx, w.fs, partitionValues, tblutils.WriteFileInfo{
 		FileSchema:       w.fileSchema,
 		FileName:         filePath,

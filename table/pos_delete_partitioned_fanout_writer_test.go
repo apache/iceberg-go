@@ -665,10 +665,8 @@ var defaultPositionDeleteMatching = []dataFileMatcherOption{withContentTypeMatch
 // ptr-helpers previously sprinkled across the internal package tests.
 func ptr[T any](v T) *T { return &v }
 
-// TestPositionDeleteUnpartitionedSortOrderID covers the unpartitioned branch
-// of positionDeleteRecordsToDataFiles: position deletes are ordered by
-// (file_path, pos), never by a table sort order, so the spec requires their
-// sort order id to stay null even when the table has a default sort order.
+// Position deletes are ordered by (file_path, pos), never by a table sort
+// order, so their sort order id stays null.
 func TestPositionDeleteUnpartitionedSortOrderID(t *testing.T) {
 	t.Parallel()
 
@@ -718,9 +716,8 @@ func TestPositionDeleteUnpartitionedSortOrderID(t *testing.T) {
 	}
 }
 
-// TestEqualityDeleteUnpartitionedSortOrderID covers the unpartitioned branch
-// of equalityDeleteRecordsToDataFiles: the writer does not order delete rows
-// by the table sort order, so the resulting DataFiles must not claim it.
+// The eq-delete writer does not order rows by the table sort order, so the
+// DataFiles must not claim it.
 func TestEqualityDeleteUnpartitionedSortOrderID(t *testing.T) {
 	t.Parallel()
 

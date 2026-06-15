@@ -243,10 +243,8 @@ func (s *RollingDataWriterTestSuite) TestBytesWrittenNoDoubleCountAcrossRowGroup
 		"DataFile.FileSizeBytes should match actual file size on disk")
 }
 
-// TestWriterFactoryDoesNotStampSortOrderID covers the standard data write
-// path: the rolling data writer sorts only per batch, so the emitted DataFile
-// must NOT claim the table's default sort order id — the spec's per-file
-// sort_order_id asserts the whole file is sorted by that order.
+// The rolling path sorts per batch but takes no per-task claim, so the emitted
+// DataFile must not claim the table's sort order even when one is set.
 func (s *RollingDataWriterTestSuite) TestWriterFactoryDoesNotStampSortOrderID() {
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
