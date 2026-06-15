@@ -74,7 +74,7 @@ func TestPositionDeletePartitionedFanoutWriterProcessBatch(t *testing.T) {
 			name:                   "success",
 			pathToPartitionContext: map[string]partitionContext{"file://namespace/age_bucket=1/test.parquet": {partitionData: map[int]any{iceberg.PartitionDataIDStart: 1}, specID: 0}},
 			input:                  mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema, `[{"file_path": "file://namespace/age_bucket=1/test.parquet", "pos": 100}]`),
-			expectedDataFile:       &mockDataFile{columnSizes: map[int]int64{2147483545: 86, 2147483546: 172}, format: iceberg.ParquetFile, partition: map[int]any{iceberg.PartitionDataIDStart: 1}, count: 1, specid: 0, contentType: iceberg.EntryContentPosDeletes, sortOrderID: ptr(1)},
+			expectedDataFile:       &mockDataFile{columnSizes: map[int]int64{2147483545: 86, 2147483546: 172}, format: iceberg.ParquetFile, partition: map[int]any{iceberg.PartitionDataIDStart: 1}, count: 1, specid: 0, contentType: iceberg.EntryContentPosDeletes},
 		},
 		// This test case illustrates how the positionDeletePartitionedFanoutWriter does not validate that all records
 		// in a batch have the same file path. Doing so would be prohibitive in the current implementation and
@@ -84,7 +84,7 @@ func TestPositionDeletePartitionedFanoutWriterProcessBatch(t *testing.T) {
 			name:                   "batch with records having different file paths",
 			pathToPartitionContext: map[string]partitionContext{"file://namespace/age_bucket=1/test.parquet": {partitionData: map[int]any{iceberg.PartitionDataIDStart: 1}, specID: 0}},
 			input:                  mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema, `[{"file_path": "file://namespace/age_bucket=1/test.parquet", "pos": 100}, {"file_path": "file://namespace/age_bucket=0/test.parquet", "pos": 10}]`),
-			expectedDataFile:       &mockDataFile{columnSizes: map[int]int64{2147483545: 94, 2147483546: 185}, format: iceberg.ParquetFile, partition: map[int]any{iceberg.PartitionDataIDStart: 1}, count: 2, specid: 0, contentType: iceberg.EntryContentPosDeletes, sortOrderID: ptr(1)},
+			expectedDataFile:       &mockDataFile{columnSizes: map[int]int64{2147483545: 94, 2147483546: 185}, format: iceberg.ParquetFile, partition: map[int]any{iceberg.PartitionDataIDStart: 1}, count: 2, specid: 0, contentType: iceberg.EntryContentPosDeletes},
 		},
 	}
 
@@ -665,9 +665,8 @@ var defaultPositionDeleteMatching = []dataFileMatcherOption{withContentTypeMatch
 // ptr-helpers previously sprinkled across the internal package tests.
 func ptr[T any](v T) *T { return &v }
 
-// TestPositionDeleteUnpartitionedSortOrderID covers the unpartitioned branch
-// of positionDeleteRecordsToDataFiles: the resulting DataFiles must carry
-// the table's default sort order id exactly like the partitioned branch does.
+// Position deletes are ordered by (file_path, pos), never by a table sort
+// order, so their sort order id stays null.
 func TestPositionDeleteUnpartitionedSortOrderID(t *testing.T) {
 	t.Parallel()
 
@@ -690,8 +689,7 @@ func TestPositionDeleteUnpartitionedSortOrderID(t *testing.T) {
 
 	built, err := metadataBuilder.Build()
 	require.NoError(t, err)
-	expectedID := built.DefaultSortOrder()
-	require.NotZero(t, expectedID, "sanity: sort order id should be non-zero")
+	require.NotZero(t, built.DefaultSortOrder(), "sanity: sort order id should be non-zero")
 
 	writeUUID := uuid.New()
 	rb := mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema, `[{"file_path": "file://unpartitioned/test.parquet", "pos": 0}]`)
@@ -714,14 +712,12 @@ func TestPositionDeleteUnpartitionedSortOrderID(t *testing.T) {
 	}
 	require.NotEmpty(t, files, "expected at least one data file")
 	for _, df := range files {
-		require.NotNil(t, df.SortOrderID(), "unpartitioned pos-delete DataFile must carry sort order id")
-		assert.Equal(t, expectedID, *df.SortOrderID())
+		assert.Nil(t, df.SortOrderID(), "pos-delete DataFile must have a null sort order id per spec")
 	}
 }
 
-// TestEqualityDeleteUnpartitionedSortOrderID covers the unpartitioned branch
-// of equalityDeleteRecordsToDataFiles: the resulting DataFiles must carry
-// the table's default sort order id.
+// The eq-delete writer does not order rows by the table sort order, so the
+// DataFiles must not claim it.
 func TestEqualityDeleteUnpartitionedSortOrderID(t *testing.T) {
 	t.Parallel()
 
@@ -749,8 +745,7 @@ func TestEqualityDeleteUnpartitionedSortOrderID(t *testing.T) {
 
 	built, err := metadataBuilder.Build()
 	require.NoError(t, err)
-	expectedID := built.DefaultSortOrder()
-	require.NotZero(t, expectedID, "sanity: sort order id should be non-zero")
+	require.NotZero(t, built.DefaultSortOrder(), "sanity: sort order id should be non-zero")
 
 	delArrowSc, err := SchemaToArrowSchema(delSchema, nil, true, false)
 	require.NoError(t, err)
@@ -777,8 +772,7 @@ func TestEqualityDeleteUnpartitionedSortOrderID(t *testing.T) {
 	}
 	require.NotEmpty(t, files, "expected at least one data file")
 	for _, df := range files {
-		require.NotNil(t, df.SortOrderID(), "unpartitioned eq-delete DataFile must carry sort order id")
-		assert.Equal(t, expectedID, *df.SortOrderID())
+		assert.Nil(t, df.SortOrderID(), "eq-delete DataFile must not claim a sort order it was not written in")
 	}
 }
 

@@ -1470,7 +1470,7 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 				}
 			}()
 
-			dataFiles[i] = fileToDataFile(ctx, fileIO, filePath, currentSchema, currentSpec, meta.defaultSortOrderID, meta.props)
+			dataFiles[i] = fileToDataFile(ctx, fileIO, filePath, currentSchema, currentSpec, meta.props)
 
 			return nil
 		})
@@ -1483,7 +1483,9 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 	return dataFiles, nil
 }
 
-func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, currentSchema *iceberg.Schema, currentSpec iceberg.PartitionSpec, sortOrderID int, props iceberg.Properties) iceberg.DataFile {
+// fileToDataFile builds a DataFile for a pre-existing file. The caller cannot
+// convey its sort layout, so no sort_order_id is claimed.
+func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, currentSchema *iceberg.Schema, currentSpec iceberg.PartitionSpec, props iceberg.Properties) iceberg.DataFile {
 	format := tblutils.FormatFromFileName(filePath)
 	rdr := must(format.Open(ctx, fileIO, filePath))
 	defer rdr.Close()
@@ -1526,7 +1528,6 @@ func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, curre
 		Content:         iceberg.EntryContentData,
 		FileSize:        rdr.SourceFileSize(),
 		PartitionValues: partitionValues,
-		SortOrderID:     sortOrderID,
 	})
 }
 
@@ -1741,7 +1742,6 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 					FileCount:   fileCount,
 					Schema:      iceberg.PositionalDeleteSchema,
 					Batches:     batch,
-					SortOrderID: meta.defaultSortOrderID,
 				}
 				if !yield(t) {
 					return

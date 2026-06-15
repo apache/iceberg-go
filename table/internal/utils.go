@@ -248,8 +248,13 @@ type DataFileOpts struct {
 	Content         iceberg.ManifestEntryContent
 	FileSize        int64
 	PartitionValues map[int]any
-	SortOrderID     int
+	// SortOrderID claims the file's rows are fully sorted by that order; zero
+	// makes no claim and leaves the field absent.
+	SortOrderID int
 }
+
+// unsortedSortOrderID mirrors table.UnsortedSortOrderID.
+const unsortedSortOrderID = 0
 
 func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 	var fieldIDToPartitionData map[int]any
@@ -330,7 +335,10 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 		bldr.EqualityFieldIDs(d.EqualityFieldIDs)
 	}
 
-	bldr.SortOrderID(opts.SortOrderID)
+	// Claim invariants are enforced upstream in defaultDataFileWriter.writeFile.
+	if opts.SortOrderID != unsortedSortOrderID {
+		bldr.SortOrderID(opts.SortOrderID)
+	}
 
 	return bldr.Build()
 }
