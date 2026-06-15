@@ -188,7 +188,7 @@ func (c *Catalog) defaultTableLocation(ident table.Identifier) string {
 func isTableDir(filesystem HadoopCatalogFS, path string) bool {
 	metaDir := filepath.Join(path, "metadata")
 
-	found_metadata := false
+	foundMetadata := false
 	err := filesystem.WalkDir(metaDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -208,7 +208,7 @@ func isTableDir(filesystem HadoopCatalogFS, path string) bool {
 		if versionPattern.MatchString(name) ||
 			uuidMetadataPattern.MatchString(name) ||
 			name == "version-hint.text" {
-			found_metadata = true
+			foundMetadata = true
 
 			return fs.SkipAll
 		}
@@ -216,11 +216,11 @@ func isTableDir(filesystem HadoopCatalogFS, path string) bool {
 		return nil
 	})
 
-	if err != nil && err != fs.SkipAll {
+	if err != nil {
 		return false
 	}
 
-	return found_metadata
+	return foundMetadata
 }
 
 func (c *Catalog) readVersionHint(ident table.Identifier) int {
@@ -566,13 +566,13 @@ func (c *Catalog) ListTables(_ context.Context, ns table.Identifier) iter.Seq2[t
 
 			// Skip anything that is not a table directory.
 			if !isTableDir(c.filesystem, path) {
-				return nil
+				return fs.SkipDir
 			}
 			ident := make(table.Identifier, len(ns)+1)
 			copy(ident, ns)
 			ident[len(ns)] = d.Name()
 			if !yield(ident, nil) {
-				return nil
+				return fs.SkipAll
 			}
 
 			return nil
@@ -627,7 +627,7 @@ func (c *Catalog) CreateNamespace(_ context.Context, ns table.Identifier, props 
 	}
 
 	// Raise an error if the namespace already exists
-	if err := c.CheckedMkdirAll(ns, true); err != nil {
+	if err := c.CheckedMkdirAll(ns); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("%w: %s", catalog.ErrNamespaceAlreadyExists, strings.Join(ns, "."))
 		}
@@ -774,10 +774,11 @@ func (c *Catalog) UpdateNamespaceProperties(_ context.Context, _ table.Identifie
 	return catalog.PropertiesUpdateSummary{}, errors.New("hadoop catalog: UpdateNamespaceProperties not yet implemented")
 }
 
-// CheckedMkdirAll is a helper function that checkes
-// all subdirectories of a given identifier path exist before creting the full path.
-// If errIfExists is true, it also checks that the full path does not already exist before creating it.
-func (c *Catalog) CheckedMkdirAll(id table.Identifier, errIfExists bool) error {
+// CheckedMkdirAll is a helper function that checks
+// all subdirectories of a given identifier path exist before creating the full path.
+// This function is not atomic and may not return ErrNamespaceAlreadyExists if
+// called concurrently with other calls that change the same identifier
+func (c *Catalog) CheckedMkdirAll(id table.Identifier) error {
 	path := c.namespaceToPath(id)
 	for pathIndex := range id {
 		subPath := id[:pathIndex]
@@ -786,13 +787,11 @@ func (c *Catalog) CheckedMkdirAll(id table.Identifier, errIfExists bool) error {
 			return err
 		}
 	}
-	if errIfExists {
-		if _, err := c.filesystem.Stat(path); err == nil {
-			// If there is no error and stat returns successfully,
-			// it means that it must already exist
-			return fs.ErrExist
-		}
+	// Check the final element in the path
+	if _, err := c.filesystem.Stat(path); err == nil {
+		// If there is no error and stat returns successfully,
+		// it means that it must already exist
+		return fs.ErrExist
 	}
-
 	return c.filesystem.MkdirAll(path)
 }
