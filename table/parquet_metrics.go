@@ -31,15 +31,15 @@ import (
 // delete) from a parquet file's in-heap [metadata.FileMetaData] without
 // performing any filesystem reads.
 type ParquetDataFileArgs struct {
-	Schema *iceberg.Schema
-	Spec iceberg.PartitionSpec
-	ParquetMetadata *metadata.FileMetaData
-	FilePath string
-	FileSize int64
-	Content iceberg.ManifestEntryContent
-	PartitionValues map[int]any
-	SortOrderID int
-	Properties iceberg.Properties
+	Schema           *iceberg.Schema
+	Spec             iceberg.PartitionSpec
+	ParquetMetadata  *metadata.FileMetaData
+	FilePath         string
+	FileSize         int64
+	Content          iceberg.ManifestEntryContent
+	PartitionValues  map[int]any
+	SortOrderID      int
+	Properties       iceberg.Properties
 	EqualityFieldIDs []int
 }
 
