@@ -626,7 +626,7 @@ func (c *Catalog) CreateNamespace(_ context.Context, ns table.Identifier, props 
 	}
 
 	// Raise an error if the namespace already exists
-	if err := c.CheckedMkdirAll(ns); err != nil {
+	if err := c.checkedMkdirAll(ns); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("%w: %s", catalog.ErrNamespaceAlreadyExists, strings.Join(ns, "."))
 		}
@@ -773,13 +773,14 @@ func (c *Catalog) UpdateNamespaceProperties(_ context.Context, _ table.Identifie
 	return catalog.PropertiesUpdateSummary{}, errors.New("hadoop catalog: UpdateNamespaceProperties not yet implemented")
 }
 
-// CheckedMkdirAll is a helper function that checks
+// checkedMkdirAll is a helper function that checks
 // all subdirectories of a given identifier path exist before creating the full path.
 // This function is not atomic and may not return ErrNamespaceAlreadyExists if
 // called concurrently with other calls that change the same identifier
-func (c *Catalog) CheckedMkdirAll(id table.Identifier) error {
+func (c *Catalog) checkedMkdirAll(id table.Identifier) error {
 	path := c.namespaceToPath(id)
-	for pathIndex := range id {
+	// Start at index 1 to skip the root warehouse directory
+	for pathIndex := 1; pathIndex < len(id); pathIndex++ {
 		subPath := id[:pathIndex]
 		parentPath := c.namespaceToPath(subPath)
 		if _, err := c.filesystem.Stat(parentPath); err != nil {
