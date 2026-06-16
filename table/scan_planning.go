@@ -26,10 +26,19 @@ import (
 	"context"
 
 	"github.com/apache/iceberg-go"
+	icebergio "github.com/apache/iceberg-go/io"
 )
 
-// ScanPlanningMode selects how (*Scan).PlanFiles plans a scan. Local planning
-// remains the default; remote planning is opt-in via WithScanPlanningMode.
+// ScanPlanningMode is the user-facing scan option: three values
+// (local/remote/auto) selecting how (*Scan).PlanFiles plans a scan. Local
+// planning remains the default; remote is opt-in via WithScanPlanningMode.
+//
+// This is deliberately distinct from the REST table-config key
+// `scan-planning-mode` (values `client`/`server`), which is a server directive
+// resolved separately (OQ4): a `server` table forces remote planning regardless
+// of this option, and an explicit ScanPlanningLocal against such a table is an
+// error. There is intentionally no fourth `server` value here; the directive
+// lives in the table config, not the user option.
 type ScanPlanningMode string
 
 const (
@@ -47,38 +56,49 @@ const (
 // WithScanPlanningMode sets the scan-planning mode for a scan. The default is
 // ScanPlanningLocal unless the REST table config requires server planning.
 func WithScanPlanningMode(mode ScanPlanningMode) ScanOption {
-	panic("unimplemented: proposed API for #1178")
+	// The panic is deferred to option application, not construction: an
+	// unimplemented option must not blow up when an options slice is built,
+	// only if it is actually applied to a Scan.
+	return func(*Scan) { panic("unimplemented: proposed API for #1178") }
 }
 
 // ScanPlanningRequest is the input a Scan hands to a ScanPlanner. It carries
 // the resolved scan state a planner needs without depending on catalog/rest.
 //
 // Open question (epic OQ4): when the table has evolved, UseSnapshotSchema must
-// pin which schema binds a returned residual and the partition decode — the
+// pin which schema binds a returned residual and the partition decode: the
 // snapshot's schema (via schema-id), kept separate from each file's partition
 // spec-id. Incremental scans (start/end snapshot) are deferred to a later
 // phase; point-in-time SnapshotID lands first.
 type ScanPlanningRequest struct {
-	Identifier        Identifier
-	Metadata          Metadata
-	MetadataLocation  string
-	SnapshotID        *int64
-	SelectedFields    []string
-	RowFilter         iceberg.BooleanExpression
+	Identifier Identifier
+	// Metadata is the full table metadata. This likely over-specifies the
+	// contract: a planner needs only schema(s), partition specs, and snapshot
+	// resolution; narrowing to a smaller interface is an open refinement.
+	Metadata         Metadata
+	MetadataLocation string
+	SnapshotID       *int64
+	SelectedFields   []string
+	RowFilter        iceberg.BooleanExpression
+	MinRowsRequested *int64
+	StatsFields      []string
+	// CaseSensitive must carry the Scan's value (which defaults to true), not
+	// Go's false zero value, or the wire request would flip the spec default.
 	CaseSensitive     bool
 	UseSnapshotSchema bool
 }
 
+// PlanIO lazily loads the FileIO that should be used to read a planned scan.
+// Nil means the scan should keep using the table's normal FileIO. Remote
+// planners may return a PlanIO backed by plan-scoped storage credentials.
+type PlanIO interface {
+	Load(context.Context) (icebergio.IO, error)
+}
+
 // ScanPlanningResult is what a ScanPlanner returns.
-//
-// Open question (OQ1): how plan-scoped FileIO reaches ReadTasks across the
-// PlanFiles -> ReadTasks boundary is unsettled. IO here is one provisional
-// carrier; a live FileIO should not live on FileScanTask (it has a transport
-// codec). Alternatives: a richer planned-result object, an internal plan
-// context on Scan, or a serializable credential handle on FileScanTask.
 type ScanPlanningResult struct {
 	Tasks []FileScanTask
-	IO    FSysF // PROVISIONAL carrier — see OQ1
+	IO    PlanIO
 }
 
 // ScanPlanner plans scans for a table. rest.Catalog implements it; non-REST
@@ -95,3 +115,19 @@ type ScanPlanner interface {
 	SupportsRemoteScanPlanning() bool
 	PlanFiles(context.Context, ScanPlanningRequest) (ScanPlanningResult, error)
 }
+
+// Proposed Scan integration, added in the scanner-delegation phase. Sketched
+// here (not declared) to show how the seam wires into the existing Scan, whose
+// fields live in scanner.go:
+//
+//	type Scan struct {
+//		// ...existing fields...
+//		planningMode ScanPlanningMode // set by WithScanPlanningMode; default ScanPlanningLocal
+//		planner      ScanPlanner      // non-nil only when the catalog supplies one
+//	}
+//
+// (*Scan).PlanFiles resolves planningMode and, for remote/auto with a capable
+// planner, delegates to planner.PlanFiles; otherwise it runs the existing local
+// path unchanged. The compile-time `var _ table.ScanPlanner = (*Catalog)(nil)`
+// in catalog/rest proves the seam is satisfiable, but not this wiring, which
+// arrives with scanner delegation.

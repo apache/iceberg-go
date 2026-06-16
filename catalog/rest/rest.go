@@ -156,7 +156,9 @@ func (t *commitTableResponse) UnmarshalJSON(b []byte) (err error) {
 	return err
 }
 
-type storageCredential struct {
+// StorageCredential carries REST-vended storage credentials scoped to matching
+// object-location prefixes.
+type StorageCredential struct {
 	Prefix string             `json:"prefix"`
 	Config iceberg.Properties `json:"config"`
 }
@@ -165,12 +167,12 @@ type loadTableResponse struct {
 	MetadataLoc        string              `json:"metadata-location"`
 	RawMetadata        json.RawMessage     `json:"metadata"`
 	Config             iceberg.Properties  `json:"config"`
-	StorageCredentials []storageCredential `json:"storage-credentials"`
+	StorageCredentials []StorageCredential `json:"storage-credentials"`
 	Metadata           table.Metadata      `json:"-"`
 }
 
 type loadCredentialsResponse struct {
-	StorageCredentials []storageCredential `json:"storage-credentials"`
+	StorageCredentials []StorageCredential `json:"storage-credentials"`
 }
 
 func (t *loadTableResponse) UnmarshalJSON(b []byte) (err error) {

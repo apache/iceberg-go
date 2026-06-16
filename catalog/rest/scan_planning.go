@@ -99,17 +99,19 @@ func (c *Catalog) FetchScanTasks(ctx context.Context, ident table.Identifier, re
 	panic("unimplemented: proposed API for #1178")
 }
 
-// WaitForPlan submits and polls a plan to completion using jittered backoff,
-// cancelling the server-side plan if the context is cancelled.
-func (c *Catalog) WaitForPlan(ctx context.Context, ident table.Identifier, planID string, opts WaitForPlanOptions) (FetchPlanningResultResponse, error) {
+// WaitForPlan polls a submitted plan to completion using jittered backoff,
+// cancelling the server-side plan if the context is cancelled. It returns an
+// error if the plan is still submitted after the wait, cancelled, failed, or
+// expired.
+func (c *Catalog) WaitForPlan(ctx context.Context, ident table.Identifier, planID string, opts WaitForPlanOptions) (CompletedPlanningResult, error) {
 	panic("unimplemented: proposed API for #1178")
 }
 
 // --- Wire types (sketch) ----------------------------------------------------
 //
-// Field-complete request/response decoding (content-file JSON, residuals,
-// storage credentials) lands with the scan-task decoder PR; these sketch the
-// request/response envelopes so the client surface compiles and reads.
+// Content-file, delete-file, and residual decoding lands with the scan-task
+// decoder PR; these sketch the request/response envelopes so the client
+// surface compiles and reads.
 
 // PlanStatus is the status of a server-side plan.
 type PlanStatus string
@@ -121,6 +123,32 @@ const (
 	PlanStatusFailed    PlanStatus = "failed"
 )
 
+// PlanningError is the ErrorModel payload carried by a failed planning result.
+type PlanningError struct {
+	Message string `json:"message"`
+	Type    string `json:"type"`
+	Code    int    `json:"code"`
+}
+
+// ScanTasks carries the task payload shared by completed planning responses and
+// fetchScanTasks responses. Task/delete payload decoding lands with the
+// scan-task decoder PR.
+type ScanTasks struct {
+	PlanTasks     []string        `json:"plan-tasks,omitempty"`
+	FileScanTasks json.RawMessage `json:"file-scan-tasks,omitempty"`
+	DeleteFiles   json.RawMessage `json:"delete-files,omitempty"`
+}
+
+// CompletedPlanningResult is the completed arm of the planning-result union.
+// PlanID is populated only by the initial planTableScan response's
+// CompletedPlanningWithIDResult arm.
+type CompletedPlanningResult struct {
+	Status PlanStatus `json:"status"`
+	PlanID *string    `json:"plan-id,omitempty"`
+	ScanTasks
+	StorageCredentials []StorageCredential `json:"storage-credentials,omitempty"`
+}
+
 // PlanTableScanRequest is the POST .../plan request body. Filter is the
 // ExpressionParser-format JSON produced by iceberg.MarshalExpressionJSON.
 type PlanTableScanRequest struct {
@@ -129,21 +157,31 @@ type PlanTableScanRequest struct {
 	EndSnapshotID     *int64          `json:"end-snapshot-id,omitempty"`
 	Select            []string        `json:"select,omitempty"`
 	Filter            json.RawMessage `json:"filter,omitempty"`
+	MinRowsRequested  *int64          `json:"min-rows-requested,omitempty"`
 	CaseSensitive     *bool           `json:"case-sensitive,omitempty"`
 	UseSnapshotSchema *bool           `json:"use-snapshot-schema,omitempty"`
+	StatsFields       []string        `json:"stats-fields,omitempty"`
 }
 
-// PlanTableScanResponse is the POST .../plan response envelope.
+// PlanTableScanResponse is the POST .../plan response. The spec models this as
+// a `status`-discriminated union; the flat struct carries every arm's fields
+// with omitempty so none are discarded. Task/delete RawMessage payloads are
+// decoded by the scan-task decoder PR.
 type PlanTableScanResponse struct {
-	PlanStatus PlanStatus `json:"plan-status"`
-	PlanID     *string    `json:"plan-id,omitempty"`
-	// file-scan-tasks, delete-files, plan-tasks, storage-credentials decoded
-	// by the scan-task decoder PR.
+	Status PlanStatus     `json:"status"`
+	PlanID *string        `json:"plan-id,omitempty"` // status=submitted, or completed from planTableScan
+	Error  *PlanningError `json:"error,omitempty"`
+	ScanTasks
+	StorageCredentials []StorageCredential `json:"storage-credentials,omitempty"`
 }
 
-// FetchPlanningResultResponse is the GET .../plan/{plan-id} response envelope.
+// FetchPlanningResultResponse is the GET .../plan/{plan-id} poll response. Same
+// `status`-discriminated union (completed / submitted / cancelled / failed).
 type FetchPlanningResultResponse struct {
-	PlanStatus PlanStatus `json:"plan-status"`
+	Status PlanStatus     `json:"status"`
+	Error  *PlanningError `json:"error,omitempty"`
+	ScanTasks
+	StorageCredentials []StorageCredential `json:"storage-credentials,omitempty"`
 }
 
 // FetchScanTasksRequest is the POST .../tasks request body.
@@ -151,8 +189,12 @@ type FetchScanTasksRequest struct {
 	PlanTask string `json:"plan-task"`
 }
 
-// FetchScanTasksResponse is the POST .../tasks response envelope.
-type FetchScanTasksResponse struct{}
+// FetchScanTasksResponse is the POST .../tasks response. May itself return more
+// plan-tasks for further fanout. Task/delete payloads decoded by the
+// scan-task decoder PR.
+type FetchScanTasksResponse struct {
+	ScanTasks
+}
 
 // WaitForPlanOptions tunes the polling loop. Defaults should be conservative.
 type WaitForPlanOptions struct {
