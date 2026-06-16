@@ -39,8 +39,7 @@ const (
 // manifest file has rows that might or might not match a given partition filter by using
 // the stats provided in the partitions (UpperBound/LowerBound/ContainsNull/ContainsNaN).
 func newManifestEvaluator(spec iceberg.PartitionSpec, schema *iceberg.Schema, partitionFilter iceberg.BooleanExpression, caseSensitive bool) (func(iceberg.ManifestFile) (bool, error), error) {
-	partType := spec.PartitionType(schema)
-	partSchema := iceberg.NewSchema(0, partType.FieldList...)
+	partSchema := iceberg.NewSchema(0, manifestPartitionFields(spec, schema)...)
 	filter, err := iceberg.RewriteNotExpr(partitionFilter)
 	if err != nil {
 		return nil, err
@@ -52,6 +51,30 @@ func newManifestEvaluator(spec iceberg.PartitionSpec, schema *iceberg.Schema, pa
 	}
 
 	return (&manifestEvalVisitor{partitionFilter: boundFilter}).Eval, nil
+}
+
+// manifestPartitionFields builds the partition-struct fields for evaluating
+// manifest FieldSummary lists. Summaries are positional per the spec's full
+// field list, so unlike PartitionSpec.PartitionType (which compacts fields
+// whose source column is missing from the schema), every spec field must be
+// kept. A dropped-source field becomes an Unknown-typed placeholder that no
+// projected predicate can reference, preserving positions of later fields.
+func manifestPartitionFields(spec iceberg.PartitionSpec, schema *iceberg.Schema) []iceberg.NestedField {
+	fields := make([]iceberg.NestedField, 0, spec.NumFields())
+	for _, field := range spec.Fields() {
+		typ := iceberg.Type(iceberg.UnknownType{})
+		if sourceType, ok := schema.FindTypeByID(field.SourceID()); ok {
+			typ = field.Transform.ResultType(sourceType)
+		}
+		fields = append(fields, iceberg.NestedField{
+			ID:       field.FieldID,
+			Name:     field.Name,
+			Type:     typ,
+			Required: false,
+		})
+	}
+
+	return fields
 }
 
 type manifestEvalVisitor struct {

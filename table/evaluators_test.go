@@ -715,6 +715,86 @@ func TestManifestEvaluator(t *testing.T) {
 	})
 }
 
+func TestManifestEvaluatorWithDroppedPartitionSource(t *testing.T) {
+	// Manifest partition summaries are positional per the spec's full field
+	// list. When a partition field's source column is dropped from the current
+	// schema, the evaluator must keep that field's slot (as an Unknown-typed
+	// placeholder) rather than compacting it away; otherwise a later, present
+	// field is read against an earlier slot's bounds.
+	bound := func(lo, hi int64) iceberg.FieldSummary {
+		lower, err := iceberg.Int64Literal(lo).MarshalBinary()
+		require.NoError(t, err)
+		upper, err := iceberg.Int64Literal(hi).MarshalBinary()
+		require.NoError(t, err)
+
+		return iceberg.FieldSummary{ContainsNull: false, LowerBound: &lower, UpperBound: &upper}
+	}
+	manifestWith := func(summaries ...iceberg.FieldSummary) iceberg.ManifestFile {
+		return iceberg.NewManifestFile(1, "", 0, 0, 0).Partitions(summaries).Build()
+	}
+	// evalForCol projects (col == 2) onto the spec and returns the manifest
+	// evaluator. In every case below the dropped field's slot contains 2
+	// exactly when the present field's slot does not, so a compacted read of
+	// the wrong slot flips both the match and the prune assertion.
+	evalForCol := func(spec iceberg.PartitionSpec, schema *iceberg.Schema, col string) func(iceberg.ManifestFile) bool {
+		project := newInclusiveProjection(schema, spec, true)
+		partitionFilter, err := project(iceberg.EqualTo(iceberg.Reference(col), int64(2)))
+		require.NoError(t, err)
+		eval, err := newManifestEvaluator(spec, schema, partitionFilter, true)
+		require.NoError(t, err)
+
+		return func(mf iceberg.ManifestFile) bool {
+			res, err := eval(mf)
+			require.NoError(t, err)
+
+			return res
+		}
+	}
+
+	t.Run("dropped source at slot 0", func(t *testing.T) {
+		// q_part (slot 0) sources a dropped column; p_part (slot 1) sources the
+		// present column "p". Compaction would drop q_part and read p_part at
+		// slot 0.
+		spec := iceberg.NewPartitionSpec(
+			iceberg.PartitionField{SourceIDs: []int{3}, FieldID: 1000, Name: "q_part", Transform: iceberg.IdentityTransform{}},
+			iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1001, Name: "p_part", Transform: iceberg.IdentityTransform{}},
+		)
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+			iceberg.NestedField{ID: 2, Name: "p", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		)
+		eval := evalForCol(spec, schema, "p")
+
+		assert.True(t, eval(manifestWith(bound(100, 200), bound(2, 2))),
+			"p=2 is in p_part's slot-1 bounds; must read slot 1, not q_part's slot 0")
+		assert.False(t, eval(manifestWith(bound(0, 5), bound(100, 200))),
+			"p=2 is outside p_part's slot-1 bounds; manifest must be pruned (reading slot 0 would wrongly keep it)")
+	})
+
+	t.Run("dropped sources around a middle field", func(t *testing.T) {
+		// b_part (slot 1) sources the only present column; a_part (slot 0) and
+		// c_part (slot 2) source dropped columns. Dropping the leading a_part
+		// shifts b_part to slot 0 under compaction.
+		spec := iceberg.NewPartitionSpec(
+			iceberg.PartitionField{SourceIDs: []int{3}, FieldID: 1000, Name: "a_part", Transform: iceberg.IdentityTransform{}},
+			iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1001, Name: "b_part", Transform: iceberg.IdentityTransform{}},
+			iceberg.PartitionField{SourceIDs: []int{4}, FieldID: 1002, Name: "c_part", Transform: iceberg.IdentityTransform{}},
+		)
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+			iceberg.NestedField{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		)
+		eval := evalForCol(spec, schema, "b")
+
+		// Dropped slots 0 and 2 carry the opposite bounds to b_part, catching
+		// an off-by-one in either direction.
+		assert.True(t, eval(manifestWith(bound(100, 200), bound(2, 2), bound(100, 200))),
+			"b=2 is in b_part's slot-1 bounds; must read slot 1")
+		assert.False(t, eval(manifestWith(bound(0, 5), bound(100, 200), bound(0, 5))),
+			"b=2 is outside b_part's slot-1 bounds; manifest must be pruned")
+	})
+}
+
 type ProjectionTestSuite struct {
 	suite.Suite
 }
