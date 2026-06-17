@@ -261,7 +261,7 @@ func TestExecuteCompactionGroupPreservesRowID(t *testing.T) {
 
 	tx := tbl.NewTransaction()
 	rewrite := tx.NewRewrite(nil)
-	rewrite.Apply(gr.OldDataFiles, gr.NewDataFiles, gr.SafePosDeletes)
+	rewrite.ApplyResult(gr)
 	require.NoError(t, rewrite.Commit(ctx))
 	tbl, err = tx.Commit(ctx)
 	require.NoError(t, err)

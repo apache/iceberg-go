@@ -152,8 +152,10 @@ func (r *RewriteFiles) AddDataFile(df iceberg.DataFile) *RewriteFiles {
 // [RewriteFiles.DeleteFile] (which routes data vs. delete files by
 // content type), and every entry in adds via [RewriteFiles.AddDataFile].
 //
-// Coordinators feeding worker outputs must use [RewriteFiles.ApplyResult]; see
-// the warning there.
+// Deprecated: use [RewriteFiles.ApplyResult], which also carries
+// SafeDeletionVectors. Apply has no slot for them, so a coordinator wiring
+// worker output through Apply leaves deletion vectors for the rewritten files
+// orphaned.
 func (r *RewriteFiles) Apply(deletes, adds, safeDeletes []iceberg.DataFile) *RewriteFiles {
 	if r.err != nil {
 		return r
@@ -189,9 +191,20 @@ func (r *RewriteFiles) Apply(deletes, adds, safeDeletes []iceberg.DataFile) *Rew
 //	}
 //	if err := rewrite.Commit(ctx); err != nil { ... }
 func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
-	r.Apply(gr.OldDataFiles, gr.NewDataFiles, gr.SafePosDeletes)
-	for _, dv := range gr.SafeDeletionVectors {
-		r.DeleteFile(dv)
+	for _, df := range gr.OldDataFiles {
+		r.DeleteFile(df)
+	}
+	for _, df := range gr.NewDataFiles {
+		r.AddDataFile(df)
+	}
+	// Both delete kinds route through DeleteFile: a DV's content type is
+	// EntryContentPosDeletes, so it lands in the removal queue and ReplaceFiles
+	// re-identifies it by referenced data file to expunge the right entry.
+	for _, df := range gr.SafePosDeletes {
+		r.DeleteFile(df)
+	}
+	for _, df := range gr.SafeDeletionVectors {
+		r.DeleteFile(df)
 	}
 
 	return r

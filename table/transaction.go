@@ -886,12 +886,15 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if df == nil {
 			return fmt.Errorf("nil delete file at index %d for ReplaceFiles", i)
 		}
-		if isDeletionVectorFile(df) {
-			ref := *df.ReferencedDataFile()
-			if _, ok := dvRefsToRemove[ref]; ok {
+		if isDeletionVector(df) {
+			ref := df.ReferencedDataFile()
+			if ref == nil {
+				return errors.New("deletion vector to remove is missing referenced_data_file for ReplaceFiles")
+			}
+			if _, ok := dvRefsToRemove[*ref]; ok {
 				return errors.New("deletion vectors to remove must reference distinct data files for ReplaceFiles")
 			}
-			dvRefsToRemove[ref] = struct{}{}
+			dvRefsToRemove[*ref] = struct{}{}
 
 			continue
 		}
@@ -932,8 +935,8 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if !isData {
 			if _, ok := setDeleteFilesToRemove[path]; ok {
 				markedDeleteForRemoval = append(markedDeleteForRemoval, df)
-			} else if isDeletionVectorFile(df) {
-				if _, ok := dvRefsToRemove[*df.ReferencedDataFile()]; ok {
+			} else if ref := df.ReferencedDataFile(); isDeletionVector(df) && ref != nil {
+				if _, ok := dvRefsToRemove[*ref]; ok {
 					markedDVsForRemoval = append(markedDVsForRemoval, df)
 				}
 			}
@@ -949,6 +952,9 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	if len(markedDeleteForRemoval) != len(setDeleteFilesToRemove) {
 		return errors.New("cannot remove delete files that do not belong to the table")
 	}
+	// Relies on the spec invariant of at most one DV per referenced data file:
+	// duplicate refs in the table would inflate markedDVsForRemoval past the
+	// deduped map and slip past this check.
 	if len(markedDVsForRemoval) != len(dvRefsToRemove) {
 		return errors.New("cannot remove deletion vectors that do not belong to the table")
 	}

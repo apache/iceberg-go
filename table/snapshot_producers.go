@@ -591,7 +591,11 @@ func (sp *snapshotProducer) removeDeleteFile(df iceberg.DataFile) *snapshotProdu
 }
 
 func (sp *snapshotProducer) removeDeletionVector(df iceberg.DataFile) *snapshotProducer {
-	sp.deletedDVsByRef[*df.ReferencedDataFile()] = df
+	ref := df.ReferencedDataFile()
+	if ref == nil {
+		return sp
+	}
+	sp.deletedDVsByRef[*ref] = df
 
 	return sp
 }
@@ -604,18 +608,13 @@ func (sp *snapshotProducer) deleteFileRemoved(df iceberg.DataFile) bool {
 	if _, ok := sp.deletedDeleteFiles[df.FilePath()]; ok {
 		return true
 	}
-	if isDeletionVectorFile(df) {
-		_, ok := sp.deletedDVsByRef[*df.ReferencedDataFile()]
+	if ref := df.ReferencedDataFile(); isDeletionVector(df) && ref != nil {
+		_, ok := sp.deletedDVsByRef[*ref]
 
 		return ok
 	}
 
 	return false
-}
-
-// isDeletionVectorFile reports whether df is a Puffin deletion vector.
-func isDeletionVectorFile(df iceberg.DataFile) bool {
-	return df.FileFormat() == iceberg.PuffinFile && df.ReferencedDataFile() != nil
 }
 
 func (sp *snapshotProducer) newManifestWriter(spec iceberg.PartitionSpec, opts ...iceberg.ManifestWriterOption) (_ *iceberg.ManifestWriter, _ string, _ *internal.CountingWriter, _ io.Closer, err error) {

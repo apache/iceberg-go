@@ -35,7 +35,9 @@ import (
 
 // TestRewriteDataFilesRemovesDeletionVectors guarantees that compacting a data
 // file carrying a deletion vector expunges that DV in the same rewrite snapshot,
-// leaving no manifest entry referencing the removed data file.
+// leaving no manifest entry referencing the removed data file. Both commit
+// paths of [Transaction.RewriteDataFiles] are covered: the single atomic
+// snapshot and the per-group partial-progress path.
 //
 // Background: a DV manifest entry is 1:1 with its referenced data file but rides
 // in FileScanTask.DeletionVectorFiles, separate from the pos-delete files in
@@ -46,87 +48,64 @@ import (
 // referenced data file is gone — so the assertion walks the raw delete manifests
 // of the post-compaction snapshot.
 func TestRewriteDataFilesRemovesDeletionVectors(t *testing.T) {
-	ctx := context.Background()
-	mem := memory.DefaultAllocator
-	fs := iceio.LocalFS{}
-
-	tbl := newV3RowLineageTestTable(t)
-
-	arrowSchema := arrow.NewSchema([]arrow.Field{
-		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
-		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
-	}, nil)
-
-	// Two appends produce two data files so the planner forms a compaction group.
-	for _, rows := range []string{
-		`[{"id": 1, "data": "a"}, {"id": 2, "data": "b"}]`,
-		`[{"id": 3, "data": "c"}, {"id": 4, "data": "d"}]`,
-	} {
-		tab, err := array.TableFromJSON(mem, arrowSchema, []string{rows})
-		require.NoError(t, err)
-		tbl, err = tbl.Append(ctx, array.NewTableReader(tab, -1), nil)
-		tab.Release()
-		require.NoError(t, err)
-	}
-	assertRowCount(t, tbl, 4)
-
-	tasks, err := tbl.Scan().PlanFiles(ctx)
-	require.NoError(t, err)
-	require.Len(t, tasks, 2)
-	dvTarget := tasks[0].File.FilePath()
-
-	// Author a real DV (puffin) deleting position 0 (id=1) of the first data
-	// file, then commit it as a delete manifest entry.
-	specByID := func(id int32) *iceberg.PartitionSpec {
-		if id == 0 {
-			return iceberg.UnpartitionedSpec
+	for _, partialProgress := range []bool{false, true} {
+		name := "atomic"
+		if partialProgress {
+			name = "partial-progress"
 		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			tbl, dvTarget := seedV3TableWithDV(t)
 
-		return nil
+			groups, rewritten := planDVCompaction(t, tbl, dvTarget)
+
+			rtx := tbl.NewTransaction()
+			_, err := rtx.RewriteDataFiles(ctx, groups,
+				table.RewriteDataFilesOptions{PartialProgress: partialProgress})
+			require.NoError(t, err)
+			tbl, err = rtx.Commit(ctx)
+			require.NoError(t, err)
+
+			assertRowCount(t, tbl, 3) // DV applied during the rewrite; id=1 stays gone
+			assert.Empty(t, deleteEntriesReferencing(t, tbl, rewritten),
+				"compaction must remove deletion vectors for rewritten data files")
+		})
 	}
-	w := dv.NewDVWriter(fs, specByID)
-	w.Add(dvTarget, []int64{0}, 0, nil)
-	dvFiles, err := w.Flush(ctx, filepath.Join(filepath.Dir(dvTarget), "dv-0001.puffin"))
-	require.NoError(t, err)
-	require.Len(t, dvFiles, 1)
-	require.Equal(t, dvTarget, *dvFiles[0].ReferencedDataFile())
+}
+
+// TestRewriteFilesApplyResultRemovesDeletionVectors drives the distributed
+// coordinator path — a worker runs [ExecuteCompactionGroup], then a leader
+// stages the results with [Transaction.NewRewrite] + [RewriteFiles.ApplyResult]
+// + Commit. It locks the ApplyResult→ReplaceFiles coupling that carries
+// SafeDeletionVectors and expunges them by referenced data file.
+func TestRewriteFilesApplyResultRemovesDeletionVectors(t *testing.T) {
+	ctx := context.Background()
+	tbl, dvTarget := seedV3TableWithDV(t)
+
+	groups, rewritten := planDVCompaction(t, tbl, dvTarget)
+
+	var results []table.CompactionGroupResult
+	dvCount := 0
+	for _, g := range groups {
+		gr, err := table.ExecuteCompactionGroup(ctx, tbl, g)
+		require.NoError(t, err)
+		results = append(results, gr)
+		dvCount += len(gr.SafeDeletionVectors)
+	}
+	require.Positive(t, dvCount, "worker must collect the DV for removal")
 
 	tx := tbl.NewTransaction()
-	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dvFiles...).Commit(ctx))
-	tbl, err = tx.Commit(ctx)
-	require.NoError(t, err)
-	assertRowCount(t, tbl, 3) // id=1 deleted by the DV
-
-	tasks, err = tbl.Scan().PlanFiles(ctx)
-	require.NoError(t, err)
-
-	cfg := defaultTestCompactionCfg
-	cfg.DeleteFileThreshold = 1 // force compaction of the DV-bearing file
-	plan, err := cfg.PlanCompaction(tasks)
-	require.NoError(t, err)
-	require.NotEmpty(t, plan.Groups)
-
-	rewritten := map[string]struct{}{}
-	for _, g := range plan.Groups {
-		for _, tk := range g.Tasks {
-			rewritten[tk.File.FilePath()] = struct{}{}
-		}
+	rewrite := tx.NewRewrite(nil)
+	for _, gr := range results {
+		rewrite.ApplyResult(gr)
 	}
-	require.Contains(t, rewritten, dvTarget,
-		"the DV's referenced data file must be in the rewrite set for this test to exercise the bug")
-
-	rtx := tbl.NewTransaction()
-	_, err = rtx.RewriteDataFiles(ctx, toTaskGroups(plan.Groups), table.RewriteDataFilesOptions{})
-	require.NoError(t, err)
-	tbl, err = rtx.Commit(ctx)
+	require.NoError(t, rewrite.Commit(ctx))
+	tbl, err := tx.Commit(ctx)
 	require.NoError(t, err)
 
-	assertRowCount(t, tbl, 3) // DV applied during the rewrite; id=1 stays gone
-
-	orphans := deleteEntriesReferencing(t, tbl, rewritten)
-	assert.Empty(t, orphans,
-		"compaction must remove deletion vectors for rewritten data files; "+
-			"these DV entries still reference files removed by the rewrite: %v", orphans)
+	assertRowCount(t, tbl, 3)
+	assert.Empty(t, deleteEntriesReferencing(t, tbl, rewritten),
+		"coordinator commit must remove deletion vectors for rewritten data files")
 }
 
 // TestRewriteDataFilesPreservesSiblingDeletionVector pins the granularity of DV
@@ -137,26 +116,9 @@ func TestRewriteDataFilesRemovesDeletionVectors(t *testing.T) {
 // both and silently resurrect the sibling's deleted rows.
 func TestRewriteDataFilesPreservesSiblingDeletionVector(t *testing.T) {
 	ctx := context.Background()
-	mem := memory.DefaultAllocator
 	fs := iceio.LocalFS{}
 
-	tbl := newV3RowLineageTestTable(t)
-
-	arrowSchema := arrow.NewSchema([]arrow.Field{
-		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
-		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
-	}, nil)
-
-	for _, rows := range []string{
-		`[{"id": 1, "data": "a"}, {"id": 2, "data": "b"}]`,
-		`[{"id": 3, "data": "c"}, {"id": 4, "data": "d"}]`,
-	} {
-		tab, err := array.TableFromJSON(mem, arrowSchema, []string{rows})
-		require.NoError(t, err)
-		tbl, err = tbl.Append(ctx, array.NewTableReader(tab, -1), nil)
-		tab.Release()
-		require.NoError(t, err)
-	}
+	tbl := appendTwoDataFiles(t, newV3RowLineageTestTable(t))
 
 	tasks, err := tbl.Scan().PlanFiles(ctx)
 	require.NoError(t, err)
@@ -164,17 +126,9 @@ func TestRewriteDataFilesPreservesSiblingDeletionVector(t *testing.T) {
 	rewriteTarget := tasks[0].File.FilePath()
 	sibling := tasks[1].File.FilePath()
 
-	specByID := func(id int32) *iceberg.PartitionSpec {
-		if id == 0 {
-			return iceberg.UnpartitionedSpec
-		}
-
-		return nil
-	}
-
 	// One Flush writes a single Puffin holding a DV blob for each data file,
 	// so both manifest entries share the Puffin path. Each deletes id=1 / id=3.
-	w := dv.NewDVWriter(fs, specByID)
+	w := dv.NewDVWriter(fs, unpartitionedSpecByID)
 	w.Add(rewriteTarget, []int64{0}, 0, nil)
 	w.Add(sibling, []int64{0}, 0, nil)
 	dvFiles, err := w.Flush(ctx, filepath.Join(filepath.Dir(rewriteTarget), "dv-shared.puffin"))
@@ -217,10 +171,102 @@ func TestRewriteDataFilesPreservesSiblingDeletionVector(t *testing.T) {
 	assertRowCount(t, tbl, 2) // sibling DV still applies: id=3 stays deleted
 }
 
+// seedV3TableWithDV builds a v3 table with two data files ([1,2] and [3,4]) and
+// commits a deletion vector deleting id=1 from the first. Returns the table and
+// the DV's target data-file path.
+func seedV3TableWithDV(t *testing.T) (*table.Table, string) {
+	t.Helper()
+	ctx := context.Background()
+	fs := iceio.LocalFS{}
+
+	tbl := appendTwoDataFiles(t, newV3RowLineageTestTable(t))
+
+	tasks, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	dvTarget := tasks[0].File.FilePath()
+
+	w := dv.NewDVWriter(fs, unpartitionedSpecByID)
+	w.Add(dvTarget, []int64{0}, 0, nil)
+	dvFiles, err := w.Flush(ctx, filepath.Join(filepath.Dir(dvTarget), "dv-0001.puffin"))
+	require.NoError(t, err)
+	require.Len(t, dvFiles, 1)
+	require.Equal(t, dvTarget, *dvFiles[0].ReferencedDataFile())
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dvFiles...).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	assertRowCount(t, tbl, 3)
+
+	return tbl, dvTarget
+}
+
+// appendTwoDataFiles appends [1,2] and [3,4] as two separate data files. The
+// returned table reflects both commits.
+func appendTwoDataFiles(t *testing.T, tbl *table.Table) *table.Table {
+	t.Helper()
+	ctx := context.Background()
+	mem := memory.DefaultAllocator
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+	for _, rows := range []string{
+		`[{"id": 1, "data": "a"}, {"id": 2, "data": "b"}]`,
+		`[{"id": 3, "data": "c"}, {"id": 4, "data": "d"}]`,
+	} {
+		tab, err := array.TableFromJSON(mem, arrowSchema, []string{rows})
+		require.NoError(t, err)
+		tbl, err = tbl.Append(ctx, array.NewTableReader(tab, -1), nil)
+		tab.Release()
+		require.NoError(t, err)
+	}
+
+	return tbl
+}
+
+// planDVCompaction plans a compaction forced by the delete threshold and
+// returns the task groups plus the set of data-file paths being rewritten,
+// asserting the DV target is among them.
+func planDVCompaction(t *testing.T, tbl *table.Table, dvTarget string) ([]table.CompactionTaskGroup, map[string]struct{}) {
+	t.Helper()
+
+	tasks, err := tbl.Scan().PlanFiles(context.Background())
+	require.NoError(t, err)
+
+	cfg := defaultTestCompactionCfg
+	cfg.DeleteFileThreshold = 1
+	plan, err := cfg.PlanCompaction(tasks)
+	require.NoError(t, err)
+	require.NotEmpty(t, plan.Groups)
+
+	groups := toTaskGroups(plan.Groups)
+	rewritten := map[string]struct{}{}
+	for _, g := range groups {
+		for _, tk := range g.Tasks {
+			rewritten[tk.File.FilePath()] = struct{}{}
+		}
+	}
+	require.Contains(t, rewritten, dvTarget,
+		"the DV's referenced data file must be in the rewrite set for this test to be meaningful")
+
+	return groups, rewritten
+}
+
+func unpartitionedSpecByID(id int32) *iceberg.PartitionSpec {
+	if id == 0 {
+		return iceberg.UnpartitionedSpec
+	}
+
+	return nil
+}
+
 // deleteEntriesReferencing walks the current snapshot's delete manifests and
-// returns live entries whose referenced_data_file is in rewritten — i.e.
-// deletion vectors orphaned by a rewrite that removed their data file.
-func deleteEntriesReferencing(t *testing.T, tbl *table.Table, rewritten map[string]struct{}) []string {
+// returns live entries whose referenced_data_file is in refs — i.e. deletion
+// vectors still bound to those data files.
+func deleteEntriesReferencing(t *testing.T, tbl *table.Table, refs map[string]struct{}) []string {
 	t.Helper()
 
 	snap := tbl.CurrentSnapshot()
@@ -230,7 +276,7 @@ func deleteEntriesReferencing(t *testing.T, tbl *table.Table, rewritten map[stri
 	manifests, err := snap.Manifests(fs)
 	require.NoError(t, err)
 
-	var orphans []string
+	var found []string
 	for _, m := range manifests {
 		if m.ManifestContent() != iceberg.ManifestContentDeletes {
 			continue
@@ -244,11 +290,11 @@ func deleteEntriesReferencing(t *testing.T, tbl *table.Table, rewritten map[stri
 			if ref == nil {
 				continue
 			}
-			if _, ok := rewritten[*ref]; ok {
-				orphans = append(orphans, e.DataFile().FilePath()+" -> "+*ref)
+			if _, ok := refs[*ref]; ok {
+				found = append(found, e.DataFile().FilePath()+" -> "+*ref)
 			}
 		}
 	}
 
-	return orphans
+	return found
 }
