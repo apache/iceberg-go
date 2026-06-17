@@ -429,6 +429,12 @@ func getFieldIDMap(sc *avro.Schema) (map[string]int, map[int]string, map[int]int
 // encoding difference. Only day transforms are affected; other plain integer
 // partition values (including hour/month/year transforms) are left untouched.
 //
+// The Iceberg spec gives the day transform result type "date" and requires
+// readers to also accept the plain-int encoding, interpreting each integer as
+// the number of days since 1970-01-01 (see the transform table and note [1] in
+// apache/iceberg#16446). Accepting both encodings is therefore spec-mandated,
+// not merely cross-engine convention.
+//
 // Absent or malformed partition-spec metadata is ignored: the reader simply
 // falls back to the logical types declared in the Avro schema.
 func applyDayTransformDates(specJSON []byte, fieldIDToType map[int]string) {
@@ -1894,6 +1900,12 @@ func (d *dataFile) convertAvroValueToIcebergType(v any, fieldID int) any {
 				return Date(val)
 			}
 
+			// Unreachable with twmb/avro: an int+date logical type decodes
+			// to time.Time and a plain int to int32, so v is always one of
+			// the two cases above. Returning v rather than panicking keeps a
+			// future decoder change from crashing here, but callers that type
+			// assert iceberg.Date would then fail; do not add a guard that
+			// silently coerces other types, which reintroduces #1200.
 			return v
 		case atype.TimeMillis:
 			if val, ok := v.(time.Duration); ok {

@@ -117,7 +117,9 @@ func writeDayPartitionManifest(t *testing.T, partFieldNode avro.SchemaNode, dayV
 // TestDayPartitionReadsAvroIntAndDate verifies that a day-transform partition
 // value is exposed consistently as iceberg.Date regardless of whether it was
 // written as a plain Avro int or as an Avro int carrying the "date" logical
-// type. Other Iceberg implementations and engines accept both encodings, and
+// type. The Iceberg spec gives the day transform result type "date" and
+// requires readers to also accept the plain-int encoding as days since
+// 1970-01-01 (transform table and note [1] in apache/iceberg#16446), so
 // iceberg-go must not leak that Avro encoding difference to users: both must
 // surface the same iceberg.Date for a day(...) field. See apache/iceberg-go#1200.
 func TestDayPartitionReadsAvroIntAndDate(t *testing.T) {
