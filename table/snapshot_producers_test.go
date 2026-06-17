@@ -971,6 +971,31 @@ func TestSummary_InheritsPreviousSnapshotTotals(t *testing.T) {
 	require.Equal(t, "1", sum.Properties[addedDataFilesKey])
 }
 
+// TestSummary_ParentSnapshotWithoutSummary verifies that summary computation
+// does not panic when the parent snapshot exists but has no summary (V1 /
+// omitempty). Totals fall back to the zero baseline like a new table.
+func TestSummary_ParentSnapshotWithoutSummary(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	io := newMemIO(1<<20, nil)
+	txn := createTestTransaction(t, io, spec)
+
+	const parentID = int64(42)
+	txn.meta.snapshotList = append(txn.meta.snapshotList, Snapshot{
+		SnapshotID: parentID,
+		Summary:    nil,
+	})
+
+	sp := newFastAppendFilesProducer(OpAppend, txn, io, nil, nil)
+	sp.parentSnapshotID = parentID
+	sp.appendDataFile(newTestDataFile(t, spec, "file://data.parquet", nil))
+
+	sum, err := sp.summary(nil)
+	require.NoError(t, err)
+	require.Equal(t, "1", sum.Properties[totalDataFilesKey],
+		"nil parent summary must use zero baseline, not panic")
+	require.Equal(t, "1", sum.Properties[addedDataFilesKey])
+}
+
 // TestComputeOwnManifests_SnapshotByIDError verifies that when the parent
 // snapshot cannot be found an error is returned instead of silently claiming
 // all manifests as own.

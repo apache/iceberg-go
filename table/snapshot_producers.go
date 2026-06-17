@@ -816,7 +816,7 @@ func (sp *snapshotProducer) summary(props iceberg.Properties) (Summary, error) {
 	}
 
 	var previousSummary iceberg.Properties
-	if previousSnapshot != nil {
+	if previousSnapshot != nil && previousSnapshot.Summary != nil {
 		previousSummary = previousSnapshot.Summary.Properties
 	}
 
