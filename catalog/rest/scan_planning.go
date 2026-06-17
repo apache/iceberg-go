@@ -125,9 +125,10 @@ const (
 
 // PlanningError is the ErrorModel payload carried by a failed planning result.
 type PlanningError struct {
-	Message string `json:"message"`
-	Type    string `json:"type"`
-	Code    int    `json:"code"`
+	Message string   `json:"message"`
+	Type    string   `json:"type"`
+	Code    int      `json:"code"`
+	Stack   []string `json:"stack,omitempty"`
 }
 
 // ScanTasks carries the task payload shared by completed planning responses and

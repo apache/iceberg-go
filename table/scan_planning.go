@@ -35,9 +35,9 @@ import (
 //
 // This is deliberately distinct from the REST table-config key
 // `scan-planning-mode` (values `client`/`server`), which is a server directive
-// resolved separately (OQ4): a `server` table forces remote planning regardless
-// of this option, and an explicit ScanPlanningLocal against such a table is an
-// error. There is intentionally no fourth `server` value here; the directive
+// resolved separately (OQ4): a `client` table forces local planning, a `server`
+// table forces remote planning, and explicit conflicting scan options fail
+// fast. There is intentionally no fourth `server` value here; the directive
 // lives in the table config, not the user option.
 type ScanPlanningMode string
 
