@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -98,6 +99,12 @@ func (p *unboundUnaryPredicate) MarshalJSON() ([]byte, error)   { return encodeE
 func (p *unboundLiteralPredicate) MarshalJSON() ([]byte, error) { return encodeExpr(p) }
 func (p *unboundSetPredicate) MarshalJSON() ([]byte, error)     { return encodeExpr(p) }
 
+// Bound predicates delegate to the same encoder; without these, json.Marshal of
+// a bound expression would fall through to {} since their fields are unexported.
+func (p *boundUnaryPredicate[T]) MarshalJSON() ([]byte, error)   { return encodeExpr(p) }
+func (p *boundLiteralPredicate[T]) MarshalJSON() ([]byte, error) { return encodeExpr(p) }
+func (p *boundSetPredicate[T]) MarshalJSON() ([]byte, error)     { return encodeExpr(p) }
+
 // ParseExpr parses an expression from its REST JSON form (a request "filter" or
 // a task's residual filter).
 //
@@ -168,6 +175,13 @@ func encodePredicate(e BooleanExpression) (json.RawMessage, error) {
 		return nil, fmt.Errorf("%w: cannot serialize expression of type %T", ErrInvalidArgument, e)
 	}
 
+	// A bound term carries the field type, which a timestamptz literal needs to
+	// emit its +00:00 offset. Unbound terms leave it nil.
+	var typ Type
+	if bt, ok := term.(BoundTerm); ok {
+		typ = bt.Type()
+	}
+
 	node := exprNode{Type: js}
 	if node.Term, err = encodeTerm(term); err != nil {
 		return nil, err
@@ -181,7 +195,7 @@ func encodePredicate(e BooleanExpression) (json.RawMessage, error) {
 		if err != nil {
 			return nil, err
 		}
-		if node.Value, err = encodeLiteral(lit); err != nil {
+		if node.Value, err = encodeLiteral(lit, typ); err != nil {
 			return nil, err
 		}
 	case op >= OpIn && op <= OpNotIn:
@@ -191,7 +205,7 @@ func encodePredicate(e BooleanExpression) (json.RawMessage, error) {
 		}
 		node.Values = make([]json.RawMessage, 0, len(lits))
 		for _, l := range lits {
-			v, err := encodeLiteral(l)
+			v, err := encodeLiteral(l, typ)
 			if err != nil {
 				return nil, err
 			}
@@ -226,8 +240,9 @@ func encodeTerm(term Term) (json.RawMessage, error) {
 }
 
 // encodeLiteral writes a non-null literal in the JSON form for its Iceberg type
-// (see Java's SingleValueParser).
-func encodeLiteral(lit Literal) (json.RawMessage, error) {
+// (see Java's SingleValueParser). typ is the resolved field type, used to tell a
+// timestamptz literal from a plain timestamp; it may be nil for an unbound term.
+func encodeLiteral(lit Literal, typ Type) (json.RawMessage, error) {
 	switch l := lit.(type) {
 	case BoolLiteral:
 		return json.Marshal(bool(l))
@@ -236,8 +251,16 @@ func encodeLiteral(lit Literal) (json.RawMessage, error) {
 	case Int64Literal:
 		return json.Marshal(int64(l))
 	case Float32Literal:
+		if f := float64(l); math.IsInf(f, 0) || math.IsNaN(f) {
+			return nil, fmt.Errorf("%w: cannot serialize non-finite float %v", ErrInvalidArgument, f)
+		}
+
 		return json.Marshal(float32(l))
 	case Float64Literal:
+		if f := float64(l); math.IsInf(f, 0) || math.IsNaN(f) {
+			return nil, fmt.Errorf("%w: cannot serialize non-finite float %v", ErrInvalidArgument, f)
+		}
+
 		return json.Marshal(float64(l))
 	case StringLiteral:
 		return json.Marshal(string(l))
@@ -247,9 +270,20 @@ func encodeLiteral(lit Literal) (json.RawMessage, error) {
 		// "9"s trim trailing fractional zeros (and the point when zero), as Java does.
 		return json.Marshal(time.UnixMicro(int64(l)).UTC().Format("15:04:05.999999"))
 	case TimestampLiteral:
-		return json.Marshal(Timestamp(l).ToTime().Format("2006-01-02T15:04:05.999999"))
+		t := Timestamp(l).ToTime()
+		// timestamptz gets a +00:00 offset ("-07:00" prints it, "Z07:00" wouldn't).
+		if _, ok := typ.(TimestampTzType); ok {
+			return json.Marshal(t.UTC().Format("2006-01-02T15:04:05.999999-07:00"))
+		}
+
+		return json.Marshal(t.Format("2006-01-02T15:04:05.999999"))
 	case TimestampNsLiteral:
-		return json.Marshal(TimestampNano(l).ToTime().Format("2006-01-02T15:04:05.999999999"))
+		t := TimestampNano(l).ToTime()
+		if _, ok := typ.(TimestampTzNsType); ok {
+			return json.Marshal(t.UTC().Format("2006-01-02T15:04:05.999999999-07:00"))
+		}
+
+		return json.Marshal(t.Format("2006-01-02T15:04:05.999999999"))
 	case UUIDLiteral:
 		return json.Marshal(uuid.UUID(l).String())
 	case FixedLiteral:
@@ -381,6 +415,9 @@ func decodePredicate(op Operation, node exprNode, schema *Schema) (BooleanExpres
 		if len(node.Value) == 0 {
 			return nil, fmt.Errorf("%w: predicate %s is missing a value", ErrInvalidArgument, node.Type)
 		}
+		if node.Values != nil {
+			return nil, fmt.Errorf("%w: predicate %s must not have values", ErrInvalidArgument, node.Type)
+		}
 		lit, err := decodeValue(node.Value, typ)
 		if err != nil {
 			return nil, err
@@ -390,6 +427,9 @@ func decodePredicate(op Operation, node exprNode, schema *Schema) (BooleanExpres
 	case op >= OpIn && op <= OpNotIn:
 		if node.Values == nil {
 			return nil, fmt.Errorf("%w: predicate %s is missing values", ErrInvalidArgument, node.Type)
+		}
+		if len(node.Value) != 0 {
+			return nil, fmt.Errorf("%w: predicate %s must not have a value", ErrInvalidArgument, node.Type)
 		}
 		lits := make([]Literal, 0, len(node.Values))
 		for _, v := range node.Values {

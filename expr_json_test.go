@@ -19,6 +19,7 @@ package iceberg_test
 
 import (
 	"encoding/json"
+	"math"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -172,6 +173,52 @@ func TestMarshalExpressionTypedLiterals(t *testing.T) {
 	}
 }
 
+// TestMarshalExpressionTimestampTz checks that a timestamptz value serializes
+// with a +00:00 offset (Java's format), which needs the bound field type to tell
+// it apart from a plain timestamp. It also round-trips back through the schema.
+func TestMarshalExpressionTimestampTz(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.TimestampTz},
+	)
+	unbound := iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference("ts"),
+		mustLit(t, "2022-08-14T10:00:00+00:00", iceberg.PrimitiveTypes.TimestampTz))
+
+	bound, err := iceberg.BindExpr(schema, unbound, true)
+	require.NoError(t, err)
+
+	got, err := json.Marshal(bound)
+	require.NoError(t, err)
+	assert.Equal(t, `{"type":"eq","term":"ts","value":"2022-08-14T10:00:00+00:00"}`, string(got))
+
+	parsed, err := iceberg.ParseExpr(got, schema)
+	require.NoError(t, err)
+	assert.Truef(t, unbound.Equals(parsed), "want %s, got %s", unbound, parsed)
+}
+
+// TestMarshalBoundExpression guards against bound expressions falling through to
+// "{}": their MarshalJSON must delegate to the same encoder as the unbound ones.
+func TestMarshalBoundExpression(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "i", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	bound, err := iceberg.BindExpr(schema, iceberg.EqualTo(iceberg.Reference("i"), int32(25)), true)
+	require.NoError(t, err)
+
+	got, err := json.Marshal(bound)
+	require.NoError(t, err)
+	assert.Equal(t, `{"type":"eq","term":"i","value":25}`, string(got))
+}
+
+// TestMarshalExpressionNonFiniteFloat checks that NaN/Inf bounds are rejected
+// rather than producing invalid JSON.
+func TestMarshalExpressionNonFiniteFloat(t *testing.T) {
+	for _, v := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		expr := iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference("f"), iceberg.Float64Literal(v))
+		_, err := json.Marshal(expr)
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	}
+}
+
 func mustLit(t *testing.T, s string, typ iceberg.Type) iceberg.Literal {
 	t.Helper()
 	lit, err := iceberg.NewLiteral(s).To(typ)
@@ -274,6 +321,8 @@ func TestUnmarshalExpressionErrors(t *testing.T) {
 		{"literal missing value", `{"type":"eq","term":"a"}`},
 		{"in missing values", `{"type":"in","term":"a"}`},
 		{"missing term", `{"type":"eq","value":1}`},
+		{"literal with stray values", `{"type":"eq","term":"a","value":1,"values":[1,2]}`},
+		{"set with stray value", `{"type":"in","term":"a","values":[1],"value":1}`},
 	}
 
 	for _, tt := range tests {
