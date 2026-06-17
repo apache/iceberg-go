@@ -92,6 +92,8 @@ func init() {
 			}
 		}()
 
+		// Here, name is the loader-supplied catalog name and is persisted as the
+		// catalog_name partition key on every row in the iceberg_tables and iceberg_namespace_properties.
 		return NewCatalog(name, sqldb, SupportedDialect(dialect), p)
 	}))
 }
