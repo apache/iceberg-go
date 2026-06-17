@@ -448,9 +448,6 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 		return func(v any) any {
 			switch v := v.(type) {
 			case string:
-				if t.Width <= 0 {
-					return v
-				}
 				byteOff := 0
 				for cp := 0; cp < t.Width && byteOff < len(v); cp++ {
 					_, size := utf8.DecodeRuneInString(v[byteOff:])
