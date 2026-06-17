@@ -176,7 +176,7 @@ func (of *overwriteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 			path := entry.DataFile().FilePath()
 			content := entry.DataFile().ContentType()
 			_, isDeletedData := of.base.deletedFiles[path]
-			_, isDeletedDelete := of.base.deletedDeleteFiles[path]
+			isDeletedDelete := of.base.deleteFileRemoved(entry.DataFile())
 
 			isData := content == iceberg.EntryContentData
 			matched := (isDeletedData && isData) || (isDeletedDelete && !isData)
@@ -304,7 +304,7 @@ func (of *overwriteFiles) deletedEntries(ctx context.Context) ([]iceberg.Manifes
 			content := entry.DataFile().ContentType()
 
 			_, isDeletedData := of.base.deletedFiles[path]
-			_, isDeletedDelete := of.base.deletedDeleteFiles[path]
+			isDeletedDelete := of.base.deleteFileRemoved(entry.DataFile())
 
 			if (isDeletedData && content == iceberg.EntryContentData) ||
 				(isDeletedDelete && content != iceberg.EntryContentData) {
@@ -523,6 +523,7 @@ type snapshotProducer struct {
 	manifestCount      atomic.Int32
 	deletedFiles       map[string]iceberg.DataFile
 	deletedDeleteFiles map[string]iceberg.DataFile
+	deletedDVsByRef    map[string]iceberg.DataFile
 	snapshotProps      iceberg.Properties
 }
 
@@ -552,6 +553,7 @@ func createSnapshotProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO
 		addedFiles:         []iceberg.DataFile{},
 		deletedFiles:       make(map[string]iceberg.DataFile),
 		deletedDeleteFiles: make(map[string]iceberg.DataFile),
+		deletedDVsByRef:    make(map[string]iceberg.DataFile),
 		snapshotProps:      snapshotProps,
 	}
 }
@@ -586,6 +588,34 @@ func (sp *snapshotProducer) removeDeleteFile(df iceberg.DataFile) *snapshotProdu
 	sp.deletedDeleteFiles[df.FilePath()] = df
 
 	return sp
+}
+
+func (sp *snapshotProducer) removeDeletionVector(df iceberg.DataFile) *snapshotProducer {
+	sp.deletedDVsByRef[*df.ReferencedDataFile()] = df
+
+	return sp
+}
+
+// deleteFileRemoved reports whether a delete-file entry is being expunged in
+// this snapshot: position/equality deletes match by path, deletion vectors by
+// referenced data file (one Puffin holds blobs for several data files, so a
+// shared path would over-remove live siblings).
+func (sp *snapshotProducer) deleteFileRemoved(df iceberg.DataFile) bool {
+	if _, ok := sp.deletedDeleteFiles[df.FilePath()]; ok {
+		return true
+	}
+	if isDeletionVectorFile(df) {
+		_, ok := sp.deletedDVsByRef[*df.ReferencedDataFile()]
+
+		return ok
+	}
+
+	return false
+}
+
+// isDeletionVectorFile reports whether df is a Puffin deletion vector.
+func isDeletionVectorFile(df iceberg.DataFile) bool {
+	return df.FileFormat() == iceberg.PuffinFile && df.ReferencedDataFile() != nil
 }
 
 func (sp *snapshotProducer) newManifestWriter(spec iceberg.PartitionSpec, opts ...iceberg.ManifestWriterOption) (_ *iceberg.ManifestWriter, _ string, _ *internal.CountingWriter, _ io.Closer, err error) {
@@ -801,6 +831,15 @@ func (sp *snapshotProducer) summary(props iceberg.Properties) (Summary, error) {
 	if len(sp.deletedDeleteFiles) > 0 {
 		specs := sp.txn.meta.specs
 		for _, df := range sp.deletedDeleteFiles {
+			if err = ssc.removeFile(df, currentSchema, specs[df.SpecID()]); err != nil {
+				return Summary{}, err
+			}
+		}
+	}
+
+	if len(sp.deletedDVsByRef) > 0 {
+		specs := sp.txn.meta.specs
+		for _, df := range sp.deletedDVsByRef {
 			if err = ssc.removeFile(df, currentSchema, specs[df.SpecID()]); err != nil {
 				return Summary{}, err
 			}

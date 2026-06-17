@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"slices"
 
 	"github.com/apache/iceberg-go"
 )
@@ -46,6 +47,10 @@ type RewriteResult struct {
 	// The caller computes which eq-deletes are dead — typically via
 	// [compaction.CollectDeadEqualityDeletes] — and passes the list in.
 	RemovedEqualityDeleteFiles int
+
+	// RemovedDeletionVectorFiles is the count of deletion vectors removed
+	// because their referenced data file was rewritten.
+	RemovedDeletionVectorFiles int
 
 	// BytesBefore is the total size of input data files (from the compaction plan).
 	BytesBefore int64
@@ -78,7 +83,7 @@ type CompactionTaskGroup struct {
 // the position delete files safe to expunge in the rewrite snapshot.
 //
 // A distributed coordinator aggregates results from N workers and
-// applies them to a [RewriteFiles] builder via [RewriteFiles.Apply]
+// applies them to a [RewriteFiles] builder via [RewriteFiles.ApplyResult]
 // to commit a single atomic snapshot. Each field is plain data
 // ([]iceberg.DataFile values plus scalars) — callers serialize the
 // contained DataFiles across process boundaries themselves; the
@@ -101,6 +106,11 @@ type CompactionGroupResult struct {
 	// via [CollectSafePositionDeletes]. They are safe to expunge in
 	// the rewrite snapshot.
 	SafePosDeletes []iceberg.DataFile
+
+	// SafeDeletionVectors are deletion vectors attached to tasks in this
+	// group, computed via [CollectSafeDeletionVectors]. Each is bound to
+	// a data file being rewritten, so all are safe to expunge.
+	SafeDeletionVectors []iceberg.DataFile
 
 	// BytesBefore is [CompactionTaskGroup.TotalSizeBytes] passed
 	// through, recorded so the coordinator can roll up metrics
@@ -207,7 +217,7 @@ func WithCompactionScanConcurrency(n int) CompactionGroupOption {
 // convert [compaction.Group] → [CompactionTaskGroup] and pass them
 // here. Distributed coordinators stage worker results via
 // [ExecuteCompactionGroup] and commit them via [Transaction.NewRewrite]
-// + [RewriteFiles.Apply] + [RewriteFiles.Commit] instead.
+// + [RewriteFiles.ApplyResult] + [RewriteFiles.Commit] instead.
 func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (*RewriteResult, error) {
 	if len(groups) == 0 {
 		return &RewriteResult{}, nil
@@ -238,7 +248,7 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 			continue
 		}
 
-		rewrite.Apply(gr.OldDataFiles, gr.NewDataFiles, gr.SafePosDeletes)
+		rewrite.ApplyResult(gr)
 		accumulateGroupMetrics(result, gr)
 	}
 
@@ -263,7 +273,7 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 // [WriteRecords], and computes the position-delete files safe to
 // expunge in the rewrite snapshot. It does not commit — the caller
 // hands the result to a coordinator that uses [Transaction.NewRewrite]
-// + [RewriteFiles.Apply] + [RewriteFiles.Commit] to stage the
+// + [RewriteFiles.ApplyResult] + [RewriteFiles.Commit] to stage the
 // atomic commit.
 //
 // Empty groups return a zero [CompactionGroupResult] without doing
@@ -368,12 +378,13 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	}
 
 	return CompactionGroupResult{
-		PartitionKey:   group.PartitionKey,
-		OldDataFiles:   oldFiles,
-		NewDataFiles:   newFiles,
-		SafePosDeletes: CollectSafePositionDeletes(group.Tasks),
-		BytesBefore:    group.TotalSizeBytes,
-		BytesAfter:     bytesAfter,
+		PartitionKey:        group.PartitionKey,
+		OldDataFiles:        oldFiles,
+		NewDataFiles:        newFiles,
+		SafePosDeletes:      CollectSafePositionDeletes(group.Tasks),
+		SafeDeletionVectors: CollectSafeDeletionVectors(group.Tasks),
+		BytesBefore:         group.TotalSizeBytes,
+		BytesAfter:          bytesAfter,
 	}, nil
 }
 
@@ -430,7 +441,8 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 			continue
 		}
 
-		if err := t.ReplaceFiles(ctx, gr.OldDataFiles, gr.NewDataFiles, gr.SafePosDeletes,
+		deletesToRemove := append(slices.Clone(gr.SafePosDeletes), gr.SafeDeletionVectors...)
+		if err := t.ReplaceFiles(ctx, gr.OldDataFiles, gr.NewDataFiles, deletesToRemove,
 			props, withRewriteSemantics()); err != nil {
 			return result, fmt.Errorf("commit compaction group %q: %w", group.PartitionKey, err)
 		}
@@ -453,6 +465,7 @@ func accumulateGroupMetrics(r *RewriteResult, gr CompactionGroupResult) {
 	r.AddedDataFiles += len(gr.NewDataFiles)
 	r.RemovedDataFiles += len(gr.OldDataFiles)
 	r.RemovedPositionDeleteFiles += len(gr.SafePosDeletes)
+	r.RemovedDeletionVectorFiles += len(gr.SafeDeletionVectors)
 	r.BytesBefore += gr.BytesBefore
 	r.BytesAfter += gr.BytesAfter
 }
@@ -519,6 +532,28 @@ func CollectSafePositionDeletes(tasks []FileScanTask) []iceberg.DataFile {
 			}
 			seen[path] = true
 			safe = append(safe, df)
+		}
+	}
+
+	return safe
+}
+
+// CollectSafeDeletionVectors returns the deletion vectors attached to the
+// tasks. A DV is bound 1:1 to the data file it references, and that file is
+// always in the rewrite set (it is the task's own file), so every DV here is
+// safe to expunge. Deduplicated by referenced data file.
+func CollectSafeDeletionVectors(tasks []FileScanTask) []iceberg.DataFile {
+	seen := make(map[string]bool)
+	var safe []iceberg.DataFile
+
+	for _, task := range tasks {
+		for _, dv := range task.DeletionVectorFiles {
+			ref := dv.ReferencedDataFile()
+			if ref == nil || seen[*ref] {
+				continue
+			}
+			seen[*ref] = true
+			safe = append(safe, dv)
 		}
 	}
 

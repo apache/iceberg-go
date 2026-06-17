@@ -33,25 +33,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestRewriteDataFilesOrphansDeletionVectors demonstrates the open gap that the
-// downstream v3-readiness guard blocks on: compaction rewrites a data file that
-// carries a deletion vector, removes the data file, but leaves the DV manifest
-// entry behind. The DV now references a data file that no longer exists in the
-// table — an orphan.
+// TestRewriteDataFilesRemovesDeletionVectors guarantees that compacting a data
+// file carrying a deletion vector expunges that DV in the same rewrite snapshot,
+// leaving no manifest entry referencing the removed data file.
 //
-// Root cause: every delete-removal path keys by file path, but a DV manifest
-// entry is 1:1 with its referenced data file. ExecuteCompactionGroup only
-// collects pos-delete files from FileScanTask.DeleteFiles (via
-// CollectSafePositionDeletes); DVs ride in FileScanTask.DeletionVectorFiles and
-// are never collected, so the rewrite commit never removes them.
+// Background: a DV manifest entry is 1:1 with its referenced data file but rides
+// in FileScanTask.DeletionVectorFiles, separate from the pos-delete files in
+// FileScanTask.DeleteFiles. A rewrite that collected only the latter would leave
+// the DV behind, referencing a data file no longer in the table — an orphan.
 //
-// The orphan is invisible to scan planning — matchDVToData drops a DV whose
-// referenced data file is gone — so the assertion walks the raw delete
-// manifests of the post-compaction snapshot.
-//
-// This test asserts the correct post-fix behavior (no DV references a rewritten
-// data file) and therefore FAILS on current code, where the DV survives.
-func TestRewriteDataFilesOrphansDeletionVectors(t *testing.T) {
+// An orphaned DV is invisible to scan planning — matchDVToData drops a DV whose
+// referenced data file is gone — so the assertion walks the raw delete manifests
+// of the post-compaction snapshot.
+func TestRewriteDataFilesRemovesDeletionVectors(t *testing.T) {
 	ctx := context.Background()
 	mem := memory.DefaultAllocator
 	fs := iceio.LocalFS{}
@@ -133,6 +127,94 @@ func TestRewriteDataFilesOrphansDeletionVectors(t *testing.T) {
 	assert.Empty(t, orphans,
 		"compaction must remove deletion vectors for rewritten data files; "+
 			"these DV entries still reference files removed by the rewrite: %v", orphans)
+}
+
+// TestRewriteDataFilesPreservesSiblingDeletionVector pins the granularity of DV
+// removal: one Puffin file holds DV blobs for two data files (a shared path),
+// but only one of those data files is rewritten. The rewritten file's DV must
+// be expunged while the sibling DV — sharing the same Puffin path — must
+// survive. A removal keyed by path instead of referenced data file would drop
+// both and silently resurrect the sibling's deleted rows.
+func TestRewriteDataFilesPreservesSiblingDeletionVector(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.DefaultAllocator
+	fs := iceio.LocalFS{}
+
+	tbl := newV3RowLineageTestTable(t)
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	for _, rows := range []string{
+		`[{"id": 1, "data": "a"}, {"id": 2, "data": "b"}]`,
+		`[{"id": 3, "data": "c"}, {"id": 4, "data": "d"}]`,
+	} {
+		tab, err := array.TableFromJSON(mem, arrowSchema, []string{rows})
+		require.NoError(t, err)
+		tbl, err = tbl.Append(ctx, array.NewTableReader(tab, -1), nil)
+		tab.Release()
+		require.NoError(t, err)
+	}
+
+	tasks, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	rewriteTarget := tasks[0].File.FilePath()
+	sibling := tasks[1].File.FilePath()
+
+	specByID := func(id int32) *iceberg.PartitionSpec {
+		if id == 0 {
+			return iceberg.UnpartitionedSpec
+		}
+
+		return nil
+	}
+
+	// One Flush writes a single Puffin holding a DV blob for each data file,
+	// so both manifest entries share the Puffin path. Each deletes id=1 / id=3.
+	w := dv.NewDVWriter(fs, specByID)
+	w.Add(rewriteTarget, []int64{0}, 0, nil)
+	w.Add(sibling, []int64{0}, 0, nil)
+	dvFiles, err := w.Flush(ctx, filepath.Join(filepath.Dir(rewriteTarget), "dv-shared.puffin"))
+	require.NoError(t, err)
+	require.Len(t, dvFiles, 2)
+	require.Equal(t, dvFiles[0].FilePath(), dvFiles[1].FilePath(),
+		"both DV blobs must live in one shared Puffin file for this test to be meaningful")
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dvFiles...).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	assertRowCount(t, tbl, 2) // id=1 and id=3 deleted
+
+	tasks, err = tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+
+	var group table.CompactionTaskGroup
+	for _, tk := range tasks {
+		if tk.File.FilePath() == rewriteTarget {
+			group = table.CompactionTaskGroup{
+				PartitionKey:   "p",
+				Tasks:          []table.FileScanTask{tk},
+				TotalSizeBytes: tk.File.FileSizeBytes(),
+			}
+		}
+	}
+	require.NotEmpty(t, group.Tasks)
+
+	rtx := tbl.NewTransaction()
+	_, err = rtx.RewriteDataFiles(ctx, []table.CompactionTaskGroup{group}, table.RewriteDataFilesOptions{})
+	require.NoError(t, err)
+	tbl, err = rtx.Commit(ctx)
+	require.NoError(t, err)
+
+	assert.Empty(t, deleteEntriesReferencing(t, tbl, map[string]struct{}{rewriteTarget: {}}),
+		"the rewritten file's DV must be expunged")
+	assert.Len(t, deleteEntriesReferencing(t, tbl, map[string]struct{}{sibling: {}}), 1,
+		"the sibling DV in the same Puffin must survive")
+	assertRowCount(t, tbl, 2) // sibling DV still applies: id=3 stays deleted
 }
 
 // deleteEntriesReferencing walks the current snapshot's delete manifests and

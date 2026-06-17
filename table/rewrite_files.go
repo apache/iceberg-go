@@ -47,7 +47,7 @@ import (
 //     fires.
 //
 // Distributed compaction coordinators construct one [RewriteFiles] on
-// the leader transaction, feed worker outputs in via [RewriteFiles.Apply],
+// the leader transaction, feed worker outputs in via [RewriteFiles.ApplyResult],
 // and commit one snapshot. In-process callers can use
 // [Transaction.RewriteDataFiles] which drives this builder internally.
 //
@@ -152,9 +152,8 @@ func (r *RewriteFiles) AddDataFile(df iceberg.DataFile) *RewriteFiles {
 // [RewriteFiles.DeleteFile] (which routes data vs. delete files by
 // content type), and every entry in adds via [RewriteFiles.AddDataFile].
 //
-// Distributed coordinators should prefer [RewriteFiles.ApplyResult],
-// which takes a [CompactionGroupResult] directly: the three positional
-// same-typed slices here transpose silently under refactor.
+// Coordinators feeding worker outputs must use [RewriteFiles.ApplyResult]; see
+// the warning there.
 func (r *RewriteFiles) Apply(deletes, adds, safeDeletes []iceberg.DataFile) *RewriteFiles {
 	if r.err != nil {
 		return r
@@ -175,11 +174,12 @@ func (r *RewriteFiles) Apply(deletes, adds, safeDeletes []iceberg.DataFile) *Rew
 
 // ApplyResult is the typed coordinator entry point: it queues a worker's
 // [CompactionGroupResult] onto this builder by routing OldDataFiles
-// (via DeleteFile), NewDataFiles (via AddDataFile), and SafePosDeletes
-// (via DeleteFile) in one call. Prefer this over [RewriteFiles.Apply]
-// when feeding worker outputs — the field names line up with the
-// builder semantics, so a refactor of CompactionGroupResult cannot
-// silently transpose roles.
+// (via DeleteFile), NewDataFiles (via AddDataFile), SafePosDeletes and
+// SafeDeletionVectors (via DeleteFile) in one call. Use this over
+// [RewriteFiles.Apply] when feeding worker outputs — Apply cannot carry
+// SafeDeletionVectors, and the field names here line up with the builder
+// semantics so a refactor of CompactionGroupResult cannot silently
+// transpose roles.
 //
 // Typical distributed-coordinator pattern:
 //
@@ -189,7 +189,12 @@ func (r *RewriteFiles) Apply(deletes, adds, safeDeletes []iceberg.DataFile) *Rew
 //	}
 //	if err := rewrite.Commit(ctx); err != nil { ... }
 func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
-	return r.Apply(gr.OldDataFiles, gr.NewDataFiles, gr.SafePosDeletes)
+	r.Apply(gr.OldDataFiles, gr.NewDataFiles, gr.SafePosDeletes)
+	for _, dv := range gr.SafeDeletionVectors {
+		r.DeleteFile(dv)
+	}
+
+	return r
 }
 
 // Commit stages the rewrite snapshot on the underlying transaction.
