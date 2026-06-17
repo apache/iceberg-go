@@ -481,8 +481,6 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 	require.NoError(t, err)
 	geogKarney, err := iceberg.GeographyTypeOf("srid:4269", "karney")
 	require.NoError(t, err)
-
-	// Note that these tests below are based on arrow-rs tests (https://github.com/apache/arrow-rs/pull/10065)
 	geomSRID0, err := iceberg.GeometryTypeOf("srid:0")
 	require.NoError(t, err)
 	geomEPSG4267, err := iceberg.GeometryTypeOf("EPSG:4267")
@@ -501,14 +499,11 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 	require.NoError(t, err)
 	geogEPSG4267, err := iceberg.GeographyTypeOf("EPSG:4267", "spherical")
 	require.NoError(t, err)
-
 	defaultGeometry, err := iceberg.GeometryTypeOf("OGC:CRS84")
 	require.NoError(t, err)
-	geomPROJJSON3857, err := iceberg.GeometryTypeOf("EPSG:3857")
+	geomEPSG3857, err := iceberg.GeometryTypeOf("EPSG:3857")
 	require.NoError(t, err)
 	geogEPSG4267Karney, err := iceberg.GeographyTypeOf("EPSG:4267", "karney")
-	require.NoError(t, err)
-	geogPROJJSON4267, err := iceberg.GeographyTypeOf("EPSG:4267", "spherical")
 	require.NoError(t, err)
 
 	typeCases := []struct {
@@ -516,6 +511,7 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 		ice              iceberg.Type
 		geoarrowMetaJSON string
 	}{
+		// Note that these tests below are based on arrow-rs tests (https://github.com/apache/arrow-rs/pull/10065)
 		// Geometry with default CRS (defaults to OGC:CRS84 per Parquet spec)
 		{
 			name:             "geometry_default_crs",
@@ -634,7 +630,7 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 		// Geometry with PROJJSON CRS
 		{
 			name:             "geometry_projjson_epsg_3857",
-			ice:              geomPROJJSON3857,
+			ice:              geomEPSG3857,
 			geoarrowMetaJSON: `{"crs":{"id":{"authority":"EPSG","code":3857}}}`,
 		},
 		// Geometry with lon/lat CRSes (canonically removed because lon/lat is the
@@ -706,7 +702,7 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 		// Geography with PROJJSON CRS
 		{
 			name:             "geography_projjson_epsg_4267_spherical",
-			ice:              geogPROJJSON4267,
+			ice:              geogEPSG4267,
 			geoarrowMetaJSON: `{"crs":{"id":{"authority":"EPSG","code":4267}},"edges":"spherical"}`,
 		},
 	}
