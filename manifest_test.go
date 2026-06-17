@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/suite"
@@ -542,6 +543,36 @@ func (m *ManifestTestSuite) writeManifestEntries() {
 func (m *ManifestTestSuite) SetupSuite() {
 	m.writeManifestList()
 	m.writeManifestEntries()
+}
+
+func (m *ManifestTestSuite) TestWriteManifestDecimalPartitionUsesDeclaredPrecision() {
+	schema := NewSchema(
+		1,
+		NestedField{ID: 1, Name: "price", Type: DecimalTypeOf(10, 2), Required: true},
+	)
+	spec := NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "price", Transform: IdentityTransform{}},
+	)
+
+	dataFile, err := NewDataFileBuilder(
+		spec,
+		EntryContentData,
+		"s3://bucket/table/data/00001.parquet",
+		ParquetFile,
+		map[int]any{1000: Decimal{Val: decimal128.FromI64(100), Scale: 2}},
+		nil,
+		nil,
+		1,
+		1,
+	)
+	m.Require().NoError(err)
+
+	snapshotID := int64(1)
+	entry := NewManifestEntryBuilder(EntryStatusADDED, &snapshotID, dataFile.Build()).Build()
+
+	var out bytes.Buffer
+	_, err = WriteManifest("s3://bucket/table/metadata/manifest.avro", &out, 2, spec, schema, snapshotID, []ManifestEntry{entry})
+	m.Require().NoError(err)
 }
 
 func (m *ManifestTestSuite) TestManifestEntriesV1() {
