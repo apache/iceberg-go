@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
@@ -447,7 +448,16 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 		return func(v any) any {
 			switch v := v.(type) {
 			case string:
-				return v[:min(len(v), t.Width)]
+				if t.Width <= 0 {
+					return v
+				}
+				byteOff := 0
+				for cp := 0; cp < t.Width && byteOff < len(v); cp++ {
+					_, size := utf8.DecodeRuneInString(v[byteOff:])
+					byteOff += size
+				}
+
+				return v[:byteOff]
 			case []byte:
 				return v[:min(len(v), t.Width)]
 			default:

@@ -24,6 +24,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
@@ -713,6 +714,66 @@ func TestTruncateTransform(t *testing.T) {
 			result := transform.Apply(iceberg.Optional[iceberg.Literal]{Val: tt.value, Valid: true})
 			require.True(t, result.Valid)
 			assert.Equal(t, tt.expected, result.Val)
+		})
+	}
+}
+
+func TestTruncateTransformStringUnicode(t *testing.T) {
+	tests := []struct {
+		name     string
+		width    int
+		input    string
+		expected string
+	}{
+		{
+			name:     "truncate_unicode_string_width_2",
+			width:    2,
+			input:    "イロハニホヘト",
+			expected: "イロ",
+		},
+		{
+			name:     "truncate_unicode_string_width_3",
+			width:    3,
+			input:    "イロハニホヘト",
+			expected: "イロハ",
+		},
+		{
+			name:     "truncate_multibyte_string_width_1",
+			width:    1,
+			input:    "测试",
+			expected: "测",
+		},
+		{
+			name:     "truncate_mixed_unicode_and_ascii",
+			width:    4,
+			input:    "测试raul试测",
+			expected: "测试ra",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transform := iceberg.TruncateTransform{Width: tt.width}
+
+			fn, err := transform.Transformer(iceberg.PrimitiveTypes.String)
+			require.NoError(t, err)
+
+			gotAny := fn(tt.input)
+			got, ok := gotAny.(string)
+			require.True(t, ok, "Transformer must return string for StringType")
+			assert.Equal(t, tt.expected, got, "Transformer truncated value must match Java's code-point semantics")
+			assert.True(t, utf8.ValidString(got),
+				"Transformer output must be valid UTF-8; got bytes %x for input %q",
+				got, tt.input)
+
+			result := transform.Apply(iceberg.Optional[iceberg.Literal]{
+				Val: iceberg.StringLiteral(tt.input), Valid: true,
+			})
+			require.True(t, result.Valid)
+			assert.Equal(t, iceberg.StringLiteral(tt.expected), result.Val,
+				"Apply on StringLiteral must match Transformer semantics")
+			assert.True(t, utf8.ValidString(string(result.Val.(iceberg.StringLiteral))),
+				"Apply output must be valid UTF-8")
 		})
 	}
 }
