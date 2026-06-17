@@ -809,11 +809,14 @@ func (sp *snapshotProducer) summary(props iceberg.Properties) (Summary, error) {
 
 	var previousSnapshot *Snapshot
 	if sp.parentSnapshotID > 0 {
-		previousSnapshot, _ = sp.txn.meta.SnapshotByID(sp.parentSnapshotID)
+		previousSnapshot, err = sp.txn.meta.SnapshotByID(sp.parentSnapshotID)
+		if err != nil {
+			return Summary{}, fmt.Errorf("summary: lookup parent snapshot %d: %w", sp.parentSnapshotID, err)
+		}
 	}
 
 	var previousSummary iceberg.Properties
-	if previousSnapshot != nil {
+	if previousSnapshot != nil && previousSnapshot.Summary != nil {
 		previousSummary = previousSnapshot.Summary.Properties
 	}
 
