@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"maps"
 
-	"github.com/apache/iceberg-go"
+	"github.com/DataDog/iceberg-go"
 )
 
 // RewriteFiles is the snapshot-operation builder for rewrite

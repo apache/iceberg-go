@@ -29,10 +29,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apache/iceberg-go"
-	iceinternal "github.com/apache/iceberg-go/internal"
-	"github.com/apache/iceberg-go/table"
-	"github.com/apache/iceberg-go/view/internal"
+	"github.com/DataDog/iceberg-go"
+	iceinternal "github.com/DataDog/iceberg-go/internal"
+	"github.com/DataDog/iceberg-go/table"
+	"github.com/DataDog/iceberg-go/view/internal"
 
 	"github.com/google/uuid"
 )

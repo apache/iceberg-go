@@ -32,10 +32,10 @@ import (
 	arrowdecimal "github.com/apache/arrow-go/v18/arrow/decimal"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/config"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/config"
 
-	iceio "github.com/apache/iceberg-go/io"
+	iceio "github.com/DataDog/iceberg-go/io"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 )

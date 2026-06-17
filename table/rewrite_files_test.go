@@ -32,9 +32,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/apache/iceberg-go"
-	iceio "github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/table"
+	"github.com/DataDog/iceberg-go"
+	iceio "github.com/DataDog/iceberg-go/io"
+	"github.com/DataDog/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

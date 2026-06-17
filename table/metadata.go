@@ -30,8 +30,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/apache/iceberg-go"
-	iceinternal "github.com/apache/iceberg-go/internal"
+	"github.com/DataDog/iceberg-go"
+	iceinternal "github.com/DataDog/iceberg-go/internal"
 	"github.com/google/uuid"
 )
 

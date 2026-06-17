@@ -28,7 +28,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
-	"github.com/apache/iceberg-go"
+	"github.com/DataDog/iceberg-go"
 	"golang.org/x/sync/errgroup"
 )
 

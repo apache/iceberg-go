@@ -37,8 +37,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/internal/datafileavro"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/internal/datafileavro"
 )
 
 // EncodeDataFile encodes a single DataFile for cross-process transport

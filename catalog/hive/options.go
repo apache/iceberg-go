@@ -21,7 +21,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/apache/iceberg-go"
+	"github.com/DataDog/iceberg-go"
 )
 
 const (

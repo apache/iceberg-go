@@ -24,8 +24,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/apache/iceberg-go"
-	iceio "github.com/apache/iceberg-go/io"
+	"github.com/DataDog/iceberg-go"
+	iceio "github.com/DataDog/iceberg-go/io"
 	"golang.org/x/sync/semaphore"
 )
 

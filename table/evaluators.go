@@ -24,8 +24,8 @@ import (
 	"slices"
 
 	"github.com/apache/arrow-go/v18/parquet/metadata"
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/table/internal"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/table/internal"
 	"github.com/google/uuid"
 )
 

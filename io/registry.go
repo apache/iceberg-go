@@ -78,7 +78,7 @@ func init() {
 func schemeRegistrationHint(scheme string) string {
 	switch scheme {
 	case "s3", "s3a", "s3n", "gs", "abfs", "abfss", "wasb", "wasbs":
-		return `hint: import the matching IO module for side-effect registration: _ "github.com/apache/iceberg-go/io/gocloud"  // for s3/gcs/azblob`
+		return `hint: register an IO implementation for this scheme via io.Register`
 	default:
 		return ""
 	}

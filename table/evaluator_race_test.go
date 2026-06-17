@@ -14,7 +14,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/apache/iceberg-go"
+	"github.com/DataDog/iceberg-go"
 )
 
 // TestManifestEvalVisitorEvalRace fans out 256 goroutines that all call the

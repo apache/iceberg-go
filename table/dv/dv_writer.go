@@ -23,9 +23,9 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/apache/iceberg-go"
-	iceio "github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/puffin"
+	"github.com/DataDog/iceberg-go"
+	iceio "github.com/DataDog/iceberg-go/io"
+	"github.com/DataDog/iceberg-go/puffin"
 )
 
 // DVWriter accumulates deletion positions per data file and flushes them as

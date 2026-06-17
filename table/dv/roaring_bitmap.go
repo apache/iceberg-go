@@ -27,7 +27,7 @@ import (
 	"sort"
 
 	"github.com/RoaringBitmap/roaring/v2"
-	"github.com/apache/iceberg-go/puffin"
+	"github.com/DataDog/iceberg-go/puffin"
 )
 
 // maxBitmapCount is the maximum number of 32-bit bitmap keys allowed during

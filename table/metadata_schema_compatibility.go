@@ -24,7 +24,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/apache/iceberg-go"
+	"github.com/DataDog/iceberg-go"
 )
 
 type ErrIncompatibleSchema struct {

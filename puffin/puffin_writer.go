@@ -25,7 +25,7 @@ import (
 	"math"
 	"strconv"
 
-	"github.com/apache/iceberg-go"
+	"github.com/DataDog/iceberg-go"
 )
 
 // Writer writes blobs and metadata to a Puffin file.

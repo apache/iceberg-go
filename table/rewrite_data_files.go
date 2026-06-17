@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"maps"
 
-	"github.com/apache/iceberg-go"
+	"github.com/DataDog/iceberg-go"
 )
 
 // RewriteResult summarizes a completed compaction.

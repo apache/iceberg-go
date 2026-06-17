@@ -21,9 +21,9 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/codec"
-	"github.com/apache/iceberg-go/table"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/codec"
+	"github.com/DataDog/iceberg-go/table"
 	"github.com/stretchr/testify/require"
 )
 

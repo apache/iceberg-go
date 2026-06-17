@@ -26,12 +26,12 @@ import (
 	"strings"
 	_ "unsafe"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/catalog"
-	"github.com/apache/iceberg-go/catalog/internal"
-	"github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/table"
-	"github.com/apache/iceberg-go/view"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/catalog"
+	"github.com/DataDog/iceberg-go/catalog/internal"
+	"github.com/DataDog/iceberg-go/io"
+	"github.com/DataDog/iceberg-go/table"
+	"github.com/DataDog/iceberg-go/view"
 	"github.com/beltran/gohive/hive_metastore"
 )
 
@@ -778,7 +778,7 @@ func (c *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 	return props, nil
 }
 
-//go:linkname getUpdatedPropsAndUpdateSummary github.com/apache/iceberg-go/catalog.getUpdatedPropsAndUpdateSummary
+//go:linkname getUpdatedPropsAndUpdateSummary github.com/DataDog/iceberg-go/catalog.getUpdatedPropsAndUpdateSummary
 func getUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals []string, updates iceberg.Properties) (iceberg.Properties, catalog.PropertiesUpdateSummary, error)
 
 // UpdateNamespaceProperties updates the properties for a namespace.

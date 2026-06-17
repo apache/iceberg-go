@@ -18,15 +18,8 @@
 // Package io provides an interface for IO implementations along with
 // a registry for registering IO implementations for different URI schemes.
 //
-// Subpackages of this package provide implementations for cloud storage providers
-// which will register themselves if imported. For instance, adding the following
-// import:
-//
-//	import _ "github.com/apache/iceberg-go/io/gocloud"
-//
-// Will register cloud storage implementations for S3, GCS, Azure, and in-memory
-// blob storage. The local filesystem (file:// and empty scheme) is registered
-// by default.
+// The local filesystem (file:// and empty scheme) is registered by default.
+// Additional IO implementations can be registered via the Register function.
 package io
 
 import (
@@ -288,11 +281,7 @@ func (f ioFile) ReadDir(count int) ([]fs.DirEntry, error) {
 // The scheme is extracted from the location URI and used to look up
 // the appropriate factory from the registry. The local filesystem
 // (file:// or empty scheme) is registered by default.
-//
-// Additional schemes can be registered by importing subpackages.
-// For S3, GCS, Azure and in-memory support, import:
-//
-//	import _ "github.com/apache/iceberg-go/io/gocloud"
+// Additional schemes can be registered via the Register function.
 func LoadFS(ctx context.Context, props map[string]string, location string) (IO, error) {
 	if location == "" {
 		location = props["warehouse"]

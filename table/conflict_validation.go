@@ -51,8 +51,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/apache/iceberg-go"
-	iceio "github.com/apache/iceberg-go/io"
+	"github.com/DataDog/iceberg-go"
+	iceio "github.com/DataDog/iceberg-go/io"
 	"github.com/google/uuid"
 )
 

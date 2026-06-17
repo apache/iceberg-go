@@ -21,7 +21,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/apache/iceberg-go/view"
+	"github.com/DataDog/iceberg-go/view"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 )

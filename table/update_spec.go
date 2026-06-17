@@ -21,7 +21,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/apache/iceberg-go"
+	"github.com/DataDog/iceberg-go"
 )
 
 // UpdateSpec implements a builder for evolving a table's partition specification.

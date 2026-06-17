@@ -21,8 +21,8 @@ package compaction
 import (
 	"fmt"
 
-	"github.com/apache/iceberg-go/internal"
-	"github.com/apache/iceberg-go/table"
+	"github.com/DataDog/iceberg-go/internal"
+	"github.com/DataDog/iceberg-go/table"
 )
 
 // Config holds tunable thresholds for bin-pack compaction.

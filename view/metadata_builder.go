@@ -26,8 +26,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/view/internal"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/view/internal"
 
 	"github.com/google/uuid"
 )

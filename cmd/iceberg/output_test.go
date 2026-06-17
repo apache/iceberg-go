@@ -22,7 +22,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/apache/iceberg-go/table"
+	"github.com/DataDog/iceberg-go/table"
 	"github.com/pterm/pterm"
 	"github.com/stretchr/testify/assert"
 )

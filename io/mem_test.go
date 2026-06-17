@@ -23,7 +23,7 @@ import (
 	"io/fs"
 	"testing"
 
-	icebergio "github.com/apache/iceberg-go/io"
+	icebergio "github.com/DataDog/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
