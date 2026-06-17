@@ -478,6 +478,16 @@ func (s *HadoopCatalogTestSuite) TestDropNamespaceNotEmptyWithChildNamespace() {
 	s.ErrorIs(err, catalog.ErrNamespaceNotEmpty)
 }
 
+func (s *HadoopCatalogTestSuite) TestDropNameSpaceFileInsteadofDir() {
+	filePath := filepath.Join(s.warehouse, "not_a_dir")
+	s.Require().NoError(os.WriteFile(filePath, nil, 0o644))
+	err := s.cat.DropNamespace(context.Background(), []string{"not_a_dir"})
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	info, err := os.Stat(filePath)
+	s.NoError(err)
+	s.False(info.IsDir())
+}
+
 // CheckNamespaceExists tests
 
 func (s *HadoopCatalogTestSuite) TestCheckNamespaceExistsTrue() {
@@ -809,6 +819,25 @@ func (s *HadoopCatalogTestSuite) TestListTablesNestedNamespace() {
 
 	s.Len(tables, 1)
 	s.Equal(table.Identifier{"a", "b", "tbl1"}, tables[0])
+}
+
+func (s *HadoopCatalogTestSuite) TestListTablesDoesNotYieldTablesInChildNamespace() {
+	// When a namespace is passed into ListTables, only tables in that direct
+	// namespace should be yielded. Not the additionaltables in the children namespaces.
+	ctx := context.Background()
+	err := s.cat.CreateNamespace(ctx, []string{"ns"}, nil)
+	s.Require().NoError(err)
+	s.createFakeTable([]string{"ns", "tbl1"})
+	err = s.cat.CreateNamespace(ctx, []string{"ns", "child_ns"}, nil)
+	s.Require().NoError(err)
+	s.createFakeTable([]string{"ns", "child_ns", "tbl2"})
+	var tables []table.Identifier
+	for ident, err := range s.cat.ListTables(ctx, []string{"ns"}) {
+		s.Require().NoError(err)
+		tables = append(tables, ident)
+	}
+	s.Len(tables, 1)
+	s.Equal(table.Identifier{"ns", "tbl1"}, tables[0])
 }
 
 // DropTable tests
