@@ -24,6 +24,9 @@ from pyiceberg.types import FixedType, NestedField, UUIDType
 
 spark = SparkSession.builder.getOrCreate()
 
+# Spark 4 (Iceberg 1.11+) warns on a bare "default." in ALTER extensions; Spark 3.5 (Iceberg 1.8) can't plan them with an explicit catalog. Qualify only on 4+.
+alter_ns = "spark_catalog.default" if int(spark.version.split(".")[0]) >= 4 else "default"
+
 catalogs = {
     'rest': load_catalog(
         "rest",
@@ -138,7 +141,7 @@ for catalog_name, catalog in catalogs.items():
 
     # Partitioning is not really needed, but there is a bug:
     # https://github.com/apache/iceberg/pull/7685
-    spark.sql(f"ALTER TABLE spark_catalog.default.test_positional_mor_deletes ADD PARTITION FIELD years(dt) AS dt_years")
+    spark.sql(f"ALTER TABLE {alter_ns}.test_positional_mor_deletes ADD PARTITION FIELD years(dt) AS dt_years")
 
     spark.sql(
         f"""
@@ -159,9 +162,9 @@ for catalog_name, catalog in catalogs.items():
     """
     )
 
-    spark.sql(f"ALTER TABLE spark_catalog.default.test_positional_mor_deletes CREATE TAG tag_12")
+    spark.sql(f"ALTER TABLE {alter_ns}.test_positional_mor_deletes CREATE TAG tag_12")
 
-    spark.sql(f"ALTER TABLE spark_catalog.default.test_positional_mor_deletes CREATE BRANCH without_5")
+    spark.sql(f"ALTER TABLE {alter_ns}.test_positional_mor_deletes CREATE BRANCH without_5")
 
     # WAP must be enabled for spark.wap.branch to scope DML to the branch
     spark.sql(f"ALTER TABLE default.test_positional_mor_deletes SET TBLPROPERTIES ('write.wap.enabled'='true')")
@@ -189,7 +192,7 @@ for catalog_name, catalog in catalogs.items():
     """
     )
 
-    spark.sql(f"ALTER TABLE spark_catalog.default.test_positional_mor_double_deletes ADD PARTITION FIELD years(dt) AS dt_years")
+    spark.sql(f"ALTER TABLE {alter_ns}.test_positional_mor_double_deletes ADD PARTITION FIELD years(dt) AS dt_years")
 
     spark.sql(
         f"""
@@ -272,7 +275,7 @@ for catalog_name, catalog in catalogs.items():
         """
         )
 
-        spark.sql(f"ALTER TABLE spark_catalog.default.{table_name} ADD PARTITION FIELD {partition}")
+        spark.sql(f"ALTER TABLE {alter_ns}.{table_name} ADD PARTITION FIELD {partition}")
 
         spark.sql(
             f"""
