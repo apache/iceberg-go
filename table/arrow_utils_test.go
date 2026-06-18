@@ -35,6 +35,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
+	"github.com/geoarrow/geoarrow-go"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -427,6 +428,462 @@ func TestVariantArrowConversion(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, ice.Field(1).Type.Equals(iceberg.VariantType{}))
 		assert.True(t, ice.Field(2).Type.Equals(iceberg.VariantType{}))
+	})
+}
+
+func assertGeoArrowWKB(t *testing.T, dt arrow.DataType, storage arrow.DataType, want geoarrow.Metadata) {
+	t.Helper()
+
+	wkb, ok := dt.(*geoarrow.WKBType)
+	require.True(t, ok, "expected *geoarrow.WKBType, got %T", dt)
+	assert.Equal(t, "geoarrow.wkb", wkb.ExtensionName())
+	assert.True(t, arrow.TypeEqual(storage, wkb.StorageType()))
+	assert.Equal(t, want.CRS, wkb.Metadata().CRS)
+	assert.Equal(t, want.Edges, wkb.Metadata().Edges)
+}
+
+func assertGeoArrowWKBMetadataJSON(t *testing.T, dt arrow.DataType, storage arrow.DataType, wantJSON string) {
+	t.Helper()
+
+	wkb, ok := dt.(*geoarrow.WKBType)
+	require.True(t, ok, "expected *geoarrow.WKBType, got %T", dt)
+	assert.Equal(t, "geoarrow.wkb", wkb.ExtensionName())
+	assert.True(t, arrow.TypeEqual(storage, wkb.StorageType()))
+
+	var want map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(wantJSON), &want))
+
+	meta := wkb.Metadata()
+
+	if wantCRS, ok := want["crs"]; ok {
+		assert.JSONEq(t, string(wantCRS), string(meta.CRS), "crs mismatch")
+	} else {
+		assert.Empty(t, meta.CRS, "expected omitted crs")
+	}
+
+	if wantEdges, ok := want["edges"]; ok {
+		var edges string
+		require.NoError(t, json.Unmarshal(wantEdges, &edges))
+		assert.Equal(t, geoarrow.EdgeInterpolation(edges), meta.Edges, "edges mismatch")
+	} else {
+		assert.Empty(t, meta.Edges, "expected omitted edges")
+	}
+}
+
+func jsonCRS(s string) json.RawMessage {
+	raw, _ := json.Marshal(s)
+
+	return raw
+}
+
+func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
+	geomSRID, err := iceberg.GeometryTypeOf("srid:4326")
+	require.NoError(t, err)
+	geogKarney, err := iceberg.GeographyTypeOf("srid:4269", "karney")
+	require.NoError(t, err)
+	geomSRID0, err := iceberg.GeometryTypeOf("srid:0")
+	require.NoError(t, err)
+	geomEPSG4267, err := iceberg.GeometryTypeOf("EPSG:4267")
+	require.NoError(t, err)
+	geogSpherical, err := iceberg.GeographyTypeOf("OGC:CRS84", "spherical")
+	require.NoError(t, err)
+	geogKarneyDefaultCRS, err := iceberg.GeographyTypeOf("OGC:CRS84", "karney")
+	require.NoError(t, err)
+	geogVincenty, err := iceberg.GeographyTypeOf("OGC:CRS84", "vincenty")
+	require.NoError(t, err)
+	geogAndoyer, err := iceberg.GeographyTypeOf("OGC:CRS84", "andoyer")
+	require.NoError(t, err)
+	geogThomas, err := iceberg.GeographyTypeOf("OGC:CRS84", "thomas")
+	require.NoError(t, err)
+	geogSRID0, err := iceberg.GeographyTypeOf("srid:0", "spherical")
+	require.NoError(t, err)
+	geogEPSG4267, err := iceberg.GeographyTypeOf("EPSG:4267", "spherical")
+	require.NoError(t, err)
+	defaultGeometry, err := iceberg.GeometryTypeOf("OGC:CRS84")
+	require.NoError(t, err)
+	geomEPSG3857, err := iceberg.GeometryTypeOf("EPSG:3857")
+	require.NoError(t, err)
+	geogEPSG4267Karney, err := iceberg.GeographyTypeOf("EPSG:4267", "karney")
+	require.NoError(t, err)
+
+	typeCases := []struct {
+		name             string
+		ice              iceberg.Type
+		geoarrowMetaJSON string
+	}{
+		// Note that these tests below are based on arrow-rs tests (https://github.com/apache/arrow-rs/pull/10065)
+		// Geometry with default CRS (defaults to OGC:CRS84 per Parquet spec)
+		{
+			name:             "geometry_default_crs",
+			ice:              iceberg.GeometryType{},
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84"}`,
+		},
+		// Geometry with srid:0 should result in an unset (omitted) CRS
+		{
+			name:             "geometry_srid_0",
+			ice:              geomSRID0,
+			geoarrowMetaJSON: `{}`,
+		},
+		// Geometry with custom CRSes (authority:code and partial projjson)
+		{
+			name:             "geometry_epsg_4267",
+			ice:              geomEPSG4267,
+			geoarrowMetaJSON: `{"crs":"EPSG:4267"}`,
+		},
+		// Geography with default CRS (default OGC:CRS84, spherical edges)
+		{
+			name:             "geography_default_crs",
+			ice:              iceberg.GeographyType{},
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"spherical"}`,
+		},
+		// Geography with explicit edges
+		{
+			name:             "geography_explicit_spherical",
+			ice:              geogSpherical,
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"spherical"}`,
+		},
+		{
+			name:             "geography_karney",
+			ice:              geogKarneyDefaultCRS,
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"karney"}`,
+		},
+		{
+			name:             "geography_vincenty",
+			ice:              geogVincenty,
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"vincenty"}`,
+		},
+		{
+			name:             "geography_andoyer",
+			ice:              geogAndoyer,
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"andoyer"}`,
+		},
+		{
+			name:             "geography_thomas",
+			ice:              geogThomas,
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"thomas"}`,
+		},
+		// Geography with srid:0 should result in an unset (omitted) CRS and spherical edges
+		{
+			name:             "geography_srid_0",
+			ice:              geogSRID0,
+			geoarrowMetaJSON: `{"edges":"spherical"}`,
+		},
+		// Geography with custom CRSes (authority:code and partial projjson)
+		{
+			name:             "geography_epsg_4267",
+			ice:              geogEPSG4267,
+			geoarrowMetaJSON: `{"crs":"EPSG:4267","edges":"spherical"}`,
+		},
+		// Happy path SRID
+		{
+			name:             "geometry_srid_4326",
+			ice:              geomSRID,
+			geoarrowMetaJSON: `{"crs":"4326", "crs_type":"srid"}`,
+		},
+	}
+
+	// The following tests focus on edge cases and pinning specific behavior for read case
+	readOnlyCases := []struct {
+		name             string
+		ice              iceberg.Type
+		geoarrowMetaJSON string
+	}{
+		{
+			name:             "geometry_srid_0_with_crs_type",
+			ice:              geomSRID0,
+			geoarrowMetaJSON: `{"crs_type":"authority_code"}`,
+		},
+		{
+			name:             "case_insensitive_default_geometry",
+			ice:              defaultGeometry,
+			geoarrowMetaJSON: `{"crs":"OgC:cRs84"}`,
+		},
+		{
+			name:             "case_insensitive_default_geometry_epsg_4326",
+			ice:              defaultGeometry,
+			geoarrowMetaJSON: `{"crs":"EpSg:4326"}`,
+		},
+		{
+			name:             "geometry_epsg_4326",
+			ice:              defaultGeometry,
+			geoarrowMetaJSON: `{"crs":"epsg:4326"}`,
+		},
+		{
+			name:             "geometry_epsg_4326_incorrect_type",
+			ice:              defaultGeometry,
+			geoarrowMetaJSON: `{"crs":"epsg:4326", "crs_type":"projjson"}`,
+		},
+
+		// Translated from arrow-rs geo logical type read tests (https://github.com/apache/arrow-rs/pull/10065)
+		// Geometry with no CRS should be GEOMETRY(srid:0)
+		{
+			name:             "geometry_no_crs",
+			ice:              geomSRID0,
+			geoarrowMetaJSON: `{}`,
+		},
+		// Geometry with string CRS
+		{
+			name:             "geometry_epsg_4267_from_crs",
+			ice:              geomEPSG4267,
+			geoarrowMetaJSON: `{"crs":"EPSG:4267"}`,
+		},
+		// Geometry with PROJJSON CRS
+		{
+			name:             "geometry_projjson_epsg_3857",
+			ice:              geomEPSG3857,
+			geoarrowMetaJSON: `{"crs":{"id":{"authority":"EPSG","code":3857}}}`,
+		},
+		// Geometry with lon/lat CRSes (canonically removed because lon/lat is the
+		// default Iceberg CRS)
+		{
+			name:             "geometry_ogc_crs84_canonical",
+			ice:              iceberg.GeometryType{},
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84"}`,
+		},
+		{
+			name:             "geometry_epsg_4326_canonical",
+			ice:              iceberg.GeometryType{},
+			geoarrowMetaJSON: `{"crs":"EPSG:4326"}`,
+		},
+		{
+			name:             "geometry_projjson_epsg_4326_canonical",
+			ice:              iceberg.GeometryType{},
+			geoarrowMetaJSON: `{"crs":{"id":{"authority":"EPSG","code":4326}}}`,
+		},
+		{
+			name:             "geometry_projjson_epsg_4326_string_code_canonical",
+			ice:              iceberg.GeometryType{},
+			geoarrowMetaJSON: `{"crs":{"id":{"authority":"EPSG","code":"4326"}}}`,
+		},
+		{
+			name:             "geometry_projjson_ogc_crs84_canonical",
+			ice:              iceberg.GeometryType{},
+			geoarrowMetaJSON: `{"crs":{"id":{"authority":"OGC","code":"CRS84"}}}`,
+		},
+		// Geography with no CRS, spherical edges
+		{
+			name:             "geography_no_crs_spherical",
+			ice:              geogSRID0,
+			geoarrowMetaJSON: `{"edges":"spherical"}`,
+		},
+		// Geography with OGC:CRS84 and spherical edges
+		{
+			name:             "geography_ogc_crs84_spherical_canonical",
+			ice:              iceberg.GeographyType{},
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"spherical"}`,
+		},
+		// Geography with different edge algorithms
+		{
+			name:             "geography_ogc_crs84_karney",
+			ice:              geogKarneyDefaultCRS,
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"karney"}`,
+		},
+		{
+			name:             "geography_ogc_crs84_vincenty",
+			ice:              geogVincenty,
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"vincenty"}`,
+		},
+		{
+			name:             "geography_ogc_crs84_andoyer",
+			ice:              geogAndoyer,
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"andoyer"}`,
+		},
+		{
+			name:             "geography_ogc_crs84_thomas",
+			ice:              geogThomas,
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"thomas"}`,
+		},
+		// Geography with custom CRS and edges
+		{
+			name:             "geography_epsg_4267_karney",
+			ice:              geogEPSG4267Karney,
+			geoarrowMetaJSON: `{"crs":"EPSG:4267","edges":"karney"}`,
+		},
+		// Geography with PROJJSON CRS
+		{
+			name:             "geography_projjson_epsg_4267_spherical",
+			ice:              geogEPSG4267,
+			geoarrowMetaJSON: `{"crs":{"id":{"authority":"EPSG","code":4267}},"edges":"spherical"}`,
+		},
+	}
+
+	for _, tt := range typeCases {
+		t.Run("iceberg_to_arrow/"+tt.name, func(t *testing.T) {
+			result, err := table.TypeToArrowType(tt.ice, true, false)
+			require.NoError(t, err)
+			assertGeoArrowWKBMetadataJSON(t, result, arrow.BinaryTypes.Binary, tt.geoarrowMetaJSON)
+		})
+	}
+
+	for _, tt := range typeCases {
+		t.Run("iceberg_to_arrow_round_trip/"+tt.name, func(t *testing.T) {
+			arrowType, err := table.TypeToArrowType(tt.ice, true, false)
+			require.NoError(t, err)
+
+			iceType, err := table.ArrowTypeToIceberg(arrowType, false)
+			require.NoError(t, err)
+			assert.True(t, tt.ice.Equals(iceType), "expected %s, got %s", tt.ice, iceType)
+		})
+	}
+
+	for _, tt := range append(typeCases, readOnlyCases...) {
+		t.Run("arrow_to_iceberg/"+tt.name, func(t *testing.T) {
+			arrowType, err := geoarrow.NewWKBType().Deserialize(arrow.BinaryTypes.Binary, tt.geoarrowMetaJSON)
+			require.NoError(t, err)
+
+			iceType, err := table.ArrowTypeToIceberg(arrowType, false)
+			require.NoError(t, err)
+			assert.True(t, tt.ice.Equals(iceType), "expected %s, got %s", tt.ice, iceType)
+		})
+	}
+
+	t.Run("type/geometry_vs_geography_edge_differentiation", func(t *testing.T) {
+		geomResult, err := table.TypeToArrowType(iceberg.GeometryType{}, true, false)
+		require.NoError(t, err)
+		geogResult, err := table.TypeToArrowType(iceberg.GeographyType{}, true, false)
+		require.NoError(t, err)
+
+		geomWKB, ok := geomResult.(*geoarrow.WKBType)
+		require.True(t, ok)
+		geogWKB, ok := geogResult.(*geoarrow.WKBType)
+		require.True(t, ok)
+
+		assert.Equal(t, geoarrow.EdgePlanar, geomWKB.Metadata().Edges)
+		assert.Equal(t, geoarrow.EdgeSpherical, geogWKB.Metadata().Edges)
+	})
+
+	t.Run("large_binary_storage", func(t *testing.T) {
+		result, err := table.TypeToArrowType(iceberg.GeometryType{}, true, true)
+		require.NoError(t, err)
+		assertGeoArrowWKB(t, result, arrow.BinaryTypes.LargeBinary, geoarrow.Metadata{CRS: jsonCRS("OGC:CRS84")})
+	})
+
+	t.Run("epsg_4326_behavior", func(t *testing.T) {
+		geom, err := iceberg.GeometryTypeOf("EPSG:4326")
+		require.NoError(t, err)
+
+		geomResult, err := table.TypeToArrowType(geom, true, false)
+		require.NoError(t, err)
+
+		geomWKB, ok := geomResult.(*geoarrow.WKBType)
+		assert.True(t, ok)
+
+		meta := geomWKB.Metadata()
+		assert.Equal(t, meta.CRS, jsonCRS("OGC:CRS84"))
+		assert.Equal(t, meta.Edges, geoarrow.EdgePlanar)
+		assert.Equal(t, meta.CRSType, geoarrow.CRSTypeAuthorityCode)
+
+		roundTripGeom, err := table.ArrowTypeToIceberg(geomWKB, false)
+		require.NoError(t, err)
+
+		g, ok := roundTripGeom.(iceberg.GeometryType)
+		require.True(t, ok)
+
+		assert.Equal(t, g.CRS(), "OGC:CRS84")
+		assert.Equal(t, g, defaultGeometry)
+	})
+
+	t.Run("projjson_error_behavior", func(t *testing.T) {
+		geom, err := iceberg.GeometryTypeOf("projjson:my-custom-crs")
+		require.NoError(t, err)
+
+		_, err = table.TypeToArrowType(geom, true, false)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "projjson CRS not supported yet")
+
+		arrowType, err := geoarrow.NewWKBType().Deserialize(arrow.BinaryTypes.Binary,
+			`{"crs_type":"projjson","crs":{"id":{"authority":"OGC", "code":"CRS84"}}}`)
+		require.NoError(t, err)
+
+		g, err := table.ArrowTypeToIceberg(arrowType, false)
+		require.NoError(t, err)
+		assert.Equal(t, g, defaultGeometry)
+	})
+
+	t.Run("wkt2:2019_error_behavior", func(t *testing.T) {
+		arrowType, err := geoarrow.NewWKBType().Deserialize(arrow.BinaryTypes.Binary,
+			`{"crs_type":"wkt2:2019","crs":"GEOGCRS[\"WGS 84\",DATUM[\"World Geodetic System 1984\",ELLIPSOID[\"WGS 84\",6378137,298.257223563]],CS[ellipsoidal,2],AXIS[\"geodetic latitude (Lat)\",north],AXIS[\"geodetic longitude (Lon)\",east],ID[\"EPSG\",4326]]"}`)
+		require.NoError(t, err)
+
+		_, err = table.ArrowTypeToIceberg(arrowType, false)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "CRS type wkt2:2019 not supported")
+
+		arrowTypeWithoutCRSType, err := geoarrow.NewWKBType().Deserialize(arrow.BinaryTypes.Binary,
+			`{"crs":"GEOGCRS[\"WGS 84\",DATUM[\"World Geodetic System 1984\",ELLIPSOID[\"WGS 84\",6378137,298.257223563]],CS[ellipsoidal,2],AXIS[\"geodetic latitude (Lat)\",north],AXIS[\"geodetic longitude (Lon)\",east],ID[\"EPSG\",4326]]"}`)
+		require.NoError(t, err)
+
+		_, err = table.ArrowTypeToIceberg(arrowTypeWithoutCRSType, false)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "crs length too long")
+	})
+
+	t.Run("schema", func(t *testing.T) {
+		geomList, err := iceberg.GeometryTypeOf("srid:4326")
+		require.NoError(t, err)
+
+		iceSchema := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "point", Type: iceberg.GeometryType{}, Required: false},
+			iceberg.NestedField{ID: 2, Name: "loc", Type: geomSRID, Required: true},
+			iceberg.NestedField{ID: 3, Name: "area", Type: iceberg.GeographyType{}, Required: false},
+			iceberg.NestedField{ID: 4, Name: "region", Type: geogKarney, Required: false},
+			iceberg.NestedField{
+				ID:   5,
+				Name: "locations",
+				Type: &iceberg.ListType{
+					ElementID:       6,
+					Element:         geomList,
+					ElementRequired: true,
+				},
+				Required: true,
+			},
+		)
+
+		arrowSc, err := table.SchemaToArrowSchema(iceSchema, nil, true, false)
+		require.NoError(t, err)
+		require.Equal(t, 5, arrowSc.NumFields())
+
+		wantFields := []struct {
+			name     string
+			nullable bool
+			fieldID  string
+			wantMeta geoarrow.Metadata
+		}{
+			{"point", true, "1", geoarrow.Metadata{CRS: jsonCRS("OGC:CRS84")}},
+			{"loc", false, "2", geoarrow.Metadata{CRS: jsonCRS("4326"), CRSType: geoarrow.CRSTypeSRID}},
+			{"area", true, "3", geoarrow.Metadata{CRS: jsonCRS("OGC:CRS84"), Edges: geoarrow.EdgeSpherical}},
+			{"region", true, "4", geoarrow.Metadata{CRS: jsonCRS("4269"), CRSType: geoarrow.CRSTypeSRID, Edges: geoarrow.EdgeKarney}},
+		}
+
+		for i, want := range wantFields {
+			field := arrowSc.Field(i)
+			assert.Equal(t, want.name, field.Name)
+			assert.Equal(t, want.nullable, field.Nullable)
+			fieldID, ok := field.Metadata.GetValue(table.ArrowParquetFieldIDKey)
+			require.True(t, ok)
+			assert.Equal(t, want.fieldID, fieldID)
+			assertGeoArrowWKB(t, field.Type, arrow.BinaryTypes.Binary, want.wantMeta)
+		}
+
+		listField := arrowSc.Field(4)
+		assert.Equal(t, "locations", listField.Name)
+		assert.False(t, listField.Nullable)
+		listFieldID, ok := listField.Metadata.GetValue(table.ArrowParquetFieldIDKey)
+		require.True(t, ok)
+		assert.Equal(t, "5", listFieldID)
+		listType, ok := listField.Type.(*arrow.ListType)
+		require.True(t, ok, "expected list type, got %T", listField.Type)
+
+		elemField := listType.ElemField()
+		assert.Equal(t, "element", elemField.Name)
+		assert.False(t, elemField.Nullable)
+		elemFieldID, ok := elemField.Metadata.GetValue(table.ArrowParquetFieldIDKey)
+		require.True(t, ok)
+		assert.Equal(t, "6", elemFieldID)
+		assertGeoArrowWKB(t, elemField.Type, arrow.BinaryTypes.Binary, geoarrow.Metadata{
+			CRS:     jsonCRS("4326"),
+			CRSType: geoarrow.CRSTypeSRID,
+		})
 	})
 }
 
