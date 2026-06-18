@@ -73,6 +73,58 @@ func TestRewriteDataFilesRemovesDeletionVectors(t *testing.T) {
 	}
 }
 
+// TestRewriteDataFilesPreservesRowIDThroughDeletionVector guarantees that
+// applying a deletion vector during compaction does not renumber the surviving
+// rows' _row_id. The v3 spec requires _row_id = first_row_id + the row's
+// ORIGINAL position in its source file; a rewrite copies survivors and must
+// carry those ids unchanged. The regression this guards: synthesizing lineage
+// after the DV filter dropped rows yields a dense 0..N renumbering instead.
+func TestRewriteDataFilesPreservesRowIDThroughDeletionVector(t *testing.T) {
+	ctx := context.Background()
+	tbl, dvTarget := seedV3TableWithDV(t)
+
+	// Survivors after the DV deletes id=1: id=2 (_row_id 1, first file), id=3
+	// (_row_id 2) and id=4 (_row_id 3, second file).
+	before := rowIDByID(t, tbl)
+	require.Equal(t, map[int64]int64{2: 1, 3: 2, 4: 3}, before)
+
+	groups, _ := planDVCompaction(t, tbl, dvTarget)
+	rtx := tbl.NewTransaction()
+	_, err := rtx.RewriteDataFiles(ctx, groups, table.RewriteDataFilesOptions{})
+	require.NoError(t, err)
+	tbl, err = rtx.Commit(ctx)
+	require.NoError(t, err)
+
+	assert.Equal(t, before, rowIDByID(t, tbl),
+		"_row_id must be preserved for survivors when a deletion vector is applied during compaction")
+}
+
+// rowIDByID scans the table with row lineage and returns a map of id -> _row_id.
+func rowIDByID(t *testing.T, tbl *table.Table) map[int64]int64 {
+	t.Helper()
+
+	_, itr, err := tbl.Scan(table.WithRowLineage()).ToArrowRecords(context.Background())
+	require.NoError(t, err)
+
+	out := map[int64]int64{}
+	for rec, err := range itr {
+		require.NoError(t, err)
+		idIdx := rec.Schema().FieldIndices("id")
+		require.NotEmpty(t, idIdx)
+		rowIDIdx := rec.Schema().FieldIndices(iceberg.RowIDColumnName)
+		require.NotEmpty(t, rowIDIdx, "_row_id must be in the row-lineage scan projection")
+		idCol := rec.Column(idIdx[0]).(*array.Int64)
+		rowIDCol := rec.Column(rowIDIdx[0]).(*array.Int64)
+		for i := 0; i < int(rec.NumRows()); i++ {
+			require.False(t, rowIDCol.IsNull(i), "_row_id must not be null for id=%d", idCol.Value(i))
+			out[idCol.Value(i)] = rowIDCol.Value(i)
+		}
+		rec.Release()
+	}
+
+	return out
+}
+
 // TestRewriteFilesApplyResultRemovesDeletionVectors drives the distributed
 // coordinator path — a worker runs [ExecuteCompactionGroup], then a leader
 // stages the results with [Transaction.NewRewrite] + [RewriteFiles.ApplyResult]
