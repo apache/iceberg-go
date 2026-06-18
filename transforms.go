@@ -286,6 +286,8 @@ func (t BucketTransform) Apply(value Optional[Literal]) Optional[Literal] {
 		hash = hashHelperInt[int64](int64(v))
 	case TimestampLiteral:
 		hash = hashHelperInt[int64](int64(v))
+	case TimestampNsLiteral:
+		hash = hashHelperInt[int64](int64(v))
 	default:
 		return Optional[Literal]{}
 	}
@@ -312,6 +314,8 @@ func (t BucketTransform) Transformer(src Type) func(any) Optional[int32] {
 		h = hashHelperInt[Timestamp]
 	case TimestampTzType:
 		h = hashHelperInt[Timestamp]
+	case TimestampNsType, TimestampTzNsType:
+		h = hashHelperInt[TimestampNano]
 	case DecimalType:
 		h = func(v any) uint32 {
 			b, _ := DecimalLiteral(v.(Decimal)).MarshalBinary()
