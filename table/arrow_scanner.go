@@ -30,6 +30,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/apache/iceberg-go"
 	iceinternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
@@ -251,6 +252,153 @@ func sameDVBlob(a, b iceberg.DataFile) bool {
 	return *a.ContentOffset() == *b.ContentOffset()
 }
 
+func filePathValueType(dt arrow.DataType) arrow.DataType {
+	if dictType, ok := dt.(*arrow.DictionaryType); ok {
+		return dictType.ValueType
+	}
+
+	return dt
+}
+
+func filePathValues(values arrow.Array) (arrow.TypedArray[string], error) {
+	switch arr := values.(type) {
+	case *array.Dictionary:
+		wrapped, err := array.NewDictWrapper[string](arr)
+		if err != nil {
+			return nil, fmt.Errorf("%w: file_path column is not string: %w",
+				iceberg.ErrInvalidSchema, err)
+		}
+
+		return wrapped, nil
+	case arrow.TypedArray[string]:
+		return arr, nil
+	default:
+		return nil, fmt.Errorf("%w: unsupported file_path column type %s in position delete file",
+			iceberg.ErrInvalidSchema, values.DataType())
+	}
+}
+
+func validateFilePathValues(values arrow.TypedArray[string], arr arrow.Array) error {
+	var dict arrow.Array
+	var indices *array.Dictionary
+	if dictionary, ok := arr.(*array.Dictionary); ok {
+		indices = dictionary
+		dict = dictionary.Dictionary()
+	}
+
+	for i := 0; i < values.Len(); i++ {
+		if values.IsNull(i) {
+			return fmt.Errorf("%w: null file_path in position delete file",
+				iceberg.ErrInvalidSchema)
+		}
+		if dict != nil && dict.IsNull(indices.GetValueIndex(i)) {
+			return fmt.Errorf("%w: null file_path dictionary value in position delete file",
+				iceberg.ErrInvalidSchema)
+		}
+	}
+
+	return nil
+}
+
+func distinctPosDeleteFilePaths(ctx context.Context, filePathCol *arrow.Chunked) (arrow.Array, error) {
+	if filePathCol.NullN() > 0 {
+		return nil, fmt.Errorf("%w: null file_path in position delete file", iceberg.ErrInvalidSchema)
+	}
+	if filePathValueType(filePathCol.DataType()).ID() == arrow.STRING_VIEW {
+		return nil, fmt.Errorf("%w: unsupported file_path column type %s in position delete file",
+			iceberg.ErrInvalidSchema, filePathCol.DataType())
+	}
+
+	filePaths := compute.NewDatum(filePathCol)
+	unique, err := compute.Unique(ctx, filePaths)
+	filePaths.Release()
+	if err != nil {
+		return nil, err
+	}
+
+	result, ok := unique.(*compute.ArrayDatum)
+	if !ok {
+		unique.Release()
+
+		return nil, fmt.Errorf("%w: unique file_path result is %s",
+			iceberg.ErrInvalidSchema, unique.Kind())
+	}
+
+	arr := result.MakeArray()
+	unique.Release()
+
+	return arr, nil
+}
+
+func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.Chunked) (map[string]*arrow.Chunked, error) {
+	uniquePaths, err := distinctPosDeleteFilePaths(ctx, filePathCol)
+	if err != nil {
+		return nil, err
+	}
+	defer uniquePaths.Release()
+
+	paths, err := filePathValues(uniquePaths)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateFilePathValues(paths, uniquePaths); err != nil {
+		return nil, err
+	}
+
+	results := make(map[string]*arrow.Chunked, uniquePaths.Len())
+	for i := 0; i < uniquePaths.Len(); i++ {
+		sc, err := scalar.GetScalar(uniquePaths, i)
+		if err != nil {
+			releasePosDeletes(results)
+
+			return nil, err
+		}
+		scDatum := compute.NewDatum(sc)
+		if releasable, ok := sc.(scalar.Releasable); ok {
+			releasable.Release()
+		}
+		mask, err := compute.CallFunction(ctx, "equal", nil,
+			compute.NewDatumWithoutOwning(filePathCol), scDatum)
+		scDatum.Release()
+		if err != nil {
+			releasePosDeletes(results)
+
+			return nil, err
+		}
+
+		filtered, err := compute.Filter(ctx, compute.NewDatumWithoutOwning(posCol),
+			mask, *compute.DefaultFilterOptions())
+		mask.Release()
+		if err != nil {
+			releasePosDeletes(results)
+
+			return nil, err
+		}
+
+		filteredChunked, ok := filtered.(*compute.ChunkedDatum)
+		if !ok {
+			filtered.Release()
+			releasePosDeletes(results)
+
+			return nil, fmt.Errorf("%w: filtered position delete result is %s",
+				iceberg.ErrInvalidSchema, filtered.Kind())
+		}
+		filteredChunked.Value.Retain()
+		results[paths.Value(i)] = filteredChunked.Value
+		filtered.Release()
+	}
+
+	return results, nil
+}
+
+func releasePosDeletes(deletes map[string]*arrow.Chunked) {
+	for _, chunk := range deletes {
+		if chunk != nil {
+			chunk.Release()
+		}
+	}
+}
+
 func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_ map[string]*arrow.Chunked, err error) {
 	src, err := internal.GetFile(ctx, fs, dataFile, true)
 	if err != nil {
@@ -277,29 +425,8 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_
 
 	filePathCol := tbl.Column(tbl.Schema().FieldIndices("file_path")[0]).Data()
 	posCol := tbl.Column(tbl.Schema().FieldIndices("pos")[0]).Data()
-	dict := filePathCol.Chunk(0).(*array.Dictionary).Dictionary().(*array.String)
 
-	results := make(map[string]*arrow.Chunked)
-	for i := 0; i < dict.Len(); i++ {
-		v := dict.Value(i)
-
-		mask, err := compute.CallFunction(ctx, "equal", nil,
-			compute.NewDatumWithoutOwning(filePathCol), compute.NewDatum(v))
-		if err != nil {
-			return nil, err
-		}
-		defer mask.Release()
-
-		filtered, err := compute.Filter(ctx, compute.NewDatumWithoutOwning(posCol),
-			mask, *compute.DefaultFilterOptions())
-		if err != nil {
-			return nil, err
-		}
-
-		results[v] = filtered.(*compute.ChunkedDatum).Value
-	}
-
-	return results, nil
+	return groupPosDeletesByFilePath(ctx, filePathCol, posCol)
 }
 
 type set[T comparable] map[T]struct{}
