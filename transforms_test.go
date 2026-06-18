@@ -152,6 +152,106 @@ func TestToHumanString(t *testing.T) {
 	}
 }
 
+func TestIdentityToHumanStrType_TimestampTz(t *testing.T) {
+	id := iceberg.IdentityTransform{}
+
+	tzMicros := iceberg.Timestamp(1512151975038194)
+	noTzMicros := iceberg.Timestamp(1512123175038194)
+	tzNanos := iceberg.TimestampNano(-1510871468000001001)
+	noTzNanos := iceberg.TimestampNano(1512151975038194001)
+
+	tests := []struct {
+		name     string
+		typ      iceberg.Type
+		val      any
+		expected string
+	}{
+		{
+			name:     "TimestampType formats without UTC offset",
+			typ:      iceberg.PrimitiveTypes.Timestamp,
+			val:      noTzMicros,
+			expected: "2017-12-01T10:12:55.038194",
+		},
+		{
+			name:     "TimestampTzType formats with +00:00 offset",
+			typ:      iceberg.PrimitiveTypes.TimestampTz,
+			val:      tzMicros,
+			expected: "2017-12-01T18:12:55.038194+00:00",
+		},
+		{
+			name:     "TimestampNsType formats nanoseconds without UTC offset",
+			typ:      iceberg.PrimitiveTypes.TimestampNs,
+			val:      noTzNanos,
+			expected: "2017-12-01T18:12:55.038194001",
+		},
+		{
+			name:     "TimestampTzNsType formats nanoseconds with +00:00 offset",
+			typ:      iceberg.PrimitiveTypes.TimestampTzNs,
+			val:      tzNanos,
+			expected: "1922-02-15T01:28:51.999998999+00:00",
+		},
+		{
+			name:     "nil value returns null",
+			typ:      iceberg.PrimitiveTypes.TimestampTz,
+			val:      nil,
+			expected: "null",
+		},
+		{
+			name:     "non-timestamp types fall back to ToHumanStr",
+			typ:      iceberg.PrimitiveTypes.Date,
+			val:      iceberg.Date(17501),
+			expected: "2017-12-01",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, id.ToHumanStrType(tt.typ, tt.val))
+		})
+	}
+}
+
+func TestPartitionToPath_TimestampTzIdentity(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "created_ts_tz", Type: iceberg.PrimitiveTypes.TimestampTz, Required: true},
+		iceberg.NestedField{ID: 2, Name: "created_ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
+		iceberg.NestedField{ID: 3, Name: "created_ts_tz_ns", Type: iceberg.PrimitiveTypes.TimestampTzNs, Required: true},
+		iceberg.NestedField{ID: 4, Name: "created_ts_ns", Type: iceberg.PrimitiveTypes.TimestampNs, Required: true},
+	)
+
+	spec := iceberg.NewPartitionSpecID(3,
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000,
+			Transform: iceberg.IdentityTransform{}, Name: "created_ts_tz",
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{2}, FieldID: 1001,
+			Transform: iceberg.IdentityTransform{}, Name: "created_ts",
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{3}, FieldID: 1002,
+			Transform: iceberg.IdentityTransform{}, Name: "created_ts_tz_ns",
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{4}, FieldID: 1003,
+			Transform: iceberg.IdentityTransform{}, Name: "created_ts_ns",
+		},
+	)
+
+	tsMicros := iceberg.Timestamp(1705314600000000)
+	tsNanos := iceberg.TimestampNano(1705314600000000001)
+	record := partitionRecord{tsMicros, tsMicros, tsNanos, tsNanos}
+
+	expected := strings.Join([]string{
+		"created_ts_tz=2024-01-15T10%3A30%3A00%2B00%3A00",
+		"created_ts=2024-01-15T10%3A30%3A00",
+		"created_ts_tz_ns=2024-01-15T10%3A30%3A00.000000001%2B00%3A00",
+		"created_ts_ns=2024-01-15T10%3A30%3A00.000000001",
+	}, "/")
+
+	assert.Equal(t, expected, spec.PartitionToPath(record, schema))
+}
+
 func TestManifestPartitionVals(t *testing.T) {
 	// Sanity checks that the source and result types of the transform are
 	// compatible with their use to generate partition data in manifests.

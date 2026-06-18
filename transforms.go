@@ -103,6 +103,10 @@ type Transform interface {
 	ToHumanStr(any) string
 }
 
+type typedHumanStringer interface {
+	ToHumanStrType(typ Type, val any) string
+}
+
 // IdentityTransform uses the identity function, performing no transformation
 // but instead partitioning on the value itself.
 type IdentityTransform struct{}
@@ -151,9 +155,37 @@ func (IdentityTransform) ToHumanStr(val any) string {
 		return v.ToTime().Format("15:04:05.999999")
 	case Timestamp:
 		return v.ToTime().Format("2006-01-02T15:04:05.999999")
+	case TimestampNano:
+		return v.ToTime().Format("2006-01-02T15:04:05.999999999")
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+func (t IdentityTransform) ToHumanStrType(typ Type, val any) string {
+	if val == nil {
+		return "null"
+	}
+	switch typ.(type) {
+	case TimestampType:
+		if v, ok := val.(Timestamp); ok {
+			return v.ToTime().Format("2006-01-02T15:04:05.999999")
+		}
+	case TimestampTzType:
+		if v, ok := val.(Timestamp); ok {
+			return v.ToTime().Format("2006-01-02T15:04:05.999999") + "+00:00"
+		}
+	case TimestampNsType:
+		if v, ok := val.(TimestampNano); ok {
+			return v.ToTime().Format("2006-01-02T15:04:05.999999999")
+		}
+	case TimestampTzNsType:
+		if v, ok := val.(TimestampNano); ok {
+			return v.ToTime().Format("2006-01-02T15:04:05.999999999") + "+00:00"
+		}
+	}
+
+	return t.ToHumanStr(val)
 }
 
 func (t IdentityTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
