@@ -1046,6 +1046,55 @@ func (p *ProjectionTestSuite) TestStringTruncateProjection() {
 		{iceberg.NotEqualTo(ref, "aaa"), iceberg.AlwaysTrue{}},
 		{iceberg.IsIn(ref, "aaa", "aab"), iceberg.EqualTo(truncStr, "aa")},
 		{iceberg.NotIn(ref, "aaa", "aab"), iceberg.AlwaysTrue{}},
+		{iceberg.NotStartsWith(ref, "a"), iceberg.NotStartsWith(truncStr, "a")},
+		{iceberg.NotStartsWith(ref, "aa"), iceberg.NotEqualTo(truncStr, "aa")},
+		{iceberg.NotStartsWith(ref, "aaa"), iceberg.AlwaysTrue{}},
+	}
+
+	project := newInclusiveProjection(schema, spec, true)
+	for _, tt := range tests {
+		p.Run(tt.pred.String(), func() {
+			expr, err := project(tt.pred)
+			p.Require().NoError(err)
+			p.Truef(tt.expected.Equals(expr), "expected: %s\ngot: %s", tt.expected, expr)
+		})
+	}
+}
+
+func (p *ProjectionTestSuite) TestBinaryTruncateProjection() {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "data", Type: iceberg.PrimitiveTypes.Binary},
+	)
+	spec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000,
+			Transform: iceberg.TruncateTransform{Width: 2}, Name: "data_trunc",
+		},
+	)
+
+	ref, truncBin := iceberg.Reference("data"), iceberg.Reference("data_trunc")
+	notStartsWith := func(t iceberg.UnboundTerm, v string) iceberg.BooleanExpression {
+		return iceberg.LiteralPredicate(iceberg.OpNotStartsWith, t, iceberg.NewLiteral([]byte(v)))
+	}
+	tests := []struct {
+		pred, expected iceberg.BooleanExpression
+	}{
+		{iceberg.NotNull(ref), iceberg.NotNull(truncBin)},
+		{iceberg.IsNull(ref), iceberg.IsNull(truncBin)},
+		{iceberg.LessThan(ref, []byte("aaa")), iceberg.LessThanEqual(truncBin, []byte("aa"))},
+		{iceberg.LessThanEqual(ref, []byte("aaa")), iceberg.LessThanEqual(truncBin, []byte("aa"))},
+		{iceberg.GreaterThan(ref, []byte("aaa")), iceberg.GreaterThanEqual(truncBin, []byte("aa"))},
+		{iceberg.GreaterThanEqual(ref, []byte("aaa")), iceberg.GreaterThanEqual(truncBin, []byte("aa"))},
+		{iceberg.EqualTo(ref, []byte("aaa")), iceberg.EqualTo(truncBin, []byte("aa"))},
+		{iceberg.NotEqualTo(ref, []byte("aaa")), iceberg.AlwaysTrue{}},
+		{iceberg.IsIn(ref, []byte("aaa"), []byte("aab")), iceberg.EqualTo(truncBin, []byte("aa"))},
+		{iceberg.NotIn(ref, []byte("aaa"), []byte("aab")), iceberg.AlwaysTrue{}},
+		// prefix shorter than width: keep NOT STARTS WITH on the truncated field.
+		{notStartsWith(ref, "a"), notStartsWith(truncBin, "a")},
+		// prefix exactly the width: equivalent to != on the partition value.
+		{notStartsWith(ref, "aa"), iceberg.NotEqualTo(truncBin, []byte("aa"))},
+		// prefix longer than width: not projectable, must not prune.
+		{notStartsWith(ref, "aaa"), iceberg.AlwaysTrue{}},
 	}
 
 	project := newInclusiveProjection(schema, spec, true)

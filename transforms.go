@@ -555,6 +555,24 @@ func (t TruncateTransform) Project(name string, pred BoundPredicate) (UnboundPre
 			return setApplyTransform(name, p, wrapTransformFn[[]byte](transformer)), nil
 		}
 	case BoundLiteralPredicate:
+		// notStartsWith is only projectable when the prefix fits within the
+		// truncation width. If the prefix is longer, the truncated partition
+		// value may itself satisfy the predicate, so projecting the truncated
+		// prefix would incorrectly prune matching files.
+		if p.Op() == OpNotStartsWith {
+			l := literalLen(p.Literal())
+			switch {
+			case l < 0:
+				return nil, nil
+			case l < t.Width:
+				return LiteralPredicate(OpNotStartsWith, Reference(name), p.Literal()), nil
+			case l == t.Width:
+				return LiteralPredicate(OpNEQ, Reference(name), p.Literal()), nil
+			}
+
+			return nil, nil
+		}
+
 		switch fieldType.(type) {
 		case Int32Type:
 			return truncateNumber(name, p, wrapTransformFn[int32](transformer))
@@ -1110,12 +1128,22 @@ func truncateArray[T LiteralType](name string, pred BoundLiteralPredicate, fn fu
 	case OpStartsWith:
 		return LiteralPredicate(OpStartsWith, Reference(name),
 			transformLiteral(fn, boundary)), nil
-	case OpNotStartsWith:
-		return LiteralPredicate(OpNotStartsWith, Reference(name),
-			transformLiteral(fn, boundary)), nil
 	}
 
 	return nil, nil
+}
+
+func literalLen(lit Literal) int {
+	switch l := lit.(type) {
+	case StringLiteral:
+		return len(l)
+	case BinaryLiteral:
+		return len(l)
+	case FixedLiteral:
+		return len(l)
+	}
+
+	return -1
 }
 
 func setApplyTransform[T LiteralType](name string, pred BoundSetPredicate, fn func(any) Optional[T]) UnboundPredicate {
