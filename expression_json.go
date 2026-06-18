@@ -22,8 +22,14 @@
 // The codec lives in the root iceberg package because expression internals
 // are defined here and are not exported. Compatibility with Java's
 // ExpressionParser is correctness-critical and every encoding must be
-// confirmed against checked-in Java golden fixtures (e.g. AlwaysTrue/False
-// serialize as the bare JSON booleans `true`/`false`, not objects).
+// confirmed against checked-in Java golden fixtures.
+//
+// Design decision: MarshalExpressionJSON emits Java ExpressionParser wire
+// format, including bare JSON booleans for AlwaysTrue/AlwaysFalse (`true` and
+// `false`). That intentionally differs from the REST OpenAPI Expression schema,
+// where true/false are represented as objects (`{"type":"true"}` and
+// `{"type":"false"}`). UnmarshalExpressionJSON must accept both forms so
+// clients can read Java-compatible responses and strictly spec-shaped payloads.
 
 package iceberg
 

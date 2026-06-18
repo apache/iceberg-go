@@ -50,13 +50,13 @@ var ErrPlanExpired = fmt.Errorf("%w: scan plan expired", ErrRESTError)
 
 // SupportsPlanTableScan reports whether the server advertised the synchronous
 // plan endpoint.
-func (c *Catalog) SupportsPlanTableScan() bool {
+func (r *Catalog) SupportsPlanTableScan() bool {
 	panic("unimplemented: proposed API for #1178")
 }
 
 // SupportsFullRemoteScanPlanning reports whether the server advertised all four
 // scan-planning endpoints (plan, fetch-result, cancel, fetch-tasks).
-func (c *Catalog) SupportsFullRemoteScanPlanning() bool {
+func (r *Catalog) SupportsFullRemoteScanPlanning() bool {
 	panic("unimplemented: proposed API for #1178")
 }
 
@@ -64,13 +64,13 @@ func (c *Catalog) SupportsFullRemoteScanPlanning() bool {
 
 // SupportsRemoteScanPlanning reports whether this catalog can complete a remote
 // plan end-to-end; backed by the split capability checks above.
-func (c *Catalog) SupportsRemoteScanPlanning() bool {
+func (r *Catalog) SupportsRemoteScanPlanning() bool {
 	panic("unimplemented: proposed API for #1178")
 }
 
 // PlanFiles plans a scan server-side and returns tasks (and, optionally, a
 // plan-scoped FileIO) for the table to read.
-func (c *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) (table.ScanPlanningResult, error) {
+func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) (table.ScanPlanningResult, error) {
 	panic("unimplemented: proposed API for #1178")
 }
 
@@ -78,24 +78,24 @@ func (c *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) 
 
 // PlanTableScan submits a scan plan. The result is either completed inline,
 // submitted (returns a plan-id to poll), or failed.
-func (c *Catalog) PlanTableScan(ctx context.Context, ident table.Identifier, req PlanTableScanRequest) (PlanTableScanResponse, error) {
+func (r *Catalog) PlanTableScan(ctx context.Context, ident table.Identifier, req PlanTableScanRequest) (PlanTableScanResponse, error) {
 	panic("unimplemented: proposed API for #1178")
 }
 
 // FetchPlanningResult polls a previously submitted plan.
-func (c *Catalog) FetchPlanningResult(ctx context.Context, ident table.Identifier, planID string) (FetchPlanningResultResponse, error) {
+func (r *Catalog) FetchPlanningResult(ctx context.Context, ident table.Identifier, planID string) (FetchPlanningResultResponse, error) {
 	panic("unimplemented: proposed API for #1178")
 }
 
 // CancelPlanning cancels a server-side plan. Callers should cancel on context
 // cancellation using a detached context with a short timeout.
-func (c *Catalog) CancelPlanning(ctx context.Context, ident table.Identifier, planID string) error {
+func (r *Catalog) CancelPlanning(ctx context.Context, ident table.Identifier, planID string) error {
 	panic("unimplemented: proposed API for #1178")
 }
 
 // FetchScanTasks fetches the scan tasks for a plan-task handle returned by a
 // completed plan.
-func (c *Catalog) FetchScanTasks(ctx context.Context, ident table.Identifier, req FetchScanTasksRequest) (FetchScanTasksResponse, error) {
+func (r *Catalog) FetchScanTasks(ctx context.Context, ident table.Identifier, req FetchScanTasksRequest) (FetchScanTasksResponse, error) {
 	panic("unimplemented: proposed API for #1178")
 }
 
@@ -103,7 +103,7 @@ func (c *Catalog) FetchScanTasks(ctx context.Context, ident table.Identifier, re
 // cancelling the server-side plan if the context is cancelled. It returns an
 // error if the plan is still submitted after the wait, cancelled, failed, or
 // expired.
-func (c *Catalog) WaitForPlan(ctx context.Context, ident table.Identifier, planID string, opts WaitForPlanOptions) (CompletedPlanningResult, error) {
+func (r *Catalog) WaitForPlan(ctx context.Context, ident table.Identifier, planID string, opts WaitForPlanOptions) (CompletedPlanningResult, error) {
 	panic("unimplemented: proposed API for #1178")
 }
 
@@ -119,6 +119,9 @@ type PlanStatus string
 const (
 	PlanStatusCompleted PlanStatus = "completed"
 	PlanStatusSubmitted PlanStatus = "submitted"
+	// PlanStatusCancelled is valid when polling a submitted plan, but invalid
+	// as a planTableScan response. PlanTableScan and WaitForPlan should treat a
+	// cancelled initial planning response as an error.
 	PlanStatusCancelled PlanStatus = "cancelled"
 	PlanStatusFailed    PlanStatus = "failed"
 )
@@ -141,8 +144,8 @@ type ScanTasks struct {
 }
 
 // CompletedPlanningResult is the completed arm of the planning-result union.
-// PlanID is populated only by the initial planTableScan response's
-// CompletedPlanningWithIDResult arm.
+// PlanID is required by the initial planTableScan response's
+// CompletedPlanningWithIDResult arm and omitted by fetchPlanningResult.
 type CompletedPlanningResult struct {
 	Status PlanStatus `json:"status"`
 	PlanID *string    `json:"plan-id,omitempty"`
@@ -167,10 +170,13 @@ type PlanTableScanRequest struct {
 // PlanTableScanResponse is the POST .../plan response. The spec models this as
 // a `status`-discriminated union; the flat struct carries every arm's fields
 // with omitempty so none are discarded. Task/delete RawMessage payloads are
-// decoded by the scan-task decoder PR.
+// decoded by the scan-task decoder PR. PlanID is required for submitted and
+// completed responses from planTableScan; implementations must reject a missing
+// PlanID for either status. A cancelled status is invalid here and must be
+// treated as an error.
 type PlanTableScanResponse struct {
 	Status PlanStatus     `json:"status"`
-	PlanID *string        `json:"plan-id,omitempty"` // status=submitted, or completed from planTableScan
+	PlanID *string        `json:"plan-id,omitempty"`
 	Error  *PlanningError `json:"error,omitempty"`
 	ScanTasks
 	StorageCredentials []StorageCredential `json:"storage-credentials,omitempty"`
