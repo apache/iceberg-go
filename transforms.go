@@ -103,6 +103,8 @@ type Transform interface {
 	ToHumanStr(any) string
 }
 
+// typedHumanStringer is an opt-in extension for transforms whose
+// human-string form depends on the source Iceberg Type
 type typedHumanStringer interface {
 	ToHumanStrType(typ Type, val any) string
 }
@@ -162,6 +164,8 @@ func (IdentityTransform) ToHumanStr(val any) string {
 	}
 }
 
+// ToHumanStrType is the type-aware form invoked by PartitionToPath.
+// It appends "+00:00" for TimestampTz/TimestampTzNs — information the value-only ToHumanStr(any) cannot recover by design
 func (t IdentityTransform) ToHumanStrType(typ Type, val any) string {
 	if val == nil {
 		return "null"

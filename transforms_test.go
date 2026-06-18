@@ -139,6 +139,7 @@ func TestToHumanString(t *testing.T) {
 		{iceberg.IdentityTransform{}, iceberg.Date(17501), "2017-12-01"},
 		{iceberg.IdentityTransform{}, iceberg.Time(36775038194), "10:12:55.038194"},
 		{iceberg.IdentityTransform{}, iceberg.Timestamp(1512151975038194), "2017-12-01T18:12:55.038194"},
+		{iceberg.IdentityTransform{}, iceberg.TimestampNano(1512151975038194001), "2017-12-01T18:12:55.038194001"},
 		{iceberg.IdentityTransform{}, int64(-1234567890000), "-1234567890000"},
 		{iceberg.IdentityTransform{}, "a/b/c=d", "a/b/c=d"},
 		{iceberg.IdentityTransform{}, []byte("foo"), "Zm9v"},
