@@ -139,6 +139,7 @@ func TestToHumanString(t *testing.T) {
 		{iceberg.IdentityTransform{}, iceberg.Date(17501), "2017-12-01"},
 		{iceberg.IdentityTransform{}, iceberg.Time(36775038194), "10:12:55.038194"},
 		{iceberg.IdentityTransform{}, iceberg.Timestamp(1512151975038194), "2017-12-01T18:12:55.038194"},
+		{iceberg.IdentityTransform{}, iceberg.TimestampNano(1512151975038194001), "2017-12-01T18:12:55.038194001"},
 		{iceberg.IdentityTransform{}, int64(-1234567890000), "-1234567890000"},
 		{iceberg.IdentityTransform{}, "a/b/c=d", "a/b/c=d"},
 		{iceberg.IdentityTransform{}, []byte("foo"), "Zm9v"},
@@ -150,6 +151,47 @@ func TestToHumanString(t *testing.T) {
 			assert.Equal(t, tt.expected, tt.transform.ToHumanStr(tt.input))
 		})
 	}
+}
+
+func TestPartitionToPath_TimestampTzIdentity(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "created_ts_tz", Type: iceberg.PrimitiveTypes.TimestampTz, Required: true},
+		iceberg.NestedField{ID: 2, Name: "created_ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
+		iceberg.NestedField{ID: 3, Name: "created_ts_tz_ns", Type: iceberg.PrimitiveTypes.TimestampTzNs, Required: true},
+		iceberg.NestedField{ID: 4, Name: "created_ts_ns", Type: iceberg.PrimitiveTypes.TimestampNs, Required: true},
+	)
+
+	spec := iceberg.NewPartitionSpecID(3,
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000,
+			Transform: iceberg.IdentityTransform{}, Name: "created_ts_tz",
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{2}, FieldID: 1001,
+			Transform: iceberg.IdentityTransform{}, Name: "created_ts",
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{3}, FieldID: 1002,
+			Transform: iceberg.IdentityTransform{}, Name: "created_ts_tz_ns",
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{4}, FieldID: 1003,
+			Transform: iceberg.IdentityTransform{}, Name: "created_ts_ns",
+		},
+	)
+
+	tsMicros := iceberg.Timestamp(1705314600000000)
+	tsNanos := iceberg.TimestampNano(1705314600000000001)
+	record := partitionRecord{tsMicros, tsMicros, tsNanos, tsNanos}
+
+	expected := strings.Join([]string{
+		"created_ts_tz=2024-01-15T10%3A30%3A00%2B00%3A00",
+		"created_ts=2024-01-15T10%3A30%3A00",
+		"created_ts_tz_ns=2024-01-15T10%3A30%3A00.000000001%2B00%3A00",
+		"created_ts_ns=2024-01-15T10%3A30%3A00.000000001",
+	}, "/")
+
+	assert.Equal(t, expected, spec.PartitionToPath(record, schema))
 }
 
 func TestManifestPartitionVals(t *testing.T) {
