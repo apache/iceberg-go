@@ -416,7 +416,6 @@ func (r *RollingDataWriter) sendError(err error) {
 }
 
 func (r *RollingDataWriter) close() {
-	r.cancel()
 	close(r.recordCh)
 }
 
@@ -428,6 +427,8 @@ func (r *RollingDataWriter) closeAndWait() error {
 	if err := <-r.errorCh; err != nil {
 		return fmt.Errorf("error in rolling data writer: %w", err)
 	}
+
+	r.cancel()
 
 	return nil
 }
