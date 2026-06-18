@@ -138,7 +138,7 @@ for catalog_name, catalog in catalogs.items():
 
     # Partitioning is not really needed, but there is a bug:
     # https://github.com/apache/iceberg/pull/7685
-    spark.sql(f"ALTER TABLE default.test_positional_mor_deletes ADD PARTITION FIELD years(dt) AS dt_years")
+    spark.sql(f"ALTER TABLE spark_catalog.default.test_positional_mor_deletes ADD PARTITION FIELD years(dt) AS dt_years")
 
     spark.sql(
         f"""
@@ -159,9 +159,9 @@ for catalog_name, catalog in catalogs.items():
     """
     )
 
-    spark.sql(f"ALTER TABLE default.test_positional_mor_deletes CREATE TAG tag_12")
+    spark.sql(f"ALTER TABLE spark_catalog.default.test_positional_mor_deletes CREATE TAG tag_12")
 
-    spark.sql(f"ALTER TABLE default.test_positional_mor_deletes CREATE BRANCH without_5")
+    spark.sql(f"ALTER TABLE spark_catalog.default.test_positional_mor_deletes CREATE BRANCH without_5")
 
     # WAP must be enabled for spark.wap.branch to scope DML to the branch
     spark.sql(f"ALTER TABLE default.test_positional_mor_deletes SET TBLPROPERTIES ('write.wap.enabled'='true')")
@@ -189,7 +189,7 @@ for catalog_name, catalog in catalogs.items():
     """
     )
 
-    spark.sql(f"ALTER TABLE default.test_positional_mor_double_deletes ADD PARTITION FIELD years(dt) AS dt_years")
+    spark.sql(f"ALTER TABLE spark_catalog.default.test_positional_mor_double_deletes ADD PARTITION FIELD years(dt) AS dt_years")
 
     spark.sql(
         f"""
@@ -272,7 +272,7 @@ for catalog_name, catalog in catalogs.items():
         """
         )
 
-        spark.sql(f"ALTER TABLE default.{table_name} ADD PARTITION FIELD {partition}")
+        spark.sql(f"ALTER TABLE spark_catalog.default.{table_name} ADD PARTITION FIELD {partition}")
 
         spark.sql(
             f"""
