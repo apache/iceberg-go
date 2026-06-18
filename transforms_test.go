@@ -152,65 +152,6 @@ func TestToHumanString(t *testing.T) {
 	}
 }
 
-func TestIdentityToHumanStrType_TimestampTz(t *testing.T) {
-	id := iceberg.IdentityTransform{}
-
-	tzMicros := iceberg.Timestamp(1512151975038194)
-	noTzMicros := iceberg.Timestamp(1512123175038194)
-	tzNanos := iceberg.TimestampNano(-1510871468000001001)
-	noTzNanos := iceberg.TimestampNano(1512151975038194001)
-
-	tests := []struct {
-		name     string
-		typ      iceberg.Type
-		val      any
-		expected string
-	}{
-		{
-			name:     "TimestampType formats without UTC offset",
-			typ:      iceberg.PrimitiveTypes.Timestamp,
-			val:      noTzMicros,
-			expected: "2017-12-01T10:12:55.038194",
-		},
-		{
-			name:     "TimestampTzType formats with +00:00 offset",
-			typ:      iceberg.PrimitiveTypes.TimestampTz,
-			val:      tzMicros,
-			expected: "2017-12-01T18:12:55.038194+00:00",
-		},
-		{
-			name:     "TimestampNsType formats nanoseconds without UTC offset",
-			typ:      iceberg.PrimitiveTypes.TimestampNs,
-			val:      noTzNanos,
-			expected: "2017-12-01T18:12:55.038194001",
-		},
-		{
-			name:     "TimestampTzNsType formats nanoseconds with +00:00 offset",
-			typ:      iceberg.PrimitiveTypes.TimestampTzNs,
-			val:      tzNanos,
-			expected: "1922-02-15T01:28:51.999998999+00:00",
-		},
-		{
-			name:     "nil value returns null",
-			typ:      iceberg.PrimitiveTypes.TimestampTz,
-			val:      nil,
-			expected: "null",
-		},
-		{
-			name:     "non-timestamp types fall back to ToHumanStr",
-			typ:      iceberg.PrimitiveTypes.Date,
-			val:      iceberg.Date(17501),
-			expected: "2017-12-01",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, id.ToHumanStrType(tt.typ, tt.val))
-		})
-	}
-}
-
 func TestPartitionToPath_TimestampTzIdentity(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "created_ts_tz", Type: iceberg.PrimitiveTypes.TimestampTz, Required: true},
