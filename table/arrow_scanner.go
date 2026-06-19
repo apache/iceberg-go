@@ -579,9 +579,26 @@ func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Sc
 	return nil, false, nil
 }
 
-// synthesizeRowLineageColumns fills _row_id and _last_updated_sequence_number from
-// task constants: per the v3 spec a null value inherits first_row_id + position /
-// data_sequence_number, a non-null value is kept. Absent columns are appended.
+// fieldIndexByID returns the index of the field carrying fieldID in its Arrow
+// metadata, or -1. Resolving by reserved id (not name) matches how
+// SchemaWithRowLineageColumns and projection identify lineage columns.
+func fieldIndexByID(schema *arrow.Schema, fieldID int) int {
+	for i, f := range schema.Fields() {
+		if v, ok := f.Metadata.GetValue(ArrowParquetFieldIDKey); ok {
+			if id, err := strconv.Atoi(v); err == nil && id == fieldID {
+				return i
+			}
+		}
+	}
+
+	return -1
+}
+
+// synthesizeRowLineageColumns fills the requested row-lineage columns from task
+// constants: per the v3 spec a null value inherits first_row_id + position /
+// data_sequence_number, a non-null value is kept. A column absent from the batch
+// is appended. The caller sets synthesizeRowID/synthesizeSeq only when the
+// matching task constant is present.
 //
 // MUST run before any row-dropping step: _row_id is first_row_id + the row's ORIGINAL
 // position, so rowOffset (advanced by the full batch) is only correct before rows are
@@ -591,6 +608,7 @@ func synthesizeRowLineageColumns(
 	rowOffset *int64,
 	task FileScanTask,
 	batch arrow.RecordBatch,
+	synthesizeRowID, synthesizeSeq bool,
 ) (arrow.RecordBatch, error) {
 	alloc := compute.GetAllocator(ctx)
 	schema := batch.Schema()
@@ -605,14 +623,14 @@ func synthesizeRowLineageColumns(
 		}
 	}()
 
-	synth := func(name string, fieldID int, value func(k int64) int64) {
-		idx := -1
-		if ids := schema.FieldIndices(name); len(ids) > 0 {
-			idx = ids[0]
-		}
+	synth := func(name string, fieldID int, value func(k int64) int64) error {
+		idx := fieldIndexByID(schema, fieldID)
 		var existing *array.Int64
 		if idx >= 0 {
-			existing, _ = newCols[idx].(*array.Int64)
+			var ok bool
+			if existing, ok = newCols[idx].(*array.Int64); !ok {
+				return fmt.Errorf("row-lineage column %s is %s, want int64", name, newCols[idx].DataType())
+			}
 		}
 
 		bldr := array.NewInt64Builder(alloc)
@@ -631,7 +649,7 @@ func synthesizeRowLineageColumns(
 		if idx >= 0 {
 			newCols[idx] = arr
 
-			return
+			return nil
 		}
 		fields = append(fields, arrow.Field{
 			Name:     name,
@@ -640,19 +658,25 @@ func synthesizeRowLineageColumns(
 			Metadata: arrow.NewMetadata([]string{ArrowParquetFieldIDKey}, []string{strconv.Itoa(fieldID)}),
 		})
 		newCols = append(newCols, arr)
+
+		return nil
 	}
 
-	if task.FirstRowID != nil {
+	if synthesizeRowID {
 		first := *task.FirstRowID
-		synth(iceberg.RowIDColumnName, iceberg.RowIDFieldID, func(k int64) int64 {
+		if err := synth(iceberg.RowIDColumnName, iceberg.RowIDFieldID, func(k int64) int64 {
 			return first + *rowOffset + k
-		})
+		}); err != nil {
+			return nil, err
+		}
 	}
-	if task.DataSequenceNumber != nil {
+	if synthesizeSeq {
 		seq := *task.DataSequenceNumber
-		synth(iceberg.LastUpdatedSequenceNumberColumnName, iceberg.LastUpdatedSequenceNumberFieldID, func(int64) int64 {
+		if err := synth(iceberg.LastUpdatedSequenceNumberColumnName, iceberg.LastUpdatedSequenceNumberFieldID, func(int64) int64 {
 			return seq
-		})
+		}); err != nil {
+			return nil, err
+		}
 	}
 
 	// Advance so the next batch from this file uses the correct row position for _row_id.
@@ -775,19 +799,20 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 	}
 	_, wantRowID := as.projectedSchema.FindFieldByID(iceberg.RowIDFieldID)
 	_, wantSeqNum := as.projectedSchema.FindFieldByID(iceberg.LastUpdatedSequenceNumberFieldID)
-	haveRowID := task.Value.FirstRowID != nil
-	haveSeqNum := task.Value.DataSequenceNumber != nil
-	synthesizingLineage := rowLineageEnabled && (wantRowID || wantSeqNum) && (haveRowID || haveSeqNum)
-	if synthesizingLineage {
+	synthesizeRowID := rowLineageEnabled && wantRowID && task.Value.FirstRowID != nil
+	synthesizeSeq := rowLineageEnabled && wantSeqNum && task.Value.DataSequenceNumber != nil
+	// Only _row_id depends on position, so only it forces contiguous reads.
+	needsOriginalPositions := synthesizeRowID
+	if synthesizeRowID || synthesizeSeq {
 		// Mirror the columns synthesize will append so ToRequestedSchema never
 		// resolves a lineage field missing from the batch.
-		readSchema = iceberg.SchemaWithRowLineageColumns(iceSchema, haveRowID, haveSeqNum)
+		readSchema = iceberg.SchemaWithRowLineageColumns(iceSchema, synthesizeRowID, synthesizeSeq)
 		var rowOffset int64
 		taskVal := task.Value
 		pipeline = append(pipeline, func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
 			defer r.Release()
 
-			return synthesizeRowLineageColumns(ctx, &rowOffset, taskVal, r)
+			return synthesizeRowLineageColumns(ctx, &rowOffset, taskVal, r, synthesizeRowID, synthesizeSeq)
 		})
 	}
 
@@ -849,7 +874,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 		return ToRequestedSchema(ctx, as.projectedSchema, readSchema, r, SchemaOptions{UseLargeTypes: as.useLargeTypes})
 	})
 
-	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, synthesizingLineage, out)
+	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, needsOriginalPositions, out)
 
 	return err
 }

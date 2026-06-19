@@ -143,6 +143,9 @@ func TestRewriteFilesApplyResultRemovesDeletionVectors(t *testing.T) {
 	ctx := context.Background()
 	tbl, dvTarget := seedV3TableWithDV(t)
 
+	before := rowIDByID(t, tbl)
+	require.Equal(t, map[int64]int64{2: 1, 3: 2, 4: 3}, before)
+
 	groups, rewritten := planDVCompaction(t, tbl, dvTarget)
 
 	var results []table.CompactionGroupResult
@@ -167,6 +170,8 @@ func TestRewriteFilesApplyResultRemovesDeletionVectors(t *testing.T) {
 	assertRowCount(t, tbl, 3)
 	assert.Empty(t, deleteEntriesReferencing(t, tbl, rewritten),
 		"coordinator commit must remove deletion vectors for rewritten data files")
+	assert.Equal(t, before, rowIDByID(t, tbl),
+		"the coordinator path must preserve survivors' _row_id")
 }
 
 // TestRewriteDataFilesPreservesSiblingDeletionVector pins the granularity of DV
