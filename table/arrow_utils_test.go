@@ -789,6 +789,17 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 
 		_, err = table.TypeToArrowType(geom, true, false)
 		require.Error(t, err)
+		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		require.ErrorContains(t, err, "projjson CRS not supported yet")
+
+		// Geography goes through VisitGeography; assert the projjson rejection
+		// surfaces symmetrically through the visitor recover.
+		geog, err := iceberg.GeographyTypeOf("projjson:my-custom-crs", "spherical")
+		require.NoError(t, err)
+
+		_, err = table.TypeToArrowType(geog, true, false)
+		require.Error(t, err)
+		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 		require.ErrorContains(t, err, "projjson CRS not supported yet")
 
 		arrowType, err := geoarrow.NewWKBType().Deserialize(arrow.BinaryTypes.Binary,
