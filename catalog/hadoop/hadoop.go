@@ -188,25 +188,38 @@ func (c *Catalog) defaultTableLocation(ident table.Identifier) string {
 func isTableDir(filesystem HadoopCatalogFS, path string) bool {
 	metaDir := filepath.Join(path, "metadata")
 
-	entries, err := filesystem.ReadDir(metaDir)
+	foundMetadata := false
+	err := filesystem.WalkDir(metaDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Skip the root itself.
+		if path == metaDir {
+			return nil
+		}
+
+		// Don't descend into subdirectories.
+		if d.IsDir() {
+			return fs.SkipDir
+		}
+
+		name := d.Name()
+		if versionPattern.MatchString(name) ||
+			uuidMetadataPattern.MatchString(name) ||
+			name == "version-hint.text" {
+			foundMetadata = true
+
+			return fs.SkipAll
+		}
+
+		return nil
+	})
 	if err != nil {
 		return false
 	}
 
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-
-		name := e.Name()
-		if versionPattern.MatchString(name) ||
-			uuidMetadataPattern.MatchString(name) ||
-			name == "version-hint.text" {
-			return true
-		}
-	}
-
-	return false
+	return foundMetadata
 }
 
 func (c *Catalog) readVersionHint(ident table.Identifier) int {
@@ -275,25 +288,34 @@ func (c *Catalog) findVersion(ident table.Identifier) (int, error) {
 
 	dir := c.metadataDir(ident)
 
-	entries, err := c.filesystem.ReadDir(dir)
-	if err != nil {
-		return 0, fmt.Errorf("hadoop catalog: cannot read metadata directory for %s: %w",
-			strings.Join(ident, "."), catalog.ErrNoSuchTable)
-	}
-
 	maxVer := 0
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
+	// Walk just one directory level to find metadata files,
+	// ignoring any subdirectories that may exist
+	err := c.filesystem.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == dir {
+			return nil
+		}
+		if d.IsDir() {
+			return fs.SkipDir
 		}
 
-		matches := versionPattern.FindStringSubmatch(e.Name())
+		name := d.Name()
+		matches := versionPattern.FindStringSubmatch(name)
 		if len(matches) == 2 {
 			v, _ := strconv.Atoi(matches[1])
 			if v > maxVer {
 				maxVer = v
 			}
 		}
+
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("hadoop catalog: cannot read metadata directory for %s: %w",
+			strings.Join(ident, "."), catalog.ErrNoSuchTable)
 	}
 
 	if maxVer == 0 {
@@ -526,29 +548,39 @@ func (c *Catalog) ListTables(_ context.Context, ns table.Identifier) iter.Seq2[t
 			return
 		}
 
-		entries, err := c.filesystem.ReadDir(nsPath)
+		err = c.filesystem.WalkDir(nsPath, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+
+			// Anything that is a file is not a namespace or table, so skip it.
+			if !d.IsDir() {
+				return nil
+			}
+
+			// Skip the namespace directory itself.
+			if path == nsPath {
+				return nil
+			}
+
+			// Skip anything that is not a table directory.
+			if !isTableDir(c.filesystem, path) {
+				return fs.SkipDir
+			}
+			ident := make(table.Identifier, len(ns)+1)
+			copy(ident, ns)
+			ident[len(ns)] = d.Name()
+			if !yield(ident, nil) {
+				return fs.SkipAll
+			}
+			// If a table has been found, then that directory
+			// doesn't need to be walked further
+			return fs.SkipDir
+		})
 		if err != nil {
 			yield(nil, fmt.Errorf("hadoop catalog: failed to read namespace directory: %w", err))
 
 			return
-		}
-
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-
-			child := filepath.Join(nsPath, e.Name())
-			if !isTableDir(c.filesystem, child) {
-				continue
-			}
-
-			ident := make(table.Identifier, len(ns)+1)
-			copy(ident, ns)
-			ident[len(ns)] = e.Name()
-			if !yield(ident, nil) {
-				return
-			}
 		}
 	}
 }
@@ -594,9 +626,8 @@ func (c *Catalog) CreateNamespace(_ context.Context, ns table.Identifier, props 
 		return errors.New("hadoop catalog: namespace properties are not supported")
 	}
 
-	path := c.namespaceToPath(ns)
-
-	if err := c.filesystem.Mkdir(path); err != nil {
+	// Raise an error if the namespace already exists
+	if err := c.checkedMkdirAll(ns); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("%w: %s", catalog.ErrNamespaceAlreadyExists, strings.Join(ns, "."))
 		}
@@ -619,7 +650,28 @@ func (c *Catalog) DropNamespace(_ context.Context, ns table.Identifier) error {
 
 	path := c.namespaceToPath(ns)
 
-	entries, err := c.filesystem.ReadDir(path)
+	info, err := c.filesystem.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) || (err == nil && !info.IsDir()) {
+		return fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(ns, "."))
+	}
+	if err != nil {
+		return fmt.Errorf("hadoop catalog: failed to stat namespace directory: %w", err)
+	}
+
+	foundEntries := false
+	err = c.filesystem.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if p == path {
+			return nil
+		}
+
+		foundEntries = true
+
+		return fs.SkipAll
+	})
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(ns, "."))
@@ -628,7 +680,7 @@ func (c *Catalog) DropNamespace(_ context.Context, ns table.Identifier) error {
 		return fmt.Errorf("hadoop catalog: failed to read namespace directory: %w", err)
 	}
 
-	if len(entries) > 0 {
+	if foundEntries {
 		return fmt.Errorf("%w: %s", catalog.ErrNamespaceNotEmpty, strings.Join(ns, "."))
 	}
 
@@ -674,23 +726,29 @@ func (c *Catalog) ListNamespaces(_ context.Context, parent table.Identifier) ([]
 		}
 	}
 
-	entries, err := c.filesystem.ReadDir(path)
+	result := []table.Identifier{}
+	err := c.filesystem.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if p == path {
+			return nil
+		}
+
+		if !d.IsDir() {
+			// skip plain files
+			return nil
+		}
+		if isTableDir(c.filesystem, p) {
+			// if a table, not a namespace, don't descend
+			return fs.SkipDir
+		}
+		result = append(result, table.Identifier{d.Name()})
+		// found a namespace dir, don't recurse into it
+		return fs.SkipDir
+	})
 	if err != nil {
 		return nil, fmt.Errorf("hadoop catalog: failed to read directory: %w", err)
-	}
-
-	result := []table.Identifier{}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-
-		child := filepath.Join(path, e.Name())
-		if isTableDir(c.filesystem, child) {
-			continue
-		}
-
-		result = append(result, table.Identifier{e.Name()})
 	}
 
 	return result, nil
@@ -722,4 +780,28 @@ func (c *Catalog) LoadNamespaceProperties(_ context.Context, ns table.Identifier
 
 func (c *Catalog) UpdateNamespaceProperties(_ context.Context, _ table.Identifier, _ []string, _ iceberg.Properties) (catalog.PropertiesUpdateSummary, error) {
 	return catalog.PropertiesUpdateSummary{}, errors.New("hadoop catalog: UpdateNamespaceProperties not yet implemented")
+}
+
+// checkedMkdirAll is a helper function that checks
+// all subdirectories of a given identifier path exist before creating the full path.
+// This function is not atomic and may not return ErrNamespaceAlreadyExists if
+// called concurrently with other calls that change the same identifier
+func (c *Catalog) checkedMkdirAll(id table.Identifier) error {
+	path := c.namespaceToPath(id)
+	// Start at index 1 to skip the root warehouse directory
+	for pathIndex := 1; pathIndex < len(id); pathIndex++ {
+		subPath := id[:pathIndex]
+		parentPath := c.namespaceToPath(subPath)
+		if _, err := c.filesystem.Stat(parentPath); err != nil {
+			return err
+		}
+	}
+	// Check the final element in the path
+	if _, err := c.filesystem.Stat(path); err == nil {
+		// If there is no error and stat returns successfully,
+		// it means that it must already exist
+		return fs.ErrExist
+	}
+
+	return c.filesystem.MkdirAll(path)
 }

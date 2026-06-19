@@ -478,6 +478,16 @@ func (s *HadoopCatalogTestSuite) TestDropNamespaceNotEmptyWithChildNamespace() {
 	s.ErrorIs(err, catalog.ErrNamespaceNotEmpty)
 }
 
+func (s *HadoopCatalogTestSuite) TestDropNameSpaceFileInsteadofDir() {
+	filePath := filepath.Join(s.warehouse, "not_a_dir")
+	s.Require().NoError(os.WriteFile(filePath, nil, 0o644))
+	err := s.cat.DropNamespace(context.Background(), []string{"not_a_dir"})
+	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	info, err := os.Stat(filePath)
+	s.NoError(err)
+	s.False(info.IsDir())
+}
+
 // CheckNamespaceExists tests
 
 func (s *HadoopCatalogTestSuite) TestCheckNamespaceExistsTrue() {
@@ -811,6 +821,25 @@ func (s *HadoopCatalogTestSuite) TestListTablesNestedNamespace() {
 	s.Equal(table.Identifier{"a", "b", "tbl1"}, tables[0])
 }
 
+func (s *HadoopCatalogTestSuite) TestListTablesDoesNotYieldTablesInChildNamespace() {
+	// When a namespace is passed into ListTables, only tables in that direct
+	// namespace should be yielded. Not the additionaltables in the children namespaces.
+	ctx := context.Background()
+	err := s.cat.CreateNamespace(ctx, []string{"ns"}, nil)
+	s.Require().NoError(err)
+	s.createFakeTable([]string{"ns", "tbl1"})
+	err = s.cat.CreateNamespace(ctx, []string{"ns", "child_ns"}, nil)
+	s.Require().NoError(err)
+	s.createFakeTable([]string{"ns", "child_ns", "tbl2"})
+	var tables []table.Identifier
+	for ident, err := range s.cat.ListTables(ctx, []string{"ns"}) {
+		s.Require().NoError(err)
+		tables = append(tables, ident)
+	}
+	s.Len(tables, 1)
+	s.Equal(table.Identifier{"ns", "tbl1"}, tables[0])
+}
+
 // DropTable tests
 
 func (s *HadoopCatalogTestSuite) TestDropTable() {
@@ -857,7 +886,8 @@ func (s *HadoopCatalogTestSuite) TestDropTableShortIdentifier() {
 // CreateTable tests
 
 func (s *HadoopCatalogTestSuite) testSchema() *iceberg.Schema {
-	return iceberg.NewSchema(1,
+	return iceberg.NewSchema(
+		1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
 	)
@@ -1150,7 +1180,8 @@ func (s *HadoopCatalogTestSuite) TestCommitTableSingleUpdate() {
 	ctx := context.Background()
 	tbl := s.createTestTable("ns", "tbl")
 
-	meta, metaLoc, err := s.cat.CommitTable(ctx, []string{"ns", "tbl"},
+	meta, metaLoc, err := s.cat.CommitTable(
+		ctx, []string{"ns", "tbl"},
 		[]table.Requirement{
 			table.AssertTableUUID(tbl.Metadata().TableUUID()),
 		},
@@ -1177,7 +1208,8 @@ func (s *HadoopCatalogTestSuite) TestCommitTableMultipleSequential() {
 		loaded, err := s.cat.LoadTable(ctx, ident)
 		s.Require().NoError(err)
 
-		_, metaLoc, err := s.cat.CommitTable(ctx, ident,
+		_, metaLoc, err := s.cat.CommitTable(
+			ctx, ident,
 			[]table.Requirement{
 				table.AssertTableUUID(loaded.Metadata().TableUUID()),
 			},
@@ -1207,7 +1239,8 @@ func (s *HadoopCatalogTestSuite) TestCommitTableNoChanges() {
 	ctx := context.Background()
 	tbl := s.createTestTable("ns", "tbl")
 
-	meta, metaLoc, err := s.cat.CommitTable(ctx, []string{"ns", "tbl"},
+	meta, metaLoc, err := s.cat.CommitTable(
+		ctx, []string{"ns", "tbl"},
 		[]table.Requirement{
 			table.AssertTableUUID(tbl.Metadata().TableUUID()),
 		},
@@ -1233,7 +1266,8 @@ func (s *HadoopCatalogTestSuite) TestCommitTableConflictDetection() {
 	ident := []string{"ns", "tbl"}
 
 	for i := 2; i <= 5; i++ {
-		_, metaLoc, err := s.cat.CommitTable(ctx, ident,
+		_, metaLoc, err := s.cat.CommitTable(
+			ctx, ident,
 			nil,
 			[]table.Update{
 				table.NewSetPropertiesUpdate(iceberg.Properties{
@@ -1252,7 +1286,8 @@ func (s *HadoopCatalogTestSuite) TestCommitTableRequirementFailure() {
 	s.createTestTable("ns", "tbl")
 
 	wrongUUID := uuid.New()
-	_, _, err := s.cat.CommitTable(ctx, []string{"ns", "tbl"},
+	_, _, err := s.cat.CommitTable(
+		ctx, []string{"ns", "tbl"},
 		[]table.Requirement{
 			table.AssertTableUUID(wrongUUID),
 		},
@@ -1268,7 +1303,8 @@ func (s *HadoopCatalogTestSuite) TestCommitTableLocationChange() {
 	ctx := context.Background()
 	s.createTestTable("ns", "tbl")
 
-	_, _, err := s.cat.CommitTable(ctx, []string{"ns", "tbl"},
+	_, _, err := s.cat.CommitTable(
+		ctx, []string{"ns", "tbl"},
 		nil,
 		[]table.Update{
 			table.NewSetLocationUpdate("/some/other/location"),
@@ -1282,7 +1318,8 @@ func (s *HadoopCatalogTestSuite) TestCommitTableWriteMetadataLocation() {
 	ctx := context.Background()
 	s.createTestTable("ns", "tbl")
 
-	_, _, err := s.cat.CommitTable(ctx, []string{"ns", "tbl"},
+	_, _, err := s.cat.CommitTable(
+		ctx, []string{"ns", "tbl"},
 		nil,
 		[]table.Update{
 			table.NewSetPropertiesUpdate(iceberg.Properties{
@@ -1301,7 +1338,8 @@ func (s *HadoopCatalogTestSuite) TestCommitTableNoOrphanedTempFiles() {
 
 	// Do several commits and verify no temp files are left behind.
 	for i := 0; i < 3; i++ {
-		_, _, err := s.cat.CommitTable(ctx, ident,
+		_, _, err := s.cat.CommitTable(
+			ctx, ident,
 			nil,
 			[]table.Update{
 				table.NewSetPropertiesUpdate(iceberg.Properties{
@@ -1328,7 +1366,8 @@ func (s *HadoopCatalogTestSuite) TestCommitTableVersionHintUpdated() {
 	s.createTestTable("ns", "tbl")
 	ident := []string{"ns", "tbl"}
 
-	_, _, err := s.cat.CommitTable(ctx, ident,
+	_, _, err := s.cat.CommitTable(
+		ctx, ident,
 		nil,
 		[]table.Update{
 			table.NewSetPropertiesUpdate(iceberg.Properties{"k": "v"}),
@@ -1345,7 +1384,8 @@ func (s *HadoopCatalogTestSuite) TestCommitTableCreateViaCommit() {
 	ident := []string{"ns", "tbl"}
 
 	loc := s.cat.defaultTableLocation(ident)
-	meta, metaLoc, err := s.cat.CommitTable(ctx, ident,
+	meta, metaLoc, err := s.cat.CommitTable(
+		ctx, ident,
 		[]table.Requirement{
 			table.AssertCreate(),
 		},

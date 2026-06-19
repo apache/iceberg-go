@@ -92,7 +92,8 @@ func (s *HadoopIntegrationSuite) createFakeTable(ident table.Identifier) {
 	metaDir := filepath.Join(tablePath, "metadata")
 	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
 	s.Require().NoError(os.WriteFile(
-		filepath.Join(metaDir, "v1.metadata.json"), []byte("{}"), 0o644))
+		filepath.Join(metaDir, "v1.metadata.json"), []byte("{}"), 0o644,
+	))
 }
 
 // TestListTablesSparkCreated creates tables in Spark and verifies that
@@ -240,7 +241,8 @@ func (s *HadoopIntegrationSuite) TestGoCreateSparkDescribe() {
 	err := s.cat.CreateNamespace(s.ctx, []string{"describe_ns"}, nil)
 	s.Require().NoError(err)
 
-	schema := iceberg.NewSchema(1,
+	schema := iceberg.NewSchema(
+		1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
 	)
@@ -281,7 +283,8 @@ func (s *HadoopIntegrationSuite) TestGoCreateSparkSelect() {
 	err := s.cat.CreateNamespace(s.ctx, []string{"select_ns"}, nil)
 	s.Require().NoError(err)
 
-	schema := iceberg.NewSchema(1,
+	schema := iceberg.NewSchema(
+		1,
 		iceberg.NestedField{ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 	)
 
