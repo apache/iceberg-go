@@ -915,6 +915,7 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	}
 
 	setDeleteFilesToRemove := make(map[string]struct{}, len(deleteFilesToRemove))
+	dvRefsToRemove := make(map[string]struct{}, len(deleteFilesToRemove))
 	for i, df := range deleteFilesToRemove {
 		if df == nil {
 			return fmt.Errorf("nil delete file at index %d for ReplaceFiles", i)
@@ -922,6 +923,18 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		path := df.FilePath()
 		if path == "" {
 			return errors.New("delete file paths must be non-empty for ReplaceFiles")
+		}
+		if isDeletionVector(df) {
+			ref := df.ReferencedDataFile()
+			if ref == nil {
+				return errors.New("deletion vector to remove is missing referenced_data_file for ReplaceFiles")
+			}
+			if _, ok := dvRefsToRemove[*ref]; ok {
+				return errors.New("deletion vectors to remove must reference distinct data files for ReplaceFiles")
+			}
+			dvRefsToRemove[*ref] = struct{}{}
+
+			continue
 		}
 		if _, ok := setDeleteFilesToRemove[path]; ok {
 			return errors.New("delete file paths must be unique for ReplaceFiles")
@@ -943,6 +956,7 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	// that all files to delete/remove actually exist in the table.
 	markedDataForDeletion := make([]iceberg.DataFile, 0, len(setToDelete))
 	markedDeleteForRemoval := make([]iceberg.DataFile, 0, len(setDeleteFilesToRemove))
+	markedDVsForRemoval := make(map[string]iceberg.DataFile, len(dvRefsToRemove))
 	for df, err := range s.dataFiles(fs, nil) {
 		if err != nil {
 			return err
@@ -952,8 +966,14 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if _, ok := setToDelete[path]; ok && isData {
 			markedDataForDeletion = append(markedDataForDeletion, df)
 		}
-		if _, ok := setDeleteFilesToRemove[path]; ok && !isData {
-			markedDeleteForRemoval = append(markedDeleteForRemoval, df)
+		if !isData {
+			if _, ok := setDeleteFilesToRemove[path]; ok {
+				markedDeleteForRemoval = append(markedDeleteForRemoval, df)
+			} else if ref := df.ReferencedDataFile(); isDeletionVector(df) && ref != nil {
+				if _, ok := dvRefsToRemove[*ref]; ok {
+					markedDVsForRemoval[*ref] = df
+				}
+			}
 		}
 		if _, ok := setToAdd[path]; ok {
 			return fmt.Errorf("cannot add files that are already referenced by table, files: %s", path)
@@ -965,6 +985,11 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	}
 	if len(markedDeleteForRemoval) != len(setDeleteFilesToRemove) {
 		return errors.New("cannot remove delete files that do not belong to the table")
+	}
+	// Keyed by referenced data file, so duplicate DV entries for one ref collapse
+	// to one slot; equality then means every requested ref exists in the table.
+	if len(markedDVsForRemoval) != len(dvRefsToRemove) {
+		return errors.New("cannot remove deletion vectors that do not belong to the table")
 	}
 
 	if !cfg.skipAutoNameMapping {
@@ -993,6 +1018,9 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	}
 	for _, df := range markedDeleteForRemoval {
 		updater.removeDeleteFile(df)
+	}
+	for _, df := range markedDVsForRemoval {
+		updater.removeDeletionVector(df)
 	}
 
 	updates, reqs, err := updater.commit(ctx)

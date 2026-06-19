@@ -68,6 +68,7 @@ func TestIsDeletionVector(t *testing.T) {
 				mockDataFile: mockDataFile{
 					path:        "s3://bucket/data/dv.puffin",
 					contentType: iceberg.EntryContentPosDeletes,
+					format:      iceberg.PuffinFile,
 				},
 				referencedDataFile: strPtr("s3://bucket/data/file.parquet"),
 				contentOffset:      int64Ptr(100),
@@ -117,6 +118,7 @@ func TestManifestEntries_DVClassification(t *testing.T) {
 		mockDataFile: mockDataFile{
 			path:        "s3://bucket/data/dv-001.puffin",
 			contentType: iceberg.EntryContentPosDeletes,
+			format:      iceberg.PuffinFile,
 		},
 		referencedDataFile: strPtr("s3://bucket/data/data-001.parquet"),
 		contentOffset:      int64Ptr(0),
@@ -311,6 +313,7 @@ func TestFileScanTask_DeletionVectorFilesField(t *testing.T) {
 		mockDataFile: mockDataFile{
 			path:        "s3://bucket/data/dv-001.puffin",
 			contentType: iceberg.EntryContentPosDeletes,
+			format:      iceberg.PuffinFile,
 		},
 		referencedDataFile: strPtr("s3://bucket/data/data-001.parquet"),
 		contentOffset:      int64Ptr(0),
