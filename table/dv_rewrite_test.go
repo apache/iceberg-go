@@ -73,6 +73,67 @@ func TestRewriteDataFilesRemovesDeletionVectors(t *testing.T) {
 	}
 }
 
+// TestRewriteDataFilesPreservesRowIDThroughDeletionVector: applying a DV during
+// compaction must not renumber survivors' _row_id (= first_row_id + ORIGINAL
+// position). Regression guard against synthesizing lineage after the DV filter
+// drops rows, which yields a dense 0..N renumbering.
+func TestRewriteDataFilesPreservesRowIDThroughDeletionVector(t *testing.T) {
+	for _, partialProgress := range []bool{false, true} {
+		name := "atomic"
+		if partialProgress {
+			name = "partial-progress"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			tbl, dvTarget := seedV3TableWithDV(t)
+
+			// Survivors after the DV deletes id=1: id=2 (_row_id 1, first file),
+			// id=3 (_row_id 2) and id=4 (_row_id 3, second file).
+			before := rowIDByID(t, tbl)
+			require.Equal(t, map[int64]int64{2: 1, 3: 2, 4: 3}, before)
+
+			groups, _ := planDVCompaction(t, tbl, dvTarget)
+			rtx := tbl.NewTransaction()
+			_, err := rtx.RewriteDataFiles(ctx, groups,
+				table.RewriteDataFilesOptions{PartialProgress: partialProgress})
+			require.NoError(t, err)
+			tbl, err = rtx.Commit(ctx)
+			require.NoError(t, err)
+
+			assert.Equal(t, before, rowIDByID(t, tbl),
+				"_row_id must be preserved for survivors when a deletion vector is applied during compaction")
+		})
+	}
+}
+
+// rowIDByID scans the table with row lineage (plus any extra options) and
+// returns a map of id -> _row_id.
+func rowIDByID(t *testing.T, tbl *table.Table, opts ...table.ScanOption) map[int64]int64 {
+	t.Helper()
+
+	scanOpts := append([]table.ScanOption{table.WithRowLineage()}, opts...)
+	_, itr, err := tbl.Scan(scanOpts...).ToArrowRecords(context.Background())
+	require.NoError(t, err)
+
+	out := map[int64]int64{}
+	for rec, err := range itr {
+		require.NoError(t, err)
+		idIdx := rec.Schema().FieldIndices("id")
+		require.NotEmpty(t, idIdx)
+		rowIDIdx := rec.Schema().FieldIndices(iceberg.RowIDColumnName)
+		require.NotEmpty(t, rowIDIdx, "_row_id must be in the row-lineage scan projection")
+		idCol := rec.Column(idIdx[0]).(*array.Int64)
+		rowIDCol := rec.Column(rowIDIdx[0]).(*array.Int64)
+		for i := range int(rec.NumRows()) {
+			require.False(t, rowIDCol.IsNull(i), "_row_id must not be null for id=%d", idCol.Value(i))
+			out[idCol.Value(i)] = rowIDCol.Value(i)
+		}
+		rec.Release()
+	}
+
+	return out
+}
+
 // TestRewriteFilesApplyResultRemovesDeletionVectors drives the distributed
 // coordinator path — a worker runs [ExecuteCompactionGroup], then a leader
 // stages the results with [Transaction.NewRewrite] + [RewriteFiles.ApplyResult]
@@ -81,6 +142,9 @@ func TestRewriteDataFilesRemovesDeletionVectors(t *testing.T) {
 func TestRewriteFilesApplyResultRemovesDeletionVectors(t *testing.T) {
 	ctx := context.Background()
 	tbl, dvTarget := seedV3TableWithDV(t)
+
+	before := rowIDByID(t, tbl)
+	require.Equal(t, map[int64]int64{2: 1, 3: 2, 4: 3}, before)
 
 	groups, rewritten := planDVCompaction(t, tbl, dvTarget)
 
@@ -106,6 +170,8 @@ func TestRewriteFilesApplyResultRemovesDeletionVectors(t *testing.T) {
 	assertRowCount(t, tbl, 3)
 	assert.Empty(t, deleteEntriesReferencing(t, tbl, rewritten),
 		"coordinator commit must remove deletion vectors for rewritten data files")
+	assert.Equal(t, before, rowIDByID(t, tbl),
+		"the coordinator path must preserve survivors' _row_id")
 }
 
 // TestRewriteDataFilesPreservesSiblingDeletionVector pins the granularity of DV
@@ -184,7 +250,19 @@ func seedV3TableWithDV(t *testing.T) (*table.Table, string) {
 	tasks, err := tbl.Scan().PlanFiles(ctx)
 	require.NoError(t, err)
 	require.Len(t, tasks, 2)
-	dvTarget := tasks[0].File.FilePath()
+
+	// PlanFiles order is not stable, so pick the first-appended file (the one
+	// holding ids 1,2) by its first_row_id. Its row at position 0 is id=1, so
+	// the DV below deterministically deletes id=1.
+	target := tasks[0]
+	for _, tk := range tasks[1:] {
+		if tk.FirstRowID != nil && (target.FirstRowID == nil || *tk.FirstRowID < *target.FirstRowID) {
+			target = tk
+		}
+	}
+	require.NotNil(t, target.FirstRowID)
+	require.Zero(t, *target.FirstRowID, "first-appended file must have first_row_id 0")
+	dvTarget := target.File.FilePath()
 
 	w := dv.NewDVWriter(fs, unpartitionedSpecByID)
 	w.Add(dvTarget, []int64{0}, 0, nil)
