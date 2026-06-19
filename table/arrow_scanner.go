@@ -702,9 +702,11 @@ func (as *arrowScan) processRecords(
 		recRdr        array.RecordReader
 	)
 
-	// Row-group pruning skips whole groups, so emitted positions stop being
-	// contiguous. Position-keyed steps (row-lineage _row_id) need every group
-	// read; the per-row filter still enforces the predicate.
+	// Row-group stats/bloom pruning skips whole groups, so emitted batches no
+	// longer cover contiguous file positions. Steps that key on the original
+	// position (row-lineage _row_id, generated position deletes) need the full
+	// sequence, so the per-row filter alone enforces the predicate while every
+	// group is still read.
 	switch {
 	case task.Value.File.FileFormat() == iceberg.ParquetFile && !skipRowGroupPruning:
 		statsFn, err := newParquetRowGroupStatsEvaluator(fileSchema, as.boundRowFilter, false)
@@ -946,7 +948,9 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task interna
 		return ToRequestedSchema(ctx, iceberg.PositionalDeleteSchema, enrichedIcebergSchema, r, SchemaOptions{IncludeFieldIDs: true, UseLargeTypes: as.useLargeTypes})
 	})
 
-	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, false, out)
+	// enrichRecordsWithPosDeleteFields stamps positions by counting emitted
+	// rows, so the reader must not prune row groups out from under it.
+	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, true, out)
 
 	return err
 }
