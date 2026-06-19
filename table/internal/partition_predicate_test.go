@@ -346,14 +346,14 @@ func TestLiteralForPartitionValue(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := literalForPartitionValue(tc.in)
+			got, err := LiteralForPartitionValue(tc.in)
 			require.NoError(t, err)
 			assert.True(t, got.Equals(tc.want), "want %s, got %s", tc.want, got)
 		})
 	}
 
 	t.Run("unsupported", func(t *testing.T) {
-		_, err := literalForPartitionValue(struct{}{})
+		_, err := LiteralForPartitionValue(struct{}{})
 		require.Error(t, err)
 		assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	})

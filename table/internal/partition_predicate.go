@@ -109,11 +109,6 @@ func BuildPartitionMatchPredicate(spec iceberg.PartitionSpec, schema *iceberg.Sc
 				continue
 			}
 
-			lit, err := literalForPartitionValue(val)
-			if err != nil {
-				return nil, fmt.Errorf("partition field %q: %w", fr.name, err)
-			}
-
 			if isNaN(val) {
 				// x == NaN is never true (IEEE 754), so a NaN partition value must
 				// match via IsNaN. This intentionally diverges from PyIceberg's
@@ -128,6 +123,11 @@ func BuildPartitionMatchPredicate(spec iceberg.PartitionSpec, schema *iceberg.Sc
 				sigParts = append(sigParts, strconv.Itoa(fr.id)+":nan")
 
 				continue
+			}
+
+			lit, err := LiteralForPartitionValue(val)
+			if err != nil {
+				return nil, fmt.Errorf("partition field %q: %w", fr.name, err)
 			}
 
 			clause = iceberg.NewAnd(clause, iceberg.LiteralPredicate(iceberg.OpEQ, ref, lit))
@@ -163,13 +163,13 @@ func isNaN(v any) bool {
 	}
 }
 
-// literalForPartitionValue converts a partition value (as stored on a DataFile)
+// LiteralForPartitionValue converts a partition value (as stored on a DataFile)
 // into a typed Literal so the resulting predicate binds against the source
 // field with the correct type, rather than relying on a string rendering.
 //
 // DataFile.Partition() yields either a Literal (e.g. DecimalLiteral for decimal
 // fields, decoded in manifest.go) or a raw Go value; both are handled.
-func literalForPartitionValue(v any) (iceberg.Literal, error) {
+func LiteralForPartitionValue(v any) (iceberg.Literal, error) {
 	// Decoded partition values are sometimes already Literals (decimal fields).
 	if lit, ok := v.(iceberg.Literal); ok {
 		return lit, nil
