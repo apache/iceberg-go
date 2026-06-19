@@ -239,12 +239,21 @@ type expireSnapshotsCfg struct {
 
 type ExpireSnapshotsOpt func(*expireSnapshotsCfg)
 
+// WithRetainLast sets the minimum number of snapshots to keep per branch,
+// regardless of age. It overrides the MinSnapshotsToKeepKey
+// ("min-snapshots-to-keep") table property for this call. Snapshots beyond this
+// count become eligible for expiry only once they are also older than the
+// configured age (see WithOlderThan).
 func WithRetainLast(n int) ExpireSnapshotsOpt {
 	return func(cfg *expireSnapshotsCfg) {
 		cfg.minSnapshotsToKeep = &n
 	}
 }
 
+// WithOlderThan expires snapshots older than the given duration, measured from
+// the current time. It overrides the MaxSnapshotAgeMsKey ("max-snapshot-age-ms")
+// table property for this call. The most recent snapshots are still retained up
+// to the count set by WithRetainLast.
 func WithOlderThan(t time.Duration) ExpireSnapshotsOpt {
 	return func(cfg *expireSnapshotsCfg) {
 		n := t.Milliseconds()
@@ -262,6 +271,31 @@ func WithPostCommit(postCommit bool) ExpireSnapshotsOpt {
 	}
 }
 
+// ExpireSnapshots removes expired snapshots from the table metadata, staging
+// the changes on the transaction. Call [Transaction.Commit] to persist them.
+//
+// A snapshot is retained when it is referenced by a branch or tag, or when it
+// is needed to satisfy the retention rules. Retention is resolved per ref,
+// falling back through the ref's own settings, the options passed here, and
+// finally the table properties (MinSnapshotsToKeepKey, MaxSnapshotAgeMsKey,
+// MaxRefAgeMsKey), mirroring the Java implementation. The current snapshot of
+// the main branch is always kept.
+//
+// By default the now-unreferenced manifests, manifest lists, and data files are
+// deleted once the commit lands; pass WithPostCommit(false) to defer that
+// cleanup to a separate maintenance job and avoid racing in-flight readers.
+//
+//	txn := tbl.NewTransaction()
+//	err := txn.ExpireSnapshots(
+//		table.WithOlderThan(7*24*time.Hour),
+//		table.WithRetainLast(10),
+//	)
+//	if err != nil {
+//		// ...
+//	}
+//	newTbl, err := txn.Commit(ctx)
+//
+// The "iceberg expire-snapshots" CLI command wraps the same operation.
 func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	var (
 		cfg         = expireSnapshotsCfg{postCommit: true}
