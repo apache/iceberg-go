@@ -1410,6 +1410,23 @@ fmt.Printf(&quot;rewrote %d files into %d (%d -&gt; %d bytes)\n&quot;,
     result.RemovedDataFiles, result.AddedDataFiles, result.BytesBefore, result.BytesAfter)
 </code></pre>
 <p>The <code>table/compaction</code> subpackage provides bin-packing planning. The <code>iceberg compact analyze</code> and <code>compact run</code> CLI commands wrap the same machinery - see <a href="./cli.html">CLI</a>.</p>
+<h3 id="expiring-snapshots"><a class="header" href="#expiring-snapshots">Expiring snapshots</a></h3>
+<pre><code class="language-go">import (
+    &quot;time&quot;
+
+    &quot;github.com/apache/iceberg-go/table&quot;
+)
+
+txn := tbl.NewTransaction()
+err := txn.ExpireSnapshots(
+    table.WithOlderThan(7*24*time.Hour),
+    table.WithRetainLast(10),
+)
+if err != nil { /* ... */ }
+
+newTbl, err := txn.Commit(ctx)
+</code></pre>
+<p>Pass <code>table.WithPostCommit(true)</code> to delete the unreferenced data and metadata files after the commit lands. The <code>iceberg expire-snapshots</code> CLI command wraps the same operation - see <a href="./cli.html">CLI</a>.</p>
 <h2 id="views"><a class="header" href="#views">Views</a></h2>
 <p>Views are created and loaded through catalogs that support them (REST, Hive, SQL):</p>
 <pre><code class="language-go">import &quot;github.com/apache/iceberg-go/view&quot;
