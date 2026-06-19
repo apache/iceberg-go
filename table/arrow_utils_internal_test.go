@@ -32,6 +32,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table/internal"
+	"github.com/geoarrow/geoarrow-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -452,4 +453,41 @@ func TestStatsTypes(t *testing.T) {
 		iceberg.PrimitiveTypes.String,
 		iceberg.PrimitiveTypes.Int32,
 	}, actual)
+}
+
+func TestIcebergCRSToGeoArrowMetadata(t *testing.T) {
+	// Calling the converter directly (outside the schema visitor) must not panic:
+	// an unsupported CRS comes back as an error, symmetric with the read path.
+	t.Run("projjson returns an error instead of panicking", func(t *testing.T) {
+		_, err := icebergCRSToGeoArrowMetadata("projjson:my-custom-crs")
+		require.Error(t, err)
+		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		require.ErrorContains(t, err, "projjson CRS not supported yet")
+	})
+
+	t.Run("supported CRS values map to the expected CRSType", func(t *testing.T) {
+		cases := []struct {
+			crs         string
+			wantCRSType geoarrow.CRSType
+		}{
+			{"srid:4326", geoarrow.CRSTypeSRID},
+			{"OGC:CRS84", geoarrow.CRSTypeAuthorityCode},
+			{"EPSG:4326", geoarrow.CRSTypeAuthorityCode},
+			{"EPSG:4267", geoarrow.CRSTypeAuthorityCode},
+		}
+		for _, tc := range cases {
+			t.Run(tc.crs, func(t *testing.T) {
+				meta, err := icebergCRSToGeoArrowMetadata(tc.crs)
+				require.NoError(t, err)
+				assert.Equal(t, tc.wantCRSType, meta.CRSType)
+			})
+		}
+	})
+
+	t.Run("srid:0 maps to an omitted CRS", func(t *testing.T) {
+		meta, err := icebergCRSToGeoArrowMetadata("srid:0")
+		require.NoError(t, err)
+		assert.Empty(t, meta.CRS)
+		assert.Empty(t, meta.CRSType)
+	})
 }

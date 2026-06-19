@@ -673,7 +673,13 @@ func (c convertToArrow) VisitVariant() arrow.Field {
 }
 
 func (c convertToArrow) VisitGeometry(g iceberg.GeometryType) arrow.Field {
-	meta := icebergCRSToGeoArrowMetadata(g.CRS())
+	meta, err := icebergCRSToGeoArrowMetadata(g.CRS())
+	if err != nil {
+		// Panic to thread the error through iceberg.Visit's recover, matching the
+		// convention used by the other visitor methods.
+		panic(err)
+	}
+
 	if c.useLargeTypes {
 		return arrow.Field{Type: geoarrow.NewWKBType(geoarrow.WKBWithLargeBinaryStorage(), geoarrow.WKBWithMetadata(meta))}
 	}
@@ -682,7 +688,13 @@ func (c convertToArrow) VisitGeometry(g iceberg.GeometryType) arrow.Field {
 }
 
 func (c convertToArrow) VisitGeography(g iceberg.GeographyType) arrow.Field {
-	meta := icebergCRSToGeoArrowMetadata(g.CRS())
+	meta, err := icebergCRSToGeoArrowMetadata(g.CRS())
+	if err != nil {
+		// Panic to thread the error through iceberg.Visit's recover, matching the
+		// convention used by the other visitor methods.
+		panic(err)
+	}
+
 	// Always add an edge to differentiate between Geography and Geometry arrow fields.
 	// Note that the edge convention is a best-effort hint and planar geography from other clients won't round-trip through Arrow alone.
 	meta.Edges = geoarrow.EdgeInterpolation(g.Algorithm())
@@ -1956,13 +1968,13 @@ func geoArrowMetadataToIcebergType(meta geoarrow.Metadata) (iceberg.Type, error)
 
 var authorityCodeCRS = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*:[A-Za-z0-9_.-]+$`)
 
-func icebergCRSToGeoArrowMetadata(crs string) geoarrow.Metadata {
+func icebergCRSToGeoArrowMetadata(crs string) (geoarrow.Metadata, error) {
 	lowerCRS := strings.ToLower(crs)
 	if strings.HasPrefix(lowerCRS, "srid:") {
 		id := crs[len("srid:"):]
 
 		if id == "0" {
-			return geoarrow.NewMetadata() // srid:0 maps to omitted GeoArrow CRS
+			return geoarrow.NewMetadata(), nil // srid:0 maps to omitted GeoArrow CRS
 		}
 
 		raw, _ := json.Marshal(id) //nolint:errcheck // Marshalling a string can't fail
@@ -1970,11 +1982,11 @@ func icebergCRSToGeoArrowMetadata(crs string) geoarrow.Metadata {
 		return geoarrow.Metadata{
 			CRS:     raw,
 			CRSType: geoarrow.CRSTypeSRID,
-		}
+		}, nil
 	}
 
 	if strings.HasPrefix(lowerCRS, "projjson:") {
-		panic(fmt.Errorf("%w: projjson CRS not supported yet", iceberg.ErrInvalidSchema))
+		return geoarrow.Metadata{}, fmt.Errorf("%w: projjson CRS not supported yet", iceberg.ErrInvalidSchema)
 	}
 
 	var raw []byte
@@ -1991,5 +2003,5 @@ func icebergCRSToGeoArrowMetadata(crs string) geoarrow.Metadata {
 		meta.CRSType = geoarrow.CRSTypeAuthorityCode
 	}
 
-	return meta
+	return meta, nil
 }
