@@ -538,27 +538,27 @@ func CollectSafePositionDeletes(tasks []FileScanTask) []iceberg.DataFile {
 	return safe
 }
 
-// CollectSafeDeletionVectors returns the deletion vectors attached to the
-// tasks, deduplicated by referenced data file.
+// CollectSafeDeletionVectors returns the tasks' deletion vectors, deduplicated
+// by referenced data file.
 //
-// Safety rests on the scan-planning invariant that a task carries only the DV
-// referencing its own data file (matchDVToData keys on task.File's path), so
-// every DV returned references a file in the rewrite set. A caller that
-// hand-builds a [FileScanTask] with a DV whose ReferencedDataFile is some other
-// live data file would have that DV marked safe to expunge here, silently
-// resurrecting its deleted rows — populate DeletionVectorFiles only from scan
-// planning.
+// Scan planning attaches to a task only the DV referencing its own data file,
+// so every returned DV references a file in the rewrite set. A hand-built
+// [FileScanTask] carrying a DV for some other live data file would have that DV
+// expunged here — populate DeletionVectorFiles only from scan planning.
 func CollectSafeDeletionVectors(tasks []FileScanTask) []iceberg.DataFile {
-	seen := make(map[string]bool)
+	seen := make(map[string]struct{})
 	var safe []iceberg.DataFile
 
 	for _, task := range tasks {
 		for _, dv := range task.DeletionVectorFiles {
 			ref := dv.ReferencedDataFile()
-			if ref == nil || seen[*ref] {
+			if ref == nil {
 				continue
 			}
-			seen[*ref] = true
+			if _, ok := seen[*ref]; ok {
+				continue
+			}
+			seen[*ref] = struct{}{}
 			safe = append(safe, dv)
 		}
 	}

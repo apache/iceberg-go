@@ -174,14 +174,10 @@ func (r *RewriteFiles) Apply(deletes, adds, safeDeletes []iceberg.DataFile) *Rew
 	return r
 }
 
-// ApplyResult is the typed coordinator entry point: it queues a worker's
-// [CompactionGroupResult] onto this builder by routing OldDataFiles
-// (via DeleteFile), NewDataFiles (via AddDataFile), SafePosDeletes and
-// SafeDeletionVectors (via DeleteFile) in one call. Use this over
-// [RewriteFiles.Apply] when feeding worker outputs — Apply cannot carry
-// SafeDeletionVectors, and the field names here line up with the builder
-// semantics so a refactor of CompactionGroupResult cannot silently
-// transpose roles.
+// ApplyResult queues a worker's [CompactionGroupResult] onto this builder,
+// routing OldDataFiles (DeleteFile), NewDataFiles (AddDataFile), SafePosDeletes
+// and SafeDeletionVectors (DeleteFile). Prefer it over [RewriteFiles.Apply],
+// which cannot carry SafeDeletionVectors.
 //
 // Typical distributed-coordinator pattern:
 //
@@ -197,9 +193,8 @@ func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 	for _, df := range gr.NewDataFiles {
 		r.AddDataFile(df)
 	}
-	// Both delete kinds route through DeleteFile: a DV's content type is
-	// EntryContentPosDeletes, so it lands in the removal queue and ReplaceFiles
-	// re-identifies it by referenced data file to expunge the right entry.
+	// DVs route through DeleteFile like any pos-delete; ReplaceFiles then
+	// re-identifies them by referenced data file.
 	for _, df := range gr.SafePosDeletes {
 		r.DeleteFile(df)
 	}

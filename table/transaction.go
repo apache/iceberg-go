@@ -886,6 +886,10 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if df == nil {
 			return fmt.Errorf("nil delete file at index %d for ReplaceFiles", i)
 		}
+		path := df.FilePath()
+		if path == "" {
+			return errors.New("delete file paths must be non-empty for ReplaceFiles")
+		}
 		if isDeletionVector(df) {
 			ref := df.ReferencedDataFile()
 			if ref == nil {
@@ -897,10 +901,6 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			dvRefsToRemove[*ref] = struct{}{}
 
 			continue
-		}
-		path := df.FilePath()
-		if path == "" {
-			return errors.New("delete file paths must be non-empty for ReplaceFiles")
 		}
 		if _, ok := setDeleteFilesToRemove[path]; ok {
 			return errors.New("delete file paths must be unique for ReplaceFiles")
@@ -922,7 +922,7 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	// that all files to delete/remove actually exist in the table.
 	markedDataForDeletion := make([]iceberg.DataFile, 0, len(setToDelete))
 	markedDeleteForRemoval := make([]iceberg.DataFile, 0, len(setDeleteFilesToRemove))
-	markedDVsForRemoval := make([]iceberg.DataFile, 0, len(dvRefsToRemove))
+	markedDVsForRemoval := make(map[string]iceberg.DataFile, len(dvRefsToRemove))
 	for df, err := range s.dataFiles(fs, nil) {
 		if err != nil {
 			return err
@@ -937,7 +937,7 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 				markedDeleteForRemoval = append(markedDeleteForRemoval, df)
 			} else if ref := df.ReferencedDataFile(); isDeletionVector(df) && ref != nil {
 				if _, ok := dvRefsToRemove[*ref]; ok {
-					markedDVsForRemoval = append(markedDVsForRemoval, df)
+					markedDVsForRemoval[*ref] = df
 				}
 			}
 		}
@@ -952,9 +952,8 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	if len(markedDeleteForRemoval) != len(setDeleteFilesToRemove) {
 		return errors.New("cannot remove delete files that do not belong to the table")
 	}
-	// Relies on the spec invariant of at most one DV per referenced data file:
-	// duplicate refs in the table would inflate markedDVsForRemoval past the
-	// deduped map and slip past this check.
+	// Keyed by referenced data file, so duplicate DV entries for one ref collapse
+	// to one slot; equality then means every requested ref exists in the table.
 	if len(markedDVsForRemoval) != len(dvRefsToRemove) {
 		return errors.New("cannot remove deletion vectors that do not belong to the table")
 	}
