@@ -589,6 +589,7 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 		geoarrowMetaJSON string
 	}{
 		{
+			// Pin that a present crs_type without CRS still follows the srid:0 default.
 			name:             "geometry_srid_0_with_crs_type",
 			ice:              geomSRID0,
 			geoarrowMetaJSON: `{"crs_type":"authority_code"}`,
@@ -609,6 +610,7 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 			geoarrowMetaJSON: `{"crs":"epsg:4326"}`,
 		},
 		{
+			// EPSG:4326 is canonicalized before crs_type validation, so a mismatched type still maps to the default CRS.
 			name:             "geometry_epsg_4326_incorrect_type",
 			ice:              defaultGeometry,
 			geoarrowMetaJSON: `{"crs":"epsg:4326", "crs_type":"projjson"}`,
@@ -769,9 +771,9 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 		assert.True(t, ok)
 
 		meta := geomWKB.Metadata()
-		assert.Equal(t, meta.CRS, jsonCRS("OGC:CRS84"))
-		assert.Equal(t, meta.Edges, geoarrow.EdgePlanar)
-		assert.Equal(t, meta.CRSType, geoarrow.CRSTypeAuthorityCode)
+		assert.Equal(t, jsonCRS("OGC:CRS84"), meta.CRS)
+		assert.Equal(t, geoarrow.EdgePlanar, meta.Edges)
+		assert.Equal(t, geoarrow.CRSTypeAuthorityCode, meta.CRSType)
 
 		roundTripGeom, err := table.ArrowTypeToIceberg(geomWKB, false)
 		require.NoError(t, err)
@@ -779,8 +781,20 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 		g, ok := roundTripGeom.(iceberg.GeometryType)
 		require.True(t, ok)
 
-		assert.Equal(t, g.CRS(), "OGC:CRS84")
-		assert.Equal(t, g, defaultGeometry)
+		assert.Equal(t, "OGC:CRS84", g.CRS())
+		assert.Equal(t, defaultGeometry, g)
+	})
+
+	t.Run("geoarrow_wkb_without_edges_reads_as_geometry", func(t *testing.T) {
+		arrowType, err := geoarrow.NewWKBType().Deserialize(arrow.BinaryTypes.Binary, `{"crs":"OGC:CRS84"}`)
+		require.NoError(t, err)
+
+		iceType, err := table.ArrowTypeToIceberg(arrowType, false)
+		require.NoError(t, err)
+
+		geom, ok := iceType.(iceberg.GeometryType)
+		require.True(t, ok, "expected geometry, got %T", iceType)
+		assert.Equal(t, "OGC:CRS84", geom.CRS())
 	})
 
 	t.Run("projjson_error_behavior", func(t *testing.T) {
@@ -830,9 +844,6 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 	})
 
 	t.Run("schema", func(t *testing.T) {
-		geomList, err := iceberg.GeometryTypeOf("srid:4326")
-		require.NoError(t, err)
-
 		iceSchema := iceberg.NewSchema(0,
 			iceberg.NestedField{ID: 1, Name: "point", Type: iceberg.GeometryType{}, Required: false},
 			iceberg.NestedField{ID: 2, Name: "loc", Type: geomSRID, Required: true},
@@ -843,7 +854,7 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 				Name: "locations",
 				Type: &iceberg.ListType{
 					ElementID:       6,
-					Element:         geomList,
+					Element:         geomSRID,
 					ElementRequired: true,
 				},
 				Required: true,

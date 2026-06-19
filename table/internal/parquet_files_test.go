@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"strings"
@@ -604,6 +605,42 @@ func TestDecimalPhysicalTypes(t *testing.T) {
 	}
 }
 
+func geoArrowCRS(s string) json.RawMessage {
+	raw, _ := json.Marshal(s)
+
+	return raw
+}
+
+func assertGeoArrowWKBType(t *testing.T, dt arrow.DataType, storage arrow.DataType, want geoarrow.Metadata) *geoarrow.WKBType {
+	t.Helper()
+
+	wkbType, ok := dt.(*geoarrow.WKBType)
+	require.True(t, ok, "expected *geoarrow.WKBType, got %T", dt)
+	assert.Equal(t, "geoarrow.wkb", wkbType.ExtensionName())
+	assert.True(t, arrow.TypeEqual(storage, wkbType.StorageType()))
+	assert.Equal(t, want.CRS, wkbType.Metadata().CRS)
+	assert.Equal(t, want.Edges, wkbType.Metadata().Edges)
+
+	return wkbType
+}
+
+func assertWKBValues(t *testing.T, col arrow.Array, wants ...geoarrow.WKBBytes) {
+	t.Helper()
+
+	arr, ok := col.(*geoarrow.WKBArray)
+	require.True(t, ok, "expected *geoarrow.WKBArray, got %T", col)
+	require.Equal(t, len(wants), arr.Len())
+
+	for i, want := range wants {
+		if want == nil {
+			assert.Nil(t, arr.Value(i), "row %d", i)
+
+			continue
+		}
+		assert.Equal(t, want, arr.Value(i), "row %d", i)
+	}
+}
+
 func TestParquetGeoArrowExtensionMetadataRoundTrip(t *testing.T) {
 	geomType, err := iceberg.GeometryTypeOf("srid:4326")
 	require.NoError(t, err)
@@ -615,6 +652,8 @@ func TestParquetGeoArrowExtensionMetadataRoundTrip(t *testing.T) {
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
 		iceberg.NestedField{ID: 2, Name: "geom", Type: geomType, Required: false},
 		iceberg.NestedField{ID: 3, Name: "geog", Type: geogType, Required: false},
+		iceberg.NestedField{ID: 4, Name: "default_geom", Type: iceberg.GeometryType{}, Required: false},
+		iceberg.NestedField{ID: 5, Name: "default_geog", Type: iceberg.GeographyType{}, Required: false},
 	)
 
 	arrowSchema, err := table.SchemaToArrowSchema(iceSchema, nil, true, false)
@@ -624,10 +663,26 @@ func TestParquetGeoArrowExtensionMetadataRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	geogWKB, err := wktToWKB("POINT (20 5)")
 	require.NoError(t, err)
+	defaultGeomWKB, err := wktToWKB("POINT (10 20)")
+	require.NoError(t, err)
+	defaultGeogWKB, err := wktToWKB("POINT (40 15)")
+	require.NoError(t, err)
 
 	rec, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSchema, strings.NewReader(`[
-		{"id": 1, "geom": "`+geomWKB.String()+`", "geog": "`+geogWKB.String()+`"},
-		{"id": null, "geom": null, "geog": "`+geogWKB.String()+`"}
+		{
+			"id": 1,
+			"geom": "`+geomWKB.String()+`",
+			"geog": "`+geogWKB.String()+`",
+			"default_geom": "`+defaultGeomWKB.String()+`",
+			"default_geog": "`+defaultGeogWKB.String()+`"
+		},
+		{
+			"id": null,
+			"geom": null,
+			"geog": "`+geogWKB.String()+`",
+			"default_geom": "`+defaultGeomWKB.String()+`",
+			"default_geog": null
+		}
 	]`))
 	require.NoError(t, err)
 	defer rec.Release()
@@ -658,26 +713,42 @@ func TestParquetGeoArrowExtensionMetadataRoundTrip(t *testing.T) {
 
 	roundTripSchema := tbl.Schema()
 
-	origGeomType := arrowSchema.Field(1).Type.(*geoarrow.WKBType)
-	origGeogType := arrowSchema.Field(2).Type.(*geoarrow.WKBType)
-	rtGeomField := roundTripSchema.Field(1)
-	rtGeogField := roundTripSchema.Field(2)
+	tests := []struct {
+		name     string
+		idx      int
+		wantMeta geoarrow.Metadata
+		wantType geoarrow.EdgeInterpolation
+	}{
+		{
+			name: "explicit_srid_geometry", idx: 1,
+			wantMeta: geoarrow.Metadata{CRS: geoArrowCRS("4326"), Edges: geoarrow.EdgePlanar},
+			wantType: geoarrow.EdgePlanar,
+		},
+		{
+			name: "explicit_srid_geography", idx: 2,
+			wantMeta: geoarrow.Metadata{CRS: geoArrowCRS("4326"), Edges: geoarrow.EdgeVincenty},
+			wantType: geoarrow.EdgeVincenty,
+		},
+		{
+			name: "default_crs_geometry", idx: 3,
+			wantMeta: geoarrow.Metadata{CRS: geoArrowCRS("OGC:CRS84"), Edges: geoarrow.EdgePlanar},
+			wantType: geoarrow.EdgePlanar,
+		},
+		{
+			name: "default_crs_geography", idx: 4,
+			wantMeta: geoarrow.Metadata{CRS: geoArrowCRS("OGC:CRS84"), Edges: geoarrow.EdgeSpherical},
+			wantType: geoarrow.EdgeSpherical,
+		},
+	}
 
-	rtGeomExt := rtGeomField.Type.(arrow.ExtensionType)
-	rtGeogExt := rtGeogField.Type.(arrow.ExtensionType)
-	rtGeomType := rtGeomExt.(*geoarrow.WKBType)
-	rtGeogType := rtGeogExt.(*geoarrow.WKBType)
-
-	assert.Equal(t, origGeomType.ExtensionName(), rtGeomExt.ExtensionName())
-	assert.Equal(t, origGeogType.ExtensionName(), rtGeogExt.ExtensionName())
-	assert.True(t, arrow.TypeEqual(origGeomType.StorageType(), rtGeomType.StorageType()))
-	assert.True(t, arrow.TypeEqual(origGeogType.StorageType(), rtGeogType.StorageType()))
-	assert.Equal(t, origGeomType.Metadata(), rtGeomType.Metadata())
-	assert.Equal(t, origGeogType.Metadata(), rtGeogType.Metadata())
-	assert.Equal(t, geoarrow.CRSTypeSRID, rtGeomType.Metadata().CRSType)
-	assert.Equal(t, geoarrow.EdgePlanar, rtGeomType.Metadata().Edges)
-	assert.Equal(t, geoarrow.CRSTypeSRID, rtGeogType.Metadata().CRSType)
-	assert.Equal(t, geoarrow.EdgeVincenty, rtGeogType.Metadata().Edges)
+	for _, tt := range tests {
+		t.Run("metadata/"+tt.name, func(t *testing.T) {
+			origType := assertGeoArrowWKBType(t, arrowSchema.Field(tt.idx).Type, arrow.BinaryTypes.Binary, tt.wantMeta)
+			rtType := assertGeoArrowWKBType(t, roundTripSchema.Field(tt.idx).Type, arrow.BinaryTypes.Binary, tt.wantMeta)
+			assert.Equal(t, origType.Metadata(), rtType.Metadata())
+			assert.Equal(t, tt.wantType, rtType.Metadata().Edges)
+		})
+	}
 
 	rr, err := fr.GetRecords(context.Background(), nil, nil)
 	require.NoError(t, err)
@@ -688,15 +759,10 @@ func TestParquetGeoArrowExtensionMetadataRoundTrip(t *testing.T) {
 	defer batch.Release()
 	require.Equal(t, int64(2), batch.NumRows())
 
-	geomArr, ok := batch.Column(1).(*geoarrow.WKBArray)
-	assert.True(t, ok)
-	assert.Equal(t, geomWKB, geomArr.Value(0))
-	assert.Nil(t, geomArr.Value(1))
-
-	geogArr, ok := batch.Column(2).(*geoarrow.WKBArray)
-	assert.True(t, ok)
-	assert.Equal(t, geogWKB, geogArr.Value(0))
-	assert.Equal(t, geogWKB, geogArr.Value(1))
+	assertWKBValues(t, batch.Column(1), geomWKB, nil)
+	assertWKBValues(t, batch.Column(2), geogWKB, geogWKB)
+	assertWKBValues(t, batch.Column(3), defaultGeomWKB, defaultGeomWKB)
+	assertWKBValues(t, batch.Column(4), defaultGeogWKB, nil)
 }
 
 func TestWriteDataFileErrOnClose(t *testing.T) {
