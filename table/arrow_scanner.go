@@ -579,16 +579,13 @@ func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Sc
 	return nil, false, nil
 }
 
-// synthesizeRowLineageColumns fills _row_id and _last_updated_sequence_number from task constants.
-// Per the Iceberg v3 row lineage spec: if the value is null in the file, it is inherited
-// (synthesized) from the file's first_row_id and data_sequence_number; otherwise the value from
-// the file is kept. When a lineage column is absent from the batch it is appended.
+// synthesizeRowLineageColumns fills _row_id and _last_updated_sequence_number from
+// task constants: per the v3 spec a null value inherits first_row_id + position /
+// data_sequence_number, a non-null value is kept. Absent columns are appended.
 //
-// This MUST run before any row-dropping pipeline step (positional/equality deletes, deletion
-// vectors, the row filter): _row_id is first_row_id + the row's ORIGINAL position in the file, so
-// rowOffset (advanced by the full unfiltered batch size) only stays correct if no rows have been
-// dropped yet. A later filter then drops rows carrying their already-correct _row_id, and
-// ToRequestedSchema resolves the columns by reserved field id via a lineage-extended read schema.
+// MUST run before any row-dropping step: _row_id is first_row_id + the row's ORIGINAL
+// position, so rowOffset (advanced by the full batch) is only correct before rows are
+// dropped. ToRequestedSchema then resolves the columns by reserved field id.
 func synthesizeRowLineageColumns(
 	ctx context.Context,
 	rowOffset *int64,
@@ -661,7 +658,9 @@ func synthesizeRowLineageColumns(
 	// Advance so the next batch from this file uses the correct row position for _row_id.
 	*rowOffset += nrows
 
-	return array.NewRecordBatch(arrow.NewSchema(fields, nil), newCols, nrows), nil
+	meta := schema.Metadata()
+
+	return array.NewRecordBatch(arrow.NewSchema(fields, &meta), newCols, nrows), nil
 }
 
 func (as *arrowScan) processRecords(
@@ -671,6 +670,7 @@ func (as *arrowScan) processRecords(
 	rdr internal.FileReader,
 	columns []int,
 	pipeline []recProcessFn,
+	skipRowGroupPruning bool,
 	out chan<- enumeratedRecord,
 ) (err error) {
 	var (
@@ -678,8 +678,11 @@ func (as *arrowScan) processRecords(
 		recRdr        array.RecordReader
 	)
 
-	switch task.Value.File.FileFormat() {
-	case iceberg.ParquetFile:
+	// Row-group pruning skips whole groups, so emitted positions stop being
+	// contiguous. Position-keyed steps (row-lineage _row_id) need every group
+	// read; the per-row filter still enforces the predicate.
+	switch {
+	case task.Value.File.FileFormat() == iceberg.ParquetFile && !skipRowGroupPruning:
 		statsFn, err := newParquetRowGroupStatsEvaluator(fileSchema, as.boundRowFilter, false)
 		if err != nil {
 			return err
@@ -762,12 +765,9 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 
 	pipeline := make([]recProcessFn, 0, 4)
 
-	// Row lineage: synthesize _row_id / _last_updated_sequence_number from the
-	// source file's ORIGINAL positions before any row-dropping step below, so a
-	// deletion vector or positional delete cannot renumber the surviving rows.
-	// readSchema carries the reserved field ids so ToRequestedSchema resolves the
-	// enriched columns. Gated on the projection actually requesting lineage so
-	// non-lineage scans keep their original, allocation-free path.
+	// Synthesize lineage before any row-dropping step so deletes/filters can't
+	// renumber survivors' _row_id; readSchema carries the field ids for
+	// ToRequestedSchema. Gated so non-lineage scans keep the allocation-free path.
 	readSchema := iceSchema
 	rowLineageEnabled, lerr := strconv.ParseBool(as.options.Get(ScanOptionRowLineageEnabled, "true"))
 	if lerr != nil {
@@ -777,9 +777,10 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 	_, wantSeqNum := as.projectedSchema.FindFieldByID(iceberg.LastUpdatedSequenceNumberFieldID)
 	haveRowID := task.Value.FirstRowID != nil
 	haveSeqNum := task.Value.DataSequenceNumber != nil
-	if rowLineageEnabled && (wantRowID || wantSeqNum) && (haveRowID || haveSeqNum) {
-		// Mirror exactly the columns synthesizeRowLineageColumns will append so
-		// ToRequestedSchema never resolves a lineage field absent from the batch.
+	synthesizingLineage := rowLineageEnabled && (wantRowID || wantSeqNum) && (haveRowID || haveSeqNum)
+	if synthesizingLineage {
+		// Mirror the columns synthesize will append so ToRequestedSchema never
+		// resolves a lineage field missing from the batch.
 		readSchema = iceberg.SchemaWithRowLineageColumns(iceSchema, haveRowID, haveSeqNum)
 		var rowOffset int64
 		taskVal := task.Value
@@ -848,7 +849,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 		return ToRequestedSchema(ctx, as.projectedSchema, readSchema, r, SchemaOptions{UseLargeTypes: as.useLargeTypes})
 	})
 
-	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, out)
+	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, synthesizingLineage, out)
 
 	return err
 }
@@ -920,7 +921,7 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task interna
 		return ToRequestedSchema(ctx, iceberg.PositionalDeleteSchema, enrichedIcebergSchema, r, SchemaOptions{IncludeFieldIDs: true, UseLargeTypes: as.useLargeTypes})
 	})
 
-	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, out)
+	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, false, out)
 
 	return err
 }

@@ -420,6 +420,52 @@ func TestSynthesizeRowLineageColumnsPreservesExplicit(t *testing.T) {
 	assert.EqualValues(t, 3, rowOffset)
 }
 
+// TestSynthesizeRowLineageColumnsAppendsMissing covers the path where the
+// lineage columns are absent from the batch: they must be appended (in _row_id,
+// _last_updated_sequence_number order) and the input schema's metadata must
+// survive the rebuild.
+func TestSynthesizeRowLineageColumnsAppendsMissing(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	ctx := compute.WithAllocator(t.Context(), mem)
+	defer mem.AssertSize(t, 0)
+
+	firstRowID := int64(1000)
+	dataSeqNum := int64(5)
+	task := FileScanTask{FirstRowID: &firstRowID, DataSequenceNumber: &dataSeqNum}
+	rowOffset := int64(0)
+
+	md := arrow.NewMetadata([]string{"k"}, []string{"v"})
+	schema := arrow.NewSchema(
+		[]arrow.Field{{Name: "x", Type: arrow.PrimitiveTypes.Int64, Nullable: true}}, &md)
+	const nrows = 3
+	xBldr := array.NewInt64Builder(mem)
+	defer xBldr.Release()
+	xBldr.AppendValues([]int64{1, 2, 3}, nil)
+	xArr := xBldr.NewArray()
+	batch := array.NewRecordBatch(schema, []arrow.Array{xArr}, nrows)
+	xArr.Release()
+	defer batch.Release()
+
+	out, err := synthesizeRowLineageColumns(ctx, &rowOffset, task, batch)
+	require.NoError(t, err)
+	defer out.Release()
+
+	require.EqualValues(t, 3, out.NumCols())
+	assert.Equal(t, iceberg.RowIDColumnName, out.Schema().Field(1).Name)
+	assert.Equal(t, iceberg.LastUpdatedSequenceNumberColumnName, out.Schema().Field(2).Name)
+
+	rowIDCol := out.Column(1).(*array.Int64)
+	seqCol := out.Column(2).(*array.Int64)
+	for i := range nrows {
+		assert.EqualValues(t, 1000+int64(i), rowIDCol.Value(i), "row %d", i)
+		assert.EqualValues(t, 5, seqCol.Value(i), "row %d", i)
+	}
+
+	got, ok := out.Schema().Metadata().GetValue("k")
+	assert.True(t, ok, "input schema metadata must be preserved")
+	assert.Equal(t, "v", got)
+}
+
 // TestProjectionV3SelectRowLineageColumns verifies that explicitly selecting
 // _row_id (and _last_updated_sequence_number) on a v3 table yields a projection
 // containing those metadata columns, even though they are not declared in the

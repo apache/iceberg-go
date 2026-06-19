@@ -63,22 +63,17 @@ func IsMetadataColumn(fieldID int) bool {
 	return fieldID == RowIDFieldID || fieldID == LastUpdatedSequenceNumberFieldID
 }
 
-// SchemaWithRowLineage returns a new schema with both row-lineage metadata columns
-// (_row_id, _last_updated_sequence_number) appended to the given schema's fields.
-// Used when reading source files during a CoW rewrite or compaction so that row
-// identity and per-row update sequence are preserved in the output.
+// SchemaWithRowLineage appends both row-lineage metadata columns (_row_id,
+// _last_updated_sequence_number) so a CoW rewrite or compaction preserves them.
 func SchemaWithRowLineage(s *Schema) *Schema {
 	return SchemaWithRowLineageColumns(s, true, true)
 }
 
-// SchemaWithRowLineageColumns returns a new schema with the requested row-lineage
-// metadata columns appended: _row_id when rowID is set, _last_updated_sequence_number
-// when lastUpdatedSeq is set. Callers that synthesize these columns conditionally must
-// request exactly the ones they will materialize so the read schema stays aligned with
-// the produced batch.
+// SchemaWithRowLineageColumns appends the requested row-lineage columns: _row_id
+// when rowID, _last_updated_sequence_number when lastUpdatedSeq. Request exactly
+// the columns you will materialize so the read schema matches the produced batch.
 //
-// Idempotent: a column already present (by reserved field ID) is not appended again.
-// Always allocates a fresh field slice so it cannot alias the input schema's backing array.
+// Idempotent by reserved field ID; always clones the field slice (no aliasing).
 func SchemaWithRowLineageColumns(s *Schema, rowID, lastUpdatedSeq bool) *Schema {
 	if s == nil {
 		return nil
