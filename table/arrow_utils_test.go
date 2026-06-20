@@ -608,11 +608,6 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 			ice:              defaultGeometry,
 			geoarrowMetaJSON: `{"crs":"epsg:4326"}`,
 		},
-		{
-			name:             "geometry_epsg_4326_incorrect_type",
-			ice:              defaultGeometry,
-			geoarrowMetaJSON: `{"crs":"epsg:4326", "crs_type":"projjson"}`,
-		},
 
 		// Translated from arrow-rs geo logical type read tests (https://github.com/apache/arrow-rs/pull/10065)
 		// Geometry with no CRS should be GEOMETRY(srid:0)
@@ -802,6 +797,14 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 		require.ErrorContains(t, err, "projjson CRS not supported yet")
 
+		stringArrowType, err := geoarrow.NewWKBType().Deserialize(arrow.BinaryTypes.Binary,
+			`{"crs_type":"projjson","crs":"EPSG:4326"}`)
+		require.NoError(t, err)
+
+		_, err = table.ArrowTypeToIceberg(stringArrowType, false)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "CRS type projjson not supported for string CRS")
+
 		arrowType, err := geoarrow.NewWKBType().Deserialize(arrow.BinaryTypes.Binary,
 			`{"crs_type":"projjson","crs":{"id":{"authority":"OGC", "code":"CRS84"}}}`)
 		require.NoError(t, err)
@@ -826,7 +829,7 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 
 		_, err = table.ArrowTypeToIceberg(arrowTypeWithoutCRSType, false)
 		require.Error(t, err)
-		require.ErrorContains(t, err, "crs length too long")
+		require.ErrorContains(t, err, "CRS type wkt2:2019 not supported")
 	})
 
 	t.Run("schema", func(t *testing.T) {

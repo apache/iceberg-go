@@ -1871,6 +1871,43 @@ func checkCRSJSON(rawCrs json.RawMessage) bool {
 	return len(b) > 0 && b[0] == '{'
 }
 
+// errWKT2CRSNotSupported is returned for WKT2:2019 CRS definitions, which this
+// package does not support yet.
+var errWKT2CRSNotSupported = errors.New("CRS type wkt2:2019 not supported")
+
+// isWKT2CRSString reports whether crs looks like a WKT2 (ISO 19162) CRS
+// definition. It is a best-effort heuristic used only to surface the clearer
+// errWKT2CRSNotSupported message: a WKT2 string fails the authority:code check
+// regardless, so a missing keyword only changes the error text, not the
+// outcome. The list covers the WKT2:2019 CRS keywords and their long forms.
+func isWKT2CRSString(crs string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(crs))
+
+	for _, prefix := range []string{
+		"BOUNDCRS[",
+		"COMPOUNDCRS[",
+		"DERIVEDPROJCRS[",
+		"ENGCRS[",
+		"ENGINEERINGCRS[",
+		"GEODCRS[",
+		"GEODETICCRS[",
+		"GEOGCRS[",
+		"GEOGRAPHICCRS[",
+		"PARAMETRICCRS[",
+		"PROJCRS[",
+		"PROJECTEDCRS[",
+		"TIMECRS[",
+		"VERTCRS[",
+		"VERTICALCRS[",
+	} {
+		if strings.HasPrefix(upper, prefix) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 	if len(meta.CRS) == 0 {
 		return "srid:0", nil
@@ -1884,22 +1921,26 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 			return "", fmt.Errorf("invalid geoarrow CRS metadata: %w", err)
 		}
 
-		if strings.EqualFold(crs, "OGC:CRS84") || strings.EqualFold(crs, "EPSG:4326") {
-			return "OGC:CRS84", nil
-		}
-
 		switch meta.CRSType {
 		case geoarrow.CRSTypeSRID:
 			return "srid:" + crs, nil
+		case geoarrow.CRSTypePROJJSON:
+			return "", errors.New("CRS type projjson not supported for string CRS")
 		case geoarrow.CRSTypeWKT22019:
-			return "", errors.New("CRS type wkt2:2019 not supported")
-		default:
-			if len(crs) <= 32 {
-				return crs, nil
-			}
-
-			return "", errors.New("crs length too long")
+			return "", errWKT2CRSNotSupported
 		}
+
+		if strings.EqualFold(crs, "OGC:CRS84") || strings.EqualFold(crs, "EPSG:4326") {
+			return "OGC:CRS84", nil
+		}
+		if isWKT2CRSString(crs) {
+			return "", errWKT2CRSNotSupported
+		}
+		if authorityCodeCRS.MatchString(crs) {
+			return crs, nil
+		}
+
+		return "", errors.New("unsupported CRS string: expected authority:code form")
 	case checkCRSJSON(meta.CRS):
 		var crs map[string]json.RawMessage
 
@@ -1909,34 +1950,41 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 
 		idRaw, ok := crs["id"]
 		if !ok || len(idRaw) == 0 {
-			return "", errors.New("unsupported CRS")
+			return "", errors.New("unsupported CRS: missing id")
 		}
 
 		var id map[string]json.RawMessage
 		if err := json.Unmarshal(idRaw, &id); err != nil {
-			return "", errors.New("unsupported CRS")
+			return "", fmt.Errorf("unsupported CRS: invalid id: %w", err)
 		}
 
 		var authority string
-		if err := json.Unmarshal(id["authority"], &authority); err != nil || authority == "" {
-			return "", errors.New("unsupported CRS")
+		authorityRaw, ok := id["authority"]
+		if !ok || len(authorityRaw) == 0 {
+			return "", errors.New("unsupported CRS: missing id.authority")
+		}
+		if err := json.Unmarshal(authorityRaw, &authority); err != nil {
+			return "", fmt.Errorf("unsupported CRS: invalid id.authority: %w", err)
+		}
+		if authority == "" {
+			return "", errors.New("unsupported CRS: empty id.authority")
 		}
 
 		codeRaw := id["code"]
 		if len(codeRaw) == 0 {
-			return "", errors.New("unsupported CRS")
+			return "", errors.New("unsupported CRS: missing id.code")
 		}
 
 		var code string
 		if err := json.Unmarshal(codeRaw, &code); err != nil {
 			var codeNum json.Number
 			if err := json.Unmarshal(codeRaw, &codeNum); err != nil {
-				return "", errors.New("unsupported CRS")
+				return "", fmt.Errorf("unsupported CRS: invalid id.code: %w", err)
 			}
 			code = codeNum.String()
 		}
 		if code == "" {
-			return "", errors.New("unsupported CRS")
+			return "", errors.New("unsupported CRS: empty id.code")
 		}
 
 		authorityCode := authority + ":" + code

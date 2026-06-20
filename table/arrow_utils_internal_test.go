@@ -20,6 +20,7 @@ package table
 import (
 	"bytes"
 	"cmp"
+	"encoding/json"
 	"math"
 	"slices"
 	"testing"
@@ -489,5 +490,102 @@ func TestIcebergCRSToGeoArrowMetadata(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, meta.CRS)
 		assert.Empty(t, meta.CRSType)
+	})
+}
+
+func TestGeoArrowCRSToIcebergCRS(t *testing.T) {
+	stringCRS := func(s string) json.RawMessage {
+		raw, err := json.Marshal(s)
+		require.NoError(t, err)
+
+		return raw
+	}
+
+	t.Run("accepts long authority code string", func(t *testing.T) {
+		const crs = "EPSGAuthorityLongName:CODE-12345678901234567890"
+
+		got, err := geoArrowCRSToIcebergCRS(geoarrow.Metadata{CRS: stringCRS(crs)})
+		require.NoError(t, err)
+		assert.Equal(t, crs, got)
+	})
+
+	t.Run("rejects arbitrary short string", func(t *testing.T) {
+		_, err := geoArrowCRSToIcebergCRS(geoarrow.Metadata{CRS: stringCRS("custom")})
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "unsupported CRS string: expected authority:code form")
+	})
+
+	t.Run("rejects projjson string CRS", func(t *testing.T) {
+		_, err := geoArrowCRSToIcebergCRS(geoarrow.Metadata{
+			CRS:     stringCRS("EPSG:4326"),
+			CRSType: geoarrow.CRSTypePROJJSON,
+		})
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "CRS type projjson not supported for string CRS")
+	})
+
+	t.Run("bare WKT2 string uses not supported error", func(t *testing.T) {
+		_, err := geoArrowCRSToIcebergCRS(geoarrow.Metadata{
+			CRS: stringCRS(`GEOGCRS["WGS 84",DATUM["World Geodetic System 1984"]]`),
+		})
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "CRS type wkt2:2019 not supported")
+	})
+
+	t.Run("json object errors identify the failing member", func(t *testing.T) {
+		cases := []struct {
+			name    string
+			rawCRS  string
+			wantErr string
+		}{
+			{
+				name:    "missing id",
+				rawCRS:  `{"type":"GeographicCRS"}`,
+				wantErr: "unsupported CRS: missing id",
+			},
+			{
+				name:    "invalid id",
+				rawCRS:  `{"id":42}`,
+				wantErr: "unsupported CRS: invalid id",
+			},
+			{
+				name:    "missing authority",
+				rawCRS:  `{"id":{"code":4326}}`,
+				wantErr: "unsupported CRS: missing id.authority",
+			},
+			{
+				name:    "invalid authority",
+				rawCRS:  `{"id":{"authority":7,"code":4326}}`,
+				wantErr: "unsupported CRS: invalid id.authority",
+			},
+			{
+				name:    "empty authority",
+				rawCRS:  `{"id":{"authority":"","code":4326}}`,
+				wantErr: "unsupported CRS: empty id.authority",
+			},
+			{
+				name:    "missing code",
+				rawCRS:  `{"id":{"authority":"EPSG"}}`,
+				wantErr: "unsupported CRS: missing id.code",
+			},
+			{
+				name:    "invalid code",
+				rawCRS:  `{"id":{"authority":"EPSG","code":{}}}`,
+				wantErr: "unsupported CRS: invalid id.code",
+			},
+			{
+				name:    "empty code",
+				rawCRS:  `{"id":{"authority":"EPSG","code":""}}`,
+				wantErr: "unsupported CRS: empty id.code",
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := geoArrowCRSToIcebergCRS(geoarrow.Metadata{CRS: json.RawMessage(tc.rawCRS)})
+				require.Error(t, err)
+				assert.ErrorContains(t, err, tc.wantErr)
+			})
+		}
 	})
 }
