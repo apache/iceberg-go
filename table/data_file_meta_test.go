@@ -59,7 +59,7 @@ func parquetMetaFromSchema(t *testing.T, sch *iceberg.Schema, jsonRows string) (
 	return buf.Bytes(), rdr.MetaData()
 }
 
-func TestDataFileFromParquetMetadata_DataFile(t *testing.T) {
+func TestDataFileFromMetadata_DataFile(t *testing.T) {
 	sch := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
 		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
@@ -76,13 +76,14 @@ func TestDataFileFromParquetMetadata_DataFile(t *testing.T) {
 
 	const filePath = "s3://bucket/data/test-data-001.parquet"
 
-	df, err := table.DataFileFromParquetMetadata(table.ParquetDataFileArgs{
-		Schema:          sch,
-		Spec:            spec,
-		ParquetMetadata: pqMeta,
-		FilePath:        filePath,
-		FileSize:        int64(len(pqBytes)),
-		Content:         iceberg.EntryContentData,
+	df, err := table.DataFileFromMetadata(table.DataFileArgs{
+		Schema:   sch,
+		Spec:     spec,
+		Format:   iceberg.ParquetFile,
+		Metadata: pqMeta,
+		FilePath: filePath,
+		FileSize: int64(len(pqBytes)),
+		Content:  iceberg.EntryContentData,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, df)
@@ -100,7 +101,7 @@ func TestDataFileFromParquetMetadata_DataFile(t *testing.T) {
 	assert.Nil(t, df.EqualityFieldIDs(), "data files must not have equality field IDs")
 }
 
-func TestDataFileFromParquetMetadata_EqualityDeleteFile(t *testing.T) {
+func TestDataFileFromMetadata_EqualityDeleteFile(t *testing.T) {
 	keySchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 	)
@@ -110,10 +111,11 @@ func TestDataFileFromParquetMetadata_EqualityDeleteFile(t *testing.T) {
 
 	const filePath = "s3://bucket/data/eq-del-001.parquet"
 
-	df, err := table.DataFileFromParquetMetadata(table.ParquetDataFileArgs{
+	df, err := table.DataFileFromMetadata(table.DataFileArgs{
 		Schema:           keySchema,
 		Spec:             spec,
-		ParquetMetadata:  pqMeta,
+		Format:           iceberg.ParquetFile,
+		Metadata:         pqMeta,
 		FilePath:         filePath,
 		FileSize:         int64(len(pqBytes)),
 		Content:          iceberg.EntryContentEqDeletes,
@@ -129,7 +131,7 @@ func TestDataFileFromParquetMetadata_EqualityDeleteFile(t *testing.T) {
 	assert.Equal(t, []int{1}, df.EqualityFieldIDs())
 }
 
-func TestDataFileFromParquetMetadata_PositionalDeleteFile(t *testing.T) {
+func TestDataFileFromMetadata_PositionalDeleteFile(t *testing.T) {
 	spec := iceberg.NewPartitionSpec()
 
 	const dataFilePath = "s3://bucket/data/data-001.parquet"
@@ -144,13 +146,14 @@ func TestDataFileFromParquetMetadata_PositionalDeleteFile(t *testing.T) {
 
 	const filePath = "s3://bucket/data/pos-del-001.parquet"
 
-	df, err := table.DataFileFromParquetMetadata(table.ParquetDataFileArgs{
-		Schema:          iceberg.PositionalDeleteSchema,
-		Spec:            spec,
-		ParquetMetadata: pqMeta,
-		FilePath:        filePath,
-		FileSize:        int64(len(pqBytes)),
-		Content:         iceberg.EntryContentPosDeletes,
+	df, err := table.DataFileFromMetadata(table.DataFileArgs{
+		Schema:   iceberg.PositionalDeleteSchema,
+		Spec:     spec,
+		Format:   iceberg.ParquetFile,
+		Metadata: pqMeta,
+		FilePath: filePath,
+		FileSize: int64(len(pqBytes)),
+		Content:  iceberg.EntryContentPosDeletes,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, df)

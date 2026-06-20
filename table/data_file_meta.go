@@ -21,21 +21,19 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/iceberg-go"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 )
 
-// ParquetDataFileArgs collects everything needed to compute a fully
-// populated [iceberg.DataFile] (data, equality-delete, or positional-
-// delete) from a parquet file's in-heap [metadata.FileMetaData] without
-// performing any filesystem reads.
-type ParquetDataFileArgs struct {
-	// Schema is the Iceberg schema the parquet file's contents conform
-	// to. The parquet column chunks MUST carry per-leaf
-	// "PARQUET:field_id" metadata whose values match this schema's
-	// field IDs; otherwise the resulting per-column statistics will be
-	// empty because the column-path → field-ID mapping cannot resolve.
+// DataFileArgs collects everything needed to compute a fully populated
+// [iceberg.DataFile] (data, equality-delete, or positional-delete) from
+// a file's in-memory, format-specific metadata object without performing
+// any filesystem reads.
+type DataFileArgs struct {
+	// Schema is the Iceberg schema the file's contents conform to. The
+	// file's columns MUST carry per-leaf field-ID metadata whose values
+	// match this schema's field IDs (for Parquet this is the
+	// "PARQUET:field_id" key on each leaf).
 	Schema *iceberg.Schema
 
 	// Spec is the partition spec the resulting DataFile is bound to —
@@ -43,13 +41,19 @@ type ParquetDataFileArgs struct {
 	// *iceberg.UnpartitionedSpec.
 	Spec iceberg.PartitionSpec
 
-	// ParquetMetadata is the file-level footer captured in-process,
-	// usually from (*file.Writer).FileMetadata() after Close.
-	ParquetMetadata *metadata.FileMetaData
+	// Format identifies the on-disk file format of the file being
+	// described and selects the internal FileFormat implementation used
+	// to extract per-column statistics from Metadata.
+	Format iceberg.FileFormat
 
-	// FilePath is the fully qualified location the parquet bytes were
-	// written to (the same path that will be recorded in the manifest
-	// entry).
+	// Metadata is the format-specific, in-memory file metadata object
+	// produced by the external writer (for example
+	// *parquet/metadata.FileMetaData when Format is
+	// [iceberg.ParquetFile]).
+	Metadata any
+
+	// FilePath is the fully qualified location the file bytes were
+	// written to (the same path that will be recorded in the manifest entry).
 	FilePath string
 
 	// FileSize is the byte length of the object at FilePath. Must be
@@ -61,8 +65,7 @@ type ParquetDataFileArgs struct {
 	// [iceberg.EntryContentPosDeletes].
 	Content iceberg.ManifestEntryContent
 
-	// PartitionValues maps spec field ID → partition value for the
-	// identity-partitioned fields covered by Spec. Required when Spec
+	// PartitionValues maps spec field ID → partition value. Required when Spec
 	// is partitioned; leave nil/empty for unpartitioned tables.
 	PartitionValues map[int]any
 
@@ -84,28 +87,25 @@ type ParquetDataFileArgs struct {
 	EqualityFieldIDs []int
 }
 
-// DataFileFromParquetMetadata builds a fully populated [iceberg.DataFile]
-// from a parquet file's in-heap [metadata.FileMetaData], extracting per-
-// column statistics (column_sizes, value_counts, null_value_counts,
-// lower_bounds, upper_bounds), split offsets (= row-group start offsets),
-// and the manifest-entry shape required for the requested content type.
-// No filesystem reads are performed.
+// DataFileFromMetadata builds a fully populated [iceberg.DataFile] from a
+// file's in-memory, format-specific metadata object, extracting per-column
+// statistics (column_sizes, value_counts, null_value_counts, lower_bounds,
+// upper_bounds), split offsets, and the manifest-entry shape required for
+// the requested content type. The format-specific extraction is dispatched
+// through the internal FileFormat interface; no filesystem reads are
+// performed.
 //
 // The returned DataFile is intended to be handed to
 // [Transaction.AddDataFiles] (data files) or [Transaction.NewRowDelta]
-// (delete files); it is NOT committed automatically. The parquet bytes
-// described by args.ParquetMetadata must already have been uploaded to
+// (delete files); it is NOT committed automatically. The file bytes
+// described by args.Metadata must already have been uploaded to
 // args.FilePath.
-//
-// Returns an error when Schema/ParquetMetadata/FilePath are unset,
-// FileSize is non-positive, Content is outside the three valid values,
-// or the EqualityFieldIDs ↔ Content invariant is violated.
-func DataFileFromParquetMetadata(args ParquetDataFileArgs) (iceberg.DataFile, error) {
+func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 	if args.Schema == nil {
 		return nil, errors.New("schema is required")
 	}
-	if args.ParquetMetadata == nil {
-		return nil, errors.New("parquet metadata is required")
+	if args.Metadata == nil {
+		return nil, errors.New("file metadata is required")
 	}
 	if args.FilePath == "" {
 		return nil, errors.New("file path is required")
@@ -129,9 +129,9 @@ func DataFileFromParquetMetadata(args ParquetDataFileArgs) (iceberg.DataFile, er
 		return nil, fmt.Errorf("equalityFieldIDs must be empty for content %v", args.Content)
 	}
 
-	format := tblutils.GetFileFormat(iceberg.ParquetFile)
+	format := tblutils.GetFileFormat(args.Format)
 	if format == nil {
-		return nil, errors.New("parquet file format unavailable")
+		return nil, fmt.Errorf("unsupported file format: %s", args.Format)
 	}
 
 	statsPlan, err := computeStatsPlan(args.Schema, args.Properties)
@@ -145,13 +145,13 @@ func DataFileFromParquetMetadata(args ParquetDataFileArgs) (iceberg.DataFile, er
 	}
 
 	stats := format.DataFileStatsFromMeta(
-		args.ParquetMetadata,
+		args.Metadata,
 		statsPlan,
 		pathMapping,
 		tblutils.VariantFieldIDsFromSchema(args.Schema),
 	)
 	if stats == nil {
-		return nil, errors.New("failed to build data file stats from meta")
+		return nil, errors.New("failed to build data file stats from metadata")
 	}
 
 	if len(args.EqualityFieldIDs) > 0 {
@@ -167,7 +167,7 @@ func DataFileFromParquetMetadata(args ParquetDataFileArgs) (iceberg.DataFile, er
 		Schema:          args.Schema,
 		Spec:            args.Spec,
 		Path:            args.FilePath,
-		Format:          iceberg.ParquetFile,
+		Format:          args.Format,
 		Content:         args.Content,
 		FileSize:        args.FileSize,
 		PartitionValues: partitionValues,
