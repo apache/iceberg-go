@@ -618,8 +618,15 @@ func assertGeoArrowWKBType(t *testing.T, dt arrow.DataType, storage arrow.DataTy
 	require.True(t, ok, "expected *geoarrow.WKBType, got %T", dt)
 	assert.Equal(t, "geoarrow.wkb", wkbType.ExtensionName())
 	assert.True(t, arrow.TypeEqual(storage, wkbType.StorageType()))
-	assert.Equal(t, want.CRS, wkbType.Metadata().CRS)
-	assert.Equal(t, want.Edges, wkbType.Metadata().Edges)
+	meta := wkbType.Metadata()
+	assert.Equal(t, want.CRS, meta.CRS)
+	assert.Equal(t, want.Edges, meta.Edges)
+	if want.CRSType != "" {
+		assert.Equal(t, want.CRSType, meta.CRSType)
+	}
+	if want.Edges == geoarrow.EdgePlanar {
+		assert.NotEqual(t, geoarrow.EdgeSpherical, meta.Edges)
+	}
 
 	return wkbType
 }
@@ -717,27 +724,22 @@ func TestParquetGeoArrowExtensionMetadataRoundTrip(t *testing.T) {
 		name     string
 		idx      int
 		wantMeta geoarrow.Metadata
-		wantType geoarrow.EdgeInterpolation
 	}{
 		{
 			name: "explicit_srid_geometry", idx: 1,
-			wantMeta: geoarrow.Metadata{CRS: geoArrowCRS("4326"), Edges: geoarrow.EdgePlanar},
-			wantType: geoarrow.EdgePlanar,
+			wantMeta: geoarrow.Metadata{CRS: geoArrowCRS("4326"), CRSType: geoarrow.CRSTypeSRID, Edges: geoarrow.EdgePlanar},
 		},
 		{
 			name: "explicit_srid_geography", idx: 2,
-			wantMeta: geoarrow.Metadata{CRS: geoArrowCRS("4326"), Edges: geoarrow.EdgeVincenty},
-			wantType: geoarrow.EdgeVincenty,
+			wantMeta: geoarrow.Metadata{CRS: geoArrowCRS("4326"), CRSType: geoarrow.CRSTypeSRID, Edges: geoarrow.EdgeVincenty},
 		},
 		{
 			name: "default_crs_geometry", idx: 3,
-			wantMeta: geoarrow.Metadata{CRS: geoArrowCRS("OGC:CRS84"), Edges: geoarrow.EdgePlanar},
-			wantType: geoarrow.EdgePlanar,
+			wantMeta: geoarrow.Metadata{CRS: geoArrowCRS("OGC:CRS84"), CRSType: geoarrow.CRSTypeAuthorityCode, Edges: geoarrow.EdgePlanar},
 		},
 		{
 			name: "default_crs_geography", idx: 4,
-			wantMeta: geoarrow.Metadata{CRS: geoArrowCRS("OGC:CRS84"), Edges: geoarrow.EdgeSpherical},
-			wantType: geoarrow.EdgeSpherical,
+			wantMeta: geoarrow.Metadata{CRS: geoArrowCRS("OGC:CRS84"), CRSType: geoarrow.CRSTypeAuthorityCode, Edges: geoarrow.EdgeSpherical},
 		},
 	}
 
@@ -746,7 +748,6 @@ func TestParquetGeoArrowExtensionMetadataRoundTrip(t *testing.T) {
 			origType := assertGeoArrowWKBType(t, arrowSchema.Field(tt.idx).Type, arrow.BinaryTypes.Binary, tt.wantMeta)
 			rtType := assertGeoArrowWKBType(t, roundTripSchema.Field(tt.idx).Type, arrow.BinaryTypes.Binary, tt.wantMeta)
 			assert.Equal(t, origType.Metadata(), rtType.Metadata())
-			assert.Equal(t, tt.wantType, rtType.Metadata().Edges)
 		})
 	}
 
