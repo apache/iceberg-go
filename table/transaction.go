@@ -1866,6 +1866,8 @@ func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
 	s := &Scan{
 		metadata:       updatedMeta,
 		ioF:            t.tbl.fsF,
+		planner:        t.tbl.planner,
+		planningMode:   ScanPlanningLocal,
 		rowFilter:      iceberg.AlwaysTrue{},
 		selectedFields: []string{"*"},
 		caseSensitive:  true,

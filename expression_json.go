@@ -26,17 +26,20 @@
 //
 // Design decision: MarshalExpressionJSON emits Java ExpressionParser wire
 // format, including bare JSON booleans for AlwaysTrue/AlwaysFalse (`true` and
-// `false`). That intentionally differs from the REST OpenAPI Expression schema,
-// where true/false are represented as objects (`{"type":"true"}` and
-// `{"type":"false"}`). UnmarshalExpressionJSON must accept both forms so
-// clients can read Java-compatible responses and strictly spec-shaped payloads.
+// `false`). The Java REST reference uses the same parser for planTableScan
+// request filters, even though the REST OpenAPI Expression schema also models
+// true/false as objects (`{"type":"true"}` and `{"type":"false"}`).
+// UnmarshalExpressionJSON must accept both forms so clients can read Java-
+// compatible responses and strictly spec-shaped payloads.
 
 package iceberg
+
+import "fmt"
 
 // MarshalExpressionJSON serializes a boolean expression to the JSON format
 // produced by Java's ExpressionParser, for use as a REST scan-planning filter.
 func MarshalExpressionJSON(expr BooleanExpression) ([]byte, error) {
-	panic("unimplemented: proposed API for #1178")
+	return nil, fmt.Errorf("%w: expression JSON marshal", ErrNotImplemented)
 }
 
 // UnmarshalExpressionJSON parses a Java ExpressionParser-format expression,
@@ -44,5 +47,5 @@ func MarshalExpressionJSON(expr BooleanExpression) ([]byte, error) {
 // date/time/decimal/fixed fidelity and to bind residual filters returned by a
 // REST server.
 func UnmarshalExpressionJSON(data []byte, schema *Schema) (BooleanExpression, error) {
-	panic("unimplemented: proposed API for #1178")
+	return nil, fmt.Errorf("%w: expression JSON unmarshal", ErrNotImplemented)
 }

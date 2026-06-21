@@ -16,8 +16,10 @@
 // under the License.
 
 // This file is a PROPOSED public API surface for REST server-side scan
-// planning (apache/iceberg-go#1178). The bodies are intentionally
-// unimplemented; the file exists so the REST surface can be reviewed as Go.
+// planning (apache/iceberg-go#1178). The method bodies are intentionally
+// unimplemented stubs (returning ErrNotImplemented) so the REST surface can be
+// reviewed as Go — with one exception: PlanTableScanResponse.UnmarshalJSON
+// validates the status/plan-id union (with tests), added per review.
 // Endpoint capability discovery (Endpoint, SupportsEndpoint) lands separately
 // in the Phase 0 PR and is intentionally not redeclared here.
 
@@ -29,6 +31,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
 )
 
@@ -51,13 +54,13 @@ var ErrPlanExpired = fmt.Errorf("%w: scan plan expired", ErrRESTError)
 // SupportsPlanTableScan reports whether the server advertised the synchronous
 // plan endpoint.
 func (r *Catalog) SupportsPlanTableScan() bool {
-	panic("unimplemented: proposed API for #1178")
+	return false
 }
 
 // SupportsFullRemoteScanPlanning reports whether the server advertised all four
 // scan-planning endpoints (plan, fetch-result, cancel, fetch-tasks).
 func (r *Catalog) SupportsFullRemoteScanPlanning() bool {
-	panic("unimplemented: proposed API for #1178")
+	return false
 }
 
 // --- table.ScanPlanner implementation ---------------------------------------
@@ -65,13 +68,13 @@ func (r *Catalog) SupportsFullRemoteScanPlanning() bool {
 // SupportsRemoteScanPlanning reports whether this catalog can complete a remote
 // plan end-to-end; backed by the split capability checks above.
 func (r *Catalog) SupportsRemoteScanPlanning() bool {
-	panic("unimplemented: proposed API for #1178")
+	return false
 }
 
 // PlanFiles plans a scan server-side and returns tasks (and, optionally, a
 // plan-scoped FileIO) for the table to read.
 func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) (table.ScanPlanningResult, error) {
-	panic("unimplemented: proposed API for #1178")
+	return table.ScanPlanningResult{}, fmt.Errorf("%w: REST scan planning", iceberg.ErrNotImplemented)
 }
 
 // --- Low-level client methods -----------------------------------------------
@@ -79,32 +82,32 @@ func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) 
 // PlanTableScan submits a scan plan. The result is either completed inline,
 // submitted (returns a plan-id to poll), or failed.
 func (r *Catalog) PlanTableScan(ctx context.Context, ident table.Identifier, req PlanTableScanRequest) (PlanTableScanResponse, error) {
-	panic("unimplemented: proposed API for #1178")
+	return PlanTableScanResponse{}, fmt.Errorf("%w: plan table scan", iceberg.ErrNotImplemented)
 }
 
 // FetchPlanningResult polls a previously submitted plan.
 func (r *Catalog) FetchPlanningResult(ctx context.Context, ident table.Identifier, planID string) (FetchPlanningResultResponse, error) {
-	panic("unimplemented: proposed API for #1178")
+	return FetchPlanningResultResponse{}, fmt.Errorf("%w: fetch planning result", iceberg.ErrNotImplemented)
 }
 
 // CancelPlanning cancels a server-side plan. Callers should cancel on context
 // cancellation using a detached context with a short timeout.
 func (r *Catalog) CancelPlanning(ctx context.Context, ident table.Identifier, planID string) error {
-	panic("unimplemented: proposed API for #1178")
+	return fmt.Errorf("%w: cancel planning", iceberg.ErrNotImplemented)
 }
 
 // FetchScanTasks fetches the scan tasks for a plan-task handle returned by a
 // completed plan.
 func (r *Catalog) FetchScanTasks(ctx context.Context, ident table.Identifier, req FetchScanTasksRequest) (FetchScanTasksResponse, error) {
-	panic("unimplemented: proposed API for #1178")
+	return FetchScanTasksResponse{}, fmt.Errorf("%w: fetch scan tasks", iceberg.ErrNotImplemented)
 }
 
 // WaitForPlan polls a submitted plan to completion using jittered backoff,
-// cancelling the server-side plan if the context is cancelled. It returns an
-// error if the plan is still submitted after the wait, cancelled, failed, or
-// expired.
+// cancelling the server-side plan if the context is cancelled. The total wait is
+// bounded by the context deadline; it returns an error if the deadline passes
+// while still submitted, or if the plan is cancelled, failed, or expired.
 func (r *Catalog) WaitForPlan(ctx context.Context, ident table.Identifier, planID string, opts WaitForPlanOptions) (CompletedPlanningResult, error) {
-	panic("unimplemented: proposed API for #1178")
+	return CompletedPlanningResult{}, fmt.Errorf("%w: wait for plan", iceberg.ErrNotImplemented)
 }
 
 // --- Wire types (sketch) ----------------------------------------------------
@@ -127,38 +130,51 @@ const (
 )
 
 // PlanningError is the ErrorModel payload carried by a failed planning result.
-type PlanningError struct {
-	Message string   `json:"message"`
-	Type    string   `json:"type"`
-	Code    int      `json:"code"`
-	Stack   []string `json:"stack,omitempty"`
-}
+type PlanningError = errorResponse
+
+// RESTFileScanTask is the REST FileScanTask wire payload. The REST prefix
+// avoids confusion with table.FileScanTask, the decoded domain type. The
+// scan-task decoder PR fills in the content-file and residual fields; the named
+// type is committed here so ScanTasks does not expose json.RawMessage.
+type RESTFileScanTask struct{}
+
+// RESTDeleteFile is the REST DeleteFile wire payload. The scan-task decoder PR
+// fills in the position/equality delete-file variants.
+type RESTDeleteFile struct{}
 
 // ScanTasks carries the task payload shared by completed planning responses and
 // fetchScanTasks responses. Task/delete payload decoding lands with the
 // scan-task decoder PR.
 type ScanTasks struct {
-	PlanTasks     []string        `json:"plan-tasks,omitempty"`
-	FileScanTasks json.RawMessage `json:"file-scan-tasks,omitempty"`
-	DeleteFiles   json.RawMessage `json:"delete-files,omitempty"`
+	PlanTasks     []string           `json:"plan-tasks,omitempty"`
+	FileScanTasks []RESTFileScanTask `json:"file-scan-tasks,omitempty"`
+	DeleteFiles   []RESTDeleteFile   `json:"delete-files,omitempty"`
 }
 
 // CompletedPlanningResult is the completed arm of the planning-result union.
-// PlanID is required by the initial planTableScan response's
-// CompletedPlanningWithIDResult arm and omitted by fetchPlanningResult.
+// planTableScan carries the plan-id on PlanTableScanResponse; fetchPlanningResult
+// omits it.
 type CompletedPlanningResult struct {
 	Status PlanStatus `json:"status"`
-	PlanID *string    `json:"plan-id,omitempty"`
 	ScanTasks
 	StorageCredentials []StorageCredential `json:"storage-credentials,omitempty"`
 }
 
 // PlanTableScanRequest is the POST .../plan request body. Filter is the
 // ExpressionParser-format JSON produced by iceberg.MarshalExpressionJSON.
+//
+// Point-in-time only for now: the spec's incremental start-snapshot-id /
+// end-snapshot-id fields are deliberately omitted and land with the incremental
+// phase, together with the matching fields on table.ScanPlanningRequest, so the
+// wire type and the seam stay in agreement.
 type PlanTableScanRequest struct {
+	// IdempotencyKey is sent as the Idempotency-Key header, not in the JSON body.
+	IdempotencyKey *string `json:"-"`
+	// AccessDelegation is sent as the X-Iceberg-Access-Delegation header, not
+	// in the JSON body. Nil uses the catalog default.
+	AccessDelegation *string `json:"-"`
+
 	SnapshotID        *int64          `json:"snapshot-id,omitempty"`
-	StartSnapshotID   *int64          `json:"start-snapshot-id,omitempty"`
-	EndSnapshotID     *int64          `json:"end-snapshot-id,omitempty"`
 	Select            []string        `json:"select,omitempty"`
 	Filter            json.RawMessage `json:"filter,omitempty"`
 	MinRowsRequested  *int64          `json:"min-rows-requested,omitempty"`
@@ -169,17 +185,38 @@ type PlanTableScanRequest struct {
 
 // PlanTableScanResponse is the POST .../plan response. The spec models this as
 // a `status`-discriminated union; the flat struct carries every arm's fields
-// with omitempty so none are discarded. Task/delete RawMessage payloads are
-// decoded by the scan-task decoder PR. PlanID is required for submitted and
-// completed responses from planTableScan; implementations must reject a missing
-// PlanID for either status. A cancelled status is invalid here and must be
-// treated as an error.
+// with omitempty so none are discarded. Task/delete payloads are filled in by
+// the scan-task decoder PR. Per the spec's CompletedPlanningWithIDResult, plan-id
+// is required for both submitted and completed responses here; the wire decoder
+// must validate PlanID != nil at unmarshal (not rely on the omitempty pointer),
+// since the caller needs it to CancelPlanning and release server resources. A
+// cancelled status is invalid for this endpoint and must be treated as an error.
 type PlanTableScanResponse struct {
 	Status PlanStatus     `json:"status"`
 	PlanID *string        `json:"plan-id,omitempty"`
 	Error  *PlanningError `json:"error,omitempty"`
 	ScanTasks
 	StorageCredentials []StorageCredential `json:"storage-credentials,omitempty"`
+}
+
+func (r *PlanTableScanResponse) UnmarshalJSON(data []byte) error {
+	type planTableScanResponse PlanTableScanResponse
+	var resp planTableScanResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return err
+	}
+
+	switch resp.Status {
+	case PlanStatusCompleted, PlanStatusSubmitted:
+		if resp.PlanID == nil {
+			return fmt.Errorf("%w: planTableScan response with status %q missing plan-id", ErrRESTError, resp.Status)
+		}
+	case PlanStatusCancelled:
+		return fmt.Errorf("%w: planTableScan response has invalid status %q", ErrRESTError, resp.Status)
+	}
+
+	*r = PlanTableScanResponse(resp)
+	return nil
 }
 
 // FetchPlanningResultResponse is the GET .../plan/{plan-id} poll response. Same
@@ -193,6 +230,9 @@ type FetchPlanningResultResponse struct {
 
 // FetchScanTasksRequest is the POST .../tasks request body.
 type FetchScanTasksRequest struct {
+	// IdempotencyKey is sent as the Idempotency-Key header, not in the JSON body.
+	IdempotencyKey *string `json:"-"`
+
 	PlanTask string `json:"plan-task"`
 }
 
@@ -203,9 +243,11 @@ type FetchScanTasksResponse struct {
 	ScanTasks
 }
 
-// WaitForPlanOptions tunes the polling loop. Defaults should be conservative.
+// WaitForPlanOptions tunes the polling backoff. The total wait is bounded by the
+// caller's context deadline (context.WithTimeout). There is deliberately no
+// Timeout field to avoid duplicating the context and the zero-value footgun.
+// Defaults should be conservative.
 type WaitForPlanOptions struct {
 	MinDelay time.Duration
 	MaxDelay time.Duration
-	Timeout  time.Duration
 }

@@ -109,9 +109,10 @@ func init() {
 }
 
 type errorResponse struct {
-	Message string `json:"message"`
-	Type    string `json:"type"`
-	Code    int    `json:"code"`
+	Message string   `json:"message"`
+	Type    string   `json:"type"`
+	Code    int      `json:"code"`
+	Stack   []string `json:"stack,omitempty"`
 
 	wrapping error
 }

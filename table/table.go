@@ -81,6 +81,7 @@ type Table struct {
 	metadataLocation string
 	cat              CatalogIO
 	fsF              FSysF
+	planner          ScanPlanner
 }
 
 func (t Table) Equals(other Table) bool {
@@ -831,6 +832,8 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 	s := &Scan{
 		metadata:       t.metadata,
 		ioF:            t.fsF,
+		planner:        t.planner,
+		planningMode:   ScanPlanningLocal,
 		rowFilter:      iceberg.AlwaysTrue{},
 		selectedFields: []string{"*"},
 		caseSensitive:  true,
@@ -847,13 +850,27 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 	return s
 }
 
+// New constructs a Table. If cat implements ScanPlanner — as rest.Catalog does
+// for servers that support remote scan planning — it is wired as the table's
+// planner so (*Scan).PlanFiles can delegate to it; catalogs that do not
+// implement ScanPlanner leave planner nil and planning stays local. This is the
+// concrete Catalog -> Table -> Scan wiring for #1178: no New signature change
+// and no catalog accessor are needed, because the catalog already satisfies
+// ScanPlanner.
 func New(ident Identifier, meta Metadata, metadataLocation string, fsF FSysF, cat CatalogIO) *Table {
+	// A catalog that supports server-side scan planning implements ScanPlanner.
+	var planner ScanPlanner
+	if p, ok := cat.(ScanPlanner); ok {
+		planner = p
+	}
+
 	return &Table{
 		identifier:       ident,
 		metadata:         meta,
 		metadataLocation: metadataLocation,
 		fsF:              fsF,
 		cat:              cat,
+		planner:          planner,
 	}
 }
 

@@ -186,6 +186,8 @@ func isDeletionVector(df iceberg.DataFile) bool {
 type Scan struct {
 	metadata       Metadata
 	ioF            FSysF
+	planner        ScanPlanner
+	planningMode   ScanPlanningMode
 	rowFilter      iceberg.BooleanExpression
 	selectedFields []string
 	caseSensitive  bool

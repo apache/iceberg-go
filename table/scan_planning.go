@@ -16,9 +16,11 @@
 // under the License.
 
 // This file is a PROPOSED public API surface for REST server-side scan
-// planning (apache/iceberg-go#1178). The bodies are intentionally
-// unimplemented; the file exists so the seam can be reviewed as Go rather
-// than prose. Nothing here changes existing behavior.
+// planning (apache/iceberg-go#1178). It defines the table-side seam — the
+// option, request/result types, and the ScanPlanner interface (implemented by
+// catalog/rest) — so it can be reviewed as Go rather than prose.
+// WithScanPlanningMode records the requested mode on the Scan, but nothing reads
+// it until scanner delegation lands, so nothing here changes existing behavior.
 
 package table
 
@@ -56,10 +58,7 @@ const (
 // WithScanPlanningMode sets the scan-planning mode for a scan. The default is
 // ScanPlanningLocal unless the REST table config requires server planning.
 func WithScanPlanningMode(mode ScanPlanningMode) ScanOption {
-	// The panic is deferred to option application, not construction: an
-	// unimplemented option must not blow up when an options slice is built,
-	// only if it is actually applied to a Scan.
-	return func(*Scan) { panic("unimplemented: proposed API for #1178") }
+	return func(scan *Scan) { scan.planningMode = mode }
 }
 
 // ScanPlanningRequest is the input a Scan hands to a ScanPlanner. It carries
@@ -84,8 +83,11 @@ type ScanPlanningRequest struct {
 	StatsFields      []string
 	// CaseSensitive must carry the Scan's value (which defaults to true), not
 	// Go's false zero value, or the wire request would flip the spec default.
-	CaseSensitive     bool
-	UseSnapshotSchema bool
+	// Nil means use the scan default.
+	CaseSensitive *bool
+	// UseSnapshotSchema is a pointer to distinguish the spec default from an
+	// explicit false when the scanner-delegation phase binds it to table config.
+	UseSnapshotSchema *bool
 }
 
 // PlanIO lazily loads the FileIO that should be used to read a planned scan.
@@ -116,9 +118,8 @@ type ScanPlanner interface {
 	PlanFiles(context.Context, ScanPlanningRequest) (ScanPlanningResult, error)
 }
 
-// Proposed Scan integration, added in the scanner-delegation phase. Sketched
-// here (not declared) to show how the seam wires into the existing Scan, whose
-// fields live in scanner.go:
+// Scan integration, added here as inert fields and completed in the
+// scanner-delegation phase:
 //
 //	type Scan struct {
 //		// ...existing fields...
@@ -126,8 +127,12 @@ type ScanPlanner interface {
 //		planner      ScanPlanner      // non-nil only when the catalog supplies one
 //	}
 //
+// table.New sets Table.planner when the supplied CatalogIO also implements
+// ScanPlanner; Table.Scan copies that planner into Scan. This chooses the
+// Catalog -> Table -> Scan wiring now, while keeping (*Scan).PlanFiles on the
+// existing local path until delegation lands.
+//
 // (*Scan).PlanFiles resolves planningMode and, for remote/auto with a capable
 // planner, delegates to planner.PlanFiles; otherwise it runs the existing local
 // path unchanged. The compile-time `var _ table.ScanPlanner = (*Catalog)(nil)`
-// in catalog/rest proves the seam is satisfiable, but not this wiring, which
-// arrives with scanner delegation.
+// in catalog/rest proves the REST catalog satisfies the planner interface.
