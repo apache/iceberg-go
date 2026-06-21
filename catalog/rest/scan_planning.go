@@ -216,6 +216,7 @@ func (r *PlanTableScanResponse) UnmarshalJSON(data []byte) error {
 	}
 
 	*r = PlanTableScanResponse(resp)
+
 	return nil
 }
 
