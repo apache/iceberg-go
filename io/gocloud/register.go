@@ -22,6 +22,7 @@ import (
 	"net/url"
 
 	icebergio "github.com/apache/iceberg-go/io"
+	"gocloud.dev/blob"
 )
 
 func init() {
@@ -38,7 +39,13 @@ func registerS3Schemes() {
 			return nil, err
 		}
 
-		return createBlobFS(ctx, bucket, defaultKeyExtractor(parsed.Host)), nil
+		opener := func(ctx context.Context, bucketName string) (*blob.Bucket, error) {
+			u := &url.URL{Scheme: parsed.Scheme, Host: bucketName}
+
+			return createS3Bucket(ctx, u, props)
+		}
+
+		return createMultiBucketBlobFS(ctx, bucket, parsed.Host, opener), nil
 	}
 	icebergio.Register("s3", s3Factory)
 	icebergio.Register("s3a", s3Factory)
