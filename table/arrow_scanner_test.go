@@ -95,7 +95,7 @@ func TestEnrichRecordsWithPosDeleteFields(t *testing.T) {
 				}
 			}()
 
-			enrichFn := enrichRecordsWithPosDeleteFields(ctx, &mockDataFile{path: "file://test_path.parquet"})
+			enrichFn := enrichRecordsWithPosDeleteFields(ctx, &mockDataFile{path: "file://test_path.parquet"}, (&rowPositionSource{}).cursor())
 			for i, b := range tc.inputBatches {
 				out, err := enrichFn(b)
 				require.NoError(t, err)

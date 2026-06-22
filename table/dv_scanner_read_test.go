@@ -296,7 +296,7 @@ func TestFilterByDeletionVector(t *testing.T) {
 	for _, p := range []uint64{1, 3, 7, 9} {
 		bitmap.Set(p)
 	}
-	filter := filterByDeletionVector(ctx, bitmap, 10)
+	filter := filterByDeletionVector(ctx, bitmap, 10, (&rowPositionSource{}).cursor())
 
 	mkBatch := func(start, end int64) arrow.RecordBatch {
 		bldr := array.NewInt64Builder(mem)

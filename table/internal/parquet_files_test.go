@@ -957,44 +957,55 @@ func TestBloomFilterRowGroupPruning(t *testing.T) {
 
 	t.Run("value in RG0 prunes RG1", func(t *testing.T) {
 		rdr := openBloomTestReader(t, data)
+		var survivors []internal.RowGroupSpan
 		tester := &internal.ParquetRowGroupTester{
 			StatsFn: alwaysKeep,
 			BloomPreds: []internal.RowGroupBloomPred{
 				{FieldID: 1, PhysBytes: [][]byte{int32PhysBytes(50)}}, // 50 is in RG0
 			},
+			Survivors: &survivors,
 		}
 		rr, err := rdr.GetRecords(ctx, cols, tester)
 		require.NoError(t, err)
 
 		assert.Equal(t, int64(rgSize), countRecords(t, rr), "only RG0 rows expected")
+		assert.Equal(t, []internal.RowGroupSpan{{FirstRowPos: 0, NumRows: rgSize}}, survivors,
+			"surviving RG0 keeps file position 0")
 	})
 
 	t.Run("value in RG1 prunes RG0", func(t *testing.T) {
 		rdr := openBloomTestReader(t, data)
+		var survivors []internal.RowGroupSpan
 		tester := &internal.ParquetRowGroupTester{
 			StatsFn: alwaysKeep,
 			BloomPreds: []internal.RowGroupBloomPred{
 				{FieldID: 1, PhysBytes: [][]byte{int32PhysBytes(150)}}, // 150 is in RG1
 			},
+			Survivors: &survivors,
 		}
 		rr, err := rdr.GetRecords(ctx, cols, tester)
 		require.NoError(t, err)
 
 		assert.Equal(t, int64(rgSize), countRecords(t, rr), "only RG1 rows expected")
+		assert.Equal(t, []internal.RowGroupSpan{{FirstRowPos: rgSize, NumRows: rgSize}}, survivors,
+			"surviving RG1 keeps its file position past the bloom-pruned RG0")
 	})
 
 	t.Run("value absent from all row groups skips all", func(t *testing.T) {
 		rdr := openBloomTestReader(t, data)
+		var survivors []internal.RowGroupSpan
 		tester := &internal.ParquetRowGroupTester{
 			StatsFn: alwaysKeep,
 			BloomPreds: []internal.RowGroupBloomPred{
 				{FieldID: 1, PhysBytes: [][]byte{int32PhysBytes(999)}}, // 999 not in either RG
 			},
+			Survivors: &survivors,
 		}
 		rr, err := rdr.GetRecords(ctx, cols, tester)
 		require.NoError(t, err)
 
 		assert.Equal(t, int64(0), countRecords(t, rr), "no rows expected when value absent")
+		assert.Empty(t, survivors, "no surviving row groups when value is absent everywhere")
 	})
 
 	t.Run("In predicate with a value in each RG keeps both", func(t *testing.T) {

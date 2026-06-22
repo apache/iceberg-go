@@ -36,9 +36,9 @@ import (
 // TestMergeOnReadDeleteAcrossPrunedRowGroups guards the row-group pruning hazard
 // in generated position deletes: a merge-on-read DELETE whose filter prunes a
 // leading row group must still delete the right physical rows. enrichRecords-
-// WithPosDeleteFields stamps each surviving row's position by counting emitted
-// rows, so if the reader skips a pruned row group the positions are off by the
-// pruned group's size and the wrong rows get deleted.
+// WithPosDeleteFields stamps each surviving row's position from a rowPositionCursor
+// seeded with the surviving row groups, so a pruned group's rows are still counted
+// and the survivors keep their original file positions.
 //
 // The file has two row groups (ids 1..5, then 6..10). Deleting id == 7 matches
 // only the second group, so the first is pruned by stats; a dense position
