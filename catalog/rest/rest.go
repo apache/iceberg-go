@@ -1143,6 +1143,15 @@ func (r *Catalog) tableFromResponse(_ context.Context, identifier []string, meta
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}
+	// Opt-in: POST scan/commit reports to the catalog's metrics endpoint, but
+	// only when enabled and the server advertises the endpoint.
+	if config.GetBool(keyReportMetricsEnabled, false) && r.endpoints.check(endpointReportMetrics) == nil {
+		if ns, tbl, idErr := r.splitIdentForPath(identifier); idErr == nil {
+			if path, pErr := endpointReportMetrics.reqPath(ns, tbl); pErr == nil {
+				reporter = metrics.Combine(reporter, &restMetricsReporter{baseURI: r.baseURI, cl: r.cl, path: path})
+			}
+		}
+	}
 
 	return table.New(
 		identifier,
