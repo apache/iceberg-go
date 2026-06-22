@@ -252,10 +252,10 @@ func (c *Catalog) ensureTablesExist() error {
 		return err
 	}
 
-	return c.migrateVOSchema(ctx)
+	return c.migrateV0Schema(ctx)
 }
 
-func (c *Catalog) migrateVOSchema(ctx context.Context) error {
+func (c *Catalog) migrateV0Schema(ctx context.Context) error {
 	hasCol, probeErr := c.icebergTypeColumnExists(ctx)
 	if probeErr != nil {
 		log.Printf("WARNING: skipping V0 schema migration; iceberg_type column probe failed: %v", probeErr)
