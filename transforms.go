@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
@@ -1190,7 +1191,7 @@ func truncateArray[T LiteralType](name string, pred BoundLiteralPredicate, fn fu
 func literalLen(lit Literal) int {
 	switch l := lit.(type) {
 	case StringLiteral:
-		return len(l)
+		return utf8.RuneCountInString(string(l))
 	case BinaryLiteral:
 		return len(l)
 	case FixedLiteral:
