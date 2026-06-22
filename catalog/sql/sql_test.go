@@ -438,6 +438,66 @@ func (s *SqliteCatalogTestSuite) TestV0SchemaListAndDropAcceptNullIcebergType() 
 	s.Equal(0, remaining, "DropTable must delete rows with iceberg_type IS NULL")
 }
 
+func (s *SqliteCatalogTestSuite) TestV0SchemaLoadCommitRenameAcceptNullIcebergType() {
+	sqldb := s.getDB()
+
+	cat := s.getCatalogSqlite()
+	ctx := context.Background()
+
+	tblID := s.randomTableIdentifier()
+	ns := catalog.NamespaceFromIdent(tblID)
+	s.Require().NoError(cat.CreateNamespace(ctx, ns, nil))
+
+	tbl, err := cat.CreateTable(ctx, tblID, tableSchemaNested)
+	s.Require().NoError(err)
+	s.Equal(tblID, tbl.Identifier())
+
+	nullIcebergType := func(ident table.Identifier) {
+		res, exErr := sqldb.Exec(
+			`UPDATE iceberg_tables SET iceberg_type = NULL `+
+				`WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?`,
+			"default",
+			strings.Join(catalog.NamespaceFromIdent(ident), "."),
+			catalog.TableNameFromIdent(ident),
+		)
+		s.Require().NoError(exErr)
+		n, raErr := res.RowsAffected()
+		s.Require().NoError(raErr)
+		s.Require().EqualValues(1, n, "test setup: expected exactly one row to be NULLed")
+	}
+	nullIcebergType(tblID)
+
+	loaded, err := cat.LoadTable(ctx, tblID)
+	s.Require().NoError(err, "LoadTable must accept rows with iceberg_type IS NULL")
+	s.Equal(tblID, loaded.Identifier())
+
+	tx := loaded.NewTransaction()
+	s.Require().NoError(tx.SetProperties(iceberg.Properties{"v0.commit.test": "ok"}))
+	_, err = tx.Commit(ctx)
+	s.Require().NoError(err, "CommitTable must accept rows with iceberg_type IS NULL")
+
+	var icebergType sql.NullString
+	err = sqldb.QueryRow(
+		`SELECT iceberg_type FROM iceberg_tables WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?`,
+		"default",
+		strings.Join(ns, "."),
+		catalog.TableNameFromIdent(tblID),
+	).Scan(&icebergType)
+	s.Require().NoError(err)
+	s.True(icebergType.Valid, "CommitTable on a V0 row must stamp iceberg_type back to TABLE")
+	s.Equal(sqlcat.TableType, icebergType.String)
+
+	nullIcebergType(tblID)
+
+	toID := s.randomTableIdentifier()
+	toNs := catalog.NamespaceFromIdent(toID)
+	s.Require().NoError(cat.CreateNamespace(ctx, toNs, nil))
+
+	renamed, err := cat.RenameTable(ctx, tblID, toID)
+	s.Require().NoError(err, "RenameTable must accept rows with iceberg_type IS NULL")
+	s.Equal(toID, renamed.Identifier())
+}
+
 func (s *SqliteCatalogTestSuite) TestCatalogNameMatchesLoaderArg() {
 	ctx := context.Background()
 
