@@ -322,10 +322,14 @@ func (s *RollingDataWriterTestSuite) TestAbortWithZeroRowsWritten() {
 	}, nil)
 
 	loc := filepath.ToSlash(s.T().TempDir())
-	fw := s.createFileWriter(loc, arrSchema, "test-abort-zero-rows.parquet")
+	fileName := "test-abort-zero-rows.parquet"
+	filePath := filepath.Join(loc, fileName)
+	fw := s.createFileWriter(loc, arrSchema, fileName)
 
 	// Abort without writing any rows must not panic.
 	s.Require().NoError(fw.Abort())
+	_, err := os.Stat(filePath)
+	s.True(os.IsNotExist(err), "abort should remove the incomplete file")
 }
 
 func (s *RollingDataWriterTestSuite) TestStreamErrorPathUsesAbort() {
@@ -355,6 +359,20 @@ func (s *RollingDataWriterTestSuite) TestStreamErrorPathUsesAbort() {
 
 	s.Require().NoError(writer.Add(badRecord))
 	s.Require().Error(writer.closeAndWait())
+
+	var files []string
+	err := filepath.Walk(loc, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			files = append(files, path)
+		}
+
+		return nil
+	})
+	s.Require().NoError(err)
+	s.Empty(files, "deferred abort should remove the incomplete file")
 }
 
 func (s *RollingDataWriterTestSuite) TestBytesWrittenReflectsCompressedSize() {
