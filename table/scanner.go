@@ -26,6 +26,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -653,10 +654,13 @@ func (scan *Scan) fetchPartitionSpecFilteredManifests(ctx context.Context) ([]ic
 		return nil, err
 	}
 
-	return scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema)
+	return scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema, &scanMetricsAccumulator{})
 }
 
-func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(ctx context.Context, schema *iceberg.Schema) ([]iceberg.ManifestFile, error) {
+// fetchPartitionSpecFilteredManifestsWithSchema filters the snapshot's manifests
+// using the given schema. It records total/scanned/skipped manifest counts
+// (split by data vs delete content) into acc.
+func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(ctx context.Context, schema *iceberg.Schema, acc *scanMetricsAccumulator) ([]iceberg.ManifestFile, error) {
 	snap, err := scan.ResolveSnapshot()
 	if err != nil {
 		return nil, err
@@ -682,6 +686,13 @@ func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(ctx context.Cont
 	})
 	filtered := make([]iceberg.ManifestFile, 0, len(manifestList))
 	for _, mf := range manifestList {
+		isDelete := mf.ManifestContent() == iceberg.ManifestContentDeletes
+		if isDelete {
+			acc.totalDeleteManifests++
+		} else {
+			acc.totalDataManifests++
+		}
+
 		eval, err := manifestEvaluators.Get(int(mf.PartitionSpecID()))
 		if err != nil {
 			return nil, fmt.Errorf("failed to build manifest evaluator for spec %d: %w", mf.PartitionSpecID(), err)
@@ -691,7 +702,16 @@ func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(ctx context.Cont
 			return nil, fmt.Errorf("failed to evaluate manifest %s: %w", mf.FilePath(), err)
 		}
 		if use {
+			if isDelete {
+				acc.scannedDeleteManifests++
+			} else {
+				acc.scannedDataManifests++
+			}
 			filtered = append(filtered, mf)
+		} else if isDelete {
+			acc.skippedDeleteManifests++
+		} else {
+			acc.skippedDataManifests++
 		}
 	}
 
@@ -788,8 +808,11 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 	return entries, nil
 }
 
-// PlanFiles orchestrates the fetching and filtering of manifests, and then
-// building a list of FileScanTasks that match the current Scan criteria.
+// PlanFiles orchestrates the fetching and filtering of manifests, building a
+// list of FileScanTasks that match the current Scan criteria. When planning
+// happens locally it times the whole operation and emits a ScanReport to the
+// scan's reporter on success; remote (server-side) planning reports its own
+// metrics and does not emit here.
 func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	if scan.asOfTimestamp != nil {
 		snapshot, err := scan.ResolveSnapshot()
@@ -812,6 +835,30 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 		return nil, fmt.Errorf("%w: unknown scan planning mode %q", iceberg.ErrInvalidArgument, scan.planningMode)
 	}
 
+	start := time.Now()
+	var acc scanMetricsAccumulator
+
+	results, err := scan.planFilesLocal(ctx, &acc)
+	if err != nil {
+		return nil, err
+	}
+
+	// Building the report is skipped for the no-op reporter — the opt-in default
+	// set by Table.Scan, and the nil-reporter case for scans constructed directly
+	// in tests (see Reporter, which maps nil to NopReporter). A NopReporter
+	// discards the report, so assembling one would be pure overhead.
+	rep := scan.Reporter()
+	if _, isNop := rep.(metrics.NopReporter); !isNop {
+		rep.Report(ctx, scan.buildScanReport(&acc, time.Since(start)))
+	}
+
+	return results, nil
+}
+
+// planFilesLocal performs local scan planning: it reads and filters the
+// snapshot's manifests, builds the matching FileScanTasks, and records planning
+// metrics into acc for the caller to report.
+func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulator) ([]FileScanTask, error) {
 	scan.planIO = nil
 
 	schema, err := scan.effectiveSchema()
@@ -820,7 +867,7 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	}
 
 	// Step 1: Retrieve filtered manifests based on snapshot and partition specs.
-	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema)
+	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema, acc)
 	if err != nil || len(manifestList) == 0 {
 		return nil, err
 	}
@@ -879,7 +926,14 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 			task.DataSequenceNumber = &s
 		}
 		results = append(results, task)
+		acc.totalFileSize += e.DataFile().FileSizeBytes()
 	}
+
+	acc.resultDataFiles = int64(len(results))
+	// Delete-file metrics are derived from the planned tasks so they are
+	// result-scoped, consistent with result-data-files and total-file-size (a
+	// DV-suppressed positional delete never lands on a task, so it is excluded).
+	acc.applyResultDeleteMetrics(results)
 
 	return results, nil
 }
