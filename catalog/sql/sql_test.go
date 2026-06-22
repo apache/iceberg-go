@@ -322,6 +322,122 @@ func (s *SqliteCatalogTestSuite) TestCreationAllTablesExist() {
 	s.confirmTablesExist(sqldb)
 }
 
+func (s *SqliteCatalogTestSuite) TestV0SchemaFromIcebergIsMigrated() {
+	sqldb := s.getDB()
+	s.confirmNoTables(sqldb)
+
+	_, err := sqldb.Exec(`CREATE TABLE "iceberg_tables" (
+		"catalog_name" VARCHAR NOT NULL,
+		"table_namespace" VARCHAR NOT NULL,
+		"table_name" VARCHAR NOT NULL,
+		"metadata_location" VARCHAR,
+		"previous_metadata_location" VARCHAR,
+		PRIMARY KEY ("catalog_name", "table_namespace", "table_name"))`)
+	s.Require().NoError(err)
+	_, err = sqldb.Exec(`CREATE TABLE "iceberg_namespace_properties" (
+		"catalog_name" VARCHAR NOT NULL,
+		"namespace" VARCHAR NOT NULL,
+		"property_key" VARCHAR NOT NULL,
+		"property_value" VARCHAR,
+		PRIMARY KEY ("catalog_name", "namespace", "property_key"))`)
+	s.Require().NoError(err)
+
+	const (
+		catName = "default"
+		nsName  = "java_v0_ns"
+		tblName = "java_v0_tbl"
+		metaLoc = "file:///does/not/matter/00000-v0.metadata.json"
+	)
+	_, err = sqldb.Exec(
+		`INSERT INTO "iceberg_namespace_properties" `+
+			`("catalog_name", "namespace", "property_key", "property_value") VALUES (?, ?, ?, ?)`,
+		catName, nsName, "exists", "true")
+	s.Require().NoError(err)
+	_, err = sqldb.Exec(
+		`INSERT INTO "iceberg_tables" `+
+			`("catalog_name", "table_namespace", "table_name", "metadata_location") VALUES (?, ?, ?, ?)`,
+		catName, nsName, tblName, metaLoc)
+	s.Require().NoError(err)
+
+	_ = s.loadCatalogForTableCreation()
+
+	var present int
+	err = sqldb.QueryRow(
+		`SELECT 1 FROM pragma_table_info('iceberg_tables') WHERE name = 'iceberg_type'`,
+	).Scan(&present)
+	s.Require().NoError(err, "migration must add iceberg_type column")
+	s.Equal(1, present)
+
+	var got sql.NullString
+	err = sqldb.QueryRow(
+		`SELECT iceberg_type FROM iceberg_tables WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?`,
+		catName, nsName, tblName,
+	).Scan(&got)
+	s.Require().NoError(err)
+	s.False(got.Valid, "pre-V0 row should keep iceberg_type IS NULL after migration")
+
+	_ = s.loadCatalogForTableCreation()
+}
+
+func (s *SqliteCatalogTestSuite) TestV0SchemaListAndDropAcceptNullIcebergType() {
+	sqldb := s.getDB()
+	s.confirmNoTables(sqldb)
+
+	_, err := sqldb.Exec(`CREATE TABLE "iceberg_tables" (
+		"catalog_name" VARCHAR NOT NULL,
+		"table_namespace" VARCHAR NOT NULL,
+		"table_name" VARCHAR NOT NULL,
+		"metadata_location" VARCHAR,
+		"previous_metadata_location" VARCHAR,
+		PRIMARY KEY ("catalog_name", "table_namespace", "table_name"))`)
+	s.Require().NoError(err)
+	_, err = sqldb.Exec(`CREATE TABLE "iceberg_namespace_properties" (
+		"catalog_name" VARCHAR NOT NULL,
+		"namespace" VARCHAR NOT NULL,
+		"property_key" VARCHAR NOT NULL,
+		"property_value" VARCHAR,
+		PRIMARY KEY ("catalog_name", "namespace", "property_key"))`)
+	s.Require().NoError(err)
+
+	const (
+		catName = "default"
+		nsName  = "legacy_ns"
+		tblName = "legacy_tbl"
+		metaLoc = "file:///legacy/00000-v0.metadata.json"
+	)
+	_, err = sqldb.Exec(
+		`INSERT INTO "iceberg_namespace_properties" `+
+			`("catalog_name", "namespace", "property_key", "property_value") VALUES (?, ?, ?, ?)`,
+		catName, nsName, "exists", "true")
+	s.Require().NoError(err)
+	_, err = sqldb.Exec(
+		`INSERT INTO "iceberg_tables" `+
+			`("catalog_name", "table_namespace", "table_name", "metadata_location") VALUES (?, ?, ?, ?)`,
+		catName, nsName, tblName, metaLoc)
+	s.Require().NoError(err)
+
+	cat := s.loadCatalogForTableCreation()
+	ctx := context.Background()
+
+	var listed []table.Identifier
+	for ident, err := range cat.ListTables(ctx, table.Identifier{nsName}) {
+		s.Require().NoError(err)
+		listed = append(listed, ident)
+	}
+	s.Require().Len(listed, 1, "ListTables must return rows with iceberg_type IS NULL")
+	s.Equal(tblName, listed[0][len(listed[0])-1])
+
+	s.Require().NoError(cat.DropTable(ctx, table.Identifier{nsName, tblName}))
+
+	var remaining int
+	err = sqldb.QueryRow(
+		`SELECT COUNT(*) FROM iceberg_tables WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?`,
+		catName, nsName, tblName,
+	).Scan(&remaining)
+	s.Require().NoError(err)
+	s.Equal(0, remaining, "DropTable must delete rows with iceberg_type IS NULL")
+}
+
 func (s *SqliteCatalogTestSuite) TestCatalogNameMatchesLoaderArg() {
 	ctx := context.Background()
 

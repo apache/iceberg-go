@@ -139,10 +139,10 @@ func getDialect(d SupportedDialect) schema.Dialect {
 type sqlIcebergTable struct {
 	bun.BaseModel `bun:"table:iceberg_tables"`
 
-	CatalogName              string `bun:",pk"`
-	TableNamespace           string `bun:",pk"`
-	TableName                string `bun:",pk"`
-	IcebergType              string // TableType or ViewType
+	CatalogName              string         `bun:",pk"`
+	TableNamespace           string         `bun:",pk"`
+	TableName                string         `bun:",pk"`
+	IcebergType              sql.NullString // TableType, ViewType, or NULL for legacy V0 rows
 	MetadataLocation         sql.NullString
 	PreviousMetadataLocation sql.NullString
 }
@@ -247,7 +247,76 @@ func (c *Catalog) DropSQLTables(ctx context.Context) error {
 }
 
 func (c *Catalog) ensureTablesExist() error {
-	return c.CreateSQLTables(context.Background())
+	ctx := context.Background()
+	if err := c.CreateSQLTables(ctx); err != nil {
+		return err
+	}
+
+	return c.migrateVOSchema(ctx)
+}
+
+func (c *Catalog) migrateVOSchema(ctx context.Context) error {
+	hasCol, probeErr := c.icebergTypeColumnExists(ctx)
+	if probeErr != nil {
+		log.Printf("WARNING: skipping V0 schema migration; iceberg_type column probe failed: %v", probeErr)
+
+		return nil
+	}
+	if hasCol {
+		return nil
+	}
+
+	if _, err := c.db.ExecContext(ctx, "ALTER TABLE iceberg_tables ADD COLUMN iceberg_type VARCHAR(5)"); err != nil {
+		has, reprobeErr := c.icebergTypeColumnExists(ctx)
+		if has {
+			return nil
+		}
+		if reprobeErr != nil {
+			log.Printf("WARNING: V0 schema migration re-probe failed after ALTER error: %v", reprobeErr)
+		}
+
+		return fmt.Errorf("migration of V0 schema failed: %w", err)
+	}
+
+	return nil
+}
+
+func (c *Catalog) icebergTypeColumnExists(ctx context.Context) (bool, error) {
+	var query string
+	switch dialectName := c.db.Dialect().Name().String(); dialectName {
+	case "pg", "postgres":
+		query = `SELECT 1 FROM information_schema.columns
+		         WHERE table_name = 'iceberg_tables'
+		           AND column_name = 'iceberg_type' LIMIT 1`
+	case "mysql":
+		query = `SELECT 1 FROM information_schema.columns
+		         WHERE table_schema = DATABASE()
+		           AND table_name = 'iceberg_tables'
+		           AND column_name = 'iceberg_type' LIMIT 1`
+	case "mssql":
+		query = `SELECT TOP 1 1 FROM information_schema.columns
+		         WHERE table_name = 'iceberg_tables'
+		           AND column_name = 'iceberg_type'`
+	case "sqlite":
+		query = `SELECT 1 FROM pragma_table_info('iceberg_tables')
+		         WHERE name = 'iceberg_type' LIMIT 1`
+	case "oracle":
+		query = `SELECT 1 FROM user_tab_columns
+ 			    WHERE UPPER(table_name) = 'ICEBERG_TABLES'
+  			  	 AND UPPER(column_name) = 'ICEBERG_TYPE'`
+	default:
+		return false, fmt.Errorf("unsupported dialect for V0 migration: %s", dialectName)
+	}
+	var dummy int
+	if err := c.db.QueryRowContext(ctx, query).Scan(&dummy); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+
+		return false, err
+	}
+
+	return true, nil
 }
 
 func (c *Catalog) namespaceExists(ctx context.Context, ns string) (bool, error) {
@@ -305,7 +374,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 			TableNamespace:   ns,
 			TableName:        tblIdent,
 			MetadataLocation: sql.NullString{String: staged.MetadataLocation(), Valid: true},
-			IcebergType:      TableType,
+			IcebergType:      sql.NullString{String: TableType, Valid: true},
 		}).Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to create table: %w", err)
@@ -349,11 +418,11 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 				CatalogName:              c.name,
 				TableNamespace:           strings.Join(ns, "."),
 				TableName:                tblName,
-				IcebergType:              TableType,
+				IcebergType:              sql.NullString{String: TableType, Valid: true},
 				MetadataLocation:         sql.NullString{Valid: true, String: staged.MetadataLocation()},
 				PreviousMetadataLocation: sql.NullString{Valid: true, String: current.MetadataLocation()},
 			}).WherePK().Where("metadata_location = ?", current.MetadataLocation()).
-				Where("iceberg_type = ?", TableType).
+				Where("(iceberg_type = ? OR iceberg_type IS NULL)", TableType).
 				Exec(ctx)
 			if err != nil {
 				return fmt.Errorf("error updating table information: %w", err)
@@ -379,7 +448,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 			CatalogName:      c.name,
 			TableNamespace:   strings.Join(ns, "."),
 			TableName:        tblName,
-			IcebergType:      TableType,
+			IcebergType:      sql.NullString{String: TableType, Valid: true},
 			MetadataLocation: sql.NullString{Valid: true, String: staged.MetadataLocation()},
 		}).Exec(ctx)
 		if err != nil {
@@ -405,6 +474,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 			Where("catalog_name = ?", c.name).
 			Where("table_namespace = ?", strings.Join(ns, ".")).
 			Where("table_name = ?", tbl).
+			Where("(iceberg_type = ? OR iceberg_type IS NULL)", TableType).
 			Scan(ctx)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchTable, identifier)
@@ -442,7 +512,7 @@ func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 			CatalogName:    c.name,
 			TableNamespace: ns,
 			TableName:      tbl,
-		}).WherePK().Where("iceberg_type = ?", TableType).Exec(ctx)
+		}).WherePK().Where("(iceberg_type = ? OR iceberg_type IS NULL)", TableType).Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to delete table entry: %w", err)
 		}
@@ -513,7 +583,7 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 			CatalogName:    c.name,
 			TableNamespace: fromNs,
 			TableName:      fromTbl,
-		}).WherePK().Where("iceberg_type = ?", TableType).
+		}).WherePK().Where("(iceberg_type = ? OR iceberg_type IS NULL)", TableType).
 			Set("table_namespace = ?", toNs).
 			Set("table_name = ?", toTbl).
 			Exec(ctx)
@@ -703,7 +773,7 @@ func (c *Catalog) listTablesAll(ctx context.Context, namespace table.Identifier)
 		err := tx.NewSelect().Model(&tables).
 			Where("catalog_name = ?", c.name).
 			Where("table_namespace = ?", ns).
-			Where("iceberg_type = ?", TableType).
+			Where("(iceberg_type = ? OR iceberg_type IS NULL)", TableType).
 			Scan(ctx)
 
 		return tables, err
@@ -878,7 +948,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 			CatalogName:      c.name,
 			TableNamespace:   ns,
 			TableName:        viewIdent,
-			IcebergType:      ViewType,
+			IcebergType:      sql.NullString{String: ViewType, Valid: true},
 			MetadataLocation: sql.NullString{String: metadataLocation, Valid: true},
 		}).Exec(ctx)
 		if err != nil {
