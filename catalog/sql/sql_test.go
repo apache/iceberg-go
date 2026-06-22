@@ -344,8 +344,8 @@ func (s *SqliteCatalogTestSuite) TestV0SchemaFromIcebergIsMigrated() {
 
 	const (
 		catName = "default"
-		nsName  = "java_v0_ns"
-		tblName = "java_v0_tbl"
+		nsName  = "test_v0_ns"
+		tblName = "test_v0_tbl"
 		metaLoc = "file:///does/not/matter/00000-v0.metadata.json"
 	)
 	_, err = sqldb.Exec(
