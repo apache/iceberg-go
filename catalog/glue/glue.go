@@ -33,6 +33,7 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/internal"
 	"github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -283,6 +284,10 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	}
 	// Load the metadata file to get table properties
 	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
+	reporter, err := metrics.FromProperties(c.props)
+	if err != nil {
+		return nil, err
+	}
 	// Read the metadata file
 	tbl, err := table.NewFromLocation(
 		ctx,
@@ -290,6 +295,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		metadataLocation,
 		io.LoadFSFunc(nil, metadataLocation),
 		c,
+		table.WithMetricsReporter(reporter),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read table metadata from %s: %w", metadataLocation, err)
@@ -833,12 +839,18 @@ func (c *Catalog) convertGlueToIceberg(ctx context.Context, glueTable *types.Tab
 		return nil, fmt.Errorf("missing metadata location for table %s", tableName)
 	}
 
+	reporter, err := metrics.FromProperties(c.props)
+	if err != nil {
+		return nil, err
+	}
+
 	icebergTable, err := table.NewFromLocation(
 		utils.WithAwsConfig(ctx, c.awsCfg),
 		TableIdentifier(database, tableName),
 		metadataLocation,
 		io.LoadFSFunc(nil, metadataLocation),
 		c,
+		table.WithMetricsReporter(reporter),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create iceberg table from location %s: %w", metadataLocation, err)

@@ -31,6 +31,7 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/internal"
 	"github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
 	"github.com/beltran/gohive/hive_metastore"
@@ -149,12 +150,18 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 		return nil, fmt.Errorf("failed to get metadata location: %w", err)
 	}
 
+	reporter, err := metrics.FromProperties(c.opts.props)
+	if err != nil {
+		return nil, err
+	}
+
 	return table.NewFromLocation(
 		ctx,
 		identifier,
 		metadataLocation,
 		io.LoadFSFunc(c.opts.props, metadataLocation),
 		c,
+		table.WithMetricsReporter(reporter),
 	)
 }
 
@@ -226,12 +233,18 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		return nil, fmt.Errorf("%w: %s.%s", catalog.ErrTableAlreadyExists, database, tableName)
 	}
 
+	reporter, err := metrics.FromProperties(c.opts.props)
+	if err != nil {
+		return nil, err
+	}
+
 	tbl, err := table.NewFromLocation(
 		ctx,
 		identifier,
 		metadataLocation,
 		io.LoadFSFunc(c.opts.props, metadataLocation),
 		c,
+		table.WithMetricsReporter(reporter),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read table metadata from %s: %s", metadataLocation, err)

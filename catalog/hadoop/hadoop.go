@@ -36,6 +36,7 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/internal"
 	"github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 )
@@ -549,12 +550,18 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 
 	c.writeVersionHint(ident, version)
 
+	reporter, err := metrics.FromProperties(c.props)
+	if err != nil {
+		return nil, err
+	}
+
 	tbl := table.New(
 		ident,
 		metadata,
 		metaPath,
 		io.LoadFSFunc(c.props, metaPath),
 		c,
+		table.WithMetricsReporter(reporter),
 	)
 
 	return tbl, nil
@@ -570,7 +577,12 @@ func (c *Catalog) loadTable(ctx context.Context, ident table.Identifier) (*table
 		return nil, 0, err
 	}
 
-	tbl, err := table.NewFromLocation(ctx, ident, metaPath, io.LoadFSFunc(c.props, metaPath), c)
+	reporter, err := metrics.FromProperties(c.props)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	tbl, err := table.NewFromLocation(ctx, ident, metaPath, io.LoadFSFunc(c.props, metaPath), c, table.WithMetricsReporter(reporter))
 	if err != nil {
 		return nil, 0, err
 	}

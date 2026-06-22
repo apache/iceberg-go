@@ -39,6 +39,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/udf"
 	"github.com/apache/iceberg-go/view"
@@ -1074,12 +1075,18 @@ func (r *Catalog) tableFromResponse(_ context.Context, identifier []string, meta
 		fsF = iceio.LoadFSFunc(config, loc)
 	}
 
+	reporter, err := metrics.FromProperties(config)
+	if err != nil {
+		return nil, err
+	}
+
 	return table.New(
 		identifier,
 		metadata,
 		loc,
 		fsF,
 		r,
+		table.WithMetricsReporter(reporter),
 	), nil
 }
 

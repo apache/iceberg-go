@@ -35,6 +35,7 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/internal"
 	"github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
 	"github.com/uptrace/bun"
@@ -797,12 +798,18 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 		return nil, fmt.Errorf("%w: %s, metadata location is missing", catalog.ErrNoSuchTable, identifier)
 	}
 
+	reporter, err := metrics.FromProperties(c.props)
+	if err != nil {
+		return nil, err
+	}
+
 	return table.NewFromLocation(
 		ctx,
 		identifier,
 		result.MetadataLocation.String,
 		io.LoadFSFunc(c.props, result.MetadataLocation.String),
 		c,
+		table.WithMetricsReporter(reporter),
 	)
 }
 
