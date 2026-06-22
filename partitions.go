@@ -552,12 +552,7 @@ func (ps *PartitionSpec) PartitionToPath(data StructLike, sc *Schema) string {
 		sb.WriteByte('=')
 
 		// Only escape the value (which changes per row)
-		var valueStr string
-		if t, ok := ps.fields[i].Transform.(typedHumanStringer); ok {
-			valueStr = t.ToHumanStrType(partType.FieldList[i].Type, data.Get(i))
-		} else {
-			valueStr = ps.fields[i].Transform.ToHumanStr(data.Get(i))
-		}
+		valueStr := ps.fields[i].Transform.ToHumanStrType(partType.FieldList[i].Type, data.Get(i))
 		sb.WriteString(url.QueryEscape(valueStr))
 	}
 
