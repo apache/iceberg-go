@@ -110,18 +110,5 @@ func SchemaWithRowLineageColumns(s *Schema, rowID, lastUpdatedSeq bool) *Schema 
 //
 // Idempotent on RowIDFieldID; allocates a fresh field slice.
 func SchemaWithRowID(s *Schema) *Schema {
-	if s == nil {
-		return nil
-	}
-	fields := slices.Clone(s.Fields())
-
-	for _, f := range fields {
-		if f.ID == RowIDFieldID {
-			return NewSchemaWithIdentifiers(s.ID, s.IdentifierFieldIDs, fields...)
-		}
-	}
-
-	fields = append(fields, RowID())
-
-	return NewSchemaWithIdentifiers(s.ID, s.IdentifierFieldIDs, fields...)
+	return SchemaWithRowLineageColumns(s, true, false)
 }
