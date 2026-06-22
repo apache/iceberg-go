@@ -509,10 +509,38 @@ func TestGeoArrowCRSToIcebergCRS(t *testing.T) {
 		assert.Equal(t, crs, got)
 	})
 
-	t.Run("rejects arbitrary short string", func(t *testing.T) {
-		_, err := geoArrowCRSToIcebergCRS(geoarrow.Metadata{CRS: stringCRS("custom")})
+	t.Run("accepts arbitrary string CRS", func(t *testing.T) {
+		got, err := geoArrowCRSToIcebergCRS(geoarrow.Metadata{CRS: stringCRS("custom")})
+		require.NoError(t, err)
+		assert.Equal(t, "custom", got)
+	})
+
+	t.Run("canonical string CRS wins over srid type annotation", func(t *testing.T) {
+		for _, crs := range []string{"EPSG:4326", "OGC:CRS84"} {
+			t.Run(crs, func(t *testing.T) {
+				got, err := geoArrowCRSToIcebergCRS(geoarrow.Metadata{
+					CRS:     stringCRS(crs),
+					CRSType: geoarrow.CRSTypeSRID,
+				})
+				require.NoError(t, err)
+				assert.Equal(t, "OGC:CRS84", got)
+			})
+		}
+	})
+
+	t.Run("numeric srid type annotation maps to srid", func(t *testing.T) {
+		got, err := geoArrowCRSToIcebergCRS(geoarrow.Metadata{
+			CRS:     stringCRS("3857"),
+			CRSType: geoarrow.CRSTypeSRID,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "srid:3857", got)
+	})
+
+	t.Run("rejects empty string CRS", func(t *testing.T) {
+		_, err := geoArrowCRSToIcebergCRS(geoarrow.Metadata{CRS: stringCRS("")})
 		require.Error(t, err)
-		assert.ErrorContains(t, err, "unsupported CRS string: expected authority:code form")
+		assert.ErrorContains(t, err, "unsupported CRS: empty string CRS")
 	})
 
 	t.Run("rejects projjson string CRS", func(t *testing.T) {

@@ -499,6 +499,8 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 	require.NoError(t, err)
 	geogEPSG4267, err := iceberg.GeographyTypeOf("EPSG:4267", "spherical")
 	require.NoError(t, err)
+	geomCustomCRS, err := iceberg.GeometryTypeOf("my-custom-crs")
+	require.NoError(t, err)
 	defaultGeometry, err := iceberg.GeometryTypeOf("OGC:CRS84")
 	require.NoError(t, err)
 	geomEPSG3857, err := iceberg.GeometryTypeOf("EPSG:3857")
@@ -529,6 +531,11 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 			name:             "geometry_epsg_4267",
 			ice:              geomEPSG4267,
 			geoarrowMetaJSON: `{"crs":"EPSG:4267"}`,
+		},
+		{
+			name:             "geometry_custom_string_crs",
+			ice:              geomCustomCRS,
+			geoarrowMetaJSON: `{"crs":"my-custom-crs"}`,
 		},
 		// Geography with default CRS (default OGC:CRS84, spherical edges)
 		{

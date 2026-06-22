@@ -1875,11 +1875,14 @@ func checkCRSJSON(rawCrs json.RawMessage) bool {
 // package does not support yet.
 var errWKT2CRSNotSupported = errors.New("CRS type wkt2:2019 not supported")
 
+// errPROJJSONStringCRSNotSupported is returned for projjson-typed string CRS
+// values, which this package does not support yet.
+var errPROJJSONStringCRSNotSupported = errors.New("CRS type projjson not supported for string CRS")
+
 // isWKT2CRSString reports whether crs looks like a WKT2 (ISO 19162) CRS
 // definition. It is a best-effort heuristic used only to surface the clearer
-// errWKT2CRSNotSupported message: a WKT2 string fails the authority:code check
-// regardless, so a missing keyword only changes the error text, not the
-// outcome. The list covers the WKT2:2019 CRS keywords and their long forms.
+// errWKT2CRSNotSupported message. The list covers the WKT2:2019 CRS keywords
+// and their long forms.
 func isWKT2CRSString(crs string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(crs))
 
@@ -1920,12 +1923,13 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 		if err := json.Unmarshal(meta.CRS, &crs); err != nil {
 			return "", fmt.Errorf("invalid geoarrow CRS metadata: %w", err)
 		}
+		if crs == "" {
+			return "", errors.New("unsupported CRS: empty string CRS")
+		}
 
 		switch meta.CRSType {
-		case geoarrow.CRSTypeSRID:
-			return "srid:" + crs, nil
 		case geoarrow.CRSTypePROJJSON:
-			return "", errors.New("CRS type projjson not supported for string CRS")
+			return "", errPROJJSONStringCRSNotSupported
 		case geoarrow.CRSTypeWKT22019:
 			return "", errWKT2CRSNotSupported
 		}
@@ -1936,11 +1940,15 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 		if isWKT2CRSString(crs) {
 			return "", errWKT2CRSNotSupported
 		}
-		if authorityCodeCRS.MatchString(crs) {
-			return crs, nil
+		// SRID is resolved after the canonical and WKT2 checks so a
+		// contradictory crs_type=srid on a value like "EPSG:4326" still
+		// canonicalizes rather than producing "srid:EPSG:4326". Real numeric
+		// SRIDs match none of the checks above and fall through to here.
+		if meta.CRSType == geoarrow.CRSTypeSRID {
+			return "srid:" + crs, nil
 		}
 
-		return "", errors.New("unsupported CRS string: expected authority:code form")
+		return crs, nil
 	case checkCRSJSON(meta.CRS):
 		var crs map[string]json.RawMessage
 
