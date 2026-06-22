@@ -201,21 +201,53 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 	return azureblob.OpenBucket(ctx, client, nil)
 }
 
-// adlsKeyExtractor creates a key extractor for Azure schemes using the adlsURIPattern pattern
-func adlsKeyExtractor() KeyExtractor {
-	return func(location string) (string, error) {
+func adlsAuthority(parsed *url.URL) string {
+	if parsed.User == nil {
+		return parsed.Host
+	}
+
+	return parsed.User.String() + "@" + parsed.Host
+}
+
+func adlsObjectLocationExtractor(parsedURL *url.URL, opts ...keyExtractorOption) objectLocationExtractor {
+	var cfg keyExtractorConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	expectedAuthority := adlsAuthority(parsedURL)
+
+	return func(location string) (objectLocation, error) {
 		matches := adlsURIPattern.FindStringSubmatch(location)
 		if len(matches) < 4 {
-			return "", fmt.Errorf("invalid ADLS location: %s", location)
+			return objectLocation{}, fmt.Errorf("invalid ADLS location: %s", location)
+		}
+
+		authority := matches[2]
+		if cfg.strictAuthorityValidation && authority != expectedAuthority {
+			return objectLocation{}, fmt.Errorf("URI authority %q does not match configured authority %q",
+				authority, expectedAuthority)
 		}
 
 		uriPath := matches[3]
 		key := strings.TrimPrefix(uriPath, "/")
 
-		if key == "" {
-			return "", fmt.Errorf("URI path is empty: %s", location)
+		parsed := objectLocation{
+			authority:    authority,
+			key:          key,
+			uriPrefix:    matches[1] + "://" + authority + "/",
+			hasAuthority: true,
 		}
 
-		return key, nil
+		if key == "" {
+			return parsed, fmt.Errorf("%w: %s", errEmptyObjectKey, location)
+		}
+
+		return parsed, nil
 	}
+}
+
+// adlsKeyExtractor creates a key extractor for Azure schemes using the adlsURIPattern pattern.
+func adlsKeyExtractor(parsedURL *url.URL, opts ...keyExtractorOption) KeyExtractor {
+	return keyExtractorFromObjectLocation(adlsObjectLocationExtractor(parsedURL, opts...))
 }

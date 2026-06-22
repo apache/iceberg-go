@@ -20,6 +20,7 @@ package gocloud
 import (
 	"context"
 	"net/url"
+	"strconv"
 
 	icebergio "github.com/apache/iceberg-go/io"
 )
@@ -30,6 +31,14 @@ func init() {
 	registerAzureSchemes()
 }
 
+func keyExtractorOptions(props map[string]string) []keyExtractorOption {
+	if enabled, err := strconv.ParseBool(props[icebergio.ObjectStoreStrictAuthorityValidation]); err == nil && enabled {
+		return []keyExtractorOption{withStrictAuthorityValidation()}
+	}
+
+	return nil
+}
+
 // registerS3Schemes registers S3-compatible storage schemes (s3, s3a, s3n).
 func registerS3Schemes() {
 	s3Factory := func(ctx context.Context, parsed *url.URL, props map[string]string) (icebergio.IO, error) {
@@ -38,7 +47,9 @@ func registerS3Schemes() {
 			return nil, err
 		}
 
-		return createBlobFS(ctx, bucket, defaultKeyExtractor(parsed.Host)), nil
+		extractor := defaultObjectLocationExtractor(parsed.Host, keyExtractorOptions(props)...)
+
+		return createBlobFS(ctx, bucket, keyExtractorFromObjectLocation(extractor), extractor), nil
 	}
 	icebergio.Register("s3", s3Factory)
 	icebergio.Register("s3a", s3Factory)
@@ -54,7 +65,9 @@ func registerGCSScheme() {
 			return nil, err
 		}
 
-		return createBlobFS(ctx, bucket, defaultKeyExtractor(parsed.Host)), nil
+		extractor := defaultObjectLocationExtractor(parsed.Host, keyExtractorOptions(props)...)
+
+		return createBlobFS(ctx, bucket, keyExtractorFromObjectLocation(extractor), extractor), nil
 	})
 }
 
@@ -66,7 +79,9 @@ func registerAzureSchemes() {
 			return nil, err
 		}
 
-		return createBlobFS(ctx, bucket, adlsKeyExtractor()), nil
+		extractor := adlsObjectLocationExtractor(parsed, keyExtractorOptions(props)...)
+
+		return createBlobFS(ctx, bucket, keyExtractorFromObjectLocation(extractor), extractor), nil
 	}
 	icebergio.Register("abfs", azureFactory)
 	icebergio.Register("abfss", azureFactory)

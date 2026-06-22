@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCreateAzureBucketDefaultCredentialCalled(t *testing.T) {
@@ -171,12 +172,17 @@ func TestNewAdlsLocationUriParsing(t *testing.T) {
 }
 
 func TestAdlsKeyExtractor(t *testing.T) {
-	extractor := adlsKeyExtractor()
+	parsed, err := url.Parse("abfs://container@account.dfs.core.windows.net/")
+	require.NoError(t, err)
+
+	extractor := adlsKeyExtractor(parsed)
+	strictExtractor := adlsKeyExtractor(parsed, withStrictAuthorityValidation())
 
 	tests := []struct {
 		name        string
 		input       string
 		expectedKey string
+		strict      bool
 		shouldError bool
 	}{
 		{
@@ -210,6 +216,12 @@ func TestAdlsKeyExtractor(t *testing.T) {
 			shouldError: true,
 		},
 		{
+			name:        "strict URI with different container",
+			input:       "abfs://other@account.dfs.core.windows.net/path/to/file.parquet",
+			strict:      true,
+			shouldError: true,
+		},
+		{
 			name:        "invalid ADLS location - invalid scheme",
 			input:       "s3://bucket/path/to/file.parquet",
 			shouldError: true,
@@ -218,7 +230,11 @@ func TestAdlsKeyExtractor(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			key, err := extractor(test.input)
+			extract := extractor
+			if test.strict {
+				extract = strictExtractor
+			}
+			key, err := extract(test.input)
 
 			if test.shouldError {
 				assert.Error(t, err, "Expected error for input: %s", test.input)

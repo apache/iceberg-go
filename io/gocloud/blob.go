@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net/url"
 	"path/filepath"
 	"strings"
 
@@ -69,33 +68,130 @@ func (f *blobOpenFile) Sys() any                   { return f.b }
 func (f *blobOpenFile) IsDir() bool                { return false }
 func (f *blobOpenFile) Stat() (fs.FileInfo, error) { return f, nil }
 
-// KeyExtractor extracts the object key from an input path
+// KeyExtractor extracts the object key from an input path.
 type KeyExtractor func(path string) (string, error)
 
-// defaultKeyExtractor extracts the object key by removing the scheme and bucket name from the URI
-// e.g., s3://bucket/path/file -> path/file
-func defaultKeyExtractor(bucketName string) KeyExtractor {
-	return func(location string) (string, error) {
-		_, after, found := strings.Cut(location, "://")
-		if found {
-			location = after
-		}
+var errEmptyObjectKey = errors.New("object key is empty")
 
-		key := strings.TrimPrefix(location, bucketName+"/")
+type objectLocation struct {
+	authority    string
+	key          string
+	uriPrefix    string
+	hasAuthority bool
+}
 
-		if key == "" {
-			return "", fmt.Errorf("URI path is empty: %s", location)
-		}
-
-		return key, nil
+func splitObjectLocation(location string) (objectLocation, error) {
+	scheme, rest, ok := strings.Cut(location, "://")
+	if !ok {
+		return objectLocation{key: location}, nil
 	}
+
+	authorityEnd := strings.IndexAny(rest, "/?#")
+	if authorityEnd == -1 {
+		authorityEnd = len(rest)
+	}
+
+	authority := rest[:authorityEnd]
+	if authority == "" {
+		return objectLocation{}, fmt.Errorf("URI authority is empty: %s", location)
+	}
+
+	key := ""
+	if authorityEnd < len(rest) {
+		if rest[authorityEnd] != '/' {
+			return objectLocation{}, fmt.Errorf("URI authority %q must be followed by an object path: %s",
+				authority, location)
+		}
+
+		key = strings.TrimPrefix(rest[authorityEnd:], "/")
+	}
+
+	return objectLocation{
+		authority:    authority,
+		key:          key,
+		uriPrefix:    scheme + "://" + authority + "/",
+		hasAuthority: true,
+	}, nil
+}
+
+type keyExtractorConfig struct {
+	strictAuthorityValidation bool
+}
+
+type keyExtractorOption func(*keyExtractorConfig)
+
+func withStrictAuthorityValidation() keyExtractorOption {
+	return func(cfg *keyExtractorConfig) {
+		cfg.strictAuthorityValidation = true
+	}
+}
+
+type objectLocationExtractor func(location string) (objectLocation, error)
+
+func keyExtractorFromObjectLocation(extract objectLocationExtractor) KeyExtractor {
+	return func(location string) (string, error) {
+		parsed, err := extract(location)
+		if err != nil {
+			return "", err
+		}
+
+		return parsed.key, nil
+	}
+}
+
+func legacyAuthorityKey(parsed objectLocation) string {
+	if parsed.key == "" {
+		return parsed.authority + "/"
+	}
+
+	return parsed.authority + "/" + parsed.key
+}
+
+func defaultObjectLocationExtractor(bucketName string, opts ...keyExtractorOption) objectLocationExtractor {
+	var cfg keyExtractorConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	return func(location string) (objectLocation, error) {
+		parsed, err := splitObjectLocation(location)
+		if err != nil {
+			return objectLocation{}, err
+		}
+
+		if parsed.hasAuthority {
+			if parsed.authority != bucketName {
+				if cfg.strictAuthorityValidation {
+					return objectLocation{}, fmt.Errorf("URI authority %q does not match configured authority %q",
+						parsed.authority, bucketName)
+				}
+
+				parsed.key = legacyAuthorityKey(parsed)
+			}
+		} else {
+			parsed.key = strings.TrimPrefix(location, bucketName+"/")
+		}
+
+		if parsed.key == "" {
+			return parsed, fmt.Errorf("%w: %s", errEmptyObjectKey, location)
+		}
+
+		return parsed, nil
+	}
+}
+
+// defaultKeyExtractor extracts the object key by removing the scheme and bucket name from the URI.
+// e.g., s3://bucket/path/file -> path/file.
+func defaultKeyExtractor(bucketName string, opts ...keyExtractorOption) KeyExtractor {
+	return keyExtractorFromObjectLocation(defaultObjectLocationExtractor(bucketName, opts...))
 }
 
 type blobFileIO struct {
 	*blob.Bucket
 
-	keyExtractor KeyExtractor
-	ctx          context.Context
+	keyExtractor  KeyExtractor
+	extractObject objectLocationExtractor
+	ctx           context.Context
 
 	// newRangeReader is an optional hook for testing.
 	// It allows injecting a mock reader to verify Close calls.
@@ -198,25 +294,52 @@ func (bfs *blobFileIO) NewWriter(ctx context.Context, path string, overwrite boo
 		nil
 }
 
-func createBlobFS(ctx context.Context, bucket *blob.Bucket, keyExtractor KeyExtractor) icebergio.IO {
-	return &blobFileIO{Bucket: bucket, keyExtractor: keyExtractor, ctx: ctx}
+func createBlobFS(ctx context.Context, bucket *blob.Bucket, keyExtractor KeyExtractor, extractObject ...objectLocationExtractor) icebergio.IO {
+	var extractor objectLocationExtractor
+	if len(extractObject) > 0 {
+		extractor = extractObject[0]
+	}
+
+	return &blobFileIO{Bucket: bucket, keyExtractor: keyExtractor, extractObject: extractor, ctx: ctx}
+}
+
+func (bfs *blobFileIO) objectLocation(root string) (objectLocation, error) {
+	if bfs.extractObject != nil {
+		return bfs.extractObject(root)
+	}
+
+	location, err := splitObjectLocation(root)
+	if err != nil {
+		return objectLocation{}, err
+	}
+
+	key, err := bfs.preprocess(root)
+	location.key = key
+
+	return location, err
 }
 
 func (bfs *blobFileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
-	parsed, err := url.Parse(root)
+	location, err := bfs.objectLocation(root)
+	walkPath := location.key
 	if err != nil {
-		return fmt.Errorf("invalid URL %s: %w", root, err)
-	}
+		if !errors.Is(err, errEmptyObjectKey) {
+			return &fs.PathError{Op: "walk dir", Path: root, Err: err}
+		}
 
-	walkPath := strings.TrimPrefix(parsed.Path, "/")
-	if walkPath == "" {
 		walkPath = "."
 	}
 
-	parsed.Path = ""
-
 	return fs.WalkDir(bfs.Bucket, walkPath, func(path string, d fs.DirEntry, err error) error {
-		return fn(parsed.JoinPath(path).String(), d, err)
+		if location.hasAuthority {
+			if path == "." {
+				path = location.uriPrefix
+			} else {
+				path = location.uriPrefix + path
+			}
+		}
+
+		return fn(path, d, err)
 	})
 }
 
