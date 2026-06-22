@@ -40,7 +40,8 @@ import (
 func newRowDeltaTestTable(t *testing.T, formatVersion int) *table.Table {
 	t.Helper()
 
-	schema := iceberg.NewSchema(0,
+	schema := iceberg.NewSchema(
+		0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
 	)
@@ -66,7 +67,8 @@ func buildDataFile(t *testing.T, path string) iceberg.DataFile {
 
 	b, err := iceberg.NewDataFileBuilder(
 		*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
-		path, iceberg.ParquetFile, nil, nil, nil, 10, 1024)
+		path, iceberg.ParquetFile, nil, nil, nil, 10, 1024,
+	)
 	require.NoError(t, err)
 
 	return b.Build()
@@ -77,7 +79,8 @@ func buildPosDeleteFile(t *testing.T, path string) iceberg.DataFile {
 
 	b, err := iceberg.NewDataFileBuilder(
 		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
-		path, iceberg.ParquetFile, nil, nil, nil, 5, 512)
+		path, iceberg.ParquetFile, nil, nil, nil, 5, 512,
+	)
 	require.NoError(t, err)
 
 	return b.Build()
@@ -88,7 +91,8 @@ func buildEqDeleteFile(t *testing.T, path string, fieldIDs []int) iceberg.DataFi
 
 	b, err := iceberg.NewDataFileBuilder(
 		*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
-		path, iceberg.ParquetFile, nil, nil, nil, 3, 256)
+		path, iceberg.ParquetFile, nil, nil, nil, 3, 256,
+	)
 	require.NoError(t, err)
 	b.EqualityFieldIDs(fieldIDs)
 
@@ -191,7 +195,8 @@ func TestRowDeltaRejectsEqDeleteWithoutFieldIDs(t *testing.T) {
 	// Build an equality delete file without setting EqualityFieldIDs
 	b, err := iceberg.NewDataFileBuilder(
 		*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
-		"s3://bucket/data/eq-del.parquet", iceberg.ParquetFile, nil, nil, nil, 3, 256)
+		"s3://bucket/data/eq-del.parquet", iceberg.ParquetFile, nil, nil, nil, 3, 256,
+	)
 	require.NoError(t, err)
 	df := b.Build()
 
@@ -239,7 +244,8 @@ func newRowDeltaCommitTestTable(t *testing.T) *table.Table {
 
 	location := filepath.ToSlash(t.TempDir())
 
-	schema := iceberg.NewSchema(0,
+	schema := iceberg.NewSchema(
+		0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
 	)
@@ -423,6 +429,19 @@ func TestRowDeltaMultipleCommitsOnSameTransaction(t *testing.T) {
 func writeParquetFile(t testing.TB, path string, sc *arrow.Schema, jsonData string) {
 	t.Helper()
 
+	writeParquetFileWithProperties(t, path, sc, jsonData, 0, nil)
+}
+
+func writeParquetFileWithProperties(
+	t testing.TB,
+	path string,
+	sc *arrow.Schema,
+	jsonData string,
+	rowGroupSize int64,
+	writerProps *parquet.WriterProperties,
+) {
+	t.Helper()
+
 	rec, _, err := array.RecordFromJSON(memory.DefaultAllocator, sc, strings.NewReader(jsonData))
 	require.NoError(t, err)
 	defer rec.Release()
@@ -434,16 +453,22 @@ func writeParquetFile(t testing.TB, path string, sc *arrow.Schema, jsonData stri
 	tbl := array.NewTableFromRecords(sc, []arrow.RecordBatch{rec})
 	defer tbl.Release()
 
-	require.NoError(t, pqarrow.WriteTable(tbl, fw, rec.NumRows(),
-		parquet.NewWriterProperties(parquet.WithStats(true)),
-		pqarrow.DefaultWriterProps()))
+	if rowGroupSize <= 0 {
+		rowGroupSize = rec.NumRows()
+	}
+	if writerProps == nil {
+		writerProps = parquet.NewWriterProperties(parquet.WithStats(true))
+	}
+
+	require.NoError(t, pqarrow.WriteTable(tbl, fw, rowGroupSize, writerProps, pqarrow.DefaultWriterProps()))
 }
 
 func TestRowDeltaIntegrationPosDeleteRoundTrip(t *testing.T) {
 	location := filepath.ToSlash(t.TempDir())
 
 	// Schema: id (int64), data (string)
-	iceSchema := iceberg.NewSchema(0,
+	iceSchema := iceberg.NewSchema(
+		0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
 	)
@@ -487,17 +512,27 @@ func TestRowDeltaIntegrationPosDeleteRoundTrip(t *testing.T) {
 	assertRowCount(t, tbl, 5)
 
 	// Step 2: Commit a position delete via RowDelta that removes rows 1 and 3
-	// (0-indexed: positions 1 and 3 → "beta" and "delta")
+	// (0-indexed: positions 1 and 3 → "beta" and "delta").
+	//
+	// WithDictionaryDefault(false) is the load-bearing bit: it writes file_path
+	// as a plain (non-dictionary) string column, exercising the read path that
+	// used to panic on the unchecked *array.Dictionary cast. Row-group size is
+	// left at the default — it controls Parquet physical layout, not the Arrow
+	// chunk structure the reader produces.
 	posDelArrowSc := table.PositionalDeleteArrowSchema
 	posDelPath := location + "/data/pos-del-001.parquet"
-	writeParquetFile(t, posDelPath, posDelArrowSc, `[
+	writeParquetFileWithProperties(t, posDelPath, posDelArrowSc, `[
 		{"file_path": "`+dataPath+`", "pos": 1},
 		{"file_path": "`+dataPath+`", "pos": 3}
-	]`)
+	]`, 0, parquet.NewWriterProperties(
+		parquet.WithStats(true),
+		parquet.WithDictionaryDefault(false),
+	))
 
 	posDelBuilder, err := iceberg.NewDataFileBuilder(
 		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
-		posDelPath, iceberg.ParquetFile, nil, nil, nil, 2, 256)
+		posDelPath, iceberg.ParquetFile, nil, nil, nil, 2, 256,
+	)
 	require.NoError(t, err)
 	posDelFile := posDelBuilder.Build()
 
