@@ -30,8 +30,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// JSON serialization for boolean expressions, used for the "filter" field of a
-// REST scan-planning request. Mirrors Java's ExpressionParser.
+// JSON for boolean expressions, used as the "filter" of a REST scan-planning
+// request. Mirrors Java's ExpressionParser.
 
 // exprKeyTransform is the "type" value identifying a transform term.
 const exprKeyTransform = "transform"
@@ -87,24 +87,6 @@ type transformNode struct {
 	Term      string `json:"term"`
 }
 
-// MarshalJSON emits the REST JSON form, so an expression can be used directly
-// as a request's "filter" field. Tag such fields omitempty to drop a nil one.
-func (e AlwaysTrue) MarshalJSON() ([]byte, error)  { return encodeExpr(e) }
-func (e AlwaysFalse) MarshalJSON() ([]byte, error) { return encodeExpr(e) }
-func (e NotExpr) MarshalJSON() ([]byte, error)     { return encodeExpr(e) }
-func (e AndExpr) MarshalJSON() ([]byte, error)     { return encodeExpr(e) }
-func (e OrExpr) MarshalJSON() ([]byte, error)      { return encodeExpr(e) }
-
-func (p *unboundUnaryPredicate) MarshalJSON() ([]byte, error)   { return encodeExpr(p) }
-func (p *unboundLiteralPredicate) MarshalJSON() ([]byte, error) { return encodeExpr(p) }
-func (p *unboundSetPredicate) MarshalJSON() ([]byte, error)     { return encodeExpr(p) }
-
-// Bound predicates delegate to the same encoder; without these, json.Marshal of
-// a bound expression would fall through to {} since their fields are unexported.
-func (p *boundUnaryPredicate[T]) MarshalJSON() ([]byte, error)   { return encodeExpr(p) }
-func (p *boundLiteralPredicate[T]) MarshalJSON() ([]byte, error) { return encodeExpr(p) }
-func (p *boundSetPredicate[T]) MarshalJSON() ([]byte, error)     { return encodeExpr(p) }
-
 // ParseExpr parses an expression from its REST JSON form (a request "filter" or
 // a task's residual filter).
 //
@@ -115,231 +97,288 @@ func ParseExpr(data []byte, schema *Schema) (BooleanExpression, error) {
 	return decodeExpr(json.RawMessage(data), schema)
 }
 
-func encodeExpr(e BooleanExpression) (json.RawMessage, error) {
-	switch v := e.(type) {
-	case AlwaysTrue:
-		return json.RawMessage("true"), nil
-	case AlwaysFalse:
-		return json.RawMessage("false"), nil
-	case NotExpr:
-		child, err := encodeExpr(v.child)
-		if err != nil {
-			return nil, err
-		}
+// MarshalJSON emits the REST form, so an expression can be used as a "filter"
+// field directly. Tag such fields omitempty to drop a nil one.
+func (AlwaysTrue) MarshalJSON() ([]byte, error)  { return []byte("true"), nil }
+func (AlwaysFalse) MarshalJSON() ([]byte, error) { return []byte("false"), nil }
 
-		return json.Marshal(exprNode{Type: opToJSON[OpNot], Child: child})
-	case AndExpr:
-		left, err := encodeExpr(v.left)
-		if err != nil {
-			return nil, err
-		}
-		right, err := encodeExpr(v.right)
-		if err != nil {
-			return nil, err
-		}
-
-		return json.Marshal(exprNode{Type: opToJSON[OpAnd], Left: left, Right: right})
-	case OrExpr:
-		left, err := encodeExpr(v.left)
-		if err != nil {
-			return nil, err
-		}
-		right, err := encodeExpr(v.right)
-		if err != nil {
-			return nil, err
-		}
-
-		return json.Marshal(exprNode{Type: opToJSON[OpOr], Left: left, Right: right})
-	}
-
-	return encodePredicate(e)
-}
-
-func encodePredicate(e BooleanExpression) (json.RawMessage, error) {
-	op := e.Op()
-	js, ok := opToJSON[op]
-	if !ok {
-		return nil, fmt.Errorf("%w: cannot serialize expression with operation %s", ErrInvalidArgument, op)
-	}
-
-	var (
-		term Term
-		err  error
-	)
-	switch p := e.(type) {
-	case UnboundPredicate:
-		term = p.Term()
-	case BoundPredicate:
-		term = p.Term()
-	default:
-		return nil, fmt.Errorf("%w: cannot serialize expression of type %T", ErrInvalidArgument, e)
-	}
-
-	// A bound term carries the field type, which a timestamptz literal needs to
-	// emit its +00:00 offset. Unbound terms leave it nil.
-	var typ Type
-	if bt, ok := term.(BoundTerm); ok {
-		typ = bt.Type()
-	}
-
-	node := exprNode{Type: js}
-	if node.Term, err = encodeTerm(term); err != nil {
+func (n NotExpr) MarshalJSON() ([]byte, error) {
+	child, err := json.Marshal(n.child)
+	if err != nil {
 		return nil, err
 	}
 
-	switch {
-	case op >= OpIsNull && op <= OpNotNan:
-		// unary predicate: no value or values field
-	case op >= OpLT && op <= OpNotStartsWith:
-		lit, err := literalOf(e)
+	return json.Marshal(exprNode{Type: opToJSON[OpNot], Child: child})
+}
+
+func (a AndExpr) MarshalJSON() ([]byte, error) {
+	left, right, err := marshalChildren(a.left, a.right)
+	if err != nil {
+		return nil, err
+	}
+
+	return json.Marshal(exprNode{Type: opToJSON[OpAnd], Left: left, Right: right})
+}
+
+func (o OrExpr) MarshalJSON() ([]byte, error) {
+	left, right, err := marshalChildren(o.left, o.right)
+	if err != nil {
+		return nil, err
+	}
+
+	return json.Marshal(exprNode{Type: opToJSON[OpOr], Left: left, Right: right})
+}
+
+func marshalChildren(left, right BooleanExpression) (json.RawMessage, json.RawMessage, error) {
+	l, err := json.Marshal(left)
+	if err != nil {
+		return nil, nil, err
+	}
+	r, err := json.Marshal(right)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return l, r, nil
+}
+
+// Bound predicates need their own MarshalJSON too; without it json.Marshal would
+// fall through to {} since their fields are unexported.
+func (up *unboundUnaryPredicate) MarshalJSON() ([]byte, error) {
+	return marshalUnaryPredicate(up.op, up.term)
+}
+
+func (bp *boundUnaryPredicate[T]) MarshalJSON() ([]byte, error) {
+	return marshalUnaryPredicate(bp.op, bp.term)
+}
+
+func (ul *unboundLiteralPredicate) MarshalJSON() ([]byte, error) {
+	return marshalLiteralPredicate(ul.op, ul.term, ul.lit)
+}
+
+func (blp *boundLiteralPredicate[T]) MarshalJSON() ([]byte, error) {
+	return marshalLiteralPredicate(blp.op, blp.term, blp.lit)
+}
+
+func (usp *unboundSetPredicate) MarshalJSON() ([]byte, error) {
+	return marshalSetPredicate(usp.op, usp.term, usp.lits.Members())
+}
+
+func (bsp *boundSetPredicate[T]) MarshalJSON() ([]byte, error) {
+	return marshalSetPredicate(bsp.op, bsp.term, bsp.lits.Members())
+}
+
+// predicateType returns the wire "type" string for a predicate operation.
+func predicateType(op Operation) (string, error) {
+	s, ok := opToJSON[op]
+	if !ok {
+		return "", fmt.Errorf("%w: cannot serialize expression with operation %s", ErrInvalidArgument, op)
+	}
+
+	return s, nil
+}
+
+func marshalUnaryPredicate(op Operation, term Term) ([]byte, error) {
+	js, err := predicateType(op)
+	if err != nil {
+		return nil, err
+	}
+	t, err := json.Marshal(term)
+	if err != nil {
+		return nil, err
+	}
+
+	return json.Marshal(exprNode{Type: js, Term: t})
+}
+
+func marshalLiteralPredicate(op Operation, term Term, lit Literal) ([]byte, error) {
+	js, err := predicateType(op)
+	if err != nil {
+		return nil, err
+	}
+	t, err := json.Marshal(term)
+	if err != nil {
+		return nil, err
+	}
+	v, err := json.Marshal(literalValue{lit, termType(term)})
+	if err != nil {
+		return nil, err
+	}
+
+	return json.Marshal(exprNode{Type: js, Term: t, Value: v})
+}
+
+// termType is the field type of a bound term, or nil for an unbound reference.
+func termType(term Term) Type {
+	if bt, ok := term.(BoundTerm); ok {
+		return bt.Ref().Field().Type
+	}
+
+	return nil
+}
+
+func marshalSetPredicate(op Operation, term Term, lits []Literal) ([]byte, error) {
+	js, err := predicateType(op)
+	if err != nil {
+		return nil, err
+	}
+	t, err := json.Marshal(term)
+	if err != nil {
+		return nil, err
+	}
+
+	typ := termType(term)
+	values := make([]json.RawMessage, 0, len(lits))
+	for _, l := range lits {
+		v, err := json.Marshal(literalValue{l, typ})
 		if err != nil {
 			return nil, err
 		}
-		if node.Value, err = encodeLiteral(lit, typ); err != nil {
-			return nil, err
-		}
-	case op >= OpIn && op <= OpNotIn:
-		lits, err := literalsOf(e)
-		if err != nil {
-			return nil, err
-		}
-		node.Values = make([]json.RawMessage, 0, len(lits))
-		for _, l := range lits {
-			v, err := encodeLiteral(l, typ)
-			if err != nil {
-				return nil, err
-			}
-			node.Values = append(node.Values, v)
-		}
-		// A set has no order; sort the encoded values for deterministic output.
-		sort.Slice(node.Values, func(i, j int) bool {
-			return bytes.Compare(node.Values[i], node.Values[j]) < 0
-		})
-	default:
-		return nil, fmt.Errorf("%w: cannot serialize expression with operation %s", ErrInvalidArgument, op)
+		values = append(values, v)
 	}
+	// A set has no order; sort the encoded values for deterministic output.
+	sort.Slice(values, func(i, j int) bool {
+		return bytes.Compare(values[i], values[j]) < 0
+	})
 
-	return json.Marshal(node)
+	return json.Marshal(exprNode{Type: js, Term: t, Values: values})
 }
 
-func encodeTerm(term Term) (json.RawMessage, error) {
-	switch t := term.(type) {
-	case Reference:
-		return json.Marshal(string(t))
-	case BoundReference:
-		return json.Marshal(t.Field().Name)
-	case *BoundTransform:
-		return json.Marshal(transformNode{
-			Type:      exprKeyTransform,
-			Transform: t.transform.String(),
-			Term:      t.term.Ref().Field().Name,
-		})
-	default:
-		return nil, fmt.Errorf("%w: cannot serialize term of type %T", ErrInvalidArgument, term)
-	}
+func (r Reference) MarshalJSON() ([]byte, error) { return json.Marshal(string(r)) }
+
+func (b *boundRef[T]) MarshalJSON() ([]byte, error) { return json.Marshal(b.field.Name) }
+
+func (b *BoundTransform) MarshalJSON() ([]byte, error) {
+	return json.Marshal(transformNode{
+		Type:      exprKeyTransform,
+		Transform: b.transform.String(),
+		Term:      b.term.Ref().Field().Name,
+	})
 }
 
-// encodeLiteral writes a non-null literal in the JSON form for its Iceberg type
-// (see Java's SingleValueParser). typ is the resolved field type, used to tell a
-// timestamptz literal from a plain timestamp; it may be nil for an unbound term.
-func encodeLiteral(lit Literal, typ Type) (json.RawMessage, error) {
-	switch l := lit.(type) {
-	case BoolLiteral:
-		return json.Marshal(bool(l))
-	case Int32Literal:
-		return json.Marshal(int32(l))
-	case Int64Literal:
-		return json.Marshal(int64(l))
-	case Float32Literal:
-		if f := float64(l); math.IsInf(f, 0) || math.IsNaN(f) {
-			return nil, fmt.Errorf("%w: cannot serialize non-finite float %v", ErrInvalidArgument, f)
-		}
+// Each literal writes its REST form (Java's SingleValueParser).
+func (l BoolLiteral) MarshalJSON() ([]byte, error)   { return json.Marshal(bool(l)) }
+func (l Int32Literal) MarshalJSON() ([]byte, error)  { return json.Marshal(int32(l)) }
+func (l Int64Literal) MarshalJSON() ([]byte, error)  { return json.Marshal(int64(l)) }
+func (l StringLiteral) MarshalJSON() ([]byte, error) { return json.Marshal(string(l)) }
 
-		return json.Marshal(float32(l))
-	case Float64Literal:
-		if f := float64(l); math.IsInf(f, 0) || math.IsNaN(f) {
-			return nil, fmt.Errorf("%w: cannot serialize non-finite float %v", ErrInvalidArgument, f)
-		}
+func (l Float32Literal) MarshalJSON() ([]byte, error) {
+	if f := float64(l); math.IsInf(f, 0) || math.IsNaN(f) {
+		return nil, fmt.Errorf("%w: cannot serialize non-finite float %v", ErrInvalidArgument, f)
+	}
 
-		return json.Marshal(float64(l))
-	case StringLiteral:
-		return json.Marshal(string(l))
-	case DateLiteral:
-		return json.Marshal(Date(l).ToTime().Format("2006-01-02"))
-	case TimeLiteral:
-		// "9"s trim trailing fractional zeros (and the point when zero), as Java does.
-		return json.Marshal(time.UnixMicro(int64(l)).UTC().Format("15:04:05.999999"))
+	return json.Marshal(float32(l))
+}
+
+func (l Float64Literal) MarshalJSON() ([]byte, error) {
+	if f := float64(l); math.IsInf(f, 0) || math.IsNaN(f) {
+		return nil, fmt.Errorf("%w: cannot serialize non-finite float %v", ErrInvalidArgument, f)
+	}
+
+	return json.Marshal(float64(l))
+}
+
+func (l DateLiteral) MarshalJSON() ([]byte, error) {
+	return json.Marshal(Date(l).ToTime().Format("2006-01-02"))
+}
+
+func (l TimeLiteral) MarshalJSON() ([]byte, error) {
+	// "9"s trim trailing fractional zeros (and the point when zero), as Java does.
+	return json.Marshal(time.UnixMicro(int64(l)).UTC().Format("15:04:05.999999"))
+}
+
+// A bare timestamp literal has no field type, so it can't pick a wire form;
+// serialize through a predicate (see literalValue) instead.
+func (TimestampLiteral) MarshalJSON() ([]byte, error) {
+	return nil, fmt.Errorf("%w: serialize a timestamp literal through a predicate so the field type is known", ErrInvalidArgument)
+}
+
+func (TimestampNsLiteral) MarshalJSON() ([]byte, error) {
+	return nil, fmt.Errorf("%w: serialize a timestamp literal through a predicate so the field type is known", ErrInvalidArgument)
+}
+
+func (l UUIDLiteral) MarshalJSON() ([]byte, error) {
+	return json.Marshal(uuid.UUID(l).String())
+}
+
+func (l FixedLiteral) MarshalJSON() ([]byte, error) {
+	return json.Marshal(strings.ToUpper(hex.EncodeToString([]byte(l))))
+}
+
+func (l BinaryLiteral) MarshalJSON() ([]byte, error) {
+	return json.Marshal(strings.ToUpper(hex.EncodeToString([]byte(l))))
+}
+
+func (l DecimalLiteral) MarshalJSON() ([]byte, error) {
+	return json.Marshal(Decimal(l).String())
+}
+
+// literalValue pairs a literal with its field type, like typeIFace does for
+// types. timestamp and timestamptz share one literal type, so the field type is
+// the only thing that decides the +00:00 offset on the wire.
+type literalValue struct {
+	Literal
+	typ Type
+}
+
+func (v literalValue) MarshalJSON() ([]byte, error) {
+	switch l := v.Literal.(type) {
 	case TimestampLiteral:
-		t := Timestamp(l).ToTime()
-		// timestamptz gets a +00:00 offset ("-07:00" prints it, "Z07:00" wouldn't).
-		if _, ok := typ.(TimestampTzType); ok {
-			return json.Marshal(t.UTC().Format("2006-01-02T15:04:05.999999-07:00"))
-		}
-
-		return json.Marshal(t.Format("2006-01-02T15:04:05.999999"))
+		return marshalTimestamp(Timestamp(l).ToTime(), v.typ)
 	case TimestampNsLiteral:
-		t := TimestampNano(l).ToTime()
-		if _, ok := typ.(TimestampTzNsType); ok {
-			return json.Marshal(t.UTC().Format("2006-01-02T15:04:05.999999999-07:00"))
-		}
-
-		return json.Marshal(t.Format("2006-01-02T15:04:05.999999999"))
-	case UUIDLiteral:
-		return json.Marshal(uuid.UUID(l).String())
-	case FixedLiteral:
-		return json.Marshal(strings.ToUpper(hex.EncodeToString([]byte(l))))
-	case BinaryLiteral:
-		return json.Marshal(strings.ToUpper(hex.EncodeToString([]byte(l))))
-	case DecimalLiteral:
-		return json.Marshal(Decimal(l).String())
+		return marshalTimestamp(TimestampNano(l).ToTime(), v.typ)
 	default:
-		return nil, fmt.Errorf("%w: cannot serialize literal of type %s", ErrInvalidArgument, lit.Type())
+		return json.Marshal(v.Literal)
 	}
 }
 
-func literalOf(e BooleanExpression) (Literal, error) {
-	switch p := e.(type) {
-	case *unboundLiteralPredicate:
-		return p.lit, nil
-	case BoundLiteralPredicate:
-		return p.Literal(), nil
-	default:
-		return nil, fmt.Errorf("%w: expected a literal predicate, got %T", ErrInvalidArgument, e)
+func (v *literalValue) UnmarshalJSON(b []byte) error {
+	base, err := asObject(b)
+	if err != nil {
+		return err
 	}
+	lit, err := convertValue(base, v.typ)
+	if err != nil {
+		return err
+	}
+	v.Literal = lit
+
+	return nil
 }
 
-func literalsOf(e BooleanExpression) ([]Literal, error) {
-	switch p := e.(type) {
-	case *unboundSetPredicate:
-		return p.lits.Members(), nil
-	case BoundSetPredicate:
-		return p.Literals().Members(), nil
+// marshalTimestamp emits the REST form: with the UTC offset for timestamptz,
+// without it for timestamp.
+func marshalTimestamp(tm time.Time, typ Type) ([]byte, error) {
+	switch typ.(type) {
+	case TimestampTzType, TimestampTzNsType:
+		// "-07:00" prints +00:00 for a UTC instant, matching Java.
+		return json.Marshal(tm.Format("2006-01-02T15:04:05.999999-07:00"))
+	case TimestampType, TimestampNsType:
+		return json.Marshal(tm.Format("2006-01-02T15:04:05.999999"))
 	default:
-		return nil, fmt.Errorf("%w: expected a set predicate, got %T", ErrInvalidArgument, e)
+		return nil, fmt.Errorf("%w: serializing a timestamp filter needs the field type; bind the expression to a schema first", ErrInvalidArgument)
 	}
 }
 
 func decodeExpr(raw json.RawMessage, schema *Schema) (BooleanExpression, error) {
-	b := bytes.TrimSpace(raw)
-	if len(b) == 0 {
-		return nil, fmt.Errorf("%w: cannot parse expression from empty input", ErrInvalidArgument)
+	// A bare boolean is AlwaysTrue/AlwaysFalse; anything else is a node object.
+	tok, err := firstToken(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%w: cannot parse expression: %s", ErrInvalidArgument, err)
 	}
-
-	// A bare boolean is AlwaysTrue/AlwaysFalse.
-	if b[0] == 't' || b[0] == 'f' {
-		var bv bool
-		if err := json.Unmarshal(b, &bv); err != nil {
-			return nil, fmt.Errorf("%w: cannot parse expression: %s", ErrInvalidArgument, err)
-		}
-		if bv {
+	if b, ok := tok.(bool); ok {
+		if b {
 			return AlwaysTrue{}, nil
 		}
 
 		return AlwaysFalse{}, nil
 	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return nil, fmt.Errorf("%w: cannot parse expression from %s", ErrInvalidArgument, raw)
+	}
 
 	var node exprNode
-	if err := json.Unmarshal(b, &node); err != nil {
+	if err := json.Unmarshal(raw, &node); err != nil {
 		return nil, fmt.Errorf("%w: cannot parse expression: %s", ErrInvalidArgument, err)
 	}
 
@@ -386,6 +425,14 @@ func decodeExpr(raw json.RawMessage, schema *Schema) (BooleanExpression, error) 
 	}
 
 	return decodePredicate(op, node, schema)
+}
+
+// firstToken returns the first JSON token of raw, used to classify a node
+// without inspecting bytes by hand.
+func firstToken(raw json.RawMessage) (json.Token, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+
+	return dec.Token()
 }
 
 func decodePredicate(op Operation, node exprNode, schema *Schema) (BooleanExpression, error) {
@@ -447,22 +494,22 @@ func decodePredicate(op Operation, node exprNode, schema *Schema) (BooleanExpres
 }
 
 func decodeTerm(raw json.RawMessage) (UnboundTerm, error) {
-	b := bytes.TrimSpace(raw)
-	if len(b) == 0 {
+	if len(raw) == 0 {
 		return nil, fmt.Errorf("%w: predicate is missing a term", ErrInvalidArgument)
 	}
 
-	if b[0] == '"' {
-		var name string
-		if err := json.Unmarshal(b, &name); err != nil {
-			return nil, fmt.Errorf("%w: cannot parse term: %s", ErrInvalidArgument, err)
-		}
+	tok, err := firstToken(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%w: cannot parse term: %s", ErrInvalidArgument, err)
+	}
 
+	// A bare string is a plain reference.
+	if name, ok := tok.(string); ok {
 		return Reference(name), nil
 	}
 
 	var t transformNode
-	if err := json.Unmarshal(b, &t); err != nil {
+	if err := json.Unmarshal(raw, &t); err != nil {
 		return nil, fmt.Errorf("%w: cannot parse term: %s", ErrInvalidArgument, err)
 	}
 	switch t.Type {
@@ -476,14 +523,19 @@ func decodeTerm(raw json.RawMessage) (UnboundTerm, error) {
 	}
 }
 
-// decodeValue parses one literal value. A nil type yields the base literal kind
-// for the JSON token; otherwise the value is converted to that type.
+// decodeValue parses one literal value and converts it to typ.
 func decodeValue(raw json.RawMessage, typ Type) (Literal, error) {
-	base, err := asObject(raw)
-	if err != nil {
+	v := literalValue{typ: typ}
+	if err := json.Unmarshal(raw, &v); err != nil {
 		return nil, err
 	}
 
+	return v.Literal, nil
+}
+
+// convertValue turns a base literal into typ. A nil type yields the base kind for
+// the JSON token, as the reference does without a schema.
+func convertValue(base Literal, typ Type) (Literal, error) {
 	if typ == nil {
 		return base, nil
 	}

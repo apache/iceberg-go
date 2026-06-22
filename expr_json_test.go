@@ -153,9 +153,6 @@ func TestMarshalExpressionTypedLiterals(t *testing.T) {
 		want string
 	}{
 		{"date", mustLit(t, "2022-08-14", iceberg.PrimitiveTypes.Date), `{"type":"eq","term":"d","value":"2022-08-14"}`},
-		{"timestamp (no fraction)", mustLit(t, "2022-08-14T10:00:00", iceberg.PrimitiveTypes.Timestamp), `{"type":"eq","term":"d","value":"2022-08-14T10:00:00"}`},
-		{"timestamp (micros)", mustLit(t, "2022-08-14T10:00:00.123456", iceberg.PrimitiveTypes.Timestamp), `{"type":"eq","term":"d","value":"2022-08-14T10:00:00.123456"}`},
-		{"timestamp (trailing zeros trimmed)", mustLit(t, "2022-08-14T10:00:00.500000", iceberg.PrimitiveTypes.Timestamp), `{"type":"eq","term":"d","value":"2022-08-14T10:00:00.5"}`},
 		{"uuid", iceberg.UUIDLiteral(uuid.MustParse("f79c3e09-677c-4bbd-a479-3f349cb785e7")), `{"type":"eq","term":"d","value":"f79c3e09-677c-4bbd-a479-3f349cb785e7"}`},
 		{"binary", iceberg.BinaryLiteral([]byte{0x01, 0x02, 0x03}), `{"type":"eq","term":"d","value":"010203"}`},
 		{"decimal", mustLit(t, "3.14", iceberg.DecimalTypeOf(9, 2)), `{"type":"eq","term":"d","value":"3.14"}`},
@@ -173,26 +170,48 @@ func TestMarshalExpressionTypedLiterals(t *testing.T) {
 	}
 }
 
-// TestMarshalExpressionTimestampTz checks that a timestamptz value serializes
-// with a +00:00 offset (Java's format), which needs the bound field type to tell
-// it apart from a plain timestamp. It also round-trips back through the schema.
-func TestMarshalExpressionTimestampTz(t *testing.T) {
+// TestMarshalExpressionTimestamp checks the timestamp and timestamptz wire forms,
+// which differ only by the UTC offset and so depend on the bound field type.
+func TestMarshalExpressionTimestamp(t *testing.T) {
 	schema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.TimestampTz},
+		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp},
+		iceberg.NestedField{ID: 2, Name: "tstz", Type: iceberg.PrimitiveTypes.TimestampTz},
 	)
-	unbound := iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference("ts"),
-		mustLit(t, "2022-08-14T10:00:00+00:00", iceberg.PrimitiveTypes.TimestampTz))
+	lit := mustLit(t, "2022-08-14T10:00:00", iceberg.PrimitiveTypes.Timestamp)
 
-	bound, err := iceberg.BindExpr(schema, unbound, true)
-	require.NoError(t, err)
+	tests := []struct {
+		field string
+		want  string
+	}{
+		{"ts", `{"type":"eq","term":"ts","value":"2022-08-14T10:00:00"}`},
+		{"tstz", `{"type":"eq","term":"tstz","value":"2022-08-14T10:00:00+00:00"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.field, func(t *testing.T) {
+			bound, err := iceberg.BindExpr(schema,
+				iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference(tt.field), lit), true)
+			require.NoError(t, err)
+			got, err := json.Marshal(bound)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, string(got))
 
-	got, err := json.Marshal(bound)
-	require.NoError(t, err)
-	assert.Equal(t, `{"type":"eq","term":"ts","value":"2022-08-14T10:00:00+00:00"}`, string(got))
+			// Parse back with the schema to resolve the value via the same type.
+			parsed, err := iceberg.ParseExpr(got, schema)
+			require.NoError(t, err)
+			rebound, err := iceberg.BindExpr(schema, parsed, true)
+			require.NoError(t, err)
+			assert.Truef(t, bound.Equals(rebound), "want %s, got %s", bound, rebound)
+		})
+	}
+}
 
-	parsed, err := iceberg.ParseExpr(got, schema)
-	require.NoError(t, err)
-	assert.Truef(t, unbound.Equals(parsed), "want %s, got %s", unbound, parsed)
+// TestMarshalExpressionUnboundTimestamp covers the gap: an unbound timestamp
+// predicate has no field type, so it can't be serialized.
+func TestMarshalExpressionUnboundTimestamp(t *testing.T) {
+	expr := iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference("ts"),
+		mustLit(t, "2022-08-14T10:00:00", iceberg.PrimitiveTypes.Timestamp))
+	_, err := json.Marshal(expr)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 }
 
 // TestMarshalBoundExpression guards against bound expressions falling through to
