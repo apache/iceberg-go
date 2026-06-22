@@ -70,21 +70,33 @@ var uuidMetadataPattern = regexp.MustCompile(
 // Note: this is POSIX-best-effort validation — it does not catch NUL bytes
 // or Windows reserved names (NUL, CON, COM1, etc.).
 func validateIdentifier(ident table.Identifier) error {
+	return validateIdentifierParts(ident, catalog.ErrNoSuchNamespace, "namespace identifier", "identifier component")
+}
+
+func validateTableIdentifier(ident table.Identifier) error {
+	if len(ident) < 2 {
+		return fmt.Errorf("%w: table identifier must have at least a namespace and table name", catalog.ErrNoSuchTable)
+	}
+
+	return validateIdentifierParts(ident, catalog.ErrNoSuchTable, "table identifier", "table identifier component")
+}
+
+func validateIdentifierParts(ident table.Identifier, errType error, identifierName, componentName string) error {
 	if len(ident) == 0 {
-		return fmt.Errorf("%w: namespace identifier must not be empty", catalog.ErrNoSuchNamespace)
+		return fmt.Errorf("%w: %s must not be empty", errType, identifierName)
 	}
 
 	for _, part := range ident {
 		if part == "" {
-			return fmt.Errorf("%w: identifier component must not be empty", catalog.ErrNoSuchNamespace)
+			return fmt.Errorf("%w: %s must not be empty", errType, componentName)
 		}
 
 		if part == "." || part == ".." {
-			return fmt.Errorf("%w: invalid identifier component %q", catalog.ErrNoSuchNamespace, part)
+			return fmt.Errorf("%w: invalid %s %q", errType, componentName, part)
 		}
 
 		if strings.ContainsAny(part, "/\\") {
-			return fmt.Errorf("%w: identifier component must not contain path separators: %q", catalog.ErrNoSuchNamespace, part)
+			return fmt.Errorf("%w: %s must not contain path separators: %q", errType, componentName, part)
 		}
 	}
 
@@ -332,8 +344,8 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		opt(&cfg)
 	}
 
-	if len(ident) < 2 {
-		return nil, errors.New("hadoop catalog: table identifier must have at least a namespace and table name")
+	if err := validateTableIdentifier(ident); err != nil {
+		return nil, err
 	}
 
 	ns := catalog.NamespaceFromIdent(ident)
@@ -404,8 +416,8 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 }
 
 func (c *Catalog) LoadTable(ctx context.Context, ident table.Identifier) (*table.Table, error) {
-	if len(ident) < 2 {
-		return nil, errors.New("hadoop catalog: table identifier must have at least a namespace and table name")
+	if err := validateTableIdentifier(ident); err != nil {
+		return nil, err
 	}
 
 	ver, err := c.findVersion(ident)
@@ -419,7 +431,7 @@ func (c *Catalog) LoadTable(ctx context.Context, ident table.Identifier) (*table
 }
 
 func (c *Catalog) CheckTableExists(_ context.Context, ident table.Identifier) (bool, error) {
-	if len(ident) < 2 {
+	if err := validateTableIdentifier(ident); err != nil {
 		return false, nil
 	}
 
@@ -427,8 +439,8 @@ func (c *Catalog) CheckTableExists(_ context.Context, ident table.Identifier) (b
 }
 
 func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
-	if len(ident) < 2 {
-		return nil, "", errors.New("hadoop catalog: table identifier must have at least a namespace and table name")
+	if err := validateTableIdentifier(ident); err != nil {
+		return nil, "", err
 	}
 
 	// Step 1: Load current table (nil for create-via-commit).
@@ -527,8 +539,8 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 
 func (c *Catalog) ListTables(_ context.Context, ns table.Identifier) iter.Seq2[table.Identifier, error] {
 	return func(yield func(table.Identifier, error) bool) {
-		if len(ns) == 0 {
-			yield(nil, errors.New("hadoop catalog: namespace identifier must not be empty"))
+		if err := validateIdentifier(ns); err != nil {
+			yield(nil, err)
 
 			return
 		}
@@ -586,8 +598,8 @@ func (c *Catalog) ListTables(_ context.Context, ns table.Identifier) iter.Seq2[t
 }
 
 func (c *Catalog) DropTable(_ context.Context, ident table.Identifier) error {
-	if len(ident) < 2 {
-		return errors.New("hadoop catalog: table identifier must have at least a namespace and table name")
+	if err := validateTableIdentifier(ident); err != nil {
+		return err
 	}
 
 	tablePath := c.tableToPath(ident)
@@ -599,6 +611,10 @@ func (c *Catalog) DropTable(_ context.Context, ident table.Identifier) error {
 }
 
 func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) error {
+	if err := validateTableIdentifier(identifier); err != nil {
+		return err
+	}
+
 	tbl, err := c.LoadTable(ctx, identifier)
 	if err != nil {
 		return err
