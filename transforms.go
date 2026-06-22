@@ -229,7 +229,7 @@ func (VoidTransform) Apply(value Optional[Literal]) Optional[Literal] {
 
 func (VoidTransform) ToHumanStr(any) string { return "null" }
 
-func (VoidTransform) ToHumanStrType(typ Type, val any) string { return "null" }
+func (VoidTransform) ToHumanStrType(Type, any) string { return "null" }
 
 func (VoidTransform) Project(string, BoundPredicate) (UnboundPredicate, error) {
 	return nil, nil
