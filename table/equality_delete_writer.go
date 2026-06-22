@@ -27,7 +27,6 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/config"
 	"github.com/apache/iceberg-go/internal"
-	iceio "github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
 )
 
@@ -91,9 +90,9 @@ func (t *Transaction) WriteEqualityDeletes(ctx context.Context, equalityFieldIDs
 		return nil, err
 	}
 
-	wfs, ok := fs.(iceio.WriteFileIO)
-	if !ok {
-		return nil, errors.New("filesystem does not support writing")
+	wfs, err := requireWriteFileIO(fs)
+	if err != nil {
+		return nil, err
 	}
 
 	arrowSc, err := SchemaToArrowSchema(deleteSchema, nil, true, false)
