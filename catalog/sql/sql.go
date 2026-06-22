@@ -284,7 +284,7 @@ func (c *Catalog) migrateV0Schema(ctx context.Context) error {
 func (c *Catalog) icebergTypeColumnExists(ctx context.Context) (bool, error) {
 	var query string
 	switch dialectName := c.db.Dialect().Name().String(); dialectName {
-	case "pg", "postgres":
+	case "pg":
 		query = `SELECT 1 FROM information_schema.columns
 		         WHERE table_name = 'iceberg_tables'
 		           AND column_name = 'iceberg_type' LIMIT 1`
