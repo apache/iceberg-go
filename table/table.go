@@ -464,6 +464,9 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		return nil, err
 	}
 
+	commitStart := time.Now()
+	attemptsUsed := 0
+
 	// Bound total retry time with a derived context so both the wait loop
 	// and the CommitTable call itself respect the deadline uniformly.
 	retryCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.totalTimeoutMs)*time.Millisecond)
@@ -596,6 +599,8 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 
 		newMeta, newLoc, err = t.cat.CommitTable(retryCtx, slices.Clone(t.identifier), reqs, updates)
 		if err == nil {
+			attemptsUsed = int(attempt) + 1
+
 			break
 		}
 
@@ -631,6 +636,28 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 	}
 
 	deleteOldMetadata(fs, t.metadata, newMeta)
+
+	// Emit a commit report on success. Prefer the just-committed branch head
+	// over the table's current snapshot so commits to a non-default branch
+	// report the snapshot they actually created.
+	//
+	// Mirrors the scan path: building the report is skipped for a no-op
+	// reporter (the opt-in default), since a nop discards it and assembling one
+	// would be pure overhead. A metadata-only commit produces no snapshot and
+	// must be skipped too — its branch head is unchanged, so reporting it would
+	// attribute a prior snapshot's metrics to this commit.
+	if rep := t.MetricsReporter(); !metrics.IsNop(rep) && commitAddedSnapshot(updates) {
+		committed := newMeta.CurrentSnapshot()
+		if co.branch != "" {
+			if s := newMeta.SnapshotByName(co.branch); s != nil {
+				committed = s
+			}
+		}
+		if committed != nil {
+			rep.Report(ctx,
+				buildCommitReport(strings.Join(t.identifier, "."), committed, attemptsUsed, time.Since(commitStart)))
+		}
+	}
 
 	return New(t.identifier, newMeta, newLoc, t.fsF, t.cat, withReporterState(t.reporter, t.reporterSet)), nil
 }
