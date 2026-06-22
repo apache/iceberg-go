@@ -312,9 +312,15 @@ func (p parquetFormat) WriteDataFile(ctx context.Context, fs iceio.WriteFileIO, 
 		return nil, err
 	}
 
+	return writeDataFileBatches(w, batches)
+}
+
+func writeDataFileBatches(w FileWriter, batches []arrow.RecordBatch) (iceberg.DataFile, error) {
 	for _, batch := range batches {
 		if err := w.Write(batch); err != nil {
-			w.Close()
+			if abortErr := w.Abort(); abortErr != nil {
+				return nil, errors.Join(err, abortErr)
+			}
 
 			return nil, err
 		}
