@@ -70,8 +70,10 @@ const (
 
 	authorizationHeader = "Authorization"
 	bearerPrefix        = "Bearer"
-	namespaceSeparator  = "\x1F"
 	keyPrefix           = "prefix"
+
+	keyNamespaceSeparator     = "namespace-separator"
+	defaultNamespaceSeparator = "%1F"
 
 	icebergRestSpecVersion = "0.14.1"
 
@@ -532,6 +534,8 @@ type Catalog struct {
 	name      string
 	props     iceberg.Properties
 	endpoints endpointSet
+
+	namespaceSeparator string
 }
 
 func newCatalogFromProps(ctx context.Context, name string, uri string, p iceberg.Properties) (*Catalog, error) {
@@ -743,6 +747,8 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client,
 	maps.Copy(cfg, toProps(opts))
 	maps.Copy(cfg, rsp.Overrides)
 
+	r.namespaceSeparator = cfg.Get(keyNamespaceSeparator, defaultNamespaceSeparator)
+
 	// Negotiate capabilities from the endpoints the server advertises, falling
 	// back to a backward-compatible default set when none are provided.
 	r.endpoints = resolveEndpoints(rsp.Endpoints, cfg.GetBool(keyViewEndpointsSupported, false))
@@ -803,7 +809,7 @@ func (r *Catalog) fetchTableCreds(ctx context.Context, ident []string, location 
 		return nil, err
 	}
 
-	ns, tbl, err := splitIdentForPath(ident)
+	ns, tbl, err := r.splitIdentForPath(ident)
 	if err != nil {
 		return nil, err
 	}
@@ -857,7 +863,7 @@ func (r *Catalog) listTablesPage(ctx context.Context, namespace table.Identifier
 	if !r.endpoints.allowed(endpointListTables) {
 		return nil, "", nil
 	}
-	ns := strings.Join(namespace, namespaceSeparator)
+	ns := r.encodeNamespace(namespace)
 	path, err := endpointListTables.reqPath(ns)
 	if err != nil {
 		return nil, "", err
@@ -889,13 +895,45 @@ func (r *Catalog) listTablesPage(ctx context.Context, namespace table.Identifier
 	return out, rsp.NextPageToken, nil
 }
 
-func splitIdentForPath(ident table.Identifier) (string, string, error) {
+func (r *Catalog) nsSeparator() string {
+	if r.namespaceSeparator == "" {
+		return defaultNamespaceSeparator
+	}
+
+	return r.namespaceSeparator
+}
+
+// encodeNamespace URL-encodes each namespace level and joins them with the
+// server-advertised, URL-encoded namespace separator for use as a REST path
+// segment. Mirrors RESTUtil.encodeNamespace in the Java implementation.
+func (r *Catalog) encodeNamespace(namespace table.Identifier) string {
+	encoded := make([]string, len(namespace))
+	for i, level := range namespace {
+		encoded[i] = url.PathEscape(level)
+	}
+
+	return strings.Join(encoded, r.nsSeparator())
+}
+
+// namespaceToQueryParam joins the raw namespace levels with the decoded
+// separator for use as a query-parameter value, which the HTTP layer then
+// percent-encodes. Mirrors RESTUtil.namespaceToQueryParam in Java.
+func (r *Catalog) namespaceToQueryParam(namespace table.Identifier) string {
+	sep, err := url.PathUnescape(r.nsSeparator())
+	if err != nil {
+		sep = r.nsSeparator()
+	}
+
+	return strings.Join(namespace, sep)
+}
+
+func (r *Catalog) splitIdentForPath(ident table.Identifier) (string, string, error) {
 	if len(ident) < 1 {
 		return "", "", fmt.Errorf("%w: missing namespace or invalid identifier %v",
 			catalog.ErrNoSuchTable, strings.Join(ident, "."))
 	}
 
-	return strings.Join(catalog.NamespaceFromIdent(ident), namespaceSeparator), catalog.TableNameFromIdent(ident), nil
+	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.TableNameFromIdent(ident), nil
 }
 
 func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
@@ -903,7 +941,7 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, err
 	}
 
-	ns, tbl, err := splitIdentForPath(identifier)
+	ns, tbl, err := r.splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -1014,7 +1052,7 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 		return nil, "", err
 	}
 
-	ns, tblName, err := splitIdentForPath(ident)
+	ns, tblName, err := r.splitIdentForPath(ident)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1129,7 +1167,7 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		return nil, err
 	}
 
-	ns, tbl, err := splitIdentForPath(identifier)
+	ns, tbl, err := r.splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -1166,7 +1204,7 @@ func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 		return nil, err
 	}
 
-	ns, tbl, err := splitIdentForPath(identifier)
+	ns, tbl, err := r.splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -1196,7 +1234,7 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 		return nil, err
 	}
 
-	ns, tbl, err := splitIdentForPath(ident)
+	ns, tbl, err := r.splitIdentForPath(ident)
 	if err != nil {
 		return nil, err
 	}
@@ -1240,7 +1278,7 @@ func (r *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 		return err
 	}
 
-	ns, tbl, err := splitIdentForPath(identifier)
+	ns, tbl, err := r.splitIdentForPath(identifier)
 	if err != nil {
 		return err
 	}
@@ -1266,7 +1304,7 @@ func (r *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 		return err
 	}
 
-	ns, tbl, err := splitIdentForPath(identifier)
+	ns, tbl, err := r.splitIdentForPath(identifier)
 	if err != nil {
 		return err
 	}
@@ -1350,7 +1388,7 @@ func (r *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 		return err
 	}
 
-	path, err := endpointDeleteNamespace.reqPath(strings.Join(namespace, namespaceSeparator))
+	path, err := endpointDeleteNamespace.reqPath(r.encodeNamespace(namespace))
 	if err != nil {
 		return err
 	}
@@ -1398,7 +1436,7 @@ func (r *Catalog) listNamespacesPage(ctx context.Context, parent table.Identifie
 
 	v := url.Values{}
 	if len(parent) != 0 {
-		v.Set("parent", strings.Join(parent, namespaceSeparator))
+		v.Set("parent", r.namespaceToQueryParam(parent))
 	}
 	if pageSize > 0 {
 		v.Set("pageSize", strconv.Itoa(pageSize))
@@ -1437,7 +1475,7 @@ func (r *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 		Props     iceberg.Properties `json:"properties"`
 	}
 
-	path, err := endpointLoadNamespace.reqPath(strings.Join(namespace, namespaceSeparator))
+	path, err := endpointLoadNamespace.reqPath(r.encodeNamespace(namespace))
 	if err != nil {
 		return nil, err
 	}
@@ -1467,7 +1505,7 @@ func (r *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 		Updates iceberg.Properties `json:"updates"`
 	}
 
-	ns := strings.Join(namespace, namespaceSeparator)
+	ns := r.encodeNamespace(namespace)
 
 	path, err := endpointUpdateNamespace.reqPath(ns)
 	if err != nil {
@@ -1498,7 +1536,7 @@ func (r *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Iden
 		return true, nil
 	}
 
-	path, err := endpointNamespaceExists.reqPath(strings.Join(namespace, namespaceSeparator))
+	path, err := endpointNamespaceExists.reqPath(r.encodeNamespace(namespace))
 	if err != nil {
 		return false, err
 	}
@@ -1517,7 +1555,7 @@ func (r *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Iden
 }
 
 func (r *Catalog) CheckTableExists(ctx context.Context, identifier table.Identifier) (bool, error) {
-	ns, tbl, err := splitIdentForPath(identifier)
+	ns, tbl, err := r.splitIdentForPath(identifier)
 	if err != nil {
 		return false, err
 	}
@@ -1590,7 +1628,7 @@ func (r *Catalog) listViewsPage(ctx context.Context, namespace table.Identifier,
 	if !r.endpoints.allowed(endpointListViews) {
 		return nil, "", nil
 	}
-	ns := strings.Join(namespace, namespaceSeparator)
+	ns := r.encodeNamespace(namespace)
 	path, err := endpointListViews.reqPath(ns)
 	if err != nil {
 		return nil, "", err
@@ -1641,7 +1679,7 @@ func (r *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 		return err
 	}
 
-	ns, view, err := splitIdentForPath(identifier)
+	ns, view, err := r.splitIdentForPath(identifier)
 	if err != nil {
 		return err
 	}
@@ -1658,7 +1696,7 @@ func (r *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 }
 
 func (r *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifier) (bool, error) {
-	ns, view, err := splitIdentForPath(identifier)
+	ns, view, err := r.splitIdentForPath(identifier)
 	if err != nil {
 		return false, err
 	}
@@ -1728,7 +1766,7 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		return nil, err
 	}
 
-	ns, viewName, err := splitIdentForPath(identifier)
+	ns, viewName, err := r.splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -1789,7 +1827,7 @@ func (r *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 		return nil, err
 	}
 
-	ns, viewName, err := splitIdentForPath(ident)
+	ns, viewName, err := r.splitIdentForPath(ident)
 	if err != nil {
 		return nil, err
 	}
@@ -1834,7 +1872,7 @@ func (r *Catalog) RegisterView(ctx context.Context, identifier table.Identifier,
 		return nil, err
 	}
 
-	ns, v, err := splitIdentForPath(identifier)
+	ns, v, err := r.splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -1871,7 +1909,7 @@ func (r *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*v
 		return nil, err
 	}
 
-	ns, v, err := splitIdentForPath(identifier)
+	ns, v, err := r.splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
