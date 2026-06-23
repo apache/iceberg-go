@@ -1036,6 +1036,8 @@ func createIterator(ctx context.Context, numWorkers uint, records <-chan enumera
 
 				if rec.NumRows() == 0 {
 					// skip empty records
+					rec.Release()
+
 					continue
 				}
 

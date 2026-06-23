@@ -18,6 +18,7 @@
 package table
 
 import (
+	"context"
 	"strconv"
 	"strings"
 	"testing"
@@ -26,6 +27,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -190,4 +192,47 @@ func TestReleasePerFilePosDeletes(t *testing.T) {
 
 		require.NotPanics(t, func() { releasePerFilePosDeletes(m) })
 	})
+}
+
+func TestCreateIteratorReleasesEmptyRecordBatches(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	bldr := array.NewInt64Builder(mem)
+	bldr.AppendValues([]int64{1, 2}, nil)
+	arr := bldr.NewArray()
+	bldr.Release()
+
+	emptyArr := array.NewSlice(arr, 0, 0)
+	arr.Release()
+
+	schema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+	}, nil)
+	batch := array.NewRecordBatch(schema, []arrow.Array{emptyArr}, 0)
+	emptyArr.Release()
+
+	records := make(chan enumeratedRecord, 1)
+	records <- enumeratedRecord{
+		Record: internal.Enumerated[arrow.RecordBatch]{
+			Value: batch,
+			Index: 0,
+			Last:  true,
+		},
+		Task: internal.Enumerated[FileScanTask]{
+			Index: 0,
+			Last:  true,
+		},
+	}
+	close(records)
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	itr := createIterator(ctx, 1, records, nil, cancel, 0)
+	for rec, err := range itr {
+		require.NoError(t, err)
+		if rec != nil {
+			rec.Release()
+		}
+		require.Fail(t, "empty record batch should not be yielded")
+	}
 }
