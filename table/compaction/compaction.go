@@ -56,6 +56,12 @@ type Config struct {
 	// of memory. Default: DefaultPackingLookback.
 	PackingLookback uint
 
+	// MaxFilesToRewrite caps the total number of input files selected
+	// across all compaction groups. Groups are included in order; the
+	// last group is truncated to fit within the budget. 0 means
+	// unlimited.
+	MaxFilesToRewrite int
+
 	// PreserveDeadEqualityDeletes, when true, retains equality delete
 	// files that are provably dead after the rewrite. The cleanup
 	// predicate matches the v2 reader (see scanner.go
@@ -122,6 +128,9 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.DeleteFileThreshold < 1 {
 		return fmt.Errorf("delete file threshold must be >= 1, got %d", cfg.DeleteFileThreshold)
+	}
+	if cfg.MaxFilesToRewrite < 0 {
+		return fmt.Errorf("max files to rewrite must be non-negative, got %d", cfg.MaxFilesToRewrite)
 	}
 
 	return nil
@@ -253,7 +262,49 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 		}
 	}
 
+	if cfg.MaxFilesToRewrite > 0 {
+		budget := cfg.MaxFilesToRewrite
+		trimmed := make([]Group, 0, len(plan.Groups))
+		for _, g := range plan.Groups {
+			if budget <= 0 {
+				plan.SkippedFiles += len(g.Tasks)
+				plan.EstOutputFiles -= max(1, int((g.TotalSizeBytes+cfg.TargetFileSizeBytes-1)/cfg.TargetFileSizeBytes))
+				plan.EstOutputBytes -= g.TotalSizeBytes
+
+				continue
+			}
+			if len(g.Tasks) <= budget {
+				trimmed = append(trimmed, g)
+				budget -= len(g.Tasks)
+			} else {
+				// Truncate the last group to the remaining budget.
+				truncated := buildGroup(g.PartitionKey, g.Tasks[:budget])
+				dropped := g.Tasks[budget:]
+				for _, t := range dropped {
+					plan.SkippedFiles++
+					plan.EstOutputBytes -= t.File.FileSizeBytes()
+				}
+				estDrop := max(1, int((g.TotalSizeBytes+cfg.TargetFileSizeBytes-1)/cfg.TargetFileSizeBytes))
+				estKeep := max(1, int((truncated.TotalSizeBytes+cfg.TargetFileSizeBytes-1)/cfg.TargetFileSizeBytes))
+				plan.EstOutputFiles -= estDrop - estKeep
+				trimmed = append(trimmed, truncated)
+				budget = 0
+			}
+		}
+		plan.Groups = trimmed
+	}
+
 	return plan, nil
+}
+
+func buildGroup(partitionKey string, tasks []table.FileScanTask) Group {
+	g := Group{PartitionKey: partitionKey, Tasks: tasks}
+	for _, t := range tasks {
+		g.TotalSizeBytes += t.File.FileSizeBytes()
+		g.DeleteFileCount += len(t.DeleteFiles) + len(t.EqualityDeleteFiles)
+	}
+
+	return g
 }
 
 // isCandidate returns true if a file should be considered for compaction.
