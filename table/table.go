@@ -142,6 +142,7 @@ func (t *Table) Refresh(ctx context.Context) error {
 	t.metadata = fresh.metadata
 	t.fsF = fresh.fsF
 	t.metadataLocation = fresh.metadataLocation
+	t.planner = fresh.planner
 
 	return nil
 }
@@ -830,9 +831,12 @@ func WithRowLineage() ScanOption {
 
 func (t Table) Scan(opts ...ScanOption) *Scan {
 	s := &Scan{
-		metadata:       t.metadata,
-		ioF:            t.fsF,
-		planner:        t.planner,
+		identifier:       t.identifier,
+		metadata:         t.metadata,
+		metadataLocation: t.metadataLocation,
+		ioF:              t.fsF,
+		planner:          t.planner,
+		// TODO(#1178 Phase 6): resolve scan-planning-mode table properties here.
 		planningMode:   ScanPlanningLocal,
 		rowFilter:      iceberg.AlwaysTrue{},
 		selectedFields: []string{"*"},

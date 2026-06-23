@@ -85,8 +85,11 @@ func (r *Catalog) PlanTableScan(ctx context.Context, ident table.Identifier, req
 	return PlanTableScanResponse{}, fmt.Errorf("%w: plan table scan", iceberg.ErrNotImplemented)
 }
 
-// FetchPlanningResult polls a previously submitted plan.
-func (r *Catalog) FetchPlanningResult(ctx context.Context, ident table.Identifier, planID string) (FetchPlanningResultResponse, error) {
+// FetchPlanningResult polls a previously submitted plan. opts.AccessDelegation
+// is sent as the X-Iceberg-Access-Delegation header so an async poll can still
+// receive plan-scoped storage credentials: the spec defines data-access on this
+// endpoint, and the completed-async result is where those credentials are vended.
+func (r *Catalog) FetchPlanningResult(ctx context.Context, ident table.Identifier, planID string, opts FetchPlanningResultOptions) (FetchPlanningResultResponse, error) {
 	return FetchPlanningResultResponse{}, fmt.Errorf("%w: fetch planning result", iceberg.ErrNotImplemented)
 }
 
@@ -129,8 +132,16 @@ const (
 	PlanStatusFailed    PlanStatus = "failed"
 )
 
-// PlanningError is the ErrorModel payload carried by a failed planning result.
-type PlanningError = errorResponse
+// PlanningError is the REST ErrorModel payload carried by the error arm of a
+// failed planning result. It mirrors the package's internal error wire shape
+// but is a dedicated exported struct so it renders cleanly in godoc and does
+// not leak an unexported type or its unexported fields into the public API.
+type PlanningError struct {
+	Message string   `json:"message"`
+	Type    string   `json:"type"`
+	Code    int      `json:"code"`
+	Stack   []string `json:"stack,omitempty"`
+}
 
 // RESTFileScanTask is the REST FileScanTask wire payload. The REST prefix
 // avoids confusion with table.FileScanTask, the decoded domain type. The
@@ -169,6 +180,8 @@ type CompletedPlanningResult struct {
 // wire type and the seam stay in agreement.
 type PlanTableScanRequest struct {
 	// IdempotencyKey is sent as the Idempotency-Key header, not in the JSON body.
+	// If set, it must be a UUID string; nil lets the implementation choose a
+	// safe retry key.
 	IdempotencyKey *string `json:"-"`
 	// AccessDelegation is sent as the X-Iceberg-Access-Delegation header, not
 	// in the JSON body. Nil uses the catalog default.
@@ -186,11 +199,12 @@ type PlanTableScanRequest struct {
 // PlanTableScanResponse is the POST .../plan response. The spec models this as
 // a `status`-discriminated union; the flat struct carries every arm's fields
 // with omitempty so none are discarded. Task/delete payloads are filled in by
-// the scan-task decoder PR. Per the spec's CompletedPlanningWithIDResult, plan-id
-// is required for both submitted and completed responses here; the wire decoder
-// must validate PlanID != nil at unmarshal (not rely on the omitempty pointer),
-// since the caller needs it to CancelPlanning and release server resources. A
-// cancelled status is invalid for this endpoint and must be treated as an error.
+// the scan-task decoder PR. Per the spec, plan-id is required for both completed
+// (CompletedPlanningWithIDResult) and submitted (AsyncPlanningResult) responses
+// here; the wire decoder must validate PlanID != nil at unmarshal rather than
+// rely on the omitempty pointer. A cancelled status is invalid for this endpoint
+// and must be treated as an error. A failed status decodes successfully when it
+// carries Error; callers must branch on Status before dereferencing PlanID.
 type PlanTableScanResponse struct {
 	Status PlanStatus     `json:"status"`
 	PlanID *string        `json:"plan-id,omitempty"`
@@ -211,8 +225,14 @@ func (r *PlanTableScanResponse) UnmarshalJSON(data []byte) error {
 		if resp.PlanID == nil {
 			return fmt.Errorf("%w: planTableScan response with status %q missing plan-id", ErrRESTError, resp.Status)
 		}
+	case PlanStatusFailed:
+		if resp.Error == nil {
+			return fmt.Errorf("%w: planTableScan failed response missing error", ErrRESTError)
+		}
 	case PlanStatusCancelled:
 		return fmt.Errorf("%w: planTableScan response has invalid status %q", ErrRESTError, resp.Status)
+	default:
+		return fmt.Errorf("%w: planTableScan response has unknown status %q", ErrRESTError, resp.Status)
 	}
 
 	*r = PlanTableScanResponse(resp)
@@ -232,6 +252,8 @@ type FetchPlanningResultResponse struct {
 // FetchScanTasksRequest is the POST .../tasks request body.
 type FetchScanTasksRequest struct {
 	// IdempotencyKey is sent as the Idempotency-Key header, not in the JSON body.
+	// If set, it must be a UUID string; nil lets the implementation choose a
+	// safe retry key.
 	IdempotencyKey *string `json:"-"`
 
 	PlanTask string `json:"plan-task"`
@@ -244,11 +266,30 @@ type FetchScanTasksResponse struct {
 	ScanTasks
 }
 
+// DefaultWaitForPlanOptions is the conservative polling backoff used when
+// callers pass the zero-value WaitForPlanOptions.
+var DefaultWaitForPlanOptions = WaitForPlanOptions{
+	MinDelay: 100 * time.Millisecond,
+	MaxDelay: 5 * time.Second,
+}
+
 // WaitForPlanOptions tunes the polling backoff. The total wait is bounded by the
 // caller's context deadline (context.WithTimeout). There is deliberately no
 // Timeout field to avoid duplicating the context and the zero-value footgun.
-// Defaults should be conservative.
+// A zero MinDelay/MaxDelay uses DefaultWaitForPlanOptions.
 type WaitForPlanOptions struct {
 	MinDelay time.Duration
 	MaxDelay time.Duration
+	// AccessDelegation is sent as the X-Iceberg-Access-Delegation header on each
+	// poll; nil uses the catalog default. Needed for async plans so the
+	// completed poll can return vended storage credentials.
+	AccessDelegation *string
+}
+
+// FetchPlanningResultOptions carries per-call headers for fetchPlanningResult.
+type FetchPlanningResultOptions struct {
+	// AccessDelegation is sent as the X-Iceberg-Access-Delegation header; nil
+	// uses the catalog default. The spec defines data-access on this endpoint,
+	// so an async poll needs it to receive vended storage credentials.
+	AccessDelegation *string
 }

@@ -19,31 +19,37 @@ package rest
 
 import (
 	"encoding/json"
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPlanTableScanResponseRequiresPlanIDForTrackedStatuses(t *testing.T) {
+	t.Parallel()
+
 	for _, status := range []PlanStatus{PlanStatusCompleted, PlanStatusSubmitted} {
 		t.Run(string(status), func(t *testing.T) {
+			t.Parallel()
+
 			var resp PlanTableScanResponse
 			err := json.Unmarshal([]byte(`{"status":"`+string(status)+`"}`), &resp)
-			if !errors.Is(err, ErrRESTError) {
-				t.Fatalf("expected ErrRESTError, got %v", err)
-			}
+			require.ErrorIs(t, err, ErrRESTError)
 		})
 	}
 }
 
 func TestPlanTableScanResponseRejectsCancelled(t *testing.T) {
+	t.Parallel()
+
 	var resp PlanTableScanResponse
 	err := json.Unmarshal([]byte(`{"status":"cancelled","plan-id":"abc"}`), &resp)
-	if !errors.Is(err, ErrRESTError) {
-		t.Fatalf("expected ErrRESTError, got %v", err)
-	}
+	require.ErrorIs(t, err, ErrRESTError)
 }
 
 func TestPlanTableScanResponseAcceptsCompletedWithPlanID(t *testing.T) {
+	t.Parallel()
+
 	var resp PlanTableScanResponse
 	err := json.Unmarshal([]byte(`{
 		"status":"completed",
@@ -52,14 +58,39 @@ func TestPlanTableScanResponseAcceptsCompletedWithPlanID(t *testing.T) {
 		"file-scan-tasks":[{"data-file":{}}],
 		"delete-files":[{"content":"position-deletes"}]
 	}`), &resp)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
-	if resp.PlanID == nil || *resp.PlanID != "abc" {
-		t.Fatalf("expected plan id abc, got %v", resp.PlanID)
-	}
-	if len(resp.PlanTasks) != 1 || len(resp.FileScanTasks) != 1 || len(resp.DeleteFiles) != 1 {
-		t.Fatalf("expected scan task envelope to decode, got %+v", resp.ScanTasks)
-	}
+	require.NotNil(t, resp.PlanID)
+	assert.Equal(t, "abc", *resp.PlanID)
+	assert.Len(t, resp.PlanTasks, 1)
+	// TODO(Phase 2): assert decoded task/delete-file content once the
+	// scan-task decoder fills RESTFileScanTask and RESTDeleteFile.
+	assert.Len(t, resp.FileScanTasks, 1)
+	assert.Len(t, resp.DeleteFiles, 1)
+}
+
+func TestPlanTableScanResponseRejectsFailedWithoutError(t *testing.T) {
+	t.Parallel()
+
+	var resp PlanTableScanResponse
+	err := json.Unmarshal([]byte(`{"status":"failed"}`), &resp)
+	require.ErrorIs(t, err, ErrRESTError)
+}
+
+func TestPlanTableScanResponseAcceptsFailedWithError(t *testing.T) {
+	t.Parallel()
+
+	var resp PlanTableScanResponse
+	err := json.Unmarshal([]byte(`{"status":"failed","error":{"message":"boom","type":"ServerError","code":500}}`), &resp)
+	require.NoError(t, err)
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, "boom", resp.Error.Message)
+}
+
+func TestPlanTableScanResponseRejectsUnknownStatus(t *testing.T) {
+	t.Parallel()
+
+	var resp PlanTableScanResponse
+	err := json.Unmarshal([]byte(`{"status":"bogus"}`), &resp)
+	require.ErrorIs(t, err, ErrRESTError)
 }

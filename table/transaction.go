@@ -1864,9 +1864,12 @@ func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
 	}
 
 	s := &Scan{
-		metadata:       updatedMeta,
-		ioF:            t.tbl.fsF,
-		planner:        t.tbl.planner,
+		identifier:       t.tbl.identifier,
+		metadata:         updatedMeta,
+		metadataLocation: t.tbl.metadataLocation,
+		ioF:              t.tbl.fsF,
+		planner:          t.tbl.planner,
+		// TODO(#1178 Phase 6): resolve scan-planning-mode table properties here.
 		planningMode:   ScanPlanningLocal,
 		rowFilter:      iceberg.AlwaysTrue{},
 		selectedFields: []string{"*"},

@@ -19,8 +19,9 @@
 // planning (apache/iceberg-go#1178). It defines the table-side seam — the
 // option, request/result types, and the ScanPlanner interface (implemented by
 // catalog/rest) — so it can be reviewed as Go rather than prose.
-// WithScanPlanningMode records the requested mode on the Scan, but nothing reads
-// it until scanner delegation lands, so nothing here changes existing behavior.
+// WithScanPlanningMode records the requested mode on the Scan; the delegation
+// skeleton rejects unavailable remote planning so the exported option is not a
+// silent no-op if this surface is released before the full implementation lands.
 
 package table
 
@@ -61,6 +62,25 @@ func WithScanPlanningMode(mode ScanPlanningMode) ScanOption {
 	return func(scan *Scan) { scan.planningMode = mode }
 }
 
+// ScanPlanningMetadata is the subset of table.Metadata a ScanPlanner needs:
+// schema binding, snapshot resolution, partition decode, and property-based
+// mode resolution. Narrowing from the full Metadata interface keeps the seam
+// contract honest — planners do not depend on metadata logs, sort orders, or
+// file lists. table.Metadata satisfies it.
+type ScanPlanningMetadata interface {
+	CurrentSchema() *iceberg.Schema
+	Schemas() []*iceberg.Schema
+	PartitionSpec() iceberg.PartitionSpec
+	PartitionSpecByID(int) *iceberg.PartitionSpec
+	CurrentSnapshot() *Snapshot
+	SnapshotByID(int64) *Snapshot
+	Properties() iceberg.Properties
+}
+
+// Compile-time guard that the full Metadata interface still satisfies the
+// narrowed planner view, so callers can pass a table.Metadata directly.
+var _ ScanPlanningMetadata = (Metadata)(nil)
+
 // ScanPlanningRequest is the input a Scan hands to a ScanPlanner. It carries
 // the resolved scan state a planner needs without depending on catalog/rest.
 //
@@ -71,10 +91,9 @@ func WithScanPlanningMode(mode ScanPlanningMode) ScanOption {
 // phase; point-in-time SnapshotID lands first.
 type ScanPlanningRequest struct {
 	Identifier Identifier
-	// Metadata is the full table metadata. This likely over-specifies the
-	// contract: a planner needs only schema(s), partition specs, and snapshot
-	// resolution; narrowing to a smaller interface is an open refinement.
-	Metadata         Metadata
+	// Metadata is the narrowed planner view of table metadata (see
+	// ScanPlanningMetadata); MetadataLocation is kept separate.
+	Metadata         ScanPlanningMetadata
 	MetadataLocation string
 	SnapshotID       *int64
 	SelectedFields   []string
@@ -90,11 +109,20 @@ type ScanPlanningRequest struct {
 	UseSnapshotSchema *bool
 }
 
-// PlanIO lazily loads the FileIO that should be used to read a planned scan.
-// Nil means the scan should keep using the table's normal FileIO. Remote
-// planners may return a PlanIO backed by plan-scoped storage credentials.
+// PlanIO lazily loads the FileIO used to read a planned scan and closes any
+// resources it holds (e.g. plan-scoped credentials) once reading is done. Nil
+// means the scan keeps using the table's normal FileIO. Remote planners may
+// return a PlanIO backed by plan-scoped storage credentials.
+//
+// Delivery contract (OQ1): a returned ScanPlanningResult.IO is stored on the
+// Scan that planned it; ReadTasks then loads from it instead of the table's
+// FileIO and closes it after the returned iterator finishes. This ties a
+// plan-scoped scan to the PlanFiles -> ReadTasks sequence on one Scan — tasks
+// from a remote plan must be read by the Scan that produced them, and a Scan
+// carrying plan-scoped IO is not safe for concurrent PlanFiles/ReadTasks.
 type PlanIO interface {
 	Load(context.Context) (icebergio.IO, error)
+	Close() error
 }
 
 // ScanPlanningResult is what a ScanPlanner returns.
@@ -118,7 +146,7 @@ type ScanPlanner interface {
 	PlanFiles(context.Context, ScanPlanningRequest) (ScanPlanningResult, error)
 }
 
-// Scan integration, added here as inert fields and completed in the
+// Scan integration, added here as a delegation skeleton and completed in the
 // scanner-delegation phase:
 //
 //	type Scan struct {
@@ -129,10 +157,11 @@ type ScanPlanner interface {
 //
 // table.New sets Table.planner when the supplied CatalogIO also implements
 // ScanPlanner; Table.Scan copies that planner into Scan. This chooses the
-// Catalog -> Table -> Scan wiring now, while keeping (*Scan).PlanFiles on the
-// existing local path until delegation lands.
+// Catalog -> Table -> Scan wiring now.
 //
 // (*Scan).PlanFiles resolves planningMode and, for remote/auto with a capable
-// planner, delegates to planner.PlanFiles; otherwise it runs the existing local
-// path unchanged. The compile-time `var _ table.ScanPlanner = (*Catalog)(nil)`
-// in catalog/rest proves the REST catalog satisfies the planner interface.
+// planner, delegates to planner.PlanFiles and stores any returned PlanIO on the
+// Scan for ReadTasks. Auto without a capable planner runs the existing local
+// path unchanged; remote without one fails loudly instead of silently planning
+// locally. The compile-time `var _ table.ScanPlanner = (*Catalog)(nil)` in
+// catalog/rest proves the REST catalog satisfies the planner interface.

@@ -25,12 +25,18 @@
 // confirmed against checked-in Java golden fixtures.
 //
 // Design decision: MarshalExpressionJSON emits Java ExpressionParser wire
-// format, including bare JSON booleans for AlwaysTrue/AlwaysFalse (`true` and
-// `false`). The Java REST reference uses the same parser for planTableScan
-// request filters, even though the REST OpenAPI Expression schema also models
-// true/false as objects (`{"type":"true"}` and `{"type":"false"}`).
-// UnmarshalExpressionJSON must accept both forms so clients can read Java-
-// compatible responses and strictly spec-shaped payloads.
+// format. AlwaysTrue/AlwaysFalse are bare JSON booleans (`true`/`false`) — what
+// ExpressionParser.toJson emits and what the Java REST reference accepts on
+// planTableScan request filters (it parses the filter through the same parser).
+//
+// The REST OpenAPI Expression schema documents true/false as objects
+// (`{"type":"true"}` / `{"type":"false"}`), but the Java reference parser does
+// not implement that form: it rejects `{"type":"true"}` and accepts only bare
+// booleans or the literal form `{"type":"literal","value":true}`. That is why
+// marshal emits bare booleans. UnmarshalExpressionJSON stays permissive — it
+// accepts bare booleans and the `{"type":"literal","value":...}` form, and also
+// the OpenAPI object form for a strictly spec-shaped server, even though no
+// known implementation emits it.
 
 package iceberg
 
