@@ -104,9 +104,10 @@ type Catalog struct {
 }
 
 // NewCatalog creates a new Hadoop catalog rooted at the given warehouse path.
-// Currently only local filesystem paths are supported. The warehouse directory
-// is not created on construction; it is created implicitly by the first
-// CreateNamespace call.
+// When using a local filesystem, the warehouse directory
+// is not created on construction; it is created implicitly by the first CreateNamespace
+// call. When using other schemes, you must set the proeprty `allow-unsafe-commits` to
+// true since custom schemes and blob filesystems do not have the same atomicity guarantees.
 func NewCatalog(name, warehouse string, props iceberg.Properties) (*Catalog, error) {
 	if warehouse == "" {
 		return nil, errors.New("hadoop catalog requires a warehouse path")
@@ -117,8 +118,11 @@ func NewCatalog(name, warehouse string, props iceberg.Properties) (*Catalog, err
 		return nil, fmt.Errorf("hadoop catalog: invalid warehouse path: %w", err)
 	}
 
-	if u.Scheme != "" && u.Scheme != "file" {
-		return nil, fmt.Errorf("hadoop catalog: unsupported warehouse scheme %q, must be file:// or a local path", u.Scheme)
+	isLocal := u.Scheme == "" || u.Scheme == "file"
+	allowUnsafeCommits := props.GetBool("allow-unsafe-commits", false)
+
+	if !isLocal && !allowUnsafeCommits {
+		return nil, fmt.Errorf("hadoop catalog: when using warehouse scheme %q, `allow-unsafe-commits` must be set to true", u.Scheme)
 	}
 
 	if u.Opaque != "" {
