@@ -19,6 +19,8 @@ package iceberg_test
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -27,6 +29,22 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// geoSchemaJavaFixtureName is a schema JSON fixture emitted by Apache Iceberg
+// Java SchemaParser.toJson on apache/iceberg main at
+// df6ea0820030d217d5f645469419cdbb3f54a41f.
+//
+// Source schema:
+//
+//	new Schema(17, ImmutableList.of(
+//	    Types.NestedField.required(1, "id", Types.LongType.get()),
+//	    Types.NestedField.optional(2, "geom", Types.GeometryType.of("srid:3857")),
+//	    Types.NestedField.optional(3, "geog",
+//	        Types.GeographyType.of("srid:4269", EdgeAlgorithm.KARNEY))))
+//
+// Java and Go write object keys in different orders, so the fixture test pins
+// the raw JSON string literals for field types instead of whole-object bytes.
+const geoSchemaJavaFixtureName = "geo-schema-java-main.json"
 
 var (
 	tableSchemaNested = iceberg.NewSchemaWithIdentifiers(1,
@@ -1175,6 +1193,45 @@ func TestSchemaWithGeometryGeographyTypes(t *testing.T) {
 	var unmarshaledSchema iceberg.Schema
 	require.NoError(t, json.Unmarshal(data, &unmarshaledSchema))
 	assert.True(t, schema.Equals(&unmarshaledSchema))
+}
+
+func TestSchemaGeoTypeStringWireFormatFixture(t *testing.T) {
+	fixtureBytes, err := os.ReadFile(filepath.Join("testdata", geoSchemaJavaFixtureName))
+	require.NoError(t, err, "fixture missing")
+
+	var schema iceberg.Schema
+	require.NoError(t, json.Unmarshal(fixtureBytes, &schema))
+
+	freshBytes, err := json.Marshal(&schema)
+	require.NoError(t, err)
+
+	fixtureTypes := rawTopLevelFieldTypes(t, fixtureBytes)
+	freshTypes := rawTopLevelFieldTypes(t, freshBytes)
+	require.Equal(t, fixtureTypes, freshTypes)
+	assert.Equal(t, `"geometry(srid:3857)"`, freshTypes["geom"])
+	assert.Equal(t, `"geography(srid:4269, karney)"`, freshTypes["geog"])
+}
+
+func rawTopLevelFieldTypes(t *testing.T, data []byte) map[string]string {
+	t.Helper()
+
+	var schema struct {
+		Fields []struct {
+			Name string          `json:"name"`
+			Type json.RawMessage `json:"type"`
+		} `json:"fields"`
+	}
+	require.NoError(t, json.Unmarshal(data, &schema))
+	require.NotEmpty(t, schema.Fields)
+
+	types := make(map[string]string, len(schema.Fields))
+	for _, field := range schema.Fields {
+		require.NotEmpty(t, field.Name)
+		require.NotEmptyf(t, field.Type, "field %q is missing type", field.Name)
+		types[field.Name] = string(field.Type)
+	}
+
+	return types
 }
 
 func TestNestedFieldToStringGeographyGeometry(t *testing.T) {
