@@ -312,11 +312,11 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	// Read table-level retention properties as the last-resort defaults,
 	// mirroring the Java implementation. When neither the ref nor the
 	// caller provides a value, fall back to the table property; when the
-	// table property is also absent use the constant default (math.MaxInt,
+	// table property is also absent use the constant default (math.MaxInt64,
 	// meaning "keep everything").
-	propMaxRefAgeMs := int64(t.meta.props.GetInt(MaxRefAgeMsKey, MaxRefAgeMsDefault))
+	propMaxRefAgeMs := t.meta.props.GetInt64(MaxRefAgeMsKey, MaxRefAgeMsDefault)
 	propMinSnapshotsToKeep := t.meta.props.GetInt(MinSnapshotsToKeepKey, MinSnapshotsToKeepDefault)
-	propMaxSnapshotAgeMs := int64(t.meta.props.GetInt(MaxSnapshotAgeMsKey, MaxSnapshotAgeMsDefault))
+	propMaxSnapshotAgeMs := t.meta.props.GetInt64(MaxSnapshotAgeMsKey, MaxSnapshotAgeMsDefault)
 
 	for refName, ref := range t.meta.refs {
 		// Assert that this ref's snapshot ID hasn't changed concurrently.
