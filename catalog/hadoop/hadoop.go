@@ -166,7 +166,7 @@ func NewCatalog(name, warehouse string, props iceberg.Properties) (*Catalog, err
 
 	hadoopFs, ok := filesystem.(HadoopCatalogFS)
 	if !ok {
-		return nil, fmt.Errorf("hadoop catalog: filesystem %T does not implement necessary functions to be use as a Hadoop catalog", filesystem)
+		return nil, fmt.Errorf("hadoop catalog: filesystem %T does not implement necessary functions to be used as a Hadoop catalog", filesystem)
 	}
 
 	return &Catalog{
