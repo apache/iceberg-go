@@ -91,14 +91,14 @@ func (s *HadoopCatalogTestSuite) TestNewCatalogStripsFilePrefix() {
 	s.Equal("/tmp/wh", cat.warehouse)
 }
 
-func (s *HadoopCatalogTestSuite) TestNewCatalogRejectsNonFileScheme() {
+func (s *HadoopCatalogTestSuite) TestNewCatalogRequiresOptInForRemoteSchemes() {
 	_, err := NewCatalog("test", "s3://bucket/path", nil)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "unsupported warehouse scheme")
+	s.Contains(err.Error(), "`allow-unsafe-commits` must be set to true")
 
 	_, err = NewCatalog("test", "hdfs://namenode/warehouse", nil)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "unsupported warehouse scheme")
+	s.Contains(err.Error(), "`allow-unsafe-commits` must be set to true")
 }
 
 func (s *HadoopCatalogTestSuite) TestNamespaceToPathSingleLevel() {
