@@ -322,7 +322,23 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 	defer close(r.errorCh)
 
 	var currentWriter tblutils.FileWriter
+	// Cleanup defer: recover a panic in the write path and abort any
+	// in-progress file. stream runs in its own goroutine with no caller to
+	// recover it, and FileWriter.Close can panic (stats.ToDataFile panics when
+	// NewDataFileBuilder fails); convert that into an error on errorCh instead
+	// of crashing the process, mirroring the recover in
+	// equalityDeleteRecordsToDataFiles. Registered after close(r.errorCh) so it
+	// runs first (LIFO) and can still send on the open channel before it is
+	// closed.
 	defer func() {
+		if rec := recover(); rec != nil {
+			switch e := rec.(type) {
+			case error:
+				r.sendError(fmt.Errorf("panic during rolling data file writing: %w", e))
+			default:
+				r.sendError(fmt.Errorf("panic during rolling data file writing: %v", e))
+			}
+		}
 		if currentWriter != nil {
 			_ = currentWriter.Abort()
 		}
