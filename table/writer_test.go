@@ -240,7 +240,7 @@ func TestWriteFileRejectsPosDeleteSortOrderClaim(t *testing.T) {
 
 	metadataBuilder, err := NewMetadataBuilder(2)
 	require.NoError(t, err)
-	require.NoError(t, metadataBuilder.AddSchema(iceberg.PositionalDeleteSchema))
+	require.NoError(t, metadataBuilder.AddSchema(clonePositionalDeleteSchema()))
 	require.NoError(t, metadataBuilder.SetCurrentSchemaID(0))
 	unpartitioned := *iceberg.UnpartitionedSpec
 	require.NoError(t, metadataBuilder.AddPartitionSpec(&unpartitioned, true))

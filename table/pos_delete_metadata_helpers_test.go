@@ -34,11 +34,15 @@ func addUnsortedSortOrder(t *testing.T, mb *MetadataBuilder) {
 	require.NoError(t, mb.SetDefaultSortOrderID(0))
 }
 
+func clonePositionalDeleteSchema() *iceberg.Schema {
+	return iceberg.NewSchema(iceberg.PositionalDeleteSchema.ID, iceberg.PositionalDeleteSchema.Fields()...)
+}
+
 func newPositionDeleteUnpartitionedMetadata(t *testing.T, formatVersion int) *MetadataBuilder {
 	t.Helper()
 	mb, err := NewMetadataBuilder(formatVersion)
 	require.NoError(t, err)
-	require.NoError(t, mb.AddSchema(iceberg.PositionalDeleteSchema))
+	require.NoError(t, mb.AddSchema(clonePositionalDeleteSchema()))
 	require.NoError(t, mb.SetCurrentSchemaID(0))
 	require.NoError(t, mb.AddPartitionSpec(iceberg.UnpartitionedSpec, true))
 	require.NoError(t, mb.SetDefaultSpecID(0))
