@@ -1201,23 +1201,12 @@ func (a *arrowProjectionVisitor) Variant(_ iceberg.VariantType, arr arrow.Array)
 	if !ok || !varr.IsShredded() {
 		return arr
 	}
-	bldr := extensions.NewVariantBuilder(compute.GetAllocator(a.ctx), extensions.NewDefaultVariantType())
-	defer bldr.Release()
-	for i := 0; i < varr.Len(); i++ {
-		// Physical nulls only: a present row holding an encoded variant-null stays present.
-		if varr.Storage().IsNull(i) {
-			bldr.AppendNull()
-
-			continue
-		}
-		v, err := varr.Value(i)
-		if err != nil {
-			panic(fmt.Errorf("variant projection: reassembly failed at row %d: %w", i, err))
-		}
-		bldr.Append(v)
+	out, err := extensions.UnshredVariant(varr, compute.GetAllocator(a.ctx))
+	if err != nil {
+		panic(fmt.Errorf("variant projection: %w", err))
 	}
 
-	return bldr.NewArray()
+	return out
 }
 
 // SchemaOptions controls the behaviour of ToRequestedSchema.
