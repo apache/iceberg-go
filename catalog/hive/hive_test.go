@@ -18,20 +18,27 @@
 package hive
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	cataloginternal "github.com/apache/iceberg-go/catalog/internal"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
 	"github.com/beltran/gohive/hive_metastore"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+var errHivePurgeRemove = errors.New("hive purge remove failed")
 
 type mockHiveClient struct {
 	mock.Mock
@@ -521,6 +528,114 @@ func TestHiveDropTable(t *testing.T) {
 	assert.NoError(err)
 
 	mockClient.AssertExpectations(t)
+}
+
+func TestHivePurgeTable(t *testing.T) {
+	assert := require.New(t)
+	ctx := context.Background()
+	tableLocation := filepath.Join(t.TempDir(), "warehouse", "test_database", "test_table")
+	metadataLocation, dataFile := writeHivePurgeTableFiles(t, tableLocation)
+	hiveTable := hivePurgeTable(metadataLocation, tableLocation)
+
+	mockClient := &mockHiveClient{}
+	mockClient.On("GetTable", mock.Anything, "test_database", "test_table").
+		Return(hiveTable, nil).Twice()
+	mockClient.On("DropTable", mock.Anything, "test_database", "test_table", false).
+		Return(nil).Once()
+
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	assert.NoError(hiveCatalog.PurgeTable(ctx, TableIdentifier("test_database", "test_table")))
+	assert.NoFileExists(metadataLocation)
+	assert.NoFileExists(dataFile)
+	mockClient.AssertExpectations(t)
+}
+
+func TestHivePurgeTableSwallowsPurgeFilesError(t *testing.T) {
+	assert := require.New(t)
+	ctx := context.Background()
+	const scheme = "hivepurgefail"
+	failingFS := failRemoveIO{MemFS: iceio.NewMemFS(), err: errHivePurgeRemove}
+	iceio.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+		return failingFS, nil
+	})
+	t.Cleanup(func() { iceio.Unregister(scheme) })
+
+	tableLocation := scheme + "://bucket/test_database/test_table"
+	metadataLocation := tableLocation + "/metadata/v1.metadata.json"
+	dataFile := tableLocation + "/data/file.parquet"
+	writeHivePurgeTableMetadata(t, failingFS, tableLocation, metadataLocation)
+	require.NoError(t, failingFS.WriteFile(dataFile, []byte("data")))
+	hiveTable := hivePurgeTable(metadataLocation, tableLocation)
+
+	mockClient := &mockHiveClient{}
+	mockClient.On("GetTable", mock.Anything, "test_database", "test_table").
+		Return(hiveTable, nil).Twice()
+	mockClient.On("DropTable", mock.Anything, "test_database", "test_table", false).
+		Return(nil).Once()
+
+	var logs bytes.Buffer
+	originalLogOutput := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(originalLogOutput) })
+
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	assert.NoError(hiveCatalog.PurgeTable(ctx, TableIdentifier("test_database", "test_table")))
+	assert.Contains(logs.String(), "failed to purge files")
+	assert.Contains(logs.String(), errHivePurgeRemove.Error())
+	file, err := failingFS.Open(dataFile)
+	assert.NoError(err, "data file should remain when FileIO remove fails")
+	assert.NoError(file.Close())
+	mockClient.AssertExpectations(t)
+}
+
+type failRemoveIO struct {
+	*iceio.MemFS
+	err error
+}
+
+func (f failRemoveIO) Remove(string) error {
+	return f.err
+}
+
+func hivePurgeTable(metadataLocation, tableLocation string) *hive_metastore.Table {
+	return &hive_metastore.Table{
+		TableName: "test_table",
+		DbName:    "test_database",
+		TableType: TableTypeExternalTable,
+		Parameters: map[string]string{
+			TableTypeKey:        TableTypeIceberg,
+			MetadataLocationKey: metadataLocation,
+		},
+		Sd: &hive_metastore.StorageDescriptor{
+			Location: tableLocation,
+		},
+	}
+}
+
+func writeHivePurgeTableFiles(t *testing.T, tableLocation string) (metadataLocation, dataFile string) {
+	t.Helper()
+	metadataLocation = filepath.Join(tableLocation, "metadata", "v1.metadata.json")
+	dataFile = filepath.Join(tableLocation, "data", "file.parquet")
+	writeHivePurgeTableMetadata(t, iceio.LocalFS{}, tableLocation, metadataLocation)
+	writer, err := iceio.LocalFS{}.Create(dataFile)
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("data"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	return metadataLocation, dataFile
+}
+
+func writeHivePurgeTableMetadata(t *testing.T, fs iceio.WriteFileIO, tableLocation, metadataLocation string) {
+	t.Helper()
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: true,
+	})
+	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, tableLocation, nil)
+	require.NoError(t, err)
+	require.NoError(t, cataloginternal.WriteTableMetadata(meta, fs, metadataLocation, table.MetadataCompressionCodecNone))
 }
 
 func TestHiveDropTableNotExists(t *testing.T) {
