@@ -33,12 +33,14 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
+	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/arrow-go/v18/parquet/schema"
+	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
 	internal2 "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
@@ -1184,4 +1186,154 @@ func TestBloomFilterRowGroupPruning(t *testing.T) {
 
 		assert.Equal(t, int64(2*rgSize), countRecords(t, rr), "all rows expected when field ID unknown")
 	})
+}
+
+func TestShreddedVariantStatsDoesNotPanic(t *testing.T) {
+	mem := memory.DefaultAllocator
+
+	shreddedType := extensions.NewShreddedVariantType(arrow.StructOf(
+		arrow.Field{Name: "latitude", Type: arrow.PrimitiveTypes.Float64},
+	))
+
+	bldr := extensions.NewVariantBuilder(mem, shreddedType)
+	defer bldr.Release()
+
+	var b variant.Builder
+	require.NoError(t, b.Append(map[string]any{"latitude": float64(40.7), "city": "NYC"}))
+	v1, err := b.Build()
+	require.NoError(t, err)
+	bldr.Append(v1)
+
+	b = variant.Builder{}
+	require.NoError(t, b.Append(map[string]any{"latitude": float64(51.5), "city": "London"}))
+	v2, err := b.Build()
+	require.NoError(t, err)
+	bldr.Append(v2)
+
+	arr := bldr.NewArray()
+	defer arr.Release()
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{{
+		Name: "payload", Type: shreddedType, Nullable: true,
+		Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"1"}),
+	}}, nil)
+
+	rec := array.NewRecordBatch(arrowSchema, []arrow.Array{arr}, 2)
+	defer rec.Release()
+
+	var buf bytes.Buffer
+	wr, err := pqarrow.NewFileWriter(arrowSchema, &buf,
+		parquet.NewWriterProperties(parquet.WithStats(true)),
+		pqarrow.DefaultWriterProps())
+	require.NoError(t, err)
+	require.NoError(t, wr.Write(rec))
+	require.NoError(t, wr.Close())
+
+	rdr, err := file.NewParquetReader(bytes.NewReader(buf.Bytes()))
+	require.NoError(t, err)
+	defer rdr.Close()
+
+	meta := rdr.MetaData()
+
+	// colMapping: only the parent variant field has an Iceberg field ID.
+	// Shredded sub-columns (metadata, value, typed_value.latitude.*) do NOT.
+	colMapping := map[string]int{
+		"payload": 1,
+	}
+
+	// No stats collector for variant (arrowStatsCollector.Variant returns empty)
+	statsCols := map[int]internal.StatisticsCollector{}
+
+	variantFieldIDs := map[int]struct{}{1: {}}
+
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+	assert.NotPanics(t, func() {
+		format.DataFileStatsFromMeta(internal.Metadata(meta), statsCols, colMapping, variantFieldIDs)
+	})
+}
+
+func TestShreddedVariantReadRoundTrip(t *testing.T) {
+	mem := memory.DefaultAllocator
+
+	// Build a shredded variant column in-memory: typed_value {a:int64} with a
+	// residual "city" field in the value column.
+	shreddedType := extensions.NewShreddedVariantType(arrow.StructOf(
+		arrow.Field{Name: "a", Type: arrow.PrimitiveTypes.Int64},
+	))
+	bldr := extensions.NewVariantBuilder(mem, shreddedType)
+	defer bldr.Release()
+
+	const nRows = 5
+	for i := 0; i < nRows; i++ {
+		var b variant.Builder
+		require.NoError(t, b.Append(map[string]any{"a": int64(i), "city": "NYC"}))
+		v, err := b.Build()
+		require.NoError(t, err)
+		bldr.Append(v)
+	}
+	arr := bldr.NewArray()
+	defer arr.Release()
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{{
+		Name: "payload", Type: shreddedType, Nullable: true,
+		Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"1"}),
+	}}, nil)
+	rec := array.NewRecordBatch(arrowSchema, []arrow.Array{arr}, int64(nRows))
+	defer rec.Release()
+
+	var buf bytes.Buffer
+	wr, err := pqarrow.NewFileWriter(arrowSchema, &buf,
+		parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps())
+	require.NoError(t, err)
+	require.NoError(t, wr.Write(rec))
+	require.NoError(t, wr.Close())
+
+	pqRdr, err := file.NewParquetReader(bytes.NewReader(buf.Bytes()))
+	require.NoError(t, err)
+	defer pqRdr.Close()
+
+	arrRdr, err := pqarrow.NewFileReader(pqRdr, pqarrow.ArrowReadProperties{}, mem)
+	require.NoError(t, err)
+
+	arrowSc, err := arrRdr.Schema()
+	require.NoError(t, err)
+	assert.Equal(t, 1, arrowSc.NumFields())
+
+	ext, ok := arrowSc.Field(0).Type.(arrow.ExtensionType)
+	require.True(t, ok, "expected extension type, got %T", arrowSc.Field(0).Type)
+	assert.Equal(t, "parquet.variant", ext.ExtensionName())
+
+	// The shredded layout collapses back to a plain VariantType in Iceberg.
+	iceSc, err := table.ArrowSchemaToIceberg(arrowSc, false, nil)
+	require.NoError(t, err)
+	assert.True(t, iceSc.Field(0).Type.Equals(iceberg.VariantType{}))
+
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+	mapping, err := format.PathToIDMapping(iceSc)
+	require.NoError(t, err)
+	assert.Contains(t, mapping, "payload")
+
+	statsCols := map[int]internal.StatisticsCollector{}
+	variantFieldIDs := internal.VariantFieldIDsFromSchema(iceSc)
+	assert.NotPanics(t, func() {
+		format.DataFileStatsFromMeta(internal.Metadata(pqRdr.MetaData()), statsCols, mapping, variantFieldIDs)
+	})
+
+	tbl, err := arrRdr.ReadTable(context.Background())
+	require.NoError(t, err)
+	defer tbl.Release()
+
+	assert.Equal(t, int64(nRows), tbl.NumRows())
+	assert.Equal(t, 1, int(tbl.NumCols()))
+
+	chunk := tbl.Column(0).Data().Chunk(0)
+	varArr, ok := chunk.(*extensions.VariantArray)
+	require.True(t, ok, "expected VariantArray, got %T", chunk)
+	for i := 0; i < varArr.Len(); i++ {
+		val, err := varArr.Value(i)
+		require.NoError(t, err, "row %d", i)
+		obj, ok := val.Value().(variant.ObjectValue)
+		require.True(t, ok, "row %d: expected ObjectValue, got %T", i, val.Value())
+		assert.EqualValues(t, 2, obj.NumElements(), "row %d should have a + city", i)
+	}
 }
