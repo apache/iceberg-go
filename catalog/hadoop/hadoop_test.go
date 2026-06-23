@@ -91,7 +91,7 @@ func (s *HadoopCatalogTestSuite) TestNewCatalogStripsFilePrefix() {
 	s.Equal("/tmp/wh", cat.warehouse)
 }
 
-func (s *HadoopCatalogTestSuite) TestNewCatalogRejectsNonFileSchemeWithoutUnsafeCommits() {
+func (s *HadoopCatalogTestSuite) TestNewCatalogRequiresOptInForRemoteSchemes() {
 	_, err := NewCatalog("test", "s3://bucket/path", nil)
 	s.Require().Error(err)
 	s.Contains(err.Error(), "`allow-unsafe-commits` must be set to true")
