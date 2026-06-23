@@ -26,7 +26,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -404,7 +403,6 @@ func (t Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurren
 }
 
 func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {
-	// Prefer ListableIO when available.
 	if listable, ok := fsys.(iceio.ListableIO); ok {
 		return listable.WalkDir(root, func(path string, d stdfs.DirEntry, err error) error {
 			if err != nil {
@@ -424,64 +422,7 @@ func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.F
 		})
 	}
 
-	// Fallback to original implementation for IO types that don't
-	// implement ListableIO yet.
-	switch v := fsys.(type) {
-	case iceio.LocalFS:
-		cleanRoot := strings.TrimPrefix(root, "file://")
-		if cleanRoot == "" {
-			cleanRoot = "."
-		}
-
-		return filepath.WalkDir(cleanRoot, makeFileWalkFunc(fn, func(path string) string {
-			return path
-		}))
-
-	default:
-		// For blob storage: direct field access since we know the structure.
-		bucket := getBucketName(v)
-
-		parsed, err := url.Parse(root)
-		if err != nil {
-			return fmt.Errorf("invalid URL %s: %w", root, err)
-		}
-
-		walkPath := strings.TrimPrefix(parsed.Path, "/")
-		if walkPath == "" {
-			walkPath = "."
-		}
-
-		return stdfs.WalkDir(bucket, walkPath, makeFileWalkFunc(fn, func(path string) string {
-			return parsed.Scheme + "://" + parsed.Host + "/" + path
-		}))
-	}
-}
-
-// getBucketName gets the Bucket field from blob storage - absolute minimal approach.
-func getBucketName(fsys iceio.IO) stdfs.FS {
-	v := reflect.ValueOf(fsys).Elem()
-
-	return v.FieldByName("Bucket").Interface().(stdfs.FS)
-}
-
-// makeFileWalkFunc creates a WalkDirFunc that processes only files with path transformation.
-func makeFileWalkFunc(fn func(path string, info stdfs.FileInfo) error, pathTransform func(string) string) stdfs.WalkDirFunc {
-	return func(path string, d stdfs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if d.IsDir() {
-			return nil
-		}
-
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-
-		return fn(pathTransform(path), info)
-	}
+	return fmt.Errorf("filesystem %T does not implement io.ListableIO", fsys)
 }
 
 func isFileOrphan(file string, referencedFiles map[string]bool, normalizedReferencedFiles map[string]string, cfg *orphanCleanupConfig) (bool, error) {

@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	stdfs "io/fs"
 	"strings"
 	"testing"
 	"time"
@@ -595,7 +596,7 @@ func TestDeleteFilesEmpty(t *testing.T) {
 	assert.Nil(t, deleted)
 }
 
-// mockPlainIO implements only IO (no BulkRemovableIO) to verify fallback behavior.
+// mockPlainIO implements only IO, without optional delete or listing capabilities.
 type mockPlainIO struct {
 	removed []string
 }
@@ -619,6 +620,16 @@ func TestDeleteFilesFallsBackToExistingBehavior(t *testing.T) {
 	require.NoError(t, err)
 	assert.ElementsMatch(t, orphans, mock.removed)
 	assert.ElementsMatch(t, orphans, deleted)
+}
+
+func TestWalkDirectoryRequiresListableIO(t *testing.T) {
+	err := walkDirectory(&mockPlainIO{}, "s3://bucket/data", func(string, stdfs.FileInfo) error {
+		require.Fail(t, "walk callback should not run for non-listable IO")
+
+		return nil
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not implement io.ListableIO")
 }
 
 type inMemoryCatalog struct {
