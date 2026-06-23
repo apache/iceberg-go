@@ -34,7 +34,6 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/internal"
 	"github.com/apache/iceberg-go/io"
-	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 )
@@ -423,7 +422,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		ident,
 		metadata,
 		metaPath,
-		icebergio.LoadFSFunc(c.props, metaPath),
+		io.LoadFSFunc(c.props, metaPath),
 		c,
 	)
 
@@ -442,7 +441,7 @@ func (c *Catalog) LoadTable(ctx context.Context, ident table.Identifier) (*table
 
 	metaPath := c.metadataFilePath(ident, ver)
 
-	return table.NewFromLocation(ctx, ident, metaPath, icebergio.LoadFSFunc(c.props, metaPath), c)
+	return table.NewFromLocation(ctx, ident, metaPath, io.LoadFSFunc(c.props, metaPath), c)
 }
 
 func (c *Catalog) CheckTableExists(_ context.Context, ident table.Identifier) (bool, error) {
