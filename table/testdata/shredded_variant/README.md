@@ -29,10 +29,8 @@ Each `case-NNN_row-R.variant.bin` is the canonical Java serialization (`metadata
 bytes followed by `value` bytes) of the variant expected at row `R`; a row with
 no `.variant.bin` is a null variant.
 
-A full survey of all 137 upstream cases against the arrow-go reader lives in
-`go-notes/986-shredded-conformance-and-patches.md`. The cases vendored here are a
-representative sample covering each distinct reader behaviour; the survey proves
-the rest.
+The cases vendored here are a representative sample, one per distinct reader
+behaviour, rather than the full upstream suite.
 
 ## Success cases (reassemble to the Java golden)
 
@@ -63,7 +61,7 @@ Cases 040/042/087/128 are rejected by the scanner. Cases 127/137 are read as
 `null` instead: arrow-go intentionally supports `uint32`/`fixed_size_binary`
 `typed_value` (a superset of the Java reference), and these fixtures carry null
 data, so the reassembled result is null. That divergence is arrow-go leniency,
-not a bug - see the conformance note for the evidence.
+not a bug.
 
 ## Invalid cases (spec permits error or read)
 
