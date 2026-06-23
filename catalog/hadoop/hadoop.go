@@ -106,7 +106,7 @@ type Catalog struct {
 // NewCatalog creates a new Hadoop catalog rooted at the given warehouse path.
 // When using a local filesystem, the warehouse directory
 // is not created on construction; it is created implicitly by the first CreateNamespace
-// call. When using other schemes, you must set the proeprty `allow-unsafe-commits` to
+// call. When using other schemes, the property `allow-unsafe-commits` must be set to
 // true since custom schemes and blob filesystems do not have the same atomicity guarantees.
 func NewCatalog(name, warehouse string, props iceberg.Properties) (*Catalog, error) {
 	if warehouse == "" {
