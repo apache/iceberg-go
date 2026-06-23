@@ -39,7 +39,7 @@ func wktToWKB(s string) (geoarrow.WKBBytes, error) {
 
 	wkbBytes, err := wkb.Marshal(geometry, wkb.NDR) // little endian
 	if err != nil {
-		return nil, fmt.Errorf("parse WKT: %w", err)
+		return nil, fmt.Errorf("marshal WKB: %w", err)
 	}
 
 	return geoarrow.WKBBytes(wkbBytes), nil

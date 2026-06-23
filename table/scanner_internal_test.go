@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -300,8 +301,8 @@ func TestSynthesizeRowLineageColumns(t *testing.T) {
 	schema := arrow.NewSchema(
 		[]arrow.Field{
 			{Name: "x", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
-			{Name: iceberg.RowIDColumnName, Type: arrow.PrimitiveTypes.Int64, Nullable: true},
-			{Name: iceberg.LastUpdatedSequenceNumberColumnName, Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+			lineageArrowField(iceberg.RowIDColumnName, iceberg.RowIDFieldID),
+			lineageArrowField(iceberg.LastUpdatedSequenceNumberColumnName, iceberg.LastUpdatedSequenceNumberFieldID),
 		},
 		nil,
 	)
@@ -325,7 +326,7 @@ func TestSynthesizeRowLineageColumns(t *testing.T) {
 	seqArr.Release()
 	defer batch.Release()
 
-	out, err := synthesizeRowLineageColumns(ctx, &rowOffset, task, batch)
+	out, err := synthesizeRowLineageColumns(ctx, &rowOffset, task, batch, true, true)
 	require.NoError(t, err)
 	defer out.Release()
 
@@ -363,8 +364,8 @@ func TestSynthesizeRowLineageColumnsPreservesExplicit(t *testing.T) {
 	schema := arrow.NewSchema(
 		[]arrow.Field{
 			{Name: "x", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
-			{Name: iceberg.RowIDColumnName, Type: arrow.PrimitiveTypes.Int64, Nullable: true},
-			{Name: iceberg.LastUpdatedSequenceNumberColumnName, Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+			lineageArrowField(iceberg.RowIDColumnName, iceberg.RowIDFieldID),
+			lineageArrowField(iceberg.LastUpdatedSequenceNumberColumnName, iceberg.LastUpdatedSequenceNumberFieldID),
 		},
 		nil,
 	)
@@ -395,7 +396,7 @@ func TestSynthesizeRowLineageColumnsPreservesExplicit(t *testing.T) {
 	seqArr.Release()
 	defer batch.Release()
 
-	out, err := synthesizeRowLineageColumns(ctx, &rowOffset, task, batch)
+	out, err := synthesizeRowLineageColumns(ctx, &rowOffset, task, batch, true, true)
 	require.NoError(t, err)
 	defer out.Release()
 
@@ -418,6 +419,92 @@ func TestSynthesizeRowLineageColumnsPreservesExplicit(t *testing.T) {
 	assert.EqualValues(t, 9, seqCol.Value(2), "explicit seq must survive even with a different value")
 
 	assert.EqualValues(t, 3, rowOffset)
+}
+
+// TestSynthesizeRowLineageColumnsAppendsMissing covers the path where the
+// lineage columns are absent from the batch: they must be appended (in _row_id,
+// _last_updated_sequence_number order) and the input schema's metadata must
+// survive the rebuild.
+func TestSynthesizeRowLineageColumnsAppendsMissing(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	ctx := compute.WithAllocator(t.Context(), mem)
+	defer mem.AssertSize(t, 0)
+
+	firstRowID := int64(1000)
+	dataSeqNum := int64(5)
+	task := FileScanTask{FirstRowID: &firstRowID, DataSequenceNumber: &dataSeqNum}
+	rowOffset := int64(0)
+
+	md := arrow.NewMetadata([]string{"k"}, []string{"v"})
+	schema := arrow.NewSchema(
+		[]arrow.Field{{Name: "x", Type: arrow.PrimitiveTypes.Int64, Nullable: true}}, &md)
+	const nrows = 3
+	xBldr := array.NewInt64Builder(mem)
+	defer xBldr.Release()
+	xBldr.AppendValues([]int64{1, 2, 3}, nil)
+	xArr := xBldr.NewArray()
+	batch := array.NewRecordBatch(schema, []arrow.Array{xArr}, nrows)
+	xArr.Release()
+	defer batch.Release()
+
+	out, err := synthesizeRowLineageColumns(ctx, &rowOffset, task, batch, true, true)
+	require.NoError(t, err)
+	defer out.Release()
+
+	require.EqualValues(t, 3, out.NumCols())
+	assert.Equal(t, iceberg.RowIDColumnName, out.Schema().Field(1).Name)
+	assert.Equal(t, iceberg.LastUpdatedSequenceNumberColumnName, out.Schema().Field(2).Name)
+
+	rowIDCol := out.Column(1).(*array.Int64)
+	seqCol := out.Column(2).(*array.Int64)
+	for i := range nrows {
+		assert.EqualValues(t, 1000+int64(i), rowIDCol.Value(i), "row %d", i)
+		assert.EqualValues(t, 5, seqCol.Value(i), "row %d", i)
+	}
+
+	got, ok := out.Schema().Metadata().GetValue("k")
+	assert.True(t, ok, "input schema metadata must be preserved")
+	assert.Equal(t, "v", got)
+}
+
+// TestSynthesizeRowLineageColumnsRejectsWrongType guards against a panic: an
+// existing _row_id column of the wrong type would otherwise leave the field's
+// declared type and the replacement int64 array inconsistent.
+func TestSynthesizeRowLineageColumnsRejectsWrongType(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	ctx := compute.WithAllocator(t.Context(), mem)
+	defer mem.AssertSize(t, 0)
+
+	firstRowID := int64(1000)
+	task := FileScanTask{FirstRowID: &firstRowID}
+	rowOffset := int64(0)
+
+	wrongField := lineageArrowField(iceberg.RowIDColumnName, iceberg.RowIDFieldID)
+	wrongField.Type = arrow.BinaryTypes.String
+	schema := arrow.NewSchema([]arrow.Field{wrongField}, nil)
+
+	bldr := array.NewStringBuilder(mem)
+	defer bldr.Release()
+	bldr.AppendValues([]string{"a", "b"}, nil)
+	arr := bldr.NewArray()
+	batch := array.NewRecordBatch(schema, []arrow.Array{arr}, 2)
+	arr.Release()
+	defer batch.Release()
+
+	_, err := synthesizeRowLineageColumns(ctx, &rowOffset, task, batch, true, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "want int64")
+}
+
+// lineageArrowField builds an Int64 Arrow field tagged with the reserved
+// row-lineage field id, mirroring how the Parquet reader tags columns.
+func lineageArrowField(name string, fieldID int) arrow.Field {
+	return arrow.Field{
+		Name:     name,
+		Type:     arrow.PrimitiveTypes.Int64,
+		Nullable: true,
+		Metadata: arrow.NewMetadata([]string{ArrowParquetFieldIDKey}, []string{strconv.Itoa(fieldID)}),
+	}
 }
 
 // TestProjectionV3SelectRowLineageColumns verifies that explicitly selecting

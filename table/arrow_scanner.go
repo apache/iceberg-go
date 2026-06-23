@@ -579,85 +579,112 @@ func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Sc
 	return nil, false, nil
 }
 
-// synthesizeRowLineageColumns fills _row_id and _last_updated_sequence_number from task constants
-// when those columns are present in the batch (e.g. from ToRequestedSchema). Per the Iceberg v3
-// row lineage spec: if the value is null in the file, it is inherited (synthesized) from the file's
-// first_row_id and data_sequence_number; otherwise the value from the file is kept.
-// rowOffset is the 0-based row index within the current file and is updated so _row_id stays
-// correct across multiple batches from the same file (first_row_id + row_position).
+// fieldIndexByID returns the index of the field carrying fieldID in its Arrow
+// metadata, or -1. Resolving by reserved id (not name) matches how
+// SchemaWithRowLineageColumns and projection identify lineage columns.
+func fieldIndexByID(schema *arrow.Schema, fieldID int) int {
+	for i, f := range schema.Fields() {
+		if v, ok := f.Metadata.GetValue(ArrowParquetFieldIDKey); ok {
+			if id, err := strconv.Atoi(v); err == nil && id == fieldID {
+				return i
+			}
+		}
+	}
+
+	return -1
+}
+
+// synthesizeRowLineageColumns fills the requested row-lineage columns from task
+// constants: per the v3 spec a null value inherits first_row_id + position /
+// data_sequence_number, a non-null value is kept. A column absent from the batch
+// is appended. The caller sets synthesizeRowID/synthesizeSeq only when the
+// matching task constant is present.
+//
+// MUST run before any row-dropping step: _row_id is first_row_id + the row's ORIGINAL
+// position, so rowOffset (advanced by the full batch) is only correct before rows are
+// dropped. ToRequestedSchema then resolves the columns by reserved field id.
 func synthesizeRowLineageColumns(
 	ctx context.Context,
 	rowOffset *int64,
 	task FileScanTask,
 	batch arrow.RecordBatch,
+	synthesizeRowID, synthesizeSeq bool,
 ) (arrow.RecordBatch, error) {
 	alloc := compute.GetAllocator(ctx)
 	schema := batch.Schema()
 	nrows := batch.NumRows()
 
-	// Start from the existing columns; we'll replace the row lineage columns in-place
-	// when we need to synthesize values.
+	fields := append([]arrow.Field(nil), schema.Fields()...)
 	newCols := append([]arrow.Array(nil), batch.Columns()...)
+	var built []arrow.Array
+	defer func() {
+		for _, a := range built {
+			a.Release()
+		}
+	}()
 
-	// Resolve column indices by name; -1 if not present.
-	rowIDIndices := schema.FieldIndices(iceberg.RowIDColumnName)
-	seqNumIndices := schema.FieldIndices(iceberg.LastUpdatedSequenceNumberColumnName)
-	rowIDColIdx := -1
-	if len(rowIDIndices) > 0 {
-		rowIDColIdx = rowIDIndices[0]
-	}
-	seqNumColIdx := -1
-	if len(seqNumIndices) > 0 {
-		seqNumColIdx = seqNumIndices[0]
-	}
-
-	bldr := array.NewInt64Builder(alloc)
-	defer bldr.Release()
-
-	// _row_id: inherit first_row_id + row_position when null; else keep value from file.
-	if rowIDColIdx >= 0 && task.FirstRowID != nil {
-		if col, ok := newCols[rowIDColIdx].(*array.Int64); ok {
-			bldr.Reserve(int(nrows))
-			first := *task.FirstRowID
-			for k := range nrows {
-				if col.IsNull(int(k)) {
-					bldr.Append(first + *rowOffset + int64(k))
-				} else {
-					bldr.Append(col.Value(int(k)))
-				}
+	synth := func(name string, fieldID int, value func(k int64) int64) error {
+		idx := fieldIndexByID(schema, fieldID)
+		var existing *array.Int64
+		if idx >= 0 {
+			var ok bool
+			if existing, ok = newCols[idx].(*array.Int64); !ok {
+				return fmt.Errorf("row-lineage column %s is %s, want int64", name, newCols[idx].DataType())
 			}
+		}
 
-			arr := bldr.NewArray()
-			newCols[rowIDColIdx] = arr
-			defer arr.Release()
+		bldr := array.NewInt64Builder(alloc)
+		defer bldr.Release()
+		bldr.Reserve(int(nrows))
+		for k := range nrows {
+			if existing != nil && !existing.IsNull(int(k)) {
+				bldr.Append(existing.Value(int(k)))
+			} else {
+				bldr.Append(value(k))
+			}
+		}
+		arr := bldr.NewArray()
+		built = append(built, arr)
+
+		if idx >= 0 {
+			newCols[idx] = arr
+
+			return nil
+		}
+		fields = append(fields, arrow.Field{
+			Name:     name,
+			Type:     arrow.PrimitiveTypes.Int64,
+			Nullable: true,
+			Metadata: arrow.NewMetadata([]string{ArrowParquetFieldIDKey}, []string{strconv.Itoa(fieldID)}),
+		})
+		newCols = append(newCols, arr)
+
+		return nil
+	}
+
+	if synthesizeRowID {
+		first := *task.FirstRowID
+		if err := synth(iceberg.RowIDColumnName, iceberg.RowIDFieldID, func(k int64) int64 {
+			return first + *rowOffset + k
+		}); err != nil {
+			return nil, err
 		}
 	}
-
-	// _last_updated_sequence_number: inherit file's data_sequence_number when null; else keep value from file.
-	if seqNumColIdx >= 0 && task.DataSequenceNumber != nil {
-		if col, ok := newCols[seqNumColIdx].(*array.Int64); ok {
-			bldr.Reserve(int(nrows))
-			seq := *task.DataSequenceNumber
-			for k := range nrows {
-				if col.IsNull(int(k)) {
-					bldr.Append(seq)
-				} else {
-					bldr.Append(col.Value(int(k)))
-				}
-			}
-
-			arr := bldr.NewArray()
-			newCols[seqNumColIdx] = arr
-			defer arr.Release()
+	if synthesizeSeq {
+		seq := *task.DataSequenceNumber
+		if err := synth(iceberg.LastUpdatedSequenceNumberColumnName, iceberg.LastUpdatedSequenceNumberFieldID, func(int64) int64 {
+			return seq
+		}); err != nil {
+			return nil, err
 		}
 	}
 
 	// Advance so the next batch from this file uses the correct row position for _row_id.
 	*rowOffset += nrows
 
-	rec := array.NewRecordBatch(schema, newCols, nrows)
+	meta := schema.Metadata()
 
-	return rec, nil
+	return array.NewRecordBatch(arrow.NewSchema(fields, &meta), newCols, nrows), nil
 }
 
 func (as *arrowScan) processRecords(
@@ -667,6 +694,7 @@ func (as *arrowScan) processRecords(
 	rdr internal.FileReader,
 	columns []int,
 	pipeline []recProcessFn,
+	skipRowGroupPruning bool,
 	out chan<- enumeratedRecord,
 ) (err error) {
 	var (
@@ -674,8 +702,13 @@ func (as *arrowScan) processRecords(
 		recRdr        array.RecordReader
 	)
 
-	switch task.Value.File.FileFormat() {
-	case iceberg.ParquetFile:
+	// Row-group stats/bloom pruning skips whole groups, so emitted batches no
+	// longer cover contiguous file positions. Steps that key on the original
+	// position (row-lineage _row_id, generated position deletes) need the full
+	// sequence, so the per-row filter alone enforces the predicate while every
+	// group is still read.
+	switch {
+	case task.Value.File.FileFormat() == iceberg.ParquetFile && !skipRowGroupPruning:
 		statsFn, err := newParquetRowGroupStatsEvaluator(fileSchema, as.boundRowFilter, false)
 		if err != nil {
 			return err
@@ -756,7 +789,35 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 	}
 	defer iceinternal.CheckedClose(rdr, &err)
 
-	pipeline := make([]recProcessFn, 0, 3)
+	pipeline := make([]recProcessFn, 0, 4)
+
+	// Synthesize lineage before any row-dropping step so deletes/filters can't
+	// renumber survivors' _row_id; readSchema carries the field ids for
+	// ToRequestedSchema. Gated so non-lineage scans keep the allocation-free path.
+	readSchema := iceSchema
+	rowLineageEnabled, lerr := strconv.ParseBool(as.options.Get(ScanOptionRowLineageEnabled, "true"))
+	if lerr != nil {
+		rowLineageEnabled = true
+	}
+	_, wantRowID := as.projectedSchema.FindFieldByID(iceberg.RowIDFieldID)
+	_, wantSeqNum := as.projectedSchema.FindFieldByID(iceberg.LastUpdatedSequenceNumberFieldID)
+	synthesizeRowID := rowLineageEnabled && wantRowID && task.Value.FirstRowID != nil
+	synthesizeSeq := rowLineageEnabled && wantSeqNum && task.Value.DataSequenceNumber != nil
+	// Only _row_id depends on position, so only it forces contiguous reads.
+	needsOriginalPositions := synthesizeRowID
+	if synthesizeRowID || synthesizeSeq {
+		// Mirror the columns synthesize will append so ToRequestedSchema never
+		// resolves a lineage field missing from the batch.
+		readSchema = iceberg.SchemaWithRowLineageColumns(iceSchema, synthesizeRowID, synthesizeSeq)
+		var rowOffset int64
+		taskVal := task.Value
+		pipeline = append(pipeline, func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
+			defer r.Release()
+
+			return synthesizeRowLineageColumns(ctx, &rowOffset, taskVal, r, synthesizeRowID, synthesizeSeq)
+		})
+	}
+
 	if len(positionalDeletes) > 0 {
 		deletes := set[int64]{}
 		for _, chunk := range positionalDeletes {
@@ -812,26 +873,10 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 	pipeline = append(pipeline, func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
 		defer r.Release()
 
-		return ToRequestedSchema(ctx, as.projectedSchema, iceSchema, r, SchemaOptions{UseLargeTypes: as.useLargeTypes})
+		return ToRequestedSchema(ctx, as.projectedSchema, readSchema, r, SchemaOptions{UseLargeTypes: as.useLargeTypes})
 	})
 
-	// Row lineage: optionally fill _row_id and _last_updated_sequence_number from task
-	// constants when in projection.
-	rowLineageEnabled, err := strconv.ParseBool(as.options.Get(ScanOptionRowLineageEnabled, "true"))
-	if err != nil {
-		rowLineageEnabled = true
-	}
-	if rowLineageEnabled && (task.Value.FirstRowID != nil || task.Value.DataSequenceNumber != nil) {
-		var rowOffset int64
-		taskVal := task.Value
-		pipeline = append(pipeline, func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
-			defer r.Release()
-
-			return synthesizeRowLineageColumns(ctx, &rowOffset, taskVal, r)
-		})
-	}
-
-	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, out)
+	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, needsOriginalPositions, out)
 
 	return err
 }
@@ -903,7 +948,9 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task interna
 		return ToRequestedSchema(ctx, iceberg.PositionalDeleteSchema, enrichedIcebergSchema, r, SchemaOptions{IncludeFieldIDs: true, UseLargeTypes: as.useLargeTypes})
 	})
 
-	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, out)
+	// enrichRecordsWithPosDeleteFields stamps positions by counting emitted
+	// rows, so the reader must not prune row groups out from under it.
+	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, true, out)
 
 	return err
 }
