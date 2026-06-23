@@ -137,7 +137,6 @@ func NewCatalog(name, warehouse string, props iceberg.Properties) (*Catalog, err
 	if !isLocal && !allowUnsafeCommits {
 		return nil, fmt.Errorf("hadoop catalog: when using warehouse scheme %q, `allow-unsafe-commits` must be set to true", u.Scheme)
 	} else if isLocal {
-		// Use the path as the warehouse if no scheme is specified.
 		if u.Opaque != "" {
 			warehouse = u.Opaque
 		} else {
