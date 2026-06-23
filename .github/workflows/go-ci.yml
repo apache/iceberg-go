@@ -33,7 +33,7 @@ permissions:
 jobs:
   lint-and-test:
     name: ${{ matrix.os }} go${{ matrix.go }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     # Cache dirs are pinned to dot-prefixed paths under the workspace so they are
     # identical across Linux/Windows/macOS (no per-OS path branching) and are
     # excluded from `go`/golangci-lint `./...` expansion (leading-dot dirs are
@@ -47,7 +47,11 @@ jobs:
       fail-fast: false
       matrix:
         go: [ '1.25.8', '1.26.1' ]
-        os: [ 'ubuntu-latest', 'windows-latest', 'macos-latest' ]
+        os:
+          - 'ubuntu-latest'
+          - 'macos-latest'
+          # - 'windows-latest'  # blocked on Windows path support, see #1262
+
     steps:
     - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       with:
