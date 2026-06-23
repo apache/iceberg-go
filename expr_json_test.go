@@ -205,6 +205,45 @@ func TestMarshalExpressionTimestamp(t *testing.T) {
 	}
 }
 
+// TestMarshalExpressionTimestampSubsecond guards the sub-second round-trip:
+// fractional seconds must survive marshal+parse, and the nanosecond types must
+// keep all nine digits rather than truncating to microseconds.
+func TestMarshalExpressionTimestampSubsecond(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp},
+		iceberg.NestedField{ID: 2, Name: "tstz", Type: iceberg.PrimitiveTypes.TimestampTz},
+		iceberg.NestedField{ID: 3, Name: "tsns", Type: iceberg.PrimitiveTypes.TimestampNs},
+		iceberg.NestedField{ID: 4, Name: "tstzns", Type: iceberg.PrimitiveTypes.TimestampTzNs},
+	)
+	tests := []struct {
+		field string
+		value string
+		typ   iceberg.Type
+		want  string
+	}{
+		{"ts", "2022-08-14T10:00:00.123456", iceberg.PrimitiveTypes.Timestamp, `{"type":"eq","term":"ts","value":"2022-08-14T10:00:00.123456"}`},
+		{"tstz", "2022-08-14T10:00:00.123456+00:00", iceberg.PrimitiveTypes.TimestampTz, `{"type":"eq","term":"tstz","value":"2022-08-14T10:00:00.123456+00:00"}`},
+		{"tsns", "2007-12-03T10:15:30.123456789", iceberg.PrimitiveTypes.TimestampNs, `{"type":"eq","term":"tsns","value":"2007-12-03T10:15:30.123456789"}`},
+		{"tstzns", "2007-12-03T10:15:30.123456789+00:00", iceberg.PrimitiveTypes.TimestampTzNs, `{"type":"eq","term":"tstzns","value":"2007-12-03T10:15:30.123456789+00:00"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.field, func(t *testing.T) {
+			bound, err := iceberg.BindExpr(schema,
+				iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference(tt.field), mustLit(t, tt.value, tt.typ)), true)
+			require.NoError(t, err)
+			got, err := json.Marshal(bound)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, string(got))
+
+			parsed, err := iceberg.ParseExpr(got, schema)
+			require.NoError(t, err)
+			rebound, err := iceberg.BindExpr(schema, parsed, true)
+			require.NoError(t, err)
+			assert.Truef(t, bound.Equals(rebound), "want %s, got %s", bound, rebound)
+		})
+	}
+}
+
 // TestMarshalExpressionUnboundTimestamp covers the gap: an unbound timestamp
 // predicate has no field type, so it can't be serialized.
 func TestMarshalExpressionUnboundTimestamp(t *testing.T) {
@@ -342,6 +381,8 @@ func TestUnmarshalExpressionErrors(t *testing.T) {
 		{"missing term", `{"type":"eq","value":1}`},
 		{"literal with stray values", `{"type":"eq","term":"a","value":1,"values":[1,2]}`},
 		{"set with stray value", `{"type":"in","term":"a","values":[1],"value":1}`},
+		{"literal null value", `{"type":"literal","value":null}`},
+		{"literal node missing value", `{"type":"literal"}`},
 	}
 
 	for _, tt := range tests {
@@ -352,8 +393,73 @@ func TestUnmarshalExpressionErrors(t *testing.T) {
 	}
 }
 
-func TestUnmarshalExpressionTransformTermUnsupported(t *testing.T) {
-	_, err := iceberg.ParseExpr(
-		[]byte(`{"type":"eq","term":{"type":"transform","transform":"bucket[16]","term":"id"},"value":1}`), nil)
+// TestExpressionTransformTermRoundTrip covers a residual filter whose term is a
+// partition transform, e.g. a Java server's bucket[100](id) <= 50.
+func TestExpressionTransformTermRoundTrip(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	data := []byte(`{"type":"lt-eq","term":{"type":"transform","transform":"bucket[100]","term":"id"},"value":50}`)
+
+	parsed, err := iceberg.ParseExpr(data, schema)
+	require.NoError(t, err)
+
+	// The parsed term resolves the transform's result type against the schema.
+	want := iceberg.LiteralPredicate(iceberg.OpLTEQ,
+		iceberg.NewUnboundTransform(iceberg.BucketTransform{NumBuckets: 100}, iceberg.Reference("id")),
+		iceberg.Int32Literal(50))
+
+	// And serializes back to the same wire form.
+	got, err := json.Marshal(want)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(data), string(got))
+
+	reparsed, err := iceberg.ParseExpr(got, schema)
+	require.NoError(t, err)
+	assert.Truef(t, parsed.Equals(reparsed), "want %s, got %s", parsed, reparsed)
+
+	// Binding a predicate over a transform term isn't supported yet, but it must
+	// fail cleanly rather than panic.
+	_, err = iceberg.BindExpr(schema, parsed, true)
 	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+}
+
+// TestUnboundTransformBind checks the transform term itself binds to a
+// BoundTransform with the transform's result type.
+func TestUnboundTransformBind(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	term := iceberg.NewUnboundTransform(iceberg.BucketTransform{NumBuckets: 100}, iceberg.Reference("id"))
+	bound, err := term.Bind(schema, true)
+	require.NoError(t, err)
+	assert.True(t, bound.Type().Equals(iceberg.PrimitiveTypes.Int32))
+}
+
+// TestUnmarshalExpressionTransformTermInvalid rejects an unparseable transform
+// string rather than panicking or binding nonsense.
+func TestUnmarshalExpressionTransformTermInvalid(t *testing.T) {
+	_, err := iceberg.ParseExpr(
+		[]byte(`{"type":"eq","term":{"type":"transform","transform":"bogus[16]","term":"id"},"value":1}`), nil)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+}
+
+// TestUnmarshalExpressionFixedLength rejects a fixed value whose decoded length
+// doesn't match the column's declared length.
+func TestUnmarshalExpressionFixedLength(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "f", Type: iceberg.FixedTypeOf(4)},
+	)
+	_, err := iceberg.ParseExpr([]byte(`{"type":"eq","term":"f","value":"0102"}`), schema)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+}
+
+// TestUnmarshalExpressionCaseSensitive checks that ParseExpr resolves field
+// names case-sensitively, since REST field names are authoritative.
+func TestUnmarshalExpressionCaseSensitive(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	_, err := iceberg.ParseExpr([]byte(`{"type":"eq","term":"ID","value":1}`), schema)
+	require.Error(t, err)
 }

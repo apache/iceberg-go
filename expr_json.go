@@ -67,6 +67,22 @@ var jsonToOp = func() map[string]Operation {
 	return m
 }()
 
+// Predicate operations grouped by the shape they carry on the wire. Spelled out
+// rather than keyed off iota ranges, so reordering the Operation constants can't
+// silently reclassify a predicate.
+var (
+	unaryOps = map[Operation]bool{
+		OpIsNull: true, OpNotNull: true, OpIsNan: true, OpNotNan: true,
+	}
+	literalOps = map[Operation]bool{
+		OpLT: true, OpLTEQ: true, OpGT: true, OpGTEQ: true,
+		OpEQ: true, OpNEQ: true, OpStartsWith: true, OpNotStartsWith: true,
+	}
+	setOps = map[Operation]bool{
+		OpIn: true, OpNotIn: true,
+	}
+)
+
 // exprNode is the wire form of an expression node. omitempty leaves only the
 // keys relevant to a given node; field order matches Java's output.
 type exprNode struct {
@@ -91,10 +107,21 @@ type transformNode struct {
 // a task's residual filter).
 //
 // With a schema, literals take the referenced field's type (e.g. "2022-08-14"
-// on a date column becomes a DateLiteral). Without one they fall back to the
-// base JSON kind: Int64Literal, Float64Literal, StringLiteral, or BoolLiteral.
+// on a date column becomes a DateLiteral) and field names are resolved
+// case-sensitively, since REST field names are authoritative. Without a schema
+// literals fall back to the base JSON kind: Int64Literal, Float64Literal,
+// StringLiteral, or BoolLiteral. The result is unbound.
+//
+// Transform terms (e.g. {"type":"transform","transform":"bucket[16]","term":"id"})
+// parse into an UnboundTransform. The term resolves its result type against the
+// schema; binding a full predicate over a transform term to the typed bound
+// machinery is not yet supported.
 func ParseExpr(data []byte, schema *Schema) (BooleanExpression, error) {
-	return decodeExpr(json.RawMessage(data), schema)
+	return parseExpr(json.RawMessage(data), schema, true)
+}
+
+func parseExpr(raw json.RawMessage, schema *Schema, caseSensitive bool) (BooleanExpression, error) {
+	return decodeExpr(raw, schema, caseSensitive)
 }
 
 // MarshalJSON emits the REST form, so an expression can be used as a "filter"
@@ -256,6 +283,19 @@ func (b *BoundTransform) MarshalJSON() ([]byte, error) {
 	})
 }
 
+func (u *UnboundTransform) MarshalJSON() ([]byte, error) {
+	ref, ok := u.term.(Reference)
+	if !ok {
+		return nil, fmt.Errorf("%w: cannot serialize transform over a non-reference term", ErrInvalidArgument)
+	}
+
+	return json.Marshal(transformNode{
+		Type:      exprKeyTransform,
+		Transform: u.transform.String(),
+		Term:      string(ref),
+	})
+}
+
 // Each literal writes its REST form (Java's SingleValueParser).
 func (l BoolLiteral) MarshalJSON() ([]byte, error)   { return json.Marshal(bool(l)) }
 func (l Int32Literal) MarshalJSON() ([]byte, error)  { return json.Marshal(int32(l)) }
@@ -350,17 +390,22 @@ func (v *literalValue) UnmarshalJSON(b []byte) error {
 // without it for timestamp.
 func marshalTimestamp(tm time.Time, typ Type) ([]byte, error) {
 	switch typ.(type) {
-	case TimestampTzType, TimestampTzNsType:
+	case TimestampTzType:
 		// "-07:00" prints +00:00 for a UTC instant, matching Java.
 		return json.Marshal(tm.Format("2006-01-02T15:04:05.999999-07:00"))
-	case TimestampType, TimestampNsType:
+	case TimestampTzNsType:
+		// Nanosecond precision needs nine fractional digits.
+		return json.Marshal(tm.Format("2006-01-02T15:04:05.999999999-07:00"))
+	case TimestampType:
 		return json.Marshal(tm.Format("2006-01-02T15:04:05.999999"))
+	case TimestampNsType:
+		return json.Marshal(tm.Format("2006-01-02T15:04:05.999999999"))
 	default:
 		return nil, fmt.Errorf("%w: serializing a timestamp filter needs the field type; bind the expression to a schema first", ErrInvalidArgument)
 	}
 }
 
-func decodeExpr(raw json.RawMessage, schema *Schema) (BooleanExpression, error) {
+func decodeExpr(raw json.RawMessage, schema *Schema, caseSensitive bool) (BooleanExpression, error) {
 	// A bare boolean is AlwaysTrue/AlwaysFalse; anything else is a node object.
 	tok, err := firstToken(raw)
 	if err != nil {
@@ -384,6 +429,11 @@ func decodeExpr(raw json.RawMessage, schema *Schema) (BooleanExpression, error) 
 
 	// {"type":"literal","value":<bool>} is an alternate spelling of a constant.
 	if node.Type == "literal" {
+		// A missing or null value would unmarshal to false and silently become
+		// AlwaysFalse, turning a corrupt payload into "filter everything out".
+		if len(node.Value) == 0 || bytes.Equal(node.Value, []byte("null")) {
+			return nil, fmt.Errorf("%w: literal expression is missing a boolean value", ErrInvalidArgument)
+		}
 		var bv bool
 		if err := json.Unmarshal(node.Value, &bv); err != nil {
 			return nil, fmt.Errorf("%w: cannot parse literal expression: %s", ErrInvalidArgument, err)
@@ -402,18 +452,18 @@ func decodeExpr(raw json.RawMessage, schema *Schema) (BooleanExpression, error) 
 
 	switch op {
 	case OpNot:
-		child, err := decodeExpr(node.Child, schema)
+		child, err := decodeExpr(node.Child, schema, caseSensitive)
 		if err != nil {
 			return nil, err
 		}
 
 		return NewNot(child), nil
 	case OpAnd, OpOr:
-		left, err := decodeExpr(node.Left, schema)
+		left, err := decodeExpr(node.Left, schema, caseSensitive)
 		if err != nil {
 			return nil, err
 		}
-		right, err := decodeExpr(node.Right, schema)
+		right, err := decodeExpr(node.Right, schema, caseSensitive)
 		if err != nil {
 			return nil, err
 		}
@@ -424,7 +474,7 @@ func decodeExpr(raw json.RawMessage, schema *Schema) (BooleanExpression, error) 
 		return NewOr(left, right), nil
 	}
 
-	return decodePredicate(op, node, schema)
+	return decodePredicate(op, node, schema, caseSensitive)
 }
 
 // firstToken returns the first JSON token of raw, used to classify a node
@@ -435,7 +485,7 @@ func firstToken(raw json.RawMessage) (json.Token, error) {
 	return dec.Token()
 }
 
-func decodePredicate(op Operation, node exprNode, schema *Schema) (BooleanExpression, error) {
+func decodePredicate(op Operation, node exprNode, schema *Schema, caseSensitive bool) (BooleanExpression, error) {
 	term, err := decodeTerm(node.Term)
 	if err != nil {
 		return nil, err
@@ -444,7 +494,7 @@ func decodePredicate(op Operation, node exprNode, schema *Schema) (BooleanExpres
 	// Resolve the field type once; nil means schema-less.
 	var typ Type
 	if schema != nil {
-		bound, err := term.Bind(schema, false)
+		bound, err := term.Bind(schema, caseSensitive)
 		if err != nil {
 			return nil, err
 		}
@@ -452,13 +502,13 @@ func decodePredicate(op Operation, node exprNode, schema *Schema) (BooleanExpres
 	}
 
 	switch {
-	case op >= OpIsNull && op <= OpNotNan:
+	case unaryOps[op]:
 		if len(node.Value) != 0 || node.Values != nil {
 			return nil, fmt.Errorf("%w: unary predicate %s must not have a value", ErrInvalidArgument, node.Type)
 		}
 
 		return UnaryPredicate(op, term), nil
-	case op >= OpLT && op <= OpNotStartsWith:
+	case literalOps[op]:
 		if len(node.Value) == 0 {
 			return nil, fmt.Errorf("%w: predicate %s is missing a value", ErrInvalidArgument, node.Type)
 		}
@@ -471,7 +521,7 @@ func decodePredicate(op Operation, node exprNode, schema *Schema) (BooleanExpres
 		}
 
 		return LiteralPredicate(op, term, lit), nil
-	case op >= OpIn && op <= OpNotIn:
+	case setOps[op]:
 		if node.Values == nil {
 			return nil, fmt.Errorf("%w: predicate %s is missing values", ErrInvalidArgument, node.Type)
 		}
@@ -517,7 +567,13 @@ func decodeTerm(raw json.RawMessage) (UnboundTerm, error) {
 		// {"type":"reference","term":"name"}
 		return Reference(t.Term), nil
 	case exprKeyTransform:
-		return nil, fmt.Errorf("%w: transform terms are not supported when parsing expressions", ErrNotImplemented)
+		// {"type":"transform","transform":"bucket[16]","term":"id"}
+		tf, err := ParseTransform(t.Transform)
+		if err != nil {
+			return nil, fmt.Errorf("%w: cannot parse transform term: %s", ErrInvalidArgument, err)
+		}
+
+		return NewUnboundTransform(tf, Reference(t.Term)), nil
 	default:
 		return nil, fmt.Errorf("%w: cannot parse term with type %q", ErrInvalidArgument, t.Type)
 	}
@@ -552,7 +608,11 @@ func convertValue(base Literal, typ Type) (Literal, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%w: invalid hex for %s value: %s", ErrInvalidArgument, typ, err)
 		}
-		if _, ok := typ.(FixedType); ok {
+		if ft, ok := typ.(FixedType); ok {
+			if len(decoded) != ft.Len() {
+				return nil, fmt.Errorf("%w: fixed[%d] value has %d bytes", ErrInvalidArgument, ft.Len(), len(decoded))
+			}
+
 			return FixedLiteral(decoded), nil
 		}
 
