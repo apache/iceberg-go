@@ -576,10 +576,10 @@ func TestPropUInt(t *testing.T) {
 
 func TestGetInt64(t *testing.T) {
 	props := iceberg.Properties{
-		"n":         "42",
-		"maxint64":  "9223372036854775807",
-		"neg":       "-7",
-		"garbage":   "not-a-number",
+		"n":        "42",
+		"maxint64": "9223372036854775807",
+		"neg":      "-7",
+		"garbage":  "not-a-number",
 	}
 
 	assert.Equal(t, int64(42), props.GetInt64("n", 0))
