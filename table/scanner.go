@@ -528,14 +528,25 @@ func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]iceberg.Manifes
 }
 
 // matchDVToData returns the deletion vector that applies to the given data
-// entry, if any. A DV applies only when the data file's sequence number is
-// less than or equal to the DV's sequence number.
+// entry, if any. A DV applies when the data file's sequence number is less
+// than or equal to the DV's sequence number.
+//
+// SequenceNum reports the -1 sentinel when an entry's sequence number is
+// unset (see manifest.go). Entries arrive here already inherited, so a
+// committed ADDED entry always carries a real (>= 0) sequence number; an
+// unset value comes from an EXISTING/DELETED entry missing its required
+// explicit sequence number, or a not-yet-committed manifest. Such an
+// indeterminate sequence number — on either side — is treated as "applies":
+// comparing a real data sequence number against an unset DV sequence (-1)
+// would never satisfy dataSeq <= -1 and would silently drop the DV,
+// resurfacing deleted rows; an unset data sequence likewise satisfies
+// -1 <= dvSeq for any known DV sequence.
 func matchDVToData(dataEntry iceberg.ManifestEntry, dvIndex map[string]iceberg.ManifestEntry) []iceberg.DataFile {
 	dvEntry, ok := dvIndex[dataEntry.DataFile().FilePath()]
 	if !ok {
 		return nil
 	}
-	if dataEntry.SequenceNum() <= dvEntry.SequenceNum() {
+	if dvSeq := dvEntry.SequenceNum(); dvSeq < 0 || dataEntry.SequenceNum() <= dvSeq {
 		return []iceberg.DataFile{dvEntry.DataFile()}
 	}
 
