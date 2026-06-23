@@ -33,6 +33,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/internal"
+	"github.com/apache/iceberg-go/io"
 	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
@@ -135,35 +136,46 @@ func NewCatalog(name, warehouse string, props iceberg.Properties) (*Catalog, err
 
 	if !isLocal && !allowUnsafeCommits {
 		return nil, fmt.Errorf("hadoop catalog: when using warehouse scheme %q, `allow-unsafe-commits` must be set to true", u.Scheme)
+	} else if isLocal {
+		// Use the path as the warehouse if no scheme is specified.
+		if u.Opaque != "" {
+			warehouse = u.Opaque
+		} else {
+			warehouse = u.Path
+		}
+
+		if warehouse == "" || warehouse == "/" {
+			return nil, errors.New("hadoop catalog: local filesystem requires a non-root warehouse path")
+		}
+
+		warehouse = strings.TrimRight(warehouse, "/")
+
+		// Normalize to absolute path so the synthetic "location" property
+		// always produces a valid file:// URI.
+		absWarehouse, err := filepath.Abs(warehouse)
+		if err != nil {
+			return nil, fmt.Errorf("hadoop catalog: failed to resolve absolute warehouse path: %w", err)
+		}
+
+		warehouse = absWarehouse
 	}
 
-	if u.Opaque != "" {
-		warehouse = u.Opaque
-	} else {
-		warehouse = u.Path
-	}
-
-	if warehouse == "" || warehouse == "/" {
-		return nil, errors.New("hadoop catalog requires a non-root warehouse path")
-	}
-
-	warehouse = strings.TrimRight(warehouse, "/")
-
-	// Normalize to absolute path so the synthetic "location" property
-	// always produces a valid file:// URI.
-	absWarehouse, err := filepath.Abs(warehouse)
+	filesystem, err := io.LoadFS(context.Background(), nil, warehouse)
 	if err != nil {
-		return nil, fmt.Errorf("hadoop catalog: failed to resolve absolute warehouse path: %w", err)
+		return nil, fmt.Errorf("hadoop catalog: failed to load filesystem: %w", err)
 	}
 
-	warehouse = absWarehouse
+	hadoopFs, ok := filesystem.(HadoopCatalogFS)
+	if !ok {
+		return nil, fmt.Errorf("hadoop catalog: filesystem %T does not implement necessary interface for Hadoop catalog", filesystem)
+	}
 
 	return &Catalog{
 		name:      name,
 		warehouse: warehouse,
 		// for the time being, we default to localfs since there is not yet
 		// support for other filesystems like blob stores
-		filesystem: icebergio.LocalFS{},
+		filesystem: hadoopFs,
 		props:      props,
 	}, nil
 }
