@@ -367,6 +367,17 @@ func TestBlobFileIODeleteFilesMissingFilesAreNotErrors(t *testing.T) {
 	assert.Equal(t, []string{"s3://test-bucket/data/nonexistent.parquet"}, deleted)
 }
 
+func TestBlobFileIORemoveMissingFileReturnsNotExist(t *testing.T) {
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	bfs := createBlobFS(ctx, bucket, defaultKeyExtractor("test-bucket"))
+
+	err := bfs.Remove("s3://test-bucket/data/nonexistent.parquet")
+	require.ErrorIs(t, err, fs.ErrNotExist)
+}
+
 func TestBlobFileIODeleteFilesEmpty(t *testing.T) {
 	ctx := context.Background()
 	bucket := memblob.OpenBucket(nil)

@@ -133,7 +133,15 @@ func (bfs *blobFileIO) Remove(name string) error {
 		return &fs.PathError{Op: "remove", Path: name, Err: err}
 	}
 
-	return bfs.Delete(bfs.ctx, name)
+	if err := bfs.Delete(bfs.ctx, name); err != nil {
+		if gcerrors.Code(err) == gcerrors.NotFound {
+			err = fs.ErrNotExist
+		}
+
+		return &fs.PathError{Op: "remove", Path: name, Err: err}
+	}
+
+	return nil
 }
 
 func (bfs *blobFileIO) Create(name string) (icebergio.FileWriter, error) {

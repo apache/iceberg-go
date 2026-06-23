@@ -22,7 +22,9 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
+	iofs "io/fs"
 	"math/big"
 	"strings"
 	"testing"
@@ -39,6 +41,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/schema"
 	"github.com/apache/iceberg-go"
 	internal2 "github.com/apache/iceberg-go/internal"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/table/internal"
 	"github.com/geoarrow/geoarrow-go"
@@ -46,6 +49,36 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type abortTestFile struct {
+	bytes.Buffer
+	closeErr error
+}
+
+func (f *abortTestFile) Close() error {
+	return f.closeErr
+}
+
+func newAbortTestWriter(t *testing.T, fs iceio.WriteFileIO, fileName string) internal.FileWriter {
+	t.Helper()
+
+	fm := internal.GetFileFormat(iceberg.ParquetFile)
+	icebergSchema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false,
+	})
+	arrowSchema, err := table.SchemaToArrowSchema(icebergSchema, nil, true, false)
+	require.NoError(t, err)
+
+	writer, err := fm.NewFileWriter(context.Background(), fs, nil, internal.WriteFileInfo{
+		FileSchema: icebergSchema,
+		Spec:       *iceberg.UnpartitionedSpec,
+		FileName:   fileName,
+		WriteProps: fm.GetWriteProperties(iceberg.Properties{}),
+	}, arrowSchema)
+	require.NoError(t, err)
+
+	return writer
+}
 
 func constructTestTablePrimitiveTypes(t *testing.T) (*metadata.FileMetaData, table.Metadata) {
 	tableMeta, err := table.ParseMetadataString(`{
@@ -808,6 +841,48 @@ func TestWriteDataFileErrOnClose(t *testing.T) {
 		WriteProps: []parquet.WriterProperty{},
 	}, []arrow.RecordBatch{rec})
 	require.ErrorContains(t, err, "error on close")
+}
+
+func TestParquetFileWriterAbortRemovesFile(t *testing.T) {
+	memFS := iceio.NewMemFS()
+	fileName := "mem://abort-test/data.parquet"
+	writer := newAbortTestWriter(t, memFS, fileName)
+
+	require.NoError(t, writer.Abort())
+
+	_, err := memFS.Open(fileName)
+	require.ErrorIs(t, err, iofs.ErrNotExist)
+}
+
+func TestParquetFileWriterAbortIgnoresRemoveNotExist(t *testing.T) {
+	mockfs := internal2.MockFS{}
+	mockfs.Test(t)
+	mockfs.On("Create", "f").Return(&abortTestFile{}, nil)
+	mockfs.On("Remove", "f").Return(&iofs.PathError{
+		Op:   "remove",
+		Path: "f",
+		Err:  iofs.ErrNotExist,
+	})
+
+	writer := newAbortTestWriter(t, &mockfs, "f")
+	require.NoError(t, writer.Abort())
+	mockfs.AssertExpectations(t)
+}
+
+func TestParquetFileWriterAbortJoinsCloseAndRemoveErrors(t *testing.T) {
+	closeErr := errors.New("close failed")
+	removeErr := errors.New("remove failed")
+
+	mockfs := internal2.MockFS{}
+	mockfs.Test(t)
+	mockfs.On("Create", "f").Return(&abortTestFile{closeErr: closeErr}, nil)
+	mockfs.On("Remove", "f").Return(removeErr)
+
+	writer := newAbortTestWriter(t, &mockfs, "f")
+	err := writer.Abort()
+	require.ErrorIs(t, err, closeErr)
+	require.ErrorIs(t, err, removeErr)
+	mockfs.AssertExpectations(t)
 }
 
 func TestGetWritePropertiesPageVersion(t *testing.T) {
