@@ -1258,6 +1258,52 @@ func TestToRequestedSchema(t *testing.T) {
 	assert.True(t, array.RecordEqual(rec, rec2))
 }
 
+// TestToRequestedSchemaListLargeTypeCoercion guards against the writer
+// rejecting compacted batches: the projected list variant must follow
+// UseLargeTypes, not the offset width the reader happened to hand back.
+func TestToRequestedSchemaListLargeTypeCoercion(t *testing.T) {
+	elem := arrow.Field{
+		Name: "element", Type: arrow.PrimitiveTypes.Int32, Nullable: false,
+		Metadata: arrow.NewMetadata([]string{table.ArrowParquetFieldIDKey}, []string{"2"}),
+	}
+
+	build := func(t *testing.T, listType arrow.DataType) (arrow.RecordBatch, *iceberg.Schema) {
+		t.Helper()
+		schema := arrow.NewSchema([]arrow.Field{{
+			Name: "nested", Type: listType,
+			Metadata: arrow.NewMetadata([]string{table.ArrowParquetFieldIDKey}, []string{"1"}),
+		}}, nil)
+		bldr := array.NewRecordBuilder(memory.DefaultAllocator, schema)
+		defer bldr.Release()
+		require.NoError(t, bldr.UnmarshalJSON([]byte(`{"nested": [1, 2, 3]}`)))
+		rec := bldr.NewRecordBatch()
+		icesc, err := table.ArrowSchemaToIceberg(schema, false, nil)
+		require.NoError(t, err)
+
+		return rec, icesc
+	}
+
+	t.Run("large_list downcast to list", func(t *testing.T) {
+		rec, icesc := build(t, arrow.LargeListOfField(elem))
+		defer rec.Release()
+
+		out, err := table.ToRequestedSchema(context.Background(), icesc, icesc, rec, table.SchemaOptions{IncludeFieldIDs: true})
+		require.NoError(t, err)
+		defer out.Release()
+		assert.Equal(t, arrow.LIST, out.Column(0).DataType().ID())
+	})
+
+	t.Run("list upcast to large_list", func(t *testing.T) {
+		rec, icesc := build(t, arrow.ListOfField(elem))
+		defer rec.Release()
+
+		out, err := table.ToRequestedSchema(context.Background(), icesc, icesc, rec, table.SchemaOptions{IncludeFieldIDs: true, UseLargeTypes: true})
+		require.NoError(t, err)
+		defer out.Release()
+		assert.Equal(t, arrow.LARGE_LIST, out.Column(0).DataType().ID())
+	})
+}
+
 func TestToRequestedSchemaWriteDefaults(t *testing.T) {
 	ctx := context.Background()
 	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
