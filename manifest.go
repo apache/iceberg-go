@@ -1332,54 +1332,52 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 		return errors.New("cannot add entry to closed manifest writer")
 	}
 
-	switch entry.Status() {
+	status := entry.Status()
+	switch status {
+	case EntryStatusADDED, EntryStatusEXISTING, EntryStatusDELETED:
+	default:
+		return fmt.Errorf("unknown entry status: %v", status)
+	}
+	count := entry.DataFile().Count()
+	partition := entry.Data.Partition()
+
+	entryToEncode := *entry
+	if dataFile, ok := entry.DataFile().(*dataFile); ok {
+		encodeDataFile := cloneDataFileAvroFields(dataFile)
+		encodeDataFile.PartitionData = avroEncodePartitionData(partition, w.partFieldNameToID, w.partFieldIDToType)
+		entryToEncode.Data = encodeDataFile
+	}
+
+	toEncode, err := w.impl.prepareEntry(&entryToEncode, w.snapshotID)
+	if err != nil {
+		return err
+	}
+
+	if err := w.writer.Encode(toEncode); err != nil {
+		return err
+	}
+
+	switch status {
 	case EntryStatusADDED:
 		w.addedFiles++
-		w.addedRows += entry.DataFile().Count()
+		w.addedRows += count
 	case EntryStatusEXISTING:
 		w.existingFiles++
-		w.existingRows += entry.DataFile().Count()
+		w.existingRows += count
 	case EntryStatusDELETED:
 		w.deletedFiles++
-		w.deletedRows += entry.DataFile().Count()
-	default:
-		return fmt.Errorf("unknown entry status: %v", entry.Status())
+		w.deletedRows += count
 	}
 
-	if setter, ok := entry.DataFile().(hasFieldToIDMap); ok {
-		setter.setFieldNameToIDMap(w.partFieldNameToID)
-		setter.setFieldIDToLogicalTypeMap(w.partFieldIDToType)
-	}
+	w.partitions = append(w.partitions, partition)
 
-	w.partitions = append(w.partitions, entry.Data.Partition())
-	partitionData := avroPartitionData(entry.Data.Partition(), w.partFieldIDToType)
-
-	if dataFile, ok := entry.DataFile().(*dataFile); ok {
-		convertedPartitionData := make(map[string]any)
-		for fieldID, convertedValue := range partitionData {
-			for fieldName, id := range w.partFieldNameToID {
-				if id == fieldID {
-					convertedPartitionData[fieldName] = convertedValue
-
-					break
-				}
-			}
-		}
-		dataFile.PartitionData = convertedPartitionData
-	}
-
-	if entry.Status() == EntryStatusADDED || entry.Status() == EntryStatusEXISTING {
+	if status == EntryStatusADDED || status == EntryStatusEXISTING {
 		if seq := entry.SequenceNum(); seq >= 0 && (w.minSeqNum < 0 || seq < w.minSeqNum) {
 			w.minSeqNum = seq
 		}
 	}
 
-	toEncode, err := w.impl.prepareEntry(entry, w.snapshotID)
-	if err != nil {
-		return err
-	}
-
-	return w.writer.Encode(toEncode)
+	return nil
 }
 
 func (w *ManifestWriter) Add(entry ManifestEntry) error {

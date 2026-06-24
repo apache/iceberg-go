@@ -2037,6 +2037,60 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+func (m *ManifestTestSuite) TestManifestWriterDoesNotCommitStateOnEncodeError() {
+	schema := NewSchema(0,
+		NestedField{ID: 1, Name: "dt", Type: PrimitiveTypes.Date},
+	)
+	partitionSpec := NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "dt", Transform: IdentityTransform{}},
+	)
+
+	var out bytes.Buffer
+	writer, err := NewManifestWriter(2, &out, partitionSpec, schema, snapshotID)
+	m.Require().NoError(err)
+
+	badPartitionValue := struct{ Value string }{Value: "not-a-date"}
+	entry := newDatePartitionManifestEntry(m.T(), partitionSpec, snapshotID, badPartitionValue)
+	dataFile := entry.DataFile().(*dataFile)
+	originalPartitionData := map[string]any{"dt": badPartitionValue}
+	m.Equal(originalPartitionData, dataFile.PartitionData)
+
+	err = writer.Add(entry)
+	m.Require().Error(err)
+
+	m.Zero(writer.addedFiles)
+	m.Zero(writer.addedRows)
+	m.Zero(writer.existingFiles)
+	m.Zero(writer.existingRows)
+	m.Zero(writer.deletedFiles)
+	m.Zero(writer.deletedRows)
+	m.Empty(writer.partitions)
+	m.Equal(int64(-1), writer.minSeqNum)
+	m.Equal(originalPartitionData, dataFile.PartitionData)
+}
+
+func newDatePartitionManifestEntry(t *testing.T, partitionSpec PartitionSpec, snapshotID int64, partitionValue any) ManifestEntry {
+	t.Helper()
+
+	seqNum := int64(1)
+	builder, err := NewDataFileBuilder(
+		partitionSpec,
+		EntryContentData,
+		"s3://bucket/ns/table/data/date-partition.parquet",
+		ParquetFile,
+		map[int]any{1000: partitionValue},
+		nil,
+		nil,
+		5,
+		1024,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return NewManifestEntry(EntryStatusADDED, &snapshotID, &seqNum, &seqNum, builder.Build())
+}
+
 func (m *ManifestTestSuite) TestWriteManifestListClosesWriterOnError() {
 	// A v2 manifest list cannot reference v3 manifests because the v2 entry
 	// schema has no first_row_id column; this gives us a deterministic
