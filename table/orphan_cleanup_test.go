@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	stdfs "io/fs"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type nonListableIO struct{}
+
+func (nonListableIO) Open(string) (io.File, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (nonListableIO) Remove(string) error {
+	return nil
+}
 
 func TestPrefixMismatchMode_String(t *testing.T) {
 	tests := []struct {
@@ -50,6 +61,17 @@ func TestPrefixMismatchMode_String(t *testing.T) {
 			assert.Equal(t, tt.expected, tt.mode.String())
 		})
 	}
+}
+
+func TestWalkDirectoryRequiresListableIO(t *testing.T) {
+	err := walkDirectory(nonListableIO{}, "s3://bucket/data", func(string, stdfs.FileInfo) error {
+		require.Fail(t, "walkDirectory should not invoke callback for non-listable IO")
+
+		return nil
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not implement ListableIO")
 }
 
 func TestOrphanCleanupOptions(t *testing.T) {
