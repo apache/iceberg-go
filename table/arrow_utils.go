@@ -1155,7 +1155,26 @@ func (a *arrowProjectionVisitor) List(listType iceberg.ListType, listArr arrow.A
 		[]arrow.ArrayData{valArr.Data()}, arr.NullN(), arr.Data().Offset())
 	defer data.Release()
 
-	return array.MakeFromData(data)
+	out := array.MakeFromData(data)
+
+	// The Parquet reader may return large_list offsets even when the schema
+	// returned alongside the records (built with useLargeTypes) asks for small
+	// list, or vice versa; coerce the offset width to match so the writer does
+	// not reject the batch. A plain relabel would misread int64 offsets as int32.
+	switch out.DataType().ID() {
+	case arrow.LIST, arrow.LARGE_LIST:
+		var want arrow.DataType = arrow.ListOfField(elemField)
+		if a.useLargeTypes {
+			want = arrow.LargeListOfField(elemField)
+		}
+		if !arrow.TypeEqual(out.DataType(), want) {
+			defer out.Release()
+
+			return retOrPanic(compute.CastArray(a.ctx, out, compute.SafeCastOptions(want)))
+		}
+	}
+
+	return out
 }
 
 func (a *arrowProjectionVisitor) Map(m iceberg.MapType, mapArray, keyResult, valResult arrow.Array) arrow.Array {
