@@ -113,6 +113,46 @@ func TestMinSequenceNum(t *testing.T) {
 	}
 }
 
+func TestSplitLineageMetadataFields(t *testing.T) {
+	tests := []struct {
+		name          string
+		selected      []string
+		caseSensitive bool
+		wantUser      []string
+		wantLineage   []iceberg.NestedField
+	}{
+		{
+			name:          "case-insensitive matches mixed-case lineage columns",
+			selected:      []string{"id", "_ROW_ID", "_Last_Updated_Sequence_Number"},
+			caseSensitive: false,
+			wantUser:      []string{"id"},
+			wantLineage:   []iceberg.NestedField{iceberg.RowID(), iceberg.LastUpdatedSequenceNumber()},
+		},
+		{
+			name:          "case-sensitive leaves mixed-case names as user fields",
+			selected:      []string{"id", "_ROW_ID", "_Last_Updated_Sequence_Number"},
+			caseSensitive: true,
+			wantUser:      []string{"id", "_ROW_ID", "_Last_Updated_Sequence_Number"},
+			wantLineage:   nil,
+		},
+		{
+			name:          "case-sensitive matches exact lineage column names",
+			selected:      []string{"id", iceberg.RowIDColumnName, iceberg.LastUpdatedSequenceNumberColumnName},
+			caseSensitive: true,
+			wantUser:      []string{"id"},
+			wantLineage:   []iceberg.NestedField{iceberg.RowID(), iceberg.LastUpdatedSequenceNumber()},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			userFields, lineageFields := splitLineageMetadataFields(tt.selected, tt.caseSensitive)
+			assert.Equal(t, tt.wantUser, userFields)
+			assert.Equal(t, tt.wantLineage, lineageFields)
+		})
+	}
+}
+
 func TestKeyDefaultMapRaceCondition(t *testing.T) {
 	var factoryCallCount atomic.Int64
 	factory := func(key string) int {
