@@ -283,7 +283,7 @@ func TestProcessPositionalDeletesAcrossBatches(t *testing.T) {
 
 	// processPositionalDeletes owns (releases) each input batch it is handed.
 	deletes := set[int64]{3: {}}
-	processFn := processPositionalDeletes(ctx, deletes)
+	processFn := processPositionalDeletes(ctx, deletes, (&rowPositionSource{}).cursor())
 
 	for i, b := range batches {
 		out, err := processFn(b)

@@ -60,7 +60,7 @@ func TestShreddedVariantSurvivesPositionalDelete(t *testing.T) {
 
 	// Delete positions 1 and 3; survivors are 0, 2, 4. processPositionalDeletes
 	// owns (releases) the batch it is handed.
-	survivors, err := processPositionalDeletes(ctx, set[int64]{1: {}, 3: {}})(batch)
+	survivors, err := processPositionalDeletes(ctx, set[int64]{1: {}, 3: {}}, (&rowPositionSource{}).cursor())(batch)
 	require.NoError(t, err)
 
 	ice := iceberg.NewSchema(0, iceberg.NestedField{ID: 2, Name: "var", Type: iceberg.VariantType{}})

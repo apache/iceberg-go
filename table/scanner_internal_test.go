@@ -32,6 +32,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -335,7 +336,7 @@ func TestSynthesizeRowLineageColumns(t *testing.T) {
 	firstRowID := int64(1000)
 	dataSeqNum := int64(5)
 	task := FileScanTask{FirstRowID: &firstRowID, DataSequenceNumber: &dataSeqNum}
-	rowOffset := int64(0)
+	cursor := (&rowPositionSource{}).cursor()
 
 	// Build a batch with a data column plus _row_id and _last_updated_sequence_number (all nulls).
 	schema := arrow.NewSchema(
@@ -366,7 +367,7 @@ func TestSynthesizeRowLineageColumns(t *testing.T) {
 	seqArr.Release()
 	defer batch.Release()
 
-	out, err := synthesizeRowLineageColumns(ctx, &rowOffset, task, batch, true, true)
+	out, err := synthesizeRowLineageColumns(ctx, cursor, task, batch, true, true)
 	require.NoError(t, err)
 	defer out.Release()
 
@@ -383,7 +384,7 @@ func TestSynthesizeRowLineageColumns(t *testing.T) {
 		assert.False(t, seqCol.IsNull(i), "row %d", i)
 		assert.EqualValues(t, 5, seqCol.Value(i), "row %d", i)
 	}
-	assert.EqualValues(t, 3, rowOffset)
+	assert.EqualValues(t, 3, cursor.consumed)
 }
 
 // TestSynthesizeRowLineageColumnsPreservesExplicit covers the spec's null-
@@ -399,7 +400,7 @@ func TestSynthesizeRowLineageColumnsPreservesExplicit(t *testing.T) {
 	firstRowID := int64(1000)
 	dataSeqNum := int64(5)
 	task := FileScanTask{FirstRowID: &firstRowID, DataSequenceNumber: &dataSeqNum}
-	rowOffset := int64(0)
+	cursor := (&rowPositionSource{}).cursor()
 
 	schema := arrow.NewSchema(
 		[]arrow.Field{
@@ -436,7 +437,7 @@ func TestSynthesizeRowLineageColumnsPreservesExplicit(t *testing.T) {
 	seqArr.Release()
 	defer batch.Release()
 
-	out, err := synthesizeRowLineageColumns(ctx, &rowOffset, task, batch, true, true)
+	out, err := synthesizeRowLineageColumns(ctx, cursor, task, batch, true, true)
 	require.NoError(t, err)
 	defer out.Release()
 
@@ -458,7 +459,7 @@ func TestSynthesizeRowLineageColumnsPreservesExplicit(t *testing.T) {
 	assert.False(t, seqCol.IsNull(2))
 	assert.EqualValues(t, 9, seqCol.Value(2), "explicit seq must survive even with a different value")
 
-	assert.EqualValues(t, 3, rowOffset)
+	assert.EqualValues(t, 3, cursor.consumed)
 }
 
 // TestSynthesizeRowLineageColumnsAppendsMissing covers the path where the
@@ -473,7 +474,7 @@ func TestSynthesizeRowLineageColumnsAppendsMissing(t *testing.T) {
 	firstRowID := int64(1000)
 	dataSeqNum := int64(5)
 	task := FileScanTask{FirstRowID: &firstRowID, DataSequenceNumber: &dataSeqNum}
-	rowOffset := int64(0)
+	cursor := (&rowPositionSource{}).cursor()
 
 	md := arrow.NewMetadata([]string{"k"}, []string{"v"})
 	schema := arrow.NewSchema(
@@ -487,7 +488,7 @@ func TestSynthesizeRowLineageColumnsAppendsMissing(t *testing.T) {
 	xArr.Release()
 	defer batch.Release()
 
-	out, err := synthesizeRowLineageColumns(ctx, &rowOffset, task, batch, true, true)
+	out, err := synthesizeRowLineageColumns(ctx, cursor, task, batch, true, true)
 	require.NoError(t, err)
 	defer out.Release()
 
@@ -517,7 +518,7 @@ func TestSynthesizeRowLineageColumnsRejectsWrongType(t *testing.T) {
 
 	firstRowID := int64(1000)
 	task := FileScanTask{FirstRowID: &firstRowID}
-	rowOffset := int64(0)
+	cursor := (&rowPositionSource{}).cursor()
 
 	wrongField := lineageArrowField(iceberg.RowIDColumnName, iceberg.RowIDFieldID)
 	wrongField.Type = arrow.BinaryTypes.String
@@ -531,9 +532,58 @@ func TestSynthesizeRowLineageColumnsRejectsWrongType(t *testing.T) {
 	arr.Release()
 	defer batch.Release()
 
-	_, err := synthesizeRowLineageColumns(ctx, &rowOffset, task, batch, true, false)
+	_, err := synthesizeRowLineageColumns(ctx, cursor, task, batch, true, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "want int64")
+}
+
+// TestRowPositionCursor covers the position reconstruction that lets row-group
+// pruning stay enabled: surviving spans map emitted rows back to their original
+// file positions, jumping across the gaps left by pruned groups even when a
+// single sequence of calls crosses a span seam.
+func TestRowPositionCursor(t *testing.T) {
+	tests := []struct {
+		name  string
+		spans []internal.RowGroupSpan
+		calls int
+		want  []int64
+	}{
+		{
+			name:  "no spans falls back to contiguous from zero",
+			spans: nil,
+			calls: 4,
+			want:  []int64{0, 1, 2, 3},
+		},
+		{
+			name:  "pruned leading group starts at its file position",
+			spans: []internal.RowGroupSpan{{FirstRowPos: 5, NumRows: 5}},
+			calls: 5,
+			want:  []int64{5, 6, 7, 8, 9},
+		},
+		{
+			name:  "gap between surviving groups is skipped across the seam",
+			spans: []internal.RowGroupSpan{{FirstRowPos: 0, NumRows: 5}, {FirstRowPos: 10, NumRows: 5}},
+			calls: 10,
+			want:  []int64{0, 1, 2, 3, 4, 10, 11, 12, 13, 14},
+		},
+		{
+			name:  "empty leading span is stepped over",
+			spans: []internal.RowGroupSpan{{FirstRowPos: 0, NumRows: 0}, {FirstRowPos: 7, NumRows: 3}},
+			calls: 3,
+			want:  []int64{7, 8, 9},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cursor := (&rowPositionSource{spans: tt.spans}).cursor()
+			got := make([]int64, tt.calls)
+			for i := range got {
+				got[i] = cursor.next()
+			}
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
 
 // lineageArrowField builds an Int64 Arrow field tagged with the reserved
