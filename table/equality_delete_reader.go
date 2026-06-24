@@ -65,6 +65,10 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 				continue
 			}
 
+			if len(d.EqualityFieldIDs()) == 0 {
+				return nil, fmt.Errorf("%w: equality delete file %s", ErrEmptyEqualityFieldIDs, d.FilePath())
+			}
+
 			hasAny = true
 			if _, ok := uniqueDeletes[d.FilePath()]; !ok {
 				uniqueDeletes[d.FilePath()] = deleteFileInfo{
