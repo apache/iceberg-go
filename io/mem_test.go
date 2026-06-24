@@ -159,3 +159,36 @@ func TestMemIO_WalkDir(t *testing.T) {
 		"mem://walkdir-bucket/a/2.txt",
 	}, walked)
 }
+
+func TestMemIO_WalkDirDoesNotIncludeSiblingPrefixes(t *testing.T) {
+	ctx := context.Background()
+
+	memIO, err := icebergio.LoadFS(ctx, map[string]string{}, "mem://walkdir-boundary-bucket/")
+	require.NoError(t, err)
+
+	listable := memIO.(icebergio.ListableIO)
+	writeIO := memIO.(icebergio.WriteFileIO)
+
+	require.NoError(t, writeIO.WriteFile("mem://walkdir-boundary-bucket/table/data.parquet", []byte("table")))
+	require.NoError(t, writeIO.WriteFile("mem://walkdir-boundary-bucket/table2/data.parquet", []byte("table2")))
+	require.NoError(t, writeIO.WriteFile("mem://walkdir-boundary-bucket/table_backup/data.parquet", []byte("backup")))
+
+	for _, root := range []string{
+		"mem://walkdir-boundary-bucket/table",
+		"mem://walkdir-boundary-bucket/table/",
+	} {
+		t.Run(root, func(t *testing.T) {
+			var walked []string
+			err := listable.WalkDir(root, func(path string, _ fs.DirEntry, err error) error {
+				require.NoError(t, err)
+				walked = append(walked, path)
+
+				return nil
+			})
+			require.NoError(t, err)
+			assert.ElementsMatch(t, []string{
+				"mem://walkdir-boundary-bucket/table/data.parquet",
+			}, walked)
+		})
+	}
+}
