@@ -31,8 +31,9 @@ import (
 )
 
 // geoSchemaJavaFixtureName is a schema JSON fixture emitted by Apache Iceberg
-// Java SchemaParser.toJson on apache/iceberg main at
-// df6ea0820030d217d5f645469419cdbb3f54a41f.
+// Java SchemaParser.toJson. Geometry and geography support was added in
+// apache/iceberg commit e1e0a740 (#12346) and the geo type-string format was
+// last touched in 8de302bf when this fixture was captured.
 //
 // Source schema:
 //
@@ -44,10 +45,16 @@ import (
 //	    Types.NestedField.optional(4, "geog_default_algo",
 //	        Types.GeographyType.of("srid:4269")),
 //	    Types.NestedField.optional(5, "geog_default_crs",
-//	        Types.GeographyType.of("OGC:CRS84", EdgeAlgorithm.KARNEY))))
+//	        Types.GeographyType.of("OGC:CRS84", EdgeAlgorithm.KARNEY)),
+//	    Types.NestedField.optional(6, "geom_default",
+//	        Types.GeometryType.crs84()),
+//	    Types.NestedField.optional(7, "geog_default",
+//	        Types.GeographyType.crs84())))
 //
 // Java and Go write object keys in different orders, so the fixture test pins
 // the raw JSON string literals for field types instead of whole-object bytes.
+// PyIceberg currently emits quoted CRS values like geometry('srid:3857'), so
+// this fixture is scoped specifically to Java's type-string form.
 const geoSchemaJavaFixtureName = "geo-schema-java-main.json"
 
 var (
@@ -1211,11 +1218,21 @@ func TestSchemaGeoTypeStringWireFormatFixture(t *testing.T) {
 
 	fixtureTypes := rawTopLevelFieldTypes(t, fixtureBytes)
 	freshTypes := rawTopLevelFieldTypes(t, freshBytes)
-	require.Equal(t, fixtureTypes, freshTypes)
-	assert.Equal(t, `"geometry(srid:3857)"`, freshTypes["geom"])
-	assert.Equal(t, `"geography(srid:4269, karney)"`, freshTypes["geog"])
-	assert.Equal(t, `"geography(srid:4269)"`, freshTypes["geog_default_algo"])
-	assert.Equal(t, `"geography(OGC:CRS84, karney)"`, freshTypes["geog_default_crs"])
+	expectedTypes := map[string]string{
+		"id":                `"long"`,
+		"geom":              `"geometry(srid:3857)"`,
+		"geog":              `"geography(srid:4269, karney)"`,
+		"geog_default_algo": `"geography(srid:4269)"`,
+		"geog_default_crs":  `"geography(OGC:CRS84, karney)"`,
+		"geom_default":      `"geometry"`,
+		"geog_default":      `"geography"`,
+	}
+	require.Len(t, fixtureTypes, len(expectedTypes))
+	require.Len(t, freshTypes, len(expectedTypes))
+	for fieldName, expected := range expectedTypes {
+		require.Equalf(t, expected, fixtureTypes[fieldName], "fixture field %q type", fieldName)
+		assert.Equalf(t, expected, freshTypes[fieldName], "fresh field %q type", fieldName)
+	}
 }
 
 func rawTopLevelFieldTypes(t *testing.T, data []byte) map[string]string {
@@ -1234,6 +1251,7 @@ func rawTopLevelFieldTypes(t *testing.T, data []byte) map[string]string {
 	for _, field := range schema.Fields {
 		require.NotEmpty(t, field.Name)
 		require.NotEmptyf(t, field.Type, "field %q is missing type", field.Name)
+		require.NotEqualf(t, "null", string(field.Type), "field %q is missing type", field.Name)
 		types[field.Name] = string(field.Type)
 	}
 
