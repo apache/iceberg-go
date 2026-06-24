@@ -1889,6 +1889,9 @@ func isWKT2CRSString(crs string) bool {
 	for _, prefix := range []string{
 		"BOUNDCRS[",
 		"COMPOUNDCRS[",
+		"COORDINATEMETADATA[",
+		"COORDINATEOPERATION[",
+		"CRS[",
 		"DERIVEDPROJCRS[",
 		"ENGCRS[",
 		"ENGINEERINGCRS[",
@@ -1927,27 +1930,29 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 			return "", errors.New("unsupported CRS: empty string CRS")
 		}
 
+		if strings.EqualFold(crs, "OGC:CRS84") || strings.EqualFold(crs, "EPSG:4326") {
+			return "OGC:CRS84", nil
+		}
+
 		switch meta.CRSType {
 		case geoarrow.CRSTypePROJJSON:
 			return "", errPROJJSONStringCRSNotSupported
 		case geoarrow.CRSTypeWKT22019:
 			return "", errWKT2CRSNotSupported
+		default:
+			// Unset, AuthorityCode, SRID, and future CRSType values continue to
+			// the string-shape checks below.
 		}
 
-		if strings.EqualFold(crs, "OGC:CRS84") || strings.EqualFold(crs, "EPSG:4326") {
-			return "OGC:CRS84", nil
-		}
 		if isWKT2CRSString(crs) {
 			return "", errWKT2CRSNotSupported
 		}
-		// SRID is resolved after the canonical and WKT2 checks so a
-		// contradictory crs_type=srid on a value like "EPSG:4326" still
-		// canonicalizes rather than producing "srid:EPSG:4326". Real numeric
-		// SRIDs match none of the checks above and fall through to here.
 		if meta.CRSType == geoarrow.CRSTypeSRID {
 			return "srid:" + crs, nil
 		}
 
+		// Bare or unrecognized string CRS values are opaque identifiers per the
+		// Iceberg type contract; preserve them for read/write compatibility.
 		return crs, nil
 	case checkCRSJSON(meta.CRS):
 		var crs map[string]json.RawMessage

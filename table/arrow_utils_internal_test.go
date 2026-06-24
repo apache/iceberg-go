@@ -495,8 +495,7 @@ func TestIcebergCRSToGeoArrowMetadata(t *testing.T) {
 
 func TestGeoArrowCRSToIcebergCRS(t *testing.T) {
 	stringCRS := func(s string) json.RawMessage {
-		raw, err := json.Marshal(s)
-		require.NoError(t, err)
+		raw, _ := json.Marshal(s) //nolint:errcheck // Marshalling a string can't fail
 
 		return raw
 	}
@@ -515,16 +514,22 @@ func TestGeoArrowCRSToIcebergCRS(t *testing.T) {
 		assert.Equal(t, "custom", got)
 	})
 
-	t.Run("canonical string CRS wins over srid type annotation", func(t *testing.T) {
-		for _, crs := range []string{"EPSG:4326", "OGC:CRS84"} {
-			t.Run(crs, func(t *testing.T) {
-				got, err := geoArrowCRSToIcebergCRS(geoarrow.Metadata{
-					CRS:     stringCRS(crs),
-					CRSType: geoarrow.CRSTypeSRID,
+	t.Run("canonical string CRS wins over type annotation", func(t *testing.T) {
+		for _, crsType := range []geoarrow.CRSType{
+			geoarrow.CRSTypeSRID,
+			geoarrow.CRSTypePROJJSON,
+			geoarrow.CRSTypeWKT22019,
+		} {
+			for _, crs := range []string{"EPSG:4326", "OGC:CRS84"} {
+				t.Run(string(crsType)+"/"+crs, func(t *testing.T) {
+					got, err := geoArrowCRSToIcebergCRS(geoarrow.Metadata{
+						CRS:     stringCRS(crs),
+						CRSType: crsType,
+					})
+					require.NoError(t, err)
+					assert.Equal(t, "OGC:CRS84", got)
 				})
-				require.NoError(t, err)
-				assert.Equal(t, "OGC:CRS84", got)
-			})
+			}
 		}
 	})
 
@@ -545,19 +550,28 @@ func TestGeoArrowCRSToIcebergCRS(t *testing.T) {
 
 	t.Run("rejects projjson string CRS", func(t *testing.T) {
 		_, err := geoArrowCRSToIcebergCRS(geoarrow.Metadata{
-			CRS:     stringCRS("EPSG:4326"),
+			CRS:     stringCRS("EPSG:3857"),
 			CRSType: geoarrow.CRSTypePROJJSON,
 		})
 		require.Error(t, err)
-		assert.ErrorContains(t, err, "CRS type projjson not supported for string CRS")
+		assert.ErrorIs(t, err, errPROJJSONStringCRSNotSupported)
 	})
 
 	t.Run("bare WKT2 string uses not supported error", func(t *testing.T) {
-		_, err := geoArrowCRSToIcebergCRS(geoarrow.Metadata{
-			CRS: stringCRS(`GEOGCRS["WGS 84",DATUM["World Geodetic System 1984"]]`),
-		})
-		require.Error(t, err)
-		assert.ErrorContains(t, err, "CRS type wkt2:2019 not supported")
+		for _, crs := range []string{
+			`GEOGCRS["WGS 84",DATUM["World Geodetic System 1984"]]`,
+			`COORDINATEMETADATA[SOURCECRS[GEOGCRS["WGS 84"]]]`,
+			`COORDINATEOPERATION["operation"]`,
+			`CRS["generic"]`,
+		} {
+			t.Run(crs, func(t *testing.T) {
+				_, err := geoArrowCRSToIcebergCRS(geoarrow.Metadata{
+					CRS: stringCRS(crs),
+				})
+				require.Error(t, err)
+				assert.ErrorIs(t, err, errWKT2CRSNotSupported)
+			})
+		}
 	})
 
 	t.Run("json object errors identify the failing member", func(t *testing.T) {
