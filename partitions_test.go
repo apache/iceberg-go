@@ -19,12 +19,24 @@ package iceberg_test
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type nonComparableTransform struct {
+	iceberg.IdentityTransform
+	values []int
+}
+
+func (t nonComparableTransform) Equals(other iceberg.Transform) bool {
+	o, ok := other.(nonComparableTransform)
+
+	return ok && slices.Equal(t.values, o.values)
+}
 
 func TestPartitionSpec(t *testing.T) {
 	assert.Equal(t, 999, iceberg.UnpartitionedSpec.LastAssignedFieldID())
@@ -59,6 +71,32 @@ func TestPartitionSpec(t *testing.T) {
 	spec3 := iceberg.NewPartitionSpec(idField1, idField2)
 	assert.False(t, spec1.CompatibleWith(&spec3))
 	assert.Equal(t, 1002, spec3.LastAssignedFieldID())
+}
+
+func TestPartitionSpecCompatibleWithUsesTransformEquals(t *testing.T) {
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1001, Name: "id",
+		Transform: nonComparableTransform{values: []int{1, 2}},
+	})
+	sameTransformSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1002, Name: "id",
+		Transform: nonComparableTransform{values: []int{1, 2}},
+	})
+	differentTransformSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1003, Name: "id",
+		Transform: nonComparableTransform{values: []int{2, 3}},
+	})
+
+	var compatible bool
+	require.NotPanics(t, func() {
+		compatible = spec.CompatibleWith(&sameTransformSpec)
+	})
+	assert.True(t, compatible)
+
+	require.NotPanics(t, func() {
+		compatible = spec.CompatibleWith(&differentTransformSpec)
+	})
+	assert.False(t, compatible)
 }
 
 func TestUnpartitionedWithVoidField(t *testing.T) {

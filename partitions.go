@@ -371,7 +371,7 @@ func (ps *PartitionSpec) CompatibleWith(other *PartitionSpec) bool {
 
 	return slices.EqualFunc(ps.fields, other.fields, func(left, right PartitionField) bool {
 		return slices.Equal(left.SourceIDs, right.SourceIDs) && left.Name == right.Name &&
-			left.Transform == right.Transform
+			left.Transform.Equals(right.Transform)
 	})
 }
 
