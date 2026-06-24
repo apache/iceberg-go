@@ -34,6 +34,7 @@ import (
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/puffin"
 	"github.com/apache/iceberg-go/table/dv"
+	"github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -326,4 +327,34 @@ func TestFilterByDeletionVector(t *testing.T) {
 		assert.Equal(t, []int64{5, 6, 8},
 			out2.Column(0).(*array.Int64).Int64Values())
 	})
+}
+
+// TestFilterByDeletionVectorOutOfBoundsPosition guards the slow-path bound: when
+// a surviving span's cursor positions exceed rowCount (row-group metadata and the
+// manifest's File.Count() disagree — a writer bug, hand-built file, or corruption)
+// the keep-mask index must not run off keepBits. The guard keeps such rows rather
+// than panicking, so the batch survives intact.
+func TestFilterByDeletionVectorOutOfBoundsPosition(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.NewGoAllocator()
+
+	const rowCount = 4
+	bitmap := dv.NewRoaringPositionBitmap()
+	src := &rowPositionSource{spans: []internal.RowGroupSpan{{FirstRowPos: 100, NumRows: 3}}}
+	filter := filterByDeletionVector(ctx, bitmap, rowCount, src.cursor())
+
+	bldr := array.NewInt64Builder(mem)
+	defer bldr.Release()
+	for i := int64(0); i < 3; i++ {
+		bldr.Append(i)
+	}
+	col := bldr.NewArray()
+	defer col.Release()
+	schema := arrow.NewSchema([]arrow.Field{{Name: "pos", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	batch := array.NewRecordBatch(schema, []arrow.Array{col}, 3)
+
+	out, err := filter(batch)
+	require.NoError(t, err)
+	defer out.Release()
+	assert.Equal(t, []int64{0, 1, 2}, out.Column(0).(*array.Int64).Int64Values())
 }

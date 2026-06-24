@@ -752,7 +752,7 @@ type ParquetRowGroupTester struct {
 	// Survivors, if non-nil, is reset and then filled with one span per row group
 	// that survives pruning, in file order, with positions relative to the full
 	// file. It lets callers reconstruct each emitted row's original position even
-	// when pruning skips groups. Left empty when no group is skipped.
+	// when pruning skips groups. Set to nil when no group is skipped.
 	Survivors *[]RowGroupSpan
 }
 

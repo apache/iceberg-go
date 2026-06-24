@@ -392,6 +392,14 @@ func filterByDeletionVector(ctx context.Context, bitmap *dv.RoaringPositionBitma
 		bldr.Reserve(int(nrows))
 		for range nrows {
 			pos := cursor.next()
+			// keepBits is sized for rowCount; a pos past it means row-group
+			// metadata and the manifest's File.Count() disagree. Keep the row
+			// rather than indexing out of bounds.
+			if pos >= rowCount {
+				bldr.Append(true)
+
+				continue
+			}
 			// Test keep bit at absolute position pos: byte pos/8, bit pos%8,
 			// LSB-first (the layout the fast path's array.NewBoolean reads).
 			bldr.Append(keepBits[pos>>3]&(1<<(uint(pos)&7)) != 0)
@@ -644,7 +652,9 @@ type rowPositionCursor struct {
 // next returns the original file position of the next row. It is meant to be
 // called once per physical row read, in order. spanIdx is bounded to the last
 // span, so reading past the total row count degrades to positions beyond the
-// final span rather than panicking.
+// final span rather than panicking here. Callers that index a buffer sized to
+// the file's row count (e.g. filterByDeletionVector's keep-mask) must still
+// guard against the returned position exceeding that count.
 func (c *rowPositionCursor) next() int64 {
 	spans := c.src.spans
 	if len(spans) == 0 {
@@ -696,7 +706,10 @@ func synthesizeRowLineageColumns(
 		}
 	}()
 
-	synth := func(name string, fieldID int, value func(k int64) int64) error {
+	// perRow, when set, runs once for every physical row in order — including
+	// rows whose explicit value wins — so a cursor stays in lockstep with the
+	// batch even when value is never called.
+	synth := func(name string, fieldID int, perRow func(k int64), value func(k int64) int64) error {
 		idx := fieldIndexByID(schema, fieldID)
 		var existing *array.Int64
 		if idx >= 0 {
@@ -710,6 +723,9 @@ func synthesizeRowLineageColumns(
 		defer bldr.Release()
 		bldr.Reserve(int(nrows))
 		for k := range nrows {
+			if perRow != nil {
+				perRow(k)
+			}
 			if existing != nil && !existing.IsNull(int(k)) {
 				bldr.Append(existing.Value(int(k)))
 			} else {
@@ -737,23 +753,20 @@ func synthesizeRowLineageColumns(
 
 	if synthesizeRowID {
 		first := *task.FirstRowID
-		// Advance the cursor once per physical row (even where an explicit id
-		// wins) so the next batch starts at the right position.
-		positions := make([]int64, nrows)
-		for k := range nrows {
-			positions[k] = cursor.next()
-		}
-		if err := synth(iceberg.RowIDColumnName, iceberg.RowIDFieldID, func(k int64) int64 {
-			return first + positions[k]
-		}); err != nil {
+		var pos int64
+		if err := synth(iceberg.RowIDColumnName, iceberg.RowIDFieldID,
+			func(int64) { pos = cursor.next() },
+			func(int64) int64 { return first + pos },
+		); err != nil {
 			return nil, err
 		}
 	}
 	if synthesizeSeq {
 		seq := *task.DataSequenceNumber
-		if err := synth(iceberg.LastUpdatedSequenceNumberColumnName, iceberg.LastUpdatedSequenceNumberFieldID, func(int64) int64 {
-			return seq
-		}); err != nil {
+		if err := synth(iceberg.LastUpdatedSequenceNumberColumnName, iceberg.LastUpdatedSequenceNumberFieldID, nil,
+			func(int64) int64 {
+				return seq
+			}); err != nil {
 			return nil, err
 		}
 	}
