@@ -670,21 +670,17 @@ func (c *Catalog) DropNamespace(_ context.Context, ns table.Identifier) error {
 
 	path := c.namespaceToPath(ns)
 
-	info, err := c.filesystem.Stat(path)
-	if errors.Is(err, fs.ErrNotExist) || (err == nil && !info.IsDir()) {
-		return fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(ns, "."))
-	}
-	if err != nil {
-		return fmt.Errorf("hadoop catalog: failed to stat namespace directory: %w", err)
-	}
-
 	foundEntries := false
-	err = c.filesystem.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+	err := c.filesystem.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
 		if p == path {
+			if !d.IsDir() {
+				return fs.ErrNotExist
+			}
+
 			return nil
 		}
 
