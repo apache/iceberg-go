@@ -102,6 +102,8 @@ type blobFileIO struct {
 	newRangeReader func(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error)
 }
 
+var _ icebergio.ListableIO = (*blobFileIO)(nil)
+
 func (bfs *blobFileIO) preprocess(path string) (string, error) {
 	return bfs.keyExtractor(path)
 }
