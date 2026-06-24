@@ -108,12 +108,12 @@ func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, 
 				if deletes == nil {
 					return nil
 				}
-				select {
-				case perFileChan <- deletes:
-					return nil
-				case <-gctx.Done():
-					return gctx.Err()
-				}
+				// Safe even after gctx cancellation: the channel buffer equals
+				// g's concurrency limit, so every in-flight worker can send
+				// without blocking while the for-range below drains to close.
+				perFileChan <- deletes
+
+				return nil
 			})
 		}
 		_ = g.Wait()
@@ -126,7 +126,7 @@ func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, 
 	}
 
 	if err := g.Wait(); err != nil {
-		return nil, err
+		return deletesPerFile, err
 	}
 
 	return deletesPerFile, nil
@@ -1142,6 +1142,8 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 	// no intermediate position set.
 	dvBitmaps, err := readAllDeletionVectors(ctx, as.fs, tasks, as.concurrency)
 	if err != nil {
+		releasePerFilePosDeletes(deletesPerFile)
+
 		return nil, nil, err
 	}
 

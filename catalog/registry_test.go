@@ -133,6 +133,40 @@ func TestCatalogWithEmptyName(t *testing.T) {
 	catalog.Unregister("mock")
 }
 
+func TestCatalogLoadDoesNotMutateProps(t *testing.T) {
+	ctx := context.Background()
+	defer func(cats map[string]config.CatalogConfig) {
+		config.EnvConfig.Catalogs = cats
+	}(config.EnvConfig.Catalogs)
+	defer catalog.Unregister("mock")
+
+	config.EnvConfig.Catalogs = map[string]config.CatalogConfig{
+		"mock": {
+			URI:         "http://localhost:8181/",
+			Credential:  "default-credential",
+			Warehouse:   "/default/warehouse",
+			CatalogType: "mock",
+		},
+	}
+
+	catalog.Register("mock", catalog.RegistrarFunc(func(ctx context.Context, name string, props iceberg.Properties) (catalog.Catalog, error) {
+		assert.Equal(t, "mock", name)
+		assert.Equal(t, "mock", props.Get("type", ""))
+		assert.Equal(t, "http://localhost:8181/", props.Get("uri", ""))
+		assert.Equal(t, "default-credential", props.Get("credential", ""))
+		assert.Equal(t, "/default/warehouse", props.Get("warehouse", ""))
+
+		return nil, nil
+	}))
+
+	props := iceberg.Properties{"type": "mock"}
+	c, err := catalog.Load(ctx, "mock", props)
+
+	assert.Nil(t, c)
+	assert.NoError(t, err)
+	assert.Equal(t, iceberg.Properties{"type": "mock"}, props)
+}
+
 func TestCatalogLoadInvalidURI(t *testing.T) {
 	ctx := context.Background()
 	config.EnvConfig.DefaultCatalog = "default"

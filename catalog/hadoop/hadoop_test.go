@@ -19,13 +19,16 @@ package hadoop
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
@@ -450,6 +453,36 @@ func (s *HadoopCatalogTestSuite) TestDropNamespace() {
 
 	err := s.cat.DropNamespace(context.Background(), []string{"ns"})
 	s.Require().NoError(err)
+
+	_, err = os.Stat(nsDir)
+	s.True(os.IsNotExist(err))
+}
+
+// statFailingFS guards against reintroducing a pre-walk Stat in DropNamespace
+// (see issue #1273). It embeds LocalFS so every other operation behaves
+// normally, but fails and counts any Stat call so the test can assert that
+// DropNamespace never stats the namespace before walking it.
+type statFailingFS struct {
+	icebergio.LocalFS
+	statCalls int
+}
+
+func (f *statFailingFS) Stat(string) (fs.FileInfo, error) {
+	f.statCalls++
+
+	return nil, errors.New("stat should not be called")
+}
+
+func (s *HadoopCatalogTestSuite) TestDropNamespaceDoesNotPreStat() {
+	nsDir := filepath.Join(s.warehouse, "ns")
+	s.Require().NoError(os.Mkdir(nsDir, 0o755))
+
+	fsys := &statFailingFS{}
+	s.cat.filesystem = fsys
+
+	err := s.cat.DropNamespace(context.Background(), []string{"ns"})
+	s.Require().NoError(err)
+	s.Zero(fsys.statCalls)
 
 	_, err = os.Stat(nsDir)
 	s.True(os.IsNotExist(err))
