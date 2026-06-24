@@ -44,6 +44,7 @@ const (
 
 var (
 	ErrInvalidSortOrderID   = errors.New("invalid sort order ID")
+	ErrInvalidSortSourceID  = errors.New("invalid sort source ID")
 	ErrInvalidTransform     = errors.New("invalid transform, must be a valid transform string or a transform object")
 	ErrInvalidSortDirection = errors.New("invalid sort direction, must be 'asc' or 'desc'")
 	ErrInvalidNullOrder     = errors.New("invalid null order, must be 'nulls-first' or 'nulls-last'")
@@ -133,10 +134,13 @@ func (s *SortField) UnmarshalJSON(b []byte) error {
 		return fmt.Errorf("%w: failed to unmarshal sort field", err)
 	}
 
-	if _, ok := raw["source-id"]; ok {
-		if _, ok := raw["source-ids"]; ok {
-			return errors.New("sort field cannot contain both source-id and source-ids")
-		}
+	_, hasSourceID := raw["source-id"]
+	_, hasSourceIDs := raw["source-ids"]
+	if hasSourceID && hasSourceIDs {
+		return errors.New("sort field cannot contain both source-id and source-ids")
+	}
+	if !hasSourceID && !hasSourceIDs {
+		return fmt.Errorf("%w: sort field must contain source-id or source-ids", ErrInvalidSortSourceID)
 	}
 
 	aux := struct {
@@ -154,9 +158,15 @@ func (s *SortField) UnmarshalJSON(b []byte) error {
 	s.Direction = aux.Direction
 	s.NullOrder = aux.NullOrder
 
-	if len(aux.SourceIDs) > 0 {
+	if hasSourceIDs {
+		if err := validateSortSourceIDs(aux.SourceIDs); err != nil {
+			return err
+		}
 		s.SourceIDs = aux.SourceIDs
 	} else {
+		if err := validateSortSourceID(aux.SourceID); err != nil {
+			return err
+		}
 		s.SourceIDs = []int{aux.SourceID}
 	}
 
@@ -175,6 +185,28 @@ func (s *SortField) UnmarshalJSON(b []byte) error {
 	case NullsFirst, NullsLast:
 	default:
 		return ErrInvalidNullOrder
+	}
+
+	return nil
+}
+
+func validateSortSourceID(id int) error {
+	if id <= 0 {
+		return fmt.Errorf("%w: source ID must be positive: %d", ErrInvalidSortSourceID, id)
+	}
+
+	return nil
+}
+
+func validateSortSourceIDs(ids []int) error {
+	if len(ids) == 0 {
+		return fmt.Errorf("%w: source-ids must not be empty", ErrInvalidSortSourceID)
+	}
+
+	for _, id := range ids {
+		if err := validateSortSourceID(id); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -271,6 +303,9 @@ func NewSortOrder(orderID int, fields []SortField) (SortOrder, error) {
 		fields = []SortField{}
 	}
 	for idx, field := range fields {
+		if err := validateSortSourceIDs(field.SourceIDs); err != nil {
+			return SortOrder{}, fmt.Errorf("%w: sort field at index %d", err, idx)
+		}
 		if field.Transform == nil {
 			return SortOrder{}, fmt.Errorf("%w: sort field at index %d has no transform", ErrInvalidTransform, idx)
 		}
