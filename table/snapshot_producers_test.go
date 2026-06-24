@@ -164,6 +164,31 @@ func newTestDataFile(t *testing.T, spec iceberg.PartitionSpec, path string, part
 	return newTestDataFileWithCount(t, spec, path, partition, 1)
 }
 
+func newTestPosDeleteFileForSpec(
+	t *testing.T,
+	spec iceberg.PartitionSpec,
+	path string,
+	partition map[int]any,
+	referencedDataFile string,
+) iceberg.DataFile {
+	t.Helper()
+
+	builder, err := iceberg.NewDataFileBuilder(
+		spec,
+		iceberg.EntryContentPosDeletes,
+		path,
+		iceberg.ParquetFile,
+		partition,
+		nil,
+		nil,
+		1,
+		1,
+	)
+	require.NoError(t, err, "new position delete file builder")
+
+	return builder.ReferencedDataFile(referencedDataFile).Build()
+}
+
 func newTestDataFileWithCount(t *testing.T, spec iceberg.PartitionSpec, path string, partition map[int]any, count int64) iceberg.DataFile {
 	t.Helper()
 
@@ -632,6 +657,55 @@ func TestManifestWriterClosesUnderlyingFile(t *testing.T) {
 
 	unclosed := trackIO.GetUnclosedWriters()
 	require.Empty(t, unclosed, "all file writerFactory should be closed, but these are still open: %v", unclosed)
+}
+
+func TestAddedDeleteManifestsUseDeleteFileSpecID(t *testing.T) {
+	oldSpec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, oldSpec)
+
+	newSpec := partitionedSpec()
+	require.NoError(t, txn.meta.AddPartitionSpec(&newSpec, false))
+	require.NoError(t, txn.meta.SetDefaultSpecID(-1))
+	currentSpec, err := txn.meta.CurrentSpec()
+	require.NoError(t, err)
+	require.NotNil(t, currentSpec)
+	require.Equal(t, 1, currentSpec.ID(), "test setup should evolve the current spec")
+
+	sp := newFastAppendFilesProducer(OpDelete, txn, wfs, nil, nil)
+	oldSpecDelete := newTestPosDeleteFileForSpec(
+		t,
+		oldSpec,
+		"mem://default/table-location/delete/old-spec-pos-delete.parquet",
+		nil,
+		"mem://default/table-location/data/old-spec-data.parquet",
+	)
+	currentSpecDelete := newTestPosDeleteFileForSpec(
+		t,
+		*currentSpec,
+		"mem://default/table-location/delete/current-spec-pos-delete.parquet",
+		map[int]any{1000: int32(7)},
+		"mem://default/table-location/data/current-spec-data.parquet",
+	)
+	sp.appendDeleteFile(oldSpecDelete)
+	sp.appendDeleteFile(currentSpecDelete)
+
+	manifests, err := sp.manifests(context.Background())
+	require.NoError(t, err)
+
+	deleteManifestSpecIDs := make([]int32, 0, len(manifests))
+	for _, manifest := range manifests {
+		if manifest.ManifestContent() != iceberg.ManifestContentDeletes {
+			continue
+		}
+
+		deleteManifestSpecIDs = append(deleteManifestSpecIDs, manifest.PartitionSpecID())
+		for entry, err := range manifest.Entries(wfs, false) {
+			require.NoError(t, err)
+			require.Equal(t, manifest.PartitionSpecID(), entry.DataFile().SpecID())
+		}
+	}
+
+	require.ElementsMatch(t, []int32{0, 1}, deleteManifestSpecIDs)
 }
 
 // TestCreateManifestClosesUnderlyingFile tests that createManifest properly
