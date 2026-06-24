@@ -263,9 +263,9 @@ func toByteSliceSubstraitLiteral[T []byte | types.UUID](v T) expr.Literal {
 // toDecimalLiteral converts an iceberg.DecimalLiteral into a Substrait decimal
 // literal. Precision is taken from the bound field's iceberg.DecimalType (typ),
 // NOT from v.Type(). DecimalLiteral does not carry the originating column's
-// precision, so v.Type() always reports a hardcoded precision of 9 (see
+// precision, so v.Type() reports a placeholder precision (see
 // https://github.com/apache/iceberg-go/issues/1028). If typ is not a
-// DecimalType, this falls back to v.Type()'s (hardcoded) precision.
+// DecimalType, this falls back to v.Type()'s placeholder precision.
 func toDecimalLiteral(typ iceberg.Type, v iceberg.DecimalLiteral) expr.Literal {
 	precision := v.Type().(iceberg.DecimalType).Precision()
 	if dt, ok := typ.(iceberg.DecimalType); ok {

@@ -32,11 +32,13 @@ import (
 )
 
 var (
-	regexFromBrackets = regexp.MustCompile(`^\w+\[(\d+)\]$`)
-	decimalRegex      = regexp.MustCompile(`decimal\(\s*(\d+)\s*,\s*(\d+)\s*\)`)
-	geometryRegex     = regexp.MustCompile(`(?i)^geometry\s*(?:\(\s*([^),]+?)\s*\))?$`)
-	geographyRegex    = regexp.MustCompile(`(?i)^geography\s*(?:\(\s*([^\s,)]+)\s*(?:,\s*(\w+)\s*)?\))?$`)
+	fixedRegex     = regexp.MustCompile(`^fixed\[(\d+)\]$`)
+	decimalRegex   = regexp.MustCompile(`^decimal\(\s*(\d+)\s*,\s*(\d+)\s*\)$`)
+	geometryRegex  = regexp.MustCompile(`(?i)^geometry\s*(?:\(\s*([^),]+?)\s*\))?$`)
+	geographyRegex = regexp.MustCompile(`(?i)^geography\s*(?:\(\s*([^\s,)]+)\s*(?:,\s*(\w+)\s*)?\))?$`)
 )
+
+const maxDecimalPrecision = 38
 
 type Properties map[string]string
 
@@ -183,12 +185,16 @@ func (t *typeIFace) UnmarshalJSON(b []byte) error {
 		default:
 			switch {
 			case strings.HasPrefix(typename, "fixed"):
-				matches := regexFromBrackets.FindStringSubmatch(typename)
+				matches := fixedRegex.FindStringSubmatch(typename)
 				if len(matches) != 2 {
 					return fmt.Errorf("%w: %s", ErrInvalidTypeString, typename)
 				}
 
 				n, _ := strconv.Atoi(matches[1])
+				if err := validateFixedLength(n); err != nil {
+					return fmt.Errorf("%w: %s: %w", ErrInvalidTypeString, typename, err)
+				}
+
 				t.Type = FixedType{len: n}
 			case strings.HasPrefix(typename, "decimal"):
 				matches := decimalRegex.FindStringSubmatch(typename)
@@ -198,6 +204,10 @@ func (t *typeIFace) UnmarshalJSON(b []byte) error {
 
 				prec, _ := strconv.Atoi(matches[1])
 				scale, _ := strconv.Atoi(matches[2])
+				if err := validateDecimalParams(prec, scale); err != nil {
+					return fmt.Errorf("%w: %s: %w", ErrInvalidTypeString, typename, err)
+				}
+
 				t.Type = DecimalType{precision: prec, scale: scale}
 			// note that geo type names are case insensitive but other type names are case sensitive.
 			// matches java behavior - this behavior is intentional
@@ -545,7 +555,21 @@ func (m *MapType) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-func FixedTypeOf(n int) FixedType { return FixedType{len: n} }
+func validateFixedLength(n int) error {
+	if n <= 0 {
+		return fmt.Errorf("%w: fixed length must be greater than 0: %d", ErrInvalidArgument, n)
+	}
+
+	return nil
+}
+
+func FixedTypeOf(n int) FixedType {
+	if err := validateFixedLength(n); err != nil {
+		panic(err)
+	}
+
+	return FixedType{len: n}
+}
 
 type FixedType struct {
 	len int
@@ -564,7 +588,24 @@ func (f FixedType) Type() string   { return fmt.Sprintf("fixed[%d]", f.len) }
 func (f FixedType) String() string { return fmt.Sprintf("fixed[%d]", f.len) }
 func (f FixedType) primitive()     {}
 
+func validateDecimalParams(prec, scale int) error {
+	if prec < 1 || prec > maxDecimalPrecision {
+		return fmt.Errorf("%w: decimal precision must be between 1 and %d: %d",
+			ErrInvalidArgument, maxDecimalPrecision, prec)
+	}
+	if scale < 0 || scale > prec {
+		return fmt.Errorf("%w: decimal scale must be between 0 and precision %d: %d",
+			ErrInvalidArgument, prec, scale)
+	}
+
+	return nil
+}
+
 func DecimalTypeOf(prec, scale int) DecimalType {
+	if err := validateDecimalParams(prec, scale); err != nil {
+		panic(err)
+	}
+
 	return DecimalType{precision: prec, scale: scale}
 }
 

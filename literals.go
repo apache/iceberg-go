@@ -1119,7 +1119,7 @@ func (b *BinaryLiteral) UnmarshalBinary(data []byte) error {
 type FixedLiteral []byte
 
 func (FixedLiteral) Comparator() Comparator[[]byte] { return bytes.Compare }
-func (f FixedLiteral) Type() Type                   { return FixedTypeOf(len(f)) }
+func (f FixedLiteral) Type() Type                   { return FixedTypeOf(max(1, len(f))) }
 func (f FixedLiteral) Value() []byte                { return []byte(f) }
 func (f FixedLiteral) Any() any                     { return f.Value() }
 func (f FixedLiteral) String() string               { return string(f) }
@@ -1246,12 +1246,16 @@ func (DecimalLiteral) Comparator() Comparator[Decimal] {
 	}
 }
 
-// Type returns a DecimalType built from the literal's scale and a hardcoded
-// precision of 9. The precision is NOT the originating column's declared
-// precision; DecimalLiteral does not carry precision. Callers that need the
-// real column precision must consult the bound field's type rather than
-// lit.Type(). See https://github.com/apache/iceberg-go/issues/1028.
-func (d DecimalLiteral) Type() Type     { return DecimalTypeOf(9, d.Scale) }
+// Type returns a DecimalType built from the literal's scale and a placeholder
+// precision that is at least 9. The precision is NOT the originating column's
+// declared precision; DecimalLiteral does not carry precision. Callers that
+// need the real column precision must consult the bound field's type rather
+// than lit.Type(). See https://github.com/apache/iceberg-go/issues/1028.
+func (d DecimalLiteral) Type() Type {
+	precision := max(9, d.Scale)
+
+	return DecimalTypeOf(precision, d.Scale)
+}
 func (d DecimalLiteral) Value() Decimal { return Decimal(d) }
 func (d DecimalLiteral) Any() any       { return d.Value() }
 func (d DecimalLiteral) String() string {

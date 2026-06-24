@@ -389,6 +389,24 @@ func TestDecimalToDecimalConversion(t *testing.T) {
 	assert.ErrorContains(t, err, "could not convert 34.11 to decimal(9, 3)")
 }
 
+func TestDecimalLiteralTypePrecisionIsAtLeastScale(t *testing.T) {
+	lit := iceberg.DecimalLiteral{Val: decimal128.FromI64(1), Scale: 10}
+
+	typ := lit.Type().(iceberg.DecimalType)
+	assert.Equal(t, 10, typ.Precision())
+	assert.Equal(t, 10, typ.Scale())
+}
+
+func TestFixedLiteralTypeLengthIsAtLeastOne(t *testing.T) {
+	empty := iceberg.FixedLiteral{}
+	emptyType := empty.Type().(iceberg.FixedType)
+	assert.Equal(t, 1, emptyType.Len())
+
+	lit := iceberg.FixedLiteral{0x00, 0x01, 0x02}
+	typ := lit.Type().(iceberg.FixedType)
+	assert.Equal(t, 3, typ.Len())
+}
+
 func TestDecimalLiteralConversions(t *testing.T) {
 	n1 := iceberg.Decimal{Val: decimal128.FromI64(1234), Scale: 2}
 	n2 := iceberg.Decimal{Val: decimal128.FromI64(math.MaxInt32 + 1), Scale: 0}
