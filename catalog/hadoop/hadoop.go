@@ -670,21 +670,18 @@ func (c *Catalog) DropNamespace(_ context.Context, ns table.Identifier) error {
 
 	path := c.namespaceToPath(ns)
 
-	info, err := c.filesystem.Stat(path)
-	if errors.Is(err, fs.ErrNotExist) || (err == nil && !info.IsDir()) {
-		return fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(ns, "."))
-	}
-	if err != nil {
-		return fmt.Errorf("hadoop catalog: failed to stat namespace directory: %w", err)
-	}
-
+	// Walk the namespace directory directly so existence and type checks use the
+	// same filesystem view. The root entry preserves file-at-namespace handling.
+	rootNotDir := false
 	foundEntries := false
-	err = c.filesystem.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+	err := c.filesystem.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
 		if p == path {
+			rootNotDir = !d.IsDir()
+
 			return nil
 		}
 
@@ -698,6 +695,10 @@ func (c *Catalog) DropNamespace(_ context.Context, ns table.Identifier) error {
 		}
 
 		return fmt.Errorf("hadoop catalog: failed to read namespace directory: %w", err)
+	}
+
+	if rootNotDir {
+		return fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(ns, "."))
 	}
 
 	if foundEntries {
