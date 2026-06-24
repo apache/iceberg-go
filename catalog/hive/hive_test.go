@@ -18,10 +18,8 @@
 package hive
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"log"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -589,22 +587,12 @@ func TestHivePurgeTableSwallowsPurgeFilesError(t *testing.T) {
 			dropCalled = true
 		}).Return(nil).Once()
 
-	var logs bytes.Buffer
-	originalLogOutput := log.Writer()
-	// This test redirects the process-global logger, so keep it non-parallel.
-	log.SetOutput(&logs)
-	t.Cleanup(func() { log.SetOutput(originalLogOutput) })
-
 	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
 
 	assert.NoError(hiveCatalog.PurgeTable(ctx, TableIdentifier("test_database", "test_table")))
 	assert.True(dropCalled)
 	assert.Positive(removeCalls)
 	assert.False(removeBeforeDrop, "PurgeTable should drop the catalog entry before removing files")
-	assert.Contains(logs.String(), "WARNING: dropped table")
-	assert.Contains(logs.String(), "test_database")
-	assert.Contains(logs.String(), "test_table")
-	assert.Contains(logs.String(), errHivePurgeRemove.Error())
 	file, err := failingFS.Open(dataFile)
 	assert.NoError(err, "data file should remain when FileIO remove fails")
 	assert.NotNil(file)

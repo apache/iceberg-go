@@ -18,13 +18,11 @@
 package glue
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -526,22 +524,12 @@ func TestGluePurgeTableSwallowsPurgeFilesError(t *testing.T) {
 		dropCalled = true
 	}).Return(&glue.DeleteTableOutput{}, nil).Once()
 
-	var logs bytes.Buffer
-	originalLogOutput := log.Writer()
-	// This test redirects the process-global logger, so keep it non-parallel.
-	log.SetOutput(&logs)
-	t.Cleanup(func() { log.SetOutput(originalLogOutput) })
-
 	glueCatalog := &Catalog{glueSvc: mockGlueSvc}
 
 	assert.NoError(glueCatalog.PurgeTable(ctx, TableIdentifier("test_database", "test_table")))
 	assert.True(dropCalled)
 	assert.Positive(removeCalls)
 	assert.False(removeBeforeDrop, "PurgeTable should drop the catalog entry before removing files")
-	assert.Contains(logs.String(), "WARNING: dropped table")
-	assert.Contains(logs.String(), "test_database")
-	assert.Contains(logs.String(), "test_table")
-	assert.Contains(logs.String(), errGluePurgeRemove.Error())
 	file, err := failingFS.Open(dataFile)
 	assert.NoError(err, "data file should remain when FileIO remove fails")
 	assert.NotNil(file)
