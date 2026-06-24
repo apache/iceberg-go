@@ -33,13 +33,25 @@ permissions:
 jobs:
   lint-and-test:
     name: ${{ matrix.os }} go${{ matrix.go }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    # Cache dirs are pinned to dot-prefixed paths under the workspace so they are
+    # identical across Linux/Windows/macOS (no per-OS path branching) and are
+    # excluded from `go`/golangci-lint `./...` expansion (leading-dot dirs are
+    # ignored). Go and golangci-lint honor these env vars for their cache dirs.
+    env:
+      GOMODCACHE: ${{ github.workspace }}/.gocache/mod
+      GOCACHE: ${{ github.workspace }}/.gocache/build
+      GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.gocache/golangci
     strategy:
       max-parallel: 15
       fail-fast: false
       matrix:
         go: [ '1.25.8', '1.26.1' ]
-        os: [ 'ubuntu-latest', 'windows-latest', 'macos-latest' ]
+        os:
+          - 'ubuntu-latest'
+          - 'macos-latest'
+          # - 'windows-latest'  # blocked on Windows path support, see #1262
+
     steps:
     - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       with:
@@ -48,18 +60,53 @@ jobs:
       uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
       with:
         go-version: ${{ matrix.go }}
-        cache: true
-        cache-dependency-path: go.sum
+        # Caching is managed explicitly below so saves can be gated to main and
+        # the golangci-lint cache can be keyed by Go version.
+        cache: false
+    # Restore is unconditional (PRs read main's caches); save is gated to main.
+    - name: Restore Go module and build cache
+      uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      with:
+        path: |
+          ${{ github.workspace }}/.gocache/mod
+          ${{ github.workspace }}/.gocache/build
+        key: go-${{ matrix.os }}-go${{ matrix.go }}-${{ hashFiles('go.sum') }}
+        restore-keys: |
+          go-${{ matrix.os }}-go${{ matrix.go }}-
+    - name: Restore golangci-lint cache
+      uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      with:
+        path: ${{ github.workspace }}/.gocache/golangci
+        key: golangci-${{ matrix.os }}-go${{ matrix.go }}-${{ hashFiles('go.sum', '.golangci.yml') }}
+        restore-keys: |
+          golangci-${{ matrix.os }}-go${{ matrix.go }}-
     - name: Run golangci-lint
       uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1
       with:
         version: v2.11.4
         args: --timeout=10m
+        # The action's own cache key omits the Go version, so all matrix cells
+        # collide on one entry; we manage the cache explicitly above instead.
+        skip-cache: true
     - name: Run tests
       run: go test -v ./...
     # Race detector is opt-in per package/test.
     - name: Run race detector
       run: go test -race -v ./codec/...
+    - name: Save Go module and build cache
+      if: github.ref == 'refs/heads/main'
+      uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      with:
+        path: |
+          ${{ github.workspace }}/.gocache/mod
+          ${{ github.workspace }}/.gocache/build
+        key: go-${{ matrix.os }}-go${{ matrix.go }}-${{ hashFiles('go.sum') }}
+    - name: Save golangci-lint cache
+      if: github.ref == 'refs/heads/main'
+      uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      with:
+        path: ${{ github.workspace }}/.gocache/golangci
+        key: golangci-${{ matrix.os }}-go${{ matrix.go }}-${{ hashFiles('go.sum', '.golangci.yml') }}
 
   # Guards against big-endian-only failures such as the runtime.staticuint64s
   # relocation misalignment triggered by boxing scalars in generic code
@@ -69,6 +116,9 @@ jobs:
   cross-compile:
     name: cross-compile linux/s390x
     runs-on: ubuntu-latest
+    env:
+      GOMODCACHE: ${{ github.workspace }}/.gocache/mod
+      GOCACHE: ${{ github.workspace }}/.gocache/build
     steps:
     - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       with:
@@ -77,11 +127,27 @@ jobs:
       uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
       with:
         go-version: '1.26.1'
-        cache: true
-        cache-dependency-path: go.sum
+        cache: false
+    - name: Restore Go module and build cache
+      uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      with:
+        path: |
+          ${{ github.workspace }}/.gocache/mod
+          ${{ github.workspace }}/.gocache/build
+        key: go-cross-s390x-${{ hashFiles('go.sum') }}
+        restore-keys: |
+          go-cross-s390x-
     - name: Build for big-endian (s390x)
       env:
         GOOS: linux
         GOARCH: s390x
         CGO_ENABLED: '0'
       run: go build ./...
+    - name: Save Go module and build cache
+      if: github.ref == 'refs/heads/main'
+      uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      with:
+        path: |
+          ${{ github.workspace }}/.gocache/mod
+          ${{ github.workspace }}/.gocache/build
+        key: go-cross-s390x-${{ hashFiles('go.sum') }}

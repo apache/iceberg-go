@@ -22,8 +22,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"maps"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -312,9 +314,15 @@ func (p parquetFormat) WriteDataFile(ctx context.Context, fs iceio.WriteFileIO, 
 		return nil, err
 	}
 
+	return writeDataFileBatches(w, batches)
+}
+
+func writeDataFileBatches(w FileWriter, batches []arrow.RecordBatch) (iceberg.DataFile, error) {
 	for _, batch := range batches {
 		if err := w.Write(batch); err != nil {
-			w.Close()
+			if abortErr := w.Abort(); abortErr != nil {
+				return nil, errors.Join(err, abortErr)
+			}
 
 			return nil, err
 		}
@@ -330,6 +338,7 @@ type ParquetFileWriter struct {
 	pqWriter   *pqarrow.FileWriter
 	counter    *internal.CountingWriter
 	fileCloser io.Closer
+	fs         iceio.WriteFileIO
 	format     parquetFormat
 	info       WriteFileInfo
 	partition  map[int]any
@@ -370,6 +379,7 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 		pqWriter:   writer,
 		counter:    counter,
 		fileCloser: fw,
+		fs:         fs,
 		format:     p,
 		info:       info,
 		partition:  partitionValues,
@@ -417,7 +427,13 @@ func (w *ParquetFileWriter) Close() (_ iceberg.DataFile, err error) {
 }
 
 func (w *ParquetFileWriter) Abort() error {
-	return w.fileCloser.Close()
+	closeErr := w.fileCloser.Close()
+	removeErr := w.fs.Remove(w.info.FileName)
+	if errors.Is(removeErr, fs.ErrNotExist) || os.IsNotExist(removeErr) {
+		removeErr = nil
+	}
+
+	return errors.Join(closeErr, removeErr)
 }
 
 type decAsIntAgg[T int32 | int64] struct {

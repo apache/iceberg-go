@@ -695,8 +695,9 @@ func (c convertToArrow) VisitGeography(g iceberg.GeographyType) arrow.Field {
 		panic(err)
 	}
 
-	// Always add an edge to differentiate between Geography and Geometry arrow fields.
-	// Note that the edge convention is a best-effort hint and planar geography from other clients won't round-trip through Arrow alone.
+	// Always write an edge algorithm so iceberg-go-authored Arrow metadata can
+	// distinguish Geography from Geometry on round trip. Arrow-only reads from
+	// clients that omit edges for geography are lossy.
 	meta.Edges = geoarrow.EdgeInterpolation(g.Algorithm())
 
 	if c.useLargeTypes {
@@ -1190,8 +1191,26 @@ func (a *arrowProjectionVisitor) Primitive(_ iceberg.PrimitiveType, arr arrow.Ar
 	return arr
 }
 
+// Variant reassembles a shredded variant back into the unshredded layout so the
+// projected schema matches; without it the scanner fails to assemble the table.
 func (a *arrowProjectionVisitor) Variant(_ iceberg.VariantType, arr arrow.Array) arrow.Array {
-	return arr
+	if arr == nil {
+		return arr
+	}
+	varr, ok := arr.(*extensions.VariantArray)
+	if !ok || !varr.IsShredded() {
+		return arr
+	}
+	// UnshredVariant returns a caller-owned array whose ref is balanced by
+	// castIfNeeded's Retain/Release. This holds only because VariantType is not
+	// an arrow.NestedType; if it were, Struct would also Release and double-free.
+	// The checked-allocator leak tests guard this invariant.
+	out, err := extensions.UnshredVariant(varr, compute.GetAllocator(a.ctx))
+	if err != nil {
+		panic(fmt.Errorf("variant projection: %w", err))
+	}
+
+	return out
 }
 
 // SchemaOptions controls the behaviour of ToRequestedSchema.
@@ -1956,6 +1975,10 @@ func geoArrowMetadataToIcebergType(meta geoarrow.Metadata) (iceberg.Type, error)
 		return nil, err
 	}
 
+	// Missing GeoArrow edges use the planar default, matching arrow-rs
+	// geoarrow.wkb reads. PyIceberg-authored geography files may omit edges,
+	// which is an interop gap: Arrow metadata alone cannot distinguish those
+	// geography columns from Geometry here.
 	switch meta.Edges {
 	case geoarrow.EdgePlanar:
 		return iceberg.GeometryTypeOf(crs)
