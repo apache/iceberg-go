@@ -19,9 +19,10 @@
 package compaction
 
 import (
+	"bytes"
 	"fmt"
 
-	iceberg "github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/table"
 )
@@ -53,10 +54,11 @@ type Config struct {
 	DeleteFileThreshold int
 
 	// DeleteRatioThreshold forces a data file into compaction when the fraction
-	// of its rows shadowed by a deletion vector reaches this value, regardless
-	// of file size. Deletion vectors are 1:1 with their data file and carry an
+	// of its rows shadowed by file-scoped deletes (deletion vectors and
+	// path-scoped positional deletes) reaches this value, regardless of file
+	// size. File-scoped deletes apply to exactly one data file and carry an
 	// exact deleted-row count, so size-based selection alone never reclaims a
-	// right-sized file's DV dead space; this rule does. Range [0,1]; 0 disables
+	// right-sized file's dead space; this rule does. Range [0,1]; 0 disables
 	// it. Default: DefaultDeleteRatioThreshold.
 	DeleteRatioThreshold float64
 
@@ -96,8 +98,9 @@ const (
 	DefaultPackingLookback uint = 128
 
 	// DefaultDeleteRatioThreshold mirrors Java's delete-ratio default: a file
-	// whose deletion vector shadows at least 30% of its rows is rewritten.
-	DefaultDeleteRatioThreshold = 0.3
+	// whose file-scoped deletes (deletion vectors and path-scoped positional
+	// deletes) shadow at least 30% of its rows is rewritten.
+	DefaultDeleteRatioThreshold float64 = 0.3
 )
 
 // DefaultConfig returns a Config with production defaults.
@@ -138,7 +141,7 @@ func (cfg Config) Validate() error {
 		return fmt.Errorf("delete file threshold must be >= 1, got %d", cfg.DeleteFileThreshold)
 	}
 	if cfg.DeleteRatioThreshold < 0 || cfg.DeleteRatioThreshold > 1 {
-		return fmt.Errorf("delete ratio threshold must be in [0,1], got %v", cfg.DeleteRatioThreshold)
+		return fmt.Errorf("delete ratio threshold must be in [0,1], got %g", cfg.DeleteRatioThreshold)
 	}
 
 	return nil
@@ -276,6 +279,13 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 // isCandidate returns true if a file should be considered for compaction.
 func (cfg Config) isCandidate(t table.FileScanTask) bool {
 	size := t.File.FileSizeBytes()
+
+	// Deletion vectors are counted here alongside positional and equality
+	// delete files, matching Java's unified task.deletes() count. A data file
+	// has at most one DV, so at the minimum DeleteFileThreshold of 1 a single
+	// DV trips this rule before the ratio rule below runs; at the default of 5
+	// it does not. The ratio rule still owns right-sized DV-backed files at any
+	// threshold above 1.
 	deleteCount := len(t.DeleteFiles) + len(t.EqualityDeleteFiles) + len(t.DeletionVectorFiles)
 
 	// Too many delete files — always compact regardless of size.
@@ -286,16 +296,13 @@ func (cfg Config) isCandidate(t table.FileScanTask) bool {
 	// Enough rows shadowed by file-scoped deletes — compact to reclaim the dead
 	// space. Mirrors Java BinPackRewriteFilePlanner.tooHighDeleteRatio: sum the
 	// record counts of file-scoped deletes (deletion vectors and path-scoped
-	// positional deletes — those carrying a referenced data file), cap at the
-	// data file's record count, and compare the ratio. Equality deletes and
-	// partition-scoped positional deletes are not file-scoped (their counts
-	// cannot be attributed to one data file) and are left to the count rule.
+	// positional deletes — see isFileScoped), cap at the data file's record
+	// count, and compare the ratio. Equality deletes and partition-scoped
+	// positional deletes are not file-scoped (their counts cannot be attributed
+	// to one data file) and are left to the count rule.
 	if cfg.DeleteRatioThreshold > 0 {
 		if records := t.File.Count(); records > 0 {
-			deleted := fileScopedDeletedRows(t)
-			if deleted > records {
-				deleted = records
-			}
+			deleted := min(fileScopedDeletedRows(t), records)
 			if float64(deleted)/float64(records) >= cfg.DeleteRatioThreshold {
 				return true
 			}
@@ -337,9 +344,29 @@ func fileScopedDeletedRows(t table.FileScanTask) int64 {
 }
 
 // isFileScoped reports whether a delete file applies to exactly one data file.
-// Mirrors Java ContentFileUtil.isFileScoped: deletion vectors and path-scoped
-// positional deletes carry a referenced data file; partition-scoped positional
-// deletes and equality deletes do not.
+// Mirrors Java ContentFileUtil.isFileScoped/referencedDataFile: a deletion
+// vector or path-scoped positional delete carries a referenced data file
+// either explicitly or, when referenced_data_file is absent (it is optional in
+// V2 and our own scan planning never sets it — see matchDeletesToData), through
+// equal file_path lower/upper bounds. Equality deletes and partition-scoped
+// positional deletes are not file-scoped.
 func isFileScoped(d iceberg.DataFile) bool {
-	return d.ReferencedDataFile() != nil
+	if d.ContentType() == iceberg.EntryContentEqDeletes {
+		return false
+	}
+	if d.ReferencedDataFile() != nil {
+		return true
+	}
+	lower := d.LowerBoundValues()[filePathFieldID]
+	upper := d.UpperBoundValues()[filePathFieldID]
+
+	return len(lower) > 0 && bytes.Equal(lower, upper)
 }
+
+// filePathFieldID is the reserved field ID of the file_path column in a
+// positional delete file, sourced from the canonical delete schema.
+var filePathFieldID = func() int {
+	f, _ := iceberg.PositionalDeleteSchema.FindFieldByName("file_path")
+
+	return f.ID
+}()

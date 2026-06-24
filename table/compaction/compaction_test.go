@@ -31,13 +31,15 @@ import (
 
 // testDataFile implements iceberg.DataFile for testing.
 type testDataFile struct {
-	path       string
-	size       int64
-	records    int64
-	partition  map[int]any
-	specID     int32
-	content    iceberg.ManifestEntryContent
-	referenced *string
+	path        string
+	size        int64
+	records     int64
+	partition   map[int]any
+	specID      int32
+	content     iceberg.ManifestEntryContent
+	referenced  *string
+	lowerBounds map[int][]byte
+	upperBounds map[int][]byte
 }
 
 func (f *testDataFile) ContentType() iceberg.ManifestEntryContent { return f.content }
@@ -51,8 +53,8 @@ func (f *testDataFile) ValueCounts() map[int]int64                { return nil }
 func (f *testDataFile) NullValueCounts() map[int]int64            { return nil }
 func (f *testDataFile) NaNValueCounts() map[int]int64             { return nil }
 func (f *testDataFile) DistinctValueCounts() map[int]int64        { return nil }
-func (f *testDataFile) LowerBoundValues() map[int][]byte          { return nil }
-func (f *testDataFile) UpperBoundValues() map[int][]byte          { return nil }
+func (f *testDataFile) LowerBoundValues() map[int][]byte          { return f.lowerBounds }
+func (f *testDataFile) UpperBoundValues() map[int][]byte          { return f.upperBounds }
 func (f *testDataFile) KeyMetadata() []byte                       { return nil }
 func (f *testDataFile) SplitOffsets() []int64                     { return nil }
 func (f *testDataFile) EqualityFieldIDs() []int                   { return nil }
@@ -127,6 +129,36 @@ func makeTaskWithScopedPosDelete(file *testDataFile, deletedRows int64) table.Fi
 	}
 }
 
+// newBoundsScopedDeleteFile builds a path-scoped positional delete that signals
+// file-scope only through equal file_path lower/upper bounds, with no
+// referenced_data_file — mirroring what scan planning (matchDeletesToData)
+// actually produces.
+func newBoundsScopedDeleteFile(path, referenced string, deletedRows int64) *testDataFile {
+	fp, _ := iceberg.PositionalDeleteSchema.FindFieldByName("file_path")
+	bound := []byte(referenced)
+
+	return &testDataFile{
+		path:        path,
+		size:        1024,
+		records:     deletedRows,
+		content:     iceberg.EntryContentPosDeletes,
+		lowerBounds: map[int][]byte{fp.ID: bound},
+		upperBounds: map[int][]byte{fp.ID: bound},
+	}
+}
+
+// makeTaskWithBoundsScopedPosDelete builds a scan task whose data file is
+// shadowed by a positional delete that is file-scoped only via its file_path
+// bounds (referenced_data_file absent).
+func makeTaskWithBoundsScopedPosDelete(file *testDataFile, deletedRows int64) table.FileScanTask {
+	return table.FileScanTask{
+		File:        file,
+		Start:       0,
+		Length:      file.size,
+		DeleteFiles: []iceberg.DataFile{newBoundsScopedDeleteFile(file.path+".pos", file.path, deletedRows)},
+	}
+}
+
 func makeTask(file *testDataFile, numPosDeletes, numEqDeletes int) table.FileScanTask {
 	task := table.FileScanTask{
 		File:   file,
@@ -192,6 +224,11 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "delete ratio above 1",
 			cfg:  compaction.Config{TargetFileSizeBytes: 100, MinFileSizeBytes: 10, MaxFileSizeBytes: 200, MinInputFiles: 1, DeleteFileThreshold: 1, DeleteRatioThreshold: 1.5},
+			err:  "delete ratio threshold must be in [0,1]",
+		},
+		{
+			name: "negative delete ratio",
+			cfg:  compaction.Config{TargetFileSizeBytes: 100, MinFileSizeBytes: 10, MaxFileSizeBytes: 200, MinInputFiles: 1, DeleteFileThreshold: 1, DeleteRatioThreshold: -0.1},
 			err:  "delete ratio threshold must be in [0,1]",
 		},
 		{
@@ -319,7 +356,7 @@ func dvRatioConfig() compaction.Config {
 		MaxFileSizeBytes:     3000 * 1024 * 1024,
 		MinInputFiles:        2,
 		DeleteFileThreshold:  5,
-		DeleteRatioThreshold: 0.3,
+		DeleteRatioThreshold: compaction.DefaultDeleteRatioThreshold,
 		PackingLookback:      compaction.DefaultPackingLookback,
 	}
 }
@@ -377,6 +414,62 @@ func TestPlanCompaction_ScopedPositionalDeleteRatioForcesCompaction(t *testing.T
 	for i := range 5 {
 		f := newDataFile(fmt.Sprintf("rs-%d.parquet", i), 500)
 		tasks = append(tasks, makeTaskWithScopedPosDelete(f, 40))
+	}
+
+	plan, err := cfg.PlanCompaction(tasks)
+	require.NoError(t, err)
+
+	assert.Equal(t, 0, plan.SkippedFiles)
+	totalInGroups := 0
+	for _, g := range plan.Groups {
+		totalInGroups += len(g.Tasks)
+	}
+	assert.Equal(t, 5, totalInGroups)
+}
+
+func TestPlanCompaction_DeletionVectorAtRatioBoundary(t *testing.T) {
+	cfg := dvRatioConfig()
+
+	t.Run("exactly at threshold forces compaction", func(t *testing.T) {
+		// 30 of 100 rows is the default 0.30 ratio exactly: the >= comparison
+		// must treat the boundary as triggering (guards > vs >=).
+		var tasks []table.FileScanTask
+		for i := range 5 {
+			f := newDataFile(fmt.Sprintf("rs-%d.parquet", i), 500)
+			tasks = append(tasks, makeTaskWithDV(f, 30))
+		}
+
+		plan, err := cfg.PlanCompaction(tasks)
+		require.NoError(t, err)
+		assert.Equal(t, 0, plan.SkippedFiles)
+		assert.NotEmpty(t, plan.Groups)
+	})
+
+	t.Run("just below threshold is skipped", func(t *testing.T) {
+		// 29 of 100 rows is 0.29 < 0.30: must not trigger.
+		var tasks []table.FileScanTask
+		for i := range 5 {
+			f := newDataFile(fmt.Sprintf("rs-%d.parquet", i), 500)
+			tasks = append(tasks, makeTaskWithDV(f, 29))
+		}
+
+		plan, err := cfg.PlanCompaction(tasks)
+		require.NoError(t, err)
+		assert.Equal(t, 5, plan.SkippedFiles)
+		assert.Empty(t, plan.Groups)
+	})
+}
+
+func TestPlanCompaction_BoundsScopedPositionalDeleteRatioForcesCompaction(t *testing.T) {
+	cfg := dvRatioConfig()
+
+	// Positional deletes that signal file-scope only through equal file_path
+	// bounds (no referenced_data_file) — what scan planning actually emits —
+	// must still count toward the ratio via the bounds fallback in isFileScoped.
+	var tasks []table.FileScanTask
+	for i := range 5 {
+		f := newDataFile(fmt.Sprintf("rs-%d.parquet", i), 500)
+		tasks = append(tasks, makeTaskWithBoundsScopedPosDelete(f, 40))
 	}
 
 	plan, err := cfg.PlanCompaction(tasks)
