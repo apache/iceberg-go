@@ -303,14 +303,21 @@ func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile,
 			go func() {
 				for range results {
 				}
-				for range errch {
+				if errch != nil {
+					for range errch {
+					}
 				}
 			}()
 		}()
 
 		for {
 			select {
-			case err := <-errch:
+			case err, ok := <-errch:
+				if !ok {
+					errch = nil
+
+					continue
+				}
 				if err != nil {
 					yield(nil, err)
 
