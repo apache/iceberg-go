@@ -95,12 +95,58 @@ func TestEncodeFileScanTaskRejectsMismatchedDeleteFileSpec(t *testing.T) {
 	}
 	_, err := codec.EncodeFileScanTask(task, specMain, schema, 2)
 	require.Error(t, err)
+	require.Contains(t, err.Error(), "codec: EncodeFileScanTask:",
+		"propagated error must carry the codec function marker")
 	require.Contains(t, err.Error(), "spec id",
 		"error must call out the spec-id mismatch")
-	require.Contains(t, err.Error(), "99",
+	require.Contains(t, err.Error(), "data file spec id 99",
 		"error must include the offending delete file's spec id")
-	require.Contains(t, err.Error(), "7",
+	require.Contains(t, err.Error(), "codec spec id 7",
 		"error must include the codec's spec id")
+}
+
+func TestEncodeFileScanTaskRejectsMismatchedPrimaryDataFileSpec(t *testing.T) {
+	schema := iceberg.NewSchema(123,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+	)
+	specMain := iceberg.NewPartitionSpecID(7,
+		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "id_part", Transform: iceberg.IdentityTransform{}},
+	)
+	specOther := iceberg.NewPartitionSpecID(99,
+		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "id_part", Transform: iceberg.IdentityTransform{}},
+	)
+
+	// Primary data file written under a different spec than the codec spec.
+	// Without the guard, EncodeDataFile would encode its partition data against
+	// the wrong spec and silently return a corrupt blob.
+	mismatchedMain := newScanTaskDataFile(t, specOther, "s3://bucket/main.parquet",
+		iceberg.EntryContentData, iceberg.ParquetFile, "", 2)
+
+	task := table.FileScanTask{File: mismatchedMain}
+	_, err := codec.EncodeFileScanTask(task, specMain, schema, 2)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "codec: EncodeFileScanTask:",
+		"error must carry the codec function marker")
+	require.Contains(t, err.Error(), "spec id",
+		"error must call out the spec-id mismatch")
+	require.Contains(t, err.Error(), "data file spec id 99",
+		"error must include the offending data file's spec id")
+	require.Contains(t, err.Error(), "codec spec id 7",
+		"error must include the codec's spec id")
+}
+
+func TestDecodeFileScanTaskErrorCarriesMarker(t *testing.T) {
+	schema := iceberg.NewSchema(123,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+	)
+	spec := iceberg.NewPartitionSpecID(7,
+		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "id_part", Transform: iceberg.IdentityTransform{}},
+	)
+
+	_, err := codec.DecodeFileScanTask([]byte("not a valid envelope"), spec, schema, 2)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "codec: DecodeFileScanTask:",
+		"decode error must carry the codec function marker")
 }
 
 func TestEncodeFileScanTaskEmptyDeleteLists(t *testing.T) {
