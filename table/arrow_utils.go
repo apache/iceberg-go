@@ -1191,8 +1191,26 @@ func (a *arrowProjectionVisitor) Primitive(_ iceberg.PrimitiveType, arr arrow.Ar
 	return arr
 }
 
+// Variant reassembles a shredded variant back into the unshredded layout so the
+// projected schema matches; without it the scanner fails to assemble the table.
 func (a *arrowProjectionVisitor) Variant(_ iceberg.VariantType, arr arrow.Array) arrow.Array {
-	return arr
+	if arr == nil {
+		return arr
+	}
+	varr, ok := arr.(*extensions.VariantArray)
+	if !ok || !varr.IsShredded() {
+		return arr
+	}
+	// UnshredVariant returns a caller-owned array whose ref is balanced by
+	// castIfNeeded's Retain/Release. This holds only because VariantType is not
+	// an arrow.NestedType; if it were, Struct would also Release and double-free.
+	// The checked-allocator leak tests guard this invariant.
+	out, err := extensions.UnshredVariant(varr, compute.GetAllocator(a.ctx))
+	if err != nil {
+		panic(fmt.Errorf("variant projection: %w", err))
+	}
+
+	return out
 }
 
 // SchemaOptions controls the behaviour of ToRequestedSchema.

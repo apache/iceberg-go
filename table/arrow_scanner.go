@@ -108,12 +108,12 @@ func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, 
 				if deletes == nil {
 					return nil
 				}
-				select {
-				case perFileChan <- deletes:
-					return nil
-				case <-gctx.Done():
-					return gctx.Err()
-				}
+				// Safe even after gctx cancellation: the channel buffer equals
+				// g's concurrency limit, so every in-flight worker can send
+				// without blocking while the for-range below drains to close.
+				perFileChan <- deletes
+
+				return nil
 			})
 		}
 		_ = g.Wait()
@@ -126,7 +126,7 @@ func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, 
 	}
 
 	if err := g.Wait(); err != nil {
-		return nil, err
+		return deletesPerFile, err
 	}
 
 	return deletesPerFile, nil
@@ -702,9 +702,11 @@ func (as *arrowScan) processRecords(
 		recRdr        array.RecordReader
 	)
 
-	// Row-group pruning skips whole groups, so emitted positions stop being
-	// contiguous. Position-keyed steps (row-lineage _row_id) need every group
-	// read; the per-row filter still enforces the predicate.
+	// Row-group stats/bloom pruning skips whole groups, so emitted batches no
+	// longer cover contiguous file positions. Steps that key on the original
+	// position (row-lineage _row_id, generated position deletes) need the full
+	// sequence, so the per-row filter alone enforces the predicate while every
+	// group is still read.
 	switch {
 	case task.Value.File.FileFormat() == iceberg.ParquetFile && !skipRowGroupPruning:
 		statsFn, err := newParquetRowGroupStatsEvaluator(fileSchema, as.boundRowFilter, false)
@@ -946,7 +948,9 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task interna
 		return ToRequestedSchema(ctx, iceberg.PositionalDeleteSchema, enrichedIcebergSchema, r, SchemaOptions{IncludeFieldIDs: true, UseLargeTypes: as.useLargeTypes})
 	})
 
-	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, false, out)
+	// enrichRecordsWithPosDeleteFields stamps positions by counting emitted
+	// rows, so the reader must not prune row groups out from under it.
+	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, true, out)
 
 	return err
 }
@@ -1136,6 +1140,8 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 	// no intermediate position set.
 	dvBitmaps, err := readAllDeletionVectors(ctx, as.fs, tasks, as.concurrency)
 	if err != nil {
+		releasePerFilePosDeletes(deletesPerFile)
+
 		return nil, nil, err
 	}
 
