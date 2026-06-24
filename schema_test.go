@@ -40,7 +40,11 @@ import (
 //	    Types.NestedField.required(1, "id", Types.LongType.get()),
 //	    Types.NestedField.optional(2, "geom", Types.GeometryType.of("srid:3857")),
 //	    Types.NestedField.optional(3, "geog",
-//	        Types.GeographyType.of("srid:4269", EdgeAlgorithm.KARNEY))))
+//	        Types.GeographyType.of("srid:4269", EdgeAlgorithm.KARNEY)),
+//	    Types.NestedField.optional(4, "geog_default_algo",
+//	        Types.GeographyType.of("srid:4269")),
+//	    Types.NestedField.optional(5, "geog_default_crs",
+//	        Types.GeographyType.of("OGC:CRS84", EdgeAlgorithm.KARNEY))))
 //
 // Java and Go write object keys in different orders, so the fixture test pins
 // the raw JSON string literals for field types instead of whole-object bytes.
@@ -1210,6 +1214,8 @@ func TestSchemaGeoTypeStringWireFormatFixture(t *testing.T) {
 	require.Equal(t, fixtureTypes, freshTypes)
 	assert.Equal(t, `"geometry(srid:3857)"`, freshTypes["geom"])
 	assert.Equal(t, `"geography(srid:4269, karney)"`, freshTypes["geog"])
+	assert.Equal(t, `"geography(srid:4269)"`, freshTypes["geog_default_algo"])
+	assert.Equal(t, `"geography(OGC:CRS84, karney)"`, freshTypes["geog_default_crs"])
 }
 
 func rawTopLevelFieldTypes(t *testing.T, data []byte) map[string]string {
