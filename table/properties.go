@@ -95,10 +95,10 @@ const (
 	MinSnapshotsToKeepDefault = math.MaxInt
 
 	MaxSnapshotAgeMsKey     = "max-snapshot-age-ms"
-	MaxSnapshotAgeMsDefault = math.MaxInt
+	MaxSnapshotAgeMsDefault = int64(math.MaxInt64)
 
 	MaxRefAgeMsKey     = "max-ref-age-ms"
-	MaxRefAgeMsDefault = math.MaxInt
+	MaxRefAgeMsDefault = int64(math.MaxInt64)
 
 	// CommitNumRetriesKey is the number of commit retry attempts before
 	// giving up on ErrCommitFailed from the catalog.
