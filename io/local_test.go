@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -85,6 +86,33 @@ func TestLocalFSWalkDirWithFileScheme(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, []string{filepath.Join(dir, "test.txt")}, files)
+}
+
+func TestLocalFSWriteFileCreatesParentDirectories(t *testing.T) {
+	dir := t.TempDir()
+	content := []byte("content")
+
+	for _, tt := range []struct {
+		name string
+		path string
+	}{
+		{
+			name: "plain path",
+			path: filepath.Join(dir, "plain", "nested", "file.txt"),
+		},
+		{
+			name: "file scheme",
+			path: "file://" + filepath.Join(dir, "scheme", "nested", "file.txt"),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoError(t, LocalFS{}.WriteFile(tt.path, content))
+
+			got, err := os.ReadFile(strings.TrimPrefix(tt.path, "file://"))
+			require.NoError(t, err)
+			assert.Equal(t, content, got)
+		})
+	}
 }
 
 func TestLocalFSImplementsListableIO(t *testing.T) {
