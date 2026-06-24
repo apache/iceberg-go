@@ -488,7 +488,20 @@ func TestGluePurgeTableSwallowsPurgeFilesError(t *testing.T) {
 	assert := require.New(t)
 	ctx := context.Background()
 	const scheme = "gluepurgefail"
-	failingFS := failRemoveIO{MemFS: iceio.NewMemFS(), err: errGluePurgeRemove}
+	dropCalled := false
+	removeBeforeDrop := false
+	removeCalls := 0
+	failingFS := failRemoveIO{
+		MemFS: iceio.NewMemFS(),
+		err:   errGluePurgeRemove,
+		onRemove: func() {
+			removeCalls++
+			if !dropCalled {
+				removeBeforeDrop = true
+			}
+		},
+	}
+	iceio.Unregister(scheme)
 	iceio.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
 		return failingFS, nil
 	})
@@ -497,8 +510,51 @@ func TestGluePurgeTableSwallowsPurgeFilesError(t *testing.T) {
 	tableLocation := scheme + "://bucket/test_database/test_table"
 	metadataLocation := tableLocation + "/metadata/v1.metadata.json"
 	dataFile := tableLocation + "/data/file.parquet"
-	writeGluePurgeTableMetadata(t, failingFS, tableLocation, metadataLocation)
-	require.NoError(t, failingFS.WriteFile(dataFile, []byte("data")))
+	writeGluePurgeTableMetadata(t, failingFS, tableLocation, metadataLocation, nil)
+	assert.NoError(failingFS.WriteFile(dataFile, []byte("data")))
+	glueTable := gluePurgeTable(metadataLocation)
+
+	mockGlueSvc := &mockGlueClient{}
+	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything).Return(&glue.GetTableOutput{Table: &glueTable}, nil).Twice()
+	mockGlueSvc.On("DeleteTable", mock.Anything, &glue.DeleteTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything).Run(func(mock.Arguments) {
+		dropCalled = true
+	}).Return(&glue.DeleteTableOutput{}, nil).Once()
+
+	var logs bytes.Buffer
+	originalLogOutput := log.Writer()
+	// This test redirects the process-global logger, so keep it non-parallel.
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(originalLogOutput) })
+
+	glueCatalog := &Catalog{glueSvc: mockGlueSvc}
+
+	assert.NoError(glueCatalog.PurgeTable(ctx, TableIdentifier("test_database", "test_table")))
+	assert.True(dropCalled)
+	assert.Positive(removeCalls)
+	assert.False(removeBeforeDrop, "PurgeTable should drop the catalog entry before removing files")
+	assert.Contains(logs.String(), "WARNING: dropped table")
+	assert.Contains(logs.String(), "test_database")
+	assert.Contains(logs.String(), "test_table")
+	assert.Contains(logs.String(), errGluePurgeRemove.Error())
+	file, err := failingFS.Open(dataFile)
+	assert.NoError(err, "data file should remain when FileIO remove fails")
+	assert.NotNil(file)
+	assert.NoError(file.Close())
+	mockGlueSvc.AssertExpectations(t)
+}
+
+func TestGluePurgeTableWithGCDisabled(t *testing.T) {
+	assert := require.New(t)
+	ctx := context.Background()
+	tableLocation := filepath.Join(t.TempDir(), "warehouse", "test_database", "test_table")
+	metadataLocation, dataFile := writeGluePurgeTableFilesWithProperties(
+		t, tableLocation, iceberg.Properties{"gc.enabled": "false"})
 	glueTable := gluePurgeTable(metadataLocation)
 
 	mockGlueSvc := &mockGlueClient{}
@@ -511,28 +567,25 @@ func TestGluePurgeTableSwallowsPurgeFilesError(t *testing.T) {
 		Name:         aws.String("test_table"),
 	}, mock.Anything).Return(&glue.DeleteTableOutput{}, nil).Once()
 
-	var logs bytes.Buffer
-	originalLogOutput := log.Writer()
-	log.SetOutput(&logs)
-	t.Cleanup(func() { log.SetOutput(originalLogOutput) })
-
 	glueCatalog := &Catalog{glueSvc: mockGlueSvc}
 
 	assert.NoError(glueCatalog.PurgeTable(ctx, TableIdentifier("test_database", "test_table")))
-	assert.Contains(logs.String(), "failed to purge files")
-	assert.Contains(logs.String(), errGluePurgeRemove.Error())
-	file, err := failingFS.Open(dataFile)
-	assert.NoError(err, "data file should remain when FileIO remove fails")
-	assert.NoError(file.Close())
+	assert.NoFileExists(metadataLocation)
+	assert.FileExists(dataFile)
 	mockGlueSvc.AssertExpectations(t)
 }
 
 type failRemoveIO struct {
 	*iceio.MemFS
-	err error
+	err      error
+	onRemove func()
 }
 
 func (f failRemoveIO) Remove(string) error {
+	if f.onRemove != nil {
+		f.onRemove()
+	}
+
 	return f.err
 }
 
@@ -549,22 +602,36 @@ func gluePurgeTable(metadataLocation string) types.Table {
 }
 
 func writeGluePurgeTableFiles(t *testing.T, tableLocation string) (metadataLocation, dataFile string) {
+	return writeGluePurgeTableFilesWithProperties(t, tableLocation, nil)
+}
+
+func writeGluePurgeTableFilesWithProperties(
+	t *testing.T,
+	tableLocation string,
+	props iceberg.Properties,
+) (metadataLocation, dataFile string) {
 	t.Helper()
 	metadataLocation = filepath.Join(tableLocation, "metadata", "v1.metadata.json")
 	dataFile = filepath.Join(tableLocation, "data", "file.parquet")
-	writeGluePurgeTableMetadata(t, iceio.LocalFS{}, tableLocation, metadataLocation)
+	writeGluePurgeTableMetadata(t, iceio.LocalFS{}, tableLocation, metadataLocation, props)
 	require.NoError(t, os.MkdirAll(filepath.Dir(dataFile), 0o755))
 	require.NoError(t, os.WriteFile(dataFile, []byte("data"), 0o644))
 
 	return metadataLocation, dataFile
 }
 
-func writeGluePurgeTableMetadata(t *testing.T, fs iceio.WriteFileIO, tableLocation, metadataLocation string) {
+func writeGluePurgeTableMetadata(
+	t *testing.T,
+	fs iceio.WriteFileIO,
+	tableLocation,
+	metadataLocation string,
+	props iceberg.Properties,
+) {
 	t.Helper()
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: true,
 	})
-	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, tableLocation, nil)
+	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, tableLocation, props)
 	require.NoError(t, err)
 	require.NoError(t, cataloginternal.WriteTableMetadata(meta, fs, metadataLocation, table.MetadataCompressionCodecNone))
 }
