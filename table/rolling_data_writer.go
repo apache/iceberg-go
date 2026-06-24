@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"maps"
@@ -34,6 +35,10 @@ import (
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 )
+
+// ErrWriterClosed is returned when records are added to a writer after its
+// streaming goroutine has already stopped.
+var ErrWriterClosed = errors.New("writer is closed")
 
 // writerFactory manages the creation and lifecycle of RollingDataWriter instances
 // for different partitions, providing shared configuration and coordination
@@ -306,8 +311,11 @@ func (r *RollingDataWriter) Add(record arrow.RecordBatch) error {
 	select {
 	case r.recordCh <- record:
 		return nil
-	case err := <-r.errorCh:
+	case err, ok := <-r.errorCh:
 		record.Release()
+		if !ok {
+			return ErrWriterClosed
+		}
 
 		return err
 	case <-r.ctx.Done():
@@ -320,6 +328,7 @@ func (r *RollingDataWriter) Add(record arrow.RecordBatch) error {
 func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 	defer r.wg.Done()
 	defer close(r.errorCh)
+	defer r.factory.writers.CompareAndDelete(r.partitionKey, r)
 
 	var currentWriter tblutils.FileWriter
 	defer func() {

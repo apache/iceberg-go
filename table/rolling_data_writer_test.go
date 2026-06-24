@@ -375,6 +375,61 @@ func (s *RollingDataWriterTestSuite) TestStreamErrorPathUsesAbort() {
 	s.Empty(files, "deferred abort should remove the incomplete file")
 }
 
+func (s *RollingDataWriterTestSuite) TestAddReturnsErrorAfterStreamStopsCleanly() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	record := s.buildRecord(arrSchema, 1)
+	defer record.Release()
+
+	errorCh := make(chan error)
+	close(errorCh)
+
+	writer := &RollingDataWriter{
+		recordCh: make(chan arrow.RecordBatch),
+		errorCh:  errorCh,
+		ctx:      s.ctx,
+	}
+
+	s.ErrorIs(writer.Add(record), ErrWriterClosed)
+}
+
+func (s *RollingDataWriterTestSuite) TestStreamErrorRemovesWriterFromFactory() {
+	writerSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	loc := filepath.ToSlash(s.T().TempDir())
+	factory, _ := s.createWriterFactory(loc, writerSchema, 1024*1024)
+	defer factory.closeAll()
+
+	outputCh := make(chan iceberg.DataFile, 10)
+	writer, err := factory.getOrCreateRollingDataWriter(s.ctx, "", nil, outputCh)
+	s.Require().NoError(err)
+
+	badSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "x", Type: arrow.PrimitiveTypes.Float64, Nullable: true},
+	}, nil)
+	bldr := array.NewRecordBuilder(s.mem, badSchema)
+	bldr.Field(0).(*array.Float64Builder).Append(1.0)
+	badRecord := bldr.NewRecordBatch()
+	bldr.Release()
+	defer badRecord.Release()
+
+	s.Require().NoError(writer.Add(badRecord))
+	writer.wg.Wait()
+
+	_, ok := factory.writers.Load("")
+	s.False(ok, "failed writer should be removed from partition writer cache")
+
+	err, ok = <-writer.errorCh
+	s.True(ok)
+	s.Error(err)
+}
+
 func (s *RollingDataWriterTestSuite) TestBytesWrittenReflectsCompressedSize() {
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
