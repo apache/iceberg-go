@@ -90,3 +90,24 @@ func TestLocalFSWalkDirWithFileScheme(t *testing.T) {
 func TestLocalFSImplementsListableIO(t *testing.T) {
 	var _ ListableIO = LocalFS{}
 }
+
+func TestLocalFSRenameNoReplaceDoesNotOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	dst := filepath.Join(dir, "dst")
+
+	require.NoError(t, os.WriteFile(src, []byte("new"), 0o644))
+	require.NoError(t, os.WriteFile(dst, []byte("old"), 0o644))
+
+	err := LocalFS{}.RenameNoReplace(src, dst)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, fs.ErrExist)
+
+	data, err := os.ReadFile(dst)
+	require.NoError(t, err)
+	assert.Equal(t, "old", string(data))
+
+	data, err = os.ReadFile(src)
+	require.NoError(t, err)
+	assert.Equal(t, "new", string(data))
+}

@@ -31,6 +31,7 @@ type HadoopCatalogFS interface {
 	icebergio.WriteFileIO
 	StatIO
 	RenameIO
+	RenameNoReplaceIO
 	RemoveAllIO
 	MkdirAllIO
 }
@@ -54,6 +55,16 @@ type RenameIO interface {
 	icebergio.IO
 
 	Rename(oldpath, newpath string) error
+}
+
+// RenameNoReplaceIO is an extension of IO interface that includes the
+// RenameNoReplace method for atomically moving files only when the destination
+// path does not already exist. Implementations may require oldpath and newpath
+// to live on the same filesystem.
+type RenameNoReplaceIO interface {
+	icebergio.IO
+
+	RenameNoReplace(oldpath, newpath string) error
 }
 
 // RemoveAllIO is an extension of IO interface that includes the RemoveAll
