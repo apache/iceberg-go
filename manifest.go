@@ -710,8 +710,14 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 	// Avro encoding used to write them.
 	applyDayTransformDates(metadata["partition-spec"], fieldIDToType)
 
-	inheritRowIDs := formatVersion >= 3 &&
-		content == ManifestContentData &&
+	// A non-nil manifest-list first_row_id is the spec's inheritance signal and
+	// is only assigned by a v3+ manifest-list writer, so it — not the manifest
+	// file's own internal format-version — gates inheritance. A v1- or v2-era
+	// manifest carried into an upgraded v3 table keeps its older format-version
+	// internally but is assigned a first_row_id when written into the v3 list; its
+	// data files must still inherit row IDs (spec: First Row ID Inheritance, "even
+	// if the data file is existing"), otherwise compaction drops their lineage.
+	inheritRowIDs := content == ManifestContentData &&
 		file.FirstRowID() != nil
 	var nextFirstRowID int64
 	if inheritRowIDs {
@@ -824,14 +830,17 @@ func (c *ManifestReader) ReadEntry() (ManifestEntry, error) {
 		tmp = tmp.(*fallbackManifestEntry).toEntry()
 	}
 	tmp.inherit(c.file)
-	// Apply first_row_id inheritance for v3 data manifests (spec: First Row ID Inheritance).
-	if c.inheritRowIDs {
-		if df, ok := tmp.DataFile().(*dataFile); ok {
-			if df.FirstRowIDField == nil {
-				id := c.nextFirstRowID
-				df.FirstRowIDField = &id
-			}
-			// Advance for every data file, null or explicit, to match Java semantics.
+	// First Row ID Inheritance (spec): assign the manifest's first_row_id to data
+	// files that lack one, advancing by record_count only on the files actually
+	// assigned. Deleted entries consume no row IDs and are skipped — the
+	// manifest-list writer reserves a manifest's id range as added+existing rows
+	// (excludes deleted), so the read side must match or a live file following a
+	// deleted one over-advances into the next manifest's range. Mirrors Java
+	// ManifestReader.idAssigner (status != DELETED, increment inside the null check).
+	if c.inheritRowIDs && tmp.Status() != EntryStatusDELETED {
+		if df, ok := tmp.DataFile().(*dataFile); ok && df.FirstRowIDField == nil {
+			id := c.nextFirstRowID
+			df.FirstRowIDField = &id
 			c.nextFirstRowID += df.Count()
 		}
 	}
