@@ -250,6 +250,14 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 
 			h := s.newHash()
 			if _, err = io.Copy(h, rdr); err != nil {
+				if closeErr := rdr.Close(); closeErr != nil {
+					err = errors.Join(err, closeErr)
+				}
+
+				return nil, err
+			}
+
+			if err = rdr.Close(); err != nil {
 				return nil, err
 			}
 

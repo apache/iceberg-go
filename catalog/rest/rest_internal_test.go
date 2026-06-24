@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/stretchr/testify/assert"
@@ -604,6 +605,103 @@ func TestSigv4ContentSha256Header(t *testing.T) {
 
 		assert.Equal(t, expectedHashStr, capturedHeader, "header should contain correct hash of request body")
 	})
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+type closeTrackingReadCloser struct {
+	*bytes.Reader
+	closeErr error
+	closed   bool
+}
+
+func (r *closeTrackingReadCloser) Close() error {
+	r.closed = true
+
+	return r.closeErr
+}
+
+func newSigV4TestTransport(rt http.RoundTripper) *sessionTransport {
+	return &sessionTransport{
+		RoundTripper: rt,
+		signer:       v4.NewSigner(),
+		cfg: aws.Config{
+			Region: "us-east-1",
+			Credentials: credentials.StaticCredentialsProvider{
+				Value: aws.Credentials{
+					AccessKeyID:     "test-access-key",
+					SecretAccessKey: "test-secret-key",
+				},
+			},
+		},
+		service: "s3",
+		newHash: sha256.New,
+	}
+}
+
+func TestSigv4ClosesClonedRequestBody(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"test": "data"}`)
+	var clonedBody *closeTrackingReadCloser
+
+	transport := newSigV4TestTransport(roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewReader(nil)),
+			Header:     make(http.Header),
+		}, nil
+	}))
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		"https://example.com/test", bytes.NewReader(body))
+	require.NoError(t, err)
+	req.GetBody = func() (io.ReadCloser, error) {
+		clonedBody = &closeTrackingReadCloser{Reader: bytes.NewReader(body)}
+
+		return clonedBody, nil
+	}
+
+	resp, err := transport.RoundTrip(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.NotNil(t, clonedBody)
+	assert.True(t, clonedBody.closed)
+}
+
+func TestSigv4ReturnsClonedRequestBodyCloseError(t *testing.T) {
+	t.Parallel()
+
+	closeErr := errors.New("close failed")
+	body := []byte(`{"test": "data"}`)
+	var clonedBody *closeTrackingReadCloser
+
+	transport := newSigV4TestTransport(roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		t.Fatal("request should not be sent when the signing body clone fails to close")
+
+		return nil, nil
+	}))
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		"https://example.com/test", bytes.NewReader(body))
+	require.NoError(t, err)
+	req.GetBody = func() (io.ReadCloser, error) {
+		clonedBody = &closeTrackingReadCloser{
+			Reader:   bytes.NewReader(body),
+			closeErr: closeErr,
+		}
+
+		return clonedBody, nil
+	}
+
+	_, err = transport.RoundTrip(req)
+	require.ErrorIs(t, err, closeErr)
+	require.NotNil(t, clonedBody)
+	assert.True(t, clonedBody.closed)
 }
 
 func TestSigv4ConcurrentSigners(t *testing.T) {
