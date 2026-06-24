@@ -166,6 +166,11 @@ type OrphanCleanupResult struct {
 	TotalSizeBytes int64
 }
 
+// DeleteOrphanFiles identifies files under a table location that are no longer
+// referenced by table metadata and deletes them unless dry-run is enabled.
+//
+// The table filesystem must implement iceio.ListableIO so orphan cleanup can
+// fully enumerate candidate files before deciding what is safe to delete.
 func (t Table) DeleteOrphanFiles(ctx context.Context, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := &orphanCleanupConfig{
 		location:           "",             // empty means use table's data location
@@ -422,7 +427,7 @@ func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.F
 		})
 	}
 
-	return fmt.Errorf("filesystem %T does not implement io.ListableIO", fsys)
+	return fmt.Errorf("filesystem %T does not implement iceio.ListableIO", fsys)
 }
 
 func isFileOrphan(file string, referencedFiles map[string]bool, normalizedReferencedFiles map[string]string, cfg *orphanCleanupConfig) (bool, error) {
