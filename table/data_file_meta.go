@@ -89,9 +89,8 @@ type DataFileArgs struct {
 	EqualityFieldIDs []int
 
 	// FirstRowID is the _row_id assigned to the first row of the data file.
-	// Required when the target table uses format version 3 or later and
-	// Content == [iceberg.EntryContentData]; ignored for v1/v2 tables
-	// or delete files.
+	//  Set it for v3 data files; it is not required on v1/v2 tables, and 
+	// first_row_id does not apply to delete files.
 	FirstRowID *int64
 }
 
@@ -127,10 +126,14 @@ func DataFileFromMetadata(args DataFileArgs) (df iceberg.DataFile, err error) {
 	if args.Metadata == nil {
 		return nil, errors.New("file metadata is required")
 	}
-	if _, ok := args.Metadata.(*metadata.FileMetaData); !ok {
+	pqMeta, ok := args.Metadata.(*metadata.FileMetaData)
+	if !ok {
 		return nil, fmt.Errorf(
 			"unsupported metadata type: expected *metadata.FileMetaData, got %T",
 			args.Metadata)
+	}
+	if pqMeta == nil {
+		return nil, errors.New("file metadata is required")
 	}
 	if args.FilePath == "" {
 		return nil, errors.New("file path is required")

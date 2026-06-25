@@ -443,9 +443,16 @@ func TestDataFileFromMetadata_Errors(t *testing.T) {
 		{
 			name: "wrong metadata concrete type",
 			mutate: func(a *table.DataFileArgs) {
-				a.Metadata = "i am not a parquet FileMetaData"
+				a.Metadata = "not a *metadata.FileMetaData"
 			},
 			wantSub: "unsupported metadata type",
+		},
+		{
+			name: "typed-nil metadata pointer",
+			mutate: func(a *table.DataFileArgs) {
+				a.Metadata = (*metadata.FileMetaData)(nil)
+			},
+			wantSub: "file metadata is required",
 		},
 		{
 			name: "unsupported file format",
