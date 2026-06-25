@@ -141,6 +141,7 @@ func Load(ctx context.Context, name string, props iceberg.Properties) (Catalog, 
 			"warehouse":  conf.Warehouse,
 		}
 	} else {
+		props = maps.Clone(props)
 		props["uri"] = props.Get("uri", conf.URI)
 		props["credential"] = props.Get("credential", conf.Credential)
 		props["warehouse"] = props.Get("warehouse", conf.Warehouse)

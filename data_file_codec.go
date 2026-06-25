@@ -256,8 +256,9 @@ func mustNewSchemaCache(size int) *lru.Cache[dataFileSchemaCacheKey, *dataFileSc
 // active partition specs; long-running consumers with larger working
 // sets (e.g. a compaction service touching many tables) should raise
 // it. Existing entries are preserved on grow; on shrink, least-recently
-// used entries are evicted down to the new size. Not safe to call
-// concurrently with codec operations.
+// used entries are evicted down to the new size. Safe to call concurrently
+// with codec operations: the underlying golang-lru/v2 cache serializes Resize
+// against Get/Add through the same mutex.
 func SetSchemaCacheSize(size int) error {
 	if size <= 0 {
 		return fmt.Errorf("iceberg: SetSchemaCacheSize: size must be positive, got %d", size)

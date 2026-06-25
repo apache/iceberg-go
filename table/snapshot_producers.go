@@ -176,7 +176,7 @@ func (of *overwriteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 			path := entry.DataFile().FilePath()
 			content := entry.DataFile().ContentType()
 			_, isDeletedData := of.base.deletedFiles[path]
-			_, isDeletedDelete := of.base.deletedDeleteFiles[path]
+			isDeletedDelete := of.base.deleteFileRemoved(entry.DataFile())
 
 			isData := content == iceberg.EntryContentData
 			matched := (isDeletedData && isData) || (isDeletedDelete && !isData)
@@ -304,7 +304,7 @@ func (of *overwriteFiles) deletedEntries(ctx context.Context) ([]iceberg.Manifes
 			content := entry.DataFile().ContentType()
 
 			_, isDeletedData := of.base.deletedFiles[path]
-			_, isDeletedDelete := of.base.deletedDeleteFiles[path]
+			isDeletedDelete := of.base.deleteFileRemoved(entry.DataFile())
 
 			if (isDeletedData && content == iceberg.EntryContentData) ||
 				(isDeletedDelete && content != iceberg.EntryContentData) {
@@ -523,6 +523,7 @@ type snapshotProducer struct {
 	manifestCount      atomic.Int32
 	deletedFiles       map[string]iceberg.DataFile
 	deletedDeleteFiles map[string]iceberg.DataFile
+	deletedDVsByRef    map[string]iceberg.DataFile
 	snapshotProps      iceberg.Properties
 }
 
@@ -552,6 +553,7 @@ func createSnapshotProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO
 		addedFiles:         []iceberg.DataFile{},
 		deletedFiles:       make(map[string]iceberg.DataFile),
 		deletedDeleteFiles: make(map[string]iceberg.DataFile),
+		deletedDVsByRef:    make(map[string]iceberg.DataFile),
 		snapshotProps:      snapshotProps,
 	}
 }
@@ -586,6 +588,33 @@ func (sp *snapshotProducer) removeDeleteFile(df iceberg.DataFile) *snapshotProdu
 	sp.deletedDeleteFiles[df.FilePath()] = df
 
 	return sp
+}
+
+func (sp *snapshotProducer) removeDeletionVector(df iceberg.DataFile) *snapshotProducer {
+	ref := df.ReferencedDataFile()
+	if ref == nil {
+		return sp
+	}
+	sp.deletedDVsByRef[*ref] = df
+
+	return sp
+}
+
+// deleteFileRemoved reports whether a delete-file entry is being expunged in
+// this snapshot: position/equality deletes match by path, deletion vectors by
+// referenced data file (one Puffin holds blobs for several data files, so a
+// shared path would over-remove live siblings).
+func (sp *snapshotProducer) deleteFileRemoved(df iceberg.DataFile) bool {
+	if _, ok := sp.deletedDeleteFiles[df.FilePath()]; ok {
+		return true
+	}
+	if ref := df.ReferencedDataFile(); isDeletionVector(df) && ref != nil {
+		_, ok := sp.deletedDVsByRef[*ref]
+
+		return ok
+	}
+
+	return false
 }
 
 func (sp *snapshotProducer) newManifestWriter(spec iceberg.PartitionSpec, opts ...iceberg.ManifestWriterOption) (_ *iceberg.ManifestWriter, _ string, _ *internal.CountingWriter, _ io.Closer, err error) {
@@ -725,46 +754,46 @@ func (sp *snapshotProducer) manifests(ctx context.Context) (_ []iceberg.Manifest
 
 func (sp *snapshotProducer) manifestProducer(content iceberg.ManifestContent, files []iceberg.DataFile, output *[]iceberg.ManifestFile) func() (err error) {
 	return func() (err error) {
-		out, path, err := sp.newManifestOutput()
-		if err != nil {
-			return err
-		}
-		defer internal.CheckedClose(out, &err)
-
-		counter := &internal.CountingWriter{W: out}
-		currentSpec, err := sp.txn.meta.CurrentSpec()
-		if err != nil || currentSpec == nil {
-			return fmt.Errorf("could not get current partition spec: %w", err)
-		}
-		wr, err := iceberg.NewManifestWriter(sp.txn.meta.formatVersion, counter,
-			*currentSpec, sp.txn.meta.CurrentSchema(),
-			sp.snapshotID, iceberg.WithManifestWriterContent(content))
-		if err != nil {
-			return err
-		}
-		defer internal.CheckedClose(wr, &err)
-
+		groups := make(map[int][]iceberg.DataFile)
 		for _, df := range files {
-			err := wr.Add(iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &sp.snapshotID,
-				nil, nil, df))
+			specID := int(df.SpecID())
+			groups[specID] = append(groups[specID], df)
+		}
+
+		for specID, files := range groups {
+			mf, err := sp.writeAddedManifest(content, specID, files)
 			if err != nil {
 				return err
 			}
+			*output = append(*output, mf)
 		}
-
-		// close the writer to force a flush and ensure counter.Count is accurate
-		if err := wr.Close(); err != nil {
-			return err
-		}
-
-		mf, err := wr.ToManifestFile(path, counter.Count, iceberg.WithManifestFileContent(content))
-		if err != nil {
-			return err
-		}
-		*output = []iceberg.ManifestFile{mf}
 
 		return nil
 	}
+}
+
+func (sp *snapshotProducer) writeAddedManifest(content iceberg.ManifestContent, specID int, files []iceberg.DataFile) (_ iceberg.ManifestFile, retErr error) {
+	wr, path, counter, out, err := sp.newManifestWriter(sp.spec(specID), iceberg.WithManifestWriterContent(content))
+	if err != nil {
+		return nil, err
+	}
+	defer internal.CheckedClose(out, &retErr)
+	defer internal.CheckedClose(wr, &retErr)
+
+	for _, df := range files {
+		err := wr.Add(iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &sp.snapshotID,
+			nil, nil, df))
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// close the writer to force a flush and ensure counter.Count is accurate
+	if err := wr.Close(); err != nil {
+		return nil, err
+	}
+
+	return wr.ToManifestFile(path, counter.Count, iceberg.WithManifestFileContent(content))
 }
 
 func (sp *snapshotProducer) summary(props iceberg.Properties) (Summary, error) {
@@ -773,18 +802,19 @@ func (sp *snapshotProducer) summary(props iceberg.Properties) (Summary, error) {
 		GetInt(WritePartitionSummaryLimitKey, WritePartitionSummaryLimitDefault)
 	ssc.setPartitionSummaryLimit(partitionSummaryLimit)
 
+	var err error
 	currentSchema := sp.txn.meta.CurrentSchema()
 	partitionSpec, err := sp.txn.meta.CurrentSpec()
 	if err != nil || partitionSpec == nil {
 		return Summary{}, fmt.Errorf("could not get current partition spec: %w", err)
 	}
 	for _, df := range sp.addedFiles {
-		if err = ssc.addFile(df, currentSchema, *partitionSpec); err != nil {
+		if err = ssc.addFile(df, currentSchema, sp.spec(int(df.SpecID()))); err != nil {
 			return Summary{}, err
 		}
 	}
 	for _, df := range sp.addedDeleteFiles {
-		if err = ssc.addFile(df, currentSchema, *partitionSpec); err != nil {
+		if err = ssc.addFile(df, currentSchema, sp.spec(int(df.SpecID()))); err != nil {
 			return Summary{}, err
 		}
 	}
@@ -807,13 +837,25 @@ func (sp *snapshotProducer) summary(props iceberg.Properties) (Summary, error) {
 		}
 	}
 
+	if len(sp.deletedDVsByRef) > 0 {
+		specs := sp.txn.meta.specs
+		for _, df := range sp.deletedDVsByRef {
+			if err = ssc.removeFile(df, currentSchema, specs[df.SpecID()]); err != nil {
+				return Summary{}, err
+			}
+		}
+	}
+
 	var previousSnapshot *Snapshot
 	if sp.parentSnapshotID > 0 {
-		previousSnapshot, _ = sp.txn.meta.SnapshotByID(sp.parentSnapshotID)
+		previousSnapshot, err = sp.txn.meta.SnapshotByID(sp.parentSnapshotID)
+		if err != nil {
+			return Summary{}, fmt.Errorf("summary: lookup parent snapshot %d: %w", sp.parentSnapshotID, err)
+		}
 	}
 
 	var previousSummary iceberg.Properties
-	if previousSnapshot != nil {
+	if previousSnapshot != nil && previousSnapshot.Summary != nil {
 		previousSummary = previousSnapshot.Summary.Properties
 	}
 

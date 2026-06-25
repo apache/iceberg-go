@@ -322,6 +322,45 @@ func (s *SqliteCatalogTestSuite) TestCreationAllTablesExist() {
 	s.confirmTablesExist(sqldb)
 }
 
+func (s *SqliteCatalogTestSuite) TestCatalogNameMatchesLoaderArg() {
+	ctx := context.Background()
+
+	sharedURI := s.catalogUri()
+	props := iceberg.Properties{
+		"uri":             sharedURI,
+		sqlcat.DriverKey:  sqliteshim.ShimName,
+		sqlcat.DialectKey: string(sqlcat.SQLite),
+		"type":            "sql",
+		"warehouse":       "file://" + s.warehouse,
+	}
+
+	const catalogName = "test_catalog"
+	cat, err := catalog.Load(ctx, catalogName, props)
+	s.Require().NoError(err)
+	sqlCat, ok := cat.(*sqlcat.Catalog)
+	s.Require().True(ok, "expected *sqlcat.Catalog")
+	s.Equal(catalogName, sqlCat.Name(), "SQL catalog must surface the name passed to catalog.Load")
+
+	ns := table.Identifier{"test"}
+	s.Require().NoError(sqlCat.CreateNamespace(ctx, ns, iceberg.Properties{"created_by": "iceberg-go"}))
+
+	got, err := sqlCat.ListNamespaces(ctx, table.Identifier{})
+	s.Require().NoError(err)
+	s.Len(got, 1, "the loader-named catalog should see exactly the namespace it just created")
+	s.Contains(got, ns, "iceberg-go must list a namespace it just created under its own catalog name")
+
+	otherCat, err := catalog.Load(ctx, "sql", props)
+	s.Require().NoError(err)
+	otherSQLCat, ok := otherCat.(*sqlcat.Catalog)
+	s.Require().True(ok, "expected *sqlcat.Catalog")
+	s.Equal("sql", otherSQLCat.Name())
+
+	otherNS, err := otherSQLCat.ListNamespaces(ctx, table.Identifier{})
+	s.Require().NoError(err)
+	s.NotContains(otherNS, ns,
+		"a catalog loaded under a different name must not see namespaces written under another catalog_name")
+}
+
 func (s *SqliteCatalogTestSuite) TestDropSQLTablesIdempotency() {
 	sqldb := s.getDB()
 	s.confirmNoTables(sqldb)

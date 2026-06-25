@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"maps"
@@ -34,6 +35,10 @@ import (
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 )
+
+// ErrWriterClosed is returned when records are added to a writer after its
+// streaming goroutine has already stopped.
+var ErrWriterClosed = errors.New("writer is closed")
 
 // writerFactory manages the creation and lifecycle of RollingDataWriter instances
 // for different partitions, providing shared configuration and coordination
@@ -57,7 +62,6 @@ type writerFactory struct {
 	format           tblutils.FileFormat
 	content          iceberg.ManifestEntryContent
 	equalityFieldIDs []int
-	sortOrderID      int
 	sortKeys         []compute.SortKey
 
 	writers               sync.Map
@@ -165,7 +169,6 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		format:         format,
 		nextCount:      nextCount,
 		stopCount:      stopCount,
-		sortOrderID:    meta.defaultSortOrderID,
 	}
 	for _, apply := range opts {
 		apply(f)
@@ -178,8 +181,8 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		return nil, err
 	}
 
-	if f.content == iceberg.EntryContentData && f.sortOrderID != UnsortedSortOrderID {
-		sortOrder, err := meta.GetSortOrderByID(f.sortOrderID)
+	if f.content == iceberg.EntryContentData && meta.defaultSortOrderID != UnsortedSortOrderID {
+		sortOrder, err := meta.GetSortOrderByID(meta.defaultSortOrderID)
 		if err != nil {
 			stopCount()
 
@@ -203,12 +206,9 @@ func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string
 	cnt, _ := w.nextCount()
 	w.countMu.Unlock()
 
-	fileName := WriteTask{
-		Uuid:        *w.writeUUID,
-		ID:          cnt,
-		PartitionID: partitionID,
-		FileCount:   fileCount,
-	}.GenerateDataFileName(strings.ToLower(string(w.fileFormat)))
+	// Names files directly, not via WriteTask: it has no per-task sort claim.
+	fileName := dataFileName(*w.writeUUID, cnt, partitionID, fileCount,
+		strings.ToLower(string(w.fileFormat)))
 
 	var filePath string
 	if partitionPath != "" {
@@ -221,6 +221,7 @@ func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string
 		filePath = w.locProvider.NewDataLocation(fileName)
 	}
 
+	// No SortOrderID: batches are sorted only individually (see resolveSortKeys).
 	return w.format.NewFileWriter(ctx, w.fs, partitionValues, tblutils.WriteFileInfo{
 		FileSchema:       w.fileSchema,
 		FileName:         filePath,
@@ -229,7 +230,6 @@ func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string
 		Spec:             w.currentSpec,
 		Content:          w.content,
 		EqualityFieldIDs: w.equalityFieldIDs,
-		SortOrderID:      w.sortOrderID,
 	}, w.arrowSchema)
 }
 
@@ -311,8 +311,11 @@ func (r *RollingDataWriter) Add(record arrow.RecordBatch) error {
 	select {
 	case r.recordCh <- record:
 		return nil
-	case err := <-r.errorCh:
+	case err, ok := <-r.errorCh:
 		record.Release()
+		if !ok {
+			return ErrWriterClosed
+		}
 
 		return err
 	case <-r.ctx.Done():
@@ -325,9 +328,26 @@ func (r *RollingDataWriter) Add(record arrow.RecordBatch) error {
 func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 	defer r.wg.Done()
 	defer close(r.errorCh)
+	defer r.factory.writers.CompareAndDelete(r.partitionKey, r)
 
 	var currentWriter tblutils.FileWriter
+	// Cleanup defer: recover a panic in the write path and abort any
+	// in-progress file. stream runs in its own goroutine with no caller to
+	// recover it, and FileWriter.Close can panic (stats.ToDataFile panics when
+	// NewDataFileBuilder fails); convert that into an error on errorCh instead
+	// of crashing the process, mirroring the recover in
+	// equalityDeleteRecordsToDataFiles. Registered after close(r.errorCh) so it
+	// runs first (LIFO) and can still send on the open channel before it is
+	// closed.
 	defer func() {
+		if rec := recover(); rec != nil {
+			switch e := rec.(type) {
+			case error:
+				r.sendError(fmt.Errorf("panic during rolling data file writing: %w", e))
+			default:
+				r.sendError(fmt.Errorf("panic during rolling data file writing: %v", e))
+			}
+		}
 		if currentWriter != nil {
 			_ = currentWriter.Abort()
 		}

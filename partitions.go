@@ -69,12 +69,13 @@ func (p PartitionField) SourceID() int {
 }
 
 // EscapedName returns the URL-escaped version of the partition field name.
+// initialize() pre-populates escapedName for specs built through a constructor.
 func (p *PartitionField) EscapedName() string {
-	if p.escapedName == "" {
-		p.escapedName = url.QueryEscape(p.Name)
+	if p.escapedName != "" {
+		return p.escapedName
 	}
 
-	return p.escapedName
+	return url.QueryEscape(p.Name)
 }
 
 func (p PartitionField) MarshalJSON() ([]byte, error) {
@@ -418,6 +419,7 @@ func (ps *PartitionSpec) initialize() {
 	ps.sourceIdToFields = make(map[int][]PartitionField)
 
 	for i := range ps.fields {
+		ps.fields[i].escapedName = url.QueryEscape(ps.fields[i].Name)
 		ps.sourceIdToFields[ps.fields[i].SourceID()] = append(ps.sourceIdToFields[ps.fields[i].SourceID()], ps.fields[i])
 	}
 }
@@ -491,6 +493,15 @@ func (ps *PartitionSpec) LastAssignedFieldID() int {
 // There is a case where we can guarantee that a partition field in the first
 // and only parittion spec that uses a required source column will never be
 // null, but it doesn't seem worth tracking this case.
+//
+// Note: the result is compacted. A partition field whose source column is not
+// present in schema (for example, the column was dropped) is omitted rather
+// than retained, so the returned struct does NOT positionally correspond to a
+// manifest's partition FieldSummary list, which is ordered by the full
+// partition spec. It must therefore not be used to index positional partition
+// summaries; build a schema that keeps every spec field (with an UnknownType
+// placeholder for dropped sources) for that purpose — see manifestPartitionFields
+// in the table package.
 func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
 	nestedFields := []NestedField{}
 	for _, field := range ps.fields {
@@ -543,7 +554,7 @@ func (ps *PartitionSpec) PartitionToPath(data StructLike, sc *Schema) string {
 		sb.WriteByte('=')
 
 		// Only escape the value (which changes per row)
-		valueStr := ps.fields[i].Transform.ToHumanStr(data.Get(i))
+		valueStr := ps.fields[i].Transform.ToHumanStrType(partType.FieldList[i].Type, data.Get(i))
 		sb.WriteString(url.QueryEscape(valueStr))
 	}
 

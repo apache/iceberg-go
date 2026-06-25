@@ -227,7 +227,7 @@ func TestRewriteFiles_Commit_SingleShot(t *testing.T) {
 	tx := tbl.NewTransaction()
 	rewrite := tx.NewRewrite(nil)
 	for _, gr := range results {
-		rewrite.Apply(gr.OldDataFiles, gr.NewDataFiles, gr.SafePosDeletes)
+		rewrite.ApplyResult(gr)
 	}
 	require.NoError(t, rewrite.Commit(t.Context()))
 
@@ -424,7 +424,7 @@ func TestRewriteFiles_DistributedEquivalence(t *testing.T) {
 	leaderTxn := tbl.NewTransaction()
 	rewrite := leaderTxn.NewRewrite(nil)
 	for _, gr := range results {
-		rewrite.Apply(gr.OldDataFiles, gr.NewDataFiles, gr.SafePosDeletes)
+		rewrite.ApplyResult(gr)
 	}
 	require.NoError(t, rewrite.Commit(t.Context()))
 
@@ -519,7 +519,7 @@ func TestRewriteFiles_DropsSafePositionDeletes(t *testing.T) {
 	leaderTxn := tbl.NewTransaction()
 	rewrite := leaderTxn.NewRewrite(nil)
 	for _, gr := range results {
-		rewrite.Apply(gr.OldDataFiles, gr.NewDataFiles, gr.SafePosDeletes)
+		rewrite.ApplyResult(gr)
 	}
 	require.NoError(t, rewrite.Commit(t.Context()))
 
@@ -601,7 +601,7 @@ func TestRewriteFiles_RejectsConcurrentEqDelete(t *testing.T) {
 	leaderTxn := tbl.NewTransaction()
 	rewrite := leaderTxn.NewRewrite(nil)
 	for _, gr := range results {
-		rewrite.Apply(gr.OldDataFiles, gr.NewDataFiles, gr.SafePosDeletes)
+		rewrite.ApplyResult(gr)
 	}
 	require.NoError(t, rewrite.Commit(t.Context()),
 		"staging the rewrite must succeed; the conflict surfaces at Commit time")

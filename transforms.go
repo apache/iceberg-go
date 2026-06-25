@@ -24,9 +24,11 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
@@ -35,51 +37,44 @@ import (
 	"github.com/twmb/murmur3"
 )
 
+var (
+	bucketTransformRegex   = regexp.MustCompile(`^bucket\[(\d+)\]$`)
+	truncateTransformRegex = regexp.MustCompile(`^truncate\[(\d+)\]$`)
+)
+
 // ParseTransform takes the string representation of a transform as
 // defined in the iceberg spec, and produces the appropriate Transform
 // object or an error if the string is not a valid transform string.
 func ParseTransform(s string) (Transform, error) {
 	s = strings.ToLower(s)
-	switch {
-	case strings.HasPrefix(s, "bucket"):
-		matches := regexFromBrackets.FindStringSubmatch(s)
-		if len(matches) != 2 {
-			break
-		}
 
+	if matches := bucketTransformRegex.FindStringSubmatch(s); len(matches) == 2 {
 		n, err := strconv.Atoi(matches[1])
-		if err != nil || n <= 0 || n > math.MaxInt32 {
-			break
+		if err == nil && n > 0 && n <= math.MaxInt32 {
+			return BucketTransform{NumBuckets: n}, nil
 		}
+	}
 
-		return BucketTransform{NumBuckets: n}, nil
-	case strings.HasPrefix(s, "truncate"):
-		matches := regexFromBrackets.FindStringSubmatch(s)
-		if len(matches) != 2 {
-			break
-		}
-
+	if matches := truncateTransformRegex.FindStringSubmatch(s); len(matches) == 2 {
 		n, err := strconv.Atoi(matches[1])
-		if err != nil || n <= 0 || n > math.MaxInt32 {
-			break
+		if err == nil && n > 0 && n <= math.MaxInt32 {
+			return TruncateTransform{Width: n}, nil
 		}
+	}
 
-		return TruncateTransform{Width: n}, nil
-	default:
-		switch s {
-		case "identity":
-			return IdentityTransform{}, nil
-		case "void":
-			return VoidTransform{}, nil
-		case "year":
-			return YearTransform{}, nil
-		case "month":
-			return MonthTransform{}, nil
-		case "day":
-			return DayTransform{}, nil
-		case "hour":
-			return HourTransform{}, nil
-		}
+	switch s {
+	case "identity":
+		return IdentityTransform{}, nil
+	case "void":
+		return VoidTransform{}, nil
+	case "year":
+		return YearTransform{}, nil
+	case "month":
+		return MonthTransform{}, nil
+	case "day":
+		return DayTransform{}, nil
+	case "hour":
+		return HourTransform{}, nil
 	}
 
 	return nil, fmt.Errorf("%w: %s", ErrInvalidTransform, s)
@@ -99,6 +94,8 @@ type Transform interface {
 	Apply(Optional[Literal]) Optional[Literal]
 	Project(name string, pred BoundPredicate) (UnboundPredicate, error)
 
+	ToHumanStrType(typ Type, val any) string
+	// Deprecated: ToHumanStr cannot recover source-type information; use ToHumanStrType instead.
 	ToHumanStr(any) string
 }
 
@@ -114,7 +111,7 @@ func (IdentityTransform) String() string { return "identity" }
 
 func (IdentityTransform) CanTransform(t Type) bool {
 	switch t.(type) {
-	case GeometryType, GeographyType:
+	case GeometryType, GeographyType, VariantType:
 		return false
 	}
 	_, ok := t.(PrimitiveType)
@@ -150,9 +147,39 @@ func (IdentityTransform) ToHumanStr(val any) string {
 		return v.ToTime().Format("15:04:05.999999")
 	case Timestamp:
 		return v.ToTime().Format("2006-01-02T15:04:05.999999")
+	case TimestampNano:
+		return v.ToTime().Format("2006-01-02T15:04:05.999999999")
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+// ToHumanStrType is the type-aware form invoked by PartitionToPath.
+// It appends "+00:00" for TimestampTz/TimestampTzNs — information the value-only ToHumanStr(any) cannot recover by design
+func (t IdentityTransform) ToHumanStrType(typ Type, val any) string {
+	if val == nil {
+		return "null"
+	}
+	switch typ.(type) {
+	case TimestampType:
+		if v, ok := val.(Timestamp); ok {
+			return v.ToTime().Format("2006-01-02T15:04:05.999999")
+		}
+	case TimestampTzType:
+		if v, ok := val.(Timestamp); ok {
+			return v.ToTime().Format("2006-01-02T15:04:05.999999") + "+00:00"
+		}
+	case TimestampNsType:
+		if v, ok := val.(TimestampNano); ok {
+			return v.ToTime().Format("2006-01-02T15:04:05.999999999")
+		}
+	case TimestampTzNsType:
+		if v, ok := val.(TimestampNano); ok {
+			return v.ToTime().Format("2006-01-02T15:04:05.999999999") + "+00:00"
+		}
+	}
+
+	return t.ToHumanStr(val)
 }
 
 func (t IdentityTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
@@ -196,6 +223,8 @@ func (VoidTransform) Apply(value Optional[Literal]) Optional[Literal] {
 }
 
 func (VoidTransform) ToHumanStr(any) string { return "null" }
+
+func (VoidTransform) ToHumanStrType(Type, any) string { return "null" }
 
 func (VoidTransform) Project(string, BoundPredicate) (UnboundPredicate, error) {
 	return nil, nil
@@ -285,6 +314,8 @@ func (t BucketTransform) Apply(value Optional[Literal]) Optional[Literal] {
 		hash = hashHelperInt[int64](int64(v))
 	case TimestampLiteral:
 		hash = hashHelperInt[int64](int64(v))
+	case TimestampNsLiteral:
+		hash = hashHelperInt[int64](int64(v))
 	default:
 		return Optional[Literal]{}
 	}
@@ -311,6 +342,8 @@ func (t BucketTransform) Transformer(src Type) func(any) Optional[int32] {
 		h = hashHelperInt[Timestamp]
 	case TimestampTzType:
 		h = hashHelperInt[Timestamp]
+	case TimestampNsType, TimestampTzNsType:
+		h = hashHelperInt[TimestampNano]
 	case DecimalType:
 		h = func(v any) uint32 {
 			b, _ := DecimalLiteral(v.(Decimal)).MarshalBinary()
@@ -357,6 +390,10 @@ func (BucketTransform) ToHumanStr(val any) string {
 	}
 
 	return fmt.Sprintf("%v", val)
+}
+
+func (t BucketTransform) ToHumanStrType(_ Type, val any) string {
+	return t.ToHumanStr(val)
 }
 
 func (t BucketTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
@@ -443,16 +480,23 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 
 			return val - (((val % width) + width) % width)
 		}, nil
-	case StringType, BinaryType:
+	case StringType:
 		return func(v any) any {
-			switch v := v.(type) {
-			case string:
-				return v[:min(len(v), t.Width)]
-			case []byte:
-				return v[:min(len(v), t.Width)]
-			default:
+			str, ok := v.(string)
+			if !ok {
 				return nil
 			}
+
+			return truncateString(str, t.Width)
+		}, nil
+	case BinaryType:
+		return func(v any) any {
+			b, ok := v.([]byte)
+			if !ok {
+				return nil
+			}
+
+			return b[:min(len(b), t.Width)]
 		}, nil
 	case DecimalType:
 		bigWidth := big.NewInt(int64(t.Width))
@@ -475,6 +519,20 @@ func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
 
 	return nil, fmt.Errorf("%w: cannot truncate for type %s",
 		ErrInvalidArgument, src)
+}
+
+// Range yields byte indexes at UTF-8 code point boundaries, so slicing on idx
+// truncates by Unicode characters without copying the whole string to []rune.
+func truncateString(s string, width int) string {
+	for idx := range s {
+		if width == 0 {
+			return s[:idx]
+		}
+
+		width--
+	}
+
+	return s
 }
 
 func (t TruncateTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
@@ -515,6 +573,10 @@ func (TruncateTransform) ToHumanStr(val any) string {
 	}
 }
 
+func (t TruncateTransform) ToHumanStrType(_ Type, val any) string {
+	return t.ToHumanStr(val)
+}
+
 func (t TruncateTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
 	if _, ok := pred.Term().(*BoundTransform); ok {
 		return projectTransformPredicate(t, name, pred)
@@ -548,6 +610,24 @@ func (t TruncateTransform) Project(name string, pred BoundPredicate) (UnboundPre
 			return setApplyTransform(name, p, wrapTransformFn[[]byte](transformer)), nil
 		}
 	case BoundLiteralPredicate:
+		// notStartsWith is only projectable when the prefix fits within the
+		// truncation width. If the prefix is longer, the truncated partition
+		// value may itself satisfy the predicate, so projecting the truncated
+		// prefix would incorrectly prune matching files.
+		if p.Op() == OpNotStartsWith {
+			l := literalLen(p.Literal())
+			switch {
+			case l < 0:
+				return nil, nil
+			case l < t.Width:
+				return LiteralPredicate(OpNotStartsWith, Reference(name), p.Literal()), nil
+			case l == t.Width:
+				return LiteralPredicate(OpNEQ, Reference(name), p.Literal()), nil
+			}
+
+			return nil, nil
+		}
+
 		switch fieldType.(type) {
 		case Int32Type:
 			return truncateNumber(name, p, wrapTransformFn[int32](transformer))
@@ -696,6 +776,10 @@ func (YearTransform) ToHumanStr(val any) string {
 	}
 }
 
+func (t YearTransform) ToHumanStrType(_ Type, val any) string {
+	return t.ToHumanStr(val)
+}
+
 func (t YearTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
 	return projectTimeTransform(t, name, pred)
 }
@@ -801,6 +885,10 @@ func (t MonthTransform) ToHumanStr(val any) string {
 	}
 }
 
+func (t MonthTransform) ToHumanStrType(_ Type, val any) string {
+	return t.ToHumanStr(val)
+}
+
 func (t MonthTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
 	return projectTimeTransform(t, name, pred)
 }
@@ -893,6 +981,10 @@ func (DayTransform) ToHumanStr(val any) string {
 	}
 }
 
+func (t DayTransform) ToHumanStrType(_ Type, val any) string {
+	return t.ToHumanStr(val)
+}
+
 func (t DayTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
 	return projectTimeTransform(t, name, pred)
 }
@@ -983,6 +1075,10 @@ func (HourTransform) ToHumanStr(val any) string {
 	default:
 		return "null"
 	}
+}
+
+func (t HourTransform) ToHumanStrType(_ Type, val any) string {
+	return t.ToHumanStr(val)
 }
 
 func (t HourTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
@@ -1103,12 +1199,22 @@ func truncateArray[T LiteralType](name string, pred BoundLiteralPredicate, fn fu
 	case OpStartsWith:
 		return LiteralPredicate(OpStartsWith, Reference(name),
 			transformLiteral(fn, boundary)), nil
-	case OpNotStartsWith:
-		return LiteralPredicate(OpNotStartsWith, Reference(name),
-			transformLiteral(fn, boundary)), nil
 	}
 
 	return nil, nil
+}
+
+func literalLen(lit Literal) int {
+	switch l := lit.(type) {
+	case StringLiteral:
+		return utf8.RuneCountInString(string(l))
+	case BinaryLiteral:
+		return len(l)
+	case FixedLiteral:
+		return len(l)
+	}
+
+	return -1
 }
 
 func setApplyTransform[T LiteralType](name string, pred BoundSetPredicate, fn func(any) Optional[T]) UnboundPredicate {

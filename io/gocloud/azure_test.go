@@ -88,6 +88,8 @@ func TestCreateAzureBucketManagedIdentityCredentialCalled(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "ManagedIdentityCredential",
 		"Expected ManagedIdentityCredential error but got: %v", err)
+	assert.NotContains(t, err.Error(), "DefaultAzureCredential",
+		"managed-identity path should not fall back to DefaultAzureCredential: %v", err)
 }
 
 func TestCreateAzureBucketSharedKeyMissingAccountKey(t *testing.T) {

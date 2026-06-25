@@ -24,6 +24,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
@@ -88,6 +89,10 @@ func TestParseTransform(t *testing.T) {
 		{"truncate atoi overflow", "truncate[999999999999999999999999999999999999999]"},
 		{"bucket int32 overflow", "bucket[4294967296]"},
 		{"truncate int32 overflow", "truncate[4294967296]"},
+		{"bucket extra suffix", "bucketx[5]"},
+		{"bucket extra token", "bucket_extra[5]"},
+		{"truncate extra suffix", "truncatefoo[10]"},
+		{"truncate extra token", "truncate_garbage[4]"},
 	}
 
 	for _, tt := range errorTests {
@@ -138,6 +143,7 @@ func TestToHumanString(t *testing.T) {
 		{iceberg.IdentityTransform{}, iceberg.Date(17501), "2017-12-01"},
 		{iceberg.IdentityTransform{}, iceberg.Time(36775038194), "10:12:55.038194"},
 		{iceberg.IdentityTransform{}, iceberg.Timestamp(1512151975038194), "2017-12-01T18:12:55.038194"},
+		{iceberg.IdentityTransform{}, iceberg.TimestampNano(1512151975038194001), "2017-12-01T18:12:55.038194001"},
 		{iceberg.IdentityTransform{}, int64(-1234567890000), "-1234567890000"},
 		{iceberg.IdentityTransform{}, "a/b/c=d", "a/b/c=d"},
 		{iceberg.IdentityTransform{}, []byte("foo"), "Zm9v"},
@@ -149,6 +155,89 @@ func TestToHumanString(t *testing.T) {
 			assert.Equal(t, tt.expected, tt.transform.ToHumanStr(tt.input))
 		})
 	}
+}
+
+func TestToHumanStrType(t *testing.T) {
+	decVal, _ := decimal.Decimal128FromString("14.21", 4, 2)
+	tsMicros := iceberg.Timestamp(1705314600000000)
+	tsNanos := iceberg.TimestampNano(1705314600000000001)
+
+	tests := []struct {
+		name      string
+		transform iceberg.Transform
+		typ       iceberg.Type
+		input     any
+		expected  string
+	}{
+		{"identity_tstz_micros", iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.TimestampTz, tsMicros, "2024-01-15T10:30:00+00:00"},
+		{"identity_ts_micros", iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.Timestamp, tsMicros, "2024-01-15T10:30:00"},
+		{"identity_tstz_nanos", iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.TimestampTzNs, tsNanos, "2024-01-15T10:30:00.000000001+00:00"},
+		{"identity_ts_nanos", iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.TimestampNs, tsNanos, "2024-01-15T10:30:00.000000001"},
+		{"identity_date", iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.Date, iceberg.Date(17501), "2017-12-01"},
+		{"identity_string", iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.String, "a/b/c=d", "a/b/c=d"},
+		{"identity_nil", iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.TimestampTz, nil, "null"},
+		{"year", iceberg.YearTransform{}, iceberg.PrimitiveTypes.Date, int32(47), "2017"},
+		{"month", iceberg.MonthTransform{}, iceberg.PrimitiveTypes.Date, int32(575), "2017-12"},
+		{"day", iceberg.DayTransform{}, iceberg.PrimitiveTypes.Date, int32(17501), "2017-12-01"},
+		{"hour", iceberg.HourTransform{}, iceberg.PrimitiveTypes.TimestampTz, int32(420042), "2017-12-01-18"},
+		{"year_nil", iceberg.YearTransform{}, iceberg.PrimitiveTypes.Date, nil, "null"},
+		{"bucket", iceberg.BucketTransform{NumBuckets: 16}, iceberg.PrimitiveTypes.String, int32(7), "7"},
+		{"bucket_nil", iceberg.BucketTransform{NumBuckets: 16}, iceberg.PrimitiveTypes.String, nil, "null"},
+		{"truncate_int32", iceberg.TruncateTransform{Width: 1}, iceberg.PrimitiveTypes.Int32, int32(123), "123"},
+		{"truncate_string", iceberg.TruncateTransform{Width: 1}, iceberg.PrimitiveTypes.String, "foo", "foo"},
+		{"truncate_bytes", iceberg.TruncateTransform{Width: 1}, iceberg.PrimitiveTypes.Binary, []byte{0x00, 0x01, 0x02, 0x03}, "AAECAw=="},
+		{"truncate_decimal", iceberg.TruncateTransform{Width: 1}, iceberg.DecimalTypeOf(4, 2), iceberg.Decimal{Val: decVal, Scale: 2}, "14.21"},
+		{"truncate_nil", iceberg.TruncateTransform{Width: 1}, iceberg.PrimitiveTypes.String, nil, "null"},
+		{"void", iceberg.VoidTransform{}, iceberg.PrimitiveTypes.TimestampTz, tsMicros, "null"},
+		{"void_nil", iceberg.VoidTransform{}, iceberg.PrimitiveTypes.String, nil, "null"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, tt.transform.ToHumanStrType(tt.typ, tt.input))
+		})
+	}
+}
+
+func TestPartitionToPath_TimestampTzIdentity(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "created_ts_tz", Type: iceberg.PrimitiveTypes.TimestampTz, Required: true},
+		iceberg.NestedField{ID: 2, Name: "created_ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
+		iceberg.NestedField{ID: 3, Name: "created_ts_tz_ns", Type: iceberg.PrimitiveTypes.TimestampTzNs, Required: true},
+		iceberg.NestedField{ID: 4, Name: "created_ts_ns", Type: iceberg.PrimitiveTypes.TimestampNs, Required: true},
+	)
+
+	spec := iceberg.NewPartitionSpecID(3,
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000,
+			Transform: iceberg.IdentityTransform{}, Name: "created_ts_tz",
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{2}, FieldID: 1001,
+			Transform: iceberg.IdentityTransform{}, Name: "created_ts",
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{3}, FieldID: 1002,
+			Transform: iceberg.IdentityTransform{}, Name: "created_ts_tz_ns",
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{4}, FieldID: 1003,
+			Transform: iceberg.IdentityTransform{}, Name: "created_ts_ns",
+		},
+	)
+
+	tsMicros := iceberg.Timestamp(1705314600000000)
+	tsNanos := iceberg.TimestampNano(1705314600000000001)
+	record := partitionRecord{tsMicros, tsMicros, tsNanos, tsNanos}
+
+	expected := strings.Join([]string{
+		"created_ts_tz=2024-01-15T10%3A30%3A00%2B00%3A00",
+		"created_ts=2024-01-15T10%3A30%3A00",
+		"created_ts_tz_ns=2024-01-15T10%3A30%3A00.000000001%2B00%3A00",
+		"created_ts_ns=2024-01-15T10%3A30%3A00.000000001",
+	}, "/")
+
+	assert.Equal(t, expected, spec.PartitionToPath(record, schema))
 }
 
 func TestManifestPartitionVals(t *testing.T) {
@@ -475,6 +564,59 @@ func TestYearMonthTransformNanoseconds(t *testing.T) {
 	}
 }
 
+func TestBucketTransformTimestampNanoseconds(t *testing.T) {
+	transform := iceberg.BucketTransform{NumBuckets: 16}
+	values := []struct {
+		name string
+		ts   iceberg.TimestampNano
+	}{
+		{name: "post-epoch", ts: iceberg.TimestampNano(123456789)},
+		{name: "pre-epoch", ts: iceberg.TimestampNano(-1)},
+	}
+
+	for _, srcType := range []iceberg.Type{
+		iceberg.PrimitiveTypes.TimestampNs,
+		iceberg.PrimitiveTypes.TimestampTzNs,
+	} {
+		t.Run(srcType.String(), func(t *testing.T) {
+			require.True(t, transform.CanTransform(srcType))
+
+			fn := transform.Transformer(srcType)
+			for _, tt := range values {
+				t.Run(tt.name, func(t *testing.T) {
+					applied := transform.Apply(iceberg.Optional[iceberg.Literal]{
+						Valid: true,
+						Val:   iceberg.NewLiteral(tt.ts),
+					})
+					require.True(t, applied.Valid)
+
+					var transformed iceberg.Optional[int32]
+					require.NotPanics(t, func() {
+						transformed = fn(tt.ts)
+					})
+					require.True(t, transformed.Valid)
+					assert.Equal(t, applied.Val, iceberg.NewLiteral(transformed.Val))
+
+					schema := iceberg.NewSchema(1, iceberg.NestedField{
+						ID:   1,
+						Name: "ts",
+						Type: srcType,
+					})
+					bound, err := iceberg.EqualTo(iceberg.Reference("ts"), tt.ts).Bind(schema, true)
+					require.NoError(t, err)
+
+					projected, err := transform.Project("ts_bucket", bound.(iceberg.BoundPredicate))
+					require.NoError(t, err)
+					assert.True(t, iceberg.EqualTo(
+						iceberg.Reference("ts_bucket"),
+						transformed.Val,
+					).Equals(projected))
+				})
+			}
+		})
+	}
+}
+
 func TestHourTransformPreEpoch(t *testing.T) {
 	const microsecondsPerHour = int64(time.Hour / time.Microsecond)
 
@@ -715,4 +857,102 @@ func TestTruncateTransform(t *testing.T) {
 			assert.Equal(t, tt.expected, result.Val)
 		})
 	}
+}
+
+func TestTruncateTransformStringUnicode(t *testing.T) {
+	tests := []struct {
+		name     string
+		width    int
+		input    string
+		expected string
+	}{
+		{
+			name:     "truncate_unicode_string_width_2",
+			width:    2,
+			input:    "イロハニホヘト",
+			expected: "イロ",
+		},
+		{
+			name:     "truncate_unicode_string_width_3",
+			width:    3,
+			input:    "イロハニホヘト",
+			expected: "イロハ",
+		},
+		{
+			name:     "truncate_multibyte_string_width_1",
+			width:    1,
+			input:    "测试",
+			expected: "测",
+		},
+		{
+			name:     "truncate_mixed_unicode_and_ascii",
+			width:    4,
+			input:    "测试raul试测",
+			expected: "测试ra",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transform := iceberg.TruncateTransform{Width: tt.width}
+
+			fn, err := transform.Transformer(iceberg.PrimitiveTypes.String)
+			require.NoError(t, err)
+
+			gotAny := fn(tt.input)
+			got, ok := gotAny.(string)
+			require.True(t, ok, "Transformer must return string for StringType")
+			assert.Equal(t, tt.expected, got, "Transformer truncated value must match Java's code-point semantics")
+			assert.True(t, utf8.ValidString(got),
+				"Transformer output must be valid UTF-8; got bytes %x for input %q",
+				got, tt.input)
+
+			result := transform.Apply(iceberg.Optional[iceberg.Literal]{
+				Val: iceberg.StringLiteral(tt.input), Valid: true,
+			})
+			require.True(t, result.Valid)
+			assert.Equal(t, iceberg.StringLiteral(tt.expected), result.Val,
+				"Apply on StringLiteral must match Transformer semantics")
+			assert.True(t, utf8.ValidString(string(result.Val.(iceberg.StringLiteral))),
+				"Apply output must be valid UTF-8")
+		})
+	}
+}
+
+func TestTruncateStringDoesNotSplitUTF8(t *testing.T) {
+	transform := iceberg.TruncateTransform{Width: 1}
+
+	out := transform.Apply(iceberg.Optional[iceberg.Literal]{
+		Valid: true,
+		Val:   iceberg.StringLiteral("éx"),
+	})
+	require.True(t, out.Valid)
+	got := string(out.Val.(iceberg.StringLiteral))
+	require.True(t, utf8.ValidString(got), "truncate produced invalid UTF-8: %q", got)
+	assert.Equal(t, "é", got)
+
+	fn, err := transform.Transformer(iceberg.PrimitiveTypes.String)
+	require.NoError(t, err)
+	transformed := fn("éx").(string)
+	require.True(t, utf8.ValidString(transformed), "transformer produced invalid UTF-8: %q", transformed)
+	assert.Equal(t, "é", transformed)
+
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID:   1,
+		Name: "s",
+		Type: iceberg.PrimitiveTypes.String,
+	})
+	bound, err := iceberg.EqualTo(iceberg.Reference("s"), "éx").Bind(schema, true)
+	require.NoError(t, err)
+
+	projected, err := transform.Project("s_trunc", bound.(iceberg.BoundPredicate))
+	require.NoError(t, err)
+	assert.True(t, iceberg.EqualTo(iceberg.Reference("s_trunc"), "é").Equals(projected))
+
+	binary := transform.Apply(iceberg.Optional[iceberg.Literal]{
+		Valid: true,
+		Val:   iceberg.BinaryLiteral([]byte("éx")),
+	})
+	require.True(t, binary.Valid)
+	assert.Equal(t, iceberg.BinaryLiteral([]byte{0xc3}), binary.Val)
 }

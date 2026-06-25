@@ -175,50 +175,6 @@ func buildPartitionedContext(
 }
 
 // ---------------------------------------------------------------------------
-// anyToLiteral
-// ---------------------------------------------------------------------------
-
-func TestAnyToLiteral_SupportedTypes(t *testing.T) {
-	cases := []struct {
-		name string
-		v    any
-	}{
-		{"bool", true},
-		{"int32", int32(42)},
-		{"int64", int64(42)},
-		{"float32", float32(1.5)},
-		{"float64", float64(1.5)},
-		{"string", "hello"},
-		{"bytes", []byte{0x01}},
-		{"Date", iceberg.Date(100)},
-		{"Time", iceberg.Time(1000)},
-		{"Timestamp", iceberg.Timestamp(9999)},
-		// TimestampNano: arm in anyToLiteral was unreachable from the manifest read path
-		// because convertAvroValueToIcebergType had no timestamp-nanos case; now fixed.
-		{"TimestampNano", iceberg.TimestampNano(9999)},
-		{"UUID", uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")},
-		// DecimalLiteral is the named type returned by convertAvroValueToIcebergType
-		// (type DecimalLiteral Decimal). It must be accepted without falling through
-		// to the default error branch.
-		{"DecimalLiteral", iceberg.DecimalLiteral{Scale: 2}},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			lit, err := anyToLiteral(tc.v)
-			require.NoError(t, err)
-			assert.NotNil(t, lit)
-		})
-	}
-}
-
-func TestAnyToLiteral_UnsupportedType(t *testing.T) {
-	_, err := anyToLiteral(struct{}{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unsupported partition value type")
-}
-
-// ---------------------------------------------------------------------------
 // validateNoConflictingDataFilesInPartitions short-circuit paths
 // ---------------------------------------------------------------------------
 

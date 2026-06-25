@@ -68,6 +68,7 @@ func TestIsDeletionVector(t *testing.T) {
 				mockDataFile: mockDataFile{
 					path:        "s3://bucket/data/dv.puffin",
 					contentType: iceberg.EntryContentPosDeletes,
+					format:      iceberg.PuffinFile,
 				},
 				referencedDataFile: strPtr("s3://bucket/data/file.parquet"),
 				contentOffset:      int64Ptr(100),
@@ -117,6 +118,7 @@ func TestManifestEntries_DVClassification(t *testing.T) {
 		mockDataFile: mockDataFile{
 			path:        "s3://bucket/data/dv-001.puffin",
 			contentType: iceberg.EntryContentPosDeletes,
+			format:      iceberg.PuffinFile,
 		},
 		referencedDataFile: strPtr("s3://bucket/data/data-001.parquet"),
 		contentOffset:      int64Ptr(0),
@@ -300,6 +302,60 @@ func TestMatchDVToData_SequenceNumberGuard(t *testing.T) {
 	}
 }
 
+// TestMatchDVToData_NilDVSequenceNumber covers indeterminate sequence
+// numbers, for which ManifestEntry.SequenceNum reports the -1 sentinel. An
+// unset sequence number on either side must be treated as "applies": before
+// the guard, a real (>= 0) data sequence number compared against an unset
+// DV sequence (-1) was always false, silently dropping the DV and
+// resurfacing deleted rows. A known sequence of 0 is a real value, not
+// "unset", so the < 0 guard must stay tight.
+func TestMatchDVToData_NilDVSequenceNumber(t *testing.T) {
+	dataFilePath := "s3://bucket/data/data-001.parquet"
+	snapshotID := int64(1)
+
+	tests := []struct {
+		name     string
+		dvSeq    *int64 // nil → unset, SequenceNum reports -1
+		dataSeq  *int64 // nil → unset
+		expectDV bool
+	}{
+		{"unset DV seq, real data seq — applies (regression)", nil, int64Ptr(7), true},
+		{"unset DV seq and unset data seq — applies", nil, nil, true},
+		{"known DV seq 0, newer data — skipped (guard stays tight)", int64Ptr(0), int64Ptr(5), false},
+		{"known DV seq 0, same data seq 0 — applies", int64Ptr(0), int64Ptr(0), true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dvFile := &dvMockDataFile{
+				mockDataFile: mockDataFile{
+					path:        "s3://bucket/data/dv-001.puffin",
+					contentType: iceberg.EntryContentPosDeletes,
+				},
+				referencedDataFile: strPtr(dataFilePath),
+				contentOffset:      int64Ptr(0),
+				contentSizeInBytes: int64Ptr(128),
+			}
+			dvEntries := []iceberg.ManifestEntry{
+				iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, tt.dvSeq, nil, dvFile),
+			}
+			dvIndex, err := buildDVIndex(dvEntries)
+			assert.NoError(t, err)
+
+			dataEntry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, tt.dataSeq, nil,
+				&mockDataFile{path: dataFilePath, contentType: iceberg.EntryContentData})
+
+			matched := matchDVToData(dataEntry, dvIndex)
+			if tt.expectDV {
+				assert.Len(t, matched, 1)
+				assert.Equal(t, dvFile.path, matched[0].FilePath())
+			} else {
+				assert.Empty(t, matched)
+			}
+		})
+	}
+}
+
 func TestFileScanTask_DeletionVectorFilesField(t *testing.T) {
 	dataFile := &mockDataFile{
 		path:        "s3://bucket/data/data-001.parquet",
@@ -311,6 +367,7 @@ func TestFileScanTask_DeletionVectorFilesField(t *testing.T) {
 		mockDataFile: mockDataFile{
 			path:        "s3://bucket/data/dv-001.puffin",
 			contentType: iceberg.EntryContentPosDeletes,
+			format:      iceberg.PuffinFile,
 		},
 		referencedDataFile: strPtr("s3://bucket/data/data-001.parquet"),
 		contentOffset:      int64Ptr(0),

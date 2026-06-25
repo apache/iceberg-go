@@ -179,13 +179,27 @@ func openManifest(io io.IO, manifest iceberg.ManifestFile,
 	return out, nil
 }
 
+// isDeletionVector reports whether df is a deletion vector: a Puffin file with
+// position-delete content. The content-type guard matters because df is an
+// arbitrary DataFile, so a non-pos-delete Puffin from an external writer must
+// not be misclassified. Keying on format rather than referenced_data_file
+// avoids misclassifying a Parquet pos-delete that legally sets it.
 func isDeletionVector(df iceberg.DataFile) bool {
-	return df.ReferencedDataFile() != nil
+	return df.FileFormat() == iceberg.PuffinFile &&
+		df.ContentType() == iceberg.EntryContentPosDeletes
 }
 
 type Scan struct {
-	metadata       Metadata
-	ioF            FSysF
+	identifier       Identifier
+	metadata         Metadata
+	metadataLocation string
+	ioF              FSysF
+	planner          ScanPlanner
+	planningMode     ScanPlanningMode
+	// planIO, when non-nil, is a plan-scoped FileIO loader set by remote scan
+	// planning; ReadTasks loads from it instead of ioF and closes it after the
+	// returned iterator finishes. See PlanIO.
+	planIO         PlanIO
 	rowFilter      iceberg.BooleanExpression
 	selectedFields []string
 	caseSensitive  bool
@@ -522,14 +536,25 @@ func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]iceberg.Manifes
 }
 
 // matchDVToData returns the deletion vector that applies to the given data
-// entry, if any. A DV applies only when the data file's sequence number is
-// less than or equal to the DV's sequence number.
+// entry, if any. A DV applies when the data file's sequence number is less
+// than or equal to the DV's sequence number.
+//
+// SequenceNum reports the -1 sentinel when an entry's sequence number is
+// unset (see manifest.go). Entries arrive here already inherited, so a
+// committed ADDED entry always carries a real (>= 0) sequence number; an
+// unset value comes from an EXISTING/DELETED entry missing its required
+// explicit sequence number, or a not-yet-committed manifest. Such an
+// indeterminate sequence number — on either side — is treated as "applies":
+// comparing a real data sequence number against an unset DV sequence (-1)
+// would never satisfy dataSeq <= -1 and would silently drop the DV,
+// resurfacing deleted rows; an unset data sequence likewise satisfies
+// -1 <= dvSeq for any known DV sequence.
 func matchDVToData(dataEntry iceberg.ManifestEntry, dvIndex map[string]iceberg.ManifestEntry) []iceberg.DataFile {
 	dvEntry, ok := dvIndex[dataEntry.DataFile().FilePath()]
 	if !ok {
 		return nil
 	}
-	if dataEntry.SequenceNum() <= dvEntry.SequenceNum() {
+	if dvSeq := dvEntry.SequenceNum(); dvSeq < 0 || dataEntry.SequenceNum() <= dvSeq {
 		return []iceberg.DataFile{dvEntry.DataFile()}
 	}
 
@@ -662,6 +687,21 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 		scan.snapshotID = &snapshot.SnapshotID
 		scan.asOfTimestamp = nil
 	}
+
+	switch scan.planningMode {
+	case ScanPlanningRemote:
+		return scan.planFilesRemote(ctx)
+	case ScanPlanningAuto:
+		if scan.planner != nil && scan.planner.SupportsRemoteScanPlanning() {
+			return scan.planFilesRemote(ctx)
+		}
+	case ScanPlanningLocal:
+	default:
+		return nil, fmt.Errorf("%w: unknown scan planning mode %q", iceberg.ErrInvalidArgument, scan.planningMode)
+	}
+
+	scan.planIO = nil
+
 	// Step 1: Retrieve filtered manifests based on snapshot and partition specs.
 	manifestList, err := scan.fetchPartitionSpecFilteredManifests(ctx)
 	if err != nil || len(manifestList) == 0 {
@@ -727,6 +767,30 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	return results, nil
 }
 
+func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
+	if scan.planner == nil || !scan.planner.SupportsRemoteScanPlanning() {
+		return nil, fmt.Errorf("%w: remote scan planning is unavailable", ErrInvalidOperation)
+	}
+
+	caseSensitive := scan.caseSensitive
+	result, err := scan.planner.PlanFiles(ctx, ScanPlanningRequest{
+		Identifier:       scan.identifier,
+		Metadata:         scan.metadata,
+		MetadataLocation: scan.metadataLocation,
+		SnapshotID:       scan.snapshotID,
+		SelectedFields:   scan.selectedFields,
+		RowFilter:        scan.rowFilter,
+		CaseSensitive:    &caseSensitive,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	scan.planIO = result.IO
+
+	return result.Tasks, nil
+}
+
 type FileScanTask struct {
 	File                iceberg.DataFile
 	DeleteFiles         []iceberg.DataFile // positional delete files
@@ -779,12 +843,19 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 		return nil, nil, err
 	}
 
-	fs, err := scan.ioF(ctx)
+	// A plan-scoped FileIO (from remote planning) takes precedence over the
+	// table's default FileIO and is closed once the returned iterator finishes.
+	var fs io.IO
+	if scan.planIO != nil {
+		fs, err = scan.planIO.Load(ctx)
+	} else {
+		fs, err = scan.ioF(ctx)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
 
-	return (&arrowScan{
+	outSchema, records, err := (&arrowScan{
 		metadata:        scan.metadata,
 		fs:              fs,
 		projectedSchema: schema,
@@ -794,6 +865,35 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 		options:         scan.options,
 		concurrency:     scan.concurrency,
 	}).GetRecords(ctx, tasks)
+	if err != nil {
+		// No iterator to drive cleanup on a setup error, so close here.
+		if scan.planIO != nil {
+			_ = scan.planIO.Close()
+		}
+
+		return nil, nil, err
+	}
+
+	if scan.planIO != nil {
+		records = closePlanIOAfter(records, scan.planIO)
+	}
+
+	return outSchema, records, nil
+}
+
+// closePlanIOAfter wraps an arrow record iterator so the plan-scoped IO is
+// closed once iteration ends — whether the consumer exhausts the iterator or
+// stops early. A caller that never ranges over the iterator does not trigger
+// the close; that is an accepted edge for an unread result.
+func closePlanIOAfter(seq iter.Seq2[arrow.RecordBatch, error], pio PlanIO) iter.Seq2[arrow.RecordBatch, error] {
+	return func(yield func(arrow.RecordBatch, error) bool) {
+		defer func() { _ = pio.Close() }()
+		for rec, err := range seq {
+			if !yield(rec, err) {
+				return
+			}
+		}
+	}
 }
 
 // ToArrowTable calls ToArrowRecords and then gathers all of the records together

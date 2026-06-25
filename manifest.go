@@ -422,6 +422,38 @@ func getFieldIDMap(sc *avro.Schema) (map[string]int, map[int]string, map[int]int
 	return result, logicalTypes, fixedSizes
 }
 
+// applyDayTransformDates marks every day(...) partition field described by the
+// manifest's partition-spec metadata as a "date" logical type. This normalizes
+// day-transform partition values to iceberg.Date even when they were written as
+// a plain Avro int with no logical type, so callers never observe the Avro
+// encoding difference. Only day transforms are affected; other plain integer
+// partition values (including hour/month/year transforms) are left untouched.
+//
+// The Iceberg spec gives the day transform result type "date" and requires
+// readers to also accept the plain-int encoding, interpreting each integer as
+// the number of days since 1970-01-01 (see the transform table and note [1] in
+// apache/iceberg#16446). Accepting both encodings is therefore spec-mandated,
+// not merely cross-engine convention.
+//
+// Absent or malformed partition-spec metadata is ignored: the reader simply
+// falls back to the logical types declared in the Avro schema.
+func applyDayTransformDates(specJSON []byte, fieldIDToType map[int]string) {
+	if len(specJSON) == 0 {
+		return
+	}
+
+	var fields []PartitionField
+	if err := json.Unmarshal(specJSON, &fields); err != nil {
+		return
+	}
+
+	for _, f := range fields {
+		if _, ok := f.Transform.(DayTransform); ok {
+			fieldIDToType[f.FieldID] = atype.Date
+		}
+	}
+}
+
 type hasFieldToIDMap interface {
 	setFieldNameToIDMap(map[string]int)
 	setFieldIDToLogicalTypeMap(map[int]string)
@@ -671,9 +703,21 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 		}
 	}
 	fieldNameToID, fieldIDToType, fieldIDToSize := getFieldIDMap(sc)
+	// day(...) partition values are days since the Unix epoch, but a manifest
+	// may encode them either as an Avro int carrying the "date" logical type or
+	// as a legacy plain Avro int. Overlay the manifest's partition spec so
+	// day-transform fields are always exposed as iceberg.Date, regardless of the
+	// Avro encoding used to write them.
+	applyDayTransformDates(metadata["partition-spec"], fieldIDToType)
 
-	inheritRowIDs := formatVersion >= 3 &&
-		content == ManifestContentData &&
+	// A non-nil manifest-list first_row_id is the spec's inheritance signal and
+	// is only assigned by a v3+ manifest-list writer, so it — not the manifest
+	// file's own internal format-version — gates inheritance. A v1- or v2-era
+	// manifest carried into an upgraded v3 table keeps its older format-version
+	// internally but is assigned a first_row_id when written into the v3 list; its
+	// data files must still inherit row IDs (spec: First Row ID Inheritance, "even
+	// if the data file is existing"), otherwise compaction drops their lineage.
+	inheritRowIDs := content == ManifestContentData &&
 		file.FirstRowID() != nil
 	var nextFirstRowID int64
 	if inheritRowIDs {
@@ -786,14 +830,17 @@ func (c *ManifestReader) ReadEntry() (ManifestEntry, error) {
 		tmp = tmp.(*fallbackManifestEntry).toEntry()
 	}
 	tmp.inherit(c.file)
-	// Apply first_row_id inheritance for v3 data manifests (spec: First Row ID Inheritance).
-	if c.inheritRowIDs {
-		if df, ok := tmp.DataFile().(*dataFile); ok {
-			if df.FirstRowIDField == nil {
-				id := c.nextFirstRowID
-				df.FirstRowIDField = &id
-			}
-			// Advance for every data file, null or explicit, to match Java semantics.
+	// First Row ID Inheritance (spec): assign the manifest's first_row_id to data
+	// files that lack one, advancing by record_count only on the files actually
+	// assigned. Deleted entries consume no row IDs and are skipped — the
+	// manifest-list writer reserves a manifest's id range as added+existing rows
+	// (excludes deleted), so the read side must match or a live file following a
+	// deleted one over-advances into the next manifest's range. Mirrors Java
+	// ManifestReader.idAssigner (status != DELETED, increment inside the null check).
+	if c.inheritRowIDs && tmp.Status() != EntryStatusDELETED {
+		if df, ok := tmp.DataFile().(*dataFile); ok && df.FirstRowIDField == nil {
+			id := c.nextFirstRowID
+			df.FirstRowIDField = &id
 			c.nextFirstRowID += df.Count()
 		}
 	}
@@ -1294,54 +1341,52 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 		return errors.New("cannot add entry to closed manifest writer")
 	}
 
-	switch entry.Status() {
+	status := entry.Status()
+	switch status {
+	case EntryStatusADDED, EntryStatusEXISTING, EntryStatusDELETED:
+	default:
+		return fmt.Errorf("unknown entry status: %v", status)
+	}
+	count := entry.DataFile().Count()
+	partition := entry.Data.Partition()
+
+	entryToEncode := *entry
+	if dataFile, ok := entry.DataFile().(*dataFile); ok {
+		encodeDataFile := cloneDataFileAvroFields(dataFile)
+		encodeDataFile.PartitionData = avroEncodePartitionData(partition, w.partFieldNameToID, w.partFieldIDToType)
+		entryToEncode.Data = encodeDataFile
+	}
+
+	toEncode, err := w.impl.prepareEntry(&entryToEncode, w.snapshotID)
+	if err != nil {
+		return err
+	}
+
+	if err := w.writer.Encode(toEncode); err != nil {
+		return err
+	}
+
+	switch status {
 	case EntryStatusADDED:
 		w.addedFiles++
-		w.addedRows += entry.DataFile().Count()
+		w.addedRows += count
 	case EntryStatusEXISTING:
 		w.existingFiles++
-		w.existingRows += entry.DataFile().Count()
+		w.existingRows += count
 	case EntryStatusDELETED:
 		w.deletedFiles++
-		w.deletedRows += entry.DataFile().Count()
-	default:
-		return fmt.Errorf("unknown entry status: %v", entry.Status())
+		w.deletedRows += count
 	}
 
-	if setter, ok := entry.DataFile().(hasFieldToIDMap); ok {
-		setter.setFieldNameToIDMap(w.partFieldNameToID)
-		setter.setFieldIDToLogicalTypeMap(w.partFieldIDToType)
-	}
+	w.partitions = append(w.partitions, partition)
 
-	w.partitions = append(w.partitions, entry.Data.Partition())
-	partitionData := avroPartitionData(entry.Data.Partition(), w.partFieldIDToType)
-
-	if dataFile, ok := entry.DataFile().(*dataFile); ok {
-		convertedPartitionData := make(map[string]any)
-		for fieldID, convertedValue := range partitionData {
-			for fieldName, id := range w.partFieldNameToID {
-				if id == fieldID {
-					convertedPartitionData[fieldName] = convertedValue
-
-					break
-				}
-			}
-		}
-		dataFile.PartitionData = convertedPartitionData
-	}
-
-	if entry.Status() == EntryStatusADDED || entry.Status() == EntryStatusEXISTING {
+	if status == EntryStatusADDED || status == EntryStatusEXISTING {
 		if seq := entry.SequenceNum(); seq >= 0 && (w.minSeqNum < 0 || seq < w.minSeqNum) {
 			w.minSeqNum = seq
 		}
 	}
 
-	toEncode, err := w.impl.prepareEntry(entry, w.snapshotID)
-	if err != nil {
-		return err
-	}
-
-	return w.writer.Encode(toEncode)
+	return nil
 }
 
 func (w *ManifestWriter) Add(entry ManifestEntry) error {
@@ -1866,8 +1911,17 @@ func (d *dataFile) convertAvroValueToIcebergType(v any, fieldID int) any {
 			if val, ok := v.(time.Time); ok {
 				return Date(val.Truncate(24*time.Hour).Unix() / int64((time.Hour * 24).Seconds()))
 			}
+			if val, ok := v.(int32); ok {
+				return Date(val)
+			}
 
-			return Date(v.(int32))
+			// Unreachable with twmb/avro: an int+date logical type decodes
+			// to time.Time and a plain int to int32, so v is always one of
+			// the two cases above. Returning v rather than panicking keeps a
+			// future decoder change from crashing here, but callers that type
+			// assert iceberg.Date would then fail; do not add a guard that
+			// silently coerces other types, which reintroduces #1200.
+			return v
 		case atype.TimeMillis:
 			if val, ok := v.(time.Duration); ok {
 				return Time(val.Milliseconds())

@@ -53,7 +53,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
-	"github.com/google/uuid"
+	"github.com/apache/iceberg-go/table/internal"
 )
 
 // IsolationLevel controls how strictly a commit rejects concurrent
@@ -546,7 +546,7 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 				continue
 			}
 
-			lit, err := anyToLiteral(value)
+			lit, err := internal.LiteralForPartitionValue(value)
 			if err != nil {
 				return nil, fmt.Errorf("partition field %q: %w", sourceField.Name, err)
 			}
@@ -570,46 +570,6 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 	}
 
 	return iceberg.NewOr(terms[0], terms[1], terms[2:]...), nil
-}
-
-// anyToLiteral converts a dynamically-typed partition value (as
-// stored in iceberg.DataFile.Partition()) to an iceberg.Literal.
-// The supported types mirror the iceberg.LiteralType constraint.
-func anyToLiteral(v any) (iceberg.Literal, error) {
-	switch val := v.(type) {
-	case bool:
-		return iceberg.NewLiteral(val), nil
-	case int32:
-		return iceberg.NewLiteral(val), nil
-	case int64:
-		return iceberg.NewLiteral(val), nil
-	case float32:
-		return iceberg.NewLiteral(val), nil
-	case float64:
-		return iceberg.NewLiteral(val), nil
-	case string:
-		return iceberg.NewLiteral(val), nil
-	case []byte:
-		return iceberg.NewLiteral(val), nil
-	case iceberg.Date:
-		return iceberg.NewLiteral(val), nil
-	case iceberg.Time:
-		return iceberg.NewLiteral(val), nil
-	case iceberg.Timestamp:
-		return iceberg.NewLiteral(val), nil
-	case iceberg.TimestampNano:
-		return iceberg.NewLiteral(val), nil
-	case iceberg.Decimal:
-		return iceberg.NewLiteral(val), nil
-	case iceberg.DecimalLiteral:
-		// convertAvroValueToIcebergType returns the named type DecimalLiteral
-		// (type DecimalLiteral Decimal), not Decimal itself. Handle both.
-		return iceberg.NewLiteral(iceberg.Decimal(val)), nil
-	case uuid.UUID:
-		return iceberg.NewLiteral(val), nil
-	default:
-		return nil, fmt.Errorf("unsupported partition value type %T", v)
-	}
 }
 
 // validateNoNewDeletesForRewrittenFiles rejects the commit if any

@@ -239,12 +239,21 @@ type expireSnapshotsCfg struct {
 
 type ExpireSnapshotsOpt func(*expireSnapshotsCfg)
 
+// WithRetainLast sets the minimum number of snapshots to keep per branch,
+// regardless of age. It overrides the MinSnapshotsToKeepKey
+// ("min-snapshots-to-keep") table property for this call. Snapshots beyond this
+// count become eligible for expiry only once they are also older than the
+// configured age (see WithOlderThan).
 func WithRetainLast(n int) ExpireSnapshotsOpt {
 	return func(cfg *expireSnapshotsCfg) {
 		cfg.minSnapshotsToKeep = &n
 	}
 }
 
+// WithOlderThan expires snapshots older than the given duration, measured from
+// the current time. It overrides the MaxSnapshotAgeMsKey ("max-snapshot-age-ms")
+// table property for this call. The most recent snapshots are still retained up
+// to the count set by WithRetainLast.
 func WithOlderThan(t time.Duration) ExpireSnapshotsOpt {
 	return func(cfg *expireSnapshotsCfg) {
 		n := t.Milliseconds()
@@ -262,6 +271,31 @@ func WithPostCommit(postCommit bool) ExpireSnapshotsOpt {
 	}
 }
 
+// ExpireSnapshots removes expired snapshots from the table metadata, staging
+// the changes on the transaction. Call [Transaction.Commit] to persist them.
+//
+// A snapshot is retained when it is referenced by a branch or tag, or when it
+// is needed to satisfy the retention rules. Retention is resolved per ref,
+// falling back through the ref's own settings, the options passed here, and
+// finally the table properties (MinSnapshotsToKeepKey, MaxSnapshotAgeMsKey,
+// MaxRefAgeMsKey), mirroring the Java implementation. The current snapshot of
+// the main branch is always kept.
+//
+// By default the now-unreferenced manifests, manifest lists, and data files are
+// deleted once the commit lands; pass WithPostCommit(false) to defer that
+// cleanup to a separate maintenance job and avoid racing in-flight readers.
+//
+//	txn := tbl.NewTransaction()
+//	err := txn.ExpireSnapshots(
+//		table.WithOlderThan(7*24*time.Hour),
+//		table.WithRetainLast(10),
+//	)
+//	if err != nil {
+//		// ...
+//	}
+//	newTbl, err := txn.Commit(ctx)
+//
+// The "iceberg expire-snapshots" CLI command wraps the same operation.
 func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	var (
 		cfg         = expireSnapshotsCfg{postCommit: true}
@@ -278,11 +312,11 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	// Read table-level retention properties as the last-resort defaults,
 	// mirroring the Java implementation. When neither the ref nor the
 	// caller provides a value, fall back to the table property; when the
-	// table property is also absent use the constant default (math.MaxInt,
+	// table property is also absent use the constant default (math.MaxInt64,
 	// meaning "keep everything").
-	propMaxRefAgeMs := int64(t.meta.props.GetInt(MaxRefAgeMsKey, MaxRefAgeMsDefault))
+	propMaxRefAgeMs := t.meta.props.GetInt64(MaxRefAgeMsKey, MaxRefAgeMsDefault)
 	propMinSnapshotsToKeep := t.meta.props.GetInt(MinSnapshotsToKeepKey, MinSnapshotsToKeepDefault)
-	propMaxSnapshotAgeMs := int64(t.meta.props.GetInt(MaxSnapshotAgeMsKey, MaxSnapshotAgeMsDefault))
+	propMaxSnapshotAgeMs := t.meta.props.GetInt64(MaxSnapshotAgeMsKey, MaxSnapshotAgeMsDefault)
 
 	for refName, ref := range t.meta.refs {
 		// Assert that this ref's snapshot ID hasn't changed concurrently.
@@ -881,6 +915,7 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	}
 
 	setDeleteFilesToRemove := make(map[string]struct{}, len(deleteFilesToRemove))
+	dvRefsToRemove := make(map[string]struct{}, len(deleteFilesToRemove))
 	for i, df := range deleteFilesToRemove {
 		if df == nil {
 			return fmt.Errorf("nil delete file at index %d for ReplaceFiles", i)
@@ -888,6 +923,18 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		path := df.FilePath()
 		if path == "" {
 			return errors.New("delete file paths must be non-empty for ReplaceFiles")
+		}
+		if isDeletionVector(df) {
+			ref := df.ReferencedDataFile()
+			if ref == nil {
+				return errors.New("deletion vector to remove is missing referenced_data_file for ReplaceFiles")
+			}
+			if _, ok := dvRefsToRemove[*ref]; ok {
+				return errors.New("deletion vectors to remove must reference distinct data files for ReplaceFiles")
+			}
+			dvRefsToRemove[*ref] = struct{}{}
+
+			continue
 		}
 		if _, ok := setDeleteFilesToRemove[path]; ok {
 			return errors.New("delete file paths must be unique for ReplaceFiles")
@@ -909,6 +956,7 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	// that all files to delete/remove actually exist in the table.
 	markedDataForDeletion := make([]iceberg.DataFile, 0, len(setToDelete))
 	markedDeleteForRemoval := make([]iceberg.DataFile, 0, len(setDeleteFilesToRemove))
+	markedDVsForRemoval := make(map[string]iceberg.DataFile, len(dvRefsToRemove))
 	for df, err := range s.dataFiles(fs, nil) {
 		if err != nil {
 			return err
@@ -918,8 +966,14 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if _, ok := setToDelete[path]; ok && isData {
 			markedDataForDeletion = append(markedDataForDeletion, df)
 		}
-		if _, ok := setDeleteFilesToRemove[path]; ok && !isData {
-			markedDeleteForRemoval = append(markedDeleteForRemoval, df)
+		if !isData {
+			if _, ok := setDeleteFilesToRemove[path]; ok {
+				markedDeleteForRemoval = append(markedDeleteForRemoval, df)
+			} else if ref := df.ReferencedDataFile(); isDeletionVector(df) && ref != nil {
+				if _, ok := dvRefsToRemove[*ref]; ok {
+					markedDVsForRemoval[*ref] = df
+				}
+			}
 		}
 		if _, ok := setToAdd[path]; ok {
 			return fmt.Errorf("cannot add files that are already referenced by table, files: %s", path)
@@ -931,6 +985,11 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	}
 	if len(markedDeleteForRemoval) != len(setDeleteFilesToRemove) {
 		return errors.New("cannot remove delete files that do not belong to the table")
+	}
+	// Keyed by referenced data file, so duplicate DV entries for one ref collapse
+	// to one slot; equality then means every requested ref exists in the table.
+	if len(markedDVsForRemoval) != len(dvRefsToRemove) {
+		return errors.New("cannot remove deletion vectors that do not belong to the table")
 	}
 
 	if !cfg.skipAutoNameMapping {
@@ -959,6 +1018,9 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	}
 	for _, df := range markedDeleteForRemoval {
 		updater.removeDeleteFile(df)
+	}
+	for _, df := range markedDVsForRemoval {
+		updater.removeDeletionVector(df)
 	}
 
 	updates, reqs, err := updater.commit(ctx)
@@ -1864,8 +1926,13 @@ func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
 	}
 
 	s := &Scan{
-		metadata:       updatedMeta,
-		ioF:            t.tbl.fsF,
+		identifier:       t.tbl.identifier,
+		metadata:         updatedMeta,
+		metadataLocation: t.tbl.metadataLocation,
+		ioF:              t.tbl.fsF,
+		planner:          t.tbl.planner,
+		// TODO(#1178 Phase 6): resolve scan-planning-mode table properties here.
+		planningMode:   ScanPlanningLocal,
 		rowFilter:      iceberg.AlwaysTrue{},
 		selectedFields: []string{"*"},
 		caseSensitive:  true,

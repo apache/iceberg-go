@@ -576,6 +576,9 @@ func (up *unboundUnaryPredicate) Bind(schema *Schema, caseSensitive bool) (Boole
 	if err != nil {
 		return nil, err
 	}
+	if err := rejectTransformTerm(bound); err != nil {
+		return nil, err
+	}
 
 	// fast case optimizations
 	switch up.op {
@@ -730,6 +733,9 @@ func (ul *unboundLiteralPredicate) Bind(schema *Schema, caseSensitive bool) (Boo
 	if err != nil {
 		return nil, err
 	}
+	if err := rejectTransformTerm(bound); err != nil {
+		return nil, err
+	}
 
 	if (ul.op == OpStartsWith || ul.op == OpNotStartsWith) &&
 		(!bound.Type().Equals(PrimitiveTypes.String) && !bound.Type().Equals(PrimitiveTypes.Binary)) {
@@ -811,6 +817,8 @@ func createBoundLiteralPredicate(op Operation, term BoundTerm, lit Literal) (Bou
 		return newBoundLiteralPredicate[Decimal](op, term, finalLit), nil
 	case UUIDType:
 		return newBoundLiteralPredicate[uuid.UUID](op, term, finalLit), nil
+	case VariantType:
+		return nil, fmt.Errorf("%w: ordered predicates are not supported on variant fields", ErrInvalidArgument)
 	}
 
 	return nil, fmt.Errorf("%w: could not create bound literal predicate for term type %s",
@@ -911,6 +919,9 @@ func (usp *unboundSetPredicate) Term() UnboundTerm { return usp.term }
 func (usp *unboundSetPredicate) Bind(schema *Schema, caseSensitive bool) (BooleanExpression, error) {
 	bound, err := usp.term.Bind(schema, caseSensitive)
 	if err != nil {
+		return nil, err
+	}
+	if err := rejectTransformTerm(bound); err != nil {
 		return nil, err
 	}
 
@@ -1067,4 +1078,57 @@ func (b *BoundTransform) evalToLiteral(st StructLike) Optional[Literal] {
 
 func (b *BoundTransform) evalIsNull(st StructLike) bool {
 	return !b.evalToLiteral(st).Valid
+}
+
+// UnboundTransform is a transform applied to a term, not yet bound to a schema;
+// the unbound counterpart of BoundTransform. It's what a transform term in a
+// REST expression (e.g. bucket[16](id)) parses into.
+type UnboundTransform struct {
+	transform Transform
+	term      UnboundTerm
+}
+
+func NewUnboundTransform(transform Transform, term UnboundTerm) *UnboundTransform {
+	return &UnboundTransform{transform: transform, term: term}
+}
+
+func (*UnboundTransform) isTerm() {}
+func (u *UnboundTransform) String() string {
+	return fmt.Sprintf("UnboundTransform(transform=%s, term=%s)", u.transform, u.term)
+}
+
+// Transform returns the transform applied to the term.
+func (u *UnboundTransform) Transform() Transform { return u.transform }
+
+func (u *UnboundTransform) Equals(other UnboundTerm) bool {
+	rhs, ok := other.(*UnboundTransform)
+	if !ok {
+		return false
+	}
+
+	return u.transform.Equals(rhs.transform) && u.term.Equals(rhs.term)
+}
+
+func (u *UnboundTransform) Bind(schema *Schema, caseSensitive bool) (BoundTerm, error) {
+	bound, err := u.term.Bind(schema, caseSensitive)
+	if err != nil {
+		return nil, err
+	}
+	if !u.transform.CanTransform(bound.Type()) {
+		return nil, fmt.Errorf("%w: transform %s cannot be applied to %s",
+			ErrInvalidArgument, u.transform, bound.Type())
+	}
+
+	return &BoundTransform{transform: u.transform, term: bound}, nil
+}
+
+// rejectTransformTerm guards the typed bound-predicate machinery, which only
+// accepts bound[T] terms (references). Binding a predicate over a transform term
+// isn't supported yet; without this it would panic in newBound*Predicate.
+func rejectTransformTerm(term BoundTerm) error {
+	if _, ok := term.(*BoundTransform); ok {
+		return fmt.Errorf("%w: binding a predicate over a transform term is not supported", ErrNotImplemented)
+	}
+
+	return nil
 }

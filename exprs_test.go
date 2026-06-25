@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -887,4 +888,21 @@ func TestBindAboveBelowIntMax(t *testing.T) {
 			assert.Equal(t, tt.exp, b)
 		})
 	}
+}
+
+func TestVariantBoundLiteralRejectionMessage(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.VariantType{}, Required: false},
+	)
+
+	var b variant.Builder
+	require.NoError(t, b.Append(int64(1)))
+	val, err := b.Build()
+	require.NoError(t, err)
+
+	pred := iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference("payload"), iceberg.VariantLiteral(val))
+	_, err = iceberg.BindExpr(sc, pred, true)
+	require.Error(t, err)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.ErrorContains(t, err, "ordered predicates are not supported on variant fields")
 }

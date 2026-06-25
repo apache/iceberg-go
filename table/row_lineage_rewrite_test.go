@@ -51,6 +51,51 @@ func newV3RowLineageTestTable(t *testing.T) *table.Table {
 	return table.New(table.Identifier{"db", "row_lineage_test"}, meta, metaLoc, fsF, cat)
 }
 
+func newV2RowLineageTestTable(t *testing.T) *table.Table {
+	t.Helper()
+
+	location := filepath.ToSlash(t.TempDir())
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, location,
+		iceberg.Properties{table.PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+
+	metaLoc := location + "/metadata/v1.metadata.json"
+	fsF := func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }
+	cat := &concurrentTestCatalog{metadata: meta, location: metaLoc, fsF: fsF}
+
+	return table.New(table.Identifier{"db", "row_lineage_test"}, meta, metaLoc, fsF, cat)
+}
+
+func readRowIDsByID(t *testing.T, ctx context.Context, tbl *table.Table) map[int64]int64 {
+	t.Helper()
+
+	_, itr, err := tbl.Scan(table.WithRowLineage()).ToArrowRecords(ctx)
+	require.NoError(t, err)
+
+	got := map[int64]int64{}
+	for rec, err := range itr {
+		require.NoError(t, err)
+		idIdx := rec.Schema().FieldIndices("id")
+		require.NotEmpty(t, idIdx)
+		rowIDIdx := rec.Schema().FieldIndices(iceberg.RowIDColumnName)
+		require.NotEmpty(t, rowIDIdx, "_row_id must be projected")
+
+		idCol := rec.Column(idIdx[0]).(*array.Int64)
+		rowIDCol := rec.Column(rowIDIdx[0]).(*array.Int64)
+		for i := 0; i < int(rec.NumRows()); i++ {
+			require.False(t, rowIDCol.IsNull(i), "_row_id must be non-null for id=%d", idCol.Value(i))
+			got[idCol.Value(i)] = rowIDCol.Value(i)
+		}
+		rec.Release()
+	}
+
+	return got
+}
+
 // TestCoWRewritePreservesRowID verifies that a copy-on-write overwrite with a
 // row filter preserves the original _row_id and _last_updated_sequence_number
 // values in the rewritten file. Surviving rows must keep both values from the
@@ -261,7 +306,7 @@ func TestExecuteCompactionGroupPreservesRowID(t *testing.T) {
 
 	tx := tbl.NewTransaction()
 	rewrite := tx.NewRewrite(nil)
-	rewrite.Apply(gr.OldDataFiles, gr.NewDataFiles, gr.SafePosDeletes)
+	rewrite.ApplyResult(gr)
 	require.NoError(t, rewrite.Commit(ctx))
 	tbl, err = tx.Commit(ctx)
 	require.NoError(t, err)
@@ -291,4 +336,101 @@ func TestExecuteCompactionGroupPreservesRowID(t *testing.T) {
 		map[int64]int64{1: 0, 2: 1, 3: 2, 4: 3},
 		got,
 		"compaction must preserve every row's _row_id")
+}
+
+// TestExecuteCompactionGroupPreservesRowIDAcrossV2Upgrade verifies that
+// compaction preserves _row_id when a group mixes a pre-upgrade v2-era data
+// file (written into a v2-format manifest, no row lineage) with a v3 data file.
+//
+// The first commit after upgrading to v3 assigns a first_row_id to every data
+// manifest in the new v3 manifest list — including the carried-over v2-era one
+// (spec: First Row ID Inheritance, "even if the data file is existing"). The
+// v2-era manifest keeps its internal format-version 2, so the read path must
+// gate row-id inheritance on that manifest-list first_row_id, not on the
+// manifest's own version. If it does not, the v2-era file's FirstRowID stays
+// nil, the group looks mixed-lineage, and compaction reassigns every _row_id.
+func TestExecuteCompactionGroupPreservesRowIDAcrossV2Upgrade(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.DefaultAllocator
+
+	tbl := newV2RowLineageTestTable(t)
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	// Append while still v2: produces a v2-format manifest with no row lineage.
+	v2Data, err := array.TableFromJSON(mem, arrowSchema, []string{
+		`[{"id": 1, "data": "a"}, {"id": 2, "data": "b"}]`,
+	})
+	require.NoError(t, err)
+	t.Cleanup(v2Data.Release)
+	tbl, err = tbl.Append(ctx, array.NewTableReader(v2Data, -1), nil)
+	require.NoError(t, err)
+
+	// Upgrade to v3 in place, then append again. The v3 append is the first v3
+	// commit, so its manifest list assigns first_row_id to both the new and the
+	// carried-over v2-era manifest.
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.UpgradeFormatVersion(3))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 3, tbl.Metadata().Version())
+
+	v3Data, err := array.TableFromJSON(mem, arrowSchema, []string{
+		`[{"id": 3, "data": "c"}, {"id": 4, "data": "d"}]`,
+	})
+	require.NoError(t, err)
+	t.Cleanup(v3Data.Release)
+	tbl, err = tbl.Append(ctx, array.NewTableReader(v3Data, -1), nil)
+	require.NoError(t, err)
+
+	// The planner must see a non-null inherited FirstRowID on BOTH files — the
+	// v2-era one included. This is the exact mechanism the inheritance gate
+	// restores; without it the v2-era task's FirstRowID is nil.
+	tasks, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 2, "two source files for compaction")
+
+	scanTasks := make([]table.FileScanTask, len(tasks))
+	var totalSize int64
+	for i, st := range tasks {
+		require.NotNilf(t, st.FirstRowID,
+			"every data file in a committed v3 snapshot must carry an inherited first_row_id, including the v2-era file (path %s)",
+			st.File.FilePath())
+		scanTasks[i] = st
+		totalSize += st.File.FileSizeBytes()
+	}
+
+	// Baseline the engine-assigned _row_id for every row before compaction. The
+	// four rows must form one contiguous 0-based lineage with no overlap across the
+	// v2->v3 boundary: manifest-list order puts the newest (v3) manifest first, so
+	// the v3 file (id 3,4) inherits [0,1] and the carried-over v2-era file (id 1,2)
+	// inherits [2,3]. A gap, overlap, or duplicate means inheritance mis-assigned a
+	// range.
+	pre := readRowIDsByID(t, ctx, tbl)
+	assert.Equal(t, map[int64]int64{3: 0, 4: 1, 1: 2, 2: 3}, pre,
+		"each row's inherited _row_id must be distinct and contiguous from 0")
+
+	group := table.CompactionTaskGroup{
+		PartitionKey:   "single",
+		Tasks:          scanTasks,
+		TotalSizeBytes: totalSize,
+	}
+	gr, err := table.ExecuteCompactionGroup(ctx, tbl, group)
+	require.NoError(t, err)
+	require.Equal(t, 2, len(gr.OldDataFiles), "both source files should be replaced")
+	require.GreaterOrEqual(t, len(gr.NewDataFiles), 1, "compaction should produce at least one output file")
+
+	tx = tbl.NewTransaction()
+	rewrite := tx.NewRewrite(nil)
+	rewrite.ApplyResult(gr)
+	require.NoError(t, rewrite.Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	post := readRowIDsByID(t, ctx, tbl)
+	assert.Equal(t, pre, post,
+		"compaction across a v2->v3 upgrade must preserve every row's _row_id, including the v2-era rows")
 }

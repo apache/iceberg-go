@@ -164,6 +164,31 @@ func newTestDataFile(t *testing.T, spec iceberg.PartitionSpec, path string, part
 	return newTestDataFileWithCount(t, spec, path, partition, 1)
 }
 
+func newTestPosDeleteFileForSpec(
+	t *testing.T,
+	spec iceberg.PartitionSpec,
+	path string,
+	partition map[int]any,
+	referencedDataFile string,
+) iceberg.DataFile {
+	t.Helper()
+
+	builder, err := iceberg.NewDataFileBuilder(
+		spec,
+		iceberg.EntryContentPosDeletes,
+		path,
+		iceberg.ParquetFile,
+		partition,
+		nil,
+		nil,
+		1,
+		1,
+	)
+	require.NoError(t, err, "new position delete file builder")
+
+	return builder.ReferencedDataFile(referencedDataFile).Build()
+}
+
 func newTestDataFileWithCount(t *testing.T, spec iceberg.PartitionSpec, path string, partition map[int]any, count int64) iceberg.DataFile {
 	t.Helper()
 
@@ -634,6 +659,55 @@ func TestManifestWriterClosesUnderlyingFile(t *testing.T) {
 	require.Empty(t, unclosed, "all file writerFactory should be closed, but these are still open: %v", unclosed)
 }
 
+func TestAddedDeleteManifestsUseDeleteFileSpecID(t *testing.T) {
+	oldSpec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, oldSpec)
+
+	newSpec := partitionedSpec()
+	require.NoError(t, txn.meta.AddPartitionSpec(&newSpec, false))
+	require.NoError(t, txn.meta.SetDefaultSpecID(-1))
+	currentSpec, err := txn.meta.CurrentSpec()
+	require.NoError(t, err)
+	require.NotNil(t, currentSpec)
+	require.Equal(t, 1, currentSpec.ID(), "test setup should evolve the current spec")
+
+	sp := newFastAppendFilesProducer(OpDelete, txn, wfs, nil, nil)
+	oldSpecDelete := newTestPosDeleteFileForSpec(
+		t,
+		oldSpec,
+		"mem://default/table-location/delete/old-spec-pos-delete.parquet",
+		nil,
+		"mem://default/table-location/data/old-spec-data.parquet",
+	)
+	currentSpecDelete := newTestPosDeleteFileForSpec(
+		t,
+		*currentSpec,
+		"mem://default/table-location/delete/current-spec-pos-delete.parquet",
+		map[int]any{1000: int32(7)},
+		"mem://default/table-location/data/current-spec-data.parquet",
+	)
+	sp.appendDeleteFile(oldSpecDelete)
+	sp.appendDeleteFile(currentSpecDelete)
+
+	manifests, err := sp.manifests(context.Background())
+	require.NoError(t, err)
+
+	deleteManifestSpecIDs := make([]int32, 0, len(manifests))
+	for _, manifest := range manifests {
+		if manifest.ManifestContent() != iceberg.ManifestContentDeletes {
+			continue
+		}
+
+		deleteManifestSpecIDs = append(deleteManifestSpecIDs, manifest.PartitionSpecID())
+		for entry, err := range manifest.Entries(wfs, false) {
+			require.NoError(t, err)
+			require.Equal(t, manifest.PartitionSpecID(), entry.DataFile().SpecID())
+		}
+	}
+
+	require.ElementsMatch(t, []int32{0, 1}, deleteManifestSpecIDs)
+}
+
 // TestCreateManifestClosesUnderlyingFile tests that createManifest properly
 // closes the underlying file writer. This is related to issue #644 and #681.
 func TestCreateManifestClosesUnderlyingFile(t *testing.T) {
@@ -921,6 +995,79 @@ func TestComputeOwnManifests_NewTable(t *testing.T) {
 	got, err := sp.computeOwnManifests(nil)
 	require.NoError(t, err, "new table: computeOwnManifests must not error")
 	require.Nil(t, got, "new table: returned manifests must equal input")
+}
+
+// TestSummary_SnapshotByIDError verifies that summary computation fails when
+// the parent snapshot cannot be found, instead of silently treating totals as
+// starting from zero.
+func TestSummary_SnapshotByIDError(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	io := newMemIO(1<<20, nil)
+	txn := createTestTransaction(t, io, spec)
+	sp := newFastAppendFilesProducer(OpAppend, txn, io, nil, nil)
+	sp.parentSnapshotID = 9999 // no such snapshot in metadata
+	sp.appendDataFile(newTestDataFile(t, spec, "file://data.parquet", nil))
+
+	_, err := sp.summary(nil)
+	require.Error(t, err, "unknown parent snapshot ID: summary must return error, not silent fallback")
+	require.ErrorIs(t, err, ErrSnapshotNotFound,
+		"production wraps ErrSnapshotNotFound; pin meaning via errors.Is")
+	require.ErrorContains(t, err, "summary: lookup parent snapshot 9999",
+		"error must identify the summary code path and parent snapshot ID")
+}
+
+// TestSummary_InheritsPreviousSnapshotTotals verifies that incremental totals
+// are computed from the parent snapshot summary when the parent exists.
+func TestSummary_InheritsPreviousSnapshotTotals(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	io := newMemIO(1<<20, nil)
+	txn := createTestTransaction(t, io, spec)
+
+	const parentID = int64(42)
+	txn.meta.snapshotList = append(txn.meta.snapshotList, Snapshot{
+		SnapshotID: parentID,
+		Summary: &Summary{
+			Operation: OpAppend,
+			Properties: iceberg.Properties{
+				totalDataFilesKey: "5",
+			},
+		},
+	})
+
+	sp := newFastAppendFilesProducer(OpAppend, txn, io, nil, nil)
+	sp.parentSnapshotID = parentID
+	sp.appendDataFile(newTestDataFile(t, spec, "file://data.parquet", nil))
+
+	sum, err := sp.summary(nil)
+	require.NoError(t, err)
+	require.Equal(t, "6", sum.Properties[totalDataFilesKey],
+		"total-data-files must inherit parent total (5) plus one added file")
+	require.Equal(t, "1", sum.Properties[addedDataFilesKey])
+}
+
+// TestSummary_ParentSnapshotWithoutSummary verifies that summary computation
+// does not panic when the parent snapshot exists but has no summary (V1 /
+// omitempty). Totals fall back to the zero baseline like a new table.
+func TestSummary_ParentSnapshotWithoutSummary(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	io := newMemIO(1<<20, nil)
+	txn := createTestTransaction(t, io, spec)
+
+	const parentID = int64(42)
+	txn.meta.snapshotList = append(txn.meta.snapshotList, Snapshot{
+		SnapshotID: parentID,
+		Summary:    nil,
+	})
+
+	sp := newFastAppendFilesProducer(OpAppend, txn, io, nil, nil)
+	sp.parentSnapshotID = parentID
+	sp.appendDataFile(newTestDataFile(t, spec, "file://data.parquet", nil))
+
+	sum, err := sp.summary(nil)
+	require.NoError(t, err)
+	require.Equal(t, "1", sum.Properties[totalDataFilesKey],
+		"nil parent summary must use zero baseline, not panic")
+	require.Equal(t, "1", sum.Properties[addedDataFilesKey])
 }
 
 // TestComputeOwnManifests_SnapshotByIDError verifies that when the parent

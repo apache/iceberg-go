@@ -80,37 +80,43 @@ type NumericLiteral interface {
 	Decrement() Literal
 }
 
-// NewLiteral provides a literal based on the type of T
+// NewLiteral provides a literal based on the type of T.
+//
+// The type switch is performed on &val (a pointer) rather than val itself.
+// Boxing a small scalar such as bool into an interface makes the compiler
+// reference runtime.staticuint64s, which emits a relocation the linker rejects
+// as misaligned on big-endian platforms such as s390x. Switching on a pointer
+// boxes only the pointer, never the scalar, avoiding that reference.
 func NewLiteral[T LiteralType](val T) Literal {
-	switch v := any(val).(type) {
-	case bool:
-		return BoolLiteral(v)
-	case int32:
-		return Int32Literal(v)
-	case int64:
-		return Int64Literal(v)
-	case float32:
-		return Float32Literal(v)
-	case float64:
-		return Float64Literal(v)
-	case Date:
-		return DateLiteral(v)
-	case Time:
-		return TimeLiteral(v)
-	case Timestamp:
-		return TimestampLiteral(v)
-	case TimestampNano:
-		return TimestampNsLiteral(v)
-	case string:
-		return StringLiteral(v)
-	case []byte:
-		return BinaryLiteral(v)
-	case uuid.UUID:
-		return UUIDLiteral(v)
-	case Decimal:
-		return DecimalLiteral(v)
-	case variant.Value:
-		return VariantLiteral(v)
+	switch v := any(&val).(type) {
+	case *bool:
+		return BoolLiteral(*v)
+	case *int32:
+		return Int32Literal(*v)
+	case *int64:
+		return Int64Literal(*v)
+	case *float32:
+		return Float32Literal(*v)
+	case *float64:
+		return Float64Literal(*v)
+	case *Date:
+		return DateLiteral(*v)
+	case *Time:
+		return TimeLiteral(*v)
+	case *Timestamp:
+		return TimestampLiteral(*v)
+	case *TimestampNano:
+		return TimestampNsLiteral(*v)
+	case *string:
+		return StringLiteral(*v)
+	case *[]byte:
+		return BinaryLiteral(*v)
+	case *uuid.UUID:
+		return UUIDLiteral(*v)
+	case *Decimal:
+		return DecimalLiteral(*v)
+	case *variant.Value:
+		return VariantLiteral(*v)
 	}
 	panic("can't happen due to literal type constraint")
 }
@@ -960,8 +966,8 @@ func (s StringLiteral) To(typ Type) (Literal, error) {
 
 		return TimeLiteral(val), nil
 	case TimestampType:
-		// requires RFC3339 with no time zone
-		tm, err := time.Parse("2006-01-02T15:04:05", string(s))
+		// ISO date-time, no zone; fractional seconds optional.
+		tm, err := time.Parse("2006-01-02T15:04:05.999999999", string(s))
 		if err != nil {
 			return nil, fmt.Errorf("%w: invalid Timestamp format for casting from string '%s': %s",
 				ErrBadCast, s, err.Error())
@@ -969,14 +975,32 @@ func (s StringLiteral) To(typ Type) (Literal, error) {
 
 		return TimestampLiteral(Timestamp(tm.UTC().UnixMicro())), nil
 	case TimestampTzType:
-		// requires RFC3339 format WITH time zone
-		tm, err := time.Parse(time.RFC3339, string(s))
+		// ISO date-time WITH zone; up to microsecond fractional seconds.
+		tm, err := time.Parse("2006-01-02T15:04:05.999999Z07:00", string(s))
 		if err != nil {
 			return nil, fmt.Errorf("%w: invalid TimestampTz format for casting from string '%s': %s",
 				ErrBadCast, s, err.Error())
 		}
 
 		return TimestampLiteral(Timestamp(tm.UTC().UnixMicro())), nil
+	case TimestampNsType:
+		// Same as timestamp but nanosecond precision.
+		tm, err := time.Parse("2006-01-02T15:04:05.999999999", string(s))
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid TimestampNs format for casting from string '%s': %s",
+				ErrBadCast, s, err.Error())
+		}
+
+		return TimestampNsLiteral(TimestampNano(tm.UTC().UnixNano())), nil
+	case TimestampTzNsType:
+		// Same as timestamptz but nanosecond precision.
+		tm, err := time.Parse("2006-01-02T15:04:05.999999999Z07:00", string(s))
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid TimestampTzNs format for casting from string '%s': %s",
+				ErrBadCast, s, err.Error())
+		}
+
+		return TimestampNsLiteral(TimestampNano(tm.UTC().UnixNano())), nil
 	case UUIDType:
 		val, err := uuid.Parse(string(s))
 		if err != nil {

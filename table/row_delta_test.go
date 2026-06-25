@@ -423,6 +423,19 @@ func TestRowDeltaMultipleCommitsOnSameTransaction(t *testing.T) {
 func writeParquetFile(t testing.TB, path string, sc *arrow.Schema, jsonData string) {
 	t.Helper()
 
+	writeParquetFileWithProperties(t, path, sc, jsonData, 0, nil)
+}
+
+func writeParquetFileWithProperties(
+	t testing.TB,
+	path string,
+	sc *arrow.Schema,
+	jsonData string,
+	rowGroupSize int64,
+	writerProps *parquet.WriterProperties,
+) {
+	t.Helper()
+
 	rec, _, err := array.RecordFromJSON(memory.DefaultAllocator, sc, strings.NewReader(jsonData))
 	require.NoError(t, err)
 	defer rec.Release()
@@ -430,13 +443,19 @@ func writeParquetFile(t testing.TB, path string, sc *arrow.Schema, jsonData stri
 	fs := iceio.LocalFS{}
 	fw, err := fs.Create(path)
 	require.NoError(t, err)
+	defer fw.Close()
 
 	tbl := array.NewTableFromRecords(sc, []arrow.RecordBatch{rec})
 	defer tbl.Release()
 
-	require.NoError(t, pqarrow.WriteTable(tbl, fw, rec.NumRows(),
-		parquet.NewWriterProperties(parquet.WithStats(true)),
-		pqarrow.DefaultWriterProps()))
+	if rowGroupSize <= 0 {
+		rowGroupSize = rec.NumRows()
+	}
+	if writerProps == nil {
+		writerProps = parquet.NewWriterProperties(parquet.WithStats(true))
+	}
+
+	require.NoError(t, pqarrow.WriteTable(tbl, fw, rowGroupSize, writerProps, pqarrow.DefaultWriterProps()))
 }
 
 func TestRowDeltaIntegrationPosDeleteRoundTrip(t *testing.T) {
@@ -490,10 +509,13 @@ func TestRowDeltaIntegrationPosDeleteRoundTrip(t *testing.T) {
 	// (0-indexed: positions 1 and 3 → "beta" and "delta")
 	posDelArrowSc := table.PositionalDeleteArrowSchema
 	posDelPath := location + "/data/pos-del-001.parquet"
-	writeParquetFile(t, posDelPath, posDelArrowSc, `[
+	writeParquetFileWithProperties(t, posDelPath, posDelArrowSc, `[
 		{"file_path": "`+dataPath+`", "pos": 1},
 		{"file_path": "`+dataPath+`", "pos": 3}
-	]`)
+	]`, 1, parquet.NewWriterProperties(
+		parquet.WithStats(true),
+		parquet.WithDictionaryDefault(false),
+	))
 
 	posDelBuilder, err := iceberg.NewDataFileBuilder(
 		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
@@ -518,16 +540,20 @@ func TestRowDeltaIntegrationPosDeleteRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 
 	var ids []int64
+	var data []string
 	for rec, err := range itr {
 		require.NoError(t, err)
-		col := rec.Column(0).(*array.Int64)
-		for i := 0; i < col.Len(); i++ {
-			ids = append(ids, col.Value(i))
+		idCol := rec.Column(0).(*array.Int64)
+		dataCol := rec.Column(1).(*array.String)
+		for i := 0; i < idCol.Len(); i++ {
+			ids = append(ids, idCol.Value(i))
+			data = append(data, dataCol.Value(i))
 		}
 		rec.Release()
 	}
 
 	assert.Equal(t, []int64{1, 3, 5}, ids, "expected rows at positions 0,2,4 (beta/delta deleted)")
+	assert.Equal(t, []string{"alpha", "gamma", "epsilon"}, data)
 }
 
 func assertRowCount(t *testing.T, tbl *table.Table, expected int64) {
