@@ -249,6 +249,7 @@ type DataFileOpts struct {
 	FileSize        int64
 	PartitionValues map[int]any
 	SortOrderID     int
+	FirstRowID      *int64
 }
 
 func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
@@ -331,6 +332,10 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 	}
 
 	bldr.SortOrderID(opts.SortOrderID)
+
+	if opts.FirstRowID != nil {
+		bldr.FirstRowID(*opts.FirstRowID)
+	}
 
 	return bldr.Build()
 }

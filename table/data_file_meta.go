@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/iceberg-go"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 )
@@ -37,8 +38,9 @@ type DataFileArgs struct {
 	Schema *iceberg.Schema
 
 	// Spec is the partition spec the resulting DataFile is bound to —
-	// typically tbl.Spec(). For an unpartitioned table pass
-	// *iceberg.UnpartitionedSpec.
+	// typically tbl.Spec(). The zero value [iceberg.PartitionSpec]{} is
+	// equivalent to *iceberg.UnpartitionedSpec and is accepted for
+	// unpartitioned tables.
 	Spec iceberg.PartitionSpec
 
 	// Format identifies the on-disk file format of the file being
@@ -83,8 +85,14 @@ type DataFileArgs struct {
 	// EqualityFieldIDs lists the schema field IDs that an equality
 	// delete file matches on. Required when
 	// Content == [iceberg.EntryContentEqDeletes] and MUST be empty
-	// for every other Content value.
+	// for every other Content value. Every listed ID must be present in Schema.
 	EqualityFieldIDs []int
+
+	// FirstRowID is the _row_id assigned to the first row of the data file.
+	// Required when the target table uses format version 3 or later and
+	// Content == [iceberg.EntryContentData]; ignored for v1/v2 tables
+	// or delete files.
+	FirstRowID *int64
 }
 
 // DataFileFromMetadata builds a fully populated [iceberg.DataFile] from a
@@ -100,12 +108,29 @@ type DataFileArgs struct {
 // (delete files); it is NOT committed automatically. The file bytes
 // described by args.Metadata must already have been uploaded to
 // args.FilePath.
-func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
+func DataFileFromMetadata(args DataFileArgs) (df iceberg.DataFile, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			df = nil
+			switch e := r.(type) {
+			case error:
+				err = fmt.Errorf("error while building an iceberg datafile: %w", e)
+			default:
+				err = fmt.Errorf("error while building an iceberg datafile: %v", e)
+			}
+		}
+	}()
+
 	if args.Schema == nil {
 		return nil, errors.New("schema is required")
 	}
 	if args.Metadata == nil {
 		return nil, errors.New("file metadata is required")
+	}
+	if _, ok := args.Metadata.(*metadata.FileMetaData); !ok {
+		return nil, fmt.Errorf(
+			"unsupported metadata type: expected *metadata.FileMetaData, got %T",
+			args.Metadata)
 	}
 	if args.FilePath == "" {
 		return nil, errors.New("file path is required")
@@ -123,10 +148,23 @@ func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 	}
 
 	if args.Content == iceberg.EntryContentEqDeletes && len(args.EqualityFieldIDs) == 0 {
-		return nil, errors.New("equalityFieldIDs is required for equality-delete files")
+		return nil, errors.New("EqualityFieldIDs is required for equality-delete files")
 	}
 	if args.Content != iceberg.EntryContentEqDeletes && len(args.EqualityFieldIDs) > 0 {
-		return nil, fmt.Errorf("equalityFieldIDs must be empty for content %v", args.Content)
+		return nil, fmt.Errorf("EqualityFieldIDs must be empty for content %v", args.Content)
+	}
+
+	if args.Content == iceberg.EntryContentPosDeletes && args.SortOrderID != UnsortedSortOrderID {
+		return nil, fmt.Errorf("position delete file claims sort order id %d; the spec requires unsorted order id (%d)",
+			args.SortOrderID, UnsortedSortOrderID)
+	}
+
+	if err := validateContentSchema(args); err != nil {
+		return nil, err
+	}
+
+	if err := validatePartitionValues(args.Spec, args.PartitionValues); err != nil {
+		return nil, err
 	}
 
 	format := tblutils.GetFileFormat(args.Format)
@@ -155,7 +193,7 @@ func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 	}
 
 	if len(args.EqualityFieldIDs) > 0 {
-		stats.EqualityFieldIDs = append(stats.EqualityFieldIDs, args.EqualityFieldIDs...)
+		stats.EqualityFieldIDs = args.EqualityFieldIDs
 	}
 
 	partitionValues := args.PartitionValues
@@ -163,7 +201,7 @@ func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 		partitionValues = make(map[int]any)
 	}
 
-	df := stats.ToDataFile(tblutils.DataFileOpts{
+	df = stats.ToDataFile(tblutils.DataFileOpts{
 		Schema:          args.Schema,
 		Spec:            args.Spec,
 		Path:            args.FilePath,
@@ -172,7 +210,58 @@ func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 		FileSize:        args.FileSize,
 		PartitionValues: partitionValues,
 		SortOrderID:     args.SortOrderID,
+		FirstRowID:      args.FirstRowID,
 	})
 
 	return df, nil
+}
+
+func validateContentSchema(args DataFileArgs) error {
+	switch args.Content {
+	case iceberg.EntryContentEqDeletes:
+		for _, id := range args.EqualityFieldIDs {
+			if _, ok := args.Schema.FindFieldByID(id); !ok {
+				return fmt.Errorf(
+					"EqualityFieldIDs contains field id %d which is not present in the supplied schema", id)
+			}
+		}
+	case iceberg.EntryContentPosDeletes:
+		for _, want := range iceberg.PositionalDeleteSchema.Fields() {
+			got, ok := args.Schema.FindFieldByID(want.ID)
+			if !ok {
+				return fmt.Errorf(
+					"positional delete schema requires reserved field id %d (%s); schema is missing it", want.ID, want.Name)
+			}
+			if !got.Type.Equals(want.Type) {
+				return fmt.Errorf(
+					"positional delete schema field id %d (%s) must have type %s, got %s", want.ID, want.Name, want.Type, got.Type)
+			}
+		}
+	}
+
+	return nil
+}
+
+func validatePartitionValues(spec iceberg.PartitionSpec, values map[int]any) error {
+	if spec.Equals(*iceberg.UnpartitionedSpec) {
+		return nil
+	}
+
+	expected := make(map[int]string, spec.NumFields())
+	for _, field := range spec.Fields() {
+		expected[field.FieldID] = field.Name
+		if _, ok := values[field.FieldID]; !ok {
+			return fmt.Errorf("missing partition value for field id %d (%s) in spec id %d",
+				field.FieldID, field.Name, spec.ID())
+		}
+	}
+
+	for id := range values {
+		if _, ok := expected[id]; !ok {
+			return fmt.Errorf("partition value supplied for field id %d which is not part of the spec id %d",
+				id, spec.ID())
+		}
+	}
+
+	return nil
 }
