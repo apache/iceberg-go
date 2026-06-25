@@ -89,7 +89,7 @@ type DataFileArgs struct {
 	EqualityFieldIDs []int
 
 	// FirstRowID is the _row_id assigned to the first row of the data file.
-	//  Set it for v3 data files; it is not required on v1/v2 tables, and 
+	// Set it for v3 data files; it is not required on v1/v2 tables, and
 	// first_row_id does not apply to delete files.
 	FirstRowID *int64
 }
