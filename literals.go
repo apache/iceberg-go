@@ -34,6 +34,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/parquet/variant"
+	"github.com/apache/iceberg-go/collation"
 	"github.com/google/uuid"
 )
 
@@ -603,7 +604,8 @@ func (Float32Literal) Comparator() Comparator[float32] { return cmp.Compare[floa
 func (f Float32Literal) Type() Type                    { return PrimitiveTypes.Float32 }
 func (f Float32Literal) Value() float32                { return float32(f) }
 func (f Float32Literal) Any() any                      { return f.Value() }
-func (f Float32Literal) String() string                { return strconv.FormatFloat(float64(f), 'g', -1, 32) }
+func (f Float32Literal) String() string { return strconv.FormatFloat(float64(f), 'g', -1, 32) }
+
 func (f Float32Literal) To(t Type) (Literal, error) {
 	switch t := t.(type) {
 	case Float32Type:
@@ -651,7 +653,8 @@ func (Float64Literal) Comparator() Comparator[float64] { return cmp.Compare[floa
 func (f Float64Literal) Type() Type                    { return PrimitiveTypes.Float64 }
 func (f Float64Literal) Value() float64                { return float64(f) }
 func (f Float64Literal) Any() any                      { return f.Value() }
-func (f Float64Literal) String() string                { return strconv.FormatFloat(float64(f), 'g', -1, 64) }
+func (f Float64Literal) String() string { return strconv.FormatFloat(float64(f), 'g', -1, 64) }
+
 func (f Float64Literal) To(t Type) (Literal, error) {
 	switch t := t.(type) {
 	case Float32Type:
@@ -848,9 +851,10 @@ func (t *TimestampLiteral) UnmarshalBinary(data []byte) error {
 type TimestampNsLiteral TimestampNano
 
 func (TimestampNsLiteral) Comparator() Comparator[TimestampNano] { return cmp.Compare[TimestampNano] }
-func (t TimestampNsLiteral) Type() Type                          { return PrimitiveTypes.TimestampNs }
-func (t TimestampNsLiteral) Value() TimestampNano                { return TimestampNano(t) }
-func (t TimestampNsLiteral) Any() any                            { return t.Value() }
+
+func (t TimestampNsLiteral) Type() Type           { return PrimitiveTypes.TimestampNs }
+func (t TimestampNsLiteral) Value() TimestampNano { return TimestampNano(t) }
+func (t TimestampNsLiteral) Any() any             { return t.Value() }
 func (t TimestampNsLiteral) String() string {
 	tm := TimestampNano(t).ToTime()
 
@@ -901,6 +905,24 @@ func (t *TimestampNsLiteral) UnmarshalBinary(data []byte) error {
 }
 
 type StringLiteral string
+
+// CollatedStringComparator returns a string Comparator honoring spec. For a nil
+// or binary spec it is the default byte-order comparator, identical to
+// StringLiteral.Comparator().
+//
+// Note that a collation is a property of a column/field, not of an individual
+// literal value, so the collation-aware comparator is sourced from the field's
+// StringType (see StringType.Comparator) rather than from a StringLiteral. A
+// bare StringLiteral has no collation context and therefore always compares
+// byte-wise; this mirrors Delta Kernel, where predicates (not literals) carry
+// the collation and default to binary.
+func CollatedStringComparator(spec *collation.Spec) Comparator[string] {
+	if spec.IsBinary() {
+		return cmp.Compare[string]
+	}
+
+	return spec.Comparator()
+}
 
 func (StringLiteral) Comparator() Comparator[string] { return cmp.Compare[string] }
 func (s StringLiteral) Type() Type                   { return PrimitiveTypes.String }

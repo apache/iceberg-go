@@ -25,6 +25,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/collation"
 	"github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 )
@@ -737,6 +738,11 @@ type inclusiveMetricsEval struct {
 	st                iceberg.StructType
 	expr              iceberg.BooleanExpression
 	includeEmptyFiles bool
+
+	// collation-aware bounds (Delta-style: original values + version), keyed by
+	// field ID. Populated from a DataFile that implements
+	// iceberg.CollationBoundsProvider; nil for files without collation stats.
+	collationBounds map[int]iceberg.CollationBoundEntry
 }
 
 func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, colIndices []int) (bool, error) {
@@ -749,6 +755,11 @@ func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, c
 	m.nanCounts = nil
 	m.lowerBounds = make(map[int][]byte)
 	m.upperBounds = make(map[int][]byte)
+	// Parquet row groups carry no collation-aware bounds (collations are not a
+	// Parquet concept), so clear any left over from a prior file-level Eval on a
+	// reused evaluator. Collated columns therefore conservatively keep every row
+	// group; row-group-level collation pruning is out of scope for this prototype.
+	m.collationBounds = nil
 
 	for _, c := range colIndices {
 		colMeta, err := rgmeta.ColumnChunk(c)
@@ -798,6 +809,9 @@ func (m *inclusiveMetricsEval) Eval(file iceberg.DataFile) (bool, error) {
 	ev.valueCounts, ev.nullCounts = file.ValueCounts(), file.NullValueCounts()
 	ev.nanCounts = file.NaNValueCounts()
 	ev.lowerBounds, ev.upperBounds = file.LowerBoundValues(), file.UpperBoundValues()
+	if p, ok := file.(iceberg.CollationBoundsProvider); ok {
+		ev.collationBounds = p.CollationBounds()
+	}
 
 	return iceberg.VisitExpr(m.expr, &ev)
 }
@@ -816,8 +830,143 @@ func (m *inclusiveMetricsEval) VisitUnbound(iceberg.UnboundPredicate) bool {
 	panic("need bound predicate")
 }
 
+// collationOrderSensitive reports whether an operation compares string values
+// (ordering, equality, prefix, or set membership) and therefore must not be
+// pruned using a collated column's UTF-8 byte-order bounds. Every such op is
+// intercepted for collated columns: those collatedMightMatch understands
+// (LT/LTEQ/GT/GTEQ/EQ/IN) are pruned with collation-aware bounds, and the rest
+// (NEQ/NotIn/StartsWith/NotStartsWith) are conservatively kept — byte-order
+// prefix/inequality pruning is unsafe once comparison is collation-defined.
+// Spelled out rather than a range check so it can't silently drift if the
+// Operation enum is reordered or extended.
+func collationOrderSensitive(op iceberg.Operation) bool {
+	switch op {
+	case iceberg.OpLT, iceberg.OpLTEQ, iceberg.OpGT, iceberg.OpGTEQ,
+		iceberg.OpEQ, iceberg.OpNEQ, iceberg.OpStartsWith, iceberg.OpNotStartsWith,
+		iceberg.OpIn, iceberg.OpNotIn:
+		return true
+	default:
+		return false
+	}
+}
+
+// fieldHasNonBinaryCollation reports whether the field is a string column with a
+// collation whose order differs from UTF-8 byte order.
+func fieldHasNonBinaryCollation(f iceberg.NestedField) bool {
+	st, ok := f.Type.(iceberg.StringType)
+
+	return ok && !st.Collation().IsBinary()
+}
+
 func (m *inclusiveMetricsEval) VisitBound(pred iceberg.BoundPredicate) bool {
+	// Collation handling for ordering/equality predicates. The stored lower/upper
+	// bounds are UTF-8 byte-order bounds, but a collated column orders by its
+	// collation, which can disagree with byte order ('a' > 'B' in UTF-8 but
+	// 'a' < 'B' case-insensitively), so byte-order bounds must not be used to
+	// prune. Instead we use the column's collation-aware bounds when the data
+	// file carries them for a matching collation version; otherwise we keep the
+	// file. Null/NaN predicates are collation-independent and evaluate normally.
+	if collationOrderSensitive(pred.Op()) {
+		field := pred.Ref().Field()
+		if st, ok := field.Type.(iceberg.StringType); ok && !st.Collation().IsBinary() {
+			if result, decided := m.evalCollated(pred, field.ID, st.Collation()); decided {
+				return result
+			}
+
+			return rowsMightMatch
+		}
+	}
+
 	return iceberg.VisitBoundPredicate(pred, m)
+}
+
+// evalCollated attempts collation-aware pruning for a predicate on a collated
+// string column. It returns (result, true) when it could make a decision using
+// version-matching collation bounds, or (_, false) when no usable bounds exist
+// (the caller then conservatively keeps the file).
+func (m *inclusiveMetricsEval) evalCollated(pred iceberg.BoundPredicate, fieldID int, spec *collation.Spec) (bool, bool) {
+	entry, ok := m.collationBounds[fieldID]
+	if !ok || !entry.ValidFor(spec) {
+		return false, false
+	}
+
+	if m.containsNullsOnly(fieldID) {
+		return rowsCannotMatch, true
+	}
+
+	lower, err := iceberg.LiteralFromBytes(iceberg.PrimitiveTypes.String, entry.Lower)
+	if err != nil {
+		return false, false
+	}
+	upper, err := iceberg.LiteralFromBytes(iceberg.PrimitiveTypes.String, entry.Upper)
+	if err != nil {
+		return false, false
+	}
+
+	lowerVal, ok1 := stringLiteralValue(lower)
+	upperVal, ok2 := stringLiteralValue(upper)
+	if !ok1 || !ok2 {
+		return false, false
+	}
+
+	cmp := spec.Comparator()
+
+	return collatedMightMatch(pred, cmp, lowerVal, upperVal)
+}
+
+func stringLiteralValue(lit iceberg.Literal) (string, bool) {
+	sl, ok := lit.(iceberg.StringLiteral)
+
+	return string(sl), ok
+}
+
+// collatedMightMatch applies the inclusive-metrics logic for ordering/equality
+// predicates using the collation comparator cmp against original-value bounds
+// [lower, upper]. It returns (result, true) for handled ops; for ops that this
+// prototype does not prune (NEQ, NotIn, StartsWith, NotStartsWith) it returns
+// (rowsMightMatch, true).
+func collatedMightMatch(pred iceberg.BoundPredicate, cmp func(a, b string) int, lower, upper string) (bool, bool) {
+	switch pred.Op() {
+	case iceberg.OpLT, iceberg.OpLTEQ, iceberg.OpGT, iceberg.OpGTEQ, iceberg.OpEQ:
+		lp, ok := pred.(iceberg.BoundLiteralPredicate)
+		if !ok {
+			return rowsMightMatch, true
+		}
+		val, ok := stringLiteralValue(lp.Literal())
+		if !ok {
+			return rowsMightMatch, true
+		}
+		switch pred.Op() {
+		case iceberg.OpLT:
+			return cmp(lower, val) < 0, true
+		case iceberg.OpLTEQ:
+			return cmp(lower, val) <= 0, true
+		case iceberg.OpGT:
+			return cmp(upper, val) > 0, true
+		case iceberg.OpGTEQ:
+			return cmp(upper, val) >= 0, true
+		case iceberg.OpEQ:
+			return cmp(lower, val) <= 0 && cmp(upper, val) >= 0, true
+		default:
+			return rowsMightMatch, true
+		}
+	case iceberg.OpIn:
+		sp, ok := pred.(iceberg.BoundSetPredicate)
+		if !ok {
+			return rowsMightMatch, true
+		}
+		for _, lit := range sp.Literals().Members() {
+			val, ok := stringLiteralValue(lit)
+			if ok && cmp(lower, val) <= 0 && cmp(upper, val) >= 0 {
+				return rowsMightMatch, true
+			}
+		}
+
+		return rowsCannotMatch, true
+	}
+
+	// NEQ, NotIn, StartsWith, NotStartsWith: not pruned in this prototype.
+	return rowsMightMatch, true
 }
 
 func (m *inclusiveMetricsEval) VisitIsNull(t iceberg.BoundTerm) bool {
@@ -1282,6 +1431,13 @@ func (m *strictMetricsEval) VisitUnbound(iceberg.UnboundPredicate) bool {
 }
 
 func (m *strictMetricsEval) VisitBound(pred iceberg.BoundPredicate) bool {
+	// A collated column orders by its collation, not byte order, so the stored
+	// byte-order bounds cannot prove that all rows satisfy an ordering/equality
+	// predicate. Conservatively report that some rows might not match.
+	if collationOrderSensitive(pred.Op()) && fieldHasNonBinaryCollation(pred.Ref().Field()) {
+		return rowsMightNotMatch
+	}
+
 	return iceberg.VisitBoundPredicate(pred, m)
 }
 

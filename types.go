@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal"
+	"github.com/apache/iceberg-go/collation"
 	"github.com/apache/iceberg-go/internal"
 	"github.com/geoarrow/geoarrow-go"
 )
@@ -288,20 +289,50 @@ func (n *NestedField) Equals(other NestedField) bool {
 		n.Type.Equals(other.Type)
 }
 
+// collationSpecJSON is the on-disk form of a collation annotation, following
+// the Iceberg collation proposal's collation_spec object. The proposal's
+// collation_metrics_id (a pseudo-field holding collation-key bounds) is omitted:
+// this prototype uses Delta-style original-value bounds (see CollationBoundEntry)
+// rather than the sort-key pseudo-field.
+//
+// PROTOTYPE: this JSON shape (name + icu_collator_version) is provisional and
+// tracks the current proposal; a Java reference implementation may settle on
+// different key names, in which case stored schemas would need migration. The
+// annotation is only (de)serialized at the NestedField level — a collated string
+// nested inside a list/map element is not yet preserved on round-trip.
+type collationSpecJSON struct {
+	Name               string `json:"name"`
+	ICUCollatorVersion string `json:"icu_collator_version,omitempty"`
+}
+
 func (n NestedField) MarshalJSON() ([]byte, error) {
 	type Alias NestedField
 
-	return json.Marshal(struct {
-		Type *typeIFace `json:"type"`
+	aux := struct {
+		Type      *typeIFace         `json:"type"`
+		Collation *collationSpecJSON `json:"collation_spec,omitempty"`
 		*Alias
-	}{Type: &typeIFace{n.Type}, Alias: (*Alias)(&n)})
+	}{Type: &typeIFace{n.Type}, Alias: (*Alias)(&n)}
+
+	// A collated string keeps its Iceberg type name "string" and carries the
+	// collation as a sibling collation_spec field, so engines that don't
+	// understand collations still read it as a plain string.
+	if st, ok := n.Type.(StringType); ok && !st.Collation().IsBinary() {
+		aux.Collation = &collationSpecJSON{
+			Name:               st.Collation().String(),
+			ICUCollatorVersion: st.Collation().Version(),
+		}
+	}
+
+	return json.Marshal(aux)
 }
 
 func (n *NestedField) UnmarshalJSON(b []byte) error {
 	type Alias NestedField
 	aux := struct {
-		ID   *int      `json:"id"`
-		Type typeIFace `json:"type"`
+		ID        *int               `json:"id"`
+		Type      typeIFace          `json:"type"`
+		Collation *collationSpecJSON `json:"collation_spec,omitempty"`
 		*Alias
 	}{
 		Alias: (*Alias)(n),
@@ -324,6 +355,20 @@ func (n *NestedField) UnmarshalJSON(b []byte) error {
 
 	if n.Type == nil {
 		return fmt.Errorf("%w: field %q is missing required 'type' key in JSON", ErrInvalidSchema, n.Name)
+	}
+
+	if aux.Collation != nil {
+		if _, ok := n.Type.(StringType); !ok {
+			return fmt.Errorf("%w: field %q has collation_spec but is not a string type", ErrInvalidSchema, n.Name)
+		}
+		spec, err := collation.Parse(aux.Collation.Name)
+		if err != nil {
+			return fmt.Errorf("%w: field %q: %w", ErrInvalidSchema, n.Name, err)
+		}
+		if v := aux.Collation.ICUCollatorVersion; v != "" {
+			spec = spec.WithVersion(v)
+		}
+		n.Type = StringTypeWithCollation(spec)
 	}
 
 	return nil
@@ -749,17 +794,52 @@ func (TimestampTzType) primitive()     {}
 func (TimestampTzType) Type() string   { return "timestamptz" }
 func (TimestampTzType) String() string { return "timestamptz" }
 
-type StringType struct{}
-
-func (StringType) Equals(other Type) bool {
-	_, ok := other.(StringType)
-
-	return ok
+// StringType is the Iceberg string type. It optionally carries a collation
+// annotation that changes how values are compared and ordered without changing
+// how they are stored. The zero value (StringType{}) is the default UTF-8
+// byte-order string.
+//
+// Note: StringType now holds a pointer field, so two collated string types must
+// be compared with Equals, not ==. (== compares the spec pointer, not the
+// collation it denotes, and is unsafe as a map key for collated strings.)
+type StringType struct {
+	collation *collation.Spec
 }
 
-func (StringType) primitive()     {}
-func (StringType) Type() string   { return "string" }
-func (StringType) String() string { return "string" }
+// StringTypeWithCollation returns a string type annotated with the given
+// collation. A nil spec yields the default (binary) string type.
+func StringTypeWithCollation(spec *collation.Spec) StringType {
+	return StringType{collation: spec}
+}
+
+// Collation returns the collation annotation, or nil for the default UTF-8
+// byte-order comparison.
+func (s StringType) Collation() *collation.Spec { return s.collation }
+
+// Comparator returns the string comparator implied by this type's collation:
+// byte order for a plain string, or the collation-aware comparator otherwise.
+func (s StringType) Comparator() Comparator[string] {
+	return CollatedStringComparator(s.collation)
+}
+
+func (s StringType) Equals(other Type) bool {
+	o, ok := other.(StringType)
+	if !ok {
+		return false
+	}
+
+	return collation.Equal(s.collation, o.collation)
+}
+
+func (StringType) primitive()   {}
+func (StringType) Type() string { return "string" }
+func (s StringType) String() string {
+	if !s.collation.IsBinary() {
+		return "string collate " + s.collation.String()
+	}
+
+	return "string"
+}
 
 type UUIDType struct{}
 
