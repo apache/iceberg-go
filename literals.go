@@ -376,11 +376,10 @@ type BoolLiteral bool
 
 func (BoolLiteral) Comparator() Comparator[bool] {
 	return func(v1, v2 bool) int {
+		if v1 == v2 {
+			return 0
+		}
 		if v1 {
-			if v2 {
-				return 0
-			}
-
 			return 1
 		}
 
