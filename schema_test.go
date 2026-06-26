@@ -545,6 +545,114 @@ func TestUnmarshalSchemaRejectsDuplicateFieldIDs(t *testing.T) {
 	}
 }
 
+func TestUnmarshalSchemaRejectsMissingOrZeroCollectionFieldIDs(t *testing.T) {
+	tests := []struct {
+		name     string
+		schema   string
+		contains string
+	}{
+		{
+			name: "missing list element id",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{
+						"id": 1,
+						"name": "items",
+						"type": {
+							"type": "list",
+							"element": "int",
+							"element-required": false
+						},
+						"required": false
+					}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			contains: "field is missing required 'element-id' key in JSON",
+		},
+		{
+			name: "zero list element id",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{
+						"id": 1,
+						"name": "items",
+						"type": {
+							"type": "list",
+							"element-id": 0,
+							"element": "int",
+							"element-required": false
+						},
+						"required": false
+					}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			contains: "field 'element-id' must not be 0",
+		},
+		{
+			name: "missing map key id",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{
+						"id": 1,
+						"name": "props",
+						"type": {
+							"type": "map",
+							"key": "string",
+							"value-id": 2,
+							"value": "int",
+							"value-required": false
+						},
+						"required": false
+					}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			contains: "field is missing required 'key-id' key in JSON",
+		},
+		{
+			name: "zero map value id",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{
+						"id": 1,
+						"name": "props",
+						"type": {
+							"type": "map",
+							"key-id": 2,
+							"key": "string",
+							"value-id": 0,
+							"value": "int",
+							"value-required": false
+						},
+						"required": false
+					}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			contains: "field 'value-id' must not be 0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var schema iceberg.Schema
+			err := json.Unmarshal([]byte(tt.schema), &schema)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.ErrorContains(t, err, tt.contains)
+		})
+	}
+}
+
 func TestPruneColumnsString(t *testing.T) {
 	sc, err := iceberg.PruneColumns(tableSchemaNested, map[int]iceberg.Void{1: {}}, false)
 	require.NoError(t, err)

@@ -444,7 +444,7 @@ func (l *ListType) String() string { return fmt.Sprintf("list<%s>", l.Element) }
 
 func (l *ListType) UnmarshalJSON(b []byte) error {
 	aux := struct {
-		ID   int       `json:"element-id"`
+		ID   *int      `json:"element-id"`
 		Elem typeIFace `json:"element"`
 		Req  bool      `json:"element-required"`
 	}{}
@@ -452,7 +452,14 @@ func (l *ListType) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	l.ElementID = aux.ID
+	if aux.ID == nil {
+		return fmt.Errorf("%w: field is missing required 'element-id' key in JSON", ErrInvalidSchema)
+	}
+	if *aux.ID == 0 {
+		return fmt.Errorf("%w: field 'element-id' must not be 0", ErrInvalidSchema)
+	}
+
+	l.ElementID = *aux.ID
 	l.Element = aux.Elem.Type
 	l.ElementRequired = aux.Req
 
@@ -524,9 +531,9 @@ func (m *MapType) String() string {
 
 func (m *MapType) UnmarshalJSON(b []byte) error {
 	aux := struct {
-		KeyID    int       `json:"key-id"`
+		KeyID    *int      `json:"key-id"`
 		Key      typeIFace `json:"key"`
-		ValueID  int       `json:"value-id"`
+		ValueID  *int      `json:"value-id"`
 		Value    typeIFace `json:"value"`
 		ValueReq *bool     `json:"value-required"`
 	}{}
@@ -534,8 +541,21 @@ func (m *MapType) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	m.KeyID, m.KeyType = aux.KeyID, aux.Key.Type
-	m.ValueID, m.ValueType = aux.ValueID, aux.Value.Type
+	if aux.KeyID == nil {
+		return fmt.Errorf("%w: field is missing required 'key-id' key in JSON", ErrInvalidSchema)
+	}
+	if *aux.KeyID == 0 {
+		return fmt.Errorf("%w: field 'key-id' must not be 0", ErrInvalidSchema)
+	}
+	if aux.ValueID == nil {
+		return fmt.Errorf("%w: field is missing required 'value-id' key in JSON", ErrInvalidSchema)
+	}
+	if *aux.ValueID == 0 {
+		return fmt.Errorf("%w: field 'value-id' must not be 0", ErrInvalidSchema)
+	}
+
+	m.KeyID, m.KeyType = *aux.KeyID, aux.Key.Type
+	m.ValueID, m.ValueType = *aux.ValueID, aux.Value.Type
 	if aux.ValueReq == nil {
 		m.ValueRequired = true
 	} else {
