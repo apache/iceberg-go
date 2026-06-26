@@ -1190,6 +1190,10 @@ func (b *MetadataBuilder) reuseOrCreateNewSchemaID(newSchema *iceberg.Schema) in
 }
 
 func (b *MetadataBuilder) RemovePartitionSpecs(ints []int) error {
+	if len(ints) == 0 {
+		return nil
+	}
+
 	if slices.Contains(ints, b.defaultSpecID) {
 		return fmt.Errorf("%w: can't remove default partition spec with id %d", iceberg.ErrInvalidArgument, b.defaultSpecID)
 	}

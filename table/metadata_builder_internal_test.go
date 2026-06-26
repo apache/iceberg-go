@@ -326,6 +326,14 @@ func TestRemovePartitionSpecsNoMatchDoesNotUpdate(t *testing.T) {
 	require.Len(t, builder.specs, 1)
 }
 
+func TestRemovePartitionSpecsEmptyDoesNotUpdate(t *testing.T) {
+	builder := builderWithoutChanges(2)
+
+	require.NoError(t, builder.RemovePartitionSpecs(nil))
+	require.Empty(t, builder.updates)
+	require.Len(t, builder.specs, 1)
+}
+
 func TestSetDefaultPartitionSpec(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	curSchema, err := builder.GetSchemaByID(builder.currentSchemaID)
