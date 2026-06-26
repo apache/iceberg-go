@@ -604,7 +604,7 @@ func (Float32Literal) Comparator() Comparator[float32] { return cmp.Compare[floa
 func (f Float32Literal) Type() Type                    { return PrimitiveTypes.Float32 }
 func (f Float32Literal) Value() float32                { return float32(f) }
 func (f Float32Literal) Any() any                      { return f.Value() }
-func (f Float32Literal) String() string { return strconv.FormatFloat(float64(f), 'g', -1, 32) }
+func (f Float32Literal) String() string                { return strconv.FormatFloat(float64(f), 'g', -1, 32) }
 
 func (f Float32Literal) To(t Type) (Literal, error) {
 	switch t := t.(type) {
@@ -653,7 +653,7 @@ func (Float64Literal) Comparator() Comparator[float64] { return cmp.Compare[floa
 func (f Float64Literal) Type() Type                    { return PrimitiveTypes.Float64 }
 func (f Float64Literal) Value() float64                { return float64(f) }
 func (f Float64Literal) Any() any                      { return f.Value() }
-func (f Float64Literal) String() string { return strconv.FormatFloat(float64(f), 'g', -1, 64) }
+func (f Float64Literal) String() string                { return strconv.FormatFloat(float64(f), 'g', -1, 64) }
 
 func (f Float64Literal) To(t Type) (Literal, error) {
 	switch t := t.(type) {
