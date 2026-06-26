@@ -84,6 +84,10 @@ func TestTypeUnmarshalRejectsInvalidFixedAndDecimal(t *testing.T) {
 			wantErrContains: "fixed length must be greater than 0",
 		},
 		{
+			typ:             "fixed[99999999999999999999]",
+			wantErrContains: "value out of range",
+		},
+		{
 			typ: "fixedx[5]",
 		},
 		{

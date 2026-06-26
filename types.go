@@ -190,7 +190,10 @@ func (t *typeIFace) UnmarshalJSON(b []byte) error {
 					return fmt.Errorf("%w: %s", ErrInvalidTypeString, typename)
 				}
 
-				n, _ := strconv.Atoi(matches[1])
+				n, err := strconv.Atoi(matches[1])
+				if err != nil {
+					return fmt.Errorf("%w: %s: %w", ErrInvalidTypeString, typename, err)
+				}
 				if err := validateFixedLength(n); err != nil {
 					return fmt.Errorf("%w: %s: %w", ErrInvalidTypeString, typename, err)
 				}

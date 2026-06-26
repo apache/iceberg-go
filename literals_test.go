@@ -397,6 +397,38 @@ func TestDecimalLiteralTypePrecisionIsAtLeastScale(t *testing.T) {
 	assert.Equal(t, 10, typ.Scale())
 }
 
+func TestDecimalLiteralTypeClampsScaleIntoValidRange(t *testing.T) {
+	tests := []struct {
+		name          string
+		scale         int
+		wantPrecision int
+		wantScale     int
+	}{
+		{
+			name:          "above max precision",
+			scale:         39,
+			wantPrecision: 38,
+			wantScale:     38,
+		},
+		{
+			name:          "negative scale",
+			scale:         -1,
+			wantPrecision: 9,
+			wantScale:     0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lit := iceberg.DecimalLiteral{Val: decimal128.FromI64(1), Scale: tt.scale}
+
+			typ := lit.Type().(iceberg.DecimalType)
+			assert.Equal(t, tt.wantPrecision, typ.Precision())
+			assert.Equal(t, tt.wantScale, typ.Scale())
+		})
+	}
+}
+
 func TestFixedLiteralTypeLengthIsAtLeastOne(t *testing.T) {
 	empty := iceberg.FixedLiteral{}
 	emptyType := empty.Type().(iceberg.FixedType)

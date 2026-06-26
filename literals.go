@@ -1119,10 +1119,13 @@ func (b *BinaryLiteral) UnmarshalBinary(data []byte) error {
 type FixedLiteral []byte
 
 func (FixedLiteral) Comparator() Comparator[[]byte] { return bytes.Compare }
-func (f FixedLiteral) Type() Type                   { return FixedTypeOf(max(1, len(f))) }
-func (f FixedLiteral) Value() []byte                { return []byte(f) }
-func (f FixedLiteral) Any() any                     { return f.Value() }
-func (f FixedLiteral) String() string               { return string(f) }
+
+// Empty fixed literals can arise from zero values or empty unmarshaled data.
+// Report fixed[1] as a placeholder so Type() stays non-panicking.
+func (f FixedLiteral) Type() Type     { return FixedTypeOf(max(1, len(f))) }
+func (f FixedLiteral) Value() []byte  { return []byte(f) }
+func (f FixedLiteral) Any() any       { return f.Value() }
+func (f FixedLiteral) String() string { return string(f) }
 func (f FixedLiteral) To(typ Type) (Literal, error) {
 	switch t := typ.(type) {
 	case UUIDType:
@@ -1252,9 +1255,12 @@ func (DecimalLiteral) Comparator() Comparator[Decimal] {
 // need the real column precision must consult the bound field's type rather
 // than lit.Type(). See https://github.com/apache/iceberg-go/issues/1028.
 func (d DecimalLiteral) Type() Type {
-	precision := max(9, d.Scale)
+	// Clamp the placeholder scale into Iceberg's valid schema range so odd
+	// literal values still report a non-panicking placeholder type.
+	scale := min(maxDecimalPrecision, max(0, d.Scale))
+	precision := max(9, scale)
 
-	return DecimalTypeOf(precision, d.Scale)
+	return DecimalTypeOf(precision, scale)
 }
 func (d DecimalLiteral) Value() Decimal { return Decimal(d) }
 func (d DecimalLiteral) Any() any       { return d.Value() }
