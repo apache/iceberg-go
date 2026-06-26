@@ -76,6 +76,7 @@ var errEmptyObjectKey = errors.New("object key is empty")
 type objectLocation struct {
 	authority    string
 	key          string
+	uriKey       string
 	uriPrefix    string
 	hasAuthority bool
 }
@@ -83,7 +84,7 @@ type objectLocation struct {
 func splitObjectLocation(location string) (objectLocation, error) {
 	scheme, rest, ok := strings.Cut(location, "://")
 	if !ok {
-		return objectLocation{key: location}, nil
+		return objectLocation{key: location, uriKey: location}, nil
 	}
 
 	authorityEnd := strings.IndexAny(rest, "/?#")
@@ -109,6 +110,7 @@ func splitObjectLocation(location string) (objectLocation, error) {
 	return objectLocation{
 		authority:    authority,
 		key:          key,
+		uriKey:       key,
 		uriPrefix:    scheme + "://" + authority + "/",
 		hasAuthority: true,
 	}, nil
@@ -166,10 +168,14 @@ func defaultObjectLocationExtractor(bucketName string, opts ...keyExtractorOptio
 						parsed.authority, bucketName)
 				}
 
+				// Preserve the legacy fold-by-authority behavior on the default
+				// path so existing cross-authority manifests keep loading until
+				// the FileIO can open per-authority buckets.
 				parsed.key = legacyAuthorityKey(parsed)
 			}
 		} else {
 			parsed.key = strings.TrimPrefix(location, bucketName+"/")
+			parsed.uriKey = parsed.key
 		}
 
 		if parsed.key == "" {
@@ -294,29 +300,45 @@ func (bfs *blobFileIO) NewWriter(ctx context.Context, path string, overwrite boo
 		nil
 }
 
-func createBlobFS(ctx context.Context, bucket *blob.Bucket, keyExtractor KeyExtractor, extractObject ...objectLocationExtractor) icebergio.IO {
-	var extractor objectLocationExtractor
-	if len(extractObject) > 0 {
-		extractor = extractObject[0]
-	}
-
-	return &blobFileIO{Bucket: bucket, keyExtractor: keyExtractor, extractObject: extractor, ctx: ctx}
+func createBlobFS(ctx context.Context, bucket *blob.Bucket, keyExtractor KeyExtractor, extractObject objectLocationExtractor) icebergio.IO {
+	return &blobFileIO{Bucket: bucket, keyExtractor: keyExtractor, extractObject: extractObject, ctx: ctx}
 }
 
 func (bfs *blobFileIO) objectLocation(root string) (objectLocation, error) {
-	if bfs.extractObject != nil {
-		return bfs.extractObject(root)
+	if bfs.extractObject == nil {
+		return objectLocation{}, errors.New("blob file IO missing object location extractor")
 	}
 
-	location, err := splitObjectLocation(root)
-	if err != nil {
-		return objectLocation{}, err
+	return bfs.extractObject(root)
+}
+
+func walkedURIPath(location objectLocation, walked string) string {
+	if walked == "." {
+		return location.uriPrefix
 	}
 
-	key, err := bfs.preprocess(root)
-	location.key = key
+	uriKey := walked
+	if location.key != location.uriKey {
+		storageRoot := strings.TrimSuffix(location.key, "/")
+		if walked == location.key || walked == storageRoot {
+			uriKey = location.uriKey
+		} else {
+			prefix := storageRoot + "/"
+			if suffix, ok := strings.CutPrefix(walked, prefix); ok {
+				if location.uriKey == "" {
+					uriKey = suffix
+				} else {
+					uriKey = location.uriKey + "/" + suffix
+				}
+			}
+		}
+	}
 
-	return location, err
+	if uriKey == "" {
+		return location.uriPrefix
+	}
+
+	return location.uriPrefix + uriKey
 }
 
 func (bfs *blobFileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
@@ -332,11 +354,7 @@ func (bfs *blobFileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
 
 	return fs.WalkDir(bfs.Bucket, walkPath, func(path string, d fs.DirEntry, err error) error {
 		if location.hasAuthority {
-			if path == "." {
-				path = location.uriPrefix
-			} else {
-				path = location.uriPrefix + path
-			}
+			path = walkedURIPath(location, path)
 		}
 
 		return fn(path, d, err)

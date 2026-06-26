@@ -235,6 +235,7 @@ func adlsObjectLocationExtractor(parsedURL *url.URL, opts ...keyExtractorOption)
 		parsed := objectLocation{
 			authority:    authority,
 			key:          key,
+			uriKey:       key,
 			uriPrefix:    matches[1] + "://" + authority + "/",
 			hasAuthority: true,
 		}

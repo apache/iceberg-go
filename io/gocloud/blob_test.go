@@ -434,6 +434,35 @@ func TestBlobFileIOWalkDirRejectsWrongBucket(t *testing.T) {
 	}
 }
 
+func TestBlobFileIOWalkDirKeepsCrossAuthorityPathsStableByDefault(t *testing.T) {
+	ctx := context.Background()
+
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	require.NoError(t, bucket.WriteAll(ctx, "other-bucket/data/file.parquet", []byte("content"), nil))
+
+	bfs := testBlobFileIO(ctx, "test-bucket", bucket)
+
+	var walked []string
+	err := bfs.WalkDir("s3://other-bucket/data", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		walked = append(walked, path)
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, walked, "s3://other-bucket/data")
+	assert.Contains(t, walked, "s3://other-bucket/data/file.parquet")
+	for _, path := range walked {
+		assert.NotContains(t, path, "s3://other-bucket/other-bucket/")
+	}
+}
+
 func TestBlobFileIOWalkDirRejectsWrongAzureAuthority(t *testing.T) {
 	ctx := context.Background()
 
@@ -518,7 +547,8 @@ func TestBlobFileIOImplementsBulkRemovableIO(t *testing.T) {
 	bucket := memblob.OpenBucket(nil)
 	defer bucket.Close()
 
-	bfs := createBlobFS(context.Background(), bucket, defaultKeyExtractor("test-bucket"))
+	extractor := defaultObjectLocationExtractor("test-bucket")
+	bfs := createBlobFS(context.Background(), bucket, keyExtractorFromObjectLocation(extractor), extractor)
 
 	_, ok := bfs.(icebergio.BulkRemovableIO)
 	assert.True(t, ok, "blobFileIO should implement BulkRemovableIO")
@@ -534,7 +564,8 @@ func TestBlobFileIODeleteFiles(t *testing.T) {
 	require.NoError(t, bucket.WriteAll(ctx, "data/file2.parquet", []byte("data2"), nil))
 	require.NoError(t, bucket.WriteAll(ctx, "data/file3.parquet", []byte("data3"), nil))
 
-	bfs := createBlobFS(ctx, bucket, defaultKeyExtractor("test-bucket"))
+	extractor := defaultObjectLocationExtractor("test-bucket")
+	bfs := createBlobFS(ctx, bucket, keyExtractorFromObjectLocation(extractor), extractor)
 	bulk := bfs.(icebergio.BulkRemovableIO)
 
 	deleted, err := bulk.DeleteFiles(ctx, []string{
@@ -563,7 +594,8 @@ func TestBlobFileIODeleteFilesMissingFilesAreNotErrors(t *testing.T) {
 	bucket := memblob.OpenBucket(nil)
 	defer bucket.Close()
 
-	bfs := createBlobFS(ctx, bucket, defaultKeyExtractor("test-bucket"))
+	extractor := defaultObjectLocationExtractor("test-bucket")
+	bfs := createBlobFS(ctx, bucket, keyExtractorFromObjectLocation(extractor), extractor)
 	bulk := bfs.(icebergio.BulkRemovableIO)
 
 	// Deleting non-existent files should succeed.
@@ -590,7 +622,8 @@ func TestBlobFileIODeleteFilesEmpty(t *testing.T) {
 	bucket := memblob.OpenBucket(nil)
 	defer bucket.Close()
 
-	bfs := createBlobFS(ctx, bucket, defaultKeyExtractor("test-bucket"))
+	extractor := defaultObjectLocationExtractor("test-bucket")
+	bfs := createBlobFS(ctx, bucket, keyExtractorFromObjectLocation(extractor), extractor)
 	bulk := bfs.(icebergio.BulkRemovableIO)
 
 	deleted, err := bulk.DeleteFiles(ctx, nil)
