@@ -141,6 +141,8 @@ func keyExtractorFromObjectLocation(extract objectLocationExtractor) KeyExtracto
 	}
 }
 
+// Non-strict cross-authority paths still fold into a storage key so existing
+// manifests keep loading until the FileIO can open per-authority buckets.
 func legacyAuthorityKey(parsed objectLocation) string {
 	if parsed.key == "" {
 		return parsed.authority + "/"
