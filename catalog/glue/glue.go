@@ -700,7 +700,8 @@ func (c *Catalog) convertGlueToIceberg(ctx context.Context, glueTable *types.Tab
 		return nil, fmt.Errorf("missing parameters for table %s", tableName)
 	}
 
-	if glueTable.Parameters[tableParamTableType] != glueTypeIceberg {
+	// Keep this case-insensitive check consistent with getTable and filterTableListByType.
+	if !strings.EqualFold(glueTable.Parameters[tableParamTableType], glueTypeIceberg) {
 		return nil, fmt.Errorf("table %s.%s is not an iceberg table", database, tableName)
 	}
 
