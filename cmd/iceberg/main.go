@@ -237,9 +237,14 @@ func main() {
 		}
 	}
 
-	fileCfg := config.ParseConfig(config.LoadConfig(args.Config), args.CatalogName)
-	if fileCfg != nil {
+	configData := config.LoadConfig(args.Config)
+	fileCfg, err := config.ParseConfig(configData, resolveCatalogName(explicitFlags, args.CatalogName))
+	if err != nil {
+		log.Printf("warning: failed to parse config file: %v", err)
+	} else if fileCfg != nil {
 		mergeConf(fileCfg, &args, explicitFlags)
+	} else if len(configData) > 0 {
+		log.Printf("warning: catalog %q not found in config file", args.CatalogName)
 	}
 
 	// Validate nested subcommands before catalog init.
@@ -789,6 +794,17 @@ func loadTable(ctx context.Context, output Output, cat catalog.Catalog, id strin
 	}
 
 	return tbl
+}
+
+// resolveCatalogName returns the catalog name to pass to ParseConfig.
+// When --catalog-name was given explicitly it wins; otherwise "" is returned
+// so ParseConfig can fall back through default-catalog -> "default".
+func resolveCatalogName(explicitFlags map[string]bool, flagValue string) string {
+	if explicitFlags["catalog-name"] {
+		return flagValue
+	}
+
+	return ""
 }
 
 // mergeConf applies values from the file config into args for any option
