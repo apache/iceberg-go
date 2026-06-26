@@ -15,13 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// This file is a PROPOSED public API surface for REST server-side scan
-// planning (apache/iceberg-go#1178). The method bodies are intentionally
-// unimplemented stubs (returning ErrNotImplemented) so the REST surface can be
-// reviewed as Go — with one exception: PlanTableScanResponse.UnmarshalJSON
-// validates the status/plan-id union (with tests), added per review.
-// Endpoint capability discovery (Endpoint, SupportsEndpoint) lands separately
-// in the Phase 0 PR and is intentionally not redeclared here.
+// This file contains the REST server-side scan planning client surface for
+// apache/iceberg-go#1178. Low-level client methods and endpoint capability
+// checks are implemented here; higher-level orchestration, scanner delegation,
+// expression wrappers, and scan-task content decoding land in follow-up phases.
 
 package rest
 
@@ -29,10 +26,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"
+	"github.com/google/uuid"
 )
 
 // Compile-time proof that the REST catalog satisfies the table planner seam.
@@ -41,6 +41,11 @@ var _ table.ScanPlanner = (*Catalog)(nil)
 // ErrPlanExpired is returned when polling a plan-id the server no longer knows
 // about (HTTP 404 while polling), distinct from a table-not-found 404.
 var ErrPlanExpired = fmt.Errorf("%w: scan plan expired", ErrRESTError)
+
+// headerIdempotencyKey is the per-request retry key on the plan and tasks
+// POSTs. The access-delegation header name lives in rest.go because it is also
+// a session default.
+const headerIdempotencyKey = "Idempotency-Key"
 
 // --- Capability gating (Open Question 2) ------------------------------------
 //
@@ -54,13 +59,16 @@ var ErrPlanExpired = fmt.Errorf("%w: scan plan expired", ErrRESTError)
 // SupportsPlanTableScan reports whether the server advertised the synchronous
 // plan endpoint.
 func (r *Catalog) SupportsPlanTableScan() bool {
-	return false
+	return r.endpoints.contains(endpointPlanTableScan)
 }
 
 // SupportsFullRemoteScanPlanning reports whether the server advertised all four
 // scan-planning endpoints (plan, fetch-result, cancel, fetch-tasks).
 func (r *Catalog) SupportsFullRemoteScanPlanning() bool {
-	return false
+	return r.SupportsPlanTableScan() &&
+		r.endpoints.contains(endpointFetchPlanResult) &&
+		r.endpoints.contains(endpointCancelPlanning) &&
+		r.endpoints.contains(endpointFetchScanTasks)
 }
 
 // --- table.ScanPlanner implementation ---------------------------------------
@@ -68,7 +76,7 @@ func (r *Catalog) SupportsFullRemoteScanPlanning() bool {
 // SupportsRemoteScanPlanning reports whether this catalog can complete a remote
 // plan end-to-end; backed by the split capability checks above.
 func (r *Catalog) SupportsRemoteScanPlanning() bool {
-	return false
+	return r.SupportsFullRemoteScanPlanning()
 }
 
 // PlanFiles plans a scan server-side and returns tasks (and, optionally, a
@@ -80,9 +88,26 @@ func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) 
 // --- Low-level client methods -----------------------------------------------
 
 // PlanTableScan submits a scan plan. The result is either completed inline,
-// submitted (returns a plan-id to poll), or failed.
+// submitted (returns a plan-id to poll), or failed. A failed planning response
+// decodes as (resp, nil); callers must branch on resp.Status.
 func (r *Catalog) PlanTableScan(ctx context.Context, ident table.Identifier, req PlanTableScanRequest) (PlanTableScanResponse, error) {
-	return PlanTableScanResponse{}, fmt.Errorf("%w: plan table scan", iceberg.ErrNotImplemented)
+	if err := r.endpoints.check(endpointPlanTableScan); err != nil {
+		return PlanTableScanResponse{}, err
+	}
+
+	path, err := r.scanPlanningPath(endpointPlanTableScan, ident)
+	if err != nil {
+		return PlanTableScanResponse{}, err
+	}
+
+	headers, err := scanPlanningHeaders(req.IdempotencyKey, req.AccessDelegation, true)
+	if err != nil {
+		return PlanTableScanResponse{}, err
+	}
+
+	return doPost[PlanTableScanRequest, PlanTableScanResponse](
+		ctx, r.baseURI, path, req, r.cl,
+		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable}, withHeaders(headers))
 }
 
 // FetchPlanningResult polls a previously submitted plan. opts.AccessDelegation
@@ -90,19 +115,70 @@ func (r *Catalog) PlanTableScan(ctx context.Context, ident table.Identifier, req
 // receive plan-scoped storage credentials: the spec defines data-access on this
 // endpoint, and the completed-async result is where those credentials are vended.
 func (r *Catalog) FetchPlanningResult(ctx context.Context, ident table.Identifier, planID string, opts FetchPlanningResultOptions) (FetchPlanningResultResponse, error) {
-	return FetchPlanningResultResponse{}, fmt.Errorf("%w: fetch planning result", iceberg.ErrNotImplemented)
+	if err := r.endpoints.check(endpointFetchPlanResult); err != nil {
+		return FetchPlanningResultResponse{}, err
+	}
+
+	path, err := r.scanPlanningPath(endpointFetchPlanResult, ident, planID)
+	if err != nil {
+		return FetchPlanningResultResponse{}, err
+	}
+
+	headers, err := scanPlanningHeaders(nil, opts.AccessDelegation, false)
+	if err != nil {
+		return FetchPlanningResultResponse{}, err
+	}
+
+	return doGet[FetchPlanningResultResponse](
+		ctx, r.baseURI, path, r.cl,
+		map[int]error{http.StatusNotFound: ErrPlanExpired}, withHeaders(headers))
 }
 
 // CancelPlanning cancels a server-side plan. Callers should cancel on context
-// cancellation using a detached context with a short timeout.
+// cancellation using a detached context with a short timeout. The spec supports
+// idempotency and access-delegation headers on cancel; this low-level method
+// deliberately defers those until a cancel options type is added, and suppresses
+// the session-default access-delegation header (cancel vends no credentials). A
+// 404 (already-expired or unknown plan) is not special-cased: cancel is
+// best-effort, so the generic REST error is acceptable.
 func (r *Catalog) CancelPlanning(ctx context.Context, ident table.Identifier, planID string) error {
-	return fmt.Errorf("%w: cancel planning", iceberg.ErrNotImplemented)
+	if err := r.endpoints.check(endpointCancelPlanning); err != nil {
+		return err
+	}
+
+	path, err := r.scanPlanningPath(endpointCancelPlanning, ident, planID)
+	if err != nil {
+		return err
+	}
+
+	_, err = doDelete[struct{}](
+		ctx, r.baseURI, path, r.cl, nil,
+		withSuppressedHeaders(headerIcebergAccessDelegation))
+
+	return err
 }
 
 // FetchScanTasks fetches the scan tasks for a plan-task handle returned by a
 // completed plan.
 func (r *Catalog) FetchScanTasks(ctx context.Context, ident table.Identifier, req FetchScanTasksRequest) (FetchScanTasksResponse, error) {
-	return FetchScanTasksResponse{}, fmt.Errorf("%w: fetch scan tasks", iceberg.ErrNotImplemented)
+	if err := r.endpoints.check(endpointFetchScanTasks); err != nil {
+		return FetchScanTasksResponse{}, err
+	}
+
+	path, err := r.scanPlanningPath(endpointFetchScanTasks, ident)
+	if err != nil {
+		return FetchScanTasksResponse{}, err
+	}
+
+	headers, err := scanPlanningHeaders(req.IdempotencyKey, nil, true)
+	if err != nil {
+		return FetchScanTasksResponse{}, err
+	}
+
+	return doPost[FetchScanTasksRequest, FetchScanTasksResponse](
+		ctx, r.baseURI, path, req, r.cl,
+		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable},
+		withHeaders(headers), withSuppressedHeaders(headerIcebergAccessDelegation))
 }
 
 // WaitForPlan polls a submitted plan to completion using jittered backoff,
@@ -111,6 +187,48 @@ func (r *Catalog) FetchScanTasks(ctx context.Context, ident table.Identifier, re
 // while still submitted, or if the plan is cancelled, failed, or expired.
 func (r *Catalog) WaitForPlan(ctx context.Context, ident table.Identifier, planID string, opts WaitForPlanOptions) (CompletedPlanningResult, error) {
 	return CompletedPlanningResult{}, fmt.Errorf("%w: wait for plan", iceberg.ErrNotImplemented)
+}
+
+func (r *Catalog) scanPlanningPath(ep endpoint, ident table.Identifier, extra ...string) ([]string, error) {
+	ns, tbl, err := r.splitIdentForPath(ident)
+	if err != nil {
+		return nil, err
+	}
+
+	return ep.reqPath(append([]string{ns, tbl}, extra...)...)
+}
+
+func scanPlanningHeaders(idempotencyKey, accessDelegation *string, includeIdempotency bool) (map[string]string, error) {
+	headers := make(map[string]string, 2)
+	if includeIdempotency {
+		key, err := idempotencyHeaderValue(idempotencyKey)
+		if err != nil {
+			return nil, err
+		}
+		headers[headerIdempotencyKey] = key
+	}
+	if accessDelegation != nil {
+		headers[headerIcebergAccessDelegation] = *accessDelegation
+	}
+	if len(headers) == 0 {
+		return nil, nil
+	}
+
+	return headers, nil
+}
+
+func idempotencyHeaderValue(idempotencyKey *string) (string, error) {
+	if idempotencyKey == nil {
+		// Plan and task POSTs always send an idempotency key. There is no
+		// transport retry here, so nil means a fresh key for this call.
+		return uuid.NewString(), nil
+	}
+
+	if _, err := uuid.Parse(*idempotencyKey); err != nil {
+		return "", fmt.Errorf("%w: invalid idempotency key %q", iceberg.ErrInvalidArgument, *idempotencyKey)
+	}
+
+	return *idempotencyKey, nil
 }
 
 // --- Wire types (sketch) ----------------------------------------------------
@@ -247,6 +365,28 @@ type FetchPlanningResultResponse struct {
 	Error  *PlanningError `json:"error,omitempty"`
 	ScanTasks
 	StorageCredentials []StorageCredential `json:"storage-credentials,omitempty"`
+}
+
+func (r *FetchPlanningResultResponse) UnmarshalJSON(data []byte) error {
+	type fetchPlanningResultResponse FetchPlanningResultResponse
+	var resp fetchPlanningResultResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return err
+	}
+
+	switch resp.Status {
+	case PlanStatusCompleted, PlanStatusSubmitted, PlanStatusCancelled:
+	case PlanStatusFailed:
+		if resp.Error == nil {
+			return fmt.Errorf("%w: fetchPlanningResult failed response missing error", ErrRESTError)
+		}
+	default:
+		return fmt.Errorf("%w: fetchPlanningResult response has unknown status %q", ErrRESTError, resp.Status)
+	}
+
+	*r = FetchPlanningResultResponse(resp)
+
+	return nil
 }
 
 // FetchScanTasksRequest is the POST .../tasks request body.

@@ -914,22 +914,22 @@ func TestResponseBodyLeak(t *testing.T) {
 		baseURI, err := url.Parse(srv.URL)
 		require.NoError(t, err)
 
-		_, err = do[struct{}](context.Background(), http.MethodGet, baseURI, []string{"test"}, client, nil, false)
+		_, err = do[struct{}](context.Background(), http.MethodGet, baseURI, []string{"test"}, client, nil)
 		require.Error(t, err)
 
 		assert.True(t, tracker.body.closed,
 			"response body should be closed on non-200 status")
 	})
 
-	t.Run("doPostAllowNoContent", func(t *testing.T) {
+	t.Run("doPost", func(t *testing.T) {
 		tracker := &trackingTransport{transport: http.DefaultTransport}
 		client := &http.Client{Transport: tracker}
 
 		baseURI, err := url.Parse(srv.URL)
 		require.NoError(t, err)
 
-		_, err = doPostAllowNoContent[map[string]string, struct{}](
-			context.Background(), baseURI, []string{"test"}, map[string]string{"key": "value"}, client, nil, false)
+		_, err = doPost[map[string]string, struct{}](
+			context.Background(), baseURI, []string{"test"}, map[string]string{"key": "value"}, client, nil, allowNoContent())
 		require.Error(t, err)
 
 		assert.True(t, tracker.body.closed,

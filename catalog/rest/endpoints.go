@@ -105,6 +105,10 @@ var (
 	endpointRegisterTable    = endpoint{http.MethodPost, "/v1/{prefix}/namespaces/{namespace}/register"}
 	endpointReportMetrics    = endpoint{http.MethodPost, "/v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics"}
 	endpointTableCredentials = endpoint{http.MethodGet, "/v1/{prefix}/namespaces/{namespace}/tables/{table}/credentials"}
+	endpointPlanTableScan    = endpoint{http.MethodPost, "/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan"}
+	endpointFetchPlanResult  = endpoint{http.MethodGet, "/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}"}
+	endpointCancelPlanning   = endpoint{http.MethodDelete, "/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan/{plan-id}"}
+	endpointFetchScanTasks   = endpoint{http.MethodPost, "/v1/{prefix}/namespaces/{namespace}/tables/{table}/tasks"}
 
 	endpointListViews    = endpoint{http.MethodGet, "/v1/{prefix}/namespaces/{namespace}/views"}
 	endpointLoadView     = endpoint{http.MethodGet, "/v1/{prefix}/namespaces/{namespace}/views/{view}"}
@@ -142,6 +146,7 @@ var allEndpoints = []endpoint{
 	endpointListTables, endpointLoadTable, endpointTableExists, endpointCreateTable,
 	endpointUpdateTable, endpointDeleteTable, endpointRenameTable, endpointRegisterTable,
 	endpointReportMetrics, endpointTableCredentials,
+	endpointPlanTableScan, endpointFetchPlanResult, endpointCancelPlanning, endpointFetchScanTasks,
 	endpointListViews, endpointLoadView, endpointViewExists, endpointCreateView,
 	endpointUpdateView, endpointDeleteView, endpointRenameView, endpointRegisterView,
 }
