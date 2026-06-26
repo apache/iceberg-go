@@ -1190,12 +1190,16 @@ func (b *MetadataBuilder) reuseOrCreateNewSchemaID(newSchema *iceberg.Schema) in
 }
 
 func (b *MetadataBuilder) RemovePartitionSpecs(ints []int) error {
+	if len(ints) == 0 {
+		return nil
+	}
+
 	if slices.Contains(ints, b.defaultSpecID) {
 		return fmt.Errorf("%w: can't remove default partition spec with id %d", iceberg.ErrInvalidArgument, b.defaultSpecID)
 	}
 
-	newSpecs := make([]iceberg.PartitionSpec, 0, len(b.specs)-len(ints))
-	removed := make([]int, len(ints))
+	newSpecs := make([]iceberg.PartitionSpec, 0, len(b.specs))
+	removed := make([]int, 0, len(ints))
 	for _, spec := range b.specs {
 		if slices.Contains(ints, spec.ID()) {
 			removed = append(removed, spec.ID())
@@ -1208,7 +1212,7 @@ func (b *MetadataBuilder) RemovePartitionSpecs(ints []int) error {
 	b.specs = newSpecs
 
 	if len(removed) != 0 {
-		b.updates = append(b.updates, NewRemoveSpecUpdate(ints))
+		b.updates = append(b.updates, NewRemoveSpecUpdate(removed))
 	}
 
 	return nil
@@ -1223,7 +1227,7 @@ func (b *MetadataBuilder) RemoveSchemas(ints []int) error {
 		return fmt.Errorf("%w: can't remove current schema with id %d", iceberg.ErrInvalidArgument, b.currentSchemaID)
 	}
 
-	removed := make([]int, len(ints))
+	removed := make([]int, 0, len(ints))
 	b.schemaList = slices.DeleteFunc(b.schemaList, func(s *iceberg.Schema) bool {
 		if slices.Contains(ints, s.ID) {
 			removed = append(removed, s.ID)
@@ -1235,7 +1239,7 @@ func (b *MetadataBuilder) RemoveSchemas(ints []int) error {
 	})
 
 	if len(removed) != 0 {
-		b.updates = append(b.updates, NewRemoveSchemasUpdate(ints))
+		b.updates = append(b.updates, NewRemoveSchemasUpdate(removed))
 	}
 
 	return nil
