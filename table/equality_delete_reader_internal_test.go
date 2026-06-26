@@ -24,7 +24,10 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMakeColEncoderMatchesGenericForNullFastPathTypes(t *testing.T) {
@@ -164,12 +167,7 @@ func buildTimestampArray(mem memory.Allocator, shape encoderArrayShape) arrow.Ar
 	return buildFastPathArray(
 		array.NewTimestampBuilder(mem, arrow.FixedWidthTypes.Timestamp_us.(*arrow.TimestampType)),
 		shape, arrow.Timestamp(7), arrow.Timestamp(-3), arrow.Timestamp(0), arrow.Timestamp(4))
-	"testing"
-
-	"github.com/apache/iceberg-go"
-	iceio "github.com/apache/iceberg-go/io"
-	"github.com/stretchr/testify/require"
-)
+}
 
 func TestReadAllEqualityDeleteFilesRejectsEmptyEqualityFieldIDs(t *testing.T) {
 	schema := iceberg.NewSchema(0,
