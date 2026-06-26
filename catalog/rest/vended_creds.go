@@ -40,8 +40,8 @@ const (
 
 // resolveStorageCredentials finds the best-matching credential for the given
 // location using longest-prefix match, mirroring the Java and Python implementations.
-func resolveStorageCredentials(creds []storageCredential, location string) iceberg.Properties {
-	var best *storageCredential
+func resolveStorageCredentials(creds []StorageCredential, location string) iceberg.Properties {
+	var best *StorageCredential
 	for i := range creds {
 		c := &creds[i]
 		if strings.HasPrefix(location, c.Prefix) {

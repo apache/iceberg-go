@@ -330,7 +330,7 @@ func TestResolveStorageCredentials(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		creds    []storageCredential
+		creds    []StorageCredential
 		location string
 		want     iceberg.Properties
 	}{
@@ -342,7 +342,7 @@ func TestResolveStorageCredentials(t *testing.T) {
 		},
 		{
 			name: "matching prefix",
-			creds: []storageCredential{
+			creds: []StorageCredential{
 				{Prefix: "s3://bucket/", Config: s3Creds},
 			},
 			location: "s3://bucket/path/to/file",
@@ -350,7 +350,7 @@ func TestResolveStorageCredentials(t *testing.T) {
 		},
 		{
 			name: "no matching prefix",
-			creds: []storageCredential{
+			creds: []StorageCredential{
 				{Prefix: "s3://other-bucket/", Config: s3Creds},
 			},
 			location: "s3://bucket/path",
@@ -358,7 +358,7 @@ func TestResolveStorageCredentials(t *testing.T) {
 		},
 		{
 			name: "longest prefix wins",
-			creds: []storageCredential{
+			creds: []StorageCredential{
 				{Prefix: "s3://bucket/", Config: s3Creds},
 				{Prefix: "s3://bucket/specific/", Config: specificCreds},
 			},
@@ -367,7 +367,7 @@ func TestResolveStorageCredentials(t *testing.T) {
 		},
 		{
 			name: "longest prefix wins regardless of order",
-			creds: []storageCredential{
+			creds: []StorageCredential{
 				{Prefix: "s3://bucket/specific/", Config: specificCreds},
 				{Prefix: "s3://bucket/", Config: s3Creds},
 			},

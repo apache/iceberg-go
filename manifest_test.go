@@ -1111,6 +1111,53 @@ func (m *ManifestTestSuite) TestV3DataManifestFirstRowIDInheritance() {
 	m.EqualValues(1000+firstCount, *entries[1].DataFile().FirstRowID())
 }
 
+// TestV3DataManifestFirstRowIDInheritanceSkipsDeletedEntries verifies that a
+// DELETED entry consumes no row IDs during inheritance, matching the
+// manifest-list writer, which reserves a manifest's id range as added+existing
+// rows. A live file following a deleted one must inherit the deleted file's
+// range, not skip past it — otherwise its rows overflow into the next
+// manifest's range. Mirrors Java ManifestReader.idAssigner.
+func (m *ManifestTestSuite) TestV3DataManifestFirstRowIDInheritanceSkipsDeletedEntries() {
+	partitionSpec := NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "x", Transform: IdentityTransform{}})
+	liveCount, deletedCount := int64(10), int64(50)
+	newDataFile := func(path string, count int64) *dataFile {
+		return &dataFile{
+			Content:          EntryContentData,
+			Path:             path,
+			Format:           ParquetFile,
+			PartitionData:    map[string]any{"x": int(1)},
+			RecordCount:      count,
+			FileSize:         1000,
+			BlockSizeInBytes: 64 * 1024,
+			FirstRowIDField:  nil,
+		}
+	}
+	seqNum := int64(1)
+	entries := []ManifestEntry{
+		&manifestEntry{EntryStatus: EntryStatusEXISTING, Snapshot: &entrySnapshotID, SeqNum: &seqNum, FileSeqNum: &seqNum, Data: newDataFile("/data/live1.parquet", liveCount)},
+		&manifestEntry{EntryStatus: EntryStatusDELETED, Snapshot: &entrySnapshotID, SeqNum: &seqNum, FileSeqNum: &seqNum, Data: newDataFile("/data/deleted.parquet", deletedCount)},
+		&manifestEntry{EntryStatus: EntryStatusEXISTING, Snapshot: &entrySnapshotID, SeqNum: &seqNum, FileSeqNum: &seqNum, Data: newDataFile("/data/live2.parquet", liveCount)},
+	}
+	var manifestBuf bytes.Buffer
+	_, err := WriteManifest("/manifest.avro", &manifestBuf, 3, partitionSpec, testSchema, entrySnapshotID, entries)
+	m.Require().NoError(err)
+
+	manifestFirstRowID := int64(1000)
+	file := &manifestFile{version: 3, Path: "/manifest.avro", Content: ManifestContentData, FirstRowIDValue: &manifestFirstRowID}
+	read, err := ReadManifest(file, bytes.NewReader(manifestBuf.Bytes()), false)
+	m.Require().NoError(err)
+	m.Require().Len(read, 3)
+
+	m.Require().NotNil(read[0].DataFile().FirstRowID())
+	m.EqualValues(1000, *read[0].DataFile().FirstRowID())
+	// The deleted entry is skipped: assigned no id and consuming none.
+	m.Nil(read[1].DataFile().FirstRowID())
+	// live2 inherits live1's range, not past the deleted file's record_count.
+	m.Require().NotNil(read[2].DataFile().FirstRowID())
+	m.EqualValues(1000+liveCount, *read[2].DataFile().FirstRowID())
+}
+
 func (m *ManifestTestSuite) TestReadManifestListIncompleteSchema() {
 	// Verify that reading a manifest list whose embedded schema references
 	// an undefined named type ("field_summary" without its definition)
@@ -2035,6 +2082,60 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 	w.written += len(p)
 
 	return len(p), nil
+}
+
+func (m *ManifestTestSuite) TestManifestWriterDoesNotCommitStateOnEncodeError() {
+	schema := NewSchema(0,
+		NestedField{ID: 1, Name: "dt", Type: PrimitiveTypes.Date},
+	)
+	partitionSpec := NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "dt", Transform: IdentityTransform{}},
+	)
+
+	var out bytes.Buffer
+	writer, err := NewManifestWriter(2, &out, partitionSpec, schema, snapshotID)
+	m.Require().NoError(err)
+
+	badPartitionValue := struct{ Value string }{Value: "not-a-date"}
+	entry := newDatePartitionManifestEntry(m.T(), partitionSpec, snapshotID, badPartitionValue)
+	dataFile := entry.DataFile().(*dataFile)
+	originalPartitionData := map[string]any{"dt": badPartitionValue}
+	m.Equal(originalPartitionData, dataFile.PartitionData)
+
+	err = writer.Add(entry)
+	m.Require().Error(err)
+
+	m.Zero(writer.addedFiles)
+	m.Zero(writer.addedRows)
+	m.Zero(writer.existingFiles)
+	m.Zero(writer.existingRows)
+	m.Zero(writer.deletedFiles)
+	m.Zero(writer.deletedRows)
+	m.Empty(writer.partitions)
+	m.Equal(int64(-1), writer.minSeqNum)
+	m.Equal(originalPartitionData, dataFile.PartitionData)
+}
+
+func newDatePartitionManifestEntry(t *testing.T, partitionSpec PartitionSpec, snapshotID int64, partitionValue any) ManifestEntry {
+	t.Helper()
+
+	seqNum := int64(1)
+	builder, err := NewDataFileBuilder(
+		partitionSpec,
+		EntryContentData,
+		"s3://bucket/ns/table/data/date-partition.parquet",
+		ParquetFile,
+		map[int]any{1000: partitionValue},
+		nil,
+		nil,
+		5,
+		1024,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return NewManifestEntry(EntryStatusADDED, &snapshotID, &seqNum, &seqNum, builder.Build())
 }
 
 func (m *ManifestTestSuite) TestWriteManifestListClosesWriterOnError() {

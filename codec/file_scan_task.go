@@ -32,31 +32,36 @@ import (
 // is given on the receiver.
 //
 // All carried DataFiles (data, positional deletes, equality deletes,
-// and deletion vectors) must share the supplied spec.ID(): each delete
-// file's SpecID is validated and a mismatch returns an error. After
-// partition evolution, delete files may have been written under a
-// different partition spec than the data file; the caller is
-// responsible for partitioning the FileScanTask by per-file specID and
-// calling EncodeFileScanTask once per group.
+// and deletion vectors) must share the supplied spec.ID(): every file's
+// SpecID is validated and a mismatch returns an error. After partition
+// evolution, delete files may have been written under a different
+// partition spec than the data file; the caller is responsible for
+// partitioning the FileScanTask by per-file specID and calling
+// EncodeFileScanTask once per group.
 func EncodeFileScanTask(task table.FileScanTask, spec iceberg.PartitionSpec, schema *iceberg.Schema, version int) ([]byte, error) {
 	if version < 1 || version > 3 {
 		return nil, fmt.Errorf("codec: EncodeFileScanTask: unsupported format version %d", version)
 	}
+	// Validate the primary data file's spec, like encodeDataFileSlice does for
+	// every delete/equality/DV file.
+	if err := checkDataFileSpecID(task.File, spec); err != nil {
+		return nil, fmt.Errorf("codec: EncodeFileScanTask: %w", err)
+	}
 	fileBytes, err := EncodeDataFile(task.File, spec, schema, version)
 	if err != nil {
-		return nil, fmt.Errorf("file: %w", err)
+		return nil, fmt.Errorf("codec: EncodeFileScanTask: file: %w", err)
 	}
 	del, err := encodeDataFileSlice(task.DeleteFiles, spec, schema, version)
 	if err != nil {
-		return nil, fmt.Errorf("delete files: %w", err)
+		return nil, fmt.Errorf("codec: EncodeFileScanTask: delete files: %w", err)
 	}
 	eq, err := encodeDataFileSlice(task.EqualityDeleteFiles, spec, schema, version)
 	if err != nil {
-		return nil, fmt.Errorf("equality delete files: %w", err)
+		return nil, fmt.Errorf("codec: EncodeFileScanTask: equality delete files: %w", err)
 	}
 	dv, err := encodeDataFileSlice(task.DeletionVectorFiles, spec, schema, version)
 	if err != nil {
-		return nil, fmt.Errorf("deletion vector files: %w", err)
+		return nil, fmt.Errorf("codec: EncodeFileScanTask: deletion vector files: %w", err)
 	}
 	envelope := fileScanTaskEnvelope{
 		File:                fileBytes,
@@ -80,23 +85,23 @@ func DecodeFileScanTask(data []byte, spec iceberg.PartitionSpec, schema *iceberg
 	}
 	var envelope fileScanTaskEnvelope
 	if _, err := fileScanTaskSchema.Decode(data, &envelope); err != nil {
-		return table.FileScanTask{}, fmt.Errorf("decode: %w", err)
+		return table.FileScanTask{}, fmt.Errorf("codec: DecodeFileScanTask: decode: %w", err)
 	}
 	file, err := DecodeDataFile(envelope.File, spec, schema, version)
 	if err != nil {
-		return table.FileScanTask{}, fmt.Errorf("file: %w", err)
+		return table.FileScanTask{}, fmt.Errorf("codec: DecodeFileScanTask: file: %w", err)
 	}
 	del, err := decodeDataFileSlice(envelope.DeleteFiles, spec, schema, version)
 	if err != nil {
-		return table.FileScanTask{}, fmt.Errorf("delete files: %w", err)
+		return table.FileScanTask{}, fmt.Errorf("codec: DecodeFileScanTask: delete files: %w", err)
 	}
 	eq, err := decodeDataFileSlice(envelope.EqualityDeleteFiles, spec, schema, version)
 	if err != nil {
-		return table.FileScanTask{}, fmt.Errorf("equality delete files: %w", err)
+		return table.FileScanTask{}, fmt.Errorf("codec: DecodeFileScanTask: equality delete files: %w", err)
 	}
 	dv, err := decodeDataFileSlice(envelope.DeletionVectorFiles, spec, schema, version)
 	if err != nil {
-		return table.FileScanTask{}, fmt.Errorf("deletion vector files: %w", err)
+		return table.FileScanTask{}, fmt.Errorf("codec: DecodeFileScanTask: deletion vector files: %w", err)
 	}
 
 	return table.FileScanTask{
@@ -172,14 +177,26 @@ func init() {
 	fileScanTaskSchema = s
 }
 
+// checkDataFileSpecID verifies a data file's SpecID matches the codec spec.
+// EncodeDataFile encodes partition data against the passed-in spec, so a file
+// carrying a different spec would silently mis-map or drop partition values and
+// still succeed. Every file in a FileScanTask must therefore share spec.ID().
+func checkDataFileSpecID(f iceberg.DataFile, spec iceberg.PartitionSpec) error {
+	if int(f.SpecID()) != spec.ID() {
+		return fmt.Errorf("data file spec id %d does not match codec spec id %d (partition evolution requires per-spec grouping)", f.SpecID(), spec.ID())
+	}
+
+	return nil
+}
+
 func encodeDataFileSlice(files []iceberg.DataFile, spec iceberg.PartitionSpec, schema *iceberg.Schema, version int) ([][]byte, error) {
 	if len(files) == 0 {
 		return nil, nil
 	}
 	out := make([][]byte, 0, len(files))
 	for i, f := range files {
-		if int(f.SpecID()) != spec.ID() {
-			return nil, fmt.Errorf("entry %d: data file spec id %d does not match codec spec id %d (partition evolution requires per-spec grouping)", i, f.SpecID(), spec.ID())
+		if err := checkDataFileSpecID(f, spec); err != nil {
+			return nil, fmt.Errorf("entry %d: %w", i, err)
 		}
 		b, err := EncodeDataFile(f, spec, schema, version)
 		if err != nil {

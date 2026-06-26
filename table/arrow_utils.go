@@ -695,8 +695,9 @@ func (c convertToArrow) VisitGeography(g iceberg.GeographyType) arrow.Field {
 		panic(err)
 	}
 
-	// Always add an edge to differentiate between Geography and Geometry arrow fields.
-	// Note that the edge convention is a best-effort hint and planar geography from other clients won't round-trip through Arrow alone.
+	// Always write an edge algorithm so iceberg-go-authored Arrow metadata can
+	// distinguish Geography from Geometry on round trip. Arrow-only reads from
+	// clients that omit edges for geography are lossy.
 	meta.Edges = geoarrow.EdgeInterpolation(g.Algorithm())
 
 	if c.useLargeTypes {
@@ -1154,7 +1155,26 @@ func (a *arrowProjectionVisitor) List(listType iceberg.ListType, listArr arrow.A
 		[]arrow.ArrayData{valArr.Data()}, arr.NullN(), arr.Data().Offset())
 	defer data.Release()
 
-	return array.MakeFromData(data)
+	out := array.MakeFromData(data)
+
+	// The Parquet reader may return large_list offsets even when the schema
+	// returned alongside the records (built with useLargeTypes) asks for small
+	// list, or vice versa; coerce the offset width to match so the writer does
+	// not reject the batch. A plain relabel would misread int64 offsets as int32.
+	switch out.DataType().ID() {
+	case arrow.LIST, arrow.LARGE_LIST:
+		var want arrow.DataType = arrow.ListOfField(elemField)
+		if a.useLargeTypes {
+			want = arrow.LargeListOfField(elemField)
+		}
+		if !arrow.TypeEqual(out.DataType(), want) {
+			defer out.Release()
+
+			return retOrPanic(compute.CastArray(a.ctx, out, compute.SafeCastOptions(want)))
+		}
+	}
+
+	return out
 }
 
 func (a *arrowProjectionVisitor) Map(m iceberg.MapType, mapArray, keyResult, valResult arrow.Array) arrow.Array {
@@ -1190,8 +1210,26 @@ func (a *arrowProjectionVisitor) Primitive(_ iceberg.PrimitiveType, arr arrow.Ar
 	return arr
 }
 
+// Variant reassembles a shredded variant back into the unshredded layout so the
+// projected schema matches; without it the scanner fails to assemble the table.
 func (a *arrowProjectionVisitor) Variant(_ iceberg.VariantType, arr arrow.Array) arrow.Array {
-	return arr
+	if arr == nil {
+		return arr
+	}
+	varr, ok := arr.(*extensions.VariantArray)
+	if !ok || !varr.IsShredded() {
+		return arr
+	}
+	// UnshredVariant returns a caller-owned array whose ref is balanced by
+	// castIfNeeded's Retain/Release. This holds only because VariantType is not
+	// an arrow.NestedType; if it were, Struct would also Release and double-free.
+	// The checked-allocator leak tests guard this invariant.
+	out, err := extensions.UnshredVariant(varr, compute.GetAllocator(a.ctx))
+	if err != nil {
+		panic(fmt.Errorf("variant projection: %w", err))
+	}
+
+	return out
 }
 
 // SchemaOptions controls the behaviour of ToRequestedSchema.
@@ -1871,6 +1909,49 @@ func checkCRSJSON(rawCrs json.RawMessage) bool {
 	return len(b) > 0 && b[0] == '{'
 }
 
+// errWKT2CRSNotSupported is returned for WKT2:2019 CRS definitions, which this
+// package does not support yet.
+var errWKT2CRSNotSupported = errors.New("CRS type wkt2:2019 not supported")
+
+// errPROJJSONStringCRSNotSupported is returned for projjson-typed string CRS
+// values, which this package does not support yet.
+var errPROJJSONStringCRSNotSupported = errors.New("CRS type projjson not supported for string CRS")
+
+// isWKT2CRSString reports whether crs looks like a WKT2 (ISO 19162) CRS
+// definition. It is a best-effort heuristic used only to surface the clearer
+// errWKT2CRSNotSupported message. The list covers the WKT2:2019 CRS keywords
+// and their long forms.
+func isWKT2CRSString(crs string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(crs))
+
+	for _, prefix := range []string{
+		"BOUNDCRS[",
+		"COMPOUNDCRS[",
+		"COORDINATEMETADATA[",
+		"COORDINATEOPERATION[",
+		"CRS[",
+		"DERIVEDPROJCRS[",
+		"ENGCRS[",
+		"ENGINEERINGCRS[",
+		"GEODCRS[",
+		"GEODETICCRS[",
+		"GEOGCRS[",
+		"GEOGRAPHICCRS[",
+		"PARAMETRICCRS[",
+		"PROJCRS[",
+		"PROJECTEDCRS[",
+		"TIMECRS[",
+		"VERTCRS[",
+		"VERTICALCRS[",
+	} {
+		if strings.HasPrefix(upper, prefix) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 	if len(meta.CRS) == 0 {
 		return "srid:0", nil
@@ -1883,23 +1964,34 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 		if err := json.Unmarshal(meta.CRS, &crs); err != nil {
 			return "", fmt.Errorf("invalid geoarrow CRS metadata: %w", err)
 		}
+		if crs == "" {
+			return "", errors.New("unsupported CRS: empty string CRS")
+		}
 
 		if strings.EqualFold(crs, "OGC:CRS84") || strings.EqualFold(crs, "EPSG:4326") {
 			return "OGC:CRS84", nil
 		}
 
 		switch meta.CRSType {
-		case geoarrow.CRSTypeSRID:
-			return "srid:" + crs, nil
+		case geoarrow.CRSTypePROJJSON:
+			return "", errPROJJSONStringCRSNotSupported
 		case geoarrow.CRSTypeWKT22019:
-			return "", errors.New("CRS type wkt2:2019 not supported")
+			return "", errWKT2CRSNotSupported
 		default:
-			if len(crs) <= 32 {
-				return crs, nil
-			}
-
-			return "", errors.New("crs length too long")
+			// Unset, AuthorityCode, SRID, and future CRSType values continue to
+			// the string-shape checks below.
 		}
+
+		if isWKT2CRSString(crs) {
+			return "", errWKT2CRSNotSupported
+		}
+		if meta.CRSType == geoarrow.CRSTypeSRID {
+			return "srid:" + crs, nil
+		}
+
+		// Bare or unrecognized string CRS values are opaque identifiers per the
+		// Iceberg type contract; preserve them for read/write compatibility.
+		return crs, nil
 	case checkCRSJSON(meta.CRS):
 		var crs map[string]json.RawMessage
 
@@ -1909,34 +2001,41 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 
 		idRaw, ok := crs["id"]
 		if !ok || len(idRaw) == 0 {
-			return "", errors.New("unsupported CRS")
+			return "", errors.New("unsupported CRS: missing id")
 		}
 
 		var id map[string]json.RawMessage
 		if err := json.Unmarshal(idRaw, &id); err != nil {
-			return "", errors.New("unsupported CRS")
+			return "", fmt.Errorf("unsupported CRS: invalid id: %w", err)
 		}
 
 		var authority string
-		if err := json.Unmarshal(id["authority"], &authority); err != nil || authority == "" {
-			return "", errors.New("unsupported CRS")
+		authorityRaw, ok := id["authority"]
+		if !ok || len(authorityRaw) == 0 {
+			return "", errors.New("unsupported CRS: missing id.authority")
+		}
+		if err := json.Unmarshal(authorityRaw, &authority); err != nil {
+			return "", fmt.Errorf("unsupported CRS: invalid id.authority: %w", err)
+		}
+		if authority == "" {
+			return "", errors.New("unsupported CRS: empty id.authority")
 		}
 
 		codeRaw := id["code"]
 		if len(codeRaw) == 0 {
-			return "", errors.New("unsupported CRS")
+			return "", errors.New("unsupported CRS: missing id.code")
 		}
 
 		var code string
 		if err := json.Unmarshal(codeRaw, &code); err != nil {
 			var codeNum json.Number
 			if err := json.Unmarshal(codeRaw, &codeNum); err != nil {
-				return "", errors.New("unsupported CRS")
+				return "", fmt.Errorf("unsupported CRS: invalid id.code: %w", err)
 			}
 			code = codeNum.String()
 		}
 		if code == "" {
-			return "", errors.New("unsupported CRS")
+			return "", errors.New("unsupported CRS: empty id.code")
 		}
 
 		authorityCode := authority + ":" + code
@@ -1956,6 +2055,10 @@ func geoArrowMetadataToIcebergType(meta geoarrow.Metadata) (iceberg.Type, error)
 		return nil, err
 	}
 
+	// Missing GeoArrow edges use the planar default, matching arrow-rs
+	// geoarrow.wkb reads. PyIceberg-authored geography files may omit edges,
+	// which is an interop gap: Arrow metadata alone cannot distinguish those
+	// geography columns from Geometry here.
 	switch meta.Edges {
 	case geoarrow.EdgePlanar:
 		return iceberg.GeometryTypeOf(crs)

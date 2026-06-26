@@ -102,6 +102,8 @@ type blobFileIO struct {
 	newRangeReader func(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error)
 }
 
+var _ icebergio.ListableIO = (*blobFileIO)(nil)
+
 func (bfs *blobFileIO) preprocess(path string) (string, error) {
 	return bfs.keyExtractor(path)
 }
@@ -133,7 +135,15 @@ func (bfs *blobFileIO) Remove(name string) error {
 		return &fs.PathError{Op: "remove", Path: name, Err: err}
 	}
 
-	return bfs.Delete(bfs.ctx, name)
+	if err := bfs.Delete(bfs.ctx, name); err != nil {
+		if gcerrors.Code(err) == gcerrors.NotFound {
+			err = fs.ErrNotExist
+		}
+
+		return &fs.PathError{Op: "remove", Path: name, Err: err}
+	}
+
+	return nil
 }
 
 func (bfs *blobFileIO) Create(name string) (icebergio.FileWriter, error) {

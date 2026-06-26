@@ -19,13 +19,16 @@ package hadoop
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
@@ -91,14 +94,14 @@ func (s *HadoopCatalogTestSuite) TestNewCatalogStripsFilePrefix() {
 	s.Equal("/tmp/wh", cat.warehouse)
 }
 
-func (s *HadoopCatalogTestSuite) TestNewCatalogRejectsNonFileScheme() {
+func (s *HadoopCatalogTestSuite) TestNewCatalogRequiresOptInForRemoteSchemes() {
 	_, err := NewCatalog("test", "s3://bucket/path", nil)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "unsupported warehouse scheme")
+	s.Contains(err.Error(), "`allow-unsafe-commits` must be set to true")
 
 	_, err = NewCatalog("test", "hdfs://namenode/warehouse", nil)
 	s.Require().Error(err)
-	s.Contains(err.Error(), "unsupported warehouse scheme")
+	s.Contains(err.Error(), "`allow-unsafe-commits` must be set to true")
 }
 
 func (s *HadoopCatalogTestSuite) TestNamespaceToPathSingleLevel() {
@@ -455,6 +458,36 @@ func (s *HadoopCatalogTestSuite) TestDropNamespace() {
 	s.True(os.IsNotExist(err))
 }
 
+// statFailingFS guards against reintroducing a pre-walk Stat in DropNamespace
+// (see issue #1273). It embeds LocalFS so every other operation behaves
+// normally, but fails and counts any Stat call so the test can assert that
+// DropNamespace never stats the namespace before walking it.
+type statFailingFS struct {
+	icebergio.LocalFS
+	statCalls int
+}
+
+func (f *statFailingFS) Stat(string) (fs.FileInfo, error) {
+	f.statCalls++
+
+	return nil, errors.New("stat should not be called")
+}
+
+func (s *HadoopCatalogTestSuite) TestDropNamespaceDoesNotPreStat() {
+	nsDir := filepath.Join(s.warehouse, "ns")
+	s.Require().NoError(os.Mkdir(nsDir, 0o755))
+
+	fsys := &statFailingFS{}
+	s.cat.filesystem = fsys
+
+	err := s.cat.DropNamespace(context.Background(), []string{"ns"})
+	s.Require().NoError(err)
+	s.Zero(fsys.statCalls)
+
+	_, err = os.Stat(nsDir)
+	s.True(os.IsNotExist(err))
+}
+
 func (s *HadoopCatalogTestSuite) TestDropNamespaceNotExists() {
 	err := s.cat.DropNamespace(context.Background(), []string{"nope"})
 	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
@@ -694,6 +727,30 @@ func (s *HadoopCatalogTestSuite) TestCheckNamespaceExistsRejectsInvalid() {
 	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
+func (s *HadoopCatalogTestSuite) TestListTablesRejectsInvalidIdentifiers() {
+	tests := []struct {
+		name  string
+		ident table.Identifier
+	}{
+		{"empty component", table.Identifier{"a", "", "b"}},
+		{"dot component", table.Identifier{"."}},
+		{"dot dot component", table.Identifier{".."}},
+		{"slash component", table.Identifier{"a/b"}},
+		{"backslash component", table.Identifier{`a\b`}},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			for _, err := range s.cat.ListTables(context.Background(), tt.ident) {
+				s.Require().Error(err)
+				s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+
+				break
+			}
+		})
+	}
+}
+
 // isTableDir interop tests
 
 func (s *HadoopCatalogTestSuite) TestIsTableDirTrueVersionHintText() {
@@ -880,6 +937,7 @@ func (s *HadoopCatalogTestSuite) TestDropTableVerifyCleanup() {
 func (s *HadoopCatalogTestSuite) TestDropTableShortIdentifier() {
 	err := s.cat.DropTable(context.Background(), []string{"tbl"})
 	s.Require().Error(err)
+	s.ErrorIs(err, catalog.ErrNoSuchTable)
 	s.Contains(err.Error(), "at least a namespace and table name")
 }
 
@@ -1029,7 +1087,111 @@ func (s *HadoopCatalogTestSuite) TestCreateTableShortIdentifier() {
 
 	_, err := s.cat.CreateTable(ctx, []string{"tbl"}, s.testSchema())
 	s.Require().Error(err)
+	s.ErrorIs(err, catalog.ErrNoSuchTable)
 	s.Contains(err.Error(), "at least a namespace and table name")
+}
+
+func (s *HadoopCatalogTestSuite) tableIdentifierErrorOperations(ctx context.Context) []struct {
+	name string
+	run  func(table.Identifier) error
+} {
+	return []struct {
+		name string
+		run  func(table.Identifier) error
+	}{
+		{
+			name: "CreateTable",
+			run: func(ident table.Identifier) error {
+				_, err := s.cat.CreateTable(ctx, ident, s.testSchema())
+
+				return err
+			},
+		},
+		{
+			name: "LoadTable",
+			run: func(ident table.Identifier) error {
+				_, err := s.cat.LoadTable(ctx, ident)
+
+				return err
+			},
+		},
+		{
+			name: "CommitTable",
+			run: func(ident table.Identifier) error {
+				_, _, err := s.cat.CommitTable(ctx, ident, nil, nil)
+
+				return err
+			},
+		},
+		{
+			name: "DropTable",
+			run: func(ident table.Identifier) error {
+				return s.cat.DropTable(ctx, ident)
+			},
+		},
+		{
+			name: "PurgeTable",
+			run: func(ident table.Identifier) error {
+				return s.cat.PurgeTable(ctx, ident)
+			},
+		},
+	}
+}
+
+func (s *HadoopCatalogTestSuite) TestTableOperationsRejectInvalidIdentifiers() {
+	ctx := context.Background()
+	tests := []struct {
+		name  string
+		ident table.Identifier
+	}{
+		{"empty namespace component", table.Identifier{"", "tbl"}},
+		{"empty table name", table.Identifier{"ns", ""}},
+		{"dot namespace component", table.Identifier{".", "tbl"}},
+		{"dot table name", table.Identifier{"ns", "."}},
+		{"dot dot namespace component", table.Identifier{"..", "tbl"}},
+		{"dot dot table name", table.Identifier{"ns", ".."}},
+		{"slash namespace component", table.Identifier{"a/b", "tbl"}},
+		{"slash table name", table.Identifier{"ns", "a/b"}},
+		{"backslash namespace component", table.Identifier{`a\b`, "tbl"}},
+		{"backslash table name", table.Identifier{"ns", `a\b`}},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			for _, op := range s.tableIdentifierErrorOperations(ctx) {
+				s.Run(op.name, func() {
+					err := op.run(tt.ident)
+					s.Require().Error(err)
+					s.ErrorIs(err, catalog.ErrNoSuchTable)
+				})
+			}
+		})
+	}
+}
+
+func (s *HadoopCatalogTestSuite) TestTableOperationsRejectParentTraversalIdentifier() {
+	ctx := context.Background()
+	outside, err := os.MkdirTemp(filepath.Dir(s.warehouse), "outside_table_")
+	s.Require().NoError(err)
+	defer os.RemoveAll(outside)
+
+	outsideTable := filepath.Join(outside, "tbl")
+	metaDir := filepath.Join(outsideTable, "metadata")
+	marker := filepath.Join(outsideTable, "sentinel.txt")
+	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
+	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "v1.metadata.json"), []byte("{}"), 0o644))
+	s.Require().NoError(os.WriteFile(marker, []byte("keep"), 0o644))
+
+	ident := table.Identifier{"..", filepath.Base(outside), "tbl"}
+	for _, op := range s.tableIdentifierErrorOperations(ctx) {
+		s.Run(op.name, func() {
+			err := op.run(ident)
+			s.Require().Error(err)
+			s.ErrorIs(err, catalog.ErrNoSuchTable)
+			s.FileExists(marker)
+			s.DirExists(metaDir)
+		})
+	}
 }
 
 func (s *HadoopCatalogTestSuite) TestDropTableNamespacePreserved() {
@@ -1116,6 +1278,7 @@ func (s *HadoopCatalogTestSuite) TestLoadTableShortIdentifier() {
 
 	_, err := s.cat.LoadTable(ctx, []string{"tbl"})
 	s.Require().Error(err)
+	s.ErrorIs(err, catalog.ErrNoSuchTable)
 	s.Contains(err.Error(), "at least a namespace and table name")
 }
 
@@ -1137,6 +1300,38 @@ func (s *HadoopCatalogTestSuite) TestCheckTableExistsFalse() {
 	exists, err := s.cat.CheckTableExists(context.Background(), []string{"ns", "tbl"})
 	s.Require().NoError(err)
 	s.False(exists)
+}
+
+func (s *HadoopCatalogTestSuite) TestCheckTableExistsShortIdentifier() {
+	exists, err := s.cat.CheckTableExists(context.Background(), []string{"tbl"})
+	s.Require().NoError(err)
+	s.False(exists)
+}
+
+func (s *HadoopCatalogTestSuite) TestCheckTableExistsInvalidIdentifierFalse() {
+	tests := []struct {
+		name  string
+		ident table.Identifier
+	}{
+		{"empty namespace component", table.Identifier{"", "tbl"}},
+		{"empty table name", table.Identifier{"ns", ""}},
+		{"dot namespace component", table.Identifier{".", "tbl"}},
+		{"dot table name", table.Identifier{"ns", "."}},
+		{"dot dot namespace component", table.Identifier{"..", "tbl"}},
+		{"dot dot table name", table.Identifier{"ns", ".."}},
+		{"slash namespace component", table.Identifier{"a/b", "tbl"}},
+		{"slash table name", table.Identifier{"ns", "a/b"}},
+		{"backslash namespace component", table.Identifier{`a\b`, "tbl"}},
+		{"backslash table name", table.Identifier{"ns", `a\b`}},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			exists, err := s.cat.CheckTableExists(context.Background(), tt.ident)
+			s.Require().NoError(err)
+			s.False(exists)
+		})
+	}
 }
 
 func (s *HadoopCatalogTestSuite) TestCreateTableNestedNamespace() {
@@ -1410,5 +1605,6 @@ func (s *HadoopCatalogTestSuite) TestCommitTableCreateViaCommit() {
 func (s *HadoopCatalogTestSuite) TestCommitTableShortIdentifier() {
 	_, _, err := s.cat.CommitTable(context.Background(), []string{"tbl"}, nil, nil)
 	s.Require().Error(err)
+	s.ErrorIs(err, catalog.ErrNoSuchTable)
 	s.Contains(err.Error(), "at least a namespace and table name")
 }

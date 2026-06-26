@@ -18,17 +18,81 @@
 package table
 
 import (
+	"context"
+	"errors"
+	iofs "io/fs"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
+	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type failAfterGoodCloseFS struct {
+	*iceio.MemFS
+
+	goodPath string
+	badPath  string
+
+	goodClosed     chan struct{}
+	goodClosedOnce sync.Once
+}
+
+func (f *failAfterGoodCloseFS) Open(name string) (iceio.File, error) {
+	if name == f.goodPath {
+		file, err := f.MemFS.Open(name)
+		if err != nil {
+			return nil, err
+		}
+
+		return &closeSignalFile{
+			File: file,
+			onClose: func() {
+				f.goodClosedOnce.Do(func() { close(f.goodClosed) })
+			},
+		}, nil
+	}
+
+	if name == f.badPath {
+		select {
+		case <-f.goodClosed:
+		case <-time.After(5 * time.Second):
+			return nil, &iofs.PathError{
+				Op:   "open",
+				Path: name,
+				Err:  errors.New("timed out waiting for good delete file to close"),
+			}
+		}
+
+		return nil, &iofs.PathError{Op: "open", Path: name, Err: iofs.ErrNotExist}
+	}
+
+	return f.MemFS.Open(name)
+}
+
+type closeSignalFile struct {
+	iceio.File
+	onClose func()
+}
+
+func (f *closeSignalFile) Close() error {
+	err := f.File.Close()
+	f.onClose()
+
+	return err
+}
 
 func TestEnrichRecordsWithPosDeleteFields(t *testing.T) {
 	testSchema := arrow.NewSchema([]arrow.Field{
@@ -95,7 +159,7 @@ func TestEnrichRecordsWithPosDeleteFields(t *testing.T) {
 				}
 			}()
 
-			enrichFn := enrichRecordsWithPosDeleteFields(ctx, &mockDataFile{path: "file://test_path.parquet"})
+			enrichFn := enrichRecordsWithPosDeleteFields(ctx, &mockDataFile{path: "file://test_path.parquet"}, (&rowPositionSource{}).cursor())
 			for i, b := range tc.inputBatches {
 				out, err := enrichFn(b)
 				require.NoError(t, err)
@@ -128,6 +192,35 @@ func mustLoadRecordBatchFromJSON(schema *arrow.Schema, content string) arrow.Rec
 	return recordBatch
 }
 
+func writePosDeleteParquetToMemFS(t *testing.T, memFS *iceio.MemFS, path, content string) {
+	t.Helper()
+
+	rec := mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema, content)
+	defer rec.Release()
+
+	tbl := array.NewTableFromRecords(PositionalDeleteArrowSchema, []arrow.RecordBatch{rec})
+	defer tbl.Release()
+
+	fw, err := memFS.Create(path)
+	require.NoError(t, err)
+
+	require.NoError(t, pqarrow.WriteTable(tbl, fw, rec.NumRows(),
+		parquet.NewWriterProperties(parquet.WithStats(true)),
+		pqarrow.DefaultWriterProps()))
+	require.NoError(t, fw.Close())
+}
+
+func newPosDeleteFile(t *testing.T, path string, count, size int64) iceberg.DataFile {
+	t.Helper()
+
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		path, iceberg.ParquetFile, nil, nil, nil, count, size)
+	require.NoError(t, err)
+
+	return builder.Build()
+}
+
 // chunkedPosDelete allocates a positional-delete *arrow.Chunked against mem so
 // the CheckedAllocator can prove leaks. Returns a chunked that owns one Int64
 // array of `positions` values.
@@ -140,6 +233,49 @@ func chunkedPosDelete(t *testing.T, mem memory.Allocator, positions []int64) *ar
 	defer arr.Release()
 
 	return arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{arr})
+}
+
+func TestReadAllDeleteFilesReturnsPartialDeletesOnError(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	ctx := compute.WithAllocator(t.Context(), mem)
+	goodDeletePath := "mem://bucket/deletes/good.parquet"
+	badDeletePath := "mem://bucket/deletes/missing.parquet"
+	dataPath := "mem://bucket/data/data.parquet"
+
+	memFS := iceio.NewMemFS()
+	writePosDeleteParquetToMemFS(t, memFS, goodDeletePath, `[
+		{"file_path": "`+dataPath+`", "pos": 1},
+		{"file_path": "`+dataPath+`", "pos": 3}
+	]`)
+	testFS := &failAfterGoodCloseFS{
+		MemFS:      memFS,
+		goodPath:   goodDeletePath,
+		badPath:    badDeletePath,
+		goodClosed: make(chan struct{}),
+	}
+	tasks := []FileScanTask{{
+		DeleteFiles: []iceberg.DataFile{
+			newPosDeleteFile(t, goodDeletePath, 2, 128),
+			newPosDeleteFile(t, badDeletePath, 1, 128),
+		},
+	}}
+
+	// concurrency=2 is enough to observe the partial result deterministically:
+	// the good worker closes first, then the bad worker returns its error.
+	deletesPerFile, err := readAllDeleteFiles(ctx, testFS, tasks, 2)
+	require.Error(t, err)
+	require.NotNil(t, deletesPerFile)
+	require.Contains(t, deletesPerFile, dataPath)
+	require.Len(t, deletesPerFile[dataPath], 1)
+
+	chunks := deletesPerFile[dataPath][0].Chunks()
+	require.Len(t, chunks, 1)
+	pos, ok := chunks[0].(*array.Int64)
+	require.True(t, ok)
+	assert.Equal(t, []int64{1, 3}, pos.Int64Values())
+
+	releasePerFilePosDeletes(deletesPerFile)
+	mem.AssertSize(t, 0)
 }
 
 // TestReleasePerFilePosDeletes verifies the helper releases every Arrow chunk
@@ -190,4 +326,47 @@ func TestReleasePerFilePosDeletes(t *testing.T) {
 
 		require.NotPanics(t, func() { releasePerFilePosDeletes(m) })
 	})
+}
+
+func TestCreateIteratorReleasesEmptyRecordBatches(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	bldr := array.NewInt64Builder(mem)
+	bldr.AppendValues([]int64{1, 2}, nil)
+	arr := bldr.NewArray()
+	bldr.Release()
+
+	emptyArr := array.NewSlice(arr, 0, 0)
+	arr.Release()
+
+	schema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+	}, nil)
+	batch := array.NewRecordBatch(schema, []arrow.Array{emptyArr}, 0)
+	emptyArr.Release()
+
+	records := make(chan enumeratedRecord, 1)
+	records <- enumeratedRecord{
+		Record: internal.Enumerated[arrow.RecordBatch]{
+			Value: batch,
+			Index: 0,
+			Last:  true,
+		},
+		Task: internal.Enumerated[FileScanTask]{
+			Index: 0,
+			Last:  true,
+		},
+	}
+	close(records)
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	itr := createIterator(ctx, 1, records, nil, cancel, 0)
+	for rec, err := range itr {
+		require.NoError(t, err)
+		if rec != nil {
+			rec.Release()
+		}
+		require.Fail(t, "empty record batch should not be yielded")
+	}
 }

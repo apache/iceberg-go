@@ -69,12 +69,13 @@ func (p PartitionField) SourceID() int {
 }
 
 // EscapedName returns the URL-escaped version of the partition field name.
+// initialize() pre-populates escapedName for specs built through a constructor.
 func (p *PartitionField) EscapedName() string {
-	if p.escapedName == "" {
-		p.escapedName = url.QueryEscape(p.Name)
+	if p.escapedName != "" {
+		return p.escapedName
 	}
 
-	return p.escapedName
+	return url.QueryEscape(p.Name)
 }
 
 func (p PartitionField) MarshalJSON() ([]byte, error) {
@@ -418,6 +419,7 @@ func (ps *PartitionSpec) initialize() {
 	ps.sourceIdToFields = make(map[int][]PartitionField)
 
 	for i := range ps.fields {
+		ps.fields[i].escapedName = url.QueryEscape(ps.fields[i].Name)
 		ps.sourceIdToFields[ps.fields[i].SourceID()] = append(ps.sourceIdToFields[ps.fields[i].SourceID()], ps.fields[i])
 	}
 }
@@ -552,12 +554,7 @@ func (ps *PartitionSpec) PartitionToPath(data StructLike, sc *Schema) string {
 		sb.WriteByte('=')
 
 		// Only escape the value (which changes per row)
-		var valueStr string
-		if t, ok := ps.fields[i].Transform.(typedHumanStringer); ok {
-			valueStr = t.ToHumanStrType(partType.FieldList[i].Type, data.Get(i))
-		} else {
-			valueStr = ps.fields[i].Transform.ToHumanStr(data.Get(i))
-		}
+		valueStr := ps.fields[i].Transform.ToHumanStrType(partType.FieldList[i].Type, data.Get(i))
 		sb.WriteString(url.QueryEscape(valueStr))
 	}
 

@@ -164,4 +164,33 @@ func buildTimestampArray(mem memory.Allocator, shape encoderArrayShape) arrow.Ar
 	return buildFastPathArray(
 		array.NewTimestampBuilder(mem, arrow.FixedWidthTypes.Timestamp_us.(*arrow.TimestampType)),
 		shape, arrow.Timestamp(7), arrow.Timestamp(-3), arrow.Timestamp(0), arrow.Timestamp(4))
+	"testing"
+
+	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
+	"github.com/stretchr/testify/require"
+)
+
+func TestReadAllEqualityDeleteFilesRejectsEmptyEqualityFieldIDs(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+		"mem://default/table/delete/empty-equality-fields.parquet",
+		iceberg.ParquetFile, nil, nil, nil, 1, 128,
+	)
+	require.NoError(t, err)
+	deleteFile := builder.EqualityFieldIDs(nil).Build()
+
+	_, err = readAllEqualityDeleteFiles(
+		t.Context(),
+		iceio.NewMemFS(),
+		schema,
+		[]FileScanTask{{EqualityDeleteFiles: []iceberg.DataFile{deleteFile}}},
+		1,
+	)
+	require.ErrorIs(t, err, ErrEmptyEqualityFieldIDs)
+	require.ErrorContains(t, err, "empty-equality-fields.parquet")
 }

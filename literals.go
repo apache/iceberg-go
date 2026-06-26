@@ -966,8 +966,8 @@ func (s StringLiteral) To(typ Type) (Literal, error) {
 
 		return TimeLiteral(val), nil
 	case TimestampType:
-		// requires RFC3339 with no time zone
-		tm, err := time.Parse("2006-01-02T15:04:05", string(s))
+		// ISO date-time, no zone; fractional seconds optional.
+		tm, err := time.Parse("2006-01-02T15:04:05.999999999", string(s))
 		if err != nil {
 			return nil, fmt.Errorf("%w: invalid Timestamp format for casting from string '%s': %s",
 				ErrBadCast, s, err.Error())
@@ -975,14 +975,32 @@ func (s StringLiteral) To(typ Type) (Literal, error) {
 
 		return TimestampLiteral(Timestamp(tm.UTC().UnixMicro())), nil
 	case TimestampTzType:
-		// requires RFC3339 format WITH time zone
-		tm, err := time.Parse(time.RFC3339, string(s))
+		// ISO date-time WITH zone; up to microsecond fractional seconds.
+		tm, err := time.Parse("2006-01-02T15:04:05.999999Z07:00", string(s))
 		if err != nil {
 			return nil, fmt.Errorf("%w: invalid TimestampTz format for casting from string '%s': %s",
 				ErrBadCast, s, err.Error())
 		}
 
 		return TimestampLiteral(Timestamp(tm.UTC().UnixMicro())), nil
+	case TimestampNsType:
+		// Same as timestamp but nanosecond precision.
+		tm, err := time.Parse("2006-01-02T15:04:05.999999999", string(s))
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid TimestampNs format for casting from string '%s': %s",
+				ErrBadCast, s, err.Error())
+		}
+
+		return TimestampNsLiteral(TimestampNano(tm.UTC().UnixNano())), nil
+	case TimestampTzNsType:
+		// Same as timestamptz but nanosecond precision.
+		tm, err := time.Parse("2006-01-02T15:04:05.999999999Z07:00", string(s))
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid TimestampTzNs format for casting from string '%s': %s",
+				ErrBadCast, s, err.Error())
+		}
+
+		return TimestampNsLiteral(TimestampNano(tm.UTC().UnixNano())), nil
 	case UUIDType:
 		val, err := uuid.Parse(string(s))
 		if err != nil {

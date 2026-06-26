@@ -19,6 +19,7 @@ package iceberg_test
 
 import (
 	"encoding/json"
+	"math"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -571,6 +572,27 @@ func TestPropUInt(t *testing.T) {
 		"negative string must fall back, not wrap to a huge positive")
 	assert.Equal(t, uint(77), iceberg.PropUInt(props, "garbage", 77), "falls back on parse error")
 	assert.Equal(t, uint(5), iceberg.PropUInt(props, "missing", 5), "falls back on missing key")
+}
+
+func TestGetInt64(t *testing.T) {
+	props := iceberg.Properties{
+		"n":        "42",
+		"maxint64": "9223372036854775807",
+		"neg":      "-7",
+		"garbage":  "not-a-number",
+	}
+
+	assert.Equal(t, int64(42), props.GetInt64("n", 0))
+	assert.Equal(t, int64(math.MaxInt64), props.GetInt64("maxint64", 0),
+		"must preserve full int64 MaxInt64 value")
+	assert.Equal(t, int64(-7), props.GetInt64("neg", 0))
+	assert.Equal(t, int64(99), props.GetInt64("garbage", 99), "falls back on parse error")
+	assert.Equal(t, int64(5), props.GetInt64("missing", 5), "falls back on missing key")
+
+	// Verify the default itself survives round-trip without truncation on 32-bit.
+	def := int64(math.MaxInt64)
+	assert.Equal(t, def, props.GetInt64("missing", def),
+		"default int64(math.MaxInt64) must not be truncated")
 }
 
 func TestGeometryType(t *testing.T) {
