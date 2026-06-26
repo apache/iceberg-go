@@ -182,6 +182,7 @@ func TestAdlsKeyExtractor(t *testing.T) {
 		name        string
 		input       string
 		expectedKey string
+		expectedErr string
 		strict      bool
 		shouldError bool
 	}{
@@ -216,6 +217,12 @@ func TestAdlsKeyExtractor(t *testing.T) {
 			shouldError: true,
 		},
 		{
+			name:        "URI with query but no path",
+			input:       "abfs://container@account.dfs.core.windows.net?prefix=data",
+			expectedErr: "must be followed by an object path",
+			shouldError: true,
+		},
+		{
 			name:        "strict URI with different container",
 			input:       "abfs://other@account.dfs.core.windows.net/path/to/file.parquet",
 			strict:      true,
@@ -238,6 +245,9 @@ func TestAdlsKeyExtractor(t *testing.T) {
 
 			if test.shouldError {
 				assert.Error(t, err, "Expected error for input: %s", test.input)
+				if test.expectedErr != "" {
+					assert.ErrorContains(t, err, test.expectedErr, "Expected specific error for input: %s", test.input)
+				}
 			} else {
 				assert.NoError(t, err, "Unexpected error for input: %s", test.input)
 				assert.Equal(t, test.expectedKey, key, "Key mismatch for input: %s", test.input)

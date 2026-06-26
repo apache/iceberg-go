@@ -230,6 +230,11 @@ func adlsObjectLocationExtractor(parsedURL *url.URL, opts ...keyExtractorOption)
 		}
 
 		uriPath := matches[3]
+		if uriPath != "" && !strings.HasPrefix(uriPath, "/") {
+			return objectLocation{}, fmt.Errorf("URI authority %q must be followed by an object path: %s",
+				authority, location)
+		}
+
 		key := strings.TrimPrefix(uriPath, "/")
 
 		parsed := objectLocation{
