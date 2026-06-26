@@ -1158,6 +1158,66 @@ func (m *ManifestTestSuite) TestV3DataManifestFirstRowIDInheritanceSkipsDeletedE
 	m.EqualValues(1000+liveCount, *read[2].DataFile().FirstRowID())
 }
 
+func (m *ManifestTestSuite) TestWriteManifestWithFirstRowIDOption() {
+	partitionSpec := NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "x", Transform: IdentityTransform{}})
+	count := int64(10)
+	entries := []ManifestEntry{
+		&manifestEntry{
+			EntryStatus: EntryStatusADDED,
+			Snapshot:    &entrySnapshotID,
+			Data: &dataFile{
+				Content:          EntryContentData,
+				Path:             "/data/file1.parquet",
+				Format:           ParquetFile,
+				PartitionData:    map[string]any{"x": int(1)},
+				RecordCount:      count,
+				FileSize:         1000,
+				BlockSizeInBytes: 64 * 1024,
+				FirstRowIDField:  nil,
+			},
+		},
+		&manifestEntry{
+			EntryStatus: EntryStatusADDED,
+			Snapshot:    &entrySnapshotID,
+			Data: &dataFile{
+				Content:          EntryContentData,
+				Path:             "/data/file2.parquet",
+				Format:           ParquetFile,
+				PartitionData:    map[string]any{"x": int(2)},
+				RecordCount:      count,
+				FileSize:         2000,
+				BlockSizeInBytes: 64 * 1024,
+				FirstRowIDField:  nil,
+			},
+		},
+	}
+
+	// Test 1: WriteManifest with WithManifestFileFirstRowID sets the field.
+	var bufWithID bytes.Buffer
+	firstRowID := int64(500)
+	mf, err := WriteManifest("/manifest.avro", &bufWithID, 3, partitionSpec, testSchema, entrySnapshotID, entries,
+		WithManifestFileFirstRowID(firstRowID))
+	m.Require().NoError(err)
+	m.Require().NotNil(mf.FirstRowID())
+	m.Equal(firstRowID, *mf.FirstRowID())
+
+	// Reading back, entries inherit first_row_id from the manifest file.
+	read, err := ReadManifest(mf, bytes.NewReader(bufWithID.Bytes()), false)
+	m.Require().NoError(err)
+	m.Require().Len(read, 2)
+	m.Require().NotNil(read[0].DataFile().FirstRowID())
+	m.EqualValues(firstRowID, *read[0].DataFile().FirstRowID())
+	m.Require().NotNil(read[1].DataFile().FirstRowID())
+	m.EqualValues(firstRowID+count, *read[1].DataFile().FirstRowID())
+
+	// Test 2: WriteManifest without option leaves FirstRowID nil (backward compat).
+	var bufNoID bytes.Buffer
+	mf2, err := WriteManifest("/manifest.avro", &bufNoID, 3, partitionSpec, testSchema, entrySnapshotID, entries)
+	m.Require().NoError(err)
+	m.Nil(mf2.FirstRowID())
+}
+
 func (m *ManifestTestSuite) TestReadManifestListIncompleteSchema() {
 	// Verify that reading a manifest list whose embedded schema references
 	// an undefined named type ("field_summary" without its definition)

@@ -1274,6 +1274,13 @@ func WithManifestFileContent(content ManifestContent) ManifestFileOption {
 	}
 }
 
+// WithManifestFileFirstRowID sets the first_row_id on a v3+ data manifest.
+func WithManifestFileFirstRowID(firstRowID int64) ManifestFileOption {
+	return func(mf *manifestFile) {
+		mf.FirstRowIDValue = &firstRowID
+	}
+}
+
 func (w *ManifestWriter) ToManifestFile(location string, length int64, opts ...ManifestFileOption) (ManifestFile, error) {
 	if err := w.Close(); err != nil {
 		return nil, err
@@ -1628,6 +1635,7 @@ func WriteManifest(
 	schema *Schema,
 	snapshotID int64,
 	entries []ManifestEntry,
+	opts ...ManifestFileOption,
 ) (mf ManifestFile, err error) {
 	cnt := &internal.CountingWriter{W: out}
 
@@ -1648,7 +1656,7 @@ func WriteManifest(
 		return nil, err
 	}
 
-	return w.ToManifestFile(filename, cnt.Count)
+	return w.ToManifestFile(filename, cnt.Count, opts...)
 }
 
 // ManifestEntryStatus defines constants for the entry status of
