@@ -437,6 +437,23 @@ func TestDecimalLiteralConversions(t *testing.T) {
 	assert.Equal(t, iceberg.Int64BelowMinLiteral(), below)
 	assert.Equal(t, iceberg.PrimitiveTypes.Int64, below.Type())
 
+	above, err = iceberg.DecimalLiteral(n4).To(iceberg.PrimitiveTypes.Int32)
+	require.NoError(t, err)
+	assert.Equal(t, iceberg.Int32AboveMaxLiteral(), above)
+	assert.Equal(t, iceberg.PrimitiveTypes.Int32, above.Type())
+
+	below, err = iceberg.DecimalLiteral(n5).To(iceberg.PrimitiveTypes.Int32)
+	require.NoError(t, err)
+	assert.Equal(t, iceberg.Int32BelowMinLiteral(), below)
+	assert.Equal(t, iceberg.PrimitiveTypes.Int32, below.Type())
+
+	n6 := iceberg.Decimal{Val: decimal128.FromU64(uint64(math.MaxInt64) + 2).Negate(), Scale: 0}
+
+	below, err = iceberg.DecimalLiteral(n6).To(iceberg.PrimitiveTypes.Int32)
+	require.NoError(t, err)
+	assert.Equal(t, iceberg.Int32BelowMinLiteral(), below)
+	assert.Equal(t, iceberg.PrimitiveTypes.Int32, below.Type())
+
 	v, err := decimal128.FromFloat64(math.MaxFloat32+1e37, 38, -1)
 	require.NoError(t, err)
 	above, err = iceberg.DecimalLiteral(iceberg.Decimal{Val: v, Scale: -1}).
