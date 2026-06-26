@@ -736,6 +736,27 @@ func TestInvalidBoolLiteralConversions(t *testing.T) {
 	})
 }
 
+func TestBoolLiteralComparator(t *testing.T) {
+	cmp := iceberg.BoolLiteral(false).Comparator()
+
+	tests := []struct {
+		name     string
+		v1, v2   bool
+		expected int
+	}{
+		{"false_equals_false", false, false, 0},
+		{"true_equals_true", true, true, 0},
+		{"false_less_than_true", false, true, -1},
+		{"true_greater_than_false", true, false, 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, cmp(tt.v1, tt.v2))
+		})
+	}
+}
+
 func TestInvalidNumericConversions(t *testing.T) {
 	testInvalidLiteralConversions(t, iceberg.NewLiteral(int32(34)), []iceberg.Type{
 		iceberg.PrimitiveTypes.Bool,
