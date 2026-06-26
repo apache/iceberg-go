@@ -611,7 +611,8 @@ func TestBlobFileIORemoveMissingFileReturnsNotExist(t *testing.T) {
 	bucket := memblob.OpenBucket(nil)
 	defer bucket.Close()
 
-	bfs := createBlobFS(ctx, bucket, defaultKeyExtractor("test-bucket"))
+	extractor := defaultObjectLocationExtractor("test-bucket")
+	bfs := createBlobFS(ctx, bucket, keyExtractorFromObjectLocation(extractor), extractor)
 
 	err := bfs.Remove("s3://test-bucket/data/nonexistent.parquet")
 	require.ErrorIs(t, err, fs.ErrNotExist)
