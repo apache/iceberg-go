@@ -131,6 +131,23 @@ func TestSortOrderCheckCompatibilityWithValidTransform(t *testing.T) {
 	require.NoError(t, sortOrder.CheckCompatibility(schema))
 }
 
+func TestSortOrderCheckCompatibilityRejectsInvalidMultiArgSourceID(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 19, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	sortOrder, err := table.NewSortOrder(1, []table.SortField{{
+		SourceIDs: []int{19, 999},
+		Transform: iceberg.IdentityTransform{},
+		NullOrder: table.NullsFirst,
+		Direction: table.SortASC,
+	}})
+	require.NoError(t, err)
+
+	err = sortOrder.CheckCompatibility(schema)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "sort field with source id 999 not found in schema")
+}
+
 func TestUnmarshalSortOrderDefaults(t *testing.T) {
 	var order table.SortOrder
 	require.NoError(t, json.Unmarshal([]byte(`{"fields": []}`), &order))

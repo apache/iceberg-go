@@ -330,21 +330,28 @@ func (s *SortOrder) CheckCompatibility(schema *iceberg.Schema) error {
 	}
 
 	for _, field := range s.fields {
-		f, ok := schema.FindFieldByID(field.SourceID())
-		if !ok {
-			return fmt.Errorf("sort field with source id %d not found in schema", field.SourceID())
-		}
-
-		if _, ok := f.Type.(iceberg.PrimitiveType); !ok {
-			return fmt.Errorf("cannot sort by non-primitive source field: %s", f.Type.Type())
-		}
-
 		if field.Transform == nil {
 			return fmt.Errorf("%w: sort field with source id %d has no transform", ErrInvalidTransform, field.SourceID())
 		}
 
-		if !field.Transform.CanTransform(f.Type) {
-			return fmt.Errorf("invalid source type %s for transform %s", f.Type.Type(), field.Transform)
+		var firstField iceberg.NestedField
+		for idx, sourceID := range field.SourceIDs {
+			f, ok := schema.FindFieldByID(sourceID)
+			if !ok {
+				return fmt.Errorf("sort field with source id %d not found in schema", sourceID)
+			}
+
+			if _, ok := f.Type.(iceberg.PrimitiveType); !ok {
+				return fmt.Errorf("cannot sort by non-primitive source field: %s", f.Type.Type())
+			}
+
+			if idx == 0 {
+				firstField = f
+			}
+		}
+
+		if !field.Transform.CanTransform(firstField.Type) {
+			return fmt.Errorf("invalid source type %s for transform %s", firstField.Type.Type(), field.Transform)
 		}
 	}
 
