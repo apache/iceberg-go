@@ -208,6 +208,7 @@ func (s *WriteRecordsTestSuite) TestFSNotWritable() {
 	records := func(yield func(arrow.RecordBatch, error) bool) {}
 
 	for _, err := range table.WriteRecords(s.ctx, tbl, schema, records) {
+		s.Require().ErrorIs(err, table.ErrWriteIORequired)
 		s.Require().ErrorIs(err, iceberg.ErrNotImplemented)
 	}
 }
