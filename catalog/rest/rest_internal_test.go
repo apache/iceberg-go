@@ -40,6 +40,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/catalog"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -48,6 +50,40 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 )
+
+func TestLoadRegisteredCatalogRejectsInvalidAuthURL(t *testing.T) {
+	t.Parallel()
+
+	cat, err := catalog.Load(context.Background(), "rest", iceberg.Properties{
+		"uri":                    "http://example.com",
+		"rest.authorization-url": "http://[::1",
+	})
+	require.Error(t, err)
+	assert.Nil(t, cat)
+	assert.ErrorContains(t, err, "invalid rest.authorization-url")
+}
+
+func TestNewCatalogRejectsInvalidAuthURLFromConfig(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{
+				"rest.authorization-url": "http://[::1",
+			},
+			"overrides": map[string]any{},
+		})
+	})
+
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL)
+	require.Error(t, err)
+	assert.Nil(t, cat)
+	assert.ErrorContains(t, err, "invalid rest.authorization-url")
+}
 
 func TestTokenAuthenticationPriority(t *testing.T) {
 	t.Parallel()
