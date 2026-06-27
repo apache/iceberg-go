@@ -451,6 +451,26 @@ func (s *HadoopCatalogTestSuite) TestMetadataFilePath() {
 	s.Equal(filepath.Join(s.warehouse, "ns", "tbl", "metadata", "v42.metadata.json"), path)
 }
 
+func (s *HadoopCatalogTestSuite) TestMetadataFilePathForCompression() {
+	ident := []string{"ns", "tbl"}
+
+	path, err := s.cat.metadataFilePathForCompression(ident, 1, table.MetadataCompressionCodecNone)
+	s.Require().NoError(err)
+	s.Equal(filepath.Join(s.warehouse, "ns", "tbl", "metadata", "v1.metadata.json"), path)
+
+	path, err = s.cat.metadataFilePathForCompression(ident, 1, table.MetadataCompressionCodecGzip)
+	s.Require().NoError(err)
+	s.Equal(filepath.Join(s.warehouse, "ns", "tbl", "metadata", "v1.gz.metadata.json"), path)
+
+	path, err = s.cat.metadataFilePathForCompression(ident, 1, table.MetadataCompressionCodecZstd)
+	s.Require().NoError(err)
+	s.Equal(filepath.Join(s.warehouse, "ns", "tbl", "metadata", "v1.zstd.metadata.json"), path)
+
+	_, err = s.cat.metadataFilePathForCompression(ident, 1, "brotli")
+	s.Require().Error(err)
+	s.Contains(err.Error(), "unsupported write metadata compression codec")
+}
+
 func (s *HadoopCatalogTestSuite) TestVersionHintPath() {
 	path := s.cat.versionHintPath([]string{"ns", "tbl"})
 	s.Equal(filepath.Join(s.warehouse, "ns", "tbl", "metadata", "version-hint.text"), path)
@@ -473,6 +493,8 @@ func (s *HadoopCatalogTestSuite) TestVersionPatternMatches() {
 		"v100.metadata.json",
 		"v1.gz.metadata.json",
 		"v42.gz.metadata.json",
+		"v1.zstd.metadata.json",
+		"v42.zstd.metadata.json",
 	}
 
 	for _, name := range names {
@@ -562,6 +584,15 @@ func (s *HadoopCatalogTestSuite) TestIsTableDirWithGzipMetadata() {
 	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "v1.gz.metadata.json"), nil, 0o644))
 
 	s.True(s.requireIsTableDir(tableDir))
+}
+
+func (s *HadoopCatalogTestSuite) TestIsTableDirWithZstdMetadata() {
+	tableDir := filepath.Join(s.warehouse, "ns", "tbl")
+	metaDir := filepath.Join(tableDir, "metadata")
+	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
+	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "v1.zstd.metadata.json"), nil, 0o644))
+
+	s.True(isTableDir(s.cat.filesystem, tableDir))
 }
 
 func (s *HadoopCatalogTestSuite) TestIsTableDirNonExistentPath() {
@@ -771,6 +802,33 @@ func (s *HadoopCatalogTestSuite) TestFindVersionMixedGzipAndPlain() {
 	s.createMetadataFile(ident, 1)
 	s.createMetadataFile(ident, 2)
 	s.Require().NoError(os.WriteFile(filepath.Join(dir, "v3.gz.metadata.json"), nil, 0o644))
+	s.cat.writeVersionHint(ident, 1)
+
+	ver, err := s.cat.findVersion(ident)
+	s.Require().NoError(err)
+	s.Equal(3, ver)
+}
+
+func (s *HadoopCatalogTestSuite) TestFindVersionZstdOnlyWithHint() {
+	ident := []string{"ns", "tbl"}
+	dir := s.cat.metadataDir(ident)
+	s.Require().NoError(os.MkdirAll(dir, 0o755))
+	s.Require().NoError(os.WriteFile(filepath.Join(dir, "v1.zstd.metadata.json"), nil, 0o644))
+	s.Require().NoError(os.WriteFile(filepath.Join(dir, "v2.zstd.metadata.json"), nil, 0o644))
+	s.cat.writeVersionHint(ident, 1)
+
+	ver, err := s.cat.findVersion(ident)
+	s.Require().NoError(err)
+	s.Equal(2, ver)
+}
+
+func (s *HadoopCatalogTestSuite) TestFindVersionMixedZstdAndPlain() {
+	ident := []string{"ns", "tbl"}
+	dir := s.cat.metadataDir(ident)
+	s.Require().NoError(os.MkdirAll(dir, 0o755))
+	s.createMetadataFile(ident, 1)
+	s.createMetadataFile(ident, 2)
+	s.Require().NoError(os.WriteFile(filepath.Join(dir, "v3.zstd.metadata.json"), nil, 0o644))
 	s.cat.writeVersionHint(ident, 1)
 
 	ver, err := s.cat.findVersion(ident)
@@ -1402,6 +1460,50 @@ func (s *HadoopCatalogTestSuite) TestCreateTableAndLoad() {
 	s.Equal(len(created.Schema().Fields()), len(loaded.Schema().Fields()))
 }
 
+func (s *HadoopCatalogTestSuite) TestCreateTableGzipMetadata() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	props := iceberg.Properties{
+		table.MetadataCompressionKey: table.MetadataCompressionCodecGzip,
+	}
+
+	tbl, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema(),
+		catalog.WithProperties(props))
+	s.Require().NoError(err)
+
+	metaPath := filepath.Join(s.warehouse, "ns", "tbl", "metadata", "v1.gz.metadata.json")
+	s.FileExists(metaPath)
+	s.Equal(metaPath, tbl.MetadataLocation())
+
+	loaded, err := s.cat.LoadTable(ctx, []string{"ns", "tbl"})
+	s.Require().NoError(err)
+	s.Equal(metaPath, loaded.MetadataLocation())
+	s.Equal(tbl.Metadata().TableUUID(), loaded.Metadata().TableUUID())
+}
+
+func (s *HadoopCatalogTestSuite) TestCreateTableZstdMetadata() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	props := iceberg.Properties{
+		table.MetadataCompressionKey: table.MetadataCompressionCodecZstd,
+	}
+
+	tbl, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema(),
+		catalog.WithProperties(props))
+	s.Require().NoError(err)
+
+	metaPath := filepath.Join(s.warehouse, "ns", "tbl", "metadata", "v1.zstd.metadata.json")
+	s.FileExists(metaPath)
+	s.Equal(metaPath, tbl.MetadataLocation())
+
+	loaded, err := s.cat.LoadTable(ctx, []string{"ns", "tbl"})
+	s.Require().NoError(err)
+	s.Equal(metaPath, loaded.MetadataLocation())
+	s.Equal(tbl.Metadata().TableUUID(), loaded.Metadata().TableUUID())
+}
+
 func (s *HadoopCatalogTestSuite) TestCreateTableCustomLocation() {
 	ctx := context.Background()
 	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
@@ -1964,6 +2066,68 @@ func (s *HadoopCatalogTestSuite) TestCommitTableSingleUpdate() {
 
 	// File should exist on disk.
 	s.FileExists(metaLoc)
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableGzipMetadata() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	props := iceberg.Properties{
+		table.MetadataCompressionKey: table.MetadataCompressionCodecGzip,
+	}
+
+	tbl, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema(),
+		catalog.WithProperties(props))
+	s.Require().NoError(err)
+
+	_, metaLoc, err := s.cat.CommitTable(
+		ctx, []string{"ns", "tbl"},
+		[]table.Requirement{
+			table.AssertTableUUID(tbl.Metadata().TableUUID()),
+		},
+		[]table.Update{
+			table.NewSetPropertiesUpdate(iceberg.Properties{"test.key": "test.value"}),
+		},
+	)
+	s.Require().NoError(err)
+	s.Equal(filepath.Join(s.warehouse, "ns", "tbl", "metadata", "v2.gz.metadata.json"), metaLoc)
+	s.FileExists(metaLoc)
+
+	loaded, err := s.cat.LoadTable(ctx, []string{"ns", "tbl"})
+	s.Require().NoError(err)
+	s.Equal(metaLoc, loaded.MetadataLocation())
+	s.Equal("test.value", loaded.Properties()["test.key"])
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableZstdMetadata() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	props := iceberg.Properties{
+		table.MetadataCompressionKey: table.MetadataCompressionCodecZstd,
+	}
+
+	tbl, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema(),
+		catalog.WithProperties(props))
+	s.Require().NoError(err)
+
+	_, metaLoc, err := s.cat.CommitTable(
+		ctx, []string{"ns", "tbl"},
+		[]table.Requirement{
+			table.AssertTableUUID(tbl.Metadata().TableUUID()),
+		},
+		[]table.Update{
+			table.NewSetPropertiesUpdate(iceberg.Properties{"test.key": "test.value"}),
+		},
+	)
+	s.Require().NoError(err)
+	s.Equal(filepath.Join(s.warehouse, "ns", "tbl", "metadata", "v2.zstd.metadata.json"), metaLoc)
+	s.FileExists(metaLoc)
+
+	loaded, err := s.cat.LoadTable(ctx, []string{"ns", "tbl"})
+	s.Require().NoError(err)
+	s.Equal(metaLoc, loaded.MetadataLocation())
+	s.Equal("test.value", loaded.Properties()["test.key"])
 }
 
 func (s *HadoopCatalogTestSuite) TestCommitTableMultipleSequential() {

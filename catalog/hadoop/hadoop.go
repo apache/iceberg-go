@@ -290,6 +290,20 @@ func (c *Catalog) metadataFilePath(ident table.Identifier, version int) string {
 	return joinPath(c.isLocal, c.metadataDir(ident), fmt.Sprintf("v%d.metadata.json", version))
 }
 
+func (c *Catalog) metadataFilePathForCompression(ident table.Identifier, version int, compression string) (string, error) {
+	var suffix string
+	switch compression {
+	case table.MetadataCompressionCodecNone:
+		suffix = ".metadata.json"
+	case table.MetadataCompressionCodecGzip:
+		suffix = ".gz.metadata.json"
+	default:
+		return "", fmt.Errorf("unsupported write metadata compression codec: %s", compression)
+	}
+
+	return joinPath(c.isLocal, c.metadataDir(ident), fmt.Sprintf("v%d%s", version, suffix)), nil
+}
+
 func (c *Catalog) versionHintPath(ident table.Identifier) string {
 	return joinPath(c.isLocal, c.metadataDir(ident), "version-hint.text")
 }
@@ -525,15 +539,19 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 	}
 
 	version := 1
-	metaPath := c.metadataFilePath(ident, version)
-	tempPath := joinPath(c.isLocal, metaDir, uuid.New().String()+".metadata.json")
-
 	compression := table.MetadataCompressionDefault
 	if cfg.Properties != nil {
 		if v, ok := cfg.Properties[table.MetadataCompressionKey]; ok {
 			compression = v
 		}
 	}
+
+	metaPath, err := c.metadataFilePathForCompression(ident, version, compression)
+	if err != nil {
+		return nil, fmt.Errorf("hadoop catalog: failed to determine metadata file path: %w", err)
+	}
+
+	tempPath := joinPath(c.isLocal, metaDir, uuid.New().String()+".metadata.json")
 
 	if err := internal.WriteTableMetadata(metadata, c.filesystem, tempPath, compression); err != nil {
 		_ = c.filesystem.Remove(tempPath)
@@ -655,10 +673,13 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 		return nil, "", fmt.Errorf("hadoop catalog: failed to create metadata directory: %w", err)
 	}
 
-	newMetaPath := c.metadataFilePath(ident, newVersion)
-	tempPath := joinPath(c.isLocal, metaDir, uuid.New().String()+".metadata.json")
-
 	compression := updated.Properties().Get(table.MetadataCompressionKey, table.MetadataCompressionDefault)
+	newMetaPath, err := c.metadataFilePathForCompression(ident, newVersion, compression)
+	if err != nil {
+		return nil, "", fmt.Errorf("hadoop catalog: failed to determine metadata file path: %w", err)
+	}
+
+	tempPath := joinPath(c.isLocal, metaDir, uuid.New().String()+".metadata.json")
 
 	if err := internal.WriteTableMetadata(updated, c.filesystem, tempPath, compression); err != nil {
 		_ = c.filesystem.Remove(tempPath)
