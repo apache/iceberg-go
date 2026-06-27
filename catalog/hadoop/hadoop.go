@@ -286,10 +286,6 @@ func (c *Catalog) metadataDir(ident table.Identifier) string {
 	return joinPath(c.isLocal, c.tableToPath(ident), "metadata")
 }
 
-func (c *Catalog) metadataFilePath(ident table.Identifier, version int) string {
-	return joinPath(c.isLocal, c.metadataDir(ident), fmt.Sprintf("v%d.metadata.json", version))
-}
-
 func (c *Catalog) metadataFilePathForCompression(ident table.Identifier, version int, compression string) (string, error) {
 	var suffix string
 	switch compression {

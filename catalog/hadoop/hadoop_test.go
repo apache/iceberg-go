@@ -79,6 +79,33 @@ func (f *barrierRenameNoReplaceFS) RenameNoReplace(oldpath, newpath string) erro
 	return f.LocalFS.RenameNoReplace(oldpath, newpath)
 }
 
+type versionConflictOnCreateFS struct {
+	icebergio.LocalFS
+
+	conflictPath string
+
+	once        sync.Once
+	conflictErr error
+}
+
+func (f *versionConflictOnCreateFS) Create(name string) (icebergio.FileWriter, error) {
+	w, err := f.LocalFS.Create(name)
+	if err != nil {
+		return nil, err
+	}
+
+	f.once.Do(func() {
+		f.conflictErr = f.WriteFile(f.conflictPath, nil)
+	})
+	if f.conflictErr != nil {
+		_ = w.Close()
+
+		return nil, f.conflictErr
+	}
+
+	return w, nil
+}
+
 // a mock hadoop catalog filesystem to ensure that we
 // can load arbitrary new filesystem implementations
 // as long as they full the HadoopCatalogFS interface
@@ -401,7 +428,9 @@ func (s *HadoopCatalogTestSuite) TestNewCatalogRemoteHappyPathWithUnsafeCommits(
 	s.Equal(scheme+"://bucket/wh/ns", cat.namespaceToPath(ident[:1]))
 	s.Equal(scheme+"://bucket/wh/ns/tbl", cat.tableToPath(ident))
 	s.Equal(scheme+"://bucket/wh/ns/tbl/metadata", cat.metadataDir(ident))
-	s.Equal(scheme+"://bucket/wh/ns/tbl/metadata/v1.metadata.json", cat.metadataFilePath(ident, 1))
+	metaPath, err := cat.metadataFilePathForCompression(ident, 1, table.MetadataCompressionCodecNone)
+	s.Require().NoError(err)
+	s.Equal(scheme+"://bucket/wh/ns/tbl/metadata/v1.metadata.json", metaPath)
 	s.Equal(scheme+"://bucket/wh/ns/tbl/metadata/version-hint.text", cat.versionHintPath(ident))
 	s.Equal(scheme+"://bucket/wh/ns/tbl", cat.defaultTableLocation(ident))
 }
@@ -443,14 +472,6 @@ func (s *HadoopCatalogTestSuite) TestMetadataDir() {
 	s.Equal(filepath.Join(s.warehouse, "ns", "tbl", "metadata"), path)
 }
 
-func (s *HadoopCatalogTestSuite) TestMetadataFilePath() {
-	path := s.cat.metadataFilePath([]string{"ns", "tbl"}, 1)
-	s.Equal(filepath.Join(s.warehouse, "ns", "tbl", "metadata", "v1.metadata.json"), path)
-
-	path = s.cat.metadataFilePath([]string{"ns", "tbl"}, 42)
-	s.Equal(filepath.Join(s.warehouse, "ns", "tbl", "metadata", "v42.metadata.json"), path)
-}
-
 func (s *HadoopCatalogTestSuite) TestMetadataFilePathForCompression() {
 	ident := []string{"ns", "tbl"}
 
@@ -462,13 +483,15 @@ func (s *HadoopCatalogTestSuite) TestMetadataFilePathForCompression() {
 	s.Require().NoError(err)
 	s.Equal(filepath.Join(s.warehouse, "ns", "tbl", "metadata", "v1.gz.metadata.json"), path)
 
-	path, err = s.cat.metadataFilePathForCompression(ident, 1, table.MetadataCompressionCodecZstd)
+	path, err = s.cat.metadataFilePathForCompression(ident, 42, table.MetadataCompressionCodecGzip)
 	s.Require().NoError(err)
-	s.Equal(filepath.Join(s.warehouse, "ns", "tbl", "metadata", "v1.zstd.metadata.json"), path)
+	s.Equal(filepath.Join(s.warehouse, "ns", "tbl", "metadata", "v42.gz.metadata.json"), path)
 
-	_, err = s.cat.metadataFilePathForCompression(ident, 1, "brotli")
-	s.Require().Error(err)
-	s.Contains(err.Error(), "unsupported write metadata compression codec")
+	for _, codec := range []string{table.MetadataCompressionCodecZstd, "brotli"} {
+		_, err = s.cat.metadataFilePathForCompression(ident, 1, codec)
+		s.Require().Error(err)
+		s.Contains(err.Error(), "unsupported write metadata compression codec")
+	}
 }
 
 func (s *HadoopCatalogTestSuite) TestVersionHintPath() {
@@ -493,8 +516,6 @@ func (s *HadoopCatalogTestSuite) TestVersionPatternMatches() {
 		"v100.metadata.json",
 		"v1.gz.metadata.json",
 		"v42.gz.metadata.json",
-		"v1.zstd.metadata.json",
-		"v42.zstd.metadata.json",
 	}
 
 	for _, name := range names {
@@ -510,6 +531,7 @@ func (s *HadoopCatalogTestSuite) TestVersionPatternRejects() {
 		"metadata.json",
 		"v1.metadata.json.bak",
 		"v-1.metadata.json",
+		"v1.zstd.metadata.json",
 	}
 
 	for _, name := range tests {
@@ -586,13 +608,13 @@ func (s *HadoopCatalogTestSuite) TestIsTableDirWithGzipMetadata() {
 	s.True(s.requireIsTableDir(tableDir))
 }
 
-func (s *HadoopCatalogTestSuite) TestIsTableDirWithZstdMetadata() {
+func (s *HadoopCatalogTestSuite) TestIsTableDirIgnoresZstdMetadata() {
 	tableDir := filepath.Join(s.warehouse, "ns", "tbl")
 	metaDir := filepath.Join(tableDir, "metadata")
 	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
 	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "v1.zstd.metadata.json"), nil, 0o644))
 
-	s.True(isTableDir(s.cat.filesystem, tableDir))
+	s.False(isTableDir(s.cat.filesystem, s.cat.isLocal, tableDir))
 }
 
 func (s *HadoopCatalogTestSuite) TestIsTableDirNonExistentPath() {
@@ -600,7 +622,8 @@ func (s *HadoopCatalogTestSuite) TestIsTableDirNonExistentPath() {
 }
 
 func (s *HadoopCatalogTestSuite) createMetadataFile(ident table.Identifier, version int) {
-	path := s.cat.metadataFilePath(ident, version)
+	path, err := s.cat.metadataFilePathForCompression(ident, version, table.MetadataCompressionCodecNone)
+	s.Require().NoError(err)
 	s.Require().NoError(os.MkdirAll(filepath.Dir(path), 0o755))
 	s.Require().NoError(os.WriteFile(path, nil, 0o644))
 }
@@ -788,9 +811,10 @@ func (s *HadoopCatalogTestSuite) TestFindVersionGzipOnlyWithHint() {
 	s.Require().NoError(os.WriteFile(filepath.Join(dir, "v2.gz.metadata.json"), nil, 0o644))
 	s.cat.writeVersionHint(ident, 1)
 
-	ver, err := s.cat.findVersion(ident)
+	path, ver, err := s.cat.findMetadataLocation(ident)
 	s.Require().NoError(err)
 	s.Equal(2, ver)
+	s.Equal(filepath.Join(dir, "v2.gz.metadata.json"), path)
 }
 
 func (s *HadoopCatalogTestSuite) TestFindVersionMixedGzipAndPlain() {
@@ -804,36 +828,25 @@ func (s *HadoopCatalogTestSuite) TestFindVersionMixedGzipAndPlain() {
 	s.Require().NoError(os.WriteFile(filepath.Join(dir, "v3.gz.metadata.json"), nil, 0o644))
 	s.cat.writeVersionHint(ident, 1)
 
-	ver, err := s.cat.findVersion(ident)
+	path, ver, err := s.cat.findMetadataLocation(ident)
 	s.Require().NoError(err)
 	s.Equal(3, ver)
+	s.Equal(filepath.Join(dir, "v3.gz.metadata.json"), path)
 }
 
-func (s *HadoopCatalogTestSuite) TestFindVersionZstdOnlyWithHint() {
-	ident := []string{"ns", "tbl"}
-	dir := s.cat.metadataDir(ident)
-	s.Require().NoError(os.MkdirAll(dir, 0o755))
-	s.Require().NoError(os.WriteFile(filepath.Join(dir, "v1.zstd.metadata.json"), nil, 0o644))
-	s.Require().NoError(os.WriteFile(filepath.Join(dir, "v2.zstd.metadata.json"), nil, 0o644))
-	s.cat.writeVersionHint(ident, 1)
-
-	ver, err := s.cat.findVersion(ident)
-	s.Require().NoError(err)
-	s.Equal(2, ver)
-}
-
-func (s *HadoopCatalogTestSuite) TestFindVersionMixedZstdAndPlain() {
+func (s *HadoopCatalogTestSuite) TestFindMetadataLocationKeepsDiscoveredPathForDuplicateVersion() {
 	ident := []string{"ns", "tbl"}
 	dir := s.cat.metadataDir(ident)
 	s.Require().NoError(os.MkdirAll(dir, 0o755))
 	s.createMetadataFile(ident, 1)
 	s.createMetadataFile(ident, 2)
-	s.Require().NoError(os.WriteFile(filepath.Join(dir, "v3.zstd.metadata.json"), nil, 0o644))
-	s.cat.writeVersionHint(ident, 1)
+	s.createMetadataFile(ident, 3)
+	s.Require().NoError(os.WriteFile(filepath.Join(dir, "v3.gz.metadata.json"), nil, 0o644))
 
-	ver, err := s.cat.findVersion(ident)
+	path, ver, err := s.cat.findMetadataLocation(ident)
 	s.Require().NoError(err)
 	s.Equal(3, ver)
+	s.Equal(filepath.Join(dir, "v3.gz.metadata.json"), path)
 }
 
 // CreateNamespace tests
@@ -1482,7 +1495,7 @@ func (s *HadoopCatalogTestSuite) TestCreateTableGzipMetadata() {
 	s.Equal(tbl.Metadata().TableUUID(), loaded.Metadata().TableUUID())
 }
 
-func (s *HadoopCatalogTestSuite) TestCreateTableZstdMetadata() {
+func (s *HadoopCatalogTestSuite) TestCreateTableRejectsZstdMetadata() {
 	ctx := context.Background()
 	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
 
@@ -1490,18 +1503,10 @@ func (s *HadoopCatalogTestSuite) TestCreateTableZstdMetadata() {
 		table.MetadataCompressionKey: table.MetadataCompressionCodecZstd,
 	}
 
-	tbl, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema(),
+	_, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema(),
 		catalog.WithProperties(props))
-	s.Require().NoError(err)
-
-	metaPath := filepath.Join(s.warehouse, "ns", "tbl", "metadata", "v1.zstd.metadata.json")
-	s.FileExists(metaPath)
-	s.Equal(metaPath, tbl.MetadataLocation())
-
-	loaded, err := s.cat.LoadTable(ctx, []string{"ns", "tbl"})
-	s.Require().NoError(err)
-	s.Equal(metaPath, loaded.MetadataLocation())
-	s.Equal(tbl.Metadata().TableUUID(), loaded.Metadata().TableUUID())
+	s.Require().Error(err)
+	s.Contains(err.Error(), "unsupported write metadata compression codec")
 }
 
 func (s *HadoopCatalogTestSuite) TestCreateTableCustomLocation() {
@@ -1590,7 +1595,9 @@ func (s *HadoopCatalogTestSuite) TestCreateTableConcurrentMetadataPublishConflic
 
 	s.Equal(1, successes)
 	s.Equal(1, conflicts)
-	s.FileExists(s.cat.metadataFilePath([]string{"ns", "tbl"}, 1))
+	metaPath, err := s.cat.metadataFilePathForCompression([]string{"ns", "tbl"}, 1, table.MetadataCompressionCodecNone)
+	s.Require().NoError(err)
+	s.FileExists(metaPath)
 }
 
 func (s *HadoopCatalogTestSuite) TestCreateTableWithPartitionSpec() {
@@ -2099,20 +2106,15 @@ func (s *HadoopCatalogTestSuite) TestCommitTableGzipMetadata() {
 	s.Equal("test.value", loaded.Properties()["test.key"])
 }
 
-func (s *HadoopCatalogTestSuite) TestCommitTableZstdMetadata() {
+func (s *HadoopCatalogTestSuite) TestCommitTableDetectsCrossCodecVersionConflict() {
 	ctx := context.Background()
-	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+	tbl := s.createTestTable("ns", "tbl")
+	ident := []string{"ns", "tbl"}
+	conflictPath := filepath.Join(s.cat.metadataDir(ident), "v2.gz.metadata.json")
+	s.cat.filesystem = &versionConflictOnCreateFS{conflictPath: conflictPath}
 
-	props := iceberg.Properties{
-		table.MetadataCompressionKey: table.MetadataCompressionCodecZstd,
-	}
-
-	tbl, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema(),
-		catalog.WithProperties(props))
-	s.Require().NoError(err)
-
-	_, metaLoc, err := s.cat.CommitTable(
-		ctx, []string{"ns", "tbl"},
+	_, _, err := s.cat.CommitTable(
+		ctx, ident,
 		[]table.Requirement{
 			table.AssertTableUUID(tbl.Metadata().TableUUID()),
 		},
@@ -2120,14 +2122,30 @@ func (s *HadoopCatalogTestSuite) TestCommitTableZstdMetadata() {
 			table.NewSetPropertiesUpdate(iceberg.Properties{"test.key": "test.value"}),
 		},
 	)
-	s.Require().NoError(err)
-	s.Equal(filepath.Join(s.warehouse, "ns", "tbl", "metadata", "v2.zstd.metadata.json"), metaLoc)
-	s.FileExists(metaLoc)
+	s.Require().ErrorIs(err, table.ErrCommitFailed)
+	s.Contains(err.Error(), conflictPath)
+}
 
-	loaded, err := s.cat.LoadTable(ctx, []string{"ns", "tbl"})
+func (s *HadoopCatalogTestSuite) TestCommitTableRejectsZstdMetadata() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	tbl, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema())
 	s.Require().NoError(err)
-	s.Equal(metaLoc, loaded.MetadataLocation())
-	s.Equal("test.value", loaded.Properties()["test.key"])
+
+	_, _, err = s.cat.CommitTable(
+		ctx, []string{"ns", "tbl"},
+		[]table.Requirement{
+			table.AssertTableUUID(tbl.Metadata().TableUUID()),
+		},
+		[]table.Update{
+			table.NewSetPropertiesUpdate(iceberg.Properties{
+				table.MetadataCompressionKey: table.MetadataCompressionCodecZstd,
+			}),
+		},
+	)
+	s.Require().Error(err)
+	s.Contains(err.Error(), "unsupported write metadata compression codec")
 }
 
 func (s *HadoopCatalogTestSuite) TestCommitTableMultipleSequential() {
@@ -2202,7 +2220,9 @@ func (s *HadoopCatalogTestSuite) TestCommitTableConflictDetection() {
 		)
 		s.Require().NoError(err)
 		s.Contains(metaLoc, fmt.Sprintf("v%d.metadata.json", i))
-		s.FileExists(s.cat.metadataFilePath(ident, i))
+		expectedPath, pathErr := s.cat.metadataFilePathForCompression(ident, i, table.MetadataCompressionCodecNone)
+		s.Require().NoError(pathErr)
+		s.FileExists(expectedPath)
 	}
 }
 
@@ -2257,7 +2277,9 @@ func (s *HadoopCatalogTestSuite) TestCommitTableConcurrentMetadataPublishConflic
 
 	s.Equal(1, successes)
 	s.Equal(1, conflicts)
-	s.FileExists(s.cat.metadataFilePath(ident, 2))
+	metaPath, err := s.cat.metadataFilePathForCompression(ident, 2, table.MetadataCompressionCodecNone)
+	s.Require().NoError(err)
+	s.FileExists(metaPath)
 	s.Equal(2, s.cat.readVersionHint(ident))
 }
 
