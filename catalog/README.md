@@ -25,7 +25,7 @@ in the `cmd/iceberg` folder.
 ### REST Catalog
 
 To test the REST catalog implementation, we have a docker configuration
-for a Minio container and tabluario/iceberg-rest container.
+for a Minio container and tabulario/iceberg-rest container.
 
 You can spin up the local catalog by going to the `dev/` folder and running
 `docker-compose up`. You can then follow the steps of the Iceberg [Quickstart](https://iceberg.apache.org/spark-quickstart/#creating-a-table) 
