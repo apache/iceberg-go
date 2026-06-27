@@ -2023,6 +2023,73 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterPersistsPerManifestFirstRowI
 	m.EqualValues(5022, *writer.NextRowID())
 }
 
+func (m *ManifestTestSuite) TestManifestListWriterMetadataPreservesInt64Values() {
+	parentSnapshot := int64(1 << 40)
+
+	tests := []struct {
+		name     string
+		build    func(io.Writer) (*ManifestListWriter, error)
+		expected map[string]string
+	}{
+		{
+			name: "v1",
+			build: func(w io.Writer) (*ManifestListWriter, error) {
+				return NewManifestListWriterV1(w, (1<<40)+1, &parentSnapshot)
+			},
+			expected: map[string]string{
+				"format-version":     "1",
+				"snapshot-id":        "1099511627777",
+				"parent-snapshot-id": "1099511627776",
+			},
+		},
+		{
+			name: "v2",
+			build: func(w io.Writer) (*ManifestListWriter, error) {
+				return NewManifestListWriterV2(w, (1<<40)+2, (1<<40)+3, &parentSnapshot)
+			},
+			expected: map[string]string{
+				"format-version":     "2",
+				"snapshot-id":        "1099511627778",
+				"sequence-number":    "1099511627779",
+				"parent-snapshot-id": "1099511627776",
+			},
+		},
+		{
+			name: "v3",
+			build: func(w io.Writer) (*ManifestListWriter, error) {
+				return NewManifestListWriterV3(w, (1<<40)+4, (1<<40)+5, (1<<40)+6, &parentSnapshot)
+			},
+			expected: map[string]string{
+				"format-version":     "3",
+				"snapshot-id":        "1099511627780",
+				"sequence-number":    "1099511627781",
+				"first-row-id":       "1099511627782",
+				"parent-snapshot-id": "1099511627776",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		m.Run(tt.name, func() {
+			var buf bytes.Buffer
+			writer, err := tt.build(&buf)
+			m.Require().NoError(err)
+			m.Require().NoError(writer.Close())
+
+			reader, err := ocf.NewReader(&buf)
+			m.Require().NoError(err)
+			defer func() {
+				m.Require().NoError(reader.Close())
+			}()
+
+			meta := reader.Metadata()
+			for key, want := range tt.expected {
+				m.Equal(want, string(meta[key]))
+			}
+		})
+	}
+}
+
 func (m *ManifestTestSuite) TestV3PrepareEntrySequenceNumberValidation() {
 	// Test v3writerImpl.prepareEntry sequence number validation logic
 	v3Writer := v3writerImpl{}
