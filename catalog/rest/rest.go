@@ -451,6 +451,10 @@ func handleNon200(rsp *http.Response, override map[int]error) error {
 func fromProps(props iceberg.Properties, o *options) error {
 	for k, v := range props {
 		switch k {
+		case keyOauthToken:
+			if o.oauthToken == "" {
+				o.oauthToken = v
+			}
 		case keyWarehouseLocation:
 			o.warehouseLocation = v
 		case keyMetadataLocation:
@@ -510,6 +514,7 @@ func toProps(o *options) iceberg.Properties {
 		}
 	}
 
+	setIf(keyOauthToken, o.oauthToken)
 	setIf(keyOauthCredential, o.credential)
 	setIf(keyWarehouseLocation, o.warehouseLocation)
 	setIf(keyMetadataLocation, o.metadataLocation)
@@ -544,7 +549,9 @@ type Catalog struct {
 	baseURI *url.URL
 	cl      *http.Client
 
-	name      string
+	name string
+	// Retained catalog properties are reused for table/view IO and may carry
+	// authentication material such as credential or token.
 	props     iceberg.Properties
 	endpoints endpointSet
 

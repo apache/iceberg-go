@@ -2261,7 +2261,8 @@ type RestTLSCatalogSuite struct {
 	srv *httptest.Server
 	mux *http.ServeMux
 
-	configVals url.Values
+	configVals       url.Values
+	configAuthHeader string
 }
 
 func (r *RestTLSCatalogSuite) SetupTest() {
@@ -2270,6 +2271,7 @@ func (r *RestTLSCatalogSuite) SetupTest() {
 	r.mux.HandleFunc("/v1/config", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodGet, req.Method)
 		r.configVals = req.URL.Query()
+		r.configAuthHeader = req.Header.Get("Authorization")
 
 		json.NewEncoder(w).Encode(map[string]any{
 			"defaults":  map[string]any{},
@@ -2286,6 +2288,7 @@ func (r *RestTLSCatalogSuite) TearDownTest() {
 	r.srv = nil
 	r.mux = nil
 	r.configVals = nil
+	r.configAuthHeader = ""
 }
 
 func (r *RestTLSCatalogSuite) TestSSLFail() {
@@ -2307,6 +2310,7 @@ func (r *RestTLSCatalogSuite) TestSSLLoadRegisteredCatalog() {
 
 	r.NotNil(cat)
 	r.Equal(r.configVals.Get("warehouse"), "s3://some-bucket")
+	r.Equal("Bearer "+TestToken, r.configAuthHeader)
 }
 
 func (r *RestTLSCatalogSuite) TestSSLConfig() {
