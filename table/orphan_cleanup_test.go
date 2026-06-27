@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	stdfs "io/fs"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -153,6 +154,36 @@ func TestNormalizeNonURLPath(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := normalizeNonURLPath(tt.input)
 			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestVersionHintLocation(t *testing.T) {
+	tests := []struct {
+		name     string
+		location string
+		expected string
+	}{
+		{
+			name:     "s3_uri",
+			location: "s3://bucket/table",
+			expected: "s3://bucket/table/metadata/version-hint.text",
+		},
+		{
+			name:     "file_uri",
+			location: "file:///tmp/table",
+			expected: "file:///tmp/table/metadata/version-hint.text",
+		},
+		{
+			name:     "local_path",
+			location: filepath.Join("local", "table"),
+			expected: filepath.Join("local", "table", "metadata", "version-hint.text"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, versionHintLocation(tt.location))
 		})
 	}
 }
@@ -532,6 +563,8 @@ func TestGetReferencedFiles_IncludesStatisticsFiles(t *testing.T) {
 	assert.Contains(t, refs, normalizeFilePath("s3://bucket/stats/table-stats.puffin"))
 	assert.Contains(t, refs, normalizeFilePath("s3://bucket/stats/part-stats.puffin"))
 	assert.Contains(t, refs, normalizeFilePath(tbl.metadataLocation))
+	assert.Contains(t, refs, normalizeFilePath("s3://bucket/test/location/metadata/version-hint.text"))
+	assert.NotContains(t, refs, normalizeFilePath("s3:/bucket/test/location/metadata/version-hint.text"))
 	assert.NotContains(t, refs, normalizeFilePath("s3://bucket/stats/not-referenced.puffin"))
 	assert.NotContains(t, refs, "")
 }
