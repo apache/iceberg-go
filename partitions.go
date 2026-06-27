@@ -482,20 +482,20 @@ func (ps *PartitionSpec) LastAssignedFieldID() int {
 	return id
 }
 
-type partitionFieldType struct {
+type activePartitionField struct {
 	field      PartitionField
 	resultType Type
 }
 
-func (ps *PartitionSpec) activePartitionFields(schema *Schema) []partitionFieldType {
-	fields := make([]partitionFieldType, 0, len(ps.fields))
+func (ps *PartitionSpec) activePartitionFields(schema *Schema) []activePartitionField {
+	fields := make([]activePartitionField, 0, len(ps.fields))
 	for _, field := range ps.fields {
 		sourceType, ok := schema.FindTypeByID(field.SourceID())
 		if !ok {
 			continue
 		}
 
-		fields = append(fields, partitionFieldType{
+		fields = append(fields, activePartitionField{
 			field:      field,
 			resultType: field.Transform.ResultType(sourceType),
 		})
