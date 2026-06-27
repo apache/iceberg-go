@@ -461,6 +461,9 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 		return nil, fmt.Errorf("failed to create the table %s.%s: %w", fromDatabase, fromTable, err)
 	}
 
+	// Revalidate the source table immediately before delete to narrow the
+	// rename race window. Glue does not offer a conditional DeleteTable, so
+	// this cannot eliminate the race if a commit lands after this read.
 	currentFromGlueTable, err := c.getTable(ctx, fromDatabase, fromTable)
 	if err != nil {
 		c.rollbackRenamedTable(ctx, toDatabase, toTable)
@@ -495,7 +498,7 @@ func (c *Catalog) rollbackRenamedTable(ctx context.Context, database, tableName 
 		Name:         aws.String(tableName),
 	})
 	if rollbackErr != nil {
-		fmt.Printf("failed to rollback the new table %s.%s: %v", database, tableName, rollbackErr)
+		log.Printf("failed to rollback the new table %s.%s: %v", database, tableName, rollbackErr)
 	}
 }
 
@@ -867,6 +870,9 @@ func glueTableChangedDuringRename(original, current *types.Table) bool {
 	originalVersionID := aws.ToString(original.VersionId)
 	currentVersionID := aws.ToString(current.VersionId)
 	if originalVersionID != "" || currentVersionID != "" {
+		// Glue returns the same VersionId across consecutive GetTable calls
+		// unless the table was updated, making this a stronger drift check
+		// than comparing metadata_location when both versions are present.
 		return originalVersionID != currentVersionID
 	}
 
