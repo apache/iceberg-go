@@ -153,6 +153,8 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 	return nil
 }
 
+// requirementSemanticKey assumes Requirement JSON marshaling is canonical and
+// deterministic for every requirement type that participates in dedupe.
 func requirementSemanticKey(r Requirement) (string, error) {
 	data, err := json.Marshal(r)
 	if err != nil {

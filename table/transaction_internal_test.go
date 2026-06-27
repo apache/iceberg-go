@@ -38,8 +38,8 @@ func TestTransactionApplyKeepsDistinctRequirementsOfSameType(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, txn.reqs, 2)
-	requireContainsRequirement(t, txn.reqs, AssertRefSnapshotID(MainBranch, &mainSnapshotID))
-	requireContainsRequirement(t, txn.reqs, AssertRefSnapshotID("feature", &featureSnapshotID))
+	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, &mainSnapshotID)
+	requireContainsRefSnapshotRequirement(t, txn.reqs, "feature", &featureSnapshotID)
 }
 
 func TestTransactionApplyDedupesEquivalentRequirementsWithinAndAcrossCalls(t *testing.T) {
@@ -52,12 +52,12 @@ func TestTransactionApplyDedupesEquivalentRequirementsWithinAndAcrossCalls(t *te
 	err := txn.apply(nil, []Requirement{first, second})
 	require.NoError(t, err)
 	require.Len(t, txn.reqs, 1)
-	requireContainsRequirement(t, txn.reqs, first)
+	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, &mainSnapshotID)
 
 	err = txn.apply(nil, []Requirement{AssertRefSnapshotID(MainBranch, &mainSnapshotID)})
 	require.NoError(t, err)
 	require.Len(t, txn.reqs, 1)
-	requireContainsRequirement(t, txn.reqs, first)
+	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, &mainSnapshotID)
 }
 
 func newTransactionWithSnapshotRefs(t *testing.T) *Transaction {
@@ -89,23 +89,27 @@ func newTransactionWithSnapshotRefs(t *testing.T) *Transaction {
 	return txn
 }
 
-func requireContainsRequirement(t *testing.T, requirements []Requirement, expected Requirement) {
+func requireContainsRefSnapshotRequirement(t *testing.T, requirements []Requirement, ref string, snapshotID *int64) {
 	t.Helper()
 
-	expectedKey, err := requirementSemanticKey(expected)
-	require.NoError(t, err)
-
 	for _, requirement := range requirements {
-		actualKey, keyErr := requirementSemanticKey(requirement)
-		require.NoError(t, keyErr)
-		if actualKey == expectedKey {
+		actual, ok := requirement.(*assertRefSnapshotID)
+		if ok && actual.Ref == ref && transactionTestInt64PtrEqual(actual.SnapshotID, snapshotID) {
 			return
 		}
 	}
 
-	t.Fatalf("expected requirement %s not found", expectedKey)
+	t.Fatalf("expected assertRefSnapshotID requirement for ref %q and snapshot id %v not found", ref, snapshotID)
 }
 
 func transactionTestPtr[T any](v T) *T {
 	return &v
+}
+
+func transactionTestInt64PtrEqual(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+
+	return *left == *right
 }
