@@ -569,6 +569,18 @@ func buildFromBase(t *testing.T) *MetadataBuilder {
 	return b
 }
 
+func TestAssignUUIDUpdate_ApplyRejectsNilUUID(t *testing.T) {
+	b := buildFromBase(t)
+
+	err := NewAssignUUIDUpdate(uuid.Nil).Apply(b)
+	require.ErrorContains(t, err, "cannot set uuid to null")
+	require.False(t, b.HasChanges())
+
+	meta, err := b.Build()
+	require.NoError(t, err)
+	require.NotEqual(t, uuid.Nil, meta.TableUUID())
+}
+
 func TestSetStatisticsUpdate_Unmarshal(t *testing.T) {
 	data := []byte(`[{
 		"action": "set-statistics",

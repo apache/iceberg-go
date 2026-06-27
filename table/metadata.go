@@ -902,13 +902,17 @@ func (b *MetadataBuilder) RemoveSnapshotRef(name string) error {
 	return nil
 }
 
-func (b *MetadataBuilder) SetUUID(uuid uuid.UUID) error {
-	if b.uuid == uuid {
+func (b *MetadataBuilder) SetUUID(newUUID uuid.UUID) error {
+	if newUUID == uuid.Nil {
+		return errors.New("cannot set uuid to null")
+	}
+
+	if b.uuid == newUUID {
 		return nil
 	}
 
-	b.updates = append(b.updates, NewAssignUUIDUpdate(uuid))
-	b.uuid = uuid
+	b.updates = append(b.updates, NewAssignUUIDUpdate(newUUID))
+	b.uuid = newUUID
 
 	return nil
 }

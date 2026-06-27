@@ -2317,6 +2317,20 @@ func TestSetFormatVersionPreservesExistingUUID(t *testing.T) {
 	require.Equal(t, existingUUID, meta.TableUUID())
 }
 
+func TestSetUUIDRejectsNil(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	originalUUID := builder.uuid
+
+	err := builder.SetUUID(uuid.Nil)
+	require.ErrorContains(t, err, "cannot set uuid to null")
+	require.False(t, builder.HasChanges())
+	require.Equal(t, originalUUID, builder.uuid)
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.Equal(t, originalUUID, meta.TableUUID())
+}
+
 func TestSetFormatVersionDowngradeNotAllowed(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	err := builder.SetFormatVersion(1)
