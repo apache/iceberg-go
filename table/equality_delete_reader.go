@@ -365,6 +365,12 @@ func makeColEncoder(arr arrow.Array) colEncoder {
 		vals := a.Int8Values()
 
 		return func(buf *bytes.Buffer, row int) {
+			if a.IsNull(row) {
+				buf.WriteByte(0)
+
+				return
+			}
+
 			buf.WriteByte(1)
 			buf.WriteByte(byte(vals[row]))
 		}
@@ -372,6 +378,12 @@ func makeColEncoder(arr arrow.Array) colEncoder {
 		vals := a.Int16Values()
 
 		return func(buf *bytes.Buffer, row int) {
+			if a.IsNull(row) {
+				buf.WriteByte(0)
+
+				return
+			}
+
 			buf.WriteByte(1)
 			bufPutUint16(buf, uint16(vals[row]))
 		}
@@ -379,6 +391,12 @@ func makeColEncoder(arr arrow.Array) colEncoder {
 		vals := a.Int32Values()
 
 		return func(buf *bytes.Buffer, row int) {
+			if a.IsNull(row) {
+				buf.WriteByte(0)
+
+				return
+			}
+
 			buf.WriteByte(1)
 			bufPutUint32(buf, uint32(vals[row]))
 		}
@@ -386,6 +404,12 @@ func makeColEncoder(arr arrow.Array) colEncoder {
 		vals := a.Int64Values()
 
 		return func(buf *bytes.Buffer, row int) {
+			if a.IsNull(row) {
+				buf.WriteByte(0)
+
+				return
+			}
+
 			buf.WriteByte(1)
 			bufPutUint64(buf, uint64(vals[row]))
 		}
@@ -393,6 +417,12 @@ func makeColEncoder(arr arrow.Array) colEncoder {
 		vals := a.Float32Values()
 
 		return func(buf *bytes.Buffer, row int) {
+			if a.IsNull(row) {
+				buf.WriteByte(0)
+
+				return
+			}
+
 			buf.WriteByte(1)
 			bufPutUint32(buf, math.Float32bits(vals[row]))
 		}
@@ -400,6 +430,12 @@ func makeColEncoder(arr arrow.Array) colEncoder {
 		vals := a.Float64Values()
 
 		return func(buf *bytes.Buffer, row int) {
+			if a.IsNull(row) {
+				buf.WriteByte(0)
+
+				return
+			}
+
 			buf.WriteByte(1)
 			bufPutUint64(buf, math.Float64bits(vals[row]))
 		}
@@ -407,6 +443,12 @@ func makeColEncoder(arr arrow.Array) colEncoder {
 		vals := a.Date32Values()
 
 		return func(buf *bytes.Buffer, row int) {
+			if a.IsNull(row) {
+				buf.WriteByte(0)
+
+				return
+			}
+
 			buf.WriteByte(1)
 			bufPutUint32(buf, uint32(vals[row]))
 		}
@@ -414,6 +456,12 @@ func makeColEncoder(arr arrow.Array) colEncoder {
 		vals := a.Date64Values()
 
 		return func(buf *bytes.Buffer, row int) {
+			if a.IsNull(row) {
+				buf.WriteByte(0)
+
+				return
+			}
+
 			buf.WriteByte(1)
 			bufPutUint64(buf, uint64(vals[row]))
 		}
@@ -421,6 +469,12 @@ func makeColEncoder(arr arrow.Array) colEncoder {
 		vals := a.Time32Values()
 
 		return func(buf *bytes.Buffer, row int) {
+			if a.IsNull(row) {
+				buf.WriteByte(0)
+
+				return
+			}
+
 			buf.WriteByte(1)
 			bufPutUint32(buf, uint32(vals[row]))
 		}
@@ -428,6 +482,12 @@ func makeColEncoder(arr arrow.Array) colEncoder {
 		vals := a.Time64Values()
 
 		return func(buf *bytes.Buffer, row int) {
+			if a.IsNull(row) {
+				buf.WriteByte(0)
+
+				return
+			}
+
 			buf.WriteByte(1)
 			bufPutUint64(buf, uint64(vals[row]))
 		}
@@ -435,6 +495,12 @@ func makeColEncoder(arr arrow.Array) colEncoder {
 		vals := a.TimestampValues()
 
 		return func(buf *bytes.Buffer, row int) {
+			if a.IsNull(row) {
+				buf.WriteByte(0)
+
+				return
+			}
+
 			buf.WriteByte(1)
 			bufPutUint64(buf, uint64(vals[row]))
 		}
