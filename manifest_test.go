@@ -24,6 +24,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"math"
 	"strconv"
 	"testing"
 	"time"
@@ -2088,6 +2089,34 @@ func (m *ManifestTestSuite) TestManifestListWriterMetadataPreservesInt64Values()
 			}
 		})
 	}
+
+	m.Run("v3_near_max_int64", func() {
+		maxParentSnapshot := int64(math.MaxInt64 - 3)
+
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(
+			&buf,
+			math.MaxInt64-2,
+			math.MaxInt64-1,
+			math.MaxInt64,
+			&maxParentSnapshot,
+		)
+		m.Require().NoError(err)
+		m.Require().NoError(writer.Close())
+
+		reader, err := ocf.NewReader(&buf)
+		m.Require().NoError(err)
+		defer func() {
+			m.Require().NoError(reader.Close())
+		}()
+
+		meta := reader.Metadata()
+		m.Equal("3", string(meta["format-version"]))
+		m.Equal(strconv.FormatInt(math.MaxInt64-2, 10), string(meta["snapshot-id"]))
+		m.Equal(strconv.FormatInt(math.MaxInt64-1, 10), string(meta["sequence-number"]))
+		m.Equal(strconv.FormatInt(math.MaxInt64, 10), string(meta["first-row-id"]))
+		m.Equal(strconv.FormatInt(maxParentSnapshot, 10), string(meta["parent-snapshot-id"]))
+	})
 }
 
 func (m *ManifestTestSuite) TestV3PrepareEntrySequenceNumberValidation() {
