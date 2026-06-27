@@ -20,6 +20,7 @@ package table
 import (
 	"bytes"
 	"context"
+	"errors"
 	"runtime"
 	"strconv"
 	"sync"
@@ -186,6 +187,27 @@ func TestKeyDefaultMapRaceCondition(t *testing.T) {
 		"factory should be called exactly once per key, but was called %d times", callCount)
 }
 
+func TestKeyDefaultMapWrapErrCachesError(t *testing.T) {
+	var factoryCallCount atomic.Int64
+	expectedErr := errors.New("boom")
+	kdm := newKeyDefaultMapWrapErr(func(key string) (int, error) {
+		factoryCallCount.Add(1)
+
+		return 0, expectedErr
+	})
+
+	value, err := kdm.Get("same-key")
+	require.ErrorIs(t, err, expectedErr)
+	assert.Zero(t, value)
+
+	value, err = kdm.Get("same-key")
+	require.ErrorIs(t, err, expectedErr)
+	assert.Zero(t, value)
+
+	assert.Equal(t, int64(1), factoryCallCount.Load(),
+		"factory should be called exactly once per key even when it fails")
+}
+
 func TestBuildPartitionProjectionWithInvalidSpecID(t *testing.T) {
 	schema := iceberg.NewSchema(
 		1,
@@ -261,6 +283,49 @@ func TestFetchPartitionSpecFilteredManifests_PropagatesEvalError(t *testing.T) {
 
 	_, err = scan.PlanFiles(context.Background())
 	require.Error(t, err, "PlanFiles must fail when manifest filtering errors")
+}
+
+func TestFetchPartitionSpecFilteredManifests_InvalidSpecIDDoesNotPanic(t *testing.T) {
+	spec := partitionedSpec()
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+
+	const (
+		snapshotID       = int64(1)
+		manifestListPath = "mem://default/table-location/metadata/snap-1-manifest-list.avro"
+	)
+
+	mf := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/manifest.avro", 100, 999, snapshotID).Build()
+
+	var listBuf bytes.Buffer
+	seqNum := int64(1)
+	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &seqNum, 0, []iceberg.ManifestFile{mf}))
+	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+
+	snapID := snapshotID
+	txn.meta.snapshotList = []Snapshot{{
+		SnapshotID:     snapshotID,
+		ManifestList:   manifestListPath,
+		SequenceNumber: seqNum,
+	}}
+	txn.meta.currentSnapshotID = &snapID
+
+	built, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	tbl := New(Identifier{"db", "tbl"}, built, "metadata.json", func(context.Context) (iceio.IO, error) {
+		return memIO, nil
+	}, nil)
+
+	scan := tbl.Scan()
+
+	_, err = scan.fetchPartitionSpecFilteredManifests(context.Background())
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrPartitionSpecNotFound)
+	require.ErrorContains(t, err, "999")
+
+	_, err = scan.PlanFiles(context.Background())
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrPartitionSpecNotFound)
 }
 
 func TestBuildManifestEvaluatorWithInvalidSpecID(t *testing.T) {

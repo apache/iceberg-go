@@ -1477,7 +1477,7 @@ func (t *Transaction) classifyFilesForDeletions(ctx context.Context, fs io.IO, f
 
 type fileClassificationTask struct {
 	meta             Metadata
-	partitionFilters *keyDefaultMap[int, iceberg.BooleanExpression]
+	partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression]
 	caseSensitive    bool
 	rowFilter        iceberg.BooleanExpression
 }
@@ -1542,7 +1542,10 @@ func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs 
 	for _, manifest := range manifests {
 		manifest := manifest // capture loop variable
 		g.Go(func() error {
-			manifestEval := manifestEvaluators.Get(int(manifest.PartitionSpecID()))
+			manifestEval, err := manifestEvaluators.Get(int(manifest.PartitionSpecID()))
+			if err != nil {
+				return fmt.Errorf("failed to build manifest evaluator for spec %d: %w", manifest.PartitionSpecID(), err)
+			}
 			if manifestEval != nil {
 				match, err := manifestEval(manifest)
 				if err != nil {
