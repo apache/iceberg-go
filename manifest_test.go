@@ -1216,6 +1216,50 @@ func (m *ManifestTestSuite) TestWriteManifestWithFirstRowIDOption() {
 	mf2, err := WriteManifest("/manifest.avro", &bufNoID, 3, partitionSpec, testSchema, entrySnapshotID, entries)
 	m.Require().NoError(err)
 	m.Nil(mf2.FirstRowID())
+
+	// Test 3: v1 + WithManifestFileFirstRowID is a no-op (version < 3).
+	var bufV1 bytes.Buffer
+	mf3, err := WriteManifest("/manifest.avro", &bufV1, 1, partitionSpec, testSchema, entrySnapshotID, entries,
+		WithManifestFileFirstRowID(999))
+	m.Require().NoError(err)
+	m.Nil(mf3.FirstRowID())
+
+	// Test 4: v3 delete-manifest + WithManifestFileFirstRowID sets the field
+	// (version >= 3), but the reader does not inherit first_row_id into entries
+	// for delete manifests.
+	deleteEntry := &manifestEntry{
+		EntryStatus: EntryStatusADDED,
+		Snapshot:    &entrySnapshotID,
+		Data: &dataFile{
+			Content:          EntryContentPosDeletes,
+			Path:             "/data/deletes.avro",
+			Format:           AvroFile,
+			PartitionData:    map[string]any{"x": int(1)},
+			RecordCount:      count,
+			FileSize:         1000,
+			BlockSizeInBytes: 64 * 1024,
+			FirstRowIDField:  nil,
+		},
+	}
+	var bufDelete bytes.Buffer
+	cnt := &internal.CountingWriter{W: &bufDelete}
+	w, err := NewManifestWriter(3, cnt, partitionSpec, testSchema, entrySnapshotID,
+		WithManifestWriterContent(ManifestContentDeletes))
+	m.Require().NoError(err)
+	m.Require().NoError(w.Add(deleteEntry))
+	m.Require().NoError(w.Close())
+	mf4, err := w.ToManifestFile("/manifest.avro", cnt.Count,
+		WithManifestFileContent(ManifestContentDeletes),
+		WithManifestFileFirstRowID(777))
+	m.Require().NoError(err)
+	m.Require().NotNil(mf4.FirstRowID())
+	m.EqualValues(777, *mf4.FirstRowID())
+
+	// Reading back a delete manifest — entries should not inherit first_row_id.
+	readDelete, err := ReadManifest(mf4, bytes.NewReader(bufDelete.Bytes()), false)
+	m.Require().NoError(err)
+	m.Require().Len(readDelete, 1)
+	m.Nil(readDelete[0].DataFile().FirstRowID())
 }
 
 func (m *ManifestTestSuite) TestReadManifestListIncompleteSchema() {

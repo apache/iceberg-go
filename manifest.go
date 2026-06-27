@@ -1275,9 +1275,12 @@ func WithManifestFileContent(content ManifestContent) ManifestFileOption {
 }
 
 // WithManifestFileFirstRowID sets the first_row_id on a v3+ data manifest.
+// Silently no-ops on v1/v2 manifests since the field does not exist in those formats.
 func WithManifestFileFirstRowID(firstRowID int64) ManifestFileOption {
 	return func(mf *manifestFile) {
-		mf.FirstRowIDValue = &firstRowID
+		if mf.version >= 3 {
+			mf.FirstRowIDValue = &firstRowID
+		}
 	}
 }
 
@@ -1627,6 +1630,10 @@ func WriteManifestList(version int, out io.Writer, snapshotID int64, parentSnaps
 	return writer.AddManifests(files)
 }
 
+// WriteManifest writes a manifest file (a list of manifest entries) as Avro.
+// opts may include ManifestFileOption values such as WithManifestFileContent or
+// WithManifestFileFirstRowID (v3+ only) to set descriptor fields on the returned
+// ManifestFile.
 func WriteManifest(
 	filename string,
 	out io.Writer,
