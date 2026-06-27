@@ -190,6 +190,31 @@ func TestPartitionSpecToPath(t *testing.T) {
 		spec.PartitionToPath(record, schema))
 }
 
+func TestPartitionSpecToPathWithDroppedLeadingSourceColumn(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool},
+	)
+
+	spec := iceberg.NewPartitionSpecID(3,
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000,
+			Transform: iceberg.IdentityTransform{}, Name: "foo",
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{2}, FieldID: 1001,
+			Transform: iceberg.IdentityTransform{}, Name: "bar",
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{3}, FieldID: 1002,
+			Transform: iceberg.IdentityTransform{}, Name: "baz",
+		},
+	)
+
+	record := partitionRecord{int32(7), true}
+	assert.Equal(t, "bar=7/baz=true", spec.PartitionToPath(record, schema))
+}
+
 func TestGetPartitionFieldName(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "str", Type: iceberg.PrimitiveTypes.String},
