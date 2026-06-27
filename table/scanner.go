@@ -78,13 +78,6 @@ func (k *keyDefaultMap[K, V]) Get(key K) V {
 	return v
 }
 
-func newKeyDefaultMap[K comparable, V any](factory func(K) V) *keyDefaultMap[K, V] {
-	return &keyDefaultMap[K, V]{
-		data:           make(map[K]V),
-		defaultFactory: factory,
-	}
-}
-
 func (k *keyDefaultMapErr[K, V]) Get(key K) (V, error) {
 	k.mx.RLock()
 	if v, ok := k.data[key]; ok {
@@ -108,6 +101,15 @@ func (k *keyDefaultMapErr[K, V]) Get(key K) (V, error) {
 	return value, err
 }
 
+func newKeyDefaultMap[K comparable, V any](factory func(K) V) *keyDefaultMap[K, V] {
+	return &keyDefaultMap[K, V]{
+		data:           make(map[K]V),
+		defaultFactory: factory,
+	}
+}
+
+// newKeyDefaultMapWrapErr memoizes both successful values and deterministic
+// factory errors, so the same failing key is not retried on subsequent reads.
 func newKeyDefaultMapWrapErr[K comparable, V any](factory func(K) (V, error)) *keyDefaultMapErr[K, V] {
 	return &keyDefaultMapErr[K, V]{
 		data:           make(map[K]keyDefaultValueErr[V]),

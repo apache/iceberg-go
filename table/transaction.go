@@ -1546,14 +1546,12 @@ func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs 
 			if err != nil {
 				return fmt.Errorf("failed to build manifest evaluator for spec %d: %w", manifest.PartitionSpecID(), err)
 			}
-			if manifestEval != nil {
-				match, err := manifestEval(manifest)
-				if err != nil {
-					return fmt.Errorf("failed to evaluate manifest %s: %w", manifest.FilePath(), err)
-				}
-				if !match {
-					return nil
-				}
+			match, err := manifestEval(manifest)
+			if err != nil {
+				return fmt.Errorf("failed to evaluate manifest %s: %w", manifest.FilePath(), err)
+			}
+			if !match {
+				return nil
 			}
 
 			localDelete := make([]iceberg.DataFile, 0)
