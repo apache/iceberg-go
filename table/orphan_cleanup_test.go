@@ -175,6 +175,11 @@ func TestVersionHintLocation(t *testing.T) {
 			expected: "file:///tmp/table/metadata/version-hint.text",
 		},
 		{
+			name:     "file_uri_opaque",
+			location: "file:/tmp/table",
+			expected: "file:/tmp/table/metadata/version-hint.text",
+		},
+		{
 			name:     "local_path",
 			location: filepath.Join("local", "table"),
 			expected: filepath.Join("local", "table", "metadata", "version-hint.text"),
