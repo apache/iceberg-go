@@ -196,6 +196,22 @@ func (c *Catalog) defaultTableLocation(ident table.Identifier) string {
 	return c.tableToPath(ident)
 }
 
+// publishMetadataFile atomically publishes a staged metadata file without
+// replacing an existing destination file.
+func (c *Catalog) publishMetadataFile(tempPath, finalPath string) error {
+	if err := c.filesystem.Link(tempPath, finalPath); err != nil {
+		_ = c.filesystem.Remove(tempPath)
+
+		return err
+	}
+
+	if err := c.filesystem.Remove(tempPath); err != nil {
+		log.Printf("hadoop catalog: failed to remove staged metadata file %s after publish: %v", tempPath, err)
+	}
+
+	return nil
+}
+
 // isTableDir reports whether path is a table directory by checking for
 // metadata files in its metadata/ subdirectory. It recognizes:
 //   - v*.metadata.json (Hadoop catalog format)
@@ -400,8 +416,10 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		return nil, fmt.Errorf("hadoop catalog: failed to write table metadata: %w", err)
 	}
 
-	if err := c.filesystem.Rename(tempPath, metaPath); err != nil {
-		_ = c.filesystem.Remove(tempPath)
+	if err := c.publishMetadataFile(tempPath, metaPath); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return nil, fmt.Errorf("%w: %s", catalog.ErrTableAlreadyExists, strings.Join(ident, "."))
+		}
 
 		return nil, fmt.Errorf("hadoop catalog: failed to commit metadata file: %w", err)
 	}
@@ -520,17 +538,11 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 		return nil, "", fmt.Errorf("hadoop catalog: failed to write table metadata: %w", err)
 	}
 
-	// Conflict detection: target file must not already exist.
-	if _, err := c.filesystem.Stat(newMetaPath); err == nil {
-		_ = c.filesystem.Remove(tempPath)
-
-		return nil, "", fmt.Errorf("hadoop catalog: version %d already exists for table %s",
-			newVersion, strings.Join(ident, "."))
-	}
-
-	// Atomic commit via rename.
-	if err := c.filesystem.Rename(tempPath, newMetaPath); err != nil {
-		_ = c.filesystem.Remove(tempPath)
+	if err := c.publishMetadataFile(tempPath, newMetaPath); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return nil, "", fmt.Errorf("hadoop catalog: version %d already exists for table %s",
+				newVersion, strings.Join(ident, "."))
+		}
 
 		return nil, "", fmt.Errorf("hadoop catalog: failed to commit metadata file: %w", err)
 	}

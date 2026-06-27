@@ -30,6 +30,7 @@ type HadoopCatalogFS interface {
 	icebergio.ReadFileIO
 	icebergio.WriteFileIO
 	StatIO
+	LinkIO
 	RenameIO
 	RemoveAllIO
 	MkdirAllIO
@@ -54,6 +55,15 @@ type RenameIO interface {
 	icebergio.IO
 
 	Rename(oldpath, newpath string) error
+}
+
+// LinkIO is an extension of IO interface that includes the Link
+// method for atomically publishing a new file without replacing an
+// existing destination.
+type LinkIO interface {
+	icebergio.IO
+
+	Link(oldpath, newpath string) error
 }
 
 // RemoveAllIO is an extension of IO interface that includes the RemoveAll

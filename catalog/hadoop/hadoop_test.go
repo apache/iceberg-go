@@ -473,6 +473,26 @@ func (f *statFailingFS) Stat(string) (fs.FileInfo, error) {
 	return nil, errors.New("stat should not be called")
 }
 
+type linkConflictFS struct {
+	icebergio.LocalFS
+	target    string
+	contents  []byte
+	linkCalls int
+}
+
+func (f *linkConflictFS) Link(oldpath, newpath string) error {
+	f.linkCalls++
+	if newpath == f.target {
+		if err := os.WriteFile(newpath, f.contents, 0o644); err != nil {
+			return err
+		}
+
+		return fs.ErrExist
+	}
+
+	return f.LocalFS.Link(oldpath, newpath)
+}
+
 func (s *HadoopCatalogTestSuite) TestDropNamespaceDoesNotPreStat() {
 	nsDir := filepath.Join(s.warehouse, "ns")
 	s.Require().NoError(os.Mkdir(nsDir, 0o755))
@@ -1029,6 +1049,34 @@ func (s *HadoopCatalogTestSuite) TestCreateTableAlreadyExists() {
 	s.ErrorIs(err, catalog.ErrTableAlreadyExists)
 }
 
+func (s *HadoopCatalogTestSuite) TestCreateTableDoesNotOverwriteConcurrentMetadataFile() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	ident := []string{"ns", "tbl"}
+	metaPath := s.cat.metadataFilePath(ident, 1)
+	fsys := &linkConflictFS{
+		LocalFS:  icebergio.LocalFS{},
+		target:   metaPath,
+		contents: []byte("existing create winner"),
+	}
+	s.cat.filesystem = fsys
+
+	_, err := s.cat.CreateTable(ctx, ident, s.testSchema())
+	s.Require().Error(err)
+	s.ErrorIs(err, catalog.ErrTableAlreadyExists)
+	s.Equal(1, fsys.linkCalls)
+
+	data, err := os.ReadFile(metaPath)
+	s.Require().NoError(err)
+	s.Equal(fsys.contents, data)
+
+	entries, err := os.ReadDir(s.cat.metadataDir(ident))
+	s.Require().NoError(err)
+	s.Len(entries, 1)
+	s.Equal("v1.metadata.json", entries[0].Name())
+}
+
 func (s *HadoopCatalogTestSuite) TestCreateTableWithPartitionSpec() {
 	ctx := context.Background()
 	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
@@ -1450,12 +1498,11 @@ func (s *HadoopCatalogTestSuite) TestCommitTableNoChanges() {
 }
 
 func (s *HadoopCatalogTestSuite) TestCommitTableConflictDetection() {
-	// Conflict detection relies on os.Stat checking whether the target
-	// v{N+1}.metadata.json already exists before the atomic rename.
-	// In a single-threaded test we cannot trigger the TOCTOU race
-	// between findVersion and os.Stat. Instead, we verify that after
-	// multiple sequential commits, the version sequence is contiguous
-	// and no versions are skipped or duplicated.
+	// In a single-threaded test we cannot trigger the publish race
+	// where another writer wins the same metadata version first.
+	// Instead, we verify that after multiple sequential commits,
+	// the version sequence is contiguous and no versions are skipped
+	// or duplicated.
 	ctx := context.Background()
 	s.createTestTable("ns", "tbl")
 	ident := []string{"ns", "tbl"}
@@ -1474,6 +1521,49 @@ func (s *HadoopCatalogTestSuite) TestCommitTableConflictDetection() {
 		s.Contains(metaLoc, fmt.Sprintf("v%d.metadata.json", i))
 		s.FileExists(s.cat.metadataFilePath(ident, i))
 	}
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableDoesNotOverwriteConcurrentMetadataFile() {
+	ctx := context.Background()
+	s.createTestTable("ns", "tbl")
+
+	ident := []string{"ns", "tbl"}
+	metaPath := s.cat.metadataFilePath(ident, 2)
+	fsys := &linkConflictFS{
+		LocalFS:  icebergio.LocalFS{},
+		target:   metaPath,
+		contents: []byte("existing commit winner"),
+	}
+	s.cat.filesystem = fsys
+
+	_, _, err := s.cat.CommitTable(
+		ctx, ident,
+		nil,
+		[]table.Update{
+			table.NewSetPropertiesUpdate(iceberg.Properties{"k": "v"}),
+		},
+	)
+	s.Require().Error(err)
+	s.Equal("hadoop catalog: version 2 already exists for table ns.tbl", err.Error())
+	s.Equal(1, fsys.linkCalls)
+
+	data, readErr := os.ReadFile(metaPath)
+	s.Require().NoError(readErr)
+	s.Equal(fsys.contents, data)
+	s.Equal(1, s.cat.readVersionHint(ident))
+
+	entries, readDirErr := os.ReadDir(s.cat.metadataDir(ident))
+	s.Require().NoError(readDirErr)
+	s.Len(entries, 3)
+
+	names := map[string]bool{}
+	for _, entry := range entries {
+		names[entry.Name()] = true
+	}
+
+	s.True(names["v1.metadata.json"])
+	s.True(names["v2.metadata.json"])
+	s.True(names["version-hint.text"])
 }
 
 func (s *HadoopCatalogTestSuite) TestCommitTableRequirementFailure() {

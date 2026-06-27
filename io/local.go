@@ -85,3 +85,7 @@ func (LocalFS) Stat(name string) (fs.FileInfo, error) {
 func (LocalFS) Rename(oldpath, newpath string) error {
 	return os.Rename(strings.TrimPrefix(oldpath, "file://"), strings.TrimPrefix(newpath, "file://"))
 }
+
+func (LocalFS) Link(oldpath, newpath string) error {
+	return os.Link(strings.TrimPrefix(oldpath, "file://"), strings.TrimPrefix(newpath, "file://"))
+}
