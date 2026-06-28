@@ -47,7 +47,7 @@ type CatalogConfig struct {
 	Output      string       `yaml:"output"`
 	Credential  string       `yaml:"credential"`
 	Warehouse   string       `yaml:"warehouse"`
-	AwsProfile  string       `yaml:"aws-profile,omitempty"`
+	AwsProfile  string       `yaml:"aws-profile"`
 	RestOptions *RestOptions `yaml:"rest,omitempty"`
 }
 
