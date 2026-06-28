@@ -68,6 +68,12 @@ const (
 	ParquetBloomFilterMaxBytesDefault        = 1024 * 1024
 	ParquetBloomFilterColumnEnabledKeyPrefix = "write.parquet.bloom-filter-enabled.column"
 
+	ParquetShredVariantsKey     = "write.parquet.shred-variants"
+	ParquetShredVariantsDefault = false
+	// Rows buffered per file to infer shredding (held per open partition writer).
+	ParquetVariantBufferSizeKey     = "write.parquet.variant-inference-buffer-size"
+	ParquetVariantBufferSizeDefault = 100
+
 	ParquetBatchSizeKey     = "read.parquet.batch-size"
 	ParquetBatchSizeDefault = 1 << 17 // 131072 rows
 )
@@ -303,6 +309,12 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 		// "yes", is false. strconv.ParseBool behaves differently ("1" → true).
 		enabled := strings.EqualFold(val, "true")
 		writerProps = append(writerProps, parquet.WithBloomFilterEnabledFor(colName, enabled))
+	}
+
+	// Shredded decimals need INT32/INT64/FLBA-by-precision (VariantShredding.md);
+	// arrow-go emits those only with StoreDecimalAsInteger. Gated to keep default writes unchanged.
+	if props.GetBool(ParquetShredVariantsKey, ParquetShredVariantsDefault) {
+		writerProps = append(writerProps, parquet.WithStoreDecimalAsInteger(true))
 	}
 
 	return writerProps

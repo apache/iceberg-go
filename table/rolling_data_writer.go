@@ -30,6 +30,8 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/extensions"
+	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	tblutils "github.com/apache/iceberg-go/table/internal"
@@ -63,6 +65,10 @@ type writerFactory struct {
 	content          iceberg.ManifestEntryContent
 	equalityFieldIDs []int
 	sortKeys         []compute.SortKey
+
+	// Variant shredding: per-file inference over the first shredBufferRows rows.
+	shredEnabled    bool
+	shredBufferRows int
 
 	writers               sync.Map
 	partitionLocProviders sync.Map
@@ -196,12 +202,31 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		}
 	}
 
+	// Shred top-level variant columns on data writes only.
+	f.shredBufferRows = meta.props.GetInt(ParquetVariantBufferSizeKey, ParquetVariantBufferSizeDefault)
+	if f.shredBufferRows < 1 {
+		f.shredBufferRows = 1
+	}
+	if f.content == iceberg.EntryContentData &&
+		meta.props.GetBool(ParquetShredVariantsKey, ParquetShredVariantsDefault) {
+		for _, fld := range f.fileSchema.Fields() {
+			if _, ok := fld.Type.(iceberg.VariantType); ok {
+				f.shredEnabled = true
+
+				break
+			}
+		}
+	}
+
 	return f, nil
 }
 
 func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string,
-	partitionValues map[int]any, partitionID int, fileCount int,
+	partitionValues map[int]any, partitionID int, fileCount int, arrowSchema *arrow.Schema,
 ) (tblutils.FileWriter, error) {
+	if arrowSchema == nil {
+		arrowSchema = w.arrowSchema
+	}
 	w.countMu.Lock()
 	cnt, _ := w.nextCount()
 	w.countMu.Unlock()
@@ -222,6 +247,7 @@ func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string
 	}
 
 	// No SortOrderID: batches are sorted only individually (see resolveSortKeys).
+	// FileSchema stays logical; only arrowSchema carries the shredded layout.
 	return w.format.NewFileWriter(ctx, w.fs, partitionValues, tblutils.WriteFileInfo{
 		FileSchema:       w.fileSchema,
 		FileName:         filePath,
@@ -230,7 +256,7 @@ func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string
 		Spec:             w.currentSpec,
 		Content:          w.content,
 		EqualityFieldIDs: w.equalityFieldIDs,
-	}, w.arrowSchema)
+	}, arrowSchema)
 }
 
 func (w *writerFactory) partitionLocProvider(partitionPath string) (LocationProvider, error) {
@@ -330,14 +356,31 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 	defer close(r.errorCh)
 	defer r.factory.writers.CompareAndDelete(r.partitionKey, r)
 
+	alloc := compute.GetAllocator(r.ctx)
+
 	var currentWriter tblutils.FileWriter
-	// Cleanup defer: recover a panic in the write path and abort any
-	// in-progress file. stream runs in its own goroutine with no caller to
-	// recover it, and FileWriter.Close can panic (stats.ToDataFile panics when
-	// NewDataFileBuilder fails); convert that into an error on errorCh instead
-	// of crashing the process, mirroring the recover in
-	// equalityDeleteRecordsToDataFiles. Registered after close(r.errorCh) so it
-	// runs first (LIFO) and can still send on the open channel before it is
+	var fileArrowSchema *arrow.Schema // per-file shredded schema; nil => factory default
+
+	// bootstrap buffer of converted batches, held until inference runs.
+	var buf []arrow.RecordBatch
+	var bufRows int64
+	bootstrapping := r.factory.shredEnabled
+
+	releaseBuf := func() {
+		for _, b := range buf {
+			b.Release()
+		}
+		buf = nil
+		bufRows = 0
+	}
+
+	// Cleanup defer: recover a panic in the write path, release the bootstrap
+	// buffer, and abort any in-progress file. stream runs in its own goroutine
+	// with no caller to recover it, and FileWriter.Close can panic
+	// (stats.ToDataFile panics when NewDataFileBuilder fails); convert that into
+	// an error on errorCh instead of crashing the process, mirroring the recover
+	// in equalityDeleteRecordsToDataFiles. Registered after close(r.errorCh) so
+	// it runs first (LIFO) and can still send on the open channel before it is
 	// closed.
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -348,6 +391,7 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 				r.sendError(fmt.Errorf("panic during rolling data file writing: %v", e))
 			}
 		}
+		releaseBuf()
 		if currentWriter != nil {
 			_ = currentWriter.Abort()
 		}
@@ -359,6 +403,8 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 		}
 		df, err := currentWriter.Close()
 		currentWriter = nil
+		fileArrowSchema = nil
+		bootstrapping = r.factory.shredEnabled // next file re-bootstraps
 		if err != nil {
 			return err
 		}
@@ -367,32 +413,25 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 		return nil
 	}
 
-	for record := range r.recordCh {
-		if currentWriter == nil {
-			fileCount := int(r.fileCount.Add(1))
-			var err error
-			currentWriter, err = r.factory.openFileWriter(
-				r.ctx, r.partitionKey, r.partitionValues,
-				r.partitionID, fileCount)
+	openCurrent := func() error {
+		fileCount := int(r.fileCount.Add(1))
+		var err error
+		currentWriter, err = r.factory.openFileWriter(
+			r.ctx, r.partitionKey, r.partitionValues, r.partitionID, fileCount, fileArrowSchema)
+
+		return err
+	}
+
+	// writeConverted owns converted: shred -> sort -> Write -> roll. allowRoll is
+	// false during replay (no mid-replay roll).
+	writeConverted := func(converted arrow.RecordBatch, allowRoll bool) error {
+		if fileArrowSchema != nil {
+			shredded, err := tblutils.ShredRecordVariants(converted, fileArrowSchema, alloc)
+			converted.Release()
 			if err != nil {
-				record.Release()
-				r.sendError(err)
-
-				return
+				return err
 			}
-		}
-
-		converted, err := ToRequestedSchema(r.ctx, r.factory.fileSchema,
-			r.factory.taskSchema, record, SchemaOptions{
-				DowncastTimestamp: true,
-				IncludeFieldIDs:   true,
-				UseWriteDefault:   true,
-			})
-		if err != nil {
-			record.Release()
-			r.sendError(err)
-
-			return
+			converted = shredded
 		}
 
 		// Sort each batch independently before writing. This is per-batch, not
@@ -402,16 +441,66 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 			sorted, err := compute.SortRecordBatch(r.ctx, converted, r.factory.sortKeys)
 			converted.Release()
 			if err != nil {
-				record.Release()
-				r.sendError(err)
-
-				return
+				return err
 			}
 			converted = sorted
 		}
 
-		err = currentWriter.Write(converted)
+		err := currentWriter.Write(converted)
 		converted.Release()
+		if err != nil {
+			return err
+		}
+
+		if allowRoll && currentWriter.BytesWritten() >= r.factory.targetFileSize {
+			return closeWriter()
+		}
+
+		return nil
+	}
+
+	// flushBootstrap infers the schema, opens the file, and replays the buffer.
+	flushBootstrap := func() error {
+		if len(buf) == 0 {
+			bootstrapping = false
+
+			return nil
+		}
+		fileArrowSchema = tblutils.ShreddedArrowSchema(r.factory.arrowSchema,
+			inferShreddingFromBatches(buf, r.factory.shredBufferRows))
+		if err := openCurrent(); err != nil {
+			releaseBuf()
+
+			return err
+		}
+		// Detach so the deferred releaseBuf can't double-release the replayed batches.
+		batches := buf
+		buf = nil
+		bufRows = 0
+		bootstrapping = false
+		for i, b := range batches {
+			if err := writeConverted(b, false); err != nil {
+				for _, rest := range batches[i+1:] {
+					rest.Release()
+				}
+
+				return err
+			}
+		}
+		if currentWriter != nil && currentWriter.BytesWritten() >= r.factory.targetFileSize {
+			return closeWriter()
+		}
+
+		return nil
+	}
+
+	for record := range r.recordCh {
+		converted, err := ToRequestedSchema(r.ctx, r.factory.fileSchema,
+			r.factory.taskSchema, record, SchemaOptions{
+				DowncastTimestamp: true,
+				IncludeFieldIDs:   true,
+				UseWriteDefault:   true,
+			})
 		record.Release()
 		if err != nil {
 			r.sendError(err)
@@ -419,18 +508,86 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 			return
 		}
 
-		if currentWriter.BytesWritten() >= r.factory.targetFileSize {
-			if err := closeWriter(); err != nil {
+		if bootstrapping {
+			buf = append(buf, converted)
+			bufRows += converted.NumRows()
+			if bufRows >= int64(r.factory.shredBufferRows) {
+				if err := flushBootstrap(); err != nil {
+					r.sendError(err)
+
+					return
+				}
+			}
+
+			continue
+		}
+
+		if currentWriter == nil {
+			if err := openCurrent(); err != nil {
+				converted.Release()
 				r.sendError(err)
 
 				return
 			}
 		}
+		if err := writeConverted(converted, true); err != nil {
+			r.sendError(err)
+
+			return
+		}
 	}
 
+	// Channel closed: flush any partial bootstrap buffer, then finalize.
+	if bootstrapping {
+		if err := flushBootstrap(); err != nil {
+			r.sendError(err)
+
+			return
+		}
+	}
 	if err := closeWriter(); err != nil {
 		r.sendError(err)
 	}
+}
+
+// inferShreddingFromBatches infers the inner type per top-level variant column,
+// sampling up to limit non-null values from the buffer. Keyed by column index.
+func inferShreddingFromBatches(buf []arrow.RecordBatch, limit int) map[int]arrow.DataType {
+	if len(buf) == 0 {
+		return nil
+	}
+
+	inferred := make(map[int]arrow.DataType)
+	for col := 0; col < int(buf[0].NumCols()); col++ {
+		if _, ok := buf[0].Column(col).(*extensions.VariantArray); !ok {
+			continue
+		}
+		var sample []variant.Value
+		for _, b := range buf {
+			if len(sample) >= limit {
+				break
+			}
+			va, ok := b.Column(col).(*extensions.VariantArray)
+			if !ok {
+				continue
+			}
+			for i := 0; i < va.Len() && len(sample) < limit; i++ {
+				if va.Storage().IsNull(i) {
+					continue
+				}
+				v, err := va.Value(i)
+				if err != nil {
+					continue
+				}
+				sample = append(sample, v)
+			}
+		}
+		if dt, ok := tblutils.AnalyzeVariantShredding(sample); ok {
+			inferred[col] = dt
+		}
+	}
+
+	return inferred
 }
 
 func (r *RollingDataWriter) sendError(err error) {

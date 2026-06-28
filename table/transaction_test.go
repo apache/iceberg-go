@@ -29,6 +29,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/decimal"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
@@ -670,6 +671,92 @@ func (s *SparkIntegrationTestSuite) assertVariantFileShredded(tbl *table.Table, 
 		cNames[cField.Field(i).Name()] = true
 	}
 	s.True(cNames["typed_value"], "nested object c must itself be shredded; got %v", cNames)
+}
+
+func (s *SparkIntegrationTestSuite) TestShreddedVariantGoWriteSparkRead() {
+	s.requireSpark4()
+
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+
+	tbl, err := s.cat.CreateTable(
+		s.ctx,
+		catalog.ToIdentifier("default", "go_shred_write"),
+		icebergSchema,
+		catalog.WithProperties(iceberg.Properties{
+			table.PropertyFormatVersion:    "3",
+			"write.parquet.shred-variants": "true",
+		}),
+	)
+	s.Require().NoError(err)
+
+	arrowSchema, err := table.SchemaToArrowSchema(icebergSchema, nil, true, false)
+	s.Require().NoError(err)
+
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(s.T(), 0)
+
+	idBldr := array.NewInt64Builder(mem)
+	defer idBldr.Release()
+	payloadBldr := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
+	defer payloadBldr.Release()
+
+	mkVariant := func(v any) variant.Value {
+		var b variant.Builder
+		s.Require().NoError(b.Append(v))
+		val, err := b.Build()
+		s.Require().NoError(err)
+
+		return val
+	}
+
+	// 12 uniform rows {a, b, c:{x,y}, d:decimal} so the analyzer shreds a, b, the
+	// nested object c, and the decimal d; assertVariantFileShredded requires c too.
+	// d (123.45, precision 5) exercises the spec decimal4->INT32 typed_value path.
+	const nRows = 12
+	for i := 0; i < nRows; i++ {
+		idBldr.Append(int64(i))
+		payloadBldr.Append(mkVariant(map[string]any{
+			"a": int64(5_000_000_000 + i),
+			"b": "row",
+			"c": map[string]any{"x": int64(i * 2), "y": int64(i * 3)},
+			"d": variant.DecimalValue[decimal.Decimal32]{Scale: 2, Value: decimal.Decimal32(12345)},
+		}))
+	}
+
+	idArr := idBldr.NewInt64Array()
+	defer idArr.Release()
+	payloadArr := payloadBldr.NewArray()
+	defer payloadArr.Release()
+
+	rec := array.NewRecord(arrowSchema, []arrow.Array{idArr, payloadArr}, nRows)
+	defer rec.Release()
+	arrTable := array.NewTableFromRecords(arrowSchema, []arrow.Record{rec})
+	defer arrTable.Release()
+
+	tx := tbl.NewTransaction()
+	s.Require().NoError(tx.AppendTable(s.ctx, arrTable, 2048, nil))
+	tbl, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	// Prove the GO writer actually shredded the file (and nested c too).
+	tasks, err := tbl.Scan().PlanFiles(s.ctx)
+	s.Require().NoError(err)
+	s.Require().NotEmpty(tasks)
+	s.assertVariantFileShredded(tbl, tasks[0].File.FilePath())
+
+	// Spark reads the Go-written shredded file back and reassembles values.
+	out, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--sql",
+		"SELECT id, to_json(payload) AS pj FROM default.go_shred_write ORDER BY id")
+	s.Require().NoError(err)
+	s.Require().Contains(out, `"a":5000000000`)
+	s.Require().Contains(out, `"c":{"x":0,"y":0}`)
+	s.Require().Contains(out, `"c":{"x":22,"y":33}`)
+	// Decimal round-trips: Spark renders variant decimals as bare numerics (see
+	// TestDifferentDataTypes), so the spec decimal4->INT32 typed_value reassembles.
+	s.Require().Contains(out, `"d":123.45`)
 }
 
 func (s *SparkIntegrationTestSuite) TestUnknownTypeWriteAndScan() {
