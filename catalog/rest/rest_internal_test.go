@@ -54,35 +54,101 @@ import (
 func TestLoadRegisteredCatalogRejectsInvalidAuthURL(t *testing.T) {
 	t.Parallel()
 
-	cat, err := catalog.Load(context.Background(), "rest", iceberg.Properties{
-		"uri":                    "http://example.com",
-		"rest.authorization-url": "http://[::1",
-	})
-	require.Error(t, err)
-	assert.Nil(t, cat)
-	assert.ErrorContains(t, err, "invalid rest.authorization-url")
+	tests := []struct {
+		name    string
+		authURL string
+		wantErr string
+	}{
+		{
+			name:    "malformed URL",
+			authURL: "http://[::1",
+			wantErr: "invalid rest.authorization-url",
+		},
+		{
+			name:    "missing scheme",
+			authURL: "example.com/auth",
+			wantErr: "missing scheme or host",
+		},
+		{
+			name:    "missing host",
+			authURL: "localhost:8080",
+			wantErr: "missing scheme or host",
+		},
+		{
+			name:    "empty URL",
+			authURL: "",
+			wantErr: "missing scheme or host",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cat, err := catalog.Load(context.Background(), "rest", iceberg.Properties{
+				"uri":                    "http://example.com",
+				"rest.authorization-url": tt.authURL,
+			})
+			require.Error(t, err)
+			assert.Nil(t, cat)
+			assert.ErrorContains(t, err, tt.wantErr)
+		})
+	}
 }
 
 func TestNewCatalogRejectsInvalidAuthURLFromConfig(t *testing.T) {
 	t.Parallel()
 
-	mux := http.NewServeMux()
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	tests := []struct {
+		name    string
+		section string
+		authURL string
+		wantErr string
+	}{
+		{
+			name:    "malformed URL in defaults",
+			section: "defaults",
+			authURL: "http://[::1",
+			wantErr: "invalid rest.authorization-url",
+		},
+		{
+			name:    "scheme-less URL in overrides",
+			section: "overrides",
+			authURL: "example.com/auth",
+			wantErr: "missing scheme or host",
+		},
+	}
 
-	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
-			"defaults": map[string]any{
-				"rest.authorization-url": "http://[::1",
-			},
-			"overrides": map[string]any{},
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mux := http.NewServeMux()
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			defaults := map[string]any{}
+			overrides := map[string]any{}
+			switch tt.section {
+			case "defaults":
+				defaults[keyAuthUrl] = tt.authURL
+			case "overrides":
+				overrides[keyAuthUrl] = tt.authURL
+			}
+
+			mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(map[string]any{
+					"defaults":  defaults,
+					"overrides": overrides,
+				})
+			})
+
+			cat, err := NewCatalog(context.Background(), "rest", srv.URL)
+			require.Error(t, err)
+			assert.Nil(t, cat)
+			assert.ErrorContains(t, err, tt.wantErr)
 		})
-	})
-
-	cat, err := NewCatalog(context.Background(), "rest", srv.URL)
-	require.Error(t, err)
-	assert.Nil(t, cat)
-	assert.ErrorContains(t, err, "invalid rest.authorization-url")
+	}
 }
 
 func TestTokenAuthenticationPriority(t *testing.T) {
