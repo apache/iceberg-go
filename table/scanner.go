@@ -43,6 +43,18 @@ type keyDefaultMap[K comparable, V any] struct {
 	mx sync.RWMutex
 }
 
+type keyDefaultMapErr[K comparable, V any] struct {
+	defaultFactory func(K) (V, error)
+	data           map[K]keyDefaultValueErr[V]
+
+	mx sync.RWMutex
+}
+
+type keyDefaultValueErr[V any] struct {
+	value V
+	err   error
+}
+
 func (k *keyDefaultMap[K, V]) Get(key K) V {
 	k.mx.RLock()
 	if v, ok := k.data[key]; ok {
@@ -66,6 +78,29 @@ func (k *keyDefaultMap[K, V]) Get(key K) V {
 	return v
 }
 
+func (k *keyDefaultMapErr[K, V]) Get(key K) (V, error) {
+	k.mx.RLock()
+	if v, ok := k.data[key]; ok {
+		k.mx.RUnlock()
+
+		return v.value, v.err
+	}
+
+	k.mx.RUnlock()
+	k.mx.Lock()
+	defer k.mx.Unlock()
+
+	// race check between RLock and Lock
+	if v, ok := k.data[key]; ok {
+		return v.value, v.err
+	}
+
+	value, err := k.defaultFactory(key)
+	k.data[key] = keyDefaultValueErr[V]{value: value, err: err}
+
+	return value, err
+}
+
 func newKeyDefaultMap[K comparable, V any](factory func(K) V) *keyDefaultMap[K, V] {
 	return &keyDefaultMap[K, V]{
 		data:           make(map[K]V),
@@ -73,17 +108,12 @@ func newKeyDefaultMap[K comparable, V any](factory func(K) V) *keyDefaultMap[K, 
 	}
 }
 
-func newKeyDefaultMapWrapErr[K comparable, V any](factory func(K) (V, error)) *keyDefaultMap[K, V] {
-	return &keyDefaultMap[K, V]{
-		data: make(map[K]V),
-		defaultFactory: func(k K) V {
-			v, err := factory(k)
-			if err != nil {
-				panic(err)
-			}
-
-			return v
-		},
+// newKeyDefaultMapWrapErr memoizes both successful values and deterministic
+// factory errors, so the same failing key is not retried on subsequent reads.
+func newKeyDefaultMapWrapErr[K comparable, V any](factory func(K) (V, error)) *keyDefaultMapErr[K, V] {
+	return &keyDefaultMapErr[K, V]{
+		data:           make(map[K]keyDefaultValueErr[V]),
+		defaultFactory: factory,
 	}
 }
 
@@ -210,7 +240,7 @@ type Scan struct {
 
 	includeRowLineage bool
 
-	partitionFilters *keyDefaultMap[int, iceberg.BooleanExpression]
+	partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression]
 	concurrency      int
 }
 
@@ -390,21 +420,26 @@ func (scan *Scan) buildManifestEvaluator(specID int) (func(iceberg.ManifestFile)
 	return buildManifestEvaluator(specID, scan.metadata, scan.partitionFilters, scan.caseSensitive)
 }
 
-func buildManifestEvaluator(specID int, metadata Metadata, partitionFilters *keyDefaultMap[int, iceberg.BooleanExpression], caseSensitive bool) (func(iceberg.ManifestFile) (bool, error), error) {
+func buildManifestEvaluator(specID int, metadata Metadata, partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression], caseSensitive bool) (func(iceberg.ManifestFile) (bool, error), error) {
 	spec := metadata.PartitionSpecByID(specID)
 	if spec == nil {
 		return nil, fmt.Errorf("%w: id %d", ErrPartitionSpecNotFound, specID)
 	}
 
+	partitionFilter, err := partitionFilters.Get(specID)
+	if err != nil {
+		return nil, err
+	}
+
 	return newManifestEvaluator(*spec, metadata.CurrentSchema(),
-		partitionFilters.Get(specID), caseSensitive)
+		partitionFilter, caseSensitive)
 }
 
 func (scan *Scan) buildPartitionEvaluator(specID int) (func(iceberg.DataFile) (bool, error), error) {
 	return buildPartitionEvaluator(specID, scan.metadata, scan.partitionFilters, scan.caseSensitive)
 }
 
-func buildPartitionEvaluator(specID int, metadata Metadata, partitionFilters *keyDefaultMap[int, iceberg.BooleanExpression], caseSensitive bool) (func(iceberg.DataFile) (bool, error), error) {
+func buildPartitionEvaluator(specID int, metadata Metadata, partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression], caseSensitive bool) (func(iceberg.DataFile) (bool, error), error) {
 	spec := metadata.PartitionSpecByID(specID)
 	if spec == nil {
 		return nil, fmt.Errorf("%w: id %d", ErrPartitionSpecNotFound, specID)
@@ -412,7 +447,12 @@ func buildPartitionEvaluator(specID int, metadata Metadata, partitionFilters *ke
 	partType := spec.PartitionType(metadata.CurrentSchema())
 	partSchema := iceberg.NewSchema(0, partType.FieldList...)
 
-	fn, err := iceberg.ExpressionEvaluator(partSchema, partitionFilters.Get(specID), caseSensitive)
+	partitionFilter, err := partitionFilters.Get(specID)
+	if err != nil {
+		return nil, err
+	}
+
+	fn, err := iceberg.ExpressionEvaluator(partSchema, partitionFilter, caseSensitive)
 	if err != nil {
 		return nil, err
 	}
@@ -583,7 +623,10 @@ func (scan *Scan) fetchPartitionSpecFilteredManifests(ctx context.Context) ([]ic
 	manifestEvaluators := newKeyDefaultMapWrapErr(scan.buildManifestEvaluator)
 	filtered := make([]iceberg.ManifestFile, 0, len(manifestList))
 	for _, mf := range manifestList {
-		eval := manifestEvaluators.Get(int(mf.PartitionSpecID()))
+		eval, err := manifestEvaluators.Get(int(mf.PartitionSpecID()))
+		if err != nil {
+			return nil, fmt.Errorf("failed to build manifest evaluator for spec %d: %w", mf.PartitionSpecID(), err)
+		}
 		use, err := eval(mf)
 		if err != nil {
 			return nil, fmt.Errorf("failed to evaluate manifest %s: %w", mf.FilePath(), err)
@@ -631,7 +674,10 @@ func (scan *Scan) collectManifestEntries(
 			if err != nil {
 				return err
 			}
-			partEval := partitionEvaluators.Get(int(mf.PartitionSpecID()))
+			partEval, err := partitionEvaluators.Get(int(mf.PartitionSpecID()))
+			if err != nil {
+				return fmt.Errorf("failed to build partition evaluator for spec %d: %w", mf.PartitionSpecID(), err)
+			}
 			manifestEntries, err := openManifest(fs, mf, partEval, metricsEval)
 			if err != nil {
 				return err

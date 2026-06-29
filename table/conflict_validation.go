@@ -391,7 +391,10 @@ func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.B
 				continue
 			}
 
-			mEval := manifestEvals.Get(int(mf.PartitionSpecID()))
+			mEval, err := manifestEvals.Get(int(mf.PartitionSpecID()))
+			if err != nil {
+				return fmt.Errorf("failed to build manifest evaluator for spec %d: %w", mf.PartitionSpecID(), err)
+			}
 			keep, err := mEval(mf)
 			if err != nil {
 				return err
@@ -400,7 +403,10 @@ func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.B
 				continue
 			}
 
-			pEval := partitionEvals.Get(int(mf.PartitionSpecID()))
+			pEval, err := partitionEvals.Get(int(mf.PartitionSpecID()))
+			if err != nil {
+				return fmt.Errorf("failed to build partition evaluator for spec %d: %w", mf.PartitionSpecID(), err)
+			}
 			for e, err := range mf.Entries(ctx.fs, false) {
 				if err != nil {
 					return fmt.Errorf("reading entries from manifest %s: %w", mf.FilePath(), err)
