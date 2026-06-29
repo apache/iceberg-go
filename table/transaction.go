@@ -1860,7 +1860,7 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 	}
 	wfs, err := requireWriteFileIO(fs)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	partitionContextByFilePath := make(map[string]partitionContext, len(files))
