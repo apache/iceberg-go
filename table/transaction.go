@@ -1359,8 +1359,22 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 	}
 
 	if len(withPartialDeletions) > 0 {
-		if err := t.writePositionDeletesForFiles(ctx, fs, updater, withPartialDeletions, filter, caseSensitive, concurrency, commitUUID); err != nil {
+		referenced, err := t.writePositionDeletesForFiles(ctx, fs, updater, withPartialDeletions, filter, caseSensitive, concurrency, commitUUID)
+		if err != nil {
 			return nil, err
+		}
+
+		// Verify the data files these position deletes target still exist on
+		// the branch head at commit time. The overwriteFiles producer only
+		// validates partition-filter overlap; without this check a concurrent
+		// commit that removed a referenced data file would silently orphan the
+		// deletes (they would apply to rewritten data or dangle). Mirrors
+		// RowDelta.validate: collect referenced data-file paths and run
+		// validateDataFilesExist unconditionally (no isolation gating).
+		if len(referenced) > 0 {
+			t.addValidator(func(cc *conflictContext) error {
+				return validateDataFilesExist(cc, referenced)
+			})
 		}
 	}
 
@@ -1834,11 +1848,15 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 	return result, nil
 }
 
-// writePositionDeletesForFiles rewrites data files by preserving only rows that do NOT match the filter
-func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO, updater *snapshotProducer, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, commitUUID uuid.UUID) error {
+// writePositionDeletesForFiles writes position-delete files for the rows in
+// files that match filter, appends them to updater, and returns the distinct
+// data-file paths those deletes reference. A position-delete that does not
+// record its referenced data file is omitted from the returned paths (it
+// cannot be existence-checked), matching RowDelta.validate and Java.
+func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO, updater *snapshotProducer, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, commitUUID uuid.UUID) ([]string, error) {
 	posDeleteRecIter, err := t.makePositionDeleteRecordsForFilter(ctx, fs, files, filter, caseSensitive, concurrency)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	wfs, err := requireWriteFileIO(fs)
 	if err != nil {
@@ -1857,14 +1875,22 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 		fs:        wfs,
 	})
 
+	var referenced []string
+	seen := make(map[string]struct{})
 	for f, err := range posDeleteFiles {
 		if err != nil {
-			return err
+			return nil, err
 		}
 		updater.appendDeleteFile(f)
+		if ref := f.ReferencedDataFile(); ref != nil && *ref != "" {
+			if _, ok := seen[*ref]; !ok {
+				seen[*ref] = struct{}{}
+				referenced = append(referenced, *ref)
+			}
+		}
 	}
 
-	return nil
+	return referenced, nil
 }
 
 func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs io.IO, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (seq2 iter.Seq2[arrow.RecordBatch, error], err error) {
