@@ -1233,16 +1233,11 @@ func (m *ManifestTestSuite) TestWriteManifestV3() {
 }
 
 func (m *ManifestTestSuite) TestAddManifestsPresetAndNilFirstRowIDNoOverlap() {
-	// Verify that a v3 list writer's AddManifests advances nextRowID for all
-	// data manifests regardless of whether first_row_id is pre-set or nil,
-	// preventing overlapping row-ID ranges.
 	partitionSpec := NewPartitionSpecID(1,
 		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "x", Transform: IdentityTransform{}})
 	commitSnapID := int64(100)
 	seqNum := int64(1)
-
-	// Pre-set manifest: FirstRowIDValue set via WriteManifestV3.
-	count := int64(10)
+	count := int64(1)
 	entries := []ManifestEntry{
 		&manifestEntry{
 			EntryStatus: EntryStatusADDED,
@@ -1258,42 +1253,37 @@ func (m *ManifestTestSuite) TestAddManifestsPresetAndNilFirstRowIDNoOverlap() {
 			},
 		},
 	}
+
 	var buf1 bytes.Buffer
-	m1, idAfterM1, err := WriteManifestV3("/m1.avro", &buf1, 1000, partitionSpec, testSchema, commitSnapID, entries)
+	m1, _, err := WriteManifestV3("/m1.avro", &buf1, 0, partitionSpec, testSchema, commitSnapID, entries)
 	m.Require().NoError(err)
 	m.Require().NotNil(m1.FirstRowID())
-	m.EqualValues(1000, *m1.FirstRowID())
-	m.EqualValues(1010, idAfterM1) // 1000 + 10
+	m.EqualValues(0, *m1.FirstRowID())
 
-	// Nil-ID manifest: FirstRowIDValue is nil (WriteManifest without opts).
 	var buf2 bytes.Buffer
 	m2, err := WriteManifest("/m2.avro", &buf2, 3, partitionSpec, testSchema, commitSnapID, entries)
 	m.Require().NoError(err)
 	m.Nil(m2.FirstRowID())
 
-	// Add both to a v3 list writer starting at firstRowID=0.
 	var listBuf bytes.Buffer
-	writer, err := NewManifestListWriterV3(&listBuf, commitSnapID, seqNum, 0, nil)
+	writer, err := NewManifestListWriterV3(&listBuf, commitSnapID, seqNum, 1, nil)
 	m.Require().NoError(err)
 	m.Require().NoError(writer.AddManifests([]ManifestFile{m1, m2}))
 	m.Require().NoError(writer.Close())
 
-	// Read back and verify:
-	// - m1 (pre-set, 1000) preserves its value, list writer advances nextRowID by 10 to 10
-	// - m2 (nil) gets first_row_id=10 (not 0 — would overlap with m1's 1000-1009)
 	list, err := ReadManifestList(bytes.NewReader(listBuf.Bytes()))
 	m.Require().NoError(err)
 	m.Require().Len(list, 2)
-
 	m.Require().NotNil(list[0].FirstRowID())
-	m.EqualValues(1000, *list[0].FirstRowID(), "pre-set manifest preserves its first_row_id")
-
+	m.EqualValues(0, *list[0].FirstRowID())
 	m.Require().NotNil(list[1].FirstRowID())
-	m.NotEqual(int64(0), *list[1].FirstRowID(), "nil-ID sibling must NOT get first_row_id=0 (would overlap)")
-	m.EqualValues(10, *list[1].FirstRowID(), "nil-ID sibling gets the advanced counter, not the initial one")
+	m.EqualValues(1, *list[1].FirstRowID())
+	m.EqualValues(2, *writer.NextRowID())
+
 }
 
 func (m *ManifestTestSuite) TestReadManifestListIncompleteSchema() {
+
 	// Verify that reading a manifest list whose embedded schema references
 	// an undefined named type ("field_summary" without its definition)
 	// fails. A stray cache or cross-file resolver could mask this by

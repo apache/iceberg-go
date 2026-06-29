@@ -1560,10 +1560,8 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 						if m.nextRowID != nil {
 							firstRowID := *m.nextRowID
 							wrapped.FirstRowIDValue = &firstRowID
+							*m.nextRowID += wrapped.ExistingRowsCount + wrapped.AddedRowsCount
 						}
-					}
-					if m.nextRowID != nil {
-						*m.nextRowID += wrapped.ExistingRowsCount + wrapped.AddedRowsCount
 					}
 				}
 			}
