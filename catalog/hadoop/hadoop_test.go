@@ -78,7 +78,7 @@ func (f *barrierRenameNoReplaceFS) RenameNoReplace(oldpath, newpath string) erro
 
 // a mock hadoop catalog filesystem to ensure that we
 // can load arbitrary new filesystem implementations
-// as longa s they full the HadoopCatalogFS interface
+// as long as they full the HadoopCatalogFS interface
 type stubHadoopCatalogFS struct {
 	icebergio.LocalFS
 }
