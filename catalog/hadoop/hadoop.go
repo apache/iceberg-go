@@ -400,10 +400,8 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		return nil, fmt.Errorf("hadoop catalog: failed to write table metadata: %w", err)
 	}
 
-	if err := c.filesystem.Rename(tempPath, metaPath); err != nil {
-		_ = c.filesystem.Remove(tempPath)
-
-		return nil, fmt.Errorf("hadoop catalog: failed to commit metadata file: %w", err)
+	if err := c.commitMetadataFile(ident, tempPath, metaPath, catalog.ErrTableAlreadyExists); err != nil {
+		return nil, err
 	}
 
 	c.writeVersionHint(ident, version)
@@ -520,25 +518,29 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 		return nil, "", fmt.Errorf("hadoop catalog: failed to write table metadata: %w", err)
 	}
 
-	// Conflict detection: target file must not already exist.
-	if _, err := c.filesystem.Stat(newMetaPath); err == nil {
-		_ = c.filesystem.Remove(tempPath)
-
-		return nil, "", fmt.Errorf("hadoop catalog: version %d already exists for table %s",
-			newVersion, strings.Join(ident, "."))
-	}
-
-	// Atomic commit via rename.
-	if err := c.filesystem.Rename(tempPath, newMetaPath); err != nil {
-		_ = c.filesystem.Remove(tempPath)
-
-		return nil, "", fmt.Errorf("hadoop catalog: failed to commit metadata file: %w", err)
+	if err := c.commitMetadataFile(ident, tempPath, newMetaPath, table.ErrCommitFailed); err != nil {
+		return nil, "", err
 	}
 
 	// Step 8: Best-effort version hint update.
 	c.writeVersionHint(ident, newVersion)
 
 	return updated, newMetaPath, nil
+}
+
+func (c *Catalog) commitMetadataFile(ident table.Identifier, tempPath, metaPath string, conflictErr error) error {
+	if err := c.filesystem.RenameNoReplace(tempPath, metaPath); err != nil {
+		_ = c.filesystem.Remove(tempPath)
+
+		if errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("%w: metadata file already exists for table %s: %s",
+				conflictErr, strings.Join(ident, "."), metaPath)
+		}
+
+		return fmt.Errorf("hadoop catalog: failed to commit metadata file: %w", err)
+	}
+
+	return nil
 }
 
 func (c *Catalog) ListTables(_ context.Context, ns table.Identifier) iter.Seq2[table.Identifier, error] {
