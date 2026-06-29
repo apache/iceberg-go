@@ -24,6 +24,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"math"
 	"strconv"
 	"testing"
 	"time"
@@ -2021,6 +2022,101 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterPersistsPerManifestFirstRowI
 	m.EqualValues(5000, *firstManifest.FirstRowID()) // start of first range
 	m.EqualValues(5015, *secondManifest.FirstRowID())
 	m.EqualValues(5022, *writer.NextRowID())
+}
+
+func (m *ManifestTestSuite) TestManifestListWriterMetadataPreservesInt64Values() {
+	parentSnapshot := int64(1 << 40)
+
+	tests := []struct {
+		name     string
+		build    func(io.Writer) (*ManifestListWriter, error)
+		expected map[string]string
+	}{
+		{
+			name: "v1",
+			build: func(w io.Writer) (*ManifestListWriter, error) {
+				return NewManifestListWriterV1(w, (1<<40)+1, &parentSnapshot)
+			},
+			expected: map[string]string{
+				"format-version":     "1",
+				"snapshot-id":        "1099511627777",
+				"parent-snapshot-id": "1099511627776",
+			},
+		},
+		{
+			name: "v2",
+			build: func(w io.Writer) (*ManifestListWriter, error) {
+				return NewManifestListWriterV2(w, (1<<40)+2, (1<<40)+3, &parentSnapshot)
+			},
+			expected: map[string]string{
+				"format-version":     "2",
+				"snapshot-id":        "1099511627778",
+				"sequence-number":    "1099511627779",
+				"parent-snapshot-id": "1099511627776",
+			},
+		},
+		{
+			name: "v3",
+			build: func(w io.Writer) (*ManifestListWriter, error) {
+				return NewManifestListWriterV3(w, (1<<40)+4, (1<<40)+5, (1<<40)+6, &parentSnapshot)
+			},
+			expected: map[string]string{
+				"format-version":     "3",
+				"snapshot-id":        "1099511627780",
+				"sequence-number":    "1099511627781",
+				"first-row-id":       "1099511627782",
+				"parent-snapshot-id": "1099511627776",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		m.Run(tt.name, func() {
+			var buf bytes.Buffer
+			writer, err := tt.build(&buf)
+			m.Require().NoError(err)
+			m.Require().NoError(writer.Close())
+
+			reader, err := ocf.NewReader(&buf)
+			m.Require().NoError(err)
+			defer func() {
+				m.Require().NoError(reader.Close())
+			}()
+
+			meta := reader.Metadata()
+			for key, want := range tt.expected {
+				m.Equal(want, string(meta[key]))
+			}
+		})
+	}
+
+	m.Run("v3_near_max_int64", func() {
+		maxParentSnapshot := int64(math.MaxInt64 - 3)
+
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(
+			&buf,
+			math.MaxInt64-2,
+			math.MaxInt64-1,
+			math.MaxInt64,
+			&maxParentSnapshot,
+		)
+		m.Require().NoError(err)
+		m.Require().NoError(writer.Close())
+
+		reader, err := ocf.NewReader(&buf)
+		m.Require().NoError(err)
+		defer func() {
+			m.Require().NoError(reader.Close())
+		}()
+
+		meta := reader.Metadata()
+		m.Equal("3", string(meta["format-version"]))
+		m.Equal(strconv.FormatInt(math.MaxInt64-2, 10), string(meta["snapshot-id"]))
+		m.Equal(strconv.FormatInt(math.MaxInt64-1, 10), string(meta["sequence-number"]))
+		m.Equal(strconv.FormatInt(math.MaxInt64, 10), string(meta["first-row-id"]))
+		m.Equal(strconv.FormatInt(maxParentSnapshot, 10), string(meta["parent-snapshot-id"]))
+	})
 }
 
 func (m *ManifestTestSuite) TestV3PrepareEntrySequenceNumberValidation() {

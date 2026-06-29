@@ -1427,12 +1427,12 @@ func NewManifestListWriterV1(out io.Writer, snapshotID int64, parentSnapshot *in
 
 	parentSnapshotStr := "null"
 	if parentSnapshot != nil {
-		parentSnapshotStr = strconv.Itoa(int(*parentSnapshot))
+		parentSnapshotStr = strconv.FormatInt(*parentSnapshot, 10)
 	}
 
 	return m, m.init(map[string][]byte{
 		"format-version":     []byte(strconv.Itoa(m.version)),
-		"snapshot-id":        []byte(strconv.Itoa(int(snapshotID))),
+		"snapshot-id":        []byte(strconv.FormatInt(snapshotID, 10)),
 		"parent-snapshot-id": []byte(parentSnapshotStr),
 	})
 }
@@ -1447,13 +1447,13 @@ func NewManifestListWriterV2(out io.Writer, snapshotID, sequenceNumber int64, pa
 
 	parentSnapshotStr := "null"
 	if parentSnapshot != nil {
-		parentSnapshotStr = strconv.Itoa(int(*parentSnapshot))
+		parentSnapshotStr = strconv.FormatInt(*parentSnapshot, 10)
 	}
 
 	return m, m.init(map[string][]byte{
 		"format-version":     []byte(strconv.Itoa(m.version)),
-		"snapshot-id":        []byte(strconv.Itoa(int(snapshotID))),
-		"sequence-number":    []byte(strconv.Itoa(int(sequenceNumber))),
+		"snapshot-id":        []byte(strconv.FormatInt(snapshotID, 10)),
+		"sequence-number":    []byte(strconv.FormatInt(sequenceNumber, 10)),
 		"parent-snapshot-id": []byte(parentSnapshotStr),
 	})
 }
@@ -1468,14 +1468,14 @@ func NewManifestListWriterV3(out io.Writer, snapshotId, sequenceNumber, firstRow
 	}
 	parentSnapshotStr := "null"
 	if parentSnapshot != nil {
-		parentSnapshotStr = strconv.Itoa(int(*parentSnapshot))
+		parentSnapshotStr = strconv.FormatInt(*parentSnapshot, 10)
 	}
 
 	return m, m.init(map[string][]byte{
 		"format-version":     []byte(strconv.Itoa(m.version)),
-		"snapshot-id":        []byte(strconv.Itoa(int(snapshotId))),
-		"sequence-number":    []byte(strconv.Itoa(int(sequenceNumber))),
-		"first-row-id":       []byte(strconv.Itoa(int(firstRowID))),
+		"snapshot-id":        []byte(strconv.FormatInt(snapshotId, 10)),
+		"sequence-number":    []byte(strconv.FormatInt(sequenceNumber, 10)),
+		"first-row-id":       []byte(strconv.FormatInt(firstRowID, 10)),
 		"parent-snapshot-id": []byte(parentSnapshotStr),
 	})
 }
