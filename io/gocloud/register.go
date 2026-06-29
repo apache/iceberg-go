@@ -19,6 +19,7 @@ package gocloud
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"strconv"
 
@@ -31,25 +32,41 @@ func init() {
 	registerAzureSchemes()
 }
 
-func keyExtractorOptions(props map[string]string) []keyExtractorOption {
-	if enabled, err := strconv.ParseBool(props[icebergio.ObjectStoreStrictAuthorityValidation]); err == nil && enabled {
-		return []keyExtractorOption{withStrictAuthorityValidation()}
+func keyExtractorOptions(props map[string]string) ([]keyExtractorOption, error) {
+	value, ok := props[icebergio.ObjectStoreStrictAuthorityValidation]
+	if !ok {
+		return nil, nil
 	}
 
-	return nil
+	enabled, err := strconv.ParseBool(value)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s value %q: %w",
+			icebergio.ObjectStoreStrictAuthorityValidation, value, err)
+	}
+
+	if enabled {
+		return []keyExtractorOption{withStrictAuthorityValidation()}, nil
+	}
+
+	return nil, nil
 }
 
 // registerS3Schemes registers S3-compatible storage schemes (s3, s3a, s3n).
 func registerS3Schemes() {
 	s3Factory := func(ctx context.Context, parsed *url.URL, props map[string]string) (icebergio.IO, error) {
+		opts, err := keyExtractorOptions(props)
+		if err != nil {
+			return nil, err
+		}
+
 		bucket, err := createS3Bucket(ctx, parsed, props)
 		if err != nil {
 			return nil, err
 		}
 
-		extractor := defaultObjectLocationExtractor(parsed.Host, keyExtractorOptions(props)...)
+		extractor := defaultObjectLocationExtractor(parsed.Host, opts...)
 
-		return createBlobFS(ctx, bucket, keyExtractorFromObjectLocation(extractor), extractor), nil
+		return createBlobFS(ctx, bucket, extractor), nil
 	}
 	icebergio.Register("s3", s3Factory)
 	icebergio.Register("s3a", s3Factory)
@@ -60,28 +77,38 @@ func registerS3Schemes() {
 // registerGCSScheme registers the Google Cloud Storage scheme (gs).
 func registerGCSScheme() {
 	icebergio.Register("gs", func(ctx context.Context, parsed *url.URL, props map[string]string) (icebergio.IO, error) {
+		opts, err := keyExtractorOptions(props)
+		if err != nil {
+			return nil, err
+		}
+
 		bucket, err := createGCSBucket(ctx, parsed, props)
 		if err != nil {
 			return nil, err
 		}
 
-		extractor := defaultObjectLocationExtractor(parsed.Host, keyExtractorOptions(props)...)
+		extractor := defaultObjectLocationExtractor(parsed.Host, opts...)
 
-		return createBlobFS(ctx, bucket, keyExtractorFromObjectLocation(extractor), extractor), nil
+		return createBlobFS(ctx, bucket, extractor), nil
 	})
 }
 
 // registerAzureSchemes registers Azure Data Lake Storage schemes (abfs, abfss, wasb, wasbs).
 func registerAzureSchemes() {
 	azureFactory := func(ctx context.Context, parsed *url.URL, props map[string]string) (icebergio.IO, error) {
+		opts, err := keyExtractorOptions(props)
+		if err != nil {
+			return nil, err
+		}
+
 		bucket, err := createAzureBucket(ctx, parsed, props)
 		if err != nil {
 			return nil, err
 		}
 
-		extractor := adlsObjectLocationExtractor(parsed, keyExtractorOptions(props)...)
+		extractor := adlsObjectLocationExtractor(parsed, opts...)
 
-		return createBlobFS(ctx, bucket, keyExtractorFromObjectLocation(extractor), extractor), nil
+		return createBlobFS(ctx, bucket, extractor), nil
 	}
 	icebergio.Register("abfs", azureFactory)
 	icebergio.Register("abfss", azureFactory)

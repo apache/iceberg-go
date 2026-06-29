@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"regexp"
 	"strings"
@@ -227,6 +228,11 @@ func adlsObjectLocationExtractor(parsedURL *url.URL, opts ...keyExtractorOption)
 		if cfg.strictAuthorityValidation && authority != expectedAuthority {
 			return objectLocation{}, fmt.Errorf("URI authority %q does not match configured authority %q",
 				authority, expectedAuthority)
+		}
+		if !cfg.strictAuthorityValidation && authority != expectedAuthority {
+			slog.Warn("using cross-authority ADLS URI with configured container",
+				"authority", authority,
+				"configured_authority", expectedAuthority)
 		}
 
 		uriPath := matches[3]

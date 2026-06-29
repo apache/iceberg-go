@@ -164,12 +164,29 @@ func TestDefaultKeyExtractor(t *testing.T) {
 	}
 }
 
+func TestKeyExtractorOptionsRejectsInvalidStrictAuthorityValidation(t *testing.T) {
+	opts, err := keyExtractorOptions(map[string]string{
+		icebergio.ObjectStoreStrictAuthorityValidation: "ture",
+	})
+
+	require.ErrorContains(t, err, icebergio.ObjectStoreStrictAuthorityValidation)
+	assert.Nil(t, opts)
+}
+
+func TestKeyExtractorOptionsParsesStrictAuthorityValidation(t *testing.T) {
+	opts, err := keyExtractorOptions(map[string]string{
+		icebergio.ObjectStoreStrictAuthorityValidation: "true",
+	})
+
+	require.NoError(t, err)
+	assert.Len(t, opts, 1)
+}
+
 func testBlobFileIO(ctx context.Context, bucketName string, bucket *blob.Bucket, opts ...keyExtractorOption) *blobFileIO {
 	extractor := defaultObjectLocationExtractor(bucketName, opts...)
 
 	return &blobFileIO{
 		Bucket:        bucket,
-		keyExtractor:  keyExtractorFromObjectLocation(extractor),
 		extractObject: extractor,
 		ctx:           ctx,
 	}
@@ -185,10 +202,13 @@ func testADLSBlobFileIO(t *testing.T, ctx context.Context, root string, bucket *
 
 	return &blobFileIO{
 		Bucket:        bucket,
-		keyExtractor:  keyExtractorFromObjectLocation(extractor),
 		extractObject: extractor,
 		ctx:           ctx,
 	}
+}
+
+func identityObjectLocation(location string) (objectLocation, error) {
+	return objectLocation{key: location, uriKey: location}, nil
 }
 
 func TestBlobFileIORejectsWrongBucketObjectPaths(t *testing.T) {
@@ -234,9 +254,9 @@ func TestNewWriterExistsError(t *testing.T) {
 	bucket := memblob.OpenBucket(nil)
 
 	bfs := &blobFileIO{
-		Bucket:       bucket,
-		keyExtractor: func(path string) (string, error) { return path, nil },
-		ctx:          ctx,
+		Bucket:        bucket,
+		extractObject: identityObjectLocation,
+		ctx:           ctx,
 	}
 	require.NoError(t, bucket.Close())
 
@@ -302,9 +322,9 @@ func TestReadAtResourceCleanup(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var lastReaderClosed bool
 			bfs := &blobFileIO{
-				Bucket:       bucket,
-				keyExtractor: func(path string) (string, error) { return path, nil },
-				ctx:          ctx,
+				Bucket:        bucket,
+				extractObject: identityObjectLocation,
+				ctx:           ctx,
 				newRangeReader: func(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error) {
 					r, err := bucket.NewRangeReader(ctx, key, offset, length, nil)
 					if err != nil {
@@ -463,6 +483,19 @@ func TestBlobFileIOWalkDirKeepsCrossAuthorityPathsStableByDefault(t *testing.T) 
 	}
 }
 
+func TestWalkedURIPathRejectsPathOutsideStorageRoot(t *testing.T) {
+	location := objectLocation{
+		authority:    "other-bucket",
+		key:          "other-bucket/data",
+		uriKey:       "data",
+		uriPrefix:    "s3://other-bucket/",
+		hasAuthority: true,
+	}
+
+	_, err := walkedURIPath(location, "unrelated/data/file.parquet")
+	require.ErrorContains(t, err, "outside storage root")
+}
+
 func TestBlobFileIOWalkDirRejectsWrongAzureAuthority(t *testing.T) {
 	ctx := context.Background()
 
@@ -548,7 +581,7 @@ func TestBlobFileIOImplementsBulkRemovableIO(t *testing.T) {
 	defer bucket.Close()
 
 	extractor := defaultObjectLocationExtractor("test-bucket")
-	bfs := createBlobFS(context.Background(), bucket, keyExtractorFromObjectLocation(extractor), extractor)
+	bfs := createBlobFS(context.Background(), bucket, extractor)
 
 	_, ok := bfs.(icebergio.BulkRemovableIO)
 	assert.True(t, ok, "blobFileIO should implement BulkRemovableIO")
@@ -565,7 +598,7 @@ func TestBlobFileIODeleteFiles(t *testing.T) {
 	require.NoError(t, bucket.WriteAll(ctx, "data/file3.parquet", []byte("data3"), nil))
 
 	extractor := defaultObjectLocationExtractor("test-bucket")
-	bfs := createBlobFS(ctx, bucket, keyExtractorFromObjectLocation(extractor), extractor)
+	bfs := createBlobFS(ctx, bucket, extractor)
 	bulk := bfs.(icebergio.BulkRemovableIO)
 
 	deleted, err := bulk.DeleteFiles(ctx, []string{
@@ -595,7 +628,7 @@ func TestBlobFileIODeleteFilesMissingFilesAreNotErrors(t *testing.T) {
 	defer bucket.Close()
 
 	extractor := defaultObjectLocationExtractor("test-bucket")
-	bfs := createBlobFS(ctx, bucket, keyExtractorFromObjectLocation(extractor), extractor)
+	bfs := createBlobFS(ctx, bucket, extractor)
 	bulk := bfs.(icebergio.BulkRemovableIO)
 
 	// Deleting non-existent files should succeed.
@@ -612,7 +645,7 @@ func TestBlobFileIORemoveMissingFileReturnsNotExist(t *testing.T) {
 	defer bucket.Close()
 
 	extractor := defaultObjectLocationExtractor("test-bucket")
-	bfs := createBlobFS(ctx, bucket, keyExtractorFromObjectLocation(extractor), extractor)
+	bfs := createBlobFS(ctx, bucket, extractor)
 
 	err := bfs.Remove("s3://test-bucket/data/nonexistent.parquet")
 	require.ErrorIs(t, err, fs.ErrNotExist)
@@ -624,7 +657,7 @@ func TestBlobFileIODeleteFilesEmpty(t *testing.T) {
 	defer bucket.Close()
 
 	extractor := defaultObjectLocationExtractor("test-bucket")
-	bfs := createBlobFS(ctx, bucket, keyExtractorFromObjectLocation(extractor), extractor)
+	bfs := createBlobFS(ctx, bucket, extractor)
 	bulk := bfs.(icebergio.BulkRemovableIO)
 
 	deleted, err := bulk.DeleteFiles(ctx, nil)
