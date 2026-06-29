@@ -221,25 +221,15 @@ func (c *Catalog) tableToPath(ident table.Identifier) string {
 }
 
 func (c *Catalog) metadataDir(ident table.Identifier) string {
-	return joinPath(c.isLocal, c.warehouse, ident...)
+	return joinPath(c.isLocal, c.tableToPath(ident), "metadata")
 }
 
 func (c *Catalog) metadataFilePath(ident table.Identifier, version int) string {
-	metadataPath := []string{
-		c.metadataDir(ident),
-		"metadata",
-		fmt.Sprintf("v%d.metadata.json", version),
-	}
-
-	return joinPath(c.isLocal, c.warehouse, metadataPath...)
+	return joinPath(c.isLocal, c.metadataDir(ident), fmt.Sprintf("v%d.metadata.json", version))
 }
 
 func (c *Catalog) versionHintPath(ident table.Identifier) string {
-	versionHintPath := []string{
-		c.metadataDir(ident),
-		"version-hint.text",
-	}
-	return joinPath(c.isLocal, c.warehouse, versionHintPath...)
+	return joinPath(c.isLocal, c.metadataDir(ident), "version-hint.text")
 }
 
 func (c *Catalog) defaultTableLocation(ident table.Identifier) string {
