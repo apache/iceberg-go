@@ -23,15 +23,15 @@ import (
 	"sync"
 )
 
-// Nop is a [Reporter] that discards every report. It is the default when no
-// reporter is configured, so that instrumentation is free unless a user opts
-// in. The zero value is ready to use.
-type Nop struct{}
+// NopReporter is a [Reporter] that discards every report. It is the default
+// when no reporter is configured, so that instrumentation is free unless a user
+// opts in. The zero value is ready to use.
+type NopReporter struct{}
 
-var _ Reporter = Nop{}
+var _ Reporter = NopReporter{}
 
 // Report implements [Reporter] and does nothing.
-func (Nop) Report(context.Context, Report) {}
+func (NopReporter) Report(context.Context, MetricsReport) {}
 
 // LoggingReporter is a [Reporter] that logs each report via an [slog.Logger]. It
 // is a convenient default for development and debugging.
@@ -52,7 +52,7 @@ func NewLoggingReporter(logger *slog.Logger) *LoggingReporter {
 }
 
 // Report logs report at info level.
-func (r *LoggingReporter) Report(ctx context.Context, report Report) {
+func (r *LoggingReporter) Report(ctx context.Context, report MetricsReport) {
 	if report == nil {
 		return
 	}
@@ -63,13 +63,13 @@ func (r *LoggingReporter) Report(ctx context.Context, report Report) {
 // primarily intended for tests and inspection. It is safe for concurrent use.
 type InMemoryReporter struct {
 	mu      sync.Mutex
-	reports []Report
+	reports []MetricsReport
 }
 
 var _ Reporter = (*InMemoryReporter)(nil)
 
 // Report appends report to the retained set.
-func (r *InMemoryReporter) Report(_ context.Context, report Report) {
+func (r *InMemoryReporter) Report(_ context.Context, report MetricsReport) {
 	if report == nil {
 		return
 	}
@@ -79,11 +79,11 @@ func (r *InMemoryReporter) Report(_ context.Context, report Report) {
 }
 
 // Reports returns a copy of the reports received so far, in arrival order.
-func (r *InMemoryReporter) Reports() []Report {
+func (r *InMemoryReporter) Reports() []MetricsReport {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	return append([]Report(nil), r.reports...)
+	return append([]MetricsReport(nil), r.reports...)
 }
 
 // Reset discards all retained reports.
@@ -97,10 +97,14 @@ func (r *InMemoryReporter) Reset() {
 // reporters in order. nil reporters are skipped. A panic in one reporter must
 // not prevent the others from receiving the report, so each call is isolated;
 // in keeping with the [Reporter] contract a misbehaving reporter never affects
-// the observed operation.
+// the observed operation. A recovered panic is logged at debug level via
+// [slog.Default] so a broken reporter is not entirely invisible.
 //
-// As a convenience, Combine with no reporters returns [Nop], and with a single
-// non-nil reporter returns that reporter directly.
+// As a convenience, Combine with no reporters returns [NopReporter], and with a
+// single non-nil reporter returns that reporter directly. The per-reporter
+// panic recovery therefore applies only when two or more reporters are
+// combined: a lone reporter is returned unwrapped and runs exactly as it would
+// if called directly, without the safety net.
 func Combine(reporters ...Reporter) Reporter {
 	nonNil := make([]Reporter, 0, len(reporters))
 	for _, r := range reporters {
@@ -111,7 +115,7 @@ func Combine(reporters ...Reporter) Reporter {
 
 	switch len(nonNil) {
 	case 0:
-		return Nop{}
+		return NopReporter{}
 	case 1:
 		return nonNil[0]
 	default:
@@ -121,10 +125,16 @@ func Combine(reporters ...Reporter) Reporter {
 
 type compositeReporter []Reporter
 
-func (c compositeReporter) Report(ctx context.Context, report Report) {
+func (c compositeReporter) Report(ctx context.Context, report MetricsReport) {
 	for _, r := range c {
 		func() {
-			defer func() { _ = recover() }()
+			defer func() {
+				if v := recover(); v != nil {
+					// Swallow per the Reporter contract, but surface the
+					// failure at debug level so a broken reporter is traceable.
+					slog.Default().DebugContext(ctx, "iceberg metrics reporter panicked; recovered", "panic", v)
+				}
+			}()
 			r.Report(ctx, report)
 		}()
 	}

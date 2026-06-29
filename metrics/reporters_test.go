@@ -26,10 +26,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// testReport is a minimal Report. The marker is unexported (sealed to this
-// package), so report values can only be created from within the package — this
-// white-box test is how we exercise the reporters until the concrete report
-// types land.
+// testReport is a minimal MetricsReport. The marker is unexported (sealed to
+// this package), so report values can only be created from within the
+// package — this white-box test is how we exercise the reporters until the
+// concrete report types land.
 type testReport struct{ name string }
 
 func (testReport) isMetricsReport() {}
@@ -40,7 +40,7 @@ type countingReporter struct {
 	count int
 }
 
-func (c *countingReporter) Report(context.Context, Report) {
+func (c *countingReporter) Report(context.Context, MetricsReport) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.count++
@@ -56,13 +56,13 @@ func (c *countingReporter) calls() int {
 // panickingReporter always panics, to verify Combine isolates failures.
 type panickingReporter struct{}
 
-func (panickingReporter) Report(context.Context, Report) { panic("boom") }
+func (panickingReporter) Report(context.Context, MetricsReport) { panic("boom") }
 
 func TestNopReporter(t *testing.T) {
-	// Nop must accept anything, including nil, without panicking.
+	// NopReporter must accept anything, including nil, without panicking.
 	assert.NotPanics(t, func() {
-		Nop{}.Report(context.Background(), nil)
-		Nop{}.Report(context.Background(), testReport{})
+		NopReporter{}.Report(context.Background(), nil)
+		NopReporter{}.Report(context.Background(), testReport{})
 	})
 }
 
@@ -100,8 +100,8 @@ func TestLoggingReporterNilLoggerAndReport(t *testing.T) {
 
 func TestCombine(t *testing.T) {
 	t.Run("no reporters returns Nop", func(t *testing.T) {
-		assert.IsType(t, Nop{}, Combine())
-		assert.IsType(t, Nop{}, Combine(nil, nil))
+		assert.IsType(t, NopReporter{}, Combine())
+		assert.IsType(t, NopReporter{}, Combine(nil, nil))
 	})
 
 	t.Run("single reporter returned directly", func(t *testing.T) {

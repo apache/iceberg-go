@@ -17,27 +17,33 @@
 
 // Package metrics implements Iceberg's Metrics Reporting API for iceberg-go.
 //
-// A [Reporter] is a pluggable sink that receives a [Report] — a ScanReport
-// after scan planning or a CommitReport after a commit — describing what the
-// client did (files and manifests considered, scanned and skipped; bytes read;
-// commit attempts and durations). Reporting gives operators a standard way to
-// aggregate these otherwise-invisible client-side metrics across many clients.
+// A [Reporter] is a pluggable sink that receives a [MetricsReport] — a
+// ScanReport after scan planning or a CommitReport after a commit — describing
+// what the client did (files and manifests considered, scanned and skipped;
+// bytes read; commit attempts and durations). Reporting gives operators a
+// standard way to aggregate these otherwise-invisible client-side metrics
+// across many clients.
 //
 // Reporting is strictly opt-in: with no reporter configured the instrumented
 // code paths do no work. Reporters must never block or fail the scan/commit
 // they observe — see [Reporter] for the contract.
 //
-// This package provides the contract and the built-in reporters ([Nop],
-// [LoggingReporter], [InMemoryReporter], and [Combine]). The concrete report
-// types and the scan/commit instrumentation are layered on top in later work.
+// This package provides the contract and the built-in reporters
+// ([NopReporter], [LoggingReporter], [InMemoryReporter], and [Combine]). The
+// concrete report types and the scan/commit instrumentation are layered on top
+// in later work.
 package metrics
 
 import "context"
 
-// Report is the sealed marker interface implemented by the concrete report
-// types (ScanReport and CommitReport). It is sealed to this package so the set
-// of report types stays under the framework's control.
-type Report interface {
+// MetricsReport is the sealed marker interface implemented by the concrete
+// report types (ScanReport and CommitReport). It is sealed to this package so
+// the set of report types stays under the framework's control.
+//
+// The name mirrors the MetricsReport type in the Java and Python Iceberg
+// implementations, easing ports across the ecosystem and disambiguating the
+// type from the [Reporter.Report] method that consumes it.
+type MetricsReport interface {
 	isMetricsReport()
 }
 
@@ -50,5 +56,5 @@ type Report interface {
 // (logged and swallowed), never propagated back to the caller. Report must be
 // safe for concurrent use by multiple goroutines.
 type Reporter interface {
-	Report(ctx context.Context, report Report)
+	Report(ctx context.Context, report MetricsReport)
 }
