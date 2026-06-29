@@ -452,7 +452,8 @@ var (
 		},
 	}
 
-	testSchema = NewSchema(0,
+	testSchema = NewSchema(
+		0,
 		NestedField{ID: 1, Name: "VendorID", Type: PrimitiveTypes.Int32, Required: true},
 		NestedField{ID: 2, Name: "tpep_pickup_datetime", Type: PrimitiveTypes.Timestamp, Required: true},
 		NestedField{ID: 3, Name: "tpep_dropoff_datetime", Type: PrimitiveTypes.Timestamp, Required: true},
@@ -1279,11 +1280,9 @@ func (m *ManifestTestSuite) TestAddManifestsPresetAndNilFirstRowIDNoOverlap() {
 	m.Require().NotNil(list[1].FirstRowID())
 	m.EqualValues(1, *list[1].FirstRowID())
 	m.EqualValues(2, *writer.NextRowID())
-
 }
 
 func (m *ManifestTestSuite) TestReadManifestListIncompleteSchema() {
-
 	// Verify that reading a manifest list whose embedded schema references
 	// an undefined named type ("field_summary" without its definition)
 	// fails. A stray cache or cross-file resolver could mask this by
@@ -1403,7 +1402,8 @@ func (m *ManifestTestSuite) TestReadManifestListIncompleteSchema() {
 	// We'll generate a file that is missing part of its schema
 	sch, err := internal.NewManifestFileSchema(2)
 	m.NoError(err)
-	wr, err := ocf.NewWriter(&buf, sch,
+	wr, err := ocf.NewWriter(
+		&buf, sch,
 		ocf.WithSchema(incompleteSchema),
 		ocf.WithMetadata(map[string][]byte{
 			"format-version":     {'2'},
@@ -1446,7 +1446,8 @@ func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
 	file, err := WriteManifest(
 		"s3://bucket/namespace/table/metadata/abcd-0123.avro", &buf, 2,
 		partitionSpec,
-		NewSchema(123,
+		NewSchema(
+			123,
 			NestedField{ID: 1, Name: "id", Type: Int64Type{}},
 			NestedField{ID: 2, Name: "name", Type: StringType{}},
 		),
@@ -1520,7 +1521,8 @@ func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
 	m.NoError(err)
 	sch, err := internal.NewManifestEntrySchema(partitionSchema, 2)
 	m.NoError(err)
-	wr, err := ocf.NewWriter(&buf, sch,
+	wr, err := ocf.NewWriter(
+		&buf, sch,
 		ocf.WithSchema(incompleteSchema),
 		ocf.WithMetadata(map[string][]byte{
 			"format-version": {'2'},
@@ -1875,7 +1877,8 @@ func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 	entry := NewManifestEntryBuilder(
 		EntryStatusEXISTING,
 		&snapshotEntryID,
-		dataFileBuilder.Build()).Build()
+		dataFileBuilder.Build(),
+	).Build()
 
 	m.Assert().Equal(EntryStatusEXISTING, entry.Status())
 	m.Assert().EqualValues(1, entry.SnapshotID())
@@ -1973,10 +1976,12 @@ func (m *ManifestTestSuite) TestManifestWriterMeta() {
 }
 
 func TestReadManifestDecodesNilLogicalPartitionValueFromNullableUnion(t *testing.T) {
-	schema := NewSchema(0,
+	schema := NewSchema(
+		0,
 		NestedField{ID: 1, Name: "dt", Type: PrimitiveTypes.Date},
 	)
-	partitionSpec := NewPartitionSpecID(1,
+	partitionSpec := NewPartitionSpecID(
+		1,
 		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "dt", Transform: IdentityTransform{}},
 	)
 
@@ -2210,10 +2215,12 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 }
 
 func (m *ManifestTestSuite) TestManifestWriterDoesNotCommitStateOnEncodeError() {
-	schema := NewSchema(0,
+	schema := NewSchema(
+		0,
 		NestedField{ID: 1, Name: "dt", Type: PrimitiveTypes.Date},
 	)
-	partitionSpec := NewPartitionSpecID(1,
+	partitionSpec := NewPartitionSpecID(
+		1,
 		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "dt", Transform: IdentityTransform{}},
 	)
 
@@ -2467,7 +2474,8 @@ func (m *ManifestTestSuite) TestManifestRoundTripSortOrderID() {
 	file, err := WriteManifest(
 		"s3://bucket/ns/table/metadata/round-trip.avro", &buf, 2,
 		partitionSpec,
-		NewSchema(0,
+		NewSchema(
+			0,
 			NestedField{ID: 1, Name: "id", Type: Int64Type{}},
 		),
 		snapshotID,
@@ -2525,7 +2533,8 @@ func (m *ManifestTestSuite) assertWriteOmitsDistinctCounts(version int) {
 	file, err := WriteManifest(
 		"s3://bucket/ns/table/metadata/distinct.avro", &buf, version,
 		partitionSpec,
-		NewSchema(0,
+		NewSchema(
+			0,
 			NestedField{ID: 1, Name: "id", Type: Int64Type{}, Required: true},
 		),
 		snapshotID,
@@ -2560,7 +2569,8 @@ func (m *ManifestTestSuite) assertWriteOmitsDistinctCounts(version int) {
 // the distinct counts come back populated.
 func (m *ManifestTestSuite) TestReadManifestLegacyDistinctCounts() {
 	partitionSpec := NewPartitionSpec()
-	tableSchema := NewSchema(0,
+	tableSchema := NewSchema(
+		0,
 		NestedField{ID: 1, Name: "id", Type: Int64Type{}, Required: true},
 	)
 	partitionSchema, err := partitionTypeToAvroSchema(partitionSpec.PartitionType(tableSchema))
@@ -2588,7 +2598,8 @@ func (m *ManifestTestSuite) TestReadManifestLegacyDistinctCounts() {
 	}
 
 	var buf bytes.Buffer
-	wr, err := ocf.NewWriter(&buf, legacySchema,
+	wr, err := ocf.NewWriter(
+		&buf, legacySchema,
 		ocf.WithSchema(legacySchema.String()),
 		ocf.WithMetadata(map[string][]byte{
 			"format-version": []byte("2"),
