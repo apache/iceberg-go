@@ -20,16 +20,35 @@ package hadoop
 import (
 	"context"
 	"fmt"
+	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 )
+
+type stubHadoopCatalogFS struct {
+	icebergio.LocalFS
+}
+
+var _ HadoopCatalogFS = (*stubHadoopCatalogFS)(nil)
+
+type stubIO struct{}
+
+func (stubIO) Open(string) (icebergio.File, error) {
+	return nil, fs.ErrNotExist
+}
+
+func (stubIO) Remove(string) error {
+	return nil
+}
 
 type HadoopCatalogTestSuite struct {
 	suite.Suite
@@ -52,6 +71,16 @@ func (s *HadoopCatalogTestSuite) TearDownTest() {
 
 func TestHadoopCatalogTestSuite(t *testing.T) {
 	suite.Run(t, new(HadoopCatalogTestSuite))
+}
+
+func (s *HadoopCatalogTestSuite) registerScheme(factory icebergio.SchemeFactory) string {
+	scheme := "hadoop-test-" + uuid.NewString()
+	icebergio.Register(scheme, factory)
+	s.T().Cleanup(func() {
+		icebergio.Unregister(scheme)
+	})
+
+	return scheme
 }
 
 func (s *HadoopCatalogTestSuite) TestCatalogType() {
@@ -99,6 +128,55 @@ func (s *HadoopCatalogTestSuite) TestNewCatalogRequiresOptInForRemoteSchemes() {
 	_, err = NewCatalog("test", "hdfs://namenode/warehouse", nil)
 	s.Require().Error(err)
 	s.Contains(err.Error(), "`allow-unsafe-commits` must be set to true")
+
+	loadFSCalled := false
+	scheme := s.registerScheme(func(context.Context, *url.URL, map[string]string) (icebergio.IO, error) {
+		loadFSCalled = true
+
+		return &stubHadoopCatalogFS{}, nil
+	})
+
+	_, err = NewCatalog("test", scheme+"://bucket/path", nil)
+	s.Require().Error(err)
+	s.Contains(err.Error(), "`allow-unsafe-commits` must be set to true")
+	s.False(loadFSCalled)
+}
+
+func (s *HadoopCatalogTestSuite) TestNewCatalogRemoteHappyPathWithUnsafeCommits() {
+	scheme := s.registerScheme(func(_ context.Context, parsed *url.URL, props map[string]string) (icebergio.IO, error) {
+		s.Equal("bucket", parsed.Host)
+		s.Equal("/wh/", parsed.Path)
+		s.Equal("true", props["allow-unsafe-commits"])
+
+		return &stubHadoopCatalogFS{}, nil
+	})
+
+	cat, err := NewCatalog("test", scheme+"://bucket/wh/", iceberg.Properties{
+		"allow-unsafe-commits": "true",
+	})
+	s.Require().NoError(err)
+	s.False(cat.isLocal)
+	s.IsType(&stubHadoopCatalogFS{}, cat.filesystem)
+
+	ident := table.Identifier{"ns", "tbl"}
+	s.Equal(scheme+"://bucket/wh/ns", cat.namespaceToPath(ident[:1]))
+	s.Equal(scheme+"://bucket/wh/ns/tbl", cat.tableToPath(ident))
+	s.Equal(scheme+"://bucket/wh/ns/tbl/metadata", cat.metadataDir(ident))
+	s.Equal(scheme+"://bucket/wh/ns/tbl/metadata/v1.metadata.json", cat.metadataFilePath(ident, 1))
+	s.Equal(scheme+"://bucket/wh/ns/tbl/metadata/version-hint.text", cat.versionHintPath(ident))
+	s.Equal(scheme+"://bucket/wh/ns/tbl", cat.defaultTableLocation(ident))
+}
+
+func (s *HadoopCatalogTestSuite) TestNewCatalogRemoteRequiresHadoopCatalogFS() {
+	scheme := s.registerScheme(func(context.Context, *url.URL, map[string]string) (icebergio.IO, error) {
+		return stubIO{}, nil
+	})
+
+	_, err := NewCatalog("test", scheme+"://bucket/wh", iceberg.Properties{
+		"allow-unsafe-commits": "true",
+	})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "does not implement HadoopCatalogFS")
 }
 
 func (s *HadoopCatalogTestSuite) TestNamespaceToPathSingleLevel() {
@@ -184,14 +262,14 @@ func (s *HadoopCatalogTestSuite) TestIsTableDirTrue() {
 	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
 	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "v1.metadata.json"), nil, 0o644))
 
-	s.True(isTableDir(s.cat.filesystem, tableDir))
+	s.True(isTableDir(s.cat.filesystem, s.cat.isLocal, tableDir))
 }
 
 func (s *HadoopCatalogTestSuite) TestIsTableDirFalseNoMetadataDir() {
 	nsDir := filepath.Join(s.warehouse, "ns")
 	s.Require().NoError(os.MkdirAll(nsDir, 0o755))
 
-	s.False(isTableDir(s.cat.filesystem, nsDir))
+	s.False(isTableDir(s.cat.filesystem, s.cat.isLocal, nsDir))
 }
 
 func (s *HadoopCatalogTestSuite) TestIsTableDirFalseEmptyMetadataDir() {
@@ -199,7 +277,7 @@ func (s *HadoopCatalogTestSuite) TestIsTableDirFalseEmptyMetadataDir() {
 	metaDir := filepath.Join(tableDir, "metadata")
 	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
 
-	s.False(isTableDir(s.cat.filesystem, tableDir))
+	s.False(isTableDir(s.cat.filesystem, s.cat.isLocal, tableDir))
 }
 
 func (s *HadoopCatalogTestSuite) TestIsTableDirTrueUUIDMetadata() {
@@ -208,7 +286,7 @@ func (s *HadoopCatalogTestSuite) TestIsTableDirTrueUUIDMetadata() {
 	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
 	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "00001-a1b2c3d4-e5f6-7890-abcd-ef1234567890.metadata.json"), nil, 0o644))
 
-	s.True(isTableDir(s.cat.filesystem, tableDir))
+	s.True(isTableDir(s.cat.filesystem, s.cat.isLocal, tableDir))
 }
 
 func (s *HadoopCatalogTestSuite) TestIsTableDirWithGzipMetadata() {
@@ -217,11 +295,11 @@ func (s *HadoopCatalogTestSuite) TestIsTableDirWithGzipMetadata() {
 	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
 	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "v1.gz.metadata.json"), nil, 0o644))
 
-	s.True(isTableDir(s.cat.filesystem, tableDir))
+	s.True(isTableDir(s.cat.filesystem, s.cat.isLocal, tableDir))
 }
 
 func (s *HadoopCatalogTestSuite) TestIsTableDirNonExistentPath() {
-	s.False(isTableDir(s.cat.filesystem, filepath.Join(s.warehouse, "does", "not", "exist")))
+	s.False(isTableDir(s.cat.filesystem, s.cat.isLocal, filepath.Join(s.warehouse, "does", "not", "exist")))
 }
 
 func (s *HadoopCatalogTestSuite) createMetadataFile(ident table.Identifier, version int) {
@@ -726,7 +804,7 @@ func (s *HadoopCatalogTestSuite) TestIsTableDirTrueVersionHintText() {
 	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
 	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "version-hint.text"), []byte("1"), 0o644))
 
-	s.True(isTableDir(s.cat.filesystem, tableDir))
+	s.True(isTableDir(s.cat.filesystem, s.cat.isLocal, tableDir))
 }
 
 func (s *HadoopCatalogTestSuite) TestIsTableDirTrueUUIDMetadataGzip() {
@@ -735,7 +813,7 @@ func (s *HadoopCatalogTestSuite) TestIsTableDirTrueUUIDMetadataGzip() {
 	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
 	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "00001-a1b2c3d4-e5f6-7890-abcd-ef1234567890.gz.metadata.json"), nil, 0o644))
 
-	s.True(isTableDir(s.cat.filesystem, tableDir))
+	s.True(isTableDir(s.cat.filesystem, s.cat.isLocal, tableDir))
 }
 
 func (s *HadoopCatalogTestSuite) TestIsTableDirFalseNonMatchingFiles() {
@@ -744,7 +822,7 @@ func (s *HadoopCatalogTestSuite) TestIsTableDirFalseNonMatchingFiles() {
 	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
 	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "random.json"), nil, 0o644))
 
-	s.False(isTableDir(s.cat.filesystem, tableDir))
+	s.False(isTableDir(s.cat.filesystem, s.cat.isLocal, tableDir))
 }
 
 // Helper to create a fake table directory with a metadata file.
@@ -1574,4 +1652,84 @@ func (s *HadoopCatalogTestSuite) TestCommitTableShortIdentifier() {
 	s.Require().Error(err)
 	s.ErrorIs(err, catalog.ErrNoSuchTable)
 	s.Contains(err.Error(), "at least a namespace and table name")
+}
+
+func (s *HadoopCatalogTestSuite) TestJoinPathLocal() {
+	tests := []struct {
+		name  string
+		base  string
+		parts []string
+		want  string
+	}{
+		{
+			name:  "base only",
+			base:  "/tmp/wh/",
+			parts: nil,
+			want:  filepath.Clean("/tmp/wh/"),
+		},
+		{
+			name:  "namespace and table",
+			base:  "/tmp/wh",
+			parts: []string{"ns", "tbl"},
+			want:  filepath.Join("/tmp/wh", "ns", "tbl"),
+		},
+		{
+			name:  "cleans local path components",
+			base:  "/tmp/wh",
+			parts: []string{"ns", ".", "tbl", "metadata"},
+			want:  filepath.Join("/tmp/wh", "ns", "tbl", "metadata"),
+		},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			s.Equal(tt.want, joinPath(true, tt.base, tt.parts...))
+		})
+	}
+}
+
+func (s *HadoopCatalogTestSuite) TestJoinPathRemotePreservesSchemeAuthority() {
+	cases := []struct {
+		name  string
+		base  string
+		parts []string
+		want  string
+	}{
+		{
+			name:  "base only trims trailing slash",
+			base:  "s3://bucket/wh/",
+			parts: nil,
+			want:  "s3://bucket/wh",
+		},
+		{
+			name:  "namespace and table",
+			base:  "s3://bucket/wh/",
+			parts: []string{"ns", "tbl"},
+			want:  "s3://bucket/wh/ns/tbl",
+		},
+		{
+			name:  "metadata file",
+			base:  "s3://bucket/wh",
+			parts: []string{"ns", "tbl", "metadata", "v1.metadata.json"},
+			want:  "s3://bucket/wh/ns/tbl/metadata/v1.metadata.json",
+		},
+		{
+			name:  "cleans remote path components after authority",
+			base:  "s3://bucket/wh/",
+			parts: []string{"ns", ".", "tbl", "metadata"},
+			want:  "s3://bucket/wh/ns/tbl/metadata",
+		},
+		{
+			name:  "bucket root",
+			base:  "s3://bucket/",
+			parts: []string{"ns"},
+			want:  "s3://bucket/ns",
+		},
+	}
+
+	for _, tt := range cases {
+		s.Run(tt.name, func() {
+			s.Equal(tt.want, joinPath(false, tt.base, tt.parts...))
+		})
+	}
 }

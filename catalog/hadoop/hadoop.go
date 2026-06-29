@@ -25,6 +25,7 @@ import (
 	"iter"
 	"log"
 	"net/url"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -111,6 +112,7 @@ var _ catalog.PurgeableTable = (*Catalog)(nil)
 type Catalog struct {
 	name       string
 	warehouse  string
+	isLocal    bool
 	filesystem HadoopCatalogFS
 	props      iceberg.Properties
 }
@@ -135,7 +137,9 @@ func NewCatalog(name, warehouse string, props iceberg.Properties) (*Catalog, err
 
 	if !isLocal && !allowUnsafeCommits {
 		return nil, fmt.Errorf("hadoop catalog: when using warehouse scheme %q, `allow-unsafe-commits` must be set to true", u.Scheme)
-	} else if isLocal {
+	}
+
+	if isLocal {
 		if u.Opaque != "" {
 			warehouse = u.Opaque
 		} else {
@@ -157,22 +161,22 @@ func NewCatalog(name, warehouse string, props iceberg.Properties) (*Catalog, err
 
 		warehouse = absWarehouse
 	}
-
-	filesystem, err := io.LoadFS(context.Background(), nil, warehouse)
+	// TODO: propagate caller context once NewCatalog accepts one
+	filesystem, err := io.LoadFS(context.Background(), props, warehouse)
 	if err != nil {
 		return nil, fmt.Errorf("hadoop catalog: failed to load filesystem: %w", err)
 	}
 
 	hadoopFs, ok := filesystem.(HadoopCatalogFS)
 	if !ok {
-		return nil, fmt.Errorf("hadoop catalog: filesystem %T does not implement necessary functions to be used as a Hadoop catalog", filesystem)
+		return nil, fmt.Errorf("hadoop catalog: %T does not implement HadoopCatalogFS", filesystem)
 	}
 
 	return &Catalog{
 		name:      name,
 		warehouse: warehouse,
-		// for the time being, we default to localfs since there is not yet
-		// support for other filesystems like blob stores
+		isLocal:   isLocal,
+		// filesystem is resolved dynamically from the IO registry based on the warehouse scheme
 		filesystem: hadoopFs,
 		props:      props,
 	}, nil
@@ -182,24 +186,60 @@ func (c *Catalog) CatalogType() catalog.Type {
 	return catalog.Hadoop
 }
 
+// joinPath is a helper that allows paths to be joined as both local filesystem
+// paths or as remote URIs needed for filesystems like blob stores.
+func joinPath(isLocal bool, base string, parts ...string) string {
+	if isLocal {
+		// Local filesystems can be joined using path.Join
+		// without any special handling.
+		return filepath.Join(append([]string{base}, parts...)...)
+	}
+
+	baseWithoutTrailingSlash := strings.TrimRight(base, "/")
+	if len(parts) == 0 {
+		// Remote warehouse roots should not keep a trailing slash.
+		return baseWithoutTrailingSlash
+	}
+
+	// Remote paths need POSIX separators without removing the URI authority.
+	joinedParts := path.Join(parts...)
+	// joined returns . if all parts are empty; if this is the case,
+	// we return the base without the trailing slash
+	if joinedParts == "." {
+		return baseWithoutTrailingSlash
+	}
+
+	return baseWithoutTrailingSlash + "/" + joinedParts
+}
+
 func (c *Catalog) namespaceToPath(ns table.Identifier) string {
-	return filepath.Join(append([]string{c.warehouse}, ns...)...)
+	return joinPath(c.isLocal, c.warehouse, ns...)
 }
 
 func (c *Catalog) tableToPath(ident table.Identifier) string {
-	return filepath.Join(append([]string{c.warehouse}, ident...)...)
+	return joinPath(c.isLocal, c.warehouse, ident...)
 }
 
 func (c *Catalog) metadataDir(ident table.Identifier) string {
-	return filepath.Join(c.tableToPath(ident), "metadata")
+	return joinPath(c.isLocal, c.warehouse, ident...)
 }
 
 func (c *Catalog) metadataFilePath(ident table.Identifier, version int) string {
-	return filepath.Join(c.metadataDir(ident), fmt.Sprintf("v%d.metadata.json", version))
+	metadataPath := []string{
+		c.metadataDir(ident),
+		"metadata",
+		fmt.Sprintf("v%d.metadata.json", version),
+	}
+
+	return joinPath(c.isLocal, c.warehouse, metadataPath...)
 }
 
 func (c *Catalog) versionHintPath(ident table.Identifier) string {
-	return filepath.Join(c.metadataDir(ident), "version-hint.text")
+	versionHintPath := []string{
+		c.metadataDir(ident),
+		"version-hint.text",
+	}
+	return joinPath(c.isLocal, c.warehouse, versionHintPath...)
 }
 
 func (c *Catalog) defaultTableLocation(ident table.Identifier) string {
@@ -211,8 +251,8 @@ func (c *Catalog) defaultTableLocation(ident table.Identifier) string {
 //   - v*.metadata.json (Hadoop catalog format)
 //   - <seq>-<uuid>.metadata.json (Java/PyIceberg format)
 //   - version-hint.text
-func isTableDir(filesystem HadoopCatalogFS, path string) bool {
-	metaDir := filepath.Join(path, "metadata")
+func isTableDir(filesystem HadoopCatalogFS, isLocal bool, path string) bool {
+	metaDir := joinPath(isLocal, path, "metadata")
 
 	foundMetadata := false
 	err := filesystem.WalkDir(metaDir, func(path string, d fs.DirEntry, err error) error {
@@ -264,7 +304,7 @@ func (c *Catalog) readVersionHint(ident table.Identifier) int {
 
 func (c *Catalog) writeVersionHint(ident table.Identifier, version int) {
 	dir := c.metadataDir(ident)
-	tempPath := filepath.Join(dir, uuid.New().String()+"-version-hint.temp")
+	tempPath := joinPath(c.isLocal, dir, uuid.New().String()+"-version-hint.temp")
 	hintPath := c.versionHintPath(ident)
 
 	content := []byte(strconv.Itoa(version))
@@ -284,13 +324,13 @@ func (c *Catalog) writeVersionHint(ident table.Identifier, version int) {
 // exists in either plain or gzip-compressed form.
 func (c *Catalog) metadataVersionExists(ident table.Identifier, version int) bool {
 	dir := c.metadataDir(ident)
-	plain := filepath.Join(dir, fmt.Sprintf("v%d.metadata.json", version))
+	plain := joinPath(c.isLocal, dir, fmt.Sprintf("v%d.metadata.json", version))
 
 	if _, err := c.filesystem.Stat(plain); err == nil {
 		return true
 	}
 
-	gz := filepath.Join(dir, fmt.Sprintf("v%d.gz.metadata.json", version))
+	gz := joinPath(c.isLocal, dir, fmt.Sprintf("v%d.gz.metadata.json", version))
 
 	_, err := c.filesystem.Stat(gz)
 
@@ -379,7 +419,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		return nil, errors.New("hadoop catalog: custom table locations are not supported")
 	}
 
-	if isTableDir(c.filesystem, loc) {
+	if isTableDir(c.filesystem, c.isLocal, loc) {
 		return nil, fmt.Errorf("%w: %s", catalog.ErrTableAlreadyExists, strings.Join(ident, "."))
 	}
 
@@ -395,7 +435,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 
 	version := 1
 	metaPath := c.metadataFilePath(ident, version)
-	tempPath := filepath.Join(metaDir, uuid.New().String()+".metadata.json")
+	tempPath := joinPath(c.isLocal, metaDir, uuid.New().String()+".metadata.json")
 
 	compression := table.MetadataCompressionDefault
 	if cfg.Properties != nil {
@@ -449,7 +489,7 @@ func (c *Catalog) CheckTableExists(_ context.Context, ident table.Identifier) (b
 		return false, nil
 	}
 
-	return isTableDir(c.filesystem, c.tableToPath(ident)), nil
+	return isTableDir(c.filesystem, c.isLocal, c.tableToPath(ident)), nil
 }
 
 func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
@@ -520,7 +560,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 	}
 
 	newMetaPath := c.metadataFilePath(ident, newVersion)
-	tempPath := filepath.Join(metaDir, uuid.New().String()+".metadata.json")
+	tempPath := joinPath(c.isLocal, metaDir, uuid.New().String()+".metadata.json")
 
 	compression := updated.Properties().Get(table.MetadataCompressionKey, table.MetadataCompressionDefault)
 
@@ -590,7 +630,7 @@ func (c *Catalog) ListTables(_ context.Context, ns table.Identifier) iter.Seq2[t
 			}
 
 			// Skip anything that is not a table directory.
-			if !isTableDir(c.filesystem, path) {
+			if !isTableDir(c.filesystem, c.isLocal, path) {
 				return fs.SkipDir
 			}
 			ident := make(table.Identifier, len(ns)+1)
@@ -617,7 +657,7 @@ func (c *Catalog) DropTable(_ context.Context, ident table.Identifier) error {
 	}
 
 	tablePath := c.tableToPath(ident)
-	if !isTableDir(c.filesystem, tablePath) {
+	if !isTableDir(c.filesystem, c.isLocal, tablePath) {
 		return fmt.Errorf("%w: %s", catalog.ErrNoSuchTable, strings.Join(ident, "."))
 	}
 
@@ -769,7 +809,7 @@ func (c *Catalog) ListNamespaces(_ context.Context, parent table.Identifier) ([]
 			// skip plain files
 			return nil
 		}
-		if isTableDir(c.filesystem, p) {
+		if isTableDir(c.filesystem, c.isLocal, p) {
 			// if a table, not a namespace, don't descend
 			return fs.SkipDir
 		}
