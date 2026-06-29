@@ -1158,7 +1158,7 @@ func (m *ManifestTestSuite) TestV3DataManifestFirstRowIDInheritanceSkipsDeletedE
 	m.EqualValues(1000+liveCount, *read[2].DataFile().FirstRowID())
 }
 
-func (m *ManifestTestSuite) TestWriteManifestWithFirstRowIDOption() {
+func (m *ManifestTestSuite) TestWriteManifestV3() {
 	partitionSpec := NewPartitionSpecID(1,
 		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "x", Transform: IdentityTransform{}})
 	count := int64(10)
@@ -1193,73 +1193,104 @@ func (m *ManifestTestSuite) TestWriteManifestWithFirstRowIDOption() {
 		},
 	}
 
-	// Test 1: WriteManifest with WithManifestFileFirstRowID sets the field.
-	var bufWithID bytes.Buffer
-	firstRowID := int64(500)
-	mf, err := WriteManifest("/manifest.avro", &bufWithID, 3, partitionSpec, testSchema, entrySnapshotID, entries,
-		WithManifestFileFirstRowID(firstRowID))
-	m.Require().NoError(err)
-	m.Require().NotNil(mf.FirstRowID())
-	m.Equal(firstRowID, *mf.FirstRowID())
+	m.Run("sets first_row_id on returned manifest", func() {
+		var buf bytes.Buffer
+		mf, _, err := WriteManifestV3("/manifest.avro", &buf, 500, partitionSpec, testSchema, entrySnapshotID, entries)
+		m.Require().NoError(err)
+		m.Require().NotNil(mf.FirstRowID())
+		m.EqualValues(500, *mf.FirstRowID())
+	})
 
-	// Reading back, entries inherit first_row_id from the manifest file.
-	read, err := ReadManifest(mf, bytes.NewReader(bufWithID.Bytes()), false)
-	m.Require().NoError(err)
-	m.Require().Len(read, 2)
-	m.Require().NotNil(read[0].DataFile().FirstRowID())
-	m.EqualValues(firstRowID, *read[0].DataFile().FirstRowID())
-	m.Require().NotNil(read[1].DataFile().FirstRowID())
-	m.EqualValues(firstRowID+count, *read[1].DataFile().FirstRowID())
+	m.Run("returns nextFirstRowID", func() {
+		var buf bytes.Buffer
+		// Two entries each with count=10, all added => 20 rows total
+		_, nextID, err := WriteManifestV3("/manifest.avro", &buf, 500, partitionSpec, testSchema, entrySnapshotID, entries)
+		m.Require().NoError(err)
+		m.EqualValues(520, nextID) // 500 + 10 + 10
+	})
 
-	// Test 2: WriteManifest without option leaves FirstRowID nil (backward compat).
-	var bufNoID bytes.Buffer
-	mf2, err := WriteManifest("/manifest.avro", &bufNoID, 3, partitionSpec, testSchema, entrySnapshotID, entries)
-	m.Require().NoError(err)
-	m.Nil(mf2.FirstRowID())
+	m.Run("read inheritance from manifest", func() {
+		var buf bytes.Buffer
+		firstRowID := int64(500)
+		mf, _, err := WriteManifestV3("/manifest.avro", &buf, firstRowID, partitionSpec, testSchema, entrySnapshotID, entries)
+		m.Require().NoError(err)
 
-	// Test 3: v1 + WithManifestFileFirstRowID is a no-op (version < 3).
-	var bufV1 bytes.Buffer
-	mf3, err := WriteManifest("/manifest.avro", &bufV1, 1, partitionSpec, testSchema, entrySnapshotID, entries,
-		WithManifestFileFirstRowID(999))
-	m.Require().NoError(err)
-	m.Nil(mf3.FirstRowID())
+		read, err := ReadManifest(mf, bytes.NewReader(buf.Bytes()), false)
+		m.Require().NoError(err)
+		m.Require().Len(read, 2)
+		m.Require().NotNil(read[0].DataFile().FirstRowID())
+		m.EqualValues(firstRowID, *read[0].DataFile().FirstRowID())
+		m.Require().NotNil(read[1].DataFile().FirstRowID())
+		m.EqualValues(firstRowID+count, *read[1].DataFile().FirstRowID())
+	})
 
-	// Test 4: v3 delete-manifest + WithManifestFileFirstRowID sets the field
-	// (version >= 3), but the reader does not inherit first_row_id into entries
-	// for delete manifests.
-	deleteEntry := &manifestEntry{
-		EntryStatus: EntryStatusADDED,
-		Snapshot:    &entrySnapshotID,
-		Data: &dataFile{
-			Content:          EntryContentPosDeletes,
-			Path:             "/data/deletes.avro",
-			Format:           AvroFile,
-			PartitionData:    map[string]any{"x": int(1)},
-			RecordCount:      count,
-			FileSize:         1000,
-			BlockSizeInBytes: 64 * 1024,
-			FirstRowIDField:  nil,
+	m.Run("WriteManifest backward compat returns nil first_row_id", func() {
+		var buf bytes.Buffer
+		mf, err := WriteManifest("/manifest.avro", &buf, 3, partitionSpec, testSchema, entrySnapshotID, entries)
+		m.Require().NoError(err)
+		m.Nil(mf.FirstRowID())
+	})
+}
+
+func (m *ManifestTestSuite) TestAddManifestsPresetAndNilFirstRowIDNoOverlap() {
+	// Verify that a v3 list writer's AddManifests advances nextRowID for all
+	// data manifests regardless of whether first_row_id is pre-set or nil,
+	// preventing overlapping row-ID ranges.
+	partitionSpec := NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "x", Transform: IdentityTransform{}})
+	commitSnapID := int64(100)
+	seqNum := int64(1)
+
+	// Pre-set manifest: FirstRowIDValue set via WriteManifestV3.
+	count := int64(10)
+	entries := []ManifestEntry{
+		&manifestEntry{
+			EntryStatus: EntryStatusADDED,
+			Snapshot:    &commitSnapID,
+			Data: &dataFile{
+				Content:          EntryContentData,
+				Path:             "/data/m1.parquet",
+				Format:           ParquetFile,
+				PartitionData:    map[string]any{"x": int(1)},
+				RecordCount:      count,
+				FileSize:         1000,
+				BlockSizeInBytes: 64 * 1024,
+			},
 		},
 	}
-	var bufDelete bytes.Buffer
-	cnt := &internal.CountingWriter{W: &bufDelete}
-	w, err := NewManifestWriter(3, cnt, partitionSpec, testSchema, entrySnapshotID,
-		WithManifestWriterContent(ManifestContentDeletes))
+	var buf1 bytes.Buffer
+	m1, idAfterM1, err := WriteManifestV3("/m1.avro", &buf1, 1000, partitionSpec, testSchema, commitSnapID, entries)
 	m.Require().NoError(err)
-	m.Require().NoError(w.Add(deleteEntry))
-	m.Require().NoError(w.Close())
-	mf4, err := w.ToManifestFile("/manifest.avro", cnt.Count,
-		WithManifestFileContent(ManifestContentDeletes),
-		WithManifestFileFirstRowID(777))
-	m.Require().NoError(err)
-	m.Require().NotNil(mf4.FirstRowID())
-	m.EqualValues(777, *mf4.FirstRowID())
+	m.Require().NotNil(m1.FirstRowID())
+	m.EqualValues(1000, *m1.FirstRowID())
+	m.EqualValues(1010, idAfterM1) // 1000 + 10
 
-	// Reading back a delete manifest — entries should not inherit first_row_id.
-	readDelete, err := ReadManifest(mf4, bytes.NewReader(bufDelete.Bytes()), false)
+	// Nil-ID manifest: FirstRowIDValue is nil (WriteManifest without opts).
+	var buf2 bytes.Buffer
+	m2, err := WriteManifest("/m2.avro", &buf2, 3, partitionSpec, testSchema, commitSnapID, entries)
 	m.Require().NoError(err)
-	m.Require().Len(readDelete, 1)
-	m.Nil(readDelete[0].DataFile().FirstRowID())
+	m.Nil(m2.FirstRowID())
+
+	// Add both to a v3 list writer starting at firstRowID=0.
+	var listBuf bytes.Buffer
+	writer, err := NewManifestListWriterV3(&listBuf, commitSnapID, seqNum, 0, nil)
+	m.Require().NoError(err)
+	m.Require().NoError(writer.AddManifests([]ManifestFile{m1, m2}))
+	m.Require().NoError(writer.Close())
+
+	// Read back and verify:
+	// - m1 (pre-set, 1000) preserves its value, list writer advances nextRowID by 10 to 10
+	// - m2 (nil) gets first_row_id=10 (not 0 — would overlap with m1's 1000-1009)
+	list, err := ReadManifestList(bytes.NewReader(listBuf.Bytes()))
+	m.Require().NoError(err)
+	m.Require().Len(list, 2)
+
+	m.Require().NotNil(list[0].FirstRowID())
+	m.EqualValues(1000, *list[0].FirstRowID(), "pre-set manifest preserves its first_row_id")
+
+	m.Require().NotNil(list[1].FirstRowID())
+	m.NotEqual(int64(0), *list[1].FirstRowID(), "nil-ID sibling must NOT get first_row_id=0 (would overlap)")
+	m.EqualValues(10, *list[1].FirstRowID(), "nil-ID sibling gets the advanced counter, not the initial one")
 }
 
 func (m *ManifestTestSuite) TestReadManifestListIncompleteSchema() {

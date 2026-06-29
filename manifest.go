@@ -1274,16 +1274,6 @@ func WithManifestFileContent(content ManifestContent) ManifestFileOption {
 	}
 }
 
-// WithManifestFileFirstRowID sets the first_row_id on a v3+ data manifest.
-// Silently no-ops on v1/v2 manifests since the field does not exist in those formats.
-func WithManifestFileFirstRowID(firstRowID int64) ManifestFileOption {
-	return func(mf *manifestFile) {
-		if mf.version >= 3 {
-			mf.FirstRowIDValue = &firstRowID
-		}
-	}
-}
-
 func (w *ManifestWriter) ToManifestFile(location string, length int64, opts ...ManifestFileOption) (ManifestFile, error) {
 	if err := w.Close(); err != nil {
 		return nil, err
@@ -1314,6 +1304,10 @@ func (w *ManifestWriter) ToManifestFile(location string, length int64, opts ...M
 	}
 	for _, apply := range opts {
 		apply(&mf)
+	}
+
+	if mf.Content == ManifestContentDeletes && mf.FirstRowIDValue != nil {
+		return nil, errors.New("first_row_id must not be set on delete manifests")
 	}
 
 	return &mf, nil
@@ -1561,10 +1555,14 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 			wrapped := *(file.(*manifestFile))
 			if m.version == 3 {
 				// Ref: https://github.com/apache/iceberg/blob/ea2071568dc66148b483a82eefedcd2992b435f7/core/src/main/java/org/apache/iceberg/ManifestListWriter.java#L157-L168
-				if wrapped.Content == ManifestContentData && wrapped.FirstRowIDValue == nil {
+				if wrapped.Content == ManifestContentData {
+					if wrapped.FirstRowIDValue == nil {
+						if m.nextRowID != nil {
+							firstRowID := *m.nextRowID
+							wrapped.FirstRowIDValue = &firstRowID
+						}
+					}
 					if m.nextRowID != nil {
-						firstRowID := *m.nextRowID
-						wrapped.FirstRowIDValue = &firstRowID
 						*m.nextRowID += wrapped.ExistingRowsCount + wrapped.AddedRowsCount
 					}
 				}
@@ -1630,10 +1628,6 @@ func WriteManifestList(version int, out io.Writer, snapshotID int64, parentSnaps
 	return writer.AddManifests(files)
 }
 
-// WriteManifest writes a manifest file (a list of manifest entries) as Avro.
-// opts may include ManifestFileOption values such as WithManifestFileContent or
-// WithManifestFileFirstRowID (v3+ only) to set descriptor fields on the returned
-// ManifestFile.
 func WriteManifest(
 	filename string,
 	out io.Writer,
@@ -1642,7 +1636,6 @@ func WriteManifest(
 	schema *Schema,
 	snapshotID int64,
 	entries []ManifestEntry,
-	opts ...ManifestFileOption,
 ) (mf ManifestFile, err error) {
 	cnt := &internal.CountingWriter{W: out}
 
@@ -1663,7 +1656,53 @@ func WriteManifest(
 		return nil, err
 	}
 
-	return w.ToManifestFile(filename, cnt.Count, opts...)
+	return w.ToManifestFile(filename, cnt.Count)
+}
+
+// WriteManifestV3 writes a v3 data manifest and assigns first_row_id.
+// The returned ManifestFile has FirstRowID() set to firstRowID.
+// nextFirstRowID is firstRowID + AddedRowsCount + ExistingRowsCount
+// for the caller to chain to the next manifest. Use this only for
+// reconstruction — manifests committed through a v3 list writer get
+// first_row_id from AddManifests; pre-setting collides with that allocation.
+func WriteManifestV3(
+	filename string,
+	out io.Writer,
+	firstRowID int64,
+	spec PartitionSpec,
+	schema *Schema,
+	snapshotID int64,
+	entries []ManifestEntry,
+) (mf ManifestFile, nextFirstRowID int64, err error) {
+	cnt := &internal.CountingWriter{W: out}
+
+	w, err := NewManifestWriter(3, cnt, spec, schema, snapshotID)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer internal.CheckedClose(w, &err)
+
+	for _, entry := range entries {
+		if err := w.addEntry(entry.(*manifestEntry)); err != nil {
+			return nil, 0, err
+		}
+	}
+
+	if err := w.Close(); err != nil {
+		return nil, 0, err
+	}
+
+	mf, err = w.ToManifestFile(filename, cnt.Count)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	raw := mf.(*manifestFile)
+	v := firstRowID
+	raw.FirstRowIDValue = &v
+	nextFirstRowID = firstRowID + raw.AddedRowsCount + raw.ExistingRowsCount
+
+	return raw, nextFirstRowID, nil
 }
 
 // ManifestEntryStatus defines constants for the entry status of
