@@ -258,6 +258,7 @@ docker run -p 8181:8181 apache/iceberg-rest-fixture:latest
 <tr><td><code>--scope</code></td><td>OAuth scope (default <code>catalog</code>)</td></tr>
 <tr><td><code>--catalog-name</code></td><td>Catalog name to load from config file (default <code>default</code>)</td></tr>
 <tr><td><code>--config</code></td><td>Path to a config file</td></tr>
+<tr><td><code>--aws-profile</code></td><td>AWS named profile to use (Glue catalog); overrides <code>aws-profile</code> in the config file</td></tr>
 </tbody></table>
 </div>
 <p>To avoid passing flags every time, define a config file at <code>~/.iceberg-go.yaml</code>:</p>

@@ -533,6 +533,7 @@ catalog:
     warehouse: s3://my-bucket/warehouse
     credential: &lt;client-id&gt;:&lt;client-secret&gt;
     output: text
+    aws-profile: &quot;&quot;
     rest:
       sigv4-enabled: false
       signing-name: &quot;&quot;
@@ -546,6 +547,7 @@ catalog:
 <tr><td><code>catalog.&lt;name&gt;.warehouse</code></td><td>Warehouse identifier (REST/Glue) or location (Hive/SQL).</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.credential</code></td><td>Credential string passed through to the catalog's auth handler.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.output</code></td><td>CLI output format (e.g. <code>text</code>, <code>json</code>).</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.aws-profile</code></td><td>AWS named profile for the Glue catalog. When unset, the AWS SDK default credential chain is used.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.rest.sigv4-enabled</code></td><td>Enable AWS SigV4 signing for REST.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.rest.signing-name</code></td><td>SigV4 service name.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.rest.signing-region</code></td><td>SigV4 region.</td></tr>
@@ -818,6 +820,7 @@ docker run -p 8181:8181 apache/iceberg-rest-fixture:latest
 <tr><td><code>--scope</code></td><td>OAuth scope (default <code>catalog</code>)</td></tr>
 <tr><td><code>--catalog-name</code></td><td>Catalog name to load from config file (default <code>default</code>)</td></tr>
 <tr><td><code>--config</code></td><td>Path to a config file</td></tr>
+<tr><td><code>--aws-profile</code></td><td>AWS named profile to use (Glue catalog); overrides <code>aws-profile</code> in the config file</td></tr>
 </tbody></table>
 </div>
 <p>To avoid passing flags every time, define a config file at <code>~/.iceberg-go.yaml</code>:</p>
