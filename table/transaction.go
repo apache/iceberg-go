@@ -114,12 +114,23 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 
 	existing := map[string]struct{}{}
 	for _, r := range t.reqs {
-		existing[r.GetType()] = struct{}{}
+		key, err := requirementSemanticKey(r)
+		if err != nil {
+			return err
+		}
+
+		existing[key] = struct{}{}
 	}
 
 	for _, r := range reqs {
-		if _, ok := existing[r.GetType()]; !ok {
+		key, err := requirementSemanticKey(r)
+		if err != nil {
+			return err
+		}
+
+		if _, ok := existing[key]; !ok {
 			t.reqs = append(t.reqs, r)
+			existing[key] = struct{}{}
 		}
 	}
 
@@ -140,6 +151,17 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 	}
 
 	return nil
+}
+
+// requirementSemanticKey assumes Requirement JSON marshaling is canonical and
+// deterministic for every requirement type that participates in dedupe.
+func requirementSemanticKey(r Requirement) (string, error) {
+	data, err := json.Marshal(r)
+	if err != nil {
+		return "", fmt.Errorf("marshal requirement %q: %w", r.GetType(), err)
+	}
+
+	return string(data), nil
 }
 
 // addValidator appends a conflict validator under t.mx. Producers
