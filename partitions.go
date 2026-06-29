@@ -482,6 +482,28 @@ func (ps *PartitionSpec) LastAssignedFieldID() int {
 	return id
 }
 
+type activePartitionField struct {
+	field      PartitionField
+	resultType Type
+}
+
+func (ps *PartitionSpec) activePartitionFields(schema *Schema) []activePartitionField {
+	fields := make([]activePartitionField, 0, len(ps.fields))
+	for _, field := range ps.fields {
+		sourceType, ok := schema.FindTypeByID(field.SourceID())
+		if !ok {
+			continue
+		}
+
+		fields = append(fields, activePartitionField{
+			field:      field,
+			resultType: field.Transform.ResultType(sourceType),
+		})
+	}
+
+	return fields
+}
+
 // PartitionType produces a struct of the partition spec.
 //
 // The partition fields should be optional:
@@ -503,17 +525,13 @@ func (ps *PartitionSpec) LastAssignedFieldID() int {
 // placeholder for dropped sources) for that purpose — see manifestPartitionFields
 // in the table package.
 func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
-	nestedFields := []NestedField{}
-	for _, field := range ps.fields {
-		sourceType, ok := schema.FindTypeByID(field.SourceID())
-		if !ok {
-			continue
-		}
-		resultType := field.Transform.ResultType(sourceType)
+	activeFields := ps.activePartitionFields(schema)
+	nestedFields := make([]NestedField, 0, len(activeFields))
+	for _, field := range activeFields {
 		nestedFields = append(nestedFields, NestedField{
-			ID:       field.FieldID,
-			Name:     field.Name,
-			Type:     resultType,
+			ID:       field.field.FieldID,
+			Name:     field.field.Name,
+			Type:     field.resultType,
 			Required: false,
 		})
 	}
@@ -529,9 +547,9 @@ func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
 // This does not apply the transforms to the data, it is assumed the provided data
 // has already been transformed appropriately.
 func (ps *PartitionSpec) PartitionToPath(data StructLike, sc *Schema) string {
-	partType := ps.PartitionType(sc)
+	activeFields := ps.activePartitionFields(sc)
 
-	if len(partType.FieldList) == 0 {
+	if len(activeFields) == 0 {
 		return ""
 	}
 
@@ -539,22 +557,22 @@ func (ps *PartitionSpec) PartitionToPath(data StructLike, sc *Schema) string {
 	// Estimate capacity: escaped_name + "=" + escaped_value + "/" per field
 	var sb strings.Builder
 	estimatedSize := 0
-	for i := range partType.Fields() {
-		estimatedSize += len(ps.fields[i].EscapedName()) + 20 // name + "=" + avg value + "/"
+	for i := range activeFields {
+		estimatedSize += len(activeFields[i].field.EscapedName()) + 20 // name + "=" + avg value + "/"
 	}
 	sb.Grow(estimatedSize)
 
-	for i := range partType.Fields() {
+	for i := range activeFields {
 		if i > 0 {
 			sb.WriteByte('/')
 		}
 
 		// Use pre-escaped field name (now guaranteed to be initialized)
-		sb.WriteString(ps.fields[i].EscapedName())
+		sb.WriteString(activeFields[i].field.EscapedName())
 		sb.WriteByte('=')
 
 		// Only escape the value (which changes per row)
-		valueStr := ps.fields[i].Transform.ToHumanStrType(partType.FieldList[i].Type, data.Get(i))
+		valueStr := activeFields[i].field.Transform.ToHumanStrType(activeFields[i].resultType, data.Get(i))
 		sb.WriteString(url.QueryEscape(valueStr))
 	}
 
