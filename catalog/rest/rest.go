@@ -113,9 +113,10 @@ func init() {
 }
 
 type errorResponse struct {
-	Message string `json:"message"`
-	Type    string `json:"type"`
-	Code    int    `json:"code"`
+	Message string   `json:"message"`
+	Type    string   `json:"type"`
+	Code    int      `json:"code"`
+	Stack   []string `json:"stack,omitempty"`
 
 	wrapping error
 }
@@ -160,7 +161,9 @@ func (t *commitTableResponse) UnmarshalJSON(b []byte) (err error) {
 	return err
 }
 
-type storageCredential struct {
+// StorageCredential carries REST-vended storage credentials scoped to matching
+// object-location prefixes.
+type StorageCredential struct {
 	Prefix string             `json:"prefix"`
 	Config iceberg.Properties `json:"config"`
 }
@@ -169,12 +172,12 @@ type loadTableResponse struct {
 	MetadataLoc        string              `json:"metadata-location"`
 	RawMetadata        json.RawMessage     `json:"metadata"`
 	Config             iceberg.Properties  `json:"config"`
-	StorageCredentials []storageCredential `json:"storage-credentials"`
+	StorageCredentials []StorageCredential `json:"storage-credentials"`
 	Metadata           table.Metadata      `json:"-"`
 }
 
 type loadCredentialsResponse struct {
-	StorageCredentials []storageCredential `json:"storage-credentials"`
+	StorageCredentials []StorageCredential `json:"storage-credentials"`
 }
 
 func (t *loadTableResponse) UnmarshalJSON(b []byte) (err error) {
@@ -250,6 +253,14 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 
 			h := s.newHash()
 			if _, err = io.Copy(h, rdr); err != nil {
+				if closeErr := rdr.Close(); closeErr != nil {
+					err = errors.Join(err, closeErr)
+				}
+
+				return nil, err
+			}
+
+			if err = rdr.Close(); err != nil {
 				return nil, err
 			}
 

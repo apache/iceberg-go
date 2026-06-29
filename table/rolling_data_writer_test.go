@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -322,10 +323,14 @@ func (s *RollingDataWriterTestSuite) TestAbortWithZeroRowsWritten() {
 	}, nil)
 
 	loc := filepath.ToSlash(s.T().TempDir())
-	fw := s.createFileWriter(loc, arrSchema, "test-abort-zero-rows.parquet")
+	fileName := "test-abort-zero-rows.parquet"
+	filePath := filepath.Join(loc, fileName)
+	fw := s.createFileWriter(loc, arrSchema, fileName)
 
 	// Abort without writing any rows must not panic.
 	s.Require().NoError(fw.Abort())
+	_, err := os.Stat(filePath)
+	s.True(os.IsNotExist(err), "abort should remove the incomplete file")
 }
 
 func (s *RollingDataWriterTestSuite) TestStreamErrorPathUsesAbort() {
@@ -355,6 +360,75 @@ func (s *RollingDataWriterTestSuite) TestStreamErrorPathUsesAbort() {
 
 	s.Require().NoError(writer.Add(badRecord))
 	s.Require().Error(writer.closeAndWait())
+
+	var files []string
+	err := filepath.Walk(loc, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			files = append(files, path)
+		}
+
+		return nil
+	})
+	s.Require().NoError(err)
+	s.Empty(files, "deferred abort should remove the incomplete file")
+}
+
+func (s *RollingDataWriterTestSuite) TestAddReturnsErrorAfterStreamStopsCleanly() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	record := s.buildRecord(arrSchema, 1)
+	defer record.Release()
+
+	errorCh := make(chan error)
+	close(errorCh)
+
+	writer := &RollingDataWriter{
+		recordCh: make(chan arrow.RecordBatch),
+		errorCh:  errorCh,
+		ctx:      s.ctx,
+	}
+
+	s.ErrorIs(writer.Add(record), ErrWriterClosed)
+}
+
+func (s *RollingDataWriterTestSuite) TestStreamErrorRemovesWriterFromFactory() {
+	writerSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	loc := filepath.ToSlash(s.T().TempDir())
+	factory, _ := s.createWriterFactory(loc, writerSchema, 1024*1024)
+	defer factory.closeAll()
+
+	outputCh := make(chan iceberg.DataFile, 10)
+	writer, err := factory.getOrCreateRollingDataWriter(s.ctx, "", nil, outputCh)
+	s.Require().NoError(err)
+
+	badSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "x", Type: arrow.PrimitiveTypes.Float64, Nullable: true},
+	}, nil)
+	bldr := array.NewRecordBuilder(s.mem, badSchema)
+	bldr.Field(0).(*array.Float64Builder).Append(1.0)
+	badRecord := bldr.NewRecordBatch()
+	bldr.Release()
+	defer badRecord.Release()
+
+	s.Require().NoError(writer.Add(badRecord))
+	writer.wg.Wait()
+
+	_, ok := factory.writers.Load("")
+	s.False(ok, "failed writer should be removed from partition writer cache")
+
+	err, ok = <-writer.errorCh
+	s.True(ok)
+	s.Error(err)
 }
 
 func (s *RollingDataWriterTestSuite) TestBytesWrittenReflectsCompressedSize() {
@@ -648,4 +722,78 @@ func (s *RollingDataWriterTestSuite) TestUnsortedOrderIsNoOp() {
 		}
 	}
 	s.Equal([]int32{3, 1, 2}, ids, "unsorted order must preserve arrival order")
+}
+
+// panicOnCloseFormat wraps a real FileFormat but hands out writers whose Close
+// panics, mimicking stats.ToDataFile panicking when NewDataFileBuilder fails.
+// bytesWritten is reported by every writer it creates: a value >= the target
+// file size makes stream roll (and Close) mid-loop, 0 defers Close to the end
+// of the stream.
+type panicOnCloseFormat struct {
+	tblutils.FileFormat
+	bytesWritten int64
+}
+
+func (f panicOnCloseFormat) NewFileWriter(_ context.Context, _ iceio.WriteFileIO, _ map[int]any, _ tblutils.WriteFileInfo, _ *arrow.Schema) (tblutils.FileWriter, error) {
+	return panicOnCloseWriter{bytesWritten: f.bytesWritten}, nil
+}
+
+// panicOnCloseWriter is a FileWriter whose Close panics with an error, like the
+// real stats.ToDataFile -> NewDataFileBuilder failure path.
+type panicOnCloseWriter struct {
+	bytesWritten int64
+}
+
+func (panicOnCloseWriter) Write(arrow.RecordBatch) error { return nil }
+func (w panicOnCloseWriter) BytesWritten() int64         { return w.bytesWritten }
+func (panicOnCloseWriter) Close() (iceberg.DataFile, error) {
+	panic(errors.New("simulated NewDataFileBuilder failure"))
+}
+func (panicOnCloseWriter) Abort() error { return nil }
+
+// TestStreamRecoversWriterClosePanic drives the rolling writer so the file
+// writer's Close panics inside the stream goroutine, and asserts the panic is
+// recovered and surfaced as an error on errorCh rather than crashing the
+// process. Both Close call sites are covered: the mid-loop roll (the common
+// production path) and the end-of-stream close.
+func (s *RollingDataWriterTestSuite) TestStreamRecoversWriterClosePanic() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	const targetFileSize = 1024 * 1024
+	tests := []struct {
+		name         string
+		bytesWritten int64
+	}{
+		{"end-of-stream close", 0},
+		{"mid-stream file roll", targetFileSize}, // >= target rolls (and closes) mid-loop
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			loc := filepath.ToSlash(s.T().TempDir())
+			factory, _ := s.createWriterFactory(loc, arrSchema, targetFileSize)
+			defer factory.closeAll()
+
+			// Hand out a writer whose Close panics. Assigned before
+			// newRollingDataWriter so it happens-before the stream goroutine
+			// reads factory.format. Before the recover in stream, this panic
+			// escaped the goroutine and crashed the process.
+			factory.format = panicOnCloseFormat{FileFormat: factory.format, bytesWritten: tt.bytesWritten}
+
+			outputCh := make(chan iceberg.DataFile, 1)
+			writer := factory.newRollingDataWriter(s.ctx, "", nil, outputCh)
+
+			record := s.buildRecord(arrSchema, 5)
+			defer record.Release()
+			s.Require().NoError(writer.Add(record))
+
+			err := writer.closeAndWait()
+			s.Require().Error(err)
+			s.Contains(err.Error(), "panic during rolling data file writing")
+			s.Contains(err.Error(), "simulated NewDataFileBuilder failure")
+		})
+	}
 }

@@ -22,7 +22,9 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
+	iofs "io/fs"
 	"math/big"
 	"strings"
 	"testing"
@@ -31,14 +33,17 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
+	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/arrow-go/v18/parquet/schema"
+	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
 	internal2 "github.com/apache/iceberg-go/internal"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/table/internal"
 	"github.com/geoarrow/geoarrow-go"
@@ -46,6 +51,36 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type abortTestFile struct {
+	bytes.Buffer
+	closeErr error
+}
+
+func (f *abortTestFile) Close() error {
+	return f.closeErr
+}
+
+func newAbortTestWriter(t *testing.T, fs iceio.WriteFileIO, fileName string) internal.FileWriter {
+	t.Helper()
+
+	fm := internal.GetFileFormat(iceberg.ParquetFile)
+	icebergSchema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false,
+	})
+	arrowSchema, err := table.SchemaToArrowSchema(icebergSchema, nil, true, false)
+	require.NoError(t, err)
+
+	writer, err := fm.NewFileWriter(context.Background(), fs, nil, internal.WriteFileInfo{
+		FileSchema: icebergSchema,
+		Spec:       *iceberg.UnpartitionedSpec,
+		FileName:   fileName,
+		WriteProps: fm.GetWriteProperties(iceberg.Properties{}),
+	}, arrowSchema)
+	require.NoError(t, err)
+
+	return writer
+}
 
 func constructTestTablePrimitiveTypes(t *testing.T) (*metadata.FileMetaData, table.Metadata) {
 	tableMeta, err := table.ParseMetadataString(`{
@@ -810,6 +845,48 @@ func TestWriteDataFileErrOnClose(t *testing.T) {
 	require.ErrorContains(t, err, "error on close")
 }
 
+func TestParquetFileWriterAbortRemovesFile(t *testing.T) {
+	memFS := iceio.NewMemFS()
+	fileName := "mem://abort-test/data.parquet"
+	writer := newAbortTestWriter(t, memFS, fileName)
+
+	require.NoError(t, writer.Abort())
+
+	_, err := memFS.Open(fileName)
+	require.ErrorIs(t, err, iofs.ErrNotExist)
+}
+
+func TestParquetFileWriterAbortIgnoresRemoveNotExist(t *testing.T) {
+	mockfs := internal2.MockFS{}
+	mockfs.Test(t)
+	mockfs.On("Create", "f").Return(&abortTestFile{}, nil)
+	mockfs.On("Remove", "f").Return(&iofs.PathError{
+		Op:   "remove",
+		Path: "f",
+		Err:  iofs.ErrNotExist,
+	})
+
+	writer := newAbortTestWriter(t, &mockfs, "f")
+	require.NoError(t, writer.Abort())
+	mockfs.AssertExpectations(t)
+}
+
+func TestParquetFileWriterAbortJoinsCloseAndRemoveErrors(t *testing.T) {
+	closeErr := errors.New("close failed")
+	removeErr := errors.New("remove failed")
+
+	mockfs := internal2.MockFS{}
+	mockfs.Test(t)
+	mockfs.On("Create", "f").Return(&abortTestFile{closeErr: closeErr}, nil)
+	mockfs.On("Remove", "f").Return(removeErr)
+
+	writer := newAbortTestWriter(t, &mockfs, "f")
+	err := writer.Abort()
+	require.ErrorIs(t, err, closeErr)
+	require.ErrorIs(t, err, removeErr)
+	mockfs.AssertExpectations(t)
+}
+
 func TestGetWritePropertiesPageVersion(t *testing.T) {
 	tests := []struct {
 		name             string
@@ -1024,44 +1101,55 @@ func TestBloomFilterRowGroupPruning(t *testing.T) {
 
 	t.Run("value in RG0 prunes RG1", func(t *testing.T) {
 		rdr := openBloomTestReader(t, data)
+		var survivors []internal.RowGroupSpan
 		tester := &internal.ParquetRowGroupTester{
 			StatsFn: alwaysKeep,
 			BloomPreds: []internal.RowGroupBloomPred{
 				{FieldID: 1, PhysBytes: [][]byte{int32PhysBytes(50)}}, // 50 is in RG0
 			},
+			Survivors: &survivors,
 		}
 		rr, err := rdr.GetRecords(ctx, cols, tester)
 		require.NoError(t, err)
 
 		assert.Equal(t, int64(rgSize), countRecords(t, rr), "only RG0 rows expected")
+		assert.Equal(t, []internal.RowGroupSpan{{FirstRowPos: 0, NumRows: rgSize}}, survivors,
+			"surviving RG0 keeps file position 0")
 	})
 
 	t.Run("value in RG1 prunes RG0", func(t *testing.T) {
 		rdr := openBloomTestReader(t, data)
+		var survivors []internal.RowGroupSpan
 		tester := &internal.ParquetRowGroupTester{
 			StatsFn: alwaysKeep,
 			BloomPreds: []internal.RowGroupBloomPred{
 				{FieldID: 1, PhysBytes: [][]byte{int32PhysBytes(150)}}, // 150 is in RG1
 			},
+			Survivors: &survivors,
 		}
 		rr, err := rdr.GetRecords(ctx, cols, tester)
 		require.NoError(t, err)
 
 		assert.Equal(t, int64(rgSize), countRecords(t, rr), "only RG1 rows expected")
+		assert.Equal(t, []internal.RowGroupSpan{{FirstRowPos: rgSize, NumRows: rgSize}}, survivors,
+			"surviving RG1 keeps its file position past the bloom-pruned RG0")
 	})
 
 	t.Run("value absent from all row groups skips all", func(t *testing.T) {
 		rdr := openBloomTestReader(t, data)
+		var survivors []internal.RowGroupSpan
 		tester := &internal.ParquetRowGroupTester{
 			StatsFn: alwaysKeep,
 			BloomPreds: []internal.RowGroupBloomPred{
 				{FieldID: 1, PhysBytes: [][]byte{int32PhysBytes(999)}}, // 999 not in either RG
 			},
+			Survivors: &survivors,
 		}
 		rr, err := rdr.GetRecords(ctx, cols, tester)
 		require.NoError(t, err)
 
 		assert.Equal(t, int64(0), countRecords(t, rr), "no rows expected when value absent")
+		assert.Empty(t, survivors, "no surviving row groups when value is absent everywhere")
 	})
 
 	t.Run("In predicate with a value in each RG keeps both", func(t *testing.T) {
@@ -1109,4 +1197,154 @@ func TestBloomFilterRowGroupPruning(t *testing.T) {
 
 		assert.Equal(t, int64(2*rgSize), countRecords(t, rr), "all rows expected when field ID unknown")
 	})
+}
+
+func TestShreddedVariantStatsDoesNotPanic(t *testing.T) {
+	mem := memory.DefaultAllocator
+
+	shreddedType := extensions.NewShreddedVariantType(arrow.StructOf(
+		arrow.Field{Name: "latitude", Type: arrow.PrimitiveTypes.Float64},
+	))
+
+	bldr := extensions.NewVariantBuilder(mem, shreddedType)
+	defer bldr.Release()
+
+	var b variant.Builder
+	require.NoError(t, b.Append(map[string]any{"latitude": float64(40.7), "city": "NYC"}))
+	v1, err := b.Build()
+	require.NoError(t, err)
+	bldr.Append(v1)
+
+	b = variant.Builder{}
+	require.NoError(t, b.Append(map[string]any{"latitude": float64(51.5), "city": "London"}))
+	v2, err := b.Build()
+	require.NoError(t, err)
+	bldr.Append(v2)
+
+	arr := bldr.NewArray()
+	defer arr.Release()
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{{
+		Name: "payload", Type: shreddedType, Nullable: true,
+		Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"1"}),
+	}}, nil)
+
+	rec := array.NewRecordBatch(arrowSchema, []arrow.Array{arr}, 2)
+	defer rec.Release()
+
+	var buf bytes.Buffer
+	wr, err := pqarrow.NewFileWriter(arrowSchema, &buf,
+		parquet.NewWriterProperties(parquet.WithStats(true)),
+		pqarrow.DefaultWriterProps())
+	require.NoError(t, err)
+	require.NoError(t, wr.Write(rec))
+	require.NoError(t, wr.Close())
+
+	rdr, err := file.NewParquetReader(bytes.NewReader(buf.Bytes()))
+	require.NoError(t, err)
+	defer rdr.Close()
+
+	meta := rdr.MetaData()
+
+	// colMapping: only the parent variant field has an Iceberg field ID.
+	// Shredded sub-columns (metadata, value, typed_value.latitude.*) do NOT.
+	colMapping := map[string]int{
+		"payload": 1,
+	}
+
+	// No stats collector for variant (arrowStatsCollector.Variant returns empty)
+	statsCols := map[int]internal.StatisticsCollector{}
+
+	variantFieldIDs := map[int]struct{}{1: {}}
+
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+	assert.NotPanics(t, func() {
+		format.DataFileStatsFromMeta(internal.Metadata(meta), statsCols, colMapping, variantFieldIDs)
+	})
+}
+
+func TestShreddedVariantReadRoundTrip(t *testing.T) {
+	mem := memory.DefaultAllocator
+
+	// Build a shredded variant column in-memory: typed_value {a:int64} with a
+	// residual "city" field in the value column.
+	shreddedType := extensions.NewShreddedVariantType(arrow.StructOf(
+		arrow.Field{Name: "a", Type: arrow.PrimitiveTypes.Int64},
+	))
+	bldr := extensions.NewVariantBuilder(mem, shreddedType)
+	defer bldr.Release()
+
+	const nRows = 5
+	for i := 0; i < nRows; i++ {
+		var b variant.Builder
+		require.NoError(t, b.Append(map[string]any{"a": int64(i), "city": "NYC"}))
+		v, err := b.Build()
+		require.NoError(t, err)
+		bldr.Append(v)
+	}
+	arr := bldr.NewArray()
+	defer arr.Release()
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{{
+		Name: "payload", Type: shreddedType, Nullable: true,
+		Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{"1"}),
+	}}, nil)
+	rec := array.NewRecordBatch(arrowSchema, []arrow.Array{arr}, int64(nRows))
+	defer rec.Release()
+
+	var buf bytes.Buffer
+	wr, err := pqarrow.NewFileWriter(arrowSchema, &buf,
+		parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps())
+	require.NoError(t, err)
+	require.NoError(t, wr.Write(rec))
+	require.NoError(t, wr.Close())
+
+	pqRdr, err := file.NewParquetReader(bytes.NewReader(buf.Bytes()))
+	require.NoError(t, err)
+	defer pqRdr.Close()
+
+	arrRdr, err := pqarrow.NewFileReader(pqRdr, pqarrow.ArrowReadProperties{}, mem)
+	require.NoError(t, err)
+
+	arrowSc, err := arrRdr.Schema()
+	require.NoError(t, err)
+	assert.Equal(t, 1, arrowSc.NumFields())
+
+	ext, ok := arrowSc.Field(0).Type.(arrow.ExtensionType)
+	require.True(t, ok, "expected extension type, got %T", arrowSc.Field(0).Type)
+	assert.Equal(t, "parquet.variant", ext.ExtensionName())
+
+	// The shredded layout collapses back to a plain VariantType in Iceberg.
+	iceSc, err := table.ArrowSchemaToIceberg(arrowSc, false, nil)
+	require.NoError(t, err)
+	assert.True(t, iceSc.Field(0).Type.Equals(iceberg.VariantType{}))
+
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+	mapping, err := format.PathToIDMapping(iceSc)
+	require.NoError(t, err)
+	assert.Contains(t, mapping, "payload")
+
+	statsCols := map[int]internal.StatisticsCollector{}
+	variantFieldIDs := internal.VariantFieldIDsFromSchema(iceSc)
+	assert.NotPanics(t, func() {
+		format.DataFileStatsFromMeta(internal.Metadata(pqRdr.MetaData()), statsCols, mapping, variantFieldIDs)
+	})
+
+	tbl, err := arrRdr.ReadTable(context.Background())
+	require.NoError(t, err)
+	defer tbl.Release()
+
+	assert.Equal(t, int64(nRows), tbl.NumRows())
+	assert.Equal(t, 1, int(tbl.NumCols()))
+
+	chunk := tbl.Column(0).Data().Chunk(0)
+	varArr, ok := chunk.(*extensions.VariantArray)
+	require.True(t, ok, "expected VariantArray, got %T", chunk)
+	for i := 0; i < varArr.Len(); i++ {
+		val, err := varArr.Value(i)
+		require.NoError(t, err, "row %d", i)
+		obj, ok := val.Value().(variant.ObjectValue)
+		require.True(t, ok, "row %d: expected ObjectValue, got %T", i, val.Value())
+		assert.EqualValues(t, 2, obj.NumElements(), "row %d should have a + city", i)
+	}
 }

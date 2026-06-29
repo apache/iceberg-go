@@ -104,8 +104,9 @@ func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	root = strings.TrimRight(root, "/")
 	for key, data := range m.files {
-		if !strings.HasPrefix(key, root) {
+		if !memPathInRoot(key, root) {
 			continue
 		}
 		info := &memFileInfo{name: filepath.Base(key), size: int64(len(data))}
@@ -115,6 +116,10 @@ func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 	}
 
 	return nil
+}
+
+func memPathInRoot(path, root string) bool {
+	return root == "" || path == root || strings.HasPrefix(path, root+"/")
 }
 
 type memFile struct {

@@ -19,6 +19,8 @@ package iceberg_test
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -27,6 +29,33 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// geoSchemaJavaFixtureName is a schema JSON fixture emitted by Apache Iceberg
+// Java SchemaParser.toJson. Geometry and geography support was added in
+// apache/iceberg commit e1e0a740 (#12346) and the geo type-string format was
+// last touched in 8de302bf when this fixture was captured.
+//
+// Source schema:
+//
+//	new Schema(17, ImmutableList.of(
+//	    Types.NestedField.required(1, "id", Types.LongType.get()),
+//	    Types.NestedField.optional(2, "geom", Types.GeometryType.of("srid:3857")),
+//	    Types.NestedField.optional(3, "geog",
+//	        Types.GeographyType.of("srid:4269", EdgeAlgorithm.KARNEY)),
+//	    Types.NestedField.optional(4, "geog_default_algo",
+//	        Types.GeographyType.of("srid:4269")),
+//	    Types.NestedField.optional(5, "geog_default_crs",
+//	        Types.GeographyType.of("OGC:CRS84", EdgeAlgorithm.KARNEY)),
+//	    Types.NestedField.optional(6, "geom_default",
+//	        Types.GeometryType.crs84()),
+//	    Types.NestedField.optional(7, "geog_default",
+//	        Types.GeographyType.crs84())))
+//
+// Java and Go write object keys in different orders, so the fixture test pins
+// the raw JSON string literals for field types instead of whole-object bytes.
+// PyIceberg currently emits quoted CRS values like geometry('srid:3857'), so
+// this fixture is scoped specifically to Java's type-string form.
+const geoSchemaJavaFixtureName = "geo-schema-java-main.json"
 
 var (
 	tableSchemaNested = iceberg.NewSchemaWithIdentifiers(1,
@@ -1175,6 +1204,58 @@ func TestSchemaWithGeometryGeographyTypes(t *testing.T) {
 	var unmarshaledSchema iceberg.Schema
 	require.NoError(t, json.Unmarshal(data, &unmarshaledSchema))
 	assert.True(t, schema.Equals(&unmarshaledSchema))
+}
+
+func TestSchemaGeoTypeStringWireFormatFixture(t *testing.T) {
+	fixtureBytes, err := os.ReadFile(filepath.Join("testdata", geoSchemaJavaFixtureName))
+	require.NoError(t, err, "fixture missing")
+
+	var schema iceberg.Schema
+	require.NoError(t, json.Unmarshal(fixtureBytes, &schema))
+
+	freshBytes, err := json.Marshal(&schema)
+	require.NoError(t, err)
+
+	fixtureTypes := rawTopLevelFieldTypes(t, fixtureBytes)
+	freshTypes := rawTopLevelFieldTypes(t, freshBytes)
+	expectedTypes := map[string]string{
+		"id":                `"long"`,
+		"geom":              `"geometry(srid:3857)"`,
+		"geog":              `"geography(srid:4269, karney)"`,
+		"geog_default_algo": `"geography(srid:4269)"`,
+		"geog_default_crs":  `"geography(OGC:CRS84, karney)"`,
+		"geom_default":      `"geometry"`,
+		"geog_default":      `"geography"`,
+	}
+	require.Len(t, fixtureTypes, len(expectedTypes))
+	require.Len(t, freshTypes, len(expectedTypes))
+	for fieldName, expected := range expectedTypes {
+		require.Equalf(t, expected, fixtureTypes[fieldName], "fixture field %q type", fieldName)
+		assert.Equalf(t, expected, freshTypes[fieldName], "fresh field %q type", fieldName)
+	}
+}
+
+func rawTopLevelFieldTypes(t *testing.T, data []byte) map[string]string {
+	t.Helper()
+
+	var schema struct {
+		Fields []struct {
+			Name string          `json:"name"`
+			Type json.RawMessage `json:"type"`
+		} `json:"fields"`
+	}
+	require.NoError(t, json.Unmarshal(data, &schema))
+	require.NotEmpty(t, schema.Fields)
+
+	types := make(map[string]string, len(schema.Fields))
+	for _, field := range schema.Fields {
+		require.NotEmpty(t, field.Name)
+		require.NotEmptyf(t, field.Type, "field %q is missing type", field.Name)
+		require.NotEqualf(t, "null", string(field.Type), "field %q is missing type", field.Name)
+		types[field.Name] = string(field.Type)
+	}
+
+	return types
 }
 
 func TestNestedFieldToStringGeographyGeometry(t *testing.T) {

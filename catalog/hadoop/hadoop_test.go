@@ -19,12 +19,15 @@ package hadoop
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
@@ -34,6 +37,48 @@ import (
 	"github.com/stretchr/testify/suite"
 )
 
+type barrierRenameNoReplaceFS struct {
+	icebergio.LocalFS
+
+	targetName string
+	release    chan struct{}
+
+	mu    sync.Mutex
+	calls int
+}
+
+func newBarrierRenameNoReplaceFS(targetName string) *barrierRenameNoReplaceFS {
+	return &barrierRenameNoReplaceFS{
+		targetName: targetName,
+		release:    make(chan struct{}),
+	}
+}
+
+func (f *barrierRenameNoReplaceFS) RenameNoReplace(oldpath, newpath string) error {
+	if filepath.Base(newpath) != f.targetName {
+		return f.LocalFS.RenameNoReplace(oldpath, newpath)
+	}
+
+	f.mu.Lock()
+	f.calls++
+	if f.calls == 2 {
+		close(f.release)
+	}
+	release := f.release
+	f.mu.Unlock()
+
+	select {
+	case <-release:
+	case <-time.After(5 * time.Second):
+		return errors.New("timed out waiting for concurrent metadata publish")
+	}
+
+	return f.LocalFS.RenameNoReplace(oldpath, newpath)
+}
+
+// a mock hadoop catalog filesystem to ensure that we
+// can load arbitrary new filesystem implementations
+// as longa s they full the HadoopCatalogFS interface
 type stubHadoopCatalogFS struct {
 	icebergio.LocalFS
 }
@@ -528,6 +573,36 @@ func (s *HadoopCatalogTestSuite) TestDropNamespace() {
 
 	err := s.cat.DropNamespace(context.Background(), []string{"ns"})
 	s.Require().NoError(err)
+
+	_, err = os.Stat(nsDir)
+	s.True(os.IsNotExist(err))
+}
+
+// statFailingFS guards against reintroducing a pre-walk Stat in DropNamespace
+// (see issue #1273). It embeds LocalFS so every other operation behaves
+// normally, but fails and counts any Stat call so the test can assert that
+// DropNamespace never stats the namespace before walking it.
+type statFailingFS struct {
+	icebergio.LocalFS
+	statCalls int
+}
+
+func (f *statFailingFS) Stat(string) (fs.FileInfo, error) {
+	f.statCalls++
+
+	return nil, errors.New("stat should not be called")
+}
+
+func (s *HadoopCatalogTestSuite) TestDropNamespaceDoesNotPreStat() {
+	nsDir := filepath.Join(s.warehouse, "ns")
+	s.Require().NoError(os.Mkdir(nsDir, 0o755))
+
+	fsys := &statFailingFS{}
+	s.cat.filesystem = fsys
+
+	err := s.cat.DropNamespace(context.Background(), []string{"ns"})
+	s.Require().NoError(err)
+	s.Zero(fsys.statCalls)
 
 	_, err = os.Stat(nsDir)
 	s.True(os.IsNotExist(err))
@@ -1074,6 +1149,56 @@ func (s *HadoopCatalogTestSuite) TestCreateTableAlreadyExists() {
 	s.ErrorIs(err, catalog.ErrTableAlreadyExists)
 }
 
+func (s *HadoopCatalogTestSuite) TestCreateTableConcurrentMetadataPublishConflict() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+	s.cat.filesystem = newBarrierRenameNoReplaceFS("v1.metadata.json")
+
+	type createResult struct {
+		metaLoc string
+		err     error
+	}
+
+	results := make(chan createResult, 2)
+	var wg sync.WaitGroup
+
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			tbl, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema())
+			result := createResult{err: err}
+			if err == nil {
+				result.metaLoc = tbl.MetadataLocation()
+			}
+
+			results <- result
+		}()
+	}
+
+	wg.Wait()
+	close(results)
+
+	successes := 0
+	conflicts := 0
+	for result := range results {
+		if result.err == nil {
+			successes++
+			s.Contains(result.metaLoc, "v1.metadata.json")
+
+			continue
+		}
+
+		conflicts++
+		s.ErrorIs(result.err, catalog.ErrTableAlreadyExists)
+	}
+
+	s.Equal(1, successes)
+	s.Equal(1, conflicts)
+	s.FileExists(s.cat.metadataFilePath([]string{"ns", "tbl"}, 1))
+}
+
 func (s *HadoopCatalogTestSuite) TestCreateTableWithPartitionSpec() {
 	ctx := context.Background()
 	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
@@ -1495,12 +1620,6 @@ func (s *HadoopCatalogTestSuite) TestCommitTableNoChanges() {
 }
 
 func (s *HadoopCatalogTestSuite) TestCommitTableConflictDetection() {
-	// Conflict detection relies on os.Stat checking whether the target
-	// v{N+1}.metadata.json already exists before the atomic rename.
-	// In a single-threaded test we cannot trigger the TOCTOU race
-	// between findVersion and os.Stat. Instead, we verify that after
-	// multiple sequential commits, the version sequence is contiguous
-	// and no versions are skipped or duplicated.
 	ctx := context.Background()
 	s.createTestTable("ns", "tbl")
 	ident := []string{"ns", "tbl"}
@@ -1519,6 +1638,61 @@ func (s *HadoopCatalogTestSuite) TestCommitTableConflictDetection() {
 		s.Contains(metaLoc, fmt.Sprintf("v%d.metadata.json", i))
 		s.FileExists(s.cat.metadataFilePath(ident, i))
 	}
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableConcurrentMetadataPublishConflict() {
+	ctx := context.Background()
+	s.createTestTable("ns", "tbl")
+	s.cat.filesystem = newBarrierRenameNoReplaceFS("v2.metadata.json")
+	ident := []string{"ns", "tbl"}
+
+	type commitResult struct {
+		metaLoc string
+		err     error
+	}
+
+	results := make(chan commitResult, 2)
+	var wg sync.WaitGroup
+
+	for i := range 2 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+
+			_, metaLoc, err := s.cat.CommitTable(
+				ctx, ident,
+				nil,
+				[]table.Update{
+					table.NewSetPropertiesUpdate(iceberg.Properties{
+						fmt.Sprintf("writer.%d", i): "committed",
+					}),
+				},
+			)
+			results <- commitResult{metaLoc: metaLoc, err: err}
+		}(i)
+	}
+
+	wg.Wait()
+	close(results)
+
+	successes := 0
+	conflicts := 0
+	for result := range results {
+		if result.err == nil {
+			successes++
+			s.Contains(result.metaLoc, "v2.metadata.json")
+
+			continue
+		}
+
+		conflicts++
+		s.ErrorIs(result.err, table.ErrCommitFailed)
+	}
+
+	s.Equal(1, successes)
+	s.Equal(1, conflicts)
+	s.FileExists(s.cat.metadataFilePath(ident, 2))
+	s.Equal(2, s.cat.readVersionHint(ident))
 }
 
 func (s *HadoopCatalogTestSuite) TestCommitTableRequirementFailure() {

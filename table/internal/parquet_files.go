@@ -22,8 +22,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"maps"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -336,6 +338,7 @@ type ParquetFileWriter struct {
 	pqWriter   *pqarrow.FileWriter
 	counter    *internal.CountingWriter
 	fileCloser io.Closer
+	fs         iceio.WriteFileIO
 	format     parquetFormat
 	info       WriteFileInfo
 	partition  map[int]any
@@ -376,6 +379,7 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 		pqWriter:   writer,
 		counter:    counter,
 		fileCloser: fw,
+		fs:         fs,
 		format:     p,
 		info:       info,
 		partition:  partitionValues,
@@ -423,7 +427,13 @@ func (w *ParquetFileWriter) Close() (_ iceberg.DataFile, err error) {
 }
 
 func (w *ParquetFileWriter) Abort() error {
-	return w.fileCloser.Close()
+	closeErr := w.fileCloser.Close()
+	removeErr := w.fs.Remove(w.info.FileName)
+	if errors.Is(removeErr, fs.ErrNotExist) || os.IsNotExist(removeErr) {
+		removeErr = nil
+	}
+
+	return errors.Join(closeErr, removeErr)
 }
 
 type decAsIntAgg[T int32 | int64] struct {
@@ -739,6 +749,18 @@ type RowGroupBloomPred struct {
 type ParquetRowGroupTester struct {
 	StatsFn    func(*metadata.RowGroupMetaData, []int) (bool, error)
 	BloomPreds []RowGroupBloomPred // nil = no bloom filter pass
+	// Survivors, if non-nil, is reset and then filled with one span per row group
+	// that survives pruning, in file order, with positions relative to the full
+	// file. It lets callers reconstruct each emitted row's original position even
+	// when pruning skips groups. Set to nil when no group is skipped.
+	Survivors *[]RowGroupSpan
+}
+
+// RowGroupSpan locates a surviving row group within the data file: the absolute
+// position of its first row and the number of rows it holds.
+type RowGroupSpan struct {
+	FirstRowPos int64
+	NumRows     int64
 }
 
 type wrapPqArrowReader struct {
@@ -787,15 +809,30 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 			bfReader = w.ParquetReader().GetBloomFilterReader()
 		}
 
+		if rowGroupTester.Survivors != nil {
+			*rowGroupTester.Survivors = (*rowGroupTester.Survivors)[:0]
+		}
+
 		rgList = make([]int, 0)
-		for rg := 0; rg < numRg; rg++ {
+		var firstRowPos int64
+		for rg := range numRg {
+			rgMeta := fileMeta.RowGroup(rg)
+			numRows := rgMeta.NumRows()
+			pos := firstRowPos
+			firstRowPos += numRows
+
 			use := true
-
 			if rowGroupTester.StatsFn != nil {
-				rgMeta := fileMeta.RowGroup(rg)
-
 				var err error
 				use, err = rowGroupTester.StatsFn(rgMeta, cols)
+				if err != nil {
+					return nil, err
+				}
+			}
+
+			if use && bfReader != nil {
+				var err error
+				use, err = checkRowGroupBloomFilters(bfReader, rg, fieldIDToColIdx, rowGroupTester.BloomPreds)
 				if err != nil {
 					return nil, err
 				}
@@ -805,17 +842,17 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 				continue
 			}
 
-			if bfReader != nil {
-				var err error
-				use, err = checkRowGroupBloomFilters(bfReader, rg, fieldIDToColIdx, rowGroupTester.BloomPreds)
-				if err != nil {
-					return nil, err
-				}
+			rgList = append(rgList, rg)
+			if rowGroupTester.Survivors != nil {
+				*rowGroupTester.Survivors = append(*rowGroupTester.Survivors,
+					RowGroupSpan{FirstRowPos: pos, NumRows: numRows})
 			}
+		}
 
-			if use {
-				rgList = append(rgList, rg)
-			}
+		// No group was skipped: emitted rows are contiguous from zero, so drop
+		// the spans and let position cursors take their contiguous fast path.
+		if rowGroupTester.Survivors != nil && len(rgList) == numRg {
+			*rowGroupTester.Survivors = nil
 		}
 	}
 

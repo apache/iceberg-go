@@ -280,3 +280,248 @@ func TestEqualityDeleteMultiColumnKey(t *testing.T) {
 		{id: 1, name: "charlie"},
 	}, rows)
 }
+
+func TestEqualityDeleteNullableFastPathKeys(t *testing.T) {
+	tests := []struct {
+		name           string
+		keyType        iceberg.Type
+		dataJSON       string
+		nullDeleteJSON string
+		zeroDeleteJSON string
+	}{
+		{
+			name:    "int",
+			keyType: iceberg.PrimitiveTypes.Int32,
+			dataJSON: `[
+				{"row_id": 1, "key": null},
+				{"row_id": 2, "key": 0},
+				{"row_id": 3, "key": 7}
+			]`,
+			nullDeleteJSON: `[{"key": null}]`,
+			zeroDeleteJSON: `[{"key": 0}]`,
+		},
+		{
+			name:    "long",
+			keyType: iceberg.PrimitiveTypes.Int64,
+			dataJSON: `[
+				{"row_id": 1, "key": null},
+				{"row_id": 2, "key": 0},
+				{"row_id": 3, "key": 7}
+			]`,
+			nullDeleteJSON: `[{"key": null}]`,
+			zeroDeleteJSON: `[{"key": 0}]`,
+		},
+		{
+			name:    "date",
+			keyType: iceberg.PrimitiveTypes.Date,
+			dataJSON: `[
+				{"row_id": 1, "key": null},
+				{"row_id": 2, "key": "1970-01-01"},
+				{"row_id": 3, "key": "2024-01-02"}
+			]`,
+			nullDeleteJSON: `[{"key": null}]`,
+			zeroDeleteJSON: `[{"key": "1970-01-01"}]`,
+		},
+		{
+			name:    "timestamp",
+			keyType: iceberg.PrimitiveTypes.Timestamp,
+			dataJSON: `[
+				{"row_id": 1, "key": null},
+				{"row_id": 2, "key": "1970-01-01T00:00:00.000000Z"},
+				{"row_id": 3, "key": "2024-01-02T03:04:05.000000Z"}
+			]`,
+			nullDeleteJSON: `[{"key": null}]`,
+			zeroDeleteJSON: `[{"key": "1970-01-01T00:00:00.000000Z"}]`,
+		},
+	}
+
+	for _, tt := range tests {
+		for _, del := range []struct {
+			name       string
+			deleteJSON string
+			wantRows   []int64
+		}{
+			{name: "delete-null", deleteJSON: tt.nullDeleteJSON, wantRows: []int64{2, 3}},
+			{name: "delete-zero", deleteJSON: tt.zeroDeleteJSON, wantRows: []int64{1, 3}},
+		} {
+			t.Run(tt.name+"/"+del.name, func(t *testing.T) {
+				tbl := newNullableEqDeleteReadTestTable(t, tt.keyType)
+				arrowSc, err := table.SchemaToArrowSchema(tbl.Metadata().CurrentSchema(), nil, false, false)
+				require.NoError(t, err)
+
+				dataPath := tbl.Location() + "/data/data-001.parquet"
+				writeParquetFile(t, dataPath, arrowSc, tt.dataJSON)
+
+				tx := tbl.NewTransaction()
+				require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+				tbl, err = tx.Commit(t.Context())
+				require.NoError(t, err)
+
+				delArrowSc, err := table.SchemaToArrowSchema(
+					iceberg.NewSchema(0, iceberg.NestedField{
+						ID: 2, Name: "key", Type: tt.keyType, Required: false,
+					}), nil, true, false)
+				require.NoError(t, err)
+
+				eqDelPath := tbl.Location() + "/data/eq-del-null.parquet"
+				writeParquetFile(t, eqDelPath, delArrowSc, del.deleteJSON)
+
+				eqDelBuilder, err := iceberg.NewDataFileBuilder(
+					*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+					eqDelPath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+				require.NoError(t, err)
+				eqDelBuilder.EqualityFieldIDs([]int{2})
+
+				tx2 := tbl.NewTransaction()
+				rd := tx2.NewRowDelta(nil)
+				rd.AddDeletes(eqDelBuilder.Build())
+				require.NoError(t, rd.Commit(t.Context()))
+				tbl, err = tx2.Commit(t.Context())
+				require.NoError(t, err)
+
+				assert.Equal(t, del.wantRows, collectRowIDs(t, tbl))
+			})
+		}
+	}
+}
+
+func TestEqualityDeleteNullableCompositeFastPathKey(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		dataJSON   string
+		deleteJSON string
+		wantRows   []int64
+	}{
+		{
+			name: "partially null key",
+			dataJSON: `[
+				{"row_id": 1, "id": 7, "deleted_at": null},
+				{"row_id": 2, "id": 7, "deleted_at": "1970-01-01T00:00:00.000000Z"},
+				{"row_id": 3, "id": 8, "deleted_at": null},
+				{"row_id": 4, "id": null, "deleted_at": null}
+			]`,
+			deleteJSON: `[{"id": 7, "deleted_at": null}]`,
+			wantRows:   []int64{2, 3, 4},
+		},
+		{
+			name: "all-null key",
+			dataJSON: `[
+				{"row_id": 1, "id": null, "deleted_at": null},
+				{"row_id": 2, "id": null, "deleted_at": "1970-01-01T00:00:00.000000Z"},
+				{"row_id": 3, "id": 7, "deleted_at": null}
+			]`,
+			deleteJSON: `[{"id": null, "deleted_at": null}]`,
+			wantRows:   []int64{2, 3},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			location := filepath.ToSlash(t.TempDir())
+
+			iceSchema := iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "row_id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+				iceberg.NestedField{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+				iceberg.NestedField{ID: 3, Name: "deleted_at", Type: iceberg.PrimitiveTypes.Timestamp, Required: false},
+			)
+
+			meta, err := table.NewMetadata(iceSchema, iceberg.UnpartitionedSpec,
+				table.UnsortedSortOrder, location,
+				iceberg.Properties{table.PropertyFormatVersion: "2"})
+			require.NoError(t, err)
+
+			tbl := table.New(
+				table.Identifier{"db", "eq_del_nullable_composite"},
+				meta, location+"/metadata/v1.metadata.json",
+				func(ctx context.Context) (iceio.IO, error) {
+					return iceio.LocalFS{}, nil
+				},
+				&rowDeltaCatalog{metadata: meta},
+			)
+
+			arrowSc, err := table.SchemaToArrowSchema(iceSchema, nil, false, false)
+			require.NoError(t, err)
+
+			dataPath := location + "/data/data-001.parquet"
+			writeParquetFile(t, dataPath, arrowSc, tt.dataJSON)
+
+			tx := tbl.NewTransaction()
+			require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+			tbl, err = tx.Commit(t.Context())
+			require.NoError(t, err)
+
+			delArrowSc, err := table.SchemaToArrowSchema(
+				iceberg.NewSchema(0,
+					iceberg.NestedField{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+					iceberg.NestedField{ID: 3, Name: "deleted_at", Type: iceberg.PrimitiveTypes.Timestamp, Required: false},
+				), nil, true, false)
+			require.NoError(t, err)
+
+			eqDelPath := location + "/data/eq-del-composite.parquet"
+			writeParquetFile(t, eqDelPath, delArrowSc, tt.deleteJSON)
+
+			eqDelBuilder, err := iceberg.NewDataFileBuilder(
+				*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+				eqDelPath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+			require.NoError(t, err)
+			eqDelBuilder.EqualityFieldIDs([]int{2, 3})
+
+			tx2 := tbl.NewTransaction()
+			rd := tx2.NewRowDelta(nil)
+			rd.AddDeletes(eqDelBuilder.Build())
+			require.NoError(t, rd.Commit(t.Context()))
+			tbl, err = tx2.Commit(t.Context())
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.wantRows, collectRowIDs(t, tbl))
+		})
+	}
+}
+
+func newNullableEqDeleteReadTestTable(t *testing.T, keyType iceberg.Type) *table.Table {
+	t.Helper()
+
+	location := filepath.ToSlash(t.TempDir())
+
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "row_id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "key", Type: keyType, Required: false},
+	)
+
+	meta, err := table.NewMetadata(iceSchema, iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, location,
+		iceberg.Properties{table.PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+
+	return table.New(
+		table.Identifier{"db", "eq_del_nullable_" + keyType.String()},
+		meta, location+"/metadata/v1.metadata.json",
+		func(ctx context.Context) (iceio.IO, error) {
+			return iceio.LocalFS{}, nil
+		},
+		&rowDeltaCatalog{metadata: meta},
+	)
+}
+
+func collectRowIDs(t *testing.T, tbl *table.Table) []int64 {
+	t.Helper()
+
+	_, itr, err := tbl.Scan().ToArrowRecords(t.Context())
+	require.NoError(t, err)
+
+	var ids []int64
+	for rec, err := range itr {
+		require.NoError(t, err)
+
+		indices := rec.Schema().FieldIndices("row_id")
+		require.NotEmpty(t, indices)
+
+		col, ok := rec.Column(indices[0]).(*array.Int64)
+		require.True(t, ok, "row_id column should be *array.Int64, got %T", rec.Column(indices[0]))
+		for i := range col.Len() {
+			ids = append(ids, col.Value(i))
+		}
+
+		rec.Release()
+	}
+
+	return ids
+}

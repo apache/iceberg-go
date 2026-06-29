@@ -306,15 +306,32 @@ func TestAddRemovePartitionSpec(t *testing.T) {
 	newBuilder, err := MetadataBuilderFromBase(metadata, "")
 	require.NoError(t, err)
 	// Remove the spec
-	require.NoError(t, newBuilder.RemovePartitionSpecs([]int{1}))
+	require.NoError(t, newBuilder.RemovePartitionSpecs([]int{1, 99}))
 	newBuild, err := newBuilder.Build()
 	require.NoError(t, err)
 	require.NotNil(t, newBuild)
 	require.Len(t, newBuilder.updates, 1)
+	require.Equal(t, []int{1}, newBuilder.updates[0].(*removeSpecUpdate).SpecIds)
 	require.Len(t, newBuild.PartitionSpecs(), 1)
 	_, err = newBuilder.GetSpecByID(1)
 	require.ErrorIs(t, err, ErrPartitionSpecNotFound)
 	require.ErrorContains(t, err, "id 1")
+}
+
+func TestRemovePartitionSpecsNoMatchDoesNotUpdate(t *testing.T) {
+	builder := builderWithoutChanges(2)
+
+	require.NoError(t, builder.RemovePartitionSpecs([]int{99, 100}))
+	require.Empty(t, builder.updates)
+	require.Len(t, builder.specs, 1)
+}
+
+func TestRemovePartitionSpecsEmptyDoesNotUpdate(t *testing.T) {
+	builder := builderWithoutChanges(2)
+
+	require.NoError(t, builder.RemovePartitionSpecs(nil))
+	require.Empty(t, builder.updates)
+	require.Len(t, builder.specs, 1)
 }
 
 func TestSetDefaultPartitionSpec(t *testing.T) {
@@ -1060,7 +1077,7 @@ func TestRemoveSchemas(t *testing.T) {
 	require.Len(t, meta.Schemas(), 2, "expected 2 schemas in the metadata")
 	builder, err := MetadataBuilderFromBase(meta, "")
 	require.NoError(t, err)
-	err = builder.RemoveSchemas([]int{0})
+	err = builder.RemoveSchemas([]int{0, 99})
 	require.NoError(t, err, "expected to remove schema with ID 1")
 	newMeta, err := builder.Build()
 	require.NoError(t, err)
@@ -1070,6 +1087,17 @@ func TestRemoveSchemas(t *testing.T) {
 	require.Len(t, builder.updates, 1, "expected one update for schema removal")
 	require.Equal(t, builder.updates[0].Action(), UpdateRemoveSchemas)
 	require.Equal(t, builder.updates[0].(*removeSchemasUpdate).SchemaIDs, []int{0}, "expected schema ID 0 to be removed")
+}
+
+func TestRemoveSchemasNoMatchDoesNotUpdate(t *testing.T) {
+	meta, err := getTestTableMetadata("TableMetadataV2Valid.json")
+	require.NoError(t, err)
+
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	require.NoError(t, builder.RemoveSchemas([]int{99, 100}))
+	require.Empty(t, builder.updates)
+	require.Len(t, builder.schemaList, 2)
 }
 
 // Java: TestTableMetadata.testUpdateSchema

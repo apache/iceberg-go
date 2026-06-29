@@ -65,6 +65,10 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 				continue
 			}
 
+			if len(d.EqualityFieldIDs()) == 0 {
+				return nil, fmt.Errorf("%w: equality delete file %s", ErrEmptyEqualityFieldIDs, d.FilePath())
+			}
+
 			hasAny = true
 			if _, ok := uniqueDeletes[d.FilePath()]; !ok {
 				uniqueDeletes[d.FilePath()] = deleteFileInfo{
@@ -353,6 +357,30 @@ func processEqualityDeletes(ctx context.Context, eqDeleteSets []*equalityDeleteS
 // to avoid per-row type switches.
 type colEncoder func(buf *bytes.Buffer, row int)
 
+func writeNullTagIfNull(buf *bytes.Buffer, arr arrow.Array, row int) bool {
+	if arr.IsNull(row) {
+		buf.WriteByte(0)
+
+		return true
+	}
+
+	return false
+}
+
+func withNullGuard(arr arrow.Array, enc colEncoder) colEncoder {
+	if arr.NullN() == 0 {
+		return enc
+	}
+
+	return func(buf *bytes.Buffer, row int) {
+		if writeNullTagIfNull(buf, arr, row) {
+			return
+		}
+
+		enc(buf, row)
+	}
+}
+
 // makeColEncoder returns a colEncoder for the given Arrow array that writes
 // values directly from the raw typed backing slice when possible.
 func makeColEncoder(arr arrow.Array) colEncoder {
@@ -360,175 +388,139 @@ func makeColEncoder(arr arrow.Array) colEncoder {
 	case *array.Int8:
 		vals := a.Int8Values()
 
-		return func(buf *bytes.Buffer, row int) {
+		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
 			buf.WriteByte(byte(vals[row]))
-		}
+		})
 	case *array.Int16:
 		vals := a.Int16Values()
 
-		return func(buf *bytes.Buffer, row int) {
+		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
 			bufPutUint16(buf, uint16(vals[row]))
-		}
+		})
 	case *array.Int32:
 		vals := a.Int32Values()
 
-		return func(buf *bytes.Buffer, row int) {
+		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
 			bufPutUint32(buf, uint32(vals[row]))
-		}
+		})
 	case *array.Int64:
 		vals := a.Int64Values()
 
-		return func(buf *bytes.Buffer, row int) {
+		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
 			bufPutUint64(buf, uint64(vals[row]))
-		}
+		})
 	case *array.Float32:
 		vals := a.Float32Values()
 
-		return func(buf *bytes.Buffer, row int) {
+		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
 			bufPutUint32(buf, math.Float32bits(vals[row]))
-		}
+		})
 	case *array.Float64:
 		vals := a.Float64Values()
 
-		return func(buf *bytes.Buffer, row int) {
+		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
 			bufPutUint64(buf, math.Float64bits(vals[row]))
-		}
+		})
 	case *array.Date32:
 		vals := a.Date32Values()
 
-		return func(buf *bytes.Buffer, row int) {
+		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
 			bufPutUint32(buf, uint32(vals[row]))
-		}
+		})
 	case *array.Date64:
 		vals := a.Date64Values()
 
-		return func(buf *bytes.Buffer, row int) {
+		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
 			bufPutUint64(buf, uint64(vals[row]))
-		}
+		})
 	case *array.Time32:
 		vals := a.Time32Values()
 
-		return func(buf *bytes.Buffer, row int) {
+		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
 			bufPutUint32(buf, uint32(vals[row]))
-		}
+		})
 	case *array.Time64:
 		vals := a.Time64Values()
 
-		return func(buf *bytes.Buffer, row int) {
+		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
 			bufPutUint64(buf, uint64(vals[row]))
-		}
+		})
 	case *array.Timestamp:
 		vals := a.TimestampValues()
 
-		return func(buf *bytes.Buffer, row int) {
+		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
 			bufPutUint64(buf, uint64(vals[row]))
-		}
+		})
 	case *array.String:
 		offsets := a.ValueOffsets()
 
 		rawBytes := a.ValueBytes()
 
-		return func(buf *bytes.Buffer, row int) {
-			if a.IsNull(row) {
-				buf.WriteByte(0)
-
-				return
-			}
-
+		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
 			start, end := offsets[row], offsets[row+1]
 			bufPutUint32(buf, uint32(end-start))
 			buf.Write(rawBytes[start:end])
-		}
+		})
 	case *array.LargeString:
 		offsets := a.ValueOffsets()
 		rawBytes := a.ValueBytes()
 
-		return func(buf *bytes.Buffer, row int) {
-			if a.IsNull(row) {
-				buf.WriteByte(0)
-
-				return
-			}
-
+		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
 			start, end := offsets[row], offsets[row+1]
 			bufPutUint32(buf, uint32(end-start))
 			buf.Write(rawBytes[start:end])
-		}
+		})
 	case *array.Binary:
 		offsets := a.ValueOffsets()
 		rawBytes := a.ValueBytes()
 
-		return func(buf *bytes.Buffer, row int) {
-			if a.IsNull(row) {
-				buf.WriteByte(0)
-
-				return
-			}
-
+		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
 			start, end := offsets[row], offsets[row+1]
 			bufPutUint32(buf, uint32(end-start))
 			buf.Write(rawBytes[start:end])
-		}
+		})
 	case *array.LargeBinary:
 		offsets := a.ValueOffsets()
 		rawBytes := a.ValueBytes()
 
-		return func(buf *bytes.Buffer, row int) {
-			if a.IsNull(row) {
-				buf.WriteByte(0)
-
-				return
-			}
-
+		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
 			start, end := offsets[row], offsets[row+1]
 			bufPutUint32(buf, uint32(end-start))
 			buf.Write(rawBytes[start:end])
-		}
+		})
 	case *array.Boolean:
-		return func(buf *bytes.Buffer, row int) {
-			if a.IsNull(row) {
-				buf.WriteByte(0)
-
-				return
-			}
-
+		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
 			if a.Value(row) {
 				buf.WriteByte(1)
 			} else {
 				buf.WriteByte(0)
 			}
-		}
+		})
 	case *array.FixedSizeBinary:
-		return func(buf *bytes.Buffer, row int) {
-			if a.IsNull(row) {
-				buf.WriteByte(0)
-
-				return
-			}
-
+		return withNullGuard(a, func(buf *bytes.Buffer, row int) {
 			buf.WriteByte(1)
 			buf.Write(a.Value(row))
-		}
+		})
 	default:
-		return func(buf *bytes.Buffer, row int) {
+		return withNullGuard(arr, func(buf *bytes.Buffer, row int) {
 			encodeArrowValue(buf, arr, row)
-		}
+		})
 	}
 }
 

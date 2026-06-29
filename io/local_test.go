@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -87,6 +88,54 @@ func TestLocalFSWalkDirWithFileScheme(t *testing.T) {
 	assert.Equal(t, []string{filepath.Join(dir, "test.txt")}, files)
 }
 
+func TestLocalFSWriteFileCreatesParentDirectories(t *testing.T) {
+	dir := t.TempDir()
+	content := []byte("content")
+
+	for _, tt := range []struct {
+		name string
+		path string
+	}{
+		{
+			name: "plain path",
+			path: filepath.Join(dir, "plain", "nested", "file.txt"),
+		},
+		{
+			name: "file scheme",
+			path: "file://" + filepath.Join(dir, "scheme", "nested", "file.txt"),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoError(t, LocalFS{}.WriteFile(tt.path, content))
+
+			got, err := os.ReadFile(strings.TrimPrefix(tt.path, "file://"))
+			require.NoError(t, err)
+			assert.Equal(t, content, got)
+		})
+	}
+}
+
 func TestLocalFSImplementsListableIO(t *testing.T) {
 	var _ ListableIO = LocalFS{}
+}
+
+func TestLocalFSRenameNoReplaceDoesNotOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	dst := filepath.Join(dir, "dst")
+
+	require.NoError(t, os.WriteFile(src, []byte("new"), 0o644))
+	require.NoError(t, os.WriteFile(dst, []byte("old"), 0o644))
+
+	err := LocalFS{}.RenameNoReplace(src, dst)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, fs.ErrExist)
+
+	data, err := os.ReadFile(dst)
+	require.NoError(t, err)
+	assert.Equal(t, "old", string(data))
+
+	data, err = os.ReadFile(src)
+	require.NoError(t, err)
+	assert.Equal(t, "new", string(data))
 }

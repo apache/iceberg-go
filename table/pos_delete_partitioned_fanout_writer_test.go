@@ -187,7 +187,7 @@ func TestPositionDeletePartitionedFanoutWriterPartitionPathIsDeterministic(t *te
 
 	metadataBuilder, err := NewMetadataBuilder(2)
 	require.NoError(t, err)
-	err = metadataBuilder.AddSchema(iceberg.PositionalDeleteSchema)
+	err = metadataBuilder.AddSchema(clonePositionalDeleteSchema())
 	require.NoError(t, err)
 	err = metadataBuilder.SetCurrentSchemaID(0)
 	require.NoError(t, err)
@@ -672,7 +672,7 @@ func TestPositionDeleteUnpartitionedSortOrderID(t *testing.T) {
 
 	metadataBuilder, err := NewMetadataBuilder(2)
 	require.NoError(t, err)
-	require.NoError(t, metadataBuilder.AddSchema(iceberg.PositionalDeleteSchema))
+	require.NoError(t, metadataBuilder.AddSchema(clonePositionalDeleteSchema()))
 	require.NoError(t, metadataBuilder.SetCurrentSchemaID(0))
 	unpartitioned := *iceberg.UnpartitionedSpec
 	require.NoError(t, metadataBuilder.AddPartitionSpec(&unpartitioned, true))

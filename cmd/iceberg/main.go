@@ -202,6 +202,7 @@ type Args struct {
 	Warehouse   string `arg:"--warehouse" help:"warehouse to use"`
 	Scope       string `arg:"--scope" default:"catalog" help:"OAuth scope"`
 	Config      string `arg:"--config" help:"path to configuration file"`
+	AwsProfile  string `arg:"--aws-profile" help:"AWS profile to use (Glue catalog)"`
 
 	RestOptions *config.RestOptions `arg:"-"`
 }
@@ -379,7 +380,12 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 			log.Fatal(err)
 		}
 	case catalog.Glue:
-		awscfg, err := awsconfig.LoadDefaultConfig(ctx)
+		var awsLoadOpts []func(*awsconfig.LoadOptions) error
+		if args.AwsProfile != "" {
+			awsLoadOpts = append(awsLoadOpts, awsconfig.WithSharedConfigProfile(args.AwsProfile))
+		}
+
+		awscfg, err := awsconfig.LoadDefaultConfig(ctx, awsLoadOpts...)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -808,6 +814,10 @@ func mergeConf(fileConf *config.CatalogConfig, args *Args, explicitFlags map[str
 
 	if !explicitFlags["warehouse"] && len(fileConf.Warehouse) > 0 {
 		args.Warehouse = fileConf.Warehouse
+	}
+
+	if !explicitFlags["aws-profile"] && len(fileConf.AwsProfile) > 0 {
+		args.AwsProfile = fileConf.AwsProfile
 	}
 
 	if fileConf.RestOptions != nil {

@@ -25,7 +25,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.7.0
 	github.com/RoaringBitmap/roaring/v2 v2.18.2
 	github.com/alexflint/go-arg v1.6.1
-	github.com/apache/arrow-go/v18 v18.6.1-0.20260608200437-88561cf0d192
+	github.com/apache/arrow-go/v18 v18.6.1-0.20260623163317-4a540f514484
 	github.com/aws/aws-sdk-go-v2 v1.42.0
 	github.com/aws/aws-sdk-go-v2/config v1.32.25
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.24
@@ -276,9 +276,9 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gotest.tools/v3 v3.5.2 // indirect
-	modernc.org/libc v1.72.3 // indirect
+	modernc.org/libc v1.73.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.52.0 // indirect
+	modernc.org/sqlite v1.53.0 // indirect
 	tags.cncf.io/container-device-interface v1.1.0 // indirect
 )

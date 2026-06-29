@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -36,51 +37,44 @@ import (
 	"github.com/twmb/murmur3"
 )
 
+var (
+	bucketTransformRegex   = regexp.MustCompile(`^bucket\[(\d+)\]$`)
+	truncateTransformRegex = regexp.MustCompile(`^truncate\[(\d+)\]$`)
+)
+
 // ParseTransform takes the string representation of a transform as
 // defined in the iceberg spec, and produces the appropriate Transform
 // object or an error if the string is not a valid transform string.
 func ParseTransform(s string) (Transform, error) {
 	s = strings.ToLower(s)
-	switch {
-	case strings.HasPrefix(s, "bucket"):
-		matches := regexFromBrackets.FindStringSubmatch(s)
-		if len(matches) != 2 {
-			break
-		}
 
+	if matches := bucketTransformRegex.FindStringSubmatch(s); len(matches) == 2 {
 		n, err := strconv.Atoi(matches[1])
-		if err != nil || n <= 0 || n > math.MaxInt32 {
-			break
+		if err == nil && n > 0 && n <= math.MaxInt32 {
+			return BucketTransform{NumBuckets: n}, nil
 		}
+	}
 
-		return BucketTransform{NumBuckets: n}, nil
-	case strings.HasPrefix(s, "truncate"):
-		matches := regexFromBrackets.FindStringSubmatch(s)
-		if len(matches) != 2 {
-			break
-		}
-
+	if matches := truncateTransformRegex.FindStringSubmatch(s); len(matches) == 2 {
 		n, err := strconv.Atoi(matches[1])
-		if err != nil || n <= 0 || n > math.MaxInt32 {
-			break
+		if err == nil && n > 0 && n <= math.MaxInt32 {
+			return TruncateTransform{Width: n}, nil
 		}
+	}
 
-		return TruncateTransform{Width: n}, nil
-	default:
-		switch s {
-		case "identity":
-			return IdentityTransform{}, nil
-		case "void":
-			return VoidTransform{}, nil
-		case "year":
-			return YearTransform{}, nil
-		case "month":
-			return MonthTransform{}, nil
-		case "day":
-			return DayTransform{}, nil
-		case "hour":
-			return HourTransform{}, nil
-		}
+	switch s {
+	case "identity":
+		return IdentityTransform{}, nil
+	case "void":
+		return VoidTransform{}, nil
+	case "year":
+		return YearTransform{}, nil
+	case "month":
+		return MonthTransform{}, nil
+	case "day":
+		return DayTransform{}, nil
+	case "hour":
+		return HourTransform{}, nil
 	}
 
 	return nil, fmt.Errorf("%w: %s", ErrInvalidTransform, s)

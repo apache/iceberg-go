@@ -75,6 +75,23 @@ func (p Properties) GetInt(key string, defVal int) int {
 	return defVal
 }
 
+// GetInt64 reads a 64-bit integer property by key. A missing key or an
+// unparseable value returns defVal. Unlike GetInt, this avoids truncating
+// large int64 sentinel values (such as math.MaxInt64) on 32-bit platforms
+// where int is only 32 bits wide.
+func (p Properties) GetInt64(key string, defVal int64) int64 {
+	if v, ok := p[key]; ok {
+		i, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return defVal
+		}
+
+		return i
+	}
+
+	return defVal
+}
+
 // PropUInt reads an unsigned-integer property by key. A missing key,
 // an unparseable value, or a negative value returns defVal — PropUInt
 // uses strconv.ParseUint, which rejects negatives rather than silently
