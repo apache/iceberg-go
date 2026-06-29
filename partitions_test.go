@@ -29,6 +29,7 @@ import (
 
 type nonComparableTransform struct {
 	iceberg.IdentityTransform
+	// values makes this transform non-comparable, which would have panicked with ==.
 	values []int
 }
 
@@ -87,16 +88,10 @@ func TestPartitionSpecCompatibleWithUsesTransformEquals(t *testing.T) {
 		Transform: nonComparableTransform{values: []int{2, 3}},
 	})
 
-	var compatible bool
 	require.NotPanics(t, func() {
-		compatible = spec.CompatibleWith(&sameTransformSpec)
+		assert.True(t, spec.CompatibleWith(&sameTransformSpec))
+		assert.False(t, spec.CompatibleWith(&differentTransformSpec))
 	})
-	assert.True(t, compatible)
-
-	require.NotPanics(t, func() {
-		compatible = spec.CompatibleWith(&differentTransformSpec)
-	})
-	assert.False(t, compatible)
 
 	tests := []struct {
 		name       string
