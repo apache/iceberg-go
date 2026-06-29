@@ -836,7 +836,15 @@ func (c *Catalog) LoadNamespaceProperties(_ context.Context, ns table.Identifier
 		return nil, fmt.Errorf("hadoop catalog: failed to stat namespace: %w", err)
 	}
 
-	loc := (&url.URL{Scheme: "file", Path: path}).String()
+	var loc string
+	if c.isLocal {
+		loc = (&url.URL{Scheme: "file", Path: path}).String()
+	} else {
+		// the path variable contains the proper scheme
+		// already if it is not a local file, so we can
+		// use it directly
+		loc = path
+	}
 
 	return iceberg.Properties{"location": loc}, nil
 }
