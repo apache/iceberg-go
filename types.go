@@ -455,9 +455,6 @@ func (l *ListType) UnmarshalJSON(b []byte) error {
 	if aux.ID == nil {
 		return fmt.Errorf("%w: field is missing required 'element-id' key in JSON", ErrInvalidSchema)
 	}
-	if *aux.ID == 0 {
-		return fmt.Errorf("%w: field 'element-id' must not be 0", ErrInvalidSchema)
-	}
 
 	l.ElementID = *aux.ID
 	l.Element = aux.Elem.Type
@@ -544,14 +541,9 @@ func (m *MapType) UnmarshalJSON(b []byte) error {
 	if aux.KeyID == nil {
 		return fmt.Errorf("%w: field is missing required 'key-id' key in JSON", ErrInvalidSchema)
 	}
-	if *aux.KeyID == 0 {
-		return fmt.Errorf("%w: field 'key-id' must not be 0", ErrInvalidSchema)
-	}
+
 	if aux.ValueID == nil {
 		return fmt.Errorf("%w: field is missing required 'value-id' key in JSON", ErrInvalidSchema)
-	}
-	if *aux.ValueID == 0 {
-		return fmt.Errorf("%w: field 'value-id' must not be 0", ErrInvalidSchema)
 	}
 
 	m.KeyID, m.KeyType = *aux.KeyID, aux.Key.Type
