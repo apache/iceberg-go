@@ -2322,13 +2322,23 @@ func TestSetUUIDRejectsNil(t *testing.T) {
 	originalUUID := builder.uuid
 
 	err := builder.SetUUID(uuid.Nil)
-	require.ErrorContains(t, err, "cannot set uuid to null")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	require.False(t, builder.HasChanges())
 	require.Equal(t, originalUUID, builder.uuid)
 
 	meta, err := builder.Build()
 	require.NoError(t, err)
 	require.Equal(t, originalUUID, meta.TableUUID())
+}
+
+func TestNewMetadataWithUUIDGeneratesUUIDForNil(t *testing.T) {
+	tableSchema := schema()
+	partSpec := partitionSpec()
+	order := sortOrder()
+
+	meta, err := NewMetadataWithUUID(&tableSchema, &partSpec, order, "s3://bucket/test/location", nil, uuid.Nil)
+	require.NoError(t, err)
+	require.NotEqual(t, uuid.Nil, meta.TableUUID())
 }
 
 func TestSetFormatVersionDowngradeNotAllowed(t *testing.T) {

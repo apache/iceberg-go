@@ -904,7 +904,7 @@ func (b *MetadataBuilder) RemoveSnapshotRef(name string) error {
 
 func (b *MetadataBuilder) SetUUID(newUUID uuid.UUID) error {
 	if newUUID == uuid.Nil {
-		return errors.New("cannot set uuid to null")
+		return fmt.Errorf("%w: cannot set uuid to nil", iceberg.ErrInvalidArgument)
 	}
 
 	if b.uuid == newUUID {
