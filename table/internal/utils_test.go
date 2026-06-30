@@ -209,3 +209,37 @@ func TestPartitionValue_MismatchPanics(t *testing.T) {
 
 	assert.Panics(t, func() { stats.PartitionValue(partitionField, schema) })
 }
+
+func TestToDataFile_ReferencedDataFile(t *testing.T) {
+	const ref = "s3://bucket/data/data-001.parquet"
+	stats := &internal.DataFileStatistics{RecordCount: 2}
+	refPtr := ref
+
+	t.Run("position delete records referenced data file", func(t *testing.T) {
+		df := stats.ToDataFile(internal.DataFileOpts{
+			Schema:             iceberg.PositionalDeleteSchema,
+			Spec:               *iceberg.UnpartitionedSpec,
+			Path:               "s3://bucket/data/pos-del.parquet",
+			Format:             iceberg.ParquetFile,
+			Content:            iceberg.EntryContentPosDeletes,
+			FileSize:           1024,
+			ReferencedDataFile: &refPtr,
+		})
+		require.NotNil(t, df.ReferencedDataFile())
+		assert.Equal(t, ref, *df.ReferencedDataFile())
+	})
+
+	t.Run("data content ignores referenced data file", func(t *testing.T) {
+		df := stats.ToDataFile(internal.DataFileOpts{
+			Schema:             iceberg.PositionalDeleteSchema,
+			Spec:               *iceberg.UnpartitionedSpec,
+			Path:               "s3://bucket/data/data.parquet",
+			Format:             iceberg.ParquetFile,
+			Content:            iceberg.EntryContentData,
+			FileSize:           1024,
+			ReferencedDataFile: &refPtr,
+		})
+		assert.Nil(t, df.ReferencedDataFile(),
+			"ToDataFile must ignore ReferencedDataFile for non-position-delete content")
+	})
+}

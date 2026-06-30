@@ -333,6 +333,129 @@ func TestDataFileFromMetadata_FirstRowID(t *testing.T) {
 	assert.Equal(t, firstRowID, *df.FirstRowID())
 }
 
+func TestDataFileFromMetadata_VoidPartitionAllowsNil(t *testing.T) {
+	pqBytes, pqMeta := parquetMetaFromSchema(t, dataSchema, dataRows)
+
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   1000,
+		Name:      "id_void",
+		Transform: iceberg.VoidTransform{},
+	})
+
+	df, err := table.DataFileFromMetadata(table.DataFileArgs{
+		Schema:          dataSchema,
+		Spec:            spec,
+		Format:          iceberg.ParquetFile,
+		Metadata:        pqMeta,
+		FilePath:        "s3://bucket/data/void.parquet",
+		FileSize:        int64(len(pqBytes)),
+		Content:         iceberg.EntryContentData,
+		PartitionValues: map[int]any{1000: nil},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, df)
+
+	part := df.Partition()
+	require.Contains(t, part, 1000, "void partition field must be recorded on the DataFile")
+	assert.Nil(t, part[1000], "void transform partition value must be nil")
+}
+
+func TestDataFileFromMetadata_NilPartitionValueInferredFromStats(t *testing.T) {
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   1000,
+		Name:      "id",
+		Transform: iceberg.IdentityTransform{},
+	})
+
+	t.Run("single-valued column infers the partition value", func(t *testing.T) {
+		pqBytes, pqMeta := parquetMetaFromSchema(t, dataSchema, `[
+			{"id": 7, "name": "alpha"},
+			{"id": 7, "name": "beta"}
+		]`)
+
+		df, err := table.DataFileFromMetadata(table.DataFileArgs{
+			Schema:          dataSchema,
+			Spec:            spec,
+			Format:          iceberg.ParquetFile,
+			Metadata:        pqMeta,
+			FilePath:        "s3://bucket/data/id=7/inferred.parquet",
+			FileSize:        int64(len(pqBytes)),
+			Content:         iceberg.EntryContentData,
+			PartitionValues: map[int]any{1000: nil},
+		})
+		require.NoError(t, err)
+		assert.EqualValues(t, 7, df.Partition()[1000],
+			"a nil partition value must be inferred from the file's column statistics when the column is single-valued")
+	})
+
+	t.Run("multi-valued column cannot infer and errors", func(t *testing.T) {
+		pqBytes, pqMeta := parquetMetaFromSchema(t, dataSchema, `[
+			{"id": 1, "name": "alpha"},
+			{"id": 9, "name": "beta"}
+		]`)
+
+		df, err := table.DataFileFromMetadata(table.DataFileArgs{
+			Schema:          dataSchema,
+			Spec:            spec,
+			Format:          iceberg.ParquetFile,
+			Metadata:        pqMeta,
+			FilePath:        "s3://bucket/data/range.parquet",
+			FileSize:        int64(len(pqBytes)),
+			Content:         iceberg.EntryContentData,
+			PartitionValues: map[int]any{1000: nil},
+		})
+		require.Nil(t, df, "no DataFile must be returned when inference is ambiguous")
+		require.ErrorContains(t, err, "cannot infer partition value")
+	})
+}
+
+func TestDataFileFromMetadata_ReferencedDataFile(t *testing.T) {
+	const dataPath = "s3://bucket/data/data-001.parquet"
+
+	_, fileScopedMeta := parquetMetaFromSchema(t, iceberg.PositionalDeleteSchema,
+		`[{"file_path": "`+dataPath+`", "pos": 0},
+		  {"file_path": "`+dataPath+`", "pos": 5}]`)
+
+	_, partitionScopedMeta := parquetMetaFromSchema(t, iceberg.PositionalDeleteSchema,
+		`[{"file_path": "`+dataPath+`", "pos": 0},
+		  {"file_path": "s3://bucket/data/data-002.parquet", "pos": 3}]`)
+
+	t.Run("file-scoped sets referenced_data_file", func(t *testing.T) {
+		ref := dataPath
+		df, err := table.DataFileFromMetadata(table.DataFileArgs{
+			Schema:             iceberg.PositionalDeleteSchema,
+			Spec:               iceberg.NewPartitionSpec(),
+			Format:             iceberg.ParquetFile,
+			Metadata:           fileScopedMeta,
+			FilePath:           "s3://bucket/data/pos-del-001.parquet",
+			FileSize:           1024,
+			Content:            iceberg.EntryContentPosDeletes,
+			ReferencedDataFile: &ref,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, df.ReferencedDataFile())
+		assert.Equal(t, dataPath, *df.ReferencedDataFile())
+	})
+
+	t.Run("partition-scoped leaves referenced_data_file nil", func(t *testing.T) {
+		df, err := table.DataFileFromMetadata(table.DataFileArgs{
+			Schema:   iceberg.PositionalDeleteSchema,
+			Spec:     iceberg.NewPartitionSpec(),
+			Format:   iceberg.ParquetFile,
+			Metadata: partitionScopedMeta,
+			FilePath: "s3://bucket/data/pos-del-002.parquet",
+			FileSize: 1024,
+			Content:  iceberg.EntryContentPosDeletes,
+			// ReferencedDataFile intentionally nil.
+		})
+		require.NoError(t, err)
+		assert.Nil(t, df.ReferencedDataFile(),
+			"a partition-scoped position delete must not record a referenced data file")
+	})
+}
+
 func TestDataFileFromMetadata_Errors(t *testing.T) {
 	pqBytes, pqMeta := parquetMetaFromSchema(t, dataSchema, dataRows)
 	baseSize := int64(len(pqBytes))
@@ -447,6 +570,13 @@ func TestDataFileFromMetadata_Errors(t *testing.T) {
 			wantSub: "field id 1001",
 		},
 		{
+			name: "partition values supplied for an unpartitioned spec",
+			mutate: func(a *table.DataFileArgs) {
+				a.PartitionValues = map[int]any{1000: int32(7)}
+			},
+			wantSub: "partition values supplied for an unpartitioned spec",
+		},
+		{
 			name: "FirstRowID set on an equality-delete file",
 			mutate: func(a *table.DataFileArgs) {
 				a.Content = iceberg.EntryContentEqDeletes
@@ -455,6 +585,27 @@ func TestDataFileFromMetadata_Errors(t *testing.T) {
 				a.FirstRowID = &v
 			},
 			wantSub: "FirstRowID must be nil for delete files",
+		},
+		{
+			name: "ReferencedDataFile set on a data file",
+			mutate: func(a *table.DataFileArgs) {
+				ref := "s3://bucket/data/data-001.parquet"
+				a.ReferencedDataFile = &ref
+			},
+			wantSub: "ReferencedDataFile may only be set for position-delete files",
+		},
+		{
+			name: "ReferencedDataFile empty on a positional-delete file",
+			mutate: func(a *table.DataFileArgs) {
+				a.Schema = iceberg.PositionalDeleteSchema
+				a.Content = iceberg.EntryContentPosDeletes
+				_, posMeta := parquetMetaFromSchema(t, iceberg.PositionalDeleteSchema,
+					`[{"file_path": "s3://b/d.parquet", "pos": 0}]`)
+				a.Metadata = posMeta
+				empty := ""
+				a.ReferencedDataFile = &empty
+			},
+			wantSub: "ReferencedDataFile must be non-empty when set",
 		},
 		{
 			name: "equality field id points to a non-primitive field",
