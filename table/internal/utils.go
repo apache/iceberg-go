@@ -253,7 +253,7 @@ type DataFileOpts struct {
 	SortOrderID int
 	// FirstRowID is honored only for EntryContentData; the spec requires it to
 	// be null for delete files.
-	FirstRowID *int64
+	FirstRowID         *int64
 	ReferencedDataFile *string
 }
 
