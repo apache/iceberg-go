@@ -67,17 +67,22 @@ func TestLoadRegisteredCatalogRejectsInvalidAuthURL(t *testing.T) {
 		{
 			name:    "missing scheme",
 			authURL: "example.com/auth",
-			wantErr: "missing scheme or host",
+			wantErr: "missing scheme",
 		},
 		{
-			name:    "missing host",
+			name:    "scheme and opaque value with no host",
 			authURL: "localhost:8080",
-			wantErr: "missing scheme or host",
+			wantErr: "missing host",
+		},
+		{
+			name:    "scheme with empty host",
+			authURL: "http:///path",
+			wantErr: "missing host",
 		},
 		{
 			name:    "empty URL",
 			authURL: "",
-			wantErr: "missing scheme or host",
+			wantErr: "missing scheme",
 		},
 	}
 
@@ -94,6 +99,49 @@ func TestLoadRegisteredCatalogRejectsInvalidAuthURL(t *testing.T) {
 			assert.ErrorContains(t, err, tt.wantErr)
 		})
 	}
+}
+
+func TestLoadRegisteredCatalogAcceptsValidAuthURL(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	var oauthCalled atomic.Bool
+	mux.HandleFunc("/auth-token-url", func(w http.ResponseWriter, req *http.Request) {
+		oauthCalled.Store(true)
+		assert.Equal(t, http.MethodPost, req.Method)
+
+		require.NoError(t, req.ParseForm())
+		assert.Equal(t, "client", req.PostForm.Get("client_id"))
+		assert.Equal(t, "secret", req.PostForm.Get("client_secret"))
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "some_jwt_token",
+			"token_type":   "Bearer",
+			"expires_in":   86400,
+		})
+	})
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{}, "overrides": map[string]any{},
+		})
+	})
+
+	authURL := srv.URL + "/auth-token-url"
+	cat, err := catalog.Load(context.Background(), "rest", iceberg.Properties{
+		"uri":              srv.URL,
+		keyAuthUrl:         authURL,
+		keyOauthCredential: "client:secret",
+	})
+	require.NoError(t, err)
+	require.True(t, oauthCalled.Load())
+
+	restCat, ok := cat.(*Catalog)
+	require.True(t, ok)
+	assert.Equal(t, authURL, restCat.props[keyAuthUrl])
 }
 
 func TestNewCatalogRejectsInvalidAuthURLFromConfig(t *testing.T) {
@@ -115,7 +163,7 @@ func TestNewCatalogRejectsInvalidAuthURLFromConfig(t *testing.T) {
 			name:    "scheme-less URL in overrides",
 			section: "overrides",
 			authURL: "example.com/auth",
-			wantErr: "missing scheme or host",
+			wantErr: "missing scheme",
 		},
 	}
 
@@ -149,6 +197,26 @@ func TestNewCatalogRejectsInvalidAuthURLFromConfig(t *testing.T) {
 			assert.ErrorContains(t, err, tt.wantErr)
 		})
 	}
+}
+
+func TestNewCatalogAcceptsValidAuthURLFromConfig(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	authURL := "https://auth.example.com/oauth/token"
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults":  map[string]any{},
+			"overrides": map[string]any{keyAuthUrl: authURL},
+		})
+	})
+
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL)
+	require.NoError(t, err)
+	assert.Equal(t, authURL, cat.props[keyAuthUrl])
 }
 
 func TestTokenAuthenticationPriority(t *testing.T) {

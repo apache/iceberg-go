@@ -449,14 +449,6 @@ func handleNon200(rsp *http.Response, override map[int]error) error {
 }
 
 func fromProps(props iceberg.Properties, o *options) error {
-	if v, ok := props[keyAuthUrl]; ok {
-		u, err := parseAuthURL(v)
-		if err != nil {
-			return err
-		}
-		o.authUri = u
-	}
-
 	for k, v := range props {
 		switch k {
 		case keyWarehouseLocation:
@@ -470,6 +462,11 @@ func fromProps(props iceberg.Properties, o *options) error {
 		case keyRestSigV4Service:
 			o.sigv4Service = v
 		case keyAuthUrl:
+			u, err := parseAuthURL(v)
+			if err != nil {
+				return err
+			}
+			o.authUri = u
 		case keyOauthCredential:
 			o.credential = v
 		case keyScope:
@@ -508,8 +505,11 @@ func parseAuthURL(raw string) (*url.URL, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid %s %q: %w", keyAuthUrl, raw, err)
 	}
-	if u.Scheme == "" || u.Host == "" {
-		return nil, fmt.Errorf("invalid %s %q: missing scheme or host", keyAuthUrl, raw)
+	if u.Scheme == "" {
+		return nil, fmt.Errorf("invalid %s %q: missing scheme", keyAuthUrl, raw)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("invalid %s %q: missing host", keyAuthUrl, raw)
 	}
 
 	return u, nil
