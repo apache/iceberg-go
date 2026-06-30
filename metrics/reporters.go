@@ -19,6 +19,7 @@ package metrics
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 )
@@ -36,18 +37,15 @@ func (NopReporter) Report(context.Context, MetricsReport) {}
 // LoggingReporter is a [Reporter] that logs each report via an [slog.Logger]. It
 // is a convenient default for development and debugging.
 type LoggingReporter struct {
-	logger *slog.Logger
+	logger *slog.Logger // nil means resolve slog.Default at call time
 }
 
 var _ Reporter = (*LoggingReporter)(nil)
 
 // NewLoggingReporter returns a [LoggingReporter] that logs to logger. If logger
-// is nil, [slog.Default] is used.
+// is nil, [slog.Default] is resolved at each Report call, so a later
+// [slog.SetDefault] is honored rather than snapshotted at construction.
 func NewLoggingReporter(logger *slog.Logger) *LoggingReporter {
-	if logger == nil {
-		logger = slog.Default()
-	}
-
 	return &LoggingReporter{logger: logger}
 }
 
@@ -56,7 +54,11 @@ func (r *LoggingReporter) Report(ctx context.Context, report MetricsReport) {
 	if report == nil {
 		return
 	}
-	r.logger.InfoContext(ctx, "iceberg metrics report", "report", report)
+	logger := r.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.InfoContext(ctx, "iceberg metrics report", "report", report)
 }
 
 // InMemoryReporter is a [Reporter] that retains every report it receives. It is
@@ -97,14 +99,17 @@ func (r *InMemoryReporter) Reset() {
 // reporters in order. nil reporters are skipped. A panic in one reporter must
 // not prevent the others from receiving the report, so each call is isolated;
 // in keeping with the [Reporter] contract a misbehaving reporter never affects
-// the observed operation. A recovered panic is logged at debug level via
-// [slog.Default] so a broken reporter is not entirely invisible.
+// the observed operation. A recovered panic is logged (with the reporter type)
+// at warn level via [slog.Default] so a broken reporter is not silently
+// swallowed.
 //
-// As a convenience, Combine with no reporters returns [NopReporter], and with a
-// single non-nil reporter returns that reporter directly. The per-reporter
-// panic recovery therefore applies only when two or more reporters are
-// combined: a lone reporter is returned unwrapped and runs exactly as it would
-// if called directly, without the safety net.
+// As a convenience, Combine with no non-nil reporters returns [NopReporter].
+// Otherwise every reporter — even a lone one — is wrapped so it receives the
+// per-reporter panic isolation the contract advertises. Wrapping a single
+// reporter also closes a typed-nil hole: a concrete nil pointer (e.g.
+// (*LoggingReporter)(nil)) is a non-nil interface, so it passes the nil filter;
+// returning it unwrapped would let its eventual Report nil-deref escape with no
+// recover to catch it.
 func Combine(reporters ...Reporter) Reporter {
 	nonNil := make([]Reporter, 0, len(reporters))
 	for _, r := range reporters {
@@ -113,26 +118,37 @@ func Combine(reporters ...Reporter) Reporter {
 		}
 	}
 
-	switch len(nonNil) {
-	case 0:
+	if len(nonNil) == 0 {
 		return NopReporter{}
-	case 1:
-		return nonNil[0]
-	default:
-		return compositeReporter(nonNil)
 	}
+
+	return &compositeReporter{reporters: nonNil}
 }
 
-type compositeReporter []Reporter
+// compositeReporter fans a report out to several reporters, isolating each from
+// the others' panics.
+type compositeReporter struct {
+	reporters []Reporter
+	logger    *slog.Logger // nil means resolve slog.Default at call time
+}
 
-func (c compositeReporter) Report(ctx context.Context, report MetricsReport) {
-	for _, r := range c {
+var _ Reporter = (*compositeReporter)(nil)
+
+func (c *compositeReporter) Report(ctx context.Context, report MetricsReport) {
+	for _, r := range c.reporters {
 		func() {
 			defer func() {
 				if v := recover(); v != nil {
 					// Swallow per the Reporter contract, but surface the
-					// failure at debug level so a broken reporter is traceable.
-					slog.Default().DebugContext(ctx, "iceberg metrics reporter panicked; recovered", "panic", v)
+					// failure (with the offending reporter type) so a broken
+					// reporter is traceable rather than showing up only as
+					// mysteriously-missing metrics.
+					logger := c.logger
+					if logger == nil {
+						logger = slog.Default()
+					}
+					logger.WarnContext(ctx, "iceberg metrics reporter panicked; recovered",
+						"reporter", fmt.Sprintf("%T", r), "panic", v)
 				}
 			}()
 			r.Report(ctx, report)

@@ -18,7 +18,9 @@
 package metrics
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"sync"
 	"testing"
 
@@ -26,13 +28,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// testReport is a minimal MetricsReport. The marker is unexported (sealed to
-// this package), so report values can only be created from within the
-// package — this white-box test is how we exercise the reporters until the
-// concrete report types land.
+// testReport is a minimal MetricsReport used to exercise the reporters until
+// the concrete report types (ScanReport, CommitReport) land. MetricsReport is
+// an open marker interface, so any type satisfies it.
 type testReport struct{ name string }
-
-func (testReport) isMetricsReport() {}
 
 // countingReporter records how many reports it received.
 type countingReporter struct {
@@ -90,11 +89,28 @@ func TestInMemoryReporter(t *testing.T) {
 }
 
 func TestLoggingReporterNilLoggerAndReport(t *testing.T) {
-	r := NewLoggingReporter(nil) // must fall back to slog.Default
-	require.NotNil(t, r)
-	assert.NotPanics(t, func() {
+	t.Run("nil logger falls back to default", func(t *testing.T) {
+		r := NewLoggingReporter(nil) // must fall back to slog.Default
+		require.NotNil(t, r)
+		assert.NotPanics(t, func() {
+			r.Report(context.Background(), nil)
+			r.Report(context.Background(), testReport{name: "x"})
+		})
+	})
+
+	t.Run("logs the report at info level", func(t *testing.T) {
+		var buf bytes.Buffer
+		r := NewLoggingReporter(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+		// A nil report is ignored and must produce no output.
 		r.Report(context.Background(), nil)
-		r.Report(context.Background(), testReport{name: "x"})
+		require.Empty(t, buf.String())
+
+		r.Report(context.Background(), testReport{name: "scan-42"})
+		out := buf.String()
+		assert.Contains(t, out, "level=INFO")
+		assert.Contains(t, out, "iceberg metrics report")
+		assert.Contains(t, out, "scan-42", "the report value must be logged")
 	})
 }
 
@@ -104,10 +120,16 @@ func TestCombine(t *testing.T) {
 		assert.IsType(t, NopReporter{}, Combine(nil, nil))
 	})
 
-	t.Run("single reporter returned directly", func(t *testing.T) {
-		c := &countingReporter{}
-		assert.Same(t, c, Combine(c))
-		assert.Same(t, c, Combine(nil, c, nil))
+	t.Run("single reporter is wrapped for isolation", func(t *testing.T) {
+		// Even one reporter is wrapped, so a typed-nil concrete pointer (a
+		// non-nil interface that passes the nil filter) still gets the panic
+		// isolation the contract promises instead of escaping unwrapped.
+		var lr *LoggingReporter // (*LoggingReporter)(nil) as a Reporter is non-nil
+		r := Combine(lr)
+		assert.IsType(t, &compositeReporter{}, r)
+		assert.NotPanics(t, func() {
+			r.Report(context.Background(), testReport{name: "x"})
+		})
 	})
 
 	t.Run("fans out to all", func(t *testing.T) {
@@ -129,15 +151,38 @@ func TestCombine(t *testing.T) {
 
 func TestInMemoryReporterConcurrent(t *testing.T) {
 	var r InMemoryReporter
-	const n = 100
+	const writers = 100
+
 	var wg sync.WaitGroup
-	wg.Add(n)
-	for range n {
+	wg.Add(writers)
+	for range writers {
 		go func() {
 			defer wg.Done()
 			r.Report(context.Background(), testReport{})
 		}()
 	}
+
+	// Exercise the read-under-write path: loop on Reports() in the foreground
+	// while the writers run, so -race actually has a concurrent reader to flag
+	// rather than just confirming the goroutines finish.
+	done := make(chan struct{})
+	var reader sync.WaitGroup
+	reader.Add(1)
+	go func() {
+		defer reader.Done()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				_ = r.Reports()
+			}
+		}
+	}()
+
 	wg.Wait()
-	assert.Len(t, r.Reports(), n)
+	close(done)
+	reader.Wait()
+
+	assert.Len(t, r.Reports(), writers)
 }

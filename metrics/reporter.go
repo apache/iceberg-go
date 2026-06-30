@@ -36,16 +36,20 @@ package metrics
 
 import "context"
 
-// MetricsReport is the sealed marker interface implemented by the concrete
-// report types (ScanReport and CommitReport). It is sealed to this package so
-// the set of report types stays under the framework's control.
+// MetricsReport is the marker interface implemented by the concrete report
+// types (ScanReport and CommitReport). It is intentionally empty, mirroring the
+// open MetricsReport interface in the Java and Python Iceberg implementations,
+// so downstream operators can implement it for their own report wrappers.
+//
+// The set of report types is controlled by this package for now, but that is a
+// convention documented here rather than a structural guarantee — the interface
+// is deliberately not sealed, leaving room for third-party reports without a
+// future breaking change.
 //
 // The name mirrors the MetricsReport type in the Java and Python Iceberg
 // implementations, easing ports across the ecosystem and disambiguating the
 // type from the [Reporter.Report] method that consumes it.
-type MetricsReport interface {
-	isMetricsReport()
-}
+type MetricsReport any
 
 // Reporter is a pluggable sink for metrics reports.
 //
