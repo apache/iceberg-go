@@ -228,12 +228,17 @@ type sessionTransport struct {
 const emptyStringHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	// A session default is applied unless the request already carries that
+	// header (a per-request override of any default, not just Content-Type
+	// wins) or explicitly opted out of it via withSuppressedHeaders (carried on
+	// the context as an explicit set, never inferred from header values).
+	suppressed := suppressedHeadersFrom(r.Context())
 	for k, v := range s.defaultHeaders {
-		// Per-request headers override session defaults. The check is on key
-		// *presence*, not value, so suppressRequestHeaders can opt out of a
-		// default by setting a present-but-empty entry. Keep this in sync with
-		// suppressRequestHeaders.
-		if _, ok := r.Header[http.CanonicalHeaderKey(k)]; ok {
+		ck := http.CanonicalHeaderKey(k)
+		if _, ok := r.Header[ck]; ok {
+			continue
+		}
+		if _, ok := suppressed[ck]; ok {
 			continue
 		}
 		for _, hdr := range v {
@@ -295,6 +300,11 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return s.RoundTripper.RoundTrip(r)
 }
 
+// suppressHeadersKey carries the set of session-default header keys (canonical
+// form) that a request opted out of, so sessionTransport.RoundTrip can consult
+// an explicit set rather than inferring suppression from header values.
+type suppressHeadersKey struct{}
+
 // reqConfig holds the optional per-request knobs shared by do and doPost:
 // headers to set, session-default headers to suppress, and whether an HTTP 204
 // is a valid empty result.
@@ -306,17 +316,24 @@ type reqConfig struct {
 
 type reqOption func(*reqConfig)
 
-// withHeaders sets per-request headers. They take precedence over session
-// defaults because sessionTransport.RoundTrip skips any default whose key is
-// already present on the request.
+// withHeaders sets per-request headers, merging with any already set so options
+// compose. A per-request header takes precedence over a session default because
+// sessionTransport.RoundTrip skips any default whose key is already present.
 func withHeaders(headers map[string]string) reqOption {
-	return func(c *reqConfig) { c.headers = headers }
+	return func(c *reqConfig) {
+		if c.headers == nil {
+			c.headers = make(map[string]string, len(headers))
+		}
+		maps.Copy(c.headers, headers)
+	}
 }
 
 // withSuppressedHeaders prevents the named session-default headers from being
-// sent on this request. See suppressRequestHeaders for the mechanism.
+// sent on this request. Names accumulate so options compose. Suppression is
+// carried through the request context (see RoundTrip), not encoded as a header
+// value, so req.Header only ever means "headers to send".
 func withSuppressedHeaders(names ...string) reqOption {
-	return func(c *reqConfig) { c.suppressHeaders = names }
+	return func(c *reqConfig) { c.suppressHeaders = append(c.suppressHeaders, names...) }
 }
 
 // allowNoContent treats an HTTP 204 No Content response as a valid empty result
@@ -334,6 +351,27 @@ func newReqConfig(opts []reqOption) reqConfig {
 	return cfg
 }
 
+// withSuppressedHeadersCtx returns ctx carrying the canonicalized suppression
+// set, or ctx unchanged when nothing is suppressed.
+func withSuppressedHeadersCtx(ctx context.Context, names []string) context.Context {
+	if len(names) == 0 {
+		return ctx
+	}
+
+	set := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		set[http.CanonicalHeaderKey(n)] = struct{}{}
+	}
+
+	return context.WithValue(ctx, suppressHeadersKey{}, set)
+}
+
+func suppressedHeadersFrom(ctx context.Context) map[string]struct{} {
+	set, _ := ctx.Value(suppressHeadersKey{}).(map[string]struct{})
+
+	return set
+}
+
 func do[T any](ctx context.Context, method string, baseURI *url.URL, path []string, cl *http.Client, override map[int]error, opts ...reqOption) (ret T, err error) {
 	cfg := newReqConfig(opts)
 
@@ -343,11 +381,11 @@ func do[T any](ctx context.Context, method string, baseURI *url.URL, path []stri
 	)
 
 	uri := baseURI.JoinPath(path...).String()
+	ctx = withSuppressedHeadersCtx(ctx, cfg.suppressHeaders)
 	if req, err = http.NewRequestWithContext(ctx, method, uri, nil); err != nil {
 		return ret, err
 	}
 	setRequestHeaders(req, cfg.headers)
-	suppressRequestHeaders(req, cfg.suppressHeaders)
 
 	if rsp, err = cl.Do(req); err != nil {
 		return ret, err
@@ -405,12 +443,12 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 		return ret, err
 	}
 
+	ctx = withSuppressedHeadersCtx(ctx, cfg.suppressHeaders)
 	req, err = http.NewRequestWithContext(ctx, http.MethodPost, uri, bytes.NewReader(data))
 	if err != nil {
 		return ret, err
 	}
 	setRequestHeaders(req, cfg.headers)
-	suppressRequestHeaders(req, cfg.suppressHeaders)
 
 	rsp, err = cl.Do(req)
 	if err != nil {
@@ -443,18 +481,6 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 func setRequestHeaders(req *http.Request, headers map[string]string) {
 	for k, v := range headers {
 		req.Header.Set(k, v)
-	}
-}
-
-// suppressRequestHeaders prevents the named session-default headers from being
-// sent on this request. It writes a present-but-empty header entry rather than
-// calling Header.Del: sessionTransport.RoundTrip decides whether to apply a
-// default by testing key *presence* (not value), so a present-but-empty key
-// both blocks the default and emits nothing, whereas deleting the key would let
-// the default reappear. Keep RoundTrip's presence check in sync with this.
-func suppressRequestHeaders(req *http.Request, headers []string) {
-	for _, h := range headers {
-		req.Header[http.CanonicalHeaderKey(h)] = nil
 	}
 }
 

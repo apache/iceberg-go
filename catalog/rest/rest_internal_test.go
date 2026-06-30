@@ -613,6 +613,76 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
 }
 
+func TestRoundTripDefaultHeaderHandling(t *testing.T) {
+	t.Parallel()
+
+	newSession := func(captured *http.Header) *sessionTransport {
+		s := &sessionTransport{
+			RoundTripper: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				*captured = r.Header.Clone()
+
+				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+			}),
+			defaultHeaders: http.Header{},
+		}
+		s.defaultHeaders.Set(headerIcebergAccessDelegation, defaultAccessDelegation)
+
+		return s
+	}
+
+	t.Run("applies default when absent", func(t *testing.T) {
+		t.Parallel()
+
+		var got http.Header
+		req, err := http.NewRequest(http.MethodGet, "http://example.com", nil)
+		require.NoError(t, err)
+		_, err = newSession(&got).RoundTrip(req)
+		require.NoError(t, err)
+		assert.Equal(t, []string{defaultAccessDelegation}, got.Values(headerIcebergAccessDelegation))
+	})
+
+	t.Run("per-request value overrides default without duplicating", func(t *testing.T) {
+		t.Parallel()
+
+		var got http.Header
+		req, err := http.NewRequest(http.MethodGet, "http://example.com", nil)
+		require.NoError(t, err)
+		req.Header.Set(headerIcebergAccessDelegation, "remote-signing")
+		_, err = newSession(&got).RoundTrip(req)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"remote-signing"}, got.Values(headerIcebergAccessDelegation))
+	})
+
+	t.Run("context suppression drops the default", func(t *testing.T) {
+		t.Parallel()
+
+		var got http.Header
+		ctx := withSuppressedHeadersCtx(context.Background(), []string{headerIcebergAccessDelegation})
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.com", nil)
+		require.NoError(t, err)
+		_, err = newSession(&got).RoundTrip(req)
+		require.NoError(t, err)
+		assert.Empty(t, got.Values(headerIcebergAccessDelegation))
+	})
+}
+
+func TestReqOptionsCompose(t *testing.T) {
+	t.Parallel()
+
+	cfg := newReqConfig([]reqOption{
+		withHeaders(map[string]string{"X-First": "one"}),
+		withHeaders(map[string]string{"X-Second": "two"}),
+		withSuppressedHeaders("X-First"),
+		withSuppressedHeaders("X-Second", "X-Third"),
+	})
+
+	assert.Equal(t, map[string]string{
+		"X-First":  "one",
+		"X-Second": "two",
+	}, cfg.headers)
+	assert.Equal(t, []string{"X-First", "X-Second", "X-Third"}, cfg.suppressHeaders)
+}
+
 type closeTrackingReadCloser struct {
 	*bytes.Reader
 	closeErr error

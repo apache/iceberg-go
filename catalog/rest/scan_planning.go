@@ -38,23 +38,57 @@ import (
 // Compile-time proof that the REST catalog satisfies the table planner seam.
 var _ table.ScanPlanner = (*Catalog)(nil)
 
-// ErrPlanExpired is returned when polling a plan-id the server no longer knows
-// about (HTTP 404 while polling), distinct from a table-not-found 404.
+// ErrPlanExpired is returned when polling a plan that the server no longer
+// knows about (any HTTP 404 from fetchPlanningResult). This low-level method
+// maps every 404 to ErrPlanExpired; splitting it from a table/namespace-gone
+// 404 on the response error.type is deferred to the polling layer that needs
+// the distinction.
 var ErrPlanExpired = fmt.Errorf("%w: scan plan expired", ErrRESTError)
+
+// ErrPlanFailed is returned by PlanTableScan and FetchPlanningResult when the
+// server reports a failed plan. The returned error is a *PlanFailedError, so the
+// structured PlanningError detail is reachable via errors.As.
+var ErrPlanFailed = fmt.Errorf("%w: scan plan failed", ErrRESTError)
+
+// ErrPlanCancelled is returned by FetchPlanningResult when polling a plan that
+// was cancelled (by this client or another). Like a failed plan it is terminal,
+// so it surfaces as an error rather than a (resp, nil) the if-err idiom skips.
+var ErrPlanCancelled = fmt.Errorf("%w: scan plan cancelled", ErrRESTError)
+
+// PlanFailedError carries the server's structured PlanningError detail for a
+// failed plan. It satisfies errors.Is(err, ErrPlanFailed) so callers can branch
+// on the failure with the if-err idiom while still reaching the detail via
+// errors.As.
+type PlanFailedError struct {
+	Detail *PlanningError
+}
+
+func (e *PlanFailedError) Error() string {
+	if e.Detail != nil && e.Detail.Message != "" {
+		return ErrPlanFailed.Error() + ": " + e.Detail.Message
+	}
+
+	return ErrPlanFailed.Error()
+}
+
+func (e *PlanFailedError) Unwrap() error { return ErrPlanFailed }
 
 // headerIdempotencyKey is the per-request retry key on the plan and tasks
 // POSTs. The access-delegation header name lives in rest.go because it is also
 // a session default.
 const headerIdempotencyKey = "Idempotency-Key"
 
-// --- Capability gating (Open Question 2) ------------------------------------
+// --- Capability gating -------------------------------------------------------
 //
-// A single capability check is too coarse: requiring all four endpoints falls
-// back to local against sync-only servers, while requiring only the plan
-// endpoint false-positives, because planTableScan can return `submitted` or
-// `plan-tasks` that need the poll/fetch endpoints. The split below lets `auto`
-// use a sync-only server while reserving the async/fanout path for servers
-// that advertise everything.
+// Capability is split into two predicates. SupportsPlanTableScan is the narrow
+// "server can plan inline" check (plan endpoint only). SupportsRemoteScanPlanning
+// is the end-to-end check used by table.Scan's auto mode to decide whether to
+// route a scan to the server: it requires all four endpoints, because a plan can
+// come back `submitted` or with `plan-tasks` that need the poll/cancel/fetch
+// endpoints to finish — and auto mode has no second chance to fall back to local
+// once it commits to remote. A plan-only server therefore must not advertise as
+// end-to-end capable, or an auto-mode scan that gets a `submitted` reply would
+// fail instead of planning locally.
 
 // SupportsPlanTableScan reports whether the server advertised the synchronous
 // plan endpoint.
@@ -63,7 +97,8 @@ func (r *Catalog) SupportsPlanTableScan() bool {
 }
 
 // SupportsFullRemoteScanPlanning reports whether the server advertised all four
-// scan-planning endpoints (plan, fetch-result, cancel, fetch-tasks).
+// scan-planning endpoints (plan, fetch-result, cancel, fetch-tasks), i.e. it can
+// drive the async/fanout path, not just sync inline planning.
 func (r *Catalog) SupportsFullRemoteScanPlanning() bool {
 	return r.SupportsPlanTableScan() &&
 		r.endpoints.contains(endpointFetchPlanResult) &&
@@ -74,7 +109,10 @@ func (r *Catalog) SupportsFullRemoteScanPlanning() bool {
 // --- table.ScanPlanner implementation ---------------------------------------
 
 // SupportsRemoteScanPlanning reports whether this catalog can complete a remote
-// plan end-to-end; backed by the split capability checks above.
+// plan end-to-end, including a `submitted` reply that must be polled. It requires
+// all four endpoints so table.Scan's auto mode only routes to the server when it
+// can finish without a fallback. Callers wanting the narrow "can plan inline"
+// signal should use SupportsPlanTableScan.
 func (r *Catalog) SupportsRemoteScanPlanning() bool {
 	return r.SupportsFullRemoteScanPlanning()
 }
@@ -87,9 +125,11 @@ func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) 
 
 // --- Low-level client methods -----------------------------------------------
 
-// PlanTableScan submits a scan plan. The result is either completed inline,
-// submitted (returns a plan-id to poll), or failed. A failed planning response
-// decodes as (resp, nil); callers must branch on resp.Status.
+// PlanTableScan submits a scan plan. A completed or submitted plan returns
+// (resp, nil); callers branch on resp.Status for the plan-id (completed) vs
+// poll (submitted) distinction. A failed plan returns a zero response and a
+// non-nil *PlanFailedError (errors.Is(err, ErrPlanFailed)) so the if-err idiom
+// does not mistake a failure for success; the server detail rides on the error.
 func (r *Catalog) PlanTableScan(ctx context.Context, ident table.Identifier, req PlanTableScanRequest) (PlanTableScanResponse, error) {
 	if err := r.endpoints.check(endpointPlanTableScan); err != nil {
 		return PlanTableScanResponse{}, err
@@ -105,15 +145,29 @@ func (r *Catalog) PlanTableScan(ctx context.Context, ident table.Identifier, req
 		return PlanTableScanResponse{}, err
 	}
 
-	return doPost[PlanTableScanRequest, PlanTableScanResponse](
+	resp, err := doPost[PlanTableScanRequest, PlanTableScanResponse](
 		ctx, r.baseURI, path, req, r.cl,
 		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable}, withHeaders(headers))
+	if err != nil {
+		return PlanTableScanResponse{}, err
+	}
+	if resp.Status == PlanStatusFailed {
+		return PlanTableScanResponse{}, &PlanFailedError{Detail: resp.Error}
+	}
+
+	return resp, nil
 }
 
 // FetchPlanningResult polls a previously submitted plan. opts.AccessDelegation
 // is sent as the X-Iceberg-Access-Delegation header so an async poll can still
 // receive plan-scoped storage credentials: the spec defines data-access on this
 // endpoint, and the completed-async result is where those credentials are vended.
+//
+// completed and submitted return (resp, nil) and callers branch on resp.Status
+// (done vs poll again). The terminal failure states surface as errors so an
+// if-err poll loop cannot mistake them for an empty scan: failed returns a
+// *PlanFailedError (errors.Is(err, ErrPlanFailed)) and cancelled returns
+// ErrPlanCancelled. A 404 maps to ErrPlanExpired (the plan-id the server forgot).
 func (r *Catalog) FetchPlanningResult(ctx context.Context, ident table.Identifier, planID string, opts FetchPlanningResultOptions) (FetchPlanningResultResponse, error) {
 	if err := r.endpoints.check(endpointFetchPlanResult); err != nil {
 		return FetchPlanningResultResponse{}, err
@@ -129,9 +183,20 @@ func (r *Catalog) FetchPlanningResult(ctx context.Context, ident table.Identifie
 		return FetchPlanningResultResponse{}, err
 	}
 
-	return doGet[FetchPlanningResultResponse](
+	resp, err := doGet[FetchPlanningResultResponse](
 		ctx, r.baseURI, path, r.cl,
 		map[int]error{http.StatusNotFound: ErrPlanExpired}, withHeaders(headers))
+	if err != nil {
+		return FetchPlanningResultResponse{}, err
+	}
+	switch resp.Status {
+	case PlanStatusFailed:
+		return FetchPlanningResultResponse{}, &PlanFailedError{Detail: resp.Error}
+	case PlanStatusCancelled:
+		return FetchPlanningResultResponse{}, ErrPlanCancelled
+	}
+
+	return resp, nil
 }
 
 // CancelPlanning cancels a server-side plan. Callers should cancel on context
@@ -219,13 +284,28 @@ func scanPlanningHeaders(idempotencyKey, accessDelegation *string, includeIdempo
 
 func idempotencyHeaderValue(idempotencyKey *string) (string, error) {
 	if idempotencyKey == nil {
-		// Plan and task POSTs always send an idempotency key. There is no
+		// Plan and task POSTs always send an idempotency key. The spec pins it
+		// to a UUIDv7 string (RFC 9562) so a server can key its dedup window off
+		// the embedded timestamp, matching Java's UUIDUtil.generateUuidV7(). A
+		// v4 key would be treated as undefined by such servers. There is no
 		// transport retry here, so nil means a fresh key for this call.
-		return uuid.NewString(), nil
+		key, err := uuid.NewV7()
+		if err != nil {
+			return "", fmt.Errorf("generating idempotency key: %w", err)
+		}
+
+		return key.String(), nil
 	}
 
-	if _, err := uuid.Parse(*idempotencyKey); err != nil {
+	parsed, err := uuid.Parse(*idempotencyKey)
+	if err != nil {
 		return "", fmt.Errorf("%w: invalid idempotency key %q", iceberg.ErrInvalidArgument, *idempotencyKey)
+	}
+	// The spec pins the header to UUIDv7, so reject other versions rather than
+	// forward a key a timestamp-keyed server would treat as undefined.
+	if parsed.Version() != 7 {
+		return "", fmt.Errorf("%w: idempotency key %q must be a UUIDv7, got v%d",
+			iceberg.ErrInvalidArgument, *idempotencyKey, int(parsed.Version()))
 	}
 
 	return *idempotencyKey, nil
@@ -298,8 +378,8 @@ type CompletedPlanningResult struct {
 // wire type and the seam stay in agreement.
 type PlanTableScanRequest struct {
 	// IdempotencyKey is sent as the Idempotency-Key header, not in the JSON body.
-	// If set, it must be a UUID string; nil lets the implementation choose a
-	// safe retry key.
+	// If set, it must be a UUIDv7 string (RFC 9562); nil lets the implementation
+	// generate a safe UUIDv7 retry key.
 	IdempotencyKey *string `json:"-"`
 	// AccessDelegation is sent as the X-Iceberg-Access-Delegation header, not
 	// in the JSON body. Nil uses the catalog default.
@@ -392,8 +472,8 @@ func (r *FetchPlanningResultResponse) UnmarshalJSON(data []byte) error {
 // FetchScanTasksRequest is the POST .../tasks request body.
 type FetchScanTasksRequest struct {
 	// IdempotencyKey is sent as the Idempotency-Key header, not in the JSON body.
-	// If set, it must be a UUID string; nil lets the implementation choose a
-	// safe retry key.
+	// If set, it must be a UUIDv7 string (RFC 9562); nil lets the implementation
+	// generate a safe UUIDv7 retry key.
 	IdempotencyKey *string `json:"-"`
 
 	PlanTask string `json:"plan-task"`

@@ -84,6 +84,9 @@ func TestScanPlanningCapabilities(t *testing.T) {
 	t.Run("plan only", func(t *testing.T) {
 		t.Parallel()
 
+		// A plan-only server can plan inline, but auto mode must not route to it
+		// (a `submitted` reply could not be polled), so the end-to-end
+		// SupportsRemoteScanPlanning is false.
 		cat := &Catalog{endpoints: newEndpointSet([]endpoint{endpointPlanTableScan})}
 		assert.True(t, cat.SupportsPlanTableScan())
 		assert.False(t, cat.SupportsFullRemoteScanPlanning())
@@ -211,8 +214,10 @@ func TestPlanTableScanGeneratesIdempotencyKeyAndUsesDefaultAccessDelegation(t *t
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
 			got := req.Header.Get(headerIdempotencyKey)
 			require.NotEmpty(t, got)
-			_, err := uuid.Parse(got)
+			parsed, err := uuid.Parse(got)
 			require.NoError(t, err)
+			// The spec pins the generated key to UUIDv7.
+			assert.Equal(t, 7, int(parsed.Version()))
 			assert.Equal(t, []string{defaultAccessDelegation}, req.Header.Values(headerIcebergAccessDelegation))
 
 			_, err = w.Write([]byte(`{"status":"completed","plan-id":"plan-1"}`))
@@ -227,13 +232,26 @@ func TestPlanTableScanGeneratesIdempotencyKeyAndUsesDefaultAccessDelegation(t *t
 func TestPlanTableScanRejectsInvalidIdempotencyKey(t *testing.T) {
 	t.Parallel()
 
-	badKey := "not-a-uuid"
-	cat := &Catalog{endpoints: newEndpointSet([]endpoint{endpointPlanTableScan})}
+	for _, tc := range []struct {
+		name string
+		key  string
+	}{
+		{"not a uuid", "not-a-uuid"},
+		// Valid UUID, but v1 not v7 — the spec pins the header to UUIDv7.
+		{"valid uuid wrong version", "11111111-1111-1111-1111-111111111111"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	_, err := cat.PlanTableScan(context.Background(), table.Identifier{"db", "tbl"}, PlanTableScanRequest{
-		IdempotencyKey: &badKey,
-	})
-	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			key := tc.key
+			cat := &Catalog{endpoints: newEndpointSet([]endpoint{endpointPlanTableScan})}
+
+			_, err := cat.PlanTableScan(context.Background(), table.Identifier{"db", "tbl"}, PlanTableScanRequest{
+				IdempotencyKey: &key,
+			})
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		})
+	}
 }
 
 func TestPlanTableScanRequest(t *testing.T) {
@@ -270,7 +288,7 @@ func TestPlanTableScanRequest(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			idempotencyKey := "11111111-1111-1111-1111-111111111111"
+			idempotencyKey := "0190b6c5-1c3d-7000-8000-000000000001"
 			accessDelegation := "remote-signing"
 			snapshotID := int64(22)
 			cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
@@ -299,15 +317,24 @@ func TestPlanTableScanRequest(t *testing.T) {
 				Select:           []string{"id", "data"},
 				Filter:           json.RawMessage(`{"type":"always-true"}`),
 			})
+			if tc.wantError != "" {
+				// A failed plan returns a *PlanFailedError and a zero resp; the
+				// detail rides on the error.
+				require.ErrorIs(t, err, ErrPlanFailed)
+				var pfe *PlanFailedError
+				require.ErrorAs(t, err, &pfe)
+				require.NotNil(t, pfe.Detail)
+				assert.Equal(t, tc.wantError, pfe.Detail.Message)
+				assert.Equal(t, PlanTableScanResponse{}, resp)
+
+				return
+			}
+
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantStatus, resp.Status)
 			if tc.wantPlanID != nil {
 				require.NotNil(t, resp.PlanID)
 				assert.Equal(t, *tc.wantPlanID, *resp.PlanID)
-			}
-			if tc.wantError != "" {
-				require.NotNil(t, resp.Error)
-				assert.Equal(t, tc.wantError, resp.Error.Message)
 			}
 		})
 	}
@@ -367,6 +394,52 @@ func TestFetchPlanningResultMapsNotFoundToPlanExpired(t *testing.T) {
 	require.ErrorIs(t, err, ErrPlanExpired)
 }
 
+func TestFetchPlanningResultResponseAcceptsCancelled(t *testing.T) {
+	t.Parallel()
+
+	// cancelled is a valid poll result (unlike PlanTableScanResponse, which
+	// rejects it). Pin it so a refactor routing it into the default error case
+	// is caught.
+	var resp FetchPlanningResultResponse
+	require.NoError(t, json.Unmarshal([]byte(`{"status":"cancelled"}`), &resp))
+	assert.Equal(t, PlanStatusCancelled, resp.Status)
+}
+
+func TestFetchPlanningResultStatusArms(t *testing.T) {
+	t.Parallel()
+
+	t.Run("cancelled returns ErrPlanCancelled", func(t *testing.T) {
+		t.Parallel()
+
+		cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchPlanResult}, func(mux *http.ServeMux) {
+			mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-123", func(w http.ResponseWriter, req *http.Request) {
+				_, err := w.Write([]byte(`{"status":"cancelled"}`))
+				require.NoError(t, err)
+			})
+		})
+
+		_, err := cat.FetchPlanningResult(context.Background(), table.Identifier{"db", "tbl"}, "plan-123", FetchPlanningResultOptions{})
+		require.ErrorIs(t, err, ErrPlanCancelled)
+	})
+
+	t.Run("failed returns PlanFailedError", func(t *testing.T) {
+		t.Parallel()
+
+		cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchPlanResult}, func(mux *http.ServeMux) {
+			mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-123", func(w http.ResponseWriter, req *http.Request) {
+				_, err := w.Write([]byte(`{"status":"failed","error":{"message":"boom","type":"ServerError","code":500}}`))
+				require.NoError(t, err)
+			})
+		})
+
+		_, err := cat.FetchPlanningResult(context.Background(), table.Identifier{"db", "tbl"}, "plan-123", FetchPlanningResultOptions{})
+		require.ErrorIs(t, err, ErrPlanFailed)
+		var pfe *PlanFailedError
+		require.ErrorAs(t, err, &pfe)
+		assert.Equal(t, "boom", pfe.Detail.Message)
+	})
+}
+
 func TestCancelPlanningRequest(t *testing.T) {
 	t.Parallel()
 
@@ -385,7 +458,7 @@ func TestCancelPlanningRequest(t *testing.T) {
 func TestFetchScanTasksRequest(t *testing.T) {
 	t.Parallel()
 
-	idempotencyKey := "22222222-2222-2222-2222-222222222222"
+	idempotencyKey := "0190b6c5-1c3d-7000-8000-000000000002"
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchScanTasks}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
 			require.Equal(t, http.MethodPost, req.Method)
@@ -418,24 +491,41 @@ func TestFetchScanTasksRequest(t *testing.T) {
 func TestScanPlanningEndpointGating(t *testing.T) {
 	t.Parallel()
 
-	cat := &Catalog{endpoints: newEndpointSet(defaultEndpoints)}
 	ident := table.Identifier{"db", "tbl"}
+	cases := []struct {
+		name string
+		call func(*Catalog) error
+	}{
+		{"plan", func(c *Catalog) error {
+			_, err := c.PlanTableScan(context.Background(), ident, PlanTableScanRequest{})
 
-	_, err := cat.PlanTableScan(context.Background(), ident, PlanTableScanRequest{})
-	require.ErrorIs(t, err, ErrEndpointNotSupported)
-	assert.NotErrorIs(t, err, ErrRESTError)
+			return err
+		}},
+		{"fetch-result", func(c *Catalog) error {
+			_, err := c.FetchPlanningResult(context.Background(), ident, "plan-123", FetchPlanningResultOptions{})
 
-	_, err = cat.FetchPlanningResult(context.Background(), ident, "plan-123", FetchPlanningResultOptions{})
-	require.ErrorIs(t, err, ErrEndpointNotSupported)
-	assert.NotErrorIs(t, err, ErrRESTError)
+			return err
+		}},
+		{"cancel", func(c *Catalog) error {
+			return c.CancelPlanning(context.Background(), ident, "plan-123")
+		}},
+		{"fetch-tasks", func(c *Catalog) error {
+			_, err := c.FetchScanTasks(context.Background(), ident, FetchScanTasksRequest{PlanTask: "task-1"})
 
-	err = cat.CancelPlanning(context.Background(), ident, "plan-123")
-	require.ErrorIs(t, err, ErrEndpointNotSupported)
-	assert.NotErrorIs(t, err, ErrRESTError)
+			return err
+		}},
+	}
 
-	_, err = cat.FetchScanTasks(context.Background(), ident, FetchScanTasksRequest{PlanTask: "task-1"})
-	require.ErrorIs(t, err, ErrEndpointNotSupported)
-	assert.NotErrorIs(t, err, ErrRESTError)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cat := &Catalog{endpoints: newEndpointSet(defaultEndpoints)}
+			err := tc.call(cat)
+			require.ErrorIs(t, err, ErrEndpointNotSupported)
+			assert.NotErrorIs(t, err, ErrRESTError)
+		})
+	}
 }
 
 func newScanPlanningTestCatalog(t *testing.T, endpoints []endpoint, register func(*http.ServeMux)) *Catalog {
