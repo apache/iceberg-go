@@ -44,6 +44,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/geoarrow/geoarrow-go"
 	"github.com/google/uuid"
 )
 
@@ -343,6 +344,34 @@ type ParquetFileWriter struct {
 	info       WriteFileInfo
 	partition  map[int]any
 	colMapping map[string]int
+	geoCols    []geoColumn
+	geoAccs    map[int]*geoBoundsAccumulator
+}
+
+// geoColumn locates a top-level geometry/geography column: its position in the
+// Arrow record batch and the Iceberg field ID its bounds are recorded under.
+type geoColumn struct {
+	colIdx  int
+	fieldID int
+}
+
+// collectGeoColumns finds top-level WKB-encoded geo columns in the Arrow schema
+// and pairs each with its Iceberg field ID. Geo bounds for columns nested inside
+// structs/lists/maps are not yet computed.
+func collectGeoColumns(sc *arrow.Schema, colMapping map[string]int) []geoColumn {
+	var result []geoColumn
+	for i, f := range sc.Fields() {
+		if _, ok := f.Type.(*geoarrow.WKBType); !ok {
+			continue
+		}
+		fieldID, ok := colMapping[f.Name]
+		if !ok {
+			continue
+		}
+		result = append(result, geoColumn{colIdx: i, fieldID: fieldID})
+	}
+
+	return result
 }
 
 // NewFileWriter creates a ParquetFileWriter that writes batches to a single
@@ -375,6 +404,12 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 		return nil, err
 	}
 
+	geoCols := collectGeoColumns(arrowSchema, colMapping)
+	geoAccs := make(map[int]*geoBoundsAccumulator, len(geoCols))
+	for _, gc := range geoCols {
+		geoAccs[gc.fieldID] = newGeoBoundsAccumulator()
+	}
+
 	return &ParquetFileWriter{
 		pqWriter:   writer,
 		counter:    counter,
@@ -384,12 +419,55 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 		info:       info,
 		partition:  partitionValues,
 		colMapping: colMapping,
+		geoCols:    geoCols,
+		geoAccs:    geoAccs,
 	}, nil
 }
 
 // Write appends a record batch to the Parquet file.
 func (w *ParquetFileWriter) Write(batch arrow.RecordBatch) error {
+	if err := w.accumulateGeoBounds(batch); err != nil {
+		return err
+	}
+
 	return w.pqWriter.WriteBuffered(batch)
+}
+
+// wkbStorage is the subset of the binary Arrow arrays that back a geoarrow WKB
+// column (Binary and LargeBinary both satisfy it).
+type wkbStorage interface {
+	arrow.Array
+	Value(int) []byte
+}
+
+// accumulateGeoBounds extends the per-field bounding boxes with the WKB values
+// in this batch. Null rows are skipped; a malformed WKB value fails the write.
+func (w *ParquetFileWriter) accumulateGeoBounds(batch arrow.RecordBatch) error {
+	for _, gc := range w.geoCols {
+		if gc.colIdx >= int(batch.NumCols()) {
+			continue
+		}
+		ext, ok := batch.Column(gc.colIdx).(array.ExtensionArray)
+		if !ok {
+			continue
+		}
+		storage, ok := ext.Storage().(wkbStorage)
+		if !ok {
+			continue
+		}
+
+		acc := w.geoAccs[gc.fieldID]
+		for i := range storage.Len() {
+			if storage.IsNull(i) {
+				continue
+			}
+			if err := acc.AddWKB(storage.Value(i)); err != nil {
+				return fmt.Errorf("computing geo bounds for field %d: %w", gc.fieldID, err)
+			}
+		}
+	}
+
+	return nil
 }
 
 // BytesWritten returns the number of bytes flushed to the output so far.
@@ -414,6 +492,10 @@ func (w *ParquetFileWriter) Close() (_ iceberg.DataFile, err error) {
 	stats := w.format.DataFileStatsFromMeta(filemeta, w.info.StatsCols, w.colMapping, VariantFieldIDsFromSchema(w.info.FileSchema))
 	stats.EqualityFieldIDs = w.info.EqualityFieldIDs
 
+	if err = w.applyGeoBounds(stats); err != nil {
+		return nil, err
+	}
+
 	return stats.ToDataFile(DataFileOpts{
 		Schema:          w.info.FileSchema,
 		Spec:            w.info.Spec,
@@ -434,6 +516,44 @@ func (w *ParquetFileWriter) Abort() error {
 	}
 
 	return errors.Join(closeErr, removeErr)
+}
+
+// applyGeoBounds injects the WKB single-point bounds accumulated during the
+// write into the file statistics, so they flow through ToDataFile into the
+// manifest entry like any other typed bound.
+func (w *ParquetFileWriter) applyGeoBounds(stats *DataFileStatistics) error {
+	for fieldID, acc := range w.geoAccs {
+		// Honor the column's metrics mode: counts/none modes do not record bounds.
+		switch w.info.StatsCols[fieldID].Mode.Typ {
+		case MetricModeNone, MetricModeCounts:
+			continue
+		}
+
+		agg, err := acc.StatsAgg()
+		if err != nil {
+			return fmt.Errorf("encoding geo bounds for field %d: %w", fieldID, err)
+		}
+		if agg == nil {
+			continue
+		}
+		if stats.ColAggs == nil {
+			stats.ColAggs = make(map[int]StatsAgg)
+		}
+		stats.ColAggs[fieldID] = agg
+	}
+
+	return nil
+}
+
+// isGeoType reports whether the Iceberg type is a geometry or geography, whose
+// bounds are computed from raw WKB rather than Parquet byte-array statistics.
+func isGeoType(t iceberg.PrimitiveType) bool {
+	switch t.(type) {
+	case iceberg.GeometryType, iceberg.GeographyType:
+		return true
+	default:
+		return false
+	}
 }
 
 type decAsIntAgg[T int32 | int64] struct {
@@ -667,6 +787,14 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 			}
 
 			if statsCol.Mode.Typ == MetricModeCounts || !stats.HasMinMax() {
+				continue
+			}
+
+			// Geometry/Geography bounds are computed from raw WKB during the
+			// write (Parquet byte-array min/max over WKB are meaningless) and
+			// injected separately, so skip the generic min/max aggregator here
+			// while still keeping the column's counts, sizes, and null counts.
+			if isGeoType(statsCol.IcebergTyp) {
 				continue
 			}
 

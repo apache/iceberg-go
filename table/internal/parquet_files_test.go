@@ -1348,3 +1348,80 @@ func TestShreddedVariantReadRoundTrip(t *testing.T) {
 		assert.EqualValues(t, 2, obj.NumElements(), "row %d should have a + city", i)
 	}
 }
+
+// TestWriteDataFileGeoBounds writes geometry and geography columns through the
+// full ParquetFileWriter path and asserts that the resulting DataFile carries
+// WKB single-point lower/upper bounds in the manifest entry.
+func TestWriteDataFileGeoBounds(t *testing.T) {
+	geomType, err := iceberg.GeometryTypeOf("srid:4326")
+	require.NoError(t, err)
+	geogType, err := iceberg.GeographyTypeOf("srid:4326", "vincenty")
+	require.NoError(t, err)
+
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: 2, Name: "geom", Type: geomType, Required: false},
+		iceberg.NestedField{ID: 3, Name: "geog", Type: geogType, Required: false},
+	)
+
+	arrowSchema, err := table.SchemaToArrowSchema(iceSchema, nil, true, false)
+	require.NoError(t, err)
+
+	wkbStr := func(s string) string {
+		b, err := wktToWKB(s)
+		require.NoError(t, err)
+
+		return b.String()
+	}
+
+	rec, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSchema, strings.NewReader(`[
+		{"id": 1, "geom": "`+wkbStr("POINT (30 10)")+`", "geog": "`+wkbStr("POINT (20 5)")+`"},
+		{"id": 2, "geom": "`+wkbStr("POINT (5 40)")+`", "geog": null}
+	]`))
+	require.NoError(t, err)
+	defer rec.Release()
+
+	fm := internal.GetFileFormat(iceberg.ParquetFile)
+	statsCols := map[int]internal.StatisticsCollector{
+		1: {FieldID: 1, IcebergTyp: iceberg.PrimitiveTypes.Int32, ColName: "id", Mode: internal.MetricsMode{Typ: internal.MetricModeFull}},
+		2: {FieldID: 2, IcebergTyp: geomType, ColName: "geom", Mode: internal.MetricsMode{Typ: internal.MetricModeFull}},
+		3: {FieldID: 3, IcebergTyp: geogType, ColName: "geog", Mode: internal.MetricsMode{Typ: internal.MetricModeFull}},
+	}
+
+	memFS := iceio.NewMemFS()
+	df, err := fm.WriteDataFile(context.Background(), memFS, nil, internal.WriteFileInfo{
+		FileSchema: iceSchema,
+		Spec:       *iceberg.UnpartitionedSpec,
+		FileName:   "geo.parquet",
+		StatsCols:  statsCols,
+		WriteProps: fm.GetWriteProperties(iceberg.Properties{}),
+		Content:    iceberg.EntryContentData,
+	}, []arrow.RecordBatch{rec})
+	require.NoError(t, err)
+
+	lower, upper := df.LowerBoundValues(), df.UpperBoundValues()
+
+	// Geometry bounds span both rows: lower (5, 10), upper (30, 40).
+	assert.Equal(t, []byte(mustWKB(t, "POINT (5 10)")), lower[2])
+	assert.Equal(t, []byte(mustWKB(t, "POINT (30 40)")), upper[2])
+
+	// Geography has a single non-null value, so lower == upper == that point.
+	assert.Equal(t, []byte(mustWKB(t, "POINT (20 5)")), lower[3])
+	assert.Equal(t, []byte(mustWKB(t, "POINT (20 5)")), upper[3])
+
+	// Bounds round-trip back to literals through LiteralFromBytes.
+	lit, err := iceberg.LiteralFromBytes(geomType, lower[2])
+	require.NoError(t, err)
+	assert.Equal(t, []byte(mustWKB(t, "POINT (5 10)")), lit.(iceberg.TypedLiteral[[]byte]).Value())
+
+	// Null counts are still recorded for geo columns.
+	assert.Equal(t, int64(1), df.NullValueCounts()[3])
+}
+
+func mustWKB(t *testing.T, s string) geoarrow.WKBBytes {
+	t.Helper()
+	b, err := wktToWKB(s)
+	require.NoError(t, err)
+
+	return b
+}

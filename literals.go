@@ -170,7 +170,9 @@ func LiteralFromBytes(typ Type, data []byte) (Literal, error) {
 		err := v.UnmarshalBinary(data)
 
 		return v, err
-	case BinaryType:
+	case BinaryType, GeometryType, GeographyType:
+		// Geometry and Geography bounds are stored as WKB byte payloads
+		// (single-point bounds), handled as opaque binary on read.
 		var v BinaryLiteral
 		err := v.UnmarshalBinary(data)
 
