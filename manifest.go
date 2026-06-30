@@ -1306,6 +1306,10 @@ func (w *ManifestWriter) ToManifestFile(location string, length int64, opts ...M
 		apply(&mf)
 	}
 
+	if mf.Content == ManifestContentDeletes && mf.FirstRowIDValue != nil {
+		return nil, errors.New("first_row_id must not be set on delete manifests")
+	}
+
 	return &mf, nil
 }
 
@@ -1427,12 +1431,12 @@ func NewManifestListWriterV1(out io.Writer, snapshotID int64, parentSnapshot *in
 
 	parentSnapshotStr := "null"
 	if parentSnapshot != nil {
-		parentSnapshotStr = strconv.Itoa(int(*parentSnapshot))
+		parentSnapshotStr = strconv.FormatInt(*parentSnapshot, 10)
 	}
 
 	return m, m.init(map[string][]byte{
 		"format-version":     []byte(strconv.Itoa(m.version)),
-		"snapshot-id":        []byte(strconv.Itoa(int(snapshotID))),
+		"snapshot-id":        []byte(strconv.FormatInt(snapshotID, 10)),
 		"parent-snapshot-id": []byte(parentSnapshotStr),
 	})
 }
@@ -1447,13 +1451,13 @@ func NewManifestListWriterV2(out io.Writer, snapshotID, sequenceNumber int64, pa
 
 	parentSnapshotStr := "null"
 	if parentSnapshot != nil {
-		parentSnapshotStr = strconv.Itoa(int(*parentSnapshot))
+		parentSnapshotStr = strconv.FormatInt(*parentSnapshot, 10)
 	}
 
 	return m, m.init(map[string][]byte{
 		"format-version":     []byte(strconv.Itoa(m.version)),
-		"snapshot-id":        []byte(strconv.Itoa(int(snapshotID))),
-		"sequence-number":    []byte(strconv.Itoa(int(sequenceNumber))),
+		"snapshot-id":        []byte(strconv.FormatInt(snapshotID, 10)),
+		"sequence-number":    []byte(strconv.FormatInt(sequenceNumber, 10)),
 		"parent-snapshot-id": []byte(parentSnapshotStr),
 	})
 }
@@ -1468,14 +1472,14 @@ func NewManifestListWriterV3(out io.Writer, snapshotId, sequenceNumber, firstRow
 	}
 	parentSnapshotStr := "null"
 	if parentSnapshot != nil {
-		parentSnapshotStr = strconv.Itoa(int(*parentSnapshot))
+		parentSnapshotStr = strconv.FormatInt(*parentSnapshot, 10)
 	}
 
 	return m, m.init(map[string][]byte{
 		"format-version":     []byte(strconv.Itoa(m.version)),
-		"snapshot-id":        []byte(strconv.Itoa(int(snapshotId))),
-		"sequence-number":    []byte(strconv.Itoa(int(sequenceNumber))),
-		"first-row-id":       []byte(strconv.Itoa(int(firstRowID))),
+		"snapshot-id":        []byte(strconv.FormatInt(snapshotId, 10)),
+		"sequence-number":    []byte(strconv.FormatInt(sequenceNumber, 10)),
+		"first-row-id":       []byte(strconv.FormatInt(firstRowID, 10)),
 		"parent-snapshot-id": []byte(parentSnapshotStr),
 	})
 }
@@ -1551,11 +1555,13 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 			wrapped := *(file.(*manifestFile))
 			if m.version == 3 {
 				// Ref: https://github.com/apache/iceberg/blob/ea2071568dc66148b483a82eefedcd2992b435f7/core/src/main/java/org/apache/iceberg/ManifestListWriter.java#L157-L168
-				if wrapped.Content == ManifestContentData && wrapped.FirstRowIDValue == nil {
-					if m.nextRowID != nil {
-						firstRowID := *m.nextRowID
-						wrapped.FirstRowIDValue = &firstRowID
-						*m.nextRowID += wrapped.ExistingRowsCount + wrapped.AddedRowsCount
+				if wrapped.Content == ManifestContentData {
+					if wrapped.FirstRowIDValue == nil {
+						if m.nextRowID != nil {
+							firstRowID := *m.nextRowID
+							wrapped.FirstRowIDValue = &firstRowID
+							*m.nextRowID += wrapped.ExistingRowsCount + wrapped.AddedRowsCount
+						}
 					}
 				}
 			}
@@ -1649,6 +1655,52 @@ func WriteManifest(
 	}
 
 	return w.ToManifestFile(filename, cnt.Count)
+}
+
+// WriteManifestV3 writes a v3 data manifest and assigns first_row_id.
+// The returned ManifestFile has FirstRowID() set to firstRowID.
+// nextFirstRowID is firstRowID + AddedRowsCount + ExistingRowsCount
+// for the caller to chain to the next manifest. Use this only for
+// reconstruction — manifests committed through a v3 list writer get
+// first_row_id from AddManifests; pre-setting collides with that allocation.
+func WriteManifestV3(
+	filename string,
+	out io.Writer,
+	firstRowID int64,
+	spec PartitionSpec,
+	schema *Schema,
+	snapshotID int64,
+	entries []ManifestEntry,
+) (mf ManifestFile, nextFirstRowID int64, err error) {
+	cnt := &internal.CountingWriter{W: out}
+
+	w, err := NewManifestWriter(3, cnt, spec, schema, snapshotID)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer internal.CheckedClose(w, &err)
+
+	for _, entry := range entries {
+		if err := w.addEntry(entry.(*manifestEntry)); err != nil {
+			return nil, 0, err
+		}
+	}
+
+	if err := w.Close(); err != nil {
+		return nil, 0, err
+	}
+
+	mf, err = w.ToManifestFile(filename, cnt.Count)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	raw := mf.(*manifestFile)
+	v := firstRowID
+	raw.FirstRowIDValue = &v
+	nextFirstRowID = firstRowID + raw.AddedRowsCount + raw.ExistingRowsCount
+
+	return raw, nextFirstRowID, nil
 }
 
 // ManifestEntryStatus defines constants for the entry status of

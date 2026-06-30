@@ -94,18 +94,14 @@ func TestShreddedArrowSchemaPreservesFieldMeta(t *testing.T) {
 	assert.Same(t, base, ShreddedArrowSchema(base, map[int]arrow.DataType{1: &arrow.FixedSizeBinaryType{ByteWidth: 4}}))
 }
 
-// TestShredRecordVariantsTruthTable drives a non-shredded variant column through
-// ShredRecordVariants and asserts the four (value, typed_value) outcomes, then
-// round-trips the result through UnshredVariant and checks logical equality.
+// TestShredRecordVariantsTruthTable asserts the four (value, typed_value) outcomes
+// and round-trips the result through UnshredVariant.
 func TestShredRecordVariantsTruthTable(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	defer mem.AssertSize(t, 0)
 
-	// Build a non-shredded variant column with four rows:
-	//  0: {a,b}        -> fully shredded (residual value null)
-	//  1: {a,b,extra}  -> partial object (residual value present)
-	//  2: SQL null     -> physical null
-	//  3: variant null -> present, encoded 0x00 in value
+	// Four rows: 0 fully-shredded (residual null), 1 partial-object (residual present),
+	// 2 SQL-null, 3 present variant-null.
 	nb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
 	defer nb.Release()
 	nb.Append(mkVar(t, map[string]any{"a": bigI64, "b": "x"}))

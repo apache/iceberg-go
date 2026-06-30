@@ -948,7 +948,7 @@ func TestGlueRenameTable(t *testing.T) {
 			Description:       aws.String("description"),
 			StorageDescriptor: &types.StorageDescriptor{},
 		},
-	}, nil).Once()
+	}, nil).Twice()
 
 	// Mock CreateTable response
 	mockGlueSvc.On("CreateTable", mock.Anything, &glue.CreateTableInput{
@@ -1051,7 +1051,7 @@ func TestGlueRenameTable_DeleteTableFailureRollback(t *testing.T) {
 			Description:       aws.String("description"),
 			StorageDescriptor: &types.StorageDescriptor{},
 		},
-	}, nil).Once()
+	}, nil).Twice()
 
 	// Mock CreateTable response
 	mockGlueSvc.On("CreateTable", mock.Anything, &glue.CreateTableInput{
@@ -1085,6 +1085,94 @@ func TestGlueRenameTable_DeleteTableFailureRollback(t *testing.T) {
 	renamedTable, err := glueCatalog.RenameTable(context.TODO(), TableIdentifier("test_database", "test_table"), TableIdentifier("test_database", "new_test_table"))
 	assert.Error(err)
 	assert.Nil(renamedTable)
+	mockGlueSvc.AssertCalled(t, "DeleteTable", mock.Anything, &glue.DeleteTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("new_test_table"),
+	}, mock.Anything)
+}
+
+func TestGlueRenameTable_SourceTableChangedRollback(t *testing.T) {
+	assert := require.New(t)
+
+	mockGlueSvc := &mockGlueClient{}
+
+	mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
+		Name: aws.String("test_database"),
+	}, mock.Anything).Return(&glue.GetDatabaseOutput{
+		Database: &types.Database{
+			Name: aws.String("test_database"),
+		},
+	}, nil).Once()
+
+	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything).Return(&glue.GetTableOutput{
+		Table: &types.Table{
+			Name:      aws.String("test_table"),
+			TableType: aws.String("EXTERNAL_TABLE"),
+			VersionId: aws.String("v1"),
+			Parameters: map[string]string{
+				tableParamTableType:        glueTypeIceberg,
+				tableParamMetadataLocation: "s3://test-bucket/test_table/metadata/v1.metadata.json",
+			},
+			Owner:             aws.String("owner"),
+			Description:       aws.String("description"),
+			StorageDescriptor: &types.StorageDescriptor{},
+		},
+	}, nil).Once()
+
+	mockGlueSvc.On("CreateTable", mock.Anything, &glue.CreateTableInput{
+		DatabaseName: aws.String("test_database"),
+		TableInput: &types.TableInput{
+			Name:              aws.String("new_test_table"),
+			TableType:         aws.String("EXTERNAL_TABLE"),
+			Owner:             aws.String("owner"),
+			Description:       aws.String("description"),
+			Parameters:        map[string]string{tableParamTableType: glueTypeIceberg, tableParamMetadataLocation: "s3://test-bucket/test_table/metadata/v1.metadata.json"},
+			StorageDescriptor: &types.StorageDescriptor{},
+		},
+	}, mock.Anything).Return(&glue.CreateTableOutput{}, nil).Once()
+
+	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything).Return(&glue.GetTableOutput{
+		Table: &types.Table{
+			Name:      aws.String("test_table"),
+			TableType: aws.String("EXTERNAL_TABLE"),
+			VersionId: aws.String("v2"),
+			Parameters: map[string]string{
+				tableParamTableType:        glueTypeIceberg,
+				tableParamMetadataLocation: "s3://test-bucket/test_table/metadata/v2.metadata.json",
+			},
+			Owner:             aws.String("owner"),
+			Description:       aws.String("description"),
+			StorageDescriptor: &types.StorageDescriptor{},
+		},
+	}, nil).Once()
+
+	mockGlueSvc.On("DeleteTable", mock.Anything, &glue.DeleteTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("new_test_table"),
+	}, mock.Anything).Return(&glue.DeleteTableOutput{}, nil).Once()
+
+	glueCatalog := &Catalog{
+		glueSvc: mockGlueSvc,
+	}
+
+	renamedTable, err := glueCatalog.RenameTable(
+		context.TODO(),
+		TableIdentifier("test_database", "test_table"),
+		TableIdentifier("test_database", "new_test_table"),
+	)
+	assert.ErrorContains(err, "source table changed during rename")
+	assert.Nil(renamedTable)
+
+	mockGlueSvc.AssertNotCalled(t, "DeleteTable", mock.Anything, &glue.DeleteTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything)
 	mockGlueSvc.AssertCalled(t, "DeleteTable", mock.Anything, &glue.DeleteTableInput{
 		DatabaseName: aws.String("test_database"),
 		Name:         aws.String("new_test_table"),

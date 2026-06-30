@@ -37,6 +37,7 @@ catalog:
     warehouse: s3://my-bucket/warehouse
     credential: <client-id>:<client-secret>
     output: text
+    aws-profile: ""
     rest:
       sigv4-enabled: false
       signing-name: ""
@@ -52,6 +53,7 @@ catalog:
 | `catalog.<name>.warehouse` | Warehouse identifier (REST/Glue) or location (Hive/SQL). |
 | `catalog.<name>.credential` | Credential string passed through to the catalog's auth handler. |
 | `catalog.<name>.output` | CLI output format (e.g. `text`, `json`). |
+| `catalog.<name>.aws-profile` | AWS named profile for the Glue catalog. When unset, the AWS SDK default credential chain is used. |
 | `catalog.<name>.rest.sigv4-enabled` | Enable AWS SigV4 signing for REST. |
 | `catalog.<name>.rest.signing-name` | SigV4 service name. |
 | `catalog.<name>.rest.signing-region` | SigV4 region. |

@@ -266,11 +266,19 @@ func (c *conflictContext) forEachAddedEntry(content iceberg.ManifestContent, vis
 }
 
 // validateDataFilesExist verifies that every file path in
-// referencedPaths is still reachable from the current branch head.
+// referencedPaths is still a live data file on the current branch head.
 // This is the check a position-delete commit performs to prove the
 // files it references have not been removed by a concurrent commit
 // (at which point the pos-delete would apply to rewritten data and
 // produce incorrect results).
+//
+// A file counts as present only if the head carries a non-deleted entry
+// (ADDED or EXISTING) for it. A DELETED entry — left behind by a
+// concurrent compaction or overwrite that rewrote the file — does NOT
+// satisfy existence: the rows moved to a new file, so the pos-delete is
+// orphaned and the commit must be rejected. This mirrors Java's
+// MergingSnapshotProducer, which treats a concurrently-deleted entry for
+// a referenced path as a conflict.
 //
 // Returns ErrDataFilesMissing listing the first few missing paths.
 // The committer should treat this as unrecoverable for the current
@@ -294,12 +302,19 @@ func validateDataFilesExist(ctx *conflictContext, referencedPaths []string) erro
 		return fmt.Errorf("%w: branch %q missing on current metadata", ErrCommitDiverged, ctx.branch)
 	}
 
-	for df, err := range head.dataFiles(ctx.fs, nil) {
+	for entry, err := range head.entries(ctx.fs, iceberg.ManifestContentData) {
 		if err != nil {
 			return fmt.Errorf("iterating data files for current head %d: %w", head.SnapshotID, err)
 		}
-		if _, ok := needed[df.FilePath()]; ok {
-			delete(needed, df.FilePath())
+		// A DELETED entry means the file was removed (e.g. rewritten by a
+		// concurrent compaction); it is no longer live data a pos-delete can
+		// apply to, so it does not satisfy existence.
+		if entry.Status() == iceberg.EntryStatusDELETED {
+			continue
+		}
+		path := entry.DataFile().FilePath()
+		if _, ok := needed[path]; ok {
+			delete(needed, path)
 			if len(needed) == 0 {
 				return nil
 			}
@@ -376,7 +391,10 @@ func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.B
 				continue
 			}
 
-			mEval := manifestEvals.Get(int(mf.PartitionSpecID()))
+			mEval, err := manifestEvals.Get(int(mf.PartitionSpecID()))
+			if err != nil {
+				return fmt.Errorf("failed to build manifest evaluator for spec %d: %w", mf.PartitionSpecID(), err)
+			}
 			keep, err := mEval(mf)
 			if err != nil {
 				return err
@@ -385,7 +403,10 @@ func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.B
 				continue
 			}
 
-			pEval := partitionEvals.Get(int(mf.PartitionSpecID()))
+			pEval, err := partitionEvals.Get(int(mf.PartitionSpecID()))
+			if err != nil {
+				return fmt.Errorf("failed to build partition evaluator for spec %d: %w", mf.PartitionSpecID(), err)
+			}
 			for e, err := range mf.Entries(ctx.fs, false) {
 				if err != nil {
 					return fmt.Errorf("reading entries from manifest %s: %w", mf.FilePath(), err)

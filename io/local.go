@@ -85,3 +85,18 @@ func (LocalFS) Stat(name string) (fs.FileInfo, error) {
 func (LocalFS) Rename(oldpath, newpath string) error {
 	return os.Rename(strings.TrimPrefix(oldpath, "file://"), strings.TrimPrefix(newpath, "file://"))
 }
+
+func (LocalFS) RenameNoReplace(oldpath, newpath string) error {
+	oldpath = strings.TrimPrefix(oldpath, "file://")
+	newpath = strings.TrimPrefix(newpath, "file://")
+
+	if err := os.Link(oldpath, newpath); err != nil {
+		return err
+	}
+
+	// Publishing already succeeded once the hard link exists. Removing the
+	// source temp file is best-effort cleanup.
+	_ = os.Remove(oldpath)
+
+	return nil
+}

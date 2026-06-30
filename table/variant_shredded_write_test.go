@@ -28,6 +28,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/decimal"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
@@ -174,9 +175,8 @@ func writeVariantTable(t *testing.T, props iceberg.Properties) []iceberg.DataFil
 	return files
 }
 
-// TestShreddedVariantWriteRoundTrip writes a variant table with shredding on,
-// asserts the produced file is physically shredded, and that every row reads
-// back to its original value through the standard reader path.
+// TestShreddedVariantWriteRoundTrip writes a shredded variant table and asserts the
+// file is physically shredded and every row reads back to its original value.
 func TestShreddedVariantWriteRoundTrip(t *testing.T) {
 	files := writeVariantTable(t, iceberg.Properties{
 		PropertyFormatVersion:       "3",
@@ -293,9 +293,8 @@ func TestShreddedVariantWriteNoLeak(t *testing.T) {
 	require.Greater(t, nFiles, 1, "tiny target should roll into multiple files (re-bootstrap each)")
 }
 
-// TestShreddedVariantPartitionedWrite verifies shredding works through the
-// fanout writer: each partition's RollingDataWriter bootstraps independently and
-// produces its own shredded file.
+// TestShreddedVariantPartitionedWrite verifies shredding through the fanout writer:
+// each partition bootstraps independently and produces its own shredded file.
 func TestShreddedVariantPartitionedWrite(t *testing.T) {
 	mem := memory.DefaultAllocator
 
@@ -417,9 +416,8 @@ func writeScalarVariantTable(t *testing.T, build func(*variant.Builder) error, n
 	return files, string(want)
 }
 
-// TestShreddedVariantWriteScalarTypes writes a top-level decimal and a timestamp
-// variant column through the real writer to Parquet and reads them back, covering
-// the Parquet logical-type round-trip for non-int/string leaves.
+// TestShreddedVariantWriteScalarTypes writes a top-level decimal and timestamp variant
+// through the real writer to Parquet and reads them back (physical-type + round-trip).
 func TestShreddedVariantWriteScalarTypes(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -575,4 +573,94 @@ func TestShreddedVariantWriteLargeDecimal(t *testing.T) {
 		require.NoError(t, err)
 		assert.JSONEqf(t, want, string(got), "row %d round-trip", i)
 	}
+}
+
+// columnPhysicalType returns the Parquet physical type of a top-level leaf column.
+func columnPhysicalType(t *testing.T, path, name string) parquet.Type {
+	t.Helper()
+	path = strings.TrimPrefix(path, "file://")
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	defer f.Close()
+	pf, err := file.NewParquetReader(f)
+	require.NoError(t, err)
+	defer pf.Close()
+	sc := pf.MetaData().Schema
+	for i := 0; i < sc.NumColumns(); i++ {
+		if col := sc.Column(i); col.Name() == name {
+			return col.PhysicalType()
+		}
+	}
+	t.Fatalf("column %q not found", name)
+
+	return parquet.Types.Undefined
+}
+
+// TestShreddedVariantWriteRegularDecimalStats verifies the file-global
+// StoreDecimalAsInteger (on with shredding) keeps a regular decimal column's bounds correct.
+func TestShreddedVariantWriteRegularDecimalStats(t *testing.T) {
+	mem := memory.DefaultAllocator
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "price", Type: iceberg.DecimalTypeOf(9, 2)},
+		iceberg.NestedField{ID: 3, Name: "payload", Type: iceberg.VariantType{}},
+	)
+	arrSchema, err := SchemaToArrowSchema(iceSchema, nil, true, false)
+	require.NoError(t, err)
+
+	idb := array.NewInt64Builder(mem)
+	defer idb.Release()
+	decb := array.NewDecimal128Builder(mem, &arrow.Decimal128Type{Precision: 9, Scale: 2})
+	defer decb.Release()
+	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
+	defer vb.Release()
+	for i := 1; i <= 6; i++ {
+		idb.Append(int64(i))
+		decb.Append(decimal128.FromI64(int64(i * 100))) // 1.00 .. 6.00
+		var b variant.Builder
+		require.NoError(t, b.Append(map[string]any{"a": int64(5_000_000_000 + i)}))
+		v, err := b.Build()
+		require.NoError(t, err)
+		vb.Append(v)
+	}
+	idArr := idb.NewArray()
+	defer idArr.Release()
+	decArr := decb.NewArray()
+	defer decArr.Release()
+	pArr := vb.NewArray()
+	defer pArr.Release()
+	rec := array.NewRecordBatch(arrSchema, []arrow.Array{idArr, decArr, pArr}, 6)
+	defer rec.Release()
+
+	loc := strings.ReplaceAll(t.TempDir(), "\\", "/")
+	meta, err := NewMetadata(iceSchema, iceberg.UnpartitionedSpec, UnsortedSortOrder, loc, iceberg.Properties{
+		PropertyFormatVersion:   "3",
+		ParquetShredVariantsKey: "true",
+	})
+	require.NoError(t, err)
+	mb, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	u := uuid.New()
+	itr := func(yield func(arrow.RecordBatch, error) bool) { yield(rec, nil) }
+	args := recordWritingArgs{sc: arrSchema, itr: itr, fs: iceio.LocalFS{}, writeUUID: &u, counter: infiniteCounter()}
+	factory, err := newWriterFactory(loc, args, mb, iceSchema, 512*1024*1024)
+	require.NoError(t, err)
+
+	var files []iceberg.DataFile
+	for df, err := range unpartitionedWrite(context.Background(), factory, args.itr) {
+		require.NoError(t, err)
+		files = append(files, df)
+	}
+	require.Len(t, files, 1)
+
+	// precision 9 is written INT32 because shredding enables StoreDecimalAsInteger.
+	assert.Equal(t, parquet.Types.Int32, columnPhysicalType(t, files[0].FilePath(), "price"))
+
+	decTyp := iceberg.DecimalTypeOf(9, 2)
+	lb, err := iceberg.LiteralFromBytes(decTyp, files[0].LowerBoundValues()[2])
+	require.NoError(t, err)
+	ub, err := iceberg.LiteralFromBytes(decTyp, files[0].UpperBoundValues()[2])
+	require.NoError(t, err)
+	assert.Equal(t, decimal128.FromI64(100), lb.(iceberg.DecimalLiteral).Value().Val, "min bound 1.00")
+	assert.Equal(t, decimal128.FromI64(600), ub.(iceberg.DecimalLiteral).Value().Val, "max bound 6.00")
 }

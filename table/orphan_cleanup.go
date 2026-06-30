@@ -304,7 +304,7 @@ func (t Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurren
 
 	// Add version hint file (for Hadoop-style tables)
 	// Following Java's ReachableFileUtil.versionHintLocation() logic:
-	versionHintPath := filepath.Join(metadata.Location(), "metadata", "version-hint.text")
+	versionHintPath := versionHintLocation(metadata.Location())
 	referenced[normalizeFilePath(versionHintPath)] = false
 
 	for sf := range metadata.Statistics() {
@@ -595,6 +595,16 @@ func normalizeFilePathWithConfig(path string, cfg *orphanCleanupConfig) string {
 	}
 
 	return normalizeNonURLPath(path)
+}
+
+func versionHintLocation(tableLocation string) string {
+	if strings.Contains(tableLocation, "://") || strings.HasPrefix(tableLocation, "file:") {
+		if joined, err := url.JoinPath(tableLocation, "metadata", "version-hint.text"); err == nil {
+			return joined
+		}
+	}
+
+	return filepath.Join(tableLocation, "metadata", "version-hint.text")
 }
 
 // normalizeURLPath normalizes URL-based file paths with scheme/authority equivalence.

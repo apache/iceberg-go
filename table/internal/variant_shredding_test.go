@@ -304,9 +304,8 @@ func TestInferredTypedScalarsShred(t *testing.T) {
 	}
 }
 
-// TestAnalyzeFieldCap exercises the >maxShreddedFields cap: with 301 always-present
-// fields, inference keeps exactly 300, evicting the alphabetically-largest on the
-// count tie.
+// TestAnalyzeFieldCap exercises the >maxShreddedFields cap: 301 fields keep exactly
+// 300, evicting the alphabetically-largest on the count tie.
 func TestAnalyzeFieldCap(t *testing.T) {
 	row := make(map[string]any, maxShreddedFields+1)
 	for i := 0; i <= maxShreddedFields; i++ {

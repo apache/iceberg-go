@@ -480,6 +480,45 @@ func (s *FanoutWriterTestSuite) TestTimestampPartitionRejectsOverflowWhenScaling
 	s.Require().ErrorContains(err, "overflows int64")
 }
 
+func (s *FanoutWriterTestSuite) TestGetRecordPartitionsWithDroppedLeadingSourceColumn() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "bar", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "baz", Type: arrow.FixedWidthTypes.Boolean, Nullable: true},
+	}, nil)
+
+	testRecord := s.createCustomTestRecord(arrSchema, [][]any{
+		{int32(7), true},
+	})
+	defer testRecord.Release()
+
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool},
+	)
+
+	spec := iceberg.NewPartitionSpecID(3,
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000,
+			Transform: iceberg.IdentityTransform{}, Name: "foo",
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{2}, FieldID: 1001,
+			Transform: iceberg.IdentityTransform{}, Name: "bar",
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{3}, FieldID: 1002,
+			Transform: iceberg.IdentityTransform{}, Name: "baz",
+		},
+	)
+
+	partitions, err := getRecordPartitions(spec, icebergSchema, testRecord)
+	s.Require().NoError(err)
+	s.Require().Len(partitions, 1)
+	s.Equal(int32(7), partitions[0].partitionRec.Get(0))
+	s.Equal(true, partitions[0].partitionRec.Get(1))
+	s.Equal("bar=7/baz=true", spec.PartitionToPath(partitions[0].partitionRec, icebergSchema))
+}
+
 func (s *FanoutWriterTestSuite) TestVoidTransform() {
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},

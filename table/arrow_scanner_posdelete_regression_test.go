@@ -250,6 +250,21 @@ func TestGroupPosDeletesByFilePathRejectsUnsupportedFilePathLayout(t *testing.T)
 	}
 }
 
+func TestCollectPosDeletePositionsRejectsUnsupportedPosType(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	posArr := int32Array(mem, 1, 2)
+	defer posArr.Release()
+
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int32, []arrow.Array{posArr})
+	defer posCol.Release()
+
+	_, err := collectPosDeletePositions(positionDeletes{posCol})
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Contains(t, err.Error(), "unsupported pos column type")
+}
+
 // TestProcessPositionalDeletesAcrossBatches is the regression net for the
 // positional-delete index bug: processPositionalDeletes applies deletes one Arrow
 // batch at a time, but the surviving-row indices must index into the *current
