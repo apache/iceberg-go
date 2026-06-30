@@ -55,12 +55,15 @@ func validateEqualityFieldIDs(tableSchema *iceberg.Schema, fieldIDs []int) ([]st
 			return nil, fmt.Errorf("%w: field ID %d not found in table schema", iceberg.ErrInvalidSchema, id)
 		}
 
+		// Keep both lookups: FindColumnName returns the dotted path Schema.Select
+		// needs for nested fields, while FindFieldByID exposes the field type.
 		field, ok := tableSchema.FindFieldByID(id)
 		if !ok {
+			// Defensive only: FindColumnName already found this field ID.
 			return nil, fmt.Errorf("%w: field ID %d not found in table schema", iceberg.ErrInvalidSchema, id)
 		}
 		if isFloatingPointType(field.Type) {
-			return nil, fmt.Errorf("%w: equality field ID %d (%s) has unsupported type %s: float and double cannot be used in equality delete field IDs",
+			return nil, fmt.Errorf("%w: equality field ID %d (%s) has unsupported floating-point type %s: floating-point columns cannot be used as equality delete keys",
 				iceberg.ErrInvalidSchema, id, name, field.Type)
 		}
 

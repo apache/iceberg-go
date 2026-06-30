@@ -281,6 +281,8 @@ func newPartitionedEqDeleteTestTable(t *testing.T) *table.Table {
 	iceSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.String, Required: true},
+		iceberg.NestedField{ID: 3, Name: "score", Type: iceberg.PrimitiveTypes.Float32, Required: false},
+		iceberg.NestedField{ID: 4, Name: "price", Type: iceberg.DecimalTypeOf(10, 2), Required: false},
 	)
 
 	partSpec := iceberg.NewPartitionSpec(
@@ -343,6 +345,67 @@ func TestWriteEqualityDeleteFilesPartitionedTable(t *testing.T) {
 			pqSchema := rdr.MetaData().Schema
 			assert.Equal(t, 1, pqSchema.NumColumns(), "parquet file should contain only the equality key column")
 			assert.Equal(t, "id", pqSchema.Column(0).Name())
+		}()
+	}
+}
+
+func TestWriteEqualityDeleteFilesPartitionedTableRejectsFloatFieldID(t *testing.T) {
+	tbl := newPartitionedEqDeleteTestTable(t)
+
+	delSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 3, Name: "score", Type: iceberg.PrimitiveTypes.Float32, Required: false},
+		iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+	delArrowSc, err := table.SchemaToArrowSchema(delSchema, nil, true, false)
+	require.NoError(t, err)
+
+	records, release := makeEqDeleteRecords(t, delArrowSc,
+		`[{"score": 1.5, "category": "books"}]`)
+	defer release()
+
+	tx := tbl.NewTransaction()
+	_, err = tx.WriteEqualityDeletes(t.Context(), []int{3}, records)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "score")
+	assert.ErrorContains(t, err, "float")
+	assert.ErrorContains(t, err, "floating-point columns cannot be used as equality delete keys")
+}
+
+func TestWriteEqualityDeleteFilesPartitionedTableAcceptsDecimalFieldID(t *testing.T) {
+	tbl := newPartitionedEqDeleteTestTable(t)
+
+	delSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 4, Name: "price", Type: iceberg.DecimalTypeOf(10, 2), Required: false},
+		iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+	delArrowSc, err := table.SchemaToArrowSchema(delSchema, nil, true, false)
+	require.NoError(t, err)
+
+	records, release := makeEqDeleteRecords(t, delArrowSc,
+		`[{"price": "12.34", "category": "books"}, {"price": "56.78", "category": "music"}]`)
+	defer release()
+
+	tx := tbl.NewTransaction()
+	files, err := tx.WriteEqualityDeletes(t.Context(), []int{4}, records)
+	require.NoError(t, err)
+	require.Len(t, files, 2, "should produce one file per partition")
+
+	for _, df := range files {
+		assert.Equal(t, iceberg.EntryContentEqDeletes, df.ContentType())
+		assert.Equal(t, []int{4}, df.EqualityFieldIDs())
+
+		func() {
+			f, err := os.Open(df.FilePath())
+			require.NoError(t, err)
+			defer f.Close()
+
+			rdr, err := file.NewParquetReader(f)
+			require.NoError(t, err)
+			defer rdr.Close()
+
+			pqSchema := rdr.MetaData().Schema
+			assert.Equal(t, 1, pqSchema.NumColumns(), "parquet file should contain only the equality key column")
+			assert.Equal(t, "price", pqSchema.Column(0).Name())
 		}()
 	}
 }
