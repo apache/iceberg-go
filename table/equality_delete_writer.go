@@ -35,6 +35,15 @@ var ErrEmptyEqualityFieldIDs = errors.New("equality field IDs must not be empty"
 // equalityDeleteSchema projects a table schema to only the fields specified
 // by the given field IDs, using Schema.Select for proper nested field handling.
 func equalityDeleteSchema(tableSchema *iceberg.Schema, fieldIDs []int) (*iceberg.Schema, error) {
+	names, err := validateEqualityFieldIDs(tableSchema, fieldIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	return tableSchema.Select(true, names...)
+}
+
+func validateEqualityFieldIDs(tableSchema *iceberg.Schema, fieldIDs []int) ([]string, error) {
 	if len(fieldIDs) == 0 {
 		return nil, ErrEmptyEqualityFieldIDs
 	}
@@ -46,10 +55,28 @@ func equalityDeleteSchema(tableSchema *iceberg.Schema, fieldIDs []int) (*iceberg
 			return nil, fmt.Errorf("%w: field ID %d not found in table schema", iceberg.ErrInvalidSchema, id)
 		}
 
+		field, ok := tableSchema.FindFieldByID(id)
+		if !ok {
+			return nil, fmt.Errorf("%w: field ID %d not found in table schema", iceberg.ErrInvalidSchema, id)
+		}
+		if isFloatingPointType(field.Type) {
+			return nil, fmt.Errorf("%w: equality field ID %d (%s) has unsupported type %s: float and double cannot be used in equality delete field IDs",
+				iceberg.ErrInvalidSchema, id, name, field.Type)
+		}
+
 		names = append(names, name)
 	}
 
-	return tableSchema.Select(true, names...)
+	return names, nil
+}
+
+func isFloatingPointType(typ iceberg.Type) bool {
+	switch typ.(type) {
+	case iceberg.Float32Type, iceberg.Float64Type:
+		return true
+	default:
+		return false
+	}
 }
 
 // WriteEqualityDeletes writes Arrow record batches as equality delete
@@ -219,17 +246,16 @@ func equalityDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 // writer to extract partition values from the records while keeping the delete
 // key as the equality identifier.
 func equalityDeleteWriteSchema(tableSchema *iceberg.Schema, equalityFieldIDs []int, spec iceberg.PartitionSpec) (*iceberg.Schema, error) {
+	names, err := validateEqualityFieldIDs(tableSchema, equalityFieldIDs)
+	if err != nil {
+		return nil, err
+	}
+
 	seen := make(map[int]struct{}, len(equalityFieldIDs))
-	names := make([]string, 0, len(equalityFieldIDs))
 
 	// Equality key columns first (deterministic order).
 	for _, id := range equalityFieldIDs {
-		name, ok := tableSchema.FindColumnName(id)
-		if !ok {
-			return nil, fmt.Errorf("%w: field ID %d not found in table schema", iceberg.ErrInvalidSchema, id)
-		}
 		seen[id] = struct{}{}
-		names = append(names, name)
 	}
 
 	// Partition source columns not already in the equality key.

@@ -226,6 +226,53 @@ func TestWriteEqualityDeleteFilesRejectsInvalidFieldID(t *testing.T) {
 	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 }
 
+func TestWriteEqualityDeleteFilesRejectsFloatAndDoubleFieldIDs(t *testing.T) {
+	location := filepath.ToSlash(t.TempDir())
+
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "score", Type: iceberg.PrimitiveTypes.Float32, Required: false},
+		iceberg.NestedField{ID: 3, Name: "ratio", Type: iceberg.PrimitiveTypes.Float64, Required: false},
+	)
+
+	meta, err := table.NewMetadata(iceSchema, iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, location,
+		iceberg.Properties{table.PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+
+	tbl := table.New(
+		table.Identifier{"db", "floating_key_test"},
+		meta, location+"/metadata/v1.metadata.json",
+		func(ctx context.Context) (iceio.IO, error) {
+			return iceio.LocalFS{}, nil
+		},
+		&rowDeltaCatalog{metadata: meta},
+	)
+
+	records := func(yield func(arrow.RecordBatch, error) bool) {}
+
+	tests := []struct {
+		name      string
+		fieldID   int
+		fieldName string
+		fieldType string
+	}{
+		{name: "float", fieldID: 2, fieldName: "score", fieldType: "float"},
+		{name: "double", fieldID: 3, fieldName: "ratio", fieldType: "double"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tx := tbl.NewTransaction()
+			_, err := tx.WriteEqualityDeletes(t.Context(), []int{tt.fieldID}, records)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.ErrorContains(t, err, "equality field ID")
+			assert.ErrorContains(t, err, tt.fieldName)
+			assert.ErrorContains(t, err, tt.fieldType)
+		})
+	}
+}
+
 func newPartitionedEqDeleteTestTable(t *testing.T) *table.Table {
 	t.Helper()
 
