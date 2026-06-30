@@ -43,15 +43,17 @@ type DataFileArgs struct {
 	// unpartitioned tables.
 	Spec iceberg.PartitionSpec
 
-	// Format identifies the on-disk file format of the file being
-	// described and selects the internal FileFormat implementation used
-	// to extract per-column statistics from Metadata.
+	// Format identifies the on-disk file format and selects the internal
+	// FileFormat implementation used to extract per-column statistics from
+	// Metadata. It must match the concrete type of Metadata: the only supported
+	// combination today is [iceberg.ParquetFile] with a *metadata.FileMetaData.
 	Format iceberg.FileFormat
 
-	// Metadata is the format-specific, in-memory file metadata object
-	// produced by the external writer (for example
-	// *parquet/metadata.FileMetaData when Format is
-	// [iceberg.ParquetFile]).
+	// Metadata is the format-specific, in-memory file metadata object produced
+	// by the external writer.
+	//
+	// Its concrete type MUST match Format (caller-enforced): today only
+	// Format == [iceberg.ParquetFile] with *metadata.FileMetaData is supported;
 	Metadata any
 
 	// FilePath is the fully qualified location the file bytes were
@@ -69,6 +71,12 @@ type DataFileArgs struct {
 
 	// PartitionValues maps spec field ID → partition value. Required when Spec
 	// is partitioned; leave nil/empty for unpartitioned tables.
+	//
+	// Values must already be the transform results in the expected Go types.
+	// Void-transform fields must map to nil. This helper validates that the
+	// partition field IDs match the spec, but does not coerce or type-check
+	// partition values; callers are responsible for supplying values of the
+	// correct type.
 	PartitionValues map[int]any
 
 	// SortOrderID is the sort-order ID recorded on the manifest entry,
@@ -92,6 +100,12 @@ type DataFileArgs struct {
 	// Set it for v3 data files; it is not required on v1/v2 tables, and
 	// first_row_id does not apply to delete files.
 	FirstRowID *int64
+
+	// ReferencedDataFile records, for a positional-delete file, the
+	// data file the deletes apply to (the manifest entry's referenced_data_file).
+	// Recommended for positional deletes so engines can scope the delete to a
+	// single data file. MUST be empty for data and equality-delete files.
+	ReferencedDataFile string
 }
 
 // DataFileFromMetadata builds a fully populated [iceberg.DataFile] from a
@@ -107,22 +121,24 @@ type DataFileArgs struct {
 // (delete files); it is NOT committed automatically. The file bytes
 // described by args.Metadata must already have been uploaded to
 // args.FilePath.
-func DataFileFromMetadata(args DataFileArgs) (df iceberg.DataFile, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			df = nil
-			switch e := r.(type) {
-			case error:
-				err = fmt.Errorf("error while building an iceberg datafile: %w", e)
-			default:
-				err = fmt.Errorf("error while building an iceberg datafile: %v", e)
-			}
-		}
-	}()
-
+//
+// Scope and limitations:
+//   - Only Parquet is supported today (args.Format must be
+//     [iceberg.ParquetFile] and args.Metadata a *metadata.FileMetaData).
+//   - All three manifest-entry contents are supported end to end: data,
+//     equality deletes, and positional deletes.
+//   - Row lineage is supported: a data file's first_row_id can be set via
+//     DataFileArgs.FirstRowID for format-version-3+ tables.
+//   - The v3 deletion-vector fields (content_offset and
+//     content_size_in_bytes, used by Puffin-backed deletion vectors) are
+//     out of scope for this helper
+func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 	if args.Schema == nil {
 		return nil, errors.New("schema is required")
 	}
+	// Both nil checks are intentional:
+	//   - args.Metadata == nil catches an unset interface, while
+	//   - pqMeta == nil below catches a typed-nil (*metadata.FileMetaData)(nil)
 	if args.Metadata == nil {
 		return nil, errors.New("file metadata is required")
 	}
@@ -133,7 +149,7 @@ func DataFileFromMetadata(args DataFileArgs) (df iceberg.DataFile, err error) {
 			args.Metadata)
 	}
 	if pqMeta == nil {
-		return nil, errors.New("file metadata is required")
+		return nil, errors.New("metadata pointer is nil")
 	}
 	if args.FilePath == "" {
 		return nil, errors.New("file path is required")
@@ -153,6 +169,7 @@ func DataFileFromMetadata(args DataFileArgs) (df iceberg.DataFile, err error) {
 	if args.Content == iceberg.EntryContentEqDeletes && len(args.EqualityFieldIDs) == 0 {
 		return nil, errors.New("EqualityFieldIDs is required for equality-delete files")
 	}
+
 	if args.Content != iceberg.EntryContentEqDeletes && len(args.EqualityFieldIDs) > 0 {
 		return nil, fmt.Errorf("EqualityFieldIDs must be empty for content %v", args.Content)
 	}
@@ -160,6 +177,14 @@ func DataFileFromMetadata(args DataFileArgs) (df iceberg.DataFile, err error) {
 	if args.Content == iceberg.EntryContentPosDeletes && args.SortOrderID != UnsortedSortOrderID {
 		return nil, fmt.Errorf("position delete file claims sort order id %d; the spec requires unsorted order id (%d)",
 			args.SortOrderID, UnsortedSortOrderID)
+	}
+
+	if args.Content != iceberg.EntryContentData && args.FirstRowID != nil {
+		return nil, fmt.Errorf("FirstRowID must be nil for delete files, got a non-nil value for content %v", args.Content)
+	}
+
+	if args.Content != iceberg.EntryContentPosDeletes && args.ReferencedDataFile != "" {
+		return nil, fmt.Errorf("ReferencedDataFile must be empty for content %v; it applies only to positional-delete files", args.Content)
 	}
 
 	if err := validateContentSchema(args); err != nil {
@@ -185,47 +210,83 @@ func DataFileFromMetadata(args DataFileArgs) (df iceberg.DataFile, err error) {
 		return nil, fmt.Errorf("failed to build path mapping: %w", err)
 	}
 
-	stats := format.DataFileStatsFromMeta(
-		args.Metadata,
-		statsPlan,
-		pathMapping,
-		tblutils.VariantFieldIDsFromSchema(args.Schema),
-	)
-	if stats == nil {
-		return nil, errors.New("failed to build data file stats from metadata")
-	}
-
-	if len(args.EqualityFieldIDs) > 0 {
-		stats.EqualityFieldIDs = args.EqualityFieldIDs
-	}
-
 	partitionValues := args.PartitionValues
 	if partitionValues == nil {
 		partitionValues = make(map[int]any)
 	}
 
-	df = stats.ToDataFile(tblutils.DataFileOpts{
-		Schema:          args.Schema,
-		Spec:            args.Spec,
-		Path:            args.FilePath,
-		Format:          args.Format,
-		Content:         args.Content,
-		FileSize:        args.FileSize,
-		PartitionValues: partitionValues,
-		SortOrderID:     args.SortOrderID,
-		FirstRowID:      args.FirstRowID,
-	})
+	var refDataFile *string
+	if args.ReferencedDataFile != "" {
+		refDataFile = &args.ReferencedDataFile
+	}
+
+	var df iceberg.DataFile
+	// DataFileStatsFromMeta and ToDataFile are the only calls wrapped in recover because they may panic on invalid input
+	// (missing field IDs or builder validation failures),
+	if err := func() (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				switch e := r.(type) {
+				case error:
+					err = fmt.Errorf("error encountered during extracting stats and building the data file: %w", e)
+				default:
+					err = fmt.Errorf("error encountered during extracting stats and building the data file: %v", e)
+				}
+			}
+		}()
+
+		stats := format.DataFileStatsFromMeta(
+			args.Metadata,
+			statsPlan,
+			pathMapping,
+			tblutils.VariantFieldIDsFromSchema(args.Schema),
+		)
+		if stats == nil {
+			return errors.New("failed to build data file stats from metadata")
+		}
+
+		if len(args.EqualityFieldIDs) > 0 {
+			stats.EqualityFieldIDs = args.EqualityFieldIDs
+		}
+
+		df = stats.ToDataFile(tblutils.DataFileOpts{
+			Schema:             args.Schema,
+			Spec:               args.Spec,
+			Path:               args.FilePath,
+			Format:             args.Format,
+			Content:            args.Content,
+			FileSize:           args.FileSize,
+			PartitionValues:    partitionValues,
+			SortOrderID:        args.SortOrderID,
+			FirstRowID:         args.FirstRowID,
+			ReferencedDataFile: refDataFile,
+		})
+
+		return nil
+	}(); err != nil {
+		return nil, err
+	}
 
 	return df, nil
 }
 
 func validateContentSchema(args DataFileArgs) error {
 	switch args.Content {
+	case iceberg.EntryContentData:
+		// Parquet field ids are validated implicitly by DataFileStatsFromMeta
+		// via format.PathToIDMapping(args.Schema), which rejects columns absent
+		// from the schema's field-id mapping and reports
+		// them as an error through the scoped recover.
 	case iceberg.EntryContentEqDeletes:
 		for _, id := range args.EqualityFieldIDs {
-			if _, ok := args.Schema.FindFieldByID(id); !ok {
+			f, ok := args.Schema.FindFieldByID(id)
+			if !ok {
 				return fmt.Errorf(
 					"EqualityFieldIDs contains field id %d which is not present in the supplied schema", id)
+			}
+			if _, ok := f.Type.(iceberg.PrimitiveType); !ok {
+				return fmt.Errorf(
+					"EqualityFieldIDs field id %d (%s) must resolve to a primitive leaf, got %s", id, f.Name, f.Type)
 			}
 		}
 	case iceberg.EntryContentPosDeletes:
