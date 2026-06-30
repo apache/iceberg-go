@@ -26,6 +26,7 @@ import (
 	"io"
 	"iter"
 	"maps"
+	"math"
 	"slices"
 	"strconv"
 	"time"
@@ -504,12 +505,20 @@ func (b *MetadataBuilder) validateAndUpdateRowLineage(snapshot *Snapshot) error 
 			ErrInvalidRowLineage, *snapshot.FirstRowID, nextRowID)
 	}
 
-	newNextRowID := nextRowID + *snapshot.AddedRows
-	if newNextRowID < nextRowID {
-		return fmt.Errorf("%w: next-row-id regressed from %d to %d (added-rows %d)",
-			ErrInvalidRowLineage, nextRowID, newNextRowID, *snapshot.AddedRows)
+	// next-row-id is non-decreasing across snapshots, not strictly increasing:
+	// zero-added-rows snapshots (delete-only or metadata-only commits) are
+	// spec-legal and leave the cursor unchanged, so this accepts a sum equal to
+	// the current cursor rather than requiring it to advance. At this point
+	// AddedRows is non-nil and non-negative (guaranteed by the FirstRowID != nil
+	// check above plus Snapshot.ValidateRowLineage), and nextRowID is
+	// non-negative per spec, so the only thing left to guard is int64 overflow
+	// of the running cursor.
+	if *snapshot.AddedRows > math.MaxInt64-nextRowID {
+		return fmt.Errorf("%w: adding %d rows to next-row-id %d overflows int64",
+			ErrInvalidRowLineage, *snapshot.AddedRows, nextRowID)
 	}
 
+	newNextRowID := nextRowID + *snapshot.AddedRows
 	b.nextRowID = &newNextRowID
 
 	return nil
