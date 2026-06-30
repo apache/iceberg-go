@@ -1087,7 +1087,7 @@ func (s *SqliteCatalogTestSuite) TestLoadTableInvalidMetadata() {
 
 	var metaLoc sql.NullString
 	err = sqldb.QueryRow(
-		`SELECT metadata_location FROM iceberg_tables `+
+		`SELECT metadata_location FROM iceberg_tables ` +
 			`WHERE catalog_name = 'default' AND table_namespace = 'default' AND table_name = 'invalid_metadata'`,
 	).Scan(&metaLoc)
 	s.Require().NoError(err, "the row must exist for this test to exercise the metadata-location branch")
