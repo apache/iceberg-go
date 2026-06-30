@@ -274,35 +274,6 @@ func TestDataFileFromMetadata(t *testing.T) {
 				assert.EqualValues(t, 10, decodeInt32Bound(t, df.UpperBoundValues()[1]))
 			},
 		},
-		{
-			name: "positional-delete file: ReferencedDataFile is plumbed through",
-			sch:  iceberg.PositionalDeleteSchema,
-			rows: `[
-				{"file_path": "s3://bucket/data/data-001.parquet", "pos": 0},
-				{"file_path": "s3://bucket/data/data-001.parquet", "pos": 5}
-			]`,
-			args: func(sch *iceberg.Schema, pqBytes []byte, pqMeta *metadata.FileMetaData) table.DataFileArgs {
-				return table.DataFileArgs{
-					Schema:             sch,
-					Spec:               unpartitioned,
-					Format:             iceberg.ParquetFile,
-					Metadata:           pqMeta,
-					FilePath:           "s3://bucket/data/pos-del-ref.parquet",
-					FileSize:           int64(len(pqBytes)),
-					Content:            iceberg.EntryContentPosDeletes,
-					ReferencedDataFile: "s3://bucket/data/data-001.parquet",
-				}
-			},
-			want: want{
-				content:     iceberg.EntryContentPosDeletes,
-				recordCount: 2,
-				boundIDs:    []int{2147483545, 2147483546},
-			},
-			verify: func(t *testing.T, df iceberg.DataFile) {
-				require.NotNil(t, df.ReferencedDataFile(), "referenced_data_file must be set")
-				assert.Equal(t, "s3://bucket/data/data-001.parquet", *df.ReferencedDataFile())
-			},
-		},
 	}
 
 	for _, tc := range cases {
@@ -484,13 +455,6 @@ func TestDataFileFromMetadata_Errors(t *testing.T) {
 				a.FirstRowID = &v
 			},
 			wantSub: "FirstRowID must be nil for delete files",
-		},
-		{
-			name: "ReferencedDataFile set on a data file",
-			mutate: func(a *table.DataFileArgs) {
-				a.ReferencedDataFile = "s3://bucket/data/data-001.parquet"
-			},
-			wantSub: "ReferencedDataFile must be empty",
 		},
 		{
 			name: "equality field id points to a non-primitive field",
@@ -790,14 +754,13 @@ func TestDataFileFromMetadata_EndToEndRowDelta(t *testing.T) {
 	posBytes, posMeta := parquetMetaFromSchema(t, iceberg.PositionalDeleteSchema,
 		`[{"file_path": "`+dataPath+`", "pos": 0}]`)
 	posDelete, err := table.DataFileFromMetadata(table.DataFileArgs{
-		Schema:             iceberg.PositionalDeleteSchema,
-		Spec:               iceberg.NewPartitionSpec(),
-		Format:             iceberg.ParquetFile,
-		Metadata:           posMeta,
-		FilePath:           "s3://bucket/test/data/pos-del.parquet",
-		FileSize:           int64(len(posBytes)),
-		Content:            iceberg.EntryContentPosDeletes,
-		ReferencedDataFile: dataPath,
+		Schema:   iceberg.PositionalDeleteSchema,
+		Spec:     iceberg.NewPartitionSpec(),
+		Format:   iceberg.ParquetFile,
+		Metadata: posMeta,
+		FilePath: "s3://bucket/test/data/pos-del.parquet",
+		FileSize: int64(len(posBytes)),
+		Content:  iceberg.EntryContentPosDeletes,
 	})
 	require.NoError(t, err)
 
@@ -820,7 +783,7 @@ func TestDataFileFromMetadata_EndToEndRowDelta(t *testing.T) {
 	manifests, err := snap.Manifests(iceio.LocalFS{})
 	require.NoError(t, err)
 
-	var sawReferenced bool
+	var sawPosDelete bool
 	for _, m := range manifests {
 		if m.ManifestContent() != iceberg.ManifestContentDeletes {
 			continue
@@ -828,11 +791,8 @@ func TestDataFileFromMetadata_EndToEndRowDelta(t *testing.T) {
 		for e, err := range m.Entries(iceio.LocalFS{}, true) {
 			require.NoError(t, err)
 			require.Equal(t, iceberg.EntryContentPosDeletes, e.DataFile().ContentType())
-			ref := e.DataFile().ReferencedDataFile()
-			require.NotNil(t, ref, "referenced_data_file must survive the commit")
-			assert.Equal(t, dataPath, *ref)
-			sawReferenced = true
+			sawPosDelete = true
 		}
 	}
-	assert.True(t, sawReferenced, "expected a committed positional-delete entry")
+	assert.True(t, sawPosDelete, "expected a committed positional-delete entry")
 }

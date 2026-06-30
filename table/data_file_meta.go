@@ -52,8 +52,7 @@ type DataFileArgs struct {
 	// Metadata is the format-specific, in-memory file metadata object produced
 	// by the external writer.
 	//
-	// Its concrete type MUST match Format (caller-enforced): today only
-	// Format == [iceberg.ParquetFile] with *metadata.FileMetaData is supported;
+	// Today only Format == [iceberg.ParquetFile] with *metadata.FileMetaData is supported;
 	Metadata any
 
 	// FilePath is the fully qualified location the file bytes were
@@ -100,12 +99,6 @@ type DataFileArgs struct {
 	// Set it for v3 data files; it is not required on v1/v2 tables, and
 	// first_row_id does not apply to delete files.
 	FirstRowID *int64
-
-	// ReferencedDataFile records, for a positional-delete file, the
-	// data file the deletes apply to (the manifest entry's referenced_data_file).
-	// Recommended for positional deletes so engines can scope the delete to a
-	// single data file. MUST be empty for data and equality-delete files.
-	ReferencedDataFile string
 }
 
 // DataFileFromMetadata builds a fully populated [iceberg.DataFile] from a
@@ -129,9 +122,10 @@ type DataFileArgs struct {
 //     equality deletes, and positional deletes.
 //   - Row lineage is supported: a data file's first_row_id can be set via
 //     DataFileArgs.FirstRowID for format-version-3+ tables.
-//   - The v3 deletion-vector fields (content_offset and
-//     content_size_in_bytes, used by Puffin-backed deletion vectors) are
-//     out of scope for this helper
+//   - Iceberg v3 deletion vectors are not supported in this helper function.
+//     The referenced_data_file field is therefore never populated; for v2
+//     position deletes it is an optional spec field that engines may infer
+//     from the file_path column bounds instead.
 func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 	if args.Schema == nil {
 		return nil, errors.New("schema is required")
@@ -183,10 +177,6 @@ func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 		return nil, fmt.Errorf("FirstRowID must be nil for delete files, got a non-nil value for content %v", args.Content)
 	}
 
-	if args.Content != iceberg.EntryContentPosDeletes && args.ReferencedDataFile != "" {
-		return nil, fmt.Errorf("ReferencedDataFile must be empty for content %v; it applies only to positional-delete files", args.Content)
-	}
-
 	if err := validateContentSchema(args); err != nil {
 		return nil, err
 	}
@@ -213,11 +203,6 @@ func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 	partitionValues := args.PartitionValues
 	if partitionValues == nil {
 		partitionValues = make(map[int]any)
-	}
-
-	var refDataFile *string
-	if args.ReferencedDataFile != "" {
-		refDataFile = &args.ReferencedDataFile
 	}
 
 	var df iceberg.DataFile
@@ -250,16 +235,15 @@ func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 		}
 
 		df = stats.ToDataFile(tblutils.DataFileOpts{
-			Schema:             args.Schema,
-			Spec:               args.Spec,
-			Path:               args.FilePath,
-			Format:             args.Format,
-			Content:            args.Content,
-			FileSize:           args.FileSize,
-			PartitionValues:    partitionValues,
-			SortOrderID:        args.SortOrderID,
-			FirstRowID:         args.FirstRowID,
-			ReferencedDataFile: refDataFile,
+			Schema:          args.Schema,
+			Spec:            args.Spec,
+			Path:            args.FilePath,
+			Format:          args.Format,
+			Content:         args.Content,
+			FileSize:        args.FileSize,
+			PartitionValues: partitionValues,
+			SortOrderID:     args.SortOrderID,
+			FirstRowID:      args.FirstRowID,
 		})
 
 		return nil

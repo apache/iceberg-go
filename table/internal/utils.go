@@ -254,7 +254,6 @@ type DataFileOpts struct {
 	// FirstRowID is honored only for EntryContentData; the spec requires it to
 	// be null for delete files.
 	FirstRowID *int64
-	ReferencedDataFile *string
 }
 
 // unsortedSortOrderID mirrors table.UnsortedSortOrderID.
@@ -342,10 +341,6 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 
 	if opts.FirstRowID != nil && opts.Content == iceberg.EntryContentData {
 		bldr.FirstRowID(*opts.FirstRowID)
-	}
-
-	if opts.ReferencedDataFile != nil && opts.Content == iceberg.EntryContentPosDeletes {
-		bldr.ReferencedDataFile(*opts.ReferencedDataFile)
 	}
 
 	return bldr.Build()
