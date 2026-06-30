@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/url"
 	"regexp"
 	"strings"
@@ -210,12 +209,7 @@ func adlsAuthority(parsed *url.URL) string {
 	return parsed.User.String() + "@" + parsed.Host
 }
 
-func adlsObjectLocationExtractor(parsedURL *url.URL, opts ...keyExtractorOption) objectLocationExtractor {
-	var cfg keyExtractorConfig
-	for _, opt := range opts {
-		opt(&cfg)
-	}
-
+func adlsObjectLocationExtractor(parsedURL *url.URL) objectLocationExtractor {
 	expectedAuthority := adlsAuthority(parsedURL)
 
 	return func(location string) (objectLocation, error) {
@@ -225,14 +219,9 @@ func adlsObjectLocationExtractor(parsedURL *url.URL, opts ...keyExtractorOption)
 		}
 
 		authority := matches[2]
-		if cfg.strictAuthorityValidation && authority != expectedAuthority {
+		if authority != expectedAuthority {
 			return objectLocation{}, fmt.Errorf("URI authority %q does not match configured authority %q",
 				authority, expectedAuthority)
-		}
-		if !cfg.strictAuthorityValidation && authority != expectedAuthority {
-			slog.Warn("using cross-authority ADLS URI with configured container",
-				"authority", authority,
-				"configured_authority", expectedAuthority)
 		}
 
 		uriPath := matches[3]
@@ -260,6 +249,6 @@ func adlsObjectLocationExtractor(parsedURL *url.URL, opts ...keyExtractorOption)
 }
 
 // adlsKeyExtractor creates a key extractor for Azure schemes using the adlsURIPattern pattern.
-func adlsKeyExtractor(parsedURL *url.URL, opts ...keyExtractorOption) KeyExtractor {
-	return keyExtractorFromObjectLocation(adlsObjectLocationExtractor(parsedURL, opts...))
+func adlsKeyExtractor(parsedURL *url.URL) KeyExtractor {
+	return keyExtractorFromObjectLocation(adlsObjectLocationExtractor(parsedURL))
 }

@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log/slog"
 	"path/filepath"
 	"strings"
 
@@ -117,18 +116,6 @@ func splitObjectLocation(location string) (objectLocation, error) {
 	}, nil
 }
 
-type keyExtractorConfig struct {
-	strictAuthorityValidation bool
-}
-
-type keyExtractorOption func(*keyExtractorConfig)
-
-func withStrictAuthorityValidation() keyExtractorOption {
-	return func(cfg *keyExtractorConfig) {
-		cfg.strictAuthorityValidation = true
-	}
-}
-
 type objectLocationExtractor func(location string) (objectLocation, error)
 
 func keyExtractorFromObjectLocation(extract objectLocationExtractor) KeyExtractor {
@@ -142,22 +129,7 @@ func keyExtractorFromObjectLocation(extract objectLocationExtractor) KeyExtracto
 	}
 }
 
-// Non-strict cross-authority paths still fold into a storage key so existing
-// manifests keep loading until the FileIO can open per-authority buckets.
-func legacyAuthorityKey(parsed objectLocation) string {
-	if parsed.key == "" {
-		return parsed.authority + "/"
-	}
-
-	return parsed.authority + "/" + parsed.key
-}
-
-func defaultObjectLocationExtractor(bucketName string, opts ...keyExtractorOption) objectLocationExtractor {
-	var cfg keyExtractorConfig
-	for _, opt := range opts {
-		opt(&cfg)
-	}
-
+func defaultObjectLocationExtractor(bucketName string) objectLocationExtractor {
 	return func(location string) (objectLocation, error) {
 		parsed, err := splitObjectLocation(location)
 		if err != nil {
@@ -166,19 +138,8 @@ func defaultObjectLocationExtractor(bucketName string, opts ...keyExtractorOptio
 
 		if parsed.hasAuthority {
 			if parsed.authority != bucketName {
-				if cfg.strictAuthorityValidation {
-					return objectLocation{}, fmt.Errorf("URI authority %q does not match configured authority %q",
-						parsed.authority, bucketName)
-				}
-
-				// Preserve the legacy fold-by-authority behavior on the default
-				// path so existing cross-authority manifests keep loading until
-				// the FileIO can open per-authority buckets.
-				slog.Warn("folding cross-authority object URI into configured bucket",
-					"authority", parsed.authority,
-					"configured_authority", bucketName,
-					"key", parsed.key)
-				parsed.key = legacyAuthorityKey(parsed)
+				return objectLocation{}, fmt.Errorf("URI authority %q does not match configured authority %q",
+					parsed.authority, bucketName)
 			}
 		} else {
 			parsed.key = strings.TrimPrefix(location, bucketName+"/")
@@ -195,8 +156,8 @@ func defaultObjectLocationExtractor(bucketName string, opts ...keyExtractorOptio
 
 // defaultKeyExtractor extracts the object key by removing the scheme and bucket name from the URI.
 // e.g., s3://bucket/path/file -> path/file.
-func defaultKeyExtractor(bucketName string, opts ...keyExtractorOption) KeyExtractor {
-	return keyExtractorFromObjectLocation(defaultObjectLocationExtractor(bucketName, opts...))
+func defaultKeyExtractor(bucketName string) KeyExtractor {
+	return keyExtractorFromObjectLocation(defaultObjectLocationExtractor(bucketName))
 }
 
 type blobFileIO struct {

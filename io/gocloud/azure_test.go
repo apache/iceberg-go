@@ -172,18 +172,12 @@ func TestNewAdlsLocationUriParsing(t *testing.T) {
 }
 
 func TestAdlsKeyExtractor(t *testing.T) {
-	parsed, err := url.Parse("abfs://container@account.dfs.core.windows.net/")
-	require.NoError(t, err)
-
-	extractor := adlsKeyExtractor(parsed)
-	strictExtractor := adlsKeyExtractor(parsed, withStrictAuthorityValidation())
-
 	tests := []struct {
 		name        string
+		root        string
 		input       string
 		expectedKey string
 		expectedErr string
-		strict      bool
 		shouldError bool
 	}{
 		{
@@ -198,11 +192,13 @@ func TestAdlsKeyExtractor(t *testing.T) {
 		},
 		{
 			name:        "wasb valid URI",
+			root:        "wasb://container@account.blob.core.windows.net/",
 			input:       "wasb://container@account.blob.core.windows.net/path/to/file.parquet",
 			expectedKey: "path/to/file.parquet",
 		},
 		{
 			name:        "wasbs valid URI",
+			root:        "wasbs://container@account.blob.core.windows.net/",
 			input:       "wasbs://container@account.blob.core.windows.net/path/to/file.parquet",
 			expectedKey: "path/to/file.parquet",
 		},
@@ -223,9 +219,8 @@ func TestAdlsKeyExtractor(t *testing.T) {
 			shouldError: true,
 		},
 		{
-			name:        "strict URI with different container",
+			name:        "URI with different container",
 			input:       "abfs://other@account.dfs.core.windows.net/path/to/file.parquet",
-			strict:      true,
 			shouldError: true,
 		},
 		{
@@ -237,11 +232,15 @@ func TestAdlsKeyExtractor(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			extract := extractor
-			if test.strict {
-				extract = strictExtractor
+			root := test.root
+			if root == "" {
+				root = "abfs://container@account.dfs.core.windows.net/"
 			}
-			key, err := extract(test.input)
+			parsed, err := url.Parse(root)
+			require.NoError(t, err)
+
+			extractor := adlsKeyExtractor(parsed)
+			key, err := extractor(test.input)
 
 			if test.shouldError {
 				assert.Error(t, err, "Expected error for input: %s", test.input)

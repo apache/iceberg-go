@@ -17,15 +17,6 @@
 
 package io
 
-// Constants for generic object store configuration options.
-const (
-	// ObjectStoreStrictAuthorityValidation rejects fully-qualified object paths
-	// whose URI authority differs from the bucket or container used to create
-	// the FileIO. This is honored only by the Go gocloud-backed FileIO and is
-	// ignored by other Iceberg implementations.
-	ObjectStoreStrictAuthorityValidation = "object-store.strict-authority-validation"
-)
-
 // Constants for S3 configuration options
 const (
 	S3Region          = "s3.region"

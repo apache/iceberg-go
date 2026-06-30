@@ -38,7 +38,6 @@ func TestDefaultKeyExtractor(t *testing.T) {
 		bucketName      string
 		input           string
 		expectedKey     string
-		strict          bool
 		wantErrContains string
 		wantErrIs       error
 	}{
@@ -94,25 +93,13 @@ func TestDefaultKeyExtractor(t *testing.T) {
 			expectedKey: "path/to/file.parquet",
 		},
 		{
-			name:        "s3 URI with different bucket keeps legacy key shape by default",
-			input:       "s3://other-bucket/path/to/file.parquet",
-			expectedKey: "other-bucket/path/to/file.parquet",
-		},
-		{
-			name:        "gs URI with different bucket keeps legacy key shape by default",
-			input:       "gs://other-bucket/path/to/file.parquet",
-			expectedKey: "other-bucket/path/to/file.parquet",
-		},
-		{
-			name:            "strict s3 URI with different bucket",
+			name:            "s3 URI with different bucket",
 			input:           "s3://other-bucket/path/to/file.parquet",
-			strict:          true,
 			wantErrContains: "does not match configured authority",
 		},
 		{
-			name:            "strict gs URI with different bucket",
+			name:            "gs URI with different bucket",
 			input:           "gs://other-bucket/path/to/file.parquet",
-			strict:          true,
 			wantErrContains: "does not match configured authority",
 		},
 		{
@@ -144,11 +131,7 @@ func TestDefaultKeyExtractor(t *testing.T) {
 			if bucketName == "" {
 				bucketName = "my-bucket"
 			}
-			var opts []keyExtractorOption
-			if test.strict {
-				opts = append(opts, withStrictAuthorityValidation())
-			}
-			extractor := defaultKeyExtractor(bucketName, opts...)
+			extractor := defaultKeyExtractor(bucketName)
 			key, err := extractor(test.input)
 
 			if test.wantErrContains != "" {
@@ -164,26 +147,8 @@ func TestDefaultKeyExtractor(t *testing.T) {
 	}
 }
 
-func TestKeyExtractorOptionsRejectsInvalidStrictAuthorityValidation(t *testing.T) {
-	opts, err := keyExtractorOptions(map[string]string{
-		icebergio.ObjectStoreStrictAuthorityValidation: "ture",
-	})
-
-	require.ErrorContains(t, err, icebergio.ObjectStoreStrictAuthorityValidation)
-	assert.Nil(t, opts)
-}
-
-func TestKeyExtractorOptionsParsesStrictAuthorityValidation(t *testing.T) {
-	opts, err := keyExtractorOptions(map[string]string{
-		icebergio.ObjectStoreStrictAuthorityValidation: "true",
-	})
-
-	require.NoError(t, err)
-	assert.Len(t, opts, 1)
-}
-
-func testBlobFileIO(ctx context.Context, bucketName string, bucket *blob.Bucket, opts ...keyExtractorOption) *blobFileIO {
-	extractor := defaultObjectLocationExtractor(bucketName, opts...)
+func testBlobFileIO(ctx context.Context, bucketName string, bucket *blob.Bucket) *blobFileIO {
+	extractor := defaultObjectLocationExtractor(bucketName)
 
 	return &blobFileIO{
 		Bucket:        bucket,
@@ -192,13 +157,13 @@ func testBlobFileIO(ctx context.Context, bucketName string, bucket *blob.Bucket,
 	}
 }
 
-func testADLSBlobFileIO(t *testing.T, ctx context.Context, root string, bucket *blob.Bucket, opts ...keyExtractorOption) *blobFileIO {
+func testADLSBlobFileIO(t *testing.T, ctx context.Context, root string, bucket *blob.Bucket) *blobFileIO {
 	t.Helper()
 
 	parsed, err := url.Parse(root)
 	require.NoError(t, err)
 
-	extractor := adlsObjectLocationExtractor(parsed, opts...)
+	extractor := adlsObjectLocationExtractor(parsed)
 
 	return &blobFileIO{
 		Bucket:        bucket,
@@ -217,7 +182,7 @@ func TestBlobFileIORejectsWrongBucketObjectPaths(t *testing.T) {
 	bucket := memblob.OpenBucket(nil)
 	defer bucket.Close()
 
-	bfs := testBlobFileIO(ctx, "test-bucket", bucket, withStrictAuthorityValidation())
+	bfs := testBlobFileIO(ctx, "test-bucket", bucket)
 
 	for _, tt := range []struct {
 		name   string
@@ -434,7 +399,7 @@ func TestBlobFileIOWalkDirRejectsWrongBucket(t *testing.T) {
 
 	require.NoError(t, bucket.WriteAll(ctx, "data/file1.parquet", []byte("content"), nil))
 
-	bfs := testBlobFileIO(ctx, "test-bucket", bucket, withStrictAuthorityValidation())
+	bfs := testBlobFileIO(ctx, "test-bucket", bucket)
 
 	for _, tt := range []struct {
 		name string
@@ -451,35 +416,6 @@ func TestBlobFileIOWalkDirRejectsWrongBucket(t *testing.T) {
 			})
 			require.ErrorContains(t, err, "does not match configured authority")
 		})
-	}
-}
-
-func TestBlobFileIOWalkDirKeepsCrossAuthorityPathsStableByDefault(t *testing.T) {
-	ctx := context.Background()
-
-	bucket := memblob.OpenBucket(nil)
-	defer bucket.Close()
-
-	require.NoError(t, bucket.WriteAll(ctx, "other-bucket/data/file.parquet", []byte("content"), nil))
-
-	bfs := testBlobFileIO(ctx, "test-bucket", bucket)
-
-	var walked []string
-	err := bfs.WalkDir("s3://other-bucket/data", func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		walked = append(walked, path)
-
-		return nil
-	})
-	require.NoError(t, err)
-
-	assert.Contains(t, walked, "s3://other-bucket/data")
-	assert.Contains(t, walked, "s3://other-bucket/data/file.parquet")
-	for _, path := range walked {
-		assert.NotContains(t, path, "s3://other-bucket/other-bucket/")
 	}
 }
 
@@ -502,8 +438,7 @@ func TestBlobFileIOWalkDirRejectsWrongAzureAuthority(t *testing.T) {
 	bucket := memblob.OpenBucket(nil)
 	defer bucket.Close()
 
-	bfs := testADLSBlobFileIO(t, ctx, "abfs://container@account.dfs.core.windows.net/", bucket,
-		withStrictAuthorityValidation())
+	bfs := testADLSBlobFileIO(t, ctx, "abfs://container@account.dfs.core.windows.net/", bucket)
 
 	err := bfs.WalkDir("abfs://other@account.dfs.core.windows.net/data", func(string, fs.DirEntry, error) error {
 		t.Fatal("WalkDir callback should not be called")
