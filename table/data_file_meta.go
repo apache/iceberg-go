@@ -54,7 +54,7 @@ type DataFileArgs struct {
 	// Metadata is the format-specific, in-memory file metadata object produced
 	// by the external writer.
 	//
-	// Today only Format == [iceberg.ParquetFile] with *metadata.FileMetaData is supported;
+	// Today only Format == [iceberg.ParquetFile] with *metadata.FileMetaData is supported
 	Metadata any
 
 	// FilePath is the fully qualified location the file bytes were
@@ -236,7 +236,7 @@ func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 
 	var df iceberg.DataFile
 	// DataFileStatsFromMeta and ToDataFile are the only calls wrapped in recover because they may panic on invalid input
-	// (missing field IDs or builder validation failures),
+	// (missing field IDs or builder validation failures)
 	if err := func() (err error) {
 		defer func() {
 			if r := recover(); r != nil {
