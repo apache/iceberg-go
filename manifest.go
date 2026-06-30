@@ -1552,7 +1552,7 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 					ErrInvalidArgument, m.version, file.Version())
 			}
 
-			wrapped := *(file.(*manifestFile))
+			wrapped := *file.(*manifestFile)
 			if m.version == 3 {
 				// Ref: https://github.com/apache/iceberg/blob/ea2071568dc66148b483a82eefedcd2992b435f7/core/src/main/java/org/apache/iceberg/ManifestListWriter.java#L157-L168
 				if wrapped.Content == ManifestContentData {
@@ -1880,36 +1880,38 @@ func padOrTruncateBytes(bytes []byte, size int) []byte {
 }
 
 type dataFile struct {
-	Content                 ManifestEntryContent   `avro:"content"`
-	Path                    string                 `avro:"file_path"`
-	Format                  FileFormat             `avro:"file_format"`
-	PartitionData           map[string]any         `avro:"partition"`
-	RecordCount             int64                  `avro:"record_count"`
-	FileSize                int64                  `avro:"file_size_in_bytes"`
-	BlockSizeInBytes        int64                  `avro:"block_size_in_bytes"`
-	ColSizes                *[]colMap[int, int64]  `avro:"column_sizes"`
-	ValCounts               *[]colMap[int, int64]  `avro:"value_counts"`
-	NullCounts              *[]colMap[int, int64]  `avro:"null_value_counts"`
-	NaNCounts               *[]colMap[int, int64]  `avro:"nan_value_counts"`
-	DistinctCounts          *[]colMap[int, int64]  `avro:"distinct_counts"`
-	LowerBounds             *[]colMap[int, []byte] `avro:"lower_bounds"`
-	UpperBounds             *[]colMap[int, []byte] `avro:"upper_bounds"`
-	Key                     *[]byte                `avro:"key_metadata"`
-	Splits                  *[]int64               `avro:"split_offsets"`
-	EqualityIDs             *[]int                 `avro:"equality_ids"`
-	SortOrder               *int                   `avro:"sort_order_id"`
-	FirstRowIDField         *int64                 `avro:"first_row_id"`
-	ReferencedDataFileField *string                `avro:"referenced_data_file"`
-	ContentOffsetField      *int64                 `avro:"content_offset"`
-	ContentSizeInBytesField *int64                 `avro:"content_size_in_bytes"`
+	Content                 ManifestEntryContent                `avro:"content"`
+	Path                    string                              `avro:"file_path"`
+	Format                  FileFormat                          `avro:"file_format"`
+	PartitionData           map[string]any                      `avro:"partition"`
+	RecordCount             int64                               `avro:"record_count"`
+	FileSize                int64                               `avro:"file_size_in_bytes"`
+	BlockSizeInBytes        int64                               `avro:"block_size_in_bytes"`
+	ColSizes                *[]colMap[int, int64]               `avro:"column_sizes"`
+	ValCounts               *[]colMap[int, int64]               `avro:"value_counts"`
+	NullCounts              *[]colMap[int, int64]               `avro:"null_value_counts"`
+	NaNCounts               *[]colMap[int, int64]               `avro:"nan_value_counts"`
+	DistinctCounts          *[]colMap[int, int64]               `avro:"distinct_counts"`
+	LowerBounds             *[]colMap[int, []byte]              `avro:"lower_bounds"`
+	UpperBounds             *[]colMap[int, []byte]              `avro:"upper_bounds"`
+	CollationBoundsData     *[]colMap[int, CollationBoundEntry] `avro:"collation_bounds"`
+	Key                     *[]byte                             `avro:"key_metadata"`
+	Splits                  *[]int64                            `avro:"split_offsets"`
+	EqualityIDs             *[]int                              `avro:"equality_ids"`
+	SortOrder               *int                                `avro:"sort_order_id"`
+	FirstRowIDField         *int64                              `avro:"first_row_id"`
+	ReferencedDataFileField *string                             `avro:"referenced_data_file"`
+	ContentOffsetField      *int64                              `avro:"content_offset"`
+	ContentSizeInBytesField *int64                              `avro:"content_size_in_bytes"`
 
-	colSizeMap     map[int]int64
-	valCntMap      map[int]int64
-	nullCntMap     map[int]int64
-	nanCntMap      map[int]int64
-	distinctCntMap map[int]int64
-	lowerBoundMap  map[int][]byte
-	upperBoundMap  map[int][]byte
+	colSizeMap        map[int]int64
+	valCntMap         map[int]int64
+	nullCntMap        map[int]int64
+	nanCntMap         map[int]int64
+	distinctCntMap    map[int]int64
+	lowerBoundMap     map[int][]byte
+	upperBoundMap     map[int][]byte
+	collationBoundMap map[int]CollationBoundEntry
 
 	// used for partition retrieval
 	fieldNameToID          map[string]int
@@ -1945,6 +1947,7 @@ func (d *dataFile) initColumnStatsData() {
 		d.distinctCntMap = avroColMapToMap(d.DistinctCounts)
 		d.lowerBoundMap = avroColMapToMap(d.LowerBounds)
 		d.upperBoundMap = avroColMapToMap(d.UpperBounds)
+		d.collationBoundMap = avroColMapToMap(d.CollationBoundsData)
 	})
 }
 
@@ -2091,6 +2094,14 @@ func (d *dataFile) UpperBoundValues() map[int][]byte {
 	d.initColumnStatsData()
 
 	return d.upperBoundMap
+}
+
+// CollationBounds returns the collation-aware bounds (prototype) keyed by field
+// ID. Implements CollationBoundsProvider.
+func (d *dataFile) CollationBounds() map[int]CollationBoundEntry {
+	d.initColumnStatsData()
+
+	return d.collationBoundMap
 }
 
 func (d *dataFile) KeyMetadata() []byte {
@@ -2381,6 +2392,17 @@ func (b *DataFileBuilder) UpperBoundValues(bounds map[int][]byte) *DataFileBuild
 	return b
 }
 
+// WithCollationBounds sets the collation-aware bounds for the data file
+// (prototype). Named With… to distinguish the setter from the CollationBounds()
+// accessor. Note: collation_bounds is only present in the v3 data_file Avro
+// schema, so bounds set here are silently dropped when written to a v1/v2
+// manifest.
+func (b *DataFileBuilder) WithCollationBounds(bounds map[int]CollationBoundEntry) *DataFileBuilder {
+	b.d.CollationBoundsData = mapToAvroColMap(bounds)
+
+	return b
+}
+
 // KeyMetadata sets the key metadata for the data file.
 func (b *DataFileBuilder) KeyMetadata(key []byte) *DataFileBuilder {
 	b.d.Key = &key
@@ -2534,7 +2556,8 @@ type ManifestEntry interface {
 	wrap(status ManifestEntryStatus, snapshotID, seqNum, fileSeqNum *int64, datafile DataFile) ManifestEntry
 }
 
-var PositionalDeleteSchema = NewSchema(0,
+var PositionalDeleteSchema = NewSchema(
+	0,
 	NestedField{ID: 2147483546, Type: PrimitiveTypes.String, Name: "file_path", Required: true},
 	NestedField{ID: 2147483545, Type: PrimitiveTypes.Int64, Name: "pos", Required: true},
 )
