@@ -102,9 +102,11 @@ type DataFileArgs struct {
 	// for every other Content value. Every listed ID must be present in Schema.
 	EqualityFieldIDs []int
 
-	// FirstRowID is the _row_id assigned to the first row of the data file.
-	// Set it for v3 data files; it is not required on v1/v2 tables, and
-	// first_row_id does not apply to delete files.
+	// FirstRowID sets the data file's first_row_id (row lineage, v3+).
+	//
+	// Leave it nil for newly-written files — row IDs are assigned by inheritance at commit;
+	// set only when re-registering an existing file whose first_row_id was previously assigned;
+	// always nil for delete files.
 	FirstRowID *int64
 
 	// ReferencedDataFile, when non-nil, records the single data file that a
