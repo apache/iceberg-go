@@ -223,6 +223,20 @@ func (s *SqliteCatalogTestSuite) loadCatalogForTableCreation() *sqlcat.Catalog {
 	return cat.(*sqlcat.Catalog)
 }
 
+func (s *SqliteCatalogTestSuite) loadCatalogWithV1Migration() *sqlcat.Catalog {
+	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
+		"uri":                   s.catalogUri(),
+		sqlcat.DriverKey:        sqliteshim.ShimName,
+		sqlcat.DialectKey:       string(sqlcat.SQLite),
+		"type":                  "sql",
+		"init_catalog_tables":   "true",
+		sqlcat.SchemaVersionKey: sqlcat.SchemaVersionV1,
+	})
+	s.Require().NoError(err)
+
+	return cat.(*sqlcat.Catalog)
+}
+
 func (s *SqliteCatalogTestSuite) TearDownTest() {
 	s.Require().NoError(os.RemoveAll(s.warehouse))
 }
@@ -359,24 +373,67 @@ func (s *SqliteCatalogTestSuite) TestV0SchemaFromIcebergIsMigrated() {
 		catName, nsName, tblName, metaLoc)
 	s.Require().NoError(err)
 
+	_ = s.loadCatalogWithV1Migration()
+
+	columnPresent := func() bool {
+		var present int
+		qErr := sqldb.QueryRow(
+			`SELECT 1 FROM pragma_table_info('iceberg_tables') WHERE name = 'iceberg_type'`,
+		).Scan(&present)
+		s.Require().NoError(qErr, "migration must add iceberg_type column")
+
+		return present == 1
+	}
+	s.True(columnPresent(), "migration must add iceberg_type column")
+
+	rowType := func() sql.NullString {
+		var got sql.NullString
+		qErr := sqldb.QueryRow(
+			`SELECT iceberg_type FROM iceberg_tables WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?`,
+			catName, nsName, tblName,
+		).Scan(&got)
+		s.Require().NoError(qErr)
+
+		return got
+	}
+	s.False(rowType().Valid, "pre-V0 row should keep iceberg_type IS NULL after migration")
+
+	// Re-opening with the same V1 opt-in must be idempotent: the column stays
+	// present and the legacy row's iceberg_type is left NULL (not re-added or stamped).
+	_ = s.loadCatalogWithV1Migration()
+	s.True(columnPresent(), "column must remain present after a second open")
+	s.False(rowType().Valid, "legacy row must remain NULL after a second open")
+}
+
+func (s *SqliteCatalogTestSuite) TestV0SchemaNotMigratedWithoutOptIn() {
+	sqldb := s.getDB()
+	s.confirmNoTables(sqldb)
+
+	_, err := sqldb.Exec(`CREATE TABLE "iceberg_tables" (
+		"catalog_name" VARCHAR NOT NULL,
+		"table_namespace" VARCHAR NOT NULL,
+		"table_name" VARCHAR NOT NULL,
+		"metadata_location" VARCHAR,
+		"previous_metadata_location" VARCHAR,
+		PRIMARY KEY ("catalog_name", "table_namespace", "table_name"))`)
+	s.Require().NoError(err)
+	_, err = sqldb.Exec(`CREATE TABLE "iceberg_namespace_properties" (
+		"catalog_name" VARCHAR NOT NULL,
+		"namespace" VARCHAR NOT NULL,
+		"property_key" VARCHAR NOT NULL,
+		"property_value" VARCHAR,
+		PRIMARY KEY ("catalog_name", "namespace", "property_key"))`)
+	s.Require().NoError(err)
+
+	// Without jdbc.schema-version=V1, opening a legacy V0 catalog must NOT issue
+	// the one-way ALTER; the column stays absent.
 	_ = s.loadCatalogForTableCreation()
 
 	var present int
 	err = sqldb.QueryRow(
 		`SELECT 1 FROM pragma_table_info('iceberg_tables') WHERE name = 'iceberg_type'`,
 	).Scan(&present)
-	s.Require().NoError(err, "migration must add iceberg_type column")
-	s.Equal(1, present)
-
-	var got sql.NullString
-	err = sqldb.QueryRow(
-		`SELECT iceberg_type FROM iceberg_tables WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?`,
-		catName, nsName, tblName,
-	).Scan(&got)
-	s.Require().NoError(err)
-	s.False(got.Valid, "pre-V0 row should keep iceberg_type IS NULL after migration")
-
-	_ = s.loadCatalogForTableCreation()
+	s.ErrorIs(err, sql.ErrNoRows, "iceberg_type column must not be added without the V1 opt-in")
 }
 
 func (s *SqliteCatalogTestSuite) TestV0SchemaListAndDropAcceptNullIcebergType() {
@@ -416,7 +473,9 @@ func (s *SqliteCatalogTestSuite) TestV0SchemaListAndDropAcceptNullIcebergType() 
 		catName, nsName, tblName, metaLoc)
 	s.Require().NoError(err)
 
-	cat := s.loadCatalogForTableCreation()
+	// Migrate to V1: this adds the iceberg_type column and leaves the legacy row
+	// with iceberg_type IS NULL, which the read path must still tolerate.
+	cat := s.loadCatalogWithV1Migration()
 	ctx := context.Background()
 
 	var listed []table.Identifier
@@ -444,6 +503,11 @@ func (s *SqliteCatalogTestSuite) TestV0SchemaLoadCommitRenameAcceptNullIcebergTy
 	cat := s.getCatalogSqlite()
 	ctx := context.Background()
 
+	// This is a proxy for a genuine V0 row: we create the row at V1 (so the
+	// iceberg_type column already exists) and then manually NULL it, rather than
+	// starting from a truly column-less V0 schema migrated up. It exercises the
+	// same NULL-tolerant predicate the read/commit/rename paths rely on.
+
 	tblID := s.randomTableIdentifier()
 	ns := catalog.NamespaceFromIdent(tblID)
 	s.Require().NoError(cat.CreateNamespace(ctx, ns, nil))
@@ -456,14 +520,14 @@ func (s *SqliteCatalogTestSuite) TestV0SchemaLoadCommitRenameAcceptNullIcebergTy
 		res, exErr := sqldb.Exec(
 			`UPDATE iceberg_tables SET iceberg_type = NULL `+
 				`WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?`,
-			"default",
+			cat.Name(),
 			strings.Join(catalog.NamespaceFromIdent(ident), "."),
 			catalog.TableNameFromIdent(ident),
 		)
 		s.Require().NoError(exErr)
 		n, raErr := res.RowsAffected()
 		s.Require().NoError(raErr)
-		s.Require().EqualValues(1, n, "test setup: expected exactly one row to be NULLed")
+		s.Require().Equal(int64(1), n, "test setup: expected exactly one row to be NULLed")
 	}
 	nullIcebergType(tblID)
 
@@ -479,7 +543,7 @@ func (s *SqliteCatalogTestSuite) TestV0SchemaLoadCommitRenameAcceptNullIcebergTy
 	var icebergType sql.NullString
 	err = sqldb.QueryRow(
 		`SELECT iceberg_type FROM iceberg_tables WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?`,
-		"default",
+		cat.Name(),
 		strings.Join(ns, "."),
 		catalog.TableNameFromIdent(tblID),
 	).Scan(&icebergType)
@@ -496,6 +560,132 @@ func (s *SqliteCatalogTestSuite) TestV0SchemaLoadCommitRenameAcceptNullIcebergTy
 	renamed, err := cat.RenameTable(ctx, tblID, toID)
 	s.Require().NoError(err, "RenameTable must accept rows with iceberg_type IS NULL")
 	s.Equal(toID, renamed.Identifier())
+}
+
+func (s *SqliteCatalogTestSuite) createLegacyV0Catalog(sqldb *sql.DB) {
+	_, err := sqldb.Exec(`CREATE TABLE "iceberg_tables" (
+		"catalog_name" VARCHAR NOT NULL,
+		"table_namespace" VARCHAR NOT NULL,
+		"table_name" VARCHAR NOT NULL,
+		"metadata_location" VARCHAR,
+		"previous_metadata_location" VARCHAR,
+		PRIMARY KEY ("catalog_name", "table_namespace", "table_name"))`)
+	s.Require().NoError(err)
+	_, err = sqldb.Exec(`CREATE TABLE "iceberg_namespace_properties" (
+		"catalog_name" VARCHAR NOT NULL,
+		"namespace" VARCHAR NOT NULL,
+		"property_key" VARCHAR NOT NULL,
+		"property_value" VARCHAR,
+		PRIMARY KEY ("catalog_name", "namespace", "property_key"))`)
+	s.Require().NoError(err)
+}
+
+func (s *SqliteCatalogTestSuite) loadCatalogV0NoOptIn() *sqlcat.Catalog {
+	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
+		"uri":             s.catalogUri(),
+		sqlcat.DriverKey:  sqliteshim.ShimName,
+		sqlcat.DialectKey: string(sqlcat.SQLite),
+		"type":            "sql",
+		"warehouse":       "file://" + s.warehouse,
+	})
+	s.Require().NoError(err)
+
+	return cat.(*sqlcat.Catalog)
+}
+
+func (s *SqliteCatalogTestSuite) icebergTypeColumnAbsent(sqldb *sql.DB) {
+	var present int
+	err := sqldb.QueryRow(
+		`SELECT 1 FROM pragma_table_info('iceberg_tables') WHERE name = 'iceberg_type'`,
+	).Scan(&present)
+	s.ErrorIs(err, sql.ErrNoRows, "iceberg_type column must remain absent on a V0 catalog")
+}
+
+func (s *SqliteCatalogTestSuite) TestV0SchemaFullLifecycleWithoutOptIn() {
+	sqldb := s.getDB()
+	s.confirmNoTables(sqldb)
+	s.createLegacyV0Catalog(sqldb)
+
+	cat := s.loadCatalogV0NoOptIn()
+	ctx := context.Background()
+
+	s.icebergTypeColumnAbsent(sqldb)
+
+	tblID := s.randomTableIdentifier()
+	ns := catalog.NamespaceFromIdent(tblID)
+	s.Require().NoError(cat.CreateNamespace(ctx, ns, nil))
+
+	created, err := cat.CreateTable(ctx, tblID, tableSchemaNested)
+	s.Require().NoError(err, "CreateTable must work on a column-less V0 schema")
+	s.Equal(tblID, created.Identifier())
+
+	loaded, err := cat.LoadTable(ctx, tblID)
+	s.Require().NoError(err, "LoadTable must work on a column-less V0 schema")
+	s.Equal(tblID, loaded.Identifier())
+
+	var listed []table.Identifier
+	for ident, iterErr := range cat.ListTables(ctx, ns) {
+		s.Require().NoError(iterErr)
+		listed = append(listed, ident)
+	}
+	s.Require().Len(listed, 1, "ListTables must work on a column-less V0 schema")
+	s.Equal(tblID, listed[0])
+
+	tx := loaded.NewTransaction()
+	s.Require().NoError(tx.SetProperties(iceberg.Properties{"v0.commit.test": "ok"}))
+	_, err = tx.Commit(ctx)
+	s.Require().NoError(err, "CommitTable must work on a column-less V0 schema")
+
+	toID := s.randomTableIdentifier()
+	toNs := catalog.NamespaceFromIdent(toID)
+	s.Require().NoError(cat.CreateNamespace(ctx, toNs, nil))
+
+	renamed, err := cat.RenameTable(ctx, tblID, toID)
+	s.Require().NoError(err, "RenameTable must work on a column-less V0 schema")
+	s.Equal(toID, renamed.Identifier())
+
+	s.Require().NoError(cat.DropTable(ctx, toID), "DropTable must work on a column-less V0 schema")
+	_, err = cat.LoadTable(ctx, toID)
+	s.ErrorIs(err, catalog.ErrNoSuchTable)
+
+	s.icebergTypeColumnAbsent(sqldb)
+}
+
+func (s *SqliteCatalogTestSuite) TestV0SchemaViewOperationsUnsupported() {
+	sqldb := s.getDB()
+	s.confirmNoTables(sqldb)
+	s.createLegacyV0Catalog(sqldb)
+
+	cat := s.loadCatalogV0NoOptIn()
+	ctx := context.Background()
+
+	nsName := databaseName()
+	s.Require().NoError(cat.CreateNamespace(ctx, []string{nsName}, nil))
+
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+	viewID := []string{nsName, tableName()}
+
+	err := cat.CreateView(ctx, viewID, schema, "SELECT 1", nil)
+	s.ErrorContains(err, "V0", "CreateView must be rejected on a V0 catalog")
+
+	_, err = cat.CheckViewExists(ctx, viewID)
+	s.ErrorContains(err, "V0", "CheckViewExists must be rejected on a V0 catalog")
+
+	_, err = cat.LoadView(ctx, viewID)
+	s.ErrorContains(err, "V0", "LoadView must be rejected on a V0 catalog")
+
+	err = cat.DropView(ctx, viewID)
+	s.ErrorContains(err, "V0", "DropView must be rejected on a V0 catalog")
+
+	for _, listErr := range cat.ListViews(ctx, []string{nsName}) {
+		s.ErrorContains(listErr, "V0", "ListViews must be rejected on a V0 catalog")
+
+		break
+	}
+
+	s.icebergTypeColumnAbsent(sqldb)
 }
 
 func (s *SqliteCatalogTestSuite) TestCatalogNameMatchesLoaderArg() {
@@ -880,6 +1070,13 @@ func (s *SqliteCatalogTestSuite) TestLoadTableNotExists() {
 	}
 }
 
+func (s *SqliteCatalogTestSuite) TestLoadTableRowAbsent() {
+	cat := s.loadCatalogForTableCreation()
+
+	_, err := cat.LoadTable(context.Background(), table.Identifier{"default", "does_not_exist"})
+	s.ErrorIs(err, catalog.ErrNoSuchTable)
+}
+
 func (s *SqliteCatalogTestSuite) TestLoadTableInvalidMetadata() {
 	sqldb := s.getDB()
 	cat := s.loadCatalogForTableCreation()
@@ -887,6 +1084,14 @@ func (s *SqliteCatalogTestSuite) TestLoadTableInvalidMetadata() {
 	_, err := sqldb.Exec(`INSERT INTO iceberg_tables (catalog_name, table_namespace, table_name)
 			VALUES ('default', 'default', 'invalid_metadata')`)
 	s.Require().NoError(err)
+
+	var metaLoc sql.NullString
+	err = sqldb.QueryRow(
+		`SELECT metadata_location FROM iceberg_tables `+
+			`WHERE catalog_name = 'default' AND table_namespace = 'default' AND table_name = 'invalid_metadata'`,
+	).Scan(&metaLoc)
+	s.Require().NoError(err, "the row must exist for this test to exercise the metadata-location branch")
+	s.Require().False(metaLoc.Valid, "metadata_location must be NULL")
 
 	_, err = cat.LoadTable(context.Background(), table.Identifier{"default", "invalid_metadata"})
 	s.ErrorIs(err, catalog.ErrNoSuchTable)
