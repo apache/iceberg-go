@@ -129,7 +129,11 @@ func (bfs *BlobFileIO) preprocess(path string) (string, error) {
 	return bfs.keyExtractor(path)
 }
 
-func blobPathError(op, name string, err error) error {
+// blobErrToFsErr converts a gocloud blob error to an error from the fs package; this is
+// necessary for comply with certain iceberg-go/io interface functions that expect fs.ErrNotExist
+// for missing files, rather than the gocloud error. If there is no corresponding fs error, or the
+// mapped error wouldn't be needed, the original error is returned.
+func blobErrToFsErr(op, name string, err error) error {
 	if gcerrors.Code(err) == gcerrors.NotFound {
 		err = fs.ErrNotExist
 	}
@@ -347,7 +351,7 @@ func (bfs *BlobFileIO) ReadFile(path string) ([]byte, error) {
 
 	data, err := bfs.ReadAll(bfs.ctx, key)
 	if err != nil {
-		return nil, blobPathError("ReadFile", path, err)
+		return nil, blobErrToFsErr("ReadFile", path, err)
 	}
 
 	return data, nil
@@ -374,7 +378,7 @@ func (bfs *BlobFileIO) Stat(path string) (fs.FileInfo, error) {
 	}
 
 	if gcerrors.Code(err) != gcerrors.NotFound {
-		return nil, blobPathError("Stat", path, err)
+		return nil, blobErrToFsErr("Stat", path, err)
 	}
 
 	marker := directoryMarker(key)
@@ -388,7 +392,7 @@ func (bfs *BlobFileIO) Stat(path string) (fs.FileInfo, error) {
 				sys:     attrs,
 			}, nil
 		} else if gcerrors.Code(markerErr) != gcerrors.NotFound {
-			return nil, blobPathError("Stat", path, markerErr)
+			return nil, blobErrToFsErr("Stat", path, markerErr)
 		}
 	}
 
@@ -405,7 +409,7 @@ func (bfs *BlobFileIO) Stat(path string) (fs.FileInfo, error) {
 			sys:  obj,
 		}, nil
 	} else if listErr != io.EOF {
-		return nil, blobPathError("Stat", path, listErr)
+		return nil, blobErrToFsErr("Stat", path, listErr)
 	}
 
 	return nil, &fs.PathError{Op: "Stat", Path: path, Err: fs.ErrNotExist}
@@ -424,11 +428,11 @@ func (bfs *BlobFileIO) Rename(oldpath, newpath string) error {
 	}
 
 	if err := bfs.Copy(bfs.ctx, newKey, oldKey, nil); err != nil {
-		return blobPathError("Rename", oldpath, err)
+		return blobErrToFsErr("Rename", oldpath, err)
 	}
 
 	if err := bfs.Delete(bfs.ctx, oldKey); err != nil && gcerrors.Code(err) != gcerrors.NotFound {
-		return blobPathError("Rename", oldpath, err)
+		return blobErrToFsErr("Rename", oldpath, err)
 	}
 
 	return nil
