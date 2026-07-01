@@ -27,7 +27,6 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog/hadoop"
-	"github.com/apache/iceberg-go/internal/recipe"
 	icebergio "github.com/apache/iceberg-go/io"
 	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/apache/iceberg-go/table"
@@ -42,11 +41,6 @@ type HadoopMinIOIntegrationSuite struct {
 	cat       *hadoop.Catalog
 	props     iceberg.Properties
 	warehouse string
-}
-
-func (s *HadoopMinIOIntegrationSuite) SetupSuite() {
-	_, err := recipe.Start(s.T())
-	s.Require().NoError(err)
 }
 
 func (s *HadoopMinIOIntegrationSuite) SetupTest() {
