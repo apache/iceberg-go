@@ -124,6 +124,7 @@ func (f blobFileInfo) ModTime() time.Time { return f.modTime }
 func (f blobFileInfo) IsDir() bool        { return f.mode.IsDir() }
 func (f blobFileInfo) Sys() any           { return f.sys }
 
+// preprocess returns the object key from an input path
 func (bfs *BlobFileIO) preprocess(path string) (string, error) {
 	return bfs.keyExtractor(path)
 }
@@ -136,6 +137,8 @@ func blobPathError(op, name string, err error) error {
 	return &fs.PathError{Op: op, Path: name, Err: err}
 }
 
+// directoryMarker turns a key into a string which can be interpreted as a directory marker
+// for path based operations
 func directoryMarker(key string) string {
 	key = strings.TrimRight(key, "/")
 	if key == "" {
@@ -145,6 +148,7 @@ func directoryMarker(key string) string {
 	return key + "/"
 }
 
+// directoryName returns the last component of a key, which is interpreted as the directory name
 func directoryName(key string) string {
 	key = strings.TrimRight(key, "/")
 	if key == "" {
@@ -311,6 +315,7 @@ func (bfs *BlobFileIO) DeleteFiles(ctx context.Context, paths []string) ([]strin
 	return deleted, errs
 }
 
+// MkdirAll mimics creating a directory by creating a zero-length object for each component of the path
 func (bfs *BlobFileIO) MkdirAll(path string) error {
 	key, err := bfs.preprocess(path)
 	if err != nil {
@@ -333,27 +338,31 @@ func (bfs *BlobFileIO) MkdirAll(path string) error {
 	return nil
 }
 
+// ReadFile reads the contents of the file at the given path and returns it as a byte slice.
 func (bfs *BlobFileIO) ReadFile(path string) ([]byte, error) {
 	key, err := bfs.preprocess(path)
 	if err != nil {
-		return nil, &fs.PathError{Op: "read file", Path: path, Err: err}
+		return nil, &fs.PathError{Op: "ReadFile", Path: path, Err: err}
 	}
 
 	data, err := bfs.ReadAll(bfs.ctx, key)
 	if err != nil {
-		return nil, blobPathError("read file", path, err)
+		return nil, blobPathError("ReadFile", path, err)
 	}
 
 	return data, nil
 }
 
+// Stat interprets the input path as a directory or file and returns the corresponding FileInfo.
+// If the path does not exist, it returns fs.ErrNotExist
 func (bfs *BlobFileIO) Stat(path string) (fs.FileInfo, error) {
 	key, err := bfs.preprocess(path)
 	if err != nil {
-		return nil, &fs.PathError{Op: "stat", Path: path, Err: err}
+		return nil, &fs.PathError{Op: "Stat", Path: path, Err: err}
 	}
 
 	attrs, err := bfs.Attributes(bfs.ctx, key)
+	// if there is no error and we have attributes, we can return a FileInfo for object
 	if err == nil {
 		return blobFileInfo{
 			name:    filepath.Base(key),
@@ -365,10 +374,11 @@ func (bfs *BlobFileIO) Stat(path string) (fs.FileInfo, error) {
 	}
 
 	if gcerrors.Code(err) != gcerrors.NotFound {
-		return nil, blobPathError("stat", path, err)
+		return nil, blobPathError("Stat", path, err)
 	}
 
 	marker := directoryMarker(key)
+	// if the marker exists, we can return a FileInfo for the directory
 	if marker != "" {
 		if attrs, markerErr := bfs.Attributes(bfs.ctx, marker); markerErr == nil {
 			return blobFileInfo{
@@ -378,7 +388,7 @@ func (bfs *BlobFileIO) Stat(path string) (fs.FileInfo, error) {
 				sys:     attrs,
 			}, nil
 		} else if gcerrors.Code(markerErr) != gcerrors.NotFound {
-			return nil, blobPathError("stat", path, markerErr)
+			return nil, blobPathError("Stat", path, markerErr)
 		}
 	}
 
@@ -395,37 +405,41 @@ func (bfs *BlobFileIO) Stat(path string) (fs.FileInfo, error) {
 			sys:  obj,
 		}, nil
 	} else if listErr != io.EOF {
-		return nil, blobPathError("stat", path, listErr)
+		return nil, blobPathError("Stat", path, listErr)
 	}
 
-	return nil, &fs.PathError{Op: "stat", Path: path, Err: fs.ErrNotExist}
+	return nil, &fs.PathError{Op: "Stat", Path: path, Err: fs.ErrNotExist}
 }
 
+// Rename renames a file or directory from oldpath to newpath, replacing newpath if it already exists.
 func (bfs *BlobFileIO) Rename(oldpath, newpath string) error {
 	oldKey, err := bfs.preprocess(oldpath)
 	if err != nil {
-		return &fs.PathError{Op: "rename", Path: oldpath, Err: err}
+		return &fs.PathError{Op: "Rename", Path: oldpath, Err: err}
 	}
 
 	newKey, err := bfs.preprocess(newpath)
 	if err != nil {
-		return &fs.PathError{Op: "rename", Path: newpath, Err: err}
+		return &fs.PathError{Op: "Rename", Path: newpath, Err: err}
 	}
 
 	if err := bfs.Copy(bfs.ctx, newKey, oldKey, nil); err != nil {
-		return blobPathError("rename", oldpath, err)
+		return blobPathError("Rename", oldpath, err)
 	}
 
 	if err := bfs.Delete(bfs.ctx, oldKey); err != nil && gcerrors.Code(err) != gcerrors.NotFound {
-		return blobPathError("rename", oldpath, err)
+		return blobPathError("Rename", oldpath, err)
 	}
 
 	return nil
 }
 
+// RenameNoReplace renames a file or directory from oldpath to newpath, returning an error if newpath already exists.
 func (bfs *BlobFileIO) RenameNoReplace(oldpath, newpath string) error {
 	if _, err := bfs.Stat(newpath); err == nil {
-		return &fs.PathError{Op: "rename", Path: newpath, Err: fs.ErrExist}
+		return &fs.PathError{Op: "RenameNoReplace", Path: newpath, Err: fs.ErrExist}
+		// if the error is just that the file doesn't exist, we can continue with the rename
+		// since we will be creating the new file. If the error is something else, we should return it.
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
@@ -433,15 +447,16 @@ func (bfs *BlobFileIO) RenameNoReplace(oldpath, newpath string) error {
 	return bfs.Rename(oldpath, newpath)
 }
 
+// RemoveAll removes either a single file or interprets the path as and removes both
+// it and and all its children..
 func (bfs *BlobFileIO) RemoveAll(name string) error {
 	key, err := bfs.preprocess(name)
 	if err != nil {
-		return &fs.PathError{Op: "remove all", Path: name, Err: err}
+		return &fs.PathError{Op: "RemoveAll", Path: name, Err: err}
 	}
 
-	var errs error
 	if err := bfs.Delete(bfs.ctx, key); err != nil && gcerrors.Code(err) != gcerrors.NotFound {
-		errs = errors.Join(errs, err)
+		return &fs.PathError{Op: "RemoveAll", Path: name, Err: err}
 	}
 
 	prefix := directoryMarker(key)
@@ -456,17 +471,13 @@ func (bfs *BlobFileIO) RemoveAll(name string) error {
 			break
 		}
 		if err != nil {
-			errs = errors.Join(errs, err)
-
-			break
+			return &fs.PathError{Op: "RemoveAll", Path: name, Err: err}
 		}
+		// If the err in question was NotFound, that just means the object was already deleted,
+		// so we can ignore it and continue deleting the rest of the objects.
 		if err := bfs.Delete(bfs.ctx, obj.Key); err != nil && gcerrors.Code(err) != gcerrors.NotFound {
-			errs = errors.Join(errs, err)
+			return &fs.PathError{Op: "RemoveAll", Path: name, Err: err}
 		}
-	}
-
-	if errs != nil {
-		return &fs.PathError{Op: "remove all", Path: name, Err: errs}
 	}
 
 	return nil
