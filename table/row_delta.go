@@ -134,11 +134,8 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 					f.FilePath())
 			}
 
-			for _, id := range eqIDs {
-				if _, ok := schema.FindFieldByID(id); !ok {
-					return fmt.Errorf("equality field ID %d not found in table schema: %s",
-						id, f.FilePath())
-				}
+			if _, err := validateEqualityFieldIDs(schema, eqIDs); err != nil {
+				return fmt.Errorf("invalid equality delete file %s: %w", f.FilePath(), err)
 			}
 		}
 	}

@@ -57,6 +57,27 @@ func newRowDeltaTestTable(t *testing.T, formatVersion int) *table.Table {
 	)
 }
 
+func newRowDeltaFloatingPointTestTable(t *testing.T) *table.Table {
+	t.Helper()
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "score", Type: iceberg.PrimitiveTypes.Float32, Required: false},
+		iceberg.NestedField{ID: 3, Name: "ratio", Type: iceberg.PrimitiveTypes.Float64, Required: false},
+	)
+
+	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, "s3://bucket/test",
+		iceberg.Properties{table.PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+
+	return table.New(
+		table.Identifier{"db", "floating_key_test"},
+		meta, "s3://bucket/test/metadata/v1.metadata.json",
+		nil, nil,
+	)
+}
+
 func formatVersionStr(v int) string {
 	return string(rune('0' + v))
 }
@@ -212,6 +233,33 @@ func TestRowDeltaRejectsEqDeleteWithInvalidFieldID(t *testing.T) {
 	err := rd.Commit(t.Context())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found in table schema")
+}
+
+func TestRowDeltaRejectsEqDeleteWithFloatAndDoubleFieldIDs(t *testing.T) {
+	tbl := newRowDeltaFloatingPointTestTable(t)
+
+	tests := []struct {
+		name      string
+		fieldID   int
+		fieldName string
+		fieldType string
+	}{
+		{name: "float", fieldID: 2, fieldName: "score", fieldType: "float"},
+		{name: "double", fieldID: 3, fieldName: "ratio", fieldType: "double"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rd := tbl.NewTransaction().NewRowDelta(nil)
+			rd.AddDeletes(buildEqDeleteFile(t, "s3://bucket/data/eq-del.parquet", []int{tt.fieldID}))
+
+			err := rd.Commit(t.Context())
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.ErrorContains(t, err, "eq-del.parquet")
+			assert.ErrorContains(t, err, tt.fieldName)
+			assert.ErrorContains(t, err, tt.fieldType)
+		})
+	}
 }
 
 // rowDeltaCatalog simulates catalog behavior for RowDelta commit tests.
