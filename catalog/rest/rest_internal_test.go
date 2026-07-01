@@ -251,6 +251,88 @@ func TestNewCatalogAcceptsValidAuthURLFromConfig(t *testing.T) {
 	assert.Equal(t, authURL, cat.props[keyAuthUrl])
 }
 
+func TestOAuthServerURIProps(t *testing.T) {
+	t.Parallel()
+
+	const (
+		serverURI = "https://auth.example.com/oauth/tokens"
+		authURL   = "https://legacy.example.com/v1/oauth/tokens"
+	)
+
+	t.Run("oauth2-server-uri configures the token endpoint", func(t *testing.T) {
+		t.Parallel()
+
+		var opts options
+		require.NoError(t, fromProps(iceberg.Properties{keyOAuth2ServerURI: serverURI}, &opts))
+		require.NotNil(t, opts.authUri)
+		assert.Equal(t, serverURI, opts.authUri.String())
+	})
+
+	t.Run("rest.authorization-url still works as an alias", func(t *testing.T) {
+		t.Parallel()
+
+		var opts options
+		require.NoError(t, fromProps(iceberg.Properties{keyAuthUrl: authURL}, &opts))
+		require.NotNil(t, opts.authUri)
+		assert.Equal(t, authURL, opts.authUri.String())
+	})
+
+	t.Run("oauth2-server-uri takes precedence when both are set", func(t *testing.T) {
+		t.Parallel()
+
+		var opts options
+		require.NoError(t, fromProps(iceberg.Properties{
+			keyAuthUrl:         authURL,
+			keyOAuth2ServerURI: serverURI,
+		}, &opts))
+		require.NotNil(t, opts.authUri)
+		assert.Equal(t, serverURI, opts.authUri.String())
+	})
+
+	t.Run("neither key leaves the endpoint unset for fallback", func(t *testing.T) {
+		t.Parallel()
+
+		var opts options
+		require.NoError(t, fromProps(iceberg.Properties{}, &opts))
+		assert.Nil(t, opts.authUri)
+	})
+
+	t.Run("neither key is retained as an additional prop", func(t *testing.T) {
+		t.Parallel()
+
+		var opts options
+		require.NoError(t, fromProps(iceberg.Properties{
+			keyAuthUrl:         authURL,
+			keyOAuth2ServerURI: serverURI,
+		}, &opts))
+		_, hasAuthURL := opts.additionalProps[keyAuthUrl]
+		_, hasServerURI := opts.additionalProps[keyOAuth2ServerURI]
+		assert.False(t, hasAuthURL)
+		assert.False(t, hasServerURI)
+	})
+
+	t.Run("invalid oauth2-server-uri is rejected", func(t *testing.T) {
+		t.Parallel()
+
+		var opts options
+		err := fromProps(iceberg.Properties{keyOAuth2ServerURI: "http://[::1"}, &opts)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "invalid oauth2-server-uri")
+	})
+
+	t.Run("toProps serializes under the portable oauth2-server-uri key", func(t *testing.T) {
+		t.Parallel()
+
+		u, err := url.Parse(serverURI)
+		require.NoError(t, err)
+
+		props := toProps(&options{authUri: u})
+		assert.Equal(t, serverURI, props[keyOAuth2ServerURI])
+		_, hasAuthURL := props[keyAuthUrl]
+		assert.False(t, hasAuthURL)
+	})
+}
+
 func TestTokenAuthenticationPriority(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()

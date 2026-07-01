@@ -81,7 +81,12 @@ const (
 	keyRestSigV4Region  = "rest.signing-region"
 	keyRestSigV4Service = "rest.signing-name"
 	keyAuthUrl          = "rest.authorization-url"
-	keyTlsSkipVerify    = "rest.tls.skip-verify"
+	// keyOAuth2ServerURI is the portable, spec-aligned property for the OAuth2
+	// token endpoint used by Java, PyIceberg and iceberg-rust. It is the
+	// preferred key; keyAuthUrl is retained as a compatibility alias. When both
+	// are set, oauth2-server-uri takes precedence.
+	keyOAuth2ServerURI = "oauth2-server-uri"
+	keyTlsSkipVerify   = "rest.tls.skip-verify"
 
 	keyViewEndpointsSupported = "view-endpoints-supported"
 )
@@ -449,6 +454,11 @@ func handleNon200(rsp *http.Response, override map[int]error) error {
 }
 
 func fromProps(props iceberg.Properties, o *options) error {
+	// The OAuth token endpoint may be configured via either the portable
+	// oauth2-server-uri key or the legacy rest.authorization-url alias. Capture
+	// both and resolve precedence after the loop, since map iteration order is
+	// non-deterministic.
+	var authURL, oauth2ServerURI *url.URL
 	for k, v := range props {
 		switch k {
 		case keyOauthToken:
@@ -470,7 +480,13 @@ func fromProps(props iceberg.Properties, o *options) error {
 			if err != nil {
 				return err
 			}
-			o.authUri = u
+			authURL = u
+		case keyOAuth2ServerURI:
+			u, err := url.Parse(v)
+			if err != nil {
+				return fmt.Errorf("invalid %s %q: %w", keyOAuth2ServerURI, v, err)
+			}
+			oauth2ServerURI = u
 		case keyOauthCredential:
 			o.credential = v
 		case keyScope:
@@ -499,6 +515,15 @@ func fromProps(props iceberg.Properties, o *options) error {
 				o.additionalProps[k] = v
 			}
 		}
+	}
+
+	// oauth2-server-uri is the portable, preferred key and takes precedence over
+	// the rest.authorization-url alias when both are set.
+	switch {
+	case oauth2ServerURI != nil:
+		o.authUri = oauth2ServerURI
+	case authURL != nil:
+		o.authUri = authURL
 	}
 
 	return nil
@@ -552,7 +577,8 @@ func toProps(o *options) iceberg.Properties {
 
 	setIf(keyPrefix, o.prefix)
 	if o.authUri != nil {
-		setIf(keyAuthUrl, o.authUri.String())
+		// Serialize under the portable oauth2-server-uri key.
+		setIf(keyOAuth2ServerURI, o.authUri.String())
 	}
 
 	return props
