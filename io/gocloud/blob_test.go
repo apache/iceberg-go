@@ -89,7 +89,7 @@ func TestNewWriterExistsError(t *testing.T) {
 
 	bucket := memblob.OpenBucket(nil)
 
-	bfs := &blobFileIO{
+	bfs := &BlobFileIO{
 		Bucket:       bucket,
 		keyExtractor: func(path string) (string, error) { return path, nil },
 		ctx:          ctx,
@@ -157,7 +157,7 @@ func TestReadAtResourceCleanup(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var lastReaderClosed bool
-			bfs := &blobFileIO{
+			bfs := &BlobFileIO{
 				Bucket:       bucket,
 				keyExtractor: func(path string) (string, error) { return path, nil },
 				ctx:          ctx,
@@ -208,7 +208,7 @@ func TestBlobFileIOWalkDir(t *testing.T) {
 		require.NoError(t, bucket.WriteAll(ctx, f, []byte("content"), nil))
 	}
 
-	bfs := &blobFileIO{
+	bfs := &BlobFileIO{
 		Bucket:       bucket,
 		keyExtractor: defaultKeyExtractor("test-bucket"),
 		ctx:          ctx,
@@ -246,7 +246,7 @@ func TestBlobFileIOWalkDirSubPath(t *testing.T) {
 	require.NoError(t, bucket.WriteAll(ctx, "data/file2.parquet", []byte("b"), nil))
 	require.NoError(t, bucket.WriteAll(ctx, "metadata/v1.json", []byte("c"), nil))
 
-	bfs := &blobFileIO{
+	bfs := &BlobFileIO{
 		Bucket:       bucket,
 		keyExtractor: defaultKeyExtractor("mybucket"),
 		ctx:          ctx,
@@ -281,7 +281,7 @@ func TestBlobFileIOWalkDirAzureURI(t *testing.T) {
 
 	require.NoError(t, bucket.WriteAll(ctx, "path/to/file.parquet", []byte("data"), nil))
 
-	bfs := &blobFileIO{
+	bfs := &BlobFileIO{
 		Bucket:       bucket,
 		keyExtractor: defaultKeyExtractor("container@account.dfs.core.windows.net"),
 		ctx:          ctx,

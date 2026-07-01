@@ -41,7 +41,7 @@ type blobOpenFile struct {
 	*blob.Reader
 
 	name, key string
-	b         *blobFileIO
+	b         *BlobFileIO
 	ctx       context.Context
 }
 
@@ -91,7 +91,7 @@ func defaultKeyExtractor(bucketName string) KeyExtractor {
 	}
 }
 
-type blobFileIO struct {
+type BlobFileIO struct {
 	*blob.Bucket
 
 	keyExtractor KeyExtractor
@@ -102,13 +102,13 @@ type blobFileIO struct {
 	newRangeReader func(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error)
 }
 
-var _ icebergio.ListableIO = (*blobFileIO)(nil)
+var _ icebergio.ListableIO = (*BlobFileIO)(nil)
 
-func (bfs *blobFileIO) preprocess(path string) (string, error) {
+func (bfs *BlobFileIO) preprocess(path string) (string, error) {
 	return bfs.keyExtractor(path)
 }
 
-func (bfs *blobFileIO) Open(path string) (icebergio.File, error) {
+func (bfs *BlobFileIO) Open(path string) (icebergio.File, error) {
 	var err error
 	path, err = bfs.preprocess(path)
 	if err != nil {
@@ -128,7 +128,7 @@ func (bfs *blobFileIO) Open(path string) (icebergio.File, error) {
 	return &blobOpenFile{Reader: r, name: name, key: key, b: bfs, ctx: bfs.ctx}, nil
 }
 
-func (bfs *blobFileIO) Remove(name string) error {
+func (bfs *BlobFileIO) Remove(name string) error {
 	var err error
 	name, err = bfs.preprocess(name)
 	if err != nil {
@@ -146,11 +146,11 @@ func (bfs *blobFileIO) Remove(name string) error {
 	return nil
 }
 
-func (bfs *blobFileIO) Create(name string) (icebergio.FileWriter, error) {
+func (bfs *BlobFileIO) Create(name string) (icebergio.FileWriter, error) {
 	return bfs.NewWriter(bfs.ctx, name, true, nil)
 }
 
-func (bfs *blobFileIO) WriteFile(name string, content []byte) error {
+func (bfs *BlobFileIO) WriteFile(name string, content []byte) error {
 	var err error
 	name, err = bfs.preprocess(name)
 	if err != nil {
@@ -168,7 +168,7 @@ func (bfs *blobFileIO) WriteFile(name string, content []byte) error {
 //
 // The caller must call Close on the returned Writer, even if the write is
 // aborted.
-func (bfs *blobFileIO) NewWriter(ctx context.Context, path string, overwrite bool, opts *blob.WriterOptions) (w *blobWriteFile, err error) {
+func (bfs *BlobFileIO) NewWriter(ctx context.Context, path string, overwrite bool, opts *blob.WriterOptions) (w *blobWriteFile, err error) {
 	path, err = bfs.preprocess(path)
 	if err != nil {
 		return nil, &fs.PathError{Op: "new writer", Path: path, Err: err}
@@ -199,10 +199,10 @@ func (bfs *blobFileIO) NewWriter(ctx context.Context, path string, overwrite boo
 }
 
 func createBlobFS(ctx context.Context, bucket *blob.Bucket, keyExtractor KeyExtractor) icebergio.IO {
-	return &blobFileIO{Bucket: bucket, keyExtractor: keyExtractor, ctx: ctx}
+	return &BlobFileIO{Bucket: bucket, keyExtractor: keyExtractor, ctx: ctx}
 }
 
-func (bfs *blobFileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
+func (bfs *BlobFileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
 	parsed, err := url.Parse(root)
 	if err != nil {
 		return fmt.Errorf("invalid URL %s: %w", root, err)
@@ -220,7 +220,7 @@ func (bfs *blobFileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
 	})
 }
 
-func (bfs *blobFileIO) DeleteFiles(ctx context.Context, paths []string) ([]string, error) {
+func (bfs *BlobFileIO) DeleteFiles(ctx context.Context, paths []string) ([]string, error) {
 	if len(paths) == 0 {
 		return nil, nil
 	}
@@ -256,10 +256,18 @@ func (bfs *blobFileIO) DeleteFiles(ctx context.Context, paths []string) ([]strin
 	return deleted, errs
 }
 
+func (bfs *BlobFileIO) MkdirAll(path string) error {
+	return nil
+}
+
+func (bfs *BlobFileIO) ReadFile(path string) ([]byte, error) {
+	
+}
+
 type blobWriteFile struct {
 	*blob.Writer
 	name string
-	b    *blobFileIO
+	b    *BlobFileIO
 }
 
 func (f *blobWriteFile) Name() string                { return f.name }
