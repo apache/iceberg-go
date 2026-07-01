@@ -35,5 +35,8 @@ type HadoopCatalogFS interface {
 	icebergio.MkdirAllIO
 }
 
+// LocalFS can be used to implement a Hadoop catalog with a local filesystem.
 var _ HadoopCatalogFS = (*icebergio.LocalFS)(nil)
+
+// BlobFileIO can be used to implement a Hadoop catalog with a blob storage bucket.
 var _ HadoopCatalogFS = (*gocloud.BlobFileIO)(nil)
