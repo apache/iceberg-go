@@ -390,3 +390,79 @@ func TestBlobFileIODeleteFilesEmpty(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, deleted)
 }
+
+func TestBlobFileIOStat(t *testing.T) {
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	require.NoError(t, bucket.WriteAll(ctx, "data/file.parquet", []byte("content"), nil))
+
+	bfs := createBlobFS(ctx, bucket, defaultKeyExtractor("test-bucket")).(*BlobFileIO)
+
+	fileInfo, err := bfs.Stat("s3://test-bucket/data/file.parquet")
+	require.NoError(t, err)
+	assert.Equal(t, "file.parquet", fileInfo.Name())
+	assert.Equal(t, int64(len("content")), fileInfo.Size())
+	assert.False(t, fileInfo.IsDir())
+
+	dirInfo, err := bfs.Stat("s3://test-bucket/data")
+	require.NoError(t, err)
+	assert.Equal(t, "data", dirInfo.Name())
+	assert.True(t, dirInfo.IsDir())
+
+	_, err = bfs.Stat("s3://test-bucket/missing")
+	require.ErrorIs(t, err, fs.ErrNotExist)
+}
+
+func TestBlobFileIOMkdirAll(t *testing.T) {
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	bfs := createBlobFS(ctx, bucket, defaultKeyExtractor("test-bucket")).(*BlobFileIO)
+
+	require.NoError(t, bfs.MkdirAll("s3://test-bucket/a/b/c"))
+
+	for _, key := range []string{"a/", "a/b/", "a/b/c/"} {
+		exists, err := bucket.Exists(ctx, key)
+		require.NoError(t, err)
+		assert.True(t, exists, "%s should exist", key)
+	}
+}
+
+func TestBlobFileIORemoveAll(t *testing.T) {
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	require.NoError(t, bucket.WriteAll(ctx, "data/file.parquet", []byte("file"), nil))
+	require.NoError(t, bucket.WriteAll(ctx, "warehouse/ns/", nil, nil))
+	require.NoError(t, bucket.WriteAll(ctx, "warehouse/ns/tbl/metadata/v1.metadata.json", []byte("metadata"), nil))
+	require.NoError(t, bucket.WriteAll(ctx, "warehouse/ns/tbl/data/00001.parquet", []byte("data"), nil))
+	require.NoError(t, bucket.WriteAll(ctx, "warehouse/other/keep.parquet", []byte("keep"), nil))
+
+	bfs := createBlobFS(ctx, bucket, defaultKeyExtractor("test-bucket")).(*BlobFileIO)
+
+	require.NoError(t, bfs.RemoveAll("s3://test-bucket/data/file.parquet"))
+	exists, err := bucket.Exists(ctx, "data/file.parquet")
+	require.NoError(t, err)
+	assert.False(t, exists)
+
+	require.NoError(t, bfs.RemoveAll("s3://test-bucket/warehouse/ns"))
+	for _, key := range []string{
+		"warehouse/ns/",
+		"warehouse/ns/tbl/metadata/v1.metadata.json",
+		"warehouse/ns/tbl/data/00001.parquet",
+	} {
+		exists, err := bucket.Exists(ctx, key)
+		require.NoError(t, err)
+		assert.False(t, exists, "%s should be removed", key)
+	}
+
+	exists, err = bucket.Exists(ctx, "warehouse/other/keep.parquet")
+	require.NoError(t, err)
+	assert.True(t, exists)
+
+	require.NoError(t, bfs.RemoveAll("s3://test-bucket/missing"))
+}
