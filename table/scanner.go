@@ -287,24 +287,11 @@ func (scan *Scan) Snapshot() *Snapshot {
 }
 
 func (scan *Scan) Projection() (*iceberg.Schema, error) {
-	curSchema := scan.metadata.CurrentSchema()
-	curVersion := scan.metadata.Version()
-	if scan.snapshotID != nil {
-		snap := scan.metadata.SnapshotByID(*scan.snapshotID)
-		if snap == nil {
-			return nil, fmt.Errorf("%w: snapshot not found: %d", ErrInvalidOperation, *scan.snapshotID)
-		}
-
-		if snap.SchemaID != nil {
-			for _, schema := range scan.metadata.Schemas() {
-				if schema.ID == *snap.SchemaID {
-					curSchema = schema
-
-					break
-				}
-			}
-		}
+	curSchema, err := scan.effectiveSchema()
+	if err != nil {
+		return nil, err
 	}
+	curVersion := scan.metadata.Version()
 
 	if scan.includeRowLineage && curVersion < minFormatVersionRowLineage {
 		return nil, fmt.Errorf("%w: row lineage requires format version %d, table is v%d",
@@ -351,6 +338,39 @@ func (scan *Scan) Projection() (*iceberg.Schema, error) {
 	}
 
 	return schema, nil
+}
+
+func (scan *Scan) effectiveSchema() (*iceberg.Schema, error) {
+	curSchema := scan.metadata.CurrentSchema()
+	var snap *Snapshot
+	if scan.snapshotID != nil {
+		snap = scan.metadata.SnapshotByID(*scan.snapshotID)
+		if snap == nil {
+			return nil, fmt.Errorf("%w: snapshot not found: %d", ErrInvalidOperation, *scan.snapshotID)
+		}
+	} else if scan.asOfTimestamp != nil {
+		entries := slices.Collect(scan.metadata.SnapshotLogs())
+		for i := len(entries) - 1; i >= 0; i-- {
+			entry := entries[i]
+			if entry.TimestampMs <= *scan.asOfTimestamp {
+				snap = scan.metadata.SnapshotByID(entry.SnapshotID)
+
+				break
+			}
+		}
+	}
+
+	if snap == nil || snap.SchemaID == nil {
+		return curSchema, nil
+	}
+
+	for _, schema := range scan.metadata.Schemas() {
+		if schema.ID == *snap.SchemaID {
+			return schema, nil
+		}
+	}
+
+	return curSchema, nil
 }
 
 // splitLineageMetadataFields partitions selectedFields into user fields and
@@ -403,24 +423,34 @@ func appendMissingLineageFields(s *iceberg.Schema, lineageFields []iceberg.Neste
 }
 
 func (scan *Scan) buildPartitionProjection(specID int) (iceberg.BooleanExpression, error) {
-	return buildPartitionProjection(specID, scan.metadata, scan.rowFilter, scan.caseSensitive)
+	schema, err := scan.effectiveSchema()
+	if err != nil {
+		return nil, err
+	}
+
+	return buildPartitionProjection(specID, scan.metadata, schema, scan.rowFilter, scan.caseSensitive)
 }
 
-func buildPartitionProjection(specID int, meta Metadata, rowFilter iceberg.BooleanExpression, caseSensitive bool) (iceberg.BooleanExpression, error) {
+func buildPartitionProjection(specID int, meta Metadata, schema *iceberg.Schema, rowFilter iceberg.BooleanExpression, caseSensitive bool) (iceberg.BooleanExpression, error) {
 	spec := meta.PartitionSpecByID(specID)
 	if spec == nil {
 		return nil, fmt.Errorf("%w: id %d", ErrPartitionSpecNotFound, specID)
 	}
-	project := newInclusiveProjection(meta.CurrentSchema(), *spec, caseSensitive)
+	project := newInclusiveProjection(schema, *spec, caseSensitive)
 
 	return project(rowFilter)
 }
 
 func (scan *Scan) buildManifestEvaluator(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
-	return buildManifestEvaluator(specID, scan.metadata, scan.partitionFilters, scan.caseSensitive)
+	schema, err := scan.effectiveSchema()
+	if err != nil {
+		return nil, err
+	}
+
+	return buildManifestEvaluator(specID, scan.metadata, schema, scan.partitionFilters, scan.caseSensitive)
 }
 
-func buildManifestEvaluator(specID int, metadata Metadata, partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression], caseSensitive bool) (func(iceberg.ManifestFile) (bool, error), error) {
+func buildManifestEvaluator(specID int, metadata Metadata, schema *iceberg.Schema, partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression], caseSensitive bool) (func(iceberg.ManifestFile) (bool, error), error) {
 	spec := metadata.PartitionSpecByID(specID)
 	if spec == nil {
 		return nil, fmt.Errorf("%w: id %d", ErrPartitionSpecNotFound, specID)
@@ -431,20 +461,25 @@ func buildManifestEvaluator(specID int, metadata Metadata, partitionFilters *key
 		return nil, err
 	}
 
-	return newManifestEvaluator(*spec, metadata.CurrentSchema(),
+	return newManifestEvaluator(*spec, schema,
 		partitionFilter, caseSensitive)
 }
 
 func (scan *Scan) buildPartitionEvaluator(specID int) (func(iceberg.DataFile) (bool, error), error) {
-	return buildPartitionEvaluator(specID, scan.metadata, scan.partitionFilters, scan.caseSensitive)
+	schema, err := scan.effectiveSchema()
+	if err != nil {
+		return nil, err
+	}
+
+	return buildPartitionEvaluator(specID, scan.metadata, schema, scan.partitionFilters, scan.caseSensitive)
 }
 
-func buildPartitionEvaluator(specID int, metadata Metadata, partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression], caseSensitive bool) (func(iceberg.DataFile) (bool, error), error) {
+func buildPartitionEvaluator(specID int, metadata Metadata, schema *iceberg.Schema, partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression], caseSensitive bool) (func(iceberg.DataFile) (bool, error), error) {
 	spec := metadata.PartitionSpecByID(specID)
 	if spec == nil {
 		return nil, fmt.Errorf("%w: id %d", ErrPartitionSpecNotFound, specID)
 	}
-	partType := spec.PartitionType(metadata.CurrentSchema())
+	partType := spec.PartitionType(schema)
 	partSchema := iceberg.NewSchema(0, partType.FieldList...)
 
 	partitionFilter, err := partitionFilters.Get(specID)
@@ -460,6 +495,12 @@ func buildPartitionEvaluator(specID int, metadata Metadata, partitionFilters *ke
 	return func(d iceberg.DataFile) (bool, error) {
 		return fn(GetPartitionRecord(d, partType))
 	}, nil
+}
+
+func (scan *Scan) partitionFiltersForSchema(schema *iceberg.Schema) *keyDefaultMapErr[int, iceberg.BooleanExpression] {
+	return newKeyDefaultMapWrapErr(func(specID int) (iceberg.BooleanExpression, error) {
+		return buildPartitionProjection(specID, scan.metadata, schema, scan.rowFilter, scan.caseSensitive)
+	})
 }
 
 func (scan *Scan) checkSequenceNumber(minSeqNum int64, manifest iceberg.ManifestFile) bool {
@@ -604,6 +645,15 @@ func matchDVToData(dataEntry iceberg.ManifestEntry, dvIndex map[string]iceberg.M
 // fetchPartitionSpecFilteredManifests retrieves the table's current snapshot,
 // fetches its manifest files, and applies partition-spec filters to remove irrelevant manifests.
 func (scan *Scan) fetchPartitionSpecFilteredManifests(ctx context.Context) ([]iceberg.ManifestFile, error) {
+	schema, err := scan.effectiveSchema()
+	if err != nil {
+		return nil, err
+	}
+
+	return scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema)
+}
+
+func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(ctx context.Context, schema *iceberg.Schema) ([]iceberg.ManifestFile, error) {
 	snap := scan.Snapshot()
 	if snap == nil {
 		return nil, nil
@@ -620,7 +670,10 @@ func (scan *Scan) fetchPartitionSpecFilteredManifests(ctx context.Context) ([]ic
 	}
 
 	// Build per-spec manifest evaluators and filter out irrelevant manifests.
-	manifestEvaluators := newKeyDefaultMapWrapErr(scan.buildManifestEvaluator)
+	partitionFilters := scan.partitionFiltersForSchema(schema)
+	manifestEvaluators := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
+		return buildManifestEvaluator(specID, scan.metadata, schema, partitionFilters, scan.caseSensitive)
+	})
 	filtered := make([]iceberg.ManifestFile, 0, len(manifestList))
 	for _, mf := range manifestList {
 		eval, err := manifestEvaluators.Get(int(mf.PartitionSpecID()))
@@ -645,8 +698,21 @@ func (scan *Scan) collectManifestEntries(
 	ctx context.Context,
 	manifestList []iceberg.ManifestFile,
 ) (*manifestEntries, error) {
+	schema, err := scan.effectiveSchema()
+	if err != nil {
+		return nil, err
+	}
+
+	return scan.collectManifestEntriesWithSchema(ctx, manifestList, schema)
+}
+
+func (scan *Scan) collectManifestEntriesWithSchema(
+	ctx context.Context,
+	manifestList []iceberg.ManifestFile,
+	schema *iceberg.Schema,
+) (*manifestEntries, error) {
 	metricsEval, err := newInclusiveMetricsEvaluator(
-		scan.metadata.CurrentSchema(),
+		schema,
 		scan.rowFilter,
 		scan.caseSensitive,
 		scan.options["include_empty_files"] == "true",
@@ -662,7 +728,10 @@ func (scan *Scan) collectManifestEntries(
 	g, _ := errgroup.WithContext(ctx)
 	g.SetLimit(concurrencyLimit)
 
-	partitionEvaluators := newKeyDefaultMapWrapErr(scan.buildPartitionEvaluator)
+	partitionFilters := scan.partitionFiltersForSchema(schema)
+	partitionEvaluators := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.DataFile) (bool, error), error) {
+		return buildPartitionEvaluator(specID, scan.metadata, schema, partitionFilters, scan.caseSensitive)
+	})
 
 	for _, mf := range manifestList {
 		if !scan.checkSequenceNumber(minSeqNum, mf) {
@@ -748,14 +817,19 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 
 	scan.planIO = nil
 
+	schema, err := scan.effectiveSchema()
+	if err != nil {
+		return nil, err
+	}
+
 	// Step 1: Retrieve filtered manifests based on snapshot and partition specs.
-	manifestList, err := scan.fetchPartitionSpecFilteredManifests(ctx)
+	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema)
 	if err != nil || len(manifestList) == 0 {
 		return nil, err
 	}
 
 	// Step 2: Read manifest entries concurrently, accumulating data and positional deletes.
-	entries, err := scan.collectManifestEntries(ctx, manifestList)
+	entries, err := scan.collectManifestEntriesWithSchema(ctx, manifestList, schema)
 	if err != nil {
 		return nil, err
 	}
@@ -877,8 +951,13 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 		err         error
 	)
 
+	effectiveSchema, err := scan.effectiveSchema()
+	if err != nil {
+		return nil, nil, err
+	}
+
 	if scan.rowFilter != nil {
-		boundFilter, err = iceberg.BindExpr(scan.metadata.CurrentSchema(), scan.rowFilter, scan.caseSensitive)
+		boundFilter, err = iceberg.BindExpr(effectiveSchema, scan.rowFilter, scan.caseSensitive)
 		if err != nil {
 			return nil, nil, err
 		}

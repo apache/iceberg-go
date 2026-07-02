@@ -20,6 +20,7 @@ package table
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"runtime"
 	"strconv"
@@ -390,6 +391,133 @@ func TestBuildPartitionEvaluatorWithInvalidSpecID(t *testing.T) {
 	assert.Nil(t, evaluator)
 	assert.ErrorIs(t, err, ErrPartitionSpecNotFound)
 	assert.ErrorContains(t, err, "id 999")
+}
+
+func TestTimeTravelManifestPruningUsesSnapshotSchema(t *testing.T) {
+	spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   1000,
+		Name:      "id",
+		Transform: iceberg.IdentityTransform{},
+	})
+	scan, _, snapshotID := newSchemaEvolutionScan(t, &spec, iceio.NewMemFS())
+
+	lower := int32Bound(10)
+	upper := int32Bound(20)
+	manifest := iceberg.NewManifestFile(2, "mem://default/table/metadata/manifest.avro", 100, int32(spec.ID()), snapshotID).
+		Partitions([]iceberg.FieldSummary{{
+			ContainsNull: false,
+			LowerBound:   &lower,
+			UpperBound:   &upper,
+		}}).
+		Build()
+
+	eval, err := scan.buildManifestEvaluator(spec.ID())
+	require.NoError(t, err)
+	use, err := eval(manifest)
+	require.NoError(t, err)
+	assert.False(t, use, "old snapshot partition bounds outside the filter should be pruned")
+}
+
+func TestTimeTravelMetricsPruningUsesSnapshotSchema(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	memIO := iceio.NewMemFS()
+	scan, oldSchema, snapshotID := newSchemaEvolutionScan(t, &spec, memIO)
+
+	lower := int32Bound(10)
+	upper := int32Bound(20)
+	dataFile, err := iceberg.NewDataFileBuilder(
+		spec,
+		iceberg.EntryContentData,
+		"mem://default/table/data.parquet",
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		1,
+		1024,
+	)
+	require.NoError(t, err)
+	entry := iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, &snapshotID,
+		dataFile.LowerBoundValues(map[int][]byte{1: lower}).
+			UpperBoundValues(map[int][]byte{1: upper}).
+			Build(),
+	).SequenceNum(1).Build()
+
+	manifestPath := "mem://default/table/metadata/manifest.avro"
+	var manifestBytes bytes.Buffer
+	manifest, err := iceberg.WriteManifest(manifestPath, &manifestBytes, 2, spec, oldSchema, snapshotID, []iceberg.ManifestEntry{entry})
+	require.NoError(t, err)
+	require.NoError(t, memIO.WriteFile(manifestPath, manifestBytes.Bytes()))
+
+	entries, err := scan.collectManifestEntries(context.Background(), []iceberg.ManifestFile{manifest})
+	require.NoError(t, err)
+	assert.Empty(t, entries.dataEntries, "old snapshot file metrics outside the filter should be pruned")
+}
+
+func newSchemaEvolutionScan(t *testing.T, spec *iceberg.PartitionSpec, fs iceio.IO) (*Scan, *iceberg.Schema, int64) {
+	t.Helper()
+
+	oldSchema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID:   1,
+		Name: "id",
+		Type: iceberg.PrimitiveTypes.Int32,
+	})
+	currentSchema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID:   2,
+		Name: "id",
+		Type: iceberg.PrimitiveTypes.Int32,
+	})
+	meta, err := NewMetadata(
+		oldSchema,
+		spec,
+		UnsortedSortOrder,
+		"mem://default/table",
+		iceberg.Properties{PropertyFormatVersion: "2"},
+	)
+	require.NoError(t, err)
+
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	require.NoError(t, builder.AddSchema(currentSchema))
+	require.NoError(t, builder.SetCurrentSchemaID(currentSchema.ID))
+
+	snapshotID := int64(7)
+	oldSchemaID := oldSchema.ID
+	snapshot := &Snapshot{
+		SnapshotID:     snapshotID,
+		SequenceNumber: 1,
+		TimestampMs:    meta.LastUpdatedMillis() + 1,
+		Summary:        &Summary{Operation: OpAppend},
+		SchemaID:       &oldSchemaID,
+	}
+	require.NoError(t, builder.AddSnapshot(snapshot))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, snapshotID, BranchRef))
+
+	built, err := builder.Build()
+	require.NoError(t, err)
+
+	scan := &Scan{
+		metadata:       built,
+		ioF:            func(context.Context) (iceio.IO, error) { return fs, nil },
+		rowFilter:      iceberg.EqualTo(iceberg.Reference("id"), int32(5)),
+		selectedFields: []string{"*"},
+		caseSensitive:  true,
+		snapshotID:     &snapshotID,
+		options:        iceberg.Properties{},
+		limit:          ScanNoLimit,
+		concurrency:    1,
+	}
+	scan.partitionFilters = newKeyDefaultMapWrapErr(scan.buildPartitionProjection)
+
+	return scan, oldSchema, snapshotID
+}
+
+func int32Bound(v int32) []byte {
+	out := make([]byte, 4)
+	binary.LittleEndian.PutUint32(out, uint32(v))
+
+	return out
 }
 
 // TestSynthesizeRowLineageColumns verifies that _row_id and _last_updated_sequence_number

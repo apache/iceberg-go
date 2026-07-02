@@ -1530,11 +1530,11 @@ func newFileClassificationTask(meta Metadata, rowFilter iceberg.BooleanExpressio
 }
 
 func (t *fileClassificationTask) buildManifestEvaluator(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
-	return buildManifestEvaluator(specID, t.meta, t.partitionFilters, t.caseSensitive)
+	return buildManifestEvaluator(specID, t.meta, t.meta.CurrentSchema(), t.partitionFilters, t.caseSensitive)
 }
 
 func (t *fileClassificationTask) buildPartitionProjection(specID int) (iceberg.BooleanExpression, error) {
-	return buildPartitionProjection(specID, t.meta, t.rowFilter, t.caseSensitive)
+	return buildPartitionProjection(specID, t.meta, t.meta.CurrentSchema(), t.rowFilter, t.caseSensitive)
 }
 
 // classifyFilesForFilteredDeletions classifies files for filtered overwrite operations.
