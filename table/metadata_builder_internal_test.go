@@ -1182,6 +1182,31 @@ func TestSetReservedPropertiesFails(t *testing.T) {
 	require.ErrorContains(t, err, "can't set reserved property "+PropertyCurrentSnapshotId)
 }
 
+func TestSetPropertiesClonesProperties(t *testing.T) {
+	builder := builderWithoutChanges(2)
+
+	props := iceberg.Properties{"property": "value"}
+	require.NoError(t, builder.SetProperties(props))
+
+	props["property"] = "mutated"
+	props["added"] = "mutated"
+
+	require.Equal(t, "value", builder.props["property"])
+	require.NotContains(t, builder.props, "added")
+
+	require.Len(t, builder.updates, 1)
+	firstUpdate := builder.updates[0].(*setPropertiesUpdate)
+	require.Equal(t, iceberg.Properties{"property": "value"}, firstUpdate.Updates)
+
+	moreProps := iceberg.Properties{"another-property": "another-value"}
+	require.NoError(t, builder.SetProperties(moreProps))
+	moreProps["another-property"] = "mutated"
+
+	require.Equal(t, iceberg.Properties{"property": "value"}, firstUpdate.Updates)
+	require.Equal(t, "another-value", builder.props["another-property"])
+	require.Equal(t, iceberg.Properties{"another-property": "another-value"}, builder.updates[1].(*setPropertiesUpdate).Updates)
+}
+
 func TestRemoveReservedPropertiesFails(t *testing.T) {
 	builder := builderWithoutChanges(2)
 
