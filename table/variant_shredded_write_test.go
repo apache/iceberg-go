@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"strconv"
 	"strings"
@@ -92,6 +93,33 @@ func payloadHasTypedValue(t *testing.T, path string) bool {
 	}
 
 	return false
+}
+
+// payloadAValues reads the "a" field of every variant row in the file's payload column.
+func payloadAValues(t *testing.T, path string) []int64 {
+	t.Helper()
+	path = strings.TrimPrefix(path, "file://")
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	defer f.Close()
+	tbl, err := pqarrow.ReadTable(context.Background(), f, nil, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	require.NoError(t, err)
+	defer tbl.Release()
+	col := tbl.Column(tbl.Schema().FieldIndices("payload")[0]).Data().Chunk(0).(*extensions.VariantArray)
+	out := make([]int64, 0, col.Len())
+	for i := 0; i < col.Len(); i++ {
+		v, err := col.Value(i)
+		require.NoError(t, err)
+		j, err := v.MarshalJSON()
+		require.NoError(t, err)
+		var m struct {
+			A int64 `json:"a"`
+		}
+		require.NoError(t, json.Unmarshal(j, &m))
+		out = append(out, m.A)
+	}
+
+	return out
 }
 
 // payloadTypedValuePhysicalType returns the Parquet physical type of the scalar
@@ -351,8 +379,16 @@ func TestShreddedVariantPartitionedWrite(t *testing.T) {
 	}
 
 	require.Len(t, files, 2, "two partition values -> two files")
+	seen := map[int64]int{}
 	for _, df := range files {
 		assert.True(t, payloadHasTypedValue(t, df.FilePath()), "each partition's file must be shredded")
+		for _, a := range payloadAValues(t, df.FilePath()) {
+			seen[a]++
+		}
+	}
+	require.Len(t, seen, 8, "all 8 rows present across the partition files")
+	for i := 0; i < 8; i++ {
+		assert.Equalf(t, 1, seen[int64(5_000_000_000+i)], "row a=%d present exactly once", 5_000_000_000+i)
 	}
 }
 
@@ -663,4 +699,70 @@ func TestShreddedVariantWriteRegularDecimalStats(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, decimal128.FromI64(100), lb.(iceberg.DecimalLiteral).Value().Val, "min bound 1.00")
 	assert.Equal(t, decimal128.FromI64(600), ub.(iceberg.DecimalLiteral).Value().Val, "max bound 6.00")
+}
+
+// TestShreddedVariantClusteredWrite verifies shredding through the clustered writer.
+func TestShreddedVariantClusteredWrite(t *testing.T) {
+	mem := memory.DefaultAllocator
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "p", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+	arrSchema, err := SchemaToArrowSchema(iceSchema, nil, true, false)
+	require.NoError(t, err)
+
+	pb := array.NewInt64Builder(mem)
+	defer pb.Release()
+	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
+	defer vb.Release()
+	for i := 0; i < 8; i++ {
+		pb.Append(int64(i / 4)) // clustered: 0,0,0,0,1,1,1,1
+		var b variant.Builder
+		require.NoError(t, b.Append(map[string]any{"a": int64(5_000_000_000 + i), "b": "row"}))
+		v, err := b.Build()
+		require.NoError(t, err)
+		vb.Append(v)
+	}
+	pArr := pb.NewInt64Array()
+	defer pArr.Release()
+	payloadArr := vb.NewArray()
+	defer payloadArr.Release()
+	rec := array.NewRecordBatch(arrSchema, []arrow.Array{pArr, payloadArr}, 8)
+	defer rec.Release()
+
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "p",
+	})
+	loc := strings.ReplaceAll(t.TempDir(), "\\", "/")
+	meta, err := NewMetadata(iceSchema, &spec, UnsortedSortOrder, loc, iceberg.Properties{
+		PropertyFormatVersion:   "3",
+		ParquetShredVariantsKey: "true",
+	})
+	require.NoError(t, err)
+	metaBuilder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+
+	writeUUID := uuid.New()
+	itr := func(yield func(arrow.RecordBatch, error) bool) { yield(rec, nil) }
+	args := recordWritingArgs{sc: arrSchema, itr: itr, fs: iceio.LocalFS{}, writeUUID: &writeUUID, counter: infiniteCounter()}
+	factory, err := newWriterFactory(loc, args, metaBuilder, iceSchema, 512*1024*1024)
+	require.NoError(t, err)
+
+	var files []iceberg.DataFile
+	for df, err := range clusteredPartitionedWrite(context.Background(), spec, iceSchema, factory, args.itr) {
+		require.NoError(t, err)
+		files = append(files, df)
+	}
+	require.Len(t, files, 2, "two partition values -> two files")
+	seen := map[int64]int{}
+	for _, df := range files {
+		assert.True(t, payloadHasTypedValue(t, df.FilePath()), "each clustered partition's file must be shredded")
+		for _, a := range payloadAValues(t, df.FilePath()) {
+			seen[a]++
+		}
+	}
+	require.Len(t, seen, 8, "all 8 rows present across the partition files")
+	for i := 0; i < 8; i++ {
+		assert.Equalf(t, 1, seen[int64(5_000_000_000+i)], "row a=%d present exactly once", 5_000_000_000+i)
+	}
 }
