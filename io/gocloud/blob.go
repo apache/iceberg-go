@@ -24,8 +24,7 @@ import (
 	"io"
 	"io/fs"
 	"net/url"
-	"path"
-	"path/filepath"
+	pathpkg "path"
 	"strings"
 	"time"
 
@@ -131,8 +130,7 @@ func (bfs *BlobFileIO) preprocess(path string) (string, error) {
 
 // blobErrToFsErr converts a gocloud blob error to an error from the fs package; this is
 // necessary for comply with certain iceberg-go/io interface functions that expect fs.ErrNotExist
-// for missing files, rather than the gocloud error. If there is no corresponding fs error, or the
-// mapped error wouldn't be needed, the original error is returned.
+// for missing files, rather than the gocloud error.
 func blobErrToFsErr(op, name string, err error) error {
 	if gcerrors.Code(err) == gcerrors.NotFound {
 		err = fs.ErrNotExist
@@ -159,7 +157,7 @@ func directoryName(key string) string {
 		return "."
 	}
 
-	return path.Base(key)
+	return pathpkg.Base(key)
 }
 
 func (bfs *BlobFileIO) Open(path string) (icebergio.File, error) {
@@ -172,7 +170,7 @@ func (bfs *BlobFileIO) Open(path string) (icebergio.File, error) {
 		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrInvalid}
 	}
 
-	key, name := path, filepath.Base(path)
+	key, name := path, pathpkg.Base(path)
 
 	r, err := bfs.NewReader(bfs.ctx, key, nil)
 	if err != nil {
@@ -369,7 +367,7 @@ func (bfs *BlobFileIO) Stat(path string) (fs.FileInfo, error) {
 	// if there is no error and we have attributes, we can return a FileInfo for object
 	if err == nil {
 		return blobFileInfo{
-			name:    filepath.Base(key),
+			name:    pathpkg.Base(key),
 			size:    attrs.Size,
 			mode:    fs.ModeIrregular,
 			modTime: attrs.ModTime,
@@ -415,7 +413,7 @@ func (bfs *BlobFileIO) Stat(path string) (fs.FileInfo, error) {
 	return nil, &fs.PathError{Op: "Stat", Path: path, Err: fs.ErrNotExist}
 }
 
-// Rename renames a file or directory from oldpath to newpath, replacing newpath if it already exists.
+// Rename renames one file from oldpath to newpath, replacing newpath if it already exists.
 func (bfs *BlobFileIO) Rename(oldpath, newpath string) error {
 	oldKey, err := bfs.preprocess(oldpath)
 	if err != nil {
