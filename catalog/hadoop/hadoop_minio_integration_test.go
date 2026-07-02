@@ -35,7 +35,7 @@ import (
 	"github.com/stretchr/testify/suite"
 )
 
-type TestHadoopIntegrationMinIO struct {
+type HadoopMinIOIntegrationSuite struct {
 	suite.Suite
 
 	ctx       context.Context
@@ -44,7 +44,7 @@ type TestHadoopIntegrationMinIO struct {
 	warehouse string
 }
 
-func (s *TestHadoopIntegrationMinIO) SetupTest() {
+func (s *HadoopMinIOIntegrationSuite) SetupTest() {
 	s.ctx = context.Background()
 	s.warehouse = fmt.Sprintf("s3a://warehouse/hadoop-minio/%s", uuid.NewString())
 	s.props = iceberg.Properties{
@@ -61,7 +61,7 @@ func (s *TestHadoopIntegrationMinIO) SetupTest() {
 	s.cat = cat
 }
 
-func (s *TestHadoopIntegrationMinIO) testSchema() *iceberg.Schema {
+func (s *HadoopMinIOIntegrationSuite) testSchema() *iceberg.Schema {
 	return iceberg.NewSchema(
 		1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
@@ -69,7 +69,7 @@ func (s *TestHadoopIntegrationMinIO) testSchema() *iceberg.Schema {
 	)
 }
 
-func (s *TestHadoopIntegrationMinIO) TearDownTest() {
+func (s *HadoopMinIOIntegrationSuite) TearDownTest() {
 	fs, err := icebergio.LoadFS(s.ctx, s.props, s.warehouse)
 	if err != nil {
 		return
@@ -80,7 +80,7 @@ func (s *TestHadoopIntegrationMinIO) TearDownTest() {
 	}
 }
 
-func (s *TestHadoopIntegrationMinIO) TestNamespaceTableRoundTrip() {
+func (s *HadoopMinIOIntegrationSuite) TestNamespaceTableRoundTrip() {
 	ns := table.Identifier{"minio_ns"}
 	ident := table.Identifier{"minio_ns", "tbl"}
 
@@ -114,7 +114,7 @@ func (s *TestHadoopIntegrationMinIO) TestNamespaceTableRoundTrip() {
 	s.False(tableExists)
 }
 
-func (s *TestHadoopIntegrationMinIO) TestListTablesEmptyNamespace() {
+func (s *HadoopMinIOIntegrationSuite) TestListTablesEmptyNamespace() {
 	ns := table.Identifier{"empty_ns"}
 	s.Require().NoError(s.cat.CreateNamespace(s.ctx, ns, nil))
 
@@ -126,7 +126,7 @@ func (s *TestHadoopIntegrationMinIO) TestListTablesEmptyNamespace() {
 	s.Empty(tables)
 }
 
-func (s *TestHadoopIntegrationMinIO) TestListTablesMissingNamespace() {
+func (s *HadoopMinIOIntegrationSuite) TestListTablesMissingNamespace() {
 	for _, err := range s.cat.ListTables(s.ctx, table.Identifier{"missing_ns"}) {
 		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
 
@@ -134,7 +134,7 @@ func (s *TestHadoopIntegrationMinIO) TestListTablesMissingNamespace() {
 	}
 }
 
-func (s *TestHadoopIntegrationMinIO) TestListTablesOnlyDirectNamespaceTables() {
+func (s *HadoopMinIOIntegrationSuite) TestListTablesOnlyDirectNamespaceTables() {
 	parent := table.Identifier{"parent_ns"}
 	child := table.Identifier{"parent_ns", "child_ns"}
 	directTable := table.Identifier{"parent_ns", "direct_tbl"}
@@ -155,7 +155,7 @@ func (s *TestHadoopIntegrationMinIO) TestListTablesOnlyDirectNamespaceTables() {
 	s.Equal([]table.Identifier{directTable}, tables)
 }
 
-func (s *TestHadoopIntegrationMinIO) TestDropTableRemovesTableFromListingAndLoad() {
+func (s *HadoopMinIOIntegrationSuite) TestDropTableRemovesTableFromListingAndLoad() {
 	ns := table.Identifier{"drop_ns"}
 	ident := table.Identifier{"drop_ns", "tbl"}
 
@@ -176,6 +176,6 @@ func (s *TestHadoopIntegrationMinIO) TestDropTableRemovesTableFromListingAndLoad
 	s.Empty(tables)
 }
 
-func TestHadoopMinIOIntegration(t *testing.T) {
-	suite.Run(t, new(TestHadoopIntegrationMinIO))
+func TestHadoopIntegrationMinIO(t *testing.T) {
+	suite.Run(t, new(HadoopMinIOIntegrationSuite))
 }
