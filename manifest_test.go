@@ -29,10 +29,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/suite"
 	"github.com/twmb/avro"
+	"github.com/twmb/avro/atype"
 	"github.com/twmb/avro/ocf"
 )
 
@@ -2096,6 +2098,25 @@ func TestReadManifestDecodesNilLogicalPartitionValueFromNullableUnion(t *testing
 
 	if got := entries[0].DataFile().Partition()[1000]; got != nil {
 		t.Fatalf("Partition()[1000] = %v, want nil", got)
+	}
+}
+
+func TestAvroEncodePartitionDataUsesDeclaredDecimalFixedSize(t *testing.T) {
+	decimalFieldID := 1000
+	converted, err := avroEncodePartitionData(
+		map[int]any{
+			decimalFieldID: Decimal{Val: decimal128.FromI64(1), Scale: 2},
+		},
+		map[string]int{"price": decimalFieldID},
+		map[int]string{decimalFieldID: atype.Decimal},
+		map[int]int{decimalFieldID: internal.DecimalRequiredBytes(10)},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := converted["price"], []byte{0, 0, 0, 0, 1}; !bytes.Equal(got.([]byte), want) {
+		t.Fatalf("encoded decimal = %v, want %v", got, want)
 	}
 }
 

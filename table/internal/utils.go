@@ -35,6 +35,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go"
+	iceinternal "github.com/apache/iceberg-go/internal"
 	"github.com/twmb/avro/atype"
 	"golang.org/x/sync/errgroup"
 )
@@ -296,7 +297,7 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 					fieldIDToLogicalType[field.FieldID] = atype.TimestampMicros
 				case iceberg.DecimalType:
 					fieldIDToLogicalType[field.FieldID] = atype.Decimal
-					fieldIDToFixedSize[field.FieldID] = rt.Scale()
+					fieldIDToFixedSize[field.FieldID] = iceinternal.DecimalRequiredBytes(rt.Precision())
 				case iceberg.UUIDType:
 					fieldIDToLogicalType[field.FieldID] = atype.UUID
 				}
