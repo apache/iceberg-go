@@ -466,9 +466,9 @@ func fromProps(props iceberg.Properties, o *options) error {
 		case keyRestSigV4Service:
 			o.sigv4Service = v
 		case keyAuthUrl:
-			u, err := url.Parse(v)
+			u, err := parseAuthURL(v)
 			if err != nil {
-				return fmt.Errorf("invalid %s %q: %w", keyAuthUrl, v, err)
+				return err
 			}
 			o.authUri = u
 		case keyOauthCredential:
@@ -502,6 +502,21 @@ func fromProps(props iceberg.Properties, o *options) error {
 	}
 
 	return nil
+}
+
+func parseAuthURL(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s %q: %w", keyAuthUrl, raw, err)
+	}
+	if u.Scheme == "" {
+		return nil, fmt.Errorf("invalid %s %q: missing scheme", keyAuthUrl, raw)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("invalid %s %q: missing host", keyAuthUrl, raw)
+	}
+
+	return u, nil
 }
 
 func toProps(o *options) iceberg.Properties {
