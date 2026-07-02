@@ -203,10 +203,10 @@ func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]st
 
 func adlsAuthority(parsed *url.URL) string {
 	if parsed.User == nil {
-		return parsed.Host
+		return parsed.Hostname()
 	}
 
-	return parsed.User.String() + "@" + parsed.Host
+	return parsed.User.Username() + "@" + parsed.Hostname()
 }
 
 func adlsObjectLocationExtractor(parsedURL *url.URL) objectLocationExtractor {
@@ -235,7 +235,6 @@ func adlsObjectLocationExtractor(parsedURL *url.URL) objectLocationExtractor {
 		parsed := objectLocation{
 			authority:    authority,
 			key:          key,
-			uriKey:       key,
 			uriPrefix:    matches[1] + "://" + authority + "/",
 			hasAuthority: true,
 		}
@@ -246,9 +245,4 @@ func adlsObjectLocationExtractor(parsedURL *url.URL) objectLocationExtractor {
 
 		return parsed, nil
 	}
-}
-
-// adlsKeyExtractor creates a key extractor for Azure schemes using the adlsURIPattern pattern.
-func adlsKeyExtractor(parsedURL *url.URL) KeyExtractor {
-	return keyExtractorFromObjectLocation(adlsObjectLocationExtractor(parsedURL))
 }

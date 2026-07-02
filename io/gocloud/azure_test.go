@@ -178,6 +178,7 @@ func TestAdlsKeyExtractor(t *testing.T) {
 		input       string
 		expectedKey string
 		expectedErr string
+		wantErrIs   error
 		shouldError bool
 	}{
 		{
@@ -205,11 +206,15 @@ func TestAdlsKeyExtractor(t *testing.T) {
 		{
 			name:        "URI with no path",
 			input:       "abfs://container@account.dfs.core.windows.net",
+			expectedErr: "object key is empty",
+			wantErrIs:   errEmptyObjectKey,
 			shouldError: true,
 		},
 		{
 			name:        "URI with empty path",
 			input:       "abfs://container@account.dfs.core.windows.net/",
+			expectedErr: "object key is empty",
+			wantErrIs:   errEmptyObjectKey,
 			shouldError: true,
 		},
 		{
@@ -221,11 +226,13 @@ func TestAdlsKeyExtractor(t *testing.T) {
 		{
 			name:        "URI with different container",
 			input:       "abfs://other@account.dfs.core.windows.net/path/to/file.parquet",
+			expectedErr: "does not match configured authority",
 			shouldError: true,
 		},
 		{
 			name:        "invalid ADLS location - invalid scheme",
 			input:       "s3://bucket/path/to/file.parquet",
+			expectedErr: "invalid ADLS location",
 			shouldError: true,
 		},
 	}
@@ -239,16 +246,19 @@ func TestAdlsKeyExtractor(t *testing.T) {
 			parsed, err := url.Parse(root)
 			require.NoError(t, err)
 
-			extractor := adlsKeyExtractor(parsed)
+			extractor := keyExtractorFromObjectLocation(adlsObjectLocationExtractor(parsed))
 			key, err := extractor(test.input)
 
 			if test.shouldError {
-				assert.Error(t, err, "Expected error for input: %s", test.input)
+				require.Error(t, err, "Expected error for input: %s", test.input)
 				if test.expectedErr != "" {
 					assert.ErrorContains(t, err, test.expectedErr, "Expected specific error for input: %s", test.input)
 				}
+				if test.wantErrIs != nil {
+					assert.ErrorIs(t, err, test.wantErrIs)
+				}
 			} else {
-				assert.NoError(t, err, "Unexpected error for input: %s", test.input)
+				require.NoError(t, err, "Unexpected error for input: %s", test.input)
 				assert.Equal(t, test.expectedKey, key, "Key mismatch for input: %s", test.input)
 			}
 		})

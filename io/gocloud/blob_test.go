@@ -173,7 +173,7 @@ func testADLSBlobFileIO(t *testing.T, ctx context.Context, root string, bucket *
 }
 
 func identityObjectLocation(location string) (objectLocation, error) {
-	return objectLocation{key: location, uriKey: location}, nil
+	return objectLocation{key: location}, nil
 }
 
 func TestBlobFileIORejectsWrongBucketObjectPaths(t *testing.T) {
@@ -419,19 +419,6 @@ func TestBlobFileIOWalkDirRejectsWrongBucket(t *testing.T) {
 	}
 }
 
-func TestWalkedURIPathRejectsPathOutsideStorageRoot(t *testing.T) {
-	location := objectLocation{
-		authority:    "other-bucket",
-		key:          "other-bucket/data",
-		uriKey:       "data",
-		uriPrefix:    "s3://other-bucket/",
-		hasAuthority: true,
-	}
-
-	_, err := walkedURIPath(location, "unrelated/data/file.parquet")
-	require.ErrorContains(t, err, "outside storage root")
-}
-
 func TestBlobFileIOWalkDirRejectsWrongAzureAuthority(t *testing.T) {
 	ctx := context.Background()
 
@@ -446,6 +433,36 @@ func TestBlobFileIOWalkDirRejectsWrongAzureAuthority(t *testing.T) {
 		return nil
 	})
 	require.ErrorContains(t, err, "does not match configured authority")
+}
+
+func TestBlobFileIOWalkDirRelativeRootReturnsBareKeys(t *testing.T) {
+	ctx := context.Background()
+
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	require.NoError(t, bucket.WriteAll(ctx, "data/file1.parquet", []byte("a"), nil))
+	require.NoError(t, bucket.WriteAll(ctx, "data/file2.parquet", []byte("b"), nil))
+
+	bfs := testBlobFileIO(ctx, "mybucket", bucket)
+
+	var walked []string
+	err := bfs.WalkDir("data", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if !d.IsDir() {
+			walked = append(walked, path)
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{
+		"data/file1.parquet",
+		"data/file2.parquet",
+	}, walked)
 }
 
 func TestBlobFileIOWalkDirSubPath(t *testing.T) {
@@ -487,7 +504,14 @@ func TestBlobFileIOWalkDirAzureURI(t *testing.T) {
 	bucket := memblob.OpenBucket(nil)
 	defer bucket.Close()
 
-	require.NoError(t, bucket.WriteAll(ctx, "path/to/file.parquet", []byte("data"), nil))
+	files := []string{
+		"path/100%off/file.parquet",
+		"path/city=New York/file.parquet",
+		"path/to/file.parquet",
+	}
+	for _, f := range files {
+		require.NoError(t, bucket.WriteAll(ctx, f, []byte("data"), nil))
+	}
 
 	bfs := testADLSBlobFileIO(t, ctx, "abfs://container@account.dfs.core.windows.net/", bucket)
 
@@ -506,9 +530,31 @@ func TestBlobFileIOWalkDirAzureURI(t *testing.T) {
 	require.NoError(t, err)
 
 	expected := []string{
+		"abfs://container@account.dfs.core.windows.net/path/100%off/file.parquet",
+		"abfs://container@account.dfs.core.windows.net/path/city=New York/file.parquet",
 		"abfs://container@account.dfs.core.windows.net/path/to/file.parquet",
 	}
-	assert.Equal(t, expected, walked)
+	assert.ElementsMatch(t, expected, walked)
+}
+
+func TestBlobFileIORawQueryFragmentRoundTrip(t *testing.T) {
+	ctx := context.Background()
+
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	bfs := testBlobFileIO(ctx, "test-bucket", bucket)
+	location := "s3://test-bucket/path/to/file.parquet?param=value#fragment"
+	content := []byte("data")
+	require.NoError(t, bfs.WriteFile(location, content))
+
+	file, err := bfs.Open(location)
+	require.NoError(t, err)
+	defer file.Close()
+
+	got, err := io.ReadAll(file)
+	require.NoError(t, err)
+	assert.Equal(t, content, got)
 }
 
 func TestBlobFileIOImplementsBulkRemovableIO(t *testing.T) {

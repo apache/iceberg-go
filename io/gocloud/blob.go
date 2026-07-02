@@ -76,7 +76,6 @@ var errEmptyObjectKey = errors.New("object key is empty")
 type objectLocation struct {
 	authority    string
 	key          string
-	uriKey       string
 	uriPrefix    string
 	hasAuthority bool
 }
@@ -84,7 +83,7 @@ type objectLocation struct {
 func splitObjectLocation(location string) (objectLocation, error) {
 	scheme, rest, ok := strings.Cut(location, "://")
 	if !ok {
-		return objectLocation{key: location, uriKey: location}, nil
+		return objectLocation{key: location}, nil
 	}
 
 	authorityEnd := strings.IndexAny(rest, "/?#")
@@ -104,13 +103,14 @@ func splitObjectLocation(location string) (objectLocation, error) {
 				authority, location)
 		}
 
+		// Keep object keys raw. Cloud object names are opaque strings, so this
+		// intentionally does not URL-unescape literal %, spaces, ? or #.
 		key = strings.TrimPrefix(rest[authorityEnd:], "/")
 	}
 
 	return objectLocation{
 		authority:    authority,
 		key:          key,
-		uriKey:       key,
 		uriPrefix:    scheme + "://" + authority + "/",
 		hasAuthority: true,
 	}, nil
@@ -143,7 +143,6 @@ func defaultObjectLocationExtractor(bucketName string) objectLocationExtractor {
 			}
 		} else {
 			parsed.key = strings.TrimPrefix(location, bucketName+"/")
-			parsed.uriKey = parsed.key
 		}
 
 		if parsed.key == "" {
@@ -284,55 +283,34 @@ func (bfs *blobFileIO) objectLocation(root string) (objectLocation, error) {
 	return bfs.extractObject(root)
 }
 
-func walkedURIPath(location objectLocation, walked string) (string, error) {
+func walkedURIPath(location objectLocation, walked string) string {
 	if walked == "." {
-		return location.uriPrefix, nil
+		return location.uriPrefix
 	}
 
-	uriKey := walked
-	if location.key != location.uriKey {
-		storageRoot := strings.TrimSuffix(location.key, "/")
-		if walked == location.key || walked == storageRoot {
-			uriKey = location.uriKey
-		} else {
-			prefix := storageRoot + "/"
-			if suffix, ok := strings.CutPrefix(walked, prefix); ok {
-				if location.uriKey == "" {
-					uriKey = suffix
-				} else {
-					uriKey = location.uriKey + "/" + suffix
-				}
-			} else {
-				return "", fmt.Errorf("walked path %q is outside storage root %q", walked, storageRoot)
-			}
-		}
+	if walked == "" {
+		return location.uriPrefix
 	}
 
-	if uriKey == "" {
-		return location.uriPrefix, nil
-	}
-
-	return location.uriPrefix + uriKey, nil
+	return location.uriPrefix + walked
 }
 
 func (bfs *blobFileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
 	location, err := bfs.objectLocation(root)
-	walkPath := location.key
+	var walkPath string
 	if err != nil {
 		if !errors.Is(err, errEmptyObjectKey) {
 			return &fs.PathError{Op: "walk dir", Path: root, Err: err}
 		}
 
 		walkPath = "."
+	} else {
+		walkPath = location.key
 	}
 
 	return fs.WalkDir(bfs.Bucket, walkPath, func(path string, d fs.DirEntry, err error) error {
 		if location.hasAuthority {
-			rewritten, rewriteErr := walkedURIPath(location, path)
-			if rewriteErr != nil {
-				return rewriteErr
-			}
-			path = rewritten
+			path = walkedURIPath(location, path)
 		}
 
 		return fn(path, d, err)
