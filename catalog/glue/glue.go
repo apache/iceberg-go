@@ -799,15 +799,18 @@ func constructParameters(staged *table.Table, previousGlueTable *types.Table) ma
 	parameters := make(map[string]string)
 	if previousGlueTable != nil {
 		maps.Copy(parameters, previousGlueTable.Parameters)
-		if previousMetadataLocation, ok := parameters[tableParamMetadataLocation]; ok {
+	}
+
+	maps.Copy(parameters, staged.Properties())
+	delete(parameters, tableParamPreviousMetadataLocation)
+
+	if previousGlueTable != nil {
+		if previousMetadataLocation, ok := previousGlueTable.Parameters[tableParamMetadataLocation]; ok {
 			parameters[tableParamPreviousMetadataLocation] = previousMetadataLocation
 		}
 	}
-
 	parameters[tableParamTableType] = glueTypeIceberg
 	parameters[tableParamMetadataLocation] = staged.MetadataLocation()
-
-	maps.Copy(parameters, staged.Properties())
 
 	return parameters
 }
