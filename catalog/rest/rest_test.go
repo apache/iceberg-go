@@ -2688,13 +2688,41 @@ func (r *RestCatalogSuite) TestCatalogWithCustomTransport() {
 	r.Equal("/v1/config", transport.calls[0].path)
 
 	// Not expected to succeed
-	tbl, err := cat.LoadTable(context.Background(), table.Identifier{"unknown"})
+	tbl, err := cat.LoadTable(context.Background(), table.Identifier{"namespace", "unknown"})
 	r.Error(err)
 	r.Nil(tbl)
 
 	r.Len(transport.calls, 2)
 	r.Equal("GET", transport.calls[1].method)
-	r.Equal("/v1/namespaces/tables/unknown", transport.calls[1].path)
+	r.Equal("/v1/namespaces/namespace/tables/unknown", transport.calls[1].path)
+}
+
+func (r *RestCatalogSuite) TestTableAndViewIdentifiersRequireNamespace() {
+	var transport mockTransport
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithCustomTransport(&transport))
+	r.Require().NoError(err)
+	r.Require().Len(transport.calls, 1)
+
+	_, err = cat.LoadTable(context.Background(), table.Identifier{"table"})
+	r.ErrorIs(err, catalog.ErrNoSuchTable)
+
+	_, err = cat.LoadView(context.Background(), table.Identifier{"view"})
+	r.ErrorIs(err, catalog.ErrNoSuchTable)
+
+	_, err = cat.RenameTable(context.Background(), table.Identifier{"source"}, table.Identifier{"namespace", "destination"})
+	r.ErrorIs(err, catalog.ErrNoSuchTable)
+
+	_, err = cat.RenameTable(context.Background(), table.Identifier{"namespace", "source"}, table.Identifier{"destination"})
+	r.ErrorIs(err, catalog.ErrNoSuchTable)
+
+	err = cat.CommitTransaction(context.Background(), []table.TableCommit{
+		{Identifier: table.Identifier{"table"}},
+	})
+	r.ErrorIs(err, catalog.ErrMissingIdentifier)
+	r.ErrorIs(err, catalog.ErrNoSuchTable)
+
+	r.Len(transport.calls, 1)
 }
 
 func (r *RestTLSCatalogSuite) TestCatalogWithCustomTransportAndTlsConfig() {

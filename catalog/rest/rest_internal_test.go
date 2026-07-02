@@ -42,6 +42,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -50,6 +51,26 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 )
+
+func TestSplitIdentForPathRequiresNamespaceAndName(t *testing.T) {
+	cat := &Catalog{}
+
+	_, _, err := cat.splitIdentForPath(nil)
+	require.ErrorIs(t, err, catalog.ErrNoSuchTable)
+
+	_, _, err = cat.splitIdentForPath(table.Identifier{"table"})
+	require.ErrorIs(t, err, catalog.ErrNoSuchTable)
+
+	ns, tbl, err := cat.splitIdentForPath(table.Identifier{"namespace", "table"})
+	require.NoError(t, err)
+	assert.Equal(t, "namespace", ns)
+	assert.Equal(t, "table", tbl)
+
+	ns, tbl, err = cat.splitIdentForPath(table.Identifier{"parent", "namespace", "table"})
+	require.NoError(t, err)
+	assert.Equal(t, "parent%1Fnamespace", ns)
+	assert.Equal(t, "table", tbl)
+}
 
 func TestLoadRegisteredCatalogRejectsInvalidAuthURL(t *testing.T) {
 	t.Parallel()

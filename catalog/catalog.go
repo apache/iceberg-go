@@ -214,6 +214,16 @@ func NamespaceFromIdent(ident table.Identifier) table.Identifier {
 	return ident[:len(ident)-1]
 }
 
+// ValidateTableIdentifier checks that an identifier contains at least one namespace level and a table name.
+func ValidateTableIdentifier(ident table.Identifier) error {
+	if len(ident) < 2 {
+		return fmt.Errorf("%w: missing namespace or invalid identifier %v",
+			ErrNoSuchTable, strings.Join(ident, "."))
+	}
+
+	return nil
+}
+
 type CreateTableOpt func(*CreateTableCfg)
 
 func WithLocation(location string) CreateTableOpt {
