@@ -1117,6 +1117,73 @@ func TestToPropsSigv4RegionFallback(t *testing.T) {
 	})
 }
 
+func TestToPropsPreservesOAuthToken(t *testing.T) {
+	t.Parallel()
+
+	opts := &options{
+		oauthToken: "static-token",
+	}
+	props := toProps(opts)
+	assert.Equal(t, "static-token", props[keyOauthToken])
+}
+
+func TestFromPropsReadsOAuthToken(t *testing.T) {
+	t.Parallel()
+
+	var opts options
+	err := fromProps(iceberg.Properties{
+		keyOauthToken: "static-token",
+		"custom":      "value",
+	}, &opts)
+	require.NoError(t, err)
+
+	assert.Equal(t, "static-token", opts.oauthToken)
+	assert.Equal(t, iceberg.Properties{"custom": "value"}, opts.additionalProps)
+	assert.NotContains(t, opts.additionalProps, keyOauthToken)
+}
+
+func TestFromPropsKeepsExistingOAuthToken(t *testing.T) {
+	t.Parallel()
+
+	opts := options{
+		oauthToken: "caller-token",
+	}
+	err := fromProps(iceberg.Properties{
+		keyOauthToken: "server-token",
+	}, &opts)
+	require.NoError(t, err)
+
+	assert.Equal(t, "caller-token", opts.oauthToken)
+}
+
+func TestFetchConfigTokenOverrideKeepsCallerToken(t *testing.T) {
+	t.Parallel()
+
+	var configAuthHeader string
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		configAuthHeader = r.Header.Get(authorizationHeader)
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{},
+			"overrides": map[string]any{
+				keyOauthToken: "server-token",
+			},
+			"endpoints": AllEndpointStrings,
+		})
+	})
+
+	cat, err := newCatalogFromProps(context.Background(), "rest", srv.URL, iceberg.Properties{
+		keyOauthToken: "caller-token",
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "Bearer caller-token", configAuthHeader)
+	assert.Equal(t, "caller-token", cat.props[keyOauthToken])
+}
+
 func TestEncodeNamespace(t *testing.T) {
 	tests := []struct {
 		name          string
