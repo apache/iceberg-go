@@ -1935,7 +1935,7 @@ func convertDecimalValue(v any, fixedSize int) (any, error) {
 
 func encodeDecimalBytes(dec DecimalLiteral, fixedSize int) ([]byte, error) {
 	if fixedSize <= 0 {
-		return nil, fmt.Errorf("missing decimal fixed size")
+		return nil, errors.New("missing decimal fixed size")
 	}
 
 	bytes, err := dec.MarshalBinary()
