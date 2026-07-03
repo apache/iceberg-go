@@ -147,6 +147,24 @@ func TestCombine(t *testing.T) {
 		})
 		assert.Equal(t, 1, after.calls(), "reporters after a panic still run")
 	})
+
+	t.Run("logs a recovered panic", func(t *testing.T) {
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+		after := &countingReporter{}
+		r := CombineWithLogger(logger, panickingReporter{}, after)
+
+		assert.NotPanics(t, func() {
+			r.Report(context.Background(), testReport{})
+		})
+		assert.Equal(t, 1, after.calls(), "reporters after a panic still run")
+
+		out := buf.String()
+		assert.Contains(t, out, "level=WARN")
+		assert.Contains(t, out, "panicked", "the warn path must fire")
+		assert.Contains(t, out, "panickingReporter", "the offending reporter type is logged")
+		assert.Contains(t, out, "boom", "the panic value is logged")
+	})
 }
 
 func TestInMemoryReporterConcurrent(t *testing.T) {

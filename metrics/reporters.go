@@ -101,7 +101,7 @@ func (r *InMemoryReporter) Reset() {
 // in keeping with the [Reporter] contract a misbehaving reporter never affects
 // the observed operation. A recovered panic is logged (with the reporter type)
 // at warn level via [slog.Default] so a broken reporter is not silently
-// swallowed.
+// swallowed; use [CombineWithLogger] to direct that log elsewhere.
 //
 // As a convenience, Combine with no non-nil reporters returns [NopReporter].
 // Otherwise every reporter — even a lone one — is wrapped so it receives the
@@ -111,6 +111,15 @@ func (r *InMemoryReporter) Reset() {
 // returning it unwrapped would let its eventual Report nil-deref escape with no
 // recover to catch it.
 func Combine(reporters ...Reporter) Reporter {
+	return CombineWithLogger(nil, reporters...)
+}
+
+// CombineWithLogger is [Combine] with an explicit logger for recovered reporter
+// panics. A nil logger resolves [slog.Default] at each Report call, matching
+// Combine, so a later [slog.SetDefault] is honored rather than snapshotted at
+// construction. Like Combine, with no non-nil reporters it returns
+// [NopReporter] and the logger is unused.
+func CombineWithLogger(logger *slog.Logger, reporters ...Reporter) Reporter {
 	nonNil := make([]Reporter, 0, len(reporters))
 	for _, r := range reporters {
 		if r != nil {
@@ -122,7 +131,7 @@ func Combine(reporters ...Reporter) Reporter {
 		return NopReporter{}
 	}
 
-	return &compositeReporter{reporters: nonNil}
+	return &compositeReporter{reporters: nonNil, logger: logger}
 }
 
 // compositeReporter fans a report out to several reporters, isolating each from
