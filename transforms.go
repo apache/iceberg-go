@@ -244,6 +244,14 @@ func (t BucketTransform) MarshalText() ([]byte, error) {
 
 func (t BucketTransform) String() string { return fmt.Sprintf("bucket[%d]", t.NumBuckets) }
 
+func (t BucketTransform) validateNumBuckets() error {
+	if t.NumBuckets <= 0 {
+		return fmt.Errorf("%w: bucket transform requires numBuckets > 0", ErrInvalidArgument)
+	}
+
+	return nil
+}
+
 func (BucketTransform) CanTransform(t Type) bool {
 	switch t.(type) {
 	case Int32Type,
@@ -292,6 +300,9 @@ func (t BucketTransform) Apply(value Optional[Literal]) Optional[Literal] {
 	if !value.Valid {
 		return Optional[Literal]{}
 	}
+	if err := t.validateNumBuckets(); err != nil {
+		return Optional[Literal]{}
+	}
 
 	var hash uint32
 	switch v := value.Val.(type) {
@@ -327,6 +338,12 @@ func (t BucketTransform) Apply(value Optional[Literal]) Optional[Literal] {
 }
 
 func (t BucketTransform) Transformer(src Type) func(any) Optional[int32] {
+	if err := t.validateNumBuckets(); err != nil {
+		return func(_ any) Optional[int32] {
+			return Optional[int32]{}
+		}
+	}
+
 	var h func(any) uint32
 
 	switch src.(type) {
@@ -373,7 +390,7 @@ func (t BucketTransform) Transformer(src Type) func(any) Optional[int32] {
 	}
 
 	return func(v any) Optional[int32] {
-		if v == nil {
+		if v == nil || h == nil {
 			return Optional[int32]{}
 		}
 
@@ -397,6 +414,9 @@ func (t BucketTransform) ToHumanStrType(_ Type, val any) string {
 }
 
 func (t BucketTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
+	if err := t.validateNumBuckets(); err != nil {
+		return nil, err
+	}
 	if _, ok := pred.Term().(*BoundTransform); ok {
 		return projectTransformPredicate(t, name, pred)
 	}

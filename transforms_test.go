@@ -336,6 +336,46 @@ func TestManifestPartitionVals(t *testing.T) {
 	}
 }
 
+func TestBucketTransform_NumBucketsValidation(t *testing.T) {
+	transform := iceberg.BucketTransform{}
+	t.Run("ApplyRejectsInvalidBuckets", func(t *testing.T) {
+		out := transform.Apply(iceberg.Optional[iceberg.Literal]{
+			Valid: true,
+			Val:   iceberg.Int32Literal(123),
+		})
+		require.False(t, out.Valid)
+	})
+
+	t.Run("TransformerRejectsInvalidBuckets", func(t *testing.T) {
+		fn := transform.Transformer(iceberg.PrimitiveTypes.String)
+		out := fn("abc")
+		require.False(t, out.Valid)
+	})
+
+	t.Run("ProjectRejectsInvalidBuckets", func(t *testing.T) {
+		schema := iceberg.NewSchema(1, iceberg.NestedField{
+			ID:   1,
+			Name: "id",
+			Type: iceberg.PrimitiveTypes.Int64,
+		})
+		bound, err := iceberg.EqualTo(iceberg.Reference("id"), int64(42)).Bind(schema, true)
+		require.NoError(t, err)
+
+		_, err = transform.Project("id_bucket", bound.(iceberg.BoundPredicate))
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, "numBuckets > 0")
+	})
+}
+
+func TestBucketTransformUnsupportedSourceTypeDoesNotPanic(t *testing.T) {
+	transform := iceberg.BucketTransform{NumBuckets: 16}
+	fn := transform.Transformer(iceberg.PrimitiveTypes.Bool)
+	require.NotPanics(t, func() {
+		result := fn(true)
+		require.False(t, result.Valid)
+	})
+}
+
 func TestCanTransform(t *testing.T) {
 	tests := []struct {
 		transform  iceberg.Transform
