@@ -36,6 +36,7 @@ func TestDefaultKeyExtractor(t *testing.T) {
 	tests := []struct {
 		name            string
 		bucketName      string
+		allowedSchemes  []string
 		input           string
 		expectedKey     string
 		wantErrContains string
@@ -96,11 +97,25 @@ func TestDefaultKeyExtractor(t *testing.T) {
 			name:            "s3 URI with different bucket",
 			input:           "s3://other-bucket/path/to/file.parquet",
 			wantErrContains: "does not match configured authority",
+			wantErrIs:       ErrUnsupportedObjectAuthority,
 		},
 		{
 			name:            "gs URI with different bucket",
 			input:           "gs://other-bucket/path/to/file.parquet",
 			wantErrContains: "does not match configured authority",
+			wantErrIs:       ErrUnsupportedObjectAuthority,
+		},
+		{
+			name:            "s3 extractor rejects gs URI with same bucket",
+			allowedSchemes:  s3Schemes,
+			input:           "gs://my-bucket/path/to/file.parquet",
+			wantErrContains: `URI scheme "gs" is not supported`,
+		},
+		{
+			name:            "gcs extractor rejects s3 URI with same bucket",
+			allowedSchemes:  gcsSchemes,
+			input:           "s3://my-bucket/path/to/file.parquet",
+			wantErrContains: `URI scheme "s3" is not supported`,
 		},
 		{
 			name:        "URI with query and fragment",
@@ -111,7 +126,7 @@ func TestDefaultKeyExtractor(t *testing.T) {
 			name:            "URI with empty path",
 			input:           "s3://my-bucket/",
 			wantErrContains: "object key is empty",
-			wantErrIs:       errEmptyObjectKey,
+			wantErrIs:       ErrEmptyObjectKey,
 		},
 		{
 			name:            "URI with empty authority",
@@ -131,7 +146,7 @@ func TestDefaultKeyExtractor(t *testing.T) {
 			if bucketName == "" {
 				bucketName = "my-bucket"
 			}
-			extractor := defaultKeyExtractor(bucketName)
+			extractor := defaultKeyExtractor(bucketName, test.allowedSchemes...)
 			key, err := extractor(test.input)
 
 			if test.wantErrContains != "" {
@@ -147,8 +162,11 @@ func TestDefaultKeyExtractor(t *testing.T) {
 	}
 }
 
-func testBlobFileIO(ctx context.Context, bucketName string, bucket *blob.Bucket) *blobFileIO {
-	extractor := defaultObjectLocationExtractor(bucketName)
+func testBlobFileIO(ctx context.Context, bucketName string, bucket *blob.Bucket, allowedSchemes ...string) *blobFileIO {
+	if len(allowedSchemes) == 0 {
+		allowedSchemes = s3Schemes
+	}
+	extractor := defaultObjectLocationExtractor(bucketName, allowedSchemes...)
 
 	return &blobFileIO{
 		Bucket:        bucket,
@@ -176,35 +194,60 @@ func identityObjectLocation(location string) (objectLocation, error) {
 	return objectLocation{key: location}, nil
 }
 
-func TestBlobFileIORejectsWrongBucketObjectPaths(t *testing.T) {
+func TestBlobFileIORejectsUnsupportedObjectPaths(t *testing.T) {
 	ctx := context.Background()
 
-	bucket := memblob.OpenBucket(nil)
-	defer bucket.Close()
-
-	bfs := testBlobFileIO(ctx, "test-bucket", bucket)
-
 	for _, tt := range []struct {
-		name   string
-		path   string
-		oldKey string
+		name           string
+		allowedSchemes []string
+		path           string
+		oldKey         string
+		wantErr        error
+		wantErrText    string
 	}{
 		{
-			name:   "s3",
-			path:   "s3://other-bucket/data/file.parquet",
-			oldKey: "other-bucket/data/file.parquet",
+			name:           "s3 different bucket",
+			allowedSchemes: s3Schemes,
+			path:           "s3://other-bucket/data/file.parquet",
+			oldKey:         "other-bucket/data/file.parquet",
+			wantErr:        ErrUnsupportedObjectAuthority,
+			wantErrText:    "does not match configured authority",
 		},
 		{
-			name:   "gcs",
-			path:   "gs://other-bucket/data/file.parquet",
-			oldKey: "other-bucket/data/file.parquet",
+			name:           "gcs different bucket",
+			allowedSchemes: gcsSchemes,
+			path:           "gs://other-bucket/data/file.parquet",
+			oldKey:         "other-bucket/data/file.parquet",
+			wantErr:        ErrUnsupportedObjectAuthority,
+			wantErrText:    "does not match configured authority",
+		},
+		{
+			name:           "s3 rejects gs same bucket",
+			allowedSchemes: s3Schemes,
+			path:           "gs://test-bucket/data/file.parquet",
+			oldKey:         "data/file.parquet",
+			wantErrText:    `URI scheme "gs" is not supported`,
+		},
+		{
+			name:           "gcs rejects s3 same bucket",
+			allowedSchemes: gcsSchemes,
+			path:           "s3://test-bucket/data/file.parquet",
+			oldKey:         "data/file.parquet",
+			wantErrText:    `URI scheme "s3" is not supported`,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			bucket := memblob.OpenBucket(nil)
+			defer bucket.Close()
+
+			bfs := testBlobFileIO(ctx, "test-bucket", bucket, tt.allowedSchemes...)
 			require.NoError(t, bucket.WriteAll(ctx, tt.oldKey, []byte("sentinel"), nil))
 
 			err := bfs.WriteFile(tt.path, []byte("content"))
-			require.ErrorContains(t, err, "does not match configured authority")
+			require.ErrorContains(t, err, tt.wantErrText)
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+			}
 
 			got, err := bucket.ReadAll(ctx, tt.oldKey)
 			require.NoError(t, err)
@@ -399,22 +442,23 @@ func TestBlobFileIOWalkDirRejectsWrongBucket(t *testing.T) {
 
 	require.NoError(t, bucket.WriteAll(ctx, "data/file1.parquet", []byte("content"), nil))
 
-	bfs := testBlobFileIO(ctx, "test-bucket", bucket)
-
 	for _, tt := range []struct {
-		name string
-		root string
+		name           string
+		allowedSchemes []string
+		root           string
 	}{
-		{name: "s3", root: "s3://other-bucket/"},
-		{name: "gcs", root: "gs://other-bucket/data"},
+		{name: "s3", allowedSchemes: s3Schemes, root: "s3://other-bucket/"},
+		{name: "gcs", allowedSchemes: gcsSchemes, root: "gs://other-bucket/data"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			bfs := testBlobFileIO(ctx, "test-bucket", bucket, tt.allowedSchemes...)
 			err := bfs.WalkDir(tt.root, func(string, fs.DirEntry, error) error {
 				t.Fatal("WalkDir callback should not be called")
 
 				return nil
 			})
 			require.ErrorContains(t, err, "does not match configured authority")
+			require.ErrorIs(t, err, ErrUnsupportedObjectAuthority)
 		})
 	}
 }
@@ -433,6 +477,7 @@ func TestBlobFileIOWalkDirRejectsWrongAzureAuthority(t *testing.T) {
 		return nil
 	})
 	require.ErrorContains(t, err, "does not match configured authority")
+	require.ErrorIs(t, err, ErrUnsupportedObjectAuthority)
 }
 
 func TestBlobFileIOWalkDirRelativeRootReturnsBareKeys(t *testing.T) {

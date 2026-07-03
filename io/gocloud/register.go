@@ -30,6 +30,11 @@ func init() {
 	registerAzureSchemes()
 }
 
+var (
+	s3Schemes  = []string{"s3", "s3a", "s3n", "oss"}
+	gcsSchemes = []string{"gs"}
+)
+
 // registerS3Schemes registers S3-compatible storage schemes (s3, s3a, s3n).
 func registerS3Schemes() {
 	s3Factory := func(ctx context.Context, parsed *url.URL, props map[string]string) (icebergio.IO, error) {
@@ -38,7 +43,7 @@ func registerS3Schemes() {
 			return nil, err
 		}
 
-		extractor := defaultObjectLocationExtractor(parsed.Host)
+		extractor := defaultObjectLocationExtractor(parsed.Host, s3Schemes...)
 
 		return createBlobFS(ctx, bucket, extractor), nil
 	}
@@ -56,7 +61,7 @@ func registerGCSScheme() {
 			return nil, err
 		}
 
-		extractor := defaultObjectLocationExtractor(parsed.Host)
+		extractor := defaultObjectLocationExtractor(parsed.Host, gcsSchemes...)
 
 		return createBlobFS(ctx, bucket, extractor), nil
 	})

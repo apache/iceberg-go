@@ -207,14 +207,14 @@ func TestAdlsKeyExtractor(t *testing.T) {
 			name:        "URI with no path",
 			input:       "abfs://container@account.dfs.core.windows.net",
 			expectedErr: "object key is empty",
-			wantErrIs:   errEmptyObjectKey,
+			wantErrIs:   ErrEmptyObjectKey,
 			shouldError: true,
 		},
 		{
 			name:        "URI with empty path",
 			input:       "abfs://container@account.dfs.core.windows.net/",
 			expectedErr: "object key is empty",
-			wantErrIs:   errEmptyObjectKey,
+			wantErrIs:   ErrEmptyObjectKey,
 			shouldError: true,
 		},
 		{
@@ -227,6 +227,7 @@ func TestAdlsKeyExtractor(t *testing.T) {
 			name:        "URI with different container",
 			input:       "abfs://other@account.dfs.core.windows.net/path/to/file.parquet",
 			expectedErr: "does not match configured authority",
+			wantErrIs:   ErrUnsupportedObjectAuthority,
 			shouldError: true,
 		},
 		{

@@ -220,7 +220,8 @@ func adlsObjectLocationExtractor(parsedURL *url.URL) objectLocationExtractor {
 
 		authority := matches[2]
 		if authority != expectedAuthority {
-			return objectLocation{}, fmt.Errorf("URI authority %q does not match configured authority %q",
+			return objectLocation{}, fmt.Errorf("%w: URI authority %q does not match configured authority %q",
+				ErrUnsupportedObjectAuthority,
 				authority, expectedAuthority)
 		}
 
@@ -233,6 +234,7 @@ func adlsObjectLocationExtractor(parsedURL *url.URL) objectLocationExtractor {
 		key := strings.TrimPrefix(uriPath, "/")
 
 		parsed := objectLocation{
+			scheme:       matches[1],
 			authority:    authority,
 			key:          key,
 			uriPrefix:    matches[1] + "://" + authority + "/",
@@ -240,7 +242,7 @@ func adlsObjectLocationExtractor(parsedURL *url.URL) objectLocationExtractor {
 		}
 
 		if key == "" {
-			return parsed, fmt.Errorf("%w: %s", errEmptyObjectKey, location)
+			return parsed, fmt.Errorf("%w: %s", ErrEmptyObjectKey, location)
 		}
 
 		return parsed, nil
