@@ -240,8 +240,7 @@ type Scan struct {
 
 	includeRowLineage bool
 
-	partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression]
-	concurrency      int
+	concurrency int
 }
 
 func (scan *Scan) UseRowLimit(n int64) *Scan {
@@ -260,7 +259,6 @@ func (scan *Scan) UseRef(name string) (*Scan, error) {
 	if snap := scan.metadata.SnapshotByName(name); snap != nil {
 		out := *scan
 		out.snapshotID = &snap.SnapshotID
-		out.partitionFilters = newKeyDefaultMapWrapErr(out.buildPartitionProjection)
 
 		return &out, nil
 	}
@@ -342,6 +340,13 @@ func (scan *Scan) Projection() (*iceberg.Schema, error) {
 
 func (scan *Scan) effectiveSchema() (*iceberg.Schema, error) {
 	curSchema := scan.metadata.CurrentSchema()
+	if scan.snapshotID == nil && scan.asOfTimestamp == nil {
+		// Live scans intentionally use the table's current schema. A schema-only
+		// metadata update can advance CurrentSchema without creating a snapshot,
+		// while explicit snapshot/as-of scans use the snapshot schema below.
+		return curSchema, nil
+	}
+
 	var snap *Snapshot
 	if scan.snapshotID != nil {
 		snap = scan.metadata.SnapshotByID(*scan.snapshotID)
@@ -370,7 +375,8 @@ func (scan *Scan) effectiveSchema() (*iceberg.Schema, error) {
 		}
 	}
 
-	return curSchema, nil
+	return nil, fmt.Errorf("%w: snapshot %d references unknown schema id %d",
+		ErrInvalidMetadata, snap.SnapshotID, *snap.SchemaID)
 }
 
 // splitLineageMetadataFields partitions selectedFields into user fields and
@@ -422,15 +428,6 @@ func appendMissingLineageFields(s *iceberg.Schema, lineageFields []iceberg.Neste
 	return iceberg.NewSchemaWithIdentifiers(s.ID, s.IdentifierFieldIDs, fields...)
 }
 
-func (scan *Scan) buildPartitionProjection(specID int) (iceberg.BooleanExpression, error) {
-	schema, err := scan.effectiveSchema()
-	if err != nil {
-		return nil, err
-	}
-
-	return buildPartitionProjection(specID, scan.metadata, schema, scan.rowFilter, scan.caseSensitive)
-}
-
 func buildPartitionProjection(specID int, meta Metadata, schema *iceberg.Schema, rowFilter iceberg.BooleanExpression, caseSensitive bool) (iceberg.BooleanExpression, error) {
 	spec := meta.PartitionSpecByID(specID)
 	if spec == nil {
@@ -439,15 +436,6 @@ func buildPartitionProjection(specID int, meta Metadata, schema *iceberg.Schema,
 	project := newInclusiveProjection(schema, *spec, caseSensitive)
 
 	return project(rowFilter)
-}
-
-func (scan *Scan) buildManifestEvaluator(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
-	schema, err := scan.effectiveSchema()
-	if err != nil {
-		return nil, err
-	}
-
-	return buildManifestEvaluator(specID, scan.metadata, schema, scan.partitionFilters, scan.caseSensitive)
 }
 
 func buildManifestEvaluator(specID int, metadata Metadata, schema *iceberg.Schema, partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression], caseSensitive bool) (func(iceberg.ManifestFile) (bool, error), error) {
@@ -463,15 +451,6 @@ func buildManifestEvaluator(specID int, metadata Metadata, schema *iceberg.Schem
 
 	return newManifestEvaluator(*spec, schema,
 		partitionFilter, caseSensitive)
-}
-
-func (scan *Scan) buildPartitionEvaluator(specID int) (func(iceberg.DataFile) (bool, error), error) {
-	schema, err := scan.effectiveSchema()
-	if err != nil {
-		return nil, err
-	}
-
-	return buildPartitionEvaluator(specID, scan.metadata, schema, scan.partitionFilters, scan.caseSensitive)
 }
 
 func buildPartitionEvaluator(specID int, metadata Metadata, schema *iceberg.Schema, partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression], caseSensitive bool) (func(iceberg.DataFile) (bool, error), error) {
