@@ -27,6 +27,7 @@ import (
 	"math"
 	"math/big"
 	"reflect"
+	"slices"
 	"strconv"
 	"time"
 	"unsafe"
@@ -1140,7 +1141,7 @@ func (f FixedLiteral) To(typ Type) (Literal, error) {
 		return nil, fmt.Errorf("%w: cannot convert FixedLiteral to %s, different length - %d <> %d",
 			ErrBadCast, typ, len(f), t.len)
 	case BinaryType:
-		return f, nil
+		return BinaryLiteral(slices.Clone(f)), nil
 	}
 
 	return nil, fmt.Errorf("%w: FixedLiteral[%d] to %s",
