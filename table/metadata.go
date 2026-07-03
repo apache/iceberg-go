@@ -780,11 +780,12 @@ func (b *MetadataBuilder) SetProperties(props iceberg.Properties) error {
 		}
 	}
 
-	b.updates = append(b.updates, NewSetPropertiesUpdate(props))
+	updates := maps.Clone(props)
+	b.updates = append(b.updates, NewSetPropertiesUpdate(updates))
 	if b.props == nil {
-		b.props = props
+		b.props = maps.Clone(updates)
 	} else {
-		maps.Copy(b.props, props)
+		maps.Copy(b.props, updates)
 	}
 
 	return nil
