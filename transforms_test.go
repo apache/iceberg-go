@@ -685,6 +685,33 @@ func TestBucketTransformUnsupportedTypeReturnsInvalidOptional(t *testing.T) {
 	})
 }
 
+func TestBucketProjectUnsupportedTypeReturnsNoProjection(t *testing.T) {
+	transform := iceberg.BucketTransform{NumBuckets: 16}
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID:   1,
+		Name: "flag",
+		Type: iceberg.PrimitiveTypes.Bool,
+	})
+
+	t.Run("EqualTo", func(t *testing.T) {
+		bound, err := iceberg.EqualTo(iceberg.Reference("flag"), true).Bind(schema, true)
+		require.NoError(t, err)
+
+		projected, err := transform.Project("flag_bucket", bound.(iceberg.BoundPredicate))
+		require.NoError(t, err)
+		assert.Nil(t, projected)
+	})
+
+	t.Run("In", func(t *testing.T) {
+		bound, err := iceberg.IsIn(iceberg.Reference("flag"), true, false).(iceberg.UnboundPredicate).Bind(schema, true)
+		require.NoError(t, err)
+
+		projected, err := transform.Project("flag_bucket", bound.(iceberg.BoundPredicate))
+		require.NoError(t, err)
+		assert.Nil(t, projected)
+	})
+}
+
 func TestHourTransformPreEpoch(t *testing.T) {
 	const microsecondsPerHour = int64(time.Hour / time.Microsecond)
 
