@@ -115,6 +115,7 @@ func TestInvalidDialect(t *testing.T) {
 	_, err := catalog.Load(context.Background(), "sql", iceberg.Properties{
 		sqlcat.DriverKey:  sqliteshim.ShimName,
 		sqlcat.DialectKey: "foobar",
+		"type":            "sql",
 	})
 	assert.ErrorContains(t, err, `unsupported sql dialect: "foobar"`)
 }

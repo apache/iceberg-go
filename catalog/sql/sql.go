@@ -91,6 +91,7 @@ func init() {
 		cat, err := NewCatalog(name, sqldb, SupportedDialect(dialect), p)
 		if err != nil {
 			_ = sqldb.Close()
+
 			return nil, err
 		}
 
