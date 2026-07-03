@@ -116,7 +116,7 @@ func TestInvalidDialect(t *testing.T) {
 		sqlcat.DriverKey:  sqliteshim.ShimName,
 		sqlcat.DialectKey: "foobar",
 	})
-	assert.Error(t, err)
+	assert.ErrorContains(t, err, `unsupported sql dialect: "foobar"`)
 }
 
 func TestNewCatalogInvalidDialect(t *testing.T) {
