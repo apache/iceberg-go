@@ -675,6 +675,16 @@ func TestBucketTransformTimestampNanoseconds(t *testing.T) {
 	}
 }
 
+func TestBucketTransformUnsupportedTypeReturnsInvalidOptional(t *testing.T) {
+	transform := iceberg.BucketTransform{NumBuckets: 16}
+	fn := transform.Transformer(iceberg.PrimitiveTypes.Bool)
+
+	assert.NotPanics(t, func() {
+		result := fn(true)
+		assert.False(t, result.Valid)
+	})
+}
+
 func TestHourTransformPreEpoch(t *testing.T) {
 	const microsecondsPerHour = int64(time.Hour / time.Microsecond)
 
