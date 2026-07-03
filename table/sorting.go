@@ -139,6 +139,9 @@ func (s *SortField) UnmarshalJSON(b []byte) error {
 	if hasSourceID && hasSourceIDs {
 		return errors.New("sort field cannot contain both source-id and source-ids")
 	}
+	if !hasSourceID && !hasSourceIDs {
+		return fmt.Errorf("%w: exactly one of source-id or source-ids is required", ErrInvalidSortSourceID)
+	}
 
 	aux := struct {
 		SourceID        int           `json:"source-id"`
@@ -157,10 +160,12 @@ func (s *SortField) UnmarshalJSON(b []byte) error {
 
 	if hasSourceIDs {
 		s.SourceIDs = aux.SourceIDs
-	} else if hasSourceID {
-		s.SourceIDs = []int{aux.SourceID}
 	} else {
-		s.SourceIDs = nil
+		s.SourceIDs = []int{aux.SourceID}
+	}
+
+	if err := validateSortSourceIDs(s.SourceIDs); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidSortSourceID, err)
 	}
 
 	var err error
@@ -184,8 +189,8 @@ func (s *SortField) UnmarshalJSON(b []byte) error {
 }
 
 func validateSortSourceID(id int) error {
-	if id < 0 {
-		return fmt.Errorf("source ID must be non-negative: %d", id)
+	if id <= 0 {
+		return fmt.Errorf("source ID must be positive: %d", id)
 	}
 
 	return nil
