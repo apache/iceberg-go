@@ -29,7 +29,26 @@ func TestValidateTableIdentifier(t *testing.T) {
 	require.NoError(t, catalog.ValidateTableIdentifier(table.Identifier{"namespace", "table"}))
 	require.NoError(t, catalog.ValidateTableIdentifier(table.Identifier{"parent", "namespace", "table"}))
 
-	require.ErrorIs(t, catalog.ValidateTableIdentifier(nil), catalog.ErrNoSuchTable)
-	require.ErrorIs(t, catalog.ValidateTableIdentifier(table.Identifier{}), catalog.ErrNoSuchTable)
-	require.ErrorIs(t, catalog.ValidateTableIdentifier(table.Identifier{"table"}), catalog.ErrNoSuchTable)
+	for _, ident := range []table.Identifier{
+		nil,
+		{},
+		{"table"},
+		{"namespace", ""},
+		{"namespace", "."},
+		{"namespace", ".."},
+		{"namespace", "table/name"},
+		{"namespace", "table\nname"},
+		{"", "table"},
+		{"namespace/child", "table"},
+	} {
+		require.ErrorIs(t, catalog.ValidateTableIdentifier(ident), catalog.ErrNoSuchTable)
+	}
+}
+
+func TestValidateViewIdentifier(t *testing.T) {
+	require.NoError(t, catalog.ValidateViewIdentifier(table.Identifier{"namespace", "view"}))
+
+	require.ErrorIs(t, catalog.ValidateViewIdentifier(table.Identifier{"view"}), catalog.ErrNoSuchView)
+	require.ErrorIs(t, catalog.ValidateViewIdentifier(table.Identifier{"namespace", "view/name"}), catalog.ErrNoSuchView)
+	require.NotErrorIs(t, catalog.ValidateViewIdentifier(table.Identifier{"namespace", "view/name"}), catalog.ErrNoSuchTable)
 }

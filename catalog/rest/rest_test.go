@@ -2708,7 +2708,31 @@ func (r *RestCatalogSuite) TestTableAndViewIdentifiersRequireNamespace() {
 	r.ErrorIs(err, catalog.ErrNoSuchTable)
 
 	_, err = cat.LoadView(context.Background(), table.Identifier{"view"})
-	r.ErrorIs(err, catalog.ErrNoSuchTable)
+	r.ErrorIs(err, catalog.ErrNoSuchView)
+	r.NotErrorIs(err, catalog.ErrNoSuchTable)
+
+	for _, ident := range []table.Identifier{
+		{"namespace", ""},
+		{"namespace", "."},
+		{"namespace", ".."},
+		{"namespace", "table/name"},
+		{"namespace", "table\nname"},
+	} {
+		_, err = cat.LoadTable(context.Background(), ident)
+		r.ErrorIs(err, catalog.ErrNoSuchTable)
+	}
+
+	for _, ident := range []table.Identifier{
+		{"namespace", ""},
+		{"namespace", "."},
+		{"namespace", ".."},
+		{"namespace", "view/name"},
+		{"namespace", "view\nname"},
+	} {
+		_, err = cat.LoadView(context.Background(), ident)
+		r.ErrorIs(err, catalog.ErrNoSuchView)
+		r.NotErrorIs(err, catalog.ErrNoSuchTable)
+	}
 
 	_, err = cat.RenameTable(context.Background(), table.Identifier{"source"}, table.Identifier{"namespace", "destination"})
 	r.ErrorIs(err, catalog.ErrNoSuchTable)
@@ -2719,8 +2743,14 @@ func (r *RestCatalogSuite) TestTableAndViewIdentifiersRequireNamespace() {
 	err = cat.CommitTransaction(context.Background(), []table.TableCommit{
 		{Identifier: table.Identifier{"table"}},
 	})
-	r.ErrorIs(err, catalog.ErrMissingIdentifier)
 	r.ErrorIs(err, catalog.ErrNoSuchTable)
+	r.NotErrorIs(err, catalog.ErrMissingIdentifier)
+
+	err = cat.CommitTransaction(context.Background(), []table.TableCommit{
+		{Identifier: table.Identifier{"namespace", "table/name"}},
+	})
+	r.ErrorIs(err, catalog.ErrNoSuchTable)
+	r.NotErrorIs(err, catalog.ErrMissingIdentifier)
 
 	r.Len(transport.calls, 1)
 }

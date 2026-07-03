@@ -34,6 +34,7 @@ import (
 	"iter"
 	"maps"
 	"strings"
+	"unicode"
 
 	"github.com/apache/iceberg-go"
 	iceinternal "github.com/apache/iceberg-go/internal"
@@ -214,14 +215,37 @@ func NamespaceFromIdent(ident table.Identifier) table.Identifier {
 	return ident[:len(ident)-1]
 }
 
-// ValidateTableIdentifier checks that an identifier contains at least one namespace level and a table name.
-func ValidateTableIdentifier(ident table.Identifier) error {
+func validateTableOrViewIdentifier(ident table.Identifier, notFoundErr error) error {
 	if len(ident) < 2 {
 		return fmt.Errorf("%w: missing namespace or invalid identifier %v",
-			ErrNoSuchTable, strings.Join(ident, "."))
+			notFoundErr, strings.Join(ident, "."))
+	}
+
+	for _, part := range ident {
+		if part == "" || part == "." || part == ".." || strings.Contains(part, "/") {
+			return fmt.Errorf("%w: invalid identifier component %q in %v",
+				notFoundErr, part, strings.Join(ident, "."))
+		}
+
+		for _, r := range part {
+			if unicode.IsControl(r) {
+				return fmt.Errorf("%w: invalid control character in identifier component %q in %v",
+					notFoundErr, part, strings.Join(ident, "."))
+			}
+		}
 	}
 
 	return nil
+}
+
+// ValidateTableIdentifier checks that an identifier contains at least one valid namespace level and a table name.
+func ValidateTableIdentifier(ident table.Identifier) error {
+	return validateTableOrViewIdentifier(ident, ErrNoSuchTable)
+}
+
+// ValidateViewIdentifier checks that an identifier contains at least one valid namespace level and a view name.
+func ValidateViewIdentifier(ident table.Identifier) error {
+	return validateTableOrViewIdentifier(ident, ErrNoSuchView)
 }
 
 type CreateTableOpt func(*CreateTableCfg)

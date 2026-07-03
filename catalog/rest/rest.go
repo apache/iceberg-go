@@ -974,6 +974,14 @@ func (r *Catalog) splitIdentForPath(ident table.Identifier) (string, string, err
 	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.TableNameFromIdent(ident), nil
 }
 
+func (r *Catalog) splitViewIdentForPath(ident table.Identifier) (string, string, error) {
+	if err := catalog.ValidateViewIdentifier(ident); err != nil {
+		return "", "", err
+	}
+
+	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.TableNameFromIdent(ident), nil
+}
+
 func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
 	if err := r.endpoints.check(endpointCreateTable); err != nil {
 		return nil, err
@@ -1155,8 +1163,11 @@ func (r *Catalog) CommitTransaction(ctx context.Context, commits []table.TableCo
 
 	changes := make([]tableChange, len(commits))
 	for i, c := range commits {
+		if len(c.Identifier) == 0 {
+			return catalog.ErrMissingIdentifier
+		}
 		if err := catalog.ValidateTableIdentifier(c.Identifier); err != nil {
-			return fmt.Errorf("%w: %w", catalog.ErrMissingIdentifier, err)
+			return err
 		}
 
 		reqs := c.Requirements
@@ -1723,7 +1734,7 @@ func (r *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 		return err
 	}
 
-	ns, view, err := r.splitIdentForPath(identifier)
+	ns, view, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
 		return err
 	}
@@ -1740,7 +1751,7 @@ func (r *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 }
 
 func (r *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifier) (bool, error) {
-	ns, view, err := r.splitIdentForPath(identifier)
+	ns, view, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
 		return false, err
 	}
@@ -1810,7 +1821,7 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		return nil, err
 	}
 
-	ns, viewName, err := r.splitIdentForPath(identifier)
+	ns, viewName, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -1871,7 +1882,7 @@ func (r *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 		return nil, err
 	}
 
-	ns, viewName, err := r.splitIdentForPath(ident)
+	ns, viewName, err := r.splitViewIdentForPath(ident)
 	if err != nil {
 		return nil, err
 	}
@@ -1916,7 +1927,7 @@ func (r *Catalog) RegisterView(ctx context.Context, identifier table.Identifier,
 		return nil, err
 	}
 
-	ns, v, err := r.splitIdentForPath(identifier)
+	ns, v, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -1953,7 +1964,7 @@ func (r *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*v
 		return nil, err
 	}
 
-	ns, v, err := r.splitIdentForPath(identifier)
+	ns, v, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}

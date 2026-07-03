@@ -55,11 +55,22 @@ import (
 func TestSplitIdentForPathRequiresNamespaceAndName(t *testing.T) {
 	cat := &Catalog{}
 
-	_, _, err := cat.splitIdentForPath(nil)
-	require.ErrorIs(t, err, catalog.ErrNoSuchTable)
+	for _, ident := range []table.Identifier{
+		nil,
+		{"table"},
+		{"namespace", ""},
+		{"namespace", "."},
+		{"namespace", ".."},
+		{"namespace", "table/name"},
+		{"namespace", "table\nname"},
+	} {
+		_, _, err := cat.splitIdentForPath(ident)
+		require.ErrorIs(t, err, catalog.ErrNoSuchTable)
+	}
 
-	_, _, err = cat.splitIdentForPath(table.Identifier{"table"})
-	require.ErrorIs(t, err, catalog.ErrNoSuchTable)
+	_, _, err := cat.splitViewIdentForPath(table.Identifier{"view"})
+	require.ErrorIs(t, err, catalog.ErrNoSuchView)
+	require.NotErrorIs(t, err, catalog.ErrNoSuchTable)
 
 	ns, tbl, err := cat.splitIdentForPath(table.Identifier{"namespace", "table"})
 	require.NoError(t, err)
