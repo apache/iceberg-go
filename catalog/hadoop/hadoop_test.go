@@ -834,7 +834,7 @@ func (s *HadoopCatalogTestSuite) TestFindVersionMixedGzipAndPlain() {
 	s.Equal(filepath.Join(dir, "v3.gz.metadata.json"), path)
 }
 
-func (s *HadoopCatalogTestSuite) TestFindMetadataLocationKeepsDiscoveredPathForDuplicateVersion() {
+func (s *HadoopCatalogTestSuite) TestFindMetadataLocationUsesCanonicalPathForDuplicateVersion() {
 	ident := []string{"ns", "tbl"}
 	dir := s.cat.metadataDir(ident)
 	s.Require().NoError(os.MkdirAll(dir, 0o755))
@@ -846,7 +846,7 @@ func (s *HadoopCatalogTestSuite) TestFindMetadataLocationKeepsDiscoveredPathForD
 	path, ver, err := s.cat.findMetadataLocation(ident)
 	s.Require().NoError(err)
 	s.Equal(3, ver)
-	s.Equal(filepath.Join(dir, "v3.gz.metadata.json"), path)
+	s.Equal(filepath.Join(dir, "v3.metadata.json"), path)
 }
 
 // CreateNamespace tests
