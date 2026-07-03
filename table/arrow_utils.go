@@ -1867,7 +1867,11 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 
 					return
 				}
-				writer.Add(filePath, []int64{positions.Value(int(i))}, pCtx.specID, pCtx.partitionData)
+				if err := writer.Add(filePath, []int64{positions.Value(int(i))}, pCtx.specID, pCtx.partitionData); err != nil {
+					yield(nil, err)
+
+					return
+				}
 				hasEntries = true
 			}
 		}
