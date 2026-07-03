@@ -300,6 +300,10 @@ func (c *Catalog) metadataFilePathForCompression(ident table.Identifier, version
 	return joinPath(c.isLocal, c.metadataDir(ident), fmt.Sprintf("v%d%s", version, suffix)), nil
 }
 
+func (c *Catalog) metadataVersionClaimPath(ident table.Identifier, version int) string {
+	return joinPath(c.isLocal, c.metadataDir(ident), fmt.Sprintf("v%d.metadata.json.claim", version))
+}
+
 func (c *Catalog) versionHintPath(ident table.Identifier) string {
 	return joinPath(c.isLocal, c.metadataDir(ident), "version-hint.text")
 }
@@ -460,6 +464,16 @@ func (c *Catalog) metadataVersionExists(ident table.Identifier, version int) (bo
 	return found, nil
 }
 
+func (c *Catalog) metadataVersionLocation(ident table.Identifier, version int) (string, bool) {
+	files, _, err := c.scanMetadataFiles(ident)
+	if err != nil {
+		return "", false
+	}
+
+	file, ok := files[version]
+	return file.location, ok
+}
+
 func (c *Catalog) findMetadataLocation(ident table.Identifier) (string, int, error) {
 	_, latest, err := c.scanMetadataFiles(ident)
 	if err != nil {
@@ -555,7 +569,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		return nil, fmt.Errorf("hadoop catalog: failed to write table metadata: %w", err)
 	}
 
-	if err := c.commitMetadataFile(ident, tempPath, metaPath, catalog.ErrTableAlreadyExists); err != nil {
+	if err := c.commitMetadataFile(ident, version, tempPath, metaPath, catalog.ErrTableAlreadyExists); err != nil {
 		return nil, err
 	}
 
@@ -683,20 +697,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 		return nil, "", fmt.Errorf("hadoop catalog: failed to write table metadata: %w", err)
 	}
 
-	exists, err := c.metadataVersionExists(ident, newVersion)
-	if err != nil {
-		_ = c.filesystem.Remove(tempPath)
-
-		return nil, "", fmt.Errorf("hadoop catalog: failed to inspect metadata directory for version %d: %w",
-			newVersion, err)
-	}
-	if exists {
-		_ = c.filesystem.Remove(tempPath)
-
-		return nil, "", fmt.Errorf("hadoop catalog: version %d already exists for table %s",
-			newVersion, strings.Join(ident, "."))
-	}
-	if err := c.commitMetadataFile(ident, tempPath, newMetaPath, table.ErrCommitFailed); err != nil {
+	if err := c.commitMetadataFile(ident, newVersion, tempPath, newMetaPath, table.ErrCommitFailed); err != nil {
 		return nil, "", err
 	}
 
@@ -706,10 +707,32 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 	return updated, newMetaPath, nil
 }
 
-func (c *Catalog) commitMetadataFile(ident table.Identifier, tempPath, metaPath string, conflictErr error) error {
-	if err := c.filesystem.RenameNoReplace(tempPath, metaPath); err != nil {
+func (c *Catalog) commitMetadataFile(ident table.Identifier, version int, tempPath, metaPath string, conflictErr error) error {
+	claimPath := c.metadataVersionClaimPath(ident, version)
+	if err := c.filesystem.RenameNoReplace(tempPath, claimPath); err != nil {
 		_ = c.filesystem.Remove(tempPath)
 
+		if errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("%w: metadata version already claimed for table %s: %s",
+				conflictErr, strings.Join(ident, "."), claimPath)
+		}
+
+		return fmt.Errorf("hadoop catalog: failed to claim metadata version: %w", err)
+	}
+
+	removeClaim := true
+	defer func() {
+		if removeClaim {
+			_ = c.filesystem.Remove(claimPath)
+		}
+	}()
+
+	if existingPath, exists := c.metadataVersionLocation(ident, version); exists {
+		return fmt.Errorf("%w: metadata file already exists for table %s: %s",
+			conflictErr, strings.Join(ident, "."), existingPath)
+	}
+
+	if err := c.filesystem.RenameNoReplace(claimPath, metaPath); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("%w: metadata file already exists for table %s: %s",
 				conflictErr, strings.Join(ident, "."), metaPath)
@@ -717,6 +740,8 @@ func (c *Catalog) commitMetadataFile(ident table.Identifier, tempPath, metaPath 
 
 		return fmt.Errorf("hadoop catalog: failed to commit metadata file: %w", err)
 	}
+
+	removeClaim = false
 
 	return nil
 }
