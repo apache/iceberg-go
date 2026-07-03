@@ -102,6 +102,8 @@ func constructHiveViewTable(dbName, viewName, location, metadataLocation string,
 			parameters[k] = v
 		}
 	}
+	delete(parameters, PreviousMetadataLocationKey)
+
 	parameters[TableTypeKey] = TableTypeIcebergView
 	parameters[MetadataLocationKey] = metadataLocation
 	parameters[ExternalKey] = "TRUE"

@@ -797,16 +797,18 @@ func TestConstructHiveViewTablePreservesReservedParameters(t *testing.T) {
 		testSchema,
 		"SELECT 1 AS col",
 		map[string]string{
-			TableTypeKey:        TableTypeIceberg,
-			MetadataLocationKey: "s3://wrong-bucket/metadata.json",
-			ExternalKey:         "FALSE",
-			"owner":             "alice",
+			TableTypeKey:                TableTypeIceberg,
+			MetadataLocationKey:         "s3://wrong-bucket/metadata.json",
+			PreviousMetadataLocationKey: "s3://wrong-bucket/previous.metadata.json",
+			ExternalKey:                 "FALSE",
+			"owner":                     "alice",
 		},
 	)
 
 	assert.Equal(TableTypeVirtualView, hiveTbl.TableType)
 	assert.Equal(TableTypeIcebergView, hiveTbl.Parameters[TableTypeKey])
 	assert.Equal(metadataLocation, hiveTbl.Parameters[MetadataLocationKey])
+	assert.NotContains(hiveTbl.Parameters, PreviousMetadataLocationKey)
 	assert.Equal("TRUE", hiveTbl.Parameters[ExternalKey])
 	assert.Equal("alice", hiveTbl.Parameters["owner"])
 }
