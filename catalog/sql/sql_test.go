@@ -119,6 +119,15 @@ func TestInvalidDialect(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestNewCatalogInvalidDialect(t *testing.T) {
+	sqldb, err := sql.Open(sqliteshim.ShimName, ":memory:")
+	assert.NoError(t, err)
+	defer sqldb.Close()
+
+	_, err = sqlcat.NewCatalog("default", sqldb, "foobar", nil)
+	assert.ErrorContains(t, err, "unsupported sql dialect")
+}
+
 func randomString(n int) string {
 	const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	var b strings.Builder
