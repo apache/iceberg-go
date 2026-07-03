@@ -587,6 +587,8 @@ func (c *Catalog) CheckTableExists(_ context.Context, ident table.Identifier) (b
 		return false, nil
 	}
 
+	// Direct existence checks surface metadata directory read errors; listing
+	// paths use isTableDirForListing to skip unreadable entries.
 	exists, err := isTableDir(c.filesystem, c.isLocal, c.tableToPath(ident))
 	if err != nil {
 		return false, err
