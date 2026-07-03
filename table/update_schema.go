@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -614,6 +615,182 @@ func (u *UpdateSchema) SetIdentifierField(paths [][]string) *UpdateSchema {
 	u.identifierFieldNames = identifierFieldNames
 
 	return u
+}
+
+func (u *UpdateSchema) UnionByNameWith(newSchema *iceberg.Schema) *UpdateSchema {
+	u.ops = append(u.ops, func() error {
+		return u.unionByName(newSchema)
+	})
+
+	return u
+}
+
+func (u *UpdateSchema) unionByName(newSchema *iceberg.Schema) error {
+	if newSchema == nil {
+		return errors.New("cannot union with nil schema")
+	}
+
+	for _, field := range newSchema.Fields() {
+		if err := u.unionField([]string{field.Name}, field); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (u *UpdateSchema) unionField(path []string, newField iceberg.NestedField) error {
+	existing, ok := u.findField(strings.Join(path, "."))
+	if !ok {
+		return u.unionAddColumn(path, newField)
+	}
+
+	if err := u.unionUpdateColumn(path, existing, newField); err != nil {
+		return err
+	}
+
+	switch t := newField.Type.(type) {
+	case *iceberg.StructType:
+		for _, child := range t.FieldList {
+			if err := u.unionField(childPath(path, child.Name), child); err != nil {
+				return err
+			}
+		}
+	case *iceberg.ListType:
+		if err := u.unionField(childPath(path, "element"), t.ElementField()); err != nil {
+			return err
+		}
+	case *iceberg.MapType:
+		if err := u.unionField(childPath(path, "key"), t.KeyField()); err != nil {
+			return err
+		}
+		if err := u.unionField(childPath(path, "value"), t.ValueField()); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func childPath(parent []string, name string) []string {
+	child := make([]string, 0, len(parent)+1)
+	child = append(child, parent...)
+
+	return append(child, name)
+}
+
+func (u *UpdateSchema) unionAddColumn(path []string, newField iceberg.NestedField) error {
+	fullName := strings.Join(path, ".")
+
+	parent := path[:len(path)-1]
+	parentID := TableRootID
+
+	if len(parent) > 0 {
+		parentFullPath := strings.Join(parent, ".")
+		parentField, ok := u.findField(parentFullPath)
+		if !ok {
+			return fmt.Errorf("parent field not found: %s", parentFullPath)
+		}
+
+		switch parentType := parentField.Type.(type) {
+		case *iceberg.ListType:
+			parentField = parentType.ElementField()
+		case *iceberg.MapType:
+			parentField = parentType.ValueField()
+		}
+
+		if _, ok := parentField.Type.(*iceberg.StructType); !ok {
+			return fmt.Errorf("cannot add field to non-struct type: %s", parentFullPath)
+		}
+
+		parentID = parentField.ID
+	}
+
+	name := path[len(path)-1]
+	for _, add := range u.adds[parentID] {
+		if add.Name == name {
+			return fmt.Errorf("field already exists in adds: %s", fullName)
+		}
+	}
+
+	field := iceberg.NestedField{
+		Name:           name,
+		Type:           newField.Type,
+		Required:       false,
+		Doc:            newField.Doc,
+		InitialDefault: newField.InitialDefault,
+		WriteDefault:   newField.WriteDefault,
+	}
+
+	sch, err := iceberg.AssignFreshSchemaIDs(iceberg.NewSchema(0, field), u.assignNewColumnID)
+	if err != nil {
+		return fmt.Errorf("failed to assign field id: %w", err)
+	}
+	u.adds[parentID] = append(u.adds[parentID], sch.Field(0))
+	u.addedNameToID[fullName] = sch.Field(0).ID
+
+	return nil
+}
+
+func (u *UpdateSchema) unionUpdateColumn(path []string, existing, newField iceberg.NestedField) error {
+	update := ColumnUpdate{}
+
+	if !newField.Required && existing.Required {
+		update.Required = iceberg.Optional[bool]{Valid: true, Val: false}
+	}
+
+	if !isIgnorableTypeUpdate(existing.Type, newField.Type) {
+		update.FieldType = iceberg.Optional[iceberg.Type]{Valid: true, Val: newField.Type}
+	}
+
+	if newField.Doc != "" && newField.Doc != existing.Doc {
+		update.Doc = iceberg.Optional[string]{Valid: true, Val: newField.Doc}
+	}
+
+	if update.Required.Valid || update.FieldType.Valid || update.Doc.Valid {
+		if err := u.updateColumn(path, update); err != nil {
+			return err
+		}
+	}
+
+	if newField.WriteDefault != nil && !reflect.DeepEqual(newField.WriteDefault, existing.WriteDefault) {
+		u.setWriteDefault(existing, newField.WriteDefault)
+	}
+
+	return nil
+}
+
+func (u *UpdateSchema) setWriteDefault(existing iceberg.NestedField, writeDefault any) {
+	parentID := u.findParentID(existing.ID)
+	if u.updates[parentID] == nil {
+		u.updates[parentID] = make(map[int]iceberg.NestedField)
+	}
+
+	updatedField, ok := u.updates[parentID][existing.ID]
+	if !ok {
+		updatedField = existing
+	}
+	updatedField.WriteDefault = writeDefault
+	u.updates[parentID][existing.ID] = updatedField
+}
+
+func isIgnorableTypeUpdate(existingType, newType iceberg.Type) bool {
+	if _, ok := existingType.(iceberg.PrimitiveType); ok {
+		newPrimitive, ok := newType.(iceberg.PrimitiveType)
+		if !ok {
+			return false
+		}
+		if existingType.Equals(newType) {
+			return true
+		}
+		_, err := iceberg.PromoteType(newPrimitive, existingType)
+
+		return err == nil
+	}
+
+	_, ok := newType.(iceberg.PrimitiveType)
+
+	return !ok
 }
 
 func (u *UpdateSchema) BuildUpdates() ([]Update, []Requirement, error) {
