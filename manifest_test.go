@@ -25,6 +25,7 @@ import (
 	"io"
 	"io/fs"
 	"math"
+	"math/big"
 	"strconv"
 	"testing"
 	"time"
@@ -2101,22 +2102,199 @@ func TestReadManifestDecodesNilLogicalPartitionValueFromNullableUnion(t *testing
 	}
 }
 
+func TestFitDecimalBytesAllowsOnlyRedundantSignExtension(t *testing.T) {
+	tests := []struct {
+		name    string
+		bytes   []byte
+		size    int
+		want    []byte
+		wantErr bool
+	}{
+		{
+			name:  "trims redundant positive sign extension",
+			bytes: []byte{0x00, 0x00, 0x01},
+			size:  2,
+			want:  []byte{0x00, 0x01},
+		},
+		{
+			name:  "trims redundant negative sign extension",
+			bytes: []byte{0xff, 0xff, 0x80},
+			size:  2,
+			want:  []byte{0xff, 0x80},
+		},
+		{
+			name:    "rejects positive sign change",
+			bytes:   []byte{0x00, 0x80},
+			size:    1,
+			wantErr: true,
+		},
+		{
+			name:    "rejects negative sign change",
+			bytes:   []byte{0xff, 0x7f},
+			size:    1,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := fitDecimalBytes(tt.bytes, tt.size)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, tt.want) {
+				t.Fatalf("fitDecimalBytes() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAvroEncodePartitionDataUsesDeclaredDecimalFixedSize(t *testing.T) {
 	decimalFieldID := 1000
-	converted, err := avroEncodePartitionData(
-		map[int]any{
-			decimalFieldID: Decimal{Val: decimal128.FromI64(1), Scale: 2},
+	maxPrecision38 := new(big.Int).Sub(new(big.Int).Exp(big.NewInt(10), big.NewInt(38), nil), big.NewInt(1))
+
+	tests := []struct {
+		name      string
+		value     any
+		precision int
+		want      []byte
+		wantErr   bool
+	}{
+		{
+			name:      "pads positive decimal",
+			value:     Decimal{Val: decimal128.FromI64(1), Scale: 2},
+			precision: 10,
+			want:      []byte{0x00, 0x00, 0x00, 0x00, 0x01},
 		},
-		map[string]int{"price": decimalFieldID},
-		map[int]string{decimalFieldID: atype.Decimal},
-		map[int]int{decimalFieldID: internal.DecimalRequiredBytes(10)},
+		{
+			name:      "pads zero decimal",
+			value:     Decimal{Val: decimal128.FromI64(0), Scale: 2},
+			precision: 10,
+			want:      []byte{0x00, 0x00, 0x00, 0x00, 0x00},
+		},
+		{
+			name:      "sign extends negative decimal",
+			value:     Decimal{Val: decimal128.FromI64(-1), Scale: 2},
+			precision: 10,
+			want:      []byte{0xff, 0xff, 0xff, 0xff, 0xff},
+		},
+		{
+			name:      "keeps max precision decimal",
+			value:     DecimalLiteral{Val: decimal128.FromBigInt(maxPrecision38), Scale: 0},
+			precision: 38,
+			want: []byte{
+				0x4b, 0x3b, 0x4c, 0xa8, 0x5a, 0x86, 0xc4, 0x7a,
+				0x09, 0x8a, 0x22, 0x3f, 0xff, 0xff, 0xff, 0xff,
+			},
+		},
+		{
+			name:      "rejects value changing truncation",
+			value:     Decimal{Val: decimal128.FromI64(128), Scale: 0},
+			precision: 2,
+			wantErr:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			converted, err := avroEncodePartitionData(
+				map[int]any{decimalFieldID: tt.value},
+				map[string]int{"price": decimalFieldID},
+				map[int]string{decimalFieldID: atype.Decimal},
+				map[int]int{decimalFieldID: internal.DecimalRequiredBytes(tt.precision)},
+			)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			got, ok := converted["price"].([]byte)
+			if !ok {
+				t.Fatalf("encoded decimal type = %T, want []byte", converted["price"])
+			}
+			if !bytes.Equal(got, tt.want) {
+				t.Fatalf("encoded decimal = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestManifestRoundTripDecimalPartitionUsesSignedFixedSize(t *testing.T) {
+	schema := NewSchema(
+		0,
+		NestedField{ID: 1, Name: "price", Type: DecimalTypeOf(10, 2)},
+	)
+	partitionSpec := NewPartitionSpecID(
+		1,
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "price", Transform: IdentityTransform{}},
+	)
+	partitionValue := Decimal{Val: decimal128.FromI64(-1), Scale: 2}
+	dataFileBuilder, err := NewDataFileBuilder(
+		partitionSpec,
+		EntryContentData,
+		"s3://bucket/ns/table/data/decimal-partition.parquet",
+		ParquetFile,
+		map[int]any{1000: partitionValue},
+		map[int]string{1000: atype.Decimal},
+		map[int]int{1000: internal.DecimalRequiredBytes(10)},
+		1,
+		1024,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if got, want := converted["price"], []byte{0, 0, 0, 0, 1}; !bytes.Equal(got.([]byte), want) {
-		t.Fatalf("encoded decimal = %v, want %v", got, want)
+	snapshotID := int64(1234)
+	seqNum := int64(1)
+	entry := NewManifestEntry(
+		EntryStatusADDED,
+		&snapshotID,
+		&seqNum,
+		&seqNum,
+		dataFileBuilder.Build(),
+	)
+
+	var buf bytes.Buffer
+	file, err := WriteManifest(
+		"s3://bucket/ns/table/metadata/decimal-manifest.avro",
+		&buf,
+		2,
+		partitionSpec,
+		schema,
+		snapshotID,
+		[]ManifestEntry{entry},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := ReadManifest(file, bytes.NewReader(buf.Bytes()), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("ReadManifest returned %d entries, want 1", len(entries))
+	}
+
+	got, ok := entries[0].DataFile().Partition()[1000].(DecimalLiteral)
+	if !ok {
+		t.Fatalf("Partition()[1000] type = %T, want DecimalLiteral", entries[0].DataFile().Partition()[1000])
+	}
+	if want := DecimalLiteral(partitionValue); !got.Equals(want) {
+		t.Fatalf("Partition()[1000] = %v, want %v", got, want)
 	}
 }
 

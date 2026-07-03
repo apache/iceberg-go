@@ -1943,7 +1943,7 @@ func encodeDecimalBytes(dec DecimalLiteral, fixedSize int) ([]byte, error) {
 		return nil, err
 	}
 
-	return padOrTruncateBytes(bytes, fixedSize), nil
+	return fitDecimalBytes(bytes, fixedSize)
 }
 
 func convertUUIDValue(v any) any {
@@ -1954,13 +1954,41 @@ func convertUUIDValue(v any) any {
 	return v
 }
 
-func padOrTruncateBytes(bytes []byte, size int) []byte {
-	if len(bytes) >= size {
-		return bytes[len(bytes)-size:]
+func fitDecimalBytes(bytes []byte, size int) ([]byte, error) {
+	if len(bytes) == 0 {
+		return make([]byte, size), nil
 	}
-	padded := slices.Grow(bytes, size-len(bytes))
 
-	return append(make([]byte, size-len(bytes)), padded...)
+	if len(bytes) == size {
+		return bytes, nil
+	}
+
+	if len(bytes) < size {
+		signByte := byte(0x00)
+		if bytes[0]&0x80 != 0 {
+			signByte = 0xff
+		}
+		padded := make([]byte, size)
+		for i := range padded[:size-len(bytes)] {
+			padded[i] = signByte
+		}
+		copy(padded[size-len(bytes):], bytes)
+
+		return padded, nil
+	}
+
+	retained := bytes[len(bytes)-size:]
+	signByte := byte(0x00)
+	if retained[0]&0x80 != 0 {
+		signByte = 0xff
+	}
+	for _, b := range bytes[:len(bytes)-size] {
+		if b != signByte {
+			return nil, fmt.Errorf("decimal value does not fit fixed size %d", size)
+		}
+	}
+
+	return retained, nil
 }
 
 type dataFile struct {
