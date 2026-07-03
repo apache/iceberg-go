@@ -44,6 +44,7 @@ const (
 
 var (
 	ErrInvalidSortOrderID   = errors.New("invalid sort order ID")
+	ErrInvalidSortSourceID  = errors.New("invalid sort source ID")
 	ErrInvalidTransform     = errors.New("invalid transform, must be a valid transform string or a transform object")
 	ErrInvalidSortDirection = errors.New("invalid sort direction, must be 'asc' or 'desc'")
 	ErrInvalidNullOrder     = errors.New("invalid null order, must be 'nulls-first' or 'nulls-last'")
@@ -133,10 +134,10 @@ func (s *SortField) UnmarshalJSON(b []byte) error {
 		return fmt.Errorf("%w: failed to unmarshal sort field", err)
 	}
 
-	if _, ok := raw["source-id"]; ok {
-		if _, ok := raw["source-ids"]; ok {
-			return errors.New("sort field cannot contain both source-id and source-ids")
-		}
+	_, hasSourceID := raw["source-id"]
+	_, hasSourceIDs := raw["source-ids"]
+	if hasSourceID && hasSourceIDs {
+		return errors.New("sort field cannot contain both source-id and source-ids")
 	}
 
 	aux := struct {
@@ -154,10 +155,12 @@ func (s *SortField) UnmarshalJSON(b []byte) error {
 	s.Direction = aux.Direction
 	s.NullOrder = aux.NullOrder
 
-	if len(aux.SourceIDs) > 0 {
+	if hasSourceIDs {
 		s.SourceIDs = aux.SourceIDs
-	} else {
+	} else if hasSourceID {
 		s.SourceIDs = []int{aux.SourceID}
+	} else {
+		s.SourceIDs = nil
 	}
 
 	var err error
@@ -175,6 +178,28 @@ func (s *SortField) UnmarshalJSON(b []byte) error {
 	case NullsFirst, NullsLast:
 	default:
 		return ErrInvalidNullOrder
+	}
+
+	return nil
+}
+
+func validateSortSourceID(id int) error {
+	if id < 0 {
+		return fmt.Errorf("source ID must be non-negative: %d", id)
+	}
+
+	return nil
+}
+
+func validateSortSourceIDs(ids []int) error {
+	if len(ids) == 0 {
+		return errors.New("source-ids must not be empty")
+	}
+
+	for _, id := range ids {
+		if err := validateSortSourceID(id); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -242,7 +267,7 @@ func (s *SortOrder) UnmarshalJSON(b []byte) error {
 		aux.OrderID = InitialSortOrderID
 	}
 
-	newOrder, err := NewSortOrder(aux.OrderID, aux.Fields)
+	newOrder, err := newSortOrder(aux.OrderID, aux.Fields, false)
 	if err != nil {
 		return err
 	}
@@ -256,8 +281,13 @@ func (s *SortOrder) UnmarshalJSON(b []byte) error {
 //
 // The orderID must be greater than or equal to 0.
 // If orderID is 0, no fields can be passed, this is equal to UnsortedSortOrder.
-// Fields need to have non-nil Transform, valid Direction and NullOrder values.
+// Fields need to have non-nil Transform, valid Direction and NullOrder values,
+// and non-empty source IDs.
 func NewSortOrder(orderID int, fields []SortField) (SortOrder, error) {
+	return newSortOrder(orderID, fields, true)
+}
+
+func newSortOrder(orderID int, fields []SortField, validateSourceIDs bool) (SortOrder, error) {
 	if orderID < 0 {
 		return SortOrder{}, fmt.Errorf("%w: sort order ID %d must be a non-negative integer",
 			ErrInvalidSortOrderID, orderID)
@@ -280,6 +310,12 @@ func NewSortOrder(orderID int, fields []SortField) (SortOrder, error) {
 		if field.NullOrder != NullsFirst && field.NullOrder != NullsLast {
 			return SortOrder{}, fmt.Errorf("%w: sort field at index %d", ErrInvalidNullOrder, idx)
 		}
+		if validateSourceIDs {
+			if err := validateSortSourceIDs(field.SourceIDs); err != nil {
+				return SortOrder{}, fmt.Errorf("%w: sort field at index %d has invalid source IDs: %v",
+					ErrInvalidSortSourceID, idx, err)
+			}
+		}
 	}
 
 	return SortOrder{orderID, fields}, nil
@@ -295,21 +331,32 @@ func (s *SortOrder) CheckCompatibility(schema *iceberg.Schema) error {
 	}
 
 	for _, field := range s.fields {
-		f, ok := schema.FindFieldByID(field.SourceID())
-		if !ok {
-			return fmt.Errorf("sort field with source id %d not found in schema", field.SourceID())
-		}
-
-		if _, ok := f.Type.(iceberg.PrimitiveType); !ok {
-			return fmt.Errorf("cannot sort by non-primitive source field: %s", f.Type.Type())
-		}
-
 		if field.Transform == nil {
 			return fmt.Errorf("%w: sort field with source id %d has no transform", ErrInvalidTransform, field.SourceID())
 		}
 
-		if !field.Transform.CanTransform(f.Type) {
-			return fmt.Errorf("invalid source type %s for transform %s", f.Type.Type(), field.Transform)
+		if err := validateSortSourceIDs(field.SourceIDs); err != nil {
+			return fmt.Errorf("%w: sort field has invalid source IDs: %v", ErrInvalidSortSourceID, err)
+		}
+
+		var firstField iceberg.NestedField
+		for idx, sourceID := range field.SourceIDs {
+			f, ok := schema.FindFieldByID(sourceID)
+			if !ok {
+				return fmt.Errorf("sort field with source id %d not found in schema", sourceID)
+			}
+
+			if _, ok := f.Type.(iceberg.PrimitiveType); !ok {
+				return fmt.Errorf("cannot sort by non-primitive source field: %s", f.Type.Type())
+			}
+
+			if idx == 0 {
+				firstField = f
+			}
+		}
+
+		if !field.Transform.CanTransform(firstField.Type) {
+			return fmt.Errorf("invalid source type %s for transform %s", firstField.Type.Type(), field.Transform)
 		}
 	}
 
