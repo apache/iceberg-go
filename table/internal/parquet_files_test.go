@@ -269,6 +269,62 @@ func TestParquetOpenClosesFileOnNewFileReaderFailure(t *testing.T) {
 	assert.True(t, mockFile.closed)
 }
 
+func TestParquetGetReaderClosesFileOnNewParquetReaderFailure(t *testing.T) {
+	data := []byte("not-a-parquet-file")
+	mockFile := &trackingOpenFile{
+		Reader: bytes.NewReader(data),
+	}
+	mockIO := &trackingFileSystem{file: mockFile}
+
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData,
+		"bad.parquet",
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		1,
+		int64(len(data)),
+	)
+	require.NoError(t, err)
+
+	fileSource, err := internal.GetFile(context.Background(), mockIO, builder.Build(), false)
+	require.NoError(t, err)
+
+	_, err = fileSource.GetReader(context.Background())
+	require.Error(t, err)
+	assert.True(t, mockFile.closed)
+}
+
+func TestParquetGetReaderClosesFileOnNewFileReaderFailure(t *testing.T) {
+	data := mustParquetBytesWithInvalidArrowSchema(t)
+	mockFile := &trackingOpenFile{
+		Reader: bytes.NewReader(data),
+	}
+	mockIO := &trackingFileSystem{file: mockFile}
+
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData,
+		"bad.parquet",
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		1,
+		int64(len(data)),
+	)
+	require.NoError(t, err)
+
+	fileSource, err := internal.GetFile(context.Background(), mockIO, builder.Build(), false)
+	require.NoError(t, err)
+
+	_, err = fileSource.GetReader(context.Background())
+	require.Error(t, err)
+	assert.True(t, mockFile.closed)
+}
+
 func assertBounds[T iceberg.LiteralType](t *testing.T, bound []byte, typ iceberg.Type, expected T) {
 	lit, err := iceberg.LiteralFromBytes(typ, bound)
 	require.NoError(t, err)

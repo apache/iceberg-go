@@ -74,7 +74,7 @@ const (
 
 type parquetFormat struct{}
 
-func (parquetFormat) Open(ctx context.Context, fs iceio.IO, path string) (result FileReader, err error) {
+func (parquetFormat) Open(ctx context.Context, fs iceio.IO, path string) (_ FileReader, err error) {
 	inputfile, err := fs.Open(path)
 	if err != nil {
 		return nil, err
@@ -82,7 +82,9 @@ func (parquetFormat) Open(ctx context.Context, fs iceio.IO, path string) (result
 
 	defer func() {
 		if err != nil {
-			_ = inputfile.Close()
+			if closeErr := inputfile.Close(); closeErr != nil {
+				err = errors.Join(err, closeErr)
+			}
 		}
 	}()
 
@@ -97,9 +99,7 @@ func (parquetFormat) Open(ctx context.Context, fs iceio.IO, path string) (result
 		return nil, err
 	}
 
-	result = wrapPqArrowReader{arrRdr}
-
-	return result, nil
+	return wrapPqArrowReader{arrRdr}, nil
 }
 
 func (parquetFormat) PathToIDMapping(sc *iceberg.Schema) (map[string]int, error) {
@@ -930,11 +930,19 @@ func checkRowGroupBloomFilters(
 	return true, nil
 }
 
-func (pfs *ParquetFileSource) GetReader(ctx context.Context) (FileReader, error) {
+func (pfs *ParquetFileSource) GetReader(ctx context.Context) (result FileReader, err error) {
 	pf, err := pfs.fs.Open(pfs.file.FilePath())
 	if err != nil {
 		return nil, err
 	}
+
+	defer func() {
+		if err != nil {
+			if closeErr := pf.Close(); closeErr != nil {
+				err = errors.Join(err, closeErr)
+			}
+		}
+	}()
 
 	rdr, err := file.NewParquetReader(pf,
 		file.WithReadProps(parquet.NewReaderProperties(pfs.mem)))
@@ -958,7 +966,9 @@ func (pfs *ParquetFileSource) GetReader(ctx context.Context) (FileReader, error)
 		return nil, err
 	}
 
-	return wrapPqArrowReader{fr}, nil
+	result = wrapPqArrowReader{fr}
+
+	return result, nil
 }
 
 type manifestVisitor[T any] interface {
