@@ -351,7 +351,14 @@ func NewPartitionSpec(fields ...PartitionField) PartitionSpec {
 //
 // The fields are not verified against a schema, use NewPartitionSpecOpts if you have to ensure compatibility.
 func NewPartitionSpecID(id int, fields ...PartitionField) PartitionSpec {
-	ret := PartitionSpec{id: id, fields: fields}
+	fieldCopies := make([]PartitionField, len(fields))
+	for i, field := range fields {
+		fieldCopies[i] = field
+		if field.SourceIDs != nil {
+			fieldCopies[i].SourceIDs = slices.Clone(field.SourceIDs)
+		}
+	}
+	ret := PartitionSpec{id: id, fields: fieldCopies}
 	ret.initialize()
 
 	return ret
