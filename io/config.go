@@ -40,7 +40,7 @@ const (
 	GCSKeyPath    = "gcs.keypath"
 	GCSJSONKey    = "gcs.jsonkey"
 	GCSCredType   = "gcs.credtype"
-	GCSUseJSONAPI = "gcs.usejsonapi" // set to anything to enable
+	GCSUseJSONAPI = "gcs.usejsonapi"
 )
 
 // Constants for Azure configuration options
