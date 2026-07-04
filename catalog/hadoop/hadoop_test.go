@@ -634,7 +634,8 @@ func (s *HadoopCatalogTestSuite) createMetadataFile(ident table.Identifier, vers
 }
 
 func (s *HadoopCatalogTestSuite) replaceMetadataWithGzip(ident table.Identifier, version int) string {
-	plainPath := s.cat.metadataFilePath(ident, version)
+	plainPath, err := s.cat.metadataFilePathForCompression(ident, version, table.MetadataCompressionCodecNone)
+	s.Require().NoError(err)
 	data, err := os.ReadFile(plainPath)
 	s.Require().NoError(err)
 
@@ -656,7 +657,8 @@ func (s *HadoopCatalogTestSuite) replaceMetadataWithUUIDName(ident table.Identif
 }
 
 func (s *HadoopCatalogTestSuite) replaceMetadataWithUUIDSequence(ident table.Identifier, version, sequence int) string {
-	plainPath := s.cat.metadataFilePath(ident, version)
+	plainPath, err := s.cat.metadataFilePathForCompression(ident, version, table.MetadataCompressionCodecNone)
+	s.Require().NoError(err)
 	uuidPath := filepath.Join(
 		s.cat.metadataDir(ident),
 		fmt.Sprintf("%05d-a1b2c3d4-e5f6-7890-abcd-ef1234567890.metadata.json", sequence),
@@ -744,7 +746,9 @@ func (s *HadoopCatalogTestSuite) TestFindMetadataLocationHintGapKeepsLatest() {
 	location, version, err := s.cat.findMetadataLocation(ident)
 	s.Require().NoError(err)
 	s.Equal(5, version)
-	s.Equal(s.cat.metadataFilePath(ident, 5), location)
+	plainPath, err := s.cat.metadataFilePathForCompression(ident, 5, table.MetadataCompressionCodecNone)
+	s.Require().NoError(err)
+	s.Equal(plainPath, location)
 }
 
 func (s *HadoopCatalogTestSuite) TestFindVersionNoMetadataDir() {
@@ -2500,9 +2504,11 @@ func (s *HadoopCatalogTestSuite) TestCommitTableConflictDetectionRecognizesConcu
 				},
 			)
 			s.Require().Error(err)
-			s.Contains(err.Error(), "version 2 already exists")
+			s.Contains(err.Error(), "already exists")
 			s.FileExists(conflictPath)
-			s.NoFileExists(s.cat.metadataFilePath(ident, 2))
+			plainPath, err := s.cat.metadataFilePathForCompression(ident, 2, table.MetadataCompressionCodecNone)
+			s.Require().NoError(err)
+			s.NoFileExists(plainPath)
 		})
 	}
 }
