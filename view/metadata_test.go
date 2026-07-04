@@ -88,6 +88,24 @@ func TestNewMetadata(t *testing.T) {
 	assert.Equal(t, []VersionLogEntry{{TimestampMS: 1000, VersionID: 1}}, md.VersionLog())
 }
 
+func TestNewMetadataRejectInvalidFormatVersion(t *testing.T) {
+	version := newTestVersion(1, LastAddedID,
+		WithVersionSummary(VersionSummary{"summary-key": "summary-val"}),
+		WithTimestampMS(1000))
+	schema := newTestSchema(0)
+	props := iceberg.Properties{
+		"format-version": "banana",
+		"foo":            "bar",
+	}
+
+	md, err := NewMetadata(version, schema, "location", props)
+	require.Error(t, err)
+	require.Nil(t, md)
+	assert.Equal(t, "banana", props["format-version"])
+	assert.Equal(t, "bar", props["foo"])
+	assert.Len(t, props, 2)
+}
+
 func TestUnmarshalViewMetadata(t *testing.T) {
 	md, err := ParseMetadataString(exampleViewJSON)
 	require.NoError(t, err)

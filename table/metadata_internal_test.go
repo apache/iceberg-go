@@ -780,6 +780,22 @@ func TestNewMetadataWithExplicitV1Format(t *testing.T) {
 	assert.Truef(t, expected.Equals(actual), "expected: %s\ngot: %s", expected, actual)
 }
 
+func TestNewMetadataRejectInvalidFormatVersion(t *testing.T) {
+	props := iceberg.Properties{
+		"format-version": "banana",
+		"foo":            "bar",
+	}
+	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "x", Type: iceberg.PrimitiveTypes.Int64})
+
+	metadata, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "s3://bucket/path", props)
+	require.Error(t, err)
+	require.ErrorIs(t, err, iceberg.ErrInvalidFormatVersion)
+	assert.Nil(t, metadata)
+	assert.Equal(t, "banana", props["format-version"])
+	assert.Equal(t, "bar", props["foo"])
+	assert.Len(t, props, 2)
+}
+
 func TestNewMetadataV2Format(t *testing.T) {
 	schema := iceberg.NewSchemaWithIdentifiers(10,
 		[]int{22},
