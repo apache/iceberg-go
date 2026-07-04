@@ -137,6 +137,7 @@ func (f *fakeScanPlanner) SupportsRemoteScanPlanning() bool { return f.supports 
 
 func (f *fakeScanPlanner) PlanFiles(_ context.Context, req ScanPlanningRequest) (ScanPlanningResult, error) {
 	f.receivedIdentifier = append([]string(nil), req.Identifier...)
+
 	return f.result, f.err
 }
 
