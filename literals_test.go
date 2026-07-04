@@ -684,7 +684,13 @@ func TestFixedLiteral(t *testing.T) {
 
 	binlit, err := fixedLit012.To(iceberg.PrimitiveTypes.Binary)
 	require.NoError(t, err)
-	assert.EqualValues(t, fixedLit012, binlit)
+	binaryLit, ok := binlit.(iceberg.BinaryLiteral)
+	require.True(t, ok)
+	assert.EqualValues(t, fixedLit012, binaryLit)
+	assert.True(t, binaryLit.Type().Equals(iceberg.PrimitiveTypes.Binary))
+
+	binaryLit[0] = 0xFF
+	assert.Equal(t, byte(0x00), fixedLit012[0])
 }
 
 func TestBinaryLiteral(t *testing.T) {
