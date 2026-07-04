@@ -275,6 +275,7 @@ type RollingDataWriter struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
+	closeRecordCh   sync.Once
 }
 
 func (w *writerFactory) newRollingDataWriter(ctx context.Context, partition string, partitionValues map[int]any, outputDataFilesCh chan<- iceberg.DataFile) *RollingDataWriter {
@@ -450,13 +451,22 @@ func (r *RollingDataWriter) sendError(err error) {
 	}
 }
 
-func (r *RollingDataWriter) close() {
+// closeInput gracefully closes the record channel so any queued writes can still be
+// processed while honoring context cancellation checks in the stream.
+func (r *RollingDataWriter) closeInput() {
+	r.closeRecordCh.Do(func() {
+		close(r.recordCh)
+	})
+}
+
+// abort cancels in-flight work and then closes input so the stream can exit.
+func (r *RollingDataWriter) abort() {
 	r.cancel()
-	close(r.recordCh)
+	r.closeInput()
 }
 
 func (r *RollingDataWriter) closeAndWait() error {
-	r.close()
+	r.closeInput()
 	r.factory.writers.Delete(r.partitionKey)
 	r.wg.Wait()
 
@@ -465,6 +475,12 @@ func (r *RollingDataWriter) closeAndWait() error {
 	}
 
 	return nil
+}
+
+func (r *RollingDataWriter) abortAndWait() {
+	r.abort()
+	r.factory.writers.Delete(r.partitionKey)
+	r.wg.Wait()
 }
 
 func (w *writerFactory) closeAll() error {

@@ -1706,16 +1706,14 @@ func unpartitionedWrite(ctx context.Context, factory *writerFactory, records ite
 			if err != nil {
 				errCh <- err
 				close(errCh)
-				writer.close()
-				writer.wg.Wait()
+				writer.abortAndWait()
 
 				return
 			}
 			if err := writer.Add(rec); err != nil {
 				errCh <- err
 				close(errCh)
-				writer.close()
-				writer.wg.Wait()
+				writer.abortAndWait()
 
 				return
 			}
