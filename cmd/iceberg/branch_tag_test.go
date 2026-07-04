@@ -109,6 +109,127 @@ func TestTextOutputRefCreated(t *testing.T) {
 	assert.Contains(t, output, "5000")
 }
 
+func TestRunBranchCreateRejectsNegativeRetentionValues(t *testing.T) {
+	tbl := branchTagTestTable(t)
+	cat := &branchTagCommitCatalog{tbl: tbl}
+	out := &refCreatedCapture{}
+
+	exitCode := captureBranchTagExit(func() {
+		runBranchCreate(context.Background(), out, cat, &BranchCreateCmd{
+			TableID:    "db.events",
+			BranchName: "new-feature",
+			MaxRefAge:  "-1d",
+			Yes:        true,
+			MinSnapshotsToKeep: func() *int {
+				v := -1
+				return &v
+			}(),
+		})
+	})
+
+	assert.Equal(t, 1, exitCode)
+	require.Error(t, out.lastErr)
+	assert.Contains(t, out.lastErr.Error(), "invalid --max-ref-age")
+	assert.Empty(t, cat.updates)
+	assert.Empty(t, cat.requirements)
+
+	out = &refCreatedCapture{}
+	exitCode = captureBranchTagExit(func() {
+		runBranchCreate(context.Background(), out, cat, &BranchCreateCmd{
+			TableID:            "db.events",
+			BranchName:         "new-feature-2",
+			MaxSnapshotAge:     "-1h",
+			Yes:                true,
+			MinSnapshotsToKeep: nil,
+		})
+	})
+
+	assert.Equal(t, 1, exitCode)
+	require.Error(t, out.lastErr)
+	assert.Contains(t, out.lastErr.Error(), "invalid --max-snapshot-age")
+	assert.Empty(t, cat.updates)
+
+	out = &refCreatedCapture{}
+	minSnapshotsToKeep := -1
+	exitCode = captureBranchTagExit(func() {
+		runBranchCreate(context.Background(), out, cat, &BranchCreateCmd{
+			TableID:            "db.events",
+			BranchName:         "new-feature-3",
+			MinSnapshotsToKeep: &minSnapshotsToKeep,
+			Yes:                true,
+		})
+	})
+
+	assert.Equal(t, 1, exitCode)
+	require.Error(t, out.lastErr)
+	assert.Contains(t, out.lastErr.Error(), "invalid --min-snapshots-to-keep")
+	assert.Empty(t, cat.updates)
+}
+
+func TestRunBranchCreateRejectsInvalidRefName(t *testing.T) {
+	tbl := branchTagTestTable(t)
+	cat := &branchTagCommitCatalog{tbl: tbl}
+
+	for _, name := range []string{"", "  spaced ", "..", ".", "bad/name", `bad\\name`} {
+		out := &refCreatedCapture{}
+
+		exitCode := captureBranchTagExit(func() {
+			runBranchCreate(context.Background(), out, cat, &BranchCreateCmd{
+				TableID:    "db.events",
+				BranchName: name,
+				Yes:        true,
+			})
+		})
+
+		assert.Equal(t, 1, exitCode)
+		require.Error(t, out.lastErr)
+		assert.Contains(t, out.lastErr.Error(), "invalid branch name")
+		assert.Empty(t, cat.updates)
+	}
+}
+
+func TestRunTagCreateRejectsNegativeMaxRefAge(t *testing.T) {
+	tbl := branchTagTestTable(t)
+	cat := &branchTagCommitCatalog{tbl: tbl}
+	out := &refCreatedCapture{}
+
+	exitCode := captureBranchTagExit(func() {
+		runTagCreate(context.Background(), out, cat, &TagCreateCmd{
+			TableID:   "db.events",
+			TagName:   "release-1",
+			MaxRefAge: "-12h",
+			Yes:       true,
+		})
+	})
+
+	assert.Equal(t, 1, exitCode)
+	require.Error(t, out.lastErr)
+	assert.Contains(t, out.lastErr.Error(), "invalid --max-ref-age")
+	assert.Empty(t, cat.updates)
+}
+
+func TestRunTagCreateRejectsInvalidRefName(t *testing.T) {
+	tbl := branchTagTestTable(t)
+	cat := &branchTagCommitCatalog{tbl: tbl}
+
+	for _, name := range []string{"", "  spaced ", "..", ".", "bad/name", `bad\\name`} {
+		out := &refCreatedCapture{}
+
+		exitCode := captureBranchTagExit(func() {
+			runTagCreate(context.Background(), out, cat, &TagCreateCmd{
+				TableID: "db.events",
+				TagName: name,
+				Yes:     true,
+			})
+		})
+
+		assert.Equal(t, 1, exitCode)
+		require.Error(t, out.lastErr)
+		assert.Contains(t, out.lastErr.Error(), "invalid tag name")
+		assert.Empty(t, cat.updates)
+	}
+}
+
 func TestTextOutputRefCreatedTag(t *testing.T) {
 	var buf bytes.Buffer
 	pterm.SetDefaultOutput(&buf)
@@ -500,11 +621,25 @@ type refDeleteCapture struct {
 	lastErr error
 }
 
+type refCreatedCapture struct {
+	textOutput
+	created *RefCreatedResult
+	lastErr error
+}
+
+func (r *refCreatedCapture) RefCreated(result RefCreatedResult) {
+	r.created = &result
+}
+
 func (r *refDeleteCapture) RefDeleted(result RefDeletedResult) {
 	r.deleted = &result
 }
 
 func (r *refDeleteCapture) Error(err error) {
+	r.lastErr = err
+}
+
+func (r *refCreatedCapture) Error(err error) {
 	r.lastErr = err
 }
 

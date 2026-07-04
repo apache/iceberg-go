@@ -23,6 +23,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
+	"unicode"
 
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"
@@ -50,6 +52,12 @@ func runTag(ctx context.Context, output Output, cat catalog.Catalog, cmd *TagCmd
 func runBranchCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *BranchCreateCmd) {
 	tbl := loadTable(ctx, output, cat, cmd.TableID)
 	meta := tbl.Metadata()
+	if err := validateRefName(cmd.BranchName); err != nil {
+		output.Error(fmt.Errorf("invalid branch name: %w", err))
+		osExit(1)
+
+		return
+	}
 
 	if _, found := findSnapshotRef(meta, cmd.BranchName); found {
 		output.Error(fmt.Errorf("ref %q already exists", cmd.BranchName))
@@ -80,6 +88,13 @@ func runBranchCreate(ctx context.Context, output Output, cat catalog.Catalog, cm
 			return
 		}
 
+		if d <= 0 {
+			output.Error(errors.New("invalid --max-ref-age: must be greater than 0"))
+			osExit(1)
+
+			return
+		}
+
 		maxRefAgeMs = d.Milliseconds()
 	}
 
@@ -93,11 +108,25 @@ func runBranchCreate(ctx context.Context, output Output, cat catalog.Catalog, cm
 			return
 		}
 
+		if d <= 0 {
+			output.Error(errors.New("invalid --max-snapshot-age: must be greater than 0"))
+			osExit(1)
+
+			return
+		}
+
 		maxSnapshotAgeMs = d.Milliseconds()
 	}
 
 	var minSnapshotsToKeep int
 	if cmd.MinSnapshotsToKeep != nil {
+		if *cmd.MinSnapshotsToKeep <= 0 {
+			output.Error(errors.New("invalid --min-snapshots-to-keep: must be greater than 0"))
+			osExit(1)
+
+			return
+		}
+
 		minSnapshotsToKeep = *cmd.MinSnapshotsToKeep
 	}
 
@@ -137,6 +166,12 @@ func runBranchCreate(ctx context.Context, output Output, cat catalog.Catalog, cm
 func runTagCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *TagCreateCmd) {
 	tbl := loadTable(ctx, output, cat, cmd.TableID)
 	meta := tbl.Metadata()
+	if err := validateRefName(cmd.TagName); err != nil {
+		output.Error(fmt.Errorf("invalid tag name: %w", err))
+		osExit(1)
+
+		return
+	}
 
 	if _, found := findSnapshotRef(meta, cmd.TagName); found {
 		output.Error(fmt.Errorf("ref %q already exists", cmd.TagName))
@@ -162,6 +197,13 @@ func runTagCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *
 		d, err := parseDuration(cmd.MaxRefAge)
 		if err != nil {
 			output.Error(fmt.Errorf("invalid --max-ref-age: %w", err))
+			osExit(1)
+
+			return
+		}
+
+		if d <= 0 {
+			output.Error(errors.New("invalid --max-ref-age: must be greater than 0"))
 			osExit(1)
 
 			return
@@ -195,6 +237,26 @@ func runTagCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *
 	}
 
 	output.RefCreated(result)
+}
+
+func validateRefName(name string) error {
+	if strings.TrimSpace(name) != name || name == "" {
+		return errors.New("name must be non-empty and may not contain leading/trailing whitespace")
+	}
+
+	if name == "." || name == ".." {
+		return errors.New("name may not be '.' or '..'")
+	}
+
+	if strings.ContainsAny(name, "/\\") {
+		return errors.New("name may not contain path separators")
+	}
+
+	if strings.IndexFunc(name, func(r rune) bool { return unicode.IsControl(r) }) >= 0 {
+		return errors.New("name may not contain control characters")
+	}
+
+	return nil
 }
 
 func runBranchDelete(ctx context.Context, output Output, cat catalog.Catalog, cmd *BranchDeleteCmd) {
