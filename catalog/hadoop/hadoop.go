@@ -30,6 +30,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
@@ -62,6 +63,8 @@ var versionPattern = regexp.MustCompile(`^v([0-9]+)(?:\.gz)?\.metadata\.json$`)
 var uuidMetadataPattern = regexp.MustCompile(
 	`^([0-9]{5})-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?:\.gz)?\.metadata\.json$`,
 )
+
+const metadataClaimStaleAfter = time.Minute
 
 type metadataFile struct {
 	location   string
@@ -710,15 +713,45 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 
 func (c *Catalog) commitMetadataFile(ident table.Identifier, version int, tempPath, metaPath string, conflictErr error) error {
 	claimPath := c.metadataVersionClaimPath(ident, version)
-	if err := c.filesystem.RenameNoReplace(tempPath, claimPath); err != nil {
-		_ = c.filesystem.Remove(tempPath)
+	for {
+		if err := c.filesystem.RenameNoReplace(tempPath, claimPath); err != nil {
+			if !errors.Is(err, fs.ErrExist) {
+				_ = c.filesystem.Remove(tempPath)
 
-		if errors.Is(err, fs.ErrExist) {
-			return fmt.Errorf("%w: metadata version already claimed for table %s: %s",
-				conflictErr, strings.Join(ident, "."), claimPath)
+				return fmt.Errorf("hadoop catalog: failed to claim metadata version: %w", err)
+			}
+
+			existingPath, exists := c.metadataVersionLocation(ident, version)
+			if exists {
+				_ = c.filesystem.Remove(tempPath)
+
+				return fmt.Errorf("%w: metadata file already exists for table %s: %s",
+					conflictErr, strings.Join(ident, "."), existingPath)
+			}
+
+			claimInfo, err := c.filesystem.Stat(claimPath)
+			if err != nil {
+				_ = c.filesystem.Remove(tempPath)
+
+				return fmt.Errorf("hadoop catalog: failed to inspect stale metadata claim %s: %w", claimPath, err)
+			}
+			if time.Since(claimInfo.ModTime()) < metadataClaimStaleAfter {
+				_ = c.filesystem.Remove(tempPath)
+
+				return fmt.Errorf("%w: metadata version already claimed for table %s: %s",
+					conflictErr, strings.Join(ident, "."), claimPath)
+			}
+
+			if err := c.filesystem.Remove(claimPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				_ = c.filesystem.Remove(tempPath)
+
+				return fmt.Errorf("hadoop catalog: failed to clear stale metadata claim %s: %w", claimPath, err)
+			}
+
+			continue
 		}
 
-		return fmt.Errorf("hadoop catalog: failed to claim metadata version: %w", err)
+		break
 	}
 
 	removeClaim := true
@@ -737,6 +770,16 @@ func (c *Catalog) commitMetadataFile(ident table.Identifier, version int, tempPa
 		if errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("%w: metadata file already exists for table %s: %s",
 				conflictErr, strings.Join(ident, "."), metaPath)
+		}
+		if errors.Is(err, fs.ErrNotExist) {
+			existingPath, exists := c.metadataVersionLocation(ident, version)
+			if exists {
+				return fmt.Errorf("%w: metadata file already exists for table %s: %s",
+					conflictErr, strings.Join(ident, "."), existingPath)
+			}
+
+			return fmt.Errorf("%w: metadata claim for table %s and version %d was removed before publish",
+				conflictErr, strings.Join(ident, "."), version)
 		}
 
 		return fmt.Errorf("hadoop catalog: failed to commit metadata file: %w", err)

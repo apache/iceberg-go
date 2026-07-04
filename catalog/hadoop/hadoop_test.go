@@ -1692,6 +1692,59 @@ func (s *HadoopCatalogTestSuite) TestCreateTableConcurrentMixedCodecVersionClaim
 	s.Equal(successLoc, loaded.MetadataLocation())
 }
 
+func (s *HadoopCatalogTestSuite) TestCreateTableRecoversFromStaleVersionClaim() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+	ident := []string{"ns", "tbl"}
+
+	claimPath := s.cat.metadataVersionClaimPath(ident, 1)
+	s.Require().NoError(os.MkdirAll(filepath.Dir(claimPath), 0o755))
+	s.Require().NoError(os.WriteFile(claimPath, []byte("stale claim"), 0o644))
+	stale := time.Now().Add(-2 * metadataClaimStaleAfter)
+	s.Require().NoError(os.Chtimes(claimPath, stale, stale))
+
+	tbl, err := s.cat.CreateTable(ctx, ident, s.testSchema())
+	s.Require().NoError(err)
+
+	metaPath, err := s.cat.metadataFilePathForCompression(ident, 1, table.MetadataCompressionCodecNone)
+	s.Require().NoError(err)
+	s.Equal(metaPath, tbl.MetadataLocation())
+	s.FileExists(metaPath)
+	s.NoFileExists(claimPath)
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableRecoversFromStaleVersionClaim() {
+	ctx := context.Background()
+	tbl := s.createTestTable("ns", "tbl")
+	ident := []string{"ns", "tbl"}
+
+	claimPath := s.cat.metadataVersionClaimPath(ident, 2)
+	s.Require().NoError(os.MkdirAll(filepath.Dir(claimPath), 0o755))
+	s.Require().NoError(os.WriteFile(claimPath, []byte("stale claim"), 0o644))
+	stale := time.Now().Add(-2 * metadataClaimStaleAfter)
+	s.Require().NoError(os.Chtimes(claimPath, stale, stale))
+
+	meta, metaLoc, err := s.cat.CommitTable(
+		ctx, ident,
+		[]table.Requirement{
+			table.AssertTableUUID(tbl.Metadata().TableUUID()),
+		},
+		[]table.Update{
+			table.NewSetPropertiesUpdate(iceberg.Properties{"test.key": "value"}),
+		},
+	)
+	s.Require().NoError(err)
+	s.Equal("value", meta.Properties()["test.key"])
+
+	s.Contains(metaLoc, "v2.metadata.json")
+	s.FileExists(metaLoc)
+	s.NoFileExists(claimPath)
+
+	loaded, err := s.cat.LoadTable(ctx, ident)
+	s.Require().NoError(err)
+	s.Equal(metaLoc, loaded.MetadataLocation())
+}
+
 func (s *HadoopCatalogTestSuite) TestCreateTableWithPartitionSpec() {
 	ctx := context.Background()
 	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
