@@ -515,7 +515,7 @@ func runCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *Cre
 		}
 
 		if tbl.PartitionSpec != "" {
-			spec, err := parsePartitionSpec(tbl.PartitionSpec)
+			spec, err := parsePartitionSpec(tbl.PartitionSpec, schema)
 			if err != nil {
 				output.Error(fmt.Errorf("failed to parse partition spec: %w", err))
 				os.Exit(1)

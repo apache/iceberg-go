@@ -81,39 +81,88 @@ func TestParseProperties(t *testing.T) {
 }
 
 func TestParsePartitionSpec(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{
+			ID:       10,
+			Name:     "customer_id",
+			Type:     iceberg.PrimitiveTypes.String,
+			Required: false,
+		},
+		iceberg.NestedField{
+			ID:       20,
+			Name:     "event_time",
+			Type:     iceberg.PrimitiveTypes.TimestampNs,
+			Required: false,
+		},
+	)
+
 	tests := []struct {
-		name  string
-		input string
-		isErr bool
+		name          string
+		input         string
+		wantSourceIDs [][]int
+		errContains   string
+		isErr         bool
 	}{
 		{
 			name:  "empty string",
-			input: "",
+			input: "", // keeps backward compatibility for no partitioning
 		},
 		{
 			name:  "single field",
-			input: "field1",
+			input: "customer_id",
+			wantSourceIDs: [][]int{
+				{10},
+			},
 		},
 		{
 			name:  "multiple fields",
-			input: "field1,field2,field3",
+			input: "customer_id,event_time",
+			wantSourceIDs: [][]int{
+				{10},
+				{20},
+			},
 		},
 		{
 			name:  "with spaces",
-			input: " field1 , field2 , field3 ",
+			input: " customer_id , event_time ",
+			wantSourceIDs: [][]int{
+				{10},
+				{20},
+			},
+		},
+		{
+			name:        "unknown field",
+			input:       "no_such_field",
+			isErr:       true,
+			errContains: "cannot find source column with name: no_such_field in schema",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parsePartitionSpec(tt.input)
+			got, err := parsePartitionSpec(tt.input, schema)
 			if (err != nil) != tt.isErr {
 				t.Errorf("parsePartitionSpec() error = %v, isErr %v", err, tt.isErr)
 
 				return
 			}
+			if tt.isErr {
+				if tt.errContains != "" {
+					require.ErrorContains(t, err, tt.errContains)
+				}
+
+				return
+			}
 			if !tt.isErr && got == nil {
 				t.Errorf("parsePartitionSpec() returned nil for valid input")
+			}
+			if len(tt.wantSourceIDs) == 0 {
+				require.Equal(t, iceberg.UnpartitionedSpec, got)
+				return
+			}
+			require.Equal(t, len(tt.wantSourceIDs), got.NumFields())
+			for i, wantIDs := range tt.wantSourceIDs {
+				require.Equal(t, wantIDs, got.Field(i).SourceIDs)
 			}
 		})
 	}

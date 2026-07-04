@@ -48,31 +48,33 @@ func parseProperties(propStr string) (iceberg.Properties, error) {
 	return props, nil
 }
 
-func parsePartitionSpec(specStr string) (*iceberg.PartitionSpec, error) {
+func parsePartitionSpec(specStr string, schema *iceberg.Schema) (*iceberg.PartitionSpec, error) {
+	if schema == nil {
+		return nil, fmt.Errorf("schema is required for partition spec parsing")
+	}
+
 	if specStr == "" {
 		return iceberg.UnpartitionedSpec, nil
 	}
 
 	fields := strings.Split(specStr, ",")
-	var partitionFields []iceberg.PartitionField
+	opts := make([]iceberg.PartitionOption, 0)
 
-	for i, field := range fields {
+	for _, field := range fields {
 		field = strings.TrimSpace(field)
 		if field == "" {
 			continue
 		}
 
-		partitionFields = append(partitionFields, iceberg.PartitionField{
-			SourceIDs: []int{i + 1},
-			FieldID:   i + iceberg.PartitionDataIDStart,
-			Name:      field,
-			Transform: iceberg.IdentityTransform{},
-		})
+		opts = append(opts, iceberg.AddPartitionFieldByName(field, field, iceberg.IdentityTransform{}, schema, nil))
 	}
-	if len(partitionFields) == 0 {
+	if len(opts) == 0 {
 		return iceberg.UnpartitionedSpec, nil
 	}
-	spec := iceberg.NewPartitionSpec(partitionFields...)
+	spec, err := iceberg.NewPartitionSpecOpts(opts...)
+	if err != nil {
+		return nil, err
+	}
 
 	return &spec, nil
 }
