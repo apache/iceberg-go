@@ -104,7 +104,9 @@ func (t Table) Equals(other Table) bool {
 		t.metadata.Equals(other.metadata)
 }
 
-func (t Table) Identifier() Identifier                       { return t.identifier }
+func (t Table) Identifier() Identifier {
+	return slices.Clone(t.identifier)
+}
 func (t Table) Metadata() Metadata                           { return t.metadata }
 func (t Table) MetadataLocation() string                     { return t.metadataLocation }
 func (t Table) FS(ctx context.Context) (icebergio.IO, error) { return t.fsF(ctx) }
@@ -937,7 +939,7 @@ func New(ident Identifier, meta Metadata, metadataLocation string, fsF FSysF, ca
 	}
 
 	return &Table{
-		identifier:       ident,
+		identifier:       slices.Clone(ident),
 		metadata:         meta,
 		metadataLocation: metadataLocation,
 		fsF:              fsF,
