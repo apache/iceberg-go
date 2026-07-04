@@ -161,6 +161,36 @@ func TestPartitionSpecCompatibleWithUsesTransformEquals(t *testing.T) {
 	}
 }
 
+func TestPartitionSpecRejectsInvalidBucketTransform(t *testing.T) {
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID:   1,
+		Name: "id",
+		Type: iceberg.PrimitiveTypes.Int32,
+	})
+
+	_, err := iceberg.NewPartitionSpecOpts(
+		iceberg.AddPartitionFieldBySourceID(1, "id_bucket", iceberg.BucketTransform{NumBuckets: 0}, schema, nil),
+	)
+
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "numBuckets > 0")
+}
+
+func TestPartitionSpec_MarshalTextRejectsInvalidBucketTransform(t *testing.T) {
+	spec := iceberg.NewPartitionSpecID(3,
+		iceberg.PartitionField{
+			SourceIDs: []int{1},
+			FieldID:   1000,
+			Name:      "bad_bucket",
+			Transform: iceberg.BucketTransform{NumBuckets: 0},
+		},
+	)
+
+	_, err := json.Marshal(spec)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "numBuckets > 0")
+}
+
 func TestUnpartitionedWithVoidField(t *testing.T) {
 	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
 		SourceIDs: []int{3}, FieldID: 1001, Name: "void", Transform: iceberg.VoidTransform{},
