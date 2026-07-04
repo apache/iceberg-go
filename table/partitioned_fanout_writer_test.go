@@ -175,6 +175,7 @@ func (s *FanoutWriterTestSuite) TestCloseAllFlushesAfterFanoutSuccessContextCanc
 		for dataFile, iterErr := range dataFiles {
 			if iterErr != nil {
 				resultCh <- result{err: iterErr}
+
 				return
 			}
 			total += dataFile.Count()
@@ -182,8 +183,7 @@ func (s *FanoutWriterTestSuite) TestCloseAllFlushesAfterFanoutSuccessContextCanc
 		resultCh <- result{total: total}
 	}()
 
-	var sum result
-	sum = <-resultCh
+	sum := <-resultCh
 	s.Require().NoError(sum.err)
 	s.Equal(int64(totalRows), sum.total)
 }
