@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,6 +91,101 @@ func (s *FanoutWriterTestSuite) createCustomTestRecord(arrSchema *arrow.Schema, 
 	}
 
 	return bldr.NewRecordBatch()
+}
+
+func (s *FanoutWriterTestSuite) createLargeTestRecord(arrSchema *arrow.Schema, rows int, idOffset int64, payloadSize int) arrow.RecordBatch {
+	bldr := array.NewRecordBuilder(s.mem, arrSchema)
+	defer bldr.Release()
+
+	payload := strings.Repeat("p", payloadSize)
+	for i := range rows {
+		bldr.Field(0).(*array.Int64Builder).Append(idOffset + int64(i))
+		bldr.Field(1).(*array.StringBuilder).Append(payload)
+	}
+
+	return bldr.NewRecordBatch()
+}
+
+func (s *FanoutWriterTestSuite) TestCloseAllFlushesAfterFanoutSuccessContextCancel() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+		{Name: "payload", Type: arrow.BinaryTypes.String, Nullable: false},
+	}, nil)
+
+	icebergSchema, err := ArrowSchemaToIcebergWithFreshIDs(arrSchema, false)
+	s.Require().NoError(err)
+
+	sortOrder, err := NewSortOrder(1, []SortField{{
+		SourceIDs: []int{icebergSchema.Fields()[0].ID},
+		Direction: SortASC,
+		Transform: iceberg.IdentityTransform{},
+		NullOrder: NullsFirst,
+	}})
+	s.Require().NoError(err)
+
+	loc := filepath.ToSlash(s.T().TempDir())
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{icebergSchema.Fields()[0].ID},
+		FieldID:   1000,
+		Transform: iceberg.BucketTransform{NumBuckets: 1},
+		Name:      "id_bucket",
+	})
+	meta, err := NewMetadata(icebergSchema, &spec, UnsortedSortOrder, loc, iceberg.Properties{})
+	s.Require().NoError(err)
+	metaBuilder, err := MetadataBuilderFromBase(meta, "")
+	s.Require().NoError(err)
+	s.Require().NoError(metaBuilder.AddSortOrder(&sortOrder))
+	s.Require().NoError(metaBuilder.SetDefaultSortOrderID(-1))
+
+	const totalRows = 10000
+	record := s.createLargeTestRecord(arrSchema, totalRows, 0, 512)
+	defer record.Release()
+
+	itr := func(yield func(arrow.RecordBatch, error) bool) {
+		yield(record, nil)
+	}
+
+	writeUUID := uuid.New()
+	factory, err := newWriterFactory(loc, recordWritingArgs{
+		sc:        arrSchema,
+		itr:       itr,
+		fs:        iceio.LocalFS{},
+		writeUUID: &writeUUID,
+		counter: func(yield func(int) bool) {
+			for i := 0; ; i++ {
+				if !yield(i) {
+					break
+				}
+			}
+		},
+	}, metaBuilder, icebergSchema, 1024*1024*256)
+	s.Require().NoError(err)
+	defer factory.closeAll()
+
+	partitionedWriter := newPartitionedFanoutWriter(spec, icebergSchema, itr, factory)
+
+	dataFiles := partitionedWriter.Write(s.ctx, 1)
+	type result struct {
+		total int64
+		err   error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		var total int64
+		for dataFile, iterErr := range dataFiles {
+			if iterErr != nil {
+				resultCh <- result{err: iterErr}
+				return
+			}
+			total += dataFile.Count()
+		}
+		resultCh <- result{total: total}
+	}()
+
+	var sum result
+	sum = <-resultCh
+	s.Require().NoError(sum.err)
+	s.Equal(int64(totalRows), sum.total)
 }
 
 func (s *FanoutWriterTestSuite) testTransformPartition(transform iceberg.Transform, sourceFieldName string, transformName string, testRecord arrow.RecordBatch, expectedPartitionCount int) {

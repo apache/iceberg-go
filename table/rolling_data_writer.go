@@ -471,8 +471,12 @@ func (r *RollingDataWriter) closeAndWait() error {
 	r.wg.Wait()
 
 	if err := <-r.errorCh; err != nil {
+		r.cancel()
+
 		return fmt.Errorf("error in rolling data writer: %w", err)
 	}
+
+	r.cancel()
 
 	return nil
 }
@@ -485,7 +489,26 @@ func (r *RollingDataWriter) abortAndWait() {
 
 func (w *writerFactory) closeAll() error {
 	defer w.stopCount()
-	var writers []*RollingDataWriter
+	writers := w.writerList()
+	var err error
+	for _, writer := range writers {
+		if closeErr := writer.closeAndWait(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}
+
+	return err
+}
+
+func (w *writerFactory) abortAll() {
+	defer w.stopCount()
+	writers := w.writerList()
+	for _, writer := range writers {
+		writer.abortAndWait()
+	}
+}
+
+func (w *writerFactory) writerList() (writers []*RollingDataWriter) {
 	w.writers.Range(func(key, value any) bool {
 		writer, ok := value.(*RollingDataWriter)
 		if ok {
@@ -495,12 +518,5 @@ func (w *writerFactory) closeAll() error {
 		return true
 	})
 
-	var err error
-	for _, writer := range writers {
-		if closeErr := writer.closeAndWait(); closeErr != nil && err == nil {
-			err = closeErr
-		}
-	}
-
-	return err
+	return
 }

@@ -140,7 +140,7 @@ func TestPositionDeletePartitionedFanoutWriterProcessBatch(t *testing.T) {
 			writer := newPositionDeletePartitionedFanoutWriter(latestMeta, tc.pathToPartitionContext, nil, factory)
 
 			dataFileCh := make(chan iceberg.DataFile, 10)
-			err = writer.processBatch(ctx, tc.input, dataFileCh)
+			err = writer.processBatch(ctx, ctx, tc.input, dataFileCh)
 			if tc.expectedErr != nil {
 				require.ErrorContains(t, err, tc.expectedErr.Error())
 
@@ -379,8 +379,8 @@ func TestPositionDeletePartitionedFanoutWriterRoutesPartitionsIndependently(t *t
 	batchB := mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema,
 		fmt.Sprintf(`[{"file_path": %q, "pos": 5}]`, pathB))
 
-	require.NoError(t, writer.processBatch(t.Context(), batchA, dataFileCh))
-	require.NoError(t, writer.processBatch(t.Context(), batchB, dataFileCh))
+	require.NoError(t, writer.processBatch(t.Context(), t.Context(), batchA, dataFileCh))
+	require.NoError(t, writer.processBatch(t.Context(), t.Context(), batchB, dataFileCh))
 	require.NoError(t, factory.closeAll())
 	close(dataFileCh)
 
