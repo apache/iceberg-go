@@ -80,8 +80,13 @@ func (m *MemFS) Open(name string) (File, error) {
 
 func (m *MemFS) Remove(name string) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, ok := m.files[name]; !ok {
+		return &fs.PathError{Op: "remove", Path: name, Err: fs.ErrNotExist}
+	}
+
 	delete(m.files, name)
-	m.mu.Unlock()
 
 	return nil
 }
