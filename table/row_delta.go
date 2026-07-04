@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 
 	"github.com/apache/iceberg-go"
 )
@@ -74,7 +75,7 @@ type RowDelta struct {
 func (t *Transaction) NewRowDelta(snapshotProps iceberg.Properties) *RowDelta {
 	return &RowDelta{
 		txn:   t,
-		props: snapshotProps,
+		props: maps.Clone(snapshotProps),
 	}
 }
 
