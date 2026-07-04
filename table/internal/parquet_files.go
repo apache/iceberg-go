@@ -98,6 +98,7 @@ func (parquetFormat) Open(ctx context.Context, fs iceio.IO, path string) (result
 	}
 
 	result = wrapPqArrowReader{arrRdr}
+
 	return result, nil
 }
 
