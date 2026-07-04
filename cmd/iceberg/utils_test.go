@@ -158,6 +158,7 @@ func TestParsePartitionSpec(t *testing.T) {
 			}
 			if len(tt.wantSourceIDs) == 0 {
 				require.Equal(t, iceberg.UnpartitionedSpec, got)
+
 				return
 			}
 			require.Equal(t, len(tt.wantSourceIDs), got.NumFields())

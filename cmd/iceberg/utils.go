@@ -18,6 +18,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -50,7 +51,7 @@ func parseProperties(propStr string) (iceberg.Properties, error) {
 
 func parsePartitionSpec(specStr string, schema *iceberg.Schema) (*iceberg.PartitionSpec, error) {
 	if schema == nil {
-		return nil, fmt.Errorf("schema is required for partition spec parsing")
+		return nil, errors.New("schema is required for partition spec parsing")
 	}
 
 	if specStr == "" {
