@@ -1024,13 +1024,15 @@ func (s *HadoopCatalogTestSuite) TestCheckNamespaceExistsFileNotDir() {
 func (s *HadoopCatalogTestSuite) TestCreateNamespaceEmptyIdentifier() {
 	err := s.cat.CreateNamespace(context.Background(), []string{}, nil)
 	s.Require().Error(err)
-	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	s.ErrorIs(err, catalog.ErrInvalidIdentifier)
+	s.NotErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
 func (s *HadoopCatalogTestSuite) TestDropNamespaceEmptyIdentifier() {
 	err := s.cat.DropNamespace(context.Background(), []string{})
 	s.Require().Error(err)
-	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	s.ErrorIs(err, catalog.ErrInvalidIdentifier)
+	s.NotErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
 func (s *HadoopCatalogTestSuite) TestLoadNamespacePropertiesNested() {
@@ -1068,49 +1070,57 @@ func (s *HadoopCatalogTestSuite) TestListNamespacesMixedContent() {
 func (s *HadoopCatalogTestSuite) TestCreateNamespaceRejectsDotDot() {
 	err := s.cat.CreateNamespace(context.Background(), []string{"a", ".."}, nil)
 	s.Require().Error(err)
-	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	s.ErrorIs(err, catalog.ErrInvalidIdentifier)
+	s.NotErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
 func (s *HadoopCatalogTestSuite) TestCreateNamespaceRejectsDot() {
 	err := s.cat.CreateNamespace(context.Background(), []string{"."}, nil)
 	s.Require().Error(err)
-	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	s.ErrorIs(err, catalog.ErrInvalidIdentifier)
+	s.NotErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
 func (s *HadoopCatalogTestSuite) TestCreateNamespaceRejectsEmptyComponent() {
 	err := s.cat.CreateNamespace(context.Background(), []string{"a", "", "b"}, nil)
 	s.Require().Error(err)
-	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	s.ErrorIs(err, catalog.ErrInvalidIdentifier)
+	s.NotErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
 func (s *HadoopCatalogTestSuite) TestCreateNamespaceRejectsPathSeparator() {
 	err := s.cat.CreateNamespace(context.Background(), []string{"a/b"}, nil)
 	s.Require().Error(err)
-	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	s.ErrorIs(err, catalog.ErrInvalidIdentifier)
+	s.NotErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
 func (s *HadoopCatalogTestSuite) TestDropNamespaceRejectsDotDot() {
 	err := s.cat.DropNamespace(context.Background(), []string{".."})
 	s.Require().Error(err)
-	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	s.ErrorIs(err, catalog.ErrInvalidIdentifier)
+	s.NotErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
 func (s *HadoopCatalogTestSuite) TestListNamespacesRejectsInvalidParent() {
 	_, err := s.cat.ListNamespaces(context.Background(), []string{"a", ".."})
 	s.Require().Error(err)
-	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	s.ErrorIs(err, catalog.ErrInvalidIdentifier)
+	s.NotErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
 func (s *HadoopCatalogTestSuite) TestLoadNamespacePropertiesRejectsInvalid() {
 	_, err := s.cat.LoadNamespaceProperties(context.Background(), []string{".."})
 	s.Require().Error(err)
-	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	s.ErrorIs(err, catalog.ErrInvalidIdentifier)
+	s.NotErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
 func (s *HadoopCatalogTestSuite) TestCheckNamespaceExistsRejectsInvalid() {
 	_, err := s.cat.CheckNamespaceExists(context.Background(), []string{"a/b"})
 	s.Require().Error(err)
-	s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	s.Require().ErrorIs(err, catalog.ErrInvalidIdentifier)
+	s.NotErrorIs(err, catalog.ErrNoSuchNamespace)
 }
 
 func (s *HadoopCatalogTestSuite) TestListTablesRejectsInvalidIdentifiers() {
@@ -1129,7 +1139,8 @@ func (s *HadoopCatalogTestSuite) TestListTablesRejectsInvalidIdentifiers() {
 		s.Run(tt.name, func() {
 			for _, err := range s.cat.ListTables(context.Background(), tt.ident) {
 				s.Require().Error(err)
-				s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+				s.ErrorIs(err, catalog.ErrInvalidIdentifier)
+				s.NotErrorIs(err, catalog.ErrNoSuchNamespace)
 
 				break
 			}
@@ -1349,7 +1360,8 @@ func (s *HadoopCatalogTestSuite) TestDropTableVerifyCleanup() {
 func (s *HadoopCatalogTestSuite) TestDropTableShortIdentifier() {
 	err := s.cat.DropTable(context.Background(), []string{"tbl"})
 	s.Require().Error(err)
-	s.ErrorIs(err, catalog.ErrNoSuchTable)
+	s.ErrorIs(err, catalog.ErrInvalidIdentifier)
+	s.NotErrorIs(err, catalog.ErrNoSuchTable)
 	s.Contains(err.Error(), "at least a namespace and table name")
 }
 
@@ -1549,7 +1561,8 @@ func (s *HadoopCatalogTestSuite) TestCreateTableShortIdentifier() {
 
 	_, err := s.cat.CreateTable(ctx, []string{"tbl"}, s.testSchema())
 	s.Require().Error(err)
-	s.ErrorIs(err, catalog.ErrNoSuchTable)
+	s.ErrorIs(err, catalog.ErrInvalidIdentifier)
+	s.NotErrorIs(err, catalog.ErrNoSuchTable)
 	s.Contains(err.Error(), "at least a namespace and table name")
 }
 
@@ -1624,7 +1637,8 @@ func (s *HadoopCatalogTestSuite) TestTableOperationsRejectInvalidIdentifiers() {
 				s.Run(op.name, func() {
 					err := op.run(tt.ident)
 					s.Require().Error(err)
-					s.ErrorIs(err, catalog.ErrNoSuchTable)
+					s.ErrorIs(err, catalog.ErrInvalidIdentifier)
+					s.NotErrorIs(err, catalog.ErrNoSuchTable)
 				})
 			}
 		})
@@ -1649,7 +1663,8 @@ func (s *HadoopCatalogTestSuite) TestTableOperationsRejectParentTraversalIdentif
 		s.Run(op.name, func() {
 			err := op.run(ident)
 			s.Require().Error(err)
-			s.ErrorIs(err, catalog.ErrNoSuchTable)
+			s.ErrorIs(err, catalog.ErrInvalidIdentifier)
+			s.NotErrorIs(err, catalog.ErrNoSuchTable)
 			s.FileExists(marker)
 			s.DirExists(metaDir)
 		})
@@ -1835,7 +1850,8 @@ func (s *HadoopCatalogTestSuite) TestLoadTableShortIdentifier() {
 
 	_, err := s.cat.LoadTable(ctx, []string{"tbl"})
 	s.Require().Error(err)
-	s.ErrorIs(err, catalog.ErrNoSuchTable)
+	s.ErrorIs(err, catalog.ErrInvalidIdentifier)
+	s.NotErrorIs(err, catalog.ErrNoSuchTable)
 	s.Contains(err.Error(), "at least a namespace and table name")
 }
 
@@ -1876,7 +1892,9 @@ func (s *HadoopCatalogTestSuite) TestCheckTableExistsPropagatesMetadataReadError
 
 func (s *HadoopCatalogTestSuite) TestCheckTableExistsShortIdentifier() {
 	exists, err := s.cat.CheckTableExists(context.Background(), []string{"tbl"})
-	s.Require().NoError(err)
+	s.Require().Error(err)
+	s.Require().ErrorIs(err, catalog.ErrInvalidIdentifier)
+	s.NotErrorIs(err, catalog.ErrNoSuchTable)
 	s.False(exists)
 }
 
@@ -1900,7 +1918,9 @@ func (s *HadoopCatalogTestSuite) TestCheckTableExistsInvalidIdentifierFalse() {
 	for _, tt := range tests {
 		s.Run(tt.name, func() {
 			exists, err := s.cat.CheckTableExists(context.Background(), tt.ident)
-			s.Require().NoError(err)
+			s.Require().Error(err)
+			s.Require().ErrorIs(err, catalog.ErrInvalidIdentifier)
+			s.NotErrorIs(err, catalog.ErrNoSuchTable)
 			s.False(exists)
 		})
 	}
@@ -2282,7 +2302,8 @@ func (s *HadoopCatalogTestSuite) TestCommitTableCreateViaCommit() {
 func (s *HadoopCatalogTestSuite) TestCommitTableShortIdentifier() {
 	_, _, err := s.cat.CommitTable(context.Background(), []string{"tbl"}, nil, nil)
 	s.Require().Error(err)
-	s.ErrorIs(err, catalog.ErrNoSuchTable)
+	s.ErrorIs(err, catalog.ErrInvalidIdentifier)
+	s.NotErrorIs(err, catalog.ErrNoSuchTable)
 	s.Contains(err.Error(), "at least a namespace and table name")
 }
 
