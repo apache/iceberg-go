@@ -529,6 +529,22 @@ func fromProps(props iceberg.Properties, o *options) error {
 	return nil
 }
 
+// resolveAuthURLAlias collapses the oauth2-server-uri / rest.authorization-url
+// alias within a single configuration layer into the canonical
+// oauth2-server-uri key. oauth2-server-uri wins over the rest.authorization-url
+// alias within the same layer. Collapsing per layer before merging keeps
+// defaults -> client -> overrides precedence intact.
+func resolveAuthURLAlias(props iceberg.Properties) {
+	v, ok := props[keyOAuth2ServerURI]
+	if !ok {
+		v, ok = props[keyAuthUrl]
+	}
+	delete(props, keyAuthUrl)
+	if ok {
+		props[keyOAuth2ServerURI] = v
+	}
+}
+
 func parseAuthURL(key, raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -810,7 +826,17 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client,
 	if cfg == nil {
 		cfg = iceberg.Properties{}
 	}
-	maps.Copy(cfg, toProps(opts))
+
+	// Collapse the oauth2-server-uri / rest.authorization-url alias within each
+	// layer before merging so the defaults -> client -> overrides precedence is
+	// preserved. Merging first would leave both keys in the map, letting a
+	// client oauth2-server-uri shadow a server rest.authorization-url override.
+	clientProps := toProps(opts)
+	resolveAuthURLAlias(cfg)
+	resolveAuthURLAlias(clientProps)
+	resolveAuthURLAlias(rsp.Overrides)
+
+	maps.Copy(cfg, clientProps)
 	maps.Copy(cfg, rsp.Overrides)
 
 	r.namespaceSeparator = cfg.Get(keyNamespaceSeparator, defaultNamespaceSeparator)

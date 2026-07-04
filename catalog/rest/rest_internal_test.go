@@ -1447,6 +1447,43 @@ func TestFetchConfigTokenOverrideKeepsCallerToken(t *testing.T) {
 	assert.Equal(t, "caller-token", cat.props[keyOauthToken])
 }
 
+func TestFetchConfigAuthURLOverridePrecedence(t *testing.T) {
+	t.Parallel()
+
+	const overrideAuthURL = "https://override.example.com/token"
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{},
+			// The server overrides the token endpoint via the legacy alias while
+			// the client supplied oauth2-server-uri; the override must win.
+			"overrides": map[string]any{
+				keyAuthUrl: overrideAuthURL,
+			},
+			"endpoints": AllEndpointStrings,
+		})
+	})
+
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL,
+		WithAuthURI(mustParseURL(t, "https://client.example.com/token")))
+	require.NoError(t, err)
+
+	assert.Equal(t, overrideAuthURL, cat.props[keyOAuth2ServerURI])
+	assert.Equal(t, overrideAuthURL, cat.props[keyAuthUrl])
+}
+
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	require.NoError(t, err)
+
+	return u
+}
+
 func TestEncodeNamespace(t *testing.T) {
 	tests := []struct {
 		name          string
