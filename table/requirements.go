@@ -264,8 +264,13 @@ func (a *assertLastAssignedPartitionId) Validate(meta Metadata) error {
 		return errors.New("Requirement failed: current table metadata does not exist")
 	}
 
-	if *meta.LastPartitionSpecID() != a.LastAssignedPartitionID {
-		return fmt.Errorf("requirement failed: last assigned partition id has changed: expected %d, found %d", a.LastAssignedPartitionID, *meta.LastPartitionSpecID())
+	lastPartitionSpecID := meta.LastPartitionSpecID()
+	if lastPartitionSpecID == nil {
+		return errors.New("requirement failed: last assigned partition id is missing")
+	}
+
+	if *lastPartitionSpecID != a.LastAssignedPartitionID {
+		return fmt.Errorf("requirement failed: last assigned partition id has changed: expected %d, found %d", a.LastAssignedPartitionID, *lastPartitionSpecID)
 	}
 
 	return nil
