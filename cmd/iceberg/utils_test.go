@@ -18,10 +18,16 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"maps"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/require"
 )
@@ -100,6 +106,7 @@ func TestParsePartitionSpec(t *testing.T) {
 		name          string
 		input         string
 		wantSourceIDs [][]int
+		wantFieldIDs  []int
 		errContains   string
 		isErr         bool
 	}{
@@ -113,6 +120,7 @@ func TestParsePartitionSpec(t *testing.T) {
 			wantSourceIDs: [][]int{
 				{10},
 			},
+			wantFieldIDs: []int{1000},
 		},
 		{
 			name:  "multiple fields",
@@ -121,6 +129,7 @@ func TestParsePartitionSpec(t *testing.T) {
 				{10},
 				{20},
 			},
+			wantFieldIDs: []int{1000, 1001},
 		},
 		{
 			name:  "with spaces",
@@ -129,6 +138,7 @@ func TestParsePartitionSpec(t *testing.T) {
 				{10},
 				{20},
 			},
+			wantFieldIDs: []int{1000, 1001},
 		},
 		{
 			name:        "unknown field",
@@ -164,6 +174,9 @@ func TestParsePartitionSpec(t *testing.T) {
 			require.Equal(t, len(tt.wantSourceIDs), got.NumFields())
 			for i, wantIDs := range tt.wantSourceIDs {
 				require.Equal(t, wantIDs, got.Field(i).SourceIDs)
+			}
+			for i, wantID := range tt.wantFieldIDs {
+				require.Equal(t, wantID, got.Field(i).FieldID)
 			}
 		})
 	}
@@ -291,4 +304,122 @@ func TestParseSortOrder(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParsePartitionSpecSendsFieldIDsInRestCreatePayload(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{
+			ID:       10,
+			Name:     "customer_id",
+			Type:     iceberg.PrimitiveTypes.String,
+			Required: false,
+		},
+		iceberg.NestedField{
+			ID:       20,
+			Name:     "event_time",
+			Type:     iceberg.PrimitiveTypes.TimestampNs,
+			Required: false,
+		},
+	)
+
+	spec, err := parsePartitionSpec("customer_id,event_time", schema)
+	require.NoError(t, err)
+	require.NotNil(t, spec)
+
+	var lastCreateBody map[string]any
+	createCalled := false
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/v1/config":
+			w.Header().Set("Content-Type", "application/json")
+			require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+				"defaults":  map[string]any{},
+				"overrides": map[string]any{},
+				"endpoints": []string{},
+			}))
+
+			return
+		case "/v1/namespaces/db/tables":
+			require.Equal(t, http.MethodPost, req.Method)
+			createCalled = true
+
+			require.NoError(t, json.NewDecoder(req.Body).Decode(&lastCreateBody))
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"metadata-location": "s3://warehouse/db/tbl/metadata/v1.json",
+				"metadata": ` + tableMetadataJSON("") + `
+			}`))
+
+			return
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", srv.URL)
+	require.NoError(t, err)
+
+	_, err = cat.CreateTable(context.Background(), table.Identifier{"db", "test_table"}, schema,
+		catalog.WithPartitionSpec(spec))
+	require.NoError(t, err)
+	require.True(t, createCalled, "create endpoint should be called")
+
+	rawPartitionSpec, ok := lastCreateBody["partition-spec"].(map[string]any)
+	require.True(t, ok)
+	fields, ok := rawPartitionSpec["fields"].([]any)
+	require.True(t, ok)
+	require.Len(t, fields, 2)
+
+	field0, ok := fields[0].(map[string]any)
+	require.True(t, ok)
+	field1, ok := fields[1].(map[string]any)
+	require.True(t, ok)
+	require.EqualValues(t, 1000, field0["field-id"])
+	require.EqualValues(t, 1001, field1["field-id"])
+}
+
+func tableMetadataJSON(tableUUID string) string {
+	if tableUUID == "" {
+		tableUUID = "bf289591-dcc0-4234-ad4f-5c3eed811a29"
+	}
+
+	return `{
+		"format-version": 1,
+		"table-uuid": "` + tableUUID + `",
+		"location": "s3://warehouse/db/tbl",
+		"last-updated-ms": 1657810967051,
+		"last-column-id": 20,
+		"schema": {
+			"type": "struct",
+			"schema-id": 0,
+			"fields": [
+				{"id": 10, "name": "customer_id", "required": false, "type": "string"},
+				{"id": 20, "name": "event_time", "required": false, "type": "timestamp_ns"}
+			]
+		},
+		"current-schema-id": 0,
+		"schemas": [{
+			"type": "struct",
+			"schema-id": 0,
+			"fields": [
+				{"id": 10, "name": "customer_id", "required": false, "type": "string"},
+				{"id": 20, "name": "event_time", "required": false, "type": "timestamp_ns"}
+			]
+		}],
+		"partition-spec": [],
+		"default-spec-id": 0,
+		"last-partition-id": 999,
+		"default-sort-order-id": 0,
+		"sort-orders": [{"order-id": 0, "fields": []}],
+		"properties": {},
+		"current-snapshot-id": -1,
+		"refs": {},
+		"snapshots": [],
+		"snapshot-log": [],
+		"metadata-log": []
+	}`
 }

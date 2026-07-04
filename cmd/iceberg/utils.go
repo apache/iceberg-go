@@ -60,6 +60,7 @@ func parsePartitionSpec(specStr string, schema *iceberg.Schema) (*iceberg.Partit
 
 	fields := strings.Split(specStr, ",")
 	opts := make([]iceberg.PartitionOption, 0)
+	nextFieldID := iceberg.PartitionDataIDStart
 
 	for _, field := range fields {
 		field = strings.TrimSpace(field)
@@ -67,7 +68,9 @@ func parsePartitionSpec(specStr string, schema *iceberg.Schema) (*iceberg.Partit
 			continue
 		}
 
-		opts = append(opts, iceberg.AddPartitionFieldByName(field, field, iceberg.IdentityTransform{}, schema, nil))
+		fieldID := nextFieldID
+		nextFieldID++
+		opts = append(opts, iceberg.AddPartitionFieldByName(field, field, iceberg.IdentityTransform{}, schema, &fieldID))
 	}
 	if len(opts) == 0 {
 		return iceberg.UnpartitionedSpec, nil
