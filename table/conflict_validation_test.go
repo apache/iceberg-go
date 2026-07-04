@@ -28,52 +28,64 @@ import (
 
 func TestReadIsolationLevel(t *testing.T) {
 	tests := []struct {
-		name   string
-		props  iceberg.Properties
-		key    string
-		defVal IsolationLevel
-		want   IsolationLevel
+		name    string
+		props   iceberg.Properties
+		key     string
+		defVal  IsolationLevel
+		want    IsolationLevel
+		wantErr bool
 	}{
 		{
-			name:   "missing key falls back to default",
-			props:  iceberg.Properties{},
-			key:    WriteDeleteIsolationLevelKey,
-			defVal: IsolationSerializable,
-			want:   IsolationSerializable,
+			name:    "missing key falls back to default",
+			props:   iceberg.Properties{},
+			key:     WriteDeleteIsolationLevelKey,
+			defVal:  IsolationSerializable,
+			want:    IsolationSerializable,
+			wantErr: false,
 		},
 		{
-			name:   "explicit serializable",
-			props:  iceberg.Properties{WriteDeleteIsolationLevelKey: "serializable"},
-			key:    WriteDeleteIsolationLevelKey,
-			defVal: IsolationSnapshot,
-			want:   IsolationSerializable,
+			name:    "explicit serializable",
+			props:   iceberg.Properties{WriteDeleteIsolationLevelKey: "serializable"},
+			key:     WriteDeleteIsolationLevelKey,
+			defVal:  IsolationSnapshot,
+			want:    IsolationSerializable,
+			wantErr: false,
 		},
 		{
-			name:   "explicit snapshot",
-			props:  iceberg.Properties{WriteDeleteIsolationLevelKey: "snapshot"},
-			key:    WriteDeleteIsolationLevelKey,
-			defVal: IsolationSerializable,
-			want:   IsolationSnapshot,
+			name:    "explicit snapshot",
+			props:   iceberg.Properties{WriteDeleteIsolationLevelKey: "snapshot"},
+			key:     WriteDeleteIsolationLevelKey,
+			defVal:  IsolationSerializable,
+			want:    IsolationSnapshot,
+			wantErr: false,
 		},
 		{
-			name:   "unrecognized value falls back to default",
-			props:  iceberg.Properties{WriteDeleteIsolationLevelKey: "repeatable-read"},
-			key:    WriteDeleteIsolationLevelKey,
-			defVal: IsolationSerializable,
-			want:   IsolationSerializable,
+			name:    "unrecognized value returns error",
+			props:   iceberg.Properties{WriteDeleteIsolationLevelKey: "repeatable-read"},
+			key:     WriteDeleteIsolationLevelKey,
+			defVal:  IsolationSerializable,
+			want:    IsolationSerializable,
+			wantErr: true,
 		},
 		{
-			name:   "empty string falls back to default",
-			props:  iceberg.Properties{WriteDeleteIsolationLevelKey: ""},
-			key:    WriteDeleteIsolationLevelKey,
-			defVal: IsolationSnapshot,
-			want:   IsolationSnapshot,
+			name:    "empty string returns error",
+			props:   iceberg.Properties{WriteDeleteIsolationLevelKey: ""},
+			key:     WriteDeleteIsolationLevelKey,
+			defVal:  IsolationSnapshot,
+			want:    IsolationSnapshot,
+			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := readIsolationLevel(tt.props, tt.key, tt.defVal)
+			got, err := readIsolationLevel(tt.props, tt.key, tt.defVal)
+			if tt.wantErr {
+				assert.ErrorIs(t, err, ErrInvalidIsolationLevel)
+				return
+			}
+
+			assert.NoError(t, err)
 			assert.Equal(t, tt.want, got)
 		})
 	}

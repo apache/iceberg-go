@@ -230,8 +230,11 @@ func (rd *RowDelta) validate(cc *conflictContext) error {
 	}
 
 	if len(eqDeleteFiles) > 0 {
-		level := readIsolationLevel(rd.txn.meta.props,
+		level, err := readIsolationLevel(rd.txn.meta.props,
 			WriteDeleteIsolationLevelKey, WriteDeleteIsolationLevelDefault)
+		if err != nil {
+			return err
+		}
 		// Route through the existing validateNoConflictingDataFiles path,
 		// which calls validateAddedDataFilesMatchingFilter internally.
 		// For unpartitioned tables, use AlwaysTrue conservatively — an
@@ -244,14 +247,14 @@ func (rd *RowDelta) validate(cc *conflictContext) error {
 			return fmt.Errorf("reading current partition spec: %w", specErr)
 		}
 
-		var err error
+		var conflictErr error
 		if currentSpec == nil || currentSpec.NumFields() == 0 {
-			err = validateNoConflictingDataFiles(cc, iceberg.AlwaysTrue{}, level)
+			conflictErr = validateNoConflictingDataFiles(cc, iceberg.AlwaysTrue{}, level)
 		} else {
-			err = validateNoConflictingDataFilesInPartitions(cc, eqDeleteFiles, level)
+			conflictErr = validateNoConflictingDataFilesInPartitions(cc, eqDeleteFiles, level)
 		}
-		if err != nil {
-			return err
+		if conflictErr != nil {
+			return conflictErr
 		}
 	}
 

@@ -96,19 +96,23 @@ const (
 	WriteUpdateIsolationLevelDefault = IsolationSerializable
 )
 
+// ErrInvalidIsolationLevel is returned when a configured isolation level
+// value is invalid.
+var ErrInvalidIsolationLevel = errors.New("invalid isolation level")
+
 // readIsolationLevel returns the isolation level for the given
-// property key, falling back to defVal for a missing or unrecognized
-// value.
-func readIsolationLevel(props iceberg.Properties, key string, defVal IsolationLevel) IsolationLevel {
+// property key, falling back to defVal when the key is absent.
+func readIsolationLevel(props iceberg.Properties, key string, defVal IsolationLevel) (IsolationLevel, error) {
 	v, ok := props[key]
 	if !ok {
-		return defVal
+		return defVal, nil
 	}
+
 	switch IsolationLevel(v) {
 	case IsolationSerializable, IsolationSnapshot:
-		return IsolationLevel(v)
+		return IsolationLevel(v), nil
 	default:
-		return defVal
+		return defVal, fmt.Errorf("%w: %q for property %q", ErrInvalidIsolationLevel, v, key)
 	}
 }
 

@@ -165,16 +165,32 @@ func TestOverwriteFiles_IsolationKeySplitByOp(t *testing.T) {
 		WriteUpdateIsolationLevelKey: string(IsolationSerializable),
 	}
 
+	deleteLevel, err := readIsolationLevel(props, WriteDeleteIsolationLevelKey, WriteDeleteIsolationLevelDefault)
+	require.NoError(t, err)
 	// OpDelete must resolve to the delete key (snapshot).
 	assert.Equal(t, IsolationSnapshot,
-		readIsolationLevel(props, WriteDeleteIsolationLevelKey, WriteDeleteIsolationLevelDefault),
+		deleteLevel,
 		"OpDelete path must consult write.delete.isolation-level")
 
 	// Every other op (OpOverwrite, OpReplace) must resolve to the
 	// update key (serializable).
+	updateLevel, err := readIsolationLevel(props, WriteUpdateIsolationLevelKey, WriteUpdateIsolationLevelDefault)
+	require.NoError(t, err)
 	assert.Equal(t, IsolationSerializable,
-		readIsolationLevel(props, WriteUpdateIsolationLevelKey, WriteUpdateIsolationLevelDefault),
+		updateLevel,
 		"non-delete ops must consult write.update.isolation-level")
+}
+
+// TestOverwriteFiles_ValidateInvalidIsolationLevel verifies that malformed
+// isolation settings fail the validator before conflict scanning runs.
+func TestOverwriteFiles_ValidateInvalidIsolationLevel(t *testing.T) {
+	cc := newEmptyConflictContext(t)
+	txn := newValidateTestTxn(t, iceberg.Properties{
+		WriteUpdateIsolationLevelKey: "not-a-level",
+	})
+	of := &overwriteFiles{base: &snapshotProducer{txn: txn}}
+
+	assert.ErrorIs(t, of.validate(cc), ErrInvalidIsolationLevel)
 }
 
 // TestOverwriteFiles_ValidateNilContext hardens validate against a
@@ -221,6 +237,19 @@ func TestRowDelta_ValidateEqDeleteIsolationGates(t *testing.T) {
 		rd := &RowDelta{txn: txn, delFiles: []iceberg.DataFile{eqDelete}}
 		require.NoError(t, rd.validate(cc), "%s + no concurrent should be nil", level)
 	}
+}
+
+// TestRowDelta_ValidateInvalidIsolationLevel verifies malformed isolation
+// settings fail before manifest or schema checks.
+func TestRowDelta_ValidateInvalidIsolationLevel(t *testing.T) {
+	cc := newEmptyConflictContext(t)
+	eqDelete := newTestEqDeleteFile(t, "eq-1.parquet", []int{1})
+	txn := newValidateTestTxn(t, iceberg.Properties{
+		WriteDeleteIsolationLevelKey: "not-a-level",
+	})
+	rd := &RowDelta{txn: txn, delFiles: []iceberg.DataFile{eqDelete}}
+
+	assert.ErrorIs(t, rd.validate(cc), ErrInvalidIsolationLevel)
 }
 
 func TestRewriteValidator_Smokes(t *testing.T) {

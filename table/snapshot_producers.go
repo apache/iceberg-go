@@ -259,7 +259,11 @@ func (of *overwriteFiles) validate(cc *conflictContext) error {
 	if of.base.op == OpDelete {
 		key, defVal = WriteDeleteIsolationLevelKey, WriteDeleteIsolationLevelDefault
 	}
-	if readIsolationLevel(of.base.txn.meta.props, key, defVal) != IsolationSerializable {
+	level, err := readIsolationLevel(of.base.txn.meta.props, key, defVal)
+	if err != nil {
+		return err
+	}
+	if level != IsolationSerializable {
 		// SNAPSHOT isolation allows concurrent appends into the
 		// filter region. No further checks on this path.
 		return nil
