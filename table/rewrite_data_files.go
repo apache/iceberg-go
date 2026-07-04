@@ -345,6 +345,7 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 
 	// Preserve row lineage only when every source file in the group carries
 	preserveLineage := tbl.metadata.Version() >= 3 && allTasksHaveRowLineage(group.Tasks)
+
 	return executeCompactionTaskGroup(ctx, tbl, scanOpts, group, cfg.targetFileSize, preserveLineage)
 }
 
@@ -423,6 +424,7 @@ func splitTasksByLineage(tasks []FileScanTask) (lineageTasks []FileScanTask, leg
 	for _, task := range tasks {
 		if task.FirstRowID != nil {
 			lineageTasks = append(lineageTasks, task)
+
 			continue
 		}
 
