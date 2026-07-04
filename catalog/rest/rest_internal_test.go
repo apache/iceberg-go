@@ -314,10 +314,24 @@ func TestOAuthServerURIProps(t *testing.T) {
 	t.Run("invalid oauth2-server-uri is rejected", func(t *testing.T) {
 		t.Parallel()
 
-		var opts options
-		err := fromProps(iceberg.Properties{keyOAuth2ServerURI: "http://[::1"}, &opts)
-		require.Error(t, err)
-		assert.ErrorContains(t, err, "invalid oauth2-server-uri")
+		for _, tt := range []struct {
+			name    string
+			uri     string
+			wantErr string
+		}{
+			{"malformed URL", "http://[::1", "invalid oauth2-server-uri"},
+			{"missing scheme", "auth.example.com/token", "missing scheme"},
+			{"missing host", "https://", "missing host"},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+
+				var opts options
+				err := fromProps(iceberg.Properties{keyOAuth2ServerURI: tt.uri}, &opts)
+				require.Error(t, err)
+				assert.ErrorContains(t, err, tt.wantErr)
+			})
+		}
 	})
 
 	t.Run("toProps serializes under the portable oauth2-server-uri key", func(t *testing.T) {
@@ -328,8 +342,9 @@ func TestOAuthServerURIProps(t *testing.T) {
 
 		props := toProps(&options{authUri: u})
 		assert.Equal(t, serverURI, props[keyOAuth2ServerURI])
-		_, hasAuthURL := props[keyAuthUrl]
-		assert.False(t, hasAuthURL)
+		// The legacy rest.authorization-url alias is retained for backward
+		// compatibility with consumers that read the properties back.
+		assert.Equal(t, serverURI, props[keyAuthUrl])
 	})
 }
 

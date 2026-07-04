@@ -476,15 +476,15 @@ func fromProps(props iceberg.Properties, o *options) error {
 		case keyRestSigV4Service:
 			o.sigv4Service = v
 		case keyAuthUrl:
-			u, err := parseAuthURL(v)
+			u, err := parseAuthURL(keyAuthUrl, v)
 			if err != nil {
 				return err
 			}
 			authURL = u
 		case keyOAuth2ServerURI:
-			u, err := url.Parse(v)
+			u, err := parseAuthURL(keyOAuth2ServerURI, v)
 			if err != nil {
-				return fmt.Errorf("invalid %s %q: %w", keyOAuth2ServerURI, v, err)
+				return err
 			}
 			oauth2ServerURI = u
 		case keyOauthCredential:
@@ -529,16 +529,16 @@ func fromProps(props iceberg.Properties, o *options) error {
 	return nil
 }
 
-func parseAuthURL(raw string) (*url.URL, error) {
+func parseAuthURL(key, raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, fmt.Errorf("invalid %s %q: %w", keyAuthUrl, raw, err)
+		return nil, fmt.Errorf("invalid %s %q: %w", key, raw, err)
 	}
 	if u.Scheme == "" {
-		return nil, fmt.Errorf("invalid %s %q: missing scheme", keyAuthUrl, raw)
+		return nil, fmt.Errorf("invalid %s %q: missing scheme", key, raw)
 	}
 	if u.Host == "" {
-		return nil, fmt.Errorf("invalid %s %q: missing host", keyAuthUrl, raw)
+		return nil, fmt.Errorf("invalid %s %q: missing host", key, raw)
 	}
 
 	return u, nil
@@ -577,8 +577,11 @@ func toProps(o *options) iceberg.Properties {
 
 	setIf(keyPrefix, o.prefix)
 	if o.authUri != nil {
-		// Serialize under the portable oauth2-server-uri key.
+		// Advertise the endpoint under the portable oauth2-server-uri key while
+		// also retaining the legacy rest.authorization-url alias, so existing
+		// consumers that read the properties back keep working.
 		setIf(keyOAuth2ServerURI, o.authUri.String())
+		setIf(keyAuthUrl, o.authUri.String())
 	}
 
 	return props
