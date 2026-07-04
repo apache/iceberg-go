@@ -870,8 +870,6 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 		opt(s)
 	}
 
-	s.partitionFilters = newKeyDefaultMapWrapErr(s.buildPartitionProjection)
-
 	return s
 }
 
