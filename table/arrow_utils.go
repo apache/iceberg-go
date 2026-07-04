@@ -1633,6 +1633,11 @@ type recordWritingArgs struct {
 	maxWriteWorkers int
 	clustered       bool
 	factoryOpts     []writerFactoryOption
+	// existingDVs maps a data file path to the positions already recorded in
+	// its current deletion vector. On the v3 DV write path these are folded
+	// into the newly written DV so a data file that already had a DV ends up
+	// with a single merged vector (the caller removes the superseded one).
+	existingDVs map[string]*dv.RoaringPositionBitmap
 }
 
 func recordsToDataFiles(ctx context.Context, rootLocation string, meta *MetadataBuilder, args recordWritingArgs) (ret iter.Seq2[iceberg.DataFile, error]) {
@@ -1844,7 +1849,25 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 			return metadata.PartitionSpecByID(int(id))
 		})
 
+		// Seed the writer with any deletion vector the referenced data file
+		// already carries so its previously deleted positions survive into the
+		// merged DV. The read path that produced args.itr already applied these
+		// existing deletes, so the incoming batches hold only the new positions;
+		// without the seed the replacement DV would silently resurrect rows. The
+		// spec allows at most one DV per data file, so the caller supersedes the
+		// old DV once this merged one is written.
 		hasEntries := false
+		for filePath, bitmap := range args.existingDVs {
+			pCtx, ok := partitionContextByFilePath[filePath]
+			if !ok {
+				yield(nil, fmt.Errorf("unexpected missing partition context for path %s", filePath))
+
+				return
+			}
+			writer.Load(filePath, bitmap, pCtx.specID, pCtx.partitionData)
+			hasEntries = true
+		}
+
 		for batch, err := range args.itr {
 			if err != nil {
 				yield(nil, err)

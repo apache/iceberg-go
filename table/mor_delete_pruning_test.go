@@ -75,6 +75,14 @@ func TestMergeOnReadDeleteAcrossPrunedRowGroups(t *testing.T) {
 func newMergeOnReadTestTable(t *testing.T) *table.Table {
 	t.Helper()
 
+	return newMergeOnReadTestTableVersion(t, "2")
+}
+
+// newMergeOnReadTestTableVersion builds a merge-on-read table at the given
+// format version, capping row groups at 5 rows so a 10-row append spans two.
+func newMergeOnReadTestTableVersion(t *testing.T, formatVersion string) *table.Table {
+	t.Helper()
+
 	location := filepath.ToSlash(t.TempDir())
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
@@ -82,7 +90,7 @@ func newMergeOnReadTestTable(t *testing.T) *table.Table {
 	)
 	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, location,
 		iceberg.Properties{
-			table.PropertyFormatVersion:   "2",
+			table.PropertyFormatVersion:   formatVersion,
 			table.WriteDeleteModeKey:      table.WriteModeMergeOnRead,
 			table.ParquetRowGroupLimitKey: "5",
 		})
@@ -93,6 +101,79 @@ func newMergeOnReadTestTable(t *testing.T) *table.Table {
 	cat := &concurrentTestCatalog{metadata: meta, location: metaLoc, fsF: fsF}
 
 	return table.New(table.Identifier{"db", "mor_delete_test"}, meta, metaLoc, fsF, cat)
+}
+
+// TestV3MergeOnReadDoubleDeleteMergesDeletionVector guards against a second
+// merge-on-read DELETE on a data file that already has a deletion vector
+// writing a second live DV. The spec permits at most one DV per data file, so
+// the new deletes must merge into the existing DV (which is then superseded),
+// not accumulate as a parallel one. A second live DV corrupts the table:
+// buildDVIndex rejects it at scan time with "can't index multiple deletion
+// vectors". See issue #1372.
+func TestV3MergeOnReadDoubleDeleteMergesDeletionVector(t *testing.T) {
+	ctx := context.Background()
+	tbl := newMergeOnReadTestTableVersion(t, "3")
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+	data, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"},{"id":4,"data":"d"},{"id":5,"data":"e"}]`,
+	})
+	require.NoError(t, err)
+	defer data.Release()
+
+	tbl, err = tbl.Append(ctx, array.NewTableReader(data, -1), nil)
+	require.NoError(t, err)
+
+	// First delete writes DV #1 against the single data file.
+	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(2)), nil)
+	require.NoError(t, err)
+	require.Equal(t, []int64{1, 3, 4, 5}, idsInTable(t, tbl))
+	require.Equal(t, 1, liveDVCount(t, tbl), "first delete must write exactly one DV")
+
+	// Second delete on the same data file must merge into DV #1, not add a
+	// second live DV.
+	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(4)), nil)
+	require.NoError(t, err)
+
+	require.Equal(t, 1, liveDVCount(t, tbl),
+		"the two deletes must collapse into a single merged deletion vector")
+	assert.Equal(t, []int64{1, 3, 5}, idsInTable(t, tbl),
+		"both id=2 and id=4 must be deleted and no previously deleted row may resurrect")
+}
+
+// liveDVCount returns the number of live deletion-vector entries in the table's
+// current snapshot.
+func liveDVCount(t *testing.T, tbl *table.Table) int {
+	t.Helper()
+
+	fs, err := tbl.FS(context.Background())
+	require.NoError(t, err)
+
+	snapshot := tbl.CurrentSnapshot()
+	require.NotNil(t, snapshot)
+	manifests, err := snapshot.Manifests(fs)
+	require.NoError(t, err)
+
+	count := 0
+	for _, m := range manifests {
+		for entry, err := range m.Entries(fs, false) {
+			require.NoError(t, err)
+			if entry.Status() == iceberg.EntryStatusDELETED {
+				continue
+			}
+			df := entry.DataFile()
+			if df.FileFormat() == iceberg.PuffinFile &&
+				df.ContentType() == iceberg.EntryContentPosDeletes &&
+				df.ReferencedDataFile() != nil {
+				count++
+			}
+		}
+	}
+
+	return count
 }
 
 // idsInTable scans the table and returns the surviving id values, sorted.

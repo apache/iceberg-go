@@ -34,6 +34,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table/dv"
 	"github.com/apache/iceberg-go/table/internal"
 	"github.com/apache/iceberg-go/table/substrait"
 	"github.com/google/uuid"
@@ -1891,11 +1892,36 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 		partitionContextByFilePath[df.FilePath()] = partitionContext{partitionData: df.Partition(), specID: df.SpecID()}
 	}
 
+	// V3 tables store deletes as deletion vectors, and the spec allows at most
+	// one DV per data file. A data file being partially deleted may already
+	// carry a DV from an earlier delete; those existing positions are folded
+	// into the new DV (the scan that produced the records already applied them,
+	// so the new records hold only the incremental deletes) and the superseded
+	// DVs are removed. Without this a second delete on the same file would
+	// write a second live DV, corrupting the table (buildDVIndex rejects it).
+	var existingDVs map[string]iceberg.DataFile
+	if t.meta.formatVersion >= 3 {
+		existingDVs, err = t.collectExistingDVs(fs, files)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	existingDVBitmaps := make(map[string]*dv.RoaringPositionBitmap, len(existingDVs))
+	for ref, dvFile := range existingDVs {
+		bitmap, err := dv.ReadDV(fs, dvFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read existing deletion vector for %s: %w", ref, err)
+		}
+		existingDVBitmaps[ref] = bitmap
+	}
+
 	posDeleteFiles := positionDeleteRecordsToDataFiles(ctx, t.tbl.Location(), t.meta, partitionContextByFilePath, recordWritingArgs{
-		sc:        PositionalDeleteArrowSchema,
-		itr:       posDeleteRecIter,
-		writeUUID: &commitUUID,
-		fs:        wfs,
+		sc:          PositionalDeleteArrowSchema,
+		itr:         posDeleteRecIter,
+		writeUUID:   &commitUUID,
+		fs:          wfs,
+		existingDVs: existingDVBitmaps,
 	})
 
 	var referenced []string
@@ -1913,7 +1939,48 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 		}
 	}
 
+	// Supersede the old DVs only after the merged replacements are staged, so a
+	// write failure above leaves the existing DVs untouched.
+	for _, dvFile := range existingDVs {
+		updater.removeDeletionVector(dvFile)
+	}
+
 	return referenced, nil
+}
+
+// collectExistingDVs returns the live deletion vectors that reference any of
+// files, keyed by the referenced data file path. Used by the v3 merge-on-read
+// delete path to fold prior deletes into a new DV and remove the superseded
+// entries, preserving the spec's one-DV-per-data-file invariant.
+func (t *Transaction) collectExistingDVs(fs io.IO, files []iceberg.DataFile) (map[string]iceberg.DataFile, error) {
+	s := t.meta.currentSnapshot()
+	if s == nil {
+		return nil, nil
+	}
+
+	wanted := make(map[string]struct{}, len(files))
+	for _, df := range files {
+		wanted[df.FilePath()] = struct{}{}
+	}
+
+	result := make(map[string]iceberg.DataFile)
+	for df, err := range s.dataFiles(fs, nil) {
+		if err != nil {
+			return nil, err
+		}
+		if !isDeletionVector(df) {
+			continue
+		}
+		ref := df.ReferencedDataFile()
+		if ref == nil {
+			continue
+		}
+		if _, ok := wanted[*ref]; ok {
+			result[*ref] = df
+		}
+	}
+
+	return result, nil
 }
 
 func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs io.IO, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (seq2 iter.Seq2[arrow.RecordBatch, error], err error) {
