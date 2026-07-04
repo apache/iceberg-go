@@ -50,6 +50,7 @@ func (unsupportedType) Type() string { return "unsupported" }
 func (unsupportedType) String() string {
 	return "unsupported"
 }
+
 func (unsupportedType) Equals(other iceberg.Type) bool {
 	_, ok := other.(unsupportedType)
 
