@@ -19,6 +19,7 @@ package table_test
 
 import (
 	"context"
+	"iter"
 	"path/filepath"
 	"testing"
 
@@ -71,9 +72,22 @@ func newV2RowLineageTestTable(t *testing.T) *table.Table {
 }
 
 func readRowIDsByID(t *testing.T, ctx context.Context, tbl *table.Table) map[int64]int64 {
+	return readRowIDsByTasks(t, ctx, tbl, nil)
+}
+
+func readRowIDsByTasks(t *testing.T, ctx context.Context, tbl *table.Table, tasks []table.FileScanTask) map[int64]int64 {
 	t.Helper()
 
-	_, itr, err := tbl.Scan(table.WithRowLineage()).ToArrowRecords(ctx)
+	scan := tbl.Scan(table.WithRowLineage())
+	var (
+		itr iter.Seq2[arrow.RecordBatch, error]
+		err error
+	)
+	if tasks == nil {
+		_, itr, err = scan.ToArrowRecords(ctx)
+	} else {
+		_, itr, err = scan.ReadTasks(ctx, tasks)
+	}
 	require.NoError(t, err)
 
 	got := map[int64]int64{}
@@ -476,6 +490,7 @@ func TestExecuteCompactionGroupPreservesLineageSubsetOnMixedTasks(t *testing.T) 
 	// Simulate a mixed lineage group by forcing one task to look like a legacy
 	// file (no inherited FirstRowID). The mixed-input behavior was previously a
 	// silent drop for all surviving rows.
+	legacyRows := readRowIDsByTasks(t, ctx, tbl, []table.FileScanTask{tasks[1]})
 	tasks[1].FirstRowID = nil
 
 	group := table.CompactionTaskGroup{
@@ -496,8 +511,12 @@ func TestExecuteCompactionGroupPreservesLineageSubsetOnMixedTasks(t *testing.T) 
 	require.NoError(t, err)
 
 	post := readRowIDsByID(t, ctx, tbl)
-	assert.Equal(t, pre[1], post[1], "lineage-capable file rows should keep their original _row_id")
-	assert.Equal(t, pre[2], post[2], "lineage-capable file rows should keep their original _row_id")
-	assert.NotEqual(t, pre[3], post[3], "legacy-task rows should be rewritten without legacy lineage")
-	assert.NotEqual(t, pre[4], post[4], "legacy-task rows should be rewritten without legacy lineage")
+	for id, before := range pre {
+		if _, ok := legacyRows[id]; ok {
+			assert.NotEqual(t, before, post[id],
+				"legacy-task rows should be rewritten without legacy lineage")
+			continue
+		}
+		assert.Equal(t, before, post[id], "lineage-capable file rows should keep their original _row_id")
+	}
 }
