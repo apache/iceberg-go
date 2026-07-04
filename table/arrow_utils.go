@@ -1718,9 +1718,7 @@ func unpartitionedWrite(ctx context.Context, factory *writerFactory, records ite
 				return
 			}
 		}
-		close(writer.recordCh)
-		writer.wg.Wait()
-		if err := <-writer.errorCh; err != nil {
+		if err := writer.closeAndWait(); err != nil {
 			errCh <- err
 		}
 		close(errCh)
