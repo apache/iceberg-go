@@ -184,8 +184,8 @@ func (s *SortField) UnmarshalJSON(b []byte) error {
 }
 
 func validateSortSourceID(id int) error {
-	if id < 0 {
-		return fmt.Errorf("source ID must be non-negative: %d", id)
+	if id <= 0 {
+		return fmt.Errorf("source ID must be positive: %d", id)
 	}
 
 	return nil

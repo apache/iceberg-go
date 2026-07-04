@@ -88,12 +88,20 @@ func TestNewSortOrderRejectsInvalidSourceIDs(t *testing.T) {
 			sourceIDs: []int{},
 		},
 		{
+			name:      "zero",
+			sourceIDs: []int{0},
+		},
+		{
 			name:      "negative",
 			sourceIDs: []int{-1},
 		},
 		{
 			name:      "multi arg with negative",
 			sourceIDs: []int{1, -1},
+		},
+		{
+			name:      "multi arg with zero",
+			sourceIDs: []int{1, 0},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -107,17 +115,6 @@ func TestNewSortOrderRejectsInvalidSourceIDs(t *testing.T) {
 			assert.ErrorIs(t, err, table.ErrInvalidSortSourceID)
 		})
 	}
-}
-
-func TestNewSortOrderAcceptsZeroSourceID(t *testing.T) {
-	sortOrder, err := table.NewSortOrder(1, []table.SortField{{
-		SourceIDs: []int{0},
-		Transform: iceberg.IdentityTransform{},
-		NullOrder: table.NullsFirst,
-		Direction: table.SortASC,
-	}})
-	require.NoError(t, err)
-	assert.Equal(t, 1, sortOrder.Len())
 }
 
 func TestNewSortOrderAcceptsValidTransform(t *testing.T) {
@@ -138,20 +135,6 @@ func TestSortOrderCheckCompatibilityWithValidTransform(t *testing.T) {
 	)
 	sortOrder, err := table.NewSortOrder(1, []table.SortField{{
 		SourceIDs: []int{19},
-		Transform: iceberg.IdentityTransform{},
-		NullOrder: table.NullsFirst,
-		Direction: table.SortASC,
-	}})
-	require.NoError(t, err)
-	require.NoError(t, sortOrder.CheckCompatibility(schema))
-}
-
-func TestSortOrderCheckCompatibilityAcceptsZeroSourceIDInSchema(t *testing.T) {
-	schema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 0, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-	)
-	sortOrder, err := table.NewSortOrder(1, []table.SortField{{
-		SourceIDs: []int{0},
 		Transform: iceberg.IdentityTransform{},
 		NullOrder: table.NullsFirst,
 		Direction: table.SortASC,
@@ -185,7 +168,13 @@ func TestSortOrderCheckCompatibilityRejectsInvalidSourceIDs(t *testing.T) {
 		{
 			name:                "negative",
 			jsonData:            `{"order-id": 1, "fields": [{"source-id": -1, "transform": "identity", "direction": "asc", "null-order": "nulls-first"}]}`,
-			wantErr:             "source ID must be non-negative: -1",
+			wantErr:             "source ID must be positive: -1",
+			wantInvalidSourceID: true,
+		},
+		{
+			name:                "zero",
+			jsonData:            `{"order-id": 1, "fields": [{"source-id": 0, "transform": "identity", "direction": "asc", "null-order": "nulls-first"}]}`,
+			wantErr:             "source ID must be positive: 0",
 			wantInvalidSourceID: true,
 		},
 		{
