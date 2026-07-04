@@ -19,9 +19,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
+	"strings"
 	"testing"
 
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/pterm/pterm"
 	"github.com/stretchr/testify/assert"
@@ -406,4 +409,100 @@ func Test_jsonOutput_DescribeTable(t *testing.T) {
 			assert.JSONEq(t, tt.expected, buf.String())
 		})
 	}
+}
+
+func Test_textOutput_DescribeTableSnapshotWithoutSchemaID(t *testing.T) {
+	meta := `{
+    "format-version": 2,
+    "table-uuid": "9c12d441-03fe-4693-9a96-a0705ddf69c1",
+    "location": "mem://default/table",
+    "last-sequence-number": 1,
+    "last-updated-ms": 1602638573590,
+    "last-column-id": 1,
+    "current-schema-id": 0,
+    "schemas": [
+        {"type": "struct", "schema-id": 0, "fields": [{"id": 1, "name": "id", "required": true, "type": "int"}]}
+    ],
+    "default-spec-id": 0,
+    "partition-specs": [{"spec-id": 0, "fields": []}],
+    "last-partition-id": 1000,
+    "default-sort-order-id": 0,
+    "sort-orders": [
+        {"order-id": 0, "fields": []}
+    ],
+    "properties": {},
+    "current-snapshot-id": 100,
+    "snapshots": [
+        {
+            "snapshot-id": 100,
+            "timestamp-ms": 1602638573590,
+            "sequence-number": 1,
+            "summary": {"operation": "append"}
+        }
+    ],
+    "snapshot-log": [],
+    "refs": {}
+}`
+
+	var buf bytes.Buffer
+	pterm.SetDefaultOutput(&buf)
+	pterm.DisableColor()
+
+	parsed, err := table.ParseMetadataBytes([]byte(meta))
+	assert.NoError(t, err)
+	tbl := table.New([]string{"t"}, parsed, "", nil, nil)
+
+	textOutput{}.DescribeTable(tbl)
+
+	assert.True(t, strings.Contains(buf.String(), "Snapshot 100, schema unknown"))
+}
+
+func Test_textOutput_FilesSnapshotWithoutSchemaID(t *testing.T) {
+	meta := `{
+    "format-version": 2,
+    "table-uuid": "c8e7f6d4-03fe-4693-9a96-a0705ddf69c2",
+    "location": "mem://default/table",
+    "last-sequence-number": 1,
+    "last-updated-ms": 1602638573590,
+    "last-column-id": 1,
+    "current-schema-id": 0,
+    "schemas": [
+        {"type": "struct", "schema-id": 0, "fields": [{"id": 1, "name": "id", "required": true, "type": "int"}]}
+    ],
+    "default-spec-id": 0,
+    "partition-specs": [{"spec-id": 0, "fields": []}],
+    "last-partition-id": 1000,
+    "default-sort-order-id": 0,
+    "sort-orders": [
+        {"order-id": 0, "fields": []}
+    ],
+    "properties": {},
+    "current-snapshot-id": 100,
+    "snapshots": [
+        {
+            "snapshot-id": 100,
+            "timestamp-ms": 1602638573590,
+            "sequence-number": 1,
+            "summary": {"operation": "append"}
+        }
+    ],
+    "snapshot-log": [],
+    "refs": {}
+}`
+
+	var buf bytes.Buffer
+	pterm.SetDefaultOutput(&buf)
+	pterm.DisableColor()
+
+	memFS, err := iceio.LoadFS(context.Background(), nil, "mem://default/table")
+	assert.NoError(t, err)
+	parsed, err := table.ParseMetadataBytes([]byte(meta))
+	assert.NoError(t, err)
+	tbl := table.New([]string{"db", "events"}, parsed, "", func(_ context.Context) (iceio.IO, error) {
+		return memFS, nil
+	}, nil)
+
+	textOutput{}.Files(tbl, false)
+
+	assert.True(t, strings.Contains(buf.String(), "Snapshot 100, schema unknown"))
 }
