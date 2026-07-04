@@ -300,38 +300,60 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		scanOpts = append(scanOpts, WitMaxConcurrency(cfg.scanConcurrency))
 	}
 
-	// Preserve row lineage only when every source file in the group carries
-	// it. A mixed group (some files with FirstRowID, some without — e.g.
-	// legacy files on a v3 table) would otherwise produce one output where
-	// post-lineage rows have explicit _row_id values and pre-lineage rows
-	// have nulls, which violates the per-file uniqueness/coverage
-	// invariant the v3 spec requires. Splitting mixed groups into separate
-	// outputs is a larger refactor and is left as a follow-up; for now we
-	// degrade gracefully (the rewrite still succeeds, but lineage is not
-	// preserved for the surviving rows).
-	preserveLineage := tbl.metadata.Version() >= 3 && allTasksHaveRowLineage(group.Tasks)
-	if preserveLineage {
-		scanOpts = append(scanOpts, WithRowLineage())
-	} else if tbl.metadata.Version() >= 3 {
-		// Mixed group on a v3 table — at least one source file lacks
-		// FirstRowID so we drop lineage on the surviving rows. This is the
-		// common case during a v1/v2→v3 migration; surface it so operators
-		// can detect silent lineage loss instead of having to diff
-		// metadata before/after.
-		var lineageFiles, legacyFiles int
-		for _, t := range group.Tasks {
-			if t.FirstRowID != nil {
-				lineageFiles++
-			} else {
-				legacyFiles++
-			}
-		}
-		if lineageFiles > 0 {
-			slog.Warn("compaction group has mixed row lineage; dropping _row_id on output",
+	if tbl.metadata.Version() >= 3 {
+		lineageTasks, legacyTasks := splitTasksByLineage(group.Tasks)
+		if len(lineageTasks) > 0 && len(legacyTasks) > 0 {
+			slog.Info("compaction group has mixed row-lineage tasks; splitting to preserve _row_id for lineage-capable files",
 				"partition_key", group.PartitionKey,
-				"lineage_files", lineageFiles,
-				"legacy_files", legacyFiles)
+				"lineage_tasks", len(lineageTasks),
+				"legacy_tasks", len(legacyTasks))
+
+			lineageGroup := CompactionTaskGroup{
+				PartitionKey:   group.PartitionKey,
+				Tasks:          lineageTasks,
+				TotalSizeBytes: sumTaskBytes(lineageTasks),
+			}
+			legacyGroup := CompactionTaskGroup{
+				PartitionKey:   group.PartitionKey,
+				Tasks:          legacyTasks,
+				TotalSizeBytes: sumTaskBytes(legacyTasks),
+			}
+
+			preserve, err := executeCompactionTaskGroup(ctx, tbl, scanOpts, lineageGroup, cfg.targetFileSize, true)
+			if err != nil {
+				return CompactionGroupResult{}, err
+			}
+			legacy, err := executeCompactionTaskGroup(ctx, tbl, scanOpts, legacyGroup, cfg.targetFileSize, false)
+			if err != nil {
+				return CompactionGroupResult{}, err
+			}
+
+			safePosDeletes := mergeTaskFiles(preserve.SafePosDeletes, legacy.SafePosDeletes)
+			safeDeletionVectors := mergeTaskFiles(preserve.SafeDeletionVectors, legacy.SafeDeletionVectors)
+
+			return CompactionGroupResult{
+				PartitionKey:        group.PartitionKey,
+				OldDataFiles:        append(preserve.OldDataFiles, legacy.OldDataFiles...),
+				NewDataFiles:        append(preserve.NewDataFiles, legacy.NewDataFiles...),
+				SafePosDeletes:      safePosDeletes,
+				SafeDeletionVectors: safeDeletionVectors,
+				BytesBefore:         preserve.BytesBefore + legacy.BytesBefore,
+				BytesAfter:          preserve.BytesAfter + legacy.BytesAfter,
+			}, nil
 		}
+	}
+
+	// Preserve row lineage only when every source file in the group carries
+	preserveLineage := tbl.metadata.Version() >= 3 && allTasksHaveRowLineage(group.Tasks)
+	return executeCompactionTaskGroup(ctx, tbl, scanOpts, group, cfg.targetFileSize, preserveLineage)
+}
+
+// executeCompactionTaskGroup runs a single compaction path over one task group.
+// It can preserve row lineage by projecting _row_id and _last_updated_sequence_number
+// into the read and write schemas.
+func executeCompactionTaskGroup(ctx context.Context, tbl *Table, scanOpts []ScanOption, group CompactionTaskGroup, targetFileSize int64, preserveLineage bool) (CompactionGroupResult, error) {
+	if preserveLineage {
+		scanOpts = append(slices.Clone(scanOpts), WithRowLineage())
 	}
 
 	arrowSchema, records, err := tbl.Scan(scanOpts...).ReadTasks(ctx, group.Tasks)
@@ -342,8 +364,8 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	// Each compaction group is single-partition by construction, so the
 	// read stream is trivially clustered and we can use the clustered writer.
 	writeOpts := []WriteRecordOption{WithClusteredWrite()}
-	if cfg.targetFileSize > 0 {
-		writeOpts = append(writeOpts, WithTargetFileSize(cfg.targetFileSize))
+	if targetFileSize > 0 {
+		writeOpts = append(writeOpts, WithTargetFileSize(targetFileSize))
 	}
 	if preserveLineage {
 		// Rebuild the arrow schema from the projected iceberg schema so the
@@ -388,11 +410,58 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	}, nil
 }
 
+func sumTaskBytes(tasks []FileScanTask) int64 {
+	total := int64(0)
+	for _, t := range tasks {
+		total += t.File.FileSizeBytes()
+	}
+
+	return total
+}
+
+func splitTasksByLineage(tasks []FileScanTask) (lineageTasks []FileScanTask, legacyTasks []FileScanTask) {
+	for _, task := range tasks {
+		if task.FirstRowID != nil {
+			lineageTasks = append(lineageTasks, task)
+			continue
+		}
+
+		legacyTasks = append(legacyTasks, task)
+	}
+
+	return lineageTasks, legacyTasks
+}
+
+func mergeTaskFiles(a, b []iceberg.DataFile) []iceberg.DataFile {
+	if len(a) == 0 {
+		return slices.Clone(b)
+	}
+	if len(b) == 0 {
+		return slices.Clone(a)
+	}
+
+	seen := make(map[string]struct{}, len(a)+len(b))
+	for _, df := range a {
+		seen[df.FilePath()] = struct{}{}
+	}
+
+	out := make([]iceberg.DataFile, 0, len(a)+len(b))
+	out = append(out, a...)
+	for _, df := range b {
+		if _, ok := seen[df.FilePath()]; ok {
+			continue
+		}
+		seen[df.FilePath()] = struct{}{}
+		out = append(out, df)
+	}
+
+	return out
+}
+
 // allTasksHaveRowLineage returns true iff every task in the group has a
-// non-nil FirstRowID — i.e. every source file already carries v3 row lineage.
-// Used to gate the preservation path on compaction: mixed groups (some
-// lineage, some legacy) would otherwise produce per-file invariant
-// violations, so the gate is conservative.
+// non-nil FirstRowID — i.e. every source file already carries v3 row
+// lineage. Mixed groups are now split so each subgroup can preserve lineage
+// only where it is available.
 func allTasksHaveRowLineage(tasks []FileScanTask) bool {
 	if len(tasks) == 0 {
 		return false

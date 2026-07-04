@@ -434,3 +434,70 @@ func TestExecuteCompactionGroupPreservesRowIDAcrossV2Upgrade(t *testing.T) {
 	assert.Equal(t, pre, post,
 		"compaction across a v2->v3 upgrade must preserve every row's _row_id, including the v2-era rows")
 }
+
+// TestExecuteCompactionGroupPreservesLineageSubsetOnMixedTasks verifies that
+// mixed-task compaction on a v3 table no longer drops row-lineage columns
+// for all files in the group. Lineage-capable files remain preserved while
+// legacy files without a lineage marker are rewritten in a separate output
+// stream.
+func TestExecuteCompactionGroupPreservesLineageSubsetOnMixedTasks(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.DefaultAllocator
+
+	tbl := newV3RowLineageTestTable(t)
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	first, err := array.TableFromJSON(mem, arrowSchema, []string{
+		`[{"id": 1, "data": "a"}, {"id": 2, "data": "b"}]`,
+	})
+	require.NoError(t, err)
+	t.Cleanup(first.Release)
+	tbl, err = tbl.Append(ctx, array.NewTableReader(first, -1), nil)
+	require.NoError(t, err)
+
+	second, err := array.TableFromJSON(mem, arrowSchema, []string{
+		`[{"id": 3, "data": "c"}, {"id": 4, "data": "d"}]`,
+	})
+	require.NoError(t, err)
+	t.Cleanup(second.Release)
+	tbl, err = tbl.Append(ctx, array.NewTableReader(second, -1), nil)
+	require.NoError(t, err)
+
+	pre := readRowIDsByID(t, ctx, tbl)
+
+	tasks, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+
+	// Simulate a mixed lineage group by forcing one task to look like a legacy
+	// file (no inherited FirstRowID). The mixed-input behavior was previously a
+	// silent drop for all surviving rows.
+	tasks[1].FirstRowID = nil
+
+	group := table.CompactionTaskGroup{
+		PartitionKey:   "single",
+		Tasks:          tasks,
+		TotalSizeBytes: tasks[0].File.FileSizeBytes() + tasks[1].File.FileSizeBytes(),
+	}
+
+	gr, err := table.ExecuteCompactionGroup(ctx, tbl, group)
+	require.NoError(t, err)
+	require.Equal(t, 2, len(gr.OldDataFiles), "both source files should be replaced")
+
+	tx := tbl.NewTransaction()
+	rewrite := tx.NewRewrite(nil)
+	rewrite.ApplyResult(gr)
+	require.NoError(t, rewrite.Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	post := readRowIDsByID(t, ctx, tbl)
+	assert.Equal(t, pre[1], post[1], "lineage-capable file rows should keep their original _row_id")
+	assert.Equal(t, pre[2], post[2], "lineage-capable file rows should keep their original _row_id")
+	assert.NotEqual(t, pre[3], post[3], "legacy-task rows should be rewritten without legacy lineage")
+	assert.NotEqual(t, pre[4], post[4], "legacy-task rows should be rewritten without legacy lineage")
+}
