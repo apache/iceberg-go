@@ -115,8 +115,18 @@ func TestInvalidDialect(t *testing.T) {
 	_, err := catalog.Load(context.Background(), "sql", iceberg.Properties{
 		sqlcat.DriverKey:  sqliteshim.ShimName,
 		sqlcat.DialectKey: "foobar",
+		"type":            "sql",
 	})
-	assert.Error(t, err)
+	assert.ErrorContains(t, err, `unsupported sql dialect: "foobar"`)
+}
+
+func TestNewCatalogInvalidDialect(t *testing.T) {
+	sqldb, err := sql.Open(sqliteshim.ShimName, ":memory:")
+	assert.NoError(t, err)
+	defer sqldb.Close()
+
+	_, err = sqlcat.NewCatalog("default", sqldb, "foobar", nil)
+	assert.ErrorContains(t, err, "unsupported sql dialect")
 }
 
 func randomString(n int) string {
