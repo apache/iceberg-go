@@ -183,7 +183,7 @@ func (t Table) NewTransactionOnBranchWithError(branch string) (*Transaction, err
 }
 
 func (t *Table) Refresh(ctx context.Context) error {
-	fresh, err := t.cat.LoadTable(ctx, t.identifier)
+	fresh, err := t.cat.LoadTable(ctx, slices.Clone(t.identifier))
 	if err != nil {
 		return err
 	}
@@ -567,7 +567,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			return nil, context.Cause(retryCtx)
 		}
 
-		newMeta, newLoc, err = t.cat.CommitTable(retryCtx, t.identifier, reqs, updates)
+		newMeta, newLoc, err = t.cat.CommitTable(retryCtx, slices.Clone(t.identifier), reqs, updates)
 		if err == nil {
 			break
 		}
@@ -605,7 +605,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 
 	deleteOldMetadata(fs, t.metadata, newMeta)
 
-	return New(t.identifier, newMeta, newLoc, t.fsF, t.cat), nil
+	return New(slices.Clone(t.identifier), newMeta, newLoc, t.fsF, t.cat), nil
 }
 
 // rewriteRefSnapshotRequirements returns a copy of reqs with every
@@ -903,7 +903,7 @@ func WithRowLineage() ScanOption {
 
 func (t Table) Scan(opts ...ScanOption) *Scan {
 	s := &Scan{
-		identifier:       t.identifier,
+		identifier:       slices.Clone(t.identifier),
 		metadata:         t.metadata,
 		metadataLocation: t.metadataLocation,
 		ioF:              t.fsF,

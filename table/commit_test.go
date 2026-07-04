@@ -110,6 +110,7 @@ func TestTableCommitDoesNotMarkTransactionCommitted(t *testing.T) {
 func TestTableCommitReturnsCopies(t *testing.T) {
 	tbl := newCommitTestTable(t)
 	tx := tbl.NewTransaction()
+	original := tbl.Identifier()
 
 	require.NoError(t, tx.SetProperties(map[string]string{"key": "value"}))
 
@@ -123,7 +124,10 @@ func TestTableCommitReturnsCopies(t *testing.T) {
 	if len(tc1.Requirements) > 0 {
 		tc1.Requirements = tc1.Requirements[:0]
 	}
+	tc1.Identifier[0] = "different_db"
 	assert.NotEmpty(t, tc2.Requirements)
+	assert.Equal(t, original, tbl.Identifier())
+	assert.Equal(t, original, tc2.Identifier)
 }
 
 func newV1CommitTestTable(t *testing.T) *table.Table {
