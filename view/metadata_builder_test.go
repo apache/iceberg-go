@@ -97,6 +97,84 @@ func TestBuild_NullAndMissingFields(t *testing.T) {
 	assert.ErrorContains(t, err, "cannot set uuid to null")
 }
 
+func TestNewVersion_RepresentationValidation(t *testing.T) {
+	_, err := NewVersion(1, 0,
+		Representations{{Type: "sql", Sql: "SELECT 1", Dialect: "spark"}},
+		table.Identifier{"ns"},
+	)
+	assert.NoError(t, err)
+
+	_, err = NewVersion(1, 0,
+		Representations{{Type: "hive", Sql: "SELECT 1", Dialect: "spark"}},
+		table.Identifier{"ns"},
+	)
+	assert.ErrorContains(t, err, "type should be \"sql\"")
+	assert.ErrorIs(t, err, ErrInvalidViewMetadata)
+
+	_, err = NewVersion(1, 0,
+		Representations{{Type: "sql", Sql: "", Dialect: "spark"}},
+		table.Identifier{"ns"},
+	)
+	assert.ErrorContains(t, err, "sql is required")
+	assert.ErrorIs(t, err, ErrInvalidViewMetadata)
+
+	_, err = NewVersion(1, 0,
+		Representations{{Type: "sql", Sql: "SELECT 1", Dialect: ""}},
+		table.Identifier{"ns"},
+	)
+	assert.ErrorContains(t, err, "dialect is required")
+	assert.ErrorIs(t, err, ErrInvalidViewMetadata)
+
+	_, err = NewVersion(1, 0,
+		Representations{
+			{Type: "sql", Sql: "SELECT 1", Dialect: "SpArK"},
+			{Type: "sql", Sql: "SELECT 2", Dialect: "spark"},
+		},
+		table.Identifier{"ns"},
+	)
+	assert.ErrorContains(t, err, "Cannot add multiple queries for dialect spark")
+	assert.ErrorIs(t, err, ErrInvalidViewMetadata)
+}
+
+func TestAddVersion_InvalidRepresentation_Validation(t *testing.T) {
+	invalidVersion := &Version{
+		VersionID: 1,
+		SchemaID:  0,
+		Representations: []Representation{
+			{Type: "hive", Sql: "SELECT 1", Dialect: "spark"},
+		},
+	}
+
+	_, err := newTestBuilder().
+		SetLoc("location").
+		AddSchema(newTestSchema(0)).
+		AddVersion(invalidVersion).
+		SetCurrentVersionID(1).
+		Build()
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidViewMetadata)
+	assert.ErrorContains(t, err, "type should be \"sql\"")
+
+	invalidDuplicateVersion := &Version{
+		VersionID: 2,
+		SchemaID:  0,
+		Representations: []Representation{
+			{Type: "sql", Sql: "SELECT 1", Dialect: "spark"},
+			{Type: "sql", Sql: "SELECT 2", Dialect: "spark "},
+		},
+	}
+
+	_, err = newTestBuilder().
+		SetLoc("location").
+		AddSchema(newTestSchema(0)).
+		AddVersion(invalidDuplicateVersion).
+		SetCurrentVersionID(2).
+		Build()
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidViewMetadata)
+	assert.ErrorContains(t, err, "Cannot add multiple queries for dialect spark")
+}
+
 func TestSetFormatVersion_Invalid(t *testing.T) {
 	// Downgrade
 	_, err := newTestBuilder().SetFormatVersion(0).Build()
@@ -459,18 +537,20 @@ func TestViewVersionAndSchemaIDReassignment(t *testing.T) {
 }
 
 func TestAddVersion_MultipleSQLForSameDialect(t *testing.T) {
+	// NewVersion now validates representations, so this test exercises duplicate detection
+	// in the builder path for versions coming from external metadata sources.
+	version := &Version{
+		VersionID: 1,
+		SchemaID:  0,
+		Representations: []Representation{
+			{Type: "sql", Sql: "select * from ns.tbl", Dialect: "spark"},
+			{Type: "sql", Sql: "select * from ns.tbl3", Dialect: "SpArK"},
+		},
+	}
 	_, err := newTestBuilder().
 		SetLoc("location").
 		AddSchema(newTestSchema(0)).
-		AddVersion(
-			stripErr(NewVersion(1, 0,
-				[]Representation{
-					NewRepresentation("select * from ns.tbl", "spark"),
-					NewRepresentation("select * from ns.tbl3", "SpArK"),
-				},
-				table.Identifier{"ns"},
-			)),
-		).
+		AddVersion(version).
 		SetCurrentVersionID(1).
 		Build()
 	assert.ErrorContains(t, err, "Invalid view version: Cannot add multiple queries for dialect spark")

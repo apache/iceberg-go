@@ -173,6 +173,18 @@ func NewVersion(id int64, schemaID int, representations []Representation, defaul
 		return nil, errors.New("invalid view version: must have at least one representation")
 	}
 
+	seenDialects := make(map[string]struct{})
+	for _, repr := range representations {
+		normalizedDialect, err := validateRepresentation(repr)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s", ErrInvalidViewMetadata, err)
+		}
+		if _, ok := seenDialects[normalizedDialect]; ok {
+			return nil, fmt.Errorf("%w: Invalid view version: Cannot add multiple queries for dialect %s", ErrInvalidViewMetadata, normalizedDialect)
+		}
+		seenDialects[normalizedDialect] = struct{}{}
+	}
+
 	version := &Version{
 		VersionID:        id,
 		SchemaID:         schemaID,
@@ -187,6 +199,23 @@ func NewVersion(id int64, schemaID int, representations []Representation, defaul
 	}
 
 	return version, nil
+}
+
+func validateRepresentation(repr Representation) (string, error) {
+	if repr.Type != "sql" {
+		return "", errors.New("invalid view representation: type should be \"sql\"")
+	}
+
+	if strings.TrimSpace(repr.Sql) == "" {
+		return "", errors.New("invalid view representation: sql is required")
+	}
+
+	dialect := strings.TrimSpace(repr.Dialect)
+	if dialect == "" {
+		return "", errors.New("invalid view representation: dialect is required")
+	}
+
+	return strings.ToLower(dialect), nil
 }
 
 // NewVersionFromSQL creates a new Version with a single representation
@@ -446,10 +475,14 @@ func (m *metadata) checkDialectsUnique() error {
 	for _, version := range m.VersionList {
 		seenDialects := make(map[string]bool)
 		for _, repr := range version.Representations {
-			dialect := strings.ToLower(repr.Dialect)
+			dialect, err := validateRepresentation(repr)
+			if err != nil {
+				return fmt.Errorf("%w: version %d: %s", ErrInvalidViewMetadata, version.VersionID, err)
+			}
+
 			if seenDialects[dialect] {
 				return fmt.Errorf("%w: version %d has duplicate dialect %s",
-					ErrInvalidViewMetadata, version.VersionID, repr.Dialect)
+					ErrInvalidViewMetadata, version.VersionID, dialect)
 			}
 			seenDialects[dialect] = true
 		}
