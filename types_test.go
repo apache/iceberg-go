@@ -86,6 +86,57 @@ func TestDecimalType(t *testing.T) {
 	assert.Equal(t, "decimal(9, 2)", typ.String())
 	assert.True(t, typ.Equals(iceberg.DecimalTypeOf(9, 2)))
 	assert.False(t, typ.Equals(iceberg.DecimalTypeOf(9, 3)))
+
+	t.Run("DecimalTypeOf validates precision and scale", func(t *testing.T) {
+		assert.PanicsWithError(t, "invalid argument: invalid precision 0: must be greater than 0", func() {
+			iceberg.DecimalTypeOf(0, 2)
+		})
+		assert.PanicsWithError(t, "invalid argument: invalid precision 40: must be less than 40", func() {
+			iceberg.DecimalTypeOf(40, 0)
+		})
+		assert.PanicsWithError(t, "invalid argument: invalid scale 11: must be less than or equal to precision 10", func() {
+			iceberg.DecimalTypeOf(10, 11)
+		})
+		assert.PanicsWithError(t, "invalid argument: invalid scale -1: must be greater than or equal to 0", func() {
+			iceberg.DecimalTypeOf(10, -1)
+		})
+	})
+}
+
+func TestDecimalTypeInvalidParse(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{
+			name: "trailing chars",
+			data: `{"id": 1, "name": "d", "type": "decimal(10,2)junk", "required": true}`,
+		},
+		{
+			name: "precision zero",
+			data: `{"id": 1, "name": "d", "type": "decimal(0,2)", "required": true}`,
+		},
+		{
+			name: "scale exceeds precision",
+			data: `{"id": 1, "name": "d", "type": "decimal(10,11)", "required": true}`,
+		},
+		{
+			name: "negative scale",
+			data: `{"id": 1, "name": "d", "type": "decimal(10,-1)", "required": true}`,
+		},
+		{
+			name: "precision too large",
+			data: `{"id": 1, "name": "d", "type": "decimal(40,2)", "required": true}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var n iceberg.NestedField
+			err := json.Unmarshal([]byte(tt.data), &n)
+			assert.ErrorIs(t, err, iceberg.ErrInvalidTypeString)
+		})
+	}
 }
 
 func TestStructType(t *testing.T) {
@@ -228,7 +279,7 @@ func TestTypeStrings(t *testing.T) {
 		{iceberg.PrimitiveTypes.Unknown, "unknown"},
 		{iceberg.VariantType{}, "variant"},
 		{iceberg.FixedTypeOf(22), "fixed[22]"},
-		{iceberg.DecimalTypeOf(19, 25), "decimal(19, 25)"},
+		{iceberg.DecimalTypeOf(19, 18), "decimal(19, 18)"},
 		{&iceberg.StructType{
 			FieldList: []iceberg.NestedField{
 				{ID: 1, Name: "required_field", Type: iceberg.PrimitiveTypes.String, Required: true, Doc: "this is a doc"},

@@ -52,7 +52,7 @@ func TestToDecimalLiteralUsesBoundFieldPrecision(t *testing.T) {
 		scale     int
 	}{
 		{"decimal(38,4)", 38, 4},
-		{"decimal(38,10)", 38, 10},
+		{"decimal(38,9)", 38, 9},
 		{"decimal(38,2)", 38, 2},
 	}
 
