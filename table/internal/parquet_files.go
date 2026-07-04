@@ -74,11 +74,17 @@ const (
 
 type parquetFormat struct{}
 
-func (parquetFormat) Open(ctx context.Context, fs iceio.IO, path string) (FileReader, error) {
+func (parquetFormat) Open(ctx context.Context, fs iceio.IO, path string) (result FileReader, err error) {
 	inputfile, err := fs.Open(path)
 	if err != nil {
 		return nil, err
 	}
+
+	defer func() {
+		if err != nil {
+			_ = inputfile.Close()
+		}
+	}()
 
 	rdr, err := file.NewParquetReader(inputfile)
 	if err != nil {
@@ -91,7 +97,8 @@ func (parquetFormat) Open(ctx context.Context, fs iceio.IO, path string) (FileRe
 		return nil, err
 	}
 
-	return wrapPqArrowReader{arrRdr}, nil
+	result = wrapPqArrowReader{arrRdr}
+	return result, nil
 }
 
 func (parquetFormat) PathToIDMapping(sc *iceberg.Schema) (map[string]int, error) {
