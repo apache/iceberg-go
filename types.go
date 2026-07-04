@@ -20,6 +20,7 @@ package iceberg
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -300,8 +301,8 @@ func (n *NestedField) Equals(other NestedField) bool {
 		n.Name == other.Name &&
 		n.Required == other.Required &&
 		n.Doc == other.Doc &&
-		n.InitialDefault == other.InitialDefault &&
-		n.WriteDefault == other.WriteDefault &&
+		reflect.DeepEqual(n.InitialDefault, other.InitialDefault) &&
+		reflect.DeepEqual(n.WriteDefault, other.WriteDefault) &&
 		n.Type.Equals(other.Type)
 }
 

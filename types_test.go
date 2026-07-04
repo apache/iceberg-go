@@ -265,7 +265,8 @@ func TestUnknownTypeInNestedStructs(t *testing.T) {
 		ValueRequired: false,
 	}
 
-	schema := iceberg.NewSchema(1,
+	schema := iceberg.NewSchema(
+		1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
 		iceberg.NestedField{ID: 2, Name: "top", Type: iceberg.UnknownType{}, Required: false},
 		iceberg.NestedField{ID: 3, Name: "arr", Type: listType, Required: false},
@@ -420,7 +421,8 @@ func TestVariantTypeJSONRoundTrip(t *testing.T) {
 }
 
 func TestVariantInSchema(t *testing.T) {
-	sc := iceberg.NewSchema(0,
+	sc := iceberg.NewSchema(
+		0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}, Required: false},
 	)
@@ -433,7 +435,8 @@ func TestVariantInSchema(t *testing.T) {
 }
 
 func TestVariantInNestedTypes(t *testing.T) {
-	sc := iceberg.NewSchema(0,
+	sc := iceberg.NewSchema(
+		0,
 		iceberg.NestedField{ID: 1, Name: "events", Type: &iceberg.ListType{
 			ElementID:       2,
 			Element:         iceberg.VariantType{},
@@ -466,7 +469,8 @@ func TestVariantInNestedTypes(t *testing.T) {
 }
 
 func TestVariantInStructField(t *testing.T) {
-	sc := iceberg.NewSchema(0,
+	sc := iceberg.NewSchema(
+		0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "nested", Type: &iceberg.StructType{
 			FieldList: []iceberg.NestedField{
@@ -838,4 +842,44 @@ func TestGeographyType(t *testing.T) {
 		err := json.Unmarshal([]byte(data), &n)
 		assert.ErrorIs(t, err, iceberg.ErrInvalidTypeString)
 	})
+}
+
+func TestNestedFieldEqualsWithNonComparableDefaults(t *testing.T) {
+	nonComparableDefault := map[string]any{
+		"meta": []any{"a", "b"},
+		"cfg":  map[string]any{"enabled": true},
+	}
+
+	left := iceberg.NestedField{
+		ID:             1,
+		Name:           "payload",
+		Type:           iceberg.PrimitiveTypes.String,
+		Required:       true,
+		InitialDefault: nonComparableDefault,
+		WriteDefault:   []string{"a", "b"},
+	}
+	right := iceberg.NestedField{
+		ID:       1,
+		Name:     "payload",
+		Type:     iceberg.PrimitiveTypes.String,
+		Required: true,
+		InitialDefault: map[string]any{
+			"meta": []any{"a", "b"},
+			"cfg":  map[string]any{"enabled": true},
+		},
+		WriteDefault: []string{"a", "b"},
+	}
+
+	assert.NotPanics(t, func() {
+		assert.True(t, left.Equals(right))
+	})
+
+	right.WriteDefault = []string{"b", "a"}
+	assert.False(t, left.Equals(right))
+	assert.False(t, left.Equals(iceberg.NestedField{
+		ID:       1,
+		Name:     "payload",
+		Type:     iceberg.PrimitiveTypes.String,
+		Required: true,
+	}))
 }
