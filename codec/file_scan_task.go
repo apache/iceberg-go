@@ -87,6 +87,12 @@ func DecodeFileScanTask(data []byte, spec iceberg.PartitionSpec, schema *iceberg
 	if _, err := fileScanTaskSchema.Decode(data, &envelope); err != nil {
 		return table.FileScanTask{}, fmt.Errorf("codec: DecodeFileScanTask: decode: %w", err)
 	}
+	if envelope.Start < 0 {
+		return table.FileScanTask{}, fmt.Errorf("codec: DecodeFileScanTask: start must be non-negative: %d", envelope.Start)
+	}
+	if envelope.Length < 0 {
+		return table.FileScanTask{}, fmt.Errorf("codec: DecodeFileScanTask: length must be non-negative: %d", envelope.Length)
+	}
 	file, err := DecodeDataFile(envelope.File, spec, schema, version)
 	if err != nil {
 		return table.FileScanTask{}, fmt.Errorf("codec: DecodeFileScanTask: file: %w", err)
