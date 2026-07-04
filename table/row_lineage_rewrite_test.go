@@ -515,6 +515,7 @@ func TestExecuteCompactionGroupPreservesLineageSubsetOnMixedTasks(t *testing.T) 
 		if _, ok := legacyRows[id]; ok {
 			assert.NotEqual(t, before, post[id],
 				"legacy-task rows should be rewritten without legacy lineage")
+
 			continue
 		}
 		assert.Equal(t, before, post[id], "lineage-capable file rows should keep their original _row_id")
