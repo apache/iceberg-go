@@ -26,6 +26,7 @@ import (
 	"io"
 	"iter"
 	"log"
+	"maps"
 	"math/rand/v2"
 	"runtime"
 	"slices"
@@ -834,7 +835,7 @@ func WithOptions(opts iceberg.Properties) ScanOption {
 	}
 
 	return func(scan *Scan) {
-		scan.options = opts
+		scan.options = maps.Clone(opts)
 	}
 }
 
