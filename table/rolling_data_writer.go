@@ -73,28 +73,34 @@ type writerFactory struct {
 	mu                    sync.Mutex
 }
 
-type writerFactoryOption func(*writerFactory)
+type writerFactoryOption func(*writerFactory) error
 
 func withContentType(content iceberg.ManifestEntryContent) writerFactoryOption {
-	return func(w *writerFactory) {
+	return func(w *writerFactory) error {
 		w.content = content
+
+		return nil
 	}
 }
 
 func withFactoryEqualityFieldIDs(ids []int) writerFactoryOption {
-	return func(w *writerFactory) {
+	return func(w *writerFactory) error {
 		w.equalityFieldIDs = ids
+
+		return nil
 	}
 }
 
 func withFactoryFileSchema(schema *iceberg.Schema) writerFactoryOption {
-	return func(w *writerFactory) {
+	return func(w *writerFactory) error {
 		w.fileSchema = schema
 		arrowSc, err := SchemaToArrowSchema(schema, nil, true, false)
 		if err != nil {
-			panic(fmt.Sprintf("withFactoryFileSchema: failed to convert schema: %v", err))
+			return fmt.Errorf("withFactoryFileSchema: failed to convert schema: %w", err)
 		}
 		w.arrowSchema = arrowSc
+
+		return nil
 	}
 }
 
@@ -171,7 +177,11 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		stopCount:      stopCount,
 	}
 	for _, apply := range opts {
-		apply(f)
+		if err := apply(f); err != nil {
+			stopCount()
+
+			return nil, err
+		}
 	}
 
 	f.statsCols, err = computeStatsPlan(f.fileSchema, meta.props)
