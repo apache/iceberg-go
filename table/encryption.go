@@ -17,7 +17,11 @@
 
 package table
 
-import "maps"
+import (
+	"fmt"
+	"maps"
+	"strings"
+)
 
 // EncryptionKey represents an encryption key stored in table metadata (V3+).
 type EncryptionKey struct {
@@ -25,6 +29,18 @@ type EncryptionKey struct {
 	EncryptedKeyMetadata string            `json:"encrypted-key-metadata"`
 	EncryptedByID        *string           `json:"encrypted-by-id,omitempty"`
 	Properties           map[string]string `json:"properties,omitempty"`
+}
+
+func (e EncryptionKey) Validate() error {
+	if strings.TrimSpace(e.KeyID) == "" {
+		return fmt.Errorf("encryption key-id must be non-empty")
+	}
+
+	if strings.TrimSpace(e.EncryptedKeyMetadata) == "" {
+		return fmt.Errorf("encrypted key metadata must be non-empty")
+	}
+
+	return nil
 }
 
 func (e EncryptionKey) Equals(other EncryptionKey) bool {
