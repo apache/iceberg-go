@@ -407,7 +407,13 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 	geoCols := collectGeoColumns(arrowSchema, colMapping)
 	geoAccs := make(map[int]*geoBoundsAccumulator, len(geoCols))
 	for _, gc := range geoCols {
-		geoAccs[gc.fieldID] = newGeoBoundsAccumulator()
+		// The accumulator must know whether the column is geometry or geography
+		// so it can omit unsafe geography bounds (see geoBoundsAccumulator.Bounds).
+		var isGeog bool
+		if t, ok := info.FileSchema.FindTypeByID(gc.fieldID); ok {
+			_, isGeog = t.(iceberg.GeographyType)
+		}
+		geoAccs[gc.fieldID] = newGeoBoundsAccumulator(isGeog)
 	}
 
 	return &ParquetFileWriter{

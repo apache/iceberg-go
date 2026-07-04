@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	iofs "io/fs"
+	"math"
 	"math/big"
 	"strings"
 	"testing"
@@ -1351,7 +1352,8 @@ func TestShreddedVariantReadRoundTrip(t *testing.T) {
 
 // TestWriteDataFileGeoBounds writes geometry and geography columns through the
 // full ParquetFileWriter path and asserts that the resulting DataFile carries
-// WKB single-point lower/upper bounds in the manifest entry.
+// geometry single-point bounds (Iceberg geospatial single-value serialization)
+// in the manifest entry, while geography bounds are omitted as unsafe.
 func TestWriteDataFileGeoBounds(t *testing.T) {
 	geomType, err := iceberg.GeometryTypeOf("srid:4326")
 	require.NoError(t, err)
@@ -1401,27 +1403,33 @@ func TestWriteDataFileGeoBounds(t *testing.T) {
 
 	lower, upper := df.LowerBoundValues(), df.UpperBoundValues()
 
-	// Geometry bounds span both rows: lower (5, 10), upper (30, 40).
-	assert.Equal(t, []byte(mustWKB(t, "POINT (5 10)")), lower[2])
-	assert.Equal(t, []byte(mustWKB(t, "POINT (30 40)")), upper[2])
+	// Geometry bounds span both rows: lower (5, 10), upper (30, 40), encoded as
+	// two little-endian float64 coordinates (16 bytes), not WKB.
+	require.Len(t, lower[2], 16)
+	require.Len(t, upper[2], 16)
+	assert.Equal(t, geoBoundBytes(5, 10), lower[2])
+	assert.Equal(t, geoBoundBytes(30, 40), upper[2])
 
-	// Geography has a single non-null value, so lower == upper == that point.
-	assert.Equal(t, []byte(mustWKB(t, "POINT (20 5)")), lower[3])
-	assert.Equal(t, []byte(mustWKB(t, "POINT (20 5)")), upper[3])
+	// Geography bounds are unsafe to compute from vertices, so they are omitted.
+	assert.NotContains(t, lower, 3, "geography lower bound must be omitted")
+	assert.NotContains(t, upper, 3, "geography upper bound must be omitted")
 
 	// Bounds round-trip back to literals through LiteralFromBytes.
 	lit, err := iceberg.LiteralFromBytes(geomType, lower[2])
 	require.NoError(t, err)
-	assert.Equal(t, []byte(mustWKB(t, "POINT (5 10)")), lit.(iceberg.TypedLiteral[[]byte]).Value())
+	assert.Equal(t, geoBoundBytes(5, 10), lit.(iceberg.TypedLiteral[[]byte]).Value())
 
 	// Null counts are still recorded for geo columns.
 	assert.Equal(t, int64(1), df.NullValueCounts()[3])
 }
 
-func mustWKB(t *testing.T, s string) geoarrow.WKBBytes {
-	t.Helper()
-	b, err := wktToWKB(s)
-	require.NoError(t, err)
+// geoBoundBytes builds the Iceberg geospatial single-value serialization of a
+// bound point: little-endian float64 coordinates in X, Y[, Z][, M] order.
+func geoBoundBytes(coords ...float64) []byte {
+	buf := make([]byte, len(coords)*8)
+	for i, c := range coords {
+		binary.LittleEndian.PutUint64(buf[i*8:], math.Float64bits(c))
+	}
 
-	return b
+	return buf
 }

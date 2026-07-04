@@ -18,6 +18,7 @@
 package internal
 
 import (
+	"encoding/binary"
 	"math"
 
 	"github.com/apache/iceberg-go"
@@ -37,20 +38,28 @@ const (
 )
 
 // geoBoundsAccumulator computes a geospatial bounding box from a stream of WKB
-// values. Iceberg stores geometry/geography column bounds as the WKB encoding
-// of two points: the lower bound carries the per-dimension minimums and the
-// upper bound carries the maximums. Per the Parquet/Iceberg geospatial spec,
-// null and NaN coordinate values are skipped, and a dimension that never sees a
-// finite value is omitted from the resulting points. If the X or Y dimension is
+// values. Iceberg stores geometry/geography column bounds using the single-value
+// serialization for geospatial types (spec Appendix D): the concatenation of
+// little-endian float64 coordinate values in X, Y[, Z][, M] order. The lower
+// bound carries the per-dimension minimums and the upper bound the maximums.
+// Null and NaN coordinate values are skipped, and a dimension that never sees a
+// finite value is omitted from the resulting bounds. If the X or Y dimension is
 // missing entirely, no bounding box is produced.
+//
+// Bounds are only emitted for geometry (planar edges). Geography bounds are
+// omitted: see Bounds.
 type geoBoundsAccumulator struct {
 	min [geoNumDims]float64
 	max [geoNumDims]float64
 	has [geoNumDims]bool
+
+	// isGeography marks a column whose edges are geodesics on a sphere, for
+	// which raw vertex min/max is not a safe bounding box (see Bounds).
+	isGeography bool
 }
 
-func newGeoBoundsAccumulator() *geoBoundsAccumulator {
-	return &geoBoundsAccumulator{}
+func newGeoBoundsAccumulator(isGeography bool) *geoBoundsAccumulator {
+	return &geoBoundsAccumulator{isGeography: isGeography}
 }
 
 // AddWKB unmarshals a single WKB value and extends the bounding box with its
@@ -137,50 +146,60 @@ func (a *geoBoundsAccumulator) layout() (geom.Layout, bool) {
 	}
 }
 
-func geoPointCoords(vals [geoNumDims]float64, layout geom.Layout) []float64 {
+// encodeGeoBound serializes a bound point using the Iceberg single-value
+// serialization for geospatial types: little-endian float64 coordinates in
+// X, Y[, Z][, M] order. Lengths are XY=16, XYZ=24, XYM=32, XYZM=32 bytes. For
+// XYM the Z slot is written as NaN so a reader can tell XYM (NaN in slot 3)
+// apart from XYZM (finite Z in slot 3).
+func encodeGeoBound(vals [geoNumDims]float64, layout geom.Layout) []byte {
+	var coords []float64
 	switch layout {
 	case geom.XYZ:
-		return []float64{vals[geoDimX], vals[geoDimY], vals[geoDimZ]}
+		coords = []float64{vals[geoDimX], vals[geoDimY], vals[geoDimZ]}
 	case geom.XYM:
-		return []float64{vals[geoDimX], vals[geoDimY], vals[geoDimM]}
+		coords = []float64{vals[geoDimX], vals[geoDimY], math.NaN(), vals[geoDimM]}
 	case geom.XYZM:
-		return []float64{vals[geoDimX], vals[geoDimY], vals[geoDimZ], vals[geoDimM]}
+		coords = []float64{vals[geoDimX], vals[geoDimY], vals[geoDimZ], vals[geoDimM]}
 	default:
-		return []float64{vals[geoDimX], vals[geoDimY]}
+		coords = []float64{vals[geoDimX], vals[geoDimY]}
 	}
+
+	buf := make([]byte, len(coords)*8)
+	for i, c := range coords {
+		binary.LittleEndian.PutUint64(buf[i*8:], math.Float64bits(c))
+	}
+
+	return buf
 }
 
-// Bounds encodes the lower and upper bound points as WKB. Both are nil when no
-// bounding box could be produced (e.g. an all-null column).
-func (a *geoBoundsAccumulator) Bounds() (lower, upper []byte, err error) {
+// Bounds encodes the lower and upper bound points using the Iceberg geospatial
+// single-value serialization (see encodeGeoBound). Both are nil when no bounding
+// box could be produced (e.g. an all-null column).
+//
+// Geography bounds are always omitted. Geography edges are geodesics on a
+// sphere, so a box built from raw vertex min/max is unsafe: a geodesic edge can
+// reach a higher latitude than either endpoint, and the correct longitude
+// interval may wrap across the antimeridian (xmin > xmax). Emitting naive vertex
+// bounds would prune rows that actually fall inside a query region — a
+// silent-wrong-results bug. Missing bounds only disable pruning, which is always
+// safe, so geography is left unbounded until geodesic/antimeridian-aware
+// computation is added.
+func (a *geoBoundsAccumulator) Bounds() (lower, upper []byte) {
 	layout, ok := a.layout()
-	if !ok {
-		return nil, nil, nil
+	if !ok || a.isGeography {
+		return nil, nil
 	}
 
-	lower, err = wkb.Marshal(geom.NewPointFlat(layout, geoPointCoords(a.min, layout)), wkb.NDR)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	upper, err = wkb.Marshal(geom.NewPointFlat(layout, geoPointCoords(a.max, layout)), wkb.NDR)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return lower, upper, nil
+	return encodeGeoBound(a.min, layout), encodeGeoBound(a.max, layout)
 }
 
 // StatsAgg materializes the accumulated bounds into a StatsAgg carrying the
-// precomputed WKB point bounds, or nil when no box was produced. Unlike the
+// precomputed single-point bounds, or nil when no box was produced. Unlike the
 // generic statsAggregator, geo bounds are computed from raw WKB during the write
 // (Parquet byte-array min/max over WKB are meaningless), so the aggregator just
 // replays the precomputed bytes through the existing ToDataFile bounds plumbing.
 func (a *geoBoundsAccumulator) StatsAgg() (StatsAgg, error) {
-	lower, upper, err := a.Bounds()
-	if err != nil {
-		return nil, err
-	}
+	lower, upper := a.Bounds()
 	if lower == nil {
 		return nil, nil
 	}
@@ -188,7 +207,8 @@ func (a *geoBoundsAccumulator) StatsAgg() (StatsAgg, error) {
 	return &geoStatsAgg{lower: lower, upper: upper}, nil
 }
 
-// geoStatsAgg is a StatsAgg holding precomputed WKB single-point bounds.
+// geoStatsAgg is a StatsAgg holding precomputed geo single-point bounds encoded
+// with the Iceberg geospatial single-value serialization (see encodeGeoBound).
 type geoStatsAgg struct {
 	lower, upper []byte
 }

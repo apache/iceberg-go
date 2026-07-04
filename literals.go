@@ -170,9 +170,23 @@ func LiteralFromBytes(typ Type, data []byte) (Literal, error) {
 		err := v.UnmarshalBinary(data)
 
 		return v, err
-	case BinaryType, GeometryType, GeographyType:
-		// Geometry and Geography bounds are stored as WKB byte payloads
-		// (single-point bounds), handled as opaque binary on read.
+	case BinaryType:
+		var v BinaryLiteral
+		err := v.UnmarshalBinary(data)
+
+		return v, err
+	case GeometryType, GeographyType:
+		// Geometry/Geography single-value bounds use the Iceberg geospatial
+		// serialization (spec Appendix D): little-endian float64 coordinates in
+		// X, Y[, Z][, M] order, i.e. 16, 24, or 32 bytes — not WKB. iceberg-go
+		// has no geo literal for predicate evaluation, so the validated
+		// coordinate bytes are returned as an opaque BinaryLiteral.
+		switch len(data) {
+		case 16, 24, 32:
+		default:
+			return nil, fmt.Errorf("%w: geometry/geography bound must be 16, 24, or 32 bytes, got %d",
+				ErrInvalidBinSerialization, len(data))
+		}
 		var v BinaryLiteral
 		err := v.UnmarshalBinary(data)
 
