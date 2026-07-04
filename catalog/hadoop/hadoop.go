@@ -471,6 +471,7 @@ func (c *Catalog) metadataVersionLocation(ident table.Identifier, version int) (
 	}
 
 	file, ok := files[version]
+
 	return file.location, ok
 }
 
