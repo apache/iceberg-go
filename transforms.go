@@ -239,6 +239,10 @@ type BucketTransform struct {
 }
 
 func (t BucketTransform) MarshalText() ([]byte, error) {
+	if err := t.validateNumBuckets(); err != nil {
+		return nil, err
+	}
+
 	return []byte(t.String()), nil
 }
 

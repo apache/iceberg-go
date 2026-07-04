@@ -367,6 +367,24 @@ func TestBucketTransform_NumBucketsValidation(t *testing.T) {
 	})
 }
 
+func TestBucketTransform_MarshalTextRejectsInvalidBuckets(t *testing.T) {
+	t.Run("zero", func(t *testing.T) {
+		_, err := iceberg.BucketTransform{NumBuckets: 0}.MarshalText()
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, "numBuckets > 0")
+	})
+	t.Run("negative", func(t *testing.T) {
+		_, err := iceberg.BucketTransform{NumBuckets: -1}.MarshalText()
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, "numBuckets > 0")
+	})
+	t.Run("valid", func(t *testing.T) {
+		txt, err := iceberg.BucketTransform{NumBuckets: 16}.MarshalText()
+		require.NoError(t, err)
+		assert.Equal(t, "bucket[16]", string(txt))
+	})
+}
+
 func TestBucketTransformUnsupportedSourceTypeDoesNotPanic(t *testing.T) {
 	transform := iceberg.BucketTransform{NumBuckets: 16}
 	fn := transform.Transformer(iceberg.PrimitiveTypes.Bool)
