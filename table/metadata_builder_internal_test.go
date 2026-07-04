@@ -20,6 +20,7 @@ package table
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -1727,14 +1728,19 @@ func TestAddSnapshotV3AcceptsFirstRowIDEqualToNextRowID(t *testing.T) {
 	require.Equal(t, int64(100), *builder.nextRowID)
 }
 
-func TestAddSnapshotV3AcceptsPositiveAddedRows(t *testing.T) {
-	// Positive added-rows should advance next-row-id.
+func TestAddSnapshotV3AcceptsZeroAddedRows(t *testing.T) {
+	// Asserts spec-permitted no-op behavior: a zero-added-rows snapshot
+	// (delete-only or metadata-only commit) leaves next-row-id unchanged. The
+	// cursor is first advanced to a non-zero value so the assertion is
+	// falsifiable — a regression that advanced the cursor on every commit would
+	// be caught. This is NOT coverage of the overflow guard — see
+	// TestAddSnapshotV3RejectsNextRowIDOverflow.
 	builder := builderWithoutChanges(3)
 	schemaID := 0
-	firstRowID := int64(0)
-	addedRows := int64(50)
 
-	snapshot := Snapshot{
+	appendFirstRowID := int64(0)
+	appendAddedRows := int64(50)
+	appendSnapshot := Snapshot{
 		SnapshotID:       1,
 		ParentSnapshotID: nil,
 		SequenceNumber:   0,
@@ -1742,21 +1748,69 @@ func TestAddSnapshotV3AcceptsPositiveAddedRows(t *testing.T) {
 		ManifestList:     "/snap-1.avro",
 		Summary:          &Summary{Operation: OpAppend},
 		SchemaID:         &schemaID,
-		FirstRowID:       &firstRowID,
-		AddedRows:        &addedRows,
+		FirstRowID:       &appendFirstRowID,
+		AddedRows:        &appendAddedRows,
 	}
+	require.NoError(t, builder.AddSnapshot(&appendSnapshot))
+	require.Equal(t, int64(50), *builder.nextRowID)
 
-	require.NoError(t, builder.AddSnapshot(&snapshot))
+	deleteFirstRowID := int64(50)
+	deleteAddedRows := int64(0)
+	deleteSnapshot := Snapshot{
+		SnapshotID:       2,
+		ParentSnapshotID: &appendSnapshot.SnapshotID,
+		SequenceNumber:   1,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 2,
+		ManifestList:     "/snap-2.avro",
+		Summary:          &Summary{Operation: OpDelete},
+		SchemaID:         &schemaID,
+		FirstRowID:       &deleteFirstRowID,
+		AddedRows:        &deleteAddedRows,
+	}
+	require.NoError(t, builder.AddSnapshot(&deleteSnapshot))
 	require.Equal(t, int64(50), *builder.nextRowID)
 }
 
-func TestAddSnapshotV3AcceptsZeroAddedRows(t *testing.T) {
-	// Zero added-rows is valid and should leave next-row-id unchanged.
+func TestAddSnapshotV3RejectsNextRowIDOverflow(t *testing.T) {
+	// next-row-id + added-rows must not overflow int64. Seed the cursor near
+	// the maximum so a positive added-rows tips it over. This is the only input
+	// that reaches the guard: negative added-rows is rejected earlier by
+	// Snapshot.ValidateRowLineage.
 	builder := builderWithoutChanges(3)
-	schemaID := 0
-	firstRowID := int64(0)
-	addedRows := int64(0)
+	nearMax := int64(math.MaxInt64 - 10)
+	builder.nextRowID = &nearMax
 
+	schemaID := 0
+	firstRowID := nearMax
+	addedRows := int64(20)
+	snapshot := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+		FirstRowID:       &firstRowID,
+		AddedRows:        &addedRows,
+	}
+
+	err := builder.AddSnapshot(&snapshot)
+	require.ErrorIs(t, err, ErrInvalidRowLineage)
+	require.ErrorContains(t, err, "overflows int64")
+}
+
+func TestAddSnapshotV3AcceptsMaxInt64NextRowID(t *testing.T) {
+	// Boundary: added-rows that fills the cursor to exactly math.MaxInt64 (sum
+	// == MaxInt64) must be accepted; the guard rejects only a strictly larger
+	// sum. This pins the `>` boundary against an off-by-one to `>=`.
+	builder := builderWithoutChanges(3)
+	nearMax := int64(math.MaxInt64 - 10)
+	builder.nextRowID = &nearMax
+
+	schemaID := 0
+	firstRowID := nearMax
+	addedRows := int64(10)
 	snapshot := Snapshot{
 		SnapshotID:       1,
 		ParentSnapshotID: nil,
@@ -1770,7 +1824,7 @@ func TestAddSnapshotV3AcceptsZeroAddedRows(t *testing.T) {
 	}
 
 	require.NoError(t, builder.AddSnapshot(&snapshot))
-	require.Equal(t, int64(0), *builder.nextRowID)
+	require.Equal(t, int64(math.MaxInt64), *builder.nextRowID)
 }
 
 func generateTypeSchema(typ iceberg.Type) *iceberg.Schema {
