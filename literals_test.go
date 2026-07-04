@@ -656,6 +656,11 @@ func TestVariantLiteralLargeObject(t *testing.T) {
 }
 
 func TestFixedLiteral(t *testing.T) {
+	emptyFixed := iceberg.FixedLiteral(nil)
+	assert.NotPanics(t, func() {
+		assert.Equal(t, "fixed[0]", emptyFixed.Type().String())
+	})
+
 	fixedLit012 := iceberg.FixedLiteral{0x00, 0x01, 0x02}
 	fixedLit013 := iceberg.FixedLiteral{0x00, 0x01, 0x03}
 	assert.True(t, fixedLit012.Equals(fixedLit012))

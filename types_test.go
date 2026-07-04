@@ -47,6 +47,7 @@ func TestTypesBasic(t *testing.T) {
 		{"binary", iceberg.PrimitiveTypes.Binary},
 		{"unknown", iceberg.PrimitiveTypes.Unknown},
 		{"variant", iceberg.VariantType{}},
+		{"fixed[0]", iceberg.FixedTypeOf(0)},
 		{"fixed[5]", iceberg.FixedTypeOf(5)},
 		{"decimal(9, 4)", iceberg.DecimalTypeOf(9, 4)},
 	}
@@ -77,6 +78,49 @@ func TestFixedType(t *testing.T) {
 	assert.Equal(t, "fixed[5]", typ.String())
 	assert.True(t, typ.Equals(iceberg.FixedTypeOf(5)))
 	assert.False(t, typ.Equals(iceberg.FixedTypeOf(6)))
+	assert.Equal(t, "fixed[0]", iceberg.FixedTypeOf(0).String())
+
+	t.Run("FixedTypeOf validates length", func(t *testing.T) {
+		assertFixedTypeOfPanicsWithInvalidArgument(t, -1)
+	})
+}
+
+func TestFixedTypeInvalidParse(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{
+			name: "malformed suffix",
+			data: `{"id": 1, "name": "f", "type": "fixed[0]junk", "required": true}`,
+		},
+		{
+			name: "overflow",
+			data: `{"id": 1, "name": "f", "type": "fixed[99999999999999999999]", "required": true}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var n iceberg.NestedField
+			err := json.Unmarshal([]byte(tt.data), &n)
+			assert.ErrorIs(t, err, iceberg.ErrInvalidTypeString)
+		})
+	}
+}
+
+func assertFixedTypeOfPanicsWithInvalidArgument(t *testing.T, length int) {
+	t.Helper()
+
+	defer func() {
+		r := recover()
+		require.NotNil(t, r)
+		err, ok := r.(error)
+		require.True(t, ok)
+		assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	}()
+
+	iceberg.FixedTypeOf(length)
 }
 
 func TestDecimalType(t *testing.T) {
