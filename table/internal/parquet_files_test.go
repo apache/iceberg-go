@@ -393,7 +393,7 @@ func TestDataFileStatsFromMetaWithMalformedUUIDStats(t *testing.T) {
 
 	collector := getCollector()
 	found := false
-	for _, rg := range meta.FileMetaData.RowGroups {
+	for _, rg := range meta.RowGroups {
 		for _, col := range rg.Columns {
 			if col == nil || col.MetaData == nil || col.MetaData.Statistics == nil {
 				continue
@@ -430,6 +430,57 @@ func TestDataFileStatsFromMetaWithMalformedUUIDStats(t *testing.T) {
 	assert.Len(t, dataFile.LowerBoundValues(), len(collector)-1)
 	assert.NotContains(t, dataFile.LowerBoundValues(), 11)
 	assert.NotContains(t, dataFile.UpperBoundValues(), 11)
+}
+
+func TestDataFileStatsFromMetaWithMalformedFixedLenDecimalStats(t *testing.T) {
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+
+	meta, tblMeta := constructTestTablePrimitiveTypes(t)
+	require.NotNil(t, tblMeta)
+	require.NotNil(t, meta)
+
+	mapping, err := format.PathToIDMapping(tblMeta.CurrentSchema())
+	require.NoError(t, err)
+
+	collector := getCollector()
+	found := false
+	for _, rg := range meta.RowGroups {
+		for _, col := range rg.Columns {
+			if col == nil || col.MetaData == nil || col.MetaData.Statistics == nil {
+				continue
+			}
+			path := col.MetaData.GetPathInSchema()
+			if len(path) == 1 && path[0] == "large_dec" {
+				col.MetaData.Statistics.Min = []byte{0x01}
+				col.MetaData.Statistics.Max = []byte{0x02}
+				col.MetaData.Statistics.MinValue = []byte{0x01}
+				col.MetaData.Statistics.MaxValue = []byte{0x02}
+				found = true
+			}
+		}
+	}
+	require.True(t, found, "failed to inject malformed fixed-len decimal stats")
+
+	var fileStats *internal.DataFileStatistics
+	assert.NotPanics(t, func() {
+		fileStats = format.DataFileStatsFromMeta(internal.Metadata(meta), collector, mapping, nil)
+	})
+	require.NotNil(t, fileStats)
+	require.NotContains(t, fileStats.ColAggs, 15)
+
+	dataFile := fileStats.ToDataFile(internal.DataFileOpts{
+		Schema:      tblMeta.CurrentSchema(),
+		Spec:        tblMeta.PartitionSpec(),
+		Path:        "fake-path.parquet",
+		Format:      iceberg.ParquetFile,
+		Content:     iceberg.EntryContentData,
+		FileSize:    meta.GetSourceFileSize(),
+		SortOrderID: 7,
+	})
+
+	assert.Len(t, dataFile.LowerBoundValues(), len(collector)-1)
+	assert.NotContains(t, dataFile.LowerBoundValues(), 15)
+	assert.NotContains(t, dataFile.UpperBoundValues(), 15)
 }
 
 // TestNanosecondTimestampMetrics tests that nanosecond timestamp types (v3)
