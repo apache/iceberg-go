@@ -392,6 +392,8 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 	}, nil
 }
 
+// getWriteProperties requires explicit write properties so misconfigured writer
+// plumbing fails fast instead of silently defaulting Parquet settings.
 func getWriteProperties(writeProps any) (*parquet.WriterProperties, error) {
 	if writeProps == nil {
 		return nil, fmt.Errorf("%w: write properties are required", iceberg.ErrInvalidArgument)

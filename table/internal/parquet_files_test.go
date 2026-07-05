@@ -890,6 +890,7 @@ func TestNewFileWriterRejectsInvalidWriteProps(t *testing.T) {
 		})
 	}
 }
+
 func TestParquetFileWriterAbortRemovesFile(t *testing.T) {
 	memFS := iceio.NewMemFS()
 	fileName := "mem://abort-test/data.parquet"
