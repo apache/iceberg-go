@@ -94,14 +94,32 @@ func runCleanOrphanFiles(ctx context.Context, output Output, cat catalog.Catalog
 }
 
 func buildCleanOrphanFilesResult(tbl *table.Table, result table.OrphanCleanupResult, dryRun bool) CleanOrphanFilesResult {
-	files := result.OrphanFileLocations
-	if !dryRun {
-		files = result.DeletedFiles
-	}
+	var entries []OrphanFileEntry
+	if dryRun {
+		entries = make([]OrphanFileEntry, 0, len(result.OrphanFiles))
+		for _, f := range result.OrphanFiles {
+			entries = append(entries, OrphanFileEntry{
+				Path:      f.Path,
+				SizeBytes: f.SizeBytes,
+			})
+		}
+	} else {
+		deletedSet := make(map[string]struct{}, len(result.DeletedFiles))
+		for _, f := range result.DeletedFiles {
+			deletedSet[f] = struct{}{}
+		}
 
-	entries := make([]OrphanFileEntry, 0, len(files))
-	for _, f := range files {
-		entries = append(entries, OrphanFileEntry{Path: f})
+		entries = make([]OrphanFileEntry, 0, len(result.DeletedFiles))
+		for _, f := range result.OrphanFiles {
+			if _, ok := deletedSet[f.Path]; !ok {
+				continue
+			}
+
+			entries = append(entries, OrphanFileEntry{
+				Path:      f.Path,
+				SizeBytes: f.SizeBytes,
+			})
+		}
 	}
 
 	return CleanOrphanFilesResult{
@@ -128,12 +146,13 @@ func (t textOutput) CleanOrphanFilesResult(result CleanOrphanFilesResult) {
 		pterm.Printfln("Deleted %d orphan files (%s) from %s.", result.OrphanFileCount, sizeStr, result.Table)
 	}
 
-	data := pterm.TableData{{"#", "PATH"}}
+	data := pterm.TableData{{"#", "PATH", "SIZE_BYTES"}}
 
 	for i, f := range result.OrphanFiles {
 		data = append(data, []string{
 			strconv.Itoa(i + 1),
 			f.Path,
+			formatBytes(f.SizeBytes),
 		})
 	}
 

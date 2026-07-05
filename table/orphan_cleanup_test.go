@@ -726,6 +726,68 @@ func TestWalkDirectoryUsesListableIO(t *testing.T) {
 	}, sizes)
 }
 
+func TestDeleteOrphanFilesPopulatesOrphanFileSizes(t *testing.T) {
+	const metaJSON = `{
+        "format-version": 2,
+        "table-uuid": "9c12d441-03fe-4693-9a96-a0705ddf69c1",
+        "location": "s3://bucket/table",
+        "last-sequence-number": 0,
+        "last-updated-ms": 1602638573590,
+        "last-column-id": 1,
+        "current-schema-id": 0,
+        "schemas": [{"type": "struct", "schema-id": 0, "fields": [{"id": 1, "name": "x", "required": true, "type": "long"}]}],
+        "default-spec-id": 0,
+        "partition-specs": [{"spec-id": 0, "fields": []}],
+        "last-partition-id": 0,
+        "default-sort-order-id": 0,
+        "sort-orders": [{"order-id": 0, "fields": []}],
+        "properties": {},
+        "current-snapshot-id": -1,
+        "snapshots": [],
+        "snapshot-log": [],
+        "metadata-log": [],
+        "refs": {}
+    }`
+
+	meta, err := ParseMetadataString(metaJSON)
+	require.NoError(t, err)
+
+	mockFS := &mockListableIO{
+		entries: []mockWalkEntry{
+			{path: "s3://bucket/table", info: mockFileInfo{name: "table", mode: stdfs.ModeDir}},
+			{path: "s3://bucket/table/a.parquet", info: mockFileInfo{name: "a.parquet", size: 1024}},
+			{path: "s3://bucket/table/nested", info: mockFileInfo{name: "nested", mode: stdfs.ModeDir}},
+			{path: "s3://bucket/table/nested/b.parquet", info: mockFileInfo{name: "b.parquet", size: 4096}},
+		},
+	}
+
+	tbl := New(
+		Identifier{"db", "tbl"},
+		meta,
+		"s3://bucket/table/metadata/v1.metadata.json",
+		func(context.Context) (io.IO, error) { return mockFS, nil },
+		nil,
+	)
+
+	result, err := tbl.DeleteOrphanFiles(context.Background(),
+		WithDryRun(true),
+		WithLocation("s3://bucket/table"),
+		WithMaxConcurrency(1),
+		WithFilesOlderThan(-1*time.Second),
+	)
+
+	require.NoError(t, err)
+	require.Len(t, result.OrphanFiles, 2)
+
+	orphanSizes := make(map[string]int64, len(result.OrphanFiles))
+	for _, f := range result.OrphanFiles {
+		orphanSizes[f.Path] = f.SizeBytes
+	}
+
+	assert.Equal(t, int64(1024), orphanSizes["s3://bucket/table/a.parquet"])
+	assert.Equal(t, int64(4096), orphanSizes["s3://bucket/table/nested/b.parquet"])
+}
+
 func TestWalkDirectoryRequiresListableIO(t *testing.T) {
 	err := walkDirectory(&mockPlainIO{}, "s3://bucket/data", func(string, stdfs.FileInfo) error {
 		require.Fail(t, "walk callback should not run for non-listable IO")

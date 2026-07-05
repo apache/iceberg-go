@@ -172,7 +172,7 @@ type CleanOrphanFilesResult struct {
 
 type OrphanFileEntry struct {
 	Path      string `json:"path"`
-	SizeBytes int64  `json:"size_bytes,omitempty"`
+	SizeBytes int64  `json:"size_bytes"`
 }
 
 type UpgradeResult struct {

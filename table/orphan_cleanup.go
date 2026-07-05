@@ -160,10 +160,19 @@ func WithEqualAuthorities(authorities map[string]string) OrphanCleanupOption {
 }
 
 type OrphanCleanupResult struct {
+	// OrphanFileLocations is retained for backward compatibility with callers
+	// that consume only orphan paths. Prefer OrphanFiles for canonical path+size data.
 	OrphanFileLocations []string
-	DeletedFiles        []string
+	// OrphanFiles is the canonical richer orphan result, carrying both path and size.
+	OrphanFiles  []OrphanFile
+	DeletedFiles []string
 	// TotalSizeBytes is the combined size of orphan files only, not all scanned files.
 	TotalSizeBytes int64
+}
+
+type OrphanFile struct {
+	Path      string
+	SizeBytes int64
 }
 
 // DeleteOrphanFiles identifies files under a table location that are no longer
@@ -249,6 +258,7 @@ func (t Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConfi
 	}
 
 	var orphanFiles []string
+	orphanFileEntries := make([]OrphanFile, 0)
 	var totalOrphanSize int64
 	for _, f := range scannedFiles {
 		isOrphan, err := isFileOrphan(f.path, referencedFiles, normalizedRef, cfg)
@@ -257,12 +267,17 @@ func (t Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConfi
 		}
 		if isOrphan {
 			orphanFiles = append(orphanFiles, f.path)
+			orphanFileEntries = append(orphanFileEntries, OrphanFile{
+				Path:      f.path,
+				SizeBytes: f.size,
+			})
 			totalOrphanSize += f.size
 		}
 	}
 
 	result := OrphanCleanupResult{
 		OrphanFileLocations: orphanFiles,
+		OrphanFiles:         orphanFileEntries,
 		TotalSizeBytes:      totalOrphanSize,
 	}
 
